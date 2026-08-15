@@ -17,12 +17,10 @@ import type { SparseAtlasDynamicsStageId } from "./sparse-atlas-dynamics";
 export const ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS = 100;
 
 /**
- * Exact trailing seams for the current sparse CPU authority.
- *
- * Scalar density/gamma and momentum intentionally share one conservative
- * face transaction. Giving them separate timings would double count the same
- * loop, so the graph exposes both algorithmic stages but marks momentum as a
- * term inside the coupled transport stage.
+ * Host-encoding seams for the GPU-resident sparse authority. Hardware work is
+ * observed independently by the GPU trace; these CPU intervals describe only
+ * command construction/submission and must never contain simulation-sized
+ * field loops.
  */
 export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   receiverTopology: {
@@ -75,15 +73,15 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   },
   materialization: {
     id: "adaptive-publication",
-    label: "Dense presentation field materialization",
+    label: "Encode GPU presentation field materialization",
   },
   upload: {
     id: "adaptive-publication",
-    label: "WebGPU texture upload + queue enqueue",
+    label: "Command closure + queue submission",
   },
   queueCompletion: {
     id: "adaptive-publication",
-    label: "WebGPU upload queue completion",
+    label: "GPU-resident frame queue completion",
   },
 } satisfies Record<string, GPUTimestampPhase>);
 
@@ -118,10 +116,9 @@ export interface AdaptiveMassFrameCaptureResult {
 }
 
 /**
- * One exhaustive CPU partition plus the independently observed WebGPU queue
- * interval for one adaptive advance. Construction/warmup never enters either
- * lane. The recorder owns no physics and is therefore safe to omit entirely
- * when instrumentation is off.
+ * One exhaustive host-encoding partition plus the independently observed
+ * WebGPU queue interval for one adaptive advance. Construction/warmup never
+ * enters either lane. The recorder owns no physics and is safe to omit.
  */
 export class AdaptiveMassFrameCapture {
   private readonly cpu: CPUPerformanceTrace;

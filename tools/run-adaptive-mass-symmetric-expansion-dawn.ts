@@ -16,6 +16,7 @@
 import { pathToFileURL } from "node:url";
 import { createSymmetricExpansionScene } from "../lib/core/scenes";
 import type { GPUSolverInstance } from "../lib/core/method-contract";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
@@ -82,11 +83,19 @@ interface Checkpoint {
   readonly maximumMixedSeamDivergence_s?: number;
   readonly pressureIterations?: number;
   readonly adaptiveMixedSeamFaceCount?: number;
+  readonly adaptiveResolutionTopologyEpoch?: boolean;
+  readonly adaptiveResolutionPromotedBrickCount?: number;
+  readonly adaptiveResolutionDemotedBrickCount?: number;
+  readonly adaptiveResolutionDeferredPromotionCount?: number;
+  readonly adaptiveFineBrickCount?: number;
+  readonly adaptiveCoarseBrickCount?: number;
   readonly residentOwnerScales: readonly number[];
   readonly encodedSteps?: number;
   readonly submittedTime_s?: number;
   readonly simulatedTime_s?: number;
   readonly completedTime_s?: number;
+  readonly hostFluidAuthority?: string;
+  readonly hostSimulationSizedWorkItems?: number;
 }
 
 const DENSITY_SYMMETRY_LIMIT = 1e-3;
@@ -318,11 +327,12 @@ function topologyFromOwners(
       const index = x + nx * (y + ny * z);
       const first = owners[2 * index] >>> 0;
       const second = owners[2 * index + 1] >>> 0;
-      const lowerX = first & 0x3ff;
-      const lowerZ = (first >>> 10) & 0x3ff;
-      const scale = (first >>> 20) & 0x3ff;
-      const lowerY = second & 0x3ff;
-      const upperY = (second >>> 10) & 0x3ff;
+      const wide = (second & 0x8000_0000) !== 0;
+      const lowerX = first & (wide ? 0x7ff : 0x3ff);
+      const lowerZ = (first >>> (wide ? 11 : 10)) & (wide ? 0x7ff : 0x3ff);
+      const scale = wide ? 2 ** ((first >>> 22) & 0xf) : (first >>> 20) & 0x3ff;
+      const lowerY = second & (wide ? 0x7ff : 0x3ff);
+      const upperY = wide ? lowerY + scale : (second >>> 10) & 0x3ff;
       field[index] = scale;
       if (scale < 1 || upperY !== lowerY + scale
         || x < lowerX || x >= lowerX + scale
@@ -349,7 +359,9 @@ function levelSetOwnerPhaseMismatchCount(
   for (let cell = 0; cell < density.length; cell += 1) {
     const first = owners[2 * cell] >>> 0;
     const second = owners[2 * cell + 1] >>> 0;
-    const scale = (first >>> 20) & 0x3ff;
+    const scale = (second & 0x8000_0000) !== 0
+      ? 2 ** ((first >>> 22) & 0xf)
+      : (first >>> 20) & 0x3ff;
     if (scale === 1) {
       if ((Number(density[cell]) > 0.5) !== (Number(levelSet[cell]) < 0)) mismatches += 1;
       continue;
@@ -427,6 +439,19 @@ function requirePublications(solver: GPUSolverInstance): string[] {
 }
 
 const steps = positiveInteger("steps", 20);
+const horizontalGrid = positiveInteger("grid", 32);
+if (horizontalGrid % 32 !== 0) {
+  throw new RangeError("grid must be a multiple of 32 so the symmetric brick body scales exactly");
+}
+const resolutionModeArgument = argument("resolution-mode") ?? "adaptive";
+if (resolutionModeArgument !== "adaptive" && resolutionModeArgument !== "all-fine") {
+  throw new RangeError("resolution-mode must be adaptive or all-fine");
+}
+const resolutionMode = resolutionModeArgument as "adaptive" | "all-fine";
+const postProjectionDivergenceLimit_s = resolutionMode === "adaptive"
+  ? POST_PROJECTION_DIVERGENCE_LIMIT_S
+  : Math.max(POST_PROJECTION_DIVERGENCE_LIMIT_S,
+    5e-5 * (horizontalGrid / 64) ** 2);
 const backend = argument("backend") ?? process.env.WEBGPU_BACKEND
   ?? process.env.FLUID_WEBGPU_BACKEND ?? "metal";
 const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -445,7 +470,9 @@ try {
   const gpu = dawn.create([`backend=${backend}`]);
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error(`No Dawn WebGPU adapter is available for backend ${backend}`);
-  const device = await adapter.requestDevice();
+  const device = await adapter.requestDevice({
+    requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+  });
   const validationErrors: string[] = [];
   device.addEventListener("uncapturederror", (event) => {
     event.preventDefault();
@@ -454,6 +481,23 @@ try {
   device.pushErrorScope("validation");
 
   const scene = createSymmetricExpansionScene();
+  scene.voxelDomain.finestCellSize_m = scene.container.width_m / horizontalGrid;
+  const verticalGrid = horizontalGrid / 2;
+  const brickSize = scene.voxelDomain.brickSize_cells;
+  const brickGrid = [horizontalGrid / brickSize, verticalGrid / brickSize,
+    horizontalGrid / brickSize] as const;
+  scene.fluid.initialBrickSeeds_m = [];
+  for (let bz = brickGrid[2] / 4; bz < 3 * brickGrid[2] / 4; bz += 1)
+    for (let by = 0; by < brickGrid[1] / 2; by += 1)
+      for (let bx = brickGrid[0] / 4; bx < 3 * brickGrid[0] / 4; bx += 1) {
+        scene.fluid.initialBrickSeeds_m.push({
+          x: -0.5 * scene.container.width_m
+            + (bx + 0.5) * brickSize * scene.voxelDomain.finestCellSize_m,
+          y: (by + 0.5) * brickSize * scene.voxelDomain.finestCellSize_m,
+          z: -0.5 * scene.container.depth_m
+            + (bz + 0.5) * brickSize * scene.voxelDomain.finestCellSize_m,
+        });
+      }
   const dt_s = positiveNumber(
     "dt",
     scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s,
@@ -472,7 +516,7 @@ try {
       "balanced",
       undefined,
       {
-        resolutionMode: "adaptive",
+        resolutionMode,
         seamAxis: "x",
         fineSide: "negative",
         fineTileResolution: 8,
@@ -481,8 +525,9 @@ try {
       () => {},
     );
     const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
-    expect(failures, dimensions[0] === 32 && dimensions[1] === 16 && dimensions[2] === 32,
-      `grid must be exactly 32x16x32; observed ${dimensions.join("x")}`);
+    expect(failures, dimensions[0] === horizontalGrid
+      && dimensions[1] === verticalGrid && dimensions[2] === horizontalGrid,
+    `grid must be exactly ${horizontalGrid}x${verticalGrid}x${horizontalGrid}; observed ${dimensions.join("x")}`);
     const missingPublications = requirePublications(solver);
     for (const publication of missingPublications) failures.push(`missing required publication: ${publication}`);
 
@@ -579,11 +624,22 @@ try {
         adaptiveMixedSeamFaceCount: (stats as typeof stats & {
           readonly adaptiveMixedSeamFaceCount?: number;
         }).adaptiveMixedSeamFaceCount,
+        adaptiveResolutionTopologyEpoch: stats.adaptiveResolutionTopologyEpoch,
+        adaptiveResolutionPromotedBrickCount:
+          stats.adaptiveResolutionPromotedBrickCount,
+        adaptiveResolutionDemotedBrickCount:
+          stats.adaptiveResolutionDemotedBrickCount,
+        adaptiveResolutionDeferredPromotionCount:
+          stats.adaptiveResolutionDeferredPromotionCount,
+        adaptiveFineBrickCount: stats.adaptiveFineBrickCount,
+        adaptiveCoarseBrickCount: stats.adaptiveCoarseBrickCount,
         residentOwnerScales,
         encodedSteps: stats.encodedSteps,
         submittedTime_s: stats.submittedTime_s,
         simulatedTime_s: stats.simulatedTime_s,
         completedTime_s: stats.completedTime_s,
+        hostFluidAuthority: stats.hostFluidAuthority,
+        hostSimulationSizedWorkItems: stats.hostSimulationSizedWorkItems,
       };
     };
 
@@ -672,36 +728,43 @@ try {
       expect(failures, checkpoint.pressureIterations !== undefined
         && checkpoint.pressureIterations > 0,
       `step ${step}: pressureIterations is ${checkpoint.pressureIterations ?? "missing"}; no iterative projection was executed`);
-      expect(failures, checkpoint.pressureRelativeResidual !== undefined
+      expect(failures, resolutionMode !== "adaptive" || (checkpoint.pressureRelativeResidual !== undefined
         && Number.isFinite(checkpoint.pressureRelativeResidual)
-        && checkpoint.pressureRelativeResidual <= PRESSURE_RELATIVE_RESIDUAL_LIMIT,
+        && checkpoint.pressureRelativeResidual <= PRESSURE_RELATIVE_RESIDUAL_LIMIT),
       `step ${step}: pressure relative residual ${checkpoint.pressureRelativeResidual ?? "missing"} exceeds ${PRESSURE_RELATIVE_RESIDUAL_LIMIT}`);
       expect(failures, checkpoint.divergence !== undefined
         && checkpoint.divergence.nonFiniteCount === 0,
       `step ${step}: post-projection divergence publication is missing or non-finite`);
       expect(failures, checkpoint.maximumPostProjectionDivergence_s !== undefined
-        && checkpoint.maximumPostProjectionDivergence_s <= POST_PROJECTION_DIVERGENCE_LIMIT_S,
-      `step ${step}: post-projection divergence ${checkpoint.maximumPostProjectionDivergence_s ?? "missing"} exceeds ${POST_PROJECTION_DIVERGENCE_LIMIT_S}`);
-      expect(failures, checkpoint.maximumInactiveFaceSpeedAfter_m_s === 0,
+        && checkpoint.maximumPostProjectionDivergence_s <= postProjectionDivergenceLimit_s,
+      `step ${step}: post-projection divergence ${checkpoint.maximumPostProjectionDivergence_s ?? "missing"} exceeds ${postProjectionDivergenceLimit_s}`);
+      expect(failures, resolutionMode !== "adaptive"
+        || checkpoint.maximumInactiveFaceSpeedAfter_m_s === 0,
         `step ${step}: pressure-inactive faces retained ${checkpoint.maximumInactiveFaceSpeedAfter_m_s ?? "missing"} m/s after projection`);
-      expect(failures, checkpoint.maximumMixedSeamDivergence_s !== undefined
-        && checkpoint.maximumMixedSeamDivergence_s <= POST_PROJECTION_DIVERGENCE_LIMIT_S,
+      expect(failures, resolutionMode !== "adaptive"
+        || (checkpoint.maximumMixedSeamDivergence_s !== undefined
+        && checkpoint.maximumMixedSeamDivergence_s <= POST_PROJECTION_DIVERGENCE_LIMIT_S),
       `step ${step}: mixed-seam divergence ${checkpoint.maximumMixedSeamDivergence_s ?? "missing"} exceeds ${POST_PROJECTION_DIVERGENCE_LIMIT_S}`);
       const divergenceAgreementTolerance = DIVERGENCE_PUBLICATION_ABSOLUTE_AGREEMENT_S
         + DIVERGENCE_PUBLICATION_RELATIVE_AGREEMENT * Math.max(
           Math.abs(checkpoint.maximumPostProjectionDivergence_s ?? Number.POSITIVE_INFINITY),
           Math.abs(checkpoint.statsMaximumPostProjectionDivergence_s ?? Number.POSITIVE_INFINITY),
         );
-      expect(failures, checkpoint.statsMaximumPostProjectionDivergence_s !== undefined
+      expect(failures, resolutionMode !== "adaptive"
+        || (checkpoint.statsMaximumPostProjectionDivergence_s !== undefined
         && Number.isFinite(checkpoint.statsMaximumPostProjectionDivergence_s)
         && checkpoint.maximumPostProjectionDivergence_s !== undefined
         && Math.abs(checkpoint.statsMaximumPostProjectionDivergence_s
-          - checkpoint.maximumPostProjectionDivergence_s) <= divergenceAgreementTolerance,
+          - checkpoint.maximumPostProjectionDivergence_s) <= divergenceAgreementTolerance),
       `step ${step}: max-divergence stats ${checkpoint.statsMaximumPostProjectionDivergence_s ?? "missing"} disagree with texture ${checkpoint.maximumPostProjectionDivergence_s ?? "missing"}`);
       expect(failures, checkpoint.dominantBodyMassFraction >= MINIMUM_DOMINANT_BODY_MASS_FRACTION,
       `step ${step}: dominant connected body fraction ${checkpoint.dominantBodyMassFraction} is below ${MINIMUM_DOMINANT_BODY_MASS_FRACTION}`);
       expect(failures, checkpoint.encodedSteps === step,
         `step ${step}: encodedSteps is ${checkpoint.encodedSteps ?? "missing"}`);
+      expect(failures, checkpoint.hostFluidAuthority === "gpu-resident",
+        `step ${step}: host fluid authority is ${checkpoint.hostFluidAuthority ?? "missing"}`);
+      expect(failures, checkpoint.hostSimulationSizedWorkItems === 0,
+        `step ${step}: host scheduled ${checkpoint.hostSimulationSizedWorkItems ?? "missing"} simulation-sized work items`);
       for (const [clock, actual] of [
         ["submittedTime_s", checkpoint.submittedTime_s],
         ["simulatedTime_s", checkpoint.simulatedTime_s],
@@ -719,10 +782,21 @@ try {
       `final normalized L1 density change ${finalCheckpoint.normalizedL1DensityChange} is below ${MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE}; the liquid did not visibly evolve`);
     const maximumMixedSeamFaceCount = Math.max(...checkpoints.map(
       (checkpoint) => checkpoint.adaptiveMixedSeamFaceCount ?? 0));
-    expect(failures, maximumMixedSeamFaceCount > 0,
+    const maximumPromotedBrickCount = Math.max(...checkpoints.map(
+      (checkpoint) => checkpoint.adaptiveResolutionPromotedBrickCount ?? 0));
+    const maximumDemotedBrickCount = Math.max(...checkpoints.map(
+      (checkpoint) => checkpoint.adaptiveResolutionDemotedBrickCount ?? 0));
+    const maximumDeferredPromotionCount = Math.max(...checkpoints.map(
+      (checkpoint) => checkpoint.adaptiveResolutionDeferredPromotionCount ?? 0));
+    expect(failures, resolutionMode !== "adaptive" || maximumMixedSeamFaceCount > 0,
       "no evolved step exercised a live 4^3/8^3 mixed-resolution seam");
-    expect(failures, finalCheckpoint.residentOwnerScales.includes(1)
-      && finalCheckpoint.residentOwnerScales.includes(2),
+    expect(failures, resolutionMode !== "adaptive" || maximumDeferredPromotionCount === 0,
+      `${maximumDeferredPromotionCount} eligible promotions were deferred`);
+    expect(failures, resolutionMode === "all-fine"
+      ? finalCheckpoint.residentOwnerScales.length === 1
+        && finalCheckpoint.residentOwnerScales[0] === 1
+      : finalCheckpoint.residentOwnerScales.includes(1)
+        && finalCheckpoint.residentOwnerScales.includes(2),
     `final resident topology scales ${finalCheckpoint.residentOwnerScales.join(",") || "missing"} do not include both fine (1) and coarse (2) leaves`);
     const scopedError = await device.popErrorScope();
     if (scopedError) validationErrors.push(scopedError.message);
@@ -740,6 +814,7 @@ try {
       passed: failures.length === 0,
       scenario: scene.sceneId,
       method: "adaptive-mass",
+      resolutionMode,
       backend,
       adapter: (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info,
       grid: dimensions,
@@ -773,6 +848,9 @@ try {
         (sample) => sample.projectionKineticEnergyAfterFineUnits,
       ),
       maximumAdaptiveMixedSeamFaceCount: maximumMixedSeamFaceCount,
+      maximumAdaptivePromotedBrickCount: maximumPromotedBrickCount,
+      maximumAdaptiveDemotedBrickCount: maximumDemotedBrickCount,
+      maximumAdaptiveDeferredPromotionCount: maximumDeferredPromotionCount,
       minimumDominantBodyMassFraction: Math.min(...checkpoints.map(
         (sample) => sample.dominantBodyMassFraction)),
       requiredThresholds: {
@@ -781,7 +859,7 @@ try {
         pressureD4: PRESSURE_SYMMETRY_LIMIT,
         topologyD4: 0,
         pressureRelativeResidual: PRESSURE_RELATIVE_RESIDUAL_LIMIT,
-        postProjectionDivergence_s: POST_PROJECTION_DIVERGENCE_LIMIT_S,
+        postProjectionDivergence_s: postProjectionDivergenceLimit_s,
         massRelativeError: MASS_RELATIVE_ERROR_LIMIT,
         minimumFinalNormalizedL1DensityChange: MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE,
         divergencePublicationAbsoluteAgreement_s:

@@ -88,6 +88,73 @@ export interface SparseAtlasCompositeGrid {
   readonly cellBaseByBrick: ReadonlyMap<number, number>;
   readonly mixedSeamRowCount: number;
   readonly sparseAirRowCount: number;
+  /** Identity of this topology epoch; field-only rebinds preserve it. */
+  readonly topologyKey?: object;
+}
+
+type MutableCompositeCell = { -readonly [Key in keyof SparseAtlasCompositeCell]:
+SparseAtlasCompositeCell[Key] };
+type MutableGradientRow = { -readonly [Key in keyof SparseAtlasGradientRow]:
+SparseAtlasGradientRow[Key] } & { termPool: SparseAtlasGradientTerm[] };
+
+export interface SparseAtlasCompositeGridBuildWorkspace {
+  readonly cellPool: MutableCompositeCell[];
+  readonly rowPool: MutableGradientRow[];
+  readonly cellBaseByBrick: Map<number, number>;
+  readonly termCellScratch: Int32Array;
+  readonly termCoefficientScratch: Float64Array;
+  readonly cells: SparseAtlasCompositeCell[];
+  readonly rows: SparseAtlasGradientRow[];
+  grid?: SparseAtlasCompositeGrid;
+}
+
+export function createSparseAtlasCompositeGridBuildWorkspace():
+SparseAtlasCompositeGridBuildWorkspace {
+  return {
+    cellPool: [], rowPool: [], cellBaseByBrick: new Map(),
+    termCellScratch: new Int32Array(16),
+    termCoefficientScratch: new Float64Array(16),
+    cells: [], rows: [],
+  };
+}
+
+const COMPOSITE_CELL_POOL_CHUNK = 4096;
+const COMPOSITE_ROW_POOL_CHUNK = 8192;
+const pooledVector = (): [number, number, number] => [0, 0, 0];
+
+function reserveCompositeCells(
+  workspace: SparseAtlasCompositeGridBuildWorkspace | undefined,
+  count: number,
+): void {
+  if (!workspace) return;
+  const capacity = Math.ceil(count / COMPOSITE_CELL_POOL_CHUNK)
+    * COMPOSITE_CELL_POOL_CHUNK;
+  while (workspace.cellPool.length < capacity) {
+    workspace.cellPool.push({
+      id: 0, stableLeafId: 0, brickKey: 0, brickCoordinate: pooledVector(),
+      brickResolution: 8, local: pooledVector(), localIndex: 0,
+      minimumFine: pooledVector(), maximumFine: pooledVector(), centerFine: pooledVector(),
+      widthsFine: pooledVector(), volume: 0, volumeFineCells: 0, density: 0, gamma: 1,
+    });
+  }
+}
+
+function reserveCompositeRows(
+  workspace: SparseAtlasCompositeGridBuildWorkspace | undefined,
+  count: number,
+): void {
+  if (!workspace) return;
+  const capacity = Math.ceil(count / COMPOSITE_ROW_POOL_CHUNK)
+    * COMPOSITE_ROW_POOL_CHUNK;
+  while (workspace.rowPool.length < capacity) {
+    const first = { cellId: 0, coefficient: 0 };
+    const second = { cellId: 0, coefficient: 0 };
+    workspace.rowPool.push({
+      id: 0, kind: "intra-brick", axis: 0, centerFine: pooledVector(),
+      area: 0, distance: 0, areaFineCells2: 0, centerDistanceFine: 0,
+      dualWeight: 0, terms: [], termPool: [first, second],
+    });
+  }
 }
 
 export interface SparseAtlasProjectionOptions {
@@ -153,32 +220,111 @@ export interface SparseAtlasProjectionResult {
   readonly receipt: SparseAtlasProjectionReceipt;
 }
 
-interface ActiveTerm {
-  readonly cellId: number;
-  readonly coefficient: number;
+export interface SparseAtlasProjectionWorkspace {
+  readonly rows: SparseAtlasGradientRow[];
+  readonly neighbors: number[][];
+  readonly neighborCounts: number[];
+  componentMembers: Int32Array;
+  componentStarts: Int32Array;
+  componentAnchored: Uint8Array;
+  phi: Float64Array;
+  liquid: Uint8Array;
+  diagonal: Float64Array;
+  anchored: Uint8Array;
+  thetaByRow: Float64Array;
+  componentByCell: Int32Array;
+  componentStack: Int32Array;
+  velocityBefore: Float64Array;
+  rhs: Float64Array;
+  pressure: Float64Array;
+  residual: Float64Array;
+  preconditioned: Float64Array;
+  direction: Float64Array;
+  applied: Float64Array;
+  trueResidual: Float64Array;
+  correction: Float64Array;
+  activeRows: Uint8Array;
+  projectedFaceVelocity: Float64Array;
+  projectedEquationResidual: Float64Array;
+  preDivergence: Float64Array;
+  leafDivergence: Float64Array;
+  collocatedVelocity: Float64Array;
+  collocationWeights: Float64Array;
+  system?: LiquidSystem;
+  result?: SparseAtlasProjectionResult;
+  receipt?: SparseAtlasProjectionReceipt;
 }
 
-interface ActiveRow {
-  readonly source: SparseAtlasGradientRow;
-  readonly terms: readonly ActiveTerm[];
-  readonly theta: number;
-  readonly cut: boolean;
+export function createSparseAtlasProjectionWorkspace(): SparseAtlasProjectionWorkspace {
+  return {
+    rows: [], neighbors: [], neighborCounts: [],
+    componentMembers: new Int32Array(0), componentStarts: new Int32Array(0),
+    componentAnchored: new Uint8Array(0),
+    phi: new Float64Array(0), liquid: new Uint8Array(0),
+    diagonal: new Float64Array(0), anchored: new Uint8Array(0),
+    thetaByRow: new Float64Array(0), componentByCell: new Int32Array(0),
+    componentStack: new Int32Array(0),
+    velocityBefore: new Float64Array(0), rhs: new Float64Array(0),
+    pressure: new Float64Array(0), residual: new Float64Array(0),
+    preconditioned: new Float64Array(0), direction: new Float64Array(0),
+    applied: new Float64Array(0), trueResidual: new Float64Array(0),
+    correction: new Float64Array(0), activeRows: new Uint8Array(0),
+    projectedFaceVelocity: new Float64Array(0),
+    projectedEquationResidual: new Float64Array(0),
+    preDivergence: new Float64Array(0), leafDivergence: new Float64Array(0),
+    collocatedVelocity: new Float64Array(0), collocationWeights: new Float64Array(0),
+  };
 }
+
+function exactFloat64(values: Float64Array, length: number): Float64Array {
+  if (values.length === length) return values;
+  const available = values.byteOffset === 0 ? values.buffer.byteLength / 8 : 0;
+  if (available >= length) return new Float64Array(values.buffer, 0, length);
+  let capacity = 1;
+  while (capacity < length) capacity *= 2;
+  const grown = new Float64Array(capacity);
+  return length === capacity ? grown : grown.subarray(0, length);
+}
+
+function exactUint8(values: Uint8Array, length: number): Uint8Array {
+  if (values.length === length) return values;
+  const available = values.byteOffset === 0 ? values.buffer.byteLength : 0;
+  if (available >= length) return new Uint8Array(values.buffer, 0, length);
+  let capacity = 1;
+  while (capacity < length) capacity *= 2;
+  const grown = new Uint8Array(capacity);
+  return length === capacity ? grown : grown.subarray(0, length);
+}
+
+function exactInt32(values: Int32Array, length: number): Int32Array {
+  if (values.length === length) return values;
+  const available = values.byteOffset === 0 ? values.buffer.byteLength / 4 : 0;
+  if (available >= length) return new Int32Array(values.buffer, 0, length);
+  let capacity = 1;
+  while (capacity < length) capacity *= 2;
+  const grown = new Int32Array(capacity);
+  return length === capacity ? grown : grown.subarray(0, length);
+}
+
+type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
 
 interface LiquidSystem {
-  readonly grid: SparseAtlasCompositeGrid;
-  readonly phi: Float64Array;
-  readonly liquid: Uint8Array;
-  readonly rows: readonly ActiveRow[];
-  readonly anchored: Uint8Array;
-  readonly componentByCell: Int32Array;
-  readonly componentAnchored: readonly boolean[];
-  readonly componentCells: readonly (readonly number[])[];
-  readonly diagonal: Float64Array;
-  readonly cutRowCount: number;
-  readonly cutMixedSeamRowCount: number;
-  readonly thetaClampCount: number;
-  readonly minimumTheta: number;
+  grid: SparseAtlasCompositeGrid;
+  phi: Float64Array;
+  liquid: Uint8Array;
+  rows: readonly SparseAtlasGradientRow[];
+  thetaByRow: Float64Array;
+  anchored: Uint8Array;
+  componentByCell: Int32Array;
+  componentMembers: Int32Array;
+  componentStarts: Int32Array;
+  componentAnchored: Uint8Array;
+  componentCount: number;
+  diagonal: Float64Array;
+  cutRowCount: number;
+  cutMixedSeamRowCount: number;
+  thetaClampCount: number;
+  minimumTheta: number;
 }
 
 const BRICK_FINE_WIDTH = 8;
@@ -218,91 +364,178 @@ function overlapLength(a0: number, a1: number, b0: number, b1: number): number {
 export function buildSparseAtlasCompositeGrid(
   atlas: SparseAdaptiveMassAtlas,
   sparseAirPhi = 0.5,
+  workspace?: SparseAtlasCompositeGridBuildWorkspace,
 ): SparseAtlasCompositeGrid {
   if (!Number.isFinite(sparseAirPhi) || sparseAirPhi <= 0) {
     throw new RangeError("sparseAirPhi must be finite and positive");
   }
-  const bricks = [...atlas.bricks].sort((left, right) => left.key - right.key);
-  const cells: SparseAtlasCompositeCell[] = [];
-  const cellBaseByBrick = new Map<number, number>();
-  const cellIdByBrickLocal = new Map<string, number>();
+  let bricks = atlas.bricks;
+  for (let index = 1; index < bricks.length; index += 1) {
+    if (bricks[index - 1].key <= bricks[index].key) continue;
+    bricks = [...bricks].sort((left, right) => left.key - right.key);
+    break;
+  }
+  const cells: SparseAtlasCompositeCell[] = workspace?.cells ?? [];
+  let cellCountBuilt = 0;
+  const cellBaseByBrick = workspace?.cellBaseByBrick ?? new Map<number, number>();
+  cellBaseByBrick.clear();
 
   for (const brick of bricks) {
-    cellBaseByBrick.set(brick.key, cells.length);
+    cellBaseByBrick.set(brick.key, cellCountBuilt);
     const scale = BRICK_FINE_WIDTH / brick.resolution;
     for (let z = 0; z < brick.resolution; z += 1) {
       for (let y = 0; y < brick.resolution; y += 1) {
         for (let x = 0; x < brick.resolution; x += 1) {
-          const local = [x, y, z] as const;
-          const index = localIndex(local, brick.resolution);
-          const minimum = [
-            brick.coordinate[0] * BRICK_FINE_WIDTH + x * scale,
-            brick.coordinate[1] * BRICK_FINE_WIDTH + y * scale,
-            brick.coordinate[2] * BRICK_FINE_WIDTH + z * scale,
-          ] as const;
-          const maximum = minimum.map((value, axis) =>
-            Math.min(value + scale, atlas.dimensions[axis])) as [number, number, number];
-          const widths = maximum.map((value, axis) =>
-            value - minimum[axis]) as [number, number, number];
-          if (widths.some((value) => value <= 0)) continue;
-          const cellId = cells.length;
-          cells.push({
-            id: cellId,
-            stableLeafId: brick.key * 512 + index,
-            brickKey: brick.key,
-            brickCoordinate: brick.coordinate,
-            brickResolution: brick.resolution,
-            local,
-            localIndex: index,
-            minimumFine: minimum,
-            maximumFine: maximum,
-            centerFine: maximum.map((value, axis) =>
-              0.5 * (minimum[axis] + value)) as [number, number, number],
-            widthsFine: widths,
-            volume: widths[0] * widths[1] * widths[2],
-            volumeFineCells: widths[0] * widths[1] * widths[2],
-            density: brick.density[index],
-            gamma: brick.gamma[index],
-          });
-          cellIdByBrickLocal.set(`${brick.key}:${index}`, cellId);
+          const index = x + brick.resolution * (y + brick.resolution * z);
+          const minimum0 = brick.coordinate[0] * BRICK_FINE_WIDTH + x * scale;
+          const minimum1 = brick.coordinate[1] * BRICK_FINE_WIDTH + y * scale;
+          const minimum2 = brick.coordinate[2] * BRICK_FINE_WIDTH + z * scale;
+          const maximum0 = Math.min(minimum0 + scale, atlas.dimensions[0]);
+          const maximum1 = Math.min(minimum1 + scale, atlas.dimensions[1]);
+          const maximum2 = Math.min(minimum2 + scale, atlas.dimensions[2]);
+          const width0 = maximum0 - minimum0;
+          const width1 = maximum1 - minimum1;
+          const width2 = maximum2 - minimum2;
+          if (width0 <= 0 || width1 <= 0 || width2 <= 0) continue;
+          const cellId = cellCountBuilt++;
+          const stableLeafId = brick.key * 512 + index;
+          let cell = workspace?.cellPool[cellId];
+          if (!cell) {
+            cell = {
+              id: cellId, stableLeafId, brickKey: brick.key,
+              brickCoordinate: brick.coordinate, brickResolution: brick.resolution,
+              local: [x, y, z], localIndex: index,
+              minimumFine: [minimum0, minimum1, minimum2],
+              maximumFine: [maximum0, maximum1, maximum2],
+              centerFine: [
+                0.5 * (minimum0 + maximum0),
+                0.5 * (minimum1 + maximum1),
+                0.5 * (minimum2 + maximum2),
+              ],
+              widthsFine: [width0, width1, width2],
+              volume: width0 * width1 * width2,
+              volumeFineCells: width0 * width1 * width2,
+              density: brick.density[index], gamma: brick.gamma[index],
+            };
+            if (workspace) workspace.cellPool[cellId] = cell;
+          } else {
+            cell.id = cellId;
+            cell.stableLeafId = stableLeafId;
+            cell.brickKey = brick.key;
+            cell.brickCoordinate = brick.coordinate;
+            cell.brickResolution = brick.resolution;
+            (cell.local as [number, number, number])[0] = x;
+            (cell.local as [number, number, number])[1] = y;
+            (cell.local as [number, number, number])[2] = z;
+            cell.localIndex = index;
+            const minimum = cell.minimumFine as [number, number, number];
+            minimum[0] = minimum0; minimum[1] = minimum1; minimum[2] = minimum2;
+            const maximum = cell.maximumFine as [number, number, number];
+            maximum[0] = maximum0; maximum[1] = maximum1; maximum[2] = maximum2;
+            const center = cell.centerFine as [number, number, number];
+            center[0] = 0.5 * (minimum0 + maximum0);
+            center[1] = 0.5 * (minimum1 + maximum1);
+            center[2] = 0.5 * (minimum2 + maximum2);
+            const widths = cell.widthsFine as [number, number, number];
+            widths[0] = width0; widths[1] = width1; widths[2] = width2;
+            cell.volume = width0 * width1 * width2;
+            cell.volumeFineCells = cell.volume;
+            cell.density = brick.density[index];
+            cell.gamma = brick.gamma[index];
+          }
+          cells[cellId] = cell;
         }
       }
     }
   }
+  cells.length = cellCountBuilt;
 
-  const rows: SparseAtlasGradientRow[] = [];
-  const cellFor = (brick: SparseAdaptiveMassBrick, local: SparseBrickVec3) => {
-    const id = cellIdByBrickLocal.get(`${brick.key}:${localIndex(local, brick.resolution)}`);
-    return id === undefined ? undefined : cells[id];
-  };
-
-  const appendRow = (input: Omit<
-    SparseAtlasGradientRow,
-    "id" | "dualWeight" | "areaFineCells2" | "centerDistanceFine"
-  >): void => {
-    rows.push({
-      ...input,
-      id: rows.length,
-      dualWeight: input.area * input.distance,
-      areaFineCells2: input.area,
-      centerDistanceFine: input.distance,
-    });
+  const rows: SparseAtlasGradientRow[] = workspace?.rows ?? [];
+  let rowCountBuilt = 0;
+  const termCellScratch = workspace?.termCellScratch ?? new Int32Array(16);
+  const termCoefficientScratch = workspace?.termCoefficientScratch ?? new Float64Array(16);
+  let mixedSeamRowCount = 0, sparseAirRowCount = 0;
+  const appendRow = (
+    kind: SparseAtlasGradientRowKind,
+    axis: SparseAtlasAxis,
+    center0: number,
+    center1: number,
+    center2: number,
+    area: number,
+    distance: number,
+    termCount: number,
+    negativeBrickKey?: number,
+    positiveBrickKey?: number,
+    exteriorPhi?: number,
+  ): void => {
+    const id = rowCountBuilt++;
+    let row = workspace?.rowPool[id];
+    if (!row) {
+      row = {
+        id, kind, axis, centerFine: [center0, center1, center2], area, distance,
+        areaFineCells2: area, centerDistanceFine: distance,
+        dualWeight: area * distance, terms: [], negativeBrickKey,
+        positiveBrickKey, exteriorPhi, termPool: [],
+      };
+      if (workspace) workspace.rowPool[id] = row;
+    } else {
+      row.id = id;
+      row.kind = kind;
+      row.axis = axis;
+      (row.centerFine as [number, number, number])[0] = center0;
+      (row.centerFine as [number, number, number])[1] = center1;
+      (row.centerFine as [number, number, number])[2] = center2;
+      row.area = area;
+      row.distance = distance;
+      row.areaFineCells2 = area;
+      row.centerDistanceFine = distance;
+      row.dualWeight = area * distance;
+      row.negativeBrickKey = negativeBrickKey;
+      row.positiveBrickKey = positiveBrickKey;
+      row.exteriorPhi = exteriorPhi;
+    }
+    const terms = row.terms as SparseAtlasGradientTerm[];
+    for (let index = 0; index < termCount; index += 1) {
+      let term = row.termPool[index] as { cellId: number; coefficient: number } | undefined;
+      if (!term) term = row.termPool[index] = {
+        cellId: termCellScratch[index], coefficient: termCoefficientScratch[index],
+      };
+      term.cellId = termCellScratch[index];
+      term.coefficient = termCoefficientScratch[index];
+      terms[index] = term;
+    }
+    terms.length = termCount;
+    rows[id] = row;
+    if (kind === "mixed-seam") mixedSeamRowCount += 1;
+    if (kind === "sparse-air") sparseAirRowCount += 1;
   };
 
   // Ordinary faces wholly inside a brick.
   for (const brick of bricks) {
+    const cellBase = cellBaseByBrick.get(brick.key)!;
+    const scale = BRICK_FINE_WIDTH / brick.resolution;
+    const validX = Math.max(0, Math.min(brick.resolution, Math.ceil(
+      (atlas.dimensions[0] - brick.coordinate[0] * BRICK_FINE_WIDTH) / scale,
+    )));
+    const validY = Math.max(0, Math.min(brick.resolution, Math.ceil(
+      (atlas.dimensions[1] - brick.coordinate[1] * BRICK_FINE_WIDTH) / scale,
+    )));
+    const validZ = Math.max(0, Math.min(brick.resolution, Math.ceil(
+      (atlas.dimensions[2] - brick.coordinate[2] * BRICK_FINE_WIDTH) / scale,
+    )));
     for (const axis of [0, 1, 2] as const) {
       const tangents = tangentialAxes(axis);
       for (let z = 0; z < brick.resolution; z += 1) {
         for (let y = 0; y < brick.resolution; y += 1) {
           for (let x = 0; x < brick.resolution; x += 1) {
-            const positiveLocal = [x, y, z] as [number, number, number];
-            if (positiveLocal[axis] === 0) continue;
-            const negativeLocal = [...positiveLocal] as [number, number, number];
-            negativeLocal[axis] -= 1;
-            const negative = cellFor(brick, negativeLocal);
-            const positive = cellFor(brick, positiveLocal);
-            if (!negative || !positive) continue;
+            if (x >= validX || y >= validY || z >= validZ) continue;
+            const positiveCoordinate = axis === 0 ? x : axis === 1 ? y : z;
+            if (positiveCoordinate === 0) continue;
+            const positiveId = cellBase + x + validX * (y + validY * z);
+            const negativeId = positiveId - (axis === 0 ? 1
+              : axis === 1 ? validX : validX * validY);
+            const negative = cells[negativeId];
+            const positive = cells[positiveId];
             const distance = positive.centerFine[axis] - negative.centerFine[axis];
             const area = overlapLength(
               negative.minimumFine[tangents[0]], negative.maximumFine[tangents[0]],
@@ -311,47 +544,70 @@ export function buildSparseAtlasCompositeGrid(
               negative.minimumFine[tangents[1]], negative.maximumFine[tangents[1]],
               positive.minimumFine[tangents[1]], positive.maximumFine[tangents[1]],
             );
-            const center = mutableVector();
-            center[axis] = negative.maximumFine[axis];
-            center[tangents[0]] = 0.5 * (negative.minimumFine[tangents[0]]
+            let center0 = 0, center1 = 0, center2 = 0;
+            const faceCenter = negative.maximumFine[axis];
+            const tangentCenter0 = 0.5 * (negative.minimumFine[tangents[0]]
               + negative.maximumFine[tangents[0]]);
-            center[tangents[1]] = 0.5 * (negative.minimumFine[tangents[1]]
+            const tangentCenter1 = 0.5 * (negative.minimumFine[tangents[1]]
               + negative.maximumFine[tangents[1]]);
-            appendRow({
-              kind: "intra-brick",
-              axis,
-              centerFine: center,
-              area,
-              distance,
-              terms: [
-                { cellId: negative.id, coefficient: -1 / distance },
-                { cellId: positive.id, coefficient: 1 / distance },
-              ],
-              negativeBrickKey: brick.key,
-              positiveBrickKey: brick.key,
-            });
+            if (axis === 0) center0 = faceCenter;
+            else if (axis === 1) center1 = faceCenter;
+            else center2 = faceCenter;
+            if (tangents[0] === 0) center0 = tangentCenter0;
+            else if (tangents[0] === 1) center1 = tangentCenter0;
+            else center2 = tangentCenter0;
+            if (tangents[1] === 0) center0 = tangentCenter1;
+            else if (tangents[1] === 1) center1 = tangentCenter1;
+            else center2 = tangentCenter1;
+            termCellScratch[0] = negative.id;
+            termCoefficientScratch[0] = -1 / distance;
+            termCellScratch[1] = positive.id;
+            termCoefficientScratch[1] = 1 / distance;
+            appendRow(
+              "intra-brick", axis, center0, center1, center2, area, distance, 2,
+              brick.key, brick.key,
+            );
           }
         }
       }
     }
   }
 
-  const faceCells = (brick: SparseAdaptiveMassBrick, axis: SparseAtlasAxis, side: -1 | 1) => {
+  const faceCells = (
+    brick: SparseAdaptiveMassBrick,
+    axis: SparseAtlasAxis,
+    side: -1 | 1,
+    result: SparseAtlasCompositeCell[],
+  ): SparseAtlasCompositeCell[] => {
+    result.length = 0;
     const coordinate = side < 0 ? 0 : brick.resolution - 1;
-    const result: SparseAtlasCompositeCell[] = [];
+    const cellBase = cellBaseByBrick.get(brick.key)!;
+    const scale = BRICK_FINE_WIDTH / brick.resolution;
+    const validX = Math.max(0, Math.min(brick.resolution, Math.ceil(
+      (atlas.dimensions[0] - brick.coordinate[0] * BRICK_FINE_WIDTH) / scale,
+    )));
+    const validY = Math.max(0, Math.min(brick.resolution, Math.ceil(
+      (atlas.dimensions[1] - brick.coordinate[1] * BRICK_FINE_WIDTH) / scale,
+    )));
+    const validZ = Math.max(0, Math.min(brick.resolution, Math.ceil(
+      (atlas.dimensions[2] - brick.coordinate[2] * BRICK_FINE_WIDTH) / scale,
+    )));
     for (let z = 0; z < brick.resolution; z += 1) {
       for (let y = 0; y < brick.resolution; y += 1) {
         for (let x = 0; x < brick.resolution; x += 1) {
-          const local = [x, y, z] as [number, number, number];
-          if (local[axis] === coordinate) {
-            const cell = cellFor(brick, local);
-            if (cell) result.push(cell);
+          if (x >= validX || y >= validY || z >= validZ) continue;
+          const axisCoordinate = axis === 0 ? x : axis === 1 ? y : z;
+          if (axisCoordinate === coordinate) {
+            const id = cellBase + x + validX * (y + validY * z);
+            result.push(cells[id]);
           }
         }
       }
     }
     return result;
   };
+  const negativeFaceCells: SparseAtlasCompositeCell[] = [];
+  const positiveFaceCells: SparseAtlasCompositeCell[] = [];
 
   const appendBrickInterface = (
     negative: SparseAdaptiveMassBrick,
@@ -363,10 +619,13 @@ export function buildSparseAtlasCompositeGrid(
       BRICK_FINE_WIDTH / negative.resolution,
       BRICK_FINE_WIDTH / positive.resolution,
     );
-    const negativeCells = faceCells(negative, axis, 1);
-    const positiveCells = faceCells(positive, axis, -1);
-    const brickMinimum = negative.coordinate.map((value) =>
-      value * BRICK_FINE_WIDTH) as [number, number, number];
+    const negativeCells = faceCells(negative, axis, 1, negativeFaceCells);
+    const positiveCells = faceCells(positive, axis, -1, positiveFaceCells);
+    const brickMinimum: SparseBrickVec3 = [
+      negative.coordinate[0] * BRICK_FINE_WIDTH,
+      negative.coordinate[1] * BRICK_FINE_WIDTH,
+      negative.coordinate[2] * BRICK_FINE_WIDTH,
+    ];
     const faceCoordinate = (negative.coordinate[axis] + 1) * BRICK_FINE_WIDTH;
     for (let portV = 0; portV < BRICK_FINE_WIDTH; portV += portWidth) {
       for (let portU = 0; portU < BRICK_FINE_WIDTH; portU += portWidth) {
@@ -384,49 +643,84 @@ export function buildSparseAtlasCompositeGrid(
         const area = (maximum[tangents[0]] - minimum[tangents[0]])
           * (maximum[tangents[1]] - minimum[tangents[1]]);
         if (!(area > 0)) continue;
-        const negativeOnPort = negativeCells.map((cell) => ({
-          cell,
-          overlap: overlapLength(minimum[tangents[0]], maximum[tangents[0]],
-            cell.minimumFine[tangents[0]], cell.maximumFine[tangents[0]])
-            * overlapLength(minimum[tangents[1]], maximum[tangents[1]],
-              cell.minimumFine[tangents[1]], cell.maximumFine[tangents[1]]),
-        })).filter(({ overlap }) => overlap > 0);
-        const positiveOnPort = positiveCells.map((cell) => ({
-          cell,
-          overlap: overlapLength(minimum[tangents[0]], maximum[tangents[0]],
-            cell.minimumFine[tangents[0]], cell.maximumFine[tangents[0]])
-            * overlapLength(minimum[tangents[1]], maximum[tangents[1]],
-              cell.minimumFine[tangents[1]], cell.maximumFine[tangents[1]]),
-        })).filter(({ overlap }) => overlap > 0);
-        if (negativeOnPort.length === 0 || positiveOnPort.length === 0) continue;
-        const negativeCenter = negativeOnPort.reduce(
-          (sum, item) => sum + item.overlap * item.cell.centerFine[axis], 0,
-        ) / area;
-        const positiveCenter = positiveOnPort.reduce(
-          (sum, item) => sum + item.overlap * item.cell.centerFine[axis], 0,
-        ) / area;
+        let negativeCount = 0, positiveCount = 0;
+        let negativeCenterSum = 0, positiveCenterSum = 0;
+        for (let index = 0; index < negativeCells.length; index += 1) {
+          const cell = negativeCells[index];
+          const overlap = overlapLength(
+            minimum[tangents[0]], maximum[tangents[0]],
+            cell.minimumFine[tangents[0]], cell.maximumFine[tangents[0]],
+          ) * overlapLength(
+            minimum[tangents[1]], maximum[tangents[1]],
+            cell.minimumFine[tangents[1]], cell.maximumFine[tangents[1]],
+          );
+          if (!(overlap > 0)) continue;
+          negativeCount += 1;
+          negativeCenterSum += overlap * cell.centerFine[axis];
+        }
+        for (let index = 0; index < positiveCells.length; index += 1) {
+          const cell = positiveCells[index];
+          const overlap = overlapLength(
+            minimum[tangents[0]], maximum[tangents[0]],
+            cell.minimumFine[tangents[0]], cell.maximumFine[tangents[0]],
+          ) * overlapLength(
+            minimum[tangents[1]], maximum[tangents[1]],
+            cell.minimumFine[tangents[1]], cell.maximumFine[tangents[1]],
+          );
+          if (!(overlap > 0)) continue;
+          positiveCount += 1;
+          positiveCenterSum += overlap * cell.centerFine[axis];
+        }
+        if (negativeCount === 0 || positiveCount === 0) continue;
+        const negativeCenter = negativeCenterSum / area;
+        const positiveCenter = positiveCenterSum / area;
         const distance = positiveCenter - negativeCenter;
-        const center = mutableVector();
-        center[axis] = faceCoordinate;
-        center[tangents[0]] = 0.5 * (minimum[tangents[0]] + maximum[tangents[0]]);
-        center[tangents[1]] = 0.5 * (minimum[tangents[1]] + maximum[tangents[1]]);
-        appendRow({
-          kind: negative.resolution === positive.resolution ? "brick-face" : "mixed-seam",
-          axis,
-          centerFine: center,
-          area,
-          distance,
-          terms: [
-            ...negativeOnPort.map(({ cell, overlap }) => ({
-              cellId: cell.id, coefficient: -overlap / (area * distance),
-            })),
-            ...positiveOnPort.map(({ cell, overlap }) => ({
-              cellId: cell.id, coefficient: overlap / (area * distance),
-            })),
-          ],
-          negativeBrickKey: negative.key,
-          positiveBrickKey: positive.key,
-        });
+        let center0 = 0, center1 = 0, center2 = 0;
+        if (axis === 0) center0 = faceCoordinate;
+        else if (axis === 1) center1 = faceCoordinate;
+        else center2 = faceCoordinate;
+        const tangentCenter0 = 0.5 * (minimum[tangents[0]] + maximum[tangents[0]]);
+        const tangentCenter1 = 0.5 * (minimum[tangents[1]] + maximum[tangents[1]]);
+        if (tangents[0] === 0) center0 = tangentCenter0;
+        else if (tangents[0] === 1) center1 = tangentCenter0;
+        else center2 = tangentCenter0;
+        if (tangents[1] === 0) center0 = tangentCenter1;
+        else if (tangents[1] === 1) center1 = tangentCenter1;
+        else center2 = tangentCenter1;
+        let termCount = 0;
+        for (let index = 0; index < negativeCells.length; index += 1) {
+          const cell = negativeCells[index];
+          const overlap = overlapLength(
+            minimum[tangents[0]], maximum[tangents[0]],
+            cell.minimumFine[tangents[0]], cell.maximumFine[tangents[0]],
+          ) * overlapLength(
+            minimum[tangents[1]], maximum[tangents[1]],
+            cell.minimumFine[tangents[1]], cell.maximumFine[tangents[1]],
+          );
+          if (overlap > 0) {
+            termCellScratch[termCount] = cell.id;
+            termCoefficientScratch[termCount++] = -overlap / (area * distance);
+          }
+        }
+        for (let index = 0; index < positiveCells.length; index += 1) {
+          const cell = positiveCells[index];
+          const overlap = overlapLength(
+            minimum[tangents[0]], maximum[tangents[0]],
+            cell.minimumFine[tangents[0]], cell.maximumFine[tangents[0]],
+          ) * overlapLength(
+            minimum[tangents[1]], maximum[tangents[1]],
+            cell.minimumFine[tangents[1]], cell.maximumFine[tangents[1]],
+          );
+          if (overlap > 0) {
+            termCellScratch[termCount] = cell.id;
+            termCoefficientScratch[termCount++] = overlap / (area * distance);
+          }
+        }
+        appendRow(
+          negative.resolution === positive.resolution ? "brick-face" : "mixed-seam",
+          axis, center0, center1, center2, area, distance, termCount,
+          negative.key, positive.key,
+        );
       }
     }
   };
@@ -437,21 +731,26 @@ export function buildSparseAtlasCompositeGrid(
     side: -1 | 1,
   ): void => {
     const tangents = tangentialAxes(axis);
-    for (const cell of faceCells(brick, axis, side)) {
+    const cellsOnFace = faceCells(brick, axis, side, negativeFaceCells);
+    for (let index = 0; index < cellsOnFace.length; index += 1) {
+      const cell = cellsOnFace[index];
       const distance = cell.widthsFine[axis];
       const area = cell.widthsFine[tangents[0]] * cell.widthsFine[tangents[1]];
-      const center = [...cell.centerFine] as [number, number, number];
-      center[axis] = side < 0 ? cell.minimumFine[axis] : cell.maximumFine[axis];
-      appendRow({
-        kind: "sparse-air",
-        axis,
-        centerFine: center,
-        area,
-        distance,
-        terms: [{ cellId: cell.id, coefficient: side < 0 ? 1 / distance : -1 / distance }],
-        ...(side < 0 ? { positiveBrickKey: brick.key } : { negativeBrickKey: brick.key }),
-        exteriorPhi: sparseAirPhi,
-      });
+      let center0 = cell.centerFine[0];
+      let center1 = cell.centerFine[1];
+      let center2 = cell.centerFine[2];
+      const faceCenter = side < 0 ? cell.minimumFine[axis] : cell.maximumFine[axis];
+      if (axis === 0) center0 = faceCenter;
+      else if (axis === 1) center1 = faceCenter;
+      else center2 = faceCenter;
+      termCellScratch[0] = cell.id;
+      termCoefficientScratch[0] = side < 0 ? 1 / distance : -1 / distance;
+      appendRow(
+        "sparse-air", axis, center0, center1, center2, area, distance, 1,
+        side > 0 ? brick.key : undefined,
+        side < 0 ? brick.key : undefined,
+        sparseAirPhi,
+      );
     }
   };
 
@@ -475,14 +774,35 @@ export function buildSparseAtlasCompositeGrid(
     }
   }
 
-  return {
-    atlas,
-    cells,
-    gradientRows: rows,
-    cellBaseByBrick,
-    mixedSeamRowCount: rows.filter((row) => row.kind === "mixed-seam").length,
-    sparseAirRowCount: rows.filter((row) => row.kind === "sparse-air").length,
+  rows.length = rowCountBuilt;
+  reserveCompositeCells(workspace, cells.length);
+  reserveCompositeRows(workspace, rows.length);
+  const topologyKey = {};
+  if (!workspace?.grid) {
+    const grid = {
+      atlas, cells, gradientRows: rows, cellBaseByBrick, mixedSeamRowCount,
+      sparseAirRowCount, topologyKey,
+    };
+    if (workspace) workspace.grid = grid;
+    return grid;
+  }
+  const grid = workspace.grid as {
+    atlas: SparseAdaptiveMassAtlas;
+    cells: readonly SparseAtlasCompositeCell[];
+    gradientRows: readonly SparseAtlasGradientRow[];
+    cellBaseByBrick: ReadonlyMap<number, number>;
+    mixedSeamRowCount: number;
+    sparseAirRowCount: number;
+    topologyKey?: object;
   };
+  grid.atlas = atlas;
+  grid.cells = cells;
+  grid.gradientRows = rows;
+  grid.cellBaseByBrick = cellBaseByBrick;
+  grid.mixedSeamRowCount = mixedSeamRowCount;
+  grid.sparseAirRowCount = sparseAirRowCount;
+  grid.topologyKey = topologyKey;
+  return workspace.grid;
 }
 
 /** Apply the global G row list, with sparse-air pressure fixed to zero. */
@@ -565,44 +885,65 @@ function buildLiquidSystem(
   phiInput: ArrayLike<number> | undefined,
   denominatorEpsilon: number,
   sparseAirPhi: number,
+  workspace: SparseAtlasProjectionWorkspace,
 ): LiquidSystem {
-  const phi = phiInput
-    ? Float64Array.from(phiInput)
-    : Float64Array.from(grid.cells, (cell) => CM12_LIQUID_ISOVALUE - cell.density);
+  const count = grid.cells.length;
+  const phi = workspace.phi = exactFloat64(workspace.phi, count);
+  if (phiInput) {
+    assertVectorLength(phiInput, count, "phi");
+    for (let id = 0; id < count; id += 1) phi[id] = phiInput[id];
+  } else {
+    for (const cell of grid.cells) phi[cell.id] = CM12_LIQUID_ISOVALUE - cell.density;
+  }
   assertVectorLength(phi, grid.cells.length, "phi");
-  const liquid = Uint8Array.from(phi, (value) => value <= 0 ? 1 : 0);
-  const rows: ActiveRow[] = [];
-  const diagonal = new Float64Array(grid.cells.length);
-  const anchored = new Uint8Array(grid.cells.length);
+  const liquid = workspace.liquid = exactUint8(workspace.liquid, count);
+  for (let id = 0; id < count; id += 1) liquid[id] = phi[id] <= 0 ? 1 : 0;
+  const rows = workspace.rows;
+  let activeRowCount = 0;
+  const diagonal = workspace.diagonal = exactFloat64(workspace.diagonal, count);
+  diagonal.fill(0);
+  const anchored = workspace.anchored = exactUint8(workspace.anchored, count);
+  anchored.fill(0);
+  const thetaByRow = workspace.thetaByRow = exactFloat64(
+    workspace.thetaByRow, grid.gradientRows.length,
+  );
   let cutRowCount = 0;
   let cutMixedSeamRowCount = 0;
   let thetaClampCount = 0;
   let minimumTheta = 1;
 
   for (const source of grid.gradientRows) {
-    const terms = source.terms.filter((term) => liquid[term.cellId] !== 0);
-    if (terms.length === 0) continue;
-    const airTerms = source.terms.filter((term) => liquid[term.cellId] === 0);
+    let liquidTermCount = 0, airTermCount = 0;
+    for (const term of source.terms) {
+      if (liquid[term.cellId] !== 0) liquidTermCount += 1;
+      else airTermCount += 1;
+    }
+    if (liquidTermCount === 0) continue;
     const hasExteriorAir = source.kind === "sparse-air";
-    const cut = airTerms.length > 0 || hasExteriorAir;
+    const cut = airTermCount > 0 || hasExteriorAir;
     let theta = 1;
     if (cut) {
       let liquidPhiSum = 0;
       let liquidWeight = 0;
-      for (const term of terms) {
+      for (const term of source.terms) {
+        if (liquid[term.cellId] === 0) continue;
         const weight = Math.abs(term.coefficient);
         liquidPhiSum += weight * phi[term.cellId];
         liquidWeight += weight;
       }
       let airPhiSum = 0;
       let airWeight = 0;
-      for (const term of airTerms) {
+      for (const term of source.terms) {
+        if (liquid[term.cellId] !== 0) continue;
         const weight = Math.abs(term.coefficient);
         airPhiSum += weight * phi[term.cellId];
         airWeight += weight;
       }
       if (hasExteriorAir) {
-        const weight = terms.reduce((sum, term) => sum + Math.abs(term.coefficient), 0);
+        let weight = 0;
+        for (const term of source.terms) {
+          if (liquid[term.cellId] !== 0) weight += Math.abs(term.coefficient);
+        }
         airPhiSum += weight * (source.exteriorPhi ?? sparseAirPhi);
         airWeight += weight;
       }
@@ -614,55 +955,104 @@ function buildLiquidSystem(
       if (theta !== rawTheta) thetaClampCount += 1;
       cutRowCount += 1;
       if (source.kind === "mixed-seam") cutMixedSeamRowCount += 1;
-      for (const term of terms) anchored[term.cellId] = 1;
+      for (const term of source.terms) {
+        if (liquid[term.cellId] !== 0) anchored[term.cellId] = 1;
+      }
     }
     minimumTheta = Math.min(minimumTheta, theta);
-    const active = { source, terms, theta, cut } satisfies ActiveRow;
-    rows.push(active);
-    for (const term of terms) {
+    rows[activeRowCount++] = source;
+    thetaByRow[source.id] = theta;
+    for (const term of source.terms) {
+      if (liquid[term.cellId] === 0) continue;
       diagonal[term.cellId] += source.dualWeight
         * term.coefficient * term.coefficient / theta;
     }
   }
+  rows.length = activeRowCount;
 
   // Connected liquid components establish the exact nullspace projector.
-  const neighbors = Array.from({ length: grid.cells.length }, () => [] as number[]);
+  const neighbors = workspace.neighbors;
+  while (neighbors.length < count) neighbors.push([]);
+  const neighborCounts = workspace.neighborCounts;
+  for (let id = 0; id < count; id += 1) neighborCounts[id] = 0;
   for (const row of rows) {
     for (let left = 0; left < row.terms.length; left += 1) {
+      if (liquid[row.terms[left].cellId] === 0) continue;
       for (let right = left + 1; right < row.terms.length; right += 1) {
-        neighbors[row.terms[left].cellId].push(row.terms[right].cellId);
-        neighbors[row.terms[right].cellId].push(row.terms[left].cellId);
+        if (liquid[row.terms[right].cellId] === 0) continue;
+        const leftId = row.terms[left].cellId;
+        const rightId = row.terms[right].cellId;
+        let neighborCount = neighborCounts[leftId];
+        neighbors[leftId][neighborCount] = rightId;
+        neighborCounts[leftId] = neighborCount + 1;
+        neighborCount = neighborCounts[rightId];
+        neighbors[rightId][neighborCount] = leftId;
+        neighborCounts[rightId] = neighborCount + 1;
       }
     }
   }
-  const componentByCell = new Int32Array(grid.cells.length).fill(-1);
-  const componentCells: number[][] = [];
-  const componentAnchored: boolean[] = [];
+  const componentByCell = workspace.componentByCell = exactInt32(
+    workspace.componentByCell, count,
+  );
+  componentByCell.fill(-1);
+  const componentMembers = workspace.componentMembers = exactInt32(
+    workspace.componentMembers, count,
+  );
+  const componentStarts = workspace.componentStarts = exactInt32(
+    workspace.componentStarts, count + 1,
+  );
+  const componentAnchored = workspace.componentAnchored = exactUint8(
+    workspace.componentAnchored, count,
+  );
+  let componentCount = 0;
+  let memberCount = 0;
+  const stack = workspace.componentStack = exactInt32(workspace.componentStack, count);
   for (const cell of grid.cells) {
     if (!liquid[cell.id] || componentByCell[cell.id] >= 0) continue;
-    const component = componentCells.length;
-    const members: number[] = [];
-    const stack = [cell.id];
+    const component = componentCount;
+    componentStarts[component] = memberCount;
+    let stackCount = 1;
+    stack[0] = cell.id;
     componentByCell[cell.id] = component;
     let hasAnchor = false;
-    while (stack.length > 0) {
-      const current = stack.pop();
-      if (current === undefined) break;
-      members.push(current);
+    while (stackCount > 0) {
+      const current = stack[--stackCount];
+      componentMembers[memberCount++] = current;
       hasAnchor ||= anchored[current] !== 0;
-      for (const neighbor of neighbors[current]) {
+      for (let neighborIndex = 0;
+        neighborIndex < neighborCounts[current]; neighborIndex += 1) {
+        const neighbor = neighbors[current][neighborIndex];
         if (componentByCell[neighbor] >= 0) continue;
         componentByCell[neighbor] = component;
-        stack.push(neighbor);
+        stack[stackCount++] = neighbor;
       }
     }
-    componentCells.push(members);
-    componentAnchored.push(hasAnchor);
+    componentStarts[component + 1] = memberCount;
+    componentAnchored[component] = hasAnchor ? 1 : 0;
+    componentCount += 1;
   }
-  return {
-    grid, phi, liquid, rows, anchored, componentByCell, componentAnchored, componentCells,
+  const system = workspace.system ?? (workspace.system = {
+    grid, phi, liquid, rows, thetaByRow, anchored,
+    componentByCell, componentMembers, componentStarts, componentAnchored, componentCount,
     diagonal, cutRowCount, cutMixedSeamRowCount, thetaClampCount, minimumTheta,
-  };
+  });
+  system.grid = grid;
+  system.phi = phi;
+  system.liquid = liquid;
+  system.rows = rows;
+  system.thetaByRow = thetaByRow;
+  system.anchored = anchored;
+  system.componentByCell = componentByCell;
+  system.componentMembers = componentMembers;
+  system.componentStarts = componentStarts;
+  system.componentAnchored = componentAnchored;
+  system.componentCount = componentCount;
+  system.diagonal = diagonal;
+  system.cutRowCount = cutRowCount;
+  system.cutMixedSeamRowCount = cutMixedSeamRowCount;
+  system.thetaClampCount = thetaClampCount;
+  system.minimumTheta = minimumTheta;
+  return system;
 }
 
 function applyLiquidOperator(
@@ -673,23 +1063,36 @@ function applyLiquidOperator(
   output.fill(0);
   for (const row of system.rows) {
     let jump = 0;
-    for (const term of row.terms) jump += term.coefficient * pressure[term.cellId];
-    const weighted = row.source.dualWeight * jump / row.theta;
-    for (const term of row.terms) output[term.cellId] += term.coefficient * weighted;
+    for (const term of row.terms) {
+      if (system.liquid[term.cellId] !== 0) {
+        jump += term.coefficient * pressure[term.cellId];
+      }
+    }
+    const weighted = row.dualWeight * jump / system.thetaByRow[row.id];
+    for (const term of row.terms) {
+      if (system.liquid[term.cellId] !== 0) {
+        output[term.cellId] += term.coefficient * weighted;
+      }
+    }
   }
   return output;
 }
 
 function projectNullspace(system: LiquidSystem, values: Float64Array): number {
   let maximumRemoved = 0;
-  for (let component = 0; component < system.componentCells.length; component += 1) {
+  for (let component = 0; component < system.componentCount; component += 1) {
     if (system.componentAnchored[component]) continue;
-    const members = system.componentCells[component];
     let sum = 0;
-    for (const cellId of members) sum += values[cellId];
-    const mean = sum / members.length;
+    const begin = system.componentStarts[component];
+    const end = system.componentStarts[component + 1];
+    for (let member = begin; member < end; member += 1) {
+      sum += values[system.componentMembers[member]];
+    }
+    const mean = sum / (end - begin);
     maximumRemoved = Math.max(maximumRemoved, Math.abs(sum));
-    for (const cellId of members) values[cellId] -= mean;
+    for (let member = begin; member < end; member += 1) {
+      values[system.componentMembers[member]] -= mean;
+    }
   }
   return maximumRemoved;
 }
@@ -723,14 +1126,17 @@ function assembleLiquidRhs(
   system: LiquidSystem,
   velocity: ArrayLike<number>,
   targetDivergence?: ArrayLike<number>,
+  rhs: Float64Array = new Float64Array(system.grid.cells.length),
 ): Float64Array {
   if (targetDivergence) {
     assertVectorLength(targetDivergence, system.grid.cells.length, "targetDivergence");
   }
-  const rhs = new Float64Array(system.grid.cells.length);
+  rhs.fill(0);
   for (const row of system.rows) {
-    const weighted = row.source.dualWeight * velocity[row.source.id];
-    for (const term of row.terms) rhs[term.cellId] += term.coefficient * weighted;
+    const weighted = row.dualWeight * velocity[row.id];
+    for (const term of row.terms) {
+      if (system.liquid[term.cellId] !== 0) rhs[term.cellId] += term.coefficient * weighted;
+    }
   }
   // D = -M^-1 G^T W. Solving A p = G^T W u + M q leaves
   // G^T W (u-Gp) = -M q and therefore D u' = q.
@@ -740,12 +1146,20 @@ function assembleLiquidRhs(
   return rhs;
 }
 
-function pressureCorrection(system: LiquidSystem, pressure: ArrayLike<number>): Float64Array {
-  const correction = new Float64Array(system.grid.gradientRows.length);
+function pressureCorrection(
+  system: LiquidSystem,
+  pressure: ArrayLike<number>,
+  correction: Float64Array = new Float64Array(system.grid.gradientRows.length),
+): Float64Array {
+  correction.fill(0);
   for (const row of system.rows) {
     let jump = 0;
-    for (const term of row.terms) jump += term.coefficient * pressure[term.cellId];
-    correction[row.source.id] = jump / row.theta;
+    for (const term of row.terms) {
+      if (system.liquid[term.cellId] !== 0) {
+        jump += term.coefficient * pressure[term.cellId];
+      }
+    }
+    correction[row.id] = jump / system.thetaByRow[row.id];
   }
   return correction;
 }
@@ -753,8 +1167,8 @@ function pressureCorrection(system: LiquidSystem, pressure: ArrayLike<number>): 
 function faceEnergy(system: LiquidSystem, velocity: ArrayLike<number>): number {
   let energy = 0;
   for (const row of system.rows) {
-    const value = velocity[row.source.id];
-    energy += 0.5 * row.source.dualWeight * row.theta * value * value;
+    const value = velocity[row.id];
+    energy += 0.5 * row.dualWeight * system.thetaByRow[row.id] * value * value;
   }
   return energy;
 }
@@ -762,9 +1176,12 @@ function faceEnergy(system: LiquidSystem, velocity: ArrayLike<number>): number {
 function divergenceFromEquationResidual(
   system: LiquidSystem,
   residual: ArrayLike<number>,
+  result: Float64Array = new Float64Array(system.grid.cells.length),
 ): Float64Array {
-  return Float64Array.from(system.grid.cells, (cell) =>
-    system.liquid[cell.id] ? -residual[cell.id] / cell.volume : 0);
+  for (const cell of system.grid.cells) {
+    result[cell.id] = system.liquid[cell.id] ? -residual[cell.id] / cell.volume : 0;
+  }
+  return result;
 }
 
 function volumeL2(grid: SparseAtlasCompositeGrid, values: ArrayLike<number>): number {
@@ -776,9 +1193,13 @@ function volumeL2(grid: SparseAtlasCompositeGrid, values: ArrayLike<number>): nu
 export function collocateSparseAtlasVelocity(
   grid: SparseAtlasCompositeGrid,
   velocity: ArrayLike<number>,
+  result: Float64Array = new Float64Array(3 * grid.cells.length),
+  weights: Float64Array = new Float64Array(3 * grid.cells.length),
 ): Float64Array {
-  const result = new Float64Array(3 * grid.cells.length);
-  const weights = new Float64Array(3 * grid.cells.length);
+  assertVectorLength(result, 3 * grid.cells.length, "collocated velocity output");
+  assertVectorLength(weights, 3 * grid.cells.length, "collocated velocity weights");
+  result.fill(0);
+  weights.fill(0);
   for (const row of grid.gradientRows) {
     for (const term of row.terms) {
       const offset = 3 * term.cellId + row.axis;
@@ -791,7 +1212,8 @@ export function collocateSparseAtlasVelocity(
   // pressure rows. They still contribute one side of the MAC-to-cell average.
   // Without their zero-valued weight, boundary cells use the sole interior
   // face at full strength (twice Uniform CM12's collocated wall velocity).
-  for (const cell of grid.cells) for (const axis of [0, 1, 2] as const) {
+  for (const cell of grid.cells) for (let axisIndex = 0; axisIndex < 3; axisIndex += 1) {
+    const axis = axisIndex as SparseAtlasAxis;
     if (cell.minimumFine[axis] !== 0
       && cell.maximumFine[axis] !== grid.atlas.dimensions[axis]) continue;
     const tangents = tangentialAxes(axis);
@@ -812,15 +1234,22 @@ export function collocateSparseAtlasVelocity(
 export function projectSparseAtlasVelocity(
   atlasOrGrid: SparseAdaptiveMassAtlas | SparseAtlasCompositeGrid,
   options: SparseAtlasProjectionOptions = {},
+  workspace: SparseAtlasProjectionWorkspace = createSparseAtlasProjectionWorkspace(),
 ): SparseAtlasProjectionResult {
   const sparseAirPhi = options.sparseAirPhi ?? 0.5;
   const grid = "gradientRows" in atlasOrGrid
     ? atlasOrGrid
     : buildSparseAtlasCompositeGrid(atlasOrGrid, sparseAirPhi);
   const atlas = grid.atlas;
-  const velocityBefore = options.normalVelocity
-    ? Float64Array.from(options.normalVelocity)
-    : new Float64Array(grid.gradientRows.length);
+  const faceCount = grid.gradientRows.length;
+  const cellCount = grid.cells.length;
+  const velocityBefore = workspace.velocityBefore = exactFloat64(
+    workspace.velocityBefore, faceCount,
+  );
+  if (options.normalVelocity) {
+    assertVectorLength(options.normalVelocity, faceCount, "normalVelocity");
+    for (let id = 0; id < faceCount; id += 1) velocityBefore[id] = options.normalVelocity[id];
+  } else velocityBefore.fill(0);
   assertVectorLength(velocityBefore, grid.gradientRows.length, "normalVelocity");
   const relativeTolerance = options.relativeTolerance ?? 1e-10;
   const absoluteTolerance = options.absoluteTolerance ?? 1e-12;
@@ -832,34 +1261,46 @@ export function projectSparseAtlasVelocity(
     throw new RangeError("invalid sparse-atlas projection solve options");
   }
   const system = buildLiquidSystem(
-    grid, options.phi, denominatorEpsilon, sparseAirPhi,
+    grid, options.phi, denominatorEpsilon, sparseAirPhi, workspace,
   );
   options.onStageComplete?.("topology");
-  const rhs = assembleLiquidRhs(system, velocityBefore, options.targetDivergence);
+  const rhs = workspace.rhs = exactFloat64(workspace.rhs, cellCount);
+  assembleLiquidRhs(system, velocityBefore, options.targetDivergence, rhs);
   const rhsCompatibilityMaxAbs = projectNullspace(system, rhs);
   const rhsNorm = norm(rhs);
   options.onStageComplete?.("rhs");
-  const pressure = options.initialPressure
-    ? Float64Array.from(options.initialPressure)
-    : new Float64Array(grid.cells.length);
+  const pressure = workspace.pressure = exactFloat64(workspace.pressure, cellCount);
+  if (options.initialPressure) {
+    assertVectorLength(options.initialPressure, cellCount, "initialPressure");
+    if (options.initialPressure !== pressure) {
+      for (let id = 0; id < cellCount; id += 1) pressure[id] = options.initialPressure[id];
+    }
+  } else pressure.fill(0);
   assertVectorLength(pressure, grid.cells.length, "initialPressure");
   projectNullspace(system, pressure);
-  const residual = rhs.slice();
+  const residual = workspace.residual = exactFloat64(workspace.residual, cellCount);
+  residual.set(rhs);
+  const applied = workspace.applied = exactFloat64(workspace.applied, cellCount);
   if (options.initialPressure) {
-    const initialImage = applyLiquidOperator(system, pressure);
+    const initialImage = applyLiquidOperator(system, pressure, applied);
     for (let index = 0; index < residual.length; index += 1) {
       residual[index] -= initialImage[index];
     }
     projectNullspace(system, residual);
   }
-  const preconditioned = Float64Array.from(residual, (value, cellId) =>
-    system.diagonal[cellId] > 0 ? value / system.diagonal[cellId] : 0);
+  const preconditioned = workspace.preconditioned = exactFloat64(
+    workspace.preconditioned, cellCount,
+  );
+  for (let cellId = 0; cellId < cellCount; cellId += 1) {
+    preconditioned[cellId] = system.diagonal[cellId] > 0
+      ? residual[cellId] / system.diagonal[cellId] : 0;
+  }
   projectNullspace(system, preconditioned);
-  const direction = preconditioned.slice();
+  const direction = workspace.direction = exactFloat64(workspace.direction, cellCount);
+  direction.set(preconditioned);
   // One stable residual norm per iteration is sufficient. The former loop
   // condition recomputed the same O(n) Kahan dot after the previous tail,
   // adding a full leaf sweep to every PCG iteration.
-  const applied = new Float64Array(grid.cells.length);
   let residualPreconditioned = dot(residual, preconditioned);
   let residualNorm = norm(residual);
   let iterations = 0;
@@ -896,19 +1337,26 @@ export function projectSparseAtlasVelocity(
     residualPreconditioned = nextResidualPreconditioned;
   }
 
-  const trueResidual = applyLiquidOperator(system, pressure);
+  const trueResidual = workspace.trueResidual = exactFloat64(
+    workspace.trueResidual, cellCount,
+  );
+  applyLiquidOperator(system, pressure, trueResidual);
   for (let index = 0; index < trueResidual.length; index += 1) {
     trueResidual[index] -= rhs[index];
   }
   projectNullspace(system, trueResidual);
   options.onStageComplete?.("solve");
-  const correction = pressureCorrection(system, pressure);
-  const activeRows = new Uint8Array(grid.gradientRows.length);
-  for (const row of system.rows) activeRows[row.source.id] = 1;
+  const correction = workspace.correction = exactFloat64(workspace.correction, faceCount);
+  pressureCorrection(system, pressure, correction);
+  const activeRows = workspace.activeRows = exactUint8(workspace.activeRows, faceCount);
+  activeRows.fill(0);
+  for (const row of system.rows) activeRows[row.id] = 1;
   let maximumInactiveFaceVelocityBefore = 0;
-  const projectedFaceVelocity = Float64Array.from(
-    velocityBefore,
-    (value, rowId) => {
+  const projectedFaceVelocity = workspace.projectedFaceVelocity = exactFloat64(
+    workspace.projectedFaceVelocity, faceCount,
+  );
+  for (let rowId = 0; rowId < faceCount; rowId += 1) {
+      const value = velocityBefore[rowId];
       if (activeRows[rowId] === 0) {
         maximumInactiveFaceVelocityBefore = Math.max(
           maximumInactiveFaceVelocityBefore,
@@ -920,11 +1368,11 @@ export function projectSparseAtlasVelocity(
         // into transport and appears as surface boiling. Velocity extension
         // can replace this zero boundary condition later, but inactive values
         // must never persist as physical state.
-        return 0;
+        projectedFaceVelocity[rowId] = 0;
+        continue;
       }
-      return value - correction[rowId];
-    },
-  );
+      projectedFaceVelocity[rowId] = value - correction[rowId];
+  }
   let maximumInactiveFaceVelocityAfter = 0;
   for (const row of grid.gradientRows) {
     if (activeRows[row.id] === 0) {
@@ -939,14 +1387,23 @@ export function projectSparseAtlasVelocity(
   // pressure system's quotient-space nullspace projector here: doing so would
   // hide a componentwise compatibility/net-flux defect from the published
   // divergence receipt. Nullspace projection belongs only to PCG algebra.
-  const projectedEquationResidual = assembleLiquidRhs(
-    system, projectedFaceVelocity, options.targetDivergence,
+  const projectedEquationResidual = workspace.projectedEquationResidual = exactFloat64(
+    workspace.projectedEquationResidual, cellCount,
   );
-  const preDivergence = divergenceFromEquationResidual(system, rhs);
-  const leafDivergence = divergenceFromEquationResidual(system, projectedEquationResidual);
+  assembleLiquidRhs(
+    system, projectedFaceVelocity, options.targetDivergence, projectedEquationResidual,
+  );
+  const preDivergence = workspace.preDivergence = exactFloat64(
+    workspace.preDivergence, cellCount,
+  );
+  divergenceFromEquationResidual(system, rhs, preDivergence);
+  const leafDivergence = workspace.leafDivergence = exactFloat64(
+    workspace.leafDivergence, cellCount,
+  );
+  divergenceFromEquationResidual(system, projectedEquationResidual, leafDivergence);
   let postMixedSeamDivergenceMaximum = 0;
   for (const row of system.rows) {
-    if (row.source.kind !== "mixed-seam") continue;
+    if (row.kind !== "mixed-seam") continue;
     for (const term of row.terms) {
       postMixedSeamDivergenceMaximum = Math.max(
         postMixedSeamDivergenceMaximum,
@@ -960,48 +1417,92 @@ export function projectSparseAtlasVelocity(
   const kineticEnergyAfter = faceEnergy(system, projectedFaceVelocity);
   const pressureCorrectionEnergy = faceEnergy(system, correction);
   options.onStageComplete?.("diagnostics");
-  return {
-    atlas,
-    grid,
-    leafPressure: pressure,
-    leafRhs: rhs,
-    leafDiagonal: system.diagonal,
-    leafDivergenceBefore: preDivergence,
-    leafDivergence,
-    leafCollocatedVelocity: collocateSparseAtlasVelocity(grid, projectedFaceVelocity),
-    projectedFaceVelocity,
-    receipt: {
-      iterations,
-      converged: norm(trueResidual) <= target,
-      liquidCellCount: system.liquid.reduce((sum, value) => sum + value, 0),
-      activeRowCount: system.rows.length,
-      cutRowCount: system.cutRowCount,
-      mixedSeamRowCount: grid.mixedSeamRowCount,
+  let liquidCellCount = 0;
+  for (let id = 0; id < system.liquid.length; id += 1) {
+    liquidCellCount += system.liquid[id];
+  }
+  let inactiveRowCount = 0;
+  for (let id = 0; id < activeRows.length; id += 1) {
+    inactiveRowCount += activeRows[id] === 0 ? 1 : 0;
+  }
+  const converged = norm(trueResidual) <= target;
+  const relativeResidualL2 = rhsNorm > 0 ? norm(trueResidual) / rhsNorm : 0;
+  const maximumResidual = maximumAbsolute(trueResidual);
+  const preDivergenceMaximum = maximumAbsolute(preDivergence);
+  const postDivergenceMaximum = maximumAbsolute(leafDivergence);
+  const divergenceReduction = preDivergenceVolumeL2 > 0
+    ? postDivergenceVolumeL2 / preDivergenceVolumeL2 : 0;
+  const energyIdentityAbsError = Math.abs(
+    kineticEnergyBefore - kineticEnergyAfter - pressureCorrectionEnergy,
+  );
+  let receipt = workspace.receipt;
+  if (!receipt) {
+    receipt = workspace.receipt = {
+      iterations, converged, liquidCellCount, activeRowCount: system.rows.length,
+      cutRowCount: system.cutRowCount, mixedSeamRowCount: grid.mixedSeamRowCount,
       cutMixedSeamRowCount: system.cutMixedSeamRowCount,
-      thetaClampCount: system.thetaClampCount,
-      minimumTheta: system.minimumTheta,
-      rhsCompatibilityMaxAbs,
-      relativeResidualL2: rhsNorm > 0 ? norm(trueResidual) / rhsNorm : 0,
-      maximumResidual: maximumAbsolute(trueResidual),
-      preDivergenceVolumeL2,
-      postDivergenceVolumeL2,
-      preDivergenceMaximum: maximumAbsolute(preDivergence),
-      postDivergenceMaximum: maximumAbsolute(leafDivergence),
-      divergenceReduction: preDivergenceVolumeL2 > 0
-        ? postDivergenceVolumeL2 / preDivergenceVolumeL2 : 0,
-      kineticEnergyBefore,
-      kineticEnergyAfter,
-      pressureCorrectionEnergy,
-      energyIdentityAbsError: Math.abs(
-        kineticEnergyBefore - kineticEnergyAfter - pressureCorrectionEnergy,
-      ),
-      inactiveRowCount: activeRows.reduce(
-        (count, active) => count + (active === 0 ? 1 : 0), 0),
-      maximumInactiveFaceVelocityBefore,
-      maximumInactiveFaceVelocityAfter,
-      postMixedSeamDivergenceMaximum,
-    },
-  };
+      thetaClampCount: system.thetaClampCount, minimumTheta: system.minimumTheta,
+      rhsCompatibilityMaxAbs, relativeResidualL2, maximumResidual,
+      preDivergenceVolumeL2, postDivergenceVolumeL2, preDivergenceMaximum,
+      postDivergenceMaximum, divergenceReduction, kineticEnergyBefore,
+      kineticEnergyAfter, pressureCorrectionEnergy, energyIdentityAbsError,
+      inactiveRowCount, maximumInactiveFaceVelocityBefore,
+      maximumInactiveFaceVelocityAfter, postMixedSeamDivergenceMaximum,
+    };
+  } else {
+    const mutable = receipt as Mutable<SparseAtlasProjectionReceipt>;
+    mutable.iterations = iterations;
+    mutable.converged = converged;
+    mutable.liquidCellCount = liquidCellCount;
+    mutable.activeRowCount = system.rows.length;
+    mutable.cutRowCount = system.cutRowCount;
+    mutable.mixedSeamRowCount = grid.mixedSeamRowCount;
+    mutable.cutMixedSeamRowCount = system.cutMixedSeamRowCount;
+    mutable.thetaClampCount = system.thetaClampCount;
+    mutable.minimumTheta = system.minimumTheta;
+    mutable.rhsCompatibilityMaxAbs = rhsCompatibilityMaxAbs;
+    mutable.relativeResidualL2 = relativeResidualL2;
+    mutable.maximumResidual = maximumResidual;
+    mutable.preDivergenceVolumeL2 = preDivergenceVolumeL2;
+    mutable.postDivergenceVolumeL2 = postDivergenceVolumeL2;
+    mutable.preDivergenceMaximum = preDivergenceMaximum;
+    mutable.postDivergenceMaximum = postDivergenceMaximum;
+    mutable.divergenceReduction = divergenceReduction;
+    mutable.kineticEnergyBefore = kineticEnergyBefore;
+    mutable.kineticEnergyAfter = kineticEnergyAfter;
+    mutable.pressureCorrectionEnergy = pressureCorrectionEnergy;
+    mutable.energyIdentityAbsError = energyIdentityAbsError;
+    mutable.inactiveRowCount = inactiveRowCount;
+    mutable.maximumInactiveFaceVelocityBefore = maximumInactiveFaceVelocityBefore;
+    mutable.maximumInactiveFaceVelocityAfter = maximumInactiveFaceVelocityAfter;
+    mutable.postMixedSeamDivergenceMaximum = postMixedSeamDivergenceMaximum;
+  }
+  const leafCollocatedVelocity = collocateSparseAtlasVelocity(
+    grid,
+    projectedFaceVelocity,
+    workspace.collocatedVelocity = exactFloat64(workspace.collocatedVelocity, 3 * cellCount),
+    workspace.collocationWeights = exactFloat64(workspace.collocationWeights, 3 * cellCount),
+  );
+  if (!workspace.result) {
+    workspace.result = {
+      atlas, grid, leafPressure: pressure, leafRhs: rhs,
+      leafDiagonal: system.diagonal, leafDivergenceBefore: preDivergence,
+      leafDivergence, leafCollocatedVelocity, projectedFaceVelocity, receipt,
+    };
+  } else {
+    const result = workspace.result as Mutable<SparseAtlasProjectionResult>;
+    result.atlas = atlas;
+    result.grid = grid;
+    result.leafPressure = pressure;
+    result.leafRhs = rhs;
+    result.leafDiagonal = system.diagonal;
+    result.leafDivergenceBefore = preDivergence;
+    result.leafDivergence = leafDivergence;
+    result.leafCollocatedVelocity = leafCollocatedVelocity;
+    result.projectedFaceVelocity = projectedFaceVelocity;
+    result.receipt = receipt;
+  }
+  return workspace.result;
 }
 
 /** Materialise one compact leaf scalar onto the bounded finest lattice. */
@@ -1009,11 +1510,13 @@ export function materializeSparseAtlasLeafScalar(
   grid: SparseAtlasCompositeGrid,
   values: ArrayLike<number>,
   emptyValue = 0,
+  output?: Float32Array,
 ): Float32Array {
   assertVectorLength(values, grid.cells.length, "leaf scalar");
   const dimensions = grid.atlas.dimensions;
-  const result = new Float32Array(dimensions[0] * dimensions[1] * dimensions[2]);
-  if (emptyValue !== 0) result.fill(emptyValue);
+  const count = dimensions[0] * dimensions[1] * dimensions[2];
+  const result = output?.length === count ? output : new Float32Array(count);
+  result.fill(emptyValue);
   for (const cell of grid.cells) {
     for (let z = cell.minimumFine[2]; z < cell.maximumFine[2]; z += 1) {
       for (let y = cell.minimumFine[1]; y < cell.maximumFine[1]; y += 1) {
@@ -1030,10 +1533,13 @@ export function materializeSparseAtlasLeafScalar(
 export function materializeSparseAtlasCollocatedVelocity(
   grid: SparseAtlasCompositeGrid,
   velocity: ArrayLike<number>,
+  output?: Float32Array,
 ): Float32Array {
   assertVectorLength(velocity, 3 * grid.cells.length, "leaf collocated velocity");
   const dimensions = grid.atlas.dimensions;
-  const result = new Float32Array(3 * dimensions[0] * dimensions[1] * dimensions[2]);
+  const count = 3 * dimensions[0] * dimensions[1] * dimensions[2];
+  const result = output?.length === count ? output : new Float32Array(count);
+  result.fill(0);
   for (const cell of grid.cells) {
     for (let z = cell.minimumFine[2]; z < cell.maximumFine[2]; z += 1) {
       for (let y = cell.minimumFine[1]; y < cell.maximumFine[1]; y += 1) {
@@ -1050,8 +1556,12 @@ export function materializeSparseAtlasCollocatedVelocity(
   return result;
 }
 
-export const materializeSparseAtlasPressure = (result: SparseAtlasProjectionResult): Float32Array =>
-  materializeSparseAtlasLeafScalar(result.grid, result.leafPressure);
+export const materializeSparseAtlasPressure = (
+  result: SparseAtlasProjectionResult,
+  output?: Float32Array,
+): Float32Array => materializeSparseAtlasLeafScalar(
+  result.grid, result.leafPressure, 0, output,
+);
 
 export const materializeSparseAtlasRhs = (result: SparseAtlasProjectionResult): Float32Array =>
   materializeSparseAtlasLeafScalar(result.grid, result.leafRhs);
@@ -1059,8 +1569,12 @@ export const materializeSparseAtlasRhs = (result: SparseAtlasProjectionResult): 
 export const materializeSparseAtlasDiagonal = (result: SparseAtlasProjectionResult): Float32Array =>
   materializeSparseAtlasLeafScalar(result.grid, result.leafDiagonal);
 
-export const materializeSparseAtlasDivergence = (result: SparseAtlasProjectionResult): Float32Array =>
-  materializeSparseAtlasLeafScalar(result.grid, result.leafDivergence);
+export const materializeSparseAtlasDivergence = (
+  result: SparseAtlasProjectionResult,
+  output?: Float32Array,
+): Float32Array => materializeSparseAtlasLeafScalar(
+  result.grid, result.leafDivergence, 0, output,
+);
 
 export const materializeSparseAtlasDivergenceBefore = (
   result: SparseAtlasProjectionResult,

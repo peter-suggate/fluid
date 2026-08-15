@@ -1383,12 +1383,11 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "high-resolution-dam-break",
     name: "Dam break · high resolution 128³",
-    blurb: "A 0.8 m analytic water column resolved on a 128³ lattice. The factor-1 coarse surface keeps the full frame budget on simulation and rendering, with no separate 4× fine-band allocation.",
+    blurb: "A 0.8 m analytic water column resolved on a 128³ lattice, carried on the sparse 4³/8³ brick atlas so the full frame budget stays on simulation and rendering.",
     audience: "explore",
     shelf: "Tanks",
     environment: "default",
     presentationMode: "fluid-only",
-    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
     build: createHighResolutionDamBreakScene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
   }),
@@ -1414,11 +1413,10 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "ocean-seiche",
     name: "Ocean · rolling wave",
-    blurb: "A broad 8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. The deep interior coarsens to the full leaf-32 ladder while the moving surface stays fine.",
+    blurb: "A broad 8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. The quiescent deep interior rides coarse 4³ bricks while the moving surface is promoted to 8³.",
     audience: "explore",
     shelf: "Open water",
     environment: "research-station",
-    methodProfile: OCEAN_SEICHE_METHOD_PROFILE,
     build: createOceanSeicheScene,
     camera: { azimuth_rad: 0.35, elevation_rad: 0.32, distance_m: 9.0, target_m: { x: 0, y: 1.1, z: 0 } },
     variants: {

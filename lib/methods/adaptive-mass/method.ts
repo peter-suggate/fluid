@@ -104,7 +104,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   shortLabel: "Sparse CM12",
   badge: "SPARSE CM12",
   description: "Sparse 4³/8³ world-brick expansion of the uniform CM12 mass-conserving method.",
-  detail: "Sparse CM12 maps any authored scene into a fixed-world-space brick atlas, retains no dry bricks, and couples 4³ and 8³ neighbours through shared conservative transport and a global composite pressure solve. Its hysteretic activity policy promotes moving, deforming, or geometrically complex surface bricks and slowly coarsens calm regions under a bounded fine-leaf capacity. This milestone still runs the sparse physics authority on CPU; the final GPU page pool and camera-weighted refinement are not yet claimed.",
+  detail: "Sparse CM12 maps any authored scene into a fixed-world-space GPU brick atlas and couples 4³ and 8³ neighbours through shared conservative transport and a global composite pressure solve. Compact receiver support, evolving fields, pressure iterations, projection, diagnostics fields, and presentation publication remain GPU-resident between submissions; construction-time topology packing is the only host-sized preparation.",
   backend: "webgpu",
   resource: {
     id: "fluid.sparse-cm12",

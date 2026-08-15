@@ -273,7 +273,7 @@ function seedBrickCoordinates(
   return unique;
 }
 
-function initialFluidBrickCoordinates(
+export function initialFluidBrickCoordinates(
   scene: SceneDescription,
   dimensions: readonly [number, number, number],
   brickSize: number,

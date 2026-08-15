@@ -57,8 +57,11 @@ installSimulationMethods({
   // reachable from the picker before the split (as the octree method's
   // `coarseBackend` select) and because `interactiveMethodId` silently
   // substitutes the default for a non-interactive id: a `method=power-liquids`
-  // link would have hydrated as uniform and simulated something else.
+  // link would have hydrated as the default method and simulated something
+  // else.
   interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, adaptiveMassMethod],
-  // Uniform is the default for any scene that does not author a method profile.
-  defaultId: uniformMethod.id,
+  // Sparse CM12 is the default for any scene that does not author a method
+  // profile. Uniform CM12 remains the pinned method of the paper-figure
+  // reproductions, which name it explicitly.
+  defaultId: adaptiveMassMethod.id,
 });

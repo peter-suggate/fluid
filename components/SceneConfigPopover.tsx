@@ -21,7 +21,6 @@ const defaultInflow: FluidInflow = {
 };
 
 const sections = [
-  { id: "scene", label: "Scene", hint: "Identity and seed" },
   { id: "method", label: "Method", hint: "Solver, quality, and parameters" },
   { id: "container", label: "Container", hint: "Extents, walls, and the voxel domain" },
   { id: "fluid", label: "Fluid", hint: "Material properties and the inflow jet" },
@@ -53,7 +52,7 @@ export function SceneConfigPopover() {
   const patchContainer = useSceneStore((state) => state.patchContainer);
   const patchFluid = useSceneStore((state) => state.patchFluid);
   const patchNumerics = useSceneStore((state) => state.patchNumerics);
-  const [section, setSection] = useState<SectionId>("scene");
+  const [section, setSection] = useState<SectionId>("method");
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; baseX: number; baseY: number } | null>(null);
   if (!open) return null;
@@ -121,11 +120,6 @@ export function SceneConfigPopover() {
           ))}
         </nav>
         <div className="popover-body">
-          {section === "scene" && <section>
-            <h3>Identity</h3>
-            <label className="text-field"><span>Scene ID</span><input aria-label="Scene name" value={scene.sceneId} onChange={(event) => patchScene({ sceneId: event.target.value })} /></label>
-            <NumberField label="Random seed" value={scene.randomSeed} step={1} min={0} onChange={(value) => patchScene({ randomSeed: Math.max(0, Math.round(value)) })} />
-          </section>}
           {section === "method" && <MethodPanel />}
           {section === "container" && <>
             <section>

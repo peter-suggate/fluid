@@ -56,6 +56,12 @@ const sceneArgument = process.argv.slice(2)
 if (sceneArgument !== "symmetric" && sceneArgument !== "mini32") {
   throw new RangeError("scene must be symmetric or mini32");
 }
+const sparseResolutionArgument = process.argv.slice(2)
+  .find((value) => value.startsWith("--sparse-resolution="))
+  ?.slice("--sparse-resolution=".length) ?? "all-fine";
+if (sparseResolutionArgument !== "all-fine" && sparseResolutionArgument !== "adaptive") {
+  throw new RangeError("sparse-resolution must be all-fine or adaptive");
+}
 const buildScene = sceneArgument === "mini32"
   ? createMinimalPowerDamBreak32Scene
   : createSymmetricExpansionScene;
@@ -148,7 +154,7 @@ async function createArm(
 ): Promise<MutableArm> {
   const overrides: MethodParamValues = method.id === "uniform"
     ? { timeStep: "scene", densityPostProcessing: "off" }
-    : { timeStep: "scene" };
+    : { timeStep: "scene", resolutionMode: sparseResolutionArgument };
   const values = resolveMethodValues(method, "balanced", overrides);
   const solver = await method.createSolverAsync!(
     device,
@@ -285,6 +291,17 @@ try {
     }
   }
 
+  assert.equal(sparse.solver.info.hostFluidAuthority, "gpu-resident",
+    "Sparse CM12 frame authority must remain GPU-resident");
+  assert.equal(sparse.solver.info.hostSimulationSizedWorkItems, 0,
+    "Sparse CM12 must not perform simulation-sized host work per frame");
+  assert.equal(sparse.solver.info.hostSchedulingUsesReadback, false,
+    "Sparse CM12 frame scheduling must not depend on GPU readback");
+  if (sparseResolutionArgument === "all-fine") {
+    assert.equal(sparse.solver.info.cellCount, uniform.solver.info.cellCount,
+      "all-fine A/B must compare the same represented cell count");
+  }
+
   const verdict = evaluateSparseCM12Performance(
     frozenArm(uniform),
     frozenArm(sparse),
@@ -297,6 +314,13 @@ try {
     dt_s,
     warmupFrames,
     timedFrames,
+    sparseResolutionMode: sparseResolutionArgument,
+    matchedRepresentation: {
+      uniformCells: uniform.solver.info.cellCount,
+      sparseLeaves: sparse.solver.info.cellCount,
+      exactDegreesOfFreedomMatch:
+        uniform.solver.info.cellCount === sparse.solver.info.cellCount,
+    },
     validationErrors,
     stateGrowth: {
       uniform: summarizeFrameState(uniform.frameState),

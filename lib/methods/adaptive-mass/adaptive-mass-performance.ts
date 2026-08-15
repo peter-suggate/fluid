@@ -144,9 +144,10 @@ export function summarizeSparseCM12BenchmarkArm(
 
 /**
  * Hard matched-frame gate. Only serialized end-to-end wall observations are
- * ratioed: CPU and GPU phase traces remain separate evidence because the
- * current sparse milestone executes physics on CPU while uniform is GPU
- * authoritative. Construction is explicitly forbidden from both arms.
+ * ratioed. Host command-encoding and GPU execution traces remain separate
+ * evidence; both methods publish `hostFluidAuthority = gpu-resident` and no
+ * simulation-sized host work is permitted. Construction is forbidden from
+ * both arms.
  */
 export function evaluateSparseCM12Performance(
   uniform: SparseCM12BenchmarkArm,

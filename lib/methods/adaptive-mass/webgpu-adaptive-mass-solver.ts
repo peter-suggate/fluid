@@ -17,29 +17,21 @@ import {
 } from "./adaptive-mass-frame-pipeline";
 import type { AdaptiveMassSolverOptions } from "./method";
 import {
-  coarsenLargeQuiescentComponents,
+  createSparseAdaptiveMassAtlas,
   initializeSparseBrickAtlasFromScene,
+  sparseBrickKey,
   sparseBrickAtlasStats,
   type SparseAdaptiveMassAtlas,
+  type SparseAdaptiveMassBrick,
+  type SparseBrickResolution,
   type SparseBrickVec3,
 } from "./sparse-brick-atlas";
 import {
-  materializeSparseAtlasDivergence,
-  materializeSparseAtlasPressure,
-  type SparseAtlasProjectionResult,
-} from "./sparse-atlas-composite-projection";
-import {
   initializeSparseAtlasDynamics,
-  injectSparseAtlasLiquid,
-  materializeSparseAtlasDynamicsVelocityRgba,
-  stepSparseAtlasDynamics,
   type SparseAtlasDynamicsState,
 } from "./sparse-atlas-dynamics";
-import {
-  materializeAdaptiveMassPresentationAtlas,
-  WebGPUAdaptiveMassAtlasPresentation,
-  type AdaptiveMassAtlasMaterialization,
-} from "./webgpu-adaptive-mass-atlas-presentation";
+import { WebGPUAdaptiveMassAtlasPresentation } from "./webgpu-adaptive-mass-atlas-presentation";
+import { WebGPUSparseCM12Resident } from "./webgpu-sparse-cm12-resident";
 
 /** Method-local long-run physics receipt carried through the generic info bag. */
 export interface AdaptiveMassStepTelemetry {
@@ -55,23 +47,45 @@ export interface AdaptiveMassStepTelemetry {
   adaptiveMaximumDensityAfterConditioning?: number;
 }
 
-/**
- * Temporary budget for the legacy dense renderer/diagnostic bridge.
- * Physics is never rescaled to fit it: a future compact surface-page source
- * replaces this bridge for domains above the budget.
- */
-export const ADAPTIVE_MASS_DENSE_PRESENTATION_MAXIMUM_CELLS = 1_048_576;
+/** Reserve a compact receiver halo for the fixed-topology GPU control arms. */
+function residentSupportAtlas(
+  source: SparseAdaptiveMassAtlas,
+  mode: AdaptiveMassSolverOptions["resolutionMode"],
+): SparseAdaptiveMassAtlas {
+  const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
+  const receiverResolution: SparseBrickResolution = mode === "all-coarse" ? 4 : 8;
+  for (const brick of source.bricks) {
+    for (let dz = -1; dz <= 1; dz += 1) for (let dy = -1; dy <= 1; dy += 1)
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const coordinate: SparseBrickVec3 = [
+          brick.coordinate[0] + dx,
+          brick.coordinate[1] + dy,
+          brick.coordinate[2] + dz,
+        ];
+        if (coordinate.some((value, axis) => value < 0
+          || value >= source.brickDimensions[axis])) continue;
+        const key = sparseBrickKey(coordinate, source.brickDimensions);
+        if (bricks.has(key)) continue;
+        const count = receiverResolution ** 3;
+        const receiver: SparseAdaptiveMassBrick = {
+          key, coordinate, resolution: receiverResolution,
+          density: new Float64Array(count),
+          gamma: new Float64Array(count).fill(1),
+        };
+        bricks.set(key, receiver);
+      }
+  }
+  return createSparseAdaptiveMassAtlas(
+    source.dimensions,
+    [...bricks.values()].sort((left, right) => left.key - right.key),
+    source.generation,
+  );
+}
 
 /**
- * Browser milestone for the adaptive-mass method.
- *
- * Physics authority is a compact CPU f64 atlas for now. It owns force,
- * conservative transport, and global composite projection across arbitrary
- * resident 4³/8³ bricks; WebGPU owns the consumer textures and ordinary
- * renderer lifecycle. This does not yet claim the final GPU page pool, GPU
- * sparse execution or camera-weighted refinement. Compact activity-driven
- * 4³/8³ topology changes are authoritative and reprojected every accepted
- * step; only the execution backend remains the M1 CPU reference.
+ * GPU-resident Sparse CM12 authority. Construction may build compact topology
+ * on the host, but every accepted frame is device-only simulation work: the
+ * host writes one small uniform block and encodes a fixed dispatch schedule.
  */
 export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readonly info: GPUEulerianInfo;
@@ -83,9 +97,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readonly gridDivergenceTexture: GPUTexture;
 
   private atlas: SparseAdaptiveMassAtlas;
-  private dynamics: SparseAtlasDynamicsState;
   private lastTime_s = 0;
-  private initialMassFineCells: number;
   private disposed = false;
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
@@ -96,12 +108,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     private readonly scene: SceneDescription,
     private readonly options: AdaptiveMassSolverOptions,
     private readonly presentation: WebGPUAdaptiveMassAtlasPresentation,
+    private readonly resident: WebGPUSparseCM12Resident,
+    adaptiveMixedSeamFaceCount: number,
     atlas: SparseAdaptiveMassAtlas,
-    dynamics: SparseAtlasDynamicsState,
     quality: GPUQuality,
   ) {
     this.atlas = atlas;
-    this.dynamics = dynamics;
     this.volumeTexture = presentation.densityTexture;
     this.surfaceFieldTexture = presentation.levelSetTexture;
     this.gridCellTexture = presentation.gridCellTexture;
@@ -109,7 +121,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.gridPressureTexture = presentation.pressureTexture;
     this.gridDivergenceTexture = presentation.divergenceTexture;
     const stats = sparseBrickAtlasStats(atlas);
-    this.initialMassFineCells = stats.integratedMassFineCells;
     const [nx, ny, nz] = atlas.dimensions;
     const representedFraction = stats.leafCount / Math.max(1, stats.equivalentFinestCellCount);
     const cellSize_m = Math.min(
@@ -132,8 +143,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       gridKind: "octree",
       cellSize_m,
       pressureIterations: 0,
-      pressureSolver: "Sparse composite GᵀWG Jacobi-PCG",
-      allocatedBytes: presentation.allocatedBytes + stats.leafCount * 16,
+      pressureSolver: "GPU-resident sparse composite GᵀWG Jacobi-PCG",
+      allocatedBytes: presentation.allocatedBytes + resident.allocatedBytes,
       quality,
       volumeCellSum: stats.integratedMassFineCells,
       representedVolumeCellSum: stats.integratedMassFineCells,
@@ -148,7 +159,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       adaptiveCoarseBrickCount: stats.coarseBrickCount,
       adaptiveFineCoarseFaceConnectedPairCount:
         stats.fineCoarseFaceConnectedPairCount,
-      adaptiveMixedSeamFaceCount: dynamics.grid.mixedSeamRowCount,
+      adaptiveMixedSeamFaceCount,
       quadtreeMaximumFluidScale: 2,
       quadtreeMaximumNeighborRatio: 2,
       submittedTime_s: 0,
@@ -160,7 +171,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       maximumTallCellHeight: 2,
       surfaceField: "levelset",
       volumeControl: false,
-      hostSimulationSizedWorkItems: stats.leafCount,
+      hostFluidAuthority: "gpu-resident",
+      hostSimulationSizedWorkItems: 0,
       hostSchedulingUsesReadback: false,
     };
   }
@@ -178,8 +190,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     let dimensions: SparseBrickVec3 | undefined;
     let atlas: SparseAdaptiveMassAtlas | undefined;
     let presentation: WebGPUAdaptiveMassAtlasPresentation | undefined;
-    let materialization: AdaptiveMassAtlasMaterialization | undefined;
     let dynamics: SparseAtlasDynamicsState | undefined;
+    let resident: WebGPUSparseCM12Resident | undefined;
     try {
       await runner.run([{
         id: "adaptive-mass.plan",
@@ -194,23 +206,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         run: () => {
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
-            maximumFinestCells: ADAPTIVE_MASS_DENSE_PRESENTATION_MAXIMUM_CELLS,
             resolutionForBrick: options.resolutionMode === "all-fine"
               ? () => 8
-              : options.resolutionMode === "all-coarse" ? () => 4 : undefined,
-            fineHalf: {
-              axis: options.seamAxis === "x" ? 0 : options.seamAxis === "y" ? 1 : 2,
-              side: options.fineSide,
-            },
+              : () => 4,
           });
-          if (options.resolutionMode === "adaptive") {
-            atlas = coarsenLargeQuiescentComponents(atlas, 8, {
-              axis: options.seamAxis === "x" ? 0 : options.seamAxis === "y" ? 1 : 2,
-              side: options.fineSide,
-            });
-          }
+          atlas = residentSupportAtlas(atlas, options.resolutionMode);
           dynamics = initializeSparseAtlasDynamics(atlas);
-          materialization = atlasMaterialization(atlas, scene, dynamics);
         },
       }, {
         id: "adaptive-mass.presentation",
@@ -219,11 +220,27 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         dependencies: ["adaptive-mass.atlas"],
         run: () => { presentation = new WebGPUAdaptiveMassAtlasPresentation(device, dimensions!); },
       }, {
+        id: "adaptive-mass.resident",
+        phase: "allocation",
+        label: "Pack compact GPU topology and allocate resident frame state",
+        dependencies: ["adaptive-mass.atlas", "adaptive-mass.presentation"],
+        run: async () => {
+          resident = await WebGPUSparseCM12Resident.create(
+            device, atlas!, dynamics!.grid, presentation!,
+          );
+        },
+      }, {
         id: "adaptive-mass.upload",
         phase: "upload",
         label: "Publish sparse atlas generation zero",
-        dependencies: ["adaptive-mass.presentation"],
-        run: () => { presentation!.upload(materialization!); },
+        dependencies: ["adaptive-mass.resident"],
+        run: () => {
+          const encoder = device.createCommandEncoder({
+            label: "Sparse CM12 initial GPU publication",
+          });
+          resident!.encodeInitialPresentation(encoder, finestCellSize(scene, atlas!));
+          device.queue.submit([encoder.finish()]);
+        },
       }, {
         id: "adaptive-mass.warmup",
         phase: "warmup",
@@ -232,31 +249,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         run: () => device.queue.onSubmittedWorkDone(),
       }]);
       return new WebGPUAdaptiveMassSolver(
-        device, scene, options, presentation!, atlas!, dynamics!, quality,
+        device, scene, options, presentation!, resident!,
+        dynamics!.grid.mixedSeamRowCount, atlas!, quality,
       );
     } catch (error) {
+      resident?.destroy();
       presentation?.destroy();
       throw error;
     }
-  }
-
-  /** Every atlas-derived counter, from whatever last changed the atlas. */
-  private publishAtlasStats(): void {
-    const stats = sparseBrickAtlasStats(this.atlas);
-    this.info.volumeCellSum = stats.integratedMassFineCells;
-    this.info.representedVolumeCellSum = stats.integratedMassFineCells;
-    this.info.representedVolumeDrift = stats.integratedMassFineCells - this.initialMassFineCells;
-    this.info.fluidBrickGeneration = stats.generation;
-    this.info.adaptiveFineBrickCount = stats.fineBrickCount;
-    this.info.adaptiveCoarseBrickCount = stats.coarseBrickCount;
-    this.info.adaptiveFineCoarseFaceConnectedPairCount =
-      stats.fineCoarseFaceConnectedPairCount;
-    this.info.fluidBrickResidentCount = stats.residentBrickCount;
-    this.info.fluidBrickCoreCount = stats.residentBrickCount;
-    this.info.cellCount = stats.leafCount;
-    this.info.activeSampleCount = stats.leafCount;
-    this.info.compressionRatio = stats.leafCompressionRatio;
-    this.info.activeCompressionRatio = stats.leafCompressionRatio;
   }
 
   /**
@@ -278,29 +278,24 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     if (this.disposed || !(ball.radius_m > 0)) return;
     const container = this.scene.container;
     const [nx, ny, nz] = this.atlas.dimensions;
-    const before = sparseBrickAtlasStats(this.atlas).integratedMassFineCells;
-    const dynamics = injectSparseAtlasLiquid(this.dynamics, {
-      centerFine: [
+    const encoder = this.device.createCommandEncoder({
+      label: "Sparse CM12 GPU liquid injection",
+    });
+    this.resident.encodeLiquidInjection(
+      encoder,
+      finestCellSize(this.scene, this.atlas),
+      [
         (ball.centre_m.x + 0.5 * container.width_m) * nx / container.width_m,
         ball.centre_m.y * ny / container.height_m,
         (ball.centre_m.z + 0.5 * container.depth_m) * nz / container.depth_m,
       ],
-      radiusFine: [
+      [
         ball.radius_m * nx / container.width_m,
         ball.radius_m * ny / container.height_m,
         (ball.halfHeight_m ?? ball.radius_m) * nz / container.depth_m,
       ],
-    });
-    if (dynamics === this.dynamics) return;
-    this.dynamics = dynamics;
-    this.atlas = dynamics.atlas;
-    // The drift counter reads "mass this run has lost", so the water the user
-    // just added is added to its baseline too — otherwise a drop registers as
-    // a conservation failure of exactly its own volume.
-    this.initialMassFineCells +=
-      sparseBrickAtlasStats(this.atlas).integratedMassFineCells - before;
-    this.publishAtlasStats();
-    this.presentation.upload(atlasMaterialization(this.atlas, this.scene, this.dynamics));
+    );
+    this.device.queue.submit([encoder.finish()]);
   }
 
   advanceTo(time_s: number, _bodies: RigidBodyState[]): boolean {
@@ -321,72 +316,55 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       && traceRequestedAt_ms - this.lastPhysicsTraceAt_ms
         >= ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS;
     const traceSampleId = shouldTracePhysics ? ++this.physicsTraceSampleId : 0;
-    const traceContext = `adaptive-mass:sim-${(this.lastTime_s + dt_s).toFixed(6)}`;
     const frameCapture = shouldTracePhysics
-      ? new AdaptiveMassFrameCapture(traceSampleId, traceContext)
+      ? new AdaptiveMassFrameCapture(
+        traceSampleId,
+        `adaptive-mass:sim-${(this.lastTime_s + dt_s).toFixed(6)}`,
+      )
       : undefined;
-    const step = stepSparseAtlasDynamics(this.dynamics, {
-      dt_s,
-      finestCellSize_m: cellSize_m,
-      resolutionMode: this.options.resolutionMode,
-      accelerationFinePerSecond2: [
-        gravity.x / cellSize_m,
-        gravity.y / cellSize_m,
-        gravity.z / cellSize_m,
-      ],
-      projection: {
-        // The public physics gate is 1e-8. A 100x guard band avoids spending
-        // CPU-reference frame time on invisible residual digits while keeping
-        // the accepted solution comfortably inside that unchanged gate.
-        relativeTolerance: 1e-10,
-        absoluteTolerance: 1e-12,
-        onStageComplete: frameCapture?.completeProjectionStage,
-      },
-      onStageComplete: frameCapture?.completeDynamicsStage,
+    const encoder = this.device.createCommandEncoder({
+      label: `Sparse CM12 resident frame ${(this.lastTime_s + dt_s).toFixed(6)}`,
     });
-    this.atlas = step.atlas;
-    this.dynamics = step.state;
-    this.lastTime_s = step.state.time_s;
-    const projection = step.projection;
-    const nextTime_s = step.state.time_s;
+    this.resident.encode(
+      encoder,
+      dt_s,
+      cellSize_m,
+      this.scene.fluid.density_kg_m3 * cellSize_m * cellSize_m / dt_s,
+      [gravity.x / cellSize_m, gravity.y / cellSize_m, gravity.z / cellSize_m],
+    );
+    // These seams describe host encoding only.  The corresponding numerical
+    // stages are ordered compute dispatches in the command buffer above.
+    for (const stage of ["receiver-topology", "coupled-transport",
+      "surface-conditioning", "activity-resolution", "retain-rebuild", "force"] as const) {
+      frameCapture?.completeDynamicsStage(stage);
+    }
+    for (const stage of ["topology", "rhs", "solve", "projection", "diagnostics"] as const) {
+      frameCapture?.completeProjectionStage(stage);
+    }
+    frameCapture?.completeStateCommit();
+    frameCapture?.completeMaterialization();
+    frameCapture?.beginQueueUpload();
+    this.device.queue.submit([encoder.finish()]);
+
+    this.lastTime_s += dt_s;
+    const nextTime_s = this.lastTime_s;
     this.info.submittedTime_s = nextTime_s;
     this.info.simulatedTime_s = nextTime_s;
     this.info.simulationLag_s = Math.max(0, time_s - nextTime_s);
     this.info.lastDt_s = dt_s;
     this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
-    this.publishAtlasStats();
-    this.info.lastSubsteps = step.stats.transportSubsteps;
-    this.info.maxComponentCfl = step.stats.maximumOutgoingCfl;
-    this.info.adaptiveMixedSeamFaceCount = projection?.receipt.mixedSeamRowCount ?? 0;
-    this.info.adaptiveActivityMaximumScore = step.stats.resolutionPolicy.maximumScoreByte;
-    this.info.adaptiveActivitySurfaceBrickCount =
-      step.stats.resolutionPolicy.surfaceBrickCount;
-    this.info.adaptiveActivityHotBrickCount = step.stats.resolutionPolicy.hotBrickCount;
-    this.info.adaptiveActivityQuietBrickCount = step.stats.resolutionPolicy.quietBrickCount;
-    this.info.adaptiveResolutionTopologyEpoch = step.stats.resolutionPolicy.topologyEpoch;
-    this.info.adaptiveResolutionPromotedBrickCount =
-      step.stats.resolutionPolicy.promotedBrickCount;
-    this.info.adaptiveResolutionDemotedBrickCount =
-      step.stats.resolutionPolicy.demotedBrickCount;
-    this.info.adaptiveResolutionDeferredPromotionCount =
-      step.stats.resolutionPolicy.deferredPromotionCount;
-    this.info.hostSimulationSizedWorkItems = step.stats.workCellCount
-      + step.stats.workFaceCount;
-    const adaptiveInfo = this.info as typeof this.info & AdaptiveMassStepTelemetry;
-    adaptiveInfo.adaptiveKineticEnergyBeforeFineUnits = step.stats.kineticEnergyBefore;
-    adaptiveInfo.adaptiveKineticEnergyAfterFineUnits = step.stats.kineticEnergyAfter;
-    adaptiveInfo.adaptiveMaximumDensityAfterTransport =
-      step.stats.maximumDensityAfterTransport;
-    adaptiveInfo.adaptiveMaximumDensityAfterConditioning = step.stats.maximumDensity;
-    frameCapture?.completeStateCommit();
-    const materialization = atlasMaterialization(
-      this.atlas, this.scene, this.dynamics, step.projection, dt_s,
-    );
-    if (projection) this.publishProjectionInfo(projection, materialization);
-    frameCapture?.completeMaterialization();
-    frameCapture?.beginQueueUpload();
-    this.presentation.upload(materialization);
+    this.info.lastSubsteps = 1;
+    this.info.pressureIterations = 128;
+    this.info.hostSimulationSizedWorkItems = 0;
     const captured = frameCapture?.finish(this.device.queue);
+    this.finishFrameCapture(captured, traceRequestedAt_ms);
+    return true;
+  }
+
+  private finishFrameCapture(
+    captured: ReturnType<AdaptiveMassFrameCapture["finish"]> | undefined,
+    traceRequestedAt_ms: number,
+  ): void {
     if (captured) {
       this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;
       this.physicsTracePending = true;
@@ -402,46 +380,18 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         this.physicsTracePending = false;
       });
     }
-    return true;
-  }
-
-  private publishProjectionInfo(
-    projection: SparseAtlasProjectionResult,
-    materialization: AdaptiveMassAtlasMaterialization,
-  ): void {
-    const receipt = projection.receipt;
-    const adaptiveInfo = this.info as typeof this.info & AdaptiveMassStepTelemetry;
-    this.info.pressureIterations = receipt.iterations;
-    this.info.pressureRelativeResidual = receipt.relativeResidualL2;
-    this.info.pressureResidual = receipt.maximumResidual;
-    this.info.maxDivergenceBefore_s = receipt.preDivergenceMaximum;
-    this.info.maxDivergenceAfter_s = receipt.postDivergenceMaximum;
-    this.info.maxDivergence_s = this.info.maxDivergenceAfter_s;
-    this.info.projectionDivergenceRatio = receipt.divergenceReduction;
-    this.info.maxPressure_Pa = maximumAbsolute(materialization.pressure ?? []);
-    this.info.maxSpeed_m_s = maximumVelocityMagnitude(materialization.velocity ?? []);
-    this.info.pressureRequiredRows = receipt.activeRowCount;
-    this.info.pressureRowCapacity = projection.grid.gradientRows.length;
-    this.info.pressureCapacityOverflow = false;
-    this.info.nonFiniteCount = countNonFinite(
-      materialization.velocity ?? [], materialization.pressure ?? [],
-      materialization.divergence ?? [],
-    );
-    adaptiveInfo.adaptiveProjectionKineticEnergyBeforeFineUnits =
-      receipt.kineticEnergyBefore;
-    adaptiveInfo.adaptiveProjectionKineticEnergyAfterFineUnits =
-      receipt.kineticEnergyAfter;
-    adaptiveInfo.adaptiveInactiveFaceCount = receipt.inactiveRowCount;
-    adaptiveInfo.adaptiveMaximumInactiveFaceSpeedBefore_m_s =
-      receipt.maximumInactiveFaceVelocityBefore * this.info.cellSize_m;
-    adaptiveInfo.adaptiveMaximumInactiveFaceSpeedAfter_m_s =
-      receipt.maximumInactiveFaceVelocityAfter * this.info.cellSize_m;
-    adaptiveInfo.adaptiveMaximumMixedSeamDivergence_s =
-      receipt.postMixedSeamDivergenceMaximum;
   }
 
   async readStats(): Promise<GPUEulerianInfo> {
     await this.device.queue.onSubmittedWorkDone();
+    const diagnostics = await this.resident.readDiagnostics();
+    this.info.pressureRelativeResidual = diagnostics.pressureRelativeResidual;
+    this.info.maxDivergenceAfter_s = diagnostics.maximumDivergence_s;
+    this.info.maxDivergence_s = diagnostics.maximumDivergence_s;
+    const adaptiveInfo = this.info as typeof this.info & AdaptiveMassStepTelemetry;
+    adaptiveInfo.adaptiveMaximumMixedSeamDivergence_s =
+      diagnostics.maximumMixedSeamDivergence_s;
+    adaptiveInfo.adaptiveMaximumInactiveFaceSpeedAfter_m_s = 0;
     this.info.completedTime_s = Math.max(
       this.info.completedTime_s ?? 0,
       this.info.submittedTime_s ?? 0,
@@ -452,6 +402,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   destroy(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.resident.destroy();
     this.presentation.destroy();
   }
 }
@@ -459,52 +410,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
 export function adaptiveMassPresentationDimensionsForScene(
   scene: SceneDescription,
 ): SparseBrickVec3 {
-  const authored = sceneLatticeDimensions(scene);
-  const cells = authored[0] * authored[1] * authored[2];
-  if (cells > ADAPTIVE_MASS_DENSE_PRESENTATION_MAXIMUM_CELLS) {
-    throw new RangeError(
-      `Sparse CM12 authored lattice ${authored.join("x")} has ${cells} cells, `
-      + `above the temporary dense presentation bridge budget `
-      + `${ADAPTIVE_MASS_DENSE_PRESENTATION_MAXIMUM_CELLS}. Physics resolution `
-      + "will not be silently reduced; use the compact sparse surface-page publisher.",
-    );
-  }
-  return authored;
-}
-
-function atlasMaterialization(
-  atlas: SparseAdaptiveMassAtlas,
-  scene: SceneDescription,
-  dynamics?: SparseAtlasDynamicsState,
-  projection?: SparseAtlasProjectionResult,
-  dt_s?: number,
-): AdaptiveMassAtlasMaterialization {
-  const finestCell_m = finestCellSize(scene, atlas);
-  const base = materializeAdaptiveMassPresentationAtlas({
-    dimensions: atlas.dimensions,
-    emptyLevelSet: 4 * finestCell_m,
-    densityProxyBand: 4 * finestCell_m,
-    bricks: atlas.bricks.map((brick) => ({
-      originFine: brick.coordinate.map((value) => value * 8) as [number, number, number],
-      resolution: brick.resolution,
-      fineSpan: 8,
-      density: brick.density,
-    })),
-  });
-  const velocity = dynamics
-    ? materializeSparseAtlasDynamicsVelocityRgba(dynamics) : undefined;
-  if (velocity) scaleInPlace(velocity, finestCell_m, 4, 3);
-  const pressure = projection && dt_s
-    ? materializeSparseAtlasPressure(projection) : undefined;
-  if (pressure && dt_s) {
-    scaleInPlace(
-      pressure,
-      scene.fluid.density_kg_m3 * finestCell_m * finestCell_m / dt_s,
-    );
-  }
-  const divergence = projection
-    ? materializeSparseAtlasDivergence(projection) : undefined;
-  return { ...base, velocity, pressure, divergence };
+  return sceneLatticeDimensions(scene);
 }
 
 function finestCellSize(scene: SceneDescription, atlas: SparseAdaptiveMassAtlas): number {
@@ -513,43 +419,4 @@ function finestCellSize(scene: SceneDescription, atlas: SparseAdaptiveMassAtlas)
     scene.container.height_m / atlas.dimensions[1],
     scene.container.depth_m / atlas.dimensions[2],
   );
-}
-
-function scaleInPlace(
-  values: Float32Array,
-  scale: number,
-  stride = 1,
-  scaledChannels = stride,
-): void {
-  for (let base = 0; base < values.length; base += stride) {
-    for (let channel = 0; channel < scaledChannels; channel += 1) {
-      values[base + channel] *= scale;
-    }
-  }
-}
-
-function maximumAbsolute(values: ArrayLike<number>): number {
-  let maximum = 0;
-  for (let index = 0; index < values.length; index += 1) {
-    maximum = Math.max(maximum, Math.abs(values[index]));
-  }
-  return maximum;
-}
-
-function maximumVelocityMagnitude(values: ArrayLike<number>): number {
-  let maximum = 0;
-  for (let index = 0; index + 2 < values.length; index += 4) {
-    maximum = Math.max(maximum, Math.hypot(
-      values[index], values[index + 1], values[index + 2],
-    ));
-  }
-  return maximum;
-}
-
-function countNonFinite(...fields: readonly ArrayLike<number>[]): number {
-  let count = 0;
-  for (const field of fields) for (let index = 0; index < field.length; index += 1) {
-    if (!Number.isFinite(field[index])) count += 1;
-  }
-  return count;
 }

@@ -92,6 +92,7 @@ export function cm12GammaDiffusionFluxInto(
   neighborRho: number,
   neighborGamma: number,
   open: number,
+  output: Cm12GammaDiffusionFlux = { rho: 0, gamma: 0 },
 ): Cm12GammaDiffusionFlux {
   const gamma = 0.5 * open * (neighborGamma - ownGamma);
   let rho = 0;
@@ -100,7 +101,9 @@ export function cm12GammaDiffusionFluxInto(
   } else if (ownGamma > neighborGamma) {
     rho = -open * ownRho * (ownGamma - neighborGamma) / (2 * Math.max(ownGamma, 1e-9));
   }
-  return { rho, gamma };
+  output.rho = rho;
+  output.gamma = gamma;
+  return output;
 }
 
 /** CM12 Sec. 3.7 excess-volume divergence, with the existing one-cell/dt cap. */

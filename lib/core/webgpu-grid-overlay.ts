@@ -169,6 +169,15 @@ fn adaptiveCellKey(cell: vec3i, dims: vec3i) -> vec2u {
   return textureLoad(adaptiveCells, clamp(cell, vec3i(0), dims - vec3i(1)), 0).xy;
 }
 
+fn adaptiveCellOriginScale(key: vec2u) -> vec4i {
+  if ((key.y & 0x80000000u) != 0u) {
+    return vec4i(i32(key.x & 2047u), i32(key.y & 2047u),
+      i32((key.x >> 11u) & 2047u), i32(1u << ((key.x >> 22u) & 15u)));
+  }
+  return vec4i(i32(key.x & 1023u), i32(key.y & 1023u),
+    i32((key.x >> 10u) & 1023u), max(1, i32((key.x >> 20u) & 1023u)));
+}
+
 // Returns [lower y, upper y, horizontal quadtree leaf size]. The segmentation
 // encoder emits every retained optical row as its own one-cell-high segment;
 // only uncut runs are vertically merged. Reading this from the ownership
@@ -176,7 +185,8 @@ fn adaptiveCellKey(cell: vec3i, dims: vec3i) -> vec2u {
 // the pressure solve, including changes introduced by quadtree reduction.
 fn adaptiveCellVerticalShape(cell: vec3i, dims: vec3i) -> vec3i {
   let key = adaptiveCellKey(cell, dims);
-  return vec3i(i32(key.y & 1023u), i32((key.y >> 10u) & 1023u), max(1, i32((key.x >> 20u) & 1023u)));
+  let owner = adaptiveCellOriginScale(key);
+  return vec3i(owner.y, owner.y + owner.w, owner.w);
 }
 
 fn isOpticalCube(cell: vec3i, dims: vec3i) -> bool {
@@ -223,9 +233,9 @@ fn representedCell(cell: vec3i, dims: vec3i, boundsMin: vec3f, size: vec3f, adap
   var upper = cell + vec3i(1);
   if (adaptiveGrid) {
     let key = adaptiveCellKey(cell, dims);
-    lower = vec3i(i32(key.x & 1023u), i32(key.y & 1023u), i32((key.x >> 10u) & 1023u));
-    let leafSize = i32((key.x >> 20u) & 1023u);
-    upper = vec3i(lower.x + leafSize, i32((key.y >> 10u) & 1023u), lower.z + leafSize);
+    let owner = adaptiveCellOriginScale(key);
+    lower = owner.xyz;
+    upper = lower + vec3i(owner.w);
   } else if (tallGrid) {
     let base = i32(round(textureLoad(tallCellBases, cell.xz, 0).x));
     if (cell.y < base) {

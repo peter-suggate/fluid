@@ -4,7 +4,13 @@
  * Empty bricks have no payload and no directory entry.
  */
 
-import { damBreakBoxContains, initialLiquidFractionAtCell, sceneDamBreakBox } from "../../core/initial-fluid";
+import {
+  damBreakBoxContains,
+  initialFluidBrickCoordinates,
+  initialLiquidFractionAtCell,
+  sceneDamBreakBox,
+  sceneInitialLiquidVolumes,
+} from "../../core/initial-fluid";
 import type { SceneDescription } from "../../core/model";
 import { sceneHasTerrain, terrainHeightAt } from "../../core/terrain";
 
@@ -30,7 +36,7 @@ export interface SparseAdaptiveMassAtlas {
 
 export interface SparseBrickAtlasInitializationOptions {
   readonly finestDimensions: SparseBrickVec3;
-  /** Hard construction ceiling. Defaults to 16 million finest cells. */
+  /** Optional caller-owned construction guard; Sparse CM12 itself has no cell-count cap. */
   readonly maximumFinestCells?: number;
   readonly emptyEpsilon?: number;
   /** Keep saturated bricks fine on one configurable half of the domain. */
@@ -141,38 +147,35 @@ export function createSparseAdaptiveMassAtlas(
   return { dimensions, brickDimensions, bricks: [...bricks], directory, generation };
 }
 
-function initialDensity(scene: SceneDescription, dimensions: SparseBrickVec3): Float64Array {
-  const [nx, ny, nz] = dimensions;
-  const density = new Float64Array(nx * ny * nz);
-  if (scene.systems?.fluid === false) return density;
-  const dam = sceneDamBreakBox(scene);
-  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
-    if (sceneHasTerrain(scene)) {
-      const worldX = -0.5 * scene.container.width_m + (x + 0.5) * scene.container.width_m / nx;
-      const worldZ = -0.5 * scene.container.depth_m + (z + 0.5) * scene.container.depth_m / nz;
-      if ((y + 0.5) * scene.container.height_m / ny
-        <= terrainHeightAt(scene.terrain, worldX, worldZ)) continue;
-    }
-    const baseWet = scene.fluid.initialCondition === "tank-fill"
-      ? (y + 0.5) / ny <= scene.container.fillFraction
-      : damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / ny, (z + 0.5) / nz);
-    density[x + nx * (y + ny * z)] = initialLiquidFractionAtCell(
-      scene, x, y, z, dimensions, baseWet,
-    );
-  }
-  return density;
-}
-
-function denseValue(
-  values: ArrayLike<number>, dimensions: SparseBrickVec3, x: number, y: number, z: number,
+function initialDensityAt(
+  scene: SceneDescription,
+  dimensions: SparseBrickVec3,
+  x: number,
+  y: number,
+  z: number,
 ): number {
-  if (x < 0 || y < 0 || z < 0
-    || x >= dimensions[0] || y >= dimensions[1] || z >= dimensions[2]) return 0;
-  return values[x + dimensions[0] * (y + dimensions[1] * z)];
+  const [nx, ny, nz] = dimensions;
+  if (scene.systems?.fluid === false
+    || x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return 0;
+  const dam = sceneDamBreakBox(scene);
+  if (sceneHasTerrain(scene)) {
+    const worldX = -0.5 * scene.container.width_m
+      + (x + 0.5) * scene.container.width_m / nx;
+    const worldZ = -0.5 * scene.container.depth_m
+      + (z + 0.5) * scene.container.depth_m / nz;
+    if ((y + 0.5) * scene.container.height_m / ny
+      <= terrainHeightAt(scene.terrain, worldX, worldZ)) return 0;
+  }
+  const baseWet = scene.fluid.initialCondition === "tank-fill"
+    ? (y + 0.5) / ny <= scene.container.fillFraction
+    : damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / ny, (z + 0.5) / nz);
+  return initialLiquidFractionAtCell(scene, x, y, z, dimensions, baseWet);
 }
 
 function brickHasInterface(
-  dense: ArrayLike<number>, dimensions: SparseBrickVec3, coordinate: SparseBrickVec3,
+  scene: SceneDescription,
+  dimensions: SparseBrickVec3,
+  coordinate: SparseBrickVec3,
   epsilon: number,
 ): boolean {
   const origin = coordinate.map((value) => value * BRICK_FINE_RESOLUTION) as number[];
@@ -181,18 +184,76 @@ function brickHasInterface(
       for (let x = 0; x < BRICK_FINE_RESOLUTION; x += 1) {
         const gx = origin[0] + x, gy = origin[1] + y, gz = origin[2] + z;
         if (gx >= dimensions[0] || gy >= dimensions[1] || gz >= dimensions[2]) continue;
-        const own = denseValue(dense, dimensions, gx, gy, gz);
+        const own = initialDensityAt(scene, dimensions, gx, gy, gz);
         if (own > epsilon && own < 1 - epsilon) return true;
         for (const [dx, dy, dz] of [[-1, 0, 0], [1, 0, 0], [0, -1, 0],
           [0, 1, 0], [0, 0, -1], [0, 0, 1]] as const) {
           if (gx + dx < 0 || gy + dy < 0 || gz + dz < 0
             || gx + dx >= dimensions[0] || gy + dy >= dimensions[1]
             || gz + dz >= dimensions[2]) continue;
-          const neighbor = denseValue(dense, dimensions, gx + dx, gy + dy, gz + dz);
+          const neighbor = initialDensityAt(
+            scene, dimensions, gx + dx, gy + dy, gz + dz,
+          );
           if ((own > epsilon) !== (neighbor > epsilon)) return true;
         }
       }
   return false;
+}
+
+function initialBrick(
+  scene: SceneDescription,
+  dimensions: SparseBrickVec3,
+  coordinate: SparseBrickVec3,
+  resolution: SparseBrickResolution,
+): SparseAdaptiveMassBrick {
+  const factor = BRICK_FINE_RESOLUTION / resolution;
+  const density = new Float64Array(resolution ** 3);
+  const gamma = new Float64Array(resolution ** 3).fill(1);
+  for (let z = 0; z < resolution; z += 1)
+    for (let y = 0; y < resolution; y += 1)
+      for (let x = 0; x < resolution; x += 1) {
+        let rho = 0, count = 0;
+        for (let dz = 0; dz < factor; dz += 1)
+          for (let dy = 0; dy < factor; dy += 1)
+            for (let dx = 0; dx < factor; dx += 1) {
+              const gx = coordinate[0] * 8 + x * factor + dx;
+              const gy = coordinate[1] * 8 + y * factor + dy;
+              const gz = coordinate[2] * 8 + z * factor + dz;
+              if (gx >= dimensions[0] || gy >= dimensions[1] || gz >= dimensions[2]) continue;
+              rho += initialDensityAt(scene, dimensions, gx, gy, gz);
+              count += 1;
+            }
+        density[x + resolution * (y + resolution * z)] = count > 0 ? rho / count : 0;
+      }
+  const brickDimensions: SparseBrickVec3 = [
+    Math.ceil(dimensions[0] / BRICK_FINE_RESOLUTION),
+    Math.ceil(dimensions[1] / BRICK_FINE_RESOLUTION),
+    Math.ceil(dimensions[2] / BRICK_FINE_RESOLUTION),
+  ];
+  return {
+    key: sparseBrickKey(coordinate, brickDimensions),
+    coordinate,
+    resolution,
+    density,
+    gamma,
+  };
+}
+
+function candidateInitialBrickCoordinates(
+  scene: SceneDescription,
+  dimensions: SparseBrickVec3,
+  brickDimensions: SparseBrickVec3,
+): Iterable<SparseBrickVec3> {
+  const authored = initialFluidBrickCoordinates(scene, dimensions, BRICK_FINE_RESOLUTION);
+  if (authored && sceneInitialLiquidVolumes(scene).length === 0) return authored;
+  return {
+    *[Symbol.iterator]() {
+      for (let z = 0; z < brickDimensions[2]; z += 1)
+        for (let y = 0; y < brickDimensions[1]; y += 1)
+          for (let x = 0; x < brickDimensions[0]; x += 1)
+            yield [x, y, z] as const;
+    },
+  };
 }
 
 /** Build one payload by exact volume averaging from the bounded finest lattice. */
@@ -236,27 +297,34 @@ export function initializeSparseBrickAtlasFromScene(
 ): SparseAdaptiveMassAtlas {
   positiveDimensions(options.finestDimensions);
   const cellCount = options.finestDimensions.reduce((product, value) => product * value, 1);
-  const maximum = options.maximumFinestCells ?? 16_000_000;
-  if (cellCount > maximum) throw new RangeError(`bounded finest lattice has ${cellCount} cells; cap is ${maximum}`);
+  if (options.maximumFinestCells !== undefined
+    && cellCount > options.maximumFinestCells) {
+    throw new RangeError(
+      `bounded finest lattice has ${cellCount} cells; caller cap is ${options.maximumFinestCells}`,
+    );
+  }
   const epsilon = options.emptyEpsilon ?? 1e-12;
-  const dense = initialDensity(scene, options.finestDimensions);
   const brickDimensions = options.finestDimensions.map((value) =>
     Math.ceil(value / 8)) as [number, number, number];
   const bricks: SparseAdaptiveMassBrick[] = [];
-  for (let bz = 0; bz < brickDimensions[2]; bz += 1)
-    for (let by = 0; by < brickDimensions[1]; by += 1)
-      for (let bx = 0; bx < brickDimensions[0]; bx += 1) {
-        const coordinate = [bx, by, bz] as const;
+  for (const coordinate of candidateInitialBrickCoordinates(
+    scene, options.finestDimensions, brickDimensions,
+  )) {
         let nonempty = false;
         for (let z = 0; z < 8 && !nonempty; z += 1)
           for (let y = 0; y < 8 && !nonempty; y += 1)
             for (let x = 0; x < 8; x += 1)
-              if (denseValue(dense, options.finestDimensions, bx * 8 + x, by * 8 + y, bz * 8 + z) > epsilon) {
+              if (initialDensityAt(
+                scene, options.finestDimensions,
+                coordinate[0] * 8 + x,
+                coordinate[1] * 8 + y,
+                coordinate[2] * 8 + z,
+              ) > epsilon) {
                 nonempty = true; break;
               }
         if (!nonempty) continue;
         const interfaceBrick = brickHasInterface(
-          dense, options.finestDimensions, coordinate, epsilon,
+          scene, options.finestDimensions, coordinate, epsilon,
         );
         let defaultResolution: SparseBrickResolution = 4;
         if (options.fineHalf) {
@@ -272,9 +340,8 @@ export function initializeSparseBrickAtlasFromScene(
         }
         const resolution: SparseBrickResolution = interfaceBrick
           && !options.resolutionForBrick ? 8 : selected;
-        const key = sparseBrickKey(coordinate, brickDimensions);
-        bricks.push(sparseBrickFromDense(
-          key, coordinate, resolution, dense, options.finestDimensions,
+        bricks.push(initialBrick(
+          scene, options.finestDimensions, coordinate, resolution,
         ));
       }
   return createSparseAdaptiveMassAtlas(options.finestDimensions, bricks);

@@ -9,6 +9,7 @@
 import {
   cm12GammaDiffusionFluxInto,
   cm12SharpeningWeight,
+  type Cm12GammaDiffusionFlux,
 } from "../../core/cm12-numerics";
 import type {
   SparseAtlasAxis,
@@ -29,6 +30,8 @@ export interface SparseAtlasSurfaceConditioningOptions {
   /** Explicit dimensionless sharpening pseudo-time multiplier for probes. */
   readonly sharpeningCourant?: number;
   readonly sharpeningDistanceCells?: number;
+  /** Retain an already-proven horizontal D4 invariant across topology rebuilds. */
+  readonly preserveHorizontalD4?: boolean;
 }
 
 export interface SparseAtlasSurfaceConditioningResult {
@@ -42,35 +45,105 @@ export interface SparseAtlasSurfaceConditioningResult {
   readonly gammaIntegralAbsoluteError: number;
 }
 
+export interface SparseAtlasSurfaceConditioningWorkspace {
+  density: Float64Array;
+  gamma: Float64Array;
+  forwardDensity0: Float64Array;
+  forwardDensity1: Float64Array;
+  forwardGamma0: Float64Array;
+  forwardGamma1: Float64Array;
+  reverseDensity0: Float64Array;
+  reverseDensity1: Float64Array;
+  reverseGamma0: Float64Array;
+  reverseGamma1: Float64Array;
+  deltas: Float64Array;
+  conditionedDensity: Float64Array;
+  candidateIds: Int32Array;
+  candidateWeights: Float64Array;
+  active: Int32Array;
+  available: Int32Array;
+  readonly diffusionFlux: Cm12GammaDiffusionFlux;
+  readonly averageBefore: { value: number; distance: number };
+  readonly averageAfter: { value: number; distance: number };
+  outputFields?: SparseAtlasSurfaceFields;
+  result?: SparseAtlasSurfaceConditioningResult;
+  topologyKey?: object;
+  topology?: SurfaceTopology;
+  readonly edgePool: ScalarEdge[];
+  readonly neighborPool: Neighbor[];
+}
+
+export function createSparseAtlasSurfaceConditioningWorkspace():
+SparseAtlasSurfaceConditioningWorkspace {
+  return {
+    density: new Float64Array(0), gamma: new Float64Array(0),
+    forwardDensity0: new Float64Array(0), forwardDensity1: new Float64Array(0),
+    forwardGamma0: new Float64Array(0), forwardGamma1: new Float64Array(0),
+    reverseDensity0: new Float64Array(0), reverseDensity1: new Float64Array(0),
+    reverseGamma0: new Float64Array(0), reverseGamma1: new Float64Array(0),
+    deltas: new Float64Array(0), conditionedDensity: new Float64Array(0),
+    candidateIds: new Int32Array(8), candidateWeights: new Float64Array(8),
+    active: new Int32Array(8), available: new Int32Array(8),
+    diffusionFlux: { rho: 0, gamma: 0 },
+    averageBefore: { value: 0, distance: 1 },
+    averageAfter: { value: 0, distance: 1 },
+    edgePool: [], neighborPool: [],
+  };
+}
+
+function ensureSurfaceVectorLength(
+  workspace: SparseAtlasSurfaceConditioningWorkspace,
+  length: number,
+): void {
+  if (workspace.density.length === length) return;
+  workspace.density = new Float64Array(length);
+  workspace.gamma = new Float64Array(length);
+  workspace.forwardDensity0 = new Float64Array(length);
+  workspace.forwardDensity1 = new Float64Array(length);
+  workspace.forwardGamma0 = new Float64Array(length);
+  workspace.forwardGamma1 = new Float64Array(length);
+  workspace.reverseDensity0 = new Float64Array(length);
+  workspace.reverseDensity1 = new Float64Array(length);
+  workspace.reverseGamma0 = new Float64Array(length);
+  workspace.reverseGamma1 = new Float64Array(length);
+  workspace.deltas = new Float64Array(length);
+  workspace.conditionedDensity = new Float64Array(length);
+}
+
+function ensureCandidateCapacity(
+  workspace: SparseAtlasSurfaceConditioningWorkspace,
+  count: number,
+): void {
+  if (workspace.candidateIds.length >= count) return;
+  let capacity = workspace.candidateIds.length;
+  while (capacity < count) capacity *= 2;
+  workspace.candidateIds = new Int32Array(capacity);
+  workspace.candidateWeights = new Float64Array(capacity);
+  workspace.active = new Int32Array(capacity);
+  workspace.available = new Int32Array(capacity);
+}
+
 interface ScalarEdge {
-  readonly axis: SparseAtlasAxis;
-  readonly negativeCellId: number;
-  readonly positiveCellId: number;
-  readonly area: number;
-  readonly distance: number;
+  axis: SparseAtlasAxis;
+  negativeCellId: number;
+  positiveCellId: number;
+  area: number;
+  distance: number;
 }
 
 interface Neighbor {
-  readonly cellId: number;
-  readonly area: number;
-  readonly distance: number;
+  cellId: number;
+  area: number;
+  distance: number;
 }
 
 interface DirectionalAdjacency {
   readonly negative: Neighbor[][][];
   readonly positive: Neighbor[][][];
   readonly all: Neighbor[][];
-}
-
-function compensatedSum(values: Iterable<number>): number {
-  let sum = 0, correction = 0;
-  for (const value of values) {
-    const adjusted = value - correction;
-    const next = sum + adjusted;
-    correction = next - sum - adjusted;
-    sum = next;
-  }
-  return sum;
+  readonly negativeCount: number[][];
+  readonly positiveCount: number[][];
+  readonly allCount: number[];
 }
 
 function integratedScalar(
@@ -130,6 +203,26 @@ function buildD4SymmetryOrbits(
   return orbits;
 }
 
+export function sparseAtlasHasHorizontalD4Topology(
+  grid: SparseAtlasCompositeGrid,
+): boolean {
+  return buildD4SymmetryOrbits(grid) !== undefined;
+}
+
+export function sparseAtlasScalarsHaveHorizontalD4Symmetry(
+  grid: SparseAtlasCompositeGrid,
+  density: ArrayLike<number>,
+  gamma: ArrayLike<number>,
+): boolean {
+  if (density.length !== grid.cells.length || gamma.length !== grid.cells.length) {
+    return false;
+  }
+  return activeD4SymmetryOrbits(buildD4SymmetryOrbits(grid), {
+    density: density as Float64Array,
+    gamma: gamma as Float64Array,
+  }) !== undefined;
+}
+
 function activeD4SymmetryOrbits(
   candidate: readonly (readonly number[])[] | undefined,
   fields: SparseAtlasSurfaceFields,
@@ -150,8 +243,20 @@ function preserveD4Symmetry(
 ): void {
   if (!orbits) return;
   for (const orbit of orbits) {
-    const meanDensity = compensatedSum(orbit.map((id) => density[id])) / orbit.length;
-    const meanGamma = compensatedSum(orbit.map((id) => gamma[id])) / orbit.length;
+    let densitySum = 0, densityCorrection = 0;
+    let gammaSum = 0, gammaCorrection = 0;
+    for (const id of orbit) {
+      const densityAdjusted = density[id] - densityCorrection;
+      const densityNext = densitySum + densityAdjusted;
+      densityCorrection = densityNext - densitySum - densityAdjusted;
+      densitySum = densityNext;
+      const gammaAdjusted = gamma[id] - gammaCorrection;
+      const gammaNext = gammaSum + gammaAdjusted;
+      gammaCorrection = gammaNext - gammaSum - gammaAdjusted;
+      gammaSum = gammaNext;
+    }
+    const meanDensity = densitySum / orbit.length;
+    const meanGamma = gammaSum / orbit.length;
     for (const id of orbit) {
       density[id] = meanDensity;
       gamma[id] = meanGamma;
@@ -160,30 +265,88 @@ function preserveD4Symmetry(
 }
 
 /** Expand aggregate mixed-resolution ports into physical scalar subfaces. */
-function scalarEdges(grid: SparseAtlasCompositeGrid): ScalarEdge[] {
-  const edges: ScalarEdge[] = [];
+function scalarEdges(
+  grid: SparseAtlasCompositeGrid,
+  edges: ScalarEdge[] = [],
+  pool: ScalarEdge[] = [],
+): ScalarEdge[] {
+  let edgeCount = 0;
   for (const row of grid.gradientRows) {
-    const negative = row.terms.filter((term) => term.coefficient < 0);
-    const positive = row.terms.filter((term) => term.coefficient > 0);
+    let negativeCount = 0, positiveCount = 0;
+    for (let index = 0; index < row.terms.length; index += 1) {
+      if (row.terms[index].coefficient < 0) negativeCount += 1;
+      else if (row.terms[index].coefficient > 0) positiveCount += 1;
+    }
     // A one-sided sparse-air row is a pressure boundary, not a resident scalar
     // diffusion/sharpening edge. Receiver activation owns material entering it.
-    if (negative.length === 0 || positive.length === 0) continue;
-    const subfaceArea = row.area / (negative.length * positive.length);
-    for (const left of negative) for (const right of positive) {
-      edges.push({
-        axis: row.axis,
-        negativeCellId: left.cellId,
-        positiveCellId: right.cellId,
-        area: subfaceArea,
-        distance: row.distance,
-      });
+    if (negativeCount === 0 || positiveCount === 0) continue;
+    const subfaceArea = row.area / (negativeCount * positiveCount);
+    for (let leftIndex = 0; leftIndex < row.terms.length; leftIndex += 1) {
+      const left = row.terms[leftIndex];
+      if (left.coefficient >= 0) continue;
+      for (let rightIndex = 0; rightIndex < row.terms.length; rightIndex += 1) {
+        const right = row.terms[rightIndex];
+        if (right.coefficient <= 0) continue;
+        const edgeIndex = edgeCount++;
+        let edge = pool[edgeIndex];
+        if (!edge) edge = pool[edgeIndex] = {
+          axis: row.axis, negativeCellId: left.cellId,
+          positiveCellId: right.cellId, area: subfaceArea, distance: row.distance,
+        };
+        edge.axis = row.axis;
+        edge.negativeCellId = left.cellId;
+        edge.positiveCellId = right.cellId;
+        edge.area = subfaceArea;
+        edge.distance = row.distance;
+        edges[edgeIndex] = edge;
+      }
     }
   }
+  edges.length = edgeCount;
   return edges;
 }
 
 function width(grid: SparseAtlasCompositeGrid, cellId: number): number {
   return grid.cells[cellId].widthsFine[0];
+}
+
+function diffuseGammaAxis(
+  grid: SparseAtlasCompositeGrid,
+  edges: readonly ScalarEdge[],
+  scale: number,
+  sourceDensity: Float64Array,
+  sourceGamma: Float64Array,
+  sweptDensity: Float64Array,
+  sweptGamma: Float64Array,
+  axis: SparseAtlasAxis,
+  flux: Cm12GammaDiffusionFlux,
+): number {
+  sweptDensity.set(sourceDensity);
+  sweptGamma.set(sourceGamma);
+  let pairUpdates = 0;
+  for (const edge of edges) {
+    if (edge.axis !== axis) continue;
+    const negative = grid.cells[edge.negativeCellId];
+    const positive = grid.cells[edge.positiveCellId];
+    const conductedVolume = scale * Math.min(
+      edge.area * width(grid, negative.id),
+      edge.area * width(grid, positive.id),
+    );
+    const intoNegative = cm12GammaDiffusionFluxInto(
+      sourceDensity[negative.id], sourceGamma[negative.id],
+      sourceDensity[positive.id], sourceGamma[positive.id],
+      conductedVolume / negative.volume,
+      flux,
+    );
+    const integratedRho = negative.volume * intoNegative.rho;
+    const integratedGamma = negative.volume * intoNegative.gamma;
+    sweptDensity[negative.id] += intoNegative.rho;
+    sweptGamma[negative.id] += intoNegative.gamma;
+    sweptDensity[positive.id] -= integratedRho / positive.volume;
+    sweptGamma[positive.id] -= integratedGamma / positive.volume;
+    pairUpdates += 1;
+  }
+  return pairUpdates;
 }
 
 function diffuseGamma(
@@ -192,85 +355,101 @@ function diffuseGamma(
   edges: readonly ScalarEdge[],
   iterations: number,
   scale: number,
-): { fields: SparseAtlasSurfaceFields; pairUpdates: number } {
-  let density = fields.density.slice();
-  let gamma = fields.gamma.slice();
+  workspace: SparseAtlasSurfaceConditioningWorkspace,
+): number {
+  const count = grid.cells.length;
+  const density = workspace.density;
+  const gamma = workspace.gamma;
+  density.set(fields.density);
+  gamma.set(fields.gamma);
   let pairUpdates = 0;
-  const sweep = (
-    sourceDensity: Float64Array,
-    sourceGamma: Float64Array,
-    axes: readonly SparseAtlasAxis[],
-  ): SparseAtlasSurfaceFields => {
-    let sweptDensity = sourceDensity, sweptGamma = sourceGamma;
-    for (const axis of axes) {
-      const oldDensity = sweptDensity, oldGamma = sweptGamma;
-      sweptDensity = oldDensity.slice();
-      sweptGamma = oldGamma.slice();
-      for (const edge of edges) {
-        if (edge.axis !== axis) continue;
-        const negative = grid.cells[edge.negativeCellId];
-        const positive = grid.cells[edge.positiveCellId];
-        const conductedVolume = scale * Math.min(
-          edge.area * width(grid, negative.id),
-          edge.area * width(grid, positive.id),
-        );
-        const intoNegative = cm12GammaDiffusionFluxInto(
-          oldDensity[negative.id], oldGamma[negative.id],
-          oldDensity[positive.id], oldGamma[positive.id],
-          conductedVolume / negative.volume,
-        );
-        const integratedRho = negative.volume * intoNegative.rho;
-        const integratedGamma = negative.volume * intoNegative.gamma;
-        sweptDensity[negative.id] += intoNegative.rho;
-        sweptGamma[negative.id] += intoNegative.gamma;
-        sweptDensity[positive.id] -= integratedRho / positive.volume;
-        sweptGamma[positive.id] -= integratedGamma / positive.volume;
-        pairUpdates += 1;
-      }
-    }
-    return { density: sweptDensity, gamma: sweptGamma };
-  };
   for (let iteration = 0; iteration < iterations; iteration += 1) {
     // The paper declares Gauss-Seidel between dimensional sweeps. Averaging
     // the two mirrored sweep orders retains that operator while avoiding an
     // arbitrary x-before-z bias in symmetric sparse scenes.
-    const forward = sweep(density, gamma, [0, 1, 2]);
-    const reverse = sweep(density, gamma, [2, 1, 0]);
-    density = Float64Array.from(forward.density,
-      (value, id) => 0.5 * (value + reverse.density[id]));
-    gamma = Float64Array.from(forward.gamma,
-      (value, id) => 0.5 * (value + reverse.gamma[id]));
+    pairUpdates += diffuseGammaAxis(grid, edges, scale, density, gamma,
+      workspace.forwardDensity0, workspace.forwardGamma0, 0, workspace.diffusionFlux);
+    pairUpdates += diffuseGammaAxis(grid, edges, scale,
+      workspace.forwardDensity0, workspace.forwardGamma0,
+      workspace.forwardDensity1, workspace.forwardGamma1, 1, workspace.diffusionFlux);
+    pairUpdates += diffuseGammaAxis(grid, edges, scale,
+      workspace.forwardDensity1, workspace.forwardGamma1,
+      workspace.forwardDensity0, workspace.forwardGamma0, 2, workspace.diffusionFlux);
+    pairUpdates += diffuseGammaAxis(grid, edges, scale, density, gamma,
+      workspace.reverseDensity0, workspace.reverseGamma0, 2, workspace.diffusionFlux);
+    pairUpdates += diffuseGammaAxis(grid, edges, scale,
+      workspace.reverseDensity0, workspace.reverseGamma0,
+      workspace.reverseDensity1, workspace.reverseGamma1, 1, workspace.diffusionFlux);
+    pairUpdates += diffuseGammaAxis(grid, edges, scale,
+      workspace.reverseDensity1, workspace.reverseGamma1,
+      workspace.reverseDensity0, workspace.reverseGamma0, 0, workspace.diffusionFlux);
+    for (let id = 0; id < count; id += 1) {
+      density[id] = 0.5 * (workspace.forwardDensity0[id] + workspace.reverseDensity0[id]);
+      gamma[id] = 0.5 * (workspace.forwardGamma0[id] + workspace.reverseGamma0[id]);
+    }
   }
-  return { fields: { density, gamma }, pairUpdates };
+  return pairUpdates;
 }
 
 function adjacency(
   grid: SparseAtlasCompositeGrid,
   edges: readonly ScalarEdge[],
+  result?: DirectionalAdjacency,
+  pool: Neighbor[] = [],
 ): DirectionalAdjacency {
-  const axisLists = (): Neighbor[][][] => [0, 1, 2].map(() =>
-    Array.from({ length: grid.cells.length }, () => []));
-  const negative = axisLists(), positive = axisLists();
-  const all: Neighbor[][] = Array.from({ length: grid.cells.length }, () => []);
+  const axisLists = (): Neighbor[][][] => [[], [], []];
+  const negative = result?.negative ?? axisLists();
+  const positive = result?.positive ?? axisLists();
+  const all: Neighbor[][] = result?.all ?? [];
+  const negativeCount = result?.negativeCount ?? [[], [], []];
+  const positiveCount = result?.positiveCount ?? [[], [], []];
+  const allCount = result?.allCount ?? [];
+  for (let axis = 0; axis < 3; axis += 1) {
+    while (negative[axis].length < grid.cells.length) negative[axis].push([]);
+    while (positive[axis].length < grid.cells.length) positive[axis].push([]);
+    for (let id = 0; id < grid.cells.length; id += 1) {
+      negativeCount[axis][id] = 0;
+      positiveCount[axis][id] = 0;
+    }
+  }
+  while (all.length < grid.cells.length) all.push([]);
+  for (let id = 0; id < grid.cells.length; id += 1) allCount[id] = 0;
+  let neighborIndex = 0;
   for (const edge of edges) {
-    const towardPositive = {
+    let towardPositive = pool[neighborIndex++];
+    if (!towardPositive) towardPositive = pool[neighborIndex - 1] = {
       cellId: edge.positiveCellId, area: edge.area, distance: edge.distance,
     };
-    const towardNegative = {
+    towardPositive.cellId = edge.positiveCellId;
+    towardPositive.area = edge.area;
+    towardPositive.distance = edge.distance;
+    let towardNegative = pool[neighborIndex++];
+    if (!towardNegative) towardNegative = pool[neighborIndex - 1] = {
       cellId: edge.negativeCellId, area: edge.area, distance: edge.distance,
     };
-    positive[edge.axis][edge.negativeCellId].push(towardPositive);
-    negative[edge.axis][edge.positiveCellId].push(towardNegative);
-    all[edge.negativeCellId].push(towardPositive);
-    all[edge.positiveCellId].push(towardNegative);
+    towardNegative.cellId = edge.negativeCellId;
+    towardNegative.area = edge.area;
+    towardNegative.distance = edge.distance;
+    let count = positiveCount[edge.axis][edge.negativeCellId];
+    positive[edge.axis][edge.negativeCellId][count] = towardPositive;
+    positiveCount[edge.axis][edge.negativeCellId] = count + 1;
+    count = negativeCount[edge.axis][edge.positiveCellId];
+    negative[edge.axis][edge.positiveCellId][count] = towardNegative;
+    negativeCount[edge.axis][edge.positiveCellId] = count + 1;
+    count = allCount[edge.negativeCellId];
+    all[edge.negativeCellId][count] = towardPositive;
+    allCount[edge.negativeCellId] = count + 1;
+    count = allCount[edge.positiveCellId];
+    all[edge.positiveCellId][count] = towardNegative;
+    allCount[edge.positiveCellId] = count + 1;
   }
-  return { negative, positive, all };
+  return { negative, positive, all, negativeCount, positiveCount, allCount };
 }
 
 interface SurfaceTopology {
-  readonly edges: readonly ScalarEdge[];
-  readonly graph: DirectionalAdjacency;
-  readonly d4Orbits: readonly (readonly number[])[] | undefined;
+  edges: ScalarEdge[];
+  graph: DirectionalAdjacency;
+  d4Orbits: readonly (readonly number[])[] | undefined;
 }
 
 // `rebindCompositeGrid` deliberately reuses the immutable gradient-row array
@@ -280,8 +459,24 @@ interface SurfaceTopology {
 const surfaceTopologyCache = new WeakMap<object, SurfaceTopology>();
 const surfaceD4Authority = new WeakMap<object, boolean>();
 
-function surfaceTopology(grid: SparseAtlasCompositeGrid): SurfaceTopology {
-  const key = grid.gradientRows as object;
+function surfaceTopology(
+  grid: SparseAtlasCompositeGrid,
+  workspace?: SparseAtlasSurfaceConditioningWorkspace,
+): SurfaceTopology {
+  const key = (grid.topologyKey ?? grid.gradientRows) as object;
+  if (workspace?.topologyKey === key && workspace.topology) return workspace.topology;
+  if (workspace) {
+    const topology = workspace.topology ?? (workspace.topology = {
+      edges: [],
+      graph: adjacency(grid, [], undefined, workspace.neighborPool),
+      d4Orbits: undefined,
+    });
+    scalarEdges(grid, topology.edges, workspace.edgePool);
+    topology.graph = adjacency(grid, topology.edges, topology.graph, workspace.neighborPool);
+    topology.d4Orbits = buildD4SymmetryOrbits(grid);
+    workspace.topologyKey = key;
+    return topology;
+  }
   const cached = surfaceTopologyCache.get(key);
   if (cached) return cached;
   const edges = scalarEdges(grid);
@@ -297,19 +492,25 @@ function surfaceTopology(grid: SparseAtlasCompositeGrid): SurfaceTopology {
 function areaAverage(
   own: number,
   neighbors: readonly Neighbor[],
+  neighborCount: number,
   values: ArrayLike<number>,
+  result: { value: number; distance: number } = { value: own, distance: 1 },
 ): { value: number; distance: number } {
-  if (neighbors.length === 0) return { value: own, distance: 1 };
+  if (neighborCount === 0) {
+    result.value = own;
+    result.distance = 1;
+    return result;
+  }
   let totalArea = 0, weightedValue = 0, weightedDistance = 0;
-  for (const neighbor of neighbors) {
+  for (let index = 0; index < neighborCount; index += 1) {
+    const neighbor = neighbors[index];
     totalArea += neighbor.area;
     weightedValue += neighbor.area * values[neighbor.cellId];
     weightedDistance += neighbor.area * neighbor.distance;
   }
-  return {
-    value: weightedValue / totalArea,
-    distance: weightedDistance / totalArea,
-  };
+  result.value = weightedValue / totalArea;
+  result.distance = weightedDistance / totalArea;
+  return result;
 }
 
 function sharpeningDeltas(
@@ -317,11 +518,14 @@ function sharpeningDeltas(
   density: ArrayLike<number>,
   graph: DirectionalAdjacency,
   courant: number,
+  result: Float64Array = new Float64Array(grid.cells.length),
+  workspace?: SparseAtlasSurfaceConditioningWorkspace,
 ): Float64Array {
-  return Float64Array.from(grid.cells, (cell) => {
+  for (const cell of grid.cells) {
     const rho = density[cell.id];
     let maximumDifference = 0;
-    for (const neighbor of graph.all[cell.id]) {
+    for (let index = 0; index < graph.allCount[cell.id]; index += 1) {
+      const neighbor = graph.all[cell.id][index];
       maximumDifference = Math.max(
         maximumDifference, Math.abs(rho - density[neighbor.cellId]),
       );
@@ -329,9 +533,16 @@ function sharpeningDeltas(
     const weight = cm12SharpeningWeight(rho, maximumDifference);
     let plusSquared = 0, minusSquared = 0;
     const cellWidth = width(grid, cell.id);
-    for (const axis of [0, 1, 2] as const) {
-      const before = areaAverage(rho, graph.negative[axis][cell.id], density);
-      const after = areaAverage(rho, graph.positive[axis][cell.id], density);
+    for (let axisIndex = 0; axisIndex < 3; axisIndex += 1) {
+      const axis = axisIndex as SparseAtlasAxis;
+      const before = areaAverage(
+        rho, graph.negative[axis][cell.id], graph.negativeCount[axis][cell.id],
+        density, workspace?.averageBefore,
+      );
+      const after = areaAverage(
+        rho, graph.positive[axis][cell.id], graph.positiveCount[axis][cell.id],
+        density, workspace?.averageAfter,
+      );
       const backward = -(rho - before.value) * courant * cellWidth / before.distance;
       const forward = -(after.value - rho) * courant * cellWidth / after.distance;
       plusSquared += Math.max(Math.max(backward, 0) ** 2, Math.min(forward, 0) ** 2);
@@ -340,8 +551,9 @@ function sharpeningDeltas(
     let delta = weight * Math.sqrt(weight >= 0 ? plusSquared : minusSquared);
     if (rho + delta < 0 || rho < 1e-5) delta = -rho;
     else if (rho > 0.5) delta = 0;
-    return Math.min(0, delta);
-  });
+    result[cell.id] = Math.min(0, delta);
+  }
+  return result;
 }
 
 function sharpeningDestinations(
@@ -350,34 +562,63 @@ function sharpeningDestinations(
   density: ArrayLike<number>,
   graph: DirectionalAdjacency,
   maximumDistanceCells: number,
-): ReadonlyMap<number, number> {
+  workspace: SparseAtlasSurfaceConditioningWorkspace,
+): number {
   const maximumDistance = maximumDistanceCells * width(grid, sourceCellId);
-  const candidates = graph.all[sourceCellId].map((neighbor) => ({
-    ...neighbor,
-    conductance: neighbor.area * Math.max(0,
-      (density[neighbor.cellId] - density[sourceCellId]) / neighbor.distance),
-  })).filter((candidate) => candidate.conductance > 0
-    && candidate.distance <= maximumDistance);
-  const total = compensatedSum(candidates.map((candidate) => candidate.conductance));
-  if (total <= 1e-30) return new Map([[sourceCellId, 1]]);
+  const neighbors = graph.all[sourceCellId];
+  const neighborCount = graph.allCount[sourceCellId];
+  ensureCandidateCapacity(workspace, Math.max(1, neighborCount));
+  let total = 0, correction = 0;
+  for (let neighborIndex = 0; neighborIndex < neighborCount; neighborIndex += 1) {
+    const neighbor = neighbors[neighborIndex];
+    const conductance = neighbor.area * Math.max(0,
+      (density[neighbor.cellId] - density[sourceCellId]) / neighbor.distance);
+    if (!(conductance > 0) || neighbor.distance > maximumDistance) continue;
+    const adjusted = conductance - correction;
+    const next = total + adjusted;
+    correction = next - total - adjusted;
+    total = next;
+  }
+  if (total <= 1e-30) {
+    workspace.candidateIds[0] = sourceCellId;
+    workspace.candidateWeights[0] = 1;
+    return 1;
+  }
   // A simultaneous split across the local uphill gradient is the discrete
   // counterpart of trilinear TraceAlongField scatter. Repeating the stage
   // advances returned mass farther without selecting one arbitrary axis on
   // plateaus, which would break D4 symmetry.
-  return new Map(candidates.map((candidate) => [
-    candidate.cellId, candidate.conductance / total,
-  ]));
+  let count = 0;
+  for (let neighborIndex = 0; neighborIndex < neighborCount; neighborIndex += 1) {
+    const neighbor = neighbors[neighborIndex];
+    const conductance = neighbor.area * Math.max(0,
+      (density[neighbor.cellId] - density[sourceCellId]) / neighbor.distance);
+    if (!(conductance > 0) || neighbor.distance > maximumDistance) continue;
+    let index = 0;
+    while (index < count && workspace.candidateIds[index] !== neighbor.cellId) index += 1;
+    if (index === count) {
+      workspace.candidateIds[count] = neighbor.cellId;
+      count += 1;
+    }
+    // Match `new Map(pairs)`: duplicate destinations retain first insertion
+    // order but the last value wins.
+    workspace.candidateWeights[index] = conductance / total;
+  }
+  return count;
 }
 
 export function conditionSparseAtlasSurface(
   grid: SparseAtlasCompositeGrid,
   fields: SparseAtlasSurfaceFields,
   options: SparseAtlasSurfaceConditioningOptions = {},
+  workspace: SparseAtlasSurfaceConditioningWorkspace =
+    createSparseAtlasSurfaceConditioningWorkspace(),
 ): SparseAtlasSurfaceConditioningResult {
   if (fields.density.length !== grid.cells.length
     || fields.gamma.length !== grid.cells.length) {
     throw new RangeError("surface fields must contain one value per resident cell");
   }
+  ensureSurfaceVectorLength(workspace, grid.cells.length);
   const iterations = options.gammaDiffusionIterations ?? 1;
   const timeStep_s = options.timeStep_s ?? 1 / 30;
   const gammaScale = options.gammaDiffusionScale
@@ -393,43 +634,64 @@ export function conditionSparseAtlasSurface(
   }
   const massBefore = integratedScalar(grid, fields.density);
   const gammaBefore = integratedScalar(grid, fields.gamma);
-  const topologyKey = grid.gradientRows as object;
-  const topology = surfaceTopology(grid);
-  let preservesD4 = surfaceD4Authority.get(topologyKey);
+  const topologyKey = (grid.topologyKey ?? grid.gradientRows) as object;
+  const topology = surfaceTopology(grid, workspace);
+  let preservesD4 = options.preserveHorizontalD4
+    ? topology.d4Orbits !== undefined
+    : surfaceD4Authority.get(topologyKey);
   if (preservesD4 === undefined) {
     preservesD4 = activeD4SymmetryOrbits(topology.d4Orbits, fields) !== undefined;
     surfaceD4Authority.set(topologyKey, preservesD4);
   }
   const symmetryOrbits = preservesD4 ? topology.d4Orbits : undefined;
   const edges = topology.edges;
-  const diffusion = diffuseGamma(grid, fields, edges, iterations, gammaScale);
-  const frozenDensity = diffusion.fields.density;
+  const gammaPairUpdates = diffuseGamma(
+    grid, fields, edges, iterations, gammaScale, workspace,
+  );
+  const frozenDensity = workspace.density;
   const graph = topology.graph;
-  const deltas = sharpeningDeltas(grid, frozenDensity, graph, courant);
-  const density = Float64Array.from(frozenDensity,
-    (rho, cellId) => rho + deltas[cellId]);
+  const deltas = workspace.deltas;
+  sharpeningDeltas(grid, frozenDensity, graph, courant, deltas, workspace);
+  const density = workspace.conditionedDensity;
+  for (let cellId = 0; cellId < density.length; cellId += 1) {
+    density[cellId] = frozenDensity[cellId] + deltas[cellId];
+  }
   let removedIntegratedMass = 0, returnedIntegratedMass = 0;
   let fallbackIntegratedMass = 0;
   for (const source of grid.cells) {
     if (deltas[source.id] >= 0) continue;
     const removedMass = -deltas[source.id] * source.volume;
-    const destinations = sharpeningDestinations(
-      grid, source.id, frozenDensity, graph, maximumDistanceCells,
+    const destinationCount = sharpeningDestinations(
+      grid, source.id, frozenDensity, graph, maximumDistanceCells, workspace,
     );
     let remainingMass = removedMass;
-    let active = [...destinations.entries()];
+    let activeCount = destinationCount;
+    for (let index = 0; index < activeCount; index += 1) workspace.active[index] = index;
     // Capacity-aware redistribution is the discrete CM12 limiter at the
     // scatter end. Revisit saturated branches so one full receiver cannot
     // strand mass while another uphill branch still has room.
-    for (let pass = 0; pass < active.length && remainingMass > 1e-30; pass += 1) {
-      const available = active.filter(([destinationId]) => {
+    for (let pass = 0; pass < activeCount && remainingMass > 1e-30; pass += 1) {
+      let availableCount = 0;
+      let totalWeight = 0, correction = 0;
+      for (let activeIndex = 0; activeIndex < activeCount; activeIndex += 1) {
+        const candidate = workspace.active[activeIndex];
+        const destinationId = workspace.candidateIds[candidate];
         const destination = grid.cells[destinationId];
-        return (1 - density[destinationId]) * destination.volume > 1e-30;
-      });
-      const totalWeight = compensatedSum(available.map(([, weight]) => weight));
+        if ((1 - density[destinationId]) * destination.volume <= 1e-30) continue;
+        workspace.available[availableCount] = candidate;
+        availableCount += 1;
+        const weight = workspace.candidateWeights[candidate];
+        const adjusted = weight - correction;
+        const next = totalWeight + adjusted;
+        correction = next - totalWeight - adjusted;
+        totalWeight = next;
+      }
       if (totalWeight <= 1e-30) break;
       let acceptedThisPass = 0;
-      for (const [destinationId, weight] of available) {
+      for (let index = 0; index < availableCount; index += 1) {
+        const candidate = workspace.available[index];
+        const destinationId = workspace.candidateIds[candidate];
+        const weight = workspace.candidateWeights[candidate];
         const destination = grid.cells[destinationId];
         const capacity = Math.max(0,
           (1 - density[destinationId]) * destination.volume);
@@ -439,7 +701,10 @@ export function conditionSparseAtlasSurface(
       }
       remainingMass -= acceptedThisPass;
       if (acceptedThisPass <= 1e-30) break;
-      active = available;
+      activeCount = availableCount;
+      for (let index = 0; index < availableCount; index += 1) {
+        workspace.active[index] = workspace.available[index];
+      }
     }
     if (remainingMass > 0) {
       // Deletion created this exact capacity at the source. Returning an
@@ -450,17 +715,44 @@ export function conditionSparseAtlasSurface(
     removedIntegratedMass += removedMass;
     returnedIntegratedMass += removedMass;
   }
-  preserveD4Symmetry(symmetryOrbits, density, diffusion.fields.gamma);
-  return {
-    fields: { density, gamma: diffusion.fields.gamma },
-    edgeCount: edges.length,
-    gammaPairUpdates: diffusion.pairUpdates,
-    removedIntegratedMass,
-    returnedIntegratedMass,
-    fallbackIntegratedMass,
-    massAbsoluteError: Math.abs(integratedScalar(grid, density) - massBefore),
-    gammaIntegralAbsoluteError: Math.abs(
-      integratedScalar(grid, diffusion.fields.gamma) - gammaBefore,
-    ),
-  };
+  const gamma = workspace.gamma;
+  preserveD4Symmetry(symmetryOrbits, density, gamma);
+  const massAbsoluteError = Math.abs(integratedScalar(grid, density) - massBefore);
+  const gammaIntegralAbsoluteError = Math.abs(
+    integratedScalar(grid, gamma) - gammaBefore,
+  );
+  let outputFields = workspace.outputFields;
+  if (!outputFields) workspace.outputFields = outputFields = { density, gamma };
+  else {
+    (outputFields as { density: Float64Array }).density = density;
+    (outputFields as { gamma: Float64Array }).gamma = gamma;
+  }
+  let result = workspace.result;
+  if (!result) {
+    workspace.result = result = {
+      fields: outputFields, edgeCount: edges.length, gammaPairUpdates,
+      removedIntegratedMass, returnedIntegratedMass, fallbackIntegratedMass,
+      massAbsoluteError, gammaIntegralAbsoluteError,
+    };
+  } else {
+    const mutable = result as {
+      fields: SparseAtlasSurfaceFields;
+      edgeCount: number;
+      gammaPairUpdates: number;
+      removedIntegratedMass: number;
+      returnedIntegratedMass: number;
+      fallbackIntegratedMass: number;
+      massAbsoluteError: number;
+      gammaIntegralAbsoluteError: number;
+    };
+    mutable.fields = outputFields;
+    mutable.edgeCount = edges.length;
+    mutable.gammaPairUpdates = gammaPairUpdates;
+    mutable.removedIntegratedMass = removedIntegratedMass;
+    mutable.returnedIntegratedMass = returnedIntegratedMass;
+    mutable.fallbackIntegratedMass = fallbackIntegratedMass;
+    mutable.massAbsoluteError = massAbsoluteError;
+    mutable.gammaIntegralAbsoluteError = gammaIntegralAbsoluteError;
+  }
+  return result;
 }
