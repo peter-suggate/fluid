@@ -26,6 +26,20 @@ test("resident activity measurement is GPU-owned and disjoint from accepted fiel
     "measurement must not mutate accepted topology");
 });
 
+test("resident sharpening converts the CM12 pseudo-time to finest-cell units", () => {
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn sharpeningDelta");
+  const end = webgpuSparseCM12ResidentWGSL.indexOf(
+    "fn scatterSharpeningMass", begin,
+  );
+  assert.ok(begin >= 0 && end > begin, "sharpening kernel must be inspectable");
+  const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.match(kernel, /pseudoTimeFineCells=3\.0\*p\.frame\.x\/p\.frame\.y/,
+    "3 dt must be divided by finest-cell metres before using grid-coordinate distances");
+  assert.match(kernel, /pseudoTimeFineCells\/beforeDistance/);
+  assert.doesNotMatch(kernel, /courant\*width\/beforeDistance/,
+    "local cell width must not cancel the physical density gradient");
+});
+
 test("frame scheduling never waits for or consumes activity readback", () => {
   const source = readFileSync(new URL(
     "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts",

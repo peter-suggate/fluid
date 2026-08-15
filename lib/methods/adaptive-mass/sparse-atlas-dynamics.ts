@@ -77,6 +77,7 @@ interface SparseAtlasDynamicsWorkspace {
   readonly surfaceOptions: {
     gammaDiffusionIterations: number;
     timeStep_s: number;
+    finestCellSize_m: number;
     preserveHorizontalD4: boolean;
   };
   readonly projectionOptions: {
@@ -782,6 +783,7 @@ export function initializeSparseAtlasDynamics(
       surfaceOptions: {
         gammaDiffusionIterations: 1,
         timeStep_s: 0,
+        finestCellSize_m: 1,
         preserveHorizontalD4: false,
       },
       projectionOptions: {},
@@ -1324,6 +1326,7 @@ export function stepSparseAtlasDynamics(
   // CM12 Secs. 3.4-3.5 conditioning is part of the method, not presentation
   // polish. Run it on resident composite rows with the paper's 3dt dose.
   workspace.surfaceOptions.timeStep_s = dt_s;
+  workspace.surfaceOptions.finestCellSize_m = options.finestCellSize_m ?? 1;
   workspace.surfaceOptions.preserveHorizontalD4 = source.preservesHorizontalD4;
   const conditioned = conditionSparseAtlasSurface(
     workGrid, fields, workspace.surfaceOptions, source.workspace.surfaceConditioning,

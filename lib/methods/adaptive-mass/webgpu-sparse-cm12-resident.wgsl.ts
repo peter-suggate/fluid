@@ -437,8 +437,15 @@ fn sharpeningStats(cell:u32)->SharpeningStats{
 }
 
 fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
-  let rho=state[destinationDensity()+cell];let width=cellMinimumWidth(cell);
-  let courant=3.0*p.frame.x;var plusSquared=0.0;var minusSquared=0.0;
+  let rho=state[destinationDensity()+cell];
+  // CM12 Eqs. 6-15 first integrate a unit-speed flux over a cell and then
+  // divide the Godunov mass increment by cell volume. The resulting density
+  // update is 3 dt |grad rho|, so distances stored in finest-cell units must
+  // be converted back to metres. Multiplying by the local cell width here
+  // made the old expression dimensionless and weakened sharpening by 1/h:
+  // 10x on the all-coarse symmetric-expansion control and 20x when all fine.
+  let pseudoTimeFineCells=3.0*p.frame.x/p.frame.y;
+  var plusSquared=0.0;var minusSquared=0.0;
   for(var axis=0u;axis<3u;axis+=1u){
     var before=rho;var beforeDistance=1.0;
     if(stats.negativeArea[axis]>0.0){
@@ -450,8 +457,8 @@ fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
       after=stats.positiveDensity[axis]/stats.positiveArea[axis];
       afterDistance=stats.positiveDistance[axis]/stats.positiveArea[axis];
     }
-    let backward=-(rho-before)*courant*width/beforeDistance;
-    let forward=-(after-rho)*courant*width/afterDistance;
+    let backward=-(rho-before)*pseudoTimeFineCells/beforeDistance;
+    let forward=-(after-rho)*pseudoTimeFineCells/afterDistance;
     plusSquared+=max(max(backward,0.0)*max(backward,0.0),
       min(forward,0.0)*min(forward,0.0));
     minusSquared+=max(min(backward,0.0)*min(backward,0.0),

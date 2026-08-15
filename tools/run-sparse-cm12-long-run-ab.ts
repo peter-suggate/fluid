@@ -75,6 +75,12 @@ interface FieldReceipt {
   readonly time_s: number;
   readonly mass_cells: number;
   readonly relativeMassDrift: number;
+  /** Cell-centre measure of the rho >= 0.5 phase, not conserved mass and not
+   * the paper's marching-cubes enclosed-volume integral. */
+  readonly isovalueCellVolume_cells: number;
+  readonly relativeIsovalueCellVolumeDrift: number;
+  /** Conserved density hidden below the rendered rho=0.5 phase threshold. */
+  readonly subIsovalueMassFraction: number;
   readonly densityWeightedKineticEnergyProxy: number;
   readonly maximumLiquidSpeed_m_s: number;
   readonly maximumDensity: number;
@@ -184,6 +190,8 @@ function fieldReceipt(
 ): FieldReceipt {
   const [nx, ny, nz] = dimensions;
   let mass = 0;
+  let isovalueCellVolume = 0;
+  let subIsovalueMass = 0;
   let kinetic = 0;
   let maximumLiquidSpeed = 0;
   let maximumDensity = 0;
@@ -235,6 +243,8 @@ function fieldReceipt(
       const index = cell(x, y, z);
       const rho = density[index];
       const weightedRho = cellVolumeInFineCells * rho;
+      if (rho >= 0.5) isovalueCellVolume += cellVolumeInFineCells;
+      else subIsovalueMass += weightedRho;
       const speed = Math.hypot(
         collocated[3 * index], collocated[3 * index + 1], collocated[3 * index + 2],
       );
@@ -276,6 +286,10 @@ function fieldReceipt(
     time_s: step * dt_s,
     mass_cells: mass,
     relativeMassDrift: (mass - initialMass) / Math.max(1, initialMass),
+    isovalueCellVolume_cells: isovalueCellVolume,
+    relativeIsovalueCellVolumeDrift:
+      (isovalueCellVolume - initialMass) / Math.max(1, initialMass),
+    subIsovalueMassFraction: subIsovalueMass / Math.max(1e-30, mass),
     densityWeightedKineticEnergyProxy: kinetic,
     maximumLiquidSpeed_m_s: maximumLiquidSpeed,
     maximumDensity,
@@ -751,6 +765,12 @@ try {
       uniform,
       sparse,
       finalRatios: {
+        isovalueCellVolume: sparseFinal.isovalueCellVolume_cells
+          / Math.max(1e-30, uniformFinal.isovalueCellVolume_cells),
+        subIsovalueMassFraction: {
+          uniform: uniformFinal.subIsovalueMassFraction,
+          sparse: sparseFinal.subIsovalueMassFraction,
+        },
         densityWeightedKineticEnergy: kineticEnergyRatio,
         maximumLiquidSpeed: liquidSpeedRatio,
         maximumDensity: maximumDensityRatio,

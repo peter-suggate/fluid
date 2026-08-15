@@ -12,6 +12,8 @@ import { initializeSparseAtlasDynamics, stepSparseAtlasDynamics } from
   "../lib/methods/adaptive-mass/sparse-atlas-dynamics";
 import { extrapolateSparseAtlasFaceVelocity, transportSparseAtlasCM12 } from
   "../lib/methods/adaptive-mass/sparse-atlas-cm12-transport";
+import { conditionSparseAtlasSurface } from
+  "../lib/methods/adaptive-mass/sparse-atlas-surface-conditioning";
 
 const brick = (
   key: number,
@@ -44,6 +46,32 @@ test("fixed coarse initialization overrides the usual fine interface floor", () 
   );
   assert.ok(atlas.bricks.length > 0);
   assert.equal(atlas.bricks.every((candidate) => candidate.resolution === 4), true);
+});
+
+test("CM12 sharpening dose scales inversely with physical finest-cell size", () => {
+  const atlas = createSparseAdaptiveMassAtlas([8, 8, 8], [
+    { ...brick(0, [0, 0, 0], 4), density: new Float64Array(64) },
+  ]);
+  const grid = buildSparseAtlasCompositeGrid(atlas);
+  const density = Float64Array.from(grid.cells, (cell) =>
+    cell.centerFine[0] < 2 ? 0.35 : cell.centerFine[0] < 4 ? 0.45 : 0.55);
+  const gamma = new Float64Array(grid.cells.length).fill(1);
+  const run = (finestCellSize_m: number) => conditionSparseAtlasSurface(
+    grid,
+    { density: density.slice(), gamma: gamma.slice() },
+    { gammaDiffusionIterations: 0, timeStep_s: 0.001, finestCellSize_m },
+  );
+  const metreGrid = run(1);
+  const decimetreGrid = run(0.1);
+  const l1Change = (values: ArrayLike<number>) => Array.from(values).reduce(
+    (sum, value, index) => sum + Math.abs(value - density[index]), 0,
+  );
+  const weakDose = l1Change(metreGrid.fields.density);
+  const physicalDose = l1Change(decimetreGrid.fields.density);
+  assert.ok(physicalDose > 9.9 * weakDose && physicalDose < 10.1 * weakDose,
+    `${weakDose} -> ${physicalDose}`);
+  assert.ok(metreGrid.massAbsoluteError < 1e-12);
+  assert.ok(decimetreGrid.massAbsoluteError < 1e-12);
 });
 
 test("MAC collocation includes zero-valued domain-wall faces", () => {

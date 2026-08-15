@@ -27,7 +27,9 @@ export interface SparseAtlasSurfaceConditioningOptions {
   readonly gammaDiffusionScale?: number;
   /** Physical step used by CM12 Sec. 3.5's 3dt pseudo-time dose. */
   readonly timeStep_s?: number;
-  /** Explicit dimensionless sharpening pseudo-time multiplier for probes. */
+  /** Metres per finest-cell coordinate used by the composite grid. */
+  readonly finestCellSize_m?: number;
+  /** Explicit sharpening pseudo-time in finest-cell coordinates for probes. */
   readonly sharpeningCourant?: number;
   readonly sharpeningDistanceCells?: number;
   /** Retain an already-proven horizontal D4 invariant across topology rebuilds. */
@@ -532,7 +534,6 @@ function sharpeningDeltas(
     }
     const weight = cm12SharpeningWeight(rho, maximumDifference);
     let plusSquared = 0, minusSquared = 0;
-    const cellWidth = width(grid, cell.id);
     for (let axisIndex = 0; axisIndex < 3; axisIndex += 1) {
       const axis = axisIndex as SparseAtlasAxis;
       const before = areaAverage(
@@ -543,8 +544,8 @@ function sharpeningDeltas(
         rho, graph.positive[axis][cell.id], graph.positiveCount[axis][cell.id],
         density, workspace?.averageAfter,
       );
-      const backward = -(rho - before.value) * courant * cellWidth / before.distance;
-      const forward = -(after.value - rho) * courant * cellWidth / after.distance;
+      const backward = -(rho - before.value) * courant / before.distance;
+      const forward = -(after.value - rho) * courant / after.distance;
       plusSquared += Math.max(Math.max(backward, 0) ** 2, Math.min(forward, 0) ** 2);
       minusSquared += Math.max(Math.min(backward, 0) ** 2, Math.max(forward, 0) ** 2);
     }
@@ -621,14 +622,19 @@ export function conditionSparseAtlasSurface(
   ensureSurfaceVectorLength(workspace, grid.cells.length);
   const iterations = options.gammaDiffusionIterations ?? 1;
   const timeStep_s = options.timeStep_s ?? 1 / 30;
+  const finestCellSize_m = options.finestCellSize_m ?? 1;
   const gammaScale = options.gammaDiffusionScale
     ?? Math.min(1, timeStep_s / (1 / 30));
-  const courant = options.sharpeningCourant ?? 3 * timeStep_s;
+  // Grid distances are expressed in finest-cell coordinates. CM12 Eqs. 6-15
+  // produce a density increment of 3 dt |grad rho|, so the pseudo-time must be
+  // expressed in the same coordinate units before dividing by edge distance.
+  const courant = options.sharpeningCourant ?? 3 * timeStep_s / finestCellSize_m;
   const maximumDistanceCells = options.sharpeningDistanceCells ?? 2.1;
   if (!Number.isInteger(iterations) || iterations < 0
     || !Number.isFinite(timeStep_s) || timeStep_s < 0
+    || !Number.isFinite(finestCellSize_m) || finestCellSize_m <= 0
     || !Number.isFinite(gammaScale) || gammaScale < 0 || gammaScale > 1
-    || !Number.isFinite(courant) || courant < 0 || courant > 1
+    || !Number.isFinite(courant) || courant < 0
     || !Number.isFinite(maximumDistanceCells) || maximumDistanceCells < 0) {
     throw new RangeError("invalid sparse CM12 surface-conditioning options");
   }
