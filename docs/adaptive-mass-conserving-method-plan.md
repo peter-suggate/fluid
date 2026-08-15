@@ -36,9 +36,12 @@ Current implementation checkpoint (2026-08-15):
   canonical two-second blockers are recorded below.
 - Logical residency is now adaptive for the long-tank rung: construction packs
   bounded dormant receiver slots, but a GPU activity transaction alone decides
-  when each slot becomes active. Empty slots outside the exact 26-neighbor air
-  support ring now retire on the GPU without deleting any positive-density
-  receipt. Resolution inside an allocated slot remains fixed; conservative
+  when each slot becomes active. Each surface brick publishes a directional
+  27-bit boundary-stencil/swept-receiver mask from its accepted cells and
+  velocity; only mask-addressed empty slots remain as air support. Exact
+  `rho > 0` occupancy separately retains its own brick, so a conservative trace
+  is never deleted but also cannot pin 26 additional empty bricks. Resolution
+  inside an allocated slot remains fixed; conservative
   level mutation, generic rolling allocation/freeing, solid coupling, and
   compact sparse surface publication remain open.
 - The resident GPU graph now owns CM12 transport, gamma diffusion/sharpening,
@@ -88,11 +91,18 @@ Current implementation checkpoint (2026-08-15):
   `0.324 s` both fronts are at `x=53`, Adaptive retains 38 of 72 bounded slots
   with a ten-cell receiver lead, and its mass drift is `2.74e-6`; at `1.0 s`
   its liquid front reaches `x=95` only `0.004 s` after All-fine. Dawn reports
-  no validation error. Dormant cells stay at `rho=0`, `gamma=1`, and zero velocity;
+  no validation error. At the screenshot-matched `0.724 s` checkpoint,
+  directional support retains 58 of 72 slots / 24,320 packed cells, down from
+  the whole-brick Moore policy's 64 / 27,392, and removes the six empty finest
+  top-row bricks over the quiet middle span. The front milestone is unchanged,
+  the Adaptive mass drift is `9.95e-6`, all candidate transfers pass, and the
+  planned face ratio remains at most 2:1. Dormant cells stay at `rho=0`,
+  `gamma=1`, and zero velocity;
   transport, diffusion, sharpening, pressure, and presentation exclude them
-  until the GPU atomically publishes their active bit. Occupied tiles and their
-  one-tile Moore air ring remain active; unsupported empty tiles atomically
-  retire after activity measurement. There is no global mass
+  until the GPU atomically publishes their active bit. Occupied tiles retain
+  themselves; only directionally addressed interface/swept air support remains
+  active, and every other empty tile atomically retires after activity
+  measurement. There is no global mass
   rescale, front injection, CPU frame decision, or D4-specific correction in
   this residency change. The harness now hard-fails both a pinned active
   boundary and failure to match All-fine's far-wall arrival.
@@ -1491,10 +1501,10 @@ The first adaptive calm/active rung is done only when:
    front, far-wall, mass, and active-boundary receipts are already hard gates),
    then compare the same checkpoints with forced-all-fine Sparse CM12.
 2. Replace the bounded all-fine dormant backing with a device free-slot pool.
-   Allocate `8^3` only in the swept-interface band, retain the exact one-tile
-   air-support ring, return unsupported empty slots to the pool, and add compact
-   allocation-failure/capacity receipts plus face-local row patching. Preserve
-   the current no-readback frame dependency and 2:1 closure.
+   Allocate `8^3` only for the directional swept-interface mask, return
+   unsupported empty slots to the pool, and add compact allocation-failure /
+   capacity receipts plus face-local row patching. Preserve the current
+   no-readback frame dependency and 2:1 closure.
 3. Keep the Rung A CPU policy and transfer as an offline oracle only. Replace
    construction-time component-size selection through GPU-authored measurement,
    planning, conservative candidate transfer, global reprojection, validation,

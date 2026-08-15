@@ -9,6 +9,8 @@
 
 export const CM12_PAPER_DT_S = 1 / 30;
 export const CM12_LIQUID_ISOVALUE = 0.5;
+/** Existing CM12 numerical dry cutoff used by transport and sharpening. */
+export const CM12_DRY_CELL_THRESHOLD = 1e-5;
 export const CM12_GHOST_FLUID_THETA_MIN = 0.05;
 export const CM12_TRANSPORT_FIXED_SCALE = 1_048_576;
 export const CM12_GAMMA_INTERIOR_MIN = 0.5;
@@ -138,6 +140,7 @@ function wgslF32(value: number): string {
 export function createCm12NumericsWGSL(constantsOnly = false): string {
   const constants = /* wgsl */ `
 const CM12_LIQUID_ISOVALUE:f32=${wgslF32(CM12_LIQUID_ISOVALUE)};
+const CM12_DRY_CELL_THRESHOLD:f32=${wgslF32(CM12_DRY_CELL_THRESHOLD)};
 const CM12_GHOST_FLUID_THETA_MIN:f32=${wgslF32(CM12_GHOST_FLUID_THETA_MIN)};
 const CM12_TRANSPORT_FIXED:f32=${wgslF32(CM12_TRANSPORT_FIXED_SCALE)};
 const CM12_GAMMA_INTERIOR_MIN:f32=${wgslF32(CM12_GAMMA_INTERIOR_MIN)};

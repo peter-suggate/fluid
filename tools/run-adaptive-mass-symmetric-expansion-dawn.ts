@@ -110,15 +110,35 @@ function activityD4MismatchCount(
   bricks: readonly AdaptiveMassGPUActivityBrick[],
   dimensions: Dimensions,
 ): number {
+  const transformSupportMask = (
+    mask: number,
+    transform: "reflect-x" | "reflect-z" | "swap-xz",
+  ): number => {
+    let result = 0;
+    for (let dz = -1; dz <= 1; dz += 1) for (let dy = -1; dy <= 1; dy += 1)
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const sourceBit = (dx + 1) + 3 * (dy + 1) + 9 * (dz + 1);
+        if ((mask & (1 << sourceBit)) === 0) continue;
+        const target = transform === "reflect-x" ? [-dx, dy, dz]
+          : transform === "reflect-z" ? [dx, dy, -dz] : [dz, dy, dx];
+        const targetBit = (target[0]! + 1) + 3 * (target[1]! + 1)
+          + 9 * (target[2]! + 1);
+        result |= 1 << targetBit;
+      }
+    return result;
+  };
   const brickDimensions = dimensions.map((value) => value / 8) as [number, number, number];
   const byCoordinate = new Map(bricks.map((brick) => [brick.coordinate.join(","), brick]));
   let mismatches = 0;
   for (const brick of bricks) for (const target of [
-    [brickDimensions[0] - 1 - brick.coordinate[0], brick.coordinate[1], brick.coordinate[2]],
-    [brick.coordinate[0], brick.coordinate[1], brickDimensions[2] - 1 - brick.coordinate[2]],
-    [brick.coordinate[2], brick.coordinate[1], brick.coordinate[0]],
+    { transform: "reflect-x", coordinate: [brickDimensions[0] - 1 - brick.coordinate[0],
+      brick.coordinate[1], brick.coordinate[2]] },
+    { transform: "reflect-z", coordinate: [brick.coordinate[0], brick.coordinate[1],
+      brickDimensions[2] - 1 - brick.coordinate[2]] },
+    { transform: "swap-xz", coordinate: [brick.coordinate[2], brick.coordinate[1],
+      brick.coordinate[0]] },
   ] as const) {
-    const transformed = byCoordinate.get(target.join(","));
+    const transformed = byCoordinate.get(target.coordinate.join(","));
     if (!transformed || transformed.scoreByte !== brick.scoreByte
       || transformed.reasons !== brick.reasons
       || transformed.hotEpochs !== brick.hotEpochs
@@ -131,6 +151,7 @@ function activityD4MismatchCount(
       || transformed.candidateEpoch !== brick.candidateEpoch
       || transformed.transferStatus !== brick.transferStatus
       || transformed.faceTransferStatus !== brick.faceTransferStatus
+      || transformed.supportMask !== transformSupportMask(brick.supportMask, target.transform)
       || transformed.active !== brick.active
       || transformed.activatedStep !== brick.activatedStep) mismatches += 1;
   }

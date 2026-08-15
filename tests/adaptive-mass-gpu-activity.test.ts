@@ -178,7 +178,7 @@ test("swept receiver activation is GPU-published and dormant cells stay inert", 
   assert.doesNotMatch(encode, /mapAsync|readActivitySnapshot|readGPUActivityPolicy/);
 });
 
-test("GPU retirement removes only mass-empty bricks outside the 26-neighbor air ring", () => {
+test("GPU retirement uses directional surface support without discarding exact mass", () => {
   const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn retireUnsupportedEmptyBricks");
   const end = webgpuSparseCM12ResidentWGSL.indexOf(
     "fn classifyPresentationBricks", begin,
@@ -186,6 +186,10 @@ test("GPU retirement removes only mass-empty bricks outside the 26-neighbor air 
   assert.ok(begin >= 0 && end > begin, "retirement kernel must be inspectable");
   const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
   assert.match(webgpuSparseCM12ResidentWGSL, /occupiedCell=occupiedCell\|\|rho>0\.0/);
+  assert.match(kernel, /activity\[output\+1u\]\)&64u/,
+    "any positive mass must retain its own brick");
+  assert.match(kernel, /activityRecord\(neighbor\)\+32u\]\)&\(1u<<bit\)/,
+    "only the neighbor's directional surface/swept bit may retain this air brick");
   assert.match(kernel, /for\(var dz=-1;dz<=1;dz\+=1\)/);
   assert.match(kernel, /for\(var dy=-1;dy<=1;dy\+=1\)/);
   assert.match(kernel, /for\(var dx=-1;dx<=1;dx\+=1\)/);

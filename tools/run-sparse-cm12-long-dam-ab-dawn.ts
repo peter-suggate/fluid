@@ -348,7 +348,10 @@ try {
               || value >= brickDimensions[axis]!)) continue;
             const key = coordinate[0] + brickDimensions[0]!
               * (coordinate[1] + brickDimensions[1]! * coordinate[2]);
-            supported ||= ((byKey.get(key)?.reasons ?? 0) & 64) !== 0;
+            const neighbor = byKey.get(key);
+            const bit = (1 - dx) + 3 * (1 - dy) + 9 * (1 - dz);
+            supported ||= neighbor !== undefined
+              && (neighbor.supportMask & (1 << bit)) !== 0;
           }
         if (!supported) checkpointUnsupportedEmptyActiveBricks += 1;
       }
@@ -418,6 +421,7 @@ try {
             transferMassErrorFineCells: brick.transferMassErrorFineCells,
             scoreByte: brick.scoreByte,
             reasons: brick.reasons,
+            supportMask: brick.supportMask,
             quietEpochs: brick.quietEpochs,
           })),
         },

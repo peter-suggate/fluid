@@ -10,7 +10,7 @@ const INVALID = 0xffff_ffff;
 const WORKGROUP_SIZE = 64;
 const PCG_ITERATIONS = 128;
 const ACTIVITY_HEADER_WORDS = 12;
-const ACTIVITY_RECORD_WORDS = 32;
+const ACTIVITY_RECORD_WORDS = 33;
 const CANDIDATE_CELLS_PER_BRICK = 8 ** 3;
 const CANDIDATE_CHANNELS = 12;
 
@@ -71,6 +71,8 @@ export interface SparseCM12GPUActivityRecord {
   readonly maximumAbsoluteTransferFluxErrorFineAreas: number;
   /** 0 not requested, 1 exterior flux transfer passed, 2 rejected. */
   readonly faceTransferStatus: 0 | 1 | 2;
+  /** Directional 3x3x3 free-surface/swept support mask; bit 13 is unused. */
+  readonly supportMask: number;
 }
 
 export interface SparseCM12GPUActivitySnapshot {
@@ -724,6 +726,7 @@ export class WebGPUSparseCM12Resident {
           ),
           faceTransferStatus: (words[at + 31] === 1 ? 1 : words[at + 31] === 2 ? 2 : 0) as
             SparseCM12GPUActivityRecord["faceTransferStatus"],
+          supportMask: words[at + 32]!,
         };
       });
       return { acceptedSteps: words[0]!, records };
