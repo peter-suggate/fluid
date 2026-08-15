@@ -27,14 +27,15 @@ export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze
   fieldVisualization({
     kind: "field", id: "dense-grid/density", pass: "Dense grid",
     label: "Surface density",
-    description: "Mass per cell in cell volumes, from the solver's own transported field: dilute sub-half mass, liquid, and the overfull cells the projection has to drain.",
+    description: "Mass per cell in cell volumes, from the solver's own transported field: dilute sub-half mass on a logarithmic ramp so residue reads decade by decade, liquid, and the overfull cells the projection has to drain.",
     source: "Live volume texture, before the render-only wall-film reconstruction",
     mode: "density", axis: "z",
     swatch: "#2f8fd6",
     legend: [
-      { swatch: "#3f9f8f", label: "0 < ρ < ½ — carried, not liquid" },
+      { swatch: "linear-gradient(90deg,#46327e,#23a186,#6ece58)", label: "ρ 10⁻⁶ → ½, per decade — carried, not liquid" },
       { swatch: "linear-gradient(90deg,#3f5fa0,#7ea3c1)", label: "ρ ½ → 1 — liquid, filling" },
       { swatch: "linear-gradient(90deg,#baad61,#c9563f)", label: "ρ > 1 — overfull" },
+      { swatch: "transparent", label: "ρ ≤ 10⁻⁶ — vacuum, grid only" },
     ],
   }),
   fieldVisualization({

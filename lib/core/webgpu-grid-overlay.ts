@@ -298,6 +298,22 @@ struct GridSample {
   solid: bool,
 }
 
+// displayColor tonemaps by c/(c+1) before gamma-encoding, so a gradient
+// authored in linear light lands wherever that compression puts it, and its
+// bright half collapses into one colour. A ramp whose whole job is to keep
+// decades apart cannot afford that, so the density ramp is authored in
+// display space — the literals below are the pixels — and inverted back
+// through the tonemap here.
+fn sceneColor(display: vec3f) -> vec3f {
+  let mapped = pow(clamp(display, vec3f(0.0), vec3f(0.94)), vec3f(2.2));
+  return mapped / (vec3f(1.0) - mapped);
+}
+
+// Below this the surface-density view stops claiming to resolve and draws
+// vacuum. It is the bottom of the residue band the transport actually
+// produces, six decades under a full cell.
+const DENSITY_FLOOR: f32 = 1e-6;
+
 fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint: f32) -> GridSample {
   let dims = vec3i(u.gridInfo.xyz);
   let local3 = clamp((point - boundsMin) / size, vec3f(0.0), vec3f(0.99999)) * vec3f(dims);
@@ -332,6 +348,9 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
   var fill = vec3f(0.0);
   var alpha = 0.0;
   var line = 0.0;
+  // How loudly the structural lattice draws. Views whose subject is a field
+  // value turn it down: the grid is their reference frame, not their content.
+  var lineStrength = 1.0;
   var sampleDot = 0.0;
   var opticalBoundary = 0.0;
   if (adaptiveGrid) {
@@ -506,36 +525,61 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
       // therefore visible as its own phase rather than reading as air, which is
       // the whole point: it is carried by transport and ignored by pressure.
       let rho = densitySample(cell);
-      let dilute = clamp(rho * 2.0, 0.0, 1.0);
+      // The sub-half phase is logarithmic because that is the shape of the
+      // quantity. Transported residue lives across the decades between
+      // DENSITY_FLOOR and about 1e-2, and a linear ramp over [0, 1/2] buries
+      // every one of them in the bottom two percent: each residue cell then
+      // draws the same near-black at the same near-zero alpha, which is the
+      // one failure this view exists to prevent. Here a unit of the ramp is a
+      // fixed number of decades, so the low end separates from itself.
+      let dilute = clamp(log2(max(rho, DENSITY_FLOOR) / DENSITY_FLOOR) / log2(0.5 / DENSITY_FLOOR), 0.0, 1.0);
       let full = clamp((rho - 0.5) * 2.0, 0.0, 1.0);
       let excess = clamp((rho - 1.0) * 4.0, 0.0, 1.0);
-      // Chosen against the tonemap rather than on a colour wheel: displayColor
-      // compresses by c/(c+1), which pulls any near-white toward grey, so the
-      // top of the liquid ramp is a saturated blue rather than a pale one and
-      // the dilute phase is held in green where the compression cannot merge it
-      // into that blue.
-      let diluteColor = mix(vec3f(0.04, 0.16, 0.14), vec3f(0.10, 0.62, 0.42), dilute);
-      let liquidColor = mix(vec3f(0.05, 0.14, 0.60), vec3f(0.28, 0.62, 1.25), full);
-      let excessColor = mix(vec3f(0.98, 0.72, 0.14), vec3f(1.60, 0.10, 0.05), excess);
+      // Three ramps, each authored through sceneColor as the pixels it becomes.
+      // The dilute phase runs violet → teal → green across its decades, in two
+      // segments so neighbours separate by hue as well as by luminance; liquid
+      // stays blue and overfull amber-to-red, at the same endpoints they have
+      // always tonemapped to, now with evenly spaced interiors.
+      let diluteColor = sceneColor(select(
+        mix(vec3f(0.122, 0.620, 0.537), vec3f(0.431, 0.808, 0.345), (dilute - 0.5) * 2.0),
+        mix(vec3f(0.275, 0.196, 0.494), vec3f(0.122, 0.620, 0.537), dilute * 2.0),
+        dilute < 0.5));
+      let liquidColor = sceneColor(mix(vec3f(0.251, 0.385, 0.640), vec3f(0.501, 0.646, 0.766), full));
+      let excessColor = sceneColor(mix(vec3f(0.726, 0.673, 0.385), vec3f(0.802, 0.336, 0.251), excess));
       fill = select(select(diluteColor, liquidColor, rho > 0.5), excessColor, rho > 1.0);
-      alpha = select(select(0.10 + 0.55 * dilute, 0.62 + 0.30 * full, rho > 0.5), 0.95, rho > 1.0);
+      // The faintest resolved decade still arrives at half opacity. Slice
+      // planes are thinned by SLICE_OPACITY on the way out, so the old 0.10
+      // floor reached the frame at 0.06 — under what separates from the
+      // background at all, whatever colour it was carrying.
+      alpha = select(select(0.46 + 0.30 * dilute, 0.62 + 0.30 * full, rho > 0.5), 0.95, rho > 1.0);
       // An empty cell keeps only its grid lines. "Where is there any mass at
       // all" is the first question this view has to answer, and a floor of
       // tinted haze over vacuum is how that answer gets lost.
-      alpha = select(alpha, 0.0, rho <= 1e-4);
+      alpha = select(alpha, 0.0, rho <= DENSITY_FLOOR);
+      // The lattice recedes. At the pixels-per-cell this view is actually read
+      // at, a full-strength line paints a third of every cell near-black, on
+      // top of the mass it is only there to locate.
+      lineStrength = 0.26;
       // Where cells are large enough on screen each one also fills to min(rho, 1)
       // of its own height, so the quantity is legible as a level without anyone
       // decoding a colour. A horizontal slice has no vertical extent to fill and
-      // keeps the flat colour, as do cells too small to hold a readable bar.
-      if (axis != 3 && rho > 1e-4) {
-        let barFade = smoothstep(7.0, 14.0, pixelsPerCell);
-        let below = 1.0 - smoothstep(-derivative.y, derivative.y, fract(samplePosition.y) - clamp(rho, 0.0, 1.0));
+      // keeps the flat colour, as does any cell whose bar would come out under a
+      // couple of pixels: a level that short is not readable as a level, and all
+      // it would contribute is the dimming of the cell carrying it, which is
+      // precisely the residue the ramp above just went to some trouble to show.
+      if (axis != 3 && rho > DENSITY_FLOOR) {
+        let barHeight = clamp(rho, 0.0, 1.0);
+        let barFade = smoothstep(7.0, 14.0, pixelsPerCell) * smoothstep(0.5, 2.0, barHeight * pixelsPerCell);
+        let below = 1.0 - smoothstep(-derivative.y, derivative.y, fract(samplePosition.y) - barHeight);
         fill = mix(fill, mix(fill * 0.30, fill, below), barFade);
         alpha = mix(alpha, mix(alpha * 0.28, max(alpha, 0.88), below), barFade);
       }
+      // Sample-centre dots are near-black at 0.92, and they arrive at exactly
+      // the zoom that makes the dilute phase legible.
+      sampleDot = 0.0;
     }
   }
-  line *= lineFade;
+  line *= lineFade * lineStrength;
   let gridBody = gridBodySample(representedCell(cell, dims, boundsMin, size, adaptiveGrid, tallGrid));
   if (gridBody.occupied) {
     fill = mix(vec3f(0.96, 0.43, 0.12), vec3f(1.0, 0.78, 0.38), 0.18 * gridBody.selected);
