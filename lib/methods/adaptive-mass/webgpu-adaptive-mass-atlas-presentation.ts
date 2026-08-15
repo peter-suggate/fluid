@@ -724,6 +724,7 @@ export class WebGPUAdaptiveMassSparsePresentation {
 
   constructor(device: GPUDevice) {
     const scalarUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      | GPUTextureUsage.COPY_SRC
       | GPUTextureUsage.STORAGE_BINDING;
     this.densityTexture = device.createTexture({
       label: "Sparse CM12 compact-presentation fallback",
@@ -737,6 +738,7 @@ export class WebGPUAdaptiveMassSparsePresentation {
     this.gridCellTexture = device.createTexture({ label: "Sparse CM12 owner fallback",
       size: [1, 1, 1], dimension: "3d", format: "rg32uint",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        | GPUTextureUsage.COPY_SRC
         | GPUTextureUsage.STORAGE_BINDING });
     this.velocityTexture = device.createTexture({ label: "Sparse CM12 velocity fallback",
       size: [1, 1, 1], dimension: "3d", format: "rgba32float", usage: scalarUsage });

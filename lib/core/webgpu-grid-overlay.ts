@@ -61,6 +61,7 @@ struct SparseParams {
 @group(0) @binding(14) var<storage,read> sparseFineMetadata: array<u32>;
 @group(0) @binding(15) var<storage,read> sparseFineWorklist: array<u32>;
 @group(0) @binding(16) var<storage,read> sparseFineSamples: array<u32>;
+@group(0) @binding(17) var<storage,read> sparseTopologyArena: array<u32>;
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
   var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -163,8 +164,23 @@ fn sparseBrickLookup(key:u32)->u32{
   return sparseTopology[sparseP.topologyOffsets2.y+2u*low+1u];
 }
 fn sparseBrickActive(brick:u32)->bool{
-  let at=12u+35u*brick+10u;
+  let at=24u+40u*brick+10u;
   return brick<sparseP.dispatch.w&&at<arrayLength(&sparseActivity)&&sparseActivity[at]!=0u;
+}
+fn sparseAcceptedResolution(brick:u32)->u32{
+  return sparseActivity[24u+40u*brick+12u];
+}
+fn sparseTemplateLevelIndex(resolution:u32)->u32{
+  return select(select(select(0u,1u,resolution==2u),2u,resolution==4u),3u,
+    resolution==8u);
+}
+fn sparseTemplateCellRange(brick:u32,resolution:u32)->vec2u{
+  let at=sparseTopologyArena[11u]
+    +2u*(4u*brick+sparseTemplateLevelIndex(resolution));
+  return vec2u(sparseTopologyArena[at],sparseTopologyArena[at+1u]);
+}
+fn sparseTemplateCellBase(cell:u32)->u32{
+  return sparseTopologyArena[6u]+16u*cell;
 }
 fn sparseOwner(q:vec3i)->vec2u{
   if(!sparseGridEnabled()||any(q<vec3i(0))||any(q>=vec3i(sparseP.dimensions.xyz))){return vec2u(SPARSE_INVALID);}
@@ -172,8 +188,9 @@ fn sparseOwner(q:vec3i)->vec2u{
   let brickCoordinate=uq/8u;let key=brickCoordinate.x+brickDims.x
     *(brickCoordinate.y+brickDims.y*brickCoordinate.z);
   let brick=sparseBrickLookup(key);if(brick==SPARSE_INVALID||!sparseBrickActive(brick)){return vec2u(SPARSE_INVALID);}
-  let record=sparseP.topologyOffsets2.z+4u*brick;let first=sparseTopology[record];
-  let count=sparseTopology[record+1u];let resolution=sparseTopology[record+2u];
+  let resolution=sparseAcceptedResolution(brick);
+  let range=sparseTemplateCellRange(brick,resolution);
+  let first=range.x;let count=range.y;
   let scale=8u/resolution;let local=(uq-brickCoordinate*8u)/scale;
   let origin=brickCoordinate*8u;
   let valid=(min(sparseP.dimensions.xyz-origin+vec3u(scale-1u),vec3u(8u)))/scale;
@@ -204,9 +221,11 @@ fn sparseFinePhiAt(q:vec3i)->f32{
 }
 fn sparseOwnerKey(q:vec3i)->vec2u{
   let owner=sparseOwner(q);if(owner.x==SPARSE_INVALID){return vec2u(SPARSE_INVALID);}
-  let base=sparseP.topologyOffsets.x+16u*owner.x;
-  let lower=vec3u(sparseTopology[base+7u],sparseTopology[base+8u],sparseTopology[base+9u]);
-  let scale=max(1u,sparseTopology[base+10u]);let level=u32(round(log2(f32(scale))));
+  let base=sparseTemplateCellBase(owner.x);
+  let lower=vec3u(sparseTopologyArena[base+7u],sparseTopologyArena[base+8u],
+    sparseTopologyArena[base+9u]);
+  let resolution=max(1u,sparseTopologyArena[base+10u]);
+  let scale=max(1u,8u/resolution);let level=u32(round(log2(f32(scale))));
   return vec2u(lower.x|(lower.z<<11u)|(level<<22u),lower.y|0x80000000u);
 }
 
@@ -903,6 +922,8 @@ export class GridOverlayPipeline {
         { binding: 15, resource: this.sparseSource?.fineWorklist
           ?? { buffer: this.sparseDummyStorage } },
         { binding: 16, resource: this.sparseSource?.fineSamples
+          ?? { buffer: this.sparseDummyStorage } },
+        { binding: 17, resource: this.sparseSource?.topologyArena
           ?? { buffer: this.sparseDummyStorage } },
       ]
     });

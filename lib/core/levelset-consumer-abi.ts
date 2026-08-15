@@ -39,13 +39,15 @@ export interface WebGPUFineLevelSetBrickSource {
   seedControl?: GPUBuffer;
 }
 
-/** Immutable sparse-cell topology plus the live CM12 field arena. Scientific
- * overlays sample these buffers directly; no finest-domain ownership or field
- * texture is materialized for visualization. */
+/** Sparse directory plus the live accepted physical topology and CM12 field
+ * arenas. Scientific overlays sample the GPU-published generation directly;
+ * no finest-domain ownership or field texture is materialized for them. */
 export interface SparseAdaptiveGridConsumerSource {
   readonly kind: "sparse-adaptive-grid-sampling";
   readonly params: GPUBufferBinding;
   readonly topology: GPUBufferBinding;
+  /** Immutable 1/2/4/8 templates followed by accepted/shadow worklists. */
+  readonly topologyArena: GPUBufferBinding;
   readonly state: GPUBufferBinding;
   readonly activity: GPUBufferBinding;
   readonly fineMetadata: GPUBufferBinding;

@@ -49,6 +49,8 @@ export interface SparseBrickAtlasInitializationOptions {
   /** Optional caller-owned construction guard; Sparse CM12 itself has no cell-count cap. */
   readonly maximumFinestCells?: number;
   readonly emptyEpsilon?: number;
+  /** Count of occupied face-distance rings held at 8^3 around the initial interface. */
+  readonly surfaceFineRings?: number;
   /** Optional fixed-policy override for every nonempty brick, including interfaces. */
   readonly resolutionForBrick?: (input: {
     readonly coordinate: SparseBrickVec3;
@@ -387,42 +389,119 @@ export function initializeSparseBrickAtlasFromScene(
     );
   }
   const epsilon = options.emptyEpsilon ?? 1e-12;
+  const surfaceFineRings = typeof options.surfaceFineRings === "number"
+    && Number.isFinite(options.surfaceFineRings)
+    ? Math.min(8, Math.max(1, Math.round(options.surfaceFineRings))) : 1;
   const brickDimensions = options.finestDimensions.map((value) =>
     Math.ceil(value / 8)) as [number, number, number];
   const boundary = sphericalContainerFineGeometry(scene, options.finestDimensions);
-  const bricks: SparseAdaptiveMassBrick[] = [];
+  const candidates: Array<{
+    readonly coordinate: SparseBrickVec3;
+    readonly key: number;
+    readonly interfaceBrick: boolean;
+  }> = [];
   for (const coordinate of candidateInitialBrickCoordinates(
     scene, options.finestDimensions, brickDimensions,
   )) {
-        let nonempty = false;
-        for (let z = 0; z < 8 && !nonempty; z += 1)
-          for (let y = 0; y < 8 && !nonempty; y += 1)
-            for (let x = 0; x < 8; x += 1)
-              if (initialDensityAt(
-                scene, options.finestDimensions,
-                coordinate[0] * 8 + x,
-                coordinate[1] * 8 + y,
-                coordinate[2] * 8 + z,
-              ) > epsilon) {
-                nonempty = true; break;
-              }
-        if (!nonempty) continue;
-        const interfaceBrick = brickHasInterface(
-          scene, options.finestDimensions, coordinate, epsilon,
-        );
-        // Unoverridden, only the interface rule below lifts a brick off the
-        // coarse rung; saturated interiors and dry receivers start at 4^3.
-        const selected = brickRequiresCutBoundaryResolution(boundary, coordinate) ? 8
-          : options.resolutionForBrick?.({ coordinate, brickDimensions }) ?? 4;
-        if (selected !== 1 && selected !== 2 && selected !== 4 && selected !== 8) {
-          throw new RangeError("resolutionForBrick must return 1, 2, 4, or 8");
-        }
-        const resolution: SparseBrickResolution = interfaceBrick
-          && !options.resolutionForBrick ? 8 : selected;
-        bricks.push(initialBrick(
-          scene, options.finestDimensions, coordinate, resolution,
-        ));
+    let nonempty = false;
+    for (let z = 0; z < 8 && !nonempty; z += 1)
+      for (let y = 0; y < 8 && !nonempty; y += 1)
+        for (let x = 0; x < 8; x += 1)
+          if (initialDensityAt(
+            scene, options.finestDimensions,
+            coordinate[0] * 8 + x,
+            coordinate[1] * 8 + y,
+            coordinate[2] * 8 + z,
+          ) > epsilon) {
+            nonempty = true; break;
+          }
+    if (!nonempty) continue;
+    candidates.push({
+      coordinate,
+      key: sparseBrickKey(coordinate, brickDimensions),
+      interfaceBrick: brickHasInterface(
+        scene, options.finestDimensions, coordinate, epsilon,
+      ),
+    });
+  }
+
+  // Seed an exact face-distance transform from the free surface. This makes
+  // the initial accepted topology agree with the GPU activity policy's full
+  // 8/4/2/1 ladder. Previously every saturated interior brick was fixed at
+  // 4^3; later GPU requests for 2^3 and 1^3 remained candidate-only, so deep
+  // pools such as ocean-seiche could never visibly or physically coarsen.
+  const candidateByKey = new Map(candidates.map((candidate) =>
+    [candidate.key, candidate] as const));
+  const interfaceDistance = new Map<number, number>();
+  const queue: typeof candidates = [];
+  for (const candidate of candidates) {
+    if (!candidate.interfaceBrick) continue;
+    interfaceDistance.set(candidate.key, 0);
+    queue.push(candidate);
+  }
+  const faceDirections = [
+    [-1, 0, 0], [1, 0, 0], [0, -1, 0],
+    [0, 1, 0], [0, 0, -1], [0, 0, 1],
+  ] as const;
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const candidate = queue[cursor]!;
+    const distance = interfaceDistance.get(candidate.key)!;
+    for (const direction of faceDirections) {
+      const coordinate = candidate.coordinate.map((value, axis) =>
+        value + direction[axis]) as [number, number, number];
+      if (coordinate.some((value, axis) =>
+        value < 0 || value >= brickDimensions[axis])) continue;
+      const key = sparseBrickKey(coordinate, brickDimensions);
+      const neighbor = candidateByKey.get(key);
+      if (!neighbor || interfaceDistance.has(key)) continue;
+      interfaceDistance.set(key, distance + 1);
+      queue.push(neighbor);
+    }
+  }
+
+  const resolutionByKey = new Map<number, SparseBrickResolution>();
+  for (const candidate of candidates) {
+    const { coordinate } = candidate;
+    const distance = interfaceDistance.get(candidate.key);
+    // A component without a free surface (for example a completely full,
+    // closed tank) is quiescent bulk and therefore starts at 1^3.
+    const adaptiveResolution: SparseBrickResolution = distance !== undefined
+      && distance < surfaceFineRings ? 8
+      : distance === surfaceFineRings ? 4
+        : distance === surfaceFineRings + 1 ? 2 : 1;
+    const selected = brickRequiresCutBoundaryResolution(boundary, coordinate) ? 8
+      : options.resolutionForBrick?.({
+      coordinate, brickDimensions,
+    }) ?? adaptiveResolution;
+    if (selected !== 1 && selected !== 2 && selected !== 4 && selected !== 8) {
+      throw new RangeError("resolutionForBrick must return 1, 2, 4, or 8");
+    }
+    resolutionByKey.set(candidate.key, selected);
+  }
+  // Boundary promotion is a hard floor, then the ordinary strong-grading
+  // closure propagates only as far as necessary into the liquid component.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const candidate of candidates) for (const direction of faceDirections) {
+      const coordinate = candidate.coordinate.map((value, axis) =>
+        value + direction[axis]) as [number, number, number];
+      if (coordinate.some((value, axis) => value < 0
+        || value >= brickDimensions[axis])) continue;
+      const neighborKey = sparseBrickKey(coordinate, brickDimensions);
+      if (!candidateByKey.has(neighborKey)) continue;
+      const own = resolutionByKey.get(candidate.key)!;
+      const neighbor = resolutionByKey.get(neighborKey)!;
+      if (own > 2 * neighbor) {
+        resolutionByKey.set(neighborKey, (own / 2) as SparseBrickResolution);
+        changed = true;
       }
+    }
+  }
+  const bricks = candidates.map((candidate) => initialBrick(
+    scene, options.finestDimensions, candidate.coordinate,
+    resolutionByKey.get(candidate.key)!,
+  ));
   return createSparseAdaptiveMassAtlas(options.finestDimensions, bricks, 1, boundary);
 }
 

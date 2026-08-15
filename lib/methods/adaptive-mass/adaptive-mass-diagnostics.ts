@@ -36,10 +36,10 @@ export function adaptiveMassDiagnosticRows(
     },
     {
       id: "resolution-activity",
-      label: "Calm / active policy",
-      value: `${info?.adaptiveActivityHotBrickCount ?? 0} hot · ${info?.adaptiveActivityQuietBrickCount ?? 0} quiet`,
-      unit: `${info?.adaptiveResolutionDeferredPromotionCount ?? 0} deferred promotions · topology every 4 accepted steps`,
-      tone: (info?.adaptiveResolutionDeferredPromotionCount ?? 0) > 0 ? "warn" : "neutral",
+      label: "GPU topology scheduler",
+      value: `${info?.adaptiveTopologyUrgentQueuedBrickCount ?? 0} urgent · ${info?.adaptiveTopologyOrdinaryQueuedBrickCount ?? 0} ordinary`,
+      unit: `${info?.adaptiveTopologyPreparedBrickCount ?? 0} prepared · ${info?.adaptiveTopologyCommittedBrickCount ?? 0} physical commits · ${info?.adaptiveTopologyDeferredBrickCount ?? 0} deferred · accepted generation ${info?.adaptiveTopologyShadowGeneration ?? 0}`,
+      tone: (info?.adaptiveTopologyUrgentQueuedBrickCount ?? 0) > 0 ? "warn" : "neutral",
     },
     {
       id: "sparse-residency",

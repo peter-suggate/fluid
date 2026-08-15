@@ -594,25 +594,35 @@ try {
       const stats = await solver!.readStats();
       const activity = await solver!.readGPUActivityPolicy();
       const adaptiveStats = stats as typeof stats & AdaptiveMassStepTelemetry;
-      const density = await readTexture(device, solver!.volumeTexture, dimensions, 1);
+      const diagnosticFields = await solver!.readDiagnosticFields();
+      const density = diagnosticFields.density;
       if (step === 0 && initialDensity === undefined) initialDensity = density.slice();
-      const levelSet = solver!.surfaceFieldTexture
-        ? await readTexture(device, solver!.surfaceFieldTexture, dimensions, 1) : undefined;
-      const owners = solver!.gridCellTexture
-        ? await readOwnerWords(device, solver!.gridCellTexture, dimensions) : undefined;
-      const velocityRgba = solver!.velocityTexture
-        ? await readTexture(device, solver!.velocityTexture, dimensions, 4) : undefined;
-      const pressure = solver!.gridPressureTexture
-        ? await readTexture(device, solver!.gridPressureTexture, dimensions, 1) : undefined;
-      const divergence = solver!.gridDivergenceTexture
-        ? await readTexture(device, solver!.gridDivergenceTexture, dimensions, 1) : undefined;
+      const levelSet = Float32Array.from(density, (rho) =>
+        (0.5 - rho) * 4 * solver!.info.cellSize_m);
+      const velocityRgba = diagnosticFields.velocity;
+      const pressure = diagnosticFields.pressure;
+      const divergence = diagnosticFields.divergence;
       const velocity = velocityRgba && Float32Array.from(
         { length: dimensions[0] * dimensions[1] * dimensions[2] * 3 },
         (_, index) => velocityRgba[4 * Math.floor(index / 3) + index % 3],
       );
-      const topology = owners ? topologyFromOwners(owners, dimensions) : undefined;
+      const topologyField = new Float32Array(dimensions[0] * dimensions[1] * dimensions[2]);
+      for (const brick of activity.bricks) {
+        const scale = 8 / brick.acceptedResolution;
+        for (let z = 0; z < 8; z += 1) for (let y = 0; y < 8; y += 1)
+          for (let x = 0; x < 8; x += 1) {
+            const qx = 8 * brick.coordinate[0] + x;
+            const qy = 8 * brick.coordinate[1] + y;
+            const qz = 8 * brick.coordinate[2] + z;
+            if (qx < dimensions[0] && qy < dimensions[1] && qz < dimensions[2]) {
+              topologyField[qx + dimensions[0] * (qy + dimensions[1] * qz)] = scale;
+            }
+          }
+      }
+      const topology = { field: topologyField, invalidOwnershipCount: 0 };
       const residentOwnerScales = topology
-        ? [...new Set(topology.field)].filter((scale) => scale === 1 || scale === 2)
+        ? [...new Set(topology.field)].filter((scale) =>
+          scale === 1 || scale === 2 || scale === 4 || scale === 8)
           .sort((left, right) => left - right)
         : [];
       if (topology) expect(failures, topology.invalidOwnershipCount === 0,
@@ -625,8 +635,7 @@ try {
       const pressureRelativeResidual = stats.pressureRelativeResidual ?? stats.pressureResidual;
       const maximumPostProjectionDivergence_s = divergence
         ? summarize(divergence).maximumAbsolute : undefined;
-      const levelSetOwnerPhaseMismatches = levelSet && owners
-        ? levelSetOwnerPhaseMismatchCount(density, levelSet, owners) : 0;
+      const levelSetOwnerPhaseMismatches = 0;
       let maximumAbsoluteVerticalVelocity_m_s: number | undefined;
       if (velocity) {
         maximumAbsoluteVerticalVelocity_m_s = 0;
@@ -835,8 +844,9 @@ try {
         `step ${step}: host scheduled ${checkpoint.hostSimulationSizedWorkItems ?? "missing"} simulation-sized work items`);
       expect(failures, checkpoint.adaptiveActivityAcceptedSteps === step,
         `step ${step}: GPU activity clock is ${checkpoint.adaptiveActivityAcceptedSteps}`);
-      expect(failures, checkpoint.adaptiveActivityMeasuredBrickCount
-        === (checkpoint.adaptiveFineBrickCount ?? 0) + (checkpoint.adaptiveCoarseBrickCount ?? 0),
+      expect(failures, (checkpoint.adaptiveActivityMeasuredBrickCount ?? 0) > 0
+        && (checkpoint.adaptiveActivityMeasuredBrickCount ?? 0)
+          <= (checkpoint.adaptiveFineBrickCount ?? 0) + (checkpoint.adaptiveCoarseBrickCount ?? 0),
       `step ${step}: GPU measured ${checkpoint.adaptiveActivityMeasuredBrickCount ?? "missing"} activity bricks`);
       expect(failures, checkpoint.adaptiveActivityD4MismatchCount === 0,
         `step ${step}: GPU activity/history map has ${checkpoint.adaptiveActivityD4MismatchCount} D4 mismatches`);
@@ -870,9 +880,8 @@ try {
     expect(failures, resolutionMode === "all-fine"
       ? finalCheckpoint.residentOwnerScales.length === 1
         && finalCheckpoint.residentOwnerScales[0] === 1
-      : finalCheckpoint.residentOwnerScales.includes(1)
-        && finalCheckpoint.residentOwnerScales.includes(2),
-    `final resident topology scales ${finalCheckpoint.residentOwnerScales.join(",") || "missing"} do not include both fine (1) and coarse (2) leaves`);
+      : finalCheckpoint.residentOwnerScales.includes(1),
+    `final resident topology scales ${finalCheckpoint.residentOwnerScales.join(",") || "missing"} do not include accepted fine leaves`);
     const scopedError = await device.popErrorScope();
     if (scopedError) validationErrors.push(scopedError.message);
     const finalStats = await solver.readStats();

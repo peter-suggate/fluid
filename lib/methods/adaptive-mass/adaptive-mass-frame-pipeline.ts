@@ -12,6 +12,7 @@ import {
 } from "../../core/performance-trace";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import {
+  SPARSE_CM12_ACTIVITY_POLICY,
   SPARSE_CM12_RESIDENT_FINAL_STAGE,
   SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
   SPARSE_CM12_SHARPENING_TRACE_STEPS,
@@ -99,7 +100,7 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   },
   candidateTransfer: {
     id: "power-topology",
-    label: "Candidate cell and face conservative transfer",
+    label: "Budgeted shadow-topology preparation + conservative transfer",
   },
   retentionConditioning: {
     id: "adaptive-publication",
@@ -416,31 +417,158 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Resolution planning",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.resolutionPlanning.label],
     tip: {
-      summary: "Measures compact brick activity every accepted step and authors full 1³/2³/4³/8³ candidate requests. Surface, thin fluid, fast bulk, and predicted fronts target fine; calm bulk demotes hysteretically. Accepted in-run topology publication is not implemented yet, so structural receiver controls remain the physical guard.",
+      summary: "The default selector makes every surface or thin-fluid brick request 8³ and coarsens outward through a 2:1-closed 4³/2³/1³ skirt. Existing bricks are replanned on the GPU: urgent surface refinement bypasses the ordinary round-robin preparation budget.",
       reads: "transported density, momentum, policy history",
-      writes: "score/reason history and candidate 1³/2³/4³/8³ levels",
-      feeds: "candidate conservative transfer (publication pending)",
+      writes: "score/reason history, urgent/ordinary queues and candidate 1³/2³/4³/8³ levels",
+      feeds: "budgeted GPU shadow transfer and physical generation publication",
     },
-    chip: (context) => `${context.info?.adaptiveFineBrickCount ?? 0} fine · ${context.info?.adaptiveCoarseBrickCount ?? 0} coarse`,
+    controls: [
+      {
+        kind: "readout", label: "Live topology",
+        value: (context) => `GPU TOPOLOGY GEN ${context.info?.adaptiveTopologyShadowGeneration ?? 0}`,
+        hint: "Accepted GPU-owned cell, pressure-row and field generation. advanceTo never reads scheduling state back or rebuilds topology on the host.",
+      },
+      {
+        kind: "param-choice", param: "selectorMode", label: "Criterion",
+        options: [
+          { value: "surface", label: "SURFACE", hint: "Surface and thin liquid are 8³; coarsen with distance." },
+          { value: "activity", label: "ACTIVITY", hint: "Also apply velocity, change and detail signals." },
+        ],
+      },
+      {
+        kind: "param-choice", param: "receiverFloor", label: "Created floor",
+        options: [
+          { value: "auto", label: "AUTO", hint: "Boundary-fed dams use 4³; interior sources may use 1³." },
+          { value: "1", label: "1³" }, { value: "2", label: "2³" },
+          { value: "4", label: "4³" }, { value: "8", label: "8³" },
+        ],
+        hint: "Structural capacity bootstrap. The GPU topology scheduler subsequently splits or merges every created receiver.",
+      },
+      {
+        kind: "param-range", param: "surfaceFineRings", label: "Initial fine band",
+        unit: " bricks", min: 1, max: 8, step: 1, digits: 0,
+        hint: "Structural/rebuild control: occupied face-distance rings initialized at 8³ around the authored surface.",
+      },
+      {
+        kind: "param-range", param: "receiverSupportRings", label: "Receiver reach",
+        unit: " bricks", min: 1, max: 24, step: 1, digits: 0,
+        hint: "Structural/rebuild control: radius of sparse receiver capacity reserved around authored liquid.",
+      },
+      {
+        kind: "param-range", param: "finestTravelCells", label: "8³ travel",
+        unit: " cells/step", min: 0.05, max: 4, step: 0.05, digits: 2,
+        enabled: (context) => context.values.selectorMode === "activity",
+        hint: "Maximum occupied-cell displacement needed to target 8³.",
+      },
+      {
+        kind: "param-range", param: "fourTravelCells", label: "4³ travel",
+        unit: " cells/step", min: 0, max: 2, step: 0.05, digits: 2,
+        enabled: (context) => context.values.selectorMode === "activity",
+        hint: "Displacement needed to retain at least 4³.",
+      },
+      {
+        kind: "param-range", param: "twoTravelCells", label: "2³ travel",
+        unit: " cells/step", min: 0, max: 1, step: 0.025, digits: 3,
+        enabled: (context) => context.values.selectorMode === "activity",
+        hint: "Displacement needed to retain at least 2³; slower calm bulk may target 1³.",
+      },
+      {
+        kind: "param-range", param: "frontLookaheadSteps", label: "Front lookahead",
+        unit: " steps", min: 1, max: 32, step: 1, digits: 0,
+        hint: "Accepted steps swept ahead when a surface characteristic selects receiver support.",
+      },
+      {
+        kind: "param-range", param: "thinFeatureCells", label: "Thin floor",
+        unit: " cells", min: 0.25, max: 8, step: 0.25, digits: 2,
+        hint: "Two-sided represented liquid thinner than this targets 8³.",
+      },
+      {
+        kind: "param-range", param: "thinFeatureDensity", label: "Thin density",
+        unit: " ρ", min: 0, max: 0.25, step: 0.005, digits: 3,
+        hint: "Minimum density allowed to pin thin geometry; zero means the CM12 dry threshold.",
+      },
+      {
+        kind: "param-range", param: "surfaceDensityMinimum", label: "Surface low",
+        unit: " ρ", min: 0, max: 0.49, step: 0.01, digits: 2,
+        hint: "Low bound of partial-density surface evidence.",
+      },
+      {
+        kind: "param-range", param: "surfaceDensityMaximum", label: "Surface high",
+        unit: " ρ", min: 0.51, max: 1, step: 0.01, digits: 2,
+        hint: "High bound of partial-density surface evidence.",
+      },
+      {
+        kind: "param-range", param: "detailTolerance", label: "Detail tolerance",
+        unit: " ρ", min: 0.005, max: 0.5, step: 0.005, digits: 3,
+        enabled: (context) => context.values.selectorMode === "activity",
+        hint: "2x2x2 restriction error allowed before detail vetoes demotion.",
+      },
+      {
+        kind: "param-range", param: "topologyCadenceSteps", label: "Epoch cadence",
+        unit: " steps", min: 1, max: 32, step: 1, digits: 0,
+        hint: "Accepted steps between full resolution replanning epochs. Urgent surface requests may still publish between ordinary round-robin visits.",
+      },
+      {
+        kind: "param-range", param: "prepareBricksPerFrame", label: "Work budget",
+        unit: " bricks/frame", min: 1, max: 256, step: 1, digits: 0,
+        hint: "Ordinary topology preparations started per frame. Surface/thin-fluid refinement has a separate urgent lane and does not wait behind coarsening.",
+      },
+      {
+        kind: "param-range", param: "promoteEpochs", label: "Promote hold",
+        unit: " epochs", min: 1, max: 16, step: 1, digits: 0,
+        enabled: (context) => context.values.selectorMode === "activity",
+        hint: "Hot epochs required for non-emergency activity promotion.",
+      },
+      {
+        kind: "param-range", param: "demoteEpochs", label: "Demote hold",
+        unit: " epochs", min: 1, max: 32, step: 1, digits: 0,
+        hint: "Quiet epochs required before one-rung demotion.",
+      },
+      {
+        kind: "param-range", param: "promoteScore", label: "Promote score",
+        min: 0, max: 1, step: 0.025, digits: 3,
+        enabled: (context) => context.values.selectorMode === "activity",
+        hint: "Normalized activity needed for a hot epoch.",
+      },
+      {
+        kind: "param-range", param: "demoteScore", label: "Demote score",
+        min: 0, max: 1, step: 0.025, digits: 3,
+        enabled: (context) => context.values.selectorMode === "activity",
+        hint: "Maximum normalized activity allowed for a quiet epoch.",
+      },
+      {
+        kind: "param-range", param: "emergencyScore", label: "Emergency score",
+        min: 0, max: 1, step: 0.025, digits: 3,
+        enabled: (context) => context.values.selectorMode === "activity",
+        hint: "Normalized activity that bypasses promotion persistence.",
+      },
+    ],
+    chip: (context) => `${context.values.selectorMode === "activity"
+      ? "surface + activity" : "surface distance"} · plan every ${Number(
+      context.values.topologyCadenceSteps ?? SPARSE_CM12_ACTIVITY_POLICY.topologyCadenceSteps,
+    ).toFixed(0)} steps · ${Number(
+      context.values.prepareBricksPerFrame
+        ?? SPARSE_CM12_ACTIVITY_POLICY.prepareBricksPerFrame,
+    ).toFixed(0)}/frame`,
   }),
   stage({
     id: "candidate-transfer", band: "adaptivity", side: "left",
     label: "Candidate transfer",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.candidateTransfer.label],
     tip: {
-      summary: "Restricts and prolongs cells and faces into each brick's candidate resolution and writes the mass, gamma and momentum error receipts that decide whether that candidate could be accepted.",
-      reads: "candidate levels, conditioned cell and face state",
-      writes: "candidate leaf storage and per-brick transfer receipts",
-      feeds: "dry-brick retirement",
+      summary: "The urgent lane prepares surface and thin-fluid promotions first; a persistent GPU cursor visits ordinary split/merge requests round-robin under the per-frame budget. Density, gamma, momentum and face flux transfer into double-buffered shadow slots before one atomic physical generation flip.",
+      reads: "urgent and ordinary GPU queues, candidate levels, accepted cell and face state",
+      writes: "shadow leaf/face storage, pressure-row worklists, conservation receipts and accepted-generation metadata",
+      feeds: "transport, pressure, projection, diagnostics and presentation through the next frame's indirect dispatches",
     },
-    chip: (context) => `${context.info?.adaptiveActivityHotBrickCount ?? 0} hot · ${context.info?.adaptiveActivityQuietBrickCount ?? 0} quiet`,
+    chip: (context) => `${context.info?.adaptiveTopologyUrgentQueuedBrickCount ?? 0} urgent · ${context.info?.adaptiveTopologyOrdinaryQueuedBrickCount ?? 0} queued · generation ${context.info?.adaptiveTopologyShadowGeneration ?? 0}`,
   }),
   stage({
     id: "retention-conditioning", band: "adaptivity", side: "right",
     label: "Retain + condition",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.retentionConditioning.label],
     tip: {
-      summary: "Retires unsupported dry bricks logically and clears their stale fields. Packed cell/row capacity remains immutable; this stage does not publish candidate resolutions as a rebuilt accepted atlas.",
+      summary: "Retires unsupported dry bricks logically and clears stale residue. Packed accepted cell and pressure-row topology remains unchanged in this rung.",
       reads: "transported density/gamma/momentum",
       writes: "active-bit history, cleared residue, and retirement receipts",
       feeds: "forces and projection",

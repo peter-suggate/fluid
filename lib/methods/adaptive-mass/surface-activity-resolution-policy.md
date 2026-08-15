@@ -1,10 +1,11 @@
 # Sparse CM12 surface-activity resolution policy
 
-Status: first implementable rung. This is the specified replacement for
-bootstrap component-size coarsening; it does not add camera-distance adaptation.
-The first rung keeps every free-surface brick and predicted surface receiver
-fine, while allowing deep calm liquid to coarsen. Calm-surface coarsening is a
-separate second rung after the conservative controller is proven.
+Status: the GPU candidate selector is implemented; authoritative topology
+publication remains a separate, GPU-only transaction. The default criterion is
+deliberately simple: every free-surface or thin-fluid brick requests `8^3`, and
+the rest grades outward through `4^3 -> 2^3 -> 1^3` with strict 2:1 face
+balance. Velocity/deformation/temporal/detail signals are an explicit opt-in
+criterion, not part of the default.
 
 ## Current failure and decision
 
@@ -17,11 +18,11 @@ The mini dam break is one such component, so the deliberate negative fine half
 collapses to a diagnostic seed. Component size is neither activity nor an
 accuracy measure and must not remain the production policy.
 
-The first production rung is a hysteretic, brick-local surface policy:
+The production selector is a hysteretic, brick-local surface/activity policy:
 
 - absent bricks stay absent and receive zero classification work;
-- fully interior, quiescent liquid may be `4^3`;
-- every free-surface brick is `8^3` in the first rung, independently of its
+- fully interior, quiescent liquid may descend to `1^3`;
+- every free-surface brick is `8^3`, independently of its
   activity score;
 - resolution changes occur at a topology epoch, never in the middle of a CM12
   step;
@@ -47,11 +48,42 @@ A brick is in the surface band if either:
 2. one of its composite rows straddles the CM12 `rho = 0.5` isovalue, treating
    sparse air as `rho = 0`.
 
-Only surface-band bricks evaluate the more expensive channels, but surface-band
-membership itself is a hard fine-resolution floor in the first rung. Use the coarse
-cell width `h4 = 2` in finest-cell units when making the score, irrespective of
-the brick's current resolution; this makes a promote decision and the
-corresponding keep-fine decision comparable.
+Surface-band membership is a hard fine-resolution floor. In the optional
+`Surface + activity` criterion, bulk fluid also measures maximum accepted
+velocity as finest-cell travel per step. That quantity selects a floor
+independent of the brick's current level:
+
+```text
+travel = dt * max_rho>1e-5(length(u))       // finest cells per step
+
+travel >= 1.00 -> 8^3
+travel >= 0.50 -> 4^3
+travel >= 0.25 -> 2^3
+otherwise      -> 1^3
+```
+
+The surface floor wins over the velocity floor. In default `Surface distance`
+mode, velocity, deformation, temporal change, and restriction detail do not
+affect resolution.
+
+Thin represented liquid is also a hard `8^3` floor, even when dilution makes
+it too faint to cross the `rho = 0.5` surface. For each occupied composite leaf,
+classification records the exposed positive and negative sides supplied by
+its incidence rows. The leaf is thin when both sides of any axis are exposed
+and its volume-fraction-weighted width is under two finest cells:
+
+```text
+representedThickness = clamp(rho, 0, 1) * leafWidthFineCells
+thin = rho > dryThreshold
+    && representedThickness < 2
+    && exists axis with exposedNegative(axis) && exposedPositive(axis)
+```
+
+This deliberately treats a one-cell sheet, filament, or dilute isolated leaf
+as unresolved geometry and refines its whole brick. A two-cell-or-thicker body
+with air on only its outer face is not classified as thin. Density at or below
+the shared dry threshold remains residue and may be retired instead of pinning
+fine topology.
 
 For each surface brick compute these dimensionless values:
 
@@ -97,18 +129,42 @@ Reason bits are independent of the scalar maximum:
 ```ts
 export const enum SparseSurfaceActivityReason {
   Surface       = 1 << 0,
-  Shape         = 1 << 1,
-  Transport     = 1 << 2,
-  Temporal      = 1 << 3,
-  FineDetail    = 1 << 4,
-  PredictedFace = 1 << 5,
-  Unknown       = 1 << 6,
-  SeamSentinel  = 1 << 7,
+  Deformation   = 1 << 1,
+  Temporal      = 1 << 2,
+  FineDetail    = 1 << 3,
+  PredictedFace = 1 << 4,
+  Unknown       = 1 << 5,
+  Occupied      = 1 << 6,
+  Energetic     = 1 << 7,
+  ThinFluid     = 1 << 8,
 }
 ```
 
-The initial thresholds are calibration values, not scene knobs. Publish them
-with captures so threshold changes cannot silently invalidate A/B results.
+The listed thresholds are reproducible defaults. Interactive overrides are
+method parameters and therefore travel with captures/URLs, so an experiment
+cannot silently change an A/B policy.
+
+## Interactive experiment controls
+
+The SIM panel's **Activity + resolution** stage exposes the selector rather
+than requiring shader edits. Its controls fall into two deliberately explicit
+classes:
+
+- `Created-region floor`, `Initial fine band`, and `Receiver reach` are
+  structural. They rebuild the accepted packed atlas. Until live topology
+  publication is complete, setting the created-region floor to `8^3` is the
+  conservative guarantee that a fast front cannot enter a coarse receiver.
+- travel thresholds for the `8^3/4^3/2^3` rungs, front lookahead, thin-feature
+  width/density, partial-surface bounds, restriction-error tolerance, topology
+  cadence, promotion/demotion persistence, and score thresholds are runtime
+  controls. They enter the next frame's small GPU uniform and change candidate
+  requests without resetting simulation time.
+
+The stage displays `CANDIDATE ONLY` while accepted composite rows remain
+construction-time. This is intentional disclosure, not a selector mode: GPU
+measurement, planning, 2:1 closure, and conservative transfer receipts run,
+but their candidate fields do not become physics authority until the atomic
+topology-publication transaction is implemented.
 
 ## Hysteretic state machine
 
@@ -133,7 +189,7 @@ export interface SparseSurfaceResolutionPolicyOptions {
   readonly emergencyPromoteScore: 224;
   readonly demoteScore: 96;
   readonly promoteEpochs: 2;
-  readonly demoteEpochs: 8;
+  readonly demoteEpochs: 1;
   readonly maximumPromotionLeafDelta: number;
   readonly maximumDemotions: number;
   readonly seamSentinel: "off" | "single" | "horizontal-d4-orbit";
@@ -148,8 +204,11 @@ affect another brick's result.
 ```text
 coarse + score >= 224                       -> request fine now
 coarse + score >= 160 for 2 epochs          -> request fine
-fine   + score <= 96 for 8 epochs
-       + restrictionError <= 0.08           -> request coarse
+fine   + no surface
+       + no thin fluid
+       + velocity floor below current level
+       + score < 160
+       + restrictionError <= 0.08 for 1 epoch -> request one rung coarser
 otherwise                                   -> retain resolution
 ```
 
@@ -163,11 +222,17 @@ guard, not camera adaptation. A later calm-surface rung may create a `4^3`
 receiver only when the predictor proves that the interface cannot reach it
 before the following topology epoch.
 
-With only `4^3` and `8^3` bricks, every resident adjacency is already strictly
-2:1 or equal. Still run a balance/validation pass and publish its zero-or-more
-closure count, because a later `2^3` rung must refine the coarser neighbor to a
-fixpoint. Omitted air is not a level and is not made resident merely for
-balance.
+Run a refine-only balance closure over all face neighbors after snapshot
+classification. Three ordered passes close the four-level `1/2/4/8` ladder to
+a strict 2:1 fixpoint. Omitted air is not a level and is not made resident
+merely for balance.
+
+Residency uses the shared CM12 dry threshold (`rho <= 1e-5`) rather than exact
+floating-point zero. A brick containing only sub-threshold residue may retire
+once it is outside directional surface support. Its discarded integrated mass
+is published in the activity receipt and its fields are cleared, so later
+receiver activation cannot resurrect stale residue. The worst-case discarded
+mass per full brick is bounded by `512 * 1e-5 = 0.00512` finest-cell mass units.
 
 ## Determinism and D4 symmetry
 
@@ -197,6 +262,86 @@ not alter density, gamma, or velocity. UI diagnostics must distinguish pinned
 fine bricks from activity-selected fine bricks. The present `fineHalf` option
 can be removed once `single` is wired; retaining half a domain is too expensive
 for a seam sentinel.
+
+## GPU-only staggered publication design
+
+Topology publication must not call `mapAsync`, `onSubmittedWorkDone`, rebuild a
+CPU atlas, replace buffers from the host, or pause `advanceTo`. A prototype that
+did this was immediately rejected: even compact readback introduces a queue
+bubble and makes topology cadence visible as a hitch.
+
+The accepted and preparing generations therefore live side by side on the
+device. Storage is sparse-brick-capacity-shaped, never finest-domain-shaped:
+
+```text
+accepted brick levels + active bits
+accepted fixed-slot cell state (512 slots per resident brick)
+accepted compact cell/row worklists
+
+shadow brick levels + preparation bits
+shadow cell/face transfer slots
+shadow local-row and seam-row descriptors
+dirty queue: urgent segment | ordinary segment
+indirect dispatch/count header
+```
+
+Fixed per-brick cell slots are an address space, not a compute commitment. The
+accepted cell worklist contains only `resolution^3` live slots for each active
+brick, and physics dispatches indirectly over that compact list. Row work is
+likewise compact. This avoids the two bad alternatives: global prefix offsets,
+which make one brick change relocate every later brick, and dispatching all 512
+slots for every coarse brick, which would silently turn the adaptive method
+into all-fine work.
+
+An epoch is a device-side state machine:
+
+```text
+IDLE
+  -> PLAN: snapshot evidence, request levels, close 2:1
+  -> QUEUE: mark changed bricks plus their face-neighbour seam ring
+  -> PREPARE: build shadow local topology in bounded round-robin batches
+  -> READY: all dirty metadata prepared; accepted physics still advances
+  -> COMMIT: transfer latest state, rebuild compact worklists, project, validate
+  -> FLIP: one atomic accepted-generation change
+  -> IDLE
+```
+
+Preparation may span frames because it writes only topology metadata. It must
+not transfer evolving physical state early: that snapshot would be stale by the
+time the generation flips. Cell/gamma/momentum and exterior-flux transfer runs
+from the latest accepted state in the commit frame, followed immediately by a
+zero-time composite projection and receipt validation. A failed receipt clears
+the shadow transaction and leaves the accepted generation untouched.
+
+The queue has two lanes:
+
+- **urgent**: surface/thin-fluid promotion, swept-front receivers, and every
+  balance brick needed to make those requests 2:1. Urgent work is prepared
+  first and may exceed the ordinary budget. It is never delayed behind a bulk
+  merge.
+- **ordinary**: distance-driven coarsening and optional activity promotion.
+  A device cursor consumes at most `prepareBricksPerFrame` entries, wrapping
+  round-robin across epochs. Equal-score/D4 orbit buckets are indivisible.
+
+Coarsening is lower priority than refinement. If new surface evidence touches a
+brick while an older shadow transaction wants to merge it, the GPU cancels that
+merge, raises the shadow requirement, and requeues its seam ring. If accepted
+physics activates a dormant receiver during preparation, its `8^3` urgent
+request is folded into the same transaction or starts the next one if shadow
+capacity is already sealed.
+
+Suggested initial budget is four ordinary bricks per frame, tunable from 1 to
+64 after timings exist. The actual budget contract is work-based: preparation
+stops when either the brick count or a row-descriptor count is exhausted. The
+GPU header publishes `dirty`, `urgent`, `prepared`, `remaining`, `cancelled`,
+and `generation` counters for diagnostics, but the host never consumes them to
+schedule simulation.
+
+The commit is atomic at generation granularity. Per-brick flips are forbidden:
+pressure rows crossing a brick face must never observe one endpoint from the
+accepted generation and the other from shadow. Presentation and scientific
+overlays read the same accepted-generation slot as physics, so no separate
+visual topology can get ahead of simulation.
 
 ## Conservative topology transfer
 
@@ -338,6 +483,48 @@ The current CPU dynamics authority cannot satisfy this GPU frame contract. The
 policy must therefore be implemented directly against the compact GPU frame
 pipeline rather than optimized around CPU leaf materialization.
 
+## Physical topology cutover ABI
+
+The GPU scheduler publishes brick resolution and double-buffered transferred
+fields as one physical generation. Transport, pressure, projection,
+diagnostics, and presentation all resolve the accepted worklists; the host
+never substitutes construction-time cell or row counts after initialization.
+
+Construction pre-packs reusable operator templates rather than rebuilding rows
+on the host:
+
+- four intra-brick templates per receiver (`1^3`, `2^3`, `4^3`, `8^3`);
+- one face template for every ordered neighbour-level pair (4 x 4 = 16), for
+  each resident face adjacency;
+- level-specific embedded-boundary geometry, exterior rows, term incidence,
+  and transfer maps;
+- two device-owned cell worklists and two row worklists, plus matching indirect
+  dispatch arguments and active counts.
+
+Stable template cell/row handles live in superset storage. A GPU commit writes
+the inactive worklists by selecting each brick's intra template and each
+adjacency's level-pair face template, compacts them with a scan, writes indirect
+arguments, validates 2:1 and conservation receipts, then flips one generation
+word. Every transport, pressure, projection, diagnostic and presentation
+kernel must resolve its invocation through the selected worklist; a host
+uniform `cellCount` or `rowCount` is no longer authoritative.
+
+The face templates do not need 16 full copies of geometric row payload. A face
+can retain a finest `8 x 8` micro-face lattice and pre-pack the 16 compact
+owner/term mappings into it; the selected mapping supplies the active row
+worklist. This avoids multiplying every adjacency's geometry by 16 while still
+making the dispatch independent of CPU topology work.
+
+Partial staggered commits must remain valid against the currently accepted
+generation. Urgent promotion commits include their complete 2:1 closure as one
+transaction. An ordinary one-rung demotion is committed only if its neighbours
+still satisfy 2:1 at the commit gate; otherwise it remains queued for the next
+round-robin visit. A topology generation becomes physically accepted only
+after field and flux transfer receipts validate and an atomic slot flip
+publishes its selected cell and row worklists. The next frame snapshots their
+indirect arguments entirely on the GPU before transport and pressure consume
+them.
+
 ## Acceptance gates for the first rung
 
 1. Initialization: mini dam break retains the requested single seam sentinel;
@@ -363,7 +550,7 @@ pipeline rather than optimized around CPU leaf materialization.
 10. Performance: all frame gates above pass from captured GPU stage timings,
     not wall-clock estimates around asynchronous submission.
 
-Camera distance, curvature-quality tuning, limited-linear prolongation, more
-than two resolution rungs, and authored quality regions are later rungs. They
+Camera distance, curvature-quality tuning, limited-linear prolongation, and
+authored quality regions are later rungs. They
 must compose as additional required-resolution evidence; they do not replace
 surface activity or its conservation transaction.

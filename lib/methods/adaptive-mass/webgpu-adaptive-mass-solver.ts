@@ -36,6 +36,7 @@ import {
 import { WebGPUAdaptiveMassSparsePresentation } from
   "./webgpu-adaptive-mass-atlas-presentation";
 import {
+  sparseCM12ActivityPolicy,
   sparseCM12SharpeningDistance,
   sparseCM12SharpeningTraceSteps,
   WebGPUSparseCM12Resident,
@@ -62,6 +63,22 @@ export interface AdaptiveMassGPUActivityBrick extends SparseCM12GPUActivityRecor
   readonly resolution: SparseBrickResolution;
 }
 
+/**
+ * Read-only receipt from the device scheduler. `advanceTo` never consumes this
+ * shape: it exists only so explicit diagnostics can explain what the fixed GPU
+ * dispatch chain accepted and what remains queued.
+ */
+interface SparseCM12TopologySchedulerDiagnostics {
+  readonly acceptedTopologyGeneration?: number;
+  readonly topologyUrgentQueuedBrickCount?: number;
+  readonly topologyOrdinaryQueuedBrickCount?: number;
+  readonly topologyPreparedBrickCount?: number;
+  readonly topologyCommittedBrickCount?: number;
+  readonly topologyDeferredBrickCount?: number;
+  readonly acceptedFineBrickCount?: number;
+  readonly acceptedCoarseBrickCount?: number;
+}
+
 /** Select a fine receiver and its strongly graded outward support rung. */
 export function dormantReceiverResolution(
   mode: AdaptiveMassSolverOptions["resolutionMode"],
@@ -78,12 +95,12 @@ export function dormantReceiverResolution(
 }
 
 /**
- * Fixed construction-time reach of the GPU-resident receiver pool.
+ * Fixed construction-time capacity reach of the GPU-resident receiver pool.
  *
- * This is a capacity bound, not a domain bound.  Sparse CM12 currently keeps
- * its packed composite rows immutable while a run is attached, so it reserves
- * a local apron far enough for several brick crossings and grades the cold
- * exterior down through 4/2/1 cells.  Crucially, a kilometre-wide authored
+ * This is a capacity bound, not a domain bound. It reserves a local apron far
+ * enough for several brick crossings; the GPU
+ * scheduler may split and merge bricks within that capacity after attachment.
+ * Crucially, a kilometre-wide authored
  * world costs the same as a small one when their live liquid sets are equal.
  */
 export const SPARSE_CM12_RECEIVER_SUPPORT_RINGS = 9;
@@ -218,6 +235,7 @@ export function dormantReceiverDomain(
   source: SparseAdaptiveMassAtlas,
   mode: AdaptiveMassSolverOptions["resolutionMode"],
   supportRings = SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
+  receiverFloor: "auto" | SparseBrickResolution = "auto",
 ): SparseAdaptiveMassAtlas {
   if (!Number.isSafeInteger(supportRings) || supportRings < 0) {
     throw new RangeError("Sparse CM12 receiver support rings must be a non-negative integer");
@@ -239,7 +257,9 @@ export function dormantReceiverDomain(
     (density) => density > 0,
   ) && brick.coordinate.some((value, axis) => value === 0
     || value === source.brickDimensions[axis] - 1));
-  const physicalReceiverFloor: SparseBrickResolution = boundaryFed ? 4 : 1;
+  const physicalReceiverFloor: SparseBrickResolution = mode === "all-fine" ? 8
+    : mode === "all-coarse" ? 4
+      : receiverFloor === "auto" ? (boundaryFed ? 4 : 1) : receiverFloor;
   for (const brick of source.bricks) {
     distanceByKey.set(brick.key, 0);
     queue.push(brick.coordinate);
@@ -440,11 +460,13 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               : undefined;
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
+            surfaceFineRings: options.surfaceFineRings,
             ...(resolutionForBrick ? { resolutionForBrick } : {}),
           });
           const supported = residentSupportAtlas(atlas, options.resolutionMode);
           initiallyActiveBrickKeys = new Set(supported.bricks.map((brick) => brick.key));
-          atlas = dormantReceiverDomain(supported, options.resolutionMode);
+          atlas = dormantReceiverDomain(supported, options.resolutionMode,
+            options.receiverSupportRings, options.receiverFloor);
           dynamics = initializeSparseAtlasDynamics(atlas);
         },
       }, {
@@ -555,18 +577,20 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    *
    * `timeStep` picks between the paper 1/30 s operating step and the scene's
    * authored `maxDt_s`; both are consulted at the top of `advanceTo`, so the
-   * switch is a live one. The only other control this method offers — the
-   * resolution policy — decides how the atlas was packed and genuinely cannot
-   * move without a rebuild, which is why it stays out of `runtimeParamKeys`.
+   * switch is a live one. Activity thresholds are likewise copied into the
+   * next frame's small policy uniform. Structural capacity controls still
+   * rebuild, while accepted resolution changes publish at topology epochs.
    */
   applyRuntimeValues(values: MethodParamValues): void {
     const timeStep = values.timeStep === "scene" ? "scene" : "paper";
     const sharpeningDistance = sparseCM12SharpeningDistance(values.sharpeningDistance);
     const sharpeningTraceSteps = sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps);
-    if (timeStep === this.options.timeStep
-      && sharpeningDistance === this.options.sharpeningDistance
-      && sharpeningTraceSteps === this.options.sharpeningTraceSteps) return;
-    this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps };
+    const activityPolicy = sparseCM12ActivityPolicy({
+      ...values,
+      activitySignals: values.selectorMode === "activity",
+    });
+    this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps,
+      activityPolicy };
   }
 
   advanceTo(time_s: number, _bodies: RigidBodyState[]): boolean {
@@ -618,6 +642,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         distanceCells: this.options.sharpeningDistance,
         traceSteps: this.options.sharpeningTraceSteps,
       },
+      this.options.activityPolicy,
       frameCapture?.residentStageSeams,
     );
     frameCapture?.closeCommands();
@@ -674,6 +699,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   async readStats(): Promise<GPUEulerianInfo> {
     await this.device.queue.onSubmittedWorkDone();
     const diagnostics = await this.resident.readDiagnostics();
+    // Telemetry readback is deliberately downstream of simulation. These
+    // values update panels only; no scheduler decision or dispatch dimension
+    // is ever derived from them on the host.
+    const topology = diagnostics as typeof diagnostics
+      & SparseCM12TopologySchedulerDiagnostics;
     this.info.pressureRelativeResidual = diagnostics.pressureRelativeResidual;
     this.info.maxDivergenceAfter_s = diagnostics.maximumDivergence_s;
     this.info.maxDivergence_s = diagnostics.maximumDivergence_s;
@@ -692,9 +722,23 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       / Math.max(1, this.info.equivalentUniformCells ?? diagnostics.activeCellCount);
     this.info.fluidBrickResidentCount = diagnostics.activeBrickCount;
     this.info.fluidBrickCoreCount = diagnostics.activeBrickCount;
-    this.info.fluidBrickGeneration = this.atlas.generation + diagnostics.residencyGeneration;
-    // This rung measures and retains history only. Candidate topology has no
-    // authority yet, so an epoch must publish exact zero transition counts.
+    // Residency and accepted split/merge publication are independent GPU
+    // generations. Their sum is a monotonic renderer-facing revision.
+    this.info.fluidBrickGeneration = this.atlas.generation
+      + diagnostics.residencyGeneration + (topology.acceptedTopologyGeneration ?? 0);
+    this.info.adaptiveTopologyShadowGeneration =
+      topology.acceptedTopologyGeneration ?? 0;
+    this.info.adaptiveTopologyUrgentQueuedBrickCount =
+      topology.topologyUrgentQueuedBrickCount ?? 0;
+    this.info.adaptiveTopologyOrdinaryQueuedBrickCount =
+      topology.topologyOrdinaryQueuedBrickCount ?? 0;
+    this.info.adaptiveTopologyPreparedBrickCount = topology.topologyPreparedBrickCount ?? 0;
+    this.info.adaptiveTopologyCommittedBrickCount = topology.topologyCommittedBrickCount ?? 0;
+    this.info.adaptiveTopologyDeferredBrickCount = topology.topologyDeferredBrickCount ?? 0;
+    this.info.adaptiveTopologyShadowFineBrickCount = topology.acceptedFineBrickCount;
+    this.info.adaptiveTopologyShadowCoarseBrickCount = topology.acceptedCoarseBrickCount;
+    this.info.adaptiveFineBrickCount = topology.acceptedFineBrickCount;
+    this.info.adaptiveCoarseBrickCount = topology.acceptedCoarseBrickCount;
     this.info.adaptiveResolutionPromotedBrickCount = 0;
     this.info.adaptiveResolutionDemotedBrickCount = 0;
     this.info.adaptiveResolutionDeferredPromotionCount = 0;

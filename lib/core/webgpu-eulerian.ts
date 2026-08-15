@@ -60,6 +60,15 @@ export interface GPUEulerianInfo {
   adaptiveResolutionPromotedBrickCount?: number;
   adaptiveResolutionDemotedBrickCount?: number;
   adaptiveResolutionDeferredPromotionCount?: number;
+  /** GPU-only staged topology scheduler receipt. No value here drives host scheduling. */
+  adaptiveTopologyUrgentQueuedBrickCount?: number;
+  adaptiveTopologyOrdinaryQueuedBrickCount?: number;
+  adaptiveTopologyPreparedBrickCount?: number;
+  adaptiveTopologyCommittedBrickCount?: number;
+  adaptiveTopologyDeferredBrickCount?: number;
+  adaptiveTopologyShadowGeneration?: number;
+  adaptiveTopologyShadowFineBrickCount?: number;
+  adaptiveTopologyShadowCoarseBrickCount?: number;
   /** Wet-domain storage residency, independent from the narrow surface band. */
   fluidBulkBrickResidentCount?: number;
   fluidBulkBrickHaloCount?: number;
