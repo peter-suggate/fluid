@@ -280,7 +280,21 @@ export function initialFluidBrickCoordinates(
 ): readonly [number, number, number][] | undefined {
   const seeds = scene.fluid.initialBrickSeeds_m;
   if (!seeds?.length || scene.fluid.initialBrickSeedsAdditive) return undefined;
-  return [...seedBrickCoordinates(scene, dimensions, brickSize).values()].map((entry) => entry.brick);
+  return initialFluidSeedBrickCoordinates(scene, dimensions, brickSize);
+}
+
+/** Every explicitly seeded brick, independent of whether seeds replace or add
+ * to the base fill. Sparse initializers use this together with analytic source
+ * bounds so an additive seed never forces a scan of the empty world between
+ * disconnected bodies. */
+export function initialFluidSeedBrickCoordinates(
+  scene: SceneDescription,
+  dimensions: readonly [number, number, number],
+  brickSize: number,
+): readonly [number, number, number][] {
+  return [...seedBrickCoordinates(scene, dimensions, brickSize).values()].map(
+    (entry) => entry.brick,
+  );
 }
 
 function brickBounds(

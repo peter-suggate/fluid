@@ -22,12 +22,12 @@ struct Params {
   counts:vec4u,             // cell, row, incidence, dense
   dimensions:vec4u,
   topologyOffsets:vec4u,    // cells, rows, terms, incidenceOffsets
-  topologyOffsets2:vec4u,   // incidences, owner records, brick records, background owner
+  topologyOffsets2:vec4u,   // incidences, sorted brick key/index pairs, brick records, background owner
   stateOffsets0:vec4u,      // density A/B, gamma A/B
   stateOffsets1:vec4u,      // cell velocity A/B, face A/B
   stateOffsets2:vec4u,      // pressure, rhs, diagonal, liquid
   stateOffsets3:vec4u,      // theta, residual, preconditioned, direction
-  stateOffsets4:vec4u,      // applied, divergence, presentation brick wet, brick directory
+  stateOffsets4:vec4u,      // applied, divergence, presentation brick wet, reserved
   stateOffsets5:vec4u,      // sharpening delta / D4 rho scratch, D4 gamma scratch, reserved
   frame:vec4f,              // dt, finest cell metres, pressure scale, parity
   acceleration:vec4f,       // finest cells / second^2
@@ -42,18 +42,14 @@ struct Params {
 @group(0)@binding(2)var<storage,read_write>state:array<f32>;
 @group(0)@binding(3)var<storage,read_write>partials:array<vec2f>;
 @group(0)@binding(4)var<storage,read_write>scalars:array<f32>;
-@group(0)@binding(5)var densityTexture:texture_storage_3d<r32float,write>;
-@group(0)@binding(6)var levelSetTexture:texture_storage_3d<r32float,write>;
-@group(0)@binding(7)var ownerTexture:texture_storage_3d<rg32uint,write>;
-@group(0)@binding(8)var velocityTexture:texture_storage_3d<rgba32float,write>;
-@group(0)@binding(9)var pressureTexture:texture_storage_3d<r32float,write>;
-@group(0)@binding(10)var divergenceTexture:texture_storage_3d<r32float,write>;
 @group(0)@binding(11)var<storage,read_write>conditioning:array<atomic<i32>>;
 // Device-owned activity, planning, and logical-residency arena. Physics reads
 // the published active bit, while immutable packed topology and accepted CM12
 // fields remain separate storage.
 @group(0)@binding(12)var<storage,read_write>activity:array<atomic<u32>>;
 @group(0)@binding(13)var<storage,read_write>candidateState:array<f32>;
+@group(0)@binding(14)var<storage,read>fineMetadata:array<u32>;
+@group(0)@binding(15)var<storage,read_write>fineSamples:array<u32>;
 
 fn tf(index:u32)->f32{return bitcast<f32>(topology[index]);}
 fn sourceDensity()->u32{return select(p.stateOffsets0.x,p.stateOffsets0.y,p.frame.w>0.5);}
@@ -96,21 +92,42 @@ fn brickActive(brick:u32)->bool{
 fn cellActive(cell:u32)->bool{return brickActive(cellBrick(cell));}
 fn isLiquid(cell:u32)->bool{return cellActive(cell)&&state[p.stateOffsets2.w+cell]>0.5;}
 
+fn brickDirectoryLookup(key:u32)->u32{
+  var low=0u;var high=p.dispatch.w;
+  loop{
+    if(low>=high){break;}
+    let middle=low+(high-low)/2u;
+    let candidate=topology[p.topologyOffsets2.y+2u*middle];
+    if(candidate<key){low=middle+1u;}else{high=middle;}
+  }
+  if(low>=p.dispatch.w||topology[p.topologyOffsets2.y+2u*low]!=key){return INVALID;}
+  return topology[p.topologyOffsets2.y+2u*low+1u];
+}
+
+fn compactOwnerCellAt(q:vec3i)->vec2u{
+  if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))){return vec2u(INVALID);}
+  let uq=vec3u(q);let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let brickCoordinate=uq/8u;
+  let key=brickCoordinate.x+brickDimensions.x
+    *(brickCoordinate.y+brickDimensions.y*brickCoordinate.z);
+  let brick=brickDirectoryLookup(key);if(brick==INVALID){return vec2u(INVALID);}
+  let record=p.topologyOffsets2.z+4u*brick;let first=topology[record];
+  let count=topology[record+1u];let resolution=topology[record+2u];
+  let scale=8u/resolution;let local=(uq-brickCoordinate*8u)/scale;
+  let origin=brickCoordinate*8u;
+  let valid=(min(p.dimensions.xyz-origin+vec3u(scale-1u),vec3u(8u)))/scale;
+  let cell=first+local.x+valid.x*(local.y+valid.y*local.z);
+  return select(vec2u(INVALID),vec2u(cell,brick),cell<first+count);
+}
+
 fn ownerCellAt(q:vec3i)->u32{
-  if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))){return INVALID;}
-  let dense=u32(q.x)+p.dimensions.x*(u32(q.y)+p.dimensions.y*u32(q.z));
-  let owner=p.topologyOffsets2.y+4u*dense;let cell=topology[owner];
-  if(cell==INVALID||!brickActive(topology[owner+3u])){return INVALID;}
-  return cell;
+  let owner=compactOwnerCellAt(q);if(owner.x==INVALID||!brickActive(owner.y)){return INVALID;}
+  return owner.x;
 }
 
 fn presentationOwnerCellAt(q:vec3i)->u32{
-  if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))){return INVALID;}
-  let dense=u32(q.x)+p.dimensions.x*(u32(q.y)+p.dimensions.y*u32(q.z));
-  let owner=p.topologyOffsets2.y+4u*dense;let cell=topology[owner];
-  if(cell==INVALID){return INVALID;}
-  let brick=topology[owner+3u];
-  return select(INVALID,cell,brick<p.dispatch.w&&state[p.stateOffsets4.z+brick]>0.5);
+  let owner=compactOwnerCellAt(q);if(owner.x==INVALID){return INVALID;}
+  return select(INVALID,owner.x,state[p.stateOffsets4.z+owner.y]>0.5);
 }
 
 fn presentationPhi(cell:u32)->f32{
@@ -1038,10 +1055,6 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   atomicStore(&activity[output+9u],planReasons);
 }
 
-fn brickDirectoryLookup(key:u32)->u32{
-  return topology[p.stateOffsets4.w+key];
-}
-
 // Refine-only closure of GPU-authored candidate levels. Each dispatch moves a
 // violation one rung toward a valid 2:1 plan; three ordered dispatches cover
 // the complete 1/2/4/8 ladder without ever coarsening a requested surface.
@@ -1376,32 +1389,35 @@ fn classifyPresentationBricks(@builtin(global_invocation_id)gid:vec3u){
   state[p.stateOffsets4.z+brick]=select(0.0,1.0,wet);
 }
 
-@compute @workgroup_size(4,4,4)
-fn publishPresentation(@builtin(global_invocation_id)gid:vec3u){if(any(gid>=p.dimensions.xyz)){return;}
-  let dense=gid.x+p.dimensions.x*(gid.y+p.dimensions.y*gid.z);
-  let owner=p.topologyOffsets2.y+4u*dense;let cell=topology[owner];let coordinate=vec3i(gid);
-  let brick=topology[owner+3u];
-  let presentationCell=select(INVALID,cell,cell!=INVALID&&brick<p.dispatch.w
-    &&state[p.stateOffsets4.z+brick]>0.5);
-  if(presentationCell==INVALID){textureStore(densityTexture,coordinate,vec4f(0.0));
-    textureStore(levelSetTexture,coordinate,vec4f(4.0*p.frame.y));
-    textureStore(ownerTexture,coordinate,vec4u(topology[p.topologyOffsets2.w],
-      topology[p.topologyOffsets2.w+1u],0u,0u));
-    textureStore(velocityTexture,coordinate,vec4f(0.0));textureStore(pressureTexture,coordinate,vec4f(0.0));
-    textureStore(divergenceTexture,coordinate,vec4f(0.0));return;}
-  let rho=state[destinationDensity()+presentationCell];
-  textureStore(densityTexture,coordinate,vec4f(rho));
-  // CM12 renders the 0.5 isocontour of authoritative rho. Section 3.8's
-  // optional density postprocess is deliberately off, as in the paper's
-  // default results; there is no independently advected wall-film tracer.
-  let presentationScale=i32(topology[cellBase(presentationCell)+10u]);
-  var phi=presentationPhi(presentationCell);
-  if(presentationScale>1){phi=interpolatedPresentationPhi(coordinate,presentationScale);}
-  textureStore(levelSetTexture,coordinate,vec4f(phi));
-  textureStore(ownerTexture,coordinate,vec4u(topology[owner+1u],topology[owner+2u],0u,0u));
-  let v=destinationCellVelocity()+4u*presentationCell;
-  textureStore(velocityTexture,coordinate,vec4f(state[v]*p.frame.y,state[v+1u]*p.frame.y,state[v+2u]*p.frame.y,0.0));
-  textureStore(pressureTexture,coordinate,vec4f(state[p.stateOffsets2.x+presentationCell]*p.frame.z));
-  textureStore(divergenceTexture,coordinate,vec4f(state[p.stateOffsets4.y+presentationCell]));
+// Publish one compact renderer page per workgroup. Metadata is sorted by the
+// logical 4^3 page key, so consumers binary-search it without a world-sized
+// direct table. Missing authored-world pages are implicit air and cost no
+// storage, initialization, or frame dispatch.
+@compute @workgroup_size(64)
+fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let page=wid.x;let pageCount=arrayLength(&fineMetadata)/4u;
+  if(page>=pageCount||lane>=64u){return;}
+  let source=fineMetadata[4u*page+3u];let brick=source>>3u;
+  let octant=source&7u;let local=vec3u(lane%4u,(lane/4u)%4u,lane/16u);
+  let brickRecord=p.topologyOffsets2.z+4u*brick;
+  let brickKey=topology[brickRecord+3u];let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let brickXY=brickDimensions.x*brickDimensions.y;let brickZ=brickKey/brickXY;
+  let brickRemainder=brickKey-brickZ*brickXY;let brickY=brickRemainder/brickDimensions.x;
+  let brickX=brickRemainder-brickY*brickDimensions.x;
+  let pageOffset=vec3u(octant&1u,(octant>>1u)&1u,(octant>>2u)&1u)*4u;
+  let q=vec3u(brickX,brickY,brickZ)*8u+pageOffset+local;var phi=4.0*p.frame.y;
+  if(brick<p.dispatch.w&&state[p.stateOffsets4.z+brick]>0.5&&all(q<p.dimensions.xyz)){
+    let first=topology[brickRecord];let count=topology[brickRecord+1u];
+    let resolution=topology[brickRecord+2u];let scale=8u/resolution;
+    let cellLocal=(pageOffset+local)/scale;
+    let valid=(min(p.dimensions.xyz-vec3u(brickX,brickY,brickZ)*8u
+      +vec3u(scale-1u),vec3u(8u)))/scale;
+    let cell=first+cellLocal.x+valid.x*(cellLocal.y+valid.y*cellLocal.z);
+    if(cell<first+count){phi=presentationPhi(cell);
+      if(scale>1u){phi=interpolatedPresentationPhi(vec3i(q),i32(scale));}}
+  }
+  let flags=1u|select(0u,16u,phi<0.0);
+  fineSamples[page*64u+lane]=(pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u);
 }
 `;

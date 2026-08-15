@@ -39,6 +39,20 @@ export interface WebGPUFineLevelSetBrickSource {
   seedControl?: GPUBuffer;
 }
 
+/** Immutable sparse-cell topology plus the live CM12 field arena. Scientific
+ * overlays sample these buffers directly; no finest-domain ownership or field
+ * texture is materialized for visualization. */
+export interface SparseAdaptiveGridConsumerSource {
+  readonly kind: "sparse-adaptive-grid-sampling";
+  readonly params: GPUBufferBinding;
+  readonly topology: GPUBufferBinding;
+  readonly state: GPUBufferBinding;
+  readonly activity: GPUBufferBinding;
+  readonly fineMetadata: GPUBufferBinding;
+  readonly fineWorklist: GPUBufferBinding;
+  readonly fineSamples: GPUBufferBinding;
+}
+
 /**
  * One compact coarse-octree phi row: `{phi, minimumPhi, maximumPhi, flags}`.
  *

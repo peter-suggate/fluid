@@ -9,6 +9,9 @@ import {
   type SparseCM12BenchmarkArm,
 } from "../lib/methods/adaptive-mass/adaptive-mass-performance";
 import { sceneDamBreakBox } from "../lib/core/initial-fluid";
+import { cm12Scene } from "../lib/core/cm12-paper-scenes";
+import { FINE_LEVELSET_METADATA_WORDS } from
+  "../lib/core/fine-levelset-brick-abi";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
 import {
   createMinimalPowerDamBreak64Scene,
@@ -16,11 +19,21 @@ import {
   SPARSE_CM12_LONG_DAM_METHOD_PROFILE,
 } from "../lib/core/scenes";
 import {
+  createSparseAdaptiveMassAtlas,
   initializeSparseBrickAtlasFromScene,
+  sparseBrickKey,
   sparseBrickAtlasStats,
 } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
-import { dormantReceiverDomain, dormantReceiverResolution } from
+import {
+  dormantReceiverDomain,
+  dormantReceiverResolution,
+  adaptiveMassPresentationDimensionsForScene,
+  residentSupportAtlas,
+  SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
+} from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { sparseCM12FinePresentationPlan } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 test("resident activity measurement is GPU-owned and disjoint from accepted fields", () => {
   assert.match(webgpuSparseCM12ResidentWGSL,
@@ -272,6 +285,23 @@ test("new Sparse CM12 receivers are fine with a full graded support ladder", () 
   assert.equal(dormantReceiverResolution("all-fine"), 8);
 });
 
+test("Figure 7 promotes only fluid-bearing face receivers at construction", () => {
+  const scene = cm12Scene("cm12-figure-7");
+  const initial = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
+  });
+  const supported = residentSupportAtlas(initial, "adaptive");
+  const dormant = dormantReceiverDomain(supported, "adaptive");
+  const initialStats = sparseBrickAtlasStats(initial);
+  const supportStats = sparseBrickAtlasStats(supported);
+  const dormantStats = sparseBrickAtlasStats(dormant);
+  assert.equal(supportStats.residentBrickCount - initialStats.residentBrickCount, 8,
+    "the spherical source must not promote its whole 3x3x3 neighbor shell to 8-cubed");
+  assert.equal(supportStats.fineBrickCount - initialStats.fineBrickCount, 8);
+  assert.ok(dormantStats.leafCount < 100_000,
+    `Figure 7 construction regressed to ${dormantStats.leafCount} packed cells`);
+});
+
 test("the 64-cubed mini dam has dormant receivers on every domain axis", () => {
   const scene = createMinimalPowerDamBreak64Scene();
   const dimensions = sceneLatticeDimensions(scene);
@@ -281,6 +311,8 @@ test("the 64-cubed mini dam has dormant receivers on every domain axis", () => {
   });
   const domain = dormantReceiverDomain(initial, "adaptive");
   assert.equal(domain.bricks.length, 8 ** 3);
+  assert.ok(domain.bricks.every((brick) => brick.resolution >= 4),
+    "a boundary-fed dam needs a traversable 4-cubed immutable receiver pool");
   for (const coordinate of [[7, 0, 7], [0, 7, 7], [7, 7, 7]] as const) {
     const key = coordinate[0] + 8 * (coordinate[1] + 8 * coordinate[2]);
     assert.ok(domain.directory.has(key),
@@ -288,24 +320,153 @@ test("the 64-cubed mini dam has dormant receivers on every domain axis", () => {
   }
 });
 
-test("canonical Sparse CM12 dam defines a long narrow 96x24x16 traversal", () => {
+test("Sparse CM12 receiver and compact page capacity do not grow with empty world volume", () => {
+  const seeded = (dimensions: readonly [number, number, number],
+    coordinate: readonly [number, number, number]) => {
+    const brickDimensions = dimensions.map((value) => Math.ceil(value / 8)) as
+      [number, number, number];
+    return createSparseAdaptiveMassAtlas(dimensions, [{
+      key: sparseBrickKey(coordinate, brickDimensions),
+      coordinate,
+      resolution: 8,
+      density: new Float64Array(8 ** 3).fill(1),
+      gamma: new Float64Array(8 ** 3).fill(1),
+    }]);
+  };
+  const local = dormantReceiverDomain(seeded([256, 32, 32], [16, 2, 2]), "adaptive");
+  const vast = dormantReceiverDomain(
+    seeded([1_000_000, 32, 32], [62_500, 2, 2]), "adaptive",
+  );
+  assert.equal(SPARSE_CM12_RECEIVER_SUPPORT_RINGS, 9);
+  assert.equal(vast.bricks.length, local.bricks.length,
+    "empty world width must not add receiver records");
+  assert.equal(sparseBrickAtlasStats(vast).leafCount, sparseBrickAtlasStats(local).leafCount,
+    "empty world width must not add solver cells");
+  const localPresentation = sparseCM12FinePresentationPlan(local);
+  const vastPresentation = sparseCM12FinePresentationPlan(vast);
+  assert.equal(vastPresentation.plan.maximumResidentBricks,
+    localPresentation.plan.maximumResidentBricks,
+    "empty world width must not add compact pages");
+  assert.equal(vastPresentation.worklist.length,
+    7 + vastPresentation.plan.maximumResidentBricks,
+    "compact worklist must omit the logical-domain direct table");
+  assert.ok(vastPresentation.plan.logicalBrickCount
+    > 1_000 * vastPresentation.plan.maximumResidentBricks,
+  "the test world must be materially larger than its retained page set");
+});
+
+test("compact Sparse CM12 presentation pages retain their direct source address", () => {
+  const atlas = dormantReceiverDomain(createSparseAdaptiveMassAtlas([80, 24, 16], [{
+    key: sparseBrickKey([4, 1, 1], [10, 3, 2]),
+    coordinate: [4, 1, 1],
+    resolution: 8,
+    density: new Float64Array(8 ** 3).fill(1),
+    gamma: new Float64Array(8 ** 3).fill(1),
+  }]), "adaptive", 2);
+  const publication = sparseCM12FinePresentationPlan(atlas);
+  const [pagesX, pagesY] = publication.plan.brickDimensions;
+  let previousKey = -1;
+  for (let page = 0; page < publication.plan.maximumResidentBricks; page += 1) {
+    const at = FINE_LEVELSET_METADATA_WORDS * page;
+    const key = publication.metadata[at + 1]!;
+    const source = publication.metadata[at + 3]!;
+    const brick = atlas.bricks[source >> 3]!;
+    const octant = source & 7;
+    const coordinate = [2 * brick.coordinate[0] + (octant & 1),
+      2 * brick.coordinate[1] + ((octant >> 1) & 1),
+      2 * brick.coordinate[2] + ((octant >> 2) & 1)] as const;
+    const expected = coordinate[0] + pagesX * (coordinate[1] + pagesY * coordinate[2]);
+    assert.equal(key, expected, "page metadata must directly address its packed source octant");
+    assert.ok(key > previousKey, "compact metadata must remain sorted for consumer lookup");
+    previousKey = key;
+  }
+});
+
+test("Sparse CM12 scientific overlays consume accepted compact state directly", () => {
+  const overlay = readFileSync(new URL("../lib/core/webgpu-grid-overlay.ts", import.meta.url),
+    "utf8");
+  const renderer = readFileSync(new URL("../lib/core/webgpu-renderer.ts", import.meta.url),
+    "utf8");
+  assert.match(overlay, /@binding\(11\) var<storage,read> sparseTopology/);
+  assert.match(overlay, /fn sparseBrickLookup\(key:u32\)->u32/);
+  assert.match(overlay, /if\(sparseGridEnabled\(\)\)\{return sparseDensityAt/,
+    "surface density must come from the live compact resident state");
+  assert.match(overlay,
+    /select\(sparseP\.stateOffsets0\.x,sparseP\.stateOffsets0\.y,sparseP\.frame\.w>0\.5\)/,
+    "density visualization must select the solver's accepted ping-pong bank");
+  assert.match(overlay,
+    /select\(sparseP\.stateOffsets1\.x,sparseP\.stateOffsets1\.y,sparseP\.frame\.w>0\.5\)/,
+    "velocity visualization must select the solver's accepted ping-pong bank");
+  assert.match(overlay, /if\(sparseGridEnabled\(\)&&sparseOwner\(cell\)\.x==SPARSE_INVALID\)/,
+    "unrepresented world space must remain transparent");
+  assert.match(renderer, /setSparseSource\(this\.gpuFluid\.sparseAdaptiveGridSource\)/);
+  assert.doesNotMatch(renderer, /readDiagnosticFields/,
+    "rendering must never trigger dense QA materialization");
+});
+
+test("analytic initial volumes do not trigger an empty-domain brick scan", () => {
+  const base = createSparseCM12LongDamBreakScene();
+  const seed = base.fluid.initialBrickSeeds_m?.[0] ?? { x: 0, y: 0, z: 0 };
+  const h = base.container.width_m / 1_000_000;
+  const scene = { ...base, fluid: { ...base.fluid,
+    initialBrickSeeds_m: [seed],
+    initialBrickSeedsAdditive: false,
+    initialLiquidVolumes: [{ shape: "box" as const,
+      min_m: { x: seed.x - h, y: seed.y, z: seed.z - h },
+      max_m: { x: seed.x + h, y: seed.y + h, z: seed.z + h } }],
+  } };
+  const atlas = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: [1_000_000, 32, 32],
+  });
+  assert.ok(atlas.bricks.length > 0);
+  assert.ok(atlas.bricks.length < 16,
+    "local authored sources must not retain bricks from the empty million-cell corridor");
+});
+
+test("Sparse CM12 frame publication is page-shaped, not domain-shaped", () => {
+  assert.doesNotMatch(webgpuSparseCM12ResidentWGSL, /texture_storage_3d/);
+  assert.doesNotMatch(webgpuSparseCM12ResidentWGSL, /fn publishPresentation/);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /fn brickDirectoryLookup\(key:u32\).*var low=0u;var high=p\.dispatch\.w/s);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /fn publishSparseLevelSet[\s\S]*pageCount=arrayLength\(&fineMetadata\)\/4u/);
+  const residentSource = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.doesNotMatch(residentSource, /denseCount|brickDirectoryOffset|ownerOffset/);
+  assert.doesNotMatch(residentSource, /dispatch\("publishPresentation"/);
+  assert.match(residentSource,
+    /dispatch\("publishSparseLevelSet",\s*this\.globalFineLevelSetSource\.plan\.maximumResidentBricks\)/);
+  const solverSource = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.match(solverSource, /new WebGPUAdaptiveMassSparsePresentation\(device\)/);
+  assert.doesNotMatch(solverSource, /new WebGPUAdaptiveMassAtlasPresentation\(/,
+    "the sparse solver must not construct full-domain presentation textures");
+  assert.match(solverSource, /get globalFineLevelSetSource\(\)/,
+    "compact pages must be the renderer's surface authority");
+});
+
+test("canonical Sparse CM12 dam defines a tall sparse 96x48x16 traversal", () => {
   const scene = createSparseCM12LongDamBreakScene();
-  assert.deepEqual(sceneLatticeDimensions(scene), [96, 24, 16]);
+  assert.deepEqual(sceneLatticeDimensions(scene), [96, 48, 16]);
   assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.methodId, "adaptive-mass");
-  assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.timeStep, "scene");
+  assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.timeStep, "paper");
   const dam = sceneDamBreakBox(scene);
   assert.equal(dam.min.x, 0);
   assert.ok(Math.abs(dam.max.x - 1 / 6) < 1e-12);
-  assert.ok(Math.abs(dam.max.y - 5 / 6) < 1e-12);
+  assert.ok(Math.abs(dam.max.y - 5 / 12) < 1e-12);
   assert.equal(dam.max.z, 1);
   const atlas = initializeSparseBrickAtlasFromScene(scene, {
-    finestDimensions: [96, 24, 16],
+    finestDimensions: [96, 48, 16],
     resolutionForBrick: () => 4,
   });
   const stats = sparseBrickAtlasStats(atlas);
-  assert.equal(stats.logicalBrickCount, 72);
+  assert.equal(stats.logicalBrickCount, 144);
   assert.equal(stats.residentBrickCount, 12);
-  assert.equal(stats.omittedEmptyBrickCount, 60);
+  assert.equal(stats.omittedEmptyBrickCount, 132);
   assert.equal(atlas.brickDimensions[0] - 2, 10,
     "the front must cross ten initially dry brick columns");
 });

@@ -81,10 +81,12 @@ Current implementation checkpoint (2026-08-15):
   non-authoritative: row patching, global reprojection, coupled validation, and
   atomic publication remain required before accepted levels can change.
 - The canonical end-to-end sparse scene is `sparse-cm12-long-dam-break`: a
-  `96x24x16` tank whose full-width reservoir occupies the first two of twelve
+  `96x48x16` tank whose full-width reservoir occupies the first two of twelve
   brick columns. The front must traverse the ten initially dry columns and
   reach the opposite wall without a residency gap, a 2:1 discontinuity, mass
   loss, or an unexplained departure from forced-all-fine Sparse CM12.
+  The doubled vertical air column preserves the original liquid block and
+  finest-cell size while making sparse omission the dominant visual feature.
   The original long Dawn receipt was red: at `1.004 s`, Uniform reached fine
   cell `x=95`, while Sparse CM12 and its resident allocation stopped at `x=23`.
   The receiver transaction is green in the current Adaptive/All-fine A/B. At

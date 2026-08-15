@@ -2,9 +2,17 @@ import type { SparseAtlasCompositeGrid } from "./sparse-atlas-composite-projecti
 import { sparseAtlasScalarsHaveHorizontalD4Symmetry } from
   "./sparse-atlas-surface-conditioning";
 import type { SparseAdaptiveMassAtlas } from "./sparse-brick-atlas";
-import { packAdaptiveMassPresentationOwnerKey,
-  type WebGPUAdaptiveMassAtlasPresentation } from "./webgpu-adaptive-mass-atlas-presentation";
 import { CM12_SHARPENING_TRACE_STEPS } from "../../core/cm12-numerics";
+import {
+  FINE_LEVELSET_COMPACT_LOOKUP_FLAG,
+  FINE_LEVELSET_METADATA_WORDS,
+  FINE_LEVELSET_WORKSET_HEADER_WORDS,
+  type FineLevelSetBrickPlan,
+} from "../../core/fine-levelset-brick-abi";
+import type {
+  SparseAdaptiveGridConsumerSource,
+  WebGPUFineLevelSetBrickSource,
+} from "../../core/levelset-consumer-abi";
 import { webgpuSparseCM12ResidentWGSL } from "./webgpu-sparse-cm12-resident.wgsl";
 
 /** CM12 Sec. 3.5 Algorithm 2's live trace bounds, in finest cells and substeps. */
@@ -49,10 +57,9 @@ interface PackedResidentTopology {
   readonly termOffset: number;
   readonly incidenceOffset: number;
   readonly incidenceRecordOffset: number;
-  readonly ownerOffset: number;
+  readonly brickLookupOffset: number;
   readonly brickOffset: number;
   readonly backgroundOwnerOffset: number;
-  readonly brickDirectoryOffset: number;
   readonly brickCount: number;
   readonly incidenceCount: number;
 }
@@ -69,6 +76,86 @@ interface ResidentStateLayout {
   readonly applied: number; readonly divergence: number;
   readonly presentationBrickWet: number;
   readonly sharpeningDelta: number; readonly symmetryGamma: number;
+}
+
+export interface SparseCM12FinePresentationPlan {
+  readonly plan: FineLevelSetBrickPlan;
+  readonly metadata: Uint32Array;
+  readonly worklist: Uint32Array;
+}
+
+export function sparseCM12FinePresentationPlan(
+  atlas: SparseAdaptiveMassAtlas,
+): SparseCM12FinePresentationPlan {
+  const sampleDimensions = atlas.dimensions;
+  const brickDimensions = sampleDimensions.map((value) => Math.ceil(value / 4)) as
+    [number, number, number];
+  const pages: { key: number; brick: number; octant: number }[] = [];
+  for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
+    const source = atlas.bricks[brick]!;
+    for (let oz = 0; oz < 2; oz += 1)
+      for (let oy = 0; oy < 2; oy += 1)
+        for (let ox = 0; ox < 2; ox += 1) {
+          const coordinate = [2 * source.coordinate[0] + ox,
+            2 * source.coordinate[1] + oy, 2 * source.coordinate[2] + oz] as const;
+          if (coordinate.some((value, axis) => value >= brickDimensions[axis])) continue;
+          pages.push({
+            key: coordinate[0] + brickDimensions[0]
+              * (coordinate[1] + brickDimensions[1] * coordinate[2]),
+            brick,
+            octant: ox | (oy << 1) | (oz << 2),
+          });
+        }
+  }
+  pages.sort((left, right) => left.key - right.key);
+  const pageCount = pages.length;
+  const metadata = new Uint32Array(FINE_LEVELSET_METADATA_WORDS * pageCount);
+  for (let page = 0; page < pageCount; page += 1) {
+    metadata[FINE_LEVELSET_METADATA_WORDS * page] = page;
+    metadata[FINE_LEVELSET_METADATA_WORDS * page + 1] = pages[page]!.key;
+    metadata[FINE_LEVELSET_METADATA_WORDS * page + 2] = 1;
+    // Compact Sparse CM12 owns this metadata word: source brick plus its 4^3
+    // octant. Publication can therefore address the packed cell directly
+    // instead of binary-searching the retained directory once per sample.
+    metadata[FINE_LEVELSET_METADATA_WORDS * page + 3] =
+      (pages[page]!.brick << 3) | pages[page]!.octant;
+  }
+  // Compact mode deliberately stops after the active physical-page list.  It
+  // has no `logicalBrickCount`-sized direct directory; renderer lookup binary
+  // searches the key-sorted metadata instead.
+  const worklist = new Uint32Array(FINE_LEVELSET_WORKSET_HEADER_WORDS + pageCount);
+  worklist.set([1, pageCount, pageCount,
+    (FINE_LEVELSET_COMPACT_LOOKUP_FLAG | 3) >>> 0,
+    Math.ceil(pageCount / WORKGROUP_SIZE), 1, 1]);
+  for (let page = 0; page < pageCount; page += 1) {
+    worklist[FINE_LEVELSET_WORKSET_HEADER_WORDS + page] = page;
+  }
+  const samplesPerBrick = 4 ** 3;
+  const payloadCapacityBytes = pageCount * samplesPerBrick * 4;
+  const metadataCapacityBytes = metadata.byteLength;
+  const worklistBytes = worklist.byteLength;
+  return {
+    metadata,
+    worklist,
+    plan: {
+      domainOrigin: [0, 0, 0],
+      finestCellDimensions: sampleDimensions,
+      finestCellWidth: 1,
+      fineFactor: 1,
+      fineCellWidth: 1,
+      brickResolution: 4,
+      sampleDimensions,
+      brickDimensions,
+      logicalBrickCount: brickDimensions[0] * brickDimensions[1] * brickDimensions[2],
+      maximumResidentBricks: pageCount,
+      samplesPerBrick,
+      payloadBytesPerBrick: samplesPerBrick * 4,
+      payloadCapacityBytes,
+      metadataCapacityBytes,
+      worklistBytes,
+      allocatedBytes: payloadCapacityBytes + metadataCapacityBytes + worklistBytes,
+    },
+  };
 }
 
 export interface SparseCM12GPUActivityRecord {
@@ -110,6 +197,15 @@ export interface SparseCM12GPUActivityRecord {
 export interface SparseCM12GPUActivitySnapshot {
   readonly acceptedSteps: number;
   readonly records: readonly SparseCM12GPUActivityRecord[];
+}
+
+/** Explicit QA materialization. Production rendering consumes sparse buffers
+ * directly and never constructs these finest-domain arrays. */
+export interface SparseCM12DiagnosticFields {
+  readonly density: Float32Array;
+  readonly velocity: Float32Array;
+  readonly pressure: Float32Array;
+  readonly divergence: Float32Array;
 }
 
 const align4 = (value: number): number => (value + 3) & ~3;
@@ -155,7 +251,6 @@ function packResidentTopology(
     }
   }
   const incidenceCount = byCell.reduce((sum, values) => sum + values.length, 0);
-  const denseCount = atlas.dimensions[0] * atlas.dimensions[1] * atlas.dimensions[2];
   const brickIndexByKey = new Map(atlas.bricks.map((brick, index) => [brick.key, index]));
   let at = 0;
   const cellOffset = at; at += 12 * grid.cells.length;
@@ -163,14 +258,13 @@ function packResidentTopology(
   const termOffset = at; at += 2 * termCount;
   const incidenceOffset = at; at += grid.cells.length + 1;
   const incidenceRecordOffset = at; at += 2 * incidenceCount;
-  const ownerOffset = at; at += 4 * denseCount;
+  // Compact sorted key/index pairs replace both the finest-cell owner image
+  // and the logical-domain-sized direct brick directory.  Every query derives
+  // its owner from the immutable brick record after an O(log resident) lookup.
+  const brickLookupOffset = at; at += 2 * atlas.bricks.length;
   const brickOffset = at; at += 4 * atlas.bricks.length;
   const backgroundOwnerOffset = at; at += 2;
-  const brickDirectoryOffset = at; at += atlas.brickDimensions.reduce(
-    (product, value) => product * value, 1,
-  );
   const words = new Uint32Array(at);
-  words.fill(INVALID, brickDirectoryOffset);
 
   for (const cell of grid.cells) {
     const base = cellOffset + 12 * cell.id;
@@ -223,18 +317,8 @@ function packResidentTopology(
   }
   words[incidenceOffset + grid.cells.length] = nextIncidence;
 
-  words.fill(INVALID, ownerOffset);
-  const [nx, ny] = atlas.dimensions;
-  const background = packAdaptiveMassPresentationOwnerKey(
-    [0, 0, 0], Math.min(1022, Math.max(atlas.dimensions[0], atlas.dimensions[2])),
-  );
-  words[backgroundOwnerOffset] = background[0];
-  words[backgroundOwnerOffset + 1] = background[1];
-  for (let dense = 0; dense < denseCount; dense += 1) {
-    words[ownerOffset + 4 * dense + 1] = background[0];
-    words[ownerOffset + 4 * dense + 2] = background[1];
-  }
-  const owner = [0, 0] as [number, number];
+  words[backgroundOwnerOffset] = 1 << 20;
+  words[backgroundOwnerOffset + 1] = 1 << 10;
   const firstCellByBrick = new Uint32Array(atlas.bricks.length).fill(INVALID);
   const cellCountByBrick = new Uint32Array(atlas.bricks.length);
   for (const cell of grid.cells) {
@@ -247,28 +331,22 @@ function packResidentTopology(
       throw new Error(`Sparse CM12 brick ${cell.brickKey} cells are not contiguous`);
     }
     cellCountByBrick[brickIndex] += 1;
-    packAdaptiveMassPresentationOwnerKey(cell.minimumFine, cell.widthsFine[0], owner);
-    for (let z = cell.minimumFine[2]; z < cell.maximumFine[2]; z += 1)
-      for (let y = cell.minimumFine[1]; y < cell.maximumFine[1]; y += 1)
-        for (let x = cell.minimumFine[0]; x < cell.maximumFine[0]; x += 1) {
-          const dense = x + nx * (y + ny * z);
-          words[ownerOffset + 4 * dense] = cell.id;
-          words[ownerOffset + 4 * dense + 1] = owner[0];
-          words[ownerOffset + 4 * dense + 2] = owner[1];
-          words[ownerOffset + 4 * dense + 3] = brickIndex;
-        }
   }
-  for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
+  const sortedBrickIndices = atlas.bricks.map((_, index) => index).sort((left, right) =>
+    atlas.bricks[left]!.key - atlas.bricks[right]!.key);
+  for (let sorted = 0; sorted < sortedBrickIndices.length; sorted += 1) {
+    const brick = sortedBrickIndices[sorted]!;
+    words[brickLookupOffset + 2 * sorted] = atlas.bricks[brick]!.key;
+    words[brickLookupOffset + 2 * sorted + 1] = brick;
     const record = brickOffset + 4 * brick;
     words[record] = firstCellByBrick[brick];
     words[record + 1] = cellCountByBrick[brick];
     words[record + 2] = atlas.bricks[brick]!.resolution;
     words[record + 3] = atlas.bricks[brick]!.key;
-    words[brickDirectoryOffset + atlas.bricks[brick]!.key] = brick;
   }
   return { words, cellOffset, rowOffset, termOffset, incidenceOffset,
-    incidenceRecordOffset, ownerOffset, brickOffset, backgroundOwnerOffset,
-    brickDirectoryOffset, brickCount: atlas.bricks.length, incidenceCount };
+    incidenceRecordOffset, brickLookupOffset, brickOffset, backgroundOwnerOffset,
+    brickCount: atlas.bricks.length, incidenceCount };
 }
 
 function uploadBuffer(
@@ -296,6 +374,15 @@ export class WebGPUSparseCM12Resident {
   private readonly conditioning: GPUBuffer;
   private readonly activity: GPUBuffer;
   private readonly candidateState: GPUBuffer;
+  private readonly fineMetadata: GPUBuffer;
+  private readonly fineWorklist: GPUBuffer;
+  private readonly fineSamples: GPUBuffer;
+  private readonly fineParams: GPUBuffer;
+  private readonly fineWorkA: GPUBuffer;
+  private readonly fineWorkB: GPUBuffer;
+  private readonly fineRollback: GPUBuffer;
+  readonly globalFineLevelSetSource: WebGPUFineLevelSetBrickSource;
+  readonly sparseAdaptiveGridSource: SparseAdaptiveGridConsumerSource;
   private readonly diagnosticsReadback: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
   private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
@@ -311,6 +398,9 @@ export class WebGPUSparseCM12Resident {
     private readonly layout: ResidentStateLayout,
     buffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer,
       GPUBuffer, GPUBuffer],
+    fineBuffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer,
+      GPUBuffer],
+    finePlan: FineLevelSetBrickPlan,
     diagnosticsReadback: GPUBuffer,
     bindGroup: GPUBindGroup,
     pipelines: Readonly<Record<string, GPUComputePipeline>>,
@@ -320,12 +410,38 @@ export class WebGPUSparseCM12Resident {
   ) {
     [this.parameters, this.topology, this.state, this.partials, this.scalars,
       this.conditioning, this.activity, this.candidateState] = buffers;
+    [this.fineParams, this.fineMetadata, this.fineWorklist, this.fineSamples,
+      this.fineWorkA, this.fineWorkB, this.fineRollback] = fineBuffers;
+    this.globalFineLevelSetSource = {
+      plan: finePlan,
+      generation: 1,
+      generationSlot: 0,
+      params: this.fineParams,
+      metadata: this.fineMetadata,
+      worklist: this.fineWorklist,
+      samples: this.fineSamples,
+      workA: this.fineWorkA,
+      workB: this.fineWorkB,
+      rollbackSamples: this.fineRollback,
+    };
+    this.sparseAdaptiveGridSource = {
+      kind: "sparse-adaptive-grid-sampling",
+      params: { buffer: this.parameters },
+      topology: { buffer: this.topology },
+      state: { buffer: this.state },
+      activity: { buffer: this.activity },
+      fineMetadata: { buffer: this.fineMetadata },
+      fineWorklist: { buffer: this.fineWorklist },
+      fineSamples: { buffer: this.fineSamples },
+    };
     this.diagnosticsReadback = diagnosticsReadback;
     this.bindGroup = bindGroup;
     this.pipelines = pipelines;
     this.cellCount = cellCount;
     this.rowCount = rowCount;
-    this.allocatedBytes = buffers.reduce((sum, buffer) => sum + buffer.size, 0)
+    this.allocatedBytes = [...buffers, ...fineBuffers].reduce(
+      (sum, buffer) => sum + buffer.size, 0,
+    )
       + diagnosticsReadback.size;
   }
 
@@ -333,12 +449,17 @@ export class WebGPUSparseCM12Resident {
     device: GPUDevice,
     atlas: SparseAdaptiveMassAtlas,
     grid: SparseAtlasCompositeGrid,
-    presentation: WebGPUAdaptiveMassAtlasPresentation,
+    finestCellSize_m: number,
     initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
       (brick) => brick.key,
     )),
   ): Promise<WebGPUSparseCM12Resident> {
     const packed = packResidentTopology(atlas, grid);
+    const fine = sparseCM12FinePresentationPlan(atlas);
+    (fine.plan as { finestCellWidth: number; fineCellWidth: number }).finestCellWidth =
+      finestCellSize_m;
+    (fine.plan as { finestCellWidth: number; fineCellWidth: number }).fineCellWidth =
+      finestCellSize_m;
     const layout = residentStateLayout(
       grid.cells.length, grid.gradientRows.length, packed.brickCount,
     );
@@ -393,6 +514,26 @@ export class WebGPUSparseCM12Resident {
         * packed.brickCount),
       usage: storage,
     });
+    const fineParams = device.createBuffer({
+      label: "Sparse CM12 compact fine presentation parameters",
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const fineMetadata = uploadBuffer(device,
+      "Sparse CM12 compact fine presentation metadata", fine.metadata, storage);
+    const fineWorklist = uploadBuffer(device,
+      "Sparse CM12 compact fine presentation worklist", fine.worklist, storage);
+    const fineSamples = device.createBuffer({
+      label: "Sparse CM12 compact fine presentation samples",
+      size: Math.max(4, fine.plan.payloadCapacityBytes),
+      usage: storage,
+    });
+    const fineWorkA = device.createBuffer({ label: "Sparse CM12 fine presentation work A",
+      size: 4, usage: storage });
+    const fineWorkB = device.createBuffer({ label: "Sparse CM12 fine presentation work B",
+      size: 4, usage: storage });
+    const fineRollback = device.createBuffer({ label: "Sparse CM12 fine presentation rollback",
+      size: 4, usage: storage });
     const diagnosticsReadback = device.createBuffer({
       label: "Sparse CM12 resident diagnostic readback",
       size: 80,
@@ -406,21 +547,12 @@ export class WebGPUSparseCM12Resident {
         { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
         ...[2, 3, 4].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE,
           buffer: { type: "storage" as const } })),
-        { binding: 5, visibility: GPUShaderStage.COMPUTE,
-          storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
-        { binding: 6, visibility: GPUShaderStage.COMPUTE,
-          storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
-        { binding: 7, visibility: GPUShaderStage.COMPUTE,
-          storageTexture: { access: "write-only", format: "rg32uint", viewDimension: "3d" } },
-        { binding: 8, visibility: GPUShaderStage.COMPUTE,
-          storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
-        { binding: 9, visibility: GPUShaderStage.COMPUTE,
-          storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
-        { binding: 10, visibility: GPUShaderStage.COMPUTE,
-          storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
         { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 14, visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: "read-only-storage" } },
+        { binding: 15, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ],
     });
     const bindGroup = device.createBindGroup({ label: "Sparse CM12 resident bindings",
@@ -430,15 +562,11 @@ export class WebGPUSparseCM12Resident {
         { binding: 2, resource: { buffer: state } },
         { binding: 3, resource: { buffer: partials } },
         { binding: 4, resource: { buffer: scalars } },
-        { binding: 5, resource: presentation.densityTexture.createView() },
-        { binding: 6, resource: presentation.levelSetTexture.createView() },
-        { binding: 7, resource: presentation.gridCellTexture.createView() },
-        { binding: 8, resource: presentation.velocityTexture.createView() },
-        { binding: 9, resource: presentation.pressureTexture.createView() },
-        { binding: 10, resource: presentation.divergenceTexture.createView() },
         { binding: 11, resource: { buffer: conditioning } },
         { binding: 12, resource: { buffer: activity } },
         { binding: 13, resource: { buffer: candidateState } },
+        { binding: 14, resource: { buffer: fineMetadata } },
+        { binding: 15, resource: { buffer: fineSamples } },
       ] });
     const shaderModule = device.createShaderModule({ label: "Sparse CM12 resident shader",
       code: webgpuSparseCM12ResidentWGSL });
@@ -462,13 +590,17 @@ export class WebGPUSparseCM12Resident {
       "validateCandidateResolution", "transferCandidateCells",
       "prepareCandidateFaceReceipts", "transferCandidateFaces",
       "retireUnsupportedEmptyBricks",
-      "classifyPresentationBricks", "publishPresentation"] as const;
+      "classifyPresentationBricks",
+      "publishSparseLevelSet"] as const;
     const entries = await Promise.all(names.map(async (name) => [name,
       await device.createComputePipelineAsync({ label: `Sparse CM12 ${name}`,
         layout: pipelineLayout, compute: { module: shaderModule, entryPoint: name } })] as const));
     const result = new WebGPUSparseCM12Resident(device, atlas.dimensions, layout,
       [parameters, topology, state, partials, scalars, conditioning, activity,
         candidateState],
+      [fineParams, fineMetadata, fineWorklist, fineSamples, fineWorkA, fineWorkB,
+        fineRollback],
+      fine.plan,
       diagnosticsReadback,
       bindGroup,
       Object.fromEntries(entries), grid.cells.length, grid.gradientRows.length,
@@ -555,13 +687,8 @@ export class WebGPUSparseCM12Resident {
     dispatch("retireUnsupportedEmptyBricks",
       Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
     dispatch("classifyPresentationBricks", Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    pass.setPipeline(this.pipelines.publishPresentation!);
-    pass.setBindGroup(0, this.bindGroup);
-    pass.dispatchWorkgroups(
-      Math.ceil(this.dimensions[0] / 4),
-      Math.ceil(this.dimensions[1] / 4),
-      Math.ceil(this.dimensions[2] / 4),
-    );
+    dispatch("publishSparseLevelSet",
+      this.globalFineLevelSetSource.plan.maximumResidentBricks);
     pass.end();
     this.parity ^= 1;
   }
@@ -574,12 +701,8 @@ export class WebGPUSparseCM12Resident {
     pass.setPipeline(this.pipelines.classifyPresentationBricks!);
     pass.setBindGroup(0, this.bindGroup);
     pass.dispatchWorkgroups(Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    pass.setPipeline(this.pipelines.publishPresentation!);
-    pass.dispatchWorkgroups(
-      Math.ceil(this.dimensions[0] / 4),
-      Math.ceil(this.dimensions[1] / 4),
-      Math.ceil(this.dimensions[2] / 4),
-    );
+    pass.setPipeline(this.pipelines.publishSparseLevelSet!);
+    pass.dispatchWorkgroups(this.globalFineLevelSetSource.plan.maximumResidentBricks);
     pass.end();
   }
 
@@ -605,12 +728,8 @@ export class WebGPUSparseCM12Resident {
     pass.dispatchWorkgroups(Math.ceil(this.cellCount / WORKGROUP_SIZE));
     pass.setPipeline(this.pipelines.classifyPresentationBricks!);
     pass.dispatchWorkgroups(Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    pass.setPipeline(this.pipelines.publishPresentation!);
-    pass.dispatchWorkgroups(
-      Math.ceil(this.dimensions[0] / 4),
-      Math.ceil(this.dimensions[1] / 4),
-      Math.ceil(this.dimensions[2] / 4),
-    );
+    pass.setPipeline(this.pipelines.publishSparseLevelSet!);
+    pass.dispatchWorkgroups(this.globalFineLevelSetSource.plan.maximumResidentBricks);
     pass.end();
   }
 
@@ -631,14 +750,13 @@ export class WebGPUSparseCM12Resident {
       this.dimensions[0] * this.dimensions[1] * this.dimensions[2]], 0);
     u.set([...this.dimensions, 0], 4);
     u.set([packed.cellOffset, packed.rowOffset, packed.termOffset, packed.incidenceOffset], 8);
-    u.set([packed.incidenceRecordOffset, packed.ownerOffset,
+    u.set([packed.incidenceRecordOffset, packed.brickLookupOffset,
       packed.brickOffset, packed.backgroundOwnerOffset], 12);
     u.set([l.densityA, l.densityB, l.gammaA, l.gammaB], 16);
     u.set([l.cellVelocityA, l.cellVelocityB, l.faceA, l.faceB], 20);
     u.set([l.pressure, l.rhs, l.diagonal, l.liquid], 24);
     u.set([l.theta, l.residual, l.preconditioned, l.direction], 28);
-    u.set([l.applied, l.divergence, l.presentationBrickWet,
-      packed.brickDirectoryOffset], 32);
+    u.set([l.applied, l.divergence, l.presentationBrickWet, 0], 32);
     // The D4 pass needs two disjoint scalar scratch arrays. In particular the
     // gamma scratch must never alias densityA at offset zero: doing so corrupts
     // gamma after the first symmetric frame and makes transport create mass on
@@ -706,6 +824,68 @@ export class WebGPUSparseCM12Resident {
     };
     this.diagnosticsReadback.unmap();
     return result;
+  }
+
+  /** QA-only dense readback used by Dawn physics gates. Never called by frame
+   * scheduling or visualization; callers explicitly pay for materialization. */
+  async readDiagnosticFields(): Promise<SparseCM12DiagnosticFields> {
+    this.assertLive();
+    const packed = this.lastPacked!;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 QA field readback",
+      size: this.state.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 QA field copy",
+      });
+      encoder.copyBufferToBuffer(this.state, 0, readback, 0, this.state.size);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const state = new Float32Array(readback.getMappedRange());
+      const [nx, ny, nz] = this.dimensions;
+      const count = nx * ny * nz;
+      const density = new Float32Array(count);
+      const velocity = new Float32Array(4 * count);
+      const pressure = new Float32Array(count);
+      const divergence = new Float32Array(count);
+      const densityOffset = this.parity !== 0 ? this.layout.densityB : this.layout.densityA;
+      const velocityOffset = this.parity !== 0
+        ? this.layout.cellVelocityB : this.layout.cellVelocityA;
+      const cellWidth_m = this.parameterF32[41]!;
+      const pressureScale = this.parameterF32[42]!;
+      const topologyFloats = new Float32Array(packed.words.buffer);
+      for (let cell = 0; cell < this.cellCount; cell += 1) {
+        const base = packed.cellOffset + 12 * cell;
+        const brick = packed.words[base + 11]!;
+        if (!(state[this.layout.presentationBrickWet + brick]! > 0.5)) continue;
+        const lower = [packed.words[base + 7]!, packed.words[base + 8]!,
+          packed.words[base + 9]!] as const;
+        const span = [Math.round(topologyFloats[base + 4]!),
+          Math.round(topologyFloats[base + 5]!),
+          Math.round(topologyFloats[base + 6]!)] as const;
+        const rho = state[densityOffset + cell]!;
+        const vx = state[velocityOffset + 4 * cell]! * cellWidth_m;
+        const vy = state[velocityOffset + 4 * cell + 1]! * cellWidth_m;
+        const vz = state[velocityOffset + 4 * cell + 2]! * cellWidth_m;
+        const mappedPressure = state[this.layout.pressure + cell]! * pressureScale;
+        const div = state[this.layout.divergence + cell]!;
+        for (let dz = 0; dz < span[2] && lower[2] + dz < nz; dz += 1)
+          for (let dy = 0; dy < span[1] && lower[1] + dy < ny; dy += 1)
+            for (let dx = 0; dx < span[0] && lower[0] + dx < nx; dx += 1) {
+              const at = lower[0] + dx + nx * (lower[1] + dy + ny * (lower[2] + dz));
+              density[at] = rho;
+              velocity[4 * at] = vx; velocity[4 * at + 1] = vy;
+              velocity[4 * at + 2] = vz;
+              pressure[at] = mappedPressure; divergence[at] = div;
+            }
+      }
+      return { density, velocity, pressure, divergence };
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
   }
 
   /** QA-only policy readback. It is never called by frame scheduling. */
@@ -789,7 +969,9 @@ export class WebGPUSparseCM12Resident {
     if (this.destroyed) return;
     this.destroyed = true;
     for (const buffer of [this.parameters, this.topology, this.state, this.partials,
-      this.scalars, this.conditioning, this.activity, this.candidateState]) {
+      this.scalars, this.conditioning, this.activity, this.candidateState,
+      this.fineParams, this.fineMetadata, this.fineWorklist, this.fineSamples,
+      this.fineWorkA, this.fineWorkB, this.fineRollback]) {
       buffer.destroy();
     }
     this.diagnosticsReadback.destroy();

@@ -36,7 +36,7 @@ export const SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE = Object.freeze({
 export const SPARSE_CM12_LONG_DAM_PERFORMANCE_ACCEPTANCE = Object.freeze({
   ...SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE,
   sceneId: "sparse-cm12-long-dam-break",
-  finestDimensions: [96, 24, 16] as const,
+  finestDimensions: [96, 48, 16] as const,
 });
 
 export interface SparseCM12TimingSummary {

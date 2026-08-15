@@ -18,6 +18,9 @@ export const FINE_LEVELSET_CHANNELS = 1;
 export const FINE_LEVELSET_BYTES_PER_SAMPLE = 4;
 export const FINE_LEVELSET_METADATA_WORDS = 4;
 export const FINE_LEVELSET_WORKSET_HEADER_WORDS = 7;
+/** Renderer-readable worksets may omit the logical-domain direct table when
+ * metadata is sorted by logical brick key. */
+export const FINE_LEVELSET_COMPACT_LOOKUP_FLAG = 0x8000_0000;
 
 /** Word offsets in the common workset header written by `exportGPUGeneration`
  * and by every GPU publication kernel. Named because the first two words are

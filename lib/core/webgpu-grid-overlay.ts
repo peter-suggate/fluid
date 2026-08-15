@@ -8,6 +8,7 @@
  */
 
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
+import type { SparseAdaptiveGridConsumerSource } from "./levelset-consumer-abi";
 
 export const gridOverlayShader = /* wgsl */ `
 struct Uniforms {
@@ -46,6 +47,20 @@ ${cameraApertureShaderLibrary("u")}
 // render-only wall-film/blur reconstruction; the density view deliberately
 // does not, because the question it answers is what the method holds.
 @group(0) @binding(9) var densityField: texture_3d<f32>;
+struct SparseParams {
+  counts:vec4u, dimensions:vec4u, topologyOffsets:vec4u, topologyOffsets2:vec4u,
+  stateOffsets0:vec4u, stateOffsets1:vec4u, stateOffsets2:vec4u,
+  stateOffsets3:vec4u, stateOffsets4:vec4u, stateOffsets5:vec4u,
+  frame:vec4f, acceleration:vec4f, dispatch:vec4u,
+  injectionCenter:vec4f, injectionRadius:vec4f, sharpening:vec4f,
+}
+@group(0) @binding(10) var<uniform> sparseP: SparseParams;
+@group(0) @binding(11) var<storage,read> sparseTopology: array<u32>;
+@group(0) @binding(12) var<storage,read> sparseState: array<f32>;
+@group(0) @binding(13) var<storage,read> sparseActivity: array<u32>;
+@group(0) @binding(14) var<storage,read> sparseFineMetadata: array<u32>;
+@group(0) @binding(15) var<storage,read> sparseFineWorklist: array<u32>;
+@group(0) @binding(16) var<storage,read> sparseFineSamples: array<u32>;
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
   var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -134,9 +149,71 @@ fn nearestBodyDistance(ro: vec3f, rd: vec3f) -> f32 {
   return nearest;
 }
 
+const SPARSE_INVALID:u32=0xffffffffu;
+fn sparseGridEnabled()->bool{
+  return sparseP.counts.x>0u&&all(sparseP.dimensions.xyz==vec3u(u.gridInfo.xyz));
+}
+fn sparseBrickLookup(key:u32)->u32{
+  var low=0u;var high=sparseP.dispatch.w;
+  loop{if(low>=high){break;}let middle=low+(high-low)/2u;
+    let candidate=sparseTopology[sparseP.topologyOffsets2.y+2u*middle];
+    if(candidate<key){low=middle+1u;}else{high=middle;}}
+  if(low>=sparseP.dispatch.w
+    ||sparseTopology[sparseP.topologyOffsets2.y+2u*low]!=key){return SPARSE_INVALID;}
+  return sparseTopology[sparseP.topologyOffsets2.y+2u*low+1u];
+}
+fn sparseBrickActive(brick:u32)->bool{
+  let at=12u+35u*brick+10u;
+  return brick<sparseP.dispatch.w&&at<arrayLength(&sparseActivity)&&sparseActivity[at]!=0u;
+}
+fn sparseOwner(q:vec3i)->vec2u{
+  if(!sparseGridEnabled()||any(q<vec3i(0))||any(q>=vec3i(sparseP.dimensions.xyz))){return vec2u(SPARSE_INVALID);}
+  let uq=vec3u(q);let brickDims=(sparseP.dimensions.xyz+vec3u(7u))/8u;
+  let brickCoordinate=uq/8u;let key=brickCoordinate.x+brickDims.x
+    *(brickCoordinate.y+brickDims.y*brickCoordinate.z);
+  let brick=sparseBrickLookup(key);if(brick==SPARSE_INVALID||!sparseBrickActive(brick)){return vec2u(SPARSE_INVALID);}
+  let record=sparseP.topologyOffsets2.z+4u*brick;let first=sparseTopology[record];
+  let count=sparseTopology[record+1u];let resolution=sparseTopology[record+2u];
+  let scale=8u/resolution;let local=(uq-brickCoordinate*8u)/scale;
+  let origin=brickCoordinate*8u;
+  let valid=(min(sparseP.dimensions.xyz-origin+vec3u(scale-1u),vec3u(8u)))/scale;
+  let cell=first+local.x+valid.x*(local.y+valid.y*local.z);
+  return select(vec2u(SPARSE_INVALID),vec2u(cell,brick),cell<first+count);
+}
+fn sparseDensityOffset()->u32{
+  return select(sparseP.stateOffsets0.x,sparseP.stateOffsets0.y,sparseP.frame.w>0.5);
+}
+fn sparseVelocityOffset()->u32{
+  return select(sparseP.stateOffsets1.x,sparseP.stateOffsets1.y,sparseP.frame.w>0.5);
+}
+fn sparseDensityAt(q:vec3i)->f32{
+  let owner=sparseOwner(q);if(owner.x==SPARSE_INVALID){return 0.0;}
+  return sparseState[sparseDensityOffset()+owner.x];
+}
+fn sparseFinePhiAt(q:vec3i)->f32{
+  let air=4.0*sparseP.frame.y;if(any(q<vec3i(0))||any(q>=vec3i(sparseP.dimensions.xyz))){return air;}
+  let uq=vec3u(q);let pageDims=(sparseP.dimensions.xyz+vec3u(3u))/4u;let pageCoordinate=uq/4u;
+  let key=pageCoordinate.x+pageDims.x*(pageCoordinate.y+pageDims.y*pageCoordinate.z);
+  let count=min(sparseFineWorklist[1],arrayLength(&sparseFineMetadata)/4u);
+  var low=0u;var high=count;loop{if(low>=high){break;}let middle=low+(high-low)/2u;
+    if(sparseFineMetadata[4u*middle+1u]<key){low=middle+1u;}else{high=middle;}}
+  if(low>=count||sparseFineMetadata[4u*low+1u]!=key){return air;}
+  let local=uq-pageCoordinate*4u;let at=64u*low+local.x+4u*(local.y+4u*local.z);
+  if(at>=arrayLength(&sparseFineSamples)){return air;}let packed=sparseFineSamples[at];
+  return select(air,unpack2x16float(packed&0xffffu).x,((packed>>16u)&1u)!=0u);
+}
+fn sparseOwnerKey(q:vec3i)->vec2u{
+  let owner=sparseOwner(q);if(owner.x==SPARSE_INVALID){return vec2u(SPARSE_INVALID);}
+  let base=sparseP.topologyOffsets.x+12u*owner.x;
+  let lower=vec3u(sparseTopology[base+7u],sparseTopology[base+8u],sparseTopology[base+9u]);
+  let scale=max(1u,sparseTopology[base+10u]);let level=u32(round(log2(f32(scale))));
+  return vec2u(lower.x|(lower.z<<11u)|(level<<22u),lower.y|0x80000000u);
+}
+
 fn fluidSample(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz);
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
+  if(sparseGridEnabled()){return sparseDensityAt(q);}
   if (u.gridInfo.w < 1.5) { return textureLoad(fluidField, q, 0).x; }
   let cellSizeY = u.container.y / max(u.gridInfo.y, 1.0);
   if (u.gridInfo.w > 2.5) { return clamp(0.5 - textureLoad(fluidField, q, 0).x / cellSizeY, 0.0, 1.0); }
@@ -150,6 +227,7 @@ fn fluidSample(cell: vec3i) -> f32 {
 
 fn levelSetSample(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz); let q = clamp(cell, vec3i(0), dims - vec3i(1));
+  if(sparseGridEnabled()){return sparseFinePhiAt(q);}
   let h = u.container.y / max(u.gridInfo.y, 1.0);
   if (u.gridInfo.w > 2.5) { return textureLoad(fluidField, q, 0).x; }
   return (0.5 - fluidSample(q)) * 4.0 * h;
@@ -157,15 +235,19 @@ fn levelSetSample(cell: vec3i) -> f32 {
 
 fn densitySample(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz);
+  if(sparseGridEnabled()){return sparseDensityAt(clamp(cell,vec3i(0),dims-vec3i(1)));}
   return textureLoad(densityField, clamp(cell, vec3i(0), dims - vec3i(1)), 0).x;
 }
 
 fn hasLiquidPressureDof(cell: vec3i) -> bool {
+  if(sparseGridEnabled()){let owner=sparseOwner(cell);return owner.x!=SPARSE_INVALID
+    &&sparseState[sparseP.stateOffsets2.w+owner.x]>0.5;}
   let samples = textureLoad(pressureSamples, cell, 0);
   return samples.x != 0xffffffffu || samples.y != 0xffffffffu;
 }
 
 fn adaptiveCellKey(cell: vec3i, dims: vec3i) -> vec2u {
+  if(sparseGridEnabled()){return sparseOwnerKey(clamp(cell,vec3i(0),dims-vec3i(1)));}
   return textureLoad(adaptiveCells, clamp(cell, vec3i(0), dims - vec3i(1)), 0).xy;
 }
 
@@ -201,6 +283,9 @@ fn isOpticalCube(cell: vec3i, dims: vec3i) -> bool {
 fn velocitySample(cell: vec3i) -> vec3f {
   let dims = vec3i(u.gridInfo.xyz);
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
+  if(sparseGridEnabled()){let owner=sparseOwner(q);if(owner.x==SPARSE_INVALID){return vec3f(0.0);}
+    let at=sparseVelocityOffset()+4u*owner.x;return sparseP.frame.y
+      *vec3f(sparseState[at],sparseState[at+1u],sparseState[at+2u]);}
   if (u.gridInfo.w < 1.5 || u.gridInfo.w > 2.5) { return textureLoad(velocityField, q, 0).xyz; }
   let base = i32(round(textureLoad(tallCellBases, q.xz, 0).x));
   if (q.y < base && base > 0) {
@@ -211,6 +296,17 @@ fn velocitySample(cell: vec3i) -> vec3f {
   let stored = vec3i(textureDimensions(velocityField));
   if (packedY < 2 || packedY >= stored.y) { return vec3f(0.0); }
   return textureLoad(velocityField, vec3i(q.x, packedY, q.z), 0).xyz;
+}
+
+fn divergenceSample(cell:vec3i)->f32{
+  if(sparseGridEnabled()){let owner=sparseOwner(cell);if(owner.x==SPARSE_INVALID){return 0.0;}
+    return sparseState[sparseP.stateOffsets4.y+owner.x];}
+  return textureLoad(divergenceField,cell,0).x;
+}
+fn mappedPressureSample(cell:vec3i)->f32{
+  if(sparseGridEnabled()){let owner=sparseOwner(cell);if(owner.x==SPARSE_INVALID){return 0.0;}
+    return sparseState[sparseP.stateOffsets2.x+owner.x]*sparseP.frame.z;}
+  return textureLoad(mappedPressureField,cell,0).x;
 }
 
 // Shared five-stop heat ramp for the field modes: deep blue through cyan,
@@ -318,6 +414,9 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
   let dims = vec3i(u.gridInfo.xyz);
   let local3 = clamp((point - boundsMin) / size, vec3f(0.0), vec3f(0.99999)) * vec3f(dims);
   let cell = clamp(vec3i(floor(local3)), vec3i(0), dims - vec3i(1));
+  if(sparseGridEnabled()&&sparseOwner(cell).x==SPARSE_INVALID){
+    return GridSample(vec3f(0.0),0.0,false);
+  }
   var samplePosition = local3.xy;
   var cellPerPixel = vec2f(footprint * f32(dims.x) / size.x, footprint * f32(dims.y) / size.y);
   var firstPlaneAxis = 0;
@@ -463,11 +562,11 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
       fill = select(mix(vec3f(0.96, 0.96, 0.90), vec3f(0.93, 0.47, 0.16), signed), mix(vec3f(0.96, 0.96, 0.90), vec3f(0.10, 0.45, 0.92), -signed), signed < 0.0);
       alpha = select(0.10,0.80,resident);line=max(line,select(0.0,1.0-smoothstep(0.04*h,0.22*h,abs(phi)),resident));
     } else if (fieldMode == 4) {
-      let divergence = textureLoad(divergenceField, cell, 0).x; let scaled = clamp(divergence * max(u.environment.y, 1e-6), -1.0, 1.0);
+      let divergence = divergenceSample(cell); let scaled = clamp(divergence * max(u.environment.y, 1e-6), -1.0, 1.0);
       fill = select(mix(vec3f(0.96), vec3f(0.88, 0.10, 0.08), scaled), mix(vec3f(0.96), vec3f(0.08, 0.28, 0.88), -scaled), scaled < 0.0);
       alpha = select(0.28, 0.92, wet || abs(scaled) > 0.05);
     } else if (fieldMode == 5) {
-      let pressure = textureLoad(mappedPressureField, cell, 0).x; let scale = max(1.0, 10000.0 * u.container.y);
+      let pressure = mappedPressureSample(cell); let scale = max(1.0, 10000.0 * u.container.y);
       fill = heatColor(clamp(0.5 + 0.5 * pressure / scale, 0.0, 1.0)); alpha = select(0.22, 0.88, wet);
     } else if (fieldMode == 6) {
       let unrepresented = adaptiveGrid && wet && !hasLiquidPressureDof(cell);
@@ -710,13 +809,27 @@ export class GridOverlayPipeline {
   private divergence?: GPUTexture;
   private mappedPressure?: GPUTexture;
   private density?: GPUTexture;
+  private sparseSource?: SparseAdaptiveGridConsumerSource;
+  private readonly sparseDummyParams: GPUBuffer;
+  private readonly sparseDummyStorage: GPUBuffer;
 
   constructor(
     private readonly device: GPUDevice,
     private readonly targetFormat: GPUTextureFormat,
     private readonly uniformBuffer: GPUBuffer,
     private readonly bodyBuffer: GPUBuffer
-  ) {}
+  ) {
+    this.sparseDummyParams = device.createBuffer({
+      label: "Grid overlay empty sparse parameters",
+      size: 256,
+      usage: GPUBufferUsage.UNIFORM,
+    });
+    this.sparseDummyStorage = device.createBuffer({
+      label: "Grid overlay empty sparse storage",
+      size: 4,
+      usage: GPUBufferUsage.STORAGE,
+    });
+  }
 
   async initialize() {
     const shaderModule = this.device.createShaderModule({ label: "Solver grid overlay", code: gridOverlayShader });
@@ -756,6 +869,12 @@ export class GridOverlayPipeline {
     this.rebuildBindGroup();
   }
 
+  setSparseSource(source: SparseAdaptiveGridConsumerSource | undefined) {
+    if (this.sparseSource === source) return;
+    this.sparseSource = source;
+    this.rebuildBindGroup();
+  }
+
   private rebuildBindGroup() {
     if (!this.pipeline || !this.volume || !this.columnBases || !this.adaptiveCells || !this.velocity || !this.pressureSamples || !this.divergence || !this.mappedPressure || !this.density) return;
     this.bindGroup = this.device.createBindGroup({
@@ -770,7 +889,21 @@ export class GridOverlayPipeline {
         { binding: 6, resource: this.pressureSamples.createView({ dimension: "3d" }) },
         { binding: 7, resource: this.divergence.createView({ dimension: "3d" }) },
         { binding: 8, resource: this.mappedPressure.createView({ dimension: "3d" }) },
-        { binding: 9, resource: this.density.createView({ dimension: "3d" }) }
+        { binding: 9, resource: this.density.createView({ dimension: "3d" }) },
+        { binding: 10, resource: this.sparseSource?.params
+          ?? { buffer: this.sparseDummyParams } },
+        { binding: 11, resource: this.sparseSource?.topology
+          ?? { buffer: this.sparseDummyStorage } },
+        { binding: 12, resource: this.sparseSource?.state
+          ?? { buffer: this.sparseDummyStorage } },
+        { binding: 13, resource: this.sparseSource?.activity
+          ?? { buffer: this.sparseDummyStorage } },
+        { binding: 14, resource: this.sparseSource?.fineMetadata
+          ?? { buffer: this.sparseDummyStorage } },
+        { binding: 15, resource: this.sparseSource?.fineWorklist
+          ?? { buffer: this.sparseDummyStorage } },
+        { binding: 16, resource: this.sparseSource?.fineSamples
+          ?? { buffer: this.sparseDummyStorage } },
       ]
     });
   }
@@ -788,5 +921,8 @@ export class GridOverlayPipeline {
     return true;
   }
 
-  destroy() {}
+  destroy() {
+    this.sparseDummyParams.destroy();
+    this.sparseDummyStorage.destroy();
+  }
 }

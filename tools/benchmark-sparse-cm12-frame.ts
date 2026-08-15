@@ -108,6 +108,9 @@ async function readDensity(
   device: GPUDevice,
   solver: GPUSolverInstance,
 ): Promise<Float32Array> {
+  if (solver instanceof WebGPUAdaptiveMassSolver) {
+    return (await solver.readDiagnosticFields()).density;
+  }
   const [nx, ny, nz] = dimensions;
   const bytesPerRow = Math.ceil(nx * 4 / 256) * 256;
   const readback = device.createBuffer({

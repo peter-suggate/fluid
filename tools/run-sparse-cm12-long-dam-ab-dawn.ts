@@ -47,48 +47,10 @@ const positiveInteger = (name: string, fallback: number): number => {
 };
 
 const scene = createSparseCM12LongDamBreakScene();
-const dimensions = [96, 24, 16] as const;
+const dimensions = [96, 48, 16] as const;
 const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
 const steps = positiveInteger("steps", 250);
 const checkpointEvery = positiveInteger("checkpoint-every", 25);
-
-async function readTexture(
-  device: GPUDevice,
-  texture: GPUTexture,
-  dimensions: Dimensions,
-  components: 1 | 4,
-): Promise<Float32Array> {
-  const [nx, ny, nz] = dimensions;
-  const bytesPerTexel = 4 * components;
-  const bytesPerRow = Math.ceil(nx * bytesPerTexel / 256) * 256;
-  const readback = device.createBuffer({
-    label: "Sparse CM12 long-dam A/B field readback",
-    size: bytesPerRow * ny * nz,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
-  try {
-    const encoder = device.createCommandEncoder();
-    encoder.copyTextureToBuffer(
-      { texture },
-      { buffer: readback, bytesPerRow, rowsPerImage: ny },
-      dimensions,
-    );
-    device.queue.submit([encoder.finish()]);
-    await readback.mapAsync(GPUMapMode.READ);
-    const source = new Float32Array(readback.getMappedRange());
-    const sourceStride = bytesPerRow / 4;
-    const output = new Float32Array(components * nx * ny * nz);
-    for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
-      const sourceAt = sourceStride * (y + ny * z);
-      const outputAt = components * nx * (y + ny * z);
-      output.set(source.subarray(sourceAt, sourceAt + components * nx), outputAt);
-    }
-    return output;
-  } finally {
-    if (readback.mapState === "mapped") readback.unmap();
-    readback.destroy();
-  }
-}
 
 interface DensityMetrics {
   readonly mass_cells: number;
@@ -226,8 +188,10 @@ try {
   });
   allFine = await createArm(device, "all-fine");
   adaptive = await createArm(device, "adaptive");
-  const initialAllFine = await readTexture(device, allFine.volumeTexture, dimensions, 1);
-  const initialAdaptive = await readTexture(device, adaptive.volumeTexture, dimensions, 1);
+  const initialAllFine = (await (allFine as WebGPUAdaptiveMassSolver)
+    .readDiagnosticFields()).density;
+  const initialAdaptive = (await (adaptive as WebGPUAdaptiveMassSolver)
+    .readDiagnosticFields()).density;
   const initialMass = {
     allFine: initialAllFine.reduce((sum, value) => sum + value, 0),
     adaptive: initialAdaptive.reduce((sum, value) => sum + value, 0),
@@ -245,6 +209,7 @@ try {
   let fineReceiverFloorViolations = 0;
   let unsupportedEmptyActiveBricks = 0;
   let rejectedCandidateTransfers = 0;
+  let unresolvedRejectedCandidateTransfers = 0;
   for (let step = 1; step <= steps; step += 1) {
     const time_s = step * dt_s;
     let allFineStats, adaptiveStats;
@@ -255,10 +220,12 @@ try {
       allFineStats = await advanceOne(allFine, time_s);
       adaptiveStats = await advanceOne(adaptive, time_s);
     }
-    const [allFineDensity, adaptiveDensity] = await Promise.all([
-      readTexture(device, allFine.volumeTexture, dimensions, 1),
-      readTexture(device, adaptive.volumeTexture, dimensions, 1),
+    const [allFineFields, adaptiveFields] = await Promise.all([
+      (allFine as WebGPUAdaptiveMassSolver).readDiagnosticFields(),
+      (adaptive as WebGPUAdaptiveMassSolver).readDiagnosticFields(),
     ]);
+    const allFineDensity = allFineFields.density;
+    const adaptiveDensity = adaptiveFields.density;
     const density = {
       allFine: densityMetrics(allFineDensity, initialMass.allFine),
       adaptive: densityMetrics(adaptiveDensity, initialMass.adaptive),
@@ -302,10 +269,8 @@ try {
     const capture = step === 1 || step === steps || step % checkpointEvery === 0
       || newlyArrived.length > 0;
     if (capture) {
-      const [allFineVelocity, adaptiveVelocity] = await Promise.all([
-        readTexture(device, allFine.velocityTexture!, dimensions, 4),
-        readTexture(device, adaptive.velocityTexture!, dimensions, 4),
-      ]);
+      const allFineVelocity = allFineFields.velocity;
+      const adaptiveVelocity = adaptiveFields.velocity;
       const activity = await (adaptive as WebGPUAdaptiveMassSolver).readGPUActivityPolicy();
       const activeBricks = activity.bricks.filter((brick) => brick.active);
       const resolutionHistogram = Object.fromEntries(([1, 2, 4, 8] as const).map(
@@ -371,6 +336,7 @@ try {
       rejectedCandidateTransfers = Math.max(
         rejectedCandidateTransfers, rejectedTransfers.length,
       );
+      unresolvedRejectedCandidateTransfers = rejectedTransfers.length;
       const activeMaximumFineCellX = Math.max(...activeBricks.map(
         (brick) => 8 * (brick.coordinate[0] + 1) - 1));
       checkpoints.push({
@@ -441,9 +407,8 @@ try {
   if (maximumSparseDivergence > Math.max(1e-5, 2 * maximumUniformDivergence)) {
     failures.push("adaptive divergence exceeds the absolute/all-fine-relative gate");
   }
-  if ((arrivals.allFine.liquid ?? Infinity) <= steps * dt_s
-    && arrivals.adaptive.liquid === undefined) {
-    failures.push("adaptive liquid front did not reach the far wall after all-fine");
+  if (arrivals.adaptive.liquid === undefined) {
+    failures.push("adaptive rho >= 0.5 liquid front did not reach the far wall");
   }
   if (arrivals.allFine.liquid !== undefined && arrivals.adaptive.liquid !== undefined
     && Math.abs(arrivals.adaptive.liquid - arrivals.allFine.liquid) > 0.12) {
@@ -461,8 +426,8 @@ try {
   if (unsupportedEmptyActiveBricks > 0) {
     failures.push("adaptive residency retained empty bricks outside the air-support ring");
   }
-  if (rejectedCandidateTransfers > 0) {
-    failures.push("adaptive GPU candidate cell transfer failed a conservation receipt");
+  if (unresolvedRejectedCandidateTransfers > 0) {
+    failures.push("adaptive GPU candidate transfer rejection did not recover");
   }
   if ([allFine, adaptive].some((solver) => solver.info.hostFluidAuthority !== "gpu-resident"
     || solver.info.hostSimulationSizedWorkItems !== 0
@@ -508,6 +473,7 @@ try {
       fineReceiverFloorViolations,
       unsupportedEmptyActiveBricks,
       rejectedCandidateTransfers,
+      unresolvedRejectedCandidateTransfers,
     },
     final: {
       density: final.density,

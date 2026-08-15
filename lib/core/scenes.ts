@@ -68,13 +68,23 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   }),
 });
 
-/** Canonical Sparse CM12 front-propagation lane: adaptive policy, exact scene step. */
+/**
+ * Canonical Sparse CM12 front-propagation lane: adaptive policy, paper step.
+ *
+ * Every scene that runs a CM12 lane runs it at the paper's 1/30 s, this one
+ * included. Sec. 3.5 sharpening only balances transport diffusion at that
+ * per-step dose, so a scene-step profile was asking the gate to certify a
+ * front the shipped method never propagates. The scene keeps its authored
+ * 4 ms `fixedDt_s` for the other methods that open it; the A/B tool in
+ * tools/run-sparse-cm12-long-dam-ab-dawn.ts still opts into the scene step
+ * explicitly, which is what a matched-dt comparison lane is for.
+ */
 export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
   methodId: "adaptive-mass",
   quality: "balanced",
   overrides: Object.freeze({
     resolutionMode: "adaptive",
-    timeStep: "scene",
+    timeStep: "paper",
   }),
 });
 
@@ -771,10 +781,12 @@ export function createMinimalPowerDamBreak32Scene(): SceneDescription {
 
 /**
  * Canonical Sparse CM12 traversal scene. A full-width reservoir starts at the
- * negative end of a 96x24x16 tank, leaving ten brick columns for the front to
- * cross before it reaches the far wall. The narrow transverse section keeps a
- * long residency test affordable while still exercising genuine 3D pressure,
- * transport, and 2:1 face ports.
+ * negative end of a 96x48x16 tank, leaving ten brick columns for the front to
+ * cross before it reaches the far wall. The doubled vertical air column makes
+ * sparse omission visually and numerically explicit without changing the
+ * finest cell size or the initial liquid block. The narrow transverse section
+ * keeps a long residency test affordable while still exercising genuine 3D
+ * pressure, transport, and 2:1 face ports.
  */
 export function createSparseCM12LongDamBreakScene(): SceneDescription {
   const scene = createMinimalPowerDamBreakScene();
@@ -783,9 +795,9 @@ export function createSparseCM12LongDamBreakScene(): SceneDescription {
   scene.container = {
     ...scene.container,
     width_m: 2.4,
-    height_m: 0.6,
+    height_m: 1.2,
     depth_m: 0.4,
-    fillFraction: 5 / 36,
+    fillFraction: 5 / 72,
     top: "closed",
     fluidWallMode: "free-slip",
   };
@@ -1853,14 +1865,14 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "sparse-cm12-long-dam-break",
     name: "Sparse CM12 · long-tank dam break",
-    blurb: "A 96x24x16 narrow tank with a full-width reservoir at the negative end. The canonical Sparse CM12 gate follows the front across ten initially dry brick columns to the far wall while checking resident 2:1 transitions, conservation, and Uniform comparison checkpoints.",
+    blurb: "A 96x48x16 tall, narrow tank with a full-width reservoir at the negative end. Its doubled empty air column showcases sparse omission while the canonical gate follows the front across ten initially dry brick columns and checks resident 2:1 transitions, conservation, and Uniform comparison checkpoints.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "default",
     presentationMode: "fluid-only",
     methodProfile: SPARSE_CM12_LONG_DAM_METHOD_PROFILE,
     build: createSparseCM12LongDamBreakScene,
-    camera: { distance_m: 4.2, target_m: { x: 0, y: 0.25, z: 0 } },
+    camera: { distance_m: 4.35, target_m: { x: 0, y: 0.5, z: 0 } },
   }),
   defineScene({
     id: "large-power-dam-break",

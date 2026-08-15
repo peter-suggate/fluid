@@ -708,3 +708,52 @@ export class WebGPUAdaptiveMassAtlasPresentation {
     if (this.destroyed) throw new Error("adaptive mass atlas presentation is destroyed");
   }
 }
+
+/** Constant-size compatibility textures for buffer-native sparse solvers.
+ * The renderer contours their compact page publication; these merely satisfy
+ * the generic texture fields and the shared resident bind-group layout. */
+export class WebGPUAdaptiveMassSparsePresentation {
+  readonly densityTexture: GPUTexture;
+  readonly levelSetTexture: GPUTexture;
+  readonly gridCellTexture: GPUTexture;
+  readonly velocityTexture: GPUTexture;
+  readonly pressureTexture: GPUTexture;
+  readonly divergenceTexture: GPUTexture;
+  readonly allocatedBytes = 40;
+  private destroyed = false;
+
+  constructor(device: GPUDevice) {
+    const scalarUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      | GPUTextureUsage.STORAGE_BINDING;
+    this.densityTexture = device.createTexture({
+      label: "Sparse CM12 compact-presentation fallback",
+      size: [1, 1, 1],
+      dimension: "3d",
+      format: "r32float",
+      usage: scalarUsage,
+    });
+    this.levelSetTexture = device.createTexture({ label: "Sparse CM12 level-set fallback",
+      size: [1, 1, 1], dimension: "3d", format: "r32float", usage: scalarUsage });
+    this.gridCellTexture = device.createTexture({ label: "Sparse CM12 owner fallback",
+      size: [1, 1, 1], dimension: "3d", format: "rg32uint",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        | GPUTextureUsage.STORAGE_BINDING });
+    this.velocityTexture = device.createTexture({ label: "Sparse CM12 velocity fallback",
+      size: [1, 1, 1], dimension: "3d", format: "rgba32float", usage: scalarUsage });
+    this.pressureTexture = device.createTexture({ label: "Sparse CM12 pressure fallback",
+      size: [1, 1, 1], dimension: "3d", format: "r32float", usage: scalarUsage });
+    this.divergenceTexture = device.createTexture({ label: "Sparse CM12 divergence fallback",
+      size: [1, 1, 1], dimension: "3d", format: "r32float", usage: scalarUsage });
+  }
+
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.densityTexture.destroy();
+    this.levelSetTexture.destroy();
+    this.gridCellTexture.destroy();
+    this.velocityTexture.destroy();
+    this.pressureTexture.destroy();
+    this.divergenceTexture.destroy();
+  }
+}

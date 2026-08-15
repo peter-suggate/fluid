@@ -77,7 +77,7 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   },
   materialization: {
     id: "adaptive-publication",
-    label: "Encode GPU presentation field materialization",
+    label: "Encode compact sparse presentation pages",
   },
   upload: {
     id: "adaptive-publication",

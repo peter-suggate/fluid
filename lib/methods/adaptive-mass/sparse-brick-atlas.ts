@@ -7,6 +7,7 @@
 import {
   damBreakBoxContains,
   initialFluidBrickCoordinates,
+  initialFluidSeedBrickCoordinates,
   initialLiquidFractionAtCell,
   sceneDamBreakBox,
   sceneInitialLiquidVolumes,
@@ -239,16 +240,79 @@ function candidateInitialBrickCoordinates(
   dimensions: SparseBrickVec3,
   brickDimensions: SparseBrickVec3,
 ): Iterable<SparseBrickVec3> {
-  const authored = initialFluidBrickCoordinates(scene, dimensions, BRICK_FINE_RESOLUTION);
-  if (authored && sceneInitialLiquidVolumes(scene).length === 0) return authored;
-  return {
-    *[Symbol.iterator]() {
-      for (let z = 0; z < brickDimensions[2]; z += 1)
-        for (let y = 0; y < brickDimensions[1]; y += 1)
-          for (let x = 0; x < brickDimensions[0]; x += 1)
-            yield [x, y, z] as const;
-    },
+  if (scene.systems?.fluid === false) return [];
+  const candidates = new Map<number, SparseBrickVec3>();
+  const addBrick = (coordinate: SparseBrickVec3) => {
+    if (coordinate.some((value, axis) => value < 0 || value >= brickDimensions[axis])) return;
+    candidates.set(sparseBrickKey(coordinate, brickDimensions), coordinate);
   };
+  const addCellBounds = (minimum: readonly [number, number, number],
+    maximumExclusive: readonly [number, number, number]) => {
+    const lower = minimum.map((value) => Math.max(0,
+      Math.floor(value / BRICK_FINE_RESOLUTION))) as [number, number, number];
+    const upper = maximumExclusive.map((value, axis) => Math.min(brickDimensions[axis],
+      Math.ceil(value / BRICK_FINE_RESOLUTION))) as [number, number, number];
+    for (let z = lower[2]; z < upper[2]; z += 1)
+      for (let y = lower[1]; y < upper[1]; y += 1)
+        for (let x = lower[0]; x < upper[0]; x += 1) addBrick([x, y, z]);
+  };
+  const addNormalizedBounds = (minimum: readonly [number, number, number],
+    maximum: readonly [number, number, number]) => {
+    if (maximum.some((value, axis) => value <= minimum[axis])) return;
+    // Expand by one finest cell because analytic volumes use eight samples at
+    // +/-0.4 h around the centre. The local occupancy test below removes the
+    // conservative boundary false positives.
+    addCellBounds(
+      minimum.map((value, axis) => Math.floor(value * dimensions[axis]) - 1) as
+        [number, number, number],
+      maximum.map((value, axis) => Math.ceil(value * dimensions[axis]) + 1) as
+        [number, number, number],
+    );
+  };
+
+  const authored = initialFluidBrickCoordinates(scene, dimensions, BRICK_FINE_RESOLUTION);
+  for (const coordinate of initialFluidSeedBrickCoordinates(
+    scene, dimensions, BRICK_FINE_RESOLUTION,
+  )) addBrick(coordinate);
+
+  // Replacement seeds suppress the procedural base; additive or absent seeds
+  // retain it. A tank fill legitimately scales with its wet volume, while a
+  // local dam contributes only its own bounded box.
+  if (!authored) {
+    if (scene.fluid.initialCondition === "tank-fill") {
+      addNormalizedBounds([0, 0, 0], [1, scene.container.fillFraction, 1]);
+    } else {
+      const dam = sceneDamBreakBox(scene);
+      addNormalizedBounds([dam.min.x, dam.min.y, dam.min.z],
+        [dam.max.x, dam.max.y, dam.max.z]);
+    }
+  }
+
+  const container = scene.container;
+  const normalized = (point: readonly [number, number, number]) => [
+    (point[0] + 0.5 * container.width_m) / container.width_m,
+    point[1] / container.height_m,
+    (point[2] + 0.5 * container.depth_m) / container.depth_m,
+  ] as const;
+  for (const volume of sceneInitialLiquidVolumes(scene)) {
+    const minimum = volume.shape === "box"
+      ? [volume.min_m.x, volume.min_m.y, volume.min_m.z] as const
+      : volume.shape === "cylinder"
+        ? [volume.center_m.x - volume.radius_m, volume.center_m.y - volume.radius_m,
+          volume.center_m.z - volume.halfHeight_m] as const
+        : [volume.center_m.x - volume.radius_m, volume.center_m.y - volume.radius_m,
+          volume.center_m.z - volume.radius_m] as const;
+    const maximum = volume.shape === "box"
+      ? [volume.max_m.x, volume.max_m.y, volume.max_m.z] as const
+      : volume.shape === "cylinder"
+        ? [volume.center_m.x + volume.radius_m, volume.center_m.y + volume.radius_m,
+          volume.center_m.z + volume.halfHeight_m] as const
+        : [volume.center_m.x + volume.radius_m, volume.center_m.y + volume.radius_m,
+          volume.center_m.z + volume.radius_m] as const;
+    addNormalizedBounds(normalized(minimum), normalized(maximum));
+  }
+  return [...candidates.entries()].sort((left, right) => left[0] - right[0])
+    .map((entry) => entry[1]);
 }
 
 /** Build one payload by exact volume averaging from the bounded finest lattice. */

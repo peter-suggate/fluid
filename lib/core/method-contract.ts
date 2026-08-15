@@ -7,7 +7,10 @@ import type { GPURigidBodyPick, GPURigidBodyPose } from "./webgpu-rigid-body";
 import type { Vec3 } from "./model";
 import type { GPUSecondaryParticleSource } from "./webgpu-secondary-particles";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
-import type { WebGPUFineLevelSetBrickSource } from "./levelset-consumer-abi";
+import type {
+  SparseAdaptiveGridConsumerSource,
+  WebGPUFineLevelSetBrickSource,
+} from "./levelset-consumer-abi";
 import type { GPUInitializationPhase } from "./gpu-initialization";
 import type { OctreeTechniqueDebugSource } from "./levelset-consumer-abi";
 import type { CoarseLevelSetConsumerSource } from "./levelset-consumer-abi";
@@ -219,6 +222,8 @@ export interface GPUSolverInstance {
   readonly initialSparseAuthorityReady?: boolean;
   /** Row-independent, globally indexed sparse fine level-set bricks. */
   readonly globalFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
+  /** Live sparse represented-cell fields for scientific grid overlays. */
+  readonly sparseAdaptiveGridSource?: SparseAdaptiveGridConsumerSource;
   /** Compact moving surface used when coarse-1 deliberately has no fine band. */
   readonly coarseLevelSetSource?: CoarseLevelSetConsumerSource;
   /**

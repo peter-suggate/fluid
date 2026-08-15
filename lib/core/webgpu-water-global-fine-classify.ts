@@ -45,7 +45,18 @@ fn validCurrentPublication()->bool{
   // moving surface. It deliberately has no fine worklist, pages or topology
   // transaction, so validation must finish before inspecting those sentinels.
   if(params.table.y==6u){return coarsePublished;}
-  if(arrayLength(&fineTopologyControl)<8u||arrayLength(&fineWorklist)<7u){return false;}
+  if(arrayLength(&fineWorklist)<7u){return false;}
+  let count=fineWorklist[1];
+  let finePublished=params.table.y==7u&&count<=params.table.x&&count<=params.table.z
+    &&7u+count<=arrayLength(&fineWorklist)&&(fineWorklist[0]&0x3fffffffu)==generation
+    &&fineWorklist[2]==params.table.z&&(fineWorklist[3]&3u)==3u
+    &&fineWorklist[4]==(count+63u)/64u&&fineWorklist[5]==1u&&fineWorklist[6]==1u;
+  // Sparse CM12 publishes a self-contained, key-sorted page set with a dry
+  // support apron. It has no background-octree generation to pair and missing
+  // logical pages are authoritative air, so the compact flag is its complete
+  // publication transaction.
+  if((fineWorklist[3]&0x80000000u)!=0u){return finePublished;}
+  if(arrayLength(&fineTopologyControl)<8u){return false;}
   let topologyFlags=fineTopologyControl[0];let topologyReason=fineTopologyControl[7];
   let clean=topologyFlags==0u&&fineTopologyControl[4]==1u&&fineTopologyControl[5]==0u&&topologyReason==0u;
   // Aanjaneya et al. 2017 Section 5 uses separate background-octree and
@@ -53,24 +64,31 @@ fn validCurrentPublication()->bool{
   // valid octree while the independently numbered fine SPGrid advances.
   let retained=fineTopologyControl[4]==1u&&fineTopologyControl[5]==1u
     &&topologyFlags!=0u&&topologyReason!=0u&&(topologyFlags&~0x1fu)==0u&&(topologyReason&~0x0fu)==0u;
-  let count=fineWorklist[1];
-  let finePublished=params.table.y==7u&&count<=params.table.x&&count<=params.table.z
-    &&7u+count<=arrayLength(&fineWorklist)&&(fineWorklist[0]&0x3fffffffu)==generation
-    &&fineWorklist[2]==params.table.z&&(fineWorklist[3]&3u)==3u
-    &&fineWorklist[4]==(count+63u)/64u&&fineWorklist[5]==1u&&fineWorklist[6]==1u;
   return finePublished&&coarsePublished&&((clean&&coarseGeneration==generation)||retained);
 }
 fn pageLookup(key:u32)->u32{
   if(params.table.y!=7u||arrayLength(&fineWorklist)<7u||fineWorklist[0]!=params.table.w
     ||fineWorklist[2]!=params.table.z||(fineWorklist[3]&3u)!=3u||fineWorklist[5]!=1u||fineWorklist[6]!=1u){return INVALID;}
   let logicalCount=params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z;
+  if(key>=logicalCount){return INVALID;}
+  if((fineWorklist[3]&0x80000000u)!=0u){
+    let count=min(fineWorklist[1],params.table.z);var low=0u;var high=count;
+    loop{if(low>=high){break;}let middle=low+(high-low)/2u;let base=middle*4u;
+      if(base+2u>=arrayLength(&metadata)){return INVALID;}let candidate=metadata[base+1u];
+      if(candidate<key){low=middle+1u;}else{high=middle;}}
+    let base=low*4u;return select(INVALID,low,low<count&&base+2u<arrayLength(&metadata)
+      &&metadata[base]==low&&metadata[base+1u]==key&&metadata[base+2u]==params.table.w);
+  }
   let directoryBase=7u+params.table.z;
-  if(key>=logicalCount||directoryBase+key>=arrayLength(&fineWorklist)){return INVALID;}
+  if(directoryBase+key>=arrayLength(&fineWorklist)){return INVALID;}
   let id=fineWorklist[directoryBase+key];let base=id*4u;
   return select(INVALID,id,id<params.table.z&&base+2u<arrayLength(&metadata)
     &&metadata[base]==id&&metadata[base+1u]==key&&metadata[base+2u]==params.table.w);
 }
-fn coarsePhi(q:vec3i)->f32{return sampleCoarseOctreePhi(params.settings.xyz+(vec3f(q)+vec3f(0.5))*params.settings.w);}
+fn coarsePhi(q:vec3i)->f32{
+  if((fineWorklist[3]&0x80000000u)!=0u){return 4.0*params.settings.w;}
+  return sampleCoarseOctreePhi(params.settings.xyz+(vec3f(q)+vec3f(0.5))*params.settings.w);
+}
 fn adaptiveNodalPublication()->bool{let count=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));return count>0u&&(powerCoarseSamples.entries[0].flags&0x18000000u)==0x10000000u;}
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn phi(qi:vec3i)->f32{

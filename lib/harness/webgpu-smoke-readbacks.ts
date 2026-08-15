@@ -18,6 +18,7 @@ import {
   unpackFineLevelSetPackedFlags,
   unpackFineLevelSetPackedPhi,
 } from "../core/fine-levelset-packed-sample";
+import { FINE_LEVELSET_COMPACT_LOOKUP_FLAG } from "../core/fine-levelset-brick-abi";
 import {
   FINE_LEVELSET_REDISTANCE_CONTROL_BYTES,
   unpackFineLevelSetGPURedistanceControl,
@@ -109,6 +110,39 @@ function decodePackedFineSamples(words: Uint32Array): { flags: Uint32Array; phi:
     phi[index] = unpackFineLevelSetPackedPhi(words[index]!);
   }
   return { flags, phi };
+}
+
+function finePhysicalPageForKey(
+  source: WebGPUFineLevelSetBrickSource,
+  worklist: Uint32Array,
+  metadata: Uint32Array,
+  key: number,
+): number | undefined {
+  const capacity = source.plan.maximumResidentBricks;
+  if (worklist.length < 7 || worklist[0] !== source.generation
+    || worklist[2] !== capacity || (worklist[3] & 3) !== 3
+    || worklist[5] !== 1 || worklist[6] !== 1
+    || key < 0 || key >= source.plan.logicalBrickCount) return undefined;
+  let id: number;
+  if ((worklist[3]! & FINE_LEVELSET_COMPACT_LOOKUP_FLAG) !== 0) {
+    const count = Math.min(worklist[1]!, capacity);
+    let low = 0, high = count;
+    while (low < high) {
+      const middle = low + Math.floor((high - low) / 2);
+      if (metadata[4 * middle + 1]! < key) low = middle + 1;
+      else high = middle;
+    }
+    id = low;
+    if (id >= count) return undefined;
+  } else {
+    const directoryBase = 7 + capacity;
+    if (directoryBase + key >= worklist.length) return undefined;
+    id = worklist[directoryBase + key]!;
+  }
+  const base = id * 4;
+  return id < capacity && base + 2 < metadata.length && metadata[base] === id
+    && metadata[base + 1] === key && metadata[base + 2] === source.generation
+    ? id : undefined;
 }
 
 /** Read the authoritative sparse fine phi and locate its upper zero crossing
@@ -623,20 +657,11 @@ export async function readGlobalFineGenerationDiagnostics(
   if (probeBrickKeys.length > 0) {
     const publishedIds = new Set<number>();
     for (let work = 0; work < activePages; work += 1) publishedIds.add(worklist[7 + work]);
-    const lookup = (key: number) => {
-      if (worklist.length < 7 || worklist[0] !== source.generation
-        || worklist[2] !== pageCapacity || (worklist[3] & 3) !== 3
-        || worklist[5] !== 1 || worklist[6] !== 1) return undefined;
-      const directoryBase = 7 + pageCapacity;
-      if (key >= source.plan.logicalBrickCount || directoryBase + key >= worklist.length) return undefined;
-      const id = worklist[directoryBase + key], base = id * 4;
-      return id < pageCapacity && base + 2 < metadata.length && metadata[base] === id
-        && metadata[base + 1] === key && metadata[base + 2] === source.generation ? id : undefined;
-    };
     const requiredLocals = source.plan.fineFactor === 4 && source.plan.brickResolution === 4
       ? [21, 22, 25, 26, 37, 38, 41, 42] : undefined;
     for (const key of probeBrickKeys) {
-      const id = lookup(key); const validId = id !== undefined && id < pageCapacity;
+      const id = finePhysicalPageForKey(source, worklist, metadata, key);
+      const validId = id !== undefined && id < pageCapacity;
       let pageValid = 0, pageFinite = 0;
       if (validId) for (let local = 0; local < samplesPerBrick; local += 1) {
         const index = id * samplesPerBrick + local;
