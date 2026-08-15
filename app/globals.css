@@ -413,14 +413,22 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .camera-toolbar button { height: 27px; padding: 0 9px; border: 0; background: transparent; color: var(--muted); font-size: var(--size-2); cursor: pointer; }
 .camera-toolbar button:hover { background: var(--accent-wash); color: var(--accent); }
 .camera-toolbar span { padding: 0 8px; color: var(--dim); font: var(--text-micro); }
-.axis-widget { position: absolute; left: 17px; bottom: 17px; width: 55px; height: 55px; color: var(--muted); font: var(--text-tag); pointer-events: none; }
-.axis-widget::before, .axis-widget::after { content: ""; position: absolute; left: 22px; bottom: 18px; width: 27px; height: 1px; transform-origin: left; background: var(--accent-line); }
-.axis-widget::after { transform: rotate(-42deg); }
-.axis-widget span { position: absolute; }
-.axis-y { left: 20px; top: 0; color: var(--accent); }
-.axis-y::after { content:""; position:absolute; left:3px; top:9px; width:1px; height:28px; background:var(--accent-line); }
-.axis-x { right: 0; bottom: 15px; }
-.axis-z { left: 0; bottom: 1px; }
+/* The orientation gizmo. Geometry and the depth fade are the component's, since
+   both are continuous in the camera angle; this sets only what does not move.
+   The palette is the editor's, so an arm here names the axis that a gizmo handle
+   of the same colour drags. It sits clear of the mode chip (13px + its 27px
+   row), which the old widget overlapped and got its lower labels drawn over —
+   harmless only while nothing down there moved. Arms that turn do reach it. */
+.axis-widget { position: absolute; left: 17px; bottom: 48px; pointer-events: none; }
+.axis-widget line { stroke-width: 1.25; stroke-linecap: round; }
+.axis-widget text { font: var(--text-tag); letter-spacing: var(--track-wide); }
+.axis-widget .axis-origin { fill: var(--dim); }
+.axis-widget .axis-x line { stroke: var(--red); }
+.axis-widget .axis-x text { fill: var(--red); }
+.axis-widget .axis-y line { stroke: var(--accent); }
+.axis-widget .axis-y text { fill: var(--accent); }
+.axis-widget .axis-z line { stroke: var(--axis-z); }
+.axis-widget .axis-z text { fill: var(--axis-z); }
 /* Scene identity rides over the viewport instead of costing a sidebar column:
    the preset picker and the way into configuration, then runtime status. */
 .topline-left { min-width: 0; display: flex; flex-direction: column; align-items: start; gap: 8px; }

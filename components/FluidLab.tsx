@@ -13,6 +13,7 @@ import { WebGPUViewport } from "./WebGPUViewport";
 import { EditorModeChip } from "./EditorModeChip";
 import { RadialMenu } from "./RadialMenu";
 import { SceneOverlay } from "./SceneOverlay";
+import { AxisWidget } from "./AxisWidget";
 import { SceneScaleOverlay } from "./SceneScaleOverlay";
 import { SceneConfigPopover } from "./SceneConfigPopover";
 import { RigidBodyPanel } from "./RigidBodyTray";
@@ -176,7 +177,7 @@ export function FluidLab() {
           </div>
         </div>
         <SceneScaleOverlay />
-        <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
+        <AxisWidget />
         <nav className="utility-panel-tabs" aria-label="Viewport panels">
           <button className={rightPanel === "visual" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visual" ? null : "visual")} aria-expanded={rightPanel === "visual"} title="Render and debug controls">RENDER</button>
           <button className={rightPanel === "visuals" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visuals" ? null : "visuals")} aria-expanded={rightPanel === "visuals"} aria-controls="visuals-panel" title="Scientific field visualizations">VISUALS</button>
