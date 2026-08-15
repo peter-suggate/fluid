@@ -8,6 +8,19 @@ import {
   SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE,
   type SparseCM12BenchmarkArm,
 } from "../lib/methods/adaptive-mass/adaptive-mass-performance";
+import { sceneDamBreakBox } from "../lib/core/initial-fluid";
+import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
+import {
+  createMinimalPowerDamBreak64Scene,
+  createSparseCM12LongDamBreakScene,
+  SPARSE_CM12_LONG_DAM_METHOD_PROFILE,
+} from "../lib/core/scenes";
+import {
+  initializeSparseBrickAtlasFromScene,
+  sparseBrickAtlasStats,
+} from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+import { dormantReceiverDomain, dormantReceiverResolution } from
+  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 
 test("resident activity measurement is GPU-owned and disjoint from accepted fields", () => {
   assert.match(webgpuSparseCM12ResidentWGSL,
@@ -50,6 +63,144 @@ test("frame scheduling never waits for or consumes activity readback", () => {
   const advance = source.slice(advanceBegin, advanceEnd);
   assert.doesNotMatch(advance, /readGPUActivityPolicy|readActivitySnapshot|mapAsync/);
   assert.match(source, /Explicit acceptance\/debug readback; never consulted by advanceTo/);
+});
+
+test("GPU candidate planning is epoch-gated and cannot mutate accepted state", () => {
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn planBrickResolution");
+  const end = webgpuSparseCM12ResidentWGSL.indexOf(
+    "fn classifyPresentationBricks", begin,
+  );
+  assert.ok(begin >= 0 && end > begin, "candidate planner must be independently inspectable");
+  const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.match(kernel, /requested=atomicLoad\(&activity\[output\+8u\]\)/,
+    "candidate requests must persist between topology epochs");
+  assert.match(kernel, /surface\|\|predicted\|\|score>=224u/);
+  assert.match(kernel, /else if\(atomicLoad\(&activity\[5\]\)!=0u\)/);
+  assert.match(kernel, /if\(hotEpochs>=2u\)/);
+  assert.match(kernel, /requested=min\(8u,2u\*current\)/);
+  assert.match(kernel, /quietEpochs>=8u&&!detail/);
+  assert.match(kernel, /requested=current\/2u/);
+  assert.match(kernel, /atomicStore\(&activity\[output\+8u\],requested\)/);
+  assert.doesNotMatch(kernel, /state\[[^\]]+\]\s*=(?!=)/);
+  assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/);
+});
+
+test("GPU candidate levels close the full 1/2/4/8 ladder to 2:1", () => {
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn closePlannedResolution");
+  const end = webgpuSparseCM12ResidentWGSL.indexOf(
+    "fn activateSweptReceivers", begin,
+  );
+  assert.ok(begin >= 0 && end > begin, "grading closure must be independently inspectable");
+  const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.match(kernel, /neighborResolution\/2u/);
+  assert.match(kernel, /atomicMax\(&activity\[activityRecord\(brick\)\+8u\],required\)/);
+  assert.doesNotMatch(kernel, /state\[[^\]]+\]\s*=(?!=)/);
+  assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/);
+  const residentSource = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.match(residentSource,
+    /for \(let gradingPass = 0; gradingPass < 3; gradingPass \+= 1\)/);
+});
+
+test("swept receiver activation is GPU-published and dormant cells stay inert", () => {
+  const residentSource = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /atomicCompareExchangeWeak\(&activity\[output\+10u\],0u,1u\)/);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /atomicAdd\(&activity\[11\],topology\[record\+1u\]\)/);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /if\(!cellActive\(id\)\)\{\s*state\[destinationDensity\(\)\+id\]=0\.0/);
+  const plan = residentSource.indexOf('dispatch("planBrickResolution"');
+  const activate = residentSource.indexOf('dispatch("activateSweptReceivers"');
+  const present = residentSource.indexOf('dispatch("classifyPresentationBricks"');
+  assert.ok(plan >= 0 && activate > plan && present > activate,
+    "GPU planning must publish receiver activation before presentation");
+  const encodeBegin = residentSource.indexOf("  encode(\n");
+  const encodeEnd = residentSource.indexOf("  /** Publish generation zero", encodeBegin);
+  const encode = residentSource.slice(encodeBegin, encodeEnd);
+  assert.doesNotMatch(encode, /mapAsync|readActivitySnapshot|readGPUActivityPolicy/);
+});
+
+test("GPU retirement removes only mass-empty bricks outside the 26-neighbor air ring", () => {
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn retireUnsupportedEmptyBricks");
+  const end = webgpuSparseCM12ResidentWGSL.indexOf(
+    "fn classifyPresentationBricks", begin,
+  );
+  assert.ok(begin >= 0 && end > begin, "retirement kernel must be inspectable");
+  const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.match(webgpuSparseCM12ResidentWGSL, /occupiedCell=occupiedCell\|\|rho>0\.0/);
+  assert.match(kernel, /for\(var dz=-1;dz<=1;dz\+=1\)/);
+  assert.match(kernel, /for\(var dy=-1;dy<=1;dy\+=1\)/);
+  assert.match(kernel, /for\(var dx=-1;dx<=1;dx\+=1\)/);
+  assert.match(kernel, /atomicCompareExchangeWeak\(&activity\[output\+10u\],1u,0u\)/);
+  assert.match(kernel, /atomicSub\(&activity\[8\],1u\)/);
+  assert.doesNotMatch(kernel, /state\[[^\]]+\]\s*=(?!=)/,
+    "retirement must not erase accepted fields");
+  assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/,
+    "retirement must not mutate immutable packed topology");
+  const residentSource = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  const activate = residentSource.indexOf('dispatch("activateSweptReceivers"');
+  const retire = residentSource.indexOf('dispatch("retireUnsupportedEmptyBricks"');
+  const present = residentSource.indexOf('dispatch("classifyPresentationBricks"');
+  assert.ok(activate >= 0 && retire > activate && present > retire,
+    "receiver publication and support closure must precede retirement and presentation");
+});
+
+test("new Sparse CM12 receivers are fine with a full graded support ladder", () => {
+  assert.equal(dormantReceiverResolution("adaptive"), 8);
+  assert.equal(dormantReceiverResolution("adaptive", 1), 4);
+  assert.equal(dormantReceiverResolution("adaptive", 2), 2);
+  assert.equal(dormantReceiverResolution("adaptive", 3), 1);
+  assert.equal(dormantReceiverResolution("adaptive", 4), 1);
+  assert.equal(dormantReceiverResolution("adaptive", 1, 4), 2);
+  assert.equal(dormantReceiverResolution("all-coarse"), 4);
+  assert.equal(dormantReceiverResolution("all-fine"), 8);
+});
+
+test("the 64-cubed mini dam has dormant receivers on every domain axis", () => {
+  const scene = createMinimalPowerDamBreak64Scene();
+  const dimensions = sceneLatticeDimensions(scene);
+  const initial = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: dimensions,
+    resolutionForBrick: () => 4,
+  });
+  const domain = dormantReceiverDomain(initial, "adaptive");
+  assert.equal(domain.bricks.length, 8 ** 3);
+  for (const coordinate of [[7, 0, 7], [0, 7, 7], [7, 7, 7]] as const) {
+    const key = coordinate[0] + 8 * (coordinate[1] + 8 * coordinate[2]);
+    assert.ok(domain.directory.has(key),
+      `missing dormant mini-dam receiver ${coordinate.join(",")}`);
+  }
+});
+
+test("canonical Sparse CM12 dam defines a long narrow 96x24x16 traversal", () => {
+  const scene = createSparseCM12LongDamBreakScene();
+  assert.deepEqual(sceneLatticeDimensions(scene), [96, 24, 16]);
+  assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.methodId, "adaptive-mass");
+  assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.timeStep, "scene");
+  const dam = sceneDamBreakBox(scene);
+  assert.equal(dam.min.x, 0);
+  assert.ok(Math.abs(dam.max.x - 1 / 6) < 1e-12);
+  assert.ok(Math.abs(dam.max.y - 5 / 6) < 1e-12);
+  assert.equal(dam.max.z, 1);
+  const atlas = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: [96, 24, 16],
+    resolutionForBrick: () => 4,
+  });
+  const stats = sparseBrickAtlasStats(atlas);
+  assert.equal(stats.logicalBrickCount, 72);
+  assert.equal(stats.residentBrickCount, 12);
+  assert.equal(stats.omittedEmptyBrickCount, 60);
+  assert.equal(atlas.brickDimensions[0] - 2, 10,
+    "the front must cross ten initially dry brick columns");
 });
 
 test("mini32 performance accepts a Rung-A fine set without freezing the old one-seed count", () => {

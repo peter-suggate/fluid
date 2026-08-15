@@ -1106,30 +1106,47 @@ function resampleBrickScalar(
   emptyValue: number,
 ): Float64Array {
   const output = new Float64Array(targetResolution ** 3).fill(emptyValue);
-  if (brick.resolution === 4 && targetResolution === 8) {
-    for (let z = 0; z < 8; z += 1) for (let y = 0; y < 8; y += 1) {
-      for (let x = 0; x < 8; x += 1) {
-        output[x + 8 * (y + 8 * z)] = source[Math.floor(x / 2) + 4
-          * (Math.floor(y / 2) + 4 * Math.floor(z / 2))];
-      }
-    }
+  if (targetResolution > brick.resolution
+    && targetResolution % brick.resolution === 0) {
+    const factor = targetResolution / brick.resolution;
+    for (let z = 0; z < targetResolution; z += 1)
+      for (let y = 0; y < targetResolution; y += 1)
+        for (let x = 0; x < targetResolution; x += 1) {
+          const sx = Math.floor(x / factor), sy = Math.floor(y / factor);
+          const sz = Math.floor(z / factor);
+          output[x + targetResolution * (y + targetResolution * z)] = source[
+            sx + brick.resolution * (sy + brick.resolution * sz)
+          ];
+        }
     return output;
   }
-  if (brick.resolution === 8 && targetResolution === 4) {
-    for (let z = 0; z < 4; z += 1) for (let y = 0; y < 4; y += 1) {
-      for (let x = 0; x < 4; x += 1) {
-        let weighted = 0;
-        let volume = 0;
-        for (let dz = 0; dz < 2; dz += 1) for (let dy = 0; dy < 2; dy += 1) {
-          for (let dx = 0; dx < 2; dx += 1) {
-            const sx = 2 * x + dx, sy = 2 * y + dy, sz = 2 * z + dz;
-            const childVolume = localCellVolume(dimensions, brick, 8, sx, sy, sz);
-            weighted += childVolume * source[sx + 8 * (sy + 8 * sz)];
-            volume += childVolume;
-          }
+  if (brick.resolution > targetResolution
+    && brick.resolution % targetResolution === 0) {
+    const factor = brick.resolution / targetResolution;
+    for (let z = 0; z < targetResolution; z += 1)
+      for (let y = 0; y < targetResolution; y += 1)
+        for (let x = 0; x < targetResolution; x += 1) {
+          let weighted = 0, volume = 0;
+          for (let dz = 0; dz < factor; dz += 1)
+            for (let dy = 0; dy < factor; dy += 1)
+              for (let dx = 0; dx < factor; dx += 1) {
+                const sx = factor * x + dx, sy = factor * y + dy;
+                const sz = factor * z + dz;
+                const childVolume = localCellVolume(
+                  dimensions, brick, brick.resolution, sx, sy, sz,
+                );
+                weighted += childVolume * source[sx + brick.resolution
+                  * (sy + brick.resolution * sz)];
+                volume += childVolume;
+              }
+          output[x + targetResolution * (y + targetResolution * z)] = volume > 0
+            ? weighted / volume : emptyValue;
         }
-        output[x + 4 * (y + 4 * z)] = volume > 0 ? weighted / volume : emptyValue;
-      }
+    return output;
+  }
+  if (brick.resolution === targetResolution) {
+    for (let index = 0; index < output.length; index += 1) {
+      output[index] = source[index] ?? emptyValue;
     }
     return output;
   }

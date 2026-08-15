@@ -20,6 +20,7 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import type { PerformanceTrace } from "../lib/core/performance-trace";
 import {
   createMinimalPowerDamBreak32Scene,
+  createSparseCM12LongDamBreakScene,
   createSymmetricExpansionScene,
 } from "../lib/core/scenes";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
@@ -29,9 +30,12 @@ import {
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { WebGPUAdaptiveMassSolver } from
+  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 import {
   evaluateSparseCM12Performance,
   SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE,
+  SPARSE_CM12_LONG_DAM_PERFORMANCE_ACCEPTANCE,
   SPARSE_CM12_PERFORMANCE_ACCEPTANCE,
   type SparseCM12BenchmarkArm,
   type SparseCM12TopologySample,
@@ -53,8 +57,9 @@ const timedFrames = positiveInteger("frames", 40);
 const sceneArgument = process.argv.slice(2)
   .find((value) => value.startsWith("--scene="))?.slice("--scene=".length)
   ?? "symmetric";
-if (sceneArgument !== "symmetric" && sceneArgument !== "mini32") {
-  throw new RangeError("scene must be symmetric or mini32");
+if (sceneArgument !== "symmetric" && sceneArgument !== "mini32"
+  && sceneArgument !== "long-dam") {
+  throw new RangeError("scene must be symmetric, mini32, or long-dam");
 }
 const sparseResolutionArgument = process.argv.slice(2)
   .find((value) => value.startsWith("--sparse-resolution="))
@@ -64,10 +69,14 @@ if (sparseResolutionArgument !== "all-fine" && sparseResolutionArgument !== "ada
 }
 const buildScene = sceneArgument === "mini32"
   ? createMinimalPowerDamBreak32Scene
-  : createSymmetricExpansionScene;
+  : sceneArgument === "long-dam"
+    ? createSparseCM12LongDamBreakScene
+    : createSymmetricExpansionScene;
 const acceptance = sceneArgument === "mini32"
   ? SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE
-  : SPARSE_CM12_PERFORMANCE_ACCEPTANCE;
+  : sceneArgument === "long-dam"
+    ? SPARSE_CM12_LONG_DAM_PERFORMANCE_ACCEPTANCE
+    : SPARSE_CM12_PERFORMANCE_ACCEPTANCE;
 const scene = buildScene();
 const dimensions = acceptance.finestDimensions;
 const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
@@ -93,6 +102,78 @@ interface MutableArm {
   readonly evolvedTopology: SparseCM12TopologySample[];
   lastCPUTraceSampleId: number;
   lastGPUTraceSampleId: number;
+}
+
+async function readDensity(
+  device: GPUDevice,
+  solver: GPUSolverInstance,
+): Promise<Float32Array> {
+  const [nx, ny, nz] = dimensions;
+  const bytesPerRow = Math.ceil(nx * 4 / 256) * 256;
+  const readback = device.createBuffer({
+    label: "Sparse CM12 long-dam final density readback",
+    size: bytesPerRow * ny * nz,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  try {
+    const encoder = device.createCommandEncoder();
+    encoder.copyTextureToBuffer(
+      { texture: solver.volumeTexture },
+      { buffer: readback, bytesPerRow, rowsPerImage: ny },
+      dimensions,
+    );
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const source = new Float32Array(readback.getMappedRange());
+    const stride = bytesPerRow / 4;
+    const density = new Float32Array(nx * ny * nz);
+    for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+      density.set(source.subarray(stride * (y + ny * z), stride * (y + ny * z) + nx),
+        nx * (y + ny * z));
+    }
+    return density;
+  } finally {
+    if (readback.mapState === "mapped") readback.unmap();
+    readback.destroy();
+  }
+}
+
+function frontReceipt(density: Float32Array) {
+  const [nx, ny, nz] = dimensions;
+  const columnMass = new Array<number>(nx).fill(0);
+  const furthest = { above1e3: -1, above005: -1, liquid: -1 };
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1)
+    for (let x = 0; x < nx; x += 1) {
+      const rho = density[x + nx * (y + ny * z)]!;
+      columnMass[x] += rho;
+      if (rho > 1e-3) furthest.above1e3 = Math.max(furthest.above1e3, x);
+      if (rho > 0.05) furthest.above005 = Math.max(furthest.above005, x);
+      if (rho >= 0.5) furthest.liquid = Math.max(furthest.liquid, x);
+    }
+  return {
+    furthestFineCellX: furthest,
+    occupiedColumnMass: columnMass.map((mass, x) => ({ x, mass }))
+      .filter(({ mass }) => mass > 1e-3),
+  };
+}
+
+function matchedDensityReceipt(uniform: Float32Array, sparse: Float32Array) {
+  let differenceL1 = 0, differenceSquared = 0;
+  let referenceL1 = 0, referenceSquared = 0, maximumAbsolute = 0;
+  for (let index = 0; index < uniform.length; index += 1) {
+    const difference = sparse[index]! - uniform[index]!;
+    differenceL1 += Math.abs(difference);
+    differenceSquared += difference * difference;
+    referenceL1 += Math.abs(uniform[index]!);
+    referenceSquared += uniform[index]! * uniform[index]!;
+    maximumAbsolute = Math.max(maximumAbsolute, Math.abs(difference));
+  }
+  return {
+    relativeL1: differenceL1 / Math.max(Number.MIN_VALUE, referenceL1),
+    relativeL2: Math.sqrt(differenceSquared
+      / Math.max(Number.MIN_VALUE, referenceSquared)),
+    maximumAbsolute,
+  };
 }
 
 function topologySample(info: Awaited<ReturnType<GPUSolverInstance["readStats"]>>): SparseCM12TopologySample {
@@ -302,11 +383,63 @@ try {
       "all-fine A/B must compare the same represented cell count");
   }
 
+  const performanceAcceptance = sparseResolutionArgument === "all-fine" ? {
+    sceneId: acceptance.sceneId,
+    finestDimensions: acceptance.finestDimensions,
+    dt_s: acceptance.dt_s,
+    maximumMedianFrameRatio: acceptance.maximumMedianFrameRatio,
+    targetMedianFrameRatio: acceptance.targetMedianFrameRatio,
+    minimumTimedFrames: acceptance.minimumTimedFrames,
+    constructionExcluded: acceptance.constructionExcluded,
+  } : acceptance;
   const verdict = evaluateSparseCM12Performance(
     frozenArm(uniform),
     frozenArm(sparse),
-    acceptance,
+    performanceAcceptance,
   );
+  const longDamFront = sceneArgument === "long-dam" ? {
+    uniform: frontReceipt(await readDensity(device, uniform.solver)),
+    sparse: frontReceipt(await readDensity(device, sparse.solver)),
+    sparseResidentMaximumFineCellX: Math.max(
+      ...((await (sparse.solver as WebGPUAdaptiveMassSolver)
+        .readGPUActivityPolicy()).bricks.filter((brick) => brick.active)
+        .map((brick) => 8 * (brick.coordinate[0] + 1) - 1)),
+    ),
+  } : undefined;
+  const frontFailures: string[] = [];
+  if (longDamFront
+    && longDamFront.uniform.furthestFineCellX.above005
+      > longDamFront.sparseResidentMaximumFineCellX
+    && longDamFront.sparse.furthestFineCellX.above005
+      <= longDamFront.sparseResidentMaximumFineCellX) {
+    frontFailures.push(
+      `Sparse CM12 front is pinned at resident boundary x=${
+        longDamFront.sparseResidentMaximumFineCellX}; Uniform reached x=${
+        longDamFront.uniform.furthestFineCellX.above005}`,
+    );
+  }
+  if (longDamFront
+    && longDamFront.uniform.furthestFineCellX.liquid === dimensions[0] - 1
+    && longDamFront.sparse.furthestFineCellX.liquid !== dimensions[0] - 1) {
+    frontFailures.push(
+      `Sparse CM12 liquid front stopped at x=${
+        longDamFront.sparse.furthestFineCellX.liquid}; the matched Uniform front reached the far wall`,
+    );
+  }
+  const forcedFineDensityAgreement = sparseResolutionArgument === "all-fine"
+    ? matchedDensityReceipt(
+      await readDensity(device, uniform.solver),
+      await readDensity(device, sparse.solver),
+    ) : undefined;
+  const agreementFailures: string[] = [];
+  if (forcedFineDensityAgreement && forcedFineDensityAgreement.relativeL1 > 0.05) {
+    agreementFailures.push(
+      `forced-all-fine Sparse CM12 density relative L1 ${
+        forcedFineDensityAgreement.relativeL1} exceeds 0.05 against Uniform`,
+    );
+  }
+  const passed = verdict.passed && frontFailures.length === 0
+    && agreementFailures.length === 0;
   const report = {
     phase: "sparse-cm12-frame-performance",
     scene: scene.sceneId,
@@ -335,10 +468,16 @@ try {
         ...sparse.evolvedTopology.map((sample) => sample.fineCoarseFaceConnectedPairs),
       ),
     },
+    longDamFront,
+    forcedFineDensityAgreement,
     ...verdict,
+    passed,
+    targetMet: verdict.targetMet && frontFailures.length === 0
+      && agreementFailures.length === 0,
+    failures: [...verdict.failures, ...frontFailures, ...agreementFailures],
   };
   console.log(JSON.stringify(report, null, 2));
-  if (validationErrors.length > 0 || !verdict.passed) process.exitCode = 1;
+  if (validationErrors.length > 0 || !passed) process.exitCode = 1;
 } finally {
   uniform?.solver.destroy();
   sparse?.solver.destroy();

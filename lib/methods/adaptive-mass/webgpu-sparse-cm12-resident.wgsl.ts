@@ -13,8 +13,8 @@ ${createCm12NumericsWGSL()}
 
 const INVALID:u32=0xffffffffu;
 const WORKGROUP:u32=64u;
-const ACTIVITY_HEADER_WORDS:u32=8u;
-const ACTIVITY_RECORD_WORDS:u32=8u;
+const ACTIVITY_HEADER_WORDS:u32=12u;
+const ACTIVITY_RECORD_WORDS:u32=12u;
 const ACTIVITY_FIXED:f32=65536.0;
 
 struct Params {
@@ -26,7 +26,7 @@ struct Params {
   stateOffsets1:vec4u,      // cell velocity A/B, face A/B
   stateOffsets2:vec4u,      // pressure, rhs, diagonal, liquid
   stateOffsets3:vec4u,      // theta, residual, preconditioned, direction
-  stateOffsets4:vec4u,      // applied, divergence, presentation brick wet, reserved
+  stateOffsets4:vec4u,      // applied, divergence, presentation brick wet, brick directory
   stateOffsets5:vec4u,      // sharpening delta/accepted fraction, reserved
   frame:vec4f,              // dt, finest cell metres, pressure scale, parity
   acceleration:vec4f,       // finest cells / second^2
@@ -47,9 +47,9 @@ struct Params {
 @group(0)@binding(9)var pressureTexture:texture_storage_3d<r32float,write>;
 @group(0)@binding(10)var divergenceTexture:texture_storage_3d<r32float,write>;
 @group(0)@binding(11)var<storage,read_write>conditioning:array<atomic<i32>>;
-// This policy/history arena is the only output of the first dynamic-resolution
-// rung. It is device-resident and deliberately disjoint from accepted physics
-// and topology until candidate transfer and rollback are implemented.
+// Device-owned activity, planning, and logical-residency arena. Physics reads
+// the published active bit, while immutable packed topology and accepted CM12
+// fields remain separate storage.
 @group(0)@binding(12)var<storage,read_write>activity:array<atomic<u32>>;
 
 fn tf(index:u32)->f32{return bitcast<f32>(topology[index]);}
@@ -63,6 +63,7 @@ fn sourceFaceVelocity()->u32{return select(p.stateOffsets1.z,p.stateOffsets1.w,p
 fn destinationFaceVelocity()->u32{return select(p.stateOffsets1.w,p.stateOffsets1.z,p.frame.w>0.5);}
 
 fn cellBase(id:u32)->u32{return p.topologyOffsets.x+id*12u;}
+fn cellBrick(id:u32)->u32{return topology[cellBase(id)+11u];}
 fn cellVolume(id:u32)->f32{return tf(cellBase(id)+3u);}
 fn cellMinimumWidth(id:u32)->f32{
   let b=cellBase(id);return min(tf(b+4u),min(tf(b+5u),tf(b+6u)));
@@ -83,12 +84,21 @@ fn incidenceBegin(cell:u32)->u32{return topology[p.topologyOffsets.w+cell];}
 fn incidenceEnd(cell:u32)->u32{return topology[p.topologyOffsets.w+cell+1u];}
 fn incidenceRow(index:u32)->u32{return topology[p.topologyOffsets2.x+2u*index];}
 fn incidenceTerm(index:u32)->u32{return topology[p.topologyOffsets2.x+2u*index+1u];}
-fn isLiquid(cell:u32)->bool{return state[p.stateOffsets2.w+cell]>0.5;}
+fn activityRecord(brick:u32)->u32{
+  return ACTIVITY_HEADER_WORDS+ACTIVITY_RECORD_WORDS*brick;
+}
+fn brickActive(brick:u32)->bool{
+  return brick<p.dispatch.w&&atomicLoad(&activity[activityRecord(brick)+10u])!=0u;
+}
+fn cellActive(cell:u32)->bool{return brickActive(cellBrick(cell));}
+fn isLiquid(cell:u32)->bool{return cellActive(cell)&&state[p.stateOffsets2.w+cell]>0.5;}
 
 fn ownerCellAt(q:vec3i)->u32{
   if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))){return INVALID;}
   let dense=u32(q.x)+p.dimensions.x*(u32(q.y)+p.dimensions.y*u32(q.z));
-  return topology[p.topologyOffsets2.y+4u*dense];
+  let owner=p.topologyOffsets2.y+4u*dense;let cell=topology[owner];
+  if(cell==INVALID||!brickActive(topology[owner+3u])){return INVALID;}
+  return cell;
 }
 
 fn presentationOwnerCellAt(q:vec3i)->u32{
@@ -191,6 +201,10 @@ fn transportBeta(cell:u32)->f32{
 
 fn extrapolateTransportVelocity(id:u32,inputOffset:u32,outputOffset:u32){
   let input=inputOffset+4u*id;let output=outputOffset+4u*id;
+  if(!cellActive(id)){
+    state[output]=0.0;state[output+1u]=0.0;state[output+2u]=0.0;state[output+3u]=0.0;
+    return;
+  }
   if(state[input+3u]>0.5){
     state[output]=state[input];state[output+1u]=state[input+1u];
     state[output+2u]=state[input+2u];state[output+3u]=1.0;return;
@@ -199,7 +213,7 @@ fn extrapolateTransportVelocity(id:u32,inputOffset:u32,outputOffset:u32){
   for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
     let row=incidenceRow(at);let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
     for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
-      if(neighbor==id){continue;}let source=inputOffset+4u*neighbor;
+      if(neighbor==id||!cellActive(neighbor)){continue;}let source=inputOffset+4u*neighbor;
       if(state[source+3u]<=0.5){continue;}let w=abs(termCoefficient(term));
       velocity+=w*vec3f(state[source],state[source+1u],state[source+2u]);weight+=w;
     }
@@ -213,6 +227,10 @@ fn extrapolateTransportVelocity(id:u32,inputOffset:u32,outputOffset:u32){
 fn initializeTransportVelocity(@builtin(global_invocation_id)gid:vec3u){
   let id=gid.x;if(id>=p.counts.x){return;}let input=sourceCellVelocity()+4u*id;
   let output=destinationCellVelocity()+4u*id;
+  if(!cellActive(id)){
+    state[output]=0.0;state[output+1u]=0.0;state[output+2u]=0.0;state[output+3u]=0.0;
+    return;
+  }
   state[output]=state[input];state[output+1u]=state[input+1u];state[output+2u]=state[input+2u];
   state[output+3u]=select(0.0,1.0,state[sourceDensity()+id]>CM12_LIQUID_ISOVALUE);
 }
@@ -244,7 +262,7 @@ fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(64)
 fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
-  let id=gid.x;if(id>=p.counts.x){return;}let b=cellBase(id);
+  let id=gid.x;if(id>=p.counts.x||!cellActive(id)){return;}let b=cellBase(id);
   let center=vec3f(tf(b),tf(b+1u),tf(b+2u));
   let q=(center-p.injectionCenter.xyz)/max(p.injectionRadius.xyz,vec3f(1e-6));
   let signed=length(q)-1.0;
@@ -259,7 +277,9 @@ fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
 // gamma_i w^-_li into each donor's volume-weighted beta column.
 @compute @workgroup_size(64)
 fn traceGammaAndBeta(@builtin(global_invocation_id)gid:vec3u){
-  let id=gid.x;if(id>=p.counts.x){return;}let b=cellBase(id);
+  let id=gid.x;if(id>=p.counts.x){return;}
+  if(!cellActive(id)){state[destinationGamma()+id]=1.0;return;}
+  let b=cellBase(id);
   let departure=traceDeparture(vec3f(tf(b),tf(b+1u),tf(b+2u)));
   var visible=0.0;var sampledGamma=0.0;
   for(var corner=0u;corner<8u;corner+=1u){let term=transportTerm(departure,corner);
@@ -280,7 +300,7 @@ fn traceGammaAndBeta(@builtin(global_invocation_id)gid:vec3u){
 // deterministic and keep rho and gamma transfers paired.
 @compute @workgroup_size(64)
 fn scatterDensityDeficit(@builtin(global_invocation_id)gid:vec3u){
-  let donor=gid.x;if(donor>=p.counts.x){return;}
+  let donor=gid.x;if(donor>=p.counts.x||!cellActive(donor)){return;}
   let deficit=max(0.0,1.0-transportBeta(donor));
   if(deficit<=1.0/CM12_TRANSPORT_FIXED){return;}let b=cellBase(donor);
   let arrival=traceArrival(vec3f(tf(b),tf(b+1u),tf(b+2u)));
@@ -307,7 +327,11 @@ fn scatterDensityDeficit(@builtin(global_invocation_id)gid:vec3u){
 // donor by max(1,beta_l) clamps the column without materializing A.
 @compute @workgroup_size(64)
 fn gatherConservativeDensity(@builtin(global_invocation_id)gid:vec3u){
-  let id=gid.x;if(id>=p.counts.x){return;}let b=cellBase(id);
+  let id=gid.x;if(id>=p.counts.x){return;}
+  if(!cellActive(id)){
+    state[destinationDensity()+id]=0.0;state[destinationGamma()+id]=1.0;return;
+  }
+  let b=cellBase(id);
   let departure=traceDeparture(vec3f(tf(b),tf(b+1u),tf(b+2u)));
   let advectedGamma=state[destinationGamma()+id];var visible=0.0;
   for(var corner=0u;corner<8u;corner+=1u){visible+=transportTerm(departure,corner).weight;}
@@ -328,6 +352,9 @@ fn gatherConservativeDensity(@builtin(global_invocation_id)gid:vec3u){
 fn diffuseGammaAxis(cell:u32,axis:u32,inputRho:u32,inputGamma:u32,
  outputRho:u32,outputGamma:u32){
   let ownRho=state[inputRho+cell];let ownGamma=state[inputGamma+cell];
+  if(!cellActive(cell)){
+    state[outputRho+cell]=0.0;state[outputGamma+cell]=1.0;return;
+  }
   var rho=ownRho;var gamma=ownGamma;
   let scale=min(1.0,30.0*p.frame.x);
   for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
@@ -341,6 +368,7 @@ fn diffuseGammaAxis(cell:u32,axis:u32,inputRho:u32,inputGamma:u32,
     let area=rowArea(row)/(negativeCount*positiveCount);
     for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
       if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
+      if(!cellActive(neighbor)){continue;}
       let conductedVolume=scale*min(area*cellMinimumWidth(cell),
         area*cellMinimumWidth(neighbor));
       let flux=cm12GammaDiffusionFluxInto(ownRho,ownGamma,
@@ -381,6 +409,9 @@ fn diffuseGammaReverseX(@builtin(global_invocation_id)gid:vec3u){let cell=gid.x;
 @compute @workgroup_size(64)
 fn averageGammaDiffusion(@builtin(global_invocation_id)gid:vec3u){let cell=gid.x;
   if(cell>=p.counts.x){return;}
+  if(!cellActive(cell)){
+    state[destinationDensity()+cell]=0.0;state[destinationGamma()+cell]=1.0;return;
+  }
   state[destinationDensity()+cell]=0.5*(state[p.stateOffsets2.x+cell]
     +state[p.stateOffsets3.y+cell]);
   state[destinationGamma()+cell]=0.5*(state[p.stateOffsets2.y+cell]
@@ -420,6 +451,7 @@ fn sharpeningStats(cell:u32)->SharpeningStats{
     let axis=rowAxis(row);
     for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
       if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
+      if(!cellActive(neighbor)){continue;}
       let neighborRho=state[destinationDensity()+neighbor];
       result.maximumDifference=max(result.maximumDifference,abs(rho-neighborRho));
       if(own<0.0){result.positiveArea[axis]+=area;
@@ -474,7 +506,9 @@ fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
 // scattered only over adjacent subfaces in the uphill density direction.
 @compute @workgroup_size(64)
 fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
-  let cell=gid.x;if(cell>=p.counts.x){return;}let stats=sharpeningStats(cell);
+  let cell=gid.x;if(cell>=p.counts.x){return;}
+  if(!cellActive(cell)){state[p.stateOffsets5.x+cell]=0.0;return;}
+  let stats=sharpeningStats(cell);
   var delta=sharpeningDelta(cell,stats);
   if(stats.uphillConductance<=1e-30){delta=0.0;}
   state[p.stateOffsets5.x+cell]=delta;if(delta>=0.0){return;}
@@ -491,6 +525,7 @@ fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
     let area=rowArea(row)/(negativeCount*positiveCount);let distance=rowDistance(row);
     for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
       if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
+      if(!cellActive(neighbor)){continue;}
       let conductance=area*max(0.0,
         (state[destinationDensity()+neighbor]-rho)/distance);
       if(conductance<=0.0){continue;}
@@ -507,6 +542,7 @@ fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn acceptSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
   let cell=gid.x;if(cell>=p.counts.x){return;}
+  if(!cellActive(cell)){state[p.stateOffsets5.y+cell]=0.0;return;}
   let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
   let base=state[destinationDensity()+cell]+state[p.stateOffsets5.x+cell];
   let capacity=max(0.0,(1.0-base)*cellVolume(cell));
@@ -515,7 +551,11 @@ fn acceptSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(64)
 fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
-  let cell=gid.x;if(cell>=p.counts.x){return;}let delta=state[p.stateOffsets5.x+cell];
+  let cell=gid.x;if(cell>=p.counts.x){return;}
+  if(!cellActive(cell)){
+    state[destinationDensity()+cell]=0.0;state[destinationGamma()+cell]=1.0;return;
+  }
+  let delta=state[p.stateOffsets5.x+cell];
   let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
   let accepted=incoming*state[p.stateOffsets5.y+cell];var returned=0.0;
   if(delta<0.0){let stats=sharpeningStats(cell);let rho=state[destinationDensity()+cell];
@@ -531,6 +571,7 @@ fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
       let area=rowArea(row)/(negativeCount*positiveCount);let distance=rowDistance(row);
       for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
         if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
+        if(!cellActive(neighbor)){continue;}
         let conductance=area*max(0.0,
           (state[destinationDensity()+neighbor]-rho)/distance);
         if(conductance<=0.0){continue;}
@@ -551,6 +592,9 @@ fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn preserveHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
   let cell=gid.x;if(cell>=p.counts.x){return;}let b=cellBase(cell);
+  if(!cellActive(cell)){
+    state[p.stateOffsets5.x+cell]=0.0;state[p.stateOffsets5.y+cell]=1.0;return;
+  }
   let center=vec3f(tf(b),tf(b+1u),tf(b+2u));let extent=f32(p.dimensions.x);
   let xs=array<f32,8>(center.x,extent-center.x,center.x,extent-center.x,
     center.z,extent-center.z,center.z,extent-center.z);
@@ -572,6 +616,7 @@ fn preserveHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn commitHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
   let cell=gid.x;if(cell>=p.counts.x){return;}
+  if(!cellActive(cell)){return;}
   state[destinationDensity()+cell]=state[p.stateOffsets5.x+cell];
   state[destinationGamma()+cell]=state[p.stateOffsets5.y+cell];
 }
@@ -614,7 +659,7 @@ fn applyOperator(cell:u32,inputOffset:u32)->f32{
 @compute @workgroup_size(64)
 fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
   let id=gid.x;if(id>=p.counts.x){return;}
-  let rho=state[destinationDensity()+id];let liquid=rho>=CM12_LIQUID_ISOVALUE;
+  let rho=state[destinationDensity()+id];let liquid=cellActive(id)&&rho>=CM12_LIQUID_ISOVALUE;
   state[p.stateOffsets2.w+id]=select(0.0,1.0,liquid);
   if(!liquid){state[p.stateOffsets2.y+id]=0.0;state[p.stateOffsets2.z+id]=0.0;
     state[p.stateOffsets2.x+id]=0.0;return;}
@@ -720,6 +765,11 @@ fn projectFaces(@builtin(global_invocation_id)gid:vec3u){let row=gid.x;if(row>=p
 
 @compute @workgroup_size(64)
 fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){let id=gid.x;if(id>=p.counts.x){return;}
+  if(!cellActive(id)){
+    let output=destinationCellVelocity()+4u*id;
+    state[output]=0.0;state[output+1u]=0.0;state[output+2u]=0.0;state[output+3u]=0.0;
+    state[p.stateOffsets4.y+id]=0.0;return;
+  }
   var velocity=vec3f(0.0);var weight=vec3f(0.0);var equation=0.0;var correction=0.0;
   for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){let row=incidenceRow(at);
     let term=incidenceTerm(at);let axis=rowAxis(row);let w=abs(termCoefficient(term))*rowDualWeight(row);
@@ -778,10 +828,7 @@ fn advanceActivityClock(){
   atomicStore(&activity[5],select(0u,1u,step%4u==0u));
   atomicStore(&activity[6],0u); // measured bricks
   atomicStore(&activity[7],0u); // reserved failure flags
-}
-
-fn activityRecord(brick:u32)->u32{
-  return ACTIVITY_HEADER_WORDS+ACTIVITY_RECORD_WORDS*brick;
+  atomicStore(&activity[9],0u); // newly activated bricks
 }
 
 fn activityF32(index:u32)->f32{return bitcast<f32>(atomicLoad(&activity[index]));}
@@ -794,13 +841,15 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
   let brick=wid.x;let lane=lid.x;
   if(brick>=p.dispatch.w){return;}
+  let resident=brickActive(brick);
   let brickRecord=p.topologyOffsets2.z+4u*brick;
   let first=topology[brickRecord];let count=topology[brickRecord+1u];
   let resolution=topology[brickRecord+2u];
   var densitySum=0;var momentX=0;var momentY=0;var momentZ=0;
   var deformation=0.0;var predictedMotion=0.0;var detailError=0.0;
-  var surfaceAxes=0u;var surfaceCell=false;
-  for(var cell=first+lane;cell<first+count;cell+=64u){
+  var surfaceAxes=0u;var surfaceCell=false;var occupiedCell=false;
+  let measuredCount=select(0u,count,resident);
+  for(var cell=first+lane;cell<first+measuredCount;cell+=64u){
     let rho=state[destinationDensity()+cell];let volume=cellVolume(cell);
     let local=cell-first;let x=local%resolution;
     let yz=local/resolution;let y=yz%resolution;let z=yz/resolution;
@@ -812,6 +861,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     momentZ+=i32(round(rho*volume
       *(f32(2u*z+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
     surfaceCell=surfaceCell||(rho>0.05&&rho<0.95);
+    occupiedCell=occupiedCell||rho>0.0;
     let ownVelocityAt=destinationCellVelocity()+4u*cell;
     let ownVelocity=vec3f(state[ownVelocityAt],state[ownVelocityAt+1u],
       state[ownVelocityAt+2u]);
@@ -837,13 +887,13 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
           *abs(state[destinationFaceVelocity()+row])/max(0.25*rowDistance(row),1e-12));
       }
     }
-    if(resolution==8u){
-      let b=cellBase(cell);let q=vec3u(topology[b+7u],topology[b+8u],topology[b+9u]);
-      let group=2u*(q/2u);var childSum=0;
+    if(resolution>1u){
+      let group=2u*(vec3u(x,y,z)/2u);var childSum=0;
       for(var dz=0u;dz<2u;dz+=1u){for(var dy=0u;dy<2u;dy+=1u){
         for(var dx=0u;dx<2u;dx+=1u){
-          let child=ownerCellAt(vec3i(group+vec3u(dx,dy,dz)));
-          if(child!=INVALID){childSum+=i32(round(
+          let q=group+vec3u(dx,dy,dz);
+          let child=first+q.x+resolution*(q.y+resolution*q.z);
+          if(child<first+count){childSum+=i32(round(
             state[destinationDensity()+child]*ACTIVITY_FIXED));}
       }}}
       let ownFixed=i32(round(rho*ACTIVITY_FIXED));
@@ -855,7 +905,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   activityMomentY[lane]=momentY;activityMomentZ[lane]=momentZ;
   activityDeformation[lane]=deformation;activityPredictedMotion[lane]=predictedMotion;
   activityDetailError[lane]=detailError;
-  activitySurfaceAxes[lane]=surfaceAxes|select(0u,8u,surfaceCell);
+  activitySurfaceAxes[lane]=surfaceAxes|select(0u,8u,surfaceCell)
+    |select(0u,16u,occupiedCell);
   workgroupBarrier();
   var width=32u;loop{
     if(lane<width){
@@ -873,6 +924,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   }
   if(lane!=0u){return;}
   let output=activityRecord(brick);let step=atomicLoad(&activity[0]);
+  if(!resident){
+    atomicStore(&activity[output],0u);atomicStore(&activity[output+1u],0u);return;
+  }
   let totalVolume=f32(count)*cellVolume(first);
   let meanDensity=f32(activityDensitySum[0])/(totalVolume*ACTIVITY_FIXED);
   let moments=vec3f(f32(activityMomentX[0]),f32(activityMomentY[0]),
@@ -893,6 +947,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   if(surface){reasons|=1u;}if(activityDeformation[0]>0.0){reasons|=2u;}
   if(temporal>0.0){reasons|=4u;}if(activityDetailError[0]>0.0){reasons|=8u;}
   if(activityPredictedMotion[0]>0.0){reasons|=16u;}if(step==1u){reasons|=32u;}
+  if((activitySurfaceAxes[0]&16u)!=0u){reasons|=64u;}
   let topologyEpoch=atomicLoad(&activity[5])!=0u;
   var hotEpochs=atomicLoad(&activity[output+2u]);
   var quietEpochs=atomicLoad(&activity[output+3u]);
@@ -912,9 +967,144 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   atomicAdd(&activity[6],1u);
 }
 
+// First candidate-planning rung. The accepted topology remains immutable:
+// this pass publishes only the resolution requested by the CM12 surface floor,
+// characteristic prediction, and retained activity history. Transfer and
+// atomic generation publication consume this record in a later transaction.
+@compute @workgroup_size(64)
+fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
+  let brick=gid.x;if(brick>=p.dispatch.w){return;}
+  let record=p.topologyOffsets2.z+4u*brick;
+  let current=topology[record+2u];let output=activityRecord(brick);
+  var requested=atomicLoad(&activity[output+8u]);
+  var planReasons=atomicLoad(&activity[output+9u]);
+  let score=atomicLoad(&activity[output]);
+  let reasons=atomicLoad(&activity[output+1u]);
+  let hotEpochs=atomicLoad(&activity[output+2u]);
+  let quietEpochs=atomicLoad(&activity[output+3u]);
+  let surface=(reasons&1u)!=0u;let predicted=(reasons&16u)!=0u;
+  let detail=(reasons&8u)!=0u;
+  if(surface||predicted||score>=224u){
+    requested=min(8u,2u*current);
+    if(surface){planReasons=1u;}else if(predicted){planReasons=2u;}
+    else{planReasons=4u;}
+  }else if(atomicLoad(&activity[5])!=0u){
+    requested=current;planReasons=32u;
+    if(hotEpochs>=2u){
+      requested=min(8u,2u*current);planReasons=8u;
+    }else if(current>1u&&quietEpochs>=8u&&!detail){
+      requested=current/2u;planReasons=16u;
+    }
+  }
+  atomicStore(&activity[output+8u],requested);
+  atomicStore(&activity[output+9u],planReasons);
+}
+
+fn brickDirectoryLookup(key:u32)->u32{
+  return topology[p.stateOffsets4.w+key];
+}
+
+// Refine-only closure of GPU-authored candidate levels. Each dispatch moves a
+// violation one rung toward a valid 2:1 plan; three ordered dispatches cover
+// the complete 1/2/4/8 ladder without ever coarsening a requested surface.
+@compute @workgroup_size(64)
+fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
+  let brick=gid.x;if(brick>=p.dispatch.w){return;}
+  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
+  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
+  let x=remainder-y*brickDimensions.x;let coordinate=vec3i(i32(x),i32(y),i32(z));
+  let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
+    vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  var required=atomicLoad(&activity[activityRecord(brick)+8u]);
+  for(var side=0u;side<6u;side+=1u){let neighborCoordinate=coordinate+directions[side];
+    if(any(neighborCoordinate<vec3i(0))
+      ||any(neighborCoordinate>=vec3i(brickDimensions))){continue;}
+    let neighborKey=u32(neighborCoordinate.x)+brickDimensions.x
+      *(u32(neighborCoordinate.y)+brickDimensions.y*u32(neighborCoordinate.z));
+    let neighbor=brickDirectoryLookup(neighborKey);if(neighbor==INVALID){continue;}
+    let neighborResolution=atomicLoad(&activity[activityRecord(neighbor)+8u]);
+    required=max(required,neighborResolution/2u);
+  }
+  atomicMax(&activity[activityRecord(brick)+8u],required);
+}
+
+// Publish one swept receiver layer from the immutable activity snapshot. A
+// dormant slot becomes active only when a face-neighbour is an accepted
+// surface/predicted brick. Compare-exchange makes publication single-writer;
+// all following frame dispatches observe the active bit through ownerCellAt.
+@compute @workgroup_size(64)
+fn activateSweptReceivers(@builtin(global_invocation_id)gid:vec3u){
+  let brick=gid.x;if(brick>=p.dispatch.w||brickActive(brick)){return;}
+  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
+  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
+  let x=remainder-y*brickDimensions.x;let coordinate=vec3i(i32(x),i32(y),i32(z));
+  let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
+    vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  var requested=false;
+  for(var side=0u;side<6u;side+=1u){let neighborCoordinate=coordinate+directions[side];
+    if(any(neighborCoordinate<vec3i(0))
+      ||any(neighborCoordinate>=vec3i(brickDimensions))){continue;}
+    let neighborKey=u32(neighborCoordinate.x)+brickDimensions.x
+      *(u32(neighborCoordinate.y)+brickDimensions.y*u32(neighborCoordinate.z));
+    let neighbor=brickDirectoryLookup(neighborKey);
+    if(neighbor==INVALID||!brickActive(neighbor)){continue;}
+    let neighborReasons=atomicLoad(&activity[activityRecord(neighbor)+1u]);
+    requested=requested||(neighborReasons&(1u|16u))!=0u;
+  }
+  if(!requested){return;}
+  let output=activityRecord(brick);
+  // A swept receiver contains the moving free surface by construction. It is
+  // requested fine before publication; closePlannedResolution then grows the
+  // 4/2/1 support skirt around it without weakening this hard floor.
+  atomicStore(&activity[output+8u],8u);
+  atomicStore(&activity[output+9u],1u);
+  let claimed=atomicCompareExchangeWeak(&activity[output+10u],0u,1u);
+  if(claimed.exchanged){
+    atomicStore(&activity[output+11u],atomicLoad(&activity[0]));
+    atomicAdd(&activity[8],1u);atomicAdd(&activity[9],1u);
+    atomicAdd(&activity[10],1u);atomicAdd(&activity[11],topology[record+1u]);
+  }
+}
+
+// Retire every mass-empty brick outside the one-brick Moore support ring.
+// Occupancy is an exact any(rho > 0) reduction, not a density threshold, so
+// residency retirement cannot discard even a small conservative CM12 receipt.
+@compute @workgroup_size(64)
+fn retireUnsupportedEmptyBricks(@builtin(global_invocation_id)gid:vec3u){
+  let brick=gid.x;if(brick>=p.dispatch.w||!brickActive(brick)){return;}
+  let output=activityRecord(brick);
+  if((atomicLoad(&activity[output+1u])&64u)!=0u){return;}
+  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
+  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
+  let x=remainder-y*brickDimensions.x;let coordinate=vec3i(i32(x),i32(y),i32(z));
+  for(var dz=-1;dz<=1;dz+=1){for(var dy=-1;dy<=1;dy+=1){
+    for(var dx=-1;dx<=1;dx+=1){if(dx==0&&dy==0&&dz==0){continue;}
+      let neighborCoordinate=coordinate+vec3i(dx,dy,dz);
+      if(any(neighborCoordinate<vec3i(0))
+        ||any(neighborCoordinate>=vec3i(brickDimensions))){continue;}
+      let neighborKey=u32(neighborCoordinate.x)+brickDimensions.x
+        *(u32(neighborCoordinate.y)+brickDimensions.y*u32(neighborCoordinate.z));
+      let neighbor=brickDirectoryLookup(neighborKey);if(neighbor==INVALID){continue;}
+      if((atomicLoad(&activity[activityRecord(neighbor)+1u])&64u)!=0u){return;}
+    }
+  }}
+  let retired=atomicCompareExchangeWeak(&activity[output+10u],1u,0u);
+  if(retired.exchanged){
+    atomicSub(&activity[8],1u);atomicSub(&activity[11],topology[record+1u]);
+    atomicAdd(&activity[10],1u);
+  }
+}
+
 @compute @workgroup_size(64)
 fn classifyPresentationBricks(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
+  if(!brickActive(brick)){state[p.stateOffsets4.z+brick]=0.0;return;}
   let record=p.topologyOffsets2.z+4u*brick;let first=topology[record];let count=topology[record+1u];
   var wet=false;
   for(var at=first;at<first+count;at+=1u){

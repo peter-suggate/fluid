@@ -2,7 +2,7 @@
 
 Implementation research and plan, 2026-08-14
 
-Status: Sparse CM12 is interactive and the fixed two-level composite method is
+Status: Sparse CM12 is interactive and the fixed-topology composite method is
 GPU-resident. Construction still packs the initial compact topology on the
 host, but accepted transport, surface conditioning, pressure projection,
 diagnostics, and presentation remain on the device. Dynamic topology is the
@@ -14,7 +14,8 @@ Current implementation checkpoint (2026-08-15):
 
 - CM12 constants and pure formulas live in `lib/core/cm12-numerics.ts` and are
   consumed by the production uniform shaders and the adaptive CPU oracles.
-- One row builder now covers arbitrary sparse `8^3`/`4^3` atlases as well as
+- One row builder now covers arbitrary strongly graded sparse
+  `1^3`/`2^3`/`4^3`/`8^3` atlases as well as
   the original `8+8`, `4+4`, `8+4`, and reflected `4+8` two-tile controls. The
   mixed seam has one authoritative five-cell port per coarse face patch and
   derives divergence as the weighted negative transpose of its gradient.
@@ -22,27 +23,32 @@ Current implementation checkpoint (2026-08-15):
   pressure projection, volume-weighted conservative transport with persistent
   gamma, and WGSL pressure-operator parity. `npm run
   acceptance:adaptive-mass:m1` runs this checkpoint without adding a unit-test
-  matrix.
+  matrix. Forced-all-fine Sparse CM12 is now the primary behavioral reference;
+  Uniform remains a diagnostic cross-check, not the adaptive physics target.
 - Free-surface pressure (using one SPD ghost fraction per composite row),
   composite gamma diffusion/sharpening, GPU transport-operator parity, and a
   symmetric density-slice A/B are now executable companion receipts.
 - The interactive solver omits empty bricks, activates face-local transport
   receivers, conservatively transports density/gamma/momentum, conditions the
   CM12 surface, and projects one globally coupled composite pressure system.
-  A two-second mixed-resolution symmetric-expansion receipt is stable and the
-  matched mini-dam performance lane is inside the `1.20x` median target.
-- Resolution is not yet adaptive in the production sense. Construction selects
-  a fixed coarse scene-brick set plus fine receiver support for the adaptive
-  control arm; accepted GPU frames do not yet change that topology. This is a
-  correctness scaffold, not an activity policy.
-- GPU-authored dynamic topology publication and transfer, dynamic demotion,
-  solid coupling, and compact sparse surface publication remain open.
+  The short mixed-resolution symmetric-expansion receipt is stable and the
+  matched mini-dam performance lane is inside the `1.20x` median target; the
+  canonical two-second blockers are recorded below.
+- Logical residency is now adaptive for the long-tank rung: construction packs
+  bounded dormant receiver slots, but a GPU activity transaction alone decides
+  when each slot becomes active. Empty slots outside the exact 26-neighbor air
+  support ring now retire on the GPU without deleting any positive-density
+  receipt. Resolution inside an allocated slot remains fixed; conservative
+  level mutation, generic rolling allocation/freeing, solid coupling, and
+  compact sparse surface publication remain open.
 - The resident GPU graph now owns CM12 transport, gamma diffusion/sharpening,
   one composite Jacobi-PCG projection, and dense diagnostic publication. A
-  disjoint resident activity/history arena measures every compact brick after
+  resident activity/history arena measures every active compact brick after
   projection, advances its own four-step epoch clock, and publishes score,
-  reason, hot/quiet, and D4 receipts without changing accepted topology. This
-  is the no-change GPU epoch required before candidate transfer is allowed.
+  reason, hot/quiet, and D4 receipts. Its logical active bit now gates packed
+  owner lookup and physics work; packed topology and accepted CM12 fields remain
+  immutable. This is the first GPU-published residency transaction, not yet a
+  resolution-transfer transaction.
 - From this checkpoint onward, every production adaptation increment is fully
   GPU-resident. No per-frame CPU field readback, classifier, planner, transfer,
   dispatch decision, topology rebuild, or fallback may participate in an
@@ -53,8 +59,34 @@ Current implementation checkpoint (2026-08-15):
   error, and maximum divergence are identical. The canonical 250-step baseline
   is not yet green independently of this pass: mixed topology begins losing
   velocity/pressure D4 symmetry at step 22, and forced-all-fine later reaches a
-  `3.05e-5 s^-1` float32 divergence spike. Candidate topology changes remain
-  blocked until those baseline failures are repaired rather than relaxed.
+  `3.05e-5 s^-1` float32 divergence spike. These remain guardrails and are not
+  hidden by symmetry projection or relaxed thresholds while sparse residency
+  work proceeds.
+- The read-only GPU rung turns accepted activity/history into an epoch-gated
+  requested `1^3`/`2^3`/`4^3`/`8^3` resolution for every resident brick.
+  Surface and predicted receivers request `8^3` immediately; changes otherwise
+  move one rung per epoch, and three ordered refine-only closure passes enforce
+  a maximum 2:1 face ratio. It still cannot mutate accepted topology until
+  conservative candidate transfer and rollback exist.
+- The canonical end-to-end sparse scene is `sparse-cm12-long-dam-break`: a
+  `96x24x16` tank whose full-width reservoir occupies the first two of twelve
+  brick columns. The front must traverse the ten initially dry columns and
+  reach the opposite wall without a residency gap, a 2:1 discontinuity, mass
+  loss, or an unexplained departure from forced-all-fine Sparse CM12.
+  The original long Dawn receipt was red: at `1.004 s`, Uniform reached fine
+  cell `x=95`, while Sparse CM12 and its resident allocation stopped at `x=23`.
+  The receiver transaction is green in the current Adaptive/All-fine A/B. At
+  `0.324 s` both fronts are at `x=53`, Adaptive retains 38 of 72 bounded slots
+  with a ten-cell receiver lead, and its mass drift is `2.74e-6`; at `1.0 s`
+  its liquid front reaches `x=95` only `0.004 s` after All-fine. Dawn reports
+  no validation error. Dormant cells stay at `rho=0`, `gamma=1`, and zero velocity;
+  transport, diffusion, sharpening, pressure, and presentation exclude them
+  until the GPU atomically publishes their active bit. Occupied tiles and their
+  one-tile Moore air ring remain active; unsupported empty tiles atomically
+  retire after activity measurement. There is no global mass
+  rescale, front injection, CPU frame decision, or D4-specific correction in
+  this residency change. The harness now hard-fails both a pinned active
+  boundary and failure to match All-fine's far-wall arrival.
 
 Working method id: `adaptive-mass`
 User-facing method name: `Sparse CM12`
@@ -960,15 +992,23 @@ The rollout intentionally starts more conservative than the eventual policy:
    become `4^3` only after a composite restriction estimator predicts bounded
    density, normal, flux, and silhouette error. Curved, thin, breaking, or
    rapidly moving surface remains fine. This rung cannot relax Rung A gates.
-3. **Rung C — additional levels.** Introduce `2^3` only after grading closure,
-   transfer, and pressure conditioning survive the same long runs. Never jump
-   across a level.
+3. **Rung C — additional levels.** The operator, scalar transfer oracle,
+   activity estimator, and GPU candidate planner now accept the complete
+   `1^3 / 2^3 / 4^3 / 8^3` ladder. Candidate changes move one rung per epoch
+   and close face-neighbor grading by refinement. Accepted runtime level
+   changes still wait for GPU candidate transfer, row patch, reprojection,
+   validation, and atomic publication. Never jump an accepted field across a
+   level.
 
-New face-local receivers start fine in Rung A. This is deliberate: the current
-implementation showed that creating a coarse receiver can erase the advancing
-surface before a later classifier has evidence to recover it. Rung B may create
-a coarse receiver only when the swept-interface predictor proves no surface
-can enter it before the following epoch.
+New face-local receivers start fine in Rung A. This is deliberate: the long
+tank showed that a shallow front entering a pre-published `1^3` receiver was
+volume-averaged away at that first tile. Receiver activation therefore writes
+an `8^3` GPU candidate request before publication and grading closes outward
+through `4^3`, `2^3`, and `1^3`. Omitted air has no physical level; the current
+bounded all-fine dormant backing is temporary scaffolding for the residency
+transaction and must be replaced by free-slot allocation. Rung B may create a
+coarse receiver only when the swept-interface predictor proves no surface can
+enter it before the following epoch.
 
 A method-level seam sentinel may pin one fine brick, or a complete D4 orbit, for
 diagnostic A/B scenes. It is explicit in policy telemetry and is off for
@@ -1437,32 +1477,39 @@ The first adaptive calm/active rung is done only when:
 
 ## 18. Immediate next actions
 
-1. Restore and preserve the fixed-topology two-second symmetry baseline before
-   topology mutation: eliminate the mixed velocity/pressure D4 loss beginning
-   at step 22 and the forced-all-fine long-run divergence spikes without
-   weakening either gate. Keep the dispatch-on/off no-change receipt exact.
-2. Keep the Rung A CPU policy and transfer as an offline oracle only. Replace
+1. Keep the now-green long-tank dam break as the canonical residency gate. Add
+   stored intermediate receiver-lead and active-column receipts (the final
+   front, far-wall, mass, and active-boundary receipts are already hard gates),
+   then compare the same checkpoints with forced-all-fine Sparse CM12.
+2. Replace the bounded all-fine dormant backing with a device free-slot pool.
+   Allocate `8^3` only in the swept-interface band, retain the exact one-tile
+   air-support ring, return unsupported empty slots to the pool, and add compact
+   allocation-failure/capacity receipts plus face-local row patching. Preserve
+   the current no-readback frame dependency and 2:1 closure.
+3. Keep the Rung A CPU policy and transfer as an offline oracle only. Replace
    construction-time component-size selection through GPU-authored measurement,
    planning, conservative candidate transfer, global reprojection, validation,
    and rollback; do not route accepted frames through the CPU oracle.
-3. Add translating-interface, settling-pool, slosh, and repeated wake/sleep CPU
+4. Add translating-interface, settling-pool, slosh, and repeated wake/sleep CPU
    receipts. Capture resolution/history maps at every epoch, not just final
    fluid fields.
-4. Add method-colocated GPU classifier/planner/transfer/row-patch stages to the
-   frame graph so topology costs and pressure iteration spikes are visible.
-5. Retain the compact GPU measurement/history pass as read-only authority until
-   its score/reason/history maps are exactly D4 equivariant and forced-all-fine
-   remains inside the Uniform CM12 comparison gates at every tested cadence. A
-   no-change epoch must pass the zero-allocation and frame-overhead gates before
-   GPU transfer lands.
-6. Implement GPU candidate allocation and exact `8^3 <-> 4^3` transfer, patch
+5. Add method-colocated GPU transfer/row-patch stages to the existing
+   classifier/planner/activation frame graph so topology costs and pressure
+   iteration spikes are visible.
+6. Keep resolution requests read-only until score/reason/history/active maps are
+   exactly D4 equivariant and adaptive remains inside the forced-all-fine Sparse
+   CM12 comparison gates at every tested cadence. Logical residency may change only
+   through the accepted GPU active-bit transaction; `4^3 <-> 8^3` field transfer
+   still requires the full conservation and rollback gate.
+7. Implement GPU candidate allocation and exact `8^3 <-> 4^3` transfer, patch
    only changed descriptor neighborhoods, reproject, validate, and atomically
    publish.
-7. Remove `fineHalf` from production policy; retain only an explicit off-by-
+8. Remove `fineHalf` from production policy; retain only an explicit off-by-
    default seam sentinel for diagnostics.
-8. Run two-second symmetry and mini-dam matched A/B lanes with forced-all-fine,
-   adaptive, and uniform controls. Tune thresholds only from stored receipts.
-9. Only after Rung A is stable, useful, and inside the frame contract, research
+9. Run two-second symmetry, long-tank dam, and mini-dam matched A/B lanes with
+   Adaptive and forced-all-fine Sparse CM12. Tune thresholds only from stored
+   receipts; use Uniform only for explicitly diagnostic cross-checks.
+10. Only after Rung A is stable, useful, and inside the frame contract, research
    Rung B calm-planar-surface coarsening and then camera advice.
 
 The critical path is now stable, incremental resolution change—not additional

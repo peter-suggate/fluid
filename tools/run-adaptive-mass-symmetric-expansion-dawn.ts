@@ -122,7 +122,11 @@ function activityD4MismatchCount(
     if (!transformed || transformed.scoreByte !== brick.scoreByte
       || transformed.reasons !== brick.reasons
       || transformed.hotEpochs !== brick.hotEpochs
-      || transformed.quietEpochs !== brick.quietEpochs) mismatches += 1;
+      || transformed.quietEpochs !== brick.quietEpochs
+      || transformed.plannedResolution !== brick.plannedResolution
+      || transformed.planReasons !== brick.planReasons
+      || transformed.active !== brick.active
+      || transformed.activatedStep !== brick.activatedStep) mismatches += 1;
   }
   return mismatches;
 }

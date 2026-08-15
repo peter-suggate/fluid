@@ -4,9 +4,15 @@ import {
   createSparseAdaptiveMassAtlas,
   initializeSparseBrickAtlasFromScene,
   type SparseAdaptiveMassBrick,
+  type SparseBrickResolution,
 } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import { createSymmetricExpansionScene } from "../lib/core/scenes";
-import { buildSparseAtlasCompositeGrid, collocateSparseAtlasVelocity } from
+import {
+  applySparseAtlasDivergence,
+  applySparseAtlasGradient,
+  buildSparseAtlasCompositeGrid,
+  collocateSparseAtlasVelocity,
+} from
   "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
 import { initializeSparseAtlasDynamics, stepSparseAtlasDynamics } from
   "../lib/methods/adaptive-mass/sparse-atlas-dynamics";
@@ -18,7 +24,7 @@ import { conditionSparseAtlasSurface } from
 const brick = (
   key: number,
   coordinate: readonly [number, number, number],
-  resolution: 4 | 8,
+  resolution: SparseBrickResolution,
 ): SparseAdaptiveMassBrick => ({
   key,
   coordinate,
@@ -34,6 +40,42 @@ const brick = (
     ));
   }),
   gamma: new Float64Array(resolution ** 3).fill(1),
+});
+
+test("the complete 1/2/4/8 ladder is strongly 2:1 graded", () => {
+  const atlas = createSparseAdaptiveMassAtlas([32, 8, 8], [
+    brick(0, [0, 0, 0], 8),
+    brick(1, [1, 0, 0], 4),
+    brick(2, [2, 0, 0], 2),
+    brick(3, [3, 0, 0], 1),
+  ]);
+  const grid = buildSparseAtlasCompositeGrid(atlas);
+  assert.deepEqual(atlas.bricks.map((candidate) => candidate.resolution), [8, 4, 2, 1]);
+  assert.equal(grid.mixedSeamRowCount, 4 * 4 + 2 * 2 + 1,
+    "each adjacent rung must emit ports on the coarser face lattice");
+  for (const row of grid.gradientRows) {
+    if (row.negativeBrickKey === undefined || row.positiveBrickKey === undefined) continue;
+    const negative = atlas.directory.get(row.negativeBrickKey)!;
+    const positive = atlas.directory.get(row.positiveBrickKey)!;
+    assert.ok(Math.max(negative.resolution, positive.resolution)
+      / Math.min(negative.resolution, positive.resolution) <= 2);
+  }
+  const pressure = Float64Array.from(grid.cells, (cell) =>
+    Math.sin(0.37 * (cell.id + 1)));
+  const faceVelocity = Float64Array.from(grid.gradientRows, (row) =>
+    Math.cos(0.23 * (row.id + 1)));
+  const gradient = applySparseAtlasGradient(grid, pressure);
+  const divergence = applySparseAtlasDivergence(grid, faceVelocity);
+  const gradientPairing = grid.gradientRows.reduce((sum, row) =>
+    sum + row.dualWeight * gradient[row.id] * faceVelocity[row.id], 0);
+  const divergencePairing = grid.cells.reduce((sum, cell) =>
+    sum + cell.volume * pressure[cell.id] * divergence[cell.id], 0);
+  assert.ok(Math.abs(gradientPairing + divergencePairing) < 1e-11,
+    `${gradientPairing} + ${divergencePairing}`);
+
+  assert.throws(() => createSparseAdaptiveMassAtlas([16, 8, 8], [
+    brick(0, [0, 0, 0], 8), brick(1, [1, 0, 0], 2),
+  ]), /exceeds 2:1 grading/);
 });
 
 test("fixed coarse initialization overrides the usual fine interface floor", () => {

@@ -56,6 +56,21 @@ export interface AdaptiveMassGPUActivityBrick extends SparseCM12GPUActivityRecor
   readonly resolution: SparseBrickResolution;
 }
 
+/** Select a fine receiver and its strongly graded outward support rung. */
+export function dormantReceiverResolution(
+  mode: AdaptiveMassSolverOptions["resolutionMode"],
+  distance = 0,
+  sourceResolution: SparseBrickResolution = 8,
+): SparseBrickResolution {
+  if (mode === "all-fine") return 8;
+  if (mode === "all-coarse") return 4;
+  let resolution = sourceResolution;
+  for (let step = 0; step < distance; step += 1) {
+    resolution = resolution === 8 ? 4 : resolution === 4 ? 2 : 1;
+  }
+  return resolution;
+}
+
 /** Reserve a compact receiver halo for the fixed-topology GPU control arms. */
 function residentSupportAtlas(
   source: SparseAdaptiveMassAtlas,
@@ -83,6 +98,41 @@ function residentSupportAtlas(
         };
         bricks.set(key, receiver);
       }
+  }
+  return createSparseAdaptiveMassAtlas(
+    source.dimensions,
+    [...bricks.values()].sort((left, right) => left.key - right.key),
+    source.generation,
+  );
+}
+
+/**
+ * Preallocate dormant receivers over the bounded brick domain. A one-axis
+ * corridor leaves corner-authored dams capped by the transverse support halo
+ * (cell 47 in the canonical 64-cubed mini dam).
+ */
+export function dormantReceiverDomain(
+  source: SparseAdaptiveMassAtlas,
+  mode: AdaptiveMassSolverOptions["resolutionMode"],
+): SparseAdaptiveMassAtlas {
+  const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
+  // A receiver becomes part of the represented domain precisely because the
+  // swept surface can enter it. Rung A therefore authors it at the finest
+  // level; grading may only coarsen outward support, never the receiver itself.
+  const receiverResolution: SparseBrickResolution = mode === "all-coarse" ? 4 : 8;
+  for (let z = 0; z < source.brickDimensions[2]; z += 1)
+    for (let y = 0; y < source.brickDimensions[1]; y += 1)
+      for (let x = 0; x < source.brickDimensions[0]; x += 1) {
+    const coordinate: SparseBrickVec3 = [x, y, z];
+    const key = sparseBrickKey(coordinate, source.brickDimensions);
+    if (bricks.has(key)) continue;
+    const resolution = receiverResolution;
+    const count = resolution ** 3;
+    bricks.set(key, {
+      key, coordinate, resolution,
+      density: new Float64Array(count),
+      gamma: new Float64Array(count).fill(1),
+    });
   }
   return createSparseAdaptiveMassAtlas(
     source.dimensions,
@@ -201,6 +251,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     let presentation: WebGPUAdaptiveMassAtlasPresentation | undefined;
     let dynamics: SparseAtlasDynamicsState | undefined;
     let resident: WebGPUSparseCM12Resident | undefined;
+    let initiallyActiveBrickKeys: ReadonlySet<number> | undefined;
     try {
       await runner.run([{
         id: "adaptive-mass.plan",
@@ -219,7 +270,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               ? () => 8
               : () => 4,
           });
-          atlas = residentSupportAtlas(atlas, options.resolutionMode);
+          const supported = residentSupportAtlas(atlas, options.resolutionMode);
+          initiallyActiveBrickKeys = new Set(supported.bricks.map((brick) => brick.key));
+          atlas = dormantReceiverDomain(supported, options.resolutionMode);
           dynamics = initializeSparseAtlasDynamics(atlas);
         },
       }, {
@@ -236,6 +289,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         run: async () => {
           resident = await WebGPUSparseCM12Resident.create(
             device, atlas!, dynamics!.grid, presentation!,
+            initiallyActiveBrickKeys,
           );
         },
       }, {
@@ -407,6 +461,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.adaptiveActivityHotBrickCount = diagnostics.activityHotBrickCount;
     this.info.adaptiveActivityQuietBrickCount = diagnostics.activityQuietBrickCount;
     this.info.adaptiveResolutionTopologyEpoch = diagnostics.activityTopologyEpoch;
+    this.info.activeSampleCount = diagnostics.activeCellCount;
+    this.info.activeCompressionRatio = diagnostics.activeCellCount
+      / Math.max(1, this.info.equivalentUniformCells ?? diagnostics.activeCellCount);
+    this.info.fluidBrickResidentCount = diagnostics.activeBrickCount;
+    this.info.fluidBrickCoreCount = diagnostics.activeBrickCount;
+    this.info.fluidBrickGeneration = this.atlas.generation + diagnostics.residencyGeneration;
     // This rung measures and retains history only. Candidate topology has no
     // authority yet, so an epoch must publish exact zero transition counts.
     this.info.adaptiveResolutionPromotedBrickCount = 0;

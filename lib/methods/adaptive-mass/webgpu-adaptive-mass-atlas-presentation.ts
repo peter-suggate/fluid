@@ -16,7 +16,7 @@
 
 export type AdaptiveMassAtlasDimensions = readonly [number, number, number];
 export type AdaptiveMassAtlasCoordinate = readonly [number, number, number];
-export type AdaptiveMassPresentationBrickResolution = 4 | 8;
+export type AdaptiveMassPresentationBrickResolution = 1 | 2 | 4 | 8;
 
 /** Dense, x-major presentation data accepted by the WebGPU texture owner. */
 export interface AdaptiveMassAtlasMaterialization {

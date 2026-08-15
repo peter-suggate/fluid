@@ -22,6 +22,7 @@ export const enum SparseAtlasActivityReason {
   FineDetail = 1 << 3,
   PredictedFace = 1 << 4,
   Unknown = 1 << 5,
+  Occupied = 1 << 6,
 }
 
 export interface SparseAtlasBrickActivityHistory {
@@ -154,23 +155,25 @@ function fineRestrictionError(
 ): number {
   const base = grid.cellBaseByBrick.get(brickKey);
   const brick = grid.atlas.directory.get(brickKey);
-  if (base === undefined || brick?.resolution !== 8) return 0;
+  if (base === undefined || !brick || brick.resolution === 1) return 0;
+  const fine = brick.resolution;
+  const coarse = fine / 2;
   let maximum = 0;
-  for (let coarseZ = 0; coarseZ < 4; coarseZ += 1) {
-    for (let coarseY = 0; coarseY < 4; coarseY += 1) {
-      for (let coarseX = 0; coarseX < 4; coarseX += 1) {
+  for (let coarseZ = 0; coarseZ < coarse; coarseZ += 1) {
+    for (let coarseY = 0; coarseY < coarse; coarseY += 1) {
+      for (let coarseX = 0; coarseX < coarse; coarseX += 1) {
         let average = 0;
         for (let dz = 0; dz < 2; dz += 1) for (let dy = 0; dy < 2; dy += 1) {
           for (let dx = 0; dx < 2; dx += 1) {
-            const local = (2 * coarseX + dx) + 8
-              * ((2 * coarseY + dy) + 8 * (2 * coarseZ + dz));
+            const local = (2 * coarseX + dx) + fine
+              * ((2 * coarseY + dy) + fine * (2 * coarseZ + dz));
             average += density[base + local] / 8;
           }
         }
         for (let dz = 0; dz < 2; dz += 1) for (let dy = 0; dy < 2; dy += 1) {
           for (let dx = 0; dx < 2; dx += 1) {
-            const local = (2 * coarseX + dx) + 8
-              * ((2 * coarseY + dy) + 8 * (2 * coarseZ + dz));
+            const local = (2 * coarseX + dx) + fine
+              * ((2 * coarseY + dy) + fine * (2 * coarseZ + dz));
             maximum = Math.max(maximum, Math.abs(density[base + local] - average));
           }
         }
@@ -394,17 +397,17 @@ export function planSparseAtlasResolution(
       ? quiet ? Math.min(255, (old?.quietEpochs ?? 0) + 1) : 0
       : old?.quietEpochs ?? 0;
     let target = brick.resolution;
-    if (brick.resolution === 4 && topologyEpoch
+    if (brick.resolution < 8 && topologyEpoch
       && hotEpochs >= SPARSE_ATLAS_PROMOTE_EPOCHS) {
       const bucket = ordinaryPromotionBuckets.get(scoreByte) ?? [];
       bucket.push(brick.key);
       ordinaryPromotionBuckets.set(scoreByte, bucket);
-    } else if (brick.resolution === 8 && topologyEpoch
+    } else if (brick.resolution > 1 && topologyEpoch
       && quietEpochs >= SPARSE_ATLAS_DEMOTE_EPOCHS
       && !previous.pinnedFineBrickKeys.has(brick.key)
       && acceptedSteps - (old?.lastTransitionStep ?? 0)
         >= SPARSE_ATLAS_MIN_FINE_RESIDENCE_STEPS) {
-      target = 4;
+      target = (brick.resolution / 2) as SparseBrickResolution;
     }
     targets.set(brick.key, target);
     nextHistory.set(brick.key, {
@@ -422,7 +425,8 @@ export function planSparseAtlasResolution(
   for (const score of [...ordinaryPromotionBuckets.keys()].sort((a, b) => b - a)) {
     const keys = ordinaryPromotionBuckets.get(score)!.sort((a, b) => a - b);
     for (const key of keys) {
-      targets.set(key, 8);
+      const current = grid.atlas.directory.get(key)!.resolution;
+      targets.set(key, Math.min(8, 2 * current) as SparseBrickResolution);
     }
   }
   enforceTwoToOneTargets(grid, targets);
@@ -437,7 +441,7 @@ export function planSparseAtlasResolution(
         quietEpochs: 0,
         lastTransitionStep: acceptedSteps,
       });
-      if (target === 8) promotedBrickCount += 1;
+      if (target > brick.resolution) promotedBrickCount += 1;
       else demotedBrickCount += 1;
     }
   }
@@ -461,7 +465,7 @@ export function planSparseAtlasResolution(
       targetFineBrickCount: grid.atlas.bricks.filter((brick) =>
         targets.get(brick.key) === 8).length,
       targetCoarseBrickCount: grid.atlas.bricks.filter((brick) =>
-        targets.get(brick.key) === 4).length,
+        (targets.get(brick.key) ?? brick.resolution) < 8).length,
       maximumScoreByte,
     },
   };

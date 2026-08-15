@@ -68,6 +68,18 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   }),
 });
 
+/** Canonical Sparse CM12 front-propagation lane: adaptive policy, exact scene step. */
+export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
+  methodId: "adaptive-mass",
+  quality: "balanced",
+  overrides: Object.freeze({
+    resolutionMode: "adaptive",
+    seamAxis: "x",
+    fineSide: "negative",
+    timeStep: "scene",
+  }),
+});
+
 /** Canonical factor-one adaptive LoSasso profile for interactive water.
  * This exact tuple is exercised by Dawn raster lanes before it is offered by
  * the dam-break or symmetry presets. */
@@ -756,6 +768,33 @@ export function createMinimalPowerDamBreak32Scene(): SceneDescription {
     ...scene.voxelDomain,
     finestCellSize_m: scene.voxelDomain.finestCellSize_m / 2,
   };
+  return scene;
+}
+
+/**
+ * Canonical Sparse CM12 traversal scene. A full-width reservoir starts at the
+ * negative end of a 96x24x16 tank, leaving ten brick columns for the front to
+ * cross before it reaches the far wall. The narrow transverse section keeps a
+ * long residency test affordable while still exercising genuine 3D pressure,
+ * transport, and 2:1 face ports.
+ */
+export function createSparseCM12LongDamBreakScene(): SceneDescription {
+  const scene = createMinimalPowerDamBreakScene();
+  scene.sceneId = "sparse-cm12-long-dam-break";
+  scene.duration_s = 4;
+  scene.container = {
+    ...scene.container,
+    width_m: 2.4,
+    height_m: 0.6,
+    depth_m: 0.4,
+    fillFraction: 5 / 36,
+    top: "closed",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { finestCellSize_m: 0.025, brickSize_cells: 8 };
+  scene.fluid.initialDamBreakDimensions_m = { x: 0.4, y: 0.5, z: 0.4 };
+  delete scene.fluid.initialDamBreakOrigin_m;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
   return scene;
 }
 
@@ -1812,6 +1851,18 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
     build: createMinimalPowerDamBreak64Scene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
+  }),
+  defineScene({
+    id: "sparse-cm12-long-dam-break",
+    name: "Sparse CM12 · long-tank dam break",
+    blurb: "A 96x24x16 narrow tank with a full-width reservoir at the negative end. The canonical Sparse CM12 gate follows the front across ten initially dry brick columns to the far wall while checking resident 2:1 transitions, conservation, and Uniform comparison checkpoints.",
+    audience: "validation",
+    shelf: "Dam-break ladder",
+    environment: "default",
+    presentationMode: "fluid-only",
+    methodProfile: SPARSE_CM12_LONG_DAM_METHOD_PROFILE,
+    build: createSparseCM12LongDamBreakScene,
+    camera: { distance_m: 4.2, target_m: { x: 0, y: 0.25, z: 0 } },
   }),
   defineScene({
     id: "large-power-dam-break",

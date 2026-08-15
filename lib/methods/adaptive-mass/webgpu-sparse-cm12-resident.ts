@@ -9,8 +9,8 @@ import { webgpuSparseCM12ResidentWGSL } from "./webgpu-sparse-cm12-resident.wgsl
 const INVALID = 0xffff_ffff;
 const WORKGROUP_SIZE = 64;
 const PCG_ITERATIONS = 128;
-const ACTIVITY_HEADER_WORDS = 8;
-const ACTIVITY_RECORD_WORDS = 8;
+const ACTIVITY_HEADER_WORDS = 12;
+const ACTIVITY_RECORD_WORDS = 12;
 
 interface PackedResidentTopology {
   readonly words: Uint32Array;
@@ -22,6 +22,7 @@ interface PackedResidentTopology {
   readonly ownerOffset: number;
   readonly brickOffset: number;
   readonly backgroundOwnerOffset: number;
+  readonly brickDirectoryOffset: number;
   readonly brickCount: number;
   readonly incidenceCount: number;
 }
@@ -45,6 +46,11 @@ export interface SparseCM12GPUActivityRecord {
   readonly reasons: number;
   readonly hotEpochs: number;
   readonly quietEpochs: number;
+  /** GPU-authored request for the next candidate topology epoch. */
+  readonly plannedResolution: 1 | 2 | 4 | 8;
+  readonly planReasons: number;
+  readonly active: boolean;
+  readonly activatedStep: number;
 }
 
 export interface SparseCM12GPUActivitySnapshot {
@@ -106,7 +112,11 @@ function packResidentTopology(
   const ownerOffset = at; at += 4 * denseCount;
   const brickOffset = at; at += 4 * atlas.bricks.length;
   const backgroundOwnerOffset = at; at += 2;
+  const brickDirectoryOffset = at; at += atlas.brickDimensions.reduce(
+    (product, value) => product * value, 1,
+  );
   const words = new Uint32Array(at);
+  words.fill(INVALID, brickDirectoryOffset);
 
   for (const cell of grid.cells) {
     const base = cellOffset + 12 * cell.id;
@@ -121,7 +131,9 @@ function packResidentTopology(
     words[base + 8] = cell.minimumFine[1];
     words[base + 9] = cell.minimumFine[2];
     words[base + 10] = cell.widthsFine[0];
-    words[base + 11] = cell.stableLeafId;
+    const brickIndex = brickIndexByKey.get(cell.brickKey);
+    if (brickIndex === undefined) throw new Error(`Sparse CM12 cell ${cell.id} has no brick`);
+    words[base + 11] = brickIndex;
   }
 
   nextTerm = 0;
@@ -198,10 +210,11 @@ function packResidentTopology(
     words[record + 1] = cellCountByBrick[brick];
     words[record + 2] = atlas.bricks[brick]!.resolution;
     words[record + 3] = atlas.bricks[brick]!.key;
+    words[brickDirectoryOffset + atlas.bricks[brick]!.key] = brick;
   }
   return { words, cellOffset, rowOffset, termOffset, incidenceOffset,
     incidenceRecordOffset, ownerOffset, brickOffset, backgroundOwnerOffset,
-    brickCount: atlas.bricks.length, incidenceCount };
+    brickDirectoryOffset, brickCount: atlas.bricks.length, incidenceCount };
 }
 
 function uploadBuffer(
@@ -266,6 +279,9 @@ export class WebGPUSparseCM12Resident {
     atlas: SparseAdaptiveMassAtlas,
     grid: SparseAtlasCompositeGrid,
     presentation: WebGPUAdaptiveMassAtlasPresentation,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
   ): Promise<WebGPUSparseCM12Resident> {
     const packed = packResidentTopology(atlas, grid);
     const layout = residentStateLayout(
@@ -299,12 +315,24 @@ export class WebGPUSparseCM12Resident {
       size: Math.max(4, 4 * grid.cells.length * 4),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
+    const initialActivity = new Uint32Array(ACTIVITY_HEADER_WORDS
+      + ACTIVITY_RECORD_WORDS * packed.brickCount);
+    initialActivity[8] = initiallyActiveBrickKeys.size;
+    for (let brick = 0; brick < packed.brickCount; brick += 1) {
+      const at = ACTIVITY_HEADER_WORDS + ACTIVITY_RECORD_WORDS * brick;
+      initialActivity[at + 8] = atlas.bricks[brick]!.resolution;
+      initialActivity[at + 9] = 32; // retained until the first GPU topology epoch
+      initialActivity[at + 10] = initiallyActiveBrickKeys.has(atlas.bricks[brick]!.key)
+        ? 1 : 0;
+      if (initialActivity[at + 10] !== 0) {
+        initialActivity[11] += packed.words[packed.brickOffset + 4 * brick + 1]!;
+      }
+    }
     const activity = uploadBuffer(device, "Sparse CM12 resident activity history",
-      new Uint32Array(ACTIVITY_HEADER_WORDS
-        + ACTIVITY_RECORD_WORDS * packed.brickCount), storage);
+      initialActivity, storage);
     const diagnosticsReadback = device.createBuffer({
       label: "Sparse CM12 resident diagnostic readback",
-      size: 64,
+      size: 80,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
 
@@ -365,6 +393,8 @@ export class WebGPUSparseCM12Resident {
       "collocateAndDiagnose", "measureDivergenceDiagnostics",
       "reduceDivergenceDiagnostics",
       "advanceActivityClock", "measureBrickActivity",
+      "planBrickResolution", "activateSweptReceivers", "closePlannedResolution",
+      "retireUnsupportedEmptyBricks",
       "classifyPresentationBricks", "publishPresentation"] as const;
     const entries = await Promise.all(names.map(async (name) => [name,
       await device.createComputePipelineAsync({ label: `Sparse CM12 ${name}`,
@@ -441,6 +471,15 @@ export class WebGPUSparseCM12Resident {
     dispatch("reduceDivergenceDiagnostics", 1);
     dispatch("advanceActivityClock", 1);
     dispatch("measureBrickActivity", this.lastPacked!.brickCount);
+    dispatch("planBrickResolution", Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
+    dispatch("activateSweptReceivers", Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
+    for (let gradingPass = 0; gradingPass < 3; gradingPass += 1) {
+      dispatch("closePlannedResolution", Math.ceil(
+        this.lastPacked!.brickCount / WORKGROUP_SIZE,
+      ));
+    }
+    dispatch("retireUnsupportedEmptyBricks",
+      Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
     dispatch("classifyPresentationBricks", Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
     pass.setPipeline(this.pipelines.publishPresentation!);
     pass.setBindGroup(0, this.bindGroup);
@@ -523,7 +562,8 @@ export class WebGPUSparseCM12Resident {
     u.set([l.cellVelocityA, l.cellVelocityB, l.faceA, l.faceB], 20);
     u.set([l.pressure, l.rhs, l.diagonal, l.liquid], 24);
     u.set([l.theta, l.residual, l.preconditioned, l.direction], 28);
-    u.set([l.applied, l.divergence, l.presentationBrickWet, 0], 32);
+    u.set([l.applied, l.divergence, l.presentationBrickWet,
+      packed.brickDirectoryOffset], 32);
     u.set([l.sharpeningDelta, l.sharpeningAcceptance, 0, 0], 36);
     f.set([dt_s, finestCellSize_m, pressureScale, this.parity], 40);
     f.set([...acceleration, 0], 44);
@@ -543,13 +583,17 @@ export class WebGPUSparseCM12Resident {
     readonly activityQuietBrickCount: number;
     readonly activityTopologyEpoch: boolean;
     readonly activityMeasuredBrickCount: number;
+    readonly activeBrickCount: number;
+    readonly newlyActivatedBrickCount: number;
+    readonly residencyGeneration: number;
+    readonly activeCellCount: number;
   }> {
     this.assertLive();
     const encoder = this.device.createCommandEncoder({
       label: "Sparse CM12 diagnostic scalar readback",
     });
     encoder.copyBufferToBuffer(this.scalars, 0, this.diagnosticsReadback, 0, 32);
-    encoder.copyBufferToBuffer(this.activity, 0, this.diagnosticsReadback, 32, 32);
+    encoder.copyBufferToBuffer(this.activity, 0, this.diagnosticsReadback, 32, 48);
     this.device.queue.submit([encoder.finish()]);
     await this.diagnosticsReadback.mapAsync(GPUMapMode.READ);
     const mapped = this.diagnosticsReadback.getMappedRange();
@@ -568,6 +612,10 @@ export class WebGPUSparseCM12Resident {
       activityQuietBrickCount: activity[4]!,
       activityTopologyEpoch: activity[5] !== 0,
       activityMeasuredBrickCount: activity[6]!,
+      activeBrickCount: activity[8]!,
+      newlyActivatedBrickCount: activity[9]!,
+      residencyGeneration: activity[10]!,
+      activeCellCount: activity[11]!,
     };
     this.diagnosticsReadback.unmap();
     return result;
@@ -596,6 +644,12 @@ export class WebGPUSparseCM12Resident {
           reasons: words[at + 1]!,
           hotEpochs: words[at + 2]!,
           quietEpochs: words[at + 3]!,
+          plannedResolution: (words[at + 8] === 8 ? 8
+            : words[at + 8] === 4 ? 4 : words[at + 8] === 2 ? 2 : 1) as
+              SparseCM12GPUActivityRecord["plannedResolution"],
+          planReasons: words[at + 9]!,
+          active: words[at + 10] !== 0,
+          activatedStep: words[at + 11]!,
         };
       });
       return { acceptedSteps: words[0]!, records };

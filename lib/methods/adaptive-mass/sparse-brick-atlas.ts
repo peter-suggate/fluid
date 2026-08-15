@@ -14,7 +14,8 @@ import {
 import type { SceneDescription } from "../../core/model";
 import { sceneHasTerrain, terrainHeightAt } from "../../core/terrain";
 
-export type SparseBrickResolution = 4 | 8;
+/** Power-of-two cells per fixed 8-fine-cell brick edge. */
+export type SparseBrickResolution = 1 | 2 | 4 | 8;
 export type SparseBrickVec3 = readonly [number, number, number];
 
 export interface SparseAdaptiveMassBrick {
@@ -118,8 +119,9 @@ export function createSparseAdaptiveMassAtlas(
     Math.ceil(value / BRICK_FINE_RESOLUTION)) as [number, number, number];
   const directory = new Map<number, SparseAdaptiveMassBrick>();
   for (const brick of bricks) {
-    if (brick.resolution !== 4 && brick.resolution !== 8) {
-      throw new RangeError(`brick ${brick.key} resolution must be 4 or 8`);
+    if (brick.resolution !== 1 && brick.resolution !== 2
+      && brick.resolution !== 4 && brick.resolution !== 8) {
+      throw new RangeError(`brick ${brick.key} resolution must be 1, 2, 4, or 8`);
     }
     const count = brick.resolution ** 3;
     if (brick.density.length !== count || brick.gamma.length !== count) {
@@ -131,9 +133,8 @@ export function createSparseAdaptiveMassAtlas(
     if (directory.has(brick.key)) throw new Error(`duplicate sparse brick ${brick.key}`);
     directory.set(brick.key, brick);
   }
-  // The current two-rung atlas admits only 4³ and 8³ leaves, hence every
-  // face adjacency is at most 2:1. Keep the explicit check at the storage
-  // boundary so later resolution rungs cannot silently weaken that invariant.
+  // Accepted atlases are strongly graded: every resident face adjacency is
+  // same-level or one rung apart across the complete 1/2/4/8 ladder.
   for (const brick of directory.values()) for (let axis = 0; axis < 3; axis += 1) {
     const coordinate = [...brick.coordinate] as [number, number, number];
     coordinate[axis] += 1;
@@ -335,8 +336,8 @@ export function initializeSparseBrickAtlasFromScene(
         const selected = options.resolutionForBrick?.({
           coordinate, brickDimensions, defaultResolution,
         }) ?? defaultResolution;
-        if (selected !== 4 && selected !== 8) {
-          throw new RangeError("resolutionForBrick must return 4 or 8");
+        if (selected !== 1 && selected !== 2 && selected !== 4 && selected !== 8) {
+          throw new RangeError("resolutionForBrick must return 1, 2, 4, or 8");
         }
         const resolution: SparseBrickResolution = interfaceBrick
           && !options.resolutionForBrick ? 8 : selected;
@@ -502,7 +503,7 @@ export function sparseBrickAtlasStats(atlas: SparseAdaptiveMassAtlas): SparseBri
     residentBrickCount: atlas.bricks.length,
     omittedEmptyBrickCount: logicalBrickCount - atlas.bricks.length,
     fineBrickCount: atlas.bricks.filter((brick) => brick.resolution === 8).length,
-    coarseBrickCount: atlas.bricks.filter((brick) => brick.resolution === 4).length,
+    coarseBrickCount: atlas.bricks.filter((brick) => brick.resolution < 8).length,
     fineCoarseFaceConnectedPairCount: atlas.bricks.reduce((count, brick) => {
       // Positive axes count every undirected adjacency exactly once.
       for (let axis = 0; axis < 3; axis += 1) {
