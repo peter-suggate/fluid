@@ -1000,7 +1000,9 @@ export class WebGPUSparseCM12Resident {
       size: 4, usage: storage });
     const diagnosticsReadback = device.createBuffer({
       label: "Sparse CM12 resident diagnostic readback",
-      size: 32 + 4 * ACTIVITY_HEADER_WORDS,
+      // Reduction scalars, activity header, then authoritative accepted
+      // cell/row worklist counts. These are QA receipts, never schedule input.
+      size: 32 + 4 * ACTIVITY_HEADER_WORDS + 8,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
 
@@ -1107,16 +1109,23 @@ export class WebGPUSparseCM12Resident {
     // rejects the whole chain.
     let pass: GPUComputePassEncoder | undefined;
     let passLabel = "Sparse CM12 resident frame";
+    const openPass = () => {
+      if (!pass) {
+        pass = encoder.beginComputePass({ label: passLabel });
+        pass.setBindGroup(0, this.bindGroup);
+      }
+      return pass;
+    };
     const dispatch = (name: string, count: number, y = 1, z = 1) => {
-      pass ??= encoder.beginComputePass({ label: passLabel });
-      pass.setPipeline(this.pipelines[name]!); pass.setBindGroup(0, this.bindGroup);
-      pass.dispatchWorkgroups(count, y, z);
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroups(count, y, z);
     };
     const dispatchAccepted = (name: string, kind: "cell" | "row") => {
-      pass ??= encoder.beginComputePass({ label: passLabel });
-      pass.setPipeline(this.pipelines[name]!); pass.setBindGroup(0, this.bindGroup);
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
       const argumentWord = kind === "cell" ? 8 : 11;
-      pass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments,
+      activePass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments,
         4 * (argumentWord - 8));
     };
     // Without seams this is the single frame pass it has always been. With
@@ -1397,6 +1406,8 @@ export class WebGPUSparseCM12Resident {
     readonly topologyDeferredBrickCount: number;
     readonly acceptedFineBrickCount: number;
     readonly acceptedCoarseBrickCount: number;
+    readonly acceptedCellCount: number;
+    readonly acceptedRowCount: number;
   }> {
     this.assertLive();
     const encoder = this.device.createCommandEncoder({
@@ -1405,11 +1416,16 @@ export class WebGPUSparseCM12Resident {
     encoder.copyBufferToBuffer(this.scalars, 0, this.diagnosticsReadback, 0, 32);
     encoder.copyBufferToBuffer(this.activity, 0, this.diagnosticsReadback, 32,
       4 * ACTIVITY_HEADER_WORDS);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      this.topologyWorklistBaseBytes + 4 * 4,
+      this.diagnosticsReadback, 32 + 4 * ACTIVITY_HEADER_WORDS, 8);
     this.device.queue.submit([encoder.finish()]);
     await this.diagnosticsReadback.mapAsync(GPUMapMode.READ);
     const mapped = this.diagnosticsReadback.getMappedRange();
     const values = new Float32Array(mapped, 0, 8);
     const activity = new Uint32Array(mapped, 32, ACTIVITY_HEADER_WORDS);
+    const acceptedCounts = new Uint32Array(mapped,
+      32 + 4 * ACTIVITY_HEADER_WORDS, 2);
     const rhsSquared = values[1]!;
     const residualSquared = values[4]!;
     const result = {
@@ -1435,6 +1451,8 @@ export class WebGPUSparseCM12Resident {
       topologyDeferredBrickCount: activity[18]!,
       acceptedFineBrickCount: activity[19]!,
       acceptedCoarseBrickCount: activity[20]!,
+      acceptedCellCount: acceptedCounts[0]!,
+      acceptedRowCount: acceptedCounts[1]!,
     };
     this.diagnosticsReadback.unmap();
     return result;

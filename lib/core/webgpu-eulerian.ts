@@ -69,6 +69,9 @@ export interface GPUEulerianInfo {
   adaptiveTopologyShadowGeneration?: number;
   adaptiveTopologyShadowFineBrickCount?: number;
   adaptiveTopologyShadowCoarseBrickCount?: number;
+  /** Physically accepted Sparse CM12 worklists consumed by indirect dispatch. */
+  adaptiveAcceptedCellCount?: number;
+  adaptiveAcceptedRowCount?: number;
   /** Wet-domain storage residency, independent from the narrow surface band. */
   fluidBulkBrickResidentCount?: number;
   fluidBulkBrickHaloCount?: number;

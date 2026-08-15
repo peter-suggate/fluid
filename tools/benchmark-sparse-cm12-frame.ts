@@ -10,6 +10,7 @@
  * drift. The hard ratio is defined beside the adaptive method implementation.
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
   GPUSolverInstance,
@@ -177,6 +178,24 @@ function matchedDensityReceipt(uniform: Float32Array, sparse: Float32Array) {
       / Math.max(Number.MIN_VALUE, referenceSquared)),
     maximumAbsolute,
   };
+}
+
+function rawFloatHash(values: Float32Array) {
+  return {
+    elements: values.length,
+    bytes: values.byteLength,
+    sha256: createHash("sha256").update(new Uint8Array(
+      values.buffer, values.byteOffset, values.byteLength,
+    )).digest("hex"),
+  };
+}
+
+function pressureStages(stages: Readonly<Record<string, {
+  readonly samples: number; readonly median_ms: number; readonly p95_ms: number;
+}>>) {
+  return Object.fromEntries(Object.entries(stages).filter(([label]) =>
+    label.startsWith("pressure-system:") || label.startsWith("pressure-solve:")
+      || label.startsWith("velocity-projection:")));
 }
 
 function topologySample(info: Awaited<ReturnType<GPUSolverInstance["readStats"]>>): SparseCM12TopologySample {
@@ -400,9 +419,19 @@ try {
     frozenArm(sparse),
     performanceAcceptance,
   );
+  // QA readbacks occur strictly after the timed range. They fingerprint the
+  // exact state associated with the pressure/control receipt without charging
+  // either arm's frame timing or feeding any scheduling decision.
+  const [uniformDensity, sparseDensity, finalUniformInfo, finalSparseInfo] =
+    await Promise.all([
+      readDensity(device, uniform.solver),
+      readDensity(device, sparse.solver),
+      uniform.solver.readStats(),
+      sparse.solver.readStats(),
+    ]);
   const longDamFront = sceneArgument === "long-dam" ? {
-    uniform: frontReceipt(await readDensity(device, uniform.solver)),
-    sparse: frontReceipt(await readDensity(device, sparse.solver)),
+    uniform: frontReceipt(uniformDensity),
+    sparse: frontReceipt(sparseDensity),
     sparseResidentMaximumFineCellX: Math.max(
       ...((await (sparse.solver as WebGPUAdaptiveMassSolver)
         .readGPUActivityPolicy()).bricks.filter((brick) => brick.active)
@@ -430,10 +459,7 @@ try {
     );
   }
   const forcedFineDensityAgreement = sparseResolutionArgument === "all-fine"
-    ? matchedDensityReceipt(
-      await readDensity(device, uniform.solver),
-      await readDensity(device, sparse.solver),
-    ) : undefined;
+    ? matchedDensityReceipt(uniformDensity, sparseDensity) : undefined;
   const agreementFailures: string[] = [];
   if (forcedFineDensityAgreement && forcedFineDensityAgreement.relativeL1 > 0.05) {
     agreementFailures.push(
@@ -453,9 +479,35 @@ try {
     sparseResolutionMode: sparseResolutionArgument,
     matchedRepresentation: {
       uniformCells: uniform.solver.info.cellCount,
-      sparseLeaves: sparse.solver.info.cellCount,
+      uniformCoordinateFaceRows: (dimensions[0] - 1) * dimensions[1] * dimensions[2]
+        + dimensions[0] * (dimensions[1] - 1) * dimensions[2]
+        + dimensions[0] * dimensions[1] * (dimensions[2] - 1),
+      sparseConstructionLeaves: sparse.solver.info.cellCount,
+      sparseAcceptedCells: finalSparseInfo.adaptiveAcceptedCellCount,
+      sparseAcceptedRows: finalSparseInfo.adaptiveAcceptedRowCount,
       exactDegreesOfFreedomMatch:
-        uniform.solver.info.cellCount === sparse.solver.info.cellCount,
+        uniform.solver.info.cellCount === finalSparseInfo.adaptiveAcceptedCellCount,
+    },
+    exactStateHashes: {
+      uniformDensity: rawFloatHash(uniformDensity),
+      sparseDensity: rawFloatHash(sparseDensity),
+    },
+    pressureControl: {
+      uniform: {
+        solver: finalUniformInfo.pressureSolver,
+        iterations: finalUniformInfo.pressureIterations,
+        cpuStages: pressureStages(verdict.uniform.cpuStages),
+        gpuStages: pressureStages(verdict.uniform.gpuStages),
+      },
+      sparse: {
+        solver: finalSparseInfo.pressureSolver,
+        iterations: finalSparseInfo.pressureIterations,
+        acceptedCells: finalSparseInfo.adaptiveAcceptedCellCount,
+        acceptedRows: finalSparseInfo.adaptiveAcceptedRowCount,
+        constructionLeafCount: sparse.solver.info.cellCount,
+        cpuStages: pressureStages(verdict.sparse.cpuStages),
+        gpuStages: pressureStages(verdict.sparse.gpuStages),
+      },
     },
     validationErrors,
     stateGrowth: {

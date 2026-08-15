@@ -317,6 +317,7 @@ fn traceDeparture(position:vec3f)->vec3f{return traceCharacteristic(position,-1.
 fn traceArrival(position:vec3f)->vec3f{return traceCharacteristic(position,1.0);}
 
 struct TransportTerm{cell:u32,weight:f32}
+struct TransportStencil{cells:array<u32,8>,weights:array<f32,8>}
 fn transportTerm(position:vec3f,corner:u32)->TransportTerm{
   let probe=ownerCellAt(vec3i(floor(clamp(position,vec3f(0.0),
     vec3f(p.dimensions.xyz)-vec3f(1e-4)))));
@@ -329,6 +330,29 @@ fn transportTerm(position:vec3f,corner:u32)->TransportTerm{
     *select(1.0-fraction.y,fraction.y,offset.y==1)
     *select(1.0-fraction.z,fraction.z,offset.z==1);
   return TransportTerm(cell,select(0.0,weight,cell!=INVALID));
+}
+
+// Sharpening samples every corner of the same adaptive trilinear stencil.
+// Compute its invariant probe and lattice coordinates once while retaining the
+// exact corner order and weight expression used by transportTerm.
+fn transportStencil(position:vec3f)->TransportStencil{
+  let probe=ownerCellAt(vec3i(floor(clamp(position,vec3f(0.0),
+    vec3f(p.dimensions.xyz)-vec3f(1e-4)))));
+  var spans=vec3f(1.0);if(probe!=INVALID){let b=cellBase(probe);
+    spans=vec3f(taf(b+4u),taf(b+5u),taf(b+6u));}
+  let shifted=position/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
+  let fraction=fract(shifted);var result:TransportStencil;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let lattice=spans*(vec3f(lower+offset)+vec3f(0.5));
+    let cell=ownerCellAt(vec3i(floor(lattice)));
+    let weight=select(1.0-fraction.x,fraction.x,offset.x==1)
+      *select(1.0-fraction.y,fraction.y,offset.y==1)
+      *select(1.0-fraction.z,fraction.z,offset.z==1);
+    result.cells[corner]=cell;
+    result.weights[corner]=select(0.0,weight,cell!=INVALID);
+  }
+  return result;
 }
 
 fn transportBeta(cell:u32)->f32{
@@ -672,10 +696,10 @@ fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
 }
 
 fn sampleSharpeningDensity(position:vec3f)->f32{
-  var result=0.0;
+  let stencil=transportStencil(position);var result=0.0;
   for(var corner=0u;corner<8u;corner+=1u){
-    let term=transportTerm(position,corner);
-    if(term.cell!=INVALID){result+=term.weight*state[destinationDensity()+term.cell];}
+    let cell=stencil.cells[corner];
+    if(cell!=INVALID){result+=stencil.weights[corner]*state[destinationDensity()+cell];}
   }
   return result;
 }
@@ -726,19 +750,21 @@ fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
   let delta=sharpeningDelta(cell,stats);
   state[p.stateOffsets5.x+cell]=delta;if(delta>=0.0){return;}
   let removed=-delta*cellVolume(cell);let removedFixed=i32(round(removed*CM12_TRANSPORT_FIXED));
-  let position=traceSharpeningMass(cell);var total=0.0;var lastCorner=INVALID;
-  for(var corner=0u;corner<8u;corner+=1u){let term=transportTerm(position,corner);
-    if(term.cell!=INVALID&&term.weight>0.0){total+=term.weight;lastCorner=corner;}}
+  let position=traceSharpeningMass(cell);let stencil=transportStencil(position);
+  var total=0.0;var lastCorner=INVALID;
+  for(var corner=0u;corner<8u;corner+=1u){let targetCell=stencil.cells[corner];
+    let weight=stencil.weights[corner];
+    if(targetCell!=INVALID&&weight>0.0){total+=weight;lastCorner=corner;}}
   if(total<=1e-8){
     atomicAdd(&conditioning[3u*p.counts.x+cell],removedFixed);return;
   }
   var remainingFixed=removedFixed;
-  for(var corner=0u;corner<8u;corner+=1u){let term=transportTerm(position,corner);
-    if(term.cell==INVALID||term.weight<=0.0){continue;}
-    var offeredFixed=i32(round(f32(removedFixed)*term.weight/total));
+  for(var corner=0u;corner<8u;corner+=1u){let targetCell=stencil.cells[corner];
+    let weight=stencil.weights[corner];if(targetCell==INVALID||weight<=0.0){continue;}
+    var offeredFixed=i32(round(f32(removedFixed)*weight/total));
     if(corner==lastCorner){offeredFixed=remainingFixed;}
     else{offeredFixed=clamp(offeredFixed,0,remainingFixed);}
-    atomicAdd(&conditioning[3u*p.counts.x+term.cell],offeredFixed);
+    atomicAdd(&conditioning[3u*p.counts.x+targetCell],offeredFixed);
     remainingFixed-=offeredFixed;
   }
 }
@@ -949,6 +975,8 @@ var<workgroup>transferGammaDelta:array<f32,64>;
 var<workgroup>transferMomentumXDelta:array<f32,64>;
 var<workgroup>transferMomentumYDelta:array<f32,64>;
 var<workgroup>transferMomentumZDelta:array<f32,64>;
+var<workgroup>candidateCellScheduled:u32;
+var<workgroup>candidateFaceScheduled:u32;
 fn reducePair(lane:u32,group:u32,a:f32,b:f32){
   reduceA[lane]=a;reduceB[lane]=b;workgroupBarrier();
   var width=32u;loop{if(lane<width){reduceA[lane]+=reduceA[lane+width];reduceB[lane]+=reduceB[lane+width];}
@@ -1540,6 +1568,10 @@ fn beginShadowTopology(){
 
 @compute @workgroup_size(64)
 fn buildShadowCellWorklist(@builtin(global_invocation_id)gid:vec3u){
+  // No accepted field can observe the inactive list. Avoid walking the full
+  // 1/2/4/8 template library on the overwhelmingly common no-change frame;
+  // a later prepared transaction clears and rebuilds the list before publish.
+  if(atomicLoad(&activity[16])==0u){return;}
   let cell=gid.x;if(cell>=ta(2u)){return;}
   let b=cellBase(cell);let brick=ta(b+11u);let resolution=ta(b+10u);
   if(!brickActive(brick)||resolution!=scheduledBrickResolution(brick)){return;}
@@ -1550,6 +1582,7 @@ fn buildShadowCellWorklist(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(64)
 fn buildShadowRowWorklist(@builtin(global_invocation_id)gid:vec3u){
+  if(atomicLoad(&activity[16])==0u){return;}
   let row=gid.x;if(row>=ta(3u)){return;}
   let requirements=ta(rowBase(row)+11u);let count=ta(requirements);var enabled=true;
   for(var at=0u;at<count;at+=1u){let brick=ta(requirements+1u+2u*at);
@@ -1601,8 +1634,11 @@ fn finiteTransferValue(value:f32)->bool{
 fn transferCandidateCells(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
   let brick=wid.x;let lane=lid.x;if(brick>=p.dispatch.w){return;}
-  let output=activityRecord(brick);let scheduled=atomicLoad(&activity[output+35u])!=0u;
-  let candidateStatus=select(0u,atomicLoad(&activity[output+14u]),scheduled);
+  let output=activityRecord(brick);
+  if(lane==0u){candidateCellScheduled=atomicLoad(&activity[output+35u]);}
+  let scheduled=workgroupUniformLoad(&candidateCellScheduled);
+  if(scheduled==0u){return;}
+  let candidateStatus=atomicLoad(&activity[output+14u]);
   let accepted=atomicLoad(&activity[output+12u]);
   let candidate=atomicLoad(&activity[output+13u]);
   let acceptedRange=templateBrickCellRange(brick,accepted);let first=acceptedRange.x;
@@ -1712,7 +1748,15 @@ fn transferCandidateFaces(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
   let brick=wid.x;let side=wid.y;let lane=lid.x;
   if(brick>=p.dispatch.w||side>=6u){return;}
-  let output=activityRecord(brick);let candidate=atomicLoad(&activity[output+13u]);
+  let output=activityRecord(brick);
+  // The old path area-averaged every face of every brick even when the
+  // scheduler had prepared nothing. Candidate storage is isolated and a
+  // scheduled brick recomputes all six receipts before it can commit, so this
+  // uniform workgroup return removes only provably dead writes.
+  if(lane==0u){candidateFaceScheduled=atomicLoad(&activity[output+35u]);}
+  let scheduled=workgroupUniformLoad(&candidateFaceScheduled);
+  if(scheduled==0u){return;}
+  let candidate=atomicLoad(&activity[output+13u]);
   let accepted=atomicLoad(&activity[output+12u]);let acceptedRange=templateBrickCellRange(brick,accepted);
   let record=p.topologyOffsets2.z+4u*brick;let first=acceptedRange.x;
   let count=acceptedRange.y;let key=topology[record+3u];
@@ -1796,6 +1840,7 @@ fn writeCandidateCellsToShadow(@builtin(local_invocation_id)lid:vec3u,
 // incident to a scheduled brick; unchanged accepted rows remain untouched.
 @compute @workgroup_size(64)
 fn reconstructShadowFaces(@builtin(global_invocation_id)gid:vec3u){
+  if(atomicLoad(&activity[16])==0u){return;}
   let invocation=gid.x;if(invocation>=shadowTemplateRowCount()){return;}
   let row=shadowTemplateRowInvocation(invocation);if(row==INVALID){return;}
   let requirements=ta(rowBase(row)+11u);let requirementCount=ta(requirements);

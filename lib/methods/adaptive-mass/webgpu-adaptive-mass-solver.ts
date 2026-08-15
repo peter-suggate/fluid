@@ -717,9 +717,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.adaptiveActivityHotBrickCount = diagnostics.activityHotBrickCount;
     this.info.adaptiveActivityQuietBrickCount = diagnostics.activityQuietBrickCount;
     this.info.adaptiveResolutionTopologyEpoch = diagnostics.activityTopologyEpoch;
-    this.info.activeSampleCount = diagnostics.activeCellCount;
-    this.info.activeCompressionRatio = diagnostics.activeCellCount
-      / Math.max(1, this.info.equivalentUniformCells ?? diagnostics.activeCellCount);
+    this.info.activeSampleCount = diagnostics.acceptedCellCount;
+    this.info.activeCompressionRatio = diagnostics.acceptedCellCount
+      / Math.max(1, this.info.equivalentUniformCells ?? diagnostics.acceptedCellCount);
     this.info.fluidBrickResidentCount = diagnostics.activeBrickCount;
     this.info.fluidBrickCoreCount = diagnostics.activeBrickCount;
     // Residency and accepted split/merge publication are independent GPU
@@ -737,6 +737,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.adaptiveTopologyDeferredBrickCount = topology.topologyDeferredBrickCount ?? 0;
     this.info.adaptiveTopologyShadowFineBrickCount = topology.acceptedFineBrickCount;
     this.info.adaptiveTopologyShadowCoarseBrickCount = topology.acceptedCoarseBrickCount;
+    this.info.adaptiveAcceptedCellCount = diagnostics.acceptedCellCount;
+    this.info.adaptiveAcceptedRowCount = diagnostics.acceptedRowCount;
     this.info.adaptiveFineBrickCount = topology.acceptedFineBrickCount;
     this.info.adaptiveCoarseBrickCount = topology.acceptedCoarseBrickCount;
     this.info.adaptiveResolutionPromotedBrickCount = 0;
