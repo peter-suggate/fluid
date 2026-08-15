@@ -8,6 +8,7 @@ import { simulation } from "../lib/core/simulation/controller";
 import { resolvedMethodValues, useMethodStore } from "../lib/core/stores/method-store";
 import { useUIStore } from "../lib/core/stores/ui-store";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
+import { useAnchoredFlyout } from "./anchored-flyout";
 
 /**
  * The field-overlay picker, riding a corner of the fluid container.
@@ -71,16 +72,24 @@ export function FluidFieldFlyout({
     // A view changes the publication, not the user's chosen presentation.
     // Only an inactive overlay needs the view's authored default.
     if (overlayAxis === "off") {
-      const axis = view.axis === "volume" && !volumeCapable ? "y" : view.axis;
+      // A planeless view has no slice to fall back to: it draws its own geometry
+      // over the frame, so the raymarch's volume capability does not apply.
+      const axis = view.planeless || !(view.axis === "volume" && !volumeCapable)
+        ? view.axis : "y";
       setOverlayAxis(axis);
       if (axis === "volume") setOverlaySlice(0.42);
     }
   };
 
+  // Anchored against the shell's measured box, so orbiting the camera
+  // until this corner nears an edge slides the panel instead of clipping it.
+  const { ref, style } = useAnchoredFlyout<HTMLDivElement>({ leftFraction, topFraction });
+
   return <div
+    ref={ref}
     className="fluid-field-flyout"
     data-testid="fluid-field-flyout"
-    style={{ left: `${leftFraction * 100}%`, top: `${topFraction * 100}%` }}
+    style={style}
   >
     {hasViews && <header>
       <span>FIELD</span>
@@ -93,7 +102,8 @@ export function FluidFieldFlyout({
       >HIDE</button>}
     </header>}
     {active && <>
-      <div className="fluid-field-plane" role="group" aria-label="Field view plane">
+      {!active.planeless
+      && <div className="fluid-field-plane" role="group" aria-label="Field view plane">
         {(["x", "y", "z"] as const).map((axis) => <button
           key={axis}
           type="button"
@@ -107,18 +117,20 @@ export function FluidFieldFlyout({
           title={volumeCapable ? undefined : "Volume views need an adaptive octree method"}
           onClick={() => setOverlayAxis("volume")}
         >VOL</button>
-      </div>
+      </div>}
       <label className="fluid-field-slice">
         <input
           type="range"
-          min={overlayAxis === "volume" ? 0.05 : 0}
+          min={active.planeless || overlayAxis === "volume" ? 0.05 : 0}
           max={1}
-          step={overlayAxis === "volume" ? 0.01 : 0.005}
+          step={active.planeless || overlayAxis === "volume" ? 0.01 : 0.005}
           value={overlaySlice}
           onChange={(event) => setOverlaySlice(Number(event.currentTarget.value))}
-          aria-label={overlayAxis === "volume"
-            ? "Field volume opacity"
-            : `Field ${overlayAxis} slice position`}
+          aria-label={active.planeless
+            ? `${active.label} opacity`
+            : overlayAxis === "volume"
+              ? "Field volume opacity"
+              : `Field ${overlayAxis} slice position`}
         />
         <output>{Math.round(overlaySlice * 100)}%</output>
       </label>

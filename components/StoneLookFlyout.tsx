@@ -10,6 +10,7 @@ import {
   withStoneSeedRerolled,
   type StoneDials,
 } from "../lib/core/stone-look-controls";
+import { useAnchoredFlyout } from "./anchored-flyout";
 
 /**
  * The stone sculptor, riding the selected boulder's own corner — the same
@@ -38,6 +39,10 @@ export function StoneLookFlyout({
   leftFraction: number;
   topFraction: number;
 }) {
+  // Anchored against the shell's measured box, so orbiting the camera
+  // until this corner nears an edge slides the panel instead of clipping it.
+  const { ref, style } = useAnchoredFlyout<HTMLDivElement>({ leftFraction, topFraction });
+
   const scene = useSceneStore((state) => state.scene);
   const gestureOpen = useRef(false);
   const endGesture = () => {
@@ -77,9 +82,10 @@ export function StoneLookFlyout({
   };
 
   return <div
+    ref={ref}
     className="stone-look-flyout"
     data-testid="stone-look-flyout"
-    style={{ left: `${leftFraction * 100}%`, top: `${topFraction * 100}%` }}
+    style={style}
   >
     <header>
       <span>STONE</span>

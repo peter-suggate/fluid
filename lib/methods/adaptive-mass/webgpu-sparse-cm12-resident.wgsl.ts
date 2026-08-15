@@ -17,6 +17,7 @@ const ACTIVITY_HEADER_WORDS:u32=24u;
 const ACTIVITY_RECORD_WORDS:u32=40u;
 const CANDIDATE_CELLS_PER_BRICK:u32=512u;
 const ACTIVITY_FIXED:f32=65536.0;
+override PRESSURE_EARLY_STOP:bool=false;
 
 struct Params {
   counts:vec4u,             // cell, row, incidence, dense
@@ -41,9 +42,11 @@ struct Params {
   activityEpochs:vec4u,     // cadence, promotion epochs, demotion epochs, activity signals enabled
   boundaryCenter:vec4f,
   boundaryRadii:vec4f,
-  topologyScheduling:vec4u, // ordinary shadow bricks prepared per frame
+  topologyScheduling:vec4u, // ordinary shadow bricks/frame, pressure tolerance bits
   solidOffsets:vec4u,       // dynamic cell open and row data
   rigidWorld:vec4f,         // world metres and rigid-body count
+  tracerGrid:vec4u,         // tracer lattice dimensions, tracer count
+  tracerOrigin:vec4f,       // lattice origin in fine cells, isotropic spacing
 }
 
 @group(0)@binding(0)var<uniform>p:Params;
@@ -123,6 +126,8 @@ fn destinationCellVelocity()->u32{return select(p.stateOffsets1.y,p.stateOffsets
 fn sourceFaceVelocity()->u32{return select(p.stateOffsets1.z,p.stateOffsets1.w,p.frame.w>0.5);}
 fn destinationFaceVelocity()->u32{return select(p.stateOffsets1.w,p.stateOffsets1.z,p.frame.w>0.5);}
 fn hasRigidBodies()->bool{return p.rigidWorld.w>=0.5;}
+fn pressureRelativeTolerance()->f32{return bitcast<f32>(p.topologyScheduling.y);}
+fn pressureIterationActive()->bool{return !PRESSURE_EARLY_STOP||scalars[5]>0.5;}
 
 fn cellBase(id:u32)->u32{return ta(6u)+id*16u;}
 fn cellBrick(id:u32)->u32{return ta(cellBase(id)+11u);}
@@ -229,7 +234,11 @@ fn dynamicallyCoveredCell(cell:u32)->bool{
   return hasRigidBodies()&&cellActive(cell)&&taf(cellBase(cell)+13u)>1e-8
     &&state[p.solidOffsets.x+cell]<=1e-8;
 }
-fn isLiquid(cell:u32)->bool{return cellActive(cell)&&state[p.stateOffsets2.w+cell]>0.5;}
+// The host clears the complete template field before preparePressure marks the
+// accepted liquid cells. The bit itself is therefore the pressure-epoch
+// activity mask; repeating cellActive here would re-walk brick metadata for
+// every neighbor of every SpMV.
+fn isLiquid(cell:u32)->bool{return state[p.stateOffsets2.w+cell]>0.5;}
 
 fn hasEmbeddedBoundary()->bool{return p.dimensions.w!=0u;}
 fn boundaryDistance2(q:vec3f)->f32{
@@ -625,6 +634,70 @@ fn gatherConservativeDensity(@builtin(global_invocation_id)gid:vec3u){
   state[destinationGamma()+id]=max(0.0,gammaNext);
 }
 
+// Massless markers riding the same characteristic the conservative transport
+// integrates, so a coloured parcel and the mass it stands for cannot drift
+// apart by construction: both call traceCharacteristic against the same
+// extrapolated transport velocity, in the same frame, before the density is
+// touched. Where the dots and the mass disagree, the transport is wrong.
+//
+// A tracer stores only where it is. Its seed position — and therefore the
+// colour it is drawn with — is a pure function of its invocation index, so the
+// vertex stage recovers the colour from the instance index and no per-tracer
+// colour is ever stored or advected. That is what keeps this a fixed
+// vec4-per-tracer cost independent of grid resolution, and what keeps the
+// spectrum perfectly sharp: nothing about the colour passes through an
+// advection scheme, so it cannot be numerically diffused.
+fn tracerCount()->u32{return p.tracerGrid.w;}
+fn tracerBase(index:u32)->u32{return p.stateOffsets5.z+4u*index;}
+
+fn tracerSeedPosition(index:u32)->vec3f{
+  let dimensions=max(p.tracerGrid.xyz,vec3u(1u));
+  let lattice=vec3u(index%dimensions.x,(index/dimensions.x)%dimensions.y,
+    index/(dimensions.x*dimensions.y));
+  return p.tracerOrigin.xyz+(vec3f(lattice)+vec3f(0.5))*p.tracerOrigin.w;
+}
+
+fn tracerCellAt(position:vec3f)->u32{
+  return ownerCellAt(vec3i(floor(clamp(position,vec3f(0.0),
+    vec3f(p.dimensions.xyz)-vec3f(1e-4)))));
+}
+
+// Seeding is re-runnable on purpose. Re-seeding mid-run re-reads the mixing
+// from that instant rather than from t=0, which is the question being asked
+// most of the time once a scene has already broken up.
+@compute @workgroup_size(64)
+fn seedTracers(@builtin(global_invocation_id)gid:vec3u){
+  let index=gid.x;if(index>=tracerCount()){return;}
+  let position=tracerSeedPosition(index);
+  let cell=tracerCellAt(position);
+  // Markers seeded into air stay retired rather than being compacted away: a
+  // dead lane costs one predicated early-out here and one collapsed quad in the
+  // draw, which is cheaper than maintaining a compaction the topology would
+  // invalidate every epoch anyway.
+  let live=cell!=INVALID&&state[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
+  let at=tracerBase(index);
+  state[at]=position.x;state[at+1u]=position.y;state[at+2u]=position.z;
+  state[at+3u]=select(0.0,1.0,live);
+}
+
+@compute @workgroup_size(64)
+fn advanceTracers(@builtin(global_invocation_id)gid:vec3u){
+  let index=gid.x;if(index>=tracerCount()){return;}
+  let at=tracerBase(index);if(state[at+3u]<0.5){return;}
+  let traced=traceArrival(vec3f(state[at],state[at+1u],state[at+2u]));
+  let cell=tracerCellAt(traced);
+  // Retire on vacuum, not on the liquid isovalue. A marker inside a thin film
+  // or a shedding sheet is still following fluid and is exactly what this view
+  // exists to show; one stranded in an emptied cell would freeze in place and
+  // read as motion that stopped.
+  // Read the accepted density, not the destination: this pass runs before
+  // conservative transport writes it, so the destination still holds the
+  // previous frame's image and would retire live markers at random.
+  let stranded=cell==INVALID||state[sourceDensity()+cell]<CM12_DRY_CELL_THRESHOLD;
+  state[at]=traced.x;state[at+1u]=traced.y;state[at+2u]=traced.z;
+  if(stranded){state[at+3u]=0.0;}
+}
+
 fn diffuseGammaAxis(cell:u32,axis:u32,inputRho:u32,inputGamma:u32,
  outputRho:u32,outputGamma:u32){
   let ownRho=state[inputRho+cell];let ownGamma=state[inputGamma+cell];
@@ -828,6 +901,13 @@ fn traceSharpeningMass(source:u32)->vec3f{
 fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
   if(!cellTransportActive(cell)){state[p.stateOffsets5.x+cell]=0.0;return;}
+  // Sec. 3.5 only removes density on the air side of the interface. Avoid
+  // expanding the composite incidence stencil when sharpeningDelta's final
+  // branches provably override the computed gradient. Preserve -rho for an
+  // exact zero so even the scratch field's signed-zero behavior is unchanged.
+  let rho=state[destinationDensity()+cell];
+  if(rho==0.0){state[p.stateOffsets5.x+cell]=-rho;return;}
+  if(rho>CM12_LIQUID_ISOVALUE){state[p.stateOffsets5.x+cell]=0.0;return;}
   let stats=sharpeningStats(cell);
   let delta=sharpeningDelta(cell,stats);
   state[p.stateOffsets5.x+cell]=delta;if(delta>=0.0){return;}
@@ -1014,13 +1094,29 @@ fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
 
 fn applyOperator(cell:u32,inputOffset:u32)->f32{
   if(!isLiquid(cell)){return 0.0;}var result=0.0;
-  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-    let row=incidenceRow(at);if(!rowAccepted(row)){continue;}
+  // Cache the immutable arena section offsets once per matrix row. The generic
+  // accessors intentionally favor readability elsewhere, but reloading these
+  // four header words for every incidence and term dominates 128 SpMVs.
+  let incidenceBounds=ta(9u);let incidenceRecords=ta(10u);
+  let rowRecords=ta(7u);let termRecords=ta(8u);
+  let incidenceEndOffset=ta(incidenceBounds+cell+1u);
+  for(var at=ta(incidenceBounds+cell);at<incidenceEndOffset;at+=1u){
+    let incidence=incidenceRecords+2u*at;let row=ta(incidence);
+    // classifyRows zeroes every rejected row immediately before the solve, so
+    // theta is also the accepted-row mask for this immutable pressure epoch.
+    // Avoid re-walking each row's brick-resolution requirements 128 times.
     let theta=state[p.stateOffsets3.x+row];if(theta<=0.0){continue;}
-    var jump=0.0;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-    for(var term=begin;term<end;term+=1u){let other=termCell(term);
-      if(isLiquid(other)){jump+=termCoefficient(term)*state[inputOffset+other];}}
-    result+=termCoefficient(incidenceTerm(at))*rowDualWeight(row)*jump/theta;
+    let rowRecord=rowRecords+12u*row;
+    var jump=0.0;let begin=ta(rowRecord);let end=begin+ta(rowRecord+1u);
+    for(var term=begin;term<end;term+=1u){let termRecord=termRecords+2u*term;
+      let other=ta(termRecord);if(isLiquid(other)){
+        jump+=bitcast<f32>(ta(termRecord+1u))*state[inputOffset+other];}}
+    let ownTerm=ta(incidence+1u);
+    var dualWeight=bitcast<f32>(ta(rowRecord+4u));
+    if(hasRigidBodies()){
+      dualWeight*=state[p.solidOffsets.y+4u*row+3u];
+    }
+    result+=bitcast<f32>(ta(termRecords+2u*ownTerm+1u))*dualWeight*jump/theta;
   }return result;
 }
 
@@ -1060,6 +1156,7 @@ var<workgroup>activityDetailError:array<f32,64>;
 var<workgroup>activityVelocityTravel:array<f32,64>;
 var<workgroup>activitySurfaceAxes:array<u32,64>;
 var<workgroup>activitySupportMask:array<u32,64>;
+var<workgroup>activitySweptSupportMask:array<u32,64>;
 var<workgroup>transferMassBefore:array<f32,64>;
 var<workgroup>transferMassAfter:array<f32,64>;
 var<workgroup>transferGammaDelta:array<f32,64>;
@@ -1096,29 +1193,33 @@ fn reduceInitialize(@builtin(local_invocation_id)lid:vec3u){
   reduceA[lid.x]=a;reduceB[lid.x]=b;workgroupBarrier();var width=32u;loop{
     if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];reduceB[lid.x]+=reduceB[lid.x+width];}
     workgroupBarrier();if(width==1u){break;}width/=2u;}
-  if(lid.x==0u){scalars[0]=reduceA[0];scalars[1]=reduceB[0];scalars[2]=0.0;scalars[3]=0.0;}
+  if(lid.x==0u){scalars[0]=reduceA[0];scalars[1]=reduceB[0];scalars[2]=0.0;
+    scalars[3]=0.0;scalars[5]=1.0;}
 }
 
 @compute @workgroup_size(64)
 fn applyDirection(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let id=acceptedTemplateCellInvocation(gid.x);var curvature=0.0;if(id!=INVALID){let image=applyOperator(id,p.stateOffsets3.w);
+  let iterationEnabled=pressureIterationActive();
+  let id=acceptedTemplateCellInvocation(gid.x);var curvature=0.0;if(iterationEnabled&&id!=INVALID){let image=applyOperator(id,p.stateOffsets3.w);
     state[p.stateOffsets4.x+id]=image;curvature=state[p.stateOffsets3.w+id]*image;}
   reducePair(lid.x,wid.x,curvature,0.0);
 }
 
 @compute @workgroup_size(64)
 fn reduceCurvature(@builtin(local_invocation_id)lid:vec3u){
-  var sum=0.0;for(var at=lid.x;at<acceptedTemplateCellWorkgroups();at+=64u){sum+=partials[at].x;}
+  let iterationEnabled=pressureIterationActive();
+  var sum=0.0;if(iterationEnabled){for(var at=lid.x;at<acceptedTemplateCellWorkgroups();at+=64u){sum+=partials[at].x;}}
   reduceA[lid.x]=sum;workgroupBarrier();var width=32u;loop{if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];}
     workgroupBarrier();if(width==1u){break;}width/=2u;}
-  if(lid.x==0u){scalars[2]=select(0.0,scalars[0]/reduceA[0],reduceA[0]>1e-20);}
+  if(lid.x==0u&&iterationEnabled){scalars[2]=select(0.0,scalars[0]/reduceA[0],reduceA[0]>1e-20);}
 }
 
 @compute @workgroup_size(64)
 fn updateResidual(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let id=acceptedTemplateCellInvocation(gid.x);var rz=0.0;var residual2=0.0;if(id!=INVALID){let alpha=scalars[2];
+  let iterationEnabled=pressureIterationActive();
+  let id=acceptedTemplateCellInvocation(gid.x);var rz=0.0;var residual2=0.0;if(iterationEnabled&&id!=INVALID){let alpha=scalars[2];
     state[p.stateOffsets2.x+id]+=alpha*state[p.stateOffsets3.w+id];
     let residual=state[p.stateOffsets3.y+id]-alpha*state[p.stateOffsets4.x+id];
     let diagonal=state[p.stateOffsets2.z+id];let z=select(0.0,residual/diagonal,diagonal>0.0);
@@ -1129,16 +1230,20 @@ fn updateResidual(@builtin(global_invocation_id)gid:vec3u,
 
 @compute @workgroup_size(64)
 fn reduceResidual(@builtin(local_invocation_id)lid:vec3u){
-  var a=0.0;var b=0.0;for(var at=lid.x;at<acceptedTemplateCellWorkgroups();at+=64u){a+=partials[at].x;b+=partials[at].y;}
+  let iterationEnabled=pressureIterationActive();
+  var a=0.0;var b=0.0;if(iterationEnabled){for(var at=lid.x;at<acceptedTemplateCellWorkgroups();at+=64u){a+=partials[at].x;b+=partials[at].y;}}
   reduceA[lid.x]=a;reduceB[lid.x]=b;workgroupBarrier();var width=32u;loop{
     if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];reduceB[lid.x]+=reduceB[lid.x+width];}
     workgroupBarrier();if(width==1u){break;}width/=2u;}
-  if(lid.x==0u){scalars[3]=select(0.0,reduceA[0]/scalars[0],scalars[0]>1e-20);
-    scalars[0]=reduceA[0];scalars[4]=reduceB[0];}
+  if(lid.x==0u&&iterationEnabled){scalars[3]=select(0.0,reduceA[0]/scalars[0],scalars[0]>1e-20);
+    scalars[0]=reduceA[0];scalars[4]=reduceB[0];
+    let tolerance=pressureRelativeTolerance();
+    if(tolerance>0.0&&reduceB[0]<=tolerance*tolerance*scalars[1]){scalars[5]=0.0;}}
 }
 
 @compute @workgroup_size(64)
 fn updateDirection(@builtin(global_invocation_id)gid:vec3u){
+  if(!pressureIterationActive()){return;}
   let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
   state[p.stateOffsets3.w+id]=state[p.stateOffsets3.z+id]+scalars[3]*state[p.stateOffsets3.w+id];}
 
@@ -1148,7 +1253,7 @@ fn projectedJacobiValue(cell:u32,inputOffset:u32)->f32{
     cellSeparatingMinimum(cell));}
   var offDiagonal=0.0;
   for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-    let row=incidenceRow(at);if(!rowAccepted(row)){continue;}
+    let row=incidenceRow(at);
     let theta=state[p.stateOffsets3.x+row];if(theta<=0.0){continue;}
     let own=termCoefficient(incidenceTerm(at));let weight=rowDualWeight(row)/theta;
     let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
@@ -1308,7 +1413,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   var velocityTravel=0.0;
   var surfaceAxes=0u;var surfaceCell=false;var occupiedCell=false;var thinFluidCell=false;
   var cutBoundaryCell=false;
-  var supportMask=0u;
+  var supportMask=0u;var sweptSupportMask=0u;
   let measuredCount=select(0u,count,resident);
   for(var cell=first+lane;cell<first+measuredCount;cell+=64u){
     let rho=state[destinationDensity()+cell];
@@ -1345,7 +1450,15 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       let row=incidenceRow(incidence);if(!rowAccepted(row)){continue;}
       let own=termCoefficient(incidenceTerm(incidence));
       if(!rowAccepted(row)||rowArea(row)<=1e-8){continue;}
-      var crosses=rowKind(row)==3u&&ownWet;var sideHasFluid=false;
+      let axis=rowAxis(row);let rowPosition=rowCenter(row);
+      // A sparse-air row on the domain box is the closed container wall, not
+      // a liquid-air interface. Treating the floor and side walls as surface
+      // made calm bottom bricks permanently complex/hot and refined them after
+      // the tank had settled. Only omitted air strictly inside the domain is
+      // free-surface evidence.
+      let omittedAirInside=rowKind(row)==3u&&rowPosition[axis]>1e-4
+        &&rowPosition[axis]<f32(p.dimensions[axis])-1e-4;
+      var crosses=omittedAirInside&&ownWet;var sideHasFluid=false;
       let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
       for(var term=begin;term<end;term+=1u){
         let coefficient=termCoefficient(term);if(own*coefficient>=0.0){continue;}
@@ -1363,8 +1476,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
           /max(0.15*rowDistance(row),1e-12));
       }
       if(rho>featureDensity&&!sideHasFluid){
-        let axis=rowAxis(row);
-        let side=select(0u,1u,rowCenter(row)[axis]>cellCenter[axis]);
+        let side=select(0u,1u,rowPosition[axis]>cellCenter[axis]);
         exposedSides|=1u<<(2u*axis+side);
       }
       if(crosses){
@@ -1387,6 +1499,10 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         &&(exposedSides&oppositeSides)==oppositeSides);
     }
     thinFluidCell=thinFluidCell||cellIsThinFluid;
+    // The immediate static receiver shell is structural capacity around the
+    // represented interface, independent of whether activity scoring is on.
+    // Swept prediction below extends that shell directionally; it does not
+    // replace the one-brick transport support that exists at zero velocity.
     if(interfaceCell||cellIsThinFluid){
       var minimumOffset=vec3i(0);var maximumOffset=vec3i(0);
       if(x==0u){minimumOffset.x=-1;}if(x+1u==resolution){maximumOffset.x=1;}
@@ -1400,6 +1516,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
               supportMask|=1u<<bit;
             }
       }}}
+    }
+    if(interfaceCell||cellIsThinFluid){
       let brickDimensions=vec3i((p.dimensions.xyz+vec3u(7u))/8u);
       let sourceBrick=vec3i(vec3u(ta(b+7u),ta(b+8u),ta(b+9u))/8u);
       let sweptBrick=clamp(vec3i(floor((cellCenter
@@ -1408,7 +1526,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       let sweptOffset=clamp(sweptBrick-sourceBrick,vec3i(-1),vec3i(1));
       if(any(sweptOffset!=vec3i(0))){
         let bit=u32(sweptOffset.x+1)+3u*u32(sweptOffset.y+1)
-          +9u*u32(sweptOffset.z+1);supportMask|=1u<<bit;
+          +9u*u32(sweptOffset.z+1);
+        supportMask|=1u<<bit;sweptSupportMask|=1u<<bit;
       }
     }
     if(resolution>1u){
@@ -1434,6 +1553,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     |select(0u,16u,occupiedCell)|select(0u,32u,thinFluidCell)
     |select(0u,64u,cutBoundaryCell);
   activitySupportMask[lane]=supportMask;
+  activitySweptSupportMask[lane]=sweptSupportMask;
   workgroupBarrier();
   var width=32u;loop{
     if(lane<width){
@@ -1449,6 +1569,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         activityVelocityTravel[lane+width]);
       activitySurfaceAxes[lane]|=activitySurfaceAxes[lane+width];
       activitySupportMask[lane]|=activitySupportMask[lane+width];
+      activitySweptSupportMask[lane]|=activitySweptSupportMask[lane+width];
     }
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
@@ -1456,7 +1577,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   let output=activityRecord(brick);let step=atomicLoad(&activity[0]);
   if(!resident){
     atomicStore(&activity[output],0u);atomicStore(&activity[output+1u],0u);
-    atomicStore(&activity[output+32u],0u);return;
+    atomicStore(&activity[output+32u],0u);atomicStore(&activity[output+39u],0u);return;
   }
   let totalVolume=f32(count)*cellVolume(first);
   let meanDensity=f32(activityDensitySum[0])/(totalVolume*ACTIVITY_FIXED);
@@ -1480,10 +1601,38 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   let thinFluid=occupied&&(activitySurfaceAxes[0]&32u)!=0u;
   let shape=select(0.0,1.0,countOneBits(axes)>=2u);
   let velocityActivity=activityVelocityTravel[0];
-  let featureActivity=max(max(activityDeformation[0],activityPredictedMotion[0]),
-    max(max(temporal,max(shape,select(0.0,1.0,thinFluid))),
-      activityDetailError[0]/p.activityDensity.w));
-  let scoreValue=clamp(max(velocityActivity,featureActivity),0.0,1.0);
+  // Restriction error is useful in flooded bulk and genuinely complex/thin
+  // interface geometry. A calm one-axis free surface is different: CM12 is
+  // supposed to keep that interface sharp, so its fine children can retain a
+  // large restriction residual forever even though no dynamics require the
+  // fine rung. Counting that residual made refinement irreversible after a
+  // splash. Shape/thinness already protect non-planar or unresolved surfaces.
+  let scoredDetailError=select(activityDetailError[0],0.0,
+    surface&&!thinFluid&&shape==0.0);
+  // Deep incompressible liquid has no density interface to resolve. Pressure
+  // and velocity gradients there are represented on the coarse composite
+  // grid; scoring their hydrostatic start-up residue would erase the very
+  // bulk coarsening this method exists to obtain. Dynamic change becomes a
+  // resolution signal only at the interface or in a thin feature. Flooded
+  // bulk can still veto a merge through genuine restriction detail.
+  let dynamicActivity=select(0.0,max(activityDeformation[0],temporal),
+    surface||thinFluid);
+  let detailActivity=max(0.0,scoredDetailError/p.activityDensity.w-1.0);
+  let featureActivity=max(max(dynamicActivity,activityPredictedMotion[0]),
+    max(max(0.0,max(shape,select(0.0,1.0,thinFluid))),
+      detailActivity));
+  // Velocity thresholds define both the rung floor and the score scale. Using
+  // raw cells/step here made a tuned 4-cell finest threshold irrelevant: one
+  // cell of calm travel still saturated the emergency score and promoted one
+  // rung every frame. A score of one now means the configured 8^3 threshold.
+  let normalizedVelocityActivity=velocityActivity
+    /max(p.activityThresholds.x,1e-6);
+  // Uniform translation of a fully flooded brick carries no missing spatial
+  // detail. Score travel only where a liquid-air interface/thin feature needs
+  // characteristic lookahead; bulk refinement is driven by deformation,
+  // temporal change and restriction error instead.
+  let scoredVelocityActivity=select(0.0,normalizedVelocityActivity,surface||thinFluid);
+  let scoreValue=clamp(max(scoredVelocityActivity,featureActivity),0.0,1.0);
   let score=u32(round(255.0*scoreValue));var reasons=0u;
   if(surface){reasons|=1u;}if(activityDeformation[0]>0.0){reasons|=2u;}
   if(temporal>0.0){reasons|=4u;}
@@ -1501,11 +1650,12 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     let featureHot=activitySignals&&featureActivity>=p.activityTiming.y;
     hotEpochs=select(0u,min(255u,hotEpochs+1u),featureHot);
     let current=atomicLoad(&activity[output+12u]);
-    let velocityFloor=velocityResolutionFloor(velocityActivity);
+    let velocityFloor=select(1u,velocityResolutionFloor(velocityActivity),
+      surface||thinFluid);
     let activityQuiet=!featureHot&&scoreValue<=p.activityTiming.w
-      &&activityDetailError[0]<=p.activityDensity.w;
-    let quiet=!surface&&!thinFluid&&velocityFloor<current
-      &&(!activitySignals||activityQuiet);
+      &&scoredDetailError<=p.activityDensity.w;
+    let quiet=!thinFluid&&velocityFloor<current
+      &&select(!surface,activityQuiet,activitySignals);
     quietEpochs=select(0u,min(255u,quietEpochs+1u),quiet);
   }
   atomicStore(&activity[output],score);atomicStore(&activity[output+1u],reasons);
@@ -1515,6 +1665,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   atomicStore(&activity[output+6u],bitcast<u32>(moments.y));
   atomicStore(&activity[output+7u],bitcast<u32>(moments.z));
   atomicStore(&activity[output+32u],select(0u,activitySupportMask[0],occupied));
+  atomicStore(&activity[output+39u],select(0u,activitySweptSupportMask[0],occupied));
   atomicStore(&activity[output+33u],bitcast<u32>(velocityActivity));
   atomicStore(&activity[output+34u],0u);
   atomicMax(&activity[1],score);if(surface){atomicAdd(&activity[2],1u);}
@@ -1546,8 +1697,13 @@ fn brickRequestedAsReceiver(brick:u32)->bool{
       let neighbor=brickDirectoryLookup(neighborKey);
       if(neighbor==INVALID||!brickActive(neighbor)){continue;}
       let bit=u32(1-dx)+3u*u32(1-dy)+9u*u32(1-dz);
-      requested=requested
-        ||(atomicLoad(&activity[activityRecord(neighbor)+32u])&(1u<<bit))!=0u;
+      let neighborOutput=activityRecord(neighbor);
+      // Empty immediate support participates in the next transport stencil,
+      // even at zero velocity, and is therefore a physical receiver. The
+      // planner drops this floor after it becomes flooded unless its own
+      // surface/velocity receipts still require it.
+      let receiverMask=atomicLoad(&activity[neighborOutput+32u]);
+      requested=requested||(receiverMask&(1u<<bit))!=0u;
   }}}
   return requested;
 }
@@ -1585,19 +1741,38 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let surface=(reasons&1u)!=0u;let predicted=(reasons&16u)!=0u;
   let thinFluid=(reasons&256u)!=0u;
   let cutBoundary=(reasons&512u)!=0u;
-  let receiver=brickRequestedAsReceiver(brick);
+  let receiverRequested=brickRequestedAsReceiver(brick);
+  // Receiver resolution protects empty destination capacity before transport.
+  // Once the brick contains represented liquid, its own velocity, interface,
+  // thinness and detail receipts are the resolution authority; retaining the
+  // receiver label would propagate an 8^3 floor back through wet neighbours.
   let activitySignals=activitySignalsEnabled();
-  let detail=activitySignals&&(reasons&8u)!=0u;
+  // Raw detail remains in diagnostics, but a quiet planar surface may merge:
+  // its permanent sharpening residual is not an unresolved bulk feature.
+  let detail=activitySignals&&(reasons&8u)!=0u
+    &&(!surface||thinFluid||(score>=u32(round(255.0))));
   let velocityFloor=velocityResolutionFloor(activityF32(output+33u));
-  let required=max(max(velocityFloor,select(1u,8u,
-    surface||thinFluid||receiver||(activitySignals&&predicted))),select(1u,4u,cutBoundary));
+  let receiver=receiverRequested&&((reasons&64u)==0u||surface||velocityFloor>1u);
+  // Surface-distance mode retains the conservative 8^3 interface invariant.
+  // Activity mode lets calm planar interfaces retain or earn coarser rungs;
+  // absolute bulk velocity is deliberately absent because uniform translation
+  // contains no extra spatial detail. A swept receiver is different: it is the
+  // predicted destination of a moving interface, so it retains the established
+  // 8^3 safety floor while 2:1 closure grades its neighbours.
+  let strictSurface=surface&&!activitySignals;
+  let activitySurface=surface&&activitySignals;
+  let interfaceVelocityFloor=select(1u,velocityFloor,surface||thinFluid);
+  let required=max(max(interfaceVelocityFloor,
+    select(1u,8u,strictSurface||thinFluid||receiver)),
+    max(select(1u,4u,activitySurface),select(1u,4u,cutBoundary)));
   let emergencyScore=u32(round(255.0*p.activityTiming.z));
   if(required>current||(activitySignals&&score>=emergencyScore)){
-    // A surface floor is an invariant, not a multi-epoch suggestion. Its
-    // support neighbours are graded by closePlannedResolution below.
-    requested=select(min(max(required,current),2u*current),required,
-      surface||thinFluid||receiver);
-    if(surface){planReasons=1u;}else if(receiver||predicted){planReasons=2u;}
+    // Strict surfaces, thin sheets, and receivers are safety floors and may
+    // jump directly. Ordinary measured activity advances one rung, preventing
+    // a low-speed emergency score from erasing the hierarchy in two frames.
+    let urgent=strictSurface||thinFluid||receiver;
+    requested=select(min(8u,max(required,2u*current)),required,urgent);
+    if(strictSurface){planReasons=1u;}else if(receiver||predicted){planReasons=2u;}
     else if(thinFluid){planReasons=256u;}
     else if(velocityFloor>current){planReasons=64u;}else{planReasons=4u;}
   }else if(atomicLoad(&activity[5])!=0u){
@@ -2026,6 +2201,14 @@ fn prepareCandidateFaceReceipts(@builtin(global_invocation_id)gid:vec3u){
     candidateStatus==2u&&scheduled));
 }
 
+fn boundaryCellLocal(axis:u32,positive:bool,resolution:u32,u:u32,v:u32)->u32{
+  let normal=select(0u,resolution-1u,positive);
+  let x=select(u,normal,axis==0u);
+  let y=select(select(v,u,axis==0u),normal,axis==1u);
+  let z=select(v,normal,axis==2u);
+  return x+resolution*(y+resolution*z);
+}
+
 // Area-average every authoritative accepted normal flux into the candidate's
 // exterior face patches. Each row is claimed once per incident brick, so the
 // six integrated exterior fluxes are exact transfer receipts rather than a
@@ -2046,7 +2229,7 @@ fn transferCandidateFaces(@builtin(local_invocation_id)lid:vec3u,
   let candidate=atomicLoad(&activity[output+13u]);
   let accepted=atomicLoad(&activity[output+12u]);let acceptedRange=templateBrickCellRange(brick,accepted);
   let record=p.topologyOffsets2.z+4u*brick;let first=acceptedRange.x;
-  let count=acceptedRange.y;let key=topology[record+3u];
+  let key=topology[record+3u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let bz=key/xy;
   let remainder=key-bz*xy;let by=remainder/brickDimensions.x;
@@ -2057,7 +2240,19 @@ fn transferCandidateFaces(@builtin(local_invocation_id)lid:vec3u,
   let plane=origin[axis]+select(0.0,8.0,positive);let scale=8.0/f32(candidate);
   var flux=0.0;var area=0.0;
   if(lane<candidate*candidate){
-    for(var local=0u;local<count;local+=1u){let cell=first+local;
+    // Only accepted cells on this exterior patch can contribute. The old
+    // receipt walked all accepted^3 cells for every candidate patch, although
+    // its later plane/patch tests rejected all but accepted^2 cells across the
+    // entire workgroup. Dyadic candidate levels let each lane address its
+    // exact source footprint directly while retaining the same row acceptance,
+    // ownership, geometric patch, and conservation gates below.
+    let patchU=lane%candidate;let patchV=lane/candidate;
+    let sourceSpan=max(1u,accepted/candidate);
+    let sourceU=(patchU*accepted)/candidate;
+    let sourceV=(patchV*accepted)/candidate;
+    for(var dv=0u;dv<sourceSpan;dv+=1u){for(var du=0u;du<sourceSpan;du+=1u){
+      let local=boundaryCellLocal(axis,positive,accepted,sourceU+du,sourceV+dv);
+      let cell=first+local;
       for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
         let row=incidenceRow(incidence);
         if(!rowAccepted(row)||rowAxis(row)!=axis){continue;}
@@ -2075,7 +2270,7 @@ fn transferCandidateFaces(@builtin(local_invocation_id)lid:vec3u,
         flux+=state[destinationFaceVelocity()+row]*rowAreaValue
           *select(-1.0,1.0,positive);
       }
-    }
+    }}
     candidateState[candidateFieldIndex(6u+side,brick,lane)]=select(0.0,flux/area,area>0.0);
   }
   reduceA[lane]=flux;reduceB[lane]=select(0.0,flux/area,area>0.0)*area;

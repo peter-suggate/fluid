@@ -17,6 +17,7 @@ import {
 } from "./sparse-brick-atlas";
 import { CM12_SHARPENING_TRACE_STEPS } from "../../core/cm12-numerics";
 import type { SphericalContainerFineGeometry } from "../../core/spherical-container";
+import type { GPUFluidTracerSource } from "../../core/webgpu-tracer-overlay";
 import {
   FINE_LEVELSET_COMPACT_LOOKUP_FLAG,
   FINE_LEVELSET_METADATA_WORDS,
@@ -64,7 +65,7 @@ export interface SparseCM12ActivityPolicy {
 }
 
 export const SPARSE_CM12_ACTIVITY_POLICY = Object.freeze({
-  activitySignals: false,
+  activitySignals: true,
   finestTravelCells: 1,
   fourTravelCells: 0.5,
   twoTravelCells: 0.25,
@@ -76,7 +77,7 @@ export const SPARSE_CM12_ACTIVITY_POLICY = Object.freeze({
   surfaceDensityMaximum: 0.95,
   detailTolerance: 0.08,
   frontLookaheadSteps: 4,
-  topologyCadenceSteps: 4,
+  topologyCadenceSteps: 1,
   prepareBricksPerFrame: 4,
   promoteEpochs: 2,
   demoteEpochs: 1,
@@ -188,6 +189,7 @@ export type SparseCM12ResidentStageId =
   | "transport-velocity-extension"
   | "face-preparation"
   | "conservative-transport"
+  | "tracer-advection"
   | "gamma-diffusion"
   | "surface-sharpening"
   | "symmetry-authority"
@@ -209,6 +211,7 @@ export const SPARSE_CM12_RESIDENT_STAGES: readonly SparseCM12ResidentStageId[] =
     "transport-velocity-extension",
     "face-preparation",
     "conservative-transport",
+    "tracer-advection",
     "gamma-diffusion",
     "surface-sharpening",
     "symmetry-authority",
@@ -248,7 +251,30 @@ export interface SparseCM12ResidentStageSeams {
 }
 
 const WORKGROUP_SIZE = 64;
-const PCG_ITERATIONS = 128;
+/** Params in the resident WGSL, in bytes. Grow this when a field is added. */
+const SPARSE_CM12_PARAMETER_BYTES = 432;
+export const SPARSE_CM12_PRESSURE_ITERATIONS = 128;
+export const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE = 0;
+const SPARSE_CM12_PRESSURE_ITERATIONS_MINIMUM = 8;
+const SPARSE_CM12_PRESSURE_ITERATIONS_MAXIMUM = 256;
+const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE_MAXIMUM = 0.1;
+
+export interface SparseCM12PressureControl {
+  readonly iterations?: number;
+  readonly relativeTolerance?: number;
+}
+
+export const sparseCM12PressureIterations = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value)
+    ? Math.min(SPARSE_CM12_PRESSURE_ITERATIONS_MAXIMUM,
+      Math.max(SPARSE_CM12_PRESSURE_ITERATIONS_MINIMUM, Math.round(value)))
+    : SPARSE_CM12_PRESSURE_ITERATIONS;
+
+export const sparseCM12PressureRelativeTolerance = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value)
+    ? Math.min(SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE_MAXIMUM,
+      Math.max(0, value))
+    : SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE;
 const ACTIVITY_HEADER_WORDS = 24;
 const ACTIVITY_RECORD_WORDS = 40;
 const CANDIDATE_CELLS_PER_BRICK = 8 ** 3;
@@ -469,7 +495,6 @@ function resampleBrick(brick: SparseAdaptiveMassBrick,
 function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   acceptedGrid: SparseAtlasCompositeGrid):
 PackedResidentTopologyTemplates {
-  const hierarchical = atlas.maximumSpanBricks > 1;
   // Dormant receivers are future topology owners, not inert padding. Swept
   // activation can request any span-one brick in the bounded receiver pool,
   // so every such brick must have the same 1/2/4/8 candidate library as the
@@ -477,21 +502,38 @@ PackedResidentTopologyTemplates {
   // front without a destination page and made low-rung variants violate 2:1 at
   // the active/dormant boundary (first exposed by the 64-cubed mini dam).
   const mutableBrickKeys = new Set(atlas.bricks.filter((brick) =>
-    !hierarchical && sparseBrickSpan(brick) === 1).map((brick) => brick.key));
-  const localBrickKeys = new Set(mutableBrickKeys);
-  for (const key of mutableBrickKeys) {
-    const brick = atlas.directory.get(key)!;
-    for (let axis = 0; axis < 3; axis += 1) for (const direction of [-1, 1]) {
-      const coordinate = [...brick.coordinate] as [number, number, number];
-      coordinate[axis] += direction;
-      const neighbor = sparseBrickContainingCoordinate(atlas, coordinate);
-      if (neighbor) localBrickKeys.add(neighbor.key);
+    sparseBrickSpan(brick) === 1).map((brick) => brick.key));
+  // A doubled-detail long dam has more than a thousand bounded receiver
+  // bricks. Building one full object-graph variant at 8^3 crosses V8's 4 GB
+  // heap before the compact typed-array library can be packed. Partition the
+  // mutable set and include a one-face-neighbour halo around each partition.
+  // Rows touching a core brick then see exactly the same physical neighbours
+  // as a whole-atlas build; halo-only boundary rows are discarded.
+  const TEMPLATE_BUILD_CHUNK_BRICKS = 128;
+  const mutableBricks = atlas.bricks.filter((brick) => mutableBrickKeys.has(brick.key));
+  const mutableChunks = Array.from(
+    { length: Math.ceil(mutableBricks.length / TEMPLATE_BUILD_CHUNK_BRICKS) },
+    (_, index) => mutableBricks.slice(
+      index * TEMPLATE_BUILD_CHUNK_BRICKS,
+      (index + 1) * TEMPLATE_BUILD_CHUNK_BRICKS,
+    ),
+  );
+  const localBricksFor = (core: readonly SparseAdaptiveMassBrick[]) => {
+    const keys = new Set(core.map((brick) => brick.key));
+    for (const brick of core) {
+      for (let axis = 0; axis < 3; axis += 1) for (const direction of [-1, 1]) {
+        const coordinate = [...brick.coordinate] as [number, number, number];
+        coordinate[axis] += direction;
+        const neighbor = sparseBrickContainingCoordinate(atlas, coordinate);
+        if (neighbor) keys.add(neighbor.key);
+      }
     }
-  }
-  const localBricks = atlas.bricks.filter((brick) => localBrickKeys.has(brick.key));
+    return atlas.bricks.filter((brick) => keys.has(brick.key));
+  };
   const variantAtlasAtLevels = (
     choose: (brick: SparseAdaptiveMassBrick) => SparseBrickResolution,
-  ) => createSparseAdaptiveMassAtlas(atlas.dimensions, atlas.bricks.map((brick) =>
+    sourceBricks: readonly SparseAdaptiveMassBrick[],
+  ) => createSparseAdaptiveMassAtlas(atlas.dimensions, sourceBricks.map((brick) =>
     resampleBrick(brick, choose(brick))), atlas.generation, atlas.boundary);
   // One reusable full-grid scratch bounds host construction at accepted plus
   // one transient variant. Only cells/rows touching the mutable frontier are
@@ -525,6 +567,10 @@ PackedResidentTopologyTemplates {
       const requirements = new Map<number, number>();
       const terms = source.terms.map((term) => {
         const sourceCell = grid.cells[term.cellId]!;
+        if (!sourceCell) {
+          throw new Error(`Sparse CM12 template row ${source.id} references cell ${
+            term.cellId} outside ${grid.cells.length}`);
+        }
         requirements.set(sourceCell.brickKey, sourceCell.brickResolution);
         const id = cellId.get(templateCellKey(sourceCell.brickKey,
           sourceCell.brickResolution, sourceCell.localIndex));
@@ -541,46 +587,57 @@ PackedResidentTopologyTemplates {
     }
   };
   appendRows(acceptedGrid, () => true);
-  if (!hierarchical) for (let levelIndex = 0;
+  for (let levelIndex = 0;
     levelIndex < TEMPLATE_LEVELS.length; levelIndex += 1) {
     const level = TEMPLATE_LEVELS[levelIndex]!;
-    const grid = buildSparseAtlasCompositeGrid(
-      variantAtlasAtLevels(() => level), 0.5, variantWorkspace,
-    );
-    for (const brick of localBricks) {
-      const range = 2 * (TEMPLATE_LEVELS.length * brickIndex.get(brick.key)! + levelIndex);
-      const firstSource = grid.cellBaseByBrick.get(brick.key)!;
-      const count = level ** 3;
-      let first = INVALID;
-      for (let offset = 0; offset < count; offset += 1) {
-        const source = grid.cells[firstSource + offset]!;
-        const key = templateCellKey(brick.key, level, source.localIndex);
-        let id = cellId.get(key);
-        if (id === undefined) {
-          id = cells.length; cells.push(snapshotTemplateCell(source, id)); cellId.set(key, id);
+    for (const core of mutableChunks) {
+      const coreKeys = new Set(core.map((brick) => brick.key));
+      const localBricks = localBricksFor(core);
+      const grid = buildSparseAtlasCompositeGrid(
+        variantAtlasAtLevels((brick) => mutableBrickKeys.has(brick.key)
+          ? level : brick.resolution, localBricks), 0.5, variantWorkspace,
+      );
+      for (const brick of localBricks.filter((candidate) =>
+        mutableBrickKeys.has(candidate.key))) {
+        const range = 2 * (TEMPLATE_LEVELS.length * brickIndex.get(brick.key)! + levelIndex);
+        const firstSource = grid.cellBaseByBrick.get(brick.key)!;
+        const count = level ** 3;
+        let first = INVALID;
+        for (let offset = 0; offset < count; offset += 1) {
+          const source = grid.cells[firstSource + offset]!;
+          const key = templateCellKey(brick.key, level, source.localIndex);
+          let id = cellId.get(key);
+          if (id === undefined) {
+            id = cells.length; cells.push(snapshotTemplateCell(source, id)); cellId.set(key, id);
+          }
+          first = Math.min(first, id);
         }
-        first = Math.min(first, id);
+        cellRanges[range] = first;
+        cellRanges[range + 1] = count;
       }
-      cellRanges[range] = first;
-      cellRanges[range + 1] = count;
+      appendRows(grid, (row) => row.terms.some((term) =>
+        coreKeys.has(grid.cells[term.cellId]!.brickKey)));
     }
-    appendRows(grid, (row) => row.terms.some((term) =>
-      mutableBrickKeys.has(grid.cells[term.cellId]!.brickKey)));
   }
   const rungPairs = [[1, 2], [2, 4], [4, 8]] as const;
-  if (!hierarchical) for (let axis = 0; axis < 3; axis += 1) for (const [low, high] of rungPairs) {
+  for (let axis = 0; axis < 3; axis += 1) for (const [low, high] of rungPairs) {
     // Both parity phases are required: a physical face needs templates for
     // low→high and high→low accepted generations.
     for (let phase = 0; phase < 2; phase += 1) {
-      const variant = variantAtlasAtLevels((brick) =>
-        ((brick.coordinate[axis]! & 1) ^ phase) === 0 ? low : high);
-      const variantGrid = buildSparseAtlasCompositeGrid(
-        variant, 0.5, variantWorkspace,
-      );
-      appendRows(variantGrid, (row) =>
-        row.axis === axis && row.kind === "mixed-seam"
-          && row.terms.some((term) => mutableBrickKeys.has(
-            variantGrid.cells[term.cellId]!.brickKey)));
+      for (const core of mutableChunks) {
+        const coreKeys = new Set(core.map((brick) => brick.key));
+        const localBricks = localBricksFor(core);
+        const variant = variantAtlasAtLevels((brick) => mutableBrickKeys.has(brick.key)
+          ? ((brick.coordinate[axis]! & 1) ^ phase) === 0 ? low : high
+          : brick.resolution, localBricks);
+        const variantGrid = buildSparseAtlasCompositeGrid(
+          variant, 0.5, variantWorkspace,
+        );
+        appendRows(variantGrid, (row) =>
+          row.axis === axis && row.kind === "mixed-seam"
+            && row.terms.some((term) => coreKeys.has(
+              variantGrid.cells[term.cellId]!.brickKey)));
+      }
     }
   }
 
@@ -673,6 +730,8 @@ interface ResidentStateLayout {
   readonly presentationBrickWet: number;
   readonly sharpeningDelta: number; readonly symmetryGamma: number;
   readonly solidCellOpen: number; readonly solidRowData: number;
+  /** Four floats per tracer: fine-lattice position, then a live flag. */
+  readonly tracers: number;
 }
 
 export interface SparseCM12FinePresentationPlan {
@@ -795,6 +854,8 @@ export interface SparseCM12GPUActivityRecord {
   readonly faceTransferStatus: 0 | 1 | 2;
   /** Directional 3x3x3 free-surface/swept support mask; bit 13 is unused. */
   readonly supportMask: number;
+  /** Characteristic-swept subset whose destination must be physically fine. */
+  readonly sweptSupportMask: number;
   /** Maximum accepted-fluid displacement during one step, in finest cells. */
   readonly maximumVelocityTravelFineCells: number;
   /** Sub-residency-threshold mass discarded by the latest retirement transaction. */
@@ -823,11 +884,91 @@ export interface SparseCM12DiagnosticFields {
 
 const align4 = (value: number): number => (value + 3) & ~3;
 
+/**
+ * Markers the tracer view seeds at most: 262,144 x 16 B = 4 MiB of state.
+ *
+ * The budget is a count, not a fraction of the grid, because that is the whole
+ * economy of the view — cost is decoupled from resolution, so refining the
+ * scene does not refine the marker cloud and the picture stays comparable
+ * across lanes.
+ */
+export const SPARSE_CM12_TRACER_BUDGET = 1_048_576;
+
+/**
+ * Markers per finest cell at the densest seeding.
+ *
+ * Not one-per-cell: two markers born inside the same cell do separate, because
+ * each traces the characteristic from its own position and the two cross into
+ * neighbouring cells at different times. Four is where the cloud reads as a
+ * continuous body instead of a visible lattice, and it is still only ~1.6
+ * markers per cell along each axis, so no marker is tracking detail the grid
+ * does not carry. The drawn dot is sized from the spacing, so raising this
+ * shrinks the dots by the same factor and the cloud does not turn into a wall.
+ */
+export const SPARSE_CM12_TRACER_DENSITY = 4;
+
+export interface SparseCM12TracerLattice {
+  readonly dimensions: readonly [number, number, number];
+  readonly count: number;
+  /** Lattice origin in fine cells; the lattice is centred in the domain. */
+  readonly originFine: readonly [number, number, number];
+  /** Isotropic seed spacing in fine cells. */
+  readonly spacingFine: number;
+}
+
+/**
+ * The seed lattice, as a pure function of the domain.
+ *
+ * Purity is the point: the compute pass and the vertex stage both reconstruct a
+ * marker's seed position from its index through this same arithmetic, so the
+ * colour a marker is drawn with never has to be stored, uploaded, or advected.
+ * That is also why the spacing is isotropic — an axis-dependent spacing would
+ * make the initial cloud read as already deformed.
+ *
+ * Markers seeded into air are retired rather than packed out, so the live
+ * fraction is the scene's fill fraction. Compaction would have to be redone
+ * every topology epoch to buy back memory that is already only single-digit
+ * MiB, which is not a trade worth making.
+ */
+export function sparseCM12TracerLattice(
+  dimensions: readonly [number, number, number],
+  budget: number = SPARSE_CM12_TRACER_BUDGET,
+): SparseCM12TracerLattice {
+  const domain = dimensions.map((value) => Math.max(1, Math.floor(value)));
+  const empty: SparseCM12TracerLattice = {
+    dimensions: [0, 0, 0], count: 0, originFine: [0, 0, 0], spacingFine: 1,
+  };
+  if (!(budget >= 1)) return empty;
+  const extent = (spacing: number) => domain.map(
+    (value) => Math.max(1, Math.floor(value / spacing))) as [number, number, number];
+  const finest = Math.cbrt(1 / SPARSE_CM12_TRACER_DENSITY);
+  let spacing = Math.max(finest,
+    Math.cbrt(domain[0]! * domain[1]! * domain[2]! / budget));
+  let lattice = extent(spacing);
+  // The cube-root estimate is exact only for a domain that divides evenly, so
+  // walk the spacing up until the floor()ed lattice actually fits the budget.
+  for (let attempt = 0; attempt < 64
+    && lattice[0] * lattice[1] * lattice[2] > budget; attempt += 1) {
+    spacing *= 1.05;
+    lattice = extent(spacing);
+  }
+  const count = lattice[0] * lattice[1] * lattice[2];
+  if (count > budget) return empty;
+  return {
+    dimensions: lattice,
+    count,
+    originFine: domain.map((value, axis) =>
+      0.5 * (value - lattice[axis]! * spacing)) as [number, number, number],
+    spacingFine: spacing,
+  };
+}
+
 function residentStateLayout(
   cellCount: number,
   rowCount: number,
   brickCount: number,
   rigidCoupling: boolean,
+  tracerCount: number,
 ): ResidentStateLayout {
   let at = 0;
   const cells = () => { const result = at; at += align4(cellCount); return result; };
@@ -844,6 +985,11 @@ function residentStateLayout(
     sharpeningDelta: cells(), symmetryGamma: cells(),
     solidCellOpen: rigidCoupling ? cells() : 0,
     solidRowData: rigidCoupling ? rowVectors() : 0,
+    // Tracers are presentation-only and are sized by the domain rather than by
+    // the topology, so they sit past every physics field: a re-meshed frame
+    // changes cell counts, and a marker must not silently land on a pressure
+    // row because the arena in front of it grew.
+    tracers: (() => { const result = at; at += align4(4 * tracerCount); return result; })(),
     floatCount: at,
   };
 }
@@ -1026,11 +1172,23 @@ export class WebGPUSparseCM12Resident {
   private readonly diagnosticsReadback: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
   private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
-  private readonly parameterWords = new ArrayBuffer(400);
+  private readonly parameterWords = new ArrayBuffer(SPARSE_CM12_PARAMETER_BYTES);
   private readonly parameterU32 = new Uint32Array(this.parameterWords);
   private readonly parameterF32 = new Float32Array(this.parameterWords);
   private parity = 0;
   private destroyed = false;
+  /**
+   * Derived here rather than threaded in from `create`, so the region
+   * `residentStateLayout` reserved and the region the kernels address are the
+   * same arithmetic over the same domain by construction.
+   */
+  private readonly tracerLattice: SparseCM12TracerLattice;
+  /** Built once: a fresh object per read would defeat the consumer's identity
+   * check and rebuild a bind group every frame. */
+  readonly tracerSource: GPUFluidTracerSource;
+  private tracersEnabled = false;
+  /** Set on every off-to-on transition, so enabling re-reads the live liquid. */
+  private tracerSeedPending = false;
 
   private constructor(
     private readonly device: GPUDevice,
@@ -1057,6 +1215,16 @@ export class WebGPUSparseCM12Resident {
   ) {
     [this.parameters, this.topology, this.state, this.partials, this.scalars,
       this.conditioning, this.activity, this.candidateState, this.topologyArena] = buffers;
+    this.tracerLattice = sparseCM12TracerLattice(dimensions);
+    this.tracerSource = {
+      buffer: this.state,
+      floatOffset: this.layout.tracers,
+      count: this.tracerLattice.count,
+      latticeDimensions: this.tracerLattice.dimensions,
+      originFine: this.tracerLattice.originFine,
+      spacingFine: this.tracerLattice.spacingFine,
+      domainFine: dimensions,
+    };
     this.acceptedIndirectArguments = acceptedIndirectArguments;
     [this.fineParams, this.fineMetadata, this.fineWorklist, this.fineSamples,
       this.fineWorkA, this.fineWorkB, this.fineRollback] = fineBuffers;
@@ -1104,8 +1272,12 @@ export class WebGPUSparseCM12Resident {
     )),
     rigid?: SparseCM12RigidResources,
   ): Promise<WebGPUSparseCM12Resident> {
-    const hostTemplateVariants = atlas.maximumSpanBricks === 1
-      && grid.cells.length <= 250_000 && grid.gradientRows.length <= 750_000;
+    // Macro-bricks are immutable, but their presence must not disable
+    // transitions for every ordinary span-one surface/receiver brick in the
+    // same hydrostatic scene. Prepack variants for those ordinary bricks and
+    // retain each macro only at its accepted resolution.
+    const hostTemplateVariants = grid.cells.length <= 250_000
+      && grid.gradientRows.length <= 750_000;
     // Host-template mode packs physical variants for every span-one receiver,
     // including dormant apron bricks. Give that same complete set candidate
     // state slots: activation changes residency, not whether a brick is
@@ -1121,6 +1293,7 @@ export class WebGPUSparseCM12Resident {
     if (hostTemplateVariants) {
       const cellOffset = templates.words[6]!, rangeOffset = templates.words[11]!;
       for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
+        if (sparseBrickSpan(atlas.bricks[brick]!) !== 1) continue;
         for (let level = 0; level < TEMPLATE_LEVELS.length; level += 1) {
           const resolution = TEMPLATE_LEVELS[level]!;
           const range = rangeOffset + 2 * (TEMPLATE_LEVELS.length * brick + level);
@@ -1150,8 +1323,10 @@ export class WebGPUSparseCM12Resident {
       finestCellSize_m;
     (fine.plan as { finestCellWidth: number; fineCellWidth: number }).fineCellWidth =
       finestCellSize_m;
+    const tracerLattice = sparseCM12TracerLattice(atlas.dimensions);
     const layout = residentStateLayout(
       templates.cellCount, templates.rowCount, packed.brickCount, Boolean(rigid),
+      tracerLattice.count,
     );
     const initialState = new Float32Array(layout.floatCount);
     for (let cell = 0; cell < templates.cellCount; cell += 1) {
@@ -1175,7 +1350,8 @@ export class WebGPUSparseCM12Resident {
     const cellWorkgroups = Math.ceil(templates.cellCount / WORKGROUP_SIZE);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const parameters = device.createBuffer({ label: "Sparse CM12 resident parameters",
-      size: 400, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: SPARSE_CM12_PARAMETER_BYTES,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const topology = uploadBuffer(device, "Sparse CM12 resident topology", packed.words, storage);
     const state = uploadBuffer(device, "Sparse CM12 resident state", initialState, storage);
     const partials = device.createBuffer({ label: "Sparse CM12 resident reductions",
@@ -1332,7 +1508,8 @@ export class WebGPUSparseCM12Resident {
     const names = ["injectLiquid", "initializeTransportVelocity",
       "extrapolateTransportVelocityToSource", "extrapolateTransportVelocityToDestination",
       "prepareTransportFaces", "traceGammaAndBeta", "scatterDensityDeficit",
-      "gatherConservativeDensity", "diffuseGammaForwardX", "diffuseGammaForwardY",
+      "gatherConservativeDensity", "seedTracers", "advanceTracers",
+      "diffuseGammaForwardX", "diffuseGammaForwardY",
       "diffuseGammaForwardZ", "diffuseGammaReverseZ", "diffuseGammaReverseY",
       "diffuseGammaReverseX", "averageGammaDiffusion", "scatterSharpeningMass",
       "finalizeSharpening", "clearSolidExcess", "scatterSolidExcess",
@@ -1360,6 +1537,20 @@ export class WebGPUSparseCM12Resident {
     const entries = await Promise.all(names.map(async (name) => [name,
       await device.createComputePipelineAsync({ label: `Sparse CM12 ${name}`,
         layout: pipelineLayout, compute: { module: shaderModule, entryPoint: name } })] as const));
+    const earlyStopNames = ["applyDirection", "reduceCurvature", "updateResidual",
+      "reduceResidual", "updateDirection"] as const;
+    const earlyStopEntries = await Promise.all(earlyStopNames.map(async (name) => [
+      `${name}UntilConverged`,
+      await device.createComputePipelineAsync({
+        label: `Sparse CM12 ${name} with pressure early stopping`,
+        layout: pipelineLayout,
+        compute: {
+          module: shaderModule,
+          entryPoint: name,
+          constants: { PRESSURE_EARLY_STOP: 1 },
+        },
+      }),
+    ] as const));
     const rigidCoupling = rigid ? await WebGPUSparseCM12RigidCoupling.create(device, {
       parameters,
       state,
@@ -1377,13 +1568,14 @@ export class WebGPUSparseCM12Resident {
       fine.plan,
       diagnosticsReadback,
       bindGroup,
-      Object.fromEntries(entries), templates.cellCount, templates.rowCount,
+      Object.fromEntries([...entries, ...earlyStopEntries]),
+      templates.cellCount, templates.rowCount,
       templates.cellCount, templates.rowCount,
       templates.words.byteLength,
       templates.words,
       horizontalD4Authority, atlas.boundary, rigidCoupling);
     result.writeParameters(packed, 0.004, 1, 1, [0, 0, 0], undefined, undefined,
-      0, rigid?.worldDimensions_m);
+      undefined, 0, rigid?.worldDimensions_m);
     return result;
   }
 
@@ -1395,6 +1587,7 @@ export class WebGPUSparseCM12Resident {
     accelerationFinePerSecond2: readonly [number, number, number],
     sharpening?: SharpeningTrace,
     activityPolicy?: SparseCM12ActivityPolicy,
+    pressureControl?: SparseCM12PressureControl,
     seams?: SparseCM12ResidentStageSeams,
     bodyCount = 0,
     worldDimensions_m?: readonly [number, number, number],
@@ -1402,9 +1595,23 @@ export class WebGPUSparseCM12Resident {
     this.assertLive();
     const packed = this.lastPacked!;
     this.writeParameters(packed, dt_s, finestCellSize_m, pressureScale,
-      accelerationFinePerSecond2, sharpening, activityPolicy, bodyCount,
+      accelerationFinePerSecond2, sharpening, activityPolicy, pressureControl, bodyCount,
       worldDimensions_m);
+    const pressureIterations = sparseCM12PressureIterations(pressureControl?.iterations);
+    const pressureEarlyStop = sparseCM12PressureRelativeTolerance(
+      pressureControl?.relativeTolerance) > 0;
+    const pressureKernel = (name: "applyDirection" | "reduceCurvature"
+      | "updateResidual" | "reduceResidual" | "updateDirection") =>
+      pressureEarlyStop ? `${name}UntilConverged` : name;
     encoder.clearBuffer(this.conditioning);
+    // classifyRows only visits accepted rows. Clear the cached ghost-fluid
+    // theta field once so the pressure iteration can use theta==0 as its row
+    // acceptance mask instead of revalidating topology requirements in every
+    // cell incidence on every PCG iteration.
+    encoder.clearBuffer(this.state, 4 * this.layout.theta,
+      4 * this.templateRowCount);
+    encoder.clearBuffer(this.state, 4 * this.layout.liquid,
+      4 * this.templateCellCount);
     // The pass opens on first dispatch rather than up front. A stage that
     // encodes nothing this advance — the D4 authority on an asymmetric scene —
     // then leaves no empty pass behind, which matters because Metal writes no
@@ -1430,6 +1637,10 @@ export class WebGPUSparseCM12Resident {
       const argumentWord = kind === "cell" ? 8 : 11;
       activePass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments,
         4 * (argumentWord - 8));
+    };
+    const closePass = () => {
+      pass?.end();
+      pass = undefined;
     };
     // Without seams this is the single frame pass it has always been. With
     // them, each stage becomes its own pass so a boundary chain can land a
@@ -1464,6 +1675,23 @@ export class WebGPUSparseCM12Resident {
       dispatchAccepted("traceGammaAndBeta", "cell");
       dispatchAccepted("scatterDensityDeficit", "cell");
       dispatchAccepted("gatherConservativeDensity", "cell");
+    });
+    // After the conservative transport, which leaves both fields the markers
+    // need untouched: `gatherConservativeDensity` writes the *destination*
+    // density, and nothing between the extrapolation sweeps and the projection
+    // writes the collocated transport velocity. So a marker here integrates the
+    // same characteristic, through the same velocity, as the mass did.
+    //
+    // Encoding nothing when the view is off is the point: a stage that dispatches
+    // no work closes at zero and the whole feature costs a branch on the host.
+    stage("tracer-advection", () => {
+      if (!this.tracersEnabled || this.tracerLattice.count === 0) return;
+      const groups = Math.ceil(this.tracerLattice.count / WORKGROUP_SIZE);
+      if (this.tracerSeedPending) {
+        dispatch("seedTracers", groups);
+        this.tracerSeedPending = false;
+      }
+      dispatch("advanceTracers", groups);
     });
     stage("gamma-diffusion", () => {
       dispatchAccepted("diffuseGammaForwardX", "cell");
@@ -1506,17 +1734,19 @@ export class WebGPUSparseCM12Resident {
         // centres lie in solid enforce p >= 0; unconstrained cells retain the
         // ordinary free-surface equation. Two kernels provide the ping-pong
         // image without allocating another persistent pressure field.
-        for (let iteration = 0; iteration < PCG_ITERATIONS / 2; iteration += 1) {
+        for (let iteration = 0;
+          iteration < Math.ceil(pressureIterations / 2); iteration += 1) {
           dispatchAccepted("projectedJacobiToApplied", "cell");
           dispatchAccepted("projectedJacobiToPressure", "cell");
         }
       } else {
-        for (let iteration = 0; iteration < PCG_ITERATIONS; iteration += 1) {
-          dispatchAccepted("applyDirection", "cell");
-          dispatch("reduceCurvature", 1);
-          dispatchAccepted("updateResidual", "cell");
-          dispatch("reduceResidual", 1);
-          dispatchAccepted("updateDirection", "cell");
+        for (let iteration = 0;
+          iteration < pressureIterations; iteration += 1) {
+          dispatchAccepted(pressureKernel("applyDirection"), "cell");
+          dispatch(pressureKernel("reduceCurvature"), 1);
+          dispatchAccepted(pressureKernel("updateResidual"), "cell");
+          dispatch(pressureKernel("reduceResidual"), 1);
+          dispatchAccepted(pressureKernel("updateDirection"), "cell");
         }
       }
     });
@@ -1572,7 +1802,7 @@ export class WebGPUSparseCM12Resident {
       dispatch("publishSparseLevelSet",
         this.globalFineLevelSetSource.plan.maximumResidentBricks);
     });
-    pass?.end();
+    closePass();
     // The commit above authors next frame's accepted workgroup triplets. Keep
     // the writable arena out of indirect-dispatch synchronization scopes by
     // snapshotting those six words with a device-side copy between passes.
@@ -1580,6 +1810,30 @@ export class WebGPUSparseCM12Resident {
       this.topologyWorklistBaseBytes + 4 * 8,
       this.acceptedIndirectArguments, 0, 6 * 4);
     this.parity ^= 1;
+  }
+
+  /**
+   * Turn the marker view on or off.
+   *
+   * Off is free rather than cheap: the advance encodes no tracer dispatch at
+   * all, so the feature costs one host branch when nobody is looking at it.
+   *
+   * Every off-to-on transition re-seeds. Advancing markers nobody can see would
+   * be paying for the view while it is hidden, and showing markers that stood
+   * still while it was hidden would be worse than either — so enabling instead
+   * colours the liquid as it is at that moment. Re-seeding a running scene is a
+   * feature, not a compromise: "where does this go from here" is the question
+   * most of the time, and only a t=0 seed can answer "where did this come from".
+   */
+  setTracersEnabled(enabled: boolean): void {
+    if (enabled === this.tracersEnabled) return;
+    this.tracersEnabled = enabled;
+    if (enabled) this.tracerSeedPending = true;
+  }
+
+  /** Re-read the mixing from this instant, without toggling the view. */
+  reseedTracers(): void {
+    if (this.tracersEnabled) this.tracerSeedPending = true;
   }
 
   /** Publish generation zero without executing a physics step or mapping state. */
@@ -1648,6 +1902,7 @@ export class WebGPUSparseCM12Resident {
     acceleration: readonly [number, number, number],
     sharpening?: SharpeningTrace,
     activityPolicy?: SparseCM12ActivityPolicy,
+    pressureControl?: SparseCM12PressureControl,
     bodyCount = 0,
     worldDimensions_m?: readonly [number, number, number],
   ): void {
@@ -1669,11 +1924,13 @@ export class WebGPUSparseCM12Resident {
     // gamma scratch must never alias densityA at offset zero: doing so corrupts
     // gamma after the first symmetric frame and makes transport create mass on
     // the next frame.
-    u.set([l.sharpeningDelta, l.symmetryGamma, 0, 0], 36);
+    u.set([l.sharpeningDelta, l.symmetryGamma, l.tracers, 0], 36);
     f.set([dt_s, finestCellSize_m, pressureScale, this.parity], 40);
     f.set([...acceleration, 0], 44);
     u.set([Math.ceil(this.cellCount / WORKGROUP_SIZE),
-      Math.ceil(this.rowCount / WORKGROUP_SIZE), PCG_ITERATIONS, packed.brickCount], 48);
+      Math.ceil(this.rowCount / WORKGROUP_SIZE),
+      sparseCM12PressureIterations(pressureControl?.iterations),
+      packed.brickCount], 48);
     f.set([0, 0, 0, 0, 1, 1, 1, 0], 52);
     const policy = sparseCM12ActivityPolicy(activityPolicy ?? {});
     // CM12 Algorithm 2's trace bounds plus the sparse residency density floor.
@@ -1695,8 +1952,11 @@ export class WebGPUSparseCM12Resident {
     f.set(this.boundary ? [...this.boundary.centerFine, 0] : [0, 0, 0, 0], 80);
     f.set(this.boundary ? [...this.boundary.radiiFine, 0] : [1, 1, 1, 0], 84);
     u.set([policy.prepareBricksPerFrame, 0, 0, 0], 88);
+    f[89] = sparseCM12PressureRelativeTolerance(pressureControl?.relativeTolerance);
     u.set([l.solidCellOpen, l.solidRowData, 0, 0], 92);
     f.set([...(worldDimensions_m ?? [0, 0, 0]), bodyCount], 96);
+    u.set([...this.tracerLattice.dimensions, this.tracerLattice.count], 100);
+    f.set([...this.tracerLattice.originFine, this.tracerLattice.spacingFine], 104);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
   }
 
@@ -1776,6 +2036,36 @@ export class WebGPUSparseCM12Resident {
 
   /** QA-only dense readback used by Dawn physics gates. Never called by frame
    * scheduling or visualization; callers explicitly pay for materialization. */
+  /**
+   * The marker range, as `[x, y, z, live]` per marker in fine-lattice units.
+   *
+   * A QA receipt, never a frame input: the overlay reads the same range on the
+   * device without a copy, and a readback here would be a stall if the draw
+   * needed one.
+   */
+  async readTracers(): Promise<Float32Array> {
+    this.assertLive();
+    const count = this.tracerLattice.count;
+    if (count === 0) return new Float32Array(0);
+    const bytes = 16 * count;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 marker readback",
+      size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 marker copy",
+      });
+      encoder.copyBufferToBuffer(this.state, 4 * this.layout.tracers, readback, 0, bytes);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      return new Float32Array(readback.getMappedRange()).slice();
+    } finally {
+      readback.destroy();
+    }
+  }
+
   async readDiagnosticFields(): Promise<SparseCM12DiagnosticFields> {
     this.assertLive();
     const activitySnapshot = await this.readActivitySnapshot();
@@ -1926,6 +2216,7 @@ export class WebGPUSparseCM12Resident {
           faceTransferStatus: (words[at + 31] === 1 ? 1 : words[at + 31] === 2 ? 2 : 0) as
             SparseCM12GPUActivityRecord["faceTransferStatus"],
           supportMask: words[at + 32]!,
+          sweptSupportMask: words[at + 39]!,
           maximumVelocityTravelFineCells: new DataView(words.buffer).getFloat32(
             4 * (at + 33), true,
           ),

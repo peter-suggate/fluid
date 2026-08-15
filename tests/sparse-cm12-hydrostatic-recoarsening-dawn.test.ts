@@ -1,0 +1,167 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { pathToFileURL } from "node:url";
+
+import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
+import { cloneScene, defaultScene } from "../lib/core/model";
+import { sceneDocument } from "../lib/core/scene-definition";
+import { getSceneDefinition } from "../lib/core/scenes";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import {
+  acquireWebGPUExclusiveLock,
+  releaseWebGPUExclusiveLock,
+} from "../lib/harness/webgpu-smoke-isolation";
+import { WebGPUAdaptiveMassSolver } from
+  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import {
+  SPARSE_CM12_ACTIVITY_POLICY,
+  SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
+  SPARSE_CM12_SHARPENING_TRACE_STEPS,
+} from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import type { AdaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
+
+const dawnModule = process.env.WEBGPU_NODE_MODULE;
+const dawnTest = dawnModule ? test : test.skip;
+
+const options = (overrides: Partial<AdaptiveMassSolverOptions> = {}):
+AdaptiveMassSolverOptions => ({
+  resolutionMode: "adaptive",
+  fineTileResolution: 8,
+  coarseTileResolution: 4,
+  surfaceFineRings: 1,
+  receiverSupportRings: 9,
+  receiverFloor: "auto",
+  timeStep: "paper",
+  activityPolicy: {
+    ...SPARSE_CM12_ACTIVITY_POLICY,
+    activitySignals: true,
+    finestTravelCells: 4,
+    fourTravelCells: 2,
+    twoTravelCells: 1,
+    prepareBricksPerFrame: 256,
+  },
+  pressureIterations: 128,
+  pressureRelativeTolerance: 0,
+  sharpeningDistance: SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
+  sharpeningTraceSteps: SPARSE_CM12_SHARPENING_TRACE_STEPS,
+  ...overrides,
+});
+
+dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
+  { timeout: 240_000 }, async () => {
+    await acquireWebGPUExclusiveLock("dawn-test",
+      "tests/sparse-cm12-hydrostatic-recoarsening-dawn.test.ts");
+    let device: GPUDevice | undefined;
+    try {
+      const dawn = await import(pathToFileURL(dawnModule!).href) as {
+        create(options: string[]): GPU;
+        globals: Record<string, unknown>;
+      };
+      Object.assign(globalThis, dawn.globals);
+      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+      assert.ok(adapter);
+      device = await adapter.requestDevice({
+        requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+      });
+      const uncaptured: string[] = [];
+      device.addEventListener("uncapturederror", (event) => {
+        event.preventDefault();
+        uncaptured.push(event.error.message);
+      });
+      device.pushErrorScope("validation");
+
+      // A deep tank contains immutable macro-bricks. They must not disable the
+      // ordinary 1/2/4/8 transaction on its span-one surface/receiver bricks.
+      const tank = sceneDocument(getSceneDefinition("water-box-tank-fill"));
+      tank.rigidBodies = [];
+      tank.container.height_m = 2.4;
+      tank.container.fillFraction = 0.7;
+      tank.voxelDomain.finestCellSize_m = 0.05;
+      const tankSolver = await WebGPUAdaptiveMassSolver.createAsync(
+        device, tank, "balanced", undefined, options(), () => {},
+      );
+      try {
+        const before = await tankSolver.readGPUActivityPolicy();
+        const initiallyFine = new Set(before.bricks.filter((brick) =>
+          brick.active && brick.acceptedResolution === 8).map((brick) => brick.key));
+        assert.ok(initiallyFine.size > 0);
+
+        tankSolver.injectLiquidBall({
+          centre_m: { x: 0, y: 2, z: 0 },
+          radius_m: 0.16,
+        });
+        for (let step = 1; step <= 4; step += 1) {
+          assert.equal(tankSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        }
+        await device.queue.onSubmittedWorkDone();
+
+        const after = await tankSolver.readGPUActivityPolicy();
+        assert.ok(after.bricks.some((brick) => initiallyFine.has(brick.key)
+          && brick.acceptedResolution < 8),
+        "an existing fine hydrostatic brick must commit a lower accepted level");
+        const stats = await tankSolver.readStats();
+        assert.ok((stats.adaptiveTopologyShadowGeneration ?? 0) > 1,
+          "the lower request must publish a physical topology generation");
+      } finally {
+        tankSolver.destroy();
+      }
+
+      // A completely calm represented region isolates the ladder semantics:
+      // every accepted transition is an in-place conservative merge, one rung
+      // per quiet epoch, rather than a rebuild or a newly created region.
+      const calm = cloneScene(defaultScene);
+      calm.rigidBodies = [];
+      calm.container = {
+        ...calm.container,
+        width_m: 0.8,
+        height_m: 0.8,
+        depth_m: 0.8,
+        fillFraction: 1,
+      };
+      calm.voxelDomain.finestCellSize_m = 0.05;
+      calm.fluid.initialCondition = "dam-break";
+      calm.fluid.initialDamBreakDimensions_m = { x: 0.8, y: 0.8, z: 0.8 };
+      calm.fluid.gravity_m_s2 = { x: 0, y: 0, z: 0 };
+      const ladderSolver = await WebGPUAdaptiveMassSolver.createAsync(
+        device, calm, "balanced", undefined,
+        options({
+          resolutionMode: "all-fine",
+          receiverSupportRings: 1,
+          receiverFloor: 1,
+          activityPolicy: {
+            ...SPARSE_CM12_ACTIVITY_POLICY,
+            activitySignals: true,
+            topologyCadenceSteps: 1,
+            demoteEpochs: 1,
+            prepareBricksPerFrame: 256,
+          },
+          pressureIterations: 8,
+        }),
+        () => {},
+      );
+      try {
+        const accepted: number[] = [];
+        for (let step = 0; step <= 3; step += 1) {
+          if (step > 0) {
+            assert.equal(ladderSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+            await device.queue.onSubmittedWorkDone();
+          }
+          const snapshot = await ladderSolver.readGPUActivityPolicy();
+          const brick = snapshot.bricks.find((candidate) => candidate.active);
+          assert.ok(brick);
+          accepted.push(brick.acceptedResolution);
+        }
+        assert.deepEqual(accepted, [8, 4, 2, 1]);
+      } finally {
+        ladderSolver.destroy();
+      }
+
+      const validation = await device.popErrorScope();
+      assert.equal(validation?.message, undefined);
+      assert.deepEqual(uncaptured, []);
+    } finally {
+      device?.destroy();
+      await releaseWebGPUExclusiveLock();
+    }
+  });

@@ -6,6 +6,7 @@ import { getMethod, interactiveSimulationMethods } from "@/lib/core/method-regis
 import { useMethodStore } from "../lib/core/stores/method-store";
 import { useUIStore } from "../lib/core/stores/ui-store";
 import type { EditorEntity } from "../lib/core/editor-entity";
+import { useAnchoredFlyout } from "./anchored-flyout";
 
 /**
  * The solver switch, for the entity that declares it is the thing being solved
@@ -64,13 +65,21 @@ export function SelectionFlyout({
   const setOpen = useUIStore((state) => state.setSelectionControlsOpen);
   const fields = entity.fields ?? [];
   const choices = entity.choices ?? [];
+  // The chip sits beside the selection's own origin, which can be anywhere the
+  // camera puts it — including hard against an edge of a shell that clips. This
+  // resolves that authored offset against the measured viewport, so expanding
+  // the panel near a corner slides it into view instead of cutting it off.
+  const { ref, style } = useAnchoredFlyout<HTMLDivElement>({
+    leftFraction, topFraction, gap: 16, originY: 0, offsetY: -14,
+  });
 
   return (
     <div
+      ref={ref}
       className={`selection-flyout tone-${entity.tone}`}
       data-testid="selection-flyout"
       data-open={open}
-      style={{ left: `${leftFraction * 100}%`, top: `${topFraction * 100}%` }}
+      style={style}
     >
       <div className="selection-flyout-body">
         <button type="button" className="selection-chip" aria-expanded={open} onClick={() => setOpen(!open)}>

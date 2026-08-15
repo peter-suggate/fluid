@@ -6,6 +6,7 @@ import type { RigidBodyState } from "./rigid-body";
 import type { GPURigidBodyPick, GPURigidBodyPose } from "./webgpu-rigid-body";
 import type { Vec3 } from "./model";
 import type { GPUSecondaryParticleSource } from "./webgpu-secondary-particles";
+import type { GPUFluidTracerSource } from "./webgpu-tracer-overlay";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import type {
   SparseAdaptiveGridConsumerSource,
@@ -214,6 +215,17 @@ export interface GPUSolverInstance {
   readonly velocityTexture?: GPUTexture;
   /** Optional one-way escaped spray droplets rendered above the liquid surface. */
   readonly secondaryParticles?: GPUSecondaryParticleSource;
+  /** Optional presentation-only fluid markers, for the seed-spectrum view. */
+  readonly tracerSource?: GPUFluidTracerSource;
+  /**
+   * Turn marker advection on or off. Absent means the method has no markers.
+   *
+   * The renderer calls this from the view it is asked to draw, because the view
+   * is the only thing that knows whether anyone is looking: markers are pure
+   * presentation and a solver that advected them unwatched would be charging
+   * every frame for a picture nobody asked for.
+   */
+  setTracersEnabled?(enabled: boolean): void;
   /** Always-resident structural sparse scene used by production SVO rendering. */
   readonly sparseVoxelSceneSource?: SparseVoxelSceneRenderSource;
   /** Exact compact topology/geometry buffers for paper-technique overlays. */

@@ -45,6 +45,8 @@ import { WebGPUAdaptiveMassSparsePresentation } from
   "./webgpu-adaptive-mass-atlas-presentation";
 import {
   sparseCM12ActivityPolicy,
+  sparseCM12PressureIterations,
+  sparseCM12PressureRelativeTolerance,
   sparseCM12SharpeningDistance,
   sparseCM12SharpeningTraceSteps,
   WebGPUSparseCM12Resident,
@@ -115,6 +117,31 @@ export const SPARSE_CM12_RECEIVER_SUPPORT_RINGS = 9;
 /** Construction capacity is proportional to represented leaves, never domain volume. */
 export const SPARSE_CM12_RECEIVER_CAPACITY_FACTOR = 4;
 export const SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY = 512;
+
+/**
+ * Keep the construction-time receiver apron fixed in metres when the editor
+ * moves a scene along its DETAIL axis. `nominalResolution` follows WORLD edits
+ * but deliberately stays put for DETAIL edits, so their ratio is the exact
+ * linear lattice scale and the receiver volume scales by its cube.
+ */
+export function adaptiveMassReceiverScaleForScene(
+  scene: Pick<SceneDescription, "nominalResolution" | "voxelDomain">,
+  supportRings = SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
+): { readonly supportRings: number; readonly minimumCapacityScale: number } {
+  if (!Number.isSafeInteger(supportRings) || supportRings < 0) {
+    throw new RangeError("Sparse CM12 receiver support rings must be a non-negative integer");
+  }
+  const detailScale = scene.nominalResolution.length_m
+    / scene.voxelDomain.finestCellSize_m;
+  const finiteScale = Number.isFinite(detailScale) && detailScale > 0 ? detailScale : 1;
+  return {
+    // residentSupportAtlas contributes one immediate face-receiver shell
+    // before this dormant apron is grown. Scale their combined physical reach,
+    // then remove that still-one-brick active shell.
+    supportRings: Math.max(0, Math.round((supportRings + 1) * finiteScale) - 1),
+    minimumCapacityScale: finiteScale ** 3,
+  };
+}
 
 function receiverBoundaryResolution(
   atlas: SparseAdaptiveMassAtlas,
@@ -196,6 +223,10 @@ export function residentSupportAtlas(
   mode: AdaptiveMassSolverOptions["resolutionMode"],
 ): SparseAdaptiveMassAtlas {
   const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
+  // Construction starts the immediate shell fine so the first transport step
+  // has the same destination fidelity as the represented interface. Activity
+  // can subsequently coarsen static-only support; characteristic-swept empty
+  // destinations retain the 8^3 floor.
   const receiverResolution: SparseBrickResolution = mode === "all-coarse" ? 4 : 8;
   for (const brick of source.bricks) {
     if (sparseBrickSpan(brick) > 1) continue;
@@ -249,14 +280,18 @@ export function dormantReceiverDomain(
   mode: AdaptiveMassSolverOptions["resolutionMode"],
   supportRings = SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
   receiverFloor: "auto" | SparseBrickResolution = "auto",
+  minimumCapacityScale = 1,
 ): SparseAdaptiveMassAtlas {
   if (!Number.isSafeInteger(supportRings) || supportRings < 0) {
     throw new RangeError("Sparse CM12 receiver support rings must be a non-negative integer");
   }
+  if (!Number.isFinite(minimumCapacityScale) || minimumCapacityScale <= 0) {
+    throw new RangeError("Sparse CM12 receiver capacity scale must be positive and finite");
+  }
   const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
   const maximumReceiverBricks = Math.min(
     source.brickDimensions.reduce((product, value) => product * value, 1),
-    Math.max(SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY,
+    Math.max(Math.ceil(SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY * minimumCapacityScale),
       SPARSE_CM12_RECEIVER_CAPACITY_FACTOR * source.bricks.length),
   );
   // Multi-source breadth-first growth visits exactly the retained apron.  The
@@ -353,6 +388,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readonly gridDivergenceTexture: GPUTexture;
   readonly initialSparseAuthorityReady = true;
   get sparseAdaptiveGridSource() { return this.resident.sparseAdaptiveGridSource; }
+  get tracerSource() { return this.resident.tracerSource; }
+  setTracersEnabled(enabled: boolean) { this.resident.setTracersEnabled(enabled); }
+  /** Re-read the mixing from now; the marker colours re-date to this frame. */
+  reseedTracers() { this.resident.reseedTracers(); }
+  /** QA receipt: `[x, y, z, live]` per marker, in fine-lattice units. */
+  readTracers() { return this.resident.readTracers(); }
   get globalFineLevelSetSource() { return this.resident.globalFineLevelSetSource; }
 
   private atlas: SparseAdaptiveMassAtlas;
@@ -539,8 +580,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           });
           const supported = residentSupportAtlas(atlas, options.resolutionMode);
           initiallyActiveBrickKeys = new Set(supported.bricks.map((brick) => brick.key));
+          const receiverScale = adaptiveMassReceiverScaleForScene(
+            scene, options.receiverSupportRings,
+          );
           atlas = dormantReceiverDomain(supported, options.resolutionMode,
-            options.receiverSupportRings, options.receiverFloor);
+            receiverScale.supportRings, options.receiverFloor,
+            receiverScale.minimumCapacityScale);
           dynamics = initializeSparseAtlasDynamics(atlas);
         },
       }, {
@@ -669,12 +714,15 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const timeStep = values.timeStep === "scene" ? "scene" : "paper";
     const sharpeningDistance = sparseCM12SharpeningDistance(values.sharpeningDistance);
     const sharpeningTraceSteps = sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps);
+    const pressureIterations = sparseCM12PressureIterations(values.pressureIterations);
+    const pressureRelativeTolerance =
+      sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance);
     const activityPolicy = sparseCM12ActivityPolicy({
       ...values,
       activitySignals: values.selectorMode === "activity",
     });
     this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps,
-      activityPolicy };
+      pressureIterations, pressureRelativeTolerance, activityPolicy };
   }
 
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean {
@@ -729,6 +777,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         traceSteps: this.options.sharpeningTraceSteps,
       },
       this.options.activityPolicy,
+      {
+        iterations: this.options.pressureIterations,
+        relativeTolerance: this.options.pressureRelativeTolerance,
+      },
       frameCapture?.residentStageSeams,
       this.rigidCouplingEnabled ? activeBodies.length : 0,
       [this.scene.container.width_m, this.scene.container.height_m,
@@ -746,7 +798,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.lastDt_s = dt_s;
     this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
     this.info.lastSubsteps = 1;
-    this.info.pressureIterations = 128;
+    this.info.pressureIterations = sparseCM12PressureIterations(
+      this.options.pressureIterations);
     this.info.hostSimulationSizedWorkItems = 0;
     const captured = frameCapture?.finish(this.device.queue);
     this.finishFrameCapture(captured, traceRequestedAt_ms);

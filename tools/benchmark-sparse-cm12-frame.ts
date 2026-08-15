@@ -2,6 +2,7 @@
  * Matched serialized-frame performance gate for Uniform CM12 vs Sparse CM12.
  *
  * Run:
+ *   NODE_OPTIONS=--max-old-space-size=8192 \
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
  *   node --import tsx tools/benchmark-sparse-cm12-frame.ts
  *
@@ -22,8 +23,10 @@ import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import type { PerformanceTrace } from "../lib/core/performance-trace";
 import {
   createMinimalPowerDamBreak32Scene,
+  createMinimalPowerDamBreak64Scene,
   createSparseCM12LongDamBreakScene,
   createSymmetricExpansionScene,
+  SPARSE_CM12_LONG_DAM_METHOD_PROFILE,
 } from "../lib/core/scenes";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
@@ -60,8 +63,9 @@ const sceneArgument = process.argv.slice(2)
   .find((value) => value.startsWith("--scene="))?.slice("--scene=".length)
   ?? "symmetric";
 if (sceneArgument !== "symmetric" && sceneArgument !== "mini32"
+  && sceneArgument !== "mini64"
   && sceneArgument !== "long-dam") {
-  throw new RangeError("scene must be symmetric, mini32, or long-dam");
+  throw new RangeError("scene must be symmetric, mini32, mini64, or long-dam");
 }
 const sparseResolutionArgument = process.argv.slice(2)
   .find((value) => value.startsWith("--sparse-resolution="))
@@ -75,13 +79,19 @@ const timeStepArgument = process.argv.slice(2)
 if (timeStepArgument !== "scene" && timeStepArgument !== "paper") {
   throw new RangeError("time-step must be scene or paper");
 }
-const buildScene = sceneArgument === "mini32"
-  ? createMinimalPowerDamBreak32Scene
+const buildScene = sceneArgument === "mini32" || sceneArgument === "mini64"
+  ? sceneArgument === "mini64"
+    ? createMinimalPowerDamBreak64Scene
+    : createMinimalPowerDamBreak32Scene
   : sceneArgument === "long-dam"
     ? createSparseCM12LongDamBreakScene
     : createSymmetricExpansionScene;
-const acceptance = sceneArgument === "mini32"
-  ? SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE
+const acceptance = sceneArgument === "mini32" || sceneArgument === "mini64"
+  ? sceneArgument === "mini64"
+    ? { ...SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE,
+      sceneId: "minimal-power-dam-break-64",
+      finestDimensions: [64, 64, 64] as const }
+    : SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE
   : sceneArgument === "long-dam"
     ? SPARSE_CM12_LONG_DAM_PERFORMANCE_ACCEPTANCE
     : SPARSE_CM12_PERFORMANCE_ACCEPTANCE;
@@ -265,7 +275,12 @@ async function createArm(
 ): Promise<MutableArm> {
   const overrides: MethodParamValues = method.id === "uniform"
     ? { timeStep: timeStepArgument, densityPostProcessing: "off" }
-    : { timeStep: timeStepArgument, resolutionMode: sparseResolutionArgument };
+    : {
+      ...(sceneArgument === "long-dam"
+        ? SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides : {}),
+      timeStep: timeStepArgument,
+      resolutionMode: sparseResolutionArgument,
+    };
   const values = resolveMethodValues(method, "balanced", overrides);
   const solver = await method.createSolverAsync!(
     device,
@@ -515,6 +530,8 @@ try {
       sparse: {
         solver: finalSparseInfo.pressureSolver,
         iterations: finalSparseInfo.pressureIterations,
+        relativeResidual: finalSparseInfo.pressureRelativeResidual,
+        maximumDivergence_s: finalSparseInfo.maxDivergenceAfter_s,
         acceptedCells: finalSparseInfo.adaptiveAcceptedCellCount,
         acceptedRows: finalSparseInfo.adaptiveAcceptedRowCount,
         constructionLeafCount: sparse.solver.info.cellCount,

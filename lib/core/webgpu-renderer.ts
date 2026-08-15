@@ -24,6 +24,7 @@ import {
   type SvoPixelTraceLayer,
 } from "../svo/svo-pixel-trace";
 import { DecorationOverlay } from "./webgpu-decoration-overlay";
+import { TracerOverlay } from "./webgpu-tracer-overlay";
 import { VISUALIZATION_CATALOG } from "./visualization-catalog";
 import { assembleDecorations } from "./visualization-registry";
 import { containerDecorationSpace } from "./visualization-decorations";
@@ -208,7 +209,7 @@ export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, n
  * normalized by the last reported liquid maximum. Both sample live solver
  * textures in the overlay shader — no readback is involved.
  */
-export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | OctreeTechniqueOverlayMode;
+export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "tracers" | OctreeTechniqueOverlayMode;
 
 export interface GridOverlayConfig {
   /** Slice axes, or a ray-integrated diagnostic through the complete volume. */
@@ -225,6 +226,7 @@ export type OptionalRendererPipeline =
   | "secondary-particles"
   | "decoration-overlay"
   | "fluid-cell-trace"
+  | "tracer-overlay"
   | "svo-stage-overlay";
 
 /**
@@ -328,10 +330,11 @@ export function optionalRendererPipelineRequests(
   const requested: OptionalRendererPipeline[] = [];
   if (gridOverlay && gridOverlay.axis !== "off") {
     const technique = Boolean(gridOverlay.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode));
-    if (!technique) requested.push("grid-overlay");
-    if (technique) {
-      requested.push("technique-overlay", "technique-audit-overlay");
-    }
+    // Markers are their own instanced draw over the finished frame, so they
+    // compile neither the generic slice raymarch nor the technique programs.
+    if (gridOverlay.mode === "tracers") requested.push("tracer-overlay");
+    else if (!technique) requested.push("grid-overlay");
+    else requested.push("technique-overlay", "technique-audit-overlay");
   }
   if (sparsePresentationRequired) requested.push("svo-dry-scene");
   if (simulationRunning && secondaryParticlesAvailable) requested.push("secondary-particles");
@@ -714,6 +717,7 @@ export class FluidLabRenderer {
   private techniqueOverlayPipeline?: OverlayPipeline;
   private techniqueAuditOverlayPipeline?: OverlayPipeline;
   private decorationOverlayPipeline?: DecorationOverlay;
+  private tracerOverlayPipeline?: TracerOverlay;
   private fluidCellTracePipeline?: WebGPUFluidCellTrace;
   private svoStageOverlay?: SparseVoxelRenderStageOverlay;
   private latestFluidCellTraceValue?: FluidCellTrace;
@@ -1165,6 +1169,16 @@ export class FluidLabRenderer {
       (device) => new DecorationOverlay(device, this.format!),
       (pipeline) => pipeline.initialize(),
       (pipeline) => { this.decorationOverlayPipeline = pipeline; },
+      (pipeline) => pipeline.destroy(),
+    );
+    if (wants.has("tracer-overlay")) this.ensureOptionalPipeline(
+      "tracer-overlay", this.tracerOverlayPipeline,
+      (device) => new TracerOverlay(device, this.format!),
+      (pipeline) => pipeline.initialize(),
+      (pipeline) => {
+        this.tracerOverlayPipeline = pipeline;
+        pipeline.setSource(this.gpuFluid?.tracerSource);
+      },
       (pipeline) => pipeline.destroy(),
     );
     if (wants.has("secondary-particles")) this.ensureOptionalPipeline(
@@ -1634,7 +1648,7 @@ export class FluidLabRenderer {
     // guards hold until initialize() completes on the replacement device.
     this.device = undefined; this.context = undefined;
     this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
-    this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined; this.svoStageOverlay = undefined;
+    this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined; this.tracerOverlayPipeline = undefined; this.svoStageOverlay = undefined;
     this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.optionalPipelineFailures.clear(); this.svoDrySceneSource = undefined; this.svoSceneSidecar = undefined; this.svoDrySceneData = undefined; this.liveSceneAnimation = undefined; this.liveSceneAnimationFailure = undefined; this.renderSceneKey = ""; this.renderSceneStamp = 0; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingLiveSvoPresentation = undefined;
     this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoPublicationFailure = undefined; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
@@ -2661,6 +2675,13 @@ export class FluidLabRenderer {
     if (techniqueModeCode) {
       this.techniqueOverlayPipeline?.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
     }
+    // The view drives the marker advection, because the view is the only thing
+    // that knows whether anyone is looking. Off is free rather than cheap: the
+    // solver encodes no marker dispatch at all, and the off-to-on transition
+    // re-seeds so switching the view on colours the liquid as it is now.
+    const tracersVisible = gridOverlay?.axis !== "off" && gridOverlay?.mode === "tracers";
+    this.gpuFluid?.setTracersEnabled?.(tracersVisible);
+    if (tracersVisible) this.tracerOverlayPipeline?.setSource(this.gpuFluid?.tracerSource);
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, cameraChanging ? SVO_CAMERA_CHANGING_FRAME : -1,
       // cameraPosition.w is the aperture, tan(fov/2). It was padding until the
@@ -2984,8 +3005,27 @@ export class FluidLabRenderer {
       const overlayView=this.presentationTexture.createView();
       // Generic texture fields and compact paper publications each own both
       // their slice and ray-integrated volume presentation.
-      if(!techniqueModeCode)this.gridOverlayPipeline?.encode(encoder,overlayView);
-      if(techniqueModeCode){
+      if(tracersVisible){
+        this.tracerOverlayPipeline?.encode(encoder,overlayView,this.pixelTraceSceneDepthView(),{
+          camera: {
+            position_m: [basis.position.x, basis.position.y, basis.position.z],
+            forward: [basis.forward.x, basis.forward.y, basis.forward.z],
+            right: [basis.right.x, basis.right.y, basis.right.z],
+            up: [basis.up.x, basis.up.y, basis.up.z],
+            tanHalfFov: cameraTanHalfFov(camera),
+            aspect: viewportAspect(this.presentationTexture.width, this.presentationTexture.height),
+          },
+          viewportWidth: this.presentationTexture.width,
+          viewportHeight: this.presentationTexture.height,
+          container_m: [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
+          depthNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M,
+          // The view is planeless, so its slice control is a cloud opacity —
+          // the same meaning the slider already carries in a volume view.
+          globalAlpha: gridOverlay.position,
+        });
+      }
+      else if(!techniqueModeCode)this.gridOverlayPipeline?.encode(encoder,overlayView);
+      else{
         this.techniqueOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);
         this.techniqueAuditOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);
       }
@@ -3148,6 +3188,7 @@ export class FluidLabRenderer {
     this.retiredGPUFluids.clear();
     try { this.waterPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.gridOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
+    try { this.tracerOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.svoDryScenePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseStaging.map((slot) => slot.buffer)]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }

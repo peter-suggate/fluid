@@ -123,8 +123,12 @@ export function createSparseAtlasCompositeGridBuildWorkspace():
 SparseAtlasCompositeGridBuildWorkspace {
   return {
     cellPool: [], rowPool: [], cellBaseByBrick: new Map(),
-    termCellScratch: new Int32Array(16),
-    termCoefficientScratch: new Float64Array(16),
+    // A span-one candidate beside an immutable macro can temporarily expose
+    // more than the eight terms of an ordinary 2:1 row while the template
+    // library enumerates levels that candidate validation will reject. Keep
+    // the builder lossless through the largest 8x8 face plus its macro term.
+    termCellScratch: new Int32Array(128),
+    termCoefficientScratch: new Float64Array(128),
     cells: [], rows: [],
   };
 }
@@ -468,8 +472,8 @@ export function buildSparseAtlasCompositeGrid(
 
   const rows: SparseAtlasGradientRow[] = workspace?.rows ?? [];
   let rowCountBuilt = 0;
-  const termCellScratch = workspace?.termCellScratch ?? new Int32Array(16);
-  const termCoefficientScratch = workspace?.termCoefficientScratch ?? new Float64Array(16);
+  const termCellScratch = workspace?.termCellScratch ?? new Int32Array(128);
+  const termCoefficientScratch = workspace?.termCoefficientScratch ?? new Float64Array(128);
   let mixedSeamRowCount = 0, sparseAirRowCount = 0;
   const appendRow = (
     kind: SparseAtlasGradientRowKind,

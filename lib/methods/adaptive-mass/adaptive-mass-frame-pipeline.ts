@@ -13,6 +13,8 @@ import {
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import {
   SPARSE_CM12_ACTIVITY_POLICY,
+  SPARSE_CM12_PRESSURE_ITERATIONS,
+  SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
   SPARSE_CM12_RESIDENT_FINAL_STAGE,
   SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
   SPARSE_CM12_SHARPENING_TRACE_STEPS,
@@ -53,6 +55,10 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   coupledTransport: {
     id: "fine-sdf-advection",
     label: "Coupled conservative mass + gamma + momentum transport",
+  },
+  tracerAdvection: {
+    id: "other",
+    label: "Fluid marker advection along the transport characteristic",
   },
   gammaDiffusion: {
     id: "fine-sdf-advection",
@@ -131,6 +137,7 @@ export const ADAPTIVE_MASS_RESIDENT_STAGE_PHASE: Readonly<Record<
   "transport-velocity-extension": ADAPTIVE_MASS_ADVANCE_PHASE.velocityExtension,
   "face-preparation": ADAPTIVE_MASS_ADVANCE_PHASE.faceTopology,
   "conservative-transport": ADAPTIVE_MASS_ADVANCE_PHASE.coupledTransport,
+  "tracer-advection": ADAPTIVE_MASS_ADVANCE_PHASE.tracerAdvection,
   "gamma-diffusion": ADAPTIVE_MASS_ADVANCE_PHASE.gammaDiffusion,
   "surface-sharpening": ADAPTIVE_MASS_ADVANCE_PHASE.surfaceConditioning,
   "symmetry-authority": ADAPTIVE_MASS_ADVANCE_PHASE.symmetryAuthority,
@@ -342,6 +349,18 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     chip: () => "shared conservative transaction",
   }),
   stage({
+    id: "fluid-tracers", band: "transport", side: "right",
+    label: "Marker advection",
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.tracerAdvection.label],
+    tip: {
+      summary: "Presentation-only markers integrated forward along the same characteristic, through the same extrapolated transport velocity, that the conservative transport traces backward. Encoded only while the marker view is on, so this reads zero on an ordinary frame.",
+      reads: "extended transport velocity, accepted density",
+      writes: "marker positions and their live flags",
+      feeds: "the marker overlay, and nothing in the physics",
+    },
+    chip: () => "view only — zero when off",
+  }),
+  stage({
     id: "gamma-diffusion", band: "transport", side: "left",
     label: "Gamma diffusion",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.gammaDiffusion.label],
@@ -417,7 +436,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Resolution planning",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.resolutionPlanning.label],
     tip: {
-      summary: "The default selector makes every surface or thin-fluid brick request 8³ and coarsens outward through a 2:1-closed 4³/2³/1³ skirt. Existing bricks are replanned on the GPU: urgent surface refinement bypasses the ordinary round-robin preparation budget.",
+      summary: "The default activity selector refines moving, deformed, thin or genuinely detailed liquid, then merges settled existing bricks one rung per quiet epoch through a 2:1-closed 8³/4³/2³/1³ hierarchy. Surface-distance remains the strict interface-fine comparison mode.",
       reads: "transported density, momentum, policy history",
       writes: "score/reason history, urgent/ordinary queues and candidate 1³/2³/4³/8³ levels",
       feeds: "budgeted GPU shadow transfer and physical generation publication",
@@ -432,7 +451,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
         kind: "param-choice", param: "selectorMode", label: "Criterion",
         options: [
           { value: "surface", label: "SURFACE", hint: "Surface and thin liquid are 8³; coarsen with distance." },
-          { value: "activity", label: "ACTIVITY", hint: "Also apply velocity, change and detail signals." },
+          { value: "activity", label: "ACTIVITY", hint: "Moving/complex interfaces refine; calm surfaces and flooded deep bulk merge." },
         ],
       },
       {
@@ -511,12 +530,12 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
         kind: "param-range", param: "detailTolerance", label: "Detail tolerance",
         unit: " ρ", min: 0.005, max: 0.5, step: 0.005, digits: 3,
         enabled: (context) => context.values.selectorMode === "activity",
-        hint: "2x2x2 restriction error allowed before detail vetoes demotion.",
+        hint: "2x2x2 restriction error allowed before bulk or complex-interface detail vetoes demotion. A calm planar surface is not pinned merely by CM12 sharpening.",
       },
       {
         kind: "param-range", param: "topologyCadenceSteps", label: "Epoch cadence",
         unit: " steps", min: 1, max: 32, step: 1, digits: 0,
-        hint: "Accepted steps between full resolution replanning epochs. Urgent surface requests may still publish between ordinary round-robin visits.",
+        hint: "Accepted steps between quiet-history updates. One evaluates settling every step; each accepted merge still moves only one rung.",
       },
       {
         kind: "param-range", param: "prepareBricksPerFrame", label: "Work budget",
@@ -532,7 +551,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
       {
         kind: "param-range", param: "demoteEpochs", label: "Demote hold",
         unit: " epochs", min: 1, max: 32, step: 1, digits: 0,
-        hint: "Quiet epochs required before one-rung demotion.",
+        hint: "Quiet epochs required for each one-rung merge: 8³→4³→2³→1³.",
       },
       {
         kind: "param-range", param: "promoteScore", label: "Promote score",
@@ -631,7 +650,33 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
       writes: "compact leaf pressure",
       feeds: "velocity projection",
     },
-    chip: (context) => `${context.info?.pressureIterations ?? 0} PCG iterations`,
+    controls: [
+      {
+        kind: "param-range",
+        param: "pressureIterations",
+        label: "Iteration budget",
+        unit: "iterations",
+        min: 8, max: 256, step: 8, digits: 0,
+        hint: "Maximum matrix-free PCG iterations. Reducing this is the most direct pressure/frame-time tradeoff; 128 is the current Sparse CM12 default.",
+      },
+      {
+        kind: "param-range",
+        param: "pressureRelativeTolerance",
+        label: "Early-stop residual",
+        unit: "rel. L2",
+        min: 0, max: 0.1, step: 0.001, digits: 3,
+        hint: "Stops further PCG arithmetic after the relative L2 residual reaches this value. Zero runs every budgeted iteration.",
+      },
+    ],
+    chip: (context) => {
+      const iterations = Number(context.values.pressureIterations
+        ?? SPARSE_CM12_PRESSURE_ITERATIONS);
+      const tolerance = Number(context.values.pressureRelativeTolerance
+        ?? SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE);
+      return tolerance > 0
+        ? `${iterations.toFixed(0)} max · rel ${tolerance.toFixed(3)}`
+        : `${iterations.toFixed(0)} PCG iterations · fixed`;
+    },
   }),
   stage({
     id: "pressure-projection", band: "pressure", side: "right",

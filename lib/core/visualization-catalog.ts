@@ -19,6 +19,7 @@ import { fluidCellVisualizations } from "./fluid-cell-visualizations";
 import { gridOverlayVisualizations } from "./grid-overlay-visualizations";
 import { octreeFieldVisualizations } from "./octree-technique-debug";
 import { svoPixelTraceVisualizations } from "../svo/svo-pixel-trace";
+import { tracerOverlayVisualizations } from "./webgpu-tracer-overlay";
 import {
   decorationVisualizations,
   fieldVisualizations,
@@ -41,6 +42,7 @@ export const VISUALIZATION_CATALOG: readonly Visualization[] = Object.freeze([
   // publish, so a picker narrowed by method lists the universal set before
   // the octree-only publications.
   ...gridOverlayVisualizations,
+  ...tracerOverlayVisualizations,
   ...octreeFieldVisualizations,
 ]);
 

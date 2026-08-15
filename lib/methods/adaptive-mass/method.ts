@@ -8,9 +8,13 @@ import { adaptiveMassDiagnosticRows } from "./adaptive-mass-diagnostics";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from "./adaptive-mass-frame-pipeline";
 import {
   sparseCM12ActivityPolicy,
+  sparseCM12PressureIterations,
+  sparseCM12PressureRelativeTolerance,
   sparseCM12SharpeningDistance,
   sparseCM12SharpeningTraceSteps,
   SPARSE_CM12_ACTIVITY_POLICY,
+  SPARSE_CM12_PRESSURE_ITERATIONS,
+  SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
   SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
   SPARSE_CM12_SHARPENING_TRACE_STEPS,
   type SparseCM12ActivityPolicy,
@@ -34,6 +38,10 @@ export interface AdaptiveMassSolverOptions {
   readonly sharpeningDistance?: number;
   /** Forward-Euler substeps TraceAlongField may spend reaching D. */
   readonly sharpeningTraceSteps?: number;
+  /** Maximum matrix-free Jacobi-PCG iterations encoded for each pressure solve. */
+  readonly pressureIterations?: number;
+  /** Relative L2 residual that stops further PCG arithmetic; zero runs the full budget. */
+  readonly pressureRelativeTolerance?: number;
 }
 
 const params: MethodParamSpec[] = [
@@ -54,14 +62,14 @@ const params: MethodParamSpec[] = [
     kind: "select",
     key: "selectorMode",
     label: "Adaptive criterion",
-    default: "surface",
+    default: "activity",
     tier: "coarse",
     update: "runtime",
     options: [
       { value: "surface", label: "Surface distance" },
       { value: "activity", label: "Surface + activity" },
     ],
-    hint: "The default makes every brick touched by the free surface (or thin liquid) 8³ and coarsens outward under 2:1. Activity mode additionally uses velocity, deformation, temporal change and restriction detail.",
+    hint: "Surface distance keeps every interface brick 8³. Activity refines moving or complex interfaces and thin liquid, while flooded deep bulk stays coarse unless restriction reveals real density detail.",
   },
   {
     kind: "select",
@@ -86,7 +94,7 @@ const params: MethodParamSpec[] = [
   {
     kind: "number", key: "receiverSupportRings", label: "Receiver apron reach",
     default: 9, tier: "fine", unit: "bricks", min: 1, max: 24, step: 1, digits: 0,
-    hint: "Structural radius of pre-created sparse receiver capacity. This bounds how far fluid can travel before a rebuild; it does not make empty world volume resident.",
+    hint: "Structural radius of pre-created sparse receiver capacity at nominal detail. DETAIL edits scale its brick radius and minimum pool volume so the same physical travel remains available; it does not make unrelated empty world volume resident.",
   },
   {
     kind: "select",
@@ -99,7 +107,35 @@ const params: MethodParamSpec[] = [
       { value: "scene", label: "Scene · authored maxDt" },
     ],
     update: "runtime",
-    hint: "Sparse CM12 defaults to the same exact 1/30 s operating step as Uniform CM12. Scene mode is retained for matched-step validation and explicit timestep overrides.",
+    hint: "Sparse CM12 defaults to the exact 1/30 s paper step. Scene mode remains available for matched-step validation and hydrostatic probes.",
+  },
+  {
+    kind: "number",
+    key: "pressureIterations",
+    label: "Pressure iteration budget",
+    default: SPARSE_CM12_PRESSURE_ITERATIONS,
+    tier: "coarse",
+    unit: "iterations",
+    min: 8,
+    max: 256,
+    step: 8,
+    digits: 0,
+    update: "runtime",
+    hint: "Maximum Jacobi-PCG iterations per pressure solve. Lower budgets trade incompressibility for frame time; 128 retains the current Sparse CM12 operating point.",
+  },
+  {
+    kind: "number",
+    key: "pressureRelativeTolerance",
+    label: "Pressure early-stop tolerance",
+    default: SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
+    tier: "fine",
+    unit: "rel. L2",
+    min: 0,
+    max: 0.1,
+    step: 0.001,
+    digits: 3,
+    update: "runtime",
+    hint: "Stops PCG arithmetic after the relative residual reaches this value. Zero preserves fixed-budget execution; a larger tolerance can save pressure time when the solve converges early.",
   },
   {
     kind: "number",
@@ -130,19 +166,19 @@ const params: MethodParamSpec[] = [
     hint: "How many forward-Euler substeps the trace may spend. Each is half a cell, so the reach is whichever of D and half the substep count is smaller — at the default 7 the substeps are not the binding constraint anywhere in the paper's D range, and lowering them deliberately shortens the trace along a curving gradient.",
   },
   {
-    kind: "number", key: "finestTravelCells", label: "8³ velocity floor",
+    kind: "number", key: "finestTravelCells", label: "8³ surface travel",
     default: SPARSE_CM12_ACTIVITY_POLICY.finestTravelCells, tier: "fine", update: "runtime",
     unit: "cells/step", min: 0.05, max: 4, step: 0.05, digits: 2,
-    hint: "Any occupied brick whose maximum accepted displacement reaches this threshold targets 8³.",
+    hint: "Surface/front displacement threshold for 8³ lookahead. Fully flooded bulk does not refine merely because it translates uniformly.",
   },
   {
-    kind: "number", key: "fourTravelCells", label: "4³ velocity floor",
+    kind: "number", key: "fourTravelCells", label: "4³ surface travel",
     default: SPARSE_CM12_ACTIVITY_POLICY.fourTravelCells, tier: "fine", update: "runtime",
     unit: "cells/step", min: 0, max: 2, step: 0.05, digits: 2,
-    hint: "Displacement threshold for a 4³ minimum. Normalization keeps it no higher than the 8³ threshold.",
+    hint: "Surface/front displacement threshold for a 4³ receiver minimum. Normalization keeps it no higher than the 8³ threshold.",
   },
   {
-    kind: "number", key: "twoTravelCells", label: "2³ velocity floor",
+    kind: "number", key: "twoTravelCells", label: "2³ surface travel",
     default: SPARSE_CM12_ACTIVITY_POLICY.twoTravelCells, tier: "fine", update: "runtime",
     unit: "cells/step", min: 0, max: 1, step: 0.025, digits: 3,
     hint: "Displacement threshold for a 2³ minimum; slower non-surface bulk may target 1³.",
@@ -252,6 +288,8 @@ const params: MethodParamSpec[] = [
 export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze([
   "selectorMode",
   "timeStep",
+  "pressureIterations",
+  "pressureRelativeTolerance",
   "sharpeningDistance",
   "sharpeningTraceSteps",
   "finestTravelCells", "fourTravelCells", "twoTravelCells",
@@ -273,7 +311,7 @@ const receiverFloor = (value: unknown): AdaptiveMassSolverOptions["receiverFloor
   value === "1" ? 1 : value === "2" ? 2 : value === "4" ? 4 : value === "8" ? 8 : "auto";
 
 const selectorMode = (value: unknown): "surface" | "activity" =>
-  value === "activity" ? "activity" : "surface";
+  value === "surface" ? "surface" : "activity";
 
 const activityPolicy = (values: MethodParamValues): SparseCM12ActivityPolicy =>
   sparseCM12ActivityPolicy({
@@ -293,6 +331,9 @@ export function adaptiveMassSolverOptions(
     receiverFloor: receiverFloor(values.receiverFloor),
     activityPolicy: activityPolicy(values),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
+    pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
+    pressureRelativeTolerance:
+      sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
     sharpeningDistance: sparseCM12SharpeningDistance(values.sharpeningDistance),
     sharpeningTraceSteps: sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps),
   };
@@ -330,7 +371,8 @@ export const adaptiveMassMethod: SimulationMethod = {
   // authority. A bodyless paper-scale scene omits that substantial arena, so
   // crossing between an empty and non-empty roster rebuilds once.
   capabilities: { volumeRendering: true },
-  supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure"],
+  supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure",
+    "tracers"],
   params,
   runtimeParamKeys: ADAPTIVE_MASS_RUNTIME_PARAM_KEYS,
   pipelineGraph: async () => ADAPTIVE_MASS_FLUID_PIPELINE,
@@ -345,6 +387,9 @@ export const adaptiveMassMethod: SimulationMethod = {
       surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
       receiverSupportRings: boundedInteger(values.receiverSupportRings, 9, 1, 24),
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
+      pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
+      pressureRelativeTolerance:
+        sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
       sharpeningDistance: sparseCM12SharpeningDistance(values.sharpeningDistance),
       sharpeningTraceSteps: sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps),
       ...normalizedActivity,
@@ -357,11 +402,13 @@ export const adaptiveMassMethod: SimulationMethod = {
       SPARSE_CM12_ACTIVITY_POLICY;
     return {
       resolutionMode: "adaptive",
-      selectorMode: "surface",
+      selectorMode: "activity",
       receiverFloor: "auto",
       surfaceFineRings: 1,
       receiverSupportRings: 9,
       timeStep: "paper",
+      pressureIterations: SPARSE_CM12_PRESSURE_ITERATIONS,
+      pressureRelativeTolerance: SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
       sharpeningDistance: SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
       sharpeningTraceSteps: SPARSE_CM12_SHARPENING_TRACE_STEPS,
       ...activityDefaults,

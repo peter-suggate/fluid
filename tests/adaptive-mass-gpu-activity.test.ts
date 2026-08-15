@@ -27,6 +27,7 @@ import {
 import {
   dormantReceiverDomain,
   dormantReceiverResolution,
+  adaptiveMassReceiverScaleForScene,
   adaptiveMassPresentationDimensionsForScene,
   residentSupportAtlas,
   SPARSE_CM12_RECEIVER_CAPACITY_FACTOR,
@@ -86,6 +87,9 @@ test("resident sharpening implements CM12 Algorithm 2 trace and scatter", () => 
   assert.match(kernel, /0\.5\*cellMinimumWidth\(owner\)/,
     "the trace step must adapt after crossing a 2:1 seam");
   assert.match(kernel, /gradient\/magnitude\*distance/);
+  assert.match(kernel, /rho==0\.0/);
+  assert.match(kernel, /rho>CM12_LIQUID_ISOVALUE/,
+    "empty support and liquid-side cells must skip the composite sharpening stencil");
   assert.match(kernel, /f32\(removedFixed\)\*weight\/total/,
     "removed integrated mass must be scattered trilinearly at the traced point");
   assert.match(kernel, /offeredFixed=remainingFixed/,
@@ -103,9 +107,74 @@ test("resident D4 preservation has disjoint density and gamma scratch", () => {
   ), "utf8");
   assert.match(source, /sharpeningDelta: cells\(\), symmetryGamma: cells\(\)/,
     "density and gamma symmetry values must not share storage");
+  // Only the first two words are pinned: the rest of stateOffsets5 is reserved
+  // space that later regions claim, and a test that pinned the zeros would fail
+  // for a claim that has nothing to do with what it is guarding.
   assert.match(source,
-    /u\.set\(\[l\.sharpeningDelta, l\.symmetryGamma, 0, 0\], 36\)/,
+    /u\.set\(\[l\.sharpeningDelta, l\.symmetryGamma,/,
     "stateOffsets5.y must address allocated gamma scratch rather than densityA");
+});
+
+test("resident pressure solve caches its classified epoch masks", () => {
+  const source = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.match(source, /clearBuffer\(this\.state, 4 \* this\.layout\.theta/);
+  assert.match(source, /clearBuffer\(this\.state, 4 \* this\.layout\.liquid/);
+  assert.match(source, /dispatchAccepted\(pressureKernel\("applyDirection"\), "cell"\)/);
+
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn applyOperator");
+  const end = webgpuSparseCM12ResidentWGSL.indexOf("fn preparePressure", begin);
+  assert.ok(begin >= 0 && end > begin, "pressure operator must be inspectable");
+  const operator = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.doesNotMatch(operator, /rowAccepted\(row\)/,
+    "the 128 SpMVs must consume the cleared/classified theta mask");
+  assert.match(operator, /let incidenceBounds=ta\(9u\)/,
+    "immutable arena section offsets must be cached per matrix row");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /fn isLiquid\(cell:u32\)->bool\{return state\[p\.stateOffsets2\.w\+cell\]>0\.5;\}/);
+});
+
+test("SIM pressure controls bound live PCG work and optional early stopping", () => {
+  const configured = adaptiveMassSolverOptions({
+    pressureIterations: 40,
+    pressureRelativeTolerance: 0.012,
+  });
+  assert.equal(configured.pressureIterations, 40);
+  assert.equal(configured.pressureRelativeTolerance, 0.012);
+  assert.equal(adaptiveMassSolverOptions({ pressureIterations: 1 }).pressureIterations, 8);
+  assert.equal(adaptiveMassSolverOptions({ pressureIterations: 999 }).pressureIterations, 256);
+  assert.equal(adaptiveMassSolverOptions({ pressureRelativeTolerance: -1 })
+    .pressureRelativeTolerance, 0);
+  assert.equal(adaptiveMassSolverOptions({ pressureRelativeTolerance: 1 })
+    .pressureRelativeTolerance, 0.1);
+
+  const stage = ADAPTIVE_MASS_FLUID_PIPELINE.stages.find(
+    (candidate) => candidate.id === "pressure-solve",
+  );
+  assert.ok(stage);
+  const controls = new Set(stage.controls?.flatMap((control) =>
+    control.kind === "readout" ? [] : [control.param]));
+  assert.ok(controls.has("pressureIterations"));
+  assert.ok(controls.has("pressureRelativeTolerance"));
+  assert.ok(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("pressureIterations"));
+  assert.ok(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("pressureRelativeTolerance"));
+
+  const source = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.match(source, /iteration < pressureIterations/,
+    "the host dispatch budget must use the live iteration control");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /tolerance>0\.0&&reduceB\[0\]<=tolerance\*tolerance\*scalars\[1\]/,
+    "the device must stop expensive PCG arithmetic at the requested relative residual");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /return !PRESSURE_EARLY_STOP\|\|scalars\[5\]>0\.5/,
+    "the default fixed-budget specialization must not depend on the convergence flag");
+  assert.match(source, /constants: \{ PRESSURE_EARLY_STOP: 1 \}/,
+    "only nonzero tolerance must select convergence-guarded PCG pipelines");
 });
 
 test("resident topology templates snapshot pooled geometry by value", () => {
@@ -170,8 +239,9 @@ test("GPU candidate planning is epoch-gated and cannot mutate accepted state", (
   assert.match(kernel, /if\(!brickActive\(brick\)\)\{\s*atomicStore\(&activity\[output\+8u\],1u\)/,
     "dormant capacity must begin at the coarsest logical request");
   assert.match(kernel, /velocityFloor=velocityResolutionFloor\(activityF32\(output\+33u\)\)/);
+  assert.match(kernel, /strictSurface=surface&&!activitySignals/);
   assert.match(kernel,
-    /surface\|\|thinFluid\|\|receiver\|\|\(activitySignals&&predicted\)/);
+    /select\(1u,8u,strictSurface\|\|thinFluid\|\|receiver\)/);
   assert.match(kernel, /else if\(atomicLoad\(&activity\[5\]\)!=0u\)/);
   assert.match(kernel, /if\(activitySignals&&hotEpochs>=p\.activityEpochs\.y\)/);
   assert.match(kernel, /requested=min\(8u,2u\*current\)/);
@@ -182,7 +252,7 @@ test("GPU candidate planning is epoch-gated and cannot mutate accepted state", (
   assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/);
 });
 
-test("GPU selector maps fluid travel across the ladder and keeps surface or thin fluid finest", () => {
+test("GPU selector keeps calm surfaces and deep translating bulk coarse in activity mode", () => {
   const floorBegin = webgpuSparseCM12ResidentWGSL.indexOf("fn velocityResolutionFloor");
   const measureBegin = webgpuSparseCM12ResidentWGSL.indexOf("fn measureBrickActivity");
   const planBegin = webgpuSparseCM12ResidentWGSL.indexOf("fn planBrickResolution");
@@ -197,6 +267,21 @@ test("GPU selector maps fluid travel across the ladder and keeps surface or thin
   const measurement = webgpuSparseCM12ResidentWGSL.slice(measureBegin, planBegin);
   assert.match(measurement, /p\.frame\.x\*length\(ownVelocity\)/,
     "velocity activity must be expressed as finest-cell travel per accepted step");
+  assert.match(measurement,
+    /normalizedVelocityActivity=velocityActivity\s*\/max\(p\.activityThresholds\.x,1e-6\)/,
+    "the finest travel control must normalize emergency velocity scoring too");
+  assert.match(measurement,
+    /scoredVelocityActivity=select\(0\.0,normalizedVelocityActivity,surface\|\|thinFluid\)/,
+    "uniformly translating flooded bulk must not score as missing spatial detail");
+  assert.match(measurement,
+    /dynamicActivity=select\(0\.0,max\(activityDeformation\[0\],temporal\),\s*surface\|\|thinFluid\)/,
+    "hydrostatic deformation residue must not erase deep-bulk coarsening");
+  assert.match(measurement,
+    /detailActivity=max\(0\.0,scoredDetailError\/p\.activityDensity\.w-1\.0\)/,
+    "restriction detail below the configured tolerance must score zero");
+  assert.match(measurement,
+    /scoredDetailError=select\(activityDetailError\[0\],0\.0,\s*surface&&!thinFluid&&shape==0\.0\)/,
+    "a sharpened calm planar surface must not retain a permanent detail veto");
   assert.match(measurement, /activityDetailError\[0\]>p\.activityDensity\.w/,
     "sub-veto detail must not pin every nonuniform brick forever");
   assert.match(measurement,
@@ -207,27 +292,45 @@ test("GPU selector maps fluid travel across the ladder and keeps surface or thin
     "a sub-two-cell slab needs exposed support on both sides of an axis");
   assert.match(measurement, /if\(thinFluid\)\{reasons\|=256u;\}/,
     "thin fluid must remain independently visible in policy diagnostics");
-  assert.match(measurement, /quiet=!surface&&!thinFluid/,
-    "thin fluid must veto hysteretic demotion");
+  assert.match(measurement,
+    /quiet=!thinFluid&&velocityFloor<current\s*&&select\(!surface,activityQuiet,activitySignals\)/,
+    "activity mode must allow calm surfaces to demote while thin fluid vetoes demotion");
   assert.match(measurement,
     /cellCenter\s*\+p\.activityTiming\.x\*p\.frame\.x\*ownVelocity/,
     "front support must use the live accepted-step lookahead");
+  assert.match(measurement,
+    /if\(interfaceCell\|\|cellIsThinFluid\)\{/,
+    "every represented interface must retain its immediate static receiver shell");
   assert.match(webgpuSparseCM12ResidentWGSL,
     /step%p\.activityEpochs\.x==0u/,
     "candidate topology cadence must come from the live policy uniform");
   const planEnd = webgpuSparseCM12ResidentWGSL.indexOf("fn closePlannedResolution", planBegin);
   const plan = webgpuSparseCM12ResidentWGSL.slice(planBegin, planEnd);
+  assert.match(plan, /strictSurface=surface&&!activitySignals/,
+    "only surface-distance mode must blanket-pin interfaces fine");
   assert.match(plan,
-    /surface\|\|thinFluid\|\|receiver\|\|\(activitySignals&&predicted\)/,
-    "surface, thin fluid, and swept receivers must override velocity with the finest floor");
+    /receiver=receiverRequested&&\(\(reasons&64u\)==0u\|\|surface\|\|velocityFloor>1u\)/,
+    "the fine receiver floor must stop after the swept destination leaves the interface");
+  assert.match(plan, /activitySurface=surface&&activitySignals/,
+    "a calm activity-mode interface must retain a safe middle rung");
   assert.match(plan,
-    /requested=select\([\s\S]*?required,[\s\S]*?surface\|\|thinFluid\|\|receiver\)/,
-    "existing surface and swept-receiver bricks must jump directly to the finest requested level");
+    /select\(1u,8u,strictSurface\|\|thinFluid\|\|receiver\)/,
+    "strict surfaces, thin liquid, and moving receivers must get an 8-cubed floor");
+  assert.match(plan, /select\(1u,4u,activitySurface\)/,
+    "calm surfaces may retain the safe middle rung");
+  assert.match(plan,
+    /let detail=activitySignals&&\(reasons&8u\)!=0u\s*&&\(!surface\|\|thinFluid\|\|\(score>=u32\(round\(255\.0\)\)\)\)/,
+    "raw planar-interface restriction error must remain diagnostic without vetoing a merge");
+  assert.match(plan,
+    /requested=select\(min\(8u,max\(required,2u\*current\)\),required,urgent\)/,
+    "non-urgent measured activity must advance by one rung");
   const receiver = webgpuSparseCM12ResidentWGSL.slice(
     webgpuSparseCM12ResidentWGSL.indexOf("fn brickRequestedAsReceiver"), planBegin,
   );
-  assert.match(receiver, /activityRecord\(neighbor\)\+32u/,
-    "the same immutable neighbor support receipt must protect resident receivers");
+  assert.match(receiver, /neighborOutput\+32u/,
+    "empty receivers must retain the complete immediate support receipt");
+  assert.match(measurement, /output\+39u.*activitySweptSupportMask/,
+    "the swept subset must remain independently observable in policy telemetry");
   assert.match(webgpuSparseCM12ResidentWGSL,
     /fn activateSweptReceivers[\s\S]*?brickRequestedAsReceiver\(brick\)/,
     "activation and retained receiver resolution must share one prediction predicate");
@@ -510,8 +613,9 @@ test("Figure 7 promotes only fluid-bearing face receivers at construction", () =
   const supportStats = sparseBrickAtlasStats(supported);
   const dormantStats = sparseBrickAtlasStats(dormant);
   assert.equal(supportStats.residentBrickCount - initialStats.residentBrickCount, 8,
-    "the spherical source must not promote its whole 3x3x3 neighbor shell to 8-cubed");
-  assert.equal(supportStats.fineBrickCount - initialStats.fineBrickCount, 8);
+    "the spherical source must not create its whole 3x3x3 neighbor shell");
+  assert.equal(supportStats.fineBrickCount - initialStats.fineBrickCount, 8,
+    "the first transport step needs a fine immediate destination shell");
   assert.ok(dormantStats.leafCount < 100_000,
     `Figure 7 construction regressed to ${dormantStats.leafCount} packed cells`);
 });
@@ -677,26 +781,67 @@ test("Sparse CM12 frame publication is page-shaped, not domain-shaped", () => {
     "compact pages must be the renderer's surface authority");
 });
 
-test("canonical Sparse CM12 dam defines a tall sparse 96x48x16 traversal", () => {
+test("canonical Sparse CM12 dam defines a tall sparse 192x96x32 traversal", () => {
   const scene = createSparseCM12LongDamBreakScene();
-  assert.deepEqual(sceneLatticeDimensions(scene), [96, 48, 16]);
+  assert.deepEqual(sceneLatticeDimensions(scene), [192, 96, 32]);
   assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.methodId, "adaptive-mass");
   assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.timeStep, "paper");
+  assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.selectorMode, "activity");
+  assert.deepEqual([
+    SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.finestTravelCells,
+    SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.fourTravelCells,
+    SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.twoTravelCells,
+  ], [4, 2, 1]);
   const dam = sceneDamBreakBox(scene);
   assert.equal(dam.min.x, 0);
   assert.ok(Math.abs(dam.max.x - 1 / 6) < 1e-12);
   assert.ok(Math.abs(dam.max.y - 5 / 12) < 1e-12);
   assert.equal(dam.max.z, 1);
   const atlas = initializeSparseBrickAtlasFromScene(scene, {
-    finestDimensions: [96, 48, 16],
+    finestDimensions: [192, 96, 32],
     resolutionForBrick: () => 4,
   });
   const stats = sparseBrickAtlasStats(atlas);
-  assert.equal(stats.logicalBrickCount, 144);
-  assert.equal(stats.residentBrickCount, 12);
-  assert.equal(stats.omittedEmptyBrickCount, 132);
-  assert.equal(atlas.brickDimensions[0] - 2, 10,
-    "the front must cross ten initially dry brick columns");
+  assert.equal(stats.logicalBrickCount, 1_152);
+  assert.equal(stats.residentBrickCount, 80);
+  assert.equal(stats.omittedEmptyBrickCount, 1_072);
+  assert.equal(atlas.brickDimensions[0] - 4, 20,
+    "the front must cross twenty initially dry brick columns");
+});
+
+test("receiver capacity scaling depends only on physical detail ratio", () => {
+  const scale = (nominal_m: number, finest_m: number) =>
+    adaptiveMassReceiverScaleForScene({
+      nominalResolution: { length_m: nominal_m },
+      voxelDomain: { finestCellSize_m: finest_m, brickSize_cells: 8 },
+    });
+  assert.deepEqual(scale(0.04, 0.04), {
+    supportRings: 9, minimumCapacityScale: 1,
+  });
+  assert.deepEqual(scale(0.04, 0.01), {
+    supportRings: 39, minimumCapacityScale: 64,
+  });
+  assert.deepEqual(scale(0.12, 0.03), scale(0.04, 0.01),
+    "WORLD scaling must not change the receiver pool in lattice coordinates");
+});
+
+test("the authored DETAIL x2 long dam preserves its physical receiver reach", () => {
+  const scene = createSparseCM12LongDamBreakScene();
+  const dimensions = sceneLatticeDimensions(scene);
+  assert.deepEqual(dimensions, [192, 96, 32]);
+  const initial = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: dimensions,
+  });
+  const supported = residentSupportAtlas(initial, "adaptive");
+  const scale = adaptiveMassReceiverScaleForScene(scene);
+  assert.deepEqual(scale, { supportRings: 19, minimumCapacityScale: 8 });
+  const domain = dormantReceiverDomain(
+    supported, "adaptive", scale.supportRings, "auto", scale.minimumCapacityScale,
+  );
+  assert.equal(Math.max(...domain.bricks.map((brick) => brick.coordinate[0])), 23,
+    "the doubled-detail front must retain receiver capacity through the far wall");
+  assert.equal(sparseBrickAtlasStats(domain).residentBrickCount, 24 * 12 * 4,
+    "this finite narrow tank fits inside the physically scaled receiver apron");
 });
 
 test("mini32 performance accepts a Rung-A fine set without freezing the old one-seed count", () => {

@@ -9,6 +9,7 @@ import {
   withCanopyDials,
   type CanopyDials,
 } from "../lib/core/tree-canopy-controls";
+import { useAnchoredFlyout } from "./anchored-flyout";
 
 /**
  * The canopy sculptor, riding the selected tree's crown corner.
@@ -39,6 +40,10 @@ export function TreeCanopyFlyout({
   leftFraction: number;
   topFraction: number;
 }) {
+  // Anchored against the shell's measured box, so orbiting the camera
+  // until this corner nears an edge slides the panel instead of clipping it.
+  const { ref, style } = useAnchoredFlyout<HTMLDivElement>({ leftFraction, topFraction });
+
   const scene = useSceneStore((state) => state.scene);
   const gestureOpen = useRef(false);
   const endGesture = () => {
@@ -70,9 +75,10 @@ export function TreeCanopyFlyout({
   };
 
   return <div
+    ref={ref}
     className="tree-canopy-flyout"
     data-testid="tree-canopy-flyout"
-    style={{ left: `${leftFraction * 100}%`, top: `${topFraction * 100}%` }}
+    style={style}
   >
     <header>
       <span>CANOPY</span>

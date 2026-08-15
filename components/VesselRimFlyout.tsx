@@ -9,6 +9,7 @@ import {
   withRimDials,
   type RimDials,
 } from "../lib/core/vessel-rim-controls";
+import { useAnchoredFlyout } from "./anchored-flyout";
 
 /**
  * The coping sculptor, riding the selected rim's corner — the same gesture as
@@ -36,6 +37,10 @@ export function VesselRimFlyout({
   leftFraction: number;
   topFraction: number;
 }) {
+  // Anchored against the shell's measured box, so orbiting the camera
+  // until this corner nears an edge slides the panel instead of clipping it.
+  const { ref, style } = useAnchoredFlyout<HTMLDivElement>({ leftFraction, topFraction });
+
   const scene = useSceneStore((state) => state.scene);
   const gestureOpen = useRef(false);
   const endGesture = () => {
@@ -65,9 +70,10 @@ export function VesselRimFlyout({
   };
 
   return <div
+    ref={ref}
     className="vessel-rim-flyout"
     data-testid="vessel-rim-flyout"
-    style={{ left: `${leftFraction * 100}%`, top: `${topFraction * 100}%` }}
+    style={style}
   >
     <header>
       <span>COPING</span>

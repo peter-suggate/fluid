@@ -84,6 +84,12 @@ export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze(
   quality: "balanced",
   overrides: Object.freeze({
     resolutionMode: "adaptive",
+    // The long dam is the scale showcase, so preserve the authored graded
+    // surface until measured motion or shape complexity earns refinement.
+    selectorMode: "activity",
+    finestTravelCells: 4,
+    fourTravelCells: 2,
+    twoTravelCells: 1,
     timeStep: "paper",
   }),
 });
@@ -781,10 +787,10 @@ export function createMinimalPowerDamBreak32Scene(): SceneDescription {
 
 /**
  * Canonical Sparse CM12 traversal scene. A full-width reservoir starts at the
- * negative end of a 96x48x16 tank, leaving ten brick columns for the front to
+ * negative end of a 192x96x32 tank, leaving twenty brick columns for the front to
  * cross before it reaches the far wall. The doubled vertical air column makes
- * sparse omission visually and numerically explicit without changing the
- * finest cell size or the initial liquid block. The narrow transverse section
+ * sparse omission visually and numerically explicit; the authored DETAIL x2
+ * keeps the initial liquid block physical size unchanged. The narrow transverse section
  * keeps a long residency test affordable while still exercising genuine 3D
  * pressure, transport, and 2:1 face ports.
  */
@@ -801,7 +807,11 @@ export function createSparseCM12LongDamBreakScene(): SceneDescription {
     top: "closed",
     fluidWallMode: "free-slip",
   };
-  scene.voxelDomain = { finestCellSize_m: 0.025, brickSize_cells: 8 };
+  // This is deliberately one DETAIL rung above the original 96x48x16
+  // validation scene. The physical tank and reservoir stay unchanged while
+  // the 12.5 mm lattice makes the sparse 1/2/4/8 hierarchy do meaningful work
+  // at a scale where a blanket-fine policy is visibly and measurably costly.
+  scene.voxelDomain = { finestCellSize_m: 0.0125, brickSize_cells: 8 };
   scene.fluid.initialDamBreakDimensions_m = { x: 0.4, y: 0.5, z: 0.4 };
   delete scene.fluid.initialDamBreakOrigin_m;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
@@ -1865,7 +1875,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "sparse-cm12-long-dam-break",
     name: "Sparse CM12 · long-tank dam break",
-    blurb: "A 96x48x16 tall, narrow tank with a full-width reservoir at the negative end. Its doubled empty air column showcases sparse omission while the canonical gate follows the front across ten initially dry brick columns and checks resident 2:1 transitions, conservation, and Uniform comparison checkpoints.",
+    blurb: "A 192x96x32 tall, narrow tank with a full-width reservoir at the negative end. Its doubled empty air column showcases sparse omission while the canonical gate follows the front across twenty initially dry brick columns and checks resident 2:1 transitions, conservation, and Uniform comparison checkpoints.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "default",

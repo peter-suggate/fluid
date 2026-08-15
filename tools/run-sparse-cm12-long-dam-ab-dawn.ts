@@ -5,8 +5,13 @@
  * This is deliberately separate from the frame-time benchmark: exact per-step
  * density readbacks are QA observations and never enter production scheduling.
  *
+ * NODE_OPTIONS=--max-old-space-size=8192 \
  * WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
  *   node --import tsx tools/run-sparse-cm12-long-dam-ab-dawn.ts
+ *
+ * The doubled-detail A/B deliberately retains both large solver/template
+ * families simultaneously. The interactive sparse arm does not carry that
+ * diagnostic duplication, but this paired process needs a larger Node heap.
  */
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -17,7 +22,10 @@ import {
   type SimulationMethod,
 } from "../lib/core/method-contract";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
-import { createSparseCM12LongDamBreakScene } from "../lib/core/scenes";
+import {
+  createSparseCM12LongDamBreakScene,
+  SPARSE_CM12_LONG_DAM_METHOD_PROFILE,
+} from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
   acquireWebGPUExclusiveLock,
@@ -48,7 +56,7 @@ const positiveInteger = (name: string, fallback: number): number => {
 };
 
 const scene = createSparseCM12LongDamBreakScene();
-const dimensions = [96, 48, 16] as const;
+const dimensions = [192, 96, 32] as const;
 const dt_s = CM12_PAPER_DT_S;
 const steps = positiveInteger("steps", 250);
 const checkpointEvery = positiveInteger("checkpoint-every", 25);
@@ -152,7 +160,11 @@ async function createArm(
   resolutionMode: AdaptiveMassResolutionMode,
 ) {
   const method: SimulationMethod = adaptiveMassMethod;
-  const overrides: MethodParamValues = { timeStep: "paper", resolutionMode };
+  const overrides: MethodParamValues = {
+    ...SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides,
+    timeStep: "paper",
+    resolutionMode,
+  };
   const solver = await method.createSolverAsync!(
     device, createSparseCM12LongDamBreakScene(), "balanced",
     resolveMethodValues(method, "balanced", overrides), undefined, () => {},

@@ -140,6 +140,17 @@ export interface FieldVisualization extends VisualizationCommon {
   readonly modeCode?: number;
   /** Slice axis the view is authored for; `volume` is the ray-integrated form. */
   readonly axis: "x" | "y" | "z" | "volume";
+  /**
+   * The view draws its own geometry over the finished frame instead of being
+   * sampled inside a raymarch, so it has no slice plane to choose.
+   *
+   * Declared rather than inferred from `axis`, because `volume` already means
+   * something else here — ray-integrated through the whole depth — and a picker
+   * that offered X/Y/Z for a view with no plane would be three buttons that
+   * change nothing. Such a view keeps the slice control as its opacity, which
+   * is what `volume` already uses it for.
+   */
+  readonly planeless?: boolean;
   /** Paper figure this view reproduces, when it reproduces one. */
   readonly figure?: string;
   /**
