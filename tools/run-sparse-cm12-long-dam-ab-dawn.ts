@@ -244,6 +244,7 @@ try {
   let maximumPlannedNeighborRatio = 1;
   let fineReceiverFloorViolations = 0;
   let unsupportedEmptyActiveBricks = 0;
+  let rejectedCandidateTransfers = 0;
   for (let step = 1; step <= steps; step += 1) {
     const time_s = step * dt_s;
     let allFineStats, adaptiveStats;
@@ -359,6 +360,14 @@ try {
       unsupportedEmptyActiveBricks = Math.max(
         unsupportedEmptyActiveBricks, checkpointUnsupportedEmptyActiveBricks,
       );
+      const pendingTransfers = activity.bricks.filter((brick) =>
+        brick.candidateStatus === 1);
+      const rejectedTransfers = activity.bricks.filter((brick) =>
+        brick.candidateStatus === 2 || (brick.candidateStatus === 1
+          && (brick.transferStatus !== 1 || brick.faceTransferStatus !== 1)));
+      rejectedCandidateTransfers = Math.max(
+        rejectedCandidateTransfers, rejectedTransfers.length,
+      );
       const activeMaximumFineCellX = Math.max(...activeBricks.map(
         (brick) => 8 * (brick.coordinate[0] + 1) - 1));
       checkpoints.push({
@@ -383,11 +392,30 @@ try {
           plannedResolutionHistogram,
           plannedMaximumNeighborRatio,
           unsupportedEmptyActiveBricks: checkpointUnsupportedEmptyActiveBricks,
+          candidateTransfers: {
+            pending: pendingTransfers.length,
+            passed: pendingTransfers.filter((brick) => brick.transferStatus === 1).length,
+            rejected: rejectedTransfers.length,
+            maximumAbsoluteMassErrorFineCells: Math.max(0, ...pendingTransfers.map(
+              (brick) => Math.abs(brick.transferMassErrorFineCells))),
+            maximumAbsoluteGammaErrorFineCells: Math.max(0, ...pendingTransfers.map(
+              (brick) => Math.abs(brick.transferGammaErrorFineCells))),
+            maximumAbsoluteMomentumErrorFineCells: Math.max(0, ...pendingTransfers.flatMap(
+              (brick) => brick.transferMomentumErrorFineCells.map(Math.abs))),
+            maximumAbsoluteExteriorFluxErrorFineAreas: Math.max(0, ...pendingTransfers.map(
+              (brick) => brick.maximumAbsoluteTransferFluxErrorFineAreas)),
+          },
           topBrickRow: activity.bricks.filter((brick) =>
             brick.coordinate[1] === brickDimensions[1]! - 1 && brick.active).map((brick) => ({
             coordinate: brick.coordinate,
             resolution: brick.resolution,
             plannedResolution: brick.plannedResolution,
+            acceptedResolution: brick.acceptedResolution,
+            candidateResolution: brick.candidateResolution,
+            candidateStatus: brick.candidateStatus,
+            transferStatus: brick.transferStatus,
+            faceTransferStatus: brick.faceTransferStatus,
+            transferMassErrorFineCells: brick.transferMassErrorFineCells,
             scoreByte: brick.scoreByte,
             reasons: brick.reasons,
             quietEpochs: brick.quietEpochs,
@@ -428,6 +456,9 @@ try {
   }
   if (unsupportedEmptyActiveBricks > 0) {
     failures.push("adaptive residency retained empty bricks outside the air-support ring");
+  }
+  if (rejectedCandidateTransfers > 0) {
+    failures.push("adaptive GPU candidate cell transfer failed a conservation receipt");
   }
   if ([allFine, adaptive].some((solver) => solver.info.hostFluidAuthority !== "gpu-resident"
     || solver.info.hostSimulationSizedWorkItems !== 0
@@ -472,6 +503,7 @@ try {
       maximumPlannedNeighborRatio,
       fineReceiverFloorViolations,
       unsupportedEmptyActiveBricks,
+      rejectedCandidateTransfers,
     },
     final: {
       density: final.density,
@@ -482,7 +514,17 @@ try {
     validationErrors,
     failures,
   };
-  console.log(JSON.stringify(report, null, 2));
+  const output = argument("summary") === "1" ? {
+    passed: report.passed,
+    simulatedTime_s: report.simulatedTime_s,
+    farWallArrival_s: report.farWallArrival_s,
+    extrema: report.extrema,
+    final: report.final,
+    finalResidency: checkpoints.at(-1),
+    validationErrors: report.validationErrors,
+    failures: report.failures,
+  } : report;
+  console.log(JSON.stringify(output, null, 2));
   if (failures.length > 0) process.exitCode = 1;
 } finally {
   allFine?.destroy(); adaptive?.destroy();

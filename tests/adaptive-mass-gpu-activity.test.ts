@@ -104,6 +104,58 @@ test("GPU candidate levels close the full 1/2/4/8 ladder to 2:1", () => {
     /for \(let gradingPass = 0; gradingPass < 3; gradingPass \+= 1\)/);
 });
 
+test("GPU candidate validation is isolated from accepted level and topology", () => {
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn validateCandidateResolution");
+  const end = webgpuSparseCM12ResidentWGSL.indexOf(
+    "fn activateSweptReceivers", begin,
+  );
+  assert.ok(begin >= 0 && end > begin, "candidate validator must be inspectable");
+  const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.match(kernel, /validBrickResolution\(accepted\)/);
+  assert.match(kernel, /larger>2u\*smaller/);
+  assert.match(kernel, /atomicStore\(&activity\[output\+13u\],candidate\)/);
+  assert.match(kernel, /atomicStore\(&activity\[output\+14u\]/);
+  assert.doesNotMatch(kernel, /atomicStore\(&activity\[output\+12u\]/,
+    "validation cannot publish the accepted logical level");
+  assert.doesNotMatch(kernel, /state\[[^\]]+\]\s*=(?!=)/);
+  assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/);
+});
+
+test("GPU candidate cell transfer is conservative and remains non-authoritative", () => {
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /@group\(0\)@binding\(13\)var<storage,read_write>candidateState:array<f32>/);
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn transferCandidateCells");
+  const end = webgpuSparseCM12ResidentWGSL.indexOf(
+    "fn activateSweptReceivers", begin,
+  );
+  assert.ok(begin >= 0 && end > begin, "candidate transfer must be inspectable");
+  const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.match(kernel, /candidate<accepted/);
+  assert.match(kernel, /momentumSum\/massSum/);
+  assert.match(kernel, /candidateState\[candidateFieldIndex\(0u,brick,local\)\]=rho/);
+  assert.match(kernel, /atomicStore\(&activity\[output\+18u\],bitcast<u32>\(massError\)\)/);
+  assert.match(kernel, /if\(!valid\)\{atomicOr\(&activity\[7\],2u\);\}/);
+  assert.doesNotMatch(kernel, /state\[[^\]]+\]\s*=(?!=)/,
+    "candidate transfer cannot write accepted fields");
+  assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/);
+});
+
+test("GPU candidate face transfer area-averages authoritative exterior flux", () => {
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn transferCandidateFaces");
+  const end = webgpuSparseCM12ResidentWGSL.indexOf(
+    "fn activateSweptReceivers", begin,
+  );
+  assert.ok(begin >= 0 && end > begin, "candidate face transfer must be inspectable");
+  const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.match(kernel, /state\[destinationFaceVelocity\(\)\+row\]\*rowAreaValue/);
+  assert.match(kernel, /candidateState\[candidateFieldIndex\(6u\+side,brick,lane\)\]/);
+  assert.match(kernel, /reduceB\[0\]-reduceA\[0\]/);
+  assert.match(kernel, /atomicOr\(&activity\[7\],4u\)/);
+  assert.doesNotMatch(kernel, /state\[[^\]]+\]\s*=(?!=)/,
+    "face transfer cannot write accepted velocity");
+  assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/);
+});
+
 test("swept receiver activation is GPU-published and dormant cells stay inert", () => {
   const residentSource = readFileSync(new URL(
     "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",

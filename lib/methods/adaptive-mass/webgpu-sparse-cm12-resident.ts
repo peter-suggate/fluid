@@ -10,7 +10,9 @@ const INVALID = 0xffff_ffff;
 const WORKGROUP_SIZE = 64;
 const PCG_ITERATIONS = 128;
 const ACTIVITY_HEADER_WORDS = 12;
-const ACTIVITY_RECORD_WORDS = 12;
+const ACTIVITY_RECORD_WORDS = 32;
+const CANDIDATE_CELLS_PER_BRICK = 8 ** 3;
+const CANDIDATE_CHANNELS = 12;
 
 interface PackedResidentTopology {
   readonly words: Uint32Array;
@@ -51,6 +53,24 @@ export interface SparseCM12GPUActivityRecord {
   readonly planReasons: number;
   readonly active: boolean;
   readonly activatedStep: number;
+  /** Accepted logical level. It remains equal to packed topology until publication. */
+  readonly acceptedResolution: 1 | 2 | 4 | 8;
+  readonly candidateResolution: 1 | 2 | 4 | 8;
+  /** 0 retained, 1 transfer pending, 2 invalid/rejected. */
+  readonly candidateStatus: 0 | 1 | 2;
+  readonly candidateEpoch: number;
+  readonly transferMassBeforeFineCells: number;
+  readonly transferMassAfterFineCells: number;
+  readonly transferMassErrorFineCells: number;
+  readonly transferGammaErrorFineCells: number;
+  readonly transferMomentumErrorFineCells: readonly [number, number, number];
+  /** 0 not requested, 1 conservative cell transfer passed, 2 rejected. */
+  readonly transferStatus: 0 | 1 | 2;
+  readonly transferExteriorFluxErrorFineAreas: readonly [number, number, number,
+    number, number, number];
+  readonly maximumAbsoluteTransferFluxErrorFineAreas: number;
+  /** 0 not requested, 1 exterior flux transfer passed, 2 rejected. */
+  readonly faceTransferStatus: 0 | 1 | 2;
 }
 
 export interface SparseCM12GPUActivitySnapshot {
@@ -241,6 +261,7 @@ export class WebGPUSparseCM12Resident {
   private readonly scalars: GPUBuffer;
   private readonly conditioning: GPUBuffer;
   private readonly activity: GPUBuffer;
+  private readonly candidateState: GPUBuffer;
   private readonly diagnosticsReadback: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
   private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
@@ -255,7 +276,7 @@ export class WebGPUSparseCM12Resident {
     private readonly dimensions: readonly [number, number, number],
     private readonly layout: ResidentStateLayout,
     buffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer,
-      GPUBuffer],
+      GPUBuffer, GPUBuffer],
     diagnosticsReadback: GPUBuffer,
     bindGroup: GPUBindGroup,
     pipelines: Readonly<Record<string, GPUComputePipeline>>,
@@ -264,7 +285,7 @@ export class WebGPUSparseCM12Resident {
     private horizontalD4Authority: boolean,
   ) {
     [this.parameters, this.topology, this.state, this.partials, this.scalars,
-      this.conditioning, this.activity] = buffers;
+      this.conditioning, this.activity, this.candidateState] = buffers;
     this.diagnosticsReadback = diagnosticsReadback;
     this.bindGroup = bindGroup;
     this.pipelines = pipelines;
@@ -324,12 +345,20 @@ export class WebGPUSparseCM12Resident {
       initialActivity[at + 9] = 32; // retained until the first GPU topology epoch
       initialActivity[at + 10] = initiallyActiveBrickKeys.has(atlas.bricks[brick]!.key)
         ? 1 : 0;
+      initialActivity[at + 12] = atlas.bricks[brick]!.resolution;
+      initialActivity[at + 13] = atlas.bricks[brick]!.resolution;
       if (initialActivity[at + 10] !== 0) {
         initialActivity[11] += packed.words[packed.brickOffset + 4 * brick + 1]!;
       }
     }
     const activity = uploadBuffer(device, "Sparse CM12 resident activity history",
       initialActivity, storage);
+    const candidateState = device.createBuffer({
+      label: "Sparse CM12 isolated candidate cell fields",
+      size: Math.max(4, 4 * CANDIDATE_CHANNELS * CANDIDATE_CELLS_PER_BRICK
+        * packed.brickCount),
+      usage: storage,
+    });
     const diagnosticsReadback = device.createBuffer({
       label: "Sparse CM12 resident diagnostic readback",
       size: 80,
@@ -357,6 +386,7 @@ export class WebGPUSparseCM12Resident {
           storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
         { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ],
     });
     const bindGroup = device.createBindGroup({ label: "Sparse CM12 resident bindings",
@@ -374,6 +404,7 @@ export class WebGPUSparseCM12Resident {
         { binding: 10, resource: presentation.divergenceTexture.createView() },
         { binding: 11, resource: { buffer: conditioning } },
         { binding: 12, resource: { buffer: activity } },
+        { binding: 13, resource: { buffer: candidateState } },
       ] });
     const shaderModule = device.createShaderModule({ label: "Sparse CM12 resident shader",
       code: webgpuSparseCM12ResidentWGSL });
@@ -394,13 +425,16 @@ export class WebGPUSparseCM12Resident {
       "reduceDivergenceDiagnostics",
       "advanceActivityClock", "measureBrickActivity",
       "planBrickResolution", "activateSweptReceivers", "closePlannedResolution",
+      "validateCandidateResolution", "transferCandidateCells",
+      "prepareCandidateFaceReceipts", "transferCandidateFaces",
       "retireUnsupportedEmptyBricks",
       "classifyPresentationBricks", "publishPresentation"] as const;
     const entries = await Promise.all(names.map(async (name) => [name,
       await device.createComputePipelineAsync({ label: `Sparse CM12 ${name}`,
         layout: pipelineLayout, compute: { module: shaderModule, entryPoint: name } })] as const));
     const result = new WebGPUSparseCM12Resident(device, atlas.dimensions, layout,
-      [parameters, topology, state, partials, scalars, conditioning, activity],
+      [parameters, topology, state, partials, scalars, conditioning, activity,
+        candidateState],
       diagnosticsReadback,
       bindGroup,
       Object.fromEntries(entries), grid.cells.length, grid.gradientRows.length,
@@ -422,9 +456,9 @@ export class WebGPUSparseCM12Resident {
       accelerationFinePerSecond2);
     encoder.clearBuffer(this.conditioning);
     const pass = encoder.beginComputePass({ label: "Sparse CM12 resident frame" });
-    const dispatch = (name: string, count: number) => {
+    const dispatch = (name: string, count: number, y = 1, z = 1) => {
       pass.setPipeline(this.pipelines[name]!); pass.setBindGroup(0, this.bindGroup);
-      pass.dispatchWorkgroups(count);
+      pass.dispatchWorkgroups(count, y, z);
     };
     const cells = Math.ceil(this.cellCount / WORKGROUP_SIZE);
     const rows = Math.ceil(this.rowCount / WORKGROUP_SIZE);
@@ -478,6 +512,12 @@ export class WebGPUSparseCM12Resident {
         this.lastPacked!.brickCount / WORKGROUP_SIZE,
       ));
     }
+    dispatch("validateCandidateResolution",
+      Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
+    dispatch("transferCandidateCells", this.lastPacked!.brickCount);
+    dispatch("prepareCandidateFaceReceipts",
+      Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
+    dispatch("transferCandidateFaces", this.lastPacked!.brickCount, 6);
     dispatch("retireUnsupportedEmptyBricks",
       Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
     dispatch("classifyPresentationBricks", Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
@@ -650,6 +690,40 @@ export class WebGPUSparseCM12Resident {
           planReasons: words[at + 9]!,
           active: words[at + 10] !== 0,
           activatedStep: words[at + 11]!,
+          acceptedResolution: (words[at + 12] === 8 ? 8
+            : words[at + 12] === 4 ? 4 : words[at + 12] === 2 ? 2 : 1) as
+              SparseCM12GPUActivityRecord["acceptedResolution"],
+          candidateResolution: (words[at + 13] === 8 ? 8
+            : words[at + 13] === 4 ? 4 : words[at + 13] === 2 ? 2 : 1) as
+              SparseCM12GPUActivityRecord["candidateResolution"],
+          candidateStatus: (words[at + 14] === 1 ? 1 : words[at + 14] === 2 ? 2 : 0) as
+            SparseCM12GPUActivityRecord["candidateStatus"],
+          candidateEpoch: words[at + 15]!,
+          transferMassBeforeFineCells: new DataView(words.buffer).getFloat32(
+            4 * (at + 16), true,
+          ),
+          transferMassAfterFineCells: new DataView(words.buffer).getFloat32(
+            4 * (at + 17), true,
+          ),
+          transferMassErrorFineCells: new DataView(words.buffer).getFloat32(
+            4 * (at + 18), true,
+          ),
+          transferGammaErrorFineCells: new DataView(words.buffer).getFloat32(
+            4 * (at + 19), true,
+          ),
+          transferMomentumErrorFineCells: [20, 21, 22].map((offset) =>
+            new DataView(words.buffer).getFloat32(4 * (at + offset), true)) as
+              [number, number, number],
+          transferStatus: (words[at + 23] === 1 ? 1 : words[at + 23] === 2 ? 2 : 0) as
+            SparseCM12GPUActivityRecord["transferStatus"],
+          transferExteriorFluxErrorFineAreas: [24, 25, 26, 27, 28, 29].map((offset) =>
+            new DataView(words.buffer).getFloat32(4 * (at + offset), true)) as
+              [number, number, number, number, number, number],
+          maximumAbsoluteTransferFluxErrorFineAreas: new DataView(words.buffer).getFloat32(
+            4 * (at + 30), true,
+          ),
+          faceTransferStatus: (words[at + 31] === 1 ? 1 : words[at + 31] === 2 ? 2 : 0) as
+            SparseCM12GPUActivityRecord["faceTransferStatus"],
         };
       });
       return { acceptedSteps: words[0]!, records };
@@ -663,7 +737,7 @@ export class WebGPUSparseCM12Resident {
     if (this.destroyed) return;
     this.destroyed = true;
     for (const buffer of [this.parameters, this.topology, this.state, this.partials,
-      this.scalars, this.conditioning, this.activity]) {
+      this.scalars, this.conditioning, this.activity, this.candidateState]) {
       buffer.destroy();
     }
     this.diagnosticsReadback.destroy();

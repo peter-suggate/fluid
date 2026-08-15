@@ -68,6 +68,15 @@ Current implementation checkpoint (2026-08-15):
   move one rung per epoch, and three ordered refine-only closure passes enforce
   a maximum 2:1 face ratio. It still cannot mutate accepted topology until
   conservative candidate transfer and rollback exist.
+- Accepted and candidate levels now have separate device records. The closed
+  plan is validated for legal one-rung changes and 2:1 adjacency without
+  mutating accepted fields. A max-`8^3` isolated candidate arena performs exact
+  overlap transfer for density and gamma, mass-weighted cell momentum, and a
+  pressure warm start; six candidate exterior faces area-average the
+  authoritative accepted normal flux. Device receipts gate mass, gamma, XYZ
+  momentum, and all exterior-flux integrals. This is still deliberately
+  non-authoritative: row patching, global reprojection, coupled validation, and
+  atomic publication remain required before accepted levels can change.
 - The canonical end-to-end sparse scene is `sparse-cm12-long-dam-break`: a
   `96x24x16` tank whose full-width reservoir occupies the first two of twelve
   brick columns. The front must traverse the ten initially dry columns and
@@ -1493,9 +1502,9 @@ The first adaptive calm/active rung is done only when:
 4. Add translating-interface, settling-pool, slosh, and repeated wake/sleep CPU
    receipts. Capture resolution/history maps at every epoch, not just final
    fluid fields.
-5. Add method-colocated GPU transfer/row-patch stages to the existing
-   classifier/planner/activation frame graph so topology costs and pressure
-   iteration spikes are visible.
+5. Extend the now-live isolated GPU cell/flux transfer with candidate row
+   patches and candidate owner/directory records, then run the global candidate
+   projection so topology costs and pressure iteration spikes are visible.
 6. Keep resolution requests read-only until score/reason/history/active maps are
    exactly D4 equivariant and adaptive remains inside the forced-all-fine Sparse
    CM12 comparison gates at every tested cadence. Logical residency may change only

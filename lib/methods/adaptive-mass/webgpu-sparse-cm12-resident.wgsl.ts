@@ -14,7 +14,8 @@ ${createCm12NumericsWGSL()}
 const INVALID:u32=0xffffffffu;
 const WORKGROUP:u32=64u;
 const ACTIVITY_HEADER_WORDS:u32=12u;
-const ACTIVITY_RECORD_WORDS:u32=12u;
+const ACTIVITY_RECORD_WORDS:u32=32u;
+const CANDIDATE_CELLS_PER_BRICK:u32=512u;
 const ACTIVITY_FIXED:f32=65536.0;
 
 struct Params {
@@ -51,6 +52,7 @@ struct Params {
 // the published active bit, while immutable packed topology and accepted CM12
 // fields remain separate storage.
 @group(0)@binding(12)var<storage,read_write>activity:array<atomic<u32>>;
+@group(0)@binding(13)var<storage,read_write>candidateState:array<f32>;
 
 fn tf(index:u32)->f32{return bitcast<f32>(topology[index]);}
 fn sourceDensity()->u32{return select(p.stateOffsets0.x,p.stateOffsets0.y,p.frame.w>0.5);}
@@ -685,6 +687,12 @@ var<workgroup>activityDeformation:array<f32,64>;
 var<workgroup>activityPredictedMotion:array<f32,64>;
 var<workgroup>activityDetailError:array<f32,64>;
 var<workgroup>activitySurfaceAxes:array<u32,64>;
+var<workgroup>transferMassBefore:array<f32,64>;
+var<workgroup>transferMassAfter:array<f32,64>;
+var<workgroup>transferGammaDelta:array<f32,64>;
+var<workgroup>transferMomentumXDelta:array<f32,64>;
+var<workgroup>transferMomentumYDelta:array<f32,64>;
+var<workgroup>transferMomentumZDelta:array<f32,64>;
 fn reducePair(lane:u32,group:u32,a:f32,b:f32){
   reduceA[lane]=a;reduceB[lane]=b;workgroupBarrier();
   var width=32u;loop{if(lane<width){reduceA[lane]+=reduceA[lane+width];reduceB[lane]+=reduceB[lane+width];}
@@ -974,8 +982,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
 @compute @workgroup_size(64)
 fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
-  let record=p.topologyOffsets2.z+4u*brick;
-  let current=topology[record+2u];let output=activityRecord(brick);
+  let output=activityRecord(brick);
+  let current=atomicLoad(&activity[output+12u]);
   var requested=atomicLoad(&activity[output+8u]);
   var planReasons=atomicLoad(&activity[output+9u]);
   let score=atomicLoad(&activity[output]);
@@ -1028,6 +1036,230 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
     required=max(required,neighborResolution/2u);
   }
   atomicMax(&activity[activityRecord(brick)+8u],required);
+}
+
+fn validBrickResolution(resolution:u32)->bool{
+  return resolution==1u||resolution==2u||resolution==4u||resolution==8u;
+}
+
+// Candidate ABI boundary. This pass validates the closed device-authored plan
+// and records transfer-pending state beside the still-immutable accepted
+// level. It cannot publish topology or make candidate fields authoritative.
+@compute @workgroup_size(64)
+fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
+  let brick=gid.x;if(brick>=p.dispatch.w){return;}
+  let output=activityRecord(brick);
+  let accepted=atomicLoad(&activity[output+12u]);
+  let candidate=atomicLoad(&activity[output+8u]);
+  var invalid=!validBrickResolution(accepted)||!validBrickResolution(candidate);
+  if(!invalid){
+    let larger=max(accepted,candidate);let smaller=min(accepted,candidate);
+    invalid=larger>2u*smaller;
+  }
+  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
+  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
+  let x=remainder-y*brickDimensions.x;let coordinate=vec3i(i32(x),i32(y),i32(z));
+  let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
+    vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  for(var side=0u;side<6u;side+=1u){let neighborCoordinate=coordinate+directions[side];
+    if(any(neighborCoordinate<vec3i(0))
+      ||any(neighborCoordinate>=vec3i(brickDimensions))){continue;}
+    let neighborKey=u32(neighborCoordinate.x)+brickDimensions.x
+      *(u32(neighborCoordinate.y)+brickDimensions.y*u32(neighborCoordinate.z));
+    let neighbor=brickDirectoryLookup(neighborKey);if(neighbor==INVALID){continue;}
+    let neighborCandidate=atomicLoad(&activity[activityRecord(neighbor)+8u]);
+    let larger=max(candidate,neighborCandidate);let smaller=min(candidate,neighborCandidate);
+    invalid=invalid||larger>2u*smaller;
+  }
+  atomicStore(&activity[output+13u],candidate);
+  atomicStore(&activity[output+14u],select(select(0u,1u,candidate!=accepted),2u,invalid));
+  atomicStore(&activity[output+15u],atomicLoad(&activity[0]));
+  if(invalid){atomicOr(&activity[7],1u);}
+}
+
+fn candidateFieldIndex(channel:u32,brick:u32,local:u32)->u32{
+  let capacity=p.dispatch.w*CANDIDATE_CELLS_PER_BRICK;
+  return channel*capacity+brick*CANDIDATE_CELLS_PER_BRICK+local;
+}
+
+fn candidateCellVolume(brick:u32,resolution:u32,local:u32)->f32{
+  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let xy=brickDimensions.x*brickDimensions.y;let bz=key/xy;
+  let remainder=key-bz*xy;let by=remainder/brickDimensions.x;
+  let bx=remainder-by*brickDimensions.x;
+  let z=local/(resolution*resolution);let yz=local-z*resolution*resolution;
+  let y=yz/resolution;let x=yz-y*resolution;let scale=8u/resolution;
+  let lower=vec3u(bx,by,bz)*8u+vec3u(x,y,z)*scale;
+  let upper=min(lower+vec3u(scale),p.dimensions.xyz);
+  let widths=upper-lower;return f32(widths.x*widths.y*widths.z);
+}
+
+fn finiteTransferValue(value:f32)->bool{
+  return value==value&&abs(value)<3.4e38;
+}
+
+// Exact-overlap scalar and cell-momentum transfer into an isolated max-8^3
+// candidate slot. The accepted topology and state remain untouched. Face-flux
+// transfer, row patching, reprojection, and publication are later gates.
+@compute @workgroup_size(64)
+fn transferCandidateCells(@builtin(local_invocation_id)lid:vec3u,
+ @builtin(workgroup_id)wid:vec3u){
+  let brick=wid.x;let lane=lid.x;if(brick>=p.dispatch.w){return;}
+  let output=activityRecord(brick);let candidateStatus=atomicLoad(&activity[output+14u]);
+  let accepted=atomicLoad(&activity[output+12u]);
+  let candidate=atomicLoad(&activity[output+13u]);
+  let record=p.topologyOffsets2.z+4u*brick;let first=topology[record];
+  let sourceCount=accepted*accepted*accepted;let candidateCount=candidate*candidate*candidate;
+  var beforeMass=0.0;var beforeGamma=0.0;var beforeMomentum=vec3f(0.0);
+  for(var local=lane;local<sourceCount;local+=64u){let cell=first+local;
+    let volume=cellVolume(cell);let rho=state[destinationDensity()+cell];
+    let velocityAt=destinationCellVelocity()+4u*cell;
+    let velocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u]);
+    beforeMass+=rho*volume;beforeGamma+=state[destinationGamma()+cell]*volume;
+    beforeMomentum+=rho*volume*velocity;
+  }
+  var afterMass=0.0;var afterGamma=0.0;var afterMomentum=vec3f(0.0);
+  for(var local=lane;local<candidateCount;local+=64u){
+    let cz=local/(candidate*candidate);let yz=local-cz*candidate*candidate;
+    let cy=yz/candidate;let cx=yz-cy*candidate;
+    var rho=0.0;var gamma=0.0;var velocity=vec3f(0.0);var pressure=0.0;
+    if(candidate<accepted){let factor=accepted/candidate;
+      var volumeSum=0.0;var massSum=0.0;var momentumSum=vec3f(0.0);
+      for(var dz=0u;dz<factor;dz+=1u){for(var dy=0u;dy<factor;dy+=1u){
+        for(var dx=0u;dx<factor;dx+=1u){
+          let sx=factor*cx+dx;let sy=factor*cy+dy;let sz=factor*cz+dz;
+          let sourceLocal=sx+accepted*(sy+accepted*sz);let cell=first+sourceLocal;
+          let volume=cellVolume(cell);let sourceRho=state[destinationDensity()+cell];
+          let velocityAt=destinationCellVelocity()+4u*cell;
+          let sourceVelocity=vec3f(state[velocityAt],state[velocityAt+1u],
+            state[velocityAt+2u]);
+          volumeSum+=volume;massSum+=sourceRho*volume;
+          rho+=sourceRho*volume;gamma+=state[destinationGamma()+cell]*volume;
+          pressure+=state[p.stateOffsets2.x+cell]*volume;
+          velocity+=sourceVelocity*volume;momentumSum+=sourceRho*volume*sourceVelocity;
+      }}}
+      if(volumeSum>0.0){rho/=volumeSum;gamma/=volumeSum;pressure/=volumeSum;
+        velocity=select(velocity/volumeSum,momentumSum/massSum,abs(massSum)>1e-12);}
+    }else{
+      let factor=candidate/accepted;let sx=cx/factor;let sy=cy/factor;let sz=cz/factor;
+      let cell=first+sx+accepted*(sy+accepted*sz);rho=state[destinationDensity()+cell];
+      gamma=state[destinationGamma()+cell];pressure=state[p.stateOffsets2.x+cell];
+      let velocityAt=destinationCellVelocity()+4u*cell;
+      velocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u]);
+    }
+    candidateState[candidateFieldIndex(0u,brick,local)]=rho;
+    candidateState[candidateFieldIndex(1u,brick,local)]=gamma;
+    candidateState[candidateFieldIndex(2u,brick,local)]=velocity.x;
+    candidateState[candidateFieldIndex(3u,brick,local)]=velocity.y;
+    candidateState[candidateFieldIndex(4u,brick,local)]=velocity.z;
+    candidateState[candidateFieldIndex(5u,brick,local)]=pressure;
+    let volume=candidateCellVolume(brick,candidate,local);
+    afterMass+=rho*volume;afterGamma+=gamma*volume;
+    afterMomentum+=rho*volume*velocity;
+  }
+  transferMassBefore[lane]=beforeMass;transferMassAfter[lane]=afterMass;
+  transferGammaDelta[lane]=afterGamma-beforeGamma;
+  transferMomentumXDelta[lane]=afterMomentum.x-beforeMomentum.x;
+  transferMomentumYDelta[lane]=afterMomentum.y-beforeMomentum.y;
+  transferMomentumZDelta[lane]=afterMomentum.z-beforeMomentum.z;
+  workgroupBarrier();var width=32u;loop{if(lane<width){
+    transferMassBefore[lane]+=transferMassBefore[lane+width];
+    transferMassAfter[lane]+=transferMassAfter[lane+width];
+    transferGammaDelta[lane]+=transferGammaDelta[lane+width];
+    transferMomentumXDelta[lane]+=transferMomentumXDelta[lane+width];
+    transferMomentumYDelta[lane]+=transferMomentumYDelta[lane+width];
+    transferMomentumZDelta[lane]+=transferMomentumZDelta[lane+width];
+  }workgroupBarrier();if(width==1u){break;}width/=2u;}
+  if(lane!=0u){return;}
+  if(candidateStatus!=1u){
+    atomicStore(&activity[output+23u],select(0u,2u,candidateStatus==2u));return;
+  }
+  let massError=transferMassAfter[0]-transferMassBefore[0];
+  let gammaError=transferGammaDelta[0];let momentumError=vec3f(
+    transferMomentumXDelta[0],transferMomentumYDelta[0],transferMomentumZDelta[0]);
+  let tolerance=max(1e-4,1e-6*abs(transferMassBefore[0]));
+  let valid=finiteTransferValue(transferMassBefore[0])
+    &&finiteTransferValue(transferMassAfter[0])&&finiteTransferValue(gammaError)
+    &&all(momentumError==momentumError)&&abs(massError)<=tolerance
+    &&abs(gammaError)<=max(1e-3,tolerance)
+    &&all(abs(momentumError)<=vec3f(max(1e-3,tolerance)));
+  atomicStore(&activity[output+16u],bitcast<u32>(transferMassBefore[0]));
+  atomicStore(&activity[output+17u],bitcast<u32>(transferMassAfter[0]));
+  atomicStore(&activity[output+18u],bitcast<u32>(massError));
+  atomicStore(&activity[output+19u],bitcast<u32>(gammaError));
+  atomicStore(&activity[output+20u],bitcast<u32>(momentumError.x));
+  atomicStore(&activity[output+21u],bitcast<u32>(momentumError.y));
+  atomicStore(&activity[output+22u],bitcast<u32>(momentumError.z));
+  atomicStore(&activity[output+23u],select(2u,1u,valid));
+  if(!valid){atomicOr(&activity[7],2u);}
+}
+
+@compute @workgroup_size(64)
+fn prepareCandidateFaceReceipts(@builtin(global_invocation_id)gid:vec3u){
+  let brick=gid.x;if(brick>=p.dispatch.w){return;}let output=activityRecord(brick);
+  for(var side=0u;side<6u;side+=1u){atomicStore(&activity[output+24u+side],0u);}
+  atomicStore(&activity[output+30u],0u);
+  let candidateStatus=atomicLoad(&activity[output+14u]);
+  atomicStore(&activity[output+31u],select(select(0u,1u,candidateStatus==1u),2u,
+    candidateStatus==2u));
+}
+
+// Area-average every authoritative accepted normal flux into the candidate's
+// exterior face patches. Each row is claimed once per incident brick, so the
+// six integrated exterior fluxes are exact transfer receipts rather than a
+// cell-velocity reconstruction.
+@compute @workgroup_size(64)
+fn transferCandidateFaces(@builtin(local_invocation_id)lid:vec3u,
+ @builtin(workgroup_id)wid:vec3u){
+  let brick=wid.x;let side=wid.y;let lane=lid.x;
+  if(brick>=p.dispatch.w||side>=6u){return;}
+  let output=activityRecord(brick);let candidate=atomicLoad(&activity[output+13u]);
+  let record=p.topologyOffsets2.z+4u*brick;let first=topology[record];
+  let count=topology[record+1u];let key=topology[record+3u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let xy=brickDimensions.x*brickDimensions.y;let bz=key/xy;
+  let remainder=key-bz*xy;let by=remainder/brickDimensions.x;
+  let bx=remainder-by*brickDimensions.x;let origin=vec3f(vec3u(bx,by,bz)*8u);
+  let axis=side/2u;let positive=(side&1u)!=0u;
+  let tangent0=select(select(0u,0u,axis==2u),1u,axis==0u);
+  let tangent1=select(2u,1u,axis==2u);
+  let plane=origin[axis]+select(0.0,8.0,positive);let scale=8.0/f32(candidate);
+  var flux=0.0;var area=0.0;
+  if(lane<candidate*candidate){
+    for(var local=0u;local<count;local+=1u){let cell=first+local;
+      for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+        let row=incidenceRow(incidence);if(rowAxis(row)!=axis){continue;}
+        let center=rowCenter(row);if(abs(center[axis]-plane)>1e-4){continue;}
+        var claimant=INVALID;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+        for(var term=begin;term<end;term+=1u){let termOwner=termCell(term);
+          if(cellBrick(termOwner)==brick){claimant=min(claimant,termOwner);}}
+        if(cell!=claimant){continue;}
+        let p0=min(candidate-1u,u32(max(0.0,floor(
+          (center[tangent0]-origin[tangent0])/scale))));
+        let p1=min(candidate-1u,u32(max(0.0,floor(
+          (center[tangent1]-origin[tangent1])/scale))));
+        if(lane!=p0+candidate*p1){continue;}
+        let rowAreaValue=rowArea(row);area+=rowAreaValue;
+        flux+=state[destinationFaceVelocity()+row]*rowAreaValue
+          *select(-1.0,1.0,positive);
+      }
+    }
+    candidateState[candidateFieldIndex(6u+side,brick,lane)]=select(0.0,flux/area,area>0.0);
+  }
+  reduceA[lane]=flux;reduceB[lane]=select(0.0,flux/area,area>0.0)*area;
+  workgroupBarrier();var width=32u;loop{if(lane<width){
+    reduceA[lane]+=reduceA[lane+width];reduceB[lane]+=reduceB[lane+width];
+  }workgroupBarrier();if(width==1u){break;}width/=2u;}
+  if(lane!=0u){return;}let error=reduceB[0]-reduceA[0];
+  atomicStore(&activity[output+24u+side],bitcast<u32>(error));
+  atomicMax(&activity[output+30u],bitcast<u32>(abs(error)));
+  if(atomicLoad(&activity[output+14u])==1u){
+    let valid=finiteTransferValue(error)&&abs(error)<=max(1e-4,1e-6*abs(reduceA[0]));
+    if(!valid){atomicStore(&activity[output+31u],2u);atomicOr(&activity[7],4u);}
+  }
 }
 
 // Publish one swept receiver layer from the immutable activity snapshot. A

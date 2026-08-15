@@ -125,6 +125,12 @@ function activityD4MismatchCount(
       || transformed.quietEpochs !== brick.quietEpochs
       || transformed.plannedResolution !== brick.plannedResolution
       || transformed.planReasons !== brick.planReasons
+      || transformed.acceptedResolution !== brick.acceptedResolution
+      || transformed.candidateResolution !== brick.candidateResolution
+      || transformed.candidateStatus !== brick.candidateStatus
+      || transformed.candidateEpoch !== brick.candidateEpoch
+      || transformed.transferStatus !== brick.transferStatus
+      || transformed.faceTransferStatus !== brick.faceTransferStatus
       || transformed.active !== brick.active
       || transformed.activatedStep !== brick.activatedStep) mismatches += 1;
   }
