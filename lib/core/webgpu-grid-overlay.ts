@@ -204,7 +204,7 @@ fn sparseFinePhiAt(q:vec3i)->f32{
 }
 fn sparseOwnerKey(q:vec3i)->vec2u{
   let owner=sparseOwner(q);if(owner.x==SPARSE_INVALID){return vec2u(SPARSE_INVALID);}
-  let base=sparseP.topologyOffsets.x+12u*owner.x;
+  let base=sparseP.topologyOffsets.x+16u*owner.x;
   let lower=vec3u(sparseTopology[base+7u],sparseTopology[base+8u],sparseTopology[base+9u]);
   let scale=max(1u,sparseTopology[base+10u]);let level=u32(round(log2(f32(scale))));
   return vec2u(lower.x|(lower.z<<11u)|(level<<22u),lower.y|0x80000000u);

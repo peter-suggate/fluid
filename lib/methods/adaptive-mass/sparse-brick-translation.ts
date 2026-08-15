@@ -87,7 +87,9 @@ function transportClosure(atlas: SparseAdaptiveMassAtlas): SparseAdaptiveMassAtl
           if (!bricks.has(key)) bricks.set(key, zeroBrick(key, coordinate));
         }
   }
-  return createSparseAdaptiveMassAtlas(atlas.dimensions, [...bricks.values()], atlas.generation);
+  return createSparseAdaptiveMassAtlas(
+    atlas.dimensions, [...bricks.values()], atlas.generation, atlas.boundary,
+  );
 }
 
 function leafAtFineCell(
@@ -160,7 +162,9 @@ export function advanceSparseBrickAtlasTranslation(
   }
   const epsilon = options.emptyEpsilon ?? 1e-12;
   if (source.bricks.length === 0) {
-    return { atlas: createSparseAdaptiveMassAtlas(source.dimensions, [], source.generation + 1),
+    return { atlas: createSparseAdaptiveMassAtlas(
+      source.dimensions, [], source.generation + 1, source.boundary,
+    ),
       stats: { sourceBrickCount: 0, transientSupportBrickCount: 0, retainedBrickCount: 0,
         sourceLeafCount: 0, workLeafCount: 0, finalBetaMaximumAbsoluteError: 0,
         massBeforeFineCells: 0, massAfterFineCells: 0, massAbsoluteErrorFineCells: 0,
@@ -237,7 +241,9 @@ export function advanceSparseBrickAtlasTranslation(
     }
     if (wet) retained.push({ ...brick, density, gamma });
   }
-  const atlas = createSparseAdaptiveMassAtlas(source.dimensions, retained, source.generation + 1);
+  const atlas = createSparseAdaptiveMassAtlas(
+    source.dimensions, retained, source.generation + 1, source.boundary,
+  );
   const sourceLeaves = sparseAtlasLeaves(source);
   const resultLeaves = sparseAtlasLeaves(atlas);
   const massBeforeFineCells = sourceLeaves.reduce(

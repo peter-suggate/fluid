@@ -3,6 +3,7 @@ import { sparseAtlasScalarsHaveHorizontalD4Symmetry } from
   "./sparse-atlas-surface-conditioning";
 import type { SparseAdaptiveMassAtlas } from "./sparse-brick-atlas";
 import { CM12_SHARPENING_TRACE_STEPS } from "../../core/cm12-numerics";
+import type { SphericalContainerFineGeometry } from "../../core/spherical-container";
 import {
   FINE_LEVELSET_COMPACT_LOOKUP_FLAG,
   FINE_LEVELSET_METADATA_WORDS,
@@ -325,7 +326,7 @@ function packResidentTopology(
   const incidenceCount = byCell.reduce((sum, values) => sum + values.length, 0);
   const brickIndexByKey = new Map(atlas.bricks.map((brick, index) => [brick.key, index]));
   let at = 0;
-  const cellOffset = at; at += 12 * grid.cells.length;
+  const cellOffset = at; at += 16 * grid.cells.length;
   const rowOffset = at; at += 12 * grid.gradientRows.length;
   const termOffset = at; at += 2 * termCount;
   const incidenceOffset = at; at += grid.cells.length + 1;
@@ -339,7 +340,7 @@ function packResidentTopology(
   const words = new Uint32Array(at);
 
   for (const cell of grid.cells) {
-    const base = cellOffset + 12 * cell.id;
+    const base = cellOffset + 16 * cell.id;
     setF32(words, base, cell.centerFine[0]);
     setF32(words, base + 1, cell.centerFine[1]);
     setF32(words, base + 2, cell.centerFine[2]);
@@ -354,6 +355,9 @@ function packResidentTopology(
     const brickIndex = brickIndexByKey.get(cell.brickKey);
     if (brickIndex === undefined) throw new Error(`Sparse CM12 cell ${cell.id} has no brick`);
     words[base + 11] = brickIndex;
+    setF32(words, base + 12, cell.openFraction);
+    setF32(words, base + 13, cell.openVolume);
+    words[base + 14] = cell.separatingPressureMinimum ? 1 : 0;
   }
 
   nextTerm = 0;
@@ -458,7 +462,7 @@ export class WebGPUSparseCM12Resident {
   private readonly diagnosticsReadback: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
   private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
-  private readonly parameterWords = new ArrayBuffer(256);
+  private readonly parameterWords = new ArrayBuffer(352);
   private readonly parameterU32 = new Uint32Array(this.parameterWords);
   private readonly parameterF32 = new Float32Array(this.parameterWords);
   private parity = 0;
@@ -479,6 +483,7 @@ export class WebGPUSparseCM12Resident {
     cellCount: number,
     rowCount: number,
     private horizontalD4Authority: boolean,
+    private readonly boundary?: SphericalContainerFineGeometry,
   ) {
     [this.parameters, this.topology, this.state, this.partials, this.scalars,
       this.conditioning, this.activity, this.candidateState] = buffers;
@@ -551,7 +556,7 @@ export class WebGPUSparseCM12Resident {
     const cellWorkgroups = Math.ceil(grid.cells.length / WORKGROUP_SIZE);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const parameters = device.createBuffer({ label: "Sparse CM12 resident parameters",
-      size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 352, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const topology = uploadBuffer(device, "Sparse CM12 resident topology", packed.words, storage);
     const state = uploadBuffer(device, "Sparse CM12 resident state", initialState, storage);
     const partials = device.createBuffer({ label: "Sparse CM12 resident reductions",
@@ -650,11 +655,13 @@ export class WebGPUSparseCM12Resident {
       "gatherConservativeDensity", "diffuseGammaForwardX", "diffuseGammaForwardY",
       "diffuseGammaForwardZ", "diffuseGammaReverseZ", "diffuseGammaReverseY",
       "diffuseGammaReverseX", "averageGammaDiffusion", "scatterSharpeningMass",
-      "finalizeSharpening", "preserveHorizontalD4",
+      "finalizeSharpening", "clearSolidExcess", "scatterSolidExcess",
+      "finalizeSolidExcess", "preserveHorizontalD4",
       "commitHorizontalD4",
       "forceFaces", "classifyRows", "preparePressure",
       "initializePCG", "reduceInitialize", "applyDirection", "reduceCurvature",
-      "updateResidual", "reduceResidual", "updateDirection", "projectFaces",
+      "updateResidual", "reduceResidual", "updateDirection",
+      "projectedJacobiToApplied", "projectedJacobiToPressure", "projectFaces",
       "collocateAndDiagnose", "measureDivergenceDiagnostics",
       "reduceDivergenceDiagnostics",
       "advanceActivityClock", "measureBrickActivity",
@@ -676,7 +683,7 @@ export class WebGPUSparseCM12Resident {
       diagnosticsReadback,
       bindGroup,
       Object.fromEntries(entries), grid.cells.length, grid.gradientRows.length,
-      horizontalD4Authority);
+      horizontalD4Authority, atlas.boundary);
     result.writeParameters(packed, 0.004, 1, 1, [0, 0, 0]);
     return result;
   }
@@ -754,6 +761,11 @@ export class WebGPUSparseCM12Resident {
     stage("surface-sharpening", () => {
       dispatch("scatterSharpeningMass", cells);
       dispatch("finalizeSharpening", cells);
+      if (this.boundary) {
+        dispatch("clearSolidExcess", cells);
+        dispatch("scatterSolidExcess", cells);
+        dispatch("finalizeSolidExcess", cells);
+      }
     });
     stage("symmetry-authority", () => {
       if (!this.horizontalD4Authority) return;
@@ -773,12 +785,23 @@ export class WebGPUSparseCM12Resident {
       dispatch("reduceInitialize", 1);
     });
     stage("pressure-solve", () => {
-      for (let iteration = 0; iteration < PCG_ITERATIONS; iteration += 1) {
-        dispatch("applyDirection", cells);
-        dispatch("reduceCurvature", 1);
-        dispatch("updateResidual", cells);
-        dispatch("reduceResidual", 1);
-        dispatch("updateDirection", cells);
+      if (this.boundary) {
+        // Projected Jacobi solves the cut-boundary LCP. Pressure samples whose
+        // centres lie in solid enforce p >= 0; unconstrained cells retain the
+        // ordinary free-surface equation. Two kernels provide the ping-pong
+        // image without allocating another persistent pressure field.
+        for (let iteration = 0; iteration < PCG_ITERATIONS / 2; iteration += 1) {
+          dispatch("projectedJacobiToApplied", cells);
+          dispatch("projectedJacobiToPressure", cells);
+        }
+      } else {
+        for (let iteration = 0; iteration < PCG_ITERATIONS; iteration += 1) {
+          dispatch("applyDirection", cells);
+          dispatch("reduceCurvature", 1);
+          dispatch("updateResidual", cells);
+          dispatch("reduceResidual", 1);
+          dispatch("updateDirection", cells);
+        }
       }
     });
     stage("velocity-projection", () => {
@@ -873,7 +896,7 @@ export class WebGPUSparseCM12Resident {
     u.fill(0);
     u.set([this.cellCount, this.rowCount, packed.incidenceCount,
       this.dimensions[0] * this.dimensions[1] * this.dimensions[2]], 0);
-    u.set([...this.dimensions, 0], 4);
+    u.set([...this.dimensions, this.boundary ? 1 : 0], 4);
     u.set([packed.cellOffset, packed.rowOffset, packed.termOffset, packed.incidenceOffset], 8);
     u.set([packed.incidenceRecordOffset, packed.brickLookupOffset,
       packed.brickOffset, packed.backgroundOwnerOffset], 12);
@@ -900,6 +923,8 @@ export class WebGPUSparseCM12Resident {
       sparseCM12SharpeningTraceSteps(sharpening?.traceSteps),
       0, 0,
     ], 60);
+    f.set(this.boundary ? [...this.boundary.centerFine, 0] : [0, 0, 0, 0], 64);
+    f.set(this.boundary ? [...this.boundary.radiiFine, 0] : [1, 1, 1, 0], 68);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
   }
 
@@ -982,7 +1007,7 @@ export class WebGPUSparseCM12Resident {
       const pressureScale = this.parameterF32[42]!;
       const topologyFloats = new Float32Array(packed.words.buffer);
       for (let cell = 0; cell < this.cellCount; cell += 1) {
-        const base = packed.cellOffset + 12 * cell;
+        const base = packed.cellOffset + 16 * cell;
         const brick = packed.words[base + 11]!;
         if (!(state[this.layout.presentationBrickWet + brick]! > 0.5)) continue;
         const lower = [packed.words[base + 7]!, packed.words[base + 8]!,

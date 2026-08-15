@@ -7,6 +7,7 @@ import type {
   MethodParamValues,
 } from "../../core/method-contract";
 import type { SceneDescription } from "../../core/model";
+import { classifyFineBoxAgainstSphericalContainer } from "../../core/spherical-container";
 import type { RigidBodyState } from "../../core/rigid-body";
 import { sceneLatticeDimensions } from "../../core/scene-lattice";
 import { GPUStageTimestampRecorder } from "../../core/performance-trace";
@@ -87,6 +88,61 @@ export function dormantReceiverResolution(
  */
 export const SPARSE_CM12_RECEIVER_SUPPORT_RINGS = 9;
 
+function receiverBoundaryResolution(
+  atlas: SparseAdaptiveMassAtlas,
+  coordinate: SparseBrickVec3,
+): SparseBrickResolution | undefined {
+  if (!atlas.boundary) return undefined;
+  const minimum = coordinate.map((value) => value * 8) as [number, number, number];
+  const maximum = coordinate.map((value) => (value + 1) * 8) as [number, number, number];
+  const classification = classifyFineBoxAgainstSphericalContainer(
+    atlas.boundary, minimum, maximum,
+  );
+  if (classification === "outside") return undefined;
+  if (classification === "cut") return 4;
+  const collarMinimum = minimum.map((value) => value - 8) as [number, number, number];
+  const collarMaximum = maximum.map((value) => value + 8) as [number, number, number];
+  return classifyFineBoxAgainstSphericalContainer(
+    atlas.boundary, collarMinimum, collarMaximum,
+  ) === "cut" ? 2 : 1;
+}
+
+function closeReceiverGrading(
+  source: SparseAdaptiveMassAtlas,
+  bricks: Map<number, SparseAdaptiveMassBrick>,
+): void {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const brick of [...bricks.values()]) for (let axis = 0; axis < 3; axis += 1) {
+      const coordinate = [...brick.coordinate] as [number, number, number];
+      coordinate[axis] += 1;
+      if (coordinate[axis] >= source.brickDimensions[axis]) continue;
+      const neighbor = bricks.get(sparseBrickKey(coordinate, source.brickDimensions));
+      if (!neighbor) continue;
+      const high = Math.max(brick.resolution, neighbor.resolution);
+      const low = brick.resolution < neighbor.resolution ? brick : neighbor;
+      if (high <= 2 * low.resolution) continue;
+      const resolution = (high / 2) as SparseBrickResolution;
+      const density = new Float64Array(resolution ** 3);
+      const gamma = new Float64Array(resolution ** 3);
+      for (let z = 0; z < resolution; z += 1)
+        for (let y = 0; y < resolution; y += 1)
+          for (let x = 0; x < resolution; x += 1) {
+            const local = x + resolution * (y + resolution * z);
+            const sx = Math.min(low.resolution - 1, Math.floor(x * low.resolution / resolution));
+            const sy = Math.min(low.resolution - 1, Math.floor(y * low.resolution / resolution));
+            const sz = Math.min(low.resolution - 1, Math.floor(z * low.resolution / resolution));
+            const sourceLocal = sx + low.resolution * (sy + low.resolution * sz);
+            density[local] = low.density[sourceLocal]!;
+            gamma[local] = low.gamma[sourceLocal]!;
+          }
+      bricks.set(low.key, { ...low, resolution, density, gamma });
+      changed = true;
+    }
+  }
+}
+
 /** Reserve a compact receiver halo for the fixed-topology GPU control arms. */
 function brickFaceCarriesFluid(
   brick: SparseAdaptiveMassBrick,
@@ -131,19 +187,25 @@ export function residentSupportAtlas(
         const key = sparseBrickKey(coordinate, source.brickDimensions);
         if (bricks.has(key)) continue;
         if (!brickFaceCarriesFluid(brick, [dx, dy, dz])) continue;
-        const count = receiverResolution ** 3;
+        const boundaryResolution = receiverBoundaryResolution(source, coordinate);
+        if (source.boundary && boundaryResolution === undefined) continue;
+        const resolution = Math.max(receiverResolution,
+          boundaryResolution ?? 1) as SparseBrickResolution;
+        const count = resolution ** 3;
         const receiver: SparseAdaptiveMassBrick = {
-          key, coordinate, resolution: receiverResolution,
+          key, coordinate, resolution,
           density: new Float64Array(count),
           gamma: new Float64Array(count).fill(1),
         };
         bricks.set(key, receiver);
       }
   }
+  closeReceiverGrading(source, bricks);
   return createSparseAdaptiveMassAtlas(
     source.dimensions,
     [...bricks.values()].sort((left, right) => left.key - right.key),
     source.generation,
+    source.boundary,
   );
 }
 
@@ -173,7 +235,7 @@ export function dormantReceiverDomain(
   // 4/2/1 cold hierarchy; applying 4^3 to their entire 19-brick-wide
   // neighbourhood made Figure 7 construction almost twice as expensive and
   // measurably increased its frame time.
-  const boundaryFed = source.bricks.some((brick) => brick.density.some(
+  const boundaryFed = !source.boundary && source.bricks.some((brick) => brick.density.some(
     (density) => density > 0,
   ) && brick.coordinate.some((value, axis) => value === 0
     || value === source.brickDimensions[axis] - 1));
@@ -200,6 +262,8 @@ export function dormantReceiverDomain(
             || value >= source.brickDimensions[axis])) continue;
           const key = sparseBrickKey(neighbor, source.brickDimensions);
           if (distanceByKey.has(key)) continue;
+          const boundaryResolution = receiverBoundaryResolution(source, neighbor);
+          if (source.boundary && boundaryResolution === undefined) continue;
           const nextDistance = distance + 1;
           distanceByKey.set(key, nextDistance);
           queue.push(neighbor);
@@ -212,8 +276,9 @@ export function dormantReceiverDomain(
           // physical floor is selected once from the retained liquid source,
           // never from logical-domain volume or a domain scan.
           const planned = dormantReceiverResolution(mode, nextDistance);
-          const resolution: SparseBrickResolution = mode === "adaptive"
+          let resolution: SparseBrickResolution = mode === "adaptive"
             ? Math.max(physicalReceiverFloor, planned) as SparseBrickResolution : planned;
+          resolution = Math.max(resolution, boundaryResolution ?? 1) as SparseBrickResolution;
           const count = resolution ** 3;
           bricks.set(key, {
             key, coordinate: neighbor, resolution,
@@ -222,10 +287,12 @@ export function dormantReceiverDomain(
           });
         }
   }
+  closeReceiverGrading(source, bricks);
   return createSparseAdaptiveMassAtlas(
     source.dimensions,
     [...bricks.values()].sort((left, right) => left.key - right.key),
     source.generation,
+    source.boundary,
   );
 }
 

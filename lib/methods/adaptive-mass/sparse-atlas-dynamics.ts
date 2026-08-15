@@ -342,7 +342,8 @@ function transportSupport(
     return source;
   }
   const support = createSparseAdaptiveMassAtlas(source.dimensions,
-    [...bricks.values()].sort((left, right) => left.key - right.key), source.generation);
+    [...bricks.values()].sort((left, right) => left.key - right.key), source.generation,
+    source.boundary);
   variants.set(variantKey, support);
   return support;
 }
@@ -909,6 +910,7 @@ export function injectSparseAtlasLiquid(
     source.dimensions,
     [...bricks.values()].sort((left, right) => left.key - right.key),
     source.generation + 1,
+    source.boundary,
   );
   const retained = sameAtlasTopology(source, atlas);
   const grid = retained
@@ -1077,6 +1079,7 @@ function retainedAtlas(
     source.dimensions,
     retained,
     source.generation + 1,
+    source.boundary,
   );
 }
 

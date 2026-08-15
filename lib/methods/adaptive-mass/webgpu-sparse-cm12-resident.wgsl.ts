@@ -35,6 +35,8 @@ struct Params {
   injectionCenter:vec4f,
   injectionRadius:vec4f,
   sharpening:vec4f,         // Algorithm 2 distance in cells, trace substeps, reserved
+  boundaryCenter:vec4f,
+  boundaryRadii:vec4f,
 }
 
 @group(0)@binding(0)var<uniform>p:Params;
@@ -61,9 +63,12 @@ fn destinationCellVelocity()->u32{return select(p.stateOffsets1.y,p.stateOffsets
 fn sourceFaceVelocity()->u32{return select(p.stateOffsets1.z,p.stateOffsets1.w,p.frame.w>0.5);}
 fn destinationFaceVelocity()->u32{return select(p.stateOffsets1.w,p.stateOffsets1.z,p.frame.w>0.5);}
 
-fn cellBase(id:u32)->u32{return p.topologyOffsets.x+id*12u;}
+fn cellBase(id:u32)->u32{return p.topologyOffsets.x+id*16u;}
 fn cellBrick(id:u32)->u32{return topology[cellBase(id)+11u];}
 fn cellVolume(id:u32)->f32{return tf(cellBase(id)+3u);}
+fn cellOpenFraction(id:u32)->f32{return tf(cellBase(id)+12u);}
+fn cellOpenVolume(id:u32)->f32{return tf(cellBase(id)+13u);}
+fn cellSeparatingMinimum(id:u32)->bool{return topology[cellBase(id)+14u]!=0u;}
 fn cellMinimumWidth(id:u32)->f32{
   let b=cellBase(id);return min(tf(b+4u),min(tf(b+5u),tf(b+6u)));
 }
@@ -90,7 +95,32 @@ fn brickActive(brick:u32)->bool{
   return brick<p.dispatch.w&&atomicLoad(&activity[activityRecord(brick)+10u])!=0u;
 }
 fn cellActive(cell:u32)->bool{return brickActive(cellBrick(cell));}
+fn cellTransportActive(cell:u32)->bool{return cellActive(cell)&&cellOpenVolume(cell)>1e-8;}
 fn isLiquid(cell:u32)->bool{return cellActive(cell)&&state[p.stateOffsets2.w+cell]>0.5;}
+
+fn hasEmbeddedBoundary()->bool{return p.dimensions.w!=0u;}
+fn boundaryDistance2(q:vec3f)->f32{
+  let offset=(q-p.boundaryCenter.xyz)/max(p.boundaryRadii.xyz,vec3f(1e-6));
+  return dot(offset,offset);
+}
+fn insideEmbeddedBoundary(q:vec3f)->bool{
+  return !hasEmbeddedBoundary()||boundaryDistance2(q)<=1.0;
+}
+fn clampInsideEmbeddedBoundary(q:vec3f)->vec3f{
+  if(!hasEmbeddedBoundary()){return q;}let offset=q-p.boundaryCenter.xyz;
+  let scaled=offset/max(p.boundaryRadii.xyz,vec3f(1e-6));let d2=dot(scaled,scaled);
+  return select(q,p.boundaryCenter.xyz+offset*(0.9999/sqrt(d2)),d2>0.9998);
+}
+fn clipBoundarySegment(startInput:vec3f,candidate:vec3f)->vec3f{
+  if(!hasEmbeddedBoundary()||insideEmbeddedBoundary(candidate)){return candidate;}
+  let start=clampInsideEmbeddedBoundary(startInput);
+  let radii=max(p.boundaryRadii.xyz,vec3f(1e-6));
+  let origin=(start-p.boundaryCenter.xyz)/radii;let direction=(candidate-start)/radii;
+  let a=dot(direction,direction);let b=2.0*dot(origin,direction);
+  let c=dot(origin,origin)-1.0;let discriminant=max(0.0,b*b-4.0*a*c);
+  let hit=select(0.0,(-b+sqrt(discriminant))/max(2.0*a,1e-12),a>1e-12);
+  return mix(start,candidate,clamp(hit-1e-4,0.0,1.0));
+}
 
 fn brickDirectoryLookup(key:u32)->u32{
   var low=0u;var high=p.dispatch.w;
@@ -122,7 +152,7 @@ fn compactOwnerCellAt(q:vec3i)->vec2u{
 
 fn ownerCellAt(q:vec3i)->u32{
   let owner=compactOwnerCellAt(q);if(owner.x==INVALID||!brickActive(owner.y)){return INVALID;}
-  return owner.x;
+  return select(INVALID,owner.x,cellTransportActive(owner.x));
 }
 
 fn presentationOwnerCellAt(q:vec3i)->u32{
@@ -131,7 +161,8 @@ fn presentationOwnerCellAt(q:vec3i)->u32{
 }
 
 fn presentationPhi(cell:u32)->f32{
-  return (CM12_LIQUID_ISOVALUE-state[destinationDensity()+cell])*4.0*p.frame.y;
+  let effective=state[destinationDensity()+cell]/max(cellOpenFraction(cell),1e-6);
+  return (CM12_LIQUID_ISOVALUE-effective)*4.0*p.frame.y;
 }
 
 // Restrict authoritative rho by finest-cell volume. A coarse presentation
@@ -141,7 +172,8 @@ fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
   var rho=0.0;
   for(var dz=0;dz<cellScale;dz+=1){for(var dy=0;dy<cellScale;dy+=1){for(var dx=0;dx<cellScale;dx+=1){
     let cell=presentationOwnerCellAt(lower+vec3i(dx,dy,dz));
-    if(cell!=INVALID){rho+=state[destinationDensity()+cell];}
+    if(cell!=INVALID){rho+=state[destinationDensity()+cell]
+      /max(cellOpenFraction(cell),1e-6);}
   }}}
   return rho/f32(cellScale*cellScale*cellScale);
 }
@@ -185,15 +217,17 @@ fn sampleVelocity(position:vec3f)->vec3f{
 }
 
 fn traceCharacteristic(position:vec3f,direction:f32)->vec3f{
-  let initial=sampleVelocity(position);
+  let initialPosition=clampInsideEmbeddedBoundary(position);
+  let initial=sampleVelocity(initialPosition);
   let substeps=clamp(i32(ceil(length(initial)*p.frame.x)),1,16);
-  let subDt=p.frame.x/f32(substeps);var traced=position;
+  let subDt=p.frame.x/f32(substeps);var traced=initialPosition;
   let lower=vec3f(0.5);let upper=vec3f(p.dimensions.xyz)-vec3f(0.5);
   for(var step=0;step<substeps;step+=1){
     let first=sampleVelocity(traced);
-    let midpoint=clamp(traced+direction*0.5*subDt*first,lower,upper);
+    let midpoint=clipBoundarySegment(traced,
+      clamp(traced+direction*0.5*subDt*first,lower,upper));
     let candidate=traced+direction*subDt*sampleVelocity(midpoint);
-    traced=clamp(candidate,lower,upper);
+    traced=clipBoundarySegment(traced,clamp(candidate,lower,upper));
   }
   return traced;
 }
@@ -270,6 +304,7 @@ fn extrapolateTransportVelocityToDestination(@builtin(global_invocation_id)gid:v
 @compute @workgroup_size(64)
 fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
   let row=gid.x;if(row>=p.counts.y){return;}
+  if(rowArea(row)<=1e-8){state[destinationFaceVelocity()+row]=0.0;return;}
   let departure=traceDeparture(rowCenter(row));
   let characteristic=sampleVelocity(departure)[rowAxis(row)];
   var touchesLiquid=false;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
@@ -282,14 +317,15 @@ fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(64)
 fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
-  let id=gid.x;if(id>=p.counts.x||!cellActive(id)){return;}let b=cellBase(id);
+  let id=gid.x;if(id>=p.counts.x||!cellTransportActive(id)){return;}let b=cellBase(id);
   let center=vec3f(tf(b),tf(b+1u),tf(b+2u));
   let q=(center-p.injectionCenter.xyz)/max(p.injectionRadius.xyz,vec3f(1e-6));
   let signed=length(q)-1.0;
   let coverage=clamp(0.5-signed*min(p.injectionRadius.x,
     min(p.injectionRadius.y,p.injectionRadius.z))/max(cellMinimumWidth(id),1e-6),0.0,1.0);
-  state[p.stateOffsets0.x+id]=max(state[p.stateOffsets0.x+id],coverage);
-  state[p.stateOffsets0.y+id]=max(state[p.stateOffsets0.y+id],coverage);
+  let clippedCoverage=coverage*cellOpenFraction(id);
+  state[p.stateOffsets0.x+id]=max(state[p.stateOffsets0.x+id],clippedCoverage);
+  state[p.stateOffsets0.y+id]=max(state[p.stateOffsets0.y+id],clippedCoverage);
   if(coverage>0.0){state[p.stateOffsets0.z+id]=1.0;state[p.stateOffsets0.w+id]=1.0;}
 }
 
@@ -298,7 +334,7 @@ fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn traceGammaAndBeta(@builtin(global_invocation_id)gid:vec3u){
   let id=gid.x;if(id>=p.counts.x){return;}
-  if(!cellActive(id)){state[destinationGamma()+id]=1.0;return;}
+  if(!cellTransportActive(id)){state[destinationGamma()+id]=1.0;return;}
   let b=cellBase(id);
   let departure=traceDeparture(vec3f(tf(b),tf(b+1u),tf(b+2u)));
   var visible=0.0;var sampledGamma=0.0;
@@ -320,7 +356,7 @@ fn traceGammaAndBeta(@builtin(global_invocation_id)gid:vec3u){
 // deterministic and keep rho and gamma transfers paired.
 @compute @workgroup_size(64)
 fn scatterDensityDeficit(@builtin(global_invocation_id)gid:vec3u){
-  let donor=gid.x;if(donor>=p.counts.x||!cellActive(donor)){return;}
+  let donor=gid.x;if(donor>=p.counts.x||!cellTransportActive(donor)){return;}
   let deficit=max(0.0,1.0-transportBeta(donor));
   if(deficit<=1.0/CM12_TRANSPORT_FIXED){return;}let b=cellBase(donor);
   let arrival=traceArrival(vec3f(tf(b),tf(b+1u),tf(b+2u)));
@@ -351,6 +387,9 @@ fn gatherConservativeDensity(@builtin(global_invocation_id)gid:vec3u){
   if(!cellActive(id)){
     state[destinationDensity()+id]=0.0;state[destinationGamma()+id]=1.0;return;
   }
+  if(!cellTransportActive(id)){
+    state[destinationDensity()+id]=0.0;state[destinationGamma()+id]=1.0;return;
+  }
   let b=cellBase(id);
   let departure=traceDeparture(vec3f(tf(b),tf(b+1u),tf(b+2u)));
   let advectedGamma=state[destinationGamma()+id];var visible=0.0;
@@ -372,7 +411,7 @@ fn gatherConservativeDensity(@builtin(global_invocation_id)gid:vec3u){
 fn diffuseGammaAxis(cell:u32,axis:u32,inputRho:u32,inputGamma:u32,
  outputRho:u32,outputGamma:u32){
   let ownRho=state[inputRho+cell];let ownGamma=state[inputGamma+cell];
-  if(!cellActive(cell)){
+  if(!cellTransportActive(cell)){
     state[outputRho+cell]=0.0;state[outputGamma+cell]=1.0;return;
   }
   var rho=ownRho;var gamma=ownGamma;
@@ -567,7 +606,7 @@ fn traceSharpeningMass(source:u32)->vec3f{
 @compute @workgroup_size(64)
 fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
   let cell=gid.x;if(cell>=p.counts.x){return;}
-  if(!cellActive(cell)){state[p.stateOffsets5.x+cell]=0.0;return;}
+  if(!cellTransportActive(cell)){state[p.stateOffsets5.x+cell]=0.0;return;}
   let stats=sharpeningStats(cell);
   let delta=sharpeningDelta(cell,stats);
   state[p.stateOffsets5.x+cell]=delta;if(delta>=0.0){return;}
@@ -592,13 +631,65 @@ fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
   let cell=gid.x;if(cell>=p.counts.x){return;}
-  if(!cellActive(cell)){
+  if(!cellTransportActive(cell)){
     state[destinationDensity()+cell]=0.0;state[destinationGamma()+cell]=1.0;return;
   }
   let delta=state[p.stateOffsets5.x+cell];
   let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
   state[destinationDensity()+cell]=max(0.0,state[destinationDensity()+cell]+delta
     +incoming/cellVolume(cell));
+}
+
+@compute @workgroup_size(64)
+fn clearSolidExcess(@builtin(global_invocation_id)gid:vec3u){
+  let cell=gid.x;if(cell>=p.counts.x){return;}
+  atomicStore(&conditioning[3u*p.counts.x+cell],0);
+  state[p.stateOffsets5.x+cell]=0.0;
+}
+
+// Conservatively debit density beyond the cut-cell capacity and move that
+// mass through open faces toward cells with a larger open fraction. Atomic
+// fixed-point receipts preserve the global debit/credit identity.
+@compute @workgroup_size(64)
+fn scatterSolidExcess(@builtin(global_invocation_id)gid:vec3u){
+  let cell=gid.x;if(cell>=p.counts.x||!cellTransportActive(cell)){return;}
+  let rho=state[destinationDensity()+cell];let excessDensity=max(0.0,rho-cellOpenFraction(cell));
+  let excessMass=excessDensity*cellVolume(cell);if(excessMass<=1e-9){return;}
+  var totalSpare=0.0;var lastNeighbor=INVALID;
+  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){let row=incidenceRow(at);
+    if(rowArea(row)<=1e-8){continue;}let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
+      if(neighbor==cell||!cellTransportActive(neighbor)
+        ||cellOpenFraction(neighbor)<=cellOpenFraction(cell)){continue;}
+      let spare=max(0.0,cellOpenFraction(neighbor)-state[destinationDensity()+neighbor])
+        *cellVolume(neighbor);if(spare>0.0){totalSpare+=spare;lastNeighbor=neighbor;}
+    }
+  }
+  if(totalSpare<=1e-9){return;}
+  let movedMass=min(excessMass,totalSpare);
+  let movedFixed=i32(round(movedMass*CM12_TRANSPORT_FIXED));var remaining=movedFixed;
+  state[p.stateOffsets5.x+cell]=-f32(movedFixed)/(CM12_TRANSPORT_FIXED*cellVolume(cell));
+  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){let row=incidenceRow(at);
+    if(rowArea(row)<=1e-8){continue;}let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
+      if(neighbor==cell||!cellTransportActive(neighbor)
+        ||cellOpenFraction(neighbor)<=cellOpenFraction(cell)){continue;}
+      let spare=max(0.0,cellOpenFraction(neighbor)-state[destinationDensity()+neighbor])
+        *cellVolume(neighbor);if(spare<=0.0){continue;}
+      var offered=i32(round(f32(movedFixed)*spare/totalSpare));
+      if(neighbor==lastNeighbor){offered=remaining;}else{offered=clamp(offered,0,remaining);}
+      atomicAdd(&conditioning[3u*p.counts.x+neighbor],offered);remaining-=offered;
+    }
+  }
+}
+
+@compute @workgroup_size(64)
+fn finalizeSolidExcess(@builtin(global_invocation_id)gid:vec3u){
+  let cell=gid.x;if(cell>=p.counts.x){return;}
+  if(!cellTransportActive(cell)){state[destinationDensity()+cell]=0.0;return;}
+  let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
+  state[destinationDensity()+cell]=max(0.0,state[destinationDensity()+cell]
+    +state[p.stateOffsets5.x+cell]+incoming/cellVolume(cell));
 }
 
 // The CPU sparse path retains a proven horizontal D4 invariant after surface
@@ -641,17 +732,39 @@ fn commitHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn forceFaces(@builtin(global_invocation_id)gid:vec3u){
   let row=gid.x;if(row>=p.counts.y){return;}
+  if(rowArea(row)<=1e-8){state[destinationFaceVelocity()+row]=0.0;return;}
   state[destinationFaceVelocity()+row]+=p.frame.x*p.acceleration[rowAxis(row)];
+}
+
+fn rawPressureDensity(cell:u32)->f32{
+  return state[destinationDensity()+cell]/max(cellOpenFraction(cell),1e-6);
+}
+
+// As in the uniform cut-cell reference, a pressure sample centred in solid
+// continues the nearest open liquid density and carries p >= 0.
+fn pressureDensity(cell:u32)->f32{
+  if(!cellSeparatingMinimum(cell)){return rawPressureDensity(cell);}
+  var continued=0.0;
+  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
+    let row=incidenceRow(at);let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    for(var term=begin;term<end;term+=1u){let other=termCell(term);
+      if(other!=cell&&cellTransportActive(other)){
+        continued=max(continued,rawPressureDensity(other));
+      }
+    }
+  }
+  return continued;
 }
 
 @compute @workgroup_size(64)
 fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
   let row=gid.x;if(row>=p.counts.y){return;}
+  if(rowDualWeight(row)<=1e-8){state[p.stateOffsets3.x+row]=0.0;return;}
   let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
   var liquidCount=0u;var airCount=0u;var liquidPhiSum=0.0;var liquidWeight=0.0;
   var airPhiSum=0.0;var airWeight=0.0;
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);let w=abs(termCoefficient(at));
-    let phi=CM12_LIQUID_ISOVALUE-state[destinationDensity()+cell];
+    let phi=CM12_LIQUID_ISOVALUE-pressureDensity(cell);
     if(isLiquid(cell)){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;}
     else{airCount+=1u;airPhiSum+=w*phi;airWeight+=w;}}
   if(liquidCount==0u){state[p.stateOffsets3.x+row]=0.0;return;}
@@ -676,7 +789,8 @@ fn applyOperator(cell:u32,inputOffset:u32)->f32{
 @compute @workgroup_size(64)
 fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
   let id=gid.x;if(id>=p.counts.x){return;}
-  let rho=state[destinationDensity()+id];let liquid=cellActive(id)&&rho>=CM12_LIQUID_ISOVALUE;
+  let rho=pressureDensity(id);let liquid=cellActive(id)&&rho>=CM12_LIQUID_ISOVALUE
+    &&(cellOpenVolume(id)>1e-8||cellSeparatingMinimum(id));
   state[p.stateOffsets2.w+id]=select(0.0,1.0,liquid);
   if(!liquid){state[p.stateOffsets2.y+id]=0.0;state[p.stateOffsets2.z+id]=0.0;
     state[p.stateOffsets2.x+id]=0.0;return;}
@@ -687,8 +801,10 @@ fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
     rhs+=coefficient*rowDualWeight(row)*state[destinationFaceVelocity()+row];
     diagonal+=rowDualWeight(row)*coefficient*coefficient/theta;
   }
-  let targetDivergence=cm12VolumeCorrectionDivergence(rho,p.frame.y*cellMinimumWidth(id),p.frame.x);
-  state[p.stateOffsets2.y+id]=rhs+cellVolume(id)*targetDivergence;
+  let targetDivergence=select(cm12VolumeCorrectionDivergence(
+    rho,p.frame.y*cellMinimumWidth(id),p.frame.x),0.0,cellSeparatingMinimum(id));
+  let controlVolume=select(cellOpenVolume(id),cellVolume(id),cellSeparatingMinimum(id));
+  state[p.stateOffsets2.y+id]=rhs+controlVolume*targetDivergence;
   state[p.stateOffsets2.z+id]=diagonal;
 }
 
@@ -778,9 +894,41 @@ fn reduceResidual(@builtin(local_invocation_id)lid:vec3u){
 fn updateDirection(@builtin(global_invocation_id)gid:vec3u){let id=gid.x;if(id>=p.counts.x){return;}
   state[p.stateOffsets3.w+id]=state[p.stateOffsets3.z+id]+scalars[3]*state[p.stateOffsets3.w+id];}
 
+fn projectedJacobiValue(cell:u32,inputOffset:u32)->f32{
+  if(!isLiquid(cell)){return 0.0;}let diagonal=state[p.stateOffsets2.z+cell];
+  if(diagonal<=1e-12){return select(0.0,max(0.0,state[inputOffset+cell]),
+    cellSeparatingMinimum(cell));}
+  var offDiagonal=0.0;
+  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
+    let row=incidenceRow(at);let theta=state[p.stateOffsets3.x+row];if(theta<=0.0){continue;}
+    let own=termCoefficient(incidenceTerm(at));let weight=rowDualWeight(row)/theta;
+    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    for(var term=begin;term<end;term+=1u){let other=termCell(term);
+      if(other!=cell&&isLiquid(other)){
+        offDiagonal+=own*weight*termCoefficient(term)*state[inputOffset+other];
+      }
+    }
+  }
+  let value=(state[p.stateOffsets2.y+cell]-offDiagonal)/diagonal;
+  return select(value,max(0.0,value),cellSeparatingMinimum(cell));
+}
+
+@compute @workgroup_size(64)
+fn projectedJacobiToApplied(@builtin(global_invocation_id)gid:vec3u){
+  let cell=gid.x;if(cell>=p.counts.x){return;}
+  state[p.stateOffsets4.x+cell]=projectedJacobiValue(cell,p.stateOffsets2.x);
+}
+
+@compute @workgroup_size(64)
+fn projectedJacobiToPressure(@builtin(global_invocation_id)gid:vec3u){
+  let cell=gid.x;if(cell>=p.counts.x){return;}
+  state[p.stateOffsets2.x+cell]=projectedJacobiValue(cell,p.stateOffsets4.x);
+}
+
 @compute @workgroup_size(64)
 fn projectFaces(@builtin(global_invocation_id)gid:vec3u){let row=gid.x;if(row>=p.counts.y){return;}
-  let theta=state[p.stateOffsets3.x+row];if(theta<=0.0){state[destinationFaceVelocity()+row]=0.0;return;}
+  let theta=state[p.stateOffsets3.x+row];if(theta<=0.0||rowArea(row)<=1e-8){
+    state[destinationFaceVelocity()+row]=0.0;return;}
   var jump=0.0;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);if(isLiquid(cell)){
     jump+=termCoefficient(at)*state[p.stateOffsets2.x+cell];}}
@@ -789,7 +937,7 @@ fn projectFaces(@builtin(global_invocation_id)gid:vec3u){let row=gid.x;if(row>=p
 
 @compute @workgroup_size(64)
 fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){let id=gid.x;if(id>=p.counts.x){return;}
-  if(!cellActive(id)){
+  if(!cellTransportActive(id)){
     let output=destinationCellVelocity()+4u*id;
     state[output]=0.0;state[output+1u]=0.0;state[output+2u]=0.0;state[output+3u]=0.0;
     state[p.stateOffsets4.y+id]=0.0;return;
@@ -803,8 +951,11 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){let id=gid.x;if
   for(var axis=0u;axis<3u;axis+=1u){if(weight[axis]>0.0){velocity[axis]/=weight[axis];}}
   state[destinationCellVelocity()+4u*id]=velocity.x;state[destinationCellVelocity()+4u*id+1u]=velocity.y;
   state[destinationCellVelocity()+4u*id+2u]=velocity.z;state[destinationCellVelocity()+4u*id+3u]=0.0;
-  let targetDivergence=cm12VolumeCorrectionDivergence(state[destinationDensity()+id],p.frame.y*cellMinimumWidth(id),p.frame.x);
-  state[p.stateOffsets4.y+id]=select(0.0,-equation/cellVolume(id)-targetDivergence,isLiquid(id));
+  let targetDivergence=select(cm12VolumeCorrectionDivergence(rawPressureDensity(id),
+    p.frame.y*cellMinimumWidth(id),p.frame.x),0.0,cellSeparatingMinimum(id));
+  let controlVolume=select(cellOpenVolume(id),cellVolume(id),cellSeparatingMinimum(id));
+  state[p.stateOffsets4.y+id]=select(0.0,-equation/max(controlVolume,1e-8)
+    -targetDivergence,isLiquid(id));
 }
 
 @compute @workgroup_size(64)
@@ -1407,7 +1558,8 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   let brickX=brickRemainder-brickY*brickDimensions.x;
   let pageOffset=vec3u(octant&1u,(octant>>1u)&1u,(octant>>2u)&1u)*4u;
   let q=vec3u(brickX,brickY,brickZ)*8u+pageOffset+local;var phi=4.0*p.frame.y;
-  if(brick<p.dispatch.w&&state[p.stateOffsets4.z+brick]>0.5&&all(q<p.dimensions.xyz)){
+  if(brick<p.dispatch.w&&state[p.stateOffsets4.z+brick]>0.5&&all(q<p.dimensions.xyz)
+    &&insideEmbeddedBoundary(vec3f(q)+vec3f(0.5))){
     let first=topology[brickRecord];let count=topology[brickRecord+1u];
     let resolution=topology[brickRecord+2u];let scale=8u/resolution;
     let cellLocal=(pageOffset+local)/scale;

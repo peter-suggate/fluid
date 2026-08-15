@@ -13,6 +13,12 @@ import {
   sceneInitialLiquidVolumes,
 } from "../../core/initial-fluid";
 import type { SceneDescription } from "../../core/model";
+import {
+  classifyFineBoxAgainstSphericalContainer,
+  sphericalContainerFineGeometry,
+  sphericalContainerOpenFractionAtCell,
+  type SphericalContainerFineGeometry,
+} from "../../core/spherical-container";
 import { sceneHasTerrain, terrainHeightAt } from "../../core/terrain";
 
 /** Power-of-two cells per fixed 8-fine-cell brick edge. */
@@ -34,6 +40,8 @@ export interface SparseAdaptiveMassAtlas {
   readonly bricks: readonly SparseAdaptiveMassBrick[];
   readonly directory: ReadonlyMap<number, SparseAdaptiveMassBrick>;
   readonly generation: number;
+  /** Embedded closed boundary carried by every topology/field generation. */
+  readonly boundary?: SphericalContainerFineGeometry;
 }
 
 export interface SparseBrickAtlasInitializationOptions {
@@ -108,6 +116,7 @@ export function createSparseAdaptiveMassAtlas(
   dimensions: SparseBrickVec3,
   bricks: readonly SparseAdaptiveMassBrick[],
   generation = 1,
+  boundary?: SphericalContainerFineGeometry,
 ): SparseAdaptiveMassAtlas {
   positiveDimensions(dimensions);
   const brickDimensions = dimensions.map((value) =>
@@ -140,7 +149,7 @@ export function createSparseAdaptiveMassAtlas(
       throw new Error(`brick face ${brick.key}/${neighbor.key} exceeds 2:1 grading`);
     }
   }
-  return { dimensions, brickDimensions, bricks: [...bricks], directory, generation };
+  return { dimensions, brickDimensions, bricks: [...bricks], directory, generation, boundary };
 }
 
 function initialDensityAt(
@@ -165,7 +174,22 @@ function initialDensityAt(
   const baseWet = scene.fluid.initialCondition === "tank-fill"
     ? (y + 0.5) / ny <= scene.container.fillFraction
     : damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / ny, (z + 0.5) / nz);
-  return initialLiquidFractionAtCell(scene, x, y, z, dimensions, baseWet);
+  return Math.min(
+    sphericalContainerOpenFractionAtCell(scene, x, y, z, dimensions),
+    initialLiquidFractionAtCell(scene, x, y, z, dimensions, baseWet),
+  );
+}
+
+function brickRequiresCutBoundaryResolution(
+  boundary: SphericalContainerFineGeometry | undefined,
+  coordinate: SparseBrickVec3,
+): boolean {
+  if (!boundary) return false;
+  const minimum = coordinate.map((value) => value * BRICK_FINE_RESOLUTION) as
+    [number, number, number];
+  const maximum = coordinate.map((value) => (value + 1) * BRICK_FINE_RESOLUTION) as
+    [number, number, number];
+  return classifyFineBoxAgainstSphericalContainer(boundary, minimum, maximum) === "cut";
 }
 
 function brickHasInterface(
@@ -365,6 +389,7 @@ export function initializeSparseBrickAtlasFromScene(
   const epsilon = options.emptyEpsilon ?? 1e-12;
   const brickDimensions = options.finestDimensions.map((value) =>
     Math.ceil(value / 8)) as [number, number, number];
+  const boundary = sphericalContainerFineGeometry(scene, options.finestDimensions);
   const bricks: SparseAdaptiveMassBrick[] = [];
   for (const coordinate of candidateInitialBrickCoordinates(
     scene, options.finestDimensions, brickDimensions,
@@ -387,9 +412,8 @@ export function initializeSparseBrickAtlasFromScene(
         );
         // Unoverridden, only the interface rule below lifts a brick off the
         // coarse rung; saturated interiors and dry receivers start at 4^3.
-        const selected = options.resolutionForBrick?.({
-          coordinate, brickDimensions,
-        }) ?? 4;
+        const selected = brickRequiresCutBoundaryResolution(boundary, coordinate) ? 8
+          : options.resolutionForBrick?.({ coordinate, brickDimensions }) ?? 4;
         if (selected !== 1 && selected !== 2 && selected !== 4 && selected !== 8) {
           throw new RangeError("resolutionForBrick must return 1, 2, 4, or 8");
         }
@@ -399,7 +423,7 @@ export function initializeSparseBrickAtlasFromScene(
           scene, options.finestDimensions, coordinate, resolution,
         ));
       }
-  return createSparseAdaptiveMassAtlas(options.finestDimensions, bricks);
+  return createSparseAdaptiveMassAtlas(options.finestDimensions, bricks, 1, boundary);
 }
 
 export function sparseAtlasLeaves(atlas: SparseAdaptiveMassAtlas): SparseAtlasLeaf[] {
@@ -513,6 +537,7 @@ export function coarsenLargeQuiescentComponents(
     atlas.dimensions,
     bricks.sort((left, right) => left.key - right.key),
     atlas.generation,
+    atlas.boundary,
   );
 }
 
