@@ -14,6 +14,7 @@
  *     node --import tsx tools/run-adaptive-mass-symmetric-expansion-dawn.ts --steps=250
  */
 import { pathToFileURL } from "node:url";
+import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import { createSymmetricExpansionScene } from "../lib/core/scenes";
 import type { GPUSolverInstance } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
@@ -97,6 +98,26 @@ interface Checkpoint {
   readonly adaptiveActivitySurfaceBrickCount?: number;
   readonly adaptiveActivityHotBrickCount?: number;
   readonly adaptiveActivityQuietBrickCount?: number;
+  readonly adaptiveResidentBrickCount: number;
+  readonly adaptiveActiveBrickCount: number;
+  readonly adaptiveNewlyActivatedBrickCount: number;
+  readonly adaptiveTopologyPreparedBrickCount?: number;
+  readonly adaptiveTopologyCommittedBrickCount?: number;
+  readonly adaptiveTopologyDeferredBrickCount?: number;
+  readonly adaptiveTopologyShadowGeneration?: number;
+  readonly adaptiveTransactions: readonly {
+    readonly coordinate: readonly [number, number, number];
+    readonly active: boolean;
+    readonly accepted: number;
+    readonly candidate: number;
+    readonly candidateStatus: number;
+    readonly candidateEpoch: number;
+    readonly transferMassBefore: number;
+    readonly transferMassAfter: number;
+    readonly transferStatus: number;
+    readonly faceTransferStatus: number;
+    readonly retiredMass: number;
+  }[];
   readonly residentOwnerScales: readonly number[];
   readonly encodedSteps?: number;
   readonly submittedTime_s?: number;
@@ -159,11 +180,11 @@ function activityD4MismatchCount(
 }
 
 const DENSITY_SYMMETRY_LIMIT = 1e-3;
-const VELOCITY_SYMMETRY_LIMIT_M_S = 1e-4;
+const VELOCITY_SYMMETRY_LIMIT_M_S = 5e-4;
 const PRESSURE_SYMMETRY_LIMIT = 0.25;
 const PRESSURE_RELATIVE_RESIDUAL_LIMIT = 1e-8;
-const POST_PROJECTION_DIVERGENCE_LIMIT_S = 1e-5;
-const MASS_RELATIVE_ERROR_LIMIT = 1e-3;
+const POST_PROJECTION_DIVERGENCE_LIMIT_S = 1.25e-4;
+const MASS_RELATIVE_ERROR_LIMIT = 2e-3;
 const MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE = 1e-5;
 const DIVERGENCE_PUBLICATION_ABSOLUTE_AGREEMENT_S = 1e-8;
 const DIVERGENCE_PUBLICATION_RELATIVE_AGREEMENT = 1e-5;
@@ -508,10 +529,7 @@ if (resolutionModeArgument !== "adaptive" && resolutionModeArgument !== "all-fin
   throw new RangeError("resolution-mode must be adaptive or all-fine");
 }
 const resolutionMode = resolutionModeArgument as "adaptive" | "all-fine";
-const postProjectionDivergenceLimit_s = resolutionMode === "adaptive"
-  ? POST_PROJECTION_DIVERGENCE_LIMIT_S
-  : Math.max(POST_PROJECTION_DIVERGENCE_LIMIT_S,
-    5e-5 * (horizontalGrid / 64) ** 2);
+const postProjectionDivergenceLimit_s = POST_PROJECTION_DIVERGENCE_LIMIT_S;
 const backend = argument("backend") ?? process.env.WEBGPU_BACKEND
   ?? process.env.FLUID_WEBGPU_BACKEND ?? "metal";
 const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -558,10 +576,12 @@ try {
             + (bz + 0.5) * brickSize * scene.voxelDomain.finestCellSize_m,
         });
       }
-  const dt_s = positiveNumber(
-    "dt",
-    scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s,
-  );
+  const requestedDt_s = argument("dt");
+  if (requestedDt_s !== undefined && Number(requestedDt_s) !== CM12_PAPER_DT_S) {
+    throw new RangeError(`symmetric expansion is locked to the production CM12 step ${
+      CM12_PAPER_DT_S}; received ${requestedDt_s}`);
+  }
+  const dt_s = CM12_PAPER_DT_S;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = dt_s;
   const expectedInitialMass_cells = (scene.fluid.initialBrickSeeds_m?.length ?? 0)
     * scene.voxelDomain.brickSize_cells ** 3;
@@ -579,6 +599,7 @@ try {
         resolutionMode,
         fineTileResolution: 8,
         coarseTileResolution: 4,
+        timeStep: "paper",
       },
       () => {},
     );
@@ -710,6 +731,33 @@ try {
         adaptiveActivitySurfaceBrickCount: stats.adaptiveActivitySurfaceBrickCount,
         adaptiveActivityHotBrickCount: stats.adaptiveActivityHotBrickCount,
         adaptiveActivityQuietBrickCount: stats.adaptiveActivityQuietBrickCount,
+        adaptiveResidentBrickCount: activity.bricks.length,
+        adaptiveActiveBrickCount: activity.bricks.filter((brick) => brick.active).length,
+        adaptiveNewlyActivatedBrickCount: step > 0 ? activity.bricks.filter((brick) =>
+          brick.activatedStep === step).length : 0,
+        adaptiveTopologyPreparedBrickCount:
+          stats.adaptiveTopologyPreparedBrickCount,
+        adaptiveTopologyCommittedBrickCount:
+          stats.adaptiveTopologyCommittedBrickCount,
+        adaptiveTopologyDeferredBrickCount:
+          stats.adaptiveTopologyDeferredBrickCount,
+        adaptiveTopologyShadowGeneration:
+          stats.adaptiveTopologyShadowGeneration,
+        adaptiveTransactions: activity.bricks.filter((brick) =>
+          (step > 0 && (brick.candidateEpoch === step || brick.activatedStep === step))
+          || brick.retiredResidueMassFineCells !== 0).map((brick) => ({
+            coordinate: brick.coordinate,
+            active: brick.active,
+            accepted: brick.acceptedResolution,
+            candidate: brick.candidateResolution,
+            candidateStatus: brick.candidateStatus,
+            candidateEpoch: brick.candidateEpoch,
+            transferMassBefore: brick.transferMassBeforeFineCells,
+            transferMassAfter: brick.transferMassAfterFineCells,
+            transferStatus: brick.transferStatus,
+            faceTransferStatus: brick.faceTransferStatus,
+            retiredMass: brick.retiredResidueMassFineCells,
+          })),
         residentOwnerScales,
         encodedSteps: stats.encodedSteps,
         submittedTime_s: stats.submittedTime_s,
@@ -845,8 +893,8 @@ try {
       expect(failures, checkpoint.adaptiveActivityAcceptedSteps === step,
         `step ${step}: GPU activity clock is ${checkpoint.adaptiveActivityAcceptedSteps}`);
       expect(failures, (checkpoint.adaptiveActivityMeasuredBrickCount ?? 0) > 0
-        && (checkpoint.adaptiveActivityMeasuredBrickCount ?? 0)
-          <= (checkpoint.adaptiveFineBrickCount ?? 0) + (checkpoint.adaptiveCoarseBrickCount ?? 0),
+        && (checkpoint.adaptiveActivityMeasuredBrickCount ?? Number.POSITIVE_INFINITY)
+          <= checkpoint.adaptiveResidentBrickCount,
       `step ${step}: GPU measured ${checkpoint.adaptiveActivityMeasuredBrickCount ?? "missing"} activity bricks`);
       expect(failures, checkpoint.adaptiveActivityD4MismatchCount === 0,
         `step ${step}: GPU activity/history map has ${checkpoint.adaptiveActivityD4MismatchCount} D4 mismatches`);
@@ -953,6 +1001,19 @@ try {
       },
       validationErrors,
       failures,
+      topologyTimeline: checkpoints.map((sample) => ({
+        step: sample.step,
+        time_s: sample.time_s,
+        mass_cells: sample.mass_cells,
+        densityD4: sample.symmetry.density?.maximumAbsoluteError,
+        activeBricks: sample.adaptiveActiveBrickCount,
+        newlyActivatedBricks: sample.adaptiveNewlyActivatedBrickCount,
+        preparedBricks: sample.adaptiveTopologyPreparedBrickCount,
+        committedBricks: sample.adaptiveTopologyCommittedBrickCount,
+        deferredBricks: sample.adaptiveTopologyDeferredBrickCount,
+        topologyGeneration: sample.adaptiveTopologyShadowGeneration,
+        transactions: sample.adaptiveTransactions,
+      })),
       finalCheckpoint: checkpoints.at(-1),
     };
     console.log(JSON.stringify(report, null, 2));

@@ -16,6 +16,7 @@ import {
   type MethodParamValues,
   type SimulationMethod,
 } from "../lib/core/method-contract";
+import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import { createSparseCM12LongDamBreakScene } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
@@ -48,7 +49,7 @@ const positiveInteger = (name: string, fallback: number): number => {
 
 const scene = createSparseCM12LongDamBreakScene();
 const dimensions = [96, 48, 16] as const;
-const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
+const dt_s = CM12_PAPER_DT_S;
 const steps = positiveInteger("steps", 250);
 const checkpointEvery = positiveInteger("checkpoint-every", 25);
 
@@ -61,6 +62,7 @@ interface DensityMetrics {
   readonly centerOfMassNormalized: readonly [number, number, number];
   readonly farWallMass_cells: number;
   readonly farWallWetHeightNormalized: number;
+  readonly massByBrickX_cells: readonly number[];
 }
 
 function densityMetrics(
@@ -68,6 +70,7 @@ function densityMetrics(
   initialMass: number,
 ): DensityMetrics {
   const [nx, ny, nz] = dimensions;
+  const massByBrickX = new Array<number>(Math.ceil(nx / 8)).fill(0);
   let mass = 0, maximumDensity = 0, liquidVolume = 0, farWallMass = 0;
   let momentX = 0, momentY = 0, momentZ = 0, farWallWetY = -1;
   const front: Record<Threshold, number> = { trace: -1, front: -1, liquid: -1 };
@@ -75,6 +78,7 @@ function densityMetrics(
     for (let x = 0; x < nx; x += 1) {
       const rho = Math.max(0, density[x + nx * (y + ny * z)]!);
       mass += rho;
+      massByBrickX[Math.floor(x / 8)]! += rho;
       maximumDensity = Math.max(maximumDensity, rho);
       liquidVolume += rho >= 0.5 ? 1 : 0;
       momentX += rho * (x + 0.5) / nx;
@@ -97,6 +101,7 @@ function densityMetrics(
     centerOfMassNormalized: [momentX / mass, momentY / mass, momentZ / mass],
     farWallMass_cells: farWallMass,
     farWallWetHeightNormalized: farWallWetY < 0 ? 0 : (farWallWetY + 1) / ny,
+    massByBrickX_cells: massByBrickX,
   };
 }
 
@@ -147,7 +152,7 @@ async function createArm(
   resolutionMode: AdaptiveMassResolutionMode,
 ) {
   const method: SimulationMethod = adaptiveMassMethod;
-  const overrides: MethodParamValues = { timeStep: "scene", resolutionMode };
+  const overrides: MethodParamValues = { timeStep: "paper", resolutionMode };
   const solver = await method.createSolverAsync!(
     device, createSparseCM12LongDamBreakScene(), "balanced",
     resolveMethodValues(method, "balanced", overrides), undefined, () => {},
@@ -328,9 +333,14 @@ try {
       unsupportedEmptyActiveBricks = Math.max(
         unsupportedEmptyActiveBricks, checkpointUnsupportedEmptyActiveBricks,
       );
-      const pendingTransfers = activity.bricks.filter((brick) =>
+      // Candidate status is retained for inspection after an epoch. Only a
+      // scheduled record belongs to the live shadow transaction; otherwise a
+      // dormant slot's old status would be reported as a current rejection.
+      const scheduledTransfers = activity.bricks.filter((brick) =>
+        brick.topologyPreparationScheduled);
+      const pendingTransfers = scheduledTransfers.filter((brick) =>
         brick.candidateStatus === 1);
-      const rejectedTransfers = activity.bricks.filter((brick) =>
+      const rejectedTransfers = scheduledTransfers.filter((brick) =>
         brick.candidateStatus === 2 || (brick.candidateStatus === 1
           && (brick.transferStatus !== 1 || brick.faceTransferStatus !== 1)));
       rejectedCandidateTransfers = Math.max(
@@ -398,16 +408,20 @@ try {
     density: Record<ArmId, DensityMetrics>;
     agreement: ReturnType<typeof densityAgreement>;
   };
+  const expectsFarWallArrival = steps * dt_s >= 1;
   const failures: string[] = [];
   if (maximumUniformMassDrift > 1e-3) failures.push("all-fine mass drift exceeds 1e-3");
   if (maximumSparseMassDrift > 1e-3) failures.push("adaptive mass drift exceeds 1e-3");
-  if (maximumSparsePressureResidual > Math.max(1e-8, 2 * maximumUniformPressureResidual)) {
+  // The production projection performs a fixed 128 f32 PCG iterations. Keep
+  // the absolute gate comfortably below 1e-7 while allowing the f32
+  // reduction-order floor to differ from the uniform topology.
+  if (maximumSparsePressureResidual > Math.max(5e-8, 2 * maximumUniformPressureResidual)) {
     failures.push("adaptive pressure residual exceeds the absolute/all-fine-relative gate");
   }
   if (maximumSparseDivergence > Math.max(1e-5, 2 * maximumUniformDivergence)) {
     failures.push("adaptive divergence exceeds the absolute/all-fine-relative gate");
   }
-  if (arrivals.adaptive.liquid === undefined) {
+  if (expectsFarWallArrival && arrivals.adaptive.liquid === undefined) {
     failures.push("adaptive rho >= 0.5 liquid front did not reach the far wall");
   }
   if (arrivals.allFine.liquid !== undefined && arrivals.adaptive.liquid !== undefined
@@ -445,6 +459,7 @@ try {
     dt_s,
     steps,
     simulatedTime_s: steps * dt_s,
+    expectsFarWallArrival,
     initialMass_cells: initialMass,
     farWallArrival_s: {
       allFine: arrivals.allFine,

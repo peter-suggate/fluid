@@ -189,9 +189,16 @@ fn acceptedBrickResolution(brick:u32)->u32{
 fn brickSpan(brick:u32)->u32{
   return 1u<<(topology[p.topologyOffsets2.z+4u*brick+2u]&31u);
 }
-fn brickCandidateSlot(brick:u32)->u32{
+fn brickPackedCandidateSlot(brick:u32)->u32{
   let encoded=topology[p.topologyOffsets2.z+4u*brick+2u]>>5u;
   return select(INVALID,encoded-1u,encoded!=0u);
+}
+fn brickCandidateSlot(brick:u32)->u32{
+  return brickPackedCandidateSlot(brick);
+}
+fn brickCandidatePlanningEnabled(brick:u32)->bool{
+  let pageCapacity=atomicLoad(&topologyArena[topologyWorklistBase()+27u]);
+  return brickPackedCandidateSlot(brick)!=INVALID||(brickSpan(brick)==1u&&pageCapacity!=0u);
 }
 fn templateBrickCellRange(brick:u32,resolution:u32)->vec2u{
   let at=ta(11u)+2u*(4u*brick+templateLevelIndex(resolution));
@@ -1056,9 +1063,13 @@ var<workgroup>activitySupportMask:array<u32,64>;
 var<workgroup>transferMassBefore:array<f32,64>;
 var<workgroup>transferMassAfter:array<f32,64>;
 var<workgroup>transferGammaDelta:array<f32,64>;
+var<workgroup>transferGammaScale:array<f32,64>;
 var<workgroup>transferMomentumXDelta:array<f32,64>;
 var<workgroup>transferMomentumYDelta:array<f32,64>;
 var<workgroup>transferMomentumZDelta:array<f32,64>;
+var<workgroup>transferMomentumXScale:array<f32,64>;
+var<workgroup>transferMomentumYScale:array<f32,64>;
+var<workgroup>transferMomentumZScale:array<f32,64>;
 var<workgroup>candidateCellScheduled:u32;
 var<workgroup>candidateFaceScheduled:u32;
 fn reducePair(lane:u32,group:u32,a:f32,b:f32){
@@ -1512,6 +1523,35 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   atomicAdd(&activity[6],1u);
 }
 
+// A receiver request is an immutable activity-snapshot predicate, not merely
+// an activation predicate. An already-resident empty apron brick must remain
+// fine when a neighbour's outward characteristic can reach it before the next
+// topology epoch; otherwise it demotes for one paper step and immediately
+// promotes after the front has crossed, which is both a resolution ping-pong
+// and an under-resolved transport step.
+fn brickRequestedAsReceiver(brick:u32)->bool{
+  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
+  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
+  let x=remainder-y*brickDimensions.x;let coordinate=vec3i(i32(x),i32(y),i32(z));
+  var requested=injectionReachesBrick(brick);
+  for(var dz=-1;dz<=1;dz+=1){for(var dy=-1;dy<=1;dy+=1){
+    for(var dx=-1;dx<=1;dx+=1){if(dx==0&&dy==0&&dz==0){continue;}
+      let neighborCoordinate=coordinate+vec3i(dx,dy,dz);
+      if(any(neighborCoordinate<vec3i(0))
+        ||any(neighborCoordinate>=vec3i(brickDimensions))){continue;}
+      let neighborKey=u32(neighborCoordinate.x)+brickDimensions.x
+        *(u32(neighborCoordinate.y)+brickDimensions.y*u32(neighborCoordinate.z));
+      let neighbor=brickDirectoryLookup(neighborKey);
+      if(neighbor==INVALID||!brickActive(neighbor)){continue;}
+      let bit=u32(1-dx)+3u*u32(1-dy)+9u*u32(1-dz);
+      requested=requested
+        ||(atomicLoad(&activity[activityRecord(neighbor)+32u])&(1u<<bit))!=0u;
+  }}}
+  return requested;
+}
+
 // First candidate-planning rung. The accepted topology remains immutable:
 // this pass publishes only the resolution requested by the CM12 surface floor,
 // characteristic prediction, and retained activity history. Transfer and
@@ -1523,7 +1563,7 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let current=atomicLoad(&activity[output+12u]);
   // Macro leaves are immutable deep pages. Only span-one surface leaves own
   // mutation candidates; splitting a macro is a later sparse page-pool event.
-  if(brickCandidateSlot(brick)==INVALID){
+  if(!brickCandidatePlanningEnabled(brick)){
     atomicStore(&activity[output+8u],current);
     atomicStore(&activity[output+9u],1024u);
     return;
@@ -1545,18 +1585,19 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let surface=(reasons&1u)!=0u;let predicted=(reasons&16u)!=0u;
   let thinFluid=(reasons&256u)!=0u;
   let cutBoundary=(reasons&512u)!=0u;
+  let receiver=brickRequestedAsReceiver(brick);
   let activitySignals=activitySignalsEnabled();
   let detail=activitySignals&&(reasons&8u)!=0u;
   let velocityFloor=velocityResolutionFloor(activityF32(output+33u));
   let required=max(max(velocityFloor,select(1u,8u,
-    surface||thinFluid||(activitySignals&&predicted))),select(1u,4u,cutBoundary));
+    surface||thinFluid||receiver||(activitySignals&&predicted))),select(1u,4u,cutBoundary));
   let emergencyScore=u32(round(255.0*p.activityTiming.z));
   if(required>current||(activitySignals&&score>=emergencyScore)){
     // A surface floor is an invariant, not a multi-epoch suggestion. Its
     // support neighbours are graded by closePlannedResolution below.
     requested=select(min(max(required,current),2u*current),required,
-      surface||thinFluid);
-    if(surface){planReasons=1u;}else if(predicted){planReasons=2u;}
+      surface||thinFluid||receiver);
+    if(surface){planReasons=1u;}else if(receiver||predicted){planReasons=2u;}
     else if(thinFluid){planReasons=256u;}
     else if(velocityFloor>current){planReasons=64u;}else{planReasons=4u;}
   }else if(atomicLoad(&activity[5])!=0u){
@@ -1577,7 +1618,7 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
-  if(brickCandidateSlot(brick)==INVALID){return;}
+  if(!brickCandidatePlanningEnabled(brick)){return;}
   let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
@@ -1609,7 +1650,7 @@ fn validBrickResolution(resolution:u32)->bool{
 fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
   let output=activityRecord(brick);
-  if(brickCandidateSlot(brick)==INVALID){
+  if(!brickCandidatePlanningEnabled(brick)){
     let accepted=atomicLoad(&activity[output+12u]);
     atomicStore(&activity[output+13u],accepted);atomicStore(&activity[output+14u],0u);
     return;
@@ -1667,6 +1708,122 @@ fn scheduleTopologyPreparation(){
   }
   atomicStore(&activity[14],urgent);atomicStore(&activity[15],ordinary);
   atomicStore(&activity[16],urgent+selected);atomicStore(&activity[18],ordinary-selected);
+}
+
+fn acquireTopologyPage()->u32{
+  let base=topologyWorklistBase();let capacity=atomicLoad(&topologyArena[base+27u]);
+  loop{
+    let count=atomicLoad(&topologyArena[base+26u]);
+    if(count==0u){atomicAdd(&topologyArena[base+29u],1u);return INVALID;}
+    let claimed=atomicCompareExchangeWeak(&topologyArena[base+26u],count,count-1u);
+    if(claimed.exchanged){
+      let freeList=atomicLoad(&topologyArena[base+28u]);
+      let page=atomicLoad(&topologyArena[base+freeList+count-1u]);
+      return select(INVALID,page,page<capacity);
+    }
+  }
+}
+
+fn releaseTopologyPage(page:u32){
+  if(page==INVALID){return;}
+  let base=topologyWorklistBase();let capacity=atomicLoad(&topologyArena[base+27u]);
+  let index=atomicAdd(&topologyArena[base+26u],1u);
+  if(index<capacity){
+    let freeList=atomicLoad(&topologyArena[base+28u]);
+    atomicStore(&topologyArena[base+freeList+index],page);
+  }else{
+    atomicSub(&topologyArena[base+26u],1u);atomicAdd(&topologyArena[base+29u],1u);
+  }
+}
+
+// Allocation is a separate device transaction from topology synthesis. Large
+// scenes keep planning locked until synthesized cell/row descriptors can make
+// the claimed page authoritative; small template-backed scenes already carry
+// a packed slot and therefore take the no-op branch.
+@compute @workgroup_size(64)
+fn allocateCandidateTopologyPages(@builtin(global_invocation_id)gid:vec3u){
+  let brick=gid.x;if(brick>=p.dispatch.w||brickPackedCandidateSlot(brick)!=INVALID){return;}
+  let output=activityRecord(brick);
+  if(atomicLoad(&activity[output+35u])==0u
+    ||atomicLoad(&activity[output+37u])!=INVALID){return;}
+  let page=acquireTopologyPage();
+  if(page==INVALID){
+    atomicStore(&activity[output+14u],2u);atomicStore(&activity[output+35u],0u);
+    atomicOr(&activity[7],16u);return;
+  }
+  atomicStore(&activity[output+37u],page);
+}
+
+fn candidateTopologyPageBase(page:u32)->u32{
+  let base=topologyWorklistBase();
+  return base+atomicLoad(&topologyArena[base+30u])
+    +page*atomicLoad(&topologyArena[base+31u]);
+}
+
+// Generate cell geometry directly into the claimed page. This is independent
+// of field transfer: no accepted state or worklist can observe the descriptor
+// until row synthesis, incidence construction, and publication all validate.
+@compute @workgroup_size(64)
+fn synthesizeCandidateCellPages(@builtin(local_invocation_id)lid:vec3u,
+ @builtin(workgroup_id)wid:vec3u){
+  let brick=wid.x;let lane=lid.x;if(brick>=p.dispatch.w){return;}
+  let output=activityRecord(brick);let page=atomicLoad(&activity[output+37u]);
+  if(page==INVALID||atomicLoad(&activity[output+35u])==0u){return;}
+  let resolution=atomicLoad(&activity[output+13u]);let count=resolution*resolution*resolution;
+  let pageBase=candidateTopologyPageBase(page);
+  if(lane==0u){
+    atomicStore(&topologyArena[pageBase],brick);
+    atomicStore(&topologyArena[pageBase+1u],resolution);
+    atomicStore(&topologyArena[pageBase+2u],count);
+    atomicStore(&topologyArena[pageBase+3u],atomicLoad(&activity[output+36u]));
+  }
+  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let xy=brickDimensions.x*brickDimensions.y;let bz=key/xy;
+  let remainder=key-bz*xy;let by=remainder/brickDimensions.x;
+  let bx=remainder-by*brickDimensions.x;let brickOrigin=vec3u(bx,by,bz)*8u;
+  let scale=8u/resolution;
+  for(var local=lane;local<count;local+=64u){
+    let z=local/(resolution*resolution);let yz=local-z*resolution*resolution;
+    let y=yz/resolution;let x=yz-y*resolution;
+    let lower=brickOrigin+vec3u(x,y,z)*scale;
+    let upper=min(lower+vec3u(scale),p.dimensions.xyz);let widths=upper-lower;
+    let center=vec3f(lower)+0.5*vec3f(widths);let volume=f32(widths.x*widths.y*widths.z);
+    let cell=pageBase+4u+16u*local;
+    atomicStore(&topologyArena[cell],bitcast<u32>(center.x));
+    atomicStore(&topologyArena[cell+1u],bitcast<u32>(center.y));
+    atomicStore(&topologyArena[cell+2u],bitcast<u32>(center.z));
+    atomicStore(&topologyArena[cell+3u],bitcast<u32>(volume));
+    atomicStore(&topologyArena[cell+4u],bitcast<u32>(f32(widths.x)));
+    atomicStore(&topologyArena[cell+5u],bitcast<u32>(f32(widths.y)));
+    atomicStore(&topologyArena[cell+6u],bitcast<u32>(f32(widths.z)));
+    atomicStore(&topologyArena[cell+7u],lower.x);
+    atomicStore(&topologyArena[cell+8u],lower.y);
+    atomicStore(&topologyArena[cell+9u],lower.z);
+    atomicStore(&topologyArena[cell+10u],resolution);
+    atomicStore(&topologyArena[cell+11u],brick);
+    atomicStore(&topologyArena[cell+12u],bitcast<u32>(1.0));
+    atomicStore(&topologyArena[cell+13u],bitcast<u32>(volume));
+    atomicStore(&topologyArena[cell+14u],0u);
+    atomicStore(&topologyArena[cell+15u],local);
+  }
+}
+
+// Dynamic pages are not template slots. Keep the old transfer/publication
+// transaction asleep until this page also carries rows and incidence; that
+// transaction indexes candidateState by packed template slot. Planning and
+// synthesis remain live, so large scenes perform useful GPU topology work
+// without exposing a partial generation to accepted kernels.
+@compute @workgroup_size(1)
+fn deferDynamicTopologyPublication(){
+  let base=topologyWorklistBase();
+  if(atomicLoad(&topologyArena[base+27u])==0u){return;}
+  for(var brick=0u;brick<p.dispatch.w;brick+=1u){
+    if(brickPackedCandidateSlot(brick)==INVALID){
+      atomicStore(&activity[activityRecord(brick)+35u],0u);
+    }
+  }
+  atomicStore(&activity[16],0u);
 }
 
 @compute @workgroup_size(1)
@@ -1757,14 +1914,19 @@ fn transferCandidateCells(@builtin(local_invocation_id)lid:vec3u,
   let candidateRange=templateBrickCellRange(brick,candidate);
   let sourceCount=acceptedRange.y;let candidateCount=candidateRange.y;
   var beforeMass=0.0;var beforeGamma=0.0;var beforeMomentum=vec3f(0.0);
+  var beforeGammaScale=0.0;var beforeMomentumScale=vec3f(0.0);
   for(var local=lane;local<sourceCount;local+=64u){let cell=first+local;
     let volume=cellVolume(cell);let rho=state[destinationDensity()+cell];
+    let gammaContribution=state[destinationGamma()+cell]*volume;
     let velocityAt=destinationCellVelocity()+4u*cell;
     let velocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u]);
-    beforeMass+=rho*volume;beforeGamma+=state[destinationGamma()+cell]*volume;
-    beforeMomentum+=rho*volume*velocity;
+    let momentumContribution=rho*volume*velocity;
+    beforeMass+=rho*volume;beforeGamma+=gammaContribution;
+    beforeMomentum+=momentumContribution;beforeGammaScale+=abs(gammaContribution);
+    beforeMomentumScale+=abs(momentumContribution);
   }
   var afterMass=0.0;var afterGamma=0.0;var afterMomentum=vec3f(0.0);
+  var afterGammaScale=0.0;var afterMomentumScale=vec3f(0.0);
   for(var local=lane;local<candidateCount;local+=64u){
     let cz=local/(candidate*candidate);let yz=local-cz*candidate*candidate;
     let cy=yz/candidate;let cx=yz-cy*candidate;
@@ -1800,21 +1962,31 @@ fn transferCandidateCells(@builtin(local_invocation_id)lid:vec3u,
     candidateState[candidateFieldIndex(4u,brick,local)]=velocity.z;
     candidateState[candidateFieldIndex(5u,brick,local)]=pressure;
     let volume=candidateCellVolume(brick,candidate,local);
-    afterMass+=rho*volume;afterGamma+=gamma*volume;
-    afterMomentum+=rho*volume*velocity;
+    let gammaContribution=gamma*volume;let momentumContribution=rho*volume*velocity;
+    afterMass+=rho*volume;afterGamma+=gammaContribution;
+    afterMomentum+=momentumContribution;afterGammaScale+=abs(gammaContribution);
+    afterMomentumScale+=abs(momentumContribution);
   }
   transferMassBefore[lane]=beforeMass;transferMassAfter[lane]=afterMass;
   transferGammaDelta[lane]=afterGamma-beforeGamma;
+  transferGammaScale[lane]=beforeGammaScale+afterGammaScale;
   transferMomentumXDelta[lane]=afterMomentum.x-beforeMomentum.x;
   transferMomentumYDelta[lane]=afterMomentum.y-beforeMomentum.y;
   transferMomentumZDelta[lane]=afterMomentum.z-beforeMomentum.z;
+  transferMomentumXScale[lane]=beforeMomentumScale.x+afterMomentumScale.x;
+  transferMomentumYScale[lane]=beforeMomentumScale.y+afterMomentumScale.y;
+  transferMomentumZScale[lane]=beforeMomentumScale.z+afterMomentumScale.z;
   workgroupBarrier();var width=32u;loop{if(lane<width){
     transferMassBefore[lane]+=transferMassBefore[lane+width];
     transferMassAfter[lane]+=transferMassAfter[lane+width];
     transferGammaDelta[lane]+=transferGammaDelta[lane+width];
+    transferGammaScale[lane]+=transferGammaScale[lane+width];
     transferMomentumXDelta[lane]+=transferMomentumXDelta[lane+width];
     transferMomentumYDelta[lane]+=transferMomentumYDelta[lane+width];
     transferMomentumZDelta[lane]+=transferMomentumZDelta[lane+width];
+    transferMomentumXScale[lane]+=transferMomentumXScale[lane+width];
+    transferMomentumYScale[lane]+=transferMomentumYScale[lane+width];
+    transferMomentumZScale[lane]+=transferMomentumZScale[lane+width];
   }workgroupBarrier();if(width==1u){break;}width/=2u;}
   if(lane!=0u){return;}
   if(candidateStatus!=1u){
@@ -1823,12 +1995,15 @@ fn transferCandidateCells(@builtin(local_invocation_id)lid:vec3u,
   let massError=transferMassAfter[0]-transferMassBefore[0];
   let gammaError=transferGammaDelta[0];let momentumError=vec3f(
     transferMomentumXDelta[0],transferMomentumYDelta[0],transferMomentumZDelta[0]);
-  let tolerance=max(1e-4,1e-6*abs(transferMassBefore[0]));
+  let massTolerance=max(1e-4,1e-6*abs(transferMassBefore[0]));
+  let gammaTolerance=max(1e-3,1e-6*transferGammaScale[0]);
+  let momentumTolerance=max(vec3f(1e-3),1e-6*vec3f(
+    transferMomentumXScale[0],transferMomentumYScale[0],transferMomentumZScale[0]));
   let valid=finiteTransferValue(transferMassBefore[0])
     &&finiteTransferValue(transferMassAfter[0])&&finiteTransferValue(gammaError)
-    &&all(momentumError==momentumError)&&abs(massError)<=tolerance
-    &&abs(gammaError)<=max(1e-3,tolerance)
-    &&all(abs(momentumError)<=vec3f(max(1e-3,tolerance)));
+    &&all(momentumError==momentumError)&&abs(massError)<=massTolerance
+    &&abs(gammaError)<=gammaTolerance
+    &&all(abs(momentumError)<=momentumTolerance);
   atomicStore(&activity[output+16u],bitcast<u32>(transferMassBefore[0]));
   atomicStore(&activity[output+17u],bitcast<u32>(transferMassAfter[0]));
   atomicStore(&activity[output+18u],bitcast<u32>(massError));
@@ -2021,26 +2196,7 @@ fn validateAndCommitShadowTopology(){
 @compute @workgroup_size(64)
 fn activateSweptReceivers(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w||brickActive(brick)){return;}
-  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
-  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
-  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
-  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
-  let x=remainder-y*brickDimensions.x;let coordinate=vec3i(i32(x),i32(y),i32(z));
-  var requested=injectionReachesBrick(brick);
-  for(var dz=-1;dz<=1;dz+=1){for(var dy=-1;dy<=1;dy+=1){
-    for(var dx=-1;dx<=1;dx+=1){if(dx==0&&dy==0&&dz==0){continue;}
-      let neighborCoordinate=coordinate+vec3i(dx,dy,dz);
-      if(any(neighborCoordinate<vec3i(0))
-        ||any(neighborCoordinate>=vec3i(brickDimensions))){continue;}
-      let neighborKey=u32(neighborCoordinate.x)+brickDimensions.x
-        *(u32(neighborCoordinate.y)+brickDimensions.y*u32(neighborCoordinate.z));
-      let neighbor=brickDirectoryLookup(neighborKey);
-      if(neighbor==INVALID||!brickActive(neighbor)){continue;}
-      let bit=u32(1-dx)+3u*u32(1-dy)+9u*u32(1-dz);
-      requested=requested
-        ||(atomicLoad(&activity[activityRecord(neighbor)+32u])&(1u<<bit))!=0u;
-  }}}
-  if(!requested){return;}
+  if(!brickRequestedAsReceiver(brick)){return;}
   let output=activityRecord(brick);
   // A swept receiver contains the moving free surface by construction. It is
   // requested fine before publication; closePlannedResolution then grows the

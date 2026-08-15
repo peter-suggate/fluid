@@ -294,6 +294,8 @@ accepted compact cell/row worklists
 
 shadow brick levels + preparation bits
 shadow cell/face transfer slots (512 only for mutation-capable span-one leaves)
+GPU topology-page free list (32..512 pages, scaled from the mutable frontier)
+GPU-authored candidate cell descriptors (row/incidence publication-gated)
 shadow local-row and seam-row descriptors
 dirty queue: urgent segment | ordinary segment
 indirect dispatch/count header

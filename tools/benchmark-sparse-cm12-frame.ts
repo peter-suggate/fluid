@@ -6,7 +6,7 @@
  *   node --import tsx tools/benchmark-sparse-cm12-frame.ts
  *
  * Construction and warmup are excluded. Arms use the same authored scene,
- * 32x16x32 finest lattice and 0.004 s step, and alternate order to reduce
+ * 32x16x32 finest lattice and matched step, and alternate order to reduce
  * drift. The hard ratio is defined beside the adaptive method implementation.
  */
 import assert from "node:assert/strict";
@@ -18,6 +18,7 @@ import type {
   SimulationMethod,
 } from "../lib/core/method-contract";
 import { resolveMethodValues } from "../lib/core/method-contract";
+import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import type { PerformanceTrace } from "../lib/core/performance-trace";
 import {
   createMinimalPowerDamBreak32Scene,
@@ -68,6 +69,12 @@ const sparseResolutionArgument = process.argv.slice(2)
 if (sparseResolutionArgument !== "all-fine" && sparseResolutionArgument !== "adaptive") {
   throw new RangeError("sparse-resolution must be all-fine or adaptive");
 }
+const timeStepArgument = process.argv.slice(2)
+  .find((value) => value.startsWith("--time-step="))?.slice("--time-step=".length)
+  ?? "scene";
+if (timeStepArgument !== "scene" && timeStepArgument !== "paper") {
+  throw new RangeError("time-step must be scene or paper");
+}
 const buildScene = sceneArgument === "mini32"
   ? createMinimalPowerDamBreak32Scene
   : sceneArgument === "long-dam"
@@ -80,7 +87,8 @@ const acceptance = sceneArgument === "mini32"
     : SPARSE_CM12_PERFORMANCE_ACCEPTANCE;
 const scene = buildScene();
 const dimensions = acceptance.finestDimensions;
-const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
+const dt_s = timeStepArgument === "paper"
+  ? CM12_PAPER_DT_S : scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
 
 interface FrameStateSample {
   readonly time_s: number;
@@ -256,8 +264,8 @@ async function createArm(
   method: SimulationMethod,
 ): Promise<MutableArm> {
   const overrides: MethodParamValues = method.id === "uniform"
-    ? { timeStep: "scene", densityPostProcessing: "off" }
-    : { timeStep: "scene", resolutionMode: sparseResolutionArgument };
+    ? { timeStep: timeStepArgument, densityPostProcessing: "off" }
+    : { timeStep: timeStepArgument, resolutionMode: sparseResolutionArgument };
   const values = resolveMethodValues(method, "balanced", overrides);
   const solver = await method.createSolverAsync!(
     device,
@@ -458,8 +466,10 @@ try {
         longDamFront.sparse.furthestFineCellX.liquid}; the matched Uniform front reached the far wall`,
     );
   }
+  const densityAgreement = matchedDensityReceipt(uniformDensity, sparseDensity);
   const forcedFineDensityAgreement = sparseResolutionArgument === "all-fine"
-    ? matchedDensityReceipt(uniformDensity, sparseDensity) : undefined;
+    ? densityAgreement : undefined;
+  const performanceGateApplied = timeStepArgument === "scene";
   const agreementFailures: string[] = [];
   if (forcedFineDensityAgreement && forcedFineDensityAgreement.relativeL1 > 0.05) {
     agreementFailures.push(
@@ -467,7 +477,7 @@ try {
         forcedFineDensityAgreement.relativeL1} exceeds 0.05 against Uniform`,
     );
   }
-  const passed = verdict.passed && frontFailures.length === 0
+  const passed = (!performanceGateApplied || verdict.passed) && frontFailures.length === 0
     && agreementFailures.length === 0;
   const report = {
     phase: "sparse-cm12-frame-performance",
@@ -476,6 +486,8 @@ try {
     dt_s,
     warmupFrames,
     timedFrames,
+    timeStep: timeStepArgument,
+    performanceGateApplied,
     sparseResolutionMode: sparseResolutionArgument,
     matchedRepresentation: {
       uniformCells: uniform.solver.info.cellCount,
@@ -492,6 +504,7 @@ try {
       uniformDensity: rawFloatHash(uniformDensity),
       sparseDensity: rawFloatHash(sparseDensity),
     },
+    densityAgreement,
     pressureControl: {
       uniform: {
         solver: finalUniformInfo.pressureSolver,
@@ -527,9 +540,10 @@ try {
     forcedFineDensityAgreement,
     ...verdict,
     passed,
-    targetMet: verdict.targetMet && frontFailures.length === 0
+    targetMet: (!performanceGateApplied || verdict.targetMet) && frontFailures.length === 0
       && agreementFailures.length === 0,
-    failures: [...verdict.failures, ...frontFailures, ...agreementFailures],
+    failures: [...(performanceGateApplied ? verdict.failures : []),
+      ...frontFailures, ...agreementFailures],
   };
   console.log(JSON.stringify(report, null, 2));
   if (validationErrors.length > 0 || !passed) process.exitCode = 1;

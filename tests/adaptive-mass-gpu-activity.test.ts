@@ -33,7 +33,7 @@ import {
   SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
 } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import { sparseCM12FinePresentationPlan } from
+import { sparseCM12FinePresentationPlan, sparseCM12TopologyPagePoolPlan } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import {
   ADAPTIVE_MASS_RUNTIME_PARAM_KEYS,
@@ -108,6 +108,27 @@ test("resident D4 preservation has disjoint density and gamma scratch", () => {
     "stateOffsets5.y must address allocated gamma scratch rather than densityA");
 });
 
+test("resident topology templates snapshot pooled geometry by value", () => {
+  const source = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  const begin = source.indexOf("function snapshotTemplateCell");
+  const end = source.indexOf("function resampleBrick", begin);
+  assert.ok(begin >= 0 && end > begin, "template cell snapshot must be inspectable");
+  const snapshot = source.slice(begin, end);
+  for (const field of ["brickCoordinate", "local", "minimumFine", "maximumFine",
+    "centerFine", "widthsFine"] as const) {
+    assert.match(snapshot, new RegExp(`${field}: \\[\\.\\.\\.source\\.${field}\\]`),
+      `${field} must not alias the recycled composite-grid workspace`);
+  }
+  assert.match(source,
+    /rows\.push\(\{ \.\.\.source, id: rows\.length, centerFine: \[\.\.\.source\.centerFine\], terms \}\)/,
+    "retained template row centers must not alias the recycled workspace");
+  assert.match(source, /templates\.words\[base \+ 7\]! < 8 \* coordinate\[0\]/,
+    "template construction must reject spatially aliased cell ranges");
+});
+
 test("adaptive construction leaves interface resolution to the atlas initializer", () => {
   const source = readFileSync(new URL(
     "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts",
@@ -149,7 +170,8 @@ test("GPU candidate planning is epoch-gated and cannot mutate accepted state", (
   assert.match(kernel, /if\(!brickActive\(brick\)\)\{\s*atomicStore\(&activity\[output\+8u\],1u\)/,
     "dormant capacity must begin at the coarsest logical request");
   assert.match(kernel, /velocityFloor=velocityResolutionFloor\(activityF32\(output\+33u\)\)/);
-  assert.match(kernel, /surface\|\|thinFluid\|\|\(activitySignals&&predicted\)/);
+  assert.match(kernel,
+    /surface\|\|thinFluid\|\|receiver\|\|\(activitySignals&&predicted\)/);
   assert.match(kernel, /else if\(atomicLoad\(&activity\[5\]\)!=0u\)/);
   assert.match(kernel, /if\(activitySignals&&hotEpochs>=p\.activityEpochs\.y\)/);
   assert.match(kernel, /requested=min\(8u,2u\*current\)/);
@@ -195,10 +217,20 @@ test("GPU selector maps fluid travel across the ladder and keeps surface or thin
     "candidate topology cadence must come from the live policy uniform");
   const planEnd = webgpuSparseCM12ResidentWGSL.indexOf("fn closePlannedResolution", planBegin);
   const plan = webgpuSparseCM12ResidentWGSL.slice(planBegin, planEnd);
-  assert.match(plan, /surface\|\|thinFluid\|\|\(activitySignals&&predicted\)/,
-    "surface and thin fluid must override velocity with the finest floor");
-  assert.match(plan, /requested=select\([\s\S]*?required,[\s\S]*?surface\|\|thinFluid\)/,
-    "existing surface bricks must jump directly to the finest requested level");
+  assert.match(plan,
+    /surface\|\|thinFluid\|\|receiver\|\|\(activitySignals&&predicted\)/,
+    "surface, thin fluid, and swept receivers must override velocity with the finest floor");
+  assert.match(plan,
+    /requested=select\([\s\S]*?required,[\s\S]*?surface\|\|thinFluid\|\|receiver\)/,
+    "existing surface and swept-receiver bricks must jump directly to the finest requested level");
+  const receiver = webgpuSparseCM12ResidentWGSL.slice(
+    webgpuSparseCM12ResidentWGSL.indexOf("fn brickRequestedAsReceiver"), planBegin,
+  );
+  assert.match(receiver, /activityRecord\(neighbor\)\+32u/,
+    "the same immutable neighbor support receipt must protect resident receivers");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /fn activateSweptReceivers[\s\S]*?brickRequestedAsReceiver\(brick\)/,
+    "activation and retained receiver resolution must share one prediction predicate");
   assert.match(plan, /else if\(thinFluid\)\{planReasons=256u;\}/);
 });
 
@@ -297,6 +329,42 @@ test("GPU candidate validation is isolated from accepted level and topology", ()
   assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/);
 });
 
+test("large-scene topology pages use a bounded GPU free list", () => {
+  assert.deepEqual(sparseCM12TopologyPagePoolPlan(0), {
+    pageCapacity: 0, freeListWords: 0, pageWords: 8_196, descriptorWords: 0,
+  });
+  assert.deepEqual(sparseCM12TopologyPagePoolPlan(64), {
+    pageCapacity: 32, freeListWords: 32, pageWords: 8_196,
+    descriptorWords: 262_272,
+  });
+  assert.deepEqual(sparseCM12TopologyPagePoolPlan(100_000), {
+    pageCapacity: 512, freeListWords: 512, pageWords: 8_196,
+    descriptorWords: 4_196_352,
+  });
+  assert.match(webgpuSparseCM12ResidentWGSL, /fn acquireTopologyPage\(\)->u32/);
+  assert.match(webgpuSparseCM12ResidentWGSL, /atomicCompareExchangeWeak/);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /fn allocateCandidateTopologyPages\(@builtin\(global_invocation_id\)/);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /fn synthesizeCandidateCellPages\(@builtin\(local_invocation_id\)/);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /fn brickCandidatePlanningEnabled\(brick:u32\)->bool/);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /fn deferDynamicTopologyPublication\(\)/);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /atomicStore\(&activity\[16\],0u\)/);
+  assert.match(readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts", import.meta.url,
+  ), "utf8"), /topologyPage: words\[at \+ 37\]/);
+  const synthesis = webgpuSparseCM12ResidentWGSL.slice(
+    webgpuSparseCM12ResidentWGSL.indexOf("fn synthesizeCandidateCellPages"),
+    webgpuSparseCM12ResidentWGSL.indexOf("fn beginShadowTopology"),
+  );
+  assert.match(synthesis, /pageBase\+4u\+16u\*local/);
+  assert.doesNotMatch(synthesis, /state\[/,
+    "geometry synthesis must not mutate accepted fields before publication");
+});
+
 test("GPU candidate cell transfer is conservative and remains non-authoritative", () => {
   assert.match(webgpuSparseCM12ResidentWGSL,
     /@group\(0\)@binding\(13\)var<storage,read_write>candidateState:array<f32>/);
@@ -308,6 +376,11 @@ test("GPU candidate cell transfer is conservative and remains non-authoritative"
   const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
   assert.match(kernel, /candidate<accepted/);
   assert.match(kernel, /momentumSum\/massSum/);
+  assert.match(kernel, /beforeMomentumScale\+=abs\(momentumContribution\)/);
+  assert.match(kernel, /afterMomentumScale\+=abs\(momentumContribution\)/);
+  assert.match(kernel, /momentumTolerance=max\(vec3f\(1e-3\),1e-6\*vec3f\(/);
+  assert.match(kernel, /all\(abs\(momentumError\)<=momentumTolerance\)/);
+  assert.doesNotMatch(kernel, /momentumError\)<=vec3f\(max\(1e-3,tolerance\)\)/);
   assert.match(kernel, /candidateState\[candidateFieldIndex\(0u,brick,local\)\]=rho/);
   assert.match(kernel, /atomicStore\(&activity\[output\+18u\],bitcast<u32>\(massError\)\)/);
   assert.match(kernel, /if\(!valid\)\{atomicOr\(&activity\[7\],2u\);\}/);
