@@ -243,9 +243,11 @@ test("GPU candidate planning is epoch-gated and cannot mutate accepted state", (
   assert.match(kernel,
     /select\(1u,8u,strictSurface\|\|thinFluid\|\|receiver\)/);
   assert.match(kernel, /else if\(atomicLoad\(&activity\[5\]\)!=0u\)/);
-  assert.match(kernel, /if\(activitySignals&&hotEpochs>=p\.activityEpochs\.y\)/);
+  assert.match(kernel,
+    /if\(activitySignals&&!enclosed&&!slowSurface&&hotEpochs>=p\.activityEpochs\.y\)/);
   assert.match(kernel, /requested=min\(8u,2u\*current\)/);
-  assert.match(kernel, /quietEpochs>=p\.activityEpochs\.z&&!detail/);
+  assert.match(kernel,
+    /\(enclosed\|\|slowSurface\|\|quietEpochs>=p\.activityEpochs\.z\)&&!detail/);
   assert.match(kernel, /requested=max\(required,current\/2u\)/);
   assert.match(kernel, /atomicStore\(&activity\[output\+8u\],requested\)/);
   assert.doesNotMatch(kernel, /state\[[^\]]+\]\s*=(?!=)/);
@@ -306,21 +308,27 @@ test("GPU selector keeps calm surfaces and deep translating bulk coarse in activ
     "candidate topology cadence must come from the live policy uniform");
   const planEnd = webgpuSparseCM12ResidentWGSL.indexOf("fn closePlannedResolution", planBegin);
   const plan = webgpuSparseCM12ResidentWGSL.slice(planBegin, planEnd);
+  assert.match(plan, /enclosed=activitySignals&&brickDeeplyEnclosed\(brick\)/,
+    "deep bulk must be identified from the accepted occupied-neighbour snapshot");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /brickDirectoryLookupAtCoordinate\(vec3u\(neighborCoordinate\)\)/,
+    "deep enclosure must recognize adjacent macro-bricks rather than exact origins only");
   assert.match(plan, /strictSurface=surface&&!activitySignals/,
     "only surface-distance mode must blanket-pin interfaces fine");
   assert.match(plan,
-    /receiver=receiverRequested&&\(\(reasons&64u\)==0u\|\|surface\|\|velocityFloor>1u\)/,
-    "the fine receiver floor must stop after the swept destination leaves the interface");
-  assert.match(plan, /activitySurface=surface&&activitySignals/,
+    /receiver=receiverRequested&&\(\(reasons&64u\)==0u\|\|velocityFloor>1u\)/,
+    "the fine receiver floor must stop once its destination is wet and slow");
+  assert.match(plan, /activitySurface=adaptiveSurface&&activitySignals/,
     "a calm activity-mode interface must retain a safe middle rung");
   assert.match(plan,
     /select\(1u,8u,strictSurface\|\|thinFluid\|\|receiver\)/,
     "strict surfaces, thin liquid, and moving receivers must get an 8-cubed floor");
   assert.match(plan, /select\(1u,4u,activitySurface\)/,
     "calm surfaces may retain the safe middle rung");
-  assert.match(plan,
-    /let detail=activitySignals&&\(reasons&8u\)!=0u\s*&&\(!surface\|\|thinFluid\|\|\(score>=u32\(round\(255\.0\)\)\)\)/,
-    "raw planar-interface restriction error must remain diagnostic without vetoing a merge");
+  assert.match(plan, /slowSurface=adaptiveSurface&&!thinFluid&&velocityFloor==1u/,
+    "a slow non-thin interface must be allowed to return to its middle rung");
+  assert.match(plan, /&&!enclosed&&!slowSurface/,
+    "deep or slow-surface restriction residue must remain diagnostic without vetoing a merge");
   assert.match(plan,
     /requested=select\(min\(8u,max\(required,2u\*current\)\),required,urgent\)/,
     "non-urgent measured activity must advance by one rung");
@@ -365,7 +373,7 @@ test("Sparse CM12 exposes normalized structural and live candidate policy contro
   assert.equal(options.activityPolicy?.activitySignals, true);
   assert.equal(options.activityPolicy?.prepareBricksPerFrame, 11);
   const defaults = adaptiveMassSolverOptions({}).activityPolicy;
-  assert.equal(defaults?.activitySignals, false);
+  assert.equal(defaults?.activitySignals, true);
   assert.equal(defaults?.residencyDensity, 0.005,
     "the default region cutoff must reject settled dilute residue");
   assert.equal(defaults?.residencyMassFineCells, 1,
@@ -391,7 +399,8 @@ test("Sparse CM12 exposes normalized structural and live candidate policy contro
   assert.ok(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("prepareBricksPerFrame"));
   assert.ok(!ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("receiverFloor" as never),
     "the accepted receiver floor must rebuild rather than pretend to update live");
-  assert.match(stage.tip.summary, /urgent surface refinement bypasses the ordinary round-robin/);
+  assert.match(stage.tip.summary,
+    /merges settled existing bricks one rung per quiet epoch through a 2:1-closed/);
 });
 
 test("GPU candidate levels close the full 1/2/4/8 ladder to 2:1", () => {

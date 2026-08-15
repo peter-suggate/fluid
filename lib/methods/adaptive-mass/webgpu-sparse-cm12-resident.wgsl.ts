@@ -1708,6 +1708,33 @@ fn brickRequestedAsReceiver(brick:u32)->bool{
   return requested;
 }
 
+// A filled brick with filled face neighbours in every non-wall direction is
+// deep bulk even if a low-amplitude density ripple happens to cross rho=.5 in
+// one of its composite rows. Treating that internal crossing as a free surface
+// permanently spread 8^3 resolution down through a tank after an impact. The
+// lookup is span-aware so a mutable frontier brick beside an immutable macro
+// leaf still receives the correct enclosure evidence.
+fn brickDeeplyEnclosed(brick:u32)->bool{
+  let output=activityRecord(brick);
+  if((atomicLoad(&activity[output+1u])&64u)==0u){return false;}
+  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
+  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
+  let x=remainder-y*brickDimensions.x;let coordinate=vec3i(i32(x),i32(y),i32(z));
+  let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
+    vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  for(var side=0u;side<6u;side+=1u){let neighborCoordinate=coordinate+directions[side];
+    // The container wall is closed support, not missing liquid.
+    if(any(neighborCoordinate<vec3i(0))
+      ||any(neighborCoordinate>=vec3i(brickDimensions))){continue;}
+    let neighbor=brickDirectoryLookupAtCoordinate(vec3u(neighborCoordinate));
+    if(neighbor==INVALID||!brickActive(neighbor)
+      ||(atomicLoad(&activity[activityRecord(neighbor)+1u])&64u)==0u){return false;}
+  }
+  return true;
+}
+
 // First candidate-planning rung. The accepted topology remains immutable:
 // this pass publishes only the resolution requested by the CM12 surface floor,
 // characteristic prediction, and retained activity history. Transfer and
@@ -1749,24 +1776,34 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let activitySignals=activitySignalsEnabled();
   // Raw detail remains in diagnostics, but a quiet planar surface may merge:
   // its permanent sharpening residual is not an unresolved bulk feature.
-  let detail=activitySignals&&(reasons&8u)!=0u
-    &&(!surface||thinFluid||(score>=u32(round(255.0))));
   let velocityFloor=velocityResolutionFloor(activityF32(output+33u));
-  let receiver=receiverRequested&&((reasons&64u)==0u||surface||velocityFloor>1u);
+  let enclosed=activitySignals&&brickDeeplyEnclosed(brick);
+  // Enclosed bulk follows only its measured travel rung. In particular, an
+  // internal rho=.5 crossing left by a settling wave is not interface geometry
+  // and cannot pin the brick fine once its motion is slow enough to merge.
+  let adaptiveSurface=surface&&!enclosed;
+  let slowSurface=adaptiveSurface&&!thinFluid&&velocityFloor==1u;
+  let detail=activitySignals&&(reasons&8u)!=0u
+    &&(!adaptiveSurface||thinFluid||(score>=u32(round(255.0))))
+    &&!enclosed&&!slowSurface;
+  let receiver=receiverRequested&&((reasons&64u)==0u||velocityFloor>1u);
   // Surface-distance mode retains the conservative 8^3 interface invariant.
   // Activity mode lets calm planar interfaces retain or earn coarser rungs;
-  // absolute bulk velocity is deliberately absent because uniform translation
-  // contains no extra spatial detail. A swept receiver is different: it is the
-  // predicted destination of a moving interface, so it retains the established
-  // 8^3 safety floor while 2:1 closure grades its neighbours.
+  // uniform bulk translation is absent from emergency scoring because it does
+  // not imply missing spatial detail; enclosed bulk still follows the explicit
+  // travel rung above. A swept receiver is the predicted destination of a moving
+  // interface, so it retains the established 8^3 safety floor while 2:1 closure
+  // grades its neighbours.
   let strictSurface=surface&&!activitySignals;
-  let activitySurface=surface&&activitySignals;
-  let interfaceVelocityFloor=select(1u,velocityFloor,surface||thinFluid);
+  let activitySurface=adaptiveSurface&&activitySignals;
+  let interfaceVelocityFloor=select(1u,velocityFloor,
+    adaptiveSurface||thinFluid||enclosed);
   let required=max(max(interfaceVelocityFloor,
     select(1u,8u,strictSurface||thinFluid||receiver)),
     max(select(1u,4u,activitySurface),select(1u,4u,cutBoundary)));
   let emergencyScore=u32(round(255.0*p.activityTiming.z));
-  if(required>current||(activitySignals&&score>=emergencyScore)){
+  if(required>current
+    ||(activitySignals&&!enclosed&&!slowSurface&&score>=emergencyScore)){
     // Strict surfaces, thin sheets, and receivers are safety floors and may
     // jump directly. Ordinary measured activity advances one rung, preventing
     // a low-speed emergency score from erasing the hierarchy in two frames.
@@ -1777,9 +1814,10 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
     else if(velocityFloor>current){planReasons=64u;}else{planReasons=4u;}
   }else if(atomicLoad(&activity[5])!=0u){
     requested=current;planReasons=32u;
-    if(activitySignals&&hotEpochs>=p.activityEpochs.y){
+    if(activitySignals&&!enclosed&&!slowSurface&&hotEpochs>=p.activityEpochs.y){
       requested=min(8u,2u*current);planReasons=8u;
-    }else if(current>required&&quietEpochs>=p.activityEpochs.z&&!detail){
+    }else if(current>required
+      &&(enclosed||slowSurface||quietEpochs>=p.activityEpochs.z)&&!detail){
       requested=max(required,current/2u);planReasons=16u;
     }
   }

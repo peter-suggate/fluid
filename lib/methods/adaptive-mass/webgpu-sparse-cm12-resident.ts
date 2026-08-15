@@ -2104,7 +2104,9 @@ export class WebGPUSparseCM12Resident {
           : record.acceptedResolution === 4 ? 2 : record.acceptedResolution === 2 ? 1 : 0;
         const first = this.templateWords[rangeOffset + 2 * (4 * brick + level)]!;
         const cellCount = this.templateWords[rangeOffset + 2 * (4 * brick + level) + 1]!;
-        const key = this.lastPacked!.words[this.lastPacked!.brickOffset + 4 * brick + 3]!;
+        const brickRecord = this.lastPacked!.brickOffset + 4 * brick;
+        const key = this.lastPacked!.words[brickRecord + 3]!;
+        const spanBricks = 1 << (this.lastPacked!.words[brickRecord + 2]! & 31);
         const brickDimensions = this.dimensions.map((size) => Math.ceil(size / 8));
         const brickZ = Math.floor(key / (brickDimensions[0]! * brickDimensions[1]!));
         const keyXY = key - brickZ * brickDimensions[0]! * brickDimensions[1]!;
@@ -2114,9 +2116,9 @@ export class WebGPUSparseCM12Resident {
         const base = cellOffset + 16 * cell;
         const lower = [this.templateWords[base + 7]!, this.templateWords[base + 8]!,
           this.templateWords[base + 9]!] as const;
-        if (lower[0] < 8 * brickX || lower[0] >= 8 * (brickX + 1)
-          || lower[1] < 8 * brickY || lower[1] >= 8 * (brickY + 1)
-          || lower[2] < 8 * brickZ || lower[2] >= 8 * (brickZ + 1)) {
+        if (lower[0] < 8 * brickX || lower[0] >= 8 * (brickX + spanBricks)
+          || lower[1] < 8 * brickY || lower[1] >= 8 * (brickY + spanBricks)
+          || lower[2] < 8 * brickZ || lower[2] >= 8 * (brickZ + spanBricks)) {
           throw new Error(`Sparse CM12 active brick ${brick} at ${brickX},${brickY},${brickZ}`
             + ` aliases cell ${cell} at ${lower.join(",")}`);
         }
