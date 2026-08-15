@@ -155,13 +155,10 @@ fn sparseGridEnabled()->bool{
   return sparseP.counts.x>0u&&all(sparseP.dimensions.xyz==vec3u(u.gridInfo.xyz));
 }
 fn sparseBrickLookup(key:u32)->u32{
-  var low=0u;var high=sparseP.dispatch.w;
-  loop{if(low>=high){break;}let middle=low+(high-low)/2u;
-    let candidate=sparseTopology[sparseP.topologyOffsets2.y+2u*middle];
-    if(candidate<key){low=middle+1u;}else{high=middle;}}
-  if(low>=sparseP.dispatch.w
-    ||sparseTopology[sparseP.topologyOffsets2.y+2u*low]!=key){return SPARSE_INVALID;}
-  return sparseTopology[sparseP.topologyOffsets2.y+2u*low+1u];
+  let brickDims=(sparseP.dimensions.xyz+vec3u(7u))/8u;
+  let count=brickDims.x*brickDims.y*brickDims.z;
+  if(key>=count){return SPARSE_INVALID;}
+  return sparseTopology[sparseP.topologyOffsets2.y+key];
 }
 fn sparseBrickActive(brick:u32)->bool{
   let at=24u+40u*brick+10u;
@@ -169,6 +166,9 @@ fn sparseBrickActive(brick:u32)->bool{
 }
 fn sparseAcceptedResolution(brick:u32)->u32{
   return sparseActivity[24u+40u*brick+12u];
+}
+fn sparseBrickSpan(brick:u32)->u32{
+  return 1u<<(sparseTopology[sparseP.topologyOffsets2.z+4u*brick+2u]&31u);
 }
 fn sparseTemplateLevelIndex(resolution:u32)->u32{
   return select(select(select(0u,1u,resolution==2u),2u,resolution==4u),3u,
@@ -185,15 +185,16 @@ fn sparseTemplateCellBase(cell:u32)->u32{
 fn sparseOwner(q:vec3i)->vec2u{
   if(!sparseGridEnabled()||any(q<vec3i(0))||any(q>=vec3i(sparseP.dimensions.xyz))){return vec2u(SPARSE_INVALID);}
   let uq=vec3u(q);let brickDims=(sparseP.dimensions.xyz+vec3u(7u))/8u;
-  let brickCoordinate=uq/8u;let key=brickCoordinate.x+brickDims.x
-    *(brickCoordinate.y+brickDims.y*brickCoordinate.z);
+  let queryCoordinate=uq/8u;let key=queryCoordinate.x+brickDims.x
+    *(queryCoordinate.y+brickDims.y*queryCoordinate.z);
   let brick=sparseBrickLookup(key);if(brick==SPARSE_INVALID||!sparseBrickActive(brick)){return vec2u(SPARSE_INVALID);}
+  let span=sparseBrickSpan(brick);let brickCoordinate=(queryCoordinate/span)*span;
   let resolution=sparseAcceptedResolution(brick);
   let range=sparseTemplateCellRange(brick,resolution);
   let first=range.x;let count=range.y;
-  let scale=8u/resolution;let local=(uq-brickCoordinate*8u)/scale;
+  let scale=8u*span/resolution;let local=(uq-brickCoordinate*8u)/scale;
   let origin=brickCoordinate*8u;
-  let valid=(min(sparseP.dimensions.xyz-origin+vec3u(scale-1u),vec3u(8u)))/scale;
+  let valid=(min(sparseP.dimensions.xyz-origin+vec3u(scale-1u),vec3u(8u*span)))/scale;
   let cell=first+local.x+valid.x*(local.y+valid.y*local.z);
   return select(vec2u(SPARSE_INVALID),vec2u(cell,brick),cell<first+count);
 }
@@ -224,8 +225,8 @@ fn sparseOwnerKey(q:vec3i)->vec2u{
   let base=sparseTemplateCellBase(owner.x);
   let lower=vec3u(sparseTopologyArena[base+7u],sparseTopologyArena[base+8u],
     sparseTopologyArena[base+9u]);
-  let resolution=max(1u,sparseTopologyArena[base+10u]);
-  let scale=max(1u,8u/resolution);let level=u32(round(log2(f32(scale))));
+  let scale=max(1u,sparseTopologyArena[base+10u]);
+  let level=u32(round(log2(f32(scale))));
   return vec2u(lower.x|(lower.z<<11u)|(level<<22u),lower.y|0x80000000u);
 }
 

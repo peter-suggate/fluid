@@ -62,7 +62,7 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   },
   gammaDiffusion: {
     id: "fine-sdf-advection",
-    label: "Gamma diffusion forward and reverse axis sweeps",
+    label: "Gamma diffusion row-owned snapshot iterations",
   },
   surfaceConditioning: {
     id: "fine-sdf-redistance",
@@ -365,12 +365,12 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Gamma diffusion",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.gammaDiffusion.label],
     tip: {
-      summary: "Sec. 3.4 step 8: Jacobi within an axis, Gauss-Seidel between axes. Three forward and three reverse sweeps are averaged into one order-independent result, which is what keeps the diffused gamma from inheriting the sweep direction.",
-      reads: "transported gamma",
-      writes: "diffused gamma",
+      summary: "Sec. 3.4 step 8 evaluated as two stable immutable-snapshot iterations. Every composite subface contributes paired antisymmetric fixed-point rho/gamma receipts, so mass is conservative and no dimensional sweep order remains.",
+      reads: "transported density and gamma",
+      writes: "conditioned density and gamma",
       feeds: "surface sharpening",
     },
-    chip: () => "6 axis sweeps · averaged",
+    chip: () => "2 × row scatter + cell resolve",
   }),
   stage({
     id: "surface-conditioning", band: "transport", side: "right",
@@ -451,7 +451,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
         kind: "param-choice", param: "selectorMode", label: "Criterion",
         options: [
           { value: "surface", label: "SURFACE", hint: "Surface and thin liquid are 8³; coarsen with distance." },
-          { value: "activity", label: "ACTIVITY", hint: "Moving/complex interfaces refine; calm surfaces and flooded deep bulk merge." },
+          { value: "activity", label: "ACTIVITY", hint: "Free surfaces stay fine; calm flooded deep bulk merges." },
         ],
       },
       {
@@ -530,7 +530,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
         kind: "param-range", param: "detailTolerance", label: "Detail tolerance",
         unit: " ρ", min: 0.005, max: 0.5, step: 0.005, digits: 3,
         enabled: (context) => context.values.selectorMode === "activity",
-        hint: "2x2x2 restriction error allowed before bulk or complex-interface detail vetoes demotion. A calm planar surface is not pinned merely by CM12 sharpening.",
+        hint: "2x2x2 restriction error allowed before enclosed-bulk detail vetoes demotion. Free surfaces retain their independent 8³ floor.",
       },
       {
         kind: "param-range", param: "topologyCadenceSteps", label: "Epoch cadence",

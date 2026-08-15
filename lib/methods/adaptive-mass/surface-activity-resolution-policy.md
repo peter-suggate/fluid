@@ -222,9 +222,8 @@ the first rung. A surface row whose outward characteristic can reach another
 brick before the next topology epoch sets `PredictedFace` and immediately
 requests that receiver fine. This uses
 `topologyCadenceSteps * dt * max(abs(faceVelocity))`; it is a surface-motion
-guard, not camera adaptation. A later calm-surface rung may create a `4^3`
-receiver only when the predictor proves that the interface cannot reach it
-before the following topology epoch.
+guard, not camera adaptation. A receiver may coarsen only after it is wet,
+enclosed, and no longer part of the free-surface support band.
 
 Run a refine-only balance closure over all face neighbors after snapshot
 classification. Three ordered passes close the four-level `1/2/4/8` ladder to

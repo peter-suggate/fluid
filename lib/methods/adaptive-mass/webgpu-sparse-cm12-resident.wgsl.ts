@@ -23,7 +23,7 @@ struct Params {
   counts:vec4u,             // cell, row, incidence, dense
   dimensions:vec4u,
   topologyOffsets:vec4u,    // cells, rows, terms, incidenceOffsets
-  topologyOffsets2:vec4u,   // incidences, sorted brick key/index pairs, brick records, background owner
+  topologyOffsets2:vec4u,   // incidences, direct logical-brick owners, brick records, background owner
   stateOffsets0:vec4u,      // density A/B, gamma A/B
   stateOffsets1:vec4u,      // cell velocity A/B, face A/B
   stateOffsets2:vec4u,      // pressure, rhs, diagonal, liquid
@@ -265,32 +265,17 @@ fn clipBoundarySegment(startInput:vec3f,candidate:vec3f)->vec3f{
 }
 
 fn brickDirectoryLookup(key:u32)->u32{
-  var low=0u;var high=p.dispatch.w;
-  loop{
-    if(low>=high){break;}
-    let middle=low+(high-low)/2u;
-    let candidate=topology[p.topologyOffsets2.y+2u*middle];
-    if(candidate<key){low=middle+1u;}else{high=middle;}
-  }
-  if(low>=p.dispatch.w||topology[p.topologyOffsets2.y+2u*low]!=key){return INVALID;}
-  return topology[p.topologyOffsets2.y+2u*low+1u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let count=brickDimensions.x*brickDimensions.y*brickDimensions.z;
+  if(key>=count){return INVALID;}
+  return topology[p.topologyOffsets2.y+key];
 }
 
 fn brickDirectoryLookupAtCoordinate(coordinate:vec3u)->u32{
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
-  let maximumSpan=max(brickDimensions.x,max(brickDimensions.y,brickDimensions.z));
-  var span=1u;
-  loop{
-    let origin=(coordinate/span)*span;
-    let key=origin.x+brickDimensions.x*(origin.y+brickDimensions.y*origin.z);
-    let brick=brickDirectoryLookup(key);
-    if(brick!=INVALID){
-      let record=p.topologyOffsets2.z+4u*brick;
-      if(brickSpan(brick)==span){return brick;}
-    }
-    if(span>=maximumSpan){break;}span*=2u;
-  }
-  return INVALID;
+  if(any(coordinate>=brickDimensions)){return INVALID;}
+  let key=coordinate.x+brickDimensions.x*(coordinate.y+brickDimensions.y*coordinate.z);
+  return brickDirectoryLookup(key);
 }
 
 fn compactOwnerCellAt(q:vec3i)->vec2u{
@@ -489,16 +474,27 @@ fn extrapolateTransportVelocityToDestination(@builtin(global_invocation_id)gid:v
 @compute @workgroup_size(64)
 fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
-  if(!rowAccepted(row)){state[destinationFaceVelocity()+row]=0.0;return;}
   if(rowArea(row)<=1e-8){
+    state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());return;
+  }
+  var touchesExtendedVelocity=false;var touchesLiquid=false;
+  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+  for(var term=begin;term<end;term+=1u){
+    let cell=termCell(term);let rho=state[sourceDensity()+cell];
+    touchesExtendedVelocity=touchesExtendedVelocity
+      ||state[destinationCellVelocity()+4u*cell+3u]>0.5;
+    touchesLiquid=touchesLiquid||rho>CM12_LIQUID_ISOVALUE;
+  }
+  // Dry receiver rows still carry the extrapolated velocity band. The next
+  // characteristic needs that velocity before any mass has reached the row;
+  // treating rho==0 as inert pins and then releases a moving sparse front.
+  // Beyond that eight-sweep validity band the interpolant is identically zero,
+  // so those rows can still avoid an RK2 trace without changing a face value.
+  if(!touchesExtendedVelocity){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());return;
   }
   let departure=traceDeparture(rowCenter(row));
   let characteristic=sampleVelocity(departure)[rowAxis(row)];
-  var touchesLiquid=false;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-  for(var term=begin;term<end;term+=1u){
-    touchesLiquid=touchesLiquid||state[sourceDensity()+termCell(term)]>CM12_LIQUID_ISOVALUE;
-  }
   state[destinationFaceVelocity()+row]=select(characteristic,
     mix(characteristic,state[sourceFaceVelocity()+row],0.4),touchesLiquid);
   if(hasRigidBodies()){
@@ -698,7 +694,56 @@ fn advanceTracers(@builtin(global_invocation_id)gid:vec3u){
   if(stranded){state[at+3u]=0.0;}
 }
 
-fn diffuseGammaAxis(cell:u32,axis:u32,inputRho:u32,inputGamma:u32,
+// Two immutable, row-owned iterations replace the mirrored xyz/zyx chain.
+// An accepted composite row owns each physical negative/positive subface pair
+// exactly once. It quantizes integrated rho and gamma receipts and adds each
+// integer to one endpoint and its exact opposite to the other, making both
+// fields conservative independent of dispatch order and unequal cell volumes.
+fn scatterGammaRow(row:u32,inputRho:u32,inputGamma:u32){
+  let rowAreaValue=rowArea(row);if(rowAreaValue<=1e-8){return;}
+  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+  var negativeCount=0.0;var positiveCount=0.0;
+  for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
+    negativeCount+=select(0.0,1.0,coefficient<0.0);
+    positiveCount+=select(0.0,1.0,coefficient>0.0);}
+  if(negativeCount==0.0||positiveCount==0.0){return;}
+  let pairArea=rowAreaValue/(negativeCount*positiveCount);
+  // A regular interior cell participates in six rows. The CM12 flux already
+  // contains its one-half diffusion coefficient, so /3 gives a convex
+  // simultaneous six-neighbour update at the paper's full 1/30 s step.
+  let scale=min(1.0,30.0*p.frame.x)/3.0;
+  for(var negativeTerm=begin;negativeTerm<end;negativeTerm+=1u){
+    if(termCoefficient(negativeTerm)>=0.0){continue;}
+    let negative=termCell(negativeTerm);if(!cellTransportActive(negative)){continue;}
+    for(var positiveTerm=begin;positiveTerm<end;positiveTerm+=1u){
+      if(termCoefficient(positiveTerm)<=0.0){continue;}
+      let positive=termCell(positiveTerm);if(!cellTransportActive(positive)){continue;}
+      let conductedVolume=scale*min(pairArea*cellMinimumWidth(negative),
+        pairArea*cellMinimumWidth(positive));
+      let fluxIntoNegative=cm12GammaDiffusionFluxInto(
+        state[inputRho+negative],state[inputGamma+negative],
+        state[inputRho+positive],state[inputGamma+positive],
+        conductedVolume/cellVolume(negative));
+      let rhoReceipt=i32(round(fluxIntoNegative.x*cellVolume(negative)
+        *CM12_TRANSPORT_FIXED));
+      let gammaReceipt=i32(round(fluxIntoNegative.y*cellVolume(negative)
+        *CM12_TRANSPORT_FIXED));
+      atomicAdd(&conditioning[negative],rhoReceipt);
+      atomicAdd(&conditioning[positive],-rhoReceipt);
+      atomicAdd(&conditioning[p.counts.x+negative],gammaReceipt);
+      atomicAdd(&conditioning[p.counts.x+positive],-gammaReceipt);
+    }
+  }
+}
+
+@compute @workgroup_size(64)
+fn scatterGammaSnapshot(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);if(row!=INVALID){
+    scatterGammaRow(row,destinationDensity(),destinationGamma());
+  }
+}
+
+fn finalizeGammaCell(cell:u32,inputRho:u32,inputGamma:u32,
  outputRho:u32,outputGamma:u32){
   let ownRho=state[inputRho+cell];let ownGamma=state[inputGamma+cell];
   if(!cellTransportActive(cell)){
@@ -707,68 +752,39 @@ fn diffuseGammaAxis(cell:u32,axis:u32,inputRho:u32,inputGamma:u32,
     }else{state[outputRho+cell]=0.0;state[outputGamma+cell]=1.0;}
     return;
   }
-  var rho=ownRho;var gamma=ownGamma;
-  let scale=min(1.0,30.0*p.frame.x);
-  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-    let row=incidenceRow(at);if(!rowAccepted(row)||rowAxis(row)!=axis){continue;}
-    let own=termCoefficient(incidenceTerm(at));let begin=rowTermOffset(row);
-    let end=begin+rowTermCount(row);var negativeCount=0.0;var positiveCount=0.0;
-    for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
-      negativeCount+=select(0.0,1.0,coefficient<0.0);
-      positiveCount+=select(0.0,1.0,coefficient>0.0);}
-    if(negativeCount==0.0||positiveCount==0.0){continue;}
-    let area=rowArea(row)/(negativeCount*positiveCount);
-    for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
-      if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
-      if(!cellActive(neighbor)){continue;}
-      let conductedVolume=scale*min(area*cellMinimumWidth(cell),
-        area*cellMinimumWidth(neighbor));
-      let flux=cm12GammaDiffusionFluxInto(ownRho,ownGamma,
-        state[inputRho+neighbor],state[inputGamma+neighbor],
-        conductedVolume/cellVolume(cell));
-      rho+=flux.x;gamma+=flux.y;
-    }
-  }
-  state[outputRho+cell]=rho;state[outputGamma+cell]=gamma;
+  let inverseVolume=1.0/cellVolume(cell);
+  let rhoReceipt=f32(atomicLoad(&conditioning[cell]))/CM12_TRANSPORT_FIXED;
+  let gammaReceipt=f32(atomicLoad(&conditioning[p.counts.x+cell]))
+    /CM12_TRANSPORT_FIXED;
+  state[outputRho+cell]=ownRho+rhoReceipt*inverseVolume;
+  state[outputGamma+cell]=ownGamma+gammaReceipt*inverseVolume;
 }
 
-// CM12 Sec. 3.4 step 8. Average mirrored dimensional Gauss-Seidel orders,
-// matching the CPU sparse operator while avoiding an arbitrary x/z bias.
 @compute @workgroup_size(64)
-fn diffuseGammaForwardX(@builtin(global_invocation_id)gid:vec3u){let cell=acceptedTemplateCellInvocation(gid.x);
-  if(cell!=INVALID){diffuseGammaAxis(cell,0u,destinationDensity(),destinationGamma(),
-    p.stateOffsets2.x,p.stateOffsets2.y);}}
-@compute @workgroup_size(64)
-fn diffuseGammaForwardY(@builtin(global_invocation_id)gid:vec3u){let cell=acceptedTemplateCellInvocation(gid.x);
-  if(cell!=INVALID){diffuseGammaAxis(cell,1u,p.stateOffsets2.x,p.stateOffsets2.y,
-    p.stateOffsets2.z,p.stateOffsets2.w);}}
-@compute @workgroup_size(64)
-fn diffuseGammaForwardZ(@builtin(global_invocation_id)gid:vec3u){let cell=acceptedTemplateCellInvocation(gid.x);
-  if(cell!=INVALID){diffuseGammaAxis(cell,2u,p.stateOffsets2.z,p.stateOffsets2.w,
-    p.stateOffsets2.x,p.stateOffsets2.y);}}
-@compute @workgroup_size(64)
-fn diffuseGammaReverseZ(@builtin(global_invocation_id)gid:vec3u){let cell=acceptedTemplateCellInvocation(gid.x);
-  if(cell!=INVALID){diffuseGammaAxis(cell,2u,destinationDensity(),destinationGamma(),
-    p.stateOffsets3.y,p.stateOffsets3.z);}}
-@compute @workgroup_size(64)
-fn diffuseGammaReverseY(@builtin(global_invocation_id)gid:vec3u){let cell=acceptedTemplateCellInvocation(gid.x);
-  if(cell!=INVALID){diffuseGammaAxis(cell,1u,p.stateOffsets3.y,p.stateOffsets3.z,
-    p.stateOffsets3.w,p.stateOffsets4.x);}}
-@compute @workgroup_size(64)
-fn diffuseGammaReverseX(@builtin(global_invocation_id)gid:vec3u){let cell=acceptedTemplateCellInvocation(gid.x);
-  if(cell!=INVALID){diffuseGammaAxis(cell,0u,p.stateOffsets3.w,p.stateOffsets4.x,
-    p.stateOffsets3.y,p.stateOffsets3.z);}}
-@compute @workgroup_size(64)
-fn averageGammaDiffusion(@builtin(global_invocation_id)gid:vec3u){let cell=acceptedTemplateCellInvocation(gid.x);
-  if(cell==INVALID){return;}
-  if(!cellActive(cell)){
-    state[destinationDensity()+cell]=0.0;state[destinationGamma()+cell]=1.0;return;
+fn finalizeGammaSnapshot(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID){
+    finalizeGammaCell(cell,destinationDensity(),destinationGamma(),
+      p.stateOffsets2.x,p.stateOffsets2.y);
   }
-  state[destinationDensity()+cell]=0.5*(state[p.stateOffsets2.x+cell]
-    +state[p.stateOffsets3.y+cell]);
-  state[destinationGamma()+cell]=0.5*(state[p.stateOffsets2.y+cell]
-    +state[p.stateOffsets3.z+cell]);
 }
+
+@compute @workgroup_size(64)
+fn scatterGammaRefinement(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);if(row!=INVALID){
+    scatterGammaRow(row,p.stateOffsets2.x,p.stateOffsets2.y);
+  }
+}
+
+@compute @workgroup_size(64)
+fn finalizeGammaRefinement(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID){
+    finalizeGammaCell(cell,p.stateOffsets2.x,p.stateOffsets2.y,
+      p.stateOffsets2.z,p.stateOffsets2.w);
+  }
+}
+
+fn conditionedDensity(cell:u32)->f32{return state[p.stateOffsets2.z+cell];}
+fn conditionedGamma(cell:u32)->f32{return state[p.stateOffsets2.w+cell];}
 
 struct SharpeningStats {
   maximumDifference:f32,
@@ -784,7 +800,7 @@ struct SharpeningStats {
 // sparse-atlas-surface-conditioning.ts. This retains the paper's adjacent-cell
 // stencil at 4^3/8^3 seams instead of treating an aggregate port as one cell.
 fn sharpeningStats(cell:u32)->SharpeningStats{
-  var result:SharpeningStats;let rho=state[destinationDensity()+cell];
+  var result:SharpeningStats;let rho=conditionedDensity(cell);
   result.maximumDifference=0.0;result.negativeArea=vec3f(0.0);
   result.positiveArea=vec3f(0.0);result.negativeDensity=vec3f(0.0);
   result.positiveDensity=vec3f(0.0);result.negativeDistance=vec3f(0.0);
@@ -803,7 +819,7 @@ fn sharpeningStats(cell:u32)->SharpeningStats{
     for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
       if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
       if(!cellActive(neighbor)){continue;}
-      let neighborRho=state[destinationDensity()+neighbor];
+      let neighborRho=conditionedDensity(neighbor);
       result.maximumDifference=max(result.maximumDifference,abs(rho-neighborRho));
       if(own<0.0){result.positiveArea[axis]+=area;
         result.positiveDensity[axis]+=area*neighborRho;
@@ -817,7 +833,7 @@ fn sharpeningStats(cell:u32)->SharpeningStats{
 }
 
 fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
-  let rho=state[destinationDensity()+cell];
+  let rho=conditionedDensity(cell);
   // CM12 Eqs. 6-15 first integrate a unit-speed flux over a cell and then
   // divide the Godunov mass increment by cell volume. The resulting density
   // update is 3 dt |grad rho|, so distances stored in finest-cell units must
@@ -850,23 +866,39 @@ fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
   return min(0.0,delta);
 }
 
-fn sampleSharpeningDensity(position:vec3f)->f32{
-  let stencil=transportStencil(position);var result=0.0;
-  for(var corner=0u;corner<8u;corner+=1u){
-    let cell=stencil.cells[corner];
-    if(cell!=INVALID){result+=stencil.weights[corner]*state[destinationDensity()+cell];}
+// Freeze the per-cell sharpening dose once. The trace itself differentiates
+// the exact continuous adaptive density interpolant analytically below.
+@compute @workgroup_size(64)
+fn prepareSharpeningField(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  if(!cellTransportActive(cell)){
+    state[p.stateOffsets5.x+cell]=0.0;return;
   }
-  return result;
+  let stats=sharpeningStats(cell);
+  let rho=conditionedDensity(cell);
+  state[p.stateOffsets5.x+cell]=select(sharpeningDelta(cell,stats),0.0,
+    rho>CM12_LIQUID_ISOVALUE);
 }
 
-fn sharpeningDensityGradient(position:vec3f,owner:u32)->vec3f{
-  // Differentiate the same continuous adaptive interpolant used by the trace.
-  // The finite-difference baseline follows the current owner after a 2:1 seam,
-  // and the denominator remains an actual finest-coordinate distance.
-  let halfDistance=0.5*cellMinimumWidth(owner);var result=vec3f(0.0);
-  for(var axis=0u;axis<3u;axis+=1u){var offset=vec3f(0.0);offset[axis]=halfDistance;
-    result[axis]=(sampleSharpeningDensity(position+offset)
-      -sampleSharpeningDensity(position-offset))/max(2.0*halfDistance,1e-12);
+fn sampleSharpeningField(position:vec3f)->vec4f{
+  let probe=ownerCellAt(vec3i(floor(clamp(position,vec3f(0.0),
+    vec3f(p.dimensions.xyz)-vec3f(1e-4)))));
+  var spans=vec3f(1.0);if(probe!=INVALID){let b=cellBase(probe);
+    spans=vec3f(taf(b+4u),taf(b+5u),taf(b+6u));}
+  let shifted=position/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
+  let fraction=fract(shifted);var result=vec4f(0.0);
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let lattice=spans*(vec3f(lower+offset)+vec3f(0.5));
+    let cell=ownerCellAt(vec3i(floor(lattice)));if(cell==INVALID){continue;}
+    let sx=select(-1.0,1.0,offset.x==1);let sy=select(-1.0,1.0,offset.y==1);
+    let sz=select(-1.0,1.0,offset.z==1);
+    let wx=select(1.0-fraction.x,fraction.x,offset.x==1);
+    let wy=select(1.0-fraction.y,fraction.y,offset.y==1);
+    let wz=select(1.0-fraction.z,fraction.z,offset.z==1);
+    let rho=conditionedDensity(cell);
+    result+=rho*vec4f(wx*wy*wz,sx*wy*wz/spans.x,
+      wx*sy*wz/spans.y,wx*wy*sz/spans.z);
   }
   return result;
 }
@@ -881,10 +913,10 @@ fn traceSharpeningMass(source:u32)->vec3f{
   var travelled=0.0;
   for(var step=0u;step<40u;step+=1u){
     if(step>=u32(p.sharpening.y)){break;}
-    if(sampleSharpeningDensity(position)>=CM12_LIQUID_ISOVALUE
-      ||travelled>=maximumDistance){break;}
+    let field=sampleSharpeningField(position);
+    if(field.x>=CM12_LIQUID_ISOVALUE||travelled>=maximumDistance){break;}
     let owner=ownerCellAt(vec3i(floor(position)));if(owner==INVALID){break;}
-    let gradient=sharpeningDensityGradient(position,owner);let magnitude=length(gradient);
+    let gradient=field.yzw;let magnitude=length(gradient);
     if(magnitude<1e-6){break;}
     let distance=min(0.5*cellMinimumWidth(owner),maximumDistance-travelled);
     let candidate=position+gradient/magnitude*distance;
@@ -905,11 +937,10 @@ fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
   // expanding the composite incidence stencil when sharpeningDelta's final
   // branches provably override the computed gradient. Preserve -rho for an
   // exact zero so even the scratch field's signed-zero behavior is unchanged.
-  let rho=state[destinationDensity()+cell];
+  let rho=conditionedDensity(cell);
   if(rho==0.0){state[p.stateOffsets5.x+cell]=-rho;return;}
   if(rho>CM12_LIQUID_ISOVALUE){state[p.stateOffsets5.x+cell]=0.0;return;}
-  let stats=sharpeningStats(cell);
-  let delta=sharpeningDelta(cell,stats);
+  let delta=state[p.stateOffsets5.x+cell];
   state[p.stateOffsets5.x+cell]=delta;if(delta>=0.0){return;}
   let removed=-delta*cellVolume(cell);let removedFixed=i32(round(removed*CM12_TRANSPORT_FIXED));
   let position=traceSharpeningMass(cell);let stencil=transportStencil(position);
@@ -942,8 +973,9 @@ fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
   }
   let delta=state[p.stateOffsets5.x+cell];
   let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
-  state[destinationDensity()+cell]=max(0.0,state[destinationDensity()+cell]+delta
+  state[destinationDensity()+cell]=max(0.0,conditionedDensity(cell)+delta
     +incoming/cellVolume(cell));
+  state[destinationGamma()+cell]=max(0.0,conditionedGamma(cell));
 }
 
 @compute @workgroup_size(64)
@@ -1774,8 +1806,9 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // thinness and detail receipts are the resolution authority; retaining the
   // receiver label would propagate an 8^3 floor back through wet neighbours.
   let activitySignals=activitySignalsEnabled();
-  // Raw detail remains in diagnostics, but a quiet planar surface may merge:
-  // its permanent sharpening residual is not an unresolved bulk feature.
+  // Raw detail remains in diagnostics, but a quiet planar surface's permanent
+  // sharpening residual is not an additional activity veto; the independent
+  // interface floor below already keeps that brick fine.
   let velocityFloor=velocityResolutionFloor(activityF32(output+33u));
   let enclosed=activitySignals&&brickDeeplyEnclosed(brick);
   // Enclosed bulk follows only its measured travel rung. In particular, an
@@ -1787,29 +1820,29 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
     &&(!adaptiveSurface||thinFluid||(score>=u32(round(255.0))))
     &&!enclosed&&!slowSurface;
   let receiver=receiverRequested&&((reasons&64u)==0u||velocityFloor>1u);
-  // Surface-distance mode retains the conservative 8^3 interface invariant.
-  // Activity mode lets calm planar interfaces retain or earn coarser rungs;
-  // uniform bulk translation is absent from emergency scoring because it does
-  // not imply missing spatial detail; enclosed bulk still follows the explicit
-  // travel rung above. A swept receiver is the predicted destination of a moving
-  // interface, so it retains the established 8^3 safety floor while 2:1 closure
-  // grades its neighbours.
+  // Every genuine free surface retains the conservative 8^3 interface
+  // invariant. Activity mode coarsens only enclosed bulk; uniform bulk
+  // translation is absent from emergency scoring because it does not imply
+  // missing spatial detail. A swept receiver is the predicted destination of
+  // a moving interface, so it retains the same 8^3 safety floor while 2:1
+  // closure grades its neighbours.
   let strictSurface=surface&&!activitySignals;
   let activitySurface=adaptiveSurface&&activitySignals;
   let interfaceVelocityFloor=select(1u,velocityFloor,
     adaptiveSurface||thinFluid||enclosed);
   let required=max(max(interfaceVelocityFloor,
-    select(1u,8u,strictSurface||thinFluid||receiver)),
-    max(select(1u,4u,activitySurface),select(1u,4u,cutBoundary)));
+    select(1u,8u,strictSurface||activitySurface||thinFluid||receiver)),
+    select(1u,4u,cutBoundary));
   let emergencyScore=u32(round(255.0*p.activityTiming.z));
   if(required>current
     ||(activitySignals&&!enclosed&&!slowSurface&&score>=emergencyScore)){
-    // Strict surfaces, thin sheets, and receivers are safety floors and may
+    // Surfaces, thin sheets, and receivers are safety floors and may
     // jump directly. Ordinary measured activity advances one rung, preventing
     // a low-speed emergency score from erasing the hierarchy in two frames.
-    let urgent=strictSurface||thinFluid||receiver;
+    let urgent=strictSurface||activitySurface||thinFluid||receiver;
     requested=select(min(8u,max(required,2u*current)),required,urgent);
-    if(strictSurface){planReasons=1u;}else if(receiver||predicted){planReasons=2u;}
+    if(strictSurface||activitySurface){planReasons=1u;}
+    else if(receiver||predicted){planReasons=2u;}
     else if(thinFluid){planReasons=256u;}
     else if(velocityFloor>current){planReasons=64u;}else{planReasons=4u;}
   }else if(atomicLoad(&activity[5])!=0u){

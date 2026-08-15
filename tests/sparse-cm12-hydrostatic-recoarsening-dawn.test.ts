@@ -72,7 +72,8 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
       device.pushErrorScope("validation");
 
       // A deep tank contains immutable macro-bricks. They must not disable the
-      // ordinary 1/2/4/8 transaction on its span-one surface/receiver bricks.
+      // ordinary 1/2/4/8 transaction in enclosed bulk, while genuine surface
+      // bricks retain the fine interface invariant.
       const tank = sceneDocument(getSceneDefinition("water-box-tank-fill"));
       tank.rigidBodies = [];
       tank.container.height_m = 2.4;
@@ -82,24 +83,21 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
         device, tank, "balanced", undefined, options(), () => {},
       );
       try {
-        const before = await tankSolver.readGPUActivityPolicy();
-        const initiallyFine = new Set(before.bricks.filter((brick) =>
-          brick.active && brick.acceptedResolution === 8).map((brick) => brick.key));
-        assert.ok(initiallyFine.size > 0);
-
-        tankSolver.injectLiquidBall({
-          centre_m: { x: 0, y: 2, z: 0 },
-          radius_m: 0.16,
-        });
         for (let step = 1; step <= 4; step += 1) {
           assert.equal(tankSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
         }
         await device.queue.onSubmittedWorkDone();
 
         const after = await tankSolver.readGPUActivityPolicy();
-        assert.ok(after.bricks.some((brick) => initiallyFine.has(brick.key)
-          && brick.acceptedResolution < 8),
-        "an existing fine hydrostatic brick must commit a lower accepted level");
+        const surface = after.bricks.filter((brick) => brick.active
+          && (brick.reasons & 1) !== 0);
+        assert.ok(surface.length > 0, "the tank must retain a measured free surface");
+        assert.ok(surface.every((brick) => brick.acceptedResolution === 8),
+          "every genuine free-surface brick must remain 8 cubed");
+        assert.ok(after.bricks.some((brick) => brick.active
+          && (brick.reasons & 64) !== 0 && (brick.reasons & 1) === 0
+          && brick.acceptedResolution < 4),
+        "enclosed hydrostatic bulk must still commit an aggressive coarse level");
         const stats = await tankSolver.readStats();
         assert.ok((stats.adaptiveTopologyShadowGeneration ?? 0) > 1,
           "the lower request must publish a physical topology generation");

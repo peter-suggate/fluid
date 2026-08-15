@@ -6,6 +6,7 @@ import type { RigidBodyState } from "./rigid-body";
 import type { GPURigidBodyPick, GPURigidBodyPose } from "./webgpu-rigid-body";
 import type { Vec3 } from "./model";
 import type { GPUSecondaryParticleSource } from "./webgpu-secondary-particles";
+import type { GPUFluidFaceVelocitySource } from "./webgpu-face-velocity-overlay";
 import type { GPUFluidTracerSource } from "./webgpu-tracer-overlay";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import type {
@@ -226,6 +227,14 @@ export interface GPUSolverInstance {
    * every frame for a picture nobody asked for.
    */
   setTracersEnabled?(enabled: boolean): void;
+  /**
+   * Optional MAC face velocities, for the face-arrow view.
+   *
+   * There is no enable to pair with this, and that asymmetry with the markers
+   * above is the point: face velocities exist because the solve needs them, so
+   * a view that reads them adds a draw and no simulation work at all.
+   */
+  readonly faceVelocitySource?: GPUFluidFaceVelocitySource;
   /** Always-resident structural sparse scene used by production SVO rendering. */
   readonly sparseVoxelSceneSource?: SparseVoxelSceneRenderSource;
   /** Exact compact topology/geometry buffers for paper-technique overlays. */

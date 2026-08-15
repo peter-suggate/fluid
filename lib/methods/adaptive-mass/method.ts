@@ -372,7 +372,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   // crossing between an empty and non-empty roster rebuilds once.
   capabilities: { volumeRendering: true },
   supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure",
-    "tracers"],
+    "tracers", "face-velocity"],
   params,
   runtimeParamKeys: ADAPTIVE_MASS_RUNTIME_PARAM_KEYS,
   pipelineGraph: async () => ADAPTIVE_MASS_FLUID_PIPELINE,

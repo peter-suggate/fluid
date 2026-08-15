@@ -17,6 +17,7 @@ import {
 } from "./sparse-brick-atlas";
 import { CM12_SHARPENING_TRACE_STEPS } from "../../core/cm12-numerics";
 import type { SphericalContainerFineGeometry } from "../../core/spherical-container";
+import type { GPUFluidFaceVelocitySource } from "../../core/webgpu-face-velocity-overlay";
 import type { GPUFluidTracerSource } from "../../core/webgpu-tracer-overlay";
 import {
   FINE_LEVELSET_COMPACT_LOOKUP_FLAG,
@@ -1022,13 +1023,17 @@ function packResidentTopology(
   const termOffset = at; at += 2 * termCount;
   const incidenceOffset = at; at += grid.cells.length + 1;
   const incidenceRecordOffset = at; at += 2 * incidenceCount;
-  // Compact sorted key/index pairs replace both the finest-cell owner image
-  // and the logical-domain-sized direct brick directory.  Every query derives
-  // its owner from the immutable brick record after an O(log resident) lookup.
-  const brickLookupOffset = at; at += 2 * atlas.bricks.length;
+  // Direct logical-brick ownership is the hot locator for every characteristic
+  // and sharpening sample.  Filling macro leaves across the brick coordinates
+  // they cover turns the former span walk plus binary search into one load.
+  const brickDimensions = atlas.dimensions.map((size) => Math.ceil(size / 8)) as
+    [number, number, number];
+  const brickLookupOffset = at;
+  at += brickDimensions[0] * brickDimensions[1] * brickDimensions[2];
   const brickOffset = at; at += 4 * atlas.bricks.length;
   const backgroundOwnerOffset = at; at += 2;
   const words = new Uint32Array(at);
+  words.fill(INVALID, brickLookupOffset, brickOffset);
 
   for (const cell of grid.cells) {
     const base = cellOffset + 16 * cell.id;
@@ -1107,12 +1112,24 @@ function packResidentTopology(
     }
     cellCountByBrick[brickIndex] += 1;
   }
-  const sortedBrickIndices = atlas.bricks.map((_, index) => index).sort((left, right) =>
-    atlas.bricks[left]!.key - atlas.bricks[right]!.key);
-  for (let sorted = 0; sorted < sortedBrickIndices.length; sorted += 1) {
-    const brick = sortedBrickIndices[sorted]!;
-    words[brickLookupOffset + 2 * sorted] = atlas.bricks[brick]!.key;
-    words[brickLookupOffset + 2 * sorted + 1] = brick;
+  for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
+    const source = atlas.bricks[brick]!;
+    const span = sparseBrickSpan(source);
+    for (let z = source.coordinate[2]; z < Math.min(brickDimensions[2],
+      source.coordinate[2] + span); z += 1) {
+      for (let y = source.coordinate[1]; y < Math.min(brickDimensions[1],
+        source.coordinate[1] + span); y += 1) {
+        for (let x = source.coordinate[0]; x < Math.min(brickDimensions[0],
+          source.coordinate[0] + span); x += 1) {
+          const directory = brickLookupOffset + x + brickDimensions[0]
+            * (y + brickDimensions[1] * z);
+          if (words[directory] !== INVALID) {
+            throw new Error(`Sparse CM12 logical brick directory overlap at ${x},${y},${z}`);
+          }
+          words[directory] = brick;
+        }
+      }
+    }
     const record = brickOffset + 4 * brick;
     words[record] = firstCellByBrick[brick];
     words[record + 1] = cellCountByBrick[brick];
@@ -1121,7 +1138,7 @@ function packResidentTopology(
     words[record + 2] = Math.log2(sparseBrickSpan(atlas.bricks[brick]!))
       | (candidateSlotByBrick[brick] === INVALID
         ? 0 : ((candidateSlotByBrick[brick]! + 1) << 5));
-    words[record + 3] = atlas.bricks[brick]!.key;
+    words[record + 3] = source.key;
   }
   return { words, cellOffset, rowOffset, termOffset, incidenceOffset,
     incidenceRecordOffset, brickLookupOffset, brickOffset, backgroundOwnerOffset,
@@ -1509,9 +1526,8 @@ export class WebGPUSparseCM12Resident {
       "extrapolateTransportVelocityToSource", "extrapolateTransportVelocityToDestination",
       "prepareTransportFaces", "traceGammaAndBeta", "scatterDensityDeficit",
       "gatherConservativeDensity", "seedTracers", "advanceTracers",
-      "diffuseGammaForwardX", "diffuseGammaForwardY",
-      "diffuseGammaForwardZ", "diffuseGammaReverseZ", "diffuseGammaReverseY",
-      "diffuseGammaReverseX", "averageGammaDiffusion", "scatterSharpeningMass",
+      "scatterGammaSnapshot", "finalizeGammaSnapshot", "scatterGammaRefinement",
+      "finalizeGammaRefinement", "prepareSharpeningField", "scatterSharpeningMass",
       "finalizeSharpening", "clearSolidExcess", "scatterSolidExcess",
       "finalizeSolidExcess", "preserveHorizontalD4",
       "commitHorizontalD4",
@@ -1693,16 +1709,22 @@ export class WebGPUSparseCM12Resident {
       }
       dispatch("advanceTracers", groups);
     });
+    // Conservative transport has consumed the first three accumulator banks.
+    // Recycle them for the row-owned gamma transaction; a buffer clear cannot
+    // be encoded inside an open compute pass, so this is the deliberate phase
+    // boundary in the otherwise resident frame.
+    closePass();
+    encoder.clearBuffer(this.conditioning);
     stage("gamma-diffusion", () => {
-      dispatchAccepted("diffuseGammaForwardX", "cell");
-      dispatchAccepted("diffuseGammaForwardY", "cell");
-      dispatchAccepted("diffuseGammaForwardZ", "cell");
-      dispatchAccepted("diffuseGammaReverseZ", "cell");
-      dispatchAccepted("diffuseGammaReverseY", "cell");
-      dispatchAccepted("diffuseGammaReverseX", "cell");
-      dispatchAccepted("averageGammaDiffusion", "cell");
+      dispatchAccepted("scatterGammaSnapshot", "row");
+      dispatchAccepted("finalizeGammaSnapshot", "cell");
+      closePass();
+      encoder.clearBuffer(this.conditioning);
+      dispatchAccepted("scatterGammaRefinement", "row");
+      dispatchAccepted("finalizeGammaRefinement", "cell");
     });
     stage("surface-sharpening", () => {
+      dispatchAccepted("prepareSharpeningField", "cell");
       dispatchAccepted("scatterSharpeningMass", "cell");
       dispatchAccepted("finalizeSharpening", "cell");
       if (this.boundary || bodyCount > 0) {
@@ -1834,6 +1856,30 @@ export class WebGPUSparseCM12Resident {
   /** Re-read the mixing from this instant, without toggling the view. */
   reseedTracers(): void {
     if (this.tracersEnabled) this.tracerSeedPending = true;
+  }
+
+  /**
+   * Where the finished frame's face velocities are, for a view to read.
+   *
+   * Rebuilt on every access rather than cached, because the two banks swap
+   * with parity: `advanceTo` flips it on completion, so the bank the *next*
+   * step will read as its source is the one the finished step accepted.
+   *
+   * There is no enable flag to pair with this. Everything it names already
+   * exists because the solve needs it, so a reader costs the solver nothing —
+   * unlike the markers, which are only advected when someone is looking.
+   */
+  get faceVelocitySource(): GPUFluidFaceVelocitySource {
+    return {
+      state: this.state,
+      topologyArena: this.topologyArena,
+      faceFloatOffset: this.parity !== 0 ? this.layout.faceB : this.layout.faceA,
+      rowCount: this.rowCount,
+      domainFine: this.dimensions,
+      // The width the last advance was actually parameterised with, which is
+      // the unit its face velocities are stored in.
+      finestCell_m: this.parameterF32[41] ?? 0,
+    };
   }
 
   /** Publish generation zero without executing a physics step or mapping state. */

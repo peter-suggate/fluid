@@ -394,6 +394,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   reseedTracers() { this.resident.reseedTracers(); }
   /** QA receipt: `[x, y, z, live]` per marker, in fine-lattice units. */
   readTracers() { return this.resident.readTracers(); }
+  /** Face velocities and the row records that place them; no enable needed. */
+  get faceVelocitySource() { return this.resident.faceVelocitySource; }
   get globalFineLevelSetSource() { return this.resident.globalFineLevelSetSource; }
 
   private atlas: SparseAdaptiveMassAtlas;

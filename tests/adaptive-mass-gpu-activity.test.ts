@@ -82,8 +82,10 @@ test("resident sharpening implements CM12 Algorithm 2 trace and scatter", () => 
   assert.match(kernel, /maximumDistance=p\.sharpening\.x\*sourceWidth/);
   assert.match(kernel, /step<40u/);
   assert.match(kernel, /step>=u32\(p\.sharpening\.y\)/);
-  assert.match(kernel, /sampleSharpeningDensity\(position\)>=CM12_LIQUID_ISOVALUE/);
-  assert.match(kernel, /sharpeningDensityGradient\(position,owner\)/);
+  assert.match(kernel, /let field=sampleSharpeningField\(position\)/);
+  assert.match(kernel, /let gradient=field\.yzw/);
+  assert.match(webgpuSparseCM12ResidentWGSL, /fn prepareSharpeningField/,
+    "the per-cell sharpening dose must be frozen once before trace donors run");
   assert.match(kernel, /0\.5\*cellMinimumWidth\(owner\)/,
     "the trace step must adapt after crossing a 2:1 seam");
   assert.match(kernel, /gradient\/magnitude\*distance/);
@@ -98,6 +100,50 @@ test("resident sharpening implements CM12 Algorithm 2 trace and scatter", () => 
     "every fixed-point deposit must be resolved into receiver density");
   assert.doesNotMatch(kernel, /uphillConductance|capacity\/incoming/,
     "the paper trace must not fall back to the old one-face/capacity shortcut");
+});
+
+test("resident face preparation preserves the dry extrapolated velocity band", () => {
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn prepareTransportFaces");
+  const end = webgpuSparseCM12ResidentWGSL.indexOf("fn traceGammaAndBeta", begin);
+  assert.ok(begin >= 0 && end > begin, "face preparation must be inspectable");
+  const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.match(kernel,
+    /state\[destinationCellVelocity\(\)\+4u\*cell\+3u\]>0\.5/,
+    "the skip predicate must follow extrapolated-velocity validity into dry receivers");
+  assert.doesNotMatch(kernel, /touchesTransport|rho>CM12_DRY_CELL_THRESHOLD/,
+    "density cannot decide whether a dry receiver face carries front velocity");
+});
+
+test("resident gamma diffusion uses conservative row-owned snapshot iterations", () => {
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn scatterGammaRow");
+  const end = webgpuSparseCM12ResidentWGSL.indexOf("fn conditionedDensity", begin);
+  assert.ok(begin >= 0 && end > begin, "gamma transaction must be inspectable");
+  const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.match(kernel, /acceptedTemplateRowInvocation\(gid\.x\)/,
+    "each physical composite row must own its endpoint pairs once");
+  assert.match(kernel, /atomicAdd\(&conditioning\[negative\],rhoReceipt\)/);
+  assert.match(kernel, /atomicAdd\(&conditioning\[positive\],-rhoReceipt\)/);
+  assert.match(kernel, /atomicAdd\(&conditioning\[p\.counts\.x\+negative\],gammaReceipt\)/);
+  assert.match(kernel, /atomicAdd\(&conditioning\[p\.counts\.x\+positive\],-gammaReceipt\)/,
+    "the two endpoints must receive one exactly antisymmetric fixed-point receipt");
+  assert.match(kernel, /state\[outputRho\+cell\]=ownRho\+rhoReceipt\*inverseVolume/,
+    "the paired density receipt must be resolved by physical cell volume");
+  assert.doesNotMatch(webgpuSparseCM12ResidentWGSL,
+    /diffuseGammaForwardX|diffuseGammaReverseX|averageGammaDiffusion/,
+    "the six order-dependent axis sweeps must not return");
+
+  const source = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.match(source,
+    /closePass\(\);\s*encoder\.clearBuffer\(this\.conditioning\);\s*stage\("gamma-diffusion"/,
+    "transport receipts must be retired before their accumulator banks are recycled");
+  assert.match(source,
+    /dispatchAccepted\("scatterGammaSnapshot", "row"\);\s*dispatchAccepted\("finalizeGammaSnapshot", "cell"\)/);
+  assert.match(source,
+    /dispatchAccepted\("scatterGammaRefinement", "row"\);\s*dispatchAccepted\("finalizeGammaRefinement", "cell"\)/,
+    "a second stable snapshot iteration must recover paper-step dam-front conditioning");
 });
 
 test("resident D4 preservation has disjoint density and gamma scratch", () => {
@@ -241,7 +287,9 @@ test("GPU candidate planning is epoch-gated and cannot mutate accepted state", (
   assert.match(kernel, /velocityFloor=velocityResolutionFloor\(activityF32\(output\+33u\)\)/);
   assert.match(kernel, /strictSurface=surface&&!activitySignals/);
   assert.match(kernel,
-    /select\(1u,8u,strictSurface\|\|thinFluid\|\|receiver\)/);
+    /select\(1u,8u,strictSurface\|\|activitySurface\|\|thinFluid\|\|receiver\)/);
+  assert.doesNotMatch(kernel, /horizontalD4IsAuthoritative/,
+    "D4 field symmetry must not freeze topology planning");
   assert.match(kernel, /else if\(atomicLoad\(&activity\[5\]\)!=0u\)/);
   assert.match(kernel,
     /if\(activitySignals&&!enclosed&&!slowSurface&&hotEpochs>=p\.activityEpochs\.y\)/);
@@ -254,7 +302,7 @@ test("GPU candidate planning is epoch-gated and cannot mutate accepted state", (
   assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/);
 });
 
-test("GPU selector keeps calm surfaces and deep translating bulk coarse in activity mode", () => {
+test("GPU selector keeps free surfaces fine and deep translating bulk coarse in activity mode", () => {
   const floorBegin = webgpuSparseCM12ResidentWGSL.indexOf("fn velocityResolutionFloor");
   const measureBegin = webgpuSparseCM12ResidentWGSL.indexOf("fn measureBrickActivity");
   const planBegin = webgpuSparseCM12ResidentWGSL.indexOf("fn planBrickResolution");
@@ -296,7 +344,7 @@ test("GPU selector keeps calm surfaces and deep translating bulk coarse in activ
     "thin fluid must remain independently visible in policy diagnostics");
   assert.match(measurement,
     /quiet=!thinFluid&&velocityFloor<current\s*&&select\(!surface,activityQuiet,activitySignals\)/,
-    "activity mode must allow calm surfaces to demote while thin fluid vetoes demotion");
+    "activity histories may mark a calm surface quiet without weakening its independent floor");
   assert.match(measurement,
     /cellCenter\s*\+p\.activityTiming\.x\*p\.frame\.x\*ownVelocity/,
     "front support must use the live accepted-step lookahead");
@@ -319,16 +367,18 @@ test("GPU selector keeps calm surfaces and deep translating bulk coarse in activ
     /receiver=receiverRequested&&\(\(reasons&64u\)==0u\|\|velocityFloor>1u\)/,
     "the fine receiver floor must stop once its destination is wet and slow");
   assert.match(plan, /activitySurface=adaptiveSurface&&activitySignals/,
-    "a calm activity-mode interface must retain a safe middle rung");
+    "activity-mode interfaces must remain distinct from enclosed bulk");
   assert.match(plan,
-    /select\(1u,8u,strictSurface\|\|thinFluid\|\|receiver\)/,
-    "strict surfaces, thin liquid, and moving receivers must get an 8-cubed floor");
-  assert.match(plan, /select\(1u,4u,activitySurface\)/,
-    "calm surfaces may retain the safe middle rung");
+    /select\(1u,8u,strictSurface\|\|activitySurface\|\|thinFluid\|\|receiver\)/,
+    "every genuine surface, thin liquid, and moving receiver must get an 8-cubed floor");
+  assert.doesNotMatch(plan, /select\(1u,4u,activitySurface\)/,
+    "calm free surfaces must never demote to the middle rung");
+  assert.match(plan, /urgent=strictSurface\|\|activitySurface\|\|thinFluid\|\|receiver/,
+    "a newly detected surface must jump directly back to 8 cubed");
   assert.match(plan, /slowSurface=adaptiveSurface&&!thinFluid&&velocityFloor==1u/,
-    "a slow non-thin interface must be allowed to return to its middle rung");
+    "a slow non-thin interface must remain quiet without weakening its surface floor");
   assert.match(plan, /&&!enclosed&&!slowSurface/,
-    "deep or slow-surface restriction residue must remain diagnostic without vetoing a merge");
+    "deep or slow-surface restriction residue must remain diagnostic without changing the surface floor");
   assert.match(plan,
     /requested=select\(min\(8u,max\(required,2u\*current\)\),required,urgent\)/,
     "non-urgent measured activity must advance by one rung");
@@ -546,6 +596,8 @@ test("GPU retirement drops only bounded dilute residue and clears stale receiver
   );
   assert.ok(begin >= 0 && end > begin, "retirement kernel must be inspectable");
   const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
+  assert.doesNotMatch(kernel, /horizontalD4IsAuthoritative/,
+    "D4 field symmetry must not disable ordinary brick retirement");
   assert.match(webgpuSparseCM12ResidentWGSL,
     /occupiedCell=occupiedCell\|\|rho>residencyDensity/);
   assert.match(webgpuSparseCM12ResidentWGSL,
@@ -764,11 +816,14 @@ test("analytic initial volumes do not trigger an empty-domain brick scan", () =>
     "local authored sources must not retain bricks from the empty million-cell corridor");
 });
 
-test("Sparse CM12 frame publication is page-shaped, not domain-shaped", () => {
+test("Sparse CM12 publication stays page-shaped with a direct brick-scale hot locator", () => {
   assert.doesNotMatch(webgpuSparseCM12ResidentWGSL, /texture_storage_3d/);
   assert.doesNotMatch(webgpuSparseCM12ResidentWGSL, /fn publishPresentation/);
   assert.match(webgpuSparseCM12ResidentWGSL,
-    /fn brickDirectoryLookup\(key:u32\).*var low=0u;var high=p\.dispatch\.w/s);
+    /fn brickDirectoryLookup\(key:u32\)[\s\S]*topology\[p\.topologyOffsets2\.y\+key\]/);
+  assert.doesNotMatch(webgpuSparseCM12ResidentWGSL,
+    /fn brickDirectoryLookup\(key:u32\)[\s\S]*var low=0u;var high=p\.dispatch\.w/,
+    "hot characteristic samples must not binary-search the resident brick set");
   assert.match(webgpuSparseCM12ResidentWGSL,
     /fn publishSparseLevelSet[\s\S]*pageCount=arrayLength\(&fineMetadata\)\/4u/);
   const residentSource = readFileSync(new URL(

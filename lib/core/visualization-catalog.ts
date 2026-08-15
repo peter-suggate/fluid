@@ -14,6 +14,7 @@
  */
 import { blastRadiusVisualizations } from "./fluid-blast-radius";
 import { fineBandCellVisualizations } from "./fine-band-cell-visualizations";
+import { faceVelocityOverlayVisualizations } from "./webgpu-face-velocity-overlay";
 import { fineFloodVisualizations } from "./fine-flood-provenance";
 import { fluidCellVisualizations } from "./fluid-cell-visualizations";
 import { gridOverlayVisualizations } from "./grid-overlay-visualizations";
@@ -43,6 +44,7 @@ export const VISUALIZATION_CATALOG: readonly Visualization[] = Object.freeze([
   // the octree-only publications.
   ...gridOverlayVisualizations,
   ...tracerOverlayVisualizations,
+  ...faceVelocityOverlayVisualizations,
   ...octreeFieldVisualizations,
 ]);
 
