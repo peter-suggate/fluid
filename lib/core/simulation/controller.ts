@@ -276,7 +276,7 @@ class SimulationController {
     const drag = this.kinematicDrag;
     if (!drag) return;
     const body = this.bodies.find((candidate) => candidate.description.id === drag.bodyId);
-    if (body) { body.position_m = { ...drag.position }; body.linearVelocity_m_s = { ...drag.velocity }; body.angularVelocity_rad_s = { x: 0, y: 0, z: 0 }; body.angularMomentum_kg_m2_s = { x: 0, y: 0, z: 0 }; }
+    if (body) { body.held = true; body.position_m = { ...drag.position }; body.linearVelocity_m_s = { ...drag.velocity }; body.angularVelocity_rad_s = { x: 0, y: 0, z: 0 }; body.angularMomentum_kg_m2_s = { x: 0, y: 0, z: 0 }; }
   }
 
   singleStep() {
@@ -338,6 +338,12 @@ class SimulationController {
     const heldId = this.kinematicDrag?.bodyId;
     if (heldId !== undefined && !this.bodies.some((body) => body.description.id === heldId)) {
       this.kinematicDrag = null;
+    }
+    // The constraint is the only thing that may hold a body, so anything still
+    // flagged without one is a release the roster outlived: a gesture whose
+    // body was replaced by an edit, or a drag ended while it was off-roster.
+    for (const body of this.bodies) {
+      if (body.held && body.description.id !== this.kinematicDrag?.bodyId) body.held = false;
     }
     this.applyDragConstraint();
     if (!this.safeBrowserBringup()) this.safeBrowserStepConsumed = false;
@@ -929,6 +935,10 @@ class SimulationController {
     else this.kinematicDrag = { bodyId, position: { ...position }, velocity: { ...velocity } };
     const body = this.bodies.find((candidate) => candidate.description.id === bodyId);
     if (!body) return;
+    // Held is the whole of "no gravity": the pose below is a command, and a
+    // body that also integrated would sink out of the hand between the frames
+    // where the pointer happens not to move.
+    body.held = phase !== "end";
     body.position_m = { ...position };
     if (orientation) body.orientation = { ...orientation };
     body.linearVelocity_m_s = phase === "end" ? { x: 0, y: 0, z: 0 } : { ...velocity };

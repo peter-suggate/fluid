@@ -11,6 +11,17 @@ export interface MassProperties {
 
 export interface RigidBodyState {
   description: RigidBodyDescription;
+  /**
+   * In the user's hand: the pose is commanded, not integrated.
+   *
+   * Distinct from `motion === "static"`, which is what the body *is*. This is
+   * what is being done to it, so it lives on the runtime state rather than on
+   * the description and never reaches the document. Consumers must keep reading
+   * its displaced volume — a carried cup is dipped precisely so the water sees
+   * it — and must stop applying gravity, contacts and pair impulses to it, or a
+   * body held still would sink out of the hand holding it.
+   */
+  held?: boolean;
   position_m: Vec3;
   orientation: Quaternion;
   linearVelocity_m_s: Vec3;
@@ -370,7 +381,11 @@ export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDe
     body.hydrodynamicForce_N = load?.hydrodynamicForce_N ? { ...load.hydrodynamicForce_N } : ZERO();
     body.hydrodynamicTorque_N_m = load?.torque_N_m ? { ...load.torque_N_m } : ZERO();
     body.displacedFluidVolume_m3 = load?.displacedFluidVolume_m3 ?? 0;
-    if (body.description.motion === "static") {
+    // A held body is on the hand's clock, not gravity's. It keeps the displaced
+    // volume assigned above — a carried cup still pushes water aside — but it
+    // integrates nothing, and the contact pass below rolls back anything that
+    // manages to shove it.
+    if (body.description.motion === "static" || body.held) {
       body.netForce_N = ZERO(); body.netTorque_N_m = ZERO(); body.linearVelocity_m_s = ZERO(); body.angularVelocity_rad_s = ZERO(); body.angularMomentum_kg_m2_s = ZERO();
       continue;
     }
@@ -402,6 +417,14 @@ export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDe
   if (c.top === "closed") planes.push([{ x: 0, y: -1, z: 0 }, -c.height_m]);
   const terrain = sceneHasTerrain(scene) ? scene.terrain : undefined;
 
+  // Where the hand put them. The contact solver has no notion of an immovable
+  // body — a plane pushes anything it penetrates, and a pair correction moves
+  // both — so a held body's pose is taken back afterwards rather than defended
+  // inside every contact. It still pushes its neighbours; nothing pushes back.
+  const heldPoses = bodies
+    .filter((body) => body.held)
+    .map((body) => ({ body, position_m: { ...body.position_m }, orientation: { ...body.orientation } }));
+
   for (let iteration = 0; iteration < collisionIterations; iteration += 1) {
     for (const body of bodies) {
       for (const [normal, offset] of planes) solvePlaneContact(body, normal, offset);
@@ -414,6 +437,10 @@ export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDe
       }
     }
     for (let i = 0; i < bodies.length; i += 1) for (let j = i + 1; j < bodies.length; j += 1) solveBodyContact(bodies[i], bodies[j]);
+  }
+  for (const held of heldPoses) {
+    held.body.position_m = held.position_m; held.body.orientation = held.orientation;
+    held.body.linearVelocity_m_s = ZERO(); held.body.angularVelocity_rad_s = ZERO(); held.body.angularMomentum_kg_m2_s = ZERO();
   }
   for (const body of bodies) {
     body.netForce_N = add(body.netForce_N, scale(body.collisionImpulse_N_s, 1 / dt));

@@ -31,6 +31,30 @@ export const GPU_RIGID_BODY_CAPACITY = 12;
  * rather than by arithmetic. See `rigidAllocationKey`.
  */
 export const SCENE_ENVIRONMENT_OWNER_BASE = GPU_RIGID_BODY_CAPACITY;
+/**
+ * What `material.z` says about a body's motion.
+ *
+ * Three states, not two, because "does it integrate?" and "is it a fixed part
+ * of the scene?" stopped being the same question the moment a body could be
+ * picked up. A held body must keep publishing the volume it displaces — that is
+ * the whole point of dipping a cup — while refusing gravity, contacts and pair
+ * impulses, and neither of the two states that existed can say that.
+ */
+export const GPU_RIGID_MOTION_LANES = Object.freeze({
+  /** Authored static: no integration, authored waterline volume. */
+  fixed: 0,
+  /** Ordinary dynamic: integrates, publishes its live displaced volume. */
+  dynamic: 1,
+  /** In the user's hand: publishes displacement, integrates nothing. */
+  held: 2,
+});
+
+/** The lane `syncBodies` packs for one body. */
+export function rigidMotionLane(body: RigidBodyState): number {
+  if (body.description.motion === "static") return GPU_RIGID_MOTION_LANES.fixed;
+  return body.held ? GPU_RIGID_MOTION_LANES.held : GPU_RIGID_MOTION_LANES.dynamic;
+}
+
 export const GPU_RIGID_STATE_FLOATS = 32;
 export const GPU_RIGID_STATE_BYTES = GPU_RIGID_BODY_CAPACITY * GPU_RIGID_STATE_FLOATS * 4;
 export const GPU_RIGID_RENDER_FLOATS = 16;
@@ -277,9 +301,18 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
     let base=index*12u;let wet=f32(atomicLoad(&exchange[base+6u]))/65536.0/snapshots;let displaced=min(max(0.0,wet*params.coupling.x),bodyVolume(body));
     // Static bodies retain the analytic authored-waterline volume uploaded by
     // syncBodies. Only an integrating pose needs a recurring immersed update.
-    if(body.material.z>0.5){if(index<arrayLength(&immersedVolumes)){immersedVolumes[index]=displaced;}let impulse=vec3f(f32(atomicLoad(&exchange[base])),f32(atomicLoad(&exchange[base+1u])),f32(atomicLoad(&exchange[base+2u])))*1e-6;let angularImpulse=vec3f(f32(atomicLoad(&exchange[base+3u])),f32(atomicLoad(&exchange[base+4u])),f32(atomicLoad(&exchange[base+5u])))*1e-6;let weighted=vec3f(f32(atomicLoad(&exchange[base+7u])),f32(atomicLoad(&exchange[base+8u])),f32(atomicLoad(&exchange[base+9u])))*1e-4/snapshots;let velocityWeight=f32(atomicLoad(&exchange[base+11u]))/65536.0/snapshots;let pressureCoupled=atomicLoad(&exchange[base+10u])!=0;let meanVelocity=select(vec3f(0),weighted/velocityWeight,velocityWeight>1e-8);let scaledInverseMass=body.inverseMassInertia.x;let mass=select(1e30,rho/scaledInverseMass,scaledInverseMass>0.0);let immersed=clamp(displaced/max(bodyVolume(body),1e-9),0.0,1.0);let relative=body.linearVelocity.xyz-meanVelocity;let speed=length(relative);let drag=-.5*rho*params.coupling.y*3.141592653589793*body.dimensions.w*body.dimensions.w*immersed*speed*relative;let buoyancy=select(-rho*displaced*params.gravity.xyz,vec3f(0),pressureCoupled);let added=params.coupling.z*rho*displaced;let acceleration=(mass*params.gravity.xyz+impulse/max(dt,1e-8)+drag+buoyancy)/max(mass+added,1e-8);body.linearVelocity=vec4f(body.linearVelocity.xyz+acceleration*dt,body.linearVelocity.w);body.angularMomentumRestitution=vec4f(body.angularMomentumRestitution.xyz+angularImpulse,body.angularMomentumRestitution.w);body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);body.angularVelocity=vec4f(inverseInertia(body,body.angularMomentumRestitution.xyz),body.angularVelocity.w);let derivative=qMultiply(vec4f(0,body.angularVelocity.xyz),body.orientation);body.orientation=normalize(body.orientation+.5*dt*derivative);bodies[index]=body;}
+    // A held body is on the moving side of that line and not the integrating
+    // one: a cup carried into the tank has to keep displacing water even while
+    // the hand holding it refuses gravity.
+    if(body.material.z>0.5){if(index<arrayLength(&immersedVolumes)){immersedVolumes[index]=displaced;}}
+    if(body.material.z>0.5&&body.material.z<1.5){let impulse=vec3f(f32(atomicLoad(&exchange[base])),f32(atomicLoad(&exchange[base+1u])),f32(atomicLoad(&exchange[base+2u])))*1e-6;let angularImpulse=vec3f(f32(atomicLoad(&exchange[base+3u])),f32(atomicLoad(&exchange[base+4u])),f32(atomicLoad(&exchange[base+5u])))*1e-6;let weighted=vec3f(f32(atomicLoad(&exchange[base+7u])),f32(atomicLoad(&exchange[base+8u])),f32(atomicLoad(&exchange[base+9u])))*1e-4/snapshots;let velocityWeight=f32(atomicLoad(&exchange[base+11u]))/65536.0/snapshots;let pressureCoupled=atomicLoad(&exchange[base+10u])!=0;let meanVelocity=select(vec3f(0),weighted/velocityWeight,velocityWeight>1e-8);let scaledInverseMass=body.inverseMassInertia.x;let mass=select(1e30,rho/scaledInverseMass,scaledInverseMass>0.0);let immersed=clamp(displaced/max(bodyVolume(body),1e-9),0.0,1.0);let relative=body.linearVelocity.xyz-meanVelocity;let speed=length(relative);let drag=-.5*rho*params.coupling.y*3.141592653589793*body.dimensions.w*body.dimensions.w*immersed*speed*relative;let buoyancy=select(-rho*displaced*params.gravity.xyz,vec3f(0),pressureCoupled);let added=params.coupling.z*rho*displaced;let acceleration=(mass*params.gravity.xyz+impulse/max(dt,1e-8)+drag+buoyancy)/max(mass+added,1e-8);body.linearVelocity=vec4f(body.linearVelocity.xyz+acceleration*dt,body.linearVelocity.w);body.angularMomentumRestitution=vec4f(body.angularMomentumRestitution.xyz+angularImpulse,body.angularMomentumRestitution.w);body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);body.angularVelocity=vec4f(inverseInertia(body,body.angularMomentumRestitution.xyz),body.angularVelocity.w);let derivative=qMultiply(vec4f(0,body.angularVelocity.xyz),body.orientation);body.orientation=normalize(body.orientation+.5*dt*derivative);bodies[index]=body;}
   }
   for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);bodies[index]=body;}for(var a=0u;a<12u;a++){if(a>=count){break;}for(var b=a+1u;b<12u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
+  // A held body is the host's to place. Whatever the contact iterations did to
+  // it — a pair impulse from a crate it was shoved into, an angular momentum it
+  // would spin off the instant it is let go — is rolled back to the pose the
+  // pointer authored. It still pushes its neighbours; nothing pushes back.
+  for(var index=0u;index<12u;index++){if(index>=count){break;}if(bodies[index].material.z>1.5){bodies[index]=previousBodies[index];}}
   for(var index=0u;index<12u;index++){if(index<count){publish(index);publishMotion(index,previousBodies[index],bodies[index],dt);}else{renderBodies[index]=RenderBody(vec4f(0),vec4f(0),vec4f(1,0,0,0),vec4f(0));rigidMotion[index]=SvoPrimitiveMotionRecord();}}
 }
 `;
@@ -397,7 +430,7 @@ export class WebGPURigidBodySystem {
     const ids = active.map((body) => body.description.id);
     const structural = active.map((body) => JSON.stringify([body.description.shape,body.description.dimensions_m,body.description.density_kg_m3,body.description.restitution,body.description.friction,body.description.motion]));
     const authored = active.map((body) => JSON.stringify([body.description.position_m,body.description.orientation,body.description.linearVelocity_m_s,body.description.angularVelocity_rad_s]));
-    const commands = active.map((body) => JSON.stringify([body.position_m,body.orientation,body.linearVelocity_m_s,body.angularVelocity_rad_s]));
+    const commands = active.map((body) => JSON.stringify([body.position_m,body.orientation,body.linearVelocity_m_s,body.angularVelocity_rad_s,Boolean(body.held)]));
     if (JSON.stringify([ids,structural,authored,commands]) === JSON.stringify([this.bodyIds,this.structuralSignatures,this.authoredTransformSignatures,this.commandSignatures])) return;
     this.bodyCount = active.length;
     const stateStorage = new ArrayBuffer(GPU_RIGID_STATE_BYTES), state = new Float32Array(stateStorage), stateWords = new Uint32Array(stateStorage);
@@ -427,7 +460,15 @@ export class WebGPURigidBodySystem {
       // fell through to the capsule's radius for anything it did not name, so a
       // cup was packed with a bounding sphere it does not have.
       const radius = boundingRadius(body.description);
-      state.set([body.position_m.x,body.position_m.y,body.position_m.z,shape,d.x,d.y,d.z,radius,q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,body.inverseMass_kg*rho,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3,body.inverseMass_kg*rho,body.inverseInertiaBody_kg_m2.x*rho,body.inverseInertiaBody_kg_m2.y*rho,body.inverseInertiaBody_kg_m2.z*rho,body.angularMomentum_kg_m2_s.x,body.angularMomentum_kg_m2_s.y,body.angularMomentum_kg_m2_s.z,body.description.restitution,body.description.friction,0,body.description.motion === "static" ? 0 : 1,0],o);
+      // A held body is immovable rather than weightless: zero inverse mass and
+      // inertia is what makes `planeContact` return early and `applyImpulse` a
+      // no-op, so a wall or a neighbouring crate cannot push the thing in the
+      // user's hand. Gravity is refused separately, by the motion lane below.
+      const inverseMass = body.held ? 0 : body.inverseMass_kg * rho;
+      const inverseInertia = body.held
+        ? { x: 0, y: 0, z: 0 }
+        : { x: body.inverseInertiaBody_kg_m2.x*rho, y: body.inverseInertiaBody_kg_m2.y*rho, z: body.inverseInertiaBody_kg_m2.z*rho };
+      state.set([body.position_m.x,body.position_m.y,body.position_m.z,shape,d.x,d.y,d.z,radius,q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,inverseMass,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3,inverseMass,inverseInertia.x,inverseInertia.y,inverseInertia.z,body.angularMomentum_kg_m2_s.x,body.angularMomentum_kg_m2_s.y,body.angularMomentum_kg_m2_s.z,body.description.restitution,body.description.friction,0,rigidMotionLane(body),0],o);
       stateWords[o+29]=nextMotionGenerations[index];
       const half = sceneShapeRenderHalfExtent_m(body.description.shape, d);
       render.set([body.position_m.x,body.position_m.y,body.position_m.z,state[o+7],half[0],half[1],half[2],shape,q.w,q.x,q.y,q.z,...palette[shape],0],index*GPU_RIGID_RENDER_FLOATS);

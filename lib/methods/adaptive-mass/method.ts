@@ -72,9 +72,22 @@ const params: MethodParamSpec[] = [
       { value: "paper", label: "Paper · 1/30 s large steps" },
       { value: "scene", label: "Scene · authored maxDt" },
     ],
+    update: "runtime",
     hint: "Sparse CM12 defaults to the same exact 1/30 s operating step as Uniform CM12. Scene mode is retained for matched-step validation and explicit timestep overrides.",
   },
 ];
+
+/**
+ * The controls a live Sparse CM12 solver adopts.
+ *
+ * Only the clock. The resolution policy and the seam seed decide how the atlas
+ * was packed — a different rung or a different fine side is a different world —
+ * so they stay structural. `timeStep` is consulted at the top of every
+ * `advanceTo` and nowhere else, and it is also what the transport bar's step
+ * slider releases: leaving it structural made a nudge of that slider rebuild
+ * the sparse world to arrive at an identical one.
+ */
+export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze(["timeStep"] as const);
 
 const seamAxis = (value: unknown): AdaptiveMassSeamAxis =>
   value === "y" || value === "z" ? value : "x";
@@ -136,6 +149,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   capabilities: { volumeRendering: true, adoptsRigidRosterShape: true },
   supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure"],
   params,
+  runtimeParamKeys: ADAPTIVE_MASS_RUNTIME_PARAM_KEYS,
   pipelineGraph: async () => ADAPTIVE_MASS_FLUID_PIPELINE,
   pressureMapping: "Every live Sparse CM12 step solves one globally coupled composite pressure system over regular faces and conservative 2:1 seam ports using matrix-free Jacobi-PCG.",
   normalizeValues: (values) => ({

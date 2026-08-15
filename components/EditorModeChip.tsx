@@ -3,6 +3,7 @@
 import { DEFAULT_EDITOR_TOOL, getEditorTool } from "../lib/core/editor-tools";
 import { simulation } from "../lib/core/simulation/controller";
 import { useEditorHistoryStore } from "../lib/core/stores/history-store";
+import { useSceneStore } from "../lib/core/stores/scene-store";
 import { useUIStore } from "../lib/core/stores/ui-store";
 
 /**
@@ -29,6 +30,11 @@ export function EditorModeChip() {
   const activeTool = useUIStore((state) => state.activeTool);
   const setActiveTool = useUIStore((state) => state.setActiveTool);
   const carry = useUIStore((state) => state.carry);
+  // A carry started by a selection carries no name — the UI store must not read
+  // the document to get one — so the chip resolves it here, where the document
+  // is already a legitimate dependency.
+  const carriedName = useSceneStore((state) =>
+    state.scene.rigidBodies.find((body) => body.id === carry?.bodyId)?.name);
   const canUndo = useEditorHistoryStore((state) => state.past.length > 0);
   const canRedo = useEditorHistoryStore((state) => state.future.length > 0);
   const tool = getEditorTool(activeTool);
@@ -38,7 +44,7 @@ export function EditorModeChip() {
     <div className="editor-mode-chip" data-active-tool={activeTool} data-carrying={Boolean(carry)}>
       {carry ? (
         <div className="mode-chip carrying" role="status" aria-live="polite" data-testid="carry-chip">
-          <strong>{carry.label}</strong>
+          <strong>{carry.label ?? carriedName ?? "carrying"}</strong>
           {carry.tiltDegrees !== 0 && <em>{carry.tiltDegrees > 0 ? "+" : ""}{Math.round(carry.tiltDegrees)}°</em>}
           <span>drag to dip and lift · wheel for depth · Q/E to pour · shift to ease · click to put down</span>
         </div>

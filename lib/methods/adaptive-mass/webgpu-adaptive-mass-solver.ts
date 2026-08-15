@@ -4,6 +4,7 @@ import type {
   GPUInitializationReporter,
   GPUSolverInstance,
   InjectedLiquidBall,
+  MethodParamValues,
 } from "../../core/method-contract";
 import type { SceneDescription } from "../../core/model";
 import type { RigidBodyState } from "../../core/rigid-body";
@@ -164,8 +165,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
 
   private constructor(
     private readonly device: GPUDevice,
-    private readonly scene: SceneDescription,
-    private readonly options: AdaptiveMassSolverOptions,
+    // Not readonly: `applySceneUniforms` swaps in scalar-only scene revisions,
+    // and `applyRuntimeValues` swaps the clock lane. Both are read fresh on
+    // every advance rather than baked into an allocation, which is the whole
+    // reason they can be adopted instead of rebuilt for.
+    private scene: SceneDescription,
+    private options: AdaptiveMassSolverOptions,
     private readonly presentation: WebGPUAdaptiveMassAtlasPresentation,
     private readonly resident: WebGPUSparseCM12Resident,
     adaptiveMixedSeamFaceCount: number,
@@ -359,6 +364,37 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       ],
     );
     this.device.queue.submit([encoder.finish()]);
+  }
+
+  /**
+   * Adopt scene scalars on the running solver.
+   *
+   * Everything this method reads out of the document below — `numerics.maxDt_s`,
+   * `fluid.gravity_m_s2`, `fluid.density_kg_m3` — is read per advance, never
+   * baked into a buffer, a pipeline or an atlas. Without this the renderer had
+   * no way to deliver a changed scalar except by constructing a new solver, so
+   * nudging the step slider rebuilt the whole sparse world to arrive at an
+   * identical one. The renderer only calls this once the structural and seed
+   * tiers already match, so the incoming document differs in scalars alone.
+   */
+  applySceneUniforms(scene: SceneDescription): void {
+    this.scene = scene;
+  }
+
+  /**
+   * Adopt the controls that only change what the next advance asks for.
+   *
+   * `timeStep` picks between the paper 1/30 s operating step and the scene's
+   * authored `maxDt_s`; both are consulted at the top of `advanceTo`, so the
+   * switch is a live one. Everything else this method offers — the resolution
+   * policy and the seam seed — decides how the atlas was packed and genuinely
+   * cannot move without a rebuild, which is why they stay out of
+   * `runtimeParamKeys`.
+   */
+  applyRuntimeValues(values: MethodParamValues): void {
+    const timeStep = values.timeStep === "scene" ? "scene" : "paper";
+    if (timeStep === this.options.timeStep) return;
+    this.options = { ...this.options, timeStep };
   }
 
   advanceTo(time_s: number, _bodies: RigidBodyState[]): boolean {

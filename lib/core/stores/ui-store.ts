@@ -36,9 +36,35 @@ import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
  */
 export interface CarrySession {
   readonly bodyId: string;
-  readonly label: string;
+  /**
+   * What the chip calls it, when whoever started the carry knew. A carry that
+   * begins from a selection does not: the store that holds the selection has no
+   * business reading the scene document to name a body, so the chip resolves the
+   * name itself and this stays absent.
+   */
+  readonly label?: string;
   /** Degrees, for display; the radians the solver sees are the viewport's. */
   readonly tiltDegrees: number;
+}
+
+/**
+ * The carry a selection implies.
+ *
+ * Selecting a body *is* picking it up. That is the whole editing model here:
+ * you point at a thing, it comes to the cursor and stays there — gravity
+ * refused, contacts refused — until you put it down. Anything else makes
+ * "selected" a state you have to then act on, and a body that keeps falling
+ * while its handles are up is a body you cannot aim.
+ *
+ * Re-selecting the same body keeps the session it already has, so a tilt
+ * survives a click that changes nothing. Selecting something else, or nothing,
+ * puts down whatever was in hand — the release is implicit in aiming elsewhere.
+ * A deliberate drop clears the carry without clearing the selection, and the
+ * next click on the same body picks it up again.
+ */
+function carryForSelection(current: CarrySession | undefined, bodyId: string | undefined): CarrySession | undefined {
+  if (!bodyId) return undefined;
+  return current?.bodyId === bodyId ? current : { bodyId, tiltDegrees: 0 };
 }
 
 /**
@@ -300,12 +326,14 @@ export const useUIStore = create<UIStore>((set) => ({
   select: (selection) => set((state) => ({
     selection,
     selectedBodyId: selectedBodyIdOf(selection),
+    carry: carryForSelection(state.carry, selectedBodyIdOf(selection)),
     selectionControlsOpen: state.selection?.id === selection?.id && state.selection?.kind === selection?.kind
       ? state.selectionControlsOpen : false,
   })),
   selectBody: (selectedBodyId) => set((state) => ({
     selectedBodyId,
     selection: bodySelection(selectedBodyId),
+    carry: carryForSelection(state.carry, selectedBodyId),
     selectionControlsOpen: state.selectedBodyId === selectedBodyId ? state.selectionControlsOpen : false,
   })),
   openRadialMenu: (radialMenu) => set({ radialMenu }),

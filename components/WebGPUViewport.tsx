@@ -1329,6 +1329,12 @@ export function WebGPUViewport() {
    * The selection is deliberately not moved here. See `pointerUp`.
    */
   const beginBodyDrag = (pointerId: number, timeStamp: number, downX: number, downY: number, ray: { origin: Vec3; direction: Vec3 }, body: RigidBodyState, position: Vec3, orientation?: RigidBodyState["orientation"], surfacePosition = position) => {
+    // The press that starts a drag also selects, and a selection means "in
+    // hand" — so without this the gesture would be racing a carry for the same
+    // body, and the first pointer move would go to whichever won. The drag owns
+    // it now; its release re-selects and the carry starts cleanly from there,
+    // unless the release was a throw, which is a putting-down of its own.
+    useUIStore.getState().endCarry();
     const basis = cameraBasis(useUIStore.getState().camera);
     const dragPoint = planeHit(ray.origin, ray.direction, surfacePosition, basis.forward), grabOffset = sub(position, dragPoint);
     pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };

@@ -18,6 +18,7 @@ import {
   type DisplayGradeAuthoring,
 } from "./webgpu-lighting";
 import { terrainContentStamp, terrainHeightAt, type TerrainDescription } from "./terrain";
+import { fluidOnlyRigidSceneShader, rigidBodyRaymarchShaderLibrary } from "./webgpu-rigid-raymarch";
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import {
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
@@ -67,6 +68,19 @@ export function causticReceiverContentKey(
 
 /** Raster/body depth separation that activates the local implicit resolver. */
 export const CONTACT_RESOLVE_BAND_CELLS = 1.5;
+
+/** The rigid buffer this pipeline is handed holds twelve records; see `bodyBuffer`. */
+export const RASTER_WATER_MAXIMUM_BODIES = 12;
+
+/**
+ * The fluid-only backdrop.
+ *
+ * Linear counterpart of the studio's own ground (`--bg`, warmed): the viewport
+ * is most of the window, so a teal backdrop here made the whole app read cold
+ * no matter what the chrome around it did. Alpha is far depth, the dry-scene
+ * attachment's convention (`resolvedDrySceneDepth`).
+ */
+const FLUID_ONLY_BACKGROUND: GPUColor = Object.freeze({ r: .0194, g: .0145, b: .0097, a: 65504 });
 
 /**
  * Resolve one filtered sample from the additive caustic target.
@@ -1225,7 +1239,7 @@ fn recoveredWallFilm(positionSample:vec4f,normalSample:vec4f)->f32{
   return max(0.0,normalSample.a/max(positionSample.a,1e-4)-1.0);
 }
 fn cameraRay(textureUV:vec2f)->vec3f{let ndc=vec2f(textureUV.x*2.0-1.0,1.0-textureUV.y*2.0);let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();return normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);}
-fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let near3=min(a,b);let far3=max(a,b);return vec2f(max(max(near3.x,near3.y),near3.z),min(min(far3.x,far3.y),far3.z));}
+${rigidBodyRaymarchShaderLibrary}
 ${environmentShaderLibrary}
 ${unifiedLightingShaderLibrary}
 ${unifiedDisplayTransferShaderLibrary}
@@ -1242,36 +1256,6 @@ fn waterKeyColor()->vec3f{return select(environmentLightColor(),waterKeyRadiance
 // carry its own hue all the way out to the rim instead of ending in a fixed
 // pale turquoise that contradicts its body.
 fn waterTintScale()->vec3f{return waterScatter()/vec3f(${WATER_OPTICS.scatter.join(",")});}
-fn qrot(q:vec4f,v:vec3f)->vec3f{let a=cross(q.yzw,v);return v+2.0*(q.x*a+cross(q.yzw,a));}
-fn qinv(q:vec4f,v:vec3f)->vec3f{return qrot(vec4f(q.x,-q.yzw),v);}
-struct RigidHit { t:f32, n:vec3f }
-fn sphereRigidHit(ro:vec3f,rd:vec3f,center:vec3f,radius:f32)->RigidHit{
-  let oc=ro-center;let b=dot(oc,rd);let discriminant=b*b-dot(oc,oc)+radius*radius;
-  if(discriminant<0.0){return RigidHit(1e20,vec3f(0,1,0));}
-  let root=sqrt(discriminant);var t=-b-root;if(t<=1e-4){t=-b+root;}
-  if(t<=1e-4){return RigidHit(1e20,vec3f(0,1,0));}
-  return RigidHit(t,normalize(ro+rd*t-center));
-}
-fn cylinderRigidHit(ro:vec3f,rd:vec3f,radius:f32,halfHeight:f32,capped:bool)->RigidHit{
-  var best=RigidHit(1e20,vec3f(0,1,0));let a=dot(rd.xz,rd.xz);
-  if(a>1e-8){let b=dot(ro.xz,rd.xz);let c=dot(ro.xz,ro.xz)-radius*radius;let discriminant=b*b-a*c;
-    if(discriminant>=0.0){let root=sqrt(discriminant);var t=(-b-root)/a;if(t<=1e-4){t=(-b+root)/a;}let y=ro.y+rd.y*t;
-      if(t>1e-4&&abs(y)<=halfHeight){let p=ro+rd*t;best=RigidHit(t,normalize(vec3f(p.x,0,p.z)));}}}
-  if(capped&&abs(rd.y)>1e-8){for(var side=-1.0;side<=1.0;side+=2.0){let t=(side*halfHeight-ro.y)/rd.y;let p=ro+rd*t;
-    if(t>1e-4&&t<best.t&&dot(p.xz,p.xz)<=radius*radius){best=RigidHit(t,vec3f(0,side,0));}}}
-  return best;
-}
-fn bodyRigidHit(ro:vec3f,rd:vec3f,body:BodyGPU)->RigidHit{
-  let o=qinv(body.orientation,ro-body.positionRadius.xyz);let d=qinv(body.orientation,rd);let shape=i32(round(body.halfSizeShape.w));var hit=RigidHit(1e20,vec3f(0,1,0));
-  if(shape==0){hit=sphereRigidHit(o,d,vec3f(0),body.halfSizeShape.x);}
-  else if(shape==1){let interval=boxHit(o,d,-body.halfSizeShape.xyz,body.halfSizeShape.xyz);var t=interval.x;if(t<=1e-4){t=interval.y;}
-    if(t>1e-4&&interval.x<=interval.y){let p=o+d*t;let q=abs(p/max(body.halfSizeShape.xyz,vec3f(1e-5)));var n=vec3f(0,0,sign(p.z));
-      if(q.x>=q.y&&q.x>=q.z){n=vec3f(sign(p.x),0,0);}else if(q.y>=q.z){n=vec3f(0,sign(p.y),0);}hit=RigidHit(t,n);}}
-  else if(shape==2){hit=cylinderRigidHit(o,d,body.halfSizeShape.x,body.halfSizeShape.y,false);let upper=sphereRigidHit(o,d,vec3f(0,body.halfSizeShape.y,0),body.halfSizeShape.x);let lower=sphereRigidHit(o,d,vec3f(0,-body.halfSizeShape.y,0),body.halfSizeShape.x);if(upper.t<hit.t){hit=upper;}if(lower.t<hit.t){hit=lower;}}
-  else{hit=cylinderRigidHit(o,d,body.halfSizeShape.x,body.halfSizeShape.y,true);}
-  return RigidHit(hit.t,normalize(qrot(body.orientation,hit.n)));
-}
-fn nearestRigid(ro:vec3f,rd:vec3f)->RigidHit{var best=RigidHit(1e20,vec3f(0,1,0));for(var i=0u;i<12u;i+=1u){if(i>=u32(round(u.options.z))){break;}let hit=bodyRigidHit(ro,rd,bodies[i]);if(hit.t<best.t){best=hit;}}return best;}
 
 // The raster mesh is the fast global solution. Only pixels whose analytic
 // rigid depth lies in this narrow band evaluate the resident implicit field.
@@ -1601,6 +1585,10 @@ export class RasterWaterPipeline {
   private surfacePeelBindGroup?: GPUBindGroup;
   private compositeBindGroup?: GPUBindGroup;
   private compositeBindGroups = new WeakMap<GPUTextureView, GPUBindGroup>();
+  private rigidSceneLayout?: GPUBindGroupLayout;
+  private rigidScenePipeline?: GPURenderPipeline;
+  private rigidSceneBindGroup?: GPUBindGroup;
+  private rigidBodyCount = 0;
   private sceneTexture?: GPUTexture;
   private sceneTextureView?: GPUTextureView;
   private frontPosition?: GPUTexture;
@@ -1777,7 +1765,7 @@ export class RasterWaterPipeline {
   }
 
   async initialize(onProgress:(label:string,completed:number,total:number)=>void=()=>{}) {
-    const [extract, globalClassify, globalScan, globalEmitAll, prepare, surface, caustic, composite] = await Promise.all([
+    const [extract, globalClassify, globalScan, globalEmitAll, prepare, surface, caustic, composite, rigidScene] = await Promise.all([
       checkedModule(this.device, "Water isosurface extraction", surfaceExtractionShader),
       checkedModule(this.device, "Global fine water classification", globalFineSurfaceClassificationShader),
       checkedModule(this.device, "Classified global fine scan", globalFineClassifiedIndirectScanShader),
@@ -1785,7 +1773,8 @@ export class RasterWaterPipeline {
       checkedModule(this.device, "Water extraction dispatch prepare", extractionPrepareShader),
       checkedModule(this.device, "Water interface raster", surfaceRasterShader),
       checkedModule(this.device, "Water caustic projection", causticShader),
-      checkedModule(this.device, "Water optical composite", compositeShader)
+      checkedModule(this.device, "Water optical composite", compositeShader),
+      checkedModule(this.device, "Fluid-only rigid bodies", fluidOnlyRigidSceneShader)
     ]);
     this.extractLayout = this.device.createBindGroupLayout({ label: "Water extraction bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
@@ -1870,6 +1859,16 @@ export class RasterWaterPipeline {
       { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
     ] });
+    // Binding 3 is the caustic receiver the optics library declares and this
+    // pass never reads. It stays in the layout because the library is included
+    // whole: the alternative is a second copy of it that differs only by what
+    // it leaves out.
+    this.rigidSceneLayout = this.device.createBindGroupLayout({ label: "Fluid-only rigid body bindings", entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
+    ] });
     this.causticLayout = this.device.createBindGroupLayout({ label: "Water caustic projection bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
       { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
@@ -1878,7 +1877,7 @@ export class RasterWaterPipeline {
     ] });
     const extractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.extractLayout] });
     const globalExtractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.globalExtractLayout] });
-    const total=16;let completed=0;
+    const total=17;let completed=0;
     const compute=async(label:string,descriptor:GPUComputePipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createComputePipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
     const render=async(label:string,descriptor:GPURenderPipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createRenderPipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
     const extractionConstants = { thinWallFilmsEnabled: this.pipelineOptions.thinWallFilms ? 1 : 0 };
@@ -1915,6 +1914,12 @@ export class RasterWaterPipeline {
     const compositePipelineLayout=this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeLayout] });
     const compositeDescriptor:GPURenderPipelineDescriptor={ label:"Composite layered water optics", layout: compositePipelineLayout, vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } };
     this.compositePipeline = await render("Compositing water optics",compositeDescriptor);
+    this.rigidScenePipeline = await render("Drawing rigid bodies",{
+      label: "Fluid-only rigid bodies", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.rigidSceneLayout] }),
+      vertex: { module: rigidScene, entryPoint: "vertexMain" },
+      fragment: { module: rigidScene, entryPoint: "fragmentMain", targets: [{ format: "rgba16float" }] },
+      primitive: { topology: "triangle-list" }
+    });
     this.sampler = this.device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.fallbackSparsePageTable = this.device.createBuffer({ label: "Water sparse-page fallback", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.fallbackSparseActivePages = this.device.createBuffer({ label: "Water sparse-active fallback", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
@@ -2181,6 +2186,21 @@ export class RasterWaterPipeline {
   }
 
   /**
+   * How many bodies the dry-scene attachment has to account for.
+   *
+   * Only the fluid-only path reads it. A `full-scene` presentation draws the
+   * roster through the SVO rigid raster and never asks. Zero returns the
+   * attachment to its once-only clear, which is why this invalidates it:
+   * removing the last body must repaint the background the body was over.
+   */
+  setRigidBodyCount(count: number) {
+    const bodies = Math.max(0, Math.min(RASTER_WATER_MAXIMUM_BODIES, Math.floor(count)));
+    if (this.rigidBodyCount === bodies) return;
+    this.rigidBodyCount = bodies;
+    this.clearBackgroundEncoded = false;
+  }
+
+  /**
    * Frame-graph stages this pipeline must not encode. See
    * `render-stage-switches`; only `surface-extraction`, `water-interfaces`,
    * `caustics` and `optical-composite` are its to honour.
@@ -2253,6 +2273,10 @@ export class RasterWaterPipeline {
     ] });
     if (this.surfacePeelLayout && this.sceneTextureView) this.surfaceUnpeeledBindGroup = this.device.createBindGroup({ label: "Water unpeeled placeholder binding", layout: this.surfacePeelLayout, entries: [{ binding: 0, resource: this.sceneTextureView }] });
     if (this.surfacePeelLayout && this.backPosition) this.surfacePeelBindGroup = this.device.createBindGroup({ layout: this.surfacePeelLayout, entries: [{ binding: 0, resource: this.backPosition.createView() }] });
+    if (this.rigidSceneLayout && this.waterSceneOpticsBuffer && this.causticReceiver) this.rigidSceneBindGroup = this.device.createBindGroup({ label: "Fluid-only rigid body inputs", layout: this.rigidSceneLayout, entries: [
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.bodyBuffer } },
+      { binding: 2, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 3, resource: this.causticReceiver.createView() }
+    ] });
     this.compositeBindGroup = this.sceneTextureView ? this.compositeBindGroupFor(this.sceneTextureView) : undefined;
   }
 
@@ -2382,14 +2406,33 @@ export class RasterWaterPipeline {
       // A later switch to fluid-only must clear imagery left by this frame.
       this.clearBackgroundEncoded = false;
     } else if (backgroundMode === "clear") {
-      // No geometry, shader, draw, or recurring full-frame write. The clear is
-      // retained until a dry-scene encoder writes the attachment or it resizes.
-      if (!this.clearBackgroundEncoded) {
-        // Linear counterpart of the studio's own ground (`--bg`, warmed): the
-        // viewport is most of the window, so a teal backdrop here made the
-        // whole app read cold no matter what the chrome around it did.
+      // A fluid-only scene runs no SVO world, so `webgpu-svo-rigid-raster` --
+      // the only other thing that draws a body -- never encodes, and the
+      // composite reads the roster for contact and for the interior exit but
+      // never shades one. Without this pass a body is invisible until it is
+      // behind water, which is not a thing you can drop something into.
+      //
+      // It writes what the SVO dry scene writes, so nothing downstream changes:
+      // radiance in RGB, ray distance in alpha. Bodies therefore sort against
+      // the water through `resolvedDrySceneDepth` and refract through the
+      // ordinary scene-texture read.
+      if (this.rigidBodyCount > 0 && this.rigidScenePipeline && this.rigidSceneBindGroup) {
+        const pass = encoder.beginRenderPass({label:"Fluid-only rigid bodies",colorAttachments:[{
+          view:this.sceneTextureView!,clearValue:FLUID_ONLY_BACKGROUND,loadOp:"clear",storeOp:"store"
+        }]});
+        pass.setPipeline(this.rigidScenePipeline);
+        pass.setBindGroup(0,this.rigidSceneBindGroup);
+        pass.draw(3);
+        pass.end();
+        // Bodies move, so this attachment is authored every frame. The retained
+        // clear below is no longer what is on it.
+        this.clearBackgroundEncoded = false;
+        tracePhase?.({ id: "dry-scene", label: "Fluid-only rigid bodies" });
+      } else if (!this.clearBackgroundEncoded) {
+        // No geometry, shader, draw, or recurring full-frame write. The clear is
+        // retained until a dry-scene encoder writes the attachment or it resizes.
         encoder.beginRenderPass({label:"Fluid-only clear background",colorAttachments:[{
-          view:this.sceneTextureView!,clearValue:{r:.0194,g:.0145,b:.0097,a:65504},loadOp:"clear",storeOp:"store"
+          view:this.sceneTextureView!,clearValue:FLUID_ONLY_BACKGROUND,loadOp:"clear",storeOp:"store"
         }]}).end();
         this.clearBackgroundEncoded = true;
         tracePhase?.({ id: "dry-scene", label: "Fluid-only background clear" });

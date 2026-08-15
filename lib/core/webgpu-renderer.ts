@@ -455,9 +455,15 @@ export function gpuSceneSeedKey(scene: SceneDescription): string {
  * `adoptsRigidRosterShape` and gets a constant, which is what makes the first
  * body dropped into a running uniform scene warm as well.
  */
-function rigidAllocationKey(bodies: SceneDescription["rigidBodies"], methodId: string): string {
+function rigidAllocationKey(scene: SceneDescription, methodId: string): string {
   if (getMethod(methodId).capabilities?.adoptsRigidRosterShape) return "live";
-  return `${bodies.length > 0}:${bodies.some((body) => body.motion !== "static")}`;
+  const bodies = scene.rigidBodies;
+  // Terrain already forces the sparse world, so on a terrain scene the presence
+  // bit answers a question nothing asks. Reading it anyway is what made the
+  // first body dropped onto a landscape restart an octree solve that would have
+  // allocated exactly the same thing either way.
+  const presence = sceneHasTerrain(scene) ? "terrain" : `${bodies.length > 0}`;
+  return `${presence}:${bodies.some((body) => body.motion !== "static")}`;
 }
 
 /** The roster itself, which a live solver re-uploads rather than rebuilds for. */
@@ -504,7 +510,7 @@ function inflowBudgetKey(inflow: SceneDescription["fluid"]["inflow"]): string {
 export function sceneEditRequiresReset(before: SceneDescription, after: SceneDescription, methodId: string): boolean {
   return sceneStructuralKey(before) !== sceneStructuralKey(after)
     || gpuSceneSeedKey(before) !== gpuSceneSeedKey(after)
-    || rigidAllocationKey(before.rigidBodies, methodId) !== rigidAllocationKey(after.rigidBodies, methodId);
+    || rigidAllocationKey(before, methodId) !== rigidAllocationKey(after, methodId);
 }
 
 /** Where the nozzle is, which way it points, and how far it reaches. */
@@ -553,7 +559,7 @@ function refinementRegionKey(scene: SceneDescription): string {
  * ignoring the edit.
  */
 export function gpuSceneSolverKey(scene: SceneDescription, config: SimulationRunConfig): string {
-  return `${config.simulationEpoch ?? 0}:${gpuSceneStructuralKey(scene, config)}:${gpuSceneSeedKey(scene)}:${rigidAllocationKey(scene.rigidBodies, config.methodId)}`;
+  return `${config.simulationEpoch ?? 0}:${gpuSceneStructuralKey(scene, config)}:${gpuSceneSeedKey(scene)}:${rigidAllocationKey(scene, config.methodId)}`;
 }
 
 
@@ -2833,6 +2839,11 @@ export class FluidLabRenderer {
       return replacementResult;
     };
     this.waterPipeline.setSceneHasFluid(Boolean(sceneRuntime.fluidSolver));
+    // Who draws the bodies. A full-scene presentation rasters them into the SVO
+    // dry G-buffer; a fluid-only one runs no dry scene at all, so the water
+    // pipeline authors the same attachment itself. Zero here is not "no bodies"
+    // but "not yours" — the roster is unchanged, the renderer of it is not.
+    this.waterPipeline.setRigidBodyCount(sparsePresentationRequired ? 0 : bodies.length);
     // The medium, the key and the caustic receiver are all document facts the
     // composite used to have inlined into its WGSL at build time. The pipeline
     // ignores a call that changes nothing, so this stays a per-frame statement
