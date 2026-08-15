@@ -12,6 +12,10 @@ import {
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import type { SparseAtlasProjectionStageId } from "./sparse-atlas-composite-projection";
 import type { SparseAtlasDynamicsStageId } from "./sparse-atlas-dynamics";
+import {
+  SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
+  SPARSE_CM12_SHARPENING_TRACE_STEPS,
+} from "./webgpu-sparse-cm12-resident";
 
 /** The capture cadence matches the uniform reference's observatory lane. */
 export const ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS = 100;
@@ -257,12 +261,34 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Surface conditioning",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.surfaceConditioning.label],
     tip: {
-      summary: "Applies the shared CM12 surface-conditioning transaction on compact resident leaves before activity is measured.",
+      summary: "Applies the shared CM12 surface-conditioning transaction on compact resident leaves before activity is measured. Sec. 3.5's density correction and Algorithm 2's local mass return are one dispatch pair here rather than the uniform lane's two separable stages, so both trace controls live on this stage.",
       reads: "transported density and gamma",
       writes: "conditioned density and gamma",
       feeds: "activity measurement and resolution planning",
     },
-    chip: () => "CM12 sharpening",
+    controls: [
+      {
+        kind: "param-range",
+        param: "sharpeningDistance",
+        label: "Trace distance",
+        unit: "cells",
+        min: 0.1, max: 3.1, step: 0.1, digits: 1,
+        hint: "Algorithm 2's D. The paper explores 1.1-3.1 cells and reads increasing it as surface tension; the sparse lane sits at the top of that range because a shorter trace strands removed mass on the tall side walls.",
+      },
+      {
+        kind: "param-range",
+        param: "sharpeningTraceSteps",
+        label: "Trace substeps",
+        unit: "substeps",
+        min: 1, max: 16, step: 1, digits: 0,
+        hint: "Forward-Euler substeps the trace may spend, at half a cell each. Reach is min(D, half the substeps), so at the default seven the distance is what binds and lowering these is a separate, shorter-trace ablation.",
+      },
+    ],
+    chip: (context) => `CM12 sharpening · D ${Number(
+      context.values.sharpeningDistance ?? SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
+    ).toFixed(1)} cells · ${Number(
+      context.values.sharpeningTraceSteps ?? SPARSE_CM12_SHARPENING_TRACE_STEPS,
+    ).toFixed(0)} substeps`,
   }),
   stage({
     id: "activity-resolution", band: "topology", side: "left",

@@ -33,6 +33,8 @@ import {
 } from "./sparse-atlas-dynamics";
 import { WebGPUAdaptiveMassAtlasPresentation } from "./webgpu-adaptive-mass-atlas-presentation";
 import {
+  sparseCM12SharpeningDistance,
+  sparseCM12SharpeningTraceSteps,
   WebGPUSparseCM12Resident,
   type SparseCM12GPUActivityRecord,
 } from "./webgpu-sparse-cm12-resident";
@@ -392,8 +394,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    */
   applyRuntimeValues(values: MethodParamValues): void {
     const timeStep = values.timeStep === "scene" ? "scene" : "paper";
-    if (timeStep === this.options.timeStep) return;
-    this.options = { ...this.options, timeStep };
+    const sharpeningDistance = sparseCM12SharpeningDistance(values.sharpeningDistance);
+    const sharpeningTraceSteps = sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps);
+    if (timeStep === this.options.timeStep
+      && sharpeningDistance === this.options.sharpeningDistance
+      && sharpeningTraceSteps === this.options.sharpeningTraceSteps) return;
+    this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps };
   }
 
   advanceTo(time_s: number, _bodies: RigidBodyState[]): boolean {
@@ -429,6 +435,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       cellSize_m,
       this.scene.fluid.density_kg_m3 * cellSize_m * cellSize_m / dt_s,
       [gravity.x / cellSize_m, gravity.y / cellSize_m, gravity.z / cellSize_m],
+      {
+        distanceCells: this.options.sharpeningDistance,
+        traceSteps: this.options.sharpeningTraceSteps,
+      },
     );
     // These seams describe host encoding only.  The corresponding numerical
     // stages are ordered compute dispatches in the command buffer above.

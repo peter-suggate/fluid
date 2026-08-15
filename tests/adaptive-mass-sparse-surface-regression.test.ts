@@ -69,6 +69,55 @@ test("resident-row surface conditioning is conservative", () => {
     Number.isFinite(value) && value >= -1e-12));
 });
 
+test("Dawn all-fine Figure 2 clears the tall wall residue conservatively", {
+  skip: !process.env.WEBGPU_NODE_MODULE,
+  timeout: 30_000,
+}, () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const child = spawnSync(process.execPath, [
+    "--import", "tsx", "tools/probe-cm12-figure2-residue-dawn.ts", "--steps=98",
+  ], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 25_000,
+    killSignal: "SIGKILL",
+    env: {
+      ...process.env,
+      FLUID_WEBGPU_BACKEND: process.env.FLUID_WEBGPU_BACKEND ?? "metal",
+    },
+  });
+  assert.equal(child.status, 0,
+    `Figure 2 residue probe failed\nstdout:\n${child.stdout}\nstderr:\n${child.stderr}`);
+  const result = JSON.parse(child.stdout) as {
+    steps: number;
+    time_s: number;
+    activity: {
+      activeBricks: number;
+      relativeRawMassDrift: number;
+    };
+    residueBricks: Array<{
+      coordinate: [number, number, number];
+      maximumDensity: number;
+    }>;
+    validationErrors: string[];
+  };
+  const upperWallResidue = result.residueBricks.filter(({ coordinate: [x, y] }) =>
+    (x <= 2 || x >= 13) && y >= 7);
+  const centralTrail = result.residueBricks.filter(({ coordinate: [x, y] }) =>
+    x >= 6 && x <= 9 && y >= 7);
+  assert.equal(result.steps, 98);
+  assert.equal(result.time_s, 98 / 30);
+  assert.deepEqual(upperWallResidue, [],
+    "the abandoned splash still publishes tall side-wall residue");
+  assert.ok(centralTrail.every(({ maximumDensity }) => maximumDensity < 1e-4),
+    `the central trail exceeds the microscopic residue band: ${JSON.stringify(centralTrail)}`);
+  assert.ok(result.activity.activeBricks <= 115,
+    `the cleaned splash retained ${result.activity.activeBricks} active bricks`);
+  assert.ok(Math.abs(result.activity.relativeRawMassDrift) < 2e-4,
+    `Algorithm 2 mass drift was ${result.activity.relativeRawMassDrift}`);
+  assert.deepEqual(result.validationErrors, []);
+});
+
 test("Dawn all-coarse mini dam vacates the upper walls without corner amplification", {
   skip: !process.env.WEBGPU_NODE_MODULE,
   timeout: 30_000,
@@ -113,7 +162,12 @@ test("Dawn all-coarse mini dam vacates the upper walls without corner amplificat
   assert.deepEqual(result.grids, { sparse: [32, 32, 32], uniform: [16, 16, 16] });
   assert.equal(result.sparse.fineBricks, 0);
   assert.equal(result.sparse.coarseBricks, 64);
-  assert.equal(result.sparse.presentationInterpolation.coarseSamples, 32 ** 3);
+  // Empty unsupported bricks may now retire after sharpening returns their
+  // residue to the front. Every still-published coarse brick contributes one
+  // complete 8^3 presentation block.
+  assert.ok(result.sparse.presentationInterpolation.coarseSamples > 0);
+  assert.ok(result.sparse.presentationInterpolation.coarseSamples <= 32 ** 3);
+  assert.equal(result.sparse.presentationInterpolation.coarseSamples % (8 ** 3), 0);
   assert.ok(result.sparse.presentationInterpolation.relativeL1 < 1e-6,
     `all-coarse presentation used discontinuous leaf values: ${result.sparse.presentationInterpolation.relativeL1}`);
   assert.ok(result.sparse.presentationInterpolation.maximumAbsolute < 1e-6,

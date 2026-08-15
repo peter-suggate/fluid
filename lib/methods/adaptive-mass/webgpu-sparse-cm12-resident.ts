@@ -4,7 +4,35 @@ import { sparseAtlasScalarsHaveHorizontalD4Symmetry } from
 import type { SparseAdaptiveMassAtlas } from "./sparse-brick-atlas";
 import { packAdaptiveMassPresentationOwnerKey,
   type WebGPUAdaptiveMassAtlasPresentation } from "./webgpu-adaptive-mass-atlas-presentation";
+import { CM12_SHARPENING_TRACE_STEPS } from "../../core/cm12-numerics";
 import { webgpuSparseCM12ResidentWGSL } from "./webgpu-sparse-cm12-resident.wgsl";
+
+/** CM12 Sec. 3.5 Algorithm 2's live trace bounds, in finest cells and substeps. */
+export interface SharpeningTrace {
+  readonly distanceCells?: number;
+  readonly traceSteps?: number;
+}
+
+/**
+ * The sparse lane's D, at the top of the paper's 1.1-to-3.1 range rather than
+ * at Uniform CM12's Fig. 5 value of 2.1. A shorter trace leaves the abandoned
+ * splash's removed mass on the tall side walls, where the residue regression
+ * finds it; matched A/B lanes against the uniform reference therefore have to
+ * move one slider or the other.
+ */
+export const SPARSE_CM12_SHARPENING_DISTANCE_CELLS = 3.1;
+export const SPARSE_CM12_SHARPENING_TRACE_STEPS = CM12_SHARPENING_TRACE_STEPS;
+
+/** Kept inside the paper's own D range; the panel spec declares the same bounds. */
+export const sparseCM12SharpeningDistance = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value)
+    ? Math.min(3.1, Math.max(0.1, value))
+    : SPARSE_CM12_SHARPENING_DISTANCE_CELLS;
+
+export const sparseCM12SharpeningTraceSteps = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value)
+    ? Math.min(16, Math.max(1, Math.round(value)))
+    : SPARSE_CM12_SHARPENING_TRACE_STEPS;
 
 const INVALID = 0xffff_ffff;
 const WORKGROUP_SIZE = 64;
@@ -40,7 +68,7 @@ interface ResidentStateLayout {
   readonly preconditioned: number; readonly direction: number;
   readonly applied: number; readonly divergence: number;
   readonly presentationBrickWet: number;
-  readonly sharpeningDelta: number; readonly sharpeningAcceptance: number;
+  readonly sharpeningDelta: number;
 }
 
 export interface SparseCM12GPUActivityRecord {
@@ -48,6 +76,10 @@ export interface SparseCM12GPUActivityRecord {
   readonly reasons: number;
   readonly hotEpochs: number;
   readonly quietEpochs: number;
+  /** Mean intensive density retained in the brick at the last activity census. */
+  readonly meanDensity: number;
+  /** Density-weighted local brick moments used by the temporal activity score. */
+  readonly densityMoments: readonly [number, number, number];
   /** GPU-authored request for the next candidate topology epoch. */
   readonly plannedResolution: 1 | 2 | 4 | 8;
   readonly planReasons: number;
@@ -98,7 +130,7 @@ function residentStateLayout(
     liquid: cells(), theta: rows(), residual: cells(), preconditioned: cells(),
     direction: cells(), applied: cells(), divergence: cells(),
     presentationBrickWet: (() => { const result = at; at += align4(brickCount); return result; })(),
-    sharpeningDelta: cells(), sharpeningAcceptance: cells(),
+    sharpeningDelta: cells(),
     floatCount: at,
   };
 }
@@ -418,7 +450,7 @@ export class WebGPUSparseCM12Resident {
       "gatherConservativeDensity", "diffuseGammaForwardX", "diffuseGammaForwardY",
       "diffuseGammaForwardZ", "diffuseGammaReverseZ", "diffuseGammaReverseY",
       "diffuseGammaReverseX", "averageGammaDiffusion", "scatterSharpeningMass",
-      "acceptSharpeningMass", "finalizeSharpening", "preserveHorizontalD4",
+      "finalizeSharpening", "preserveHorizontalD4",
       "commitHorizontalD4",
       "forceFaces", "classifyRows", "preparePressure",
       "initializePCG", "reduceInitialize", "applyDirection", "reduceCurvature",
@@ -451,11 +483,12 @@ export class WebGPUSparseCM12Resident {
     finestCellSize_m: number,
     pressureScale: number,
     accelerationFinePerSecond2: readonly [number, number, number],
+    sharpening?: SharpeningTrace,
   ): void {
     this.assertLive();
     const packed = this.lastPacked!;
     this.writeParameters(packed, dt_s, finestCellSize_m, pressureScale,
-      accelerationFinePerSecond2);
+      accelerationFinePerSecond2, sharpening);
     encoder.clearBuffer(this.conditioning);
     const pass = encoder.beginComputePass({ label: "Sparse CM12 resident frame" });
     const dispatch = (name: string, count: number, y = 1, z = 1) => {
@@ -482,7 +515,6 @@ export class WebGPUSparseCM12Resident {
     dispatch("diffuseGammaReverseX", cells);
     dispatch("averageGammaDiffusion", cells);
     dispatch("scatterSharpeningMass", cells);
-    dispatch("acceptSharpeningMass", cells);
     dispatch("finalizeSharpening", cells);
     if (this.horizontalD4Authority) {
       dispatch("preserveHorizontalD4", cells);
@@ -590,6 +622,7 @@ export class WebGPUSparseCM12Resident {
     finestCellSize_m: number,
     pressureScale: number,
     acceleration: readonly [number, number, number],
+    sharpening?: SharpeningTrace,
   ): void {
     this.lastPacked = packed;
     const u = this.parameterU32, f = this.parameterF32, l = this.layout;
@@ -606,12 +639,20 @@ export class WebGPUSparseCM12Resident {
     u.set([l.theta, l.residual, l.preconditioned, l.direction], 28);
     u.set([l.applied, l.divergence, l.presentationBrickWet,
       packed.brickDirectoryOffset], 32);
-    u.set([l.sharpeningDelta, l.sharpeningAcceptance, 0, 0], 36);
+    u.set([l.sharpeningDelta, 0, 0, 0], 36);
     f.set([dt_s, finestCellSize_m, pressureScale, this.parity], 40);
     f.set([...acceleration, 0], 44);
     u.set([Math.ceil(this.cellCount / WORKGROUP_SIZE),
       Math.ceil(this.rowCount / WORKGROUP_SIZE), PCG_ITERATIONS, packed.brickCount], 48);
     f.set([0, 0, 0, 0, 1, 1, 1, 0], 52);
+    // CM12 Algorithm 2's trace bounds. Direct diagnostic constructors pass no
+    // controls and get the paper's own values, so an unparameterized probe and
+    // a default panel run are the same simulation.
+    f.set([
+      sparseCM12SharpeningDistance(sharpening?.distanceCells),
+      sparseCM12SharpeningTraceSteps(sharpening?.traceSteps),
+      0, 0,
+    ], 60);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
   }
 
@@ -686,6 +727,10 @@ export class WebGPUSparseCM12Resident {
           reasons: words[at + 1]!,
           hotEpochs: words[at + 2]!,
           quietEpochs: words[at + 3]!,
+          meanDensity: new DataView(words.buffer).getFloat32(4 * (at + 4), true),
+          densityMoments: [5, 6, 7].map((offset) =>
+            new DataView(words.buffer).getFloat32(4 * (at + offset), true)) as
+              [number, number, number],
           plannedResolution: (words[at + 8] === 8 ? 8
             : words[at + 8] === 4 ? 4 : words[at + 8] === 2 ? 2 : 1) as
               SparseCM12GPUActivityRecord["plannedResolution"],

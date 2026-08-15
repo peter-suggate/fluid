@@ -28,12 +28,13 @@ struct Params {
   stateOffsets2:vec4u,      // pressure, rhs, diagonal, liquid
   stateOffsets3:vec4u,      // theta, residual, preconditioned, direction
   stateOffsets4:vec4u,      // applied, divergence, presentation brick wet, brick directory
-  stateOffsets5:vec4u,      // sharpening delta/accepted fraction, reserved
+  stateOffsets5:vec4u,      // sharpening delta, reserved
   frame:vec4f,              // dt, finest cell metres, pressure scale, parity
   acceleration:vec4f,       // finest cells / second^2
   dispatch:vec4u,           // cell workgroups, row workgroups, pcg iterations, brick count
   injectionCenter:vec4f,
   injectionRadius:vec4f,
+  sharpening:vec4f,         // Algorithm 2 distance in cells, trace substeps, reserved
 }
 
 @group(0)@binding(0)var<uniform>p:Params;
@@ -428,7 +429,6 @@ struct SharpeningStats {
   positiveDensity:vec3f,
   negativeDistance:vec3f,
   positiveDistance:vec3f,
-  uphillConductance:f32,
 }
 
 // Expand each composite G row into the same physical scalar subfaces used by
@@ -439,8 +439,7 @@ fn sharpeningStats(cell:u32)->SharpeningStats{
   result.maximumDifference=0.0;result.negativeArea=vec3f(0.0);
   result.positiveArea=vec3f(0.0);result.negativeDensity=vec3f(0.0);
   result.positiveDensity=vec3f(0.0);result.negativeDistance=vec3f(0.0);
-  result.positiveDistance=vec3f(0.0);result.uphillConductance=0.0;
-  let maximumDistance=2.1*cellMinimumWidth(cell);
+  result.positiveDistance=vec3f(0.0);
   for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
     let row=incidenceRow(at);let own=termCoefficient(incidenceTerm(at));
     let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
@@ -462,9 +461,6 @@ fn sharpeningStats(cell:u32)->SharpeningStats{
       }else{result.negativeArea[axis]+=area;
         result.negativeDensity[axis]+=area*neighborRho;
         result.negativeDistance[axis]+=area*distance;}
-      if(distance<=maximumDistance){
-        result.uphillConductance+=area*max(0.0,(neighborRho-rho)/distance);
-      }
     }
   }
   return result;
@@ -504,51 +500,83 @@ fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
   return min(0.0,delta);
 }
 
-// CM12 Sec. 3.5, Eqs. 4-17 and Algorithm 2. Removed air-side mass is
-// scattered only over adjacent subfaces in the uphill density direction.
+fn sharpeningGradient(cell:u32)->vec3f{
+  let stats=sharpeningStats(cell);
+  var result=vec3f(0.0);
+  for(var axis=0u;axis<3u;axis+=1u){
+    // CM12 extends density by zero across a solid boundary for the tracing
+    // field. Reusing the source density here can turn a wall residue maximum's
+    // gradient into the wall, where the solid-stop rule deposits it locally.
+    var before=0.0;var beforeDistance=cellMinimumWidth(cell);
+    if(stats.negativeArea[axis]>0.0){
+      before=stats.negativeDensity[axis]/stats.negativeArea[axis];
+      beforeDistance=stats.negativeDistance[axis]/stats.negativeArea[axis];
+    }
+    var after=0.0;var afterDistance=cellMinimumWidth(cell);
+    if(stats.positiveArea[axis]>0.0){
+      after=stats.positiveDensity[axis]/stats.positiveArea[axis];
+      afterDistance=stats.positiveDistance[axis]/stats.positiveArea[axis];
+    }
+    result[axis]=(after-before)/max(beforeDistance+afterDistance,1e-12);
+  }
+  return result;
+}
+
+fn sampleSharpeningDensity(position:vec3f)->f32{
+  var result=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let term=transportTerm(position,corner);
+    if(term.cell!=INVALID){result+=term.weight*state[destinationDensity()+term.cell];}
+  }
+  return result;
+}
+
+// CM12 Algorithm 2's TraceAlongField in composite-grid coordinates. As in the
+// Uniform reference, half-cell forward-Euler substeps follow the frozen density
+// gradient until rho=.5 or the configured paper-range D bound is reached. An invalid
+// or inactive owner is the sparse equivalent of the paper's solid-stop rule.
+fn traceSharpeningPosition(source:u32)->vec3f{
+  let b=cellBase(source);var position=vec3f(tf(b),tf(b+1u),tf(b+2u));
+  let sourceWidth=cellMinimumWidth(source);let maximumDistance=p.sharpening.x*sourceWidth;
+  let stepLength=CM12_SHARPENING_TRACE_STEP_CELLS*sourceWidth;var travelled=0.0;
+  for(var step=0u;step<16u;step+=1u){
+    if(step>=u32(p.sharpening.y)){break;}
+    if(sampleSharpeningDensity(position)>=CM12_LIQUID_ISOVALUE
+      ||travelled>=maximumDistance){break;}
+    let owner=ownerCellAt(vec3i(floor(position)));if(owner==INVALID){break;}
+    let gradient=sharpeningGradient(owner);let magnitude=length(gradient);
+    if(magnitude<1e-6){break;}
+    let distance=min(stepLength,maximumDistance-travelled);
+    let candidate=position+gradient/magnitude*distance;
+    if(ownerCellAt(vec3i(floor(candidate)))==INVALID){break;}
+    position=candidate;travelled+=distance;
+  }
+  return position;
+}
+
+// CM12 Sec. 3.5, Eqs. 4-17 and Algorithm 2. Remove the air-side correction,
+// trace along grad(rho), then scatter its integrated mass trilinearly at the
+// traced point. Fixed-point atomics keep simultaneous GPU scatters additive.
 @compute @workgroup_size(64)
 fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
   let cell=gid.x;if(cell>=p.counts.x){return;}
   if(!cellActive(cell)){state[p.stateOffsets5.x+cell]=0.0;return;}
   let stats=sharpeningStats(cell);
-  var delta=sharpeningDelta(cell,stats);
-  if(stats.uphillConductance<=1e-30){delta=0.0;}
+  let delta=sharpeningDelta(cell,stats);
   state[p.stateOffsets5.x+cell]=delta;if(delta>=0.0){return;}
-  let rho=state[destinationDensity()+cell];let removed=-delta*cellVolume(cell);
-  let maximumDistance=2.1*cellMinimumWidth(cell);
-  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-    let row=incidenceRow(at);let own=termCoefficient(incidenceTerm(at));
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-    var negativeCount=0.0;var positiveCount=0.0;
-    for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
-      negativeCount+=select(0.0,1.0,coefficient<0.0);
-      positiveCount+=select(0.0,1.0,coefficient>0.0);}
-    if(negativeCount==0.0||positiveCount==0.0||rowDistance(row)>maximumDistance){continue;}
-    let area=rowArea(row)/(negativeCount*positiveCount);let distance=rowDistance(row);
-    for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
-      if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
-      if(!cellActive(neighbor)){continue;}
-      let conductance=area*max(0.0,
-        (state[destinationDensity()+neighbor]-rho)/distance);
-      if(conductance<=0.0){continue;}
-      let offered=removed*conductance/stats.uphillConductance;
-      atomicAdd(&conditioning[3u*p.counts.x+neighbor],
-        i32(round(offered*CM12_TRANSPORT_FIXED)));
-    }
+  let removed=-delta*cellVolume(cell);let position=traceSharpeningPosition(cell);
+  var total=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){total+=transportTerm(position,corner).weight;}
+  if(total<=1e-8){
+    atomicAdd(&conditioning[3u*p.counts.x+cell],
+      i32(round(removed*CM12_TRANSPORT_FIXED)));return;
   }
-}
-
-// Resolve all simultaneous scatters with one receiver scale. This is the
-// parallel form of ScatterValue's bounded deposition: it cannot create rho>1,
-// and rejected mass is returned to its source in finalizeSharpening.
-@compute @workgroup_size(64)
-fn acceptSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
-  let cell=gid.x;if(cell>=p.counts.x){return;}
-  if(!cellActive(cell)){state[p.stateOffsets5.y+cell]=0.0;return;}
-  let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
-  let base=state[destinationDensity()+cell]+state[p.stateOffsets5.x+cell];
-  let capacity=max(0.0,(1.0-base)*cellVolume(cell));
-  state[p.stateOffsets5.y+cell]=select(0.0,min(1.0,capacity/incoming),incoming>0.0);
+  for(var corner=0u;corner<8u;corner+=1u){let term=transportTerm(position,corner);
+    if(term.cell==INVALID||term.weight<=0.0){continue;}
+    let offered=removed*term.weight/total;
+    atomicAdd(&conditioning[3u*p.counts.x+term.cell],
+      i32(round(offered*CM12_TRANSPORT_FIXED)));
+  }
 }
 
 @compute @workgroup_size(64)
@@ -559,31 +587,8 @@ fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
   }
   let delta=state[p.stateOffsets5.x+cell];
   let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
-  let accepted=incoming*state[p.stateOffsets5.y+cell];var returned=0.0;
-  if(delta<0.0){let stats=sharpeningStats(cell);let rho=state[destinationDensity()+cell];
-    let removed=-delta*cellVolume(cell);let maximumDistance=2.1*cellMinimumWidth(cell);
-    for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-      let row=incidenceRow(at);let own=termCoefficient(incidenceTerm(at));
-      let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-      var negativeCount=0.0;var positiveCount=0.0;
-      for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
-        negativeCount+=select(0.0,1.0,coefficient<0.0);
-        positiveCount+=select(0.0,1.0,coefficient>0.0);}
-      if(negativeCount==0.0||positiveCount==0.0||rowDistance(row)>maximumDistance){continue;}
-      let area=rowArea(row)/(negativeCount*positiveCount);let distance=rowDistance(row);
-      for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
-        if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
-        if(!cellActive(neighbor)){continue;}
-        let conductance=area*max(0.0,
-          (state[destinationDensity()+neighbor]-rho)/distance);
-        if(conductance<=0.0){continue;}
-        let offered=removed*conductance/stats.uphillConductance;
-        returned+=offered*(1.0-state[p.stateOffsets5.y+neighbor]);
-      }
-    }
-  }
   state[destinationDensity()+cell]=max(0.0,state[destinationDensity()+cell]+delta
-    +(accepted+returned)/cellVolume(cell));
+    +incoming/cellVolume(cell));
 }
 
 // The CPU sparse path retains a proven horizontal D4 invariant after surface

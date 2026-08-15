@@ -18,6 +18,21 @@ export const CM12_GAMMA_MAX = 2.5;
 export const CM12_VOLUME_CORRECTION_LAMBDA = 0.5;
 export const CM12_VOLUME_CORRECTION_ETA = 1;
 export const CM12_SHARPENING_TAU = 0.4;
+/**
+ * Algorithm 2's D, in cells: how far TraceAlongField may carry removed mass
+ * toward the 0.5 iso-contour. Sec. 3.5 uses 1.1 to 3.1 across the paper's
+ * examples and 2.1 for the Fig. 5 ball drop, which remains the shared
+ * reference value. Sparse CM12 declares its 3.1 default with its GPU trace.
+ */
+export const CM12_SHARPENING_DISTANCE_CELLS = 2.1;
+/**
+ * Forward-Euler substeps the same trace may spend. The paper only says
+ * "multiple"; both implementations take half-cell steps, so seven covers the
+ * whole published D range with headroom for a gradient that turns.
+ */
+export const CM12_SHARPENING_TRACE_STEPS = 7;
+/** Length of one of those substeps, in cells. */
+export const CM12_SHARPENING_TRACE_STEP_CELLS = 0.5;
 
 export function cm12GhostFluidTheta(
   liquidPhi: number,
@@ -148,6 +163,7 @@ const CM12_GAMMA_MAX:f32=${wgslF32(CM12_GAMMA_MAX)};
 const CM12_VOLUME_CORRECTION_LAMBDA:f32=${wgslF32(CM12_VOLUME_CORRECTION_LAMBDA)};
 const CM12_VOLUME_CORRECTION_ETA:f32=${wgslF32(CM12_VOLUME_CORRECTION_ETA)};
 const CM12_SHARPENING_TAU:f32=${wgslF32(CM12_SHARPENING_TAU)};
+const CM12_SHARPENING_TRACE_STEP_CELLS:f32=${wgslF32(CM12_SHARPENING_TRACE_STEP_CELLS)};
 `;
   if (constantsOnly) return constants;
   return constants + /* wgsl */ `

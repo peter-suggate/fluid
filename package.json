@@ -6,6 +6,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "probe:cm12:figure2-residue": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/probe-cm12-figure2-residue-dawn.ts",
     "probe:adaptive-mass:m1:ab": "node --import tsx tools/run-adaptive-mass-m1-ab.ts",
     "probe:adaptive-mass:m1:projection": "node --import tsx tools/probe-adaptive-mass-two-tile-projection.ts",
     "probe:adaptive-mass:m1:ghost-fluid": "node --import tsx tools/probe-adaptive-mass-two-tile-ghost-fluid.ts",

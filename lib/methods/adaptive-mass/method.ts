@@ -6,6 +6,12 @@ import type {
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
 import { adaptiveMassDiagnosticRows } from "./adaptive-mass-diagnostics";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from "./adaptive-mass-frame-pipeline";
+import {
+  sparseCM12SharpeningDistance,
+  sparseCM12SharpeningTraceSteps,
+  SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
+  SPARSE_CM12_SHARPENING_TRACE_STEPS,
+} from "./webgpu-sparse-cm12-resident";
 import { WebGPUAdaptiveMassSolver } from "./webgpu-adaptive-mass-solver";
 
 export type AdaptiveMassResolutionMode = "adaptive" | "all-fine" | "all-coarse";
@@ -17,6 +23,10 @@ export interface AdaptiveMassSolverOptions {
   readonly coarseTileResolution: 4;
   /** Omitted only by direct diagnostic constructors, which retain scene-step behavior. */
   readonly timeStep?: "paper" | "scene";
+  /** CM12 Algorithm 2's D, in finest cells. Omitted constructors use the 3.1 upper paper bound. */
+  readonly sharpeningDistance?: number;
+  /** Forward-Euler substeps TraceAlongField may spend reaching D. */
+  readonly sharpeningTraceSteps?: number;
 }
 
 const params: MethodParamSpec[] = [
@@ -46,18 +56,52 @@ const params: MethodParamSpec[] = [
     update: "runtime",
     hint: "Sparse CM12 defaults to the same exact 1/30 s operating step as Uniform CM12. Scene mode is retained for matched-step validation and explicit timestep overrides.",
   },
+  {
+    kind: "number",
+    key: "sharpeningDistance",
+    label: "Mass-return distance",
+    default: SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
+    tier: "fine",
+    unit: "cells",
+    min: 0.1,
+    max: 3.1,
+    step: 0.1,
+    digits: 1,
+    update: "runtime",
+    hint: "Algorithm 2's D: how far TraceAlongField may follow grad(rho) toward the 0.5 iso-contour before depositing. The paper uses 1.1 to 3.1 cells and says raising it visually resembles surface tension; below 1.1 the removed mass stays essentially where it was taken.",
+  },
+  {
+    kind: "number",
+    key: "sharpeningTraceSteps",
+    label: "Trace substeps",
+    default: SPARSE_CM12_SHARPENING_TRACE_STEPS,
+    tier: "fine",
+    unit: "substeps",
+    min: 1,
+    max: 16,
+    step: 1,
+    digits: 0,
+    update: "runtime",
+    hint: "How many forward-Euler substeps the trace may spend. Each is half a cell, so the reach is whichever of D and half the substep count is smaller — at the default 7 the substeps are not the binding constraint anywhere in the paper's D range, and lowering them deliberately shortens the trace along a curving gradient.",
+  },
 ];
 
 /**
  * The controls a live Sparse CM12 solver adopts.
  *
- * Only the clock. The resolution policy decides how the atlas was packed — a
- * different rung is a different world — so it stays structural. `timeStep` is
- * consulted at the top of every `advanceTo` and nowhere else, and it is also
- * what the transport bar's step slider releases: leaving it structural made a
- * nudge of that slider rebuild the sparse world to arrive at an identical one.
+ * The clock and the two Sec. 3.5 trace scalars. The resolution policy decides
+ * how the atlas was packed — a different rung is a different world — so it
+ * stays structural. `timeStep` is consulted at the top of every `advanceTo`
+ * and nowhere else, and it is also what the transport bar's step slider
+ * releases: leaving it structural made a nudge of that slider rebuild the
+ * sparse world to arrive at an identical one. The sharpening scalars reach the
+ * device through the per-advance uniform, so they are live for the same reason.
  */
-export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze(["timeStep"] as const);
+export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze([
+  "timeStep",
+  "sharpeningDistance",
+  "sharpeningTraceSteps",
+] as const);
 
 const resolutionMode = (value: unknown): AdaptiveMassResolutionMode =>
   value === "all-fine" || value === "all-coarse" ? value : "adaptive";
@@ -70,6 +114,8 @@ export function adaptiveMassSolverOptions(
     fineTileResolution: 8,
     coarseTileResolution: 4,
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
+    sharpeningDistance: sparseCM12SharpeningDistance(values.sharpeningDistance),
+    sharpeningTraceSteps: sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps),
   };
 }
 
@@ -118,12 +164,16 @@ export const adaptiveMassMethod: SimulationMethod = {
     ...values,
     resolutionMode: resolutionMode(values.resolutionMode),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
+    sharpeningDistance: sparseCM12SharpeningDistance(values.sharpeningDistance),
+    sharpeningTraceSteps: sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps),
   }),
   effectiveStep_s: (_scene, values) =>
     values.timeStep !== "scene" ? CM12_PAPER_DT_S : undefined,
   presetFor: () => ({
     resolutionMode: "adaptive",
     timeStep: "paper",
+    sharpeningDistance: SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
+    sharpeningTraceSteps: SPARSE_CM12_SHARPENING_TRACE_STEPS,
   }),
   diagnosticRows: adaptiveMassDiagnosticRows,
   createSolverAsync: (
