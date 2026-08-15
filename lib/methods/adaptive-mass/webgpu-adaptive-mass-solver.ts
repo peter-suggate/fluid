@@ -271,11 +271,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         label: "Build resident 4³/8³ sparse bricks",
         dependencies: ["adaptive-mass.plan"],
         run: () => {
+          const resolutionForBrick = options.resolutionMode === "all-fine"
+            ? () => 8 as const
+            : options.resolutionMode === "all-coarse"
+              ? () => 4 as const
+              : undefined;
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
-            resolutionForBrick: options.resolutionMode === "all-fine"
-              ? () => 8
-              : () => 4,
+            ...(resolutionForBrick ? { resolutionForBrick } : {}),
           });
           const supported = residentSupportAtlas(atlas, options.resolutionMode);
           initiallyActiveBrickKeys = new Set(supported.bricks.map((brick) => brick.key));

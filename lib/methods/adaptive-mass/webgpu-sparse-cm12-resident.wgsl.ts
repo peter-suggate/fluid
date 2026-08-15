@@ -28,7 +28,7 @@ struct Params {
   stateOffsets2:vec4u,      // pressure, rhs, diagonal, liquid
   stateOffsets3:vec4u,      // theta, residual, preconditioned, direction
   stateOffsets4:vec4u,      // applied, divergence, presentation brick wet, brick directory
-  stateOffsets5:vec4u,      // sharpening delta, reserved
+  stateOffsets5:vec4u,      // sharpening delta / D4 rho scratch, D4 gamma scratch, reserved
   frame:vec4f,              // dt, finest cell metres, pressure scale, parity
   acceleration:vec4f,       // finest cells / second^2
   dispatch:vec4u,           // cell workgroups, row workgroups, pcg iterations, brick count
@@ -500,28 +500,6 @@ fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
   return min(0.0,delta);
 }
 
-fn sharpeningGradient(cell:u32)->vec3f{
-  let stats=sharpeningStats(cell);
-  var result=vec3f(0.0);
-  for(var axis=0u;axis<3u;axis+=1u){
-    // CM12 extends density by zero across a solid boundary for the tracing
-    // field. Reusing the source density here can turn a wall residue maximum's
-    // gradient into the wall, where the solid-stop rule deposits it locally.
-    var before=0.0;var beforeDistance=cellMinimumWidth(cell);
-    if(stats.negativeArea[axis]>0.0){
-      before=stats.negativeDensity[axis]/stats.negativeArea[axis];
-      beforeDistance=stats.negativeDistance[axis]/stats.negativeArea[axis];
-    }
-    var after=0.0;var afterDistance=cellMinimumWidth(cell);
-    if(stats.positiveArea[axis]>0.0){
-      after=stats.positiveDensity[axis]/stats.positiveArea[axis];
-      afterDistance=stats.positiveDistance[axis]/stats.positiveArea[axis];
-    }
-    result[axis]=(after-before)/max(beforeDistance+afterDistance,1e-12);
-  }
-  return result;
-}
-
 fn sampleSharpeningDensity(position:vec3f)->f32{
   var result=0.0;
   for(var corner=0u;corner<8u;corner+=1u){
@@ -531,22 +509,34 @@ fn sampleSharpeningDensity(position:vec3f)->f32{
   return result;
 }
 
+fn sharpeningDensityGradient(position:vec3f,owner:u32)->vec3f{
+  // Differentiate the same continuous adaptive interpolant used by the trace.
+  // The finite-difference baseline follows the current owner after a 2:1 seam,
+  // and the denominator remains an actual finest-coordinate distance.
+  let halfDistance=0.5*cellMinimumWidth(owner);var result=vec3f(0.0);
+  for(var axis=0u;axis<3u;axis+=1u){var offset=vec3f(0.0);offset[axis]=halfDistance;
+    result[axis]=(sampleSharpeningDensity(position+offset)
+      -sampleSharpeningDensity(position-offset))/max(2.0*halfDistance,1e-12);
+  }
+  return result;
+}
+
 // CM12 Algorithm 2's TraceAlongField in composite-grid coordinates. As in the
 // Uniform reference, half-cell forward-Euler substeps follow the frozen density
 // gradient until rho=.5 or the configured paper-range D bound is reached. An invalid
 // or inactive owner is the sparse equivalent of the paper's solid-stop rule.
-fn traceSharpeningPosition(source:u32)->vec3f{
+fn traceSharpeningMass(source:u32)->vec3f{
   let b=cellBase(source);var position=vec3f(tf(b),tf(b+1u),tf(b+2u));
   let sourceWidth=cellMinimumWidth(source);let maximumDistance=p.sharpening.x*sourceWidth;
-  let stepLength=CM12_SHARPENING_TRACE_STEP_CELLS*sourceWidth;var travelled=0.0;
-  for(var step=0u;step<16u;step+=1u){
+  var travelled=0.0;
+  for(var step=0u;step<40u;step+=1u){
     if(step>=u32(p.sharpening.y)){break;}
     if(sampleSharpeningDensity(position)>=CM12_LIQUID_ISOVALUE
       ||travelled>=maximumDistance){break;}
     let owner=ownerCellAt(vec3i(floor(position)));if(owner==INVALID){break;}
-    let gradient=sharpeningGradient(owner);let magnitude=length(gradient);
+    let gradient=sharpeningDensityGradient(position,owner);let magnitude=length(gradient);
     if(magnitude<1e-6){break;}
-    let distance=min(stepLength,maximumDistance-travelled);
+    let distance=min(0.5*cellMinimumWidth(owner),maximumDistance-travelled);
     let candidate=position+gradient/magnitude*distance;
     if(ownerCellAt(vec3i(floor(candidate)))==INVALID){break;}
     position=candidate;travelled+=distance;
@@ -564,18 +554,21 @@ fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
   let stats=sharpeningStats(cell);
   let delta=sharpeningDelta(cell,stats);
   state[p.stateOffsets5.x+cell]=delta;if(delta>=0.0){return;}
-  let removed=-delta*cellVolume(cell);let position=traceSharpeningPosition(cell);
-  var total=0.0;
-  for(var corner=0u;corner<8u;corner+=1u){total+=transportTerm(position,corner).weight;}
+  let removed=-delta*cellVolume(cell);let removedFixed=i32(round(removed*CM12_TRANSPORT_FIXED));
+  let position=traceSharpeningMass(cell);var total=0.0;var lastCorner=INVALID;
+  for(var corner=0u;corner<8u;corner+=1u){let term=transportTerm(position,corner);
+    if(term.cell!=INVALID&&term.weight>0.0){total+=term.weight;lastCorner=corner;}}
   if(total<=1e-8){
-    atomicAdd(&conditioning[3u*p.counts.x+cell],
-      i32(round(removed*CM12_TRANSPORT_FIXED)));return;
+    atomicAdd(&conditioning[3u*p.counts.x+cell],removedFixed);return;
   }
+  var remainingFixed=removedFixed;
   for(var corner=0u;corner<8u;corner+=1u){let term=transportTerm(position,corner);
     if(term.cell==INVALID||term.weight<=0.0){continue;}
-    let offered=removed*term.weight/total;
-    atomicAdd(&conditioning[3u*p.counts.x+term.cell],
-      i32(round(offered*CM12_TRANSPORT_FIXED)));
+    var offeredFixed=i32(round(f32(removedFixed)*term.weight/total));
+    if(corner==lastCorner){offeredFixed=remainingFixed;}
+    else{offeredFixed=clamp(offeredFixed,0,remainingFixed);}
+    atomicAdd(&conditioning[3u*p.counts.x+term.cell],offeredFixed);
+    remainingFixed-=offeredFixed;
   }
 }
 

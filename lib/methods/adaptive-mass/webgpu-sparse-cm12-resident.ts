@@ -68,7 +68,7 @@ interface ResidentStateLayout {
   readonly preconditioned: number; readonly direction: number;
   readonly applied: number; readonly divergence: number;
   readonly presentationBrickWet: number;
-  readonly sharpeningDelta: number;
+  readonly sharpeningDelta: number; readonly symmetryGamma: number;
 }
 
 export interface SparseCM12GPUActivityRecord {
@@ -130,7 +130,7 @@ function residentStateLayout(
     liquid: cells(), theta: rows(), residual: cells(), preconditioned: cells(),
     direction: cells(), applied: cells(), divergence: cells(),
     presentationBrickWet: (() => { const result = at; at += align4(brickCount); return result; })(),
-    sharpeningDelta: cells(),
+    sharpeningDelta: cells(), symmetryGamma: cells(),
     floatCount: at,
   };
 }
@@ -639,7 +639,11 @@ export class WebGPUSparseCM12Resident {
     u.set([l.theta, l.residual, l.preconditioned, l.direction], 28);
     u.set([l.applied, l.divergence, l.presentationBrickWet,
       packed.brickDirectoryOffset], 32);
-    u.set([l.sharpeningDelta, 0, 0, 0], 36);
+    // The D4 pass needs two disjoint scalar scratch arrays. In particular the
+    // gamma scratch must never alias densityA at offset zero: doing so corrupts
+    // gamma after the first symmetric frame and makes transport create mass on
+    // the next frame.
+    u.set([l.sharpeningDelta, l.symmetryGamma, 0, 0], 36);
     f.set([dt_s, finestCellSize_m, pressureScale, this.parity], 40);
     f.set([...acceleration, 0], 44);
     u.set([Math.ceil(this.cellCount / WORKGROUP_SIZE),

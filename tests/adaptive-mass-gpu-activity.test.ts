@@ -54,21 +54,54 @@ test("resident sharpening converts the CM12 pseudo-time to finest-cell units", (
 });
 
 test("resident sharpening implements CM12 Algorithm 2 trace and scatter", () => {
-  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn traceSharpeningPosition");
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn traceSharpeningMass");
   const end = webgpuSparseCM12ResidentWGSL.indexOf("fn preserveHorizontalD4", begin);
   assert.ok(begin >= 0 && end > begin, "sharpening return must be inspectable");
   const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
   assert.match(kernel, /maximumDistance=p\.sharpening\.x\*sourceWidth/);
-  assert.match(kernel, /stepLength=CM12_SHARPENING_TRACE_STEP_CELLS\*sourceWidth/);
+  assert.match(kernel, /step<40u/);
   assert.match(kernel, /step>=u32\(p\.sharpening\.y\)/);
   assert.match(kernel, /sampleSharpeningDensity\(position\)>=CM12_LIQUID_ISOVALUE/);
+  assert.match(kernel, /sharpeningDensityGradient\(position,owner\)/);
+  assert.match(kernel, /0\.5\*cellMinimumWidth\(owner\)/,
+    "the trace step must adapt after crossing a 2:1 seam");
   assert.match(kernel, /gradient\/magnitude\*distance/);
-  assert.match(kernel, /removed\*term\.weight\/total/,
+  assert.match(kernel, /f32\(removedFixed\)\*term\.weight\/total/,
     "removed integrated mass must be scattered trilinearly at the traced point");
+  assert.match(kernel, /offeredFixed=remainingFixed/,
+    "fixed-point scatter rounding must remain exactly conservative");
   assert.match(kernel, /\+incoming\/cellVolume\(cell\)/,
     "every fixed-point deposit must be resolved into receiver density");
   assert.doesNotMatch(kernel, /uphillConductance|capacity\/incoming/,
     "the paper trace must not fall back to the old one-face/capacity shortcut");
+});
+
+test("resident D4 preservation has disjoint density and gamma scratch", () => {
+  const source = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.match(source, /sharpeningDelta: cells\(\), symmetryGamma: cells\(\)/,
+    "density and gamma symmetry values must not share storage");
+  assert.match(source,
+    /u\.set\(\[l\.sharpeningDelta, l\.symmetryGamma, 0, 0\], 36\)/,
+    "stateOffsets5.y must address allocated gamma scratch rather than densityA");
+});
+
+test("adaptive construction leaves interface resolution to the atlas initializer", () => {
+  const source = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts",
+    import.meta.url,
+  ), "utf8");
+  const begin = source.indexOf('id: "adaptive-mass.atlas"');
+  const end = source.indexOf('id: "adaptive-mass.presentation"', begin);
+  const construction = source.slice(begin, end);
+  assert.match(construction, /options\.resolutionMode === "all-coarse"/);
+  assert.match(construction, /:\s*undefined/);
+  assert.match(construction, /\.\.\.\(resolutionForBrick \? \{ resolutionForBrick \} : \{\}\)/);
+  assert.doesNotMatch(construction,
+    /options\.resolutionMode === "all-fine"[\s\S]*?\? \(\) => 8[\s\S]*?: \(\) => 4,/,
+    "adaptive mode must not blanket-force every interface brick to 4 cubed");
 });
 
 test("frame scheduling never waits for or consumes activity readback", () => {

@@ -64,6 +64,8 @@ export interface SparseAtlasSurfaceConditioningWorkspace {
   candidateWeights: Float64Array;
   active: Int32Array;
   available: Int32Array;
+  tracePosition: Float64Array;
+  traceGradient: Float64Array;
   readonly diffusionFlux: Cm12GammaDiffusionFlux;
   readonly averageBefore: { value: number; distance: number };
   readonly averageAfter: { value: number; distance: number };
@@ -86,6 +88,7 @@ SparseAtlasSurfaceConditioningWorkspace {
     deltas: new Float64Array(0), conditionedDensity: new Float64Array(0),
     candidateIds: new Int32Array(8), candidateWeights: new Float64Array(8),
     active: new Int32Array(8), available: new Int32Array(8),
+    tracePosition: new Float64Array(3), traceGradient: new Float64Array(3),
     diffusionFlux: { rho: 0, gamma: 0 },
     averageBefore: { value: 0, distance: 1 },
     averageAfter: { value: 0, distance: 1 },
@@ -452,6 +455,22 @@ interface SurfaceTopology {
   edges: ScalarEdge[];
   graph: DirectionalAdjacency;
   d4Orbits: readonly (readonly number[])[] | undefined;
+  ownerByFine: Int32Array;
+}
+
+function buildFineOwnerTable(grid: SparseAtlasCompositeGrid): Int32Array {
+  const [nx, ny, nz] = grid.atlas.dimensions;
+  const result = new Int32Array(nx * ny * nz).fill(-1);
+  for (const cell of grid.cells) {
+    for (let z = cell.minimumFine[2]; z < cell.maximumFine[2]; z += 1) {
+      for (let y = cell.minimumFine[1]; y < cell.maximumFine[1]; y += 1) {
+        for (let x = cell.minimumFine[0]; x < cell.maximumFine[0]; x += 1) {
+          result[x + nx * (y + ny * z)] = cell.id;
+        }
+      }
+    }
+  }
+  return result;
 }
 
 // `rebindCompositeGrid` deliberately reuses the immutable gradient-row array
@@ -472,10 +491,12 @@ function surfaceTopology(
       edges: [],
       graph: adjacency(grid, [], undefined, workspace.neighborPool),
       d4Orbits: undefined,
+      ownerByFine: new Int32Array(0),
     });
     scalarEdges(grid, topology.edges, workspace.edgePool);
     topology.graph = adjacency(grid, topology.edges, topology.graph, workspace.neighborPool);
     topology.d4Orbits = buildD4SymmetryOrbits(grid);
+    topology.ownerByFine = buildFineOwnerTable(grid);
     workspace.topologyKey = key;
     return topology;
   }
@@ -486,6 +507,7 @@ function surfaceTopology(
     edges,
     graph: adjacency(grid, edges),
     d4Orbits: buildD4SymmetryOrbits(grid),
+    ownerByFine: buildFineOwnerTable(grid),
   } satisfies SurfaceTopology;
   surfaceTopologyCache.set(key, built);
   return built;
@@ -561,49 +583,119 @@ function sharpeningDestinations(
   grid: SparseAtlasCompositeGrid,
   sourceCellId: number,
   density: ArrayLike<number>,
-  graph: DirectionalAdjacency,
+  topology: SurfaceTopology,
   maximumDistanceCells: number,
   workspace: SparseAtlasSurfaceConditioningWorkspace,
 ): number {
-  const maximumDistance = maximumDistanceCells * width(grid, sourceCellId);
-  const neighbors = graph.all[sourceCellId];
-  const neighborCount = graph.allCount[sourceCellId];
-  ensureCandidateCapacity(workspace, Math.max(1, neighborCount));
-  let total = 0, correction = 0;
-  for (let neighborIndex = 0; neighborIndex < neighborCount; neighborIndex += 1) {
-    const neighbor = neighbors[neighborIndex];
-    const conductance = neighbor.area * Math.max(0,
-      (density[neighbor.cellId] - density[sourceCellId]) / neighbor.distance);
-    if (!(conductance > 0) || neighbor.distance > maximumDistance) continue;
-    const adjusted = conductance - correction;
-    const next = total + adjusted;
-    correction = next - total - adjusted;
-    total = next;
+  ensureCandidateCapacity(workspace, 8);
+  const dimensions = grid.atlas.dimensions;
+  const ownerAt = (x: number, y: number, z: number): number => {
+    const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+    if (ix < 0 || iy < 0 || iz < 0
+      || ix >= dimensions[0] || iy >= dimensions[1] || iz >= dimensions[2]) return -1;
+    return topology.ownerByFine[ix + dimensions[0] * (iy + dimensions[1] * iz)];
+  };
+  const sample = (x: number, y: number, z: number): number => {
+    const probe = ownerAt(
+      Math.min(dimensions[0] - 1e-4, Math.max(0, x)),
+      Math.min(dimensions[1] - 1e-4, Math.max(0, y)),
+      Math.min(dimensions[2] - 1e-4, Math.max(0, z)),
+    );
+    if (probe < 0) return 0;
+    const spans = grid.cells[probe].widthsFine;
+    const lowerX = Math.floor(x / spans[0] - 0.5);
+    const lowerY = Math.floor(y / spans[1] - 0.5);
+    const lowerZ = Math.floor(z / spans[2] - 0.5);
+    const fractionX = x / spans[0] - 0.5 - lowerX;
+    const fractionY = y / spans[1] - 0.5 - lowerY;
+    const fractionZ = z / spans[2] - 0.5 - lowerZ;
+    let result = 0;
+    for (let corner = 0; corner < 8; corner += 1) {
+      const ox = corner & 1, oy = (corner >> 1) & 1, oz = (corner >> 2) & 1;
+      const owner = ownerAt(
+        spans[0] * (lowerX + ox + 0.5),
+        spans[1] * (lowerY + oy + 0.5),
+        spans[2] * (lowerZ + oz + 0.5),
+      );
+      if (owner < 0) continue;
+      result += (ox ? fractionX : 1 - fractionX)
+        * (oy ? fractionY : 1 - fractionY)
+        * (oz ? fractionZ : 1 - fractionZ) * density[owner];
+    }
+    return result;
+  };
+
+  const source = grid.cells[sourceCellId];
+  const position = workspace.tracePosition;
+  position.set(source.centerFine);
+  const maximumDistance = maximumDistanceCells * Math.min(...source.widthsFine);
+  let travelled = 0;
+  for (let step = 0; step < 40 && travelled < maximumDistance; step += 1) {
+    if (sample(position[0], position[1], position[2]) >= 0.5) break;
+    const owner = ownerAt(position[0], position[1], position[2]);
+    if (owner < 0) break;
+    const localWidth = Math.min(...grid.cells[owner].widthsFine);
+    const halfDistance = 0.5 * localWidth;
+    const gradient = workspace.traceGradient;
+    gradient[0] = (sample(position[0] + halfDistance, position[1], position[2])
+      - sample(position[0] - halfDistance, position[1], position[2])) / (2 * halfDistance);
+    gradient[1] = (sample(position[0], position[1] + halfDistance, position[2])
+      - sample(position[0], position[1] - halfDistance, position[2])) / (2 * halfDistance);
+    gradient[2] = (sample(position[0], position[1], position[2] + halfDistance)
+      - sample(position[0], position[1], position[2] - halfDistance)) / (2 * halfDistance);
+    const magnitude = Math.hypot(gradient[0], gradient[1], gradient[2]);
+    if (magnitude < 1e-12) break;
+    const distance = Math.min(halfDistance, maximumDistance - travelled);
+    const nextX = position[0] + gradient[0] * distance / magnitude;
+    const nextY = position[1] + gradient[1] * distance / magnitude;
+    const nextZ = position[2] + gradient[2] * distance / magnitude;
+    if (ownerAt(nextX, nextY, nextZ) < 0) break;
+    position[0] = nextX; position[1] = nextY; position[2] = nextZ;
+    travelled += distance;
   }
-  if (total <= 1e-30) {
+
+  const probe = ownerAt(position[0], position[1], position[2]);
+  if (probe < 0) {
     workspace.candidateIds[0] = sourceCellId;
     workspace.candidateWeights[0] = 1;
     return 1;
   }
-  // A simultaneous split across the local uphill gradient is the discrete
-  // counterpart of trilinear TraceAlongField scatter. Repeating the stage
-  // advances returned mass farther without selecting one arbitrary axis on
-  // plateaus, which would break D4 symmetry.
-  let count = 0;
-  for (let neighborIndex = 0; neighborIndex < neighborCount; neighborIndex += 1) {
-    const neighbor = neighbors[neighborIndex];
-    const conductance = neighbor.area * Math.max(0,
-      (density[neighbor.cellId] - density[sourceCellId]) / neighbor.distance);
-    if (!(conductance > 0) || neighbor.distance > maximumDistance) continue;
+  const spans = grid.cells[probe].widthsFine;
+  const lowerX = Math.floor(position[0] / spans[0] - 0.5);
+  const lowerY = Math.floor(position[1] / spans[1] - 0.5);
+  const lowerZ = Math.floor(position[2] / spans[2] - 0.5);
+  const fractionX = position[0] / spans[0] - 0.5 - lowerX;
+  const fractionY = position[1] / spans[1] - 0.5 - lowerY;
+  const fractionZ = position[2] / spans[2] - 0.5 - lowerZ;
+  let count = 0, totalWeight = 0;
+  for (let corner = 0; corner < 8; corner += 1) {
+    const ox = corner & 1, oy = (corner >> 1) & 1, oz = (corner >> 2) & 1;
+    const owner = ownerAt(
+      spans[0] * (lowerX + ox + 0.5),
+      spans[1] * (lowerY + oy + 0.5),
+      spans[2] * (lowerZ + oz + 0.5),
+    );
+    if (owner < 0) continue;
+    const weight = (ox ? fractionX : 1 - fractionX)
+      * (oy ? fractionY : 1 - fractionY)
+      * (oz ? fractionZ : 1 - fractionZ);
+    if (!(weight > 0)) continue;
     let index = 0;
-    while (index < count && workspace.candidateIds[index] !== neighbor.cellId) index += 1;
+    while (index < count && workspace.candidateIds[index] !== owner) index += 1;
     if (index === count) {
-      workspace.candidateIds[count] = neighbor.cellId;
-      count += 1;
+      workspace.candidateIds[count++] = owner;
+      workspace.candidateWeights[index] = 0;
     }
-    // Match `new Map(pairs)`: duplicate destinations retain first insertion
-    // order but the last value wins.
-    workspace.candidateWeights[index] = conductance / total;
+    workspace.candidateWeights[index] += weight;
+    totalWeight += weight;
+  }
+  if (!(totalWeight > 0)) {
+    workspace.candidateIds[0] = sourceCellId;
+    workspace.candidateWeights[0] = 1;
+    return 1;
+  }
+  for (let index = 0; index < count; index += 1) {
+    workspace.candidateWeights[index] /= totalWeight;
   }
   return count;
 }
@@ -668,55 +760,16 @@ export function conditionSparseAtlasSurface(
     if (deltas[source.id] >= 0) continue;
     const removedMass = -deltas[source.id] * source.volume;
     const destinationCount = sharpeningDestinations(
-      grid, source.id, frozenDensity, graph, maximumDistanceCells, workspace,
+      grid, source.id, frozenDensity, topology, maximumDistanceCells, workspace,
     );
-    let remainingMass = removedMass;
-    let activeCount = destinationCount;
-    for (let index = 0; index < activeCount; index += 1) workspace.active[index] = index;
-    // Capacity-aware redistribution is the discrete CM12 limiter at the
-    // scatter end. Revisit saturated branches so one full receiver cannot
-    // strand mass while another uphill branch still has room.
-    for (let pass = 0; pass < activeCount && remainingMass > 1e-30; pass += 1) {
-      let availableCount = 0;
-      let totalWeight = 0, correction = 0;
-      for (let activeIndex = 0; activeIndex < activeCount; activeIndex += 1) {
-        const candidate = workspace.active[activeIndex];
-        const destinationId = workspace.candidateIds[candidate];
-        const destination = grid.cells[destinationId];
-        if ((1 - density[destinationId]) * destination.volume <= 1e-30) continue;
-        workspace.available[availableCount] = candidate;
-        availableCount += 1;
-        const weight = workspace.candidateWeights[candidate];
-        const adjusted = weight - correction;
-        const next = totalWeight + adjusted;
-        correction = next - totalWeight - adjusted;
-        totalWeight = next;
-      }
-      if (totalWeight <= 1e-30) break;
-      let acceptedThisPass = 0;
-      for (let index = 0; index < availableCount; index += 1) {
-        const candidate = workspace.available[index];
-        const destinationId = workspace.candidateIds[candidate];
-        const weight = workspace.candidateWeights[candidate];
-        const destination = grid.cells[destinationId];
-        const capacity = Math.max(0,
-          (1 - density[destinationId]) * destination.volume);
-        const accepted = Math.min(capacity, remainingMass * weight / totalWeight);
-        density[destinationId] += accepted / destination.volume;
-        acceptedThisPass += accepted;
-      }
-      remainingMass -= acceptedThisPass;
-      if (acceptedThisPass <= 1e-30) break;
-      activeCount = availableCount;
-      for (let index = 0; index < availableCount; index += 1) {
-        workspace.active[index] = workspace.available[index];
-      }
+    for (let index = 0; index < destinationCount; index += 1) {
+      const destinationId = workspace.candidateIds[index];
+      const destination = grid.cells[destinationId];
+      density[destinationId] += removedMass * workspace.candidateWeights[index]
+        / destination.volume;
     }
-    if (remainingMass > 0) {
-      // Deletion created this exact capacity at the source. Returning an
-      // unaccepted remainder is therefore always bounded and conservative.
-      density[source.id] += remainingMass / source.volume;
-      fallbackIntegratedMass += remainingMass;
+    if (destinationCount === 1 && workspace.candidateIds[0] === source.id) {
+      fallbackIntegratedMass += removedMass;
     }
     removedIntegratedMass += removedMass;
     returnedIntegratedMass += removedMass;

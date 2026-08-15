@@ -116,6 +116,41 @@ test("CM12 sharpening dose scales inversely with physical finest-cell size", () 
   assert.ok(decimetreGrid.massAbsoluteError < 1e-12);
 });
 
+test("CM12 Algorithm 2 traces sharpening mass across a 2:1 seam", () => {
+  const atlas = createSparseAdaptiveMassAtlas([16, 8, 8], [
+    brick(0, [0, 0, 0], 8),
+    brick(1, [1, 0, 0], 4),
+  ]);
+  const grid = buildSparseAtlasCompositeGrid(atlas);
+  const density = Float64Array.from(grid.cells, (cell) => {
+    const x = cell.centerFine[0];
+    return x < 5 ? 0.2 : x < 6 ? 0.3 : x < 7 ? 0.36 : x < 8 ? 0.42 : 0.6;
+  });
+  const coarseMass = (values: ArrayLike<number>) => grid.cells.reduce(
+    (sum, cell) => sum + (cell.brickKey === 1 ? cell.volume * values[cell.id] : 0),
+    0,
+  );
+  const before = coarseMass(density);
+  const run = (distanceCells: number) => conditionSparseAtlasSurface(
+    grid,
+    { density: density.slice(), gamma: new Float64Array(density.length).fill(1) },
+    {
+      gammaDiffusionIterations: 0,
+      timeStep_s: 0.05,
+      finestCellSize_m: 1,
+      sharpeningDistanceCells: distanceCells,
+      preserveHorizontalD4: false,
+    },
+  );
+  const local = run(1);
+  const traced = run(2.1);
+  assert.ok(coarseMass(local.fields.density) - before < 1e-3,
+    "a one-cell trace should remain effectively on the fine side");
+  assert.ok(coarseMass(traced.fields.density) - before > 1e-3,
+    "the paper-distance trace must deposit into the coarse brick");
+  assert.ok(traced.massAbsoluteError < 1e-10, `${traced.massAbsoluteError}`);
+});
+
 test("MAC collocation includes zero-valued domain-wall faces", () => {
   const atlas = createSparseAdaptiveMassAtlas([8, 8, 8], [
     { ...brick(0, [0, 0, 0], 4), density: new Float64Array(64).fill(1) },
