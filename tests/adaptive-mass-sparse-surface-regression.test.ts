@@ -118,6 +118,93 @@ test("Dawn all-fine Figure 2 clears the tall wall residue conservatively", {
   assert.deepEqual(result.validationErrors, []);
 });
 
+test("Dawn twin dam retires both dilute upper regions after four seconds", {
+  skip: !process.env.WEBGPU_NODE_MODULE,
+  timeout: 30_000,
+}, () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const child = spawnSync(process.execPath, [
+    "--import", "tsx", "tools/probe-sparse-cm12-twin-dam-residency-dawn.ts",
+  ], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 25_000,
+    killSignal: "SIGKILL",
+    env: {
+      ...process.env,
+      FLUID_WEBGPU_BACKEND: process.env.FLUID_WEBGPU_BACKEND ?? "metal",
+    },
+  });
+  assert.equal(child.status, 0,
+    `Twin-dam residency probe failed\nstdout:\n${child.stdout}\nstderr:\n${child.stderr}`);
+  const result = JSON.parse(child.stdout) as {
+    time_s: number;
+    topBricks: Array<{
+      coordinate: [number, number, number];
+      active: boolean;
+      maximumDensity: number;
+    }>;
+    validationErrors: string[];
+  };
+  assert.equal(result.time_s, 4);
+  assert.equal(result.topBricks.length, 14, "the 7x2 tank must expose two upper brick rows");
+  assert.deepEqual(result.topBricks.filter(({ active }) => active), [],
+    `dilute residue kept upper regions alive: ${JSON.stringify(result.topBricks)}`);
+  assert.deepEqual(result.validationErrors, []);
+});
+
+test("Dawn mini32 retires subcell fragments from the ceiling brick layer", {
+  skip: !process.env.WEBGPU_NODE_MODULE,
+  timeout: 30_000,
+}, () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const child = spawnSync(process.execPath, [
+    "--import", "tsx", "tools/probe-sparse-cm12-twin-dam-residency-dawn.ts",
+    "--scene=mini32",
+  ], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 25_000,
+    killSignal: "SIGKILL",
+    env: {
+      ...process.env,
+      FLUID_WEBGPU_BACKEND: process.env.FLUID_WEBGPU_BACKEND ?? "metal",
+    },
+  });
+  assert.equal(child.status, 0,
+    `Mini32 residency probe failed\nstdout:\n${child.stdout}\nstderr:\n${child.stderr}`);
+  const result = JSON.parse(child.stdout) as {
+    time_s: number;
+    activeBricks: Array<{
+      coordinate: [number, number, number];
+      acceptedResolution: number;
+      maximumDensity: number;
+      reasons: number;
+    }>;
+    ceilingBricks: Array<{
+      coordinate: [number, number, number];
+      active: boolean;
+      maximumDensity: number;
+      mass_cells: number;
+    }>;
+    validationErrors: string[];
+  };
+  assert.equal(result.time_s, 16 / 3);
+  assert.equal(result.ceilingBricks.length, 16);
+  assert.deepEqual(result.ceilingBricks.filter(({ active }) => active), [],
+    `subcell fragments kept ceiling regions alive: ${JSON.stringify(result.ceilingBricks)}`);
+  for (const coordinate of [[0, 0, 0], [0, 1, 0]] as const) {
+    const brick = result.activeBricks.find(({ coordinate: actual }) =>
+      actual.every((value, axis) => value === coordinate[axis]));
+    assert.ok(brick, `initial dam brick ${coordinate.join(",")} retired unexpectedly`);
+    assert.ok((brick.reasons & 1) !== 0,
+      `initial dam brick ${coordinate.join(",")} lost its surface classification`);
+    assert.equal(brick.acceptedResolution, 8,
+      `initial dam brick ${coordinate.join(",")} remained artificially coarse`);
+  }
+  assert.deepEqual(result.validationErrors, []);
+});
+
 test("Dawn all-coarse mini dam vacates the upper walls without corner amplification", {
   skip: !process.env.WEBGPU_NODE_MODULE,
   timeout: 30_000,

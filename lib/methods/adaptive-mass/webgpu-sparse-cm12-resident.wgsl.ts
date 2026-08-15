@@ -34,7 +34,7 @@ struct Params {
   dispatch:vec4u,           // cell workgroups, row workgroups, pcg iterations, brick count
   injectionCenter:vec4f,
   injectionRadius:vec4f,
-  sharpening:vec4f,         // Algorithm 2 distance in cells, trace substeps, reserved
+  sharpening:vec4f,         // Algorithm 2 distance/substeps, residency density/mass
   activityThresholds:vec4f, // 8/4/2 travel floors, thin-feature width
   activityDensity:vec4f,    // thin floor, surface low/high, detail tolerance
   activityTiming:vec4f,     // front lookahead, promote/emergency/demote scores
@@ -42,6 +42,8 @@ struct Params {
   boundaryCenter:vec4f,
   boundaryRadii:vec4f,
   topologyScheduling:vec4u, // ordinary shadow bricks prepared per frame
+  solidOffsets:vec4u,       // dynamic cell open and row data
+  rigidWorld:vec4f,         // world metres and rigid-body count
 }
 
 @group(0)@binding(0)var<uniform>p:Params;
@@ -63,6 +65,9 @@ struct Params {
 @group(0)@binding(16)var<storage,read_write>topologyArena:array<atomic<u32>>;
 
 fn topologyWorklistBase()->u32{return atomicLoad(&topologyArena[14u]);}
+fn residencyDensityThreshold()->f32{
+  return max(CM12_DRY_CELL_THRESHOLD,p.sharpening.z);
+}
 fn acceptedTopologySlot()->u32{
   return atomicLoad(&topologyArena[topologyWorklistBase()+2u])&1u;
 }
@@ -117,12 +122,19 @@ fn sourceCellVelocity()->u32{return select(p.stateOffsets1.x,p.stateOffsets1.y,p
 fn destinationCellVelocity()->u32{return select(p.stateOffsets1.y,p.stateOffsets1.x,p.frame.w>0.5);}
 fn sourceFaceVelocity()->u32{return select(p.stateOffsets1.z,p.stateOffsets1.w,p.frame.w>0.5);}
 fn destinationFaceVelocity()->u32{return select(p.stateOffsets1.w,p.stateOffsets1.z,p.frame.w>0.5);}
+fn hasRigidBodies()->bool{return p.rigidWorld.w>=0.5;}
 
 fn cellBase(id:u32)->u32{return ta(6u)+id*16u;}
 fn cellBrick(id:u32)->u32{return ta(cellBase(id)+11u);}
 fn cellVolume(id:u32)->f32{return taf(cellBase(id)+3u);}
-fn cellOpenFraction(id:u32)->f32{return taf(cellBase(id)+12u);}
-fn cellOpenVolume(id:u32)->f32{return taf(cellBase(id)+13u);}
+fn cellOpenFraction(id:u32)->f32{
+  if(!hasRigidBodies()){return taf(cellBase(id)+12u);}
+  return taf(cellBase(id)+12u)*state[p.solidOffsets.x+id];
+}
+fn cellOpenVolume(id:u32)->f32{
+  if(!hasRigidBodies()){return taf(cellBase(id)+13u);}
+  return taf(cellBase(id)+13u)*state[p.solidOffsets.x+id];
+}
 fn cellSeparatingMinimum(id:u32)->bool{return ta(cellBase(id)+14u)!=0u;}
 fn cellMinimumWidth(id:u32)->f32{
   let b=cellBase(id);return min(taf(b+4u),min(taf(b+5u),taf(b+6u)));
@@ -132,8 +144,25 @@ fn rowTermOffset(id:u32)->u32{return ta(rowBase(id));}
 fn rowTermCount(id:u32)->u32{return ta(rowBase(id)+1u);}
 fn rowAxis(id:u32)->u32{return ta(rowBase(id)+2u);}
 fn rowKind(id:u32)->u32{return ta(rowBase(id)+3u);}
-fn rowDualWeight(id:u32)->f32{return taf(rowBase(id)+4u);}
-fn rowArea(id:u32)->f32{return taf(rowBase(id)+5u);}
+fn rowStaticDualWeight(id:u32)->f32{return taf(rowBase(id)+4u);}
+fn rowOpenFraction(id:u32)->f32{
+  if(!hasRigidBodies()){return 1.0;}return state[p.solidOffsets.y+4u*id];
+}
+fn rowSolidVelocity(id:u32)->f32{
+  if(!hasRigidBodies()){return 0.0;}return state[p.solidOffsets.y+4u*id+1u];
+}
+fn rowPressureOpenFraction(id:u32)->f32{
+  if(!hasRigidBodies()){return 1.0;}return state[p.solidOffsets.y+4u*id+3u];
+}
+fn rowDualWeight(id:u32)->f32{
+  if(!hasRigidBodies()){return rowStaticDualWeight(id);}
+  return rowStaticDualWeight(id)*rowPressureOpenFraction(id);
+}
+fn rowStaticArea(id:u32)->f32{return taf(rowBase(id)+5u);}
+fn rowArea(id:u32)->f32{
+  if(!hasRigidBodies()){return rowStaticArea(id);}
+  return rowStaticArea(id)*rowOpenFraction(id);
+}
 fn rowDistance(id:u32)->f32{return taf(rowBase(id)+6u);}
 fn rowExteriorPhi(id:u32)->f32{return taf(rowBase(id)+7u);}
 fn rowCenter(id:u32)->vec3f{let b=rowBase(id);return vec3f(taf(b+8u),taf(b+9u),taf(b+10u));}
@@ -157,6 +186,13 @@ fn templateLevelIndex(resolution:u32)->u32{
 fn acceptedBrickResolution(brick:u32)->u32{
   return atomicLoad(&activity[activityRecord(brick)+12u]);
 }
+fn brickSpan(brick:u32)->u32{
+  return 1u<<(topology[p.topologyOffsets2.z+4u*brick+2u]&31u);
+}
+fn brickCandidateSlot(brick:u32)->u32{
+  let encoded=topology[p.topologyOffsets2.z+4u*brick+2u]>>5u;
+  return select(INVALID,encoded-1u,encoded!=0u);
+}
 fn templateBrickCellRange(brick:u32,resolution:u32)->vec2u{
   let at=ta(11u)+2u*(4u*brick+templateLevelIndex(resolution));
   return vec2u(ta(at),ta(at+1u));
@@ -178,6 +214,14 @@ fn rowAccepted(row:u32)->bool{
   return true;
 }
 fn cellTransportActive(cell:u32)->bool{return cellActive(cell)&&cellOpenVolume(cell)>1e-8;}
+// A body can cover a wet cell in one frame. Keep its conservative mass receipt
+// while V_i is exactly zero; partial cells use the Sec. 3.6 excess scatter, and
+// an uncovered cell re-enters transport with the same mass instead of making
+// water disappear inside a moving solid.
+fn dynamicallyCoveredCell(cell:u32)->bool{
+  return hasRigidBodies()&&cellActive(cell)&&taf(cellBase(cell)+13u)>1e-8
+    &&state[p.solidOffsets.x+cell]<=1e-8;
+}
 fn isLiquid(cell:u32)->bool{return cellActive(cell)&&state[p.stateOffsets2.w+cell]>0.5;}
 
 fn hasEmbeddedBoundary()->bool{return p.dimensions.w!=0u;}
@@ -216,18 +260,36 @@ fn brickDirectoryLookup(key:u32)->u32{
   return topology[p.topologyOffsets2.y+2u*low+1u];
 }
 
+fn brickDirectoryLookupAtCoordinate(coordinate:vec3u)->u32{
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let maximumSpan=max(brickDimensions.x,max(brickDimensions.y,brickDimensions.z));
+  var span=1u;
+  loop{
+    let origin=(coordinate/span)*span;
+    let key=origin.x+brickDimensions.x*(origin.y+brickDimensions.y*origin.z);
+    let brick=brickDirectoryLookup(key);
+    if(brick!=INVALID){
+      let record=p.topologyOffsets2.z+4u*brick;
+      if(brickSpan(brick)==span){return brick;}
+    }
+    if(span>=maximumSpan){break;}span*=2u;
+  }
+  return INVALID;
+}
+
 fn compactOwnerCellAt(q:vec3i)->vec2u{
   if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))){return vec2u(INVALID);}
   let uq=vec3u(q);let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
-  let brickCoordinate=uq/8u;
-  let key=brickCoordinate.x+brickDimensions.x
-    *(brickCoordinate.y+brickDimensions.y*brickCoordinate.z);
-  let brick=brickDirectoryLookup(key);if(brick==INVALID){return vec2u(INVALID);}
+  let queryCoordinate=uq/8u;
+  let brick=brickDirectoryLookupAtCoordinate(queryCoordinate);
+  if(brick==INVALID){return vec2u(INVALID);}
+  let span=brickSpan(brick);
+  let brickCoordinate=(queryCoordinate/span)*span;
   let resolution=acceptedBrickResolution(brick);
   let range=templateBrickCellRange(brick,resolution);let first=range.x;let count=range.y;
-  let scale=8u/resolution;let local=(uq-brickCoordinate*8u)/scale;
+  let scale=8u*span/resolution;let local=(uq-brickCoordinate*8u)/scale;
   let origin=brickCoordinate*8u;
-  let valid=(min(p.dimensions.xyz-origin+vec3u(scale-1u),vec3u(8u)))/scale;
+  let valid=(min(p.dimensions.xyz-origin+vec3u(scale-1u),vec3u(8u*span)))/scale;
   let cell=first+local.x+valid.x*(local.y+valid.y*local.z);
   return select(vec2u(INVALID),vec2u(cell,brick),cell<first+count);
 }
@@ -412,7 +474,9 @@ fn extrapolateTransportVelocityToDestination(@builtin(global_invocation_id)gid:v
 fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
   if(!rowAccepted(row)){state[destinationFaceVelocity()+row]=0.0;return;}
-  if(rowArea(row)<=1e-8){state[destinationFaceVelocity()+row]=0.0;return;}
+  if(rowArea(row)<=1e-8){
+    state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());return;
+  }
   let departure=traceDeparture(rowCenter(row));
   let characteristic=sampleVelocity(departure)[rowAxis(row)];
   var touchesLiquid=false;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
@@ -421,6 +485,10 @@ fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
   }
   state[destinationFaceVelocity()+row]=select(characteristic,
     mix(characteristic,state[sourceFaceVelocity()+row],0.4),touchesLiquid);
+  if(hasRigidBodies()){
+    let open=rowOpenFraction(row);let fluid=state[destinationFaceVelocity()+row];
+    state[destinationFaceVelocity()+row]=open*fluid+(1.0-open)*rowSolidVelocity(row);
+  }
 }
 
 // Coverage of one accepted cell by the dropped ball, in the same partial-cell
@@ -526,7 +594,11 @@ fn gatherConservativeDensity(@builtin(global_invocation_id)gid:vec3u){
     state[destinationDensity()+id]=0.0;state[destinationGamma()+id]=1.0;return;
   }
   if(!cellTransportActive(id)){
-    state[destinationDensity()+id]=0.0;state[destinationGamma()+id]=1.0;return;
+    if(dynamicallyCoveredCell(id)){
+      state[destinationDensity()+id]=state[sourceDensity()+id];
+      state[destinationGamma()+id]=state[sourceGamma()+id];
+    }else{state[destinationDensity()+id]=0.0;state[destinationGamma()+id]=1.0;}
+    return;
   }
   let b=cellBase(id);
   let departure=traceDeparture(vec3f(taf(b),taf(b+1u),taf(b+2u)));
@@ -550,7 +622,10 @@ fn diffuseGammaAxis(cell:u32,axis:u32,inputRho:u32,inputGamma:u32,
  outputRho:u32,outputGamma:u32){
   let ownRho=state[inputRho+cell];let ownGamma=state[inputGamma+cell];
   if(!cellTransportActive(cell)){
-    state[outputRho+cell]=0.0;state[outputGamma+cell]=1.0;return;
+    if(dynamicallyCoveredCell(cell)){
+      state[outputRho+cell]=ownRho;state[outputGamma+cell]=ownGamma;
+    }else{state[outputRho+cell]=0.0;state[outputGamma+cell]=1.0;}
+    return;
   }
   var rho=ownRho;var gamma=ownGamma;
   let scale=min(1.0,30.0*p.frame.x);
@@ -773,7 +848,10 @@ fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
 fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
   if(!cellTransportActive(cell)){
-    state[destinationDensity()+cell]=0.0;state[destinationGamma()+cell]=1.0;return;
+    if(!dynamicallyCoveredCell(cell)){
+      state[destinationDensity()+cell]=0.0;state[destinationGamma()+cell]=1.0;
+    }
+    return;
   }
   let delta=state[p.stateOffsets5.x+cell];
   let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
@@ -830,7 +908,9 @@ fn scatterSolidExcess(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn finalizeSolidExcess(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  if(!cellTransportActive(cell)){state[destinationDensity()+cell]=0.0;return;}
+  if(!cellTransportActive(cell)){
+    if(!dynamicallyCoveredCell(cell)){state[destinationDensity()+cell]=0.0;}return;
+  }
   let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
   state[destinationDensity()+cell]=max(0.0,state[destinationDensity()+cell]
     +state[p.stateOffsets5.x+cell]+incoming/cellVolume(cell));
@@ -877,8 +957,11 @@ fn commitHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
 fn forceFaces(@builtin(global_invocation_id)gid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
   if(!rowAccepted(row)){state[destinationFaceVelocity()+row]=0.0;return;}
-  if(rowArea(row)<=1e-8){state[destinationFaceVelocity()+row]=0.0;return;}
-  state[destinationFaceVelocity()+row]+=p.frame.x*p.acceleration[rowAxis(row)];
+  if(rowArea(row)<=1e-8){
+    state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());return;
+  }
+  let open=select(1.0,rowOpenFraction(row),hasRigidBodies());
+  state[destinationFaceVelocity()+row]+=open*p.frame.x*p.acceleration[rowAxis(row)];
 }
 
 fn rawPressureDensity(cell:u32)->f32{
@@ -947,7 +1030,8 @@ fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
     let row=incidenceRow(at);if(!rowAccepted(row)){continue;}
     let theta=state[p.stateOffsets3.x+row];if(theta<=0.0){continue;}
     let coefficient=termCoefficient(incidenceTerm(at));
-    rhs+=coefficient*rowDualWeight(row)*state[destinationFaceVelocity()+row];
+    let fluxWeight=select(rowDualWeight(row),rowStaticDualWeight(row),hasRigidBodies());
+    rhs+=coefficient*fluxWeight*state[destinationFaceVelocity()+row];
     diagonal+=rowDualWeight(row)*coefficient*coefficient/theta;
   }
   let targetDivergence=select(cm12VolumeCorrectionDivergence(
@@ -1084,11 +1168,12 @@ fn projectFaces(@builtin(global_invocation_id)gid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
   if(!rowAccepted(row)){state[destinationFaceVelocity()+row]=0.0;return;}
   let theta=state[p.stateOffsets3.x+row];if(theta<=0.0||rowArea(row)<=1e-8){
-    state[destinationFaceVelocity()+row]=0.0;return;}
+    state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());return;}
   var jump=0.0;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);if(isLiquid(cell)){
     jump+=termCoefficient(at)*state[p.stateOffsets2.x+cell];}}
-  state[destinationFaceVelocity()+row]-=jump/theta;
+  let pressureOpen=select(1.0,rowPressureOpenFraction(row),hasRigidBodies());
+  state[destinationFaceVelocity()+row]-=pressureOpen*jump/theta;
 }
 
 @compute @workgroup_size(64)
@@ -1102,9 +1187,16 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
   var velocity=vec3f(0.0);var weight=vec3f(0.0);var equation=0.0;var correction=0.0;
   for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){let row=incidenceRow(at);
     if(!rowAccepted(row)){continue;}
-    let term=incidenceTerm(at);let axis=rowAxis(row);let w=abs(termCoefficient(term))*rowDualWeight(row);
-    velocity[axis]+=w*state[destinationFaceVelocity()+row];weight[axis]+=w;
-    if(isLiquid(id)){let value=termCoefficient(term)*rowDualWeight(row)*state[destinationFaceVelocity()+row];
+    let term=incidenceTerm(at);let axis=rowAxis(row);
+    let fluxWeight=select(rowDualWeight(row),rowStaticDualWeight(row),hasRigidBodies());
+    let w=abs(termCoefficient(term))*fluxWeight;var faceVelocity=state[destinationFaceVelocity()+row];
+    if(hasRigidBodies()){
+      let open=rowOpenFraction(row);
+      faceVelocity=select(rowSolidVelocity(row),
+        (faceVelocity-(1.0-open)*rowSolidVelocity(row))/max(open,1e-6),open>1e-6);
+    }
+    velocity[axis]+=w*faceVelocity;weight[axis]+=w;
+    if(isLiquid(id)){let value=termCoefficient(term)*fluxWeight*state[destinationFaceVelocity()+row];
       let adjusted=value-correction;let next=equation+adjusted;correction=(next-equation)-adjusted;equation=next;}}
   for(var axis=0u;axis<3u;axis+=1u){if(weight[axis]>0.0){velocity[axis]/=weight[axis];}}
   state[destinationCellVelocity()+4u*id]=velocity.x;state[destinationCellVelocity()+4u*id+1u]=velocity.y;
@@ -1223,18 +1315,19 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       *(f32(2u*z+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
     var interfaceCell=fill>p.activityDensity.y&&fill<p.activityDensity.z;
     surfaceCell=surfaceCell||interfaceCell;
-    // Residue below the shared CM12 dry threshold is neither surface nor
-    // residency authority. The retirement pass records and clears that
-    // bounded residue instead of pinning a sparse brick forever.
-    occupiedCell=occupiedCell||rho>CM12_DRY_CELL_THRESHOLD;
+    // The arithmetic dry epsilon is deliberately smaller than the residency
+    // floor. Numerically transported mist must not pin an otherwise empty
+    // sparse region after a scene settles.
+    let residencyDensity=residencyDensityThreshold();
+    occupiedCell=occupiedCell||rho>residencyDensity;
     let ownVelocityAt=destinationCellVelocity()+4u*cell;
     let ownVelocity=vec3f(state[ownVelocityAt],state[ownVelocityAt+1u],
       state[ownVelocityAt+2u]);
-    if(rho>CM12_DRY_CELL_THRESHOLD){
+    if(rho>residencyDensity){
       velocityTravel=max(velocityTravel,p.frame.x*length(ownVelocity));
     }
     let ownWet=fill>=CM12_LIQUID_ISOVALUE;
-    let featureDensity=max(CM12_DRY_CELL_THRESHOLD,p.activityDensity.x);
+    let featureDensity=max(residencyDensity,p.activityDensity.x);
     let b=cellBase(cell);let cellCenter=vec3f(taf(b),taf(b+1u),taf(b+2u));
     var exposedSides=0u;
     for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
@@ -1365,9 +1458,15 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       max(abs(moments.y-activityF32(output+6u))/0.02,
         abs(moments.z-activityF32(output+7u))/0.02)));
   }
-  let axes=activitySurfaceAxes[0]&7u;
-  let surface=(activitySurfaceAxes[0]&8u)!=0u||axes!=0u;
-  let thinFluid=(activitySurfaceAxes[0]&32u)!=0u;
+  let densityMassFineCells=f32(activityDensitySum[0])/ACTIVITY_FIXED;
+  let densityPresent=(activitySurfaceAxes[0]&16u)!=0u;
+  // A few concentrated interpolation remnants can exceed the per-cell density
+  // floor while carrying less than one finest cell of liquid in the whole
+  // brick. They are residue, not a surface or neighbor-support authority.
+  let occupied=densityPresent&&densityMassFineCells>=p.sharpening.w;
+  let axes=select(0u,activitySurfaceAxes[0]&7u,occupied);
+  let surface=occupied&&((activitySurfaceAxes[0]&8u)!=0u||axes!=0u);
+  let thinFluid=occupied&&(activitySurfaceAxes[0]&32u)!=0u;
   let shape=select(0.0,1.0,countOneBits(axes)>=2u);
   let velocityActivity=activityVelocityTravel[0];
   let featureActivity=max(max(activityDeformation[0],activityPredictedMotion[0]),
@@ -1379,7 +1478,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   if(temporal>0.0){reasons|=4u;}
   if(activityDetailError[0]>p.activityDensity.w){reasons|=8u;}
   if(activityPredictedMotion[0]>0.0){reasons|=16u;}if(step==1u){reasons|=32u;}
-  if((activitySurfaceAxes[0]&16u)!=0u){reasons|=64u;}
+  if(occupied){reasons|=64u;}
   if(velocityResolutionFloor(velocityActivity)>1u){reasons|=128u;}
   if(thinFluid){reasons|=256u;}
   if((activitySurfaceAxes[0]&64u)!=0u){reasons|=512u;}
@@ -1404,7 +1503,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   atomicStore(&activity[output+5u],bitcast<u32>(moments.x));
   atomicStore(&activity[output+6u],bitcast<u32>(moments.y));
   atomicStore(&activity[output+7u],bitcast<u32>(moments.z));
-  atomicStore(&activity[output+32u],activitySupportMask[0]);
+  atomicStore(&activity[output+32u],select(0u,activitySupportMask[0],occupied));
   atomicStore(&activity[output+33u],bitcast<u32>(velocityActivity));
   atomicStore(&activity[output+34u],0u);
   atomicMax(&activity[1],score);if(surface){atomicAdd(&activity[2],1u);}
@@ -1422,6 +1521,13 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
   let output=activityRecord(brick);
   let current=atomicLoad(&activity[output+12u]);
+  // Macro leaves are immutable deep pages. Only span-one surface leaves own
+  // mutation candidates; splitting a macro is a later sparse page-pool event.
+  if(brickCandidateSlot(brick)==INVALID){
+    atomicStore(&activity[output+8u],current);
+    atomicStore(&activity[output+9u],1024u);
+    return;
+  }
   var requested=atomicLoad(&activity[output+8u]);
   var planReasons=atomicLoad(&activity[output+9u]);
   // Dormant capacity is not a represented fluid level. Start it at the
@@ -1471,6 +1577,7 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
+  if(brickCandidateSlot(brick)==INVALID){return;}
   let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
@@ -1502,6 +1609,11 @@ fn validBrickResolution(resolution:u32)->bool{
 fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
   let output=activityRecord(brick);
+  if(brickCandidateSlot(brick)==INVALID){
+    let accepted=atomicLoad(&activity[output+12u]);
+    atomicStore(&activity[output+13u],accepted);atomicStore(&activity[output+14u],0u);
+    return;
+  }
   let accepted=atomicLoad(&activity[output+12u]);
   let candidate=atomicLoad(&activity[output+8u]);
   var invalid=!validBrickResolution(accepted)||!validBrickResolution(candidate);
@@ -1606,8 +1718,8 @@ fn finalizeShadowWorklists(){
 }
 
 fn candidateFieldIndex(channel:u32,brick:u32,local:u32)->u32{
-  let capacity=p.dispatch.w*CANDIDATE_CELLS_PER_BRICK;
-  return channel*capacity+brick*CANDIDATE_CELLS_PER_BRICK+local;
+  let capacity=topology[p.topologyOffsets2.w]*CANDIDATE_CELLS_PER_BRICK;
+  return channel*capacity+brickCandidateSlot(brick)*CANDIDATE_CELLS_PER_BRICK+local;
 }
 
 fn candidateCellVolume(brick:u32,resolution:u32,local:u32)->f32{
@@ -1959,9 +2071,9 @@ fn activateSweptReceivers(@builtin(global_invocation_id)gid:vec3u){
   }
 }
 
-// Retire every dry-threshold brick outside the directional interface stencil
+// Retire every sub-residency brick outside the directional interface stencil
 // and swept receiver mask. The discarded mass is recorded per brick and is
-// bounded by CM12_DRY_CELL_THRESHOLD times one 8^3 brick volume.
+// bounded by the residency threshold times one 8^3 brick volume.
 @compute @workgroup_size(64)
 fn retireUnsupportedEmptyBricks(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w||!brickActive(brick)){return;}
@@ -2012,10 +2124,13 @@ fn classifyPresentationBricks(@builtin(global_invocation_id)gid:vec3u){
   if(!brickActive(brick)){state[p.stateOffsets4.z+brick]=0.0;return;}
   let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
   let first=range.x;let count=range.y;
-  var wet=false;
+  var wet=false;var massFineCells=0.0;
   for(var at=first;at<first+count;at+=1u){
-    wet=wet||state[destinationDensity()+at]>CM12_DRY_CELL_THRESHOLD;
+    let rho=state[destinationDensity()+at];
+    wet=wet||rho>residencyDensityThreshold();
+    massFineCells+=max(0.0,rho)*cellVolume(at);
   }
+  wet=wet&&massFineCells>=p.sharpening.w;
   state[p.stateOffsets4.z+brick]=select(0.0,1.0,wet);
 }
 

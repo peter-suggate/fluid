@@ -8,12 +8,18 @@ import type {
 } from "../../core/method-contract";
 import type { SceneDescription } from "../../core/model";
 import { classifyFineBoxAgainstSphericalContainer } from "../../core/spherical-container";
-import type { RigidBodyState } from "../../core/rigid-body";
+import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { sceneLatticeDimensions } from "../../core/scene-lattice";
 import { GPUStageTimestampRecorder } from "../../core/performance-trace";
 import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
-import type { GPUEulerianInfo, GPURigidLoad } from "../../core/webgpu-eulerian";
+import {
+  GPU_RIGID_EXCHANGE_BYTES,
+  type GPUEulerianInfo,
+  type GPURigidLoad,
+} from "../../core/webgpu-eulerian";
+import { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
+import { sceneHasTerrain, terrainColumnHeights } from "../../core/terrain";
 import {
   ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS,
   AdaptiveMassFrameCapture,
@@ -22,7 +28,9 @@ import type { AdaptiveMassSolverOptions } from "./method";
 import {
   createSparseAdaptiveMassAtlas,
   initializeSparseBrickAtlasFromScene,
+  sparseBrickContainingCoordinate,
   sparseBrickKey,
+  sparseBrickSpan,
   sparseBrickAtlasStats,
   type SparseAdaptiveMassAtlas,
   type SparseAdaptiveMassBrick,
@@ -104,6 +112,9 @@ export function dormantReceiverResolution(
  * world costs the same as a small one when their live liquid sets are equal.
  */
 export const SPARSE_CM12_RECEIVER_SUPPORT_RINGS = 9;
+/** Construction capacity is proportional to represented leaves, never domain volume. */
+export const SPARSE_CM12_RECEIVER_CAPACITY_FACTOR = 4;
+export const SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY = 512;
 
 function receiverBoundaryResolution(
   atlas: SparseAdaptiveMassAtlas,
@@ -132,11 +143,12 @@ function closeReceiverGrading(
   while (changed) {
     changed = false;
     for (const brick of [...bricks.values()]) for (let axis = 0; axis < 3; axis += 1) {
+      if (sparseBrickSpan(brick) > 1) continue;
       const coordinate = [...brick.coordinate] as [number, number, number];
       coordinate[axis] += 1;
       if (coordinate[axis] >= source.brickDimensions[axis]) continue;
       const neighbor = bricks.get(sparseBrickKey(coordinate, source.brickDimensions));
-      if (!neighbor) continue;
+      if (!neighbor || sparseBrickSpan(neighbor) > 1) continue;
       const high = Math.max(brick.resolution, neighbor.resolution);
       const low = brick.resolution < neighbor.resolution ? brick : neighbor;
       if (high <= 2 * low.resolution) continue;
@@ -186,6 +198,7 @@ export function residentSupportAtlas(
   const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
   const receiverResolution: SparseBrickResolution = mode === "all-coarse" ? 4 : 8;
   for (const brick of source.bricks) {
+    if (sparseBrickSpan(brick) > 1) continue;
     for (let dz = -1; dz <= 1; dz += 1) for (let dy = -1; dy <= 1; dy += 1)
       for (let dx = -1; dx <= 1; dx += 1) {
         // Conservative transport crosses a face. Reserve the six immediate
@@ -202,7 +215,7 @@ export function residentSupportAtlas(
         if (coordinate.some((value, axis) => value < 0
           || value >= source.brickDimensions[axis])) continue;
         const key = sparseBrickKey(coordinate, source.brickDimensions);
-        if (bricks.has(key)) continue;
+        if (bricks.has(key) || sparseBrickContainingCoordinate(source, coordinate)) continue;
         if (!brickFaceCarriesFluid(brick, [dx, dy, dz])) continue;
         const boundaryResolution = receiverBoundaryResolution(source, coordinate);
         if (source.boundary && boundaryResolution === undefined) continue;
@@ -241,6 +254,11 @@ export function dormantReceiverDomain(
     throw new RangeError("Sparse CM12 receiver support rings must be a non-negative integer");
   }
   const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
+  const maximumReceiverBricks = Math.min(
+    source.brickDimensions.reduce((product, value) => product * value, 1),
+    Math.max(SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY,
+      SPARSE_CM12_RECEIVER_CAPACITY_FACTOR * source.bricks.length),
+  );
   // Multi-source breadth-first growth visits exactly the retained apron.  The
   // previous three nested domain loops made an empty 128^3 Figure 7 tank build
   // 4,096 fine bricks and made construction scale with empty world volume.
@@ -262,7 +280,7 @@ export function dormantReceiverDomain(
       : receiverFloor === "auto" ? (boundaryFed ? 4 : 1) : receiverFloor;
   for (const brick of source.bricks) {
     distanceByKey.set(brick.key, 0);
-    queue.push(brick.coordinate);
+    if (sparseBrickSpan(brick) === 1) queue.push(brick.coordinate);
   }
   for (let cursor = 0; cursor < queue.length; cursor += 1) {
     const coordinate = queue[cursor]!;
@@ -282,12 +300,16 @@ export function dormantReceiverDomain(
             || value >= source.brickDimensions[axis])) continue;
           const key = sparseBrickKey(neighbor, source.brickDimensions);
           if (distanceByKey.has(key)) continue;
+          const containingSource = sparseBrickContainingCoordinate(source, neighbor);
+          if (containingSource && sparseBrickSpan(containingSource) > 1) continue;
+          if (!bricks.has(key) && !containingSource
+            && bricks.size >= maximumReceiverBricks) continue;
           const boundaryResolution = receiverBoundaryResolution(source, neighbor);
           if (source.boundary && boundaryResolution === undefined) continue;
           const nextDistance = distance + 1;
           distanceByKey.set(key, nextDistance);
           queue.push(neighbor);
-          if (bricks.has(key)) continue;
+          if (bricks.has(key) || containingSource) continue;
           // Packed composite rows are immutable while the solver is attached.
           // Until a candidate topology can replace those rows, a 2^3/1^3
           // dormant brick would remain that coarse after the GPU planner asks
@@ -352,6 +374,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     private options: AdaptiveMassSolverOptions,
     private readonly presentation: WebGPUAdaptiveMassSparsePresentation,
     private readonly resident: WebGPUSparseCM12Resident,
+    private readonly rigidSystem: WebGPURigidBodySystem | undefined,
+    private readonly rigidExchange: GPUBuffer | undefined,
+    private readonly rigidTerrainTexture: GPUTexture | undefined,
+    private readonly rigidCouplingEnabled: boolean,
     adaptiveMixedSeamFaceCount: number,
     atlas: SparseAdaptiveMassAtlas,
     quality: GPUQuality,
@@ -440,9 +466,57 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     let presentation: WebGPUAdaptiveMassSparsePresentation | undefined;
     let dynamics: SparseAtlasDynamicsState | undefined;
     let resident: WebGPUSparseCM12Resident | undefined;
+    const rigidCouplingEnabled = scene.rigidBodies.length > 0;
+    let rigidTerrainTexture: GPUTexture | undefined;
+    let rigidExchange: GPUBuffer | undefined;
+    let rigidSystem: WebGPURigidBodySystem | undefined;
+    if (rigidCouplingEnabled) {
+      const rigidDimensions = sceneLatticeDimensions(scene);
+      const rigidCellHeight_m = Math.min(
+        scene.container.width_m / rigidDimensions[0],
+        scene.container.height_m / rigidDimensions[1],
+        scene.container.depth_m / rigidDimensions[2],
+      );
+      const hasRigidTerrain = sceneHasTerrain(scene);
+      const rigidTerrainWidth = hasRigidTerrain ? rigidDimensions[0] : 1;
+      const rigidTerrainDepth = hasRigidTerrain ? rigidDimensions[2] : 1;
+      rigidTerrainTexture = device.createTexture({
+        label: "Sparse CM12 rigid terrain",
+        size: [rigidTerrainWidth, rigidTerrainDepth],
+        format: "r32float",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      if (hasRigidTerrain) {
+        const terrain = terrainColumnHeights(scene, rigidTerrainWidth, rigidTerrainDepth);
+        const rowBytes = rigidTerrainWidth * 4;
+        const paddedRowBytes = Math.ceil(rowBytes / 256) * 256;
+        const terrainUpload = new Float32Array(paddedRowBytes / 4 * rigidTerrainDepth);
+        for (let z = 0; z < rigidTerrainDepth; z += 1) {
+          terrainUpload.set(Float32Array.from(
+            terrain.slice(z * rigidTerrainWidth, (z + 1) * rigidTerrainWidth),
+            (height) => height / rigidCellHeight_m,
+          ), z * paddedRowBytes / 4);
+        }
+        device.queue.writeTexture(
+          { texture: rigidTerrainTexture },
+          terrainUpload,
+          { bytesPerRow: paddedRowBytes, rowsPerImage: rigidTerrainDepth },
+          [rigidTerrainWidth, rigidTerrainDepth],
+        );
+      }
+      rigidExchange = device.createBuffer({
+        label: "Sparse CM12 rigid exchange",
+        size: GPU_RIGID_EXCHANGE_BYTES,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+      });
+      rigidSystem = new WebGPURigidBodySystem(
+        device, scene, rigidExchange, rigidTerrainTexture,
+      );
+      rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
+    }
     let initiallyActiveBrickKeys: ReadonlySet<number> | undefined;
     try {
-      await runner.run([{
+      await runner.run([...(rigidSystem?.initializationTasks() ?? []), {
         id: "adaptive-mass.plan",
         phase: "planning",
         label: "Bound the arbitrary-scene presentation lattice",
@@ -486,6 +560,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           resident = await WebGPUSparseCM12Resident.create(
             device, atlas!, dynamics!.grid, finestCellSize(scene, atlas!),
             initiallyActiveBrickKeys,
+            rigidCouplingEnabled ? {
+              bodies: rigidSystem!.stateBuffer,
+              exchange: rigidExchange!,
+              worldDimensions_m: [scene.container.width_m, scene.container.height_m,
+                scene.container.depth_m],
+            } : undefined,
           );
         },
       }, {
@@ -509,11 +589,15 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       }]);
       return new WebGPUAdaptiveMassSolver(
         device, scene, options, presentation!, resident!,
+        rigidSystem, rigidExchange, rigidTerrainTexture, rigidCouplingEnabled,
         dynamics!.grid.mixedSeamRowCount, atlas!, quality,
       );
     } catch (error) {
       resident?.destroy();
       presentation?.destroy();
+      rigidSystem?.destroy();
+      rigidExchange?.destroy();
+      rigidTerrainTexture?.destroy();
       throw error;
     }
   }
@@ -593,8 +677,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       activityPolicy };
   }
 
-  advanceTo(time_s: number, _bodies: RigidBodyState[]): boolean {
-    void _bodies;
+  advanceTo(time_s: number, bodies: RigidBodyState[]): boolean {
     if (this.disposed || !Number.isFinite(time_s) || time_s <= this.lastTime_s + 1e-9) return false;
     const paperTimeStep = this.options.timeStep === "paper";
     if (paperTimeStep
@@ -604,6 +687,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       : Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime_s);
     if (!(dt_s > 0)) return false;
     const cellSize_m = finestCellSize(this.scene, this.atlas);
+    const activeBodies = bodies.slice(0, 12);
+    this.rigidSystem?.syncBodies(activeBodies);
     const gravity = this.scene.fluid.gravity_m_s2;
     const instrumentation = usePerformanceInstrumentationStore.getState();
     const traceRequestedAt_ms = instrumentation.enabled ? performance.now() : 0;
@@ -632,6 +717,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const encoder = frameCapture
       ? frameCapture.instrument(rawEncoder, hardwareTrace)
       : rawEncoder;
+    if (this.rigidExchange) encoder.clearBuffer(this.rigidExchange);
     this.resident.encode(
       encoder,
       dt_s,
@@ -644,7 +730,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       },
       this.options.activityPolicy,
       frameCapture?.residentStageSeams,
+      this.rigidCouplingEnabled ? activeBodies.length : 0,
+      [this.scene.container.width_m, this.scene.container.height_m,
+        this.scene.container.depth_m],
     );
+    this.rigidSystem?.encode(encoder, dt_s, cellSize_m ** 3, 1, cellSize_m);
     frameCapture?.closeCommands();
     this.device.queue.submit([encoder.finish()]);
 
@@ -754,6 +844,15 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   /** Explicit Dawn/QA materialization; production rendering stays sparse. */
   readDiagnosticFields() { return this.resident.readDiagnosticFields(); }
 
+  get rigidRenderBuffer(): GPUBuffer | undefined { return this.rigidSystem?.renderBuffer; }
+  get rigidMotionBuffer(): GPUBuffer | undefined { return this.rigidSystem?.motionBuffer; }
+  setSelectedRigidBody(index: number): void { this.rigidSystem?.setSelectedIndex(index); }
+  async pickRigidBody(origin: RigidBodyState["position_m"],
+    direction: RigidBodyState["position_m"]) {
+    return this.rigidSystem?.pick(origin, direction);
+  }
+  async readRigidBodyPoses() { return this.rigidSystem?.readPoses(); }
+
   /** Explicit acceptance/debug readback; never consulted by advanceTo. */
   async readGPUActivityPolicy(): Promise<{
     readonly acceptedSteps: number;
@@ -778,6 +877,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.disposed = true;
     this.resident.destroy();
     this.presentation.destroy();
+    this.rigidSystem?.destroy();
+    this.rigidExchange?.destroy();
+    this.rigidTerrainTexture?.destroy();
   }
 }
 

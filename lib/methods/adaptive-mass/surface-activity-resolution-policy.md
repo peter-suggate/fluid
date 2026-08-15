@@ -74,16 +74,20 @@ and its volume-fraction-weighted width is under two finest cells:
 
 ```text
 representedThickness = clamp(rho, 0, 1) * leafWidthFineCells
-thin = rho > dryThreshold
+thin = rho > max(residencyThreshold, thinFeatureThreshold)
     && representedThickness < 2
     && exists axis with exposedNegative(axis) && exposedPositive(axis)
 ```
 
 This deliberately treats a one-cell sheet, filament, or dilute isolated leaf
 as unresolved geometry and refines its whole brick. A two-cell-or-thicker body
-with air on only its outer face is not classified as thin. Density at or below
-the shared dry threshold remains residue and may be retired instead of pinning
-fine topology.
+with air on only its outer face is not classified as thin. Density below the
+`0.005` residency threshold remains numerical residue and may be retired
+instead of pinning fine topology. A brick must also contain at least one
+finest-cell equivalent of integrated liquid mass; this rejects concentrated
+subcell fragments that would otherwise pass a per-cell maximum test and pin a
+whole region. These liveness cutoffs are deliberately distinct from CM12's
+`1e-5` arithmetic dry epsilon.
 
 For each surface brick compute these dimensionless values:
 
@@ -227,12 +231,22 @@ classification. Three ordered passes close the four-level `1/2/4/8` ladder to
 a strict 2:1 fixpoint. Omitted air is not a level and is not made resident
 merely for balance.
 
-Residency uses the shared CM12 dry threshold (`rho <= 1e-5`) rather than exact
-floating-point zero. A brick containing only sub-threshold residue may retire
-once it is outside directional surface support. Its discarded integrated mass
-is published in the activity receipt and its fields are cleared, so later
-receiver activation cannot resurrect stale residue. The worst-case discarded
-mass per full brick is bounded by `512 * 1e-5 = 0.00512` finest-cell mass units.
+Residency uses both a separate density threshold (`rho <= 0.005`) and a
+one-finest-cell integrated-mass floor rather than exact floating-point zero or
+CM12's much smaller arithmetic epsilon. A brick that fails either liveness test
+may retire once it is outside directional surface support. Its discarded
+integrated mass is published in the activity receipt and its fields are cleared,
+so later receiver activation cannot resurrect stale residue. Actual retirement
+receipts remain the authority for conservation diagnostics.
+
+Every span-one surface/receiver brick retains candidate storage and topology
+templates through `8^3`, independently of its authored resolution. Deep
+quiescent liquid is represented by immutable dyadic macro-bricks; those leaves
+allocate only their accepted cells and no candidate or fine-presentation page.
+Splitting a macro is a sparse page-pool event, never a reason to preallocate its
+covered fixed-brick volume. Runtime surface requests can therefore refine an
+initially saturated span-one brick all the way to the fine rung without making
+deep storage domain-shaped.
 
 ## Determinism and D4 symmetry
 
@@ -275,11 +289,11 @@ device. Storage is sparse-brick-capacity-shaped, never finest-domain-shaped:
 
 ```text
 accepted brick levels + active bits
-accepted fixed-slot cell state (512 slots per resident brick)
+accepted compact cell state (resolution^3 slots per accepted leaf)
 accepted compact cell/row worklists
 
 shadow brick levels + preparation bits
-shadow cell/face transfer slots
+shadow cell/face transfer slots (512 only for mutation-capable span-one leaves)
 shadow local-row and seam-row descriptors
 dirty queue: urgent segment | ordinary segment
 indirect dispatch/count header
@@ -490,8 +504,13 @@ fields as one physical generation. Transport, pressure, projection,
 diagnostics, and presentation all resolve the accepted worklists; the host
 never substitutes construction-time cell or row counts after initialization.
 
-Construction pre-packs reusable operator templates rather than rebuilding rows
-on the host:
+Small construction lanes may pre-pack reusable operator templates. A large
+accepted generation must instead stream generation zero directly into typed
+arrays and leave candidate pages to the bounded GPU topology arena; Figure 6
+proved that retaining the accepted graph plus four uniform and eighteen seam
+object graphs exceeds the ordinary host heap.
+
+The small-lane library contains:
 
 - four intra-brick templates per receiver (`1^3`, `2^3`, `4^3`, `8^3`);
 - one face template for every ordered neighbour-level pair (4 x 4 = 16), for

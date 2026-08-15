@@ -488,6 +488,16 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
         hint: "Minimum density allowed to pin thin geometry; zero means the CM12 dry threshold.",
       },
       {
+        kind: "param-range", param: "residencyDensity", label: "Region density",
+        unit: " ρ", min: 0.000_01, max: 0.05, step: 0.001, digits: 3,
+        hint: "Minimum cell density that keeps a sparse region populated after interface support leaves it.",
+      },
+      {
+        kind: "param-range", param: "residencyMassFineCells", label: "Region mass",
+        unit: " cells", min: 0, max: 8, step: 0.25, digits: 2,
+        hint: "Integrated liquid mass needed to keep a region populated; one cell rejects subcell fragments.",
+      },
+      {
         kind: "param-range", param: "surfaceDensityMinimum", label: "Surface low",
         unit: " ρ", min: 0, max: 0.49, step: 0.01, digits: 2,
         hint: "Low bound of partial-density surface evidence.",

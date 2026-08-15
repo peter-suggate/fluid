@@ -166,6 +166,19 @@ const params: MethodParamSpec[] = [
     hint: "Minimum density allowed to pin a thin feature fine. Zero uses CM12's dry threshold; raise it to ignore increasingly dilute residue.",
   },
   {
+    kind: "number", key: "residencyDensity", label: "Region density cutoff",
+    default: SPARSE_CM12_ACTIVITY_POLICY.residencyDensity, tier: "fine", update: "runtime",
+    unit: "ρ", min: 0.000_01, max: 0.05, step: 0.001, digits: 3,
+    hint: "Minimum cell density that keeps a sparse region populated. Lower numerical residue is retired once it leaves interface support.",
+  },
+  {
+    kind: "number", key: "residencyMassFineCells", label: "Region mass cutoff",
+    default: SPARSE_CM12_ACTIVITY_POLICY.residencyMassFineCells,
+    tier: "fine", update: "runtime", unit: "cells", min: 0, max: 8,
+    step: 0.25, digits: 2,
+    hint: "Minimum integrated liquid mass needed to keep an 8³ region populated. The default rejects fragments smaller than one full finest cell.",
+  },
+  {
     kind: "number", key: "surfaceDensityMinimum", label: "Surface density low",
     default: SPARSE_CM12_ACTIVITY_POLICY.surfaceDensityMinimum, tier: "fine", update: "runtime",
     unit: "ρ", min: 0, max: 0.49, step: 0.01, digits: 2,
@@ -242,7 +255,8 @@ export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze([
   "sharpeningDistance",
   "sharpeningTraceSteps",
   "finestTravelCells", "fourTravelCells", "twoTravelCells",
-  "frontLookaheadSteps", "thinFeatureCells", "thinFeatureDensity",
+  "frontLookaheadSteps", "thinFeatureCells", "thinFeatureDensity", "residencyDensity",
+  "residencyMassFineCells",
   "surfaceDensityMinimum", "surfaceDensityMaximum", "detailTolerance",
   "topologyCadenceSteps", "prepareBricksPerFrame", "promoteEpochs", "demoteEpochs",
   "promoteScore", "demoteScore", "emergencyScore",
@@ -312,14 +326,10 @@ export const adaptiveMassMethod: SimulationMethod = {
     ultra: "Sparse graded 1³→8³",
   },
   showQualityControl: false,
-  // `adoptsRigidRosterShape` for the opposite reason to Uniform CM12's: this
-  // method has no rigid system at all — `_onRigidLoads` is ignored, `advanceTo`
-  // voids its bodies, and nothing under lib/methods/adaptive-mass so much as
-  // names `scene.rigidBodies` — so the roster sizes none of its allocations.
-  // Keeping the first body in the solver key restarted the scene to buy an
-  // identical solver, and a body that the sparse water cannot see is no less
-  // invisible after a rebuild than before one.
-  capabilities: { volumeRendering: true, adoptsRigidRosterShape: true },
+  // Body scenes reserve sparse solid-fraction fields alongside their fluid
+  // authority. A bodyless paper-scale scene omits that substantial arena, so
+  // crossing between an empty and non-empty roster rebuilds once.
+  capabilities: { volumeRendering: true },
   supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure"],
   params,
   runtimeParamKeys: ADAPTIVE_MASS_RUNTIME_PARAM_KEYS,

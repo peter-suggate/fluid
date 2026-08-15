@@ -29,6 +29,7 @@ import {
   dormantReceiverResolution,
   adaptiveMassPresentationDimensionsForScene,
   residentSupportAtlas,
+  SPARSE_CM12_RECEIVER_CAPACITY_FACTOR,
   SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
 } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
@@ -85,7 +86,7 @@ test("resident sharpening implements CM12 Algorithm 2 trace and scatter", () => 
   assert.match(kernel, /0\.5\*cellMinimumWidth\(owner\)/,
     "the trace step must adapt after crossing a 2:1 seam");
   assert.match(kernel, /gradient\/magnitude\*distance/);
-  assert.match(kernel, /f32\(removedFixed\)\*term\.weight\/total/,
+  assert.match(kernel, /f32\(removedFixed\)\*weight\/total/,
     "removed integrated mass must be scattered trilinearly at the traced point");
   assert.match(kernel, /offeredFixed=remainingFixed/,
     "fixed-point scatter rounding must remain exactly conservative");
@@ -207,6 +208,7 @@ test("Sparse CM12 exposes normalized structural and live candidate policy contro
     receiverFloor: "8", surfaceFineRings: 3, receiverSupportRings: 12,
     finestTravelCells: 0.5, fourTravelCells: 0.75, twoTravelCells: 0.9,
     frontLookaheadSteps: 9.4, thinFeatureCells: 1.75, thinFeatureDensity: 0.02,
+    residencyDensity: 0.007, residencyMassFineCells: 1.5,
     topologyCadenceSteps: 3, prepareBricksPerFrame: 11,
     promoteEpochs: 4, demoteEpochs: 7,
     promoteScore: 0.7, demoteScore: 0.8, emergencyScore: 0.6,
@@ -221,11 +223,18 @@ test("Sparse CM12 exposes normalized structural and live candidate policy contro
   ], [0.5, 0.5, 0.5], "velocity floors must remain descending");
   assert.equal(options.activityPolicy?.frontLookaheadSteps, 9);
   assert.equal(options.activityPolicy?.thinFeatureCells, 1.75);
+  assert.equal(options.activityPolicy?.residencyDensity, 0.007);
+  assert.equal(options.activityPolicy?.residencyMassFineCells, 1.5);
   assert.equal(options.activityPolicy?.demoteScore, 0.7);
   assert.equal(options.activityPolicy?.emergencyScore, 0.7);
   assert.equal(options.activityPolicy?.activitySignals, true);
   assert.equal(options.activityPolicy?.prepareBricksPerFrame, 11);
-  assert.equal(adaptiveMassSolverOptions({}).activityPolicy?.activitySignals, false);
+  const defaults = adaptiveMassSolverOptions({}).activityPolicy;
+  assert.equal(defaults?.activitySignals, false);
+  assert.equal(defaults?.residencyDensity, 0.005,
+    "the default region cutoff must reject settled dilute residue");
+  assert.equal(defaults?.residencyMassFineCells, 1,
+    "subcell fragments must not keep a whole sparse region populated");
 
   const stage = ADAPTIVE_MASS_FLUID_PIPELINE.stages.find(
     (candidate) => candidate.id === "resolution-planning",
@@ -235,7 +244,8 @@ test("Sparse CM12 exposes normalized structural and live candidate policy contro
     control.kind === "readout" ? [] : [control.param]));
   for (const param of ["selectorMode", "receiverFloor", "surfaceFineRings", "receiverSupportRings",
     "finestTravelCells", "fourTravelCells", "twoTravelCells", "frontLookaheadSteps",
-    "thinFeatureCells", "thinFeatureDensity", "surfaceDensityMinimum",
+    "thinFeatureCells", "thinFeatureDensity", "residencyDensity",
+    "residencyMassFineCells", "surfaceDensityMinimum",
     "surfaceDensityMaximum", "detailTolerance", "topologyCadenceSteps",
     "prepareBricksPerFrame",
     "promoteEpochs", "demoteEpochs", "promoteScore", "demoteScore", "emergencyScore"]) {
@@ -344,7 +354,7 @@ test("swept receiver activation is GPU-published and dormant cells stay inert", 
   assert.doesNotMatch(encode, /mapAsync|readActivitySnapshot|readGPUActivityPolicy/);
 });
 
-test("GPU retirement drops only bounded dry residue and clears stale receiver state", () => {
+test("GPU retirement drops only bounded dilute residue and clears stale receiver state", () => {
   const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn retireUnsupportedEmptyBricks");
   const end = webgpuSparseCM12ResidentWGSL.indexOf(
     "fn classifyPresentationBricks", begin,
@@ -352,9 +362,21 @@ test("GPU retirement drops only bounded dry residue and clears stale receiver st
   assert.ok(begin >= 0 && end > begin, "retirement kernel must be inspectable");
   const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
   assert.match(webgpuSparseCM12ResidentWGSL,
-    /occupiedCell=occupiedCell\|\|rho>CM12_DRY_CELL_THRESHOLD/);
+    /occupiedCell=occupiedCell\|\|rho>residencyDensity/);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /return max\(CM12_DRY_CELL_THRESHOLD,p\.sharpening\.z\)/,
+    "region liveness must use its own policy floor without weakening CM12 arithmetic cleanup");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /occupied=densityPresent&&densityMassFineCells>=p\.sharpening\.w/,
+    "a concentrated subcell fragment must not count as a populated region");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /activity\[output\+32u\],select\(0u,activitySupportMask\[0\],occupied\)/,
+    "subcell fragments must not keep neighboring regions alive through support masks");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /wet=wet\|\|rho>residencyDensityThreshold\(\)[\s\S]*massFineCells\+=max\(0\.0,rho\)\*cellVolume\(at\)[\s\S]*wet=wet&&massFineCells>=p\.sharpening\.w/,
+    "presentation population must agree with physical region liveness");
   assert.match(kernel, /activity\[output\+1u\]\)&64u/,
-    "mass above the shared dry threshold must retain its own brick");
+    "mass above the region-density floor must retain its own brick");
   assert.match(kernel, /activityRecord\(neighbor\)\+32u\]\)&\(1u<<bit\)/,
     "only the neighbor's directional surface/swept bit may retain this air brick");
   assert.match(kernel, /for\(var dz=-1;dz<=1;dz\+=1\)/);
@@ -419,6 +441,20 @@ test("Figure 7 promotes only fluid-bearing face receivers at construction", () =
   assert.equal(supportStats.fineBrickCount - initialStats.fineBrickCount, 8);
   assert.ok(dormantStats.leafCount < 100_000,
     `Figure 7 construction regressed to ${dormantStats.leafCount} packed cells`);
+});
+
+test("Figure 6 receiver capacity is live-set-shaped rather than domain-shaped", () => {
+  const scene = cm12Scene("cm12-figure-6");
+  const initial = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
+  });
+  const supported = residentSupportAtlas(initial, "adaptive");
+  const resident = dormantReceiverDomain(supported, "adaptive");
+  assert.ok(resident.bricks.length
+    <= SPARSE_CM12_RECEIVER_CAPACITY_FACTOR * supported.bricks.length);
+  assert.ok(resident.bricks.length < 0.5 * 16 ** 3,
+    "Figure 6 must not allocate its complete logical brick domain");
+  assert.equal(sparseBrickAtlasStats(resident).integratedMassFineCells, 94_276);
 });
 
 test("the 64-cubed mini dam has dormant receivers on every domain axis", () => {
