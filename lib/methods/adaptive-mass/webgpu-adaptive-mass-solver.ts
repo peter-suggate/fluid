@@ -31,7 +31,10 @@ import {
   type SparseAtlasDynamicsState,
 } from "./sparse-atlas-dynamics";
 import { WebGPUAdaptiveMassAtlasPresentation } from "./webgpu-adaptive-mass-atlas-presentation";
-import { WebGPUSparseCM12Resident } from "./webgpu-sparse-cm12-resident";
+import {
+  WebGPUSparseCM12Resident,
+  type SparseCM12GPUActivityRecord,
+} from "./webgpu-sparse-cm12-resident";
 
 /** Method-local long-run physics receipt carried through the generic info bag. */
 export interface AdaptiveMassStepTelemetry {
@@ -45,6 +48,12 @@ export interface AdaptiveMassStepTelemetry {
   adaptiveMaximumMixedSeamDivergence_s?: number;
   adaptiveMaximumDensityAfterTransport?: number;
   adaptiveMaximumDensityAfterConditioning?: number;
+}
+
+export interface AdaptiveMassGPUActivityBrick extends SparseCM12GPUActivityRecord {
+  readonly key: number;
+  readonly coordinate: SparseBrickVec3;
+  readonly resolution: SparseBrickResolution;
 }
 
 /** Reserve a compact receiver halo for the fixed-topology GPU control arms. */
@@ -392,11 +401,41 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     adaptiveInfo.adaptiveMaximumMixedSeamDivergence_s =
       diagnostics.maximumMixedSeamDivergence_s;
     adaptiveInfo.adaptiveMaximumInactiveFaceSpeedAfter_m_s = 0;
+    this.info.adaptiveActivityMaximumScore = diagnostics.activityMaximumScore;
+    this.info.adaptiveActivityMeasuredBrickCount = diagnostics.activityMeasuredBrickCount;
+    this.info.adaptiveActivitySurfaceBrickCount = diagnostics.activitySurfaceBrickCount;
+    this.info.adaptiveActivityHotBrickCount = diagnostics.activityHotBrickCount;
+    this.info.adaptiveActivityQuietBrickCount = diagnostics.activityQuietBrickCount;
+    this.info.adaptiveResolutionTopologyEpoch = diagnostics.activityTopologyEpoch;
+    // This rung measures and retains history only. Candidate topology has no
+    // authority yet, so an epoch must publish exact zero transition counts.
+    this.info.adaptiveResolutionPromotedBrickCount = 0;
+    this.info.adaptiveResolutionDemotedBrickCount = 0;
+    this.info.adaptiveResolutionDeferredPromotionCount = 0;
     this.info.completedTime_s = Math.max(
       this.info.completedTime_s ?? 0,
       this.info.submittedTime_s ?? 0,
     );
     return { ...this.info };
+  }
+
+  /** Explicit acceptance/debug readback; never consulted by advanceTo. */
+  async readGPUActivityPolicy(): Promise<{
+    readonly acceptedSteps: number;
+    readonly bricks: readonly AdaptiveMassGPUActivityBrick[];
+  }> {
+    const snapshot = await this.resident.readActivitySnapshot();
+    if (snapshot.records.length !== this.atlas.bricks.length) {
+      throw new Error("Sparse CM12 GPU activity record count does not match resident bricks");
+    }
+    return {
+      acceptedSteps: snapshot.acceptedSteps,
+      bricks: snapshot.records.map((record, index) => {
+        const brick = this.atlas.bricks[index]!;
+        return { ...record, key: brick.key, coordinate: brick.coordinate,
+          resolution: brick.resolution };
+      }),
+    };
   }
 
   destroy(): void {

@@ -2,14 +2,15 @@
 
 Implementation research and plan, 2026-08-14
 
-Status: Sparse CM12 is interactive and the two-level composite method is
-numerically operational. The current authority is still a CPU implementation
-published through WebGPU textures; the GPU-resident topology, transport, and
-pressure pipelines described below remain the production target. The existing
-uniform method remains the behavioral oracle and is not the implementation
-substrate.
+Status: Sparse CM12 is interactive and the fixed two-level composite method is
+GPU-resident. Construction still packs the initial compact topology on the
+host, but accepted transport, surface conditioning, pressure projection,
+diagnostics, and presentation remain on the device. Dynamic topology is the
+next production target. CPU implementations are test oracles only and may not
+become frame authority. The existing uniform method remains the behavioral
+oracle and is not the implementation substrate.
 
-Current implementation checkpoint (2026-08-14):
+Current implementation checkpoint (2026-08-15):
 
 - CM12 constants and pure formulas live in `lib/core/cm12-numerics.ts` and are
   consumed by the production uniform shaders and the adaptive CPU oracles.
@@ -30,13 +31,30 @@ Current implementation checkpoint (2026-08-14):
   CM12 surface, and projects one globally coupled composite pressure system.
   A two-second mixed-resolution symmetric-expansion receipt is stable and the
   matched mini-dam performance lane is inside the `1.20x` median target.
-- Resolution is not yet adaptive in the production sense. Construction uses a
-  component-size bootstrap plus an optional deterministic fine seam seed;
-  moving surface bricks are promoted immediately and never demoted. This is a
+- Resolution is not yet adaptive in the production sense. Construction selects
+  a fixed coarse scene-brick set plus fine receiver support for the adaptive
+  control arm; accepted GPU frames do not yet change that topology. This is a
   correctness scaffold, not an activity policy.
-- GPU-authored topology/classification, GPU transport and pressure authority,
-  dynamic demotion, solid coupling, and compact sparse surface publication
-  remain open.
+- GPU-authored dynamic topology publication and transfer, dynamic demotion,
+  solid coupling, and compact sparse surface publication remain open.
+- The resident GPU graph now owns CM12 transport, gamma diffusion/sharpening,
+  one composite Jacobi-PCG projection, and dense diagnostic publication. A
+  disjoint resident activity/history arena measures every compact brick after
+  projection, advances its own four-step epoch clock, and publishes score,
+  reason, hot/quiet, and D4 receipts without changing accepted topology. This
+  is the no-change GPU epoch required before candidate transfer is allowed.
+- From this checkpoint onward, every production adaptation increment is fully
+  GPU-resident. No per-frame CPU field readback, classifier, planner, transfer,
+  dispatch decision, topology rebuild, or fallback may participate in an
+  accepted step. Readback remains permitted only for explicit diagnostics and
+  acceptance tests.
+- The no-change pass is proven non-perturbing through a dispatch-on/off Dawn
+  A/B: through 30 mixed-resolution steps, mass, velocity D4 error, pressure D4
+  error, and maximum divergence are identical. The canonical 250-step baseline
+  is not yet green independently of this pass: mixed topology begins losing
+  velocity/pressure D4 symmetry at step 22, and forced-all-fine later reaches a
+  `3.05e-5 s^-1` float32 divergence spike. Candidate topology changes remain
+  blocked until those baseline failures are repaired rather than relaxed.
 
 Working method id: `adaptive-mass`
 User-facing method name: `Sparse CM12`
@@ -1419,18 +1437,24 @@ The first adaptive calm/active rung is done only when:
 
 ## 18. Immediate next actions
 
-1. Preserve the current fixed-topology two-second symmetry, long-run A/B, and
-   matched frame receipts as the pre-adaptation baseline.
-2. Replace construction-time component-size coarsening with the Rung A CPU
-   oracle: fine interface/predicted receivers, hysteretic deep-liquid demotion,
-   conservative transfers, global reprojection, and rollback.
+1. Restore and preserve the fixed-topology two-second symmetry baseline before
+   topology mutation: eliminate the mixed velocity/pressure D4 loss beginning
+   at step 22 and the forced-all-fine long-run divergence spikes without
+   weakening either gate. Keep the dispatch-on/off no-change receipt exact.
+2. Keep the Rung A CPU policy and transfer as an offline oracle only. Replace
+   construction-time component-size selection through GPU-authored measurement,
+   planning, conservative candidate transfer, global reprojection, validation,
+   and rollback; do not route accepted frames through the CPU oracle.
 3. Add translating-interface, settling-pool, slosh, and repeated wake/sleep CPU
    receipts. Capture resolution/history maps at every epoch, not just final
    fluid fields.
-4. Add method-colocated classifier/planner/transfer/row-patch stages to the
+4. Add method-colocated GPU classifier/planner/transfer/row-patch stages to the
    frame graph so topology costs and pressure iteration spikes are visible.
-5. Implement compact GPU measurement and history first. A no-change epoch must
-   pass the zero-allocation and frame-overhead gates before GPU transfer lands.
+5. Retain the compact GPU measurement/history pass as read-only authority until
+   its score/reason/history maps are exactly D4 equivariant and forced-all-fine
+   remains inside the Uniform CM12 comparison gates at every tested cadence. A
+   no-change epoch must pass the zero-allocation and frame-overhead gates before
+   GPU transfer lands.
 6. Implement GPU candidate allocation and exact `8^3 <-> 4^3` transfer, patch
    only changed descriptor neighborhoods, reproject, validate, and atomically
    publish.

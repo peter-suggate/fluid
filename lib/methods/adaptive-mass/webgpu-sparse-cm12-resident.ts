@@ -9,6 +9,8 @@ import { webgpuSparseCM12ResidentWGSL } from "./webgpu-sparse-cm12-resident.wgsl
 const INVALID = 0xffff_ffff;
 const WORKGROUP_SIZE = 64;
 const PCG_ITERATIONS = 128;
+const ACTIVITY_HEADER_WORDS = 8;
+const ACTIVITY_RECORD_WORDS = 8;
 
 interface PackedResidentTopology {
   readonly words: Uint32Array;
@@ -36,6 +38,18 @@ interface ResidentStateLayout {
   readonly applied: number; readonly divergence: number;
   readonly presentationBrickWet: number;
   readonly sharpeningDelta: number; readonly sharpeningAcceptance: number;
+}
+
+export interface SparseCM12GPUActivityRecord {
+  readonly scoreByte: number;
+  readonly reasons: number;
+  readonly hotEpochs: number;
+  readonly quietEpochs: number;
+}
+
+export interface SparseCM12GPUActivitySnapshot {
+  readonly acceptedSteps: number;
+  readonly records: readonly SparseCM12GPUActivityRecord[];
 }
 
 const align4 = (value: number): number => (value + 3) & ~3;
@@ -90,7 +104,7 @@ function packResidentTopology(
   const incidenceOffset = at; at += grid.cells.length + 1;
   const incidenceRecordOffset = at; at += 2 * incidenceCount;
   const ownerOffset = at; at += 4 * denseCount;
-  const brickOffset = at; at += 2 * atlas.bricks.length;
+  const brickOffset = at; at += 4 * atlas.bricks.length;
   const backgroundOwnerOffset = at; at += 2;
   const words = new Uint32Array(at);
 
@@ -179,8 +193,11 @@ function packResidentTopology(
         }
   }
   for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
-    words[brickOffset + 2 * brick] = firstCellByBrick[brick];
-    words[brickOffset + 2 * brick + 1] = cellCountByBrick[brick];
+    const record = brickOffset + 4 * brick;
+    words[record] = firstCellByBrick[brick];
+    words[record + 1] = cellCountByBrick[brick];
+    words[record + 2] = atlas.bricks[brick]!.resolution;
+    words[record + 3] = atlas.bricks[brick]!.key;
   }
   return { words, cellOffset, rowOffset, termOffset, incidenceOffset,
     incidenceRecordOffset, ownerOffset, brickOffset, backgroundOwnerOffset,
@@ -210,6 +227,7 @@ export class WebGPUSparseCM12Resident {
   private readonly partials: GPUBuffer;
   private readonly scalars: GPUBuffer;
   private readonly conditioning: GPUBuffer;
+  private readonly activity: GPUBuffer;
   private readonly diagnosticsReadback: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
   private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
@@ -223,7 +241,8 @@ export class WebGPUSparseCM12Resident {
     private readonly device: GPUDevice,
     private readonly dimensions: readonly [number, number, number],
     private readonly layout: ResidentStateLayout,
-    buffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer],
+    buffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer,
+      GPUBuffer],
     diagnosticsReadback: GPUBuffer,
     bindGroup: GPUBindGroup,
     pipelines: Readonly<Record<string, GPUComputePipeline>>,
@@ -232,7 +251,7 @@ export class WebGPUSparseCM12Resident {
     private horizontalD4Authority: boolean,
   ) {
     [this.parameters, this.topology, this.state, this.partials, this.scalars,
-      this.conditioning] = buffers;
+      this.conditioning, this.activity] = buffers;
     this.diagnosticsReadback = diagnosticsReadback;
     this.bindGroup = bindGroup;
     this.pipelines = pipelines;
@@ -280,9 +299,12 @@ export class WebGPUSparseCM12Resident {
       size: Math.max(4, 4 * grid.cells.length * 4),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
+    const activity = uploadBuffer(device, "Sparse CM12 resident activity history",
+      new Uint32Array(ACTIVITY_HEADER_WORDS
+        + ACTIVITY_RECORD_WORDS * packed.brickCount), storage);
     const diagnosticsReadback = device.createBuffer({
       label: "Sparse CM12 resident diagnostic readback",
-      size: 32,
+      size: 64,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
 
@@ -306,6 +328,7 @@ export class WebGPUSparseCM12Resident {
         { binding: 10, visibility: GPUShaderStage.COMPUTE,
           storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
         { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ],
     });
     const bindGroup = device.createBindGroup({ label: "Sparse CM12 resident bindings",
@@ -322,6 +345,7 @@ export class WebGPUSparseCM12Resident {
         { binding: 9, resource: presentation.pressureTexture.createView() },
         { binding: 10, resource: presentation.divergenceTexture.createView() },
         { binding: 11, resource: { buffer: conditioning } },
+        { binding: 12, resource: { buffer: activity } },
       ] });
     const shaderModule = device.createShaderModule({ label: "Sparse CM12 resident shader",
       code: webgpuSparseCM12ResidentWGSL });
@@ -340,12 +364,14 @@ export class WebGPUSparseCM12Resident {
       "updateResidual", "reduceResidual", "updateDirection", "projectFaces",
       "collocateAndDiagnose", "measureDivergenceDiagnostics",
       "reduceDivergenceDiagnostics",
+      "advanceActivityClock", "measureBrickActivity",
       "classifyPresentationBricks", "publishPresentation"] as const;
     const entries = await Promise.all(names.map(async (name) => [name,
       await device.createComputePipelineAsync({ label: `Sparse CM12 ${name}`,
         layout: pipelineLayout, compute: { module: shaderModule, entryPoint: name } })] as const));
     const result = new WebGPUSparseCM12Resident(device, atlas.dimensions, layout,
-      [parameters, topology, state, partials, scalars, conditioning], diagnosticsReadback,
+      [parameters, topology, state, partials, scalars, conditioning, activity],
+      diagnosticsReadback,
       bindGroup,
       Object.fromEntries(entries), grid.cells.length, grid.gradientRows.length,
       horizontalD4Authority);
@@ -413,6 +439,8 @@ export class WebGPUSparseCM12Resident {
     dispatch("collocateAndDiagnose", cells);
     dispatch("measureDivergenceDiagnostics", cells);
     dispatch("reduceDivergenceDiagnostics", 1);
+    dispatch("advanceActivityClock", 1);
+    dispatch("measureBrickActivity", this.lastPacked!.brickCount);
     dispatch("classifyPresentationBricks", Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
     pass.setPipeline(this.pipelines.publishPresentation!);
     pass.setBindGroup(0, this.bindGroup);
@@ -509,15 +537,24 @@ export class WebGPUSparseCM12Resident {
     readonly pressureRelativeResidual: number;
     readonly maximumDivergence_s: number;
     readonly maximumMixedSeamDivergence_s: number;
+    readonly activityMaximumScore: number;
+    readonly activitySurfaceBrickCount: number;
+    readonly activityHotBrickCount: number;
+    readonly activityQuietBrickCount: number;
+    readonly activityTopologyEpoch: boolean;
+    readonly activityMeasuredBrickCount: number;
   }> {
     this.assertLive();
     const encoder = this.device.createCommandEncoder({
       label: "Sparse CM12 diagnostic scalar readback",
     });
     encoder.copyBufferToBuffer(this.scalars, 0, this.diagnosticsReadback, 0, 32);
+    encoder.copyBufferToBuffer(this.activity, 0, this.diagnosticsReadback, 32, 32);
     this.device.queue.submit([encoder.finish()]);
     await this.diagnosticsReadback.mapAsync(GPUMapMode.READ);
-    const values = new Float32Array(this.diagnosticsReadback.getMappedRange());
+    const mapped = this.diagnosticsReadback.getMappedRange();
+    const values = new Float32Array(mapped, 0, 8);
+    const activity = new Uint32Array(mapped, 32, ACTIVITY_HEADER_WORDS);
     const rhsSquared = values[1]!;
     const residualSquared = values[4]!;
     const result = {
@@ -525,16 +562,54 @@ export class WebGPUSparseCM12Resident {
         / Math.max(rhsSquared, Number.MIN_VALUE)),
       maximumDivergence_s: values[6]!,
       maximumMixedSeamDivergence_s: values[7]!,
+      activityMaximumScore: activity[1]!,
+      activitySurfaceBrickCount: activity[2]!,
+      activityHotBrickCount: activity[3]!,
+      activityQuietBrickCount: activity[4]!,
+      activityTopologyEpoch: activity[5] !== 0,
+      activityMeasuredBrickCount: activity[6]!,
     };
     this.diagnosticsReadback.unmap();
     return result;
+  }
+
+  /** QA-only policy readback. It is never called by frame scheduling. */
+  async readActivitySnapshot(): Promise<SparseCM12GPUActivitySnapshot> {
+    this.assertLive();
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 activity QA readback",
+      size: this.activity.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 activity QA copy",
+      });
+      encoder.copyBufferToBuffer(this.activity, 0, readback, 0, this.activity.size);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const records = Array.from({ length: this.lastPacked!.brickCount }, (_, brick) => {
+        const at = ACTIVITY_HEADER_WORDS + ACTIVITY_RECORD_WORDS * brick;
+        return {
+          scoreByte: words[at]!,
+          reasons: words[at + 1]!,
+          hotEpochs: words[at + 2]!,
+          quietEpochs: words[at + 3]!,
+        };
+      });
+      return { acceptedSteps: words[0]!, records };
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     for (const buffer of [this.parameters, this.topology, this.state, this.partials,
-      this.scalars, this.conditioning]) {
+      this.scalars, this.conditioning, this.activity]) {
       buffer.destroy();
     }
     this.diagnosticsReadback.destroy();

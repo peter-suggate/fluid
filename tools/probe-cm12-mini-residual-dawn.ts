@@ -23,8 +23,9 @@ const dt_s = 1 / 30;
 const seconds = Number(argument("seconds") ?? 16 / 3);
 const steps = Math.ceil(seconds / dt_s);
 const sparseResolutionMode = argument("sparse-resolution") ?? "all-fine";
-if (sparseResolutionMode !== "all-fine" && sparseResolutionMode !== "all-coarse") {
-  throw new RangeError("sparse-resolution must be all-fine or all-coarse");
+if (sparseResolutionMode !== "adaptive" && sparseResolutionMode !== "all-fine"
+  && sparseResolutionMode !== "all-coarse") {
+  throw new RangeError("sparse-resolution must be adaptive, all-fine, or all-coarse");
 }
 const uniformResolutionMode = argument("uniform-resolution") ?? "fine";
 if (uniformResolutionMode !== "fine" && uniformResolutionMode !== "matched") {
@@ -57,6 +58,36 @@ async function readDensity(
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
       output.set(source.subarray(stride * (y + ny * z), stride * (y + ny * z) + nx),
         nx * (y + ny * z));
+    }
+    return output;
+  } finally {
+    if (buffer.mapState === "mapped") buffer.unmap();
+    buffer.destroy();
+  }
+}
+
+async function readOwners(
+  device: GPUDevice,
+  texture: GPUTexture,
+  dimensions: Dimensions,
+): Promise<Uint32Array> {
+  const [nx, ny, nz] = dimensions;
+  const bytesPerRow = Math.ceil(nx * 8 / 256) * 256;
+  const buffer = device.createBuffer({
+    size: bytesPerRow * ny * nz,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  try {
+    const encoder = device.createCommandEncoder();
+    encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: ny }, dimensions);
+    device.queue.submit([encoder.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const source = new Uint32Array(buffer.getMappedRange());
+    const output = new Uint32Array(2 * nx * ny * nz);
+    const stride = bytesPerRow / 4;
+    for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+      output.set(source.subarray(stride * (y + ny * z), stride * (y + ny * z) + 2 * nx),
+        2 * nx * (y + ny * z));
     }
     return output;
   } finally {
@@ -132,6 +163,66 @@ function integratedMassInFineCells(
   return sum;
 }
 
+function ownerScale(owners: Uint32Array, index: number): number {
+  const first = owners[2 * index] >>> 0;
+  const second = owners[2 * index + 1] >>> 0;
+  return (second & 0x8000_0000) !== 0
+    ? 2 ** ((first >>> 22) & 0xf)
+    : (first >>> 20) & 0x3ff;
+}
+
+function presentationInterpolationError(
+  density: Float32Array,
+  surfaceDensity: Float32Array,
+  owners: Uint32Array | undefined,
+  dimensions: Dimensions,
+) {
+  const [nx, ny, nz] = dimensions;
+  if (!owners) return { relativeL1: 0, maximumAbsolute: 0, coarseSamples: 0 };
+  const restricted = (x: number, y: number, z: number, scale: number) => {
+    let value = 0;
+    for (let dz = 0; dz < scale; dz += 1) for (let dy = 0; dy < scale; dy += 1) {
+      for (let dx = 0; dx < scale; dx += 1) {
+        value += density[scale * x + dx + nx
+          * (scale * y + dy + ny * (scale * z + dz))];
+      }
+    }
+    return value / scale ** 3;
+  };
+  let absolute = 0, reference = 0, maximumAbsolute = 0;
+  let coarseSamples = 0;
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) {
+      const index = x + nx * (y + ny * z);
+      const scale = ownerScale(owners, index);
+      if (scale !== 2) continue;
+      coarseSamples += 1;
+      const coarse = [nx / scale, ny / scale, nz / scale] as const;
+      const position = [x, y, z].map((value) => (value + 0.5) / scale - 0.5);
+      const lower = position.map(Math.floor);
+      const fraction = position.map((value, axis) => value - lower[axis]);
+      let expected = 0;
+      for (let dz = 0; dz < 2; dz += 1) for (let dy = 0; dy < 2; dy += 1) {
+        for (let dx = 0; dx < 2; dx += 1) {
+          const offset = [dx, dy, dz];
+          const q = offset.map((value, axis) => Math.max(0,
+            Math.min(coarse[axis] - 1, lower[axis] + value)));
+          const weight = offset.reduce((product, value, axis) => product
+            * (value === 0 ? 1 - fraction[axis] : fraction[axis]), 1);
+          expected += weight * restricted(q[0], q[1], q[2], scale);
+        }
+      }
+      const actual = surfaceDensity[index];
+      const error = Math.abs(actual - expected);
+      absolute += error;
+      reference += Math.abs(expected);
+      maximumAbsolute = Math.max(maximumAbsolute, error);
+    }
+  }
+  return { relativeL1: absolute / Math.max(reference, Number.MIN_VALUE),
+    maximumAbsolute, coarseSamples };
+}
+
 async function run(
   device: GPUDevice,
   method: SimulationMethod,
@@ -162,6 +253,8 @@ async function run(
     const density = await readDensity(device, solver.volumeTexture, dimensions);
     assert.ok(solver.surfaceFieldTexture);
     const levelSet = await readDensity(device, solver.surfaceFieldTexture, dimensions);
+    const owners = solver.gridCellTexture
+      ? await readOwners(device, solver.gridCellTexture, dimensions) : undefined;
     const finestCellSize_m = Math.min(
       scene.container.width_m / dimensions[0],
       scene.container.height_m / dimensions[1],
@@ -177,6 +270,9 @@ async function run(
         method: method.id,
         residual: residual(density, dimensions, latticeScale ** 3),
         upperWallFilm: upperWallFilm(surfaceDensity, dimensions),
+        presentationInterpolation: presentationInterpolationError(
+          density, surfaceDensity, owners, dimensions,
+        ),
         maximumDensity: density.reduce((maximum, value) => Math.max(maximum, value), 0),
         maximumSurfaceDensity: surfaceDensity.reduce(
           (maximum, value) => Math.max(maximum, value), 0),
@@ -190,6 +286,12 @@ async function run(
           / Math.max(initialMass_cells, Number.MIN_VALUE),
         fineBricks: info.adaptiveFineBrickCount,
         coarseBricks: info.adaptiveCoarseBrickCount,
+        activityMaximumScore: info.adaptiveActivityMaximumScore,
+        activityMeasuredBricks: info.adaptiveActivityMeasuredBrickCount,
+        activitySurfaceBricks: info.adaptiveActivitySurfaceBrickCount,
+        activityHotBricks: info.adaptiveActivityHotBrickCount,
+        activityQuietBricks: info.adaptiveActivityQuietBrickCount,
+        activityTopologyEpoch: info.adaptiveResolutionTopologyEpoch,
       },
     };
   } finally {

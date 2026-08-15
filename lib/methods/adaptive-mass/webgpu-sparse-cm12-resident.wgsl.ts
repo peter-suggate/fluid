@@ -13,6 +13,9 @@ ${createCm12NumericsWGSL()}
 
 const INVALID:u32=0xffffffffu;
 const WORKGROUP:u32=64u;
+const ACTIVITY_HEADER_WORDS:u32=8u;
+const ACTIVITY_RECORD_WORDS:u32=8u;
+const ACTIVITY_FIXED:f32=65536.0;
 
 struct Params {
   counts:vec4u,             // cell, row, incidence, dense
@@ -44,6 +47,10 @@ struct Params {
 @group(0)@binding(9)var pressureTexture:texture_storage_3d<r32float,write>;
 @group(0)@binding(10)var divergenceTexture:texture_storage_3d<r32float,write>;
 @group(0)@binding(11)var<storage,read_write>conditioning:array<atomic<i32>>;
+// This policy/history arena is the only output of the first dynamic-resolution
+// rung. It is device-resident and deliberately disjoint from accepted physics
+// and topology until candidate transfer and rollback are implemented.
+@group(0)@binding(12)var<storage,read_write>activity:array<atomic<u32>>;
 
 fn tf(index:u32)->f32{return bitcast<f32>(topology[index]);}
 fn sourceDensity()->u32{return select(p.stateOffsets0.x,p.stateOffsets0.y,p.frame.w>0.5);}
@@ -97,62 +104,37 @@ fn presentationPhi(cell:u32)->f32{
   return (CM12_LIQUID_ISOVALUE-state[destinationDensity()+cell])*4.0*p.frame.y;
 }
 
-// Match materializeAdaptiveMassPresentationAtlas's presentation-only linear
-// prolongation. Density remains piecewise constant; only phi is reconstructed
-// inside a coarse leaf so marching cubes sees the same finest-lattice samples
-// as the former CPU publisher.
-fn presentationFaceNeighborSample(cell:u32,axis:u32,side:i32)->vec3f{
-  let b=cellBase(cell);let scale=i32(round(tf(b+10u)));
-  let lower=vec3i(vec3u(topology[b+7u],topology[b+8u],topology[b+9u]));
-  let face=lower[axis]+select(scale,-1,side<0);
-  if(face<0||face>=i32(p.dimensions[axis])){return vec3f(0.0);}
-  let tangentA=select(0u,1u,axis==0u);
-  let tangentB=select(2u,1u,axis==2u);
-  let center=vec3f(tf(b),tf(b+1u),tf(b+2u));
-  var value=0.0;var distance=0.0;var samples=0.0;
-  for(var tangentBOffset=0;tangentBOffset<scale;tangentBOffset+=1){
-    for(var tangentAOffset=0;tangentAOffset<scale;tangentAOffset+=1){
-      var q=lower;q[axis]=face;q[tangentA]+=tangentAOffset;q[tangentB]+=tangentBOffset;
-      let neighbor=presentationOwnerCellAt(q);
-      if(neighbor==INVALID){
-        value+=4.0*p.frame.y;
-        distance+=abs(f32(face)+0.5-center[axis]);
-      }else{
-        let neighborBase=cellBase(neighbor);
-        value+=presentationPhi(neighbor);
-        distance+=abs(tf(neighborBase+axis)-center[axis]);
-      }
-      samples+=1.0;
-    }
-  }
-  return vec3f(value/samples,distance/samples,1.0);
+// Restrict authoritative rho by finest-cell volume. A coarse presentation
+// stencil can therefore cross a 2:1 seam without choosing an arbitrary fine
+// child, and its sample has exactly the mass of that virtual coarse cell.
+fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
+  var rho=0.0;
+  for(var dz=0;dz<cellScale;dz+=1){for(var dy=0;dy<cellScale;dy+=1){for(var dx=0;dx<cellScale;dx+=1){
+    let cell=presentationOwnerCellAt(lower+vec3i(dx,dy,dz));
+    if(cell!=INVALID){rho+=state[destinationDensity()+cell];}
+  }}}
+  return rho/f32(cellScale*cellScale*cellScale);
 }
 
-fn reconstructedPresentationPhi(cell:u32,coordinate:vec3i)->f32{
-  let b=cellBase(cell);let scale=i32(round(tf(b+10u)));let phi=presentationPhi(cell);
-  if(scale<=1){return phi;}
-  var gradient=vec3f(0.0);var maximumNeighborDelta=0.0;
-  for(var axis=0u;axis<3u;axis+=1u){
-    let negative=presentationFaceNeighborSample(cell,axis,-1);
-    let positive=presentationFaceNeighborSample(cell,axis,1);
-    if(negative.z>0.5){maximumNeighborDelta=max(maximumNeighborDelta,abs(negative.x-phi));}
-    if(positive.z>0.5){maximumNeighborDelta=max(maximumNeighborDelta,abs(positive.x-phi));}
-    if(negative.z>0.5&&positive.z>0.5){
-      gradient[axis]=(positive.x-negative.x)/max(positive.y+negative.y,1e-30);
-    }else if(positive.z>0.5){
-      gradient[axis]=(positive.x-phi)/max(positive.y,1e-30);
-    }else if(negative.z>0.5){
-      gradient[axis]=(phi-negative.x)/max(negative.y,1e-30);
-    }
-  }
-  let maximumOffset=0.5*f32(scale-1);
-  let predictedMaximumDelta=maximumOffset*(abs(gradient.x)+abs(gradient.y)+abs(gradient.z));
-  if(predictedMaximumDelta>maximumNeighborDelta&&predictedMaximumDelta>0.0){
-    gradient*=maximumNeighborDelta/predictedMaximumDelta;
-  }
-  let lower=vec3i(vec3u(topology[b+7u],topology[b+8u],topology[b+9u]));
-  let offset=vec3f(coordinate-lower)+vec3f(0.5)-vec3f(0.5*f32(scale));
-  return phi+dot(gradient,offset);
+// CM12 renders the rho=.5 contour. Evaluate its cell-centred rho with the
+// paper's trilinear weights on the current owner's lattice. This reads the
+// accepted rho every publication; the reconstruction follows moving liquid
+// and the current coarse/fine ownership instead of a constructor-time mode.
+fn interpolatedPresentationPhi(coordinate:vec3i,cellScale:i32)->f32{
+  let scale=f32(cellScale);
+  let shifted=(vec3f(coordinate)+vec3f(0.5))/scale-vec3f(0.5);
+  let lower=vec3i(floor(shifted));let fraction=fract(shifted);var rho=0.0;
+  let coarseDimensions=vec3i(p.dimensions.xyz)/cellScale;
+  for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
+    let offset=vec3i(dx,dy,dz);
+    let coarse=clamp(lower+offset,vec3i(0),coarseDimensions-vec3i(1));
+    let sample=restrictedPresentationDensity(coarse*cellScale,cellScale);
+    let wx=select(1.0-fraction.x,fraction.x,dx==1);
+    let wy=select(1.0-fraction.y,fraction.y,dy==1);
+    let wz=select(1.0-fraction.z,fraction.z,dz==1);
+    rho+=wx*wy*wz*sample;
+  }}}
+  return (CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
 }
 
 fn sampleVelocity(position:vec3f)->vec3f{
@@ -643,6 +625,14 @@ fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
 
 var<workgroup>reduceA:array<f32,64>;
 var<workgroup>reduceB:array<f32,64>;
+var<workgroup>activityDensitySum:array<i32,64>;
+var<workgroup>activityMomentX:array<i32,64>;
+var<workgroup>activityMomentY:array<i32,64>;
+var<workgroup>activityMomentZ:array<i32,64>;
+var<workgroup>activityDeformation:array<f32,64>;
+var<workgroup>activityPredictedMotion:array<f32,64>;
+var<workgroup>activityDetailError:array<f32,64>;
+var<workgroup>activitySurfaceAxes:array<u32,64>;
 fn reducePair(lane:u32,group:u32,a:f32,b:f32){
   reduceA[lane]=a;reduceB[lane]=b;workgroupBarrier();
   var width=32u;loop{if(lane<width){reduceA[lane]+=reduceA[lane+width];reduceB[lane]+=reduceB[lane+width];}
@@ -768,10 +758,157 @@ fn reduceDivergenceDiagnostics(@builtin(local_invocation_id)lid:vec3u){
   if(lid.x==0u){scalars[6]=reduceA[0];scalars[7]=reduceB[0];}
 }
 
+// Advance and clear the compact receipt entirely on the device. The host
+// encodes this fixed singleton but neither supplies nor consumes a policy
+// decision while advancing the simulation.
+@compute @workgroup_size(1)
+fn advanceActivityClock(){
+  let step=atomicAdd(&activity[0],1u)+1u;
+  atomicStore(&activity[1],0u); // maximum score
+  atomicStore(&activity[2],0u); // surface bricks
+  atomicStore(&activity[3],0u); // hot bricks
+  atomicStore(&activity[4],0u); // quiet bricks
+  atomicStore(&activity[5],select(0u,1u,step%4u==0u));
+  atomicStore(&activity[6],0u); // measured bricks
+  atomicStore(&activity[7],0u); // reserved failure flags
+}
+
+fn activityRecord(brick:u32)->u32{
+  return ACTIVITY_HEADER_WORDS+ACTIVITY_RECORD_WORDS*brick;
+}
+
+fn activityF32(index:u32)->f32{return bitcast<f32>(atomicLoad(&activity[index]));}
+
+// One workgroup owns one brick. Fixed-point density moments make the compact
+// history exactly invariant to x/z lane permutations for a D4-symmetric field;
+// only maxima are used for floating activity channels.
+@compute @workgroup_size(64)
+fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
+ @builtin(workgroup_id)wid:vec3u){
+  let brick=wid.x;let lane=lid.x;
+  if(brick>=p.dispatch.w){return;}
+  let brickRecord=p.topologyOffsets2.z+4u*brick;
+  let first=topology[brickRecord];let count=topology[brickRecord+1u];
+  let resolution=topology[brickRecord+2u];
+  var densitySum=0;var momentX=0;var momentY=0;var momentZ=0;
+  var deformation=0.0;var predictedMotion=0.0;var detailError=0.0;
+  var surfaceAxes=0u;var surfaceCell=false;
+  for(var cell=first+lane;cell<first+count;cell+=64u){
+    let rho=state[destinationDensity()+cell];let volume=cellVolume(cell);
+    let local=cell-first;let x=local%resolution;
+    let yz=local/resolution;let y=yz%resolution;let z=yz/resolution;
+    densitySum+=i32(round(rho*volume*ACTIVITY_FIXED));
+    momentX+=i32(round(rho*volume
+      *(f32(2u*x+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
+    momentY+=i32(round(rho*volume
+      *(f32(2u*y+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
+    momentZ+=i32(round(rho*volume
+      *(f32(2u*z+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
+    surfaceCell=surfaceCell||(rho>0.05&&rho<0.95);
+    let ownVelocityAt=destinationCellVelocity()+4u*cell;
+    let ownVelocity=vec3f(state[ownVelocityAt],state[ownVelocityAt+1u],
+      state[ownVelocityAt+2u]);
+    let ownWet=rho>=CM12_LIQUID_ISOVALUE;
+    for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+      let row=incidenceRow(incidence);let own=termCoefficient(incidenceTerm(incidence));
+      var crosses=rowKind(row)==3u&&ownWet;
+      let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+      for(var term=begin;term<end;term+=1u){
+        let coefficient=termCoefficient(term);if(own*coefficient>=0.0){continue;}
+        let neighbor=termCell(term);
+        crosses=crosses||(state[destinationDensity()+neighbor]>=CM12_LIQUID_ISOVALUE)!=ownWet;
+        let neighborVelocityAt=destinationCellVelocity()+4u*neighbor;
+        let neighborVelocity=vec3f(state[neighborVelocityAt],
+          state[neighborVelocityAt+1u],state[neighborVelocityAt+2u]);
+        deformation=max(deformation,p.frame.x*max(abs(ownVelocity.x-neighborVelocity.x),
+          max(abs(ownVelocity.y-neighborVelocity.y),abs(ownVelocity.z-neighborVelocity.z)))
+          /max(0.15*rowDistance(row),1e-12));
+      }
+      if(crosses){
+        surfaceAxes|=1u<<rowAxis(row);
+        predictedMotion=max(predictedMotion,p.frame.x
+          *abs(state[destinationFaceVelocity()+row])/max(0.25*rowDistance(row),1e-12));
+      }
+    }
+    if(resolution==8u){
+      let b=cellBase(cell);let q=vec3u(topology[b+7u],topology[b+8u],topology[b+9u]);
+      let group=2u*(q/2u);var childSum=0;
+      for(var dz=0u;dz<2u;dz+=1u){for(var dy=0u;dy<2u;dy+=1u){
+        for(var dx=0u;dx<2u;dx+=1u){
+          let child=ownerCellAt(vec3i(group+vec3u(dx,dy,dz)));
+          if(child!=INVALID){childSum+=i32(round(
+            state[destinationDensity()+child]*ACTIVITY_FIXED));}
+      }}}
+      let ownFixed=i32(round(rho*ACTIVITY_FIXED));
+      detailError=max(detailError,
+        f32(abs(8*ownFixed-childSum))/(8.0*ACTIVITY_FIXED));
+    }
+  }
+  activityDensitySum[lane]=densitySum;activityMomentX[lane]=momentX;
+  activityMomentY[lane]=momentY;activityMomentZ[lane]=momentZ;
+  activityDeformation[lane]=deformation;activityPredictedMotion[lane]=predictedMotion;
+  activityDetailError[lane]=detailError;
+  activitySurfaceAxes[lane]=surfaceAxes|select(0u,8u,surfaceCell);
+  workgroupBarrier();
+  var width=32u;loop{
+    if(lane<width){
+      activityDensitySum[lane]+=activityDensitySum[lane+width];
+      activityMomentX[lane]+=activityMomentX[lane+width];
+      activityMomentY[lane]+=activityMomentY[lane+width];
+      activityMomentZ[lane]+=activityMomentZ[lane+width];
+      activityDeformation[lane]=max(activityDeformation[lane],activityDeformation[lane+width]);
+      activityPredictedMotion[lane]=max(activityPredictedMotion[lane],
+        activityPredictedMotion[lane+width]);
+      activityDetailError[lane]=max(activityDetailError[lane],activityDetailError[lane+width]);
+      activitySurfaceAxes[lane]|=activitySurfaceAxes[lane+width];
+    }
+    workgroupBarrier();if(width==1u){break;}width/=2u;
+  }
+  if(lane!=0u){return;}
+  let output=activityRecord(brick);let step=atomicLoad(&activity[0]);
+  let totalVolume=f32(count)*cellVolume(first);
+  let meanDensity=f32(activityDensitySum[0])/(totalVolume*ACTIVITY_FIXED);
+  let moments=vec3f(f32(activityMomentX[0]),f32(activityMomentY[0]),
+    f32(activityMomentZ[0]))/(totalVolume*ACTIVITY_FIXED);
+  var temporal=0.0;
+  if(step>1u){
+    temporal=max(abs(meanDensity-activityF32(output+4u))/0.05,
+      max(abs(moments.x-activityF32(output+5u))/0.02,
+      max(abs(moments.y-activityF32(output+6u))/0.02,
+        abs(moments.z-activityF32(output+7u))/0.02)));
+  }
+  let axes=activitySurfaceAxes[0]&7u;
+  let surface=(activitySurfaceAxes[0]&8u)!=0u||axes!=0u;
+  let shape=select(0.0,1.0,countOneBits(axes)>=2u);
+  let scoreValue=clamp(max(max(activityDeformation[0],activityPredictedMotion[0]),
+    max(max(temporal,shape),activityDetailError[0]/0.08)),0.0,1.0);
+  let score=u32(round(255.0*scoreValue));var reasons=0u;
+  if(surface){reasons|=1u;}if(activityDeformation[0]>0.0){reasons|=2u;}
+  if(temporal>0.0){reasons|=4u;}if(activityDetailError[0]>0.0){reasons|=8u;}
+  if(activityPredictedMotion[0]>0.0){reasons|=16u;}if(step==1u){reasons|=32u;}
+  let topologyEpoch=atomicLoad(&activity[5])!=0u;
+  var hotEpochs=atomicLoad(&activity[output+2u]);
+  var quietEpochs=atomicLoad(&activity[output+3u]);
+  if(topologyEpoch){
+    hotEpochs=select(0u,min(255u,hotEpochs+1u),score>=160u);
+    quietEpochs=select(0u,min(255u,quietEpochs+1u),score<=96u
+      &&activityDetailError[0]<=0.08);
+  }
+  atomicStore(&activity[output],score);atomicStore(&activity[output+1u],reasons);
+  atomicStore(&activity[output+2u],hotEpochs);atomicStore(&activity[output+3u],quietEpochs);
+  atomicStore(&activity[output+4u],bitcast<u32>(meanDensity));
+  atomicStore(&activity[output+5u],bitcast<u32>(moments.x));
+  atomicStore(&activity[output+6u],bitcast<u32>(moments.y));
+  atomicStore(&activity[output+7u],bitcast<u32>(moments.z));
+  atomicMax(&activity[1],score);if(surface){atomicAdd(&activity[2],1u);}
+  if(score>=160u){atomicAdd(&activity[3],1u);}if(score<=96u){atomicAdd(&activity[4],1u);}
+  atomicAdd(&activity[6],1u);
+}
+
 @compute @workgroup_size(64)
 fn classifyPresentationBricks(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
-  let record=p.topologyOffsets2.z+2u*brick;let first=topology[record];let count=topology[record+1u];
+  let record=p.topologyOffsets2.z+4u*brick;let first=topology[record];let count=topology[record+1u];
   var wet=false;
   for(var at=first;at<first+count;at+=1u){
     wet=wet||state[destinationDensity()+at]>1e-5;
@@ -797,8 +934,10 @@ fn publishPresentation(@builtin(global_invocation_id)gid:vec3u){if(any(gid>=p.di
   // CM12 renders the 0.5 isocontour of authoritative rho. Section 3.8's
   // optional density postprocess is deliberately off, as in the paper's
   // default results; there is no independently advected wall-film tracer.
-  textureStore(levelSetTexture,coordinate,vec4f(
-    reconstructedPresentationPhi(presentationCell,coordinate)));
+  let presentationScale=i32(topology[cellBase(presentationCell)+10u]);
+  var phi=presentationPhi(presentationCell);
+  if(presentationScale>1){phi=interpolatedPresentationPhi(coordinate,presentationScale);}
+  textureStore(levelSetTexture,coordinate,vec4f(phi));
   textureStore(ownerTexture,coordinate,vec4u(topology[owner+1u],topology[owner+2u],0u,0u));
   let v=destinationCellVelocity()+4u*presentationCell;
   textureStore(velocityTexture,coordinate,vec4f(state[v]*p.frame.y,state[v+1u]*p.frame.y,state[v+2u]*p.frame.y,0.0));

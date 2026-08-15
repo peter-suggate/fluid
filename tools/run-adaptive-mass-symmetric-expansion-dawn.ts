@@ -22,6 +22,7 @@ import {
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 import {
+  type AdaptiveMassGPUActivityBrick,
   type AdaptiveMassStepTelemetry,
   WebGPUAdaptiveMassSolver,
 } from
@@ -89,6 +90,13 @@ interface Checkpoint {
   readonly adaptiveResolutionDeferredPromotionCount?: number;
   readonly adaptiveFineBrickCount?: number;
   readonly adaptiveCoarseBrickCount?: number;
+  readonly adaptiveActivityAcceptedSteps: number;
+  readonly adaptiveActivityD4MismatchCount: number;
+  readonly adaptiveActivityMaximumScore?: number;
+  readonly adaptiveActivityMeasuredBrickCount?: number;
+  readonly adaptiveActivitySurfaceBrickCount?: number;
+  readonly adaptiveActivityHotBrickCount?: number;
+  readonly adaptiveActivityQuietBrickCount?: number;
   readonly residentOwnerScales: readonly number[];
   readonly encodedSteps?: number;
   readonly submittedTime_s?: number;
@@ -96,6 +104,27 @@ interface Checkpoint {
   readonly completedTime_s?: number;
   readonly hostFluidAuthority?: string;
   readonly hostSimulationSizedWorkItems?: number;
+}
+
+function activityD4MismatchCount(
+  bricks: readonly AdaptiveMassGPUActivityBrick[],
+  dimensions: Dimensions,
+): number {
+  const brickDimensions = dimensions.map((value) => value / 8) as [number, number, number];
+  const byCoordinate = new Map(bricks.map((brick) => [brick.coordinate.join(","), brick]));
+  let mismatches = 0;
+  for (const brick of bricks) for (const target of [
+    [brickDimensions[0] - 1 - brick.coordinate[0], brick.coordinate[1], brick.coordinate[2]],
+    [brick.coordinate[0], brick.coordinate[1], brickDimensions[2] - 1 - brick.coordinate[2]],
+    [brick.coordinate[2], brick.coordinate[1], brick.coordinate[0]],
+  ] as const) {
+    const transformed = byCoordinate.get(target.join(","));
+    if (!transformed || transformed.scoreByte !== brick.scoreByte
+      || transformed.reasons !== brick.reasons
+      || transformed.hotEpochs !== brick.hotEpochs
+      || transformed.quietEpochs !== brick.quietEpochs) mismatches += 1;
+  }
+  return mismatches;
 }
 
 const DENSITY_SYMMETRY_LIMIT = 1e-3;
@@ -534,6 +563,7 @@ try {
     const capture = async (step: number): Promise<Checkpoint> => {
       await device.queue.onSubmittedWorkDone();
       const stats = await solver!.readStats();
+      const activity = await solver!.readGPUActivityPolicy();
       const adaptiveStats = stats as typeof stats & AdaptiveMassStepTelemetry;
       const density = await readTexture(device, solver!.volumeTexture, dimensions, 1);
       if (step === 0 && initialDensity === undefined) initialDensity = density.slice();
@@ -633,6 +663,15 @@ try {
           stats.adaptiveResolutionDeferredPromotionCount,
         adaptiveFineBrickCount: stats.adaptiveFineBrickCount,
         adaptiveCoarseBrickCount: stats.adaptiveCoarseBrickCount,
+        adaptiveActivityAcceptedSteps: activity.acceptedSteps,
+        adaptiveActivityD4MismatchCount: activityD4MismatchCount(
+          activity.bricks, dimensions,
+        ),
+        adaptiveActivityMaximumScore: stats.adaptiveActivityMaximumScore,
+        adaptiveActivityMeasuredBrickCount: stats.adaptiveActivityMeasuredBrickCount,
+        adaptiveActivitySurfaceBrickCount: stats.adaptiveActivitySurfaceBrickCount,
+        adaptiveActivityHotBrickCount: stats.adaptiveActivityHotBrickCount,
+        adaptiveActivityQuietBrickCount: stats.adaptiveActivityQuietBrickCount,
         residentOwnerScales,
         encodedSteps: stats.encodedSteps,
         submittedTime_s: stats.submittedTime_s,
@@ -765,6 +804,13 @@ try {
         `step ${step}: host fluid authority is ${checkpoint.hostFluidAuthority ?? "missing"}`);
       expect(failures, checkpoint.hostSimulationSizedWorkItems === 0,
         `step ${step}: host scheduled ${checkpoint.hostSimulationSizedWorkItems ?? "missing"} simulation-sized work items`);
+      expect(failures, checkpoint.adaptiveActivityAcceptedSteps === step,
+        `step ${step}: GPU activity clock is ${checkpoint.adaptiveActivityAcceptedSteps}`);
+      expect(failures, checkpoint.adaptiveActivityMeasuredBrickCount
+        === (checkpoint.adaptiveFineBrickCount ?? 0) + (checkpoint.adaptiveCoarseBrickCount ?? 0),
+      `step ${step}: GPU measured ${checkpoint.adaptiveActivityMeasuredBrickCount ?? "missing"} activity bricks`);
+      expect(failures, checkpoint.adaptiveActivityD4MismatchCount === 0,
+        `step ${step}: GPU activity/history map has ${checkpoint.adaptiveActivityD4MismatchCount} D4 mismatches`);
       for (const [clock, actual] of [
         ["submittedTime_s", checkpoint.submittedTime_s],
         ["simulatedTime_s", checkpoint.simulatedTime_s],

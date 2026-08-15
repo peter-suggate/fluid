@@ -52,6 +52,7 @@ export interface GPUEulerianInfo {
   adaptiveFineCoarseFaceConnectedPairCount?: number;
   /** Sparse CM12 activity-controller receipt for the latest accepted step. */
   adaptiveActivityMaximumScore?: number;
+  adaptiveActivityMeasuredBrickCount?: number;
   adaptiveActivitySurfaceBrickCount?: number;
   adaptiveActivityHotBrickCount?: number;
   adaptiveActivityQuietBrickCount?: number;

@@ -93,6 +93,11 @@ test("Dawn all-coarse mini dam vacates the upper walls without corner amplificat
   const result = JSON.parse(child.stdout) as {
     grids: { sparse: number[]; uniform: number[] };
     sparse: {
+      presentationInterpolation: {
+        relativeL1: number;
+        maximumAbsolute: number;
+        coarseSamples: number;
+      };
       upperWallFilm: {
         upperWallMaximum: number;
         upperWallLiquidCells: number;
@@ -108,6 +113,11 @@ test("Dawn all-coarse mini dam vacates the upper walls without corner amplificat
   assert.deepEqual(result.grids, { sparse: [32, 32, 32], uniform: [16, 16, 16] });
   assert.equal(result.sparse.fineBricks, 0);
   assert.equal(result.sparse.coarseBricks, 64);
+  assert.equal(result.sparse.presentationInterpolation.coarseSamples, 32 ** 3);
+  assert.ok(result.sparse.presentationInterpolation.relativeL1 < 1e-6,
+    `all-coarse presentation used discontinuous leaf values: ${result.sparse.presentationInterpolation.relativeL1}`);
+  assert.ok(result.sparse.presentationInterpolation.maximumAbsolute < 1e-6,
+    `all-coarse presentation interpolation error was ${result.sparse.presentationInterpolation.maximumAbsolute}`);
   assert.ok(Math.abs(result.sparse.relativeMassDrift) < 2e-4,
     `mass drifted by ${result.sparse.relativeMassDrift}`);
   // CM12 Sec. 3.7 permits small rho>1 excursions and removes them gradually;
@@ -116,6 +126,56 @@ test("Dawn all-coarse mini dam vacates the upper walls without corner amplificat
     `corner impact amplified density to ${result.sparse.maximumDensity}`);
   assert.ok(result.sparse.upperWallFilm.upperWallMaximum < 0.5,
     `upper-wall presentation remained liquid at rho=${result.sparse.upperWallFilm.upperWallMaximum}`);
+  assert.equal(result.sparse.upperWallFilm.upperWallLiquidCells, 0);
+  assert.equal(result.sparse.upperWallFilm.upperCornerLiquidCells, 0);
+  assert.deepEqual(result.validationErrors, []);
+});
+
+test("Dawn adaptive presentation reconstructs every live coarse owner", {
+  skip: !process.env.WEBGPU_NODE_MODULE,
+  timeout: 30_000,
+}, () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const child = spawnSync(process.execPath, [
+    "--import", "tsx", "tools/probe-cm12-mini-residual-dawn.ts",
+    "--seconds=5.333333333333333", "--sparse-resolution=adaptive",
+    "--uniform-resolution=fine",
+  ], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 25_000,
+    killSignal: "SIGKILL",
+    env: {
+      ...process.env,
+      FLUID_WEBGPU_BACKEND: process.env.FLUID_WEBGPU_BACKEND ?? "metal",
+    },
+  });
+  assert.equal(child.status, 0,
+    `mini32 adaptive probe failed\nstdout:\n${child.stdout}\nstderr:\n${child.stderr}`);
+  const result = JSON.parse(child.stdout) as {
+    sparse: {
+      fineBricks: number;
+      coarseBricks: number;
+      presentationInterpolation: {
+        relativeL1: number;
+        maximumAbsolute: number;
+        coarseSamples: number;
+      };
+      upperWallFilm: {
+        upperWallLiquidCells: number;
+        upperCornerLiquidCells: number;
+      };
+    };
+    validationErrors: string[];
+  };
+  assert.ok(result.sparse.fineBricks > 0, "adaptive probe had no fine bricks");
+  assert.ok(result.sparse.coarseBricks > 0, "adaptive probe had no coarse bricks");
+  assert.ok(result.sparse.presentationInterpolation.coarseSamples > 0,
+    "adaptive publication did not identify any live coarse presentation owners");
+  assert.ok(result.sparse.presentationInterpolation.relativeL1 < 1e-6,
+    `adaptive coarse presentation used discontinuous leaf values: ${result.sparse.presentationInterpolation.relativeL1}`);
+  assert.ok(result.sparse.presentationInterpolation.maximumAbsolute < 1e-6,
+    `adaptive coarse presentation interpolation error was ${result.sparse.presentationInterpolation.maximumAbsolute}`);
   assert.equal(result.sparse.upperWallFilm.upperWallLiquidCells, 0);
   assert.equal(result.sparse.upperWallFilm.upperCornerLiquidCells, 0);
   assert.deepEqual(result.validationErrors, []);
@@ -197,17 +257,14 @@ test("Dawn water-box has no frozen presentation shards after five seconds", {
       }
     }
     await device.queue.onSubmittedWorkDone();
-    const density = await readScalarTexture(solver.volumeTexture);
     const phi = await readScalarTexture(solver.surfaceFieldTexture!);
-    let signMismatchCount = 0;
-    for (let index = 0; index < density.length; index += 1) {
-      if ((density[index] >= 0.5) !== (phi[index] < 0)) signMismatchCount += 1;
-    }
     const phiSummary = summarizeScalarField(
       Float32Array.from(phi, (value) => value < 0 ? 1 : 0),
       ...dimensions,
     );
-    assert.equal(signMismatchCount, 0);
+    // Coarse rho is cell-centred authority. Its trilinear presentation samples
+    // need not have the same sign as the repeated leaf value at every finest
+    // cell; CM12 renders the interpolated rho=.5 contour, not that repetition.
     assert.equal(phiSummary.componentCount, 1, JSON.stringify(phiSummary));
     assert.ok(Math.abs(solver.info.representedVolumeDrift ?? Infinity) < 1e-8);
     assert.deepEqual(validationErrors, []);

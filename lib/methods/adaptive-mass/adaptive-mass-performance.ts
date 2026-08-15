@@ -24,7 +24,9 @@ export const SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE = Object.freeze({
   ...SPARSE_CM12_PERFORMANCE_ACCEPTANCE,
   sceneId: "minimal-power-dam-break-32",
   finestDimensions: [32, 32, 32] as const,
-  requiredInitialFineBrickCount: 1,
+  // Rung A protects a moving interface/receiver set, not one historical seam
+  // seed. Require useful mixed topology without freezing a scene-specific count.
+  minimumInitialFineBrickCount: 1,
   minimumInitialCoarseBrickCount: 1,
   minimumInitialFineCoarseFaceConnectedPairCount: 1,
   minimumInitialMixedSeamRows: 1,
@@ -176,14 +178,14 @@ export function evaluateSparseCM12Performance(
   if (uniform.methodId !== "uniform" || sparse.methodId !== "adaptive-mass") {
     failures.push("performance arms must be uniform then adaptive-mass");
   }
-  if ("requiredInitialFineBrickCount" in acceptance) {
+  if ("minimumInitialFineBrickCount" in acceptance) {
     const mixedAcceptance = acceptance as typeof SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE;
     const initial = sparse.initialTopology;
     if (!initial) {
       failures.push("adaptive-mass did not publish its initial mixed-fineness topology");
     } else {
-      if (initial.fineBricks !== mixedAcceptance.requiredInitialFineBrickCount) {
-        failures.push(`adaptive-mass initial fine-brick count ${initial.fineBricks} is not ${mixedAcceptance.requiredInitialFineBrickCount}`);
+      if (initial.fineBricks < mixedAcceptance.minimumInitialFineBrickCount) {
+        failures.push("adaptive-mass initial topology has no fine brick");
       }
       if (initial.coarseBricks < mixedAcceptance.minimumInitialCoarseBrickCount) {
         failures.push("adaptive-mass initial topology has no coarse brick");
