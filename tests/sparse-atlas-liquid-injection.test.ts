@@ -19,7 +19,6 @@ function state() {
   const atlas = initializeSparseBrickAtlasFromScene(scene, {
     finestDimensions: DIMENSIONS,
     maximumFinestCells: 1_048_576,
-    fineHalf: { axis: 0, side: "negative" },
   });
   return initializeSparseAtlasDynamics(atlas, { time_s: 4 });
 }

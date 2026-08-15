@@ -386,10 +386,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    *
    * `timeStep` picks between the paper 1/30 s operating step and the scene's
    * authored `maxDt_s`; both are consulted at the top of `advanceTo`, so the
-   * switch is a live one. Everything else this method offers — the resolution
-   * policy and the seam seed — decides how the atlas was packed and genuinely
-   * cannot move without a rebuild, which is why they stay out of
-   * `runtimeParamKeys`.
+   * switch is a live one. The only other control this method offers — the
+   * resolution policy — decides how the atlas was packed and genuinely cannot
+   * move without a rebuild, which is why it stays out of `runtimeParamKeys`.
    */
   applyRuntimeValues(values: MethodParamValues): void {
     const timeStep = values.timeStep === "scene" ? "scene" : "paper";

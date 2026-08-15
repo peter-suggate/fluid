@@ -21,9 +21,8 @@ const dimensions = [32, 32, 32] as const;
 let atlas = initializeSparseBrickAtlasFromScene(scene, {
   finestDimensions: dimensions,
   maximumFinestCells: 1_048_576,
-  fineHalf: { axis: 0, side: "negative" },
 });
-atlas = coarsenLargeQuiescentComponents(atlas, 8, { axis: 0, side: "negative" });
+atlas = coarsenLargeQuiescentComponents(atlas, 8);
 let state = initializeSparseAtlasDynamics(atlas);
 const dt_s = 1 / 30;
 const steps = Math.ceil(seconds / dt_s);

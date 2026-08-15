@@ -1030,9 +1030,11 @@ coarse receiver only when the swept-interface predictor proves no surface can
 enter it before the following epoch.
 
 A method-level seam sentinel may pin one fine brick, or a complete D4 orbit, for
-diagnostic A/B scenes. It is explicit in policy telemetry and is off for
-production and physics comparisons. The present `fineHalf` and component-size
-bootstrap are deleted once the sentinel and real classifier land.
+diagnostic A/B scenes. It would be explicit in policy telemetry and off for
+production and physics comparisons; none is implemented. `fineHalf`, the
+`fineSeed` half of the component-size bootstrap, and the `seamAxis`/`fineSide`
+method params that steered them are deleted (see step 8): the interface rule
+alone decides the initial rung, and the classifier grows the fine set from there.
 
 ### M4 — Physics-driven measurement, planning, and transfer
 
@@ -1475,8 +1477,8 @@ multiresolution liquid method.
 
 The first adaptive calm/active rung is done only when:
 
-- component-size bootstrap coarsening and implicit `fineHalf` policy are absent
-  from production selection;
+- component-size bootstrap coarsening is absent from production selection
+  (implicit `fineHalf` seeding already is);
 - the same accepted snapshot produces byte-identical score, reason, history,
   and resolution maps under x/z D4 transformations;
 - interface/predicted receivers promote before mass arrives, while deep liquid
@@ -1523,8 +1525,11 @@ The first adaptive calm/active rung is done only when:
 7. Implement GPU candidate allocation and exact `8^3 <-> 4^3` transfer, patch
    only changed descriptor neighborhoods, reproject, validate, and atomically
    publish.
-8. Remove `fineHalf` from production policy; retain only an explicit off-by-
-   default seam sentinel for diagnostics.
+8. DONE. `fineHalf`, `coarsenLargeQuiescentComponents`'s `fineSeed`, and the
+   `seamAxis`/`fineSide` params are removed outright rather than demoted to a
+   diagnostic sentinel: none of them reached the live solver, which packs its
+   initial rung from the interface rule alone. Add a seam sentinel only if a
+   diagnostic lane is later shown to need one.
 9. Run two-second symmetry, long-tank dam, and mini-dam matched A/B lanes with
    Adaptive and forced-all-fine Sparse CM12. Tune thresholds only from stored
    receipts; use Uniform only for explicitly diagnostic cross-checks.

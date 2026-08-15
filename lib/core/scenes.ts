@@ -74,8 +74,6 @@ export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze(
   quality: "balanced",
   overrides: Object.freeze({
     resolutionMode: "adaptive",
-    seamAxis: "x",
-    fineSide: "negative",
     timeStep: "scene",
   }),
 });

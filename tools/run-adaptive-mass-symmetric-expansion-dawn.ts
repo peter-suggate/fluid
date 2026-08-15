@@ -577,8 +577,6 @@ try {
       undefined,
       {
         resolutionMode,
-        seamAxis: "x",
-        fineSide: "negative",
         fineTileResolution: 8,
         coarseTileResolution: 4,
       },

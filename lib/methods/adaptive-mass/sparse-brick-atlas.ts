@@ -40,16 +40,10 @@ export interface SparseBrickAtlasInitializationOptions {
   /** Optional caller-owned construction guard; Sparse CM12 itself has no cell-count cap. */
   readonly maximumFinestCells?: number;
   readonly emptyEpsilon?: number;
-  /** Keep saturated bricks fine on one configurable half of the domain. */
-  readonly fineHalf?: {
-    readonly axis: 0 | 1 | 2;
-    readonly side: "negative" | "positive";
-  };
   /** Optional fixed-policy override for every nonempty brick, including interfaces. */
   readonly resolutionForBrick?: (input: {
     readonly coordinate: SparseBrickVec3;
     readonly brickDimensions: SparseBrickVec3;
-    readonly defaultResolution: SparseBrickResolution;
   }) => SparseBrickResolution;
 }
 
@@ -327,15 +321,11 @@ export function initializeSparseBrickAtlasFromScene(
         const interfaceBrick = brickHasInterface(
           scene, options.finestDimensions, coordinate, epsilon,
         );
-        let defaultResolution: SparseBrickResolution = 4;
-        if (options.fineHalf) {
-          const { axis, side } = options.fineHalf;
-          const onPositiveHalf = coordinate[axis] + 0.5 >= 0.5 * brickDimensions[axis];
-          if ((side === "positive") === onPositiveHalf) defaultResolution = 8;
-        }
+        // Unoverridden, only the interface rule below lifts a brick off the
+        // coarse rung; saturated interiors and dry receivers start at 4^3.
         const selected = options.resolutionForBrick?.({
-          coordinate, brickDimensions, defaultResolution,
-        }) ?? defaultResolution;
+          coordinate, brickDimensions,
+        }) ?? 4;
         if (selected !== 1 && selected !== 2 && selected !== 4 && selected !== 8) {
           throw new RangeError("resolutionForBrick must return 1, 2, 4, or 8");
         }
@@ -405,10 +395,6 @@ export function materializeSparseBrickAtlasDensity(atlas: SparseAdaptiveMassAtla
 export function coarsenLargeQuiescentComponents(
   atlas: SparseAdaptiveMassAtlas,
   maximumFineComponentBricks = 8,
-  fineSeed?: {
-    readonly axis: 0 | 1 | 2;
-    readonly side: "negative" | "positive";
-  },
 ): SparseAdaptiveMassAtlas {
   if (!Number.isSafeInteger(maximumFineComponentBricks)
     || maximumFineComponentBricks < 1) {
@@ -448,35 +434,8 @@ export function coarsenLargeQuiescentComponents(
   const denseDensity = materializeSparseBrickAtlasDensity(atlas);
   const bricks = components.flatMap((component) => {
     if (component.length <= maximumFineComponentBricks) return component;
-    let retainedFineKey: number | undefined;
-    if (fineSeed) {
-      const tangentialAxes = ([0, 1, 2] as const).filter(
-        (axis) => axis !== fineSeed.axis,
-      );
-      const centroid = component.reduce((sum, brick) => [
-        sum[0] + brick.coordinate[0] / component.length,
-        sum[1] + brick.coordinate[1] / component.length,
-        sum[2] + brick.coordinate[2] / component.length,
-      ], [0, 0, 0]);
-      const candidates = component.filter((brick) => brick.resolution === 8);
-      candidates.sort((left, right) => {
-        const alongSplit = fineSeed.side === "negative"
-          ? left.coordinate[fineSeed.axis] - right.coordinate[fineSeed.axis]
-          : right.coordinate[fineSeed.axis] - left.coordinate[fineSeed.axis];
-        if (alongSplit !== 0) return alongSplit;
-        let leftTangentialDistance = 0;
-        let rightTangentialDistance = 0;
-        for (const axis of tangentialAxes) {
-          leftTangentialDistance += (left.coordinate[axis] - centroid[axis]) ** 2;
-          rightTangentialDistance += (right.coordinate[axis] - centroid[axis]) ** 2;
-        }
-        return leftTangentialDistance - rightTangentialDistance
-          || left.key - right.key;
-      });
-      retainedFineKey = candidates[0]?.key;
-    }
     return component.map((brick) =>
-      brick.resolution === 4 || brick.key === retainedFineKey
+      brick.resolution === 4
         ? brick
         : sparseBrickFromDense(
           brick.key,

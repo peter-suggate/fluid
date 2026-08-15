@@ -198,7 +198,7 @@ export function evaluateSparseCM12Performance(
       }
       if (initial.fineCoarseFaceConnectedPairs
         < mixedAcceptance.minimumInitialFineCoarseFaceConnectedPairCount) {
-        failures.push("adaptive-mass retained fine seed is not face-connected to a coarse brick");
+        failures.push("adaptive-mass has no fine brick face-connected to a coarse brick");
       }
       if (initial.mixedSeamRows < mixedAcceptance.minimumInitialMixedSeamRows) {
         failures.push("adaptive-mass initial composite grid has no live mixed seam row");

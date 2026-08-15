@@ -2,25 +2,17 @@ import type { MethodParamValues } from "../../core/method-contract";
 import type { DiagnosticRow } from "../../core/method-diagnostics";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 
-const labelValue = (
-  value: unknown,
-  allowed: readonly string[],
-  fallback: string,
-): string => typeof value === "string" && allowed.includes(value) ? value : fallback;
-
 /**
  * Sparse CM12 publications owned by the fixed-world-brick method.
  *
  * The generic panel deliberately does not infer these cards from `gridKind`:
- * resident bricks, a frozen 4/8 seam orientation, and the composite pressure
- * verdict are facts about this method rather than about every adaptive grid.
+ * resident bricks, the 4/8 resolution split, and the composite pressure verdict
+ * are facts about this method rather than about every adaptive grid.
  */
 export function adaptiveMassDiagnosticRows(
   info: GPUEulerianInfo | undefined,
   values: MethodParamValues,
 ): readonly DiagnosticRow[] {
-  const axis = labelValue(values.seamAxis, ["x", "y", "z"], "x");
-  const fineSide = labelValue(values.fineSide, ["negative", "positive"], "negative");
   const allFine = values.resolutionMode === "all-fine";
   const allCoarse = values.resolutionMode === "all-coarse";
   const resident = info?.fluidBrickResidentCount;
@@ -35,7 +27,7 @@ export function adaptiveMassDiagnosticRows(
       value: info?.adaptiveFineBrickCount !== undefined
         ? `${info.adaptiveFineBrickCount} fine · ${info.adaptiveCoarseBrickCount ?? 0} coarse`
         : allFine ? "all resident tiles 8³"
-          : allCoarse ? "all resident tiles 4³" : `seed 8³ ${fineSide} ${axis}`,
+          : allCoarse ? "all resident tiles 4³" : "interface tiles 8³ · interiors 4³",
       unit: info?.adaptiveResolutionTopologyEpoch
         ? `${info.adaptiveResolutionPromotedBrickCount ?? 0} promoted · ${info.adaptiveResolutionDemotedBrickCount ?? 0} demoted this epoch`
         : `${info?.adaptiveActivitySurfaceBrickCount ?? 0} surface · score ${info?.adaptiveActivityMaximumScore ?? 0}/255`,

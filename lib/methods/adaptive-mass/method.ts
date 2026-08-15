@@ -8,15 +8,11 @@ import { adaptiveMassDiagnosticRows } from "./adaptive-mass-diagnostics";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from "./adaptive-mass-frame-pipeline";
 import { WebGPUAdaptiveMassSolver } from "./webgpu-adaptive-mass-solver";
 
-export type AdaptiveMassSeamAxis = "x" | "y" | "z";
-export type AdaptiveMassFineSide = "negative" | "positive";
 export type AdaptiveMassResolutionMode = "adaptive" | "all-fine" | "all-coarse";
 
 /** Initial sparse-resolution split consumed by the interactive solver factory. */
 export interface AdaptiveMassSolverOptions {
   readonly resolutionMode: AdaptiveMassResolutionMode;
-  readonly seamAxis: AdaptiveMassSeamAxis;
-  readonly fineSide: AdaptiveMassFineSide;
   readonly fineTileResolution: 8;
   readonly coarseTileResolution: 4;
   /** Omitted only by direct diagnostic constructors, which retain scene-step behavior. */
@@ -39,31 +35,6 @@ const params: MethodParamSpec[] = [
   },
   {
     kind: "select",
-    key: "seamAxis",
-    label: "Fine seed axis",
-    default: "x",
-    tier: "coarse",
-    options: [
-      { value: "x", label: "X axis" },
-      { value: "y", label: "Y axis" },
-      { value: "z", label: "Z axis" },
-    ],
-    hint: "Chooses the axis used to place the retained 8³ seam-acceptance seed. Changing it rebuilds the sparse solver.",
-  },
-  {
-    kind: "select",
-    key: "fineSide",
-    label: "Fine seed side",
-    default: "negative",
-    tier: "coarse",
-    options: [
-      { value: "negative", label: "Negative side · 8³" },
-      { value: "positive", label: "Positive side · 8³" },
-    ],
-    hint: "Places one deterministic 8³ seed on this side of each large quiescent component; activity-driven promotion will grow the fine region. Changing it rebuilds the solver.",
-  },
-  {
-    kind: "select",
     key: "timeStep",
     label: "Time step",
     default: "paper",
@@ -80,20 +51,13 @@ const params: MethodParamSpec[] = [
 /**
  * The controls a live Sparse CM12 solver adopts.
  *
- * Only the clock. The resolution policy and the seam seed decide how the atlas
- * was packed — a different rung or a different fine side is a different world —
- * so they stay structural. `timeStep` is consulted at the top of every
- * `advanceTo` and nowhere else, and it is also what the transport bar's step
- * slider releases: leaving it structural made a nudge of that slider rebuild
- * the sparse world to arrive at an identical one.
+ * Only the clock. The resolution policy decides how the atlas was packed — a
+ * different rung is a different world — so it stays structural. `timeStep` is
+ * consulted at the top of every `advanceTo` and nowhere else, and it is also
+ * what the transport bar's step slider releases: leaving it structural made a
+ * nudge of that slider rebuild the sparse world to arrive at an identical one.
  */
 export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze(["timeStep"] as const);
-
-const seamAxis = (value: unknown): AdaptiveMassSeamAxis =>
-  value === "y" || value === "z" ? value : "x";
-
-const fineSide = (value: unknown): AdaptiveMassFineSide =>
-  value === "positive" ? value : "negative";
 
 const resolutionMode = (value: unknown): AdaptiveMassResolutionMode =>
   value === "all-fine" || value === "all-coarse" ? value : "adaptive";
@@ -103,8 +67,6 @@ export function adaptiveMassSolverOptions(
 ): AdaptiveMassSolverOptions {
   return {
     resolutionMode: resolutionMode(values.resolutionMode),
-    seamAxis: seamAxis(values.seamAxis),
-    fineSide: fineSide(values.fineSide),
     fineTileResolution: 8,
     coarseTileResolution: 4,
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
@@ -155,16 +117,12 @@ export const adaptiveMassMethod: SimulationMethod = {
   normalizeValues: (values) => ({
     ...values,
     resolutionMode: resolutionMode(values.resolutionMode),
-    seamAxis: seamAxis(values.seamAxis),
-    fineSide: fineSide(values.fineSide),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
   }),
   effectiveStep_s: (_scene, values) =>
     values.timeStep !== "scene" ? CM12_PAPER_DT_S : undefined,
   presetFor: () => ({
     resolutionMode: "adaptive",
-    seamAxis: "x",
-    fineSide: "negative",
     timeStep: "paper",
   }),
   diagnosticRows: adaptiveMassDiagnosticRows,
