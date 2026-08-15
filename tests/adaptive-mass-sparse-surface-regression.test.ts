@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { getScenePreset } from "../lib/core/scenes";
@@ -66,6 +67,58 @@ test("resident-row surface conditioning is conservative", () => {
     `${result.gammaIntegralAbsoluteError}`);
   assert.ok(Array.from(result.fields.density).every((value) =>
     Number.isFinite(value) && value >= -1e-12));
+});
+
+test("Dawn all-coarse mini dam vacates the upper walls without corner amplification", {
+  skip: !process.env.WEBGPU_NODE_MODULE,
+  timeout: 30_000,
+}, () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const child = spawnSync(process.execPath, [
+    "--import", "tsx", "tools/probe-cm12-mini-residual-dawn.ts",
+    "--seconds=5.333333333333333", "--sparse-resolution=all-coarse",
+    "--uniform-resolution=matched",
+  ], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 25_000,
+    killSignal: "SIGKILL",
+    env: {
+      ...process.env,
+      FLUID_WEBGPU_BACKEND: process.env.FLUID_WEBGPU_BACKEND ?? "metal",
+    },
+  });
+  assert.equal(child.status, 0,
+    `mini32 all-coarse probe failed\nstdout:\n${child.stdout}\nstderr:\n${child.stderr}`);
+  const result = JSON.parse(child.stdout) as {
+    grids: { sparse: number[]; uniform: number[] };
+    sparse: {
+      upperWallFilm: {
+        upperWallMaximum: number;
+        upperWallLiquidCells: number;
+        upperCornerLiquidCells: number;
+      };
+      maximumDensity: number;
+      relativeMassDrift: number;
+      fineBricks: number;
+      coarseBricks: number;
+    };
+    validationErrors: string[];
+  };
+  assert.deepEqual(result.grids, { sparse: [32, 32, 32], uniform: [16, 16, 16] });
+  assert.equal(result.sparse.fineBricks, 0);
+  assert.equal(result.sparse.coarseBricks, 64);
+  assert.ok(Math.abs(result.sparse.relativeMassDrift) < 2e-4,
+    `mass drifted by ${result.sparse.relativeMassDrift}`);
+  // CM12 Sec. 3.7 permits small rho>1 excursions and removes them gradually;
+  // this ceiling catches an impact instability without forbidding that term.
+  assert.ok(result.sparse.maximumDensity <= 1.2,
+    `corner impact amplified density to ${result.sparse.maximumDensity}`);
+  assert.ok(result.sparse.upperWallFilm.upperWallMaximum < 0.5,
+    `upper-wall presentation remained liquid at rho=${result.sparse.upperWallFilm.upperWallMaximum}`);
+  assert.equal(result.sparse.upperWallFilm.upperWallLiquidCells, 0);
+  assert.equal(result.sparse.upperWallFilm.upperCornerLiquidCells, 0);
+  assert.deepEqual(result.validationErrors, []);
 });
 
 test("Dawn water-box has no frozen presentation shards after five seconds", {
@@ -155,7 +208,7 @@ test("Dawn water-box has no frozen presentation shards after five seconds", {
       ...dimensions,
     );
     assert.equal(signMismatchCount, 0);
-    assert.equal(phiSummary.componentCount, 1);
+    assert.equal(phiSummary.componentCount, 1, JSON.stringify(phiSummary));
     assert.ok(Math.abs(solver.info.representedVolumeDrift ?? Infinity) < 1e-8);
     assert.deepEqual(validationErrors, []);
   } finally {

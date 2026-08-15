@@ -1,4 +1,6 @@
 import type { SparseAtlasCompositeGrid } from "./sparse-atlas-composite-projection";
+import { sparseAtlasScalarsHaveHorizontalD4Symmetry } from
+  "./sparse-atlas-surface-conditioning";
 import type { SparseAdaptiveMassAtlas } from "./sparse-brick-atlas";
 import { packAdaptiveMassPresentationOwnerKey,
   type WebGPUAdaptiveMassAtlasPresentation } from "./webgpu-adaptive-mass-atlas-presentation";
@@ -33,7 +35,7 @@ interface ResidentStateLayout {
   readonly preconditioned: number; readonly direction: number;
   readonly applied: number; readonly divergence: number;
   readonly presentationBrickWet: number;
-  readonly presentationDensityA: number; readonly presentationDensityB: number;
+  readonly sharpeningDelta: number; readonly sharpeningAcceptance: number;
 }
 
 const align4 = (value: number): number => (value + 3) & ~3;
@@ -42,7 +44,6 @@ function residentStateLayout(
   cellCount: number,
   rowCount: number,
   brickCount: number,
-  denseCount: number,
 ): ResidentStateLayout {
   let at = 0;
   const cells = () => { const result = at; at += align4(cellCount); return result; };
@@ -55,8 +56,7 @@ function residentStateLayout(
     liquid: cells(), theta: rows(), residual: cells(), preconditioned: cells(),
     direction: cells(), applied: cells(), divergence: cells(),
     presentationBrickWet: (() => { const result = at; at += align4(brickCount); return result; })(),
-    presentationDensityA: (() => { const result = at; at += align4(denseCount); return result; })(),
-    presentationDensityB: (() => { const result = at; at += align4(denseCount); return result; })(),
+    sharpeningDelta: cells(), sharpeningAcceptance: cells(),
     floatCount: at,
   };
 }
@@ -209,6 +209,7 @@ export class WebGPUSparseCM12Resident {
   private readonly state: GPUBuffer;
   private readonly partials: GPUBuffer;
   private readonly scalars: GPUBuffer;
+  private readonly conditioning: GPUBuffer;
   private readonly diagnosticsReadback: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
   private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
@@ -222,15 +223,16 @@ export class WebGPUSparseCM12Resident {
     private readonly device: GPUDevice,
     private readonly dimensions: readonly [number, number, number],
     private readonly layout: ResidentStateLayout,
-    buffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer],
+    buffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer],
     diagnosticsReadback: GPUBuffer,
     bindGroup: GPUBindGroup,
     pipelines: Readonly<Record<string, GPUComputePipeline>>,
     cellCount: number,
     rowCount: number,
-    private readonly usesFinePresentationDensity: boolean,
+    private horizontalD4Authority: boolean,
   ) {
-    [this.parameters, this.topology, this.state, this.partials, this.scalars] = buffers;
+    [this.parameters, this.topology, this.state, this.partials, this.scalars,
+      this.conditioning] = buffers;
     this.diagnosticsReadback = diagnosticsReadback;
     this.bindGroup = bindGroup;
     this.pipelines = pipelines;
@@ -247,9 +249,8 @@ export class WebGPUSparseCM12Resident {
     presentation: WebGPUAdaptiveMassAtlasPresentation,
   ): Promise<WebGPUSparseCM12Resident> {
     const packed = packResidentTopology(atlas, grid);
-    const denseCount = atlas.dimensions[0] * atlas.dimensions[1] * atlas.dimensions[2];
     const layout = residentStateLayout(
-      grid.cells.length, grid.gradientRows.length, packed.brickCount, denseCount,
+      grid.cells.length, grid.gradientRows.length, packed.brickCount,
     );
     const initialState = new Float32Array(layout.floatCount);
     for (const cell of grid.cells) {
@@ -259,17 +260,11 @@ export class WebGPUSparseCM12Resident {
       initialState[layout.gammaB + cell.id] = cell.gamma;
       initialState[layout.liquid + cell.id] = cell.density >= 0.5 ? 1 : 0;
     }
-    for (let dense = 0; dense < denseCount; dense += 1) {
-      const cell = packed.words[packed.ownerOffset + 4 * dense]!;
-      const density = cell === INVALID ? 0 : grid.cells[cell]!.density;
-      initialState[layout.presentationDensityA + dense] = density;
-      initialState[layout.presentationDensityB + dense] = density;
-    }
-    const hasCoarseCells = grid.cells.some((cell) =>
-      cell.widthsFine.some((width) => width > 1));
-    // Any coarse support needs the finest-lattice tracer to carry the surface
-    // continuously across a coarse/fine or wet/dry brick boundary.
-    const usesFinePresentationDensity = hasCoarseCells;
+    const horizontalD4Authority = sparseAtlasScalarsHaveHorizontalD4Symmetry(
+      grid,
+      Float64Array.from(grid.cells, (cell) => cell.density),
+      Float64Array.from(grid.cells, (cell) => cell.gamma),
+    );
     const cellWorkgroups = Math.ceil(grid.cells.length / WORKGROUP_SIZE);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const parameters = device.createBuffer({ label: "Sparse CM12 resident parameters",
@@ -280,6 +275,11 @@ export class WebGPUSparseCM12Resident {
       size: Math.max(8, 8 * cellWorkgroups), usage: storage });
     const scalars = device.createBuffer({ label: "Sparse CM12 resident scalar reductions",
       size: 32, usage: storage });
+    const conditioning = device.createBuffer({
+      label: "Sparse CM12 conservative transport and conditioning accumulators",
+      size: Math.max(4, 4 * grid.cells.length * 4),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
     const diagnosticsReadback = device.createBuffer({
       label: "Sparse CM12 resident diagnostic readback",
       size: 32,
@@ -305,6 +305,7 @@ export class WebGPUSparseCM12Resident {
           storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
         { binding: 10, visibility: GPUShaderStage.COMPUTE,
           storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
+        { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ],
     });
     const bindGroup = device.createBindGroup({ label: "Sparse CM12 resident bindings",
@@ -320,6 +321,7 @@ export class WebGPUSparseCM12Resident {
         { binding: 8, resource: presentation.velocityTexture.createView() },
         { binding: 9, resource: presentation.pressureTexture.createView() },
         { binding: 10, resource: presentation.divergenceTexture.createView() },
+        { binding: 11, resource: { buffer: conditioning } },
       ] });
     const shaderModule = device.createShaderModule({ label: "Sparse CM12 resident shader",
       code: webgpuSparseCM12ResidentWGSL });
@@ -327,24 +329,26 @@ export class WebGPUSparseCM12Resident {
       bindGroupLayouts: [bindGroupLayout] });
     const names = ["injectLiquid", "initializeTransportVelocity",
       "extrapolateTransportVelocityToSource", "extrapolateTransportVelocityToDestination",
-      "prepareTransportFaces", "initializePresentationDensity",
-      "transportPresentationDensity", "transportCells",
-      "measureTransportMass",
-      "reduceTransportMass", "scaleTransport",
+      "prepareTransportFaces", "traceGammaAndBeta", "scatterDensityDeficit",
+      "gatherConservativeDensity", "diffuseGammaForwardX", "diffuseGammaForwardY",
+      "diffuseGammaForwardZ", "diffuseGammaReverseZ", "diffuseGammaReverseY",
+      "diffuseGammaReverseX", "averageGammaDiffusion", "scatterSharpeningMass",
+      "acceptSharpeningMass", "finalizeSharpening", "preserveHorizontalD4",
+      "commitHorizontalD4",
       "forceFaces", "classifyRows", "preparePressure",
       "initializePCG", "reduceInitialize", "applyDirection", "reduceCurvature",
       "updateResidual", "reduceResidual", "updateDirection", "projectFaces",
       "collocateAndDiagnose", "measureDivergenceDiagnostics",
-      "reduceDivergenceDiagnostics", "injectPresentationLiquid",
+      "reduceDivergenceDiagnostics",
       "classifyPresentationBricks", "publishPresentation"] as const;
     const entries = await Promise.all(names.map(async (name) => [name,
       await device.createComputePipelineAsync({ label: `Sparse CM12 ${name}`,
         layout: pipelineLayout, compute: { module: shaderModule, entryPoint: name } })] as const));
     const result = new WebGPUSparseCM12Resident(device, atlas.dimensions, layout,
-      [parameters, topology, state, partials, scalars], diagnosticsReadback,
+      [parameters, topology, state, partials, scalars, conditioning], diagnosticsReadback,
       bindGroup,
       Object.fromEntries(entries), grid.cells.length, grid.gradientRows.length,
-      usesFinePresentationDensity);
+      horizontalD4Authority);
     result.writeParameters(packed, 0.004, 1, 1, [0, 0, 0]);
     return result;
   }
@@ -360,6 +364,7 @@ export class WebGPUSparseCM12Resident {
     const packed = this.lastPacked!;
     this.writeParameters(packed, dt_s, finestCellSize_m, pressureScale,
       accelerationFinePerSecond2);
+    encoder.clearBuffer(this.conditioning);
     const pass = encoder.beginComputePass({ label: "Sparse CM12 resident frame" });
     const dispatch = (name: string, count: number) => {
       pass.setPipeline(this.pipelines[name]!); pass.setBindGroup(0, this.bindGroup);
@@ -374,14 +379,23 @@ export class WebGPUSparseCM12Resident {
         : "extrapolateTransportVelocityToDestination", cells);
     }
     dispatch("prepareTransportFaces", rows);
-    if (this.usesFinePresentationDensity) {
-      dispatch("transportPresentationDensity", Math.ceil(
-        this.dimensions[0] * this.dimensions[1] * this.dimensions[2] / WORKGROUP_SIZE));
+    dispatch("traceGammaAndBeta", cells);
+    dispatch("scatterDensityDeficit", cells);
+    dispatch("gatherConservativeDensity", cells);
+    dispatch("diffuseGammaForwardX", cells);
+    dispatch("diffuseGammaForwardY", cells);
+    dispatch("diffuseGammaForwardZ", cells);
+    dispatch("diffuseGammaReverseZ", cells);
+    dispatch("diffuseGammaReverseY", cells);
+    dispatch("diffuseGammaReverseX", cells);
+    dispatch("averageGammaDiffusion", cells);
+    dispatch("scatterSharpeningMass", cells);
+    dispatch("acceptSharpeningMass", cells);
+    dispatch("finalizeSharpening", cells);
+    if (this.horizontalD4Authority) {
+      dispatch("preserveHorizontalD4", cells);
+      dispatch("commitHorizontalD4", cells);
     }
-    dispatch("transportCells", cells);
-    dispatch("measureTransportMass", cells);
-    dispatch("reduceTransportMass", 1);
-    dispatch("scaleTransport", cells);
     dispatch("forceFaces", rows);
     dispatch("preparePressure", cells);
     dispatch("classifyRows", rows);
@@ -419,11 +433,6 @@ export class WebGPUSparseCM12Resident {
     pass.setPipeline(this.pipelines.classifyPresentationBricks!);
     pass.setBindGroup(0, this.bindGroup);
     pass.dispatchWorkgroups(Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    if (this.usesFinePresentationDensity) {
-      pass.setPipeline(this.pipelines.initializePresentationDensity!);
-      pass.dispatchWorkgroups(Math.ceil(
-        this.dimensions[0] * this.dimensions[1] * this.dimensions[2] / WORKGROUP_SIZE));
-    }
     pass.setPipeline(this.pipelines.publishPresentation!);
     pass.dispatchWorkgroups(
       Math.ceil(this.dimensions[0] / 4),
@@ -440,6 +449,11 @@ export class WebGPUSparseCM12Resident {
     radiusFine: readonly [number, number, number],
   ): void {
     this.assertLive();
+    if (Math.abs(centerFine[0] - 0.5 * this.dimensions[0]) > 1e-6
+      || Math.abs(centerFine[2] - 0.5 * this.dimensions[2]) > 1e-6
+      || Math.abs(radiusFine[0] - radiusFine[2]) > 1e-6) {
+      this.horizontalD4Authority = false;
+    }
     this.writeParameters(this.lastPacked!, 0.004, finestCellSize_m, 1, [0, 0, 0]);
     this.parameterF32.set([...centerFine, 0], 52);
     this.parameterF32.set([...radiusFine, 0], 56);
@@ -448,11 +462,6 @@ export class WebGPUSparseCM12Resident {
     pass.setPipeline(this.pipelines.injectLiquid!);
     pass.setBindGroup(0, this.bindGroup);
     pass.dispatchWorkgroups(Math.ceil(this.cellCount / WORKGROUP_SIZE));
-    if (this.usesFinePresentationDensity) {
-      pass.setPipeline(this.pipelines.injectPresentationLiquid!);
-      pass.dispatchWorkgroups(Math.ceil(
-        this.dimensions[0] * this.dimensions[1] * this.dimensions[2] / WORKGROUP_SIZE));
-    }
     pass.setPipeline(this.pipelines.classifyPresentationBricks!);
     pass.dispatchWorkgroups(Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
     pass.setPipeline(this.pipelines.publishPresentation!);
@@ -487,8 +496,7 @@ export class WebGPUSparseCM12Resident {
     u.set([l.pressure, l.rhs, l.diagonal, l.liquid], 24);
     u.set([l.theta, l.residual, l.preconditioned, l.direction], 28);
     u.set([l.applied, l.divergence, l.presentationBrickWet, 0], 32);
-    u.set([l.presentationDensityA, l.presentationDensityB,
-      this.usesFinePresentationDensity ? 1 : 0, 0], 36);
+    u.set([l.sharpeningDelta, l.sharpeningAcceptance, 0, 0], 36);
     f.set([dt_s, finestCellSize_m, pressureScale, this.parity], 40);
     f.set([...acceleration, 0], 44);
     u.set([Math.ceil(this.cellCount / WORKGROUP_SIZE),
@@ -525,7 +533,8 @@ export class WebGPUSparseCM12Resident {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    for (const buffer of [this.parameters, this.topology, this.state, this.partials, this.scalars]) {
+    for (const buffer of [this.parameters, this.topology, this.state, this.partials,
+      this.scalars, this.conditioning]) {
       buffer.destroy();
     }
     this.diagnosticsReadback.destroy();

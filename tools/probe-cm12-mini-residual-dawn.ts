@@ -87,6 +87,51 @@ function residual(
   return { mass_cells: mass, maximum, cellsAbove1e3: cells, minimumY, maxY };
 }
 
+function upperWallFilm(density: Float32Array, dimensions: Dimensions) {
+  const [nx, ny, nz] = dimensions;
+  const upperStart = Math.floor(0.75 * ny);
+  const wallBand = Math.max(1, Math.floor(Math.min(nx, nz) / 8));
+  let upperMass = 0, upperWallMass = 0, upperCornerMass = 0;
+  let upperCellsAbove1e3 = 0, upperWallCellsAbove1e3 = 0;
+  let upperWallMaximum = 0, upperWallLiquidCells = 0, upperCornerLiquidCells = 0;
+  for (let z = 0; z < nz; z += 1) for (let y = upperStart; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) {
+      const rho = density[x + nx * (y + ny * z)];
+      const xWall = x < wallBand || x >= nx - wallBand;
+      const zWall = z < wallBand || z >= nz - wallBand;
+      upperMass += rho;
+      upperCellsAbove1e3 += rho > 1e-3 ? 1 : 0;
+      if (xWall || zWall) {
+        upperWallMass += rho;
+        upperWallCellsAbove1e3 += rho > 1e-3 ? 1 : 0;
+        upperWallMaximum = Math.max(upperWallMaximum, rho);
+        upperWallLiquidCells += rho >= 0.5 ? 1 : 0;
+      }
+      if (xWall && zWall) {
+        upperCornerMass += rho;
+        upperCornerLiquidCells += rho >= 0.5 ? 1 : 0;
+      }
+    }
+  }
+  return { upperStart, wallBand, upperMass, upperWallMass, upperCornerMass,
+    upperCellsAbove1e3, upperWallCellsAbove1e3, upperWallMaximum,
+    upperWallLiquidCells, upperCornerLiquidCells };
+}
+
+function integratedMassInFineCells(
+  density: Float32Array,
+  cellVolumeInFineCells: number,
+): number {
+  let sum = 0, correction = 0;
+  for (const rho of density) {
+    const adjusted = cellVolumeInFineCells * rho - correction;
+    const next = sum + adjusted;
+    correction = next - sum - adjusted;
+    sum = next;
+  }
+  return sum;
+}
+
 async function run(
   device: GPUDevice,
   method: SimulationMethod,
@@ -105,18 +150,44 @@ async function run(
     undefined, () => {});
   try {
     assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], dimensions);
+    await device.queue.onSubmittedWorkDone();
+    const initialDensity = await readDensity(device, solver.volumeTexture, dimensions);
+    const initialMass_cells = integratedMassInFineCells(
+      initialDensity, latticeScale ** 3,
+    );
     for (let step = 1; step <= steps; step += 1) {
       while (!solver.advanceTo(step * dt_s, [])) await new Promise(setImmediate);
     }
     await device.queue.onSubmittedWorkDone();
     const density = await readDensity(device, solver.volumeTexture, dimensions);
+    assert.ok(solver.surfaceFieldTexture);
+    const levelSet = await readDensity(device, solver.surfaceFieldTexture, dimensions);
+    const finestCellSize_m = Math.min(
+      scene.container.width_m / dimensions[0],
+      scene.container.height_m / dimensions[1],
+      scene.container.depth_m / dimensions[2],
+    );
+    const surfaceDensity = Float32Array.from(levelSet, (phi) =>
+      Math.max(0, Math.min(1.5, 0.5 - phi / (4 * finestCellSize_m))));
     const info = await solver.readStats();
+    const mass_cells = integratedMassInFineCells(density, latticeScale ** 3);
     return {
       density,
       receipt: {
         method: method.id,
         residual: residual(density, dimensions, latticeScale ** 3),
-        massDrift: info.representedVolumeDrift,
+        upperWallFilm: upperWallFilm(surfaceDensity, dimensions),
+        maximumDensity: density.reduce((maximum, value) => Math.max(maximum, value), 0),
+        maximumSurfaceDensity: surfaceDensity.reduce(
+          (maximum, value) => Math.max(maximum, value), 0),
+        maximumSpeed_m_s: info.maxSpeed_m_s,
+        pressureRelativeResidual: info.pressureRelativeResidual,
+        maximumPostProjectionDivergence_s: info.maxDivergenceAfter_s,
+        initialMass_cells,
+        mass_cells,
+        massDrift_cells: mass_cells - initialMass_cells,
+        relativeMassDrift: (mass_cells - initialMass_cells)
+          / Math.max(initialMass_cells, Number.MIN_VALUE),
         fineBricks: info.adaptiveFineBrickCount,
         coarseBricks: info.adaptiveCoarseBrickCount,
       },
@@ -165,6 +236,9 @@ try {
   const device = await adapter.requestDevice({
     requiredLimits: requiredFluidDeviceLimits(adapter.limits),
   });
+  const validationErrors: string[] = [];
+  device.addEventListener("uncapturederror", (event) =>
+    validationErrors.push(event.error.message));
   try {
     const uniform = await run(
       device, uniformMethod, uniformDimensions, uniformLatticeScale,
@@ -202,6 +276,7 @@ try {
         supportIntersectionOverUnion1e3:
           supportIntersection / Math.max(1, supportUnion),
       },
+      validationErrors,
     }, null, 2));
   } finally {
     device.destroy();

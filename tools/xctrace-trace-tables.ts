@@ -46,6 +46,7 @@ interface Frame {
   readonly fmt?: string;
   readonly isColumn?: boolean;
   readonly counted?: boolean;
+  readonly backtraceFrames?: string[];
 }
 
 export interface ParseTableOptions {
@@ -63,6 +64,7 @@ export async function* parseTraceTable(
   const wanted = options.columns ? new Set(options.columns) : undefined;
   const values = new Map<string, { fmt?: string; text: string }>();
   const frameNames = new Map<string, string>();
+  const backtraceFrames = new Map<string, readonly string[]>();
   const columns: string[] = [];
   const stack: Frame[] = [];
 
@@ -114,6 +116,10 @@ export async function* parseTraceTable(
           continue;
         }
         if (frame.id !== undefined) values.set(frame.id, { fmt: frame.fmt, text: body });
+        if (frame.backtraceFrames !== undefined) {
+          if (frame.id !== undefined) backtraceFrames.set(frame.id, frame.backtraceFrames);
+          row.frames = frame.backtraceFrames;
+        }
         if (frame.isColumn) assign(frame.fmt !== undefined ? frame.fmt : body);
         if (frame.counted) rowDepth -= 1;
         continue;
@@ -150,7 +156,13 @@ export async function* parseTraceTable(
           frameNames.set(attributes.id, name);
         }
         if (inRow && name !== undefined) {
-          ((row.frames ??= []) as string[]).push(name);
+          for (let index = stack.length - 1; index >= 0; index -= 1) {
+            const collector = stack[index]?.backtraceFrames;
+            if (collector !== undefined) {
+              collector.push(name);
+              break;
+            }
+          }
         }
         if (!selfClose) {
           stack.push({ counted: inRow });
@@ -170,6 +182,10 @@ export async function* parseTraceTable(
         if (isColumn) {
           const hit = values.get(attributes.ref);
           assign(hit === undefined ? null : (hit.fmt !== undefined ? hit.fmt : hit.text));
+          if (options.stacks && openName === "tagged-backtrace") {
+            const frames = backtraceFrames.get(attributes.ref);
+            if (frames !== undefined) row.frames = frames;
+          }
         }
         continue;
       }
@@ -183,6 +199,7 @@ export async function* parseTraceTable(
 
       stack.push({
         id: attributes.id, fmt: attributes.fmt, isColumn, counted: inRow,
+        backtraceFrames: options.stacks && openName === "tagged-backtrace" ? [] : undefined,
       });
       if (inRow) rowDepth += 1;
       text = "";
