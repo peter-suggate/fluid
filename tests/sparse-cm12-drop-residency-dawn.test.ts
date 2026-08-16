@@ -3,7 +3,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
-import { defaultScene } from "../lib/core/model";
+import { cloneScene, defaultScene } from "../lib/core/model";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
@@ -12,6 +12,8 @@ import { initializeSparseBrickAtlasFromScene } from
   "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import { residentSupportAtlas, WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { SPARSE_CM12_ACTIVITY_POLICY } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
@@ -119,6 +121,8 @@ dawnTest("Dawn makes a dormant apron brick resident for a dropped ball",
         const activated = afterDrop.bricks.find((brick) => brick.key === target.key)!;
         assert.equal(activated.active, true,
           `dropping into brick ${target.coordinate.join(",")} must make it resident`);
+        assert.equal(activated.acceptedResolution, 8,
+          "a dropped ball must be promoted before it is wetted, not one simulation step later");
         // Read the water itself, not only the activity pass's summary of it:
         // a drop that activates a brick and then writes nothing into it is the
         // same lost gesture wearing a resident bit.
@@ -145,9 +149,70 @@ dawnTest("Dawn makes a dormant apron brick resident for a dropped ball",
         assert.ok(stepped.meanDensity > 0,
           `the dropped ball must carry mass; measured ${stepped.meanDensity}`);
         assert.equal(stepped.acceptedResolution, 8,
-          "a dropped ball is a free surface, so its brick must reach 8^3");
+          "a dropped ball is a free surface, so its brick must remain 8^3");
       } finally {
         solver.destroy();
+      }
+
+      // Isolate the already-active path in a full, zero-gravity cube which
+      // deterministically walks 8 -> 4 -> 2 -> 1 before the injection.
+      const calm = cloneScene(defaultScene);
+      calm.rigidBodies = [];
+      calm.container = { ...calm.container,
+        width_m: 0.8, height_m: 0.8, depth_m: 0.8, fillFraction: 1 };
+      calm.voxelDomain.finestCellSize_m = 0.05;
+      calm.fluid.initialCondition = "dam-break";
+      calm.fluid.initialDamBreakDimensions_m = { x: 0.8, y: 0.8, z: 0.8 };
+      calm.fluid.gravity_m_s2 = { x: 0, y: 0, z: 0 };
+      const activeSolver = await WebGPUAdaptiveMassSolver.createAsync(
+        device, calm, "balanced", undefined,
+        {
+          resolutionMode: "all-fine",
+          fineTileResolution: 8,
+          coarseTileResolution: 4,
+          surfaceFineRings: 1,
+          receiverSupportRings: 1,
+          receiverFloor: 1,
+          timeStep: "paper",
+          activityPolicy: {
+            ...SPARSE_CM12_ACTIVITY_POLICY,
+            activitySignals: true,
+            topologyCadenceSteps: 1,
+            demoteEpochs: 1,
+            prepareBricksPerFrame: 256,
+          },
+          pressureIterations: 8,
+        },
+        () => {},
+      );
+      try {
+        for (let step = 1; step <= 3; step += 1) {
+          assert.equal(activeSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        }
+        await device.queue.onSubmittedWorkDone();
+        const beforeActiveDrop = await activeSolver.readGPUActivityPolicy();
+        const intersected = beforeActiveDrop.bricks.filter((brick) => brick.active
+          && brick.coordinate[1] === 0);
+        assert.equal(intersected.length, 4,
+          "the calm cube must expose four active bricks around its horizontal centre");
+        assert.ok(intersected.every((brick) => brick.acceptedResolution === 1),
+          "the calm injection targets must first reach the 1-cubed rung");
+        const beforeByKey = new Map(beforeActiveDrop.bricks
+          .map((brick) => [brick.key, brick.acceptedResolution] as const));
+        activeSolver.injectLiquidBall({
+          centre_m: { x: 0, y: 0.2, z: 0 }, radius_m: 0.1,
+        });
+        await device.queue.onSubmittedWorkDone();
+        const afterActiveDrop = await activeSolver.readGPUActivityPolicy();
+        assert.ok(intersected.every((targetBrick) => afterActiveDrop.bricks.find(
+          (brick) => brick.key === targetBrick.key)?.acceptedResolution === 8),
+        "all four already-active coarse injection targets must promote before wetting");
+        assert.ok(afterActiveDrop.bricks.every((brick) => {
+          const previous = beforeByKey.get(brick.key);
+          return previous === undefined || brick.acceptedResolution >= previous;
+        }), "dropping liquid must never coarsen accepted topology");
+      } finally {
+        activeSolver.destroy();
       }
       const validation = await device.popErrorScope();
       assert.equal(validation?.message, undefined);

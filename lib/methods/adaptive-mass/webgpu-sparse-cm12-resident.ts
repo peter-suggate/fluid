@@ -367,6 +367,15 @@ function packAcceptedTopologyTemplates(
     incidenceOffsets[cell + 1] = incidenceOffsets[cell]! + incidenceCounts[cell]!;
   }
   const incidenceCount = incidenceOffsets[cells.length]!;
+  const pressureEdgeCounts = new Uint32Array(cells.length);
+  for (const row of rows) for (const own of row.terms) {
+    pressureEdgeCounts[own.cellId] += row.terms.length - 1;
+  }
+  const pressureEdgeOffsets = new Uint32Array(cells.length + 1);
+  for (let cell = 0; cell < cells.length; cell += 1) {
+    pressureEdgeOffsets[cell + 1] = pressureEdgeOffsets[cell]! + pressureEdgeCounts[cell]!;
+  }
+  const pressureEdgeCount = pressureEdgeOffsets[cells.length]!;
   let at = TEMPLATE_HEADER_WORDS;
   const cellOffset = at; at += 16 * cells.length;
   const rowOffset = at; at += 12 * rows.length;
@@ -375,10 +384,13 @@ function packAcceptedTopologyTemplates(
   const incidenceRecordOffset = at; at += 2 * incidenceCount;
   const cellRangeOffset = at; at += 8 * atlas.bricks.length;
   const rowRequirementOffset = at; at += requirementWords;
+  const pressureEdgeOffset = at; at += cells.length + 1;
+  const pressureEdgeRecordOffset = at; at += 3 * pressureEdgeCount;
   const words = new Uint32Array(at);
   words.set([TEMPLATE_MAGIC, 1, cells.length, rows.length, termCount, incidenceCount,
     cellOffset, rowOffset, termOffset, incidenceOffset, incidenceRecordOffset,
     cellRangeOffset, rowRequirementOffset, atlas.bricks.length], 0);
+  words[15] = pressureEdgeOffset;
   for (const cell of cells) {
     const base = cellOffset + 16 * cell.id;
     setF32(words, base, cell.centerFine[0]); setF32(words, base + 1, cell.centerFine[1]);
@@ -401,7 +413,9 @@ function packAcceptedTopologyTemplates(
     }
   }
   words.set(incidenceOffsets, incidenceOffset);
+  words.set(pressureEdgeOffsets, pressureEdgeOffset);
   const incidenceCursor = incidenceOffsets.slice(0, cells.length);
+  const pressureEdgeCursor = pressureEdgeOffsets.slice(0, cells.length);
   let nextTerm = 0, requirementAt = rowRequirementOffset;
   for (const row of rows) {
     const base = rowOffset + 12 * row.id;
@@ -425,6 +439,15 @@ function packAcceptedTopologyTemplates(
       words[incidenceRecordOffset + 2 * incidence] = row.id;
       words[incidenceRecordOffset + 2 * incidence + 1] = nextTerm;
       nextTerm += 1;
+    }
+    for (const own of row.terms) for (const other of row.terms) {
+      if (other.cellId === own.cellId) continue;
+      const edge = pressureEdgeCursor[own.cellId]++;
+      const record = pressureEdgeRecordOffset + 3 * edge;
+      words[record] = row.id;
+      words[record + 1] = other.cellId;
+      setF32(words, record + 2,
+        own.coefficient * row.dualWeight * other.coefficient);
     }
     words[requirementAt++] = owners.length;
     for (const owner of owners) {
@@ -649,6 +672,15 @@ PackedResidentTopologyTemplates {
     incidences[row.terms[term]!.cellId]!.push({ row: row.id, term: termCount++ });
   }
   const incidenceCount = incidences.reduce((sum, list) => sum + list.length, 0);
+  const pressureEdgeCounts = new Uint32Array(cells.length);
+  for (const row of rows) for (const own of row.terms) {
+    pressureEdgeCounts[own.cellId] += row.terms.length - 1;
+  }
+  const pressureEdgeOffsets = new Uint32Array(cells.length + 1);
+  for (let cell = 0; cell < cells.length; cell += 1) {
+    pressureEdgeOffsets[cell + 1] = pressureEdgeOffsets[cell]! + pressureEdgeCounts[cell]!;
+  }
+  const pressureEdgeCount = pressureEdgeOffsets[cells.length]!;
   let at = TEMPLATE_HEADER_WORDS;
   const cellOffset = at; at += 16 * cells.length;
   const rowOffset = at; at += 12 * rows.length;
@@ -660,10 +692,13 @@ PackedResidentTopologyTemplates {
   const rowRequirementOffsets = rowRequirements.map((requirements) => {
     const result = at; at += 1 + requirements.length; return result;
   });
+  const pressureEdgeOffset = at; at += cells.length + 1;
+  const pressureEdgeRecordOffset = at; at += 3 * pressureEdgeCount;
   const words = new Uint32Array(at);
   words.set([TEMPLATE_MAGIC, 1, cells.length, rows.length, termCount, incidenceCount,
     cellOffset, rowOffset, termOffset, incidenceOffset, incidenceRecordOffset,
     cellRangeOffset, rowRequirementOffset, atlas.bricks.length], 0);
+  words[15] = pressureEdgeOffset;
   for (const cell of cells) {
     const base = cellOffset + 16 * cell.id;
     setF32(words, base, cell.centerFine[0]); setF32(words, base + 1, cell.centerFine[1]);
@@ -707,6 +742,17 @@ PackedResidentTopologyTemplates {
   for (const requirements of rowRequirements) {
     words[requirementAt++] = requirements.length / 2;
     words.set(requirements, requirementAt); requirementAt += requirements.length;
+  }
+  words.set(pressureEdgeOffsets, pressureEdgeOffset);
+  const pressureEdgeCursor = pressureEdgeOffsets.slice(0, cells.length);
+  for (const row of rows) for (const own of row.terms) for (const other of row.terms) {
+    if (other.cellId === own.cellId) continue;
+    const edge = pressureEdgeCursor[own.cellId]++;
+    const record = pressureEdgeRecordOffset + 3 * edge;
+    words[record] = row.id;
+    words[record + 1] = other.cellId;
+    setF32(words, record + 2,
+      own.coefficient * row.dualWeight * other.coefficient);
   }
   const initialCellWorklist = Uint32Array.from({ length: acceptedGrid.cells.length },
     (_, id) => id);
@@ -1184,10 +1230,14 @@ export class WebGPUSparseCM12Resident {
   private readonly fineWorkA: GPUBuffer;
   private readonly fineWorkB: GPUBuffer;
   private readonly fineRollback: GPUBuffer;
+  /** Immutable topology duplicate used by pressure SpMVs through a
+   * read-only binding instead of the mutable atomic arena. */
+  private readonly pressureTemplates: GPUBuffer;
   readonly globalFineLevelSetSource: WebGPUFineLevelSetBrickSource;
   readonly sparseAdaptiveGridSource: SparseAdaptiveGridConsumerSource;
   private readonly diagnosticsReadback: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
+  private readonly pressureBindGroup: GPUBindGroup;
   private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
   private readonly parameterWords = new ArrayBuffer(SPARSE_CM12_PARAMETER_BYTES);
   private readonly parameterU32 = new Uint32Array(this.parameterWords);
@@ -1219,6 +1269,8 @@ export class WebGPUSparseCM12Resident {
     finePlan: FineLevelSetBrickPlan,
     diagnosticsReadback: GPUBuffer,
     bindGroup: GPUBindGroup,
+    pressureBindGroup: GPUBindGroup,
+    pressureTemplates: GPUBuffer,
     pipelines: Readonly<Record<string, GPUComputePipeline>>,
     cellCount: number,
     rowCount: number,
@@ -1270,10 +1322,13 @@ export class WebGPUSparseCM12Resident {
     };
     this.diagnosticsReadback = diagnosticsReadback;
     this.bindGroup = bindGroup;
+    this.pressureBindGroup = pressureBindGroup;
+    this.pressureTemplates = pressureTemplates;
     this.pipelines = pipelines;
     this.cellCount = cellCount;
     this.rowCount = rowCount;
-    this.allocatedBytes = [acceptedIndirectArguments, ...buffers, ...fineBuffers].reduce(
+    this.allocatedBytes = [acceptedIndirectArguments, pressureTemplates,
+      ...buffers, ...fineBuffers].reduce(
       (sum, buffer) => sum + buffer.size, 0,
     )
       + diagnosticsReadback.size;
@@ -1393,6 +1448,9 @@ export class WebGPUSparseCM12Resident {
       initialActivity[at + 12] = atlas.bricks[brick]!.resolution;
       initialActivity[at + 13] = atlas.bricks[brick]!.resolution;
       initialActivity[at + 37] = INVALID;
+      // Low four bits retain the coarsest calm level accepted before this
+      // brick's first promotion; bit 31 is latched by that promotion.
+      initialActivity[at + 38] = atlas.bricks[brick]!.resolution;
       if (initialActivity[at + 10] !== 0) {
         if (atlas.bricks[brick]!.resolution === 8) initialActivity[19] += 1;
         else initialActivity[20] += 1;
@@ -1456,6 +1514,9 @@ export class WebGPUSparseCM12Resident {
     const topologyArena = uploadBuffer(device,
       "Sparse CM12 physical topology templates and worklists", topologyArenaWords,
       storage);
+    const pressureTemplates = uploadBuffer(device,
+      "Sparse CM12 read-only pressure topology", templates.words,
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     const acceptedIndirectArguments = uploadBuffer(device,
       "Sparse CM12 accepted indirect dispatch snapshot",
       initialWorklists.subarray(8, 14),
@@ -1518,6 +1579,23 @@ export class WebGPUSparseCM12Resident {
         { binding: 15, resource: { buffer: fineSamples } },
         { binding: 16, resource: { buffer: topologyArena } },
       ] });
+    const pressureBindGroup = device.createBindGroup({
+      label: "Sparse CM12 read-only pressure bindings",
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: parameters } },
+        { binding: 1, resource: { buffer: topology } },
+        { binding: 2, resource: { buffer: state } },
+        { binding: 3, resource: { buffer: partials } },
+        { binding: 4, resource: { buffer: scalars } },
+        { binding: 11, resource: { buffer: conditioning } },
+        { binding: 12, resource: { buffer: activity } },
+        { binding: 13, resource: { buffer: candidateState } },
+        { binding: 14, resource: { buffer: pressureTemplates } },
+        { binding: 15, resource: { buffer: fineSamples } },
+        { binding: 16, resource: { buffer: topologyArena } },
+      ],
+    });
     const shaderModule = device.createShaderModule({ label: "Sparse CM12 resident shader",
       code: webgpuSparseCM12ResidentWGSL });
     const pipelineLayout = device.createPipelineLayout({ label: "Sparse CM12 resident pipeline layout",
@@ -1531,9 +1609,11 @@ export class WebGPUSparseCM12Resident {
       "finalizeSharpening", "clearSolidExcess", "scatterSolidExcess",
       "finalizeSolidExcess", "preserveHorizontalD4",
       "commitHorizontalD4",
-      "forceFaces", "classifyRows", "preparePressure",
-      "initializePCG", "reduceInitialize", "applyDirection", "reduceCurvature",
-      "updateResidual", "reduceResidual", "updateDirection",
+      "forceFaces", "classifyPressureCells", "classifyRows", "preparePressure",
+      "initializePCG",
+      "reduceInitialize", "applyDirection", "reduceCurvature",
+      "updateResidual",
+      "reduceResidual", "updateDirection",
       "projectedJacobiToApplied", "projectedJacobiToPressure", "projectFaces",
       "collocateAndDiagnose", "measureDivergenceDiagnostics",
       "reduceDivergenceDiagnostics",
@@ -1584,6 +1664,8 @@ export class WebGPUSparseCM12Resident {
       fine.plan,
       diagnosticsReadback,
       bindGroup,
+      pressureBindGroup,
+      pressureTemplates,
       Object.fromEntries([...entries, ...earlyStopEntries]),
       templates.cellCount, templates.rowCount,
       templates.cellCount, templates.rowCount,
@@ -1634,11 +1716,12 @@ export class WebGPUSparseCM12Resident {
     // timestamp for a pass that does no work and one unsampled boundary
     // rejects the whole chain.
     let pass: GPUComputePassEncoder | undefined;
+    let activeBindGroup = this.bindGroup;
     let passLabel = "Sparse CM12 resident frame";
     const openPass = () => {
       if (!pass) {
         pass = encoder.beginComputePass({ label: passLabel });
-        pass.setBindGroup(0, this.bindGroup);
+        pass.setBindGroup(0, activeBindGroup);
       }
       return pass;
     };
@@ -1657,6 +1740,10 @@ export class WebGPUSparseCM12Resident {
     const closePass = () => {
       pass?.end();
       pass = undefined;
+    };
+    const useBindGroup = (bindGroup: GPUBindGroup) => {
+      activeBindGroup = bindGroup;
+      pass?.setBindGroup(0, bindGroup);
     };
     // Without seams this is the single frame pass it has always been. With
     // them, each stage becomes its own pass so a boundary chain can land a
@@ -1742,7 +1829,8 @@ export class WebGPUSparseCM12Resident {
       dispatchAccepted("forceFaces", "row");
     });
     stage("pressure-topology", () => {
-      dispatchAccepted("preparePressure", "cell");
+      useBindGroup(this.pressureBindGroup);
+      dispatchAccepted("classifyPressureCells", "cell");
       dispatchAccepted("classifyRows", "row");
       dispatchAccepted("preparePressure", "cell");
     });
@@ -1786,6 +1874,7 @@ export class WebGPUSparseCM12Resident {
       dispatch("reduceDivergenceDiagnostics", 1);
     });
     stage("activity-measurement", () => {
+      useBindGroup(this.bindGroup);
       dispatch("advanceActivityClock", 1);
       dispatch("measureBrickActivity", packed.brickCount);
     });
@@ -1915,27 +2004,61 @@ export class WebGPUSparseCM12Resident {
     this.parameterF32.set([...centerFine, 1], 52);
     this.parameterF32.set([...radiusFine, 0], 56);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
-    const bricks = Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE);
-    const pass = encoder.beginComputePass({ label: "Sparse CM12 resident liquid injection" });
-    pass.setBindGroup(0, this.bindGroup);
-    // Residency first, by the one path a moving front already uses. A ball
-    // dropped into the dormant apron reaches bricks whose `brickActive` bit is
-    // still clear, and injection, transport, pressure and presentation are all
-    // gated on that bit, so without this the drop wrote nothing at all.
-    // Activation also clears the receiver it claims, which is why it can never
-    // run after the wetting it would erase.
-    pass.setPipeline(this.pipelines.activateSweptReceivers!);
-    pass.dispatchWorkgroups(bricks);
-    // Brick-indexed rather than indirect over the accepted cell worklist: the
-    // bricks this drop just activated do not enter that worklist until the next
-    // commit, and a ball that has to wait for one is the vanishing drop again.
-    pass.setPipeline(this.pipelines.injectLiquid!);
-    pass.dispatchWorkgroups(bricks);
-    pass.setPipeline(this.pipelines.classifyPresentationBricks!);
-    pass.dispatchWorkgroups(bricks);
-    pass.setPipeline(this.pipelines.publishSparseLevelSet!);
-    pass.dispatchWorkgroups(this.globalFineLevelSetSource.plan.maximumResidentBricks);
-    pass.end();
+    const packed = this.lastPacked!;
+    const bricks = Math.ceil(packed.brickCount / WORKGROUP_SIZE);
+    const topologyPass = encoder.beginComputePass({
+      label: "Sparse CM12 resident liquid injection topology",
+    });
+    topologyPass.setBindGroup(0, this.bindGroup);
+    const dispatchTopology = (name: string, count: number, y = 1, z = 1) => {
+      topologyPass.setPipeline(this.pipelines[name]!);
+      topologyPass.dispatchWorkgroups(count, y, z);
+    };
+    // Promote every intersected brick before writing any density. The planner
+    // treats the enabled injection as refine-only: untouched accepted bricks
+    // are preserved, while closure may still grow the required 2:1 support.
+    dispatchTopology("planBrickResolution", bricks);
+    dispatchTopology("activateSweptReceivers", bricks);
+    for (let gradingPass = 0; gradingPass < 3; gradingPass += 1) {
+      dispatchTopology("closePlannedResolution", bricks);
+    }
+    dispatchTopology("validateCandidateResolution", bricks);
+    dispatchTopology("scheduleTopologyPreparation", 1);
+    dispatchTopology("allocateCandidateTopologyPages", bricks);
+    dispatchTopology("synthesizeCandidateCellPages", packed.brickCount);
+    dispatchTopology("deferDynamicTopologyPublication", 1);
+    dispatchTopology("beginShadowTopology", 1);
+    dispatchTopology("buildShadowCellWorklist",
+      Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
+    dispatchTopology("buildShadowRowWorklist",
+      Math.ceil(this.templateRowCount / WORKGROUP_SIZE));
+    dispatchTopology("finalizeShadowWorklists", 1);
+    dispatchTopology("transferCandidateCells", packed.brickCount);
+    dispatchTopology("prepareCandidateFaceReceipts", bricks);
+    dispatchTopology("transferCandidateFaces", packed.brickCount, 6);
+    dispatchTopology("writeCandidateCellsToShadow", packed.brickCount);
+    dispatchTopology("reconstructShadowFaces",
+      Math.ceil(this.templateRowCount / WORKGROUP_SIZE));
+    dispatchTopology("validateAndCommitShadowTopology", 1);
+    topologyPass.end();
+    encoder.copyBufferToBuffer(this.topologyArena,
+      this.topologyWorklistBaseBytes + 4 * 8,
+      this.acceptedIndirectArguments, 0, 6 * 4);
+
+    const injectionPass = encoder.beginComputePass({
+      label: "Sparse CM12 resident liquid injection",
+    });
+    injectionPass.setBindGroup(0, this.bindGroup);
+    // Brick-indexed rather than indirect over the accepted cell worklist: this
+    // also covers a newly activated receiver in the same command buffer.
+    injectionPass.setPipeline(this.pipelines.injectLiquid!);
+    injectionPass.dispatchWorkgroups(bricks);
+    injectionPass.setPipeline(this.pipelines.classifyPresentationBricks!);
+    injectionPass.dispatchWorkgroups(bricks);
+    injectionPass.setPipeline(this.pipelines.publishSparseLevelSet!);
+    injectionPass.dispatchWorkgroups(
+      this.globalFineLevelSetSource.plan.maximumResidentBricks);
+    injectionPass.end();
   }
 
   private lastPacked?: PackedResidentTopology;
@@ -2290,6 +2413,7 @@ export class WebGPUSparseCM12Resident {
     for (const buffer of [this.parameters, this.topology, this.state, this.partials,
       this.scalars, this.conditioning, this.activity, this.candidateState,
       this.topologyArena, this.acceptedIndirectArguments,
+      this.pressureTemplates,
       this.fineParams, this.fineMetadata, this.fineWorklist, this.fineSamples,
       this.fineWorkA, this.fineWorkB, this.fineRollback]) {
       buffer.destroy();

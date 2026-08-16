@@ -15,6 +15,7 @@ const INVALID:u32=0xffffffffu;
 const WORKGROUP:u32=64u;
 const ACTIVITY_HEADER_WORDS:u32=24u;
 const ACTIVITY_RECORD_WORDS:u32=40u;
+const ACTIVITY_RECOVERY_LOCK:u32=0x80000000u;
 const CANDIDATE_CELLS_PER_BRICK:u32=512u;
 const ACTIVITY_FIXED:f32=65536.0;
 override PRESSURE_EARLY_STOP:bool=false;
@@ -95,6 +96,11 @@ fn acceptedTemplateRowInvocation(invocation:u32)->u32{
   let offset=atomicLoad(&topologyArena[base+16u+acceptedTopologySlot()]);
   return atomicLoad(&topologyArena[base+offset+invocation]);
 }
+// Pressure passes bind an immutable copy of the physical template arena at
+// binding 14.  Unlike topologyArena this path is ordinary read-only storage,
+// so recurring SpMVs do not pay atomic-load semantics for data which never
+// changes after construction.
+fn pressureTemplateWord(index:u32)->u32{return fineMetadata[index];}
 fn shadowTopologySlot()->u32{return 1u-acceptedTopologySlot();}
 fn shadowTemplateCellCount()->u32{
   return atomicLoad(&topologyArena[topologyWorklistBase()+18u]);
@@ -522,10 +528,19 @@ fn injectionCoverage(id:u32)->f32{
 // one existing activation path instead of vanishing into an inactive brick.
 fn injectionReachesBrick(brick:u32)->bool{
   if(p.injectionCenter.w==0.0){return false;}
-  let range=templateBrickCellRange(brick,scheduledBrickResolution(brick));
-  for(var at=0u;at<range.y;at+=1u){let id=range.x+at;
-    if(cellOpenVolume(id)>1e-8&&injectionCoverage(id)>0.0){return true;}}
-  return false;
+  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
+  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
+  let x=remainder-y*brickDimensions.x;
+  let lower=vec3f(vec3u(x,y,z)*8u);
+  let upper=min(lower+vec3f(f32(8u*brickSpan(brick))),vec3f(p.dimensions.xyz));
+  // Residency is conservative: use the ellipsoid's bounding box so a brick
+  // sharing only a face/edge with the drop is promoted too. injectLiquid still
+  // applies the exact smooth ellipsoid coverage and therefore writes no false
+  // liquid into the conservative receiver shell.
+  return all(p.injectionCenter.xyz+p.injectionRadius.xyz>=lower)
+    &&all(p.injectionCenter.xyz-p.injectionRadius.xyz<=upper);
 }
 
 // Wetting walks each brick's accepted template range rather than the accepted
@@ -973,8 +988,15 @@ fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
   }
   let delta=state[p.stateOffsets5.x+cell];
   let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
-  state[destinationDensity()+cell]=max(0.0,conditionedDensity(cell)+delta
-    +incoming/cellVolume(cell));
+  var density=max(0.0,conditionedDensity(cell)+delta+incoming/cellVolume(cell));
+  let capacity=cellOpenFraction(cell);
+  // Fixed-point receipts can leave a mathematically full hydrostatic cell one
+  // quantisation unit below its exact capacity. Restore that endpoint exactly;
+  // this changes no resolved interface value and prevents zero-flow topology
+  // transfers from becoming visible density churn on the next frame.
+  density=select(density,capacity,
+    abs(density-capacity)<=1.0/CM12_TRANSPORT_FIXED);
+  state[destinationDensity()+cell]=density;
   state[destinationGamma()+cell]=max(0.0,conditionedGamma(cell));
 }
 
@@ -1105,6 +1127,18 @@ fn pressureDensity(cell:u32)->f32{
 }
 
 @compute @workgroup_size(64)
+fn classifyPressureCells(@builtin(global_invocation_id)gid:vec3u){
+  let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
+  let rho=pressureDensity(id);let liquid=cellActive(id)&&rho>=CM12_LIQUID_ISOVALUE
+    &&(cellOpenVolume(id)>1e-8||cellSeparatingMinimum(id));
+  state[p.stateOffsets2.w+id]=select(0.0,1.0,liquid);
+  if(!liquid){
+    state[p.stateOffsets2.y+id]=0.0;state[p.stateOffsets2.z+id]=0.0;
+    state[p.stateOffsets2.x+id]=0.0;
+  }
+}
+
+@compute @workgroup_size(64)
 fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
   if(!rowAccepted(row)){state[p.stateOffsets3.x+row]=0.0;return;}
@@ -1125,41 +1159,30 @@ fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
 }
 
 fn applyOperator(cell:u32,inputOffset:u32)->f32{
-  if(!isLiquid(cell)){return 0.0;}var result=0.0;
-  // Cache the immutable arena section offsets once per matrix row. The generic
-  // accessors intentionally favor readability elsewhere, but reloading these
-  // four header words for every incidence and term dominates 128 SpMVs.
-  let incidenceBounds=ta(9u);let incidenceRecords=ta(10u);
-  let rowRecords=ta(7u);let termRecords=ta(8u);
-  let incidenceEndOffset=ta(incidenceBounds+cell+1u);
-  for(var at=ta(incidenceBounds+cell);at<incidenceEndOffset;at+=1u){
-    let incidence=incidenceRecords+2u*at;let row=ta(incidence);
-    // classifyRows zeroes every rejected row immediately before the solve, so
-    // theta is also the accepted-row mask for this immutable pressure epoch.
-    // Avoid re-walking each row's brick-resolution requirements 128 times.
+  if(!isLiquid(cell)){return 0.0;}
+  // The pressure epoch has already classified rows and assembled the exact
+  // diagonal.  Physical topology packing expands every off-diagonal
+  // contribution once, so 128 SpMVs no longer reconstruct cell -> incidence
+  // -> row -> term chains or repeatedly rebuild each mixed-port jump.
+  let edgeOffsets=pressureTemplateWord(15u);
+  let edgeRecords=edgeOffsets+p.counts.x+1u;
+  var result=state[p.stateOffsets2.z+cell]*state[inputOffset+cell];
+  let end=pressureTemplateWord(edgeOffsets+cell+1u);
+  for(var edge=pressureTemplateWord(edgeOffsets+cell);edge<end;edge+=1u){
+    let record=edgeRecords+3u*edge;let row=pressureTemplateWord(record);
     let theta=state[p.stateOffsets3.x+row];if(theta<=0.0){continue;}
-    let rowRecord=rowRecords+12u*row;
-    var jump=0.0;let begin=ta(rowRecord);let end=begin+ta(rowRecord+1u);
-    for(var term=begin;term<end;term+=1u){let termRecord=termRecords+2u*term;
-      let other=ta(termRecord);if(isLiquid(other)){
-        jump+=bitcast<f32>(ta(termRecord+1u))*state[inputOffset+other];}}
-    let ownTerm=ta(incidence+1u);
-    var dualWeight=bitcast<f32>(ta(rowRecord+4u));
-    if(hasRigidBodies()){
-      dualWeight*=state[p.solidOffsets.y+4u*row+3u];
-    }
-    result+=bitcast<f32>(ta(termRecords+2u*ownTerm+1u))*dualWeight*jump/theta;
-  }return result;
+    let other=pressureTemplateWord(record+1u);if(!isLiquid(other)){continue;}
+    var weight=bitcast<f32>(pressureTemplateWord(record+2u));
+    if(hasRigidBodies()){weight*=state[p.solidOffsets.y+4u*row+3u];}
+    result+=weight*state[inputOffset+other]/theta;
+  }
+  return result;
 }
 
 @compute @workgroup_size(64)
 fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
   let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
-  let rho=pressureDensity(id);let liquid=cellActive(id)&&rho>=CM12_LIQUID_ISOVALUE
-    &&(cellOpenVolume(id)>1e-8||cellSeparatingMinimum(id));
-  state[p.stateOffsets2.w+id]=select(0.0,1.0,liquid);
-  if(!liquid){state[p.stateOffsets2.y+id]=0.0;state[p.stateOffsets2.z+id]=0.0;
-    state[p.stateOffsets2.x+id]=0.0;return;}
+  if(!isLiquid(id)){return;}let rho=pressureDensity(id);
   var rhs=0.0;var diagonal=0.0;
   for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
     let row=incidenceRow(at);if(!rowAccepted(row)){continue;}
@@ -1211,11 +1234,14 @@ fn reducePair(lane:u32,group:u32,a:f32,b:f32){
 @compute @workgroup_size(64)
 fn initializePCG(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let id=acceptedTemplateCellInvocation(gid.x);var rz=0.0;var rhs2=0.0;if(id!=INVALID){
+  let id=acceptedTemplateCellInvocation(gid.x);var rz=0.0;var rhs2=0.0;
+  if(id!=INVALID){
     let image=applyOperator(id,p.stateOffsets2.x);let residual=state[p.stateOffsets2.y+id]-image;
     let diagonal=state[p.stateOffsets2.z+id];let z=select(0.0,residual/diagonal,diagonal>0.0);
     state[p.stateOffsets3.y+id]=residual;state[p.stateOffsets3.z+id]=z;
-    state[p.stateOffsets3.w+id]=z;rz=residual*z;let rhs=state[p.stateOffsets2.y+id];rhs2=rhs*rhs;}
+    state[p.stateOffsets3.w+id]=z;rz=residual*z;
+    let rhs=state[p.stateOffsets2.y+id];rhs2=rhs*rhs;
+  }
   reducePair(lid.x,wid.x,rz,rhs2);
 }
 
@@ -1251,12 +1277,14 @@ fn reduceCurvature(@builtin(local_invocation_id)lid:vec3u){
 fn updateResidual(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
   let iterationEnabled=pressureIterationActive();
-  let id=acceptedTemplateCellInvocation(gid.x);var rz=0.0;var residual2=0.0;if(iterationEnabled&&id!=INVALID){let alpha=scalars[2];
+  let id=acceptedTemplateCellInvocation(gid.x);var rz=0.0;var residual2=0.0;
+  if(iterationEnabled&&id!=INVALID){let alpha=scalars[2];
     state[p.stateOffsets2.x+id]+=alpha*state[p.stateOffsets3.w+id];
     let residual=state[p.stateOffsets3.y+id]-alpha*state[p.stateOffsets4.x+id];
     let diagonal=state[p.stateOffsets2.z+id];let z=select(0.0,residual/diagonal,diagonal>0.0);
     state[p.stateOffsets3.y+id]=residual;state[p.stateOffsets3.z+id]=z;
-    rz=residual*z;residual2=residual*residual;}
+    rz=residual*z;residual2=residual*residual;
+  }
   reducePair(lid.x,wid.x,rz,residual2);
 }
 
@@ -1283,17 +1311,16 @@ fn projectedJacobiValue(cell:u32,inputOffset:u32)->f32{
   if(!isLiquid(cell)){return 0.0;}let diagonal=state[p.stateOffsets2.z+cell];
   if(diagonal<=1e-12){return select(0.0,max(0.0,state[inputOffset+cell]),
     cellSeparatingMinimum(cell));}
-  var offDiagonal=0.0;
-  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-    let row=incidenceRow(at);
+  let edgeOffsets=pressureTemplateWord(15u);
+  let edgeRecords=edgeOffsets+p.counts.x+1u;
+  var offDiagonal=0.0;let end=pressureTemplateWord(edgeOffsets+cell+1u);
+  for(var edge=pressureTemplateWord(edgeOffsets+cell);edge<end;edge+=1u){
+    let record=edgeRecords+3u*edge;let row=pressureTemplateWord(record);
     let theta=state[p.stateOffsets3.x+row];if(theta<=0.0){continue;}
-    let own=termCoefficient(incidenceTerm(at));let weight=rowDualWeight(row)/theta;
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-    for(var term=begin;term<end;term+=1u){let other=termCell(term);
-      if(other!=cell&&isLiquid(other)){
-        offDiagonal+=own*weight*termCoefficient(term)*state[inputOffset+other];
-      }
-    }
+    let other=pressureTemplateWord(record+1u);if(!isLiquid(other)){continue;}
+    var weight=bitcast<f32>(pressureTemplateWord(record+2u));
+    if(hasRigidBodies()){weight*=state[p.solidOffsets.y+4u*row+3u];}
+    offDiagonal+=weight*state[inputOffset+other]/theta;
   }
   let value=(state[p.stateOffsets2.y+cell]-offDiagonal)/diagonal;
   return select(value,max(0.0,value),cellSeparatingMinimum(cell));
@@ -1740,12 +1767,13 @@ fn brickRequestedAsReceiver(brick:u32)->bool{
   return requested;
 }
 
-// A filled brick with filled face neighbours in every non-wall direction is
+// A filled brick with majority-liquid face neighbours in every non-wall direction is
 // deep bulk even if a low-amplitude density ripple happens to cross rho=.5 in
 // one of its composite rows. Treating that internal crossing as a free surface
 // permanently spread 8^3 resolution down through a tank after an impact. The
-// lookup is span-aware so a mutable frontier brick beside an immutable macro
-// leaf still receives the correct enclosure evidence.
+// mean-density test is deliberately much stronger than the residency bit: a
+// trace of liquid in an air receiver must not make the real top surface look
+// enclosed. The lookup remains span-aware beside immutable macro leaves.
 fn brickDeeplyEnclosed(brick:u32)->bool{
   let output=activityRecord(brick);
   if((atomicLoad(&activity[output+1u])&64u)==0u){return false;}
@@ -1762,7 +1790,7 @@ fn brickDeeplyEnclosed(brick:u32)->bool{
       ||any(neighborCoordinate>=vec3i(brickDimensions))){continue;}
     let neighbor=brickDirectoryLookupAtCoordinate(vec3u(neighborCoordinate));
     if(neighbor==INVALID||!brickActive(neighbor)
-      ||(atomicLoad(&activity[activityRecord(neighbor)+1u])&64u)==0u){return false;}
+      ||activityF32(activityRecord(neighbor)+4u)<CM12_LIQUID_ISOVALUE){return false;}
   }
   return true;
 }
@@ -1783,6 +1811,15 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
     atomicStore(&activity[output+9u],1024u);
     return;
   }
+  let injectionReceiver=injectionReachesBrick(brick);
+  // Injection is a topology transaction of its own. Preserve every brick the
+  // drop does not touch so that a wetting gesture can refine its receivers and
+  // 2:1 support without opportunistically coarsening an unrelated calm region.
+  if(p.injectionCenter.w!=0.0&&!injectionReceiver){
+    atomicStore(&activity[output+8u],current);
+    atomicStore(&activity[output+9u],32u);
+    return;
+  }
   var requested=atomicLoad(&activity[output+8u]);
   var planReasons=atomicLoad(&activity[output+9u]);
   // Dormant capacity is not a represented fluid level. Start it at the
@@ -1797,6 +1834,9 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let reasons=atomicLoad(&activity[output+1u]);
   let hotEpochs=atomicLoad(&activity[output+2u]);
   let quietEpochs=atomicLoad(&activity[output+3u]);
+  let recoveryState=atomicLoad(&activity[output+38u]);
+  let recoveryFloor=recoveryState&15u;
+  let recoveryLocked=(recoveryState&ACTIVITY_RECOVERY_LOCK)!=0u;
   let surface=(reasons&1u)!=0u;let predicted=(reasons&16u)!=0u;
   let thinFluid=(reasons&256u)!=0u;
   let cutBoundary=(reasons&512u)!=0u;
@@ -1811,15 +1851,23 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // interface floor below already keeps that brick fine.
   let velocityFloor=velocityResolutionFloor(activityF32(output+33u));
   let enclosed=activitySignals&&brickDeeplyEnclosed(brick);
-  // Enclosed bulk follows only its measured travel rung. In particular, an
-  // internal rho=.5 crossing left by a settling wave is not interface geometry
-  // and cannot pin the brick fine once its motion is slow enough to merge.
-  let adaptiveSurface=surface&&!enclosed;
+  // The first accepted promotion closes the calm-baseline record for this
+  // brick. Once its motion is quiet and it is again overwhelmingly liquid, a
+  // new internal rho crossing may not overwrite that known-safe deep level.
+  // Genuine surface bricks have an 8^3 recovery floor and remain fine.
+  let settledRecoveredBulk=activitySignals&&recoveryLocked&&surface
+    &&activityF32(output+4u)>=1.0-2.0*p.activityDensity.y
+    &&quietEpochs>=p.activityEpochs.z;
+  // Only an exposed liquid-air interface owns the hard surface floor. An
+  // enclosed rho crossing is bulk restriction residue and must be allowed to
+  // return through the same coarse ladder it occupied before an impact.
+  let adaptiveSurface=surface&&!enclosed&&!settledRecoveredBulk;
   let slowSurface=adaptiveSurface&&!thinFluid&&velocityFloor==1u;
   let detail=activitySignals&&(reasons&8u)!=0u
     &&(!adaptiveSurface||thinFluid||(score>=u32(round(255.0))))
-    &&!enclosed&&!slowSurface;
-  let receiver=receiverRequested&&((reasons&64u)==0u||velocityFloor>1u);
+    &&!enclosed&&!slowSurface&&!settledRecoveredBulk;
+  let receiver=injectionReceiver
+    ||(receiverRequested&&((reasons&64u)==0u||velocityFloor>1u));
   // Every genuine free surface retains the conservative 8^3 interface
   // invariant. Activity mode coarsens only enclosed bulk; uniform bulk
   // translation is absent from emergency scoring because it does not imply
@@ -1830,9 +1878,9 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let activitySurface=adaptiveSurface&&activitySignals;
   let interfaceVelocityFloor=select(1u,velocityFloor,
     adaptiveSurface||thinFluid||enclosed);
-  let required=max(max(interfaceVelocityFloor,
+  let required=max(select(1u,recoveryFloor,recoveryLocked),max(max(interfaceVelocityFloor,
     select(1u,8u,strictSurface||activitySurface||thinFluid||receiver)),
-    select(1u,4u,cutBoundary));
+    select(1u,4u,cutBoundary)));
   let emergencyScore=u32(round(255.0*p.activityTiming.z));
   if(required>current
     ||(activitySignals&&!enclosed&&!slowSurface&&score>=emergencyScore)){
@@ -2433,7 +2481,17 @@ fn validateAndCommitShadowTopology(){
   if(!valid){atomicStore(&activity[21],1u);atomicStore(&topologyArena[base+3u],3u);return;}
   for(var brick=0u;brick<p.dispatch.w;brick+=1u){let output=activityRecord(brick);
     if(atomicLoad(&activity[output+35u])!=0u){
-      atomicStore(&activity[output+12u],atomicLoad(&activity[output+13u]));
+      let accepted=atomicLoad(&activity[output+12u]);
+      let next=atomicLoad(&activity[output+13u]);
+      atomicStore(&activity[output+12u],next);
+      let recoveryState=atomicLoad(&activity[output+38u]);
+      let recoveryFloor=recoveryState&15u;
+      let recoveryLocked=(recoveryState&ACTIVITY_RECOVERY_LOCK)!=0u;
+      if(next>accepted){
+        atomicStore(&activity[output+38u],recoveryFloor|ACTIVITY_RECOVERY_LOCK);
+      }else if(!recoveryLocked&&next<recoveryFloor){
+        atomicStore(&activity[output+38u],next);
+      }
       atomicStore(&activity[output+2u],0u);atomicStore(&activity[output+3u],0u);
       atomicStore(&activity[output+35u],0u);atomicAdd(&activity[17],1u);
     }
@@ -2469,7 +2527,10 @@ fn activateSweptReceivers(@builtin(global_invocation_id)gid:vec3u){
   // 4/2/1 support skirt around it without weakening this hard floor.
   atomicStore(&activity[output+8u],8u);
   atomicStore(&activity[output+9u],1u);
-  let claimed=atomicCompareExchangeWeak(&activity[output+10u],0u,1u);
+  var claimed=atomicCompareExchangeWeak(&activity[output+10u],0u,1u);
+  while(!claimed.exchanged&&claimed.old_value==0u){
+    claimed=atomicCompareExchangeWeak(&activity[output+10u],0u,1u);
+  }
   if(claimed.exchanged){
     // A retired residue brick may later become a legitimate receiver. Never
     // resurrect its stale sub-threshold fields as new liquid.

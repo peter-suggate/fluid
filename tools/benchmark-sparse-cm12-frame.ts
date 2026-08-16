@@ -452,9 +452,12 @@ try {
       uniform.solver.readStats(),
       sparse.solver.readStats(),
     ]);
-  const longDamFront = sceneArgument === "long-dam" ? {
+  const sceneFront = {
     uniform: frontReceipt(uniformDensity),
     sparse: frontReceipt(sparseDensity),
+  };
+  const longDamFront = sceneArgument === "long-dam" ? {
+    ...sceneFront,
     sparseResidentMaximumFineCellX: Math.max(
       ...((await (sparse.solver as WebGPUAdaptiveMassSolver)
         .readGPUActivityPolicy()).bricks.filter((brick) => brick.active)
@@ -553,6 +556,7 @@ try {
         ...sparse.evolvedTopology.map((sample) => sample.fineCoarseFaceConnectedPairs),
       ),
     },
+    sceneFront,
     longDamFront,
     forcedFineDensityAgreement,
     ...verdict,

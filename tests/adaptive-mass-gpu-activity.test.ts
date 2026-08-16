@@ -176,8 +176,8 @@ test("resident pressure solve caches its classified epoch masks", () => {
   const operator = webgpuSparseCM12ResidentWGSL.slice(begin, end);
   assert.doesNotMatch(operator, /rowAccepted\(row\)/,
     "the 128 SpMVs must consume the cleared/classified theta mask");
-  assert.match(operator, /let incidenceBounds=ta\(9u\)/,
-    "immutable arena section offsets must be cached per matrix row");
+  assert.match(operator, /let edgeOffsets=pressureTemplateWord\(15u\)/,
+    "the immutable prepacked pressure-edge section must be cached per matrix row");
   assert.match(webgpuSparseCM12ResidentWGSL,
     /fn isLiquid\(cell:u32\)->bool\{return state\[p\.stateOffsets2\.w\+cell\]>0\.5;\}/);
 });
@@ -286,6 +286,7 @@ test("GPU candidate planning is epoch-gated and cannot mutate accepted state", (
     "dormant capacity must begin at the coarsest logical request");
   assert.match(kernel, /velocityFloor=velocityResolutionFloor\(activityF32\(output\+33u\)\)/);
   assert.match(kernel, /strictSurface=surface&&!activitySignals/);
+  assert.match(kernel, /adaptiveSurface=surface&&!enclosed/);
   assert.match(kernel,
     /select\(1u,8u,strictSurface\|\|activitySurface\|\|thinFluid\|\|receiver\)/);
   assert.doesNotMatch(kernel, /horizontalD4IsAuthoritative/,
@@ -361,13 +362,18 @@ test("GPU selector keeps free surfaces fine and deep translating bulk coarse in 
   assert.match(webgpuSparseCM12ResidentWGSL,
     /brickDirectoryLookupAtCoordinate\(vec3u\(neighborCoordinate\)\)/,
     "deep enclosure must recognize adjacent macro-bricks rather than exact origins only");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /activityF32\(activityRecord\(neighbor\)\+4u\)<CM12_LIQUID_ISOVALUE/,
+    "air-receiver residue must not hide a real exposed surface");
   assert.match(plan, /strictSurface=surface&&!activitySignals/,
     "only surface-distance mode must blanket-pin interfaces fine");
   assert.match(plan,
-    /receiver=receiverRequested&&\(\(reasons&64u\)==0u\|\|velocityFloor>1u\)/,
-    "the fine receiver floor must stop once its destination is wet and slow");
+    /receiver=injectionReceiver\s*\|\|\(receiverRequested&&\(\(reasons&64u\)==0u\|\|velocityFloor>1u\)\)/,
+    "injection must override the ordinary wet-and-slow receiver suppression");
+  assert.match(plan, /adaptiveSurface=surface&&!enclosed/,
+    "only exposed interfaces may pin the surface floor; enclosed rho ripples must recover");
   assert.match(plan, /activitySurface=adaptiveSurface&&activitySignals/,
-    "activity-mode interfaces must remain distinct from enclosed bulk");
+    "activity-mode interfaces must retain their independent surface floor");
   assert.match(plan,
     /select\(1u,8u,strictSurface\|\|activitySurface\|\|thinFluid\|\|receiver\)/,
     "every genuine surface, thin liquid, and moving receiver must get an 8-cubed floor");
@@ -382,6 +388,24 @@ test("GPU selector keeps free surfaces fine and deep translating bulk coarse in 
   assert.match(plan,
     /requested=select\(min\(8u,max\(required,2u\*current\)\),required,urgent\)/,
     "non-urgent measured activity must advance by one rung");
+  assert.match(plan,
+    /if\(p\.injectionCenter\.w!=0\.0&&!injectionReceiver\)\{[\s\S]*?activity\[output\+8u\],current/,
+    "an injection topology transaction must preserve every untouched accepted brick");
+  assert.match(plan,
+    /recoveryFloor=recoveryState&15u[\s\S]*?recoveryLocked=\(recoveryState&ACTIVITY_RECOVERY_LOCK\)!=0u/,
+    "candidate planning must retain the brick's pre-promotion calm level");
+  assert.match(plan,
+    /settledRecoveredBulk=activitySignals&&recoveryLocked&&surface[\s\S]*?quietEpochs>=p\.activityEpochs\.z/,
+    "a quiet, refilled deep brick must be allowed to dismiss internal rho crossings");
+  assert.match(plan, /select\(1u,recoveryFloor,recoveryLocked\)/,
+    "recovery must stop exactly at the remembered calm level");
+  const commitBegin = webgpuSparseCM12ResidentWGSL.indexOf(
+    "fn validateAndCommitShadowTopology",
+  );
+  const commit = webgpuSparseCM12ResidentWGSL.slice(commitBegin);
+  assert.match(commit,
+    /if\(next>accepted\)\{\s*atomicStore\(&activity\[output\+38u\],recoveryFloor\|ACTIVITY_RECOVERY_LOCK\)/,
+    "the first accepted promotion must freeze the calm recovery target");
   const receiver = webgpuSparseCM12ResidentWGSL.slice(
     webgpuSparseCM12ResidentWGSL.indexOf("fn brickRequestedAsReceiver"), planBegin,
   );
@@ -393,6 +417,28 @@ test("GPU selector keeps free surfaces fine and deep translating bulk coarse in 
     /fn activateSweptReceivers[\s\S]*?brickRequestedAsReceiver\(brick\)/,
     "activation and retained receiver resolution must share one prediction predicate");
   assert.match(plan, /else if\(thinFluid\)\{planReasons=256u;\}/);
+});
+
+test("liquid injection commits fine topology before writing the drop", () => {
+  const source = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  const begin = source.indexOf("encodeLiquidInjection(");
+  const end = source.indexOf("private lastPacked", begin);
+  assert.ok(begin >= 0 && end > begin, "liquid injection must be independently inspectable");
+  const injection = source.slice(begin, end);
+  const plan = injection.indexOf('dispatchTopology("planBrickResolution"');
+  const commit = injection.indexOf('dispatchTopology("validateAndCommitShadowTopology"');
+  const wet = injection.indexOf("this.pipelines.injectLiquid");
+  assert.ok(plan >= 0 && commit > plan && wet > commit,
+    "the intersected topology must plan, commit, and only then receive density");
+  assert.match(injection,
+    /copyBufferToBuffer\(this\.topologyArena,[\s\S]*?this\.acceptedIndirectArguments/,
+    "the promoted accepted worklists must be snapshotted in the injection transaction");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /fn injectionReachesBrick[\s\S]*?injectionCenter\.xyz\+p\.injectionRadius\.xyz>=lower/,
+    "drop/brick intersection must be independent of the brick's current cell resolution");
 });
 
 test("Sparse CM12 exposes normalized structural and live candidate policy controls", () => {
