@@ -1,8 +1,100 @@
 # Sparse CM12 pressure performance — implementation handoff
 
-Date: 2026-08-16. Scope checked against the current working tree at HEAD
-`c418b265`; the tree has unrelated staged and unstaged user changes, so this
+Date: 2026-08-16. The original handoff analysis was checked at `c418b265`;
+the implementation receipt below was checked on the working tree above HEAD
+`556f6b0e`. The tree has unrelated staged and unstaged user changes, so this
 document does not claim a clean-tree receipt.
+
+## Implementation status — immediate cutover
+
+The aggressive production cutover from this handoff is implemented in the
+current working tree:
+
+- `tools/benchmark-sparse-cm12-pressure.ts` publishes versioned frozen-snapshot
+  receipts for the ten WP0 manufactured cases through the independent CPU
+  composite oracle;
+- the non-spherical resident solver recomputes a true `b - A p` initially, at
+  its guarded recurrence cadence, and at the end;
+- the production relative tolerance is `5e-7`; only a fresh residual may stop
+  useful PCG arithmetic, while a zero tolerance retains the fixed-budget debug
+  control;
+- curvature collapse pauses the recursive solve and recovers from the next
+  fresh residual instead of being misreported as convergence;
+- accepted cells are compacted once per pressure epoch to a stable-ID live
+  liquid worklist; every non-spherical PCG vector/SpMV dispatch consumes its
+  copied indirect count instead of invoking accepted air cells;
+- active pressure rows are compacted independently and projection consumes a
+  copied indirect row count;
+- effective fine-edge weights and a dense neighbour stream are baked once per
+  pressure epoch, removing row lookup, ghost-fluid division, and three-word
+  edge records from recurring SpMVs;
+- the standard two-reduction PCG and projected-Jacobi pipelines have been
+  removed. The only installed pressure pipeline is one-reduction pipelined
+  sparse MGPCG; separating-boundary construction fails closed;
+- the additive sparse hierarchy is built from resident bricks by powers of two
+  through the domain root. Every level owns compact directed CSR edges whose
+  weights are baked from fine-edge contributions once per epoch; execution is
+  flattened across all levels rather than hard-coded per level;
+- a four-stage brick Chebyshev smoother and compact hierarchy correction form
+  the preconditioner. Hierarchy corrections are combined once per brick rather
+  than walked by every liquid cell;
+- the production cap is 64 iterations, down from 128;
+- diagnostics distinguish recursive and true residuals, executed and encoded
+  iterations, first tolerance crossing, gated tail, curvature recovery,
+  residual drift, convergence reason, and cap failure;
+- the CPU oracle receipt now exposes component anchoring, compatibility, and
+  warm-versus-zero initial residual quality.
+
+Representative Dawn checks on the cutover tree:
+
+- mini32, one warmup plus eight measured paper-step frames: Sparse and Uniform
+  both reach liquid-front `x=31`, with no WebGPU validation errors;
+- symmetric expansion, 250 steps: maximum true relative residual
+  `1.85e-6`, maximum post-projection divergence `7.78e-5 1/s`, final frame 70
+  executed iterations and `9.46e-7` true relative residual, with no WebGPU
+  validation errors. The scene's independent mass/seam harness still reports
+  its pre-existing topology-policy gates and is not re-blessed here.
+
+WP1 component projection and the remaining topology-publication work are still
+open. WP2 row/effective-edge compaction and the central WP4-WP6 scalable-solve
+cutover have landed; the implementation does not claim topology-complete GPU
+candidate-page publication.
+
+Latest same-command Dawn receipts (`long-dam`, adaptive sparse resolution, one
+warmup plus four paper-step frames) retain front motion to trace/surface/liquid
+`x=52/51/50`. At 64 production iterations the root-complete solve reports true
+relative residual near `8.0e-6`, maximum true residual between `0.008` and
+`0.011`, and maximum post-projection divergence near `0.0014 1/s`. The GPU
+pressure-stage median is approximately `8.5-8.9 ms`, versus the earlier
+`11.93 ms` 128-iteration receipt; short two-sample GPU timestamp medians are
+reported as a range rather than overfit to one run.
+
+The 40-frame mini32 Dawn indicator reaches `x=31` for trace, surface, and liquid
+fronts with true relative residual `1.39e-6`, maximum residual `1.75e-4`, and
+divergence `6.10e-5 1/s`. The 20-step symmetric indicator passes every pressure
+and D4-symmetry gate (maximum true relative residual `1.86e-6`, divergence
+`4.10e-5 1/s`, exact density/topology symmetry); its two reported failures
+remain the independent mass-drift and absent-mixed-seam fixture gates.
+
+### Construction-time CPU regression found during cutover
+
+No pressure or simulation-sized frame work moved back to the CPU. Scene
+construction nevertheless has a separate severe host-side regression: the
+working tree raises `SPARSE_CM12_HOST_TEMPLATE_MUTABLE_BRICK_MAXIMUM` from 512
+to 2048. Long-dam's 1152 mutable bricks therefore enter
+`packResidentTopologyTemplates`, which constructs 22 composite topology
+variants per 128-brick chunk on the CPU.
+
+A CPU-only device-boundary measurement put long-dam host packing at `31.65 s`,
+`2.85 GiB` of approximate JS heap growth, and `552.1 MiB` of planned GPU
+buffers. Forcing the accepted-only path measured `0.47 s`, `9.7 MiB`, and
+`85.5 MiB` respectively. The 2048 bound is currently a correctness
+compatibility measure because the GPU candidate-page prototype does not yet
+publish rows and incidence; simply restoring 512 would regress long-dam front
+activation. Immediate architectural cutover therefore means completing
+topology-complete GPU page publication, then removing the enlarged host path.
+Mini32 dam-front parity, symmetric expansion, mini64 threshold behavior, and
+long-dam front activation are the required Dawn gates for that removal.
 
 ## 0. Scope and decision
 

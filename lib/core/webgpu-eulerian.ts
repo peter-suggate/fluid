@@ -72,6 +72,14 @@ export interface GPUEulerianInfo {
   /** Physically accepted Sparse CM12 worklists consumed by indirect dispatch. */
   adaptiveAcceptedCellCount?: number;
   adaptiveAcceptedRowCount?: number;
+  /** Accepted same-level rows whose required brick resolution is below 8. */
+  adaptiveAcceptedSameLevelCoarseRowCount?: number;
+  /** Accepted rows that couple different 2:1 pressure resolutions. */
+  adaptiveAcceptedMixedSeamRowCount?: number;
+  /** Accepted rows retained by the latest liquid/ghost-fluid classification. */
+  adaptivePressureActiveRowCount?: number;
+  /** Compact live-liquid cells invoked by the latest pressure solve. */
+  adaptivePressureCellCount?: number;
   /** Wet-domain storage residency, independent from the narrow surface band. */
   fluidBulkBrickResidentCount?: number;
   fluidBulkBrickHaloCount?: number;
@@ -204,7 +212,22 @@ export interface GPUEulerianInfo {
    * the unit from a grid kind two methods share. */
   maxPressure_Pa?: number;
   pressureResidual?: number;
+  /** Fresh b-Ap relative L2 residual; authoritative for Sparse CM12 convergence. */
   pressureRelativeResidual?: number;
+  /** Recursively updated CG residual, retained only to diagnose f32 drift. */
+  pressureRecursiveRelativeResidual?: number;
+  pressureTrueResidualMaximum?: number;
+  pressureInitialTrueRelativeResidual?: number;
+  pressureIterationsExecuted?: number;
+  pressureIterationsEncoded?: number;
+  pressureFirstToleranceCrossingIteration?: number;
+  pressureSolveConverged?: boolean;
+  pressureIterationCapReached?: boolean;
+  pressureConvergenceReason?: "tolerance" | "iteration-cap" | "fixed-budget";
+  pressureCurvatureBreakdown?: boolean;
+  pressureCurvatureRecoveryCount?: number;
+  pressureRecursiveToTrueResidualRatio?: number;
+  pressureResidualDrift?: boolean;
   pressureRowCapacity?: number;
   pressureRequiredRows?: number;
   pressureCapacityOverflow?: boolean;
@@ -296,7 +319,7 @@ export interface GPUEulerianInfo {
   adaptiveSubIsoVolume_cells?: number;
   adaptiveOverfullLeafCount?: number;
   adaptiveSubIsoLeafCount?: number;
-  /** Composite face ports crossing a live 4³/8³ atlas seam in the latest step. */
+  /** Legacy alias for the live accepted mixed-seam pressure-row count. */
   adaptiveMixedSeamFaceCount?: number;
   phiInterfaceCellCount?: number;
   volumeCorrectionNormalSpeed_cells_s?: number;

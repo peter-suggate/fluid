@@ -466,7 +466,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       gridKind: "octree",
       cellSize_m,
       pressureIterations: 0,
-      pressureSolver: "GPU-resident sparse composite GᵀWG Jacobi-PCG",
+      pressureSolver: "GPU-resident one-reduction composite GᵀWG sparse MGPCG",
       allocatedBytes: presentation.allocatedBytes + resident.allocatedBytes,
       quality,
       volumeCellSum: stats.integratedMassFineCells,
@@ -865,6 +865,24 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const topology = diagnostics as typeof diagnostics
       & SparseCM12TopologySchedulerDiagnostics;
     this.info.pressureRelativeResidual = diagnostics.pressureRelativeResidual;
+    this.info.pressureRecursiveRelativeResidual =
+      diagnostics.pressureRecursiveRelativeResidual;
+    this.info.pressureTrueResidualMaximum = diagnostics.pressureTrueResidualMaximum;
+    this.info.pressureInitialTrueRelativeResidual =
+      diagnostics.pressureInitialTrueRelativeResidual;
+    this.info.pressureIterationsExecuted = diagnostics.pressureIterationsExecuted;
+    this.info.pressureIterationsEncoded = diagnostics.pressureIterationsEncoded;
+    this.info.pressureFirstToleranceCrossingIteration =
+      diagnostics.pressureFirstToleranceCrossingIteration;
+    this.info.pressureSolveConverged = diagnostics.pressureSolveConverged;
+    this.info.pressureIterationCapReached = diagnostics.pressureIterationCapReached;
+    this.info.pressureConvergenceReason = diagnostics.pressureConvergenceReason;
+    this.info.pressureCurvatureBreakdown = diagnostics.pressureCurvatureBreakdown;
+    this.info.pressureCurvatureRecoveryCount =
+      diagnostics.pressureCurvatureRecoveryCount;
+    this.info.pressureRecursiveToTrueResidualRatio =
+      diagnostics.pressureRecursiveToTrueResidualRatio;
+    this.info.pressureResidualDrift = diagnostics.pressureResidualDrift;
     this.info.maxDivergenceAfter_s = diagnostics.maximumDivergence_s;
     this.info.maxDivergence_s = diagnostics.maximumDivergence_s;
     const adaptiveInfo = this.info as typeof this.info & AdaptiveMassStepTelemetry;
@@ -899,6 +917,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.adaptiveTopologyShadowCoarseBrickCount = topology.acceptedCoarseBrickCount;
     this.info.adaptiveAcceptedCellCount = diagnostics.acceptedCellCount;
     this.info.adaptiveAcceptedRowCount = diagnostics.acceptedRowCount;
+    this.info.adaptiveAcceptedSameLevelCoarseRowCount =
+      diagnostics.acceptedSameLevelCoarseRowCount;
+    this.info.adaptiveAcceptedMixedSeamRowCount = diagnostics.acceptedMixedSeamRowCount;
+    this.info.adaptivePressureActiveRowCount = diagnostics.pressureActiveRowCount;
+    this.info.adaptivePressureCellCount = diagnostics.pressureCellCount;
+    // Keep the established diagnostics/benchmark field live while callers
+    // migrate to the pressure-specific name above.
+    this.info.adaptiveMixedSeamFaceCount = diagnostics.acceptedMixedSeamRowCount;
     this.info.adaptiveFineBrickCount = topology.acceptedFineBrickCount;
     this.info.adaptiveCoarseBrickCount = topology.acceptedCoarseBrickCount;
     this.info.adaptiveResolutionPromotedBrickCount = 0;

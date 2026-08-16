@@ -71,6 +71,10 @@ interface Checkpoint {
   readonly symmetry: Readonly<Partial<Record<ScalarFieldName | "velocity", SymmetrySummary>>>;
   readonly dominantBodyMassFraction: number;
   readonly pressureRelativeResidual?: number;
+  readonly pressureRecursiveRelativeResidual?: number;
+  readonly pressureIterationsExecuted?: number;
+  readonly pressureResidualDrift?: boolean;
+  readonly adaptivePressureCellCount?: number;
   readonly maximumPostProjectionDivergence_s?: number;
   readonly statsMaximumPostProjectionDivergence_s?: number;
   readonly maximumAbsoluteVerticalVelocity_m_s?: number;
@@ -182,7 +186,10 @@ function activityD4MismatchCount(
 const DENSITY_SYMMETRY_LIMIT = 1e-3;
 const VELOCITY_SYMMETRY_LIMIT_M_S = 5e-4;
 const PRESSURE_SYMMETRY_LIMIT = 0.25;
-const PRESSURE_RELATIVE_RESIDUAL_LIMIT = 1e-8;
+// Sparse CM12 now publishes a fresh f32 b-Ap residual rather than the much
+// smaller recursively updated CG vector. The production cutover stops at this
+// measured floor and keeps the independent physical divergence gate below.
+const PRESSURE_RELATIVE_RESIDUAL_LIMIT = 2e-6;
 const POST_PROJECTION_DIVERGENCE_LIMIT_S = 1.25e-4;
 const MASS_RELATIVE_ERROR_LIMIT = 2e-3;
 const MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE = 1e-5;
@@ -529,6 +536,14 @@ if (resolutionModeArgument !== "adaptive" && resolutionModeArgument !== "all-fin
   throw new RangeError("resolution-mode must be adaptive or all-fine");
 }
 const resolutionMode = resolutionModeArgument as "adaptive" | "all-fine";
+const pressureIterationsArgument = argument("pressure-iterations");
+const pressureIterationsOverride = pressureIterationsArgument === undefined
+  ? undefined : Number(pressureIterationsArgument);
+if (pressureIterationsOverride !== undefined
+  && (!Number.isSafeInteger(pressureIterationsOverride)
+    || pressureIterationsOverride < 8 || pressureIterationsOverride > 256)) {
+  throw new RangeError("pressure-iterations must be an integer from 8 through 256");
+}
 const postProjectionDivergenceLimit_s = POST_PROJECTION_DIVERGENCE_LIMIT_S;
 const backend = argument("backend") ?? process.env.WEBGPU_BACKEND
   ?? process.env.FLUID_WEBGPU_BACKEND ?? "metal";
@@ -600,6 +615,8 @@ try {
         fineTileResolution: 8,
         coarseTileResolution: 4,
         timeStep: "paper",
+        ...(pressureIterationsOverride === undefined
+          ? {} : { pressureIterations: pressureIterationsOverride }),
       },
       () => {},
     );
@@ -690,6 +707,10 @@ try {
         },
         dominantBodyMassFraction: dominantBodyMassFraction(density, dimensions),
         pressureRelativeResidual,
+        pressureRecursiveRelativeResidual: stats.pressureRecursiveRelativeResidual,
+        pressureIterationsExecuted: stats.pressureIterationsExecuted,
+        pressureResidualDrift: stats.pressureResidualDrift,
+        adaptivePressureCellCount: stats.adaptivePressureCellCount,
         maximumPostProjectionDivergence_s,
         statsMaximumPostProjectionDivergence_s: stats.maxDivergenceAfter_s,
         maximumAbsoluteVerticalVelocity_m_s,
@@ -962,6 +983,15 @@ try {
       maximumPressureD4Error: maximum((sample) => sample.symmetry.pressure?.maximumAbsoluteError),
       maximumTopologyD4Error: maximum((sample) => sample.symmetry.topology?.maximumAbsoluteError),
       maximumPressureRelativeResidual: maximum((sample) => sample.pressureRelativeResidual),
+      maximumPressureRecursiveRelativeResidual: maximum(
+        (sample) => sample.pressureRecursiveRelativeResidual,
+      ),
+      maximumPressureIterationsExecuted: maximum(
+        (sample) => sample.pressureIterationsExecuted,
+      ),
+      pressureResidualDriftCount: checkpoints.filter(
+        (sample) => sample.pressureResidualDrift,
+      ).length,
       maximumPostProjectionDivergence_s: maximum((sample) => sample.maximumPostProjectionDivergence_s),
       maximumMixedSeamDivergence_s: maximum(
         (sample) => sample.maximumMixedSeamDivergence_s,

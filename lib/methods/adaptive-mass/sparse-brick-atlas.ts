@@ -322,11 +322,6 @@ function uniformInitialBrick(
   };
 }
 
-function floorPowerOfTwo(value: number): number {
-  if (!(value >= 1)) return 1;
-  return 2 ** Math.floor(Math.log2(value));
-}
-
 /**
  * Cover an analytic tank fill with maximal graded octree leaves. The traversal
  * visits octree boundary nodes, not every wet fixed brick. Partial top bricks
@@ -360,12 +355,19 @@ function hierarchicalTankFillBricks(
     const inside = origin.every((value, axis) => value + span <= wetMaximum[axis]);
     if (inside) {
       const edgeFine = span * BRICK_FINE_RESOLUTION;
-      const clearanceFine = hasFreeSurface
-        ? Math.max(0, (wetMaximum[1] - origin[1] - span) * BRICK_FINE_RESOLUTION
-          - (surfaceFineRings - 1) * BRICK_FINE_RESOLUTION)
+      const clearanceRings = hasFreeSurface
+        ? Math.max(0, wetMaximum[1] - origin[1] - span - (surfaceFineRings - 1))
         : Number.POSITIVE_INFINITY;
+      // Strong 2:1 grading doubles the admissible cell width once per complete
+      // brick ring below the fine surface band: 1, 2, 4, then the maximum
+      // physical width 8 supported by the runtime ladder. The old
+      // linear `clearanceFine / 4` approximation plateaued at 4 for both the
+      // second and third submerged rings. On a 40-cell-deep tank that authored
+      // the bottom span-two macro at width 4; macro leaves are intentionally
+      // immutable at runtime, so selecting Surface distance could never reach
+      // the valid width-8 bottom rung visible in the UI.
       const allowedCellWidth = hasFreeSurface
-        ? Math.min(edgeFine, floorPowerOfTwo(Math.max(1, clearanceFine / 4)))
+        ? Math.min(BRICK_FINE_RESOLUTION, edgeFine, 2 ** clearanceRings)
         : edgeFine;
       const requiredResolution = edgeFine / allowedCellWidth;
       // A macro at 8^3 would refine all tangential directions merely to grade

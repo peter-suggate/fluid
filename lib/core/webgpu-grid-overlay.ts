@@ -151,6 +151,8 @@ fn nearestBodyDistance(ro: vec3f, rd: vec3f) -> f32 {
 }
 
 const SPARSE_INVALID:u32=0xffffffffu;
+const SPARSE_ACTIVITY_HEADER_WORDS:u32=28u;
+const SPARSE_ACTIVITY_RECORD_WORDS:u32=40u;
 fn sparseGridEnabled()->bool{
   return sparseP.counts.x>0u&&all(sparseP.dimensions.xyz==vec3u(u.gridInfo.xyz));
 }
@@ -174,11 +176,12 @@ fn sparseBrickLookup(key:u32)->u32{
   return SPARSE_INVALID;
 }
 fn sparseBrickActive(brick:u32)->bool{
-  let at=24u+40u*brick+10u;
+  let at=SPARSE_ACTIVITY_HEADER_WORDS+SPARSE_ACTIVITY_RECORD_WORDS*brick+10u;
   return brick<sparseP.dispatch.w&&at<arrayLength(&sparseActivity)&&sparseActivity[at]!=0u;
 }
 fn sparseAcceptedResolution(brick:u32)->u32{
-  return sparseActivity[24u+40u*brick+12u];
+  return sparseActivity[SPARSE_ACTIVITY_HEADER_WORDS
+    +SPARSE_ACTIVITY_RECORD_WORDS*brick+12u];
 }
 fn sparseBrickSpan(brick:u32)->u32{
   return 1u<<(sparseTopology[sparseP.topologyOffsets2.z+4u*brick+2u]&31u);

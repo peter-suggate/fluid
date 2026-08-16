@@ -62,9 +62,11 @@ travel >= 0.25 -> 2^3
 otherwise      -> 1^3
 ```
 
-The surface floor wins over the velocity floor. In default `Surface distance`
-mode, velocity, deformation, temporal change, and restriction detail do not
-affect resolution.
+The surface floor wins over the velocity floor. In `Surface distance` mode,
+every non-surface submerged brick requests `1^3` immediately; refine-only 2:1
+closure raises only the support rungs required beside `8^3` surface bricks.
+Velocity, deformation, temporal change, restriction detail, recovery history,
+and promotion/demotion hysteresis do not affect that request.
 
 A fractional density is not surface evidence on its own. Conservative
 transport and wall conditioning can leave a fully submerged cell between the
@@ -75,6 +77,14 @@ domain faces are excluded. A submerged numerical oscillation across `rho =
 0.5` is not a surface unless one endpoint reaches the configured air band. The
 separate thin-feature predicate continues to protect represented sheets that
 never cross `rho = 0.5`.
+
+This is one planner, not a second surface-only implementation. Both selector
+modes use the same surface/thin/receiver classification, 2:1 closure,
+conservative transfer, and generation commit. The selector only gates the
+activity-derived floors and cadence/history checks. Initial hierarchical tank
+fills use the same 1/2/4/8 distance ladder, including immutable deep macros, so
+a live selector change is never expected to repair an overly fine authored
+bottom level.
 
 Thin represented liquid is also a hard `8^3` floor, even when dilution makes
 it too faint to cross the `rho = 0.5` surface. For each occupied composite leaf,

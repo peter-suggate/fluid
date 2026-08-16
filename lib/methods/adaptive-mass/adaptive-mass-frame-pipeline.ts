@@ -86,7 +86,7 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   },
   pressureSolve: {
     id: "pressure-solve",
-    label: "Matrix-free Jacobi-PCG pressure solve",
+    label: "One-reduction sparse MGPCG pressure solve",
   },
   pressureProjection: {
     id: "velocity-projection",
@@ -450,7 +450,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
       {
         kind: "param-choice", param: "selectorMode", label: "Criterion",
         options: [
-          { value: "surface", label: "SURFACE", hint: "Surface and thin liquid are 8³; coarsen with distance." },
+          { value: "surface", label: "SURFACE", hint: "Surface/thin liquid is 8³; submerged liquid requests 1³ and only 2:1 closure grades it." },
           { value: "activity", label: "ACTIVITY", hint: "Free surfaces stay fine; calm flooded deep bulk merges." },
         ],
       },
@@ -535,6 +535,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
       {
         kind: "param-range", param: "topologyCadenceSteps", label: "Epoch cadence",
         unit: " steps", min: 1, max: 32, step: 1, digits: 0,
+        enabled: (context) => context.values.selectorMode === "activity",
         hint: "Accepted steps between quiet-history updates. One evaluates settling every step; each accepted merge still moves only one rung.",
       },
       {
@@ -551,6 +552,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
       {
         kind: "param-range", param: "demoteEpochs", label: "Demote hold",
         unit: " epochs", min: 1, max: 32, step: 1, digits: 0,
+        enabled: (context) => context.values.selectorMode === "activity",
         hint: "Quiet epochs required for each one-rung merge: 8³→4³→2³→1³.",
       },
       {
@@ -573,9 +575,9 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
       },
     ],
     chip: (context) => `${context.values.selectorMode === "activity"
-      ? "surface + activity" : "surface distance"} · plan every ${Number(
-      context.values.topologyCadenceSteps ?? SPARSE_CM12_ACTIVITY_POLICY.topologyCadenceSteps,
-    ).toFixed(0)} steps · ${Number(
+      ? `surface + activity · plan every ${Number(context.values.topologyCadenceSteps
+        ?? SPARSE_CM12_ACTIVITY_POLICY.topologyCadenceSteps).toFixed(0)} steps`
+      : "surface distance · direct 1³ bulk"} · ${Number(
       context.values.prepareBricksPerFrame
         ?? SPARSE_CM12_ACTIVITY_POLICY.prepareBricksPerFrame,
     ).toFixed(0)}/frame`,
@@ -626,7 +628,18 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
       writes: "active rows, diagonal, nullspace components",
       feeds: "RHS construction",
     },
-    chip: (context) => `${context.info?.adaptiveMixedSeamFaceCount ?? 0} mixed rows`,
+    chip: (context) => {
+      const info = context.info;
+      const accepted = info?.adaptiveAcceptedRowCount ?? 0;
+      const active = info?.adaptivePressureActiveRowCount ?? 0;
+      const coarse = info?.adaptiveAcceptedSameLevelCoarseRowCount ?? 0;
+      const mixed = info?.adaptiveAcceptedMixedSeamRowCount
+        ?? info?.adaptiveMixedSeamFaceCount ?? 0;
+      return `Accepted rows: ${accepted.toLocaleString()}`
+        + `\nActive in solve: ${active.toLocaleString()}`
+        + `\nSame-level coarse: ${coarse.toLocaleString()}`
+        + `\nMixed seams: ${mixed.toLocaleString()}`;
+    },
   }),
   stage({
     id: "pressure-rhs", band: "pressure", side: "right",
@@ -636,7 +649,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
       summary: "Builds the finite-volume divergence RHS and projects enclosed components onto their exact compatible quotient space.",
       reads: "predicted face velocity, active pressure rows",
       writes: "compatible pressure RHS",
-      feeds: "Jacobi-PCG",
+      feeds: "sparse MGPCG",
     },
     chip: () => "D = −M⁻¹GᵀW",
   }),

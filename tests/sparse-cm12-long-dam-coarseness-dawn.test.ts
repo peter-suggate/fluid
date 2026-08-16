@@ -20,7 +20,7 @@ import { WebGPUAdaptiveMassSolver } from
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
 
-dawnTest("doubled-detail long dam retains coarse work after two paper steps",
+dawnTest("long dam keeps deep work coarse and publishes new front receivers fine",
   { timeout: 240_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-long-dam-coarseness-dawn.test.ts");
@@ -96,6 +96,57 @@ dawnTest("doubled-detail long dam retains coarse work after two paper steps",
       assert.ok(acceptedCells <= 0.8 * allFineCells,
         `expected at least 20% active-cell reduction; got ${acceptedCells}/${allFineCells} ${
           JSON.stringify(census)} wet=${JSON.stringify(wetCensus)}`);
+
+      const initialActiveKeys = new Set(initialActive.map((brick) => brick.key));
+      const protectedNewKeys = new Set<number>();
+      const coordinateKey = (coordinate: readonly number[]) => coordinate.join("/");
+      // Mirror brickRequestedAsReceiver: a target consumes the bit pointing
+      // back from each active neighbour's immutable support snapshot.
+      const requestedAsReceiver = (target: (typeof evolved.bricks)[number],
+        bricks: typeof evolved.bricks): boolean => {
+        const byCoordinate = new Map(bricks.map((brick) =>
+          [coordinateKey(brick.coordinate), brick]));
+        for (let dz = -1; dz <= 1; dz += 1) for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0 && dz === 0) continue;
+            const neighbour = byCoordinate.get(coordinateKey([
+              target.coordinate[0] + dx,
+              target.coordinate[1] + dy,
+              target.coordinate[2] + dz,
+            ]));
+            if (!neighbour?.active) continue;
+            const bit = 1 - dx + 3 * (1 - dy) + 9 * (1 - dz);
+            if ((neighbour.supportMask & 2 ** bit) !== 0) return true;
+          }
+        }
+        return false;
+      };
+
+      // Run far enough for the fast leading face to leave its construction-
+      // time receiver shell. Every newly resident surface/receiver brick must
+      // publish 8^3 in that same accepted step; no ordinary topology budget is
+      // allowed to expose it at a coarse rung even transiently.
+      for (let step = 3; step <= 96; step += 1) {
+        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        await device.queue.onSubmittedWorkDone();
+        const snapshot = await solver.readGPUActivityPolicy();
+        for (const brick of snapshot.bricks) {
+          if (!brick.active || initialActiveKeys.has(brick.key)) continue;
+          const movingSurface = (brick.reasons & (1 | 128)) === (1 | 128);
+          const urgentReceiver = requestedAsReceiver(brick, snapshot.bricks)
+            && ((brick.reasons & 64) === 0 || (brick.reasons & 128) !== 0);
+          if (!movingSurface && !urgentReceiver) continue;
+          protectedNewKeys.add(brick.key);
+          assert.equal(brick.acceptedResolution, 8,
+            `new front brick ${brick.coordinate.join(",")} was accepted at ${
+              brick.acceptedResolution}^3 on step ${step}; acceptedSteps=${
+              snapshot.acceptedSteps} activated=${brick.activatedStep} reasons=${
+              brick.reasons} plan=${brick.plannedResolution}/${brick.planReasons} candidate=${
+              brick.candidateResolution}/${brick.candidateStatus}`);
+        }
+      }
+      assert.ok(protectedNewKeys.size > 0,
+        "the long-dam front must enter at least one new protected receiver region");
       assert.deepEqual(validationErrors, []);
     } finally {
       solver?.destroy();

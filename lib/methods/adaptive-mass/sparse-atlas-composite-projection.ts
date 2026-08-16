@@ -197,6 +197,9 @@ export interface SparseAtlasProjectionOptions {
 export interface SparseAtlasProjectionReceipt {
   readonly iterations: number;
   readonly converged: boolean;
+  readonly componentCount: number;
+  readonly anchoredComponentCount: number;
+  readonly unanchoredComponentCount: number;
   readonly liquidCellCount: number;
   readonly activeRowCount: number;
   readonly cutRowCount: number;
@@ -205,6 +208,11 @@ export interface SparseAtlasProjectionReceipt {
   readonly thetaClampCount: number;
   readonly minimumTheta: number;
   readonly rhsCompatibilityMaxAbs: number;
+  /** True `b - A p` norm before the first PCG iteration. */
+  readonly initialRelativeResidualL2: number;
+  /** The same frozen system from a zero pressure seed. */
+  readonly zeroSeedInitialRelativeResidualL2: number;
+  readonly initialMaximumResidual: number;
   readonly relativeResidualL2: number;
   readonly maximumResidual: number;
   readonly preDivergenceVolumeL2: number;
@@ -1403,6 +1411,8 @@ export function projectSparseAtlasVelocity(
   // adding a full leaf sweep to every PCG iteration.
   let residualPreconditioned = dot(residual, preconditioned);
   let residualNorm = norm(residual);
+  const initialResidualNorm = residualNorm;
+  const initialMaximumResidual = maximumAbsolute(residual);
   let iterations = 0;
   const target = Math.max(absoluteTolerance, relativeTolerance * rhsNorm);
 
@@ -1526,6 +1536,13 @@ export function projectSparseAtlasVelocity(
     inactiveRowCount += activeRows[id] === 0 ? 1 : 0;
   }
   const converged = norm(trueResidual) <= target;
+  let anchoredComponentCount = 0;
+  for (let component = 0; component < system.componentCount; component += 1) {
+    anchoredComponentCount += system.componentAnchored[component] !== 0 ? 1 : 0;
+  }
+  const unanchoredComponentCount = system.componentCount - anchoredComponentCount;
+  const initialRelativeResidualL2 = rhsNorm > 0 ? initialResidualNorm / rhsNorm : 0;
+  const zeroSeedInitialRelativeResidualL2 = rhsNorm > 0 ? 1 : 0;
   const relativeResidualL2 = rhsNorm > 0 ? norm(trueResidual) / rhsNorm : 0;
   const maximumResidual = maximumAbsolute(trueResidual);
   const preDivergenceMaximum = maximumAbsolute(preDivergence);
@@ -1538,11 +1555,15 @@ export function projectSparseAtlasVelocity(
   let receipt = workspace.receipt;
   if (!receipt) {
     receipt = workspace.receipt = {
-      iterations, converged, liquidCellCount, activeRowCount: system.rows.length,
+      iterations, converged, componentCount: system.componentCount,
+      anchoredComponentCount, unanchoredComponentCount,
+      liquidCellCount, activeRowCount: system.rows.length,
       cutRowCount: system.cutRowCount, mixedSeamRowCount: grid.mixedSeamRowCount,
       cutMixedSeamRowCount: system.cutMixedSeamRowCount,
       thetaClampCount: system.thetaClampCount, minimumTheta: system.minimumTheta,
-      rhsCompatibilityMaxAbs, relativeResidualL2, maximumResidual,
+      rhsCompatibilityMaxAbs, initialRelativeResidualL2,
+      zeroSeedInitialRelativeResidualL2, initialMaximumResidual,
+      relativeResidualL2, maximumResidual,
       preDivergenceVolumeL2, postDivergenceVolumeL2, preDivergenceMaximum,
       postDivergenceMaximum, divergenceReduction, kineticEnergyBefore,
       kineticEnergyAfter, pressureCorrectionEnergy, energyIdentityAbsError,
@@ -1553,6 +1574,9 @@ export function projectSparseAtlasVelocity(
     const mutable = receipt as Mutable<SparseAtlasProjectionReceipt>;
     mutable.iterations = iterations;
     mutable.converged = converged;
+    mutable.componentCount = system.componentCount;
+    mutable.anchoredComponentCount = anchoredComponentCount;
+    mutable.unanchoredComponentCount = unanchoredComponentCount;
     mutable.liquidCellCount = liquidCellCount;
     mutable.activeRowCount = system.rows.length;
     mutable.cutRowCount = system.cutRowCount;
@@ -1561,6 +1585,9 @@ export function projectSparseAtlasVelocity(
     mutable.thetaClampCount = system.thetaClampCount;
     mutable.minimumTheta = system.minimumTheta;
     mutable.rhsCompatibilityMaxAbs = rhsCompatibilityMaxAbs;
+    mutable.initialRelativeResidualL2 = initialRelativeResidualL2;
+    mutable.zeroSeedInitialRelativeResidualL2 = zeroSeedInitialRelativeResidualL2;
+    mutable.initialMaximumResidual = initialMaximumResidual;
     mutable.relativeResidualL2 = relativeResidualL2;
     mutable.maximumResidual = maximumResidual;
     mutable.preDivergenceVolumeL2 = preDivergenceVolumeL2;

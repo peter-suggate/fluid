@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { createOceanSeicheScene, getSceneDefinition } from "../lib/core/scenes";
+import {
+  createDeepPowerHydrostaticScene,
+  createOceanSeicheScene,
+  getSceneDefinition,
+} from "../lib/core/scenes";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import { sceneCardForDefinition } from "../lib/core/scene-definition";
 import { buildEnvironmentProxyCatalog } from "../lib/core/voxel-environments";
@@ -55,7 +59,7 @@ test("ocean seiche collapses deep water into graded macro-bricks", () => {
     const brick = sparseBrickContainingCoordinate(atlas, [x, y, z]);
     return brick && 8 * sparseBrickSpan(brick) / brick.resolution;
   });
-  assert.deepEqual(verticalRungs(20, 5), [8, 8, 8, 8, 4, 4, 4, 2, 1],
+  assert.deepEqual(verticalRungs(20, 5), [8, 8, 8, 8, 8, 8, 4, 2, 1],
     "calm water must become progressively coarser below the free surface");
 
   for (const brick of atlas.bricks) {
@@ -71,6 +75,24 @@ test("ocean seiche collapses deep water into graded macro-bricks", () => {
       `brick ${brick.key}/${neighbor.key} exceeds 2:1 grading`);
     }
   }
+});
+
+test("deep hydrostatic authors every maximally graded surface-distance rung", () => {
+  const scene = createDeepPowerHydrostaticScene();
+  const atlas = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
+  });
+  const verticalWidths = Array.from({ length: 5 }, (_, y) => {
+    const brick = sparseBrickContainingCoordinate(atlas, [0, y, 0]);
+    assert.ok(brick, `missing wet brick at y=${y}`);
+    return 8 * sparseBrickSpan(brick) / brick.resolution;
+  });
+  assert.deepEqual(verticalWidths, [8, 8, 4, 2, 1],
+    "the 40-cell pool must reach width 8 at the bottom without a duplicate width-4 rung");
+  const bottom = sparseBrickContainingCoordinate(atlas, [0, 0, 0]);
+  assert.equal(sparseBrickSpan(bottom!), 2);
+  assert.equal(bottom!.resolution, 2,
+    "the immutable bottom macro must be authored at its final surface-distance level");
 });
 
 test("ocean seiche opens without pressure-hull ribs behind the water", () => {

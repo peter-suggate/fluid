@@ -38,7 +38,7 @@ export interface AdaptiveMassSolverOptions {
   readonly sharpeningDistance?: number;
   /** Forward-Euler substeps TraceAlongField may spend reaching D. */
   readonly sharpeningTraceSteps?: number;
-  /** Maximum matrix-free Jacobi-PCG iterations encoded for each pressure solve. */
+  /** Maximum one-reduction sparse MGPCG iterations encoded for each pressure solve. */
   readonly pressureIterations?: number;
   /** Relative L2 residual that stops further PCG arithmetic; zero runs the full budget. */
   readonly pressureRelativeTolerance?: number;
@@ -69,7 +69,7 @@ const params: MethodParamSpec[] = [
       { value: "surface", label: "Surface distance" },
       { value: "activity", label: "Surface + activity" },
     ],
-    hint: "Surface distance keeps every interface brick 8³. Activity refines moving or complex interfaces and thin liquid, while flooded deep bulk stays coarse unless restriction reveals real density detail.",
+    hint: "Surface distance keeps interface/thin bricks 8³ and sends submerged bricks directly to 1³ before 2:1 closure, ignoring velocity and history. Activity additionally refines moving or complex liquid.",
   },
   {
     kind: "select",
@@ -121,7 +121,7 @@ const params: MethodParamSpec[] = [
     step: 8,
     digits: 0,
     update: "runtime",
-    hint: "Maximum Jacobi-PCG iterations per pressure solve. Lower budgets trade incompressibility for frame time; 128 retains the current Sparse CM12 operating point.",
+    hint: "Maximum sparse MGPCG iterations per pressure solve. Lower budgets trade incompressibility for frame time; 64 is the validated production operating point.",
   },
   {
     kind: "number",
@@ -376,7 +376,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   params,
   runtimeParamKeys: ADAPTIVE_MASS_RUNTIME_PARAM_KEYS,
   pipelineGraph: async () => ADAPTIVE_MASS_FLUID_PIPELINE,
-  pressureMapping: "Every live Sparse CM12 step solves one globally coupled composite pressure system over regular faces and conservative 2:1 seam ports using matrix-free Jacobi-PCG.",
+  pressureMapping: "Every live Sparse CM12 step solves one globally coupled composite pressure system over regular faces and conservative 2:1 seam ports using one-reduction sparse MGPCG.",
   normalizeValues: (values) => {
     const { activitySignals: _activitySignals, ...normalizedActivity } = activityPolicy(values);
     return {

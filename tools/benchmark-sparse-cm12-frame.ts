@@ -72,6 +72,7 @@ const warmupFrames = positiveInteger("warmup", 5);
 const timedFrames = positiveInteger("frames", 40);
 const prepareBricksPerFrame = optionalPositiveInteger("prepare-bricks");
 const surfaceFineRings = optionalPositiveInteger("surface-fine-rings");
+const pressureIterationsOverride = optionalPositiveInteger("pressure-iterations");
 const sceneArgument = process.argv.slice(2)
   .find((value) => value.startsWith("--scene="))?.slice("--scene=".length)
   ?? "symmetric";
@@ -303,6 +304,8 @@ async function createArm(
       resolutionMode: sparseResolutionArgument,
       ...(prepareBricksPerFrame === undefined ? {} : { prepareBricksPerFrame }),
       ...(surfaceFineRings === undefined ? {} : { surfaceFineRings }),
+      ...(pressureIterationsOverride === undefined
+        ? {} : { pressureIterations: pressureIterationsOverride }),
     };
   const values = resolveMethodValues(method, "balanced", overrides);
   const solver = await method.createSolverAsync!(
@@ -564,9 +567,17 @@ try {
       sparse: {
         solver: finalSparseInfo.pressureSolver,
         iterations: finalSparseInfo.pressureIterations,
+        executedIterations: finalSparseInfo.pressureIterationsExecuted,
+        encodedIterations: finalSparseInfo.pressureIterationsEncoded,
+        convergenceReason: finalSparseInfo.pressureConvergenceReason,
+        iterationCapReached: finalSparseInfo.pressureIterationCapReached,
+        recursiveRelativeResidual: finalSparseInfo.pressureRecursiveRelativeResidual,
         relativeResidual: finalSparseInfo.pressureRelativeResidual,
+        trueResidualMaximum: finalSparseInfo.pressureTrueResidualMaximum,
+        residualDrift: finalSparseInfo.pressureResidualDrift,
         maximumDivergence_s: finalSparseInfo.maxDivergenceAfter_s,
         acceptedCells: finalSparseInfo.adaptiveAcceptedCellCount,
+        liquidPressureCells: finalSparseInfo.adaptivePressureCellCount,
         acceptedRows: finalSparseInfo.adaptiveAcceptedRowCount,
         constructionLeafCount: sparse.solver.info.cellCount,
         cpuStages: pressureStages(verdict.sparse.cpuStages),

@@ -82,6 +82,27 @@ test("every diagram node sits in a declared band", () => {
   for (const band of bands) assert.ok(populated.has(band), `band ${band} draws nothing`);
 });
 
+test("pressure topology presents its live row census as labeled lines", () => {
+  const stage = ADAPTIVE_MASS_FLUID_PIPELINE.stages.find(
+    (candidate) => candidate.id === "pressure-topology",
+  );
+  assert.ok(stage);
+  const context = {
+    info: {
+      adaptiveAcceptedRowCount: 12_480,
+      adaptivePressureActiveRowCount: 5_940,
+      adaptiveAcceptedSameLevelCoarseRowCount: 7_216,
+      adaptiveAcceptedMixedSeamRowCount: 384,
+    },
+  } as Parameters<typeof stage.chip>[0];
+  assert.equal(stage.chip(context), [
+    "Accepted rows: 12,480",
+    "Active in solve: 5,940",
+    "Same-level coarse: 7,216",
+    "Mixed seams: 384",
+  ].join("\n"));
+});
+
 test("the CPU-lane brackets stay outside the diagram", () => {
   // Host planning and submission are real CPU intervals but no GPU stage owns
   // them; a node naming either would read 0 ms under a hardware partition.

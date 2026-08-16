@@ -831,9 +831,9 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    cost — it is one — but tagged, because its basis includes render passes the
    compute column around it cannot see. */
 .rp-trunk-wall-tag { fill: var(--micro); font: var(--text-tag); letter-spacing: var(--track-wide); }
-/* The simulation pipeline's one visible fact row: pass counts and schedule
-   under the stage name, never prose. Prose stays in the hover tip. */
-.rp-node-chip { display: block; margin: 2px 0 0 16px; overflow: hidden; color: var(--micro); font: var(--text-small); text-overflow: ellipsis; white-space: nowrap; }
+/* Compact stage facts under the name. Most receipts remain one line; a stage
+   with several related counts can publish one labeled fact per line. */
+.rp-node-chip { display: block; margin: 2px 0 0 16px; overflow: hidden; color: var(--micro); font: var(--text-small); line-height: 1.45; white-space: pre-line; }
 /* What the switch was worth: the frame total differenced across it. Cheaper
    under the current setting reads as a saving, dearer as a charge. */
 .rp-node-delta { padding: 0 3px; border: 1px solid var(--line); color: var(--dim); font: 700 9px/13px var(--mono); white-space: nowrap; }

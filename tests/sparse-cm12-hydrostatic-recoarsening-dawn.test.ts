@@ -155,6 +155,53 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
         ladderSolver.destroy();
       }
 
+      // The Surface distance comparison mode has no activity hysteresis: in a
+      // completely submerged domain every brick asks for 1^3 immediately.
+      // Accepted-neighbour closure still publishes the safe 8->4->2->1 ladder
+      // because the ordinary work budget may cut over only part of a plan.
+      const surfaceOnlySolver = await WebGPUAdaptiveMassSolver.createAsync(
+        device, calm, "balanced", undefined,
+        options({
+          resolutionMode: "all-fine",
+          receiverSupportRings: 1,
+          receiverFloor: 1,
+          activityPolicy: {
+            ...SPARSE_CM12_ACTIVITY_POLICY,
+            activitySignals: false,
+            topologyCadenceSteps: 32,
+            demoteEpochs: 32,
+            prepareBricksPerFrame: 256,
+          },
+          pressureIterations: 8,
+        }),
+        () => {},
+      );
+      try {
+        const before = await surfaceOnlySolver.readGPUActivityPolicy();
+        assert.ok(before.bricks.filter((brick) => brick.active).every(
+          (brick) => brick.acceptedResolution === 8));
+        const accepted = [8];
+        let active = before.bricks.filter((brick) => brick.active);
+        for (let step = 1; step <= 3; step += 1) {
+          assert.equal(surfaceOnlySolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+          await device.queue.onSubmittedWorkDone();
+          const after = await surfaceOnlySolver.readGPUActivityPolicy();
+          active = after.bricks.filter((brick) => brick.active);
+          assert.ok(active.length > 0);
+          const resolutions = new Set(active.map((brick) => brick.acceptedResolution));
+          assert.equal(resolutions.size, 1,
+            `surface-only submerged bricks diverged at step ${step}: ${
+              [...resolutions].join(",")}`);
+          accepted.push(active[0]!.acceptedResolution);
+        }
+        assert.deepEqual(accepted, [8, 4, 2, 1],
+          "surface-only bulk must collapse every accepted step despite a 32-epoch hold");
+        assert.ok(active.every((brick) => brick.planReasons === 2048),
+          "surface-only submerged planning must publish only the direct coarse reason");
+      } finally {
+        surfaceOnlySolver.destroy();
+      }
+
       const validation = await device.popErrorScope();
       assert.equal(validation?.message, undefined);
       assert.deepEqual(uncaptured, []);

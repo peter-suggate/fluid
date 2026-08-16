@@ -254,8 +254,12 @@ export interface SparseCM12ResidentStageSeams {
 const WORKGROUP_SIZE = 64;
 /** Params in the resident WGSL, in bytes. Grow this when a field is added. */
 const SPARSE_CM12_PARAMETER_BYTES = 432;
-export const SPARSE_CM12_PRESSURE_ITERATIONS = 128;
-export const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE = 0;
+/** Twenty f32 convergence/diagnostic scalars; see the WGSL initialization. */
+const SPARSE_CM12_PRESSURE_SCALAR_BYTES = 80;
+export const SPARSE_CM12_PRESSURE_ITERATIONS = 64;
+/** Immediate production cutover: guarded by a fresh b-Ap check every batch. */
+export const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE = 5e-7;
+export const SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE = 32;
 const SPARSE_CM12_PRESSURE_ITERATIONS_MINIMUM = 8;
 const SPARSE_CM12_PRESSURE_ITERATIONS_MAXIMUM = 256;
 const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE_MAXIMUM = 0.1;
@@ -276,8 +280,11 @@ export const sparseCM12PressureRelativeTolerance = (value: unknown): number =>
     ? Math.min(SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE_MAXIMUM,
       Math.max(0, value))
     : SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE;
-const ACTIVITY_HEADER_WORDS = 24;
+const ACTIVITY_HEADER_WORDS = 28;
 const ACTIVITY_RECORD_WORDS = 40;
+const ACCEPTED_COARSE_ROW_COUNT_WORD = 22;
+const ACCEPTED_MIXED_ROW_COUNT_WORD = 23;
+const PRESSURE_ACTIVE_ROW_COUNT_WORD = 24;
 const CANDIDATE_CELLS_PER_BRICK = 8 ** 3;
 const CANDIDATE_CHANNELS = 12;
 const GPU_TOPOLOGY_PAGE_POOL_MINIMUM = 32;
@@ -316,7 +323,16 @@ export function sparseCM12OwnershipTablePlan(
     allocatedWords: hashWords + brickRecordWords + 2 };
 }
 
-export const SPARSE_CM12_HOST_TEMPLATE_MUTABLE_BRICK_MAXIMUM = 512;
+// The 192x96x32 long-dam scene has a 24x12x4 span-one receiver domain. Keeping
+// the bound below its 1152 leaves routed its moving front through the cell-only
+// dynamic page prototype, whose publication is deliberately deferred until it
+// also owns rows and incidence. The result was worse than merely delayed adaptation:
+// newly activated swept receivers remained at their construction-time coarse
+// rung. A 2048-leaf compatibility frontier remains bounded while giving that
+// benchmark the complete cell/row/incidence templates needed for urgent 8^3
+// surface publication. Leave headroom for the same bounded frontier with a
+// modest apron; the accepted cell/row limits above remain independent guards.
+export const SPARSE_CM12_HOST_TEMPLATE_MUTABLE_BRICK_MAXIMUM = 2048;
 
 /**
  * Host variant packing is a compatibility path for bounded live frontiers.
@@ -1244,16 +1260,182 @@ function uploadBuffer(
  * cell, row, term and incidence record a second time. */
 function compactPressureTopology(
   templates: PackedResidentTopologyTemplates,
+  atlas: SparseAdaptiveMassAtlas,
 ): Uint32Array {
+  const brickCount = atlas.bricks.length;
   const sourceOffset = templates.words[15]!;
   if (sourceOffset < TEMPLATE_HEADER_WORDS || sourceOffset >= templates.words.length) {
     throw new Error(`Sparse CM12 pressure edge offset ${sourceOffset} is invalid`);
   }
-  const result = new Uint32Array(TEMPLATE_HEADER_WORDS
-    + templates.words.length - sourceOffset);
+  const cellOffset = templates.words[6]!;
+  const edgeCount = templates.words[sourceOffset + templates.cellCount]!;
+  const edgeRecords = sourceOffset + templates.cellCount + 1;
+  const contributions = new Map<number, number[]>();
+  for (let cell = 0; cell < templates.cellCount; cell += 1) {
+    const brick = templates.words[cellOffset + 16 * cell + 11]!;
+    const begin = templates.words[sourceOffset + cell]!;
+    const end = templates.words[sourceOffset + cell + 1]!;
+    for (let edge = begin; edge < end; edge += 1) {
+      const other = templates.words[edgeRecords + 3 * edge + 1]!;
+      const otherBrick = templates.words[cellOffset + 16 * other + 11]!;
+      if (otherBrick === brick) continue;
+      const key = brick * brickCount + otherBrick;
+      const list = contributions.get(key);
+      if (list) list.push(edge); else contributions.set(key, [edge]);
+    }
+  }
+  const ordered = [...contributions.entries()].sort(([left], [right]) => left - right);
+  const coarseOffsets = new Uint32Array(brickCount + 1);
+  for (const [key] of ordered) coarseOffsets[Math.floor(key / brickCount) + 1] += 1;
+  for (let brick = 0; brick < brickCount; brick += 1) {
+    coarseOffsets[brick + 1] += coarseOffsets[brick]!;
+  }
+  const contributionCount = ordered.reduce((sum, [, list]) => sum + list.length, 0);
+  const compactEdgeWords = templates.words.length - sourceOffset;
+  const coarseBase = TEMPLATE_HEADER_WORDS + compactEdgeWords;
+  const coarseRecordBase = coarseBase + 4 + coarseOffsets.length;
+  const contributionBase = coarseRecordBase + 3 * ordered.length;
+  const hierarchyBase = contributionBase + contributionCount;
+  const brickDimensions = atlas.dimensions.map((value) => Math.ceil(value / 8));
+  const hierarchyScales: number[] = [];
+  for (let scale = 2; ; scale *= 2) {
+    hierarchyScales.push(scale);
+    if (brickDimensions.every((value) => value <= scale)) break;
+    if (!Number.isSafeInteger(scale * 2)) {
+      throw new RangeError("Sparse CM12 pressure hierarchy scale overflow");
+    }
+  }
+  const hierarchy = hierarchyScales.map((scale) => {
+    const dimensions = brickDimensions.map((value) => Math.ceil(value / scale));
+    const groupCount = dimensions[0]! * dimensions[1]! * dimensions[2]!;
+    const parents = Uint32Array.from(atlas.bricks, (brick) => {
+      const coordinate = brick.coordinate.map((value) => Math.floor(value / scale));
+      return coordinate[0]! + dimensions[0]!
+        * (coordinate[1]! + dimensions[1]! * coordinate[2]!);
+    });
+    const childCounts = new Uint32Array(groupCount);
+    for (const parent of parents) childCounts[parent] += 1;
+    const childOffsets = new Uint32Array(groupCount + 1);
+    for (let group = 0; group < groupCount; group += 1) {
+      childOffsets[group + 1] = childOffsets[group]! + childCounts[group]!;
+    }
+    const childCursor = childOffsets.slice(0, groupCount);
+    const children = new Uint32Array(brickCount);
+    parents.forEach((parent, brick) => { children[childCursor[parent]++] = brick; });
+    const internalCounts = new Uint32Array(groupCount);
+    ordered.forEach(([key]) => {
+      const source = Math.floor(key / brickCount), target = key % brickCount;
+      if (parents[source] === parents[target]) internalCounts[parents[source]!] += 1;
+    });
+    const internalOffsets = new Uint32Array(groupCount + 1);
+    for (let group = 0; group < groupCount; group += 1) {
+      internalOffsets[group + 1] = internalOffsets[group]! + internalCounts[group]!;
+    }
+    const internalCursor = internalOffsets.slice(0, groupCount);
+    const internalEdges = new Uint32Array(internalOffsets[groupCount]!);
+    ordered.forEach(([key], edge) => {
+      const source = Math.floor(key / brickCount), target = key % brickCount;
+      if (parents[source] === parents[target]) {
+        internalEdges[internalCursor[parents[source]!]++] = edge;
+      }
+    });
+    const crossContributionsByPair = new Map<number, number[]>();
+    ordered.forEach(([key], edge) => {
+      const source = Math.floor(key / brickCount), target = key % brickCount;
+      const sourceGroup = parents[source]!, targetGroup = parents[target]!;
+      if (sourceGroup === targetGroup) return;
+      const pair = sourceGroup * groupCount + targetGroup;
+      const list = crossContributionsByPair.get(pair);
+      if (list) list.push(edge); else crossContributionsByPair.set(pair, [edge]);
+    });
+    const cross = [...crossContributionsByPair.entries()]
+      .sort(([left], [right]) => left - right);
+    const crossOffsets = new Uint32Array(groupCount + 1);
+    for (const [pair] of cross) crossOffsets[Math.floor(pair / groupCount) + 1] += 1;
+    for (let group = 0; group < groupCount; group += 1) {
+      crossOffsets[group + 1] += crossOffsets[group]!;
+    }
+    const crossContributionCount = cross.reduce((sum, [, list]) => sum + list.length, 0);
+    return { groupCount, parents, childOffsets, children, internalOffsets, internalEdges,
+      cross, crossOffsets, crossContributionCount };
+  });
+  const hierarchyDescriptorWords = 10;
+  let hierarchyWords = 1 + hierarchyDescriptorWords * hierarchy.length;
+  for (const level of hierarchy) hierarchyWords += level.parents.length
+    + level.childOffsets.length + level.children.length
+    + level.internalOffsets.length + level.internalEdges.length
+    + level.crossOffsets.length + 3 * level.cross.length
+    + level.crossContributionCount;
+  const result = new Uint32Array(hierarchyBase + hierarchyWords);
   result.set(templates.words.subarray(0, TEMPLATE_HEADER_WORDS));
   result[15] = TEMPLATE_HEADER_WORDS;
   result.set(templates.words.subarray(sourceOffset), TEMPLATE_HEADER_WORDS);
+  result[13] = hierarchyBase;
+  result[14] = coarseBase;
+  result.set([brickCount, ordered.length, contributionCount, edgeCount], coarseBase);
+  result.set(coarseOffsets, coarseBase + 4);
+  let contributionAt = contributionBase;
+  ordered.forEach(([key, list], coarseEdge) => {
+    const record = coarseRecordBase + 3 * coarseEdge;
+    result[record] = key % brickCount;
+    result[record + 1] = contributionAt;
+    result[record + 2] = list.length;
+    result.set(list, contributionAt);
+    contributionAt += list.length;
+  });
+  result[hierarchyBase] = hierarchy.length;
+  let hierarchyAt = hierarchyBase + 1 + hierarchyDescriptorWords * hierarchy.length;
+  let hierarchyDynamicAt = 0;
+  hierarchy.forEach((level, index) => {
+    const descriptor = hierarchyBase + 1 + hierarchyDescriptorWords * index;
+    result[descriptor] = level.groupCount;
+    result[descriptor + 9] = hierarchyDynamicAt;
+    const append = (slot: number, values: Uint32Array): void => {
+      result[descriptor + slot] = hierarchyAt;
+      result.set(values, hierarchyAt);
+      hierarchyAt += values.length;
+    };
+    append(1, level.parents);
+    append(2, level.childOffsets);
+    append(3, level.children);
+    append(4, level.internalOffsets);
+    append(5, level.internalEdges);
+    append(6, level.crossOffsets);
+    const crossRecordBase = hierarchyAt;
+    result[descriptor + 7] = crossRecordBase;
+    hierarchyAt += 3 * level.cross.length;
+    const crossContributionBase = hierarchyAt;
+    result[descriptor + 8] = crossContributionBase;
+    let crossContributionAt = crossContributionBase;
+    level.cross.forEach(([pair, list], edge) => {
+      const record = crossRecordBase + 3 * edge;
+      result[record] = pair % level.groupCount;
+      result[record + 1] = crossContributionAt;
+      result[record + 2] = list.length;
+      result.set(list, crossContributionAt);
+      crossContributionAt += list.length;
+    });
+    hierarchyAt += level.crossContributionCount;
+    hierarchyDynamicAt += level.cross.length + 4 * level.groupCount;
+  });
+  return result;
+}
+
+/** Writable pressure dispatch headers/worklists followed by the immutable
+ * dense neighbor stream consumed by every SpMV. Keeping this out of the
+ * presentation payload removes both atomic access and a 3-u32 record stride
+ * from the pressure hot path. */
+function pressureWorklistAndNeighbors(
+  templates: PackedResidentTopologyTemplates,
+): Uint32Array {
+  const edgeOffsets = templates.words[15]!;
+  const edgeCount = templates.words[edgeOffsets + templates.cellCount]!;
+  const edgeRecords = edgeOffsets + templates.cellCount + 1;
+  const neighborOffset = 8 + templates.cellCount + templates.rowCount;
+  const result = new Uint32Array(neighborOffset + edgeCount);
+  for (let edge = 0; edge < edgeCount; edge += 1) {
+    result[neighborOffset + edge] = templates.words[edgeRecords + 3 * edge + 1]!;
+  }
   return result;
 }
 
@@ -1277,6 +1459,12 @@ export class WebGPUSparseCM12Resident {
    * each commit. WebGPU forbids one buffer being writable storage and an
    * indirect source in the same compute-pass synchronization scope. */
   private readonly acceptedIndirectArguments: GPUBuffer;
+  /** Copy-isolated indirect dispatch for the frame's compact liquid cells. */
+  private readonly pressureCellIndirectArguments: GPUBuffer;
+  /** Copy-isolated indirect dispatch for active pressure rows. */
+  private readonly pressureRowIndirectArguments: GPUBuffer;
+  /** Ordinary compact pressure IDs and dense immutable SpMV neighbors. */
+  private readonly pressureWorklists: GPUBuffer;
   private readonly fineMetadata: GPUBuffer;
   private readonly fineWorklist: GPUBuffer;
   private readonly fineSamples: GPUBuffer;
@@ -1318,6 +1506,9 @@ export class WebGPUSparseCM12Resident {
     buffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer,
       GPUBuffer, GPUBuffer, GPUBuffer],
     acceptedIndirectArguments: GPUBuffer,
+    pressureCellIndirectArguments: GPUBuffer,
+    pressureRowIndirectArguments: GPUBuffer,
+    pressureWorklists: GPUBuffer,
     fineBuffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer,
       GPUBuffer],
     finePlan: FineLevelSetBrickPlan,
@@ -1330,6 +1521,10 @@ export class WebGPUSparseCM12Resident {
     rowCount: number,
     private readonly templateCellCount: number,
     private readonly templateRowCount: number,
+    private readonly pressureCoarseEdgeCount: number,
+    private readonly pressureHierarchyGroupCount: number,
+    private readonly pressureHierarchyEdgeCount: number,
+    private readonly pressureScratchBytes: number,
     private readonly topologyWorklistBaseBytes: number,
     private readonly templateWords: Uint32Array,
     private horizontalD4Authority: boolean,
@@ -1349,6 +1544,9 @@ export class WebGPUSparseCM12Resident {
       domainFine: dimensions,
     };
     this.acceptedIndirectArguments = acceptedIndirectArguments;
+    this.pressureCellIndirectArguments = pressureCellIndirectArguments;
+    this.pressureRowIndirectArguments = pressureRowIndirectArguments;
+    this.pressureWorklists = pressureWorklists;
     [this.fineParams, this.fineMetadata, this.fineWorklist, this.fineSamples,
       this.fineWorkA, this.fineWorkB, this.fineRollback] = fineBuffers;
     this.globalFineLevelSetSource = {
@@ -1381,7 +1579,9 @@ export class WebGPUSparseCM12Resident {
     this.pipelines = pipelines;
     this.cellCount = cellCount;
     this.rowCount = rowCount;
-    this.allocatedBytes = [acceptedIndirectArguments, pressureTemplates,
+    this.allocatedBytes = [acceptedIndirectArguments, pressureCellIndirectArguments,
+      pressureRowIndirectArguments,
+      pressureTemplates, pressureWorklists,
       ...buffers, ...fineBuffers].reduce(
       (sum, buffer) => sum + buffer.size, 0,
     )
@@ -1398,6 +1598,9 @@ export class WebGPUSparseCM12Resident {
     )),
     rigid?: SparseCM12RigidResources,
   ): Promise<WebGPUSparseCM12Resident> {
+    if (atlas.boundary) {
+      throw new Error("Sparse CM12 sparse MGPCG does not support separating boundaries; no fallback solver is installed");
+    }
     // Macro-bricks are immutable, but their presence must not disable
     // transitions for every ordinary span-one surface/receiver brick in the
     // same hydrostatic scene. Prepack variants for those ordinary bricks and
@@ -1505,13 +1708,16 @@ export class WebGPUSparseCM12Resident {
         (density) => density >= 0.5 ? 1 : 0));
     }
     const partials = device.createBuffer({ label: "Sparse CM12 resident reductions",
-      size: Math.max(8, 8 * cellWorkgroups), usage: storage });
+      size: Math.max(16, 16 * cellWorkgroups), usage: storage });
     const scalars = device.createBuffer({ label: "Sparse CM12 resident scalar reductions",
-      size: 32, usage: storage });
+      size: SPARSE_CM12_PRESSURE_SCALAR_BYTES, usage: storage });
     const conditioning = device.createBuffer({
       label: "Sparse CM12 conservative transport and conditioning accumulators",
-      size: Math.max(4, 4 * templates.cellCount * 4),
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      // Transport needs four cell planes. Pressure reuses the dead arena for
+      // cell and row headers plus their stable-ID compact worklists.
+      size: 4 * Math.max(4 * templates.cellCount,
+        templates.cellCount + templates.rowCount + 8),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     const initialActivity = new Uint32Array(ACTIVITY_HEADER_WORDS
       + ACTIVITY_RECORD_WORDS * packed.brickCount);
@@ -1539,10 +1745,32 @@ export class WebGPUSparseCM12Resident {
     }
     const activity = uploadBuffer(device, "Sparse CM12 resident activity history",
       initialActivity, storage);
+    const pressureEdgeOffset = templates.words[15]!;
+    const pressureEdgeCount = templates.words[pressureEdgeOffset + templates.cellCount]!;
+    const pressureTopology = compactPressureTopology(templates, atlas);
+    const pressureCoarseBase = pressureTopology[14]!;
+    const pressureCoarseEdgeCount = pressureTopology[pressureCoarseBase + 1]!;
+    const pressureHierarchyBase = pressureTopology[13]!;
+    const pressureHierarchyGroupCounts = Array.from(
+      { length: pressureTopology[pressureHierarchyBase]! },
+      (_, level) => pressureTopology[pressureHierarchyBase + 1 + 10 * level]!,
+    );
+    const pressureHierarchyEdgeCounts = pressureHierarchyGroupCounts.map((groupCount, level) => {
+      const descriptor = pressureHierarchyBase + 1 + 10 * level;
+      const crossOffsets = pressureTopology[descriptor + 6]!;
+      return pressureTopology[crossOffsets + groupCount]!;
+    });
+    const pressureScratchBytes = 4 * (pressureEdgeCount + pressureCoarseEdgeCount
+      + 4 * packed.brickCount
+      + pressureHierarchyGroupCounts.reduce((sum, count, level) =>
+        sum + 4 * count + pressureHierarchyEdgeCounts[level]!, 0));
     const candidateState = device.createBuffer({
       label: "Sparse CM12 isolated candidate cell fields",
-      size: Math.max(4, 4 * CANDIDATE_CHANNELS * CANDIDATE_CELLS_PER_BRICK
-        * packed.candidateBrickCount),
+      // Candidate transfer begins after projection, so the same storage first
+      // carries the pressure epoch's baked effective edge coefficients.
+      size: Math.max(4, pressureScratchBytes,
+        4 * CANDIDATE_CHANNELS * CANDIDATE_CELLS_PER_BRICK
+          * packed.candidateBrickCount),
       usage: storage,
     });
     const topologyPagePool = sparseCM12TopologyPagePoolPlan(
@@ -1597,14 +1825,27 @@ export class WebGPUSparseCM12Resident {
     device.queue.writeBuffer(topologyArena, templates.words.byteLength,
       initialWorklists.buffer as ArrayBuffer, initialWorklists.byteOffset,
       initialWorklists.byteLength);
-    const pressureTopology = compactPressureTopology(templates);
     const pressureTemplates = uploadBuffer(device,
       "Sparse CM12 read-only pressure topology", pressureTopology,
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
+    const pressureWorklists = uploadBuffer(device,
+      "Sparse CM12 ordinary pressure worklists and dense neighbors",
+      pressureWorklistAndNeighbors(templates),
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     const acceptedIndirectArguments = uploadBuffer(device,
       "Sparse CM12 accepted indirect dispatch snapshot",
       initialWorklists.subarray(8, 14),
       GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST);
+    const pressureCellIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 pressure-cell indirect dispatch",
+      size: 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const pressureRowIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 pressure-row indirect dispatch",
+      size: 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
     const fineParams = device.createBuffer({
       label: "Sparse CM12 compact fine presentation parameters",
       size: 16,
@@ -1628,8 +1869,9 @@ export class WebGPUSparseCM12Resident {
     const diagnosticsReadback = device.createBuffer({
       label: "Sparse CM12 resident diagnostic readback",
       // Reduction scalars, activity header, then authoritative accepted
-      // cell/row worklist counts. These are QA receipts, never schedule input.
-      size: 32 + 4 * ACTIVITY_HEADER_WORDS + 8,
+      // cell/row worklist counts and compact pressure-cell count. These are QA
+      // receipts, never schedule input.
+      size: SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS + 12,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
 
@@ -1676,7 +1918,7 @@ export class WebGPUSparseCM12Resident {
         { binding: 12, resource: { buffer: activity } },
         { binding: 13, resource: { buffer: candidateState } },
         { binding: 14, resource: { buffer: pressureTemplates } },
-        { binding: 15, resource: { buffer: fineSamples } },
+        { binding: 15, resource: { buffer: pressureWorklists } },
         { binding: 16, resource: { buffer: topologyArena } },
       ],
     });
@@ -1693,12 +1935,29 @@ export class WebGPUSparseCM12Resident {
       "finalizeSharpening", "clearSolidExcess", "scatterSolidExcess",
       "finalizeSolidExcess", "preserveHorizontalD4",
       "commitHorizontalD4",
-      "forceFaces", "classifyPressureCells", "classifyRows", "preparePressure",
-      "initializePCG",
-      "reduceInitialize", "applyDirection", "reduceCurvature",
-      "updateResidual",
-      "reduceResidual", "updateDirection",
-      "projectedJacobiToApplied", "projectedJacobiToPressure", "projectFaces",
+      "forceFaces", "classifyPressureCells", "countPressureCells",
+      "finalizePressureCellWorklist", "compactPressureCells", "classifyRows",
+      "countPressureRows", "finalizePressureRowWorklist", "compactPressureRows",
+      "bakeEffectivePressureEdges", "preparePressure",
+      "bakeBrickAggregateDiagonal", "restrictBrickAggregateResidual",
+      "bakePressureHierarchyDiagonal", "bakePressureHierarchyEdges",
+      "restrictPressureHierarchyResidual", "refinePressureHierarchyCorrection",
+      "combinePressureHierarchyCorrection",
+      "bakeBrickAggregateEdges", "refineBrickAggregateAtoB1",
+      "refineBrickAggregateBtoA2", "refineBrickAggregateAtoB3",
+      "refineBrickAggregateBtoA4", "refineBrickAggregateAtoB5",
+      "refineBrickAggregateBtoA6", "refineBrickAggregateAtoB7",
+      "applyBrickAggregatePreconditioner",
+      "initializeBrickAggregateDirection",
+      "initializePCG", "measureTrueResidual", "measureGuardedTrueResidual",
+      "reduceInitialTrueResidual", "reduceGuardedTrueResidual",
+      "restartPCGAfterCurvatureLoss", "initializeBrickAggregateRecoveryDirection",
+      "reduceCurvatureRecovery",
+      "reduceFinalTrueResidual",
+      "initializePipelinedImage", "reducePipelinedInitialize",
+      "updatePipelinedState", "applyPipelinedImage", "reducePipelinedIteration",
+      "applyPipelinedRecovery", "reducePipelinedRecovery",
+      "reduceInitialize", "projectFaces",
       "collocateAndDiagnose", "measureDivergenceDiagnostics",
       "reduceDivergenceDiagnostics",
       "advanceActivityClock", "measureBrickActivity",
@@ -1717,20 +1976,6 @@ export class WebGPUSparseCM12Resident {
     const entries = await Promise.all(names.map(async (name) => [name,
       await device.createComputePipelineAsync({ label: `Sparse CM12 ${name}`,
         layout: pipelineLayout, compute: { module: shaderModule, entryPoint: name } })] as const));
-    const earlyStopNames = ["applyDirection", "reduceCurvature", "updateResidual",
-      "reduceResidual", "updateDirection"] as const;
-    const earlyStopEntries = await Promise.all(earlyStopNames.map(async (name) => [
-      `${name}UntilConverged`,
-      await device.createComputePipelineAsync({
-        label: `Sparse CM12 ${name} with pressure early stopping`,
-        layout: pipelineLayout,
-        compute: {
-          module: shaderModule,
-          entryPoint: name,
-          constants: { PRESSURE_EARLY_STOP: 1 },
-        },
-      }),
-    ] as const));
     const rigidCoupling = rigid ? await WebGPUSparseCM12RigidCoupling.create(device, {
       parameters,
       state,
@@ -1743,6 +1988,9 @@ export class WebGPUSparseCM12Resident {
       [parameters, topology, state, partials, scalars, conditioning, activity,
         candidateState, topologyArena],
       acceptedIndirectArguments,
+      pressureCellIndirectArguments,
+      pressureRowIndirectArguments,
+      pressureWorklists,
       [fineParams, fineMetadata, fineWorklist, fineSamples, fineWorkA, fineWorkB,
         fineRollback],
       fine.plan,
@@ -1750,9 +1998,13 @@ export class WebGPUSparseCM12Resident {
       bindGroup,
       pressureBindGroup,
       pressureTemplates,
-      Object.fromEntries([...entries, ...earlyStopEntries]),
+      Object.fromEntries(entries),
       templates.cellCount, templates.rowCount,
       templates.cellCount, templates.rowCount,
+      pressureCoarseEdgeCount,
+      pressureHierarchyGroupCounts.reduce((sum, count) => sum + count, 0),
+      pressureHierarchyEdgeCounts.reduce((sum, count) => sum + count, 0),
+      pressureScratchBytes,
       templates.words.byteLength,
       templates.words,
       horizontalD4Authority, atlas.boundary, rigidCoupling);
@@ -1780,12 +2032,8 @@ export class WebGPUSparseCM12Resident {
       accelerationFinePerSecond2, sharpening, activityPolicy, pressureControl, bodyCount,
       worldDimensions_m);
     const pressureIterations = sparseCM12PressureIterations(pressureControl?.iterations);
-    const pressureEarlyStop = sparseCM12PressureRelativeTolerance(
-      pressureControl?.relativeTolerance) > 0;
-    const pressureKernel = (name: "applyDirection" | "reduceCurvature"
-      | "updateResidual" | "reduceResidual" | "updateDirection") =>
-      pressureEarlyStop ? `${name}UntilConverged` : name;
-    encoder.clearBuffer(this.conditioning);
+    encoder.clearBuffer(this.conditioning, 0,
+      Math.max(4, 12 * this.templateCellCount));
     // classifyRows only visits accepted rows. Clear the cached ghost-fluid
     // theta field once so the pressure iteration can use theta==0 as its row
     // acceptance mask instead of revalidating topology requirements in every
@@ -1794,6 +2042,11 @@ export class WebGPUSparseCM12Resident {
       4 * this.templateRowCount);
     encoder.clearBuffer(this.state, 4 * this.layout.liquid,
       4 * this.templateCellCount);
+    // Live pressure-row census. classifyRows increments these counters from
+    // the accepted row worklist after topology publication and liquid/ghost-
+    // fluid classification; they are diagnostics only and never schedule work.
+    encoder.clearBuffer(this.activity, 4 * ACCEPTED_COARSE_ROW_COUNT_WORD,
+      4 * (PRESSURE_ACTIVE_ROW_COUNT_WORD - ACCEPTED_COARSE_ROW_COUNT_WORD + 1));
     // The pass opens on first dispatch rather than up front. A stage that
     // encodes nothing this advance — the D4 authority on an asymmetric scene —
     // then leaves no empty pass behind, which matters because Metal writes no
@@ -1821,6 +2074,16 @@ export class WebGPUSparseCM12Resident {
       activePass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments,
         4 * (argumentWord - 8));
     };
+    const dispatchPressureCell = (name: string) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(this.pressureCellIndirectArguments, 0);
+    };
+    const dispatchPressureRow = (name: string) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(this.pressureRowIndirectArguments, 0);
+    };
     const closePass = () => {
       pass?.end();
       pass = undefined;
@@ -1846,6 +2109,8 @@ export class WebGPUSparseCM12Resident {
       seams.close(id);
     };
     const bricks = Math.ceil(packed.brickCount / WORKGROUP_SIZE);
+    const templateCellGroups = Math.ceil(this.templateCellCount / WORKGROUP_SIZE);
+    const templateRowGroups = Math.ceil(this.templateRowCount / WORKGROUP_SIZE);
     stage("transport-velocity-extension", () => {
       this.rigidCoupling?.encodeVoxelization(encoder, bodyCount);
       dispatchAccepted("initializeTransportVelocity", "cell");
@@ -1885,12 +2150,15 @@ export class WebGPUSparseCM12Resident {
     // be encoded inside an open compute pass, so this is the deliberate phase
     // boundary in the otherwise resident frame.
     closePass();
-    encoder.clearBuffer(this.conditioning);
+    encoder.clearBuffer(this.conditioning, 0,
+      Math.max(4, 8 * this.templateCellCount));
     stage("gamma-diffusion", () => {
       dispatchAccepted("scatterGammaSnapshot", "row");
       dispatchAccepted("finalizeGammaSnapshot", "cell");
       closePass();
-      encoder.clearBuffer(this.conditioning);
+      encoder.clearBuffer(this.conditioning, 0,
+        Math.max(4, 16 * this.templateCellCount));
+      encoder.clearBuffer(this.candidateState, 0, this.pressureScratchBytes);
       dispatchAccepted("scatterGammaRefinement", "row");
       dispatchAccepted("finalizeGammaRefinement", "cell");
     });
@@ -1913,39 +2181,98 @@ export class WebGPUSparseCM12Resident {
       dispatchAccepted("forceFaces", "row");
     });
     stage("pressure-topology", () => {
+      // Conservative conditioning is dead after sharpening. Reuse its large
+      // cell-scaled arena for stable-ID liquid compaction, then copy only the
+      // three indirect words outside the pass to satisfy WebGPU usage scopes.
+      closePass();
+      encoder.clearBuffer(this.conditioning, 0,
+        Math.max(4, 4 * (this.templateCellCount + this.templateRowCount + 8)));
       useBindGroup(this.pressureBindGroup);
       dispatchAccepted("classifyPressureCells", "cell");
+      dispatch("countPressureCells", templateCellGroups);
+      dispatch("finalizePressureCellWorklist", 1);
+      dispatch("compactPressureCells", templateCellGroups);
       dispatchAccepted("classifyRows", "row");
+      dispatch("countPressureRows", templateRowGroups);
+      dispatch("finalizePressureRowWorklist", 1);
+      dispatch("compactPressureRows", templateRowGroups);
+      dispatchAccepted("bakeEffectivePressureEdges", "cell");
       dispatchAccepted("preparePressure", "cell");
+      dispatch("bakeBrickAggregateEdges",
+        Math.max(1, Math.ceil(this.pressureCoarseEdgeCount / WORKGROUP_SIZE)));
+      dispatch("bakePressureHierarchyEdges", Math.max(1,
+        Math.ceil(this.pressureHierarchyEdgeCount / WORKGROUP_SIZE)));
+      dispatch("bakeBrickAggregateDiagonal", packed.brickCount);
+      dispatch("bakePressureHierarchyDiagonal", this.pressureHierarchyGroupCount);
+      closePass();
+      encoder.copyBufferToBuffer(this.conditioning, 4,
+        this.pressureCellIndirectArguments, 0, 12);
+      encoder.copyBufferToBuffer(this.conditioning,
+        4 * (4 + this.templateCellCount + 1),
+        this.pressureRowIndirectArguments, 0, 12);
     });
     stage("pressure-rhs", () => {
-      dispatchAccepted("initializePCG", "cell");
+      dispatchPressureCell("initializePCG");
+      dispatch("restrictBrickAggregateResidual", packed.brickCount);
+      dispatch("refineBrickAggregateAtoB1", packed.brickCount);
+      dispatch("refineBrickAggregateBtoA2", packed.brickCount);
+      dispatch("refineBrickAggregateAtoB3", packed.brickCount);
+      dispatch("restrictPressureHierarchyResidual", this.pressureHierarchyGroupCount);
+      dispatch("refinePressureHierarchyCorrection", this.pressureHierarchyGroupCount);
+      dispatch("combinePressureHierarchyCorrection",
+        Math.max(1, Math.ceil(packed.brickCount / WORKGROUP_SIZE)));
+      dispatchPressureCell("initializeBrickAggregateDirection");
       dispatch("reduceInitialize", 1);
+      dispatchPressureCell("measureTrueResidual");
+      dispatch("reduceInitialTrueResidual", 1);
+      dispatchPressureCell("initializePipelinedImage");
+      dispatch("reducePipelinedInitialize", 1);
     });
     stage("pressure-solve", () => {
-      if (this.boundary) {
-        // Projected Jacobi solves the cut-boundary LCP. Pressure samples whose
-        // centres lie in solid enforce p >= 0; unconstrained cells retain the
-        // ordinary free-surface equation. Two kernels provide the ping-pong
-        // image without allocating another persistent pressure field.
-        for (let iteration = 0;
-          iteration < Math.ceil(pressureIterations / 2); iteration += 1) {
-          dispatchAccepted("projectedJacobiToApplied", "cell");
-          dispatchAccepted("projectedJacobiToPressure", "cell");
-        }
-      } else {
-        for (let iteration = 0;
-          iteration < pressureIterations; iteration += 1) {
-          dispatchAccepted(pressureKernel("applyDirection"), "cell");
-          dispatch(pressureKernel("reduceCurvature"), 1);
-          dispatchAccepted(pressureKernel("updateResidual"), "cell");
-          dispatch(pressureKernel("reduceResidual"), 1);
-          dispatchAccepted(pressureKernel("updateDirection"), "cell");
-        }
+      for (let iteration = 0;
+        iteration < pressureIterations; iteration += 1) {
+          dispatchPressureCell("updatePipelinedState");
+          dispatch("restrictBrickAggregateResidual", packed.brickCount);
+          dispatch("refineBrickAggregateAtoB1", packed.brickCount);
+          dispatch("refineBrickAggregateBtoA2", packed.brickCount);
+          dispatch("refineBrickAggregateAtoB3", packed.brickCount);
+          dispatch("restrictPressureHierarchyResidual", this.pressureHierarchyGroupCount);
+          dispatch("refinePressureHierarchyCorrection", this.pressureHierarchyGroupCount);
+          dispatch("combinePressureHierarchyCorrection",
+            Math.max(1, Math.ceil(packed.brickCount / WORKGROUP_SIZE)));
+          dispatchPressureCell("applyBrickAggregatePreconditioner");
+          dispatchPressureCell("applyPipelinedImage");
+          dispatch("reducePipelinedIteration", 1);
+          if ((iteration + 1) % SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE === 0
+            && iteration + 1 < pressureIterations) {
+            dispatchPressureCell("measureGuardedTrueResidual");
+            dispatch("reduceGuardedTrueResidual", 1);
+            dispatchPressureCell("restartPCGAfterCurvatureLoss");
+            dispatch("restrictBrickAggregateResidual", packed.brickCount);
+            dispatch("refineBrickAggregateAtoB1", packed.brickCount);
+            dispatch("refineBrickAggregateBtoA2", packed.brickCount);
+            dispatch("refineBrickAggregateAtoB3", packed.brickCount);
+            dispatch("refineBrickAggregateBtoA4", packed.brickCount);
+            dispatch("refineBrickAggregateAtoB5", packed.brickCount);
+            dispatch("refineBrickAggregateBtoA6", packed.brickCount);
+            dispatch("refineBrickAggregateAtoB7", packed.brickCount);
+            dispatch("restrictPressureHierarchyResidual", this.pressureHierarchyGroupCount);
+            dispatch("refinePressureHierarchyCorrection", this.pressureHierarchyGroupCount);
+            dispatch("combinePressureHierarchyCorrection",
+              Math.max(1, Math.ceil(packed.brickCount / WORKGROUP_SIZE)));
+            dispatchPressureCell("initializeBrickAggregateRecoveryDirection");
+            dispatch("reduceCurvatureRecovery", 1);
+            dispatchPressureCell("applyPipelinedRecovery");
+            dispatch("reducePipelinedRecovery", 1);
+          }
       }
+      // Always close the solve with a fresh b-Ap application. No convergence
+      // or performance receipt may rely on the recursive residual.
+      dispatchPressureCell("measureTrueResidual");
+      dispatch("reduceFinalTrueResidual", 1);
     });
     stage("velocity-projection", () => {
-      dispatchAccepted("projectFaces", "row");
+      dispatchPressureRow("projectFaces");
       dispatchAccepted("collocateAndDiagnose", "cell");
       if (bodyCount > 0 && this.rigidCoupling) {
         pass?.end();
@@ -2215,6 +2542,19 @@ export class WebGPUSparseCM12Resident {
 
   async readDiagnostics(): Promise<{
     readonly pressureRelativeResidual: number;
+    readonly pressureRecursiveRelativeResidual: number;
+    readonly pressureTrueResidualMaximum: number;
+    readonly pressureInitialTrueRelativeResidual: number;
+    readonly pressureIterationsExecuted: number;
+    readonly pressureIterationsEncoded: number;
+    readonly pressureFirstToleranceCrossingIteration: number | undefined;
+    readonly pressureSolveConverged: boolean;
+    readonly pressureIterationCapReached: boolean;
+    readonly pressureConvergenceReason: "tolerance" | "iteration-cap" | "fixed-budget";
+    readonly pressureCurvatureBreakdown: boolean;
+    readonly pressureCurvatureRecoveryCount: number;
+    readonly pressureRecursiveToTrueResidualRatio: number;
+    readonly pressureResidualDrift: boolean;
     readonly maximumDivergence_s: number;
     readonly maximumMixedSeamDivergence_s: number;
     readonly activityMaximumScore: number;
@@ -2237,29 +2577,67 @@ export class WebGPUSparseCM12Resident {
     readonly acceptedCoarseBrickCount: number;
     readonly acceptedCellCount: number;
     readonly acceptedRowCount: number;
+    readonly acceptedSameLevelCoarseRowCount: number;
+    readonly acceptedMixedSeamRowCount: number;
+    readonly pressureActiveRowCount: number;
+    readonly pressureCellCount: number;
   }> {
     this.assertLive();
     const encoder = this.device.createCommandEncoder({
       label: "Sparse CM12 diagnostic scalar readback",
     });
-    encoder.copyBufferToBuffer(this.scalars, 0, this.diagnosticsReadback, 0, 32);
-    encoder.copyBufferToBuffer(this.activity, 0, this.diagnosticsReadback, 32,
+    encoder.copyBufferToBuffer(this.scalars, 0, this.diagnosticsReadback, 0,
+      SPARSE_CM12_PRESSURE_SCALAR_BYTES);
+    encoder.copyBufferToBuffer(this.activity, 0, this.diagnosticsReadback,
+      SPARSE_CM12_PRESSURE_SCALAR_BYTES,
       4 * ACTIVITY_HEADER_WORDS);
     encoder.copyBufferToBuffer(this.topologyArena,
       this.topologyWorklistBaseBytes + 4 * 4,
-      this.diagnosticsReadback, 32 + 4 * ACTIVITY_HEADER_WORDS, 8);
+      this.diagnosticsReadback,
+      SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS, 8);
+    encoder.copyBufferToBuffer(this.conditioning, 0, this.diagnosticsReadback,
+      SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS + 8, 4);
     this.device.queue.submit([encoder.finish()]);
     await this.diagnosticsReadback.mapAsync(GPUMapMode.READ);
     const mapped = this.diagnosticsReadback.getMappedRange();
-    const values = new Float32Array(mapped, 0, 8);
-    const activity = new Uint32Array(mapped, 32, ACTIVITY_HEADER_WORDS);
+    const values = new Float32Array(mapped, 0,
+      SPARSE_CM12_PRESSURE_SCALAR_BYTES / 4);
+    const activity = new Uint32Array(mapped,
+      SPARSE_CM12_PRESSURE_SCALAR_BYTES, ACTIVITY_HEADER_WORDS);
     const acceptedCounts = new Uint32Array(mapped,
-      32 + 4 * ACTIVITY_HEADER_WORDS, 2);
+      SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS, 2);
+    const pressureCounts = new Uint32Array(mapped,
+      SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS + 8, 1);
     const rhsSquared = values[1]!;
-    const residualSquared = values[4]!;
+    const recursiveResidualSquared = values[4]!;
+    const initialTrueResidualSquared = values[8]!;
+    const trueResidualSquared = values[10]!;
+    const relative = (squared: number) => Math.sqrt(Math.max(0, squared)
+      / Math.max(rhsSquared, Number.MIN_VALUE));
+    const firstCrossing = Math.round(values[13]!);
+    const pressureIterationsExecuted = Math.max(0, Math.round(values[12]!));
+    const pressureIterationsEncoded = this.parameterU32[50]!;
+    const fixedBudget = this.parameterF32[89]! <= 0;
+    const pressureSolveConverged = !fixedBudget && firstCrossing >= 0;
+    const pressureConvergenceReason: "tolerance" | "iteration-cap" | "fixed-budget" =
+      fixedBudget ? "fixed-budget" : pressureSolveConverged ? "tolerance" : "iteration-cap";
     const result = {
-      pressureRelativeResidual: Math.sqrt(Math.max(0, residualSquared)
-        / Math.max(rhsSquared, Number.MIN_VALUE)),
+      pressureRelativeResidual: relative(trueResidualSquared),
+      pressureRecursiveRelativeResidual: relative(recursiveResidualSquared),
+      pressureTrueResidualMaximum: values[11]!,
+      pressureInitialTrueRelativeResidual: relative(initialTrueResidualSquared),
+      pressureIterationsExecuted,
+      pressureIterationsEncoded,
+      pressureFirstToleranceCrossingIteration: firstCrossing >= 0
+        ? firstCrossing : undefined,
+      pressureSolveConverged,
+      pressureIterationCapReached: !fixedBudget && !pressureSolveConverged
+        && pressureIterationsExecuted >= pressureIterationsEncoded,
+      pressureConvergenceReason,
+      pressureCurvatureBreakdown: values[18]! > 0.5,
+      pressureCurvatureRecoveryCount: Math.max(0, Math.round(values[18]!)),
+      pressureRecursiveToTrueResidualRatio: values[16]!,
+      pressureResidualDrift: values[17]! > 0.5,
       maximumDivergence_s: values[6]!,
       maximumMixedSeamDivergence_s: values[7]!,
       activityMaximumScore: activity[1]!,
@@ -2282,6 +2660,10 @@ export class WebGPUSparseCM12Resident {
       acceptedCoarseBrickCount: activity[20]!,
       acceptedCellCount: acceptedCounts[0]!,
       acceptedRowCount: acceptedCounts[1]!,
+      acceptedSameLevelCoarseRowCount: activity[ACCEPTED_COARSE_ROW_COUNT_WORD]!,
+      acceptedMixedSeamRowCount: activity[ACCEPTED_MIXED_ROW_COUNT_WORD]!,
+      pressureActiveRowCount: activity[PRESSURE_ACTIVE_ROW_COUNT_WORD]!,
+      pressureCellCount: pressureCounts[0]!,
     };
     this.diagnosticsReadback.unmap();
     return result;
@@ -2497,7 +2879,8 @@ export class WebGPUSparseCM12Resident {
     for (const buffer of [this.parameters, this.topology, this.state, this.partials,
       this.scalars, this.conditioning, this.activity, this.candidateState,
       this.topologyArena, this.acceptedIndirectArguments,
-      this.pressureTemplates,
+      this.pressureCellIndirectArguments, this.pressureRowIndirectArguments,
+      this.pressureTemplates, this.pressureWorklists,
       this.fineParams, this.fineMetadata, this.fineWorklist, this.fineSamples,
       this.fineWorkA, this.fineWorkB, this.fineRollback]) {
       buffer.destroy();

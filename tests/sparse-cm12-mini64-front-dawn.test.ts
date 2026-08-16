@@ -288,6 +288,19 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
         assert.ok((final.activity.topology.acceptedCells)
           < (initialStats.adaptiveAcceptedCellCount ?? Number.POSITIVE_INFINITY),
         "aggressive submerged coarsening must reduce accepted pressure-cell work");
+        const finalStats = await adaptive.readStats();
+        assert.ok((finalStats.adaptiveAcceptedSameLevelCoarseRowCount ?? 0) > 0,
+          "accepted pressure topology must publish live same-level coarse rows");
+        assert.ok((finalStats.adaptiveAcceptedMixedSeamRowCount ?? 0) > 0,
+          "accepted pressure topology must publish live mixed-resolution rows");
+        assert.ok((finalStats.adaptivePressureActiveRowCount ?? 0) > 0,
+          "pressure classification must publish rows that entered the solve");
+        assert.ok((finalStats.adaptivePressureActiveRowCount ?? Number.POSITIVE_INFINITY)
+          <= (finalStats.adaptiveAcceptedRowCount ?? 0),
+        "pressure-active rows must be a subset of the accepted topology");
+        assert.equal(finalStats.adaptiveMixedSeamFaceCount,
+          finalStats.adaptiveAcceptedMixedSeamRowCount,
+        "the legacy mixed-seam receipt must track the live accepted census");
         if (process.env.FLUID_MINI64_FRONT_DIAGNOSTICS === "1") {
           console.log(JSON.stringify({
             phase: "sparse-cm12-mini64-front",
