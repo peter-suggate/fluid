@@ -38,9 +38,9 @@ import {
   type SparseBrickVec3,
 } from "./sparse-brick-atlas";
 import {
-  initializeSparseAtlasDynamics,
-  type SparseAtlasDynamicsState,
-} from "./sparse-atlas-dynamics";
+  buildSparseAtlasCompositeGrid,
+  type SparseAtlasCompositeGrid,
+} from "./sparse-atlas-composite-projection";
 import { WebGPUAdaptiveMassSparsePresentation } from
   "./webgpu-adaptive-mass-atlas-presentation";
 import {
@@ -313,6 +313,17 @@ export function dormantReceiverDomain(
   const physicalReceiverFloor: SparseBrickResolution = mode === "all-fine" ? 8
     : mode === "all-coarse" ? 4
       : receiverFloor === "auto" ? (boundaryFed ? 4 : 1) : receiverFloor;
+  // If the complete authored tank already fits inside the leaf budget, retain
+  // it. A fixed ring count otherwise creates a hidden numerical wall one brick
+  // before the real wall (Figure 9's 40-cell reservoir plus nine rings stopped
+  // at x=119 in a 128-cell tank). Large worlds still use the caller's bounded
+  // reach because their logical brick volume exceeds this same capacity.
+  const logicalBrickCount = source.brickDimensions.reduce(
+    (product, value) => product * value, 1,
+  );
+  const effectiveSupportRings = boundaryFed && logicalBrickCount <= maximumReceiverBricks
+    ? Math.max(...source.brickDimensions)
+    : supportRings;
   for (const brick of source.bricks) {
     distanceByKey.set(brick.key, 0);
     if (sparseBrickSpan(brick) === 1) queue.push(brick.coordinate);
@@ -321,7 +332,7 @@ export function dormantReceiverDomain(
     const coordinate = queue[cursor]!;
     const ownKey = sparseBrickKey(coordinate, source.brickDimensions);
     const distance = distanceByKey.get(ownKey)!;
-    if (distance >= supportRings) continue;
+    if (distance >= effectiveSupportRings) continue;
     for (let dz = -1; dz <= 1; dz += 1)
       for (let dy = -1; dy <= 1; dy += 1)
         for (let dx = -1; dx <= 1; dx += 1) {
@@ -507,7 +518,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     let dimensions: SparseBrickVec3 | undefined;
     let atlas: SparseAdaptiveMassAtlas | undefined;
     let presentation: WebGPUAdaptiveMassSparsePresentation | undefined;
-    let dynamics: SparseAtlasDynamicsState | undefined;
+    let grid: SparseAtlasCompositeGrid | undefined;
     let resident: WebGPUSparseCM12Resident | undefined;
     const rigidCouplingEnabled = scene.rigidBodies.length > 0;
     let rigidTerrainTexture: GPUTexture | undefined;
@@ -588,7 +599,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           atlas = dormantReceiverDomain(supported, options.resolutionMode,
             receiverScale.supportRings, options.receiverFloor,
             receiverScale.minimumCapacityScale);
-          dynamics = initializeSparseAtlasDynamics(atlas);
+          // The runtime is GPU-resident from generation zero. Construct only
+          // the topology oracle needed by the packer; the CPU dynamics state
+          // used to allocate duplicate velocity, pressure, policy and
+          // workspace graphs that were never stepped or returned.
+          grid = buildSparseAtlasCompositeGrid(atlas);
         },
       }, {
         id: "adaptive-mass.presentation",
@@ -605,7 +620,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         dependencies: ["adaptive-mass.atlas", "adaptive-mass.presentation"],
         run: async () => {
           resident = await WebGPUSparseCM12Resident.create(
-            device, atlas!, dynamics!.grid, finestCellSize(scene, atlas!),
+            device, atlas!, grid!, finestCellSize(scene, atlas!),
             initiallyActiveBrickKeys,
             rigidCouplingEnabled ? {
               bodies: rigidSystem!.stateBuffer,
@@ -637,7 +652,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       return new WebGPUAdaptiveMassSolver(
         device, scene, options, presentation!, resident!,
         rigidSystem, rigidExchange, rigidTerrainTexture, rigidCouplingEnabled,
-        dynamics!.grid.mixedSeamRowCount, atlas!, quality,
+        grid!.mixedSeamRowCount, atlas!, quality,
       );
     } catch (error) {
       resident?.destroy();

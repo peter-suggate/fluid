@@ -1475,7 +1475,12 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A broad 8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. The quiescent deep interior rides coarse 4³ bricks while the moving surface is promoted to 8³.",
     audience: "explore",
     shelf: "Open water",
-    environment: "research-station",
+    // The station's circular pressure-hull ribs scale from the largest scene
+    // axis. This tank is deliberately long and shallow, so those ribs become
+    // enormous low arcs behind the glass and their refraction reads as a hole
+    // through the deep water. Keep this volume against the uncluttered room;
+    // the wave and its macro-rung transitions remain the only silhouettes.
+    environment: "default",
     build: createOceanSeicheScene,
     camera: { azimuth_rad: 0.35, elevation_rad: 0.32, distance_m: 9.0, target_m: { x: 0, y: 1.1, z: 0 } },
     variants: {

@@ -34,7 +34,12 @@ import {
   SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
 } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import { sparseCM12FinePresentationPlan, sparseCM12TopologyPagePoolPlan } from
+import {
+  decodeSparseCM12FinePresentationSource,
+  sparseCM12HostTemplateVariantsEnabled,
+  sparseCM12FinePresentationPlan,
+  sparseCM12TopologyPagePoolPlan,
+} from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import {
   ADAPTIVE_MASS_RUNTIME_PARAM_KEYS,
@@ -258,6 +263,9 @@ test("adaptive construction leaves interface resolution to the atlas initializer
   assert.doesNotMatch(construction,
     /options\.resolutionMode === "all-fine"[\s\S]*?\? \(\) => 8[\s\S]*?: \(\) => 4,/,
     "adaptive mode must not blanket-force every interface brick to 4 cubed");
+  assert.doesNotMatch(source, /initializeSparseAtlasDynamics/,
+    "GPU-only startup must not construct an unused CPU dynamics state");
+  assert.match(construction, /grid = buildSparseAtlasCompositeGrid\(atlas\)/);
 });
 
 test("frame scheduling remains GPU-only and never waits for topology readback", () => {
@@ -297,7 +305,8 @@ test("GPU candidate planning is epoch-gated and cannot mutate accepted state", (
   assert.match(kernel, /requested=min\(8u,2u\*current\)/);
   assert.match(kernel,
     /\(enclosed\|\|slowSurface\|\|quietEpochs>=p\.activityEpochs\.z\)&&!detail/);
-  assert.match(kernel, /requested=max\(required,current\/2u\)/);
+  assert.match(kernel,
+    /requested=select\(max\(required,current\/2u\),required,enclosed\)/);
   assert.match(kernel, /atomicStore\(&activity\[output\+8u\],requested\)/);
   assert.doesNotMatch(kernel, /state\[[^\]]+\]\s*=(?!=)/);
   assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/);
@@ -316,6 +325,13 @@ test("GPU selector keeps free surfaces fine and deep translating bulk coarse in 
   assert.match(floor, /travelFineCells>=p\.activityThresholds\.z\)\{return 2u/);
   assert.match(floor, /return 1u/);
   const measurement = webgpuSparseCM12ResidentWGSL.slice(measureBegin, planBegin);
+  assert.match(measurement, /densitySum\+=i32\(round\(rho\*ACTIVITY_FIXED\)\)/,
+    "activity fixed point must remain dimensionless before its reduction");
+  assert.doesNotMatch(measurement, /densitySum\+=i32\(round\(rho\*volume\*ACTIVITY_FIXED\)\)/,
+    "a full 32-cubed macro cell must not overflow signed activity fixed point");
+  assert.match(measurement,
+    /densityMassFineCells=f32\(activityDensitySum\[0\]\)\/ACTIVITY_FIXED\*cellVolume\(first\)/,
+    "the common macro-cell volume must be applied after the safe fixed-point reduction");
   assert.match(measurement, /p\.frame\.x\*length\(ownVelocity\)/,
     "velocity activity must be expressed as finest-cell travel per accepted step");
   assert.match(measurement,
@@ -399,6 +415,14 @@ test("GPU selector keeps free surfaces fine and deep translating bulk coarse in 
     "a quiet, refilled deep brick must be allowed to dismiss internal rho crossings");
   assert.match(plan, /select\(1u,recoveryFloor,recoveryLocked\)/,
     "recovery must stop exactly at the remembered calm level");
+  assert.match(plan,
+    /required=select\(dynamicRequired,select\(1u,4u,cutBoundary\),enclosed\)/,
+    "submerged bulk must ignore motion/history floors while retaining cut-boundary detail");
+  assert.match(plan,
+    /requested=select\(max\(required,current\/2u\),required,enclosed\)/,
+    "enclosed liquid must jump to its coarsest request before 2:1 closure");
+  assert.match(plan, /planReasons=select\(16u,2048u,enclosed\)/,
+    "aggressive submerged requests must remain observable in GPU policy receipts");
   const commitBegin = webgpuSparseCM12ResidentWGSL.indexOf(
     "fn validateAndCommitShadowTopology",
   );
@@ -496,7 +520,7 @@ test("Sparse CM12 exposes normalized structural and live candidate policy contro
   assert.ok(!ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("receiverFloor" as never),
     "the accepted receiver floor must rebuild rather than pretend to update live");
   assert.match(stage.tip.summary,
-    /merges settled existing bricks one rung per quiet epoch through a 2:1-closed/);
+    /sends deeply submerged bricks directly to the coarsest level permitted by the accepted 2:1-closed/);
 });
 
 test("GPU candidate levels close the full 1/2/4/8 ladder to 2:1", () => {
@@ -506,7 +530,8 @@ test("GPU candidate levels close the full 1/2/4/8 ladder to 2:1", () => {
   );
   assert.ok(begin >= 0 && end > begin, "grading closure must be independently inspectable");
   const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
-  assert.match(kernel, /neighborResolution\/2u/);
+  assert.match(kernel, /max\(neighborResolution,neighborAccepted\)\/2u/,
+    "a partially published coarsening transaction must remain 2:1 against accepted neighbors");
   assert.match(kernel, /atomicMax\(&activity\[activityRecord\(brick\)\+8u\],required\)/);
   assert.doesNotMatch(kernel, /state\[[^\]]+\]\s*=(?!=)/);
   assert.doesNotMatch(kernel, /topology\[[^\]]+\]\s*=(?!=)/);
@@ -538,6 +563,12 @@ test("GPU candidate validation is isolated from accepted level and topology", ()
 });
 
 test("large-scene topology pages use a bounded GPU free list", () => {
+  assert.equal(sparseCM12HostTemplateVariantsEnabled(250_000, 750_000, 512), true,
+    "the bounded compatibility frontier may retain prepacked host variants");
+  assert.equal(sparseCM12HostTemplateVariantsEnabled(250_000, 750_000, 513), false,
+    "mutable brick count must cap host work even when accepted topology is compact");
+  assert.equal(sparseCM12HostTemplateVariantsEnabled(250_001, 1, 1), false);
+  assert.equal(sparseCM12HostTemplateVariantsEnabled(1, 750_001, 1), false);
   assert.deepEqual(sparseCM12TopologyPagePoolPlan(0), {
     pageCapacity: 0, freeListWords: 0, pageWords: 8_196, descriptorWords: 0,
   });
@@ -808,9 +839,10 @@ test("compact Sparse CM12 presentation pages retain their direct source address"
   for (let page = 0; page < publication.plan.maximumResidentBricks; page += 1) {
     const at = FINE_LEVELSET_METADATA_WORDS * page;
     const key = publication.metadata[at + 1]!;
-    const source = publication.metadata[at + 3]!;
-    const brick = atlas.bricks[source >> 3]!;
-    const octant = source & 7;
+    const source = decodeSparseCM12FinePresentationSource(publication.metadata[at + 3]!);
+    const brick = atlas.bricks[source.brick]!;
+    const octant = source.octant;
+    assert.equal(source.spanBricks, 1);
     const coordinate = [2 * brick.coordinate[0] + (octant & 1),
       2 * brick.coordinate[1] + ((octant >> 1) & 1),
       2 * brick.coordinate[2] + ((octant >> 2) & 1)] as const;
@@ -862,14 +894,16 @@ test("analytic initial volumes do not trigger an empty-domain brick scan", () =>
     "local authored sources must not retain bricks from the empty million-cell corridor");
 });
 
-test("Sparse CM12 publication stays page-shaped with a direct brick-scale hot locator", () => {
+test("Sparse CM12 publication stays page-shaped with a leaf-scaled hashed locator", () => {
   assert.doesNotMatch(webgpuSparseCM12ResidentWGSL, /texture_storage_3d/);
   assert.doesNotMatch(webgpuSparseCM12ResidentWGSL, /fn publishPresentation/);
   assert.match(webgpuSparseCM12ResidentWGSL,
-    /fn brickDirectoryLookup\(key:u32\)[\s\S]*topology\[p\.topologyOffsets2\.y\+key\]/);
+    /fn brickDirectoryLookup\(key:u32\)[\s\S]*originKey\*0x9e3779b1u/);
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /maximumSpanLog=topology\[p\.topologyOffsets2\.w\+1u\]&31u/);
   assert.doesNotMatch(webgpuSparseCM12ResidentWGSL,
     /fn brickDirectoryLookup\(key:u32\)[\s\S]*var low=0u;var high=p\.dispatch\.w/,
-    "hot characteristic samples must not binary-search the resident brick set");
+    "hot characteristic samples must not binary-search all resident leaves");
   assert.match(webgpuSparseCM12ResidentWGSL,
     /fn publishSparseLevelSet[\s\S]*pageCount=arrayLength\(&fineMetadata\)\/4u/);
   const residentSource = readFileSync(new URL(
@@ -877,6 +911,10 @@ test("Sparse CM12 publication stays page-shaped with a direct brick-scale hot lo
     import.meta.url,
   ), "utf8");
   assert.doesNotMatch(residentSource, /denseCount|brickDirectoryOffset|ownerOffset/);
+  assert.doesNotMatch(residentSource, /const topologyArenaWords = new Uint32Array/,
+    "startup must not concatenate its largest GPU uploads on the host");
+  assert.match(residentSource, /function compactPressureTopology\(/,
+    "pressure aliasing must copy only the CSR edge tail");
   assert.doesNotMatch(residentSource, /dispatch\("publishPresentation"/);
   assert.match(residentSource,
     /dispatch\("publishSparseLevelSet",\s*this\.globalFineLevelSetSource\.plan\.maximumResidentBricks\)/);

@@ -436,7 +436,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Resolution planning",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.resolutionPlanning.label],
     tip: {
-      summary: "The default activity selector refines moving, deformed, thin or genuinely detailed liquid, then merges settled existing bricks one rung per quiet epoch through a 2:1-closed 8³/4³/2³/1³ hierarchy. Surface-distance remains the strict interface-fine comparison mode.",
+      summary: "The default activity selector refines moving, deformed, thin or genuinely detailed liquid, then sends deeply submerged bricks directly to the coarsest level permitted by the accepted 2:1-closed 8³/4³/2³/1³ hierarchy. Surface-distance remains the strict interface-fine comparison mode.",
       reads: "transported density, momentum, policy history",
       writes: "score/reason history, urgent/ordinary queues and candidate 1³/2³/4³/8³ levels",
       feeds: "budgeted GPU shadow transfer and physical generation publication",

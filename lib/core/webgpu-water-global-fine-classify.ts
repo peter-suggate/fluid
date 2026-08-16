@@ -91,17 +91,48 @@ fn coarsePhi(q:vec3i)->f32{
 }
 fn adaptiveNodalPublication()->bool{let count=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));return count>0u&&(powerCoarseSamples.entries[0].flags&0x18000000u)==0x10000000u;}
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
+// Resolve a fine coordinate to either its ordinary 4^3 page or the single
+// native-scale page owned by a containing Sparse CM12 macro leaf. Word 3 of
+// compact metadata stores [spanLog:5, brick:24, octant:3], and worklist word 3
+// advertises the largest span log. The bounded logarithmic probe avoids a
+// domain-sized direct directory and never expands a macro leaf by volume.
+fn compactSampleAddress(q:vec3u)->vec2u{
+  let r=max(1u,params.brickResolution);let pageCoordinate=q/r;
+  let exactKey=pageCoordinate.x+params.brickDimensions.x
+    *(pageCoordinate.y+params.brickDimensions.y*pageCoordinate.z);
+  let exact=pageLookup(exactKey);
+  if(exact!=INVALID){
+    if((fineWorklist[3]&0x80000000u)==0u){let local=q-pageCoordinate*r;
+      return vec2u(exact,local.x+r*(local.y+r*local.z));}
+    let source=metadata[4u*exact+3u];let spanLog=source>>27u;
+    if(spanLog==0u){let local=q-pageCoordinate*r;
+      return vec2u(exact,local.x+r*(local.y+r*local.z));}
+    let scale=2u*(1u<<spanLog);let origin=pageCoordinate*r;
+    let local=min((q-origin)/scale,vec3u(r-1u));
+    return vec2u(exact,local.x+r*(local.y+r*local.z));
+  }
+  let maximumSpanLog=(fineWorklist[3]>>8u)&31u;
+  for(var spanLog=1u;spanLog<=maximumSpanLog;spanLog+=1u){
+    let span=1u<<spanLog;let pageSpan=2u*span;
+    let originPage=(pageCoordinate/pageSpan)*pageSpan;
+    let key=originPage.x+params.brickDimensions.x
+      *(originPage.y+params.brickDimensions.y*originPage.z);
+    let id=pageLookup(key);if(id==INVALID){continue;}
+    let source=metadata[4u*id+3u];if((source>>27u)!=spanLog){continue;}
+    let scale=2u*span;let origin=originPage*r;
+    let local=min((q-origin)/scale,vec3u(r-1u));
+    return vec2u(id,local.x+r*(local.y+r*local.z));
+  }
+  return vec2u(INVALID);
+}
 fn phi(qi:vec3i)->f32{
   if(any(qi<vec3i(0))||any(qi>=vec3i(params.sampleDimensions))){return coarsePhi(qi);}
-  let q=vec3u(qi);let r=max(1u,params.brickResolution);let brick=q/r;let local=q-brick*r;
-  if(any(brick>=params.brickDimensions)){return coarsePhi(qi);}
-  let key=brick.x+params.brickDimensions.x*(brick.y+params.brickDimensions.y*brick.z);let id=pageLookup(key);
-  if(id==INVALID){return coarsePhi(qi);}
-  let index=id*params.samplesPerBrick+local.x+r*(local.y+r*local.z);
+  let address=compactSampleAddress(vec3u(qi));if(address.x==INVALID){return coarsePhi(qi);}
+  let index=address.x*params.samplesPerBrick+address.y;
   if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return coarsePhi(qi);}
   return finePackedPhi(index);
 }
-fn fineValid(q:vec3u)->bool{if(any(q>=params.sampleDimensions)){return false;}let r=max(1u,params.brickResolution);let brick=q/r;if(any(brick>=params.brickDimensions)){return false;}let local=q-brick*r;let key=brick.x+params.brickDimensions.x*(brick.y+params.brickDimensions.y*brick.z);let id=pageLookup(key);if(id==INVALID){return false;}let index=id*params.samplesPerBrick+local.x+r*(local.y+r*local.z);return index<arrayLength(&fineSamples)&&(finePackedFlags(index)&1u)!=0u&&finite(finePackedPhi(index));}
+fn fineValid(q:vec3u)->bool{if(any(q>=params.sampleDimensions)){return false;}let address=compactSampleAddress(q);if(address.x==INVALID){return false;}let index=address.x*params.samplesPerBrick+address.y;return index<arrayLength(&fineSamples)&&(finePackedFlags(index)&1u)!=0u&&finite(finePackedPhi(index));}
 fn fineOwnsCube(base:vec3i)->bool{let q=max(base-vec3i(1),vec3i(0));return all(q<vec3i(params.sampleDimensions))&&fineValid(vec3u(q));}
 fn occupancy(value:f32)->f32{let band=4.0*u.container.y/max(f32(params.sampleDimensions.y),1.0);return clamp(0.5-value/band,0.0,1.0);}
 // Adaptive nodal phi is a signed-distance scalar, not optical occupancy.
@@ -114,18 +145,17 @@ fn adaptiveContourValue(value:f32)->f32{let band=4.0*u.container.y/max(f32(param
 // The ordinary halo represents one closed tank wall with an exterior air
 // sample. At an x/z tank edge a single Cartesian-product halo cube cannot
 // represent both perpendicular wall caps: marching tetrahedra turns the two
-// planes into a diagonal chamfer. Boundary modes 1 and 2 give that edge cube
-// two explicit owners. The x-wall owner mirrors z through the edge; the
-// z-wall owner mirrors x. Their zero sets meet on the exact tank corner.
+// planes into a diagonal chamfer. Boundary-mode bits mirror z (bit 0) and x
+// (bit 1); mode 3 mirrors both after exact wall-plane records own the caps.
 fn latticeForWall(p:vec3i,wallMode:u32)->f32{
   let dims=vec3i(params.sampleDimensions);
   if(p.y>=dims.y+1){return 0.0;}
   var x=p.x-1;var z=p.z-1;
   if(p.x<=0||p.x>=dims.x+1){
-    if(wallMode!=2u){return 0.0;}x=clamp(x,0,dims.x-1);
+    if((wallMode&2u)==0u){return 0.0;}x=clamp(x,0,dims.x-1);
   }
   if(p.z<=0||p.z>=dims.z+1){
-    if(wallMode!=1u){return 0.0;}z=clamp(z,0,dims.z-1);
+    if((wallMode&1u)==0u){return 0.0;}z=clamp(z,0,dims.z-1);
   }
   return occupancy(phi(vec3i(x,max(p.y-1,0),z)));
 }
@@ -151,8 +181,31 @@ fn emitAdaptiveWallFace(base:vec3i,values:array<f32,8>,axis:u32,side:u32){
   // Require strict liquid evidence here so the wall path cannot duplicate it.
   var ownsLiquid=false;for(var i=0u;i<4u;i+=1u){ownsLiquid=ownsLiquid||values[corners[i]]>.5;}
   if(!ownsLiquid){return;}
-  let tag=(1u<<(8u+axis))|(axis<<14u);
+  // Bits 8..13 carry log2(tangential scale)+1 for every wall-face record.
+  // Adaptive nodal faces are unit scale.
+  let tag=(1u<<8u)|(axis<<14u);
   emitClassifiedCubeTagged(base,i32(252u+side),0.,1.,vec4f(values[0],values[1],values[2],values[3]),vec4f(values[4],values[5],values[6],values[7]),tag);
+}
+// Native Sparse CM12 macro pages are sampled every 2*span finest cells. Do
+// not reconstruct a closed tank wall by interpolating from the adjacent wet
+// cell to a ghost-air sample across that whole distance: doing so moves the
+// visible wall inward by scale/2 and makes a uniform pool look terraced. Emit
+// the exact wall plane and use the interior boundary scalar only to clip its
+// tangential extent at a real liquid-air interface.
+fn emitScaledBoundaryWallFace(base:vec3i,scale:i32,axis:u32,side:u32){
+  let dims=vec3i(params.sampleDimensions);
+  let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
+  var values=array<f32,8>();var ownsLiquid=false;
+  for(var i=0u;i<8u;i+=1u){
+    var q=clamp(base+o[i]*scale-vec3i(1),vec3i(0),dims-vec3i(1));
+    q[axis]=select(0,dims[axis]-1,side!=0u);
+    values[i]=occupancy(phi(q));ownsLiquid=ownsLiquid||values[i]>=.5;
+  }
+  if(!ownsLiquid){return;}
+  var wallBase=base;wallBase[axis]=select(0,dims[axis]-1,side!=0u);
+  let scaleCode=1u+(31u-countLeadingZeros(u32(scale)));
+  let tag=(scaleCode<<8u)|(axis<<14u);
+  emitClassifiedCubeTagged(wallBase,i32(252u+side),0.,1.,vec4f(values[0],values[1],values[2],values[3]),vec4f(values[4],values[5],values[6],values[7]),tag);
 }
 fn classifyAdaptiveNodal(base:vec3i){
   if(any(base<vec3i(0))||any(base>=vec3i(params.sampleDimensions))){return;}
@@ -221,8 +274,18 @@ fn classifySharpInteriorBoxFeature(base:vec3i,scale:i32)->bool{
   }}return false;
 }
 fn classifyScaled(base:vec3i,scale:i32){
-  let dims=vec3i(params.sampleDimensions);let xWall=base.x==0||base.x==dims.x;let zWall=base.z==0||base.z==dims.z;
-  if(xWall&&zWall){classifyScaledForWall(base,scale,1u);classifyScaledForWall(base,scale,2u);return;}
+  let dims=vec3i(params.sampleDimensions);
+  let lowX=base.x==0;let highX=base.x+scale-1==dims.x;
+  let lowZ=base.z==0;let highZ=base.z+scale-1==dims.z;
+  let xWall=lowX||highX;let zWall=lowZ||highZ;
+  if(lowX){emitScaledBoundaryWallFace(base,scale,0u,0u);}
+  if(highX){emitScaledBoundaryWallFace(base,scale,0u,1u);}
+  if(lowZ){emitScaledBoundaryWallFace(base,scale,2u,0u);}
+  if(highZ){emitScaledBoundaryWallFace(base,scale,2u,1u);}
+  // Mirror both horizontal wall axes after their exact plane owners have
+  // been emitted. This preserves a free-surface cap in a wall cube without
+  // also emitting the old scale-dependent ghost-air wall contour.
+  if(xWall||zWall){classifyScaledForWall(base,scale,3u);return;}
   if(!xWall&&!zWall&&classifySharpInteriorBoxFeature(base,scale)){return;}
   classifyScaledForWall(base,scale,0u);
 }
@@ -233,10 +296,14 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   if(work>=fineWorklist[1]){return;}let id=fineWorklist[7u+work];let metadataBase=id*4u;
   if(id>=params.table.z||metadataBase+2u>=arrayLength(&metadata)||metadata[metadataBase]!=id||metadata[metadataBase+2u]!=params.table.w){return;}
   let key=metadata[id*4u+1u];let xy=max(1u,params.brickDimensions.x*params.brickDimensions.y);let bz=key/xy;let rem=key-bz*xy;let by=rem/params.brickDimensions.x;let bx=rem-by*params.brickDimensions.x;
-  let localIndex=stream-work*samples;let r=max(1u,params.brickResolution);let local=vec3u(localIndex%r,(localIndex/r)%r,localIndex/max(1u,r*r));let q=vec3u(bx,by,bz)*r+local;
+  let localIndex=stream-work*samples;let r=max(1u,params.brickResolution);let local=vec3u(localIndex%r,(localIndex/r)%r,localIndex/max(1u,r*r));
+  let source=metadata[metadataBase+3u];var span=1u;
+  if((fineWorklist[3]&0x80000000u)!=0u){span=1u<<(source>>27u);}
+  let sampleScale=select(1u,2u*span,span>1u);
+  let q=vec3u(bx,by,bz)*r+local*sampleScale;
   if(any(q>=params.sampleDimensions)){return;}let index=id*samples+localIndex;if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return;}let xb=array<i32,2>(i32(q.x+1u),0);let yb=array<i32,2>(i32(q.y+1u),0);let zb=array<i32,2>(i32(q.z+1u),0);
   let xn=select(1u,2u,q.x==0u);let yn=select(1u,2u,q.y==0u);let zn=select(1u,2u,q.z==0u);
-  for(var zi=0u;zi<zn;zi+=1u){for(var yi=0u;yi<yn;yi+=1u){for(var xi=0u;xi<xn;xi+=1u){classifyScaled(vec3i(xb[xi],yb[yi],zb[zi]),1);}}}
+  for(var zi=0u;zi<zn;zi+=1u){for(var yi=0u;yi<yn;yi+=1u){for(var xi=0u;xi<xn;xi+=1u){classifyScaled(vec3i(xb[xi],yb[yi],zb[zi]),i32(sampleScale));}}}
 }
 @compute @workgroup_size(256)
 fn extractGlobalCoarseMain(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)local:u32){if(!validCurrentPublication()){return;}

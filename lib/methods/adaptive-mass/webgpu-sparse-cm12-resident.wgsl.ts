@@ -274,7 +274,25 @@ fn brickDirectoryLookup(key:u32)->u32{
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let count=brickDimensions.x*brickDimensions.y*brickDimensions.z;
   if(key>=count){return INVALID;}
-  return topology[p.topologyOffsets2.y+key];
+  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
+  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
+  let coordinate=vec3u(remainder-y*brickDimensions.x,y,z);
+  let tableCapacity=(p.topologyOffsets2.z-p.topologyOffsets2.y)/2u;
+  let tableMask=tableCapacity-1u;
+  let maximumSpanLog=topology[p.topologyOffsets2.w+1u]&31u;
+  for(var spanLog=0u;spanLog<=maximumSpanLog;spanLog+=1u){
+    let span=1u<<spanLog;let origin=(coordinate/span)*span;
+    let originKey=origin.x+brickDimensions.x*(origin.y+brickDimensions.y*origin.z);
+    var slot=(originKey*0x9e3779b1u)&tableMask;
+    for(var probe=0u;probe<tableCapacity;probe+=1u){
+      let at=p.topologyOffsets2.y+2u*slot;let candidateKey=topology[at];
+      if(candidateKey==INVALID){break;}
+      if(candidateKey==originKey){let brick=topology[at+1u];
+        if(brick<p.dispatch.w&&brickSpan(brick)==span){return brick;}break;}
+      slot=(slot+1u)&tableMask;
+    }
+  }
+  return INVALID;
 }
 
 fn brickDirectoryLookupAtCoordinate(coordinate:vec3u)->u32{
@@ -1477,16 +1495,20 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   for(var cell=first+lane;cell<first+measuredCount;cell+=64u){
     let rho=state[destinationDensity()+cell];
     let fill=rho/max(cellOpenFraction(cell),1e-6);
-    let volume=cellVolume(cell);
     cutBoundaryCell=cutBoundaryCell||cellOpenFraction(cell)<0.999;
     let local=cell-first;let x=local%resolution;
     let yz=local/resolution;let y=yz%resolution;let z=yz/resolution;
-    densitySum+=i32(round(rho*volume*ACTIVITY_FIXED));
-    momentX+=i32(round(rho*volume
+    // Every cell in one accepted brick rung has the same geometric volume.
+    // Accumulate its dimensionless density here and apply that common volume
+    // after the reduction. Including macro-cell volume in the fixed-point
+    // term overflowed i32 for a full 32^3 cell (exactly 2^31 at rho=1), which
+    // made calm deep-water bricks look empty and eligible for retirement.
+    densitySum+=i32(round(rho*ACTIVITY_FIXED));
+    momentX+=i32(round(rho
       *(f32(2u*x+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
-    momentY+=i32(round(rho*volume
+    momentY+=i32(round(rho
       *(f32(2u*y+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
-    momentZ+=i32(round(rho*volume
+    momentZ+=i32(round(rho
       *(f32(2u*z+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
     var interfaceCell=fill>p.activityDensity.y&&fill<p.activityDensity.z;
     surfaceCell=surfaceCell||interfaceCell;
@@ -1638,10 +1660,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     atomicStore(&activity[output],0u);atomicStore(&activity[output+1u],0u);
     atomicStore(&activity[output+32u],0u);atomicStore(&activity[output+39u],0u);return;
   }
-  let totalVolume=f32(count)*cellVolume(first);
-  let meanDensity=f32(activityDensitySum[0])/(totalVolume*ACTIVITY_FIXED);
+  let meanDensity=f32(activityDensitySum[0])/(f32(count)*ACTIVITY_FIXED);
   let moments=vec3f(f32(activityMomentX[0]),f32(activityMomentY[0]),
-    f32(activityMomentZ[0]))/(totalVolume*ACTIVITY_FIXED);
+    f32(activityMomentZ[0]))/(f32(count)*ACTIVITY_FIXED);
   var temporal=0.0;
   if(step>1u){
     temporal=max(abs(meanDensity-activityF32(output+4u))/0.05,
@@ -1649,7 +1670,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       max(abs(moments.y-activityF32(output+6u))/0.02,
         abs(moments.z-activityF32(output+7u))/0.02)));
   }
-  let densityMassFineCells=f32(activityDensitySum[0])/ACTIVITY_FIXED;
+  let densityMassFineCells=f32(activityDensitySum[0])/ACTIVITY_FIXED*cellVolume(first);
   let densityPresent=(activitySurfaceAxes[0]&16u)!=0u;
   // A few concentrated interpolation remnants can exceed the per-cell density
   // floor while carrying less than one finest cell of liquid in the whole
@@ -1878,9 +1899,13 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let activitySurface=adaptiveSurface&&activitySignals;
   let interfaceVelocityFloor=select(1u,velocityFloor,
     adaptiveSurface||thinFluid||enclosed);
-  let required=max(select(1u,recoveryFloor,recoveryLocked),max(max(interfaceVelocityFloor,
+  let dynamicRequired=max(select(1u,recoveryFloor,recoveryLocked),max(max(interfaceVelocityFloor,
     select(1u,8u,strictSurface||activitySurface||thinFluid||receiver)),
     select(1u,4u,cutBoundary)));
+  // Fully surrounded liquid has no liquid-air feature to resolve. Ignore its
+  // history and bulk-translation floors and retain only an embedded-boundary
+  // floor; accepted/candidate 2:1 closure supplies all remaining resolution.
+  let required=select(dynamicRequired,select(1u,4u,cutBoundary),enclosed);
   let emergencyScore=u32(round(255.0*p.activityTiming.z));
   if(required>current
     ||(activitySignals&&!enclosed&&!slowSurface&&score>=emergencyScore)){
@@ -1899,7 +1924,12 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
       requested=min(8u,2u*current);planReasons=8u;
     }else if(current>required
       &&(enclosed||slowSurface||quietEpochs>=p.activityEpochs.z)&&!detail){
-      requested=max(required,current/2u);planReasons=16u;
+      // Deep liquid has no interface detail to preserve. Ask for its
+      // coarsest physical level immediately; the refine-only closure below
+      // raises only the cells needed to retain the 2:1 invariant. Exposed
+      // quiet surfaces continue to descend one rung at a time.
+      requested=select(max(required,current/2u),required,enclosed);
+      planReasons=select(16u,2048u,enclosed);
     }
   }
   atomicStore(&activity[output+8u],requested);
@@ -1909,6 +1939,8 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
 // Refine-only closure of GPU-authored candidate levels. Each dispatch moves a
 // violation one rung toward a valid 2:1 plan; three ordered dispatches cover
 // the complete 1/2/4/8 ladder without ever coarsening a requested surface.
+// The accepted-neighbour floor additionally keeps any bounded subset of the
+// candidate transaction 2:1-valid when the coarsening scheduler publishes it.
 @compute @workgroup_size(64)
 fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
@@ -1927,8 +1959,10 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
     let neighborKey=u32(neighborCoordinate.x)+brickDimensions.x
       *(u32(neighborCoordinate.y)+brickDimensions.y*u32(neighborCoordinate.z));
     let neighbor=brickDirectoryLookup(neighborKey);if(neighbor==INVALID){continue;}
-    let neighborResolution=atomicLoad(&activity[activityRecord(neighbor)+8u]);
-    required=max(required,neighborResolution/2u);
+    let neighborOutput=activityRecord(neighbor);
+    let neighborResolution=atomicLoad(&activity[neighborOutput+8u]);
+    let neighborAccepted=atomicLoad(&activity[neighborOutput+12u]);
+    required=max(required,max(neighborResolution,neighborAccepted)/2u);
   }
   atomicMax(&activity[activityRecord(brick)+8u],required);
 }
@@ -2006,7 +2040,9 @@ fn scheduleTopologyPreparation(){
 
 fn acquireTopologyPage()->u32{
   let base=topologyWorklistBase();let capacity=atomicLoad(&topologyArena[base+27u]);
-  loop{
+  // A bounded retry keeps validators from treating the terminal return as
+  // unreachable while remaining far above the maximum 512-page contention.
+  for(var attempt=0u;attempt<4096u;attempt+=1u){
     let count=atomicLoad(&topologyArena[base+26u]);
     if(count==0u){atomicAdd(&topologyArena[base+29u],1u);return INVALID;}
     let claimed=atomicCompareExchangeWeak(&topologyArena[base+26u],count,count-1u);
@@ -2016,6 +2052,8 @@ fn acquireTopologyPage()->u32{
       return select(INVALID,page,page<capacity);
     }
   }
+  atomicAdd(&topologyArena[base+29u],1u);
+  return INVALID;
 }
 
 fn releaseTopologyPage(page:u32){
@@ -2617,27 +2655,30 @@ fn classifyPresentationBricks(@builtin(global_invocation_id)gid:vec3u){
   state[p.stateOffsets4.z+brick]=select(0.0,1.0,wet);
 }
 
-// Publish one compact renderer page per workgroup. Metadata is sorted by the
-// logical 4^3 page key, so consumers binary-search it without a world-sized
-// direct table. Missing authored-world pages are implicit air and cost no
-// storage, initialization, or frame dispatch.
+// Publish one compact renderer page per workgroup. Span-one leaves use their
+// eight ordinary 4^3 octants. A macro leaf uses one 4^3 page sampled at its
+// native 2*span lattice, so deep liquid remains authoritative without an
+// O(span^3) expansion. Metadata remains sorted by logical page-origin key.
 @compute @workgroup_size(64)
 fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   let page=wid.x;let pageCount=arrayLength(&fineMetadata)/4u;
   if(page>=pageCount||lane>=64u){return;}
-  let source=fineMetadata[4u*page+3u];let brick=source>>3u;
-  let octant=source&7u;let local=vec3u(lane%4u,(lane/4u)%4u,lane/16u);
+  let source=fineMetadata[4u*page+3u];let brick=(source>>3u)&0xffffffu;
+  let octant=source&7u;let span=1u<<(source>>27u);
+  let local=vec3u(lane%4u,(lane/4u)%4u,lane/16u);
   let brickRecord=p.topologyOffsets2.z+4u*brick;
   let brickKey=topology[brickRecord+3u];let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let brickXY=brickDimensions.x*brickDimensions.y;let brickZ=brickKey/brickXY;
   let brickRemainder=brickKey-brickZ*brickXY;let brickY=brickRemainder/brickDimensions.x;
   let brickX=brickRemainder-brickY*brickDimensions.x;
   let pageOffset=vec3u(octant&1u,(octant>>1u)&1u,(octant>>2u)&1u)*4u;
-  let q=vec3u(brickX,brickY,brickZ)*8u+pageOffset+local;var phi=4.0*p.frame.y;
+  let sampleScale=select(1u,2u*span,span>1u);
+  let q=vec3u(brickX,brickY,brickZ)*8u+pageOffset+local*sampleScale;
+  var phi=4.0*p.frame.y;
   if(brick<p.dispatch.w&&state[p.stateOffsets4.z+brick]>0.5&&all(q<p.dimensions.xyz)
     &&insideEmbeddedBoundary(vec3f(q)+vec3f(0.5))){
-    let resolution=acceptedBrickResolution(brick);let scale=8u/resolution;
+    let resolution=acceptedBrickResolution(brick);let scale=8u*span/resolution;
     let cell=presentationOwnerCellAt(vec3i(q));
     if(cell!=INVALID){phi=presentationPhi(cell);
       if(scale>1u){phi=interpolatedPresentationPhi(vec3i(q),i32(scale));}}

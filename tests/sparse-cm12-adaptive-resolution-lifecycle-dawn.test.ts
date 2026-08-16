@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { createSparseCM12LongDamBreakScene } from "../lib/core/scenes";
+import { createMinimalPowerDamBreak64Scene } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
@@ -55,7 +55,7 @@ dawnTest("Dawn publishes coarse-to-fine and fine-to-coarse Sparse CM12 topology"
         uncaptured.push(event.error.message);
       });
 
-      const scene = createSparseCM12LongDamBreakScene();
+      const scene = createMinimalPowerDamBreak64Scene();
       solver = await WebGPUAdaptiveMassSolver.createAsync(
         device, scene, "balanced", undefined,
         {
@@ -63,7 +63,10 @@ dawnTest("Dawn publishes coarse-to-fine and fine-to-coarse Sparse CM12 topology"
           fineTileResolution: 8,
           coarseTileResolution: 4,
           surfaceFineRings: 1,
-          receiverSupportRings: 9,
+          // Keep this lifecycle fixture on the bounded compatibility path.
+          // Large domains intentionally skip host-built resolution variants;
+          // Figure 9 covers that accepted-only startup path separately.
+          receiverSupportRings: 1,
           receiverFloor: 4,
           timeStep: "scene",
           activityPolicy: {

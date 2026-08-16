@@ -9,9 +9,90 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { SPARSE_CM12_ACTIVITY_POLICY } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
+
+type ActivityBrick = Awaited<ReturnType<
+  WebGPUAdaptiveMassSolver["readGPUActivityPolicy"]
+>>["bricks"][number];
+
+const brickKey = (coordinate: readonly number[]) => coordinate.join(",");
+
+function resolutionHistogram(
+  bricks: readonly ActivityBrick[],
+  field: "acceptedResolution" | "candidateResolution",
+) {
+  return Object.fromEntries([1, 2, 4, 8].map((resolution) => [resolution,
+    bricks.filter((brick) => brick[field] === resolution).length])) as
+    Record<"1" | "2" | "4" | "8", number>;
+}
+
+function deeplySubmergedBricks(bricks: readonly ActivityBrick[]): readonly ActivityBrick[] {
+  const byCoordinate = new Map(bricks.map((brick) => [brickKey(brick.coordinate), brick]));
+  const directions = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0],
+    [0, 0, -1], [0, 0, 1]] as const;
+  return bricks.filter((brick) => brick.active && (brick.reasons & 64) !== 0
+    && directions.every((direction) => {
+      const coordinate = brick.coordinate.map((value, axis) =>
+        value + direction[axis]!) as [number, number, number];
+      if (coordinate.some((value) => value < 0 || value >= 8)) return true;
+      const neighbor = byCoordinate.get(brickKey(coordinate));
+      return neighbor?.active === true && neighbor.meanDensity >= 0.5;
+    }));
+}
+
+function assertTwoToOne(
+  bricks: readonly ActivityBrick[],
+  field: "acceptedResolution" | "candidateResolution",
+): void {
+  const byCoordinate = new Map(bricks.map((brick) => [brickKey(brick.coordinate), brick]));
+  for (const brick of bricks) for (let axis = 0; axis < 3; axis += 1) {
+    const coordinate = [...brick.coordinate] as [number, number, number];
+    coordinate[axis] += 1;
+    const neighbor = byCoordinate.get(brickKey(coordinate));
+    if (!neighbor) continue;
+    const low = Math.min(brick[field], neighbor[field]);
+    const high = Math.max(brick[field], neighbor[field]);
+    assert.ok(high <= 2 * low,
+      `${field} violates 2:1 at ${brickKey(brick.coordinate)}/${brickKey(coordinate)}`);
+  }
+}
+
+function assertSubmergedCandidatesAreCoarsest(bricks: readonly ActivityBrick[]): void {
+  const byCoordinate = new Map(bricks.map((brick) => [brickKey(brick.coordinate), brick]));
+  const directions = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0],
+    [0, 0, -1], [0, 0, 1]] as const;
+  for (const brick of bricks.filter((candidate) => candidate.planReasons === 2048)) {
+    // Publication updates acceptedResolution in the commit pass but retains
+    // the candidate receipt that produced it. Once both are equal, judging
+    // that completed request against the post-commit neighbours would ask it
+    // to describe the *next* coarsening epoch. Pending requests still retain
+    // the pre-publication accepted level and can be checked exactly here.
+    if (brick.candidateResolution === brick.acceptedResolution) continue;
+    let minimum = 1;
+    const neighbors: Array<Record<string, unknown>> = [];
+    for (const direction of directions) {
+      const coordinate = brick.coordinate.map((value, axis) =>
+        value + direction[axis]!) as [number, number, number];
+      const neighbor = byCoordinate.get(brickKey(coordinate));
+      if (!neighbor) continue;
+      neighbors.push({ coordinate, accepted: neighbor.acceptedResolution,
+        candidate: neighbor.candidateResolution, planned: neighbor.plannedResolution,
+        planReasons: neighbor.planReasons, active: neighbor.active });
+      minimum = Math.max(minimum,
+        Math.max(neighbor.candidateResolution, neighbor.acceptedResolution) / 2);
+    }
+    assert.equal(brick.candidateResolution, minimum,
+      `submerged brick ${brickKey(brick.coordinate)} retained avoidable resolution: ${
+        JSON.stringify({ minimum, accepted: brick.acceptedResolution,
+          candidate: brick.candidateResolution, planned: brick.plannedResolution,
+          planReasons: brick.planReasons, reasons: brick.reasons,
+          meanDensity: brick.meanDensity, neighbors })}`);
+  }
+}
 
 function densityFrontX(density: Float32Array, threshold: number): number {
   let front = -1;
@@ -82,6 +163,15 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
           resolutionMode,
           fineTileResolution: 8,
           coarseTileResolution: 4,
+          // Begin the experimental arm deliberately over-refined so this
+          // short front regression exercises live submerged coarsening rather
+          // than only the already-graded construction topology.
+          surfaceFineRings: resolutionMode === "adaptive" ? 8 : 1,
+          activityPolicy: {
+            ...SPARSE_CM12_ACTIVITY_POLICY,
+            // Keep the 8^3 oracle physically fixed over this five-step window.
+            topologyCadenceSteps: resolutionMode === "adaptive" ? 1 : 64,
+          },
           timeStep: "paper",
         }, () => {});
       const adaptive = await createSolver("adaptive");
@@ -98,6 +188,8 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
           "the regression must start at the authored mini-dam face");
         assert.deepEqual(initial.adaptive, initial.allFine,
           "adaptive and all-fine controls must start from the same physical field");
+        const initialActivity = await adaptive.readGPUActivityPolicy();
+        const initialStats = await adaptive.readStats();
 
         const trajectory: Array<{
           step: number;
@@ -111,6 +203,11 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
               committed: number;
               deferred: number;
               shadowGeneration: number;
+              acceptedCells: number;
+              accepted: Record<"1" | "2" | "4" | "8", number>;
+              candidate: Record<"1" | "2" | "4" | "8", number>;
+              deeplySubmerged: number;
+              aggressiveSubmerged: number;
             };
           };
         }> = [];
@@ -124,7 +221,11 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
           ]);
           const activity = await adaptive.readGPUActivityPolicy();
           const stats = await adaptive.readStats();
+          assertTwoToOne(activity.bricks, "acceptedResolution");
+          assertTwoToOne(activity.bricks, "candidateResolution");
+          assertSubmergedCandidatesAreCoarsest(activity.bricks);
           const activeBricks = activity.bricks.filter((brick) => brick.active);
+          const deeplySubmerged = deeplySubmergedBricks(activity.bricks);
           trajectory.push({
             step,
             adaptive: densityReceipt(adaptiveFields.density),
@@ -138,6 +239,12 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
                 committed: stats.adaptiveTopologyCommittedBrickCount ?? 0,
                 deferred: stats.adaptiveTopologyDeferredBrickCount ?? 0,
                 shadowGeneration: stats.adaptiveTopologyShadowGeneration ?? 0,
+                acceptedCells: stats.adaptiveAcceptedCellCount ?? 0,
+                accepted: resolutionHistogram(activity.bricks, "acceptedResolution"),
+                candidate: resolutionHistogram(activity.bricks, "candidateResolution"),
+                deeplySubmerged: deeplySubmerged.length,
+                aggressiveSubmerged: activity.bricks.filter(
+                  (brick) => brick.planReasons === 2048).length,
               },
             },
           });
@@ -171,6 +278,27 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
         assert.ok(trajectory.every((sample) => sample.activity.topology.prepared
           === sample.activity.topology.committed),
         "every prepared mini-dam transition must pass its conservation receipts");
+        const finalActivity = await adaptive.readGPUActivityPolicy();
+        const finalSubmerged = deeplySubmergedBricks(finalActivity.bricks);
+        assert.ok(finalSubmerged.length > 0,
+          "the mini-dam regression must retain a deeply submerged bulk region");
+        assert.ok(trajectory.some((sample) =>
+          sample.activity.topology.aggressiveSubmerged > 0),
+        "the mini-dam release never exercised aggressive submerged coarsening");
+        assert.ok((final.activity.topology.acceptedCells)
+          < (initialStats.adaptiveAcceptedCellCount ?? Number.POSITIVE_INFINITY),
+        "aggressive submerged coarsening must reduce accepted pressure-cell work");
+        if (process.env.FLUID_MINI64_FRONT_DIAGNOSTICS === "1") {
+          console.log(JSON.stringify({
+            phase: "sparse-cm12-mini64-front",
+            initial: {
+              receipt: initial.adaptive,
+              acceptedCells: initialStats.adaptiveAcceptedCellCount,
+              accepted: resolutionHistogram(initialActivity.bricks, "acceptedResolution"),
+            },
+            trajectory,
+          }));
+        }
         const activity = await adaptive.readGPUActivityPolicy();
         const activeMaximumFineCellX = Math.max(...activity.bricks.filter((brick) => brick.active)
           .map((brick) => 8 * (brick.coordinate[0] + 1) - 1));

@@ -345,8 +345,12 @@ physics activates a dormant receiver during preparation, its `8^3` urgent
 request is folded into the same transaction or starts the next one if shadow
 capacity is already sealed.
 
-Suggested initial budget is four ordinary bricks per frame, tunable from 1 to
-64 after timings exist. The actual budget contract is work-based: preparation
+The default budget is 64 ordinary bricks per frame, tunable from 1 to 256. A
+mini64 Dawn/Metal sweep found that this nearly drained a deliberately saturated
+coarsening queue while keeping topology planning and conservative transfer
+small relative to the physics kernels; a 256-brick ceiling increased coarse
+presentation spikes without producing a coarser accepted state. The actual
+budget contract is work-based: preparation
 stops when either the brick count or a row-descriptor count is exhausted. The
 GPU header publishes `dirty`, `urgent`, `prepared`, `remaining`, `cancelled`,
 and `generation` counters for diagnostics, but the host never consumes them to

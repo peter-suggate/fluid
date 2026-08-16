@@ -79,7 +79,7 @@ export const SPARSE_CM12_ACTIVITY_POLICY = Object.freeze({
   detailTolerance: 0.08,
   frontLookaheadSteps: 4,
   topologyCadenceSteps: 1,
-  prepareBricksPerFrame: 4,
+  prepareBricksPerFrame: 64,
   promoteEpochs: 2,
   demoteEpochs: 1,
   promoteScore: 160 / 255,
@@ -292,6 +292,47 @@ export interface SparseCM12TopologyPagePoolPlan {
   readonly freeListWords: number;
   readonly pageWords: number;
   readonly descriptorWords: number;
+}
+
+export interface SparseCM12OwnershipTablePlan {
+  readonly hashCapacity: number;
+  readonly hashWords: number;
+  readonly brickRecordWords: number;
+  readonly allocatedWords: number;
+}
+
+/** O(resident leaves), independent of the logical dimensions macro leaves cover. */
+export function sparseCM12OwnershipTablePlan(
+  residentBrickCount: number,
+): SparseCM12OwnershipTablePlan {
+  if (!Number.isSafeInteger(residentBrickCount) || residentBrickCount < 0
+    || residentBrickCount >= 2 ** 28) {
+    throw new RangeError(`Sparse CM12 resident brick count ${residentBrickCount} is invalid`);
+  }
+  const hashCapacity = 2 ** Math.ceil(Math.log2(Math.max(2, 2 * residentBrickCount)));
+  const hashWords = 2 * hashCapacity;
+  const brickRecordWords = 4 * residentBrickCount;
+  return { hashCapacity, hashWords, brickRecordWords,
+    allocatedWords: hashWords + brickRecordWords + 2 };
+}
+
+export const SPARSE_CM12_HOST_TEMPLATE_MUTABLE_BRICK_MAXIMUM = 512;
+
+/**
+ * Host variant packing is a compatibility path for bounded live frontiers.
+ * Its true cost is four cell rungs plus mixed-seam variants per mutable brick,
+ * not the accepted cell count alone. Keeping the mutable bound explicit stops
+ * a large low-resolution scene from passing the old cell threshold and then
+ * constructing millions of persistent JavaScript template objects.
+ */
+export function sparseCM12HostTemplateVariantsEnabled(
+  acceptedCellCount: number,
+  acceptedRowCount: number,
+  mutableBrickCount: number,
+): boolean {
+  return acceptedCellCount <= 250_000
+    && acceptedRowCount <= 750_000
+    && mutableBrickCount <= SPARSE_CM12_HOST_TEMPLATE_MUTABLE_BRICK_MAXIMUM;
 }
 
 /** Bounded by the mutable frontier, never by logical-domain brick count. */
@@ -519,18 +560,11 @@ function resampleBrick(brick: SparseAdaptiveMassBrick,
 function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   acceptedGrid: SparseAtlasCompositeGrid):
 PackedResidentTopologyTemplates {
-  // Dormant receivers are future topology owners, not inert padding. Swept
-  // activation can request any span-one brick in the bounded receiver pool,
-  // so every such brick must have the same 1/2/4/8 candidate library as the
-  // initially wet set. Restricting this to initially active keys both left the
-  // front without a destination page and made low-rung variants violate 2:1 at
-  // the active/dormant boundary (first exposed by the 64-cubed mini dam).
   const mutableBrickKeys = new Set(atlas.bricks.filter((brick) =>
     sparseBrickSpan(brick) === 1).map((brick) => brick.key));
-  // A doubled-detail long dam has more than a thousand bounded receiver
-  // bricks. Building one full object-graph variant at 8^3 crosses V8's 4 GB
-  // heap before the compact typed-array library can be packed. Partition the
-  // mutable set and include a one-face-neighbour halo around each partition.
+  // Even a bounded compatibility frontier is large enough that building one
+  // full object-graph variant at 8^3 creates a costly transient heap. Partition
+  // the mutable set and include a one-face-neighbour halo around each partition.
   // Rows touching a core brick then see exactly the same physical neighbours
   // as a whole-atlas build; halo-only boundary rows are discarded.
   const TEMPLATE_BUILD_CHUNK_BRICKS = 128;
@@ -787,19 +821,85 @@ export interface SparseCM12FinePresentationPlan {
   readonly worklist: Uint32Array;
 }
 
+// Compact presentation source word. The low three bits retain the legacy
+// 4^3 octant address, the next 24 bits address the sparse atlas leaf, and the
+// high five bits carry log2(spanBricks). A macro leaf therefore costs one
+// native-scale presentation page instead of either disappearing or expanding
+// into O(span^3) fine pages.
+export const SPARSE_CM12_PRESENTATION_SOURCE_BRICK_BITS = 24;
+export const SPARSE_CM12_PRESENTATION_SOURCE_BRICK_MASK =
+  (2 ** SPARSE_CM12_PRESENTATION_SOURCE_BRICK_BITS) - 1;
+export const SPARSE_CM12_PRESENTATION_SOURCE_SPAN_SHIFT = 27;
+// Log 31 would make the shader's 2*span page extent wrap u32.
+export const SPARSE_CM12_PRESENTATION_MAX_SPAN_LOG = 30;
+
+export interface SparseCM12FinePresentationSource {
+  readonly brick: number;
+  readonly octant: number;
+  readonly spanBricks: number;
+}
+
+export function encodeSparseCM12FinePresentationSource(
+  brick: number,
+  octant: number,
+  spanBricks: number,
+): number {
+  const spanLog = Math.log2(spanBricks);
+  if (!Number.isInteger(brick) || brick < 0
+    || brick > SPARSE_CM12_PRESENTATION_SOURCE_BRICK_MASK) {
+    throw new RangeError(`Sparse CM12 presentation brick ${brick} exceeds the 24-bit ABI`);
+  }
+  if (!Number.isInteger(octant) || octant < 0 || octant > 7) {
+    throw new RangeError(`Sparse CM12 presentation octant ${octant} is invalid`);
+  }
+  if (!Number.isInteger(spanLog) || spanLog < 0
+    || spanLog > SPARSE_CM12_PRESENTATION_MAX_SPAN_LOG) {
+    throw new RangeError(`Sparse CM12 presentation span ${spanBricks} is not representable`);
+  }
+  return ((spanLog << SPARSE_CM12_PRESENTATION_SOURCE_SPAN_SHIFT)
+    | (brick << 3) | octant) >>> 0;
+}
+
+export function decodeSparseCM12FinePresentationSource(
+  source: number,
+): SparseCM12FinePresentationSource {
+  const spanLog = source >>> SPARSE_CM12_PRESENTATION_SOURCE_SPAN_SHIFT;
+  return {
+    brick: (source >>> 3) & SPARSE_CM12_PRESENTATION_SOURCE_BRICK_MASK,
+    octant: source & 7,
+    spanBricks: 2 ** spanLog,
+  };
+}
+
 export function sparseCM12FinePresentationPlan(
   atlas: SparseAdaptiveMassAtlas,
 ): SparseCM12FinePresentationPlan {
   const sampleDimensions = atlas.dimensions;
   const brickDimensions = sampleDimensions.map((value) => Math.ceil(value / 4)) as
     [number, number, number];
-  const pages: { key: number; brick: number; octant: number }[] = [];
+  const pages: { key: number; brick: number; octant: number; spanBricks: number }[] = [];
+  let maximumSpanLog = 0;
   for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
     const source = atlas.bricks[brick]!;
-    // Deep macro leaves cannot intersect the liquid interface by construction.
-    // Publishing fine samples for their covered volume would recreate the
-    // forbidden domain-shaped presentation allocation.
-    if (sparseBrickSpan(source) > 1) continue;
+    const spanBricks = sparseBrickSpan(source);
+    const spanLog = Math.log2(spanBricks);
+    maximumSpanLog = Math.max(maximumSpanLog, spanLog);
+    // Macro leaves publish one 4^3 page on their own 2*span finest-cell
+    // sampling lattice. Surface leaves retain their eight unit-span octants.
+    // This makes cost proportional to leaves while preserving deep liquid and
+    // closed walls in the global presentation.
+    if (spanBricks > 1) {
+      const coordinate = source.coordinate.map((value) => 2 * value) as
+        [number, number, number];
+      pages.push({
+        key: coordinate[0] + brickDimensions[0]
+          * (coordinate[1] + brickDimensions[1] * coordinate[2]),
+        brick,
+        octant: 0,
+        spanBricks,
+      });
+      continue;
+    }
     for (let oz = 0; oz < 2; oz += 1)
       for (let oy = 0; oy < 2; oy += 1)
         for (let ox = 0; ox < 2; ox += 1) {
@@ -811,10 +911,16 @@ export function sparseCM12FinePresentationPlan(
               * (coordinate[1] + brickDimensions[1] * coordinate[2]),
             brick,
             octant: ox | (oy << 1) | (oz << 2),
+            spanBricks,
           });
         }
   }
   pages.sort((left, right) => left.key - right.key);
+  for (let page = 1; page < pages.length; page += 1) {
+    if (pages[page - 1]!.key === pages[page]!.key) {
+      throw new Error(`Sparse CM12 presentation page ${pages[page]!.key} has two owners`);
+    }
+  }
   const pageCount = pages.length;
   const metadata = new Uint32Array(FINE_LEVELSET_METADATA_WORDS * pageCount);
   for (let page = 0; page < pageCount; page += 1) {
@@ -825,14 +931,16 @@ export function sparseCM12FinePresentationPlan(
     // octant. Publication can therefore address the packed cell directly
     // instead of binary-searching the retained directory once per sample.
     metadata[FINE_LEVELSET_METADATA_WORDS * page + 3] =
-      (pages[page]!.brick << 3) | pages[page]!.octant;
+      encodeSparseCM12FinePresentationSource(
+        pages[page]!.brick, pages[page]!.octant, pages[page]!.spanBricks,
+      );
   }
   // Compact mode deliberately stops after the active physical-page list.  It
   // has no `logicalBrickCount`-sized direct directory; renderer lookup binary
   // searches the key-sorted metadata instead.
   const worklist = new Uint32Array(FINE_LEVELSET_WORKSET_HEADER_WORDS + pageCount);
   worklist.set([1, pageCount, pageCount,
-    (FINE_LEVELSET_COMPACT_LOOKUP_FLAG | 3) >>> 0,
+    (FINE_LEVELSET_COMPACT_LOOKUP_FLAG | 3 | (maximumSpanLog << 8)) >>> 0,
     Math.ceil(pageCount / WORKGROUP_SIZE), 1, 1]);
   for (let page = 0; page < pageCount; page += 1) {
     worklist[FINE_LEVELSET_WORKSET_HEADER_WORDS + page] = page;
@@ -1050,90 +1158,27 @@ function packResidentTopology(
   grid: SparseAtlasCompositeGrid,
   mutableBrickKeys: ReadonlySet<number>,
 ): PackedResidentTopology {
-  let termCount = 0;
-  for (const row of grid.gradientRows) termCount += row.terms.length;
-  const byCell: { row: number; term: number }[][] = Array.from(
-    { length: grid.cells.length }, () => [],
-  );
-  let nextTerm = 0;
-  for (const row of grid.gradientRows) {
-    for (const term of row.terms) {
-      byCell[term.cellId]!.push({ row: row.id, term: nextTerm++ });
-    }
+  // Physical cells, rows, terms and incidence live in topologyArena. Older
+  // versions serialized the complete graph a second time into `topology`,
+  // although its consumers only read leaf ownership and brick records. On a
+  // large ocean that dead duplicate was hundreds of MiB plus millions of JS
+  // incidence objects. Keep this buffer as the compact ownership index it is.
+  let incidenceCount = 0;
+  for (const row of grid.gradientRows) incidenceCount += row.terms.length;
+  const maximumSpanLog = Math.log2(atlas.maximumSpanBricks);
+  if (!Number.isInteger(maximumSpanLog) || maximumSpanLog < 0
+    || maximumSpanLog > SPARSE_CM12_PRESENTATION_MAX_SPAN_LOG) {
+    throw new RangeError(`Sparse CM12 maximum span ${atlas.maximumSpanBricks} is invalid`);
   }
-  const incidenceCount = byCell.reduce((sum, values) => sum + values.length, 0);
   const brickIndexByKey = new Map(atlas.bricks.map((brick, index) => [brick.key, index]));
+  const ownership = sparseCM12OwnershipTablePlan(atlas.bricks.length);
+  const hashCapacity = ownership.hashCapacity;
   let at = 0;
-  const cellOffset = at; at += 16 * grid.cells.length;
-  const rowOffset = at; at += 12 * grid.gradientRows.length;
-  const termOffset = at; at += 2 * termCount;
-  const incidenceOffset = at; at += grid.cells.length + 1;
-  const incidenceRecordOffset = at; at += 2 * incidenceCount;
-  // Direct logical-brick ownership is the hot locator for every characteristic
-  // and sharpening sample.  Filling macro leaves across the brick coordinates
-  // they cover turns the former span walk plus binary search into one load.
-  const brickDimensions = atlas.dimensions.map((size) => Math.ceil(size / 8)) as
-    [number, number, number];
-  const brickLookupOffset = at;
-  at += brickDimensions[0] * brickDimensions[1] * brickDimensions[2];
+  const brickLookupOffset = at; at += 2 * hashCapacity;
   const brickOffset = at; at += 4 * atlas.bricks.length;
   const backgroundOwnerOffset = at; at += 2;
   const words = new Uint32Array(at);
   words.fill(INVALID, brickLookupOffset, brickOffset);
-
-  for (const cell of grid.cells) {
-    const base = cellOffset + 16 * cell.id;
-    setF32(words, base, cell.centerFine[0]);
-    setF32(words, base + 1, cell.centerFine[1]);
-    setF32(words, base + 2, cell.centerFine[2]);
-    setF32(words, base + 3, cell.volume);
-    setF32(words, base + 4, cell.widthsFine[0]);
-    setF32(words, base + 5, cell.widthsFine[1]);
-    setF32(words, base + 6, cell.widthsFine[2]);
-    words[base + 7] = cell.minimumFine[0];
-    words[base + 8] = cell.minimumFine[1];
-    words[base + 9] = cell.minimumFine[2];
-    words[base + 10] = cell.widthsFine[0];
-    const brickIndex = brickIndexByKey.get(cell.brickKey);
-    if (brickIndex === undefined) throw new Error(`Sparse CM12 cell ${cell.id} has no brick`);
-    words[base + 11] = brickIndex;
-    setF32(words, base + 12, cell.openFraction);
-    setF32(words, base + 13, cell.openVolume);
-    words[base + 14] = cell.separatingPressureMinimum ? 1 : 0;
-  }
-
-  nextTerm = 0;
-  const rowKinds = { "intra-brick": 0, "brick-face": 1, "mixed-seam": 2, "sparse-air": 3 } as const;
-  for (const row of grid.gradientRows) {
-    const base = rowOffset + 12 * row.id;
-    words[base] = nextTerm;
-    words[base + 1] = row.terms.length;
-    words[base + 2] = row.axis;
-    words[base + 3] = rowKinds[row.kind];
-    setF32(words, base + 4, row.dualWeight);
-    setF32(words, base + 5, row.area);
-    setF32(words, base + 6, row.distance);
-    setF32(words, base + 7, row.exteriorPhi ?? 0.5);
-    setF32(words, base + 8, row.centerFine[0]);
-    setF32(words, base + 9, row.centerFine[1]);
-    setF32(words, base + 10, row.centerFine[2]);
-    for (const term of row.terms) {
-      words[termOffset + 2 * nextTerm] = term.cellId;
-      setF32(words, termOffset + 2 * nextTerm + 1, term.coefficient);
-      nextTerm += 1;
-    }
-  }
-
-  let nextIncidence = 0;
-  for (let cell = 0; cell < byCell.length; cell += 1) {
-    words[incidenceOffset + cell] = nextIncidence;
-    for (const incidence of byCell[cell]!) {
-      words[incidenceRecordOffset + 2 * nextIncidence] = incidence.row;
-      words[incidenceRecordOffset + 2 * nextIncidence + 1] = incidence.term;
-      nextIncidence += 1;
-    }
-  }
-  words[incidenceOffset + grid.cells.length] = nextIncidence;
 
   const candidateSlotByBrick = new Uint32Array(atlas.bricks.length).fill(INVALID);
   let candidateBrickCount = 0;
@@ -1144,7 +1189,8 @@ function packResidentTopology(
     }
   }
   words[backgroundOwnerOffset] = candidateBrickCount;
-  words[backgroundOwnerOffset + 1] = 0;
+  words[backgroundOwnerOffset + 1] = (0x8000_0000
+    | maximumSpanLog) >>> 0;
   const firstCellByBrick = new Uint32Array(atlas.bricks.length).fill(INVALID);
   const cellCountByBrick = new Uint32Array(atlas.bricks.length);
   for (const cell of grid.cells) {
@@ -1160,22 +1206,12 @@ function packResidentTopology(
   }
   for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
     const source = atlas.bricks[brick]!;
-    const span = sparseBrickSpan(source);
-    for (let z = source.coordinate[2]; z < Math.min(brickDimensions[2],
-      source.coordinate[2] + span); z += 1) {
-      for (let y = source.coordinate[1]; y < Math.min(brickDimensions[1],
-        source.coordinate[1] + span); y += 1) {
-        for (let x = source.coordinate[0]; x < Math.min(brickDimensions[0],
-          source.coordinate[0] + span); x += 1) {
-          const directory = brickLookupOffset + x + brickDimensions[0]
-            * (y + brickDimensions[1] * z);
-          if (words[directory] !== INVALID) {
-            throw new Error(`Sparse CM12 logical brick directory overlap at ${x},${y},${z}`);
-          }
-          words[directory] = brick;
-        }
-      }
+    let slot = (Math.imul(source.key, 0x9e37_79b1) >>> 0) & (hashCapacity - 1);
+    while (words[brickLookupOffset + 2 * slot] !== INVALID) {
+      slot = (slot + 1) & (hashCapacity - 1);
     }
+    words[brickLookupOffset + 2 * slot] = source.key;
+    words[brickLookupOffset + 2 * slot + 1] = brick;
     const record = brickOffset + 4 * brick;
     words[record] = firstCellByBrick[brick];
     words[record + 1] = cellCountByBrick[brick];
@@ -1186,8 +1222,8 @@ function packResidentTopology(
         ? 0 : ((candidateSlotByBrick[brick]! + 1) << 5));
     words[record + 3] = source.key;
   }
-  return { words, cellOffset, rowOffset, termOffset, incidenceOffset,
-    incidenceRecordOffset, brickLookupOffset, brickOffset, backgroundOwnerOffset,
+  return { words, cellOffset: 0, rowOffset: 0, termOffset: 0, incidenceOffset: 0,
+    incidenceRecordOffset: 0, brickLookupOffset, brickOffset, backgroundOwnerOffset,
     brickCount: atlas.bricks.length, candidateBrickCount, incidenceCount };
 }
 
@@ -1201,6 +1237,24 @@ function uploadBuffer(
   device.queue.writeBuffer(buffer, 0, source.buffer as ArrayBuffer,
     source.byteOffset, source.byteLength);
   return buffer;
+}
+
+/** Pressure SpMV reads only the CSR edge tail of the physical template ABI.
+ * Keep its alias-breaking read-only binding compact instead of cloning every
+ * cell, row, term and incidence record a second time. */
+function compactPressureTopology(
+  templates: PackedResidentTopologyTemplates,
+): Uint32Array {
+  const sourceOffset = templates.words[15]!;
+  if (sourceOffset < TEMPLATE_HEADER_WORDS || sourceOffset >= templates.words.length) {
+    throw new Error(`Sparse CM12 pressure edge offset ${sourceOffset} is invalid`);
+  }
+  const result = new Uint32Array(TEMPLATE_HEADER_WORDS
+    + templates.words.length - sourceOffset);
+  result.set(templates.words.subarray(0, TEMPLATE_HEADER_WORDS));
+  result[15] = TEMPLATE_HEADER_WORDS;
+  result.set(templates.words.subarray(sourceOffset), TEMPLATE_HEADER_WORDS);
+  return result;
 }
 
 /** Static compact topology plus fully device-resident evolving frame state. */
@@ -1348,15 +1402,18 @@ export class WebGPUSparseCM12Resident {
     // transitions for every ordinary span-one surface/receiver brick in the
     // same hydrostatic scene. Prepack variants for those ordinary bricks and
     // retain each macro only at its accepted resolution.
-    const hostTemplateVariants = grid.cells.length <= 250_000
-      && grid.gradientRows.length <= 750_000;
-    // Host-template mode packs physical variants for every span-one receiver,
-    // including dormant apron bricks. Give that same complete set candidate
-    // state slots: activation changes residency, not whether a brick is
-    // structurally capable of refining and entering the accepted worklist.
+    const mutableBrickKeysForBudget = atlas.bricks.filter((brick) =>
+      sparseBrickSpan(brick) === 1)
+      .map((brick) => brick.key);
+    const hostTemplateVariants = sparseCM12HostTemplateVariantsEnabled(
+      grid.cells.length, grid.gradientRows.length, mutableBrickKeysForBudget.length,
+    );
+    // The compatibility library must be topology-complete: forcing only a
+    // subset through its low rungs can violate 2:1 against an immutable 4/8
+    // neighbour. Bound the whole mutable set up front; larger scenes retain
+    // their accepted physical rungs and use GPU topology pages for later work.
     const mutableBrickKeys: ReadonlySet<number> = hostTemplateVariants
-      ? new Set(atlas.bricks.filter((brick) => sparseBrickSpan(brick) === 1)
-        .map((brick) => brick.key))
+      ? new Set(mutableBrickKeysForBudget)
       : new Set<number>();
     const packed = packResidentTopology(atlas, grid, mutableBrickKeys);
     const templates = hostTemplateVariants
@@ -1365,7 +1422,7 @@ export class WebGPUSparseCM12Resident {
     if (hostTemplateVariants) {
       const cellOffset = templates.words[6]!, rangeOffset = templates.words[11]!;
       for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
-        if (sparseBrickSpan(atlas.bricks[brick]!) !== 1) continue;
+        if (!mutableBrickKeys.has(atlas.bricks[brick]!.key)) continue;
         for (let level = 0; level < TEMPLATE_LEVELS.length; level += 1) {
           const resolution = TEMPLATE_LEVELS[level]!;
           const range = rangeOffset + 2 * (TEMPLATE_LEVELS.length * brick + level);
@@ -1400,20 +1457,6 @@ export class WebGPUSparseCM12Resident {
       templates.cellCount, templates.rowCount, packed.brickCount, Boolean(rigid),
       tracerLattice.count,
     );
-    const initialState = new Float32Array(layout.floatCount);
-    for (let cell = 0; cell < templates.cellCount; cell += 1) {
-      const density = templates.initialDensity[cell]!, gamma = templates.initialGamma[cell]!;
-      initialState[layout.densityA + cell] = density;
-      initialState[layout.densityB + cell] = density;
-      initialState[layout.gammaA + cell] = gamma;
-      initialState[layout.gammaB + cell] = gamma;
-      initialState[layout.liquid + cell] = density >= 0.5 ? 1 : 0;
-      if (rigid) initialState[layout.solidCellOpen + cell] = 1;
-    }
-    for (let row = 0; rigid && row < templates.rowCount; row += 1) {
-      initialState[layout.solidRowData + 4 * row] = 1;
-      initialState[layout.solidRowData + 4 * row + 3] = 1;
-    }
     const horizontalD4Authority = sparseAtlasScalarsHaveHorizontalD4Symmetry(
       grid,
       Float64Array.from(grid.cells, (cell) => cell.density),
@@ -1425,7 +1468,42 @@ export class WebGPUSparseCM12Resident {
       size: SPARSE_CM12_PARAMETER_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const topology = uploadBuffer(device, "Sparse CM12 resident topology", packed.words, storage);
-    const state = uploadBuffer(device, "Sparse CM12 resident state", initialState, storage);
+    // WebGPU buffers start zeroed. Seed only the five nonzero scalar ranges
+    // instead of allocating and uploading the complete (mostly-zero) resident
+    // state on the host. Rigid coupling retains its explicit initialization
+    // until its two strided row flags move to the bootstrap kernel.
+    let state: GPUBuffer;
+    if (rigid) {
+      const initialState = new Float32Array(layout.floatCount);
+      for (let cell = 0; cell < templates.cellCount; cell += 1) {
+        const density = templates.initialDensity[cell]!, gamma = templates.initialGamma[cell]!;
+        initialState[layout.densityA + cell] = density;
+        initialState[layout.densityB + cell] = density;
+        initialState[layout.gammaA + cell] = gamma;
+        initialState[layout.gammaB + cell] = gamma;
+        initialState[layout.liquid + cell] = density >= 0.5 ? 1 : 0;
+        initialState[layout.solidCellOpen + cell] = 1;
+      }
+      for (let row = 0; row < templates.rowCount; row += 1) {
+        initialState[layout.solidRowData + 4 * row] = 1;
+        initialState[layout.solidRowData + 4 * row + 3] = 1;
+      }
+      state = uploadBuffer(device, "Sparse CM12 resident state", initialState, storage);
+    } else {
+      state = device.createBuffer({ label: "Sparse CM12 resident state",
+        size: Math.max(4, 4 * layout.floatCount), usage: storage });
+      const seed = (floatOffset: number, values: Float32Array) => {
+        if (values.byteLength === 0) return;
+        device.queue.writeBuffer(state, 4 * floatOffset, values.buffer as ArrayBuffer,
+          values.byteOffset, values.byteLength);
+      };
+      seed(layout.densityA, templates.initialDensity);
+      seed(layout.densityB, templates.initialDensity);
+      seed(layout.gammaA, templates.initialGamma);
+      seed(layout.gammaB, templates.initialGamma);
+      seed(layout.liquid, Float32Array.from(templates.initialDensity,
+        (density) => density >= 0.5 ? 1 : 0));
+    }
     const partials = device.createBuffer({ label: "Sparse CM12 resident reductions",
       size: Math.max(8, 8 * cellWorkgroups), usage: storage });
     const scalars = device.createBuffer({ label: "Sparse CM12 resident scalar reductions",
@@ -1505,17 +1583,23 @@ export class WebGPUSparseCM12Resident {
       initialWorklists[pageFreeList + page] = page;
     }
     // One binding keeps the resident shader within WebGPU's portable ten
-    // storage-buffer limit. Template header word 14 locates the mutable tail.
-    const topologyArenaWords = new Uint32Array(templates.words.length
-      + initialWorklists.length);
-    topologyArenaWords.set(templates.words);
-    topologyArenaWords[14] = templates.words.length;
-    topologyArenaWords.set(initialWorklists, templates.words.length);
-    const topologyArena = uploadBuffer(device,
-      "Sparse CM12 physical topology templates and worklists", topologyArenaWords,
-      storage);
+    // storage-buffer limit. Upload its immutable head and mutable tail
+    // separately: materializing their concatenation briefly doubled the
+    // largest host allocation during scene loading.
+    templates.words[14] = templates.words.length;
+    const topologyArena = device.createBuffer({
+      label: "Sparse CM12 physical topology templates and worklists",
+      size: Math.max(4, templates.words.byteLength + initialWorklists.byteLength),
+      usage: storage,
+    });
+    device.queue.writeBuffer(topologyArena, 0, templates.words.buffer as ArrayBuffer,
+      templates.words.byteOffset, templates.words.byteLength);
+    device.queue.writeBuffer(topologyArena, templates.words.byteLength,
+      initialWorklists.buffer as ArrayBuffer, initialWorklists.byteOffset,
+      initialWorklists.byteLength);
+    const pressureTopology = compactPressureTopology(templates);
     const pressureTemplates = uploadBuffer(device,
-      "Sparse CM12 read-only pressure topology", templates.words,
+      "Sparse CM12 read-only pressure topology", pressureTopology,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     const acceptedIndirectArguments = uploadBuffer(device,
       "Sparse CM12 accepted indirect dispatch snapshot",

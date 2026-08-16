@@ -57,8 +57,21 @@ const positiveInteger = (name: string, fallback: number): number => {
   return value;
 };
 
+const optionalPositiveInteger = (name: string): number | undefined => {
+  const prefix = `--${name}=`;
+  const inline = process.argv.slice(2).find((value) => value.startsWith(prefix));
+  if (!inline) return undefined;
+  const value = Number(inline.slice(prefix.length));
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${name} must be a positive integer`);
+  }
+  return value;
+};
+
 const warmupFrames = positiveInteger("warmup", 5);
 const timedFrames = positiveInteger("frames", 40);
+const prepareBricksPerFrame = optionalPositiveInteger("prepare-bricks");
+const surfaceFineRings = optionalPositiveInteger("surface-fine-rings");
 const sceneArgument = process.argv.slice(2)
   .find((value) => value.startsWith("--scene="))?.slice("--scene=".length)
   ?? "symmetric";
@@ -108,6 +121,10 @@ interface FrameStateSample {
   readonly mixedSeams: number;
   readonly pressureIterations: number;
   readonly maximumCfl: number;
+  readonly topologyPrepared: number;
+  readonly topologyCommitted: number;
+  readonly topologyDeferred: number;
+  readonly fineBricks: number;
 }
 
 interface MutableArm {
@@ -252,6 +269,10 @@ async function advanceOne(arm: MutableArm, targetTime_s: number, timed: boolean)
       mixedSeams: info.adaptiveMixedSeamFaceCount ?? 0,
       pressureIterations: info.pressureIterations,
       maximumCfl: info.maxComponentCfl ?? 0,
+      topologyPrepared: info.adaptiveTopologyPreparedBrickCount ?? 0,
+      topologyCommitted: info.adaptiveTopologyCommittedBrickCount ?? 0,
+      topologyDeferred: info.adaptiveTopologyDeferredBrickCount ?? 0,
+      fineBricks: info.adaptiveFineBrickCount ?? 0,
     });
     if (arm.method.id === "adaptive-mass") {
       arm.evolvedTopology.push(topologySample(info));
@@ -280,6 +301,8 @@ async function createArm(
         ? SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides : {}),
       timeStep: timeStepArgument,
       resolutionMode: sparseResolutionArgument,
+      ...(prepareBricksPerFrame === undefined ? {} : { prepareBricksPerFrame }),
+      ...(surfaceFineRings === undefined ? {} : { surfaceFineRings }),
     };
   const values = resolveMethodValues(method, "balanced", overrides);
   const solver = await method.createSolverAsync!(
@@ -346,6 +369,10 @@ function summarizeFrameState(samples: readonly FrameStateSample[]) {
     mixedSeams: summary((sample) => sample.mixedSeams),
     pressureIterations: summary((sample) => sample.pressureIterations),
     maximumCfl: summary((sample) => sample.maximumCfl),
+    topologyPrepared: summary((sample) => sample.topologyPrepared),
+    topologyCommitted: summary((sample) => sample.topologyCommitted),
+    topologyDeferred: summary((sample) => sample.topologyDeferred),
+    fineBricks: summary((sample) => sample.fineBricks),
     worstFrames: [...samples]
       .sort((left, right) => right.duration_ms - left.duration_ms)
       .slice(0, 5),
@@ -507,6 +534,10 @@ try {
     timeStep: timeStepArgument,
     performanceGateApplied,
     sparseResolutionMode: sparseResolutionArgument,
+    topologyExperiment: {
+      prepareBricksPerFrame: prepareBricksPerFrame ?? "method-default",
+      surfaceFineRings: surfaceFineRings ?? "method-default",
+    },
     matchedRepresentation: {
       uniformCells: uniform.solver.info.cellCount,
       uniformCoordinateFaceRows: (dimensions[0] - 1) * dimensions[1] * dimensions[2]

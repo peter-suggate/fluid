@@ -92,9 +92,12 @@ import {
 } from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-velocity.wgsl";
 import { octreeLosassoAdaptiveMassWGSL } from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-mass.wgsl";
 import { makeOctreeLosassoAdaptiveDynamicsWGSL } from "../lib/methods/losasso/webgpu-octree-losasso-dynamics.wgsl";
+import { webgpuSparseCM12ResidentWGSL } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
 
 const naga = process.env.NAGA ?? "naga";
 const shaders = {
+  "sparse-cm12-resident": webgpuSparseCM12ResidentWGSL,
   "surface-extraction": surfaceExtractionShader,
   "global-fine-classification": globalFineSurfaceClassificationShader,
   "global-fine-classified-scan": globalFineClassifiedScanShader,
