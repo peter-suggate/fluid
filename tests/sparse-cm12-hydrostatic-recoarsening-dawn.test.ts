@@ -26,8 +26,7 @@ const dawnTest = dawnModule ? test : test.skip;
 const options = (overrides: Partial<AdaptiveMassSolverOptions> = {}):
 AdaptiveMassSolverOptions => ({
   resolutionMode: "adaptive",
-  fineTileResolution: 8,
-  coarseTileResolution: 4,
+  brickFineResolution: 8,
   surfaceFineRings: 1,
   receiverSupportRings: 9,
   receiverFloor: "auto",

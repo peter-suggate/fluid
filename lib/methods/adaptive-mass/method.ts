@@ -20,17 +20,25 @@ import {
   type SparseCM12ActivityPolicy,
 } from "./webgpu-sparse-cm12-resident";
 import { WebGPUAdaptiveMassSolver } from "./webgpu-adaptive-mass-solver";
+import type {
+  SparseBrickFineResolution,
+  SparseBrickResolution,
+} from "./sparse-brick-atlas";
 
 export type AdaptiveMassResolutionMode = "adaptive" | "all-fine" | "all-coarse";
 
 /** Initial sparse-resolution split consumed by the interactive solver factory. */
 export interface AdaptiveMassSolverOptions {
   readonly resolutionMode: AdaptiveMassResolutionMode;
-  readonly fineTileResolution: 8;
-  readonly coarseTileResolution: 4;
+  /** Construction-time complete dyadic ladder maximum. Defaults to 8. */
+  readonly brickFineResolution?: SparseBrickFineResolution;
+  /** Renderer-facing samples per presentation-page edge. Defaults to 4. */
+  readonly presentationPageResolution?: SparseBrickFineResolution;
+  /** Optional positive-power-of-two cap on hierarchical macro-leaf span. */
+  readonly maximumMacroSpanBricks?: number;
   readonly surfaceFineRings?: number;
   readonly receiverSupportRings?: number;
-  readonly receiverFloor?: "auto" | 1 | 2 | 4 | 8;
+  readonly receiverFloor?: "auto" | SparseBrickResolution;
   readonly activityPolicy?: SparseCM12ActivityPolicy;
   /** Omitted only by direct diagnostic constructors, which retain scene-step behavior. */
   readonly timeStep?: "paper" | "scene";
@@ -56,16 +64,60 @@ export interface AdaptiveMassSolverOptions {
 const params: MethodParamSpec[] = [
   {
     kind: "select",
+    key: "brickFineResolution",
+    label: "Brick ladder",
+    default: "8",
+    tier: "coarse",
+    options: [
+      { value: "4", label: "1³ / 2³ / 4³" },
+      { value: "8", label: "1³ / 2³ / 4³ / 8³" },
+      { value: "16", label: "1³ / 2³ / 4³ / 8³ / 16³" },
+    ],
+    hint: "Structural cells-per-brick ladder. Changing it rebuilds the atlas and specializes GPU storage and shaders.",
+  },
+  {
+    kind: "select",
+    key: "presentationPageResolution",
+    label: "Presentation page",
+    default: "4",
+    tier: "coarse",
+    options: [
+      { value: "4", label: "4³ · 64 samples" },
+      { value: "8", label: "8³ · 512 samples" },
+      { value: "16", label: "16³ · 4096 samples" },
+    ],
+    hint: "Renderer page width. It must not exceed the brick ladder maximum; wider pages amortize sparse lookup and publication setup without changing the finest sample lattice.",
+  },
+  {
+    kind: "select",
     key: "resolutionMode",
     label: "Resolution policy",
     default: "adaptive",
     tier: "coarse",
     options: [
-      { value: "adaptive", label: "Adaptive · 1³ / 2³ / 4³ / 8³" },
-      { value: "all-fine", label: "All fine · 8³" },
-      { value: "all-coarse", label: "All coarse · 4³" },
+      { value: "adaptive", label: "Adaptive · complete dyadic ladder" },
+      { value: "all-fine", label: "All fine · ladder maximum" },
+      { value: "all-coarse", label: "All coarse · one rung below maximum" },
     ],
     hint: "Fixed modes keep every resident and newly activated world tile at one rung. They provide matched-resolution parity lanes against fine or reduced Uniform CM12.",
+  },
+  {
+    kind: "select",
+    key: "maximumMacroSpanBricks",
+    label: "Largest macro span",
+    default: "auto",
+    tier: "coarse",
+    options: [
+      { value: "auto", label: "Auto · largest aligned cover" },
+      { value: "1", label: "1 brick · macros off" },
+      { value: "2", label: "2 bricks" },
+      { value: "4", label: "4 bricks" },
+      { value: "8", label: "8 bricks" },
+      { value: "16", label: "16 bricks" },
+      { value: "32", label: "32 bricks" },
+      { value: "64", label: "64 bricks" },
+    ],
+    hint: "Caps the edge span of immutable hierarchical leaves. Auto retains the largest aligned dyadic cover supported by the scene.",
   },
   {
     kind: "select",
@@ -78,7 +130,7 @@ const params: MethodParamSpec[] = [
       { value: "surface", label: "Surface distance" },
       { value: "activity", label: "Surface + activity" },
     ],
-    hint: "Surface distance keeps interface/thin bricks 8³ and sends submerged bricks directly to 1³ before 2:1 closure, ignoring velocity and history. Activity additionally refines moving or complex liquid.",
+    hint: "Surface distance keeps interface/thin bricks at the ladder maximum and sends submerged bricks directly to 1³ before 2:1 closure, ignoring velocity and history. Activity additionally refines moving or complex liquid.",
   },
   {
     kind: "select",
@@ -87,11 +139,12 @@ const params: MethodParamSpec[] = [
     default: "auto",
     tier: "coarse",
     options: [
-      { value: "auto", label: "Auto · dam 4³" },
+      { value: "auto", label: "Auto · dam at coarse rung" },
       { value: "1", label: "1³" },
       { value: "2", label: "2³" },
       { value: "4", label: "4³" },
       { value: "8", label: "8³" },
+      { value: "16", label: "16³" },
     ],
     hint: "Structural bootstrap floor for receiver capacity. The live GPU scheduler subsequently splits or merges existing receivers from current surface evidence.",
   },
@@ -333,8 +386,31 @@ const boundedInteger = (value: unknown, fallback: number, minimum: number, maxim
   typeof value === "number" && Number.isFinite(value)
     ? Math.min(maximum, Math.max(minimum, Math.round(value))) : fallback;
 
-const receiverFloor = (value: unknown): AdaptiveMassSolverOptions["receiverFloor"] =>
-  value === "1" ? 1 : value === "2" ? 2 : value === "4" ? 4 : value === "8" ? 8 : "auto";
+const brickFineResolution = (value: unknown): SparseBrickFineResolution =>
+  value === 4 || value === "4" ? 4 : value === 16 || value === "16" ? 16 : 8;
+
+const presentationPageResolution = (
+  value: unknown,
+  maximum: SparseBrickFineResolution,
+): SparseBrickFineResolution => Math.min(brickFineResolution(
+  value === undefined ? 4 : value,
+), maximum) as SparseBrickFineResolution;
+
+const maximumMacroSpanBricks = (value: unknown): number | undefined => {
+  if (value === undefined || value === "auto") return undefined;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1
+    && Number.isInteger(Math.log2(parsed)) ? parsed : undefined;
+};
+
+const receiverFloor = (
+  value: unknown,
+  maximum: SparseBrickFineResolution = 16,
+): AdaptiveMassSolverOptions["receiverFloor"] => {
+  const parsed = value === "1" ? 1 : value === "2" ? 2 : value === "4" ? 4
+    : value === "8" ? 8 : value === "16" ? 16 : "auto";
+  return parsed === "auto" ? parsed : Math.min(parsed, maximum) as SparseBrickResolution;
+};
 
 const selectorMode = (value: unknown): "surface" | "activity" =>
   value === "activity" ? "activity" : "surface";
@@ -348,13 +424,16 @@ const activityPolicy = (values: MethodParamValues): SparseCM12ActivityPolicy =>
 export function adaptiveMassSolverOptions(
   values: MethodParamValues,
 ): AdaptiveMassSolverOptions {
+  const fineResolution = brickFineResolution(values.brickFineResolution);
   return {
     resolutionMode: resolutionMode(values.resolutionMode),
-    fineTileResolution: 8,
-    coarseTileResolution: 4,
+    brickFineResolution: fineResolution,
+    presentationPageResolution:
+      presentationPageResolution(values.presentationPageResolution, fineResolution),
+    maximumMacroSpanBricks: maximumMacroSpanBricks(values.maximumMacroSpanBricks),
     surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
     receiverSupportRings: boundedInteger(values.receiverSupportRings, 9, 1, 24),
-    receiverFloor: receiverFloor(values.receiverFloor),
+    receiverFloor: receiverFloor(values.receiverFloor, fineResolution),
     activityPolicy: activityPolicy(values),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
     pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
@@ -374,7 +453,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   label: "Sparse CM12",
   shortLabel: "Sparse CM12",
   badge: "SPARSE CM12",
-  description: "Sparse 1³/2³/4³/8³ world-brick expansion of the uniform CM12 mass-conserving method.",
+  description: "Sparse complete-dyadic world-brick expansion of the uniform CM12 mass-conserving method.",
   detail: "Sparse CM12 maps any authored scene into a fixed-world-space GPU brick atlas and couples graded neighbours through shared conservative transport and a global composite pressure solve. Runtime surface-distance requests for existing bricks are measured, 2:1-closed and conservatively transferred into GPU-authored physical generations; urgent surface refinement bypasses the budgeted round-robin coarsening lane. Transport, pressure, projection and presentation all consume the accepted worklists.",
   backend: "webgpu",
   resource: {
@@ -417,9 +496,17 @@ export const adaptiveMassMethod: SimulationMethod = {
     const { activitySignals: _activitySignals, ...normalizedActivity } = activityPolicy(values);
     return {
       ...values,
+      brickFineResolution: String(brickFineResolution(values.brickFineResolution)),
+      presentationPageResolution: String(presentationPageResolution(
+        values.presentationPageResolution, brickFineResolution(values.brickFineResolution),
+      )),
+      maximumMacroSpanBricks:
+        String(maximumMacroSpanBricks(values.maximumMacroSpanBricks) ?? "auto"),
       resolutionMode: resolutionMode(values.resolutionMode),
       selectorMode: selectorMode(values.selectorMode),
-      receiverFloor: String(receiverFloor(values.receiverFloor)),
+      receiverFloor: String(receiverFloor(
+        values.receiverFloor, brickFineResolution(values.brickFineResolution),
+      )),
       surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
       receiverSupportRings: boundedInteger(values.receiverSupportRings, 9, 1, 24),
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
@@ -438,6 +525,9 @@ export const adaptiveMassMethod: SimulationMethod = {
       SPARSE_CM12_ACTIVITY_POLICY;
     return {
       resolutionMode: "adaptive",
+      brickFineResolution: "8",
+      presentationPageResolution: "4",
+      maximumMacroSpanBricks: "auto",
       selectorMode: "surface",
       receiverFloor: "auto",
       surfaceFineRings: 1,

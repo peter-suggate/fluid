@@ -256,18 +256,19 @@ function sampleWeights(
         * (fine1 + grid.atlas.dimensions[1] * fine2);
       let id = lookup.get(fineKey);
       if (id === undefined) {
-        const brick0 = Math.floor(fine0 / 8);
-        const brick1 = Math.floor(fine1 / 8);
-        const brick2 = Math.floor(fine2 / 8);
+        const brickWidth = grid.atlas.brickFineResolution;
+        const brick0 = Math.floor(fine0 / brickWidth);
+        const brick1 = Math.floor(fine1 / brickWidth);
+        const brick2 = Math.floor(fine2 / brickWidth);
         const key = brick0 + grid.atlas.brickDimensions[0]
           * (brick1 + grid.atlas.brickDimensions[1] * brick2);
         const brick = grid.atlas.directory.get(key);
         const cellBase = grid.cellBaseByBrick.get(key);
         if (brick && cellBase !== undefined) {
-          const scale = 8 / brick.resolution;
-          const local0 = Math.floor((fine0 - 8 * brick0) / scale);
-          const local1 = Math.floor((fine1 - 8 * brick1) / scale);
-          const local2 = Math.floor((fine2 - 8 * brick2) / scale);
+          const scale = brickWidth / brick.resolution;
+          const local0 = Math.floor((fine0 - brickWidth * brick0) / scale);
+          const local1 = Math.floor((fine1 - brickWidth * brick1) / scale);
+          const local2 = Math.floor((fine2 - brickWidth * brick2) / scale);
           id = cellBase + local0 + brick.resolution
             * (local1 + brick.resolution * local2);
         }

@@ -47,8 +47,7 @@ dawnTest("Sparse CM12 couples the settled-tank rigid bodies without losing water
         device, scene, "balanced", undefined,
         {
           resolutionMode: "adaptive",
-          fineTileResolution: 8,
-          coarseTileResolution: 4,
+          brickFineResolution: 8,
           timeStep: "paper",
         },
         () => {},

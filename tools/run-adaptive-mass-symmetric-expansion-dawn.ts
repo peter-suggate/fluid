@@ -134,6 +134,7 @@ interface Checkpoint {
 function activityD4MismatchCount(
   bricks: readonly AdaptiveMassGPUActivityBrick[],
   dimensions: Dimensions,
+  brickFineResolution: number,
 ): number {
   const transformSupportMask = (
     mask: number,
@@ -152,7 +153,8 @@ function activityD4MismatchCount(
       }
     return result;
   };
-  const brickDimensions = dimensions.map((value) => value / 8) as [number, number, number];
+  const brickDimensions = dimensions.map((value) => value / brickFineResolution) as
+    [number, number, number];
   const byCoordinate = new Map(bricks.map((brick) => [brick.coordinate.join(","), brick]));
   let mismatches = 0;
   for (const brick of bricks) for (const target of [
@@ -597,6 +599,11 @@ try {
       CM12_PAPER_DT_S}; received ${requestedDt_s}`);
   }
   const dt_s = CM12_PAPER_DT_S;
+  const brickFineResolution = Number(argument("brick-fine") ?? 8);
+  if (brickFineResolution !== 4 && brickFineResolution !== 8
+    && brickFineResolution !== 16) {
+    throw new RangeError("brick-fine must be 4, 8, or 16");
+  }
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = dt_s;
   const expectedInitialMass_cells = (scene.fluid.initialBrickSeeds_m?.length ?? 0)
     * scene.voxelDomain.brickSize_cells ** 3;
@@ -612,8 +619,7 @@ try {
       undefined,
       {
         resolutionMode,
-        fineTileResolution: 8,
-        coarseTileResolution: 4,
+        brickFineResolution,
         timeStep: "paper",
         ...(pressureIterationsOverride === undefined
           ? {} : { pressureIterations: pressureIterationsOverride }),
@@ -646,12 +652,13 @@ try {
       );
       const topologyField = new Float32Array(dimensions[0] * dimensions[1] * dimensions[2]);
       for (const brick of activity.bricks) {
-        const scale = 8 / brick.acceptedResolution;
-        for (let z = 0; z < 8; z += 1) for (let y = 0; y < 8; y += 1)
-          for (let x = 0; x < 8; x += 1) {
-            const qx = 8 * brick.coordinate[0] + x;
-            const qy = 8 * brick.coordinate[1] + y;
-            const qz = 8 * brick.coordinate[2] + z;
+        const scale = brickFineResolution / brick.acceptedResolution;
+        for (let z = 0; z < brickFineResolution; z += 1)
+          for (let y = 0; y < brickFineResolution; y += 1)
+            for (let x = 0; x < brickFineResolution; x += 1) {
+            const qx = brickFineResolution * brick.coordinate[0] + x;
+            const qy = brickFineResolution * brick.coordinate[1] + y;
+            const qz = brickFineResolution * brick.coordinate[2] + z;
             if (qx < dimensions[0] && qy < dimensions[1] && qz < dimensions[2]) {
               topologyField[qx + dimensions[0] * (qy + dimensions[1] * qz)] = scale;
             }
@@ -745,7 +752,7 @@ try {
         adaptiveCoarseBrickCount: stats.adaptiveCoarseBrickCount,
         adaptiveActivityAcceptedSteps: activity.acceptedSteps,
         adaptiveActivityD4MismatchCount: activityD4MismatchCount(
-          activity.bricks, dimensions,
+          activity.bricks, dimensions, brickFineResolution,
         ),
         adaptiveActivityMaximumScore: stats.adaptiveActivityMaximumScore,
         adaptiveActivityMeasuredBrickCount: stats.adaptiveActivityMeasuredBrickCount,
@@ -968,6 +975,7 @@ try {
       scenario: scene.sceneId,
       method: "adaptive-mass",
       resolutionMode,
+      brickFineResolution,
       backend,
       adapter: (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info,
       grid: dimensions,
@@ -1046,7 +1054,27 @@ try {
       })),
       finalCheckpoint: checkpoints.at(-1),
     };
-    console.log(JSON.stringify(report, null, 2));
+    const output = argument("summary") === "1" ? {
+      passed: report.passed,
+      scenario: report.scenario,
+      resolutionMode: report.resolutionMode,
+      brickFineResolution: report.brickFineResolution,
+      grid: report.grid,
+      steps: report.steps,
+      expectedInitialMass_cells: report.expectedInitialMass_cells,
+      observedInitialMass_cells: report.observedInitialMass_cells,
+      maximumAbsoluteRelativeMassDrift: report.maximumAbsoluteRelativeMassDrift,
+      finalNormalizedL1DensityChange: report.finalNormalizedL1DensityChange,
+      maximumDensityD4Error: report.maximumDensityD4Error,
+      maximumVelocityD4Error_m_s: report.maximumVelocityD4Error_m_s,
+      maximumPressureD4Error: report.maximumPressureD4Error,
+      maximumTopologyD4Error: report.maximumTopologyD4Error,
+      maximumAdaptiveMixedSeamFaceCount: report.maximumAdaptiveMixedSeamFaceCount,
+      maximumAdaptiveDeferredPromotionCount: report.maximumAdaptiveDeferredPromotionCount,
+      validationErrors: report.validationErrors,
+      failures: report.failures,
+    } : report;
+    console.log(JSON.stringify(output, null, 2));
     if (failures.length > 0) {
       throw new Error(`Adaptive-mass symmetric-expansion acceptance failed (${failures.length} gates)`);
     }

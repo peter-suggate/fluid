@@ -159,8 +159,10 @@ const SPARSE_ACTIVITY_RECORD_WORDS:u32=39u;
 fn sparseGridEnabled()->bool{
   return sparseP.counts.x>0u&&all(sparseP.dimensions.xyz==vec3u(u.gridInfo.xyz));
 }
+fn sparseBrickFineResolution()->u32{return max(1u,sparseP.dimensions.w>>1u);}
 fn sparseBrickLookup(key:u32)->u32{
-  let brickDims=(sparseP.dimensions.xyz+vec3u(7u))/8u;
+  let brickFine=sparseBrickFineResolution();
+  let brickDims=(sparseP.dimensions.xyz+vec3u(brickFine-1u))/brickFine;
   let count=brickDims.x*brickDims.y*brickDims.z;
   if(key>=count){return SPARSE_INVALID;}
   let xy=brickDims.x*brickDims.y;let z=key/xy;let remainder=key-z*xy;
@@ -192,27 +194,31 @@ fn sparseBrickSpan(brick:u32)->u32{
   return 1u<<(sparseTopology[sparseP.topologyOffsets2.z+2u*brick]&31u);
 }
 fn sparseTemplateLevelIndex(resolution:u32)->u32{
-  return select(select(select(0u,1u,resolution==2u),2u,resolution==4u),3u,
-    resolution==8u);
+  var level=0u;var rung=resolution;
+  while(rung>1u){rung/=2u;level+=1u;}return level;
 }
 fn sparseTemplateCellRange(brick:u32,resolution:u32)->vec2u{
+  let levelCount=u32(round(log2(f32(sparseBrickFineResolution()))))+1u;
   let at=sparseTopologyArena[11u]
-    +2u*(4u*brick+sparseTemplateLevelIndex(resolution));
+    +2u*(levelCount*brick+sparseTemplateLevelIndex(resolution));
   return vec2u(sparseTopologyArena[at],sparseTopologyArena[at+1u]);
 }
 fn sparseOwner(q:vec3i)->vec2u{
   if(!sparseGridEnabled()||any(q<vec3i(0))||any(q>=vec3i(sparseP.dimensions.xyz))){return vec2u(SPARSE_INVALID);}
-  let uq=vec3u(q);let brickDims=(sparseP.dimensions.xyz+vec3u(7u))/8u;
-  let queryCoordinate=uq/8u;let key=queryCoordinate.x+brickDims.x
+  let uq=vec3u(q);let brickFine=sparseBrickFineResolution();
+  let brickDims=(sparseP.dimensions.xyz+vec3u(brickFine-1u))/brickFine;
+  let queryCoordinate=uq/brickFine;let key=queryCoordinate.x+brickDims.x
     *(queryCoordinate.y+brickDims.y*queryCoordinate.z);
   let brick=sparseBrickLookup(key);if(brick==SPARSE_INVALID||!sparseBrickActive(brick)){return vec2u(SPARSE_INVALID);}
   let span=sparseBrickSpan(brick);let brickCoordinate=(queryCoordinate/span)*span;
   let resolution=sparseAcceptedResolution(brick);
   let range=sparseTemplateCellRange(brick,resolution);
   let first=range.x;let count=range.y;
-  let scale=8u*span/resolution;let local=(uq-brickCoordinate*8u)/scale;
-  let origin=brickCoordinate*8u;
-  let valid=(min(sparseP.dimensions.xyz-origin+vec3u(scale-1u),vec3u(8u*span)))/scale;
+  let scale=brickFine*span/resolution;
+  let local=(uq-brickCoordinate*brickFine)/scale;
+  let origin=brickCoordinate*brickFine;
+  let valid=(min(sparseP.dimensions.xyz-origin+vec3u(scale-1u),
+    vec3u(brickFine*span)))/scale;
   let cell=first+local.x+valid.x*(local.y+valid.y*local.z);
   return select(vec2u(SPARSE_INVALID),vec2u(cell,brick),cell<first+count);
 }
@@ -232,31 +238,49 @@ fn sparseFinePage(key:u32)->u32{
     if(sparseFineMetadata[4u*middle+1u]<key){low=middle+1u;}else{high=middle;}}
   return select(SPARSE_INVALID,low,low<count&&sparseFineMetadata[4u*low+1u]==key);
 }
+fn sparseFineSourceSpanLog(source:u32)->u32{
+  let encodedPage=(sparseFineWorklist[3]>>21u)&31u;
+  let pageResolution=select(4u,encodedPage,encodedPage!=0u);
+  if(sparseBrickFineResolution()/pageResolution==4u){
+    return select(0u,(source>>24u)&31u,(source&0x80000000u)!=0u);
+  }
+  return source>>27u;
+}
 fn sparseFineAddress(q:vec3u)->vec2u{
-  let pageDims=(sparseP.dimensions.xyz+vec3u(3u))/4u;let pageCoordinate=q/4u;
+  let encodedPage=(sparseFineWorklist[3]>>21u)&31u;
+  let pageResolution=select(4u,encodedPage,encodedPage!=0u);
+  let pagesPerSolver=max(1u,sparseBrickFineResolution()/pageResolution);
+  let pageDims=(sparseP.dimensions.xyz+vec3u(pageResolution-1u))/pageResolution;
+  let pageCoordinate=q/pageResolution;
   let exactKey=pageCoordinate.x+pageDims.x*(pageCoordinate.y+pageDims.y*pageCoordinate.z);
   let exact=sparseFinePage(exactKey);if(exact!=SPARSE_INVALID){
-    let spanLog=sparseFineMetadata[4u*exact+3u]>>27u;
-    if(spanLog==0u){let local=q-pageCoordinate*4u;
-      return vec2u(exact,local.x+4u*(local.y+4u*local.z));}
-    let scale=2u*(1u<<spanLog);let local=min((q-pageCoordinate*4u)/scale,vec3u(3u));
-    return vec2u(exact,local.x+4u*(local.y+4u*local.z));
+    let source=sparseFineMetadata[4u*exact+3u];
+    let spanLog=sparseFineSourceSpanLog(source);
+    if(spanLog==0u){let local=q-pageCoordinate*pageResolution;
+      return vec2u(exact,local.x+pageResolution*(local.y+pageResolution*local.z));}
+    let scale=pagesPerSolver*(1u<<spanLog);
+    let local=min((q-pageCoordinate*pageResolution)/scale,vec3u(pageResolution-1u));
+    return vec2u(exact,local.x+pageResolution*(local.y+pageResolution*local.z));
   }
   let maximumSpanLog=(sparseFineWorklist[3]>>8u)&31u;
   for(var spanLog=1u;spanLog<=maximumSpanLog;spanLog+=1u){let span=1u<<spanLog;
-    let pageSpan=2u*span;let originPage=(pageCoordinate/pageSpan)*pageSpan;
+    let pageSpan=pagesPerSolver*span;let originPage=(pageCoordinate/pageSpan)*pageSpan;
     let key=originPage.x+pageDims.x*(originPage.y+pageDims.y*originPage.z);
-    let page=sparseFinePage(key);if(page==SPARSE_INVALID
-      ||(sparseFineMetadata[4u*page+3u]>>27u)!=spanLog){continue;}
-    let local=min((q-originPage*4u)/(2u*span),vec3u(3u));
-    return vec2u(page,local.x+4u*(local.y+4u*local.z));
+    let page=sparseFinePage(key);if(page==SPARSE_INVALID){continue;}
+    let source=sparseFineMetadata[4u*page+3u];
+    let sourceSpanLog=sparseFineSourceSpanLog(source);
+    if(sourceSpanLog!=spanLog){continue;}
+    let local=min((q-originPage*pageResolution)/pageSpan,vec3u(pageResolution-1u));
+    return vec2u(page,local.x+pageResolution*(local.y+pageResolution*local.z));
   }
   return vec2u(SPARSE_INVALID);
 }
 fn sparseFinePhiAt(q:vec3i)->f32{
   let air=4.0*sparseP.frame.y;if(any(q<vec3i(0))||any(q>=vec3i(sparseP.dimensions.xyz))){return air;}
   let address=sparseFineAddress(vec3u(q));if(address.x==SPARSE_INVALID){return air;}
-  let at=64u*address.x+address.y;
+  let encodedPage=(sparseFineWorklist[3]>>21u)&31u;
+  let pageResolution=select(4u,encodedPage,encodedPage!=0u);
+  let at=pageResolution*pageResolution*pageResolution*address.x+address.y;
   if(at>=arrayLength(&sparseFineSamples)){return air;}let packed=sparseFineSamples[at];
   return select(air,unpack2x16float(packed&0xffffu).x,((packed>>16u)&1u)!=0u);
 }
@@ -267,7 +291,7 @@ fn sparseOwnerKey(q:vec3i)->vec2u{
   // record: that record is an internal solver layout and was compacted from 16
   // to 8 words without changing the represented topology.
   let resolution=max(1u,sparseAcceptedResolution(owner.y));
-  let scale=max(1u,8u*sparseBrickSpan(owner.y)/resolution);
+  let scale=max(1u,sparseBrickFineResolution()*sparseBrickSpan(owner.y)/resolution);
   let lower=(vec3u(q)/scale)*scale;
   let level=u32(round(log2(f32(scale))));
   return vec2u(lower.x|(lower.z<<11u)|(level<<22u),lower.y|0x80000000u);

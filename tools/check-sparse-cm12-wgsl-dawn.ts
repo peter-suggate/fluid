@@ -16,7 +16,7 @@
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { webgpuSparseCM12ResidentWGSL } from
+import { createWebgpuSparseCM12ResidentWGSL } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
@@ -49,21 +49,6 @@ async function main(): Promise<void> {
     });
     device.pushErrorScope("validation");
 
-    const module = device.createShaderModule({
-      label: "Sparse CM12 resident WGSL check",
-      code: webgpuSparseCM12ResidentWGSL,
-    });
-    const info = await module.getCompilationInfo();
-    const errors = info.messages.filter((message) => message.type === "error");
-    if (errors.length > 0) {
-      for (const error of errors) {
-        console.error(`${error.lineNum}:${error.linePos} ${error.message}`);
-      }
-      throw new Error(`${errors.length} WGSL compilation error(s)`);
-    }
-
-    const names = entryPoints(webgpuSparseCM12ResidentWGSL);
-    if (names.length === 0) throw new Error("no compute entry points found");
     const storage = { type: "storage" } as const;
     const bindGroupLayout = device.createBindGroupLayout({
       label: "Sparse CM12 WGSL check layout",
@@ -82,24 +67,49 @@ async function main(): Promise<void> {
       ],
     });
     const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
-    await Promise.all(names.map((entryPoint) =>
-      device.createComputePipelineAsync({
-        label: `Sparse CM12 WGSL check ${entryPoint}`,
-        layout, compute: { module, entryPoint },
-      })));
-    // The journal's snapshot variant is the one specialisation the shipping
-    // encode compiles, so a check that skipped it would miss exactly the
-    // override-constant failures this script exists to catch.
-    await device.createComputePipelineAsync({
-      label: "Sparse CM12 WGSL check journalIteration snapshot variant",
-      layout,
-      compute: { module, entryPoint: "journalIteration",
-        constants: { JOURNAL_SNAPSHOT: 1 } },
-    });
+    let compiledEntryPoints = 0;
+    const variants = [[4, 4], [8, 4], [8, 8], [16, 4], [16, 8], [16, 16]] as const;
+    for (const [brickFineResolution, presentationPageResolution] of variants) {
+      const variant = `B${brickFineResolution}/P${presentationPageResolution}`;
+      const source = createWebgpuSparseCM12ResidentWGSL(
+        brickFineResolution,
+        presentationPageResolution,
+      );
+      const module = device.createShaderModule({
+        label: `Sparse CM12 resident WGSL check ${variant}`,
+        code: source,
+      });
+      const info = await module.getCompilationInfo();
+      const errors = info.messages.filter((message) => message.type === "error");
+      if (errors.length > 0) {
+        for (const error of errors) {
+          console.error(`${variant} ${error.lineNum}:${error.linePos} ${error.message}`);
+        }
+        throw new Error(`${variant}: ${errors.length} WGSL compilation error(s)`);
+      }
+
+      const names = entryPoints(source);
+      if (names.length === 0) throw new Error("no compute entry points found");
+      await Promise.all(names.map((entryPoint) =>
+        device.createComputePipelineAsync({
+          label: `Sparse CM12 ${variant} WGSL check ${entryPoint}`,
+          layout, compute: { module, entryPoint },
+        })));
+      // The journal's snapshot variant is the one specialisation the shipping
+      // encode compiles, so a check that skipped it would miss exactly the
+      // override-constant failures this script exists to catch.
+      await device.createComputePipelineAsync({
+        label: `Sparse CM12 ${variant} journalIteration snapshot variant`,
+        layout,
+        compute: { module, entryPoint: "journalIteration",
+          constants: { JOURNAL_SNAPSHOT: 1 } },
+      });
+      compiledEntryPoints += names.length;
+    }
 
     const scope = await device.popErrorScope();
     if (scope) throw new Error(`validation error: ${scope.message}`);
-    console.log(`Sparse CM12 resident WGSL: ${names.length} entry points compiled`);
+    console.log(`Sparse CM12 resident WGSL: ${compiledEntryPoints} entry points compiled across ${variants.length} B/P variants`);
   } finally {
     await releaseWebGPUExclusiveLock();
   }

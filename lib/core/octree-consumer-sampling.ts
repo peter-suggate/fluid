@@ -112,7 +112,7 @@ export interface GlobalFineLevelSetConsumerSource {
   readonly topologyControl?: GPUBufferBinding;
   readonly sampleDimensions: readonly [number, number, number];
   readonly brickDimensions: readonly [number, number, number];
-  readonly brickResolution: 4;
+  readonly brickResolution: 4 | 8 | 16;
   readonly samplesPerBrick: number;
   readonly pageCapacity: number;
   readonly fineFactor: 1 | 4 | 8;
@@ -171,8 +171,9 @@ export function validateGlobalFineLevelSetConsumerSource(source: GlobalFineLevel
     throw new RangeError("Global fine sample dimensions exceed the renderer's 16-bit cube-coordinate ABI");
   }
   source.brickDimensions.forEach((value) => positiveInteger(value, "Global fine brick dimension"));
-  if (source.brickResolution !== 4 && source.brickResolution !== 8) {
-    throw new RangeError("Global fine brick resolution must be 4 or 8");
+  if (source.brickResolution !== 4 && source.brickResolution !== 8
+    && source.brickResolution !== 16) {
+    throw new RangeError("Global fine brick resolution must be 4, 8, or 16");
   }
   if (source.fineFactor !== 1 && source.fineFactor !== 4 && source.fineFactor !== 8) {
     throw new RangeError("Global fine factor must be 1, 4, or 8");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { webgpuSparseCM12ResidentWGSL } from
+import { createWebgpuSparseCM12ResidentWGSL, webgpuSparseCM12ResidentWGSL } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
 import {
   evaluateSparseCM12Performance,
@@ -215,6 +215,14 @@ test("SIM pressure controls bound live PCG work and optional early stopping", ()
     .pressureRelativeTolerance, 0);
   assert.equal(adaptiveMassSolverOptions({ pressureRelativeTolerance: 1 })
     .pressureRelativeTolerance, 0.1);
+  assert.equal(adaptiveMassSolverOptions({}).presentationPageResolution, 4);
+  assert.equal(adaptiveMassSolverOptions({
+    brickFineResolution: "16", presentationPageResolution: "8",
+  }).presentationPageResolution, 8);
+  assert.equal(adaptiveMassSolverOptions({
+    brickFineResolution: "4", presentationPageResolution: "16",
+  }).presentationPageResolution, 4,
+  "presentation pages cannot exceed the selected solver brick width");
 
   const stage = ADAPTIVE_MASS_FLUID_PIPELINE.stages.find(
     (candidate) => candidate.id === "pressure-solve",
@@ -916,7 +924,7 @@ test("compact Sparse CM12 presentation pages retain their direct source address"
 
 test("Sparse CM12 presentation publication caches coarse page stencils", () => {
   assert.match(webgpuSparseCM12ResidentWGSL,
-    /var<workgroup>presentationDensityCache:array<f32,512>/,
+    /var<workgroup>presentationDensityCache:array<f32,64>/,
     "coarse reconstruction must share its bounded page stencil across output lanes");
   assert.match(webgpuSparseCM12ResidentWGSL,
     /if\(ownerScale>=u32\(cellScale\)\)[\s\S]*return state\[destinationDensity\(\)\+owner\.x\]/,
@@ -929,6 +937,16 @@ test("Sparse CM12 presentation publication caches coarse page stencils", () => {
   );
   assert.doesNotMatch(publication, /interpolatedPresentationPhi/,
     "page publication must consume its shared stencil instead of rebuilding every corner");
+  const page8 = createWebgpuSparseCM12ResidentWGSL(16, 8);
+  const page16 = createWebgpuSparseCM12ResidentWGSL(16, 16);
+  assert.match(page8, /const PRESENTATION_PAGE_RESOLUTION:u32=8u/);
+  assert.match(page8, /var<workgroup>presentationDensityCache:array<f32,216>/);
+  assert.match(page16, /const PRESENTATION_SAMPLES_PER_PAGE:u32=4096u/);
+  assert.match(page16, /var<workgroup>presentationDensityCache:array<f32,1000>/);
+  assert.match(page16,
+    /for\(var localIndex=lane;localIndex<PRESENTATION_SAMPLES_PER_PAGE;localIndex\+=64u\)/,
+    "wide pages must be cooperatively published rather than widening the workgroup");
+  assert.throws(() => createWebgpuSparseCM12ResidentWGSL(8, 16), /does not divide/);
 });
 
 test("Sparse CM12 scientific overlays consume accepted compact state directly", () => {
@@ -950,7 +968,7 @@ test("Sparse CM12 scientific overlays consume accepted compact state directly", 
   assert.doesNotMatch(overlay, /sparseTopologyArena\[6u\]\+16u\*cell/,
     "the overlay must not decode the retired 16-word sparse cell record");
   assert.match(overlay,
-    /scale=max\(1u,8u\*sparseBrickSpan\(owner\.y\)\/resolution\)/,
+    /scale=max\(1u,sparseBrickFineResolution\(\)\*sparseBrickSpan\(owner\.y\)\/resolution\)/,
     "represented sparse cells must derive their isotropic size from the live brick rung");
   assert.match(overlay, /@binding\(11\) var<storage,read> sparseTopology/);
   assert.match(overlay, /fn sparseBrickLookup\(key:u32\)->u32/);

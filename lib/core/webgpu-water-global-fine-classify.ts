@@ -96,6 +96,18 @@ fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 // compact metadata stores [spanLog:5, brick:24, octant:3], and worklist word 3
 // advertises the largest span log. The bounded logarithmic probe avoids a
 // domain-sized direct directory and never expands a macro leaf by volume.
+fn compactBrickFineResolution()->u32{
+  let encoded=(fineWorklist[3]>>16u)&31u;return select(8u,encoded,encoded!=0u);
+}
+fn compactPagesPerSolverAxis()->u32{
+  return max(1u,compactBrickFineResolution()/max(1u,params.brickResolution));
+}
+fn compactSourceSpanLog(source:u32)->u32{
+  if(compactPagesPerSolverAxis()==4u){
+    return select(0u,(source>>24u)&31u,(source&0x80000000u)!=0u);
+  }
+  return source>>27u;
+}
 fn compactSampleAddress(q:vec3u)->vec2u{
   let r=max(1u,params.brickResolution);let pageCoordinate=q/r;
   let exactKey=pageCoordinate.x+params.brickDimensions.x
@@ -104,22 +116,22 @@ fn compactSampleAddress(q:vec3u)->vec2u{
   if(exact!=INVALID){
     if((fineWorklist[3]&0x80000000u)==0u){let local=q-pageCoordinate*r;
       return vec2u(exact,local.x+r*(local.y+r*local.z));}
-    let source=metadata[4u*exact+3u];let spanLog=source>>27u;
+    let source=metadata[4u*exact+3u];let spanLog=compactSourceSpanLog(source);
     if(spanLog==0u){let local=q-pageCoordinate*r;
       return vec2u(exact,local.x+r*(local.y+r*local.z));}
-    let scale=2u*(1u<<spanLog);let origin=pageCoordinate*r;
+    let scale=compactPagesPerSolverAxis()*(1u<<spanLog);let origin=pageCoordinate*r;
     let local=min((q-origin)/scale,vec3u(r-1u));
     return vec2u(exact,local.x+r*(local.y+r*local.z));
   }
   let maximumSpanLog=(fineWorklist[3]>>8u)&31u;
   for(var spanLog=1u;spanLog<=maximumSpanLog;spanLog+=1u){
-    let span=1u<<spanLog;let pageSpan=2u*span;
+    let span=1u<<spanLog;let pageSpan=compactPagesPerSolverAxis()*span;
     let originPage=(pageCoordinate/pageSpan)*pageSpan;
     let key=originPage.x+params.brickDimensions.x
       *(originPage.y+params.brickDimensions.y*originPage.z);
     let id=pageLookup(key);if(id==INVALID){continue;}
-    let source=metadata[4u*id+3u];if((source>>27u)!=spanLog){continue;}
-    let scale=2u*span;let origin=originPage*r;
+    let source=metadata[4u*id+3u];if(compactSourceSpanLog(source)!=spanLog){continue;}
+    let scale=pageSpan;let origin=originPage*r;
     let local=min((q-origin)/scale,vec3u(r-1u));
     return vec2u(id,local.x+r*(local.y+r*local.z));
   }
@@ -298,8 +310,8 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   let key=metadata[id*4u+1u];let xy=max(1u,params.brickDimensions.x*params.brickDimensions.y);let bz=key/xy;let rem=key-bz*xy;let by=rem/params.brickDimensions.x;let bx=rem-by*params.brickDimensions.x;
   let localIndex=stream-work*samples;let r=max(1u,params.brickResolution);let local=vec3u(localIndex%r,(localIndex/r)%r,localIndex/max(1u,r*r));
   let source=metadata[metadataBase+3u];var span=1u;
-  if((fineWorklist[3]&0x80000000u)!=0u){span=1u<<(source>>27u);}
-  let sampleScale=select(1u,2u*span,span>1u);
+  if((fineWorklist[3]&0x80000000u)!=0u){span=1u<<compactSourceSpanLog(source);}
+  let sampleScale=select(1u,compactPagesPerSolverAxis()*span,span>1u);
   let q=vec3u(bx,by,bz)*r+local*sampleScale;
   if(any(q>=params.sampleDimensions)){return;}let index=id*samples+localIndex;if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return;}let xb=array<i32,2>(i32(q.x+1u),0);let yb=array<i32,2>(i32(q.y+1u),0);let zb=array<i32,2>(i32(q.z+1u),0);
   let xn=select(1u,2u,q.x==0u);let yn=select(1u,2u,q.y==0u);let zn=select(1u,2u,q.z==0u);

@@ -127,8 +127,8 @@ SparseAtlasCompositeGridBuildWorkspace {
     // more than the eight terms of an ordinary 2:1 row while the template
     // library enumerates levels that candidate validation will reject. Keep
     // the builder lossless through the largest 8x8 face plus its macro term.
-    termCellScratch: new Int32Array(128),
-    termCoefficientScratch: new Float64Array(128),
+    termCellScratch: new Int32Array(514),
+    termCoefficientScratch: new Float64Array(514),
     cells: [], rows: [],
   };
 }
@@ -353,8 +353,6 @@ interface LiquidSystem {
   minimumTheta: number;
 }
 
-const BRICK_FINE_WIDTH = 8;
-
 function localIndex(local: SparseBrickVec3, resolution: number): number {
   return local[0] + resolution * (local[1] + resolution * local[2]);
 }
@@ -388,6 +386,7 @@ export function buildSparseAtlasCompositeGrid(
   if (!Number.isFinite(sparseAirPhi) || sparseAirPhi <= 0) {
     throw new RangeError("sparseAirPhi must be finite and positive");
   }
+  const brickFineWidth = atlas.brickFineResolution;
   let bricks = atlas.bricks;
   for (let index = 1; index < bricks.length; index += 1) {
     if (bricks[index - 1].key <= bricks[index].key) continue;
@@ -401,14 +400,14 @@ export function buildSparseAtlasCompositeGrid(
 
   for (const brick of bricks) {
     cellBaseByBrick.set(brick.key, cellCountBuilt);
-    const scale = BRICK_FINE_WIDTH * sparseBrickSpan(brick) / brick.resolution;
+    const scale = brickFineWidth * sparseBrickSpan(brick) / brick.resolution;
     for (let z = 0; z < brick.resolution; z += 1) {
       for (let y = 0; y < brick.resolution; y += 1) {
         for (let x = 0; x < brick.resolution; x += 1) {
           const index = x + brick.resolution * (y + brick.resolution * z);
-          const minimum0 = brick.coordinate[0] * BRICK_FINE_WIDTH + x * scale;
-          const minimum1 = brick.coordinate[1] * BRICK_FINE_WIDTH + y * scale;
-          const minimum2 = brick.coordinate[2] * BRICK_FINE_WIDTH + z * scale;
+          const minimum0 = brick.coordinate[0] * brickFineWidth + x * scale;
+          const minimum1 = brick.coordinate[1] * brickFineWidth + y * scale;
+          const minimum2 = brick.coordinate[2] * brickFineWidth + z * scale;
           const maximum0 = Math.min(minimum0 + scale, atlas.dimensions[0]);
           const maximum1 = Math.min(minimum1 + scale, atlas.dimensions[1]);
           const maximum2 = Math.min(minimum2 + scale, atlas.dimensions[2]);
@@ -417,7 +416,7 @@ export function buildSparseAtlasCompositeGrid(
           const width2 = maximum2 - minimum2;
           if (width0 <= 0 || width1 <= 0 || width2 <= 0) continue;
           const cellId = cellCountBuilt++;
-          const stableLeafId = brick.key * 512 + index;
+          const stableLeafId = brick.key * atlas.brickCellCapacity + index;
           const centerFine = [0.5 * (minimum0 + maximum0),
             0.5 * (minimum1 + maximum1), 0.5 * (minimum2 + maximum2)] as const;
           const widthsFine = [width0, width1, width2] as const;
@@ -480,8 +479,13 @@ export function buildSparseAtlasCompositeGrid(
 
   const rows: SparseAtlasGradientRow[] = workspace?.rows ?? [];
   let rowCountBuilt = 0;
-  const termCellScratch = workspace?.termCellScratch ?? new Int32Array(128);
-  const termCoefficientScratch = workspace?.termCoefficientScratch ?? new Float64Array(128);
+  const seamScratchCapacity = 2 * brickFineWidth ** 2 + 2;
+  const termCellScratch = workspace
+    && workspace.termCellScratch.length >= seamScratchCapacity
+    ? workspace.termCellScratch : new Int32Array(seamScratchCapacity);
+  const termCoefficientScratch = workspace
+    && workspace.termCoefficientScratch.length >= seamScratchCapacity
+    ? workspace.termCoefficientScratch : new Float64Array(seamScratchCapacity);
   let mixedSeamRowCount = 0, sparseAirRowCount = 0;
   const appendRow = (
     kind: SparseAtlasGradientRowKind,
@@ -562,15 +566,15 @@ export function buildSparseAtlasCompositeGrid(
   // Ordinary faces wholly inside a brick.
   for (const brick of bricks) {
     const cellBase = cellBaseByBrick.get(brick.key)!;
-    const scale = BRICK_FINE_WIDTH * sparseBrickSpan(brick) / brick.resolution;
+    const scale = brickFineWidth * sparseBrickSpan(brick) / brick.resolution;
     const validX = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[0] - brick.coordinate[0] * BRICK_FINE_WIDTH) / scale,
+      (atlas.dimensions[0] - brick.coordinate[0] * brickFineWidth) / scale,
     )));
     const validY = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[1] - brick.coordinate[1] * BRICK_FINE_WIDTH) / scale,
+      (atlas.dimensions[1] - brick.coordinate[1] * brickFineWidth) / scale,
     )));
     const validZ = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[2] - brick.coordinate[2] * BRICK_FINE_WIDTH) / scale,
+      (atlas.dimensions[2] - brick.coordinate[2] * brickFineWidth) / scale,
     )));
     for (const axis of [0, 1, 2] as const) {
       const tangents = tangentialAxes(axis);
@@ -632,15 +636,15 @@ export function buildSparseAtlasCompositeGrid(
     result.length = 0;
     const coordinate = side < 0 ? 0 : brick.resolution - 1;
     const cellBase = cellBaseByBrick.get(brick.key)!;
-    const scale = BRICK_FINE_WIDTH * sparseBrickSpan(brick) / brick.resolution;
+    const scale = brickFineWidth * sparseBrickSpan(brick) / brick.resolution;
     const validX = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[0] - brick.coordinate[0] * BRICK_FINE_WIDTH) / scale,
+      (atlas.dimensions[0] - brick.coordinate[0] * brickFineWidth) / scale,
     )));
     const validY = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[1] - brick.coordinate[1] * BRICK_FINE_WIDTH) / scale,
+      (atlas.dimensions[1] - brick.coordinate[1] * brickFineWidth) / scale,
     )));
     const validZ = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[2] - brick.coordinate[2] * BRICK_FINE_WIDTH) / scale,
+      (atlas.dimensions[2] - brick.coordinate[2] * brickFineWidth) / scale,
     )));
     for (let z = 0; z < brick.resolution; z += 1) {
       for (let y = 0; y < brick.resolution; y += 1) {
@@ -666,23 +670,23 @@ export function buildSparseAtlasCompositeGrid(
   ): void => {
     const tangents = tangentialAxes(axis);
     const portWidth = Math.max(
-      BRICK_FINE_WIDTH * sparseBrickSpan(negative) / negative.resolution,
-      BRICK_FINE_WIDTH * sparseBrickSpan(positive) / positive.resolution,
+      brickFineWidth * sparseBrickSpan(negative) / negative.resolution,
+      brickFineWidth * sparseBrickSpan(positive) / positive.resolution,
     );
     const negativeCells = faceCells(negative, axis, 1, negativeFaceCells);
     const positiveCells = faceCells(positive, axis, -1, positiveFaceCells);
     const faceCoordinate = (negative.coordinate[axis] + sparseBrickSpan(negative))
-      * BRICK_FINE_WIDTH;
+      * brickFineWidth;
     const overlapMinimum = [0, 0, 0] as [number, number, number];
     const overlapMaximum = [0, 0, 0] as [number, number, number];
     for (const tangent of tangents) {
       overlapMinimum[tangent] = Math.max(
         negative.coordinate[tangent], positive.coordinate[tangent],
-      ) * BRICK_FINE_WIDTH;
+      ) * brickFineWidth;
       overlapMaximum[tangent] = Math.min(
         negative.coordinate[tangent] + sparseBrickSpan(negative),
         positive.coordinate[tangent] + sparseBrickSpan(positive),
-      ) * BRICK_FINE_WIDTH;
+      ) * brickFineWidth;
     }
     for (let portV = overlapMinimum[tangents[1]];
       portV < overlapMaximum[tangents[1]]; portV += portWidth) {
@@ -776,8 +780,8 @@ export function buildSparseAtlasCompositeGrid(
           }
         }
         appendRow(
-          BRICK_FINE_WIDTH * sparseBrickSpan(negative) / negative.resolution
-            === BRICK_FINE_WIDTH * sparseBrickSpan(positive) / positive.resolution
+          brickFineWidth * sparseBrickSpan(negative) / negative.resolution
+            === brickFineWidth * sparseBrickSpan(positive) / positive.resolution
             ? "brick-face" : "mixed-seam",
           axis, center0, center1, center2, area, distance,
           maximum[tangents[0]] - minimum[tangents[0]],

@@ -1,5 +1,5 @@
 /**
- * CPU reference storage for an arbitrary sparse atlas of equal-world 4^3/8^3
+ * CPU reference storage for an arbitrary sparse atlas of equal-world dyadic
  * bricks. This is a topology/numerics oracle, not the eventual GPU page pool.
  * Empty bricks have no payload and no directory entry.
  */
@@ -21,13 +21,51 @@ import {
 } from "../../core/spherical-container";
 import { sceneHasTerrain, terrainHeightAt } from "../../core/terrain";
 
-/** Power-of-two cells per fixed 8-fine-cell brick edge. */
-export type SparseBrickResolution = 1 | 2 | 4 | 8;
+/** Supported construction-time finest resolution of one fixed-world brick. */
+export type SparseBrickFineResolution = 4 | 8 | 16;
+/** Any rung in the union of the supported complete dyadic ladders. */
+export type SparseBrickResolution = 1 | 2 | 4 | 8 | 16;
 export type SparseBrickVec3 = readonly [number, number, number];
+
+export interface SparseBrickLadder {
+  readonly fineResolution: SparseBrickFineResolution;
+  readonly coarseResolution: SparseBrickResolution;
+  readonly resolutions: readonly SparseBrickResolution[];
+  readonly cellCapacity: number;
+}
+
+export const DEFAULT_BRICK_FINE_RESOLUTION: SparseBrickFineResolution = 8;
+/** @deprecated Use atlas.brickFineResolution for geometry. */
+export const BRICK_FINE_RESOLUTION = DEFAULT_BRICK_FINE_RESOLUTION;
+
+const SPARSE_BRICK_LADDERS: Readonly<Record<SparseBrickFineResolution, SparseBrickLadder>> =
+  Object.freeze({
+    4: Object.freeze({ fineResolution: 4, coarseResolution: 2,
+      resolutions: Object.freeze([1, 2, 4] as const), cellCapacity: 4 ** 3 }),
+    8: Object.freeze({ fineResolution: 8, coarseResolution: 4,
+      resolutions: Object.freeze([1, 2, 4, 8] as const), cellCapacity: 8 ** 3 }),
+    16: Object.freeze({ fineResolution: 16, coarseResolution: 8,
+      resolutions: Object.freeze([1, 2, 4, 8, 16] as const), cellCapacity: 16 ** 3 }),
+  });
+
+export function sparseBrickLadder(
+  fineResolution: SparseBrickFineResolution = DEFAULT_BRICK_FINE_RESOLUTION,
+): SparseBrickLadder {
+  const ladder = SPARSE_BRICK_LADDERS[fineResolution];
+  if (!ladder) throw new RangeError("brickFineResolution must be 4, 8, or 16");
+  return ladder;
+}
+
+export function isSparseBrickResolution(
+  resolution: number,
+  fineResolution: SparseBrickFineResolution,
+): resolution is SparseBrickResolution {
+  return sparseBrickLadder(fineResolution).resolutions.includes(resolution as SparseBrickResolution);
+}
 
 export interface SparseAdaptiveMassBrick {
   readonly key: number;
-  /** Minimum coordinate in the fixed 8-cell brick lattice. */
+  /** Minimum coordinate in the atlas-selected fixed-brick lattice. */
   readonly coordinate: SparseBrickVec3;
   /** Dyadic edge length in fixed bricks. Omitted means one legacy brick. */
   readonly spanBricks?: number;
@@ -39,6 +77,10 @@ export interface SparseAdaptiveMassBrick {
 
 export interface SparseAdaptiveMassAtlas {
   readonly dimensions: SparseBrickVec3;
+  readonly brickFineResolution: SparseBrickFineResolution;
+  /** Stable per-brick cell-id stride; equal to brickFineResolution^3. */
+  readonly brickCellCapacity: number;
+  readonly ladder: SparseBrickLadder;
   readonly brickDimensions: SparseBrickVec3;
   readonly bricks: readonly SparseAdaptiveMassBrick[];
   readonly directory: ReadonlyMap<number, SparseAdaptiveMassBrick>;
@@ -52,10 +94,13 @@ export interface SparseAdaptiveMassAtlas {
 
 export interface SparseBrickAtlasInitializationOptions {
   readonly finestDimensions: SparseBrickVec3;
+  readonly brickFineResolution?: SparseBrickFineResolution;
   /** Optional caller-owned construction guard; Sparse CM12 itself has no cell-count cap. */
   readonly maximumFinestCells?: number;
+  /** Largest dyadic macro edge, in ordinary bricks. One disables macro leaves. */
+  readonly maximumMacroSpanBricks?: number;
   readonly emptyEpsilon?: number;
-  /** Count of occupied face-distance rings held at 8^3 around the initial interface. */
+  /** Count of occupied face-distance rings held at the finest rung around the interface. */
   readonly surfaceFineRings?: number;
   /** Optional fixed-policy override for every nonempty brick, including interfaces. */
   readonly resolutionForBrick?: (input: {
@@ -90,8 +135,6 @@ export interface SparseAtlasLeaf {
   readonly density: number;
   readonly gamma: number;
 }
-
-export const BRICK_FINE_RESOLUTION = 8;
 
 export function sparseBrickSpan(brick: SparseAdaptiveMassBrick): number {
   return brick.spanBricks ?? 1;
@@ -129,10 +172,12 @@ export function createSparseAdaptiveMassAtlas(
   bricks: readonly SparseAdaptiveMassBrick[],
   generation = 1,
   boundary?: SphericalContainerFineGeometry,
+  brickFineResolution: SparseBrickFineResolution = DEFAULT_BRICK_FINE_RESOLUTION,
 ): SparseAdaptiveMassAtlas {
   positiveDimensions(dimensions);
+  const ladder = sparseBrickLadder(brickFineResolution);
   const brickDimensions = dimensions.map((value) =>
-    Math.ceil(value / BRICK_FINE_RESOLUTION)) as [number, number, number];
+    Math.ceil(value / brickFineResolution)) as [number, number, number];
   const directory = new Map<number, SparseAdaptiveMassBrick>();
   const directoriesBySpan = new Map<number, Map<number, SparseAdaptiveMassBrick>>();
   let maximumSpanBricks = 1;
@@ -144,9 +189,8 @@ export function createSparseAdaptiveMassAtlas(
     if (brick.coordinate.some((value) => value % span !== 0)) {
       throw new Error(`brick ${brick.key} origin must be aligned to span ${span}`);
     }
-    if (brick.resolution !== 1 && brick.resolution !== 2
-      && brick.resolution !== 4 && brick.resolution !== 8) {
-      throw new RangeError(`brick ${brick.key} resolution must be 1, 2, 4, or 8`);
+    if (!isSparseBrickResolution(brick.resolution, brickFineResolution)) {
+      throw new RangeError(`brick ${brick.key} resolution is not on the ${ladder.resolutions.join("/")} ladder`);
     }
     const count = brick.resolution ** 3;
     if (brick.density.length !== count || brick.gamma.length !== count) {
@@ -163,7 +207,7 @@ export function createSparseAdaptiveMassAtlas(
     maximumSpanBricks = Math.max(maximumSpanBricks, span);
   }
   // Accepted atlases are strongly graded: every resident face adjacency is
-  // same-level or one rung apart across the complete 1/2/4/8 ladder.
+  // same-level or one rung apart across the selected complete dyadic ladder.
   for (const brick of directory.values()) for (let axis = 0; axis < 3; axis += 1) {
     const coordinate = [...brick.coordinate] as [number, number, number];
     coordinate[axis] += 1;
@@ -175,7 +219,8 @@ export function createSparseAdaptiveMassAtlas(
     }
   }
   return {
-    dimensions, brickDimensions, bricks: [...bricks], directory,
+    dimensions, brickFineResolution, brickCellCapacity: ladder.cellCapacity,
+    ladder, brickDimensions, bricks: [...bricks], directory,
     directoriesBySpan, maximumSpanBricks, generation, boundary,
   };
 }
@@ -230,11 +275,12 @@ function initialDensityAt(
 function brickRequiresCutBoundaryResolution(
   boundary: SphericalContainerFineGeometry | undefined,
   coordinate: SparseBrickVec3,
+  brickFineResolution: SparseBrickFineResolution,
 ): boolean {
   if (!boundary) return false;
-  const minimum = coordinate.map((value) => value * BRICK_FINE_RESOLUTION) as
+  const minimum = coordinate.map((value) => value * brickFineResolution) as
     [number, number, number];
-  const maximum = coordinate.map((value) => (value + 1) * BRICK_FINE_RESOLUTION) as
+  const maximum = coordinate.map((value) => (value + 1) * brickFineResolution) as
     [number, number, number];
   return classifyFineBoxAgainstSphericalContainer(boundary, minimum, maximum) === "cut";
 }
@@ -244,11 +290,12 @@ function brickHasInterface(
   dimensions: SparseBrickVec3,
   coordinate: SparseBrickVec3,
   epsilon: number,
+  brickFineResolution: SparseBrickFineResolution,
 ): boolean {
-  const origin = coordinate.map((value) => value * BRICK_FINE_RESOLUTION) as number[];
-  for (let z = 0; z < BRICK_FINE_RESOLUTION; z += 1)
-    for (let y = 0; y < BRICK_FINE_RESOLUTION; y += 1)
-      for (let x = 0; x < BRICK_FINE_RESOLUTION; x += 1) {
+  const origin = coordinate.map((value) => value * brickFineResolution) as number[];
+  for (let z = 0; z < brickFineResolution; z += 1)
+    for (let y = 0; y < brickFineResolution; y += 1)
+      for (let x = 0; x < brickFineResolution; x += 1) {
         const gx = origin[0] + x, gy = origin[1] + y, gz = origin[2] + z;
         if (gx >= dimensions[0] || gy >= dimensions[1] || gz >= dimensions[2]) continue;
         const own = initialDensityAt(scene, dimensions, gx, gy, gz);
@@ -272,8 +319,9 @@ function initialBrick(
   dimensions: SparseBrickVec3,
   coordinate: SparseBrickVec3,
   resolution: SparseBrickResolution,
+  brickFineResolution: SparseBrickFineResolution,
 ): SparseAdaptiveMassBrick {
-  const factor = BRICK_FINE_RESOLUTION / resolution;
+  const factor = brickFineResolution / resolution;
   const density = new Float64Array(resolution ** 3);
   const gamma = new Float64Array(resolution ** 3).fill(1);
   for (let z = 0; z < resolution; z += 1)
@@ -283,9 +331,9 @@ function initialBrick(
         for (let dz = 0; dz < factor; dz += 1)
           for (let dy = 0; dy < factor; dy += 1)
             for (let dx = 0; dx < factor; dx += 1) {
-              const gx = coordinate[0] * 8 + x * factor + dx;
-              const gy = coordinate[1] * 8 + y * factor + dy;
-              const gz = coordinate[2] * 8 + z * factor + dz;
+              const gx = coordinate[0] * brickFineResolution + x * factor + dx;
+              const gy = coordinate[1] * brickFineResolution + y * factor + dy;
+              const gz = coordinate[2] * brickFineResolution + z * factor + dz;
               if (gx >= dimensions[0] || gy >= dimensions[1] || gz >= dimensions[2]) continue;
               rho += initialDensityAt(scene, dimensions, gx, gy, gz);
               count += 1;
@@ -293,9 +341,9 @@ function initialBrick(
         density[x + resolution * (y + resolution * z)] = count > 0 ? rho / count : 0;
       }
   const brickDimensions: SparseBrickVec3 = [
-    Math.ceil(dimensions[0] / BRICK_FINE_RESOLUTION),
-    Math.ceil(dimensions[1] / BRICK_FINE_RESOLUTION),
-    Math.ceil(dimensions[2] / BRICK_FINE_RESOLUTION),
+    Math.ceil(dimensions[0] / brickFineResolution),
+    Math.ceil(dimensions[1] / brickFineResolution),
+    Math.ceil(dimensions[2] / brickFineResolution),
   ];
   return {
     key: sparseBrickKey(coordinate, brickDimensions),
@@ -322,6 +370,32 @@ function uniformInitialBrick(
   };
 }
 
+/** Structural bricks overlapped by the scene's authored (normally 8-cell) seed bricks. */
+function structuralSeedBrickCoordinates(
+  scene: SceneDescription,
+  dimensions: SparseBrickVec3,
+  brickDimensions: SparseBrickVec3,
+  brickFineResolution: SparseBrickFineResolution,
+): SparseBrickVec3[] {
+  const authoredWidth = scene.voxelDomain.brickSize_cells;
+  const result = new Map<number, SparseBrickVec3>();
+  for (const authored of initialFluidSeedBrickCoordinates(scene, dimensions, authoredWidth)) {
+    const lower = authored.map((value) => Math.floor(
+      value * authoredWidth / brickFineResolution,
+    )) as [number, number, number];
+    const upper = authored.map((value, axis) => Math.min(brickDimensions[axis], Math.ceil(
+      Math.min(dimensions[axis], (value + 1) * authoredWidth) / brickFineResolution,
+    ))) as [number, number, number];
+    for (let z = lower[2]; z < upper[2]; z += 1)
+      for (let y = lower[1]; y < upper[1]; y += 1)
+        for (let x = lower[0]; x < upper[0]; x += 1) {
+          const coordinate = [x, y, z] as const;
+          result.set(sparseBrickKey(coordinate, brickDimensions), coordinate);
+        }
+  }
+  return [...result.values()];
+}
+
 /**
  * Cover an analytic tank fill with maximal graded octree leaves. The traversal
  * visits octree boundary nodes, not every wet fixed brick. Partial top bricks
@@ -331,18 +405,24 @@ function hierarchicalTankFillBricks(
   scene: SceneDescription,
   dimensions: SparseBrickVec3,
   brickDimensions: SparseBrickVec3,
+  brickFineResolution: SparseBrickFineResolution,
   surfaceFineRings: number,
+  maximumMacroSpanBricks: number,
   boundary: SphericalContainerFineGeometry | undefined,
 ): SparseAdaptiveMassBrick[] | undefined {
   if (scene.systems?.fluid === false) return [];
   if (scene.fluid.initialCondition !== "tank-fill"
-    || initialFluidBrickCoordinates(scene, dimensions, BRICK_FINE_RESOLUTION)
+    || initialFluidBrickCoordinates(scene, dimensions, scene.voxelDomain.brickSize_cells)
     || sceneHasTerrain(scene) || boundary || sceneInitialLiquidVolumes(scene).length > 0) {
     return undefined;
   }
   const fullFineY = Math.max(0, Math.min(dimensions[1],
     Math.floor(scene.container.fillFraction * dimensions[1] + 0.5)));
-  const fullBrickY = Math.floor(fullFineY / BRICK_FINE_RESOLUTION);
+  const fullBrickY = Math.floor(fullFineY / brickFineResolution);
+  // A cut surface brick is itself distance ring zero. Without this offset the
+  // last completely flooded brick was also assigned ring zero, producing two
+  // fine structural bands whenever the fill height was not brick-aligned.
+  const fractionalSurfaceRing = fullFineY % brickFineResolution === 0 ? 0 : 1;
   const wetMaximum: SparseBrickVec3 = [brickDimensions[0], fullBrickY, brickDimensions[2]];
   const hasFreeSurface = fullFineY < dimensions[1];
   let rootSpan = 1;
@@ -354,26 +434,42 @@ function hierarchicalTankFillBricks(
     if (outside) return;
     const inside = origin.every((value, axis) => value + span <= wetMaximum[axis]);
     if (inside) {
-      const edgeFine = span * BRICK_FINE_RESOLUTION;
+      const edgeFine = span * brickFineResolution;
       const clearanceRings = hasFreeSurface
-        ? Math.max(0, wetMaximum[1] - origin[1] - span - (surfaceFineRings - 1))
+        ? Math.max(0, wetMaximum[1] - origin[1] - span
+          - (surfaceFineRings - 1) + fractionalSurfaceRing)
         : Number.POSITIVE_INFINITY;
       // Strong 2:1 grading doubles the admissible cell width once per complete
-      // brick ring below the fine surface band: 1, 2, 4, then the maximum
-      // physical width 8 supported by the runtime ladder. The old
+      // brick ring below the fine surface band: 1, 2, 4, and so on to B. The old
       // linear `clearanceFine / 4` approximation plateaued at 4 for both the
       // second and third submerged rings. On a 40-cell-deep tank that authored
       // the bottom span-two macro at width 4; macro leaves are intentionally
       // immutable at runtime, so selecting Surface distance could never reach
-      // the valid width-8 bottom rung visible in the UI.
+      // the valid bottom rung visible in the UI.
       const allowedCellWidth = hasFreeSurface
-        ? Math.min(BRICK_FINE_RESOLUTION, edgeFine, 2 ** clearanceRings)
+        ? Math.min(brickFineResolution, edgeFine, 2 ** clearanceRings)
         : edgeFine;
+      // A cubic macro cannot express two vertical distance rungs. Split it
+      // while its closest and deepest logical-brick layers require different
+      // cell widths; once both saturate at B it is safe and useful to retain
+      // the macro across arbitrarily deep bulk.
+      const deepestClearanceRings = hasFreeSurface
+        ? Math.max(0, wetMaximum[1] - origin[1] - 1
+          - (surfaceFineRings - 1) + fractionalSurfaceRing)
+        : Number.POSITIVE_INFINITY;
+      const deepestAllowedCellWidth = hasFreeSurface
+        ? Math.min(brickFineResolution, edgeFine, 2 ** deepestClearanceRings)
+        : edgeFine;
+      const crossesResolutionBands = span > 1
+        && deepestAllowedCellWidth !== allowedCellWidth;
       const requiredResolution = edgeFine / allowedCellWidth;
-      // A macro at 8^3 would refine all tangential directions merely to grade
+      // A macro at B^3 would refine all tangential directions merely to grade
       // one normal face. Split that last rung into base bricks instead; this
       // keeps the page census surface-shaped and substantially smaller.
-      if (requiredResolution <= (span > 1 ? 4 : 8)) {
+      if (!crossesResolutionBands && span <= maximumMacroSpanBricks
+        && requiredResolution <= (span > 1
+          ? sparseBrickLadder(brickFineResolution).coarseResolution
+          : brickFineResolution)) {
         bricks.push(uniformInitialBrick(
           origin, span, requiredResolution as SparseBrickResolution, brickDimensions,
         ));
@@ -381,7 +477,9 @@ function hierarchicalTankFillBricks(
       }
     }
     if (span === 1) {
-      if (inside) bricks.push(uniformInitialBrick(origin, 1, 8, brickDimensions));
+      if (inside) bricks.push(uniformInitialBrick(
+        origin, 1, brickFineResolution, brickDimensions,
+      ));
       return;
     }
     const childSpan = span / 2;
@@ -394,18 +492,24 @@ function hierarchicalTankFillBricks(
 
   // Only a fractional surface sheet is sampled. This is surface-shaped work,
   // independent of the liquid depth.
-  if (fullFineY % BRICK_FINE_RESOLUTION !== 0 && fullBrickY < brickDimensions[1]) {
+  if (fullFineY % brickFineResolution !== 0 && fullBrickY < brickDimensions[1]) {
     for (let z = 0; z < brickDimensions[2]; z += 1)
       for (let x = 0; x < brickDimensions[0]; x += 1)
-        bricks.push(initialBrick(scene, dimensions, [x, fullBrickY, z], 8));
+        bricks.push(initialBrick(
+          scene, dimensions, [x, fullBrickY, z], brickFineResolution, brickFineResolution,
+        ));
   }
 
-  const provisional = createSparseAdaptiveMassAtlas(dimensions, bricks, 1, boundary);
-  for (const coordinate of initialFluidSeedBrickCoordinates(
-    scene, dimensions, BRICK_FINE_RESOLUTION,
+  const provisional = createSparseAdaptiveMassAtlas(
+    dimensions, bricks, 1, boundary, brickFineResolution,
+  );
+  for (const coordinate of structuralSeedBrickCoordinates(
+    scene, dimensions, brickDimensions, brickFineResolution,
   )) {
     if (sparseBrickContainingCoordinate(provisional, coordinate)) continue;
-    bricks.push(initialBrick(scene, dimensions, coordinate, 8));
+    bricks.push(initialBrick(
+      scene, dimensions, coordinate, brickFineResolution, brickFineResolution,
+    ));
   }
   return bricks.sort((left, right) => left.key - right.key);
 }
@@ -414,6 +518,7 @@ function candidateInitialBrickCoordinates(
   scene: SceneDescription,
   dimensions: SparseBrickVec3,
   brickDimensions: SparseBrickVec3,
+  brickFineResolution: SparseBrickFineResolution,
 ): Iterable<SparseBrickVec3> {
   if (scene.systems?.fluid === false) return [];
   const candidates = new Map<number, SparseBrickVec3>();
@@ -424,9 +529,9 @@ function candidateInitialBrickCoordinates(
   const addCellBounds = (minimum: readonly [number, number, number],
     maximumExclusive: readonly [number, number, number]) => {
     const lower = minimum.map((value) => Math.max(0,
-      Math.floor(value / BRICK_FINE_RESOLUTION))) as [number, number, number];
+      Math.floor(value / brickFineResolution))) as [number, number, number];
     const upper = maximumExclusive.map((value, axis) => Math.min(brickDimensions[axis],
-      Math.ceil(value / BRICK_FINE_RESOLUTION))) as [number, number, number];
+      Math.ceil(value / brickFineResolution))) as [number, number, number];
     for (let z = lower[2]; z < upper[2]; z += 1)
       for (let y = lower[1]; y < upper[1]; y += 1)
         for (let x = lower[0]; x < upper[0]; x += 1) addBrick([x, y, z]);
@@ -445,9 +550,11 @@ function candidateInitialBrickCoordinates(
     );
   };
 
-  const authored = initialFluidBrickCoordinates(scene, dimensions, BRICK_FINE_RESOLUTION);
-  for (const coordinate of initialFluidSeedBrickCoordinates(
-    scene, dimensions, BRICK_FINE_RESOLUTION,
+  const authored = initialFluidBrickCoordinates(
+    scene, dimensions, scene.voxelDomain.brickSize_cells,
+  );
+  for (const coordinate of structuralSeedBrickCoordinates(
+    scene, dimensions, brickDimensions, brickFineResolution,
   )) addBrick(coordinate);
 
   // Replacement seeds suppress the procedural base; additive or absent seeds
@@ -498,10 +605,11 @@ export function sparseBrickFromDense(
   denseDensity: ArrayLike<number>,
   dimensions: SparseBrickVec3,
   denseGamma?: ArrayLike<number>,
+  brickFineResolution: SparseBrickFineResolution = DEFAULT_BRICK_FINE_RESOLUTION,
 ): SparseAdaptiveMassBrick {
   const density = new Float64Array(resolution ** 3);
   const gamma = new Float64Array(resolution ** 3).fill(1);
-  const factor = BRICK_FINE_RESOLUTION / resolution;
+  const factor = brickFineResolution / resolution;
   for (let z = 0; z < resolution; z += 1)
     for (let y = 0; y < resolution; y += 1)
       for (let x = 0; x < resolution; x += 1) {
@@ -509,9 +617,9 @@ export function sparseBrickFromDense(
         for (let dz = 0; dz < factor; dz += 1)
           for (let dy = 0; dy < factor; dy += 1)
             for (let dx = 0; dx < factor; dx += 1) {
-              const gx = coordinate[0] * 8 + x * factor + dx;
-              const gy = coordinate[1] * 8 + y * factor + dy;
-              const gz = coordinate[2] * 8 + z * factor + dz;
+              const gx = coordinate[0] * brickFineResolution + x * factor + dx;
+              const gy = coordinate[1] * brickFineResolution + y * factor + dy;
+              const gz = coordinate[2] * brickFineResolution + z * factor + dz;
               if (gx >= dimensions[0] || gy >= dimensions[1] || gz >= dimensions[2]) continue;
               const index = gx + dimensions[0] * (gy + dimensions[1] * gz);
               rho += denseDensity[index];
@@ -530,6 +638,17 @@ export function initializeSparseBrickAtlasFromScene(
   options: SparseBrickAtlasInitializationOptions,
 ): SparseAdaptiveMassAtlas {
   positiveDimensions(options.finestDimensions);
+  const brickFineResolution = options.brickFineResolution
+    ?? DEFAULT_BRICK_FINE_RESOLUTION;
+  const ladder = sparseBrickLadder(brickFineResolution);
+  const maximumMacroSpanBricks = options.maximumMacroSpanBricks
+    ?? Number.POSITIVE_INFINITY;
+  if (maximumMacroSpanBricks !== Number.POSITIVE_INFINITY
+    && (!Number.isSafeInteger(maximumMacroSpanBricks)
+      || maximumMacroSpanBricks < 1
+      || !Number.isInteger(Math.log2(maximumMacroSpanBricks)))) {
+    throw new RangeError("maximumMacroSpanBricks must be a positive power of two");
+  }
   const cellCount = options.finestDimensions.reduce((product, value) => product * value, 1);
   if (options.maximumFinestCells !== undefined
     && cellCount > options.maximumFinestCells) {
@@ -542,15 +661,16 @@ export function initializeSparseBrickAtlasFromScene(
     && Number.isFinite(options.surfaceFineRings)
     ? Math.min(8, Math.max(1, Math.round(options.surfaceFineRings))) : 1;
   const brickDimensions = options.finestDimensions.map((value) =>
-    Math.ceil(value / 8)) as [number, number, number];
+    Math.ceil(value / brickFineResolution)) as [number, number, number];
   const boundary = sphericalContainerFineGeometry(scene, options.finestDimensions);
   if (!options.resolutionForBrick) {
     const hierarchical = hierarchicalTankFillBricks(
-      scene, options.finestDimensions, brickDimensions, surfaceFineRings, boundary,
+      scene, options.finestDimensions, brickDimensions, brickFineResolution, surfaceFineRings,
+      maximumMacroSpanBricks, boundary,
     );
     if (hierarchical) {
       return createSparseAdaptiveMassAtlas(
-        options.finestDimensions, hierarchical, 1, boundary,
+        options.finestDimensions, hierarchical, 1, boundary, brickFineResolution,
       );
     }
   }
@@ -560,17 +680,17 @@ export function initializeSparseBrickAtlasFromScene(
     readonly interfaceBrick: boolean;
   }> = [];
   for (const coordinate of candidateInitialBrickCoordinates(
-    scene, options.finestDimensions, brickDimensions,
+    scene, options.finestDimensions, brickDimensions, brickFineResolution,
   )) {
     let nonempty = false;
-    for (let z = 0; z < 8 && !nonempty; z += 1)
-      for (let y = 0; y < 8 && !nonempty; y += 1)
-        for (let x = 0; x < 8; x += 1)
+    for (let z = 0; z < brickFineResolution && !nonempty; z += 1)
+      for (let y = 0; y < brickFineResolution && !nonempty; y += 1)
+        for (let x = 0; x < brickFineResolution; x += 1)
           if (initialDensityAt(
             scene, options.finestDimensions,
-            coordinate[0] * 8 + x,
-            coordinate[1] * 8 + y,
-            coordinate[2] * 8 + z,
+            coordinate[0] * brickFineResolution + x,
+            coordinate[1] * brickFineResolution + y,
+            coordinate[2] * brickFineResolution + z,
           ) > epsilon) {
             nonempty = true; break;
           }
@@ -579,7 +699,7 @@ export function initializeSparseBrickAtlasFromScene(
       coordinate,
       key: sparseBrickKey(coordinate, brickDimensions),
       interfaceBrick: brickHasInterface(
-        scene, options.finestDimensions, coordinate, epsilon,
+        scene, options.finestDimensions, coordinate, epsilon, brickFineResolution,
       ),
     });
   }
@@ -624,16 +744,20 @@ export function initializeSparseBrickAtlasFromScene(
     const distance = interfaceDistance.get(candidate.key);
     // A component without a free surface (for example a completely full,
     // closed tank) is quiescent bulk and therefore starts at 1^3.
-    const adaptiveResolution: SparseBrickResolution = distance !== undefined
-      && distance < surfaceFineRings ? 8
-      : distance === surfaceFineRings ? 4
-        : distance === surfaceFineRings + 1 ? 2 : 1;
-    const selected = brickRequiresCutBoundaryResolution(boundary, coordinate) ? 8
+    const distanceRung = distance === undefined
+      ? 0 : Math.max(0, ladder.resolutions.length - 1 - Math.max(0, distance - surfaceFineRings + 1));
+    const adaptiveResolution = (distance !== undefined && distance < surfaceFineRings
+      ? brickFineResolution : ladder.resolutions[distanceRung]!) as SparseBrickResolution;
+    const selected = brickRequiresCutBoundaryResolution(
+      boundary, coordinate, brickFineResolution,
+    ) ? brickFineResolution
       : options.resolutionForBrick?.({
       coordinate, brickDimensions,
     }) ?? adaptiveResolution;
-    if (selected !== 1 && selected !== 2 && selected !== 4 && selected !== 8) {
-      throw new RangeError("resolutionForBrick must return 1, 2, 4, or 8");
+    if (!isSparseBrickResolution(selected, brickFineResolution)) {
+      throw new RangeError(
+        `resolutionForBrick must return a rung on ${ladder.resolutions.join("/")}`,
+      );
     }
     resolutionByKey.set(candidate.key, selected);
   }
@@ -659,28 +783,30 @@ export function initializeSparseBrickAtlasFromScene(
   }
   const bricks = candidates.map((candidate) => initialBrick(
     scene, options.finestDimensions, candidate.coordinate,
-    resolutionByKey.get(candidate.key)!,
+    resolutionByKey.get(candidate.key)!, brickFineResolution,
   ));
-  return createSparseAdaptiveMassAtlas(options.finestDimensions, bricks, 1, boundary);
+  return createSparseAdaptiveMassAtlas(
+    options.finestDimensions, bricks, 1, boundary, brickFineResolution,
+  );
 }
 
 export function sparseAtlasLeaves(atlas: SparseAdaptiveMassAtlas): SparseAtlasLeaf[] {
   const leaves: SparseAtlasLeaf[] = [];
   for (const brick of atlas.bricks) {
-    const factor = 8 * sparseBrickSpan(brick) / brick.resolution;
+    const factor = atlas.brickFineResolution * sparseBrickSpan(brick) / brick.resolution;
     for (let z = 0; z < brick.resolution; z += 1)
       for (let y = 0; y < brick.resolution; y += 1)
         for (let x = 0; x < brick.resolution; x += 1) {
           const localIndex = x + brick.resolution * (y + brick.resolution * z);
-          const minimum = [brick.coordinate[0] * 8 + x * factor,
-            brick.coordinate[1] * 8 + y * factor,
-            brick.coordinate[2] * 8 + z * factor] as const;
+          const minimum = [brick.coordinate[0] * atlas.brickFineResolution + x * factor,
+            brick.coordinate[1] * atlas.brickFineResolution + y * factor,
+            brick.coordinate[2] * atlas.brickFineResolution + z * factor] as const;
           const spans = minimum.map((value, axis) =>
             Math.max(0, Math.min(factor, atlas.dimensions[axis] - value))) as [number, number, number];
           const volumeFineCells = spans[0] * spans[1] * spans[2];
           if (volumeFineCells <= 0) continue;
           leaves.push({
-            id: brick.key * 512 + localIndex,
+            id: brick.key * atlas.brickCellCapacity + localIndex,
             brickKey: brick.key,
             brickResolution: brick.resolution,
             localIndex,
@@ -698,13 +824,14 @@ export function sparseAtlasLeaves(atlas: SparseAdaptiveMassAtlas): SparseAtlasLe
 export function materializeSparseBrickAtlasDensity(atlas: SparseAdaptiveMassAtlas): Float32Array {
   const output = new Float32Array(atlas.dimensions.reduce((product, value) => product * value, 1));
   for (const brick of atlas.bricks) {
-    const spanFine = 8 * sparseBrickSpan(brick);
+    const spanFine = atlas.brickFineResolution * sparseBrickSpan(brick);
     const factor = spanFine / brick.resolution;
     for (let z = 0; z < spanFine; z += 1)
       for (let y = 0; y < spanFine; y += 1)
         for (let x = 0; x < spanFine; x += 1) {
-      const gx = brick.coordinate[0] * 8 + x, gy = brick.coordinate[1] * 8 + y,
-        gz = brick.coordinate[2] * 8 + z;
+      const gx = brick.coordinate[0] * atlas.brickFineResolution + x,
+        gy = brick.coordinate[1] * atlas.brickFineResolution + y,
+        gz = brick.coordinate[2] * atlas.brickFineResolution + z;
       if (gx >= atlas.dimensions[0] || gy >= atlas.dimensions[1] || gz >= atlas.dimensions[2]) continue;
       const local = Math.floor(x / factor) + brick.resolution
         * (Math.floor(y / factor) + brick.resolution * Math.floor(z / factor));
@@ -764,14 +891,16 @@ export function coarsenLargeQuiescentComponents(
   const bricks = components.flatMap((component) => {
     if (component.length <= maximumFineComponentBricks) return component;
     return component.map((brick) =>
-      sparseBrickSpan(brick) > 1 || brick.resolution === 4
+      sparseBrickSpan(brick) > 1 || brick.resolution === atlas.ladder.coarseResolution
         ? brick
         : sparseBrickFromDense(
           brick.key,
           brick.coordinate,
-          4,
+          atlas.ladder.coarseResolution,
           denseDensity,
           atlas.dimensions,
+          undefined,
+          atlas.brickFineResolution,
         ));
   });
   return createSparseAdaptiveMassAtlas(
@@ -779,6 +908,7 @@ export function coarsenLargeQuiescentComponents(
     bricks.sort((left, right) => left.key - right.key),
     atlas.generation,
     atlas.boundary,
+    atlas.brickFineResolution,
   );
 }
 
@@ -797,8 +927,10 @@ export function sparseBrickAtlasStats(atlas: SparseAdaptiveMassAtlas): SparseBri
     logicalBrickCount,
     residentBrickCount: atlas.bricks.length,
     omittedEmptyBrickCount: logicalBrickCount - representedLogicalBricks,
-    fineBrickCount: atlas.bricks.filter((brick) => brick.resolution === 8).length,
-    coarseBrickCount: atlas.bricks.filter((brick) => brick.resolution < 8).length,
+    fineBrickCount: atlas.bricks.filter((brick) =>
+      brick.resolution === atlas.brickFineResolution).length,
+    coarseBrickCount: atlas.bricks.filter((brick) =>
+      brick.resolution < atlas.brickFineResolution).length,
     fineCoarseFaceConnectedPairCount: atlas.bricks.reduce((count, brick) => {
       // Positive axes count every undirected adjacency exactly once.
       for (let axis = 0; axis < 3; axis += 1) {

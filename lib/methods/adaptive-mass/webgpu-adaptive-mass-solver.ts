@@ -95,11 +95,11 @@ export function dormantReceiverResolution(
   distance = 0,
   sourceResolution: SparseBrickResolution = 8,
 ): SparseBrickResolution {
-  if (mode === "all-fine") return 8;
-  if (mode === "all-coarse") return 4;
+  if (mode === "all-fine") return sourceResolution;
+  if (mode === "all-coarse") return Math.max(1, sourceResolution / 2) as SparseBrickResolution;
   let resolution = sourceResolution;
   for (let step = 0; step < distance; step += 1) {
-    resolution = resolution === 8 ? 4 : resolution === 4 ? 2 : 1;
+    resolution = Math.max(1, resolution / 2) as SparseBrickResolution;
   }
   return resolution;
 }
@@ -148,18 +148,19 @@ function receiverBoundaryResolution(
   coordinate: SparseBrickVec3,
 ): SparseBrickResolution | undefined {
   if (!atlas.boundary) return undefined;
-  const minimum = coordinate.map((value) => value * 8) as [number, number, number];
-  const maximum = coordinate.map((value) => (value + 1) * 8) as [number, number, number];
+  const width = atlas.brickFineResolution;
+  const minimum = coordinate.map((value) => value * width) as [number, number, number];
+  const maximum = coordinate.map((value) => (value + 1) * width) as [number, number, number];
   const classification = classifyFineBoxAgainstSphericalContainer(
     atlas.boundary, minimum, maximum,
   );
   if (classification === "outside") return undefined;
-  if (classification === "cut") return 4;
-  const collarMinimum = minimum.map((value) => value - 8) as [number, number, number];
-  const collarMaximum = maximum.map((value) => value + 8) as [number, number, number];
+  if (classification === "cut") return atlas.ladder.coarseResolution;
+  const collarMinimum = minimum.map((value) => value - width) as [number, number, number];
+  const collarMaximum = maximum.map((value) => value + width) as [number, number, number];
   return classifyFineBoxAgainstSphericalContainer(
     atlas.boundary, collarMinimum, collarMaximum,
-  ) === "cut" ? 2 : 1;
+  ) === "cut" ? Math.max(1, atlas.ladder.coarseResolution / 2) as SparseBrickResolution : 1;
 }
 
 function closeReceiverGrading(
@@ -227,7 +228,8 @@ export function residentSupportAtlas(
   // has the same destination fidelity as the represented interface. Activity
   // can subsequently coarsen static-only support; characteristic-swept empty
   // destinations retain the 8^3 floor.
-  const receiverResolution: SparseBrickResolution = mode === "all-coarse" ? 4 : 8;
+  const receiverResolution: SparseBrickResolution = mode === "all-coarse"
+    ? source.ladder.coarseResolution : source.brickFineResolution;
   for (const brick of source.bricks) {
     if (sparseBrickSpan(brick) > 1) continue;
     for (let dz = -1; dz <= 1; dz += 1) for (let dy = -1; dy <= 1; dy += 1)
@@ -267,6 +269,7 @@ export function residentSupportAtlas(
     [...bricks.values()].sort((left, right) => left.key - right.key),
     source.generation,
     source.boundary,
+    source.brickFineResolution,
   );
 }
 
@@ -310,9 +313,11 @@ export function dormantReceiverDomain(
     (density) => density > 0,
   ) && brick.coordinate.some((value, axis) => value === 0
     || value === source.brickDimensions[axis] - 1));
-  const physicalReceiverFloor: SparseBrickResolution = mode === "all-fine" ? 8
-    : mode === "all-coarse" ? 4
-      : receiverFloor === "auto" ? (boundaryFed ? 4 : 1) : receiverFloor;
+  const physicalReceiverFloor: SparseBrickResolution = mode === "all-fine"
+    ? source.brickFineResolution
+    : mode === "all-coarse" ? source.ladder.coarseResolution
+      : receiverFloor === "auto" ? (boundaryFed ? source.ladder.coarseResolution : 1)
+        : Math.min(receiverFloor, source.brickFineResolution) as SparseBrickResolution;
   // If the complete authored tank already fits inside the leaf budget, retain
   // it. A fixed ring count otherwise creates a hidden numerical wall one brick
   // before the real wall (Figure 9's 40-cell reservoir plus nine rings stopped
@@ -363,7 +368,9 @@ export function dormantReceiverDomain(
           // This is still capacity/apron-shaped rather than world-shaped. The
           // physical floor is selected once from the retained liquid source,
           // never from logical-domain volume or a domain scan.
-          const planned = dormantReceiverResolution(mode, nextDistance);
+          const planned = dormantReceiverResolution(
+            mode, nextDistance, source.brickFineResolution,
+          );
           let resolution: SparseBrickResolution = mode === "adaptive"
             ? Math.max(physicalReceiverFloor, planned) as SparseBrickResolution : planned;
           resolution = Math.max(resolution, boundaryResolution ?? 1) as SparseBrickResolution;
@@ -381,6 +388,7 @@ export function dormantReceiverDomain(
     [...bricks.values()].sort((left, right) => left.key - right.key),
     source.generation,
     source.boundary,
+    source.brickFineResolution,
   );
 }
 
@@ -591,16 +599,20 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       }, {
         id: "adaptive-mass.atlas",
         phase: "adaptive-topology",
-        label: "Build resident 4³/8³ sparse bricks",
+        label: "Build resident dyadic sparse bricks",
         dependencies: ["adaptive-mass.plan"],
         run: () => {
+          const fineResolution = options.brickFineResolution ?? 8;
+          const coarseResolution = (fineResolution / 2) as SparseBrickResolution;
           const resolutionForBrick = options.resolutionMode === "all-fine"
-            ? () => 8 as const
+            ? () => fineResolution
             : options.resolutionMode === "all-coarse"
-              ? () => 4 as const
+              ? () => coarseResolution
               : undefined;
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
+            brickFineResolution: fineResolution,
+            maximumMacroSpanBricks: options.maximumMacroSpanBricks,
             surfaceFineRings: options.surfaceFineRings,
             ...(resolutionForBrick ? { resolutionForBrick } : {}),
           });
@@ -647,6 +659,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               ? { iterationCapacity: sparseCM12PressureIterations(
                 options.pressureIterations) }
               : undefined,
+            options.presentationPageResolution ?? 4,
           );
         },
       }, {

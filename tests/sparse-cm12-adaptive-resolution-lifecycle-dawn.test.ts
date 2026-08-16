@@ -60,8 +60,7 @@ dawnTest("Dawn publishes coarse-to-fine and fine-to-coarse Sparse CM12 topology"
         device, scene, "balanced", undefined,
         {
           resolutionMode: "adaptive",
-          fineTileResolution: 8,
-          coarseTileResolution: 4,
+          brickFineResolution: 8,
           surfaceFineRings: 1,
           // Keep this lifecycle fixture on the bounded compatibility path.
           // Large domains intentionally skip host-built resolution variants;

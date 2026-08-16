@@ -73,6 +73,23 @@ const timedFrames = positiveInteger("frames", 40);
 const prepareBricksPerFrame = optionalPositiveInteger("prepare-bricks");
 const surfaceFineRings = optionalPositiveInteger("surface-fine-rings");
 const pressureIterationsOverride = optionalPositiveInteger("pressure-iterations");
+const brickFineResolution = optionalPositiveInteger("brick-fine") ?? 8;
+const presentationPageResolution = optionalPositiveInteger("presentation-page") ?? 4;
+const maximumMacroSpanBricks = optionalPositiveInteger("maximum-macro-span");
+if (brickFineResolution !== 4 && brickFineResolution !== 8
+  && brickFineResolution !== 16) {
+  throw new RangeError("brick-fine must be 4, 8, or 16");
+}
+if ((presentationPageResolution !== 4 && presentationPageResolution !== 8
+  && presentationPageResolution !== 16)
+  || presentationPageResolution > brickFineResolution
+  || brickFineResolution % presentationPageResolution !== 0) {
+  throw new RangeError("presentation-page must be 4, 8, or 16 and divide brick-fine");
+}
+if (maximumMacroSpanBricks !== undefined
+  && !Number.isInteger(Math.log2(maximumMacroSpanBricks))) {
+  throw new RangeError("maximum-macro-span must be a positive power of two");
+}
 const sceneArgument = process.argv.slice(2)
   .find((value) => value.startsWith("--scene="))?.slice("--scene=".length)
   ?? "symmetric";
@@ -302,6 +319,9 @@ async function createArm(
         ? SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides : {}),
       timeStep: timeStepArgument,
       resolutionMode: sparseResolutionArgument,
+      brickFineResolution: String(brickFineResolution),
+      presentationPageResolution: String(presentationPageResolution),
+      maximumMacroSpanBricks: String(maximumMacroSpanBricks ?? "auto"),
       ...(prepareBricksPerFrame === undefined ? {} : { prepareBricksPerFrame }),
       ...(surfaceFineRings === undefined ? {} : { surfaceFineRings }),
       ...(pressureIterationsOverride === undefined
@@ -538,6 +558,9 @@ try {
     performanceGateApplied,
     sparseResolutionMode: sparseResolutionArgument,
     topologyExperiment: {
+      brickFineResolution,
+      presentationPageResolution,
+      maximumMacroSpanBricks: maximumMacroSpanBricks ?? "auto",
       prepareBricksPerFrame: prepareBricksPerFrame ?? "method-default",
       surfaceFineRings: surfaceFineRings ?? "method-default",
     },

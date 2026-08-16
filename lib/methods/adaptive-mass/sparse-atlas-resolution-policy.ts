@@ -207,7 +207,8 @@ export function planSparseAtlasResolution(
   }
   const acceptedSteps = previous.acceptedSteps + 1;
   if (mode !== "adaptive") {
-    const fixedResolution: SparseBrickResolution = mode === "all-fine" ? 8 : 4;
+    const fixedResolution: SparseBrickResolution = mode === "all-fine"
+      ? grid.atlas.brickFineResolution : grid.atlas.ladder.coarseResolution;
     const topologyKey = (grid.topologyKey ?? grid.gradientRows) as object;
     let variants = fixedResolutionDecisionCache.get(topologyKey);
     if (!variants) {
@@ -239,8 +240,8 @@ export function planSparseAtlasResolution(
         promotedBrickCount,
         demotedBrickCount,
         deferredPromotionCount: 0,
-        targetFineBrickCount: fixedResolution === 8 ? grid.atlas.bricks.length : 0,
-        targetCoarseBrickCount: fixedResolution === 4 ? grid.atlas.bricks.length : 0,
+        targetFineBrickCount: mode === "all-fine" ? grid.atlas.bricks.length : 0,
+        targetCoarseBrickCount: mode === "all-coarse" ? grid.atlas.bricks.length : 0,
         maximumScoreByte: 0,
       },
     };
@@ -397,7 +398,7 @@ export function planSparseAtlasResolution(
       ? quiet ? Math.min(255, (old?.quietEpochs ?? 0) + 1) : 0
       : old?.quietEpochs ?? 0;
     let target = brick.resolution;
-    if (brick.resolution < 8 && topologyEpoch
+    if (brick.resolution < grid.atlas.brickFineResolution && topologyEpoch
       && hotEpochs >= SPARSE_ATLAS_PROMOTE_EPOCHS) {
       const bucket = ordinaryPromotionBuckets.get(scoreByte) ?? [];
       bucket.push(brick.key);
@@ -426,7 +427,9 @@ export function planSparseAtlasResolution(
     const keys = ordinaryPromotionBuckets.get(score)!.sort((a, b) => a - b);
     for (const key of keys) {
       const current = grid.atlas.directory.get(key)!.resolution;
-      targets.set(key, Math.min(8, 2 * current) as SparseBrickResolution);
+      targets.set(key, Math.min(
+        grid.atlas.brickFineResolution, 2 * current,
+      ) as SparseBrickResolution);
     }
   }
   enforceTwoToOneTargets(grid, targets);
@@ -463,9 +466,9 @@ export function planSparseAtlasResolution(
       demotedBrickCount,
       deferredPromotionCount,
       targetFineBrickCount: grid.atlas.bricks.filter((brick) =>
-        targets.get(brick.key) === 8).length,
+        targets.get(brick.key) === grid.atlas.brickFineResolution).length,
       targetCoarseBrickCount: grid.atlas.bricks.filter((brick) =>
-        (targets.get(brick.key) ?? brick.resolution) < 8).length,
+        (targets.get(brick.key) ?? brick.resolution) < grid.atlas.brickFineResolution).length,
       maximumScoreByte,
     },
   };

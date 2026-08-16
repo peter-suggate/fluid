@@ -158,6 +158,33 @@ test("ocean seiche presentation retains deep macro leaves at native scale", () =
     "wall emission must retain the native page's tangential span");
 });
 
+test("ocean seiche presentation page width is independent of its solver ladder", () => {
+  const scene = createOceanSeicheScene();
+  const atlas = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
+    brickFineResolution: 16,
+  });
+  for (const pageResolution of [4, 8, 16] as const) {
+    const publication = sparseCM12FinePresentationPlan(atlas, pageResolution);
+    const pagesPerAxis = 16 / pageResolution;
+    assert.equal(publication.plan.brickResolution, pageResolution);
+    assert.equal(publication.plan.samplesPerBrick, pageResolution ** 3);
+    assert.equal(publication.plan.maximumResidentBricks,
+      atlas.bricks.length * pagesPerAxis ** 3);
+    assert.equal((publication.worklist[3]! >>> 16) & 31, 16);
+    assert.equal((publication.worklist[3]! >>> 21) & 31, pageResolution);
+    for (let page = 0; page < publication.plan.maximumResidentBricks; page += 1) {
+      const source = decodeSparseCM12FinePresentationSource(
+        publication.metadata[4 * page + 3]!, 16, pageResolution,
+      );
+      assert.ok(source.brick < atlas.bricks.length);
+      assert.ok(source.octant < pagesPerAxis ** 3);
+      assert.equal(source.spanBricks, 1);
+    }
+  }
+  assert.throws(() => sparseCM12FinePresentationPlan(atlas, 32 as 16), /does not divide/);
+});
+
 test("closed vast-depth fills do no finest-domain-shaped planning or allocation", () => {
   const scene = createOceanSeicheScene();
   scene.container = { ...scene.container, fillFraction: 1 };
@@ -181,7 +208,7 @@ test("closed vast-depth fills do no finest-domain-shaped planning or allocation"
     "GPU ownership must not recreate a logical-domain brick directory");
 });
 
-dawnTest("native ocean pages close every depth rung on one uniform tank wall",
+dawnTest("native 8-cubed ocean pages close every B16 depth rung on one uniform tank wall",
   { timeout: 60_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-ocean-seiche-coarsening.test.ts");
@@ -216,7 +243,10 @@ dawnTest("native ocean pages close every depth rung on one uniform tank wall",
       delete scene.fluid.initialBrickSeeds_m;
       delete scene.fluid.initialBrickSeedsAdditive;
       solver = await WebGPUAdaptiveMassSolver.createAsync(
-        device, scene, "balanced", undefined, adaptiveMassSolverOptions({}), () => {},
+        device, scene, "balanced", undefined, adaptiveMassSolverOptions({
+          brickFineResolution: "16",
+          presentationPageResolution: "8",
+        }), () => {},
       );
 
       const uniform = device.createBuffer({ size: 416,

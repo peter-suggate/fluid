@@ -71,8 +71,7 @@ dawnTest("large hydrostatic stays still, refines on impact, and restores deep co
         device, scene, "balanced", undefined,
         {
           resolutionMode: "adaptive",
-          fineTileResolution: 8,
-          coarseTileResolution: 4,
+          brickFineResolution: 8,
           surfaceFineRings: 1,
           receiverSupportRings: 9,
           receiverFloor: "auto",

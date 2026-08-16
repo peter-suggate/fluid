@@ -69,7 +69,12 @@ export const FINE_LEVELSET_SAMPLE_FLAGS = Object.freeze({
 } as const);
 
 export type FineLevelSetFactor = 1 | 4 | 8;
-export type FineLevelSetBrickResolution = 4;
+/**
+ * Renderer-facing page width. The production octree fine tracker remains B4,
+ * but compact publishers such as Sparse CM12 may use a wider page while
+ * retaining the same logical sample lattice.
+ */
+export type FineLevelSetBrickResolution = 4 | 8 | 16;
 export type FineLevelSetVec3 = readonly [number, number, number];
 
 export interface FineLevelSetBrickPlanOptions {
@@ -101,10 +106,10 @@ export interface FineLevelSetBrickPlan {
   allocatedBytes: number;
 }
 
-/** Exact O(1) lookup shared by every global-fine consumer.
- * The direct table follows the compact sorted worklist in the same binding, so
- * consumers need no extra bind slot. Metadata still validates identity and
- * generation before the physical page becomes visible. */
+/** Shared global-fine page lookup. Ordinary publishers use the O(1) direct
+ * table following the worklist body. Compact publishers omit that domain-sized
+ * table and binary-search their key-sorted metadata instead. Metadata always
+ * validates identity and generation before the physical page becomes visible. */
 export function makeFineLevelSetSortedWorklistLookupWGSL(
   params: string,
   metadata: string,
@@ -119,9 +124,18 @@ fn ${functionName}(key:u32)->u32 {
     ||${worklist}[5]!=1u||${worklist}[6]!=1u){return INVALID;}
   let count=min(${worklist}[1],min(${params}.worklistCapacity,${params}.pageCapacity));
   let logicalCount=${params}.${brickDimensions}.x*${params}.${brickDimensions}.y*${params}.${brickDimensions}.z;
+  if(key>=logicalCount){return INVALID;}
+  if((${worklist}[3]&0x80000000u)!=0u){
+    var low=0u;var high=count;
+    loop{if(low>=high){break;}let middle=low+(high-low)/2u;let base=middle*4u;
+      if(base+2u>=arrayLength(&${metadata})){return INVALID;}let candidate=${metadata}[base+1u];
+      if(candidate<key){low=middle+1u;}else{high=middle;}}
+    let base=low*4u;
+    return select(INVALID,low,low<count&&base+2u<arrayLength(&${metadata})
+      &&${metadata}[base]==low&&${metadata}[base+1u]==key&&${metadata}[base+2u]==${params}.generation);
+  }
   let directoryBase=7u+${params}.worklistCapacity;
-  if(7u+count>arrayLength(&${worklist})||key>=logicalCount
-    ||directoryBase+key>=arrayLength(&${worklist})){return INVALID;}
+  if(7u+count>arrayLength(&${worklist})||directoryBase+key>=arrayLength(&${worklist})){return INVALID;}
   let physicalId=${worklist}[directoryBase+key];let base=physicalId*4u;
   return select(INVALID,physicalId,physicalId<${params}.pageCapacity&&base+2u<arrayLength(&${metadata})
     &&${metadata}[base]==physicalId&&${metadata}[base+1u]==key&&${metadata}[base+2u]==${params}.generation);

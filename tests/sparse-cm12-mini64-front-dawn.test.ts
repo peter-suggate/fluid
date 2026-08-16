@@ -161,8 +161,7 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
       const createSolver = (resolutionMode: "adaptive" | "all-fine") =>
         WebGPUAdaptiveMassSolver.createAsync(device!, scene, "balanced", undefined, {
           resolutionMode,
-          fineTileResolution: 8,
-          coarseTileResolution: 4,
+          brickFineResolution: 8,
           // Begin the experimental arm deliberately over-refined so this
           // short front regression exercises live submerged coarsening rather
           // than only the already-graded construction topology.

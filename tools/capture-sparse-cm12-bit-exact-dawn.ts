@@ -156,8 +156,7 @@ async function capture(
       undefined,
       {
         resolutionMode: "adaptive",
-        fineTileResolution: 8,
-        coarseTileResolution: 4,
+        brickFineResolution: 8,
         surfaceFineRings: 1,
         receiverSupportRings: 3,
         receiverFloor: 1,

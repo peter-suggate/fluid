@@ -265,6 +265,44 @@ fn finePage(key:u32)->u32{
   return select(INVALID,id,id<p.table.z&&base+2u<arrayLength(&metadata)
     &&metadata[base]==id&&metadata[base+1u]==key&&metadata[base+2u]==p.table.w);
 }
+fn compactBrickFineResolution()->u32{
+  let encoded=(fineWorklist[3]>>16u)&31u;return select(8u,encoded,encoded!=0u);
+}
+fn compactPagesPerSolverAxis()->u32{
+  return max(1u,compactBrickFineResolution()/max(1u,p.sample.w));
+}
+fn compactSourceSpanLog(source:u32)->u32{
+  if(compactPagesPerSolverAxis()==4u){
+    return select(0u,(source>>24u)&31u,(source&0x80000000u)!=0u);
+  }
+  return source>>27u;
+}
+fn compactSampleAddress(q:vec3u)->vec2u{
+  let r=max(1u,p.sample.w);let pageCoordinate=q/r;
+  let exactKey=pageCoordinate.x+p.bricks.x*(pageCoordinate.y+p.bricks.y*pageCoordinate.z);
+  let exact=finePage(exactKey);
+  if(exact!=INVALID){
+    if((fineWorklist[3]&0x80000000u)==0u){let local=q-pageCoordinate*r;
+      return vec2u(exact,local.x+r*(local.y+r*local.z));}
+    let spanLog=compactSourceSpanLog(metadata[4u*exact+3u]);
+    if(spanLog==0u){let local=q-pageCoordinate*r;
+      return vec2u(exact,local.x+r*(local.y+r*local.z));}
+    let scale=compactPagesPerSolverAxis()*(1u<<spanLog);let origin=pageCoordinate*r;
+    let local=min((q-origin)/scale,vec3u(r-1u));
+    return vec2u(exact,local.x+r*(local.y+r*local.z));
+  }
+  let maximumSpanLog=(fineWorklist[3]>>8u)&31u;
+  for(var spanLog=1u;spanLog<=maximumSpanLog;spanLog+=1u){
+    let span=1u<<spanLog;let pageSpan=compactPagesPerSolverAxis()*span;
+    let originPage=(pageCoordinate/pageSpan)*pageSpan;
+    let key=originPage.x+p.bricks.x*(originPage.y+p.bricks.y*originPage.z);
+    let id=finePage(key);if(id==INVALID){continue;}
+    if(compactSourceSpanLog(metadata[4u*id+3u])!=spanLog){continue;}
+    let origin=originPage*r;let local=min((q-origin)/pageSpan,vec3u(r-1u));
+    return vec2u(id,local.x+r*(local.y+r*local.z));
+  }
+  return vec2u(INVALID);
+}
 fn signedPhi(qi:vec3i)->f32{
   // The optical wall cubes keep their existing normals. For the adjoining free
   // surface, repeat the nearest in-domain signed sample so the smoothing kernel
@@ -280,14 +318,11 @@ fn signedPhi(qi:vec3i)->f32{
     return sampleAdaptiveCoarseOctreePhiAtGrid(vec3f(q));
   }
   let q=vec3u(clamp(qi,vec3i(0),dims-vec3i(1)));
-  let r=max(1u,p.sample.w);let brick=q/r;let local=q-brick*r;
-  if(all(brick<p.bricks.xyz)){
-    let key=brick.x+p.bricks.x*(brick.y+p.bricks.y*brick.z);let id=finePage(key);
-    if(id!=INVALID){
-      let index=id*p.bricks.w+local.x+r*(local.y+r*local.z);
-      if(index<arrayLength(&fineSamples)
-        &&(finePackedFlags(index)&1u)!=0u&&finitePhi(finePackedPhi(index))){return finePackedPhi(index);}
-    }
+  let address=compactSampleAddress(q);
+  if(address.x!=INVALID){
+    let index=address.x*p.bricks.w+address.y;
+    if(index<arrayLength(&fineSamples)
+      &&(finePackedFlags(index)&1u)!=0u&&finitePhi(finePackedPhi(index))){return finePackedPhi(index);}
   }
   if((fineWorklist[3]&0x80000000u)!=0u){return 4.0*p.settings.w;}
   return sampleCoarseOctreePhi(p.settings.xyz+(vec3f(q)+vec3f(.5))*p.settings.w);

@@ -62,13 +62,18 @@ function sum(values: Iterable<number>): number {
   return total;
 }
 
-function zeroBrick(key: number, coordinate: SparseBrickVec3): SparseAdaptiveMassBrick {
+function zeroBrick(
+  key: number,
+  coordinate: SparseBrickVec3,
+  resolution: SparseAdaptiveMassAtlas["brickFineResolution"],
+): SparseAdaptiveMassBrick {
+  const count = resolution ** 3;
   return {
     key,
     coordinate,
-    resolution: 8,
-    density: new Float64Array(512),
-    gamma: new Float64Array(512).fill(1),
+    resolution,
+    density: new Float64Array(count),
+    gamma: new Float64Array(count).fill(1),
   };
 }
 
@@ -84,11 +89,14 @@ function transportClosure(atlas: SparseAdaptiveMassAtlas): SparseAdaptiveMassAtl
             brick.coordinate[2] + dz] as const;
           if (coordinate.some((value, axis) => value < 0 || value >= atlas.brickDimensions[axis])) continue;
           const key = sparseBrickKey(coordinate, atlas.brickDimensions);
-          if (!bricks.has(key)) bricks.set(key, zeroBrick(key, coordinate));
+          if (!bricks.has(key)) bricks.set(key, zeroBrick(
+            key, coordinate, atlas.brickFineResolution,
+          ));
         }
   }
   return createSparseAdaptiveMassAtlas(
     atlas.dimensions, [...bricks.values()], atlas.generation, atlas.boundary,
+    atlas.brickFineResolution,
   );
 }
 
@@ -98,15 +106,18 @@ function leafAtFineCell(
   y: number,
   z: number,
 ): number | undefined {
-  const coordinate = [Math.floor(x / 8), Math.floor(y / 8), Math.floor(z / 8)] as const;
+  const width = atlas.brickFineResolution;
+  const coordinate = [Math.floor(x / width), Math.floor(y / width),
+    Math.floor(z / width)] as const;
   const key = sparseBrickKey(coordinate, atlas.brickDimensions);
   const brick = atlas.directory.get(key);
   if (!brick) return undefined;
-  const factor = 8 / brick.resolution;
-  const localX = Math.floor((x - coordinate[0] * 8) / factor);
-  const localY = Math.floor((y - coordinate[1] * 8) / factor);
-  const localZ = Math.floor((z - coordinate[2] * 8) / factor);
-  return key * 512 + localX + brick.resolution * (localY + brick.resolution * localZ);
+  const factor = width / brick.resolution;
+  const localX = Math.floor((x - coordinate[0] * width) / factor);
+  const localY = Math.floor((y - coordinate[1] * width) / factor);
+  const localZ = Math.floor((z - coordinate[2] * width) / factor);
+  return key * atlas.brickCellCapacity + localX
+    + brick.resolution * (localY + brick.resolution * localZ);
 }
 
 /** Nonnegative cell-centred trilinear stencil, clamped at closed domain walls. */
@@ -156,7 +167,7 @@ export function advanceSparseBrickAtlasTranslation(
   options: SparseBrickTranslationOptions,
 ): SparseBrickTranslationResult {
   for (const value of options.displacementFine) {
-    if (!Number.isFinite(value) || Math.abs(value) > 8) {
+    if (!Number.isFinite(value) || Math.abs(value) > source.brickFineResolution) {
       throw new RangeError("each displacementFine component must be finite and within one brick");
     }
   }
@@ -164,6 +175,7 @@ export function advanceSparseBrickAtlasTranslation(
   if (source.bricks.length === 0) {
     return { atlas: createSparseAdaptiveMassAtlas(
       source.dimensions, [], source.generation + 1, source.boundary,
+      source.brickFineResolution,
     ),
       stats: { sourceBrickCount: 0, transientSupportBrickCount: 0, retainedBrickCount: 0,
         sourceLeafCount: 0, workLeafCount: 0, finalBetaMaximumAbsoluteError: 0,
@@ -234,7 +246,7 @@ export function advanceSparseBrickAtlasTranslation(
     const gamma = new Float64Array(brick.resolution ** 3);
     let wet = false;
     for (let local = 0; local < density.length; local += 1) {
-      const id = brick.key * 512 + local;
+      const id = brick.key * work.brickCellCapacity + local;
       density[local] = nextDensity.get(id) ?? 0;
       gamma[local] = nextGamma.get(id) ?? 1;
       wet ||= density[local] > epsilon;
@@ -243,6 +255,7 @@ export function advanceSparseBrickAtlasTranslation(
   }
   const atlas = createSparseAdaptiveMassAtlas(
     source.dimensions, retained, source.generation + 1, source.boundary,
+    source.brickFineResolution,
   );
   const sourceLeaves = sparseAtlasLeaves(source);
   const resultLeaves = sparseAtlasLeaves(atlas);

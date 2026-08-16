@@ -26,7 +26,6 @@ import {
   type SparseAtlasProjectionWorkspace,
 } from "./sparse-atlas-composite-projection";
 import {
-  BRICK_FINE_RESOLUTION,
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassAtlas,
@@ -343,7 +342,7 @@ function transportSupport(
   }
   const support = createSparseAdaptiveMassAtlas(source.dimensions,
     [...bricks.values()].sort((left, right) => left.key - right.key), source.generation,
-    source.boundary);
+    source.boundary, source.brickFineResolution);
   variants.set(variantKey, support);
   return support;
 }
@@ -873,23 +872,26 @@ export function injectSparseAtlasLiquid(
 
   const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
   let touched = false;
-  const first = minimumFine.map((value) => Math.floor(value / BRICK_FINE_RESOLUTION));
-  const last = maximumFine.map((value) => Math.floor(value / BRICK_FINE_RESOLUTION));
+  const brickFineResolution = source.brickFineResolution;
+  const first = minimumFine.map((value) => Math.floor(value / brickFineResolution));
+  const last = maximumFine.map((value) => Math.floor(value / brickFineResolution));
   for (let bz = first[2]; bz <= last[2]; bz += 1) {
     for (let by = first[1]; by <= last[1]; by += 1) {
       for (let bx = first[0]; bx <= last[0]; bx += 1) {
         const coordinate: SparseBrickVec3 = [bx, by, bz];
         const key = sparseBrickKey(coordinate, source.brickDimensions);
-        const brick = bricks.get(key) ?? zeroBrick(key, coordinate, 8);
-        const span = BRICK_FINE_RESOLUTION / brick.resolution;
+        const brick = bricks.get(key) ?? zeroBrick(
+          key, coordinate, brickFineResolution,
+        );
+        const span = brickFineResolution / brick.resolution;
         let density: Float64Array | undefined;
         for (let lz = 0; lz < brick.resolution; lz += 1) {
           for (let ly = 0; ly < brick.resolution; ly += 1) {
             for (let lx = 0; lx < brick.resolution; lx += 1) {
               const fraction = coverage([
-                BRICK_FINE_RESOLUTION * bx + span * lx,
-                BRICK_FINE_RESOLUTION * by + span * ly,
-                BRICK_FINE_RESOLUTION * bz + span * lz,
+                brickFineResolution * bx + span * lx,
+                brickFineResolution * by + span * ly,
+                brickFineResolution * bz + span * lz,
               ], span);
               const local = lx + brick.resolution * (ly + brick.resolution * lz);
               if (fraction <= brick.density[local]) continue;
@@ -911,6 +913,7 @@ export function injectSparseAtlasLiquid(
     [...bricks.values()].sort((left, right) => left.key - right.key),
     source.generation + 1,
     source.boundary,
+    source.brickFineResolution,
   );
   const retained = sameAtlasTopology(source, atlas);
   const grid = retained
@@ -1068,10 +1071,10 @@ function retainedAtlas(
       ...brick,
       resolution: target,
       density: resampleBrickScalar(
-        source.dimensions, brick, nextDensity, target, 0,
+        source.dimensions, source.brickFineResolution, brick, nextDensity, target, 0,
       ),
       gamma: resampleBrickScalar(
-        source.dimensions, brick, nextGamma, target, 1,
+        source.dimensions, source.brickFineResolution, brick, nextGamma, target, 1,
       ),
     });
   }
@@ -1080,22 +1083,24 @@ function retainedAtlas(
     retained,
     source.generation + 1,
     source.boundary,
+    source.brickFineResolution,
   );
 }
 
 function localCellVolume(
   dimensions: SparseBrickVec3,
+  brickFineResolution: number,
   brick: SparseAdaptiveMassBrick,
   resolution: SparseBrickResolution,
   x: number,
   y: number,
   z: number,
 ): number {
-  const scale = 8 / resolution;
+  const scale = brickFineResolution / resolution;
   const local = [x, y, z] as const;
   let volume = 1;
   for (let axis = 0; axis < 3; axis += 1) {
-    const lower = brick.coordinate[axis] * 8 + local[axis] * scale;
+    const lower = brick.coordinate[axis] * brickFineResolution + local[axis] * scale;
     volume *= Math.max(0, Math.min(scale, dimensions[axis] - lower));
   }
   return volume;
@@ -1103,6 +1108,7 @@ function localCellVolume(
 
 function resampleBrickScalar(
   dimensions: SparseBrickVec3,
+  brickFineResolution: number,
   brick: SparseAdaptiveMassBrick,
   source: ArrayLike<number>,
   targetResolution: SparseBrickResolution,
@@ -1136,7 +1142,7 @@ function resampleBrickScalar(
                 const sx = factor * x + dx, sy = factor * y + dy;
                 const sz = factor * z + dz;
                 const childVolume = localCellVolume(
-                  dimensions, brick, brick.resolution, sx, sy, sz,
+                  dimensions, brickFineResolution, brick, brick.resolution, sx, sy, sz,
                 );
                 weighted += childVolume * source[sx + brick.resolution
                   * (sy + brick.resolution * sz)];
@@ -1221,8 +1227,9 @@ export function stepSparseAtlasDynamics(
   }
 
   const receiverResolution: SparseBrickResolution =
-    options.resolutionMode === "all-fine" ? 8 : 4;
-  const receiverCellSpanFine = BRICK_FINE_RESOLUTION / receiverResolution;
+    options.resolutionMode === "all-fine"
+      ? source.atlas.brickFineResolution : source.atlas.ladder.coarseResolution;
+  const receiverCellSpanFine = source.atlas.brickFineResolution / receiverResolution;
   const maximumFaceComponent = workspace.maximumFaceComponent;
   maximumFaceComponent[0] = 0;
   maximumFaceComponent[1] = 0;
@@ -1243,7 +1250,7 @@ export function stepSparseAtlasDynamics(
   // never scan or allocate the rest of the authored domain.
   const transportHaloBricks = Math.max(1, Math.ceil(
     (maximumCharacteristicDisplacementFine + receiverCellSpanFine)
-      / BRICK_FINE_RESOLUTION,
+      / source.atlas.brickFineResolution,
   ));
   const supportAtlas = transportSupport(
     source.atlas, receiverResolution, transportHaloBricks,
