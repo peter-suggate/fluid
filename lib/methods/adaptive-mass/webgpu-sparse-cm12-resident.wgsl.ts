@@ -1488,7 +1488,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   var densitySum=0;var momentX=0;var momentY=0;var momentZ=0;
   var deformation=0.0;var predictedMotion=0.0;var detailError=0.0;
   var velocityTravel=0.0;
-  var surfaceAxes=0u;var surfaceCell=false;var occupiedCell=false;var thinFluidCell=false;
+  var surfaceAxes=0u;var occupiedCell=false;var thinFluidCell=false;
   var cutBoundaryCell=false;
   var supportMask=0u;var sweptSupportMask=0u;
   let measuredCount=select(0u,count,resident);
@@ -1510,8 +1510,13 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       *(f32(2u*y+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
     momentZ+=i32(round(rho
       *(f32(2u*z+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
-    var interfaceCell=fill>p.activityDensity.y&&fill<p.activityDensity.z;
-    surfaceCell=surfaceCell||interfaceCell;
+    // A fractional density is not sufficient surface evidence. Wall
+    // conditioning and conservative transport can leave submerged cells in
+    // the broad 0<rho<1 band indefinitely. Require a represented liquid/air
+    // crossing or an interior air-facing side below; the independent
+    // thin-feature test preserves sheets that never reach the rho=.5 contour.
+    let fractionalCell=fill>p.activityDensity.y&&fill<p.activityDensity.z;
+    var interfaceCell=false;
     // The arithmetic dry epsilon is deliberately smaller than the residency
     // floor. Numerically transported mist must not pin an otherwise empty
     // sparse region after a scene settles.
@@ -1526,7 +1531,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     let ownWet=fill>=CM12_LIQUID_ISOVALUE;
     let featureDensity=max(residencyDensity,p.activityDensity.x);
     let b=cellBase(cell);let cellCenter=vec3f(taf(b),taf(b+1u),taf(b+2u));
-    var exposedSides=0u;
+    var exposedSides=0u;var surfaceAirSides=0u;
     for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
       let row=incidenceRow(incidence);if(!rowAccepted(row)){continue;}
       let own=termCoefficient(incidenceTerm(incidence));
@@ -1540,6 +1545,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       let omittedAirInside=rowKind(row)==3u&&rowPosition[axis]>1e-4
         &&rowPosition[axis]<f32(p.dimensions[axis])-1e-4;
       var crosses=omittedAirInside&&ownWet;var sideHasFluid=false;
+      var sideHasSurfaceFluid=false;
       let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
       for(var term=begin;term<end;term+=1u){
         let coefficient=termCoefficient(term);if(own*coefficient>=0.0){continue;}
@@ -1548,7 +1554,14 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         let neighborDensity=state[destinationDensity()+neighbor]
           /max(cellOpenFraction(neighbor),1e-6);
         sideHasFluid=sideHasFluid||neighborDensity>featureDensity;
-        crosses=crosses||(neighborDensity>=CM12_LIQUID_ISOVALUE)!=ownWet;
+        sideHasSurfaceFluid=sideHasSurfaceFluid
+          ||neighborDensity>p.activityDensity.y;
+        let crossesIsovalue=(neighborDensity>=CM12_LIQUID_ISOVALUE)!=ownWet;
+        // A small submerged oscillation around rho=.5 is not an interface.
+        // Require the crossing to reach the configured air band; diffuse
+        // interfaces that do not cross .5 are caught by surfaceAirSides.
+        crosses=crosses||(crossesIsovalue
+          &&min(fill,neighborDensity)<=p.activityDensity.y);
         let neighborVelocityAt=destinationCellVelocity()+4u*neighbor;
         let neighborVelocity=vec3f(state[neighborVelocityAt],
           state[neighborVelocityAt+1u],state[neighborVelocityAt+2u]);
@@ -1559,6 +1572,10 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       if(rho>featureDensity&&!sideHasFluid){
         let side=select(0u,1u,rowPosition[axis]>cellCenter[axis]);
         exposedSides|=1u<<(2u*axis+side);
+      }
+      if(fractionalCell&&!sideHasSurfaceFluid){
+        let side=select(0u,1u,rowPosition[axis]>cellCenter[axis]);
+        surfaceAirSides|=1u<<(2u*axis+side);
       }
       if(crosses){
         interfaceCell=true;
@@ -1575,6 +1592,10 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     var cellIsThinFluid=false;
     for(var axis=0u;axis<3u;axis+=1u){
       let oppositeSides=3u<<(2u*axis);
+      let airFacing=(surfaceAirSides&oppositeSides)!=0u;
+      if(fractionalCell&&airFacing){
+        interfaceCell=true;surfaceAxes|=1u<<axis;
+      }
       cellIsThinFluid=cellIsThinFluid||(fill>featureDensity
         &&representedThickness<p.activityThresholds.w
         &&(exposedSides&oppositeSides)==oppositeSides);
@@ -1630,7 +1651,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   activityDeformation[lane]=deformation;activityPredictedMotion[lane]=predictedMotion;
   activityDetailError[lane]=detailError;
   activityVelocityTravel[lane]=velocityTravel;
-  activitySurfaceAxes[lane]=surfaceAxes|select(0u,8u,surfaceCell)
+  activitySurfaceAxes[lane]=surfaceAxes
     |select(0u,16u,occupiedCell)|select(0u,32u,thinFluidCell)
     |select(0u,64u,cutBoundaryCell);
   activitySupportMask[lane]=supportMask;
@@ -1677,7 +1698,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   // brick. They are residue, not a surface or neighbor-support authority.
   let occupied=densityPresent&&densityMassFineCells>=p.sharpening.w;
   let axes=select(0u,activitySurfaceAxes[0]&7u,occupied);
-  let surface=occupied&&((activitySurfaceAxes[0]&8u)!=0u||axes!=0u);
+  let surface=occupied&&axes!=0u;
   let thinFluid=occupied&&(activitySurfaceAxes[0]&32u)!=0u;
   let shape=select(0.0,1.0,countOneBits(axes)>=2u);
   let velocityActivity=activityVelocityTravel[0];

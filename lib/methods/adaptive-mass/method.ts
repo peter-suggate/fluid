@@ -62,7 +62,7 @@ const params: MethodParamSpec[] = [
     kind: "select",
     key: "selectorMode",
     label: "Adaptive criterion",
-    default: "activity",
+    default: "surface",
     tier: "coarse",
     update: "runtime",
     options: [
@@ -311,7 +311,7 @@ const receiverFloor = (value: unknown): AdaptiveMassSolverOptions["receiverFloor
   value === "1" ? 1 : value === "2" ? 2 : value === "4" ? 4 : value === "8" ? 8 : "auto";
 
 const selectorMode = (value: unknown): "surface" | "activity" =>
-  value === "surface" ? "surface" : "activity";
+  value === "activity" ? "activity" : "surface";
 
 const activityPolicy = (values: MethodParamValues): SparseCM12ActivityPolicy =>
   sparseCM12ActivityPolicy({
@@ -402,7 +402,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       SPARSE_CM12_ACTIVITY_POLICY;
     return {
       resolutionMode: "adaptive",
-      selectorMode: "activity",
+      selectorMode: "surface",
       receiverFloor: "auto",
       surfaceFineRings: 1,
       receiverSupportRings: 9,

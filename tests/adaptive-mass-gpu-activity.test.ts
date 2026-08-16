@@ -357,6 +357,22 @@ test("GPU selector keeps free surfaces fine and deep translating bulk coarse in 
   assert.match(measurement,
     /representedThickness<p\.activityThresholds\.w\s*&&\(exposedSides&oppositeSides\)==oppositeSides/,
     "a sub-two-cell slab needs exposed support on both sides of an axis");
+  assert.match(measurement, /var interfaceCell=false/,
+    "fractional submerged density must not become surface evidence by itself");
+  assert.doesNotMatch(measurement, /surfaceCell=surfaceCell\|\|interfaceCell/,
+    "wall-conditioned bulk density must not pin bottom bricks at the surface rung");
+  assert.match(measurement,
+    /if\(fractionalCell&&airFacing\)\{\s*interfaceCell=true;surfaceAxes\|=1u<<axis/,
+    "a diffuse fractional interface must retain an interior air-facing side");
+  assert.match(measurement,
+    /sideHasSurfaceFluid=sideHasSurfaceFluid\s*\|\|neighborDensity>p\.activityDensity\.y/,
+    "diffuse surface exposure must ignore sub-threshold transported mist");
+  assert.match(measurement,
+    /crossesIsovalue[\s\S]*?min\(fill,neighborDensity\)<=p\.activityDensity\.y/,
+    "a submerged oscillation around the isovalue must not become a surface crossing");
+  assert.match(measurement,
+    /if\(crosses\)\{\s*interfaceCell=true;\s*surfaceAxes\|=1u<<rowAxis\(row\)/,
+    "surface evidence must come from an accepted liquid-air crossing");
   assert.match(measurement, /if\(thinFluid\)\{reasons\|=256u;\}/,
     "thin fluid must remain independently visible in policy diagnostics");
   assert.match(measurement,
@@ -493,7 +509,8 @@ test("Sparse CM12 exposes normalized structural and live candidate policy contro
   assert.equal(options.activityPolicy?.activitySignals, true);
   assert.equal(options.activityPolicy?.prepareBricksPerFrame, 11);
   const defaults = adaptiveMassSolverOptions({}).activityPolicy;
-  assert.equal(defaults?.activitySignals, true);
+  assert.equal(defaults?.activitySignals, false,
+    "Surface distance must be the default adaptive criterion");
   assert.equal(defaults?.residencyDensity, 0.005,
     "the default region cutoff must reject settled dilute residue");
   assert.equal(defaults?.residencyMassFineCells, 1,

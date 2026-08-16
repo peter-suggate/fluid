@@ -66,6 +66,16 @@ The surface floor wins over the velocity floor. In default `Surface distance`
 mode, velocity, deformation, temporal change, and restriction detail do not
 affect resolution.
 
+A fractional density is not surface evidence on its own. Conservative
+transport and wall conditioning can leave a fully submerged cell between the
+density clamps after a dam break has settled. The surface floor therefore
+requires either an air-supported accepted incidence crossing or a fractional
+cell with an interior air-facing side (including internal sparse air); closed
+domain faces are excluded. A submerged numerical oscillation across `rho =
+0.5` is not a surface unless one endpoint reaches the configured air band. The
+separate thin-feature predicate continues to protect represented sheets that
+never cross `rho = 0.5`.
+
 Thin represented liquid is also a hard `8^3` floor, even when dilution makes
 it too faint to cross the `rho = 0.5` surface. For each occupied composite leaf,
 classification records the exposed positive and negative sides supplied by
