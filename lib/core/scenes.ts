@@ -84,9 +84,8 @@ export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze(
   quality: "balanced",
   overrides: Object.freeze({
     resolutionMode: "adaptive",
-    // The long dam is the scale showcase, so preserve the authored graded
-    // surface until measured motion or shape complexity earns refinement.
-    selectorMode: "activity",
+    // These thresholds remain the long-dam activity tuning when that optional
+    // criterion is selected; the product default stays Surface distance.
     finestTravelCells: 4,
     fourTravelCells: 2,
     twoTravelCells: 1,

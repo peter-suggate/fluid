@@ -951,7 +951,8 @@ test("canonical Sparse CM12 dam defines a tall sparse 192x96x32 traversal", () =
   assert.deepEqual(sceneLatticeDimensions(scene), [192, 96, 32]);
   assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.methodId, "adaptive-mass");
   assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.timeStep, "paper");
-  assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.selectorMode, "activity");
+  assert.equal(SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.selectorMode, undefined,
+    "scene profiles must not override the product's Surface distance default");
   assert.deepEqual([
     SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.finestTravelCells,
     SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides?.fourTravelCells,
