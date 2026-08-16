@@ -66,15 +66,15 @@ fn acceptedRow(invocation:u32)->u32{
   let base=worklistBase();let offset=ta(base+16u+acceptedSlot());
   return ta(base+offset+invocation);
 }
-fn cellBase(id:u32)->u32{return ta(6u)+16u*id;}
-fn rowBase(id:u32)->u32{return ta(7u)+12u*id;}
+fn cellBase(id:u32)->u32{return ta(6u)+8u*id;}
+fn rowWord(id:u32,plane:u32)->u32{return ta(7u)+plane*ta(3u)+id;}
 fn cellCenter(id:u32)->vec3f{let b=cellBase(id);return vec3f(taf(b),taf(b+1u),taf(b+2u));}
 fn cellWidths(id:u32)->vec3f{let b=cellBase(id);return vec3f(taf(b+4u),taf(b+5u),taf(b+6u));}
 fn cellVolume(id:u32)->f32{return taf(cellBase(id)+3u);}
-fn rowCenter(id:u32)->vec3f{let b=rowBase(id);return vec3f(taf(b+8u),taf(b+9u),taf(b+10u));}
-fn rowAxis(id:u32)->u32{return ta(rowBase(id)+2u);}
-fn rowArea(id:u32)->f32{return taf(rowBase(id)+5u);}
-fn rowDistance(id:u32)->f32{return taf(rowBase(id)+6u);}
+fn rowCenter(id:u32)->vec3f{return vec3f(taf(rowWord(id,6u)),taf(rowWord(id,7u)),taf(rowWord(id,8u)));}
+fn rowAxis(id:u32)->u32{return ta(rowWord(id,1u))>>30u;}
+fn rowArea(id:u32)->f32{return taf(rowWord(id,3u));}
+fn rowDistance(id:u32)->f32{return taf(rowWord(id,4u));}
 fn destinationDensity()->u32{return select(p.stateOffsets0.y,p.stateOffsets0.x,p.frame.w>0.5);}
 fn destinationCellVelocity()->u32{return select(p.stateOffsets1.y,p.stateOffsets1.x,p.frame.w>0.5);}
 
@@ -151,9 +151,9 @@ fn voxelizeRows(@builtin(global_invocation_id)gid:vec3u){
   if(owner!=INVALID&&faceSolid<=0.0){
     velocity=rigidVelocity(bodies[owner],worldPoint(center))[axis]/p.frame.y;
   }else if(faceSolid>0.0){velocity/=faceSolid;}
-  let out=p.solidOffsets.y+4u*row;
+  let out=p.solidOffsets.y+3u*row;
   state[out]=1.0-faceSolid;state[out+1u]=velocity;
-  state[out+2u]=0.0;state[out+3u]=1.0-dualSolid;
+  state[out+2u]=1.0-dualSolid;
 }
 
 @compute @workgroup_size(${WORKGROUP_SIZE})

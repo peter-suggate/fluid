@@ -42,6 +42,15 @@ export interface AdaptiveMassSolverOptions {
   readonly pressureIterations?: number;
   /** Relative L2 residual that stops further PCG arithmetic; zero runs the full budget. */
   readonly pressureRelativeTolerance?: number;
+  /**
+   * Reserve the pressure journal, so the pressure lab can capture a solve.
+   *
+   * A construction-time capability rather than a runtime toggle: the journal is
+   * a tail range of the resident state buffer, whose size is fixed when the
+   * solver is built. Off by default because the snapshot region scales with the
+   * cell count, and a lane that never opens the lab must not pay for it.
+   */
+  readonly pressureJournal?: boolean;
 }
 
 const params: MethodParamSpec[] = [
@@ -164,6 +173,23 @@ const params: MethodParamSpec[] = [
     digits: 0,
     update: "runtime",
     hint: "How many forward-Euler substeps the trace may spend. Each is half a cell, so the reach is whichever of D and half the substep count is smaller — at the default 7 the substeps are not the binding constraint anywhere in the paper's D range, and lowering them deliberately shortens the trace along a curving gradient.",
+  },
+  {
+    kind: "select",
+    key: "pressureJournal",
+    label: "Pressure film capture",
+    default: "off",
+    tier: "fine",
+    options: [
+      { value: "off", label: "Off" },
+      { value: "on", label: "On · reserve the film" },
+    ],
+    // Structural, deliberately: the reservation is a region of the state buffer
+    // and it is not small, so it cannot appear and disappear under a live
+    // solver. Turning it on rebuilds once, which is the honest price of a
+    // capture that is otherwise free — an armed frame is the only frame that
+    // encodes a snapshot dispatch, and an unarmed one costs literally nothing.
+    hint: "Reserves room to film one pressure solve, so the Pressure lab views can replay its iterations. About 192 bytes per pressure cell — a few megabytes on the mini scenes and hundreds on a large one — which is why it is off unless asked for. Reserving is not capturing: the snapshots are only written on frames a Pressure lab view is open, and the reservation alone changes no dispatch.",
   },
   {
     kind: "number", key: "finestTravelCells", label: "8³ surface travel",
@@ -336,6 +362,10 @@ export function adaptiveMassSolverOptions(
       sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
     sharpeningDistance: sparseCM12SharpeningDistance(values.sharpeningDistance),
     sharpeningTraceSteps: sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps),
+    // Capability, not a tuning knob: it only reserves the journal region so a
+    // later frame can be armed. Off by default, so a solver that never asked
+    // for the film pays nothing — not a float of state, not a dispatch.
+    pressureJournal: values.pressureJournal === true || values.pressureJournal === "on",
   };
 }
 
@@ -372,7 +402,13 @@ export const adaptiveMassMethod: SimulationMethod = {
   // crossing between an empty and non-empty roster rebuilds once.
   capabilities: { volumeRendering: true },
   supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure",
-    "tracers", "face-velocity"],
+    "tracers", "face-velocity",
+    // Listed unconditionally rather than gated on the reservation: a view that
+    // vanished from the picker would be indistinguishable from one that does
+    // not exist, and the reason it is empty — the film was never reserved — is
+    // exactly what the reader needs told.
+    "pressure-journal-residual", "pressure-journal-pressure",
+    "pressure-journal-preconditioned", "pressure-journal-direction"],
   params,
   runtimeParamKeys: ADAPTIVE_MASS_RUNTIME_PARAM_KEYS,
   pipelineGraph: async () => ADAPTIVE_MASS_FLUID_PIPELINE,

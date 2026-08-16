@@ -407,6 +407,19 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readTracers() { return this.resident.readTracers(); }
   /** Face velocities and the row records that place them; no enable needed. */
   get faceVelocitySource() { return this.resident.faceVelocitySource; }
+  /**
+   * The pressure lab's capture controls.
+   *
+   * Present only when the solver was built with `pressureJournal`, because the
+   * journal is a construction-time reservation; `armPressureJournal` returning
+   * false is how a panel learns it is looking at a solver that cannot film.
+   */
+  get pressureJournalSource() { return this.resident.pressureJournalSource; }
+  get pressureJournalLayout() { return this.resident.pressureJournalLayout; }
+  get pressureJournalArmed() { return this.resident.pressureJournalArmed; }
+  armPressureJournal(armed: boolean) { return this.resident.armPressureJournal(armed); }
+  /** Header and iteration records of the last captured solve; maps a buffer. */
+  readPressureJournal() { return this.resident.readPressureJournal(); }
   get globalFineLevelSetSource() { return this.resident.globalFineLevelSetSource; }
 
   private atlas: SparseAdaptiveMassAtlas;
@@ -628,6 +641,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               worldDimensions_m: [scene.container.width_m, scene.container.height_m,
                 scene.container.depth_m],
             } : undefined,
+            // Sized from the iteration ceiling this solver was built with, so
+            // the journal can hold the longest solve it will ever encode.
+            options.pressureJournal
+              ? { iterationCapacity: sparseCM12PressureIterations(
+                options.pressureIterations) }
+              : undefined,
           );
         },
       }, {

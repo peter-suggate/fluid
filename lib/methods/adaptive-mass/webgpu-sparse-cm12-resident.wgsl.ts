@@ -14,13 +14,22 @@ ${createCm12NumericsWGSL()}
 const INVALID:u32=0xffffffffu;
 const WORKGROUP:u32=64u;
 const ACTIVITY_HEADER_WORDS:u32=28u;
-const ACTIVITY_RECORD_WORDS:u32=40u;
+const ACTIVITY_RECORD_WORDS:u32=39u;
 const ACTIVITY_RECOVERY_LOCK:u32=0x80000000u;
 const ACCEPTED_COARSE_ROW_COUNT:u32=22u;
 const ACCEPTED_MIXED_ROW_COUNT:u32=23u;
 const PRESSURE_ACTIVE_ROW_COUNT:u32=24u;
 const CANDIDATE_CELLS_PER_BRICK:u32=512u;
+const CANDIDATE_FACE_SAMPLES_PER_SIDE:u32=64u;
 const ACTIVITY_FIXED:f32=65536.0;
+
+// Pressure-journal region, a tail range of state past every physics field.
+// It lives there rather than in a buffer of its own because the compute bind
+// group is already at the device's ten-storage-buffer ceiling — the same
+// reason the tracer lattice sits past the physics fields.
+const JOURNAL_HEADER_FLOATS:u32=8u;
+const JOURNAL_ITERATION_FLOATS:u32=16u;
+const JOURNAL_FIELD_COUNT:u32=4u;
 
 struct Params {
   counts:vec4u,             // cell, row, incidence, dense
@@ -50,6 +59,7 @@ struct Params {
   rigidWorld:vec4f,         // world metres and rigid-body count
   tracerGrid:vec4u,         // tracer lattice dimensions, tracer count
   tracerOrigin:vec4f,       // lattice origin in fine cells, isotropic spacing
+  journal:vec4u,            // pressure journal base, iteration/snapshot capacity, cell stride
 }
 
 @group(0)@binding(0)var<uniform>p:Params;
@@ -112,6 +122,9 @@ fn pressureRowInvocation(invocation:u32)->u32{
   return fineSamples[pressureRowHeader()+4u+invocation];
 }
 fn pressureNeighborOffset()->u32{return pressureRowHeader()+4u+p.counts.y;}
+fn pressureExtrapolationWeightOffset()->u32{
+  return pressureNeighborOffset()+pressureEdgeCount();
+}
 fn acceptedTemplateRowInvocation(invocation:u32)->u32{
   if(invocation>=acceptedTemplateRowCount()){return INVALID;}
   let base=topologyWorklistBase();
@@ -126,6 +139,8 @@ fn pressureTemplateWord(index:u32)->u32{return fineMetadata[index];}
 fn pressureEdgeCount()->u32{
   return pressureTemplateWord(pressureTemplateWord(15u)+p.counts.x);
 }
+fn pressureEdgeRows()->u32{return pressureTemplateWord(15u)+p.counts.x+1u;}
+fn pressureEdgeWeights()->u32{return pressureEdgeRows()+pressureEdgeCount();}
 fn brickAggregateTopology()->u32{return pressureTemplateWord(14u);}
 fn brickAggregateEdgeCount()->u32{
   return pressureTemplateWord(brickAggregateTopology()+1u);
@@ -135,6 +150,13 @@ fn brickAggregateRhsOffset()->u32{return pressureEdgeCount()+brickAggregateEdgeC
 fn brickAggregateDiagonalOffset()->u32{return brickAggregateRhsOffset()+p.dispatch.w;}
 fn brickAggregateAOffset()->u32{return brickAggregateRhsOffset()+2u*p.dispatch.w;}
 fn brickAggregateBOffset()->u32{return brickAggregateRhsOffset()+3u*p.dispatch.w;}
+fn brickAggregateRangeOffset()->u32{return brickAggregateRhsOffset()+4u*p.dispatch.w;}
+fn cachedPressureBrickRange(brick:u32)->vec2u{
+  let packed=bitcast<u32>(candidateState[brickAggregateRangeOffset()+brick]);
+  if(packed==0u){return vec2u(0u);}
+  let level=(packed&7u)-1u;
+  return vec2u((packed>>3u)-1u,1u<<(3u*level));
+}
 fn pressureHierarchyTopology()->u32{return pressureTemplateWord(13u);}
 fn pressureHierarchyDescriptor(level:u32)->u32{
   return pressureHierarchyTopology()+1u+10u*level;
@@ -149,7 +171,7 @@ fn pressureHierarchyEdgeCount(level:u32)->u32{
   return pressureTemplateWord(offsets+pressureHierarchyGroupCount(level));
 }
 fn pressureHierarchyDynamicBase(level:u32)->u32{
-  return brickAggregateBOffset()+p.dispatch.w
+  return brickAggregateRangeOffset()+p.dispatch.w
     +pressureTemplateWord(pressureHierarchyDescriptor(level)+9u);
 }
 fn pressureHierarchyEdgeWeightOffset(level:u32)->u32{
@@ -166,6 +188,10 @@ fn pressureHierarchyAOffset(level:u32)->u32{
 }
 fn pressureHierarchyBOffset(level:u32)->u32{
   return pressureHierarchyDiagonalOffset(level)+3u*pressureHierarchyGroupCount(level);
+}
+fn pressureDensityCacheOffset()->u32{
+  let last=pressureHierarchyLevelCount()-1u;
+  return pressureHierarchyBOffset(last)+pressureHierarchyGroupCount(last);
 }
 fn pressureHierarchyGroupAddress(linear:u32)->vec2u{
   var remainder=linear;
@@ -219,48 +245,74 @@ fn hasRigidBodies()->bool{return p.rigidWorld.w>=0.5;}
 fn pressureRelativeTolerance()->f32{return bitcast<f32>(p.topologyScheduling.y);}
 fn pipelinedPressureActive()->bool{return scalars[5]>0.5&&scalars[14]<0.5;}
 
-fn cellBase(id:u32)->u32{return ta(6u)+id*16u;}
-fn cellBrick(id:u32)->u32{return ta(cellBase(id)+11u);}
+// True only on the pipeline variant the host encodes at a snapshot iteration.
+// A dispatch cannot be told which iteration it is — the uniform is written once
+// per frame and WebGPU has no push constant — so "is this a snapshot" is a
+// pipeline property and "which snapshot" is a device-side cursor.
+override JOURNAL_SNAPSHOT:bool=false;
+fn journalBase()->u32{return p.journal.x;}
+fn journalIterationCapacity()->u32{return p.journal.y;}
+fn journalSnapshotCapacity()->u32{return p.journal.z;}
+fn journalCellStride()->u32{return p.journal.w;}
+fn journalArmed()->bool{return p.journal.x!=0u&&p.journal.y!=0u&&p.journal.w!=0u;}
+fn journalSnapshotField(slot:u32,field:u32)->u32{
+  return journalBase()+JOURNAL_HEADER_FLOATS
+    +journalIterationCapacity()*JOURNAL_ITERATION_FLOATS
+    +(slot*JOURNAL_FIELD_COUNT+field)*journalCellStride();
+}
+
+fn cellBase(id:u32)->u32{return ta(6u)+id*8u;}
+fn cellMetadata(id:u32)->u32{return ta(cellBase(id)+7u);}
+fn cellBrick(id:u32)->u32{return cellMetadata(id)>>4u;}
+fn cellResolution(id:u32)->u32{return cellMetadata(id)&15u;}
 fn cellVolume(id:u32)->f32{return taf(cellBase(id)+3u);}
 fn cellOpenFraction(id:u32)->f32{
-  if(!hasRigidBodies()){return taf(cellBase(id)+12u);}
-  return taf(cellBase(id)+12u)*state[p.solidOffsets.x+id];
+  if(!hasRigidBodies()){return 1.0;}
+  return state[p.solidOffsets.x+id];
 }
 fn cellOpenVolume(id:u32)->f32{
-  if(!hasRigidBodies()){return taf(cellBase(id)+13u);}
-  return taf(cellBase(id)+13u)*state[p.solidOffsets.x+id];
+  if(!hasRigidBodies()){return cellVolume(id);}
+  return cellVolume(id)*state[p.solidOffsets.x+id];
 }
-fn cellSeparatingMinimum(id:u32)->bool{return ta(cellBase(id)+14u)!=0u;}
+fn cellSeparatingMinimum(id:u32)->bool{return false;}
 fn cellMinimumWidth(id:u32)->f32{
   let b=cellBase(id);return min(taf(b+4u),min(taf(b+5u),taf(b+6u)));
 }
-fn rowBase(id:u32)->u32{return ta(7u)+id*12u;}
-fn rowTermOffset(id:u32)->u32{return ta(rowBase(id));}
-fn rowTermCount(id:u32)->u32{return ta(rowBase(id)+1u);}
-fn rowAxis(id:u32)->u32{return ta(rowBase(id)+2u);}
-fn rowKind(id:u32)->u32{return ta(rowBase(id)+3u);}
-fn rowStaticDualWeight(id:u32)->f32{return taf(rowBase(id)+4u);}
+fn cellMinimum(id:u32)->vec3u{
+  let b=cellBase(id);let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
+  let widths=vec3f(taf(b+4u),taf(b+5u),taf(b+6u));
+  return vec3u(center-0.5*widths);
+}
+fn rowWord(id:u32,plane:u32)->u32{return ta(7u)+plane*ta(3u)+id;}
+fn rowPackedTerms(id:u32)->u32{return ta(rowWord(id,0u));}
+fn rowPackedMetadata(id:u32)->u32{return ta(rowWord(id,1u));}
+fn rowTermOffset(id:u32)->u32{return rowPackedTerms(id)&0x0fffffffu;}
+fn rowTermCount(id:u32)->u32{return rowPackedTerms(id)>>28u;}
+fn rowAxis(id:u32)->u32{return rowPackedMetadata(id)>>30u;}
+fn rowKind(id:u32)->u32{return (rowPackedMetadata(id)>>28u)&3u;}
+fn rowRequirementOffset(id:u32)->u32{return rowPackedMetadata(id)&0x0fffffffu;}
+fn rowStaticDualWeight(id:u32)->f32{return taf(rowWord(id,2u));}
 fn rowOpenFraction(id:u32)->f32{
-  if(!hasRigidBodies()){return 1.0;}return state[p.solidOffsets.y+4u*id];
+  if(!hasRigidBodies()){return 1.0;}return state[p.solidOffsets.y+3u*id];
 }
 fn rowSolidVelocity(id:u32)->f32{
-  if(!hasRigidBodies()){return 0.0;}return state[p.solidOffsets.y+4u*id+1u];
+  if(!hasRigidBodies()){return 0.0;}return state[p.solidOffsets.y+3u*id+1u];
 }
 fn rowPressureOpenFraction(id:u32)->f32{
-  if(!hasRigidBodies()){return 1.0;}return state[p.solidOffsets.y+4u*id+3u];
+  if(!hasRigidBodies()){return 1.0;}return state[p.solidOffsets.y+3u*id+2u];
 }
 fn rowDualWeight(id:u32)->f32{
   if(!hasRigidBodies()){return rowStaticDualWeight(id);}
   return rowStaticDualWeight(id)*rowPressureOpenFraction(id);
 }
-fn rowStaticArea(id:u32)->f32{return taf(rowBase(id)+5u);}
+fn rowStaticArea(id:u32)->f32{return taf(rowWord(id,3u));}
 fn rowArea(id:u32)->f32{
   if(!hasRigidBodies()){return rowStaticArea(id);}
   return rowStaticArea(id)*rowOpenFraction(id);
 }
-fn rowDistance(id:u32)->f32{return taf(rowBase(id)+6u);}
-fn rowExteriorPhi(id:u32)->f32{return taf(rowBase(id)+7u);}
-fn rowCenter(id:u32)->vec3f{let b=rowBase(id);return vec3f(taf(b+8u),taf(b+9u),taf(b+10u));}
+fn rowDistance(id:u32)->f32{return taf(rowWord(id,4u));}
+fn rowExteriorPhi(id:u32)->f32{return taf(rowWord(id,5u));}
+fn rowCenter(id:u32)->vec3f{return vec3f(taf(rowWord(id,6u)),taf(rowWord(id,7u)),taf(rowWord(id,8u)));}
 fn termCell(index:u32)->u32{return ta(ta(8u)+2u*index);}
 fn termCoefficient(index:u32)->f32{return taf(ta(8u)+2u*index+1u);}
 fn incidenceBegin(cell:u32)->u32{return ta(ta(9u)+cell);}
@@ -282,10 +334,10 @@ fn acceptedBrickResolution(brick:u32)->u32{
   return atomicLoad(&activity[activityRecord(brick)+12u]);
 }
 fn brickSpan(brick:u32)->u32{
-  return 1u<<(topology[p.topologyOffsets2.z+4u*brick+2u]&31u);
+  return 1u<<(topology[p.topologyOffsets2.z+2u*brick]&31u);
 }
 fn brickPackedCandidateSlot(brick:u32)->u32{
-  let encoded=topology[p.topologyOffsets2.z+4u*brick+2u]>>5u;
+  let encoded=topology[p.topologyOffsets2.z+2u*brick]>>5u;
   return select(INVALID,encoded-1u,encoded!=0u);
 }
 fn brickCandidateSlot(brick:u32)->u32{
@@ -304,12 +356,13 @@ fn brickActive(brick:u32)->bool{
 }
 fn cellActive(cell:u32)->bool{
   let brick=cellBrick(cell);
-  return brickActive(brick)&&ta(cellBase(cell)+10u)==acceptedBrickResolution(brick);
+  return brickActive(brick)&&cellResolution(cell)==acceptedBrickResolution(brick);
 }
 fn rowAccepted(row:u32)->bool{
-  let requirements=ta(rowBase(row)+11u);let count=ta(requirements);
-  for(var at=0u;at<count;at+=1u){let brick=ta(requirements+1u+2u*at);
-    if(!brickActive(brick)||acceptedBrickResolution(brick)!=ta(requirements+2u+2u*at)){
+  let requirements=rowRequirementOffset(row);let count=ta(requirements);
+  for(var at=0u;at<count;at+=1u){let metadata=ta(requirements+1u+at);
+    let brick=metadata>>4u;let resolution=metadata&15u;
+    if(!brickActive(brick)||acceptedBrickResolution(brick)!=resolution){
       return false;
     }
   }
@@ -321,7 +374,7 @@ fn cellTransportActive(cell:u32)->bool{return cellActive(cell)&&cellOpenVolume(c
 // an uncovered cell re-enters transport with the same mass instead of making
 // water disappear inside a moving solid.
 fn dynamicallyCoveredCell(cell:u32)->bool{
-  return hasRigidBodies()&&cellActive(cell)&&taf(cellBase(cell)+13u)>1e-8
+  return hasRigidBodies()&&cellActive(cell)&&cellVolume(cell)>1e-8
     &&state[p.solidOffsets.x+cell]<=1e-8;
 }
 // The host clears the complete template field before preparePressure marks the
@@ -361,7 +414,7 @@ fn brickDirectoryLookup(key:u32)->u32{
   let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
   let remainder=key-z*xy;let y=remainder/brickDimensions.x;
   let coordinate=vec3u(remainder-y*brickDimensions.x,y,z);
-  let tableCapacity=(p.topologyOffsets2.z-p.topologyOffsets2.y)/2u;
+  let tableCapacity=p.topologyOffsets2.z-p.topologyOffsets2.y;
   let tableMask=tableCapacity-1u;
   let maximumSpanLog=topology[p.topologyOffsets2.w+1u]&31u;
   for(var spanLog=0u;spanLog<=maximumSpanLog;spanLog+=1u){
@@ -369,9 +422,9 @@ fn brickDirectoryLookup(key:u32)->u32{
     let originKey=origin.x+brickDimensions.x*(origin.y+brickDimensions.y*origin.z);
     var slot=(originKey*0x9e3779b1u)&tableMask;
     for(var probe=0u;probe<tableCapacity;probe+=1u){
-      let at=p.topologyOffsets2.y+2u*slot;let candidateKey=topology[at];
-      if(candidateKey==INVALID){break;}
-      if(candidateKey==originKey){let brick=topology[at+1u];
+      let brick=topology[p.topologyOffsets2.y+slot];if(brick==INVALID){break;}
+      let candidateKey=topology[p.topologyOffsets2.z+2u*brick+1u];
+      if(candidateKey==originKey){
         if(brick<p.dispatch.w&&brickSpan(brick)==span){return brick;}break;}
       slot=(slot+1u)&tableMask;
     }
@@ -408,13 +461,14 @@ fn ownerCellAt(q:vec3i)->u32{
   // compactOwnerCellAt already resolved the accepted brick and rung. Avoid
   // reloading the cell's brick, active bit, and accepted resolution inside
   // cellTransportActive: this helper sits under every characteristic corner.
-  let available=ta(cellBase(owner.x)+10u)==owner.z&&cellOpenVolume(owner.x)>1e-8;
+  let available=cellResolution(owner.x)==owner.z&&cellOpenVolume(owner.x)>1e-8;
   return select(INVALID,owner.x,available);
 }
 
 fn presentationOwnerCellAt(q:vec3i)->u32{
   let owner=compactOwnerCellAt(q);if(owner.x==INVALID){return INVALID;}
-  return select(INVALID,owner.x,state[p.stateOffsets4.z+owner.y]>0.5);
+  return select(INVALID,owner.x,
+    (atomicLoad(&activity[activityRecord(owner.y)+1u])&64u)!=0u);
 }
 
 fn presentationPhi(cell:u32)->f32{
@@ -431,7 +485,8 @@ fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
   // of repeating the same hash-table lookup for every finest child. Only a
   // genuinely finer owner needs the volume restriction below.
   let owner=compactOwnerCellAt(lower);
-  if(owner.x!=INVALID&&state[p.stateOffsets4.z+owner.y]>0.5){
+  if(owner.x!=INVALID
+    &&(atomicLoad(&activity[activityRecord(owner.y)+1u])&64u)!=0u){
     let ownerScale=8u*brickSpan(owner.y)/owner.z;
     if(ownerScale>=u32(cellScale)){
       return state[destinationDensity()+owner.x]
@@ -485,25 +540,11 @@ fn traceCharacteristic(position:vec3f,direction:f32)->vec3f{
 fn traceDeparture(position:vec3f)->vec3f{return traceCharacteristic(position,-1.0);}
 fn traceArrival(position:vec3f)->vec3f{return traceCharacteristic(position,1.0);}
 
-struct TransportTerm{cell:u32,weight:f32}
 struct TransportStencil{cells:array<u32,8>,weights:array<f32,8>}
-fn transportTerm(position:vec3f,corner:u32)->TransportTerm{
-  let probe=ownerCellAt(vec3i(floor(clamp(position,vec3f(0.0),
-    vec3f(p.dimensions.xyz)-vec3f(1e-4)))));
-  var spans=vec3f(1.0);if(probe!=INVALID){let b=cellBase(probe);spans=vec3f(taf(b+4u),taf(b+5u),taf(b+6u));}
-  let shifted=position/spans-vec3f(0.5);let lower=vec3i(floor(shifted));let fraction=fract(shifted);
-  let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
-  let lattice=spans*(vec3f(lower+offset)+vec3f(0.5));
-  let cell=ownerCellAt(vec3i(floor(lattice)));
-  let weight=select(1.0-fraction.x,fraction.x,offset.x==1)
-    *select(1.0-fraction.y,fraction.y,offset.y==1)
-    *select(1.0-fraction.z,fraction.z,offset.z==1);
-  return TransportTerm(cell,select(0.0,weight,cell!=INVALID));
-}
 
 // Sharpening samples every corner of the same adaptive trilinear stencil.
 // Compute its invariant probe and lattice coordinates once while retaining the
-// exact corner order and weight expression used by transportTerm.
+// exact corner order and weight expression used by transport.
 fn transportStencil(position:vec3f)->TransportStencil{
   let probe=ownerCellAt(vec3i(floor(clamp(position,vec3f(0.0),
     vec3f(p.dimensions.xyz)-vec3f(1e-4)))));
@@ -539,14 +580,14 @@ fn extrapolateTransportVelocity(id:u32,inputOffset:u32,outputOffset:u32){
     state[output+2u]=state[input+2u];state[output+3u]=1.0;return;
   }
   var velocity=vec3f(0.0);var weight=0.0;
-  for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
-    let row=incidenceRow(at);if(!rowAccepted(row)){continue;}
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-    for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
-      if(neighbor==id||!cellActive(neighbor)){continue;}let source=inputOffset+4u*neighbor;
-      if(state[source+3u]<=0.5){continue;}let w=abs(termCoefficient(term));
-      velocity+=w*vec3f(state[source],state[source+1u],state[source+2u]);weight+=w;
-    }
+  let edgeOffsets=pressureTemplateWord(15u);
+  let end=pressureTemplateWord(edgeOffsets+id+1u);
+  for(var edge=pressureTemplateWord(edgeOffsets+id);edge<end;edge+=1u){
+    let row=pressureTemplateWord(pressureEdgeRows()+edge);if(!rowAccepted(row)){continue;}
+    let neighbor=fineSamples[pressureNeighborOffset()+edge];
+    let source=inputOffset+4u*neighbor;if(state[source+3u]<=0.5){continue;}
+    let w=bitcast<f32>(fineSamples[pressureExtrapolationWeightOffset()+edge]);
+    velocity+=w*vec3f(state[source],state[source+1u],state[source+2u]);weight+=w;
   }
   if(weight>0.0){velocity/=weight;}
   state[output]=velocity.x;state[output+1u]=velocity.y;state[output+2u]=velocity.z;
@@ -590,6 +631,7 @@ fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
     touchesExtendedVelocity=touchesExtendedVelocity
       ||state[destinationCellVelocity()+4u*cell+3u]>0.5;
     touchesLiquid=touchesLiquid||rho>CM12_LIQUID_ISOVALUE;
+    if(touchesExtendedVelocity&&touchesLiquid){break;}
   }
   // Dry receiver rows still carry the extrapolated velocity band. The next
   // characteristic needs that velocity before any mass has reached the row;
@@ -628,7 +670,7 @@ fn injectionCoverage(id:u32)->f32{
 // one existing activation path instead of vanishing into an inactive brick.
 fn injectionReachesBrick(brick:u32)->bool{
   if(p.injectionCenter.w==0.0){return false;}
-  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let record=p.topologyOffsets2.z+2u*brick;let key=topology[record+1u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
   let remainder=key-z*xy;let y=remainder/brickDimensions.x;
@@ -1231,7 +1273,8 @@ fn pressureDensity(cell:u32)->f32{
 @compute @workgroup_size(64)
 fn classifyPressureCells(@builtin(global_invocation_id)gid:vec3u){
   let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
-  let rho=pressureDensity(id);let liquid=cellActive(id)&&rho>=CM12_LIQUID_ISOVALUE
+  let rho=pressureDensity(id);candidateState[pressureDensityCacheOffset()+id]=rho;
+  let liquid=cellActive(id)&&rho>=CM12_LIQUID_ISOVALUE
     &&(cellOpenVolume(id)>1e-8||cellSeparatingMinimum(id));
   state[p.stateOffsets2.w+id]=select(0.0,1.0,liquid);
   if(!liquid){
@@ -1251,13 +1294,23 @@ fn stablePressurePrefix(lane:u32,flag:u32)->u32{
   return pressurePrefix[lane]-flag;
 }
 
+// Counting needs a sum, not an exclusive scan. Use a six-barrier tree here;
+// the twelve-barrier stable prefix remains only where compacted order matters.
+fn pressureWorkgroupCount(lane:u32,flag:u32)->u32{
+  pressurePrefix[lane]=flag;workgroupBarrier();var width=32u;loop{
+    if(lane<width){pressurePrefix[lane]+=pressurePrefix[lane+width];}
+    workgroupBarrier();if(width==1u){break;}width/=2u;
+  }
+  return pressurePrefix[0];
+}
+
 @compute @workgroup_size(64)
 fn countPressureCells(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
   let id=acceptedTemplateCellInvocation(gid.x);
   let flag=select(0u,1u,id!=INVALID&&isLiquid(id));
-  let prefix=stablePressurePrefix(lid.x,flag);
-  if(lid.x==63u){atomicStore(&conditioning[4u+wid.x],i32(prefix+flag));}
+  let count=pressureWorkgroupCount(lid.x,flag);
+  if(lid.x==0u){atomicStore(&conditioning[4u+wid.x],i32(count));}
 }
 
 @compute @workgroup_size(1)
@@ -1286,12 +1339,14 @@ fn compactPressureCells(@builtin(global_invocation_id)gid:vec3u,
 @compute @workgroup_size(64)
 fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
+  // Retirement may deactivate a brick after the accepted list was published;
+  // keep this dynamic fence even though physical row topology is immutable.
   if(!rowAccepted(row)){state[p.stateOffsets3.x+row]=0.0;return;}
-  let requirements=ta(rowBase(row)+11u);let requirementCount=ta(requirements);
+  let requirements=rowRequirementOffset(row);let requirementCount=ta(requirements);
   var sameLevel=requirementCount>0u;var allCoarse=requirementCount>0u;
   var firstResolution=0u;
   for(var requirement=0u;requirement<requirementCount;requirement+=1u){
-    let resolution=ta(requirements+2u+2u*requirement);
+    let resolution=ta(requirements+1u+requirement)&15u;
     if(requirement==0u){firstResolution=resolution;}
     else{sameLevel=sameLevel&&resolution==firstResolution;}
     allCoarse=allCoarse&&resolution<8u;
@@ -1303,7 +1358,7 @@ fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
   var liquidCount=0u;var airCount=0u;var liquidPhiSum=0.0;var liquidWeight=0.0;
   var airPhiSum=0.0;var airWeight=0.0;
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);let w=abs(termCoefficient(at));
-    let phi=CM12_LIQUID_ISOVALUE-pressureDensity(cell);
+    let phi=CM12_LIQUID_ISOVALUE-candidateState[pressureDensityCacheOffset()+cell];
     if(isLiquid(cell)){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;}
     else{airCount+=1u;airPhiSum+=w*phi;airWeight+=w;}}
   if(liquidCount==0u){state[p.stateOffsets3.x+row]=0.0;return;}
@@ -1320,9 +1375,9 @@ fn countPressureRows(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);
   let flag=select(0u,1u,row!=INVALID&&state[p.stateOffsets3.x+row]>0.0);
-  let prefix=stablePressurePrefix(lid.x,flag);
-  if(lid.x==63u){let header=pressureRowHeader();
-    atomicStore(&conditioning[header+4u+wid.x],i32(prefix+flag));}
+  let count=pressureWorkgroupCount(lid.x,flag);
+  if(lid.x==0u){let header=pressureRowHeader();
+    atomicStore(&conditioning[header+4u+wid.x],i32(count));}
 }
 
 @compute @workgroup_size(1)
@@ -1359,15 +1414,14 @@ fn compactPressureRows(@builtin(global_invocation_id)gid:vec3u,
 fn bakeEffectivePressureEdges(@builtin(global_invocation_id)gid:vec3u){
   let cell=pressureCellInvocation(gid.x);if(cell==INVALID){return;}
   let edgeOffsets=pressureTemplateWord(15u);
-  let edgeRecords=edgeOffsets+p.counts.x+1u;
   let end=pressureTemplateWord(edgeOffsets+cell+1u);
   for(var edge=pressureTemplateWord(edgeOffsets+cell);edge<end;edge+=1u){
-    let record=edgeRecords+3u*edge;let row=pressureTemplateWord(record);
+    let row=pressureTemplateWord(pressureEdgeRows()+edge);
     let theta=state[p.stateOffsets3.x+row];let other=fineSamples[pressureNeighborOffset()+edge];
     var weight=0.0;
     if(theta>0.0&&isLiquid(other)){
-      weight=bitcast<f32>(pressureTemplateWord(record+2u))/theta;
-      if(hasRigidBodies()){weight*=state[p.solidOffsets.y+4u*row+3u];}
+      weight=bitcast<f32>(pressureTemplateWord(pressureEdgeWeights()+edge))/theta;
+      if(hasRigidBodies()){weight*=state[p.solidOffsets.y+3u*row+2u];}
     }
     candidateState[edge]=weight;
   }
@@ -1381,12 +1435,13 @@ fn bakeEffectivePressureEdges(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn bakeBrickAggregateDiagonal(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
-  let brick=wid.x;var diagonal=0.0;
+  let brick=wid.x;var diagonal=0.0;var wet=0.0;
   if(brick<p.dispatch.w&&brickActive(brick)){
     let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
     let edgeOffsets=pressureTemplateWord(15u);
     for(var local=lid.x;local<range.y;local+=64u){let cell=range.x+local;
       if(!isLiquid(cell)){continue;}
+      wet=1.0;
       diagonal+=state[p.stateOffsets2.z+cell];
       let end=pressureTemplateWord(edgeOffsets+cell+1u);
       for(var edge=pressureTemplateWord(edgeOffsets+cell);edge<end;edge+=1u){
@@ -1395,12 +1450,19 @@ fn bakeBrickAggregateDiagonal(@builtin(local_invocation_id)lid:vec3u,
       }
     }
   }
-  reduceA[lid.x]=diagonal;workgroupBarrier();var width=32u;loop{
-    if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];}
+  reduceA[lid.x]=diagonal;reduceB[lid.x]=wet;workgroupBarrier();var width=32u;loop{
+    if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];
+      reduceB[lid.x]+=reduceB[lid.x+width];}
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
   if(lid.x==0u&&brick<p.dispatch.w){
     candidateState[brickAggregateDiagonalOffset()+brick]=max(reduceA[0],1e-12);
+    var packed=0u;if(reduceB[0]>0.0){
+      let resolution=acceptedBrickResolution(brick);
+      let range=templateBrickCellRange(brick,resolution);
+      packed=((range.x+1u)<<3u)|(templateLevelIndex(resolution)+1u);
+    }
+    candidateState[brickAggregateRangeOffset()+brick]=bitcast<f32>(packed);
   }
 }
 
@@ -1540,8 +1602,8 @@ fn combinePressureHierarchyCorrection(@builtin(global_invocation_id)gid:vec3u){
 fn restrictBrickAggregateResidual(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
   let brick=wid.x;var residual=0.0;
-  if(brick<p.dispatch.w&&brickActive(brick)){
-    let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
+  if(brick<p.dispatch.w){
+    let range=cachedPressureBrickRange(brick);
     for(var local=lid.x;local<range.y;local+=64u){let cell=range.x+local;
       if(isLiquid(cell)){residual+=state[p.stateOffsets3.y+cell];}
     }
@@ -1575,7 +1637,8 @@ fn bakeBrickAggregateEdges(@builtin(global_invocation_id)gid:vec3u){
 fn refineBrickAggregateCorrectionWork(lid:vec3u,wid:vec3u,sourceOffset:u32,
  destinationOffset:u32,weight:f32){
   let brick=wid.x;var offDiagonal=0.0;
-  if(brick<p.dispatch.w&&brickActive(brick)){
+  if(brick<p.dispatch.w&&bitcast<u32>(
+    candidateState[brickAggregateRangeOffset()+brick])!=0u){
     let topologyBase=brickAggregateTopology();let offsets=topologyBase+4u;
     let recordBase=offsets+p.dispatch.w+1u;
     let begin=pressureTemplateWord(offsets+brick);let end=pressureTemplateWord(offsets+brick+1u);
@@ -1673,11 +1736,8 @@ fn initializeBrickAggregateDirection(@builtin(global_invocation_id)gid:vec3u,
 }
 
 fn applyOperator(cell:u32,inputOffset:u32)->f32{
-  if(!isLiquid(cell)){return 0.0;}
   // The pressure epoch has already classified rows and assembled the exact
-  // diagonal.  Physical topology packing expands every off-diagonal
-  // contribution once, so recurring SpMVs no longer reconstruct cell -> incidence
-  // -> row -> term chains or repeatedly rebuild each mixed-port jump.
+  // diagonal. Physical topology packing expands every off-diagonal once.
   let edgeOffsets=pressureTemplateWord(15u);
   var result=state[p.stateOffsets2.z+cell]*state[inputOffset+cell];
   let end=pressureTemplateWord(edgeOffsets+cell+1u);
@@ -1692,7 +1752,8 @@ fn applyOperator(cell:u32,inputOffset:u32)->f32{
 @compute @workgroup_size(64)
 fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
   let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
-  if(!isLiquid(id)){return;}let rho=pressureDensity(id);
+  if(!isLiquid(id)){return;}
+  let rho=candidateState[pressureDensityCacheOffset()+id];
   var rhs=0.0;var diagonal=0.0;
   for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
     let row=incidenceRow(at);let theta=state[p.stateOffsets3.x+row];
@@ -1712,17 +1773,13 @@ fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
 var<workgroup>reduceA:array<f32,64>;
 var<workgroup>reduceB:array<f32,64>;
 var<workgroup>reduceC:array<f32,64>;
-var<workgroup>activityDensitySum:array<i32,64>;
-var<workgroup>activityMomentX:array<i32,64>;
-var<workgroup>activityMomentY:array<i32,64>;
-var<workgroup>activityMomentZ:array<i32,64>;
-var<workgroup>activityDeformation:array<f32,64>;
-var<workgroup>activityPredictedMotion:array<f32,64>;
-var<workgroup>activityDetailError:array<f32,64>;
-var<workgroup>activityVelocityTravel:array<f32,64>;
-var<workgroup>activitySurfaceAxes:array<u32,64>;
-var<workgroup>activitySupportMask:array<u32,64>;
-var<workgroup>activitySweptSupportMask:array<u32,64>;
+// Activity is reduced as one record per lane rather than eleven separate
+// planes. The fixed-density tile loads each accepted cell once for restriction
+// instead of rereading every 2^3 child for all eight comparisons.
+var<workgroup>activityMoments:array<vec4i,64>;
+var<workgroup>activityMetrics:array<vec4f,64>;
+var<workgroup>activityMasks:array<vec2u,64>;
+var<workgroup>activityDensityFixed:array<i32,512>;
 var<workgroup>transferMassBefore:array<f32,64>;
 var<workgroup>transferMassAfter:array<f32,64>;
 var<workgroup>transferGammaDelta:array<f32,64>;
@@ -1749,10 +1806,13 @@ fn reducePair(lane:u32,group:u32,a:f32,b:f32){
 
 @compute @workgroup_size(64)
 fn initializePCG(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let id=pressureCellInvocation(gid.x);var rz=0.0;var rhs2=0.0;
+ @builtin(local_invocation_id)lid:vec3u,
+  @builtin(workgroup_id)wid:vec3u){
+  let id=pressureCellInvocation(gid.x);
+  var rz=0.0;var rhs2=0.0;
   if(id!=INVALID){
-    let image=applyOperator(id,p.stateOffsets2.x);let residual=state[p.stateOffsets2.y+id]-image;
+    let image=applyOperator(id,p.stateOffsets2.x);
+    let residual=state[p.stateOffsets2.y+id]-image;
     let diagonal=state[p.stateOffsets2.z+id];let z=select(0.0,residual/diagonal,diagonal>0.0);
     state[p.stateOffsets3.y+id]=residual;state[p.stateOffsets3.z+id]=z;
     state[p.stateOffsets3.w+id]=z;rz=residual*z;
@@ -1782,11 +1842,15 @@ fn reduceInitialize(@builtin(local_invocation_id)lid:vec3u){
 // scratch whose lifetime ended before pressure; it carries w=A z here.
 @compute @workgroup_size(64)
 fn initializePipelinedImage(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let enabled=scalars[5]>0.5;let cell=pressureCellInvocation(gid.x);var delta=0.0;
+ @builtin(local_invocation_id)lid:vec3u,
+  @builtin(workgroup_id)wid:vec3u){
+  let enabled=scalars[5]>0.5;let cell=pressureCellInvocation(gid.x);
+  var delta=0.0;
   if(enabled&&cell!=INVALID){
-    let z=state[p.stateOffsets3.z+cell];let image=applyOperator(cell,p.stateOffsets3.z);
-    state[p.stateOffsets5.x+cell]=image;state[p.stateOffsets4.x+cell]=image;delta=z*image;
+    let z=state[p.stateOffsets3.z+cell];
+    let image=applyOperator(cell,p.stateOffsets3.z);
+    state[p.stateOffsets5.x+cell]=image;state[p.stateOffsets4.x+cell]=image;
+    delta=z*image;
   }
   reducePair(lid.x,wid.x,delta,0.0);
 }
@@ -1821,12 +1885,14 @@ fn updatePipelinedState(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(64)
 fn applyPipelinedImage(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
+ @builtin(local_invocation_id)lid:vec3u,
+  @builtin(workgroup_id)wid:vec3u){
   let enabled=pipelinedPressureActive();let cell=pressureCellInvocation(gid.x);
   var gamma=0.0;var delta=0.0;var residual2=0.0;
   if(enabled&&cell!=INVALID){
     let residual=state[p.stateOffsets3.y+cell];let z=state[p.stateOffsets3.z+cell];
-    let image=applyOperator(cell,p.stateOffsets3.z);state[p.stateOffsets5.x+cell]=image;
+    let image=applyOperator(cell,p.stateOffsets3.z);
+    state[p.stateOffsets5.x+cell]=image;
     gamma=residual*z;delta=image*z;residual2=residual*residual;
   }
   reduceA[lid.x]=gamma;reduceB[lid.x]=delta;reduceC[lid.x]=residual2;
@@ -1861,14 +1927,88 @@ fn reducePipelinedIteration(@builtin(local_invocation_id)lid:vec3u){
   }
 }
 
+// One journal record per *encoded* iteration.
+//
+// Deliberately ungated: the solve encodes a fixed ceiling and the residual gate
+// zeroes the tail, so a gated kernel would stop recording exactly where the
+// interesting thing — the gate closing — happens. This runs every encoded
+// iteration and stores the gate rather than obeying it, which is what lets the
+// film distinguish "converged at 43" from "ran 128 times".
+//
+// The cursor is the encoded iteration index because this kernel is dispatched
+// exactly once per encoded iteration, in order, on a queue with an implicit
+// barrier between dispatches.
+@compute @workgroup_size(64)
+fn journalIteration(@builtin(local_invocation_id)lid:vec3u){
+  if(lid.x!=0u||!journalArmed()){return;}
+  let base=journalBase();
+  let cursor=u32(max(0.0,state[base]));
+  if(cursor>=journalIterationCapacity()){return;}
+  var snapshot=-1.0;
+  if(JOURNAL_SNAPSHOT){
+    let slot=u32(max(0.0,state[base+1u]));
+    if(slot<journalSnapshotCapacity()){snapshot=f32(slot);state[base+1u]=f32(slot+1u);}
+  }
+  let at=base+JOURNAL_HEADER_FLOATS+cursor*JOURNAL_ITERATION_FLOATS;
+  state[at]=select(0.0,1.0,pipelinedPressureActive());
+  state[at+1u]=scalars[0];
+  state[at+2u]=scalars[2];
+  state[at+3u]=scalars[3];
+  state[at+4u]=scalars[4];
+  state[at+5u]=scalars[1];
+  state[at+6u]=scalars[12];
+  state[at+7u]=scalars[14];
+  state[at+8u]=scalars[10];
+  state[at+9u]=scalars[11];
+  state[at+10u]=scalars[18];
+  state[at+11u]=scalars[13];
+  state[at+12u]=scalars[8];
+  state[at+13u]=scalars[9];
+  state[at+14u]=scalars[16];
+  state[at+15u]=snapshot;
+  state[base]=f32(cursor+1u);
+  state[base+2u]=1.0;
+  state[base+3u]=1.0;
+}
+
+// A whole-field snapshot of the four cell fields the picture is made of.
+//
+// Runs over accepted cells rather than the compacted pressure worklist, so a
+// dry cell inside the topology reads as an explicit zero instead of keeping
+// whatever the previous capture left there. The slot is the snapshot cursor the
+// paired journalIteration dispatch just advanced.
+@compute @workgroup_size(64)
+fn journalSnapshot(@builtin(global_invocation_id)gid:vec3u){
+  if(!journalArmed()){return;}
+  let base=journalBase();
+  let cursorValue=state[base+1u];
+  if(cursorValue<0.5){return;}
+  let slot=u32(cursorValue)-1u;
+  if(slot>=journalSnapshotCapacity()){return;}
+  let cell=acceptedTemplateCellInvocation(gid.x);
+  if(cell==INVALID||cell>=journalCellStride()){return;}
+  let live=isLiquid(cell);
+  state[journalSnapshotField(slot,0u)+cell]=
+    select(0.0,state[p.stateOffsets2.x+cell],live);
+  state[journalSnapshotField(slot,1u)+cell]=
+    select(0.0,state[p.stateOffsets3.y+cell],live);
+  state[journalSnapshotField(slot,2u)+cell]=
+    select(0.0,state[p.stateOffsets3.z+cell],live);
+  state[journalSnapshotField(slot,3u)+cell]=
+    select(0.0,state[p.stateOffsets3.w+cell],live);
+}
+
 @compute @workgroup_size(64)
 fn applyPipelinedRecovery(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
+ @builtin(local_invocation_id)lid:vec3u,
+  @builtin(workgroup_id)wid:vec3u){
   let enabled=scalars[5]>0.5&&scalars[14]>0.5;
   let cell=pressureCellInvocation(gid.x);var delta=0.0;
   if(enabled&&cell!=INVALID){
-    let z=state[p.stateOffsets3.z+cell];let image=applyOperator(cell,p.stateOffsets3.z);
-    state[p.stateOffsets5.x+cell]=image;state[p.stateOffsets4.x+cell]=image;delta=z*image;
+    let z=state[p.stateOffsets3.z+cell];
+    let image=applyOperator(cell,p.stateOffsets3.z);
+    state[p.stateOffsets5.x+cell]=image;state[p.stateOffsets4.x+cell]=image;
+    delta=z*image;
   }
   reducePair(lid.x,wid.x,delta,0.0);
 }
@@ -1891,9 +2031,11 @@ fn reducePipelinedRecovery(@builtin(local_invocation_id)lid:vec3u){
 // recurrence drift is never published as the final residual authority.
 fn measureTrueResidualWork(gid:vec3u,lid:vec3u,wid:vec3u,enabled:bool,
  writeResidual:bool,writeGuardScratch:bool){
-  let id=pressureCellInvocation(gid.x);var residual2=0.0;var maximum=0.0;
+  let id=pressureCellInvocation(gid.x);
+  var residual2=0.0;var maximum=0.0;
   if(enabled&&id!=INVALID){
-    let residual=state[p.stateOffsets2.y+id]-applyOperator(id,p.stateOffsets2.x);
+    let residual=state[p.stateOffsets2.y+id]
+      -applyOperator(id,p.stateOffsets2.x);
     if(writeResidual){state[p.stateOffsets3.y+id]=residual;}
     if(writeGuardScratch){state[p.stateOffsets5.y+id]=residual;}
     residual2=residual*residual;maximum=abs(residual);
@@ -1909,13 +2051,15 @@ fn measureTrueResidualWork(gid:vec3u,lid:vec3u,wid:vec3u,enabled:bool,
 
 @compute @workgroup_size(64)
 fn measureTrueResidual(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
+ @builtin(local_invocation_id)lid:vec3u,
+ @builtin(workgroup_id)wid:vec3u){
   measureTrueResidualWork(gid,lid,wid,true,true,false);
 }
 
 @compute @workgroup_size(64)
 fn measureGuardedTrueResidual(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
+ @builtin(local_invocation_id)lid:vec3u,
+ @builtin(workgroup_id)wid:vec3u){
   // Preserve the fresh vector separately. The reduction decides whether f32
   // recurrence drift warrants a full pipelined-CG replacement.
   measureTrueResidualWork(gid,lid,wid,scalars[5]>0.5,false,true);
@@ -2143,6 +2287,11 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   var cutBoundaryCell=false;
   var supportMask=0u;var sweptSupportMask=0u;
   let measuredCount=select(0u,count,resident);
+  for(var local=lane;local<measuredCount;local+=64u){
+    activityDensityFixed[local]=i32(round(
+      state[destinationDensity()+first+local]*ACTIVITY_FIXED));
+  }
+  workgroupBarrier();
   for(var cell=first+lane;cell<first+measuredCount;cell+=64u){
     let rho=state[destinationDensity()+cell];
     let fill=rho/max(cellOpenFraction(cell),1e-6);
@@ -2154,7 +2303,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     // after the reduction. Including macro-cell volume in the fixed-point
     // term overflowed i32 for a full 32^3 cell (exactly 2^31 at rho=1), which
     // made calm deep-water bricks look empty and eligible for retirement.
-    densitySum+=i32(round(rho*ACTIVITY_FIXED));
+    let ownFixed=activityDensityFixed[local];
+    densitySum+=ownFixed;
     momentX+=i32(round(rho
       *(f32(2u*x+1u)-f32(resolution))/f32(resolution)*ACTIVITY_FIXED));
     momentY+=i32(round(rho
@@ -2186,7 +2336,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
       let row=incidenceRow(incidence);if(!rowAccepted(row)){continue;}
       let own=termCoefficient(incidenceTerm(incidence));
-      if(!rowAccepted(row)||rowArea(row)<=1e-8){continue;}
+      if(rowArea(row)<=1e-8){continue;}
       let axis=rowAxis(row);let rowPosition=rowCenter(row);
       // A sparse-air row on the domain box is the closed container wall, not
       // a liquid-air interface. Treating the floor and side walls as surface
@@ -2201,7 +2351,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       for(var term=begin;term<end;term+=1u){
         let coefficient=termCoefficient(term);if(own*coefficient>=0.0){continue;}
         let neighbor=termCell(term);
-        if(!cellTransportActive(neighbor)){continue;}
+        // Acceptance of the owning row already proves the neighbor's brick and
+        // resolution; only the dynamic cut-cell openness remains to test.
+        if(cellOpenVolume(neighbor)<=1e-8){continue;}
         let neighborDensity=state[destinationDensity()+neighbor]
           /max(cellOpenFraction(neighbor),1e-6);
         sideHasFluid=sideHasFluid||neighborDensity>featureDensity;
@@ -2272,7 +2424,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     }
     if(interfaceCell||cellIsThinFluid){
       let brickDimensions=vec3i((p.dimensions.xyz+vec3u(7u))/8u);
-      let sourceBrick=vec3i(vec3u(ta(b+7u),ta(b+8u),ta(b+9u))/8u);
+      let sourceBrick=vec3i(cellMinimum(cell)/8u);
       let sweptBrick=clamp(vec3i(floor((cellCenter
         +p.activityTiming.x*p.frame.x*ownVelocity)/8.0)),
         vec3i(0),brickDimensions-vec3i(1));
@@ -2289,40 +2441,26 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         for(var dx=0u;dx<2u;dx+=1u){
           let q=group+vec3u(dx,dy,dz);
           let child=first+q.x+resolution*(q.y+resolution*q.z);
-          if(child<first+count){childSum+=i32(round(
-            state[destinationDensity()+child]*ACTIVITY_FIXED));}
+          if(child<first+count){childSum+=activityDensityFixed[child-first];}
       }}}
-      let ownFixed=i32(round(rho*ACTIVITY_FIXED));
       detailError=max(detailError,
         f32(abs(8*ownFixed-childSum))/(8.0*ACTIVITY_FIXED));
     }
   }
-  activityDensitySum[lane]=densitySum;activityMomentX[lane]=momentX;
-  activityMomentY[lane]=momentY;activityMomentZ[lane]=momentZ;
-  activityDeformation[lane]=deformation;activityPredictedMotion[lane]=predictedMotion;
-  activityDetailError[lane]=detailError;
-  activityVelocityTravel[lane]=velocityTravel;
-  activitySurfaceAxes[lane]=surfaceAxes
-    |select(0u,16u,occupiedCell)|select(0u,32u,thinFluidCell)
-    |select(0u,64u,cutBoundaryCell);
-  activitySupportMask[lane]=supportMask;
-  activitySweptSupportMask[lane]=sweptSupportMask;
+  activityMoments[lane]=vec4i(densitySum,momentX,momentY,momentZ);
+  activityMetrics[lane]=vec4f(deformation,predictedMotion,detailError,velocityTravel);
+  let activityFlags=surfaceAxes|select(0u,16u,occupiedCell)
+    |select(0u,32u,thinFluidCell)|select(0u,64u,cutBoundaryCell);
+  // support and swept-support each occupy bits 0..26. Split the seven flag
+  // bits across their unused high bits: 61 bits become two words exactly.
+  activityMasks[lane]=vec2u((supportMask&0x07ffffffu)|((activityFlags&31u)<<27u),
+    (sweptSupportMask&0x07ffffffu)|((activityFlags>>5u)<<27u));
   workgroupBarrier();
   var width=32u;loop{
     if(lane<width){
-      activityDensitySum[lane]+=activityDensitySum[lane+width];
-      activityMomentX[lane]+=activityMomentX[lane+width];
-      activityMomentY[lane]+=activityMomentY[lane+width];
-      activityMomentZ[lane]+=activityMomentZ[lane+width];
-      activityDeformation[lane]=max(activityDeformation[lane],activityDeformation[lane+width]);
-      activityPredictedMotion[lane]=max(activityPredictedMotion[lane],
-        activityPredictedMotion[lane+width]);
-      activityDetailError[lane]=max(activityDetailError[lane],activityDetailError[lane+width]);
-      activityVelocityTravel[lane]=max(activityVelocityTravel[lane],
-        activityVelocityTravel[lane+width]);
-      activitySurfaceAxes[lane]|=activitySurfaceAxes[lane+width];
-      activitySupportMask[lane]|=activitySupportMask[lane+width];
-      activitySweptSupportMask[lane]|=activitySweptSupportMask[lane+width];
+      activityMoments[lane]+=activityMoments[lane+width];
+      activityMetrics[lane]=max(activityMetrics[lane],activityMetrics[lane+width]);
+      activityMasks[lane]|=activityMasks[lane+width];
     }
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
@@ -2330,11 +2468,16 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   let output=activityRecord(brick);let step=atomicLoad(&activity[0]);
   if(!resident){
     atomicStore(&activity[output],0u);atomicStore(&activity[output+1u],0u);
-    atomicStore(&activity[output+32u],0u);atomicStore(&activity[output+39u],0u);return;
+    atomicStore(&activity[output+32u],0u);atomicStore(&activity[output+3u],0u);
+    return;
   }
-  let meanDensity=f32(activityDensitySum[0])/(f32(count)*ACTIVITY_FIXED);
-  let moments=vec3f(f32(activityMomentX[0]),f32(activityMomentY[0]),
-    f32(activityMomentZ[0]))/(f32(count)*ACTIVITY_FIXED);
+  let reducedMoments=activityMoments[0];let reducedMetrics=activityMetrics[0];
+  let reducedPackedMasks=activityMasks[0];
+  let reducedSurfaceAxes=(reducedPackedMasks.x>>27u)|(reducedPackedMasks.y>>22u);
+  let reducedSupportMask=reducedPackedMasks.x&0x07ffffffu;
+  let reducedSweptSupportMask=reducedPackedMasks.y&0x07ffffffu;
+  let meanDensity=f32(reducedMoments.x)/(f32(count)*ACTIVITY_FIXED);
+  let moments=vec3f(reducedMoments.yzw)/(f32(count)*ACTIVITY_FIXED);
   var temporal=0.0;
   if(step>1u){
     temporal=max(abs(meanDensity-activityF32(output+4u))/0.05,
@@ -2342,24 +2485,24 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       max(abs(moments.y-activityF32(output+6u))/0.02,
         abs(moments.z-activityF32(output+7u))/0.02)));
   }
-  let densityMassFineCells=f32(activityDensitySum[0])/ACTIVITY_FIXED*cellVolume(first);
-  let densityPresent=(activitySurfaceAxes[0]&16u)!=0u;
+  let densityMassFineCells=f32(reducedMoments.x)/ACTIVITY_FIXED*cellVolume(first);
+  let densityPresent=(reducedSurfaceAxes&16u)!=0u;
   // A few concentrated interpolation remnants can exceed the per-cell density
   // floor while carrying less than one finest cell of liquid in the whole
   // brick. They are residue, not a surface or neighbor-support authority.
   let occupied=densityPresent&&densityMassFineCells>=p.sharpening.w;
-  let axes=select(0u,activitySurfaceAxes[0]&7u,occupied);
+  let axes=select(0u,reducedSurfaceAxes&7u,occupied);
   let surface=occupied&&axes!=0u;
-  let thinFluid=occupied&&(activitySurfaceAxes[0]&32u)!=0u;
+  let thinFluid=occupied&&(reducedSurfaceAxes&32u)!=0u;
   let shape=select(0.0,1.0,countOneBits(axes)>=2u);
-  let velocityActivity=activityVelocityTravel[0];
+  let velocityActivity=reducedMetrics.w;
   // Restriction error is useful in flooded bulk and genuinely complex/thin
   // interface geometry. A calm one-axis free surface is different: CM12 is
   // supposed to keep that interface sharp, so its fine children can retain a
   // large restriction residual forever even though no dynamics require the
   // fine rung. Counting that residual made refinement irreversible after a
   // splash. Shape/thinness already protect non-planar or unresolved surfaces.
-  let scoredDetailError=select(activityDetailError[0],0.0,
+  let scoredDetailError=select(reducedMetrics.z,0.0,
     surface&&!thinFluid&&shape==0.0);
   // Deep incompressible liquid has no density interface to resolve. Pressure
   // and velocity gradients there are represented on the coarse composite
@@ -2367,10 +2510,10 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   // bulk coarsening this method exists to obtain. Dynamic change becomes a
   // resolution signal only at the interface or in a thin feature. Flooded
   // bulk can still veto a merge through genuine restriction detail.
-  let dynamicActivity=select(0.0,max(activityDeformation[0],temporal),
+  let dynamicActivity=select(0.0,max(reducedMetrics.x,temporal),
     surface||thinFluid);
   let detailActivity=max(0.0,scoredDetailError/p.activityDensity.w-1.0);
-  let featureActivity=max(max(dynamicActivity,activityPredictedMotion[0]),
+  let featureActivity=max(max(dynamicActivity,reducedMetrics.y),
     max(max(0.0,max(shape,select(0.0,1.0,thinFluid))),
       detailActivity));
   // Velocity thresholds define both the rung floor and the score scale. Using
@@ -2386,17 +2529,17 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   let scoredVelocityActivity=select(0.0,normalizedVelocityActivity,surface||thinFluid);
   let scoreValue=clamp(max(scoredVelocityActivity,featureActivity),0.0,1.0);
   let score=u32(round(255.0*scoreValue));var reasons=0u;
-  if(surface){reasons|=1u;}if(activityDeformation[0]>0.0){reasons|=2u;}
+  if(surface){reasons|=1u;}if(reducedMetrics.x>0.0){reasons|=2u;}
   if(temporal>0.0){reasons|=4u;}
-  if(activityDetailError[0]>p.activityDensity.w){reasons|=8u;}
-  if(activityPredictedMotion[0]>0.0){reasons|=16u;}if(step==1u){reasons|=32u;}
+  if(reducedMetrics.z>p.activityDensity.w){reasons|=8u;}
+  if(reducedMetrics.y>0.0){reasons|=16u;}if(step==1u){reasons|=32u;}
   if(occupied){reasons|=64u;}
   if(velocityResolutionFloor(velocityActivity)>1u){reasons|=128u;}
   if(thinFluid){reasons|=256u;}
-  if((activitySurfaceAxes[0]&64u)!=0u){reasons|=512u;}
+  if((reducedSurfaceAxes&64u)!=0u){reasons|=512u;}
   let topologyEpoch=atomicLoad(&activity[5])!=0u;
-  var hotEpochs=atomicLoad(&activity[output+2u]);
-  var quietEpochs=atomicLoad(&activity[output+3u]);
+  let history=atomicLoad(&activity[output+2u]);
+  var hotEpochs=history&255u;var quietEpochs=(history>>8u)&255u;
   if(topologyEpoch){
     let activitySignals=activitySignalsEnabled();
     let featureHot=activitySignals&&featureActivity>=p.activityTiming.y;
@@ -2411,13 +2554,13 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     quietEpochs=select(0u,min(255u,quietEpochs+1u),quiet);
   }
   atomicStore(&activity[output],score);atomicStore(&activity[output+1u],reasons);
-  atomicStore(&activity[output+2u],hotEpochs);atomicStore(&activity[output+3u],quietEpochs);
+  atomicStore(&activity[output+2u],hotEpochs|(quietEpochs<<8u));
   atomicStore(&activity[output+4u],bitcast<u32>(meanDensity));
   atomicStore(&activity[output+5u],bitcast<u32>(moments.x));
   atomicStore(&activity[output+6u],bitcast<u32>(moments.y));
   atomicStore(&activity[output+7u],bitcast<u32>(moments.z));
-  atomicStore(&activity[output+32u],select(0u,activitySupportMask[0],occupied));
-  atomicStore(&activity[output+39u],select(0u,activitySweptSupportMask[0],occupied));
+  atomicStore(&activity[output+32u],select(0u,reducedSupportMask,occupied));
+  atomicStore(&activity[output+3u],select(0u,reducedSweptSupportMask,occupied));
   atomicStore(&activity[output+33u],bitcast<u32>(velocityActivity));
   atomicStore(&activity[output+34u],0u);
   atomicMax(&activity[1],score);if(surface){atomicAdd(&activity[2],1u);}
@@ -2433,7 +2576,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
 // promotes after the front has crossed, which is both a resolution ping-pong
 // and an under-resolved transport step.
 fn brickRequestedAsReceiver(brick:u32)->bool{
-  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let record=p.topologyOffsets2.z+2u*brick;let key=topology[record+1u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
   let remainder=key-z*xy;let y=remainder/brickDimensions.x;
@@ -2470,7 +2613,7 @@ fn brickRequestedAsReceiver(brick:u32)->bool{
 fn brickDeeplyEnclosed(brick:u32)->bool{
   let output=activityRecord(brick);
   if((atomicLoad(&activity[output+1u])&64u)==0u){return false;}
-  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let record=p.topologyOffsets2.z+2u*brick;let key=topology[record+1u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
   let remainder=key-z*xy;let y=remainder/brickDimensions.x;
@@ -2529,8 +2672,8 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   }
   let score=atomicLoad(&activity[output]);
   let reasons=atomicLoad(&activity[output+1u]);
-  let hotEpochs=atomicLoad(&activity[output+2u]);
-  let quietEpochs=atomicLoad(&activity[output+3u]);
+  let history=atomicLoad(&activity[output+2u]);
+  let hotEpochs=history&255u;let quietEpochs=(history>>8u)&255u;
   let recoveryState=atomicLoad(&activity[output+38u]);
   let recoveryFloor=recoveryState&15u;
   let recoveryLocked=(recoveryState&ACTIVITY_RECOVERY_LOCK)!=0u;
@@ -2631,7 +2774,7 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
 fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
   if(!brickCandidatePlanningEnabled(brick)){return;}
-  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let record=p.topologyOffsets2.z+2u*brick;let key=topology[record+1u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
   let remainder=key-z*xy;let y=remainder/brickDimensions.x;
@@ -2672,7 +2815,7 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
   let accepted=atomicLoad(&activity[output+12u]);
   let candidate=atomicLoad(&activity[output+8u]);
   var invalid=!validBrickResolution(accepted)||!validBrickResolution(candidate);
-  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let record=p.topologyOffsets2.z+2u*brick;let key=topology[record+1u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
   let remainder=key-z*xy;let y=remainder/brickDimensions.x;
@@ -2699,29 +2842,73 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
 // All refinement is urgent because the refine-only 2:1 closure may have
 // introduced support rungs around a surface brick. Coarsening is bounded by a
 // rotating brick-ID window, so no atomic ticket race can starve a quiet brick.
-@compute @workgroup_size(1)
-fn scheduleTopologyPreparation(){
+// Both walks are 64 lanes striding the same ranges the single lane used to.
+// Classification is a pure per-brick predicate, so it parallelizes exactly. The
+// coarsening window is order-dependent — it takes the first
+// topologyScheduling.x demotions at or after the rotating cursor — so its chunk
+// walks the *rotated* order and selects by exclusive prefix, which is the same
+// set the cursor selected. The chunk loop deliberately never breaks early:
+// selected is read from workgroup memory and is therefore non-uniform to
+// WGSL's analysis, so making it a loop condition would put the scan's barriers
+// in non-uniform control flow. Eighteen unconditional 64-wide chunks still cost
+// a fraction of 1,152 serial iterations.
+var<workgroup>topologyScheduleTotals:array<vec2u,64>;
+@compute @workgroup_size(64)
+fn scheduleTopologyPreparation(@builtin(local_invocation_id)lid:vec3u){
+  let lane=lid.x;let count=p.dispatch.w;
+  let generation=atomicLoad(&activity[12])+1u;
   var urgent=0u;var ordinary=0u;
-  for(var brick=0u;brick<p.dispatch.w;brick+=1u){let output=activityRecord(brick);
+  for(var brick=lane;brick<count;brick+=64u){
+    let output=activityRecord(brick);
     atomicStore(&activity[output+35u],0u);
     if(atomicLoad(&activity[output+14u])!=1u){continue;}
     let accepted=atomicLoad(&activity[output+12u]);
     let candidate=atomicLoad(&activity[output+13u]);
     if(candidate>accepted){atomicStore(&activity[output+35u],1u);
-      atomicStore(&activity[output+36u],atomicLoad(&activity[12])+1u);urgent+=1u;
+      atomicStore(&activity[output+36u],generation);urgent+=1u;
     }else{ordinary+=1u;}
   }
-  let cursor=atomicLoad(&activity[13])%max(1u,p.dispatch.w);var selected=0u;
-  for(var distance=0u;distance<p.dispatch.w&&selected<p.topologyScheduling.x;distance+=1u){
-    let brick=(cursor+distance)%p.dispatch.w;let output=activityRecord(brick);
-    if(atomicLoad(&activity[output+14u])!=1u){continue;}
-    let accepted=atomicLoad(&activity[output+12u]);
-    let candidate=atomicLoad(&activity[output+13u]);if(candidate>=accepted){continue;}
-    atomicStore(&activity[output+35u],1u);
-    atomicStore(&activity[output+36u],atomicLoad(&activity[12])+1u);selected+=1u;
+  // The cursor rotation means brick b is cleared above by lane b%64 and may be
+  // scheduled below by a different lane. That is a write-write hazard on word
+  // 35 across lanes, which the single-lane scheduler could not have; order it
+  // explicitly. workgroupBarrier alone would not — activity is storage.
+  storageBarrier();
+  topologyScheduleTotals[lane]=vec2u(urgent,ordinary);workgroupBarrier();
+  var width=32u;loop{
+    if(lane<width){topologyScheduleTotals[lane]+=topologyScheduleTotals[lane+width];}
+    workgroupBarrier();if(width==1u){break;}width/=2u;
   }
-  atomicStore(&activity[14],urgent);atomicStore(&activity[15],ordinary);
-  atomicStore(&activity[16],urgent+selected);atomicStore(&activity[18],ordinary-selected);
+  let urgentTotal=topologyScheduleTotals[0].x;
+  let ordinaryTotal=topologyScheduleTotals[0].y;
+  let budget=p.topologyScheduling.x;
+  let cursor=atomicLoad(&activity[13])%max(1u,count);
+  var scanned=0u;
+  for(var chunk=0u;chunk<count;chunk+=64u){
+    let distance=chunk+lane;var pending=0u;var brick=0u;
+    if(distance<count){
+      brick=(cursor+distance)%count;let output=activityRecord(brick);
+      pending=select(0u,1u,atomicLoad(&activity[output+14u])==1u
+        &&atomicLoad(&activity[output+13u])<atomicLoad(&activity[output+12u]));
+    }
+    let prefix=stablePressurePrefix(lane,pending);
+    if(pending==1u&&scanned+prefix<budget){
+      let output=activityRecord(brick);
+      atomicStore(&activity[output+35u],1u);
+      atomicStore(&activity[output+36u],generation);
+    }
+    // pressurePrefix now holds the inclusive scan; lane 63 is the chunk total.
+    let chunkTotal=pressurePrefix[63];
+    workgroupBarrier();
+    scanned+=chunkTotal;
+  }
+  if(lane!=0u){return;}
+  // The cursor walk visits every brick, so it always retires exactly
+  // min(budget, |ordinary|) demotions. Deriving that here keeps the header
+  // words independent of the non-uniform running count above.
+  let selected=min(budget,ordinaryTotal);
+  atomicStore(&activity[14],urgentTotal);atomicStore(&activity[15],ordinaryTotal);
+  atomicStore(&activity[16],urgentTotal+selected);
+  atomicStore(&activity[18],ordinaryTotal-selected);
 }
 
 fn acquireTopologyPage()->u32{
@@ -2795,7 +2982,7 @@ fn synthesizeCandidateCellPages(@builtin(local_invocation_id)lid:vec3u,
     atomicStore(&topologyArena[pageBase+2u],count);
     atomicStore(&topologyArena[pageBase+3u],atomicLoad(&activity[output+36u]));
   }
-  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let record=p.topologyOffsets2.z+2u*brick;let key=topology[record+1u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let bz=key/xy;
   let remainder=key-bz*xy;let by=remainder/brickDimensions.x;
@@ -2807,7 +2994,7 @@ fn synthesizeCandidateCellPages(@builtin(local_invocation_id)lid:vec3u,
     let lower=brickOrigin+vec3u(x,y,z)*scale;
     let upper=min(lower+vec3u(scale),p.dimensions.xyz);let widths=upper-lower;
     let center=vec3f(lower)+0.5*vec3f(widths);let volume=f32(widths.x*widths.y*widths.z);
-    let cell=pageBase+4u+16u*local;
+    let cell=pageBase+4u+8u*local;
     atomicStore(&topologyArena[cell],bitcast<u32>(center.x));
     atomicStore(&topologyArena[cell+1u],bitcast<u32>(center.y));
     atomicStore(&topologyArena[cell+2u],bitcast<u32>(center.z));
@@ -2815,15 +3002,7 @@ fn synthesizeCandidateCellPages(@builtin(local_invocation_id)lid:vec3u,
     atomicStore(&topologyArena[cell+4u],bitcast<u32>(f32(widths.x)));
     atomicStore(&topologyArena[cell+5u],bitcast<u32>(f32(widths.y)));
     atomicStore(&topologyArena[cell+6u],bitcast<u32>(f32(widths.z)));
-    atomicStore(&topologyArena[cell+7u],lower.x);
-    atomicStore(&topologyArena[cell+8u],lower.y);
-    atomicStore(&topologyArena[cell+9u],lower.z);
-    atomicStore(&topologyArena[cell+10u],resolution);
-    atomicStore(&topologyArena[cell+11u],brick);
-    atomicStore(&topologyArena[cell+12u],bitcast<u32>(1.0));
-    atomicStore(&topologyArena[cell+13u],bitcast<u32>(volume));
-    atomicStore(&topologyArena[cell+14u],0u);
-    atomicStore(&topologyArena[cell+15u],local);
+    atomicStore(&topologyArena[cell+7u],(brick<<4u)|resolution);
   }
 }
 
@@ -2860,7 +3039,7 @@ fn buildShadowCellWorklist(@builtin(global_invocation_id)gid:vec3u){
   // a later prepared transaction clears and rebuilds the list before publish.
   if(atomicLoad(&activity[16])==0u){return;}
   let cell=gid.x;if(cell>=ta(2u)){return;}
-  let b=cellBase(cell);let brick=ta(b+11u);let resolution=ta(b+10u);
+  let brick=cellBrick(cell);let resolution=cellResolution(cell);
   if(!brickActive(brick)||resolution!=scheduledBrickResolution(brick)){return;}
   let base=topologyWorklistBase();let index=atomicAdd(&topologyArena[base+18u],1u);
   let offset=atomicLoad(&topologyArena[base+14u+shadowTopologySlot()]);
@@ -2871,9 +3050,9 @@ fn buildShadowCellWorklist(@builtin(global_invocation_id)gid:vec3u){
 fn buildShadowRowWorklist(@builtin(global_invocation_id)gid:vec3u){
   if(atomicLoad(&activity[16])==0u){return;}
   let row=gid.x;if(row>=ta(3u)){return;}
-  let requirements=ta(rowBase(row)+11u);let count=ta(requirements);var enabled=true;
-  for(var at=0u;at<count;at+=1u){let brick=ta(requirements+1u+2u*at);
-    let resolution=ta(requirements+2u+2u*at);
+  let requirements=rowRequirementOffset(row);let count=ta(requirements);var enabled=true;
+  for(var at=0u;at<count;at+=1u){let metadata=ta(requirements+1u+at);
+    let brick=metadata>>4u;let resolution=metadata&15u;
     enabled=enabled&&brickActive(brick)&&scheduledBrickResolution(brick)==resolution;
   }
   if(!enabled){return;}let base=topologyWorklistBase();
@@ -2893,12 +3072,18 @@ fn finalizeShadowWorklists(){
 }
 
 fn candidateFieldIndex(channel:u32,brick:u32,local:u32)->u32{
-  let capacity=topology[p.topologyOffsets2.w]*CANDIDATE_CELLS_PER_BRICK;
-  return channel*capacity+brickCandidateSlot(brick)*CANDIDATE_CELLS_PER_BRICK+local;
+  let slots=topology[p.topologyOffsets2.w];let slot=brickCandidateSlot(brick);
+  let cellCapacity=slots*CANDIDATE_CELLS_PER_BRICK;
+  if(channel<6u){
+    return channel*cellCapacity+slot*CANDIDATE_CELLS_PER_BRICK+local;
+  }
+  let faceCapacity=slots*CANDIDATE_FACE_SAMPLES_PER_SIDE;
+  return 6u*cellCapacity+(channel-6u)*faceCapacity
+    +slot*CANDIDATE_FACE_SAMPLES_PER_SIDE+local;
 }
 
 fn candidateCellVolume(brick:u32,resolution:u32,local:u32)->f32{
-  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let record=p.topologyOffsets2.z+2u*brick;let key=topology[record+1u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let bz=key/xy;
   let remainder=key-bz*xy;let by=remainder/brickDimensions.x;
@@ -3071,8 +3256,8 @@ fn transferCandidateFaces(@builtin(local_invocation_id)lid:vec3u,
   if(scheduled==0u){return;}
   let candidate=atomicLoad(&activity[output+13u]);
   let accepted=atomicLoad(&activity[output+12u]);let acceptedRange=templateBrickCellRange(brick,accepted);
-  let record=p.topologyOffsets2.z+4u*brick;let first=acceptedRange.x;
-  let key=topology[record+3u];
+  let record=p.topologyOffsets2.z+2u*brick;let first=acceptedRange.x;
+  let key=topology[record+1u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let bz=key/xy;
   let remainder=key-bz*xy;let by=remainder/brickDimensions.x;
@@ -3168,9 +3353,9 @@ fn reconstructShadowFaces(@builtin(global_invocation_id)gid:vec3u){
   if(atomicLoad(&activity[16])==0u){return;}
   let invocation=gid.x;if(invocation>=shadowTemplateRowCount()){return;}
   let row=shadowTemplateRowInvocation(invocation);if(row==INVALID){return;}
-  let requirements=ta(rowBase(row)+11u);let requirementCount=ta(requirements);
+  let requirements=rowRequirementOffset(row);let requirementCount=ta(requirements);
   var changed=false;for(var at=0u;at<requirementCount;at+=1u){
-    let brick=ta(requirements+1u+2u*at);
+    let brick=ta(requirements+1u+at)>>4u;
     changed=changed||atomicLoad(&activity[activityRecord(brick)+35u])!=0u;
   }
   if(!changed){return;}let axis=rowAxis(row);var velocity=0.0;var weight=0.0;
@@ -3216,7 +3401,7 @@ fn validateAndCommitShadowTopology(){
       }else if(!recoveryLocked&&next<recoveryFloor){
         atomicStore(&activity[output+38u],next);
       }
-      atomicStore(&activity[output+2u],0u);atomicStore(&activity[output+3u],0u);
+      atomicStore(&activity[output+2u],0u);
       atomicStore(&activity[output+35u],0u);atomicAdd(&activity[17],1u);
     }
   }
@@ -3286,7 +3471,7 @@ fn retireUnsupportedEmptyBricks(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w||!brickActive(brick)){return;}
   let output=activityRecord(brick);
   if((atomicLoad(&activity[output+1u])&64u)!=0u){return;}
-  let record=p.topologyOffsets2.z+4u*brick;let key=topology[record+3u];
+  let record=p.topologyOffsets2.z+2u*brick;let key=topology[record+1u];
   let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
   let remainder=key-z*xy;let y=remainder/brickDimensions.x;
@@ -3328,7 +3513,8 @@ fn retireUnsupportedEmptyBricks(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn classifyPresentationBricks(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
-  if(!brickActive(brick)){state[p.stateOffsets4.z+brick]=0.0;return;}
+  let reasons=activityRecord(brick)+1u;
+  if(!brickActive(brick)){atomicAnd(&activity[reasons],0xffffffbfu);return;}
   let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
   let first=range.x;let count=range.y;
   var wet=false;var massFineCells=0.0;
@@ -3338,7 +3524,8 @@ fn classifyPresentationBricks(@builtin(global_invocation_id)gid:vec3u){
     massFineCells+=max(0.0,rho)*cellVolume(at);
   }
   wet=wet&&massFineCells>=p.sharpening.w;
-  state[p.stateOffsets4.z+brick]=select(0.0,1.0,wet);
+  if(wet){atomicOr(&activity[reasons],64u);}
+  else{atomicAnd(&activity[reasons],0xffffffbfu);}
 }
 
 // Publish one compact renderer page per workgroup. Span-one leaves use their
@@ -3356,8 +3543,8 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   let source=fineMetadata[4u*page+3u];let brick=(source>>3u)&0xffffffu;
   let octant=source&7u;let span=1u<<(source>>27u);
   let local=vec3u(lane%4u,(lane/4u)%4u,lane/16u);
-  let brickRecord=p.topologyOffsets2.z+4u*brick;
-  let brickKey=topology[brickRecord+3u];let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
+  let brickRecord=p.topologyOffsets2.z+2u*brick;
+  let brickKey=topology[brickRecord+1u];let brickDimensions=(p.dimensions.xyz+vec3u(7u))/8u;
   let brickXY=brickDimensions.x*brickDimensions.y;let brickZ=brickKey/brickXY;
   let brickRemainder=brickKey-brickZ*brickXY;let brickY=brickRemainder/brickDimensions.x;
   let brickX=brickRemainder-brickY*brickDimensions.x;
@@ -3372,7 +3559,9 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   let cacheFirst=vec3i(floor(firstShifted));
   let cacheDimensions=vec3u(vec3i(floor(lastShifted))-cacheFirst)+vec3u(2u);
   let cacheCount=cacheDimensions.x*cacheDimensions.y*cacheDimensions.z;
-  if(scale>1u){
+  let wet=brick<p.dispatch.w
+    &&(atomicLoad(&activity[activityRecord(brick)+1u])&64u)!=0u;
+  if(scale>1u&&wet){
     let coarseDimensions=max(vec3i(1),vec3i(p.dimensions.xyz)/i32(scale));
     for(var cacheIndex=lane;cacheIndex<cacheCount;cacheIndex+=64u){
       let cacheZ=cacheIndex/(cacheDimensions.x*cacheDimensions.y);
@@ -3387,7 +3576,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   }
   workgroupBarrier();
   var phi=4.0*p.frame.y;
-  if(brick<p.dispatch.w&&state[p.stateOffsets4.z+brick]>0.5&&all(q<p.dimensions.xyz)
+  if(wet&&all(q<p.dimensions.xyz)
     &&insideEmbeddedBoundary(vec3f(q)+vec3f(0.5))){
     if(scale==1u){
       // Metadata already names the source brick and octant. Fine pages can

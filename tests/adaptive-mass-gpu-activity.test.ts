@@ -934,8 +934,24 @@ test("Sparse CM12 presentation publication caches coarse page stencils", () => {
 test("Sparse CM12 scientific overlays consume accepted compact state directly", () => {
   const overlay = readFileSync(new URL("../lib/core/webgpu-grid-overlay.ts", import.meta.url),
     "utf8");
+  const resident = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
   const renderer = readFileSync(new URL("../lib/core/webgpu-renderer.ts", import.meta.url),
     "utf8");
+  const residentActivityStride = resident.match(/const ACTIVITY_RECORD_WORDS = (\d+);/)?.[1];
+  const overlayActivityStride = overlay.match(
+    /const SPARSE_ACTIVITY_RECORD_WORDS:u32=(\d+)u;/,
+  )?.[1];
+  assert.ok(residentActivityStride, "the sparse resident must declare its activity stride");
+  assert.equal(overlayActivityStride, residentActivityStride,
+    "the scientific overlay must walk the live sparse activity ABI without per-brick drift");
+  assert.doesNotMatch(overlay, /sparseTopologyArena\[6u\]\+16u\*cell/,
+    "the overlay must not decode the retired 16-word sparse cell record");
+  assert.match(overlay,
+    /scale=max\(1u,8u\*sparseBrickSpan\(owner\.y\)\/resolution\)/,
+    "represented sparse cells must derive their isotropic size from the live brick rung");
   assert.match(overlay, /@binding\(11\) var<storage,read> sparseTopology/);
   assert.match(overlay, /fn sparseBrickLookup\(key:u32\)->u32/);
   assert.match(overlay, /if\(sparseGridEnabled\(\)\)\{return sparseDensityAt/,

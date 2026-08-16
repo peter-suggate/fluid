@@ -3,6 +3,8 @@ import type { GPUStatus } from "../gpu-status";
 import { webGPUPlatformResourcePlugin } from "../webgpu-platform-resource";
 import type { EffectiveRendererStatus } from "../renderer-status";
 import type { GPUEulerianInfo } from "../webgpu-eulerian";
+import type { SparseCM12PressureJournal } from
+  "../../methods/adaptive-mass/sparse-cm12-pressure-journal";
 import type { RigidBodyState, RigidStepDiagnostics } from "../rigid-body";
 import type { GPURigidBodyPose } from "../webgpu-rigid-body";
 import type { CouplingDiagnostics } from "../fluid-rigid-coupling";
@@ -71,6 +73,16 @@ interface DiagnosticsStore {
   /** Capability-oriented readiness. Unlike gpuStatus, independent work cannot overwrite another lane. */
   resourceReadiness: ResourceReadinessSnapshot;
   gpuInfo: GPUEulerianInfo | null;
+  /**
+   * The last captured pressure film's iteration records.
+   *
+   * Refreshed only when the simulation pauses, because that is the boundary at
+   * which the renderer may map solver state — so the curve describes the frame
+   * the run stopped on, which is the one the film's overlay is drawing too.
+   * Null means no capture: either the film was never reserved, or no view has
+   * armed it yet.
+   */
+  pressureJournal: SparseCM12PressureJournal | null;
   effectiveRendererStatus: EffectiveRendererStatus;
   waterSurfacePresentation: WaterSurfacePresentationDiagnostics | null;
   frameMs: number;
@@ -115,6 +127,7 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   gpuStatus: { state: "initializing", label: "Initializing WebGPU", resource: webGPUPlatformResourcePlugin },
   resourceReadiness: initialResourceReadiness(),
   gpuInfo: null,
+  pressureJournal: null,
   effectiveRendererStatus: {
     state: "pending",
     failureReason: "missing-source",

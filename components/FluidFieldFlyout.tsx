@@ -7,8 +7,17 @@ import type { FieldVisualization } from "../lib/core/visualization-registry";
 import { simulation } from "../lib/core/simulation/controller";
 import { resolvedMethodValues, useMethodStore } from "../lib/core/stores/method-store";
 import { useUIStore } from "../lib/core/stores/ui-store";
+import { isPressureJournalOverlayMode } from "../lib/core/webgpu-pressure-journal-overlay";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
+import {
+  sparseCM12PressureJournalSchedule,
+} from "../lib/methods/adaptive-mass/sparse-cm12-pressure-journal";
+import {
+  SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS,
+  sparseCM12PressureIterations,
+} from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { useAnchoredFlyout } from "./anchored-flyout";
+import { PressureFilmStrip } from "./PressureFilmStrip";
 
 /**
  * The field-overlay picker, riding a corner of the fluid container.
@@ -62,6 +71,22 @@ export function FluidFieldFlyout({
   // widget is also where the method is switched, and a picker that vanished
   // with the fields would strand such a method with no way back.
   const hasViews = views.length > 0;
+
+  // A film view's slider is a scrub through the captured iterations, not an
+  // opacity. The iteration each stop lands on is knowable here without asking
+  // the solver anything: the snapshot schedule is a pure function of the
+  // iteration ceiling and the reserved capacity, which is the same property
+  // that lets the device pick its slot without the host telling it.
+  const filmMode = active && isPressureJournalOverlayMode(active.mode);
+  const filmReserved = methodValues.pressureJournal === "on";
+  const filmSchedule = filmMode && filmReserved
+    ? sparseCM12PressureJournalSchedule(
+      sparseCM12PressureIterations(methodValues.pressureIterations),
+      SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS)
+    : [];
+  const filmSlot = filmSchedule.length > 0
+    ? Math.round(Math.max(0, Math.min(1, overlaySlice)) * (filmSchedule.length - 1))
+    : 0;
 
   const selectView = (view: FieldView) => {
     if (overlayMode === view.mode && overlayAxis !== "off") {
@@ -118,22 +143,48 @@ export function FluidFieldFlyout({
           onClick={() => setOverlayAxis("volume")}
         >VOL</button>
       </div>}
+      {filmMode && !filmReserved && <p className="fluid-field-film" data-testid="fluid-field-film-off">
+        <span>No film reserved — this view has nothing to replay.</span>
+        <button
+          type="button"
+          data-testid="fluid-field-film-reserve"
+          title="Reserve room to capture one pressure solve. Rebuilds the solver once."
+          onClick={() => simulation.setMethodParam(methodId, "pressureJournal", "on")}
+        >RESERVE</button>
+      </p>}
       <label className="fluid-field-slice">
         <input
           type="range"
-          min={active.planeless || overlayAxis === "volume" ? 0.05 : 0}
+          min={filmMode ? 0 : active.planeless || overlayAxis === "volume" ? 0.05 : 0}
           max={1}
-          step={active.planeless || overlayAxis === "volume" ? 0.01 : 0.005}
+          // A film's stops are the captured iterations and nothing between
+          // them, so the scrub steps between snapshots rather than sliding
+          // through a continuum it cannot show.
+          step={filmSchedule.length > 1 ? 1 / (filmSchedule.length - 1)
+            : active.planeless || overlayAxis === "volume" ? 0.01 : 0.005}
           value={overlaySlice}
           onChange={(event) => setOverlaySlice(Number(event.currentTarget.value))}
-          aria-label={active.planeless
-            ? `${active.label} opacity`
-            : overlayAxis === "volume"
-              ? "Field volume opacity"
-              : `Field ${overlayAxis} slice position`}
+          aria-label={filmMode
+            ? `${active.label} iteration`
+            : active.planeless
+              ? `${active.label} opacity`
+              : overlayAxis === "volume"
+                ? "Field volume opacity"
+                : `Field ${overlayAxis} slice position`}
         />
-        <output>{Math.round(overlaySlice * 100)}%</output>
+        <output>{filmSchedule.length > 0
+          ? `iter ${filmSchedule[filmSlot]}`
+          : filmMode ? "—" : `${Math.round(overlaySlice * 100)}%`}</output>
       </label>
+      {/* The curve belongs beside the scrub, not in a panel of its own: a frame
+          of the film means something different at the third iteration than at
+          the thirtieth, and knowing which needs the plot and the position
+          together. Selecting a stop drives the same slider. */}
+      {filmMode && filmReserved && <PressureFilmStrip
+        slot={filmSlot}
+        onSelectSlot={(slot) => setOverlaySlice(filmSchedule.length > 1
+          ? slot / (filmSchedule.length - 1) : 0)}
+      />}
     </>}
     {hasViews && <div className="fluid-field-options">
       {views.map((view) => {

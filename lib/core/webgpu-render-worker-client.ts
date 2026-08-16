@@ -1,4 +1,6 @@
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
+import type { SparseCM12PressureJournal } from
+  "../methods/adaptive-mass/sparse-cm12-pressure-journal";
 import type { InjectedLiquidBall } from "./method-contract";
 import type { SceneDescription } from "./model";
 import { terrainContentStamp, type TerrainDescription } from "./terrain";
@@ -51,6 +53,7 @@ export type WebGPURenderWorkerResponse =
   | { type: "attached" }
   | { type: "status"; status: GPUStatus; workerNow_ms: number }
   | { type: "gpu-info"; info: GPUEulerianInfo }
+  | { type: "pressure-journal"; journal: SparseCM12PressureJournal | undefined }
   | { type: "rigid-loads"; loads: GPURigidLoad[] }
   | { type: "advance-completed"; time_s: number }
   | { type: "effective-renderer-status"; status: EffectiveRendererStatus }
@@ -65,6 +68,7 @@ export type WebGPURenderWorkerResponse =
 interface WorkerClientCallbacks {
   onStatus(status: GPUStatus): void;
   onGPUInfo?(info: GPUEulerianInfo): void;
+  onGPUPressureJournal?(journal: SparseCM12PressureJournal | undefined): void;
   onGPURigidLoads?(loads: GPURigidLoad[]): void;
   onGPUAdvanceCompleted?(time_s: number): void;
   onEffectiveRendererStatus?(status: EffectiveRendererStatus): void;
@@ -319,6 +323,9 @@ export class WebGPURenderWorkerClient {
       this.callbacks.onStatus(status);
     }
     else if (message.type === "gpu-info") this.callbacks.onGPUInfo?.(message.info);
+    else if (message.type === "pressure-journal") {
+      this.callbacks.onGPUPressureJournal?.(message.journal);
+    }
     else if (message.type === "rigid-loads") this.callbacks.onGPURigidLoads?.(message.loads);
     else if (message.type === "advance-completed") this.callbacks.onGPUAdvanceCompleted?.(message.time_s);
     else if (message.type === "effective-renderer-status") this.callbacks.onEffectiveRendererStatus?.(message.status);

@@ -7,6 +7,9 @@ import type { GPURigidBodyPick, GPURigidBodyPose } from "./webgpu-rigid-body";
 import type { Vec3 } from "./model";
 import type { GPUSecondaryParticleSource } from "./webgpu-secondary-particles";
 import type { GPUFluidFaceVelocitySource } from "./webgpu-face-velocity-overlay";
+import type { GPUPressureJournalSource } from "./webgpu-pressure-journal-overlay";
+import type { SparseCM12PressureJournal } from
+  "../methods/adaptive-mass/sparse-cm12-pressure-journal";
 import type { GPUFluidTracerSource } from "./webgpu-tracer-overlay";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import type {
@@ -235,6 +238,26 @@ export interface GPUSolverInstance {
    * a view that reads them adds a draw and no simulation work at all.
    */
   readonly faceVelocitySource?: GPUFluidFaceVelocitySource;
+  /**
+   * Optional captured pressure-solve journal, for the pressure-lab film.
+   *
+   * Unlike face velocities this one *is* paired with an enable, and for the
+   * same reason the markers are: the numbers it draws do not otherwise exist.
+   * The snapshots are written by dispatches the encoder only emits for an
+   * armed frame, so an unwatched solve encodes none of them.
+   */
+  readonly pressureJournalSource?: GPUPressureJournalSource;
+  /** Arm or disarm journal capture; false when the method reserved no journal. */
+  armPressureJournal?(armed: boolean): boolean;
+  /**
+   * Read back the captured film's iteration records.
+   *
+   * Maps a buffer, so it belongs to the same paused-ownership boundary as
+   * `readStats` and never to a live frame. Resolves undefined when nothing has
+   * been captured. The whole-field snapshots stay on the device — only these
+   * few kilobytes of scalars ever cross.
+   */
+  readPressureJournal?(): Promise<SparseCM12PressureJournal | undefined>;
   /** Always-resident structural sparse scene used by production SVO rendering. */
   readonly sparseVoxelSceneSource?: SparseVoxelSceneRenderSource;
   /** Exact compact topology/geometry buffers for paper-technique overlays. */

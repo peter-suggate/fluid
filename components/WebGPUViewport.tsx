@@ -1008,6 +1008,8 @@ export function WebGPUViewport() {
         useDiagnosticsStore.getState().set({ gpuStatus });
       },
       onGPUInfo: (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
+      onGPUPressureJournal: (journal) =>
+        useDiagnosticsStore.getState().set({ pressureJournal: journal ?? null }),
       onGPUAdvanceCompleted: (time_s) => simulation.gpuAdvanceCompleted(time_s),
       onEffectiveRendererStatus: (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus }),
     });

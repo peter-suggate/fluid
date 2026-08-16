@@ -19,6 +19,7 @@ import { CM12_SHARPENING_TRACE_STEPS } from "../../core/cm12-numerics";
 import type { SphericalContainerFineGeometry } from "../../core/spherical-container";
 import type { GPUFluidFaceVelocitySource } from "../../core/webgpu-face-velocity-overlay";
 import type { GPUFluidTracerSource } from "../../core/webgpu-tracer-overlay";
+import type { GPUPressureJournalSource } from "../../core/webgpu-pressure-journal-overlay";
 import {
   FINE_LEVELSET_COMPACT_LOOKUP_FLAG,
   FINE_LEVELSET_METADATA_WORDS,
@@ -29,6 +30,15 @@ import type {
   SparseAdaptiveGridConsumerSource,
   WebGPUFineLevelSetBrickSource,
 } from "../../core/levelset-consumer-abi";
+import {
+  SPARSE_CM12_PRESSURE_JOURNAL_HEADER_FLOATS,
+  SPARSE_CM12_PRESSURE_JOURNAL_ITERATION_FLOATS,
+  decodeSparseCM12PressureJournal,
+  sparseCM12PressureJournalLayout,
+  sparseCM12PressureJournalSchedule,
+  type SparseCM12PressureJournal,
+  type SparseCM12PressureJournalLayout,
+} from "./sparse-cm12-pressure-journal";
 import { webgpuSparseCM12ResidentWGSL } from "./webgpu-sparse-cm12-resident.wgsl";
 import {
   WebGPUSparseCM12RigidCoupling,
@@ -253,7 +263,7 @@ export interface SparseCM12ResidentStageSeams {
 
 const WORKGROUP_SIZE = 64;
 /** Params in the resident WGSL, in bytes. Grow this when a field is added. */
-const SPARSE_CM12_PARAMETER_BYTES = 432;
+const SPARSE_CM12_PARAMETER_BYTES = 448;
 /** Twenty f32 convergence/diagnostic scalars; see the WGSL initialization. */
 const SPARSE_CM12_PRESSURE_SCALAR_BYTES = 80;
 export const SPARSE_CM12_PRESSURE_ITERATIONS = 64;
@@ -269,6 +279,29 @@ export interface SparseCM12PressureControl {
   readonly relativeTolerance?: number;
 }
 
+/**
+ * Capacity of the optional pressure journal, chosen at construction.
+ *
+ * Sized here rather than armed at runtime because the journal is a tail range
+ * of the resident state buffer, which exists once. Defaulting it on would be
+ * the "capacity is not inert" mistake: on a large scene the snapshot region is
+ * tens of megabytes, and a lane that never opens the pressure lab would pay it
+ * at t=0. So the default is zero floats and zero dispatches, and a caller that
+ * wants the film asks for it.
+ */
+export interface SparseCM12PressureJournalCapacityRequest {
+  /**
+   * Encoded iterations to reserve records for. Pass the solve's iteration
+   * ceiling; the reservation adds one for the seed record.
+   */
+  readonly iterationCapacity?: number;
+  /** Whole-field snapshots to reserve. Twelve covers a 128-iteration solve. */
+  readonly snapshotCapacity?: number;
+}
+
+/** Snapshots reserved when a caller asks for a journal without saying how many. */
+export const SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS = 12;
+
 export const sparseCM12PressureIterations = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value)
     ? Math.min(SPARSE_CM12_PRESSURE_ITERATIONS_MAXIMUM,
@@ -281,16 +314,20 @@ export const sparseCM12PressureRelativeTolerance = (value: unknown): number =>
       Math.max(0, value))
     : SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE;
 const ACTIVITY_HEADER_WORDS = 28;
-const ACTIVITY_RECORD_WORDS = 40;
+const ACTIVITY_RECORD_WORDS = 39;
 const ACCEPTED_COARSE_ROW_COUNT_WORD = 22;
 const ACCEPTED_MIXED_ROW_COUNT_WORD = 23;
 const PRESSURE_ACTIVE_ROW_COUNT_WORD = 24;
 const CANDIDATE_CELLS_PER_BRICK = 8 ** 3;
-const CANDIDATE_CHANNELS = 12;
+const CANDIDATE_CELL_CHANNELS = 6;
+const CANDIDATE_FACE_CHANNELS = 6;
+const CANDIDATE_FACE_SAMPLES_PER_SIDE = 8 ** 2;
+const CANDIDATE_FLOATS_PER_BRICK = CANDIDATE_CELL_CHANNELS * CANDIDATE_CELLS_PER_BRICK
+  + CANDIDATE_FACE_CHANNELS * CANDIDATE_FACE_SAMPLES_PER_SIDE;
 const GPU_TOPOLOGY_PAGE_POOL_MINIMUM = 32;
 const GPU_TOPOLOGY_PAGE_POOL_MAXIMUM = 512;
 const GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS = 4;
-const GPU_TOPOLOGY_CELL_RECORD_WORDS = 16;
+const GPU_TOPOLOGY_CELL_RECORD_WORDS = 8;
 const GPU_TOPOLOGY_CELL_PAGE_WORDS = GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS
   + CANDIDATE_CELLS_PER_BRICK * GPU_TOPOLOGY_CELL_RECORD_WORDS;
 
@@ -317,8 +354,8 @@ export function sparseCM12OwnershipTablePlan(
     throw new RangeError(`Sparse CM12 resident brick count ${residentBrickCount} is invalid`);
   }
   const hashCapacity = 2 ** Math.ceil(Math.log2(Math.max(2, 2 * residentBrickCount)));
-  const hashWords = 2 * hashCapacity;
-  const brickRecordWords = 4 * residentBrickCount;
+  const hashWords = hashCapacity;
+  const brickRecordWords = 2 * residentBrickCount;
   return { hashCapacity, hashWords, brickRecordWords,
     allocatedWords: hashWords + brickRecordWords + 2 };
 }
@@ -387,6 +424,51 @@ interface PackedResidentTopology {
 const TEMPLATE_LEVELS = [1, 2, 4, 8] as const;
 const TEMPLATE_MAGIC = 0x5343_4d54; // "SCMT"
 const TEMPLATE_HEADER_WORDS = 16;
+// The resident backend rejects separating spherical boundaries before packing,
+// so openFraction=1, openVolume=volume and separatingMinimum=false are
+// invariants rather than per-cell data. Keep exact geometry plus one packed
+// [brick:28 | resolution:4] word: a 32-byte record, half the former footprint.
+const TEMPLATE_CELL_RECORD_WORDS = 8;
+const TEMPLATE_CELL_RESOLUTION_MASK = 0xf;
+
+function packedTemplateCellMetadata(brick: number, resolution: number): number {
+  if (brick < 0 || brick >= 2 ** 28 || ![1, 2, 4, 8].includes(resolution)) {
+    throw new Error(`Sparse CM12 cell metadata cannot be packed: ${brick}/${resolution}`);
+  }
+  return ((brick << 4) | resolution) >>> 0;
+}
+
+const templateCellBrick = (words: Uint32Array, base: number) => words[base + 7]! >>> 4;
+const templateCellResolution = (words: Uint32Array, base: number) =>
+  words[base + 7]! & TEMPLATE_CELL_RESOLUTION_MASK;
+// Immutable rows are read field-wise by wide shader invocations. Nine SoA
+// planes keep those reads contiguous while two packed planes preserve every
+// integer field: [term offset:28 | count:4] and
+// [requirement offset:28 | kind:2 | axis:2]. Geometry remains exact f32 bits.
+const TEMPLATE_ROW_PLANE_COUNT = 9;
+const TEMPLATE_ROW_OFFSET_MASK = 0x0fff_ffff;
+
+const templateRowWord = (
+  rowOffset: number, rowCount: number, plane: number, row: number,
+) => rowOffset + plane * rowCount + row;
+
+function packedTemplateRowTerms(offset: number, count: number): number {
+  if (offset > TEMPLATE_ROW_OFFSET_MASK || count > 0xf) {
+    throw new Error(`Sparse CM12 row term range cannot be packed: ${offset}+${count}`);
+  }
+  return (offset | (count << 28)) >>> 0;
+}
+
+function packedTemplateRowMetadata(
+  requirementOffset: number, kind: SparseAtlasGradientRow["kind"], axis: number,
+): number {
+  if (requirementOffset > TEMPLATE_ROW_OFFSET_MASK || axis > 3) {
+    throw new Error(`Sparse CM12 row metadata cannot be packed: ${requirementOffset},${axis}`);
+  }
+  const kindCode = kind === "intra-brick" ? 0 : kind === "brick-face" ? 1
+    : kind === "mixed-seam" ? 2 : 3;
+  return (requirementOffset | (kindCode << 28) | (axis << 30)) >>> 0;
+}
 
 interface PackedResidentTopologyTemplates {
   readonly words: Uint32Array;
@@ -416,7 +498,7 @@ function packAcceptedTopologyTemplates(
       const owner = brickIndex.get(cells[term.cellId]!.brickKey)!;
       if (!seen.includes(owner)) seen.push(owner);
     }
-    requirementWords += 1 + 2 * seen.length;
+    requirementWords += 1 + seen.length;
   }
   for (const cell of cells) cellCountByBrick[brickIndex.get(cell.brickKey)!] += 1;
   const incidenceOffsets = new Uint32Array(cells.length + 1);
@@ -434,8 +516,8 @@ function packAcceptedTopologyTemplates(
   }
   const pressureEdgeCount = pressureEdgeOffsets[cells.length]!;
   let at = TEMPLATE_HEADER_WORDS;
-  const cellOffset = at; at += 16 * cells.length;
-  const rowOffset = at; at += 12 * rows.length;
+  const cellOffset = at; at += TEMPLATE_CELL_RECORD_WORDS * cells.length;
+  const rowOffset = at; at += TEMPLATE_ROW_PLANE_COUNT * rows.length;
   const termOffset = at; at += 2 * termCount;
   const incidenceOffset = at; at += cells.length + 1;
   const incidenceRecordOffset = at; at += 2 * incidenceCount;
@@ -449,17 +531,18 @@ function packAcceptedTopologyTemplates(
     cellRangeOffset, rowRequirementOffset, atlas.bricks.length], 0);
   words[15] = pressureEdgeOffset;
   for (const cell of cells) {
-    const base = cellOffset + 16 * cell.id;
+    const base = cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell.id;
+    if (cell.openFraction !== 1 || cell.openVolume !== cell.volume
+      || cell.separatingPressureMinimum) {
+      throw new Error(`Sparse CM12 resident cell ${cell.id} has unsupported static boundary data`);
+    }
     setF32(words, base, cell.centerFine[0]); setF32(words, base + 1, cell.centerFine[1]);
     setF32(words, base + 2, cell.centerFine[2]); setF32(words, base + 3, cell.volume);
     setF32(words, base + 4, cell.widthsFine[0]); setF32(words, base + 5, cell.widthsFine[1]);
-    setF32(words, base + 6, cell.widthsFine[2]); words[base + 7] = cell.minimumFine[0];
-    words[base + 8] = cell.minimumFine[1]; words[base + 9] = cell.minimumFine[2];
-    words[base + 10] = cell.brickResolution;
-    words[base + 11] = brickIndex.get(cell.brickKey)!;
-    setF32(words, base + 12, cell.openFraction); setF32(words, base + 13, cell.openVolume);
-    words[base + 14] = cell.separatingPressureMinimum ? 1 : 0;
-    words[base + 15] = cell.localIndex;
+    setF32(words, base + 6, cell.widthsFine[2]);
+    words[base + 7] = packedTemplateCellMetadata(
+      brickIndex.get(cell.brickKey)!, cell.brickResolution,
+    );
   }
   for (const brick of atlas.bricks) {
     const index = brickIndex.get(brick.key)!;
@@ -475,14 +558,17 @@ function packAcceptedTopologyTemplates(
   const pressureEdgeCursor = pressureEdgeOffsets.slice(0, cells.length);
   let nextTerm = 0, requirementAt = rowRequirementOffset;
   for (const row of rows) {
-    const base = rowOffset + 12 * row.id;
-    words[base] = nextTerm; words[base + 1] = row.terms.length; words[base + 2] = row.axis;
-    words[base + 3] = row.kind === "intra-brick" ? 0 : row.kind === "brick-face" ? 1
-      : row.kind === "mixed-seam" ? 2 : 3;
-    setF32(words, base + 4, row.dualWeight); setF32(words, base + 5, row.area);
-    setF32(words, base + 6, row.distance); setF32(words, base + 7, row.exteriorPhi ?? 0.5);
-    setF32(words, base + 8, row.centerFine[0]); setF32(words, base + 9, row.centerFine[1]);
-    setF32(words, base + 10, row.centerFine[2]); words[base + 11] = requirementAt;
+    words[templateRowWord(rowOffset, rows.length, 0, row.id)]
+      = packedTemplateRowTerms(nextTerm, row.terms.length);
+    words[templateRowWord(rowOffset, rows.length, 1, row.id)]
+      = packedTemplateRowMetadata(requirementAt, row.kind, row.axis);
+    setF32(words, templateRowWord(rowOffset, rows.length, 2, row.id), row.dualWeight);
+    setF32(words, templateRowWord(rowOffset, rows.length, 3, row.id), row.area);
+    setF32(words, templateRowWord(rowOffset, rows.length, 4, row.id), row.distance);
+    setF32(words, templateRowWord(rowOffset, rows.length, 5, row.id), row.exteriorPhi ?? 0.5);
+    setF32(words, templateRowWord(rowOffset, rows.length, 6, row.id), row.centerFine[0]);
+    setF32(words, templateRowWord(rowOffset, rows.length, 7, row.id), row.centerFine[1]);
+    setF32(words, templateRowWord(rowOffset, rows.length, 8, row.id), row.centerFine[2]);
     const owners: { brick: number; resolution: number }[] = [];
     for (const term of row.terms) {
       const cell = cells[term.cellId]!;
@@ -508,7 +594,7 @@ function packAcceptedTopologyTemplates(
     }
     words[requirementAt++] = owners.length;
     for (const owner of owners) {
-      words[requirementAt++] = owner.brick; words[requirementAt++] = owner.resolution;
+      words[requirementAt++] = packedTemplateCellMetadata(owner.brick, owner.resolution);
     }
   }
   return {
@@ -656,8 +742,8 @@ PackedResidentTopologyTemplates {
       if (rowKeys.has(rowKey)) continue;
       rowKeys.add(rowKey);
       rows.push({ ...source, id: rows.length, centerFine: [...source.centerFine], terms });
-      rowRequirements.push([...requirements].flatMap(([key, level]) =>
-        [brickIndex.get(key)!, level]));
+      rowRequirements.push([...requirements].map(([key, level]) =>
+        packedTemplateCellMetadata(brickIndex.get(key)!, level)));
     }
   };
   appendRows(acceptedGrid, () => true);
@@ -732,8 +818,8 @@ PackedResidentTopologyTemplates {
   }
   const pressureEdgeCount = pressureEdgeOffsets[cells.length]!;
   let at = TEMPLATE_HEADER_WORDS;
-  const cellOffset = at; at += 16 * cells.length;
-  const rowOffset = at; at += 12 * rows.length;
+  const cellOffset = at; at += TEMPLATE_CELL_RECORD_WORDS * cells.length;
+  const rowOffset = at; at += TEMPLATE_ROW_PLANE_COUNT * rows.length;
   const termOffset = at; at += 2 * termCount;
   const incidenceOffset = at; at += cells.length + 1;
   const incidenceRecordOffset = at; at += 2 * incidenceCount;
@@ -750,28 +836,32 @@ PackedResidentTopologyTemplates {
     cellRangeOffset, rowRequirementOffset, atlas.bricks.length], 0);
   words[15] = pressureEdgeOffset;
   for (const cell of cells) {
-    const base = cellOffset + 16 * cell.id;
+    const base = cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell.id;
+    if (cell.openFraction !== 1 || cell.openVolume !== cell.volume
+      || cell.separatingPressureMinimum) {
+      throw new Error(`Sparse CM12 resident cell ${cell.id} has unsupported static boundary data`);
+    }
     setF32(words, base, cell.centerFine[0]); setF32(words, base + 1, cell.centerFine[1]);
     setF32(words, base + 2, cell.centerFine[2]); setF32(words, base + 3, cell.volume);
     setF32(words, base + 4, cell.widthsFine[0]); setF32(words, base + 5, cell.widthsFine[1]);
-    setF32(words, base + 6, cell.widthsFine[2]); words[base + 7] = cell.minimumFine[0];
-    words[base + 8] = cell.minimumFine[1]; words[base + 9] = cell.minimumFine[2];
-    words[base + 10] = cell.brickResolution; words[base + 11] = brickIndex.get(cell.brickKey)!;
-    setF32(words, base + 12, cell.openFraction); setF32(words, base + 13, cell.openVolume);
-    words[base + 14] = cell.separatingPressureMinimum ? 1 : 0;
-    words[base + 15] = cell.localIndex;
+    setF32(words, base + 6, cell.widthsFine[2]);
+    words[base + 7] = packedTemplateCellMetadata(
+      brickIndex.get(cell.brickKey)!, cell.brickResolution,
+    );
   }
   let nextTerm = 0;
   for (const row of rows) {
-    const base = rowOffset + 12 * row.id;
-    words[base] = nextTerm; words[base + 1] = row.terms.length; words[base + 2] = row.axis;
-    words[base + 3] = row.kind === "intra-brick" ? 0 : row.kind === "brick-face" ? 1
-      : row.kind === "mixed-seam" ? 2 : 3;
-    setF32(words, base + 4, row.dualWeight); setF32(words, base + 5, row.area);
-    setF32(words, base + 6, row.distance); setF32(words, base + 7, row.exteriorPhi ?? 0.5);
-    setF32(words, base + 8, row.centerFine[0]); setF32(words, base + 9, row.centerFine[1]);
-    setF32(words, base + 10, row.centerFine[2]);
-    words[base + 11] = rowRequirementOffsets[row.id]!;
+    words[templateRowWord(rowOffset, rows.length, 0, row.id)]
+      = packedTemplateRowTerms(nextTerm, row.terms.length);
+    words[templateRowWord(rowOffset, rows.length, 1, row.id)]
+      = packedTemplateRowMetadata(rowRequirementOffsets[row.id]!, row.kind, row.axis);
+    setF32(words, templateRowWord(rowOffset, rows.length, 2, row.id), row.dualWeight);
+    setF32(words, templateRowWord(rowOffset, rows.length, 3, row.id), row.area);
+    setF32(words, templateRowWord(rowOffset, rows.length, 4, row.id), row.distance);
+    setF32(words, templateRowWord(rowOffset, rows.length, 5, row.id), row.exteriorPhi ?? 0.5);
+    setF32(words, templateRowWord(rowOffset, rows.length, 6, row.id), row.centerFine[0]);
+    setF32(words, templateRowWord(rowOffset, rows.length, 7, row.id), row.centerFine[1]);
+    setF32(words, templateRowWord(rowOffset, rows.length, 8, row.id), row.centerFine[2]);
     for (const term of row.terms) {
       words[termOffset + 2 * nextTerm] = term.cellId;
       setF32(words, termOffset + 2 * nextTerm + 1, term.coefficient); nextTerm += 1;
@@ -790,7 +880,7 @@ PackedResidentTopologyTemplates {
   words.set(cellRanges, cellRangeOffset);
   let requirementAt = rowRequirementOffset;
   for (const requirements of rowRequirements) {
-    words[requirementAt++] = requirements.length / 2;
+    words[requirementAt++] = requirements.length;
     words.set(requirements, requirementAt); requirementAt += requirements.length;
   }
   words.set(pressureEdgeOffsets, pressureEdgeOffset);
@@ -824,11 +914,18 @@ interface ResidentStateLayout {
   readonly liquid: number; readonly theta: number; readonly residual: number;
   readonly preconditioned: number; readonly direction: number;
   readonly applied: number; readonly divergence: number;
-  readonly presentationBrickWet: number;
   readonly sharpeningDelta: number; readonly symmetryGamma: number;
   readonly solidCellOpen: number; readonly solidRowData: number;
   /** Four floats per tracer: fine-lattice position, then a live flag. */
   readonly tracers: number;
+  /**
+   * Base of the pressure journal, or zero when the solver was built without
+   * the capability. Past the tracers for the same reason they sit past the
+   * physics fields, and additionally because it is the only region whose size
+   * is a debug choice rather than a property of the scene.
+   */
+  readonly journal: number;
+  readonly journalLayout: SparseCM12PressureJournalLayout;
 }
 
 export interface SparseCM12FinePresentationPlan {
@@ -1137,30 +1234,39 @@ export function sparseCM12TracerLattice(
 function residentStateLayout(
   cellCount: number,
   rowCount: number,
-  brickCount: number,
   rigidCoupling: boolean,
   tracerCount: number,
+  journal: SparseCM12PressureJournalCapacityRequest = {},
 ): ResidentStateLayout {
   let at = 0;
   const cells = () => { const result = at; at += align4(cellCount); return result; };
   const rows = () => { const result = at; at += align4(rowCount); return result; };
   const cellVectors = () => { const result = at; at += align4(4 * cellCount); return result; };
-  const rowVectors = () => { const result = at; at += align4(4 * rowCount); return result; };
+  const solidRows = () => { const result = at; at += align4(3 * rowCount); return result; };
   return {
     densityA: cells(), densityB: cells(), gammaA: cells(), gammaB: cells(),
     cellVelocityA: cellVectors(), cellVelocityB: cellVectors(),
     faceA: rows(), faceB: rows(), pressure: cells(), rhs: cells(), diagonal: cells(),
     liquid: cells(), theta: rows(), residual: cells(), preconditioned: cells(),
     direction: cells(), applied: cells(), divergence: cells(),
-    presentationBrickWet: (() => { const result = at; at += align4(brickCount); return result; })(),
     sharpeningDelta: cells(), symmetryGamma: cells(),
     solidCellOpen: rigidCoupling ? cells() : 0,
-    solidRowData: rigidCoupling ? rowVectors() : 0,
+    solidRowData: rigidCoupling ? solidRows() : 0,
     // Tracers are presentation-only and are sized by the domain rather than by
     // the topology, so they sit past every physics field: a re-meshed frame
     // changes cell counts, and a marker must not silently land on a pressure
     // row because the arena in front of it grew.
     tracers: (() => { const result = at; at += align4(4 * tracerCount); return result; })(),
+    ...(() => {
+      const journalLayout = sparseCM12PressureJournalLayout({
+        iterationCapacity: journal.iterationCapacity ?? 0,
+        snapshotCapacity: journal.snapshotCapacity ?? 0,
+        cellStride: journal.iterationCapacity ? cellCount : 0,
+      });
+      const base = journalLayout.floatCount > 0 ? at : 0;
+      at += align4(journalLayout.floatCount);
+      return { journal: base, journalLayout };
+    })(),
     floatCount: at,
   };
 }
@@ -1190,8 +1296,8 @@ function packResidentTopology(
   const ownership = sparseCM12OwnershipTablePlan(atlas.bricks.length);
   const hashCapacity = ownership.hashCapacity;
   let at = 0;
-  const brickLookupOffset = at; at += 2 * hashCapacity;
-  const brickOffset = at; at += 4 * atlas.bricks.length;
+  const brickLookupOffset = at; at += hashCapacity;
+  const brickOffset = at; at += 2 * atlas.bricks.length;
   const backgroundOwnerOffset = at; at += 2;
   const words = new Uint32Array(at);
   words.fill(INVALID, brickLookupOffset, brickOffset);
@@ -1207,36 +1313,21 @@ function packResidentTopology(
   words[backgroundOwnerOffset] = candidateBrickCount;
   words[backgroundOwnerOffset + 1] = (0x8000_0000
     | maximumSpanLog) >>> 0;
-  const firstCellByBrick = new Uint32Array(atlas.bricks.length).fill(INVALID);
-  const cellCountByBrick = new Uint32Array(atlas.bricks.length);
-  for (const cell of grid.cells) {
-    const brickIndex = brickIndexByKey.get(cell.brickKey);
-    if (brickIndex === undefined) {
-      throw new Error(`Sparse CM12 cell ${cell.id} has no resident brick`);
-    }
-    if (firstCellByBrick[brickIndex] === INVALID) firstCellByBrick[brickIndex] = cell.id;
-    if (cell.id !== firstCellByBrick[brickIndex] + cellCountByBrick[brickIndex]) {
-      throw new Error(`Sparse CM12 brick ${cell.brickKey} cells are not contiguous`);
-    }
-    cellCountByBrick[brickIndex] += 1;
-  }
   for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
     const source = atlas.bricks[brick]!;
     let slot = (Math.imul(source.key, 0x9e37_79b1) >>> 0) & (hashCapacity - 1);
-    while (words[brickLookupOffset + 2 * slot] !== INVALID) {
+    while (words[brickLookupOffset + slot] !== INVALID) {
       slot = (slot + 1) & (hashCapacity - 1);
     }
-    words[brickLookupOffset + 2 * slot] = source.key;
-    words[brickLookupOffset + 2 * slot + 1] = brick;
-    const record = brickOffset + 4 * brick;
-    words[record] = firstCellByBrick[brick];
-    words[record + 1] = cellCountByBrick[brick];
-    // Log2(span) and the optional mutation-page slot share the formerly
-    // redundant packed-resolution word. Zero in the upper bits means no page.
-    words[record + 2] = Math.log2(sparseBrickSpan(atlas.bricks[brick]!))
+    words[brickLookupOffset + slot] = brick;
+    const record = brickOffset + 2 * brick;
+    // Log2(span) and the optional mutation-page slot share one word. Cell
+    // ranges live only in the immutable template table, so the compact owner
+    // directory needs no duplicate first/count pair per brick.
+    words[record] = Math.log2(sparseBrickSpan(atlas.bricks[brick]!))
       | (candidateSlotByBrick[brick] === INVALID
         ? 0 : ((candidateSlotByBrick[brick]! + 1) << 5));
-    words[record + 3] = source.key;
+    words[record + 1] = source.key;
   }
   return { words, cellOffset: 0, rowOffset: 0, termOffset: 0, incidenceOffset: 0,
     incidenceRecordOffset: 0, brickLookupOffset, brickOffset, backgroundOwnerOffset,
@@ -1272,12 +1363,16 @@ function compactPressureTopology(
   const edgeRecords = sourceOffset + templates.cellCount + 1;
   const contributions = new Map<number, number[]>();
   for (let cell = 0; cell < templates.cellCount; cell += 1) {
-    const brick = templates.words[cellOffset + 16 * cell + 11]!;
+    const brick = templateCellBrick(
+      templates.words, cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell,
+    );
     const begin = templates.words[sourceOffset + cell]!;
     const end = templates.words[sourceOffset + cell + 1]!;
     for (let edge = begin; edge < end; edge += 1) {
       const other = templates.words[edgeRecords + 3 * edge + 1]!;
-      const otherBrick = templates.words[cellOffset + 16 * other + 11]!;
+      const otherBrick = templateCellBrick(
+        templates.words, cellOffset + TEMPLATE_CELL_RECORD_WORDS * other,
+      );
       if (otherBrick === brick) continue;
       const key = brick * brickCount + otherBrick;
       const list = contributions.get(key);
@@ -1291,7 +1386,10 @@ function compactPressureTopology(
     coarseOffsets[brick + 1] += coarseOffsets[brick]!;
   }
   const contributionCount = ordered.reduce((sum, [, list]) => sum + list.length, 0);
-  const compactEdgeWords = templates.words.length - sourceOffset;
+  // Pressure consumers already keep neighbor IDs in their dense hot cache.
+  // Preserve only CSR offsets plus contiguous row and coefficient planes here;
+  // the source template's neighbor word is construction-only after `ordered`.
+  const compactEdgeWords = templates.cellCount + 1 + 2 * edgeCount;
   const coarseBase = TEMPLATE_HEADER_WORDS + compactEdgeWords;
   const coarseRecordBase = coarseBase + 4 + coarseOffsets.length;
   const contributionBase = coarseRecordBase + 3 * ordered.length;
@@ -1369,7 +1467,14 @@ function compactPressureTopology(
   const result = new Uint32Array(hierarchyBase + hierarchyWords);
   result.set(templates.words.subarray(0, TEMPLATE_HEADER_WORDS));
   result[15] = TEMPLATE_HEADER_WORDS;
-  result.set(templates.words.subarray(sourceOffset), TEMPLATE_HEADER_WORDS);
+  const compactEdgeRows = TEMPLATE_HEADER_WORDS + templates.cellCount + 1;
+  const compactEdgeWeights = compactEdgeRows + edgeCount;
+  result.set(templates.words.subarray(sourceOffset,
+    sourceOffset + templates.cellCount + 1), TEMPLATE_HEADER_WORDS);
+  for (let edge = 0; edge < edgeCount; edge += 1) {
+    result[compactEdgeRows + edge] = templates.words[edgeRecords + 3 * edge]!;
+    result[compactEdgeWeights + edge] = templates.words[edgeRecords + 3 * edge + 2]!;
+  }
   result[13] = hierarchyBase;
   result[14] = coarseBase;
   result.set([brickCount, ordered.length, contributionCount, edgeCount], coarseBase);
@@ -1421,10 +1526,10 @@ function compactPressureTopology(
   return result;
 }
 
-/** Writable pressure dispatch headers/worklists followed by the immutable
- * dense neighbor stream consumed by every SpMV. Keeping this out of the
- * presentation payload removes both atomic access and a 3-u32 record stride
- * from the pressure hot path. */
+/** Writable pressure dispatch headers/worklists followed by immutable SoA
+ * edge payloads shared by transport extrapolation and every pressure SpMV.
+ * Neighbor IDs and extrapolation weights are construction-time topology
+ * products: frame kernels only apply the current row-acceptance predicate. */
 function pressureWorklistAndNeighbors(
   templates: PackedResidentTopologyTemplates,
 ): Uint32Array {
@@ -1432,9 +1537,41 @@ function pressureWorklistAndNeighbors(
   const edgeCount = templates.words[edgeOffsets + templates.cellCount]!;
   const edgeRecords = edgeOffsets + templates.cellCount + 1;
   const neighborOffset = 8 + templates.cellCount + templates.rowCount;
-  const result = new Uint32Array(neighborOffset + edgeCount);
+  const extrapolationWeightOffset = neighborOffset + edgeCount;
+  const result = new Uint32Array(extrapolationWeightOffset + edgeCount);
+  const cellOffset = templates.words[6]!;
+  const cellRangeOffset = templates.words[11]!;
+  const rowOffset = templates.words[7]!;
+  const termOffset = templates.words[8]!;
+  for (let cell = 0; cell < templates.cellCount; cell += 1) {
+    const base = cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell;
+    const brick = templateCellBrick(templates.words, base);
+    const resolution = templateCellResolution(templates.words, base);
+    const range = cellRangeOffset + 2 * (4 * brick + Math.log2(resolution));
+    const first = templates.words[range]!, count = templates.words[range + 1]!;
+    if (count !== resolution ** 3 || cell < first || cell >= first + count) {
+      throw new Error(`Sparse CM12 pressure brick range ${brick}/${resolution} is not dense`);
+    }
+  }
   for (let edge = 0; edge < edgeCount; edge += 1) {
-    result[neighborOffset + edge] = templates.words[edgeRecords + 3 * edge + 1]!;
+    const record = edgeRecords + 3 * edge;
+    const row = templates.words[record]!;
+    const neighbor = templates.words[record + 1]!;
+    result[neighborOffset + edge] = neighbor;
+    const packedTerms = templates.words[rowOffset + row]!;
+    const begin = packedTerms & TEMPLATE_ROW_OFFSET_MASK;
+    const end = begin + (packedTerms >>> 28);
+    let found = false;
+    for (let term = begin; term < end; term += 1) {
+      if (templates.words[termOffset + 2 * term] !== neighbor) continue;
+      result[extrapolationWeightOffset + edge]
+        = templates.words[termOffset + 2 * term + 1]! & 0x7fff_ffff;
+      found = true;
+      break;
+    }
+    if (!found) {
+      throw new Error(`Sparse CM12 pressure edge ${edge} has no neighbor term`);
+    }
   }
   return result;
 }
@@ -1496,6 +1633,18 @@ export class WebGPUSparseCM12Resident {
    * check and rebuild a bind group every frame. */
   readonly tracerSource: GPUFluidTracerSource;
   private tracersEnabled = false;
+  /**
+   * Whether the next encoded advance writes a pressure journal.
+   *
+   * Separate from having reserved the region: capture is a one-frame act and
+   * the film is read on a paused sim. An armed frame splits no pass and adds
+   * no barrier, so it computes exactly what an unarmed one computes — but it
+   * does add dispatches, so a wall measured with the journal armed must never
+   * be compared against one measured without it.
+   */
+  private journalArmed = false;
+  /** Snapshot slots the last armed encode filled; the scrub's upper bound. */
+  private journalSnapshotCount = 0;
   /** Set on every off-to-on transition, so enabling re-reads the live liquid. */
   private tracerSeedPending = false;
 
@@ -1597,6 +1746,7 @@ export class WebGPUSparseCM12Resident {
       (brick) => brick.key,
     )),
     rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
   ): Promise<WebGPUSparseCM12Resident> {
     if (atlas.boundary) {
       throw new Error("Sparse CM12 sparse MGPCG does not support separating boundaries; no fallback solver is installed");
@@ -1624,6 +1774,8 @@ export class WebGPUSparseCM12Resident {
       : packAcceptedTopologyTemplates(atlas, grid);
     if (hostTemplateVariants) {
       const cellOffset = templates.words[6]!, rangeOffset = templates.words[11]!;
+      const templateFloats = new Float32Array(templates.words.buffer,
+        templates.words.byteOffset, templates.words.length);
       for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
         if (!mutableBrickKeys.has(atlas.bricks[brick]!.key)) continue;
         for (let level = 0; level < TEMPLATE_LEVELS.length; level += 1) {
@@ -1634,16 +1786,19 @@ export class WebGPUSparseCM12Resident {
             throw new Error(`Sparse CM12 template range ${brick}/${resolution} has ${count} cells`);
           }
           for (let cell = first; cell < first + count; cell += 1) {
-            const base = cellOffset + 16 * cell;
+            const base = cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell;
             const coordinate = atlas.bricks[brick]!.coordinate;
-            if (templates.words[base + 10] !== resolution
-              || templates.words[base + 11] !== brick
-              || templates.words[base + 7]! < 8 * coordinate[0]
-              || templates.words[base + 7]! >= 8 * (coordinate[0] + 1)
-              || templates.words[base + 8]! < 8 * coordinate[1]
-              || templates.words[base + 8]! >= 8 * (coordinate[1] + 1)
-              || templates.words[base + 9]! < 8 * coordinate[2]
-              || templates.words[base + 9]! >= 8 * (coordinate[2] + 1)) {
+            const lower = [0, 1, 2].map((axis) => Math.round(
+              templateFloats[base + axis]! - 0.5 * templateFloats[base + 4 + axis]!,
+            ));
+            if (templateCellResolution(templates.words, base) !== resolution
+              || templateCellBrick(templates.words, base) !== brick
+              || lower[0]! < 8 * coordinate[0]
+              || lower[0]! >= 8 * (coordinate[0] + 1)
+              || lower[1]! < 8 * coordinate[1]
+              || lower[1]! >= 8 * (coordinate[1] + 1)
+              || lower[2]! < 8 * coordinate[2]
+              || lower[2]! >= 8 * (coordinate[2] + 1)) {
               throw new Error(`Sparse CM12 template range ${brick}/${resolution} aliases cell ${cell}`);
             }
           }
@@ -1657,8 +1812,17 @@ export class WebGPUSparseCM12Resident {
       finestCellSize_m;
     const tracerLattice = sparseCM12TracerLattice(atlas.dimensions);
     const layout = residentStateLayout(
-      templates.cellCount, templates.rowCount, packed.brickCount, Boolean(rigid),
+      templates.cellCount, templates.rowCount, Boolean(rigid),
       tracerLattice.count,
+      journal?.iterationCapacity
+        ? {
+          // One more than the ceiling: record 0 is the seed, before any
+          // iteration has run, and the film starts there.
+          iterationCapacity: journal.iterationCapacity + 1,
+          snapshotCapacity: journal.snapshotCapacity
+            ?? SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS,
+        }
+        : {},
     );
     const horizontalD4Authority = sparseAtlasScalarsHaveHorizontalD4Symmetry(
       grid,
@@ -1688,8 +1852,8 @@ export class WebGPUSparseCM12Resident {
         initialState[layout.solidCellOpen + cell] = 1;
       }
       for (let row = 0; row < templates.rowCount; row += 1) {
-        initialState[layout.solidRowData + 4 * row] = 1;
-        initialState[layout.solidRowData + 4 * row + 3] = 1;
+        initialState[layout.solidRowData + 3 * row] = 1;
+        initialState[layout.solidRowData + 3 * row + 2] = 1;
       }
       state = uploadBuffer(device, "Sparse CM12 resident state", initialState, storage);
     } else {
@@ -1740,7 +1904,9 @@ export class WebGPUSparseCM12Resident {
         else initialActivity[20] += 1;
       }
       if (initialActivity[at + 10] !== 0) {
-        initialActivity[11] += packed.words[packed.brickOffset + 4 * brick + 1]!;
+        const level = Math.log2(atlas.bricks[brick]!.resolution);
+        const range = templates.words[11]! + 2 * (4 * brick + level);
+        initialActivity[11] += templates.words[range + 1]!;
       }
     }
     const activity = uploadBuffer(device, "Sparse CM12 resident activity history",
@@ -1748,6 +1914,7 @@ export class WebGPUSparseCM12Resident {
     const pressureEdgeOffset = templates.words[15]!;
     const pressureEdgeCount = templates.words[pressureEdgeOffset + templates.cellCount]!;
     const pressureTopology = compactPressureTopology(templates, atlas);
+    const pressureWorklistData = pressureWorklistAndNeighbors(templates);
     const pressureCoarseBase = pressureTopology[14]!;
     const pressureCoarseEdgeCount = pressureTopology[pressureCoarseBase + 1]!;
     const pressureHierarchyBase = pressureTopology[13]!;
@@ -1760,17 +1927,20 @@ export class WebGPUSparseCM12Resident {
       const crossOffsets = pressureTopology[descriptor + 6]!;
       return pressureTopology[crossOffsets + groupCount]!;
     });
+    if (templates.cellCount >= 0x1fff_ffff) {
+      throw new Error("Sparse CM12 pressure brick range cache exhausts its 29-bit cell base");
+    }
     const pressureScratchBytes = 4 * (pressureEdgeCount + pressureCoarseEdgeCount
-      + 4 * packed.brickCount
+      + 5 * packed.brickCount
       + pressureHierarchyGroupCounts.reduce((sum, count, level) =>
-        sum + 4 * count + pressureHierarchyEdgeCounts[level]!, 0));
+        sum + 4 * count + pressureHierarchyEdgeCounts[level]!, 0)
+      + templates.cellCount);
     const candidateState = device.createBuffer({
       label: "Sparse CM12 isolated candidate cell fields",
       // Candidate transfer begins after projection, so the same storage first
       // carries the pressure epoch's baked effective edge coefficients.
       size: Math.max(4, pressureScratchBytes,
-        4 * CANDIDATE_CHANNELS * CANDIDATE_CELLS_PER_BRICK
-          * packed.candidateBrickCount),
+        4 * CANDIDATE_FLOATS_PER_BRICK * packed.candidateBrickCount),
       usage: storage,
     });
     const topologyPagePool = sparseCM12TopologyPagePoolPlan(
@@ -1814,15 +1984,20 @@ export class WebGPUSparseCM12Resident {
     // storage-buffer limit. Upload its immutable head and mutable tail
     // separately: materializing their concatenation briefly doubled the
     // largest host allocation during scene loading.
-    templates.words[14] = templates.words.length;
+    // The pressure CSR tail has already been transformed into the two compact
+    // pressure buffers above. No ordinary/topology pass reads it, so do not
+    // upload that construction-only duplicate into the mutable template arena.
+    const physicalTemplateWordCount = pressureEdgeOffset;
+    const physicalTemplateBytes = 4 * physicalTemplateWordCount;
+    templates.words[14] = physicalTemplateWordCount;
     const topologyArena = device.createBuffer({
       label: "Sparse CM12 physical topology templates and worklists",
-      size: Math.max(4, templates.words.byteLength + initialWorklists.byteLength),
+      size: Math.max(4, physicalTemplateBytes + initialWorklists.byteLength),
       usage: storage,
     });
     device.queue.writeBuffer(topologyArena, 0, templates.words.buffer as ArrayBuffer,
-      templates.words.byteOffset, templates.words.byteLength);
-    device.queue.writeBuffer(topologyArena, templates.words.byteLength,
+      templates.words.byteOffset, physicalTemplateBytes);
+    device.queue.writeBuffer(topologyArena, physicalTemplateBytes,
       initialWorklists.buffer as ArrayBuffer, initialWorklists.byteOffset,
       initialWorklists.byteLength);
     const pressureTemplates = uploadBuffer(device,
@@ -1830,7 +2005,7 @@ export class WebGPUSparseCM12Resident {
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     const pressureWorklists = uploadBuffer(device,
       "Sparse CM12 ordinary pressure worklists and dense neighbors",
-      pressureWorklistAndNeighbors(templates),
+      pressureWorklistData,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     const acceptedIndirectArguments = uploadBuffer(device,
       "Sparse CM12 accepted indirect dispatch snapshot",
@@ -1972,10 +2147,25 @@ export class WebGPUSparseCM12Resident {
       "validateAndCommitShadowTopology",
       "retireUnsupportedEmptyBricks",
       "classifyPresentationBricks",
-      "publishSparseLevelSet"] as const;
+      "publishSparseLevelSet",
+      "journalIteration", "journalSnapshot"] as const;
     const entries = await Promise.all(names.map(async (name) => [name,
       await device.createComputePipelineAsync({ label: `Sparse CM12 ${name}`,
         layout: pipelineLayout, compute: { module: shaderModule, entryPoint: name } })] as const));
+    // Two pipelines from one entry point: the snapshot variant additionally
+    // advances the device-side snapshot cursor and stamps its slot into the
+    // record it writes. Compiled only when a journal was actually reserved.
+    const journalEntries = layout.journal === 0 ? [] : [
+      ["journalIterationSnapshot", await device.createComputePipelineAsync({
+        label: "Sparse CM12 journalIteration with field snapshot",
+        layout: pipelineLayout,
+        compute: {
+          module: shaderModule,
+          entryPoint: "journalIteration",
+          constants: { JOURNAL_SNAPSHOT: 1 },
+        },
+      })] as const,
+    ];
     const rigidCoupling = rigid ? await WebGPUSparseCM12RigidCoupling.create(device, {
       parameters,
       state,
@@ -1998,14 +2188,14 @@ export class WebGPUSparseCM12Resident {
       bindGroup,
       pressureBindGroup,
       pressureTemplates,
-      Object.fromEntries(entries),
+      Object.fromEntries([...entries, ...journalEntries]),
       templates.cellCount, templates.rowCount,
       templates.cellCount, templates.rowCount,
       pressureCoarseEdgeCount,
       pressureHierarchyGroupCounts.reduce((sum, count) => sum + count, 0),
       pressureHierarchyEdgeCounts.reduce((sum, count) => sum + count, 0),
       pressureScratchBytes,
-      templates.words.byteLength,
+      physicalTemplateBytes,
       templates.words,
       horizontalD4Authority, atlas.boundary, rigidCoupling);
     result.writeParameters(packed, 0.004, 1, 1, [0, 0, 0], undefined, undefined,
@@ -2032,6 +2222,26 @@ export class WebGPUSparseCM12Resident {
       accelerationFinePerSecond2, sharpening, activityPolicy, pressureControl, bodyCount,
       worldDimensions_m);
     const pressureIterations = sparseCM12PressureIterations(pressureControl?.iterations);
+    // The header carries the two device-side cursors, so it starts each
+    // captured frame at zero. The records and snapshots behind it are
+    // overwritten in place and never read past their cursor.
+    const journaling = this.journalArmed && this.layout.journal !== 0;
+    if (journaling) {
+      encoder.clearBuffer(this.state, 4 * this.layout.journal,
+        4 * SPARSE_CM12_PRESSURE_JOURNAL_HEADER_FLOATS);
+    }
+    // Which encoded iterations carry a whole-field snapshot. A pure function of
+    // the ceiling and the reserved capacity, so the host and the device-side
+    // cursor agree without either telling the other.
+    const journalSnapshots = journaling
+      ? new Set(sparseCM12PressureJournalSchedule(pressureIterations,
+        this.layout.journalLayout.snapshotCapacity))
+      : undefined;
+    // Published for the film's scrub, which otherwise has no way to know where
+    // the capture ends: the reserved capacity is an upper bound, and a short
+    // solve fills fewer slots than it. Scrubbing across the unfilled tail would
+    // show the previous capture's frames as though they belonged to this one.
+    if (journalSnapshots) this.journalSnapshotCount = journalSnapshots.size;
     encoder.clearBuffer(this.conditioning, 0,
       Math.max(4, 12 * this.templateCellCount));
     // classifyRows only visits accepted rows. Clear the cached ghost-fluid
@@ -2108,9 +2318,28 @@ export class WebGPUSparseCM12Resident {
       pass = undefined;
       seams.close(id);
     };
+    /**
+     * Record one encoded iteration, and snapshot the fields when this is a
+     * scheduled snapshot iteration.
+     *
+     * Encodes nothing at all when the journal is disarmed — the whole feature
+     * costs a branch on the host, which is the same bargain the tracer stage
+     * strikes. Inside a captured frame it is two dispatches, in the open pass,
+     * with no copy and therefore no pass boundary.
+     */
+    const journalRecord = (iteration: number) => {
+      if (!journalSnapshots) return;
+      const snapshot = journalSnapshots.has(iteration);
+      dispatch(snapshot ? "journalIterationSnapshot" : "journalIteration", 1);
+      if (snapshot) dispatchAccepted("journalSnapshot", "cell");
+    };
     const bricks = Math.ceil(packed.brickCount / WORKGROUP_SIZE);
     stage("transport-velocity-extension", () => {
       this.rigidCoupling?.encodeVoxelization(encoder, bodyCount);
+      // Transport extrapolation consumes the same construction-time CSR edge
+      // cache as pressure. Keep that immutable topology bound through the hot
+      // physics stages; presentation restores its own metadata binding later.
+      useBindGroup(this.pressureBindGroup);
       dispatchAccepted("initializeTransportVelocity", "cell");
       for (let sweep = 0; sweep < 8; sweep += 1) {
         dispatchAccepted(sweep % 2 === 0
@@ -2225,6 +2454,11 @@ export class WebGPUSparseCM12Resident {
       dispatch("reduceInitialTrueResidual", 1);
       dispatchPressureCell("initializePipelinedImage");
       dispatch("reducePipelinedInitialize", 1);
+      // Record 0 is the seed: the warm-started pressure and its true residual
+      // before any iteration has touched them. The first correction is the
+      // largest one in the solve, so a film that started at iteration 1 would
+      // miss the only frame where the seed is visible.
+      journalRecord(0);
     });
     stage("pressure-solve", () => {
       for (let iteration = 0;
@@ -2263,6 +2497,9 @@ export class WebGPUSparseCM12Resident {
             dispatchPressureCell("applyPipelinedRecovery");
             dispatch("reducePipelinedRecovery", 1);
           }
+          // After the cadence guard, so a record carries the true-residual
+          // check and the gate closure that its own iteration earned.
+          journalRecord(iteration + 1);
       }
       // Always close the solve with a fresh b-Ap application. No convergence
       // or performance receipt may rely on the recursive residual.
@@ -2318,7 +2555,9 @@ export class WebGPUSparseCM12Resident {
       dispatch("retireUnsupportedEmptyBricks", bricks);
     });
     stage("presentation-publication", () => {
-      dispatch("classifyPresentationBricks", bricks);
+      // measureBrickActivity has already reduced the identical density/mass
+      // wetness predicate and published its existing occupied bit per resident
+      // brick. Do not sweep every brick's cells a second time here.
       dispatch("publishSparseLevelSet",
         this.globalFineLevelSetSource.plan.maximumResidentBricks);
     });
@@ -2354,6 +2593,90 @@ export class WebGPUSparseCM12Resident {
   /** Re-read the mixing from this instant, without toggling the view. */
   reseedTracers(): void {
     if (this.tracersEnabled) this.tracerSeedPending = true;
+  }
+
+  /** The journal region this solver reserved. `floatCount` 0 means none. */
+  get pressureJournalLayout(): SparseCM12PressureJournalLayout {
+    return this.layout.journalLayout;
+  }
+
+  /**
+   * Capture the next advance's pressure solve, or stop capturing.
+   *
+   * Returns whether the request could be honoured: a solver built without a
+   * reserved journal cannot capture, and says so rather than arming a flag
+   * that would encode nothing and read back zeros.
+   */
+  armPressureJournal(armed: boolean): boolean {
+    if (armed && this.layout.journal === 0) return false;
+    this.journalArmed = armed;
+    return true;
+  }
+
+  get pressureJournalArmed(): boolean {
+    return this.journalArmed;
+  }
+
+  /**
+   * Where the captured fields are, for a view to read on the device.
+   *
+   * The snapshots deliberately never come back to the host. They are the large
+   * part of the capture — four fields per snapshot over every accepted cell —
+   * and a scrubber that mapped them would stall on every frame of the film for
+   * data the draw could read where it already sits. Only the records below,
+   * which are kilobytes, are read back.
+   */
+  get pressureJournalSource(): GPUPressureJournalSource | undefined {
+    if (this.layout.journal === 0) return undefined;
+    return {
+      state: this.state,
+      topologyArena: this.topologyArena,
+      journalFloatOffset: this.layout.journal,
+      layout: this.layout.journalLayout,
+      snapshotCount: this.journalSnapshotCount,
+      liquidFloatOffset: this.layout.liquid,
+      cellCount: this.templateCellCount,
+      domainFine: this.dimensions,
+      // The width the last advance was parameterised with, as the face
+      // velocity source reads it: it is the lattice-to-metres scale, and a
+      // captured frame is always the last one advanced.
+      finestCell_m: this.parameterF32[41] ?? 0,
+    };
+  }
+
+  /**
+   * Read back the header and iteration records of the last captured advance.
+   *
+   * QA and panel path only, never frame scheduling: it maps a buffer and
+   * therefore stalls. Returns undefined when nothing has been captured, so a
+   * panel opened before the first armed frame shows "no capture" rather than a
+   * film of a hundred and twenty-eight zeroed iterations.
+   */
+  async readPressureJournal(): Promise<SparseCM12PressureJournal | undefined> {
+    this.assertLive();
+    const layout = this.layout.journalLayout;
+    if (this.layout.journal === 0) return undefined;
+    const floats = SPARSE_CM12_PRESSURE_JOURNAL_HEADER_FLOATS
+      + layout.iterationCapacity * SPARSE_CM12_PRESSURE_JOURNAL_ITERATION_FLOATS;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 pressure journal readback",
+      size: 4 * floats,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 pressure journal readback" });
+      encoder.copyBufferToBuffer(this.state, 4 * this.layout.journal,
+        readback, 0, 4 * floats);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const values = new Float32Array(readback.getMappedRange()).slice();
+      const journal = decodeSparseCM12PressureJournal(values, layout);
+      return journal.armed ? journal : undefined;
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
   }
 
   /**
@@ -2497,7 +2820,7 @@ export class WebGPUSparseCM12Resident {
     u.set([l.cellVelocityA, l.cellVelocityB, l.faceA, l.faceB], 20);
     u.set([l.pressure, l.rhs, l.diagonal, l.liquid], 24);
     u.set([l.theta, l.residual, l.preconditioned, l.direction], 28);
-    u.set([l.applied, l.divergence, l.presentationBrickWet, 0], 32);
+    u.set([l.applied, l.divergence, 0, 0], 32);
     // The D4 pass needs two disjoint scalar scratch arrays. In particular the
     // gamma scratch must never alias densityA at offset zero: doing so corrupts
     // gamma after the first symmetric frame and makes transport create mass on
@@ -2535,6 +2858,9 @@ export class WebGPUSparseCM12Resident {
     f.set([...(worldDimensions_m ?? [0, 0, 0]), bodyCount], 96);
     u.set([...this.tracerLattice.dimensions, this.tracerLattice.count], 100);
     f.set([...this.tracerLattice.originFine, this.tracerLattice.spacingFine], 104);
+    const journal = this.layout.journalLayout;
+    u.set([this.layout.journal, journal.iterationCapacity, journal.snapshotCapacity,
+      journal.cellStride], 108);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
   }
 
@@ -2731,24 +3057,24 @@ export class WebGPUSparseCM12Resident {
       const cellOffset = this.templateWords[6]!, rangeOffset = this.templateWords[11]!;
       for (let brick = 0; brick < activitySnapshot.records.length; brick += 1) {
         const record = activitySnapshot.records[brick]!;
-        if (!record.active
-          || !(state[this.layout.presentationBrickWet + brick]! > 0.5)) continue;
+        if (!record.active || (record.reasons & 64) === 0) continue;
         const level = record.acceptedResolution === 8 ? 3
           : record.acceptedResolution === 4 ? 2 : record.acceptedResolution === 2 ? 1 : 0;
         const first = this.templateWords[rangeOffset + 2 * (4 * brick + level)]!;
         const cellCount = this.templateWords[rangeOffset + 2 * (4 * brick + level) + 1]!;
-        const brickRecord = this.lastPacked!.brickOffset + 4 * brick;
-        const key = this.lastPacked!.words[brickRecord + 3]!;
-        const spanBricks = 1 << (this.lastPacked!.words[brickRecord + 2]! & 31);
+        const brickRecord = this.lastPacked!.brickOffset + 2 * brick;
+        const key = this.lastPacked!.words[brickRecord + 1]!;
+        const spanBricks = 1 << (this.lastPacked!.words[brickRecord]! & 31);
         const brickDimensions = this.dimensions.map((size) => Math.ceil(size / 8));
         const brickZ = Math.floor(key / (brickDimensions[0]! * brickDimensions[1]!));
         const keyXY = key - brickZ * brickDimensions[0]! * brickDimensions[1]!;
         const brickY = Math.floor(keyXY / brickDimensions[0]!);
         const brickX = keyXY - brickY * brickDimensions[0]!;
         for (let cell = first; cell < first + cellCount; cell += 1) {
-        const base = cellOffset + 16 * cell;
-        const lower = [this.templateWords[base + 7]!, this.templateWords[base + 8]!,
-          this.templateWords[base + 9]!] as const;
+        const base = cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell;
+        const lower = [0, 1, 2].map((axis) => Math.round(
+          topologyFloats[base + axis]! - 0.5 * topologyFloats[base + 4 + axis]!,
+        ));
         if (lower[0] < 8 * brickX || lower[0] >= 8 * (brickX + spanBricks)
           || lower[1] < 8 * brickY || lower[1] >= 8 * (brickY + spanBricks)
           || lower[2] < 8 * brickZ || lower[2] >= 8 * (brickZ + spanBricks)) {
@@ -2804,8 +3130,8 @@ export class WebGPUSparseCM12Resident {
           scoreByte: words[at]!,
           reasons: words[at + 1]!,
           thinFluid: (words[at + 1]! & 256) !== 0,
-          hotEpochs: words[at + 2]!,
-          quietEpochs: words[at + 3]!,
+          hotEpochs: words[at + 2]! & 0xff,
+          quietEpochs: (words[at + 2]! >>> 8) & 0xff,
           meanDensity: new DataView(words.buffer).getFloat32(4 * (at + 4), true),
           densityMoments: [5, 6, 7].map((offset) =>
             new DataView(words.buffer).getFloat32(4 * (at + offset), true)) as
@@ -2851,7 +3177,7 @@ export class WebGPUSparseCM12Resident {
           faceTransferStatus: (words[at + 31] === 1 ? 1 : words[at + 31] === 2 ? 2 : 0) as
             SparseCM12GPUActivityRecord["faceTransferStatus"],
           supportMask: words[at + 32]!,
-          sweptSupportMask: words[at + 39]!,
+          sweptSupportMask: words[at + 3]!,
           maximumVelocityTravelFineCells: new DataView(words.buffer).getFloat32(
             4 * (at + 33), true,
           ),

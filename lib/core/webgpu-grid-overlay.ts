@@ -152,7 +152,10 @@ fn nearestBodyDistance(ro: vec3f, rd: vec3f) -> f32 {
 
 const SPARSE_INVALID:u32=0xffffffffu;
 const SPARSE_ACTIVITY_HEADER_WORDS:u32=28u;
-const SPARSE_ACTIVITY_RECORD_WORDS:u32=40u;
+// Keep this stride in lockstep with ACTIVITY_RECORD_WORDS in the sparse CM12
+// resident ABI. Reading the former 40-word layout shifts every brick after the
+// first and makes represented cells disappear in disconnected patches.
+const SPARSE_ACTIVITY_RECORD_WORDS:u32=39u;
 fn sparseGridEnabled()->bool{
   return sparseP.counts.x>0u&&all(sparseP.dimensions.xyz==vec3u(u.gridInfo.xyz));
 }
@@ -162,15 +165,17 @@ fn sparseBrickLookup(key:u32)->u32{
   if(key>=count){return SPARSE_INVALID;}
   let xy=brickDims.x*brickDims.y;let z=key/xy;let remainder=key-z*xy;
   let y=remainder/brickDims.x;let coordinate=vec3u(remainder-y*brickDims.x,y,z);
-  let capacity=(sparseP.topologyOffsets2.z-sparseP.topologyOffsets2.y)/2u;
+  let capacity=sparseP.topologyOffsets2.z-sparseP.topologyOffsets2.y;
   let mask=capacity-1u;let maximumSpanLog=sparseTopology[sparseP.topologyOffsets2.w+1u]&31u;
   for(var spanLog=0u;spanLog<=maximumSpanLog;spanLog+=1u){
     let span=1u<<spanLog;let origin=(coordinate/span)*span;
     let originKey=origin.x+brickDims.x*(origin.y+brickDims.y*origin.z);
     var slot=(originKey*0x9e3779b1u)&mask;
-    for(var probe=0u;probe<capacity;probe+=1u){let at=sparseP.topologyOffsets2.y+2u*slot;
-      let candidate=sparseTopology[at];if(candidate==SPARSE_INVALID){break;}
-      if(candidate==originKey){let brick=sparseTopology[at+1u];
+    for(var probe=0u;probe<capacity;probe+=1u){
+      let brick=sparseTopology[sparseP.topologyOffsets2.y+slot];
+      if(brick==SPARSE_INVALID){break;}
+      let candidate=sparseTopology[sparseP.topologyOffsets2.z+2u*brick+1u];
+      if(candidate==originKey){
         if(sparseBrickSpan(brick)==span){return brick;}break;}slot=(slot+1u)&mask;}
   }
   return SPARSE_INVALID;
@@ -184,7 +189,7 @@ fn sparseAcceptedResolution(brick:u32)->u32{
     +SPARSE_ACTIVITY_RECORD_WORDS*brick+12u];
 }
 fn sparseBrickSpan(brick:u32)->u32{
-  return 1u<<(sparseTopology[sparseP.topologyOffsets2.z+4u*brick+2u]&31u);
+  return 1u<<(sparseTopology[sparseP.topologyOffsets2.z+2u*brick]&31u);
 }
 fn sparseTemplateLevelIndex(resolution:u32)->u32{
   return select(select(select(0u,1u,resolution==2u),2u,resolution==4u),3u,
@@ -194,9 +199,6 @@ fn sparseTemplateCellRange(brick:u32,resolution:u32)->vec2u{
   let at=sparseTopologyArena[11u]
     +2u*(4u*brick+sparseTemplateLevelIndex(resolution));
   return vec2u(sparseTopologyArena[at],sparseTopologyArena[at+1u]);
-}
-fn sparseTemplateCellBase(cell:u32)->u32{
-  return sparseTopologyArena[6u]+16u*cell;
 }
 fn sparseOwner(q:vec3i)->vec2u{
   if(!sparseGridEnabled()||any(q<vec3i(0))||any(q>=vec3i(sparseP.dimensions.xyz))){return vec2u(SPARSE_INVALID);}
@@ -260,10 +262,13 @@ fn sparseFinePhiAt(q:vec3i)->f32{
 }
 fn sparseOwnerKey(q:vec3i)->vec2u{
   let owner=sparseOwner(q);if(owner.x==SPARSE_INVALID){return vec2u(SPARSE_INVALID);}
-  let base=sparseTemplateCellBase(owner.x);
-  let lower=vec3u(sparseTopologyArena[base+7u],sparseTopologyArena[base+8u],
-    sparseTopologyArena[base+9u]);
-  let scale=max(1u,sparseTopologyArena[base+10u]);
+  // CM12 cells are isotropic in the fine lattice. Derive their presentation
+  // cube from the stable brick/rung ABI instead of decoding the physical cell
+  // record: that record is an internal solver layout and was compacted from 16
+  // to 8 words without changing the represented topology.
+  let resolution=max(1u,sparseAcceptedResolution(owner.y));
+  let scale=max(1u,8u*sparseBrickSpan(owner.y)/resolution);
+  let lower=(vec3u(q)/scale)*scale;
   let level=u32(round(log2(f32(scale))));
   return vec2u(lower.x|(lower.z<<11u)|(level<<22u),lower.y|0x80000000u);
 }

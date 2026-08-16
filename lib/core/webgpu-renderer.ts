@@ -25,6 +25,14 @@ import {
 } from "../svo/svo-pixel-trace";
 import { DecorationOverlay } from "./webgpu-decoration-overlay";
 import { FaceVelocityOverlay } from "./webgpu-face-velocity-overlay";
+import type { SparseCM12PressureJournal } from
+  "../methods/adaptive-mass/sparse-cm12-pressure-journal";
+import {
+  isPressureJournalOverlayMode,
+  pressureJournalOverlayChannel,
+  PressureJournalOverlay,
+  type PressureJournalOverlayMode,
+} from "./webgpu-pressure-journal-overlay";
 import { TracerOverlay } from "./webgpu-tracer-overlay";
 import { VISUALIZATION_CATALOG } from "./visualization-catalog";
 import { assembleDecorations } from "./visualization-registry";
@@ -210,7 +218,8 @@ export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, n
  * normalized by the last reported liquid maximum. Both sample live solver
  * textures in the overlay shader — no readback is involved.
  */
-export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "tracers" | "face-velocity" | OctreeTechniqueOverlayMode;
+export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "tracers" | "face-velocity"
+  | PressureJournalOverlayMode | OctreeTechniqueOverlayMode;
 
 export interface GridOverlayConfig {
   /** Slice axes, or a ray-integrated diagnostic through the complete volume. */
@@ -229,6 +238,7 @@ export type OptionalRendererPipeline =
   | "fluid-cell-trace"
   | "tracer-overlay"
   | "face-velocity-overlay"
+  | "pressure-journal-overlay"
   | "svo-stage-overlay";
 
 /**
@@ -336,6 +346,9 @@ export function optionalRendererPipelineRequests(
     // compile neither the generic slice raymarch nor the technique programs.
     if (gridOverlay.mode === "tracers") requested.push("tracer-overlay");
     else if (gridOverlay.mode === "face-velocity") requested.push("face-velocity-overlay");
+    else if (isPressureJournalOverlayMode(gridOverlay.mode)) {
+      requested.push("pressure-journal-overlay");
+    }
     else if (!technique) requested.push("grid-overlay");
     else requested.push("technique-overlay", "technique-audit-overlay");
   }
@@ -722,6 +735,7 @@ export class FluidLabRenderer {
   private decorationOverlayPipeline?: DecorationOverlay;
   private tracerOverlayPipeline?: TracerOverlay;
   private faceVelocityOverlayPipeline?: FaceVelocityOverlay;
+  private pressureJournalOverlayPipeline?: PressureJournalOverlay;
   private fluidCellTracePipeline?: WebGPUFluidCellTrace;
   private svoStageOverlay?: SparseVoxelRenderStageOverlay;
   private latestFluidCellTraceValue?: FluidCellTrace;
@@ -786,6 +800,7 @@ export class FluidLabRenderer {
   private gpuFluidRequestGeneration = 0;
   private adapterName = "WebGPU adapter";
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
+  private gpuPressureJournalCallback?: (journal: SparseCM12PressureJournal | undefined) => void;
   private gpuRigidLoadCallback?: (loads: GPURigidLoad[]) => void;
   private gpuAdvanceCompletedCallback?: (time_s: number) => void;
   private effectiveRendererStatusCallback?: (status: EffectiveRendererStatus) => void;
@@ -876,7 +891,7 @@ export class FluidLabRenderer {
 
   get presentationRevision(): number { return this.pausedPresentationRevision; }
 
-  constructor(private readonly canvas: HTMLCanvasElement | OffscreenCanvas, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; }
+  constructor(private readonly canvas: HTMLCanvasElement | OffscreenCanvas, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void, onGPUPressureJournal?: (journal: SparseCM12PressureJournal | undefined) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuPressureJournalCallback = onGPUPressureJournal; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; }
 
   setViewportSize(width: number, height: number, devicePixelRatio = 1): void {
     this.workerViewport = {
@@ -1192,6 +1207,16 @@ export class FluidLabRenderer {
       (pipeline) => {
         this.faceVelocityOverlayPipeline = pipeline;
         pipeline.setSource(this.gpuFluid?.faceVelocitySource);
+      },
+      (pipeline) => pipeline.destroy(),
+    );
+    if (wants.has("pressure-journal-overlay")) this.ensureOptionalPipeline(
+      "pressure-journal-overlay", this.pressureJournalOverlayPipeline,
+      (device) => new PressureJournalOverlay(device, this.format!),
+      (pipeline) => pipeline.initialize(),
+      (pipeline) => {
+        this.pressureJournalOverlayPipeline = pipeline;
+        pipeline.setSource(this.gpuFluid?.pressureJournalSource);
       },
       (pipeline) => pipeline.destroy(),
     );
@@ -1662,7 +1687,7 @@ export class FluidLabRenderer {
     // guards hold until initialize() completes on the replacement device.
     this.device = undefined; this.context = undefined;
     this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
-    this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined; this.tracerOverlayPipeline = undefined; this.faceVelocityOverlayPipeline = undefined; this.svoStageOverlay = undefined;
+    this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined; this.tracerOverlayPipeline = undefined; this.faceVelocityOverlayPipeline = undefined; this.pressureJournalOverlayPipeline = undefined; this.svoStageOverlay = undefined;
     this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.optionalPipelineFailures.clear(); this.svoDrySceneSource = undefined; this.svoSceneSidecar = undefined; this.svoDrySceneData = undefined; this.liveSceneAnimation = undefined; this.liveSceneAnimationFailure = undefined; this.renderSceneKey = ""; this.renderSceneStamp = 0; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingLiveSvoPresentation = undefined;
     this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoPublicationFailure = undefined; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
@@ -1858,6 +1883,18 @@ export class FluidLabRenderer {
           this.gpuInfoCallback?.({ ...info });
         }
       }).catch(() => { /* Device loss is reported by device.lost. */ });
+      // The film's iteration records ride the same boundary, and for the same
+      // reason: reading them maps a buffer the solver owns. Pausing is also
+      // when the curve is wanted — it is what one does to study a solve — so
+      // the restriction and the interaction want the same moment.
+      if (this.gpuPressureJournalCallback && fluid.readPressureJournal) {
+        void fluid.readPressureJournal().then((journal) => {
+          if (!this.disposed && !this.deviceLost && this.gpuFluid === fluid
+            && !this.simulationRunning) {
+            this.gpuPressureJournalCallback?.(journal);
+          }
+        }).catch(() => { /* Device loss is reported by device.lost. */ });
+      }
     }
     const submittedTime_s = this.gpuFluid?.info.submittedTime_s;
     return submittedTime_s;
@@ -2704,6 +2741,18 @@ export class FluidLabRenderer {
     if (faceVelocityVisible) {
       this.faceVelocityOverlayPipeline?.setSource(this.gpuFluid?.faceVelocitySource);
     }
+    // The film follows the marker rule rather than the face-arrow one, because
+    // unlike face velocities the numbers it draws do not otherwise exist: an
+    // unarmed advance encodes no snapshot dispatch at all. So the view arms the
+    // capture, and a session that never opens it never pays for one.
+    const journalMode = isPressureJournalOverlayMode(gridOverlay?.mode)
+      ? gridOverlay.mode : undefined;
+    const journalVisible = gridOverlay?.axis !== "off" && journalMode !== undefined;
+    this.gpuFluid?.armPressureJournal?.(journalVisible);
+    if (journalVisible) {
+      this.pressureJournalOverlayPipeline?.setSource(
+        this.gpuFluid?.pressureJournalSource);
+    }
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, cameraChanging ? SVO_CAMERA_CHANGING_FRAME : -1,
       // cameraPosition.w is the aperture, tan(fov/2). It was padding until the
@@ -3063,6 +3112,32 @@ export class FluidLabRenderer {
           globalAlpha: gridOverlay.position,
         });
       }
+      else if(journalVisible&&journalMode){
+        // `position` is the film's scrub rather than a slice depth: the view is
+        // planeless, so the slider has no plane to place, and stepping through
+        // the captured iterations is the one control the film cannot do without.
+        const source=this.gpuFluid?.pressureJournalSource;
+        const captured=Math.max(1,source?.snapshotCount??1);
+        this.pressureJournalOverlayPipeline?.encode(encoder,overlayView,this.pixelTraceSceneDepthView(),{
+          camera: {
+            position_m: [basis.position.x, basis.position.y, basis.position.z],
+            forward: [basis.forward.x, basis.forward.y, basis.forward.z],
+            right: [basis.right.x, basis.right.y, basis.right.z],
+            up: [basis.up.x, basis.up.y, basis.up.z],
+            tanHalfFov: cameraTanHalfFov(camera),
+            aspect: viewportAspect(this.presentationTexture.width, this.presentationTexture.height),
+          },
+          viewportWidth: this.presentationTexture.width,
+          viewportHeight: this.presentationTexture.height,
+          container_m: [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
+          depthNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M,
+          snapshot: Math.round(Math.max(0,Math.min(1,gridOverlay.position))*(captured-1)),
+          // The residual family is normalised on the device from the capture's
+          // own seed record, so this reference is only the fallback; pressure is
+          // the channel it actually sets.
+          channel: pressureJournalOverlayChannel(journalMode, 1),
+        });
+      }
       else if(!techniqueModeCode)this.gridOverlayPipeline?.encode(encoder,overlayView);
       else{
         this.techniqueOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);
@@ -3229,6 +3304,7 @@ export class FluidLabRenderer {
     try { this.gridOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.tracerOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.faceVelocityOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
+    try { this.pressureJournalOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.svoDryScenePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseStaging.map((slot) => slot.buffer)]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }

@@ -131,6 +131,7 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       (loads) => post({ type: "rigid-loads", loads }),
       (time_s) => post({ type: "advance-completed", time_s }),
       (status) => post({ type: "effective-renderer-status", status }),
+      (journal) => post({ type: "pressure-journal", journal }),
     );
     post({ type: "attached" });
     return;

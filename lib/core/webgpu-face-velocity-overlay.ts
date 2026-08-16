@@ -198,11 +198,11 @@ const FACE_NEAR_VIEW_M:f32=0.02;
 // Below this the arrow is aimed at the camera and has projected to a point.
 const FACE_MINIMUM_SPAN_PIXELS:f32=1.5;
 
-// Row records are twelve words each, based at arena word 7. Word 2 is the axis,
-// word 6 the centre-to-centre distance, words 8..10 the centre in fine cells.
-// The compute module reads the same layout through its atomic view; a plain
-// read-only view is what lets a vertex stage index it at all.
-fn rowBase(row:u32)->u32{return arena[7u]+row*12u;}
+// Rows are nine field-wise planes based at arena word 7. The packed metadata
+// plane contains axis in its high two bits; distance and centre occupy exact
+// f32 planes 4 and 6..8. The compute module reads the same layout atomically;
+// a plain read-only view is what lets a vertex stage index it at all.
+fn rowWord(row:u32,plane:u32)->u32{return arena[7u]+plane*arena[3u]+row;}
 fn rowFloat(index:u32)->f32{return bitcast<f32>(arena[index]);}
 
 fn faceViewSpace(point:vec3f)->vec3f {
@@ -253,13 +253,13 @@ fn faceVelocityColor(t:f32)->vec3f {
   let normalized=abs(speed_m_s)/max(overlay.domain.w,1e-6);
   if (normalized<overlay.style.z) { return output; }
 
-  let base=rowBase(row);
-  let axis=arena[base+2u];
-  let centerFine=vec3f(rowFloat(base+8u),rowFloat(base+9u),rowFloat(base+10u));
+  let axis=arena[rowWord(row,1u)]>>30u;
+  let centerFine=vec3f(rowFloat(rowWord(row,6u)),rowFloat(rowWord(row,7u)),
+    rowFloat(rowWord(row,8u)));
   // The centre-to-centre distance is the local cell scale, in fine cells. Using
   // it rather than a constant is what makes one arrow never overrun its own
   // cell on either side of a 2:1 seam.
-  let spanFine=max(rowFloat(base+6u),1e-4);
+  let spanFine=max(rowFloat(rowWord(row,4u)),1e-4);
 
   // Fine-lattice coordinates are corner-origin and continuous: 0 is the domain
   // minimum and the domain extent is its maximum, on every axis.

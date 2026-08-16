@@ -1309,7 +1309,31 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .fluid-field-plane button:disabled { opacity: .35; cursor: not-allowed; }
 .fluid-field-slice { display: flex; align-items: center; gap: 5px; padding: 0 2px; }
 .fluid-field-slice input { flex: 1; min-width: 0; }
-.fluid-field-slice output { width: 27px; flex: none; color: var(--ink); font: var(--text-tag); text-align: right; }
+/* Wide enough for "iter 128": the film's scrub reports the iteration it landed
+   on rather than a percentage, and a clipped number is worse than none. */
+.fluid-field-slice output { width: 48px; flex: none; color: var(--ink); font: var(--text-tag); text-align: right; }
+.fluid-field-film { display: flex; align-items: center; gap: 5px; margin: 0; padding: 3px 4px; border: 1px solid var(--accent-line); background: var(--accent-wash); }
+.fluid-field-film span { flex: 1; color: var(--muted); font: var(--text-micro); }
+.fluid-field-film button { flex: none; padding: 1px 5px; border: 1px solid var(--accent-line); background: transparent; color: var(--accent-strong); font: var(--text-tag); cursor: pointer; }
+.fluid-field-film button:hover { background: var(--accent-line); }
+.pressure-film { display: grid; gap: 3px; margin: 0; padding: 0 2px; }
+.pressure-film > span { color: var(--muted); font: var(--text-micro); }
+.pressure-film svg { width: 100%; height: 44px; overflow: visible; }
+/* Iterations the gate dispatched but did not execute. Shaded rather than
+   omitted: "converged at 19 of 32" is the fact worth seeing. */
+.pressure-film-gated { fill: var(--dim); opacity: 0.14; }
+.pressure-film-recursive { fill: none; stroke: var(--accent-strong); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.pressure-film-guarded { fill: none; stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; }
+.pressure-film-crossing { stroke: var(--ok, #4c9); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.pressure-film-stop { stroke: var(--dim); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.pressure-film-stop.active { stroke: var(--accent-strong); stroke-width: 2; }
+.pressure-film-stops { display: flex; flex-wrap: wrap; gap: 2px; }
+.pressure-film-stops button { flex: 1 0 auto; min-width: 16px; padding: 0 2px; border: 1px solid transparent; background: transparent; color: var(--dim); font: var(--text-micro); cursor: pointer; }
+.pressure-film-stops button:hover { color: var(--accent); }
+.pressure-film-stops button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.pressure-film-caption { display: flex; align-items: baseline; gap: 5px; margin: 0; color: var(--muted); font: var(--text-micro); }
+.pressure-film-caption code { color: var(--ink); font: var(--text-tag); }
+.pressure-film-caption em { color: var(--ok, #4c9); font-style: normal; }
 .fluid-field-options { display: grid; gap: 2px; max-height: 190px; overflow-y: auto; }
 .fluid-field-options button { display: flex; align-items: center; gap: 5px; min-height: 18px; padding: 2px 5px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
 .fluid-field-options button:hover { color: var(--accent); border-color: var(--accent-line); }
