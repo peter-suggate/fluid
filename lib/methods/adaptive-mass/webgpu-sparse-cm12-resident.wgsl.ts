@@ -86,6 +86,9 @@ fn acceptedTemplateRowCount()->u32{
 fn acceptedTemplateCellWorkgroups()->u32{
   return atomicLoad(&topologyArena[topologyWorklistBase()+8u]);
 }
+fn acceptedTemplateRowWorkgroups()->u32{
+  return atomicLoad(&topologyArena[topologyWorklistBase()+11u]);
+}
 fn acceptedTemplateCellInvocation(invocation:u32)->u32{
   if(invocation>=acceptedTemplateCellCount()){return INVALID;}
   let base=topologyWorklistBase();
@@ -1251,14 +1254,15 @@ fn stablePressurePrefix(lane:u32,flag:u32)->u32{
 @compute @workgroup_size(64)
 fn countPressureCells(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let id=gid.x;let flag=select(0u,1u,id<p.counts.x&&isLiquid(id));
+  let id=acceptedTemplateCellInvocation(gid.x);
+  let flag=select(0u,1u,id!=INVALID&&isLiquid(id));
   let prefix=stablePressurePrefix(lid.x,flag);
   if(lid.x==63u){atomicStore(&conditioning[4u+wid.x],i32(prefix+flag));}
 }
 
 @compute @workgroup_size(1)
 fn finalizePressureCellWorklist(){
-  let sourceGroups=(p.counts.x+63u)/64u;
+  let sourceGroups=acceptedTemplateCellWorkgroups();
   var count=0u;for(var group=0u;group<sourceGroups;group+=1u){
     let groupCount=u32(max(0,atomicLoad(&conditioning[4u+group])));
     atomicStore(&conditioning[4u+group],i32(count));count+=groupCount;
@@ -1272,7 +1276,8 @@ fn finalizePressureCellWorklist(){
 @compute @workgroup_size(64)
 fn compactPressureCells(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let id=gid.x;let flag=select(0u,1u,id<p.counts.x&&isLiquid(id));
+  let id=acceptedTemplateCellInvocation(gid.x);
+  let flag=select(0u,1u,id!=INVALID&&isLiquid(id));
   let prefix=stablePressurePrefix(lid.x,flag);if(flag==0u){return;}
   let base=u32(max(0,atomicLoad(&conditioning[4u+wid.x])));
   fineSamples[4u+base+prefix]=id;
@@ -1313,8 +1318,8 @@ fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn countPressureRows(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let row=gid.x;
-  let flag=select(0u,1u,row<p.counts.y&&state[p.stateOffsets3.x+row]>0.0);
+  let row=acceptedTemplateRowInvocation(gid.x);
+  let flag=select(0u,1u,row!=INVALID&&state[p.stateOffsets3.x+row]>0.0);
   let prefix=stablePressurePrefix(lid.x,flag);
   if(lid.x==63u){let header=pressureRowHeader();
     atomicStore(&conditioning[header+4u+wid.x],i32(prefix+flag));}
@@ -1322,7 +1327,7 @@ fn countPressureRows(@builtin(global_invocation_id)gid:vec3u,
 
 @compute @workgroup_size(1)
 fn finalizePressureRowWorklist(){
-  let header=pressureRowHeader();let sourceGroups=(p.counts.y+63u)/64u;var count=0u;
+  let header=pressureRowHeader();let sourceGroups=acceptedTemplateRowWorkgroups();var count=0u;
   for(var group=0u;group<sourceGroups;group+=1u){
     let groupCount=u32(max(0,atomicLoad(&conditioning[header+4u+group])));
     atomicStore(&conditioning[header+4u+group],i32(count));count+=groupCount;
@@ -1338,8 +1343,8 @@ fn finalizePressureRowWorklist(){
 @compute @workgroup_size(64)
 fn compactPressureRows(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let row=gid.x;
-  let flag=select(0u,1u,row<p.counts.y&&state[p.stateOffsets3.x+row]>0.0);
+  let row=acceptedTemplateRowInvocation(gid.x);
+  let flag=select(0u,1u,row!=INVALID&&state[p.stateOffsets3.x+row]>0.0);
   let prefix=stablePressurePrefix(lid.x,flag);if(flag==0u){return;}
   let header=pressureRowHeader();
   let base=u32(max(0,atomicLoad(&conditioning[header+4u+wid.x])));

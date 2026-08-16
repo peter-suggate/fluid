@@ -176,8 +176,12 @@ test("resident pressure solve caches its classified epoch masks", () => {
   assert.match(source, /clearBuffer\(this\.state, 4 \* this\.layout\.theta/);
   assert.match(source, /clearBuffer\(this\.state, 4 \* this\.layout\.liquid/);
   assert.match(source, /dispatchPressureCell\("applyPipelinedImage"\)/);
-  assert.match(source, /dispatch\("compactPressureCells", templateCellGroups\)/,
+  assert.match(source, /dispatchAccepted\("compactPressureCells", "cell"\)/,
     "pressure must compact accepted topology to live liquid cells once per frame");
+  assert.doesNotMatch(source,
+    /stage\("pressure-topology",[\s\S]*?clearBuffer\(this\.conditioning/,
+    "pressure compaction overwrites its accepted-workgroup census and must not clear"
+      + " the full template arena");
 
   const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn applyOperator");
   const end = webgpuSparseCM12ResidentWGSL.indexOf("fn preparePressure", begin);

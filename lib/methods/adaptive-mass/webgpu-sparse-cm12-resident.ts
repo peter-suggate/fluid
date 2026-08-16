@@ -2109,8 +2109,6 @@ export class WebGPUSparseCM12Resident {
       seams.close(id);
     };
     const bricks = Math.ceil(packed.brickCount / WORKGROUP_SIZE);
-    const templateCellGroups = Math.ceil(this.templateCellCount / WORKGROUP_SIZE);
-    const templateRowGroups = Math.ceil(this.templateRowCount / WORKGROUP_SIZE);
     stage("transport-velocity-extension", () => {
       this.rigidCoupling?.encodeVoxelization(encoder, bodyCount);
       dispatchAccepted("initializeTransportVelocity", "cell");
@@ -2184,18 +2182,18 @@ export class WebGPUSparseCM12Resident {
       // Conservative conditioning is dead after sharpening. Reuse its large
       // cell-scaled arena for stable-ID liquid compaction, then copy only the
       // three indirect words outside the pass to satisfy WebGPU usage scopes.
-      closePass();
-      encoder.clearBuffer(this.conditioning, 0,
-        Math.max(4, 4 * (this.templateCellCount + this.templateRowCount + 8)));
+      // Every header and per-workgroup count read by the finalizers is written
+      // by this epoch, so clearing the complete template-sized arena here only
+      // spends bandwidth and adds a pass boundary.
       useBindGroup(this.pressureBindGroup);
       dispatchAccepted("classifyPressureCells", "cell");
-      dispatch("countPressureCells", templateCellGroups);
+      dispatchAccepted("countPressureCells", "cell");
       dispatch("finalizePressureCellWorklist", 1);
-      dispatch("compactPressureCells", templateCellGroups);
+      dispatchAccepted("compactPressureCells", "cell");
       dispatchAccepted("classifyRows", "row");
-      dispatch("countPressureRows", templateRowGroups);
+      dispatchAccepted("countPressureRows", "row");
       dispatch("finalizePressureRowWorklist", 1);
-      dispatch("compactPressureRows", templateRowGroups);
+      dispatchAccepted("compactPressureRows", "row");
       dispatchAccepted("bakeEffectivePressureEdges", "cell");
       dispatchAccepted("preparePressure", "cell");
       dispatch("bakeBrickAggregateEdges",
