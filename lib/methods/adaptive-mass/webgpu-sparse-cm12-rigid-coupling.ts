@@ -1,4 +1,6 @@
 import { sceneShapeWgsl } from "../../core/scene-shape";
+import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
+import { SPARSE_CM12_FRAME_CONTROL_FAMILY } from "./sparse-cm12-frame-control";
 
 const WORKGROUP_SIZE = 64;
 
@@ -20,7 +22,7 @@ interface SparseCM12RigidBindings {
   readonly parameters: GPUBuffer;
   readonly state: GPUBuffer;
   readonly topologyArena: GPUBuffer;
-  readonly acceptedIndirectArguments: GPUBuffer;
+  readonly frameControlIndirectArguments: GPUBuffer;
   readonly rigidBodies: GPUBuffer;
   readonly exchange: GPUBuffer;
 }
@@ -75,8 +77,9 @@ fn rowCenter(id:u32)->vec3f{return vec3f(taf(rowWord(id,6u)),taf(rowWord(id,7u))
 fn rowAxis(id:u32)->u32{return ta(rowWord(id,1u))>>30u;}
 fn rowArea(id:u32)->f32{return taf(rowWord(id,3u));}
 fn rowDistance(id:u32)->f32{return taf(rowWord(id,4u));}
-fn destinationDensity()->u32{return select(p.stateOffsets0.y,p.stateOffsets0.x,p.frame.w>0.5);}
-fn destinationCellVelocity()->u32{return select(p.stateOffsets1.y,p.stateOffsets1.x,p.frame.w>0.5);}
+fn acceptedParity()->u32{return ta(p.stateOffsets4.w)&1u;}
+fn destinationDensity()->u32{return select(p.stateOffsets0.y,p.stateOffsets0.x,acceptedParity()!=0u);}
+fn destinationCellVelocity()->u32{return select(p.stateOffsets1.y,p.stateOffsets1.x,acceptedParity()!=0u);}
 
 fn qRotate(q:vec4f,v:vec3f)->vec3f{
   let uv=cross(q.yzw,v);return v+2.0*(q.x*uv+cross(q.yzw,uv));
@@ -187,7 +190,7 @@ fn coupleCells(@builtin(global_invocation_id)gid:vec3u){
 export class WebGPUSparseCM12RigidCoupling {
   private constructor(
     private readonly bindGroup: GPUBindGroup,
-    private readonly acceptedIndirectArguments: GPUBuffer,
+    private readonly frameControlIndirectArguments: GPUBuffer,
     private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>,
   ) {}
 
@@ -217,35 +220,41 @@ export class WebGPUSparseCM12RigidCoupling {
         { binding: 4, resource: { buffer: bindings.exchange } },
       ],
     });
-    const module = device.createShaderModule({ label: "Sparse CM12 rigid coupling", code: shader });
+    const compiler = gpuCompilationManagerFor(device);
+    const module = compiler.createShaderModule({
+      label: "Sparse CM12 rigid coupling", code: shader,
+    });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
     const names = ["voxelizeCells", "voxelizeRows", "coupleCells"] as const;
     const entries = await Promise.all(names.map(async (name) => [name,
-      await device.createComputePipelineAsync({
+      await compiler.compileComputePipeline({
         label: `Sparse CM12 rigid ${name}`,
         layout: pipelineLayout,
         compute: { module, entryPoint: name },
-      })] as const));
+      }, { priority: "visible" })] as const));
     return new WebGPUSparseCM12RigidCoupling(bindGroup,
-      bindings.acceptedIndirectArguments, Object.fromEntries(entries));
+      bindings.frameControlIndirectArguments,
+      Object.fromEntries(entries));
   }
 
-  encodeVoxelization(encoder: GPUCommandEncoder, bodyCount: number): void {
+  encodeVoxelization(encoder: GPUCommandEncoder): void {
     const pass = encoder.beginComputePass({ label: "Sparse CM12 rigid voxelization" });
     pass.setBindGroup(0, this.bindGroup);
     pass.setPipeline(this.pipelines.voxelizeCells!);
-    pass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+    pass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments,
+      12 * SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyWork);
     pass.setPipeline(this.pipelines.voxelizeRows!);
-    pass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 12);
+    pass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments,
+      12 * SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyRowWork);
     pass.end();
-    void bodyCount;
   }
 
   encodeReaction(encoder: GPUCommandEncoder): void {
     const pass = encoder.beginComputePass({ label: "Sparse CM12 rigid reaction" });
     pass.setBindGroup(0, this.bindGroup);
     pass.setPipeline(this.pipelines.coupleCells!);
-    pass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+    pass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments,
+      12 * SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyWork);
     pass.end();
   }
 

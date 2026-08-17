@@ -47,6 +47,9 @@ export interface GPUFluidFaceVelocitySource {
    * solver parity, so this is read fresh each frame rather than cached.
    */
   readonly faceFloatOffset: number;
+  /** Optional GPU-owned accepted parity word in topologyArena. When present,
+   * faceFloatOffset names bank A and bank B immediately follows rowCount. */
+  readonly parityWordOffset?: number;
   readonly rowCount: number;
   /** Fine-lattice domain extent, for the lattice-to-metres mapping. */
   readonly domainFine: readonly [number, number, number];
@@ -178,7 +181,7 @@ struct FaceVelocityUniforms {
   domain:vec4f,
   // shaft half pixels, head pixels, minimum speed fraction, length exponent
   style:vec4f,
-  // face velocity float offset, row count, row stride, unused
+  // face A float offset, row count, row stride, GPU parity word or INVALID
   addressing:vec4u,
 }
 
@@ -249,7 +252,10 @@ fn faceVelocityColor(t:f32)->vec3f {
 
   // The one load that rejects most of the buffer, taken before the arena is
   // touched at all: an unaccepted row and a still face are both exactly zero.
-  let speed_m_s=state[overlay.addressing.x+row]*overlay.container.w;
+  var parity=0u;
+  if(overlay.addressing.w!=0xffffffffu){parity=arena[overlay.addressing.w]&1u;}
+  let faceOffset=overlay.addressing.x+parity*overlay.addressing.y;
+  let speed_m_s=state[faceOffset+row]*overlay.container.w;
   let normalized=abs(speed_m_s)/max(overlay.domain.w,1e-6);
   if (normalized<overlay.style.z) { return output; }
 
@@ -502,7 +508,8 @@ export class FaceVelocityOverlay {
     f.set([...source.domainFine, Math.max(1e-6, reference_m_s)], 24);
     f.set([FACE_VELOCITY_SHAFT_HALF_PIXELS, FACE_VELOCITY_HEAD_PIXELS,
       FACE_VELOCITY_MINIMUM_FRACTION, FACE_VELOCITY_LENGTH_EXPONENT], 28);
-    u.set([source.faceFloatOffset, source.rowCount, stride, 0], 32);
+    u.set([source.faceFloatOffset, source.rowCount, stride,
+      source.parityWordOffset ?? 0xffff_ffff], 32);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     const pass = encoder.beginRenderPass({
       label: "Fluid face velocity overlay",

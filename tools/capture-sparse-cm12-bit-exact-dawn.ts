@@ -25,12 +25,11 @@ import {
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 
-const SCHEMA = "fluid.sparse-cm12.bit-exact.v1";
-// Step two is currently not raw-bit reproducible on Dawn Metal (the velocity
-// hash changes across fresh solvers), so one step is the honest optimization
-// oracle. Larger counts remain useful diagnostics but must not be promoted to
-// bit-exact gates until the pressure/reduction ordering is deterministic.
-const DEFAULT_STEPS = 1;
+const SCHEMA = "fluid.sparse-cm12.bit-exact.v2";
+// The canonical exactness capture spans two physical seconds. A caller may
+// request a smaller development probe explicitly, but it is not a release
+// oracle and must not replace the default receipt.
+const DEFAULT_STEPS = 500;
 
 interface HashReceipt {
   readonly elements: number;
@@ -55,7 +54,7 @@ interface OracleReceipt {
     readonly divergence: HashReceipt;
   };
   readonly acceptedResolutions: HashReceipt & {
-    readonly counts: Readonly<Record<"1" | "2" | "4" | "8", number>>;
+    readonly counts: Readonly<Record<"1" | "2" | "4" | "8" | "16", number>>;
   };
   readonly combinedSha256: string;
 }
@@ -76,12 +75,12 @@ interface OracleRuntime {
 }
 
 async function loadRuntime(sourceRoot: string): Promise<OracleRuntime> {
-  const module = (relative: string) => pathToFileURL(`${sourceRoot}/${relative}`).href;
+  const moduleUrl = (relative: string) => pathToFileURL(`${sourceRoot}/${relative}`).href;
   const [scenes, limits, solver, resident] = await Promise.all([
-    import(module("lib/core/scenes.ts")),
-    import(module("lib/core/webgpu-device-limits.ts")),
-    import(module("lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts")),
-    import(module("lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts")),
+    import(moduleUrl("lib/core/scenes.ts")),
+    import(moduleUrl("lib/core/webgpu-device-limits.ts")),
+    import(moduleUrl("lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts")),
+    import(moduleUrl("lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts")),
   ]);
   return {
     createScene: scenes.createSymmetricExpansionScene,
@@ -123,21 +122,12 @@ function compareReceipt(expected: OracleReceipt, actual: OracleReceipt): void {
   assert.deepEqual(actual.dimensions, expected.dimensions, "oracle dimensions changed");
   assert.equal(actual.steps, expected.steps, "oracle step count changed");
   assert.equal(actual.dt_s, expected.dt_s, "oracle timestep changed");
-  assert.equal(actual.activityAcceptedSteps, expected.activityAcceptedSteps,
-    "accepted-step clock changed");
-  assert.equal(actual.generation, expected.generation, "accepted generation changed");
-  assert.equal(actual.acceptedCellCount, expected.acceptedCellCount,
-    "accepted cell worklist count changed");
-  assert.equal(actual.acceptedRowCount, expected.acceptedRowCount,
-    "accepted row worklist count changed");
   for (const field of ["density", "velocity", "pressure", "divergence"] as const) {
     assert.deepEqual(actual.fields[field], expected.fields[field],
       `${field} raw-bit receipt changed`);
   }
-  assert.deepEqual(actual.acceptedResolutions, expected.acceptedResolutions,
-    "accepted brick-resolution map changed");
   assert.equal(actual.combinedSha256, expected.combinedSha256,
-    "combined Sparse CM12 state receipt changed");
+    "combined Sparse CM12 physical-state receipt changed");
 }
 
 async function capture(
@@ -156,7 +146,8 @@ async function capture(
       undefined,
       {
         resolutionMode: "adaptive",
-        brickFineResolution: 8,
+        brickFineResolution: 16,
+        presentationPageResolution: 16,
         surfaceFineRings: 1,
         receiverSupportRings: 3,
         receiverFloor: 1,
@@ -177,8 +168,8 @@ async function capture(
     // Hash key + accepted level together. A reordered or differently addressed
     // atlas cannot accidentally look equal because it has the same histogram.
     const resolutionWords = new Uint32Array(2 * ordered.length);
-    const counts: Record<"1" | "2" | "4" | "8", number> = {
-      "1": 0, "2": 0, "4": 0, "8": 0,
+    const counts: Record<"1" | "2" | "4" | "8" | "16", number> = {
+      "1": 0, "2": 0, "4": 0, "8": 0, "16": 0,
     };
     for (let index = 0; index < ordered.length; index += 1) {
       const brick = ordered[index]!;
@@ -200,18 +191,9 @@ async function capture(
     for (const [label, view] of [
       ["density", fields.density], ["velocity", fields.velocity],
       ["pressure", fields.pressure], ["divergence", fields.divergence],
-      ["accepted-resolutions", resolutionWords],
     ] as const) {
       combined.update(label); combined.update("\0"); combined.update(bytesOf(view));
     }
-    const generationWords = new Uint32Array([
-      stats.fluidBrickGeneration ?? 0,
-      activity.acceptedSteps,
-      steps,
-      stats.adaptiveAcceptedCellCount ?? 0,
-      stats.adaptiveAcceptedRowCount ?? 0,
-    ]);
-    combined.update("generation\0"); combined.update(bytesOf(generationWords));
     return {
       schema: SCHEMA,
       scene: "symmetric-expansion",

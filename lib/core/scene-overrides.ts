@@ -29,9 +29,9 @@ import { sceneRimQuery, withSceneRimQuery } from "./vessel-rim-controls";
  *  - `scene`   document values patched over the preset's own factory output,
  *  - `method`  the solver, its quality, and per-key parameter tuning,
  *  - `render`  presentation and debug arms that change what the frame shows,
- *  - `view`    the camera and the panel layout — in the link so a shared link
- *              reopens the view that was shared, not because anything is
- *              overridden, so they are listed but never counted,
+ *  - `view`    the camera and the open scene instrument — in the link so a
+ *              shared link reopens the view that was shared, not because
+ *              anything is overridden, so they are listed but never counted,
  *  - `link`    keys this build does not manage, of which `gpu` is the one that
  *              matters: it is read once during module startup, so clearing it
  *              is a navigation rather than a store edit.
@@ -89,9 +89,10 @@ const UI_OVERRIDES: Readonly<Record<string, UIOverrideSpec>> = {
   svoStage: { label: "Stage view", group: "render", hint: "Debug stage isolation, not a product frame" },
   svoFlatExempt: { label: "Planar refinement exemption", group: "render", boolean: true },
   svoLodPixels: { label: "LOD threshold", group: "render", hint: "Screen-space pixels before a finer leaf is descended into" },
-  panel: { label: "Open panel", group: "view", counted: false },
-  panelWidth: { label: "Panel width", group: "view", counted: false },
-  sceneConfig: { label: "Configuration open", group: "view", counted: false, boolean: true },
+  // Listed but never counted, on the camera's contract: an open instrument is
+  // in the link so a shared link reopens the view that was shared, not because
+  // anything about the scene has been overridden.
+  overlay: { label: "Open instrument", group: "view", counted: false, hint: "The pipeline or diagnostics reading drawn over the scene" },
 };
 
 /** Startup flags read outside the store chassis, named so they read as English. */
@@ -304,9 +305,7 @@ export function sceneOverrideClearPlan(
     }
     if (key.startsWith("camera.")) { ui.camera = cameraForPreset(preset); continue; }
     switch (key) {
-      case "panel": ui.rightPanel = initialUI.rightPanel; ui.diagnosticsOpen = false; break;
-      case "panelWidth": ui.rightPanelWidth = initialUI.rightPanelWidth; break;
-      case "sceneConfig": ui.sceneModalOpen = false; break;
+      case "overlay": ui.sceneOverlay = initialUI.sceneOverlay; break;
       case "grid": ui.gridOverlayAxis = initialUI.gridOverlayAxis; break;
       case "gridSlice": ui.gridOverlaySlice = initialUI.gridOverlaySlice; break;
       case "gridMode": ui.gridOverlayMode = initialUI.gridOverlayMode; break;

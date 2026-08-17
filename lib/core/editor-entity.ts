@@ -168,10 +168,35 @@ export interface EditorEntity {
    */
   readonly choices?: readonly EditorChoiceGroup[];
   /**
+   * Settings that belong to this entity but are not what a gesture on it moves,
+   * as named clusters the flyout folds away.
+   *
+   * `fields` and `choices` are the gizmo's own quantities written as numbers, so
+   * they stay unfolded beside the chip. A group is the rest of what the thing
+   * *is configured as* — the tank's walls, the water's material, the lattice it
+   * is solved on — which is worth reaching from the object rather than from a
+   * modal, but which must not turn the chip into a form the first time it is
+   * expanded. One flat list of twenty controls is the panel this replaced.
+   */
+  readonly groups?: readonly EditorControlGroup[];
+  /**
    * A line under the controls stating what the current settings mean, in the
    * scene's own units. Absent when the fields already say it.
    */
   readonly summary?: string;
+  /**
+   * True when this entity is the natural place to rebuild the world the solve
+   * happens in: whether there is water at all, and which lattice the set is
+   * authored at.
+   *
+   * A flag rather than choices, for the same reason `offersFluidMethod` is one.
+   * Neither operation is a document patch — `setFluidSystem` and
+   * `rebuildSceneAtLattice` reload the run through the preset's own factory and
+   * put the clock back to zero — so an `apply` returning a scene could not
+   * express either. The entity declares that it is the domain; the flyout,
+   * which already speaks to the controller, owns the controls.
+   */
+  readonly offersSceneRebuild?: boolean;
   /**
    * True when this entity is the natural place to choose the fluid solver.
    *
@@ -234,6 +259,27 @@ export interface EditorChoiceGroup {
   /** The `EditorChoice.id` currently in force. */
   readonly value: string;
   readonly options: readonly EditorChoice[];
+}
+
+/**
+ * A named cluster of settings, drawn folded away under the entity's own fields.
+ *
+ * Same two lists as the entity itself, so nothing new has to be rendered: a
+ * group is a heading and a disclosure, and its contents commit exactly as the
+ * ungrouped ones do. That is what let the configuration popover's Container and
+ * Fluid sections move onto the tank without becoming a second panel.
+ */
+export interface EditorControlGroup {
+  readonly id: string;
+  readonly label: string;
+  /** The group's tooltip; the place to say what the cluster is for. */
+  readonly hint?: string;
+  /** Open on first expansion. Absent means folded, which is the point. */
+  readonly defaultOpen?: boolean;
+  readonly choices?: readonly EditorChoiceGroup[];
+  readonly fields?: readonly EditorField[];
+  /** A line under the group's controls, in the scene's own units. */
+  readonly summary?: string;
 }
 
 /** X, Y and Z of a position, as three fields that each move only their axis. */

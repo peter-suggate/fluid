@@ -178,13 +178,50 @@ export function saveSceneToLibrary(
   return { entries, entry };
 }
 
+/**
+ * The given name, numbered if another saved entry already holds it.
+ *
+ * Names are not identities here — ids are — but `saveSceneToLibrary` resolves
+ * "save over" by name, so two entries sharing one would make the next save
+ * replace whichever the recency sort happened to put first: the reader's other
+ * scene of that name is overwritten with no error anywhere. Saving cannot
+ * reach that state (it replaces rather than duplicates), so renaming is the
+ * only caller that has to number. `exceptId` is the entry being renamed, which
+ * must not collide with itself.
+ */
+export function uniqueSceneName(
+  entries: readonly SceneLibraryEntry[],
+  name: string,
+  exceptId: string,
+): string {
+  const normalized = normalizeSceneName(name);
+  const taken = new Set(savedSceneEntries(entries)
+    .filter((entry) => entry.id !== exceptId)
+    .map((entry) => entry.name.toLowerCase()));
+  if (!taken.has(normalized.toLowerCase())) return normalized;
+  // Bounded by the library itself: with every slot taken the loop cannot run
+  // out of candidates before it runs out of entries to collide with.
+  for (let suffix = 2; suffix <= SCENE_LIBRARY_LIMIT + 1; suffix += 1) {
+    const candidate = normalizeSceneName(`${normalized} ${suffix}`);
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return normalized;
+}
+
+/**
+ * Rename one saved entry, keeping its id and its save time: a rename is not an
+ * edit of the scene, so it must not reorder the shelf or invalidate a preview.
+ * The autosave is refused — it is the working document, named by the machine.
+ */
 export function renameSceneInLibrary(
   storage: SceneLibraryStorage | undefined,
   id: string,
   name: string,
 ): SceneLibraryEntry[] {
-  const normalized = normalizeSceneName(name);
-  return writeSceneLibrary(storage, readSceneLibrary(storage).map((entry) => entry.id === id ? { ...entry, name: normalized } : entry));
+  const entries = readSceneLibrary(storage);
+  if (id === SCENE_AUTOSAVE_ENTRY_ID) return entries;
+  const normalized = uniqueSceneName(entries, name, id);
+  return writeSceneLibrary(storage, entries.map((entry) => entry.id === id ? { ...entry, name: normalized } : entry));
 }
 
 export function deleteSceneFromLibrary(storage: SceneLibraryStorage | undefined, id: string): SceneLibraryEntry[] {

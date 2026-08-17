@@ -3,6 +3,7 @@ import {
   type EditorEntity,
   type EditorEntityDefinition,
 } from "./editor-entity";
+import { rayProbeAction } from "./editor-probe-actions";
 import type { PondVesselSpec } from "./voxel-scenery/pond-vessel";
 import { pondVesselPlanCurve } from "./voxel-scenery/pond-vessel";
 import { rimBandReach_m, sceneVessel, sceneVessels, vesselRimAt } from "./vessel-rim-controls";
@@ -66,6 +67,13 @@ export const vesselRimEntity: EditorEntityDefinition = {
   surfacedBy: (tool) => tool === "select",
   instances: (context) => sceneVessels(context.scene)
     .map(([name, spec]) => vesselRimEntityFor(name, spec)),
+  /**
+   * The rim has no verb of its own — its dials are on the flyout `Edit` opens —
+   * but it is the only way the ring reaches the *terrain*, and terrain is the
+   * solid a hero frame spends most of its primary visibility on. So the one
+   * thing declared here is the ray probe.
+   */
+  actions: (_context, target) => [rayProbeAction(target)],
   find: (context, id) => {
     const name = vesselNameFromSelection(id);
     const spec = name === undefined ? undefined : sceneVessel(context.scene, name);

@@ -1,11 +1,7 @@
 "use client";
 
-import { useRef, useState } from "react";
-import {
-  MAX_SHARED_STEP_S,
-  MIN_SHARED_STEP_S,
-  simulation,
-} from "../lib/core/simulation/controller";
+import { useEffect, useState } from "react";
+import { simulation } from "../lib/core/simulation/controller";
 import { simulationRecording } from "../lib/core/simulation/recording";
 import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
 import { useRecordingStore } from "../lib/core/stores/recording-store";
@@ -16,38 +12,84 @@ import { requestManualGPUStop } from "../lib/core/gpu-startup";
 import { useSafeBrowserGPUBringup } from "../lib/core/use-safe-browser-gpu-bringup";
 import { planSceneRuntime } from "../lib/core/scene-runtime";
 import { resourceActivitiesFor, resourceInteractionGates } from "../lib/core/resource-readiness";
-import { effectiveSimulationStep_s, methodPinsSimulationStep } from "../lib/core/simulation-step";
 import { requiresFencedInitialRasterPresentation } from "../lib/core/gpu-t0-presentation";
 
+/** How long the pointer has to be still before the cluster recedes. */
+const POINTER_IDLE_MS = 2600;
 
+/**
+ * Whether the pointer has been still long enough for chrome to get out of the
+ * way.
+ *
+ * Window-level rather than per-element because the statement is about the
+ * reader, not about this control: a pointer moving anywhere over the scene means
+ * someone is working, and the transport should be legible before they reach for
+ * it. Keyboard activity counts too — a reader driving the studio from the
+ * keyboard is not idle, and fading the only readout of simulation time out from
+ * under them would be the same bug in a different input device.
+ */
+function usePointerIdle(delay_ms = POINTER_IDLE_MS) {
+  const [idle, setIdle] = useState(false);
+  useEffect(() => {
+    let timer = 0;
+    const wake = () => {
+      setIdle(false);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setIdle(true), delay_ms);
+    };
+    wake();
+    for (const type of ["pointermove", "pointerdown", "keydown", "wheel"] as const) {
+      window.addEventListener(type, wake, { passive: true });
+    }
+    return () => {
+      window.clearTimeout(timer);
+      for (const type of ["pointermove", "pointerdown", "keydown", "wheel"] as const) {
+        window.removeEventListener(type, wake);
+      }
+    };
+  }, [delay_ms]);
+  return idle;
+}
+
+/**
+ * The clock, and the two gestures that move it.
+ *
+ * This was a full-width docked footer with three columns: transport, a step-size
+ * slider with an ms entry, a rate chip, a lag chip, a lockstep label, and file
+ * actions. All of that cost the viewport a permanent 58 px row in order to state
+ * things that are either constant (the lockstep contract), diagnostic (the rate
+ * and lag chips, which belong beside the timings that explain them), or
+ * authored once (the step size, which is now a pipeline-overlay parameter).
+ *
+ * What is left is what a reader reaches for without being told to: run, advance
+ * one step, record, and what time it is. It floats on the scene and recedes when
+ * the pointer stops — but only visually. It stays in the DOM, stays focusable,
+ * and comes fully back the moment anything inside it takes focus, because a
+ * control that disappears from the tab order is a control that is gone.
+ */
 export function TransportBar() {
   const runState = useRuntimeStore((state) => state.runState);
   const setRunState = useRuntimeStore((state) => state.setRunState);
   const simulationTime = useRuntimeStore((state) => state.simulationTime);
   const notice = useRuntimeStore((state) => state.notice);
   const noticeTone = useRuntimeStore((state) => state.noticeTone);
-  const simRate = useRuntimeStore((state) => state.simRate);
-  const scene = useSceneStore((state) => state.scene);
   const rendererOnlyScene = useSceneStore((state) => !planSceneRuntime(state.scene).fluidSolver);
-  const gpuLag = useDiagnosticsStore((state) => state.gpuInfo?.simulationLag_s);
   const resourceReadiness = useDiagnosticsStore((state) => state.resourceReadiness);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
-  const methodState = useMethodStore();
-  const methodId = methodState.methodId;
-  const fixedDt = effectiveSimulationStep_s(scene, methodState);
-  const paperStep = methodPinsSimulationStep(scene, methodState);
+  const methodId = useMethodStore((state) => state.methodId);
   const recordingStatus = useRecordingStore((state) => state.status);
   const recordingStart = useRecordingStore((state) => state.startedAtSimulation_s);
   const recording = useRecordingStore((state) => state.recording);
-  const fileRef = useRef<HTMLInputElement>(null);
   const safeBringupPolicy = useSafeBrowserGPUBringup();
   const safeBringup = safeBringupPolicy === true;
   const browserPolicyPending = safeBringupPolicy === null;
   const browserSafetyLocked = safeBringupPolicy !== false;
   const [safeStepRequested, setSafeStepRequested] = useState(false);
-  const lagged = gpuLag !== undefined && gpuLag > 2 * fixedDt;
+  const idle = usePointerIdle();
   // A resource that declares `blocks: "transport"` says so here rather than in
-  // the activity tray: the suspended control and its reason stay together.
+  // the activity tray: the suspended control and its reason stay together. It is
+  // one line of micro text now instead of a card — the controls it suspends are
+  // already showing their own disabled state beside it.
   const transportResourceWork = resourceActivitiesFor(resourceReadiness, "transport-inline")[0];
   const interaction = resourceInteractionGates(resourceReadiness, !rendererOnlyScene);
   const initialSceneReady = !requiresFencedInitialRasterPresentation(methodId)
@@ -55,12 +97,6 @@ export function TransportBar() {
       && gpuInfo?.initialRasterSurfaceReady === true);
   const transportLocked = rendererOnlyScene || !interaction.transportInteractive || !initialSceneReady;
   const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
-  const importScene = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    simulation.importScene(file.name, await file.text());
-    event.target.value = "";
-  };
   const toggleRecording = () => {
     if (recordingStatus === "recording") simulationRecording.stop(simulationTime);
     else {
@@ -69,76 +105,76 @@ export function TransportBar() {
     }
   };
   return (
-    <footer className="transport-bar">
-      <div className="transport-controls">
-        <button disabled={transportLocked || browserSafetyLocked} className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : rendererOnlyScene ? "Fluid simulation is disabled for this renderer validation scene" : safeBringup ? "Continuous play is disabled during bounded GPU bring-up" : transportLocked ? "Simulation controls unlock after the initial GPU scene is ready" : runState === "running" ? "Pause simulation" : "Play simulation"}>{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
-        <button disabled={browserPolicyPending || transportLocked || safeStepLocked} onClick={() => { if (safeBringup) setSafeStepRequested(true); simulation.singleStep(); }} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : transportLocked ? "Single step unavailable until the initial GPU scene is ready" : safeStepLocked ? "The bounded browser GPU step has already been requested" : "Single fluid clock step"}>STEP</button>
-        <button disabled={browserSafetyLocked} onClick={() => {
+    <div
+      className="transport-cluster"
+      data-idle={idle ? "true" : "false"}
+      data-testid="transport-cluster"
+    >
+      {/* The studio's only feedback channel — it is what says "Nothing to undo"
+          now that the chip's history buttons are gone — so it survives the cut,
+          as one ellipsised line that fades with the rest of the cluster. */}
+      {notice && <p className={`transport-notice${noticeTone === "warn" ? " warn" : ""}`} title={notice}>{notice}</p>}
+      <button
+        type="button"
+        className="transport-main"
+        disabled={transportLocked || browserSafetyLocked}
+        onClick={() => setRunState(runState === "running" ? "paused" : "running")}
+        aria-label={browserPolicyPending ? "Browser GPU safety policy is loading"
+          : rendererOnlyScene ? "Fluid simulation is disabled for this renderer validation scene"
+          : safeBringup ? "Continuous play is disabled during bounded GPU bring-up"
+          : transportLocked ? "Simulation controls unlock after the initial GPU scene is ready"
+          : runState === "running" ? "Pause simulation" : "Play simulation"}
+      >{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
+      <button
+        type="button"
+        disabled={browserPolicyPending || transportLocked || safeStepLocked}
+        onClick={() => { if (safeBringup) setSafeStepRequested(true); simulation.singleStep(); }}
+        aria-label={browserPolicyPending ? "Browser GPU safety policy is loading"
+          : transportLocked ? "Single step unavailable until the initial GPU scene is ready"
+          : safeStepLocked ? "The bounded browser GPU step has already been requested"
+          : "Single fluid clock step"}
+      >STEP</button>
+      {/* Not in the plan's list, and kept anyway: nothing else in the studio can
+          put a scene back to t=0, and there is no shortcut for it. It goes to
+          the ring with the rest of the tank actions in a later slice. */}
+      <button
+        type="button"
+        disabled={browserSafetyLocked}
+        onClick={() => {
           if (recordingStatus === "recording") simulationRecording.stop(simulationTime);
           simulation.reset();
-        }}>RESET</button>
-        <button
-          className={`record-button${recordingStatus === "recording" ? " active" : ""}`}
-          onClick={toggleRecording}
-          disabled={recordingStatus === "processing" || transportLocked || browserSafetyLocked}
-          aria-label={recordingStatus === "recording" ? "Stop simulation recording" : "Record simulation video"}
-          data-testid="record-simulation"
-        >{recordingStatus === "recording" ? "■ STOP" : recordingStatus === "processing" ? "WAIT" : "● REC"}</button>
-        {safeBringup && <button type="button" className="stop-gpu-button" onClick={requestManualGPUStop}>STOP GPU</button>}
-        {transportResourceWork && <span className="transport-resource-state" role="status" aria-live="polite" title={transportResourceWork.label}>
-          <i aria-hidden="true" />
-          <strong>{transportResourceWork.operation ?? transportResourceWork.label}</strong>
-          {transportResourceWork.total > 0 && <small>{Math.min(transportResourceWork.completed, transportResourceWork.total)}/{transportResourceWork.total}</small>}
-        </span>}
-      </div>
-      <div className="time-readout">
-        <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
-        <div className="transport-timing">
-          <label title={paperStep
-            ? "Uniform paper mode holds the shared rigid + fluid step at 1/30 s · changing it leaves paper mode for the scene-authored step"
-            : "One fixed step size shared by rigid bodies and fluid"}>
-            <span>STEP</span>
-            <input
-              type="range"
-              min={MIN_SHARED_STEP_S * 1000}
-              max={MAX_SHARED_STEP_S * 1000}
-              step="1"
-              value={fixedDt * 1000}
-              onChange={(event) => simulation.setStepSize(event.currentTarget.valueAsNumber / 1000)}
-              aria-label="Shared simulation step size"
-            />
-            <div className="timing-entry">
-              <input
-                type="number"
-                min={MIN_SHARED_STEP_S * 1000}
-                max={MAX_SHARED_STEP_S * 1000}
-                step="1"
-                value={Math.round(fixedDt * 1000)}
-                onChange={(event) => {
-                  if (Number.isFinite(event.currentTarget.valueAsNumber)) {
-                    simulation.setStepSize(event.currentTarget.valueAsNumber / 1000);
-                  }
-                }}
-                aria-label="Shared simulation step size in milliseconds"
-              />
-              <b>ms</b>
-            </div>
-          </label>
-        </div>
-        {simRate !== null && <small className="sim-rate" title="Queue-confirmed simulated seconds completed per wall-clock second">ACTUAL ×{simRate.toFixed(2)}</small>}
-        {lagged && <small className="lag-chip" title="Simulation time currently admitted to the bounded GPU feed window.">GPU −{gpuLag.toFixed(1)} s</small>}
-        {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
-        {rendererOnlyScene
-          ? <span className="continuous-run" title="This preset runs the live sparse scene renderer without fluid physics.">LIVE SVO · FLUID SOLVER DISABLED</span>
-          : <span className="continuous-run" title={`Each admitted simulation advance is immediately followed by its presentation · double-buffered pairs · ${paperStep ? "uniform paper" : "shared rigid + fluid"} step ${(fixedDt * 1000).toFixed(2)} ms`}>SIM + RENDER LOCKSTEP · PRESENT ASAP</span>}
-      </div>
-      <div className="file-actions">
-        <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{notice}</span>
-        {recording && recordingStatus !== "recording" && <button onClick={() => simulationRecording.open()}>Playback</button>}
-        <button disabled={browserSafetyLocked} onClick={() => { if (!simulation.loadLocalScene()) fileRef.current?.click(); }}>Load</button>
-        <button disabled={browserSafetyLocked} onClick={() => fileRef.current?.click()}>Import</button>
-        <input ref={fileRef} type="file" accept="application/json,.json" onChange={importScene} hidden />
-      </div>
-    </footer>
+        }}
+        aria-label="Reset the simulation to its authored initial state"
+      >RESET</button>
+      <button
+        type="button"
+        className={`record-button${recordingStatus === "recording" ? " active" : ""}`}
+        onClick={toggleRecording}
+        disabled={recordingStatus === "processing" || transportLocked || browserSafetyLocked}
+        aria-label={recordingStatus === "recording" ? "Stop simulation recording" : "Record simulation video"}
+        data-testid="record-simulation"
+      >{recordingStatus === "recording" ? "■ STOP" : recordingStatus === "processing" ? "WAIT" : "● REC"}</button>
+      {recording && recordingStatus !== "recording" && <button
+        type="button"
+        onClick={() => simulationRecording.open()}
+        title="Play back the recorded simulation"
+      >Playback</button>}
+      {safeBringup && <button type="button" className="stop-gpu-button" onClick={requestManualGPUStop}>STOP GPU</button>}
+      <output className="transport-time" aria-label="Simulation time in seconds">
+        {recordingStatus === "recording" && recordingStart !== null
+          ? <i className="transport-recording-dot" aria-hidden="true" /> : null}
+        <strong>{simulationTime.toFixed(4)}</strong><small>s</small>
+      </output>
+      {transportResourceWork && <span
+        className="transport-resource-state"
+        role="status"
+        aria-live="polite"
+        title={transportResourceWork.label}
+      >
+        <i aria-hidden="true" />
+        <strong>{transportResourceWork.operation ?? transportResourceWork.label}</strong>
+        {transportResourceWork.total > 0 && <small>{Math.min(transportResourceWork.completed, transportResourceWork.total)}/{transportResourceWork.total}</small>}
+      </span>}
+    </div>
   );
 }

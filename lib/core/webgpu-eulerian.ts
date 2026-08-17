@@ -80,6 +80,83 @@ export interface GPUEulerianInfo {
   adaptivePressureActiveRowCount?: number;
   /** Compact live-liquid cells invoked by the latest pressure solve. */
   adaptivePressureCellCount?: number;
+  /**
+   * Human-facing attribution for the pressure-topology timestamp sample.
+   * Pressure repair runs before the frame's topology commit, so its input is
+   * the prior terminal receipt. This tuple keeps that input separate from the
+   * current end-frame commit which will feed the next repair.
+   */
+  adaptivePressureTopologyAttribution?: {
+    readonly status: "matched" | "unavailable";
+    readonly encodedStep: number;
+    readonly inputTopologyGeneration?: number;
+    readonly priorCommittedBrickCount?: number;
+    readonly currentEndFrameTopologyGeneration: number;
+    readonly currentEndFrameCommittedBrickCount: number;
+    readonly acceptedCellCount: number;
+    readonly acceptedRowCount: number;
+    readonly temporalScalarCellCount: number;
+    readonly temporalScalarRowCount: number;
+    readonly pressureCellCount: number;
+    readonly pressureActiveRowCount: number;
+    readonly pcmCellDirtyLeafCount: number;
+    readonly pcmRowDirtyLeafCount: number;
+    readonly pcmCellAcceptedGeneration: number;
+    readonly pcmRowAcceptedGeneration: number;
+    readonly pcmMatched: boolean;
+    /**
+     * GPU-authored local-work receipts for the pressure cutover. Missing is
+     * deliberately different from zero work: the UI renders it unavailable.
+     */
+    readonly authorities?: {
+      readonly status: "matched" | "fault" | "unavailable";
+      readonly inputTopologyGeneration: number;
+      readonly fpa: {
+        readonly preparation: GPUAdaptivePressureLocalStageReceipt;
+        readonly projection: GPUAdaptivePressureLocalStageReceipt;
+      };
+      readonly pcf: GPUAdaptivePressureLocalStageReceipt;
+      readonly pca: GPUAdaptivePressureLocalStageReceipt & {
+        readonly familyDirtyCount: readonly [number, number, number, number];
+        readonly familyExecutedCount: readonly [number, number, number, number];
+      };
+      readonly psa: GPUAdaptivePressureLocalStageReceipt & {
+        readonly wetBrickCount: number;
+        readonly hierarchyNodeCount: number;
+        readonly tailPublishedGeneration: number;
+      };
+    };
+    readonly detail: string;
+  };
+  /** GPU-authored PCM1 publication receipt. QA-only; never a host scheduling input. */
+  adaptivePressureCanonicalMembership?: {
+    readonly cell: {
+      readonly phase: number; readonly fault: number; readonly firstFault: number;
+      readonly dirtyCount: number; readonly totalCount: number;
+      readonly candidateGeneration: number; readonly acceptedGeneration: number;
+    };
+    readonly row: {
+      readonly phase: number; readonly fault: number; readonly firstFault: number;
+      readonly dirtyCount: number; readonly totalCount: number;
+      readonly candidateGeneration: number; readonly acceptedGeneration: number;
+    };
+  };
+  /** GPU-authored PTR1 bounded topology-repair receipt; diagnostic only. */
+  adaptivePressureTopologyRepair?: {
+    readonly phase: number; readonly fault: number;
+    readonly firstFaultFamily: number; readonly firstFaultId: number;
+    readonly candidateGeneration: number; readonly acceptedGeneration: number;
+    readonly topologyGeneration: number;
+    readonly changedBrickCount: number; readonly changedRowCount: number;
+    readonly cellExecutionCount: number; readonly rowExecutionCount: number;
+    readonly brickDirtyLeafCount: number; readonly rowDirtyLeafCount: number;
+    readonly expectedProducerReceipts: number;
+    readonly coveredProducerReceipts: number;
+  };
+  /** Exact noncanonical scalar cells/rows in the shared temporal worklists. */
+  adaptiveTemporalScalarCellCount?: number;
+  adaptiveTemporalScalarRowCount?: number;
+  adaptiveTemporalScalarRejectionMask?: number;
   /** Wet-domain storage residency, independent from the narrow surface band. */
   fluidBulkBrickResidentCount?: number;
   fluidBulkBrickHaloCount?: number;
@@ -424,6 +501,24 @@ export interface GPUEulerianInfo {
     context: string;
     frameId: string;
   };
+}
+
+/** Compact diagnostics projection of one GPU-resident local authority header. */
+export interface GPUAdaptivePressureLocalStageReceipt {
+  readonly acceptedGeneration: number;
+  readonly candidateGeneration: number;
+  readonly topologyGeneration: number;
+  readonly directCount: number;
+  readonly closureCount: number;
+  readonly dirtyCount: number;
+  readonly workCount: number;
+  readonly executedCount: number;
+  readonly skippedCount: number;
+  readonly expectedProducerReceipts: number;
+  readonly coveredProducerReceipts: number;
+  readonly causeMask: number;
+  readonly fault: number;
+  readonly firstFaultId: number;
 }
 
 export interface WebGPUEulerianSolverOptions {

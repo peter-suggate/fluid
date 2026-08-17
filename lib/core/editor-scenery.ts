@@ -14,6 +14,7 @@ import {
   type EditorRay,
 } from "./editor-entity";
 import type { EditorActionIcon } from "./editor-action";
+import { rayProbeAction } from "./editor-probe-actions";
 import type { EnvironmentId } from "./environments";
 import type { SceneDescription, Vec3 } from "./model";
 import {
@@ -386,8 +387,12 @@ export const sceneryEntity: EditorEntityDefinition = {
    * standing something *next to* the thing you are pointing at is the whole
    * gesture of dressing a scene, and it is the only reason PROP was ever a
    * button.
+   *
+   * The ray probe joins it because a prop is a solid the renderer voxelizes, and
+   * "what did this dot cost to draw" is asked of exactly those — see
+   * `editor-probe-actions`.
    */
-  actions: () => [{
+  actions: (_context, target) => [{
     id: "prop",
     label: "Prop",
     icon: "prop",
@@ -401,7 +406,7 @@ export const sceneryEntity: EditorEntityDefinition = {
       hint: `Rest a ${prop.label.toLowerCase()} on the next surface you click`,
       effect: { kind: "arm" as const, tool: "prop-place" as const, prop: prop.kind },
     })),
-  }],
+  }, rayProbeAction(target)],
   pick: (context, ray, exclude) => {
     let nearest: { nodeId: string; distance_m: number } | undefined;
     for (const target of pickTargets(context.scene)) {

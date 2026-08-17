@@ -129,6 +129,28 @@ export const POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE: MethodProfile = Object.
 /** Historical oracle name retained for focused symmetry callers. */
 export const SYMMETRIC_EXPANSION_METHOD_PROFILE = ADAPTIVE_LOSASSO_UI_METHOD_PROFILE;
 
+/** Canonical Sparse CM12 product path for the same D4 expansion oracle.
+ *
+ * Keep the octree/LoSasso card above as its independent comparison lane. The
+ * Sparse CM12 card names B16/P16 and the interactive production pressure
+ * budget. The stricter 108-iteration accuracy oracle remains a separate Dawn
+ * lane; making that offline budget the UI default needlessly drops the scene
+ * below real time.
+ */
+export const SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE:
+MethodProfile = Object.freeze({
+  methodId: "adaptive-mass",
+  quality: "balanced",
+  overrides: Object.freeze({
+    resolutionMode: "adaptive",
+    brickFineResolution: "16",
+    presentationPageResolution: "16",
+    selectorMode: "surface",
+    timeStep: "paper",
+    pressureIterations: 64,
+  }),
+});
+
 /**
  * Shared coarse-only dam experiment. The surface field and pressure octree use
  * the same lattice; size-32 leaves preserve a materially coarse far field while
@@ -1911,6 +1933,18 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // making a healthy water publication look like an empty scene in the UI.
     presentationMode: "fluid-only",
     methodProfile: SYMMETRIC_EXPANSION_METHOD_PROFILE,
+    build: createSymmetricExpansionScene,
+    camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } },
+  }),
+  defineScene({
+    id: "sparse-cm12-symmetric-expansion",
+    name: "Sparse CM12 · symmetric expansion",
+    blurb: "The exact 32×16×32 D4 expansion oracle on the production Sparse CM12 B16/P16 resident. The card uses the real-time production pressure budget; a separate 108-iteration Dawn lane preserves the stricter accuracy oracle.",
+    audience: "validation",
+    shelf: "Symmetry",
+    environment: "default",
+    presentationMode: "fluid-only",
+    methodProfile: SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE,
     build: createSymmetricExpansionScene,
     camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } },
   }),

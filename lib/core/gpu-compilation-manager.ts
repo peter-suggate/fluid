@@ -113,11 +113,13 @@ export interface GPUCompilationService {
   ): CompiledGPUCompilationBundle<Manifest> | undefined;
 
   snapshot(): GPUCompilationSnapshot;
+  /** Resolve after every queued/in-flight driver compilation has settled. */
+  whenIdle(): Promise<void>;
   subscribe(listener: GPUCompilationSnapshotListener): () => void;
 }
 
 export interface GPUCompilationManagerOptions {
-  /** Driver compilations are sequential by default. */
+  /** Driver compilation is bounded; production uses two concurrent jobs. */
   readonly maximumConcurrentBundles?: number;
   /** Production defaults to fail-closed outside a WorkerGlobalScope. */
   readonly requireWorkerRealm?: boolean;
@@ -242,8 +244,9 @@ export class GPUCompilationManager implements GPUCompilationService {
     }
     this.#device = device;
     const maximumConcurrentBundles = options.maximumConcurrentBundles ?? 1;
-    if (!Number.isSafeInteger(maximumConcurrentBundles) || maximumConcurrentBundles < 1) {
-      throw new RangeError("GPU compilation concurrency must be a positive safe integer");
+    if (!Number.isSafeInteger(maximumConcurrentBundles)
+      || maximumConcurrentBundles < 1 || maximumConcurrentBundles > 4) {
+      throw new RangeError("GPU compilation concurrency must be a safe integer in [1, 4]");
     }
     this.maximumConcurrentBundles = maximumConcurrentBundles;
     this.generation = options.generation ?? 1;
@@ -338,6 +341,17 @@ export class GPUCompilationManager implements GPUCompilationService {
       cached: this.cache.size,
       ...(this.progress ? { progress: this.progress } : {}),
       ...(this.invalidationReason ? { invalidationReason: this.invalidationReason } : {}),
+    });
+  }
+
+  whenIdle(): Promise<void> {
+    if (this.active === 0 && this.queue.length === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let unsubscribe = () => {};
+      unsubscribe = this.subscribe((snapshot) => {
+        if (snapshot.active !== 0 || snapshot.queued !== 0) return;
+        unsubscribe();resolve();
+      });
     });
   }
 
@@ -565,7 +579,22 @@ export function gpuCompilationManagerFor(device: GPUDevice): GPUCompilationManag
   const existing = managerByDevice.get(device);
   if (existing) return existing;
   const requireWorkerRealm = typeof document !== "undefined" || isWorkerRealm();
-  const manager = new GPUCompilationManager(device, { requireWorkerRealm });
+  // This is intentionally not the old Promise-all fanout: the manager remains
+  // the sole scheduler and never has more than this many driver compilation
+  // calls active. Three separate B16/P16 Dawn processes completed cleanly at
+  // width three (~2.58 s resident construction versus ~3.50 s at width two).
+  // Width four was faster in isolated construction runs but repeated full
+  // resident builds could leave Metal in a degraded state, so production
+  // deliberately retains one slot of headroom below the hard cap.
+  const requestedConcurrency = typeof process !== "undefined"
+    ? Number(process.env?.FLUID_GPU_COMPILATION_CONCURRENCY ?? 3) : 3;
+  const maximumConcurrentBundles = Number.isSafeInteger(requestedConcurrency)
+    && requestedConcurrency >= 1 && requestedConcurrency <= 4
+    ? requestedConcurrency : 1;
+  const manager = new GPUCompilationManager(device, {
+    requireWorkerRealm,
+    maximumConcurrentBundles,
+  });
   managerByDevice.set(device, manager);
   return manager;
 }

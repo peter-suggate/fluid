@@ -4,12 +4,13 @@ import { defaultMethodId, interactiveMethodId, registeredSimulationMethods } fro
 import type { MethodParamValue, MethodParamValues } from "./method-contract";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
+import { isSparseCM12DirtyOverlayMode } from "./sparse-cm12-dirty-visualizations";
 import { cameraForPreset, defaultScenePresetId, findSceneDefinition, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
 import { useShellStore, type ShellView } from "./stores/shell-store";
-import { DEFAULT_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, useUIStore, type RightPanel } from "./stores/ui-store";
+import { useUIStore, type SceneOverlay } from "./stores/ui-store";
 import {
   DEFAULT_SVO_RENDER_DIAGNOSTICS,
   SVO_RENDER_STAGE_VIEWS,
@@ -81,10 +82,17 @@ type QueryState = {
 
 type UIQueryState = {
   camera: CameraState;
-  sceneModalOpen: boolean;
-  diagnosticsOpen: boolean;
-  rightPanel: RightPanel;
-  rightPanelWidth: number;
+  /**
+   * The instrument drawn over the scene, or `null` for a bare view.
+   *
+   * In the address for the same reason the camera is: a frame-pipeline reading
+   * is something a reader arrives at and then wants to keep — across a reload,
+   * a Fast Refresh, or a link sent to somebody else — and losing it on every
+   * reload made the overlay a thing to reopen rather than a thing to work in.
+   * Like the camera it is listed in the overrides popover but never counted:
+   * having an instrument open is not an edit to the scene.
+   */
+  sceneOverlay: SceneOverlay | null;
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
   gridOverlayMode: GridOverlayMode;
@@ -358,6 +366,32 @@ function compatibleSceneValue(base: unknown, value: unknown) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/** The key carrying the open scene instrument; see `UIQueryState.sceneOverlay`. */
+const OVERLAY_QUERY_KEY = "overlay";
+
+/**
+ * The instrument names a link may carry.
+ *
+ * An exhaustive record rather than a list of string comparisons: adding an
+ * instrument to `SceneOverlay` then fails to compile here instead of quietly
+ * becoming a value this parser drops and the serializer writes, which is the
+ * one way a round-trip can disagree with itself.
+ */
+const SCENE_OVERLAY_KEYS: Readonly<Record<SceneOverlay, true>> = {
+  "sim-pipeline": true,
+  "render-pipeline": true,
+  diagnostics: true,
+};
+
+/**
+ * Closed is the absence of the key, so an unrecognised value — a retired
+ * instrument, a hand-edited link — resolves to closed and is canonicalised out
+ * of the address rather than surviving as a name nothing draws.
+ */
+function parseSceneOverlay(raw: string | null): SceneOverlay | null {
+  return raw !== null && Object.hasOwn(SCENE_OVERLAY_KEYS, raw) ? raw as SceneOverlay : null;
+}
+
 function numberParam(query: URLSearchParams, key: string, fallback: number, min = -Infinity, max = Infinity) {
   const raw = query.get(key);
   if (raw === null) return fallback;
@@ -525,10 +559,6 @@ export function parseQueryState(search: string): QueryState {
   const presetCamera = cameraForPreset(preset);
   const grid = query.get("grid");
   const gridMode = query.get("gridMode");
-  const requestedPanel = query.get("panel");
-  const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "visuals" || requestedPanel === "simulation" || requestedPanel === "bodies" || requestedPanel === "diagnostics" || requestedPanel === "performance"
-    ? requestedPanel
-    : initialUI.rightPanel;
 
   return {
     methodId,
@@ -552,15 +582,12 @@ export function parseQueryState(search: string): QueryState {
           z: numberParam(query, "camera.targetZ", presetCamera.target_m.z)
         }
       },
-      sceneModalOpen: query.get("sceneConfig") === "1",
-      diagnosticsOpen: rightPanel === "diagnostics",
-      rightPanel,
-      rightPanelWidth: numberParam(query, "panelWidth", DEFAULT_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH),
+      sceneOverlay: parseSceneOverlay(query.get(OVERLAY_QUERY_KEY)),
       gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" || grid === "volume" ? grid : initialUI.gridOverlayAxis,
       gridOverlaySlice: grid === "volume"
         ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
         : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
-      gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || gridMode === "density" || (gridMode !== null && isOctreeTechniqueOverlayMode(gridMode)) ? gridMode : initialUI.gridOverlayMode,
+      gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || gridMode === "density" || (gridMode !== null && (isOctreeTechniqueOverlayMode(gridMode) || isSparseCM12DirtyOverlayMode(gridMode))) ? gridMode : initialUI.gridOverlayMode,
       svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
       svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
       silhouetteRefinementEnabled: query.get("svoPrimarySeamClosure") === "1",
@@ -592,8 +619,18 @@ export function parseQueryState(search: string): QueryState {
   };
 }
 
+/**
+ * Keys this module owns and therefore rewrites from scratch on every canonical
+ * write. `panel`, `panelWidth` and `sceneConfig` are retired — the docked right
+ * panel and the configuration popover are both gone — but they stay listed so a
+ * link from before the hero-scene cut is *tolerated*: the key parses to nothing
+ * and is dropped from the address rather than surviving as a stale flag nothing
+ * reads. What replaced the dock is `overlay`, which is a live key and is
+ * deliberately not a migration target: the retired panel names are not the
+ * instruments, so an old link opens the scene bare.
+ */
 function isManagedKey(key: string) {
-  return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth"
+  return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth" || key === OVERLAY_QUERY_KEY
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
     || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === SEEDS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
@@ -647,9 +684,9 @@ export function serializeQueryState(
   if (uiState.svoRenderTuning.lodScreenSpacePixels !== DEFAULT_SVO_RENDER_TUNING.lodScreenSpacePixels) {
     query.set("svoLodPixels", String(uiState.svoRenderTuning.lodScreenSpacePixels));
   }
-  if (uiState.rightPanel) query.set("panel", uiState.rightPanel);
-  if (uiState.rightPanelWidth !== DEFAULT_RIGHT_PANEL_WIDTH) query.set("panelWidth", String(uiState.rightPanelWidth));
-  if (uiState.sceneModalOpen) query.set("sceneConfig", "1");
+  // Only when one is up: a closed instrument is the absence of the key, so an
+  // ordinary scene link does not have to say which panels it is not showing.
+  if (uiState.sceneOverlay) query.set(OVERLAY_QUERY_KEY, uiState.sceneOverlay);
   if (uiState.gridOverlayAxis !== "off") query.set("grid", uiState.gridOverlayAxis);
   if (uiState.gridOverlaySlice !== 0.5) query.set("gridSlice", String(uiState.gridOverlaySlice));
   if (uiState.gridOverlayMode !== "structure") query.set("gridMode", uiState.gridOverlayMode);

@@ -20,6 +20,7 @@ import type { SphericalContainerFineGeometry } from "../../core/spherical-contai
 import type { GPUFluidFaceVelocitySource } from "../../core/webgpu-face-velocity-overlay";
 import type { GPUFluidTracerSource } from "../../core/webgpu-tracer-overlay";
 import type { GPUPressureJournalSource } from "../../core/webgpu-pressure-journal-overlay";
+import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import {
   FINE_LEVELSET_COMPACT_LOOKUP_FLAG,
   FINE_LEVELSET_METADATA_WORDS,
@@ -30,6 +31,7 @@ import type {
   SparseAdaptiveGridConsumerSource,
   WebGPUFineLevelSetBrickSource,
 } from "../../core/levelset-consumer-abi";
+import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import {
   SPARSE_CM12_PRESSURE_JOURNAL_HEADER_FLOATS,
   SPARSE_CM12_PRESSURE_JOURNAL_ITERATION_FLOATS,
@@ -39,11 +41,162 @@ import {
   type SparseCM12PressureJournal,
   type SparseCM12PressureJournalLayout,
 } from "./sparse-cm12-pressure-journal";
-import { createWebgpuSparseCM12ResidentWGSL } from "./webgpu-sparse-cm12-resident.wgsl";
+import {
+  createWebgpuSparseCM12ResidentWGSL,
+  type SparseCM12PressureRepairLayout,
+  type SparseCM12TemporalWorklistLayout,
+} from "./webgpu-sparse-cm12-resident.wgsl";
+import {
+  SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS,
+  SPARSE_CM12_DIRTY_SCHEDULER_QUEUE,
+  createSparseCM12DirtySchedulerInitialWords,
+  createSparseCM12DirtySchedulerLayout,
+  type SparseCM12DirtySchedulerLayout,
+} from "./sparse-cm12-dirty-scheduler";
+import {
+  createSparseCM12IncrementalActivityInitialWords,
+  createSparseCM12IncrementalActivityLayout,
+  type SparseCM12IncrementalActivityLayout,
+} from "./sparse-cm12-incremental-activity";
+import {
+  SPARSE_CM12_PRESSURE_MEMBERSHIP_INDIRECT_BYTES,
+  SPARSE_CM12_PRESSURE_REPAIR_HEADER,
+  SPARSE_CM12_PRESSURE_REPAIR_HEADER_WORDS,
+} from "./sparse-cm12-pressure-membership";
+import {
+  SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER,
+  createSparseCM12CanonicalMembershipLayout,
+  initializeSparseCM12CanonicalMembershipWords,
+  sparseCM12CanonicalMembershipRepairIndirectByteOffset,
+  type SparseCM12CanonicalMembershipLayout,
+} from "./sparse-cm12-canonical-membership";
 import {
   WebGPUSparseCM12RigidCoupling,
   type SparseCM12RigidResources,
 } from "./webgpu-sparse-cm12-rigid-coupling";
+import {
+  createSparseCM12FramePlanInitialWords,
+  createSparseCM12FramePlanLayout,
+  sparseCM12FramePlanSource,
+  type SparseCM12FramePlanLayout,
+} from "../../core/sparse-cm12-frame-plan";
+import {
+  createSparseCM12FramePlanPresentationInitialWords,
+  createSparseCM12FramePlanPresentationLayout,
+  SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER_WORDS,
+  type SparseCM12FramePlanPresentationLayout,
+} from "./sparse-cm12-frame-plan-presentation";
+import {
+  SPARSE_CM12_FRAME_CONTROL_COVERAGE,
+  SPARSE_CM12_FRAME_CONTROL_FAMILY,
+  SPARSE_CM12_FRAME_CONTROL_FAMILY_COUNT,
+  SPARSE_CM12_FRAME_CONTROL_HEADER,
+  SPARSE_CM12_FRAME_CONTROL_HEADER_WORDS,
+  SPARSE_CM12_FRAME_CONTROL_INVALID,
+  SPARSE_CM12_FRAME_CONTROL_MAGIC,
+  SPARSE_CM12_FRAME_CONTROL_PHASE,
+  createSparseCM12FrameControl,
+  type SparseCM12FrameControlLayout,
+} from "./sparse-cm12-frame-control";
+import {
+  SPARSE_CM12_SRR1_INGRESS_HEADER,
+  SPARSE_CM12_SRR1_INGRESS_HEADER_WORDS,
+  SPARSE_CM12_SRR1_INDIRECT_FAMILY,
+  WebGPUSparseCM12SRR1RuntimeAdapter,
+  createSparseCM12SRR1IngressLayout,
+  createSparseCM12SRR1RuntimePlan,
+  initializeSparseCM12SRR1IngressWords,
+  type SparseCM12SRR1IngressLayout,
+} from "./sparse-cm12-srr1-runtime-adapter";
+import {
+  SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT,
+  createSparseCM12VexActivityBatchIndirectCopies,
+  createSparseCM12VexActivityBatchInitialWords,
+  createSparseCM12VexActivityBatchLayout,
+  createSparseCM12VexActivityBatchPipelineDescriptors,
+  type SparseCM12VexActivityBatchLayout,
+  type SparseCM12VexActivityBatchPacket,
+} from "./sparse-cm12-vex-activity-batch";
+import {
+  SPARSE_CM12_VELOCITY_EXTENSION_HEADER,
+  SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS,
+  SPARSE_CM12_VELOCITY_EXTENSION_MAGIC,
+  SPARSE_CM12_VELOCITY_EXTENSION_VERSION,
+} from "./sparse-cm12-velocity-extension";
+import {
+  SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER,
+  SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS,
+  createSparseCM12PressureTopologyRepairInitialWords,
+  createSparseCM12PressureTopologyRepairLayout,
+  sparseCM12PressureTopologyRepairEntryPoints,
+  sparseCM12PressureTopologyRepairHeaderIndirectByteOffset,
+  sparseCM12PressureTopologyRepairIndirectByteOffset,
+  type SparseCM12PressureTopologyRepairLayout,
+} from "./sparse-cm12-pressure-topology-repair";
+import {
+  SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER,
+  SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS,
+  SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER,
+  SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS,
+  SPARSE_CM12_PRESSURE_CACHE_HEADER,
+  SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS,
+  createSparseCM12ResidentPersistentPressureCacheLayout,
+  initializeSparseCM12PersistentPressureCacheWords,
+  sparseCM12PersistentPressureCacheAggregateIndirectByteOffset,
+  type SparseCM12PersistentPressureCacheLayout,
+} from "./sparse-cm12-persistent-pressure-cache";
+import {
+  SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER,
+  SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS,
+  SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER,
+  SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS,
+  createSparseCM12PressureSolveAuthorityInitialWords,
+  createSparseCM12PressureSolveAuthorityLayout,
+  sparseCM12PressureSolveAuthorityIndirectByteOffset,
+  sparseCM12PressureSolveTailIndirectByteOffset,
+  type SparseCM12PressureSolveAuthorityLayout,
+} from "./sparse-cm12-pressure-solve-authority";
+import { WebGPUSparseCM12PressureTailAuthority } from
+  "./sparse-cm12-pressure-tail-authority";
+import {
+  SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER,
+  SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER_WORDS,
+  createSparseCM12PressureAddressingABPipelineDescriptors,
+  createSparseCM12PressureAddressingABInitialWords,
+  createSparseCM12PressureAddressingABLayout,
+  createSparseCM12ProductionPressureAddressingLayout,
+  inspectSparseCM12PressureAddressingABReceipt,
+  sparseCM12PressureAddressingABPipelineConstants,
+  type SparseCM12PressureAddressingABLayout,
+  type SparseCM12PressureAddressingABModeName,
+  type SparseCM12PressureAddressingABReceipt,
+} from "./sparse-cm12-pressure-addressing-ab";
+import {
+  SPARSE_CM12_FACE_PROJECTION_HEADER,
+  SPARSE_CM12_FACE_PROJECTION_HEADER_WORDS,
+  SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER,
+  SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS,
+  createSparseCM12FaceProjectionAuthorityInitialWords,
+  createSparseCM12FaceProjectionAuthorityLayout,
+  sparseCM12FaceProjectionBootstrapIndirectByteOffset,
+  sparseCM12FaceProjectionIndirectByteOffset,
+  type SparseCM12FaceProjectionAuthorityLayout,
+} from "./sparse-cm12-face-projection-authority";
+import {
+  SPARSE_CM12_FACE_PREPARATION_TILE_CENSUS_HEADER_WORDS,
+  createSparseCM12FacePreparationTileCensusInitialWords,
+  createSparseCM12FacePreparationTileCensusLayout,
+  inspectSparseCM12FacePreparationTileCensusQA,
+  type SparseCM12FacePreparationTileCensusLayout,
+  type SparseCM12FacePreparationTileCensusQA,
+} from "./sparse-cm12-face-preparation-tile-census";
+import {
+  createSparseCM12FpaVexReadCensusInitialWords,
+  createSparseCM12FpaVexReadCensusLayout,
+  inspectSparseCM12FpaVexReadCensusSummaryQA,
+  type SparseCM12FpaVexReadCensusLayout,
+  type SparseCM12FpaVexReadCensusSummaryQA,
+} from "./sparse-cm12-fpa-vex-read-census";
 
 /** CM12 Sec. 3.5 Algorithm 2's live trace bounds, in finest cells and substeps. */
 export interface SharpeningTrace {
@@ -239,10 +392,6 @@ export const SPARSE_CM12_RESIDENT_STAGES: readonly SparseCM12ResidentStageId[] =
     "presentation-publication",
   ] as const);
 
-/** The last stage in encode order; its boundary needs the treatment below. */
-export const SPARSE_CM12_RESIDENT_FINAL_STAGE: SparseCM12ResidentStageId =
-  SPARSE_CM12_RESIDENT_STAGES[SPARSE_CM12_RESIDENT_STAGES.length - 1]!;
-
 /** Where an observer is told about each stage of the advance. */
 export interface SparseCM12ResidentStageSeams {
   /**
@@ -251,14 +400,8 @@ export interface SparseCM12ResidentStageSeams {
    * boundary and costs exactly zero.
    */
   readonly close: (stage: SparseCM12ResidentStageId) => void;
-  /**
-   * Name the final stage before its first dispatch, so an observer can put the
-   * closing boundary on that stage's own pass. Measured on Dawn/Metal: a
-   * trailing marker pass touches nothing the frame touches, so the driver
-   * scheduled it 10 ms *before* the boundary it was meant to close and the
-   * whole sample decoded as non-monotonic.
-   */
-  readonly openFinal?: (stage: SparseCM12ResidentStageId) => void;
+  /** Bind the final timestamp to a word published at the true command tail. */
+  readonly anchorFinalBoundary?: (source: GPUBuffer, offset?: number) => void;
 }
 
 const WORKGROUP_SIZE = 64;
@@ -266,6 +409,26 @@ const WORKGROUP_SIZE = 64;
 const SPARSE_CM12_PARAMETER_BYTES = 448;
 /** Twenty f32 convergence/diagnostic scalars; see the WGSL initialization. */
 const SPARSE_CM12_PRESSURE_SCALAR_BYTES = 80;
+const SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS = 12;
+const SPARSE_CM12_PCM_DIAGNOSTIC_BYTES =
+  2 * 4 * SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS;
+const SPARSE_CM12_PRESSURE_CUTOVER_DIAGNOSTIC_WORDS =
+  2 * SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS
+  + SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS
+  + SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS
+  + 4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS
+  + SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS
+  + 2 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS;
+
+interface SparseCM12PressureAddressingABQAResources {
+  readonly mode: SparseCM12PressureAddressingABModeName;
+  readonly layout: SparseCM12PressureAddressingABLayout;
+  readonly indirectArguments: GPUBuffer;
+  readonly receiptReadback?: GPUBuffer;
+  readonly querySet?: GPUQuerySet;
+  readonly queryResolve?: GPUBuffer;
+  readonly timestampReadback?: GPUBuffer;
+}
 export const SPARSE_CM12_PRESSURE_ITERATIONS = 64;
 /** Immediate production cutover: guarded by a fresh b-Ap check every batch. */
 export const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE = 5e-7;
@@ -382,7 +545,7 @@ export function sparseCM12HostTemplateVariantsEnabled(
   acceptedCellCount: number,
   acceptedRowCount: number,
   mutableBrickCount: number,
-  brickFineResolution = 8,
+  brickFineResolution = 16,
 ): boolean {
   const mutableBrickMaximum = SPARSE_CM12_HOST_TEMPLATE_MUTABLE_BRICK_MAXIMUM
     * (8 / brickFineResolution) ** 3;
@@ -395,7 +558,7 @@ export function sparseCM12HostTemplateVariantsEnabled(
 export function sparseCM12TopologyPagePoolPlan(
   mutableFrontierBricks: number,
   enabled = true,
-  brickFineResolution = 8,
+  brickFineResolution = 16,
 ): SparseCM12TopologyPagePoolPlan {
   const pageWords = gpuTopologyCellPageWords(brickFineResolution);
   if (!enabled || mutableFrontierBricks <= 0) return {
@@ -664,6 +827,18 @@ function resampleBrick(brick: SparseAdaptiveMassBrick,
     gamma: Float64Array.from({ length: count }, (_, local) => sample(brick.gamma, local)) };
 }
 
+/** Number of compact cells emitted for a possibly clipped domain-edge brick. */
+function sparseCM12BrickLiveCellCount(atlas: SparseAdaptiveMassAtlas,
+  brick: SparseAdaptiveMassBrick, resolution: SparseBrickResolution): number {
+  const width = atlas.brickFineResolution * sparseBrickSpan(brick);
+  const scale = width / resolution;
+  return ([0, 1, 2] as const).reduce<number>((count, axis) => {
+    const origin = atlas.brickFineResolution * brick.coordinate[axis];
+    const extent = Math.max(0, Math.min(width, atlas.dimensions[axis] - origin));
+    return count * Math.min(resolution, Math.ceil(extent / scale));
+  }, 1);
+}
+
 /**
  * Construction-time physical template library. Four uniform builds provide
  * every cell, intra-brick row, same-level face, and sparse-air face. Eighteen
@@ -718,6 +893,31 @@ PackedResidentTopologyTemplates {
   const cellId = new Map<string, number>();
   const cellRanges = new Uint32Array(atlas.bricks.length * templateLevels.length * 2);
   const brickIndex = new Map(atlas.bricks.map((brick, index) => [brick.key, index]));
+  const compactBrickCellRange = (grid: SparseAtlasCompositeGrid,
+    brick: SparseAdaptiveMassBrick,
+    resolution: SparseBrickResolution, context: string) => {
+    const key = brick.key;
+    const first = grid.cellBaseByBrick.get(key);
+    if (first === undefined) {
+      throw new Error(`Sparse CM12 ${context} brick ${key}/${resolution} has no compact base`);
+    }
+    let end = first;
+    while (end < grid.cells.length && grid.cells[end]!.brickKey === key) end += 1;
+    const count = end - first;
+    const expected = sparseCM12BrickLiveCellCount(atlas, brick, resolution);
+    if (count !== expected || count === 0) {
+      throw new Error(`Sparse CM12 ${context} brick ${key}/${resolution} has ${count} `
+        + `compact cells; expected clipped count ${expected}`);
+    }
+    for (let cell = first; cell < end; cell += 1) {
+      const source = grid.cells[cell];
+      if (!source || source.brickKey !== key || source.brickResolution !== resolution) {
+        throw new Error(`Sparse CM12 ${context} brick ${key}/${resolution} compact range `
+          + `[${first},${end}) is not contiguous at ${cell}`);
+      }
+    }
+    return { first, count } as const;
+  };
   // Preserve generation-zero IDs so the old direct dispatch and the new
   // accepted worklist address the same state while physical cutover lands.
   for (const source of acceptedGrid.cells) {
@@ -728,8 +928,10 @@ PackedResidentTopologyTemplates {
   for (const brick of atlas.bricks) for (let levelIndex = 0;
     levelIndex < templateLevels.length; levelIndex += 1) {
     const range = 2 * (templateLevels.length * brickIndex.get(brick.key)! + levelIndex);
-    cellRanges[range] = acceptedGrid.cellBaseByBrick.get(brick.key) ?? 0;
-    cellRanges[range + 1] = brick.resolution ** 3;
+    const accepted = compactBrickCellRange(acceptedGrid, brick,
+      brick.resolution, "accepted template");
+    cellRanges[range] = accepted.first;
+    cellRanges[range + 1] = accepted.count;
   }
 
   const rows: SparseAtlasGradientRow[] = [];
@@ -775,11 +977,11 @@ PackedResidentTopologyTemplates {
       for (const brick of localBricks.filter((candidate) =>
         mutableBrickKeys.has(candidate.key))) {
         const range = 2 * (templateLevels.length * brickIndex.get(brick.key)! + levelIndex);
-        const firstSource = grid.cellBaseByBrick.get(brick.key)!;
-        const count = level ** 3;
+        const sourceRange = compactBrickCellRange(grid, brick, level,
+          "variant template");
         let first = INVALID;
-        for (let offset = 0; offset < count; offset += 1) {
-          const source = grid.cells[firstSource + offset]!;
+        for (let offset = 0; offset < sourceRange.count; offset += 1) {
+          const source = grid.cells[sourceRange.first + offset]!;
           const key = templateCellKey(brick.key, level, source.localIndex);
           let id = cellId.get(key);
           if (id === undefined) {
@@ -788,7 +990,7 @@ PackedResidentTopologyTemplates {
           first = Math.min(first, id);
         }
         cellRanges[range] = first;
-        cellRanges[range + 1] = count;
+        cellRanges[range + 1] = sourceRange.count;
       }
       appendRows(grid, (row) => row.terms.some((term) =>
         coreKeys.has(grid.cells[term.cellId]!.brickKey)));
@@ -942,6 +1144,8 @@ interface ResidentStateLayout {
    */
   readonly journal: number;
   readonly journalLayout: SparseCM12PressureJournalLayout;
+  /** VEX1 accepted air-band cache plus prior liquid-interface seed receipts. */
+  readonly velocityExtensionAcceptedVelocity: number;
 }
 
 export interface SparseCM12FinePresentationPlan {
@@ -975,8 +1179,8 @@ export function encodeSparseCM12FinePresentationSource(
   brick: number,
   octant: number,
   spanBricks: number,
-  brickFineResolution = 8,
-  presentationPageResolution = 4,
+  brickFineResolution = 16,
+  presentationPageResolution = 16,
 ): number {
   const spanLog = Math.log2(spanBricks);
   if (!Number.isInteger(brick) || brick < 0
@@ -1006,8 +1210,8 @@ export function encodeSparseCM12FinePresentationSource(
 
 export function decodeSparseCM12FinePresentationSource(
   source: number,
-  brickFineResolution = 8,
-  presentationPageResolution = 4,
+  brickFineResolution = 16,
+  presentationPageResolution = 16,
 ): SparseCM12FinePresentationSource {
   if (brickFineResolution / presentationPageResolution === 4) {
     const macro = (source & 0x8000_0000) !== 0;
@@ -1031,7 +1235,7 @@ export function decodeSparseCM12FinePresentationSource(
 
 export function sparseCM12FinePresentationPlan(
   atlas: SparseAdaptiveMassAtlas,
-  presentationPageResolution: SparseCM12PresentationPageResolution = 4,
+  presentationPageResolution: SparseCM12PresentationPageResolution = 16,
 ): SparseCM12FinePresentationPlan {
   const brickFineResolution = atlas.brickFineResolution;
   if (presentationPageResolution > brickFineResolution
@@ -1202,9 +1406,58 @@ export interface SparseCM12GPUActivitySnapshot {
  * directly and never constructs these finest-domain arrays. */
 export interface SparseCM12DiagnosticFields {
   readonly density: Float32Array;
+  readonly gamma: Float32Array;
   readonly velocity: Float32Array;
   readonly pressure: Float32Array;
   readonly divergence: Float32Array;
+}
+
+export type SparseCM12TemporalSeedQAMode = "current" | "change";
+
+/** Construction-only census for the immutable temporal-seed A/B. */
+export interface SparseCM12TemporalSeedQA {
+  readonly mode: SparseCM12TemporalSeedQAMode;
+  readonly seedCells: number;
+  readonly firstDilationCells: number;
+  readonly finalCells: number;
+  readonly finalRows: number;
+}
+
+/** QA-only materialization of the GPU-owned FCA1 accepted-frame header. */
+export interface SparseCM12FrameControlQA {
+  readonly phase: number;
+  readonly fault: number;
+  readonly firstFaultOwner: number;
+  readonly acceptedGeneration: number;
+  readonly candidateGeneration: number;
+  readonly sealedGeneration: number;
+  readonly scalarParity: number;
+  readonly faceParity: number;
+  readonly coverage: number;
+  readonly committedFrames: number;
+}
+
+/** Header-only VEX1 receipt. Capacity-sized comparison arrays remain opt-in. */
+export interface SparseCM12VelocityExtensionHeaderQA {
+  readonly flags: number;
+  readonly phase: number;
+  readonly acceptedGeneration: number;
+  readonly candidateGeneration: number;
+  readonly topologyGeneration: number;
+  readonly capacity: number;
+  readonly rootCount: number;
+  readonly blastCount: number;
+  readonly maximumDepth: number;
+  readonly executedCellCount: number;
+  readonly reusedCellCount: number;
+  readonly faultCount: number;
+  readonly uncoveredWriteCount: number;
+  readonly firstFault?: { readonly cell: number; readonly depth: number };
+  readonly framePlanProvenance?: {
+    readonly ownerBrick: number; readonly ownerTile: number; readonly slot: number;
+    readonly tileGeneration: number; readonly packedStageMasks: number;
+    readonly stage0MaskLow: number;
+  };
 }
 
 const align4 = (value: number): number => (value + 3) & ~3;
@@ -1324,6 +1577,7 @@ function residentStateLayout(
       at += align4(journalLayout.floatCount);
       return { journal: base, journalLayout };
     })(),
+    velocityExtensionAcceptedVelocity: cellVectors(),
     floatCount: at,
   };
 }
@@ -1349,7 +1603,6 @@ function packResidentTopology(
     || maximumSpanLog > SPARSE_CM12_PRESENTATION_MAX_SPAN_LOG) {
     throw new RangeError(`Sparse CM12 maximum span ${atlas.maximumSpanBricks} is invalid`);
   }
-  const brickIndexByKey = new Map(atlas.bricks.map((brick, index) => [brick.key, index]));
   const ownership = sparseCM12OwnershipTablePlan(atlas.bricks.length);
   const hashCapacity = ownership.hashCapacity;
   let at = 0;
@@ -1590,14 +1843,51 @@ function compactPressureTopology(
  * products: frame kernels only apply the current row-acceptance predicate. */
 function pressureWorklistAndNeighbors(
   templates: PackedResidentTopologyTemplates,
+  pressureTopology: Uint32Array,
   templateLevelCount: number,
-): Uint32Array {
+  brickCount: number,
+): { readonly words: Uint32Array; readonly layout: SparseCM12PressureRepairLayout } {
   const edgeOffsets = templates.words[15]!;
   const edgeCount = templates.words[edgeOffsets + templates.cellCount]!;
   const edgeRecords = edgeOffsets + templates.cellCount + 1;
   const neighborOffset = 8 + templates.cellCount + templates.rowCount;
   const extrapolationWeightOffset = neighborOffset + edgeCount;
-  const result = new Uint32Array(extrapolationWeightOffset + edgeCount);
+  const cellSlotBaseWords = extrapolationWeightOffset + edgeCount;
+  const rowSlotBaseWords = cellSlotBaseWords + templates.cellCount;
+  const cellChangeBaseWords = rowSlotBaseWords + templates.rowCount;
+  const rowChangeBaseWords = cellChangeBaseWords + templates.cellCount;
+  const brickStateBaseWords = rowChangeBaseWords + templates.rowCount;
+  const rowTopologyStampBaseWords = brickStateBaseWords + brickCount;
+  const aggregateEdgeForFineEdgeBaseWords = rowTopologyStampBaseWords + templates.rowCount;
+  const coarseBase = pressureTopology[14]!;
+  const coarseEdgeCount = pressureTopology[coarseBase + 1]!;
+  const aggregateEdgeSourceBaseWords = aggregateEdgeForFineEdgeBaseWords + edgeCount;
+  const hierarchyBase = pressureTopology[13]!;
+  const hierarchyLevelCount = pressureTopology[hierarchyBase]!;
+  const hierarchyEdgeForAggregateBaseWords = Array.from(
+    { length: hierarchyLevelCount },
+    (_, level) => aggregateEdgeSourceBaseWords + coarseEdgeCount * (level + 1),
+  );
+  const headerBaseWords = aggregateEdgeSourceBaseWords
+    + coarseEdgeCount * (hierarchyLevelCount + 1);
+  const layout: SparseCM12PressureRepairLayout = Object.freeze({
+    cellSlotBaseWords,
+    rowSlotBaseWords,
+    cellChangeBaseWords,
+    rowChangeBaseWords,
+    brickStateBaseWords,
+    rowTopologyStampBaseWords,
+    aggregateEdgeForFineEdgeBaseWords,
+    aggregateEdgeSourceBaseWords,
+    hierarchyEdgeForAggregateBaseWords: Object.freeze(hierarchyEdgeForAggregateBaseWords),
+    headerBaseWords,
+    totalWords: headerBaseWords + SPARSE_CM12_PRESSURE_REPAIR_HEADER_WORDS,
+  });
+  const result = new Uint32Array(layout.totalWords);
+  result.fill(INVALID, cellSlotBaseWords, rowSlotBaseWords + templates.rowCount);
+  result.fill(INVALID, brickStateBaseWords, brickStateBaseWords + brickCount);
+  result.fill(INVALID, aggregateEdgeForFineEdgeBaseWords,
+    aggregateEdgeForFineEdgeBaseWords + edgeCount);
   const cellOffset = templates.words[6]!;
   const cellRangeOffset = templates.words[11]!;
   const rowOffset = templates.words[7]!;
@@ -1609,7 +1899,7 @@ function pressureWorklistAndNeighbors(
     const range = cellRangeOffset + 2 * (templateLevelCount * brick
       + Math.log2(resolution));
     const first = templates.words[range]!, count = templates.words[range + 1]!;
-    if (count !== resolution ** 3 || cell < first || cell >= first + count) {
+    if (count === 0 || cell < first || cell >= first + count) {
       throw new Error(`Sparse CM12 pressure brick range ${brick}/${resolution} is not dense`);
     }
   }
@@ -1633,7 +1923,50 @@ function pressureWorklistAndNeighbors(
       throw new Error(`Sparse CM12 pressure edge ${edge} has no neighbor term`);
     }
   }
-  return result;
+  const coarseRecordBase = coarseBase + 4 + brickCount + 1;
+  const coarseOffsets = coarseBase + 4;
+  for (let brick = 0; brick < brickCount; brick += 1) {
+    for (let edge = pressureTopology[coarseOffsets + brick]!;
+      edge < pressureTopology[coarseOffsets + brick + 1]!; edge += 1) {
+      result[aggregateEdgeSourceBaseWords + edge] = brick;
+    }
+  }
+  for (let level = 0; level < hierarchyLevelCount; level += 1) {
+    const destination = hierarchyEdgeForAggregateBaseWords[level]!;
+    result.fill(INVALID, destination, destination + coarseEdgeCount);
+    const descriptor = hierarchyBase + 1 + 10 * level;
+    const groupCount = pressureTopology[descriptor]!;
+    const edgeOffsets = pressureTopology[descriptor + 6]!;
+    const records = pressureTopology[descriptor + 7]!;
+    const hierarchyEdgeCount = pressureTopology[edgeOffsets + groupCount]!;
+    for (let edge = 0; edge < hierarchyEdgeCount; edge += 1) {
+      const record = records + 3 * edge;
+      const first = pressureTopology[record + 1]!;
+      const count = pressureTopology[record + 2]!;
+      for (let local = 0; local < count; local += 1) {
+        const aggregateEdge = pressureTopology[first + local]!;
+        if (aggregateEdge >= coarseEdgeCount
+          || result[destination + aggregateEdge] !== INVALID) {
+          throw new Error(`Sparse CM12 aggregate edge ${aggregateEdge} has ambiguous hierarchy owner`);
+        }
+        result[destination + aggregateEdge] = edge;
+      }
+    }
+  }
+  for (let coarseEdge = 0; coarseEdge < coarseEdgeCount; coarseEdge += 1) {
+    const record = coarseRecordBase + 3 * coarseEdge;
+    const first = pressureTopology[record + 1]!;
+    const count = pressureTopology[record + 2]!;
+    for (let local = 0; local < count; local += 1) {
+      const fineEdge = pressureTopology[first + local]!;
+      if (fineEdge >= edgeCount
+        || result[aggregateEdgeForFineEdgeBaseWords + fineEdge] !== INVALID) {
+        throw new Error(`Sparse CM12 fine edge ${fineEdge} has ambiguous aggregate owner`);
+      }
+      result[aggregateEdgeForFineEdgeBaseWords + fineEdge] = coarseEdge;
+    }
+  }
+  return { words: result, layout };
 }
 
 /** Static compact topology plus fully device-resident evolving frame state. */
@@ -1648,6 +1981,41 @@ export class WebGPUSparseCM12Resident {
   private readonly scalars: GPUBuffer;
   private readonly conditioning: GPUBuffer;
   private readonly activity: GPUBuffer;
+  /** Stable 4^3 dirty/provenance packets appended to the activity arena. */
+  private readonly dirtySchedulerLayout: SparseCM12DirtySchedulerLayout;
+  private readonly temporalWorklistLayout: SparseCM12TemporalWorklistLayout;
+  private readonly pressureRepairLayout: SparseCM12PressureRepairLayout;
+  /** Persistent compact activity census and per-physical-brick 4^3 tile mask. */
+  readonly incrementalActivityLayout: SparseCM12IncrementalActivityLayout;
+  /** Deterministic GPU pressure membership and rank-select arena. */
+  private readonly canonicalMembershipLayout: SparseCM12CanonicalMembershipLayout;
+  private readonly framePlanLayout: SparseCM12FramePlanLayout;
+  private readonly framePlanPresentationLayout: SparseCM12FramePlanPresentationLayout;
+  /** FCA1 GPU-owned frame generation, parity, predicates, and indirect ABI. */
+  private readonly frameControlLayout: SparseCM12FrameControlLayout;
+  /** Producer-authored exact scalar receipts use a compact activity ingress;
+   * the dedicated authority cannot bind or mutate physical state. */
+  private readonly scalarResultIngressLayout: SparseCM12SRR1IngressLayout;
+  private readonly vexActivityBatchLayout: SparseCM12VexActivityBatchLayout;
+  private readonly vexActivityIndirectCopies: ReadonlyMap<string,
+    ReturnType<typeof createSparseCM12VexActivityBatchIndirectCopies>[number]>;
+  private readonly scalarResultAuthority: WebGPUSparseCM12SRR1RuntimeAdapter;
+  /** Immutable construction-time QA mode; never selected by frame state. */
+  private readonly pressureRefreshOracleForQA: boolean;
+  /** Immutable construction-only HEAD presentation publisher oracle. */
+  private readonly presentationPublisherOracleForQA: boolean;
+  /** Immutable paired QA mode for proving FCA1 against the retired host
+   * parity/D4 schedule. It is not reachable from ordinary solver options. */
+  private readonly legacyHostAuthorityOracleForQA: boolean;
+  private legacyHostAuthorityParityForQA = 0;
+  private legacyHostD4AuthorityForQA: boolean;
+  private readonly temporalCellIndirectArguments: GPUBuffer;
+  private readonly temporalRowIndirectArguments: GPUBuffer;
+  private readonly activityIndirectArguments: GPUBuffer;
+  private readonly vexActivityIndirectArguments: GPUBuffer;
+  private readonly framePlanIndirectArguments: GPUBuffer;
+  private readonly presentationIndirectArguments: GPUBuffer;
+  private readonly frameControlIndirectArguments: GPUBuffer;
   private readonly candidateState: GPUBuffer;
   /** Immutable physical templates followed by device-owned double-buffered
    * accepted/shadow cell+row IDs and GPU indirect arguments. */
@@ -1660,6 +2028,27 @@ export class WebGPUSparseCM12Resident {
   private readonly pressureCellIndirectArguments: GPUBuffer;
   /** Copy-isolated indirect dispatch for active pressure rows. */
   private readonly pressureRowIndirectArguments: GPUBuffer;
+  /** GPU-authored bootstrap cell/row dispatches. The inactive epoch branch
+   * publishes x=0, so the host encodes one fixed pressure schedule. */
+  private readonly pressureMembershipIndirectArguments: GPUBuffer;
+  /** Copy-isolated PTR1 indirect families: brick seed/repair/work, row
+   * seed/repair/work, and changed-brick accepted-state commit. */
+  private readonly pressureTopologyRepairIndirectArguments: GPUBuffer;
+  /** Copy-isolated PCF1/PCA1 fine, seed, repair, and work dispatches. */
+  private readonly persistentPressureCacheIndirectArguments: GPUBuffer;
+  /** Copy-isolated PSA1 bootstrap/repair/work/tail dispatches. */
+  private readonly pressureSolveAuthorityIndirectArguments: GPUBuffer;
+  /** Two 48-byte copy-isolated PSA1 tail banks. The bootstrap landing only
+   * publishes/copies bank A; existing arithmetic remains unchanged. */
+  private readonly pressureTailAuthority: WebGPUSparseCM12PressureTailAuthority;
+  /** Copy-isolated FPA1 preparation/projection bootstrap/repair/work/verify. */
+  private readonly faceProjectionAuthorityIndirectArguments: GPUBuffer;
+  /** Construction-only observational FPA tile-mask census. */
+  private readonly facePreparationTileCensusLayout:
+    SparseCM12FacePreparationTileCensusLayout | undefined;
+  /** Construction-only actual FPA VEX xyz-read dependency census. */
+  private readonly fpaVexReadCensusLayout:
+    SparseCM12FpaVexReadCensusLayout | undefined;
   /** Ordinary compact pressure IDs and dense immutable SpMV neighbors. */
   private readonly pressureWorklists: GPUBuffer;
   private readonly fineMetadata: GPUBuffer;
@@ -1681,7 +2070,6 @@ export class WebGPUSparseCM12Resident {
   private readonly parameterWords = new ArrayBuffer(SPARSE_CM12_PARAMETER_BYTES);
   private readonly parameterU32 = new Uint32Array(this.parameterWords);
   private readonly parameterF32 = new Float32Array(this.parameterWords);
-  private parity = 0;
   private destroyed = false;
   /**
    * Derived here rather than threaded in from `create`, so the region
@@ -1718,6 +2106,19 @@ export class WebGPUSparseCM12Resident {
     acceptedIndirectArguments: GPUBuffer,
     pressureCellIndirectArguments: GPUBuffer,
     pressureRowIndirectArguments: GPUBuffer,
+    pressureMembershipIndirectArguments: GPUBuffer,
+    pressureTopologyRepairIndirectArguments: GPUBuffer,
+    persistentPressureCacheIndirectArguments: GPUBuffer,
+    pressureSolveAuthorityIndirectArguments: GPUBuffer,
+    pressureTailAuthority: WebGPUSparseCM12PressureTailAuthority,
+    faceProjectionAuthorityIndirectArguments: GPUBuffer,
+    temporalCellIndirectArguments: GPUBuffer,
+    temporalRowIndirectArguments: GPUBuffer,
+    activityIndirectArguments: GPUBuffer,
+    vexActivityIndirectArguments: GPUBuffer,
+    framePlanIndirectArguments: GPUBuffer,
+    presentationIndirectArguments: GPUBuffer,
+    frameControlIndirectArguments: GPUBuffer,
     pressureWorklists: GPUBuffer,
     fineBuffers: readonly [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer,
       GPUBuffer],
@@ -1726,23 +2127,72 @@ export class WebGPUSparseCM12Resident {
     bindGroup: GPUBindGroup,
     pressureBindGroup: GPUBindGroup,
     pressureTemplates: GPUBuffer,
+    dirtySchedulerLayout: SparseCM12DirtySchedulerLayout,
+    temporalWorklistLayout: SparseCM12TemporalWorklistLayout,
+    pressureRepairLayout: SparseCM12PressureRepairLayout,
+    incrementalActivityLayout: SparseCM12IncrementalActivityLayout,
+    canonicalMembershipLayout: SparseCM12CanonicalMembershipLayout,
+    framePlanLayout: SparseCM12FramePlanLayout,
+    framePlanPresentationLayout: SparseCM12FramePlanPresentationLayout,
+    frameControlLayout: SparseCM12FrameControlLayout,
+    scalarResultIngressLayout: SparseCM12SRR1IngressLayout,
+    vexActivityBatchLayout: SparseCM12VexActivityBatchLayout,
+    private readonly pressureTopologyRepairLayout:
+      SparseCM12PressureTopologyRepairLayout,
+    private readonly persistentPressureCacheLayout:
+      SparseCM12PersistentPressureCacheLayout,
+    private readonly pressureSolveAuthorityLayout:
+      SparseCM12PressureSolveAuthorityLayout,
+    private readonly faceProjectionAuthorityLayout:
+      SparseCM12FaceProjectionAuthorityLayout,
+    facePreparationTileCensusLayout:
+      SparseCM12FacePreparationTileCensusLayout | undefined,
+    fpaVexReadCensusLayout: SparseCM12FpaVexReadCensusLayout | undefined,
+    scalarResultAuthority: WebGPUSparseCM12SRR1RuntimeAdapter,
+    pressureRefreshOracleForQA: boolean,
+    presentationPublisherOracleForQA: boolean,
+    legacyHostAuthorityOracleForQA: boolean,
+    initialHorizontalD4AuthorityForQA: boolean,
+    private readonly pressureAddressingABQA:
+      SparseCM12PressureAddressingABQAResources,
+    private readonly temporalSeedModeForQA:
+      SparseCM12TemporalSeedQAMode | undefined,
     pipelines: Readonly<Record<string, GPUComputePipeline>>,
     cellCount: number,
     rowCount: number,
     private readonly templateCellCount: number,
     private readonly templateRowCount: number,
     private readonly pressureCoarseEdgeCount: number,
+    private readonly pressureFineEdgeCount: number,
     private readonly pressureHierarchyGroupCount: number,
     private readonly pressureHierarchyEdgeCount: number,
     private readonly pressureScratchBytes: number,
     private readonly topologyWorklistBaseBytes: number,
     private readonly templateWords: Uint32Array,
-    private horizontalD4Authority: boolean,
     private readonly boundary?: SphericalContainerFineGeometry,
     private readonly rigidCoupling?: WebGPUSparseCM12RigidCoupling,
   ) {
     [this.parameters, this.topology, this.state, this.partials, this.scalars,
       this.conditioning, this.activity, this.candidateState, this.topologyArena] = buffers;
+    this.dirtySchedulerLayout = dirtySchedulerLayout;
+    this.temporalWorklistLayout = temporalWorklistLayout;
+    this.pressureRepairLayout = pressureRepairLayout;
+    this.incrementalActivityLayout = incrementalActivityLayout;
+    this.canonicalMembershipLayout = canonicalMembershipLayout;
+    this.framePlanLayout = framePlanLayout;
+    this.framePlanPresentationLayout = framePlanPresentationLayout;
+    this.frameControlLayout = frameControlLayout;
+    this.scalarResultIngressLayout = scalarResultIngressLayout;
+    this.vexActivityBatchLayout = vexActivityBatchLayout;
+    this.vexActivityIndirectCopies = new Map(
+      createSparseCM12VexActivityBatchIndirectCopies(vexActivityBatchLayout)
+        .map((copy) => [copy.id, copy] as const),
+    );
+    this.scalarResultAuthority = scalarResultAuthority;
+    this.pressureRefreshOracleForQA = pressureRefreshOracleForQA;
+    this.presentationPublisherOracleForQA = presentationPublisherOracleForQA;
+    this.legacyHostAuthorityOracleForQA = legacyHostAuthorityOracleForQA;
+    this.legacyHostD4AuthorityForQA = initialHorizontalD4AuthorityForQA;
     this.tracerLattice = sparseCM12TracerLattice(dimensions);
     this.tracerSource = {
       buffer: this.state,
@@ -1756,6 +2206,25 @@ export class WebGPUSparseCM12Resident {
     this.acceptedIndirectArguments = acceptedIndirectArguments;
     this.pressureCellIndirectArguments = pressureCellIndirectArguments;
     this.pressureRowIndirectArguments = pressureRowIndirectArguments;
+    this.pressureMembershipIndirectArguments = pressureMembershipIndirectArguments;
+    this.pressureTopologyRepairIndirectArguments =
+      pressureTopologyRepairIndirectArguments;
+    this.persistentPressureCacheIndirectArguments =
+      persistentPressureCacheIndirectArguments;
+    this.pressureSolveAuthorityIndirectArguments =
+      pressureSolveAuthorityIndirectArguments;
+    this.pressureTailAuthority = pressureTailAuthority;
+    this.faceProjectionAuthorityIndirectArguments =
+      faceProjectionAuthorityIndirectArguments;
+    this.facePreparationTileCensusLayout = facePreparationTileCensusLayout;
+    this.fpaVexReadCensusLayout = fpaVexReadCensusLayout;
+    this.temporalCellIndirectArguments = temporalCellIndirectArguments;
+    this.temporalRowIndirectArguments = temporalRowIndirectArguments;
+    this.activityIndirectArguments = activityIndirectArguments;
+    this.vexActivityIndirectArguments = vexActivityIndirectArguments;
+    this.framePlanIndirectArguments = framePlanIndirectArguments;
+    this.presentationIndirectArguments = presentationIndirectArguments;
+    this.frameControlIndirectArguments = frameControlIndirectArguments;
     this.pressureWorklists = pressureWorklists;
     [this.fineParams, this.fineMetadata, this.fineWorklist, this.fineSamples,
       this.fineWorkA, this.fineWorkB, this.fineRollback] = fineBuffers;
@@ -1770,6 +2239,11 @@ export class WebGPUSparseCM12Resident {
       workA: this.fineWorkA,
       workB: this.fineWorkB,
       rollbackSamples: this.fineRollback,
+      presentationControl: {
+        buffer: this.activity,
+        offset: 4 * this.framePlanPresentationLayout.baseWords,
+        size: 4 * SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER_WORDS,
+      },
     };
     this.sparseAdaptiveGridSource = {
       kind: "sparse-adaptive-grid-sampling",
@@ -1778,6 +2252,8 @@ export class WebGPUSparseCM12Resident {
       topologyArena: { buffer: this.topologyArena },
       state: { buffer: this.state },
       activity: { buffer: this.activity },
+      framePlan: sparseCM12FramePlanSource(
+        this.framePlanLayout, this.activity, this.framePlanIndirectArguments),
       fineMetadata: { buffer: this.fineMetadata },
       fineWorklist: { buffer: this.fineWorklist },
       fineSamples: { buffer: this.fineSamples },
@@ -1790,15 +2266,25 @@ export class WebGPUSparseCM12Resident {
     this.cellCount = cellCount;
     this.rowCount = rowCount;
     this.allocatedBytes = [acceptedIndirectArguments, pressureCellIndirectArguments,
-      pressureRowIndirectArguments,
+      pressureRowIndirectArguments, pressureMembershipIndirectArguments,
+      pressureTopologyRepairIndirectArguments,
+      temporalCellIndirectArguments, temporalRowIndirectArguments,
+      activityIndirectArguments, vexActivityIndirectArguments,
+      framePlanIndirectArguments, presentationIndirectArguments,
+      frameControlIndirectArguments,
       pressureTemplates, pressureWorklists,
       ...buffers, ...fineBuffers].reduce(
       (sum, buffer) => sum + buffer.size, 0,
     )
-      + diagnosticsReadback.size;
+      + diagnosticsReadback.size + scalarResultAuthority.allocatedBytes
+      + pressureTailAuthority.buffers[0].size + pressureTailAuthority.buffers[1].size
+      + (pressureAddressingABQA ? pressureAddressingABQA.indirectArguments.size
+        + (pressureAddressingABQA.receiptReadback?.size ?? 0)
+        + (pressureAddressingABQA.queryResolve?.size ?? 0)
+        + (pressureAddressingABQA.timestampReadback?.size ?? 0) : 0);
   }
 
-  static async create(
+  static create(
     device: GPUDevice,
     atlas: SparseAdaptiveMassAtlas,
     grid: SparseAtlasCompositeGrid,
@@ -1808,8 +2294,186 @@ export class WebGPUSparseCM12Resident {
     )),
     rigid?: SparseCM12RigidResources,
     journal?: SparseCM12PressureJournalCapacityRequest,
-    presentationPageResolution: SparseCM12PresentationPageResolution = 4,
+    presentationPageResolution: SparseCM12PresentationPageResolution = 16,
   ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, false, false);
+  }
+
+  /** QA-only construction path. Production callers have no runtime option
+   * that can select this full pressure-classification oracle. */
+  static createPressureRefreshOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = 16,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      true, false, false, false);
+  }
+
+  /** QA-only construction path for the immutable HEAD presentation publisher.
+   * Production frame state cannot select it and FPP1 never falls back to it. */
+  static createPresentationPublisherOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = 16,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, true, false, false);
+  }
+
+  /** Construction-only paired oracle for the retired host authority schedule.
+   * It has no runtime selector and intentionally rejects rigid/boundary cases
+   * until their legacy direct-dispatch comparison is required. */
+  static createLegacyHostAuthorityOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = 16,
+  ): Promise<WebGPUSparseCM12Resident> {
+    if (rigid || atlas.boundary) {
+      throw new Error("legacy host-authority QA oracle currently requires no rigid/boundary source");
+    }
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, true, true);
+  }
+
+  /** Construction-only full scalar oracle. It invalidates every clean SAW1
+   * receipt while running the same compiled physical mass/gamma/surface path. */
+  static createScalarFullPathOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = 16,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, false, true);
+  }
+
+  /** Construction-only PCM rank-select pressure-address arm. */
+  static createPressureAddressingRankSelectForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = 16,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, false, false, "canonicalRankSelect");
+  }
+
+  /** Construction-only materialized pressure-address arm. */
+  static createPressureAddressingMaterializedListForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = 16,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, false, false, "materializedList");
+  }
+
+  /** Construction-only production-seed arm with QA census enabled. */
+  static createTemporalCurrentSeedOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = 16,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, false, false, undefined, "current");
+  }
+
+  /** Construction-only exact endpoint-change seed arm with QA census enabled. */
+  static createTemporalChangeSeedOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = 16,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, false, false, undefined, "change");
+  }
+
+  private static async createConfigured(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = 16,
+    pressureRefreshOracleForQA = false,
+    presentationPublisherOracleForQA = false,
+    legacyHostAuthorityOracleForQA = false,
+    scalarFullPathOracleForQA = false,
+    pressureAddressingModeForQA?: SparseCM12PressureAddressingABModeName,
+    temporalSeedModeForQA?: SparseCM12TemporalSeedQAMode,
+  ): Promise<WebGPUSparseCM12Resident> {
+    if (atlas.brickFineResolution !== 16 || presentationPageResolution !== 16) {
+      throw new Error("Sparse CM12 production requires B16/P16 while pressure addressing uses its canonical materialized list");
+    }
     if (atlas.boundary) {
       throw new Error("Sparse CM12 sparse MGPCG does not support separating boundaries; no fallback solver is installed");
     }
@@ -1846,8 +2510,11 @@ export class WebGPUSparseCM12Resident {
           const resolution = templateLevels[level]!;
           const range = rangeOffset + 2 * (templateLevels.length * brick + level);
           const first = templates.words[range]!, count = templates.words[range + 1]!;
-          if (count !== resolution ** 3) {
-            throw new Error(`Sparse CM12 template range ${brick}/${resolution} has ${count} cells`);
+          const expected = sparseCM12BrickLiveCellCount(atlas,
+            atlas.bricks[brick]!, resolution);
+          if (count !== expected || count === 0) {
+            throw new Error(`Sparse CM12 template range ${brick}/${resolution} has ${count} `
+              + `cells; expected clipped count ${expected}`);
           }
           for (let cell = first; cell < first + count; cell += 1) {
             const base = cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell;
@@ -1899,7 +2566,8 @@ export class WebGPUSparseCM12Resident {
       size: SPARSE_CM12_PARAMETER_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const topology = uploadBuffer(device, "Sparse CM12 resident topology", packed.words, storage);
-    // WebGPU buffers start zeroed. Seed only the five nonzero scalar ranges
+    // WebGPU buffers start zeroed. Seed only the four nonzero scalar ranges;
+    // PCM bootstrap authors persistent liquid membership for accepted cells.
     // instead of allocating and uploading the complete (mostly-zero) resident
     // state on the host. Rigid coupling retains its explicit initialization
     // until its two strided row flags move to the bootstrap kernel.
@@ -1912,7 +2580,6 @@ export class WebGPUSparseCM12Resident {
         initialState[layout.densityB + cell] = density;
         initialState[layout.gammaA + cell] = gamma;
         initialState[layout.gammaB + cell] = gamma;
-        initialState[layout.liquid + cell] = density >= 0.5 ? 1 : 0;
         initialState[layout.solidCellOpen + cell] = 1;
       }
       for (let row = 0; row < templates.rowCount; row += 1) {
@@ -1932,8 +2599,6 @@ export class WebGPUSparseCM12Resident {
       seed(layout.densityB, templates.initialDensity);
       seed(layout.gammaA, templates.initialGamma);
       seed(layout.gammaB, templates.initialGamma);
-      seed(layout.liquid, Float32Array.from(templates.initialDensity,
-        (density) => density >= 0.5 ? 1 : 0));
     }
     const partials = device.createBuffer({ label: "Sparse CM12 resident reductions",
       size: Math.max(16, 16 * cellWorkgroups), usage: storage });
@@ -1947,8 +2612,145 @@ export class WebGPUSparseCM12Resident {
         templates.cellCount + templates.rowCount + 8),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
-    const initialActivity = new Uint32Array(ACTIVITY_HEADER_WORDS
-      + ACTIVITY_RECORD_WORDS * packed.brickCount);
+    const activityHistoryWords = ACTIVITY_HEADER_WORDS
+      + ACTIVITY_RECORD_WORDS * packed.brickCount;
+    const logicalBrickDimensions = atlas.dimensions.map((value) =>
+      Math.ceil(value / atlas.brickFineResolution));
+    const logicalBrickCount = logicalBrickDimensions[0]!
+      * logicalBrickDimensions[1]! * logicalBrickDimensions[2]!;
+    const tilesPerLogicalBrickAxis = atlas.brickFineResolution / 4;
+    const stableDirtyTileCount = logicalBrickCount * tilesPerLogicalBrickAxis ** 3;
+    const dirtySchedulerLayout = createSparseCM12DirtySchedulerLayout({
+      logicalBrickCount,
+      brickFineResolution: atlas.brickFineResolution,
+      // One exact global-path event per stable tile in the neutral cut. Future
+      // producer coalescing shares this bound and rejects locally on overflow.
+      journalCapacity: stableDirtyTileCount,
+      packingPacketCount: 6,
+      baseWords: Math.ceil(activityHistoryWords / SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS)
+        * SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS,
+    });
+    const dirtySchedulerInitialWords = createSparseCM12DirtySchedulerInitialWords(
+      dirtySchedulerLayout, { acceptedGeneration: 0, acceptedCleanBootstrap: true },
+    );
+    const temporalHeaderBaseWords = Math.ceil(
+      dirtySchedulerLayout.totalWords / SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS,
+    ) * SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS;
+    const temporalWorklistLayout: SparseCM12TemporalWorklistLayout = Object.freeze({
+      headerBaseWords: temporalHeaderBaseWords,
+      cellListBaseWords: temporalHeaderBaseWords + 10,
+      rowListBaseWords: temporalHeaderBaseWords + 10 + templates.cellCount,
+      cellFlagABaseWords: temporalHeaderBaseWords + 10
+        + templates.cellCount + templates.rowCount,
+      cellFlagBBaseWords: temporalHeaderBaseWords + 10
+        + 2 * templates.cellCount + templates.rowCount,
+      totalWords: temporalHeaderBaseWords + 10
+        + 3 * templates.cellCount + templates.rowCount,
+    });
+    const incrementalActivityLayout = createSparseCM12IncrementalActivityLayout({
+      baseWords: temporalWorklistLayout.totalWords,
+      stableTileCount: stableDirtyTileCount,
+      brickCount: packed.brickCount,
+      alignmentWords: SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS,
+    });
+    const canonicalMembershipLayout = createSparseCM12CanonicalMembershipLayout({
+      baseWords: incrementalActivityLayout.totalWords,
+      cellCapacity: templates.cellCount,
+      rowCapacity: templates.rowCount,
+    });
+    const framePlanLayout = createSparseCM12FramePlanLayout({
+      baseWords: Math.ceil(canonicalMembershipLayout.totalWords
+        / SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS)
+        * SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS,
+      brickCapacity: packed.brickCount,
+      brickFineResolution: atlas.brickFineResolution,
+      packetCount: 6,
+    });
+    if (presentationPageResolution !== atlas.brickFineResolution) {
+      throw new Error("FPL1/FPP1 resident cutover requires one B-sized presentation page");
+    }
+    const pageCount = fine.metadata.length / FINE_LEVELSET_METADATA_WORDS;
+    if (pageCount !== packed.brickCount) {
+      throw new Error(`FPP1 requires one page per brick; found ${pageCount}/${packed.brickCount}`);
+    }
+    const brickPages = new Uint32Array(packed.brickCount).fill(INVALID);
+    for (let page = 0; page < pageCount; page += 1) {
+      const source = fine.metadata[FINE_LEVELSET_METADATA_WORDS * page + 3]!;
+      const brick = (source >>> 3) & 0x00ff_ffff;
+      if (brick >= packed.brickCount || brickPages[brick] !== INVALID) {
+        throw new Error(`FPP1 invalid or duplicate brick/page mapping ${brick}/${page}`);
+      }
+      brickPages[brick] = page;
+    }
+    if (brickPages.some((page) => page === INVALID)) {
+      throw new Error("FPP1 physical brick/page mapping is incomplete");
+    }
+    const framePlanPresentationLayout = createSparseCM12FramePlanPresentationLayout({
+      baseWords: framePlanLayout.totalWords,
+      pageCapacity: packed.brickCount,
+      brickFineResolution: atlas.brickFineResolution,
+      pageResolution: presentationPageResolution,
+      packetIndex: 5,
+    });
+    const scalarResultIngressLayout = createSparseCM12SRR1IngressLayout({
+      baseWords: framePlanPresentationLayout.totalWords,
+      tileCapacity: stableDirtyTileCount,
+    });
+    const scalarResultPlan = createSparseCM12SRR1RuntimePlan({
+      baseWords: framePlanPresentationLayout.totalWords,
+      tileCapacity: stableDirtyTileCount,
+      constructionMode: scalarFullPathOracleForQA
+        ? "immutable-full-oracle" : "temporal",
+    });
+    if (scalarResultPlan.ingressLayout.totalWords !== scalarResultIngressLayout.totalWords) {
+      throw new Error("SIR1 resident/runtime layout mismatch");
+    }
+    const vexActivityBatchLayout = createSparseCM12VexActivityBatchLayout({
+      activityTailWords: scalarResultIngressLayout.totalWords,
+      // residentStateLayout appends VEX1 immediately after the journal.
+      stateTailFloats: layout.velocityExtensionAcceptedVelocity,
+      brickCapacity: packed.brickCount,
+      cellCapacity: templates.cellCount,
+      brickFineResolution: atlas.brickFineResolution,
+    });
+    if (vexActivityBatchLayout.velocityState.acceptedVelocityFloatBase
+        !== layout.velocityExtensionAcceptedVelocity
+      || vexActivityBatchLayout.totalStateFloats !== layout.floatCount) {
+      throw new Error("VEX1 resident activity/state composition mismatch");
+    }
+    const pressureAddressingMode = pressureAddressingModeForQA ?? "materializedList";
+    const pressureAddressingABLayout = pressureAddressingModeForQA === undefined
+      ? createSparseCM12ProductionPressureAddressingLayout({
+        baseWords: vexActivityBatchLayout.totalActivityWords,
+        cellCapacity: templates.cellCount,
+        brickFineResolution: 16,
+        presentationPageResolution: 16,
+      }) : createSparseCM12PressureAddressingABLayout({
+        baseWords: vexActivityBatchLayout.totalActivityWords,
+        cellCapacity: templates.cellCount,
+        brickFineResolution: 16,
+        presentationPageResolution: 16,
+        constructionMode: "qa-pressure-addressing-ab",
+      });
+    const initialActivity = new Uint32Array(pressureAddressingABLayout.totalWords);
+    initialActivity.set(dirtySchedulerInitialWords);
+    initialActivity.set(createSparseCM12IncrementalActivityInitialWords(
+      incrementalActivityLayout,
+    ), incrementalActivityLayout.headerBaseWords);
+    initializeSparseCM12CanonicalMembershipWords(initialActivity,
+      canonicalMembershipLayout);
+    initialActivity.set(createSparseCM12FramePlanInitialWords(framePlanLayout),
+      framePlanLayout.baseWords);
+    initialActivity.set(createSparseCM12FramePlanPresentationInitialWords(
+      framePlanPresentationLayout, { brickPages: Array.from(brickPages) }),
+    framePlanPresentationLayout.baseWords);
+    initializeSparseCM12SRR1IngressWords(initialActivity,
+      scalarResultIngressLayout, scalarResultPlan.constructionMode);
+    initialActivity.set(createSparseCM12VexActivityBatchInitialWords(
+      vexActivityBatchLayout,
+    ), vexActivityBatchLayout.activityBaseWords);
+    initialActivity.set(createSparseCM12PressureAddressingABInitialWords(
+      pressureAddressingABLayout), pressureAddressingABLayout.baseWords);
     initialActivity[8] = initiallyActiveBrickKeys.size;
     initialActivity[12] = 1;
     for (let brick = 0; brick < packed.brickCount; brick += 1) {
@@ -1982,7 +2784,9 @@ export class WebGPUSparseCM12Resident {
     const pressureEdgeCount = templates.words[pressureEdgeOffset + templates.cellCount]!;
     const pressureTopology = compactPressureTopology(templates, atlas);
     const pressureWorklistData = pressureWorklistAndNeighbors(
-      templates, sparseCM12TemplateLevels(atlas.brickFineResolution).length,
+      templates, pressureTopology,
+      sparseCM12TemplateLevels(atlas.brickFineResolution).length,
+      packed.brickCount,
     );
     const pressureCoarseBase = pressureTopology[14]!;
     const pressureCoarseEdgeCount = pressureTopology[pressureCoarseBase + 1]!;
@@ -2059,27 +2863,211 @@ export class WebGPUSparseCM12Resident {
     const physicalTemplateWordCount = pressureEdgeOffset;
     const physicalTemplateBytes = 4 * physicalTemplateWordCount;
     templates.words[14] = physicalTemplateWordCount;
+    const frameControlBaseWords = Math.ceil(
+      (physicalTemplateWordCount + initialWorklists.length) / 64,
+    ) * 64;
+    const topologyMutableEndWords = physicalTemplateWordCount
+      + pageDescriptors + topologyPagePool.descriptorWords;
+    if (topologyMutableEndWords !== physicalTemplateWordCount + initialWorklists.length
+      || frameControlBaseWords < topologyMutableEndWords) {
+      throw new Error("FCA1 overlaps the mutable topology worklist/page arena");
+    }
+    const frameControl = createSparseCM12FrameControl({
+      baseWords: frameControlBaseWords,
+      cellWorkgroups,
+      rowWorkgroups: Math.ceil(templates.rowCount / WORKGROUP_SIZE),
+      bodyCapacity: rigid ? 12 : 0,
+      d4Capable: true,
+      rigidCapable: Boolean(rigid),
+      boundaryCapable: Boolean(atlas.boundary),
+      initialScalarD4Authority: horizontalD4Authority,
+      initialFaceD4Authority: horizontalD4Authority,
+    });
+    const pressureTopologyRepairLayout =
+      createSparseCM12PressureTopologyRepairLayout({
+        baseWords: frameControl.layout.totalWords,
+        brickCapacity: packed.brickCount,
+        rowCapacity: templates.rowCount,
+        brickFineResolution: 16,
+        presentationPageResolution: 16,
+      });
+    const pressureTopologyRepairWords =
+      createSparseCM12PressureTopologyRepairInitialWords(
+        pressureTopologyRepairLayout,
+      );
+    for (let brick = 0; brick < packed.brickCount; brick += 1) {
+      pressureTopologyRepairWords[
+        pressureTopologyRepairLayout.brickAcceptedStateBaseWords + brick
+      ] = atlas.bricks[brick]!.resolution
+        | (initiallyActiveBrickKeys.has(atlas.bricks[brick]!.key) ? 0x8000_0000 : 0);
+    }
+    const persistentPressureCacheLayout =
+      createSparseCM12ResidentPersistentPressureCacheLayout({
+        baseWords: pressureTopologyRepairLayout.totalWords,
+        cellCount: templates.cellCount,
+        rowCount: templates.rowCount,
+        directedEdgeCount: pressureEdgeCount,
+        brickCount: packed.brickCount,
+        aggregateEdgeCount: pressureCoarseEdgeCount,
+        hierarchyLevelCounts: pressureHierarchyGroupCounts,
+        hierarchyEdgeLevelCounts: pressureHierarchyEdgeCounts,
+        rigidScaleEnabled: Boolean(rigid),
+        // Immutable QA arm rebuilds every fine coefficient through the same
+        // stable-ID arithmetic. Production remains local-only; the paired arm
+        // exposes a missed PCM/topology coefficient event byte-for-byte.
+        qaFullOracle: false,
+      });
+    const persistentPressureCacheWords = new Uint32Array(
+      persistentPressureCacheLayout.bufferSizeWords,
+    );
+    initializeSparseCM12PersistentPressureCacheWords(
+      persistentPressureCacheWords, persistentPressureCacheLayout,
+    );
+    // Reproduce the legacy hierarchy bootstrap byte-for-byte for groups that
+    // remain outside the first local repair. The old full bake sums the
+    // max(0, 1e-12) diagonal of every child brick with the shader's 64-lane
+    // reduction order; a flat 1e-12 node initializer loses (childCount-1)
+    // floors and perturbs active coarse solves that reference an inactive
+    // neighboring group. Internal aggregate edges are construction-zero.
+    const pressureDiagonalFloor = Math.fround(1e-12);
+    const pressureDiagonalBits = (value: number) =>
+      new Uint32Array(new Float32Array([value]).buffer)[0]!;
+    pressureHierarchyGroupCounts.forEach((groupCount, level) => {
+      const descriptor = pressureHierarchyBase + 1 + 10 * level;
+      const childOffsets = pressureTopology[descriptor + 2]!;
+      for (let group = 0; group < groupCount; group += 1) {
+        const begin = pressureTopology[childOffsets + group]!;
+        const end = pressureTopology[childOffsets + group + 1]!;
+        const lanes = new Float32Array(WORKGROUP_SIZE);
+        for (let lane = 0; lane < WORKGROUP_SIZE; lane += 1) {
+          let sum = Math.fround(0);
+          for (let at = begin + lane; at < end; at += WORKGROUP_SIZE) {
+            sum = Math.fround(sum + pressureDiagonalFloor);
+          }
+          lanes[lane] = sum;
+        }
+        for (let width = WORKGROUP_SIZE >>> 1; width >= 1; width >>>= 1) {
+          for (let lane = 0; lane < width; lane += 1) {
+            lanes[lane] = Math.fround(lanes[lane]! + lanes[lane + width]!);
+          }
+        }
+        persistentPressureCacheWords[
+          persistentPressureCacheLayout.hierarchyDiagonalBaseWords[level]! + group
+        ] = pressureDiagonalBits(Math.max(lanes[0]!, pressureDiagonalFloor));
+      }
+    });
+    const pressureSolveAuthorityLayout = createSparseCM12PressureSolveAuthorityLayout({
+      baseWords: persistentPressureCacheLayout.bufferSizeWords,
+      brickCapacity: packed.brickCount,
+      hierarchyLevelCounts: pressureHierarchyGroupCounts,
+      // Immutable QA arm: same kernels and stable arithmetic, but the full
+      // brick/node domains expose any sparse execution omission byte-for-byte.
+      qaFullOracle: pressureRefreshOracleForQA,
+    });
+    const pressureSolveAuthorityWords =
+      createSparseCM12PressureSolveAuthorityInitialWords(pressureSolveAuthorityLayout);
+    const faceProjectionAuthorityLayout = createSparseCM12FaceProjectionAuthorityLayout({
+      baseWords: pressureSolveAuthorityLayout.totalWords,
+      rowCapacity: templates.rowCount, cellCapacity: templates.cellCount,
+      // Construction-only specialization; production has no selector or
+      // full-work fallback. The paired runner compares this arm byte-for-byte.
+      qaFullOracle: pressureRefreshOracleForQA,
+    });
+    const faceProjectionAuthorityWords =
+      createSparseCM12FaceProjectionAuthorityInitialWords(faceProjectionAuthorityLayout);
+    // The census exists only in the two immutable temporal QA constructors.
+    // Production retains the exact FPA arena extent and dispatch sequence.
+    const facePreparationTileCensusLayout = temporalSeedModeForQA === undefined
+      ? undefined : createSparseCM12FacePreparationTileCensusLayout({
+        baseWords: faceProjectionAuthorityLayout.totalWords,
+        rowCapacity: templates.rowCount,
+      });
+    const facePreparationTileCensusWords = facePreparationTileCensusLayout
+      ? createSparseCM12FacePreparationTileCensusInitialWords(
+        facePreparationTileCensusLayout) : undefined;
+    const fpaVexReadCensusLayout = temporalSeedModeForQA === undefined
+      ? undefined : createSparseCM12FpaVexReadCensusLayout({
+        baseWords: facePreparationTileCensusLayout!.totalWords,
+        cellCapacity: templates.cellCount, rowCapacity: templates.rowCount,
+        tileCapacity: stableDirtyTileCount,
+      });
+    const fpaVexReadCensusWords = fpaVexReadCensusLayout
+      ? createSparseCM12FpaVexReadCensusInitialWords(fpaVexReadCensusLayout)
+      : undefined;
     const topologyArena = device.createBuffer({
       label: "Sparse CM12 physical topology templates and worklists",
-      size: Math.max(4, physicalTemplateBytes + initialWorklists.byteLength),
+      size: Math.max(4, fpaVexReadCensusLayout?.totalBytes
+        ?? facePreparationTileCensusLayout?.totalBytes
+        ?? faceProjectionAuthorityLayout.totalBytes),
       usage: storage,
     });
+    const pressureTailAuthority = new WebGPUSparseCM12PressureTailAuthority(
+      device, topologyArena, pressureSolveAuthorityLayout,
+    );
     device.queue.writeBuffer(topologyArena, 0, templates.words.buffer as ArrayBuffer,
       templates.words.byteOffset, physicalTemplateBytes);
     device.queue.writeBuffer(topologyArena, physicalTemplateBytes,
       initialWorklists.buffer as ArrayBuffer, initialWorklists.byteOffset,
       initialWorklists.byteLength);
+    const frameControlWords = frameControl.words.subarray(frameControl.layout.baseWords);
+    device.queue.writeBuffer(topologyArena, 4 * frameControl.layout.baseWords,
+      frameControlWords.buffer as ArrayBuffer, frameControlWords.byteOffset,
+      frameControlWords.byteLength);
+    const pressureTopologyRepairRegion = pressureTopologyRepairWords.subarray(
+      pressureTopologyRepairLayout.baseWords,
+    );
+    device.queue.writeBuffer(topologyArena,
+      4 * pressureTopologyRepairLayout.baseWords,
+      pressureTopologyRepairRegion.buffer as ArrayBuffer,
+      pressureTopologyRepairRegion.byteOffset,
+      pressureTopologyRepairRegion.byteLength);
+    const persistentPressureCacheRegion = persistentPressureCacheWords.subarray(
+      persistentPressureCacheLayout.thetaBaseWords,
+    );
+    device.queue.writeBuffer(topologyArena,
+      4 * persistentPressureCacheLayout.thetaBaseWords,
+      persistentPressureCacheRegion.buffer as ArrayBuffer,
+      persistentPressureCacheRegion.byteOffset,
+      persistentPressureCacheRegion.byteLength);
+    const pressureSolveAuthorityRegion = pressureSolveAuthorityWords.subarray(
+      pressureSolveAuthorityLayout.baseWords,
+    );
+    device.queue.writeBuffer(topologyArena,
+      4 * pressureSolveAuthorityLayout.baseWords,
+      pressureSolveAuthorityRegion.buffer as ArrayBuffer,
+      pressureSolveAuthorityRegion.byteOffset,
+      pressureSolveAuthorityRegion.byteLength);
+    const faceProjectionAuthorityRegion = faceProjectionAuthorityWords.subarray(
+      faceProjectionAuthorityLayout.baseWords,
+    );
+    device.queue.writeBuffer(topologyArena,
+      4 * faceProjectionAuthorityLayout.baseWords,
+      faceProjectionAuthorityRegion.buffer as ArrayBuffer,
+      faceProjectionAuthorityRegion.byteOffset,
+      faceProjectionAuthorityRegion.byteLength);
+    if (facePreparationTileCensusLayout && facePreparationTileCensusWords) {
+      device.queue.writeBuffer(topologyArena,
+        4 * facePreparationTileCensusLayout.baseWords,
+        facePreparationTileCensusWords.buffer as ArrayBuffer,
+        facePreparationTileCensusWords.byteOffset,
+        facePreparationTileCensusWords.byteLength);
+    }
+    if (fpaVexReadCensusLayout && fpaVexReadCensusWords) {
+      device.queue.writeBuffer(topologyArena, 4 * fpaVexReadCensusLayout.baseWords,
+        fpaVexReadCensusWords.buffer as ArrayBuffer,
+        fpaVexReadCensusWords.byteOffset, fpaVexReadCensusWords.byteLength);
+    }
     const pressureTemplates = uploadBuffer(device,
       "Sparse CM12 read-only pressure topology", pressureTopology,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     const pressureWorklists = uploadBuffer(device,
       "Sparse CM12 ordinary pressure worklists and dense neighbors",
-      pressureWorklistData,
-      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
+      pressureWorklistData.words,
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     const acceptedIndirectArguments = uploadBuffer(device,
       "Sparse CM12 accepted indirect dispatch snapshot",
       initialWorklists.subarray(8, 14),
-      GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST);
+      GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     const pressureCellIndirectArguments = device.createBuffer({
       label: "Sparse CM12 pressure-cell indirect dispatch",
       size: 12,
@@ -2089,6 +3077,94 @@ export class WebGPUSparseCM12Resident {
       label: "Sparse CM12 pressure-row indirect dispatch",
       size: 12,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const pressureMembershipIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 pressure-membership bootstrap indirect dispatches",
+      size: SPARSE_CM12_PRESSURE_MEMBERSHIP_INDIRECT_BYTES,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const pressureTopologyRepairIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 bounded pressure-topology repair indirect dispatches",
+      size: 7 * 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const persistentPressureCacheIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 persistent pressure-cache indirect dispatches",
+      // Fine repair, then seed/repair/work for four aggregate families.
+      size: 13 * 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const pressureSolveAuthorityIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 pressure-solve authority indirect dispatches",
+      // Bootstrap, brick/node repair+work, then two banks of four tail families.
+      size: 13 * 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const faceProjectionAuthorityIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 face/projection authority indirect dispatches",
+      // Preparation/projection bootstrap, repair, work, and verify triplets.
+      size: 10 * 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const temporalCellIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 temporal scalar-cell indirect dispatch",
+      size: 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const temporalRowIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 temporal scalar-row indirect dispatch",
+      size: 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const activityIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 incremental activity indirect dispatch",
+      size: 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const vexActivityIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 VEX1/A4D2 indirect dispatches",
+      size: 4 * vexActivityBatchLayout.indirectWords,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const pressureAddressingABQA = {
+        mode: pressureAddressingMode,
+        layout: pressureAddressingABLayout,
+        indirectArguments: device.createBuffer({
+          label: "Sparse CM12 pressure-address materialization indirect dispatch",
+          size: 12, usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+        }),
+        ...(pressureAddressingModeForQA !== undefined ? {
+        receiptReadback: device.createBuffer({
+          label: "Sparse CM12 PAB1 receipt readback",
+          size: 4 * SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER_WORDS,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        }),
+        querySet: device.createQuerySet({ type: "timestamp", count: 4 }),
+        queryResolve: device.createBuffer({
+          label: "Sparse CM12 PAB1 timestamp resolve", size: 32,
+          usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+        }),
+        timestampReadback: device.createBuffer({
+          label: "Sparse CM12 PAB1 timestamp readback", size: 32,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        }),
+        } : {}),
+      } satisfies SparseCM12PressureAddressingABQAResources;
+    const framePlanIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 FPL1 fixed packet indirect dispatches",
+      size: 4 * framePlanLayout.indirectSnapshotWords,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const presentationIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 FPP1 compact page indirect dispatch",
+      size: 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const frameControlIndirectArguments = device.createBuffer({
+      label: "Sparse CM12 FCA1 fixed authority indirect dispatches",
+      size: 12 * SPARSE_CM12_FRAME_CONTROL_FAMILY_COUNT,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
+        | GPUBufferUsage.COPY_SRC,
     });
     const fineParams = device.createBuffer({
       label: "Sparse CM12 compact fine presentation parameters",
@@ -2100,8 +3176,8 @@ export class WebGPUSparseCM12Resident {
     const fineWorklist = uploadBuffer(device,
       "Sparse CM12 compact fine presentation worklist", fine.worklist, storage);
     const fineSamples = device.createBuffer({
-      label: "Sparse CM12 compact fine presentation samples",
-      size: Math.max(4, fine.plan.payloadCapacityBytes),
+      label: "Sparse CM12 accepted/candidate fine presentation samples",
+      size: Math.max(4, 2 * fine.plan.payloadCapacityBytes),
       usage: storage,
     });
     const fineWorkA = device.createBuffer({ label: "Sparse CM12 fine presentation work A",
@@ -2115,7 +3191,10 @@ export class WebGPUSparseCM12Resident {
       // Reduction scalars, activity header, then authoritative accepted
       // cell/row worklist counts and compact pressure-cell count. These are QA
       // receipts, never schedule input.
-      size: SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS + 12,
+      size: SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS + 12
+        + SPARSE_CM12_PCM_DIAGNOSTIC_BYTES
+        + 4 * SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS
+        + 4 * SPARSE_CM12_PRESSURE_CUTOVER_DIAGNOSTIC_WORDS,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
 
@@ -2130,7 +3209,7 @@ export class WebGPUSparseCM12Resident {
         { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 14, visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "read-only-storage" } },
+          buffer: { type: "storage" } },
         { binding: 15, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ],
@@ -2166,31 +3245,62 @@ export class WebGPUSparseCM12Resident {
         { binding: 16, resource: { buffer: topologyArena } },
       ],
     });
-    const shaderModule = device.createShaderModule({ label: "Sparse CM12 resident shader",
+    const compiler = gpuCompilationManagerFor(device);
+    const shaderModule = compiler.createShaderModule({ label: "Sparse CM12 resident shader",
       code: createWebgpuSparseCM12ResidentWGSL(
         atlas.brickFineResolution, presentationPageResolution,
+        dirtySchedulerLayout, temporalWorklistLayout, pressureWorklistData.layout,
+        incrementalActivityLayout, canonicalMembershipLayout,
+        framePlanLayout, framePlanPresentationLayout,
+        frameControl.layout, scalarResultIngressLayout, pressureTopologyRepairLayout,
+        persistentPressureCacheLayout,
+        pressureSolveAuthorityLayout,
+        faceProjectionAuthorityLayout,
+        vexActivityBatchLayout,
+        pressureAddressingABLayout,
+        pressureAddressingModeForQA === undefined ? "materializedList" : undefined,
+        facePreparationTileCensusLayout,
+        fpaVexReadCensusLayout,
       ) });
     const pipelineLayout = device.createPipelineLayout({ label: "Sparse CM12 resident pipeline layout",
       bindGroupLayouts: [bindGroupLayout] });
-    const names = ["injectLiquid", "initializeTransportVelocity",
-      "extrapolateTransportVelocityToSource", "extrapolateTransportVelocityToDestination",
-      "prepareTransportFaces", "traceGammaAndBeta", "scatterDensityDeficit",
-      "gatherConservativeDensity", "seedTracers", "advanceTracers",
+    const names = ["injectLiquid",
+      "beginSparseCM12FrameControl", "publishSparseCM12FrameBodyAuthority",
+      "publishSparseCM12FrameBoundaryAuthority", "sealSparseCM12FrameControl",
+      "publishSparseCM12FrameScalarOutput", "publishSparseCM12FrameFaceOutput",
+      "commitSparseCM12FrameControl", "invalidateSparseCM12FrameD4ForInjection",
+      "sparseCM12FrameControlNoop",
+      "publishSparseCM12MovingSolidVelocityRoots",
+      "beginSparseCM12SRR1Ingress",
+      "resetSparseCM12SRR1CopiedEvents", "beginSparseCM12SRR1ReceiptBatch",
+      "resetTemporalScalarWorklists", "classifyTemporalPressureCells",
+      "dilateTemporalScalarAtoB", "dilateTemporalScalarBtoA",
+      "compactTemporalScalarCells", "compactTemporalScalarRows",
+      "finalizeTemporalScalarWorklists",
+      "traceGammaAndBeta", "scatterDensityDeficit",
+      "gatherConservativeDensity", "compareSparseCM12MassResult",
+      "seedTracers", "advanceTracers",
       "scatterGammaSnapshot", "finalizeGammaSnapshot", "scatterGammaRefinement",
-      "finalizeGammaRefinement", "prepareSharpeningField", "scatterSharpeningMass",
-      "finalizeSharpening", "clearSolidExcess", "scatterSolidExcess",
+      "finalizeGammaRefinement", "prepareSharpeningField",
+      "scatterSharpeningMass", "finalizeSharpening",
+      "clearSolidExcess", "scatterSolidExcess",
       "finalizeSolidExcess", "preserveHorizontalD4",
       "commitHorizontalD4", "preserveVelocityHorizontalD4",
       "commitVelocityHorizontalD4",
-      "forceFaces", "classifyPressureCells", "countPressureCells",
-      "finalizePressureCellWorklist", "compactPressureCells", "classifyRows",
-      "countPressureRows", "finalizePressureRowWorklist", "compactPressureRows",
-      "bakeEffectivePressureEdges", "preparePressure",
-      "bakeBrickAggregateDiagonal", "restrictBrickAggregateResidual",
-      "bakePressureHierarchyDiagonal", "bakePressureHierarchyEdges",
+      "forceFaces", "classifyPressureCells", "classifyRows",
+      "beginCanonicalPressureCells", "beginCanonicalPressureRows",
+      "planPressureMembershipEpoch",
+      "finalizeCanonicalPressureCellFrontier",
+      "repairCanonicalPressureCellLeaves", "finalizeCanonicalPressureCells",
+      "finalizeCanonicalPressureRowFrontier",
+      "repairCanonicalPressureRowLeaves", "finalizeCanonicalPressureRows",
+      "classifyDirtyPressureCells",
+      "classifyDirtyPressureRows",
+      "preparePressure",
+      "restrictBrickAggregateResidual",
       "restrictPressureHierarchyResidual", "refinePressureHierarchyCorrection",
       "combinePressureHierarchyCorrection",
-      "bakeBrickAggregateEdges", "refineBrickAggregateAtoB1",
+      "refineBrickAggregateAtoB1",
       "refineBrickAggregateBtoA2", "refineBrickAggregateAtoB3",
       "refineBrickAggregateBtoA4", "refineBrickAggregateAtoB5",
       "refineBrickAggregateBtoA6", "refineBrickAggregateAtoB7",
@@ -2207,7 +3317,11 @@ export class WebGPUSparseCM12Resident {
       "reduceInitialize", "projectFaces",
       "collocateAndDiagnose", "measureDivergenceDiagnostics",
       "reduceDivergenceDiagnostics",
-      "advanceActivityClock", "measureBrickActivity",
+      "advanceActivityClock", "beginIncrementalActivity",
+      "markIncrementalActivityTemporalCells", "markIncrementalActivityTopology",
+      "markIncrementalActivityPostTopology",
+      "finalizeIncrementalActivityWorklist", "measureBrickActivity",
+      "ageIncrementalActivityHistory", "finalizeIncrementalActivityCensus",
       "planBrickResolution", "activateSweptReceivers", "closePlannedResolution",
       "validateCandidateResolution", "scheduleTopologyPreparation",
       "allocateCandidateTopologyPages", "synthesizeCandidateCellPages",
@@ -2217,18 +3331,178 @@ export class WebGPUSparseCM12Resident {
       "prepareCandidateFaceReceipts", "transferCandidateFaces",
       "writeCandidateCellsToShadow", "reconstructShadowFaces",
       "validateAndCommitShadowTopology",
-      "retireUnsupportedEmptyBricks",
+      "publishSparseCM12TopologyVelocityRoots",
+      "retireUnsupportedEmptyBricks", "sealSparseCM12PressureTopologyJournal",
       "classifyPresentationBricks",
       "publishSparseLevelSet",
-      "journalIteration", "journalSnapshot"] as const;
+      "beginSparseCM12FramePlanNext", "initializeSparseCM12FramePlanNext",
+      "populateSparseCM12PresentationFramePlan",
+      "importVelocityExtensionBlastToFramePlanNext",
+      "resolveSparseCM12FramePlanNextClosure", "sealSparseCM12FramePlanNextBricks",
+      "finalizeSparseCM12FramePlanNext", "markSparseCM12GlobalFramePlanReceipts",
+      "beginSparseCM12FramePlanPresentationPacket",
+      "buildSparseCM12FramePlanPresentationPacket",
+      "finalizeSparseCM12FramePlanPresentationPacket",
+      "executeSparseCM12FramePlanPresentationPacket",
+      "commitSparseCM12FramePlanPresentationPacket",
+      "finalizeSparseCM12FramePlanPresentationExecution",
+      "rejectSparseCM12FramePlanPresentationFaults",
+      "beginDirtySchedulerFrame", "sealDirtySchedulerPreEpoch",
+      "finalizeQueuedDirtySchedulerPackets",
+      "finalizeDirtySchedulerEpoch",
+      "beginPersistentPressureCache", "finalizePersistentPressureCacheFrontier",
+      "repairPersistentPressureCache", "finalizePersistentPressureFineCache",
+      "seedPreviousPCFBrickLeaves", "seedPreviousPCFAggregateEdgeLeaves",
+      "seedPreviousPCFHierarchyNodeLeaves", "seedPreviousPCFHierarchyEdgeLeaves",
+      "repairPersistentPressureBrickWorkset",
+      "repairPersistentPressureAggregateEdgeWorkset",
+      "repairPersistentPressureHierarchyNodeWorkset",
+      "repairPersistentPressureHierarchyEdgeWorkset",
+      "finalizePersistentPressureAggregatePlan",
+      "repairPersistentPressureAggregateEdges",
+      "repairPersistentPressureBrickDiagonals",
+      "finalizePersistentPressureAggregateExecution",
+      "finalizePersistentPressureHierarchyPlan",
+      "repairPersistentPressureHierarchyEdges",
+      "repairPersistentPressureHierarchyDiagonals",
+      "finalizePersistentPressureCache",
+      "beginSparseCM12PressureSolveAuthority",
+      "seedSparseCM12PressureSolveBootstrap",
+      "markSparseCM12PressureSolveFromPersistentBricks",
+      "finalizeSparseCM12PressureBrickFrontier",
+      "repairSparseCM12PressureBrickLeaves",
+      "finalizeSparseCM12PressureBrickRepair",
+      "repairSparseCM12PressureNodeLeaves",
+      "finalizeSparseCM12PressureSolveAuthority",
+      "publishSparseCM12PressureTailA",
+      "beginSparseCM12FacePreparationAuthority",
+      "beginSparseCM12FaceProjectionAuthority",
+      "seedSparseCM12FacePreparationBootstrap",
+      "seedSparseCM12FaceProjectionBootstrap",
+      "seedSparseCM12PreviousFacePreparationLeaves",
+      "seedSparseCM12PreviousFaceProjectionLeaves",
+      "seedSparseCM12ProjectionFromPreparation",
+      "finalizeSparseCM12FacePreparationFrontier",
+      "finalizeSparseCM12FaceProjectionFrontier",
+      "repairSparseCM12FacePreparationLeaves",
+      "repairSparseCM12FaceProjectionLeaves",
+      "finalizeSparseCM12FacePreparationPlan",
+      "finalizeSparseCM12FaceProjectionPlan",
+      "executeSparseCM12FacePreparation", "executeSparseCM12FaceProjection",
+      "verifySparseCM12FacePreparationLeaves",
+      "verifySparseCM12FaceProjectionLeaves",
+      "finalizeSparseCM12FacePreparationExecution",
+      "finalizeSparseCM12FaceProjectionExecution",
+      "markSparseCM12FacePreparationFromActivity",
+      "markSparseCM12FaceProjectionFromPressure",
+      ...sparseCM12PressureTopologyRepairEntryPoints(
+        pressureTopologyRepairLayout,
+      ),
+      // These immutable oracle kernels are not production fallbacks. Keeping
+      // them out of the ordinary eager set shortens first-visible startup and
+      // makes their construction-only ownership mechanically obvious.
+      ...(legacyHostAuthorityOracleForQA ? [
+        "initializeTransportVelocity", "captureLegacyVelocityExtensionForQA",
+        "finalizeLegacyVelocityExtensionClockForQA",
+        "extrapolateTransportVelocityToSource",
+        "extrapolateTransportVelocityToDestination",
+      ] as const : []),
+      ...(pressureRefreshOracleForQA ? [
+        "captureLegacyFacePreparationAuthority", "preparePressureFullOracle",
+        "bakeBrickAggregateDiagonal", "bakePressureHierarchyDiagonal",
+        "bakePressureHierarchyEdges", "bakeBrickAggregateEdges",
+      ] as const : []),
+      ...(pressureRefreshOracleForQA || fpaVexReadCensusLayout
+        ? ["prepareTransportFaces"] as const : []),
+      ...(layout.journal !== 0
+        ? ["journalIteration", "journalSnapshot"] as const : []),
+    ] as const;
+    const pressureAddressingConstants = pressureAddressingModeForQA === undefined
+      ? undefined : sparseCM12PressureAddressingABPipelineConstants(
+        pressureAddressingMode);
+    const temporalSeedConstants = temporalSeedModeForQA === undefined ? undefined : {
+      TEMPORAL_CHANGE_SEED_QA: temporalSeedModeForQA === "change" ? 1 : 0,
+      TEMPORAL_SEED_COUNT_QA: 1,
+    } as const;
+    const residentConstants = pressureAddressingConstants || temporalSeedConstants
+      ? { ...pressureAddressingConstants, ...temporalSeedConstants }
+      : undefined;
     const entries = await Promise.all(names.map(async (name) => [name,
-      await device.createComputePipelineAsync({ label: `Sparse CM12 ${name}`,
-        layout: pipelineLayout, compute: { module: shaderModule, entryPoint: name } })] as const));
+      await compiler.compileComputePipeline({ label: `Sparse CM12 ${name}`,
+        layout: pipelineLayout, compute: { module: shaderModule, entryPoint: name,
+          ...(residentConstants ? { constants: residentConstants } : {}) } },
+      { priority: "visible" })] as const));
+    const facePreparationTileCensusEntries = facePreparationTileCensusLayout
+      ? await Promise.all([
+        "beginSparseCM12FacePreparationTileCensus",
+        "clearSparseCM12FacePreparationTileCensus",
+        "markSparseCM12FacePreparationTileCensus",
+        "finalizeSparseCM12FacePreparationTileCensus",
+        "finalizeSparseCM12FacePreparationTileCensusWitness",
+      ].map(async (name) => [name, await compiler.compileComputePipeline({
+        label: `Sparse CM12 ${name}`,
+        layout: pipelineLayout,
+        compute: { module: shaderModule, entryPoint: name,
+          ...(residentConstants ? { constants: residentConstants } : {}) },
+      }, { priority: "visible" })] as const)) : [];
+    const fpaVexReadCensusEntries = fpaVexReadCensusLayout
+      ? await Promise.all([
+        "beginSparseCM12FpaVexReadCensus", "clearSparseCM12FpaVexReadCensus",
+        "captureSparseCM12ChangedEffectiveTransport",
+        "captureSparseCM12PriorFaceForOracle",
+        "scheduleSparseCM12FpaFromAcceptedVexReads",
+        "beginSparseCM12FpaVexReadRecording", "endSparseCM12FpaVexReadRecording",
+        "captureSparseCM12FpaOracleAndRestore",
+        "finalizeSparseCM12FpaVexReadSummary", "verifySparseCM12FpaOracle",
+        "commitSparseCM12FpaVexReadCensus",
+      ].map(async (name) => [name, await compiler.compileComputePipeline({
+        label: `Sparse CM12 ${name}`, layout: pipelineLayout,
+        compute: { module: shaderModule, entryPoint: name,
+          ...(residentConstants ? { constants: residentConstants } : {}) },
+      }, { priority: "visible" })] as const)) : [];
+    const pressureAddressingDescriptors =
+      createSparseCM12PressureAddressingABPipelineDescriptors(
+        pressureAddressingMode).slice(0, 4).filter((descriptor) =>
+          pressureAddressingModeForQA !== undefined
+            || descriptor.key !== "verifyPressureCellAddresses");
+    const pressureAddressingEntries = await Promise.all(
+      pressureAddressingDescriptors.map(async (descriptor) => [
+        descriptor.key,
+        await compiler.compileComputePipeline({
+          label: `Sparse CM12 ${descriptor.key}`,
+          layout: pipelineLayout,
+          compute: { module: shaderModule, entryPoint: descriptor.entryPoint,
+            ...(pressureAddressingConstants
+              ? { constants: pressureAddressingConstants } : {}) },
+        }, { priority: "visible" }),
+      ] as const));
+    const vexActivityEntries = await Promise.all(
+      createSparseCM12VexActivityBatchPipelineDescriptors().map(async (descriptor) => [
+        descriptor.key,
+        await compiler.compileComputePipeline({
+          label: `Sparse CM12 ${descriptor.key}`,
+          layout: pipelineLayout,
+          compute: {
+            module: shaderModule,
+            entryPoint: descriptor.entryPoint,
+            constants: descriptor.constants,
+          },
+        }, { priority: "visible" }),
+      ] as const),
+    );
+    const framePlanVerifyEntry = ["verifySparseCM12FramePlanPresentation",
+      await compiler.compileComputePipeline({
+        label: "Sparse CM12 verify FPL1 presentation coverage",
+        layout: pipelineLayout,
+        compute: { module: shaderModule,
+          entryPoint: "verifySparseCM12FramePlanCurrentStage",
+          constants: { CM12_FRAME_PLAN_VERIFY_STAGE: 5 } },
+      }, { priority: "visible" })] as const;
     // Two pipelines from one entry point: the snapshot variant additionally
     // advances the device-side snapshot cursor and stamps its slot into the
     // record it writes. Compiled only when a journal was actually reserved.
     const journalEntries = layout.journal === 0 ? [] : [
-      ["journalIterationSnapshot", await device.createComputePipelineAsync({
+      ["journalIterationSnapshot", await compiler.compileComputePipeline({
         label: "Sparse CM12 journalIteration with field snapshot",
         layout: pipelineLayout,
         compute: {
@@ -2236,16 +3510,19 @@ export class WebGPUSparseCM12Resident {
           entryPoint: "journalIteration",
           constants: { JOURNAL_SNAPSHOT: 1 },
         },
-      })] as const,
+      }, { priority: "visible" })] as const,
     ];
     const rigidCoupling = rigid ? await WebGPUSparseCM12RigidCoupling.create(device, {
       parameters,
       state,
       topologyArena,
-      acceptedIndirectArguments,
+      frameControlIndirectArguments,
       rigidBodies: rigid.bodies,
       exchange: rigid.exchange,
     }) : undefined;
+    const scalarResultAuthority = await WebGPUSparseCM12SRR1RuntimeAdapter.create(
+      device, scalarResultPlan,
+    );
     const result = new WebGPUSparseCM12Resident(
       device, atlas.dimensions, atlas.brickFineResolution, layout,
       [parameters, topology, state, partials, scalars, conditioning, activity,
@@ -2253,6 +3530,19 @@ export class WebGPUSparseCM12Resident {
       acceptedIndirectArguments,
       pressureCellIndirectArguments,
       pressureRowIndirectArguments,
+      pressureMembershipIndirectArguments,
+      pressureTopologyRepairIndirectArguments,
+      persistentPressureCacheIndirectArguments,
+      pressureSolveAuthorityIndirectArguments,
+      pressureTailAuthority,
+      faceProjectionAuthorityIndirectArguments,
+      temporalCellIndirectArguments,
+      temporalRowIndirectArguments,
+      activityIndirectArguments,
+      vexActivityIndirectArguments,
+      framePlanIndirectArguments,
+      presentationIndirectArguments,
+      frameControlIndirectArguments,
       pressureWorklists,
       [fineParams, fineMetadata, fineWorklist, fineSamples, fineWorkA, fineWorkB,
         fineRollback],
@@ -2261,16 +3551,43 @@ export class WebGPUSparseCM12Resident {
       bindGroup,
       pressureBindGroup,
       pressureTemplates,
-      Object.fromEntries([...entries, ...journalEntries]),
+      dirtySchedulerLayout,
+      temporalWorklistLayout,
+      pressureWorklistData.layout,
+      incrementalActivityLayout,
+      canonicalMembershipLayout,
+      framePlanLayout,
+      framePlanPresentationLayout,
+      frameControl.layout,
+      scalarResultIngressLayout,
+      vexActivityBatchLayout,
+      pressureTopologyRepairLayout,
+      persistentPressureCacheLayout,
+      pressureSolveAuthorityLayout,
+      faceProjectionAuthorityLayout,
+      facePreparationTileCensusLayout,
+      fpaVexReadCensusLayout,
+      scalarResultAuthority,
+      pressureRefreshOracleForQA,
+      presentationPublisherOracleForQA,
+      legacyHostAuthorityOracleForQA,
+      horizontalD4Authority,
+      pressureAddressingABQA,
+      temporalSeedModeForQA,
+      Object.fromEntries([...entries, ...facePreparationTileCensusEntries,
+        ...fpaVexReadCensusEntries,
+        ...vexActivityEntries,
+        ...pressureAddressingEntries, ...journalEntries, framePlanVerifyEntry]),
       templates.cellCount, templates.rowCount,
       templates.cellCount, templates.rowCount,
       pressureCoarseEdgeCount,
+      pressureEdgeCount,
       pressureHierarchyGroupCounts.reduce((sum, count) => sum + count, 0),
       pressureHierarchyEdgeCounts.reduce((sum, count) => sum + count, 0),
       pressureScratchBytes,
       physicalTemplateBytes,
       templates.words,
-      horizontalD4Authority, atlas.boundary, rigidCoupling);
+      atlas.boundary, rigidCoupling);
     result.writeParameters(packed, 0.004, 1, 1, [0, 0, 0], undefined, undefined,
       undefined, 0, rigid?.worldDimensions_m);
     return result;
@@ -2317,14 +3634,9 @@ export class WebGPUSparseCM12Resident {
     if (journalSnapshots) this.journalSnapshotCount = journalSnapshots.size;
     encoder.clearBuffer(this.conditioning, 0,
       Math.max(4, 12 * this.templateCellCount));
-    // classifyRows only visits accepted rows. Clear the cached ghost-fluid
-    // theta field once so the pressure iteration can use theta==0 as its row
-    // acceptance mask instead of revalidating topology requirements in every
-    // cell incidence on every PCG iteration.
-    encoder.clearBuffer(this.state, 4 * this.layout.theta,
-      4 * this.templateRowCount);
-    encoder.clearBuffer(this.state, 4 * this.layout.liquid,
-      4 * this.templateCellCount);
+    // Liquid membership and ghost-fluid theta are PCM-owned persistent caches.
+    // Bootstrap initializes the complete accepted domain; later epochs repair
+    // only dirty/topology closure and explicitly zero retired entries.
     // Live pressure-row census. classifyRows increments these counters from
     // the accepted row worklist after topology publication and liquid/ghost-
     // fluid classification; they are diagnostics only and never schedule work.
@@ -2357,6 +3669,13 @@ export class WebGPUSparseCM12Resident {
       activePass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments,
         4 * (argumentWord - 8));
     };
+    const dispatchScalarResult = (name: string,
+      family: keyof typeof SPARSE_CM12_SRR1_INDIRECT_FAMILY) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(this.scalarResultAuthority.indirectBuffer,
+        12 * SPARSE_CM12_SRR1_INDIRECT_FAMILY[family]);
+    };
     const dispatchPressureCell = (name: string) => {
       const activePass = openPass();
       activePass.setPipeline(this.pipelines[name]!);
@@ -2366,6 +3685,86 @@ export class WebGPUSparseCM12Resident {
       const activePass = openPass();
       activePass.setPipeline(this.pipelines[name]!);
       activePass.dispatchWorkgroupsIndirect(this.pressureRowIndirectArguments, 0);
+    };
+    const dispatchPressureBootstrap = (name: string, kind: "cell" | "row") => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(this.pressureMembershipIndirectArguments,
+        kind === "cell" ? 0 : 12);
+    };
+    const dispatchPressureTopologyRepair = (name: string, byteOffset: number) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(
+        this.pressureTopologyRepairIndirectArguments, byteOffset,
+      );
+    };
+    const dispatchPersistentPressureCache = (name: string, slot: number) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(
+        this.persistentPressureCacheIndirectArguments, 12 * slot,
+      );
+    };
+    const dispatchPressureSolveAuthority = (name: string, slot: number) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(
+        this.pressureSolveAuthorityIndirectArguments, 12 * slot,
+      );
+    };
+    const dispatchPressureBrickSolve = (name: string) => {
+      if (this.pressureRefreshOracleForQA) dispatch(name, packed.brickCount);
+      else dispatchPressureSolveAuthority(name, 3);
+    };
+    const dispatchPressureHierarchySolve = (name: string) => {
+      if (this.pressureRefreshOracleForQA) {
+        dispatch(name, this.pressureHierarchyGroupCount);
+      } else dispatchPressureSolveAuthority(name, 4);
+    };
+    const dispatchFaceProjectionAuthority = (name: string, slot: number) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(
+        this.faceProjectionAuthorityIndirectArguments, 12 * slot,
+      );
+    };
+    const dispatchTemporalCell = (name: string) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(this.temporalCellIndirectArguments, 0);
+    };
+    const dispatchTemporalRow = (name: string) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(this.temporalRowIndirectArguments, 0);
+    };
+    const dispatchActivity = (name: string) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(this.activityIndirectArguments, 0);
+    };
+    const dispatchVexActivity = (name: string, packet: SparseCM12VexActivityBatchPacket) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(this.vexActivityIndirectArguments,
+        4 * SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT[packet].offsetWords);
+    };
+    const copyVexActivity = (id: string) => {
+      const copy = this.vexActivityIndirectCopies.get(id);
+      if (!copy) throw new Error(`unknown VEX1/A4D2 indirect copy ${id}`);
+      closePass();
+      encoder.copyBufferToBuffer(this.activity, 4 * copy.sourceWord,
+        this.vexActivityIndirectArguments, 4 * copy.destinationWord, 12);
+    };
+    const dispatchFrameControl = (
+      name: string,
+      family: typeof SPARSE_CM12_FRAME_CONTROL_FAMILY[
+        keyof typeof SPARSE_CM12_FRAME_CONTROL_FAMILY],
+    ) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments, 12 * family);
     };
     const closePass = () => {
       pass?.end();
@@ -2383,7 +3782,6 @@ export class WebGPUSparseCM12Resident {
     const stage = (id: SparseCM12ResidentStageId, encodeStage: () => void) => {
       if (seams) {
         passLabel = `Sparse CM12 resident ${id}`;
-        if (id === SPARSE_CM12_RESIDENT_FINAL_STAGE) seams.openFinal?.(id);
       }
       encodeStage();
       if (!seams) return;
@@ -2408,25 +3806,153 @@ export class WebGPUSparseCM12Resident {
     };
     const bricks = Math.ceil(packed.brickCount / WORKGROUP_SIZE);
     stage("transport-velocity-extension", () => {
-      this.rigidCoupling?.encodeVoxelization(encoder, bodyCount);
+      // FCA1 translates external inputs and persistent D4 receipts into a
+      // sealed set of fixed indirect families. The host always encodes both
+      // work and singleton bypass packets; it never inspects evolving state.
+      // The immutable legacy-physics oracle still advances the passive FCA1
+      // clock. Downstream SRR/FPL receipts share this generation/parity even
+      // though the oracle deliberately does not consume FCA indirect packets.
+      dispatch("beginSparseCM12FrameControl", 1);
+      dispatch("publishSparseCM12FrameBodyAuthority", 1);
+      dispatch("publishSparseCM12FrameBoundaryAuthority", 1);
+      dispatch("sealSparseCM12FrameControl", 1);
+      if (!this.legacyHostAuthorityOracleForQA) {
+        closePass();
+        encoder.copyBufferToBuffer(this.topologyArena,
+          4 * this.frameControlLayout.indirectBaseWords,
+          this.frameControlIndirectArguments, 0,
+          12 * SPARSE_CM12_FRAME_CONTROL_FAMILY_COUNT);
+        this.rigidCoupling?.encodeVoxelization(encoder);
+        useBindGroup(this.bindGroup);
+        dispatchFrameControl("publishSparseCM12MovingSolidVelocityRoots",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.solidCellWork);
+        dispatchFrameControl("sparseCM12FrameControlNoop",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyBypass);
+        dispatchFrameControl("sparseCM12FrameControlNoop",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyRowBypass);
+      }
       // Transport extrapolation consumes the same construction-time CSR edge
       // cache as pressure. Keep that immutable topology bound through the hot
       // physics stages; presentation restores its own metadata binding later.
       useBindGroup(this.pressureBindGroup);
-      dispatchAccepted("initializeTransportVelocity", "cell");
-      for (let sweep = 0; sweep < 8; sweep += 1) {
-        dispatchAccepted(sweep % 2 === 0
-          ? "extrapolateTransportVelocityToSource"
-          : "extrapolateTransportVelocityToDestination", "cell");
+      if (this.legacyHostAuthorityOracleForQA) {
+        dispatchAccepted("initializeTransportVelocity", "cell");
+        for (let sweep = 0; sweep < 8; sweep += 1) {
+          dispatchAccepted(sweep % 2 === 0
+            ? "extrapolateTransportVelocityToSource"
+            : "extrapolateTransportVelocityToDestination", "cell");
+        }
+        dispatchAccepted("captureLegacyVelocityExtensionForQA", "cell");
+      } else {
+        // The prior frame sealed and copied this exact blast after its final
+        // producer. Frame start consumes it without rebuilding topology or
+        // mutating FPL Current.
+        dispatch("beginVelocityExtensionExecution", 1);
+        dispatchVexActivity("initializeVelocityExtensionCandidates", "vexSerial");
+        for (let depth = 1; depth <= 8; depth += 1) {
+          dispatchVexActivity(`advanceVelocityExtensionCandidates${depth}`, "vexSerial");
+        }
+        dispatchVexActivity("commitVelocityExtensionCandidates", "vexSerial");
+        dispatch("finalizeVelocityExtensionCandidate", 1);
       }
+      // Producer-authored activity/topology changes append bounded SIR1 tile
+      // events. The dedicated authority plans only those events plus its
+      // persistent work tree; no accepted-cell scan or host count participates.
+      dispatch("beginSparseCM12SRR1Ingress", 1);
+      closePass();
+      this.scalarResultAuthority.encodePlan(encoder, this.activity);
+      useBindGroup(this.pressureBindGroup);
+      dispatch("resetSparseCM12SRR1CopiedEvents",
+        Math.ceil(this.scalarResultIngressLayout.tileCapacity / WORKGROUP_SIZE));
+      dispatch("beginSparseCM12SRR1ReceiptBatch", 1);
     });
     stage("face-preparation", () => {
-      dispatchAccepted("prepareTransportFaces", "row");
+      // Immutable construction QA arm: preserve the original accepted-row
+      // invocation stream and arithmetic, then snapshot its destination bank
+      // for byte-for-byte comparison with production FPA. This is not exposed
+      // as a runtime fallback or selected from GPU/scene state.
+      if (this.pressureRefreshOracleForQA) {
+        dispatchAccepted("prepareTransportFaces", "row");
+        dispatchAccepted("captureLegacyFacePreparationAuthority", "row");
+        return;
+      }
+      // Construction-only actual-read census. Snapshot current dependencies,
+      // run the unchanged full FPA arithmetic while recording only VEX xyz
+      // accessor reads, restore the physical bank, then leave the production
+      // FPA schedule below untouched. The singleton bootstrap publishes the
+      // first complete graph; later candidates promote only after C⊆S verify.
+      if (this.fpaVexReadCensusLayout) {
+        const census = this.fpaVexReadCensusLayout;
+        dispatch("beginSparseCM12FpaVexReadCensus", 1);
+        dispatch("clearSparseCM12FpaVexReadCensus", Math.max(1, Math.ceil(Math.max(
+          census.rowCapacity, census.cellBitWords, census.tileBitWords,
+          census.rowBitWords) / WORKGROUP_SIZE)));
+        dispatchAccepted("captureSparseCM12ChangedEffectiveTransport", "cell");
+        dispatchAccepted("captureSparseCM12PriorFaceForOracle", "row");
+        dispatch("beginSparseCM12FpaVexReadRecording", 1);
+        dispatchAccepted("prepareTransportFaces", "row");
+        dispatch("endSparseCM12FpaVexReadRecording", 1);
+        dispatchAccepted("captureSparseCM12FpaOracleAndRestore", "row");
+        dispatch("finalizeSparseCM12FpaVexReadSummary", Math.max(1,
+          Math.ceil(census.rowCapacity / WORKGROUP_SIZE)));
+        dispatch("scheduleSparseCM12FpaFromAcceptedVexReads", Math.max(1,
+          Math.ceil(census.rowCapacity / WORKGROUP_SIZE)));
+      }
+      // Construction-only observation: snapshot the prior accepted authority
+      // and author full-brick/tile-selected shadow row sets. The production
+      // producer and execution stream immediately below remain unchanged.
+      if (this.facePreparationTileCensusLayout) {
+        dispatch("beginSparseCM12FacePreparationTileCensus", 1);
+        dispatch("clearSparseCM12FacePreparationTileCensus", Math.max(1,
+          Math.ceil(Math.max(this.facePreparationTileCensusLayout.rowCapacity,
+            this.facePreparationTileCensusLayout.rowBitWordCount) / WORKGROUP_SIZE)));
+        dispatchActivity("markSparseCM12FacePreparationTileCensus");
+      }
+      dispatch("beginSparseCM12FacePreparationAuthority", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12FaceProjectionBootstrapIndirectByteOffset(
+          this.faceProjectionAuthorityLayout, "preparation"),
+        this.faceProjectionAuthorityIndirectArguments, 0, 12);
+      dispatchFaceProjectionAuthority("seedSparseCM12FacePreparationBootstrap", 0);
+      dispatch("seedSparseCM12PreviousFacePreparationLeaves",
+        Math.max(1, Math.ceil(this.faceProjectionAuthorityLayout.preparation.leafCount
+          / WORKGROUP_SIZE)));
+      dispatchActivity("markSparseCM12FacePreparationFromActivity");
+      dispatch("finalizeSparseCM12FacePreparationFrontier", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12FaceProjectionIndirectByteOffset(
+          this.faceProjectionAuthorityLayout, "preparation", "repair"),
+        this.faceProjectionAuthorityIndirectArguments, 24, 12);
+      dispatchFaceProjectionAuthority("repairSparseCM12FacePreparationLeaves", 2);
+      dispatch("finalizeSparseCM12FacePreparationPlan", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12FaceProjectionIndirectByteOffset(
+          this.faceProjectionAuthorityLayout, "preparation", "work"),
+        this.faceProjectionAuthorityIndirectArguments, 48, 12);
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12FaceProjectionBootstrapIndirectByteOffset(
+          this.faceProjectionAuthorityLayout, "preparation"),
+        this.faceProjectionAuthorityIndirectArguments, 72, 12);
+      dispatchFaceProjectionAuthority("executeSparseCM12FacePreparation", 4);
+      dispatchFaceProjectionAuthority("verifySparseCM12FacePreparationLeaves", 6);
+      dispatch("finalizeSparseCM12FacePreparationExecution", 1);
+      if (this.facePreparationTileCensusLayout) {
+        dispatch("finalizeSparseCM12FacePreparationTileCensus", Math.max(1,
+          Math.ceil(this.facePreparationTileCensusLayout.rowCapacity / WORKGROUP_SIZE)));
+        dispatch("finalizeSparseCM12FacePreparationTileCensusWitness", 1);
+      }
+      if (this.fpaVexReadCensusLayout) {
+        dispatchAccepted("verifySparseCM12FpaOracle", "row");
+        dispatch("commitSparseCM12FpaVexReadCensus", 1);
+      }
     });
     stage("conservative-transport", () => {
-      dispatchAccepted("traceGammaAndBeta", "cell");
-      dispatchAccepted("scatterDensityDeficit", "cell");
-      dispatchAccepted("gatherConservativeDensity", "cell");
+      dispatchScalarResult("traceGammaAndBeta", "traceGammaAndBeta");
+      dispatchScalarResult("scatterDensityDeficit", "scatterDensityDeficit");
+      dispatchScalarResult("gatherConservativeDensity", "gatherConservativeDensity");
     });
     // After the conservative transport, which leaves both fields the markers
     // need untouched: `gatherConservativeDensity` writes the *destination*
@@ -2461,21 +3987,68 @@ export class WebGPUSparseCM12Resident {
       encoder.clearBuffer(this.candidateState, 0, this.pressureScratchBytes);
       dispatchAccepted("scatterGammaRefinement", "row");
       dispatchAccepted("finalizeGammaRefinement", "cell");
+      closePass();
     });
     stage("surface-sharpening", () => {
+      // Surface scatter can write receivers outside the source tile. Until a
+      // producer-authored receiver closure is sealed, retain the exact full
+      // accepted traversal; the attempted SRR-source-only cut lost mass when
+      // symmetric expansion reached an unscheduled receiver at step twenty.
       dispatchAccepted("prepareSharpeningField", "cell");
       dispatchAccepted("scatterSharpeningMass", "cell");
       dispatchAccepted("finalizeSharpening", "cell");
-      if (this.boundary || bodyCount > 0) {
-        dispatchAccepted("clearSolidExcess", "cell");
-        dispatchAccepted("scatterSolidExcess", "cell");
-        dispatchAccepted("finalizeSolidExcess", "cell");
+      if (!this.legacyHostAuthorityOracleForQA) {
+        dispatchFrameControl("clearSolidExcess",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.solidCellWork);
+        dispatchFrameControl("scatterSolidExcess",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.solidCellWork);
+        dispatchFrameControl("finalizeSolidExcess",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.solidCellWork);
+        dispatchFrameControl("sparseCM12FrameControlNoop",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.solidCellBypass);
       }
+      // Numerical scalar/gamma/surface work still uses the complete accepted
+      // traversal. Build the downstream pressure/activity frontier only after
+      // the fully conditioned destination banks exist; observing source banks
+      // here misses interface crossings produced during this frame.
+      dispatch("resetTemporalScalarWorklists", 1);
+      dispatchAccepted("classifyTemporalPressureCells", "cell");
+      dispatchAccepted("dilateTemporalScalarAtoB", "cell");
+      dispatchAccepted("dilateTemporalScalarBtoA", "cell");
+      dispatchAccepted("compactTemporalScalarCells", "cell");
+      dispatchAccepted("compactTemporalScalarRows", "row");
+      dispatch("finalizeTemporalScalarWorklists", 1);
+      closePass();
+      // The exact-result receipt observes the fully conditioned physical banks,
+      // after gamma diffusion and surface sharpening have published the values
+      // the next frame will consume. It never certifies an intermediate mass
+      // result that a later scalar producer can invalidate.
+      useBindGroup(this.pressureBindGroup);
+      dispatchScalarResult("compareSparseCM12MassResult", "compareMassResult");
+      closePass();
+      this.scalarResultAuthority.encodePublish(encoder, this.activity);
+      encoder.copyBufferToBuffer(this.activity,
+        4 * (this.temporalWorklistLayout.headerBaseWords + 1),
+        this.temporalCellIndirectArguments, 0, 12);
+      encoder.copyBufferToBuffer(this.activity,
+        4 * (this.temporalWorklistLayout.headerBaseWords + 5),
+        this.temporalRowIndirectArguments, 0, 12);
     });
     stage("symmetry-authority", () => {
-      if (!this.horizontalD4Authority || bodyCount > 0) return;
-      dispatchAccepted("preserveHorizontalD4", "cell");
-      dispatchAccepted("commitHorizontalD4", "cell");
+      if (this.legacyHostAuthorityOracleForQA) {
+        if (this.legacyHostD4AuthorityForQA) {
+          dispatchAccepted("preserveHorizontalD4", "cell");
+          dispatchAccepted("commitHorizontalD4", "cell");
+        }
+      } else {
+        dispatchFrameControl("preserveHorizontalD4",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.scalarD4Work);
+        dispatchFrameControl("commitHorizontalD4",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.scalarD4Work);
+        dispatchFrameControl("sparseCM12FrameControlNoop",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.scalarD4Bypass);
+      }
+      dispatch("publishSparseCM12FrameScalarOutput", 1);
     });
     stage("body-forces", () => {
       dispatchAccepted("forceFaces", "row");
@@ -2487,40 +4060,305 @@ export class WebGPUSparseCM12Resident {
       // Every header and per-workgroup count read by the finalizers is written
       // by this epoch, so clearing the complete template-sized arena here only
       // spends bandwidth and adds a pass boundary.
-      useBindGroup(this.pressureBindGroup);
-      dispatchAccepted("classifyPressureCells", "cell");
-      dispatchAccepted("countPressureCells", "cell");
-      dispatch("finalizePressureCellWorklist", 1);
-      dispatchAccepted("compactPressureCells", "cell");
-      dispatchAccepted("classifyRows", "row");
-      dispatchAccepted("countPressureRows", "row");
-      dispatch("finalizePressureRowWorklist", 1);
-      dispatchAccepted("compactPressureRows", "row");
-      dispatchAccepted("bakeEffectivePressureEdges", "cell");
-      dispatchAccepted("preparePressure", "cell");
-      dispatch("bakeBrickAggregateEdges",
-        Math.max(1, Math.ceil(this.pressureCoarseEdgeCount / WORKGROUP_SIZE)));
-      dispatch("bakePressureHierarchyEdges", Math.max(1,
-        Math.ceil(this.pressureHierarchyEdgeCount / WORKGROUP_SIZE)));
-      dispatch("bakeBrickAggregateDiagonal", packed.brickCount);
-      dispatch("bakePressureHierarchyDiagonal", this.pressureHierarchyGroupCount);
       closePass();
-      encoder.copyBufferToBuffer(this.conditioning, 4,
+      useBindGroup(this.pressureBindGroup);
+      dispatch("beginCanonicalPressureCells", 1);
+      dispatch("beginCanonicalPressureRows", 1);
+      dispatch("beginPersistentPressureCache", 1);
+      dispatch("planPressureMembershipEpoch", 1);
+      dispatch("beginSparseCM12PressureTopologyRepair", 1);
+      dispatch("captureSparseCM12PressureTopologyConsumerGenerations", 1);
+      closePass();
+      const persistentFamilies = ["brick", "aggregateEdge", "hierarchyNode",
+        "hierarchyEdge"] as const;
+      persistentFamilies.forEach((family, index) => {
+        encoder.copyBufferToBuffer(this.topologyArena,
+          sparseCM12PersistentPressureCacheAggregateIndirectByteOffset(
+            this.persistentPressureCacheLayout, family, "seed"),
+          this.persistentPressureCacheIndirectArguments, 12 * (1 + index), 12);
+      });
+      dispatchPersistentPressureCache("seedPreviousPCFBrickLeaves", 1);
+      dispatchPersistentPressureCache("seedPreviousPCFAggregateEdgeLeaves", 2);
+      dispatchPersistentPressureCache("seedPreviousPCFHierarchyNodeLeaves", 3);
+      dispatchPersistentPressureCache("seedPreviousPCFHierarchyEdgeLeaves", 4);
+      // Indirect arguments are copied out of GPU-authored headers. WebGPU
+      // forbids transfer commands while the shared compute pass is open.
+      closePass();
+      encoder.copyBufferToBuffer(this.pressureWorklists,
+        4 * (this.pressureRepairLayout.headerBaseWords
+          + SPARSE_CM12_PRESSURE_REPAIR_HEADER.bootstrapCellIndirect),
+        this.pressureMembershipIndirectArguments, 0,
+        SPARSE_CM12_PRESSURE_MEMBERSHIP_INDIRECT_BYTES);
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureTopologyRepairHeaderIndirectByteOffset(
+          this.pressureTopologyRepairLayout, "brickSeed"),
+        this.pressureTopologyRepairIndirectArguments, 0, 12);
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureTopologyRepairHeaderIndirectByteOffset(
+          this.pressureTopologyRepairLayout, "rowSeed"),
+        this.pressureTopologyRepairIndirectArguments, 36, 12);
+      dispatchPressureTopologyRepair(
+        "seedPreviousSparseCM12PressureTopologyBrickLeaves", 0);
+      dispatchPressureTopologyRepair(
+        "seedPreviousSparseCM12PressureTopologyRowLeaves", 36);
+      dispatch("finalizeSparseCM12PressureTopologyBrickFrontier", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureTopologyRepairIndirectByteOffset(
+          this.pressureTopologyRepairLayout, "brick", "repair"),
+        this.pressureTopologyRepairIndirectArguments, 12, 12);
+      dispatchPressureTopologyRepair(
+        "repairSparseCM12PressureTopologyBrickLeaves", 12);
+      for (let level = 1;
+        level < this.pressureTopologyRepairLayout.brick.treeLevelCounts.length;
+        level += 1) {
+        dispatchPressureTopologyRepair(
+          `reduceSparseCM12PressureTopologyBrickLevel${level}`, 12);
+      }
+      dispatch("finalizeSparseCM12PressureTopologyBrickPlan", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureTopologyRepairIndirectByteOffset(
+          this.pressureTopologyRepairLayout, "brick", "work"),
+        this.pressureTopologyRepairIndirectArguments, 24, 12);
+      dispatchPressureTopologyRepair(
+        "repairSparseCM12PressureTopologyChangedBricks", 24);
+      if (this.pressureRefreshOracleForQA) {
+        dispatchAccepted("classifyPressureCells", "cell");
+      } else {
+        dispatchPressureBootstrap("classifyPressureCells", "cell");
+      }
+      if (!this.pressureRefreshOracleForQA) {
+        dispatchTemporalCell("classifyDirtyPressureCells");
+      }
+      dispatch("finalizeCanonicalPressureCellFrontier", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.activity,
+        sparseCM12CanonicalMembershipRepairIndirectByteOffset(
+          this.canonicalMembershipLayout, "cell"),
+        this.pressureMembershipIndirectArguments, 0, 12);
+      dispatchPressureBootstrap("repairCanonicalPressureCellLeaves", "cell");
+      dispatch("finalizeCanonicalPressureCells", 1);
+      if (this.pressureAddressingABQA.mode === "materializedList") {
+        const qa = this.pressureAddressingABQA;
+        dispatch("beginPressureAddressMaterialization", 1);
+        closePass();
+        encoder.copyBufferToBuffer(this.activity,
+          4 * (qa.layout.baseWords
+            + SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER.materializeIndirectX),
+          qa.indirectArguments, 0, 12);
+        if (qa.querySet) {
+          const materializePass = encoder.beginComputePass({
+            label: "Sparse CM12 PAB1 materialize",
+            timestampWrites: { querySet: qa.querySet,
+              beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 },
+          });
+          materializePass.setBindGroup(0, this.pressureBindGroup);
+          materializePass.setPipeline(this.pipelines.materializePressureCellAddresses!);
+          materializePass.dispatchWorkgroupsIndirect(qa.indirectArguments, 0);
+          materializePass.end();
+          const verifyPass = encoder.beginComputePass({
+            label: "Sparse CM12 PAB1 verify",
+            timestampWrites: { querySet: qa.querySet,
+              beginningOfPassWriteIndex: 2, endOfPassWriteIndex: 3 },
+          });
+          verifyPass.setBindGroup(0, this.pressureBindGroup);
+          verifyPass.setPipeline(this.pipelines.verifyPressureCellAddresses!);
+          verifyPass.dispatchWorkgroupsIndirect(qa.indirectArguments, 0);
+          verifyPass.end();
+        } else {
+          const materializePass = encoder.beginComputePass({
+            label: "Sparse CM12 production pressure-address materialization",
+          });
+          materializePass.setBindGroup(0, this.pressureBindGroup);
+          materializePass.setPipeline(this.pipelines.materializePressureCellAddresses!);
+          materializePass.dispatchWorkgroupsIndirect(qa.indirectArguments, 0);
+          materializePass.end();
+        }
+        dispatch("finalizePressureAddressMaterialization", 1);
+        if (qa.querySet && qa.queryResolve && qa.timestampReadback
+          && qa.receiptReadback) {
+          closePass();
+          encoder.resolveQuerySet(qa.querySet, 0, 4, qa.queryResolve, 0);
+          encoder.copyBufferToBuffer(qa.queryResolve, 0, qa.timestampReadback, 0, 32);
+          encoder.copyBufferToBuffer(this.activity, 4 * qa.layout.baseWords,
+            qa.receiptReadback, 0,
+            4 * SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER_WORDS);
+        }
+      }
+      dispatch("finalizeSparseCM12PressureTopologyCellExecution", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.activity,
+        sparseCM12CanonicalMembershipRepairIndirectByteOffset(
+          this.canonicalMembershipLayout, "cell"),
         this.pressureCellIndirectArguments, 0, 12);
-      encoder.copyBufferToBuffer(this.conditioning,
-        4 * (4 + this.templateCellCount + 1),
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureTopologyRepairIndirectByteOffset(
+          this.pressureTopologyRepairLayout, "row", "repair"),
+        this.pressureTopologyRepairIndirectArguments, 48, 12);
+      dispatchPressureTopologyRepair(
+        "repairSparseCM12PressureTopologyRowLeaves", 48);
+      for (let level = 1;
+        level < this.pressureTopologyRepairLayout.row.treeLevelCounts.length;
+        level += 1) {
+        dispatchPressureTopologyRepair(
+          `reduceSparseCM12PressureTopologyRowLevel${level}`, 48);
+      }
+      dispatch("finalizeSparseCM12PressureTopologyRowPlan", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureTopologyRepairIndirectByteOffset(
+          this.pressureTopologyRepairLayout, "row", "work"),
+        this.pressureTopologyRepairIndirectArguments, 60, 12);
+      dispatchPressureTopologyRepair("repairSparseCM12PressureTopologyRows", 60);
+      if (this.pressureRefreshOracleForQA) {
+        dispatchAccepted("classifyRows", "row");
+      } else {
+        dispatchPressureBootstrap("classifyRows", "row");
+      }
+      if (!this.pressureRefreshOracleForQA) {
+        dispatchTemporalRow("classifyDirtyPressureRows");
+      }
+      dispatch("finalizeCanonicalPressureRowFrontier", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.activity,
+        sparseCM12CanonicalMembershipRepairIndirectByteOffset(
+          this.canonicalMembershipLayout, "row"),
+        this.pressureMembershipIndirectArguments, 12, 12);
+      dispatchPressureBootstrap("repairCanonicalPressureRowLeaves", "row");
+      dispatch("finalizeCanonicalPressureRows", 1);
+      dispatch("finalizeSparseCM12PressureTopologyRowExecution", 1);
+      dispatch("finalizePersistentPressureCacheFrontier", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.activity,
+        sparseCM12CanonicalMembershipRepairIndirectByteOffset(
+          this.canonicalMembershipLayout, "row"),
         this.pressureRowIndirectArguments, 0, 12);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        4 * (this.persistentPressureCacheLayout.headerBaseWords
+          + SPARSE_CM12_PRESSURE_CACHE_HEADER.repairIndirectX),
+        this.persistentPressureCacheIndirectArguments, 0, 12);
+      dispatchPersistentPressureCache("repairPersistentPressureCache", 0);
+      dispatch("finalizePersistentPressureFineCache", 1);
+      closePass();
+      (persistentFamilies.slice(0, 2) as readonly (typeof persistentFamilies[number])[])
+        .forEach((family, index) => {
+          encoder.copyBufferToBuffer(this.topologyArena,
+            sparseCM12PersistentPressureCacheAggregateIndirectByteOffset(
+              this.persistentPressureCacheLayout, family, "repair"),
+            this.persistentPressureCacheIndirectArguments, 12 * (5 + index), 12);
+        });
+      dispatchPersistentPressureCache("repairPersistentPressureBrickWorkset", 5);
+      dispatchPersistentPressureCache("repairPersistentPressureAggregateEdgeWorkset", 6);
+      dispatch("finalizePersistentPressureAggregatePlan", 1);
+      closePass();
+      (persistentFamilies.slice(0, 2) as readonly (typeof persistentFamilies[number])[])
+        .forEach((family, index) => {
+          encoder.copyBufferToBuffer(this.topologyArena,
+            sparseCM12PersistentPressureCacheAggregateIndirectByteOffset(
+              this.persistentPressureCacheLayout, family, "work"),
+            this.persistentPressureCacheIndirectArguments, 12 * (9 + index), 12);
+        });
+      dispatchPersistentPressureCache("repairPersistentPressureAggregateEdges", 10);
+      dispatchPersistentPressureCache("repairPersistentPressureBrickDiagonals", 9);
+      dispatch("finalizePersistentPressureAggregateExecution", 1);
+      closePass();
+      (persistentFamilies.slice(2) as readonly (typeof persistentFamilies[number])[])
+        .forEach((family, index) => {
+          encoder.copyBufferToBuffer(this.topologyArena,
+            sparseCM12PersistentPressureCacheAggregateIndirectByteOffset(
+              this.persistentPressureCacheLayout, family, "repair"),
+            this.persistentPressureCacheIndirectArguments, 12 * (7 + index), 12);
+        });
+      dispatchPersistentPressureCache("repairPersistentPressureHierarchyNodeWorkset", 7);
+      dispatchPersistentPressureCache("repairPersistentPressureHierarchyEdgeWorkset", 8);
+      dispatch("finalizePersistentPressureHierarchyPlan", 1);
+      closePass();
+      (persistentFamilies.slice(2) as readonly (typeof persistentFamilies[number])[])
+        .forEach((family, index) => {
+          encoder.copyBufferToBuffer(this.topologyArena,
+            sparseCM12PersistentPressureCacheAggregateIndirectByteOffset(
+              this.persistentPressureCacheLayout, family, "work"),
+            this.persistentPressureCacheIndirectArguments, 12 * (11 + index), 12);
+        });
+      dispatchPersistentPressureCache("repairPersistentPressureHierarchyDiagonals", 11);
+      dispatchPersistentPressureCache("repairPersistentPressureHierarchyEdges", 12);
+      dispatch("finalizePersistentPressureCache", 1);
+      // PTR and PCF form one GPU-authored transaction. PTR has already built
+      // its commit indirect, but persistent brick states cannot become visible
+      // until PCF accepts the exact candidate generation captured by PTR.
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureTopologyRepairHeaderIndirectByteOffset(
+          this.pressureTopologyRepairLayout, "commit"),
+        this.pressureTopologyRepairIndirectArguments, 72, 12);
+      dispatchPressureTopologyRepair(
+        "commitSparseCM12PressureTopologyBrickStates", 72);
+      dispatch("finalizeSparseCM12BoundedPressureTopologyRepair", 1);
+      // Open the next topology journal immediately. Resolution/activation/
+      // retirement producers later in this frame append without host state.
+      dispatch("beginSparseCM12PressureTopologyRepair", 1);
+      if (this.pressureRefreshOracleForQA) {
+        // Construction-only legacy aggregate oracle. It uses the same stable
+        // PCM rank/order for fine cells, then reproduces the pre-PCF full
+        // aggregate/hierarchy bakes into their original scratch banks.
+        dispatchPressureCell("preparePressureFullOracle");
+        dispatch("bakeBrickAggregateEdges",
+          Math.ceil(this.pressureCoarseEdgeCount / WORKGROUP_SIZE));
+        dispatch("bakeBrickAggregateDiagonal", packed.brickCount);
+        dispatch("bakePressureHierarchyEdges",
+          Math.ceil(this.pressureHierarchyEdgeCount / WORKGROUP_SIZE));
+        dispatch("bakePressureHierarchyDiagonal", this.pressureHierarchyGroupCount);
+      }
+      dispatch("beginSparseCM12PressureSolveAuthority", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        4 * (this.pressureSolveAuthorityLayout.baseWords
+          + SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER.bootstrapIndirectX),
+        this.pressureSolveAuthorityIndirectArguments, 0, 12);
+      dispatchPressureSolveAuthority("seedSparseCM12PressureSolveBootstrap", 0);
+      // The accepted PCF brick workset is already one deterministic workgroup
+      // per stable brick. Reuse it directly as PSA's only production author.
+      dispatchPersistentPressureCache("markSparseCM12PressureSolveFromPersistentBricks", 9);
+      dispatch("finalizeSparseCM12PressureBrickFrontier", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureSolveAuthorityIndirectByteOffset(
+          this.pressureSolveAuthorityLayout, "brick", "repair"),
+        this.pressureSolveAuthorityIndirectArguments, 12, 12);
+      dispatchPressureSolveAuthority("repairSparseCM12PressureBrickLeaves", 1);
+      dispatch("finalizeSparseCM12PressureBrickRepair", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureSolveAuthorityIndirectByteOffset(
+          this.pressureSolveAuthorityLayout, "hierarchyNode", "repair"),
+        this.pressureSolveAuthorityIndirectArguments, 24, 12);
+      dispatchPressureSolveAuthority("repairSparseCM12PressureNodeLeaves", 2);
+      dispatch("finalizeSparseCM12PressureSolveAuthority", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureSolveAuthorityIndirectByteOffset(
+          this.pressureSolveAuthorityLayout, "brick", "work"),
+        this.pressureSolveAuthorityIndirectArguments, 36, 12);
+      encoder.copyBufferToBuffer(this.topologyArena,
+        sparseCM12PressureSolveAuthorityIndirectByteOffset(
+          this.pressureSolveAuthorityLayout, "hierarchyNode", "work"),
+        this.pressureSolveAuthorityIndirectArguments, 48, 12);
+      if (!this.pressureRefreshOracleForQA) {
+        dispatchPressureCell("preparePressure");
+      }
+      closePass();
     });
     stage("pressure-rhs", () => {
       dispatchPressureCell("initializePCG");
-      dispatch("restrictBrickAggregateResidual", packed.brickCount);
-      dispatch("refineBrickAggregateAtoB1", packed.brickCount);
-      dispatch("refineBrickAggregateBtoA2", packed.brickCount);
-      dispatch("refineBrickAggregateAtoB3", packed.brickCount);
-      dispatch("restrictPressureHierarchyResidual", this.pressureHierarchyGroupCount);
-      dispatch("refinePressureHierarchyCorrection", this.pressureHierarchyGroupCount);
-      dispatch("combinePressureHierarchyCorrection",
-        Math.max(1, Math.ceil(packed.brickCount / WORKGROUP_SIZE)));
+      dispatchPressureBrickSolve("restrictBrickAggregateResidual");
+      dispatchPressureBrickSolve("refineBrickAggregateAtoB1");
+      dispatchPressureBrickSolve("refineBrickAggregateBtoA2");
+      dispatchPressureBrickSolve("refineBrickAggregateAtoB3");
+      dispatchPressureHierarchySolve("restrictPressureHierarchyResidual");
+      dispatchPressureHierarchySolve("refinePressureHierarchyCorrection");
+      dispatchPressureBrickSolve("combinePressureHierarchyCorrection");
       dispatchPressureCell("initializeBrickAggregateDirection");
       dispatch("reduceInitialize", 1);
       dispatchPressureCell("measureTrueResidual");
@@ -2532,19 +4370,25 @@ export class WebGPUSparseCM12Resident {
       // largest one in the solve, so a film that started at iteration 1 would
       // miss the only frame where the seed is visible.
       journalRecord(0);
+      // Receipt-only PTL1 bootstrap. The existing pressure arithmetic remains
+      // on its current indirects; this copy only seals a generation-coherent
+      // tail bank for diagnostics and the later serial arithmetic cutover.
+      const tailBank: 0 | 1 = 0;
+      dispatch("publishSparseCM12PressureTailA", 1);
+      closePass();
+      this.pressureTailAuthority.encodeCopy(encoder, tailBank);
     });
     stage("pressure-solve", () => {
       for (let iteration = 0;
         iteration < pressureIterations; iteration += 1) {
           dispatchPressureCell("updatePipelinedState");
-          dispatch("restrictBrickAggregateResidual", packed.brickCount);
-          dispatch("refineBrickAggregateAtoB1", packed.brickCount);
-          dispatch("refineBrickAggregateBtoA2", packed.brickCount);
-          dispatch("refineBrickAggregateAtoB3", packed.brickCount);
-          dispatch("restrictPressureHierarchyResidual", this.pressureHierarchyGroupCount);
-          dispatch("refinePressureHierarchyCorrection", this.pressureHierarchyGroupCount);
-          dispatch("combinePressureHierarchyCorrection",
-            Math.max(1, Math.ceil(packed.brickCount / WORKGROUP_SIZE)));
+          dispatchPressureBrickSolve("restrictBrickAggregateResidual");
+          dispatchPressureBrickSolve("refineBrickAggregateAtoB1");
+          dispatchPressureBrickSolve("refineBrickAggregateBtoA2");
+          dispatchPressureBrickSolve("refineBrickAggregateAtoB3");
+          dispatchPressureHierarchySolve("restrictPressureHierarchyResidual");
+          dispatchPressureHierarchySolve("refinePressureHierarchyCorrection");
+          dispatchPressureBrickSolve("combinePressureHierarchyCorrection");
           dispatchPressureCell("applyBrickAggregatePreconditioner");
           dispatchPressureCell("applyPipelinedImage");
           dispatch("reducePipelinedIteration", 1);
@@ -2553,18 +4397,17 @@ export class WebGPUSparseCM12Resident {
             dispatchPressureCell("measureGuardedTrueResidual");
             dispatch("reduceGuardedTrueResidual", 1);
             dispatchPressureCell("restartPCGAfterCurvatureLoss");
-            dispatch("restrictBrickAggregateResidual", packed.brickCount);
-            dispatch("refineBrickAggregateAtoB1", packed.brickCount);
-            dispatch("refineBrickAggregateBtoA2", packed.brickCount);
-            dispatch("refineBrickAggregateAtoB3", packed.brickCount);
-            dispatch("refineBrickAggregateBtoA4", packed.brickCount);
-            dispatch("refineBrickAggregateAtoB5", packed.brickCount);
-            dispatch("refineBrickAggregateBtoA6", packed.brickCount);
-            dispatch("refineBrickAggregateAtoB7", packed.brickCount);
-            dispatch("restrictPressureHierarchyResidual", this.pressureHierarchyGroupCount);
-            dispatch("refinePressureHierarchyCorrection", this.pressureHierarchyGroupCount);
-            dispatch("combinePressureHierarchyCorrection",
-              Math.max(1, Math.ceil(packed.brickCount / WORKGROUP_SIZE)));
+            dispatchPressureBrickSolve("restrictBrickAggregateResidual");
+            dispatchPressureBrickSolve("refineBrickAggregateAtoB1");
+            dispatchPressureBrickSolve("refineBrickAggregateBtoA2");
+            dispatchPressureBrickSolve("refineBrickAggregateAtoB3");
+            dispatchPressureBrickSolve("refineBrickAggregateBtoA4");
+            dispatchPressureBrickSolve("refineBrickAggregateAtoB5");
+            dispatchPressureBrickSolve("refineBrickAggregateBtoA6");
+            dispatchPressureBrickSolve("refineBrickAggregateAtoB7");
+            dispatchPressureHierarchySolve("restrictPressureHierarchyResidual");
+            dispatchPressureHierarchySolve("refinePressureHierarchyCorrection");
+            dispatchPressureBrickSolve("combinePressureHierarchyCorrection");
             dispatchPressureCell("initializeBrickAggregateRecoveryDirection");
             dispatch("reduceCurvatureRecovery", 1);
             dispatchPressureCell("applyPipelinedRecovery");
@@ -2580,17 +4423,75 @@ export class WebGPUSparseCM12Resident {
       dispatch("reduceFinalTrueResidual", 1);
     });
     stage("velocity-projection", () => {
-      dispatchPressureRow("projectFaces");
-      dispatchAccepted("collocateAndDiagnose", "cell");
-      if (this.horizontalD4Authority && bodyCount === 0) {
-        dispatchAccepted("preserveVelocityHorizontalD4", "cell");
-        dispatchAccepted("commitVelocityHorizontalD4", "cell");
+      // Open the generation before final projected velocity is authored: the
+      // collocation producer can then append only its local owner/row closure.
+      useBindGroup(this.bindGroup);
+      dispatch("advanceActivityClock", 1);
+      dispatch("beginIncrementalActivity", 1);
+      dispatch("beginDirtySchedulerFrame", 1);
+      useBindGroup(this.pressureBindGroup);
+      if (this.pressureRefreshOracleForQA) {
+        // Construction-only legacy projection oracle. It deliberately keeps
+        // the original one-bank write semantics: any source-bank mirroring or
+        // sparse-row omission in production FPA must therefore appear in the
+        // paired physical/activity/topology receipts.
+        dispatchPressureRow("projectFaces");
+      } else {
+        dispatch("beginSparseCM12FaceProjectionAuthority", 1);
+        closePass();
+        encoder.copyBufferToBuffer(this.topologyArena,
+          sparseCM12FaceProjectionBootstrapIndirectByteOffset(
+            this.faceProjectionAuthorityLayout, "projection"),
+          this.faceProjectionAuthorityIndirectArguments, 12, 12);
+        dispatchFaceProjectionAuthority("seedSparseCM12FaceProjectionBootstrap", 1);
+        dispatch("seedSparseCM12PreviousFaceProjectionLeaves",
+          Math.max(1, Math.ceil(this.faceProjectionAuthorityLayout.projection.leafCount
+            / WORKGROUP_SIZE)));
+        dispatchPressureCell("markSparseCM12FaceProjectionFromPressure");
+        dispatchFaceProjectionAuthority("seedSparseCM12ProjectionFromPreparation", 4);
+        dispatch("finalizeSparseCM12FaceProjectionFrontier", 1);
+        closePass();
+        encoder.copyBufferToBuffer(this.topologyArena,
+          sparseCM12FaceProjectionIndirectByteOffset(
+            this.faceProjectionAuthorityLayout, "projection", "repair"),
+          this.faceProjectionAuthorityIndirectArguments, 36, 12);
+        dispatchFaceProjectionAuthority("repairSparseCM12FaceProjectionLeaves", 3);
+        dispatch("finalizeSparseCM12FaceProjectionPlan", 1);
+        closePass();
+        encoder.copyBufferToBuffer(this.topologyArena,
+          sparseCM12FaceProjectionIndirectByteOffset(
+            this.faceProjectionAuthorityLayout, "projection", "work"),
+          this.faceProjectionAuthorityIndirectArguments, 60, 12);
+        encoder.copyBufferToBuffer(this.topologyArena,
+          sparseCM12FaceProjectionBootstrapIndirectByteOffset(
+            this.faceProjectionAuthorityLayout, "projection"),
+          this.faceProjectionAuthorityIndirectArguments, 84, 12);
+        dispatchFaceProjectionAuthority("executeSparseCM12FaceProjection", 5);
+        dispatchFaceProjectionAuthority("verifySparseCM12FaceProjectionLeaves", 7);
+        dispatch("finalizeSparseCM12FaceProjectionExecution", 1);
       }
-      if (bodyCount > 0 && this.rigidCoupling) {
+      useBindGroup(this.bindGroup);
+      dispatchAccepted("collocateAndDiagnose", "cell");
+      if (this.legacyHostAuthorityOracleForQA) {
+        if (this.legacyHostD4AuthorityForQA) {
+          dispatchAccepted("preserveVelocityHorizontalD4", "cell");
+          dispatchAccepted("commitVelocityHorizontalD4", "cell");
+        }
+      } else {
+        dispatchFrameControl("preserveVelocityHorizontalD4",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.faceD4Work);
+        dispatchFrameControl("commitVelocityHorizontalD4",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.faceD4Work);
+        dispatchFrameControl("sparseCM12FrameControlNoop",
+          SPARSE_CM12_FRAME_CONTROL_FAMILY.faceD4Bypass);
+      }
+      if (this.rigidCoupling) {
         pass?.end();
         pass = undefined;
         this.rigidCoupling.encodeReaction(encoder);
       }
+      useBindGroup(this.bindGroup);
+      dispatch("publishSparseCM12FrameFaceOutput", 1);
     });
     stage("projection-diagnostics", () => {
       dispatchAccepted("measureDivergenceDiagnostics", "cell");
@@ -2598,8 +4499,35 @@ export class WebGPUSparseCM12Resident {
     });
     stage("activity-measurement", () => {
       useBindGroup(this.bindGroup);
-      dispatch("advanceActivityClock", 1);
-      dispatch("measureBrickActivity", packed.brickCount);
+      dispatchTemporalCell("markIncrementalActivityTemporalCells");
+      dispatch("markIncrementalActivityTopology",
+        Math.ceil(packed.brickCount / WORKGROUP_SIZE));
+      dispatch("finalizeIncrementalActivityWorklist", 1);
+      if (this.legacyHostAuthorityOracleForQA) {
+        closePass();
+        encoder.copyBufferToBuffer(this.activity,
+          4 * (this.incrementalActivityLayout.headerBaseWords + 8),
+          this.activityIndirectArguments, 0, 12);
+        dispatchActivity("measureBrickActivity");
+        dispatch("ageIncrementalActivityHistory",
+          Math.ceil(packed.brickCount / WORKGROUP_SIZE));
+        dispatch("finalizeIncrementalActivityCensus", 1);
+      } else {
+        dispatch("beginProductionActivity", 1);
+        copyVexActivity("copy-a4d2-classify");
+        copyVexActivity("copy-a4d2-scan");
+        dispatchVexActivity("buildProductionActivityTriggers", "a4d2Classify");
+        dispatchVexActivity("classifyProductionActivityBricks", "a4d2Classify");
+        dispatchVexActivity("scanProductionActivityBrickBlocks", "a4d2Scan");
+        dispatch("scanProductionActivityBlockSums", 1);
+        dispatchVexActivity("scatterProductionActivityBricks", "a4d2Scan");
+        copyVexActivity("copy-a4d2-rebuild");
+        copyVexActivity("copy-a4d2-census");
+        dispatchVexActivity("rebuildProductionActivityBricks", "a4d2Rebuild");
+        dispatchVexActivity("reduceProductionActivityCensusBlocks", "a4d2Census");
+        dispatch("commitProductionActivityCensus", 1);
+        dispatch("acceptProductionActivity", 1);
+      }
     });
     stage("resolution-planning", () => {
       dispatch("planBrickResolution", bricks);
@@ -2628,25 +4556,62 @@ export class WebGPUSparseCM12Resident {
       dispatch("reconstructShadowFaces",
         Math.ceil(this.templateRowCount / WORKGROUP_SIZE));
       dispatch("validateAndCommitShadowTopology", 1);
+      dispatch("publishSparseCM12TopologyVelocityRoots", packed.brickCount);
     });
     stage("brick-retirement", () => {
       dispatch("retireUnsupportedEmptyBricks", bricks);
+      dispatch("sealSparseCM12PressureTopologyJournal", 1);
+      // Candidate commit/retirement occurs after the activity census. Re-open
+      // only those changed leaf spans for presentation and next-frame reuse.
+      dispatch("markIncrementalActivityPostTopology",
+        Math.ceil(packed.brickCount / WORKGROUP_SIZE));
+      // Post-census topology commits can append bricks to the same generation.
+      // Republish the exact final count and snapshot its indirect triplet now;
+      // otherwise next frame's FPA dispatch uses the pre-commit count while
+      // its fail-closed expected receipt reads the larger post-commit count.
+      dispatch("finalizeIncrementalActivityWorklist", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.activity,
+        4 * (this.incrementalActivityLayout.headerBaseWords + 8),
+        this.activityIndirectArguments, 0, 12);
     });
     stage("presentation-publication", () => {
-      // measureBrickActivity has already reduced the identical density/mass
-      // wetness predicate and published its existing occupied bit per resident
-      // brick. Do not sweep every brick's cells a second time here.
-      dispatch("publishSparseLevelSet",
-        this.globalFineLevelSetSource.plan.maximumResidentBricks);
+      // The plan and compact page count are GPU publications. Split at the
+      // storage-to-indirect copy seam; no host parity/count controls this path.
+      closePass();
+      if (this.legacyHostAuthorityOracleForQA) {
+        useBindGroup(this.pressureBindGroup);
+        dispatch("finalizeLegacyVelocityExtensionClockForQA", 1);
+        closePass();
+      } else {
+        this.encodeVelocityExtensionPlan(encoder, "Sparse CM12 next-frame VEX plan");
+      }
+      this.encodeFramePlanPresentation(encoder, "Sparse CM12 frame presentation");
+      // FPL consumes the live generation-stamped packets above. Finalize only
+      // the exact producer queue so advancing the authority no longer expands
+      // a compatibility visualization across every stable tile.
+      dispatch("sealDirtySchedulerPreEpoch", 1);
+      closePass();
+      encoder.copyBufferToBuffer(this.activity, 4 * (
+        this.dirtySchedulerLayout.queueHeaderBaseWords
+        + SPARSE_CM12_DIRTY_SCHEDULER_QUEUE.pre
+        + SPARSE_CM12_DIRTY_SCHEDULER_QUEUE.dispatchX),
+      this.presentationIndirectArguments, 0, 12);
+      const dirtyFinalize = openPass();
+      dirtyFinalize.setPipeline(this.pipelines.finalizeQueuedDirtySchedulerPackets!);
+      dirtyFinalize.dispatchWorkgroupsIndirect(this.presentationIndirectArguments, 0);
+      dispatch("finalizeDirtySchedulerEpoch", 1);
+      dispatch("commitSparseCM12FrameControl", 1);
     });
     closePass();
+    if (this.legacyHostAuthorityOracleForQA) this.legacyHostAuthorityParityForQA ^= 1;
     // The commit above authors next frame's accepted workgroup triplets. Keep
     // the writable arena out of indirect-dispatch synchronization scopes by
     // snapshotting those six words with a device-side copy between passes.
     encoder.copyBufferToBuffer(this.topologyArena,
       this.topologyWorklistBaseBytes + 4 * 8,
       this.acceptedIndirectArguments, 0, 6 * 4);
-    this.parity ^= 1;
+    seams?.anchorFinalBoundary?.(this.acceptedIndirectArguments, 0);
   }
 
   /**
@@ -2769,16 +4734,129 @@ export class WebGPUSparseCM12Resident {
    * unlike the markers, which are only advected when someone is looking.
    */
   get faceVelocitySource(): GPUFluidFaceVelocitySource {
+    if (this.legacyHostAuthorityOracleForQA) return {
+      state: this.state,
+      topologyArena: this.topologyArena,
+      faceFloatOffset: this.legacyHostAuthorityParityForQA !== 0
+        ? this.layout.faceB : this.layout.faceA,
+      rowCount: this.rowCount,
+      domainFine: this.dimensions,
+      finestCell_m: this.parameterF32[41] ?? 0,
+    };
     return {
       state: this.state,
       topologyArena: this.topologyArena,
-      faceFloatOffset: this.parity !== 0 ? this.layout.faceB : this.layout.faceA,
+      faceFloatOffset: this.layout.faceA,
+      parityWordOffset: this.frameControlLayout.baseWords
+        + SPARSE_CM12_FRAME_CONTROL_HEADER.faceParity,
       rowCount: this.rowCount,
       domainFine: this.dimensions,
       // The width the last advance was actually parameterised with, which is
       // the unit its face velocities are stored in.
       finestCell_m: this.parameterF32[41] ?? 0,
     };
+  }
+
+  private encodeFramePlanPresentation(
+    encoder: GPUCommandEncoder,
+    label: string,
+  ): void {
+    if (this.presentationPublisherOracleForQA) {
+      const oracle = encoder.beginComputePass({ label: `${label} QA publisher oracle` });
+      oracle.setBindGroup(0, this.bindGroup);
+      oracle.setPipeline(this.pipelines.publishSparseLevelSet!);
+      oracle.dispatchWorkgroups(this.globalFineLevelSetSource.plan.maximumResidentBricks);
+      oracle.end();
+      return;
+    }
+    const bricks = this.lastPacked!.brickCount;
+    const plan = encoder.beginComputePass({ label: `${label} FPL1/FPP1 plan` });
+    plan.setBindGroup(0, this.bindGroup);
+    const dispatch = (name: string, x: number) => {
+      plan.setPipeline(this.pipelines[name]!);plan.dispatchWorkgroups(x);
+    };
+    dispatch("beginSparseCM12FramePlanNext", 1);
+    dispatch("initializeSparseCM12FramePlanNext", bricks);
+    dispatch("populateSparseCM12PresentationFramePlan", bricks);
+    plan.setPipeline(this.pipelines.importVelocityExtensionBlastToFramePlanNext!);
+    plan.dispatchWorkgroupsIndirect(this.vexActivityIndirectArguments,
+      4 * SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT.vexSerial.offsetWords);
+    dispatch("resolveSparseCM12FramePlanNextClosure", bricks);
+    dispatch("sealSparseCM12FramePlanNextBricks", bricks);
+    dispatch("finalizeSparseCM12FramePlanNext", 1);
+    dispatch("markSparseCM12GlobalFramePlanReceipts", bricks);
+    dispatch("beginSparseCM12FramePlanPresentationPacket", 1);
+    dispatch("buildSparseCM12FramePlanPresentationPacket", bricks);
+    dispatch("finalizeSparseCM12FramePlanPresentationPacket", 1);
+    plan.end();
+    encoder.copyBufferToBuffer(this.activity,
+      this.framePlanLayout.fixedIndirectBinding.offset,
+      this.framePlanIndirectArguments, 0,
+      this.framePlanLayout.fixedIndirectBinding.size);
+    encoder.copyBufferToBuffer(this.activity,
+      this.framePlanPresentationLayout.indirectBinding.offset,
+      this.presentationIndirectArguments, 0, 12);
+    const execute = encoder.beginComputePass({ label: `${label} FPP1 execute` });
+    execute.setBindGroup(0, this.bindGroup);
+    execute.setPipeline(this.pipelines.executeSparseCM12FramePlanPresentationPacket!);
+    execute.dispatchWorkgroupsIndirect(this.presentationIndirectArguments, 0);
+    execute.setPipeline(this.pipelines.commitSparseCM12FramePlanPresentationPacket!);
+    execute.dispatchWorkgroupsIndirect(this.presentationIndirectArguments, 0);
+    execute.setPipeline(this.pipelines.verifySparseCM12FramePlanPresentation!);
+    execute.dispatchWorkgroups(bricks);
+    execute.setPipeline(this.pipelines.finalizeSparseCM12FramePlanPresentationExecution!);
+    execute.dispatchWorkgroups(1);
+    execute.setPipeline(this.pipelines.rejectSparseCM12FramePlanPresentationFaults!);
+    execute.dispatchWorkgroups(bricks);
+    execute.end();
+  }
+
+  /** Seal the producer-owned root queue and publish the exact next-frame blast. */
+  private encodeVelocityExtensionPlan(
+    encoder: GPUCommandEncoder,
+    label: string,
+  ): void {
+    let pass: GPUComputePassEncoder | undefined;
+    const openPass = () => {
+      if (!pass) {
+        pass = encoder.beginComputePass({ label });
+        pass.setBindGroup(0, this.pressureBindGroup);
+      }
+      return pass;
+    };
+    const closePass = () => { pass?.end();pass = undefined; };
+    const dispatch = (name: string, count = 1) => {
+      const active = openPass();
+      active.setPipeline(this.pipelines[name]!);
+      active.dispatchWorkgroups(count);
+    };
+    const dispatchIndirect = (name: string) => {
+      const active = openPass();
+      active.setPipeline(this.pipelines[name]!);
+      active.dispatchWorkgroupsIndirect(this.vexActivityIndirectArguments,
+        4 * SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT.vexSerial.offsetWords);
+    };
+    const copy = (id: string) => {
+      const receipt = this.vexActivityIndirectCopies.get(id);
+      if (!receipt) throw new Error(`unknown VEX1 indirect copy ${id}`);
+      closePass();
+      encoder.copyBufferToBuffer(this.activity, 4 * receipt.sourceWord,
+        this.vexActivityIndirectArguments, 4 * receipt.destinationWord, 12);
+    };
+    dispatch("beginVelocityExtensionCandidate");
+    dispatch("sealVelocityExtensionRoots");
+    copy("copy-vex-roots");
+    dispatchIndirect("seedVelocityExtensionRoots");
+    dispatch("sealVelocityExtensionSeedFrontier");
+    for (let depth = 1; depth <= 8; depth += 1) {
+      dispatch(`prepareVelocityExtensionFrontier${depth}`);
+      copy(depth % 2 === 1 ? "copy-vex-frontier-a" : "copy-vex-frontier-b");
+      dispatchIndirect(`expandVelocityExtensionFrontier${depth}`);
+      dispatch(`sealVelocityExtensionFrontier${depth}`);
+    }
+    dispatch("finalizeVelocityExtensionBlast");
+    copy("copy-vex-blast");
+    closePass();
   }
 
   /** Publish generation zero without executing a physics step or mapping state. */
@@ -2789,9 +4867,16 @@ export class WebGPUSparseCM12Resident {
     pass.setPipeline(this.pipelines.classifyPresentationBricks!);
     pass.setBindGroup(0, this.bindGroup);
     pass.dispatchWorkgroups(Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    pass.setPipeline(this.pipelines.publishSparseLevelSet!);
-    pass.dispatchWorkgroups(this.globalFineLevelSetSource.plan.maximumResidentBricks);
+    // Construction is the only full VEX root publication. The initial VEX
+    // header is already collecting FCA generation 1, so the recurring frame
+    // schedule contains no bootstrap branch or accepted-domain dispatch.
+    pass.setPipeline(this.pipelines.bootstrapVelocityExtensionRoots!);
+    pass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
     pass.end();
+    if (!this.legacyHostAuthorityOracleForQA) {
+      this.encodeVelocityExtensionPlan(encoder, "Sparse CM12 construction VEX plan");
+    }
+    this.encodeFramePlanPresentation(encoder, "Sparse CM12 initial presentation");
   }
 
   encodeLiquidInjection(
@@ -2801,10 +4886,11 @@ export class WebGPUSparseCM12Resident {
     radiusFine: readonly [number, number, number],
   ): void {
     this.assertLive();
-    if (Math.abs(centerFine[0] - 0.5 * this.dimensions[0]) > 1e-6
-      || Math.abs(centerFine[2] - 0.5 * this.dimensions[2]) > 1e-6
-      || Math.abs(radiusFine[0] - radiusFine[2]) > 1e-6) {
-      this.horizontalD4Authority = false;
+    if (this.legacyHostAuthorityOracleForQA
+      && (Math.abs(centerFine[0] - 0.5 * this.dimensions[0]) > 1e-6
+        || Math.abs(centerFine[2] - 0.5 * this.dimensions[2]) > 1e-6
+        || Math.abs(radiusFine[0] - radiusFine[2]) > 1e-6)) {
+      this.legacyHostD4AuthorityForQA = false;
     }
     this.writeParameters(this.lastPacked!, 0.004, finestCellSize_m, 1, [0, 0, 0]);
     // The trailing one is the injection enable that every ordinary frame writes
@@ -2824,6 +4910,9 @@ export class WebGPUSparseCM12Resident {
       topologyPass.setPipeline(this.pipelines[name]!);
       topologyPass.dispatchWorkgroups(count, y, z);
     };
+    if (!this.legacyHostAuthorityOracleForQA) {
+      dispatchTopology("reopenVelocityExtensionPlanForInjection", 1);
+    }
     // Promote every intersected brick before writing any density. The planner
     // treats the enabled injection as refine-only: untouched accepted bricks
     // are preserved, while closure may still grow the required 2:1 support.
@@ -2851,6 +4940,9 @@ export class WebGPUSparseCM12Resident {
     dispatchTopology("reconstructShadowFaces",
       Math.ceil(this.templateRowCount / WORKGROUP_SIZE));
     dispatchTopology("validateAndCommitShadowTopology", 1);
+    if (!this.legacyHostAuthorityOracleForQA) {
+      dispatchTopology("publishSparseCM12TopologyVelocityRoots", packed.brickCount);
+    }
     topologyPass.end();
     encoder.copyBufferToBuffer(this.topologyArena,
       this.topologyWorklistBaseBytes + 4 * 8,
@@ -2864,12 +4956,15 @@ export class WebGPUSparseCM12Resident {
     // also covers a newly activated receiver in the same command buffer.
     injectionPass.setPipeline(this.pipelines.injectLiquid!);
     injectionPass.dispatchWorkgroups(bricks);
+    injectionPass.setPipeline(this.pipelines.invalidateSparseCM12FrameD4ForInjection!);
+    injectionPass.dispatchWorkgroups(1);
     injectionPass.setPipeline(this.pipelines.classifyPresentationBricks!);
     injectionPass.dispatchWorkgroups(bricks);
-    injectionPass.setPipeline(this.pipelines.publishSparseLevelSet!);
-    injectionPass.dispatchWorkgroups(
-      this.globalFineLevelSetSource.plan.maximumResidentBricks);
     injectionPass.end();
+    if (!this.legacyHostAuthorityOracleForQA) {
+      this.encodeVelocityExtensionPlan(encoder, "Sparse CM12 injection VEX replan");
+    }
+    this.encodeFramePlanPresentation(encoder, "Sparse CM12 injection presentation");
   }
 
   private lastPacked?: PackedResidentTopology;
@@ -2900,13 +4995,16 @@ export class WebGPUSparseCM12Resident {
     u.set([l.cellVelocityA, l.cellVelocityB, l.faceA, l.faceB], 20);
     u.set([l.pressure, l.rhs, l.diagonal, l.liquid], 24);
     u.set([l.theta, l.residual, l.preconditioned, l.direction], 28);
-    u.set([l.applied, l.divergence, 0, 0], 32);
+    // stateOffsets4.w is a static pointer to FCA1 in topologyArena. Consumers
+    // read accepted parity there; the host never mirrors or predicts it.
+    u.set([l.applied, l.divergence, 0x4643_4131,
+      this.frameControlLayout.baseWords + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity], 32);
     // The D4 pass needs two disjoint scalar scratch arrays. In particular the
     // gamma scratch must never alias densityA at offset zero: doing so corrupts
     // gamma after the first symmetric frame and makes transport create mass on
     // the next frame.
     u.set([l.sharpeningDelta, l.symmetryGamma, l.tracers, 0], 36);
-    f.set([dt_s, finestCellSize_m, pressureScale, this.parity], 40);
+    f.set([dt_s, finestCellSize_m, pressureScale, 0], 40);
     f.set([...acceleration, 0], 44);
     u.set([Math.ceil(this.cellCount / WORKGROUP_SIZE),
       Math.ceil(this.rowCount / WORKGROUP_SIZE),
@@ -2942,6 +5040,13 @@ export class WebGPUSparseCM12Resident {
     u.set([this.layout.journal, journal.iterationCapacity, journal.snapshotCapacity,
       journal.cellStride], 108);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
+    if (this.legacyHostAuthorityOracleForQA) {
+      this.device.queue.writeBuffer(this.topologyArena,
+        4 * (this.frameControlLayout.baseWords
+          + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity),
+        Uint32Array.of(this.legacyHostAuthorityParityForQA,
+          this.legacyHostAuthorityParityForQA));
+    }
   }
 
   async readDiagnostics(): Promise<{
@@ -2985,6 +5090,34 @@ export class WebGPUSparseCM12Resident {
     readonly acceptedMixedSeamRowCount: number;
     readonly pressureActiveRowCount: number;
     readonly pressureCellCount: number;
+    readonly pressureCanonicalMembership: {
+      readonly cell: {
+        readonly phase: number; readonly fault: number; readonly firstFault: number;
+        readonly dirtyCount: number; readonly totalCount: number;
+        readonly candidateGeneration: number; readonly acceptedGeneration: number;
+      };
+      readonly row: {
+        readonly phase: number; readonly fault: number; readonly firstFault: number;
+        readonly dirtyCount: number; readonly totalCount: number;
+        readonly candidateGeneration: number; readonly acceptedGeneration: number;
+      };
+    };
+    readonly pressureTopologyRepair: {
+      readonly phase: number; readonly fault: number;
+      readonly firstFaultFamily: number; readonly firstFaultId: number;
+      readonly candidateGeneration: number; readonly acceptedGeneration: number;
+      readonly topologyGeneration: number;
+      readonly changedBrickCount: number; readonly changedRowCount: number;
+      readonly cellExecutionCount: number; readonly rowExecutionCount: number;
+      readonly brickDirtyLeafCount: number; readonly rowDirtyLeafCount: number;
+      readonly expectedProducerReceipts: number;
+      readonly coveredProducerReceipts: number;
+    };
+    readonly pressureCutoverAuthorities: NonNullable<NonNullable<
+      GPUEulerianInfo["adaptivePressureTopologyAttribution"]>["authorities"]>;
+    readonly temporalScalarCellCount: number;
+    readonly temporalScalarRowCount: number;
+    readonly temporalScalarRejectionMask: number;
   }> {
     this.assertLive();
     const encoder = this.device.createCommandEncoder({
@@ -2999,8 +5132,74 @@ export class WebGPUSparseCM12Resident {
       this.topologyWorklistBaseBytes + 4 * 4,
       this.diagnosticsReadback,
       SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS, 8);
-    encoder.copyBufferToBuffer(this.conditioning, 0, this.diagnosticsReadback,
-      SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS + 8, 4);
+    const pcmDiagnosticOffset = SPARSE_CM12_PRESSURE_SCALAR_BYTES
+      + 4 * ACTIVITY_HEADER_WORDS + 12;
+    encoder.copyBufferToBuffer(this.activity,
+      4 * this.canonicalMembershipLayout.cell.headerBaseWords,
+      this.diagnosticsReadback, pcmDiagnosticOffset,
+      4 * SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS);
+    encoder.copyBufferToBuffer(this.activity,
+      4 * this.canonicalMembershipLayout.row.headerBaseWords,
+      this.diagnosticsReadback,
+      pcmDiagnosticOffset + 4 * SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS,
+      4 * SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS);
+    const ptrDiagnosticOffset = pcmDiagnosticOffset
+      + SPARSE_CM12_PCM_DIAGNOSTIC_BYTES;
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.pressureTopologyRepairLayout.baseWords,
+      this.diagnosticsReadback, ptrDiagnosticOffset,
+      4 * SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS);
+    const fpaDiagnosticOffset = ptrDiagnosticOffset
+      + 4 * SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS;
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.faceProjectionAuthorityLayout.preparation.headerBaseWords,
+      this.diagnosticsReadback, fpaDiagnosticOffset,
+      4 * SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.faceProjectionAuthorityLayout.projection.headerBaseWords,
+      this.diagnosticsReadback,
+      fpaDiagnosticOffset + 4 * SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS,
+      4 * SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS);
+    const pcfDiagnosticOffset = fpaDiagnosticOffset
+      + 8 * SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS;
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.persistentPressureCacheLayout.headerBaseWords,
+      this.diagnosticsReadback, pcfDiagnosticOffset,
+      4 * SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS);
+    const pcaDiagnosticOffset = pcfDiagnosticOffset
+      + 4 * SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS;
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.persistentPressureCacheLayout.aggregateHeaderBaseWords,
+      this.diagnosticsReadback, pcaDiagnosticOffset,
+      4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS);
+    const persistentFamilies = ["brick", "aggregateEdge", "hierarchyNode",
+      "hierarchyEdge"] as const;
+    persistentFamilies.forEach((family, index) => {
+      encoder.copyBufferToBuffer(this.topologyArena,
+        4 * this.persistentPressureCacheLayout.aggregateFamilies[family].headerBaseWords,
+        this.diagnosticsReadback,
+        pcaDiagnosticOffset + 4 * (SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS
+          + index * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS),
+        4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS);
+    });
+    const psaDiagnosticOffset = pcaDiagnosticOffset + 4
+      * (SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS
+        + 4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.pressureSolveAuthorityLayout.baseWords,
+      this.diagnosticsReadback, psaDiagnosticOffset,
+      4 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.pressureSolveAuthorityLayout.brick.headerBaseWords,
+      this.diagnosticsReadback,
+      psaDiagnosticOffset + 4 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS,
+      4 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.pressureSolveAuthorityLayout.hierarchyNode.headerBaseWords,
+      this.diagnosticsReadback,
+      psaDiagnosticOffset + 4 * (SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS
+        + SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS),
+      4 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS);
     this.device.queue.submit([encoder.finish()]);
     await this.diagnosticsReadback.mapAsync(GPUMapMode.READ);
     const mapped = this.diagnosticsReadback.getMappedRange();
@@ -3010,8 +5209,138 @@ export class WebGPUSparseCM12Resident {
       SPARSE_CM12_PRESSURE_SCALAR_BYTES, ACTIVITY_HEADER_WORDS);
     const acceptedCounts = new Uint32Array(mapped,
       SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS, 2);
-    const pressureCounts = new Uint32Array(mapped,
-      SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS + 8, 1);
+    const pcmCell = new Uint32Array(mapped, pcmDiagnosticOffset,
+      SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS);
+    const pcmRow = new Uint32Array(mapped,
+      pcmDiagnosticOffset + 4 * SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS,
+      SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS);
+    const ptrHeader = new Uint32Array(mapped, ptrDiagnosticOffset,
+      SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS);
+    const fpaPreparationHeader = new Uint32Array(mapped, fpaDiagnosticOffset,
+      SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS);
+    const fpaProjectionHeader = new Uint32Array(mapped,
+      fpaDiagnosticOffset + 4 * SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS,
+      SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS);
+    const pcfHeader = new Uint32Array(mapped, pcfDiagnosticOffset,
+      SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS);
+    const pcaHeader = new Uint32Array(mapped, pcaDiagnosticOffset,
+      SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS);
+    const pcaFamilies = persistentFamilies.map((_, index) => new Uint32Array(mapped,
+      pcaDiagnosticOffset + 4 * (SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS
+        + index * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS),
+      SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS));
+    const psaHeader = new Uint32Array(mapped, psaDiagnosticOffset,
+      SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS);
+    const psaBrickHeader = new Uint32Array(mapped,
+      psaDiagnosticOffset + 4 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS,
+      SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS);
+    const psaNodeHeader = new Uint32Array(mapped,
+      psaDiagnosticOffset + 4 * (SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS
+        + SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS),
+      SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS);
+    const pcmDomainReceipt = (words: Uint32Array) => {
+      const h = SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER;
+      return {
+        phase: words[h.phase]!, fault: words[h.fault]!,
+        firstFault: words[h.firstFaultId]!, dirtyCount: words[h.dirtyCount]!,
+        totalCount: words[h.totalCount]!,
+        candidateGeneration: words[h.candidateGeneration]!,
+        acceptedGeneration: words[h.acceptedGeneration]!,
+      };
+    };
+    const fpaStageReceipt = (words: Uint32Array) => {
+      const h = SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER;
+      return {
+        acceptedGeneration: words[h.acceptedGeneration]!,
+        candidateGeneration: words[h.candidateGeneration]!,
+        topologyGeneration: words[h.topologyGeneration]!,
+        directCount: words[h.directWriteCount]!,
+        closureCount: words[h.closureWriteCount]!,
+        dirtyCount: words[h.dirtyLeafCount]!,
+        workCount: words[h.workCount]!, executedCount: words[h.executedCount]!,
+        skippedCount: words[h.reusedCount]!,
+        expectedProducerReceipts: words[h.expectedProducerReceipts]!,
+        coveredProducerReceipts: words[h.coveredProducerReceipts]!,
+        causeMask: words[h.causeMask]!, fault: words[h.fault]!,
+        firstFaultId: words[h.firstFaultRow]!,
+      };
+    };
+    const cache = SPARSE_CM12_PRESSURE_CACHE_HEADER;
+    const aggregate = SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER;
+    const aggregateFamily = SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER;
+    const pcaDirty = pcaFamilies.map((words) => words[aggregateFamily.dirtyLeafCount]!);
+    const pcaWork = pcaFamilies.map((words) => words[aggregateFamily.workCount]!);
+    const pcaExecuted = pcaFamilies.map((words) => words[aggregateFamily.executedCount]!);
+    const pcaCauses = pcaFamilies.reduce((mask, words) =>
+      mask | words[aggregateFamily.causeMask]!, 0);
+    const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0);
+    const pressureCacheTopologyGeneration = pcaHeader[aggregate.topologyGeneration]!;
+    const pressureCacheReceipt = {
+      acceptedGeneration: pcfHeader[cache.acceptedGeneration]!,
+      candidateGeneration: pcfHeader[cache.candidateGeneration]!,
+      topologyGeneration: pressureCacheTopologyGeneration,
+      directCount: pcfHeader[cache.directEventCount]!,
+      closureCount: pcfHeader[cache.closureWriteCount]!,
+      dirtyCount: pcfHeader[cache.dirtyLeafCount]!,
+      workCount: pcfHeader[cache.dirtyLeafCount]!,
+      executedCount: pcfHeader[cache.repairedLeafCount]!,
+      skippedCount: Math.max(0, pcfHeader[cache.dirtyLeafCount]!
+        - pcfHeader[cache.repairedLeafCount]!),
+      expectedProducerReceipts: pcfHeader[cache.expectedEventCount]!,
+      coveredProducerReceipts: pcfHeader[cache.coveredEventCount]!,
+      causeMask: pcfHeader[cache.causeMask]!, fault: pcfHeader[cache.fault]!,
+      firstFaultId: pcfHeader[cache.firstFaultId]!,
+    };
+    const pressureAggregateReceipt = {
+      acceptedGeneration: pressureCacheReceipt.acceptedGeneration,
+      candidateGeneration: pressureCacheReceipt.candidateGeneration,
+      topologyGeneration: pressureCacheTopologyGeneration,
+      directCount: 0, closureCount: 0,
+      dirtyCount: sum(pcaDirty), workCount: sum(pcaWork),
+      executedCount: sum(pcaExecuted),
+      skippedCount: Math.max(0, sum(pcaWork) - sum(pcaExecuted)),
+      expectedProducerReceipts: pressureCacheReceipt.expectedProducerReceipts,
+      coveredProducerReceipts: pressureCacheReceipt.coveredProducerReceipts,
+      causeMask: pcaCauses, fault: pressureCacheReceipt.fault,
+      firstFaultId: pressureCacheReceipt.fault === 0
+        ? 0xffff_ffff : pcaHeader[aggregate.firstFaultId]!,
+      familyDirtyCount: pcaDirty as [number, number, number, number],
+      familyExecutedCount: pcaExecuted as [number, number, number, number],
+    };
+    const solve = SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER;
+    const solveFamily = SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER;
+    const psaFamilies = [psaBrickHeader, psaNodeHeader] as const;
+    const psaActive = psaFamilies.map((words) => words[solveFamily.activeCount]!);
+    const psaDirty = psaFamilies.map((words) => words[solveFamily.dirtyLeafCount]!);
+    const pressureSolveReceipt = {
+      acceptedGeneration: psaHeader[solve.acceptedGeneration]!,
+      candidateGeneration: psaHeader[solve.candidateGeneration]!,
+      topologyGeneration: psaHeader[solve.topologyGeneration]!,
+      directCount: sum(psaFamilies.map((words) => words[solveFamily.directWriteCount]!)),
+      closureCount: sum(psaFamilies.map((words) => words[solveFamily.closureWriteCount]!)),
+      dirtyCount: sum(psaDirty), workCount: sum(psaActive),
+      // PSA's accepted rank trees are the execution authority; pressure uses
+      // them repeatedly, so the one-per-frame receipt is the accepted census.
+      executedCount: sum(psaActive), skippedCount: 0,
+      expectedProducerReceipts: psaHeader[solve.expectedProducerReceipts]!,
+      coveredProducerReceipts: psaHeader[solve.coveredProducerReceipts]!,
+      causeMask: psaHeader[solve.causeMask]!, fault: psaHeader[solve.fault]!,
+      firstFaultId: psaHeader[solve.firstFaultId]!,
+      wetBrickCount: psaActive[0]!, hierarchyNodeCount: psaActive[1]!,
+      tailPublishedGeneration: psaHeader[solve.tailPublishedGeneration]!,
+    };
+    const preparationReceipt = fpaStageReceipt(fpaPreparationHeader);
+    const projectionReceipt = fpaStageReceipt(fpaProjectionHeader);
+    const pressureCutoverFault = preparationReceipt.fault !== 0
+      || projectionReceipt.fault !== 0 || pressureCacheReceipt.fault !== 0
+      || pressureSolveReceipt.fault !== 0;
+    const pressureCutoverAuthorities = {
+      status: pressureCutoverFault ? "fault" as const : "matched" as const,
+      inputTopologyGeneration: preparationReceipt.topologyGeneration,
+      fpa: { preparation: preparationReceipt, projection: projectionReceipt },
+      pcf: pressureCacheReceipt, pca: pressureAggregateReceipt,
+      psa: pressureSolveReceipt,
+    };
     const rhsSquared = values[1]!;
     const recursiveResidualSquared = values[4]!;
     const initialTrueResidualSquared = values[8]!;
@@ -3067,10 +5396,308 @@ export class WebGPUSparseCM12Resident {
       acceptedSameLevelCoarseRowCount: activity[ACCEPTED_COARSE_ROW_COUNT_WORD]!,
       acceptedMixedSeamRowCount: activity[ACCEPTED_MIXED_ROW_COUNT_WORD]!,
       pressureActiveRowCount: activity[PRESSURE_ACTIVE_ROW_COUNT_WORD]!,
-      pressureCellCount: pressureCounts[0]!,
+      pressureCellCount: pcmCell[
+        SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER.totalCount]!,
+      pressureCanonicalMembership: {
+        cell: pcmDomainReceipt(pcmCell), row: pcmDomainReceipt(pcmRow),
+      },
+      pressureTopologyRepair: {
+        phase: ptrHeader[SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.phase]!,
+        fault: ptrHeader[SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.fault]!,
+        firstFaultFamily: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.firstFaultFamily]!,
+        firstFaultId: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.firstFaultId]!,
+        candidateGeneration: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.candidateGeneration]!,
+        acceptedGeneration: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.acceptedGeneration]!,
+        topologyGeneration: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.topologyGeneration]!,
+        changedBrickCount: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.acceptedChangedBrickCount]!,
+        changedRowCount: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.acceptedChangedRowCount]!,
+        cellExecutionCount: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.acceptedCellExecutionCount]!,
+        rowExecutionCount: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.acceptedRowExecutionCount]!,
+        brickDirtyLeafCount: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.acceptedBrickDirtyLeafCount]!,
+        rowDirtyLeafCount: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.acceptedRowDirtyLeafCount]!,
+        expectedProducerReceipts: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.expectedProducerReceipts]!,
+        coveredProducerReceipts: ptrHeader[
+          SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER.coveredProducerReceipts]!,
+      },
+      pressureCutoverAuthorities,
+      temporalScalarCellCount: activity[25]!,
+      temporalScalarRowCount: activity[26]!,
+      temporalScalarRejectionMask: activity[27]! & 0x7fff_ffff,
     };
     this.diagnosticsReadback.unmap();
     return result;
+  }
+
+  /** QA-only PCM1 header and active-bitset receipt. This readback is never
+   * consulted by frame encoding or any physics/worklist decision. */
+  async readPressureCanonicalMembershipQA() {
+    this.assertLive();
+    const headerWords = SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS;
+    const cell = this.canonicalMembershipLayout.cell;
+    const row = this.canonicalMembershipLayout.row;
+    const cellHeaderAt = 0;
+    const cellBitsAt = cellHeaderAt + headerWords;
+    const rowHeaderAt = cellBitsAt + cell.activeBitWordCount;
+    const rowBitsAt = rowHeaderAt + headerWords;
+    const cellClassificationAt = rowBitsAt + row.activeBitWordCount;
+    const rowClassificationAt = cellClassificationAt + cell.capacity;
+    const coefficientAt = rowClassificationAt + row.capacity;
+    const rhsAt = coefficientAt + this.pressureFineEdgeCount;
+    const preparedAt = rhsAt + cell.capacity;
+    const faceAAt = preparedAt + row.capacity;
+    const faceBAt = faceAAt + row.capacity;
+    const fpaHeaderAt = faceBAt + row.capacity;
+    const preparationHeaderAt = fpaHeaderAt + SPARSE_CM12_FACE_PROJECTION_HEADER_WORDS;
+    const projectionHeaderAt = preparationHeaderAt
+      + SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS;
+    const aggregateEdgeAt = projectionHeaderAt
+      + SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS;
+    const brickDiagonalAt = aggregateEdgeAt
+      + this.persistentPressureCacheLayout.aggregateEdgeCount;
+    const hierarchyEdgeAt = brickDiagonalAt
+      + this.persistentPressureCacheLayout.brickCount;
+    const hierarchyDiagonalAt = hierarchyEdgeAt
+      + this.persistentPressureCacheLayout.hierarchyEdgeCount;
+    const wordCount = hierarchyDiagonalAt
+      + this.persistentPressureCacheLayout.hierarchyNodeCount;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 PCM1 QA receipt",
+      size: Math.max(4, 4 * wordCount),
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({
+      label: "Sparse CM12 PCM1 QA copy",
+    });
+    const copy = (sourceWords: number, targetWords: number, words: number) => {
+      encoder.copyBufferToBuffer(this.activity, 4 * sourceWords, readback,
+        4 * targetWords, 4 * words);
+    };
+    copy(cell.headerBaseWords, cellHeaderAt, headerWords);
+    copy(cell.activeBitsBaseWords, cellBitsAt, cell.activeBitWordCount);
+    copy(row.headerBaseWords, rowHeaderAt, headerWords);
+    copy(row.activeBitsBaseWords, rowBitsAt, row.activeBitWordCount);
+    encoder.copyBufferToBuffer(this.state, 4 * this.layout.liquid, readback,
+      4 * cellClassificationAt, 4 * cell.capacity);
+    encoder.copyBufferToBuffer(this.state, 4 * this.layout.theta, readback,
+      4 * rowClassificationAt, 4 * row.capacity);
+    // Hash the authority the production operator actually consumes. The old
+    // candidate-state coefficient bank is scratch after PCF1 cutover.
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.persistentPressureCacheLayout.effectiveEdgeBaseWords, readback,
+      4 * coefficientAt, 4 * this.pressureFineEdgeCount);
+    encoder.copyBufferToBuffer(this.state, 4 * this.layout.rhs, readback,
+      4 * rhsAt, 4 * cell.capacity);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.faceProjectionAuthorityLayout.preparedAuthorityBaseWords, readback,
+      4 * preparedAt, 4 * row.capacity);
+    encoder.copyBufferToBuffer(this.state, 4 * this.layout.faceA, readback,
+      4 * faceAAt, 4 * row.capacity);
+    encoder.copyBufferToBuffer(this.state, 4 * this.layout.faceB, readback,
+      4 * faceBAt, 4 * row.capacity);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.faceProjectionAuthorityLayout.baseWords, readback,
+      4 * fpaHeaderAt, 4 * SPARSE_CM12_FACE_PROJECTION_HEADER_WORDS);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.faceProjectionAuthorityLayout.preparation.headerBaseWords, readback,
+      4 * preparationHeaderAt, 4 * SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.faceProjectionAuthorityLayout.projection.headerBaseWords, readback,
+      4 * projectionHeaderAt, 4 * SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.persistentPressureCacheLayout.brickAggregateEdgeBaseWords, readback,
+      4 * aggregateEdgeAt,
+      4 * this.persistentPressureCacheLayout.aggregateEdgeCount);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * this.persistentPressureCacheLayout.brickAggregateDiagonalBaseWords, readback,
+      4 * brickDiagonalAt, 4 * this.persistentPressureCacheLayout.brickCount);
+    let hierarchyTarget = hierarchyEdgeAt;
+    for (let level = 0;
+      level < this.persistentPressureCacheLayout.hierarchyEdgeLevelCounts.length;
+      level += 1) {
+      const count = this.persistentPressureCacheLayout.hierarchyEdgeLevelCounts[level]!;
+      encoder.copyBufferToBuffer(this.topologyArena,
+        4 * this.persistentPressureCacheLayout.hierarchyEdgeBaseWords[level]!, readback,
+        4 * hierarchyTarget, 4 * count);
+      hierarchyTarget += count;
+    }
+    hierarchyTarget = hierarchyDiagonalAt;
+    for (let level = 0;
+      level < this.persistentPressureCacheLayout.hierarchyLevelCounts.length;
+      level += 1) {
+      const count = this.persistentPressureCacheLayout.hierarchyLevelCounts[level]!;
+      encoder.copyBufferToBuffer(this.topologyArena,
+        4 * this.persistentPressureCacheLayout.hierarchyDiagonalBaseWords[level]!, readback,
+        4 * hierarchyTarget, 4 * count);
+      hierarchyTarget += count;
+    }
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const mapped = new Uint32Array(readback.getMappedRange());
+      const h = SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER;
+      const popcount = (value: number) => {
+        let x = value >>> 0;
+        x -= (x >>> 1) & 0x5555_5555;
+        x = (x & 0x3333_3333) + ((x >>> 2) & 0x3333_3333);
+        return (((x + (x >>> 4)) & 0x0f0f_0f0f) * 0x0101_0101) >>> 24;
+      };
+      const sha256 = async (words: Uint32Array) => {
+        const bytes = new Uint8Array(words.byteLength);
+        bytes.set(new Uint8Array(words.buffer, words.byteOffset, words.byteLength));
+        const digest = new Uint8Array(await globalThis.crypto.subtle.digest(
+          "SHA-256", bytes.buffer,
+        ));
+        return Array.from(digest,
+          (byte) => byte.toString(16).padStart(2, "0")).join("");
+      };
+      const contains = (bitsAt: number, id: number) =>
+        (mapped[bitsAt + (id >>> 5)]! & (1 << (id & 31))) !== 0;
+      // Authority receipts deliberately exclude inactive stable slots. Those
+      // slots retain scratch from older pressure epochs and are outside the
+      // PCM domain; hashing them would turn harmless storage history into a
+      // false local-vs-oracle physics failure. Stable ids are interleaved with
+      // values so the digest still commits to both membership position and
+      // exact f32 bits.
+      const sha256ActiveValues = (valuesAt: number, capacity: number,
+        bitsAt: number) => {
+        const authority: number[] = [];
+        for (let id = 0; id < capacity; id += 1) {
+          if (contains(bitsAt, id)) authority.push(id, mapped[valuesAt + id]!);
+        }
+        return sha256(Uint32Array.from(authority));
+      };
+      const sha256ActiveCoefficients = () => {
+        const authority: number[] = [];
+        const edgeOffsets = this.templateWords[15]!;
+        for (let cellId = 0; cellId < cell.capacity; cellId += 1) {
+          if (!contains(cellBitsAt, cellId)) continue;
+          const first = this.templateWords[edgeOffsets + cellId]!;
+          const end = this.templateWords[edgeOffsets + cellId + 1]!;
+          for (let edge = first; edge < end; edge += 1) {
+            authority.push(edge, mapped[coefficientAt + edge]!);
+          }
+        }
+        return sha256(Uint32Array.from(authority));
+      };
+      const receipt = async (headerAt: number, bitsAt: number, bitsWords: number,
+        classificationAt: number, capacity: number, threshold: number) => {
+        const header = mapped.slice(headerAt, headerAt + headerWords);
+        const bits = mapped.slice(bitsAt, bitsAt + bitsWords);
+        const classifications = new Float32Array(mapped.buffer,
+          mapped.byteOffset + 4 * classificationAt, capacity);
+        const classificationBits = new Uint32Array(bitsWords);
+        for (let id = 0; id < capacity; id += 1) {
+          if (classifications[id]! > threshold) {
+            classificationBits[id >>> 5]! |= 1 << (id & 31);
+          }
+        }
+        const activeBitsSha256 = await sha256(bits);
+        const classificationBitsSha256 = await sha256(classificationBits);
+        return {
+          phase: header[h.phase]!, fault: header[h.fault]!,
+          firstFault: header[h.firstFaultId]!, dirtyCount: header[h.dirtyCount]!,
+          totalCount: header[h.totalCount]!,
+          candidateGeneration: header[h.candidateGeneration]!,
+          acceptedGeneration: header[h.acceptedGeneration]!,
+          activeBitCount: bits.reduce((sum, word) => sum + popcount(word), 0),
+          activeBitsSha256,
+          classificationBitCount: classificationBits.reduce(
+            (sum, word) => sum + popcount(word), 0),
+          classificationBitsSha256,
+          matchesClassification: activeBitsSha256 === classificationBitsSha256,
+        };
+      };
+      const [cellReceipt, rowReceipt, thetaSha256, coefficientSha256, rhsSha256,
+        facePreparationSha256, aggregateEdgeSha256, brickDiagonalSha256,
+        hierarchyEdgeSha256, hierarchyDiagonalSha256,
+        rawThetaSha256, rawCoefficientSha256, rawRhsSha256] =
+        await Promise.all([
+          receipt(cellHeaderAt, cellBitsAt, cell.activeBitWordCount,
+          cellClassificationAt, cell.capacity, 0.5),
+          receipt(rowHeaderAt, rowBitsAt, row.activeBitWordCount,
+          rowClassificationAt, row.capacity, 0),
+          sha256ActiveValues(rowClassificationAt, row.capacity, rowBitsAt),
+          sha256ActiveCoefficients(),
+          sha256ActiveValues(rhsAt, cell.capacity, cellBitsAt),
+          sha256(mapped.slice(preparedAt, preparedAt + row.capacity)),
+          sha256(mapped.slice(aggregateEdgeAt, brickDiagonalAt)),
+          sha256(mapped.slice(brickDiagonalAt, hierarchyEdgeAt)),
+          sha256(mapped.slice(hierarchyEdgeAt, hierarchyDiagonalAt)),
+          sha256(mapped.slice(hierarchyDiagonalAt, wordCount)),
+          sha256(mapped.slice(rowClassificationAt, rowClassificationAt + row.capacity)),
+          sha256(mapped.slice(coefficientAt, coefficientAt + this.pressureFineEdgeCount)),
+          sha256(mapped.slice(rhsAt, rhsAt + cell.capacity)),
+        ]);
+      const fpaStage = (at: number) => {
+        const d = SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER;
+        return {
+          phase: mapped[at + d.phase]!, fault: mapped[at + d.fault]!,
+          firstFaultRow: mapped[at + d.firstFaultRow]!,
+          acceptedGeneration: mapped[at + d.acceptedGeneration]!,
+          candidateGeneration: mapped[at + d.candidateGeneration]!,
+          frameGeneration: mapped[at + d.frameGeneration]!,
+          topologyGeneration: mapped[at + d.topologyGeneration]!,
+          pcmGeneration: mapped[at + d.pcmGeneration]!,
+          sourceParity: mapped[at + d.sourceParity]!,
+          workCount: mapped[at + d.workCount]!,
+          executedCount: mapped[at + d.executedCount]!,
+        };
+      };
+      const result = {
+        mode: this.pressureRefreshOracleForQA ? "full-refresh-oracle" : "local",
+        cell: cellReceipt,
+        row: rowReceipt,
+        thetaSha256,
+        coefficientSha256,
+        rhsSha256,
+        facePreparationSha256,
+        aggregateEdgeSha256,
+        brickDiagonalSha256,
+        hierarchyEdgeSha256,
+        hierarchyDiagonalSha256,
+        faceAuthority: {
+          firstFaultStage: mapped[fpaHeaderAt
+            + SPARSE_CM12_FACE_PROJECTION_HEADER.firstFaultStage]!,
+          preparation: fpaStage(preparationHeaderAt),
+          projection: fpaStage(projectionHeaderAt),
+        },
+        rawThetaSha256,
+        rawCoefficientSha256,
+        rawRhsSha256,
+      };
+      Object.defineProperty(result, "qaRaw", { enumerable: false, value: {
+        coefficientBits: mapped.slice(coefficientAt,
+          coefficientAt + this.pressureFineEdgeCount),
+        preparedBits: mapped.slice(preparedAt, preparedAt + row.capacity),
+        faceABits: mapped.slice(faceAAt, faceAAt + row.capacity),
+        faceBBits: mapped.slice(faceBAt, faceBAt + row.capacity),
+        aggregateEdgeBits: mapped.slice(aggregateEdgeAt, brickDiagonalAt),
+        brickDiagonalBits: mapped.slice(brickDiagonalAt, hierarchyEdgeAt),
+        hierarchyEdgeBits: mapped.slice(hierarchyEdgeAt, hierarchyDiagonalAt),
+        hierarchyDiagonalBits: mapped.slice(hierarchyDiagonalAt, wordCount),
+      } });
+      return result as typeof result & { readonly qaRaw: {
+        readonly coefficientBits: Uint32Array; readonly preparedBits: Uint32Array;
+        readonly faceABits: Uint32Array; readonly faceBBits: Uint32Array;
+        readonly aggregateEdgeBits: Uint32Array; readonly brickDiagonalBits: Uint32Array;
+        readonly hierarchyEdgeBits: Uint32Array; readonly hierarchyDiagonalBits: Uint32Array;
+      } };
+    } finally {
+      readback.unmap();
+      readback.destroy();
+    }
   }
 
   /** QA-only dense readback used by Dawn physics gates. Never called by frame
@@ -3108,9 +5735,10 @@ export class WebGPUSparseCM12Resident {
   async readDiagnosticFields(): Promise<SparseCM12DiagnosticFields> {
     this.assertLive();
     const activitySnapshot = await this.readActivitySnapshot();
+    const pressureCellBitsBytes = 4 * this.canonicalMembershipLayout.cell.activeBitWordCount;
     const readback = this.device.createBuffer({
       label: "Sparse CM12 QA field readback",
-      size: this.state.size,
+      size: this.state.size + pressureCellBitsBytes + 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
@@ -3118,17 +5746,33 @@ export class WebGPUSparseCM12Resident {
         label: "Sparse CM12 QA field copy",
       });
       encoder.copyBufferToBuffer(this.state, 0, readback, 0, this.state.size);
+      encoder.copyBufferToBuffer(this.activity,
+        4 * this.canonicalMembershipLayout.cell.activeBitsBaseWords,
+        readback, this.state.size, pressureCellBitsBytes);
+      encoder.copyBufferToBuffer(this.topologyArena,
+        4 * (this.frameControlLayout.baseWords
+          + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity),
+        readback, this.state.size + pressureCellBitsBytes, 4);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const state = new Float32Array(readback.getMappedRange());
+      const pressureCellBits = new Uint32Array(state.buffer,
+        state.byteOffset + this.state.size,
+        this.canonicalMembershipLayout.cell.activeBitWordCount);
+      const acceptedParity = this.legacyHostAuthorityOracleForQA
+        ? this.legacyHostAuthorityParityForQA
+        : new Uint32Array(state.buffer,
+          state.byteOffset + this.state.size + pressureCellBitsBytes, 1)[0]! & 1;
       const [nx, ny, nz] = this.dimensions;
       const count = nx * ny * nz;
       const density = new Float32Array(count);
+      const gamma = new Float32Array(count);
       const velocity = new Float32Array(4 * count);
       const pressure = new Float32Array(count);
       const divergence = new Float32Array(count);
-      const densityOffset = this.parity !== 0 ? this.layout.densityB : this.layout.densityA;
-      const velocityOffset = this.parity !== 0
+      const densityOffset = acceptedParity !== 0 ? this.layout.densityB : this.layout.densityA;
+      const gammaOffset = acceptedParity !== 0 ? this.layout.gammaB : this.layout.gammaA;
+      const velocityOffset = acceptedParity !== 0
         ? this.layout.cellVelocityB : this.layout.cellVelocityA;
       const cellWidth_m = this.parameterF32[41]!;
       const pressureScale = this.parameterF32[42]!;
@@ -3171,6 +5815,7 @@ export class WebGPUSparseCM12Resident {
           Math.round(topologyFloats[base + 5]!),
           Math.round(topologyFloats[base + 6]!)] as const;
         const rho = state[densityOffset + cell]!;
+        const gammaValue = state[gammaOffset + cell]!;
         const vx = state[velocityOffset + 4 * cell]! * cellWidth_m;
         const vy = state[velocityOffset + 4 * cell + 1]! * cellWidth_m;
         const vz = state[velocityOffset + 4 * cell + 2]! * cellWidth_m;
@@ -3181,13 +5826,399 @@ export class WebGPUSparseCM12Resident {
             for (let dx = 0; dx < span[0] && lower[0] + dx < nx; dx += 1) {
               const at = lower[0] + dx + nx * (lower[1] + dy + ny * (lower[2] + dz));
               density[at] = rho;
+              gamma[at] = gammaValue;
               velocity[4 * at] = vx; velocity[4 * at + 1] = vy;
               velocity[4 * at + 2] = vz;
-              pressure[at] = mappedPressure; divergence[at] = div;
+              // Pressure is physical only on the current PCM domain. Inactive
+              // stable slots intentionally retain solver scratch, so dense QA
+              // publication canonicalizes them to zero without changing the
+              // resident numerical state or frame scheduling.
+              pressure[at] = (pressureCellBits[cell >>> 5]! & (1 << (cell & 31))) !== 0
+                ? mappedPressure : 0;
+              divergence[at] = div;
             }
         }
       }
-      return { density, velocity, pressure, divergence };
+      return { density, gamma, velocity, pressure, divergence };
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Explicit QA receipt only; no production frame decision reads this back. */
+  async readFrameControlQA(): Promise<SparseCM12FrameControlQA> {
+    this.assertLive();
+    const bytes = 4 * SPARSE_CM12_FRAME_CONTROL_HEADER_WORDS;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 FCA1 QA readback",
+      size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({ label: "Sparse CM12 FCA1 QA copy" });
+      encoder.copyBufferToBuffer(this.topologyArena, 4 * this.frameControlLayout.baseWords,
+        readback, 0, bytes);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      if (words[SPARSE_CM12_FRAME_CONTROL_HEADER.magic] !== SPARSE_CM12_FRAME_CONTROL_MAGIC) {
+        throw new Error("Sparse CM12 FCA1 QA header is unavailable or incompatible");
+      }
+      const at = (name: keyof typeof SPARSE_CM12_FRAME_CONTROL_HEADER) =>
+        words[SPARSE_CM12_FRAME_CONTROL_HEADER[name]]!;
+      return {
+        phase: at("phase"), fault: at("fault"), firstFaultOwner: at("firstFaultOwner"),
+        acceptedGeneration: at("acceptedGeneration"),
+        candidateGeneration: at("candidateGeneration"),
+        sealedGeneration: at("sealedGeneration"), scalarParity: at("scalarParity"),
+        faceParity: at("faceParity"), coverage: at("coverage"),
+        committedFrames: at("committedFrames"),
+      };
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Explicit SAW1 QA materialization; never consulted by frame encoding. */
+  readScalarAuthorityQA() { return this.scalarResultAuthority.readQA(); }
+  readScalarAuthorityIndirectQA() { return this.scalarResultAuthority.readIndirectQA(); }
+  /** Header-only SRR1/SAW1 receipt for per-advance generation diagnostics. */
+  readScalarAuthorityHeaderQA() { return this.scalarResultAuthority.readHeaderQA(); }
+  /** Resident SIR1 ingress header; diagnostics only, never a scheduling input. */
+  async readScalarIngressHeaderQA() {
+    this.assertLive();
+    const wordCount = SPARSE_CM12_SRR1_INGRESS_HEADER_WORDS;
+    const readback = this.device.createBuffer({ label: "Sparse CM12 SIR1 header QA readback",
+      size: 4 * wordCount, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      const encoder = this.device.createCommandEncoder({ label: "Sparse CM12 SIR1 header QA copy" });
+      encoder.copyBufferToBuffer(this.activity,
+        4 * this.scalarResultIngressLayout.headerBaseWords,
+        readback, 0, 4 * wordCount);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const h = SPARSE_CM12_SRR1_INGRESS_HEADER;
+      return Object.freeze({
+        magic: words[h.magic]!, version: words[h.version]!,
+        tileCapacity: words[h.tileCapacity]!, eventCapacity: words[h.eventCapacity]!,
+        candidateGeneration: words[h.candidateGeneration]!,
+        topologyGeneration: words[h.topologyGeneration]!, sourceParity: words[h.sourceParity]!,
+        eventCount: words[h.eventCount]!, receiptCount: words[h.receiptCount]!,
+        fault: words[h.fault]!, firstFaultTile: words[h.firstFaultTile]!,
+        committedGeneration: words[h.committedGeneration]!,
+      });
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Construction-only temporal seed census; never consulted by encoding. */
+  async readTemporalSeedQA(): Promise<SparseCM12TemporalSeedQA> {
+    this.assertLive();
+    if (this.temporalSeedModeForQA === undefined) {
+      throw new Error("temporal seed QA receipt requested from an ordinary resident");
+    }
+    const wordCount = 10;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 temporal seed QA readback",
+      size: 4 * wordCount,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 temporal seed QA copy",
+      });
+      encoder.copyBufferToBuffer(this.activity,
+        4 * this.temporalWorklistLayout.headerBaseWords,
+        readback, 0, 4 * wordCount);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      return {
+        mode: this.temporalSeedModeForQA,
+        seedCells: words[8]!,
+        firstDilationCells: words[9]!,
+        finalCells: words[0]!,
+        finalRows: words[4]!,
+      };
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Construction-only FPA tile shadow census; never consulted by encoding. */
+  async readFacePreparationTileCensusQA():
+    Promise<SparseCM12FacePreparationTileCensusQA> {
+    this.assertLive();
+    const layout = this.facePreparationTileCensusLayout;
+    if (!layout) {
+      throw new Error("FPA tile census requested from an ordinary resident");
+    }
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 FPA tile census QA readback",
+      size: 4 * SPARSE_CM12_FACE_PREPARATION_TILE_CENSUS_HEADER_WORDS,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 FPA tile census QA copy",
+      });
+      encoder.copyBufferToBuffer(this.topologyArena, 4 * layout.headerBaseWords,
+        readback, 0, 4 * SPARSE_CM12_FACE_PREPARATION_TILE_CENSUS_HEADER_WORDS);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      return inspectSparseCM12FacePreparationTileCensusQA(
+        new Uint32Array(readback.getMappedRange()));
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Construction-only accepted FPA/VEX donor graph and C⊆S receipt. */
+  async readFpaVexReadCensusQA(): Promise<SparseCM12FpaVexReadCensusSummaryQA> {
+    this.assertLive();
+    const layout = this.fpaVexReadCensusLayout;
+    if (!layout) throw new Error("FVR1 census requested from an ordinary resident");
+    const bytes = layout.compactSummaryBytes;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 FVR1 bounded QA readback", size: Math.max(4, bytes),
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({ label: "Sparse CM12 FVR1 QA copy" });
+      encoder.copyBufferToBuffer(this.topologyArena, 4 * layout.baseWords,
+        readback, 0, bytes);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      return inspectSparseCM12FpaVexReadCensusSummaryQA(
+        new Uint32Array(readback.getMappedRange()), layout);
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Construction-only PAB1 receipt and isolated timestamp intervals. */
+  async readPressureAddressingABQA(): Promise<{
+    readonly mode: SparseCM12PressureAddressingABModeName;
+    readonly receipt?: SparseCM12PressureAddressingABReceipt;
+    readonly materialization_ms: number;
+    readonly verification_ms: number;
+  }> {
+    this.assertLive();
+    const qa = this.pressureAddressingABQA;
+    if (qa.mode === "canonicalRankSelect") {
+      return { mode: qa.mode, materialization_ms: 0, verification_ms: 0 };
+    }
+    if (!qa.receiptReadback || !qa.timestampReadback) {
+      throw new Error("PAB1 QA receipt requested from the production pressure-address authority");
+    }
+    try {
+      await Promise.all([
+        qa.receiptReadback.mapAsync(GPUMapMode.READ),
+        qa.timestampReadback.mapAsync(GPUMapMode.READ),
+      ]);
+      const receipt = inspectSparseCM12PressureAddressingABReceipt(
+        new Uint32Array(qa.receiptReadback.getMappedRange()), qa.layout,
+        qa.layout.baseWords);
+      const timestamps = new BigUint64Array(qa.timestampReadback.getMappedRange());
+      return { mode: qa.mode, receipt,
+        materialization_ms: Number(timestamps[1]! - timestamps[0]!) / 1e6,
+        verification_ms: Number(timestamps[3]! - timestamps[2]!) / 1e6 };
+    } finally {
+      if (qa.receiptReadback.mapState === "mapped") qa.receiptReadback.unmap();
+      if (qa.timestampReadback.mapState === "mapped") qa.timestampReadback.unmap();
+    }
+  }
+
+  /** Header-only pressure-address receipt. This is diagnostic-only and works
+   * for both the immutable production list and the two construction arms. */
+  async readPressureAddressingHeaderQA(): Promise<SparseCM12PressureAddressingABReceipt> {
+    this.assertLive();
+    const qa = this.pressureAddressingABQA;
+    const bytes = 4 * SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER_WORDS;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 PAB1 header QA readback", size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 PAB1 header QA copy",
+      });
+      encoder.copyBufferToBuffer(this.activity, 4 * qa.layout.baseWords,
+        readback, 0, bytes);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      return inspectSparseCM12PressureAddressingABReceipt(
+        new Uint32Array(readback.getMappedRange()), qa.layout, qa.layout.baseWords);
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** The two accepted cell/row dispatch triplets consumed by full-domain
+   * kernels. Kept compact so a runaway packet can be diagnosed directly. */
+  async readAcceptedIndirectQA(): Promise<readonly number[]> {
+    this.assertLive();
+    const bytes = 6 * 4;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 accepted-indirect QA readback", size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 accepted-indirect QA copy",
+      });
+      encoder.copyBufferToBuffer(this.acceptedIndirectArguments, 0, readback, 0, bytes);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      return Object.freeze(Array.from(new Uint32Array(readback.getMappedRange())));
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  async readFrameControlIndirectQA(): Promise<readonly number[]> {
+    this.assertLive();
+    const bytes = 12 * SPARSE_CM12_FRAME_CONTROL_FAMILY_COUNT;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 FCA1 indirect QA readback", size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 FCA1 indirect QA copy",
+      });
+      encoder.copyBufferToBuffer(this.frameControlIndirectArguments, 0,
+        readback, 0, bytes);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      return Object.freeze(Array.from(new Uint32Array(readback.getMappedRange())));
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Header-only VEX1 receipt; suitable for bounded per-frame fault diagnosis. */
+  async readVelocityExtensionHeaderQA(): Promise<SparseCM12VelocityExtensionHeaderQA> {
+    this.assertLive();
+    const layout = this.vexActivityBatchLayout.velocityExtension;
+    const bytes = 4 * SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 VEX1 header QA readback", size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 VEX1 header QA copy",
+      });
+      encoder.copyBufferToBuffer(this.activity, 4 * layout.headerBaseWords,
+        readback, 0, bytes);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const h = SPARSE_CM12_VELOCITY_EXTENSION_HEADER;
+      if (words[h.magic] !== SPARSE_CM12_VELOCITY_EXTENSION_MAGIC
+        || words[h.version] !== SPARSE_CM12_VELOCITY_EXTENSION_VERSION
+        || words[h.headerWords] !== SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS
+        || words[h.capacity] !== layout.cellCapacity) {
+        throw new Error("Sparse CM12 VEX1 header QA receipt is unavailable or incompatible");
+      }
+      const firstFaultCell = words[h.firstFaultCell]!;
+      const hasFirstFault = words[h.faultCount]! > 0
+        && firstFaultCell !== SPARSE_CM12_FRAME_CONTROL_INVALID
+        && firstFaultCell < layout.cellCapacity;
+      const hasFramePlanProvenance = hasFirstFault && words[h.reserved] === 3;
+      return {
+        flags: words[h.flags]!, phase: words[h.reserved]!,
+        acceptedGeneration: words[h.acceptedGeneration]!,
+        candidateGeneration: words[h.candidateGeneration]!,
+        topologyGeneration: words[h.topologyGeneration]!,
+        capacity: words[h.capacity]!, rootCount: words[h.rootCount]!,
+        blastCount: words[h.blastCount]!, maximumDepth: words[h.maximumDepth]!,
+        executedCellCount: words[h.executedCellCount]!,
+        reusedCellCount: words[h.reusedCellCount]!, faultCount: words[h.faultCount]!,
+        uncoveredWriteCount: words[h.uncoveredWriteCount]!,
+        ...(hasFirstFault ? {
+          firstFault: { cell: firstFaultCell, depth: words[h.firstFaultDepth]! },
+        } : {}),
+        ...(hasFramePlanProvenance ? {
+          framePlanProvenance: {
+            ownerBrick: words[h.rootDispatchY]!, ownerTile: words[h.rootDispatchZ]!,
+            slot: words[h.frontierADispatchY]!,
+            tileGeneration: words[h.frontierADispatchZ]!,
+            packedStageMasks: words[h.frontierBDispatchY]!,
+            stage0MaskLow: words[h.frontierBDispatchZ]!,
+          },
+        } : {}),
+      };
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Construction-only VEX comparison receipt. No frame decision consumes it. */
+  async readVelocityExtensionQA() {
+    this.assertLive();
+    const layout = this.vexActivityBatchLayout.velocityExtension;
+    const capacity = layout.cellCapacity;
+    const headerWords = SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS;
+    const blastDepthAt = headerWords;
+    const candidateDepthAt = blastDepthAt + capacity;
+    const rootCauseAt = candidateDepthAt + capacity;
+    const acceptedDepthAt = rootCauseAt + capacity;
+    const acceptedOwnerAt = acceptedDepthAt + capacity;
+    const velocityAt = acceptedOwnerAt + capacity;
+    const totalWords = velocityAt + 4 * capacity;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 VEX1 QA readback",
+      size: 4 * totalWords,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({ label: "Sparse CM12 VEX1 QA copy" });
+      encoder.copyBufferToBuffer(this.activity, 4 * layout.headerBaseWords,
+        readback, 0, 4 * headerWords);
+      for (const [source, destination] of [
+        [layout.blastDepthBaseWords, blastDepthAt],
+        [layout.candidateDepthBaseWords, candidateDepthAt],
+        [layout.rootCauseBaseWords, rootCauseAt],
+        [layout.acceptedDepthBaseWords, acceptedDepthAt],
+        [layout.acceptedOwnerBaseWords, acceptedOwnerAt],
+      ] as const) {
+        encoder.copyBufferToBuffer(this.activity, 4 * source,
+          readback, 4 * destination, 4 * capacity);
+      }
+      encoder.copyBufferToBuffer(this.state,
+        4 * this.vexActivityBatchLayout.velocityState.acceptedVelocityFloatBase,
+        readback, 4 * velocityAt, 16 * capacity);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const header = words.slice(0, headerWords);
+      if (header[SPARSE_CM12_VELOCITY_EXTENSION_HEADER.magic]
+          !== SPARSE_CM12_VELOCITY_EXTENSION_MAGIC) {
+        throw new Error("Sparse CM12 VEX1 QA header is unavailable or incompatible");
+      }
+      return {
+        header,
+        blastDepth: words.slice(blastDepthAt, blastDepthAt + capacity),
+        candidateDepth: words.slice(candidateDepthAt, candidateDepthAt + capacity),
+        rootCause: words.slice(rootCauseAt, rootCauseAt + capacity),
+        acceptedDepth: words.slice(acceptedDepthAt, acceptedDepthAt + capacity),
+        acceptedOwner: words.slice(acceptedOwnerAt, acceptedOwnerAt + capacity),
+        velocityBits: words.slice(velocityAt, velocityAt + 4 * capacity),
+      };
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
       readback.destroy();
@@ -3280,10 +6311,27 @@ export class WebGPUSparseCM12Resident {
     if (this.destroyed) return;
     this.destroyed = true;
     this.rigidCoupling?.destroy();
+    this.scalarResultAuthority.destroy();
+    this.pressureTailAuthority.destroy();
+    this.pressureAddressingABQA.indirectArguments.destroy();
+    this.pressureAddressingABQA.receiptReadback?.destroy();
+    this.pressureAddressingABQA.queryResolve?.destroy();
+    this.pressureAddressingABQA.timestampReadback?.destroy();
+    this.pressureAddressingABQA.querySet?.destroy();
     for (const buffer of [this.parameters, this.topology, this.state, this.partials,
       this.scalars, this.conditioning, this.activity, this.candidateState,
       this.topologyArena, this.acceptedIndirectArguments,
       this.pressureCellIndirectArguments, this.pressureRowIndirectArguments,
+      this.pressureMembershipIndirectArguments,
+      this.frameControlIndirectArguments,
+      this.pressureTopologyRepairIndirectArguments,
+      this.persistentPressureCacheIndirectArguments,
+      this.pressureSolveAuthorityIndirectArguments,
+      this.faceProjectionAuthorityIndirectArguments,
+      this.temporalCellIndirectArguments, this.temporalRowIndirectArguments,
+      this.activityIndirectArguments, this.vexActivityIndirectArguments,
+      this.framePlanIndirectArguments,
+      this.presentationIndirectArguments,
       this.pressureTemplates, this.pressureWorklists,
       this.fineParams, this.fineMetadata, this.fineWorklist, this.fineSamples,
       this.fineWorkA, this.fineWorkB, this.fineRollback]) {

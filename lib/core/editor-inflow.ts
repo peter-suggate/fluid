@@ -220,6 +220,52 @@ function inflowEntityFor(context: EditorEntityContext): EditorEntity | undefined
         apply: (value) => patch({ ...inflow, velocity_m_s: scale(direction, value) }),
       },
     ],
+    // When the jet runs, which the arrow cannot say. The nozzle's own length is
+    // here beside them rather than beside the bore: both are the channel, and
+    // the box handles are already the direct way to reshape it.
+    groups: [{
+      id: "schedule",
+      label: "Jet",
+      hint: "The channel's length, and the window the jet injects over",
+      fields: [
+        {
+          id: "length",
+          label: "Length",
+          unit: "m",
+          value: inflow.length_m,
+          step: 0.01,
+          min: INFLOW_MINIMUM_LENGTH_M,
+          apply: (value) => patch(setInflowLength(inflow, value)),
+        },
+        {
+          id: "ramp",
+          label: "Ramp",
+          unit: "s",
+          value: inflow.ramp_s,
+          step: 0.05,
+          min: 0,
+          apply: (value) => patch({ ...inflow, ramp_s: Math.max(0, value) }),
+        },
+        {
+          id: "start",
+          label: "Start",
+          unit: "s",
+          value: inflow.start_s,
+          step: 0.5,
+          min: 0,
+          apply: (value) => patch({ ...inflow, start_s: Math.max(0, value) }),
+        },
+        {
+          id: "end",
+          label: "End",
+          unit: "s",
+          value: inflow.end_s,
+          step: 0.5,
+          min: 0,
+          apply: (value) => patch({ ...inflow, end_s: Math.max(0, value) }),
+        },
+      ],
+    }],
     remove: () => {
       const { inflow: _dropped, ...fluid } = scene.fluid;
       void _dropped;

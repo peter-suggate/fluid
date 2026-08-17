@@ -1,6 +1,6 @@
 import type { EditorSelection, EditorTool } from "./editor-tools";
 import type { RigidShape, SceneDescription, Vec3 } from "./model";
-import type { SceneryPropKind } from "./stores/ui-store";
+import type { SceneOverlay, SceneryPropKind, TracePinAim } from "./stores/ui-store";
 
 /**
  * What an entity offers when you point at it.
@@ -69,6 +69,51 @@ export type EditorActionEffect =
     readonly kind: "select";
     readonly selection: EditorSelection;
     readonly openControls?: boolean;
+  }
+  /**
+   * Leave the studio for another route.
+   *
+   * A route rather than a router call, for the same reason every other effect is
+   * a noun: this module is core, it may not import the framework, and the ring
+   * is not the only surface that will ever want to send someone to the library.
+   */
+  | { readonly kind: "navigate"; readonly href: string }
+  /**
+   * Ask for a scene document from the reader's own machine.
+   *
+   * The file picker cannot be opened from anywhere but a user gesture, which is
+   * exactly what choosing a wedge is — so the effect carries no payload and the
+   * performer does the asking.
+   */
+  | { readonly kind: "import-scene" }
+  /**
+   * Raise an instrument over the scene: a pipeline graph, or the metric cards.
+   *
+   * A verb like any other, and reachable the same way — pointing at the water
+   * and asking what it costs is the same gesture as pointing at it and asking
+   * for a ball of it. Only one can be up, so the effect names which rather than
+   * toggling: choosing the wedge for the one already open re-states it, which is
+   * what a menu selection should mean.
+   */
+  | { readonly kind: "open-overlay"; readonly overlay: SceneOverlay }
+  /**
+   * Aim one of the two pointer probes at the pixel the ring was opened on.
+   *
+   * The aim rides along for the same reason `place` carries a point: the ring is
+   * opened at a click and chosen a moment later, and by then the pointer is
+   * wherever the flick left it. A probe that pinned *there* would answer about a
+   * pixel nobody pointed at, so the aim is captured at composition time by the
+   * one surface that knows it — see the pin doctrine on `TracePinRequest`.
+   *
+   * Absent when the wedge was composed by something with no aim of its own, in
+   * which case the viewport falls back to the live pointer exactly as the HUD's
+   * own pin button does.
+   */
+  | {
+    readonly kind: "probe";
+    /** The ray behind the pixel, or the pressure cell behind it. */
+    readonly probe: "ray" | "cell";
+    readonly aim?: TracePinAim;
   };
 
 /** Palette token, shared with `EditorEntityTone` so a wedge is coloured like its entity. */
@@ -105,7 +150,14 @@ export type EditorActionIcon =
   | "cylinder"
   | "capsule"
   | "cup"
-  | "ellipsoid";
+  | "ellipsoid"
+  | "library"
+  | "import"
+  | "pipeline"
+  | "render-pipeline"
+  | "diagnostics"
+  | "trace-ray"
+  | "inspect-cell";
 
 export interface EditorAction {
   /** Unique within the ring it appears in. */
@@ -137,6 +189,16 @@ export interface EditorActionTarget {
   readonly point_m: Vec3;
   /** Its outward normal there, when the pick knew one. */
   readonly normal?: Vec3;
+  /**
+   * Where that point was on the canvas, in viewport fractions.
+   *
+   * The pointer probes are aimed at a *pixel* rather than at a point in the
+   * world — the ray behind it is the whole subject — so the world point above
+   * cannot stand in for it. Only the viewport knows this, and the viewport is
+   * what composes the ring, so it is carried in rather than looked up later when
+   * the pointer has already moved on.
+   */
+  readonly aim?: TracePinAim;
 }
 
 /** True when an action can actually be chosen. */

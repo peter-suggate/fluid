@@ -206,7 +206,6 @@ export function WebGPUViewport() {
   const gpuLifecycleRef = useRef<GPUViewportLifecycle | null>(null);
   const camera = useUIStore((state) => state.camera);
   const setCamera = useUIStore((state) => state.setCamera);
-  const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
   // Presentation reads the display scene, so every handle, outline and readout
   // below follows an open drag. The physics still reads the committed store —
   // the render loop and the commit paths go through `useSceneStore` directly.
@@ -442,11 +441,19 @@ export function WebGPUViewport() {
   const publishFluidCellTrace = (renderer: FluidLabRendererHandle) => {
     const ui = useUIStore.getState();
     if (!ui.fluidCellTraceEnabled) return;
-    // A pin asked for from the panel or the HUD becomes the same request a click
-    // makes, so both record an exact aim and neither can re-aim afterwards.
-    if (ui.fluidCellTracePinRequested && !ui.fluidCellTracePinned
-      && !cellTracePinRequestRef.current && tracePointerRef.current) {
-      cellTracePinRequestRef.current = { ...tracePointerRef.current };
+    // A pin asked for from the HUD or from a ring wedge becomes the same request
+    // a click makes, so all three record an exact aim and none can re-aim
+    // afterwards. The ring carries its own — the pixel it was opened on — and
+    // everything else is aimed here, at the live pointer, because it has none.
+    if (ui.fluidCellTracePinRequest && !ui.fluidCellTracePinned && !cellTracePinRequestRef.current) {
+      const aim = ui.fluidCellTracePinRequest.aim ?? tracePointerRef.current;
+      if (aim) {
+        // The ring's aim is a pointer observation in its own right: without this
+        // a probe reached from a wedge before the pointer ever moved over the
+        // canvas would report itself as having nothing to look at.
+        tracePointerRef.current = { ...aim };
+        cellTracePinRequestRef.current = { ...aim };
+      }
     }
     if (cellTracePinRequestRef.current && !ui.fluidCellTracePinned) {
       cellTracePinnedRef.current = cellTracePinRequestRef.current;
@@ -545,17 +552,26 @@ export function WebGPUViewport() {
     const status = renderer.pixelTraceStatus;
     const pointerSeen = tracePointerRef.current !== null;
     const revision = renderer.pixelTraceRevision;
-    // A pin asked for from the panel or the HUD button becomes the same request a
-    // click makes, so both record an exact aim and neither can re-aim later.
+    // A pin asked for from the HUD button or from a ring wedge becomes the same
+    // request a click makes, so all three record an exact aim and none can
+    // re-aim later. The ring carries its own — the pixel it was opened on —
+    // and everything else is aimed here, at the live pointer, because it has none.
     const ui = useUIStore.getState();
-    if (ui.pixelTracePinRequested && !ui.pixelTracePinned && !tracePinRequestRef.current && tracePointerRef.current) {
-      tracePinRequestRef.current = svoPixelTracePinClick({
-        pinned: false, pending: false,
-        ...tracePointerRef.current,
-        cameraKey: pixelTraceCameraKey(ui.camera),
-        revision,
-      }).request ?? null;
-      useUIStore.setState({ pixelTracePinRequested: false });
+    if (ui.pixelTracePinRequest && !ui.pixelTracePinned && !tracePinRequestRef.current) {
+      const aim = ui.pixelTracePinRequest.aim ?? tracePointerRef.current;
+      if (aim) {
+        // The ring's aim is a pointer observation in its own right: without this
+        // a probe reached from a wedge before the pointer ever moved over the
+        // canvas would report itself as having nothing to trace.
+        tracePointerRef.current = { ...aim };
+        tracePinRequestRef.current = svoPixelTracePinClick({
+          pinned: false, pending: false,
+          ...aim,
+          cameraKey: pixelTraceCameraKey(ui.camera),
+          revision,
+        }).request ?? null;
+        useUIStore.setState({ pixelTracePinRequest: null });
+      }
     }
     const pinRequest = tracePinRequestRef.current;
     if (pinRequest) {
@@ -1056,8 +1072,6 @@ export function WebGPUViewport() {
         methodValues: resolvedMethodValues(methodState),
         canonicalMethodValues: canonicalSafeMethodValues,
         exactScene: canonicalScene(sceneState.scene) === canonicalScene(getScenePreset("water-box-dam-break").create()),
-        diagnosticsOpen: ui.diagnosticsOpen,
-        rightPanel: ui.rightPanel,
         gridOverlayAxis: ui.gridOverlayAxis,
         activeTool: ui.activeTool,
         search: window.location.search,
@@ -1435,6 +1449,14 @@ export function WebGPUViewport() {
         selection: hit.selection,
         point_m: add(ray.origin, scale(ray.direction, hit.distance_m)),
         normal: hover?.normal,
+        // The pixel this ring was opened on, for the wedges that aim a probe at
+        // it. Captured here because by the time a wedge is chosen the pointer is
+        // out on the ring: only the composing surface still knows where the
+        // click was, which is the whole reason the ring is composed here.
+        aim: {
+          normalizedX: (event.clientX - rect.left) / Math.max(rect.width, 1),
+          normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
+        },
       })
       : hover ? sceneActionsAt(hover.position_m) : [];
     if (actions.length === 0) { useUIStore.getState().closeRadialMenu(); return; }
@@ -2423,37 +2445,8 @@ export function WebGPUViewport() {
       }}
       onContextMenu={openRadialMenuAt}
     />
-    {/* The top-right cluster: everything that rides the corner is laid out by
-        one flex row rather than by a column of hand-tuned `right:` offsets.
-        Two of them stacked on the same absolute corner is how a tool once
-        landed on top of the frame-rate readout, and the next thing added there
-        would do it again. Order is left-to-right by how often it is touched:
-        a mode, then a readout. */}
-    <div className="viewport-topright">
-    {/* Pick mode, beside the frame rate rather than four scrolls into a
-        collapsed panel section. It is a mode and not an action — it changes
-        what a click on the scene means — so it reads as a pressed state with
-        the gesture spelled out, and it names the pinned case separately because
-        that is the state a reader can get stuck in without noticing. It is a
-        GPU readback against the presented frame, so it waits for picking. */}
-    <button
-      type="button"
-      className="scene-pick-toggle"
-      data-testid="cell-pick-toggle"
-      aria-pressed={fluidCellTraceEnabled}
-      disabled={!pickingInteractive}
-      data-pinned={fluidCellTracePinned ? "true" : "false"}
-      onClick={() => setFluidCellTraceEnabled(!fluidCellTraceEnabled)}
-      title={fluidCellTraceEnabled
-        ? (fluidCellTracePinned
-          ? "A cell is pinned — click the scene to follow the pointer again, or press C to leave pick mode"
-          : "Hover the fluid to inspect the pressure cell behind that pixel; click to pin it. Press C to leave pick mode.")
-        : "Inspect one pressure cell: what the frame published about it, and what the fine band did to it. Shortcut: C"}
-    >
-      <i aria-hidden="true" />
-      <span>{fluidCellTraceEnabled ? (fluidCellTracePinned ? "Cell pinned" : "Picking cell") : "Pick cell"}</span>
-      <small>C</small>
-    </button>
+    {/* The frame rate is the only thing left on this corner. Pick mode moved to
+        the contextual ring on a fluid cell — the shortcut (`C`) is unchanged. */}
     <output
       ref={fpsRef}
       className="fps-meter"
@@ -2461,7 +2454,6 @@ export function WebGPUViewport() {
       aria-label="Presentation frame rate"
       title="WebGPU presentations per second · rolling mean of the latest 5 frame intervals"
     >— FPS</output>
-    </div>
     {fillHandle?.visible && <div
       className="editor-fill-handle"
       data-testid="editor-fill-handle"
@@ -2686,7 +2678,6 @@ export function WebGPUViewport() {
     >
       <div><strong>{failure.title}</strong><span>{failure.stage}</span></div>
       <p>{failure.detail}</p>
-      <button type="button" onClick={() => setDiagnosticsOpen(true)}>INSPECT DIAGNOSTICS</button>
     </div>}
     {failure && failureProjection?.visible && <div
       className={`viewport-failure-marker tone-${failure.tone}`}

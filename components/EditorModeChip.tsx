@@ -1,8 +1,6 @@
 "use client";
 
 import { DEFAULT_EDITOR_TOOL, getEditorTool } from "../lib/core/editor-tools";
-import { simulation } from "../lib/core/simulation/controller";
-import { useEditorHistoryStore } from "../lib/core/stores/history-store";
 import { useSceneStore } from "../lib/core/stores/scene-store";
 import { useUIStore } from "../lib/core/stores/ui-store";
 
@@ -21,10 +19,10 @@ import { useUIStore } from "../lib/core/stores/ui-store";
  * click that would normally select is now the release. That has to be legible
  * without the reader having to remember how they got here.
  *
- * UNDO and REDO stay because they are not modes — they are the two commands a
- * direct-manipulation editor cannot make discoverable any other way, and the
- * ring is contextual on a target so a history that spans targets does not
- * belong in it.
+ * Nothing at rest. The resting hint told a reader to right-click once and then
+ * sat on the image forever, and the UNDO/REDO pair was two permanent buttons for
+ * a command every editor already binds to a key. Both are gone: this is a state
+ * report, and with no mode armed and nothing in hand there is no state.
  */
 export function EditorModeChip() {
   const activeTool = useUIStore((state) => state.activeTool);
@@ -35,10 +33,9 @@ export function EditorModeChip() {
   // is already a legitimate dependency.
   const carriedName = useSceneStore((state) =>
     state.scene.rigidBodies.find((body) => body.id === carry?.bodyId)?.name);
-  const canUndo = useEditorHistoryStore((state) => state.past.length > 0);
-  const canRedo = useEditorHistoryStore((state) => state.future.length > 0);
   const tool = getEditorTool(activeTool);
   const armed = activeTool !== DEFAULT_EDITOR_TOOL;
+  if (!carry && !armed) return null;
 
   return (
     <div className="editor-mode-chip" data-active-tool={activeTool} data-carrying={Boolean(carry)}>
@@ -48,7 +45,7 @@ export function EditorModeChip() {
           {carry.tiltDegrees !== 0 && <em>{carry.tiltDegrees > 0 ? "+" : ""}{Math.round(carry.tiltDegrees)}°</em>}
           <span>drag to dip and lift · wheel for depth · Q/E to pour · shift to ease · click to put down</span>
         </div>
-      ) : armed ? (
+      ) : (
         <button
           type="button"
           className="mode-chip armed"
@@ -60,13 +57,7 @@ export function EditorModeChip() {
           <span>{tool.hint}</span>
           <em>esc</em>
         </button>
-      ) : (
-        <p className="mode-chip resting">right-click anything for what it can do</p>
       )}
-      <div className="editor-history" role="group" aria-label="Edit history">
-        <button type="button" disabled={!canUndo} title="Undo (⌘Z)" onClick={() => simulation.undo()}>UNDO</button>
-        <button type="button" disabled={!canRedo} title="Redo (⇧⌘Z)" onClick={() => simulation.redo()}>REDO</button>
-      </div>
     </div>
   );
 }

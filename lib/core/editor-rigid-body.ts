@@ -202,6 +202,40 @@ function rigidBodyEntityFor(
           });
         },
       },
+      // What the body is made of, which no handle can express: the tray that
+      // used to hold these was a docked list of every body in the scene, and
+      // the three numbers it offered for the selected one are the three that
+      // belong on the selected one.
+      {
+        id: "density",
+        label: "Density",
+        unit: "kg/m³",
+        value: description.density_kg_m3,
+        step: 10,
+        min: 100,
+        max: 4000,
+        apply: (value) => rigidBodyPatch(context.scene, description.id, { density_kg_m3: value }),
+      },
+      {
+        id: "restitution",
+        label: "Bounce",
+        unit: "—",
+        value: description.restitution,
+        step: 0.05,
+        min: 0,
+        max: 1,
+        apply: (value) => rigidBodyPatch(context.scene, description.id, { restitution: value }),
+      },
+      {
+        id: "friction",
+        label: "Friction",
+        unit: "—",
+        value: description.friction,
+        step: 0.05,
+        min: 0,
+        max: 1.2,
+        apply: (value) => rigidBodyPatch(context.scene, description.id, { friction: value }),
+      },
     ],
     remove: () => ({
       ...context.scene,

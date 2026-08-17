@@ -1,6 +1,7 @@
 import { damBreakFractions, initialFluidBrickComponents } from "./initial-fluid";
 import { SCENE_SHAPES_BY_CODE } from "./scene-shape";
-import type { EditorAction } from "./editor-action";
+import type { EditorAction, EditorActionTarget } from "./editor-action";
+import { cellProbeAction, rayProbeAction } from "./editor-probe-actions";
 import {
   boxCenter,
   boxHandles,
@@ -483,12 +484,18 @@ function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefi
  * user's.
  */
 /**
- * What pointing at water offers.
+ * What pointing at water offers: the verbs that put something at a point.
  *
  * Declared once and shared with the tank, because an empty tank and the water
  * standing in it are the same place as far as this menu is concerned: someone
  * who right-clicks either is asking what they can do to the water there, and a
  * ring that changed as the tank filled would be a ring nobody could aim at.
+ *
+ * These are also the whole of what a bare point in the room offers — see
+ * `sceneActionsAt` — which is why the water's instruments are a separate group
+ * below rather than more entries here. Every verb in this list needs a place and
+ * nothing else; a ring that opened on the floor and offered to read the solver
+ * would be pricing something the click never named.
  *
  * The shapes come from the shape table, so a shape declared for the solver is
  * reachable here the day it is declared and never has to be added to a menu.
@@ -558,6 +565,59 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
   ];
 }
 
+/**
+ * The two overlays that read the water rather than shape it.
+ *
+ * They are about the fluid and not about the room: "what is this advance
+ * costing" and "is this solve converging" are questions asked *of a running
+ * solve*, which is the same reason the ring is contextual at all. So they are
+ * offered wherever the water is — on the body and on the tank that holds it —
+ * and nowhere else. Their counterpart for the *picture* is `sceneDocumentActions`
+ * on the empty-space ring, where the frame graph sits for the mirror reason.
+ */
+export function fluidInstrumentActions(): readonly EditorAction[] {
+  return [
+    {
+      id: "pipeline",
+      label: "Pipeline",
+      icon: "pipeline",
+      tone: "fluid",
+      hint: "Open the advance pipeline: per-stage GPU cost, gates and solver tuning",
+      effect: { kind: "open-overlay", overlay: "sim-pipeline" },
+    },
+    {
+      id: "diagnostics",
+      label: "Diagnostics",
+      icon: "diagnostics",
+      tone: "fluid",
+      hint: "Open the live instrument cards: divergence, residual, CFL, mass drift",
+      effect: { kind: "open-overlay", overlay: "diagnostics" },
+    },
+  ];
+}
+
+/**
+ * The whole ring for a point on the water: what you can do to it, then the
+ * instruments and probes that read it.
+ *
+ * Kept apart from `fluidPlayActions` because the play verbs are also what a bare
+ * point in the room offers, while nothing below them is: an instrument there
+ * would price a solve the click never pointed at, and a probe there would have
+ * nothing to aim at — the empty-space ring is composed from a world position,
+ * not from a pixel. Anything pointing at *water* gets every half, which is why
+ * the tank shares this rather than the placement verbs alone.
+ */
+export function fluidRingActions(target: EditorActionTarget): readonly EditorAction[] {
+  return [
+    ...fluidPlayActions(target.point_m),
+    ...fluidInstrumentActions(),
+    cellProbeAction(target),
+    // A ray through water is as real as a ray into a stone, and the water is
+    // where the expensive ones are, so the ray probe is offered here too.
+    rayProbeAction(target),
+  ];
+}
+
 export const fluidBodyEntity: EditorEntityDefinition = {
   kind: "fluid-body",
   surfacedBy: (tool) => tool === "select",
@@ -572,7 +632,7 @@ export const fluidBodyEntity: EditorEntityDefinition = {
         volumeEntityFor(context.scene, body, offset + seeds.length + index + 1)),
     ];
   },
-  actions: (_context, target) => fluidPlayActions(target.point_m),
+  actions: (_context, target) => fluidRingActions(target),
   find: (context, id) => {
     if (id === FLUID_BODY_SELECTION_ID) return fluidBodyEntityFor(context);
     const offset = fluidBodyBox(context.scene) ? 1 : 0;

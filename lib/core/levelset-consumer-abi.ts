@@ -11,6 +11,7 @@
  * Nothing here allocates, binds or dispatches: these are descriptions.
  */
 import type { FineLevelSetBrickPlan } from "./fine-levelset-brick-abi";
+import type { SparseCM12FramePlanSource } from "./sparse-cm12-frame-plan";
 
 /** GPU-resident authority for one domain-global fine level-set generation. */
 export interface WebGPUFineLevelSetBrickSource {
@@ -37,6 +38,14 @@ export interface WebGPUFineLevelSetBrickSource {
   topologyControl?: GPUBuffer;
   /** Diagnostic-only seed transaction control. */
   seedControl?: GPUBuffer;
+  /**
+   * Optional FPP1 transactional publication receipt. Consumers which opt in
+   * must require `executionComplete`, a zero fault, and a generation receipt
+   * matching the accepted generation before treating newly activated pages as
+   * visible. The page metadata generation remains the per-page fail-closed
+   * gate used by existing consumers.
+   */
+  presentationControl?: GPUBufferBinding;
 }
 
 /** Sparse directory plus the live accepted physical topology and CM12 field
@@ -53,6 +62,9 @@ export interface SparseAdaptiveGridConsumerSource {
   readonly fineMetadata: GPUBufferBinding;
   readonly fineWorklist: GPUBufferBinding;
   readonly fineSamples: GPUBufferBinding;
+  /** Optional versioned 4³ temporal-dirty publication. Missing is UNKNOWN. */
+  /** Optional GPU-authored FPL1 schedule/receipt publication. Missing falls back to CMD1. */
+  readonly framePlan?: SparseCM12FramePlanSource;
 }
 
 /**

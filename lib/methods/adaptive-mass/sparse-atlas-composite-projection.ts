@@ -863,8 +863,13 @@ export function buildSparseAtlasCompositeGrid(
     }
   }
 
+  // A reused workspace may previously have held a larger atlas variant. Keep
+  // the public compact arrays authoritative: stale pooled cells beyond this
+  // build would make the final brick appear to own records that were skipped
+  // by domain clipping.
+  cells.length = cellCountBuilt;
   rows.length = rowCountBuilt;
-  reserveCompositeCells(workspace, cells.length);
+  reserveCompositeCells(workspace, cellCountBuilt);
   reserveCompositeRows(workspace, rows.length);
   const topologyKey = {};
   if (!workspace?.grid) {

@@ -1,23 +1,30 @@
 "use client";
 
 import {
+  Aperture,
   ArrowDownToLine,
   Beaker,
   Box,
   Brush,
   Circle,
+  Crosshair,
   Cylinder,
   Droplet,
   Egg,
   Eraser,
+  FileUp,
+  Gauge,
   Hand,
+  LibraryBig,
   Pill,
+  ScanSearch,
   Shapes,
   SlidersHorizontal,
   SprayCan,
   Square,
   SquareDashed,
   Trash2,
+  Workflow,
   type LucideIcon,
 } from "lucide-react";
 import type { EditorActionIcon as EditorActionIconName } from "../lib/core/editor-action";
@@ -53,6 +60,15 @@ const ICONS = {
   capsule: Pill,
   cup: Beaker,
   ellipsoid: Egg,
+  library: LibraryBig,
+  import: FileUp,
+  pipeline: Workflow,
+  "render-pipeline": Aperture,
+  diagnostics: Gauge,
+  // The two pointer probes: a reticle for the one that aims a ray at a pixel,
+  // a framed magnifier for the one that reads the cell behind it.
+  "trace-ray": Crosshair,
+  "inspect-cell": ScanSearch,
 } satisfies Record<EditorActionIconName, LucideIcon>;
 
 /**

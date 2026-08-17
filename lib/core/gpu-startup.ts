@@ -45,8 +45,6 @@ export interface SafeBrowserGPUBringupConfig {
   readonly methodValues: Readonly<Record<string, unknown>>;
   readonly canonicalMethodValues: Readonly<Record<string, unknown>>;
   readonly exactScene: boolean;
-  readonly diagnosticsOpen: boolean;
-  readonly rightPanel: string | null;
   readonly gridOverlayAxis: string;
   /** Armed WYSIWYG editor tool; authoring gestures mutate the pinned workload. */
   readonly activeTool: string;
@@ -80,8 +78,6 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
       && "global fine level set must be factor 1, 4, or 8",
     values.maximumLeafSize !== "16" && "maximum leaf size must be 16",
     parameterDrift.length > 0 && `method profile drifted: ${parameterDrift.join(", ")}`,
-    config.diagnosticsOpen && "diagnostics panel must remain closed",
-    config.rightPanel !== null && "all right-side panels must remain closed",
     config.gridOverlayAxis !== "off" && "grid overlays must remain off",
     config.activeTool !== "select" && "editor tools must remain on select",
     unapprovedQueryKeys.length > 0 && `unapproved safe-mode query flags: ${unapprovedQueryKeys.join(", ")}`,

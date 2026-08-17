@@ -12,6 +12,18 @@ import { defaultCamera, type CameraState, type RigidShape } from "../model";
  * to say. These three are the ones a point and a size fully determine.
  */
 export type SceneryPropKind = "box" | "cylinder" | "ellipsoid";
+
+/**
+ * The instrument currently drawn over the scene.
+ *
+ * One at a time, and therefore one field rather than three booleans: these are
+ * reading surfaces, not tools, and two of them side by side would cover the
+ * thing they are instruments *of*. Round-trips through the URL as `overlay`, on
+ * the camera's contract rather than the scene's: it is not part of the document,
+ * but it is part of the view a link reopens, so a reload keeps the reading that
+ * was being taken. See `UIQueryState.sceneOverlay`.
+ */
+export type SceneOverlay = "sim-pipeline" | "render-pipeline" | "diagnostics";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   type SvoConeTracingMode,
@@ -84,20 +96,40 @@ export interface RadialMenuState {
   readonly actions: readonly EditorAction[];
 }
 
-export type RightPanel = "visual" | "visuals" | "simulation" | "bodies" | "diagnostics" | "performance" | null;
-
-export const DEFAULT_RIGHT_PANEL_WIDTH = 620;
-export const MIN_RIGHT_PANEL_WIDTH = 300;
-/** The shell keeps a 360 px viewport floor, so the observatory can claim the
- *  width the removed left sidebar used to hold on a wide display. */
-export const MAX_RIGHT_PANEL_WIDTH = 1400;
-
-export function normalizeRightPanelWidth(width: number) {
-  if (!Number.isFinite(width)) return DEFAULT_RIGHT_PANEL_WIDTH;
-  return Math.round(Math.max(MIN_RIGHT_PANEL_WIDTH, Math.min(MAX_RIGHT_PANEL_WIDTH, width)));
+/**
+ * Where on the canvas a probe is aimed, in viewport fractions.
+ *
+ * Fractions rather than pixels because the canvas is resized by the layout and
+ * by the resolution scale, and a pin recorded in device pixels would drift off
+ * the thing it was aimed at the first time either changed.
+ */
+export interface TracePinAim {
+  /** 0 at the left edge, 1 at the right. */
+  readonly normalizedX: number;
+  /** 0 at the top edge, 1 at the bottom. */
+  readonly normalizedY: number;
 }
 
-/** Viewport state: camera, selection, open panels, and debug controls. */
+/**
+ * A pin asked for from outside the viewport, and the aim it captured if it had
+ * one.
+ *
+ * The viewport owns the aim — which pixel, from which view — and pinning without
+ * recording it is what lets a later refresh silently answer a different ray, so
+ * a control that cannot know the aim asks for a pin instead of declaring one and
+ * the viewport fills the aim in from the live pointer.
+ *
+ * A surface that *does* know an aim carries it here. The radial ring is the one
+ * that does: it is composed by the viewport at the click that opened it, and by
+ * the time a wedge is chosen the pointer has flicked off to wherever the wedge
+ * was — so a ring probe that fell back to the live pointer would pin a pixel
+ * nobody pointed at.
+ */
+export interface TracePinRequest {
+  readonly aim?: TracePinAim;
+}
+
+/** Viewport state: camera, selection, and debug controls. */
 interface UIStore {
   camera: CameraState;
   /** Armed direct-manipulation tool; the pointer machine dispatches on it. */
@@ -135,10 +167,8 @@ interface UIStore {
   placementShape: RigidShape;
   /** Shape the scenery-place tool rests on the next surface. */
   propShape: SceneryPropKind;
-  sceneModalOpen: boolean;
-  diagnosticsOpen: boolean;
-  rightPanel: RightPanel;
-  rightPanelWidth: number;
+  /** The pipeline or diagnostics instrument drawn over the scene, if any. */
+  sceneOverlay: SceneOverlay | null;
   /** Fig. 2-style grid cross-section drawn on a slice plane in the scene. */
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
@@ -174,18 +204,13 @@ interface UIStore {
   pixelTraceEnabled: boolean;
   /** A pinned trace holds its recorded geometry so the camera can orbit it. */
   pixelTracePinned: boolean;
-  /**
-   * A pin asked for from outside the viewport. The viewport owns the aim — which
-   * pixel, from which view — and pinning without recording it is what lets a
-   * later refresh silently answer a different ray, so a control that cannot know
-   * the aim asks for a pin instead of declaring one.
-   */
-  pixelTracePinRequested: boolean;
+  /** An outstanding ask for a pin, consumed by the viewport. See `TracePinRequest`. */
+  pixelTracePinRequest: TracePinRequest | null;
   pixelTraceLayers: readonly SvoPixelTraceLayer[];
   /** Per-cell fluid work diagnostic; the solver-side counterpart of the ray probe. */
   fluidCellTraceEnabled: boolean;
   fluidCellTracePinned: boolean;
-  fluidCellTracePinRequested: boolean;
+  fluidCellTracePinRequest: TracePinRequest | null;
   fluidCellTraceLayers: readonly FluidCellTraceLayer[];
   /**
    * Which leaf along the pointer ray is described, nearest first. Held here
@@ -231,10 +256,8 @@ interface UIStore {
   endCarry: () => void;
   setPlacementShape: (shape: RigidShape) => void;
   setPropShape: (shape: SceneryPropKind) => void;
-  setSceneModalOpen: (open: boolean) => void;
-  setDiagnosticsOpen: (open: boolean) => void;
-  setRightPanel: (panel: RightPanel) => void;
-  setRightPanelWidth: (width: number) => void;
+  /** Show one instrument over the scene, or `null` to clear the one that is up. */
+  setSceneOverlay: (overlay: SceneOverlay | null) => void;
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
@@ -252,13 +275,16 @@ interface UIStore {
   setSvoRenderTuning: (next: SvoRenderTuning | ((current: SvoRenderTuning) => SvoRenderTuning)) => void;
   setPixelTraceEnabled: (enabled: boolean) => void;
   setPixelTracePinned: (pinned: boolean) => void;
-  /** Ask the viewport to pin the ray under the pointer, aim and all. */
-  requestPixelTracePin: () => void;
+  /**
+   * Ask the viewport to pin the ray under the pointer, aim and all — or at an
+   * aim the caller captured itself, when it is a surface that knows one.
+   */
+  requestPixelTracePin: (request?: TracePinRequest) => void;
   togglePixelTraceLayer: (layer: SvoPixelTraceLayer) => void;
   setPixelTraceLayers: (layers: readonly SvoPixelTraceLayer[]) => void;
   setFluidCellTraceEnabled: (enabled: boolean) => void;
   setFluidCellTracePinned: (pinned: boolean) => void;
-  requestFluidCellTracePin: () => void;
+  requestFluidCellTracePin: (request?: TracePinRequest) => void;
   toggleFluidCellTraceLayer: (layer: FluidCellTraceLayer) => void;
   /**
    * Step along the ray run. The caller wraps against the run length it has seen,
@@ -284,10 +310,7 @@ export const useUIStore = create<UIStore>((set) => ({
   selectionControlsOpen: false,
   placementShape: "sphere",
   propShape: "box",
-  sceneModalOpen: false,
-  diagnosticsOpen: false,
-  rightPanel: null,
-  rightPanelWidth: DEFAULT_RIGHT_PANEL_WIDTH,
+  sceneOverlay: null,
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
@@ -305,11 +328,11 @@ export const useUIStore = create<UIStore>((set) => ({
   svoRenderTuning: DEFAULT_SVO_RENDER_TUNING,
   pixelTraceEnabled: false,
   pixelTracePinned: false,
-  pixelTracePinRequested: false,
+  pixelTracePinRequest: null,
   pixelTraceLayers: SVO_PIXEL_TRACE_LAYERS,
   fluidCellTraceEnabled: false,
   fluidCellTracePinned: false,
-  fluidCellTracePinRequested: false,
+  fluidCellTracePinRequest: null,
   fluidCellTraceLayers: FLUID_CELL_TRACE_LAYERS,
   fluidCellTraceHitIndex: 0,
   fluidCellTraceHitCount: 0,
@@ -349,13 +372,9 @@ export const useUIStore = create<UIStore>((set) => ({
   endCarry: () => set({ carry: undefined }),
   setPlacementShape: (placementShape) => set({ placementShape }),
   setPropShape: (propShape) => set({ propShape }),
-  setSceneModalOpen: (sceneModalOpen) => set({ sceneModalOpen }),
-  setDiagnosticsOpen: (diagnosticsOpen) => set((state) => ({
-    diagnosticsOpen,
-    rightPanel: diagnosticsOpen ? "diagnostics" : state.rightPanel === "diagnostics" ? null : state.rightPanel
-  })),
-  setRightPanel: (rightPanel) => set({ rightPanel, diagnosticsOpen: rightPanel === "diagnostics" }),
-  setRightPanelWidth: (rightPanelWidth) => set({ rightPanelWidth: normalizeRightPanelWidth(rightPanelWidth) }),
+  // Assignment rather than a toggle set: opening one instrument closes whichever
+  // was up, because the field can only hold one and the ring writes it directly.
+  setSceneOverlay: (sceneOverlay) => set({ sceneOverlay }),
   setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
@@ -409,12 +428,12 @@ export const useUIStore = create<UIStore>((set) => ({
   setPixelTraceEnabled: (pixelTraceEnabled) => set((state) => ({
     pixelTraceEnabled,
     pixelTracePinned: pixelTraceEnabled ? state.pixelTracePinned : false,
-    pixelTracePinRequested: false,
+    pixelTracePinRequest: null,
   })),
   // Only the viewport may declare a pin, because only it knows the aim the pin
   // must record. Every other control asks, and the request is consumed there.
-  setPixelTracePinned: (pixelTracePinned) => set({ pixelTracePinned, pixelTracePinRequested: false }),
-  requestPixelTracePin: () => set({ pixelTracePinRequested: true }),
+  setPixelTracePinned: (pixelTracePinned) => set({ pixelTracePinned, pixelTracePinRequest: null }),
+  requestPixelTracePin: (request = {}) => set({ pixelTracePinRequest: request }),
   togglePixelTraceLayer: (layer) => set((state) => ({
     pixelTraceLayers: state.pixelTraceLayers.includes(layer)
       ? state.pixelTraceLayers.filter((entry) => entry !== layer)
@@ -428,7 +447,7 @@ export const useUIStore = create<UIStore>((set) => ({
   setFluidCellTraceEnabled: (fluidCellTraceEnabled) => set((state) => ({
     fluidCellTraceEnabled,
     fluidCellTracePinned: fluidCellTraceEnabled ? state.fluidCellTracePinned : false,
-    fluidCellTracePinRequested: false,
+    fluidCellTracePinRequest: null,
     fluidCellTraceHitIndex: fluidCellTraceEnabled ? state.fluidCellTraceHitIndex : 0,
     fluidCellTraceHitCount: fluidCellTraceEnabled ? state.fluidCellTraceHitCount : 0,
     fluidCellTraceInterfaceHits: fluidCellTraceEnabled ? state.fluidCellTraceInterfaceHits : [],
@@ -436,9 +455,9 @@ export const useUIStore = create<UIStore>((set) => ({
   // As with the ray probe, only the viewport may declare a pin, because only it
   // knows the pointer position the pin must record.
   setFluidCellTracePinned: (fluidCellTracePinned) => set({
-    fluidCellTracePinned, fluidCellTracePinRequested: false,
+    fluidCellTracePinned, fluidCellTracePinRequest: null,
   }),
-  requestFluidCellTracePin: () => set({ fluidCellTracePinRequested: true }),
+  requestFluidCellTracePin: (request = {}) => set({ fluidCellTracePinRequest: request }),
   toggleFluidCellTraceLayer: (layer) => set((state) => ({
     fluidCellTraceLayers: state.fluidCellTraceLayers.includes(layer)
       ? state.fluidCellTraceLayers.filter((entry) => entry !== layer)

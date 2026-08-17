@@ -353,6 +353,9 @@ export interface GPUSolverInstance {
   /** Apply configuration explicitly classified as runtime-safe by the method. */
   applyRuntimeValues?(values: MethodParamValues): void;
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean;
+  /** Host-only timing snapshot; never fences or maps simulation buffers. */
+  readPerformanceTraceSnapshot?(): Pick<GPUEulerianInfo,
+    "physicsTrace" | "physicsCPUTrace" | "physicsCaptureIdentity">;
   readStats(): Promise<GPUEulerianInfo>;
   destroy(): void;
 }

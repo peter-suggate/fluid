@@ -417,9 +417,11 @@ class SimulationController {
       camera: opening.camera ?? previousCamera,
     });
     const runtimePlan = planSceneRuntime(opening.scene);
+    const effectiveStep_s = effectiveSimulationStep_s(
+      opening.scene, useMethodStore.getState());
     useRuntimeStore.getState().setNotice(!runtimePlan.fluidSolver
       ? `${card.name} opened · no fluid solver, so nothing waits on one`
-      : `${card.name} opened · dt ${opening.scene.numerics.fixedDt_s.toFixed(4)} s`);
+      : `${card.name} opened · dt ${effectiveStep_s.toFixed(4)} s`);
     useRuntimeStore.getState().setRunState(runtimePlan.fluidSolver ? "running" : "paused");
     useShellStore.getState().enterStudio();
     return true;

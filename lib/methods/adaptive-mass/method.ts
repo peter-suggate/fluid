@@ -4,6 +4,7 @@ import type {
   SimulationMethod,
 } from "../../core/method-contract";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
+import { SPARSE_CM12_DIRTY_OVERLAY_MODES } from "../../core/sparse-cm12-dirty-visualizations";
 import { adaptiveMassDiagnosticRows } from "./adaptive-mass-diagnostics";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from "./adaptive-mass-frame-pipeline";
 import {
@@ -30,9 +31,9 @@ export type AdaptiveMassResolutionMode = "adaptive" | "all-fine" | "all-coarse";
 /** Initial sparse-resolution split consumed by the interactive solver factory. */
 export interface AdaptiveMassSolverOptions {
   readonly resolutionMode: AdaptiveMassResolutionMode;
-  /** Construction-time complete dyadic ladder maximum. Defaults to 8. */
+  /** Construction-time complete dyadic ladder maximum. Defaults to 16. */
   readonly brickFineResolution?: SparseBrickFineResolution;
-  /** Renderer-facing samples per presentation-page edge. Defaults to 4. */
+  /** Renderer-facing samples per presentation-page edge. Defaults to 16. */
   readonly presentationPageResolution?: SparseBrickFineResolution;
   /** Optional positive-power-of-two cap on hierarchical macro-leaf span. */
   readonly maximumMacroSpanBricks?: number;
@@ -66,27 +67,12 @@ const params: MethodParamSpec[] = [
     kind: "select",
     key: "brickFineResolution",
     label: "Brick ladder",
-    default: "8",
+    default: "16",
     tier: "coarse",
     options: [
-      { value: "4", label: "1³ / 2³ / 4³" },
-      { value: "8", label: "1³ / 2³ / 4³ / 8³" },
       { value: "16", label: "1³ / 2³ / 4³ / 8³ / 16³" },
     ],
-    hint: "Structural cells-per-brick ladder. Changing it rebuilds the atlas and specializes GPU storage and shaders.",
-  },
-  {
-    kind: "select",
-    key: "presentationPageResolution",
-    label: "Presentation page",
-    default: "4",
-    tier: "coarse",
-    options: [
-      { value: "4", label: "4³ · 64 samples" },
-      { value: "8", label: "8³ · 512 samples" },
-      { value: "16", label: "16³ · 4096 samples" },
-    ],
-    hint: "Renderer page width. It must not exceed the brick ladder maximum; wider pages amortize sparse lookup and publication setup without changing the finest sample lattice.",
+    hint: "Production is pinned to B16/P16 until SIR tile addressing is parameterized. B4/B8 remain available only through construction QA factories.",
   },
   {
     kind: "select",
@@ -151,7 +137,7 @@ const params: MethodParamSpec[] = [
   {
     kind: "number", key: "surfaceFineRings", label: "Initial fine surface band",
     default: 1, tier: "fine", unit: "bricks", min: 1, max: 8, step: 1, digits: 0,
-    hint: "Structural count of occupied face-distance rings initialized at 8³ around the authored free surface; the 4³/2³/1³ skirt follows outside it.",
+    hint: "Structural count of occupied face-distance rings initialized at the ladder maximum around the authored free surface; the coarser dyadic skirt follows outside it.",
   },
   {
     kind: "number", key: "receiverSupportRings", label: "Receiver apron reach",
@@ -387,14 +373,12 @@ const boundedInteger = (value: unknown, fallback: number, minimum: number, maxim
     ? Math.min(maximum, Math.max(minimum, Math.round(value))) : fallback;
 
 const brickFineResolution = (value: unknown): SparseBrickFineResolution =>
-  value === 4 || value === "4" ? 4 : value === 16 || value === "16" ? 16 : 8;
+  value === 4 || value === "4" ? 4 : value === 8 || value === "8" ? 8 : 16;
 
 const presentationPageResolution = (
-  value: unknown,
+  _value: unknown,
   maximum: SparseBrickFineResolution,
-): SparseBrickFineResolution => Math.min(brickFineResolution(
-  value === undefined ? 4 : value,
-), maximum) as SparseBrickFineResolution;
+): SparseBrickFineResolution => maximum;
 
 const maximumMacroSpanBricks = (value: unknown): number | undefined => {
   if (value === undefined || value === "auto") return undefined;
@@ -471,9 +455,9 @@ export const adaptiveMassMethod: SimulationMethod = {
     },
   },
   qualityLabels: {
-    balanced: "Sparse graded 1³→8³",
-    high: "Sparse graded 1³→8³",
-    ultra: "Sparse graded 1³→8³",
+    balanced: "Sparse graded 1³→16³",
+    high: "Sparse graded 1³→16³",
+    ultra: "Sparse graded 1³→16³",
   },
   showQualityControl: false,
   // Body scenes reserve sparse solid-fraction fields alongside their fluid
@@ -482,6 +466,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   capabilities: { volumeRendering: true },
   supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure",
     "tracers", "face-velocity",
+    ...SPARSE_CM12_DIRTY_OVERLAY_MODES,
     // Listed unconditionally rather than gated on the reservation: a view that
     // vanished from the picker would be indistinguishable from one that does
     // not exist, and the reason it is empty — the film was never reserved — is
@@ -494,18 +479,21 @@ export const adaptiveMassMethod: SimulationMethod = {
   pressureMapping: "Every live Sparse CM12 step solves one globally coupled composite pressure system over regular faces and conservative 2:1 seam ports using one-reduction sparse MGPCG.",
   normalizeValues: (values) => {
     const { activitySignals: _activitySignals, ...normalizedActivity } = activityPolicy(values);
+    // SIR1 currently addresses every logical brick as exactly 64 4^3 tiles.
+    // That is correct only for B16. Keep smaller ladders reachable through the
+    // direct solver construction QA paths, but never serialize them as a
+    // production method configuration whose provenance receipts would lie.
+    const fineResolution: SparseBrickFineResolution = 16;
     return {
       ...values,
-      brickFineResolution: String(brickFineResolution(values.brickFineResolution)),
-      presentationPageResolution: String(presentationPageResolution(
-        values.presentationPageResolution, brickFineResolution(values.brickFineResolution),
-      )),
+      brickFineResolution: String(fineResolution),
+      presentationPageResolution: String(fineResolution),
       maximumMacroSpanBricks:
         String(maximumMacroSpanBricks(values.maximumMacroSpanBricks) ?? "auto"),
       resolutionMode: resolutionMode(values.resolutionMode),
       selectorMode: selectorMode(values.selectorMode),
       receiverFloor: String(receiverFloor(
-        values.receiverFloor, brickFineResolution(values.brickFineResolution),
+        values.receiverFloor, fineResolution,
       )),
       surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
       receiverSupportRings: boundedInteger(values.receiverSupportRings, 9, 1, 24),
@@ -525,8 +513,8 @@ export const adaptiveMassMethod: SimulationMethod = {
       SPARSE_CM12_ACTIVITY_POLICY;
     return {
       resolutionMode: "adaptive",
-      brickFineResolution: "8",
-      presentationPageResolution: "4",
+      brickFineResolution: "16",
+      presentationPageResolution: "16",
       maximumMacroSpanBricks: "auto",
       selectorMode: "surface",
       receiverFloor: "auto",
@@ -549,13 +537,21 @@ export const adaptiveMassMethod: SimulationMethod = {
     onRigidLoads,
     onProgress,
     signal,
-  ) => WebGPUAdaptiveMassSolver.createAsync(
-    device,
-    scene,
-    quality,
-    onRigidLoads,
-    adaptiveMassSolverOptions(values),
-    onProgress,
-    signal,
-  ),
+  ) => {
+    const options = adaptiveMassSolverOptions(values);
+    if (options.brickFineResolution !== 16 || options.presentationPageResolution !== 16) {
+      return Promise.reject(new RangeError(
+        "Sparse CM12 production requires B16/P16 until SIR tile addressing is parameterized",
+      ));
+    }
+    return WebGPUAdaptiveMassSolver.createAsync(
+      device,
+      scene,
+      quality,
+      onRigidLoads,
+      options,
+      onProgress,
+      signal,
+    );
+  },
 };

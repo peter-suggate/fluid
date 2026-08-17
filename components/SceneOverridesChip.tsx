@@ -81,8 +81,8 @@ function OverrideRow({ override, onClear }: { override: SceneOverride; onClear: 
  * beside the scene name, and the list beneath it is the same diff the address
  * bar is — see `sceneOverridesInQuery`.
  *
- * The camera and the open panel are listed but never counted. They are in the
- * link so a shared link reopens the view that was shared; treating them as
+ * The camera and the open instrument are listed but never counted. They are in
+ * the link so a shared link reopens the view that was shared; treating them as
  * overrides would leave the badge lit from the first orbit and it would stop
  * meaning anything.
  */
@@ -146,7 +146,7 @@ export function SceneOverridesChip() {
         data-override-count={counted.length}
         title={counted.length > 0
           ? `${counted.length} setting${counted.length === 1 ? "" : "s"} in this link differ${counted.length === 1 ? "s" : ""} from the authored scene`
-          : "This link carries a camera or panel state, but no overridden settings"}
+          : "This link carries a camera or an open instrument, but no overridden settings"}
       >
         <i aria-hidden="true" />
         <strong>{counted.length > 0 ? `${counted.length} OVERRIDE${counted.length === 1 ? "" : "S"}` : "LINK STATE"}</strong>

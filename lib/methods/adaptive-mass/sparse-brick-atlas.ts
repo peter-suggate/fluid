@@ -34,7 +34,7 @@ export interface SparseBrickLadder {
   readonly cellCapacity: number;
 }
 
-export const DEFAULT_BRICK_FINE_RESOLUTION: SparseBrickFineResolution = 8;
+export const DEFAULT_BRICK_FINE_RESOLUTION: SparseBrickFineResolution = 16;
 /** @deprecated Use atlas.brickFineResolution for geometry. */
 export const BRICK_FINE_RESOLUTION = DEFAULT_BRICK_FINE_RESOLUTION;
 

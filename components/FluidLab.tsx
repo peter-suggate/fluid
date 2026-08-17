@@ -1,27 +1,19 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { simulation } from "../lib/core/simulation/controller";
 import { startQueryStateSync } from "../lib/core/url-state";
 import { startSceneAutosave } from "../lib/core/scene-autosave";
 import { browserSceneLibraryStorage } from "../lib/core/scene-library";
 import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
 import { useRuntimeStore } from "../lib/core/stores/runtime-store";
-import { useUIStore } from "../lib/core/stores/ui-store";
 import { useShellStore } from "../lib/core/stores/shell-store";
 import { WebGPUViewport } from "./WebGPUViewport";
 import { EditorModeChip } from "./EditorModeChip";
+import { PipelineOverlay } from "./PipelineOverlay";
 import { RadialMenu } from "./RadialMenu";
 import { SceneOverlay } from "./SceneOverlay";
-import { AxisWidget } from "./AxisWidget";
 import { SceneScaleOverlay } from "./SceneScaleOverlay";
-import { SceneConfigPopover } from "./SceneConfigPopover";
-import { RigidBodyPanel } from "./RigidBodyTray";
-import { VisualPanel } from "./VisualPanel";
-import { VisualsPanel } from "./VisualsPanel";
-import { FluidPipelinePanel } from "./FluidPipelinePanel";
-import { DiagnosticsPanel } from "./DiagnosticsPanel";
-import { PerformancePanel } from "./PerformancePanel";
 import { TransportBar } from "./TransportBar";
 import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
 import type { ResourceActivity, ResourcePluginDefinition } from "../lib/core/resource-readiness";
@@ -29,51 +21,6 @@ import { resourceActivities, resourceActivitiesFor } from "../lib/core/resource-
 import { requestManualGPUStart } from "../lib/core/gpu-startup";
 import { useSafeBrowserGPUBringup } from "../lib/core/use-safe-browser-gpu-bringup";
 import { useEditorShortcuts } from "../lib/core/use-editor-shortcuts";
-import { MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH } from "../lib/core/stores/ui-store";
-
-function RightPanelResizer() {
-  const rightPanelWidth = useUIStore((state) => state.rightPanelWidth);
-  const setRightPanelWidth = useUIStore((state) => state.setRightPanelWidth);
-  const dragStart = useRef<{ pointerX: number; width: number } | null>(null);
-
-  const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    event.currentTarget.setPointerCapture(event.pointerId);
-    dragStart.current = { pointerX: event.clientX, width: rightPanelWidth };
-  };
-  const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
-    if (!dragStart.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-    setRightPanelWidth(dragStart.current.width + dragStart.current.pointerX - event.clientX);
-  };
-  const finishResize = (event: PointerEvent<HTMLDivElement>) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    dragStart.current = null;
-  };
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const step = event.shiftKey ? 50 : 10;
-    if (event.key === "ArrowLeft") setRightPanelWidth(rightPanelWidth + step);
-    else if (event.key === "ArrowRight") setRightPanelWidth(rightPanelWidth - step);
-    else if (event.key === "Home") setRightPanelWidth(MIN_RIGHT_PANEL_WIDTH);
-    else if (event.key === "End") setRightPanelWidth(MAX_RIGHT_PANEL_WIDTH);
-    else return;
-    event.preventDefault();
-  };
-
-  return <div
-    className="right-panel-resizer"
-    role="separator"
-    aria-label="Resize panel"
-    aria-orientation="vertical"
-    aria-valuemin={MIN_RIGHT_PANEL_WIDTH}
-    aria-valuemax={MAX_RIGHT_PANEL_WIDTH}
-    aria-valuenow={rightPanelWidth}
-    tabIndex={0}
-    onPointerDown={onPointerDown}
-    onPointerMove={onPointerMove}
-    onPointerUp={finishResize}
-    onPointerCancel={finishResize}
-    onKeyDown={onKeyDown}
-  />;
-}
 
 function GPUInitializationPanel({ activity, plugin }: {
   activity: ResourceActivity;
@@ -101,8 +48,8 @@ function GPUInitializationPanel({ activity, plugin }: {
     <small>{activity.retainingPrevious
       ? "The attached generation remains usable. "
       : plugin.blocks === "viewport"
-        ? "Panels and file actions remain available. "
-        : "The editor, camera, panels, and file actions remain available. "}{plugin.blocks === "viewport"
+        ? "The rest of the studio remains available. "
+        : "The editor and camera remain available. "}{plugin.blocks === "viewport"
           ? "Scene interaction unlocks when a complete SVO frame is fenced."
           : plugin.blocks === "transport"
             ? "Simulation transport unlocks when authoritative fluid is fenced."
@@ -126,11 +73,6 @@ export function FluidLab() {
   const bodies = useDiagnosticsStore((state) => state.bodies);
   const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
   const resourceReadiness = useDiagnosticsStore((state) => state.resourceReadiness);
-  const diagnosticsOpen = useUIStore((state) => state.diagnosticsOpen);
-  const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
-  const rightPanel = useUIStore((state) => state.rightPanel);
-  const rightPanelWidth = useUIStore((state) => state.rightPanelWidth);
-  const setRightPanel = useUIStore((state) => state.setRightPanel);
   const shellView = useShellStore((state) => state.view);
   const activities = resourceActivities(resourceReadiness);
   // Transport-blocking work is deliberately absent here: TransportBar states it
@@ -166,7 +108,7 @@ export function FluidLab() {
 
 
   return (
-    <main className="lab-shell" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties} data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(rightPanel)} data-right-panel={rightPanel ?? "closed"} data-shell-view={shellView}>
+    <main className="lab-shell" data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-shell-view={shellView}>
       <section className="viewport-shell" data-resource-active={activities.length > 0} data-gpu-transition={activities.at(-1)?.lane ?? resourceReadiness.platform.state}>
         <WebGPUViewport />
         <EditorModeChip />
@@ -177,15 +119,8 @@ export function FluidLab() {
           </div>
         </div>
         <SceneScaleOverlay />
-        <AxisWidget />
-        <nav className="utility-panel-tabs" aria-label="Viewport panels">
-          <button className={rightPanel === "visual" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visual" ? null : "visual")} aria-expanded={rightPanel === "visual"} title="Render and debug controls">RENDER</button>
-          <button className={rightPanel === "visuals" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visuals" ? null : "visuals")} aria-expanded={rightPanel === "visuals"} aria-controls="visuals-panel" title="Scientific field visualizations">VISUALS</button>
-          <button className={rightPanel === "simulation" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "simulation" ? null : "simulation")} aria-expanded={rightPanel === "simulation"} aria-controls="simulation-panel" title="The selected method's advance pipeline with per-stage GPU timings">SIM</button>
-          <button className={rightPanel === "bodies" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "bodies" ? null : "bodies")} aria-expanded={rightPanel === "bodies"} title="Rigid body controls">BODIES</button>
-          <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAGNOSTICS</button>
-          <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Measured work and paper fields">PERFORMANCE</button>
-        </nav>
+        <PipelineOverlay />
+        <TransportBar />
         {(trayCards.length > 0 || trayPills.length > 0) && <div className="resource-activity-tray" aria-label="Resource tasks">
           {trayCards.map((activity) => <GPUInitializationPanel
             key={activity.id}
@@ -215,17 +150,7 @@ export function FluidLab() {
         </div>}
       </section>
 
-      {rightPanel && <RightPanelResizer />}
-      {rightPanel === "visual" && <VisualPanel />}
-      {rightPanel === "visuals" && <VisualsPanel />}
-      {rightPanel === "simulation" && <FluidPipelinePanel />}
-      {rightPanel === "bodies" && <RigidBodyPanel />}
-      {diagnosticsOpen && <DiagnosticsPanel />}
-      {rightPanel === "performance" && <PerformancePanel />}
-      <TransportBar />
-
       <RecordingPlaybackModal />
-      <SceneConfigPopover />
     </main>
   );
 }

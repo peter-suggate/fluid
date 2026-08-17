@@ -4,7 +4,7 @@
 // from a server component, so it is its own client entry and cannot rely on
 // the shell's module having been evaluated first. See `AppShell`.
 import "../lib/methods";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { simulation } from "../lib/core/simulation/controller";
 import { currentScenePageUrl } from "../lib/core/url-state";
@@ -19,7 +19,15 @@ import {
 } from "../lib/core/scene-cards";
 import type { SceneCard } from "../lib/core/scene-definition";
 import { sceneResume } from "../lib/core/scene-autosave";
-import { browserSceneLibraryStorage, readSceneLibrary, type SceneLibraryEntry } from "../lib/core/scene-library";
+import {
+  browserSceneLibraryStorage,
+  deleteSceneFromLibrary,
+  readSceneLibrary,
+  renameSceneInLibrary,
+  savedSceneEntries,
+  SCENE_NAME_MAXIMUM_LENGTH,
+  type SceneLibraryEntry,
+} from "../lib/core/scene-library";
 import { readSceneRecents, recentSceneCards, recordSceneOpen, type RecentSceneOpen } from "../lib/core/scene-recents";
 import { planSceneRuntime } from "../lib/core/scene-runtime";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
@@ -72,6 +80,25 @@ function SceneCardChips({ card }: { card: SceneCard }) {
   </>;
 }
 
+/**
+ * A card's face, without deciding what the face *is*.
+ *
+ * A saved scene being renamed or asked about is the same card as any other —
+ * same mark, same blurb, same chips — but it cannot be a button while it holds
+ * a text field or a confirm, so the face is factored out and both hosts draw
+ * it. `title` is the one part either host replaces.
+ */
+function SceneCardFace({ card, title }: { card: SceneCard; title?: ReactNode }) {
+  return <>
+    <span className="card-art"><SceneCardArt card={card} /></span>
+    <span className="card-body">
+      {title ?? <strong>{card.name}</strong>}
+      <small>{card.blurb}</small>
+      <span className="chip-row"><SceneCardChips card={card} /></span>
+    </span>
+  </>;
+}
+
 function SceneCardButton({ card, active, open }: { card: SceneCard; active: boolean; open: (card: SceneCard) => void }) {
   return (
     <button
@@ -83,13 +110,131 @@ function SceneCardButton({ card, active, open }: { card: SceneCard; active: bool
       aria-current={active || undefined}
       onClick={() => open(card)}
     >
-      <span className="card-art"><SceneCardArt card={card} /></span>
-      <span className="card-body">
-        <strong>{card.name}</strong>
-        <small>{card.blurb}</small>
-        <span className="chip-row"><SceneCardChips card={card} /></span>
-      </span>
+      <SceneCardFace card={card} />
     </button>
+  );
+}
+
+/** Which saved card is being edited, and which of the two edits it is holding. */
+interface SceneCardEdit {
+  readonly entryId: string;
+  readonly mode: "rename" | "delete";
+}
+
+/**
+ * A saved scene's card, with the two things only its owner can do to it.
+ *
+ * The affordances are quiet — two icon buttons over the thumbnail, drawn on
+ * hover or keyboard focus — so a shelf of saved scenes reads exactly like every
+ * other shelf until the pointer is on one. Both edits then happen *on the card*:
+ * renaming is the title becoming a field, deleting is the card asking once. The
+ * alternative is a browser dialog, which takes the thing being named or
+ * destroyed off screen in order to ask about it, and which this product does
+ * not use anywhere.
+ *
+ * While either edit is open the card is a static face rather than a button.
+ * There must be no scene to click under a confirm nobody has answered, and
+ * nothing behind it to tab into.
+ */
+function SavedSceneCard({ card, entry, active, open, edit, setEdit, rename, remove }: {
+  card: SceneCard;
+  entry: SceneLibraryEntry;
+  active: boolean;
+  open: (card: SceneCard) => void;
+  edit: SceneCardEdit | undefined;
+  setEdit: (edit: SceneCardEdit | undefined) => void;
+  rename: (entryId: string, name: string) => void;
+  remove: (entryId: string) => void;
+}) {
+  const mode = edit?.entryId === entry.id ? edit.mode : undefined;
+  // Escape unmounts the field, and Chrome fires no blur for a removed element —
+  // but an edit that loses the reader's typing if that ever changes is not one
+  // to leave resting on it, so the cancel is latched and the commit reads it.
+  const cancelled = useRef(false);
+
+  const renameField = (
+    <input
+      className="card-rename"
+      autoFocus
+      defaultValue={entry.name}
+      maxLength={SCENE_NAME_MAXIMUM_LENGTH}
+      aria-label={`Rename ${entry.name}`}
+      data-testid={`scene-rename-${entry.id}`}
+      onFocus={(event) => event.currentTarget.select()}
+      onBlur={(event) => {
+        if (cancelled.current) { setEdit(undefined); return; }
+        rename(entry.id, event.target.value);
+      }}
+      onKeyDown={(event) => {
+        // Both keys are the page's as well — Escape clears the search box and
+        // "/" focuses it — so an edit in progress keeps them.
+        event.stopPropagation();
+        if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
+        if (event.key === "Escape") { cancelled.current = true; setEdit(undefined); }
+      }}
+    />
+  );
+
+  return (
+    <div className="scene-card-slot" data-editing={mode} data-testid={`scene-card-slot-${entry.id}`}>
+      {mode === undefined ? <SceneCardButton card={card} active={active} open={open} /> : (
+        <div className="card scene-card" data-source={card.source} data-active={active || undefined}>
+          <SceneCardFace card={card} title={mode === "rename" ? renameField : undefined} />
+        </div>
+      )}
+
+      {mode === undefined && (
+        <span className="card-actions">
+          <button
+            type="button"
+            className="card-action"
+            title={`Rename ${card.name}`}
+            aria-label={`Rename ${card.name}`}
+            data-testid={`scene-rename-open-${entry.id}`}
+            onClick={() => { cancelled.current = false; setEdit({ entryId: entry.id, mode: "rename" }); }}
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M10.9 2.9a1.6 1.6 0 0 1 2.2 2.2l-7.3 7.3-3 .8.8-3z" />
+              <path d="M9.8 4l2.2 2.2" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="card-action"
+            title={`Delete ${card.name}`}
+            aria-label={`Delete ${card.name}`}
+            data-testid={`scene-delete-open-${entry.id}`}
+            onClick={() => setEdit({ entryId: entry.id, mode: "delete" })}
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3.4 4.6h9.2M6.4 4.6V3.2h3.2v1.4M4.7 4.6l.6 8.2h5.4l.6-8.2" />
+              <path d="M6.8 6.9v3.9M9.2 6.9v3.9" />
+            </svg>
+          </button>
+        </span>
+      )}
+
+      {/* Escape closes the confirm from the page's own key handler rather than
+          from a listener here, so it answers wherever the focus has wandered. */}
+      {mode === "delete" && (
+        <div className="card-confirm" role="group" aria-label={`Delete ${card.name}?`}>
+          <p>Delete <strong>{card.name}</strong>?</p>
+          <small>It is only in this browser, so this cannot be undone.</small>
+          <span className="card-confirm-actions">
+            <button
+              type="button"
+              className="card-confirm-yes"
+              autoFocus
+              data-testid={`scene-delete-confirm-${entry.id}`}
+              onClick={() => remove(entry.id)}
+            >
+              Delete
+            </button>
+            <button type="button" className="card-confirm-no" onClick={() => setEdit(undefined)}>Keep</button>
+          </span>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -146,7 +291,7 @@ function shelfAnchor(sectionId: SceneSection["id"], shelf: string): string {
   return `shelf:${sectionId}:${shelf.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
 }
 
-function SceneSectionBlock({ section, activeId, open }: { section: SceneSection; activeId: string; open: (card: SceneCard) => void }) {
+function SceneSectionBlock({ section, tile }: { section: SceneSection; tile: (card: SceneCard) => ReactNode }) {
   return (
     <section className="scene-section" data-section={section.id} data-map-anchor={sectionAnchor(section.id)}>
       <header className="section-head">
@@ -159,7 +304,7 @@ function SceneSectionBlock({ section, activeId, open }: { section: SceneSection;
               drawn when the section actually divides into several. */}
           {section.shelves.length > 1 && <h3>{shelf.shelf}</h3>}
           <div className="scene-grid">
-            {shelf.cards.map((card) => <SceneCardButton key={card.id} card={card} active={card.id === activeId} open={open} />)}
+            {shelf.cards.map((card) => tile(card))}
           </div>
         </div>
       ))}
@@ -284,6 +429,7 @@ export function SceneLibrary() {
   const presetId = useSceneStore((state) => state.presetId);
   const [entries, setEntries] = useState<SceneLibraryEntry[]>([]);
   const [recents, setRecents] = useState<RecentSceneOpen[]>([]);
+  const [edit, setEdit] = useState<SceneCardEdit | undefined>();
   const searchRef = useRef<HTMLInputElement | null>(null);
   const scrollBodyRef = useRef<HTMLDivElement | null>(null);
   const [activeAnchor, setActiveAnchor] = useState("");
@@ -304,6 +450,47 @@ export function SceneLibrary() {
     if (!simulation.openSceneCard(card)) return;
     recordSceneOpen(browserSceneLibraryStorage(), card.id, Date.now());
     router.push(currentScenePageUrl());
+  };
+
+  /**
+   * A card, back to the stored row it was minted from.
+   *
+   * `savedSceneCard` is the only thing that mints these ids and the entry is
+   * the only side that carries the id storage writes through, so this map is
+   * the page's single crossing between the two. Everything else — the shelves,
+   * the search results, the recent row — stays cards.
+   */
+  const savedByCardId = useMemo(
+    () => new Map<string, SceneLibraryEntry>(savedSceneEntries(entries).map((entry) => [`saved:${entry.id}`, entry])),
+    [entries],
+  );
+
+  const renameSaved = (entryId: string, name: string) => {
+    setEntries(renameSceneInLibrary(browserSceneLibraryStorage(), entryId, name));
+    setEdit(undefined);
+  };
+  const deleteSaved = (entryId: string) => {
+    setEntries(deleteSceneFromLibrary(browserSceneLibraryStorage(), entryId));
+    setEdit(undefined);
+  };
+
+  // One renderer for both grids, so a saved scene carries its own affordances
+  // wherever it is listed — its shelf, or a search that reached it.
+  const tile = (card: SceneCard): ReactNode => {
+    const entry = savedByCardId.get(card.id);
+    return entry === undefined
+      ? <SceneCardButton key={card.id} card={card} active={card.id === presetId} open={open} />
+      : <SavedSceneCard
+          key={card.id}
+          card={card}
+          entry={entry}
+          active={card.id === presetId}
+          open={open}
+          edit={edit}
+          setEdit={setEdit}
+          rename={renameSaved}
+          remove={deleteSaved}
+        />;
   };
 
   const sections = useMemo(() => sceneSections(entries), [entries]);
@@ -371,6 +558,12 @@ export function SceneLibrary() {
       const target = event.target as HTMLElement | null;
       const editing = target !== null && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
       if (event.key === "Escape") {
+        // A card's open edit answers first, and from here rather than from the
+        // card, so a delete confirm still closes when the focus has wandered
+        // off it. A rename in progress never reaches this: its field stops the
+        // key so that Escape means "discard the typing", not "clear the
+        // search", and so the discard is latched before the field unmounts.
+        if (edit) { setEdit(undefined); return; }
         if (editing && search) { setSearch(""); return; }
         return;
       }
@@ -378,7 +571,7 @@ export function SceneLibrary() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [search, setSearch]);
+  }, [edit, search, setSearch]);
 
   const resumeScene = resume ? sceneCardPreview(resume.card) : undefined;
 
@@ -437,7 +630,7 @@ export function SceneLibrary() {
                 </header>
                 <div className="scene-shelf">
                   <div className="scene-grid">
-                    {results.map((card) => <SceneCardButton key={card.id} card={card} active={card.id === presetId} open={open} />)}
+                    {results.map((card) => tile(card))}
                   </div>
                 </div>
                 {results.length === 0 && <p className="library-empty">Nothing here matches “{search}”.</p>}
@@ -477,7 +670,7 @@ export function SceneLibrary() {
               </div>
               {recentCards.length > 0 && <RecentRow cards={recentCards} activeId={presetId} open={open} />}
               {sections.map((section) => (
-                <SceneSectionBlock key={section.id} section={section} activeId={presetId} open={open} />
+                <SceneSectionBlock key={section.id} section={section} tile={tile} />
               ))}
             </>}
           </div>

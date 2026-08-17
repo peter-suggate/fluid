@@ -69,7 +69,10 @@ export function useEditorShortcuts(): void {
       if (event.key === "Escape") {
         event.preventDefault();
         // A mode inside a mode is left from the inside out, so the first Escape
-        // drops the axis lock and the second leaves the tool.
+        // drops the axis lock and the second leaves the tool. A raised
+        // instrument is the outermost of those: it covers part of the scene, so
+        // it goes before anything about the selection under it moves.
+        if (ui.sceneOverlay) { ui.setSceneOverlay(null); return; }
         if (ui.axisConstraint) { ui.setAxisConstraint(undefined); return; }
         ui.setActiveTool("select");
         ui.select(undefined);

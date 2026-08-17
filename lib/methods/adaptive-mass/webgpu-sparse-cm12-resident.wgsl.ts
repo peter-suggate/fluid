@@ -1,4 +1,81 @@
 import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
+import {
+  SPARSE_CM12_DIRTY_CAUSE_BIT,
+} from "../../core/sparse-cm12-dirty-visualizations";
+import {
+  SPARSE_CM12_DIRTY_SCHEDULER_HEADER,
+  type SparseCM12DirtySchedulerLayout,
+} from "./sparse-cm12-dirty-scheduler";
+import { createSparseCM12DirtySchedulerWGSL } from "./sparse-cm12-dirty-scheduler.wgsl";
+import type { SparseCM12IncrementalActivityLayout } from
+  "./sparse-cm12-incremental-activity";
+import { createSparseCM12IncrementalActivityWGSL } from
+  "./sparse-cm12-incremental-activity.wgsl";
+import type { SparseCM12CanonicalMembershipLayout } from
+  "./sparse-cm12-canonical-membership";
+import { createSparseCM12CanonicalMembershipWGSL } from
+  "./sparse-cm12-canonical-membership.wgsl";
+import {
+  SPARSE_CM12_PRESSURE_MEMBERSHIP_MODE,
+  SPARSE_CM12_PRESSURE_REPAIR_HEADER,
+} from "./sparse-cm12-pressure-membership";
+import { createSparseCM12FramePlanWGSL } from "../../core/sparse-cm12-frame-plan.wgsl";
+import type { SparseCM12FramePlanLayout } from "../../core/sparse-cm12-frame-plan";
+import { createSparseCM12FramePlanPresentationWGSL } from
+  "./sparse-cm12-frame-plan-presentation.wgsl";
+import type { SparseCM12FramePlanPresentationLayout } from
+  "./sparse-cm12-frame-plan-presentation";
+import {
+  SPARSE_CM12_FRAME_CONTROL_COVERAGE,
+  SPARSE_CM12_FRAME_CONTROL_FAULT,
+  type SparseCM12FrameControlLayout,
+} from "./sparse-cm12-frame-control";
+import { createSparseCM12FrameControlWGSL } from "./sparse-cm12-frame-control.wgsl";
+import type { SparseCM12PressureTopologyRepairLayout } from
+  "./sparse-cm12-pressure-topology-repair";
+import { createSparseCM12PressureTopologyRepairWGSL } from
+  "./sparse-cm12-pressure-topology-repair.wgsl";
+import { SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_CAUSE } from
+  "./sparse-cm12-pressure-topology-repair";
+import type { SparseCM12PersistentPressureCacheLayout } from
+  "./sparse-cm12-persistent-pressure-cache";
+import { createSparseCM12PersistentPressureCacheWGSL } from
+  "./sparse-cm12-persistent-pressure-cache.wgsl";
+import type { SparseCM12PressureSolveAuthorityLayout } from
+  "./sparse-cm12-pressure-solve-authority";
+import { createSparseCM12PressureSolveAuthorityWGSL } from
+  "./sparse-cm12-pressure-solve-authority.wgsl";
+import type { SparseCM12FaceProjectionAuthorityLayout } from
+  "./sparse-cm12-face-projection-authority";
+import { createSparseCM12FaceProjectionAuthorityWGSL } from
+  "./sparse-cm12-face-projection-authority.wgsl";
+import type { SparseCM12FacePreparationTileCensusLayout } from
+  "./sparse-cm12-face-preparation-tile-census";
+import { createSparseCM12FacePreparationTileCensusWGSL } from
+  "./sparse-cm12-face-preparation-tile-census.wgsl";
+import type { SparseCM12FpaVexReadCensusLayout } from
+  "./sparse-cm12-fpa-vex-read-census";
+import { createSparseCM12FpaVexReadCensusWGSL } from
+  "./sparse-cm12-fpa-vex-read-census.wgsl";
+import type { SparseCM12SRR1IngressLayout } from
+  "./sparse-cm12-srr1-runtime-adapter";
+import { createSparseCM12SRR1ResidentIngressWGSL } from
+  "./sparse-cm12-srr1-resident-ingress.wgsl";
+import { SPARSE_CM12_SCALAR_RESULT_CAUSE } from
+  "./sparse-cm12-scalar-result-receipts";
+import type { SparseCM12VexActivityBatchLayout } from
+  "./sparse-cm12-vex-activity-batch";
+import { createSparseCM12VexActivityBatchWGSL } from
+  "./sparse-cm12-vex-activity-batch.wgsl";
+import type { SparseCM12PressureAddressingABLayout,
+  SparseCM12PressureAddressingABModeName } from
+  "./sparse-cm12-pressure-addressing-ab";
+import { createSparseCM12PressureAddressingABWGSL } from
+  "./sparse-cm12-pressure-addressing-ab.wgsl";
+import {
+  SPARSE_CM12_VELOCITY_EXTENSION_CAUSE,
+  SPARSE_CM12_VELOCITY_EXTENSION_HEADER,
+} from "./sparse-cm12-velocity-extension";
 
 /**
  * Compact, GPU-resident Sparse CM12 frame kernel.
@@ -10,11 +87,272 @@ import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
  */
 export type SparseCM12BrickFineResolution = 4 | 8 | 16;
 
+export interface SparseCM12TemporalWorklistLayout {
+  readonly headerBaseWords: number;
+  readonly cellListBaseWords: number;
+  readonly rowListBaseWords: number;
+  readonly cellFlagABaseWords: number;
+  readonly cellFlagBBaseWords: number;
+  readonly totalWords: number;
+}
+
+/** Persistent dense pressure membership plus bounded local change journals. */
+export interface SparseCM12PressureRepairLayout {
+  readonly cellSlotBaseWords: number;
+  readonly rowSlotBaseWords: number;
+  readonly cellChangeBaseWords: number;
+  readonly rowChangeBaseWords: number;
+  readonly brickStateBaseWords: number;
+  readonly rowTopologyStampBaseWords: number;
+  readonly aggregateEdgeForFineEdgeBaseWords: number;
+  readonly aggregateEdgeSourceBaseWords: number;
+  readonly hierarchyEdgeForAggregateBaseWords: readonly number[];
+  readonly headerBaseWords: number;
+  readonly totalWords: number;
+}
+
+function createTemporalWorklistWGSL(
+  layout: SparseCM12TemporalWorklistLayout,
+): string {
+  const h = layout.headerBaseWords;
+  return /* wgsl */ `
+const TEMPORAL_CELL_COUNT_AT:u32=${h}u;
+const TEMPORAL_ROW_COUNT_AT:u32=${h + 4}u;
+const TEMPORAL_CELL_LIST:u32=${layout.cellListBaseWords}u;
+const TEMPORAL_ROW_LIST:u32=${layout.rowListBaseWords}u;
+const TEMPORAL_CELL_FLAG_A:u32=${layout.cellFlagABaseWords}u;
+const TEMPORAL_CELL_FLAG_B:u32=${layout.cellFlagBBaseWords}u;
+const TEMPORAL_F32_POSITIVE_ZERO:u32=0x00000000u;
+const TEMPORAL_F32_ONE:u32=0x3f800000u;
+// The exact bit-change seed is the production path. The immutable "current"
+// QA constructor overrides this to false so the former canonical-value seed
+// remains available as a byte-exact comparison oracle.
+override TEMPORAL_CHANGE_SEED_QA:bool=true;
+override TEMPORAL_SEED_COUNT_QA:bool=false;
+const TEMPORAL_SEED_COUNT_AT:u32=${h + 8}u;
+const TEMPORAL_DILATION_A_COUNT_AT:u32=${h + 9}u;
+
+// 0 = exact dry authority, 1 = exact flooded authority, 2 = unresolved.
+fn temporalScalarEndpointPhaseAt(cell:u32,densityOffset:u32,gammaOffset:u32)->u32{
+  if(!cellActive(cell)||bitcast<u32>(cellOpenFraction(cell))!=TEMPORAL_F32_ONE
+    ||bitcast<u32>(state[gammaOffset+cell])!=TEMPORAL_F32_ONE){return 2u;}
+  let rho=bitcast<u32>(state[densityOffset+cell]);
+  if(rho==TEMPORAL_F32_POSITIVE_ZERO){return 0u;}
+  if(rho==TEMPORAL_F32_ONE){return 1u;}
+  return 2u;
+}
+
+// Exact constant-field authority. This is a value/topology certificate, not a
+// scene heuristic: any cut face, non-two-term row, phase value, moving solid,
+// high local CFL, or noncanonical neighbor stays on the ordinary path.
+fn temporalScalarCellCanonicalAt(cell:u32,densityOffset:u32,gammaOffset:u32)->bool{
+  let phase=temporalScalarEndpointPhaseAt(cell,densityOffset,gammaOffset);
+  if(phase==2u){atomicOr(&activity[27],1u);return false;}
+  let velocityAt=destinationCellVelocity()+4u*cell;
+  // A dry constant field has no characteristic payload to move. Flooded cells
+  // require a bounded trace. The collocation producer deliberately clears w
+  // after projection because w is the *next extrapolation* marker, not a
+  // validity bit for the projected xyz values observed here. The next-frame
+  // mass receipt checks w again after all eight extrapolation sweeps.
+  if(phase==1u&&(length(vec3f(state[velocityAt],state[velocityAt+1u],
+      state[velocityAt+2u]))*p.frame.x
+      >0.75*cellMinimumWidth(cell))){atomicOr(&activity[27],4u);return false;}
+  var sideMask=0u;
+  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+    let row=incidenceRow(incidence);
+    if(!rowAccepted(row)||rowArea(row)<=1e-8){
+      atomicOr(&activity[27],8u);return false;}
+    let coefficient=termCoefficient(incidenceTerm(incidence));
+    let side=2u*rowAxis(row)+select(0u,1u,coefficient>0.0);
+    sideMask|=1u<<side;
+    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);var hasNeighbor=false;
+    for(var term=begin;term<end;term+=1u){
+      let candidate=termCell(term);if(candidate==cell){continue;}
+      hasNeighbor=true;
+      if(temporalScalarEndpointPhaseAt(candidate,densityOffset,gammaOffset)!=phase){
+        atomicOr(&activity[27],16u);return false;
+      }
+    }
+    if(!hasNeighbor){atomicOr(&activity[27],16u);return false;}
+  }
+  if(sideMask!=63u){atomicOr(&activity[27],2u);return false;}
+  return true;
+}
+
+@compute @workgroup_size(1)
+fn resetTemporalScalarWorklists(){
+  atomicStore(&activity[TEMPORAL_CELL_COUNT_AT],0u);
+  atomicStore(&activity[TEMPORAL_CELL_COUNT_AT+1u],0u);
+  atomicStore(&activity[TEMPORAL_CELL_COUNT_AT+2u],1u);
+  atomicStore(&activity[TEMPORAL_CELL_COUNT_AT+3u],1u);
+  atomicStore(&activity[TEMPORAL_ROW_COUNT_AT],0u);
+  atomicStore(&activity[TEMPORAL_ROW_COUNT_AT+1u],0u);
+  atomicStore(&activity[TEMPORAL_ROW_COUNT_AT+2u],1u);
+  atomicStore(&activity[TEMPORAL_ROW_COUNT_AT+3u],1u);
+  if(TEMPORAL_SEED_COUNT_QA){
+    atomicStore(&activity[TEMPORAL_SEED_COUNT_AT],0u);
+    atomicStore(&activity[TEMPORAL_DILATION_A_COUNT_AT],0u);
+  }
+  atomicStore(&activity[27],0x80000000u);
+}
+
+// Pressure membership consumes the fully conditioned destination fields, not
+// the pre-transport source banks. This observation-only pass builds the same
+// conservative two-ring frontier after sharpening has published those values.
+@compute @workgroup_size(64)
+fn classifyTemporalPressureCells(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  // Exact endpoint transitions can look canonical on the current frame while
+  // the persistent PCM bit still carries the previous phase. The global QA
+  // census is presently our correctness authority, so explicitly root that
+  // transition without mutating pressure state; the ordinary incidence
+  // dilation below supplies the dependent row closure.
+  let membershipChanged=pressureCellMembershipPredicate(cell)!=pcmCellContains(cell);
+  var slow=false;
+  if(TEMPORAL_CHANGE_SEED_QA){
+    // Bitwise-identical scalar endpoints do not require
+    // pressure/presentation/activity repair merely because their value is
+    // noncanonical. Rigid/cut cells retain the conservative certificate.
+    let scalarChanged=bitcast<u32>(state[sourceDensity()+cell])
+        !=bitcast<u32>(state[destinationDensity()+cell])
+      ||bitcast<u32>(state[sourceGamma()+cell])
+        !=bitcast<u32>(state[destinationGamma()+cell]);
+    let conservative=hasRigidBodies()
+      ||bitcast<u32>(cellOpenFraction(cell))!=TEMPORAL_F32_ONE;
+    slow=membershipChanged||scalarChanged||conservative;
+  }else{
+    slow=membershipChanged
+      ||!temporalScalarCellCanonicalAt(cell,destinationDensity(),destinationGamma());
+  }
+  atomicStore(&activity[TEMPORAL_CELL_FLAG_A+cell],select(0u,1u,slow));
+  if(TEMPORAL_SEED_COUNT_QA&&slow){
+    atomicAdd(&activity[TEMPORAL_SEED_COUNT_AT],1u);
+  }
+}
+
+fn dilateTemporalScalarCell(cell:u32,inputBase:u32)->u32{
+  if(atomicLoad(&activity[inputBase+cell])!=0u){return 1u;}
+  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+    let row=incidenceRow(incidence);if(!rowAccepted(row)){return 1u;}
+    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    for(var term=begin;term<end;term+=1u){
+      let neighbor=termCell(term);
+      if(atomicLoad(&activity[inputBase+neighbor])!=0u){return 1u;}
+    }
+  }
+  return 0u;
+}
+
+@compute @workgroup_size(64)
+fn dilateTemporalScalarAtoB(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let slow=dilateTemporalScalarCell(cell,TEMPORAL_CELL_FLAG_A);
+  atomicStore(&activity[TEMPORAL_CELL_FLAG_B+cell],slow);
+  if(TEMPORAL_SEED_COUNT_QA&&slow!=0u){
+    atomicAdd(&activity[TEMPORAL_DILATION_A_COUNT_AT],1u);
+  }
+}
+
+@compute @workgroup_size(64)
+fn dilateTemporalScalarBtoA(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  atomicStore(&activity[TEMPORAL_CELL_FLAG_A+cell],
+    dilateTemporalScalarCell(cell,TEMPORAL_CELL_FLAG_B));
+}
+
+@compute @workgroup_size(64)
+fn compactTemporalScalarCells(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID
+    ||atomicLoad(&activity[TEMPORAL_CELL_FLAG_A+cell])==0u){return;}
+  let slot=atomicAdd(&activity[TEMPORAL_CELL_COUNT_AT],1u);
+  atomicStore(&activity[TEMPORAL_CELL_LIST+slot],cell);
+}
+
+@compute @workgroup_size(64)
+fn compactTemporalScalarRows(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
+  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);var slow=false;
+  for(var term=begin;term<end;term+=1u){
+    slow=slow||atomicLoad(&activity[TEMPORAL_CELL_FLAG_A+termCell(term)])!=0u;
+  }
+  if(!slow){return;}
+  let slot=atomicAdd(&activity[TEMPORAL_ROW_COUNT_AT],1u);
+  atomicStore(&activity[TEMPORAL_ROW_LIST+slot],row);
+}
+
+@compute @workgroup_size(1)
+fn finalizeTemporalScalarWorklists(){
+  let cells=atomicLoad(&activity[TEMPORAL_CELL_COUNT_AT]);
+  let rows=atomicLoad(&activity[TEMPORAL_ROW_COUNT_AT]);
+  atomicStore(&activity[TEMPORAL_CELL_COUNT_AT+1u],(cells+63u)/64u);
+  atomicStore(&activity[TEMPORAL_ROW_COUNT_AT+1u],(rows+63u)/64u);
+  atomicStore(&activity[25],cells);atomicStore(&activity[26],rows);
+}
+
+fn temporalScalarCellInvocation(invocation:u32)->u32{
+  let count=atomicLoad(&activity[TEMPORAL_CELL_COUNT_AT]);
+  return select(INVALID,atomicLoad(&activity[TEMPORAL_CELL_LIST+invocation]),invocation<count);
+}
+fn temporalScalarRowInvocation(invocation:u32)->u32{
+  let count=atomicLoad(&activity[TEMPORAL_ROW_COUNT_AT]);
+  return select(INVALID,atomicLoad(&activity[TEMPORAL_ROW_LIST+invocation]),invocation<count);
+}
+`;
+}
+
+function createResidentDirtySchedulerEntriesWGSL(
+  layout: SparseCM12DirtySchedulerLayout,
+): string {
+  return /* wgsl */ `
+@compute @workgroup_size(1)
+fn beginDirtySchedulerFrame(){
+  let accepted=cm12DirtyLoad(${layout.schedulerBaseWords
+    + SPARSE_CM12_DIRTY_SCHEDULER_HEADER.acceptedGeneration}u);
+  _=cm12DirtyBeginCandidate(accepted,accepted+1u);
+}
+
+@compute @workgroup_size(1)
+fn sealDirtySchedulerPreEpoch(){cm12DirtySealPreOpenPost();}
+
+@compute @workgroup_size(64)
+fn finalizeQueuedDirtySchedulerPackets(@builtin(global_invocation_id)gid:vec3u){
+  let invocation=gid.x;
+  let count=cm12DirtyLoad(${layout.queueHeaderBaseWords}u);
+  if(invocation>=count){return;}
+  let tile=cm12DirtyLoad(${layout.frontierABaseWords}u+invocation);
+  _=cm12DirtyFinalizePacket(tile);
+}
+
+@compute @workgroup_size(1)
+fn finalizeDirtySchedulerEpoch(){
+  _=cm12DirtyFinalizeEpoch();
+}
+`;
+}
+
 /** Construction-time specialization keeps brick geometry in WGSL constants,
  * so the hot lookup/transfer paths pay no runtime ladder branch. */
 export function createWebgpuSparseCM12ResidentWGSL(
-  brickFineResolution: SparseCM12BrickFineResolution = 8,
-  presentationPageResolution: SparseCM12BrickFineResolution = 4,
+  brickFineResolution: SparseCM12BrickFineResolution = 16,
+  presentationPageResolution: SparseCM12BrickFineResolution = 16,
+  dirtySchedulerLayout?: SparseCM12DirtySchedulerLayout,
+  temporalWorklistLayout?: SparseCM12TemporalWorklistLayout,
+  pressureRepairLayout?: SparseCM12PressureRepairLayout,
+  incrementalActivityLayout?: SparseCM12IncrementalActivityLayout,
+  canonicalMembershipLayout?: SparseCM12CanonicalMembershipLayout,
+  framePlanLayout?: SparseCM12FramePlanLayout,
+  framePlanPresentationLayout?: SparseCM12FramePlanPresentationLayout,
+  frameControlLayout?: SparseCM12FrameControlLayout,
+  scalarResultIngressLayout?: SparseCM12SRR1IngressLayout,
+  pressureTopologyRepairLayout?: SparseCM12PressureTopologyRepairLayout,
+  persistentPressureCacheLayout?: SparseCM12PersistentPressureCacheLayout,
+  pressureSolveAuthorityLayout?: SparseCM12PressureSolveAuthorityLayout,
+  faceProjectionAuthorityLayout?: SparseCM12FaceProjectionAuthorityLayout,
+  vexActivityBatchLayout?: SparseCM12VexActivityBatchLayout,
+  pressureAddressingABLayout?: SparseCM12PressureAddressingABLayout,
+  pressureAddressingFixedMode?: SparseCM12PressureAddressingABModeName,
+  facePreparationTileCensusLayout?: SparseCM12FacePreparationTileCensusLayout,
+  fpaVexReadCensusLayout?: SparseCM12FpaVexReadCensusLayout,
 ): string {
   if (presentationPageResolution > brickFineResolution
     || brickFineResolution % presentationPageResolution !== 0) {
@@ -28,11 +366,321 @@ export function createWebgpuSparseCM12ResidentWGSL(
   // authority directly, so scale two is the finest cached reconstruction.
   // A finer macro can exceed this bounded cache and takes the direct fallback.
   const presentationCacheCapacity = (presentationPageResolution / 2 + 2) ** 3;
+  const dirtySchedulerLibrary = dirtySchedulerLayout
+    ? createSparseCM12DirtySchedulerWGSL({
+      layout: dirtySchedulerLayout, arenaName: "activity", workgroupSize: 64,
+    })
+    : "";
+  const dirtySchedulerEntries = dirtySchedulerLayout
+    ? createResidentDirtySchedulerEntriesWGSL(dirtySchedulerLayout)
+    : "";
+  const temporalWorklistEntries = temporalWorklistLayout
+    ? createTemporalWorklistWGSL(temporalWorklistLayout)
+    : /* wgsl */ `
+const TEMPORAL_CELL_FLAG_A:u32=0u;
+fn temporalScalarCellInvocation(invocation:u32)->u32{
+  return acceptedTemplateCellInvocation(invocation);
+}
+fn temporalScalarRowInvocation(invocation:u32)->u32{
+  return acceptedTemplateRowInvocation(invocation);
+}
+`;
+  const incrementalActivityEntries = dirtySchedulerLayout && incrementalActivityLayout
+    ? createSparseCM12IncrementalActivityWGSL(incrementalActivityLayout,
+      dirtySchedulerLayout)
+    : /* wgsl */ `
+fn incrementalActivityGeneration()->u32{return 0u;}
+fn incrementalActivityMarkCellClosure(cell:u32,cause:u32){_=cell;_=cause;}
+fn incrementalActivityBrickInvocation(invocation:u32)->u32{
+  return select(INVALID,invocation,invocation<p.dispatch.w);
+}
+fn incrementalActivityBrickTileMask(brick:u32)->vec2u{_=brick;return vec2u(0u);}
+fn incrementalActivityAcceptMeasuredTopology(brick:u32){_=brick;}
+fn incrementalActivityRemoveCensus(brick:u32){_=brick;}
+fn incrementalActivityAddCensus(brick:u32,score:u32,reasons:u32){
+  _=brick;atomicMax(&activity[1],score);
+  if((reasons&1u)!=0u){atomicAdd(&activity[2],1u);}
+  let value=f32(score)/255.0;
+  if(value>=p.activityTiming.y){atomicAdd(&activity[3],1u);}
+  if(value<=p.activityTiming.w){atomicAdd(&activity[4],1u);}
+  atomicAdd(&activity[6],1u);
+}
+`;
+  const framePlanEntries = framePlanLayout
+    ? createSparseCM12FramePlanWGSL({ layout: framePlanLayout, arenaName: "activity" })
+    : "";
+  const framePlanPresentationEntries = framePlanLayout && framePlanPresentationLayout
+    ? createSparseCM12FramePlanPresentationWGSL({
+      layout: framePlanPresentationLayout,
+      framePlanPrefix: "cm12FramePlan",
+      packetArenaName: "activity",
+      hookPrefix: "cm12Presentation",
+    })
+    : "";
+  const vexActivityBatchEntries = vexActivityBatchLayout
+    ? createSparseCM12VexActivityBatchWGSL({
+      layout: vexActivityBatchLayout,
+      arenaName: "activity",
+      stateName: "state",
+      topologyGenerationExpression: "atomicLoad(&topologyArena[topologyWorklistBase()])",
+      sourceFrameGenerationExpression: "cm12FCAcceptedGeneration()",
+      nextFrameGenerationExpression: "cm12FCCandidateGeneration()",
+      frameAuthorityReadyExpression: "cm12FCFrameSealed()",
+      provenanceHookPrefix: "cm12Resident",
+    })
+    : "";
+  const canonicalMembershipEntries = canonicalMembershipLayout
+    ? createSparseCM12CanonicalMembershipWGSL({
+      layout: canonicalMembershipLayout,
+      arenaName: "activity",
+      workgroupSize: 64,
+    })
+    : /* wgsl */ `
+fn pcmCellBegin(expected:u32)->bool{_=expected;return true;}
+fn pcmRowBegin(expected:u32)->bool{_=expected;return true;}
+fn pcmCellSetCandidate(id:u32,enabled:bool,cause:u32,closure:bool)->bool{
+  _=id;_=enabled;_=cause;_=closure;return true;
+}
+fn pcmRowSetCandidate(id:u32,enabled:bool,cause:u32,closure:bool)->bool{
+  _=id;_=enabled;_=cause;_=closure;return true;
+}
+fn pcmCellFinalizeFrontier()->bool{return true;}
+fn pcmRowFinalizeFrontier()->bool{return true;}
+fn pcmCellFinalize()->bool{return true;}
+fn pcmRowFinalize()->bool{return true;}
+fn pcmCellRankSelect(rank:u32)->u32{return pressureCellListInvocation(rank);}
+fn pcmRowRankSelect(rank:u32)->u32{return pressureRowListInvocation(rank);}
+fn pcmCellContains(id:u32)->bool{return isLiquid(id);}
+fn pcmRowContains(id:u32)->bool{return state[p.stateOffsets3.x+id]>0.0;}
+fn pcmCellAcceptedCount()->u32{return fineSamples[0];}
+fn pcmRowAcceptedCount()->u32{return fineSamples[pressureRowHeader()];}
+fn pcmCellBootstrapEpoch()->bool{return true;}
+fn pcmRowBootstrapEpoch()->bool{return true;}
+fn pcmCellCandidateGeneration()->u32{return 1u;}
+fn pcmRowCandidateGeneration()->u32{return 1u;}
+fn pcmCellFault()->u32{return 0u;}
+fn pcmRowFault()->u32{return 0u;}
+fn pcmCellFirstFault()->u32{return INVALID;}
+fn pcmRowFirstFault()->u32{return INVALID;}
+fn pcmCellPhase()->u32{return 1u;}
+fn pcmRowPhase()->u32{return 1u;}
+fn pcmCellDirtyCount()->u32{return 0u;}
+fn pcmRowDirtyCount()->u32{return 0u;}
+fn pcmCellAcceptedGeneration()->u32{return 0u;}
+fn pcmRowAcceptedGeneration()->u32{return 0u;}
+`;
+  const pressureRepairEntries = pressureRepairLayout ? /* wgsl */ `
+const PRESSURE_CELL_SLOT_BASE:u32=${pressureRepairLayout.cellSlotBaseWords}u;
+const PRESSURE_ROW_SLOT_BASE:u32=${pressureRepairLayout.rowSlotBaseWords}u;
+const PRESSURE_CELL_CHANGE_BASE:u32=${pressureRepairLayout.cellChangeBaseWords}u;
+const PRESSURE_ROW_CHANGE_BASE:u32=${pressureRepairLayout.rowChangeBaseWords}u;
+const PRESSURE_BRICK_STATE_BASE:u32=${pressureRepairLayout.brickStateBaseWords}u;
+const PRESSURE_ROW_TOPOLOGY_STAMP_BASE:u32=${pressureRepairLayout.rowTopologyStampBaseWords}u;
+const PRESSURE_REPAIR_HEADER:u32=${pressureRepairLayout.headerBaseWords}u;
+const PRESSURE_REPAIR_INITIALIZED:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.initialized}u;
+const PRESSURE_REPAIR_CELL_CHANGES:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.cellChanges}u;
+const PRESSURE_REPAIR_ROW_CHANGES:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.rowChanges}u;
+const PRESSURE_REPAIR_FAULT:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.fault}u;
+const PRESSURE_REPAIR_TOPOLOGY_GENERATION:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.topologyGeneration}u;
+const PRESSURE_REPAIR_EPOCH:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.epoch}u;
+const PRESSURE_REPAIR_MODE:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.mode}u;
+const PRESSURE_BOOTSTRAP_CELL_INDIRECT:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.bootstrapCellIndirect}u;
+const PRESSURE_BOOTSTRAP_ROW_INDIRECT:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.bootstrapRowIndirect}u;
+const PRESSURE_MODE_FAIL_CLOSED:u32=${SPARSE_CM12_PRESSURE_MEMBERSHIP_MODE.failClosed}u;
+const PRESSURE_MODE_BOOTSTRAP:u32=${SPARSE_CM12_PRESSURE_MEMBERSHIP_MODE.bootstrap}u;
+const PRESSURE_MODE_INCREMENTAL:u32=${SPARSE_CM12_PRESSURE_MEMBERSHIP_MODE.incremental}u;
+` : /* wgsl */ `
+const PRESSURE_CELL_SLOT_BASE:u32=0u;
+const PRESSURE_ROW_SLOT_BASE:u32=0u;
+const PRESSURE_CELL_CHANGE_BASE:u32=0u;
+const PRESSURE_ROW_CHANGE_BASE:u32=0u;
+const PRESSURE_BRICK_STATE_BASE:u32=0u;
+const PRESSURE_ROW_TOPOLOGY_STAMP_BASE:u32=0u;
+const PRESSURE_REPAIR_HEADER:u32=0u;
+const PRESSURE_REPAIR_INITIALIZED:u32=0u;
+const PRESSURE_REPAIR_CELL_CHANGES:u32=1u;
+const PRESSURE_REPAIR_ROW_CHANGES:u32=2u;
+const PRESSURE_REPAIR_FAULT:u32=3u;
+const PRESSURE_REPAIR_TOPOLOGY_GENERATION:u32=4u;
+const PRESSURE_REPAIR_EPOCH:u32=5u;
+const PRESSURE_REPAIR_MODE:u32=6u;
+const PRESSURE_BOOTSTRAP_CELL_INDIRECT:u32=7u;
+const PRESSURE_BOOTSTRAP_ROW_INDIRECT:u32=10u;
+const PRESSURE_MODE_FAIL_CLOSED:u32=0u;
+const PRESSURE_MODE_BOOTSTRAP:u32=1u;
+const PRESSURE_MODE_INCREMENTAL:u32=2u;
+`;
+  const presentationTemporalReuse = temporalWorklistLayout ? /* wgsl */ `
+  // Fine samples sourced from exact-authority scalar cells retain their prior
+  // payload. Keep one workgroup per page: workgroup-per-tile publication is
+  // prohibitively expensive on Metal even when most tiles return early.
+  let temporalReady=(atomicLoad(&activity[27])&0x80000000u)!=0u;
+  let reusePresentationSamples=temporalReady&&atomicLoad(&activity[17])==0u
+    &&brickActive(brick)&&scale==1u;
+` : "  let reusePresentationSamples=false;";
+  const frameControlEntries = frameControlLayout
+    ? createSparseCM12FrameControlWGSL({
+      layout: frameControlLayout, controlName: "topologyArena",
+    })
+    : /* wgsl */ `
+fn cm12FCSourceScalarParity()->u32{return select(0u,1u,p.frame.w>0.5);}
+fn cm12FCDestinationScalarParity()->u32{return cm12FCSourceScalarParity()^1u;}
+fn cm12FCSourceFaceParity()->u32{return cm12FCSourceScalarParity();}
+fn cm12FCDestinationFaceParity()->u32{return cm12FCSourceFaceParity()^1u;}
+fn cm12FCCandidateGeneration()->u32{return 1u;}
+fn cm12FCAcceptedGeneration()->u32{return 1u;}
+fn cm12FCFrameSealed()->bool{return true;}
+fn cm12FCBegin()->bool{return true;}
+fn cm12FCPublishBody(count:u32)->bool{_=count;return true;}
+fn cm12FCPublishBoundary(live:bool)->bool{_=live;return true;}
+fn cm12FCSeal()->bool{return true;}
+fn cm12FCPublishOutput(mask:u32)->bool{_=mask;return true;}
+fn cm12FCCommit()->bool{return true;}
+fn cm12FCInvalidateD4(cause:u32,owner:u32)->bool{_=cause;_=owner;return true;}
+`;
+  const scalarAuthorityEntries = scalarResultIngressLayout
+    ? createSparseCM12SRR1ResidentIngressWGSL({
+      layout: scalarResultIngressLayout, arenaName: "activity",
+    })
+    : /* wgsl */ `
+fn sirResidentBeginFrame(generation:u32,topologyGeneration:u32,sourceParity:u32)->bool{
+  _=generation;_=topologyGeneration;_=sourceParity;return true;}
+fn sirResidentAppendEvent(tile:u32,generation:u32,cause:u32)->bool{
+  _=tile;_=generation;_=cause;return true;}
+fn sirResidentEventStamped(tile:u32,generation:u32)->bool{
+  _=tile;_=generation;return false;}
+fn sirResidentEventCause(tile:u32,generation:u32)->u32{
+  _=tile;_=generation;return 0u;}
+fn sirResidentResetCopiedEvents(){}
+fn sirResidentBeginReceiptBatch(){}
+fn sirResidentCandidateGeneration()->u32{return 1u;}
+fn sirResidentTopologyGeneration()->u32{return 1u;}
+fn sirResidentSourceParity()->u32{return 0u;}
+fn sirResidentWorkTile(rank:u32)->u32{return rank;}
+fn sirResidentPublishReceipt(rank:u32,tile:u32,topologyGeneration:u32,
+  bank0Generation:u32,bank1Generation:u32,headResultGeneration:u32,
+  coveredWords:u32,expectedWords:u32,sourceMismatchCount:u32,
+  destinationMismatchCount:u32,dependencyGeneration:u32,
+  dependencyCertifiedGeneration:u32,resultKind:u32,generation:u32)->bool{
+  _=rank;_=tile;_=topologyGeneration;_=bank0Generation;_=bank1Generation;
+  _=headResultGeneration;_=coveredWords;_=expectedWords;_=sourceMismatchCount;
+  _=destinationMismatchCount;_=dependencyGeneration;_=dependencyCertifiedGeneration;
+  _=resultKind;_=generation;return true;}
+`;
+  const pressureAddressingABEntries = pressureAddressingABLayout
+    ? createSparseCM12PressureAddressingABWGSL({
+      layout: pressureAddressingABLayout, arenaName: "activity", workgroupSize: 64,
+      fixedMode: pressureAddressingFixedMode,
+    })
+    : /* wgsl */ `
+fn pabPressureCellAddress(rank:u32)->u32{return pcmCellRankSelect(rank);}
+fn pabPressureAddressingReady()->bool{return true;}
+`;
+  const pressureTopologyRepairEntries = pressureTopologyRepairLayout
+    ? createSparseCM12PressureTopologyRepairWGSL({
+      layout: pressureTopologyRepairLayout, arenaName: "topologyArena",
+      prefix: "ptr", workgroupSize: 64,
+    })
+    : /* wgsl */ `
+const ptrH_COVERED_PRODUCER_RECEIPTS:u32=0u;
+fn ptrRecordChangedBrick(brick:u32,oldState:u32,newState:u32,cause:u32,
+ receipt:bool)->bool{_=brick;_=oldState;_=newState;_=cause;_=receipt;return true;}
+fn ptrSealTopologyJournal(expected:u32,topologyGeneration:u32)->bool{
+ _=expected;_=topologyGeneration;return true;}
+fn ptrRejectTopologyJournal()->bool{return true;}
+`;
+  const persistentPressureCacheEntries = persistentPressureCacheLayout
+    ? createSparseCM12PersistentPressureCacheWGSL({
+      layout: persistentPressureCacheLayout,
+      arenaName: "topologyArena",
+      cellContainsFunction: "pcmCellContains",
+      rowContainsFunction: "pcmRowContains",
+      solidRowScaleFunction: "pcfResidentSolidRowScale",
+      workgroupSize: 64,
+    })
+    : /* wgsl */ `
+fn pcfBegin(expectedEvents:u32)->bool{_=expectedEvents;return true;}
+fn pcfFinalizeFrontier()->bool{return true;}
+fn pcfRecordCellMembershipEvent(cell:u32)->bool{_=cell;return true;}
+fn pcfRecordTopologyCellEvent(cell:u32)->bool{_=cell;return true;}
+fn pcfStoreThetaAndRecord(row:u32,theta:f32)->bool{_=row;_=theta;return true;}
+fn pcfEdgeWeight(edge:u32)->f32{_=edge;return 0.0;}
+fn pcfStoreEdgeWeight(edge:u32,value:f32){_=edge;_=value;}
+fn pcfDiagonal(cell:u32)->f32{_=cell;return 0.0;}
+fn pcfCandidateGeneration()->u32{return 0u;}
+fn pcfAcceptedGeneration()->u32{return 0u;}
+fn pcfCaptureConsumerGenerations(){}
+fn pcfBrickWorkCount()->u32{return 0u;}
+fn pcfBrickRankSelect(rank:u32)->u32{_=rank;return INVALID;}
+`;
+  const pressureSolveAuthorityEntries = pressureSolveAuthorityLayout
+    ? createSparseCM12PressureSolveAuthorityWGSL({
+      layout: pressureSolveAuthorityLayout, arenaName: "topologyArena",
+      prefix: "psa", workgroupSize: 64,
+    })
+    : /* wgsl */ `
+fn psaWetBrickInvocation(invocation:u32)->u32{return invocation;}
+fn psaActiveHierarchyNodeAddress(invocation:u32)->vec2u{
+  return pressureHierarchyGroupAddress(invocation);}
+fn psaWetBrickCount()->u32{return p.dispatch.w;}
+fn psaActiveHierarchyNodeCount()->u32{return 0u;}
+fn psaAcceptedGeneration()->u32{return 0u;}
+fn psaFaultCode()->u32{return 0u;}
+fn psaWetBrickContains(brick:u32)->bool{return brick<p.dispatch.w;}
+fn psaMarkTopologyBrickBlast(brick:u32,receipt:bool)->bool{
+  _=brick;_=receipt;return true;}
+`;
+  const faceProjectionAuthorityEntries = faceProjectionAuthorityLayout
+    ? createSparseCM12FaceProjectionAuthorityWGSL({
+      layout: faceProjectionAuthorityLayout, arenaName: "topologyArena",
+      prefix: "fpa", workgroupSize: 64,
+      preparationBootstrapInvocationFunction: "acceptedTemplateRowInvocation",
+    })
+    : /* wgsl */ `
+fn fpaPreparationRowInvocation(invocation:u32)->u32{
+  return acceptedTemplateRowInvocation(invocation);}
+fn fpaProjectionRowInvocation(invocation:u32)->u32{
+  return pressureRowInvocation(invocation);}
+fn fpaPreparationComplete(row:u32)->bool{_=row;return true;}
+fn fpaProjectionComplete(row:u32)->bool{_=row;return true;}
+fn fpaStorePreparedAuthority(row:u32,bits:u32){_=row;_=bits;}
+fn fpaPreparedAuthorityBits(row:u32)->u32{_=row;return 0u;}
+fn fpaPreparationMustMirrorUnprojected(row:u32)->bool{_=row;return false;}
+fn fpaProjectionMustMirror(row:u32)->bool{_=row;return false;}
+fn fpaMarkPreparationRow(row:u32,cause:u32,depth:u32,receipt:bool)->bool{
+  _=row;_=cause;_=depth;_=receipt;return true;}
+fn fpaMarkProjectionRow(row:u32,cause:u32,depth:u32,receipt:bool)->bool{
+  _=row;_=cause;_=depth;_=receipt;return true;}
+fn fpaCoverPreparationReceipt(){}
+fn fpaMarkProjectionPressureCell(cell:u32,bits:u32,cause:u32)->bool{
+  _=cell;_=bits;_=cause;return true;}
+`;
+  const facePreparationTileCensusEntries = facePreparationTileCensusLayout
+    && incrementalActivityLayout
+    ? createSparseCM12FacePreparationTileCensusWGSL({
+      layout: facePreparationTileCensusLayout, activity: incrementalActivityLayout,
+    }) : "";
+  const fpaVexReadCensusEntries = fpaVexReadCensusLayout
+    ? createSparseCM12FpaVexReadCensusWGSL(fpaVexReadCensusLayout) : "";
+  // The census is a construction-only QA specialization. Keep the ordinary
+  // production interpolation source byte-clean: no census parameter, call,
+  // or no-op seam is emitted for the production resident.
+  const fvrParameter = fpaVexReadCensusLayout ? ",censusRow:u32" : "";
+  const fvrArgument = fpaVexReadCensusLayout ? ",censusRow" : "";
+  const fvrInvalidArgument = fpaVexReadCensusLayout ? ",INVALID" : "";
+  const fvrRowArgument = fpaVexReadCensusLayout ? ",row" : "";
+  const fvrSampleRead = fpaVexReadCensusLayout
+    ? `let effective=cm12ExtensionTransportVelocity(cell);
+    fvrRecordXyzRead(censusRow,cell,effective.xyz);
+    result+=wx*wy*wz*effective.xyz;`
+    : "result+=wx*wy*wz*cm12ExtensionTransportVelocity(cell).xyz;";
   return /* wgsl */ `
 ${createCm12NumericsWGSL()}
 
 const INVALID:u32=0xffffffffu;
 const WORKGROUP:u32=64u;
+const PRESSURE_EXECUTION_QA_ORACLE:bool=${pressureSolveAuthorityLayout?.qaFullOracle
+  ? "true" : "false"};
 const ACTIVITY_HEADER_WORDS:u32=28u;
 const ACTIVITY_RECORD_WORDS:u32=39u;
 const ACTIVITY_RECOVERY_LOCK:u32=0x80000000u;
@@ -101,12 +749,29 @@ struct Params {
 // fields remain separate storage.
 @group(0)@binding(12)var<storage,read_write>activity:array<atomic<u32>>;
 @group(0)@binding(13)var<storage,read_write>candidateState:array<f32>;
-@group(0)@binding(14)var<storage,read>fineMetadata:array<u32>;
+@group(0)@binding(14)var<storage,read_write>fineMetadata:array<u32>;
 @group(0)@binding(15)var<storage,read_write>fineSamples:array<u32>;
 // Physical dyadic cell and row templates are immutable after construction.
 // Worklists are device-owned and double-buffered: a commit publishes by
 // flipping word 2 only after shadow transfer/projection has completed.
 @group(0)@binding(16)var<storage,read_write>topologyArena:array<atomic<u32>>;
+
+${frameControlEntries}
+${dirtySchedulerLibrary}
+${temporalWorklistEntries}
+${pressureRepairEntries}
+${incrementalActivityEntries}
+${canonicalMembershipEntries}
+${framePlanEntries}
+${framePlanPresentationEntries}
+${pressureTopologyRepairEntries}
+${persistentPressureCacheEntries}
+${pressureSolveAuthorityEntries}
+${faceProjectionAuthorityEntries}
+${facePreparationTileCensusEntries}
+${fpaVexReadCensusEntries}
+${vexActivityBatchEntries}
+${pressureAddressingABEntries}
 
 fn topologyWorklistBase()->u32{return atomicLoad(&topologyArena[14u]);}
 fn residencyDensityThreshold()->f32{
@@ -137,17 +802,27 @@ fn acceptedTemplateCellInvocation(invocation:u32)->u32{
 // compact ordinary-u32 pressure worklist/neighbor arena in the pressure bind
 // group. Counters are atomic only while compaction is being built; finalized
 // pressure kernels read this immutable snapshot without atomic semantics.
-fn pressureCellCount()->u32{return fineSamples[0];}
+fn pressureCellCount()->u32{return pcmCellAcceptedCount();}
 fn pressureCellWorkgroups()->u32{return fineSamples[1];}
-fn pressureCellInvocation(invocation:u32)->u32{
+fn pressureCellListInvocation(invocation:u32)->u32{
   if(invocation>=pressureCellCount()){return INVALID;}
   return fineSamples[4u+invocation];
 }
+fn pressureCellInvocation(invocation:u32)->u32{
+  let cell=pabPressureCellAddress(invocation);
+  return select(INVALID,cell,cell!=INVALID&&pcmCellContains(cell)
+    &&cellActive(cell));
+}
 fn pressureRowHeader()->u32{return 4u+p.counts.x;}
-fn pressureRowCount()->u32{return fineSamples[pressureRowHeader()];}
-fn pressureRowInvocation(invocation:u32)->u32{
+fn pressureRowCount()->u32{return pcmRowAcceptedCount();}
+fn pressureRowListInvocation(invocation:u32)->u32{
   if(invocation>=pressureRowCount()){return INVALID;}
   return fineSamples[pressureRowHeader()+4u+invocation];
+}
+fn pressureRowInvocation(invocation:u32)->u32{
+  let row=pcmRowRankSelect(invocation);
+  return select(INVALID,row,row!=INVALID&&pcmRowContains(row)&&rowAccepted(row)
+    &&state[p.stateOffsets3.x+row]>0.0);
 }
 fn pressureNeighborOffset()->u32{return pressureRowHeader()+4u+p.counts.y;}
 fn pressureExtrapolationWeightOffset()->u32{
@@ -180,7 +855,13 @@ fn brickAggregateAOffset()->u32{return brickAggregateRhsOffset()+2u*p.dispatch.w
 fn brickAggregateBOffset()->u32{return brickAggregateRhsOffset()+3u*p.dispatch.w;}
 fn brickAggregateRangeOffset()->u32{return brickAggregateRhsOffset()+4u*p.dispatch.w;}
 fn cachedPressureBrickRange(brick:u32)->vec2u{
-  let packed=bitcast<u32>(candidateState[brickAggregateRangeOffset()+brick]);
+  if(PRESSURE_EXECUTION_QA_ORACLE){
+    let packed=bitcast<u32>(candidateState[brickAggregateRangeOffset()+brick]);
+    if(packed==0u){return vec2u(0u);}let level=(packed&7u)-1u;
+    return vec2u((packed>>3u)-1u,1u<<(3u*level));
+  }
+  let packed=atomicLoad(&topologyArena[
+    ${persistentPressureCacheLayout?.brickAggregateRangeBaseWords ?? 0}u+brick]);
   if(packed==0u){return vec2u(0u);}
   let level=(packed&7u)-1u;
   return vec2u((packed>>3u)-1u,1u<<(3u*level));
@@ -261,14 +942,60 @@ fn shadowTemplateRowInvocation(invocation:u32)->u32{
 
 fn ta(index:u32)->u32{return atomicLoad(&topologyArena[index]);}
 fn taf(index:u32)->f32{return bitcast<f32>(ta(index));}
-fn sourceDensity()->u32{return select(p.stateOffsets0.x,p.stateOffsets0.y,p.frame.w>0.5);}
-fn destinationDensity()->u32{return select(p.stateOffsets0.y,p.stateOffsets0.x,p.frame.w>0.5);}
-fn sourceGamma()->u32{return select(p.stateOffsets0.z,p.stateOffsets0.w,p.frame.w>0.5);}
-fn destinationGamma()->u32{return select(p.stateOffsets0.w,p.stateOffsets0.z,p.frame.w>0.5);}
-fn sourceCellVelocity()->u32{return select(p.stateOffsets1.x,p.stateOffsets1.y,p.frame.w>0.5);}
-fn destinationCellVelocity()->u32{return select(p.stateOffsets1.y,p.stateOffsets1.x,p.frame.w>0.5);}
-fn sourceFaceVelocity()->u32{return select(p.stateOffsets1.z,p.stateOffsets1.w,p.frame.w>0.5);}
-fn destinationFaceVelocity()->u32{return select(p.stateOffsets1.w,p.stateOffsets1.z,p.frame.w>0.5);}
+fn sourceDensity()->u32{return select(p.stateOffsets0.x,p.stateOffsets0.y,
+  cm12FCSourceScalarParity()!=0u);}
+fn destinationDensity()->u32{return select(p.stateOffsets0.y,p.stateOffsets0.x,
+  cm12FCDestinationScalarParity()==0u);}
+fn sourceGamma()->u32{return select(p.stateOffsets0.z,p.stateOffsets0.w,
+  cm12FCSourceScalarParity()!=0u);}
+fn destinationGamma()->u32{return select(p.stateOffsets0.w,p.stateOffsets0.z,
+  cm12FCDestinationScalarParity()==0u);}
+fn sourceCellVelocity()->u32{return select(p.stateOffsets1.x,p.stateOffsets1.y,
+  cm12FCSourceFaceParity()!=0u);}
+fn destinationCellVelocity()->u32{return select(p.stateOffsets1.y,p.stateOffsets1.x,
+  cm12FCDestinationFaceParity()==0u);}
+fn sourceFaceVelocity()->u32{return select(p.stateOffsets1.z,p.stateOffsets1.w,
+  cm12FCSourceFaceParity()!=0u);}
+fn destinationFaceVelocity()->u32{return select(p.stateOffsets1.w,p.stateOffsets1.z,
+  cm12FCDestinationFaceParity()==0u);}
+
+@compute @workgroup_size(1)
+fn beginSparseCM12FrameControl(){_=cm12FCBegin();}
+@compute @workgroup_size(1)
+fn publishSparseCM12FrameBodyAuthority(){
+  _=cm12FCPublishBody(min(12u,u32(max(0.0,round(p.rigidWorld.w)))));
+}
+@compute @workgroup_size(1)
+fn publishSparseCM12FrameBoundaryAuthority(){
+  _=cm12FCPublishBoundary((p.dimensions.w&1u)!=0u);
+}
+@compute @workgroup_size(1)
+fn sealSparseCM12FrameControl(){_=cm12FCSeal();}
+@compute @workgroup_size(1)
+fn publishSparseCM12FrameScalarOutput(){
+  _=cm12FCPublishOutput(${SPARSE_CM12_FRAME_CONTROL_COVERAGE.scalarOutput}u);
+}
+@compute @workgroup_size(1)
+fn publishSparseCM12FrameFaceOutput(){
+  _=cm12FCPublishOutput(${SPARSE_CM12_FRAME_CONTROL_COVERAGE.faceOutput}u);
+}
+@compute @workgroup_size(1)
+fn commitSparseCM12FrameControl(){
+  ${vexActivityBatchLayout ? `if(!cm12ExtensionReadyForFrameCommit()){
+    cm12FCFail(${SPARSE_CM12_FRAME_CONTROL_FAULT.velocityExtensionReceipt}u,
+      cm12ExtensionAcceptedGeneration());return;
+  }` : ""}
+  _=cm12FCCommit();
+}
+@compute @workgroup_size(1)
+fn invalidateSparseCM12FrameD4ForInjection(){
+  let asymmetric=abs(p.injectionCenter.x-0.5*f32(p.dimensions.x))>1e-6
+    ||abs(p.injectionCenter.z-0.5*f32(p.dimensions.z))>1e-6
+    ||abs(p.injectionRadius.x-p.injectionRadius.z)>1e-6;
+  if(asymmetric){_=cm12FCInvalidateD4(1u,0u);}
+}
+@compute @workgroup_size(64)
+fn sparseCM12FrameControlNoop(){ }
 fn hasRigidBodies()->bool{return p.rigidWorld.w>=0.5;}
 fn pressureRelativeTolerance()->f32{return bitcast<f32>(p.topologyScheduling.y);}
 fn pipelinedPressureActive()->bool{return scalars[5]>0.5&&scalars[14]<0.5;}
@@ -507,15 +1234,16 @@ fn presentationOwnerCellAt(q:vec3i)->u32{
     (atomicLoad(&activity[activityRecord(owner.y)+1u])&64u)!=0u);
 }
 
-fn presentationPhi(cell:u32)->f32{
-  let effective=state[destinationDensity()+cell]/max(cellOpenFraction(cell),1e-6);
+fn presentationPhiAt(cell:u32,densityOffset:u32)->f32{
+  let effective=state[densityOffset+cell]/max(cellOpenFraction(cell),1e-6);
   return (CM12_LIQUID_ISOVALUE-effective)*4.0*p.frame.y;
 }
+fn presentationPhi(cell:u32)->f32{return presentationPhiAt(cell,destinationDensity());}
 
 // Restrict authoritative rho by finest-cell volume. A coarse presentation
 // stencil can therefore cross a 2:1 seam without choosing an arbitrary fine
 // child, and its sample has exactly the mass of that virtual coarse cell.
-fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
+fn restrictedPresentationDensityAt(lower:vec3i,cellScale:i32,densityOffset:u32)->f32{
   // The common adaptive case asks for a virtual coarse cell that is already
   // represented by one coarse authority cell. Resolve that owner once instead
   // of repeating the same hash-table lookup for every finest child. Only a
@@ -525,20 +1253,23 @@ fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
     &&(atomicLoad(&activity[activityRecord(owner.y)+1u])&64u)!=0u){
     let ownerScale=BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z;
     if(ownerScale>=u32(cellScale)){
-      return state[destinationDensity()+owner.x]
+      return state[densityOffset+owner.x]
         /max(cellOpenFraction(owner.x),1e-6);
     }
   }
   var rho=0.0;
   for(var dz=0;dz<cellScale;dz+=1){for(var dy=0;dy<cellScale;dy+=1){for(var dx=0;dx<cellScale;dx+=1){
     let cell=presentationOwnerCellAt(lower+vec3i(dx,dy,dz));
-    if(cell!=INVALID){rho+=state[destinationDensity()+cell]
+    if(cell!=INVALID){rho+=state[densityOffset+cell]
       /max(cellOpenFraction(cell),1e-6);}
   }}}
   return rho/f32(cellScale*cellScale*cellScale);
 }
+fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
+  return restrictedPresentationDensityAt(lower,cellScale,destinationDensity());
+}
 
-fn sampleVelocity(position:vec3f)->vec3f{
+fn sampleVelocity(position:vec3f${fvrParameter})->vec3f{
   let probe=ownerCellAt(vec3i(floor(clamp(position,vec3f(0.0),
     vec3f(p.dimensions.xyz)-vec3f(1e-4)))));
   var spans=vec3f(1.0);if(probe!=INVALID){let b=cellBase(probe);spans=vec3f(taf(b+4u),taf(b+5u),taf(b+6u));}
@@ -550,14 +1281,14 @@ fn sampleVelocity(position:vec3f)->vec3f{
     let cell=ownerCellAt(vec3i(floor(lattice)));if(cell==INVALID){continue;}
     let wx=select(1.0-fraction.x,fraction.x,dx==1);
     let wy=select(1.0-fraction.y,fraction.y,dy==1);
-    let wz=select(1.0-fraction.z,fraction.z,dz==1);let at=destinationCellVelocity()+4u*cell;
-    result+=wx*wy*wz*vec3f(state[at],state[at+1u],state[at+2u]);
+    let wz=select(1.0-fraction.z,fraction.z,dz==1);
+    ${fvrSampleRead}
   }}}return result;
 }
 
-fn traceCharacteristic(position:vec3f,direction:f32)->vec3f{
+fn traceCharacteristic(position:vec3f,direction:f32${fvrParameter})->vec3f{
   let initialPosition=clampInsideEmbeddedBoundary(position);
-  let initial=sampleVelocity(initialPosition);
+  let initial=sampleVelocity(initialPosition${fvrArgument});
   let substeps=clamp(i32(ceil(length(initial)*p.frame.x)),1,16);
   let subDt=p.frame.x/f32(substeps);var traced=initialPosition;
   let lower=vec3f(0.5);let upper=vec3f(p.dimensions.xyz)-vec3f(0.5);
@@ -565,16 +1296,18 @@ fn traceCharacteristic(position:vec3f,direction:f32)->vec3f{
     // On the first substep traced is still initialPosition, whose velocity was
     // just sampled to choose the substep count. Reuse it rather than repeating
     // nine sparse owner resolutions.
-    var first=initial;if(step>0){first=sampleVelocity(traced);}
+    var first=initial;if(step>0){first=sampleVelocity(traced${fvrArgument});}
     let midpoint=clipBoundarySegment(traced,
       clamp(traced+direction*0.5*subDt*first,lower,upper));
-    let candidate=traced+direction*subDt*sampleVelocity(midpoint);
+    let candidate=traced+direction*subDt*sampleVelocity(midpoint${fvrArgument});
     traced=clipBoundarySegment(traced,clamp(candidate,lower,upper));
   }
   return traced;
 }
-fn traceDeparture(position:vec3f)->vec3f{return traceCharacteristic(position,-1.0);}
-fn traceArrival(position:vec3f)->vec3f{return traceCharacteristic(position,1.0);}
+fn traceDeparture(position:vec3f${fvrParameter})->vec3f{
+  return traceCharacteristic(position,-1.0${fvrArgument});}
+fn traceArrival(position:vec3f)->vec3f{
+  return traceCharacteristic(position,1.0${fvrInvalidArgument});}
 
 struct TransportStencil{cells:array<u32,8>,weights:array<f32,8>}
 
@@ -599,6 +1332,125 @@ fn transportStencil(position:vec3f)->TransportStencil{
     result.weights[corner]=select(0.0,weight,cell!=INVALID);
   }
   return result;
+}
+
+${scalarAuthorityEntries}
+
+const SIR1_CAUSE_SCALAR:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.scalarWrite}u;
+const SIR1_CAUSE_TOPOLOGY:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.topologyWrite}u;
+const SIR1_CAUSE_DEPENDENCY_CLOSURE:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.dependencyClosure}u;
+fn scaLogicalBrickDimensions()->vec3u{
+  return (p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))/BRICK_FINE_RESOLUTION;
+}
+fn scaTileAtFine(qInput:vec3i)->u32{
+  let q=vec3u(clamp(qInput,vec3i(0),vec3i(p.dimensions.xyz)-vec3i(1)));
+  let brick=q/BRICK_FINE_RESOLUTION;let dims=scaLogicalBrickDimensions();
+  let key=brick.x+dims.x*(brick.y+dims.y*brick.z);
+  let local=(q%BRICK_FINE_RESOLUTION)/4u;
+  return key*64u+local.x+4u*(local.y+4u*local.z);
+}
+fn scaCellBounds(cell:u32)->array<vec3i,2>{
+  let b=cellBase(cell);let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
+  let width=vec3f(taf(b+4u),taf(b+5u),taf(b+6u));var result:array<vec3i,2>;
+  result[0]=vec3i(round(center-0.5*width));
+  result[1]=vec3i(round(center+0.5*width))-vec3i(1);return result;
+}
+fn sirMassTileCell(rank:u32,lane:u32)->u32{
+  let tile=sirResidentWorkTile(rank);if(tile==INVALID){return INVALID;}
+  let logical=tile/64u;let localTile=tile%64u;let dims=scaLogicalBrickDimensions();
+  let xy=dims.x*dims.y;if(xy==0u||logical>=xy*dims.z){return INVALID;}
+  let bz=logical/xy;let rem=logical-bz*xy;let by=rem/dims.x;let bx=rem-by*dims.x;
+  let tx=localTile&3u;let ty=(localTile>>2u)&3u;let tz=(localTile>>4u)&3u;
+  let q=vec3u(bx,by,bz)*BRICK_FINE_RESOLUTION+4u*vec3u(tx,ty,tz)
+    +vec3u(lane&3u,(lane>>2u)&3u,(lane>>4u)&3u);
+  if(any(q>=p.dimensions.xyz)){return INVALID;}
+  let cell=ownerCellAt(vec3i(q));if(cell==INVALID){return INVALID;}
+  return select(INVALID,cell,all(scaCellBounds(cell)[0]==vec3i(q)));
+}
+
+@compute @workgroup_size(1)
+fn beginSparseCM12SRR1Ingress(){
+  _=sirResidentBeginFrame(cm12FCCandidateGeneration(),
+    atomicLoad(&topologyArena[topologyWorklistBase()]),cm12FCSourceScalarParity());
+}
+@compute @workgroup_size(64)
+fn resetSparseCM12SRR1CopiedEvents(@builtin(global_invocation_id)gid:vec3u){
+  sirResidentResetCopiedEvents(gid.x);
+}
+@compute @workgroup_size(1)
+fn beginSparseCM12SRR1ReceiptBatch(){sirResidentBeginReceiptBatch();}
+
+fn scaInvalidateBrickTopologyClosure(brick:u32){
+  if(brick>=p.dispatch.w){return;}let dims=scaLogicalBrickDimensions();
+  let key=topology[p.topologyOffsets2.z+2u*brick+1u];let xy=dims.x*dims.y;
+  if(xy==0u||key>=xy*dims.z){return;}let z=key/xy;let rem=key-z*xy;
+  let y=rem/dims.x;let x=rem-y*dims.x;let origin=vec3i(i32(x),i32(y),i32(z));
+  let span=i32(brickSpan(brick));let lower=max(vec3i(0),origin-vec3i(1));
+  let upper=min(vec3i(dims)-vec3i(1),origin+vec3i(span));
+  let generation=cm12FCCandidateGeneration()+1u;
+  for(var bz=lower.z;bz<=upper.z;bz+=1){for(var by=lower.y;by<=upper.y;by+=1){
+    for(var bx=lower.x;bx<=upper.x;bx+=1){let logical=u32(bx)+dims.x*(u32(by)+dims.y*u32(bz));
+      for(var local=0u;local<64u;local+=1u){
+        _=sirResidentAppendEvent(64u*logical+local,generation,SIR1_CAUSE_TOPOLOGY);
+      }
+  }}}
+}
+
+fn scaInvalidateCellClosure(cell:u32,generation:u32,cause:u32){
+  let bounds=scaCellBounds(cell);let dims=scaLogicalBrickDimensions();
+  let tileDims=4u*dims;let owner=scaTileAtFine(bounds[0]);
+  // Never suppress extent publication because the owner is already stamped:
+  // a fine-cell producer can pre-stamp it before a later coarse producer needs
+  // to publish the rest of this cell's extent. Append deduplicates each
+  // destination tile independently.
+  _=sirResidentAppendEvent(owner,generation,cause);
+  let lower=max(vec3i(0),bounds[0]/vec3i(4)-vec3i(1));
+  let upper=min(vec3i(tileDims)-vec3i(1),bounds[1]/vec3i(4)+vec3i(1));
+  for(var z=lower.z;z<=upper.z;z+=1){for(var y=lower.y;y<=upper.y;y+=1){
+    for(var x=lower.x;x<=upper.x;x+=1){let q=vec3u(u32(x),u32(y),u32(z));
+      let brick=q/4u;let sub=q%4u;let key=brick.x+dims.x*(brick.y+dims.y*brick.z);
+      let tile=64u*key+sub.x+4u*(sub.y+4u*sub.z);
+      _=sirResidentAppendEvent(tile,generation,cause|SIR1_CAUSE_DEPENDENCY_CLOSURE);
+  }}}
+}
+
+var<workgroup>sirCovered:array<u32,64>;
+var<workgroup>sirBank0Mismatch:array<u32,64>;
+var<workgroup>sirBank1Mismatch:array<u32,64>;
+var<workgroup>sirDependencyMismatch:array<u32,64>;
+
+// Exact algebraic phase certificate for the final scalar banks. Returning 0/1
+// means both physical rho banks contain exact dry/flooded capacity and both
+// gamma banks contain exact one. Two is unresolved and can never certify clean.
+fn sirExactScalarPhase(cell:u32)->u32{
+  if(!cellActive(cell)||bitcast<u32>(cellOpenFraction(cell))!=0x3f800000u){return 2u;}
+  let rho0=bitcast<u32>(state[p.stateOffsets0.x+cell]);
+  let rho1=bitcast<u32>(state[p.stateOffsets0.y+cell]);
+  let gamma0=bitcast<u32>(state[p.stateOffsets0.z+cell]);
+  let gamma1=bitcast<u32>(state[p.stateOffsets0.w+cell]);
+  if(gamma0!=0x3f800000u||gamma1!=0x3f800000u||rho0!=rho1){return 2u;}
+  if(rho0==0u){return 0u;}if(rho0==0x3f800000u){return 1u;}return 2u;
+}
+fn sirExactScalarDependency(cell:u32,phase:u32)->bool{
+  if(phase>1u){return false;}var sideMask=0u;
+  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+    let row=incidenceRow(incidence);
+    if(!rowAccepted(row)||bitcast<u32>(rowOpenFraction(row))!=0x3f800000u
+      ||rowArea(row)<=1e-8){return false;}
+    let coefficient=termCoefficient(incidenceTerm(incidence));
+    let side=2u*rowAxis(row)+select(0u,1u,coefficient>0.0);sideMask|=1u<<side;
+    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);var neighbor=false;
+    for(var term=begin;term<end;term+=1u){let other=termCell(term);
+      if(other==cell){continue;}neighbor=true;
+      if(sirExactScalarPhase(other)!=phase){return false;}
+    }
+    if(!neighbor){return false;}
+  }
+  return sideMask==63u;
+}
+fn sirRecordFinalScalarProducer(cell:u32){
+  if(sirExactScalarPhase(cell)<=1u){return;}
+  scaInvalidateCellClosure(cell,cm12FCCandidateGeneration()+1u,SIR1_CAUSE_SCALAR);
 }
 
 fn transportBeta(cell:u32)->f32{
@@ -654,9 +1506,7 @@ fn extrapolateTransportVelocityToDestination(@builtin(global_invocation_id)gid:v
   extrapolateTransportVelocity(id,sourceCellVelocity(),destinationCellVelocity());
 }
 
-@compute @workgroup_size(64)
-fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
-  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
+fn prepareTransportFaceRow(row:u32){
   if(rowArea(row)<=1e-8){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());return;
   }
@@ -665,7 +1515,7 @@ fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
   for(var term=begin;term<end;term+=1u){
     let cell=termCell(term);let rho=state[sourceDensity()+cell];
     touchesExtendedVelocity=touchesExtendedVelocity
-      ||state[destinationCellVelocity()+4u*cell+3u]>0.5;
+      ||cm12ExtensionTransportVelocity(cell).w>0.5;
     touchesLiquid=touchesLiquid||rho>CM12_LIQUID_ISOVALUE;
     if(touchesExtendedVelocity&&touchesLiquid){break;}
   }
@@ -677,14 +1527,43 @@ fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
   if(!touchesExtendedVelocity){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());return;
   }
-  let departure=traceDeparture(rowCenter(row));
-  let characteristic=sampleVelocity(departure)[rowAxis(row)];
+  let departure=traceDeparture(rowCenter(row)${fvrRowArgument});
+  let characteristic=sampleVelocity(departure${fvrRowArgument})[rowAxis(row)];
   state[destinationFaceVelocity()+row]=select(characteristic,
     mix(characteristic,state[sourceFaceVelocity()+row],0.4),touchesLiquid);
   if(hasRigidBodies()){
     let open=rowOpenFraction(row);let fluid=state[destinationFaceVelocity()+row];
     state[destinationFaceVelocity()+row]=open*fluid+(1.0-open)*rowSolidVelocity(row);
   }
+}
+@compute @workgroup_size(64)
+fn publishSparseCM12MovingSolidVelocityRoots(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||!hasRigidBodies()){return;}
+  if(cellOpenFraction(cell)<0.999||dynamicallyCoveredCell(cell)){
+    cm12ResidentRecordExtensionIncidence(cell,32u);
+  }
+}
+@compute @workgroup_size(64)
+fn prepareTransportFaces(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);
+  if(row!=INVALID&&fpaPreparationRowLive(row)){prepareTransportFaceRow(row);}
+}
+// Construction-only FPA oracle capture. The host's immutable QA specialization
+// first executes the original accepted-row preparation traversal, then snapshots
+// the exact destination bank into the same stable authority arena production
+// FPA consumes. This kernel is observational: it does not publish an FPA epoch
+// or alter either face bank.
+@compute @workgroup_size(64)
+fn captureLegacyFacePreparationAuthority(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
+  fpaStorePreparedAuthority(row,bitcast<u32>(state[destinationFaceVelocity()+row]));
+}
+@compute @workgroup_size(64)
+fn executeSparseCM12FacePreparation(@builtin(global_invocation_id)gid:vec3u){
+  let row=fpaPreparationRowInvocation(gid.x);if(row==INVALID){return;}
+  prepareTransportFaceRow(row);let bits=bitcast<u32>(state[destinationFaceVelocity()+row]);
+  fpaStorePreparedAuthority(row,bits);
+  _=fpaPreparationComplete(row);
 }
 
 // Coverage of one accepted cell by the dropped ball, in the same partial-cell
@@ -729,6 +1608,7 @@ fn injectionReachesBrick(brick:u32)->bool{
 // exist is the vanishing drop again.
 @compute @workgroup_size(64)
 fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
+  atomicAnd(&activity[27],0x7fffffffu);
   let brick=gid.x;if(brick>=p.dispatch.w||!brickActive(brick)){return;}
   let range=templateBrickCellRange(brick,scheduledBrickResolution(brick));
   for(var at=0u;at<range.y;at+=1u){
@@ -737,18 +1617,21 @@ fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
     let clippedCoverage=coverage*cellOpenFraction(id);
     state[p.stateOffsets0.x+id]=max(state[p.stateOffsets0.x+id],clippedCoverage);
     state[p.stateOffsets0.y+id]=max(state[p.stateOffsets0.y+id],clippedCoverage);
-    if(coverage>0.0){state[p.stateOffsets0.z+id]=1.0;state[p.stateOffsets0.w+id]=1.0;}
+    if(coverage>0.0){state[p.stateOffsets0.z+id]=1.0;state[p.stateOffsets0.w+id]=1.0;
+      cm12ResidentRecordExtensionIncidence(id,16u);
+      scaInvalidateCellClosure(id,cm12FCCandidateGeneration()+1u,SIR1_CAUSE_SCALAR);}
   }
 }
 
 // CM12 Sec. 3.4 steps 1-3. Backward-advect cumulative gamma, then scatter
 // gamma_i w^-_li into each donor's volume-weighted beta column.
 @compute @workgroup_size(64)
-fn traceGammaAndBeta(@builtin(global_invocation_id)gid:vec3u){
-  let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
+fn traceGammaAndBeta(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let id=sirMassTileCell(wid.x,lane);if(id==INVALID){return;}
   if(!cellTransportActive(id)){state[destinationGamma()+id]=1.0;return;}
   let b=cellBase(id);
-  let departure=traceDeparture(vec3f(taf(b),taf(b+1u),taf(b+2u)));
+  let departure=traceDeparture(vec3f(taf(b),taf(b+1u),taf(b+2u))${fvrInvalidArgument});
   let stencil=transportStencil(departure);
   var visible=0.0;var sampledGamma=0.0;
   for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];let weight=stencil.weights[corner];
@@ -768,8 +1651,9 @@ fn traceGammaAndBeta(@builtin(global_invocation_id)gid:vec3u){
 // weight along the forward characteristic. The fixed-point scatters are
 // deterministic and keep rho and gamma transfers paired.
 @compute @workgroup_size(64)
-fn scatterDensityDeficit(@builtin(global_invocation_id)gid:vec3u){
-  let donor=acceptedTemplateCellInvocation(gid.x);
+fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let donor=sirMassTileCell(wid.x,lane);
   if(donor==INVALID||!cellTransportActive(donor)){return;}
   let deficit=max(0.0,1.0-transportBeta(donor));
   if(deficit<=1.0/CM12_TRANSPORT_FIXED){return;}let b=cellBase(donor);
@@ -796,8 +1680,9 @@ fn scatterDensityDeficit(@builtin(global_invocation_id)gid:vec3u){
 // CM12 Sec. 3.4 steps 4-5 plus the forward-deficit resolve. Scaling each
 // donor by max(1,beta_l) clamps the column without materializing A.
 @compute @workgroup_size(64)
-fn gatherConservativeDensity(@builtin(global_invocation_id)gid:vec3u){
-  let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
+fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let id=sirMassTileCell(wid.x,lane);if(id==INVALID){return;}
   if(!cellActive(id)){
     state[destinationDensity()+id]=0.0;state[destinationGamma()+id]=1.0;return;
   }
@@ -809,7 +1694,7 @@ fn gatherConservativeDensity(@builtin(global_invocation_id)gid:vec3u){
     return;
   }
   let b=cellBase(id);
-  let departure=traceDeparture(vec3f(taf(b),taf(b+1u),taf(b+2u)));
+  let departure=traceDeparture(vec3f(taf(b),taf(b+1u),taf(b+2u))${fvrInvalidArgument});
   let stencil=transportStencil(departure);
   let advectedGamma=state[destinationGamma()+id];var visible=0.0;
   for(var corner=0u;corner<8u;corner+=1u){visible+=stencil.weights[corner];}
@@ -823,8 +1708,34 @@ fn gatherConservativeDensity(@builtin(global_invocation_id)gid:vec3u){
   rhoNext+=f32(atomicLoad(&conditioning[p.counts.x+id]))/CM12_TRANSPORT_FIXED;
   gammaNext+=f32(atomicLoad(&conditioning[2u*p.counts.x+id]))/CM12_TRANSPORT_FIXED;
   if(rhoNext<CM12_DRY_CELL_THRESHOLD){gammaNext=1.0;}
-  state[destinationDensity()+id]=max(0.0,rhoNext);
+  let nextDensity=max(0.0,rhoNext);
+  let densityChanged=bitcast<u32>(nextDensity)!=bitcast<u32>(state[sourceDensity()+id]);
+  state[destinationDensity()+id]=nextDensity;
   state[destinationGamma()+id]=max(0.0,gammaNext);
+  if(densityChanged){cm12ResidentRecordExtensionIncidence(id,4u);}
+}
+
+@compute @workgroup_size(64)
+fn compareSparseCM12MassResult(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let cell=sirMassTileCell(wid.x,lane);var covered=0u;var mismatch0=0u;
+  var mismatch1=0u;var dependencyMismatch=0u;
+  if(cell!=INVALID){let phase=sirExactScalarPhase(cell);covered=4u;
+    mismatch0=select(0u,1u,phase>1u);mismatch1=mismatch0;
+    dependencyMismatch=select(1u,0u,sirExactScalarDependency(cell,phase));
+  }
+  sirCovered[lane]=covered;sirBank0Mismatch[lane]=mismatch0;
+  sirBank1Mismatch[lane]=mismatch1;sirDependencyMismatch[lane]=dependencyMismatch;
+  workgroupBarrier();var width=32u;loop{if(lane<width){sirCovered[lane]+=sirCovered[lane+width];
+    sirBank0Mismatch[lane]+=sirBank0Mismatch[lane+width];
+    sirBank1Mismatch[lane]+=sirBank1Mismatch[lane+width];
+    sirDependencyMismatch[lane]+=sirDependencyMismatch[lane+width];}
+    workgroupBarrier();if(width==1u){break;}width/=2u;}
+  if(lane==0u){let tile=sirResidentWorkTile(wid.x);let generation=sirResidentCandidateGeneration();
+    _=sirResidentPublishReceipt(wid.x,tile,sirResidentTopologyGeneration(),generation,
+      generation,generation,sirCovered[0],sirCovered[0],sirBank0Mismatch[0],
+      sirBank1Mismatch[0],generation,select(0u,generation,sirDependencyMismatch[0]==0u),
+      1u,generation);}
 }
 
 // Massless markers riding the same characteristic the conservative transport
@@ -1065,9 +1976,7 @@ fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
 
 // Freeze the per-cell sharpening dose once. The trace itself differentiates
 // the exact continuous adaptive density interpolant analytically below.
-@compute @workgroup_size(64)
-fn prepareSharpeningField(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+fn prepareSharpeningCell(cell:u32){
   if(!cellTransportActive(cell)){
     state[p.stateOffsets5.x+cell]=0.0;return;
   }
@@ -1076,7 +1985,11 @@ fn prepareSharpeningField(@builtin(global_invocation_id)gid:vec3u){
   state[p.stateOffsets5.x+cell]=select(sharpeningDelta(cell,stats),0.0,
     rho>CM12_LIQUID_ISOVALUE);
 }
-
+@compute @workgroup_size(64)
+fn prepareSharpeningField(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID){
+    prepareSharpeningCell(cell);}
+}
 fn sampleSharpeningField(position:vec3f)->vec4f{
   let probe=ownerCellAt(vec3i(floor(clamp(position,vec3f(0.0),
     vec3f(p.dimensions.xyz)-vec3f(1e-4)))));
@@ -1126,9 +2039,7 @@ fn traceSharpeningMass(source:u32)->vec3f{
 // CM12 Sec. 3.5, Eqs. 4-17 and Algorithm 2. Remove the air-side correction,
 // trace along grad(rho), then scatter its integrated mass trilinearly at the
 // traced point. Fixed-point atomics keep simultaneous GPU scatters additive.
-@compute @workgroup_size(64)
-fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+fn scatterSharpeningCell(cell:u32){
   if(!cellTransportActive(cell)){state[p.stateOffsets5.x+cell]=0.0;return;}
   // Sec. 3.5 only removes density on the air side of the interface. Avoid
   // expanding the composite incidence stencil when sharpeningDelta's final
@@ -1158,14 +2069,20 @@ fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
     remainingFixed-=offeredFixed;
   }
 }
-
 @compute @workgroup_size(64)
-fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID){
+    scatterSharpeningCell(cell);}
+}
+fn finalizeSharpeningCell(cell:u32){
   if(!cellTransportActive(cell)){
     if(!dynamicallyCoveredCell(cell)){
       state[destinationDensity()+cell]=0.0;state[destinationGamma()+cell]=1.0;
     }
+    if(bitcast<u32>(state[destinationDensity()+cell])
+      !=bitcast<u32>(state[sourceDensity()+cell])){
+      cm12ResidentRecordExtensionIncidence(cell,4u);}
+    sirRecordFinalScalarProducer(cell);
     return;
   }
   let delta=state[p.stateOffsets5.x+cell];
@@ -1180,8 +2097,15 @@ fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
     abs(density-capacity)<=1.0/CM12_TRANSPORT_FIXED);
   state[destinationDensity()+cell]=density;
   state[destinationGamma()+cell]=max(0.0,conditionedGamma(cell));
+  if(bitcast<u32>(density)!=bitcast<u32>(state[sourceDensity()+cell])){
+    cm12ResidentRecordExtensionIncidence(cell,4u);}
+  sirRecordFinalScalarProducer(cell);
 }
-
+@compute @workgroup_size(64)
+fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID){
+    finalizeSharpeningCell(cell);}
+}
 @compute @workgroup_size(64)
 fn clearSolidExcess(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
@@ -1232,11 +2156,19 @@ fn scatterSolidExcess(@builtin(global_invocation_id)gid:vec3u){
 fn finalizeSolidExcess(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
   if(!cellTransportActive(cell)){
-    if(!dynamicallyCoveredCell(cell)){state[destinationDensity()+cell]=0.0;}return;
+    if(!dynamicallyCoveredCell(cell)){state[destinationDensity()+cell]=0.0;}
+    if(bitcast<u32>(state[destinationDensity()+cell])
+      !=bitcast<u32>(state[sourceDensity()+cell])){
+      cm12ResidentRecordExtensionIncidence(cell,4u);}
+    sirRecordFinalScalarProducer(cell);return;
   }
   let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
   state[destinationDensity()+cell]=max(0.0,state[destinationDensity()+cell]
     +state[p.stateOffsets5.x+cell]+incoming/cellVolume(cell));
+  if(bitcast<u32>(state[destinationDensity()+cell])
+    !=bitcast<u32>(state[sourceDensity()+cell])){
+    cm12ResidentRecordExtensionIncidence(cell,4u);}
+  sirRecordFinalScalarProducer(cell);
 }
 
 // The CPU sparse path retains a proven horizontal D4 invariant after surface
@@ -1308,17 +2240,270 @@ fn pressureDensity(cell:u32)->f32{
   return continued;
 }
 
-@compute @workgroup_size(64)
-fn classifyPressureCells(@builtin(global_invocation_id)gid:vec3u){
-  let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
-  let rho=pressureDensity(id);candidateState[pressureDensityCacheOffset()+id]=rho;
-  let liquid=cellActive(id)&&rho>=CM12_LIQUID_ISOVALUE
+fn pressureCellMembershipFromDensity(id:u32,rho:f32)->bool{
+  return cellActive(id)&&rho>=CM12_LIQUID_ISOVALUE
     &&(cellOpenVolume(id)>1e-8||cellSeparatingMinimum(id));
+}
+fn pressureCellMembershipPredicate(id:u32)->bool{
+  return pressureCellMembershipFromDensity(id,pressureDensity(id));
+}
+
+fn classifyPressureCell(id:u32)->bool{
+  let rho=pressureDensity(id);candidateState[pressureDensityCacheOffset()+id]=rho;
+  let liquid=pressureCellMembershipFromDensity(id,rho);
   state[p.stateOffsets2.w+id]=select(0.0,1.0,liquid);
   if(!liquid){
     state[p.stateOffsets2.y+id]=0.0;state[p.stateOffsets2.z+id]=0.0;
     state[p.stateOffsets2.x+id]=0.0;
   }
+  return liquid;
+}
+fn classifyPressureCellAndRecord(id:u32)->bool{
+  let previous=pcmCellContains(id);let enabled=classifyPressureCell(id);
+  if(previous!=enabled){_=pcfRecordCellMembershipEvent(id);}
+  return enabled;
+}
+
+@compute @workgroup_size(64)
+fn classifyPressureCells(@builtin(global_invocation_id)gid:vec3u){
+  let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
+  _=pcmCellSetCandidate(id,classifyPressureCellAndRecord(id),1u,false);
+}
+
+@compute @workgroup_size(1)
+fn beginCanonicalPressureCells(){_=pcmCellBegin(0u);}
+
+@compute @workgroup_size(1)
+fn beginCanonicalPressureRows(){_=pcmRowBegin(0u);}
+
+@compute @workgroup_size(1)
+fn planPressureMembershipEpoch(){
+  let cellGroups=select(0u,acceptedTemplateCellWorkgroups(),pcmCellBootstrapEpoch());
+  let rowGroups=select(0u,acceptedTemplateRowWorkgroups(),pcmRowBootstrapEpoch());
+  let cellAt=PRESSURE_REPAIR_HEADER+PRESSURE_BOOTSTRAP_CELL_INDIRECT;
+  let rowAt=PRESSURE_REPAIR_HEADER+PRESSURE_BOOTSTRAP_ROW_INDIRECT;
+  fineSamples[cellAt]=cellGroups;fineSamples[cellAt+1u]=1u;fineSamples[cellAt+2u]=1u;
+  fineSamples[rowAt]=rowGroups;fineSamples[rowAt+1u]=1u;fineSamples[rowAt+2u]=1u;
+}
+
+@compute @workgroup_size(64)
+fn classifyDirtyPressureCells(@builtin(global_invocation_id)gid:vec3u){
+  let id=temporalScalarCellInvocation(gid.x);if(id==INVALID){return;}
+  _=pcmCellSetCandidate(id,classifyPressureCellAndRecord(id),2u,false);
+}
+
+fn pressureBrickStateAtResolution(brick:u32,resolution:u32)->u32{
+  return resolution|select(0u,0x80000000u,brickActive(brick));
+}
+
+// PTR1 and PCF1 are binding-free and consume the resident's canonical
+// PCM/state APIs. PCF1 lives in the non-aliased atomic topology-arena tail.
+fn ptrFrameGeneration()->u32{return atomicLoad(&activity[0]);}
+fn ptrTopologyGeneration()->u32{return atomicLoad(&topologyArena[topologyWorklistBase()]);}
+fn ptrPCMCellCandidateGeneration()->u32{return pcmCellCandidateGeneration();}
+fn ptrPCMRowCandidateGeneration()->u32{return pcmRowCandidateGeneration();}
+fn ptrPCFCandidateGeneration()->u32{return pcfCandidateGeneration();}
+fn ptrPCMCellAcceptedGeneration()->u32{return pcmCellAcceptedGeneration();}
+fn ptrPCMRowAcceptedGeneration()->u32{return pcmRowAcceptedGeneration();}
+fn ptrPCFAcceptedGeneration()->u32{return pcfAcceptedGeneration();}
+fn ptrTopologyJournalCount()->u32{return 0u;}
+fn ptrTopologyJournalRecord(at:u32)->vec4u{_=at;return vec4u(INVALID);}
+fn ptrCellCapacity()->u32{return p.counts.x;}
+fn ptrBrickCellRange(brick:u32,encoded:u32)->vec2u{
+  if(encoded==INVALID||(encoded&0x80000000u)==0u){return vec2u(0u);}
+  return templateBrickCellRange(brick,encoded&0x7fffffffu);
+}
+fn ptrCellIncidenceRange(cell:u32)->vec2u{
+  return vec2u(incidenceBegin(cell),incidenceEnd(cell));
+}
+fn ptrIncidenceRow(at:u32)->u32{return incidenceRow(at);}
+fn ptrApplyPressureCellClassification(cell:u32,current:bool)->bool{
+  if(current){return classifyPressureCell(cell);}
+  state[p.stateOffsets2.w+cell]=0.0;return false;
+}
+fn ptrClassifyPressureRow(row:u32)->bool{return classifyPressureRow(row);}
+fn ptrPressureTheta(row:u32)->f32{return state[p.stateOffsets3.x+row];}
+
+// HTP1 compatibility accessors preserve the resident template's exact stable
+// IDs and packed arithmetic while PCF1 is migrated into the resident arena.
+fn cm12HotHeaderValid()->bool{return true;}
+fn cm12HotRowValid(row:u32)->bool{return row<p.counts.y;}
+fn cm12HotRowTermCount(row:u32)->u32{return rowTermCount(row);}
+fn cm12HotRowTermCell(row:u32,ordinal:u32)->u32{
+  return termCell(rowTermOffset(row)+ordinal);
+}
+fn cm12HotRowTermCoefficient(row:u32,ordinal:u32)->f32{
+  return termCoefficient(rowTermOffset(row)+ordinal);
+}
+fn cm12HotRowDualWeight(row:u32)->f32{return rowDualWeight(row);}
+fn cm12HotIncidenceRange(cell:u32)->vec2u{
+  let first=incidenceBegin(cell);return vec2u(first,incidenceEnd(cell)-first);
+}
+fn cm12HotIncidence(at:u32)->vec2u{
+  let row=incidenceRow(at);return vec2u(row,incidenceTerm(at)-rowTermOffset(row));
+}
+fn cm12HotDirectedEdgeRange(cell:u32)->vec2u{
+  let offsets=pressureTemplateWord(15u);let first=pressureTemplateWord(offsets+cell);
+  return vec2u(first,pressureTemplateWord(offsets+cell+1u)-first);
+}
+fn cm12HotDirectedEdge(edge:u32)->vec3u{return vec3u(
+  fineSamples[pressureNeighborOffset()+edge],
+  pressureTemplateWord(pressureEdgeRows()+edge),
+  pressureTemplateWord(pressureEdgeWeights()+edge));
+}
+fn pcfResidentSolidRowScale(row:u32)->f32{
+  return select(1.0,state[p.solidOffsets.y+3u*row+2u],hasRigidBodies());
+}
+fn pcfTopologyGeneration()->u32{return ptrTopologyGeneration();}
+fn pcfPCMGeneration()->u32{
+  return max(pcmCellAcceptedGeneration(),pcmRowAcceptedGeneration());
+}
+fn pcfAggregateTopologyGeneration()->u32{return 1u;}
+fn pcfCellBrick(cell:u32)->u32{return cellBrick(cell);}
+fn pcfBrickCellRange(brick:u32)->vec2u{
+  return templateBrickCellRange(brick,acceptedBrickResolution(brick));
+}
+fn pcfAggregateEdgeForFineEdge(edge:u32)->u32{
+  return fineSamples[${pressureRepairLayout?.aggregateEdgeForFineEdgeBaseWords ?? 0}u+edge];
+}
+fn pcfAggregateEdgeContributionRange(edge:u32)->vec2u{
+  let base=brickAggregateTopology();let records=base+4u+p.dispatch.w+1u;
+  let record=records+3u*edge;return vec2u(pressureTemplateWord(record+1u),
+    pressureTemplateWord(record+2u));
+}
+fn pcfAggregateEdgeContribution(at:u32)->u32{return pressureTemplateWord(at);}
+fn pcfAggregateEdgeSourceBrick(edge:u32)->u32{
+  return fineSamples[${pressureRepairLayout?.aggregateEdgeSourceBaseWords ?? 0}u+edge];
+}
+fn pcfHierarchyParent(level:u32,brick:u32)->u32{
+  let descriptor=pressureHierarchyDescriptor(level);
+  return pressureTemplateWord(pressureTemplateWord(descriptor+1u)+brick);
+}
+fn pcfHierarchyEdgeForAggregate(level:u32,aggregateEdge:u32)->u32{
+  ${pressureRepairLayout?.hierarchyEdgeForAggregateBaseWords.map((base, level) =>
+    `if(level==${level}u){return fineSamples[${base}u+aggregateEdge];}`).join("\n  ") ?? ""}
+  return INVALID;
+}
+fn pcfHierarchyChildRange(level:u32,group:u32)->vec2u{
+  let descriptor=pressureHierarchyDescriptor(level);let offsets=pressureTemplateWord(descriptor+2u);
+  let first=pressureTemplateWord(offsets+group);
+  return vec2u(first,pressureTemplateWord(offsets+group+1u)-first);
+}
+fn pcfHierarchyChild(level:u32,at:u32)->u32{
+  return pressureTemplateWord(pressureTemplateWord(pressureHierarchyDescriptor(level)+3u)+at);
+}
+fn pcfHierarchyInternalEdgeRange(level:u32,group:u32)->vec2u{
+  let descriptor=pressureHierarchyDescriptor(level);let offsets=pressureTemplateWord(descriptor+4u);
+  let first=pressureTemplateWord(offsets+group);
+  return vec2u(first,pressureTemplateWord(offsets+group+1u)-first);
+}
+fn pcfHierarchyInternalEdge(level:u32,at:u32)->u32{
+  return pressureTemplateWord(pressureTemplateWord(pressureHierarchyDescriptor(level)+5u)+at);
+}
+fn pcfHierarchyEdgeContributionRange(level:u32,edge:u32)->vec2u{
+  let records=pressureTemplateWord(pressureHierarchyDescriptor(level)+7u);
+  let record=records+3u*edge;return vec2u(pressureTemplateWord(record+1u),
+    pressureTemplateWord(record+2u));
+}
+fn pcfHierarchyEdgeContribution(level:u32,at:u32)->u32{_=level;return pressureTemplateWord(at);}
+fn persistentBrickAggregateEdge(edge:u32)->f32{return select(bitcast<f32>(atomicLoad(
+  &topologyArena[${persistentPressureCacheLayout?.brickAggregateEdgeBaseWords ?? 0}u+edge])),
+  candidateState[brickAggregateEdgeWeightOffset()+edge],PRESSURE_EXECUTION_QA_ORACLE);}
+fn persistentBrickAggregateDiagonal(brick:u32)->f32{return select(bitcast<f32>(atomicLoad(
+  &topologyArena[${persistentPressureCacheLayout?.brickAggregateDiagonalBaseWords ?? 0}u+brick])),
+  candidateState[brickAggregateDiagonalOffset()+brick],PRESSURE_EXECUTION_QA_ORACLE);}
+fn persistentHierarchyEdge(level:u32,edge:u32)->f32{
+  if(PRESSURE_EXECUTION_QA_ORACLE){return candidateState[
+    pressureHierarchyEdgeWeightOffset(level)+edge];}
+  ${persistentPressureCacheLayout?.hierarchyEdgeBaseWords.map((base, level) =>
+    `if(level==${level}u){return bitcast<f32>(atomicLoad(&topologyArena[${base}u+edge]));}`)
+    .join("\n  ") ?? ""}
+  return 0.0;
+}
+fn persistentHierarchyDiagonal(level:u32,group:u32)->f32{
+  if(PRESSURE_EXECUTION_QA_ORACLE){return candidateState[
+    pressureHierarchyDiagonalOffset(level)+group];}
+  ${persistentPressureCacheLayout?.hierarchyDiagonalBaseWords.map((base, level) =>
+    `if(level==${level}u){return bitcast<f32>(atomicLoad(&topologyArena[${base}u+group]));}`)
+    .join("\n  ") ?? ""}
+  return 1e-12;
+}
+fn psaFrameGeneration()->u32{return atomicLoad(&activity[0]);}
+fn psaTopologyGeneration()->u32{return ptrTopologyGeneration();}
+fn psaPCMGeneration()->u32{return pcfPCMGeneration();}
+fn psaPCFGeneration()->u32{return pcfAcceptedGeneration();}
+fn psaExpectedProducerReceipts()->u32{return pcfBrickWorkCount();}
+fn psaPCMCellWorkgroupCount()->u32{return (pcmCellAcceptedCount()+63u)/64u;}
+fn psaCellBrick(cell:u32)->u32{return cellBrick(cell);}
+fn psaBrickWetExact(brick:u32)->bool{return cachedPressureBrickRange(brick).y!=0u;}
+fn psaHierarchyParent(level:u32,brick:u32)->u32{return pcfHierarchyParent(level,brick);}
+fn psaHierarchyNodeActiveExact(linear:u32)->bool{
+  let address=pressureHierarchyGroupAddress(linear);if(address.x==INVALID){return false;}
+  let range=pcfHierarchyChildRange(address.x,address.y);
+  for(var at=0u;at<range.y;at+=1u){
+    if(psaWetBrickContains(pcfHierarchyChild(address.x,range.x+at))){return true;}}
+  return false;
+}
+fn psaPressureArithmeticActive()->bool{return pipelinedPressureActive();}
+fn psaPressureAddressingReady()->bool{return pabPressureAddressingReady();}
+@compute @workgroup_size(64)
+fn markSparseCM12PressureSolveFromPersistentBricks(
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
+  if(lane!=0u){return;}let brick=pcfBrickRankSelect(wid.x);
+  if(brick!=INVALID){_=psaMarkTopologyBrickBlast(brick,psaBrickWetExact(brick));}
+}
+fn fpaFrameGeneration()->u32{return max(1u,atomicLoad(&activity[0]));}
+fn fpaTopologyGeneration()->u32{return ptrTopologyGeneration();}
+fn fpaPCMGeneration()->u32{return max(1u,pcmRowAcceptedGeneration());}
+fn fpaSourceParity()->u32{return cm12FCSourceFaceParity();}
+fn fpaPolicyBits()->u32{return bitcast<u32>(p.frame.x)
+  ^bitcast<u32>(p.frame.y)^select(0u,0x80000000u,hasRigidBodies());}
+fn fpaExpectedPreparationReceipts()->u32{return atomicLoad(&activity[
+  ${(incrementalActivityLayout?.headerBaseWords ?? 0) + 6}u]);}
+fn fpaExpectedProjectionReceipts()->u32{return 0u;}
+fn fpaPreparationRowLive(row:u32)->bool{return rowAccepted(row);}
+fn fpaProjectionRowLive(row:u32)->bool{return pcmRowContains(row);}
+fn fpaPreparationDependencyGeneration(row:u32)->u32{
+  _=row;return max(1u,incrementalActivityGeneration());}
+fn fpaProjectionDependencyGeneration(row:u32)->u32{
+  _=row;return max(1u,pcfAcceptedGeneration());}
+@compute @workgroup_size(64)
+fn markSparseCM12FacePreparationFromActivity(
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
+  let brick=incrementalActivityBrickInvocation(wid.x);
+  if(brick!=INVALID){let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
+    for(var local=lane;local<range.y;local+=64u){let cell=range.x+local;
+      for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
+        _=fpaMarkPreparationRow(incidenceRow(at),7u,0u,false);}}}
+  workgroupBarrier();if(lane==0u&&brick!=INVALID){fpaCoverPreparationReceipt();}
+}
+@compute @workgroup_size(64)
+fn markSparseCM12FaceProjectionFromPressure(
+ @builtin(global_invocation_id)gid:vec3u){
+  let cell=pressureCellInvocation(gid.x);if(cell==INVALID){return;}
+  _=fpaMarkProjectionPressureCell(cell,
+    bitcast<u32>(state[p.stateOffsets2.x+cell]),512u);
+}
+
+@compute @workgroup_size(1)
+fn beginPersistentPressureCache(){_=pcfBegin(0u);}
+@compute @workgroup_size(1)
+fn finalizePersistentPressureCacheFrontier(){
+  pcfCaptureConsumerGenerations();_=pcfFinalizeFrontier();
+}
+
+@compute @workgroup_size(1)
+fn finalizeCanonicalPressureCellFrontier(){_=pcmCellFinalizeFrontier();}
+
+@compute @workgroup_size(1)
+fn finalizeCanonicalPressureCells(){
+  _=pcmCellFinalize();
+  let count=pcmCellAcceptedCount();let groups=(count+63u)/64u;
+  fineSamples[0]=count;fineSamples[1]=groups;fineSamples[2]=1u;fineSamples[3]=1u;
+  atomicStore(&conditioning[0],i32(count));atomicStore(&conditioning[1],i32(groups));
+  atomicStore(&conditioning[2],1);atomicStore(&conditioning[3],1);
+  fineSamples[PRESSURE_REPAIR_HEADER+PRESSURE_REPAIR_CELL_CHANGES]=pcmCellFirstFault();
+  fineSamples[PRESSURE_REPAIR_HEADER+PRESSURE_REPAIR_FAULT]=pcmCellFault();
 }
 
 var<workgroup>pressurePrefix:array<u32,64>;
@@ -1332,54 +2517,10 @@ fn stablePressurePrefix(lane:u32,flag:u32)->u32{
   return pressurePrefix[lane]-flag;
 }
 
-// Counting needs a sum, not an exclusive scan. Use a six-barrier tree here;
-// the twelve-barrier stable prefix remains only where compacted order matters.
-fn pressureWorkgroupCount(lane:u32,flag:u32)->u32{
-  pressurePrefix[lane]=flag;workgroupBarrier();var width=32u;loop{
-    if(lane<width){pressurePrefix[lane]+=pressurePrefix[lane+width];}
-    workgroupBarrier();if(width==1u){break;}width/=2u;
-  }
-  return pressurePrefix[0];
-}
-
-@compute @workgroup_size(64)
-fn countPressureCells(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let id=acceptedTemplateCellInvocation(gid.x);
-  let flag=select(0u,1u,id!=INVALID&&isLiquid(id));
-  let count=pressureWorkgroupCount(lid.x,flag);
-  if(lid.x==0u){atomicStore(&conditioning[4u+wid.x],i32(count));}
-}
-
-@compute @workgroup_size(1)
-fn finalizePressureCellWorklist(){
-  let sourceGroups=acceptedTemplateCellWorkgroups();
-  var count=0u;for(var group=0u;group<sourceGroups;group+=1u){
-    let groupCount=u32(max(0,atomicLoad(&conditioning[4u+group])));
-    atomicStore(&conditioning[4u+group],i32(count));count+=groupCount;
-  }
-  let groups=(count+63u)/64u;
-  fineSamples[0]=count;fineSamples[1]=groups;fineSamples[2]=1u;fineSamples[3]=1u;
-  atomicStore(&conditioning[0],i32(count));atomicStore(&conditioning[1],i32(groups));
-  atomicStore(&conditioning[2],1);atomicStore(&conditioning[3],1);
-}
-
-@compute @workgroup_size(64)
-fn compactPressureCells(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let id=acceptedTemplateCellInvocation(gid.x);
-  let flag=select(0u,1u,id!=INVALID&&isLiquid(id));
-  let prefix=stablePressurePrefix(lid.x,flag);if(flag==0u){return;}
-  let base=u32(max(0,atomicLoad(&conditioning[4u+wid.x])));
-  fineSamples[4u+base+prefix]=id;
-}
-
-@compute @workgroup_size(64)
-fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
-  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
+fn classifyPressureRow(row:u32)->bool{
   // Retirement may deactivate a brick after the accepted list was published;
   // keep this dynamic fence even though physical row topology is immutable.
-  if(!rowAccepted(row)){state[p.stateOffsets3.x+row]=0.0;return;}
+  if(!rowAccepted(row)){state[p.stateOffsets3.x+row]=0.0;return false;}
   let requirements=rowRequirementOffset(row);let requirementCount=ta(requirements);
   var sameLevel=requirementCount>0u;var allCoarse=requirementCount>0u;
   var firstResolution=0u;
@@ -1391,78 +2532,62 @@ fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
   }
   if(rowKind(row)==2u){atomicAdd(&activity[ACCEPTED_MIXED_ROW_COUNT],1u);}
   else if(sameLevel&&allCoarse){atomicAdd(&activity[ACCEPTED_COARSE_ROW_COUNT],1u);}
-  if(rowDualWeight(row)<=1e-8){state[p.stateOffsets3.x+row]=0.0;return;}
+  if(rowDualWeight(row)<=1e-8){state[p.stateOffsets3.x+row]=0.0;return false;}
   let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
   var liquidCount=0u;var airCount=0u;var liquidPhiSum=0.0;var liquidWeight=0.0;
   var airPhiSum=0.0;var airWeight=0.0;
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);let w=abs(termCoefficient(at));
-    let phi=CM12_LIQUID_ISOVALUE-candidateState[pressureDensityCacheOffset()+cell];
-    if(isLiquid(cell)){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;}
+    let phi=CM12_LIQUID_ISOVALUE-pressureDensity(cell);
+    if(pcmCellContains(cell)){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;}
     else{airCount+=1u;airPhiSum+=w*phi;airWeight+=w;}}
-  if(liquidCount==0u){state[p.stateOffsets3.x+row]=0.0;return;}
+  if(liquidCount==0u){state[p.stateOffsets3.x+row]=0.0;return false;}
   if(rowKind(row)==3u){let w=liquidWeight;airPhiSum+=w*rowExteriorPhi(row);airWeight+=w;}
   let cut=airCount>0u||rowKind(row)==3u;
   let theta=select(1.0,cm12GhostFluidTheta(liquidPhiSum/max(liquidWeight,1e-9),
     airPhiSum/max(airWeight,1e-9),1e-12),cut);
   state[p.stateOffsets3.x+row]=theta;
   atomicAdd(&activity[PRESSURE_ACTIVE_ROW_COUNT],1u);
+  return true;
 }
 
 @compute @workgroup_size(64)
-fn countPressureRows(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let row=acceptedTemplateRowInvocation(gid.x);
-  let flag=select(0u,1u,row!=INVALID&&state[p.stateOffsets3.x+row]>0.0);
-  let count=pressureWorkgroupCount(lid.x,flag);
-  if(lid.x==0u){let header=pressureRowHeader();
-    atomicStore(&conditioning[header+4u+wid.x],i32(count));}
+fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
+  let enabled=classifyPressureRow(row);_=pcfStoreThetaAndRecord(row,
+    state[p.stateOffsets3.x+row]);_=pcmRowSetCandidate(row,enabled,1u,false);
+}
+
+@compute @workgroup_size(64)
+fn classifyDirtyPressureRows(@builtin(global_invocation_id)gid:vec3u){
+  let row=temporalScalarRowInvocation(gid.x);if(row==INVALID){return;}
+  let enabled=classifyPressureRow(row);_=pcfStoreThetaAndRecord(row,
+    state[p.stateOffsets3.x+row]);_=pcmRowSetCandidate(row,enabled,2u,false);
 }
 
 @compute @workgroup_size(1)
-fn finalizePressureRowWorklist(){
-  let header=pressureRowHeader();let sourceGroups=acceptedTemplateRowWorkgroups();var count=0u;
-  for(var group=0u;group<sourceGroups;group+=1u){
-    let groupCount=u32(max(0,atomicLoad(&conditioning[header+4u+group])));
-    atomicStore(&conditioning[header+4u+group],i32(count));count+=groupCount;
-  }
-  let groups=(count+63u)/64u;
-  fineSamples[header]=count;fineSamples[header+1u]=groups;
+fn finalizeCanonicalPressureRowFrontier(){_=pcmRowFinalizeFrontier();}
+
+@compute @workgroup_size(1)
+fn finalizeCanonicalPressureRows(){
+  _=pcmRowFinalize();
+  let count=pcmRowAcceptedCount();let groups=(count+63u)/64u;
+  let header=pressureRowHeader();fineSamples[header]=count;fineSamples[header+1u]=groups;
   fineSamples[header+2u]=1u;fineSamples[header+3u]=1u;
   atomicStore(&conditioning[header],i32(count));
   atomicStore(&conditioning[header+1u],i32(groups));
   atomicStore(&conditioning[header+2u],1);atomicStore(&conditioning[header+3u],1);
-}
-
-@compute @workgroup_size(64)
-fn compactPressureRows(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let row=acceptedTemplateRowInvocation(gid.x);
-  let flag=select(0u,1u,row!=INVALID&&state[p.stateOffsets3.x+row]>0.0);
-  let prefix=stablePressurePrefix(lid.x,flag);if(flag==0u){return;}
-  let header=pressureRowHeader();
-  let base=u32(max(0,atomicLoad(&conditioning[header+4u+wid.x])));
-  fineSamples[header+4u+base+prefix]=row;
+  atomicStore(&activity[PRESSURE_ACTIVE_ROW_COUNT],count);
+  fineSamples[PRESSURE_REPAIR_HEADER+PRESSURE_REPAIR_ROW_CHANGES]=pcmRowFirstFault();
+  let rowFault=pcmRowFault();if(rowFault!=0u){
+    fineSamples[PRESSURE_REPAIR_HEADER+PRESSURE_REPAIR_FAULT]=0x10000u|rowFault;
+  }
 }
 
 // Theta and any live rigid scaling are constant throughout one pressure
-// epoch. Bake them once into candidateState, whose transfer payload is dead
-// until after projection, instead of re-reading the row and dividing in every
-// PCG SpMV.
-@compute @workgroup_size(64)
-fn bakeEffectivePressureEdges(@builtin(global_invocation_id)gid:vec3u){
-  let cell=pressureCellInvocation(gid.x);if(cell==INVALID){return;}
-  let edgeOffsets=pressureTemplateWord(15u);
-  let end=pressureTemplateWord(edgeOffsets+cell+1u);
-  for(var edge=pressureTemplateWord(edgeOffsets+cell);edge<end;edge+=1u){
-    let row=pressureTemplateWord(pressureEdgeRows()+edge);
-    let theta=state[p.stateOffsets3.x+row];let other=fineSamples[pressureNeighborOffset()+edge];
-    var weight=0.0;
-    if(theta>0.0&&isLiquid(other)){
-      weight=bitcast<f32>(pressureTemplateWord(pressureEdgeWeights()+edge))/theta;
-      if(hasRigidBodies()){weight*=state[p.solidOffsets.y+3u*row+2u];}
-    }
-    candidateState[edge]=weight;
-  }
+// epoch. candidateState is transient pressure scratch and every current
+// pressure member refreshes its directed edges before the solve.
+fn effectivePressureEdgeWeight(edge:u32)->f32{
+  return pcfEdgeWeight(edge);
 }
 
 // One coarse scalar per resident brick supplies a sparse additive coarse
@@ -1478,13 +2603,13 @@ fn bakeBrickAggregateDiagonal(@builtin(local_invocation_id)lid:vec3u,
     let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
     let edgeOffsets=pressureTemplateWord(15u);
     for(var local=lid.x;local<range.y;local+=64u){let cell=range.x+local;
-      if(!isLiquid(cell)){continue;}
+      if(!pcmCellContains(cell)){continue;}
       wet=1.0;
       diagonal+=state[p.stateOffsets2.z+cell];
       let end=pressureTemplateWord(edgeOffsets+cell+1u);
       for(var edge=pressureTemplateWord(edgeOffsets+cell);edge<end;edge+=1u){
         let other=fineSamples[pressureNeighborOffset()+edge];
-        if(cellBrick(other)==brick){diagonal+=candidateState[edge];}
+        if(cellBrick(other)==brick){diagonal+=effectivePressureEdgeWeight(edge);}
       }
     }
   }
@@ -1516,13 +2641,13 @@ fn bakePressureHierarchyDiagonalWork(lid:vec3u,wid:vec3u,level:u32){
     let childEnd=pressureTemplateWord(childOffsets+group+1u);
     for(var at=childBegin+lid.x;at<childEnd;at+=64u){
       let brick=pressureTemplateWord(children+at);
-      diagonal+=candidateState[brickAggregateDiagonalOffset()+brick];
+      diagonal+=persistentBrickAggregateDiagonal(brick);
     }
     let edgeBegin=pressureTemplateWord(internalOffsets+group);
     let edgeEnd=pressureTemplateWord(internalOffsets+group+1u);
     for(var at=edgeBegin+lid.x;at<edgeEnd;at+=64u){
       let edge=pressureTemplateWord(internalEdges+at);
-      diagonal+=candidateState[brickAggregateEdgeWeightOffset()+edge];
+      diagonal+=persistentBrickAggregateEdge(edge);
     }
   }
   reduceA[lid.x]=diagonal;workgroupBarrier();var width=32u;loop{
@@ -1565,7 +2690,7 @@ fn restrictPressureHierarchyResidualWork(lid:vec3u,wid:vec3u,level:u32){
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
   if(lid.x==0u&&group<count){
-    let diagonal=candidateState[pressureHierarchyDiagonalOffset(level)+group];
+    let diagonal=persistentHierarchyDiagonal(level,group);
     candidateState[pressureHierarchyRhsOffset(level)+group]=reduceA[0];
     candidateState[pressureHierarchyAOffset(level)+group]
       =select(0.0,2.8573742*reduceA[0]/diagonal,diagonal>1e-12);
@@ -1582,7 +2707,7 @@ fn refinePressureHierarchyCorrectionWork(lid:vec3u,wid:vec3u,level:u32){
     let edgeEnd=pressureTemplateWord(offsets+group+1u);
     for(var edge=edgeBegin+lid.x;edge<edgeEnd;edge+=64u){
       let otherGroup=pressureTemplateWord(records+3u*edge);
-      offDiagonal+=candidateState[pressureHierarchyEdgeWeightOffset(level)+edge]
+      offDiagonal+=persistentHierarchyEdge(level,edge)
         *candidateState[pressureHierarchyAOffset(level)+otherGroup];
     }
   }
@@ -1591,7 +2716,7 @@ fn refinePressureHierarchyCorrectionWork(lid:vec3u,wid:vec3u,level:u32){
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
   if(lid.x==0u&&group<count){
-    let diagonal=candidateState[pressureHierarchyDiagonalOffset(level)+group];
+    let diagonal=persistentHierarchyDiagonal(level,group);
     let current=candidateState[pressureHierarchyAOffset(level)+group];
     let rhs=candidateState[pressureHierarchyRhsOffset(level)+group];
     let residual=rhs-(diagonal*current+reduceA[0]);
@@ -1614,19 +2739,21 @@ fn bakePressureHierarchyDiagonal(@builtin(local_invocation_id)lid:vec3u,
 @compute @workgroup_size(64)
 fn restrictPressureHierarchyResidual(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
-  let address=pressureHierarchyGroupAddress(wid.x);
+  let address=psaActiveHierarchyNodeAddress(wid.x);
   restrictPressureHierarchyResidualWork(lid,vec3u(address.y,0u,0u),address.x);
 }
 @compute @workgroup_size(64)
 fn refinePressureHierarchyCorrection(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
-  let address=pressureHierarchyGroupAddress(wid.x);
+  let address=psaActiveHierarchyNodeAddress(wid.x);
   refinePressureHierarchyCorrectionWork(lid,vec3u(address.y,0u,0u),address.x);
 }
 
 @compute @workgroup_size(64)
-fn combinePressureHierarchyCorrection(@builtin(global_invocation_id)gid:vec3u){
-  let brick=gid.x;if(brick>=p.dispatch.w){return;}var correction=0.0;
+fn combinePressureHierarchyCorrection(@builtin(local_invocation_index)lane:u32,
+ @builtin(workgroup_id)wid:vec3u){
+  if(lane!=0u){return;}let brick=psaWetBrickInvocation(wid.x);
+  if(brick==INVALID){return;}var correction=0.0;
   for(var level=0u;level<pressureHierarchyLevelCount();level+=1u){
     let parents=pressureTemplateWord(pressureHierarchyDescriptor(level)+1u);
     let parent=pressureTemplateWord(parents+brick);
@@ -1639,19 +2766,19 @@ fn combinePressureHierarchyCorrection(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn restrictBrickAggregateResidual(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
-  let brick=wid.x;var residual=0.0;
-  if(brick<p.dispatch.w){
+  let brick=psaWetBrickInvocation(wid.x);var residual=0.0;
+  if(brick!=INVALID){
     let range=cachedPressureBrickRange(brick);
     for(var local=lid.x;local<range.y;local+=64u){let cell=range.x+local;
-      if(isLiquid(cell)){residual+=state[p.stateOffsets3.y+cell];}
+      if(pcmCellContains(cell)){residual+=state[p.stateOffsets3.y+cell];}
     }
   }
   reduceA[lid.x]=residual;workgroupBarrier();var width=32u;loop{
     if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];}
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
-  if(lid.x==0u&&brick<p.dispatch.w){
-    let diagonal=candidateState[brickAggregateDiagonalOffset()+brick];
+  if(lid.x==0u&&brick!=INVALID){
+    let diagonal=persistentBrickAggregateDiagonal(brick);
     candidateState[brickAggregateRhsOffset()+brick]=reduceA[0];
     candidateState[brickAggregateAOffset()+brick]
       =select(0.0,2.8573742*reduceA[0]/diagonal,diagonal>1e-12);
@@ -1667,22 +2794,21 @@ fn bakeBrickAggregateEdges(@builtin(global_invocation_id)gid:vec3u){
   let contributionBegin=pressureTemplateWord(record+1u);
   let contributionCount=pressureTemplateWord(record+2u);var weight=0.0;
   for(var at=0u;at<contributionCount;at+=1u){
-    weight+=candidateState[pressureTemplateWord(contributionBegin+at)];
+    weight+=effectivePressureEdgeWeight(pressureTemplateWord(contributionBegin+at));
   }
   candidateState[brickAggregateEdgeWeightOffset()+coarseEdge]=weight;
 }
 
 fn refineBrickAggregateCorrectionWork(lid:vec3u,wid:vec3u,sourceOffset:u32,
  destinationOffset:u32,weight:f32){
-  let brick=wid.x;var offDiagonal=0.0;
-  if(brick<p.dispatch.w&&bitcast<u32>(
-    candidateState[brickAggregateRangeOffset()+brick])!=0u){
+  let brick=psaWetBrickInvocation(wid.x);var offDiagonal=0.0;
+  if(brick!=INVALID&&cachedPressureBrickRange(brick).y!=0u){
     let topologyBase=brickAggregateTopology();let offsets=topologyBase+4u;
     let recordBase=offsets+p.dispatch.w+1u;
     let begin=pressureTemplateWord(offsets+brick);let end=pressureTemplateWord(offsets+brick+1u);
     for(var coarseEdge=begin+lid.x;coarseEdge<end;coarseEdge+=64u){
       let otherBrick=pressureTemplateWord(recordBase+3u*coarseEdge);
-      offDiagonal+=candidateState[brickAggregateEdgeWeightOffset()+coarseEdge]
+      offDiagonal+=persistentBrickAggregateEdge(coarseEdge)
         *candidateState[sourceOffset+otherBrick];
     }
   }
@@ -1690,8 +2816,8 @@ fn refineBrickAggregateCorrectionWork(lid:vec3u,wid:vec3u,sourceOffset:u32,
     if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];}
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
-  if(lid.x==0u&&brick<p.dispatch.w){
-    let diagonal=candidateState[brickAggregateDiagonalOffset()+brick];
+  if(lid.x==0u&&brick!=INVALID){
+    let diagonal=persistentBrickAggregateDiagonal(brick);
     let current=candidateState[sourceOffset+brick];
     let rhs=candidateState[brickAggregateRhsOffset()+brick];
     let residual=rhs-(diagonal*current+reduceA[0]);
@@ -1780,7 +2906,7 @@ fn applyOperator(cell:u32,inputOffset:u32)->f32{
   var result=state[p.stateOffsets2.z+cell]*state[inputOffset+cell];
   let end=pressureTemplateWord(edgeOffsets+cell+1u);
   for(var edge=pressureTemplateWord(edgeOffsets+cell);edge<end;edge+=1u){
-    let weight=candidateState[edge];if(weight==0.0){continue;}
+    let weight=effectivePressureEdgeWeight(edge);if(weight==0.0){continue;}
     let other=fineSamples[pressureNeighborOffset()+edge];
     result+=weight*state[inputOffset+other];
   }
@@ -1789,17 +2915,55 @@ fn applyOperator(cell:u32,inputOffset:u32)->f32{
 
 @compute @workgroup_size(64)
 fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
-  let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
-  if(!isLiquid(id)){return;}
-  let rho=candidateState[pressureDensityCacheOffset()+id];
-  var rhs=0.0;var diagonal=0.0;
+  let id=pressureCellInvocation(gid.x);if(id==INVALID){return;}
+  let rho=pressureDensity(id);
+  var rhs=0.0;let diagonal=pcfDiagonal(id);
   for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
     let row=incidenceRow(at);let theta=state[p.stateOffsets3.x+row];
     if(theta<=0.0){continue;}
     let coefficient=termCoefficient(incidenceTerm(at));
     let fluxWeight=select(rowDualWeight(row),rowStaticDualWeight(row),hasRigidBodies());
     rhs+=coefficient*fluxWeight*state[destinationFaceVelocity()+row];
+  }
+  let targetDivergence=select(cm12VolumeCorrectionDivergence(
+    rho,p.frame.y*cellMinimumWidth(id),p.frame.x),0.0,cellSeparatingMinimum(id));
+  let controlVolume=select(cellOpenVolume(id),cellVolume(id),cellSeparatingMinimum(id));
+  state[p.stateOffsets2.y+id]=rhs+controlVolume*targetDivergence;
+  state[p.stateOffsets2.z+id]=diagonal;
+}
+
+// Construction-only full coefficient oracle. It reproduces the legacy stable
+// PCM traversal into the QA instance's persistent edge arena without touching
+// PCF work headers or producer receipts. Production never dispatches it and
+// has no selector or full-work fallback path.
+@compute @workgroup_size(64)
+fn preparePressureFullOracle(@builtin(global_invocation_id)gid:vec3u){
+  let id=pressureCellInvocation(gid.x);if(id==INVALID){return;}
+  let edgeOffsets=pressureTemplateWord(15u);
+  let edgeEnd=pressureTemplateWord(edgeOffsets+id+1u);
+  for(var edge=pressureTemplateWord(edgeOffsets+id);edge<edgeEnd;edge+=1u){
+    let row=pressureTemplateWord(pressureEdgeRows()+edge);
+    let theta=state[p.stateOffsets3.x+row];let other=fineSamples[pressureNeighborOffset()+edge];
+    var weight=0.0;
+    if(theta>0.0&&pcmCellContains(other)){
+      weight=bitcast<f32>(pressureTemplateWord(pressureEdgeWeights()+edge))/theta;
+      if(hasRigidBodies()){weight*=state[p.solidOffsets.y+3u*row+2u];}
+    }
+    pcfStoreEdgeWeight(edge,weight);
+  }
+  var diagonal=0.0;
+  for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
+    let row=incidenceRow(at);let theta=state[p.stateOffsets3.x+row];
+    if(theta<=0.0||!pcmRowContains(row)){continue;}
+    let coefficient=termCoefficient(incidenceTerm(at));
     diagonal+=rowDualWeight(row)*coefficient*coefficient/theta;
+  }
+  let rho=pressureDensity(id);var rhs=0.0;
+  for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
+    let row=incidenceRow(at);let theta=state[p.stateOffsets3.x+row];
+    if(theta<=0.0){continue;}let coefficient=termCoefficient(incidenceTerm(at));
+    let fluxWeight=select(rowDualWeight(row),rowStaticDualWeight(row),hasRigidBodies());
+    rhs+=coefficient*fluxWeight*state[destinationFaceVelocity()+row];
   }
   let targetDivergence=select(cm12VolumeCorrectionDivergence(
     rho,p.frame.y*cellMinimumWidth(id),p.frame.x),0.0,cellSeparatingMinimum(id));
@@ -2023,7 +3187,7 @@ fn journalSnapshot(@builtin(global_invocation_id)gid:vec3u){
   if(slot>=journalSnapshotCapacity()){return;}
   let cell=acceptedTemplateCellInvocation(gid.x);
   if(cell==INVALID||cell>=journalCellStride()){return;}
-  let live=isLiquid(cell);
+  let live=pcmCellContains(cell);
   state[journalSnapshotField(slot,0u)+cell]=
     select(0.0,state[p.stateOffsets2.x+cell],live);
   state[journalSnapshotField(slot,1u)+cell]=
@@ -2194,10 +3358,50 @@ fn projectFaces(@builtin(global_invocation_id)gid:vec3u){
   let theta=state[p.stateOffsets3.x+row];if(theta<=0.0||rowArea(row)<=1e-8){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());return;}
   var jump=0.0;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-  for(var at=begin;at<end;at+=1u){let cell=termCell(at);if(isLiquid(cell)){
+  for(var at=begin;at<end;at+=1u){let cell=termCell(at);if(pcmCellContains(cell)){
     jump+=termCoefficient(at)*state[p.stateOffsets2.x+cell];}}
   let pressureOpen=select(1.0,rowPressureOpenFraction(row),hasRigidBodies());
   state[destinationFaceVelocity()+row]-=pressureOpen*jump/theta;
+}
+@compute @workgroup_size(64)
+fn executeSparseCM12FaceProjection(@builtin(global_invocation_id)gid:vec3u){
+  let row=fpaProjectionRowInvocation(gid.x);if(row==INVALID){return;}
+  // Project the live destination authority. Body forces are applied after
+  // preparation and before the pressure solve; restoring the pre-force FPA
+  // snapshot here silently erased them and changed activity/topology. The
+  // stored prepared bits remain a preparation reuse receipt, not a substitute
+  // for the force-conditioned face bank.
+  let theta=state[p.stateOffsets3.x+row];
+  if(theta<=0.0||rowArea(row)<=1e-8){
+    state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());
+  }else{var jump=0.0;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    for(var at=begin;at<end;at+=1u){let cell=termCell(at);if(pcmCellContains(cell)){
+      jump+=termCoefficient(at)*state[p.stateOffsets2.x+cell];}}
+    let pressureOpen=select(1.0,rowPressureOpenFraction(row),hasRigidBodies());
+    state[destinationFaceVelocity()+row]-=pressureOpen*jump/theta;}
+  _=fpaProjectionComplete(row);
+}
+
+// The extrapolation recurrence uses the accepted collocated liquid velocities
+// only at the liquid/air interface. Both collocated banks are recurrence
+// scratch by the time projection publishes the next accepted source, so a
+// comparison with either bank cannot prove that a boundary seed is unchanged.
+// VEX1 retains the prior accepted seed bits alongside its air cache. Publish
+// only interface seeds whose newly projected value differs from that receipt;
+// VEX1 expands the compact root set by the fixed eight-layer dependency closure.
+fn cm12VelocityExtensionChangedInterfaceSeed(cell:u32,velocity:vec3f)->bool{
+  if(state[destinationDensity()+cell]<=CM12_LIQUID_ISOVALUE){return false;}
+  let edgeOffsets=pressureTemplateWord(15u);
+  let end=pressureTemplateWord(edgeOffsets+cell+1u);
+  for(var edge=pressureTemplateWord(edgeOffsets+cell);edge<end;edge+=1u){
+    let row=pressureTemplateWord(pressureEdgeRows()+edge);if(!rowAccepted(row)){continue;}
+    let neighbor=fineSamples[pressureNeighborOffset()+edge];
+    if(neighbor<p.counts.x&&cellActive(neighbor)
+      &&state[destinationDensity()+neighbor]<=CM12_LIQUID_ISOVALUE){
+      return cm12ExtensionAcceptedVelocityChanged(cell,velocity);
+    }
+  }
+  return false;
 }
 
 @compute @workgroup_size(64)
@@ -2205,9 +3409,18 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
   let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
   if(!cellTransportActive(id)){
     let output=destinationCellVelocity()+4u*id;
+    if(cellActive(id)&&any(bitcast<vec3u>(vec3f(state[output],state[output+1u],
+      state[output+2u]))!=vec3u(0u))){
+      incrementalActivityMarkCellClosure(id,
+        ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic
+          | SPARSE_CM12_DIRTY_CAUSE_BIT.movingSolidSweep}u);
+    }
     state[output]=0.0;state[output+1u]=0.0;state[output+2u]=0.0;state[output+3u]=0.0;
+    cm12ResidentRecordExtensionIncidence(id,2u);
     state[p.stateOffsets4.y+id]=0.0;return;
   }
+  let previousAt=destinationCellVelocity()+4u*id;
+  let previousVelocity=vec3f(state[previousAt],state[previousAt+1u],state[previousAt+2u]);
   var velocity=vec3f(0.0);var weight=vec3f(0.0);var equation=0.0;var correction=0.0;
   for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){let row=incidenceRow(at);
     if(!rowAccepted(row)){continue;}
@@ -2220,16 +3433,24 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
         (faceVelocity-(1.0-open)*rowSolidVelocity(row))/max(open,1e-6),open>1e-6);
     }
     velocity[axis]+=w*faceVelocity;weight[axis]+=w;
-    if(isLiquid(id)){let value=termCoefficient(term)*fluxWeight*state[destinationFaceVelocity()+row];
+    if(pcmCellContains(id)){let value=termCoefficient(term)*fluxWeight*state[destinationFaceVelocity()+row];
       let adjusted=value-correction;let next=equation+adjusted;correction=(next-equation)-adjusted;equation=next;}}
   for(var axis=0u;axis<3u;axis+=1u){if(weight[axis]>0.0){velocity[axis]/=weight[axis];}}
+  let velocityChanged=any(bitcast<vec3u>(velocity)!=bitcast<vec3u>(previousVelocity));
+  if(velocityChanged){
+    incrementalActivityMarkCellClosure(id,
+      ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
+  }
+  if(velocityChanged||cm12VelocityExtensionChangedInterfaceSeed(id,velocity)){
+    cm12ResidentRecordExtensionIncidence(id,2u);
+  }
   state[destinationCellVelocity()+4u*id]=velocity.x;state[destinationCellVelocity()+4u*id+1u]=velocity.y;
   state[destinationCellVelocity()+4u*id+2u]=velocity.z;state[destinationCellVelocity()+4u*id+3u]=0.0;
   let targetDivergence=select(cm12VolumeCorrectionDivergence(rawPressureDensity(id),
     p.frame.y*cellMinimumWidth(id),p.frame.x),0.0,cellSeparatingMinimum(id));
   let controlVolume=select(cellOpenVolume(id),cellVolume(id),cellSeparatingMinimum(id));
   state[p.stateOffsets4.y+id]=select(0.0,-equation/max(controlVolume,1e-8)
-    -targetDivergence,isLiquid(id));
+    -targetDivergence,pcmCellContains(id));
 }
 
 // Collocated velocity is transport state, not the conservative projected face
@@ -2268,7 +3489,7 @@ fn preserveVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
     else if(transform==6u){let x=v.x;v.x=-v.z;v.z=x;}
     else if(transform==7u){let x=v.x;v.x=-v.z;v.z=-x;}
     sum+=v;count+=1u;
-    if(isLiquid(member)){
+    if(pcmCellContains(member)){
       pressureSum+=state[p.stateOffsets2.x+member];pressureCount+=1u;
     }
   }
@@ -2284,10 +3505,17 @@ fn preserveVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
 fn commitVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||!cellActive(cell)){return;}
   let at=destinationCellVelocity()+4u*cell;
-  state[at]=bitcast<f32>(atomicLoad(&conditioning[cell]));
-  state[at+1u]=bitcast<f32>(atomicLoad(&conditioning[p.counts.x+cell]));
-  state[at+2u]=bitcast<f32>(atomicLoad(&conditioning[2u*p.counts.x+cell]));
-  if(isLiquid(cell)){state[p.stateOffsets2.x+cell]=state[p.stateOffsets5.x+cell];}
+  let previous=vec3f(state[at],state[at+1u],state[at+2u]);
+  let next=vec3f(bitcast<f32>(atomicLoad(&conditioning[cell])),
+    bitcast<f32>(atomicLoad(&conditioning[p.counts.x+cell])),
+    bitcast<f32>(atomicLoad(&conditioning[2u*p.counts.x+cell])));
+  if(any(bitcast<vec3u>(previous)!=bitcast<vec3u>(next))){
+    incrementalActivityMarkCellClosure(cell,
+      ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
+    cm12ResidentRecordExtensionIncidence(cell,2u);
+  }
+  state[at]=next.x;state[at+1u]=next.y;state[at+2u]=next.z;
+  if(pcmCellContains(cell)){state[p.stateOffsets2.x+cell]=state[p.stateOffsets5.x+cell];}
 }
 
 @compute @workgroup_size(64)
@@ -2324,16 +3552,371 @@ fn reduceDivergenceDiagnostics(@builtin(local_invocation_id)lid:vec3u){
   if(lid.x==0u){scalars[6]=reduceA[0];scalars[7]=reduceB[0];}
 }
 
+${vexActivityBatchLayout ? /* wgsl */ `
+// VEX1/A4D2 resident bridge. These functions are the sole semantic seam
+// between the generic compact authorities and the frozen CM12 field/layout
+// arithmetic below.
+fn cm12ResidentCellTile(cell:u32)->vec2u{
+  let brick=cellBrick(cell);let minimum=cellMinimum(cell);
+  let local=(minimum%vec3u(BRICK_FINE_RESOLUTION))/4u;
+  return vec2u(brick,local.x+4u*(local.y+4u*local.z));
+}
+fn cm12ResidentRecordExtensionIncidence(cell:u32,cause:u32){
+  if(cell>=p.counts.x||!cellActive(cell)){return;}
+  _=cm12ExtensionRecordRoot(cell,cause);
+  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+    let row=incidenceRow(incidence);if(!rowAccepted(row)){continue;}
+    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
+      if(neighbor!=cell&&cellActive(neighbor)){_=cm12ExtensionRecordRoot(neighbor,cause);}
+    }
+  }
+}
+fn cm12ResidentVelocityExtensionRoot(cell:u32,cause:u32,generation:u32)->bool{
+  _=cause;return cell<p.counts.x&&generation==cm12ExtensionGeneration();
+}
+fn cm12ResidentVelocityExtensionClosure(cell:u32,depth:u32,generation:u32)->bool{
+  _=depth;return cell<p.counts.x&&generation==cm12ExtensionGeneration();
+}
+fn cm12ResidentVelocityExtensionScheduled(cell:u32,depth:u32,generation:u32)->bool{
+  if(cell>=p.counts.x||generation!=cm12ExtensionGeneration()){return false;}
+  let owner=cm12ResidentCellTile(cell);
+  if(!cm12FramePlanCurrentTileScheduled(owner.x,owner.y,0u)){
+    cm12FramePlanMarkCurrentTileFault(owner.x,owner.y,0u);return false;
+  }
+  cm12FramePlanMarkCurrentTileExecuted(owner.x,owner.y,0u);_=depth;return true;
+}
+fn cm12ResidentVelocityExtensionOwner(cell:u32)->u32{
+  if(cell>=p.counts.x){return INVALID;}
+  let brick=cellBrick(cell);let rung=cellResolution(cell);
+  // The cell ID already names the local template/rung identity. The owner word is
+  // therefore the exact immutable logical brick key, accepted only while that
+  // rung remains current. Do not include the live active bit: receiver planning
+  // toggles it before accepted topology publication and used to invalidate an
+  // otherwise unchanged cache identity in the all-fine companion lane.
+  if(brick>=p.dispatch.w||rung!=acceptedBrickResolution(brick)){return INVALID;}
+  return topology[p.topologyOffsets2.z+2u*brick+1u];
+}
+fn cm12ResidentVelocityExtensionFault(cell:u32,depth:u32){
+  // Expansion authors FPL Next, so it must never mutate accepted FPL Current.
+  // Only the recurrence consumer owns a current-plan fault disposition.
+  if(cm12ExtensionLoad(${vexActivityBatchLayout.velocityExtension.headerBaseWords
+      + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.reserved}u)
+      ==cm12ExtensionPhaseConsuming&&cell<p.counts.x){
+    let owner=cm12ResidentCellTile(cell);
+    cm12FramePlanMarkCurrentTileFault(owner.x,owner.y,0u);
+    // First-fault QA receipt in dispatch words already zeroed by fail-closed.
+    // No production decision consumes these words after a fault.
+    if(cm12ExtensionLoad(${vexActivityBatchLayout.velocityExtension.headerBaseWords
+        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.firstFaultCell}u)==cell
+      &&cm12ExtensionLoad(${vexActivityBatchLayout.velocityExtension.headerBaseWords
+        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.firstFaultDepth}u)==depth){
+      let slot=cm12FramePlanCurrentSlot();
+      let tile=cm12FramePlanTileAt(slot,owner.x,owner.y);
+      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
+        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.rootDispatchY}u,owner.x);
+      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
+        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.rootDispatchZ}u,owner.y);
+      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
+        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.frontierADispatchY}u,slot);
+      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
+        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.frontierADispatchZ}u,
+        cm12FramePlanLoad(tile));
+      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
+        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.frontierBDispatchY}u,
+        cm12FramePlanLoad(tile+1u));
+      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
+        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.frontierBDispatchZ}u,
+        cm12FramePlanLoad(cm12FramePlanBrickAt(slot,owner.x)+4u));
+    }
+  }
+  _=depth;
+}
+fn cm12ResidentVelocityExtensionDirtyCause(cause:u32)->u32{
+  var result=0u;
+  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.bootstrap}u)!=0u){
+    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.generationMismatch}u;}
+  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.projectedVelocity}u)!=0u){
+    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u;}
+  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.liquidClassification}u)!=0u){
+    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged
+      | SPARSE_CM12_DIRTY_CAUSE_BIT.phaseCrossing}u;}
+  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.topologyOrEdgeOwnership}u)!=0u){
+    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
+      | SPARSE_CM12_DIRTY_CAUSE_BIT.coefficientChanged}u;}
+  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.injection}u)!=0u){
+    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.boundarySource}u;}
+  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.movingSolid}u)!=0u){
+    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.movingSolidSweep}u;}
+  return result;
+}
+// Late-frame VEX planning owns the exact blast list. Import that list only
+// after FPL Next is open: depth zero is direct root evidence, positive depth
+// is dependency closure with its exact graph depth. Atomic FPL masks dedupe
+// multiple cells that share one stable B16 tile.
+@compute @workgroup_size(64)
+fn importVelocityExtensionBlastToFramePlanNext(
+ @builtin(global_invocation_id)gid:vec3u){
+  let invocation=gid.x;
+  let count=cm12ExtensionLoad(
+    ${vexActivityBatchLayout.velocityExtension.headerBaseWords
+      + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.blastCount}u);
+  if(invocation>=count){return;}
+  let cell=cm12ExtensionLoad(cm12ExtensionBlastList+invocation);
+  // The sealed blast is the exact recurrence authority. Seed-time pruning is
+  // its activity boundary; independently filtering here could drop FPL
+  // coverage after a same-frame retirement while the immutable blast still
+  // reaches next frame's consumer.
+  if(cell>=p.counts.x){cm12ExtensionFail(cell,0u);return;}
+  let depth=cm12ExtensionLoad(cm12ExtensionBlastDepth+cell);
+  let owner=cm12ResidentCellTile(cell);
+  if(depth==0u){
+    let cause=cm12ResidentVelocityExtensionDirtyCause(
+      cm12ExtensionLoad(cm12ExtensionRootCause+cell));
+    cm12FramePlanMarkOwnedNextTile(owner.x,owner.y,1u,0u,cause,0u,0u);
+  }else{
+    cm12FramePlanMarkOwnedNextTile(owner.x,owner.y,0u,1u,0u,
+      ${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u,depth);
+  }
+}
+
+fn cm12ActivityCandidateGeneration()->u32{return incrementalActivityGeneration();}
+fn cm12ActivityCandidateBrickCount()->u32{return incrementalActivityBrickCount();}
+fn cm12ActivityCandidateListGeneration()->u32{return incrementalActivityListGeneration();}
+fn cm12ActivityCandidateBrickInvocation(candidate:u32)->u32{
+  return incrementalActivityBrickInvocation(candidate);
+}
+fn cm12ActivityTopologyGeneration()->u32{
+  return atomicLoad(&topologyArena[topologyWorklistBase()]);
+}
+fn cm12ActivityFramePlanGeneration()->u32{return cm12FramePlanCandidateGeneration();}
+fn cm12ActivityBrickTopologySignature(brick:u32)->u32{
+  return incrementalActivityTopologyState(brick);
+}
+fn cm12ActivityBrickTopologyChanged(brick:u32)->bool{
+  let mask=incrementalActivityBrickTileMask(brick);return (mask.x|mask.y)!=0u;
+}
+fn cm12ActivityBuildTileTrigger(brick:u32,tile:u32)->vec4u{
+  let generation=cm12ActivityCandidateGeneration();
+  let mask=incrementalActivityBrickTileMask(brick);
+  let dirty=select(0u,1u,(mask.x|mask.y)!=0u);
+  let certificates=0x807f0000u;
+  return vec4u(generation,${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u,
+    certificates|select(0u,0x03ffu,dirty!=0u),cm12ActivityBrickTopologySignature(brick));
+}
+fn cm12ActivityExpectedTileContributionCount(brick:u32,tile:u32)->u32{
+  if(!brickActive(brick)){return 0u;}
+  let resolution=acceptedBrickResolution(brick);let scale=BRICK_FINE_RESOLUTION/resolution;
+  let tx=tile%4u;let yz=tile/4u;let ty=yz%4u;let tz=yz/4u;
+  let lo=vec3u(tx,ty,tz)*4u;let hi=lo+vec3u(4u);
+  let begin=(lo+vec3u(scale-1u))/scale;let end=(hi+vec3u(scale-1u))/scale;
+  return (end.x-begin.x)*(end.y-begin.y)*(end.z-begin.z);
+}
+fn cm12ActivityExpectedTileCheck(brick:u32,tile:u32)->u32{
+  return cm12ActivityBrickTopologySignature(brick)^(tile*0x9e3779b9u)
+    ^cm12ActivityExpectedTileContributionCount(brick,tile);
+}
+fn cm12ActivityPublishFramePlanRoot(brick:u32,tile:u32,directStages:u32,
+ closureStages:u32,cause:u32,depth:u32,generation:u32)->bool{
+  _=brick;_=tile;_=directStages;_=closureStages;_=cause;_=depth;_=generation;
+  return true;
+}
+fn cm12ActivityRebuildExactTile(brick:u32,tile:u32)->A4D2TileSummary{
+  if(!brickActive(brick)){return A4D2TileSummary(vec4i(0),vec4f(0.0),
+    0u,0u,0u,0u,cm12ActivityExpectedTileCheck(brick,tile));}
+  let resolution=acceptedBrickResolution(brick);let range=templateBrickCellRange(brick,resolution);
+  let first=range.x;let scale=BRICK_FINE_RESOLUTION/resolution;
+  let tx=tile%4u;let yz=tile/4u;let ty=yz%4u;let tz=yz/4u;
+  let lo=(vec3u(tx,ty,tz)*4u+vec3u(scale-1u))/scale;
+  let hi=(vec3u(tx,ty,tz)*4u+vec3u(4u)+vec3u(scale-1u))/scale;
+  var sums=vec4i(0);var metrics=vec4f(0.0);var surfaceAxes=0u;
+  var occupiedCell=false;var thinFluidCell=false;var cutBoundaryCell=false;
+  var supportMask=0u;var sweptSupportMask=0u;var contributionCount=0u;
+  for(var z=lo.z;z<hi.z;z+=1u){for(var y=lo.y;y<hi.y;y+=1u){
+    for(var x=lo.x;x<hi.x;x+=1u){
+      let cell=first+x+resolution*(y+resolution*z);contributionCount+=1u;
+      let rho=state[destinationDensity()+cell];let fill=rho/max(cellOpenFraction(cell),1e-6);
+      cutBoundaryCell=cutBoundaryCell||cellOpenFraction(cell)<0.999;
+      let ownFixed=i32(round(rho*ACTIVITY_FIXED));sums.x+=ownFixed;
+      sums.y+=i32(round(rho*(f32(2u*x+1u)-f32(resolution))
+        /f32(resolution)*ACTIVITY_FIXED));
+      sums.z+=i32(round(rho*(f32(2u*y+1u)-f32(resolution))
+        /f32(resolution)*ACTIVITY_FIXED));
+      sums.w+=i32(round(rho*(f32(2u*z+1u)-f32(resolution))
+        /f32(resolution)*ACTIVITY_FIXED));
+      let fractionalCell=fill>p.activityDensity.y&&fill<p.activityDensity.z;
+      var interfaceCell=false;let residencyDensity=residencyDensityThreshold();
+      occupiedCell=occupiedCell||rho>residencyDensity;
+      let ownVelocityAt=destinationCellVelocity()+4u*cell;
+      let ownVelocity=vec3f(state[ownVelocityAt],state[ownVelocityAt+1u],
+        state[ownVelocityAt+2u]);
+      if(rho>residencyDensity){metrics.w=max(metrics.w,p.frame.x*length(ownVelocity));}
+      let ownWet=fill>=CM12_LIQUID_ISOVALUE;
+      let featureDensity=max(residencyDensity,p.activityDensity.x);
+      let b=cellBase(cell);let cellCenter=vec3f(taf(b),taf(b+1u),taf(b+2u));
+      var exposedSides=0u;var surfaceAirSides=0u;
+      for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+        let row=incidenceRow(incidence);if(!rowAccepted(row)){continue;}
+        let own=termCoefficient(incidenceTerm(incidence));if(rowArea(row)<=1e-8){continue;}
+        let axis=rowAxis(row);let rowPosition=rowCenter(row);
+        let omittedAirInside=rowKind(row)==3u&&rowPosition[axis]>1e-4
+          &&rowPosition[axis]<f32(p.dimensions[axis])-1e-4;
+        var crosses=omittedAirInside&&ownWet;var sideHasFluid=false;
+        var sideHasSurfaceFluid=false;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+        for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
+          if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
+          if(cellOpenVolume(neighbor)<=1e-8){continue;}
+          let neighborDensity=state[destinationDensity()+neighbor]
+            /max(cellOpenFraction(neighbor),1e-6);
+          sideHasFluid=sideHasFluid||neighborDensity>featureDensity;
+          sideHasSurfaceFluid=sideHasSurfaceFluid||neighborDensity>p.activityDensity.y;
+          crosses=crosses||((neighborDensity>=CM12_LIQUID_ISOVALUE)!=ownWet
+            &&min(fill,neighborDensity)<=p.activityDensity.y);
+          let neighborVelocityAt=destinationCellVelocity()+4u*neighbor;
+          let neighborVelocity=vec3f(state[neighborVelocityAt],state[neighborVelocityAt+1u],
+            state[neighborVelocityAt+2u]);
+          metrics.x=max(metrics.x,p.frame.x*max(abs(ownVelocity.x-neighborVelocity.x),
+            max(abs(ownVelocity.y-neighborVelocity.y),abs(ownVelocity.z-neighborVelocity.z)))
+            /max(0.15*rowDistance(row),1e-12));
+        }
+        if(rho>featureDensity&&!sideHasFluid){let side=select(0u,1u,rowPosition[axis]>cellCenter[axis]);
+          exposedSides|=1u<<(2u*axis+side);}
+        if(fractionalCell&&!sideHasSurfaceFluid){
+          let side=select(0u,1u,rowPosition[axis]>cellCenter[axis]);
+          surfaceAirSides|=1u<<(2u*axis+side);}
+        if(crosses){interfaceCell=true;surfaceAxes|=1u<<axis;
+          metrics.y=max(metrics.y,p.frame.x*abs(state[destinationFaceVelocity()+row])
+            /max(0.25*rowDistance(row),1e-12));}
+      }
+      let representedThickness=clamp(rho,0.0,1.0)*cellMinimumWidth(cell);
+      var cellIsThinFluid=false;
+      for(var axis=0u;axis<3u;axis+=1u){let oppositeSides=3u<<(2u*axis);
+        if(fractionalCell&&(surfaceAirSides&oppositeSides)!=0u){
+          interfaceCell=true;surfaceAxes|=1u<<axis;}
+        cellIsThinFluid=cellIsThinFluid||(fill>featureDensity
+          &&representedThickness<p.activityThresholds.w
+          &&(exposedSides&oppositeSides)==oppositeSides);
+      }
+      thinFluidCell=thinFluidCell||cellIsThinFluid;
+      if(interfaceCell||cellIsThinFluid){var minimumOffset=vec3i(0);var maximumOffset=vec3i(0);
+        if(x==0u){minimumOffset.x=-1;}if(x+1u==resolution){maximumOffset.x=1;}
+        if(y==0u){minimumOffset.y=-1;}if(y+1u==resolution){maximumOffset.y=1;}
+        if(z==0u){minimumOffset.z=-1;}if(z+1u==resolution){maximumOffset.z=1;}
+        for(var dz=minimumOffset.z;dz<=maximumOffset.z;dz+=1){
+          for(var dy=minimumOffset.y;dy<=maximumOffset.y;dy+=1){
+            for(var dx=minimumOffset.x;dx<=maximumOffset.x;dx+=1){
+              if(dx!=0||dy!=0||dz!=0){let bit=u32(dx+1)+3u*u32(dy+1)+9u*u32(dz+1);
+                supportMask|=1u<<bit;}
+        }}}
+        let brickDimensions=vec3i((p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
+          /BRICK_FINE_RESOLUTION);let sourceBrick=vec3i(cellMinimum(cell)/BRICK_FINE_RESOLUTION);
+        let sweptBrick=clamp(vec3i(floor((cellCenter+p.activityTiming.x*p.frame.x*ownVelocity)
+          /f32(BRICK_FINE_RESOLUTION))),vec3i(0),brickDimensions-vec3i(1));
+        let sweptOffset=clamp(sweptBrick-sourceBrick,vec3i(-1),vec3i(1));
+        if(any(sweptOffset!=vec3i(0))){let bit=u32(sweptOffset.x+1)+3u*u32(sweptOffset.y+1)
+          +9u*u32(sweptOffset.z+1);supportMask|=1u<<bit;sweptSupportMask|=1u<<bit;}
+      }
+      if(resolution>1u){let group=2u*(vec3u(x,y,z)/2u);var childSum=0;
+        for(var dz=0u;dz<2u;dz+=1u){for(var dy=0u;dy<2u;dy+=1u){
+          for(var dx=0u;dx<2u;dx+=1u){let q=group+vec3u(dx,dy,dz);
+            let child=first+q.x+resolution*(q.y+resolution*q.z);
+            if(child<first+range.y){childSum+=i32(round(
+              state[destinationDensity()+child]*ACTIVITY_FIXED));}
+        }}}
+        metrics.z=max(metrics.z,f32(abs(8*ownFixed-childSum))/(8.0*ACTIVITY_FIXED));
+      }
+  }}}
+  let flags=surfaceAxes|select(0u,16u,occupiedCell)|select(0u,32u,thinFluidCell)
+    |select(0u,64u,cutBoundaryCell);
+  return A4D2TileSummary(sums,metrics,flags,supportMask,sweptSupportMask,
+    contributionCount,cm12ActivityExpectedTileCheck(brick,tile));
+}
+fn cm12ActivityPublishExactBrick(brick:u32,moments:vec4i,metrics:vec4f,
+ masks:vec4u,prior:vec4u)->vec4u{
+  _=prior;let output=activityRecord(brick);let step=atomicLoad(&activity[0]);
+  incrementalActivityRemoveCensus(brick);
+  if(!brickActive(brick)){
+    atomicStore(&activity[output],0u);atomicStore(&activity[output+1u],0u);
+    atomicStore(&activity[output+32u],0u);atomicStore(&activity[output+3u],0u);
+    incrementalActivityAcceptMeasuredTopology(brick);
+    return vec4u(0u,0u,0u,0u);
+  }
+  let count=max(1u,masks.w);let first=templateBrickCellRange(
+    brick,acceptedBrickResolution(brick)).x;
+  let meanDensity=f32(moments.x)/(f32(count)*ACTIVITY_FIXED);
+  let normalizedMoments=vec3f(moments.yzw)/(f32(count)*ACTIVITY_FIXED);
+  var temporal=0.0;if(step>1u){temporal=max(abs(meanDensity-activityF32(output+4u))/0.05,
+    max(abs(normalizedMoments.x-activityF32(output+5u))/0.02,
+    max(abs(normalizedMoments.y-activityF32(output+6u))/0.02,
+      abs(normalizedMoments.z-activityF32(output+7u))/0.02)));}
+  let densityMassFineCells=f32(moments.x)/ACTIVITY_FIXED*cellVolume(first);
+  let densityPresent=(masks.x&16u)!=0u;
+  let occupied=densityPresent&&densityMassFineCells>=p.sharpening.w;
+  let axes=select(0u,masks.x&7u,occupied);let surface=occupied&&axes!=0u;
+  let thinFluid=occupied&&(masks.x&32u)!=0u;
+  let shape=select(0.0,1.0,countOneBits(axes)>=2u);
+  let velocityActivity=metrics.w;
+  let scoredDetailError=select(metrics.z,0.0,surface&&!thinFluid&&shape==0.0);
+  let dynamicActivity=select(0.0,max(metrics.x,temporal),surface||thinFluid);
+  let detailActivity=max(0.0,scoredDetailError/p.activityDensity.w-1.0);
+  let featureActivity=max(max(dynamicActivity,metrics.y),
+    max(max(0.0,max(shape,select(0.0,1.0,thinFluid))),detailActivity));
+  let normalizedVelocityActivity=velocityActivity/max(p.activityThresholds.x,1e-6);
+  let scoredVelocityActivity=select(0.0,normalizedVelocityActivity,surface||thinFluid);
+  let scoreValue=clamp(max(scoredVelocityActivity,featureActivity),0.0,1.0);
+  let score=u32(round(255.0*scoreValue));var reasons=0u;
+  if(surface){reasons|=1u;}if(metrics.x>0.0){reasons|=2u;}if(temporal>0.0){reasons|=4u;}
+  if(metrics.z>p.activityDensity.w){reasons|=8u;}if(metrics.y>0.0){reasons|=16u;}
+  if(step==1u){reasons|=32u;}if(occupied){reasons|=64u;}
+  if(velocityResolutionFloor(velocityActivity)>1u){reasons|=128u;}
+  if(thinFluid){reasons|=256u;}if((masks.x&64u)!=0u){reasons|=512u;}
+  let topologyEpoch=atomicLoad(&activity[5])!=0u;
+  let oldHistory=atomicLoad(&activity[output+2u]);
+  var hotEpochs=oldHistory&255u;var quietEpochs=(oldHistory>>8u)&255u;
+  if(topologyEpoch){let activitySignals=activitySignalsEnabled();
+    let featureHot=activitySignals&&featureActivity>=p.activityTiming.y;
+    hotEpochs=select(0u,min(255u,hotEpochs+1u),featureHot);
+    let current=atomicLoad(&activity[output+12u]);
+    let velocityFloor=select(1u,velocityResolutionFloor(velocityActivity),surface||thinFluid);
+    let activityQuiet=!featureHot&&scoreValue<=p.activityTiming.w
+      &&scoredDetailError<=p.activityDensity.w;
+    let quiet=!thinFluid&&velocityFloor<current&&select(!surface,activityQuiet,activitySignals);
+    quietEpochs=select(0u,min(255u,quietEpochs+1u),quiet);
+  }
+  let history=hotEpochs|(quietEpochs<<8u);
+  atomicStore(&activity[output],score);atomicStore(&activity[output+1u],reasons);
+  atomicStore(&activity[output+2u],history);
+  atomicStore(&activity[output+4u],bitcast<u32>(meanDensity));
+  atomicStore(&activity[output+5u],bitcast<u32>(normalizedMoments.x));
+  atomicStore(&activity[output+6u],bitcast<u32>(normalizedMoments.y));
+  atomicStore(&activity[output+7u],bitcast<u32>(normalizedMoments.z));
+  atomicStore(&activity[output+32u],select(0u,masks.y,occupied));
+  atomicStore(&activity[output+3u],select(0u,masks.z,occupied));
+  atomicStore(&activity[output+33u],bitcast<u32>(velocityActivity));
+  atomicStore(&activity[output+34u],0u);
+  incrementalActivityAddCensus(brick,score,reasons);
+  incrementalActivityAcceptMeasuredTopology(brick);
+  let a4d2Flags=1u|select(0u,2u,surface)
+    |select(0u,4u,featureActivity>=p.activityTiming.y)
+    |select(0u,8u,scoreValue<=p.activityTiming.w);
+  return vec4u(score,reasons,history,a4d2Flags);
+}
+` : /* wgsl */ `
+fn cm12ExtensionTransportVelocity(cell:u32)->vec4f{
+  let at=destinationCellVelocity()+4u*cell;
+  return vec4f(state[at],state[at+1u],state[at+2u],state[at+3u]);
+}
+fn cm12ResidentRecordExtensionIncidence(cell:u32,cause:u32){_=cell;_=cause;}
+`}
+
 // Advance and clear the compact receipt entirely on the device. The host
 // encodes this fixed singleton but neither supplies nor consumes a policy
 // decision while advancing the simulation.
 @compute @workgroup_size(1)
 fn advanceActivityClock(){
   let step=atomicAdd(&activity[0],1u)+1u;
-  atomicStore(&activity[1],0u); // maximum score
-  atomicStore(&activity[2],0u); // surface bricks
-  atomicStore(&activity[3],0u); // hot bricks
-  atomicStore(&activity[4],0u); // quiet bricks
+  // Score/class counters are persistent. Dirty bricks transactionally remove
+  // their old census contribution before publishing the new one.
   atomicStore(&activity[5],select(0u,1u,step%p.activityEpochs.x==0u));
   atomicStore(&activity[6],0u); // measured bricks
   atomicStore(&activity[7],0u); // reserved failure flags
@@ -2368,9 +3951,12 @@ fn velocityResolutionFloor(travelFineCells:f32)->u32{
 @compute @workgroup_size(64)
 fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
-  let brick=wid.x;let lane=lid.x;
-  if(brick>=p.dispatch.w){return;}
-  let resident=brickActive(brick);
+  let requestedBrick=incrementalActivityBrickInvocation(wid.x);let lane=lid.x;
+  // Keep invalid-worklist fail-closed handling outside the workgroup-uniform
+  // reduction. All lanes reduce an empty brick-zero payload, then lane zero
+  // exits without publishing it.
+  let brick=select(0u,requestedBrick,requestedBrick!=INVALID);
+  let resident=requestedBrick!=INVALID&&brickActive(brick);
   let resolution=acceptedBrickResolution(brick);
   let range=templateBrickCellRange(brick,resolution);
   let first=range.x;let count=range.y;
@@ -2555,11 +4141,13 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     }
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
-  if(lane!=0u){return;}
+  if(lane!=0u){return;}if(requestedBrick==INVALID){return;}
   let output=activityRecord(brick);let step=atomicLoad(&activity[0]);
+  incrementalActivityRemoveCensus(brick);
   if(!resident){
     atomicStore(&activity[output],0u);atomicStore(&activity[output+1u],0u);
     atomicStore(&activity[output+32u],0u);atomicStore(&activity[output+3u],0u);
+    incrementalActivityAcceptMeasuredTopology(brick);
     return;
   }
   let reducedMoments=activityMoments[0];let reducedMetrics=activityMetrics[0];
@@ -2654,10 +4242,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   atomicStore(&activity[output+3u],select(0u,reducedSweptSupportMask,occupied));
   atomicStore(&activity[output+33u],bitcast<u32>(velocityActivity));
   atomicStore(&activity[output+34u],0u);
-  atomicMax(&activity[1],score);if(surface){atomicAdd(&activity[2],1u);}
-  if(scoreValue>=p.activityTiming.y){atomicAdd(&activity[3],1u);}
-  if(scoreValue<=p.activityTiming.w){atomicAdd(&activity[4],1u);}
-  atomicAdd(&activity[6],1u);
+  incrementalActivityAddCensus(brick,score,reasons);
+  incrementalActivityAcceptMeasuredTopology(brick);
 }
 
 // A receiver request is an immutable activity-snapshot predicate, not merely
@@ -2910,7 +4496,14 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
   }
   let accepted=atomicLoad(&activity[output+12u]);
   let candidate=atomicLoad(&activity[output+8u]);
-  var invalid=!validBrickResolution(accepted)||!validBrickResolution(candidate);
+  // Receiver activation uses a bounded weak-CAS. If its unique writer still
+  // observes 64 spurious failures, preserve that local rejection through this
+  // validation pass instead of silently turning the requested receiver into
+  // ordinary topology work.
+  let activationFault=(atomicLoad(&activity[7])&32u)!=0u
+    &&brickRequestedAsReceiver(brick)&&!brickActive(brick);
+  var invalid=!validBrickResolution(accepted)||!validBrickResolution(candidate)
+    ||activationFault;
   let record=p.topologyOffsets2.z+2u*brick;let key=topology[record+1u];
   let brickDimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
     /BRICK_FINE_RESOLUTION;
@@ -2963,6 +4556,9 @@ fn scheduleTopologyPreparation(@builtin(local_invocation_id)lid:vec3u){
     let candidate=atomicLoad(&activity[output+13u]);
     if(candidate>accepted){atomicStore(&activity[output+35u],1u);
       atomicStore(&activity[output+36u],generation);urgent+=1u;
+      _=ptrRecordChangedBrick(brick,pressureBrickStateAtResolution(brick,accepted),
+        pressureBrickStateAtResolution(brick,candidate),
+        ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_CAUSE.resolutionChanged}u,true);
     }else{ordinary+=1u;}
   }
   // The cursor rotation means brick b is cleared above by lane b%64 and may be
@@ -2992,6 +4588,11 @@ fn scheduleTopologyPreparation(@builtin(local_invocation_id)lid:vec3u){
       let output=activityRecord(brick);
       atomicStore(&activity[output+35u],1u);
       atomicStore(&activity[output+36u],generation);
+      let accepted=atomicLoad(&activity[output+12u]);
+      let candidate=atomicLoad(&activity[output+13u]);
+      _=ptrRecordChangedBrick(brick,pressureBrickStateAtResolution(brick,accepted),
+        pressureBrickStateAtResolution(brick,candidate),
+        ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_CAUSE.resolutionChanged}u,true);
     }
     // pressurePrefix now holds the inclusive scan; lane 63 is the chunk total.
     let chunkTotal=pressurePrefix[63];
@@ -3482,6 +5083,8 @@ fn reconstructShadowFaces(@builtin(global_invocation_id)gid:vec3u){
 fn validateAndCommitShadowTopology(){
   let prepared=atomicLoad(&activity[16]);let base=topologyWorklistBase();
   if(prepared==0u){
+    _=ptrSealTopologyJournal(atomicLoad(&topologyArena[ptrH_COVERED_PRODUCER_RECEIPTS]),
+      atomicLoad(&topologyArena[base]));
     atomicStore(&activity[13],(atomicLoad(&activity[13])+p.topologyScheduling.x)
       %max(1u,p.dispatch.w));return;
   }
@@ -3497,12 +5100,20 @@ fn validateAndCommitShadowTopology(){
     if(brickActive(brick)){activeCells+=templateBrickCellRange(brick,resolution).y;
       if(resolution==BRICK_FINE_RESOLUTION){fine+=1u;}else{coarse+=1u;}}
   }
-  if(!valid){atomicStore(&activity[21],1u);atomicStore(&topologyArena[base+3u],3u);return;}
+  if(!valid){_=ptrRejectTopologyJournal();atomicStore(&activity[21],1u);
+    atomicStore(&topologyArena[base+3u],3u);return;}
   for(var brick=0u;brick<p.dispatch.w;brick+=1u){let output=activityRecord(brick);
     if(atomicLoad(&activity[output+35u])!=0u){
       let accepted=atomicLoad(&activity[output+12u]);
       let next=atomicLoad(&activity[output+13u]);
+      // The next-frame scalar candidate was already published. Poison only
+      // this changed topology closure before publishing the replacement rung.
+      scaInvalidateBrickTopologyClosure(brick);
       atomicStore(&activity[output+12u],next);
+      // The replacement rung may cover a larger logical span. Stamp its full
+      // page identity and receiver halo as well; generation dedupe unions this
+      // with the old-span closure without growing the event journal twice.
+      scaInvalidateBrickTopologyClosure(brick);
       let recoveryState=atomicLoad(&activity[output+38u]);
       let recoveryFloor=recoveryState&31u;
       let recoveryLocked=(recoveryState&ACTIVITY_RECOVERY_LOCK)!=0u;
@@ -3512,7 +5123,9 @@ fn validateAndCommitShadowTopology(){
         atomicStore(&activity[output+38u],next);
       }
       atomicStore(&activity[output+2u],0u);
-      atomicStore(&activity[output+35u],0u);atomicAdd(&activity[17],1u);
+      // Keep the local scheduled bit through the post-commit VEX root pass;
+      // the next planner clears it before authoring another transaction.
+      atomicAdd(&activity[17],1u);
     }
   }
   let slot=shadowTopologySlot();
@@ -3523,6 +5136,8 @@ fn validateAndCommitShadowTopology(){
     atomicStore(&topologyArena[base+11u+at],atomicLoad(&topologyArena[base+23u+at]));
   }
   atomicStore(&topologyArena[base],atomicLoad(&topologyArena[base+1u]));
+  _=ptrSealTopologyJournal(atomicLoad(&topologyArena[ptrH_COVERED_PRODUCER_RECEIPTS]),
+    atomicLoad(&topologyArena[base]));
   atomicStore(&activity[12],atomicLoad(&topologyArena[base]));
   atomicStore(&activity[19],fine);atomicStore(&activity[20],coarse);
   atomicStore(&activity[11],activeCells);atomicStore(&activity[13],
@@ -3531,6 +5146,17 @@ fn validateAndCommitShadowTopology(){
   // Release-like publication point: every state/list write is ordered before
   // the next dispatch observes the new accepted slot.
   atomicStore(&topologyArena[base+2u],slot);
+}
+
+@compute @workgroup_size(64)
+fn publishSparseCM12TopologyVelocityRoots(@builtin(local_invocation_id)lid:vec3u,
+ @builtin(workgroup_id)wid:vec3u){
+  let brick=wid.x;if(brick>=p.dispatch.w){return;}let output=activityRecord(brick);
+  if(atomicLoad(&activity[output+35u])==0u){return;}
+  let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
+  for(var local=lid.x;local<range.y;local+=64u){
+    cm12ResidentRecordExtensionIncidence(range.x+local,8u);
+  }
 }
 
 // Publish only the directional free-surface stencil and swept receivers from
@@ -3547,10 +5173,28 @@ fn activateSweptReceivers(@builtin(global_invocation_id)gid:vec3u){
   atomicStore(&activity[output+8u],BRICK_FINE_RESOLUTION);
   atomicStore(&activity[output+9u],1u);
   var claimed=atomicCompareExchangeWeak(&activity[output+10u],0u,1u);
-  while(!claimed.exchanged&&claimed.old_value==0u){
+  for(var attempt=1u;attempt<64u&&!claimed.exchanged
+      &&claimed.old_value==0u;attempt+=1u){
     claimed=atomicCompareExchangeWeak(&activity[output+10u],0u,1u);
   }
+  if(!claimed.exchanged&&claimed.old_value==0u){
+    // One invocation owns each brick, so this is weak-CAS exhaustion rather
+    // than ordinary contention. Poison only this topology/scalar closure and
+    // let validateCandidateResolution retain status=invalid; the scheduler
+    // then publishes no transfer work for the affected receiver.
+    scaInvalidateBrickTopologyClosure(brick);
+    atomicStore(&activity[output+14u],2u);
+    atomicStore(&activity[output+35u],0u);
+    atomicOr(&activity[7],32u);
+    return;
+  }
   if(claimed.exchanged){
+    // Activation changes the physical page identity even when its accepted
+    // rung is unchanged. Reject this local scalar closure for the next frame.
+    scaInvalidateBrickTopologyClosure(brick);
+    let resolution=acceptedBrickResolution(brick);
+    _=ptrRecordChangedBrick(brick,resolution,0x80000000u|resolution,
+      ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_CAUSE.topologyCreated}u,true);
     // A retired residue brick may later become a legitimate receiver. Never
     // resurrect its stale sub-threshold fields as new liquid.
     let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
@@ -3565,6 +5209,14 @@ fn activateSweptReceivers(@builtin(global_invocation_id)gid:vec3u){
       state[p.stateOffsets2.x+cell]=0.0;state[p.stateOffsets2.y+cell]=0.0;
       state[p.stateOffsets2.z+cell]=0.0;state[p.stateOffsets2.w+cell]=0.0;
       state[p.stateOffsets4.y+cell]=0.0;
+      // Construction deliberately leaves dormant receiver cache ownership
+      // invalid. A same-rung activation is not a resolution transaction, so
+      // output+35 and the later topology-root pass do not cover it. Publish
+      // every newly accepted support cell directly into the open next-frame
+      // VEX plan: relying on the old active boundary's eight-hop closure
+      // leaves the ninth layer as an active cell with no accepted cache.
+      _=cm12ExtensionRecordRoot(cell,
+        ${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.topologyOrEdgeOwnership}u);
     }
     atomicStore(&activity[output+34u],0u);
     atomicStore(&activity[output+11u],atomicLoad(&activity[0]));
@@ -3601,6 +5253,12 @@ fn retireUnsupportedEmptyBricks(@builtin(global_invocation_id)gid:vec3u){
   }}
   let retired=atomicCompareExchangeWeak(&activity[output+10u],1u,0u);
   if(retired.exchanged){
+    // Retirement removes scatter/incidence receivers. Preserve the old page's
+    // full logical span and receiver halo as explicit next-frame work.
+    scaInvalidateBrickTopologyClosure(brick);
+    let resolution=acceptedBrickResolution(brick);
+    _=ptrRecordChangedBrick(brick,0x80000000u|resolution,resolution,
+      ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_CAUSE.topologyRetired}u,true);
     let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
     let first=range.x;let count=range.y;var residueMass=0.0;
     for(var cell=first;cell<first+count;cell+=1u){
@@ -3614,12 +5272,304 @@ fn retireUnsupportedEmptyBricks(@builtin(global_invocation_id)gid:vec3u){
       state[p.stateOffsets2.x+cell]=0.0;state[p.stateOffsets2.y+cell]=0.0;
       state[p.stateOffsets2.z+cell]=0.0;state[p.stateOffsets2.w+cell]=0.0;
       state[p.stateOffsets4.y+cell]=0.0;
+      // Retirement revokes the accepted VEX identity locally. A later
+      // same-rung receiver activation republishes every cell as an ordinary
+      // root, so stale cache ownership can never survive deactivate/reactivate.
+      _=cm12ExtensionInvalidateRetiredCell(cell,
+        ${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.topologyOrEdgeOwnership}u);
     }
     atomicStore(&activity[output+34u],bitcast<u32>(residueMass));
     atomicSub(&activity[8],1u);atomicSub(&activity[11],count);
     atomicAdd(&activity[10],1u);
   }
 }
+
+// Retirement is the last topology producer in the frame. Candidate commit
+// seals the journal earlier, so republish the exact final producer count after
+// retirement has appended its local records. The next pressure epoch can then
+// fail closed on a real coverage mismatch without rejecting legitimate late
+// retirement work.
+@compute @workgroup_size(1)
+fn sealSparseCM12PressureTopologyJournal(){
+  _=ptrSealTopologyJournal(
+    atomicLoad(&topologyArena[ptrH_COVERED_PRODUCER_RECEIPTS]),
+    ptrTopologyGeneration());
+}
+
+${framePlanLayout && framePlanPresentationLayout ? /* wgsl */ `
+const PRESENTATION_FRAME_PLAN_STAGE:u32=5u;
+const PRESENTATION_FRAME_PLAN_STAGE_BIT:u32=1u<<PRESENTATION_FRAME_PLAN_STAGE;
+const PRESENTATION_FRAME_PLAN_CAUSES:u32=${(
+  SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.topologyRetired
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.phaseCrossing
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.boundarySource
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.pageActivated
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.pageRetired
+) >>> 0}u;
+const PRESENTATION_FRAME_PLAN_DIRECT_CAUSES:u32=${(
+  SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.topologyRetired
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.phaseCrossing
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.boundarySource
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.pageActivated
+  | SPARSE_CM12_DIRTY_CAUSE_BIT.pageRetired
+) >>> 0}u;
+
+@compute @workgroup_size(64)
+fn populateSparseCM12PresentationFramePlan(
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
+  let brick=wid.x;if(brick>=p.dispatch.w){return;}
+  let key=topology[p.topologyOffsets2.z+2u*brick+1u];
+  if(lane==0u){
+    cm12FramePlanSetNextBrickLogicalKey(brick,key);
+    if(brick==0u){
+      let frameGeneration=atomicLoad(&activity[0]);
+      cm12FramePlanSetNextTopologyGeneration(
+        atomicLoad(&topologyArena[topologyWorklistBase()]));
+      cm12FramePlanSetNextFrameAuthority(frameGeneration,frameGeneration&1u);
+    }
+  }
+  if(lane>=ACTIVITY_TILES_PER_BRICK){return;}
+  let bootstrap=cm12FramePlanCandidateGeneration()==0u;
+  let injected=p.injectionCenter.w>0.5&&injectionReachesBrick(brick);
+  // Stages 1..4 have not yet cut over to FPL scheduling. Publish their actual
+  // global blast radius as four distinct physical packets and label the lack
+  // of accepted local authority explicitly; never paint them green/reused.
+  // Stage 0 is VEX-owned and may only come from its construction bootstrap or
+  // its dynamic root/closure publication.
+  let previousTopology=atomicLoad(&activity[ACTIVITY_BRICK_TOPOLOGY+brick]);
+  let previouslyActive=previousTopology!=INVALID&&(previousTopology&0x80000000u)!=0u;
+  if(previouslyActive&&p.injectionCenter.w<=0.5){
+    cm12FramePlanMarkOwnedNextTile(brick,lane,0x1eu,0u,
+      ${SPARSE_CM12_DIRTY_CAUSE_BIT.generationMismatch}u,0u,0u);
+  }
+  var mask=incrementalActivityBrickStageTileMask(brick,
+    PRESENTATION_FRAME_PLAN_STAGE_BIT,PRESENTATION_FRAME_PLAN_CAUSES);
+  let page=cm12FppLoad(cm12FppBrickPages+brick);
+  let pageNeedsActivation=page<arrayLength(&fineMetadata)/4u
+    &&fineMetadata[4u*page+2u]!=1u;
+  if(bootstrap||injected||pageNeedsActivation){
+    mask=vec2u(ACTIVITY_ALL_TILE_LOW,ACTIVITY_ALL_TILE_HIGH);
+  }
+  let scheduled=(select(mask.x,mask.y,lane>=32u)&(1u<<(lane&31u)))!=0u;
+  if(!scheduled){return;}
+  let stable=key*ACTIVITY_TILES_PER_BRICK+lane;
+  var origin=cm12DirtyOriginCauseMask(stable)&PRESENTATION_FRAME_PLAN_CAUSES;
+  var inherited=cm12DirtyInheritedCauseMask(stable)&PRESENTATION_FRAME_PLAN_CAUSES;
+  if(bootstrap){origin=${(SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
+    | SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged) >>> 0}u;inherited=0u;}
+  if(injected){origin|=${(SPARSE_CM12_DIRTY_CAUSE_BIT.phaseCrossing
+    | SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged) >>> 0}u;}
+  if(pageNeedsActivation){origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.pageActivated}u;}
+  let direct=(origin&PRESENTATION_FRAME_PLAN_DIRECT_CAUSES)!=0u;
+  if(!direct){inherited|=${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u;}
+  let depth=select(max(1u,(cm12DirtyResolvedClosureDepths(stable)
+    >>(4u*PRESENTATION_FRAME_PLAN_STAGE))&15u),0u,direct);
+  cm12FramePlanMarkOwnedNextTile(brick,lane,
+    select(0u,PRESENTATION_FRAME_PLAN_STAGE_BIT,direct),
+    select(PRESENTATION_FRAME_PLAN_STAGE_BIT,0u,direct),origin,inherited,
+    depth<<(4u*PRESENTATION_FRAME_PLAN_STAGE));
+}
+
+@compute @workgroup_size(64)
+fn markSparseCM12GlobalFramePlanReceipts(
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
+  let brick=wid.x;if(brick>=p.dispatch.w||lane>=ACTIVITY_TILES_PER_BRICK){return;}
+  let previousTopology=atomicLoad(&activity[ACTIVITY_BRICK_TOPOLOGY+brick]);
+  if(previousTopology==INVALID||(previousTopology&0x80000000u)==0u
+    ||p.injectionCenter.w>0.5){return;}
+  // Stage 0 is executed only by the VEX consumer hook. Marking it here would
+  // fabricate coverage for a recurrence which has not run yet.
+  for(var stage=1u;stage<PRESENTATION_FRAME_PLAN_STAGE;stage+=1u){
+    cm12FramePlanMarkCurrentTileExecuted(brick,lane,stage);
+  }
+}
+
+var<workgroup>cm12PresentationBrick:u32;
+var<workgroup>cm12PresentationPage:u32;
+var<workgroup>cm12PresentationPageOrigin:vec3u;
+var<workgroup>cm12PresentationBrickOrigin:vec3u;
+var<workgroup>cm12PresentationSampleScale:u32;
+var<workgroup>cm12PresentationResolution:u32;
+var<workgroup>cm12PresentationScale:u32;
+var<workgroup>cm12PresentationCacheFirst:vec3i;
+var<workgroup>cm12PresentationCacheDimensions:vec3u;
+var<workgroup>cm12PresentationCacheFits:u32;
+var<workgroup>cm12PresentationWet:u32;
+var<workgroup>cm12PresentationTemporalReuse:u32;
+var<workgroup>cm12PresentationDensityOffset:u32;
+
+fn cm12PresentationSourceBrick(source:u32)->u32{
+  if(PRESENTATION_PAGES_PER_AXIS==4u){
+    let macroPage=(source&0x80000000u)!=0u;
+    return select((source>>6u)&0xffffffu,source&0xffffffu,macroPage);
+  }
+  return (source>>3u)&0xffffffu;
+}
+fn cm12PresentationSourceSpan(source:u32)->u32{
+  if(PRESENTATION_PAGES_PER_AXIS==4u){
+    return select(1u,1u<<((source>>24u)&31u),(source&0x80000000u)!=0u);
+  }
+  return 1u<<(source>>27u);
+}
+fn cm12PresentationPageMatches(page:u32,brick:u32,logicalKey:u32,
+ topologyGeneration:u32)->bool{
+  let pageCount=arrayLength(&fineMetadata)/4u;if(page>=pageCount||brick>=p.dispatch.w){return false;}
+  let source=fineMetadata[4u*page+3u];
+  return cm12PresentationSourceBrick(source)==brick
+    &&cm12PresentationSourceSpan(source)==brickSpan(brick)
+    &&fineMetadata[4u*page]==page&&fineMetadata[4u*page+1u]==logicalKey
+    &&fineMetadata[4u*page+2u]<=1u
+    &&topology[p.topologyOffsets2.z+2u*brick+1u]==logicalKey
+    &&topologyGeneration==atomicLoad(&topologyArena[topologyWorklistBase()]);
+}
+fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
+ generation:u32,causeMask:u32)->u32{
+  _=generation;_=causeMask;
+  if(lane==0u){
+    let source=fineMetadata[4u*page+3u];var octant=0u;var span=1u;
+    if(PRESENTATION_PAGES_PER_AXIS==4u){
+      let macroPage=(source&0x80000000u)!=0u;
+      octant=select(source&63u,0u,macroPage);
+      span=select(1u,1u<<((source>>24u)&31u),macroPage);
+    }else{octant=source&7u;span=1u<<(source>>27u);}
+    let brickKey=topology[p.topologyOffsets2.z+2u*brick+1u];
+    let brickDimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
+      /BRICK_FINE_RESOLUTION;
+    let brickXY=brickDimensions.x*brickDimensions.y;let brickZ=brickKey/brickXY;
+    let brickRemainder=brickKey-brickZ*brickXY;
+    let brickY=brickRemainder/brickDimensions.x;
+    let brickX=brickRemainder-brickY*brickDimensions.x;
+    let pageZ=octant/(PRESENTATION_PAGES_PER_AXIS*PRESENTATION_PAGES_PER_AXIS);
+    let pageRemainder=octant-pageZ*PRESENTATION_PAGES_PER_AXIS*PRESENTATION_PAGES_PER_AXIS;
+    let pageY=pageRemainder/PRESENTATION_PAGES_PER_AXIS;
+    let pageX=pageRemainder-pageY*PRESENTATION_PAGES_PER_AXIS;
+    let pageOffset=vec3u(pageX,pageY,pageZ)*PRESENTATION_PAGE_RESOLUTION;
+    let sampleScale=select(1u,
+      BRICK_FINE_RESOLUTION*span/PRESENTATION_PAGE_RESOLUTION,span>1u);
+    let brickOrigin=vec3u(brickX,brickY,brickZ)*BRICK_FINE_RESOLUTION;
+    let pageOrigin=brickOrigin+pageOffset;let resolution=acceptedBrickResolution(brick);
+    let scale=BRICK_FINE_RESOLUTION*span/resolution;let scaleF=f32(scale);
+    let firstShifted=(vec3f(pageOrigin)+vec3f(0.5))/scaleF-vec3f(0.5);
+    let lastQ=pageOrigin+vec3u(PRESENTATION_PAGE_RESOLUTION-1u)*sampleScale;
+    let lastShifted=(vec3f(lastQ)+vec3f(0.5))/scaleF-vec3f(0.5);
+    let cacheFirst=vec3i(floor(firstShifted));
+    let cacheDimensions=vec3u(vec3i(floor(lastShifted))-cacheFirst)+vec3u(2u);
+    let cacheCount=cacheDimensions.x*cacheDimensions.y*cacheDimensions.z;
+    let temporalReady=(atomicLoad(&activity[27])&0x80000000u)!=0u;
+    cm12PresentationBrick=brick;cm12PresentationPage=page;
+    cm12PresentationPageOrigin=pageOrigin;cm12PresentationBrickOrigin=brickOrigin;
+    cm12PresentationSampleScale=sampleScale;cm12PresentationResolution=resolution;
+    cm12PresentationScale=scale;cm12PresentationCacheFirst=cacheFirst;
+    cm12PresentationCacheDimensions=cacheDimensions;
+    cm12PresentationCacheFits=select(0u,1u,cacheCount<=PRESENTATION_CACHE_CAPACITY);
+    cm12PresentationWet=select(0u,1u,brick<p.dispatch.w
+      &&(atomicLoad(&activity[activityRecord(brick)+1u])&64u)!=0u);
+    cm12PresentationTemporalReuse=select(0u,1u,temporalReady
+      &&atomicLoad(&activity[17])==0u&&brickActive(brick)&&scale==1u);
+    cm12PresentationDensityOffset=select(p.stateOffsets0.x,p.stateOffsets0.y,
+      cm12FramePlanAcceptedParity()!=0u);
+  }
+  workgroupBarrier();
+  let cacheCount=cm12PresentationCacheDimensions.x*cm12PresentationCacheDimensions.y
+    *cm12PresentationCacheDimensions.z;
+  if(cm12PresentationScale>1u&&cm12PresentationWet!=0u
+    &&cm12PresentationCacheFits!=0u){
+    let coarseDimensions=max(vec3i(1),vec3i(p.dimensions.xyz)/i32(cm12PresentationScale));
+    for(var cacheIndex=lane;cacheIndex<cacheCount;cacheIndex+=64u){
+      let cacheZ=cacheIndex/(cm12PresentationCacheDimensions.x
+        *cm12PresentationCacheDimensions.y);
+      let cacheRemainder=cacheIndex-cacheZ*cm12PresentationCacheDimensions.x
+        *cm12PresentationCacheDimensions.y;
+      let cacheY=cacheRemainder/cm12PresentationCacheDimensions.x;
+      let cacheX=cacheRemainder-cacheY*cm12PresentationCacheDimensions.x;
+      let coarse=clamp(cm12PresentationCacheFirst
+        +vec3i(i32(cacheX),i32(cacheY),i32(cacheZ)),vec3i(0),coarseDimensions-vec3i(1));
+      presentationDensityCache[cacheIndex]=restrictedPresentationDensityAt(
+        coarse*i32(cm12PresentationScale),i32(cm12PresentationScale),
+        cm12PresentationDensityOffset);
+    }
+  }
+  return 0u;
+}
+fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
+ generation:u32,causeMask:u32)->vec2u{
+  _=generation;_=causeMask;_=brick;
+  let localIndex=cm12FppLocalIndex(tile,sample);
+  let localZ=localIndex/(PRESENTATION_PAGE_RESOLUTION*PRESENTATION_PAGE_RESOLUTION);
+  let localRemainder=localIndex-localZ*PRESENTATION_PAGE_RESOLUTION*PRESENTATION_PAGE_RESOLUTION;
+  let localY=localRemainder/PRESENTATION_PAGE_RESOLUTION;
+  let localX=localRemainder-localY*PRESENTATION_PAGE_RESOLUTION;
+  let local=vec3u(localX,localY,localZ);
+  let q=cm12PresentationPageOrigin+local*cm12PresentationSampleScale;
+  var phi=4.0*p.frame.y;
+  if(cm12PresentationWet!=0u&&all(q<p.dimensions.xyz)
+    &&insideEmbeddedBoundary(vec3f(q)+vec3f(0.5))){
+    if(cm12PresentationScale==1u){
+      let range=templateBrickCellRange(cm12PresentationBrick,cm12PresentationResolution);
+      let valid=min(p.dimensions.xyz-cm12PresentationBrickOrigin,vec3u(BRICK_FINE_RESOLUTION));
+      let localCell=q-cm12PresentationBrickOrigin;
+      let cell=range.x+localCell.x+valid.x*(localCell.y+valid.y*localCell.z);
+      if(cell<range.x+range.y){
+        if(cm12PresentationTemporalReuse!=0u
+          &&atomicLoad(&activity[TEMPORAL_CELL_FLAG_A+cell])==0u){
+          return vec2u(fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+localIndex],0u);
+        }
+        phi=presentationPhiAt(cell,cm12PresentationDensityOffset);
+      }
+    }else{
+      let scaleF=f32(cm12PresentationScale);
+      let shifted=(vec3f(q)+vec3f(0.5))/scaleF-vec3f(0.5);
+      let lower=vec3i(floor(shifted));let fraction=fract(shifted);var rho=0.0;
+      let coarseDimensions=max(vec3i(1),vec3i(p.dimensions.xyz)/i32(cm12PresentationScale));
+      for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
+        let offset=vec3i(dx,dy,dz);var density=0.0;
+        if(cm12PresentationCacheFits!=0u){
+          let cache=vec3u(lower+offset-cm12PresentationCacheFirst);
+          let cacheIndex=cache.x+cm12PresentationCacheDimensions.x
+            *(cache.y+cm12PresentationCacheDimensions.y*cache.z);
+          density=presentationDensityCache[cacheIndex];
+        }else{
+          let coarse=clamp(lower+offset,vec3i(0),coarseDimensions-vec3i(1));
+          density=restrictedPresentationDensityAt(coarse*i32(cm12PresentationScale),
+            i32(cm12PresentationScale),cm12PresentationDensityOffset);
+        }
+        let wx=select(1.0-fraction.x,fraction.x,dx==1);
+        let wy=select(1.0-fraction.y,fraction.y,dy==1);
+        let wz=select(1.0-fraction.z,fraction.z,dz==1);
+        rho+=wx*wy*wz*density;
+      }}}
+      phi=(CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
+    }
+  }
+  let flags=1u|select(0u,16u,phi<0.0);
+  return vec2u((pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u),0u);
+}
+fn cm12PresentationCandidateBase()->u32{
+  return (arrayLength(&fineMetadata)/4u)*PRESENTATION_SAMPLES_PER_PAGE;
+}
+fn cm12PresentationStoreCandidate(page:u32,localIndex:u32,generation:u32,payload:u32){
+  _=generation;fineSamples[cm12PresentationCandidateBase()
+    +page*PRESENTATION_SAMPLES_PER_PAGE+localIndex]=payload;
+}
+fn cm12PresentationLoadCandidate(page:u32,localIndex:u32,generation:u32)->u32{
+  _=generation;return fineSamples[cm12PresentationCandidateBase()
+    +page*PRESENTATION_SAMPLES_PER_PAGE+localIndex];
+}
+fn cm12PresentationStoreAccepted(page:u32,localIndex:u32,payload:u32){
+  fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+localIndex]=payload;
+}
+fn cm12PresentationCommitCandidate(page:u32,generation:u32){
+  _=generation;fineMetadata[4u*page+2u]=1u;
+}
+fn cm12PresentationRejectAccepted(page:u32){
+  if(page<arrayLength(&fineMetadata)/4u){fineMetadata[4u*page+2u]=0u;}
+}
+` : ""}
 
 @compute @workgroup_size(64)
 fn classifyPresentationBricks(@builtin(global_invocation_id)gid:vec3u){
@@ -3680,6 +5630,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   let pageOrigin=brickOrigin+pageOffset;
   let resolution=acceptedBrickResolution(brick);
   let scale=BRICK_FINE_RESOLUTION*span/resolution;
+${presentationTemporalReuse}
   let scaleF=f32(scale);let firstShifted=(vec3f(pageOrigin)+vec3f(0.5))/scaleF-vec3f(0.5);
   let lastQ=pageOrigin+vec3u(PRESENTATION_PAGE_RESOLUTION-1u)*sampleScale;
   let lastShifted=(vec3f(lastQ)+vec3f(0.5))/scaleF-vec3f(0.5);
@@ -3721,7 +5672,11 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
         let valid=min(p.dimensions.xyz-brickOrigin,vec3u(BRICK_FINE_RESOLUTION));
         let localCell=q-brickOrigin;
         let cell=range.x+localCell.x+valid.x*(localCell.y+valid.y*localCell.z);
-        if(cell<range.x+range.y){phi=presentationPhi(cell);}
+        if(cell<range.x+range.y){
+          if(reusePresentationSamples
+            &&atomicLoad(&activity[TEMPORAL_CELL_FLAG_A+cell])==0u){continue;}
+          phi=presentationPhi(cell);
+        }
       }else{
         let shifted=(vec3f(q)+vec3f(0.5))/scaleF-vec3f(0.5);
         let lower=vec3i(floor(shifted));let fraction=fract(shifted);var rho=0.0;
@@ -3749,8 +5704,10 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
       =(pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u);
   }
 }
+
+${dirtySchedulerEntries}
 `;
 }
 
 /** Legacy/default specialization retained for direct shader-source consumers. */
-export const webgpuSparseCM12ResidentWGSL = createWebgpuSparseCM12ResidentWGSL(8);
+export const webgpuSparseCM12ResidentWGSL = createWebgpuSparseCM12ResidentWGSL(16, 16);

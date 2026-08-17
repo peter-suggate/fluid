@@ -207,13 +207,66 @@ export function entityActionsAt(
  * be allowed to mean "no menu" — so a miss offers the verbs that need a place
  * rather than a thing, which is exactly what the water body contributes.
  *
+ * Only the placement half of the water's ring: `fluidPlayActions` is exactly the
+ * verbs that need a place, so the instruments and probes beside it on the water
+ * — the advance pipeline, the diagnostic cards, the two pointer probes — stay
+ * off this ring by construction rather than by a filter here. They read a solve
+ * or a pixel the miss never named, and a ring that answered questions about
+ * nothing in particular is how "everything reachable from the ring" turns back
+ * into a menu bar drawn in a circle.
+ *
  * This also keeps the editor reachable when picking is gated off. `entityAtRay`
  * refuses without a fenced presentation because selecting the wrong object is
  * worse than selecting none; placing water at an analytically-traced point has
  * no such hazard, and the fallback card already promises the editor still works.
  */
 export function sceneActionsAt(point_m: Vec3): readonly EditorAction[] {
-  return fluidPlayActions(point_m);
+  return [...fluidPlayActions(point_m), ...sceneDocumentActions()];
+}
+
+/**
+ * The verbs that are about the *document* rather than about anything in it: go
+ * and find another scene, bring one in from a file, or look at what drawing this
+ * one costs.
+ *
+ * They are composed here rather than declared by an entity because they belong
+ * to no entity — which is also why they appear only on the ring opened over
+ * empty space. Pointing at the tank asks what can be done to the tank; pointing
+ * at the room is the closest thing the viewport has to asking about the scene
+ * itself, and it is where the transport bar's Load/Import buttons went when the
+ * bar became a transport cluster.
+ *
+ * The frame graph belongs to this half for the same reason: it prices the
+ * *picture*, which no object in the picture owns. Its simulation counterpart
+ * sits on the water, where the advance it prices does.
+ */
+function sceneDocumentActions(): readonly EditorAction[] {
+  return [
+    {
+      id: "render-pipeline",
+      label: "Render",
+      icon: "render-pipeline",
+      tone: "prop",
+      hint: "Open the frame graph: per-pass GPU cost, stage ablation and node tuning",
+      effect: { kind: "open-overlay", overlay: "render-pipeline" },
+    },
+    {
+      id: "library",
+      label: "Library",
+      icon: "library",
+      tone: "prop",
+      hint: "Browse every scene, your saved ones included",
+      effect: { kind: "navigate", href: "/" },
+    },
+    {
+      id: "import",
+      label: "Import",
+      icon: "import",
+      tone: "prop",
+      hint: "Open a scene JSON file from this machine",
+      effect: { kind: "import-scene" },
+    },
+  ];
 }
 
 export function findEntity(

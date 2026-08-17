@@ -11,11 +11,12 @@ import {
   type PerformanceTrace,
 } from "../../core/performance-trace";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
+import { formatSparseCM12PressureCutoverAuthorities } from
+  "./sparse-cm12-pressure-cutover-observability";
 import {
   SPARSE_CM12_ACTIVITY_POLICY,
   SPARSE_CM12_PRESSURE_ITERATIONS,
   SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
-  SPARSE_CM12_RESIDENT_FINAL_STAGE,
   SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
   SPARSE_CM12_SHARPENING_TRACE_STEPS,
   type SparseCM12ResidentStageId,
@@ -154,6 +155,47 @@ export const ADAPTIVE_MASS_RESIDENT_STAGE_PHASE: Readonly<Record<
   "presentation-publication": ADAPTIVE_MASS_ADVANCE_PHASE.materialization,
 });
 
+/** Pressure repair consumes the topology accepted before this advance. The
+ * topology committed at the end of this advance is intentionally a separate
+ * final line because it can only affect the next pressure-topology sample. */
+export function adaptiveMassPressureTopologyChip(
+  info: Pick<GPUEulerianInfo,
+    "adaptivePressureTopologyAttribution"
+    | "adaptiveAcceptedSameLevelCoarseRowCount"
+    | "adaptiveAcceptedMixedSeamRowCount"
+    | "adaptiveMixedSeamFaceCount"> | null | undefined,
+): string {
+  const receipt = info?.adaptivePressureTopologyAttribution;
+  if (!receipt) {
+    return "Input topology: awaiting paired diagnostics receipt"
+      + "\nPressure work attribution unavailable; end-frame commits are not relabelled";
+  }
+  const input = receipt.status === "matched"
+    ? `Input topology gen ${receipt.inputTopologyGeneration ?? "?"}`
+      + ` · prior commit ${(receipt.priorCommittedBrickCount ?? 0).toLocaleString()} bricks`
+    : "Input topology: UNAVAILABLE (unobserved generation change)";
+  const work = `Matched work: accepted ${receipt.acceptedCellCount.toLocaleString()} cells / `
+    + `${receipt.acceptedRowCount.toLocaleString()} rows · temporal `
+    + `${receipt.temporalScalarCellCount.toLocaleString()} / `
+    + `${receipt.temporalScalarRowCount.toLocaleString()} · pressure `
+    + `${receipt.pressureCellCount.toLocaleString()} / `
+    + `${receipt.pressureActiveRowCount.toLocaleString()}`;
+  const pcm = `PCM gen ${receipt.pcmCellAcceptedGeneration}/`
+    + `${receipt.pcmRowAcceptedGeneration} · dirty leaves `
+    + `${receipt.pcmCellDirtyLeafCount}/${receipt.pcmRowDirtyLeafCount}`
+    + ` · ${receipt.pcmMatched ? "matched" : "FAULT/INCOMPLETE"}`;
+  const authorities = formatSparseCM12PressureCutoverAuthorities(
+    receipt.authorities, receipt.inputTopologyGeneration,
+  );
+  const next = `End-frame → topology gen ${receipt.currentEndFrameTopologyGeneration}`
+    + ` · ${receipt.currentEndFrameCommittedBrickCount.toLocaleString()} committed bricks`
+    + " (next repair input)";
+  const structure = `Rows: ${(info?.adaptiveAcceptedSameLevelCoarseRowCount ?? 0)
+    .toLocaleString()} same-level coarse · ${(info?.adaptiveAcceptedMixedSeamRowCount
+      ?? info?.adaptiveMixedSeamFaceCount ?? 0).toLocaleString()} mixed seams`;
+  return `${input}\n${work}\n${pcm}\n${authorities}\n${structure}\n${next}`;
+}
+
 export interface AdaptiveMassFrameCaptureResult {
   readonly cpuTrace: PerformanceTrace;
   /**
@@ -218,21 +260,20 @@ export class AdaptiveMassFrameCapture {
   /**
    * The encoder's stage seams: one stage closes on every lane at once.
    *
-   * The final stage is the exception. Its hardware boundary is armed before
-   * its pass begins so that pass's own end-of-pass counter closes the chain;
-   * a marker pass after it measures whenever the driver felt like running it.
-   * The host lane has no such hazard and closes it at the seam like any other.
+   * The final stage closes through the recorder's observable trailing marker.
+   * This matters when the stage contains several passes and intervening copies:
+   * closing on its first pass would silently omit the rest of the frame tail.
    */
   readonly residentStageSeams: SparseCM12ResidentStageSeams = {
     close: (stage) => {
       const phase = ADAPTIVE_MASS_RESIDENT_STAGE_PHASE[stage];
       this.cpu.completePhase(phase);
-      if (this.encoder && stage !== SPARSE_CM12_RESIDENT_FINAL_STAGE) {
+      if (this.encoder) {
         this.gpu?.completePhase(this.encoder, phase);
       }
     },
-    openFinal: (stage) => {
-      this.gpu?.completeFinalPhaseOnNextPass(ADAPTIVE_MASS_RESIDENT_STAGE_PHASE[stage]);
+    anchorFinalBoundary: (source, offset) => {
+      this.gpu?.anchorFinalBoundary(source, offset);
     },
   };
 
@@ -587,12 +628,12 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Candidate transfer",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.candidateTransfer.label],
     tip: {
-      summary: "The urgent lane prepares surface and thin-fluid promotions first; a persistent GPU cursor visits ordinary split/merge requests round-robin under the per-frame budget. Density, gamma, momentum and face flux transfer into double-buffered shadow slots before one atomic physical generation flip.",
+      summary: "The urgent lane prepares surface and thin-fluid promotions first; a persistent GPU cursor visits ordinary split/merge requests round-robin under the per-frame budget. Density, gamma, momentum and face flux transfer into double-buffered shadow slots before one atomic physical generation flip. That end-frame flip is input to the next advance's pressure repair, never the pressure-topology timestamp earlier in this advance.",
       reads: "urgent and ordinary GPU queues, candidate levels, accepted cell and face state",
       writes: "shadow leaf/face storage, pressure-row worklists, conservation receipts and accepted-generation metadata",
       feeds: "transport, pressure, projection, diagnostics and presentation through the next frame's indirect dispatches",
     },
-    chip: (context) => `${context.info?.adaptiveTopologyUrgentQueuedBrickCount ?? 0} urgent · ${context.info?.adaptiveTopologyOrdinaryQueuedBrickCount ?? 0} queued · generation ${context.info?.adaptiveTopologyShadowGeneration ?? 0}`,
+    chip: (context) => `${context.info?.adaptiveTopologyUrgentQueuedBrickCount ?? 0} urgent · ${context.info?.adaptiveTopologyOrdinaryQueuedBrickCount ?? 0} queued · end-frame generation ${context.info?.adaptiveTopologyShadowGeneration ?? 0} → next pressure repair`,
   }),
   stage({
     id: "retention-conditioning", band: "adaptivity", side: "right",
@@ -623,23 +664,12 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Pressure topology",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.pressureTopology.label],
     tip: {
-      summary: "Classifies liquid rows, applies ghost-fluid theta at sparse air, and assembles one symmetric GᵀWG operator across regular and 2:1 faces.",
-      reads: "conditioned atlas and density-derived phi",
+      summary: "Classifies liquid rows, applies ghost-fluid theta at sparse air, and assembles one symmetric GᵀWG operator across regular and 2:1 faces. Its timestamp is attributed to the topology generation accepted at the end of the prior advance. The current advance's later topology commit is reported separately as next-frame input.",
+      reads: "prior end-frame topology receipt, conditioned atlas, density-derived phi, temporal scalar worklists and matched PCM cell/row generations",
       writes: "active rows, diagonal, nullspace components",
-      feeds: "RHS construction",
+      feeds: "this advance's RHS construction; the later topology commit feeds the next advance instead",
     },
-    chip: (context) => {
-      const info = context.info;
-      const accepted = info?.adaptiveAcceptedRowCount ?? 0;
-      const active = info?.adaptivePressureActiveRowCount ?? 0;
-      const coarse = info?.adaptiveAcceptedSameLevelCoarseRowCount ?? 0;
-      const mixed = info?.adaptiveAcceptedMixedSeamRowCount
-        ?? info?.adaptiveMixedSeamFaceCount ?? 0;
-      return `Accepted rows: ${accepted.toLocaleString()}`
-        + `\nActive in solve: ${active.toLocaleString()}`
-        + `\nSame-level coarse: ${coarse.toLocaleString()}`
-        + `\nMixed seams: ${mixed.toLocaleString()}`;
-    },
+    chip: (context) => adaptiveMassPressureTopologyChip(context.info),
   }),
   stage({
     id: "pressure-rhs", band: "pressure", side: "right",

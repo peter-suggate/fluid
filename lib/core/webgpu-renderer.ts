@@ -79,6 +79,10 @@ import { isGPUInitializationAbort } from "./gpu-initialization";
 import { createGlobalFineLevelSetConsumerSource } from "./octree-consumer-sampling";
 import { OCTREE_TECHNIQUE_OVERLAY_CODES, isOctreeTechniqueOverlayMode, type OctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import {
+  sparseCM12DirtyOverlayCode,
+  type SparseCM12DirtyOverlayMode,
+} from "./sparse-cm12-dirty-visualizations";
+import {
   automaticGPURecoveryEnabled,
   fluidExecutionDeviceFeatures,
 } from "./gpu-startup";
@@ -219,7 +223,7 @@ export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, n
  * textures in the overlay shader — no readback is involved.
  */
 export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "tracers" | "face-velocity"
-  | PressureJournalOverlayMode | OctreeTechniqueOverlayMode;
+  | PressureJournalOverlayMode | OctreeTechniqueOverlayMode | SparseCM12DirtyOverlayMode;
 
 export interface GridOverlayConfig {
   /** Slice axes, or a ray-integrated diagnostic through the complete volume. */
@@ -2720,6 +2724,11 @@ export class FluidLabRenderer {
     const techniqueModeCode = gridOverlay?.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode)
       ? OCTREE_TECHNIQUE_OVERLAY_CODES[gridOverlay.mode]
       : 0;
+    // Keep the diagnostic selected even when the active solver has not
+    // published CMD1. The grid overlay binds its one-word dummy storage in
+    // that case; the version/extent checks deliberately render UNKNOWN
+    // magenta instead of silently falling back to Grid structure.
+    const dirtyModeCode = sparseCM12DirtyOverlayCode(gridOverlay?.mode);
     // The compact pressure solve ping-pongs its row buffer. Refresh the
     // diagnostic bundle only while a technique view is visible so pressure
     // updates never keep a bind group pointed at the preceding solve bank.
@@ -2773,7 +2782,7 @@ export class FluidLabRenderer {
       // Field mode: 1 = raw occupancy, 3 = uniform-layout level set.
       gpuInfo?.nx ?? 1, gpuInfo?.ny ?? 1, gpuInfo?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "octree" ? 3 : 1) : 0,
       gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : gridOverlay?.axis === "y" ? 3 : gridOverlay?.axis === "volume" ? 4 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "octree" ? 1 : 0,
-      techniqueModeCode || (gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && gpuInfo?.gridKind === "octree" ? 9 : gridOverlay?.mode === "density" ? 10 : 0),
+      techniqueModeCode || dirtyModeCode || (gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && gpuInfo?.gridKind === "octree" ? 9 : gridOverlay?.mode === "density" ? 10 : 0),
       environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0,
       0
     ]);

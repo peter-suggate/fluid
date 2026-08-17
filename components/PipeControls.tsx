@@ -74,8 +74,3 @@ export function PipeChoice<T extends string>({ label, value, options, onChange, 
     </div>
   </div>;
 }
-
-/** A row of compact controls under a node, with no disclosure over it. */
-export function PipeRow({ children }: { children: React.ReactNode }) {
-  return <div className="pipe-row">{children}</div>;
-}

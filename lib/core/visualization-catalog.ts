@@ -20,6 +20,7 @@ import { fluidCellVisualizations } from "./fluid-cell-visualizations";
 import { gridOverlayVisualizations } from "./grid-overlay-visualizations";
 import { octreeFieldVisualizations } from "./octree-technique-debug";
 import { pressureJournalOverlayVisualizations } from "./webgpu-pressure-journal-overlay";
+import { sparseCM12DirtyVisualizations } from "./sparse-cm12-dirty-visualizations";
 import { svoPixelTraceVisualizations } from "../svo/svo-pixel-trace";
 import { tracerOverlayVisualizations } from "./webgpu-tracer-overlay";
 import {
@@ -46,6 +47,7 @@ export const VISUALIZATION_CATALOG: readonly Visualization[] = Object.freeze([
   ...gridOverlayVisualizations,
   ...tracerOverlayVisualizations,
   ...faceVelocityOverlayVisualizations,
+  ...sparseCM12DirtyVisualizations,
   // Last of the overlay draws: a captured solve is drawn over the live scene,
   // and it is the one view that answers a question about a frame that has
   // already finished rather than about the frame on screen.

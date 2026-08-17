@@ -591,6 +591,7 @@ export class GPUPerformanceTraceRecorder {
 interface DynamicTraceMarkerResources {
   readonly pipeline: GPUComputePipeline;
   readonly bindGroup: GPUBindGroup;
+  readonly buffer: GPUBuffer;
 }
 
 const dynamicTraceMarkers = new WeakMap<GPUDevice, Promise<DynamicTraceMarkerResources>>();
@@ -620,14 +621,14 @@ async function dynamicTraceMarkerResources(device: GPUDevice): Promise<DynamicTr
     const buffer = device.createBuffer({
       label: "dynamic trace marker storage",
       size: 4,
-      usage: GPUBufferUsage.STORAGE,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     const bindGroup = device.createBindGroup({
       label: "dynamic trace marker",
       layout: pipeline.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: { buffer } }],
     });
-    const resources = { pipeline, bindGroup };
+    const resources = { pipeline, bindGroup, buffer };
     preparedDynamicTraceMarkers.set(device, resources);
     return resources;
   });
@@ -812,6 +813,7 @@ export class GPUStageTimestampRecorder {
   private armedBoundaries = 0;
   private queryCount = 0;
   private finalPhaseClosesOnNextPass = false;
+  private finalBoundaryAnchor?: { readonly source: GPUBuffer; readonly offset: number };
   private started = false;
   private resolved = false;
   private overflowed = false;
@@ -935,6 +937,20 @@ export class GPUStageTimestampRecorder {
   }
 
   /**
+   * Make an otherwise independent trailing marker consume a word published by
+   * the observed command tail. Dawn/Metal may schedule an unrelated marker
+   * ahead of prior work; this copy creates the dependency that makes its end
+   * timestamp a trustworthy final boundary.
+   */
+  anchorFinalBoundary(source: GPUBuffer, offset = 0): void {
+    if (this.resolved) throw new Error("GPU stage trace is already resolved");
+    if (offset < 0 || offset % 4 !== 0) {
+      throw new RangeError("GPU stage trace final anchor offset must be nonnegative/aligned");
+    }
+    this.finalBoundaryAnchor = { source, offset };
+  }
+
+  /**
    * Assign every armed boundary to the pass about to begin. A descriptor that
    * already carries timestamp writes belongs to another recorder and is never
    * displaced; its boundaries stay armed for the pass after it.
@@ -987,6 +1003,11 @@ export class GPUStageTimestampRecorder {
       }
       this.armedBoundaries = 0;
       encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
+      if (this.finalBoundaryAnchor) {
+        if (!this.markerResources) { this.overflowed = true; return; }
+        encoder.copyBufferToBuffer(this.finalBoundaryAnchor.source,
+          this.finalBoundaryAnchor.offset, this.markerResources.buffer, 0, 4);
+      }
       const marker = encoder.beginComputePass({
         label: "GPU stage trace close",
         timestampWrites: { querySet: this.querySet, endOfPassWriteIndex },

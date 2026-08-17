@@ -73,8 +73,8 @@ const timedFrames = positiveInteger("frames", 40);
 const prepareBricksPerFrame = optionalPositiveInteger("prepare-bricks");
 const surfaceFineRings = optionalPositiveInteger("surface-fine-rings");
 const pressureIterationsOverride = optionalPositiveInteger("pressure-iterations");
-const brickFineResolution = optionalPositiveInteger("brick-fine") ?? 8;
-const presentationPageResolution = optionalPositiveInteger("presentation-page") ?? 4;
+const brickFineResolution = optionalPositiveInteger("brick-fine") ?? 16;
+const presentationPageResolution = optionalPositiveInteger("presentation-page") ?? 16;
 const maximumMacroSpanBricks = optionalPositiveInteger("maximum-macro-span");
 if (brickFineResolution !== 4 && brickFineResolution !== 8
   && brickFineResolution !== 16) {
