@@ -1,3 +1,4 @@
+import { containerContains, containerPlacementPoint } from "./editor-entity";
 import { sceneryEntity, sceneryIdFromSelection } from "./editor-scenery";
 import { add, dot, scale, sub } from "./math";
 import type { SceneDescription, Vec3 } from "./model";
@@ -147,6 +148,33 @@ export function restOnHover(hover: EditorHover, radius_m: number, scene: SceneDe
     y: Math.min(c.height_m + 0.8, Math.max(radius_m, placed.y)),
     z: Math.min(c.depth_m / 2 - radius_m, Math.max(-c.depth_m / 2 + radius_m, placed.z)),
   };
+}
+
+/**
+ * Where something of this size, put down at this pixel, comes to rest *in the
+ * tank* — or nothing, when the pixel is not aimed at the tank at all.
+ *
+ * The one answer both the preview circle and the press use, for every tool that
+ * puts an object into the simulation. Two rules, in this order:
+ *
+ * A surface inside the container wins, and the object rests on it: dropping on
+ * the floor, on a prop or on a body means what it looks like. A surface hit
+ * *outside* the container is not one of those — since the house set became a
+ * stage the ray leaving the top of the tank lands on the stage floor metres
+ * away, and resting on that put every such placement outside the simulation,
+ * where it was refused. Out there the ray is carrying no depth information
+ * worth having, so the container supplies it instead; see
+ * `containerPlacementPoint`, which is what makes the upper volume and the top
+ * corners reachable again.
+ */
+export function restInContainer(
+  scene: SceneDescription,
+  ray: { origin: Vec3; direction: Vec3 },
+  hover: EditorHover | undefined,
+  radius_m: number,
+): Vec3 | undefined {
+  if (hover && containerContains(scene, hover.position_m)) return restOnHover(hover, radius_m, scene);
+  return containerPlacementPoint(scene, ray, radius_m);
 }
 
 /** Re-evaluated rather than reused so a floor hit still rests on real ground. */

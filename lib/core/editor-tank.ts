@@ -416,7 +416,7 @@ export const tankEntity: EditorEntityDefinition = {
   instances: (context) => [tankEntityFor(context)],
   // The same ring the water offers: see `fluidRingActions`. Pointing at an
   // empty tank and pointing at the water in it are the same question.
-  actions: (_context, target) => fluidRingActions(target),
+  actions: (context, target) => fluidRingActions(context.scene, target),
   find: (context, id) => id === TANK_SELECTION_ID ? tankEntityFor(context) : undefined,
   pick: (context, ray, exclude) => {
     if (pickExcluded(exclude, "tank", TANK_SELECTION_ID)) return undefined;

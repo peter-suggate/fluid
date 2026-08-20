@@ -306,29 +306,6 @@ export function fluidDropVolume(
   return moveFluidVolume(scene, seed, seed.center_m) as InitialLiquidSphere | InitialLiquidCylinder;
 }
 
-/**
- * Whether a ball may be dropped at this point: inside the tank, and nowhere
- * else.
- *
- * A press on the room floor beside the tank, on a prop, or on the sky resolves
- * to a perfectly good world-space point that is simply not in the simulation —
- * a ball dropped there is water the solver has no cell for. Refusing the press
- * outright (rather than clamping it to the nearest wall) is what keeps the
- * gesture honest: the ball appears where the pointer was or the press does
- * something else entirely, and never somewhere the user did not click.
- */
-export function fluidBallDropAllowedAt(scene: SceneDescription, point: Vec3 | undefined): boolean {
-  if (!point || ![point.x, point.y, point.z].every(Number.isFinite)) return false;
-  const limits = sceneContainerBox(scene);
-  // A hit on the floor or a wall lands exactly on the bound, so the tolerance
-  // is what makes the tank's own surfaces droppable rather than its interior
-  // only — which would be every surface a click can actually reach.
-  const slack = 1e-6;
-  return point.x >= limits.min.x - slack && point.x <= limits.max.x + slack
-    && point.y >= limits.min.y - slack && point.y <= limits.max.y + slack
-    && point.z >= limits.min.z - slack && point.z <= limits.max.z + slack;
-}
-
 /** Drop a new ball into the document, and say what to select. */
 export function addFluidBall(
   scene: SceneDescription,

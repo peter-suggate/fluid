@@ -497,6 +497,13 @@ function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefi
  * nothing else; a ring that opened on the floor and offered to read the solver
  * would be pricing something the click never named.
  *
+ * Two levels, the way every weapon wheel does it: the root ring holds a few
+ * *kinds* of intention — water, a solid, a region — and choosing one opens the
+ * ring of its verbs. A flat ring of every verb at once had eleven wedges over
+ * the water, which is past the count a flick can remember directions in; four
+ * or six wedges is not. The cost is one extra flick for the verbs that moved
+ * down a level, which is the trade the second level exists to make.
+ *
  * The shapes come from the shape table, so a shape declared for the solver is
  * reachable here the day it is declared and never has to be added to a menu.
  * Placing one carries it: a solid you asked for at a point is a solid you are
@@ -505,12 +512,45 @@ function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefi
 export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
   return [
     {
-      id: "ball",
-      label: "Ball",
+      id: "water",
+      label: "Water",
       icon: "water-ball",
       tone: "fluid",
-      hint: "Click inside the tank to drop a ball of water \u00b7 drag out to size it",
-      effect: { kind: "arm", tool: "fluid-ball" },
+      hint: "Add, paint, erase or pour water here",
+      children: [
+        {
+          id: "ball",
+          label: "Ball",
+          icon: "water-ball",
+          tone: "fluid",
+          hint: "Click inside the tank to drop a ball of water \u00b7 drag out to size it",
+          effect: { kind: "arm", tool: "fluid-ball" },
+        },
+        {
+          id: "paint",
+          label: "Paint",
+          icon: "paint",
+          tone: "fluid",
+          hint: "Click to add a water brick \u00b7 drag to paint a body of water",
+          effect: { kind: "arm", tool: "fluid-paint" },
+        },
+        {
+          id: "erase",
+          label: "Erase",
+          icon: "erase",
+          tone: "fluid",
+          hint: "Click or drag to remove painted water bricks",
+          effect: { kind: "arm", tool: "fluid-erase" },
+        },
+        {
+          id: "hose",
+          label: "Hose",
+          icon: "hose",
+          tone: "inflow",
+          hint: "Click a surface to aim the hose there",
+          effect: { kind: "arm", tool: "inflow" },
+        },
+      ],
     },
     {
       id: "carry-solid",
@@ -531,36 +571,12 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
       })),
     },
     {
-      id: "paint",
-      label: "Water",
-      icon: "paint",
-      tone: "fluid",
-      hint: "Click to add a water brick \u00b7 drag to paint a body of water",
-      effect: { kind: "arm", tool: "fluid-paint" },
-    },
-    {
-      id: "erase",
-      label: "Erase",
-      icon: "erase",
-      tone: "fluid",
-      hint: "Click or drag to remove painted water bricks",
-      effect: { kind: "arm", tool: "fluid-erase" },
-    },
-    {
       id: "region",
       label: "Region",
       icon: "region",
       tone: "region",
       hint: "Drag a box over the water to cap how finely it is solved there",
       effect: { kind: "arm", tool: "refinement-region" },
-    },
-    {
-      id: "hose",
-      label: "Hose",
-      icon: "hose",
-      tone: "inflow",
-      hint: "Click a surface to aim the hose there",
-      effect: { kind: "arm", tool: "inflow" },
     },
   ];
 }
@@ -574,17 +590,32 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
  * offered wherever the water is — on the body and on the tank that holds it —
  * and nowhere else. Their counterpart for the *picture* is `sceneDocumentActions`
  * on the empty-space ring, where the frame graph sits for the mirror reason.
+ *
+ * In a dry scene there is no advance for the pipeline wedge to price — the
+ * tank still answers the ring, but the only pipeline the scene runs is the
+ * renderer's — so the same wedge opens the frame graph instead of a sim
+ * pipeline for a solver the scene never starts.
  */
-export function fluidInstrumentActions(): readonly EditorAction[] {
+export function fluidInstrumentActions(scene: SceneDescription): readonly EditorAction[] {
+  const fluidEnabled = scene.systems?.fluid !== false;
   return [
-    {
-      id: "pipeline",
-      label: "Pipeline",
-      icon: "pipeline",
-      tone: "fluid",
-      hint: "Open the advance pipeline: per-stage GPU cost, gates and solver tuning",
-      effect: { kind: "open-overlay", overlay: "sim-pipeline" },
-    },
+    fluidEnabled
+      ? {
+        id: "pipeline",
+        label: "Pipeline",
+        icon: "pipeline",
+        tone: "fluid",
+        hint: "Open the advance pipeline: per-stage GPU cost, gates and solver tuning",
+        effect: { kind: "open-overlay", overlay: "sim-pipeline" },
+      }
+      : {
+        id: "pipeline",
+        label: "Pipeline",
+        icon: "render-pipeline",
+        tone: "prop",
+        hint: "Open the frame graph: per-pass GPU cost, stage ablation and node tuning",
+        effect: { kind: "open-overlay", overlay: "render-pipeline" },
+      },
     {
       id: "diagnostics",
       label: "Diagnostics",
@@ -606,15 +637,33 @@ export function fluidInstrumentActions(): readonly EditorAction[] {
  * nothing to aim at — the empty-space ring is composed from a world position,
  * not from a pixel. Anything pointing at *water* gets every half, which is why
  * the tank shares this rather than the placement verbs alone.
+ *
+ * The instruments and probes share one INSPECT wedge for the same reason the
+ * water verbs share one WATER wedge: they are one kind of intention — reading
+ * the scene rather than changing it — and four reading wedges on the root ring
+ * is what made the water's ring too dense to flick at. See `fluidPlayActions`
+ * for the two-level doctrine.
  */
-export function fluidRingActions(target: EditorActionTarget): readonly EditorAction[] {
+export function fluidRingActions(
+  scene: SceneDescription,
+  target: EditorActionTarget,
+): readonly EditorAction[] {
   return [
     ...fluidPlayActions(target.point_m),
-    ...fluidInstrumentActions(),
-    cellProbeAction(target),
-    // A ray through water is as real as a ray into a stone, and the water is
-    // where the expensive ones are, so the ray probe is offered here too.
-    rayProbeAction(target),
+    {
+      id: "inspect",
+      label: "Inspect",
+      icon: "diagnostics",
+      tone: "fluid",
+      hint: "Instruments and probes: pipelines, diagnostics, and what is behind this pixel",
+      children: [
+        ...fluidInstrumentActions(scene),
+        cellProbeAction(target),
+        // A ray through water is as real as a ray into a stone, and the water
+        // is where the expensive ones are, so the ray probe is offered here too.
+        rayProbeAction(target),
+      ],
+    },
   ];
 }
 
@@ -632,7 +681,7 @@ export const fluidBodyEntity: EditorEntityDefinition = {
         volumeEntityFor(context.scene, body, offset + seeds.length + index + 1)),
     ];
   },
-  actions: (_context, target) => fluidRingActions(target),
+  actions: (context, target) => fluidRingActions(context.scene, target),
   find: (context, id) => {
     if (id === FLUID_BODY_SELECTION_ID) return fluidBodyEntityFor(context);
     const offset = fluidBodyBox(context.scene) ? 1 : 0;

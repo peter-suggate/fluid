@@ -495,6 +495,89 @@ export function sceneContainerBox(scene: SceneDescription): BoxExtent {
   };
 }
 
+/** Whether a point is inside the container at all. */
+export function containerContains(scene: SceneDescription, point: Vec3 | undefined): boolean {
+  if (!point || ![point.x, point.y, point.z].every(Number.isFinite)) return false;
+  const limits = sceneContainerBox(scene);
+  // A hit on the floor or a wall lands exactly on the bound, so the tolerance
+  // is what makes the tank's own surfaces count as inside rather than its
+  // interior only — which would exclude every surface a click can reach.
+  const slack = 1e-6;
+  return EDITOR_AXES.every((axis) =>
+    point[axis] >= limits.min[axis] - slack && point[axis] <= limits.max[axis] + slack);
+}
+
+/**
+ * Where the centre of something this size may sit: the container, pulled in by
+ * its radius, so the thing itself is inside rather than merely its centre.
+ *
+ * An axis with no room collapses to its midpoint, because there is no position
+ * that would fit and the middle is the only answer that is not arbitrary.
+ */
+export function containerPlacementLimits(scene: SceneDescription, radius_m: number): BoxExtent {
+  const limits = sceneContainerBox(scene);
+  const min = { ...limits.min }, max = { ...limits.max };
+  for (const axis of EDITOR_AXES) {
+    const low = limits.min[axis] + radius_m, high = limits.max[axis] - radius_m;
+    const fits = high >= low;
+    min[axis] = fits ? low : 0.5 * (limits.min[axis] + limits.max[axis]);
+    max[axis] = fits ? high : min[axis];
+  }
+  return { min, max };
+}
+
+/**
+ * Where along a ray to put something being placed *in the tank*, when nothing
+ * inside the tank is under the cursor to rest it on.
+ *
+ * A click names a direction, never a depth, so the depth has to be chosen. It
+ * used to be chosen by a camera-facing plane through the container, which was
+ * only ever reached when the ray met no geometry at all: with the house set a
+ * bare room that was most of the frame, so aiming into the tank's upper volume
+ * worked. Since the set became a stage, the ray that leaves the top of the tank
+ * travels on and lands on the stage floor metres away — a real surface, at a
+ * real point, outside the container — so every placement aimed above the
+ * waterline resolved out there and was refused. The tank's whole upper volume,
+ * its top corners included, stopped accepting anything at all.
+ *
+ * So the depth is taken from the container itself: the span of the ray that
+ * lies within it, at whichever point on that span comes nearest the middle of
+ * the tank. Aiming at the middle of the tank puts the object in the middle;
+ * aiming at a corner clips the span down to that corner and puts it *in* the
+ * corner, which is the placement that had no gesture before. A ray that misses
+ * the container has no answer here rather than a clamped one — a press beside
+ * the tank must go on meaning what it meant, and never silently place water
+ * somewhere the pointer never was.
+ *
+ * Aimed at the *container*, then held within the placement limits, rather than
+ * aimed at the limits directly. The limits are the container pulled in by a
+ * radius, and a ray sighted along a corner of the tank passes outside that
+ * smaller box entirely: testing against it refused the corners — the one aim
+ * this exists to serve — for being exactly on target. The clamp that follows
+ * moves the point by at most the radius, which is the same allowance
+ * `restOnHover` makes for a thing having a size at all.
+ */
+export function containerPlacementPoint(
+  scene: SceneDescription,
+  ray: EditorRay,
+  radius_m: number,
+): Vec3 | undefined {
+  const span = intersectBox(ray, sceneContainerBox(scene));
+  if (!span) return undefined;
+  const near = Math.max(span.near_m, 0);
+  if (span.far_m < near) return undefined;
+  const limits = containerPlacementLimits(scene, radius_m);
+  const centre = boxCenter(limits);
+  const offset = sub(centre, ray.origin);
+  const toward = offset.x * ray.direction.x + offset.y * ray.direction.y + offset.z * ray.direction.z;
+  const point = add(ray.origin, scale(ray.direction, Math.min(span.far_m, Math.max(near, toward))));
+  const held = { ...point };
+  for (const axis of EDITOR_AXES) {
+    held[axis] = Math.min(limits.max[axis], Math.max(limits.min[axis], point[axis]));
+  }
+  return held;
+}
+
 /**
  * Slide a box to a new centre without reshaping it, held inside `limits`.
  *

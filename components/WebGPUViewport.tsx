@@ -38,7 +38,7 @@ import {
   GIZMO_AXIS_DIRECTIONS,
 } from "../lib/core/editor-gizmo";
 import { CLICK_SLOP_PX, DEFAULT_EDITOR_TOOL, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "../lib/core/editor-tools";
-import { hoverSceneAt, restOnHover, type EditorHover } from "../lib/core/editor-hover";
+import { hoverSceneAt, restInContainer, type EditorHover } from "../lib/core/editor-hover";
 import { sceneryHighlightRange, sceneryIdFromSelection, sceneryPlacementPreview } from "../lib/core/editor-scenery";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
 import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
@@ -47,7 +47,6 @@ import { createInflowAt, INFLOW_SELECTION_ID } from "../lib/core/editor-inflow";
 import {
   addFluidBall,
   defaultFluidBallRadius_m,
-  fluidBallDropAllowedAt,
   fluidDropVolume,
 } from "../lib/core/editor-fluid-volume";
 import {
@@ -752,7 +751,7 @@ export function WebGPUViewport() {
     // grows instead of sinking into the floor it was dropped on. `moved` is
     // what separates the two gestures this tool has: a click drops a default
     // ball, a drag sizes one.
-    | { id: number; action: "fluid-ball"; anchor: Vec3; hover?: EditorHover; downX: number; downY: number; moved: boolean; radius_m: number; selectionId: string }
+    | { id: number; action: "fluid-ball"; anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; downX: number; downY: number; moved: boolean; radius_m: number; selectionId: string }
     | { id: number; action: "fill-level" }
     // One arm for every editable thing. `entity` is the entity as it stood when
     // the gesture opened, resolved against the committed scene: re-resolving it
@@ -1810,8 +1809,11 @@ export function WebGPUViewport() {
    * Re-evaluated at every radius rather than fixed at the press, so growing the
    * ball lifts it off the floor instead of burying half of it.
    */
-  const fluidBallCentre = (anchor: Vec3, hover: EditorHover | undefined, radius_m: number) =>
-    hover ? restOnHover(hover, radius_m, useSceneStore.getState().scene) : anchor;
+  const fluidBallCentre = (
+    ray: { origin: Vec3; direction: Vec3 },
+    hover: EditorHover | undefined,
+    radius_m: number,
+  ) => restInContainer(useSceneStore.getState().scene, ray, hover, radius_m);
 
   /**
    * Revise the ball being dropped, as a draft over the committed document.
@@ -1822,9 +1824,18 @@ export function WebGPUViewport() {
    * contract as the brushes: authoring one ball per pointer-move would spend a
    * re-seed on each of them.
    */
-  const updateFluidBallDraft = (anchor: Vec3, hover: EditorHover | undefined, radius_m: number) => {
+  const updateFluidBallDraft = (
+    ray: { origin: Vec3; direction: Vec3 },
+    hover: EditorHover | undefined,
+    radius_m: number,
+  ) => {
     const committed = useSceneStore.getState().scene;
-    const centre = fluidBallCentre(anchor, hover, radius_m);
+    // Re-rested at every radius rather than held at the press point, so a ball
+    // dragged larger goes on sitting on what it was dropped on instead of
+    // growing through it. The press ray, never the moving one: the pointer is
+    // sizing the ball here, not aiming it again.
+    const centre = fluidBallCentre(ray, hover, radius_m);
+    if (!centre) return;
     useSceneDraftStore.getState().updateDraft({ fluid: addFluidBall(committed, centre, radius_m).fluid });
     setCursorDrop({ centre_m: centre, radius_m, tone: "fluid" });
   };
@@ -1851,18 +1862,17 @@ export function WebGPUViewport() {
   const previewCursorDrop = (ray: { origin: Vec3; direction: Vec3 }, hover: EditorHover | undefined) => {
     const ui = useUIStore.getState();
     const scene = useSceneStore.getState().scene;
-    const groundPlane = () => planeHit(ray.origin, ray.direction,
-      { x: 0, y: scene.container.height_m / 2, z: 0 }, cameraBasis(ui.camera).forward);
     if (ui.activeTool === "fluid-ball") {
-      const anchor = hover?.position_m ?? groundPlane();
-      if (!fluidBallDropAllowedAt(scene, anchor)) { setCursorDrop(null); return; }
       const radius_m = defaultFluidBallRadius_m(scene);
-      setCursorDrop({ centre_m: fluidBallCentre(anchor, hover, radius_m), radius_m, tone: "fluid" });
+      const centre_m = restInContainer(scene, ray, hover, radius_m);
+      if (!centre_m) { setCursorDrop(null); return; }
+      setCursorDrop({ centre_m, radius_m, tone: "fluid" });
       return;
     }
     if (ui.activeTool === "body-place") {
       const radius_m = boundingRadius(createBodyDescription(ui.placementShape, 1, scene.container.height_m));
-      const centre_m = hover ? restOnHover(hover, radius_m, scene) : groundPlane();
+      const centre_m = restInContainer(scene, ray, hover, radius_m);
+      if (!centre_m) { setCursorDrop(null); return; }
       setCursorDrop({ centre_m, radius_m, tone: "body" });
       return;
     }
@@ -1886,19 +1896,19 @@ export function WebGPUViewport() {
   const beginFluidBallDrop = (event: React.PointerEvent<HTMLCanvasElement>, ray: { origin: Vec3; direction: Vec3 }) => {
     const scene = useSceneStore.getState().scene;
     const hover = hoverSceneAt(scene, drawnBodies(), ray);
-    const anchor = hover?.position_m ?? planeHit(ray.origin, ray.direction,
-      { x: 0, y: scene.container.height_m / 2, z: 0 }, cameraBasis(useUIStore.getState().camera).forward);
-    // A press outside the tank is not a drop at all: it falls through to the
-    // camera, the same as a press on the background under any other tool.
-    if (!fluidBallDropAllowedAt(scene, anchor)) return;
     const radius_m = defaultFluidBallRadius_m(scene);
+    const anchor = restInContainer(scene, ray, hover, radius_m);
+    // A press that is not aimed at the tank is not a drop at all: it falls
+    // through to the camera, the same as a press on the background under any
+    // other tool.
+    if (!anchor) return;
     simulation.beginDraft("fluid-body", "Dropped a ball of water");
     pointerRef.current = {
-      id: event.pointerId, action: "fluid-ball", anchor, hover,
+      id: event.pointerId, action: "fluid-ball", anchor, ray, hover,
       downX: event.clientX, downY: event.clientY, moved: false, radius_m,
       selectionId: addFluidBall(scene, anchor, radius_m).id,
     };
-    updateFluidBallDraft(anchor, hover, radius_m);
+    updateFluidBallDraft(ray, hover, radius_m);
   };
 
   /**
@@ -1918,7 +1928,7 @@ export function WebGPUViewport() {
    * that quietly did nothing.
    */
   const finishFluidBallDrop = async (active: {
-    anchor: Vec3; hover?: EditorHover; radius_m: number; selectionId: string;
+    anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; radius_m: number; selectionId: string;
   }) => {
     const authored = () => {
       simulation.commitDraft();
@@ -1927,8 +1937,8 @@ export function WebGPUViewport() {
     if (simulation.time() <= 0) { authored(); return; }
     // The same shape the draft authored, so a drop into a running 2D case is
     // the disk that scene's water is and not a ball floating inside its slab.
-    const drop = fluidDropVolume(scene, fluidBallCentre(active.anchor, active.hover, active.radius_m),
-      active.radius_m);
+    const drop = fluidDropVolume(scene,
+      fluidBallCentre(active.ray, active.hover, active.radius_m) ?? active.anchor, active.radius_m);
     const taken = await rendererRef.current?.injectLiquidBall({
       centre_m: drop.center_m,
       radius_m: drop.radius_m,
@@ -1964,11 +1974,11 @@ export function WebGPUViewport() {
     const template = createBodyDescription(shape, 1, scene.container.height_m);
     const radius_m = boundingRadius(template);
     const target = hoverSceneAt(scene, drawnBodies(), ray);
-    // Without a surface under the cursor, fall back to the camera-facing plane
-    // through the container centre — the same target the tray drop uses.
-    const position = target
-      ? restOnHover(target, radius_m, scene)
-      : planeHit(ray.origin, ray.direction, { x: 0, y: scene.container.height_m / 2, z: 0 }, cameraBasis(ui.camera).forward);
+    // With no surface *in the tank* under the cursor the container supplies the
+    // depth, so aiming high in the tank places a body there rather than on the
+    // stage floor behind it. See `restInContainer`.
+    const position = restInContainer(scene, ray, target, radius_m);
+    if (!position) return;
     simulation.addBodyAt(shape, position, { autoRun: false });
   };
 
@@ -2006,9 +2016,8 @@ export function WebGPUViewport() {
       return;
     }
     const template = createBodyDescription(ui.placementShape, 1, scene.container.height_m);
-    const position = surface
-      ? restOnHover(surface, boundingRadius(template), scene)
-      : planeHit(ray.origin, ray.direction, { x: 0, y: scene.container.height_m / 2, z: 0 }, cameraBasis(ui.camera).forward);
+    const position = restInContainer(scene, ray, surface, boundingRadius(template));
+    if (!position) return;
     // autoRun false: the clock starts on the drag itself, so a spawn that the
     // user never moves does not quietly begin the simulation under them.
     const created = simulation.addBodyAt(ui.placementShape, position, { autoRun: false });
@@ -2235,7 +2244,7 @@ export function WebGPUViewport() {
       if (!moved) return;
       const radius_m = fluidBallDragRadius(active, pointerRay(event));
       pointerRef.current = { ...active, moved, radius_m: radius_m ?? active.radius_m };
-      if (radius_m !== undefined) updateFluidBallDraft(active.anchor, active.hover, radius_m);
+      if (radius_m !== undefined) updateFluidBallDraft(active.ray, active.hover, radius_m);
       return;
     }
     if (active.action === "entity-handle") {
