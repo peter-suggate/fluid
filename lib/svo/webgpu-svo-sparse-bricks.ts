@@ -1573,13 +1573,15 @@ export class OctreeSparseBrickWorld {
         worldOrigin, renderCellSize, brickSize, refinedBrickDimensions)
       : sceneDomain.proxyBrickCoordinates.flat();
     /**
-     * The rigid bodies, which nothing else in the claim accounts for.
+     * The static rigid bodies, which nothing else in the claim accounts for.
      *
-     * `stageSceneUpdate` voxelizes `scene.rigidBodies` alongside the authored
-     * proxies, but only the proxies reach `planSparseSceneDomain` — a body's
-     * bricks existed because the *container's* claim covered them. Once that
-     * claim is gone they have to be asked for, and the first publication is the
-     * one that cannot create a missing brick, so it has to happen here. Measured
+     * `stageSceneUpdate` voxelizes the `motion: "static"` bodies alongside the
+     * authored proxies — dynamic bodies stay analytic, their pose is
+     * solver-owned and a voxel copy would freeze at the authored drop point —
+     * but only the proxies reach `planSparseSceneDomain`: a body's bricks
+     * existed because the *container's* claim covered them. Once that claim is
+     * gone they have to be asked for, and the first publication is the one
+     * that cannot create a missing brick, so it has to happen here. Measured
      * on `garden-svo-lighting`: exactly one of its 21 body bricks is claimed by
      * no other producer, and without this it would silently stop being voxelized.
      *
@@ -1587,8 +1589,8 @@ export class OctreeSparseBrickWorld {
      * are already covered and adding them would change a shipped plan.
      */
     const rigidBodyBricks = claimsContainer ? [] : yield* liveSceneBrickCoordinatesForRegionsSteps(
-      scene.rigidBodies.map((body, ownerId) => sparseScenePrimitiveBounds(
-        sparseScenePrimitiveForRigidBody(body, ownerId))),
+      scene.rigidBodies.flatMap((body, ownerId) => body.motion === "static"
+        ? [sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId))] : []),
       worldOrigin, renderCellSize, brickSize, refinedBrickDimensions);
     /**
      * What the planner is told the solver owns, which is nothing on a dry world.
@@ -2460,11 +2462,25 @@ export class OctreeSparseBrickWorld {
     const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default");
     const authored = environmentProxyPrimitives(catalog, true);
     const liveEntries = [
-      ...scene.rigidBodies.map((body, ownerId) => ({
+      // Only the bodies that cannot move. A dynamic body is solver-owned: the
+      // GPU advances its pose every step while the document keeps the authored
+      // drop point, so a voxel copy staged from `scene.rigidBodies` freezes at
+      // the placement pose the moment the run leaves it — a second, immobile
+      // ghost beside the analytic body every lighting path already accounts
+      // for (see `visibleOwnership: "analytic-rigid-body"` in the coverage
+      // contract, and the analytic rigid-blocker corrections in the dry-scene
+      // shading). Static bodies have no live pose to diverge from, and the
+      // cone-traced lighting reads their voxels — the garden's stepping stones
+      // are the shipped case.
+      //
+      // `flatMap` rather than filter-then-map: `ownerId` is the body's roster
+      // index, and the analytic side (`rigidMotion[hit.ownerId]`) resolves the
+      // same index, so a filtered body must not shift its neighbours' ids.
+      ...scene.rigidBodies.flatMap((body, ownerId) => body.motion === "static" ? [{
         key: `rigid:${body.id}`,
         primitive: sparseScenePrimitiveForRigidBody(body, ownerId),
         materialSignature: body.shape,
-      })),
+      }] : []),
       ...authored.map((primitive) => ({
         key: primitive.key,
         primitive: sparseScenePrimitiveForProxy(primitive, {

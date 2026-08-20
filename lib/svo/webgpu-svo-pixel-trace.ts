@@ -457,7 +457,7 @@ fn probeLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32){
     if(lightIndex>=lightCount){break;}
     let light=dryLighting.lights[lightIndex];
     if(light.identity.w!=dryLighting.metadata.y){continue;}
-    let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;
+    let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;
     let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${options.cameraSettledExpression}),area),1u,globalIllumination);
     for(var sampleIndex=0u;sampleIndex<${options.areaLightSamples}u;sampleIndex+=1u){
       if(sampleIndex>=sampleCount){break;}

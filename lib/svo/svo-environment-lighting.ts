@@ -56,6 +56,9 @@ const PALETTES: Readonly<Record<EnvironmentId, EnvironmentPalette>> = Object.fre
   bathhouse: { lower: [0.045, 0.038, 0.032], upper: [0.34, 0.31, 0.25], accent: [0.54, 0.39, 0.25], keyColor: [1, 0.83, 0.57], keyDirection: [-0.55, 0.75, -0.12] },
   "research-station": { lower: [0.002, 0.012, 0.022], upper: [0.028, 0.12, 0.17], accent: [0.14, 0.56, 0.68], keyColor: [0.42, 0.83, 1], keyDirection: [0.15, 0.42, 0.90] },
   default: { lower: [0.012, 0.025, 0.028], upper: [0.19, 0.30, 0.29], accent: [0.18, 0.34, 0.31], keyColor: [1, 0.86, 0.66], keyDirection: DEFAULT_DIRECTION },
+  // The stage rig's exact values: see STUDIO_STAGE_DRY_SCENE_LIGHTING in
+  // `svo-dry-scene-lighting.ts` — a cold, very low fill under one warm key.
+  stage: { lower: [0.008, 0.010, 0.014], upper: [0.016, 0.020, 0.028], accent: [0.012, 0.015, 0.022], keyColor: [1, 0.96, 0.9], keyDirection: [-0.22, 0.94, 0.26] },
   // The lower value is the existing misty pale ground line after the garden
   // horizon mix; the upper value is its existing cloud-free pale zenith.
   garden: { lower: [0.60, 0.61, 0.59], upper: [0.52, 0.60, 0.72], accent: [0.48, 0.50, 0.53], keyColor: [1, 0.97, 0.90], keyDirection: [-0.42, 0.72, 0.38] },

@@ -272,12 +272,20 @@ export function activeCubeCapacity(maxVertices: number) {
   return Math.ceil(maxVertices / 3);
 }
 
-/** Bounded two-dimensional dispatch over every physical fine-brick sample. */
+/**
+ * Bounded two-dimensional dispatch over every physical fine-brick sample.
+ *
+ * An empty publication carries no pages, and the answer for it is a dispatch of
+ * no workgroups — `[0, 1, 1]`. The caller skips the encode rather than issuing
+ * it, so the empty scene costs nothing and Dawn is not asked to validate a
+ * zero-workgroup launch.
+ */
 export function globalFineSurfaceDispatch(pageCapacity: number, samplesPerBrick: number): readonly [number, number, number] {
-  if (!Number.isSafeInteger(pageCapacity) || pageCapacity < 1
+  if (!Number.isSafeInteger(pageCapacity) || pageCapacity < 0
     || !Number.isSafeInteger(samplesPerBrick) || samplesPerBrick < 1) {
-    throw new RangeError("Global fine extraction capacities must be positive integers");
+    throw new RangeError("Global fine extraction capacities must be non-negative and positive integers");
   }
+  if (pageCapacity === 0) return [0, 1, 1] as const;
   const groups = Math.ceil(pageCapacity * samplesPerBrick / 256);
   const x = Math.min(65_535, groups);
   const y = Math.ceil(groups / 65_535);
@@ -2353,8 +2361,13 @@ export class RasterWaterPipeline {
       if (globalFine || coarse) {
         compute.setBindGroup(0, this.globalExtractBindGroup);
         if (globalFine) {
-          compute.setPipeline(this.extractGlobalFinePipeline);
-          compute.dispatchWorkgroups(...globalFineSurfaceDispatch(globalFine.pageCapacity, globalFine.samplesPerBrick));
+          const fineDispatch = globalFineSurfaceDispatch(globalFine.pageCapacity, globalFine.samplesPerBrick);
+          // A page-less publication has nothing to classify. The scan and emit
+          // passes below still run and correctly produce a zero-triangle draw.
+          if (fineDispatch[0] > 0) {
+            compute.setPipeline(this.extractGlobalFinePipeline);
+            compute.dispatchWorkgroups(...fineDispatch);
+          }
         }
         if(globalFine?.coarsePhiRowCapacity){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(...globalFineCoarseSurfaceDispatch(globalFine.coarsePhiRowCapacity));}
         else if(coarse){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(...compactCoarseSurfaceDispatch(coarse.sampleDimensions));}

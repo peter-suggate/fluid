@@ -44,6 +44,19 @@ export const SVO_FLUID_COVERAGE_LIMITS = Object.freeze({
   /** Beyond this the volume is refused rather than silently truncated. */
   maximumTexelsPerAxis: 2_048,
   maximumLevels: 12,
+  /**
+   * Allocation ceiling for the whole mip chain.
+   *
+   * The dense arm was sized over the solver's coarse grid, where one texel per
+   * two cells is free. A compact publication has no coarse grid — its lattice is
+   * the fine one — so the same ratio over a large scene would ask for gigabytes
+   * of shadow volume. A shadow does not need fine resolution: it is read through
+   * a widening cone that is already sampling blurred mips a few centimetres off
+   * the receiver, so trading texels for a coarser `cellsPerTexel` costs almost
+   * nothing visible and is the difference between a resident volume and an
+   * out-of-memory device.
+   */
+  maximumBytes: 64 * 1024 * 1024,
 } as const);
 
 export type SvoFluidCoverageTriple = readonly [number, number, number];
@@ -101,6 +114,38 @@ function integerTriple(value: SvoFluidCoverageTriple, label: string): SvoFluidCo
     throw new RangeError(`${label} must contain three non-negative integers`);
   }
   return value;
+}
+
+/**
+ * Coarsest-to-finest choice of `cellsPerTexel` that fits the allocation ceiling.
+ *
+ * `divisor` is the publication's page resolution when there is one: the compact
+ * fill resolves one page per texel, which is only sound while a texel's cell
+ * block lies wholly inside a page, so the ratio has to divide it. Pass undefined
+ * for a dense field, which has no such constraint and accepts any power of two.
+ *
+ * Returns undefined when even the coarsest admissible ratio overflows — the
+ * caller then declines to build a volume rather than shipping a truncated one.
+ */
+export function planSvoFluidCoverageRatio(
+  fieldDimensions: SvoFluidCoverageTriple,
+  divisor?: number,
+  maximumBytes = SVO_FLUID_COVERAGE_LIMITS.maximumBytes,
+): number | undefined {
+  integerTriple(fieldDimensions, "Fluid coverage field dimensions");
+  for (let cellsPerTexel = 2; cellsPerTexel <= 64; cellsPerTexel *= 2) {
+    if (divisor !== undefined && divisor % cellsPerTexel !== 0) break;
+    let plan: SvoFluidCoveragePlan;
+    try {
+      plan = planSvoFluidCoverageVolume({
+        fieldDimensions, worldOrigin_m: [0, 0, 0], cellSize_m: [1, 1, 1], cellsPerTexel,
+      });
+    } catch {
+      continue;
+    }
+    if (plan.allocatedBytes <= maximumBytes) return cellsPerTexel;
+  }
+  return undefined;
 }
 
 /** Size the volume and its mip chain over the solver's coarse level-set field. */

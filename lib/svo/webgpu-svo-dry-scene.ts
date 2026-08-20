@@ -81,6 +81,7 @@ import {
 } from "./svo-environment-lighting";
 import {
   SVO_LIGHT_MAXIMUM_RECORDS,
+  SVO_LIGHT_KIND_CODES,
   SVO_LIGHT_KINDS,
   SVO_LIGHT_RECORD_STRIDE_BYTES,
   SVO_LIGHT_RECORD_WORDS,
@@ -1217,6 +1218,28 @@ export const SVO_DRY_SCENE_AREA_LIGHT_SAMPLES = 2;
  */
 export const SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES = 1;
 export const SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES = 4;
+
+/**
+ * Step ceiling for the fluid optical-depth march.
+ *
+ * The march is clipped to the coverage box and its step is the cone footprint,
+ * so a widening shadow cone crossing the box needs a logarithmic number of
+ * steps and typically finishes in well under ten. The ceiling only bounds the
+ * degenerate case — a near-pencil cone traversing the box's long diagonal —
+ * where 32 steps still resolve the volume at a third of a texel per step.
+ */
+export const SVO_DRY_FLUID_MARCH_STEPS = 32;
+
+/**
+ * Cone directions the fluid contact term averages.
+ *
+ * Two, not the solid term's four. The solid term needs four because scenery
+ * occlusion is high-frequency — an edge either blocks a direction or does not,
+ * and too few directions band. Coverage is a low-frequency field read through a
+ * mip chain, so its hemisphere estimate is already smooth and the extra pair
+ * moves the result by less than a quantization step of the stored byte lane.
+ */
+export const SVO_DRY_CONTACT_FLUID_SAMPLES = 2;
 /**
  * Area-light shape samples while the camera is moving. Shadows stay present
  * at every tier — losing them during motion is far more visible than a
@@ -1543,7 +1566,7 @@ export function canConsumeSparseVoxelLighting(
   for (let index = 0; index < lightCount; index += 1) {
     const identity = index * SVO_LIGHT_RECORD_WORDS + 24;
     const kind = lightWords[identity], lightId = lightWords[identity + 1], revision = lightWords[identity + 3];
-    if (kind < 1 || kind > 4 || lightId === 0 || lightIds.has(lightId) || revision !== scene.lightRevision) return false;
+    if (!SVO_LIGHT_KIND_CODES.has(kind) || lightId === 0 || lightIds.has(lightId) || revision !== scene.lightRevision) return false;
     lightIds.add(lightId);
   }
   const environmentWords = scene.environmentLightingRecord;
@@ -4362,7 +4385,7 @@ fn dryPrepassTraceVisibility(opaque:DryHit,ro:vec3f,rd:vec3f)->vec2u{
       if(lightIndex>=lightCount){break;}
       let light=dryLighting.lights[lightIndex];
       if(light.identity.w!=dryLighting.metadata.y){continue;}
-      let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;
+      let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;
       let globalIllumination=(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u;
       let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area),1u,globalIllumination);
       ${voxelLightCache ? "dryCurrentLightSlot=lightIndex;let cachedVoxel=dryVoxelLightVisibility(position,geometricNormal);if(cachedVoxel.y>0.0){let packedVisibility=mix(1.0,cachedVoxel.x,dry.tuningRays0.y);if(lightIndex<3u){visibility0[1u+lightIndex]=packedVisibility;}else if(lightIndex<7u){visibility1[lightIndex-3u]=packedVisibility;}else{visibility2.x=packedVisibility;}continue;}" : ""}
@@ -4417,7 +4440,7 @@ fn drySilhouetteTraceVisibilityExact(opaque:DryHit,ro:vec3f,rd:vec3f)->DrySilhou
     }
   }
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.exactShadow}u)!=0u){let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
-    for(var lightIndex=0u;lightIndex<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u;lightIndex+=1u){if(lightIndex>=lightCount){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let globalIllumination=(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u;let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area),1u,globalIllumination);var visibility=0.0;
+    for(var lightIndex=0u;lightIndex<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u;lightIndex+=1u){if(lightIndex>=lightCount){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let globalIllumination=(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u;let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area),1u,globalIllumination);var visibility=0.0;
       for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount){continue;}let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(geometricNormal,sample.towardLight)<=0.0){continue;}let maximumDistance=select(directionalLightSceneExitDistance(position,sample.towardLight),sample.finiteDistance_m,sample.finiteDistance_m>0.0);if(dryDirectionalRayLeavesDomain(maximumDistance)){visibility+=1.0;continue;}let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,sample.towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);dryVisibilityIgnoredBody=opaque.ownerId;dryVisibilityStepInvalidReason=DRY_SILHOUETTE_REASON_NONE;let result=svoTraceVisibility(ray,budget,true,0.001,max(ray.originBias_m,1e-6));dryVisibilityIgnoredBody=DRY_OWNER_NONE;if(result.status==SVO_VIS_STATUS_EXHAUSTED){return DrySilhouetteVisibility(DRY_PREPASS_INVALID_PACKED,DRY_SILHOUETTE_EXACT_EXHAUSTED,DRY_SILHOUETTE_REASON_NONE);}if(result.status==SVO_VIS_STATUS_INVALID){return DrySilhouetteVisibility(DRY_PREPASS_INVALID_PACKED,DRY_SILHOUETTE_EXACT_INVALID,select(dryVisibilityStepInvalidReason,DRY_SILHOUETTE_REASON_TRACE_CONTRACT,dryVisibilityStepInvalidReason==DRY_SILHOUETTE_REASON_NONE));}visibility+=dot(result.transmittance,vec3f(1.0/3.0));}
       let packedVisibility=clamp(visibility/f32(sampleCount),0.0,1.0);if(lightIndex<3u){visibility0[1u+lightIndex]=packedVisibility;}else if(lightIndex<7u){visibility1[lightIndex-3u]=packedVisibility;}else{visibility2.x=packedVisibility;}
     }
@@ -4439,7 +4462,7 @@ fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   var direct=vec3f(0.0);var sampleBudget=0u;let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
   for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
     if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}
-    let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area);
+    let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){
       if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(opaque.normal,sample.towardLight)<=0.0){continue;}
       let maximumDistance=select(directionalLightSceneExitDistance(position,sample.towardLight),sample.finiteDistance_m,sample.finiteDistance_m>0.0);
@@ -4998,7 +5021,7 @@ var<private> dryDerivedPageFailure:u32=0u;
 ${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}${lodDescentWGSL}${lodUniformWGSL}${screenSpacePrimaryProxyWGSL}${tieredComputeResolveDeclarationsWGSL}
 ${wideTraversalWGSL}${compactTraversalWGSL}${brickOccupancyHelpersWGSL}
 ${liveLeafLifecycleWGSL}
-${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true, directPageTable: true })}
+${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, directPageTable: true })}
 var<private> dryGiPageCache:DryNodeMipPageCache;
 /** The ancestor page a sub-floor radiance sample redirects to; coarser, so it changes far less often. */
 var<private> dryGiRadiancePageCache:DryNodeMipPageCache;
@@ -5588,15 +5611,97 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
 ${svoVisibilityTraceWGSL}
 
 // Water attenuates by wavelength over distance instead of blocking: red is gone
-// long before blue-green is. This is the identical Beer-Lambert term the raster
-// composite applies along the view ray, so a floor seen through water and the
-// same floor shaded under it agree about how much light reached it.
+// long before blue-green is. Extinction, not absorption: light scattered out of
+// the beam has left it just as surely as light absorbed, and for water the
+// scattering coefficient is a third of extinction in blue-green while being
+// almost nothing in red, so dropping it both weakens the shadow and warms it.
 fn dryFluidTransmittance(depth_m:f32)->vec3f {
   if(!(depth_m>0.0)){return vec3f(1.0);}
-  return unifiedBeerLambert(vec3f(${WATER_OPTICS.absorption.join(",")}),depth_m);
+  return unifiedBeerLambert(vec3f(${WATER_OPTICS.absorption.map((value, channel) => value + WATER_OPTICS.scatter[channel]!).join(",")}),depth_m);
 }
 
+// Entry and exit distance along a ray through the coverage volume's box.
+// Outside it coverage is defined to be zero, so an unclipped march spends its
+// whole step budget on empty space — and, for a receiver far from the water,
+// steps clean past the liquid without ever sampling it.
+fn dryFluidCoverageSlab(origin:vec3f,direction:vec3f,maximumDistance_m:f32)->vec2f {
+  let lower=dry.fluidCoverage.origin_m;
+  let upper=lower+vec3f(dry.fluidCoverage.dimensions)*dry.fluidCoverage.texelSize_m;
+  // An axis-parallel ray gets a denormal-free infinity rather than a branch: the
+  // resulting +/-inf slab either fails to constrain the interval or empties it,
+  // which is the correct answer in both cases.
+  let inverse=1.0/select(direction,vec3f(1e-20),abs(direction)<vec3f(1e-20));
+  let first=(lower-origin)*inverse;let second=(upper-origin)*inverse;
+  let near=min(first,second);let far=max(first,second);
+  return vec2f(max(0.0,max(near.x,max(near.y,near.z))),min(maximumDistance_m,min(far.x,min(far.y,far.z))));
+}
+
+/**
+ * Path length through liquid along a cone, in metres.
+ *
+ * Deliberately a separate march rather than a lane on the node-mip cone. The
+ * node-mip pyramid is a publish-once structure over authored scenery, and every
+ * cheap path built on it — the reduced-rate prepass, the voxel light cache —
+ * reuses a value across pixels or frames. Water moves every frame and is
+ * routinely airborne where no static page exists, so a water term carried
+ * through those caches is stale exactly when it matters. This volume is instead
+ * a small mipped 3D texture with hardware trilinear and linear mip filtering:
+ * marching it is a handful of texture fetches with no page lookup, cheap enough
+ * to run at full rate behind every cached path, which is what lets the reduced
+ * and exact pixels agree about the water rather than disagreeing at the seam.
+ *
+ * stepWidth times coverage is the length of the step that lies inside liquid,
+ * so the sum is a measured path length. No self-occlusion weight: a receiver
+ * standing in a pond really is under water, and suppressing the first samples
+ * would erase exactly the shading that makes it read as wet.
+ */
+fn dryFluidOpticalDepth(origin:vec3f,direction:vec3f,maximumDistance_m:f32,aperture:f32)->f32 {
+  if(!svoFluidCoverageReady(dry.fluidCoverage)||!(maximumDistance_m>0.0)){return 0.0;}
+  let texel_m=max(dry.fluidCoverage.texelSize_m.x,max(dry.fluidCoverage.texelSize_m.y,dry.fluidCoverage.texelSize_m.z));
+  if(!(texel_m>0.0)){return 0.0;}
+  let slab=dryFluidCoverageSlab(origin,direction,maximumDistance_m);
+  if(!(slab.y>slab.x)){return 0.0;}
+  let tangent=tan(aperture*.5);
+  var distance=slab.x;var depth_m=0.0;
+  for(var stepIndex=0u;stepIndex<${SVO_DRY_FLUID_MARCH_STEPS}u;stepIndex+=1u){
+    if(distance>=slab.y){break;}
+    // The cone footprint sets both the step and the mip level, so a widening
+    // cone costs a logarithmic number of steps and reads progressively blurrier
+    // levels — the same softening the scenery cone gets, so a water shadow and a
+    // solid one cast from the same emitter have the same penumbra.
+    let diameter=max(texel_m,2.0*distance*tangent);
+    let stepWidth=min(diameter,slab.y-distance);
+    let coverage=svoFluidCoverageAt(fluidCoverageVolume,nodeMipSampler,dry.fluidCoverage,origin+direction*(distance+stepWidth*.5),svoFluidCoverageLod(diameter,texel_m));
+    depth_m+=stepWidth*coverage;
+    distance+=stepWidth;
+  }
+  return depth_m;
+}
+
+/**
+ * Direct-light visibility, water included.
+ *
+ * The solid term has five exits — the voxel light cache, the reduced-rate
+ * prepass, the cone march, the exact SVO trace, and the early "this ray leaves
+ * the scene" shortcut — and three of them are cached paths that cannot carry a
+ * per-frame liquid term. Composing the water factor once, over whichever exit
+ * fired, is what makes the effect seamless: a pixel served by the cache and its
+ * neighbour served by the exact trace apply the identical attenuation, so the
+ * water shadow has no seam where the shading path changes.
+ *
+ * It also shares the solid shadow's strength knob, so a scene that softens or
+ * disables shadows softens or disables the water's shadow with it.
+ */
 fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32)->vec3f {
+  let solid=dryLightVisibilitySolid(position,geometricNormal,ownerId,towardLight,finiteDistance_m);
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.exactShadow}u)==0u
+    ||!svoFluidCoverageReady(dry.fluidCoverage)||all(solid<=vec3f(0.0))){return solid;}
+  let maximumDistance=select(directionalLightSceneExitDistance(position,towardLight),finiteDistance_m,finiteDistance_m>0.0);
+  let depth_m=dryFluidOpticalDepth(position,towardLight,maximumDistance,dry.tuningRays1.y);
+  return solid*mix(vec3f(1.0),dryFluidTransmittance(depth_m),dry.tuningRays0.y);
+}
+
+fn dryLightVisibilitySolid(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32)->vec3f {
   if(dot(geometricNormal,towardLight)<=0.0){return vec3f(0.0);}
   if((dry.materialPublication.w&2u)==0u){return vec3f(1.0);}
   if((dryDerivedPageFailure&${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u)!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.directVisibilityPage}u;return vec3f(0.0);}
@@ -5627,7 +5732,7 @@ fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLig
     let coneMax_m=coneMaxRaw_m-select(0.0,dry.tuningRays1.w*coneCell_m,finiteDistance_m>0.0);
     let cone=dryConeVisibility(ray.origin_m+geometricNormal*coneEscape_m,towardLight,dry.tuningRays1.y,coneMax_m,geometricNormal,finiteDistance_m>0.0);
     if(cone.valid==0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.directVisibilityPage}u;return vec3f(0.0);}
-    let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);if(rigidBlocker.t<ray.tMax_m){return vec3f(1.0-dry.tuningRays0.y);}let raw=vec3f(cone.transmittance)*dryFluidTransmittance(cone.fluidDepth_m);return mix(vec3f(1.0),raw,dry.tuningRays0.y);
+    let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);if(rigidBlocker.t<ray.tMax_m){return vec3f(1.0-dry.tuningRays0.y);}return mix(vec3f(1.0),vec3f(cone.transmittance),dry.tuningRays0.y);
   }
   dryVisibilityIgnoredBody=ownerId;
   let result=svoTraceVisibility(ray,SvoVisibilityBudget(dry.tuningCounts1.w,dry.tuningCounts2.x,dry.tuningCounts2.y,dry.tuningCounts2.z),true,0.001,max(ray.originBias_m,1e-6));if(result.status==SVO_VIS_STATUS_EXHAUSTED){}else if(result.status==SVO_VIS_STATUS_INVALID){}
@@ -5644,7 +5749,33 @@ fn dryContactVisibilityDirection(geometricNormalIn:vec3f,featureId:u32,sampleInd
   if((featureId&1u)!=0u){let previous=tangent;tangent=bitangent;bitangent=-previous;}
   let signValue=select(1.0,-1.0,sampleIndex!=0u);return normalize(geometricNormal+signValue*(.55*tangent+.2*bitangent));
 }
+/**
+ * Contact visibility, water included.
+ *
+ * This is the term the eye reads as "resting on" rather than "floating above",
+ * and it is the one a shadow alone cannot supply: the floor immediately beside
+ * a tank is still lit by the lamp, so only the near-field hemisphere darkening
+ * tells you the water is there. Sampled along the same cone directions the solid
+ * term uses, so the two darken the same neighbourhood and blend rather than
+ * fighting; averaged in linear transmittance, which is what the solid term
+ * averages too.
+ */
 fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32,ownerId:u32)->vec3f {
+  let solid=dryContactVisibilitySolid(position,geometricNormal,featureId,ownerId);
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion}u)==0u
+    ||!svoFluidCoverageReady(dry.fluidCoverage)||all(solid<=vec3f(0.0))){return solid;}
+  let radius=dryContactVisibilityRadius();if(radius<=0.0){return solid;}
+  let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
+  let origin=position+normalize(geometricNormal)*cellScale*.2;
+  var transmittance=vec3f(0.0);
+  for(var sampleIndex=0u;sampleIndex<${SVO_DRY_CONTACT_FLUID_SAMPLES}u;sampleIndex+=1u){
+    let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);
+    transmittance+=dryFluidTransmittance(dryFluidOpticalDepth(origin,direction,radius,dry.tuningRays1.x));
+  }
+  return solid*mix(vec3f(1.0),transmittance/f32(${SVO_DRY_CONTACT_FLUID_SAMPLES}),dry.tuningRays0.w);
+}
+
+fn dryContactVisibilitySolid(position:vec3f,geometricNormal:vec3f,featureId:u32,ownerId:u32)->vec3f {
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion}u)==0u){return vec3f(1.0);}
   if((dryDerivedPageFailure&${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u)!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.ambientOcclusionPage}u;return vec3f(0.0);}
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){
@@ -5665,7 +5796,10 @@ fn dryLightSample(light:SvoLightRecord,sampleIndex:u32,position:vec3f)->DryLight
   let baseRadiance=svoLightRadiance(light);if(max(max(baseRadiance.x,baseRadiance.y),baseRadiance.z)<=0.0){return dryInvalidLightSample();}
   if(light.identity.x==SVO_LIGHT_DIRECTIONAL){let lengthSquared=dot(light.directionCone.xyz,light.directionCone.xyz);if(lengthSquared<=1e-12){return dryInvalidLightSample();}return DryLightSample(light.directionCone.xyz*inverseSqrt(lengthSquared),0.0,baseRadiance,1u);}
   var samplePosition=light.positionRange.xyz;
-  if(light.identity.x==SVO_LIGHT_SPHERE_AREA){
+  if(light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_SPOT){
+    // A spot jitters across its mouth disc for the same reason a sphere jitters
+    // across its silhouette: the shadow edge of a finite emitter is a penumbra,
+    // and a single centre sample renders it as a hard line.
     let towardCenter=normalize(light.positionRange.xyz-position);let helper=select(vec3f(0.0,1.0,0.0),vec3f(1.0,0.0,0.0),abs(towardCenter.y)>.9);let tangent=normalize(cross(towardCenter,helper));let signValue=select(-1.0,1.0,sampleIndex!=0u);samplePosition+=tangent*(signValue*.45*light.shape.x);
   }else if(light.identity.x==SVO_LIGHT_RECTANGLE_AREA){
     let signValue=select(-1.0,1.0,sampleIndex!=0u);samplePosition+=light.axisUWidth.xyz*(signValue*.45*light.axisUWidth.w)+light.axisVHeight.xyz*(signValue*.2*light.axisVHeight.w);
@@ -5675,11 +5809,12 @@ fn dryLightSample(light:SvoLightRecord,sampleIndex:u32,position:vec3f)->DryLight
   var shapeScale=1.0/max(1.0,distanceSquared);
   if(light.identity.x==SVO_LIGHT_SPHERE_AREA){let area=4.0*UNIFIED_PI*light.shape.x*light.shape.x;shapeScale=area/max(area,distanceSquared);}
   if(light.identity.x==SVO_LIGHT_RECTANGLE_AREA){let area=4.0*light.axisUWidth.w*light.axisVHeight.w;let emitterFacing=max(dot(normalize(light.directionCone.xyz),-towardLight),0.0);shapeScale=emitterFacing*area/max(area,distanceSquared);}
+  if(light.identity.x==SVO_LIGHT_SPOT){shapeScale*=svoLightConeFalloff(light,towardLight);}
   let radiance=baseRadiance*(rangeFade*shapeScale);if(max(max(radiance.x,radiance.y),radiance.z)<=0.0){return dryInvalidLightSample();}
   // Point fixtures retain the finite radius of their visible emissive proxy.
   // Attenuation uses center distance, while visibility ends at the globe's
   // near surface so the source geometry cannot occlude its own light.
-  let visibilityDistance=select(distance,max(0.0,distance-light.shape.x),light.identity.x==SVO_LIGHT_POINT);
+  let visibilityDistance=select(distance,max(0.0,distance-light.shape.x),light.identity.x==SVO_LIGHT_POINT||light.identity.x==SVO_LIGHT_SPOT);
   return DryLightSample(towardLight,visibilityDistance,radiance,1u);
 }
 // The static scene is traceStatic alone. It used to be that plus an analytic
@@ -5746,7 +5881,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   // GLOBAL shading to one exact visibility sample per light.
   let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
   for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
-    if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area),1u,globalIllumination);
+    if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area),1u,globalIllumination);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,hit.normal,hit.ownerId,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(hit.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIllumination(position,hit.normal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;let indirectDiffuse=diffuseColor*gi.radiance;
@@ -6664,7 +6799,6 @@ export class SparseVoxelDrySceneRenderer {
         coneMarcherWGSL: createSvoDryConeMarcherWGSL({
           branchlessMorton: true,
           rangedDirectorySearch: true,
-          fluidCoverage: true,
           directPageTable: true,
         }),
         visibilityFlags: {

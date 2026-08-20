@@ -185,7 +185,16 @@ export function validateGlobalFineLevelSetConsumerSource(source: GlobalFineLevel
   if (source.brickDimensions.some((value, axis) => value !== expectedBricks[axis])) {
     throw new RangeError("Global fine brick dimensions do not index the complete logical sample lattice");
   }
-  positiveInteger(source.pageCapacity, "Global fine page capacity");
+  // Zero pages is a *published* state, not a malformed source. The compact
+  // Sparse CM12 publication sizes its page list from accepted ownership, so a
+  // scene with no accepted fluid — the first rung of the complexity ladder, or
+  // any domain before its first seed — legitimately publishes none. Every ABI
+  // guard in the shaders admits a page only when `id < pageCapacity`, so a zero
+  // capacity reads as "no page resolves" rather than as an out-of-range read.
+  // Refusing it here took the whole renderer down on an empty scene.
+  if (!Number.isSafeInteger(source.pageCapacity) || source.pageCapacity < 0) {
+    throw new RangeError("Global fine page capacity must be a non-negative integer");
+  }
   positiveInteger(source.generation, "Global fine generation");
   if (!Number.isFinite(source.fineCellWidth) || source.fineCellWidth <= 0
     || source.domainOrigin.some((value) => !Number.isFinite(value))) {

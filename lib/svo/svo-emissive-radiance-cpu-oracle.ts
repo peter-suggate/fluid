@@ -14,6 +14,7 @@ import {
   type SvoRadianceRgb,
 } from "./svo-tetrahedral-radiance";
 import type { EnvironmentProxyPrimitive } from "../core/voxel-environments";
+import { SVO_SPOT_PENUMBRA_FRACTION } from "./svo-light-abi";
 
 type Triple = [number, number, number];
 
@@ -139,7 +140,7 @@ interface InjectionCounts {
 
 interface CanonicalLocalLight {
   source: EnvironmentProxyPrimitive;
-  kind: "point" | "sphere" | "rectangle";
+  kind: "point" | "sphere" | "rectangle" | "spot";
   position_m: Triple;
   direction: Triple;
   colorLinear: SvoRadianceRgb;
@@ -147,6 +148,8 @@ interface CanonicalLocalLight {
   range_m: number;
   radius_m: number;
   area_m2: number;
+  /** Beam cosines for a spot; see `SvoLightRecord.cone`. */
+  cone?: { cosInner: number; cosOuter: number };
 }
 
 /** Signed-distance estimates are exact for boxes/cylinders/capsules/tori and conservative for ellipsoids/cones. */
@@ -313,6 +316,29 @@ function localLightForProxy(proxy: EnvironmentProxyPrimitive): CanonicalLocalLig
       ? Math.min(4.5, Math.max(1, 3 * Math.sqrt(proxy.material.emission)))
       : Math.max(1, 6 * Math.sqrt(proxy.material.emission)),
   };
+  // The same order `svo-light-abi.ts` classifies in: a spot is read off its
+  // reflector's taper before the point and area cases can claim the fixture.
+  if (proxy.tags.includes("spot-light")) {
+    if (proxy.kind !== "cone") throw new Error(`Spot fixture ${proxy.key} must be a cone; its taper is the beam angle`);
+    const mouthRadius_m = Math.max(proxy.baseRadius_m, proxy.topRadius_m);
+    const throatRadius_m = Math.min(proxy.baseRadius_m, proxy.topRadius_m);
+    if (!(mouthRadius_m > throatRadius_m)) throw new Error(`Spot fixture ${proxy.key} has no taper, so it describes no beam`);
+    const local: Triple = proxy.baseRadius_m > proxy.topRadius_m ? [0, -1, 0] : [0, 1, 0];
+    const direction = worldVector(proxy, local);
+    const halfAngle_rad = Math.atan2(mouthRadius_m - throatRadius_m, 2 * proxy.halfHeight_m);
+    return {
+      ...common,
+      kind: "spot",
+      position_m: common.position_m.map((value, axis) => value + direction[axis] * proxy.halfHeight_m) as Triple,
+      direction,
+      radius_m: mouthRadius_m,
+      area_m2: Math.PI * mouthRadius_m ** 2,
+      cone: {
+        cosOuter: Math.cos(halfAngle_rad),
+        cosInner: Math.cos(halfAngle_rad * (1 - SVO_SPOT_PENUMBRA_FRACTION)),
+      },
+    };
+  }
   if (proxy.tags.includes("point-light")) return {
     ...common, kind: "point", direction: [0, -1, 0], radius_m: proxyLightRadius(proxy, true), area_m2: 0,
   };
@@ -342,13 +368,19 @@ function sampleLocalLight(light: CanonicalLocalLight, point: Triple): LocalLight
   else if (light.kind === "rectangle") {
     const emitterFacing = Math.max(0, -dot(light.direction, towardLight));
     shapeScale = emitterFacing * light.area_m2 / Math.max(light.area_m2, distanceSquared);
+  } else if (light.kind === "spot" && light.cone) {
+    const alignment = -dot(light.direction, towardLight);
+    const t = Math.min(1, Math.max(0,
+      (alignment - light.cone.cosOuter) / Math.max(light.cone.cosInner - light.cone.cosOuter, 1e-4)));
+    shapeScale *= t * t;
   }
   const scale = light.intensity * rangeFade * shapeScale;
   if (!(scale > 0)) return undefined;
   return {
     towardLight,
     radiance: light.colorLinear.map((channel) => channel * scale) as Triple,
-    shadowDistance_m: light.kind === "point" ? Math.max(0, distance - light.radius_m) : distance,
+    shadowDistance_m: light.kind === "point" || light.kind === "spot"
+      ? Math.max(0, distance - light.radius_m) : distance,
   };
 }
 

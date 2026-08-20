@@ -25,7 +25,33 @@ export const SVO_LIGHT_KINDS = Object.freeze({
   point: 2,
   sphereArea: 3,
   rectangleArea: 4,
+  spot: 5,
 } as const);
+
+/**
+ * Every code the kind table assigns, as a set a validator can test against.
+ *
+ * The publication check on the renderer side has to reject a garbage kind word
+ * without knowing what the kinds mean, and it used to do that with a literal
+ * upper bound. That bound is a copy of this table, and a copy of a table is a
+ * thing that lags it: adding `spot` above made every spot-bearing scene fail
+ * its lighting contract with no message naming the kind, because 5 was one past
+ * a 4 written when 4 was the last code. Deriving the set here means the next
+ * kind is legal the moment it is declared.
+ */
+export const SVO_LIGHT_KIND_CODES: ReadonlySet<number> = new Set<number>(Object.values(SVO_LIGHT_KINDS));
+
+/**
+ * The angular skirt a spot's beam softens over, as a fraction of its own cone.
+ *
+ * A reflector has one angle — the taper its geometry describes — and a beam
+ * with only that angle has a stencil edge no real fixture produces. The inner
+ * cone is therefore derived rather than authored: it is the same cone at
+ * `1 - SVO_SPOT_PENUMBRA_FRACTION` of the half-angle, so a wide floodlight gets
+ * a proportionally wide penumbra and a tight pin-spot a tight one, and the
+ * author still sets exactly one number by drawing the fixture.
+ */
+export const SVO_SPOT_PENUMBRA_FRACTION = 0.35;
 
 export type SvoLightKind = keyof typeof SVO_LIGHT_KINDS;
 type Vec3Tuple = readonly [number, number, number];
@@ -46,6 +72,16 @@ export interface SvoLightRecord {
   halfHeight_m: number;
   /** Area radius, or the finite emissive endpoint radius for a point fixture. */
   radius_m: number;
+  /**
+   * A spot's beam, as the two cosines the shader interpolates between.
+   *
+   * Cosines rather than angles because the shader compares against a dot
+   * product and would otherwise pay an `acos` per light per sample. Absent on
+   * every other kind: those records pack the full sphere into the same two
+   * lanes and never read them back, because the beam term is taken under the
+   * spot branch rather than multiplied in unconditionally.
+   */
+  cone?: { cosInner: number; cosOuter: number };
   sourceKey: string;
 }
 
@@ -71,7 +107,7 @@ export function canonicalSvoLightRecord(input: SvoLightRecord): SvoLightRecord {
   const range_m = input.kind === "directional" ? 0 : input.range_m;
   if (!Number.isFinite(range_m) || range_m < 0) throw new RangeError("SVO light range must be finite and non-negative");
   if (!Number.isFinite(input.intensity) || input.intensity < 0) throw new RangeError("SVO light intensity must be finite and non-negative");
-  const radius_m = input.kind === "sphereArea" || input.kind === "point" ? input.radius_m : 0;
+  const radius_m = input.kind === "sphereArea" || input.kind === "point" || input.kind === "spot" ? input.radius_m : 0;
   const halfWidth_m = input.kind === "rectangleArea" ? input.halfWidth_m : 0;
   const halfHeight_m = input.kind === "rectangleArea" ? input.halfHeight_m : 0;
   if (![radius_m, halfWidth_m, halfHeight_m].every((value) => Number.isFinite(value) && value >= 0)) {
@@ -81,6 +117,7 @@ export function canonicalSvoLightRecord(input: SvoLightRecord): SvoLightRecord {
       || (input.kind === "rectangleArea" && (!(halfWidth_m > 0) || !(halfHeight_m > 0)))) {
     throw new RangeError("SVO area lights require positive shape dimensions");
   }
+  const cone = input.kind === "spot" ? spotCone(input.cone) : undefined;
   return Object.freeze({
     ...input,
     position_m: vec3(input.position_m, "SVO light position"),
@@ -93,7 +130,27 @@ export function canonicalSvoLightRecord(input: SvoLightRecord): SvoLightRecord {
     axisV: normalized(input.axisV, "SVO light V axis"),
     halfHeight_m,
     radius_m,
+    ...(cone ? { cone } : {}),
   });
+}
+
+/**
+ * A spot's two cosines, ordered and bounded.
+ *
+ * `cosInner >= cosOuter` is the whole contract: the shader divides by their
+ * difference, so an inverted pair is a beam that brightens outwards and a
+ * coincident pair is a division by zero. Both are refused here rather than
+ * clamped in the shader, where the record has already lost the name of the
+ * fixture that produced it.
+ */
+function spotCone(cone: SvoLightRecord["cone"]): { cosInner: number; cosOuter: number } {
+  if (!cone) throw new RangeError("SVO spot light needs a beam cone");
+  const { cosInner, cosOuter } = cone;
+  if (![cosInner, cosOuter].every((value) => Number.isFinite(value) && value >= -1 && value <= 1)) {
+    throw new RangeError("SVO spot cone cosines must be from -1 to 1");
+  }
+  if (!(cosInner > cosOuter)) throw new RangeError("SVO spot inner cone must be tighter than its outer cone");
+  return { cosInner, cosOuter };
 }
 
 /**
@@ -137,9 +194,85 @@ function proxyEmitterRadius(proxy: EnvironmentProxyPrimitive, policy: "bounding"
   return Math.max(proxy.halfSize_m.x, proxy.halfSize_m.y, proxy.halfSize_m.z);
 }
 
+function rotatedByProxy(proxy: EnvironmentProxyPrimitive, v: Vec3Tuple): Vec3Tuple {
+  const orientation = proxy.orientation;
+  if (!orientation) return v;
+  const { w, x, y, z } = orientation;
+  const [vx, vy, vz] = v;
+  const tx = 2 * (y * vz - z * vy);
+  const ty = 2 * (z * vx - x * vz);
+  const tz = 2 * (x * vy - y * vx);
+  return [
+    vx + w * tx + (y * tz - z * ty),
+    vy + w * ty + (z * tx - x * tz),
+    vz + w * tz + (x * ty - y * tx),
+  ];
+}
+
+/**
+ * A spot, read off the reflector that produces it.
+ *
+ * The fixture's own taper *is* the beam: a truncated cone opens from a throat
+ * to a mouth, and the half-angle between them is the only angle a real can
+ * light has. Deriving it means the author sets the beam by drawing the lamp
+ * — no second number that can disagree with the geometry standing in frame.
+ *
+ * The record is placed at the **mouth**, not at the fixture centre, and that is
+ * load-bearing rather than tidy. A cone proxy is a solid, so a shadow ray aimed
+ * at its centre would have to cross its own body to arrive; aimed at the mouth
+ * cap it arrives at the surface, and every receiver inside the beam is by
+ * construction on the open side of that cap. The mouth radius rides along as
+ * `radius_m` so the ray stops at the emitting disc rather than in it.
+ */
+function proxySpotLight(proxy: EnvironmentProxyPrimitive, common: SvoLightCommon): SvoLightRecord {
+  if (proxy.kind !== "cone") {
+    throw new Error(`Spot fixture ${proxy.key} must be a cone; its taper is the beam angle`);
+  }
+  const { baseRadius_m: base, topRadius_m: top, halfHeight_m: half } = proxy;
+  const mouthRadius_m = Math.max(base, top);
+  const throatRadius_m = Math.min(base, top);
+  if (!(mouthRadius_m > throatRadius_m)) {
+    throw new Error(`Spot fixture ${proxy.key} has no taper, so it describes no beam`);
+  }
+  if (!(half > 0)) throw new Error(`Spot fixture ${proxy.key} needs a positive half height`);
+  // `baseRadius_m` is the -Y cap and `topRadius_m` the +Y one, so the beam runs
+  // from the narrow end toward the wide one along the proxy's own axis.
+  const localAxis: Vec3Tuple = base > top ? [0, -1, 0] : [0, 1, 0];
+  const direction = normalized(rotatedByProxy(proxy, localAxis), `Spot fixture ${proxy.key} axis`);
+  const halfAngle_rad = Math.atan2(mouthRadius_m - throatRadius_m, 2 * half);
+  return canonicalSvoLightRecord({
+    ...common,
+    kind: "spot",
+    position_m: [
+      proxy.center_m.x + direction[0] * half,
+      proxy.center_m.y + direction[1] * half,
+      proxy.center_m.z + direction[2] * half,
+    ],
+    direction,
+    axisU: [1, 0, 0], axisV: [0, 0, 1],
+    halfWidth_m: 0, halfHeight_m: 0,
+    radius_m: mouthRadius_m,
+    cone: {
+      cosOuter: Math.cos(halfAngle_rad),
+      cosInner: Math.cos(halfAngle_rad * (1 - SVO_SPOT_PENUMBRA_FRACTION)),
+    },
+  });
+}
+
+interface SvoLightCommon {
+  lightId: number;
+  ownerId: number;
+  revision: number;
+  position_m: Vec3Tuple;
+  range_m: number;
+  colorLinear: Vec3Tuple;
+  intensity: number;
+  sourceKey: string;
+}
+
 function proxyPhysicalLight(proxy: EnvironmentProxyPrimitive, ownerBase: number, revision: number): SvoLightRecord | undefined {
   if (!(proxy.material.emission > 0) || !proxy.tags.includes("light")) return undefined;
-  const common = {
+  const common: SvoLightCommon = {
     lightId: proxy.ownerIndex + 2,
     ownerId: ownerBase + proxy.ownerIndex,
     revision,
@@ -154,6 +287,7 @@ function proxyPhysicalLight(proxy: EnvironmentProxyPrimitive, ownerBase: number,
     intensity: proxy.material.emission,
     sourceKey: proxy.key,
   };
+  if (proxy.tags.includes("spot-light")) return proxySpotLight(proxy, common);
   if (proxy.tags.includes("point-light")) return canonicalSvoLightRecord({
     ...common,
     kind: "point",
@@ -217,7 +351,10 @@ export interface SvoSceneLights {
 function importance(light: SvoLightRecord): number {
   const luminance = 0.2126 * light.colorLinear[0] + 0.7152 * light.colorLinear[1] + 0.0722 * light.colorLinear[2];
   const area = light.kind === "rectangleArea" ? 4 * light.halfWidth_m * light.halfHeight_m
-    : light.kind === "sphereArea" ? 4 * Math.PI * light.radius_m * light.radius_m : 1;
+    : light.kind === "sphereArea" ? 4 * Math.PI * light.radius_m * light.radius_m
+    // A spot emits from its mouth disc and only into its cone, so its emitting
+    // area is that disc rather than the sphere the same radius would imply.
+    : light.kind === "spot" ? Math.PI * light.radius_m * light.radius_m : 1;
   return luminance * light.intensity * area;
 }
 
@@ -272,12 +409,17 @@ export function packSvoLightRecords(records: readonly SvoLightRecord[]): Uint32A
     if (ids.has(light.lightId)) throw new RangeError(`Duplicate SVO light ID ${light.lightId}`);
     ids.add(light.lightId);
     const offset = index * SVO_LIGHT_RECORD_WORDS;
+    // The full sphere on every kind that is not a spot. Nothing reads these
+    // lanes there — the beam term lives under the spot branch — but a defined
+    // value keeps two records that describe the same fixture byte-identical.
+    const cosOuter = light.cone?.cosOuter ?? -1;
+    const cosInner = light.cone?.cosInner ?? 1;
     floats.set([...light.position_m, light.range_m], offset);
-    floats.set([...light.direction, 0], offset + 4);
+    floats.set([...light.direction, cosOuter], offset + 4);
     floats.set([...light.colorLinear, light.intensity], offset + 8);
     floats.set([...light.axisU, light.halfWidth_m], offset + 12);
     floats.set([...light.axisV, light.halfHeight_m], offset + 16);
-    floats.set([light.radius_m, 0, 0, 0], offset + 20);
+    floats.set([light.radius_m, cosInner, 0, 0], offset + 20);
     words.set([SVO_LIGHT_KINDS[light.kind], light.lightId, light.ownerId, light.revision], offset + 24);
   });
   return words;
@@ -297,5 +439,15 @@ const SVO_LIGHT_DIRECTIONAL:u32=1u;
 const SVO_LIGHT_POINT:u32=2u;
 const SVO_LIGHT_SPHERE_AREA:u32=3u;
 const SVO_LIGHT_RECTANGLE_AREA:u32=4u;
+const SVO_LIGHT_SPOT:u32=5u;
 fn svoLightRadiance(light:SvoLightRecord)->vec3f{return max(light.colorIntensity.xyz,vec3f(0.0))*max(light.colorIntensity.w,0.0);}
+// The beam term, for the spot branch alone. \`towardLight\` points from the
+// receiver at the emitter, so the beam axis is compared against its negation.
+// Squared so the skirt falls off as a smooth shoulder rather than a linear ramp.
+fn svoLightConeFalloff(light:SvoLightRecord,towardLight:vec3f)->f32{
+  let cosOuter=light.directionCone.w;let cosInner=light.shape.y;
+  let alignment=dot(normalize(light.directionCone.xyz),-towardLight);
+  let t=clamp((alignment-cosOuter)/max(cosInner-cosOuter,1e-4),0.0,1.0);
+  return t*t;
+}
 `;

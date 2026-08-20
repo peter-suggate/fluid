@@ -1,4 +1,9 @@
-import { WebGpuSvoFluidCoverage } from "../svo/webgpu-svo-fluid-coverage";
+import { planSvoFluidCoverageRatio, type SvoFluidCoverageTriple } from "../svo/svo-fluid-coverage";
+import {
+  WebGpuSvoFluidCoverage,
+  type WebGpuSvoFluidCoverageOptions,
+  type WebGpuSvoFluidCoverageSource,
+} from "../svo/webgpu-svo-fluid-coverage";
 import { cameraBasis, dot } from "./math";
 import { sceneLatticeDimensions } from "./scene-lattice";
 import { canonicalScene, sceneRevision, sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "./model";
@@ -76,7 +81,10 @@ import { SparseVoxelRenderStageOverlay } from "../svo/webgpu-svo-stage-overlay";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoEnvironmentTreeRefinementDepth, svoRenderTuningKey, type SvoRenderTuning } from "../svo/svo-render-tuning";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../svo/svo-screen-space-termination";
 import { isGPUInitializationAbort } from "./gpu-initialization";
-import { createGlobalFineLevelSetConsumerSource } from "./octree-consumer-sampling";
+import {
+  createGlobalFineLevelSetConsumerSource,
+  type GlobalFineLevelSetConsumerSource,
+} from "./octree-consumer-sampling";
 import { OCTREE_TECHNIQUE_OVERLAY_CODES, isOctreeTechniqueOverlayMode, type OctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import {
   sparseCM12DirtyOverlayCode,
@@ -700,6 +708,43 @@ struct Out { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @fragment fn fragmentMain(input: Out) -> @location(0) vec4f { return textureSample(source, sourceSampler, vec2f(input.uv.x, 1.0-input.uv.y)); }
 `;
 
+/**
+ * Construct the exact sparse dry-scene pipeline selected by the product.
+ *
+ * Kept outside `FluidLabRenderer` so the default Dawn startup receipt can
+ * compile the same program bundle instead of substituting the water renderer.
+ */
+export function createProductionSparseVoxelDrySceneRenderer(
+  device: GPUDevice,
+  uniformBuffer: GPUBuffer,
+  bodyBuffer: GPUBuffer,
+  primaryTraversal: SvoPrimaryTraversalMode,
+): SparseVoxelDrySceneRenderer {
+  if (primaryTraversal === "raster"
+    && device.limits.maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE) {
+    throw new RangeError(
+      `Requested SVO raster primary needs maxColorAttachmentBytesPerSample >= ${FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE}; device exposes ${device.limits.maxColorAttachmentBytesPerSample}`,
+    );
+  }
+  const traversal = primaryTraversal === "raster"
+    ? "raster-primary" as const : "canonical-parametric" as const;
+  const rasterArms = traversal === "raster-primary";
+  return new SparseVoxelDrySceneRenderer(
+    device,
+    uniformBuffer,
+    bodyBuffer,
+    "rgba16float",
+    traversal,
+    "off",
+    "split",
+    rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
+    rasterArms ? "off" : "static-primary",
+    rasterArms,
+    rasterArms,
+    true,
+  );
+}
+
 export class FluidLabRenderer {
   private device?: GPUDevice;
   private disposed = false;
@@ -1133,49 +1178,9 @@ export class FluidLabRenderer {
       // answer, already settled into `requestedPrimaryTraversal`: the proxy
       // raster is an area law and inverts against the megakernel once the scene
       // emits more proxies than the target has pixels.
-      (device) => {
-        if (this.requestedPrimaryTraversal === "raster"
-          && device.limits.maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE) {
-          throw new RangeError(
-            `Requested SVO raster primary needs maxColorAttachmentBytesPerSample >= ${FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE}; device exposes ${device.limits.maxColorAttachmentBytesPerSample}`,
-          );
-        }
-        const traversal = this.requestedPrimaryTraversal === "raster"
-          ? "raster-primary" as const : "canonical-parametric" as const;
-        // Stationary primary reuse buys whatever the primary costs, and the two
-        // traversals price that very differently. Skipping the megakernel is
-        // worth 28.5 ms of a 49.6 ms frame; skipping the raster primary is worth
-        // 7.9 ms of 29.0, and the
-        // rigid impostor pass blocks the reuse anyway whenever the scene has
-        // bodies. Asking for it there would only make a dead mode look live.
-        const coherence = traversal === "raster-primary" ? "off" as const : "static-primary" as const;
-        // The raster glass and rigid arms follow the traversal rather than being
-        // pinned on, because they are not capabilities: they are *where* glass
-        // and bodies are discovered, and the two traversals answer differently.
-        //
-        // Raster-primary has no choice — its brick pass replaces the megakernel
-        // entirely, so panes and bodies can only come from separate passes, and
-        // the constructor requires both (`webgpu-svo-dry-scene.ts:6843`). The
-        // megakernel resolves both inline: `traceOpaqueScene` folds the analytic
-        // body loop (`:6049`), and the split visibility fragment traces panes
-        // and packs the winning key into the opaque identity's spare bits
-        // (`:3765`). Asking for the raster arms there adds two passes that
-        // duplicate work the primary already did, and one of them —
-        // `rasterRigidActive` — is what blocks stationary primary reuse
-        // (`:10469`). Off is also the arm the 59.6 ms depth-3 measurement was
-        // taken on; the lane and production must agree about that.
-        const rasterArms = traversal === "raster-primary";
-        return new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float",
-          traversal, "off", "split",
-          // Authored at the termination contract's reference viewport height;
-          // the shader scales it to the actual render target, including DPR
-          // and resolutionScale, so LOD is stable across displays. Zero for the
-          // megakernel is a constructor requirement, not a preference: screen-
-          // space termination is only compiled for canonical-inline or
-          // raster-primary-split (`webgpu-svo-dry-scene.ts:6829`).
-          rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
-          coherence, rasterArms, rasterArms, true);
-      },
+      (device) => createProductionSparseVoxelDrySceneRenderer(
+        device, this.uniformBuffer!, this.bodyBuffer!, this.requestedPrimaryTraversal,
+      ),
       (pipeline) => pipeline.initialize((label, completed, total) => this.reportSvoPipelineProgress(label, completed, total)),
       (pipeline) => {
         this.svoDryScenePipeline = pipeline;
@@ -1717,44 +1722,97 @@ export class FluidLabRenderer {
   /**
    * Build or reuse the fluid coverage volume for this frame.
    *
-   * Gated on the global-fine lane, because that is the only configuration in
-   * which the solver's dense field carries a signed distance; the tall-cell and
-   * quadtree lanes pack occupancy into the same texture, and resampling that as
-   * a distance would put a shadow wherever the field happened to be positive.
-   * Outside the lane the volume is released and water casts no shadow, which is
-   * the behaviour every lane had before.
+   * Gated on the global-fine lane, because that is the only configuration whose
+   * surface is a signed distance; the tall-cell and quadtree lanes pack
+   * occupancy into the same texture, and resampling that as a distance would put
+   * a shadow wherever the field happened to be positive. Outside the lane the
+   * volume is released and water casts no shadow, which is the behaviour every
+   * lane had before.
+   *
+   * Inside the lane the source is whichever the solver actually publishes.
+   * Sparse CM12 is buffer-native: it allocates 1x1x1 stand-ins for every texture
+   * field on `GPUSolverInstance` and keeps the real surface in its page set, so
+   * the dense arm is admissible only when the texture genuinely covers the
+   * lattice it claims to. That check is the point — a fill over the stand-in
+   * reads out of bounds and quantizes to half coverage across the entire domain,
+   * which is not "no shadow", it is a uniform fog nobody asked for.
    */
   private ensureFluidCoverage(
     solver: GPUSolverInstance | undefined,
     scene: SceneDescription,
   ): WebGpuSvoFluidCoverage | undefined {
     const device = this.device;
-    // surfaceFieldTexture is the contoured level set when the solver keeps one
-    // apart from volumeTexture; it is the field globalCoarsePhi already reads.
-    const field = device && solver && this.globalFineWaterAttached && solver.globalFineLevelSetSource
-      ? solver.surfaceFieldTexture ?? solver.volumeTexture
-      : undefined;
+    const brickSource = device && solver && this.globalFineWaterAttached
+      ? solver.globalFineLevelSetSource : undefined;
+    // The factory validates, so a solver mid-rebuild can throw here. A shadow is
+    // never worth taking the frame down with it: an unusable publication is the
+    // same answer as no publication.
+    let publication: GlobalFineLevelSetConsumerSource | undefined;
+    try {
+      publication = brickSource ? createGlobalFineLevelSetConsumerSource(brickSource) : undefined;
+    } catch {
+      publication = undefined;
+    }
     const info = solver?.info;
-    if (!field || !info || !device) {
+    if (!publication || !info || !device) {
       this.svoFluidCoverage?.destroy();
       this.svoFluidCoverage = undefined;
       this.svoFluidCoverageKey = undefined;
       return undefined;
     }
-    const dimensions = [info.nx, info.ny, info.nz] as const;
+    // surfaceFieldTexture is the contoured level set when the solver keeps one
+    // apart from volumeTexture; it is the field globalCoarsePhi already reads.
+    const dense = solver?.surfaceFieldTexture ?? solver?.volumeTexture;
+    const spansLattice = Boolean(dense) && dense!.width >= info.nx
+      && dense!.height >= info.ny && dense!.depthOrArrayLayers >= info.nz;
     const container = scene.container;
-    const key = `${field.label}:${dimensions.join(",")}:${container.width_m},${container.height_m},${container.depth_m}`;
-    if (this.svoFluidCoverage && this.svoFluidCoverageKey === key) return this.svoFluidCoverage;
+    // Both arms span the same world box — the container, centred in x/z with y
+    // from the floor, which is the frame the water pipeline rasters into. Only
+    // the lattice differs: the dense field is the solver grid, the compact
+    // publication is the fine one.
+    //
+    // Deliberately NOT `publication.domainOrigin` / `publication.fineCellWidth`.
+    // Those are the publication's *own* frame, and Sparse CM12 publishes it as
+    // index space — `domainOrigin: [0,0,0]`, `fineCellWidth: 1`
+    // (`webgpu-sparse-cm12-resident.ts`). `createGlobalFineLevelSetConsumerSource`
+    // even refuses a non-zero origin outright. Taking them for metres puts the
+    // volume at the world origin with one-metre texels: a box in the wrong
+    // place, at the wrong scale, that still samples and still reports valid.
+    const lattice: SvoFluidCoverageTriple = spansLattice
+      ? [info.nx, info.ny, info.nz] : publication.sampleDimensions;
+    const field: WebGpuSvoFluidCoverageOptions = {
+      fieldDimensions: lattice,
+      worldOrigin_m: [-container.width_m / 2, 0, -container.depth_m / 2],
+      cellSize_m: [container.width_m / lattice[0], container.height_m / lattice[1], container.depth_m / lattice[2]],
+    };
+    // A compact publication's lattice is the fine one, so the dense arm's "one
+    // texel per two cells" would ask for gigabytes on a large scene. Coarsen
+    // until the volume fits, and decline rather than build one that does not.
+    const cellsPerTexel = planSvoFluidCoverageRatio(
+      field.fieldDimensions, spansLattice ? undefined : publication.brickResolution,
+    );
+    if (cellsPerTexel === undefined) {
+      this.svoFluidCoverage?.destroy();
+      this.svoFluidCoverage = undefined;
+      this.svoFluidCoverageKey = undefined;
+      return undefined;
+    }
+    const options: WebGpuSvoFluidCoverageOptions = { ...field, cellsPerTexel };
+    const key = `${spansLattice ? "dense" : "compact"}:${options.fieldDimensions.join(",")}`
+      + `:${options.worldOrigin_m.join(",")}:${options.cellSize_m.join(",")}:${cellsPerTexel}`;
+    // The page set is republished every step, so a live owner still has to take
+    // this frame's generation; only a shape or buffer change forces a rebuild.
+    if (this.svoFluidCoverage && this.svoFluidCoverageKey === key
+      && (spansLattice || this.svoFluidCoverage.adoptPublication({ ...publication, kind: "compact" }))) {
+      return this.svoFluidCoverage;
+    }
     this.svoFluidCoverage?.destroy();
     this.svoFluidCoverageKey = key;
     try {
-      // The dense field spans the container box exactly, which is the same
-      // mapping the raster composite uses to sample it.
-      this.svoFluidCoverage = new WebGpuSvoFluidCoverage(device, {
-        fieldDimensions: dimensions,
-        worldOrigin_m: [-container.width_m / 2, 0, -container.depth_m / 2],
-        cellSize_m: [container.width_m / info.nx, container.height_m / info.ny, container.depth_m / info.nz],
-      }, { coarsePhi: field.createView({ dimension: "3d" }) });
+      const source: WebGpuSvoFluidCoverageSource = spansLattice
+        ? { kind: "dense", coarsePhi: dense!.createView({ dimension: "3d" }) }
+        : { ...publication, kind: "compact" };
+      this.svoFluidCoverage = new WebGpuSvoFluidCoverage(device, options, source);
       void this.svoFluidCoverage.initializePipelines();
     } catch {
       this.svoFluidCoverage = undefined;

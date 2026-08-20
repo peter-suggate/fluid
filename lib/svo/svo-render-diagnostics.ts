@@ -80,8 +80,19 @@ export interface SvoRenderStageDefinition {
   readonly legend: readonly SvoRenderStageLegendStop[];
 }
 
+/**
+ * `stageView` is `off` because a stage view is an *instrument*, not a look.
+ *
+ * Every other entry in this table decodes a plane an earlier pass published,
+ * and the overlay that draws it replaces the presented image wholesale — after
+ * the water compositor has already run. Defaulting it to `dry-radiance` (as it
+ * briefly was) therefore shipped the pre-composite dry HDR target as the
+ * product: correct-looking on a dry set, and on a wet one a tank with no water
+ * and no glass in it, because neither had been composited yet. It also drops
+ * the scene's own ACES grade, which that view documents itself as omitting.
+ */
 export const DEFAULT_SVO_RENDER_DIAGNOSTICS: SvoRenderDiagnostics = Object.freeze({
-  stageView: "dry-radiance",
+  stageView: "off",
   lightSlot: 0,
   maximumTraversalDepth: 21,
   maximumNodeVisits: 256,

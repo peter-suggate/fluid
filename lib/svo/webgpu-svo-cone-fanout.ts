@@ -261,7 +261,7 @@ fn fanoutLightSample(light:SvoLightRecord,sampleIndex:u32,position:vec3f)->Fanou
     return FanoutLightSample(light.directionCone.xyz*inverseSqrt(lengthSquared),0.0,1u);
   }
   var samplePosition=light.positionRange.xyz;
-  if(light.identity.x==SVO_LIGHT_SPHERE_AREA){
+  if(light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_SPOT){
     let towardCenter=normalize(light.positionRange.xyz-position);let helper=select(vec3f(0,1,0),vec3f(1,0,0),abs(towardCenter.y)>.9);
     let tangent=normalize(cross(towardCenter,helper));let signValue=select(-1.0,1.0,sampleIndex!=0u);
     samplePosition+=tangent*(signValue*.45*light.shape.x);
@@ -279,8 +279,9 @@ fn fanoutLightSample(light:SvoLightRecord,sampleIndex:u32,position:vec3f)->Fanou
     let area=4.0*light.axisUWidth.w*light.axisVHeight.w;let emitterFacing=max(dot(normalize(light.directionCone.xyz),-towardLight),0.0);
     shapeScale=emitterFacing*area/max(area,distanceSquared);
   }
+  if(light.identity.x==SVO_LIGHT_SPOT){shapeScale*=svoLightConeFalloff(light,towardLight);}
   if(max(max(baseRadiance.x,baseRadiance.y),baseRadiance.z)*rangeFade*shapeScale<=0.0){return fanoutInvalidLightSample();}
-  let visibilityDistance=select(distance,max(0.0,distance-light.shape.x),light.identity.x==SVO_LIGHT_POINT);
+  let visibilityDistance=select(distance,max(0.0,distance-light.shape.x),light.identity.x==SVO_LIGHT_POINT||light.identity.x==SVO_LIGHT_SPOT);
   return FanoutLightSample(towardLight,visibilityDistance,1u);
 }
 fn fanoutDirectionalExit(position:vec3f,direction:vec3f)->f32{

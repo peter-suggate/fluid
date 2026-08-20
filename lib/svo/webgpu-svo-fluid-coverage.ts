@@ -1,3 +1,13 @@
+import { fineLevelSetPackedSampleWGSL } from "../core/fine-levelset-packed-sample";
+import {
+  COMPACT_FINE_LEVELSET_PARAM_WORDS,
+  compactFineLevelSetPageLookupWGSL,
+  compactFineLevelSetParamsWGSL,
+  compactFineLevelSetSpanScaleWGSL,
+  makeCompactFineLevelSetPhiWGSL,
+  packCompactFineLevelSetParams,
+  type CompactFineLevelSetParamInputs,
+} from "../core/compact-fine-levelset-phi";
 import {
   packSvoFluidCoverageFrame,
   planSvoFluidCoverageVolume,
@@ -8,17 +18,32 @@ import {
 } from "./svo-fluid-coverage";
 
 /**
- * Per-frame fluid coverage volume, resampled from the solver's coarse level set.
+ * Per-frame fluid coverage volume, resampled from whatever the solver publishes
+ * its surface as.
  *
- * The coarse field is a dense r32float signed distance over the container box
- * that the solver rewrites every step and the water pipeline already samples
+ * Two source arms, because the solvers do not agree about what a level set is.
+ *
+ * **Dense.** A coarse r32float signed distance over the container box that the
+ * solver rewrites every step and the water pipeline already samples
  * (`globalCoarsePhi`). It owns sign and distance everywhere the fine narrow band
  * does not, which is exactly the question a shadow asks, so the fill is a
  * resample rather than a traversal: no octree descent, no page directory, no
- * residency gate.
+ * residency gate. Reads are `textureLoad` only — r32float is not filterable, so
+ * the source binds as unfilterable-float and any smoothing happens in this
+ * volume's own mips.
  *
- * Reads are `textureLoad` only. r32float is not filterable, so the source binds
- * as unfilterable-float and any smoothing happens in this volume's own mips.
+ * **Compact.** A buffer-native solver has no dense field at all. Sparse CM12
+ * allocates 1x1x1 stand-ins for every texture field on `GPUSolverInstance` and
+ * publishes the real surface as a key-sorted page set; a fill pointed at the
+ * stand-in reads out of bounds, gets zero, and quantizes to *half coverage
+ * everywhere* — water that is uniformly, invisibly present rather than absent,
+ * which is worse than no volume at all. This arm resolves the page instead,
+ * through the same lookup the surface classifier uses.
+ *
+ * The choice is not a preference. `planSvoFluidCoverageVolume` sizes the volume
+ * over the solver lattice, so a dense source is only admissible when its texture
+ * really covers that lattice; the renderer checks, and this owner refuses a
+ * source that cannot answer for the field it was planned over.
  */
 
 export const SVO_FLUID_COVERAGE_BINDINGS = Object.freeze({
@@ -27,10 +52,34 @@ export const SVO_FLUID_COVERAGE_BINDINGS = Object.freeze({
   destination: 2,
 } as const);
 
-export interface WebGpuSvoFluidCoverageSources {
+/** Compact arm bindings. The destination lane is shared with the dense arm. */
+export const SVO_FLUID_COVERAGE_COMPACT_BINDINGS = Object.freeze({
+  worklist: 0,
+  samples: 1,
+  metadata: 2,
+  publication: 3,
+  fill: 4,
+  destination: 5,
+} as const);
+
+/** Dense arm: one filterable-free signed-distance volume over the lattice. */
+export interface WebGpuSvoFluidCoverageDenseSource {
+  readonly kind: "dense";
   /** Dense coarse level set, signed distance in metres, negative inside water. */
-  coarsePhi: GPUTextureView;
+  readonly coarsePhi: GPUTextureView;
 }
+
+/** Compact arm: the published page set, plus the shape needed to address it. */
+export interface WebGpuSvoFluidCoverageCompactSource extends CompactFineLevelSetParamInputs {
+  readonly kind: "compact";
+  readonly worklist: GPUBufferBinding;
+  readonly samples: GPUBufferBinding;
+  readonly metadata: GPUBufferBinding;
+}
+
+export type WebGpuSvoFluidCoverageSource =
+  | WebGpuSvoFluidCoverageDenseSource
+  | WebGpuSvoFluidCoverageCompactSource;
 
 export type WebGpuSvoFluidCoverageOptions = SvoFluidCoveragePlanOptions;
 
@@ -90,6 +139,97 @@ fn fillFluidCoverage(@builtin(global_invocation_id) gid: vec3u) {
 `;
 }
 
+/**
+ * Compact-source fill. Same dispatch shape and same output as the dense arm;
+ * only "what is phi here" differs.
+ *
+ * Cost lives entirely in the page lookup, so the texel resolves its page once
+ * rather than once per sample. That specialization is safe because
+ * `cellsPerTexel` divides `brickResolution` (checked on the CPU), so a texel's
+ * cell block never straddles a page boundary. It covers only the case that is
+ * trivially verifiable — the texel's own page is resident and ordinary — and
+ * defers a missing page or a macro leaf to `compactSampleAddress`, which remains
+ * the authority on the addressing.
+ */
+export function svoFluidCoverageCompactFillShader(cellsPerTexel: number): string {
+  const n = `${cellsPerTexel}u`;
+  return /* wgsl */ `
+struct FillParams {
+  dimensions: vec3u,
+  _padding0: u32,
+  fieldDimensions: vec3u,
+  _padding1: u32,
+  cellDiagonal_m: f32,
+}
+${compactFineLevelSetParamsWGSL}
+@group(0) @binding(${SVO_FLUID_COVERAGE_COMPACT_BINDINGS.worklist}) var<storage, read> fineWorklist: array<u32>;
+@group(0) @binding(${SVO_FLUID_COVERAGE_COMPACT_BINDINGS.samples}) var<storage, read> fineSamples: array<u32>;
+@group(0) @binding(${SVO_FLUID_COVERAGE_COMPACT_BINDINGS.metadata}) var<storage, read> metadata: array<u32>;
+@group(0) @binding(${SVO_FLUID_COVERAGE_COMPACT_BINDINGS.publication}) var<uniform> params: FineParams;
+@group(0) @binding(${SVO_FLUID_COVERAGE_COMPACT_BINDINGS.fill}) var<uniform> fill: FillParams;
+@group(0) @binding(${SVO_FLUID_COVERAGE_COMPACT_BINDINGS.destination}) var destination: texture_storage_3d<${SVO_FLUID_COVERAGE_LAYOUT.format}, write>;
+
+const INVALID: u32 = 0xffffffffu;
+fn finite(value: f32) -> bool { return value == value && abs(value) < 3.402823e38; }
+${fineLevelSetPackedSampleWGSL("fineSamples", false)}
+// Sparse CM12 publishes a self-contained page set with a dry support apron, so
+// a logical page that is not resident is not unknown — it is authoritative air.
+// Four fine cells of positive distance is past this coverage kernel's support,
+// which resolves the fallback to exactly zero rather than a half-lit guess.
+fn coarseAir(q: vec3i) -> f32 { return 4.0 * params.settings.w; }
+${compactFineLevelSetPageLookupWGSL}
+${makeCompactFineLevelSetPhiWGSL("coarseAir")}
+${compactFineLevelSetSpanScaleWGSL}
+
+fn coverageOf(signedDistance: f32) -> f32 {
+  if (!finite(signedDistance)) { return 0.0; }
+  return clamp(0.5 - signedDistance / fill.cellDiagonal_m, 0.0, 1.0);
+}
+
+fn sampleCoverage(index: u32) -> f32 {
+  if (index >= arrayLength(&fineSamples) || (finePackedFlags(index) & 1u) == 0u) { return 0.0; }
+  return coverageOf(finePackedPhi(index));
+}
+
+@compute @workgroup_size(${SVO_FLUID_COVERAGE_LAYOUT.fillWorkgroupSize}, ${SVO_FLUID_COVERAGE_LAYOUT.fillWorkgroupSize}, ${SVO_FLUID_COVERAGE_LAYOUT.fillWorkgroupSize})
+fn fillFluidCoverage(@builtin(global_invocation_id) gid: vec3u) {
+  if (any(gid >= fill.dimensions)) { return; }
+  let baseCell = gid * ${n};
+  var total = 0.0;
+  if (all(baseCell < fill.fieldDimensions) && all(baseCell < params.sampleDimensions)) {
+    let resolution = max(1u, params.brickResolution);
+    let pageCoordinate = baseCell / resolution;
+    let exactKey = pageCoordinate.x + params.brickDimensions.x
+      * (pageCoordinate.y + params.brickDimensions.y * pageCoordinate.z);
+    let exact = pageLookup(exactKey);
+    let direct = exact != INVALID && compactSampleSpanScale(exact) == 1u;
+    let pageBase = exact * params.samplesPerBrick;
+    let pageLocal = baseCell - pageCoordinate * resolution;
+    for (var z = 0u; z < ${n}; z += 1u) {
+      for (var y = 0u; y < ${n}; y += 1u) {
+        for (var x = 0u; x < ${n}; x += 1u) {
+          let cell = baseCell + vec3u(x, y, z);
+          // Cells outside the lattice contribute zero rather than clamping to
+          // the boundary value, which would extend the edge cell's water along
+          // every axis. Only a trailing texel of a non-divisible axis sees it.
+          if (any(cell >= fill.fieldDimensions) || any(cell >= params.sampleDimensions)) { continue; }
+          if (direct) {
+            let local = pageLocal + vec3u(x, y, z);
+            total += sampleCoverage(pageBase + local.x + resolution * (local.y + resolution * local.z));
+          } else {
+            let address = compactSampleAddress(cell);
+            if (address.x == INVALID) { continue; }
+            total += sampleCoverage(address.x * params.samplesPerBrick + address.y);
+          }
+        }
+      }
+    }
+  }
+  textureStore(destination, vec3i(gid), vec4f(total / ${(cellsPerTexel ** 3).toFixed(1)}, 0.0, 0.0, 1.0));
+}
+`;
+}
+
 export const svoFluidCoverageReduceShader = /* wgsl */ `
 struct ReduceParams { destinationDimensions: vec3u, _padding0: u32, sourceDimensions: vec3u, _padding1: u32 }
 @group(0) @binding(0) var source: texture_3d<f32>;
@@ -138,16 +278,33 @@ export class WebGpuSvoFluidCoverage {
   private fillBindGroup?: GPUBindGroup;
   private reduceBindGroups: GPUBindGroup[] = [];
   private uniforms?: GPUBuffer;
+  /** Compact arm only: the FineParams lane, rewritten when the publication moves. */
+  private publication?: GPUBuffer;
+  private publishedGeneration = -1;
   private generation = 0;
   private destroyed = false;
 
   constructor(
     private readonly device: GPUDevice,
     options: WebGpuSvoFluidCoverageOptions,
-    private readonly sources: WebGpuSvoFluidCoverageSources,
+    private source: WebGpuSvoFluidCoverageSource,
   ) {
+    if (source.kind === "compact" && source.brickResolution % (options.cellsPerTexel ?? 2) !== 0) {
+      // The compact fill resolves one page per texel. That is only sound while a
+      // texel's cell block lies wholly inside one page.
+      throw new RangeError("Fluid coverage cells per texel must divide the publication's brick resolution");
+    }
     this.plan = planSvoFluidCoverageVolume(options);
-    this.cellDiagonal_m = Math.hypot(...options.cellSize_m);
+    // The coverage band is measured in the units the stored signed distance is
+    // measured in, which is the *publisher's* metric, not the world's. A dense
+    // field stores metres and is sampled over metric cells, so the two agree.
+    // A compact publication does not have to: Sparse CM12 stores phi in fine
+    // cells and declares `fineCellWidth: 1` to say so — the classifier's own air
+    // fallback is literally `4.0 * fineCellWidth`. Dividing a cell-space phi by
+    // a metric diagonal drives every sample past the band and reads as air.
+    this.cellDiagonal_m = source.kind === "compact"
+      ? Math.hypot(source.fineCellWidth, source.fineCellWidth, source.fineCellWidth)
+      : Math.hypot(...options.cellSize_m);
     this.sampler = device.createSampler({
       label: "SVO fluid coverage sampler",
       addressModeU: "clamp-to-edge",
@@ -174,16 +331,27 @@ export class WebGpuSvoFluidCoverage {
 
   async initializePipelines(): Promise<void> {
     if (this.fillPipeline || this.destroyed) return;
+    const compact = this.source.kind === "compact";
+    const storage: GPUBindGroupLayoutEntry[] = compact
+      ? [
+        { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.worklist, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.samples, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.metadata, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.publication, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      ]
+      : [{ binding: SVO_FLUID_COVERAGE_BINDINGS.coarsePhi, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }];
     const fillModule = this.device.createShaderModule({
-      label: "SVO fluid coverage fill",
-      code: svoFluidCoverageFillShader(this.plan.cellsPerTexel),
+      label: compact ? "SVO fluid coverage fill (compact)" : "SVO fluid coverage fill",
+      code: compact
+        ? svoFluidCoverageCompactFillShader(this.plan.cellsPerTexel)
+        : svoFluidCoverageFillShader(this.plan.cellsPerTexel),
     });
     this.fillLayout = this.device.createBindGroupLayout({
       label: "SVO fluid coverage fill layout",
       entries: [
-        { binding: SVO_FLUID_COVERAGE_BINDINGS.coarsePhi, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-        { binding: SVO_FLUID_COVERAGE_BINDINGS.params, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-        { binding: SVO_FLUID_COVERAGE_BINDINGS.destination, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: SVO_FLUID_COVERAGE_LAYOUT.format, viewDimension: "3d" } },
+        ...storage,
+        { binding: compact ? SVO_FLUID_COVERAGE_COMPACT_BINDINGS.fill : SVO_FLUID_COVERAGE_BINDINGS.params, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: compact ? SVO_FLUID_COVERAGE_COMPACT_BINDINGS.destination : SVO_FLUID_COVERAGE_BINDINGS.destination, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: SVO_FLUID_COVERAGE_LAYOUT.format, viewDimension: "3d" } },
       ],
     });
     this.fillPipeline = await this.device.createComputePipelineAsync({
@@ -210,6 +378,35 @@ export class WebGpuSvoFluidCoverage {
       valid: Boolean(live),
       generation: live?.generation ?? 0,
     });
+  }
+
+  /**
+   * Compact arm: adopt this frame's publication.
+   *
+   * The page set is republished every step and only its generation moves — the
+   * lattice shape is fixed for the solver's lifetime and the buffers are
+   * long-lived — so the common case rewrites 112 bytes and nothing else. A
+   * shape or buffer change is refused rather than papered over, because the
+   * volume was planned over the shape it was built with; the renderer answers a
+   * `false` by rebuilding the owner.
+   */
+  adoptPublication(source: WebGpuSvoFluidCoverageSource): boolean {
+    if (this.destroyed) return false;
+    const current = this.source;
+    if (source.kind !== current.kind) return false;
+    if (source.kind !== "compact" || current.kind !== "compact") return source === current;
+    const sameShape = source.brickResolution === current.brickResolution
+      && source.samplesPerBrick === current.samplesPerBrick
+      && source.pageCapacity === current.pageCapacity
+      && source.sampleDimensions.every((value, axis) => value === current.sampleDimensions[axis])
+      && source.brickDimensions.every((value, axis) => value === current.brickDimensions[axis]);
+    const sameBuffers = source.worklist.buffer === current.worklist.buffer
+      && source.samples.buffer === current.samples.buffer
+      && source.metadata.buffer === current.metadata.buffer;
+    if (!sameShape || !sameBuffers) return false;
+    this.source = source;
+    if (this.publication && source.generation !== this.publishedGeneration) this.writePublication(source);
+    return true;
   }
 
   /** True when the fill and reduce passes were actually encoded this frame. */
@@ -240,10 +437,18 @@ export class WebGpuSvoFluidCoverage {
     return true;
   }
 
+  private writePublication(source: WebGpuSvoFluidCoverageCompactSource): void {
+    if (!this.publication) return;
+    this.device.queue.writeBuffer(this.publication, 0, packCompactFineLevelSetParams(source));
+    this.publishedGeneration = source.generation;
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.texture?.destroy();
     this.uniforms?.destroy();
+    this.publication?.destroy();
+    this.publication = undefined;
     this.texture = undefined;
     this.sampledView = undefined;
     this.fillBindGroup = undefined;
@@ -280,15 +485,38 @@ export class WebGpuSvoFluidCoverage {
     fillFloats[8] = this.cellDiagonal_m;
     this.device.queue.writeBuffer(this.uniforms, 0, fillParams);
 
-    this.fillBindGroup = this.device.createBindGroup({
-      label: "SVO fluid coverage fill bindings",
-      layout: this.fillLayout!,
-      entries: [
-        { binding: SVO_FLUID_COVERAGE_BINDINGS.coarsePhi, resource: this.sources.coarsePhi },
-        { binding: SVO_FLUID_COVERAGE_BINDINGS.params, resource: { buffer: this.uniforms, offset: 0, size: FILL_PARAM_WORDS * 4 } },
-        { binding: SVO_FLUID_COVERAGE_BINDINGS.destination, resource: this.texture.createView({ dimension: "3d", baseMipLevel: 0, mipLevelCount: 1 }) },
-      ],
-    });
+    const destination = this.texture.createView({ dimension: "3d", baseMipLevel: 0, mipLevelCount: 1 });
+    const source = this.source;
+    if (source.kind === "compact") {
+      this.publication = this.device.createBuffer({
+        label: "SVO fluid coverage publication",
+        size: COMPACT_FINE_LEVELSET_PARAM_WORDS * 4,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.writePublication(source);
+      this.fillBindGroup = this.device.createBindGroup({
+        label: "SVO fluid coverage fill bindings (compact)",
+        layout: this.fillLayout!,
+        entries: [
+          { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.worklist, resource: source.worklist },
+          { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.samples, resource: source.samples },
+          { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.metadata, resource: source.metadata },
+          { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.publication, resource: { buffer: this.publication } },
+          { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.fill, resource: { buffer: this.uniforms, offset: 0, size: FILL_PARAM_WORDS * 4 } },
+          { binding: SVO_FLUID_COVERAGE_COMPACT_BINDINGS.destination, resource: destination },
+        ],
+      });
+    } else {
+      this.fillBindGroup = this.device.createBindGroup({
+        label: "SVO fluid coverage fill bindings",
+        layout: this.fillLayout!,
+        entries: [
+          { binding: SVO_FLUID_COVERAGE_BINDINGS.coarsePhi, resource: source.coarsePhi },
+          { binding: SVO_FLUID_COVERAGE_BINDINGS.params, resource: { buffer: this.uniforms, offset: 0, size: FILL_PARAM_WORDS * 4 } },
+          { binding: SVO_FLUID_COVERAGE_BINDINGS.destination, resource: destination },
+        ],
+      });
+    }
 
     this.reduceBindGroups = [];
     for (let level = 1; level < levelCount; level += 1) {
