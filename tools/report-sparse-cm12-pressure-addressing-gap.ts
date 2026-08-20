@@ -66,9 +66,8 @@ assert.match(pab, /return PAB_INVALID;/,
 assert.doesNotMatch(pab,
   /PAB_MODE_LIST[\s\S]{0,500}return pcmCellRankSelect\(rank\)/,
   "materialized production addressing must never fall back to rank select");
-assert.match(wgsl,
-  /fn psaPressureAddressingReady\(\)->bool\{return pabPressureAddressingReady\(\);\}/,
-  "PSA does not consume the materialized-address receipt");
+assert.match(resident, /pressureAddressingReady/,
+  "pressure cutover diagnostics do not surface materialized-address readiness");
 
 const directHotFunctions = [
   "preparePressure",

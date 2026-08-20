@@ -86,7 +86,7 @@ Options:
   --capture-gap-ms=N                 Timestamp capture spacing (default 110)
   --max-non-pressure-ms=N            Eligible gate threshold (default 10)
   --enforce-non-pressure-gate=0|1    Exit nonzero when the eligible gate fails
-  --enforce-pressure-receipts=0|1    Require fault-free PTR/FPA/PCF/PCA/PSA receipts
+  --enforce-pressure-receipts=0|1    Require fault-free PTR/FPA/PCF/PCA receipts
                                      (default 1)
   --out=PATH                         Write the JSON receipt
 

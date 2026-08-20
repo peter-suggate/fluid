@@ -123,7 +123,7 @@ interface PartialFailureFrame {
   readonly pcm: unknown;
   readonly pressureAttribution: unknown;
   readonly rawPressureAuthority: unknown;
-  readonly psaGenerations: unknown;
+  readonly pressureAddressing: unknown;
   readonly pab?: unknown;
   readonly hardwareTracePoll?: Readonly<{
     attempts: number; elapsed_ms: number; deadline_ms: number;
@@ -317,10 +317,7 @@ async function runArm(device: GPUDevice, mode: SparseCM12PressureAddressingABMod
       pcm: { cell: constructionPCM.cell, row: constructionPCM.row },
       pressureAttribution: constructionAttribution ?? null,
       rawPressureAuthority: constructionAttribution?.authorities ?? null,
-      psaGenerations: constructionAttribution?.authorities?.psa ? {
-        acceptedGeneration: constructionAttribution.authorities.psa.acceptedGeneration,
-        candidateGeneration: constructionAttribution.authorities.psa.candidateGeneration,
-      } : null });
+      pressureAddressing: constructionAttribution?.authorities?.pressureAddressing ?? null });
     assert(constructionAttribution,
       `${mode} construction pressure attribution is absent`);
     assert.equal(constructionAttribution.status, "matched",
@@ -386,10 +383,7 @@ async function runArm(device: GPUDevice, mode: SparseCM12PressureAddressingABMod
         fca: fcaQA, srr: srrQA, pcm: { cell: pcmQA.cell, row: pcmQA.row },
         pressureAttribution: pressureAttribution ?? null,
         rawPressureAuthority: pressureAttribution?.authorities ?? null,
-        psaGenerations: pressureAttribution?.authorities?.psa ? {
-          acceptedGeneration: pressureAttribution.authorities.psa.acceptedGeneration,
-          candidateGeneration: pressureAttribution.authorities.psa.candidateGeneration,
-        } : null,
+        pressureAddressing: pressureAttribution?.authorities?.pressureAddressing ?? null,
         pab: qa, hardwareTracePoll });
       assert.equal(qa.mode, mode, `${mode} constructor published ${qa.mode}`);
       const trace = stats.physicsTrace;

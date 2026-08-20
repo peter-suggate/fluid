@@ -188,15 +188,6 @@ fn pabPressureCellAddress(rank:u32)->u32{
     ||rank>=pabLoad(${at(h.materializedCount)})){return PAB_INVALID;}
   return pabLoad(PAB_LIST_BASE+rank);
 }
-fn pabPressureAddressingReady()->bool{
-  if(CM12_PRESSURE_ADDRESS_MODE==PAB_MODE_RANK_SELECT){return true;}
-  return CM12_PRESSURE_ADDRESS_MODE==PAB_MODE_LIST
-    &&pabLoad(${at(h.phase)})==PAB_PHASE_ACCEPTED
-    &&pabLoad(${at(h.fault)})==0u
-    &&pabLoad(${at(h.materializedPCMGeneration)})==pcmCellAcceptedGeneration()
-    &&pabLoad(${at(h.materializedCount)})==pcmCellAcceptedCount();
-}
-
 @compute @workgroup_size(64)
 fn exerciseSparseCM12PressureAddressing(@builtin(global_invocation_id)gid:vec3u){
   if(gid.x<pcmCellAcceptedCount()){_=pabPressureCellAddress(gid.x);}

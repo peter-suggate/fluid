@@ -21,8 +21,6 @@ import { createSparseCM12PressureTopologyRepairLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
 import { createSparseCM12ResidentPersistentPressureCacheLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-persistent-pressure-cache";
-import { createSparseCM12PressureSolveAuthorityLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-solve-authority";
 import { createSparseCM12FaceProjectionAuthorityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-face-projection-authority";
 import { createSparseCM12FacePreparationTileCensusLayout } from
@@ -66,10 +64,8 @@ const pcf = createSparseCM12ResidentPersistentPressureCacheLayout({
   baseWords: ptr.totalWords, cellCount: 1024, rowCount: 2048,
   directedEdgeCount: 1024, brickCount: 8, aggregateEdgeCount: 32,
   hierarchyLevelCounts: [8], hierarchyEdgeLevelCounts: [32] });
-const psa = createSparseCM12PressureSolveAuthorityLayout({
-  baseWords: pcf.bufferSizeWords, brickCapacity: 8, hierarchyLevelCounts: [8] });
 const fpa = createSparseCM12FaceProjectionAuthorityLayout({
-  baseWords: psa.totalWords, rowCapacity: 2048, cellCapacity: 1024 });
+  baseWords: pcf.bufferSizeWords, rowCapacity: 2048, cellCapacity: 1024 });
 const census = process.argv.includes("--ftc")
   ? createSparseCM12FacePreparationTileCensusLayout({
     baseWords: fpa.totalWords, rowCapacity: 2048,
@@ -90,7 +86,7 @@ const pressureAddressing = process.argv.includes("--pab")
   }) : undefined;
 const source = createWebgpuSparseCM12ResidentWGSL(16, 16, temporal, pressure,
   activity, membership, framePlan, presentation, frameControl.layout, scalar,
-  ptr, pcf, psa, fpa, batch, pressureAddressing, undefined, census, fvr);
+  ptr, pcf, fpa, batch, pressureAddressing, undefined, census, fvr);
 if (process.argv.includes("--emit-wgsl")) {
   console.log(source);
   process.exit(0);

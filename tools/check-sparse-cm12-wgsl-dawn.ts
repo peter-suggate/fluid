@@ -42,8 +42,6 @@ import { createSparseCM12PressureTopologyRepairLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
 import { createSparseCM12ResidentPersistentPressureCacheLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-persistent-pressure-cache";
-import { createSparseCM12PressureSolveAuthorityLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-solve-authority";
 import { createSparseCM12FaceProjectionAuthorityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-face-projection-authority";
 import { createSparseCM12VexActivityBatchLayout } from
@@ -180,14 +178,9 @@ async function main(): Promise<void> {
           brickCount: 8, aggregateEdgeCount: 32,
           hierarchyLevelCounts: [8], hierarchyEdgeLevelCounts: [32],
         }) : undefined;
-      const pressureSolveAuthority = persistentPressureCache
-        ? createSparseCM12PressureSolveAuthorityLayout({
-          baseWords: persistentPressureCache.bufferSizeWords,
-          brickCapacity: 8, hierarchyLevelCounts: [8],
-        }) : undefined;
-      const faceProjectionAuthority = pressureSolveAuthority
+      const faceProjectionAuthority = persistentPressureCache
         ? createSparseCM12FaceProjectionAuthorityLayout({
-          baseWords: pressureSolveAuthority.totalWords,
+          baseWords: persistentPressureCache.bufferSizeWords,
           rowCapacity: 2048, cellCapacity: 1024,
         }) : undefined;
       const vexActivityBatch = productionB16P16 && scalarAuthority
@@ -203,7 +196,6 @@ async function main(): Promise<void> {
         framePlan, presentation, frameControl?.layout, scalarAuthority,
         pressureTopologyRepair,
         persistentPressureCache,
-        pressureSolveAuthority,
         faceProjectionAuthority,
         vexActivityBatch,
       );

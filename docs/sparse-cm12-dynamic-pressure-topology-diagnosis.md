@@ -78,7 +78,7 @@ Pressure repair then uses:
 5. exact PCM transition events feeding PCF fine edge/diagonal repair;
 6. immutable owner maps propagating changed fine values only to brick
    aggregate and hierarchy ancestors;
-7. PSA wet-brick and active-node repair from the same accepted PCM/PCF tuple.
+7. direct stable brick and hierarchy solve ranks over the accepted PCM/PCF tuple.
 
 The finalizer may be one invocation only if it reads compact headers, root
 counts and generation receipts. It must update stored brick state only for the
@@ -91,9 +91,8 @@ candidate generation unaccepted; it does not launch a global classifier or
 coefficient bake.
 
 The serial integration gate is one paired five-step dam run comparing physical
-fields plus PCM membership/theta, PCF coefficients/diagonals/RHS and PSA
-wet-brick/node authority byte-for-byte. After that passes, ocean timing must
+fields plus PCM membership/theta and PCF coefficients/diagonals/RHS byte-for-byte.
+After that passes, ocean timing must
 show pressure topology below 1 ms on quiescent B16/P16 and dynamic work
 proportional to the changed-brick/row-leaf/ancestor receipts. The combined
 milestone, rather than each internal authority, receives the next 60-step gate.
-

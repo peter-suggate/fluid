@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 /** CPU-only fail-closed gate for pressure cutover receipts and attribution. */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import type { GPUAdaptivePressureLocalStageReceipt } from
   "../lib/core/webgpu-eulerian";
 import { adaptiveMassPressureTopologyChip } from
   "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
 import {
   assertSparseCM12PressureCutoverLocalSources,
-  assertSparseCM12PressureCutoverNoGlobalTokens,
   formatSparseCM12PressureCutoverAuthorities,
   inspectSparseCM12PressureCutoverAuthorities,
   type SparseCM12PressureCutoverAuthorities,
@@ -33,7 +31,9 @@ SparseCM12PressureCutoverAuthorities => Object.freeze({
   pca: { ...stage({ dirtyCount: 5, executedCount: 5 }),
     familyDirtyCount: [1, 1, 2, 1] as const,
     familyExecutedCount: [1, 1, 2, 1] as const },
-  psa: { ...stage(), wetBrickCount: 12, hierarchyNodeCount: 8 },
+  pressureAddressing: { ready: true, phase: 2, fault: 0,
+    firstFaultRank: 0xffff_ffff, expectedPCMGeneration: 9,
+    materializedPCMGeneration: 9, expectedCount: 20, materializedCount: 20 },
   ...overrides,
 });
 
@@ -54,21 +54,16 @@ assert.match(formatSparseCM12PressureCutoverAuthorities(faulted, 17), /FAULT 8@4
 const localSource = "fn localInvocation(id:u32)->u32{return id;} dispatchWorkgroupsIndirect";
 assert.doesNotThrow(() => assertSparseCM12PressureCutoverLocalSources({
   fpaPreparation: localSource, fpaProjection: localSource, pcf: localSource,
-  pca: localSource, psa: localSource,
+  pca: localSource,
 }));
 assert.throws(() => assertSparseCM12PressureCutoverLocalSources({
   fpaPreparation: `${localSource} acceptedTemplateRowInvocation`,
-  fpaProjection: localSource, pcf: localSource, pca: localSource, psa: localSource,
+  fpaProjection: localSource, pcf: localSource, pca: localSource,
 }), /forbidden global token acceptedTemplateRowInvocation/);
 assert.throws(() => assertSparseCM12PressureCutoverLocalSources({
   fpaPreparation: localSource, fpaProjection: localSource,
-  pcf: localSource, pca: `${localSource} bakeBrickAggregateEdges`, psa: localSource,
+  pcf: localSource, pca: `${localSource} bakeBrickAggregateEdges`,
 }), /forbidden global token bakeBrickAggregateEdges/);
-assert.doesNotThrow(() => assertSparseCM12PressureCutoverNoGlobalTokens(readFileSync(
-  new URL("../lib/methods/adaptive-mass/sparse-cm12-production-integration-manifest.ts",
-    import.meta.url),
-  "utf8",
-), "pressure production manifest"));
 
 const pcm = { cell: { phase: 1, fault: 0, firstFault: 0xffff_ffff, dirtyCount: 1,
   totalCount: 20, candidateGeneration: 9, acceptedGeneration: 9 },

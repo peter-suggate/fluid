@@ -139,18 +139,9 @@ import {
   type SparseCM12PersistentPressureCacheLayout,
 } from "./sparse-cm12-persistent-pressure-cache";
 import {
-  SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER,
-  SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS,
-  SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER,
-  SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS,
-  createSparseCM12PressureSolveAuthorityInitialWords,
-  createSparseCM12PressureSolveAuthorityLayout,
-  sparseCM12PressureSolveAuthorityIndirectByteOffset,
-  type SparseCM12PressureSolveAuthorityLayout,
-} from "./sparse-cm12-pressure-solve-authority";
-import {
   SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER,
   SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER_WORDS,
+  SPARSE_CM12_PRESSURE_ADDRESSING_AB_PHASE,
   createSparseCM12PressureAddressingABPipelineDescriptors,
   createSparseCM12PressureAddressingABInitialWords,
   createSparseCM12PressureAddressingABLayout,
@@ -406,9 +397,7 @@ const SPARSE_CM12_PRESSURE_CUTOVER_DIAGNOSTIC_WORDS =
   2 * SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS
   + SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS
   + SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS
-  + 4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS
-  + SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS
-  + 2 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS;
+  + 4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS;
 
 interface SparseCM12PressureAddressingABQAResources {
   readonly mode: SparseCM12PressureAddressingABModeName;
@@ -2024,8 +2013,6 @@ export class WebGPUSparseCM12Resident {
   private readonly pressureTopologyRepairIndirectArguments: GPUBuffer;
   /** Copy-isolated PCF1/PCA1 fine, seed, repair, and work dispatches. */
   private readonly persistentPressureCacheIndirectArguments: GPUBuffer;
-  /** Copy-isolated PSA1 bootstrap/repair/work dispatches. */
-  private readonly pressureSolveAuthorityIndirectArguments: GPUBuffer;
   /** Copy-isolated FPA1 preparation/projection bootstrap/repair/work/verify. */
   private readonly faceProjectionAuthorityIndirectArguments: GPUBuffer;
   /** Construction-only observational FPA tile-mask census. */
@@ -2094,7 +2081,6 @@ export class WebGPUSparseCM12Resident {
     pressureMembershipIndirectArguments: GPUBuffer,
     pressureTopologyRepairIndirectArguments: GPUBuffer,
     persistentPressureCacheIndirectArguments: GPUBuffer,
-    pressureSolveAuthorityIndirectArguments: GPUBuffer,
     faceProjectionAuthorityIndirectArguments: GPUBuffer,
     temporalCellIndirectArguments: GPUBuffer,
     temporalRowIndirectArguments: GPUBuffer,
@@ -2124,8 +2110,6 @@ export class WebGPUSparseCM12Resident {
       SparseCM12PressureTopologyRepairLayout,
     private readonly persistentPressureCacheLayout:
       SparseCM12PersistentPressureCacheLayout,
-    private readonly pressureSolveAuthorityLayout:
-      SparseCM12PressureSolveAuthorityLayout,
     private readonly faceProjectionAuthorityLayout:
       SparseCM12FaceProjectionAuthorityLayout,
     facePreparationTileCensusLayout:
@@ -2193,8 +2177,6 @@ export class WebGPUSparseCM12Resident {
       pressureTopologyRepairIndirectArguments;
     this.persistentPressureCacheIndirectArguments =
       persistentPressureCacheIndirectArguments;
-    this.pressureSolveAuthorityIndirectArguments =
-      pressureSolveAuthorityIndirectArguments;
     this.faceProjectionAuthorityIndirectArguments =
       faceProjectionAuthorityIndirectArguments;
     this.facePreparationTileCensusLayout = facePreparationTileCensusLayout;
@@ -2921,18 +2903,8 @@ export class WebGPUSparseCM12Resident {
         ] = pressureDiagonalBits(Math.max(lanes[0]!, pressureDiagonalFloor));
       }
     });
-    const pressureSolveAuthorityLayout = createSparseCM12PressureSolveAuthorityLayout({
-      baseWords: persistentPressureCacheLayout.bufferSizeWords,
-      brickCapacity: packed.brickCount,
-      hierarchyLevelCounts: pressureHierarchyGroupCounts,
-      // Immutable QA arm: same kernels and stable arithmetic, but the full
-      // brick/node domains expose any sparse execution omission byte-for-byte.
-      qaFullOracle: pressureRefreshOracleForQA,
-    });
-    const pressureSolveAuthorityWords =
-      createSparseCM12PressureSolveAuthorityInitialWords(pressureSolveAuthorityLayout);
     const faceProjectionAuthorityLayout = createSparseCM12FaceProjectionAuthorityLayout({
-      baseWords: pressureSolveAuthorityLayout.totalWords,
+      baseWords: persistentPressureCacheLayout.bufferSizeWords,
       rowCapacity: templates.rowCount, cellCapacity: templates.cellCount,
       // Construction-only specialization; production has no selector or
       // full-work fallback. The paired runner compares this arm byte-for-byte.
@@ -2991,14 +2963,6 @@ export class WebGPUSparseCM12Resident {
       persistentPressureCacheRegion.buffer as ArrayBuffer,
       persistentPressureCacheRegion.byteOffset,
       persistentPressureCacheRegion.byteLength);
-    const pressureSolveAuthorityRegion = pressureSolveAuthorityWords.subarray(
-      pressureSolveAuthorityLayout.baseWords,
-    );
-    device.queue.writeBuffer(topologyArena,
-      4 * pressureSolveAuthorityLayout.baseWords,
-      pressureSolveAuthorityRegion.buffer as ArrayBuffer,
-      pressureSolveAuthorityRegion.byteOffset,
-      pressureSolveAuthorityRegion.byteLength);
     const faceProjectionAuthorityRegion = faceProjectionAuthorityWords.subarray(
       faceProjectionAuthorityLayout.baseWords,
     );
@@ -3053,12 +3017,6 @@ export class WebGPUSparseCM12Resident {
     const persistentPressureCacheIndirectArguments = device.createBuffer({
       label: "Sparse CM12 persistent pressure-cache indirect dispatches",
       // Fine repair, then seed/repair/work for four aggregate families.
-      size: 13 * 12,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-    });
-    const pressureSolveAuthorityIndirectArguments = device.createBuffer({
-      label: "Sparse CM12 pressure-solve authority indirect dispatches",
-      // Bootstrap, brick/node repair+work, then two banks of four tail families.
       size: 13 * 12,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
     });
@@ -3156,7 +3114,8 @@ export class WebGPUSparseCM12Resident {
       size: SPARSE_CM12_PRESSURE_SCALAR_BYTES + 4 * ACTIVITY_HEADER_WORDS + 12
         + SPARSE_CM12_PCM_DIAGNOSTIC_BYTES
         + 4 * SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS
-        + 4 * SPARSE_CM12_PRESSURE_CUTOVER_DIAGNOSTIC_WORDS,
+        + 4 * (SPARSE_CM12_PRESSURE_CUTOVER_DIAGNOSTIC_WORDS
+          + SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER_WORDS),
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
 
@@ -3216,13 +3175,13 @@ export class WebGPUSparseCM12Resident {
         framePlanLayout, framePlanPresentationLayout,
         frameControl.layout, scalarResultIngressLayout, pressureTopologyRepairLayout,
         persistentPressureCacheLayout,
-        pressureSolveAuthorityLayout,
         faceProjectionAuthorityLayout,
         vexActivityBatchLayout,
         pressureAddressingABLayout,
         pressureAddressingModeForQA === undefined ? "materializedList" : undefined,
         facePreparationTileCensusLayout,
         fpaVexReadCensusLayout,
+        pressureRefreshOracleForQA,
       ) });
     const pipelineLayout = device.createPipelineLayout({ label: "Sparse CM12 resident pipeline layout",
       bindGroupLayouts: [bindGroupLayout] });
@@ -3325,14 +3284,6 @@ export class WebGPUSparseCM12Resident {
       "repairPersistentPressureHierarchyEdges",
       "repairPersistentPressureHierarchyDiagonals",
       "finalizePersistentPressureCache",
-      "beginSparseCM12PressureSolveAuthority",
-      "seedSparseCM12PressureSolveBootstrap",
-      "markSparseCM12PressureSolveFromPersistentBricks",
-      "finalizeSparseCM12PressureBrickFrontier",
-      "repairSparseCM12PressureBrickLeaves",
-      "finalizeSparseCM12PressureBrickRepair",
-      "repairSparseCM12PressureNodeLeaves",
-      "finalizeSparseCM12PressureSolveAuthority",
       "beginSparseCM12FacePreparationAuthority",
       "beginSparseCM12FaceProjectionAuthority",
       "seedSparseCM12FacePreparationBootstrap",
@@ -3491,7 +3442,6 @@ export class WebGPUSparseCM12Resident {
       pressureMembershipIndirectArguments,
       pressureTopologyRepairIndirectArguments,
       persistentPressureCacheIndirectArguments,
-      pressureSolveAuthorityIndirectArguments,
       faceProjectionAuthorityIndirectArguments,
       temporalCellIndirectArguments,
       temporalRowIndirectArguments,
@@ -3519,7 +3469,6 @@ export class WebGPUSparseCM12Resident {
       vexActivityBatchLayout,
       pressureTopologyRepairLayout,
       persistentPressureCacheLayout,
-      pressureSolveAuthorityLayout,
       faceProjectionAuthorityLayout,
       facePreparationTileCensusLayout,
       fpaVexReadCensusLayout,
@@ -3662,17 +3611,7 @@ export class WebGPUSparseCM12Resident {
         this.persistentPressureCacheIndirectArguments, 12 * slot,
       );
     };
-    const dispatchPressureSolveAuthority = (name: string, slot: number) => {
-      const activePass = openPass();
-      activePass.setPipeline(this.pipelines[name]!);
-      activePass.dispatchWorkgroupsIndirect(
-        this.pressureSolveAuthorityIndirectArguments, 12 * slot,
-      );
-    };
     const dispatchPressureBrickSolve = (name: string) => {
-      // The shader still rank-selects PSA's accepted sparse domain. Encoding
-      // the stable capacity directly avoids hundreds of costly Dawn indirect
-      // dispatch conversions across the repeated pressure iterations.
       dispatch(name, packed.brickCount);
     };
     const dispatchPressureHierarchySolve = (name: string) => {
@@ -4267,40 +4206,6 @@ export class WebGPUSparseCM12Resident {
           Math.ceil(this.pressureHierarchyEdgeCount / WORKGROUP_SIZE));
         dispatch("bakePressureHierarchyDiagonal", this.pressureHierarchyGroupCount);
       }
-      dispatch("beginSparseCM12PressureSolveAuthority", 1);
-      closePass();
-      encoder.copyBufferToBuffer(this.topologyArena,
-        4 * (this.pressureSolveAuthorityLayout.baseWords
-          + SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER.bootstrapIndirectX),
-        this.pressureSolveAuthorityIndirectArguments, 0, 12);
-      dispatchPressureSolveAuthority("seedSparseCM12PressureSolveBootstrap", 0);
-      // The accepted PCF brick workset is already one deterministic workgroup
-      // per stable brick. Reuse it directly as PSA's only production author.
-      dispatchPersistentPressureCache("markSparseCM12PressureSolveFromPersistentBricks", 9);
-      dispatch("finalizeSparseCM12PressureBrickFrontier", 1);
-      closePass();
-      encoder.copyBufferToBuffer(this.topologyArena,
-        sparseCM12PressureSolveAuthorityIndirectByteOffset(
-          this.pressureSolveAuthorityLayout, "brick", "repair"),
-        this.pressureSolveAuthorityIndirectArguments, 12, 12);
-      dispatchPressureSolveAuthority("repairSparseCM12PressureBrickLeaves", 1);
-      dispatch("finalizeSparseCM12PressureBrickRepair", 1);
-      closePass();
-      encoder.copyBufferToBuffer(this.topologyArena,
-        sparseCM12PressureSolveAuthorityIndirectByteOffset(
-          this.pressureSolveAuthorityLayout, "hierarchyNode", "repair"),
-        this.pressureSolveAuthorityIndirectArguments, 24, 12);
-      dispatchPressureSolveAuthority("repairSparseCM12PressureNodeLeaves", 2);
-      dispatch("finalizeSparseCM12PressureSolveAuthority", 1);
-      closePass();
-      encoder.copyBufferToBuffer(this.topologyArena,
-        sparseCM12PressureSolveAuthorityIndirectByteOffset(
-          this.pressureSolveAuthorityLayout, "brick", "work"),
-        this.pressureSolveAuthorityIndirectArguments, 36, 12);
-      encoder.copyBufferToBuffer(this.topologyArena,
-        sparseCM12PressureSolveAuthorityIndirectByteOffset(
-          this.pressureSolveAuthorityLayout, "hierarchyNode", "work"),
-        this.pressureSolveAuthorityIndirectArguments, 48, 12);
       if (!this.pressureRefreshOracleForQA) {
         dispatchPressureCell("preparePressure");
       }
@@ -5099,24 +5004,13 @@ export class WebGPUSparseCM12Resident {
           + index * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS),
         4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS);
     });
-    const psaDiagnosticOffset = pcaDiagnosticOffset + 4
+    const pabDiagnosticOffset = pcaDiagnosticOffset + 4
       * (SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS
         + 4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS);
-    encoder.copyBufferToBuffer(this.topologyArena,
-      4 * this.pressureSolveAuthorityLayout.baseWords,
-      this.diagnosticsReadback, psaDiagnosticOffset,
-      4 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS);
-    encoder.copyBufferToBuffer(this.topologyArena,
-      4 * this.pressureSolveAuthorityLayout.brick.headerBaseWords,
-      this.diagnosticsReadback,
-      psaDiagnosticOffset + 4 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS,
-      4 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS);
-    encoder.copyBufferToBuffer(this.topologyArena,
-      4 * this.pressureSolveAuthorityLayout.hierarchyNode.headerBaseWords,
-      this.diagnosticsReadback,
-      psaDiagnosticOffset + 4 * (SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS
-        + SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS),
-      4 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS);
+    encoder.copyBufferToBuffer(this.activity,
+      4 * this.pressureAddressingABQA.layout.baseWords,
+      this.diagnosticsReadback, pabDiagnosticOffset,
+      4 * SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER_WORDS);
     this.device.queue.submit([encoder.finish()]);
     await this.diagnosticsReadback.mapAsync(GPUMapMode.READ);
     const mapped = this.diagnosticsReadback.getMappedRange();
@@ -5146,15 +5040,12 @@ export class WebGPUSparseCM12Resident {
       pcaDiagnosticOffset + 4 * (SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS
         + index * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS),
       SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS));
-    const psaHeader = new Uint32Array(mapped, psaDiagnosticOffset,
-      SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS);
-    const psaBrickHeader = new Uint32Array(mapped,
-      psaDiagnosticOffset + 4 * SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS,
-      SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS);
-    const psaNodeHeader = new Uint32Array(mapped,
-      psaDiagnosticOffset + 4 * (SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER_WORDS
-        + SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS),
-      SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER_WORDS);
+    const pressureAddressingReceipt = inspectSparseCM12PressureAddressingABReceipt(
+      new Uint32Array(mapped, pabDiagnosticOffset,
+        SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER_WORDS),
+      this.pressureAddressingABQA.layout,
+      this.pressureAddressingABQA.layout.baseWords,
+    );
     const pcmDomainReceipt = (words: Uint32Array) => {
       const h = SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER;
       return {
@@ -5224,38 +5115,36 @@ export class WebGPUSparseCM12Resident {
       familyDirtyCount: pcaDirty as [number, number, number, number],
       familyExecutedCount: pcaExecuted as [number, number, number, number],
     };
-    const solve = SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER;
-    const solveFamily = SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER;
-    const psaFamilies = [psaBrickHeader, psaNodeHeader] as const;
-    const psaActive = psaFamilies.map((words) => words[solveFamily.activeCount]!);
-    const psaDirty = psaFamilies.map((words) => words[solveFamily.dirtyLeafCount]!);
-    const pressureSolveReceipt = {
-      acceptedGeneration: psaHeader[solve.acceptedGeneration]!,
-      candidateGeneration: psaHeader[solve.candidateGeneration]!,
-      topologyGeneration: psaHeader[solve.topologyGeneration]!,
-      directCount: sum(psaFamilies.map((words) => words[solveFamily.directWriteCount]!)),
-      closureCount: sum(psaFamilies.map((words) => words[solveFamily.closureWriteCount]!)),
-      dirtyCount: sum(psaDirty), workCount: sum(psaActive),
-      // PSA's accepted rank trees are the execution authority; pressure uses
-      // them repeatedly, so the one-per-frame receipt is the accepted census.
-      executedCount: sum(psaActive), skippedCount: 0,
-      expectedProducerReceipts: psaHeader[solve.expectedProducerReceipts]!,
-      coveredProducerReceipts: psaHeader[solve.coveredProducerReceipts]!,
-      causeMask: psaHeader[solve.causeMask]!, fault: psaHeader[solve.fault]!,
-      firstFaultId: psaHeader[solve.firstFaultId]!,
-      wetBrickCount: psaActive[0]!, hierarchyNodeCount: psaActive[1]!,
-    };
     const preparationReceipt = fpaStageReceipt(fpaPreparationHeader);
     const projectionReceipt = fpaStageReceipt(fpaProjectionHeader);
+    const pressureAddressingReady = this.pressureAddressingABQA.mode === "canonicalRankSelect"
+      || (pressureAddressingReceipt.phase
+          === SPARSE_CM12_PRESSURE_ADDRESSING_AB_PHASE.accepted
+        && pressureAddressingReceipt.fault === 0
+        && pressureAddressingReceipt.expectedPCMGeneration
+          === pressureAddressingReceipt.materializedPCMGeneration
+        && pressureAddressingReceipt.expectedCount
+          === pressureAddressingReceipt.materializedCount
+        && pressureAddressingReceipt.materializedExecutions
+          === pressureAddressingReceipt.expectedCount);
     const pressureCutoverFault = preparationReceipt.fault !== 0
       || projectionReceipt.fault !== 0 || pressureCacheReceipt.fault !== 0
-      || pressureSolveReceipt.fault !== 0;
+      || !pressureAddressingReady;
     const pressureCutoverAuthorities = {
       status: pressureCutoverFault ? "fault" as const : "matched" as const,
       inputTopologyGeneration: preparationReceipt.topologyGeneration,
       fpa: { preparation: preparationReceipt, projection: projectionReceipt },
       pcf: pressureCacheReceipt, pca: pressureAggregateReceipt,
-      psa: pressureSolveReceipt,
+      pressureAddressing: {
+        ready: pressureAddressingReady,
+        phase: pressureAddressingReceipt.phase,
+        fault: pressureAddressingReceipt.fault,
+        firstFaultRank: pressureAddressingReceipt.firstFaultRank,
+        expectedPCMGeneration: pressureAddressingReceipt.expectedPCMGeneration,
+        materializedPCMGeneration: pressureAddressingReceipt.materializedPCMGeneration,
+        expectedCount: pressureAddressingReceipt.expectedCount,
+        materializedCount: pressureAddressingReceipt.materializedCount,
+      },
     };
     const rhsSquared = values[1]!;
     const recursiveResidualSquared = values[4]!;
@@ -6241,7 +6130,6 @@ export class WebGPUSparseCM12Resident {
       this.frameControlIndirectArguments,
       this.pressureTopologyRepairIndirectArguments,
       this.persistentPressureCacheIndirectArguments,
-      this.pressureSolveAuthorityIndirectArguments,
       this.faceProjectionAuthorityIndirectArguments,
       this.temporalCellIndirectArguments, this.temporalRowIndirectArguments,
       this.activityIndirectArguments, this.vexActivityIndirectArguments,

@@ -120,9 +120,15 @@ export interface GPUEulerianInfo {
         readonly familyDirtyCount: readonly [number, number, number, number];
         readonly familyExecutedCount: readonly [number, number, number, number];
       };
-      readonly psa: GPUAdaptivePressureLocalStageReceipt & {
-        readonly wetBrickCount: number;
-        readonly hierarchyNodeCount: number;
+      readonly pressureAddressing: {
+        readonly ready: boolean;
+        readonly phase: number;
+        readonly fault: number;
+        readonly firstFaultRank: number;
+        readonly expectedPCMGeneration: number;
+        readonly materializedPCMGeneration: number;
+        readonly expectedCount: number;
+        readonly materializedCount: number;
       };
     };
     readonly detail: string;

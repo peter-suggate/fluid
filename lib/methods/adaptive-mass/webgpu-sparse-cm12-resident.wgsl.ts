@@ -36,10 +36,6 @@ import type { SparseCM12PersistentPressureCacheLayout } from
   "./sparse-cm12-persistent-pressure-cache";
 import { createSparseCM12PersistentPressureCacheWGSL } from
   "./sparse-cm12-persistent-pressure-cache.wgsl";
-import type { SparseCM12PressureSolveAuthorityLayout } from
-  "./sparse-cm12-pressure-solve-authority";
-import { createSparseCM12PressureSolveAuthorityWGSL } from
-  "./sparse-cm12-pressure-solve-authority.wgsl";
 import type { SparseCM12FaceProjectionAuthorityLayout } from
   "./sparse-cm12-face-projection-authority";
 import { createSparseCM12FaceProjectionAuthorityWGSL } from
@@ -310,13 +306,13 @@ export function createWebgpuSparseCM12ResidentWGSL(
   scalarResultIngressLayout?: SparseCM12SRR1IngressLayout,
   pressureTopologyRepairLayout?: SparseCM12PressureTopologyRepairLayout,
   persistentPressureCacheLayout?: SparseCM12PersistentPressureCacheLayout,
-  pressureSolveAuthorityLayout?: SparseCM12PressureSolveAuthorityLayout,
   faceProjectionAuthorityLayout?: SparseCM12FaceProjectionAuthorityLayout,
   vexActivityBatchLayout?: SparseCM12VexActivityBatchLayout,
   pressureAddressingABLayout?: SparseCM12PressureAddressingABLayout,
   pressureAddressingFixedMode?: SparseCM12PressureAddressingABModeName,
   facePreparationTileCensusLayout?: SparseCM12FacePreparationTileCensusLayout,
   fpaVexReadCensusLayout?: SparseCM12FpaVexReadCensusLayout,
+  pressureExecutionQAOracle = false,
 ): string {
   if (presentationPageResolution > brickFineResolution
     || brickFineResolution % presentationPageResolution !== 0) {
@@ -530,7 +526,6 @@ fn sirResidentPublishReceipt(rank:u32,tile:u32,topologyGeneration:u32,
     })
     : /* wgsl */ `
 fn pabPressureCellAddress(rank:u32)->u32{return pcmCellRankSelect(rank);}
-fn pabPressureAddressingReady()->bool{return true;}
 `;
   const pressureTopologyRepairEntries = pressureTopologyRepairLayout
     ? createSparseCM12PressureTopologyRepairWGSL({
@@ -568,23 +563,6 @@ fn pcfAcceptedGeneration()->u32{return 0u;}
 fn pcfCaptureConsumerGenerations(){}
 fn pcfBrickWorkCount()->u32{return 0u;}
 fn pcfBrickRankSelect(rank:u32)->u32{_=rank;return INVALID;}
-`;
-  const pressureSolveAuthorityEntries = pressureSolveAuthorityLayout
-    ? createSparseCM12PressureSolveAuthorityWGSL({
-      layout: pressureSolveAuthorityLayout, arenaName: "topologyArena",
-      prefix: "psa", workgroupSize: 64,
-    })
-    : /* wgsl */ `
-fn psaWetBrickInvocation(invocation:u32)->u32{return invocation;}
-fn psaActiveHierarchyNodeAddress(invocation:u32)->vec2u{
-  return pressureHierarchyGroupAddress(invocation);}
-fn psaWetBrickCount()->u32{return p.dispatch.w;}
-fn psaActiveHierarchyNodeCount()->u32{return 0u;}
-fn psaAcceptedGeneration()->u32{return 0u;}
-fn psaFaultCode()->u32{return 0u;}
-fn psaWetBrickContains(brick:u32)->bool{return brick<p.dispatch.w;}
-fn psaMarkTopologyBrickBlast(brick:u32,receipt:bool)->bool{
-  _=brick;_=receipt;return true;}
 `;
   const faceProjectionAuthorityEntries = faceProjectionAuthorityLayout
     ? createSparseCM12FaceProjectionAuthorityWGSL({
@@ -635,7 +613,7 @@ ${createCm12NumericsWGSL()}
 
 const INVALID:u32=0xffffffffu;
 const WORKGROUP:u32=64u;
-const PRESSURE_EXECUTION_QA_ORACLE:bool=${pressureSolveAuthorityLayout?.qaFullOracle
+const PRESSURE_EXECUTION_QA_ORACLE:bool=${pressureExecutionQAOracle
   ? "true" : "false"};
 const ACTIVITY_HEADER_WORDS:u32=28u;
 const ACTIVITY_RECORD_WORDS:u32=39u;
@@ -721,7 +699,6 @@ ${framePlanEntries}
 ${framePlanPresentationEntries}
 ${pressureTopologyRepairEntries}
 ${persistentPressureCacheEntries}
-${pressureSolveAuthorityEntries}
 ${faceProjectionAuthorityEntries}
 ${facePreparationTileCensusEntries}
 ${fpaVexReadCensusEntries}
@@ -2383,28 +2360,11 @@ fn persistentHierarchyDiagonal(level:u32,group:u32)->f32{
     .join("\n  ") ?? ""}
   return 1e-12;
 }
-fn psaFrameGeneration()->u32{return atomicLoad(&activity[0]);}
-fn psaTopologyGeneration()->u32{return ptrTopologyGeneration();}
-fn psaPCMGeneration()->u32{return pcfPCMGeneration();}
-fn psaPCFGeneration()->u32{return pcfAcceptedGeneration();}
-fn psaExpectedProducerReceipts()->u32{return pcfBrickWorkCount();}
-fn psaPCMCellWorkgroupCount()->u32{return (pcmCellAcceptedCount()+63u)/64u;}
-fn psaCellBrick(cell:u32)->u32{return cellBrick(cell);}
-fn psaBrickWetExact(brick:u32)->bool{return cachedPressureBrickRange(brick).y!=0u;}
-fn psaHierarchyParent(level:u32,brick:u32)->u32{return pcfHierarchyParent(level,brick);}
-fn psaHierarchyNodeActiveExact(linear:u32)->bool{
-  let address=pressureHierarchyGroupAddress(linear);if(address.x==INVALID){return false;}
-  let range=pcfHierarchyChildRange(address.x,address.y);
-  for(var at=0u;at<range.y;at+=1u){
-    if(psaWetBrickContains(pcfHierarchyChild(address.x,range.x+at))){return true;}}
-  return false;
+fn stablePressureBrickInvocation(invocation:u32)->u32{
+  return select(INVALID,invocation,invocation<p.dispatch.w);
 }
-fn psaPressureAddressingReady()->bool{return pabPressureAddressingReady();}
-@compute @workgroup_size(64)
-fn markSparseCM12PressureSolveFromPersistentBricks(
- @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
-  if(lane!=0u){return;}let brick=pcfBrickRankSelect(wid.x);
-  if(brick!=INVALID){_=psaMarkTopologyBrickBlast(brick,psaBrickWetExact(brick));}
+fn stablePressureHierarchyAddress(invocation:u32)->vec2u{
+  return pressureHierarchyGroupAddress(invocation);
 }
 fn fpaFrameGeneration()->u32{return max(1u,atomicLoad(&activity[0]));}
 fn fpaTopologyGeneration()->u32{return ptrTopologyGeneration();}
@@ -2693,20 +2653,20 @@ fn bakePressureHierarchyDiagonal(@builtin(local_invocation_id)lid:vec3u,
 @compute @workgroup_size(64)
 fn restrictPressureHierarchyResidual(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
-  let address=psaActiveHierarchyNodeAddress(wid.x);
+  let address=stablePressureHierarchyAddress(wid.x);
   restrictPressureHierarchyResidualWork(lid,vec3u(address.y,0u,0u),address.x);
 }
 @compute @workgroup_size(64)
 fn refinePressureHierarchyCorrection(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
-  let address=psaActiveHierarchyNodeAddress(wid.x);
+  let address=stablePressureHierarchyAddress(wid.x);
   refinePressureHierarchyCorrectionWork(lid,vec3u(address.y,0u,0u),address.x);
 }
 
 @compute @workgroup_size(64)
 fn combinePressureHierarchyCorrection(@builtin(local_invocation_index)lane:u32,
  @builtin(workgroup_id)wid:vec3u){
-  if(lane!=0u){return;}let brick=psaWetBrickInvocation(wid.x);
+  if(lane!=0u){return;}let brick=stablePressureBrickInvocation(wid.x);
   if(brick==INVALID){return;}var correction=0.0;
   for(var level=0u;level<pressureHierarchyLevelCount();level+=1u){
     let parents=pressureTemplateWord(pressureHierarchyDescriptor(level)+1u);
@@ -2720,7 +2680,7 @@ fn combinePressureHierarchyCorrection(@builtin(local_invocation_index)lane:u32,
 @compute @workgroup_size(64)
 fn restrictBrickAggregateResidual(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
-  let brick=psaWetBrickInvocation(wid.x);var residual=0.0;
+  let brick=stablePressureBrickInvocation(wid.x);var residual=0.0;
   if(brick!=INVALID){
     let range=cachedPressureBrickRange(brick);
     for(var local=lid.x;local<range.y;local+=64u){let cell=range.x+local;
@@ -2755,7 +2715,7 @@ fn bakeBrickAggregateEdges(@builtin(global_invocation_id)gid:vec3u){
 
 fn refineBrickAggregateCorrectionWork(lid:vec3u,wid:vec3u,sourceOffset:u32,
  destinationOffset:u32,weight:f32){
-  let brick=psaWetBrickInvocation(wid.x);var offDiagonal=0.0;
+  let brick=stablePressureBrickInvocation(wid.x);var offDiagonal=0.0;
   if(brick!=INVALID&&cachedPressureBrickRange(brick).y!=0u){
     let topologyBase=brickAggregateTopology();let offsets=topologyBase+4u;
     let recordBase=offsets+p.dispatch.w+1u;

@@ -60,7 +60,6 @@ const authorityReceipts = (authoritiesValue: unknown): readonly AuthorityReceipt
     { id: "FPA1.projection", words: record(fpa.projection, "FPA projection receipt") },
     { id: "PCF1", words: record(authorities.pcf, "PCF receipt") },
     { id: "PCA1", words: record(authorities.pca, "PCA receipt") },
-    { id: "PSA1", words: record(authorities.psa, "PSA receipt") },
   ];
 };
 

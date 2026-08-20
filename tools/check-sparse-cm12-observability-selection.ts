@@ -24,7 +24,7 @@ const encodeBody = resident.slice(encodeStart, encodeEnd);
 const dispatcherNames = ["dispatch", "dispatchAccepted", "dispatchScalarResult",
   "dispatchPressureCell", "dispatchPressureRow", "dispatchPressureBootstrap",
   "dispatchPressureTopologyRepair", "dispatchPersistentPressureCache",
-  "dispatchPressureSolveAuthority", "dispatchPressureBrickSolve",
+  "dispatchPressureBrickSolve",
   "dispatchPressureHierarchySolve", "dispatchFaceProjectionAuthority",
   "dispatchTemporalCell", "dispatchTemporalRow", "dispatchActivity",
   "dispatchVexActivity", "dispatchFrameControl"] as const;

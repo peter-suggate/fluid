@@ -55,7 +55,7 @@ checkpoint contains:
   `hostSchedulingDecisionCount:0`, `externalUploadsOnly:true`, accepted,
   candidate, and sealed generations equal and positive, and zero
   `faultCount`/`omissionCount`;
-- `authorities.PCM1|PCF1|PSA1|VEX1|SAW1|FPA1|A4D2`: `accepted:true`, equal
+- `authorities.PCM1|PCF1|VEX1|SAW1|FPA1|A4D2`: `accepted:true`, equal
   positive accepted/producer/consumer generations, `coverageComplete:true`,
   and zero `faultCount`/`omissionCount`;
 - `fpl`: accepted equal producer/consumer generation, `stageCount:6`, and zero

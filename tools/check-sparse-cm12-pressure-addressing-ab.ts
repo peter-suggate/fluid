@@ -87,7 +87,6 @@ assert.doesNotMatch(helpers,
   "materialized-list arm must never fall back to rank-select");
 assert.match(helpers, /actual=pabLoad\(PAB_LIST_BASE\+rank\)/);
 assert.match(helpers, /expected=pcmCellRankSelect\(rank\)/);
-assert.match(helpers, /fn pabPressureAddressingReady\(\)->bool/);
 assert.doesNotMatch(productionHelpers,
   /pabLoad\([^\n]*verifiedExecutions[^\n]*\)!=count/,
   "production finalization must not repeat the construction rank-select oracle");
@@ -147,9 +146,8 @@ assert.doesNotMatch(resident, /Sparse CM12 production pressure-address verificat
 assert.match(resident,
   /descriptor\.key !== "verifyPressureCellAddresses"/,
   "production must not compile the construction-only verifier pipeline");
-assert.match(residentWGSL,
-  /fn psaPressureAddressingReady\(\)->bool\{return pabPressureAddressingReady\(\);\}/,
-  "PSA must reject a missing or stale pressure-address receipt");
+assert.match(resident, /pressureAddressingReady/,
+  "pressure cutover diagnostics must retain fail-closed address readiness");
 assert.match(probe, /createPressureAddressingRankSelectForQA/);
 assert.match(probe, /createPressureAddressingMaterializedListForQA/);
 assert.match(probe, /createAsync fallback is forbidden/);
@@ -181,7 +179,7 @@ assert.match(probe, /PAB1 symmetric physical receipt differs/);
 assert.match(probe, /constructionAttributionPrimedWithoutPhysicsAdvance/);
 assert.match(probe, /constructionAttribution\.encodedStep, 0/);
 assert.match(probe, /rawPressureAuthority/);
-assert.match(probe, /psaGenerations/);
+assert.match(probe, /pressureAddressing/);
 assert.match(probe, /partialFailureFrames/);
 assert.match(probe, /await device\.queue\.onSubmittedWorkDone\(\)/);
 assert.match(probe, /candidate\.sampleId > priorSampleId/);
@@ -207,7 +205,6 @@ const requiredResidentIndirectBufferDestroys = [
   "frameControlIndirectArguments",
   "pressureTopologyRepairIndirectArguments",
   "persistentPressureCacheIndirectArguments",
-  "pressureSolveAuthorityIndirectArguments",
   "faceProjectionAuthorityIndirectArguments",
 ] as const;
 for (const buffer of requiredResidentIndirectBufferDestroys) {

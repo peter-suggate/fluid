@@ -93,8 +93,8 @@ Replace, in order:
   `repairPersistentPressureHierarchyDiagonals`.
 
 The inner arithmetic and packed topology order in those replacements is the
-existing HEAD arithmetic. PSA1 subsequently uses accepted wet-brick/active-node
-rank for recurring RHS and solve work; PCF1 alone owns coefficient validity.
+existing HEAD arithmetic. Recurring RHS and solve work use direct stable brick
+and hierarchy ranks; PCF1 alone owns coefficient validity.
 
 ## QA contract
 

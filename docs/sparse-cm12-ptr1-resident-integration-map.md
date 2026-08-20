@@ -11,9 +11,8 @@ incomplete provenance publishes zero indirect counts and faults closed.
   rowCapacity, baseWords, brickFineResolution: 16, presentationPageResolution: 16 })`.
 - Source: `createSparseCM12PressureTopologyRepairWGSL({ layout, arenaName, prefix:
   "ptr", workgroupSize: 64 })`.
-- Append PTR1 after the final PSA1 region in the existing pressure authority arena. This
-  preserves the existing PCM, PCF/PCA1, and PSA1 offsets. Before that combined arena is
-  introduced, appending to the mutable `pressureWorklists` tail is ABI-safe.
+- Place PTR1 before PCF/PCA1 in the existing pressure authority arena so its accepted
+  topology journal feeds the persistent coefficient cache directly.
 - No new storage binding is required. The selected arena declaration must be
   `array<atomic<u32>>`; immutable pressure topology remains in its existing binding.
 - Allocate one 60-byte `INDIRECT | COPY_DST` snapshot. Copy five triplets into it:
@@ -40,8 +39,8 @@ written record.
 
 ## Resident touchpoints
 
-1. In `WebGPUSparseCM12Resident.create`, append and initialize PTR1 after the combined
-   pressure authority layout. Extend only the existing arena allocation and binding.
+1. In `WebGPUSparseCM12Resident.create`, initialize PTR1 in the combined pressure
+   authority arena. Extend only the existing arena allocation and binding.
 2. Pass the layout into `createSparseCM12ResidentWGSL`; append the generated binding-free
    helpers after PCM and PCF helpers so their APIs are in scope.
 3. Add PTR1 entry points to the resident pipeline list. Their names are the exported
@@ -54,9 +53,9 @@ written record.
    `finalizePressureTopologyRepair`.
 6. Preserve temporal cell/row PCM producers. PTR1 contributes only topology blast roots;
    PCM candidate writes coalesce by stable ID before canonical repair.
-7. Replace transient global coefficient/aggregate/hierarchy bakes with PCF/PCA1 repair,
-   then run PSA1. PTR1 emits membership, topology-cell and theta events directly into
-   PCF before PCF finalization.
+7. Replace transient global coefficient/aggregate/hierarchy bakes with PCF/PCA1 repair.
+   PTR1 emits membership, topology-cell and theta events directly into PCF before PCF
+   finalization; recurring pressure arithmetic uses direct stable brick/hierarchy ranks.
 
 ## Fixed host encoding and ordering
 

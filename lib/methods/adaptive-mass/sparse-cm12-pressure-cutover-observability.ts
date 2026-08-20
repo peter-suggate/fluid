@@ -26,7 +26,6 @@ const localStages = (receipt: SparseCM12PressureCutoverAuthorities): readonly [
   ["FPA projection", receipt.fpa.projection],
   ["PCF fine", receipt.pcf],
   ["PCA aggregate/hierarchy", receipt.pca],
-  ["PSA execution", receipt.psa],
 ];
 
 const validCount = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
@@ -47,7 +46,7 @@ export function inspectSparseCM12PressureCutoverAuthorities(
   expectedInputTopologyGeneration?: number,
 ): { readonly complete: boolean; readonly issues: readonly string[] } {
   if (!receipt) return Object.freeze({ complete: false,
-    issues: Object.freeze(["PCF/PCA, PSA, and FPA receipts are unavailable"]) });
+    issues: Object.freeze(["PCF/PCA and FPA receipts are unavailable"]) });
   const issues: string[] = [];
   if (!validCount(receipt.inputTopologyGeneration)) {
     issues.push("authority input topology generation is invalid");
@@ -81,6 +80,18 @@ export function inspectSparseCM12PressureCutoverAuthorities(
   if (familyExecuted !== receipt.pca.executedCount) {
     issues.push("PCA family execution census mismatch");
   }
+  if (!receipt.pressureAddressing.ready) {
+    issues.push(`pressure addressing is unavailable/faulted (phase `
+      + `${receipt.pressureAddressing.phase}, fault ${receipt.pressureAddressing.fault})`);
+  }
+  if (receipt.pressureAddressing.expectedPCMGeneration
+    !== receipt.pressureAddressing.materializedPCMGeneration) {
+    issues.push("pressure addressing PCM generation is stale");
+  }
+  if (receipt.pressureAddressing.expectedCount
+    !== receipt.pressureAddressing.materializedCount) {
+    issues.push("pressure addressing count is incomplete");
+  }
   const complete = receipt.status === "matched" && issues.length === 0;
   if (receipt.status === "fault" && issues.length === 0) {
     issues.push("authority status is fault without a decoded fault");
@@ -98,7 +109,7 @@ export function formatSparseCM12PressureCutoverAuthorities(
     receipt, expectedInputTopologyGeneration,
   );
   if (!receipt) {
-    return "FPA/PCF/PCA/PSA receipts: UNAVAILABLE (no accepted GPU authority receipt)";
+    return "FPA/PCF/PCA receipts: UNAVAILABLE (no accepted GPU authority receipt)";
   }
   const stage = (label: string, value: GPUAdaptivePressureLocalStageReceipt): string =>
     `${label} g${value.acceptedGeneration} · dirty ${value.dirtyCount}`
@@ -112,14 +123,15 @@ export function formatSparseCM12PressureCutoverAuthorities(
     stage("FPA project", receipt.fpa.projection),
     stage("PCF", receipt.pcf),
     `${stage("PCA", receipt.pca)} · family dirty ${receipt.pca.familyDirtyCount.join("/")}`,
-    `${stage("PSA", receipt.psa)} · wet/nodes ${receipt.psa.wetBrickCount}/`
-      + `${receipt.psa.hierarchyNodeCount}`,
+    `Pressure addressing: ${receipt.pressureAddressing.ready ? "READY" : "FAULT"}`
+      + ` · gen ${receipt.pressureAddressing.materializedPCMGeneration}`
+      + ` · count ${receipt.pressureAddressing.materializedCount}`,
   ].join("\n");
 }
 
 /** Static cutover check over isolated production entrypoint source slices. */
 export function assertSparseCM12PressureCutoverLocalSources(sources: Readonly<Record<
-  "fpaPreparation" | "fpaProjection" | "pcf" | "pca" | "psa", string
+  "fpaPreparation" | "fpaProjection" | "pcf" | "pca", string
 >>): void {
   for (const [authority, source] of Object.entries(sources)) {
     if (source.trim().length === 0) throw new Error(`${authority} source slice is empty`);
