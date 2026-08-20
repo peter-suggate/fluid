@@ -95,6 +95,23 @@ export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze(
   }),
 });
 
+/** The production UI tuple exercised by every Sparse CM12 complexity rung. */
+export const SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE: MethodProfile = Object.freeze({
+  methodId: "adaptive-mass",
+  quality: "balanced",
+  overrides: Object.freeze({
+    brickFineResolution: "16",
+    resolutionMode: "adaptive",
+    maximumMacroSpanBricks: "auto",
+    selectorMode: "surface",
+    receiverFloor: "auto",
+    surfaceFineRings: 1,
+    receiverSupportRings: 9,
+    timeStep: "paper",
+    pressureIterations: 64,
+  }),
+});
+
 /** Canonical factor-one adaptive LoSasso profile for interactive water.
  * This exact tuple is exercised by Dawn raster lanes before it is offered by
  * the dam-break or symmetry presets. */
@@ -1409,6 +1426,155 @@ export function createHeroGardenHoseSceneWithSet(
   return { ...scene, scenery: { ...composed, nodes: [...applyHeroGardenNodeOverrides(composed.nodes)] } };
 }
 
+export type SparseCM12ComplexitySceneId =
+  | "empty-16"
+  | "full-16"
+  | "cut-receiver-seam-16"
+  | "double-x-32"
+  | "planar-interface-16"
+  | "first-split-bundle"
+  | "recursive-split"
+  | "receiver-create"
+  | "receiver-activate"
+  | "row-only-replace"
+  | "retire-reuse"
+  | "symmetric-2d"
+  | "symmetric-3d"
+  | "brick-quad"
+  | "long-dam";
+
+export type SparseCM12ComplexityScene = Readonly<{
+  id: SparseCM12ComplexitySceneId;
+  ordinal: number;
+  title: string;
+  introducedFeature: string;
+  defaultSteps: number;
+}>;
+
+/**
+ * The visible projection of the Dawn complexity ladder. The scene factory
+ * below is shared by the browser and the probe; these labels are kept here too
+ * so adding a rung cannot leave it hidden from the scene library.
+ */
+export const SPARSE_CM12_COMPLEXITY_SCENES: readonly SparseCM12ComplexityScene[] = Object.freeze([
+  { id: "empty-16", ordinal: 0, title: "Empty complete B16/P16 domain",
+    introducedFeature: "construction and advance with no accepted fluid ownership", defaultSteps: 2 },
+  { id: "full-16", ordinal: 1, title: "Smallest fully wet quiescent domain",
+    introducedFeature: "one complete B16/P16 macro owner, one accepted cell and no pressure rows", defaultSteps: 2 },
+  { id: "cut-receiver-seam-16", ordinal: 2, title: "Smallest production cut/receiver/seam bundle",
+    introducedFeature: "smallest one-cell cut, dry receivers, cross-owner rows and mixed seams", defaultSteps: 2 },
+  { id: "double-x-32", ordinal: 3, title: "Doubled x extent",
+    introducedFeature: "double domain/reservoir x extent with the same owner closure", defaultSteps: 2 },
+  { id: "planar-interface-16", ordinal: 4, title: "Planar interface fanout",
+    introducedFeature: "larger free-surface support and row fanout", defaultSteps: 2 },
+  { id: "first-split-bundle", ordinal: 5, title: "First production split bundle",
+    introducedFeature: "first accepted moving rung/split/receiver transaction", defaultSteps: 8 },
+  { id: "recursive-split", ordinal: 6, title: "Recursive split lineage",
+    introducedFeature: "a child created in one generation later becomes a split parent", defaultSteps: 40 },
+  { id: "receiver-create", ordinal: 7, title: "Receiver creation beyond the support halo",
+    introducedFeature: "front travel beyond rings9 commits receiver creation", defaultSteps: 160 },
+  { id: "receiver-activate", ordinal: 8, title: "Receiver activation",
+    introducedFeature: "a later moving front consumes an existing receiver", defaultSteps: 240 },
+  { id: "row-only-replace", ordinal: 9, title: "Row-only seam replacement",
+    introducedFeature: "row pages change while accepted cell IDs and scalar bits remain exact", defaultSteps: 40 },
+  { id: "retire-reuse", ordinal: 10, title: "Stable-slot retirement and reuse",
+    introducedFeature: "a retired owner/page slot reappears at a newer generation", defaultSteps: 300 },
+  { id: "symmetric-2d", ordinal: 11, title: "Two-dimensional symmetric expansion",
+    introducedFeature: "symmetric front evolution with a depth symmetry boundary", defaultSteps: 20 },
+  { id: "symmetric-3d", ordinal: 12, title: "Three-dimensional D4 symmetric expansion",
+    introducedFeature: "the production D4 correctness oracle", defaultSteps: 20 },
+  { id: "brick-quad", ordinal: 13, title: "Brick-quad moving topology",
+    introducedFeature: "four-owner x/z-transpose topology and receiver churn", defaultSteps: 20 },
+  { id: "long-dam", ordinal: 14, title: "Long dam traversal",
+    introducedFeature: "large sparse moving front with repeated topology transactions", defaultSteps: 30 },
+]);
+
+const SPARSE_CM12_LADDER_CELL_M = 0.05;
+
+function createSparseCM12LadderBox(
+  id: SparseCM12ComplexitySceneId,
+  dimensions: readonly [number, number, number],
+  fillFraction: number,
+  options: Readonly<{ gravity?: boolean; dam?: readonly [number, number, number] }> = {},
+): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = `sparse-cm12-ladder-${id}`;
+  scene.duration_s = 1;
+  scene.rigidBodies = [];
+  scene.container = {
+    ...scene.container,
+    width_m: dimensions[0] * SPARSE_CM12_LADDER_CELL_M,
+    height_m: dimensions[1] * SPARSE_CM12_LADDER_CELL_M,
+    depth_m: dimensions[2] * SPARSE_CM12_LADDER_CELL_M,
+    fillFraction,
+    top: "closed",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { finestCellSize_m: SPARSE_CM12_LADDER_CELL_M, brickSize_cells: 8 };
+  scene.fluid.initialCondition = options.dam ? "dam-break" : "tank-fill";
+  if (options.dam) {
+    scene.fluid.initialDamBreakDimensions_m = {
+      x: options.dam[0] * SPARSE_CM12_LADDER_CELL_M,
+      y: options.dam[1] * SPARSE_CM12_LADDER_CELL_M,
+      z: options.dam[2] * SPARSE_CM12_LADDER_CELL_M,
+    };
+  } else {
+    delete scene.fluid.initialDamBreakDimensions_m;
+  }
+  delete scene.fluid.initialDamBreakOrigin_m;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.initialLiquidVolumes;
+  delete scene.fluid.inflow;
+  scene.fluid.dynamicViscosity_Pa_s = 0;
+  scene.fluid.surfaceTension_N_m = 0;
+  if (options.gravity === false) scene.fluid.gravity_m_s2 = { x: 0, y: 0, z: 0 };
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  return scene;
+}
+
+/** One construction route for both Dawn ladder runs and UI scene cards. */
+export function createSparseCM12ComplexityScene(id: SparseCM12ComplexitySceneId): SceneDescription {
+  switch (id) {
+    case "empty-16":
+      return createSparseCM12LadderBox(id, [16, 16, 16], 0, { gravity: false });
+    case "full-16":
+      return createSparseCM12LadderBox(id, [16, 16, 16], 1, { gravity: false });
+    case "cut-receiver-seam-16":
+      return createSparseCM12LadderBox(id, [16, 16, 16], 1 / 4096,
+        { gravity: false, dam: [1, 1, 1] });
+    case "double-x-32":
+      return createSparseCM12LadderBox(id, [32, 16, 16], 1 / 4096,
+        { gravity: false, dam: [2, 1, 1] });
+    case "planar-interface-16":
+      return createSparseCM12LadderBox(id, [16, 16, 16], 0.5, { gravity: false });
+    case "first-split-bundle":
+    case "recursive-split":
+    case "row-only-replace":
+      // These are deliberately the same physical scene observed for different
+      // transactions and durations by the ladder.
+      return createSparseCM12LadderBox("first-split-bundle", [32, 32, 16], 1 / 32,
+        { gravity: true, dam: [8, 8, 16] });
+    case "receiver-create":
+    case "receiver-activate":
+    case "retire-reuse":
+      return createSparseCM12LadderBox("receiver-activate", [64, 32, 16], 1 / 64,
+        { gravity: true, dam: [8, 8, 16] });
+    case "symmetric-2d": {
+      const scene = createSparseCM12LadderBox(id, [32, 16, 16], 1 / 8,
+        { gravity: true, dam: [8, 8, 16] });
+      scene.container.depthBoundary = "symmetry";
+      return scene;
+    }
+    case "symmetric-3d":
+      return createSymmetricExpansionScene();
+    case "brick-quad":
+      return createBrickQuadDamBreakScene();
+    case "long-dam":
+      return createSparseCM12LongDamBreakScene();
+  }
+}
+
 /**
  * The scene catalog.
  *
@@ -1864,6 +2030,16 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createPowerHybridDeepOceanScene,
     camera: { distance_m: 7.4, target_m: { x: 0, y: 1.4, z: 0 } },
   }),
+  ...SPARSE_CM12_COMPLEXITY_SCENES.map((rung) => defineScene({
+    id: `sparse-cm12-ladder-${rung.id}`,
+    name: `Sparse CM12 ${String(rung.ordinal).padStart(2, "0")} · ${rung.title}`,
+    blurb: `${rung.introducedFeature}. Dawn's default observation window is ${rung.defaultSteps} solver ${rung.defaultSteps === 1 ? "step" : "steps"}.`,
+    audience: "validation",
+    shelf: "Sparse CM12 complexity ladder",
+    environment: "stage",
+    methodProfile: SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
+    build: () => createSparseCM12ComplexityScene(rung.id),
+  })),
   defineScene({
     id: "minimal-power-dam-break",
     name: "Minimal dam break",
