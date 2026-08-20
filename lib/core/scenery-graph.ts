@@ -620,6 +620,15 @@ export interface SceneryGlazingNode extends SceneryNodeBase {
   readonly half: readonly [number, number];
 }
 
+/** The faces a room shell can build, in publication order. */
+export const SCENERY_ROOM_FACES = Object.freeze([
+  "floor", "ceiling", "wall-left", "wall-right", "wall-back", "wall-front",
+] as const);
+
+export type SceneryRoomFace = typeof SCENERY_ROOM_FACES[number];
+
+const sceneryRoomFaces = new Set<string>(SCENERY_ROOM_FACES);
+
 /** The finite six-face room every non-terrain set is staged in. */
 export interface SceneryRoomShellNode extends SceneryNodeBase {
   readonly kind: "room-shell";
@@ -633,6 +642,23 @@ export interface SceneryRoomShellNode extends SceneryNodeBase {
   readonly halfSize?: Vec3;
   /** An opening in the back wall, which is then built as the boxes around it. */
   readonly backWall?: SceneryWallOpening;
+  /**
+   * Which faces this shell actually builds. Omitted is all six.
+   *
+   * Every set in the catalog is staged in a closed room, and for those the
+   * answer is the whole enclosure — that is why it was not a question until
+   * now. A scene lit by one practical is the case that makes it one: a wall
+   * three metres from a tank is a large bright bounce surface, and the way to
+   * remove that bounce is to remove the wall, not to darken it until the paint
+   * stops reading as paint. It also removes the wall from the sparse domain,
+   * which a huge dark room would have paid for in voxels either way.
+   *
+   * The empty list is meaningful and is not the same as omitting the field: it
+   * says this set has no enclosure at all and authors its own ground, which is
+   * what a scene wants when the floor has to meet the tank base exactly rather
+   * than sit at the environment's own datum.
+   */
+  readonly faces?: readonly SceneryRoomFace[];
 }
 
 /**
@@ -740,6 +766,18 @@ export function validateSceneryGraph(graph: SceneryGraph): string[] {
     if (node.kind === "room-shell" && node.halfSize
       && ![node.halfSize.x, node.halfSize.y, node.halfSize.z].every((value) => Number.isFinite(value) && value > 0)) {
       errors.push(`Scenery room shell ${node.id} half size must be positive and finite`);
+    }
+    if (node.kind === "room-shell" && node.faces) {
+      if (!Array.isArray(node.faces)) errors.push(`Scenery room shell ${node.id} faces must be a list`);
+      else for (const face of node.faces) {
+        if (!sceneryRoomFaces.has(face)) errors.push(`Scenery room shell ${node.id} names unknown face ${String(face)}`);
+      }
+      // A hole in the back wall describes a wall; declaring both while omitting
+      // the wall is two authorities on one face, and the quiet resolution would
+      // be an opening with no frame around it.
+      if (node.backWall && !node.faces.includes("wall-back")) {
+        errors.push(`Scenery room shell ${node.id} declares a back-wall opening but does not build wall-back`);
+      }
     }
     const scale = node.place?.scale;
     if (scale !== undefined && !(scale > 0)) errors.push(`Scenery node ${node.id} scale must be positive`);

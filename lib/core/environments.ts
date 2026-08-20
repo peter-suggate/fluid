@@ -6,7 +6,10 @@ export const environmentIds = [
   "bathhouse",
   "research-station",
   "default",
-  "garden"
+  "garden",
+  // Appended: environment indices are packed into GPU records and glass pane
+  // ids, so an id keeps its position for as long as it exists.
+  "stage"
 ] as const;
 
 export type EnvironmentId = typeof environmentIds[number];
@@ -33,6 +36,13 @@ export const environmentPresets: ReadonlyArray<EnvironmentPreset> = [
     shortName: "White room",
     description: "A plain white enclosure with one overhead light and no set dressing.",
     swatch: ["#d9d9d9", "#eeeeee", "#ffffff"]
+  },
+  {
+    id: "stage",
+    name: "Spotlit stage",
+    shortName: "Stage",
+    description: "A dark stage and one lamp hung over it: no walls, no set dressing, and a pool of light the size of whatever stands in it.",
+    swatch: ["#1a1a1a", "#4a4744", "#f2ece2"]
   },
   {
     id: "conservatory",

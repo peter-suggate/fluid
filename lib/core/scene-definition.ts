@@ -4,6 +4,7 @@ import type { EnvironmentId } from "./environments";
 import { environmentIds } from "./environments";
 import type { MethodProfile } from "./method-contract";
 import { sceneWithEnvironment } from "./scenery-presets";
+import { studioStageFits } from "./studio-stage-scene";
 import {
   svoSceneryDetailCellSize_m,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
@@ -110,12 +111,17 @@ export interface SceneLattice {
  * data rather than a dam-break special case so future simulation-focused scenes
  * can select the same path without changing the renderer.
  *
- * It is also the *default*, because most of the catalog is a container of water
- * in the bare studio environment, and for those the dry world is a floor and
- * four walls that cost a construction and a draw to show. `full-scene` is the
- * opt-in a scene with an authored set makes — a garden, a room, a heightfield
- * vessel — and any scene that opens dry (`systems.fluid === false`) must make
- * it, since fluid-only leaves such a scene with nothing to present.
+ * It used to be the *default*, on the reasoning that most of the catalog is a
+ * container of water in the bare studio environment and the dry world there was
+ * a floor and four walls that cost a construction and a draw to show. That was
+ * true of the room the studio used to be, and it stopped being true when the
+ * house set became a stage — a floor and one practical are what put the water
+ * somewhere, and a scene presented against a retained clear is a subject in a
+ * void. So `full-scene` is now what a definition gets by saying nothing, and
+ * `fluid-only` is the opt-out; see `presentationModeForScene`.
+ *
+ * Any scene that opens dry (`systems.fluid === false`) must present full-scene,
+ * since fluid-only would leave it with nothing at all.
  */
 export type ScenePresentationMode = "full-scene" | "fluid-only";
 
@@ -130,7 +136,7 @@ export interface SceneDefinition {
   readonly shelf: string;
   /** Art-directed environment; part of this scene's presentation. */
   readonly environment: EnvironmentId;
-  /** Defaults to `fluid-only`; see {@link ScenePresentationMode}. */
+  /** Defaults to `full-scene`; see {@link presentationModeForScene}. */
   readonly presentationMode?: ScenePresentationMode;
   readonly camera?: Partial<CameraState>;
   /** Exact solver profile a numerical comparison requires. */
@@ -298,6 +304,41 @@ function finishSceneDocument(
   return scene.scenery
     ? { ...scene, environment: definition.environment }
     : sceneWithEnvironment(scene, definition.environment);
+}
+
+/**
+ * What a definition presents, and the one thing that can still say no.
+ *
+ * Every scene is presented full-scene unless it states otherwise. Audience is
+ * deliberately *not* a term here: an earlier cut of this rule kept the
+ * validation lanes bare on the reasoning that a scene which exists to be
+ * measured should not pay for a set, and it excluded twenty scenes — the
+ * hydrostatic oracles, the dam-break ladder, the free-fall and rigid-coupling
+ * contacts — which is most of the catalog and most of what a person scrolling
+ * the library actually sees. The measurement argument turned out to be thinner
+ * than it looked: `presentationMode` is read by the viewport alone, so the Dawn
+ * lanes and benchmarks that produce those scenes' numbers never consult it and
+ * are unaffected either way. What it changes is the picture in the app, and
+ * there the answer is the same for an oracle as for anything else.
+ *
+ * The lattice is the exception, and it is a hard one rather than a preference:
+ * the house set is paid for in solver cells, and a container resolved finely
+ * enough makes it unaffordable — see `studioStageFits`, which is calibrated on
+ * scenes that measurably fail to build. Presenting such a scene full-scene
+ * anyway would construct and trace a dry world containing a shell with no
+ * faces: the whole cost of the set and none of the picture.
+ *
+ * Only the *stage* is subject to that. A scene with any other environment has
+ * a room worth presenting whatever it costs, and a definition that states its
+ * own mode is not second-guessed here either.
+ */
+export function presentationModeForScene(
+  definition: Pick<SceneDefinition, "presentationMode" | "environment">,
+  scene: SceneDescription,
+): ScenePresentationMode {
+  if (definition.presentationMode) return definition.presentationMode;
+  if (definition.environment !== "stage") return "full-scene";
+  return studioStageFits(scene) ? "full-scene" : "fluid-only";
 }
 
 /** The camera a definition opens on, filled out from the shared default. */

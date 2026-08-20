@@ -5,6 +5,7 @@ import type { MethodParamValue, MethodParamValues } from "./method-contract";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import { isSparseCM12DirtyOverlayMode } from "./sparse-cm12-dirty-visualizations";
+import { isPressureJournalOverlayMode } from "./webgpu-pressure-journal-overlay";
 import { cameraForPreset, defaultScenePresetId, findSceneDefinition, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
 import { useMethodStore } from "./stores/method-store";
@@ -392,6 +393,28 @@ function parseSceneOverlay(raw: string | null): SceneOverlay | null {
   return raw !== null && Object.hasOwn(SCENE_OVERLAY_KEYS, raw) ? raw as SceneOverlay : null;
 }
 
+/** The generic dense-grid views, which no predicate of their own covers. */
+const DENSE_GRID_OVERLAY_MODES: Readonly<Record<string, true>> = {
+  structure: true, resolution: true, optical: true, cfl: true, speed: true,
+  phi: true, divergence: true, pressure: true, projection: true,
+  representation: true, density: true, tracers: true, "face-velocity": true,
+};
+
+/**
+ * The field view a link names, or the current one when it names nothing valid.
+ *
+ * Every family the serializer can write has to be readable back, or picking a
+ * view and reloading silently returns a different one. The three predicates are
+ * the passes' own, so a mode added beside its pass is parsed here without this
+ * module learning its name.
+ */
+function parseGridOverlayMode(raw: string | null, fallback: GridOverlayMode): GridOverlayMode {
+  if (raw === null) return fallback;
+  return Object.hasOwn(DENSE_GRID_OVERLAY_MODES, raw) || isOctreeTechniqueOverlayMode(raw)
+    || isSparseCM12DirtyOverlayMode(raw) || isPressureJournalOverlayMode(raw)
+    ? raw as GridOverlayMode : fallback;
+}
+
 function numberParam(query: URLSearchParams, key: string, fallback: number, min = -Infinity, max = Infinity) {
   const raw = query.get(key);
   if (raw === null) return fallback;
@@ -587,7 +610,7 @@ export function parseQueryState(search: string): QueryState {
       gridOverlaySlice: grid === "volume"
         ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
         : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
-      gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || gridMode === "density" || (gridMode !== null && (isOctreeTechniqueOverlayMode(gridMode) || isSparseCM12DirtyOverlayMode(gridMode))) ? gridMode : initialUI.gridOverlayMode,
+      gridOverlayMode: parseGridOverlayMode(gridMode, initialUI.gridOverlayMode),
       svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
       svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
       silhouetteRefinementEnabled: query.get("svoPrimarySeamClosure") === "1",

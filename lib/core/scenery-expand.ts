@@ -13,6 +13,7 @@ import {
   type SceneryPlacement,
   type SceneryPrimitiveNode,
   type SceneryRecursiveShapeNode,
+  type SceneryRoomFace,
   type SceneryRoomShellNode,
   type SceneryShellNode,
   type SceneryUnits,
@@ -385,11 +386,18 @@ function emitRoomShell(
     const { color, emission } = resolveMaterial(material, graph);
     builder.box(key, group, position, half, color, emission, ["shell", tag], true);
   };
-  face("shell/floor", "shell-floor", V(0, floorY - t, 0), V(roomHalf.x, t, roomHalf.z), node.floor, "floor");
-  face("shell/ceiling", "shell-ceiling", V(0, floorY + 2 * roomHalf.y + t, 0), V(roomHalf.x, t, roomHalf.z), node.ceiling, "ceiling");
-  face("shell/wall-left", "shell-wall", V(-roomHalf.x - t, centre.y, 0), V(t, roomHalf.y, roomHalf.z), node.wall, "wall");
-  face("shell/wall-right", "shell-wall", V(roomHalf.x + t, centre.y, 0), V(t, roomHalf.y, roomHalf.z), node.wall, "wall");
-  if (node.backWall) {
+  // Omitted is the whole enclosure, which is every set in the catalog. See
+  // `SceneryRoomShellNode.faces` for why an empty list is a different answer
+  // from an absent one.
+  const builds = (which: SceneryRoomFace): boolean => node.faces === undefined || node.faces.includes(which);
+  if (builds("floor")) face("shell/floor", "shell-floor", V(0, floorY - t, 0), V(roomHalf.x, t, roomHalf.z), node.floor, "floor");
+  if (builds("ceiling")) face("shell/ceiling", "shell-ceiling", V(0, floorY + 2 * roomHalf.y + t, 0), V(roomHalf.x, t, roomHalf.z), node.ceiling, "ceiling");
+  if (builds("wall-left")) face("shell/wall-left", "shell-wall", V(-roomHalf.x - t, centre.y, 0), V(t, roomHalf.y, roomHalf.z), node.wall, "wall");
+  if (builds("wall-right")) face("shell/wall-right", "shell-wall", V(roomHalf.x + t, centre.y, 0), V(t, roomHalf.y, roomHalf.z), node.wall, "wall");
+  if (!builds("wall-back")) {
+    // Nothing: an omitted back wall takes its opening with it, which
+    // `validateSceneryGraph` refuses to let a document declare separately.
+  } else if (node.backWall) {
     // The four boxes around an exact rectangular hole. A single union-only wall
     // box would conceal the authored thin-glass pane behind it and force the
     // whole set off the analytic path.
@@ -433,7 +441,7 @@ function emitRoomShell(
   } else {
     face("shell/wall-back", "shell-wall", V(0, centre.y, -roomHalf.z - t), V(roomHalf.x, roomHalf.y, t), node.wall, "wall");
   }
-  face("shell/wall-front", "shell-wall", V(0, centre.y, roomHalf.z + t), V(roomHalf.x, roomHalf.y, t), node.wall, "wall");
+  if (builds("wall-front")) face("shell/wall-front", "shell-wall", V(0, centre.y, roomHalf.z + t), V(roomHalf.x, roomHalf.y, t), node.wall, "wall");
   return {
     kind: "room", floorY_m: floorY, bounds_m: aabb(centre, roomHalf),
     primitives: builder.shell, materialModel: node.materialModel,

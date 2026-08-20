@@ -16,6 +16,8 @@ import { requiresFencedInitialRasterPresentation } from "../lib/core/gpu-t0-pres
 
 /** How long the pointer has to be still before the cluster recedes. */
 const POINTER_IDLE_MS = 2600;
+/** How long a notice stays on the cluster after it was last said. */
+const NOTICE_LIFETIME_MS = 6000;
 
 /**
  * Whether the pointer has been still long enough for chrome to get out of the
@@ -52,6 +54,26 @@ function usePointerIdle(delay_ms = POINTER_IDLE_MS) {
 }
 
 /**
+ * Whether the notice has been on screen long enough to have been read.
+ *
+ * Keyed on the store's said-count rather than on the text, so the same sentence
+ * said twice (two resets in a row) starts its clock again instead of staying
+ * faded out. The notice keeps its row either way — this only stops it from
+ * becoming a permanent caption on the transport, and never moves the buttons.
+ */
+function useNoticeStale(notice: string, said: number, lifetime_ms = NOTICE_LIFETIME_MS) {
+  // What is held is the notice that has expired, not a flag: a flag would have
+  // to be cleared from the effect body on every change, and the comparison says
+  // the same thing without a second render.
+  const [expired, setExpired] = useState<number | null>(null);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setExpired(said), lifetime_ms);
+    return () => window.clearTimeout(timer);
+  }, [said, lifetime_ms]);
+  return notice !== "" && expired === said;
+}
+
+/**
  * The clock, and the two gestures that move it.
  *
  * This was a full-width docked footer with three columns: transport, a step-size
@@ -73,6 +95,7 @@ export function TransportBar() {
   const simulationTime = useRuntimeStore((state) => state.simulationTime);
   const notice = useRuntimeStore((state) => state.notice);
   const noticeTone = useRuntimeStore((state) => state.noticeTone);
+  const noticeSaid = useRuntimeStore((state) => state.noticeSaid);
   const rendererOnlyScene = useSceneStore((state) => !planSceneRuntime(state.scene).fluidSolver);
   const resourceReadiness = useDiagnosticsStore((state) => state.resourceReadiness);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
@@ -81,6 +104,7 @@ export function TransportBar() {
   const recordingStart = useRecordingStore((state) => state.startedAtSimulation_s);
   const recording = useRecordingStore((state) => state.recording);
   const safeBringupPolicy = useSafeBrowserGPUBringup();
+  const noticeStale = useNoticeStale(notice, noticeSaid);
   const safeBringup = safeBringupPolicy === true;
   const browserPolicyPending = safeBringupPolicy === null;
   const browserSafetyLocked = safeBringupPolicy !== false;
@@ -113,7 +137,11 @@ export function TransportBar() {
       {/* The studio's only feedback channel — it is what says "Nothing to undo"
           now that the chip's history buttons are gone — so it survives the cut,
           as one ellipsised line that fades with the rest of the cluster. */}
-      {notice && <p className={`transport-notice${noticeTone === "warn" ? " warn" : ""}`} title={notice}>{notice}</p>}
+      {notice && <p
+        className={`transport-notice${noticeTone === "warn" ? " warn" : ""}`}
+        data-stale={noticeStale ? "true" : "false"}
+        title={notice}
+      >{notice}</p>}
       <button
         type="button"
         className="transport-main"

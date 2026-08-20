@@ -9,6 +9,17 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type 
  */
 export const FLYOUT_EDGE_MARGIN_PX = 10;
 
+/**
+ * The band along the bottom edge the transport cluster floats in.
+ *
+ * The shell's bottom edge is not the last place a panel may end: the transport
+ * is centred on it, it paints under these flyouts, and an expanded selection
+ * panel ran its last group across the play button. Panels stop above the band
+ * instead — and a panel with more to show than fits scrolls, which is what the
+ * height cap is for.
+ */
+export const FLYOUT_TRANSPORT_KEEPOUT_PX = 90;
+
 export type FlyoutPlacement = { left: number; top: number; maxHeight: number };
 
 export type FlyoutGeometry = {
@@ -39,13 +50,16 @@ const clamp = (value: number, low: number, high: number) =>
  * whenever it was merely tight would jitter back and forth across the anchor as
  * the camera moved, which reads worse than one sitting slightly off its mark.
  * Vertically there is no flip to make, only a clamp: these panels are taller
- * than they are wide and the anchor is already inside them.
+ * than they are wide and the anchor is already inside them. The bottom of that
+ * clamp is the transport's band rather than the shell's edge — see
+ * `FLYOUT_TRANSPORT_KEEPOUT_PX`.
  */
 export function resolveFlyoutPlacement({
   leftFraction, topFraction, gap, originY, offsetY,
   panelWidth, panelHeight, containerWidth, containerHeight,
 }: FlyoutGeometry): FlyoutPlacement {
   const margin = FLYOUT_EDGE_MARGIN_PX;
+  const floor = containerHeight - FLYOUT_TRANSPORT_KEEPOUT_PX;
   const anchorX = leftFraction * containerWidth;
   const anchorY = topFraction * containerHeight;
   const fitsRight = anchorX + gap + panelWidth <= containerWidth - margin;
@@ -53,10 +67,10 @@ export function resolveFlyoutPlacement({
   const left = fitsRight || !fitsLeft ? anchorX + gap : anchorX - gap - panelWidth;
   return {
     left: clamp(left, margin, containerWidth - margin - panelWidth),
-    top: clamp(anchorY - originY * panelHeight + offsetY, margin, containerHeight - margin - panelHeight),
+    top: clamp(anchorY - originY * panelHeight + offsetY, margin, floor - panelHeight),
     // Container-derived rather than content-derived, so applying it cannot
     // resize the panel into a different answer on the next measurement.
-    maxHeight: Math.max(0, containerHeight - 2 * margin),
+    maxHeight: Math.max(0, floor - margin),
   };
 }
 

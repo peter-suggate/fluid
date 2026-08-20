@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FLYOUT_EDGE_MARGIN_PX, resolveFlyoutPlacement } from "../components/anchored-flyout";
+import {
+  FLYOUT_EDGE_MARGIN_PX,
+  FLYOUT_TRANSPORT_KEEPOUT_PX,
+  resolveFlyoutPlacement,
+} from "../components/anchored-flyout";
 
 /** The field picker's shape: the authored 12px gap, anchored 60% down its own height. */
 const fieldFlyout = (leftFraction: number, topFraction: number, overrides: Partial<{
@@ -11,6 +15,7 @@ const fieldFlyout = (leftFraction: number, topFraction: number, overrides: Parti
 });
 
 const margin = FLYOUT_EDGE_MARGIN_PX;
+const keepout = FLYOUT_TRANSPORT_KEEPOUT_PX;
 
 test("an anchor with room keeps the authored offset", () => {
   const placement = fieldFlyout(0.25, 0.5);
@@ -44,24 +49,34 @@ test("a panel wider than its shell still starts on screen", () => {
 
 test("the vertical origin is clamped at both edges", () => {
   assert.equal(fieldFlyout(0.25, 0.01).top, margin);
-  assert.equal(fieldFlyout(0.25, 0.99).top, 700 - margin - 400);
+  // The bottom edge a panel stops at is the transport's band, not the shell's.
+  assert.equal(fieldFlyout(0.25, 0.99).top, 700 - keepout - 400);
 });
 
-test("the height cap leaves a margin at both ends and ignores the panel's own size", () => {
+test("a panel anchored at the bottom edge stops above the transport", () => {
+  const placement = fieldFlyout(0.25, 0.99, { panelHeight: 200 });
+  assert.equal(placement.top + 200, 700 - keepout);
+});
+
+test("the height cap clears both the top margin and the transport, and ignores the panel's own size", () => {
   const short = fieldFlyout(0.25, 0.5, { panelHeight: 120 });
   const tall = fieldFlyout(0.25, 0.5, { panelHeight: 900 });
-  assert.equal(short.maxHeight, 700 - 2 * margin);
-  assert.equal(tall.maxHeight, 700 - 2 * margin);
+  assert.equal(short.maxHeight, 700 - keepout - margin);
+  assert.equal(tall.maxHeight, 700 - keepout - margin);
   // A panel taller than the cap scrolls; its top is still inside the shell.
   assert.equal(tall.top, margin);
 });
 
 test("the selection chip's own offsets survive placement", () => {
   // gap 16, anchored at its top edge, nudged 14px up — the authored chip offset.
-  const placement = resolveFlyoutPlacement({
+  const chipFlyout = (panelHeight: number) => resolveFlyoutPlacement({
     leftFraction: 0.5, topFraction: 0.5, gap: 16, originY: 0, offsetY: -14,
-    panelWidth: 178, panelHeight: 300, containerWidth: 1200, containerHeight: 700,
+    panelWidth: 178, panelHeight, containerWidth: 1200, containerHeight: 700,
   });
+  const placement = chipFlyout(200);
   assert.equal(placement.left, 616);
   assert.equal(placement.top, 336);
+  // Until the panel is long enough to reach the transport, which outranks the
+  // authored nudge: an expanded tank is a column of groups, not a chip.
+  assert.equal(chipFlyout(300).top, 700 - keepout - 300);
 });

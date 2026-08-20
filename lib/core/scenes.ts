@@ -12,6 +12,7 @@ import {
   createHeroGardenHoseStressScene,
   HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
 } from "./hero-garden-stress-scene";
+import { studioStageCamera } from "./studio-stage-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt } from "./terrain";
 import type { EnvironmentId } from "./environments";
@@ -21,6 +22,7 @@ import { sceneWithEnvironment } from "./scenery-presets";
 import { withSceneryNodes } from "./scenery-edit";
 import {
   defineScene,
+  presentationModeForScene,
   sceneCardForDefinition,
   sceneDocument,
   type SceneCard,
@@ -1424,16 +1426,16 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "water-box-dam-break",
     name: "Water box · dam break",
-    blurb: "A collapsing water column. Drop bodies in and watch them take the wave.",
+    blurb: "A collapsing water column, staged: a bare floor, one lamp above it, and nothing else. The tank stands in the pool of light and the wave throws its own shadow across the boards. Drop bodies in and watch them take it.",
     audience: "explore",
     shelf: "Tanks",
-    environment: "default",
-    presentationMode: "fluid-only",
+    environment: "stage",
     build: () => {
       const scene = cloneScene(defaultScene);
       scene.rigidBodies = [];
       return scene;
     },
+    camera: studioStageCamera,
   }),
   defineScene({
     id: "water-box-tank-fill",
@@ -1466,8 +1468,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A 0.8 m analytic water column resolved on a 128³ lattice, carried on the sparse 4³/8³ brick atlas so the full frame budget stays on simulation and rendering.",
     audience: "explore",
     shelf: "Tanks",
-    environment: "default",
-    presentationMode: "fluid-only",
+    environment: "stage",
     build: createHighResolutionDamBreakScene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
   }),
@@ -1477,7 +1478,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A wide tank with a reservoir on each diagonally opposite floor corner. Both release at once, run 1.2 m down the long axis, and meet mid-tank at an angle.",
     audience: "explore",
     shelf: "Tanks",
-    environment: "default",
+    environment: "stage",
     build: createTwinDamCollisionScene,
     camera: { azimuth_rad: 0.5, elevation_rad: 0.32, distance_m: 3.2, target_m: { x: 0, y: 0.2, z: 0 } },
     variants: {
@@ -1501,7 +1502,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // enormous low arcs behind the glass and their refraction reads as a hole
     // through the deep water. Keep this volume against the uncluttered room;
     // the wave and its macro-rung transitions remain the only silhouettes.
-    environment: "default",
+    environment: "stage",
     build: createOceanSeicheScene,
     camera: { azimuth_rad: 0.35, elevation_rad: 0.32, distance_m: 9.0, target_m: { x: 0, y: 1.1, z: 0 } },
     variants: {
@@ -1704,7 +1705,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
         figure.cfl === undefined ? "" : `; CFL ${figure.cfl}`}.`,
       audience: "study",
       shelf: "CM12 paper figures",
-      environment: "default",
+      environment: "stage",
       methodProfile: cm12MethodProfile(figure),
       build: () => cm12Scene(figure.id),
       camera: cm12Camera(cm12Scene(figure.id)),
@@ -1757,7 +1758,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A 2x2 four-brick tank: one brick quadrant of water releases and crosses every brick boundary, exercising cross-brick transport, residency activation, and seam quality.",
     audience: "validation",
     shelf: "Brick residency",
-    environment: "default",
+    environment: "stage",
     build: createBrickQuadDamBreakScene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.2, z: 0 } },
     variants: {
@@ -1777,7 +1778,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A 16³ settled tank for the first coarse-pressure oracle. Leaf 16 is the largest hierarchy root that divides the authored domain, while interface band 3 keeps the surface support explicit.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
-    environment: "default",
+    environment: "stage",
     methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     build: createTinyHydrostaticScene,
     camera: { distance_m: 1.85, target_m: { x: 0, y: 0.35, z: 0 } },
@@ -1788,7 +1789,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A 32x24x16 settled tank with a cell-cut free surface. Leaf 8 is the largest hierarchy root shared by all three axes, while exercising a larger adaptive pressure layout than the tiny oracle.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
-    environment: "default",
+    environment: "stage",
     methodProfile: LARGE_HYDROSTATIC_POWER_METHOD_PROFILE,
     build: createLargeHydrostaticScene,
     camera: { distance_m: 2.75, target_m: { x: 0, y: 0.5, z: 0 } },
@@ -1799,7 +1800,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The 20× dam tank with a representable one-cell-deep 32×32 sparse pool (1,024 finest-cell volumes), completing the large-scene/minimal-liquid benchmark cell.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
-    environment: "default",
+    environment: "stage",
     methodProfile: LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
     build: createLargePowerHydrostaticScene,
     camera: { distance_m: 6.4, target_m: { x: 0, y: 0.2, z: 0 } },
@@ -1810,7 +1811,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The 20× still tank filled 2 m deep (64×48×64, 163,840 liquid cells). 67.8% of its liquid is interior — away from every wall strip and the surface band — so it is the only authored lane on which interior coarsening, and the Section 8 hybrid cost model, can be measured at all.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
-    environment: "default",
+    environment: "stage",
     methodProfile: DEEP_POWER_HYDROSTATIC_METHOD_PROFILE,
     build: createDeepPowerHydrostaticScene,
     camera: { distance_m: 7.4, target_m: { x: 0, y: 1, z: 0 } },
@@ -1824,7 +1825,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // instrument read across its members, not four scenes anyone would open
     // for their own sake. The shelf is the unit of meaning here.
     shelf: "Domain-tax sweep",
-    environment: "default",
+    environment: "stage",
     methodProfile: POWER_DROPLET_METHOD_PROFILE,
     build: () => createPowerDropletScene(edgeCells),
     camera: {
@@ -1843,7 +1844,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       // instrument read across its members, and the pair of shelves is the
       // pair of axes.
       shelf: "Live-occupancy sweep",
-      environment: "default",
+      environment: "stage",
       methodProfile: POWER_FILL_METHOD_PROFILE,
       build: () => createPowerFillScene(liquidCells),
       camera: {
@@ -1858,7 +1859,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A 64×64×48 pool filled to 56 wet layers, with no wave seed at all. The regular deep interior dominates the free-surface and wall bands, which is what makes one step of it a verdict on the machinery a hybrid discretization avoids rather than on surface accuracy.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
-    environment: "default",
+    environment: "stage",
     methodProfile: POWER_HYBRID_DEEP_OCEAN_METHOD_PROFILE,
     build: createPowerHybridDeepOceanScene,
     camera: { distance_m: 7.4, target_m: { x: 0, y: 1.4, z: 0 } },
@@ -1869,7 +1870,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The analytic 12.5%-volume dam initializer collapses inside a 16³ tank, providing the smallest dynamic solver-comparison scene.",
     audience: "validation",
     shelf: "Dam-break ladder",
-    environment: "default",
+    environment: "stage",
     methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     build: createMinimalPowerDamBreakScene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
@@ -1880,8 +1881,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The same 0.8 m analytic mini dam at 0.025 m resolution, suitable for comparing the Uniform reference lane with the retained Octree profile.",
     audience: "validation",
     shelf: "Dam-break ladder",
-    environment: "default",
-    presentationMode: "fluid-only",
+    environment: "stage",
     methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
     build: createMinimalPowerDamBreak32Scene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
@@ -1892,8 +1892,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The same 0.8 m analytic mini dam at 0.0125 m resolution, suitable for comparing the Uniform reference lane with the retained Octree profile.",
     audience: "validation",
     shelf: "Dam-break ladder",
-    environment: "default",
-    presentationMode: "fluid-only",
+    environment: "stage",
     methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
     build: createMinimalPowerDamBreak64Scene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
@@ -1904,8 +1903,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A 192x96x32 tall, narrow tank with a full-width reservoir at the negative end. Its doubled empty air column showcases sparse omission while the canonical gate follows the front across twenty initially dry brick columns and checks resident 2:1 transitions, conservation, and Uniform comparison checkpoints.",
     audience: "validation",
     shelf: "Dam-break ladder",
-    environment: "default",
-    presentationMode: "fluid-only",
+    environment: "stage",
     methodProfile: SPARSE_CM12_LONG_DAM_METHOD_PROFILE,
     build: createSparseCM12LongDamBreakScene,
     camera: { distance_m: 4.35, target_m: { x: 0, y: 0.5, z: 0 } },
@@ -1916,7 +1914,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The mini dam break's exact water block in a tank with 20× the volume: 4× longer, 4× wider, and 25% taller, using the compatible leaf-4 hierarchy and a band-1 interface.",
     audience: "validation",
     shelf: "Dam-break ladder",
-    environment: "default",
+    environment: "stage",
     methodProfile: LARGE_POWER_DAM_METHOD_PROFILE,
     build: createLargePowerDamBreakScene,
     camera: { distance_m: 6.4, target_m: { x: 0, y: 0.45, z: 0 } },
@@ -1927,11 +1925,15 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "One exact central 2×1×2-brick water body collapses across the minimum dyadic 32×16×32 tank using the default factor-1 coarse surface and level-4 coupled reach. Dawn checks D4 symmetry of volume, velocity, pressure, topology, and four-wall contact after every step.",
     audience: "validation",
     shelf: "Symmetry",
-    environment: "default",
-    // This oracle has no authored dry scenery. The default sparse room floor
-    // shares y=0 with its centred seeded bricks and can win the depth test,
-    // making a healthy water publication look like an empty scene in the UI.
-    presentationMode: "fluid-only",
+    environment: "stage",
+    // Watch this one first if the stage ever eats a publication. The set's floor
+    // puts its top face on y=0 because that is a cell plane, and this oracle's
+    // centred seeded bricks share that plane; against the room shell this scene
+    // used to be presented in, the floor could win the depth test and turn a
+    // healthy water publication into an apparently empty tank. The house set
+    // builds no room faces at all now and the failure has not been seen since,
+    // but this is the scene it was seen on, and it is the one where a rendering
+    // artifact would be read as a physics result.
     methodProfile: SYMMETRIC_EXPANSION_METHOD_PROFILE,
     build: createSymmetricExpansionScene,
     camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } },
@@ -1942,8 +1944,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The exact 32×16×32 D4 expansion oracle on the production Sparse CM12 B16/P16 resident. The card uses the real-time production pressure budget; a separate 108-iteration Dawn lane preserves the stricter accuracy oracle.",
     audience: "validation",
     shelf: "Symmetry",
-    environment: "default",
-    presentationMode: "fluid-only",
+    environment: "stage",
     methodProfile: SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE,
     build: createSymmetricExpansionScene,
     camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } },
@@ -1954,7 +1955,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "One 8³ fluid brick seeded flush under the closed lid, touching nothing else. The exact answer is free fall (y = y₀ − gt²/2, impact ≈0.29 s); any hesitation is wall adhesion.",
     audience: "validation",
     shelf: "Free-fall contact",
-    environment: "default",
+    environment: "stage",
     methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createCeilingSlabDropScene,
     camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } },
@@ -1963,7 +1964,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     id: "rigid-hydrostatic",
     name: "Rigid coupling · hydrostatic sphere",
     blurb: "A fully submerged static sphere measures pressure buoyancy, volume displacement, and publication liveness.",
-    audience: "validation", shelf: "Rigid coupling", environment: "default",
+    audience: "validation", shelf: "Rigid coupling", environment: "stage",
     methodProfile: RIGID_COUPLING_ORACLE_METHOD_PROFILE,
     build: createRigidHydrostaticScene,
     camera: { distance_m: 1.8, target_m: { x: 0, y: 0.3, z: 0 } },
@@ -1972,7 +1973,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     id: "rigid-float",
     name: "Rigid coupling · buoyant sphere",
     blurb: "A half-density sphere released at the waterline checks settling, drag, and plunge-through.",
-    audience: "validation", shelf: "Rigid coupling", environment: "default",
+    audience: "validation", shelf: "Rigid coupling", environment: "stage",
     methodProfile: RIGID_COUPLING_ORACLE_METHOD_PROFILE,
     build: createRigidFloatScene,
     camera: { distance_m: 1.8, target_m: { x: 0, y: 0.4, z: 0 } },
@@ -1981,7 +1982,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     id: "rigid-sink",
     name: "Rigid coupling · dense sphere drop",
     blurb: "A dense sphere enters from above and checks bounded splash, conserved displacement, and floor arrival.",
-    audience: "validation", shelf: "Rigid coupling", environment: "default",
+    audience: "validation", shelf: "Rigid coupling", environment: "stage",
     methodProfile: RIGID_COUPLING_ORACLE_METHOD_PROFILE,
     build: createRigidSinkScene,
     camera: { distance_m: 1.8, target_m: { x: 0, y: 0.4, z: 0 } },
@@ -1992,7 +1993,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "One 8³ fluid brick seeded into a top corner: lid, two walls, and their vertical edge seam. Frictionless walls exert only normal force, so the exact answer is still free fall.",
     audience: "validation",
     shelf: "Free-fall contact",
-    environment: "default",
+    environment: "stage",
     methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createCornerBrickDropScene,
     camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } },
@@ -2003,7 +2004,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The same 8³ brick hanging in open space, touching no boundary at all. The zero-contact control: whatever it deviates from free fall is the scheme's own transient, not adhesion.",
     audience: "validation",
     shelf: "Free-fall contact",
-    environment: "default",
+    environment: "stage",
     methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createMidairBrickDropScene,
     camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
@@ -2014,7 +2015,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The same 8³ brick against two vertical walls and their seam, but clear of the lid. Gravity is tangential to both walls, so free-slip walls cannot slow it: this isolates seam adhesion from ceiling adhesion.",
     audience: "validation",
     shelf: "Free-fall contact",
-    environment: "default",
+    environment: "stage",
     methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createMidairCornerDropScene,
     camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
@@ -2049,17 +2050,31 @@ export const sceneCatalogCards: readonly SceneCard[] =
  * true: the smoke catalog's local factories assigned `environment` without
  * copying its scenery, so ten shared ids named two different scenes.
  */
-export const scenePresets: ReadonlyArray<ScenePreset> = SCENE_CATALOG.map((definition) => ({
-  id: definition.id,
-  name: definition.name,
-  group: definition.shelf,
-  description: definition.blurb,
-  background: definition.environment,
-  presentationMode: definition.presentationMode ?? "fluid-only",
-  camera: definition.camera,
-  methodProfile: definition.methodProfile,
-  create: () => sceneDocument(definition),
-}));
+export const scenePresets: ReadonlyArray<ScenePreset> = SCENE_CATALOG.map((definition) => {
+  /**
+   * Lazy, because the answer needs the document and the document is not free.
+   *
+   * `presentationModeForScene` reads the lattice the house set has to fit into,
+   * which means building the scene; doing that for all fifty-odd definitions at
+   * import would put every factory in the catalog on the client's startup path
+   * to answer a question about the four it is asked about. Memoised because the
+   * viewport reads this every animation frame.
+   */
+  let resolved: ScenePresentationMode | undefined;
+  return {
+    id: definition.id,
+    name: definition.name,
+    group: definition.shelf,
+    description: definition.blurb,
+    background: definition.environment,
+    get presentationMode(): ScenePresentationMode {
+      return resolved ??= presentationModeForScene(definition, sceneDocument(definition));
+    },
+    camera: definition.camera,
+    methodProfile: definition.methodProfile,
+    create: () => sceneDocument(definition),
+  };
+});
 
 export const defaultScenePresetId = scenePresets[0].id;
 

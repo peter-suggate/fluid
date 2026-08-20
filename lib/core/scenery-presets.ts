@@ -1,6 +1,7 @@
 import type { EnvironmentId } from "./environments";
 import type { SceneDescription } from "./model";
 import type { SceneryGraph, SceneryNode } from "./scenery-graph";
+import { studioStageFits, studioStageSceneryGraph } from "./studio-stage-scene";
 
 /**
  * The declarative scenery an environment seeds a new scene with.
@@ -653,7 +654,17 @@ export const stationSceneryGraph: SceneryGraph = {
   nodes: stationNodes(),
 };
 
-/** A plain white room and the single overhead source that lights it. */
+/**
+ * A plain white room and the single overhead source that lights it.
+ *
+ * This is what `default` still means: the bright, unopinionated enclosure a
+ * scene gets by not choosing a set, lit by the shared daylight rig. The dark
+ * house set lives under its own id — see `stage` below and
+ * `lib/core/studio-stage-scene.ts` — because a scene that never asked for a
+ * spotlit stage should not open on one. The walls sit a fixed 1.45 m from the
+ * origin, which is inside the container on half the catalog; those scenes were
+ * historically presented `fluid-only`, which is why nobody ever saw it.
+ */
 function studioNodes(): readonly SceneryNode[] {
   return [
     // The front face remains in the SVO model but the interior renderer omits
@@ -676,6 +687,23 @@ export const studioSceneryGraph: SceneryGraph = {
 };
 
 /**
+ * What stands in for the set when a scene cannot afford one.
+ *
+ * A shell that builds no faces, which is to say nothing at all: the same empty
+ * frame these scenes presented before there was a house set, reached by the
+ * same code path so the environment is still total over `EnvironmentId`.
+ */
+const bareStageSceneryGraph: SceneryGraph = {
+  palettes: { stage: { tint: [1, 1, 1] } },
+  nodes: [{
+    kind: "room-shell", id: "shell", materialModel: "room", faces: [],
+    floor: { palette: "stage", value: .62 },
+    wall: { palette: "stage", value: .62 },
+    ceiling: { palette: "stage", value: .62 },
+  }],
+};
+
+/**
  * The scenery an environment seeds a new scene with.
  *
  * Total over `EnvironmentId`: every environment is described here, because this
@@ -692,6 +720,11 @@ export const SCENERY_GRAPHS: Readonly<Record<EnvironmentId, (scene: SceneDescrip
     bathhouse: () => bathhouseSceneryGraph,
     "research-station": () => stationSceneryGraph,
     default: () => studioSceneryGraph,
+    // The stage, when the scene's lattice can hold it. A container too
+    // finely resolved to afford a stage gets the bare shell instead — see
+    // `studioStageFits`, and `presentationModeForScene`, which stops such a
+    // scene paying for a dry world with nothing in it.
+    stage: (scene) => studioStageFits(scene) ? studioStageSceneryGraph(scene) : bareStageSceneryGraph,
   });
 
 /** The graph a scene starts from when it adopts `environmentId`. */

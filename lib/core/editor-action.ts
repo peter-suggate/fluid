@@ -177,7 +177,11 @@ export interface EditorAction {
   readonly enabled?: boolean;
   /** What choosing it does. Absent when the wedge only opens `children`. */
   readonly effect?: EditorActionEffect;
-  /** A nested ring, opened in place. One level; a pie of pies is a maze. */
+  /**
+   * A nested ring, opened in place. One level, the weapon-wheel bargain: the
+   * root ring holds a few kinds of intention and a chosen kind opens the ring
+   * of its verbs. Never deeper — a pie of pies is a maze.
+   */
   readonly children?: readonly EditorAction[];
 }
 

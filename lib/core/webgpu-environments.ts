@@ -257,11 +257,13 @@ fn environmentLightDirection()->vec3f{
   if(e==4){return normalize(vec3f(-.55,.75,-.12));}
   if(e==5){return normalize(vec3f(.15,.42,.90));}
   if(e==7){return normalize(vec3f(-.42,.72,.38));}
+  if(e==8){return normalize(vec3f(-.22,.94,.26));}
   return normalize(vec3f(-.45,.86,.28));
 }
 fn environmentLightColor()->vec3f{
   let e=environmentIndex();
   if(e==6){return vec3f(1.0,.86,.66);}
+  if(e==8){return vec3f(1.0,.96,.90);}
   if(e==1){return vec3f(1.0,.77,.52);}
   if(e==2){return vec3f(1.0,.94,.80);}
   if(e==3){return vec3f(1.0,.67,.40);}
@@ -273,6 +275,7 @@ fn environmentLightColor()->vec3f{
 fn environmentAccent()->vec3f{
   let e=environmentIndex();
   if(e==6){return vec3f(.18,.34,.31);}
+  if(e==8){return vec3f(.012,.015,.022);}
   if(e==1){return vec3f(.10,.34,.44);}
   if(e==2){return vec3f(.08,.11,.15);}
   if(e==3){return vec3f(.72,.42,.22);}
@@ -301,6 +304,9 @@ fn environmentContactShadow(p:vec3f,n:vec3f)->f32{
 fn environmentLight(rd:vec3f)->vec3f{
   let e=environmentIndex();let t=clamp(rd.y*.5+.5,0.0,1.0);var c=vec3f(0.0);
   if(e==6){c=mix(vec3f(.012,.025,.028),vec3f(.19,.30,.29),t);}
+  // The stage: STUDIO_STAGE_DRY_SCENE_LIGHTING's near-black cool hemisphere,
+  // so the water reflects the same dark surround the set stands in.
+  else if(e==8){c=mix(vec3f(.008,.010,.014),vec3f(.016,.020,.028),t);}
   else if(e==0){c=mix(vec3f(.035,.055,.044),vec3f(.46,.58,.43),t);}
   else if(e==1){c=mix(vec3f(.16,.16,.13),vec3f(.68,.69,.59),t);}
   else if(e==2){c=mix(vec3f(.016,.017,.020),vec3f(.065,.068,.078),t);c+=vec3f(.30,.30,.27)*pow(max(rd.y,0.0),6.0)+vec3f(.05,.09,.16)*pow(max(-rd.z,0.0),4.0)*.6;}
@@ -435,6 +441,21 @@ fn sampleEnvironment(ro:vec3f,rd:vec3f)->EnvironmentSample{
   if(e==6){
     let t=clamp(rd.y*.5+.5,0.0,1.0);var color=mix(vec3f(.015,.027,.029),vec3f(.16,.23,.22),t);let sun=max(dot(rd,normalize(vec3f(-.45,.86,.28))),0.0);color+=vec3f(1.0,.86,.66)*pow(sun,320.0)*2.2+vec3f(.24,.31,.28)*pow(sun,12.0);
     let floorT=(-.012-ro.y)/rd.y;if(floorT>0.0){let p=ro+rd*floorT;let radial=length(p.xz);let checker=.5+.5*cos(p.x*31.4)*cos(p.z*31.4);color=mix(color,vec3f(.055,.068,.064)+checker*vec3f(.018,.025,.022),.82*exp(-radial*.22));return EnvironmentSample(color,floorT);}
+    return EnvironmentSample(color,65504.0);
+  }
+  if(e==8){
+    // The stage as a backplate, for the presentations that do not build the
+    // set: a near-black surround, dark boards, and one warm pool that covers
+    // the container and falls off inside the frame — the same picture the
+    // authored set makes, at the fidelity a backdrop needs.
+    var color=environmentLight(rd);
+    let floorT=(-.012-ro.y)/rd.y;
+    if(floorT>0.0){
+      let p=ro+rd*floorT;let s=max(u.container.x,u.container.z);
+      let pool=exp(-dot(p.xz,p.xz)/max(s*s*1.85,1e-4));
+      let boards=.86+.14*cos(p.x*22.0);
+      return EnvironmentSample(vec3f(.010,.010,.011)+vec3f(1.0,.94,.84)*pool*.22*boards,floorT);
+    }
     return EnvironmentSample(color,65504.0);
   }
   let roomHalf=envRoomHalf();let center=vec3f(0.0,environmentFloorY()+roomHalf.y,0.0);let h=envBoxHit(ro,rd,center-roomHalf,center+roomHalf);var t=h.y;

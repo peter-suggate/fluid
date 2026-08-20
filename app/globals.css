@@ -91,6 +91,16 @@
   --hover: light-dark(rgba(38, 48, 45, .05), rgba(255, 236, 205, .05));
   --overlay: light-dark(rgba(255, 253, 248, .9), rgba(22, 18, 13, .86));
   --scrim: light-dark(rgba(66, 56, 38, .36), rgba(10, 7, 4, .76));
+  /* The ring's own plate. Opaquer than `--overlay` on purpose: a wedge is read
+     *over* whatever panel the pointer opened it on, and at the overlay's alpha
+     the text behind it comes straight through the caption. */
+  --ring-plate: light-dark(rgba(255, 253, 248, .96), rgba(22, 18, 13, .96));
+  /* One material, two thicknesses. A floating HUD surface frosts at `--frost`;
+     a chip that follows the pointer for a moment frosts at `--frost-chip`,
+     which is cheaper and reads lighter. The hero panes are the only exception
+     and state their own `blur(20px) saturate(140%)`. */
+  --frost: blur(16px);
+  --frost-chip: blur(8px);
   --on-accent: light-dark(#fffdf8, #101a15);
   --amber-line: light-dark(rgba(176, 116, 58, .4), rgba(247, 198, 109, .4));
   --amber-wash: light-dark(rgba(176, 116, 58, .08), rgba(247, 198, 109, .09));
@@ -132,7 +142,9 @@
   --shadow-card: 0 1px 2px var(--shadow-soft), 0 12px 28px -20px var(--shadow-tint);
   --shadow-lift: 0 2px 5px var(--shadow-soft), 0 26px 52px -28px var(--shadow-tint);
 
-  --mono: "SFMono-Regular", "Roboto Mono", Consolas, monospace;
+  /* `ui-monospace` first: no webfont ships with this stack, and without it a
+     non-macOS reader falls through to whatever "Consolas" resolves to. */
+  --mono: ui-monospace, "SFMono-Regular", "Roboto Mono", Consolas, monospace;
   --sans: Outfit, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --display: var(--sans);
   --control-height: 38px;
@@ -326,7 +338,9 @@ button.card[data-active] { border-color: var(--accent); }
 .control-heading > span { color: var(--muted); font-size: var(--size-3); }
 .control-heading output { color: var(--ink); font: var(--text-readout); }
 .control-heading output small { color: var(--micro); font-size: var(--size-3); }
-input[type="range"] { width: 100%; height: 2px; appearance: none; background: linear-gradient(90deg, var(--accent-line), var(--accent-wash)); cursor: ew-resize; }
+/* `accent-color` covers the browsers that still paint their own track under the
+   custom one — the studio's teal, never the UA's blue-black. */
+input[type="range"] { width: 100%; height: 2px; appearance: none; accent-color: var(--accent); background: linear-gradient(90deg, var(--accent-line), var(--accent-wash)); cursor: ew-resize; }
 input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height: 9px; border-radius: 0; border: 1px solid var(--accent); background: var(--well); box-shadow: 0 0 0 3px var(--accent-wash); }
 .segmented { display: flex; height: 31px; padding: 2px; border: 1px solid var(--line); background: var(--well); }
 .segmented button { padding: 0 11px; font-size: var(--size-3); }
@@ -348,11 +362,11 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    contextual ring on a fluid cell, so nothing else lands here to collide with
    it and it no longer needs a flex row to arbitrate the corner. Quiet by
    default: it is a number you glance at, not a control. */
-.fps-meter { position: absolute; z-index: 6; top: 15px; right: 16px; min-width: 68px; height: 26px; padding: 0 9px; display: grid; place-items: center; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); opacity: .62; pointer-events: none; backdrop-filter: blur(14px); transition: opacity .2s ease; }
+.fps-meter { position: absolute; z-index: 6; top: 15px; right: 16px; min-width: 68px; height: 26px; padding: 0 9px; display: grid; place-items: center; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); opacity: .62; pointer-events: none; backdrop-filter: var(--frost); transition: opacity .2s ease; }
 .viewport-shell:hover .fps-meter { opacity: 1; }
 .viewport-topline { position: absolute; inset: 15px 16px auto; display: flex; align-items: start; justify-content: space-between; gap: 12px; pointer-events: none; }
 .viewport-topline > * { pointer-events: auto; }
-.gpu-badge { min-width: 230px; height: 31px; padding: 0 10px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(14px); }
+.gpu-badge { min-width: 230px; height: 31px; padding: 0 10px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); }
 .gpu-badge strong { color: var(--accent); font: var(--text-tag); letter-spacing: var(--track-wide); }
 .gpu-badge > span:last-child { max-width: 175px; overflow: hidden; color: var(--muted); font-size: var(--size-2); text-overflow: ellipsis; white-space: nowrap; }
 .status-dot { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--dim); box-shadow: 0 0 0 3px var(--hover); }
@@ -360,7 +374,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .status-dot.warning { background: var(--amber); box-shadow: 0 0 9px var(--amber-line); }
 .status-dot.idle { background: var(--muted); }
 .status-dot.pulse { animation: status-pulse 2s ease-in-out infinite; }
-.camera-toolbar { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(16px); white-space: nowrap; }
+.camera-toolbar { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); white-space: nowrap; }
 .camera-toolbar button { height: 27px; padding: 0 9px; border: 0; background: transparent; color: var(--muted); font-size: var(--size-2); cursor: pointer; }
 .camera-toolbar button:hover { background: var(--accent-wash); color: var(--accent); }
 .camera-toolbar span { padding: 0 8px; color: var(--dim); font: var(--text-micro); }
@@ -373,7 +387,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    keyboard route back to the library with it — so the reveal is opacity alone.
    `:focus-within` outranks the pointer rectangle so a tab into it always brings
    it back, and the fade is skipped for readers who asked for less motion. */
-.scene-overlay { min-width: 214px; max-width: min(480px, 42vw); height: 43px; padding: 4px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line-strong); background: var(--overlay); backdrop-filter: blur(16px); opacity: 0; transition: opacity .22s ease; }
+.scene-overlay { min-width: 214px; max-width: min(480px, 42vw); height: 43px; padding: 4px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line-strong); background: var(--overlay); backdrop-filter: var(--frost); opacity: 0; transition: opacity .22s ease; }
 .scene-overlay[data-revealed="true"], .scene-overlay:hover, .scene-overlay:focus-within { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .scene-overlay { transition: none; } }
 /* A device with no hover has no way to ask for the reveal, so it never hides. */
@@ -409,13 +423,13 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .scene-overrides-popover footer button { height: 27px; padding: 0 11px; font-size: var(--size-2); letter-spacing: var(--track-wide); }
 .scene-overrides-popover > small { padding: 0 12px 11px; color: var(--dim); font: var(--text-note); }
 
-.health-chip { height: 31px; padding: 0 11px; display: flex; align-items: center; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(14px); cursor: pointer; }
+.health-chip { height: 31px; padding: 0 11px; display: flex; align-items: center; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); cursor: pointer; }
 .health-chip strong { color: var(--accent); font: var(--text-tag); letter-spacing: var(--track-wide); }
 .health-chip.alert { border-color: var(--amber-line); }
 .health-chip.alert strong { color: var(--amber); }
 .health-chip > span:last-child:not(.status-dot) { max-width: 230px; margin-left: 8px; overflow: hidden; color: var(--muted); font: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; }
 .health-chip:hover { border-color: var(--line-strong); }
-.viewport-failure-alert { position: absolute; z-index: 13; top: 60px; left: 50%; width: min(520px, calc(100% - 34px)); transform: translateX(-50%); padding: 11px 12px; border: 1px solid var(--alert-line); border-left: 3px solid var(--alert); background: var(--overlay); box-shadow: var(--shadow-lift), 0 0 24px var(--alert-wash); backdrop-filter: blur(16px); }
+.viewport-failure-alert { position: absolute; z-index: 13; top: 60px; left: 50%; width: min(520px, calc(100% - 34px)); transform: translateX(-50%); padding: 11px 12px; border: 1px solid var(--alert-line); border-left: 3px solid var(--alert); background: var(--overlay); box-shadow: var(--shadow-lift), 0 0 24px var(--alert-wash); backdrop-filter: var(--frost); }
 .viewport-failure-alert > div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .viewport-failure-alert strong { color: var(--alert-ink); font: var(--text-subheading); }
 .viewport-failure-alert span { overflow: hidden; color: var(--alert-ink); font: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; }
@@ -438,7 +452,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .gpu-fallback strong { color: var(--amber); }
 .gpu-initializing { border-color: var(--line-strong); }
 .gpu-initializing strong { color: var(--accent); }
-.gpu-build-card { padding: 16px; border: 1px solid var(--line-strong); border-left: 2px solid var(--accent); background: var(--overlay); box-shadow: var(--shadow-lift); backdrop-filter: blur(14px); pointer-events: none; }
+.gpu-build-card { padding: 16px; border: 1px solid var(--line-strong); border-left: 2px solid var(--accent); background: var(--overlay); box-shadow: var(--shadow-lift); backdrop-filter: var(--frost); pointer-events: none; }
 .resource-activity-tray { position: absolute; top: 60px; right: 17px; z-index: 8; width: min(350px, calc(100% - 34px)); display: grid; gap: 8px; pointer-events: none; }
 .gpu-build-heading { display: flex; align-items: center; gap: 9px; }
 .gpu-build-heading i { width: 8px; height: 8px; flex: 0 0 auto; border: 1px solid var(--accent-line); border-top-color: var(--accent); border-radius: 50%; animation: gpu-build-spin .8s linear infinite; }
@@ -528,7 +542,10 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
   background: var(--instrument-veil);
 }
 .scene-instrument-head h2 { margin: 0; color: var(--ink); font: 600 var(--size-4)/1.2 var(--display); letter-spacing: var(--track-tight); }
-.scene-instrument-head > span { min-width: 0; overflow: hidden; color: var(--dim); font: 500 var(--size-2)/1.2 var(--sans); letter-spacing: .06em; text-overflow: ellipsis; white-space: nowrap; }
+/* The eyebrow role, spelled the one way the sheet spells it — the ring's title
+   and this say the same kind of thing and now look it. Quiet is the colour's
+   job, not the weight's. */
+.scene-instrument-head > span { min-width: 0; overflow: hidden; color: var(--dim); font: var(--text-eyebrow); letter-spacing: var(--track-wide); text-transform: uppercase; text-overflow: ellipsis; white-space: nowrap; }
 .scene-instrument-head .panel-close { margin-left: auto; }
 .scene-instrument-body { flex: 1; min-height: 0; padding-bottom: 12px; }
 /* Every band and section inside the pane shares one inline gutter, so the
@@ -556,7 +573,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
   display: flex; align-items: center; gap: 9px; min-width: 0;
   border-bottom: 1px solid var(--instrument-hair);
   background: var(--instrument-veil);
-  backdrop-filter: blur(8px);
+  backdrop-filter: var(--frost-chip);
 }
 .render-status-line > span { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--dim); }
 .render-status-line > span.online { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
@@ -630,7 +647,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
   display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 5px;
   border: 1px solid var(--line-strong); background: var(--overlay);
   opacity: 1; transition: opacity .35s ease;
-  backdrop-filter: blur(16px);
+  backdrop-filter: var(--frost);
 }
 .transport-cluster[data-idle="true"] { opacity: .16; }
 .transport-cluster:hover, .transport-cluster:focus-within { opacity: 1; transition-duration: .12s; }
@@ -640,18 +657,28 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .transport-cluster button { min-width: 48px; height: 27px; padding: 0 9px; border: 1px solid var(--line); background: transparent; color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); cursor: pointer; }
 .transport-cluster button:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
 .transport-cluster button:disabled { opacity: .45; cursor: wait; }
-.transport-cluster .transport-main { min-width: 32px; padding: 0 8px; border-color: var(--accent-line); color: var(--accent); }
+/* The one control this cluster exists for, so it is not the smallest thing in
+   it: the same box as STEP and RESET, with the glyph one step up from their
+   tag type because a triangle at 9px is a speck. */
+.transport-cluster .transport-main { min-width: 48px; padding: 0 8px; border-color: var(--accent-line); color: var(--accent); font-size: var(--size-3); }
 .transport-cluster .record-button { color: var(--red); }
 .transport-cluster .record-button.active { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
 .transport-cluster .stop-gpu-button { border-color: var(--amber-line); color: var(--amber); }
 .transport-time { display: flex; align-items: baseline; gap: 4px; margin-left: 4px; padding: 0 8px; color: var(--ink); font-variant-numeric: tabular-nums; }
-.transport-time strong { min-width: 62px; font: var(--text-readout); }
+/* Wide enough for the four decimals it prints, and no wider — the unit belongs
+   beside the number, not a space away from it. */
+.transport-time strong { min-width: 50px; font: var(--text-readout); }
 .transport-time small { color: var(--dim); font: var(--text-micro); }
 .transport-recording-dot { align-self: center; width: 6px; height: 6px; border-radius: 50%; background: var(--red); box-shadow: 0 0 9px var(--red-line); animation: status-pulse 1.2s ease-in-out infinite; }
 /* The whole cluster's width, on its own line: the notice is a sentence, and
    wrapping the row around it would move the buttons every time it changed. */
-.transport-notice { flex: 1 0 100%; max-width: 100%; margin: 0 0 1px; padding: 0 4px; overflow: hidden; color: var(--dim); font: var(--text-micro); text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.transport-notice { flex: 1 0 100%; max-width: 100%; margin: 0 0 1px; padding: 0 4px; overflow: hidden; color: var(--dim); font: var(--text-micro); text-align: center; text-overflow: ellipsis; white-space: nowrap; transition: opacity .8s ease; }
 .transport-notice.warn { color: var(--amber); }
+/* Said once. A notice that never expires stops being news and becomes a label
+   on the cluster, so it fades out a few seconds after it last changed and comes
+   back the moment there is something new to say. */
+.transport-notice[data-stale="true"] { opacity: 0; }
+@media (prefers-reduced-motion: reduce) { .transport-notice { transition: none; } }
 
 /* ---- simulation-time video playback ---- */
 .recording-modal-backdrop { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 28px; background: var(--scrim); backdrop-filter: blur(12px); }
@@ -877,7 +904,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .panel-close:hover { background: var(--hover); color: var(--ink); }
 .utility-controls .section-heading { margin-bottom: 12px; }
 .utility-controls .control-hint { margin: 10px 0 0; }
-.svo-cost-legend { position: absolute; z-index: 5; left: 16px; bottom: 70px; width: min(310px, calc(100% - 95px)); padding: 10px 11px; border: 1px solid var(--accent-line); background: var(--overlay); box-shadow: var(--shadow-lift); backdrop-filter: blur(10px); pointer-events: none; }
+.svo-cost-legend { position: absolute; z-index: 5; left: 16px; bottom: 70px; width: min(310px, calc(100% - 95px)); padding: 10px 11px; border: 1px solid var(--accent-line); background: var(--overlay); box-shadow: var(--shadow-lift); backdrop-filter: var(--frost); pointer-events: none; }
 .svo-cost-legend header { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 7px; color: var(--accent); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
 .svo-cost-ramp { height: 8px; border: 1px solid var(--line-strong); background: linear-gradient(90deg,#182a75 0%,#0ba5b5 35%,#72d055 62%,#f5d442 82%,#f04438 100%); }
 .svo-cost-legend footer { display: flex; justify-content: space-between; margin-top: 5px; color: var(--muted); font: var(--text-micro); }
@@ -1073,7 +1100,14 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    act on, so the bottom-left corner only has to report the one mode that is
    currently on — and is empty the rest of the time. */
 .editor-mode-chip { position: absolute; z-index: 6; left: 13px; bottom: 13px; display: flex; align-items: center; gap: 7px; max-width: min(760px, 72vw); }
-.mode-chip { margin: 0; display: flex; align-items: center; gap: 8px; min-height: 27px; padding: 5px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: blur(12px); box-shadow: var(--shadow-card); text-align: left; }
+/* Bounded by the transport, not by the window. The carry hint is a whole
+   sentence of instructions, and at its natural width the chip ran across the
+   centred cluster and covered the play button — so it stops short of the
+   cluster's left edge and the hint ellipsises inside whatever is left. The
+   cluster's width is its contents (a recording scene carries two more buttons
+   than a dry one), so the bound is taken against the widest it may ever be:
+   half of its own 760 px max, plus this chip's inset and a gap. */
+.mode-chip { margin: 0; display: flex; align-items: center; gap: 8px; min-height: 27px; max-width: clamp(200px, calc(50vw - 400px), 610px); padding: 5px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost); box-shadow: var(--shadow-card); text-align: left; }
 .mode-chip strong { flex: none; font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
 .mode-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font: var(--text-micro); }
 .mode-chip em { flex: none; padding: 2px 5px; border: 1px solid currentColor; border-radius: var(--radius-s); font: var(--text-tag); font-style: normal; letter-spacing: var(--track-wide); opacity: .7; }
@@ -1085,32 +1119,62 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .mode-chip.carrying span { color: var(--muted); }
 
 /* The contextual ring. Drawn at the pointer, so its own geometry lives in the
-   SVG and this only has to place it and tone the wedges.
+   SVG and this only has to place it and light the wedges.
 
-   Tone hues are the gizmo's, verbatim: the wedge that adds water and the water
-   body's own handles are the same blue, so the ring teaches the palette that
-   the rest of the editor already uses. */
+   One rule, no exceptions: at rest every wedge is the same plate, the same
+   hairline, and one ink for both its picture and its caption. The ring used to
+   hand each wedge its *entity* hue — the water wedge blue, the tank wedge tan —
+   which is right for a gizmo handle drawn on the thing itself and wrong for a
+   menu, where six hues at rest read as six unrelated buttons and the pale ones
+   vanish into the plate. Focus is the only state that colours, it colours with
+   the studio's accent, and destructive is the single hue that survives the cut
+   because a Delete that looks like its neighbours is the one real hazard here. */
 /* Dimmed, not blacked out: the ring is contextual, so whatever was right-clicked
    has to stay visible underneath it or the reader loses the thing they aimed at. */
 .radial-menu-layer { position: fixed; z-index: 40; inset: 0; background: color-mix(in srgb, var(--scrim) 42%, transparent); }
 .radial-menu { position: absolute; transform: translate(-50%, -50%); }
 .radial-ring { display: block; overflow: visible; outline: none; filter: drop-shadow(0 12px 30px var(--shadow-tint)); }
 .radial-wedge { cursor: pointer; }
-.radial-wedge path { fill: var(--overlay); stroke: var(--line-strong); stroke-width: 1; }
-.radial-wedge[data-focused="true"] path { fill: color-mix(in srgb, var(--tone, var(--accent)) 18%, var(--overlay)); stroke: var(--tone, var(--accent)); stroke-width: 1.5; }
+/* The child combinator is load-bearing: the wedge's plate is its *own* path, and
+   an unscoped `path` also caught every path inside the Lucide mark sitting on it
+   — which is why a cube, an eraser and a gauge used to render as cream-filled
+   silhouettes with a tan hairline while a crosshair drawn from lines and circles
+   rendered in ink. One icon set, three colours, none of them chosen. */
+.radial-wedge > path { fill: var(--ring-plate); stroke: var(--line-strong); stroke-width: 1; }
+.radial-wedge[data-focused="true"] > path { fill: color-mix(in srgb, var(--accent) 14%, var(--ring-plate)); stroke: var(--accent); stroke-width: 1.5; }
 .radial-wedge[data-choosable="false"] { cursor: not-allowed; opacity: .34; }
-/* Lucide draws with `stroke: currentColor` and no fill, so the wedge's tone is
+/* Lucide draws with `stroke: currentColor` and no fill, so the wedge's ink is
    handed over as the colour rather than painted on the paths. */
-.radial-icon { color: var(--muted); pointer-events: none; }
-.radial-wedge[data-focused="true"] .radial-icon { color: var(--tone, var(--accent)); }
+.radial-icon { color: var(--ink); pointer-events: none; }
 .radial-label { fill: var(--ink); font: var(--text-label); text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
-.radial-wedge[data-focused="true"] .radial-label { fill: var(--tone, var(--accent)); }
-.radial-hub { fill: var(--overlay); stroke: var(--line-strong); }
+/* A dense ring is a narrower wedge. The caption steps down one size, and
+   `RadialMenu` clamps whatever still does not fit to the room it actually has. */
+.radial-ring[data-dense="true"] .radial-label { font-size: var(--size-2); }
+.radial-wedge[data-focused="true"] .radial-icon,
+.radial-wedge[data-focused="true"] .radial-label { color: var(--accent-strong); fill: var(--accent-strong); }
+/* The one exception. It reads red before it is aimed at, not after. */
+.radial-wedge.tone-danger .radial-icon,
+.radial-wedge.tone-danger .radial-label { color: var(--red); fill: var(--red); }
+.radial-wedge.tone-danger[data-focused="true"] > path { fill: color-mix(in srgb, var(--red) 14%, var(--ring-plate)); stroke: var(--red); }
+/* The tell that a wedge opens a second ring rather than doing something: a
+   chevron at the rim, pointing the way the flick continues. Scoped past the
+   plate rule above, which would otherwise fill it like a wedge. */
+.radial-wedge > path.radial-more { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.radial-wedge[data-focused="true"] > path.radial-more { stroke: var(--accent-strong); }
+.radial-hub { fill: var(--ring-plate); stroke: var(--line-strong); }
+/* The centre is the way back — a target, so it answers the pointer like one. */
+.radial-hub-group { cursor: pointer; }
+.radial-hub-group:hover .radial-hub { stroke: var(--accent); }
+.radial-hub-group:hover .radial-title { fill: var(--accent-strong); }
 .radial-title { fill: var(--muted); font: var(--text-readout); text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
 /* The one line of prose in the ring: what this wedge would actually do. Fixed
    below the ring rather than in it, so reading a hint never moves the wedges. */
-.radial-readout { position: absolute; top: calc(100% + 11px); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 3px; width: 300px; padding: 7px 11px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: blur(12px); text-align: center; }
-.radial-readout strong { color: var(--muted); font: var(--text-eyebrow); letter-spacing: var(--track-wider); text-transform: uppercase; }
+.radial-readout { position: absolute; top: calc(100% + 11px); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 3px; width: 300px; padding: 7px 11px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost); text-align: center; }
+/* Opened low, the readout would cross the transport. It flips over the ring
+   instead — the one part of this menu that may move, because it is prose rather
+   than a direction. */
+.radial-readout[data-flip="above"] { top: auto; bottom: calc(100% + 11px); }
+.radial-readout strong { color: var(--muted); font: var(--text-eyebrow); letter-spacing: var(--track-wide); text-transform: uppercase; }
 .radial-readout span { color: var(--dim); font: var(--text-note); }
 
 .editor-gizmo { position: absolute; z-index: 11; left: 0; top: 0; pointer-events: none; }
@@ -1126,7 +1190,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-terrain-gizmo .handle-radius-z { stroke: var(--axis-z); }
 .editor-terrain-gizmo .handle-amount { stroke: var(--amber); }
 
-.editor-fill-handle { position: absolute; z-index: 11; display: flex; align-items: center; gap: 6px; transform: translate(-50%, -50%); padding: 3px 7px; border: 1px solid color-mix(in srgb, var(--tone-fluid) 50%, transparent); background: var(--overlay); white-space: nowrap; cursor: ns-resize; backdrop-filter: blur(8px); }
+.editor-fill-handle { position: absolute; z-index: 11; display: flex; align-items: center; gap: 6px; transform: translate(-50%, -50%); padding: 3px 7px; border: 1px solid color-mix(in srgb, var(--tone-fluid) 50%, transparent); background: var(--overlay); white-space: nowrap; cursor: ns-resize; backdrop-filter: var(--frost-chip); }
 .editor-fill-handle i { width: 9px; height: 9px; flex: none; border: 1px solid var(--tone-fluid); background: color-mix(in srgb, var(--tone-fluid) 28%, transparent); }
 .editor-fill-handle span { color: var(--tone-fluid); font: var(--text-tag); letter-spacing: var(--track-wide); }
 
@@ -1167,17 +1231,17 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 
 /* The axis lock: it is held state, so it stays on screen between drags rather
    than only while one is running. */
-.shape-axis-lock { position: absolute; left: 50%; top: 16px; z-index: 12; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 4px 10px; border: 1px solid color-mix(in srgb, var(--axis-z) 55%, transparent); background: var(--overlay); white-space: nowrap; pointer-events: none; backdrop-filter: blur(16px); }
+.shape-axis-lock { position: absolute; left: 50%; top: 16px; z-index: 12; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 4px 10px; border: 1px solid color-mix(in srgb, var(--axis-z) 55%, transparent); background: var(--overlay); white-space: nowrap; pointer-events: none; backdrop-filter: var(--frost); }
 .shape-axis-lock strong { color: var(--axis-z); font: var(--text-tag); letter-spacing: var(--track-wide); }
 .shape-axis-lock span { color: var(--muted); font: var(--text-micro); }
 .shape-axis-lock[data-blocked="true"] { border-color: var(--amber-line); }
 .shape-axis-lock[data-blocked="true"] strong { color: var(--amber); }
 
-.entity-hover-chip { position: absolute; z-index: 12; display: flex; align-items: center; gap: 6px; transform: translate(10px, -50%); padding: 3px 7px; border: 1px solid var(--line); background: var(--overlay); white-space: nowrap; pointer-events: none; backdrop-filter: blur(8px); }
+.entity-hover-chip { position: absolute; z-index: 12; display: flex; align-items: center; gap: 6px; transform: translate(10px, -50%); padding: 3px 7px; border: 1px solid var(--line); background: var(--overlay); white-space: nowrap; pointer-events: none; backdrop-filter: var(--frost-chip); }
 .entity-hover-chip strong { font: var(--text-tag); letter-spacing: var(--track-wide); }
 .entity-hover-chip span { color: var(--muted); font: var(--text-micro); }
 
-.shape-readout { position: absolute; z-index: 12; display: flex; align-items: center; gap: 6px; transform: translate(8px, -50%); padding: 3px 7px; border: 1px solid var(--line); background: var(--overlay); white-space: nowrap; pointer-events: none; backdrop-filter: blur(8px); }
+.shape-readout { position: absolute; z-index: 12; display: flex; align-items: center; gap: 6px; transform: translate(8px, -50%); padding: 3px 7px; border: 1px solid var(--line); background: var(--overlay); white-space: nowrap; pointer-events: none; backdrop-filter: var(--frost-chip); }
 .shape-readout strong { font: var(--text-tag); letter-spacing: var(--track-wide); }
 .shape-readout span { color: var(--ink); font: var(--text-tag); }
 
@@ -1185,7 +1249,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    is drawing it in. */
 [class*="tone-"] strong, strong[class*="tone-"] { color: var(--tone); }
 
-.scene-scale-overlay { position: absolute; right: 17px; bottom: 17px; z-index: 11; display: grid; gap: 3px; padding: 5px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(16px); }
+.scene-scale-overlay { position: absolute; right: 17px; bottom: 17px; z-index: 11; display: grid; gap: 3px; padding: 5px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); }
 .scene-scale-row { display: grid; grid-template-columns: 44px 22px 1fr 22px; align-items: center; gap: 3px; }
 .scene-scale-label { color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); }
 .scene-scale-row output { color: var(--ink); font: var(--text-tag); text-align: center; white-space: nowrap; }
@@ -1197,7 +1261,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-inflow-gizmo .inflow-center { fill: color-mix(in srgb, var(--tone-fluid) 28%, transparent); stroke: var(--tone-fluid); stroke-width: 1.6; }
 .editor-inflow-gizmo .inflow-nozzle { fill: var(--tone-fluid); }
 
-.editor-hover-chip { position: absolute; z-index: 10; display: flex; align-items: center; gap: 6px; padding: 3px 6px; transform: translate(12px, 12px); border: 1px solid var(--line); background: var(--overlay); white-space: nowrap; pointer-events: none; backdrop-filter: blur(8px); }
+.editor-hover-chip { position: absolute; z-index: 10; display: flex; align-items: center; gap: 6px; padding: 3px 6px; transform: translate(12px, 12px); border: 1px solid var(--line); background: var(--overlay); white-space: nowrap; pointer-events: none; backdrop-filter: var(--frost-chip); }
 .editor-hover-chip i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--muted); }
 .editor-hover-chip.kind-body i { background: var(--accent); }
 .editor-hover-chip.kind-terrain i { background: var(--amber); }
@@ -1210,7 +1274,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    scrollbar was reading as a window, not as chrome on the image. Height is the
    anchoring hook's business — it hands down a container-derived `max-height` —
    so all this owes it is a scroll that stays vertical and thin. */
-.fluid-field-flyout { position: absolute; z-index: 12; display: grid; gap: 6px; align-content: start; width: 200px; padding: 7px; overflow-x: clip; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: blur(16px); border-radius: var(--radius-s); scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; --control-height: 22px; --control-font-size: var(--size-2); --control-inline-padding: 6px; }
+.fluid-field-flyout { position: absolute; z-index: 12; display: grid; gap: 6px; align-content: start; width: 200px; padding: 7px; overflow-x: clip; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost); border-radius: var(--radius-s); scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; --control-height: 22px; --control-font-size: var(--size-2); --control-inline-padding: 6px; }
 .fluid-field-plane { display: flex; gap: 3px; }
 .fluid-field-plane button { flex: 1; min-width: 0; height: 19px; border: 1px solid var(--line); border-radius: var(--radius-s); background: transparent; color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); cursor: pointer; }
 .fluid-field-plane button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent-line); }
@@ -1282,7 +1346,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .fluid-field-settings .advanced-params > summary { padding: 3px 0 1px; letter-spacing: var(--track-wider); }
 .fluid-field-settings .advanced-params[open] > summary { margin-bottom: 0; }
 
-.tree-canopy-flyout, .stone-look-flyout, .vessel-rim-flyout { position: absolute; z-index: 12; display: grid; gap: 5px; align-content: start; width: 172px; padding: 5px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(16px); border-radius: var(--radius-s); }
+.tree-canopy-flyout, .stone-look-flyout, .vessel-rim-flyout { position: absolute; z-index: 12; display: grid; gap: 5px; align-content: start; width: 172px; padding: 5px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); border-radius: var(--radius-s); }
 .tree-canopy-flyout header, .stone-look-flyout header, .vessel-rim-flyout header { display: flex; align-items: center; gap: 5px; padding: 1px 2px; }
 .tree-canopy-flyout header span, .stone-look-flyout header span, .vessel-rim-flyout header span { color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); }
 .tree-canopy-flyout header strong, .stone-look-flyout header strong, .vessel-rim-flyout header strong { flex: 1; overflow: hidden; color: var(--accent); font: var(--text-label); text-overflow: ellipsis; white-space: nowrap; }
@@ -1295,22 +1359,43 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 
 .selection-flyout { position: absolute; z-index: 12; width: max-content; max-width: 100%; overflow-y: auto; overscroll-behavior: contain; }
 .selection-flyout-body { display: grid; gap: 4px; justify-items: start; }
-.selection-chip { display: flex; align-items: center; gap: 6px; padding: 4px 7px; border: 1px solid var(--accent-line); background: var(--overlay); color: var(--accent); white-space: nowrap; cursor: pointer; backdrop-filter: blur(10px); }
+.selection-chip { display: flex; align-items: center; gap: 6px; padding: 4px 7px; border: 1px solid var(--accent-line); background: var(--overlay); color: var(--accent); white-space: nowrap; cursor: pointer; backdrop-filter: var(--frost); }
 .selection-chip strong { font: var(--text-label); }
 .selection-chip small { color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); }
-.selection-precision { display: grid; gap: 7px; width: 178px; padding: 9px; border: 1px solid var(--accent-line); background: var(--overlay); backdrop-filter: blur(12px); }
+/* Bounded by the window rather than by its contents: a tank declares enough
+   groups to run the panel off the bottom of the shell, and a panel that scrolls
+   itself keeps the chip it hangs off in view. The cap clears the transport's
+   band and the chip above it, so this is the only thing that scrolls — the
+   flyout around it carries a cap of its own and two nested scrollbars on one
+   panel read as a bug. The width is the field flyout's, less its narrower
+   gutter: the two panels carry the same solver chooser, and at 178 px the
+   longest method name could not be spelled in half of one. */
+.selection-precision { display: grid; gap: 7px; width: 196px; max-height: calc(100vh - 132px); padding: 9px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--accent-line); background: var(--overlay); backdrop-filter: var(--frost); scrollbar-width: thin; scrollbar-color: var(--dim) transparent; }
 /* What the thing IS, above what size it is. The label sits over its own row
    because an enumeration needs the full width for its options. */
 .selection-choice { display: grid; gap: 4px; }
-.selection-choice > span { color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
-.selection-choice .segmented { width: 100%; }
-.selection-choice .segmented button { flex: 1; min-width: 0; padding: 4px 2px; }
+.selection-choice > span { color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wider); text-transform: uppercase; }
+/* One chooser idiom, twice. This is the same control as the field flyout's
+   solver chips — same options, same act — so it is the same chips: a wrapping
+   grid of bordered tags rather than a single row in a well. A row could not
+   hold four options at this width, and "Sparse CM12" wrapped to two lines under
+   its neighbour's active pill. Three classes deep because that is what outranks
+   the studio's control floor further down the sheet, which sizes a segmented
+   control as a 38 px form row of 11 px type. */
+.selection-precision .selection-choice .segmented { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 4px; width: 100%; height: auto; min-height: 0; padding: 0; border: 0; background: none; }
+/* Five options or more is a ladder of glyphs (×8 … ÷8), not a row of words: a
+   72 px track would stack seven of them four rows deep. */
+.selection-precision .selection-choice .segmented:has(> button:nth-child(5)) { grid-template-columns: repeat(auto-fit, minmax(34px, 1fr)); }
+.selection-precision .selection-choice .segmented button { display: block; overflow: hidden; min-width: 0; padding: 5px 4px; border: 1px solid var(--line); border-radius: var(--radius-s); font: var(--text-tag); letter-spacing: var(--track-wide); line-height: 1.2; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.selection-precision .selection-choice .segmented button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent-line); }
+.selection-precision .selection-choice .segmented button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); box-shadow: none; }
+.selection-precision .selection-choice .segmented button:disabled { opacity: .45; cursor: not-allowed; }
 .selection-summary { margin: 0; color: var(--dim); font: var(--text-note); }
 /* Configuration that belongs to the thing but is not what a handle moves. The
    summary is a disclosure so the chip stays a chip: expanding a tank must not
    open a form. See `EditorEntity.groups`. */
 .selection-group { display: grid; gap: 7px; padding-top: 6px; border-top: 1px solid var(--line); }
-.selection-group > summary { color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; cursor: pointer; list-style-position: inside; }
+.selection-group > summary { color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wider); text-transform: uppercase; cursor: pointer; list-style-position: inside; }
 .selection-group > summary:hover { color: var(--accent); }
 .selection-group .range-control { margin: 0; }
 .selection-actions { display: flex; gap: 4px; }
@@ -1434,7 +1519,8 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 
 .gpu-badge, .health-chip, .fps-meter, .camera-toolbar, .scene-overlay,
 .transport-cluster, .resource-activity-pill, .scene-scale-overlay,
-.entity-hover-chip, .shape-readout, .shape-axis-lock, .editor-fill-handle,
+.entity-hover-chip, .editor-hover-chip, .shape-readout, .shape-axis-lock,
+.editor-fill-handle, .selection-chip, .selection-precision,
 .gpu-build-card, .svo-cost-legend, .gpu-fallback,
 .recording-modal, .viewport-failure-alert {
   border-color: var(--line-strong);
@@ -1612,7 +1698,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
    transport-blocking work states itself in the transport cluster instead. Both new
    marks inherit the tray's pointer transparency — nothing here may take input. */
 .resource-activity-pills { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
-.resource-activity-pill { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 8px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(10px); }
+.resource-activity-pill { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 8px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); }
 .resource-activity-pill i { flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: status-pulse 1.6s ease-in-out infinite; }
 .resource-activity-pill strong { overflow: hidden; color: var(--muted); font: var(--text-tag); text-overflow: ellipsis; white-space: nowrap; }
 .resource-activity-pill small { flex: none; color: var(--dim); font: var(--text-note); font-variant-numeric: tabular-nums; }
@@ -1735,7 +1821,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .lab-shell .scene-instrument .metric-card { border-radius: 5px; }
 .lab-shell .scene-instrument .rp-lamp { border-radius: 50%; }
 .lab-shell .scene-instrument .panel-close { border-radius: var(--radius-s); }
-.lab-shell .scene-instrument .rp-node { border-radius: 7px; }
+.lab-shell .scene-instrument .rp-node { border-radius: var(--radius-s); }
 
 /* The scroll: a hairline that only appears against the pane it moves over. */
 .scene-instrument .panel-scroll,
