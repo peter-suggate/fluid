@@ -494,6 +494,20 @@ fn sparseFramePlanGenerationColor(address:vec4u)->vec4f{
 fn sparseFramePlanStagePacket(brickAt:u32,stage:u32)->u32{
   return (sparseFramePlan[brickAt+16u]>>(5u*stage))&31u;
 }
+// Physical packets need stable categorical colours: tiles coalesced into one
+// pass should read as one colour, while separate packets stay distinct. The
+// execution generation is already validated by the caller and deliberately
+// does not repaint the field every frame.
+fn sparseDirtyPacketColor(packet:u32,epoch:u32)->vec3f{
+  _=epoch;
+  var stops=array<vec3f,4>(
+    vec3f(0.125,0.780,0.718),vec3f(0.259,0.475,0.910),
+    vec3f(0.718,0.357,0.910),vec3f(0.937,0.467,0.435));
+  let span=f32(max(1u,SPARSE_FRAME_PLAN_STAGE_COUNT-1u));
+  let t=clamp(f32(min(packet,SPARSE_FRAME_PLAN_STAGE_COUNT-1u))/span,0.0,1.0)*3.0;
+  let stop=min(u32(t),2u);
+  return mix(stops[stop],stops[stop+1u],t-f32(stop));
+}
 fn sparseFramePlanPassPackingColor(address:vec4u,q:vec3i)->vec4f{
   if(!sparseFramePlanHeaderValid()){return vec4f(1.0,0.035,0.63,0.96);}
   if((sparseFramePlan[16u]&SPARSE_FRAME_PLAN_FLAG_GLOBAL_FAULT)!=0u){
