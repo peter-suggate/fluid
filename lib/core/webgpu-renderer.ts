@@ -626,6 +626,40 @@ export function svoDryRigidBounds(bodies: readonly RigidBodyState[]): SvoDryRigi
   return { centre_m: centre, radius_m: radius };
 }
 
+/** What the renderer knows about a frame that decides whether reuse is legal. */
+export interface SvoPrimaryReuseEligibility {
+  /** The tuning switch. Off means never reuse, whatever the rest says. */
+  readonly reuseEnabled: boolean;
+  /** True when the shader reads rigid poses out of a solver-owned buffer. */
+  readonly residentRigidPoses: boolean;
+  readonly bodyCount: number;
+  readonly simulationRunning: boolean;
+}
+
+/**
+ * Whether this frame may carry a primary-visibility coherence key at all.
+ *
+ * The key itself is the safety — it covers camera, viewport, scene epoch, the
+ * body roster, selection, hover and tuning, and a reused G-buffer is byte for
+ * byte the traced one whenever it holds. This predicate answers the one
+ * question the key cannot: is there an input the key is blind to?
+ *
+ * There is exactly one, and it is not the water. The fluid never enters this
+ * G-buffer — the dry scene is the background the raster water pipeline
+ * composites its surface over, and the publication reaches the renderer only
+ * as the cone-shadow coverage volume that the lighting pass resamples every
+ * frame. It is solver-owned rigid pose: with a resident rigid buffer the
+ * shader reads the poses straight out of it, while the roster the key is built
+ * from is a readback of that buffer rather than its source, so the key can be
+ * a frame behind the geometry. Paused, that buffer is not moving and the
+ * staleness cannot arise.
+ */
+export function svoPrimaryReuseEligible(frame: SvoPrimaryReuseEligibility): boolean {
+  if (!frame.reuseEnabled) return false;
+  const solverOwnedRigidPoses = frame.residentRigidPoses && frame.bodyCount > 0;
+  return !solverOwnedRigidPoses || !frame.simulationRunning;
+}
+
 export interface RendererFrameMetrics {
   cpu?: PerformanceTrace;
   presentation?: PerformanceTrace;
@@ -2984,8 +3018,23 @@ export class FluidLabRenderer {
       // frame inputs remain unchanged. Source replacement and authored motion
       // advance sceneEpoch; this key also covers camera, viewport, bodies,
       // selection, tuning and environment.
-      const primaryCoherenceKey = activeSvoTuning.stationaryPrimaryReuseEnabled
-        && (!sceneRuntime.fluidSolver || !this.simulationRunning)
+      //
+      // What a running solver owns in this G-buffer is rigid pose, not water.
+      // The fluid never enters it: the dry scene is the background the raster
+      // water pipeline composites its surface over, and the publication
+      // reaches this renderer only as the cone-shadow coverage volume, which
+      // the lighting pass — never withheld — resamples every frame. So a
+      // running solver is not by itself a reason to retrace, and gating on one
+      // cost every fluid scene the whole primary band.
+      //
+      // A *resident* rigid buffer is a reason; see `svoPrimaryReuseEligible`,
+      // which is where that argument lives so a contract test can hold it.
+      const primaryCoherenceKey = svoPrimaryReuseEligible({
+        reuseEnabled: activeSvoTuning.stationaryPrimaryReuseEnabled,
+        residentRigidPoses: Boolean(residentRigidBuffer),
+        bodyCount: bodies.length,
+        simulationRunning: this.simulationRunning,
+      })
         ? `${presentationCoherenceKey}|viewport=${this.presentationTexture!.width}x${this.presentationTexture!.height}|scene=${this.svoDryScenePipeline?.sceneEpoch ?? 0}`
         : undefined;
       const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, primaryCoherenceKey, tracePhase, bandSampler) ?? false;

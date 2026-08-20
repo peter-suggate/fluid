@@ -251,9 +251,9 @@ const NODES: readonly RenderPipelineNode[] = [
     taps: [],
     toggleable: true,
     tip: {
-      summary: "Reuses the previous frame's primary G-buffer while the camera, viewport, scene epoch and tuning are all unchanged. A hit skips the whole primary band. Measured 47.6 → 20.7 ms at 1500².",
-      reads: "camera · viewport · scene epoch · tuning key",
-      gate: "static-primary coherence, and only while the simulation is paused or the scene is dry",
+      summary: "Reuses the previous frame's primary G-buffer while the camera, viewport, scene epoch, body roster and tuning are all unchanged. A hit skips the whole primary band, byte for byte. Measured 13.63 → 7.34 ms at 1791×904 on water-box-dam-break, and 47.6 → 20.7 ms at 1500².",
+      reads: "camera · viewport · scene epoch · body roster · tuning key",
+      gate: "static-primary coherence. Running water does not block it — the fluid is never in this G-buffer — but solver-owned rigid poses do, because the roster this key reads is a readback of them rather than their source",
     },
     state: (context) => (context.tuning.stationaryPrimaryReuseEnabled ? "armed" : "off"),
     chip: (context) => (context.tuning.stationaryPrimaryReuseEnabled ? "static-primary" : "always retrace"),
