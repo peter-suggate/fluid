@@ -2399,7 +2399,6 @@ fn psaHierarchyNodeActiveExact(linear:u32)->bool{
     if(psaWetBrickContains(pcfHierarchyChild(address.x,range.x+at))){return true;}}
   return false;
 }
-fn psaPressureArithmeticActive()->bool{return pipelinedPressureActive();}
 fn psaPressureAddressingReady()->bool{return pabPressureAddressingReady();}
 @compute @workgroup_size(64)
 fn markSparseCM12PressureSolveFromPersistentBricks(

@@ -333,12 +333,6 @@ export function createSparseCM12ProductionIntegrationManifest(
   ] as const;
   psaSources.forEach(([id, source, sealedBy, consumers], index) => copies.push(snapshot(id,
     "cm12.pressure-cache", source, "cm12.psa1-indirect", 12 * index, sealedBy, consumers)));
-  for (const bank of [0, 1] as const) for (let family = 0; family < 4; family += 1) {
-    copies.push(snapshot(`psa.tail.${bank}.${family}`, "cm12.pressure-cache",
-      4 * (psa.tailBankBaseWords[bank] + 3 * family), `cm12.psa1-tail-${bank}-indirect`,
-      12 * family, bank === 0 ? "psa-tail-a-publish" : "psa-tail-b-publish",
-      [bank === 0 ? "psa-tail-a-consume" : "psa-tail-b-consume"]));
-  }
 
   const authorities = [
     authority("PCM1.pressure-cache-cutover",
@@ -496,21 +490,7 @@ export function createSparseCM12ProductionIntegrationManifest(
     pass("psa-work-copy", "copy-seam", "copy PSA brick/node work triplets",
       ["psa-finalize"]),
     pass("pressure-solve", "pressure-solve", "unchanged PCM/PSA rank-ordered solve",
-      ["psa-work-copy", "psa-tail-b-consume"]),
-    pass("psa-tail-a-publish", "pressure-tail-a-plan", "publishSparseCM12PressureTailA",
-      ["psa-finalize"]),
-    pass("psa-tail-a-copy", "copy-seam", "copy four PSA tail-A triplets",
-      ["psa-tail-a-publish"]),
-    pass("psa-tail-a-consume", "pressure-tail-a", "eligible unchanged arithmetic only",
-      ["psa-tail-a-copy"], "psa.tail.0.0"),
-    pass("psa-tail-gate-a", "pressure-tail-gate", "unchanged gate-writing reduction",
-      ["psa-tail-a-consume"]),
-    pass("psa-tail-b-publish", "pressure-tail-b-plan", "publishSparseCM12PressureTailB",
-      ["psa-tail-gate-a"]),
-    pass("psa-tail-b-copy", "copy-seam", "copy four PSA tail-B triplets",
-      ["psa-tail-b-publish"]),
-    pass("psa-tail-b-consume", "pressure-tail-b", "eligible unchanged arithmetic only",
-      ["psa-tail-b-copy"], "psa.tail.1.0"),
+      ["psa-work-copy"]),
     pass("fpa-projection-begin", "projection-authority-plan-0",
       "beginSparseCM12FaceProjectionAuthority", ["pressure-solve", "fpa-preparation-accept"]),
     pass("fpa-projection-copy-bootstrap", "copy-seam", "copy fpa.projection.bootstrap",
@@ -742,7 +722,6 @@ export const SPARSE_CM12_PRODUCTION_RESIDENT_TOKEN_CONTRACT = Object.freeze({
     "repairPersistentPressureHierarchyDiagonals", "finalizePersistentPressureCache",
     "seedPreviousPCFBrickLeaves", "seedPreviousPCFAggregateEdgeLeaves",
     "seedPreviousPCFHierarchyNodeLeaves", "seedPreviousPCFHierarchyEdgeLeaves",
-    "finalizeSparseCM12PressureSolveAuthority", "publishSparseCM12PressureTailA",
-    "publishSparseCM12PressureTailB",
+    "finalizeSparseCM12PressureSolveAuthority",
   ]),
 });

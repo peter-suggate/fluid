@@ -125,7 +125,7 @@ function main(): void {
   const input = buildInput();
   const manifest = createSparseCM12ProductionIntegrationManifest(input);
   if (manifest.regions.length < 12 || manifest.bindings.length !== 42
-    || manifest.copies.length !== 35 || manifest.authorities.length !== 7
+    || manifest.copies.length !== 27 || manifest.authorities.length !== 7
     || manifest.gates.length !== 6) {
     throw new Error("manifest family count drift");
   }

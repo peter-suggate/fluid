@@ -146,11 +146,8 @@ import {
   createSparseCM12PressureSolveAuthorityInitialWords,
   createSparseCM12PressureSolveAuthorityLayout,
   sparseCM12PressureSolveAuthorityIndirectByteOffset,
-  sparseCM12PressureSolveTailIndirectByteOffset,
   type SparseCM12PressureSolveAuthorityLayout,
 } from "./sparse-cm12-pressure-solve-authority";
-import { WebGPUSparseCM12PressureTailAuthority } from
-  "./sparse-cm12-pressure-tail-authority";
 import {
   SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER,
   SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER_WORDS,
@@ -2027,11 +2024,8 @@ export class WebGPUSparseCM12Resident {
   private readonly pressureTopologyRepairIndirectArguments: GPUBuffer;
   /** Copy-isolated PCF1/PCA1 fine, seed, repair, and work dispatches. */
   private readonly persistentPressureCacheIndirectArguments: GPUBuffer;
-  /** Copy-isolated PSA1 bootstrap/repair/work/tail dispatches. */
+  /** Copy-isolated PSA1 bootstrap/repair/work dispatches. */
   private readonly pressureSolveAuthorityIndirectArguments: GPUBuffer;
-  /** Two 48-byte copy-isolated PSA1 tail banks. The bootstrap landing only
-   * publishes/copies bank A; existing arithmetic remains unchanged. */
-  private readonly pressureTailAuthority: WebGPUSparseCM12PressureTailAuthority;
   /** Copy-isolated FPA1 preparation/projection bootstrap/repair/work/verify. */
   private readonly faceProjectionAuthorityIndirectArguments: GPUBuffer;
   /** Construction-only observational FPA tile-mask census. */
@@ -2101,7 +2095,6 @@ export class WebGPUSparseCM12Resident {
     pressureTopologyRepairIndirectArguments: GPUBuffer,
     persistentPressureCacheIndirectArguments: GPUBuffer,
     pressureSolveAuthorityIndirectArguments: GPUBuffer,
-    pressureTailAuthority: WebGPUSparseCM12PressureTailAuthority,
     faceProjectionAuthorityIndirectArguments: GPUBuffer,
     temporalCellIndirectArguments: GPUBuffer,
     temporalRowIndirectArguments: GPUBuffer,
@@ -2202,7 +2195,6 @@ export class WebGPUSparseCM12Resident {
       persistentPressureCacheIndirectArguments;
     this.pressureSolveAuthorityIndirectArguments =
       pressureSolveAuthorityIndirectArguments;
-    this.pressureTailAuthority = pressureTailAuthority;
     this.faceProjectionAuthorityIndirectArguments =
       faceProjectionAuthorityIndirectArguments;
     this.facePreparationTileCensusLayout = facePreparationTileCensusLayout;
@@ -2266,7 +2258,6 @@ export class WebGPUSparseCM12Resident {
       (sum, buffer) => sum + buffer.size, 0,
     )
       + diagnosticsReadback.size + scalarResultAuthority.allocatedBytes
-      + pressureTailAuthority.buffers[0].size + pressureTailAuthority.buffers[1].size
       + (pressureAddressingABQA ? pressureAddressingABQA.indirectArguments.size
         + (pressureAddressingABQA.receiptReadback?.size ?? 0)
         + (pressureAddressingABQA.queryResolve?.size ?? 0)
@@ -2975,9 +2966,6 @@ export class WebGPUSparseCM12Resident {
         ?? faceProjectionAuthorityLayout.totalBytes),
       usage: storage,
     });
-    const pressureTailAuthority = new WebGPUSparseCM12PressureTailAuthority(
-      device, topologyArena, pressureSolveAuthorityLayout,
-    );
     device.queue.writeBuffer(topologyArena, 0, templates.words.buffer as ArrayBuffer,
       templates.words.byteOffset, physicalTemplateBytes);
     device.queue.writeBuffer(topologyArena, physicalTemplateBytes,
@@ -3345,7 +3333,6 @@ export class WebGPUSparseCM12Resident {
       "finalizeSparseCM12PressureBrickRepair",
       "repairSparseCM12PressureNodeLeaves",
       "finalizeSparseCM12PressureSolveAuthority",
-      "publishSparseCM12PressureTailA",
       "beginSparseCM12FacePreparationAuthority",
       "beginSparseCM12FaceProjectionAuthority",
       "seedSparseCM12FacePreparationBootstrap",
@@ -3505,7 +3492,6 @@ export class WebGPUSparseCM12Resident {
       pressureTopologyRepairIndirectArguments,
       persistentPressureCacheIndirectArguments,
       pressureSolveAuthorityIndirectArguments,
-      pressureTailAuthority,
       faceProjectionAuthorityIndirectArguments,
       temporalCellIndirectArguments,
       temporalRowIndirectArguments,
@@ -4340,13 +4326,6 @@ export class WebGPUSparseCM12Resident {
       // largest one in the solve, so a film that started at iteration 1 would
       // miss the only frame where the seed is visible.
       journalRecord(0);
-      // Receipt-only PTL1 bootstrap. The existing pressure arithmetic remains
-      // on its current indirects; this copy only seals a generation-coherent
-      // tail bank for diagnostics and the later serial arithmetic cutover.
-      const tailBank: 0 | 1 = 0;
-      dispatch("publishSparseCM12PressureTailA", 1);
-      closePass();
-      this.pressureTailAuthority.encodeCopy(encoder, tailBank);
     });
     stage("pressure-solve", () => {
       for (let iteration = 0;
@@ -5265,7 +5244,6 @@ export class WebGPUSparseCM12Resident {
       causeMask: psaHeader[solve.causeMask]!, fault: psaHeader[solve.fault]!,
       firstFaultId: psaHeader[solve.firstFaultId]!,
       wetBrickCount: psaActive[0]!, hierarchyNodeCount: psaActive[1]!,
-      tailPublishedGeneration: psaHeader[solve.tailPublishedGeneration]!,
     };
     const preparationReceipt = fpaStageReceipt(fpaPreparationHeader);
     const projectionReceipt = fpaStageReceipt(fpaProjectionHeader);
@@ -6250,7 +6228,6 @@ export class WebGPUSparseCM12Resident {
     this.destroyed = true;
     this.rigidCoupling?.destroy();
     this.scalarResultAuthority.destroy();
-    this.pressureTailAuthority.destroy();
     this.pressureAddressingABQA.indirectArguments.destroy();
     this.pressureAddressingABQA.receiptReadback?.destroy();
     this.pressureAddressingABQA.queryResolve?.destroy();

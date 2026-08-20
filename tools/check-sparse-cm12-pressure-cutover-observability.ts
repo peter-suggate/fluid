@@ -33,8 +33,7 @@ SparseCM12PressureCutoverAuthorities => Object.freeze({
   pca: { ...stage({ dirtyCount: 5, executedCount: 5 }),
     familyDirtyCount: [1, 1, 2, 1] as const,
     familyExecutedCount: [1, 1, 2, 1] as const },
-  psa: { ...stage(), wetBrickCount: 12, hierarchyNodeCount: 8,
-    tailPublishedGeneration: 9 },
+  psa: { ...stage(), wetBrickCount: 12, hierarchyNodeCount: 8 },
   ...overrides,
 });
 
@@ -51,16 +50,6 @@ assert.match(inspectSparseCM12PressureCutoverAuthorities(wrongInput, 17).issues.
 const faulted = authorities({ pcf: stage({ fault: 8, firstFaultId: 41 }) });
 assert.equal(inspectSparseCM12PressureCutoverAuthorities(faulted, 17).complete, false);
 assert.match(formatSparseCM12PressureCutoverAuthorities(faulted, 17), /FAULT 8@41/);
-const zeroTail = authorities({ psa: { ...stage(), wetBrickCount: 12,
-  hierarchyNodeCount: 8, tailPublishedGeneration: 0 } });
-assert.equal(inspectSparseCM12PressureCutoverAuthorities(zeroTail, 17).complete, false);
-assert.match(formatSparseCM12PressureCutoverAuthorities(zeroTail, 17),
-  /PSA converged-tail generation is zero after bootstrap/);
-const staleTail = authorities({ psa: { ...stage(), wetBrickCount: 12,
-  hierarchyNodeCount: 8, tailPublishedGeneration: 8 } });
-assert.equal(inspectSparseCM12PressureCutoverAuthorities(staleTail, 17).complete, false);
-assert.match(formatSparseCM12PressureCutoverAuthorities(staleTail, 17),
-  /does not match accepted generation 9/);
 
 const localSource = "fn localInvocation(id:u32)->u32{return id;} dispatchWorkgroupsIndirect";
 assert.doesNotThrow(() => assertSparseCM12PressureCutoverLocalSources({

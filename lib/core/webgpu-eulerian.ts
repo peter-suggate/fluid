@@ -123,7 +123,6 @@ export interface GPUEulerianInfo {
       readonly psa: GPUAdaptivePressureLocalStageReceipt & {
         readonly wetBrickCount: number;
         readonly hierarchyNodeCount: number;
-        readonly tailPublishedGeneration: number;
       };
     };
     readonly detail: string;

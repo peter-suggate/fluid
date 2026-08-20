@@ -12,7 +12,6 @@ import {
   SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_MAGIC,
   SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_PHASE,
   SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_VERSION,
-  SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY,
   type SparseCM12PressureSolveAuthorityFamilyLayout,
   type SparseCM12PressureSolveAuthorityLayout,
 } from "./sparse-cm12-pressure-solve-authority";
@@ -166,21 +165,6 @@ export function createSparseCM12PressureSolveAuthorityWGSL(
     return `select(${layout.brick[key]}u,${layout.hierarchyNode[key]}u,`
       + `family==${p}NodeFamily)`;
   };
-  const tailWrite = (bank: 0 | 1) => {
-    const base = layout.tailBankBaseWords[bank];
-    const write = (family: number, value: string) => {
-      const at = base + 3 * family;
-      return `atomicStore(&${arena}[${at}u],${value});`
-        + `atomicStore(&${arena}[${at + 1}u],1u);atomicStore(&${arena}[${at + 2}u],1u);`;
-    };
-    return `${write(SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY.cell,
-      `select(0u,psaPCMCellWorkgroupCount(),enabled)`)}
-  ${write(SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY.wetBrick,
-    `select(0u,${p}BrickExecutionCount(),enabled)`)}
-  ${write(SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY.hierarchyNode,
-    `select(0u,${p}NodeExecutionCount(),enabled)`)}
-  ${write(SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY.scalar, "select(0u,1u,enabled)")}`;
-  };
   return /* wgsl */ `
 // Required integration hooks (all GPU-authored/current-epoch):
 // psaFrameGeneration/TopologyGeneration/PCMGeneration/PCFGeneration()->u32
@@ -188,7 +172,6 @@ export function createSparseCM12PressureSolveAuthorityWGSL(
 // psaCellBrick(cell)->u32; psaBrickWetExact(brick)->bool
 // psaHierarchyParent(level,brick)->u32
 // psaHierarchyNodeActiveExact(linearNode)->bool
-// psaPressureArithmeticActive()->bool
 // psaPressureAddressingReady()->bool
 const ${p}Magic:u32=0x${SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_MAGIC.toString(16)}u;
 const ${p}Version:u32=${SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_VERSION}u;
@@ -218,8 +201,6 @@ const ${p}HFirstFaultId:u32=${hb(h.firstFaultId)};
 const ${p}HExpectedReceipts:u32=${hb(h.expectedProducerReceipts)};
 const ${p}HCoveredReceipts:u32=${hb(h.coveredProducerReceipts)};
 const ${p}HCauseMask:u32=${hb(h.causeMask)};
-const ${p}HTailPublishedGeneration:u32=${hb(h.tailPublishedGeneration)};
-const ${p}HTailActiveBank:u32=${hb(h.tailActiveBank)};
 const ${p}HBootstrapIndirectX:u32=${hb(h.bootstrapIndirectX)};
 const ${p}FActiveCount:u32=${f.activeCount}u;const ${p}FDirtyLeafCount:u32=${f.dirtyLeafCount}u;
 const ${p}FDirectWriteCount:u32=${f.directWriteCount}u;
@@ -263,8 +244,6 @@ fn ${p}ZeroIndirects(){
   atomicStore(&${arena}[${p}NodeHeader+${p}FRepairIndirectX],0u);
   atomicStore(&${arena}[${p}NodeHeader+${p}FWorkIndirectX],0u);
   atomicStore(&${arena}[${p}HBootstrapIndirectX],0u);
-  ${tailWrite(0)}
-  ${tailWrite(1)}
 }
 fn ${p}Fail(family:u32,code:u32,id:u32){
   let won=atomicCompareExchangeWeak(&${arena}[${p}HFault],0u,code).exchanged;
@@ -446,18 +425,5 @@ fn psaActiveHierarchyNodeInvocation(invocation:u32)->u32{
   return ${p}NodeRankSelect(invocation);}
 fn psaActiveHierarchyNodeAddress(invocation:u32)->vec2u{
   return ${p}HierarchyNodeAddress(psaActiveHierarchyNodeInvocation(invocation));}
-fn ${p}TailReady()->bool{return ${p}HeaderValid()
-  &&atomicLoad(&${arena}[${p}HPhase])==${p}PhaseAccepted
-  &&atomicLoad(&${arena}[${p}HFault])==0u
-  &&atomicLoad(&${arena}[${p}HPCMGeneration])==psaPCMGeneration()
-  &&atomicLoad(&${arena}[${p}HPCFGeneration])==psaPCFGeneration();}
-fn ${p}PublishTail(bank:u32){let ready=${p}TailReady();
-  let enabled=ready&&psaPressureArithmeticActive();
-  if(bank==0u){${tailWrite(0)}}else{${tailWrite(1)}}
-  if(ready){atomicStore(&${arena}[${p}HTailPublishedGeneration],atomicLoad(&${arena}[
-    ${p}HAcceptedGeneration]));atomicStore(&${arena}[${p}HTailActiveBank],bank);}
-}
-@compute @workgroup_size(1) fn publishSparseCM12PressureTailA(){${p}PublishTail(0u);}
-@compute @workgroup_size(1) fn publishSparseCM12PressureTailB(){${p}PublishTail(1u);}
 `;
 }

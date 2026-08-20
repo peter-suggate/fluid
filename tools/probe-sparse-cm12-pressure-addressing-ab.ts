@@ -123,7 +123,7 @@ interface PartialFailureFrame {
   readonly pcm: unknown;
   readonly pressureAttribution: unknown;
   readonly rawPressureAuthority: unknown;
-  readonly psaTail: unknown;
+  readonly psaGenerations: unknown;
   readonly pab?: unknown;
   readonly hardwareTracePoll?: Readonly<{
     attempts: number; elapsed_ms: number; deadline_ms: number;
@@ -317,11 +317,9 @@ async function runArm(device: GPUDevice, mode: SparseCM12PressureAddressingABMod
       pcm: { cell: constructionPCM.cell, row: constructionPCM.row },
       pressureAttribution: constructionAttribution ?? null,
       rawPressureAuthority: constructionAttribution?.authorities ?? null,
-      psaTail: constructionAttribution?.authorities?.psa ? {
+      psaGenerations: constructionAttribution?.authorities?.psa ? {
         acceptedGeneration: constructionAttribution.authorities.psa.acceptedGeneration,
         candidateGeneration: constructionAttribution.authorities.psa.candidateGeneration,
-        tailPublishedGeneration:
-          constructionAttribution.authorities.psa.tailPublishedGeneration,
       } : null });
     assert(constructionAttribution,
       `${mode} construction pressure attribution is absent`);
@@ -388,11 +386,9 @@ async function runArm(device: GPUDevice, mode: SparseCM12PressureAddressingABMod
         fca: fcaQA, srr: srrQA, pcm: { cell: pcmQA.cell, row: pcmQA.row },
         pressureAttribution: pressureAttribution ?? null,
         rawPressureAuthority: pressureAttribution?.authorities ?? null,
-        psaTail: pressureAttribution?.authorities?.psa ? {
+        psaGenerations: pressureAttribution?.authorities?.psa ? {
           acceptedGeneration: pressureAttribution.authorities.psa.acceptedGeneration,
           candidateGeneration: pressureAttribution.authorities.psa.candidateGeneration,
-          tailPublishedGeneration:
-            pressureAttribution.authorities.psa.tailPublishedGeneration,
         } : null,
         pab: qa, hardwareTracePoll });
       assert.equal(qa.mode, mode, `${mode} constructor published ${qa.mode}`);

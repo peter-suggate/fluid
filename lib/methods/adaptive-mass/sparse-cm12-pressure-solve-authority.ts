@@ -45,7 +45,6 @@ export const SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAULT = Object.freeze({
   countTreeUnderflow: 11,
   countTreeOverflow: 12,
   inactiveHierarchyParent: 13,
-  tailBankGenerationGap: 14,
   pressureAddressingGap: 15,
 } as const);
 
@@ -69,7 +68,7 @@ export const SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEADER = Object.freeze({
   frameGeneration: 17, topologyGeneration: 18, pcmGeneration: 19,
   pcfGeneration: 20, fault: 21, firstFaultFamily: 22, firstFaultId: 23,
   expectedProducerReceipts: 24, coveredProducerReceipts: 25,
-  causeMask: 26, tailPublishedGeneration: 27, tailActiveBank: 28,
+  causeMask: 26, reserved0: 27, reserved1: 28,
   // Construction-only bootstrap/oracle dispatch. Runtime incremental frames
   // receive x=0 from the GPU planner; the host always encodes both paths.
   bootstrapIndirectX: 29, bootstrapIndirectY: 30, bootstrapIndirectZ: 31,
@@ -83,18 +82,6 @@ export const SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER = Object.freeze(
   repairedLeafCount: 10, priorActiveCount: 11,
   reserved0: 12, reserved1: 13, reserved2: 14, reserved3: 15,
 } as const);
-
-export const SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY = Object.freeze({
-  cell: 0,
-  wetBrick: 1,
-  hierarchyNode: 2,
-  scalar: 3,
-} as const);
-export type SparseCM12PressureSolveTailFamilyName = keyof
-  typeof SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY;
-export const SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY_COUNT = 4;
-export const SPARSE_CM12_PRESSURE_SOLVE_TAIL_BANK_COUNT = 2;
-export const SPARSE_CM12_PRESSURE_SOLVE_TAIL_INDIRECT_WORDS = 3;
 
 export interface SparseCM12PressureSolveAuthorityFamilyLayout {
   readonly headerBaseWords: number;
@@ -117,7 +104,6 @@ export interface SparseCM12PressureSolveAuthorityLayout {
   readonly hierarchyNodeCapacity: number;
   readonly brick: SparseCM12PressureSolveAuthorityFamilyLayout;
   readonly hierarchyNode: SparseCM12PressureSolveAuthorityFamilyLayout;
-  readonly tailBankBaseWords: readonly [number, number];
   readonly totalWords: number;
   readonly totalBytes: number;
   /** Construction-specialized and unavailable to runtime policy. */
@@ -192,15 +178,10 @@ export function createSparseCM12PressureSolveAuthorityLayout(options: {
   };
   const brick = makeFamily(brickHeaderBaseWords, brickCapacity);
   const hierarchyNode = makeFamily(nodeHeaderBaseWords, hierarchyNodeCapacity);
-  const tailWords = SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY_COUNT
-    * SPARSE_CM12_PRESSURE_SOLVE_TAIL_INDIRECT_WORDS;
-  const tailA = alignWords(at); const tailB = tailA + tailWords;
-  at = alignWords(tailB + tailWords);
   return Object.freeze({ baseWords, brickCapacity,
     hierarchyLevelCounts: Object.freeze(hierarchyLevelCounts),
     hierarchyLevelOffsets: Object.freeze(hierarchyLevelOffsets),
     hierarchyNodeCapacity, brick, hierarchyNode,
-    tailBankBaseWords: Object.freeze([tailA, tailB]) as readonly [number, number],
     totalWords: at, totalBytes: 4 * at, qaFullOracle: options.qaFullOracle ?? false });
 }
 
@@ -237,12 +218,6 @@ export function initializeSparseCM12PressureSolveAuthorityWords(
     words[family.headerBaseWords + f.workIndirectY] = 1;
     words[family.headerBaseWords + f.workIndirectZ] = 1;
   }
-  for (const bank of layout.tailBankBaseWords) {
-    for (let family = 0; family < SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY_COUNT; family += 1) {
-      const at = bank + 3 * family;
-      words[at + 1] = 1; words[at + 2] = 1;
-    }
-  }
 }
 
 export function createSparseCM12PressureSolveAuthorityInitialWords(
@@ -263,16 +238,6 @@ export function sparseCM12PressureSolveAuthorityIndirectByteOffset(
   const h = SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_FAMILY_HEADER;
   return 4 * (layout[family].headerBaseWords
     + (kind === "repair" ? h.repairIndirectX : h.workIndirectX));
-}
-
-export function sparseCM12PressureSolveTailIndirectByteOffset(
-  layout: SparseCM12PressureSolveAuthorityLayout,
-  bank: 0 | 1,
-  family: SparseCM12PressureSolveTailFamilyName,
-): number {
-  return 4 * (layout.tailBankBaseWords[bank]
-    + SPARSE_CM12_PRESSURE_SOLVE_TAIL_INDIRECT_WORDS
-      * SPARSE_CM12_PRESSURE_SOLVE_TAIL_FAMILY[family]);
 }
 
 export interface SparseCM12PressureSolveAuthoritySource {

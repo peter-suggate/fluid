@@ -81,12 +81,6 @@ export function inspectSparseCM12PressureCutoverAuthorities(
   if (familyExecuted !== receipt.pca.executedCount) {
     issues.push("PCA family execution census mismatch");
   }
-  if (receipt.psa.tailPublishedGeneration === 0) {
-    issues.push("PSA converged-tail generation is zero after bootstrap");
-  } else if (receipt.psa.tailPublishedGeneration !== receipt.psa.acceptedGeneration) {
-    issues.push(`PSA converged-tail generation ${receipt.psa.tailPublishedGeneration}`
-      + ` does not match accepted generation ${receipt.psa.acceptedGeneration}`);
-  }
   const complete = receipt.status === "matched" && issues.length === 0;
   if (receipt.status === "fault" && issues.length === 0) {
     issues.push("authority status is fault without a decoded fault");
@@ -119,7 +113,7 @@ export function formatSparseCM12PressureCutoverAuthorities(
     stage("PCF", receipt.pcf),
     `${stage("PCA", receipt.pca)} · family dirty ${receipt.pca.familyDirtyCount.join("/")}`,
     `${stage("PSA", receipt.psa)} · wet/nodes ${receipt.psa.wetBrickCount}/`
-      + `${receipt.psa.hierarchyNodeCount} · tail g${receipt.psa.tailPublishedGeneration}`,
+      + `${receipt.psa.hierarchyNodeCount}`,
   ].join("\n");
 }
 

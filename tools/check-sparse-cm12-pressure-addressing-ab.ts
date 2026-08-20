@@ -181,7 +181,7 @@ assert.match(probe, /PAB1 symmetric physical receipt differs/);
 assert.match(probe, /constructionAttributionPrimedWithoutPhysicsAdvance/);
 assert.match(probe, /constructionAttribution\.encodedStep, 0/);
 assert.match(probe, /rawPressureAuthority/);
-assert.match(probe, /tailPublishedGeneration/);
+assert.match(probe, /psaGenerations/);
 assert.match(probe, /partialFailureFrames/);
 assert.match(probe, /await device\.queue\.onSubmittedWorkDone\(\)/);
 assert.match(probe, /candidate\.sampleId > priorSampleId/);

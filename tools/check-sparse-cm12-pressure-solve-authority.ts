@@ -10,7 +10,6 @@ import {
   createSparseCM12PressureSolveAuthorityInitialWords,
   createSparseCM12PressureSolveAuthorityLayout,
   sparseCM12PressureSolveAuthorityIndirectByteOffset,
-  sparseCM12PressureSolveTailIndirectByteOffset,
 } from "../lib/methods/adaptive-mass/sparse-cm12-pressure-solve-authority";
 import { createSparseCM12PressureSolveAuthorityWGSL } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-solve-authority.wgsl";
@@ -27,8 +26,6 @@ assert.equal(initial[layout.baseWords + SPARSE_CM12_PRESSURE_SOLVE_AUTHORITY_HEA
 assert.deepEqual(layout.hierarchyLevelOffsets, [0, 96, 108]);
 assert.equal(layout.hierarchyNodeCapacity, 110);
 assert(sparseCM12PressureSolveAuthorityIndirectByteOffset(layout, "brick", "work") > 0);
-assert(sparseCM12PressureSolveTailIndirectByteOffset(layout, 1, "hierarchyNode")
-  > sparseCM12PressureSolveTailIndirectByteOffset(layout, 0, "hierarchyNode"));
 
 const parent0 = Array.from({ length: brickCapacity }, (_, brick) => brick % 96);
 const parent1 = Array.from({ length: brickCapacity }, (_, brick) => brick % 12);
