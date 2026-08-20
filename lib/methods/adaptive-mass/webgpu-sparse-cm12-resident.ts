@@ -3670,13 +3670,13 @@ export class WebGPUSparseCM12Resident {
       );
     };
     const dispatchPressureBrickSolve = (name: string) => {
-      if (this.pressureRefreshOracleForQA) dispatch(name, packed.brickCount);
-      else dispatchPressureSolveAuthority(name, 3);
+      // The shader still rank-selects PSA's accepted sparse domain. Encoding
+      // the stable capacity directly avoids hundreds of costly Dawn indirect
+      // dispatch conversions across the repeated pressure iterations.
+      dispatch(name, packed.brickCount);
     };
     const dispatchPressureHierarchySolve = (name: string) => {
-      if (this.pressureRefreshOracleForQA) {
-        dispatch(name, this.pressureHierarchyGroupCount);
-      } else dispatchPressureSolveAuthority(name, 4);
+      dispatch(name, this.pressureHierarchyGroupCount);
     };
     const dispatchFaceProjectionAuthority = (name: string, slot: number) => {
       const activePass = openPass();
