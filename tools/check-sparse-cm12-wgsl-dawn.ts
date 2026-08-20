@@ -194,9 +194,7 @@ async function main(): Promise<void> {
         ? createSparseCM12VexActivityBatchLayout({
           activityTailWords: scalarAuthority.totalWords,
           stateTailFloats: 65536,
-          brickCapacity: 8,
           cellCapacity: 1024,
-          brickFineResolution: 16,
         }) : undefined;
       const source = createWebgpuSparseCM12ResidentWGSL(
         brickFineResolution,

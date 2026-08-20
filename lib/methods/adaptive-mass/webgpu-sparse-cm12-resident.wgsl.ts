@@ -3508,9 +3508,18 @@ fn reduceDivergenceDiagnostics(@builtin(local_invocation_id)lid:vec3u){
 }
 
 ${vexActivityBatchLayout ? /* wgsl */ `
-// VEX1/A4D2 resident bridge. These functions are the sole semantic seam
-// between the generic compact authorities and the frozen CM12 field/layout
-// arithmetic below.
+// VEX1 resident bridge. The remaining A4D2-shaped helpers below are dead
+// compatibility source and can be removed independently from the live VEX
+// hooks without changing this cutover.
+struct A4D2TileSummary{
+  moments:vec4i,
+  metrics:vec4f,
+  flags:u32,
+  support:u32,
+  sweptSupport:u32,
+  contributionCount:u32,
+  check:u32,
+};
 fn cm12ResidentCellTile(cell:u32)->vec2u{
   let brick=cellBrick(cell);let minimum=cellMinimum(cell);
   let local=(minimum%vec3u(BRICK_FINE_RESOLUTION))/4u;

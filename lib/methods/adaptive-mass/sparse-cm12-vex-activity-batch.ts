@@ -1,10 +1,4 @@
-/** Append-only resident adapter for the production A4D2 + VEX1 cutover batch. */
-import {
-  SPARSE_CM12_PRODUCTION_ACTIVITY_HEADER,
-  createSparseCM12ProductionActivityInitialWords,
-  createSparseCM12ProductionActivityLayout,
-  type SparseCM12ProductionActivityLayout,
-} from "./sparse-cm12-production-activity";
+/** Append-only resident adapter for the VEX1 cutover batch. */
 import {
   SPARSE_CM12_VELOCITY_EXTENSION_DEPTH,
   SPARSE_CM12_VELOCITY_EXTENSION_HEADER,
@@ -17,25 +11,19 @@ import {
 
 export const SPARSE_CM12_VEX_ACTIVITY_BATCH_MAGIC = 0x5641_4231; // VAB1
 export const SPARSE_CM12_VEX_ACTIVITY_BATCH_VERSION = 1;
-export const SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT_WORDS = 15;
+export const SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT_WORDS = 3;
 
 const align64 = (value: number): number => Math.ceil(value / 64) * 64;
 
-export type SparseCM12VexActivityBatchPacket =
-  "a4d2Classify" | "a4d2Scan" | "a4d2Rebuild" | "a4d2Census" | "vexSerial";
+export type SparseCM12VexActivityBatchPacket = "vexSerial";
 
 export const SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT = Object.freeze({
-  a4d2Classify: Object.freeze({ offsetWords: 0, sizeWords: 3 }),
-  a4d2Scan: Object.freeze({ offsetWords: 3, sizeWords: 3 }),
-  a4d2Rebuild: Object.freeze({ offsetWords: 6, sizeWords: 3 }),
-  a4d2Census: Object.freeze({ offsetWords: 9, sizeWords: 3 }),
   /** Serial scratch packet: copy only after the preceding indirect dispatch. */
-  vexSerial: Object.freeze({ offsetWords: 12, sizeWords: 3 }),
+  vexSerial: Object.freeze({ offsetWords: 0, sizeWords: 3 }),
 } as const);
 
 export interface SparseCM12VexActivityBatchLayout {
   readonly activityBaseWords: number;
-  readonly productionActivity: SparseCM12ProductionActivityLayout;
   readonly velocityExtension: SparseCM12VelocityExtensionLayout;
   readonly velocityState: SparseCM12VelocityExtensionStateLayout;
   readonly totalActivityWords: number;
@@ -51,24 +39,16 @@ export interface SparseCM12VexActivityBatchLayout {
 export function createSparseCM12VexActivityBatchLayout(options: {
   readonly activityTailWords: number;
   readonly stateTailFloats: number;
-  readonly brickCapacity: number;
   readonly cellCapacity: number;
-  readonly brickFineResolution?: 4 | 8 | 16;
 }): SparseCM12VexActivityBatchLayout {
   const activityBaseWords = align64(options.activityTailWords);
-  const productionActivity = createSparseCM12ProductionActivityLayout({
-    baseWords: activityBaseWords,
-    brickCapacity: options.brickCapacity,
-    brickFineResolution: options.brickFineResolution ?? 16,
-  });
   const velocity = createSparseCM12VelocityExtensionResidentLayouts({
-    activityTailWords: productionActivity.totalWords,
+    activityTailWords: activityBaseWords,
     stateTailFloats: options.stateTailFloats,
     cellCapacity: options.cellCapacity,
   });
   return Object.freeze({
     activityBaseWords,
-    productionActivity,
     velocityExtension: velocity.activity,
     velocityState: velocity.state,
     totalActivityWords: velocity.activity.totalWords,
@@ -83,7 +63,6 @@ export function createSparseCM12VexActivityBatchInitialWords(
   layout: SparseCM12VexActivityBatchLayout,
 ): Uint32Array {
   const result = new Uint32Array(layout.totalActivityWords - layout.activityBaseWords);
-  result.set(createSparseCM12ProductionActivityInitialWords(layout.productionActivity));
   result.set(createSparseCM12VelocityExtensionInitialWords(layout.velocityExtension),
     layout.velocityExtension.headerBaseWords - layout.activityBaseWords);
   return result;
@@ -103,22 +82,9 @@ export interface SparseCM12VexActivityBatchIndirectCopy {
 export function createSparseCM12VexActivityBatchIndirectCopies(
   layout: SparseCM12VexActivityBatchLayout,
 ): readonly SparseCM12VexActivityBatchIndirectCopy[] {
-  const a = layout.productionActivity.baseWords;
   const v = layout.velocityExtension.headerBaseWords;
   const target = SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT;
   return Object.freeze([
-    { id: "copy-a4d2-classify", packet: "a4d2Classify",
-      sourceWord: a + SPARSE_CM12_PRODUCTION_ACTIVITY_HEADER.classifyIndirectX,
-      destinationWord: target.a4d2Classify.offsetWords, words: 3 },
-    { id: "copy-a4d2-scan", packet: "a4d2Scan",
-      sourceWord: a + SPARSE_CM12_PRODUCTION_ACTIVITY_HEADER.scanIndirectX,
-      destinationWord: target.a4d2Scan.offsetWords, words: 3 },
-    { id: "copy-a4d2-rebuild", packet: "a4d2Rebuild",
-      sourceWord: a + SPARSE_CM12_PRODUCTION_ACTIVITY_HEADER.rebuildIndirectX,
-      destinationWord: target.a4d2Rebuild.offsetWords, words: 3 },
-    { id: "copy-a4d2-census", packet: "a4d2Census",
-      sourceWord: a + SPARSE_CM12_PRODUCTION_ACTIVITY_HEADER.censusIndirectX,
-      destinationWord: target.a4d2Census.offsetWords, words: 3 },
     { id: "copy-vex-roots", packet: "vexSerial",
       sourceWord: v + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.rootDispatchX,
       destinationWord: target.vexSerial.offsetWords, words: 3 },
@@ -162,24 +128,6 @@ const packet = (value: SparseCM12VexActivityBatchPacket): SparseCM12VexActivityD
 export function createSparseCM12VexActivityBatchPipelineDescriptors():
 readonly SparseCM12VexActivityPipelineDescriptor[] {
   const descriptors: SparseCM12VexActivityPipelineDescriptor[] = [
-    { key: "beginProductionActivity", entryPoint: "beginProductionActivity", dispatch: fixed() },
-    { key: "buildProductionActivityTriggers", entryPoint: "buildProductionActivityTriggers",
-      dispatch: packet("a4d2Classify") },
-    { key: "classifyProductionActivityBricks", entryPoint: "classifyProductionActivityBricks",
-      dispatch: packet("a4d2Classify") },
-    { key: "scanProductionActivityBrickBlocks", entryPoint: "scanProductionActivityBrickBlocks",
-      dispatch: packet("a4d2Scan") },
-    { key: "scanProductionActivityBlockSums", entryPoint: "scanProductionActivityBlockSums",
-      dispatch: fixed() },
-    { key: "scatterProductionActivityBricks", entryPoint: "scatterProductionActivityBricks",
-      dispatch: packet("a4d2Scan") },
-    { key: "rebuildProductionActivityBricks", entryPoint: "rebuildProductionActivityBricks",
-      dispatch: packet("a4d2Rebuild") },
-    { key: "reduceProductionActivityCensusBlocks",
-      entryPoint: "reduceProductionActivityCensusBlocks", dispatch: packet("a4d2Census") },
-    { key: "commitProductionActivityCensus", entryPoint: "commitProductionActivityCensus",
-      dispatch: fixed() },
-    { key: "acceptProductionActivity", entryPoint: "acceptProductionActivity", dispatch: fixed() },
     { key: "beginVelocityExtensionCandidate", entryPoint: "beginVelocityExtensionCandidate",
       dispatch: fixed() },
     { key: "reopenVelocityExtensionPlanForInjection",
@@ -314,38 +262,8 @@ readonly SparseCM12VexActivityBatchScheduleStep[] {
   push({ id: "face-stage-receipt", phase: "receipt", operation: "acceptance-seam",
     after: ["vex-accept"] });
 
-  push({ id: "a4d2-begin", phase: "activity-reduction", operation: "pipeline",
-    pipeline: "beginProductionActivity", after: ["face-stage-receipt"] });
-  push({ id: "a4d2-copy-classify", phase: "activity-reduction",
-    operation: "copy-indirect", copy: "copy-a4d2-classify", after: ["a4d2-begin"] });
-  push({ id: "a4d2-copy-scan", phase: "activity-reduction",
-    operation: "copy-indirect", copy: "copy-a4d2-scan", after: ["a4d2-begin"] });
-  push({ id: "a4d2-build-triggers", phase: "activity-reduction", operation: "pipeline",
-    pipeline: "buildProductionActivityTriggers", after: ["a4d2-copy-classify"] });
-  push({ id: "a4d2-classify", phase: "activity-reduction", operation: "pipeline",
-    pipeline: "classifyProductionActivityBricks", after: ["a4d2-build-triggers"] });
-  push({ id: "a4d2-scan-bricks", phase: "activity-reduction", operation: "pipeline",
-    pipeline: "scanProductionActivityBrickBlocks", after: ["a4d2-classify", "a4d2-copy-scan"] });
-  push({ id: "a4d2-scan-blocks", phase: "activity-reduction", operation: "pipeline",
-    pipeline: "scanProductionActivityBlockSums", after: ["a4d2-scan-bricks"] });
-  push({ id: "a4d2-copy-rebuild", phase: "activity-reduction",
-    operation: "copy-indirect", copy: "copy-a4d2-rebuild", after: ["a4d2-scan-blocks"] });
-  push({ id: "a4d2-copy-census", phase: "activity-reduction",
-    operation: "copy-indirect", copy: "copy-a4d2-census", after: ["a4d2-scan-blocks"] });
-  push({ id: "a4d2-scatter", phase: "activity-reduction", operation: "pipeline",
-    pipeline: "scatterProductionActivityBricks", after: ["a4d2-scan-blocks"] });
-  push({ id: "a4d2-rebuild", phase: "activity-reduction", operation: "pipeline",
-    pipeline: "rebuildProductionActivityBricks",
-    after: ["a4d2-scatter", "a4d2-copy-rebuild"] });
-  push({ id: "a4d2-reduce-census", phase: "activity-reduction", operation: "pipeline",
-    pipeline: "reduceProductionActivityCensusBlocks",
-    after: ["a4d2-rebuild", "a4d2-copy-census"] });
-  push({ id: "a4d2-commit-census", phase: "activity-reduction", operation: "pipeline",
-    pipeline: "commitProductionActivityCensus", after: ["a4d2-reduce-census"] });
-  push({ id: "a4d2-accept", phase: "activity-reduction", operation: "pipeline",
-    pipeline: "acceptProductionActivity", after: ["a4d2-commit-census"] });
   push({ id: "vex-producer-roots", phase: "velocity-extension", operation: "producer-seam",
-    after: ["a4d2-accept"] });
+    after: ["face-stage-receipt"] });
   push({ id: "vex-begin-next-plan", phase: "velocity-extension", operation: "pipeline",
     pipeline: "beginVelocityExtensionCandidate", after: ["vex-producer-roots"] });
   push({ id: "vex-seal-roots", phase: "velocity-extension", operation: "pipeline",
@@ -384,15 +302,6 @@ readonly SparseCM12VexActivityBatchScheduleStep[] {
 
 export const SPARSE_CM12_VEX_ACTIVITY_BATCH_PRODUCER_HOOKS = Object.freeze({
   vexRoots: SPARSE_CM12_VELOCITY_EXTENSION_ROOT_CONTRACT,
-  activity: Object.freeze([
-    "cm12ActivityCandidateGeneration", "cm12ActivityCandidateBrickCount",
-    "cm12ActivityCandidateListGeneration", "cm12ActivityCandidateBrickInvocation",
-    "cm12ActivityTopologyGeneration", "cm12ActivityFramePlanGeneration",
-    "cm12ActivityBrickTopologySignature", "cm12ActivityBrickTopologyChanged",
-    "cm12ActivityBuildTileTrigger", "cm12ActivityRebuildExactTile",
-    "cm12ActivityExpectedTileContributionCount", "cm12ActivityExpectedTileCheck",
-    "cm12ActivityPublishFramePlanRoot", "cm12ActivityPublishExactBrick",
-  ]),
   provenance: Object.freeze([
     "cm12BatchVelocityExtensionRoot", "cm12BatchVelocityExtensionClosure",
     "cm12BatchVelocityExtensionScheduled", "cm12BatchVelocityExtensionOwner",
@@ -479,7 +388,6 @@ export const SPARSE_CM12_VEX_ACTIVITY_BATCH_QA_RECEIPT = Object.freeze({
   diagnosticFields: Object.freeze(["topology", "worksets"]),
   provenanceFields: Object.freeze([
     "vexAcceptedGeneration", "vexFaultCount", "vexUncoveredWriteCount",
-    "a4d2AcceptedGeneration", "a4d2FaultCount", "a4d2UncoveredWriteCount",
     "fplAcceptedGeneration", "fplUnknownCount", "firstMismatchStep", "firstMismatchField",
   ]),
 } as const);

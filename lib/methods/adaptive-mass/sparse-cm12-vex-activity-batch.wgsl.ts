@@ -1,6 +1,4 @@
-/** Binding-free WGSL composition for the A4D2 + VEX1 production batch. */
-import { createSparseCM12ProductionActivityWGSL } from
-  "./sparse-cm12-production-activity.wgsl";
+/** Binding-free WGSL composition for the VEX1 production batch. */
 import {
   createSparseCM12VelocityExtensionWGSL,
   type SparseCM12VelocityExtensionWGSLOptions,
@@ -9,22 +7,6 @@ import type { SparseCM12VexActivityBatchLayout } from
   "./sparse-cm12-vex-activity-batch";
 
 export const SPARSE_CM12_VEX_ACTIVITY_BATCH_WGSL_HOOK_ABI = Object.freeze({
-  activity: Object.freeze([
-    "cm12ActivityCandidateGeneration()->u32",
-    "cm12ActivityCandidateBrickCount()->u32",
-    "cm12ActivityCandidateListGeneration()->u32",
-    "cm12ActivityCandidateBrickInvocation(u32)->u32",
-    "cm12ActivityTopologyGeneration()->u32",
-    "cm12ActivityFramePlanGeneration()->u32",
-    "cm12ActivityBrickTopologySignature(u32)->u32",
-    "cm12ActivityBrickTopologyChanged(u32)->bool",
-    "cm12ActivityBuildTileTrigger(u32,u32)->vec4u",
-    "cm12ActivityRebuildExactTile(u32,u32)->A4D2TileSummary",
-    "cm12ActivityExpectedTileContributionCount(u32,u32)->u32",
-    "cm12ActivityExpectedTileCheck(u32,u32)->u32",
-    "cm12ActivityPublishFramePlanRoot(u32,u32,u32,u32,u32,u32,u32)->bool",
-    "cm12ActivityPublishExactBrick(u32,vec4i,vec4f,vec4u,vec4u)->vec4u",
-  ]),
   provenance: Object.freeze([
     "cm12BatchVelocityExtensionRoot(u32,u32,u32)->bool",
     "cm12BatchVelocityExtensionClosure(u32,u32,u32)->bool",
@@ -60,6 +42,5 @@ export function createSparseCM12VexActivityBatchWGSL(
     frameAuthorityReadyExpression: options.frameAuthorityReadyExpression,
     provenanceHookPrefix: options.provenanceHookPrefix ?? "cm12Batch",
   };
-  return `${createSparseCM12ProductionActivityWGSL(options.layout.productionActivity)}\n`
-    + createSparseCM12VelocityExtensionWGSL(velocityOptions);
+  return createSparseCM12VelocityExtensionWGSL(velocityOptions);
 }

@@ -2686,9 +2686,7 @@ export class WebGPUSparseCM12Resident {
       activityTailWords: scalarResultIngressLayout.totalWords,
       // residentStateLayout appends VEX1 immediately after the journal.
       stateTailFloats: layout.velocityExtensionAcceptedVelocity,
-      brickCapacity: packed.brickCount,
       cellCapacity: templates.cellCount,
-      brickFineResolution: atlas.brickFineResolution,
     });
     if (vexActivityBatchLayout.velocityState.acceptedVelocityFloatBase
         !== layout.velocityExtensionAcceptedVelocity
@@ -3098,7 +3096,7 @@ export class WebGPUSparseCM12Resident {
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
     });
     const vexActivityIndirectArguments = device.createBuffer({
-      label: "Sparse CM12 VEX1/A4D2 indirect dispatches",
+      label: "Sparse CM12 VEX1 indirect dispatches",
       size: 4 * vexActivityBatchLayout.indirectWords,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
     });
@@ -3724,7 +3722,7 @@ export class WebGPUSparseCM12Resident {
     };
     const copyVexActivity = (id: string) => {
       const copy = this.vexActivityIndirectCopies.get(id);
-      if (!copy) throw new Error(`unknown VEX1/A4D2 indirect copy ${id}`);
+      if (!copy) throw new Error(`unknown VEX1 indirect copy ${id}`);
       closePass();
       encoder.copyBufferToBuffer(this.activity, 4 * copy.sourceWord,
         this.vexActivityIndirectArguments, 4 * copy.destinationWord, 12);
@@ -4474,31 +4472,14 @@ export class WebGPUSparseCM12Resident {
       dispatch("markIncrementalActivityTopology",
         Math.ceil(packed.brickCount / WORKGROUP_SIZE));
       dispatch("finalizeIncrementalActivityWorklist", 1);
-      if (this.legacyHostAuthorityOracleForQA) {
-        closePass();
-        encoder.copyBufferToBuffer(this.activity,
-          4 * (this.incrementalActivityLayout.headerBaseWords + 8),
-          this.activityIndirectArguments, 0, 12);
-        dispatchActivity("measureBrickActivity");
-        dispatch("ageIncrementalActivityHistory",
-          Math.ceil(packed.brickCount / WORKGROUP_SIZE));
-        dispatch("finalizeIncrementalActivityCensus", 1);
-      } else {
-        dispatch("beginProductionActivity", 1);
-        copyVexActivity("copy-a4d2-classify");
-        copyVexActivity("copy-a4d2-scan");
-        dispatchVexActivity("buildProductionActivityTriggers", "a4d2Classify");
-        dispatchVexActivity("classifyProductionActivityBricks", "a4d2Classify");
-        dispatchVexActivity("scanProductionActivityBrickBlocks", "a4d2Scan");
-        dispatch("scanProductionActivityBlockSums", 1);
-        dispatchVexActivity("scatterProductionActivityBricks", "a4d2Scan");
-        copyVexActivity("copy-a4d2-rebuild");
-        copyVexActivity("copy-a4d2-census");
-        dispatchVexActivity("rebuildProductionActivityBricks", "a4d2Rebuild");
-        dispatchVexActivity("reduceProductionActivityCensusBlocks", "a4d2Census");
-        dispatch("commitProductionActivityCensus", 1);
-        dispatch("acceptProductionActivity", 1);
-      }
+      closePass();
+      encoder.copyBufferToBuffer(this.activity,
+        4 * (this.incrementalActivityLayout.headerBaseWords + 8),
+        this.activityIndirectArguments, 0, 12);
+      dispatchActivity("measureBrickActivity");
+      dispatch("ageIncrementalActivityHistory",
+        Math.ceil(packed.brickCount / WORKGROUP_SIZE));
+      dispatch("finalizeIncrementalActivityCensus", 1);
     });
     stage("resolution-planning", () => {
       dispatch("planBrickResolution", bricks);

@@ -81,7 +81,7 @@ const fvr = process.argv.includes("--fvr")
   }) : undefined;
 const batch = createSparseCM12VexActivityBatchLayout({
   activityTailWords: scalar.totalWords, stateTailFloats: 65536,
-  brickCapacity: 8, cellCapacity: 1024, brickFineResolution: 16 });
+  cellCapacity: 1024 });
 const pressureAddressing = process.argv.includes("--pab")
   ? createSparseCM12PressureAddressingABLayout({
     baseWords: batch.totalActivityWords, cellCapacity: 1024,
@@ -95,13 +95,13 @@ if (process.argv.includes("--emit-wgsl")) {
   console.log(source);
   process.exit(0);
 }
-const directory = mkdtempSync(join(tmpdir(), "fluid-resident-vex-a4d2-"));
+const directory = mkdtempSync(join(tmpdir(), "fluid-resident-vex-"));
 try {
   const path = join(directory, "resident.wgsl"); writeFileSync(path, source);
   const result = spawnSync(process.env.NAGA ?? "naga", [path], { encoding: "utf8" });
   if (result.status !== 0) throw new Error(result.stderr || result.stdout);
   const entries = [...source.matchAll(/@compute[^\n]*\nfn\s+([A-Za-z0-9_]+)/g)].length;
-  console.log(`Sparse CM12 integrated VEX1+A4D2${pressureAddressing ? "+PAB1" : ""}`
+  console.log(`Sparse CM12 integrated VEX1${pressureAddressing ? "+PAB1" : ""}`
     + `${census ? "+FTC1" : ""}`
     + `${fvr ? "+FVR1" : ""}`
     + ` resident: Naga PASS (${entries} entry points)`);
