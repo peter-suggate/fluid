@@ -234,8 +234,6 @@ for (const [file, required] of [
     ["SPARSE_CM12_SCALAR_RESULT_FAULT.atomicContention", "attempt<64u"]],
   ["lib/methods/adaptive-mass/sparse-cm12-face-projection-authority.wgsl.ts",
     ["SPARSE_CM12_FACE_PROJECTION_FAULT.atomicContention", "attempt<64u"]],
-  ["lib/methods/adaptive-mass/sparse-cm12-dirty-scheduler.wgsl.ts",
-    ["SetPackedLaneMaximum(tile", "SetOriginStages(tile", "attempt<64u"]],
 ] as const) {
   const source = readFileSync(path.resolve(PROJECT_ROOT, file), "utf8");
   for (const token of required) assert.ok(source.includes(token),

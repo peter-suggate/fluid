@@ -6,8 +6,6 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createWebgpuSparseCM12ResidentWGSL } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
-import { createSparseCM12DirtySchedulerLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-dirty-scheduler";
 import { createSparseCM12IncrementalActivityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-incremental-activity";
 import { createSparseCM12CanonicalMembershipLayout } from
@@ -36,12 +34,10 @@ import { createSparseCM12VexActivityBatchLayout } from
 import { createSparseCM12PressureAddressingABLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-addressing-ab";
 
-const dirty = createSparseCM12DirtySchedulerLayout({ logicalBrickCount: 8,
-  brickFineResolution: 16, journalCapacity: 1024, packingPacketCount: 6 });
-const temporal = { headerBaseWords: dirty.totalWords + 64,
-  cellListBaseWords: dirty.totalWords + 72, rowListBaseWords: dirty.totalWords + 1096,
-  cellFlagABaseWords: dirty.totalWords + 2120,
-  cellFlagBBaseWords: dirty.totalWords + 3144, totalWords: dirty.totalWords + 4168 };
+const temporal = { headerBaseWords: 64,
+  cellListBaseWords: 72, rowListBaseWords: 1096,
+  cellFlagABaseWords: 2120,
+  cellFlagBBaseWords: 3144, totalWords: 4168 };
 const pressure = { edgeCoefficientBaseWords: 4096, cellSlotBaseWords: 8192,
   rowSlotBaseWords: 9216, cellChangeBaseWords: 10240, rowChangeBaseWords: 11264,
   brickStateBaseWords: 12288, rowTopologyStampBaseWords: 12352,
@@ -92,7 +88,7 @@ const pressureAddressing = process.argv.includes("--pab")
     brickFineResolution: 16, presentationPageResolution: 16,
     constructionMode: "qa-pressure-addressing-ab",
   }) : undefined;
-const source = createWebgpuSparseCM12ResidentWGSL(16, 16, dirty, temporal, pressure,
+const source = createWebgpuSparseCM12ResidentWGSL(16, 16, temporal, pressure,
   activity, membership, framePlan, presentation, frameControl.layout, scalar,
   ptr, pcf, psa, fpa, batch, pressureAddressing, undefined, census, fvr);
 if (process.argv.includes("--emit-wgsl")) {

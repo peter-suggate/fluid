@@ -20,8 +20,6 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createWebgpuSparseCM12ResidentWGSL } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
-import { createSparseCM12DirtySchedulerLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-dirty-scheduler";
 import { createSparseCM12IncrementalActivityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-incremental-activity";
 import { createSparseCM12CanonicalMembershipLayout } from
@@ -128,14 +126,12 @@ async function main(): Promise<void> {
       : [[4, 4], [8, 4], [8, 8], [16, 4], [16, 8], [16, 16]];
     for (const [brickFineResolution, presentationPageResolution] of variants) {
       const variant = `B${brickFineResolution}/P${presentationPageResolution}`;
-      const dirty = createSparseCM12DirtySchedulerLayout({ logicalBrickCount: 8,
-        brickFineResolution, journalCapacity: 1024, packingPacketCount: 6 });
-      const temporal = { headerBaseWords: dirty.totalWords + 64,
-        cellListBaseWords: dirty.totalWords + 72,
-        rowListBaseWords: dirty.totalWords + 1096,
-        cellFlagABaseWords: dirty.totalWords + 2120,
-        cellFlagBBaseWords: dirty.totalWords + 3144,
-        totalWords: dirty.totalWords + 4168 };
+      const temporal = { headerBaseWords: 64,
+        cellListBaseWords: 72,
+        rowListBaseWords: 1096,
+        cellFlagABaseWords: 2120,
+        cellFlagBBaseWords: 3144,
+        totalWords: 4168 };
       const pressure = { edgeCoefficientBaseWords: 4096, cellSlotBaseWords: 8192,
         rowSlotBaseWords: 9216, cellChangeBaseWords: 10240,
         rowChangeBaseWords: 11264, brickStateBaseWords: 12288,
@@ -205,7 +201,7 @@ async function main(): Promise<void> {
       const source = createWebgpuSparseCM12ResidentWGSL(
         brickFineResolution,
         presentationPageResolution,
-        dirty, temporal, pressure, activity, canonicalMembership,
+        temporal, pressure, activity, canonicalMembership,
         framePlan, presentation, frameControl?.layout, scalarAuthority,
         pressureTopologyRepair,
         persistentPressureCache,

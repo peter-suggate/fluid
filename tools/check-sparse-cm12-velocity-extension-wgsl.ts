@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 /** Compile the standalone VEX1 library in the complete resident shader context. */
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { createSparseCM12DirtySchedulerLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-dirty-scheduler";
 import { createSparseCM12IncrementalActivityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-incremental-activity";
 import { createSparseCM12VelocityExtensionLayout } from
@@ -17,14 +15,12 @@ const entryPoints = (source: string): readonly string[] =>
     .map((match) => match[1]!);
 
 function integratedSource(): string {
-  const dirty = createSparseCM12DirtySchedulerLayout({ logicalBrickCount: 8,
-    brickFineResolution: 16, journalCapacity: 512, packingPacketCount: 6 });
-  const temporal = { headerBaseWords: dirty.totalWords + 64,
-    cellListBaseWords: dirty.totalWords + 72,
-    rowListBaseWords: dirty.totalWords + 4168,
-    cellFlagABaseWords: dirty.totalWords + 8264,
-    cellFlagBBaseWords: dirty.totalWords + 12360,
-    totalWords: dirty.totalWords + 16456 };
+  const temporal = { headerBaseWords: 64,
+    cellListBaseWords: 72,
+    rowListBaseWords: 4168,
+    cellFlagABaseWords: 8264,
+    cellFlagBBaseWords: 12360,
+    totalWords: 16456 };
   const pressure = { edgeCoefficientBaseWords: 4096, cellSlotBaseWords: 8192,
     rowSlotBaseWords: 12288, cellChangeBaseWords: 16384,
     rowChangeBaseWords: 20480, brickStateBaseWords: 24576,
@@ -39,7 +35,7 @@ function integratedSource(): string {
     baseWords: activity.totalWords, cellCapacity: 4096,
   });
   return createWebgpuSparseCM12ResidentWGSL(
-    16, 16, dirty, temporal, pressure, activity,
+    16, 16, temporal, pressure, activity,
   ) + createSparseCM12VelocityExtensionWGSL({
     layout: extension,
     // Compile-only tail address. The resident integration supplies the exact

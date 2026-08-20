@@ -31,15 +31,9 @@ const dispatcherNames = ["dispatch", "dispatchAccepted", "dispatchScalarResult",
 const wholeFrameLexicalCallsites = Object.fromEntries(dispatcherNames.map((name) => [name,
   Math.max(0, (encodeBody.match(new RegExp(`\\b${name}\\(`, "g")) ?? []).length - 1)]));
 
-for (const token of ["sealDirtySchedulerPreEpoch", "finalizeDirtySchedulerEpoch"]) {
-  assert.match(resident, new RegExp(`dispatch\\(\"${token}\"`), `${token} is no longer live`);
-}
-assert.doesNotMatch(resident, /publishGlobalDirtySchedulerPackets|finalizeDirtySchedulerPackets/,
-  "global CMD1/PKT1 compatibility projection returned");
-assert.match(resident, /sealDirtySchedulerPreEpoch[\s\S]{0,800}copyBufferToBuffer\(this\.activity[\s\S]{0,800}finalizeQueuedDirtySchedulerPackets/,
-  "compact dirty scheduler finalization seam moved");
-assert.match(resident, /dispatchWorkgroupsIndirect\(this\.presentationIndirectArguments, 0\)/,
-  "queued dirty scheduler finalization is no longer GPU-counted");
+assert.doesNotMatch(resident,
+  /DirtyScheduler|publishGlobalDirtySchedulerPackets|finalizeDirtySchedulerPackets/,
+  "removed dirty scheduler returned");
 assert.doesNotMatch(resident, /set(?:Dirty|Observability).*Enabled/,
   "resident unexpectedly gained an observability selection setter");
 assert.match(overlay, /let dirtyDisplay=sparseFramePlanColor\(cell,fieldMode\)/,
@@ -127,14 +121,12 @@ const defaultValues = resolveMethodValues(adaptiveMassMethod, "balanced", {});
 assert.equal(defaultValues.brickFineResolution, "16");
 assert.equal(defaultValues.presentationPageResolution, "16");
 
-console.log(JSON.stringify({ authority: "FPL1+compact-dirty-scheduler",
+console.log(JSON.stringify({ authority: "FPL1+ACT1-causes",
   currentFixedTail: {
     fplFpp: { dispatches: 16, passes: 2, copies: 2 },
-    dirtySchedulerLifecycle: { dispatches: 3, passes: 2, copies: 1,
-      packetDomain: "GPU-authored exact pre-event queue" },
     mandatoryFrameControlCommit: { dispatches: 1, passesSharedWithPrior: true },
     finalAcceptedIndirectPublication: { dispatches: 0, passes: 0, copies: 1 },
-    total: { dispatches: 20, passes: 4, copies: 4 },
+    total: { dispatches: 17, passes: 2, copies: 3 },
   },
   wholeFrameLexicalAudit: { dispatcherCallsites: wholeFrameLexicalCallsites,
     copyCommandSites: (encodeBody.match(/encoder\.copyBufferToBuffer\(/g) ?? []).length,
@@ -142,7 +134,7 @@ console.log(JSON.stringify({ authority: "FPL1+compact-dirty-scheduler",
     logicalStages: (encodeBody.match(/\bstage\("/g) ?? []).length,
     note: "lexical sites include mutually exclusive QA branches; runtime totals also expand pressure, VEX, tree-level, grading, and journal loops" },
   globalCMD1PKT1ProjectionDeleted: true,
-  framePlanReadsLiveGenerationStampedPackets: true,
+  framePlanReadsLiveActivityCauses: true,
   sirIndexing, uiMatrix,
   b16P4P8Conflict: "fenced: production UI/URL normalizes to B16/P16; direct B4/B8 QA remains construction-only",
   selectedFPLCost: { observabilityDispatches: 0,

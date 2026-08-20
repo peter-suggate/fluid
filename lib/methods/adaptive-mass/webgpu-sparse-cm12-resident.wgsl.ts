@@ -2,11 +2,6 @@ import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
 import {
   SPARSE_CM12_DIRTY_CAUSE_BIT,
 } from "../../core/sparse-cm12-dirty-visualizations";
-import {
-  SPARSE_CM12_DIRTY_SCHEDULER_HEADER,
-  type SparseCM12DirtySchedulerLayout,
-} from "./sparse-cm12-dirty-scheduler";
-import { createSparseCM12DirtySchedulerWGSL } from "./sparse-cm12-dirty-scheduler.wgsl";
 import type { SparseCM12IncrementalActivityLayout } from
   "./sparse-cm12-incremental-activity";
 import { createSparseCM12IncrementalActivityWGSL } from
@@ -300,42 +295,11 @@ fn temporalScalarRowInvocation(invocation:u32)->u32{
 `;
 }
 
-function createResidentDirtySchedulerEntriesWGSL(
-  layout: SparseCM12DirtySchedulerLayout,
-): string {
-  return /* wgsl */ `
-@compute @workgroup_size(1)
-fn beginDirtySchedulerFrame(){
-  let accepted=cm12DirtyLoad(${layout.schedulerBaseWords
-    + SPARSE_CM12_DIRTY_SCHEDULER_HEADER.acceptedGeneration}u);
-  _=cm12DirtyBeginCandidate(accepted,accepted+1u);
-}
-
-@compute @workgroup_size(1)
-fn sealDirtySchedulerPreEpoch(){cm12DirtySealPreOpenPost();}
-
-@compute @workgroup_size(64)
-fn finalizeQueuedDirtySchedulerPackets(@builtin(global_invocation_id)gid:vec3u){
-  let invocation=gid.x;
-  let count=cm12DirtyLoad(${layout.queueHeaderBaseWords}u);
-  if(invocation>=count){return;}
-  let tile=cm12DirtyLoad(${layout.frontierABaseWords}u+invocation);
-  _=cm12DirtyFinalizePacket(tile);
-}
-
-@compute @workgroup_size(1)
-fn finalizeDirtySchedulerEpoch(){
-  _=cm12DirtyFinalizeEpoch();
-}
-`;
-}
-
 /** Construction-time specialization keeps brick geometry in WGSL constants,
  * so the hot lookup/transfer paths pay no runtime ladder branch. */
 export function createWebgpuSparseCM12ResidentWGSL(
   brickFineResolution: SparseCM12BrickFineResolution = 16,
   presentationPageResolution: SparseCM12BrickFineResolution = 16,
-  dirtySchedulerLayout?: SparseCM12DirtySchedulerLayout,
   temporalWorklistLayout?: SparseCM12TemporalWorklistLayout,
   pressureRepairLayout?: SparseCM12PressureRepairLayout,
   incrementalActivityLayout?: SparseCM12IncrementalActivityLayout,
@@ -366,14 +330,6 @@ export function createWebgpuSparseCM12ResidentWGSL(
   // authority directly, so scale two is the finest cached reconstruction.
   // A finer macro can exceed this bounded cache and takes the direct fallback.
   const presentationCacheCapacity = (presentationPageResolution / 2 + 2) ** 3;
-  const dirtySchedulerLibrary = dirtySchedulerLayout
-    ? createSparseCM12DirtySchedulerWGSL({
-      layout: dirtySchedulerLayout, arenaName: "activity", workgroupSize: 64,
-    })
-    : "";
-  const dirtySchedulerEntries = dirtySchedulerLayout
-    ? createResidentDirtySchedulerEntriesWGSL(dirtySchedulerLayout)
-    : "";
   const temporalWorklistEntries = temporalWorklistLayout
     ? createTemporalWorklistWGSL(temporalWorklistLayout)
     : /* wgsl */ `
@@ -385,9 +341,9 @@ fn temporalScalarRowInvocation(invocation:u32)->u32{
   return acceptedTemplateRowInvocation(invocation);
 }
 `;
-  const incrementalActivityEntries = dirtySchedulerLayout && incrementalActivityLayout
+  const incrementalActivityEntries = incrementalActivityLayout
     ? createSparseCM12IncrementalActivityWGSL(incrementalActivityLayout,
-      dirtySchedulerLayout)
+      brickFineResolution / 4)
     : /* wgsl */ `
 fn incrementalActivityGeneration()->u32{return 0u;}
 fn incrementalActivityMarkCellClosure(cell:u32,cause:u32){_=cell;_=cause;}
@@ -757,7 +713,6 @@ struct Params {
 @group(0)@binding(16)var<storage,read_write>topologyArena:array<atomic<u32>>;
 
 ${frameControlEntries}
-${dirtySchedulerLibrary}
 ${temporalWorklistEntries}
 ${pressureRepairEntries}
 ${incrementalActivityEntries}
@@ -5358,8 +5313,10 @@ fn populateSparseCM12PresentationFramePlan(
   let scheduled=(select(mask.x,mask.y,lane>=32u)&(1u<<(lane&31u)))!=0u;
   if(!scheduled){return;}
   let stable=key*ACTIVITY_TILES_PER_BRICK+lane;
-  var origin=cm12DirtyOriginCauseMask(stable)&PRESENTATION_FRAME_PLAN_CAUSES;
-  var inherited=cm12DirtyInheritedCauseMask(stable)&PRESENTATION_FRAME_PLAN_CAUSES;
+  let activityCauses=atomicLoad(&activity[ACTIVITY_TILE_CAUSE+stable])
+    &PRESENTATION_FRAME_PLAN_CAUSES;
+  var origin=activityCauses&PRESENTATION_FRAME_PLAN_DIRECT_CAUSES;
+  var inherited=activityCauses&${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u;
   if(bootstrap){origin=${(SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
     | SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged) >>> 0}u;inherited=0u;}
   if(injected){origin|=${(SPARSE_CM12_DIRTY_CAUSE_BIT.phaseCrossing
@@ -5367,8 +5324,7 @@ fn populateSparseCM12PresentationFramePlan(
   if(pageNeedsActivation){origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.pageActivated}u;}
   let direct=(origin&PRESENTATION_FRAME_PLAN_DIRECT_CAUSES)!=0u;
   if(!direct){inherited|=${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u;}
-  let depth=select(max(1u,(cm12DirtyResolvedClosureDepths(stable)
-    >>(4u*PRESENTATION_FRAME_PLAN_STAGE))&15u),0u,direct);
+  let depth=select(2u,0u,direct);
   cm12FramePlanMarkOwnedNextTile(brick,lane,
     select(0u,PRESENTATION_FRAME_PLAN_STAGE_BIT,direct),
     select(PRESENTATION_FRAME_PLAN_STAGE_BIT,0u,direct),origin,inherited,
@@ -5705,7 +5661,6 @@ ${presentationTemporalReuse}
   }
 }
 
-${dirtySchedulerEntries}
 `;
 }
 

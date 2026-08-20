@@ -182,7 +182,7 @@ const qaResidentWGSL = createWebgpuSparseCM12ResidentWGSL(
   16, 16,
   undefined, undefined, undefined, undefined, undefined, undefined,
   undefined, undefined, undefined, undefined, undefined, undefined,
-  undefined, undefined, undefined, undefined, undefined,
+  undefined, undefined, undefined, undefined,
   layout,
 );
 assert.match(qaResidentWGSL,

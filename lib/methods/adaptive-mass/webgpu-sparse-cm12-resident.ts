@@ -47,13 +47,6 @@ import {
   type SparseCM12TemporalWorklistLayout,
 } from "./webgpu-sparse-cm12-resident.wgsl";
 import {
-  SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS,
-  SPARSE_CM12_DIRTY_SCHEDULER_QUEUE,
-  createSparseCM12DirtySchedulerInitialWords,
-  createSparseCM12DirtySchedulerLayout,
-  type SparseCM12DirtySchedulerLayout,
-} from "./sparse-cm12-dirty-scheduler";
-import {
   createSparseCM12IncrementalActivityInitialWords,
   createSparseCM12IncrementalActivityLayout,
   type SparseCM12IncrementalActivityLayout,
@@ -1981,8 +1974,6 @@ export class WebGPUSparseCM12Resident {
   private readonly scalars: GPUBuffer;
   private readonly conditioning: GPUBuffer;
   private readonly activity: GPUBuffer;
-  /** Stable 4^3 dirty/provenance packets appended to the activity arena. */
-  private readonly dirtySchedulerLayout: SparseCM12DirtySchedulerLayout;
   private readonly temporalWorklistLayout: SparseCM12TemporalWorklistLayout;
   private readonly pressureRepairLayout: SparseCM12PressureRepairLayout;
   /** Persistent compact activity census and per-physical-brick 4^3 tile mask. */
@@ -2127,7 +2118,6 @@ export class WebGPUSparseCM12Resident {
     bindGroup: GPUBindGroup,
     pressureBindGroup: GPUBindGroup,
     pressureTemplates: GPUBuffer,
-    dirtySchedulerLayout: SparseCM12DirtySchedulerLayout,
     temporalWorklistLayout: SparseCM12TemporalWorklistLayout,
     pressureRepairLayout: SparseCM12PressureRepairLayout,
     incrementalActivityLayout: SparseCM12IncrementalActivityLayout,
@@ -2174,7 +2164,6 @@ export class WebGPUSparseCM12Resident {
   ) {
     [this.parameters, this.topology, this.state, this.partials, this.scalars,
       this.conditioning, this.activity, this.candidateState, this.topologyArena] = buffers;
-    this.dirtySchedulerLayout = dirtySchedulerLayout;
     this.temporalWorklistLayout = temporalWorklistLayout;
     this.pressureRepairLayout = pressureRepairLayout;
     this.incrementalActivityLayout = incrementalActivityLayout;
@@ -2620,22 +2609,10 @@ export class WebGPUSparseCM12Resident {
       * logicalBrickDimensions[1]! * logicalBrickDimensions[2]!;
     const tilesPerLogicalBrickAxis = atlas.brickFineResolution / 4;
     const stableDirtyTileCount = logicalBrickCount * tilesPerLogicalBrickAxis ** 3;
-    const dirtySchedulerLayout = createSparseCM12DirtySchedulerLayout({
-      logicalBrickCount,
-      brickFineResolution: atlas.brickFineResolution,
-      // One exact global-path event per stable tile in the neutral cut. Future
-      // producer coalescing shares this bound and rejects locally on overflow.
-      journalCapacity: stableDirtyTileCount,
-      packingPacketCount: 6,
-      baseWords: Math.ceil(activityHistoryWords / SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS)
-        * SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS,
-    });
-    const dirtySchedulerInitialWords = createSparseCM12DirtySchedulerInitialWords(
-      dirtySchedulerLayout, { acceptedGeneration: 0, acceptedCleanBootstrap: true },
-    );
+    const activityAlignmentWords = 64;
     const temporalHeaderBaseWords = Math.ceil(
-      dirtySchedulerLayout.totalWords / SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS,
-    ) * SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS;
+      activityHistoryWords / activityAlignmentWords,
+    ) * activityAlignmentWords;
     const temporalWorklistLayout: SparseCM12TemporalWorklistLayout = Object.freeze({
       headerBaseWords: temporalHeaderBaseWords,
       cellListBaseWords: temporalHeaderBaseWords + 10,
@@ -2651,7 +2628,7 @@ export class WebGPUSparseCM12Resident {
       baseWords: temporalWorklistLayout.totalWords,
       stableTileCount: stableDirtyTileCount,
       brickCount: packed.brickCount,
-      alignmentWords: SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS,
+      alignmentWords: activityAlignmentWords,
     });
     const canonicalMembershipLayout = createSparseCM12CanonicalMembershipLayout({
       baseWords: incrementalActivityLayout.totalWords,
@@ -2660,8 +2637,8 @@ export class WebGPUSparseCM12Resident {
     });
     const framePlanLayout = createSparseCM12FramePlanLayout({
       baseWords: Math.ceil(canonicalMembershipLayout.totalWords
-        / SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS)
-        * SPARSE_CM12_DIRTY_SCHEDULER_ALIGNMENT_WORDS,
+        / activityAlignmentWords)
+        * activityAlignmentWords,
       brickCapacity: packed.brickCount,
       brickFineResolution: atlas.brickFineResolution,
       packetCount: 6,
@@ -2731,9 +2708,8 @@ export class WebGPUSparseCM12Resident {
         brickFineResolution: 16,
         presentationPageResolution: 16,
         constructionMode: "qa-pressure-addressing-ab",
-      });
+    });
     const initialActivity = new Uint32Array(pressureAddressingABLayout.totalWords);
-    initialActivity.set(dirtySchedulerInitialWords);
     initialActivity.set(createSparseCM12IncrementalActivityInitialWords(
       incrementalActivityLayout,
     ), incrementalActivityLayout.headerBaseWords);
@@ -3249,7 +3225,7 @@ export class WebGPUSparseCM12Resident {
     const shaderModule = compiler.createShaderModule({ label: "Sparse CM12 resident shader",
       code: createWebgpuSparseCM12ResidentWGSL(
         atlas.brickFineResolution, presentationPageResolution,
-        dirtySchedulerLayout, temporalWorklistLayout, pressureWorklistData.layout,
+        temporalWorklistLayout, pressureWorklistData.layout,
         incrementalActivityLayout, canonicalMembershipLayout,
         framePlanLayout, framePlanPresentationLayout,
         frameControl.layout, scalarResultIngressLayout, pressureTopologyRepairLayout,
@@ -3347,9 +3323,6 @@ export class WebGPUSparseCM12Resident {
       "commitSparseCM12FramePlanPresentationPacket",
       "finalizeSparseCM12FramePlanPresentationExecution",
       "rejectSparseCM12FramePlanPresentationFaults",
-      "beginDirtySchedulerFrame", "sealDirtySchedulerPreEpoch",
-      "finalizeQueuedDirtySchedulerPackets",
-      "finalizeDirtySchedulerEpoch",
       "beginPersistentPressureCache", "finalizePersistentPressureCacheFrontier",
       "repairPersistentPressureCache", "finalizePersistentPressureFineCache",
       "seedPreviousPCFBrickLeaves", "seedPreviousPCFAggregateEdgeLeaves",
@@ -3551,7 +3524,6 @@ export class WebGPUSparseCM12Resident {
       bindGroup,
       pressureBindGroup,
       pressureTemplates,
-      dirtySchedulerLayout,
       temporalWorklistLayout,
       pressureWorklistData.layout,
       incrementalActivityLayout,
@@ -4428,7 +4400,6 @@ export class WebGPUSparseCM12Resident {
       useBindGroup(this.bindGroup);
       dispatch("advanceActivityClock", 1);
       dispatch("beginIncrementalActivity", 1);
-      dispatch("beginDirtySchedulerFrame", 1);
       useBindGroup(this.pressureBindGroup);
       if (this.pressureRefreshOracleForQA) {
         // Construction-only legacy projection oracle. It deliberately keeps
@@ -4587,20 +4558,6 @@ export class WebGPUSparseCM12Resident {
         this.encodeVelocityExtensionPlan(encoder, "Sparse CM12 next-frame VEX plan");
       }
       this.encodeFramePlanPresentation(encoder, "Sparse CM12 frame presentation");
-      // FPL consumes the live generation-stamped packets above. Finalize only
-      // the exact producer queue so advancing the authority no longer expands
-      // a compatibility visualization across every stable tile.
-      dispatch("sealDirtySchedulerPreEpoch", 1);
-      closePass();
-      encoder.copyBufferToBuffer(this.activity, 4 * (
-        this.dirtySchedulerLayout.queueHeaderBaseWords
-        + SPARSE_CM12_DIRTY_SCHEDULER_QUEUE.pre
-        + SPARSE_CM12_DIRTY_SCHEDULER_QUEUE.dispatchX),
-      this.presentationIndirectArguments, 0, 12);
-      const dirtyFinalize = openPass();
-      dirtyFinalize.setPipeline(this.pipelines.finalizeQueuedDirtySchedulerPackets!);
-      dirtyFinalize.dispatchWorkgroupsIndirect(this.presentationIndirectArguments, 0);
-      dispatch("finalizeDirtySchedulerEpoch", 1);
       dispatch("commitSparseCM12FrameControl", 1);
     });
     closePass();

@@ -1,7 +1,5 @@
-import { SPARSE_CM12_DIRTY_CAUSE_BIT, SPARSE_CM12_DIRTY_STAGE_COUNT } from
+import { SPARSE_CM12_DIRTY_CAUSE_BIT } from
   "../../core/sparse-cm12-dirty-visualizations";
-import { SPARSE_CM12_DIRTY_DOMAIN_COUNT, SPARSE_CM12_DIRTY_EPOCH,
-  type SparseCM12DirtySchedulerLayout } from "./sparse-cm12-dirty-scheduler";
 import {
   SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER,
   SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER_WORDS,
@@ -16,12 +14,12 @@ import {
  */
 export function createSparseCM12IncrementalActivityWGSL(
   layout: SparseCM12IncrementalActivityLayout,
-  dirtyLayout: SparseCM12DirtySchedulerLayout,
+  tilesPerAxis: number,
 ): string {
   const h = (word: number) => `${layout.headerBaseWords + word}u`;
-  const allStages = (1 << SPARSE_CM12_DIRTY_STAGE_COUNT) - 1;
-  const allDomains = (1 << SPARSE_CM12_DIRTY_DOMAIN_COUNT) - 1;
-  const tilesPerAxis = dirtyLayout.tilesPerLogicalBrickAxis;
+  if (!Number.isSafeInteger(tilesPerAxis) || tilesPerAxis < 1) {
+    throw new RangeError("activity tilesPerAxis must be a positive safe integer");
+  }
   const tilesPerBrick = tilesPerAxis ** 3;
   const allTileMaskLow = tilesPerBrick >= 32 ? 0xffff_ffff : 2 ** tilesPerBrick - 1;
   const allTileMaskHigh = tilesPerBrick <= 32 ? 0
@@ -119,14 +117,13 @@ fn incrementalActivitySetAllBrickTiles(brick:u32){
   atomicStore(&activity[ACTIVITY_BRICK_TILE_LOW+brick],ACTIVITY_ALL_TILE_LOW);
   atomicStore(&activity[ACTIVITY_BRICK_TILE_HIGH+brick],ACTIVITY_ALL_TILE_HIGH);
 }
-fn incrementalActivityRecordTile(tile:u32,cause:u32,originStage:u32,direct:bool){
+fn incrementalActivityRecordTile(tile:u32,cause:u32){
   if(tile>=ACTIVITY_STABLE_TILE_COUNT){incrementalActivityFault();return;}
   let generation=incrementalActivityGeneration();
   for(var spin=0u;spin<64u;spin+=1u){
     let observed=atomicLoad(&activity[ACTIVITY_TILE_STAMP+tile]);
     if(observed==generation){
       atomicOr(&activity[ACTIVITY_TILE_CAUSE+tile],cause);
-      _=cm12DirtyMergeCause(tile,${allStages}u,cause,direct);
       return;
     }
     if((observed&0x80000000u)==0u){
@@ -135,16 +132,6 @@ fn incrementalActivityRecordTile(tile:u32,cause:u32,originStage:u32,direct:bool)
       if(claim.exchanged){
         atomicStore(&activity[ACTIVITY_TILE_CAUSE+tile],cause);
         atomicAdd(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.dirtyTileCount)}],1u);
-        let receipt=cm12DirtyRecordEvent(tile,${SPARSE_CM12_DIRTY_EPOCH.pre}u,
-          ${allStages}u,${allDomains}u,cause,originStage,direct,true);
-        if(receipt!=cm12DirtyInvalid){
-          _=cm12DirtyRecordCoverage(tile,${SPARSE_CM12_DIRTY_EPOCH.pre}u,
-            ${allStages}u,${allDomains}u,receipt);
-          for(var stage=0u;stage<${SPARSE_CM12_DIRTY_STAGE_COUNT}u;stage+=1u){
-            _=cm12DirtyRequestClosure(tile,stage,2u,${allDomains}u);
-            _=cm12DirtyResolveClosure(tile,stage,2u);
-          }
-        }
         atomicStore(&activity[ACTIVITY_TILE_STAMP+tile],generation);
         return;
       }
@@ -165,7 +152,7 @@ fn incrementalActivityStableTile(cell:u32)->vec2u{
 fn incrementalActivityMarkCell(cell:u32,cause:u32){
   if(cell==INVALID||!cellActive(cell)){return;}
   let stable=incrementalActivityStableTile(cell);
-  incrementalActivityRecordTile(stable.x,cause,2u,true);
+  incrementalActivityRecordTile(stable.x,cause);
   let brick=cellBrick(cell);
   if(brickSpan(brick)==1u){incrementalActivitySetBrickTile(brick,stable.y);}
   else{incrementalActivitySetAllBrickTiles(brick);}
@@ -179,7 +166,7 @@ fn incrementalActivityMarkCellClosure(cell:u32,cause:u32){
       let neighbor=termCell(term);if(neighbor==INVALID||!cellActive(neighbor)){continue;}
       let stable=incrementalActivityStableTile(neighbor);
       incrementalActivityRecordTile(stable.x,
-        cause|${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u,2u,false);
+        ${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u);
       let brick=cellBrick(neighbor);
       if(brickSpan(brick)==1u){incrementalActivitySetBrickTile(brick,stable.y);}
       else{incrementalActivitySetAllBrickTiles(brick);}
@@ -213,8 +200,7 @@ fn incrementalActivityBrickStageTileMask(brick:u32,stageMask:u32,causeMask:u32)-
   for(var local=0u;local<ACTIVITY_TILES_PER_BRICK;local+=1u){
     let tile=base+local;
     if(atomicLoad(&activity[ACTIVITY_TILE_STAMP+tile])!=generation
-      ||(atomicLoad(&activity[ACTIVITY_TILE_CAUSE+tile])&causeMask)==0u
-      ||(cm12DirtyStageMask(tile)&stageMask)==0u){continue;}
+      ||(atomicLoad(&activity[ACTIVITY_TILE_CAUSE+tile])&causeMask)==0u){continue;}
     if(local<32u){result.x|=1u<<local;}else{result.y|=1u<<(local-32u);}
   }
   return result;
@@ -245,7 +231,7 @@ fn incrementalActivityMarkTopologyBrick(brick:u32){
       let q=origin+vec3u(dx,dy,dz);if(any(q>=brickDimensions)){continue;}
       let logical=q.x+brickDimensions.x*(q.y+brickDimensions.y*q.z);
       for(var local=0u;local<ACTIVITY_TILES_PER_BRICK;local+=1u){
-        incrementalActivityRecordTile(logical*ACTIVITY_TILES_PER_BRICK+local,cause,1u,true);
+        incrementalActivityRecordTile(logical*ACTIVITY_TILES_PER_BRICK+local,cause);
       }
   }}}
 }
