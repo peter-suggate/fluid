@@ -30,6 +30,8 @@ export const SPARSE_CM12_SCALAR_CANDIDATE_TILE = Object.freeze({
 } as const);
 
 export interface SparseCM12ResidentScalarAuthorityLayout {
+  readonly brickFineResolution: 4 | 8 | 16;
+  readonly presentationPageResolution: 4 | 8 | 16;
   readonly tileCapacity: number;
   readonly candidateBaseWords: number;
   readonly acceptedMassBaseWords: number;
@@ -76,10 +78,18 @@ const align64 = (words: number) => Math.ceil(words / 64) * 64;
 export function createSparseCM12ResidentScalarAuthorityLayout(options: {
   readonly baseWords: number;
   readonly tileCapacity: number;
+  readonly brickFineResolution?: 4 | 8 | 16;
+  readonly presentationPageResolution?: 4 | 8 | 16;
 }): SparseCM12ResidentScalarAuthorityLayout {
   if (!Number.isSafeInteger(options.baseWords) || options.baseWords < 0
     || !Number.isSafeInteger(options.tileCapacity) || options.tileCapacity < 1) {
     throw new RangeError("SCA1 layout requires non-negative base and positive tile capacity");
+  }
+  const brickFineResolution = options.brickFineResolution ?? 8;
+  const presentationPageResolution = options.presentationPageResolution ?? brickFineResolution;
+  if ((brickFineResolution !== 4 && brickFineResolution !== 8 && brickFineResolution !== 16)
+    || presentationPageResolution !== brickFineResolution) {
+    throw new RangeError("SCA1 requires a matched B4/P4, B8/P8, or B16/P16 profile");
   }
   const candidateBaseWords = align64(options.baseWords);
   const velocityInvalidBaseWords = SPARSE_CM12_SCALAR_CANDIDATE_HEADER_WORDS
@@ -87,6 +97,8 @@ export function createSparseCM12ResidentScalarAuthorityLayout(options: {
   const candidateWords = align64(velocityInvalidBaseWords + options.tileCapacity);
   const acceptedMassBaseWords = candidateBaseWords + candidateWords;
   return Object.freeze({
+    brickFineResolution,
+    presentationPageResolution,
     tileCapacity: options.tileCapacity,
     candidateBaseWords,
     velocityInvalidBaseWords: candidateBaseWords + velocityInvalidBaseWords,
@@ -148,8 +160,8 @@ export class WebGPUSparseCM12ScalarAuthority {
   ): Promise<WebGPUSparseCM12ScalarAuthority> {
     const authority = createSparseCM12ScalarWorkAuthority({
       tileCapacity: residentLayout.tileCapacity,
-      brickFineResolution: 16,
-      presentationPageResolution: 16,
+      brickFineResolution: residentLayout.brickFineResolution,
+      presentationPageResolution: residentLayout.presentationPageResolution,
     });
     const candidateBytes = 4 * residentLayout.candidateWords;
     const buffer = device.createBuffer({

@@ -89,8 +89,8 @@ fn cm12SAWHeaderValid()->bool{
     &&cm12SAWLoad(${h.stageHeaderWords}u)==${SPARSE_CM12_SCALAR_AUTHORITY_STAGE_HEADER_WORDS}u
     &&cm12SAWLoad(${h.stageCount}u)==${SPARSE_CM12_SCALAR_AUTHORITY_STAGE_COUNT}u
     &&cm12SAWLoad(${h.dependencyCount}u)==${SPARSE_CM12_SCALAR_AUTHORITY_DEPENDENCY_COUNT}u
-    &&cm12SAWLoad(${h.brickFineResolution}u)==16u
-    &&cm12SAWLoad(${h.presentationPageResolution}u)==16u
+    &&cm12SAWLoad(${h.brickFineResolution}u)==${l.brickFineResolution}u
+    &&cm12SAWLoad(${h.presentationPageResolution}u)==${l.presentationPageResolution}u
     &&cm12SAWLoad(${h.tileCapacity}u)==cm12SAWTileCapacity
     &&cm12SAWLoad(${h.dependencyBase}u)==${l.dependencyBaseWords}u
     &&cm12SAWLoad(${h.bankReceiptBase}u)==${l.bankReceiptBaseWords}u

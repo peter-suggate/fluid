@@ -11,6 +11,8 @@ import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 import { SPARSE_CM12_ACTIVITY_POLICY } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import type { SparseCM12TransportExperiment } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
@@ -158,8 +160,10 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
 
       device.pushErrorScope("validation");
       const scene = createMinimalPowerDamBreak64Scene();
-      const createSolver = (resolutionMode: "adaptive" | "all-fine") =>
-        WebGPUAdaptiveMassSolver.createAsync(device!, scene, "balanced", undefined, {
+      const structureExperiment = process.env.FLUID_SPARSE_CM12_STRUCTURE_EXPERIMENT as
+        Exclude<SparseCM12TransportExperiment, "baseline"> | undefined;
+      const createSolver = (resolutionMode: "adaptive" | "all-fine") => {
+        const args = [device!, scene, "balanced", undefined, {
           resolutionMode,
           brickFineResolution: 8,
           // Begin the experimental arm deliberately over-refined so this
@@ -172,7 +176,12 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
             topologyCadenceSteps: resolutionMode === "adaptive" ? 1 : 64,
           },
           timeStep: "paper",
-        }, () => {});
+        }, () => {}] as const;
+        return structureExperiment
+          ? WebGPUAdaptiveMassSolver.createTransportExperimentForQA(
+            structureExperiment, ...args)
+          : WebGPUAdaptiveMassSolver.createAsync(...args);
+      };
       const adaptive = await createSolver("adaptive");
       const allFine = await createSolver("all-fine");
       try {

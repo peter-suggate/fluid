@@ -30,6 +30,7 @@ import {
   pickFluidVolume,
   type FluidVolumeBody,
 } from "./editor-fluid-volume";
+import { SCENE_INSTRUMENTS, sceneInstrumentAction } from "./scene-instruments";
 import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice";
 import type { SceneDescription, Vec3 } from "./model";
 
@@ -587,9 +588,10 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
  * They are about the fluid and not about the room: "what is this advance
  * costing" and "is this solve converging" are questions asked *of a running
  * solve*, which is the same reason the ring is contextual at all. So they are
- * offered wherever the water is — on the body and on the tank that holds it —
- * and nowhere else. Their counterpart for the *picture* is `sceneDocumentActions`
- * on the empty-space ring, where the frame graph sits for the mirror reason.
+ * offered wherever the water is — on the body and on the tank that holds it.
+ * They are reachable without pointing at water too, from `sceneInstrumentWedge`
+ * on the empty-space ring and from their keys, because a solve nobody has
+ * clicked on is still running and still costs something.
  *
  * In a dry scene there is no advance for the pipeline wedge to price — the
  * tank still answers the ring, but the only pipeline the scene runs is the
@@ -599,31 +601,13 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
 export function fluidInstrumentActions(scene: SceneDescription): readonly EditorAction[] {
   const fluidEnabled = scene.systems?.fluid !== false;
   return [
-    fluidEnabled
-      ? {
-        id: "pipeline",
-        label: "Pipeline",
-        icon: "pipeline",
-        tone: "fluid",
-        hint: "Open the advance pipeline: per-stage GPU cost, gates and solver tuning",
-        effect: { kind: "open-overlay", overlay: "sim-pipeline" },
-      }
-      : {
-        id: "pipeline",
-        label: "Pipeline",
-        icon: "render-pipeline",
-        tone: "prop",
-        hint: "Open the frame graph: per-pass GPU cost, stage ablation and node tuning",
-        effect: { kind: "open-overlay", overlay: "render-pipeline" },
-      },
-    {
-      id: "diagnostics",
-      label: "Diagnostics",
-      icon: "diagnostics",
-      tone: "fluid",
-      hint: "Open the live instrument cards: divergence, residual, CFL, mass drift",
-      effect: { kind: "open-overlay", overlay: "diagnostics" },
-    },
+    sceneInstrumentAction(
+      fluidEnabled ? SCENE_INSTRUMENTS["sim-pipeline"] : SCENE_INSTRUMENTS["render-pipeline"],
+      // The wedge keeps its own word in the dry case: the slot in the ring is
+      // "the pipeline this scene runs", and only its contents change.
+      fluidEnabled ? undefined : { label: SCENE_INSTRUMENTS["sim-pipeline"].wedge },
+    ),
+    sceneInstrumentAction(SCENE_INSTRUMENTS.diagnostics),
   ];
 }
 

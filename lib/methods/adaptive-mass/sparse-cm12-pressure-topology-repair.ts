@@ -112,12 +112,14 @@ export function createSparseCM12PressureTopologyRepairLayout(options: {
   readonly brickCapacity: number;
   readonly rowCapacity: number;
   readonly baseWords?: number;
-  readonly brickFineResolution?: 16;
-  readonly presentationPageResolution?: 16;
+  readonly brickFineResolution?: 4 | 8 | 16;
+  readonly presentationPageResolution?: 4 | 8 | 16;
 }): SparseCM12PressureTopologyRepairLayout {
-  if ((options.brickFineResolution ?? 16) !== 16
-    || (options.presentationPageResolution ?? 16) !== 16) {
-    throw new Error("PTR1 is intentionally the B16/P16 physical ABI");
+  const brickFineResolution = options.brickFineResolution ?? 8;
+  const presentationPageResolution = options.presentationPageResolution ?? brickFineResolution;
+  if ((brickFineResolution !== 4 && brickFineResolution !== 8 && brickFineResolution !== 16)
+    || presentationPageResolution !== brickFineResolution) {
+    throw new Error("PTR1 requires a matched B4/P4, B8/P8, or B16/P16 physical ABI");
   }
   const brickCapacity = checkedCapacity(options.brickCapacity, "PTR1 brickCapacity");
   const rowCapacity = checkedCapacity(options.rowCapacity, "PTR1 rowCapacity");

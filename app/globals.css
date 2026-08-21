@@ -358,12 +358,25 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 /* A click pins the traced ray, so the pointer is aiming rather than grabbing. */
 .gpu-canvas[data-pixel-trace="live"] { cursor: crosshair; }
 .gpu-canvas[data-pixel-trace="live"]:active { cursor: grabbing; }
-/* The frame rate owns the top-right corner alone now — pick mode moved to the
-   contextual ring on a fluid cell, so nothing else lands here to collide with
-   it and it no longer needs a flex row to arbitrate the corner. Quiet by
-   default: it is a number you glance at, not a control. */
-.fps-meter { position: absolute; z-index: 6; top: 15px; right: 16px; min-width: 68px; height: 26px; padding: 0 9px; display: grid; place-items: center; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); opacity: .62; pointer-events: none; backdrop-filter: var(--frost); transition: opacity .2s ease; }
+/* The top-right corner: what the frame costs, and the way into the readings
+   that say where it went. The number is quiet by default — it is a glance, not
+   a control — and the instrument tags are quieter still: absent until the
+   pointer is in the viewport, dim until it is on them, lit only for the one
+   that is open. They reserve their width at rest so revealing them never nudges
+   the number, and they sit left of it so the digits keep the corner. */
+.fps-cluster { position: absolute; z-index: 6; top: 15px; right: 16px; display: flex; align-items: center; gap: 6px; pointer-events: none; transition: right .2s ease; }
+.fps-meter { min-width: 68px; height: 26px; padding: 0 9px; display: grid; place-items: center; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); opacity: .62; pointer-events: none; backdrop-filter: var(--frost); transition: opacity .2s ease; }
 .viewport-shell:hover .fps-meter { opacity: 1; }
+.fps-instruments { display: flex; align-items: center; gap: 4px; }
+.fps-instruments button { height: 26px; padding: 0 8px; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); opacity: 0; pointer-events: none; backdrop-filter: var(--frost); cursor: pointer; transition: opacity .2s ease, color .2s ease, border-color .2s ease, background .2s ease; }
+.viewport-shell:hover .fps-instruments button { opacity: .5; pointer-events: auto; }
+.fps-instruments:hover button, .fps-instruments:focus-within button, .fps-instruments button[aria-pressed="true"] { opacity: 1; }
+.fps-instruments button:hover { border-color: var(--line-strong); background: var(--hover); color: var(--text); }
+.fps-instruments button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+/* An open pane takes this corner, and a tag under it can neither be read nor
+   clicked — which would make switching instruments a close-then-reopen. So the
+   cluster steps aside exactly as the probe docks do, to the same berth. */
+.viewport-shell:has(.scene-instrument) .fps-cluster { right: calc(14px + min(420px, 100% - 28px) + 12px); }
 .viewport-topline { position: absolute; inset: 15px 16px auto; display: flex; align-items: start; justify-content: space-between; gap: 12px; pointer-events: none; }
 .viewport-topline > * { pointer-events: auto; }
 .gpu-badge { min-width: 230px; height: 31px; padding: 0 10px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); }
@@ -563,6 +576,8 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
      whole arrangement — so it takes the bottom half instead of the right edge
      and the picture keeps the top. */
   .scene-instrument { top: auto; left: 14px; right: 14px; bottom: 62px; width: auto; max-height: 56%; }
+  /* A bottom sheet leaves the corner alone, so the cluster keeps it. */
+  .viewport-shell:has(.scene-instrument) .fps-cluster { right: 16px; }
 }
 
 /* The status band: a live dot, what is running, whether the figures are live,
@@ -1517,7 +1532,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .lab-shell .render-discrete-control,
 .transport-resource-state { border-radius: var(--radius-s); }
 
-.gpu-badge, .health-chip, .fps-meter, .camera-toolbar, .scene-overlay,
+.gpu-badge, .health-chip, .fps-meter, .fps-instruments button, .camera-toolbar, .scene-overlay,
 .transport-cluster, .resource-activity-pill, .scene-scale-overlay,
 .entity-hover-chip, .editor-hover-chip, .shape-readout, .shape-axis-lock,
 .editor-fill-handle, .selection-chip, .selection-precision,

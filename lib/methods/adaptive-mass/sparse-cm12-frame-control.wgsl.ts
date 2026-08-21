@@ -69,8 +69,10 @@ fn cm12FCHeaderValid()->bool{
       !=${SPARSE_CM12_FRAME_CONTROL_HEADER_WORDS}u
     ||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.totalWords)})!=cm12FCTotalWords
     ||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.flags)})!=cm12FCStaticFlags
-    ||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.brickFineResolution)})!=16u
-    ||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.presentationPageResolution)})!=16u
+    ||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.brickFineResolution)})
+      !=${l.brickFineResolution}u
+    ||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.presentationPageResolution)})
+      !=${l.presentationPageResolution}u
     ||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.indirectWords)})
       !=${SPARSE_CM12_FRAME_CONTROL_INDIRECT_WORDS}u
     ||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.familyCount)})

@@ -57,8 +57,8 @@ fn cm12SRRHeaderValid()->bool{
   return arrayLength(&${arena})==${l.totalWords}u
     &&cm12SRRLoad(${h.magic}u)==0x${SPARSE_CM12_SCALAR_RESULT_MAGIC.toString(16)}u
     &&cm12SRRLoad(${h.version}u)==${SPARSE_CM12_SCALAR_RESULT_VERSION}u
-    &&cm12SRRLoad(${h.brickFineResolution}u)==16u
-    &&cm12SRRLoad(${h.presentationPageResolution}u)==16u
+    &&cm12SRRLoad(${h.brickFineResolution}u)==${l.brickFineResolution}u
+    &&cm12SRRLoad(${h.presentationPageResolution}u)==${l.presentationPageResolution}u
     &&cm12SRRLoad(${h.tileCapacity}u)==cm12SRRTileCapacity
     &&cm12SRRLoad(${h.leafCapacity}u)==cm12SRRLeafCapacity
     &&cm12SRRLoad(${h.tileBase}u)==${l.tileBaseWords}u

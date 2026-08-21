@@ -196,10 +196,13 @@ export function createSparseCM12PersistentPressureCacheLayout(request: {
   readonly qaFullOracle?: boolean;
 }): SparseCM12PersistentPressureCacheLayout {
   const { phaseArena, htp1 } = request;
-  if (phaseArena.input.brickFineResolution !== 16
-    || phaseArena.input.presentationPageResolution !== 16
-    || htp1.brickFineResolution !== 16 || htp1.presentationPageResolution !== 16) {
-    throw new Error("PCF1 is intentionally the B16/P16 pressure-cache ABI");
+  if ((phaseArena.input.brickFineResolution !== 4
+      && phaseArena.input.brickFineResolution !== 8
+      && phaseArena.input.brickFineResolution !== 16)
+    || phaseArena.input.presentationPageResolution !== phaseArena.input.brickFineResolution
+    || htp1.brickFineResolution !== phaseArena.input.brickFineResolution
+    || htp1.presentationPageResolution !== phaseArena.input.presentationPageResolution) {
+    throw new Error("PCF1 requires a matched B4/P4, B8/P8, or B16/P16 pressure-cache ABI");
   }
   if (htp1.cellCount !== phaseArena.input.cellCount
     || htp1.rowCount !== phaseArena.input.rowCount

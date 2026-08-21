@@ -1,4 +1,4 @@
-/** Exact, non-physical scalar work authority for the B16/P16 Sparse CM12 path. */
+/** Exact, non-physical scalar work authority for matched Sparse CM12 profiles. */
 import { SPARSE_CM12_FRAME_PLAN_STAGE, SPARSE_CM12_FRAME_PLAN_STAGE_COUNT } from
   "../../core/sparse-cm12-frame-plan";
 
@@ -125,8 +125,8 @@ export interface SparseCM12ScalarStageRequest {
 }
 
 export interface SparseCM12ScalarWorkAuthorityLayout {
-  readonly brickFineResolution: 16;
-  readonly presentationPageResolution: 16;
+  readonly brickFineResolution: 4 | 8 | 16;
+  readonly presentationPageResolution: 4 | 8 | 16;
   readonly tileCapacity: number;
   readonly stageHeadersBaseWords: number;
   readonly dependencyBaseWords: number;
@@ -250,14 +250,16 @@ function compileClosure(
 
 export function createSparseCM12ScalarWorkAuthority(options: {
   readonly tileCapacity: number;
-  readonly brickFineResolution?: 16;
-  readonly presentationPageResolution?: 16;
+  readonly brickFineResolution?: 4 | 8 | 16;
+  readonly presentationPageResolution?: 4 | 8 | 16;
   readonly stageClosure?: readonly (readonly (readonly number[])[])[];
 }): SparseCM12ScalarWorkAuthority {
   const tileCapacity = integer(options.tileCapacity, "tileCapacity", true);
-  if ((options.brickFineResolution ?? 16) !== 16
-    || (options.presentationPageResolution ?? 16) !== 16) {
-    throw new Error("SAW1 is intentionally the B16/P16 physical ABI");
+  const brickFineResolution = options.brickFineResolution ?? 8;
+  const presentationPageResolution = options.presentationPageResolution ?? brickFineResolution;
+  if ((brickFineResolution !== 4 && brickFineResolution !== 8 && brickFineResolution !== 16)
+    || presentationPageResolution !== brickFineResolution) {
+    throw new Error("SAW1 requires a matched B4/P4, B8/P8, or B16/P16 physical ABI");
   }
   const closure = compileClosure(tileCapacity, options.stageClosure);
   const stageHeadersBaseWords = SPARSE_CM12_SCALAR_AUTHORITY_HEADER_WORDS;
@@ -297,7 +299,7 @@ export function createSparseCM12ScalarWorkAuthority(options: {
   const closureIdBaseWords = at;
   const totalWords = alignWords(at + closure.ids.length);
   const layout: SparseCM12ScalarWorkAuthorityLayout = Object.freeze({
-    brickFineResolution: 16, presentationPageResolution: 16, tileCapacity,
+    brickFineResolution, presentationPageResolution, tileCapacity,
     stageHeadersBaseWords, dependencyBaseWords, bankReceiptBaseWords,
     fplReceiptBaseWords, tileBaseWords,
     stageTreeBaseWords: Object.freeze(stageTreeBaseWords),
@@ -314,7 +316,8 @@ export function createSparseCM12ScalarWorkAuthority(options: {
   words[h.stageHeaderWords] = SPARSE_CM12_SCALAR_AUTHORITY_STAGE_HEADER_WORDS;
   words[h.stageCount] = SPARSE_CM12_SCALAR_AUTHORITY_STAGE_COUNT;
   words[h.dependencyCount] = SPARSE_CM12_SCALAR_AUTHORITY_DEPENDENCY_COUNT;
-  words[h.brickFineResolution] = 16; words[h.presentationPageResolution] = 16;
+  words[h.brickFineResolution] = brickFineResolution;
+  words[h.presentationPageResolution] = presentationPageResolution;
   words[h.tileCapacity] = tileCapacity;
   words[h.phase] = SPARSE_CM12_SCALAR_AUTHORITY_PHASE.accepted;
   words[h.firstFaultTile] = SPARSE_CM12_SCALAR_AUTHORITY_INVALID;
@@ -400,14 +403,17 @@ export function scalarTileWord(
 export function sparseCM12ScalarAuthorityHeaderValid(authority: SparseCM12ScalarWorkAuthority): boolean {
   const { layout: l, words } = authority; const h = SPARSE_CM12_SCALAR_AUTHORITY_HEADER;
   return words.length === l.totalWords && l.totalBytes === 4 * l.totalWords
-    && l.brickFineResolution === 16 && l.presentationPageResolution === 16
+    && (l.brickFineResolution === 4 || l.brickFineResolution === 8
+      || l.brickFineResolution === 16)
+    && l.presentationPageResolution === l.brickFineResolution
     && words[h.magic] === SPARSE_CM12_SCALAR_AUTHORITY_MAGIC
     && words[h.version] === SPARSE_CM12_SCALAR_AUTHORITY_VERSION
     && words[h.headerWords] === SPARSE_CM12_SCALAR_AUTHORITY_HEADER_WORDS
     && words[h.stageHeaderWords] === SPARSE_CM12_SCALAR_AUTHORITY_STAGE_HEADER_WORDS
     && words[h.stageCount] === SPARSE_CM12_SCALAR_AUTHORITY_STAGE_COUNT
     && words[h.dependencyCount] === SPARSE_CM12_SCALAR_AUTHORITY_DEPENDENCY_COUNT
-    && words[h.brickFineResolution] === 16 && words[h.presentationPageResolution] === 16
+    && words[h.brickFineResolution] === l.brickFineResolution
+    && words[h.presentationPageResolution] === l.presentationPageResolution
     && words[h.tileCapacity] === l.tileCapacity
     && words[h.dependencyBase] === l.dependencyBaseWords
     && words[h.bankReceiptBase] === l.bankReceiptBaseWords

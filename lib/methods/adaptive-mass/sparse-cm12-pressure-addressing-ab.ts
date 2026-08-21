@@ -71,17 +71,19 @@ const align = (value: number): number => Math.ceil(value
 export function createSparseCM12PressureAddressingABLayout(options: {
   readonly baseWords?: number;
   readonly cellCapacity: number;
-  readonly brickFineResolution?: 16;
-  readonly presentationPageResolution?: 16;
+  readonly brickFineResolution?: 4 | 8 | 16;
+  readonly presentationPageResolution?: 4 | 8 | 16;
   /** Required literal makes accidental production allocation conspicuous. */
   readonly constructionMode: "qa-pressure-addressing-ab";
 }): SparseCM12PressureAddressingABLayout {
   if (options.constructionMode !== "qa-pressure-addressing-ab") {
     throw new Error("PAB1 is available only to its explicit QA construction");
   }
-  if ((options.brickFineResolution ?? 16) !== 16
-    || (options.presentationPageResolution ?? 16) !== 16) {
-    throw new Error("PAB1 is intentionally the B16/P16 QA ABI");
+  const brickFineResolution = options.brickFineResolution ?? 8;
+  const presentationPageResolution = options.presentationPageResolution ?? brickFineResolution;
+  if ((brickFineResolution !== 4 && brickFineResolution !== 8 && brickFineResolution !== 16)
+    || presentationPageResolution !== brickFineResolution) {
+    throw new Error("PAB1 requires a matched B4/P4, B8/P8, or B16/P16 QA ABI");
   }
   if (!Number.isSafeInteger(options.cellCapacity)
     || options.cellCapacity < 1 || options.cellCapacity >= 0x4000_0000) {
@@ -101,8 +103,8 @@ export function createSparseCM12PressureAddressingABLayout(options: {
 export function createSparseCM12ProductionPressureAddressingLayout(options: {
   readonly baseWords: number;
   readonly cellCapacity: number;
-  readonly brickFineResolution: 16;
-  readonly presentationPageResolution: 16;
+  readonly brickFineResolution: 4 | 8 | 16;
+  readonly presentationPageResolution: 4 | 8 | 16;
 }): SparseCM12PressureAddressingABLayout {
   const qa = createSparseCM12PressureAddressingABLayout({
     ...options, constructionMode: "qa-pressure-addressing-ab",

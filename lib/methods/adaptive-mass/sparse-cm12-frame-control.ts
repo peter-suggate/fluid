@@ -1,4 +1,4 @@
-/** GPU-owned B16/P16 frame authority, version FCA1. */
+/** GPU-owned matched brick/presentation frame authority, version FCA1. */
 export const SPARSE_CM12_FRAME_CONTROL_MAGIC = 0x4643_4131;
 export const SPARSE_CM12_FRAME_CONTROL_VERSION = 1;
 export const SPARSE_CM12_FRAME_CONTROL_HEADER_WORDS = 64;
@@ -109,8 +109,8 @@ export type SparseCM12FrameControlFamilyName = keyof typeof SPARSE_CM12_FRAME_CO
 
 export interface SparseCM12FrameControlLayout {
   readonly baseWords: number;
-  readonly brickFineResolution: 16;
-  readonly presentationPageResolution: 16;
+  readonly brickFineResolution: 4 | 8 | 16;
+  readonly presentationPageResolution: 4 | 8 | 16;
   readonly d4Capable: boolean;
   readonly rigidCapable: boolean;
   readonly boundaryCapable: boolean;
@@ -157,8 +157,8 @@ export const sparseCM12FrameControlIndirectWord = (
 
 export function createSparseCM12FrameControl(
   options: {
-    readonly brickFineResolution?: 16;
-    readonly presentationPageResolution?: 16;
+    readonly brickFineResolution?: 4 | 8 | 16;
+    readonly presentationPageResolution?: 4 | 8 | 16;
     readonly d4Capable?: boolean;
     readonly rigidCapable?: boolean;
     readonly boundaryCapable?: boolean;
@@ -172,10 +172,11 @@ export function createSparseCM12FrameControl(
     readonly baseWords?: number;
   },
 ): SparseCM12FrameControl {
-  const brickFineResolution = options.brickFineResolution ?? 16;
-  const presentationPageResolution = options.presentationPageResolution ?? 16;
-  if (brickFineResolution !== 16 || presentationPageResolution !== 16) {
-    throw new Error("FCA1 is intentionally the B16/P16 physical ABI");
+  const brickFineResolution = options.brickFineResolution ?? 8;
+  const presentationPageResolution = options.presentationPageResolution ?? brickFineResolution;
+  if ((brickFineResolution !== 4 && brickFineResolution !== 8 && brickFineResolution !== 16)
+    || presentationPageResolution !== brickFineResolution) {
+    throw new Error("FCA1 requires a matched B4/P4, B8/P8, or B16/P16 physical ABI");
   }
   const cellWorkgroups = checkedU32(options.cellWorkgroups, "cellWorkgroups");
   const rowWorkgroups = checkedU32(options.rowWorkgroups, "rowWorkgroups");
@@ -245,15 +246,19 @@ export function sparseCM12FrameControlHeaderValid(control: SparseCM12FrameContro
     | (l.boundaryCapable ? SPARSE_CM12_FRAME_CONTROL_FLAG.boundaryCapable : 0);
   return words.length >= l.totalWords && l.controlWords === SPARSE_CM12_FRAME_CONTROL_TOTAL_WORDS
     && l.totalWords === l.baseWords + l.controlWords
-    && l.totalBytes === 4 * l.totalWords && l.brickFineResolution === 16
-    && l.presentationPageResolution === 16
+    && l.totalBytes === 4 * l.totalWords
+    && (l.brickFineResolution === 4 || l.brickFineResolution === 8
+      || l.brickFineResolution === 16)
+    && l.presentationPageResolution === l.brickFineResolution
     && words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.magic)] === SPARSE_CM12_FRAME_CONTROL_MAGIC
     && words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.version)] === SPARSE_CM12_FRAME_CONTROL_VERSION
     && words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.headerWords)]
       === SPARSE_CM12_FRAME_CONTROL_HEADER_WORDS
     && words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.totalWords)] === l.controlWords
-    && words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.brickFineResolution)] === 16
-    && words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.presentationPageResolution)] === 16
+    && words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.brickFineResolution)]
+      === l.brickFineResolution
+    && words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.presentationPageResolution)]
+      === l.presentationPageResolution
     && words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.indirectWords)]
       === SPARSE_CM12_FRAME_CONTROL_INDIRECT_WORDS
     && words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.familyCount)]

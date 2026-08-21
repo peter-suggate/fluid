@@ -55,6 +55,9 @@ fn cm12PresentationStoreAccepted(page:u32,localIndex:u32,payload:u32){
 fn cm12PresentationCommitCandidate(page:u32,generation:u32){
   if(page<${capacity}u){atomicStore(&candidateControl[page],generation);}
 }
+fn cm12PresentationRejectAccepted(page:u32){
+  if(page<${capacity}u){atomicStore(&candidateControl[page],0u);}
+}
 ${createSparseCM12FramePlanWGSL({ layout: frame })}
 ${createSparseCM12FramePlanPresentationWGSL({ layout: packet })}
 `;

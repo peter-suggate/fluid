@@ -28,11 +28,13 @@ import {
   measureFluidPipelineStage,
 } from "../lib/core/fluid-pipeline";
 import { resolveMethodValues } from "../lib/core/method-contract";
+import { sceneDamBreakBox } from "../lib/core/initial-fluid";
 import {
   GPUStageTimestampRecorder,
   type PerformanceTrace,
 } from "../lib/core/performance-trace";
 import {
+  createMinimalPowerDamBreakScene,
   createMinimalPowerDamBreak32Scene,
   createMinimalPowerDamBreak64Scene,
   createOceanSeicheScene,
@@ -77,13 +79,16 @@ Usage:
 
 Options:
   --help, -h                         Print this help and exit without acquiring WebGPU
-  --scene=NAME                       mini32, mini64, long-dam, ocean-seiche,
+  --scene=NAME                       mini16, mini32, mini64, long-dam, ocean-seiche,
                                      ocean, or symmetric-expansion (default long-dam)
   --brick-fine=4|8|16                Sparse brick ladder (default 16)
   --presentation-page=4|8|16         Presentation page size (default 16)
   --warmup=N                         Warmup hardware samples (default 8)
   --frames=N                         Measured hardware samples (default 40)
   --capture-gap-ms=N                 Timestamp capture spacing (default 110)
+  --minimum-cell-size=N              Add a minimum-cell-size region in finest
+                                     cells (power of two; omitted by default)
+  --region-scope=domain|initial-dam  Region bounds (default domain)
   --max-non-pressure-ms=N            Eligible gate threshold (default 10)
   --enforce-non-pressure-gate=0|1    Exit nonzero when the eligible gate fails
   --enforce-pressure-receipts=0|1    Require fault-free PTR/FPA/PCF/PCA receipts
@@ -101,6 +106,8 @@ const sampled = Number(argument("frames", "40"));
 const brickFineResolution = Number(argument("brick-fine", "16"));
 const presentationPageResolution = Number(argument("presentation-page", "16"));
 const captureGap_ms = Number(argument("capture-gap-ms", "110"));
+const minimumCellSize = Number(argument("minimum-cell-size", "0"));
+const regionScope = argument("region-scope", "domain");
 const maximumTarget_ms = Number(argument("max-non-pressure-ms",
   argument("max-target-ms", "10")));
 const enforceNonPressureGate = argument("enforce-non-pressure-gate",
@@ -113,20 +120,28 @@ for (const [name, value] of Object.entries({ warmup, sampled, brickFineResolutio
     `${name} must be finite and positive; received ${value}`,
   );
 }
+if (!(Number.isSafeInteger(minimumCellSize) && minimumCellSize >= 0
+  && (minimumCellSize === 0 || (minimumCellSize & (minimumCellSize - 1)) === 0))) {
+  throw new RangeError("minimum-cell-size must be zero or a positive power of two");
+}
+if (regionScope !== "domain" && regionScope !== "initial-dam") {
+  throw new RangeError("region-scope must be domain or initial-dam");
+}
 if (![4, 8, 16].includes(brickFineResolution)
   || ![4, 8, 16].includes(presentationPageResolution)
   || presentationPageResolution > brickFineResolution
   || brickFineResolution % presentationPageResolution !== 0) {
   throw new RangeError("brick-fine and presentation-page must be compatible values in 4, 8, 16");
 }
-const buildScene = sceneName === "mini32" ? createMinimalPowerDamBreak32Scene
+const buildScene = sceneName === "mini16" ? createMinimalPowerDamBreakScene
+  : sceneName === "mini32" ? createMinimalPowerDamBreak32Scene
   : sceneName === "mini64" ? createMinimalPowerDamBreak64Scene
   : sceneName === "long-dam" ? createSparseCM12LongDamBreakScene
   : sceneName === "ocean" || sceneName === "ocean-seiche" ? createOceanSeicheScene
   : sceneName === "symmetric-expansion" ? createSymmetricExpansionScene
   : undefined;
 if (!buildScene) throw new RangeError(
-  `scene must be mini32, mini64, long-dam, ocean-seiche, ocean, or symmetric-expansion; received ${sceneName}`,
+  `scene must be mini16, mini32, mini64, long-dam, ocean-seiche, ocean, or symmetric-expansion; received ${sceneName}`,
 );
 
 const median = (values: number[]): number => {
@@ -168,6 +183,27 @@ type ScalarAuthorityHeader = {
   readonly topologyGeneration: number; readonly sourceParity: number;
 };
 type StageCostQASolver = {
+  readSparseWorkShapeQA(): {
+    readonly finestDomainCellCount: number;
+    readonly logicalBrickDimensions: readonly number[];
+    readonly logicalBrickCount: number;
+    readonly packedBrickCount: number;
+    readonly templateCellCount: number;
+    readonly templateRowCount: number;
+    readonly templateCellWorkgroups: number;
+    readonly templateRowWorkgroups: number;
+    readonly conditioningClearBytesPerFrame: number;
+    readonly pressureScratchClearBytesPerFrame: number;
+    readonly pressureHierarchyGroupCount: number;
+    readonly pressureHierarchyEdgeCount: number;
+    readonly pressureFineEdgeCount: number;
+    readonly pressureCoarseEdgeCount: number;
+    readonly scalarResultTileCapacity: number;
+    readonly facePreparationLeafCount: number;
+    readonly presentationPageCount: number;
+    readonly allocatedBytes: number;
+  };
+  readAdaptiveRepresentationQA(): Promise<Record<string, number | boolean>>;
   readFrameControlQA(): Promise<FrameControlHeader>;
   readScalarAuthorityHeaderQA(): Promise<ScalarAuthorityHeader>;
   readVelocityExtensionHeaderQA(): Promise<{
@@ -227,6 +263,35 @@ try {
   await GPUStageTimestampRecorder.prepare(device);
 
   const scene = buildScene();
+  if (minimumCellSize > 0) {
+    const containerMinimum = {
+      x: -0.5 * scene.container.width_m,
+      y: 0,
+      z: -0.5 * scene.container.depth_m,
+    };
+    const dam = sceneDamBreakBox(scene);
+    const min_m = regionScope === "domain" ? containerMinimum : {
+      x: containerMinimum.x + dam.min.x * scene.container.width_m,
+      y: dam.min.y * scene.container.height_m,
+      z: containerMinimum.z + dam.min.z * scene.container.depth_m,
+    };
+    const max_m = regionScope === "domain" ? {
+      x: 0.5 * scene.container.width_m,
+      y: scene.container.height_m,
+      z: 0.5 * scene.container.depth_m,
+    } : {
+      x: containerMinimum.x + dam.max.x * scene.container.width_m,
+      y: dam.max.y * scene.container.height_m,
+      z: containerMinimum.z + dam.max.z * scene.container.depth_m,
+    };
+    scene.fluid.refinementRegions = [{
+      id: `stage-cost-min-${minimumCellSize}-${regionScope}`,
+      rule: "minimum-cell-size",
+      minimumCellSize_cells: minimumCellSize,
+      min_m,
+      max_m,
+    }];
+  }
   const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
     timeStep: "scene",
     brickFineResolution: String(brickFineResolution),
@@ -236,6 +301,7 @@ try {
     device, scene, "balanced", values, undefined, () => {});
   teardownSolver = solver;
   const qaSolver = solver as typeof solver & StageCostQASolver;
+  const workShape = qaSolver.readSparseWorkShapeQA();
   const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
 
   const stageSamples = new Map<string, number[]>();
@@ -414,7 +480,6 @@ try {
     }
     const pollStarted_ms = performance.now();
     const expectedTraceContext = `adaptive-mass:sim-${(frame * dt_s).toFixed(6)}`;
-    let info: Awaited<ReturnType<typeof solver.readStats>>;
     let trace: PerformanceTrace | undefined;
     do {
       const candidate = solver.readPerformanceTraceSnapshot!().physicsTrace;
@@ -429,7 +494,7 @@ try {
       await new Promise((resolve) => setTimeout(resolve, Math.min(5, remaining_ms)));
     } while (true);
     debug(`advance ${frame} stats read begin`);
-    info = await solver.readStats();
+    const info = await solver.readStats();
     debug(`advance ${frame} stats read complete`);
     finalInfo = info;
     const committedThisFrame = (info as {
@@ -587,6 +652,7 @@ try {
     diagnosticFailure = `captured ${seen}/${sampled} requested hardware traces in ${
       maximumAdvances} advances`;
   }
+  const adaptiveRepresentation = await qaSolver.readAdaptiveRepresentationQA();
   if (!diagnosticFailure && cpuTargetSamples.length !== sampled) {
     diagnosticFailure = `matched ${cpuTargetSamples.length}/${sampled} CPU traces by sample id`;
   }
@@ -636,11 +702,21 @@ try {
     configuration: {
       brickFineResolution,
       presentationPageResolution,
+      refinementRegion: minimumCellSize === 0 ? undefined : {
+        scope: regionScope,
+        minimumCellSize_cells: minimumCellSize,
+        bounds_m: scene.fluid.refinementRegions?.[0] === undefined ? undefined : {
+          minimum: scene.fluid.refinementRegions[0].min_m,
+          maximum: scene.fluid.refinementRegions[0].max_m,
+        },
+      },
       finestGrid: [solver.info.nx, solver.info.ny, solver.info.nz],
       dt_s,
       captureGap_ms,
       measurementSource: "gpu-hardware-timestamp",
     },
+    workShape,
+    adaptiveRepresentation,
     provenance: {
       gitCommit,
       gitDirty: gitStatus.trim().length > 0,
@@ -649,7 +725,7 @@ try {
       methodProfile: "balanced",
       resolvedMethodValues: values,
       ladder: {
-        productionBrickFineResolutions: [16],
+        productionBrickFineResolutions: [4, 8, 16],
         constructionQABrickFineResolutions: [4, 8, 16],
         brickFineResolution,
         presentationPageResolution,

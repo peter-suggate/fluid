@@ -3101,6 +3101,10 @@ export class FluidLabRenderer {
       sparsePresentationRequired ? "require-dry-scene" : "clear",
       !this.simulationRunning || initialRasterSourceReady,
       bandSampler,
+      // A paused manual step gets one repaint. Its newly published surface
+      // must therefore displace the retained mesh even if that repaint lands
+      // inside the ordinary 60 Hz extraction cadence window.
+      !this.simulationRunning,
     );
     // The pipelines may have crossed submit boundaries; everything below —
     // overlays, upscale, the final submit — must ride the live encoder.

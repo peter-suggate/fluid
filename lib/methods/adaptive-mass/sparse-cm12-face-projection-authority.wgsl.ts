@@ -277,8 +277,9 @@ fn ${p}GlobalHeaderValid()->bool{return cm12HotHeaderValid()
   &&atomicLoad(&${arena}[${hb(h.totalWords)}])==${layout.totalWords}u
   &&atomicLoad(&${arena}[${hb(h.preparedAuthorityBase)}])==${p}PreparedAuthority
   &&atomicLoad(&${arena}[${hb(h.reserved0)}])==${p}AcceptedPressureBits
-  &&atomicLoad(&${arena}[${hb(h.brickFineResolution)}])==16u
-  &&atomicLoad(&${arena}[${hb(h.presentationPageResolution)}])==16u;}
+  &&atomicLoad(&${arena}[${hb(h.brickFineResolution)}])==${layout.brickFineResolution}u
+  &&atomicLoad(&${arena}[${hb(h.presentationPageResolution)}])
+    ==${layout.presentationPageResolution}u;}
 fn ${p}Fail(stage:u32,code:u32,row:u32){let header=${p}Header(stage);
   let won=atomicCompareExchangeWeak(&${arena}[header+${p}DFault],0u,code).exchanged;
   if(won){atomicStore(&${arena}[header+${p}DFirstFaultRow],row);
@@ -500,6 +501,23 @@ ${rankSelect(p, "Preparation", layout.preparation, arena)}
 ${rankSelect(p, "Projection", layout.projection, arena)}
 fn fpaPreparationRowInvocation(invocation:u32)->u32{
   return ${p}PreparationRankSelect(invocation);}
+fn fpaPreparationRowCause(row:u32)->u32{
+  if(row>=${p}RowCapacity){return 0u;}
+  return atomicLoad(&${arena}[${p}PreparationCandidateCause+row]);
+}
+// Packet execution addresses one already-materialized 256-row authority leaf.
+// Each of 64 lanes owns four stable row bits, avoiding one tree rank-select per
+// row while preserving the exact candidate bitset and completion protocol.
+fn fpaPreparationPacketRow(packet:u32,lane:u32,slot:u32)->u32{
+  let header=${p}PreparationHeader;
+  if(slot>=4u||packet>=atomicLoad(&${arena}[header+${p}DActiveLeafCount])
+    ||atomicLoad(&${arena}[header+${p}DPhase])!=${p}PhaseExecuting){return ${p}Invalid;}
+  let leaf=atomicLoad(&${arena}[${p}PreparationActiveLeafList+packet]);
+  let local=lane+64u*slot;let word=atomicLoad(&${arena}[
+    ${p}PreparationBits+leaf*${p}LeafWords+local/32u]);
+  let row=leaf*${p}LeafBits+local;
+  return select(${p}Invalid,row,row<${p}RowCapacity&&(word&(1u<<(local&31u)))!=0u);
+}
 fn fpaProjectionRowInvocation(invocation:u32)->u32{
   return ${p}ProjectionRankSelect(invocation);}
 fn ${p}Complete(stage:u32,row:u32)->bool{let header=${p}Header(stage);

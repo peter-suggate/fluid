@@ -103,8 +103,10 @@ fn cm12HotHeaderValid()->bool{
     &&${arena}[${h(SPARSE_CM12_HOT_TOPOLOGY_HEADER.version)}]==cm12HotVersion
     &&${arena}[${h(SPARSE_CM12_HOT_TOPOLOGY_HEADER.headerWords)}]
       ==${SPARSE_CM12_HOT_TOPOLOGY_HEADER_WORDS}u
-    &&${arena}[${h(SPARSE_CM12_HOT_TOPOLOGY_HEADER.brickFineResolution)}]==16u
-    &&${arena}[${h(SPARSE_CM12_HOT_TOPOLOGY_HEADER.presentationPageResolution)}]==16u
+    &&${arena}[${h(SPARSE_CM12_HOT_TOPOLOGY_HEADER.brickFineResolution)}]
+      ==${l.brickFineResolution}u
+    &&${arena}[${h(SPARSE_CM12_HOT_TOPOLOGY_HEADER.presentationPageResolution)}]
+      ==${l.presentationPageResolution}u
     &&${arena}[${h(SPARSE_CM12_HOT_TOPOLOGY_HEADER.atlasGeneration)}]
       ==${l.atlasGeneration}u
     &&${arena}[${h(SPARSE_CM12_HOT_TOPOLOGY_HEADER.logicalOwnerWords)}]

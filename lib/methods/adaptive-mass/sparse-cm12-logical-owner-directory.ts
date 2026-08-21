@@ -135,8 +135,8 @@ const recordWord = (
 
 /**
  * Build the immutable direct directory used by every finest-coordinate owner
- * lookup. Defaults are deliberately B16/P16; other supported shapes must opt
- * in explicitly so diagnostic/direct callers cannot silently retarget work.
+ * lookup. Defaults derive from the atlas and keep presentation matched to its
+ * ladder, so direct callers cannot accidentally construct a split physical ABI.
  *
  * Bricks are applied in ascending span order. An ordinary or smaller macro
  * therefore wins inside an overlapping larger macro, exactly matching
@@ -150,11 +150,11 @@ export function createSparseCM12LogicalOwnerDirectory(
   } = {},
 ): SparseCM12LogicalOwnerDirectory {
   const brickFineResolution = checkedFineResolution(
-    options.brickFineResolution ?? 16,
+    options.brickFineResolution ?? atlas.brickFineResolution,
     "brickFineResolution",
   );
   const presentationPageResolution = checkedFineResolution(
-    options.presentationPageResolution ?? 16,
+    options.presentationPageResolution ?? brickFineResolution,
     "presentationPageResolution",
   );
   if (atlas.brickFineResolution !== brickFineResolution) {

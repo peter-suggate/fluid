@@ -14,6 +14,10 @@ export interface SparseCM12LogicalOwnerDirectoryWGSLOptions {
   readonly layout: SparseCM12LogicalOwnerDirectoryLayout;
   /** Existing immutable `array<u32>` directory binding. */
   readonly directoryName?: string;
+  /** Word offset when LOD1 is appended to another immutable arena. */
+  readonly baseWords?: number;
+  /** Construction-validated resident arenas need not reread the header per query. */
+  readonly trustedHeader?: boolean;
   readonly brickActiveFunction?: string;
   readonly acceptedBrickResolutionFunction?: string;
   readonly templateBrickCellRangeFunction?: string;
@@ -38,6 +42,10 @@ export function createSparseCM12LogicalOwnerDirectoryWGSL(
   options: SparseCM12LogicalOwnerDirectoryWGSLOptions,
 ): string {
   const { layout } = options;
+  const baseWords = options.baseWords ?? 0;
+  if (!Number.isSafeInteger(baseWords) || baseWords < 0 || baseWords > 0xffff_ffff) {
+    throw new RangeError("baseWords must be a non-negative u32");
+  }
   const directory = identifier(options.directoryName ?? "logicalOwnerDirectory",
     "directoryName");
   const brickActive = identifier(options.brickActiveFunction ?? "brickActive",
@@ -68,6 +76,7 @@ const cm12LogicalOwnerCount:u32=${layout.logicalBrickCount}u;
 const cm12LogicalOwnerResidentCount:u32=${layout.residentBrickCount}u;
 const cm12LogicalOwnerMaximumSpanLog:u32=${layout.maximumSpanLog}u;
 const cm12LogicalOwnerAtlasGeneration:u32=${layout.atlasGeneration}u;
+const cm12LogicalOwnerBase:u32=${baseWords}u;
 const cm12LogicalOwnerRecordBase:u32=${layout.recordBaseWords}u;
 const cm12LogicalOwnerTotalWords:u32=${layout.totalWords}u;
 
@@ -82,35 +91,35 @@ fn cm12LogicalOwnerInvalidRecord()->CM12LogicalOwnerRecord{
 }
 
 fn cm12LogicalOwnerHeaderValid()->bool{
-  let flags=${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.flags)}];
-  return arrayLength(&${directory})>=cm12LogicalOwnerTotalWords
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.magic)}]==cm12LogicalOwnerMagic
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.version)}]==cm12LogicalOwnerVersion
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.headerWords)}]
+  let flags=${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.flags)}];
+  return arrayLength(&${directory})>=cm12LogicalOwnerBase+cm12LogicalOwnerTotalWords
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.magic)}]==cm12LogicalOwnerMagic
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.version)}]==cm12LogicalOwnerVersion
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.headerWords)}]
       ==${SPARSE_CM12_LOGICAL_OWNER_HEADER_WORDS}u
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.recordWords)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.recordWords)}]
       ==${SPARSE_CM12_LOGICAL_OWNER_RECORD_WORDS}u
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.brickFineResolution)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.brickFineResolution)}]
       ==cm12LogicalOwnerBrickFine
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.presentationPageResolution)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.presentationPageResolution)}]
       ==cm12LogicalOwnerPresentationPage
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.logicalBricksX)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.logicalBricksX)}]
       ==cm12LogicalOwnerDimensions.x
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.logicalBricksY)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.logicalBricksY)}]
       ==cm12LogicalOwnerDimensions.y
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.logicalBricksZ)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.logicalBricksZ)}]
       ==cm12LogicalOwnerDimensions.z
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.logicalBrickCount)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.logicalBrickCount)}]
       ==cm12LogicalOwnerCount
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.residentBrickCount)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.residentBrickCount)}]
       ==cm12LogicalOwnerResidentCount
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.maximumSpanLog)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.maximumSpanLog)}]
       ==cm12LogicalOwnerMaximumSpanLog
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.atlasGeneration)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.atlasGeneration)}]
       ==cm12LogicalOwnerAtlasGeneration
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.recordBase)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.recordBase)}]
       ==cm12LogicalOwnerRecordBase
-    &&${directory}[${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.totalWords)}]
+    &&${directory}[cm12LogicalOwnerBase+${h(SPARSE_CM12_LOGICAL_OWNER_HEADER.totalWords)}]
       ==cm12LogicalOwnerTotalWords
     &&(flags&${SPARSE_CM12_LOGICAL_OWNER_FLAG.complete}u)!=0u
     &&(flags&${SPARSE_CM12_LOGICAL_OWNER_FLAG.validated}u)!=0u;
@@ -128,10 +137,11 @@ fn cm12LogicalOwnerKey(coordinate:vec3u)->u32{
 }
 
 fn cm12LogicalOwnerRecordAtKey(key:u32)->CM12LogicalOwnerRecord{
-  if(!cm12LogicalOwnerHeaderValid()||key>=cm12LogicalOwnerCount){
+  if(${options.trustedHeader ? "false" : "!cm12LogicalOwnerHeaderValid()"}||key>=cm12LogicalOwnerCount){
     return cm12LogicalOwnerInvalidRecord();
   }
-  let at=cm12LogicalOwnerRecordBase+${SPARSE_CM12_LOGICAL_OWNER_RECORD_WORDS}u*key;
+  let at=cm12LogicalOwnerBase+cm12LogicalOwnerRecordBase
+    +${SPARSE_CM12_LOGICAL_OWNER_RECORD_WORDS}u*key;
   let packed=${directory}[at];let originKey=${directory}[at+1u];
   if(packed==cm12LogicalOwnerInvalid||originKey==cm12LogicalOwnerInvalid){
     return cm12LogicalOwnerInvalidRecord();
@@ -159,7 +169,13 @@ fn cm12LogicalOwnerRecordAtCoordinate(coordinate:vec3u)->CM12LogicalOwnerRecord{
 }
 
 fn cm12LogicalOwnerBrickAtKey(key:u32)->u32{
-  return cm12LogicalOwnerRecordAtKey(key).brick;
+  ${options.trustedHeader ? `
+  if(key>=cm12LogicalOwnerCount){return cm12LogicalOwnerInvalid;}
+  let at=cm12LogicalOwnerBase+cm12LogicalOwnerRecordBase
+    +${SPARSE_CM12_LOGICAL_OWNER_RECORD_WORDS}u*key;
+  let packed=${directory}[at];
+  return select(packed>>5u,cm12LogicalOwnerInvalid,packed==cm12LogicalOwnerInvalid);`
+    : "return cm12LogicalOwnerRecordAtKey(key).brick;"}
 }
 
 fn cm12LogicalOwnerSpanAtKey(key:u32)->u32{

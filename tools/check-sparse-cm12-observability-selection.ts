@@ -55,17 +55,19 @@ assert.equal((framePlanBody.match(/encoder\.copyBufferToBuffer/g) ?? []).length,
 assert.equal((framePlanBody.match(/const (?:plan|execute) = encoder\.beginComputePass/g) ?? []).length,
   2, "production FPL/FPP pass count");
 
-// Current SIR address arithmetic is correct only at B16 (4^3 = 64 tiles/brick).
-assert.match(shader, /return key\*64u\+local\.x\+4u\*\(local\.y\+4u\*local\.z\)/,
-  "SIR hard-coded 64-tile address changed; refresh audit");
-assert.match(shader, /let logical=tile\/64u;let localTile=tile%64u/,
-  "SIR hard-coded inverse address changed; refresh audit");
+// SIR address arithmetic follows the selected brick's 4^3 tile lattice.
+assert.match(shader, /const SIR1_TILES_PER_AXIS:u32=BRICK_FINE_RESOLUTION\/4u/,
+  "SIR tile-axis specialization missing");
+assert.match(shader, /key\*SIR1_TILES_PER_BRICK/,
+  "SIR forward address is not profile-sized");
+assert.match(shader, /tile\/SIR1_TILES_PER_BRICK/,
+  "SIR inverse address is not profile-sized");
 const sirIndexing = [4, 8, 16].map((brickFineResolution) => {
   const tilesPerAxis = brickFineResolution / 4; const tilesPerBrick = tilesPerAxis ** 3;
   return { brickFineResolution, tilesPerAxis, tilesPerBrick,
-    currentHardcodedTilesPerBrick: 64, exact: tilesPerBrick === 64 };
+    selectedTilesPerBrick: tilesPerBrick, exact: true };
 });
-assert.deepEqual(sirIndexing.map(({ exact }) => exact), [false, false, true]);
+assert.deepEqual(sirIndexing.map(({ exact }) => exact), [true, true, true]);
 
 // FPP requires one B-sized page. The independent page selector is therefore
 // absent and normalization pins every legacy/injected value to B.
@@ -76,11 +78,12 @@ assert.match(method, /const presentationPageResolution = \([\s\S]{0,160}\): Spar
 assert.match(resident, /if \(presentationPageResolution !== atlas\.brickFineResolution\) \{\s*throw new Error\("FPL1\/FPP1 resident cutover requires one B-sized presentation page"\)/,
   "resident P==B constraint changed");
 const uiMatrix = [4, 8, 16].map((brick) => ({ brick, page: brick,
-  uiNormalizedValid: brick === 16, residentValid: brick === 16 }));
+  uiNormalizedValid: brick === 4 || brick === 8 || brick === 16,
+  residentValid: brick === 4 || brick === 8 || brick === 16 }));
 const brickSpec = adaptiveMassMethod.params.find(
   (spec) => spec.key === "brickFineResolution");
 assert(brickSpec?.kind === "select");
-assert.deepEqual(brickSpec.options.map(({ value }) => value), ["16"]);
+assert.deepEqual(brickSpec.options.map(({ value }) => value), ["4", "8", "16"]);
 assert.equal(adaptiveMassMethod.params.some(
   (spec) => spec.key === "presentationPageResolution"), false);
 for (const fixture of [
@@ -94,32 +97,34 @@ for (const fixture of [
     brickFineResolution: fixture.brick,
     presentationPageResolution: fixture.page,
   });
-  assert.equal(values.brickFineResolution, "16");
-  assert.equal(values.presentationPageResolution, "16");
+  const expected = fixture.brick;
+  assert.equal(values.brickFineResolution, expected);
+  assert.equal(values.presentationPageResolution, expected);
   const options = adaptiveMassSolverOptions(values);
-  assert.equal(options.brickFineResolution, 16);
-  assert.equal(options.presentationPageResolution, 16);
+  assert.equal(options.brickFineResolution, Number(expected));
+  assert.equal(options.presentationPageResolution, Number(expected));
 }
 for (const brick of ["4", "8"] as const) {
   const state = parseQueryState(`?method=adaptive-mass&param.adaptive-mass.brickFineResolution=${brick}`
     + "&param.adaptive-mass.presentationPageResolution=4");
-  assert.equal(state.overrides["adaptive-mass"]?.brickFineResolution, undefined);
+  assert.equal(state.overrides["adaptive-mass"]?.brickFineResolution, brick);
   assert.equal(state.overrides["adaptive-mass"]?.presentationPageResolution, undefined);
   const values = resolveMethodValues(adaptiveMassMethod, "balanced",
     state.overrides["adaptive-mass"] ?? {});
-  assert.equal(values.brickFineResolution, "16");
-  assert.equal(values.presentationPageResolution, "16");
+  const expected = brick;
+  assert.equal(values.brickFineResolution, expected);
+  assert.equal(values.presentationPageResolution, expected);
   const canonical = serializeQueryState("?param.adaptive-mass.presentationPageResolution=4",
     { presetId: state.presetId, scene: state.scene },
     { methodId: state.methodId, quality: state.quality, overrides: state.overrides }, state.ui);
   assert.equal(new URLSearchParams(canonical)
     .has("param.adaptive-mass.presentationPageResolution"), false);
   assert.equal(new URLSearchParams(canonical)
-    .has("param.adaptive-mass.brickFineResolution"), false);
+    .has("param.adaptive-mass.brickFineResolution"), true);
 }
 const defaultValues = resolveMethodValues(adaptiveMassMethod, "balanced", {});
-assert.equal(defaultValues.brickFineResolution, "16");
-assert.equal(defaultValues.presentationPageResolution, "16");
+assert.equal(defaultValues.brickFineResolution, "8");
+assert.equal(defaultValues.presentationPageResolution, "8");
 
 console.log(JSON.stringify({ authority: "FPL1+ACT1-causes",
   currentFixedTail: {
@@ -136,6 +141,6 @@ console.log(JSON.stringify({ authority: "FPL1+ACT1-causes",
   globalCMD1PKT1ProjectionDeleted: true,
   framePlanReadsLiveActivityCauses: true,
   sirIndexing, uiMatrix,
-  b16P4P8Conflict: "fenced: production UI/URL normalizes to B16/P16; direct B4/B8 QA remains construction-only",
+  productionProfiles: "matched B4/P4, B8/P8, and B16/P16",
   selectedFPLCost: { observabilityDispatches: 0,
     failClosedWithoutReceipt: true } }, null, 2));

@@ -20,6 +20,8 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createWebgpuSparseCM12ResidentWGSL } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
+import type { SparseCM12TransportExperiment } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
 import { createSparseCM12IncrementalActivityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-incremental-activity";
 import { createSparseCM12CanonicalMembershipLayout } from
@@ -49,6 +51,19 @@ import { createSparseCM12VexActivityBatchLayout } from
 
 const staticConcurrencyCheck = process.argv.includes("--static-concurrency-check");
 const productionOnly = process.argv.includes("--production-only");
+const transportExperiment = (process.argv.find((argument) =>
+  argument.startsWith("--transport-experiment="))?.split("=")[1]
+  ?? "baseline") as SparseCM12TransportExperiment;
+const transportExperiments = new Set<SparseCM12TransportExperiment>([
+  "baseline", "legacy-owner-hash", "logical-owner-directory",
+  "logical-owner-mass-rung", "face-characteristic-cache", "face-row-packets",
+  "structure-gamma-legacy", "structure-mass-legacy", "structure-cache-legacy",
+  "mass-rung-packets", "mass-local-atomics", "mass-swept-clean",
+  "face-packets-cache", "mass-rung-local", "face-packets-mass-rung", "all-valid",
+]);
+if (!transportExperiments.has(transportExperiment)) {
+  throw new Error(`unknown transport experiment ${transportExperiment}`);
+}
 if (staticConcurrencyCheck) {
   const source = await readFile(fileURLToPath(import.meta.url), "utf8");
   const fanout = /\bPromise\.(?:all|allSettled|any|race)\s*\(/;
@@ -119,8 +134,9 @@ async function main(): Promise<void> {
     });
     const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
     let compiledEntryPoints = 0;
-    const variants: readonly (readonly [4 | 8 | 16, 4 | 8 | 16])[] = productionOnly
-      ? [[16, 16]]
+    const variants: readonly (readonly [4 | 8 | 16, 4 | 8 | 16])[] =
+      transportExperiment !== "baseline" ? [[16, 16]] : productionOnly
+      ? [[4, 4], [8, 8], [16, 16]]
       : [[4, 4], [8, 4], [8, 8], [16, 4], [16, 8], [16, 16]];
     for (const [brickFineResolution, presentationPageResolution] of variants) {
       const variant = `B${brickFineResolution}/P${presentationPageResolution}`;
@@ -154,22 +170,26 @@ async function main(): Promise<void> {
           brickFineResolution, pageResolution: presentationPageResolution,
           packetIndex: 5,
         }) : undefined;
-      const productionB16P16 = brickFineResolution === 16
-        && presentationPageResolution === 16;
-      const frameControl = productionB16P16 ? createSparseCM12FrameControl({
+      const productionMatchedProfile = (brickFineResolution === 4
+          || brickFineResolution === 8
+          || brickFineResolution === 16)
+        && presentationPageResolution === brickFineResolution;
+      const frameControl = productionMatchedProfile ? createSparseCM12FrameControl({
         baseWords: 32768, cellWorkgroups: 16, rowWorkgroups: 32,
         bodyCapacity: 0, d4Capable: true, rigidCapable: false,
         boundaryCapable: false,
+        brickFineResolution, presentationPageResolution,
       }) : undefined;
-      const scalarAuthority = productionB16P16 && presentation
+      const scalarAuthority = productionMatchedProfile && presentation
         ? createSparseCM12SRR1IngressLayout({
           baseWords: presentation.totalWords, tileCapacity: 512,
         }) : undefined;
-      const pressureTopologyRepair = productionB16P16 && frameControl
+      const pressureTopologyRepair = productionMatchedProfile && frameControl
         ? createSparseCM12PressureTopologyRepairLayout({
           baseWords: frameControl.layout.totalWords,
           brickCapacity: 8, rowCapacity: 2048,
-          brickFineResolution: 16, presentationPageResolution: 16,
+          brickFineResolution,
+          presentationPageResolution,
         }) : undefined;
       const persistentPressureCache = pressureTopologyRepair
         ? createSparseCM12ResidentPersistentPressureCacheLayout({
@@ -182,8 +202,10 @@ async function main(): Promise<void> {
         ? createSparseCM12FaceProjectionAuthorityLayout({
           baseWords: persistentPressureCache.bufferSizeWords,
           rowCapacity: 2048, cellCapacity: 1024,
+          brickFineResolution,
+          presentationPageResolution,
         }) : undefined;
-      const vexActivityBatch = productionB16P16 && scalarAuthority
+      const vexActivityBatch = productionMatchedProfile && scalarAuthority
         ? createSparseCM12VexActivityBatchLayout({
           activityTailWords: scalarAuthority.totalWords,
           stateTailFloats: 65536,
@@ -198,6 +220,8 @@ async function main(): Promise<void> {
         persistentPressureCache,
         faceProjectionAuthority,
         vexActivityBatch,
+        undefined, undefined, undefined, undefined, false,
+        transportExperiment,
       );
       const shaderModule = device.createShaderModule({
         label: `Sparse CM12 resident WGSL check ${variant}`,
@@ -294,7 +318,7 @@ async function main(): Promise<void> {
 
     const scope = await device.popErrorScope();
     if (scope) throw new Error(`validation error: ${scope.message}`);
-    console.log(`Sparse CM12 resident WGSL: ${compiledEntryPoints} entry points compiled across ${variants.length} B/P variants`);
+    console.log(`Sparse CM12 resident WGSL (${transportExperiment}): ${compiledEntryPoints} entry points compiled across ${variants.length} B/P variants`);
   } finally {
     if (device) {
       try { await device.queue.onSubmittedWorkDone(); } catch { /* Device fault already reported. */ }

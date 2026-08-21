@@ -6,7 +6,8 @@ import { rigidBodyEntity } from "./editor-rigid-body";
 import { tankEntity } from "./editor-tank";
 import { vesselRimEntity } from "./editor-vessel-rim";
 import type { EditorSelection, EditorTool } from "./editor-tools";
-import type { Vec3 } from "./model";
+import type { SceneDescription, Vec3 } from "./model";
+import { SCENE_INSTRUMENTS, sceneInstrumentAction } from "./scene-instruments";
 import { resourceInteractionGates } from "./resource-readiness";
 import { drawnBodies, useDiagnosticsStore } from "./stores/diagnostics-store";
 import { displaySceneSnapshot } from "./stores/scene-draft-store";
@@ -207,27 +208,59 @@ export function entityActionsAt(
  * be allowed to mean "no menu" — so a miss offers the verbs that need a place
  * rather than a thing, which is exactly what the water body contributes.
  *
- * Only the placement half of the water's ring: `fluidPlayActions` is exactly the
- * verbs that need a place, so the instruments and probes beside it on the water
- * — the advance pipeline, the diagnostic cards, the two pointer probes — stay
- * off this ring by construction rather than by a filter here. They read a solve
- * or a pixel the miss never named, and a ring that answered questions about
- * nothing in particular is how "everything reachable from the ring" turns back
- * into a menu bar drawn in a circle.
+ * The placement half of the water's ring, plus the instruments: `fluidPlayActions`
+ * is exactly the verbs that need a place, and the *probes* beside it on the water
+ * — the pixel and the pressure cell behind the click — stay off this ring by
+ * construction rather than by a filter here, because a miss is composed from a
+ * world position rather than from a thing and they would have nothing to aim at.
+ *
+ * The instruments used to be held off for the same reason and are not any more.
+ * A pipeline does not read the click: there is one solve and one frame, and the
+ * ring on the water was the only route to either, so asking what a scene costs
+ * meant first landing a right-click on its water — impossible while the pick is
+ * rebuilding, or when the water is off screen, or in the middle of watching a
+ * run you would rather not edit. They sit inside one INSPECT wedge so the root
+ * ring keeps its shape; the flat RENDER wedge that used to be out here moved in
+ * beside its two counterparts. See `SCENE_INSTRUMENTS` for the keys that reach
+ * them with no ring at all.
  *
  * This also keeps the editor reachable when picking is gated off. `entityAtRay`
  * refuses without a fenced presentation because selecting the wrong object is
  * worse than selecting none; placing water at an analytically-traced point has
  * no such hazard, and the fallback card already promises the editor still works.
  */
-export function sceneActionsAt(point_m: Vec3): readonly EditorAction[] {
-  return [...fluidPlayActions(point_m), ...sceneDocumentActions()];
+export function sceneActionsAt(scene: SceneDescription, point_m: Vec3): readonly EditorAction[] {
+  return [...fluidPlayActions(point_m), sceneInstrumentWedge(scene), ...sceneDocumentActions()];
+}
+
+/**
+ * Every instrument, under one wedge, on the ring that belongs to no object.
+ *
+ * Grouped rather than laid on the root for the reason the water's INSPECT wedge
+ * is grouped: reading the scene is one kind of intention, and a root of nine
+ * wedges cannot be flicked at. The dry case drops the advance pipeline rather
+ * than swapping it — unlike the water's single pipeline slot, the frame graph
+ * is already here, so a swap would offer it twice.
+ */
+function sceneInstrumentWedge(scene: SceneDescription): EditorAction {
+  const fluidEnabled = scene.systems?.fluid !== false;
+  return {
+    id: "inspect",
+    label: "Inspect",
+    icon: "diagnostics",
+    tone: "prop",
+    hint: "Instruments: what the advance costs, what the frame costs, and what the solve is doing",
+    children: [
+      ...(fluidEnabled ? [sceneInstrumentAction(SCENE_INSTRUMENTS["sim-pipeline"])] : []),
+      sceneInstrumentAction(SCENE_INSTRUMENTS["render-pipeline"]),
+      sceneInstrumentAction(SCENE_INSTRUMENTS.diagnostics),
+    ],
+  };
 }
 
 /**
  * The verbs that are about the *document* rather than about anything in it: go
- * and find another scene, bring one in from a file, or look at what drawing this
- * one costs.
+ * and find another scene, or bring one in from a file.
  *
  * They are composed here rather than declared by an entity because they belong
  * to no entity — which is also why they appear only on the ring opened over
@@ -235,21 +268,9 @@ export function sceneActionsAt(point_m: Vec3): readonly EditorAction[] {
  * at the room is the closest thing the viewport has to asking about the scene
  * itself, and it is where the transport bar's Load/Import buttons went when the
  * bar became a transport cluster.
- *
- * The frame graph belongs to this half for the same reason: it prices the
- * *picture*, which no object in the picture owns. Its simulation counterpart
- * sits on the water, where the advance it prices does.
  */
 function sceneDocumentActions(): readonly EditorAction[] {
   return [
-    {
-      id: "render-pipeline",
-      label: "Render",
-      icon: "render-pipeline",
-      tone: "prop",
-      hint: "Open the frame graph: per-pass GPU cost, stage ablation and node tuning",
-      effect: { kind: "open-overlay", overlay: "render-pipeline" },
-    },
     {
       id: "library",
       label: "Library",

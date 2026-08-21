@@ -1,6 +1,7 @@
 "use client";
 
-import { useUIStore, type SceneOverlay } from "../lib/core/stores/ui-store";
+import { SCENE_INSTRUMENTS, SCENE_INSTRUMENT_ORDER } from "../lib/core/scene-instruments";
+import { useUIStore } from "../lib/core/stores/ui-store";
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay";
 import { RenderPipelineOverlay } from "./RenderPipelineOverlay";
 import { SimPipelineOverlay } from "./SimPipelineOverlay";
@@ -27,33 +28,11 @@ import { SimPipelineOverlay } from "./SimPipelineOverlay";
  * title and the two ways out (the close button and Escape).
  */
 
-const OVERLAYS: Readonly<Record<SceneOverlay, {
-  readonly eyebrow: string;
-  readonly title: string;
-  readonly label: string;
-}>> = {
-  "sim-pipeline": {
-    eyebrow: "Simulation",
-    title: "Advance pipeline",
-    label: "Simulation pipeline",
-  },
-  "render-pipeline": {
-    eyebrow: "Render",
-    title: "Frame pipeline",
-    label: "Render pipeline",
-  },
-  diagnostics: {
-    eyebrow: "Live",
-    title: "Diagnostics",
-    label: "Diagnostics",
-  },
-};
-
 export function PipelineOverlay() {
   const overlay = useUIStore((state) => state.sceneOverlay);
   const setSceneOverlay = useUIStore((state) => state.setSceneOverlay);
   if (!overlay) return null;
-  const chrome = OVERLAYS[overlay];
+  const chrome = SCENE_INSTRUMENTS[overlay];
   return <aside
     className="scene-instrument"
     data-testid="scene-instrument"
@@ -85,4 +64,38 @@ export function PipelineOverlay() {
       {overlay === "diagnostics" && <DiagnosticsOverlay />}
     </div>
   </aside>;
+}
+
+/**
+ * The way in that is always on screen: three tags beside the frame rate.
+ *
+ * The ring is still the route for everything you do *to* the scene, but an
+ * instrument is not a verb on an object — it is a reading of the whole run, and
+ * making it cost a right-click that has to land on the water meant the question
+ * "why is this frame slow" could only be asked of a scene you could hit. This
+ * sits where the number it explains already is, so the corner reads as one
+ * thing: what it costs, and where the cost went.
+ *
+ * Quiet by construction — invisible until the pointer is in the viewport at
+ * all, dim until it is on them, and lit only for the one that is open. The
+ * keys in `SCENE_INSTRUMENTS` do the same job with no chrome, and each tag
+ * names its own key in the tooltip so the cluster is where they are learned.
+ */
+export function SceneInstrumentTags() {
+  const overlay = useUIStore((state) => state.sceneOverlay);
+  const setSceneOverlay = useUIStore((state) => state.setSceneOverlay);
+  return <div className="fps-instruments" data-testid="scene-instrument-tags">
+    {SCENE_INSTRUMENT_ORDER.map((instrument) => {
+      const open = overlay === instrument.id;
+      return <button
+        key={instrument.id}
+        type="button"
+        data-testid={`scene-instrument-tag-${instrument.id}`}
+        aria-pressed={open}
+        aria-label={`${open ? "Close" : "Open"} ${instrument.label.toLowerCase()}`}
+        title={`${instrument.hint} · ${instrument.shortcut.toUpperCase()}`}
+        onClick={() => setSceneOverlay(open ? null : instrument.id)}
+      >{instrument.tag}</button>;
+    })}
+  </div>;
 }

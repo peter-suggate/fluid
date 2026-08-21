@@ -44,9 +44,9 @@ scan the finest presentation lattice.
 
 A brick is in the surface band if either:
 
-1. one of its cells has `0.05 < rho < 0.95`; or
-2. one of its composite rows straddles the CM12 `rho = 0.5` isovalue, treating
-   sparse air as `rho = 0`.
+1. one of its composite rows straddles the CM12 `rho = 0.5` isovalue, treating
+   sparse air as `rho = 0`; or
+2. a fractional cell has an interior air-facing side.
 
 Surface-band membership is a hard fine-resolution floor. In the optional
 `Surface + activity` criterion, bulk fluid also measures maximum accepted
@@ -62,6 +62,11 @@ travel >= 0.25 -> 2^3
 otherwise      -> 1^3
 ```
 
+An authored minimum-cell-size box clamps that floor to its finest legal rung.
+For example, an `8^3` brick with a four-finest-cell minimum represents its
+surface at `2^3`; it must never fall through to `1^3` while the accepted field
+still contains an isovalue crossing.
+
 The surface floor wins over the velocity floor. In `Surface distance` mode,
 every non-surface submerged brick requests `1^3` immediately; refine-only 2:1
 closure raises only the support rungs required beside `8^3` surface bricks.
@@ -71,12 +76,13 @@ and promotion/demotion hysteresis do not affect that request.
 A fractional density is not surface evidence on its own. Conservative
 transport and wall conditioning can leave a fully submerged cell between the
 density clamps after a dam break has settled. The surface floor therefore
-requires either an air-supported accepted incidence crossing or a fractional
-cell with an interior air-facing side (including internal sparse air); closed
-domain faces are excluded. A submerged numerical oscillation across `rho =
-0.5` is not a surface unless one endpoint reaches the configured air band. The
-separate thin-feature predicate continues to protect represented sheets that
-never cross `rho = 0.5`.
+requires either an accepted isovalue crossing or a fractional cell with an
+interior air-facing side (including internal sparse air); closed domain faces
+are excluded. Every accepted crossing follows the renderer even when coarse
+restriction broadens it to a 40%-60% transition. In activity mode, the
+independent deeply-enclosed predicate prevents surrounded bulk ripples from
+becoming a planning floor. The separate thin-feature predicate continues to
+protect represented sheets that never cross `rho = 0.5`.
 
 This is one planner, not a second surface-only implementation. Both selector
 modes use the same surface/thin/receiver classification, 2:1 closure,

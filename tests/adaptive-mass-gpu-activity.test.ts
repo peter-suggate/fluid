@@ -132,7 +132,12 @@ test("resident gamma diffusion uses conservative row-owned snapshot iterations",
   assert.match(kernel, /atomicAdd\(&conditioning\[positive\],-rhoReceipt\)/);
   assert.match(kernel, /atomicAdd\(&conditioning\[p\.counts\.x\+negative\],gammaReceipt\)/);
   assert.match(kernel, /atomicAdd\(&conditioning\[p\.counts\.x\+positive\],-gammaReceipt\)/,
-    "the two endpoints must receive one exactly antisymmetric fixed-point receipt");
+    "the QA oracle must retain the exactly antisymmetric fixed-point receipt path");
+  assert.match(kernel, /writeGammaPair\(pair,rhoReceipt,gammaReceipt\)/,
+    "production must materialize each immutable pair receipt once");
+  assert.match(kernel, /gammaCellPairIncidence\(at\)/);
+  assert.match(kernel, /candidateState\[3u\*pair\+2u\]/,
+    "cell gathers must reject packets outside the current topology generation");
   assert.match(kernel, /state\[outputRho\+cell\]=ownRho\+rhoReceipt\*inverseVolume/,
     "the paired density receipt must be resolved by physical cell volume");
   assert.doesNotMatch(webgpuSparseCM12ResidentWGSL,
@@ -143,9 +148,9 @@ test("resident gamma diffusion uses conservative row-owned snapshot iterations",
     "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
     import.meta.url,
   ), "utf8");
-  assert.match(source,
-    /closePass\(\);\s*encoder\.clearBuffer\(this\.conditioning,[\s\S]*?\);\s*stage\("gamma-diffusion"/,
-    "transport receipts must be retired before their accumulator banks are recycled");
+  assert.match(source, /const legacyGamma = \["legacy-owner-hash"/,
+    "capacity clears must exist only in construction-time equivalence oracles");
+  assert.match(source, /gamma needs neither global accumulator atomics nor domain-sized clears/);
   assert.match(source,
     /dispatchAccepted\("scatterGammaSnapshot", "row"\);\s*dispatchAccepted\("finalizeGammaSnapshot", "cell"\)/);
   assert.match(source,
@@ -215,7 +220,7 @@ test("SIM pressure controls bound live PCG work and optional early stopping", ()
     .pressureRelativeTolerance, 0);
   assert.equal(adaptiveMassSolverOptions({ pressureRelativeTolerance: 1 })
     .pressureRelativeTolerance, 0.1);
-  assert.equal(adaptiveMassSolverOptions({}).presentationPageResolution, 4);
+  assert.equal(adaptiveMassSolverOptions({}).presentationPageResolution, 8);
   assert.equal(adaptiveMassSolverOptions({
     brickFineResolution: "16", presentationPageResolution: "8",
   }).presentationPageResolution, 8);
@@ -399,9 +404,11 @@ test("GPU selector keeps free surfaces fine and deep translating bulk coarse in 
   assert.match(measurement,
     /sideHasSurfaceFluid=sideHasSurfaceFluid\s*\|\|neighborDensity>p\.activityDensity\.y/,
     "diffuse surface exposure must ignore sub-threshold transported mist");
-  assert.match(measurement,
+  assert.match(measurement, /crosses=crosses\|\|crossesIsovalue/,
+    "surface evidence must follow the represented isovalue across coarse restriction");
+  assert.doesNotMatch(measurement,
     /crossesIsovalue[\s\S]*?min\(fill,neighborDensity\)<=p\.activityDensity\.y/,
-    "a submerged oscillation around the isovalue must not become a surface crossing");
+    "a coarse 40%-60% interface must not disappear behind the air-band threshold");
   assert.match(measurement,
     /if\(crosses\)\{\s*interfaceCell=true;\s*surfaceAxes\|=1u<<rowAxis\(row\)/,
     "surface evidence must come from an accepted liquid-air crossing");
@@ -673,6 +680,18 @@ test("large-scene topology pages use a bounded GPU free list", () => {
     "geometry synthesis must not mutate accepted fields before publication");
 });
 
+test("partial topology pages cannot authorize a candidate rung", () => {
+  const eligibility = webgpuSparseCM12ResidentWGSL.slice(
+    webgpuSparseCM12ResidentWGSL.indexOf("fn brickCandidateTopologyComplete"),
+    webgpuSparseCM12ResidentWGSL.indexOf("// Authored cell-size bounds"),
+  );
+  assert.match(eligibility,
+    /return brickPackedCandidateSlot\(brick\)!=INVALID/,
+    "only a complete packed topology slot may authorize a candidate rung");
+  assert.doesNotMatch(eligibility, /pageCapacity/,
+    "a geometry-only dynamic page must not masquerade as complete topology");
+});
+
 test("GPU candidate cell transfer is conservative and remains non-authoritative", () => {
   assert.match(webgpuSparseCM12ResidentWGSL,
     /@group\(0\)@binding\(13\)var<storage,read_write>candidateState:array<f32>/);
@@ -698,14 +717,14 @@ test("GPU candidate cell transfer is conservative and remains non-authoritative"
 });
 
 test("GPU candidate face transfer area-averages authoritative exterior flux", () => {
-  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn transferCandidateFaces");
+  const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn transferCandidateFaceSide");
   const end = webgpuSparseCM12ResidentWGSL.indexOf(
     "fn writeCandidateCellsToShadow", begin,
   );
   assert.ok(begin >= 0 && end > begin, "candidate face transfer must be inspectable");
   const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
   assert.match(kernel, /state\[destinationFaceVelocity\(\)\+row\]\*rowAreaValue/);
-  assert.match(kernel, /candidateState\[candidateFieldIndex\(6u\+side,brick,lane\)\]/);
+  assert.match(kernel, /candidateState\[candidateFieldIndex\(6u\+side,brick,patchIndex\)\]/);
   assert.match(kernel, /reduceB\[0\]-reduceA\[0\]/);
   assert.match(kernel, /atomicOr\(&activity\[7\],4u\)/);
   assert.doesNotMatch(kernel, /state\[[^\]]+\]\s*=(?!=)/,
@@ -747,16 +766,19 @@ test("GPU retirement drops only bounded dilute residue and clears stale receiver
   assert.match(webgpuSparseCM12ResidentWGSL,
     /occupiedCell=occupiedCell\|\|rho>residencyDensity/);
   assert.match(webgpuSparseCM12ResidentWGSL,
+    /substantialDensityCell=substantialDensityCell\|\|fill>p\.activityDensity\.y/,
+    "coarse residency must require a represented concentration witness");
+  assert.match(webgpuSparseCM12ResidentWGSL,
     /return max\(CM12_DRY_CELL_THRESHOLD,p\.sharpening\.z\)/,
     "region liveness must use its own policy floor without weakening CM12 arithmetic cleanup");
   assert.match(webgpuSparseCM12ResidentWGSL,
-    /occupied=densityPresent&&densityMassFineCells>=p\.sharpening\.w/,
-    "a concentrated subcell fragment must not count as a populated region");
+    /occupied=densityPresent&&representedFeature\s*&&densityMassFineCells>=p\.sharpening\.w/,
+    "neither a subcell fragment nor volume-amplified coarse mist may populate a region");
   assert.match(webgpuSparseCM12ResidentWGSL,
-    /activity\[output\+32u\],select\(0u,activitySupportMask\[0\],occupied\)/,
+    /activity\[output\+32u\],select\(0u,reducedSupportMask,occupied\)/,
     "subcell fragments must not keep neighboring regions alive through support masks");
   assert.match(webgpuSparseCM12ResidentWGSL,
-    /wet=wet\|\|rho>residencyDensityThreshold\(\)[\s\S]*massFineCells\+=max\(0\.0,rho\)\*cellVolume\(at\)[\s\S]*wet=wet&&massFineCells>=p\.sharpening\.w/,
+    /wet=wet\|\|fill>p\.activityDensity\.y[\s\S]*massFineCells\+=max\(0\.0,rho\)\*cellVolume\(at\)[\s\S]*wet=wet&&massFineCells>=p\.sharpening\.w/,
     "presentation population must agree with physical region liveness");
   assert.match(kernel, /activity\[output\+1u\]\)&64u/,
     "mass above the region-density floor must retain its own brick");

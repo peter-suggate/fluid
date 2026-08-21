@@ -213,12 +213,16 @@ export const SPARSE_CM12_SRR1_RESIDENT_HOOKS: readonly SparseCM12SRR1ResidentHoo
 export function createSparseCM12SRR1RuntimePlan(options: {
   readonly baseWords: number;
   readonly tileCapacity: number;
+  readonly brickFineResolution?: 4 | 8 | 16;
+  readonly presentationPageResolution?: 4 | 8 | 16;
   readonly constructionMode?: SparseCM12SRR1ConstructionMode;
 }): SparseCM12SRR1RuntimePlan {
   const constructionMode = options.constructionMode ?? "temporal";
   const authority = createSparseCM12ScalarResultAuthority({
-    tileCapacity: options.tileCapacity, brickFineResolution: 16,
-    presentationPageResolution: 16,
+    tileCapacity: options.tileCapacity,
+    brickFineResolution: options.brickFineResolution ?? 8,
+    presentationPageResolution:
+      options.presentationPageResolution ?? options.brickFineResolution ?? 8,
   });
   const ingressLayout = createSparseCM12SRR1IngressLayout({
     baseWords: options.baseWords, tileCapacity: options.tileCapacity,
@@ -372,7 +376,8 @@ export class WebGPUSparseCM12SRR1RuntimeAdapter {
   ): Promise<WebGPUSparseCM12SRR1RuntimeAdapter> {
     const initial = createSparseCM12ScalarResultAuthority({
       tileCapacity: plan.authorityLayout.tileCapacity,
-      brickFineResolution: 16, presentationPageResolution: 16,
+      brickFineResolution: plan.authorityLayout.brickFineResolution,
+      presentationPageResolution: plan.authorityLayout.presentationPageResolution,
     });
     const authorityBuffer = device.createBuffer({ label: "Sparse CM12 SRR1 authority",
       size: initial.words.byteLength,
@@ -551,8 +556,10 @@ export class WebGPUSparseCM12SRR1RuntimeAdapter {
 
 export function sparseCM12SRR1RuntimeABIReceipt(plan: SparseCM12SRR1RuntimePlan) {
   return Object.freeze({ magic: SPARSE_CM12_SCALAR_RESULT_MAGIC,
-    version: SPARSE_CM12_SCALAR_RESULT_VERSION, brickFineResolution: 16,
-    presentationPageResolution: 16, constructionMode: plan.constructionMode,
+    version: SPARSE_CM12_SCALAR_RESULT_VERSION,
+    brickFineResolution: plan.authorityLayout.brickFineResolution,
+    presentationPageResolution: plan.authorityLayout.presentationPageResolution,
+    constructionMode: plan.constructionMode,
     authorityBytes: plan.authorityLayout.totalBytes,
     ingressBytes: plan.ingressLayout.ingressBytes,
     indirectBytes: 12 * SPARSE_CM12_SRR1_INDIRECT_FAMILY_COUNT,

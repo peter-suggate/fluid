@@ -366,7 +366,7 @@ dawnTest("native 8-cubed ocean pages close every B16 depth rung on one uniform t
     }
   });
 
-dawnTest("full 32-cubed ocean cells survive the first GPU retirement census",
+dawnTest("production ocean keeps pressure and represented volume across frames",
   { timeout: 240_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-ocean-seiche-coarsening.test.ts");
@@ -388,9 +388,28 @@ dawnTest("full 32-cubed ocean cells survive the first GPU retirement census",
       solver = await WebGPUAdaptiveMassSolver.createAsync(
         device, scene, "balanced", undefined, adaptiveMassSolverOptions({}), () => {},
       );
-      assert.equal(solver.advanceTo(CM12_PAPER_DT_S, []), true);
-      await device.queue.onSubmittedWorkDone();
-      const density = (await solver.readDiagnosticFields()).density;
+      const initialDensity = (await solver.readDiagnosticFields()).density;
+      const initialMass = initialDensity.reduce((sum, rho) => sum + Math.max(0, rho), 0);
+      const initialWet = initialDensity.reduce((sum, rho) => sum + Number(rho > 0.005), 0);
+      let density = initialDensity;
+      for (let step = 1; step <= 3; step += 1) {
+        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        await device.queue.onSubmittedWorkDone();
+        const [fields, stats] = await Promise.all([
+          solver.readDiagnosticFields(), solver.readStats(),
+        ]);
+        const pcm: {
+          readonly cell: { readonly fault: number; readonly firstFault: number };
+          readonly row: { readonly fault: number; readonly firstFault: number };
+        } = await solver.readPressureCanonicalMembershipQA();
+        density = fields.density;
+        assert.ok((stats.pressureIterationsExecuted ?? 0) > 0,
+          `ocean frame ${step} skipped its pressure solve`);
+        assert.equal(pcm.cell.fault, 0,
+          `ocean frame ${step} PCM cell authority faulted at ${pcm.cell.firstFault}`);
+        assert.equal(pcm.row.fault, 0,
+          `ocean frame ${step} PCM row authority faulted at ${pcm.row.firstFault}`);
+      }
       const [nx, ny, nz] = [solver.info.nx, solver.info.ny, solver.info.nz];
       let deepMinimum = Number.POSITIVE_INFINITY;
       let missingDeepCells = 0;
@@ -404,6 +423,12 @@ dawnTest("full 32-cubed ocean cells survive the first GPU retirement census",
       assert.equal(missingDeepCells, 0,
         `GPU retirement opened ${missingDeepCells} cells in the 32-cell-deep macro rung`
           + ` (minimum rho ${deepMinimum})`);
+      const mass = density.reduce((sum, rho) => sum + Math.max(0, rho), 0);
+      const wet = density.reduce((sum, rho) => sum + Number(rho > 0.005), 0);
+      assert.ok(Math.abs(mass - initialMass) / initialMass <= 5e-4,
+        `ocean mass drifted by ${(mass - initialMass) / initialMass}`);
+      assert.ok(wet >= 0.98 * initialWet,
+        `ocean represented volume fell from ${initialWet} to ${wet} cells`);
     } finally {
       solver?.destroy(); device?.destroy();
       await releaseWebGPUExclusiveLock();

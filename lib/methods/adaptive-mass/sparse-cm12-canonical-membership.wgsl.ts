@@ -183,6 +183,7 @@ const PCM_D_CLOSURE_CAUSES:u32=${d.closureCauseMask}u;
 const PCM_D_TOTAL:u32=${d.totalCount}u;const PCM_D_INDIRECT_X:u32=${d.repairIndirectX}u;
 const PCM_D_EXPECTED_CLOSURE:u32=${d.expectedClosureCount}u;
 const PCM_D_COVERED_CLOSURE:u32=${d.coveredClosureCount}u;
+const PCM_D_FLAGS:u32=${d.flags}u;
 ${domainConstants("CELL", options.layout.cell)}
 ${domainConstants("ROW", options.layout.row)}
 var<workgroup>pcmLeafCounts:array<u32,${SPARSE_CM12_CANONICAL_MEMBERSHIP_LEAF_BITS / 32}>;
@@ -214,6 +215,7 @@ fn pcmBegin(header:u32,expectedClosureCount:u32)->bool{
   atomicStore(&${arena}[header+PCM_D_CLOSURE_CAUSES],0u);
   atomicStore(&${arena}[header+PCM_D_EXPECTED_CLOSURE],expectedClosureCount);
   atomicStore(&${arena}[header+PCM_D_COVERED_CLOSURE],0u);
+  atomicStore(&${arena}[header+PCM_D_FLAGS],0u);
   atomicStore(&${arena}[header+PCM_D_INDIRECT_X],0u);
   atomicStore(&${arena}[header+PCM_D_PHASE],PCM_PHASE_COLLECTING);return true;
 }
@@ -228,7 +230,10 @@ fn pcmSetCandidate(header:u32,capacity:u32,tokens:u32,stamps:u32,list:u32,
   var published=false;
   for(var attempt=0u;attempt<64u;attempt+=1u){
     if((observed>>1u)==generation){
-      if((observed&1u)!=(token&1u)){pcmFault(header,PCM_FAULT_CONFLICT,id);return false;}
+      if((observed&1u)!=(token&1u)){
+        atomicStore(&${arena}[header+PCM_D_FLAGS],
+          (observed&0xffffu)|((token&1u)<<16u)|((causeMask&0x7fffu)<<17u));
+        pcmFault(header,PCM_FAULT_CONFLICT,id);return false;}
       return true;
     }
     let exchanged=atomicCompareExchangeWeak(&${arena}[tokens+id],observed,token);

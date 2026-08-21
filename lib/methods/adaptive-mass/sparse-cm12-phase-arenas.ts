@@ -4,8 +4,8 @@ import {
 } from "./sparse-cm12-pressure-journal";
 import type { SparseCM12HotTopologyLayout } from "./sparse-cm12-hot-topology";
 
-export const SPARSE_CM12_PHASE_ARENA_BRICK_FINE_RESOLUTION = 16;
-export const SPARSE_CM12_PHASE_ARENA_PRESENTATION_PAGE_RESOLUTION = 16;
+export const SPARSE_CM12_PHASE_ARENA_BRICK_FINE_RESOLUTION = 8;
+export const SPARSE_CM12_PHASE_ARENA_PRESENTATION_PAGE_RESOLUTION = 8;
 export const SPARSE_CM12_PHASE_ARENA_WORKGROUP_SIZE = 64;
 export const SPARSE_CM12_PHASE_ARENA_PRESSURE_SCALAR_BYTES = 80;
 export const SPARSE_CM12_PHASE_ARENA_DIAGNOSTIC_READBACK_BYTES = 300;
@@ -74,8 +74,8 @@ export interface SparseCM12PressureHierarchyCapacity {
 }
 
 export interface SparseCM12PhaseArenaPlannerInput {
-  readonly brickFineResolution?: 16;
-  readonly presentationPageResolution?: 16;
+  readonly brickFineResolution?: 4 | 8 | 16;
+  readonly presentationPageResolution?: 4 | 8 | 16;
   readonly cellCount: number;
   readonly rowCount: number;
   readonly brickCount: number;
@@ -291,13 +291,17 @@ export function createSparseCM12PhaseArenaPlan(
   source: SparseCM12PhaseArenaPlannerInput,
 ): SparseCM12PhaseArenaPlan {
   const input = Object.freeze({ ...source,
-    brickFineResolution: source.brickFineResolution ?? 16,
-    presentationPageResolution: source.presentationPageResolution ?? 16,
+    brickFineResolution: source.brickFineResolution ?? source.htp1.brickFineResolution,
+    presentationPageResolution:
+      source.presentationPageResolution ?? source.brickFineResolution
+        ?? source.htp1.presentationPageResolution,
   });
-  if (input.brickFineResolution !== 16 || input.presentationPageResolution !== 16
-    || input.htp1.brickFineResolution !== 16
-    || input.htp1.presentationPageResolution !== 16) {
-    throw new Error("phase arenas are intentionally the B16/P16 physical ABI");
+  if ((input.brickFineResolution !== 4 && input.brickFineResolution !== 8
+      && input.brickFineResolution !== 16)
+    || input.presentationPageResolution !== input.brickFineResolution
+    || input.htp1.brickFineResolution !== input.brickFineResolution
+    || input.htp1.presentationPageResolution !== input.presentationPageResolution) {
+    throw new Error("phase arenas require a matched B4/P4, B8/P8, or B16/P16 physical ABI");
   }
   if (input.htp1.totalBytes !== 4 * input.htp1.totalWords
     || input.htp1.totalWords < 1) {

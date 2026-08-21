@@ -1,5 +1,5 @@
 /**
- * SRR1: producer-authored exact scalar-result authority for Sparse CM12 B16/P16.
+ * SRR1: producer-authored exact scalar-result authority for matched Sparse CM12 profiles.
  *
  * This authority never reads or writes scalar physics.  A scalar producer compares
  * every physical word in a tile with the exact HEAD result and publishes the
@@ -70,8 +70,8 @@ export const SPARSE_CM12_SCALAR_RESULT_CAUSE = Object.freeze({
 } as const);
 
 export interface SparseCM12ScalarResultLayout {
-  readonly brickFineResolution: 16;
-  readonly presentationPageResolution: 16;
+  readonly brickFineResolution: 4 | 8 | 16;
+  readonly presentationPageResolution: 4 | 8 | 16;
   readonly tileCapacity: number;
   readonly leafCapacity: number;
   readonly treeLeafCapacity: number;
@@ -157,17 +157,19 @@ export function scalarResultCandidateWord(
 export function createSparseCM12ScalarResultAuthority(options: {
   readonly tileCapacity: number;
   readonly leafCapacity?: number;
-  readonly brickFineResolution?: 16;
-  readonly presentationPageResolution?: 16;
+  readonly brickFineResolution?: 4 | 8 | 16;
+  readonly presentationPageResolution?: 4 | 8 | 16;
 }): SparseCM12ScalarResultAuthority {
   const tileCapacity = integer(options.tileCapacity, "SRR1 tile capacity", true);
   const leafCapacity = integer(options.leafCapacity ?? tileCapacity,
     "SRR1 leaf capacity", true);
   if (leafCapacity < tileCapacity) throw new RangeError(
     "SRR1 leaf capacity must admit one deduplicated leaf per tile");
-  if ((options.brickFineResolution ?? 16) !== 16
-    || (options.presentationPageResolution ?? 16) !== 16) {
-    throw new Error("SRR1 is the B16/P16 ABI");
+  const brickFineResolution = options.brickFineResolution ?? 8;
+  const presentationPageResolution = options.presentationPageResolution ?? brickFineResolution;
+  if ((brickFineResolution !== 4 && brickFineResolution !== 8 && brickFineResolution !== 16)
+    || presentationPageResolution !== brickFineResolution) {
+    throw new Error("SRR1 requires a matched B4/P4, B8/P8, or B16/P16 ABI");
   }
   const treeLeafCapacity = nextPowerOfTwo(tileCapacity);
   const treeWords = 2 * treeLeafCapacity - 1;
@@ -182,8 +184,8 @@ export function createSparseCM12ScalarResultAuthority(options: {
   const workTreeBaseWords = align64(workListBaseWords + tileCapacity);
   const cleanTreeBaseWords = align64(workTreeBaseWords + treeWords);
   const totalWords = align64(cleanTreeBaseWords + treeWords);
-  const layout = Object.freeze({ brickFineResolution: 16 as const,
-    presentationPageResolution: 16 as const, tileCapacity, leafCapacity,
+  const layout = Object.freeze({ brickFineResolution,
+    presentationPageResolution, tileCapacity, leafCapacity,
     treeLeafCapacity, treeWords, tileBaseWords,
     candidateReceiptBaseWords, leafBaseWords: candidateLeafBaseWords,
     workListBaseWords, workTreeBaseWords, cleanTreeBaseWords,
@@ -192,8 +194,8 @@ export function createSparseCM12ScalarResultAuthority(options: {
   const h = SPARSE_CM12_SCALAR_RESULT_HEADER;
   words[h.magic] = SPARSE_CM12_SCALAR_RESULT_MAGIC;
   words[h.version] = SPARSE_CM12_SCALAR_RESULT_VERSION;
-  words[h.brickFineResolution] = 16;
-  words[h.presentationPageResolution] = 16;
+  words[h.brickFineResolution] = brickFineResolution;
+  words[h.presentationPageResolution] = presentationPageResolution;
   words[h.tileCapacity] = tileCapacity;
   words[h.leafCapacity] = leafCapacity;
   words[h.phase] = SPARSE_CM12_SCALAR_RESULT_PHASE.accepted;

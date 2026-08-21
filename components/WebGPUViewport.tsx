@@ -114,6 +114,7 @@ import { StoneLookFlyout } from "./StoneLookFlyout";
 import { TreeCanopyFlyout } from "./TreeCanopyFlyout";
 import { VesselRimFlyout } from "./VesselRimFlyout";
 import { SelectionFlyout } from "./SelectionFlyout";
+import { SceneInstrumentTags } from "./PipelineOverlay";
 import { useSceneStore } from "../lib/core/stores/scene-store";
 import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore, type SceneDraftSubject } from "../lib/core/stores/scene-draft-store";
 import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
@@ -1457,7 +1458,7 @@ export function WebGPUViewport() {
           normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
         },
       })
-      : hover ? sceneActionsAt(hover.position_m) : [];
+      : hover ? sceneActionsAt(context.scene, hover.position_m) : [];
     if (actions.length === 0) { useUIStore.getState().closeRadialMenu(); return; }
     // Client coordinates: the ring is a fixed-position layer over the window,
     // not a child of the canvas, so it must not be told canvas-relative ones.
@@ -2454,15 +2455,20 @@ export function WebGPUViewport() {
       }}
       onContextMenu={openRadialMenuAt}
     />
-    {/* The frame rate is the only thing left on this corner. Pick mode moved to
-        the contextual ring on a fluid cell — the shortcut (`C`) is unchanged. */}
-    <output
-      ref={fpsRef}
-      className="fps-meter"
-      data-testid="fps-meter"
-      aria-label="Presentation frame rate"
-      title="WebGPU presentations per second · rolling mean of the latest 5 frame intervals"
-    >— FPS</output>
+    {/* What the frame costs, and the three readings that say where it went.
+        Pick mode moved to the contextual ring on a fluid cell — the shortcut
+        (`C`) is unchanged. The tags sit to the *left* of the number so the
+        number never moves when they reveal. */}
+    <div className="fps-cluster" data-testid="fps-cluster">
+      <SceneInstrumentTags />
+      <output
+        ref={fpsRef}
+        className="fps-meter"
+        data-testid="fps-meter"
+        aria-label="Presentation frame rate"
+        title="WebGPU presentations per second · rolling mean of the latest 5 frame intervals"
+      >— FPS</output>
+    </div>
     {fillHandle?.visible && <div
       className="editor-fill-handle"
       data-testid="editor-fill-handle"

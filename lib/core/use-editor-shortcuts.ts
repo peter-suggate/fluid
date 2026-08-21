@@ -6,6 +6,7 @@ import { cameraForFraming, cameraFramingForKey } from "./editor-camera-framing";
 import { DEFAULT_EDITOR_TOOL, editorToolForShortcut, editorToolIsActive } from "./editor-tools";
 import { stepFluidCellTraceHit } from "./fluid-cell-trace";
 import { editorEntityContext, findEntity } from "./editor-entity-catalog";
+import { sceneInstrumentForShortcut } from "./scene-instruments";
 import { simulation } from "./simulation/controller";
 import { useDiagnosticsStore } from "./stores/diagnostics-store";
 import { useUIStore } from "./stores/ui-store";
@@ -94,6 +95,19 @@ export function useEditorShortcuts(): void {
         if (!body) return;
         event.preventDefault();
         ui.setCamera((current) => ({ ...current, target_m: { ...body.position_m } }));
+        return;
+      }
+      // Raising an instrument. The only route to one that does not begin with a
+      // right-click landing on something: the rings offer the pipelines on the
+      // water and on the room, so a scene whose pick is rebuilding, or whose
+      // water is off screen, or which is being watched rather than edited, had
+      // no way to ask what it costs. Same toggle bargain as a tool key — the
+      // key that raised it puts it down — and Escape still closes whichever is
+      // up, from anywhere.
+      const instrument = sceneInstrumentForShortcut(event.key);
+      if (instrument) {
+        event.preventDefault();
+        ui.setSceneOverlay(ui.sceneOverlay === instrument.id ? null : instrument.id);
         return;
       }
       // Entering and leaving pick mode. "c" for cell, and no editor tool claims

@@ -38,6 +38,7 @@
     "check:sparse-cm12:fpa-vex-read-census": "node --import tsx tools/check-sparse-cm12-fpa-vex-read-census.ts",
     "check:sparse-cm12:vex-reverse-dependency": "node --import tsx tools/check-sparse-cm12-vex-reverse-dependency.ts",
     "probe:sparse-cm12:fpa-tile-census": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/probe-sparse-cm12-temporal-seed-ab.ts",
+    "benchmark:sparse-cm12:early-transport-experiments": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/benchmark-sparse-cm12-early-transport-experiments.ts",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "deploy:site": "npm run build && node tools/package-chatgpt-site.mjs",
     "test": "npm run build && node --import tsx --test tests/*.test.ts",

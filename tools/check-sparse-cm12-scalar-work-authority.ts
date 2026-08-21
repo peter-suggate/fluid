@@ -377,8 +377,8 @@ function transitionAndFailClosedContract(): void {
 function abiContract(): void {
   const authority = fixture();
   assert(sparseCM12ScalarAuthorityHeaderValid(authority), "SAW1 header invalid");
-  equal(authority.layout.brickFineResolution, 16, "brick resolution");
-  equal(authority.layout.presentationPageResolution, 16, "page resolution");
+  equal(authority.layout.brickFineResolution, 8, "brick resolution");
+  equal(authority.layout.presentationPageResolution, 8, "page resolution");
   const source = createSparseCM12ScalarWorkAuthorityWGSL({
     layout: authority.layout, arenaName: "proofArena",
   });
@@ -394,7 +394,7 @@ function abiContract(): void {
     createSparseCM12ScalarWorkAuthority({ tileCapacity: 1,
       brickFineResolution: 16, presentationPageResolution: 8 as 16 });
   } catch { rejected = true; }
-  assert(rejected, "non-P16 construction did not fail closed");
+  assert(rejected, "mismatched presentation construction did not fail closed");
 }
 
 abiContract();

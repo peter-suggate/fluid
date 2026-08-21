@@ -185,10 +185,12 @@ export function createSparseCM12HotTopology(
     readonly presentationPageResolution?: SparseBrickFineResolution;
   } = {},
 ): SparseCM12HotTopology {
-  const brickFineResolution = options.brickFineResolution ?? 16;
-  const presentationPageResolution = options.presentationPageResolution ?? 16;
-  if (brickFineResolution !== 16 || presentationPageResolution !== 16) {
-    throw new Error("HTP1 is intentionally the B16/P16 physical ABI");
+  const brickFineResolution = options.brickFineResolution ?? grid.atlas.brickFineResolution;
+  const presentationPageResolution = options.presentationPageResolution ?? brickFineResolution;
+  if ((brickFineResolution !== 4 && brickFineResolution !== 8
+      && brickFineResolution !== 16)
+    || presentationPageResolution !== brickFineResolution) {
+    throw new Error("HTP1 requires a matched B4/P4, B8/P8, or B16/P16 physical ABI");
   }
   const brickByKey = requireContiguousGrid(grid);
   const logicalOwner = createSparseCM12LogicalOwnerDirectory(grid.atlas, {
@@ -407,7 +409,9 @@ export function sparseCM12HotTopologyHeaderValid(topology: SparseCM12HotTopology
   const expectedRequirementBase = alignWords(expectedDirectedEdgeBase
     + SPARSE_CM12_HOT_TOPOLOGY_EDGE_WORDS * l.directedEdgeCount, 4);
   const expectedTotal = alignWords(expectedRequirementBase + l.requirementCount, 4);
-  return l.brickFineResolution === 16 && l.presentationPageResolution === 16
+  return (l.brickFineResolution === 4 || l.brickFineResolution === 8
+      || l.brickFineResolution === 16)
+    && l.presentationPageResolution === l.brickFineResolution
     && l.logicalOwnerWords === l.logicalOwner.totalWords
     && l.headerBaseWords === expectedHeaderBase
     && l.cellBaseWords === expectedCellBase && l.rowBaseWords === expectedRowBase

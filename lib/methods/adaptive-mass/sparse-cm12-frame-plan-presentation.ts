@@ -86,7 +86,7 @@ export function createSparseCM12FramePlanPresentationLayout(options: {
   readonly baseWords?: number;
 }): SparseCM12FramePlanPresentationLayout {
   const baseWords = alignWords(integer(options.baseWords ?? 0, "baseWords"));
-  const brickFineResolution = options.brickFineResolution ?? 16;
+  const brickFineResolution = options.brickFineResolution ?? 8;
   const pageResolution = options.pageResolution ?? brickFineResolution;
   if (pageResolution !== brickFineResolution) {
     throw new RangeError("FPP1 requires one B-sized presentation page per physical brick");

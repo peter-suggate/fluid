@@ -51,9 +51,17 @@ import {
  * volume once per screen pixel.
  */
 
-export function shouldUpdateWaterSurface(extractedRevision: number, latestRevision: number, lastExtractionAt_ms: number, now_ms: number) {
+export function shouldUpdateWaterSurface(
+  extractedRevision: number,
+  latestRevision: number,
+  lastExtractionAt_ms: number,
+  now_ms: number,
+  revisionCadenceBypass = false,
+) {
   return extractedRevision < 0
-    || (latestRevision !== extractedRevision && now_ms - lastExtractionAt_ms + 0.5 >= frameInterval_ms());
+    || (latestRevision !== extractedRevision
+      && (revisionCadenceBypass
+        || now_ms - lastExtractionAt_ms + 0.5 >= frameInterval_ms()));
 }
 
 /** Serializable caustic-receiver cache key shared with regression tests. */
@@ -2299,7 +2307,7 @@ export class RasterWaterPipeline {
     return bindGroup;
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene", allowSurfaceDiagnostics = true, bandPartitioner?: FrameBandPartitioner): RasterWaterEncodeResult | false {
+  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene", allowSurfaceDiagnostics = true, bandPartitioner?: FrameBandPartitioner, revisionCadenceBypass = false): RasterWaterEncodeResult | false {
     // Count only frames whose source has a completed GPU receipt. The
     // diagnostics/visual panels request full-rate receipts, making this an
     // exact source-mode counter while it is being used to judge fidelity.
@@ -2325,7 +2333,8 @@ export class RasterWaterPipeline {
     // forever behind a diagnostic switch.
     const updateSurface = forceSurfaceDiagnostics
       || (!this.disabledStages.has("surface-extraction")
-        && shouldUpdateWaterSurface(this.extractedRevision, revision, this.lastExtractionAt_ms, now_ms));
+        && shouldUpdateWaterSurface(this.extractedRevision, revision,
+          this.lastExtractionAt_ms, now_ms, revisionCadenceBypass));
     let surfaceDiagnosticsCaptured = false;
     // The map follows the mesh: a retained surface deposits the same bundles,
     // so re-projecting it would spend a full pass to write the same texels. A

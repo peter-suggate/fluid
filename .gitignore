@@ -13,5 +13,8 @@ coverage/
 .build/
 native/.build/
 tmp/
-artifacts/
+artifacts/*
+!artifacts/sparse-cm12-early-transport-experiments.json
+!artifacts/sparse-cm12-early-transport-combinations.json
+!artifacts/sparse-cm12-early-transport-confirmation.json
 .openai/deploy/

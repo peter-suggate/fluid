@@ -43,8 +43,10 @@ fn ftcInsertRow(bitsBase:u32,row:u32,counter:u32)->bool{
 fn ftcBrickCause(brick:u32,mask:vec2u)->u32{
   let generation=incrementalActivityGeneration();var cause=0u;
   if(brickSpan(brick)==1u){
-    let key=topology[p.topologyOffsets2.z+2u*brick+1u];let base=key*64u;
-    for(var tile=0u;tile<64u;tile+=1u){if(!ftcMaskContains(mask,tile)){continue;}
+    let key=topology[p.topologyOffsets2.z+2u*brick+1u];
+    let base=key*ACTIVITY_TILES_PER_BRICK;
+    for(var tile=0u;tile<ACTIVITY_TILES_PER_BRICK;tile+=1u){
+      if(!ftcMaskContains(mask,tile)){continue;}
       let stable=base+tile;
       if(stable<${activity.stableTileCount}u
         &&atomicLoad(&activity[${activity.stableTileStampBaseWords}u+stable])==generation){

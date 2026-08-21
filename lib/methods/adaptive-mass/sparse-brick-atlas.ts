@@ -13,6 +13,7 @@ import {
   sceneInitialLiquidVolumes,
 } from "../../core/initial-fluid";
 import type { SceneDescription } from "../../core/model";
+import { sceneRefinementRegions } from "../../core/refinement-regions";
 import {
   classifyFineBoxAgainstSphericalContainer,
   sphericalContainerFineGeometry,
@@ -20,6 +21,11 @@ import {
   type SphericalContainerFineGeometry,
 } from "../../core/spherical-container";
 import { sceneHasTerrain, terrainHeightAt } from "../../core/terrain";
+import {
+  applySparseCM12RefinementRegionResolutionBounds,
+  packSparseCM12RefinementRegions,
+  sparseCM12RefinementRegionResolutionBoundsForBrick,
+} from "./sparse-cm12-refinement-regions";
 
 /** Supported construction-time finest resolution of one fixed-world brick. */
 export type SparseBrickFineResolution = 4 | 8 | 16;
@@ -34,7 +40,7 @@ export interface SparseBrickLadder {
   readonly cellCapacity: number;
 }
 
-export const DEFAULT_BRICK_FINE_RESOLUTION: SparseBrickFineResolution = 16;
+export const DEFAULT_BRICK_FINE_RESOLUTION: SparseBrickFineResolution = 8;
 /** @deprecated Use atlas.brickFineResolution for geometry. */
 export const BRICK_FINE_RESOLUTION = DEFAULT_BRICK_FINE_RESOLUTION;
 
@@ -396,6 +402,29 @@ function structuralSeedBrickCoordinates(
   return [...result.values()];
 }
 
+function initialResolutionWithRefinementRegionBounds(
+  packed: ArrayBuffer,
+  dimensions: SparseBrickVec3,
+  brickCoordinate: SparseBrickVec3,
+  spanBricks: number,
+  requestedResolution: number,
+  brickFineResolution: SparseBrickFineResolution,
+): SparseBrickResolution {
+  const origin = brickCoordinate.map((value) => value * brickFineResolution) as
+    [number, number, number];
+  const extent = origin.map((value, axis) => Math.max(0,
+    Math.min(spanBricks * brickFineResolution, dimensions[axis]! - value))) as
+    [number, number, number];
+  const bounds = sparseCM12RefinementRegionResolutionBoundsForBrick(
+    packed, origin, extent, brickFineResolution, spanBricks * brickFineResolution);
+  const bounded = applySparseCM12RefinementRegionResolutionBounds(
+    requestedResolution, bounds);
+  if (!isSparseBrickResolution(bounded, brickFineResolution)) {
+    throw new Error(`refinement region selected invalid Sparse CM12 rung ${bounded}`);
+  }
+  return bounded;
+}
+
 /**
  * Cover an analytic tank fill with maximal graded octree leaves. The traversal
  * visits octree boundary nodes, not every wet fixed brick. Partial top bricks
@@ -409,6 +438,7 @@ function hierarchicalTankFillBricks(
   surfaceFineRings: number,
   maximumMacroSpanBricks: number,
   boundary: SphericalContainerFineGeometry | undefined,
+  refinementRegionParameters: ArrayBuffer,
 ): SparseAdaptiveMassBrick[] | undefined {
   if (scene.systems?.fluid === false) return [];
   if (scene.fluid.initialCondition !== "tank-fill"
@@ -462,7 +492,9 @@ function hierarchicalTankFillBricks(
         : edgeFine;
       const crossesResolutionBands = span > 1
         && deepestAllowedCellWidth !== allowedCellWidth;
-      const requiredResolution = edgeFine / allowedCellWidth;
+      const requiredResolution = initialResolutionWithRefinementRegionBounds(
+        refinementRegionParameters, dimensions, origin, span,
+        edgeFine / allowedCellWidth, brickFineResolution);
       // A macro at B^3 would refine all tangential directions merely to grade
       // one normal face. Split that last rung into base bricks instead; this
       // keeps the page census surface-shaped and substantially smaller.
@@ -478,7 +510,9 @@ function hierarchicalTankFillBricks(
     }
     if (span === 1) {
       if (inside) bricks.push(uniformInitialBrick(
-        origin, 1, brickFineResolution, brickDimensions,
+        origin, 1, initialResolutionWithRefinementRegionBounds(
+          refinementRegionParameters, dimensions, origin, 1,
+          brickFineResolution, brickFineResolution), brickDimensions,
       ));
       return;
     }
@@ -496,7 +530,9 @@ function hierarchicalTankFillBricks(
     for (let z = 0; z < brickDimensions[2]; z += 1)
       for (let x = 0; x < brickDimensions[0]; x += 1)
         bricks.push(initialBrick(
-          scene, dimensions, [x, fullBrickY, z], brickFineResolution, brickFineResolution,
+          scene, dimensions, [x, fullBrickY, z], initialResolutionWithRefinementRegionBounds(
+            refinementRegionParameters, dimensions, [x, fullBrickY, z], 1,
+            brickFineResolution, brickFineResolution), brickFineResolution,
         ));
   }
 
@@ -508,7 +544,9 @@ function hierarchicalTankFillBricks(
   )) {
     if (sparseBrickContainingCoordinate(provisional, coordinate)) continue;
     bricks.push(initialBrick(
-      scene, dimensions, coordinate, brickFineResolution, brickFineResolution,
+      scene, dimensions, coordinate, initialResolutionWithRefinementRegionBounds(
+        refinementRegionParameters, dimensions, coordinate, 1,
+        brickFineResolution, brickFineResolution), brickFineResolution,
     ));
   }
   return bricks.sort((left, right) => left.key - right.key);
@@ -662,11 +700,20 @@ export function initializeSparseBrickAtlasFromScene(
     ? Math.min(8, Math.max(1, Math.round(options.surfaceFineRings))) : 1;
   const brickDimensions = options.finestDimensions.map((value) =>
     Math.ceil(value / brickFineResolution)) as [number, number, number];
+  const container = scene.container;
+  const refinementRegionParameters = packSparseCM12RefinementRegions(
+    sceneRefinementRegions(scene), {
+      dimensions: options.finestDimensions,
+      cellSize_m: [container.width_m / options.finestDimensions[0],
+        container.height_m / options.finestDimensions[1],
+        container.depth_m / options.finestDimensions[2]],
+      origin_m: { x: -0.5 * container.width_m, y: 0, z: -0.5 * container.depth_m },
+    });
   const boundary = sphericalContainerFineGeometry(scene, options.finestDimensions);
   if (!options.resolutionForBrick) {
     const hierarchical = hierarchicalTankFillBricks(
       scene, options.finestDimensions, brickDimensions, brickFineResolution, surfaceFineRings,
-      maximumMacroSpanBricks, boundary,
+      maximumMacroSpanBricks, boundary, refinementRegionParameters,
     );
     if (hierarchical) {
       return createSparseAdaptiveMassAtlas(
@@ -748,12 +795,15 @@ export function initializeSparseBrickAtlasFromScene(
       ? 0 : Math.max(0, ladder.resolutions.length - 1 - Math.max(0, distance - surfaceFineRings + 1));
     const adaptiveResolution = (distance !== undefined && distance < surfaceFineRings
       ? brickFineResolution : ladder.resolutions[distanceRung]!) as SparseBrickResolution;
-    const selected = brickRequiresCutBoundaryResolution(
+    const evidenceSelected = brickRequiresCutBoundaryResolution(
       boundary, coordinate, brickFineResolution,
     ) ? brickFineResolution
       : options.resolutionForBrick?.({
       coordinate, brickDimensions,
     }) ?? adaptiveResolution;
+    const selected = initialResolutionWithRefinementRegionBounds(
+      refinementRegionParameters, options.finestDimensions, coordinate, 1,
+      evidenceSelected, brickFineResolution);
     if (!isSparseBrickResolution(selected, brickFineResolution)) {
       throw new RangeError(
         `resolutionForBrick must return a rung on ${ladder.resolutions.join("/")}`,

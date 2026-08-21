@@ -7,6 +7,10 @@ import type {
   MethodParamValues,
 } from "../../core/method-contract";
 import type { SceneDescription } from "../../core/model";
+import {
+  refinementRegionLattice,
+  sceneRefinementRegions,
+} from "../../core/refinement-regions";
 import { classifyFineBoxAgainstSphericalContainer } from "../../core/spherical-container";
 import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { sceneLatticeDimensions } from "../../core/scene-lattice";
@@ -43,6 +47,8 @@ import {
 } from "./sparse-atlas-composite-projection";
 import { SparseCM12PressureTopologyAttributionTracker } from
   "./sparse-cm12-pressure-topology-attribution";
+import { packSparseCM12RefinementRegions } from
+  "./sparse-cm12-refinement-regions";
 import { WebGPUAdaptiveMassSparsePresentation } from
   "./webgpu-adaptive-mass-atlas-presentation";
 import {
@@ -53,6 +59,7 @@ import {
   sparseCM12SharpeningTraceSteps,
   WebGPUSparseCM12Resident,
   type SparseCM12GPUActivityRecord,
+  type SparseCM12TransportExperiment,
 } from "./webgpu-sparse-cm12-resident";
 
 const PRESSURE_REFRESH_ORACLE_QA_TOKEN: unique symbol =
@@ -642,6 +649,18 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       onProgress, signal, TEMPORAL_CHANGE_SEED_QA_TOKEN);
   }
 
+  /** Construction-only transport specialization for paired wall-clock probes. */
+  static createTransportExperimentForQA(
+    experiment: Exclude<SparseCM12TransportExperiment, "baseline">,
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, undefined, experiment);
+  }
+
   static async createAsync(
     device: GPUDevice,
     scene: SceneDescription,
@@ -658,6 +677,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       | typeof PRESSURE_ADDRESSING_MATERIALIZED_LIST_QA_TOKEN
       | typeof TEMPORAL_CURRENT_SEED_QA_TOKEN
       | typeof TEMPORAL_CHANGE_SEED_QA_TOKEN,
+    transportExperimentForQA?: Exclude<SparseCM12TransportExperiment, "baseline">,
   ): Promise<WebGPUAdaptiveMassSolver> {
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
     // Compile the boundary chain's closing marker while the scene builds. A
@@ -731,7 +751,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         label: "Build resident dyadic sparse bricks",
         dependencies: ["adaptive-mass.plan"],
         run: () => {
-          const fineResolution = options.brickFineResolution ?? 16;
+          const fineResolution = options.brickFineResolution ?? 8;
           const coarseResolution = (fineResolution / 2) as SparseBrickResolution;
           const resolutionForBrick = options.resolutionMode === "all-fine"
             ? () => fineResolution
@@ -791,14 +811,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
                         : qaToken === TEMPORAL_CHANGE_SEED_QA_TOKEN
                           ? WebGPUSparseCM12Resident.createTemporalChangeSeedOracleForQA
               : WebGPUSparseCM12Resident.create;
-          resident = await createResident.call(WebGPUSparseCM12Resident,
+          const residentArguments = [
             device, atlas!, grid!, finestCellSize(scene, atlas!),
             initiallyActiveBrickKeys,
             rigidCouplingEnabled ? {
               bodies: rigidSystem!.stateBuffer,
               exchange: rigidExchange!,
               worldDimensions_m: [scene.container.width_m, scene.container.height_m,
-                scene.container.depth_m],
+                scene.container.depth_m] as const,
             } : undefined,
             // Sized from the iteration ceiling this solver was built with, so
             // the journal can hold the longest solve it will ever encode.
@@ -806,8 +826,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               ? { iterationCapacity: sparseCM12PressureIterations(
                 options.pressureIterations) }
               : undefined,
-            options.presentationPageResolution ?? 16,
-          );
+            options.presentationPageResolution ?? options.brickFineResolution ?? 8,
+          ] as const;
+          resident = transportExperimentForQA
+            ? await WebGPUSparseCM12Resident.createTransportExperimentForQA(
+              transportExperimentForQA, ...residentArguments)
+            : await createResident.call(WebGPUSparseCM12Resident, ...residentArguments);
+          resident.setRefinementRegionParameters(packSparseCM12RefinementRegions(
+            sceneRefinementRegions(scene), refinementRegionLattice(scene)));
         },
       }, {
         id: "adaptive-mass.upload",
@@ -895,6 +921,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    */
   applySceneUniforms(scene: SceneDescription): void {
     this.scene = scene;
+    this.resident.setRefinementRegionParameters(packSparseCM12RefinementRegions(
+      sceneRefinementRegions(scene), refinementRegionLattice(scene)));
   }
 
   /**
@@ -1173,6 +1201,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readPressureAddressingHeaderQA() {
     return this.resident.readPressureAddressingHeaderQA();
   }
+  readSparseWorkShapeQA() { return this.resident.readWorkShapeQA(); }
+  readAdaptiveRepresentationQA() { return this.resident.readAdaptiveRepresentationQA(); }
   readAcceptedIndirectQA() { return this.resident.readAcceptedIndirectQA(); }
   readFrameControlIndirectQA() { return this.resident.readFrameControlIndirectQA(); }
   /** Construction-only temporal seed census; ordinary solvers reject this call. */

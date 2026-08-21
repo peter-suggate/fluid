@@ -26,7 +26,7 @@ import { sparseCM12HostTemplateVariantsEnabled } from
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
 
-test("Figure 9 receiver capacity reaches the authored far wall without host variants", () => {
+test("Figure 9 B8 receiver capacity reaches the authored far wall", () => {
   const scene = getScenePreset("mass-conserving-figure-9-dam-break").create();
   let atlas = initializeSparseBrickAtlasFromScene(scene, {
     finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
@@ -41,6 +41,7 @@ test("Figure 9 receiver capacity reaches the authored far wall without host vari
   );
 
   assert.deepEqual(atlas.brickDimensions, [16, 16, 8]);
+  assert.equal(atlas.brickFineResolution, 8);
   assert.equal(atlas.bricks.length, 16 * 16 * 8,
     "a tank that fits the receiver budget must not contain a hidden apron wall");
   assert.ok(atlas.bricks.some((brick) => brick.coordinate[0] === 15),
@@ -49,7 +50,8 @@ test("Figure 9 receiver capacity reaches the authored far wall without host vari
   assert.equal(sparseBrickAtlasStats(atlas).leafCount, 234_896);
   assert.equal(sparseCM12HostTemplateVariantsEnabled(
     sparseBrickAtlasStats(atlas).leafCount, 0, initiallyActiveBrickCount,
-  ), false, "the 616-brick live frontier must use accepted-only startup packing");
+    atlas.brickFineResolution,
+  ), true, "the 616-brick B8 live frontier fits the bounded host-template path");
 });
 
 dawnTest("Figure 9 dam reaches the far wall through activated receivers",

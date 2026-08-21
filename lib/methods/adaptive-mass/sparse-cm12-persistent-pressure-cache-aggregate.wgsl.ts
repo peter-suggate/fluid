@@ -35,13 +35,13 @@ function rankSelect(name: SparseCM12PressureCacheAggregateFamilyName,
   const n = label(name), p = `PCFA_${n.toUpperCase()}`;
   const descend = Array.from({ length: family.treeLevelCounts.length - 1 }, (_, index) => {
     const level = family.treeLevelCounts.length - 2 - index;
-    return `let begin=node*PCFA_BRANCH;var selected=PCF_INVALID;
+    return `{let begin=node*PCFA_BRANCH;var selected=PCF_INVALID;
     for(var child=0u;child<PCFA_BRANCH;child+=1u){let candidate=begin+child;
       if(candidate>=${family.treeLevelCounts[level]}u){break;}
       let count=atomicLoad(&${arena}[${p}_TREE_${level}+candidate]);
       if(selected==PCF_INVALID&&remaining<count){selected=candidate;}
       else if(selected==PCF_INVALID){remaining-=count;}}
-    if(selected==PCF_INVALID){return PCF_INVALID;}node=selected;`;
+    if(selected==PCF_INVALID){return PCF_INVALID;}node=selected;}`;
   }).join("\n  ");
   return `fn pcf${n}RankSelect(rank:u32)->u32{
   let total=atomicLoad(&${arena}[${p}_HEADER+PCFA_F_WORK_COUNT]);

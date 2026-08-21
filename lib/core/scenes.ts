@@ -100,7 +100,7 @@ export const SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE: MethodProfile = Objec
   methodId: "adaptive-mass",
   quality: "balanced",
   overrides: Object.freeze({
-    brickFineResolution: "16",
+    brickFineResolution: "8",
     resolutionMode: "adaptive",
     maximumMacroSpanBricks: "auto",
     selectorMode: "surface",
@@ -151,7 +151,7 @@ export const SYMMETRIC_EXPANSION_METHOD_PROFILE = ADAPTIVE_LOSASSO_UI_METHOD_PRO
 /** Canonical Sparse CM12 product path for the same D4 expansion oracle.
  *
  * Keep the octree/LoSasso card above as its independent comparison lane. The
- * Sparse CM12 card names B16/P16 and the interactive production pressure
+ * Sparse CM12 card names B8/P8 and the interactive production pressure
  * budget. The stricter 108-iteration accuracy oracle remains a separate Dawn
  * lane; making that offline budget the UI default needlessly drops the scene
  * below real time.
@@ -162,8 +162,8 @@ MethodProfile = Object.freeze({
   quality: "balanced",
   overrides: Object.freeze({
     resolutionMode: "adaptive",
-    brickFineResolution: "16",
-    presentationPageResolution: "16",
+    brickFineResolution: "8",
+    presentationPageResolution: "8",
     selectorMode: "surface",
     timeStep: "paper",
     pressureIterations: 64,

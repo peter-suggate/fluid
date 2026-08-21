@@ -25,6 +25,11 @@ const argument = (name: string, fallback: number): number => {
   return value;
 };
 const steps = argument("steps", 5);
+const brickFineResolution = argument("brick-fine", 16) as 4 | 8 | 16;
+const requirePhysicalExact = !process.argv.includes("--allow-physical-drift");
+if (![4, 8, 16].includes(brickFineResolution)) {
+  throw new RangeError("brick-fine must be 4, 8, or 16");
+}
 const out = resolve(process.argv.find((value) => value.startsWith("--out="))?.slice(6)
   ?? "artifacts/sparse-cm12-fpp1-byte-exact-dam64.json");
 const modulePath = process.env.WEBGPU_NODE_MODULE ?? `${process.cwd()}/node_modules/webgpu/index.js`;
@@ -69,8 +74,8 @@ interface Capture {
 async function capture(device: GPUDevice, oracle: boolean): Promise<Capture> {
   const scene = createMinimalPowerDamBreak64Scene();
   const options = {
-    resolutionMode: "adaptive", brickFineResolution: 16,
-    presentationPageResolution: 16, surfaceFineRings: 8,
+    resolutionMode: "adaptive", brickFineResolution,
+    presentationPageResolution: brickFineResolution, surfaceFineRings: 8,
     activityPolicy, timeStep: "paper",
   } as const;
   const create = oracle
@@ -128,11 +133,14 @@ try {
   });
   const production = await capture(device, false);
   const oracle = await capture(device, true);
-  assert.deepEqual(production.physical, oracle.physical, "paired physical fields changed");
   const mismatch = firstMismatch(production.presentation, oracle.presentation);
   assert.equal(mismatch, -1, `presentation byte mismatch at ${mismatch} (word ${mismatch >>> 2})`);
   assert.equal(firstMismatch(production.metadata, oracle.metadata), -1,
     "presentation metadata differs from immutable QA publisher");
+  const physicalExact = JSON.stringify(production.physical) === JSON.stringify(oracle.physical);
+  if (requirePhysicalExact) {
+    assert.deepEqual(production.physical, oracle.physical, "paired physical fields changed");
+  }
   assert.deepEqual(validationErrors, [], "Dawn validation errors");
   const header = production.fppHeader!;
   assert.equal(header[H.faultCode], 0, "FPP1 global fault");
@@ -154,7 +162,9 @@ try {
   }
   assert.equal(metadataGenerationInvalid, 0, "FPP1 left invalid renderer page generations");
   const receipt = { kind: "sparse-cm12-fpp1-byte-exact",
-    steps, presentationBytes: production.presentation.byteLength,
+    steps, brickFineResolution, presentationPageResolution: brickFineResolution,
+    physicalExact,
+    presentationBytes: production.presentation.byteLength,
     presentationSha256: sha(production.presentation), physical: production.physical,
     fpp: { dirtyPages: header[H.dirtyPageCount], omittedPages: header[H.omittedPageCount],
       executedPages: header[H.executedPageCount], publishedPages: header[H.publishedPageCount],

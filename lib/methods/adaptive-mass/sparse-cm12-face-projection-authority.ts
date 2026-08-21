@@ -111,6 +111,8 @@ export interface SparseCM12FaceProjectionStageLayout {
 
 export interface SparseCM12FaceProjectionAuthorityLayout {
   readonly baseWords: number;
+  readonly brickFineResolution: 4 | 8 | 16;
+  readonly presentationPageResolution: 4 | 8 | 16;
   readonly rowCapacity: number;
   readonly cellCapacity: number;
   /** Exact pre-pressure face word, separate from the mirrored final face banks. */
@@ -141,14 +143,16 @@ export function createSparseCM12FaceProjectionAuthorityLayout(options: {
   readonly baseWords?: number;
   /** Construction-only test specialization. It is compiled into WGSL too. */
   readonly qaFullOracle?: boolean;
-  readonly brickFineResolution?: 16;
-  readonly presentationPageResolution?: 16;
+  readonly brickFineResolution?: 4 | 8 | 16;
+  readonly presentationPageResolution?: 4 | 8 | 16;
 }): SparseCM12FaceProjectionAuthorityLayout {
   const rowCapacity = capacity(options.rowCapacity, "FPA1 rowCapacity");
   const cellCapacity = capacity(options.cellCapacity, "FPA1 cellCapacity");
-  if ((options.brickFineResolution ?? 16) !== 16
-    || (options.presentationPageResolution ?? 16) !== 16) {
-    throw new Error("FPA1 is intentionally the B16/P16 physical ABI");
+  const brickFineResolution = options.brickFineResolution ?? 8;
+  const presentationPageResolution = options.presentationPageResolution ?? brickFineResolution;
+  if ((brickFineResolution !== 4 && brickFineResolution !== 8 && brickFineResolution !== 16)
+    || presentationPageResolution !== brickFineResolution) {
+    throw new Error("FPA1 requires a matched B4/P4, B8/P8, or B16/P16 physical ABI");
   }
   const baseWords = alignWords(options.baseWords ?? 0);
   const preparationHeaderBaseWords = baseWords + SPARSE_CM12_FACE_PROJECTION_HEADER_WORDS;
@@ -190,7 +194,8 @@ export function createSparseCM12FaceProjectionAuthorityLayout(options: {
   const preparation = makeStage(preparationHeaderBaseWords);
   const projection = makeStage(projectionHeaderBaseWords);
   const totalWords = alignWords(at);
-  return Object.freeze({ baseWords, rowCapacity, cellCapacity, preparedAuthorityBaseWords,
+  return Object.freeze({ baseWords, brickFineResolution, presentationPageResolution,
+    rowCapacity, cellCapacity, preparedAuthorityBaseWords,
     acceptedPressureBitsBaseWords,
     preparation, projection,
     totalWords, totalBytes: 4 * totalWords, qaFullOracle: options.qaFullOracle ?? false });
@@ -217,8 +222,8 @@ export function initializeSparseCM12FaceProjectionAuthorityWords(
   words[base + h.totalWords] = layout.totalWords;
   words[base + h.flags] = layout.qaFullOracle ? 1 : 0;
   words[base + h.firstFaultStage] = SPARSE_CM12_FACE_PROJECTION_INVALID;
-  words[base + h.brickFineResolution] = 16;
-  words[base + h.presentationPageResolution] = 16;
+  words[base + h.brickFineResolution] = layout.brickFineResolution;
+  words[base + h.presentationPageResolution] = layout.presentationPageResolution;
   words[base + h.preparedAuthorityBase] = layout.preparedAuthorityBaseWords;
   words[base + h.reserved0] = layout.acceptedPressureBitsBaseWords;
   const d = SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER;

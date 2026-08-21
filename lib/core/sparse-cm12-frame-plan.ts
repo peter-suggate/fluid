@@ -156,7 +156,7 @@ export function createSparseCM12FramePlanLayout(options: {
   if (baseWords % SPARSE_CM12_FRAME_PLAN_ALIGNMENT_WORDS !== 0) {
     throw new RangeError("FramePlan baseWords must be 256-byte aligned");
   }
-  const brickFineResolution = options.brickFineResolution ?? 16;
+  const brickFineResolution = options.brickFineResolution ?? 8;
   const tilesPerAxis = (brickFineResolution / SPARSE_CM12_FRAME_PLAN_TILE_EDGE) as 1 | 2 | 4;
   const tilesPerBrick = tilesPerAxis ** 3 as 1 | 8 | 64;
   const brickCapacity = checked(options.brickCapacity, "brickCapacity");

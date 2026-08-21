@@ -44,6 +44,8 @@ import {
 } from "../lib/harness/node-dawn-provider";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import type { SparseCM12TransportExperiment } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from
   "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
 import {
@@ -1531,6 +1533,20 @@ async function runDamFrontPerformanceLane(): Promise<void> {
   const replays = positiveInteger("performance-replays", 5);
   if (replays < 3) throw new RangeError("performance-replays must be at least 3");
   const captureGap_ms = positiveInteger("performance-capture-gap-ms", 110);
+  const topologyCadenceSteps = positiveInteger("topology-cadence", 1);
+  const transportExperiment = (argument("transport-experiment") ?? "baseline") as
+    SparseCM12TransportExperiment;
+  const transportExperiments = new Set<SparseCM12TransportExperiment>([
+    "baseline", "legacy-owner-hash",
+    "logical-owner-directory", "logical-owner-mass-rung",
+    "face-characteristic-cache", "face-row-packets",
+    "mass-rung-packets", "mass-local-atomics", "mass-swept-clean",
+    "structure-gamma-legacy", "structure-mass-legacy", "structure-cache-legacy",
+    "face-packets-cache", "mass-rung-local", "face-packets-mass-rung", "all-valid",
+  ]);
+  if (!transportExperiments.has(transportExperiment)) {
+    throw new RangeError(`unknown transport-experiment ${transportExperiment}`);
+  }
   if (captureGap_ms < 100) {
     throw new RangeError("performance-capture-gap-ms must be at least the 100 ms trace cadence");
   }
@@ -1587,16 +1603,20 @@ async function runDamFrontPerformanceLane(): Promise<void> {
     });
     device.pushErrorScope("validation");
     const observedDevice = pathObserver.wrap(device);
-    const createDamSolver = () => WebGPUAdaptiveMassSolver.createAsync(
-      observedDevice, createMinimalPowerDamBreak64Scene(), "balanced", undefined, {
+    const solverArguments = () => [
+      observedDevice, createMinimalPowerDamBreak64Scene(), "balanced" as const, undefined, {
         resolutionMode: "adaptive",
         brickFineResolution: TARGET_BRICK_FINE_RESOLUTION,
         presentationPageResolution: TARGET_PRESENTATION_PAGE_RESOLUTION,
         surfaceFineRings: 8,
-        activityPolicy: { ...DAM_ACTIVITY_POLICY, topologyCadenceSteps: 1 },
-        timeStep: "paper",
+        activityPolicy: { ...DAM_ACTIVITY_POLICY, topologyCadenceSteps },
+        timeStep: "paper" as const,
       }, () => {},
-    );
+    ] as const;
+    const createDamSolver = () => transportExperiment === "baseline"
+      ? WebGPUAdaptiveMassSolver.createAsync(...solverArguments())
+      : WebGPUAdaptiveMassSolver.createTransportExperimentForQA(
+        transportExperiment, ...solverArguments());
 
     // One complete replay pays Dawn/Metal's deferred shader compilation on
     // this exact device and pipeline variant. Instrumentation remains off, so
@@ -1814,6 +1834,8 @@ async function runDamFrontPerformanceLane(): Promise<void> {
       configuration: {
         brickFineResolution: TARGET_BRICK_FINE_RESOLUTION,
         presentationPageResolution: TARGET_PRESENTATION_PAGE_RESOLUTION,
+        transportExperiment,
+        topologyCadenceSteps,
         measurementSource: "gpu-hardware-timestamp",
         setupExcluded: true,
       },
@@ -1861,13 +1883,14 @@ async function runDamFrontPerformanceLane(): Promise<void> {
       validationErrors,
     };
     console.log(JSON.stringify(report, null, 2));
-    if (recordPath && failures.length === 0) {
+    const allowFailingExperimentRecord = hasFlag("allow-failing-experiment-record");
+    if (recordPath && (failures.length === 0 || allowFailingExperimentRecord)) {
       await writeFile(recordPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
     }
-    if (recordPath && failures.length > 0) {
+    if (recordPath && failures.length > 0 && !allowFailingExperimentRecord) {
       throw new Error("refusing to record a failing dam performance baseline");
     }
-    if (failures.length > 0) {
+    if (failures.length > 0 && !allowFailingExperimentRecord) {
       throw new Error(`dam-front performance regression failed (${failures.length} gates)`);
     }
   } finally {

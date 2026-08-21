@@ -31,9 +31,9 @@ export type AdaptiveMassResolutionMode = "adaptive" | "all-fine" | "all-coarse";
 /** Initial sparse-resolution split consumed by the interactive solver factory. */
 export interface AdaptiveMassSolverOptions {
   readonly resolutionMode: AdaptiveMassResolutionMode;
-  /** Construction-time complete dyadic ladder maximum. Defaults to 16. */
+  /** Construction-time complete dyadic ladder maximum. Defaults to 8. */
   readonly brickFineResolution?: SparseBrickFineResolution;
-  /** Renderer-facing samples per presentation-page edge. Defaults to 16. */
+  /** Renderer-facing samples per presentation-page edge. Defaults to the brick maximum. */
   readonly presentationPageResolution?: SparseBrickFineResolution;
   /** Optional positive-power-of-two cap on hierarchical macro-leaf span. */
   readonly maximumMacroSpanBricks?: number;
@@ -67,12 +67,14 @@ const params: MethodParamSpec[] = [
     kind: "select",
     key: "brickFineResolution",
     label: "Brick ladder",
-    default: "16",
+    default: "8",
     tier: "coarse",
     options: [
+      { value: "4", label: "1³ / 2³ / 4³ · experimental" },
+      { value: "8", label: "1³ / 2³ / 4³ / 8³ · experimental" },
       { value: "16", label: "1³ / 2³ / 4³ / 8³ / 16³" },
     ],
-    hint: "Production is pinned to B16/P16 until SIR tile addressing is parameterized. B4/B8 remain available only through construction QA factories.",
+    hint: "Selects both the adaptive ladder maximum and the matching presentation-page resolution. B8 is the production default; B4 remains experimental and B16 remains available.",
   },
   {
     kind: "select",
@@ -373,7 +375,7 @@ const boundedInteger = (value: unknown, fallback: number, minimum: number, maxim
     ? Math.min(maximum, Math.max(minimum, Math.round(value))) : fallback;
 
 const brickFineResolution = (value: unknown): SparseBrickFineResolution =>
-  value === 4 || value === "4" ? 4 : value === 8 || value === "8" ? 8 : 16;
+  value === 4 || value === "4" ? 4 : value === 16 || value === "16" ? 16 : 8;
 
 const presentationPageResolution = (
   _value: unknown,
@@ -389,7 +391,7 @@ const maximumMacroSpanBricks = (value: unknown): number | undefined => {
 
 const receiverFloor = (
   value: unknown,
-  maximum: SparseBrickFineResolution = 16,
+  maximum: SparseBrickFineResolution = 8,
 ): AdaptiveMassSolverOptions["receiverFloor"] => {
   const parsed = value === "1" ? 1 : value === "2" ? 2 : value === "4" ? 4
     : value === "8" ? 8 : value === "16" ? 16 : "auto";
@@ -479,11 +481,8 @@ export const adaptiveMassMethod: SimulationMethod = {
   pressureMapping: "Every live Sparse CM12 step solves one globally coupled composite pressure system over regular faces and conservative 2:1 seam ports using one-reduction sparse MGPCG.",
   normalizeValues: (values) => {
     const { activitySignals: _activitySignals, ...normalizedActivity } = activityPolicy(values);
-    // SIR1 currently addresses every logical brick as exactly 64 4^3 tiles.
-    // That is correct only for B16. Keep smaller ladders reachable through the
-    // direct solver construction QA paths, but never serialize them as a
-    // production method configuration whose provenance receipts would lie.
-    const fineResolution: SparseBrickFineResolution = 16;
+    const parsedFineResolution = brickFineResolution(values.brickFineResolution);
+    const fineResolution: SparseBrickFineResolution = parsedFineResolution;
     return {
       ...values,
       brickFineResolution: String(fineResolution),
@@ -513,8 +512,8 @@ export const adaptiveMassMethod: SimulationMethod = {
       SPARSE_CM12_ACTIVITY_POLICY;
     return {
       resolutionMode: "adaptive",
-      brickFineResolution: "16",
-      presentationPageResolution: "16",
+      brickFineResolution: "8",
+      presentationPageResolution: "8",
       maximumMacroSpanBricks: "auto",
       selectorMode: "surface",
       receiverFloor: "auto",
@@ -539,9 +538,11 @@ export const adaptiveMassMethod: SimulationMethod = {
     signal,
   ) => {
     const options = adaptiveMassSolverOptions(values);
-    if (options.brickFineResolution !== 16 || options.presentationPageResolution !== 16) {
+    if ((options.brickFineResolution !== 4 && options.brickFineResolution !== 8
+        && options.brickFineResolution !== 16)
+      || options.presentationPageResolution !== options.brickFineResolution) {
       return Promise.reject(new RangeError(
-        "Sparse CM12 production requires B16/P16 until SIR tile addressing is parameterized",
+        "Sparse CM12 production requires a matched B4/P4, B8/P8, or B16/P16 profile",
       ));
     }
     return WebGPUAdaptiveMassSolver.createAsync(
