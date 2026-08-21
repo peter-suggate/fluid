@@ -1102,8 +1102,8 @@ fn cellMinimum(id:u32)->vec3u{
 fn rowWord(id:u32,plane:u32)->u32{return ta(7u)+plane*ta(3u)+id;}
 fn rowPackedTerms(id:u32)->u32{return ta(rowWord(id,0u));}
 fn rowPackedMetadata(id:u32)->u32{return ta(rowWord(id,1u));}
-fn rowTermOffset(id:u32)->u32{return rowPackedTerms(id)&0x07ffffffu;}
-fn rowTermCount(id:u32)->u32{return rowPackedTerms(id)>>27u;}
+fn rowTermOffset(id:u32)->u32{return rowPackedTerms(id)&0x007fffffu;}
+fn rowTermCount(id:u32)->u32{return rowPackedTerms(id)>>23u;}
 fn rowAxis(id:u32)->u32{return rowPackedMetadata(id)>>30u;}
 fn rowKind(id:u32)->u32{return (rowPackedMetadata(id)>>28u)&3u;}
 fn rowRequirementOffset(id:u32)->u32{return rowPackedMetadata(id)&0x0fffffffu;}
@@ -1481,6 +1481,7 @@ fn transportStencil(position:vec3f)->TransportStencil{
 ${scalarAuthorityEntries}
 
 const SIR1_CAUSE_SCALAR:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.scalarWrite}u;
+const SIR1_CAUSE_VELOCITY:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.velocityWrite}u;
 const SIR1_CAUSE_TOPOLOGY:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.topologyWrite}u;
 const SIR1_CAUSE_DEPENDENCY_CLOSURE:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.dependencyClosure}u;
 const SIR1_TILES_PER_AXIS:u32=BRICK_FINE_RESOLUTION/4u;
@@ -1602,16 +1603,22 @@ var<workgroup>sirDependencyMismatch:array<u32,64>;
 // means both physical rho banks contain exact dry/flooded capacity and both
 // gamma banks contain exact one. Two is unresolved and can never certify clean.
 fn sirExactScalarPhase(cell:u32)->u32{
-  if(!cellActive(cell)||bitcast<u32>(cellOpenFraction(cell))!=0x3f800000u){return 2u;}
+  if(bitcast<u32>(cellOpenFraction(cell))!=0x3f800000u){return 2u;}
   let rho0=bitcast<u32>(state[p.stateOffsets0.x+cell]);
   let rho1=bitcast<u32>(state[p.stateOffsets0.y+cell]);
   let gamma0=bitcast<u32>(state[p.stateOffsets0.z+cell]);
   let gamma1=bitcast<u32>(state[p.stateOffsets0.w+cell]);
   if(gamma0!=0x3f800000u||gamma1!=0x3f800000u||rho0!=rho1){return 2u;}
+  // Dormant capacity is canonical dry authority. Activation/topology writers
+  // invalidate its tile explicitly, so rejecting it here only manufactures a
+  // full dry-apron event frontier every frame.
+  if(!cellActive(cell)){return select(2u,0u,rho0==0u);}
   if(rho0==0u){return 0u;}if(rho0==0x3f800000u){return 1u;}return 2u;
 }
 fn sirExactScalarDependency(cell:u32,phase:u32)->bool{
-  if(phase>1u){return false;}var sideMask=0u;
+  if(phase>1u){return false;}
+  if(phase==0u&&!cellActive(cell)){return true;}
+  var sideMask=0u;
   for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
     let row=incidenceRow(incidence);
     if(!rowAccepted(row)||bitcast<u32>(rowOpenFraction(row))!=0x3f800000u
@@ -1643,8 +1650,43 @@ fn sirExactSweptScalarSupport(cell:u32,phase:u32)->bool{
   // then an invariant for exact rho={0,1}, gamma=1 homogeneous stencils.
   return departureVisible>=0.999999&&arrivalVisible>=0.999999;
 }
+// Persistent interior-liquid certificate. Prior pressure membership proves a
+// complete liquid incidence shell, the characteristic remains inside it, and
+// the final scalar is outside the authored surface band.
+fn sirFinalPersistentBulk(cell:u32)->bool{
+  let rhoAfter=state[destinationDensity()+cell];
+  let gammaAfter=state[destinationGamma()+cell];
+  if(!cellTransportActive(cell)||hasRigidBodies()
+    ||bitcast<u32>(cellOpenFraction(cell))!=0x3f800000u
+    ||!pressureCellSubmerged(cell)
+    ||rhoAfter<p.activityDensity.z
+    ||abs(gammaAfter-1.0)>p.activityDensity.w){return false;}
+  let velocityAt=destinationCellVelocity()+4u*cell;
+  let previousAt=sourceCellVelocity()+4u*cell;
+  let velocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u]);
+  let previous=vec3f(state[previousAt],state[previousAt+1u],state[previousAt+2u]);
+  let width=cellMinimumWidth(cell);
+  return length(velocity)*p.frame.x<=0.05*width
+    &&length(velocity-previous)*p.frame.x<=0.01*width;
+}
+fn sirPersistentBulkMirrored(cell:u32)->bool{
+  return sirFinalPersistentBulk(cell)
+    &&bitcast<u32>(state[sourceDensity()+cell])
+      ==bitcast<u32>(state[destinationDensity()+cell])
+    &&bitcast<u32>(state[sourceGamma()+cell])
+      ==bitcast<u32>(state[destinationGamma()+cell]);
+}
 fn sirRecordFinalScalarProducer(cell:u32){
   if(sirExactScalarPhase(cell)<=1u){return;}
+  if(EXP_MASS_SWEPT_CLEAN&&sirFinalPersistentBulk(cell)){
+    // The conservative destination is already final. Mirroring only the dead
+    // source bank changes no current-frame mass, while making global parity
+    // flips a true no-op until a scalar, velocity, or topology producer
+    // invalidates its characteristic closure again.
+    state[sourceDensity()+cell]=state[destinationDensity()+cell];
+    state[sourceGamma()+cell]=state[destinationGamma()+cell];
+    return;
+  }
   scaInvalidateCellClosure(cell,cm12FCCandidateGeneration()+1u,SIR1_CAUSE_SCALAR);
 }
 
@@ -2014,8 +2056,10 @@ fn compareSparseCM12MassResult(@builtin(workgroup_id)wid:vec3u,
   let cell=sirMassTileCell(wid.x,lane);var covered=0u;var mismatch0=0u;
   var mismatch1=0u;var dependencyMismatch=0u;
   if(cell!=INVALID){let phase=sirExactScalarPhase(cell);covered=4u;
-    mismatch0=select(0u,1u,phase>1u);mismatch1=mismatch0;
+    let persistentBulk=EXP_MASS_SWEPT_CLEAN&&sirPersistentBulkMirrored(cell);
+    mismatch0=select(0u,1u,phase>1u&&!persistentBulk);mismatch1=mismatch0;
     let dependencyExact=sirExactScalarDependency(cell,phase)
+      ||persistentBulk
       ||(EXP_MASS_SWEPT_CLEAN&&sirExactSweptScalarSupport(cell,phase));
     dependencyMismatch=select(1u,0u,dependencyExact);
   }
@@ -3837,6 +3881,11 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
   if(velocityChanged){
     incrementalActivityMarkCellClosure(id,
       ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
+    let width=cellMinimumWidth(id);
+    if(EXP_MASS_SWEPT_CLEAN&&(length(velocity)*p.frame.x>0.05*width
+      ||length(velocity-previousVelocity)*p.frame.x>0.01*width)){
+      scaInvalidateCellClosure(id,cm12FCCandidateGeneration()+1u,SIR1_CAUSE_VELOCITY);
+    }
   }
   if(velocityChanged||cm12VelocityExtensionChangedInterfaceSeed(id,velocity)){
     cm12ResidentRecordExtensionIncidence(id,2u);
@@ -3924,6 +3973,11 @@ fn commitVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
     incrementalActivityMarkCellClosure(cell,
       ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
     cm12ResidentRecordExtensionIncidence(cell,2u);
+    let width=cellMinimumWidth(cell);
+    if(EXP_MASS_SWEPT_CLEAN&&(length(next)*p.frame.x>0.05*width
+      ||length(next-previous)*p.frame.x>0.01*width)){
+      scaInvalidateCellClosure(cell,cm12FCCandidateGeneration()+1u,SIR1_CAUSE_VELOCITY);
+    }
   }
   state[at]=next.x;state[at+1u]=next.y;state[at+2u]=next.z;
   if(pcmCellContains(cell)){state[p.stateOffsets2.x+cell]=state[p.stateOffsets5.x+cell];}

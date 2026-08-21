@@ -105,6 +105,8 @@ import {
   type SparseCM12FrameControlLayout,
 } from "./sparse-cm12-frame-control";
 import {
+  SPARSE_CM12_SRR1_EVENT,
+  SPARSE_CM12_SRR1_EVENT_WORDS,
   SPARSE_CM12_SRR1_INGRESS_HEADER,
   SPARSE_CM12_SRR1_INGRESS_HEADER_WORDS,
   SPARSE_CM12_SRR1_INDIRECT_FAMILY,
@@ -610,12 +612,15 @@ const templateCellResolution = (words: Uint32Array, base: number) =>
   words[base + 7]! & TEMPLATE_CELL_RESOLUTION_MASK;
 // Immutable rows are read field-wise by wide shader invocations. Nine SoA
 // planes keep those reads contiguous while two packed planes preserve every
-// integer field: [term offset:27 | count:5] and
+// integer field: [term offset:23 | count:9] and
 // [requirement offset:28 | kind:2 | axis:2]. Geometry remains exact f32 bits.
+// Nine count bits cover the widest supported B16 macro/fine face (256 fine
+// endpoints plus its coarse endpoint); 23 offset bits still address 8,388,608
+// two-word term records (64 MiB) before any other topology section is counted.
 const TEMPLATE_ROW_PLANE_COUNT = 9;
-const TEMPLATE_ROW_TERM_OFFSET_BITS = 27;
-const TEMPLATE_ROW_TERM_OFFSET_MASK = 0x07ff_ffff;
-const TEMPLATE_ROW_TERM_COUNT_MASK = 0x1f;
+const TEMPLATE_ROW_TERM_OFFSET_BITS = 23;
+const TEMPLATE_ROW_TERM_OFFSET_MASK = 0x007f_ffff;
+const TEMPLATE_ROW_TERM_COUNT_MASK = 0x1ff;
 const TEMPLATE_ROW_METADATA_OFFSET_MASK = 0x0fff_ffff;
 
 const templateRowWord = (
@@ -6458,6 +6463,42 @@ export class WebGPUSparseCM12Resident {
         fault: words[h.fault]!, firstFaultTile: words[h.firstFaultTile]!,
         committedGeneration: words[h.committedGeneration]!,
       });
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Compact producer event journal; QA only and never a scheduling input. */
+  async readScalarIngressEventsQA() {
+    this.assertLive();
+    const layout = this.scalarResultIngressLayout;
+    const eventWords = SPARSE_CM12_SRR1_EVENT_WORDS * layout.eventCapacity;
+    const readback = this.device.createBuffer({ label: "Sparse CM12 SIR1 events QA readback",
+      size: 4 * (SPARSE_CM12_SRR1_INGRESS_HEADER_WORDS + eventWords),
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 SIR1 events QA copy",
+      });
+      encoder.copyBufferToBuffer(this.activity, 4 * layout.headerBaseWords,
+        readback, 0, 4 * SPARSE_CM12_SRR1_INGRESS_HEADER_WORDS);
+      encoder.copyBufferToBuffer(this.activity, 4 * layout.eventBaseWords,
+        readback, 4 * SPARSE_CM12_SRR1_INGRESS_HEADER_WORDS, 4 * eventWords);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const count = Math.min(layout.eventCapacity,
+        words[SPARSE_CM12_SRR1_INGRESS_HEADER.eventCount]!);
+      const base = SPARSE_CM12_SRR1_INGRESS_HEADER_WORDS;
+      return Object.freeze(Array.from({ length: count }, (_, rank) => {
+        const at = base + SPARSE_CM12_SRR1_EVENT_WORDS * rank;
+        return Object.freeze({
+          tile: words[at + SPARSE_CM12_SRR1_EVENT.tile]!,
+          generation: words[at + SPARSE_CM12_SRR1_EVENT.generation]!,
+          causeMask: words[at + SPARSE_CM12_SRR1_EVENT.causeMask]!,
+        });
+      }));
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
       readback.destroy();

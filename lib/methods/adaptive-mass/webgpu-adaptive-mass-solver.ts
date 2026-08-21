@@ -1195,6 +1195,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readScalarAuthorityHeaderQA() { return this.resident.readScalarAuthorityHeaderQA(); }
   /** Resident SIR1 ingress header; never consulted by frame scheduling. */
   readScalarIngressHeaderQA() { return this.resident.readScalarIngressHeaderQA(); }
+  readScalarIngressEventsQA() { return this.resident.readScalarIngressEventsQA(); }
   /** Construction-only PAB1 receipt; ordinary solvers reject this call. */
   readPressureAddressingABQA() { return this.resident.readPressureAddressingABQA(); }
   /** Compact PAB1 header for production/QA fault diagnosis. */

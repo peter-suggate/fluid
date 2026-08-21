@@ -57,7 +57,14 @@ import {
 } from "../lib/harness/node-dawn-provider";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from
   "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import {
+  adaptiveMassMethod,
+  adaptiveMassSolverOptions,
+} from "../lib/methods/adaptive-mass/method";
+import { WebGPUAdaptiveMassSolver } from
+  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import type { SparseCM12TransportExperiment } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { inspectSparseCM12PressureCutoverAuthorities } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-cutover-observability";
 import {
@@ -83,6 +90,8 @@ Options:
                                      ocean, or symmetric-expansion (default long-dam)
   --brick-fine=4|8|16                Sparse brick ladder (default 16)
   --presentation-page=4|8|16         Presentation page size (default 16)
+  --transport-experiment=NAME        Construction-static A/B specialization
+                                     (default baseline)
   --warmup=N                         Warmup hardware samples (default 8)
   --frames=N                         Measured hardware samples (default 40)
   --capture-gap-ms=N                 Timestamp capture spacing (default 110)
@@ -105,6 +114,8 @@ const warmup = Number(argument("warmup", "8"));
 const sampled = Number(argument("frames", "40"));
 const brickFineResolution = Number(argument("brick-fine", "16"));
 const presentationPageResolution = Number(argument("presentation-page", "16"));
+const transportExperiment = argument("transport-experiment", "baseline") as
+  SparseCM12TransportExperiment;
 const captureGap_ms = Number(argument("capture-gap-ms", "110"));
 const minimumCellSize = Number(argument("minimum-cell-size", "0"));
 const regionScope = argument("region-scope", "domain");
@@ -132,6 +143,11 @@ if (![4, 8, 16].includes(brickFineResolution)
   || presentationPageResolution > brickFineResolution
   || brickFineResolution % presentationPageResolution !== 0) {
   throw new RangeError("brick-fine and presentation-page must be compatible values in 4, 8, 16");
+}
+if (!["baseline", "mass-swept-clean"].includes(transportExperiment)) {
+  throw new RangeError(
+    "stage-cost probe supports baseline or mass-swept-clean",
+  );
 }
 const buildScene = sceneName === "mini16" ? createMinimalPowerDamBreakScene
   : sceneName === "mini32" ? createMinimalPowerDamBreak32Scene
@@ -206,6 +222,13 @@ type StageCostQASolver = {
   readAdaptiveRepresentationQA(): Promise<Record<string, number | boolean>>;
   readFrameControlQA(): Promise<FrameControlHeader>;
   readScalarAuthorityHeaderQA(): Promise<ScalarAuthorityHeader>;
+  readScalarIngressHeaderQA(): Promise<{
+    readonly candidateGeneration: number; readonly eventCount: number;
+    readonly fault: number; readonly firstFaultTile: number;
+  }>;
+  readScalarIngressEventsQA(): Promise<readonly {
+    readonly tile: number; readonly generation: number; readonly causeMask: number;
+  }[]>;
   readVelocityExtensionHeaderQA(): Promise<{
     readonly flags: number; readonly phase: number;
     readonly acceptedGeneration: number; readonly candidateGeneration: number;
@@ -297,8 +320,12 @@ try {
     brickFineResolution: String(brickFineResolution),
     presentationPageResolution: String(presentationPageResolution),
   });
-  const solver = await adaptiveMassMethod.createSolverAsync!(
-    device, scene, "balanced", values, undefined, () => {});
+  const solver = transportExperiment === "baseline"
+    ? await adaptiveMassMethod.createSolverAsync!(
+      device, scene, "balanced", values, undefined, () => {})
+    : await WebGPUAdaptiveMassSolver.createTransportExperimentForQA(
+      transportExperiment, device, scene, "balanced", undefined,
+      adaptiveMassSolverOptions(values), () => {});
   teardownSolver = solver;
   const qaSolver = solver as typeof solver & StageCostQASolver;
   const workShape = qaSolver.readSparseWorkShapeQA();
@@ -353,6 +380,7 @@ try {
       readonly successorMatched: boolean; readonly valid: boolean };
     readonly scalarAuthority: ScalarAuthorityHeader & { readonly stalled: boolean;
       readonly successorMatched: boolean; readonly valid: boolean };
+    readonly scalarIngressEventCount: number;
   }> = [];
   let firstAuthorityFailure: Record<string, unknown> | undefined;
   let diagnosticFailure: string | undefined;
@@ -388,8 +416,9 @@ try {
     debug(`advance ${frame} encoded`);
     await device.queue.onSubmittedWorkDone();
     debug(`advance ${frame} queue complete`);
-    const [frameControl, scalarAuthorityQA] = await Promise.all([
+    const [frameControl, scalarAuthorityQA, scalarIngress] = await Promise.all([
       qaSolver.readFrameControlQA(), qaSolver.readScalarAuthorityHeaderQA(),
+      qaSolver.readScalarIngressHeaderQA(),
     ]);
     debug(`advance ${frame} authority headers complete`);
     const expectedFrameControlGeneration = initialFrameControl.acceptedGeneration + frame;
@@ -434,6 +463,7 @@ try {
         successorMatched: frameControlSuccessorMatched, valid: frameControlValid },
       scalarAuthority: { ...scalarAuthorityHeader, stalled: scalarAuthorityStalled,
         successorMatched: scalarAuthoritySuccessorMatched, valid: scalarAuthorityValid },
+      scalarIngressEventCount: scalarIngress.eventCount,
     });
     priorFrameControlGeneration = frameControl.acceptedGeneration;
     priorScalarAuthorityGeneration = scalarAuthorityQA.acceptedGeneration;
@@ -653,6 +683,18 @@ try {
       maximumAdvances} advances`;
   }
   const adaptiveRepresentation = await qaSolver.readAdaptiveRepresentationQA();
+  const scalarIngressEvents = await qaSolver.readScalarIngressEventsQA();
+  const tilesPerAxis = brickFineResolution / 4;
+  const tilesPerBrick = tilesPerAxis ** 3;
+  const [logicalX, logicalY] = workShape.logicalBrickDimensions;
+  const scalarEventYHistogram = Array.from({ length: logicalY! * tilesPerAxis }, () => 0);
+  for (const event of scalarIngressEvents) {
+    const logical = Math.floor(event.tile / tilesPerBrick);
+    const local = event.tile % tilesPerBrick;
+    const by = Math.floor(logical / logicalX!) % logicalY!;
+    const ty = Math.floor(local / tilesPerAxis) % tilesPerAxis;
+    scalarEventYHistogram[by * tilesPerAxis + ty]! += 1;
+  }
   if (!diagnosticFailure && cpuTargetSamples.length !== sampled) {
     diagnosticFailure = `matched ${cpuTargetSamples.length}/${sampled} CPU traces by sample id`;
   }
@@ -702,6 +744,7 @@ try {
     configuration: {
       brickFineResolution,
       presentationPageResolution,
+      transportExperiment,
       refinementRegion: minimumCellSize === 0 ? undefined : {
         scope: regionScope,
         minimumCellSize_cells: minimumCellSize,
@@ -716,6 +759,10 @@ try {
       measurementSource: "gpu-hardware-timestamp",
     },
     workShape,
+    scalarEventWorkShape: {
+      count: scalarIngressEvents.length,
+      yTileHistogram: scalarEventYHistogram,
+    },
     adaptiveRepresentation,
     provenance: {
       gitCommit,

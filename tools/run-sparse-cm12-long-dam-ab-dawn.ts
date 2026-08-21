@@ -14,6 +14,7 @@
  * diagnostic duplication, but this paired process needs a larger Node heap.
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   resolveMethodValues,
@@ -33,10 +34,13 @@ import {
 } from "../lib/harness/webgpu-smoke-isolation";
 import {
   adaptiveMassMethod,
+  adaptiveMassSolverOptions,
   type AdaptiveMassResolutionMode,
 } from "../lib/methods/adaptive-mass/method";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import type { SparseCM12TransportExperiment } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 type Dimensions = readonly [number, number, number];
 type ArmId = "allFine" | "adaptive";
@@ -60,6 +64,28 @@ const dimensions = [192, 96, 32] as const;
 const dt_s = CM12_PAPER_DT_S;
 const steps = positiveInteger("steps", 250);
 const checkpointEvery = positiveInteger("checkpoint-every", 25);
+const transportExperiment = (argument("transport-experiment") ?? "baseline") as
+  SparseCM12TransportExperiment;
+if (!["baseline", "mass-swept-clean"].includes(transportExperiment)) {
+  throw new RangeError("long-dam A/B supports baseline or mass-swept-clean");
+}
+
+function sha256(view: ArrayBufferView): string {
+  return createHash("sha256").update(new Uint8Array(
+    view.buffer, view.byteOffset, view.byteLength,
+  )).digest("hex");
+}
+
+function physicalFieldReceipt(fields: Awaited<ReturnType<
+  WebGPUAdaptiveMassSolver["readDiagnosticFields"]
+>>) {
+  return {
+    densitySha256: sha256(fields.density),
+    velocitySha256: sha256(fields.velocity),
+    pressureSha256: sha256(fields.pressure),
+    divergenceSha256: sha256(fields.divergence),
+  };
+}
 
 interface DensityMetrics {
   readonly mass_cells: number;
@@ -165,10 +191,16 @@ async function createArm(
     timeStep: "paper",
     resolutionMode,
   };
-  const solver = await method.createSolverAsync!(
-    device, createSparseCM12LongDamBreakScene(), "balanced",
-    resolveMethodValues(method, "balanced", overrides), undefined, () => {},
-  );
+  const values = resolveMethodValues(method, "balanced", overrides);
+  const solver = transportExperiment === "baseline"
+    ? await method.createSolverAsync!(
+      device, createSparseCM12LongDamBreakScene(), "balanced",
+      values, undefined, () => {},
+    )
+    : await WebGPUAdaptiveMassSolver.createTransportExperimentForQA(
+      transportExperiment, device, createSparseCM12LongDamBreakScene(),
+      "balanced", undefined, adaptiveMassSolverOptions(values), () => {},
+    );
   assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], dimensions);
   return solver;
 }
@@ -279,6 +311,10 @@ try {
     maximumUniformPressureResidual = Math.max(maximumUniformPressureResidual,
       uniformPressureResidual);
     trajectory.push({ step, time_s, density, agreement,
+      bitExact: {
+        allFine: physicalFieldReceipt(allFineFields),
+        adaptive: physicalFieldReceipt(adaptiveFields),
+      },
       pressureRelativeResidual: { allFine: uniformPressureResidual,
         adaptive: sparsePressureResidual },
       postProjectionDivergence_s: { allFine: uniformDivergence,
@@ -419,6 +455,7 @@ try {
   const final = trajectory.at(-1) as {
     density: Record<ArmId, DensityMetrics>;
     agreement: ReturnType<typeof densityAgreement>;
+    bitExact: Record<ArmId, ReturnType<typeof physicalFieldReceipt>>;
   };
   const expectsFarWallArrival = steps * dt_s >= 1;
   const failures: string[] = [];
@@ -464,6 +501,7 @@ try {
   const report = {
     passed: failures.length === 0,
     scenario: scene.sceneId,
+    transportExperiment,
     arms: { reference: "adaptive-mass/all-fine", candidate: "adaptive-mass/adaptive" },
     backend: process.env.FLUID_WEBGPU_BACKEND ?? "metal",
     adapter: (adapter as GPUAdapter & { readonly info?: GPUAdapterInfo }).info,
@@ -505,6 +543,7 @@ try {
     final: {
       density: final.density,
       agreement: final.agreement,
+      bitExact: final.bitExact,
     },
     checkpoints,
     trajectory,
