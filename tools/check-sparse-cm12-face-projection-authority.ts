@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import {
   SPARSE_CM12_FACE_PROJECTION_HEADER,
   SPARSE_CM12_FACE_PROJECTION_INVALID,
+  SPARSE_CM12_FACE_PROJECTION_VERSION,
   compareSparseCM12FaceProjectionAuthorityQA,
   createSparseCM12FaceProjectionAuthorityInitialWords,
   createSparseCM12FaceProjectionAuthorityLayout,
@@ -22,6 +23,10 @@ assert.equal(initial.byteLength, layout.totalBytes);
 assert.equal(initial[layout.baseWords + SPARSE_CM12_FACE_PROJECTION_HEADER.totalWords],
   layout.totalWords);
 assert(layout.preparation.activeBitsBaseWords >= layout.preparedAuthorityBaseWords + 1025);
+assert(layout.preparationCertificateBaseWords
+  >= layout.preparedAuthorityBaseWords + 1025);
+assert(layout.acceptedPressureBitsBaseWords
+  >= layout.preparationCertificateBaseWords + 1025);
 assert(layout.projection.activeBitsBaseWords > layout.preparation.treeLevelBaseWords.at(-1)!);
 
 // Exact-authority QA: stable non-zero solenoidal rows are reused, while three
@@ -82,6 +87,7 @@ fn exerciseFPA(){_=fpaMarkPreparationRow(2u,1u,0u,false);
   _=fpaMarkProjectionRow(4u,2u,0u,false);_=fpaMarkTopologyCellBlast(0u,32u);
   _=fpaPreparationRowInvocation(0u);_=fpaProjectionRowInvocation(0u);
   fpaStorePreparedAuthority(2u,0x3f800000u);_=fpaPreparedAuthorityBits(2u);
+  fpaStorePreparationCertificate(2u,1u);_=fpaPreparationCertificate(2u);
   _=fpaPreparationComplete(2u);_=fpaProjectionComplete(4u);
   _=fpaPreparationMustMirrorUnprojected(3u);_=fpaProjectionMustMirror(4u);}
 `;
@@ -98,7 +104,7 @@ try {
 }
 
 process.stdout.write(`${JSON.stringify({
-  abi: "FPA1/v1", rowCapacity: layout.rowCapacity,
+  abi: `FPA1/v${SPARSE_CM12_FACE_PROJECTION_VERSION}`, rowCapacity: layout.rowCapacity,
   leafCount: layout.preparation.leafCount,
   totalWords: layout.totalWords,
   cpuOracle: "bit-exact", naga: "valid",

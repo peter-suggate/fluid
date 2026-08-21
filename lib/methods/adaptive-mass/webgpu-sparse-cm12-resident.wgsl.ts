@@ -611,6 +611,8 @@ fn fpaPreparationComplete(row:u32)->bool{_=row;return true;}
 fn fpaProjectionComplete(row:u32)->bool{_=row;return true;}
 fn fpaStorePreparedAuthority(row:u32,bits:u32){_=row;_=bits;}
 fn fpaPreparedAuthorityBits(row:u32)->u32{_=row;return 0u;}
+fn fpaStorePreparationCertificate(row:u32,bits:u32){_=row;_=bits;}
+fn fpaPreparationCertificate(row:u32)->u32{_=row;return 0u;}
 fn fpaPreparationMustMirrorUnprojected(row:u32)->bool{_=row;return false;}
 fn fpaProjectionMustMirror(row:u32)->bool{_=row;return false;}
 fn fpaMarkPreparationRow(row:u32,cause:u32,depth:u32,receipt:bool)->bool{
@@ -1806,6 +1808,58 @@ fn finishTransportFaceRow(row:u32,characteristic:f32,touchesLiquid:bool){
     state[destinationFaceVelocity()+row]=open*fluid+(1.0-open)*rowSolidVelocity(row);
   }
 }
+// A projected face in calm, completely submerged liquid is not a surface
+// transport producer. Preserve that projected value in both parity banks so
+// the following frame can omit its RK2 characteristic trace. This certificate
+// deliberately excludes cut cells, moving solids, any face without liquid on
+// every represented side, and the surface-density band. Qualification is based
+// on the change authored by transport and projection, not absolute speed: a
+// spatially uniform bulk flow transports its own velocity exactly and should
+// not be rejected merely because it is fast.
+// Pressure projection and body forces still execute for every live pressure
+// row; only the pre-pressure transport preparation is elided.
+fn fpaDeepSupportToken(wasCertified:bool)->u32{
+  return 0x80000000u|select(0u,0x40000000u,wasCertified)
+    |(fpaTopologyGeneration()&0x3fffffffu);
+}
+fn fpaPublishDeepSupport(row:u32,support:bool){
+  let prior=fpaPreparationCertificate(row)==fpaTopologyGeneration();
+  fpaStorePreparationCertificate(row,select(0u,
+    fpaDeepSupportToken(prior),support&&!hasRigidBodies()));
+}
+fn fpaProjectedDeepFaceSupport(row:u32)->bool{
+  let marker=fpaPreparationCertificate(row);
+  return (marker&0x80000000u)!=0u
+    &&(marker&0x3fffffffu)==(fpaTopologyGeneration()&0x3fffffffu);
+}
+fn fpaDeepFaceMirrored(row:u32)->bool{
+  return rowAccepted(row)
+    &&fpaPreparationCertificate(row)==fpaTopologyGeneration();
+}
+fn fpaMirrorProjectedDeepFace(row:u32){
+  let marker=fpaPreparationCertificate(row);
+  let wasCertified=marker==fpaTopologyGeneration()
+    ||(fpaProjectedDeepFaceSupport(row)&&(marker&0x40000000u)!=0u);
+  // An unchanged pressure row retains its prior low-bit certificate. A dirty
+  // row was reclassified after preparation and carries the high-bit support
+  // token. Both paths share the same projection decision and final receipt.
+  if(!wasCertified&&!fpaProjectedDeepFaceSupport(row)){
+    fpaStorePreparationCertificate(row,0u);return;
+  }
+  let source=state[sourceFaceVelocity()+row];
+  let projected=state[destinationFaceVelocity()+row];
+  // FPA already owns the exact post-characteristic bits. A row omitted by the
+  // current certificate has source as its logical prepared value; an executed
+  // row uses the value captured by face preparation before forces were added.
+  let prepared=select(bitcast<f32>(fpaPreparedAuthorityBits(row)),source,wasCertified);
+  let width=rowDistance(row);
+  if(abs(prepared-source)*p.frame.x>0.01*width
+    ||abs(projected-source)*p.frame.x>0.005*width){return;}
+  // Projection has finished consuming the source parity bank. It is dead until
+  // the frame cursor advances, so this write changes no current-frame result.
+  state[sourceFaceVelocity()+row]=projected;
+  fpaStorePreparationCertificate(row,fpaTopologyGeneration());
+}
 fn prepareTransportFaceRow(row:u32){
   if(rowArea(row)<=1e-8){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());return;
@@ -2146,11 +2200,18 @@ fn advanceTracers(@builtin(global_invocation_id)gid:vec3u){
 // exactly once. It quantizes integrated rho and gamma receipts and adds each
 // integer to one endpoint and its exact opposite to the other, making both
 // fields conservative independent of dispatch order and unequal cell volumes.
+fn gammaPairGeneration()->u32{
+  // A topology generation can remain unchanged across many frames, and a
+  // candidate generation may be visible before it becomes accepted. Stamp the
+  // row-owned receipts with the frame epoch instead: otherwise a pair belonging
+  // to a row removed by an 8->4 commit can look current on the first frame that
+  // consumes the mixed topology and be gathered a second time.
+  return max(1u,atomicLoad(&activity[0]));
+}
 fn writeGammaPair(pair:u32,rho:i32,gamma:i32){
   candidateState[3u*pair]=bitcast<f32>(rho);
   candidateState[3u*pair+1u]=bitcast<f32>(gamma);
-  candidateState[3u*pair+2u]=bitcast<f32>(atomicLoad(
-    &topologyArena[topologyWorklistBase()+1u]));
+  candidateState[3u*pair+2u]=bitcast<f32>(gammaPairGeneration());
 }
 fn scatterGammaRow(row:u32,inputRho:u32,inputGamma:u32){
   if(!EXP_GAMMA_PAIR_CATALOG){
@@ -2237,7 +2298,7 @@ fn finalizeGammaCell(cell:u32,inputRho:u32,inputGamma:u32,
   var rhoReceipt=0.0;var gammaReceipt=0.0;
   if(EXP_GAMMA_PAIR_CATALOG){
     var rhoBits=0u;var gammaBits=0u;
-    let generation=atomicLoad(&topologyArena[topologyWorklistBase()+1u]);
+    let generation=gammaPairGeneration();
     for(var at=gammaCellPairBegin(cell);at<gammaCellPairEnd(cell);at+=1u){
       let incidence=gammaCellPairIncidence(at);let pair=incidence&0x7fffffffu;
       if(bitcast<u32>(candidateState[3u*pair+2u])!=generation){continue;}
@@ -2878,7 +2939,13 @@ fn markSparseCM12FacePreparationFromActivity(
   if(brick!=INVALID){let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
     for(var local=lane;local<range.y;local+=64u){let cell=range.x+local;
       for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-        _=fpaMarkPreparationRow(incidenceRow(at),7u,0u,false);}}}
+        let row=incidenceRow(at);
+        // A row is represented in every incident cell's CSR. Its first term is
+        // the stable owner, so classify and publish it exactly once rather than
+        // repeating the certificate and authority atomics from both sides.
+        if(incidenceTerm(at)!=rowTermOffset(row)){continue;}
+        if(!fpaDeepFaceMirrored(row)){
+          _=fpaMarkPreparationRow(row,7u,0u,false);}}}}
   workgroupBarrier();if(lane==0u&&brick!=INVALID){fpaCoverPreparationReceipt();}
 }
 @compute @workgroup_size(64)
@@ -2924,7 +2991,8 @@ fn stablePressurePrefix(lane:u32,flag:u32)->u32{
 fn classifyPressureRow(row:u32)->bool{
   // Retirement may deactivate a brick after the accepted list was published;
   // keep this dynamic fence even though physical row topology is immutable.
-  if(!rowAccepted(row)){state[p.stateOffsets3.x+row]=0.0;return false;}
+  if(!rowAccepted(row)){state[p.stateOffsets3.x+row]=0.0;
+    fpaPublishDeepSupport(row,false);return false;}
   let requirements=rowRequirementOffset(row);let requirementCount=ta(requirements);
   var sameLevel=requirementCount>0u;var allCoarse=requirementCount>0u;
   var firstResolution=0u;
@@ -2936,20 +3004,26 @@ fn classifyPressureRow(row:u32)->bool{
   }
   if(rowKind(row)==2u){atomicAdd(&activity[ACCEPTED_MIXED_ROW_COUNT],1u);}
   else if(sameLevel&&allCoarse){atomicAdd(&activity[ACCEPTED_COARSE_ROW_COUNT],1u);}
-  if(rowDualWeight(row)<=1e-8){state[p.stateOffsets3.x+row]=0.0;return false;}
+  if(rowDualWeight(row)<=1e-8){state[p.stateOffsets3.x+row]=0.0;
+    fpaPublishDeepSupport(row,false);return false;}
   let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
   var liquidCount=0u;var airCount=0u;var liquidPhiSum=0.0;var liquidWeight=0.0;
-  var airPhiSum=0.0;var airWeight=0.0;
+  var airPhiSum=0.0;var airWeight=0.0;var deepSupport=begin<end;
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);let w=abs(termCoefficient(at));
     let phi=CM12_LIQUID_ISOVALUE-pressureDensity(cell);
-    if(pcmCellContains(cell)){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;}
+    let liquid=pcmCellContains(cell);
+    deepSupport=deepSupport&&liquid
+      &&state[destinationDensity()+cell]>=p.activityDensity.z;
+    if(liquid){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;}
     else{airCount+=1u;airPhiSum+=w*phi;airWeight+=w;}}
-  if(liquidCount==0u){state[p.stateOffsets3.x+row]=0.0;return false;}
+  if(liquidCount==0u){state[p.stateOffsets3.x+row]=0.0;
+    fpaPublishDeepSupport(row,false);return false;}
   if(rowKind(row)==3u){let w=liquidWeight;airPhiSum+=w*rowExteriorPhi(row);airWeight+=w;}
   let cut=airCount>0u||rowKind(row)==3u;
   let theta=select(1.0,cm12GhostFluidTheta(liquidPhiSum/max(liquidWeight,1e-9),
     airPhiSum/max(airWeight,1e-9),1e-12),cut);
   state[p.stateOffsets3.x+row]=theta;
+  fpaPublishDeepSupport(row,deepSupport);
   atomicAdd(&activity[PRESSURE_ACTIVE_ROW_COUNT],1u);
   return true;
 }
@@ -3802,6 +3876,7 @@ fn executeSparseCM12FaceProjection(@builtin(global_invocation_id)gid:vec3u){
       jump+=termCoefficient(at)*state[p.stateOffsets2.x+cell];}}
     let pressureOpen=select(1.0,rowPressureOpenFraction(row),hasRigidBodies());
     state[destinationFaceVelocity()+row]-=pressureOpen*jump/theta;}
+  fpaMirrorProjectedDeepFace(row);
   _=fpaProjectionComplete(row);
 }
 

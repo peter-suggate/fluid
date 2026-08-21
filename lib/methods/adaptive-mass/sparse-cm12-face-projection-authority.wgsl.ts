@@ -201,6 +201,7 @@ const ${p}Invalid:u32=0x${SPARSE_CM12_FACE_PROJECTION_INVALID.toString(16)}u;
 const ${p}RowCapacity:u32=${layout.rowCapacity}u;
 const ${p}CellCapacity:u32=${layout.cellCapacity}u;
 const ${p}PreparedAuthority:u32=${layout.preparedAuthorityBaseWords}u;
+const ${p}PreparationCertificateBase:u32=${layout.preparationCertificateBaseWords}u;
 const ${p}AcceptedPressureBits:u32=${layout.acceptedPressureBitsBaseWords}u;
 const ${p}LeafBits:u32=${SPARSE_CM12_FACE_PROJECTION_LEAF_BITS}u;
 const ${p}LeafWords:u32=${SPARSE_CM12_FACE_PROJECTION_LEAF_BITS / 32}u;
@@ -537,6 +538,11 @@ fn fpaStorePreparedAuthority(row:u32,bits:u32){
 fn fpaPreparedAuthorityBits(row:u32)->u32{
   if(row>=${p}RowCapacity){return 0u;}
   return atomicLoad(&${arena}[${p}PreparedAuthority+row]);}
+fn fpaStorePreparationCertificate(row:u32,bits:u32){
+  if(row<${p}RowCapacity){atomicStore(&${arena}[${p}PreparationCertificateBase+row],bits);}}
+fn fpaPreparationCertificate(row:u32)->u32{
+  if(row>=${p}RowCapacity){return 0u;}
+  return atomicLoad(&${arena}[${p}PreparationCertificateBase+row]);}
 fn fpaPreparationMustMirrorUnprojected(row:u32)->bool{return !fpaProjectionRowLive(row);}
 fn fpaProjectionMustMirror(row:u32)->bool{_=row;return true;}
 ${verifyKernel(p, "Preparation", SPARSE_CM12_FACE_PROJECTION_STAGE.preparation,

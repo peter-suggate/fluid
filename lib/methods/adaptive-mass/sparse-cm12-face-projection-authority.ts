@@ -8,7 +8,7 @@
  * the exact authority for both ping-pong banks.
  */
 export const SPARSE_CM12_FACE_PROJECTION_MAGIC = 0x4650_4131; // FPA1
-export const SPARSE_CM12_FACE_PROJECTION_VERSION = 1;
+export const SPARSE_CM12_FACE_PROJECTION_VERSION = 2;
 export const SPARSE_CM12_FACE_PROJECTION_HEADER_WORDS = 32;
 export const SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS = 32;
 export const SPARSE_CM12_FACE_PROJECTION_STAGE_COUNT = 2;
@@ -117,6 +117,8 @@ export interface SparseCM12FaceProjectionAuthorityLayout {
   readonly cellCapacity: number;
   /** Exact pre-pressure face word, separate from the mirrored final face banks. */
   readonly preparedAuthorityBaseWords: number;
+  /** Persistent deep-row preparation certificate and transient support token. */
+  readonly preparationCertificateBaseWords: number;
   /** Exact accepted pressure bits used to root projection incidence changes. */
   readonly acceptedPressureBitsBaseWords: number;
   readonly preparation: SparseCM12FaceProjectionStageLayout;
@@ -160,7 +162,12 @@ export function createSparseCM12FaceProjectionAuthorityLayout(options: {
     + SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS;
   const preparedAuthorityBaseWords = alignWords(projectionHeaderBaseWords
     + SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS);
-  const acceptedPressureBitsBaseWords = alignWords(preparedAuthorityBaseWords + rowCapacity);
+  const preparationCertificateBaseWords = alignWords(
+    preparedAuthorityBaseWords + rowCapacity,
+  );
+  const acceptedPressureBitsBaseWords = alignWords(
+    preparationCertificateBaseWords + rowCapacity,
+  );
   let at = alignWords(acceptedPressureBitsBaseWords + cellCapacity);
   const makeStage = (headerBaseWords: number): SparseCM12FaceProjectionStageLayout => {
     const activeBitWordCount = Math.ceil(rowCapacity / 32);
@@ -195,7 +202,7 @@ export function createSparseCM12FaceProjectionAuthorityLayout(options: {
   const projection = makeStage(projectionHeaderBaseWords);
   const totalWords = alignWords(at);
   return Object.freeze({ baseWords, brickFineResolution, presentationPageResolution,
-    rowCapacity, cellCapacity, preparedAuthorityBaseWords,
+    rowCapacity, cellCapacity, preparedAuthorityBaseWords, preparationCertificateBaseWords,
     acceptedPressureBitsBaseWords,
     preparation, projection,
     totalWords, totalBytes: 4 * totalWords, qaFullOracle: options.qaFullOracle ?? false });
@@ -226,6 +233,7 @@ export function initializeSparseCM12FaceProjectionAuthorityWords(
   words[base + h.presentationPageResolution] = layout.presentationPageResolution;
   words[base + h.preparedAuthorityBase] = layout.preparedAuthorityBaseWords;
   words[base + h.reserved0] = layout.acceptedPressureBitsBaseWords;
+  words[base + h.reserved1] = layout.preparationCertificateBaseWords;
   const d = SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER;
   for (const stage of [layout.preparation, layout.projection]) {
     words[stage.headerBaseWords + d.phase] = SPARSE_CM12_FACE_PROJECTION_PHASE.uninitialized;
