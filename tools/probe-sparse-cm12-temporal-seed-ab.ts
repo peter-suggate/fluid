@@ -28,11 +28,6 @@ import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 import type { SparseCM12TemporalSeedQA, SparseCM12TemporalSeedQAMode } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
-import type { SparseCM12FacePreparationTileCensusQA } from
-  "../lib/methods/adaptive-mass/sparse-cm12-face-preparation-tile-census";
-import { SPARSE_CM12_FPA_VEX_READ_CENSUS_MAX_TILES_PER_ROW,
-  type SparseCM12FpaVexReadCensusSummaryQA } from
-  "../lib/methods/adaptive-mass/sparse-cm12-fpa-vex-read-census";
 
 const value = (name: string, fallback: string) => process.argv.slice(2)
   .find((item) => item.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
@@ -103,9 +98,6 @@ const dt_s = options.timeStep === "paper"
 
 type SeedSolver = WebGPUAdaptiveMassSolver & {
   readTemporalSeedQA(): Promise<SparseCM12TemporalSeedQA>;
-  readFacePreparationTileCensusQA():
-    Promise<SparseCM12FacePreparationTileCensusQA>;
-  readFpaVexReadCensusQA(): Promise<SparseCM12FpaVexReadCensusSummaryQA>;
 };
 type SeedFactory = typeof WebGPUAdaptiveMassSolver.createAsync;
 type Constructors = {
@@ -141,8 +133,6 @@ interface FrameReceipt {
   readonly massFineCells: number;
   readonly topologySha256: string;
   readonly temporal: SparseCM12TemporalSeedQA;
-  readonly facePreparationTileCensus: SparseCM12FacePreparationTileCensusQA;
-  readonly fpaVexReadCensus: SparseCM12FpaVexReadCensusSummaryQA;
   readonly fca: unknown;
   readonly srr: unknown;
   readonly vex: unknown;
@@ -258,7 +248,6 @@ const compactPCM = (pcm: Awaited<ReturnType<SeedSolver["readPressureCanonicalMem
     thetaSha256: pcm.thetaSha256,
     coefficientSha256: pcm.coefficientSha256,
     rhsSha256: pcm.rhsSha256,
-    facePreparationSha256: pcm.facePreparationSha256,
     faceABitsSha256: hash(pcm.qaRaw.faceABits),
     faceBBitsSha256: hash(pcm.qaRaw.faceBBits),
     aggregateEdgeSha256: pcm.aggregateEdgeSha256,
@@ -286,12 +275,10 @@ async function runArm(device: GPUDevice, mode: SparseCM12TemporalSeedQAMode,
         throw new Error(`${mode} step ${step} did not encode`);
       }
       await device.queue.onSubmittedWorkDone();
-      const [fields, topology, temporal, facePreparationTileCensus,
-        fpaVexReadCensus, fca,
+      const [fields, topology, temporal, fca,
         srrHeader, srrWork, vex, pcm, stats] =
         await Promise.all([solver.readDiagnosticFields(), solver.readGPUActivityPolicy(),
-          solver.readTemporalSeedQA(), solver.readFacePreparationTileCensusQA(),
-          solver.readFpaVexReadCensusQA(),
+          solver.readTemporalSeedQA(),
           solver.readFrameControlQA(),
           solver.readScalarAuthorityHeaderQA(), solver.readScalarAuthorityQA(),
           solver.readVelocityExtensionHeaderQA(),
@@ -308,7 +295,6 @@ async function runArm(device: GPUDevice, mode: SparseCM12TemporalSeedQAMode,
           [name, hash(field)])),
         massFineCells,
         topologySha256: hashJSON(acceptedTopologyIdentity(topology)), temporal,
-        facePreparationTileCensus, fpaVexReadCensus,
         fca, srr: { header: srrHeader, work: srrWork }, vex, pcm: compactPCM(pcm),
         ptr: ptr ?? null,
         pressure: { attribution: attribution ?? null, inspection: pressureInspection ?? null },
@@ -324,41 +310,6 @@ async function runArm(device: GPUDevice, mode: SparseCM12TemporalSeedQAMode,
         expected: "seedCells <= firstDilationCells <= finalCells", actual: temporal,
         message: `${mode} step ${step} temporal census is not monotonic`,
       });
-      recordGate(facePreparationTileCensus.fault === 0, { kind: "arm", arm: mode,
-        step, field: "facePreparationTileCensus.fault", expected: 0,
-        actual: facePreparationTileCensus.fault,
-        message: `${mode} step ${step} FPA tile census fault` });
-      recordGate(facePreparationTileCensus.omittedChangedRowCount === 0, {
-        kind: "arm", arm: mode, step,
-        field: "facePreparationTileCensus.omittedChangedRowCount", expected: 0,
-        actual: facePreparationTileCensus,
-        message: `${mode} step ${step} tile selection omitted changed preparation rows`,
-      });
-      recordGate(fpaVexReadCensus.fault === 0, { kind: "arm", arm: mode, step,
-        field: "fpaVexReadCensus.fault", expected: 0,
-        actual: fpaVexReadCensus.fault,
-        message: `${mode} step ${step} FVR1 census fault` });
-      recordGate(fpaVexReadCensus.oracleMismatchRowCount === 0, {
-        kind: "arm", arm: mode, step,
-        field: "fpaVexReadCensus.oracleMismatchRowCount", expected: 0,
-        actual: fpaVexReadCensus.oracleMismatchRowCount,
-        message: `${mode} step ${step} production FPA differs from full oracle` });
-      recordGate(fpaVexReadCensus.omittedChangedRowCount === 0, {
-        kind: "arm", arm: mode, step,
-        field: "fpaVexReadCensus.omittedChangedRowCount", expected: 0,
-        actual: fpaVexReadCensus.omittedChangedRowCount,
-        message: `${mode} step ${step} FVR1 C is not a subset of predicted S` });
-      recordGate(fpaVexReadCensus.acceptedGeneration
-        === fpaVexReadCensus.candidateGeneration, {
-        kind: "arm", arm: mode, step, field: "fpaVexReadCensus.generation",
-        expected: fpaVexReadCensus.candidateGeneration,
-        actual: fpaVexReadCensus.acceptedGeneration,
-        message: `${mode} step ${step} FVR1 candidate did not commit` });
-      recordGate(fpaVexReadCensus.constructionBootstrapPublished === (step === 1), {
-        kind: "arm", arm: mode, step,
-        field: "fpaVexReadCensus.constructionBootstrapPublished",
-        expected: step === 1, actual: fpaVexReadCensus.constructionBootstrapPublished,
-        message: `${mode} step ${step} FVR1 construction epoch receipt is invalid` });
       recordGate(fca.fault === 0, { kind: "arm", arm: mode, step, field: "fca.fault",
         expected: 0, actual: fca.fault, message: `${mode} step ${step} FCA fault` });
       recordGate(srrHeader.fault === 0, { kind: "arm", arm: mode, step,
@@ -555,10 +506,6 @@ const passed = operationError === undefined && gateErrors.length === 0
   && currentReceipt.frames.length === steps && changeReceipt.frames.length === steps;
 const artifact = { passed, kind: "sparse-cm12-temporal-seed-ab",
   scene: sceneName, steps, fixedSpecialization: true, runtimeToggle: false,
-  fpaVexCensus: {
-    maximumTilesPerRow: SPARSE_CM12_FPA_VEX_READ_CENSUS_MAX_TILES_PER_ROW,
-    capacityStatus: "provisional-census-cap-not-a-production-capacity-claim",
-  },
   dt_s, simulatedDuration_s: steps * dt_s,
   fields: ["density", "gamma", "velocity", "pressure", "divergence"],
   methodValues, validationErrors, lifecycleErrors, gateErrors, workDeltas,

@@ -1193,6 +1193,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
   /** Header-only SRR1/SAW1 receipt; never consulted by frame scheduling. */
   readScalarAuthorityHeaderQA() { return this.resident.readScalarAuthorityHeaderQA(); }
+  readSharpeningCellAuthorityQA() {
+    return this.resident.readSharpeningCellAuthorityQA();
+  }
   /** Resident SIR1 ingress header; never consulted by frame scheduling. */
   readScalarIngressHeaderQA() { return this.resident.readScalarIngressHeaderQA(); }
   readScalarIngressEventsQA() { return this.resident.readScalarIngressEventsQA(); }
@@ -1208,12 +1211,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readFrameControlIndirectQA() { return this.resident.readFrameControlIndirectQA(); }
   /** Construction-only temporal seed census; ordinary solvers reject this call. */
   readTemporalSeedQA() { return this.resident.readTemporalSeedQA(); }
-  /** Construction-only FPA tile shadow census; ordinary solvers reject this call. */
-  readFacePreparationTileCensusQA() {
-    return this.resident.readFacePreparationTileCensusQA();
-  }
-  /** Construction-only actual FPA VEX xyz-read dependency census. */
-  readFpaVexReadCensusQA() { return this.resident.readFpaVexReadCensusQA(); }
 
   readVelocityExtensionHeaderQA() { return this.resident.readVelocityExtensionHeaderQA(); }
   readVelocityExtensionQA() { return this.resident.readVelocityExtensionQA(); }

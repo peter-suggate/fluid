@@ -1109,24 +1109,6 @@ async function runDamFrontLane(): Promise<void> {
             `step ${step}: PCF full-oracle first ${family} ${mismatch} local/oracle bits ${
               mismatch < 0 ? "equal" : `${local[mismatch]}/${oracle[mismatch]}`}`);
         }
-        const faceMismatch = firstDifferentWord(
-          adaptivePressureMembership.qaRaw.preparedBits,
-          oracleMembership.qaRaw.preparedBits,
-        );
-        expect(failures, faceMismatch < 0,
-          `step ${step}: FPA full-oracle first row ${faceMismatch} prepared local/oracle bits ${
-            faceMismatch < 0 ? "equal" : `${adaptivePressureMembership.qaRaw.preparedBits[
-              faceMismatch]}/${oracleMembership.qaRaw.preparedBits[faceMismatch]}`}; face A/B local ${
-            faceMismatch < 0 ? "n/a" : `${adaptivePressureMembership.qaRaw.faceABits[
-              faceMismatch]}/${adaptivePressureMembership.qaRaw.faceBBits[faceMismatch]}`}; oracle ${
-            faceMismatch < 0 ? "n/a" : `${oracleMembership.qaRaw.faceABits[
-              faceMismatch]}/${oracleMembership.qaRaw.faceBBits[faceMismatch]}`}; generations local ${
-            JSON.stringify(adaptivePressureMembership.faceAuthority.preparation)} oracle ${
-            JSON.stringify(oracleMembership.faceAuthority.preparation)}`);
-        expect(failures,
-          adaptivePressureMembership.facePreparationSha256
-            === oracleMembership.facePreparationSha256,
-          `step ${step}: FPA prepared-authority hash mismatch`);
         for (const [bank, local, oracle] of [
           ["A", adaptivePressureMembership.qaRaw.faceABits,
             oracleMembership.qaRaw.faceABits],

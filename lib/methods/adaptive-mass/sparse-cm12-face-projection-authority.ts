@@ -1,25 +1,17 @@
-/**
- * FPA1: exact, persistent face-preparation/projection work authority.
- *
- * Stable row ids are HTP1 row ids.  The arena stores no floating-point
- * approximation and no scene predicate: a producer advances a row's local
- * dependency generation iff any bit read by the unchanged HEAD invocation
- * changes.  Absent such an event the previously mirrored final face word is
- * the exact authority for both ping-pong banks.
- */
+/** Exact persistent face-projection work authority. Face preparation is owned
+ * independently by contiguous brick row intervals and has no FPA state. */
 export const SPARSE_CM12_FACE_PROJECTION_MAGIC = 0x4650_4131; // FPA1
-export const SPARSE_CM12_FACE_PROJECTION_VERSION = 2;
+export const SPARSE_CM12_FACE_PROJECTION_VERSION = 3;
 export const SPARSE_CM12_FACE_PROJECTION_HEADER_WORDS = 32;
 export const SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS = 32;
-export const SPARSE_CM12_FACE_PROJECTION_STAGE_COUNT = 2;
+export const SPARSE_CM12_FACE_PROJECTION_STAGE_COUNT = 1;
 export const SPARSE_CM12_FACE_PROJECTION_LEAF_BITS = 256;
 export const SPARSE_CM12_FACE_PROJECTION_BRANCH = 32;
 export const SPARSE_CM12_FACE_PROJECTION_ALIGNMENT_WORDS = 64;
 export const SPARSE_CM12_FACE_PROJECTION_INVALID = 0xffff_ffff;
 
 export const SPARSE_CM12_FACE_PROJECTION_STAGE = Object.freeze({
-  preparation: 0,
-  projection: 1,
+  projection: 0,
 } as const);
 
 export const SPARSE_CM12_FACE_PROJECTION_PHASE = Object.freeze({
@@ -61,7 +53,7 @@ export const SPARSE_CM12_FACE_PROJECTION_CAUSE = Object.freeze({
   pressureBits: 1 << 9,
   thetaOrCoefficient: 1 << 10,
   pcmMembership: 1 << 11,
-  preparationDependency: 1 << 12,
+  preparedFaceBits: 1 << 12,
   closure: 1 << 13,
   bootstrap: 1 << 14,
   qaOracle: 1 << 15,
@@ -115,13 +107,8 @@ export interface SparseCM12FaceProjectionAuthorityLayout {
   readonly presentationPageResolution: 4 | 8 | 16;
   readonly rowCapacity: number;
   readonly cellCapacity: number;
-  /** Exact pre-pressure face word, separate from the mirrored final face banks. */
-  readonly preparedAuthorityBaseWords: number;
-  /** Persistent deep-row preparation certificate and transient support token. */
-  readonly preparationCertificateBaseWords: number;
   /** Exact accepted pressure bits used to root projection incidence changes. */
   readonly acceptedPressureBitsBaseWords: number;
-  readonly preparation: SparseCM12FaceProjectionStageLayout;
   readonly projection: SparseCM12FaceProjectionStageLayout;
   readonly totalWords: number;
   readonly totalBytes: number;
@@ -157,18 +144,11 @@ export function createSparseCM12FaceProjectionAuthorityLayout(options: {
     throw new Error("FPA1 requires a matched B4/P4, B8/P8, or B16/P16 physical ABI");
   }
   const baseWords = alignWords(options.baseWords ?? 0);
-  const preparationHeaderBaseWords = baseWords + SPARSE_CM12_FACE_PROJECTION_HEADER_WORDS;
-  const projectionHeaderBaseWords = preparationHeaderBaseWords
-    + SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS;
-  const preparedAuthorityBaseWords = alignWords(projectionHeaderBaseWords
+  const projectionHeaderBaseWords = baseWords + SPARSE_CM12_FACE_PROJECTION_HEADER_WORDS;
+  let at = alignWords(projectionHeaderBaseWords
     + SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER_WORDS);
-  const preparationCertificateBaseWords = alignWords(
-    preparedAuthorityBaseWords + rowCapacity,
-  );
-  const acceptedPressureBitsBaseWords = alignWords(
-    preparationCertificateBaseWords + rowCapacity,
-  );
-  let at = alignWords(acceptedPressureBitsBaseWords + cellCapacity);
+  const acceptedPressureBitsBaseWords = at;
+  at = alignWords(at + cellCapacity);
   const makeStage = (headerBaseWords: number): SparseCM12FaceProjectionStageLayout => {
     const activeBitWordCount = Math.ceil(rowCapacity / 32);
     const leafCount = Math.ceil(rowCapacity / SPARSE_CM12_FACE_PROJECTION_LEAF_BITS);
@@ -198,13 +178,10 @@ export function createSparseCM12FaceProjectionAuthorityLayout(options: {
       leafCount, treeLevelBaseWords: Object.freeze(treeLevelBaseWords),
       treeLevelCounts: Object.freeze(treeLevelCounts) });
   };
-  const preparation = makeStage(preparationHeaderBaseWords);
   const projection = makeStage(projectionHeaderBaseWords);
   const totalWords = alignWords(at);
   return Object.freeze({ baseWords, brickFineResolution, presentationPageResolution,
-    rowCapacity, cellCapacity, preparedAuthorityBaseWords, preparationCertificateBaseWords,
-    acceptedPressureBitsBaseWords,
-    preparation, projection,
+    rowCapacity, cellCapacity, acceptedPressureBitsBaseWords, projection,
     totalWords, totalBytes: 4 * totalWords, qaFullOracle: options.qaFullOracle ?? false });
 }
 
@@ -224,18 +201,18 @@ export function initializeSparseCM12FaceProjectionAuthorityWords(
   words[base + h.branch] = SPARSE_CM12_FACE_PROJECTION_BRANCH;
   words[base + h.rowCapacity] = layout.rowCapacity;
   words[base + h.cellCapacity] = layout.cellCapacity;
-  words[base + h.preparationHeaderBase] = layout.preparation.headerBaseWords;
+  words[base + h.preparationHeaderBase] = 0;
   words[base + h.projectionHeaderBase] = layout.projection.headerBaseWords;
   words[base + h.totalWords] = layout.totalWords;
   words[base + h.flags] = layout.qaFullOracle ? 1 : 0;
   words[base + h.firstFaultStage] = SPARSE_CM12_FACE_PROJECTION_INVALID;
   words[base + h.brickFineResolution] = layout.brickFineResolution;
   words[base + h.presentationPageResolution] = layout.presentationPageResolution;
-  words[base + h.preparedAuthorityBase] = layout.preparedAuthorityBaseWords;
+  words[base + h.preparedAuthorityBase] = 0;
   words[base + h.reserved0] = layout.acceptedPressureBitsBaseWords;
-  words[base + h.reserved1] = layout.preparationCertificateBaseWords;
+  words[base + h.reserved1] = 0;
   const d = SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER;
-  for (const stage of [layout.preparation, layout.projection]) {
+  for (const stage of [layout.projection]) {
     words[stage.headerBaseWords + d.phase] = SPARSE_CM12_FACE_PROJECTION_PHASE.uninitialized;
     words[stage.headerBaseWords + d.firstFaultRow] = SPARSE_CM12_FACE_PROJECTION_INVALID;
     words[stage.headerBaseWords + d.repairIndirectY] = 1;
@@ -253,7 +230,7 @@ export function createSparseCM12FaceProjectionAuthorityInitialWords(
   return words;
 }
 
-export type SparseCM12FaceProjectionStageName = "preparation" | "projection";
+export type SparseCM12FaceProjectionStageName = "projection";
 
 export function sparseCM12FaceProjectionIndirectByteOffset(
   layout: SparseCM12FaceProjectionAuthorityLayout,
@@ -277,70 +254,8 @@ export function sparseCM12FaceProjectionBootstrapIndirectByteOffset(
 export interface SparseCM12FaceProjectionAuthoritySource {
   readonly kind: "sparse-cm12-face-projection-authority";
   readonly arena: GPUBufferBinding;
-  readonly preparationBootstrapIndirect: GPUBufferBinding;
   readonly projectionBootstrapIndirect: GPUBufferBinding;
-  readonly preparationRepairIndirect: GPUBufferBinding;
   readonly projectionRepairIndirect: GPUBufferBinding;
-  readonly preparationWorkIndirect: GPUBufferBinding;
   readonly projectionWorkIndirect: GPUBufferBinding;
   readonly layout: SparseCM12FaceProjectionAuthorityLayout;
-}
-
-export interface SparseCM12FaceProjectionQAInput {
-  readonly preparationLive: Uint8Array;
-  readonly projectionLive: Uint8Array;
-  readonly preparationDirtyRows: readonly number[];
-  readonly projectionDirtyRows: readonly number[];
-  readonly acceptedFaceBits: Uint32Array;
-  readonly acceptedPreparedFaceBits: Uint32Array;
-  readonly prepareHead: (row: number) => number;
-  readonly projectHead: (row: number, preparedBits: number) => number;
-}
-
-export interface SparseCM12FaceProjectionQAResult {
-  readonly localBits: Uint32Array;
-  readonly oracleBits: Uint32Array;
-  readonly firstMismatchRow: number;
-}
-
-/** Construction/test-only byte oracle; never participates in frame scheduling. */
-export function compareSparseCM12FaceProjectionAuthorityQA(
-  input: SparseCM12FaceProjectionQAInput,
-): SparseCM12FaceProjectionQAResult {
-  const count = input.acceptedFaceBits.length;
-  if (input.acceptedPreparedFaceBits.length !== count
-    || input.preparationLive.length !== count || input.projectionLive.length !== count) {
-    throw new RangeError("FPA1 QA live masks must match acceptedFaceBits");
-  }
-  const canonical = (rows: readonly number[], label: string): number[] => {
-    const sorted = [...new Set(rows)].sort((a, b) => a - b);
-    if (sorted.some((row) => !Number.isSafeInteger(row) || row < 0 || row >= count)) {
-      throw new RangeError(`FPA1 QA ${label} row is out of range`);
-    }
-    return sorted;
-  };
-  const preparation = canonical(input.preparationDirtyRows, "preparation");
-  const projection = canonical([...input.projectionDirtyRows, ...preparation.filter(
-    (row) => input.projectionLive[row] !== 0)], "projection");
-  const localBits = input.acceptedFaceBits.slice();
-  const prepared = input.acceptedPreparedFaceBits.slice();
-  for (const row of preparation) if (input.preparationLive[row] !== 0) {
-    prepared[row] = input.prepareHead(row) >>> 0;
-    if (input.projectionLive[row] === 0) localBits[row] = prepared[row]!;
-  }
-  for (const row of projection) if (input.projectionLive[row] !== 0) {
-    localBits[row] = input.projectHead(row, prepared[row]!) >>> 0;
-  }
-  const oracleBits = input.acceptedFaceBits.slice();
-  for (let row = 0; row < count; row += 1) {
-    if (input.preparationLive[row] === 0) continue;
-    const base = input.prepareHead(row) >>> 0;
-    oracleBits[row] = input.projectionLive[row] !== 0
-      ? input.projectHead(row, base) >>> 0 : base;
-  }
-  let firstMismatchRow = SPARSE_CM12_FACE_PROJECTION_INVALID;
-  for (let row = 0; row < count; row += 1) if (localBits[row] !== oracleBits[row]) {
-    firstMismatchRow = row; break;
-  }
-  return { localBits, oracleBits, firstMismatchRow };
 }

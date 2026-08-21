@@ -23,8 +23,6 @@ export interface SparseCM12FaceProjectionAuthorityWGSLOptions {
   readonly arenaName?: string;
   readonly prefix?: string;
   readonly workgroupSize?: number;
-  /** Construction/bootstrap stable-row mapper. Omit for dense stable ids. */
-  readonly preparationBootstrapInvocationFunction?: string;
 }
 
 const identifier = (value: string, label: string): string => {
@@ -176,9 +174,6 @@ export function createSparseCM12FaceProjectionAuthorityWGSL(
   const layout = options.layout;
   const arena = identifier(options.arenaName ?? "faceProjectionArena", "arenaName");
   const p = identifier(options.prefix ?? "fpa", "prefix");
-  const preparationBootstrapInvocation = options.preparationBootstrapInvocationFunction
-    ? identifier(options.preparationBootstrapInvocationFunction,
-      "preparationBootstrapInvocationFunction") : undefined;
   const workgroupSize = options.workgroupSize ?? 64;
   if (!Number.isSafeInteger(workgroupSize) || workgroupSize < 8 || workgroupSize > 256) {
     throw new RangeError("FPA1 workgroupSize must be in [8, 256]");
@@ -186,27 +181,23 @@ export function createSparseCM12FaceProjectionAuthorityWGSL(
   const h = SPARSE_CM12_FACE_PROJECTION_HEADER;
   const d = SPARSE_CM12_FACE_PROJECTION_STAGE_HEADER;
   const hb = (word: number) => `${layout.baseWords + word}u`;
-  const prepRoot = layout.preparation.treeLevelBaseWords.at(-1)!;
   const projectionRoot = layout.projection.treeLevelBaseWords.at(-1)!;
   return /* wgsl */ `
 // Required integration hooks:
 // fpaFrameGeneration/TopologyGeneration/PCMGeneration/SourceParity/PolicyBits()->u32
-// fpaExpectedPreparationReceipts/ExpectedProjectionReceipts()->u32
-// fpaPreparationRowLive/fpaProjectionRowLive(row)->bool
-// fpaPreparationDependencyGeneration/fpaProjectionDependencyGeneration(row)->u32
+// fpaExpectedProjectionReceipts()->u32
+// fpaProjectionRowLive(row)->bool
+// fpaProjectionDependencyGeneration(row)->u32
 // Plus HTP1 cm12HotHeaderValid/RowValid/IncidenceRange/Incidence/RowTermCount/RowTermCell.
 const ${p}Magic:u32=0x${SPARSE_CM12_FACE_PROJECTION_MAGIC.toString(16)}u;
 const ${p}Version:u32=${SPARSE_CM12_FACE_PROJECTION_VERSION}u;
 const ${p}Invalid:u32=0x${SPARSE_CM12_FACE_PROJECTION_INVALID.toString(16)}u;
 const ${p}RowCapacity:u32=${layout.rowCapacity}u;
 const ${p}CellCapacity:u32=${layout.cellCapacity}u;
-const ${p}PreparedAuthority:u32=${layout.preparedAuthorityBaseWords}u;
-const ${p}PreparationCertificateBase:u32=${layout.preparationCertificateBaseWords}u;
 const ${p}AcceptedPressureBits:u32=${layout.acceptedPressureBitsBaseWords}u;
 const ${p}LeafBits:u32=${SPARSE_CM12_FACE_PROJECTION_LEAF_BITS}u;
 const ${p}LeafWords:u32=${SPARSE_CM12_FACE_PROJECTION_LEAF_BITS / 32}u;
 const ${p}Branch:u32=${SPARSE_CM12_FACE_PROJECTION_BRANCH}u;
-const ${p}Preparation:u32=${SPARSE_CM12_FACE_PROJECTION_STAGE.preparation}u;
 const ${p}Projection:u32=${SPARSE_CM12_FACE_PROJECTION_STAGE.projection}u;
 const ${p}PhaseUninitialized:u32=${SPARSE_CM12_FACE_PROJECTION_PHASE.uninitialized}u;
 const ${p}PhaseAccepted:u32=${SPARSE_CM12_FACE_PROJECTION_PHASE.accepted}u;
@@ -234,34 +225,22 @@ const ${p}DRepairIndirectX:u32=${d.repairIndirectX}u;
 const ${p}DWorkIndirectX:u32=${d.workIndirectX}u;
 const ${p}DVerifiedLeafCount:u32=${d.verifiedLeafCount}u;
 const ${p}QAOracle:bool=${layout.qaFullOracle ? "true" : "false"};
-${stageConstants(p, "Preparation", layout.preparation)}
 ${stageConstants(p, "Projection", layout.projection)}
 var<workgroup>${p}LeafCounts:array<u32,${SPARSE_CM12_FACE_PROJECTION_LEAF_BITS / 32}>;
 var<workgroup>${p}VerifyCount:atomic<u32>;
 var<workgroup>${p}VerifyFault:atomic<u32>;
 
-fn ${p}Header(stage:u32)->u32{return select(${p}PreparationHeader,${p}ProjectionHeader,
-  stage==${p}Projection);}
-fn ${p}CandidateGenerationBase(stage:u32)->u32{return select(
-  ${p}PreparationCandidateGeneration,${p}ProjectionCandidateGeneration,stage==${p}Projection);}
-fn ${p}CandidateCauseBase(stage:u32)->u32{return select(
-  ${p}PreparationCandidateCause,${p}ProjectionCandidateCause,stage==${p}Projection);}
-fn ${p}CandidateDepthBase(stage:u32)->u32{return select(
-  ${p}PreparationCandidateDepth,${p}ProjectionCandidateDepth,stage==${p}Projection);}
-fn ${p}CandidateDependencyBase(stage:u32)->u32{return select(
-  ${p}PreparationCandidateDependency,${p}ProjectionCandidateDependency,stage==${p}Projection);}
-fn ${p}AcceptedDependencyBase(stage:u32)->u32{return select(
-  ${p}PreparationAcceptedDependency,${p}ProjectionAcceptedDependency,stage==${p}Projection);}
-fn ${p}ExecutionGenerationBase(stage:u32)->u32{return select(
-  ${p}PreparationExecutionGeneration,${p}ProjectionExecutionGeneration,stage==${p}Projection);}
-fn ${p}DirtyStampBase(stage:u32)->u32{return select(
-  ${p}PreparationDirtyStamp,${p}ProjectionDirtyStamp,stage==${p}Projection);}
-fn ${p}DirtyListBase(stage:u32)->u32{return select(
-  ${p}PreparationDirtyList,${p}ProjectionDirtyList,stage==${p}Projection);}
-fn ${p}ActiveLeafListBase(stage:u32)->u32{return select(
-  ${p}PreparationActiveLeafList,${p}ProjectionActiveLeafList,stage==${p}Projection);}
-fn ${p}LeafCount(stage:u32)->u32{return select(
-  ${p}PreparationLeafCount,${p}ProjectionLeafCount,stage==${p}Projection);}
+fn ${p}Header(stage:u32)->u32{_=stage;return ${p}ProjectionHeader;}
+fn ${p}CandidateGenerationBase(stage:u32)->u32{_=stage;return ${p}ProjectionCandidateGeneration;}
+fn ${p}CandidateCauseBase(stage:u32)->u32{_=stage;return ${p}ProjectionCandidateCause;}
+fn ${p}CandidateDepthBase(stage:u32)->u32{_=stage;return ${p}ProjectionCandidateDepth;}
+fn ${p}CandidateDependencyBase(stage:u32)->u32{_=stage;return ${p}ProjectionCandidateDependency;}
+fn ${p}AcceptedDependencyBase(stage:u32)->u32{_=stage;return ${p}ProjectionAcceptedDependency;}
+fn ${p}ExecutionGenerationBase(stage:u32)->u32{_=stage;return ${p}ProjectionExecutionGeneration;}
+fn ${p}DirtyStampBase(stage:u32)->u32{_=stage;return ${p}ProjectionDirtyStamp;}
+fn ${p}DirtyListBase(stage:u32)->u32{_=stage;return ${p}ProjectionDirtyList;}
+fn ${p}ActiveLeafListBase(stage:u32)->u32{_=stage;return ${p}ProjectionActiveLeafList;}
+fn ${p}LeafCount(stage:u32)->u32{_=stage;return ${p}ProjectionLeafCount;}
 fn ${p}GlobalHeaderValid()->bool{return cm12HotHeaderValid()
   &&arrayLength(&${arena})>=${layout.totalWords}u
   &&atomicLoad(&${arena}[${hb(h.magic)}])==${p}Magic
@@ -273,10 +252,8 @@ fn ${p}GlobalHeaderValid()->bool{return cm12HotHeaderValid()
   &&atomicLoad(&${arena}[${hb(h.branch)}])==${p}Branch
   &&atomicLoad(&${arena}[${hb(h.rowCapacity)}])==${p}RowCapacity
   &&atomicLoad(&${arena}[${hb(h.cellCapacity)}])==${p}CellCapacity
-  &&atomicLoad(&${arena}[${hb(h.preparationHeaderBase)}])==${p}PreparationHeader
   &&atomicLoad(&${arena}[${hb(h.projectionHeaderBase)}])==${p}ProjectionHeader
   &&atomicLoad(&${arena}[${hb(h.totalWords)}])==${layout.totalWords}u
-  &&atomicLoad(&${arena}[${hb(h.preparedAuthorityBase)}])==${p}PreparedAuthority
   &&atomicLoad(&${arena}[${hb(h.reserved0)}])==${p}AcceptedPressureBits
   &&atomicLoad(&${arena}[${hb(h.brickFineResolution)}])==${layout.brickFineResolution}u
   &&atomicLoad(&${arena}[${hb(h.presentationPageResolution)}])
@@ -334,10 +311,6 @@ fn ${p}Begin(stage:u32,expectedReceipts:u32)->bool{let header=${p}Header(stage);
   atomicStore(&${arena}[header+${p}DPhase],${p}PhaseCollecting);return true;
 }
 @compute @workgroup_size(1)
-fn beginSparseCM12FacePreparationAuthority(){
-  _=${p}Begin(${p}Preparation,fpaExpectedPreparationReceipts());
-}
-@compute @workgroup_size(1)
 fn beginSparseCM12FaceProjectionAuthority(){
   _=${p}Begin(${p}Projection,fpaExpectedProjectionReceipts());
 }
@@ -377,20 +350,12 @@ fn ${p}Mark(stage:u32,row:u32,cause:u32,depth:u32,dependencyGeneration:u32,
   atomicOr(&${arena}[header+${p}DCauseMask],cause);
   if(receipt){atomicAdd(&${arena}[header+${p}DCoveredReceipts],1u);}return true;
 }
-fn fpaMarkPreparationRow(row:u32,cause:u32,depth:u32,receipt:bool)->bool{
-  if(!fpaPreparationRowLive(row)){if(receipt){atomicAdd(&${arena}[
-    ${p}PreparationHeader+${p}DCoveredReceipts],1u);}return true;}
-  return ${p}Mark(${p}Preparation,row,cause,depth,
-    fpaPreparationDependencyGeneration(row),receipt);
-}
 fn fpaMarkProjectionRow(row:u32,cause:u32,depth:u32,receipt:bool)->bool{
   if(!fpaProjectionRowLive(row)){if(receipt){atomicAdd(&${arena}[
     ${p}ProjectionHeader+${p}DCoveredReceipts],1u);}return true;}
   return ${p}Mark(${p}Projection,row,cause,depth,
     fpaProjectionDependencyGeneration(row),receipt);
 }
-fn fpaCoverPreparationReceipt(){atomicAdd(&${arena}[
-  ${p}PreparationHeader+${p}DCoveredReceipts],1u);}
 fn fpaMarkProjectionPressureCell(cell:u32,bits:u32,cause:u32)->bool{
   if(cell>=${p}CellCapacity){${p}Fail(${p}Projection,
     ${SPARSE_CM12_FACE_PROJECTION_FAULT.invalidCell}u,cell);return false;}
@@ -401,35 +366,6 @@ fn fpaMarkProjectionPressureCell(cell:u32,bits:u32,cause:u32)->bool{
     ok=fpaMarkProjectionRow(cm12HotIncidence(at).x,cause,0u,false)&&ok;}
   if(ok){atomicAdd(&${arena}[${p}ProjectionHeader+${p}DCoveredReceipts],1u);}
   return ok;
-}
-// One producer receipt covers the complete bounded HTP incidence/one-ring
-// closure. All row writes below are internally owned and therefore receipt=false.
-fn fpaMarkTopologyCellBlast(cell:u32,cause:u32)->bool{
-  if(cell>=${p}CellCapacity){${p}Fail(${p}Preparation,
-    ${SPARSE_CM12_FACE_PROJECTION_FAULT.invalidCell}u,cell);return false;}
-  var ok=true;let incidences=cm12HotIncidenceRange(cell);
-  for(var at=incidences.x;at<incidences.x+incidences.y;at+=1u){let incidence=cm12HotIncidence(at);
-    let row=incidence.x;ok=fpaMarkPreparationRow(row,cause,0u,false)&&ok;
-    let terms=cm12HotRowTermCount(row);
-    for(var ordinal=0u;ordinal<terms;ordinal+=1u){let neighbor=cm12HotRowTermCell(row,ordinal);
-      if(neighbor==${p}Invalid||neighbor>=${p}CellCapacity){continue;}
-      let closure=cm12HotIncidenceRange(neighbor);
-      for(var nested=closure.x;nested<closure.x+closure.y;nested+=1u){
-        let closureRow=cm12HotIncidence(nested).x;
-        ok=fpaMarkPreparationRow(closureRow,
-          cause|${SPARSE_CM12_FACE_PROJECTION_CAUSE.closure}u,1u,false)&&ok;
-      }}
-  }
-  if(ok){atomicAdd(&${arena}[${p}PreparationHeader+${p}DCoveredReceipts],1u);}return ok;
-}
-@compute @workgroup_size(${workgroupSize})
-fn seedSparseCM12FacePreparationBootstrap(@builtin(global_invocation_id)gid:vec3u){
-  let row=${preparationBootstrapInvocation
-    ? `${preparationBootstrapInvocation}(gid.x)` : "gid.x"};
-  if(row==${p}Invalid||row>=${p}RowCapacity){return;}
-  let cause=select(${SPARSE_CM12_FACE_PROJECTION_CAUSE.bootstrap}u,
-    ${SPARSE_CM12_FACE_PROJECTION_CAUSE.qaOracle}u,${p}QAOracle);
-  _=fpaMarkPreparationRow(row,cause,0u,false);
 }
 @compute @workgroup_size(${workgroupSize})
 fn seedSparseCM12FaceProjectionBootstrap(@builtin(global_invocation_id)gid:vec3u){
@@ -446,19 +382,8 @@ fn ${p}SeedPrevious(stage:u32,invocation:u32){let header=${p}Header(stage);
         leaf*${p}LeafBits);return;}_=${p}QueueLeaf(stage,leaf);
 }
 @compute @workgroup_size(${workgroupSize})
-fn seedSparseCM12PreviousFacePreparationLeaves(@builtin(global_invocation_id)gid:vec3u){
-  ${p}SeedPrevious(${p}Preparation,gid.x);
-}
-@compute @workgroup_size(${workgroupSize})
 fn seedSparseCM12PreviousFaceProjectionLeaves(@builtin(global_invocation_id)gid:vec3u){
   ${p}SeedPrevious(${p}Projection,gid.x);
-}
-@compute @workgroup_size(${workgroupSize})
-fn seedSparseCM12ProjectionFromPreparation(
- @builtin(global_invocation_id)gid:vec3u){
-  let row=${p}PreparationRankSelect(gid.x);if(row==${p}Invalid){return;}
-  if(fpaProjectionRowLive(row)){_=fpaMarkProjectionRow(row,
-    ${SPARSE_CM12_FACE_PROJECTION_CAUSE.preparationDependency}u,1u,false);}
 }
 fn ${p}FinalizeFrontier(stage:u32)->bool{let header=${p}Header(stage);
   if(atomicLoad(&${arena}[header+${p}DPhase])!=${p}PhaseCollecting
@@ -472,11 +397,7 @@ fn ${p}FinalizeFrontier(stage:u32)->bool{let header=${p}Header(stage);
   atomicStore(&${arena}[header+${p}DPhase],${p}PhaseRepairing);return true;
 }
 @compute @workgroup_size(1)
-fn finalizeSparseCM12FacePreparationFrontier(){_=${p}FinalizeFrontier(${p}Preparation);}
-@compute @workgroup_size(1)
 fn finalizeSparseCM12FaceProjectionFrontier(){_=${p}FinalizeFrontier(${p}Projection);}
-${repairKernel(p, "Preparation", SPARSE_CM12_FACE_PROJECTION_STAGE.preparation,
-    layout.preparation, arena, workgroupSize)}
 ${repairKernel(p, "Projection", SPARSE_CM12_FACE_PROJECTION_STAGE.projection,
     layout.projection, arena, workgroupSize)}
 fn ${p}FinalizePlan(stage:u32,root:u32)->bool{let header=${p}Header(stage);
@@ -493,32 +414,9 @@ fn ${p}FinalizePlan(stage:u32,root:u32)->bool{let header=${p}Header(stage);
   atomicStore(&${arena}[header+${p}DPhase],${p}PhaseExecuting);return true;
 }
 @compute @workgroup_size(1)
-fn finalizeSparseCM12FacePreparationPlan(){
-  _=${p}FinalizePlan(${p}Preparation,${prepRoot}u);}
-@compute @workgroup_size(1)
 fn finalizeSparseCM12FaceProjectionPlan(){
   _=${p}FinalizePlan(${p}Projection,${projectionRoot}u);}
-${rankSelect(p, "Preparation", layout.preparation, arena)}
 ${rankSelect(p, "Projection", layout.projection, arena)}
-fn fpaPreparationRowInvocation(invocation:u32)->u32{
-  return ${p}PreparationRankSelect(invocation);}
-fn fpaPreparationRowCause(row:u32)->u32{
-  if(row>=${p}RowCapacity){return 0u;}
-  return atomicLoad(&${arena}[${p}PreparationCandidateCause+row]);
-}
-// Packet execution addresses one already-materialized 256-row authority leaf.
-// Each of 64 lanes owns four stable row bits, avoiding one tree rank-select per
-// row while preserving the exact candidate bitset and completion protocol.
-fn fpaPreparationPacketRow(packet:u32,lane:u32,slot:u32)->u32{
-  let header=${p}PreparationHeader;
-  if(slot>=4u||packet>=atomicLoad(&${arena}[header+${p}DActiveLeafCount])
-    ||atomicLoad(&${arena}[header+${p}DPhase])!=${p}PhaseExecuting){return ${p}Invalid;}
-  let leaf=atomicLoad(&${arena}[${p}PreparationActiveLeafList+packet]);
-  let local=lane+64u*slot;let word=atomicLoad(&${arena}[
-    ${p}PreparationBits+leaf*${p}LeafWords+local/32u]);
-  let row=leaf*${p}LeafBits+local;
-  return select(${p}Invalid,row,row<${p}RowCapacity&&(word&(1u<<(local&31u)))!=0u);
-}
 fn fpaProjectionRowInvocation(invocation:u32)->u32{
   return ${p}ProjectionRankSelect(invocation);}
 fn ${p}Complete(stage:u32,row:u32)->bool{let header=${p}Header(stage);
@@ -531,22 +429,8 @@ fn ${p}Complete(stage:u32,row:u32)->bool{let header=${p}Header(stage);
     ${p}CandidateDependencyBase(stage)+row]));
   atomicStore(&${arena}[${p}ExecutionGenerationBase(stage)+row],generation);return true;
 }
-fn fpaPreparationComplete(row:u32)->bool{return ${p}Complete(${p}Preparation,row);}
 fn fpaProjectionComplete(row:u32)->bool{return ${p}Complete(${p}Projection,row);}
-fn fpaStorePreparedAuthority(row:u32,bits:u32){
-  if(row<${p}RowCapacity){atomicStore(&${arena}[${p}PreparedAuthority+row],bits);}}
-fn fpaPreparedAuthorityBits(row:u32)->u32{
-  if(row>=${p}RowCapacity){return 0u;}
-  return atomicLoad(&${arena}[${p}PreparedAuthority+row]);}
-fn fpaStorePreparationCertificate(row:u32,bits:u32){
-  if(row<${p}RowCapacity){atomicStore(&${arena}[${p}PreparationCertificateBase+row],bits);}}
-fn fpaPreparationCertificate(row:u32)->u32{
-  if(row>=${p}RowCapacity){return 0u;}
-  return atomicLoad(&${arena}[${p}PreparationCertificateBase+row]);}
-fn fpaPreparationMustMirrorUnprojected(row:u32)->bool{return !fpaProjectionRowLive(row);}
 fn fpaProjectionMustMirror(row:u32)->bool{_=row;return true;}
-${verifyKernel(p, "Preparation", SPARSE_CM12_FACE_PROJECTION_STAGE.preparation,
-    arena, workgroupSize)}
 ${verifyKernel(p, "Projection", SPARSE_CM12_FACE_PROJECTION_STAGE.projection,
     arena, workgroupSize)}
 fn ${p}Accept(stage:u32)->bool{let header=${p}Header(stage);
@@ -571,8 +455,6 @@ fn ${p}Accept(stage:u32)->bool{let header=${p}Header(stage);
     header+${p}DCandidateGeneration]));
   atomicStore(&${arena}[header+${p}DPhase],${p}PhaseAccepted);return true;
 }
-@compute @workgroup_size(1)
-fn finalizeSparseCM12FacePreparationExecution(){_=${p}Accept(${p}Preparation);}
 @compute @workgroup_size(1)
 fn finalizeSparseCM12FaceProjectionExecution(){_=${p}Accept(${p}Projection);}
 `;

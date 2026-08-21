@@ -37,6 +37,8 @@ import {
   createMinimalPowerDamBreakScene,
   createMinimalPowerDamBreak32Scene,
   createMinimalPowerDamBreak64Scene,
+  createLargePowerHydrostaticScene,
+  createDeepPowerHydrostaticScene,
   createOceanSeicheScene,
   createSparseCM12LongDamBreakScene,
   createSymmetricExpansionScene,
@@ -144,20 +146,30 @@ if (![4, 8, 16].includes(brickFineResolution)
   || brickFineResolution % presentationPageResolution !== 0) {
   throw new RangeError("brick-fine and presentation-page must be compatible values in 4, 8, 16");
 }
-if (!["baseline", "mass-swept-clean"].includes(transportExperiment)) {
+if (!["baseline", "mass-swept-clean", "structure-sharpening-legacy",
+  "face-row-packets", "face-direct-preparation", "face-characteristic-cache",
+  "structure-face-cache-legacy",
+  "structure-mass-swept-legacy", "activity-scalar-bricks",
+  "structure-activity-scalar-legacy", "presentation-uniform-bulk",
+  "structure-presentation-uniform-legacy"]
+  .concat(["mass-rung-packets", "mass-rung-local"])
+  .includes(transportExperiment)) {
   throw new RangeError(
-    "stage-cost probe supports baseline or mass-swept-clean",
+    "unsupported stage-cost transport experiment",
   );
 }
 const buildScene = sceneName === "mini16" ? createMinimalPowerDamBreakScene
   : sceneName === "mini32" ? createMinimalPowerDamBreak32Scene
   : sceneName === "mini64" ? createMinimalPowerDamBreak64Scene
   : sceneName === "long-dam" ? createSparseCM12LongDamBreakScene
+  : sceneName === "large-hydrostatic" ? createLargePowerHydrostaticScene
+  : sceneName === "deep-hydrostatic" ? createDeepPowerHydrostaticScene
   : sceneName === "ocean" || sceneName === "ocean-seiche" ? createOceanSeicheScene
   : sceneName === "symmetric-expansion" ? createSymmetricExpansionScene
   : undefined;
 if (!buildScene) throw new RangeError(
-  `scene must be mini16, mini32, mini64, long-dam, ocean-seiche, ocean, or symmetric-expansion; received ${sceneName}`,
+  `scene must be mini16, mini32, mini64, long-dam, large-hydrostatic, `
+    + `deep-hydrostatic, ocean-seiche, ocean, or symmetric-expansion; received ${sceneName}`,
 );
 
 const median = (values: number[]): number => {
@@ -222,6 +234,9 @@ type StageCostQASolver = {
   readAdaptiveRepresentationQA(): Promise<Record<string, number | boolean>>;
   readFrameControlQA(): Promise<FrameControlHeader>;
   readScalarAuthorityHeaderQA(): Promise<ScalarAuthorityHeader>;
+  readSharpeningCellAuthorityQA(): Promise<{
+    readonly generation: number; readonly packetCount: number;
+  }>;
   readScalarIngressHeaderQA(): Promise<{
     readonly candidateGeneration: number; readonly eventCount: number;
     readonly fault: number; readonly firstFaultTile: number;
@@ -333,6 +348,7 @@ try {
 
   const stageSamples = new Map<string, number[]>();
   const totals: number[] = [];
+  const wallFrameSamples: number[] = [];
   const committedSamples: number[] = [];
   const pressureTopologyInputChangedSamples: boolean[] = [];
   const pressureTopologyWorkSamples: {
@@ -411,10 +427,14 @@ try {
     if (debugProgress) process.stderr.write(`[stage-probe] ${message}\n`);
   };
   for (let frame = 1; frame <= maximumAdvances; frame += 1) {
+    const wallFrameStarted_ms = performance.now();
     debug(`advance ${frame} begin`);
     while (!solver.advanceTo(frame * dt_s, [])) await new Promise(setImmediate);
     debug(`advance ${frame} encoded`);
     await device.queue.onSubmittedWorkDone();
+    if (frame > warmup && frame <= warmup + sampled) {
+      wallFrameSamples.push(performance.now() - wallFrameStarted_ms);
+    }
     debug(`advance ${frame} queue complete`);
     const [frameControl, scalarAuthorityQA, scalarIngress] = await Promise.all([
       qaSolver.readFrameControlQA(), qaSolver.readScalarAuthorityHeaderQA(),
@@ -728,6 +748,7 @@ try {
     eligible: targetConfiguration && sampled >= 24,
     passed: targetConfiguration && sampled >= 24 && nonPressureP95_ms < maximumTarget_ms,
   };
+  const sharpeningCellAuthority = await qaSolver.readSharpeningCellAuthorityQA();
   const report = {
     probe: "sparse-cm12-stage-cost", scene: sceneName, samples: seen,
     diagnostic: {
@@ -785,6 +806,11 @@ try {
       },
     },
     medianAdvance_ms: Number(total.toFixed(4)),
+    wallFrame: {
+      samples_ms: wallFrameSamples.map((value) => Number(value.toFixed(4))),
+      median_ms: Number(median(wallFrameSamples).toFixed(4)),
+      p95_ms: Number(percentile(wallFrameSamples, 0.95).toFixed(4)),
+    },
     pressureSolve_ms: Number(pressure.toFixed(4)),
     nonPressure_ms: Number(nonPressureMedian_ms.toFixed(4)),
     nonPressure: {
@@ -844,6 +870,11 @@ try {
       abi: "SRR1",
       scheduling: "producer-authored result receipts plus GPU indirect tile ranks",
       ...lastScalarAuthorityHeader,
+    },
+    sharpeningCellAuthority: {
+      abi: "SCA1",
+      scheduling: "producer-authored air-side SRR1 work packets",
+      ...sharpeningCellAuthority,
     },
     closure: {
       maximumAbsoluteError_ms: Math.max(...closureErrors.map(Math.abs)),

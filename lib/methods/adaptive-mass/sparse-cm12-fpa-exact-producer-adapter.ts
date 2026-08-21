@@ -35,7 +35,7 @@ export const SPARSE_CM12_FPA_EXACT_PRODUCER_FAMILY_COUNT = 7;
 export const SPARSE_CM12_FPA_EXACT_PRODUCER_CAUSE = Object.freeze({
   liquidPhaseCell: SPARSE_CM12_FACE_PROJECTION_CAUSE.densityPhaseBits,
   vexCell: SPARSE_CM12_FACE_PROJECTION_CAUSE.velocityBits
-    | SPARSE_CM12_FACE_PROJECTION_CAUSE.preparationDependency,
+    | SPARSE_CM12_FACE_PROJECTION_CAUSE.preparedFaceBits,
   sourceFaceRow: SPARSE_CM12_FACE_PROJECTION_CAUSE.sourceFaceBits,
   topologyCell: SPARSE_CM12_FACE_PROJECTION_CAUSE.topology,
   movingSolidCell: SPARSE_CM12_FACE_PROJECTION_CAUSE.movingSolid,

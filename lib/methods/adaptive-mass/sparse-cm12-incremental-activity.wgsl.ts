@@ -139,6 +139,11 @@ fn incrementalActivityRecordTile(tile:u32,cause:u32){
   }
   incrementalActivityFault();
 }
+fn incrementalActivityMarkStableTileBrick(tile:u32,brick:u32,localTile:u32,cause:u32){
+  incrementalActivityRecordTile(tile,cause);
+  if(brickSpan(brick)==1u){incrementalActivitySetBrickTile(brick,localTile);}
+  else{incrementalActivitySetAllBrickTiles(brick);}
+}
 fn incrementalActivityStableTile(cell:u32)->vec2u{
   let minimum=cellMinimum(cell);
   let brickDimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
@@ -157,21 +162,25 @@ fn incrementalActivityMarkCell(cell:u32,cause:u32){
   if(brickSpan(brick)==1u){incrementalActivitySetBrickTile(brick,stable.y);}
   else{incrementalActivitySetAllBrickTiles(brick);}
 }
+fn incrementalActivityPublishFaceBrickClosure(brick:u32){
+  if(brick>=ACTIVITY_BRICK_COUNT){return;}
+  let dimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
+    /BRICK_FINE_RESOLUTION;
+  let key=topology[p.topologyOffsets2.z+2u*brick+1u];
+  let xy=dimensions.x*dimensions.y;let z=key/xy;let remainder=key-z*xy;
+  let y=remainder/dimensions.x;let x=remainder-y*dimensions.x;
+  let origin=vec3i(i32(x),i32(y),i32(z));let span=i32(brickSpan(brick));
+  for(var dz=-1;dz<=span;dz+=1){for(var dy=-1;dy<=span;dy+=1){
+    for(var dx=-1;dx<=span;dx+=1){let q=origin+vec3i(dx,dy,dz);
+      if(any(q<vec3i(0))||any(q>=vec3i(dimensions))){continue;}
+      let owner=brickDirectoryLookupAtCoordinate(vec3u(q));
+      if(owner!=INVALID){_=incrementalActivityClaimBrick(owner);}
+  }}}
+}
 fn incrementalActivityMarkCellClosure(cell:u32,cause:u32){
   incrementalActivityMarkCell(cell,cause);
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);if(!rowAccepted(row)){continue;}
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-    for(var term=begin;term<end;term+=1u){
-      let neighbor=termCell(term);if(neighbor==INVALID||!cellActive(neighbor)){continue;}
-      let stable=incrementalActivityStableTile(neighbor);
-      incrementalActivityRecordTile(stable.x,
-        ${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u);
-      let brick=cellBrick(neighbor);
-      if(brickSpan(brick)==1u){incrementalActivitySetBrickTile(brick,stable.y);}
-      else{incrementalActivitySetAllBrickTiles(brick);}
-    }
-  }
+  if(cell!=INVALID&&cellActive(cell)){
+    incrementalActivityPublishFaceBrickClosure(cellBrick(cell));}
 }
 
 @compute @workgroup_size(64)
@@ -214,6 +223,7 @@ fn incrementalActivityMarkTopologyBrick(brick:u32){
   let next=incrementalActivityTopologyState(brick);
   let previous=atomicLoad(&activity[ACTIVITY_BRICK_TOPOLOGY+brick]);
   if(previous==next){return;}
+  incrementalActivityPublishFaceBrickClosure(brick);
   let previousActive=(previous&0x80000000u)!=0u;
   let cause=select(${SPARSE_CM12_DIRTY_CAUSE_BIT.generationMismatch
     | SPARSE_CM12_DIRTY_CAUSE_BIT.coefficientChanged}u,
@@ -274,6 +284,10 @@ fn incrementalActivityBrickCount()->u32{
   return atomicLoad(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.dirtyBrickCount)}]);
 }
 fn incrementalActivityListGeneration()->u32{return incrementalActivityGeneration();}
+fn incrementalActivityBrickDirty(brick:u32)->bool{
+  return brick<ACTIVITY_BRICK_COUNT
+    &&atomicLoad(&activity[ACTIVITY_BRICK_STAMP+brick])==incrementalActivityGeneration();
+}
 fn incrementalActivityBrickTileMask(brick:u32)->vec2u{
   if(brick>=ACTIVITY_BRICK_COUNT
     ||atomicLoad(&activity[ACTIVITY_BRICK_STAMP+brick])!=incrementalActivityGeneration()){

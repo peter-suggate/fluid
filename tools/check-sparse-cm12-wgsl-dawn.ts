@@ -57,6 +57,7 @@ const transportExperiment = (process.argv.find((argument) =>
 const transportExperiments = new Set<SparseCM12TransportExperiment>([
   "baseline", "legacy-owner-hash", "logical-owner-directory",
   "logical-owner-mass-rung", "face-characteristic-cache", "face-row-packets",
+  "face-direct-preparation",
   "structure-gamma-legacy", "structure-mass-legacy", "structure-cache-legacy",
   "mass-rung-packets", "mass-local-atomics", "mass-swept-clean",
   "face-packets-cache", "mass-rung-local", "face-packets-mass-rung", "all-valid",

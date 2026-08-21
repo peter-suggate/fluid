@@ -556,6 +556,28 @@ if (accuracyArgument !== "production" && accuracyArgument !== "strict") {
 }
 const accuracyMode = accuracyArgument as "production" | "strict";
 const pressureIterationsArgument = argument("pressure-iterations");
+const transportExperiment = argument("transport-experiment");
+if (transportExperiment !== undefined
+  && !["structure-sharpening-legacy", "mass-swept-clean",
+    "structure-mass-swept-legacy", "face-direct-preparation",
+    "face-characteristic-cache",
+    "activity-scalar-bricks", "structure-activity-scalar-legacy",
+    "presentation-uniform-bulk", "structure-presentation-uniform-legacy"].includes(
+    transportExperiment)) {
+  throw new RangeError(
+    "unsupported transport-experiment in this gate",
+  );
+}
+const gatedTransportExperiment = transportExperiment as undefined
+  | "structure-sharpening-legacy"
+  | "mass-swept-clean"
+  | "structure-mass-swept-legacy"
+  | "face-direct-preparation"
+  | "face-characteristic-cache"
+  | "activity-scalar-bricks"
+  | "structure-activity-scalar-legacy"
+  | "presentation-uniform-bulk"
+  | "structure-presentation-uniform-legacy";
 const pressureIterationsOverride = pressureIterationsArgument === undefined
   ? Number(SPARSE_CM12_SYMMETRIC_EXPANSION_METHOD_PROFILE.overrides
     ?.pressureIterations)
@@ -661,20 +683,21 @@ try {
   };
   try {
     const constructionStarted_ms = performance.now();
-    solver = await WebGPUAdaptiveMassSolver.createAsync(
-      device,
-      scene,
-      "balanced",
-      undefined,
-      {
+    const solverOptions = {
         resolutionMode,
         brickFineResolution,
         presentationPageResolution,
         timeStep: "paper",
         pressureIterations: pressureIterationsOverride,
-      },
-      () => {},
-    );
+      } as const;
+    solver = gatedTransportExperiment !== undefined
+      ? await WebGPUAdaptiveMassSolver.createTransportExperimentForQA(
+        gatedTransportExperiment, device, scene, "balanced", undefined,
+        solverOptions, () => {},
+      )
+      : await WebGPUAdaptiveMassSolver.createAsync(
+        device, scene, "balanced", undefined, solverOptions, () => {},
+      );
     wallTiming.solverConstruction_ms = performance.now() - constructionStarted_ms;
     const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
     expect(failures, dimensions[0] === horizontalGrid

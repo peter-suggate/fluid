@@ -26,7 +26,7 @@ GPUAdaptivePressureLocalStageReceipt => Object.freeze({
 const authorities = (overrides: Partial<SparseCM12PressureCutoverAuthorities> = {}):
 SparseCM12PressureCutoverAuthorities => Object.freeze({
   status: "matched", inputTopologyGeneration: 17,
-  fpa: { preparation: stage(), projection: stage() },
+  fpa: { projection: stage() },
   pcf: stage(),
   pca: { ...stage({ dirtyCount: 5, executedCount: 5 }),
     familyDirtyCount: [1, 1, 2, 1] as const,
@@ -41,7 +41,7 @@ assert.deepEqual(inspectSparseCM12PressureCutoverAuthorities(undefined).complete
 assert.equal(inspectSparseCM12PressureCutoverAuthorities(authorities(), 17).complete, true);
 assert.match(formatSparseCM12PressureCutoverAuthorities(undefined), /UNAVAILABLE/);
 assert.match(formatSparseCM12PressureCutoverAuthorities(authorities(), 17),
-  /FPA prepare g9 · dirty 2 · work 7/);
+  /Face prepare: brick-owned persistent rows \(no FPA stage\)/);
 
 const wrongInput = authorities({ inputTopologyGeneration: 18 });
 assert.equal(inspectSparseCM12PressureCutoverAuthorities(wrongInput, 17).complete, false);
@@ -53,16 +53,16 @@ assert.match(formatSparseCM12PressureCutoverAuthorities(faulted, 17), /FAULT 8@4
 
 const localSource = "fn localInvocation(id:u32)->u32{return id;} dispatchWorkgroupsIndirect";
 assert.doesNotThrow(() => assertSparseCM12PressureCutoverLocalSources({
-  fpaPreparation: localSource, fpaProjection: localSource, pcf: localSource,
+  fpaProjection: localSource, pcf: localSource,
   pca: localSource,
 }));
 assert.throws(() => assertSparseCM12PressureCutoverLocalSources({
-  fpaPreparation: `${localSource} acceptedTemplateRowInvocation`,
-  fpaProjection: localSource, pcf: localSource, pca: localSource,
+  fpaProjection: `${localSource} acceptedTemplateRowInvocation`,
+  pcf: localSource, pca: localSource,
 }), /forbidden global token acceptedTemplateRowInvocation/);
 assert.throws(() => assertSparseCM12PressureCutoverLocalSources({
-  fpaPreparation: localSource, fpaProjection: localSource,
-  pcf: localSource, pca: `${localSource} bakeBrickAggregateEdges`,
+  fpaProjection: localSource, pcf: localSource,
+  pca: `${localSource} bakeBrickAggregateEdges`,
 }), /forbidden global token bakeBrickAggregateEdges/);
 
 const pcm = { cell: { phase: 1, fault: 0, firstFault: 0xffff_ffff, dirtyCount: 1,
