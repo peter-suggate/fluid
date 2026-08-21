@@ -19,6 +19,7 @@ export interface SparseCM12VelocityExtensionLayout {
 
 export interface SparseCM12VelocityExtensionStateLayout {
   readonly acceptedVelocityFloatBase: number;
+  readonly characteristicSupportFloatBase: number;
   readonly floatCount: number;
 }
 
@@ -136,9 +137,11 @@ export function createSparseCM12VelocityExtensionStateLayout(options: {
   const base = integer(options.baseFloats, "baseFloats");
   const cellCapacity = integer(options.cellCapacity, "cellCapacity");
   const acceptedVelocityFloatBase = Math.ceil(base / 4) * 4;
+  const characteristicSupportFloatBase = acceptedVelocityFloatBase + 4 * cellCapacity;
   return Object.freeze({
     acceptedVelocityFloatBase,
-    floatCount: acceptedVelocityFloatBase + 4 * cellCapacity,
+    characteristicSupportFloatBase,
+    floatCount: characteristicSupportFloatBase + cellCapacity,
   });
 }
 

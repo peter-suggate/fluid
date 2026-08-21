@@ -1426,6 +1426,8 @@ interface ResidentStateLayout {
   readonly journalLayout: SparseCM12PressureJournalLayout;
   /** VEX1 accepted air-band cache plus prior liquid-interface seed receipts. */
   readonly velocityExtensionAcceptedVelocity: number;
+  /** Persistent swept-characteristic support consumed by SIR1. */
+  readonly transportCharacteristicSupport: number;
   /** QA-only characteristic cache; zero when its compiled arm is absent. */
   readonly faceCharacteristicCache: number;
 }
@@ -1862,6 +1864,7 @@ function residentStateLayout(
     })(),
     faceCharacteristicCache: faceCharacteristicCache ? rows() : 0,
     velocityExtensionAcceptedVelocity: cellVectors(),
+    transportCharacteristicSupport: cells(),
     floatCount: at,
   };
 }
@@ -2419,6 +2422,7 @@ export class WebGPUSparseCM12Resident {
       SparseCM12PersistentPressureCacheLayout,
     private readonly faceProjectionAuthorityLayout:
       SparseCM12FaceProjectionAuthorityLayout,
+    private readonly transportRowAuthorityBaseWords: number,
     facePreparationTileCensusLayout:
       SparseCM12FacePreparationTileCensusLayout | undefined,
     fpaVexReadCensusLayout: SparseCM12FpaVexReadCensusLayout | undefined,
@@ -3044,6 +3048,8 @@ export class WebGPUSparseCM12Resident {
     });
     if (vexActivityBatchLayout.velocityState.acceptedVelocityFloatBase
         !== layout.velocityExtensionAcceptedVelocity
+      || vexActivityBatchLayout.velocityState.characteristicSupportFloatBase
+        !== layout.transportCharacteristicSupport
       || vexActivityBatchLayout.totalStateFloats !== layout.floatCount) {
       throw new Error("VEX1 resident activity/state composition mismatch");
     }
@@ -3145,7 +3151,7 @@ export class WebGPUSparseCM12Resident {
       // carries the pressure epoch's baked effective edge coefficients.
       size: Math.max(4, pressureScratchBytes,
         12 * templates.gammaPairCount,
-        56 * templates.cellCount,
+        112 * templates.cellCount,
         4 * candidateFloatsPerBrick(atlas.brickFineResolution) * packed.candidateBrickCount),
       usage: storage,
     });
@@ -3348,11 +3354,18 @@ export class WebGPUSparseCM12Resident {
     const fpaVexReadCensusWords = fpaVexReadCensusLayout
       ? createSparseCM12FpaVexReadCensusInitialWords(fpaVexReadCensusLayout)
       : undefined;
+    const transportRowAuthorityBaseWords = Math.ceil((fpaVexReadCensusLayout?.totalWords
+      ?? facePreparationTileCensusLayout?.totalWords
+      ?? faceProjectionAuthorityLayout.totalWords) / 64) * 64;
+    const transportRowAuthorityLeafCount = Math.ceil(templates.rowCount / 256);
+    const transportRowAuthorityTotalWords = transportRowAuthorityBaseWords + 8
+      + templates.rowCount + 2 * transportRowAuthorityLeafCount;
+    const gammaPairGenerationBaseWords = transportRowAuthorityTotalWords;
+    const transportAuthorityTotalWords = gammaPairGenerationBaseWords
+      + templates.gammaPairCount;
     const topologyArena = device.createBuffer({
       label: "Sparse CM12 physical topology templates and worklists",
-      size: Math.max(4, fpaVexReadCensusLayout?.totalBytes
-        ?? facePreparationTileCensusLayout?.totalBytes
-        ?? faceProjectionAuthorityLayout.totalBytes),
+      size: Math.max(4, 4 * transportAuthorityTotalWords),
       usage: storage,
     });
     device.queue.writeBuffer(topologyArena, 0, templates.words.buffer as ArrayBuffer,
@@ -3611,6 +3624,8 @@ export class WebGPUSparseCM12Resident {
         transportExperiment,
         { layout: logicalOwnerDirectory.layout, baseWords: logicalOwnerBaseWords,
           packedOwner16BaseWords: logicalOwnerPacked16BaseWords },
+        transportRowAuthorityBaseWords,
+        gammaPairGenerationBaseWords,
       ) });
     const pipelineLayout = device.createPipelineLayout({ label: "Sparse CM12 resident pipeline layout",
       bindGroupLayouts: [bindGroupLayout] });
@@ -3627,6 +3642,7 @@ export class WebGPUSparseCM12Resident {
       "dilateTemporalScalarAtoB", "dilateTemporalScalarBtoA",
       "compactTemporalScalarCells", "compactTemporalScalarRows",
       "finalizeTemporalScalarWorklists",
+      "beginTransportRowAuthority", "finalizeTransportRowAuthority",
       "traceGammaAndBeta", "scatterDensityDeficit",
       "gatherConservativeDensity", "compareSparseCM12MassResult",
       "seedTracers", "advanceTracers",
@@ -3905,6 +3921,7 @@ export class WebGPUSparseCM12Resident {
       pressureTopologyRepairLayout,
       persistentPressureCacheLayout,
       faceProjectionAuthorityLayout,
+      transportRowAuthorityBaseWords,
       facePreparationTileCensusLayout,
       fpaVexReadCensusLayout,
       scalarResultAuthority,
@@ -4077,6 +4094,13 @@ export class WebGPUSparseCM12Resident {
       activePass.dispatchWorkgroupsIndirect(
         this.faceProjectionAuthorityIndirectArguments, 12 * slot,
       );
+    };
+    const dispatchTransportRowAuthority = (name: string) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      // TRA1 reuses only the copy-isolated indirect buffer allocation. Its
+      // membership and storage are independent of FPA and pressure.
+      activePass.dispatchWorkgroupsIndirect(this.faceProjectionAuthorityIndirectArguments, 0);
     };
     const dispatchTemporalCell = (name: string) => {
       const activePass = openPass();
@@ -4303,10 +4327,16 @@ export class WebGPUSparseCM12Resident {
       }
     });
     stage("conservative-transport", () => {
+      dispatch("beginTransportRowAuthority", 1);
       dispatchScalarResult("traceGammaAndBeta", "traceGammaAndBeta");
       dispatchScalarResult("scatterDensityDeficit", "scatterDensityDeficit");
       dispatchScalarResult("gatherConservativeDensity", "gatherConservativeDensity");
+      dispatch("finalizeTransportRowAuthority", 1);
     });
+    closePass();
+    encoder.copyBufferToBuffer(this.topologyArena,
+      4 * (this.transportRowAuthorityBaseWords + 2),
+      this.faceProjectionAuthorityIndirectArguments, 0, 12);
     // After the conservative transport, which leaves both fields the markers
     // need untouched: `gatherConservativeDensity` writes the *destination*
     // density, and nothing between the extrapolation sweeps and the projection
@@ -4335,14 +4365,21 @@ export class WebGPUSparseCM12Resident {
         Math.max(4, 8 * this.templateCellCount));
     }
     stage("gamma-diffusion", () => {
-      dispatchAccepted("scatterGammaSnapshot", "row");
+      // Gamma shares the producer-authored physical scalar characteristic, not
+      // pressure membership. Surface-band cells publish their incidence rows
+      // directly during conservative gather; compact leaf packets therefore
+      // need neither a separate classifier nor an accepted-row scan.
+      // Pressure continues to solve its complete, independently-owned row set.
+      if (legacyGamma) dispatchAccepted("scatterGammaSnapshot", "row");
+      else dispatchTransportRowAuthority("scatterGammaSnapshot");
       dispatchAccepted("finalizeGammaSnapshot", "cell");
       if (legacyGamma) {
         closePass();
         encoder.clearBuffer(this.conditioning, 0,
           Math.max(4, 8 * this.templateCellCount));
       }
-      dispatchAccepted("scatterGammaRefinement", "row");
+      if (legacyGamma) dispatchAccepted("scatterGammaRefinement", "row");
+      else dispatchTransportRowAuthority("scatterGammaRefinement");
       dispatchAccepted("finalizeGammaRefinement", "cell");
     });
     stage("surface-sharpening", () => {
@@ -6177,7 +6214,7 @@ export class WebGPUSparseCM12Resident {
       gammaPairCatalogBytes: 4 * (this.templateWords[24]! - this.templateWords[19]!),
       candidateFaceCatalogBytes: 4 * (this.templateWords[15]! - this.templateWords[24]!),
       acceptedRowMembershipBytes: 4 * this.templateRowCount,
-      massDepartureCacheCapacityBytes: 56 * this.templateCellCount,
+      massDepartureCacheCapacityBytes: 112 * this.templateCellCount,
       pressureHierarchyGroupCount: this.pressureHierarchyGroupCount,
       pressureHierarchyEdgeCount: this.pressureHierarchyEdgeCount,
       pressureFineEdgeCount: this.pressureFineEdgeCount,

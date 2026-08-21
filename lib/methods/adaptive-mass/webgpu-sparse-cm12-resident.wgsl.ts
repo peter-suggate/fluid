@@ -341,6 +341,8 @@ export function createWebgpuSparseCM12ResidentWGSL(
     readonly baseWords: number;
     readonly packedOwner16BaseWords?: number;
   },
+  transportRowAuthorityBaseWords = 0,
+  gammaPairGenerationBaseWords = 0,
 ): string {
   if (presentationPageResolution > brickFineResolution
     || brickFineResolution % presentationPageResolution !== 0) {
@@ -350,6 +352,11 @@ export function createWebgpuSparseCM12ResidentWGSL(
   const candidateCellCount = brickFineResolution ** 3;
   const candidateFaceSampleCount = brickFineResolution ** 2;
   const presentationPagesPerAxis = brickFineResolution / presentationPageResolution;
+  const transportRowCapacity = faceProjectionAuthorityLayout?.rowCapacity ?? 1;
+  const transportRowLeafCount = Math.ceil(transportRowCapacity / 256);
+  const transportRowGenerationBase = transportRowAuthorityBaseWords + 8;
+  const transportRowLeafStampBase = transportRowGenerationBase + transportRowCapacity;
+  const transportRowLeafListBase = transportRowLeafStampBase + transportRowLeafCount;
   // Span-one pages need at most (P/2 + 2)^3 samples: scale one addresses the
   // authority directly, so scale two is the finest cached reconstruction.
   // A finer macro can exceed this bounded cache and takes the direct fallback.
@@ -710,6 +717,16 @@ const EXP_MASS_DEPARTURE_CACHE:bool=${![
     "legacy-owner-hash", "structure-mass-legacy", "structure-cache-legacy",
   ].includes(transportExperiment)
   ? "true" : "false"};
+// TRA1 is a compact, generation-stamped row authority shared by transport
+// producers. Surface-characteristic cells publish their incidence shell;
+// consumers launch one 256-row packet per touched leaf without a row scan.
+const TRA1_HEADER:u32=${transportRowAuthorityBaseWords}u;
+const TRA1_ROW_GENERATION:u32=${transportRowGenerationBase}u;
+const TRA1_LEAF_STAMP:u32=${transportRowLeafStampBase}u;
+const TRA1_LEAF_LIST:u32=${transportRowLeafListBase}u;
+const TRA1_ROW_CAPACITY:u32=${transportRowCapacity}u;
+const TRA1_LEAF_CAPACITY:u32=${transportRowLeafCount}u;
+const GAMMA_PAIR_GENERATION_BASE:u32=${gammaPairGenerationBaseWords}u;
 const ACTIVITY_HEADER_WORDS:u32=28u;
 const ACTIVITY_RECORD_WORDS:u32=39u;
 const ACTIVITY_RECOVERY_LOCK:u32=0x80000000u;
@@ -1448,6 +1465,43 @@ fn traceArrival(position:vec3f)->vec3f{
   return traceCharacteristic(position,1.0${fvrInvalidArgument});}
 
 struct TransportStencil{cells:array<u32,8>,weights:array<f32,8>}
+struct TransportCharacteristic{
+  departure:vec3f,
+  arrival:vec3f,
+  originVelocity:vec3f,
+}
+struct TransportCharacteristicReceipt{
+  characteristic:TransportCharacteristic,
+  departureStencil:TransportStencil,
+  arrivalStencil:TransportStencil,
+  clearance:f32,
+}
+fn traceTransportCharacteristic(position:vec3f${fvrParameter})->TransportCharacteristic{
+  // Departure and arrival share their initial adaptive velocity sample and
+  // substep count. Their midpoint paths then evolve independently, retaining
+  // exactly the same clipped RK2 construction as traceCharacteristic. Calm
+  // one-substep bulk therefore needs three sparse samples rather than four.
+  let initial=sampleVelocity(position${fvrArgument});
+  let substeps=clamp(i32(ceil(length(initial)*p.frame.x)),1,16);
+  let subDt=p.frame.x/f32(substeps);var departure=position;var arrival=position;
+  let lower=vec3f(0.5);let upper=vec3f(p.dimensions.xyz)-vec3f(0.5);
+  for(var step=0;step<substeps;step+=1){
+    var departureFirst=initial;var arrivalFirst=initial;
+    if(step>0){departureFirst=sampleVelocity(departure${fvrArgument});
+      arrivalFirst=sampleVelocity(arrival${fvrArgument});}
+    let departureMidpoint=clipBoundarySegment(departure,
+      clamp(departure-0.5*subDt*departureFirst,lower,upper));
+    let arrivalMidpoint=clipBoundarySegment(arrival,
+      clamp(arrival+0.5*subDt*arrivalFirst,lower,upper));
+    departure=clipBoundarySegment(departure,clamp(departure
+      -subDt*sampleVelocity(departureMidpoint${fvrArgument}),lower,upper));
+    arrival=clipBoundarySegment(arrival,clamp(arrival
+      +subDt*sampleVelocity(arrivalMidpoint${fvrArgument}),lower,upper));
+  }
+  var result:TransportCharacteristic;
+  result.departure=departure;result.arrival=arrival;
+  result.originVelocity=initial;return result;
+}
 
 // Sharpening samples every corner of the same adaptive trilinear stencil.
 // Compute its invariant probe and lattice coordinates once while retaining the
@@ -1486,6 +1540,8 @@ const SIR1_CAUSE_SCALAR:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.scalarWrite}u;
 const SIR1_CAUSE_VELOCITY:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.velocityWrite}u;
 const SIR1_CAUSE_TOPOLOGY:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.topologyWrite}u;
 const SIR1_CAUSE_DEPENDENCY_CLOSURE:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.dependencyClosure}u;
+const TRANSPORT_CHARACTERISTIC_CLEARANCE:u32=${vexActivityBatchLayout
+    ?.velocityState.characteristicSupportFloatBase ?? 0}u;
 const SIR1_TILES_PER_AXIS:u32=BRICK_FINE_RESOLUTION/4u;
 const SIR1_TILES_PER_BRICK:u32=SIR1_TILES_PER_AXIS*SIR1_TILES_PER_AXIS*SIR1_TILES_PER_AXIS;
 fn scaLogicalBrickDimensions()->vec3u{
@@ -1545,6 +1601,55 @@ fn sirMassTileCell(rank:u32,lane:u32)->u32{
   if(any(q>=p.dimensions.xyz)){return INVALID;}
   let cell=ownerCellAt(vec3i(q));if(cell==INVALID){return INVALID;}
   return select(INVALID,cell,all(scaCellBounds(cell)[0]==vec3i(q)));
+}
+
+fn tra1Generation()->u32{return atomicLoad(&topologyArena[TRA1_HEADER]);}
+@compute @workgroup_size(1)
+fn beginTransportRowAuthority(){
+  let generation=max(1u,cm12FCCandidateGeneration());
+  atomicStore(&topologyArena[TRA1_HEADER],generation);
+  atomicStore(&topologyArena[TRA1_HEADER+1u],0u);
+  atomicStore(&topologyArena[TRA1_HEADER+2u],0u);
+  atomicStore(&topologyArena[TRA1_HEADER+3u],1u);
+  atomicStore(&topologyArena[TRA1_HEADER+4u],1u);
+}
+fn tra1MarkRow(row:u32){
+  if(row>=TRA1_ROW_CAPACITY||!rowAccepted(row)){return;}
+  let generation=tra1Generation();
+  if(atomicExchange(&topologyArena[TRA1_ROW_GENERATION+row],generation)
+    ==generation){return;}
+  let leaf=row/256u;
+  if(atomicExchange(&topologyArena[TRA1_LEAF_STAMP+leaf],generation)
+    ==generation){return;}
+  let slot=atomicAdd(&topologyArena[TRA1_HEADER+1u],1u);
+  if(slot<TRA1_LEAF_CAPACITY){atomicStore(&topologyArena[TRA1_LEAF_LIST+slot],leaf);}
+}
+fn tra1MarkScalarCellClosure(cell:u32){
+  if(cell==INVALID){return;}
+  // Gamma conditioning only affects the presented interface when either bank
+  // lies outside the authored deep-liquid band. This physical density
+  // characteristic intentionally omits homogeneous submerged cells; it never
+  // compares scalar representations or borrows pressure membership.
+  var surfaceFeature=hasRigidBodies()||cellOpenFraction(cell)<1.0-1e-6
+    ||state[sourceDensity()+cell]<p.activityDensity.z
+    ||state[destinationDensity()+cell]<p.activityDensity.z;
+  if(!surfaceFeature){return;}
+  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
+    tra1MarkRow(incidenceRow(at));
+  }
+}
+@compute @workgroup_size(1)
+fn finalizeTransportRowAuthority(){
+  let count=atomicLoad(&topologyArena[TRA1_HEADER+1u]);
+  atomicStore(&topologyArena[TRA1_HEADER+2u],min(count,TRA1_LEAF_CAPACITY));
+}
+fn tra1PacketRow(packet:u32,lane:u32,slot:u32)->u32{
+  let count=atomicLoad(&topologyArena[TRA1_HEADER+2u]);
+  if(packet>=count||slot>=4u){return INVALID;}
+  let leaf=atomicLoad(&topologyArena[TRA1_LEAF_LIST+packet]);
+  let row=256u*leaf+64u*slot+lane;
+  return select(INVALID,row,row<TRA1_ROW_CAPACITY
+    &&atomicLoad(&topologyArena[TRA1_ROW_GENERATION+row])==tra1Generation());
 }
 
 @compute @workgroup_size(1)
@@ -1652,31 +1757,22 @@ fn sirExactSweptScalarSupport(cell:u32,phase:u32)->bool{
   // then an invariant for exact rho={0,1}, gamma=1 homogeneous stencils.
   return departureVisible>=0.999999&&arrivalVisible>=0.999999;
 }
-// Persistent interior-liquid certificate. Prior pressure membership proves a
-// complete liquid incidence shell, the characteristic remains inside it, and
-// the final scalar is outside the authored surface band.
+// Persistent interior-liquid certificate. The shared characteristic producer
+// proves that both departure donors and arrival receivers lie wholly inside
+// the authored bulk-liquid band and records a spatial clearance, in fine-cell
+// units, around that support. Absolute speed is irrelevant: a fast steady
+// trace is accepted when its actual swept support is deep. A velocity producer
+// revokes it only when the bounded RK2 trajectory shift consumes that
+// clearance; topology and scalar producers still revoke their closures.
 fn sirFinalPersistentBulk(cell:u32)->bool{
   let rhoAfter=state[destinationDensity()+cell];
   let gammaAfter=state[destinationGamma()+cell];
   if(!cellTransportActive(cell)||hasRigidBodies()
-    ||bitcast<u32>(cellOpenFraction(cell))!=0x3f800000u
-    ||!pressureCellSubmerged(cell)
+    ||cellOpenFraction(cell)<1.0-1e-6
+    ||state[TRANSPORT_CHARACTERISTIC_CLEARANCE+cell]<=0.0
     ||rhoAfter<p.activityDensity.z
     ||abs(gammaAfter-1.0)>p.activityDensity.w){return false;}
-  let velocityAt=destinationCellVelocity()+4u*cell;
-  let previousAt=sourceCellVelocity()+4u*cell;
-  let velocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u]);
-  let previous=vec3f(state[previousAt],state[previousAt+1u],state[previousAt+2u]);
-  let width=cellMinimumWidth(cell);
-  return length(velocity)*p.frame.x<=0.05*width
-    &&length(velocity-previous)*p.frame.x<=0.01*width;
-}
-fn sirPersistentBulkMirrored(cell:u32)->bool{
-  return sirFinalPersistentBulk(cell)
-    &&bitcast<u32>(state[sourceDensity()+cell])
-      ==bitcast<u32>(state[destinationDensity()+cell])
-    &&bitcast<u32>(state[sourceGamma()+cell])
-      ==bitcast<u32>(state[destinationGamma()+cell]);
+  return true;
 }
 fn sirRecordFinalScalarProducer(cell:u32){
   if(sirExactScalarPhase(cell)<=1u){return;}
@@ -1700,11 +1796,12 @@ fn transportBeta(cell:u32)->f32{
 // u32 words hold eight 24-bit IDs, followed by the exact eight f32 weights.
 // The scratch is dead pressure/candidate storage at this point in the frame.
 fn massStencilCacheBase(cell:u32)->u32{return 14u*cell;}
+fn massArrivalStencilCacheBase(cell:u32)->u32{return 14u*(p.counts.x+cell);}
 fn massStencilPackedCell(cell:u32)->u32{
   return select(cell,0x00ffffffu,cell==INVALID);
 }
-fn storeMassDepartureStencil(cell:u32,stencil:TransportStencil){
-  let base=massStencilCacheBase(cell);var ids:array<u32,8>;
+fn storeMassStencil(base:u32,stencil:TransportStencil){
+  var ids:array<u32,8>;
   for(var corner=0u;corner<8u;corner+=1u){
     ids[corner]=massStencilPackedCell(stencil.cells[corner]);
     candidateState[base+6u+corner]=stencil.weights[corner];
@@ -1715,8 +1812,14 @@ fn storeMassDepartureStencil(cell:u32,stencil:TransportStencil){
     candidateState[output+2u]=bitcast<f32>((ids[source+2u]>>16u)|(ids[source+3u]<<8u));
   }
 }
-fn massDepartureStencilCell(cell:u32,corner:u32)->u32{
-  let base=massStencilCacheBase(cell)+3u*(corner/4u);let local=corner&3u;
+fn storeMassDepartureStencil(cell:u32,stencil:TransportStencil){
+  storeMassStencil(massStencilCacheBase(cell),stencil);
+}
+fn storeMassArrivalStencil(cell:u32,stencil:TransportStencil){
+  storeMassStencil(massArrivalStencilCacheBase(cell),stencil);
+}
+fn massStencilCell(baseInput:u32,corner:u32)->u32{
+  let base=baseInput+3u*(corner/4u);let local=corner&3u;
   let a=bitcast<u32>(candidateState[base]);
   let b=bitcast<u32>(candidateState[base+1u]);
   let c=bitcast<u32>(candidateState[base+2u]);var result=0u;
@@ -1726,8 +1829,77 @@ fn massDepartureStencilCell(cell:u32,corner:u32)->u32{
   else{result=(c>>8u)&0x00ffffffu;}
   return select(result,INVALID,result==0x00ffffffu);
 }
+fn massDepartureStencilCell(cell:u32,corner:u32)->u32{
+  return massStencilCell(massStencilCacheBase(cell),corner);
+}
+fn massArrivalStencilCell(cell:u32,corner:u32)->u32{
+  return massStencilCell(massArrivalStencilCacheBase(cell),corner);
+}
 fn massDepartureStencilWeight(cell:u32,corner:u32)->f32{
   return candidateState[massStencilCacheBase(cell)+6u+corner];
+}
+fn massArrivalStencilWeight(cell:u32,corner:u32)->f32{
+  return candidateState[massArrivalStencilCacheBase(cell)+6u+corner];
+}
+fn transportCharacteristicStencilClearance(stencil:TransportStencil)->f32{
+  var visible=0.0;var minimumWidth=1e30;
+  for(var corner=0u;corner<8u;corner+=1u){let weight=stencil.weights[corner];
+    visible+=weight;let cell=stencil.cells[corner];
+    // Include zero-weight corners. They are the immediate support entered by
+    // an arbitrarily small characteristic movement at a lattice plane, so a
+    // weighted-corners-only receipt has no spatial validity radius there.
+    if(cell==INVALID||!cellTransportActive(cell)
+      ||cellOpenFraction(cell)<1.0-1e-6
+      ||state[sourceDensity()+cell]<p.activityDensity.z
+      ||abs(state[sourceGamma()+cell]-1.0)>p.activityDensity.w){return 0.0;}
+    minimumWidth=min(minimumWidth,cellMinimumWidth(cell));
+  }
+  if(visible<0.999999){return 0.0;}
+  // All eight corners are bulk liquid. Retain a small physical movement
+  // budget inside that inspected support: two percent of the narrowest
+  // adaptive cell admits roundoff-scale and quiescent projection updates but
+  // makes an accelerating/deforming characteristic publish fresh work well
+  // before it approaches a different interpolation neighbourhood.
+  return 0.02*minimumWidth;
+}
+fn traceTransportCharacteristicReceipt(position:vec3f${fvrParameter})
+ ->TransportCharacteristicReceipt{
+  var result:TransportCharacteristicReceipt;
+  result.characteristic=traceTransportCharacteristic(position${fvrArgument});
+  result.departureStencil=transportStencil(result.characteristic.departure);
+  result.arrivalStencil=transportStencil(result.characteristic.arrival);
+  let departureClearance=transportCharacteristicStencilClearance(
+    result.departureStencil);
+  let arrivalClearance=transportCharacteristicStencilClearance(
+    result.arrivalStencil);
+  let spatialClearance=min(departureClearance,arrivalClearance);
+  let supportingWidth=spatialClearance/0.02;
+  // A reusable characteristic must be locally translational, not merely wet
+  // at its endpoints. Forward/backward curvature and departure-arrival span
+  // error expose acceleration and velocity gradients without rejecting fast
+  // uniform flow. The tolerance is geometric (0.2% of the actual adaptive
+  // support width), never a comparison of scalar or velocity representations.
+  let curvature=length(result.characteristic.departure
+    +result.characteristic.arrival-2.0*position);
+  let spanError=length((result.characteristic.arrival
+    -result.characteristic.departure)
+    -2.0*p.frame.x*result.characteristic.originVelocity);
+  let locallyTranslational=max(curvature,spanError)<=0.002*supportingWidth;
+  result.clearance=select(0.0,spatialClearance,!hasRigidBodies()
+    &&departureClearance>0.0&&arrivalClearance>0.0&&locallyTranslational);
+  return result;
+}
+fn publishTransportCharacteristicReceipt(cell:u32,
+ receipt:TransportCharacteristicReceipt){
+  state[TRANSPORT_CHARACTERISTIC_CLEARANCE+cell]=receipt.clearance;
+}
+fn transportCharacteristicShiftConsumesReceipt(cell:u32,velocityDelta:vec3f)->bool{
+  let clearance=state[TRANSPORT_CHARACTERISTIC_CLEARANCE+cell];
+  // Both midpoint and final RK2 samples can move when the collocated field
+  // changes. Twice dt*|du| bounds that two-sample trajectory perturbation in
+  // the same finest-cell coordinates used by traceCharacteristic.
+  let shiftBound=2.0*p.frame.x*length(velocityDelta);
+  return clearance<=0.0||shiftBound>=clearance;
 }
 var<workgroup>sirLocalBeta:array<atomic<i32>,64>;
 var<workgroup>sirLocalDensity:array<atomic<i32>,64>;
@@ -1990,11 +2162,21 @@ fn traceGammaAndBeta(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   let id=sirMassTileCell(wid.x,lane);
   if(EXP_MASS_LOCAL_ATOMICS){atomicStore(&sirLocalBeta[lane],0);workgroupBarrier();}
-  if(id!=INVALID){if(!cellTransportActive(id)){state[destinationGamma()+id]=1.0;}
-    else{let b=cellBase(id);
-      let departure=traceDeparture(vec3f(taf(b),taf(b+1u),taf(b+2u))${fvrInvalidArgument});
-      let stencil=transportStencil(departure);
-      if(EXP_MASS_DEPARTURE_CACHE){storeMassDepartureStencil(id,stencil);}
+  if(id!=INVALID){if(!cellTransportActive(id)){state[destinationGamma()+id]=1.0;
+      if(EXP_MASS_SWEPT_CLEAN){state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]=0.0;}}
+    else{let b=cellBase(id);let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
+      var departure=vec3f(0.0);var stencil:TransportStencil;
+      if(EXP_MASS_SWEPT_CLEAN){let receipt=
+        traceTransportCharacteristicReceipt(center${fvrInvalidArgument});
+        departure=receipt.characteristic.departure;
+        stencil=receipt.departureStencil;
+        storeMassArrivalStencil(id,receipt.arrivalStencil);
+        publishTransportCharacteristicReceipt(id,receipt);
+        storeMassDepartureStencil(id,stencil);
+      }else{departure=traceDeparture(center${fvrInvalidArgument});
+        stencil=transportStencil(departure);}
+      if(EXP_MASS_DEPARTURE_CACHE&&!EXP_MASS_SWEPT_CLEAN){
+        storeMassDepartureStencil(id,stencil);}
       var visible=0.0;var sampledGamma=0.0;
       for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];let weight=stencil.weights[corner];
         visible+=weight;if(cell!=INVALID){sampledGamma+=weight*state[sourceGamma()+cell];}}
@@ -2028,14 +2210,20 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
   if(donor!=INVALID&&cellTransportActive(donor)){
     let deficit=max(0.0,1.0-transportBeta(donor));
     if(deficit>1.0/CM12_TRANSPORT_FIXED){let b=cellBase(donor);
-      let arrival=traceArrival(vec3f(taf(b),taf(b+1u),taf(b+2u)));
-      let stencil=transportStencil(arrival);
-      var visible=0.0;for(var corner=0u;corner<8u;corner+=1u){visible+=stencil.weights[corner];}
+      var visible=0.0;var arrivalStencil:TransportStencil;
+      if(EXP_MASS_SWEPT_CLEAN){for(var corner=0u;corner<8u;corner+=1u){
+        visible+=massArrivalStencilWeight(donor,corner);}}
+      else{let arrival=traceArrival(vec3f(taf(b),taf(b+1u),taf(b+2u)));
+        arrivalStencil=transportStencil(arrival);
+        for(var corner=0u;corner<8u;corner+=1u){visible+=arrivalStencil.weights[corner];}}
       if(visible<=1e-9){sirAccumulateDeficit(wid.x,donor,i32(round(
           state[sourceDensity()+donor]*deficit*CM12_TRANSPORT_FIXED)),i32(round(
           state[sourceGamma()+donor]*deficit*CM12_TRANSPORT_FIXED)));
       }else{for(var corner=0u;corner<8u;corner+=1u){
-        let cell=stencil.cells[corner];let weight=stencil.weights[corner];
+        var cell=INVALID;var weight=0.0;
+        if(EXP_MASS_SWEPT_CLEAN){cell=massArrivalStencilCell(donor,corner);
+          weight=massArrivalStencilWeight(donor,corner);
+        }else{cell=arrivalStencil.cells[corner];weight=arrivalStencil.weights[corner];}
         if(cell==INVALID||weight<=0.0){continue;}let normalized=weight/visible;
         let densityTransfer=cm12VolumeScaledDeficitTransfer(state[sourceDensity()+donor],
           cellVolume(donor),cellVolume(cell),deficit,normalized);
@@ -2101,6 +2289,7 @@ fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
   let densityChanged=bitcast<u32>(nextDensity)!=bitcast<u32>(state[sourceDensity()+id]);
   state[destinationDensity()+id]=nextDensity;
   state[destinationGamma()+id]=max(0.0,gammaNext);
+  if(EXP_GAMMA_PAIR_CATALOG){tra1MarkScalarCellClosure(id);}
   if(densityChanged){cm12ResidentRecordExtensionIncidence(id,4u);}
 }
 
@@ -2109,8 +2298,12 @@ fn compareSparseCM12MassResult(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   let cell=sirMassTileCell(wid.x,lane);var covered=0u;var mismatch0=0u;
   var mismatch1=0u;var dependencyMismatch=0u;
-  if(cell!=INVALID){let phase=sirExactScalarPhase(cell);covered=4u;
-    let persistentBulk=EXP_MASS_SWEPT_CLEAN&&sirPersistentBulkMirrored(cell);
+  if(cell!=INVALID){var phase=2u;covered=4u;
+    // The physical receipt is authoritative for persistent bulk. Exact phase
+    // algebra remains only as the pre-existing fallback for dry/interface
+    // cells; it is not consulted to qualify this optimization.
+    let persistentBulk=EXP_MASS_SWEPT_CLEAN&&sirFinalPersistentBulk(cell);
+    if(!persistentBulk){phase=sirExactScalarPhase(cell);}
     mismatch0=select(0u,1u,phase>1u&&!persistentBulk);mismatch1=mismatch0;
     let dependencyExact=sirExactScalarDependency(cell,phase)
       ||persistentBulk
@@ -2203,15 +2396,15 @@ fn advanceTracers(@builtin(global_invocation_id)gid:vec3u){
 fn gammaPairGeneration()->u32{
   // A topology generation can remain unchanged across many frames, and a
   // candidate generation may be visible before it becomes accepted. Stamp the
-  // row-owned receipts with the frame epoch instead: otherwise a pair belonging
+  // row-owned receipts with the frame-control epoch instead: otherwise a pair belonging
   // to a row removed by an 8->4 commit can look current on the first frame that
   // consumes the mixed topology and be gathered a second time.
-  return max(1u,atomicLoad(&activity[0]));
+  return max(1u,cm12FCCandidateGeneration());
 }
 fn writeGammaPair(pair:u32,rho:i32,gamma:i32){
   candidateState[3u*pair]=bitcast<f32>(rho);
   candidateState[3u*pair+1u]=bitcast<f32>(gamma);
-  candidateState[3u*pair+2u]=bitcast<f32>(gammaPairGeneration());
+  atomicStore(&topologyArena[GAMMA_PAIR_GENERATION_BASE+pair],gammaPairGeneration());
 }
 fn scatterGammaRow(row:u32,inputRho:u32,inputGamma:u32){
   if(!EXP_GAMMA_PAIR_CATALOG){
@@ -2279,10 +2472,14 @@ fn scatterGammaRow(row:u32,inputRho:u32,inputGamma:u32){
 }
 
 @compute @workgroup_size(64)
-fn scatterGammaSnapshot(@builtin(global_invocation_id)gid:vec3u){
-  let row=acceptedTemplateRowInvocation(gid.x);if(row!=INVALID){
-    scatterGammaRow(row,destinationDensity(),destinationGamma());
-  }
+fn scatterGammaSnapshot(@builtin(global_invocation_id)gid:vec3u,
+ @builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  if(EXP_GAMMA_PAIR_CATALOG){for(var slot=0u;slot<4u;slot+=1u){
+    let row=tra1PacketRow(wid.x,lane,slot);if(row!=INVALID){
+      scatterGammaRow(row,destinationDensity(),destinationGamma());}
+  }}else{let row=acceptedTemplateRowInvocation(gid.x);if(row!=INVALID){
+    scatterGammaRow(row,destinationDensity(),destinationGamma());}}
 }
 
 fn finalizeGammaCell(cell:u32,inputRho:u32,inputGamma:u32,
@@ -2301,7 +2498,7 @@ fn finalizeGammaCell(cell:u32,inputRho:u32,inputGamma:u32,
     let generation=gammaPairGeneration();
     for(var at=gammaCellPairBegin(cell);at<gammaCellPairEnd(cell);at+=1u){
       let incidence=gammaCellPairIncidence(at);let pair=incidence&0x7fffffffu;
-      if(bitcast<u32>(candidateState[3u*pair+2u])!=generation){continue;}
+      if(atomicLoad(&topologyArena[GAMMA_PAIR_GENERATION_BASE+pair])!=generation){continue;}
       let rho=bitcast<u32>(candidateState[3u*pair]);
       let gamma=bitcast<u32>(candidateState[3u*pair+1u]);
       if((incidence&0x80000000u)==0u){rhoBits+=rho;gammaBits+=gamma;}
@@ -2326,10 +2523,14 @@ fn finalizeGammaSnapshot(@builtin(global_invocation_id)gid:vec3u){
 }
 
 @compute @workgroup_size(64)
-fn scatterGammaRefinement(@builtin(global_invocation_id)gid:vec3u){
-  let row=acceptedTemplateRowInvocation(gid.x);if(row!=INVALID){
-    scatterGammaRow(row,p.stateOffsets2.x,p.stateOffsets2.y);
-  }
+fn scatterGammaRefinement(@builtin(global_invocation_id)gid:vec3u,
+ @builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  if(EXP_GAMMA_PAIR_CATALOG){for(var slot=0u;slot<4u;slot+=1u){
+    let row=tra1PacketRow(wid.x,lane,slot);if(row!=INVALID){
+      scatterGammaRow(row,p.stateOffsets2.x,p.stateOffsets2.y);}
+  }}else{let row=acceptedTemplateRowInvocation(gid.x);if(row!=INVALID){
+    scatterGammaRow(row,p.stateOffsets2.x,p.stateOffsets2.y);}}
 }
 
 @compute @workgroup_size(64)
@@ -3952,13 +4153,13 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
     }
   }
   for(var axis=0u;axis<3u;axis+=1u){if(weight[axis]>0.0){velocity[axis]/=weight[axis];}}
-  let velocityChanged=any(bitcast<vec3u>(velocity)!=bitcast<vec3u>(previousVelocity));
+  let velocityDelta=velocity-previousVelocity;
+  let velocityChanged=length(velocityDelta)>0.0;
   if(velocityChanged){
     incrementalActivityMarkCellClosure(id,
       ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
-    let width=cellMinimumWidth(id);
-    if(EXP_MASS_SWEPT_CLEAN&&(length(velocity)*p.frame.x>0.05*width
-      ||length(velocity-previousVelocity)*p.frame.x>0.01*width)){
+    if(EXP_MASS_SWEPT_CLEAN
+      &&transportCharacteristicShiftConsumesReceipt(id,velocityDelta)){
       scaInvalidateCellClosure(id,cm12FCCandidateGeneration()+1u,SIR1_CAUSE_VELOCITY);
     }
   }
@@ -4044,13 +4245,13 @@ fn commitVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
   let next=vec3f(bitcast<f32>(atomicLoad(&conditioning[cell])),
     bitcast<f32>(atomicLoad(&conditioning[p.counts.x+cell])),
     bitcast<f32>(atomicLoad(&conditioning[2u*p.counts.x+cell])));
-  if(any(bitcast<vec3u>(previous)!=bitcast<vec3u>(next))){
+  let velocityDelta=next-previous;
+  if(length(velocityDelta)>0.0){
     incrementalActivityMarkCellClosure(cell,
       ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
     cm12ResidentRecordExtensionIncidence(cell,2u);
-    let width=cellMinimumWidth(cell);
-    if(EXP_MASS_SWEPT_CLEAN&&(length(next)*p.frame.x>0.05*width
-      ||length(next-previous)*p.frame.x>0.01*width)){
+    if(EXP_MASS_SWEPT_CLEAN
+      &&transportCharacteristicShiftConsumesReceipt(cell,velocityDelta)){
       scaInvalidateCellClosure(cell,cm12FCCandidateGeneration()+1u,SIR1_CAUSE_VELOCITY);
     }
   }
