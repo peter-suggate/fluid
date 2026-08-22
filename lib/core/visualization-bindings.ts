@@ -33,7 +33,15 @@ export type VisualizationBindingKind =
   | "texture-3d-uint"
   | "texture-depth-2d";
 
-export interface VisualizationBinding {
+/**
+ * `Resource` is the set of keys this binding may name.
+ *
+ * `string` for a field program, whose publications are a hand-kept bundle. A
+ * stage lens narrows it to a union of exactly the publications and tap
+ * snapshots that lens declares, which is what turns a mistyped resource key
+ * from a magenta frame into a `tsc` error.
+ */
+export interface VisualizationBinding<Resource extends string = string> {
   /** WGSL identifier the shader body refers to. */
   readonly name: string;
   readonly kind: VisualizationBindingKind;
@@ -43,7 +51,7 @@ export interface VisualizationBinding {
    * Key the host resolves to a `GPUBindingResource`. Named rather than passed
    * positionally so a reordered declaration cannot silently rebind a buffer.
    */
-  readonly resource: string;
+  readonly resource: Resource;
 }
 
 /**

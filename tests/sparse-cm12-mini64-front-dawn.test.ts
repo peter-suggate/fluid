@@ -11,8 +11,6 @@ import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 import { SPARSE_CM12_ACTIVITY_POLICY } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
-import type { SparseCM12TransportExperiment } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
@@ -160,8 +158,6 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
 
       device.pushErrorScope("validation");
       const scene = createMinimalPowerDamBreak64Scene();
-      const structureExperiment = process.env.FLUID_SPARSE_CM12_STRUCTURE_EXPERIMENT as
-        Exclude<SparseCM12TransportExperiment, "baseline"> | undefined;
       const createSolver = (resolutionMode: "adaptive" | "all-fine") => {
         const args = [device!, scene, "balanced", undefined, {
           resolutionMode,
@@ -177,10 +173,7 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
           },
           timeStep: "paper",
         }, () => {}] as const;
-        return structureExperiment
-          ? WebGPUAdaptiveMassSolver.createTransportExperimentForQA(
-            structureExperiment, ...args)
-          : WebGPUAdaptiveMassSolver.createAsync(...args);
+        return WebGPUAdaptiveMassSolver.createAsync(...args);
       };
       const adaptive = await createSolver("adaptive");
       const allFine = await createSolver("all-fine");
@@ -229,6 +222,19 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
           ]);
           const activity = await adaptive.readGPUActivityPolicy();
           const stats = await adaptive.readStats();
+          if (process.env.FLUID_SPARSE_CM12_CANDIDATE_EFFECTS_QA === "1") {
+            const [adaptiveTransaction, allFineTransaction, adaptiveVex, allFineVex,
+              adaptiveFrame, allFineFrame] = await Promise.all([
+              adaptive.readCandidateEffectsTransactionQA(),
+              allFine.readCandidateEffectsTransactionQA(),
+              adaptive.readVelocityExtensionHeaderQA(),
+              allFine.readVelocityExtensionHeaderQA(),
+              adaptive.readFrameControlQA(), allFine.readFrameControlQA(),
+            ]);
+            process.stderr.write(`[mini64-front] ${JSON.stringify({ step,
+              adaptiveTransaction, allFineTransaction, adaptiveVex, allFineVex,
+              adaptiveFrame, allFineFrame })}\n`);
+          }
           assertTwoToOne(activity.bricks, "acceptedResolution");
           assertTwoToOne(activity.bricks, "candidateResolution");
           assertSubmergedCandidatesAreCoarsest(activity.bricks);
@@ -268,7 +274,9 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
           `the physical front must cross two dry brick columns; measured x=${final.adaptive.front.surface}`);
         assert.ok(trajectory.every((sample) =>
           Math.abs(sample.adaptive.front.surface - sample.allFine.front.surface) <= 1),
-        "adaptive/all-fine surface fronts must agree within one fine cell at every frame");
+        `adaptive/all-fine surface fronts must agree within one fine cell at every frame: ${
+          trajectory.map((sample) => `${sample.step}:${sample.adaptive.front.surface}/${
+            sample.allFine.front.surface}`).join(",")}`);
         assert.ok(trajectory.every((sample) =>
           Math.abs(sample.adaptive.front.liquid - sample.allFine.front.liquid) <= 1),
         "adaptive/all-fine liquid fronts must agree within one fine cell at every frame");

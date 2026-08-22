@@ -1026,6 +1026,8 @@ export function WebGPUViewport() {
       onGPUInfo: (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
       onGPUPressureJournal: (journal) =>
         useDiagnosticsStore.getState().set({ pressureJournal: journal ?? null }),
+      onGPUStageLens: (receipt, layers) => useDiagnosticsStore.getState()
+        .set({ stageLensReceipt: receipt ?? null, stageLensLayers: layers }),
       onGPUAdvanceCompleted: (time_s) => simulation.gpuAdvanceCompleted(time_s),
       onEffectiveRendererStatus: (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus }),
     });
@@ -1174,7 +1176,7 @@ export function WebGPUViewport() {
           metrics = renderer.draw(
             simulation.time(), presentationScene, ui.camera, state.bodies, ui.selectedBodyId,
             { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method), simulationEpoch: runtime.simulationEpoch },
-            { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
+            { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode, lensPhase: ui.gridOverlayLensPhase },
             scenePreset.background,
             scenePreset.id === sceneState.presetId ? scenePreset.presentationMode : "full-scene",
             {

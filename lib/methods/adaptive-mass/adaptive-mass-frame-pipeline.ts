@@ -14,6 +14,7 @@ import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import { formatSparseCM12PressureCutoverAuthorities } from
   "./sparse-cm12-pressure-cutover-observability";
 import {
+  SPARSE_CM12_RESIDENT_STAGES,
   SPARSE_CM12_ACTIVITY_POLICY,
   SPARSE_CM12_PRESSURE_ITERATIONS,
   SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
@@ -21,6 +22,9 @@ import {
   SPARSE_CM12_SHARPENING_TRACE_STEPS,
   type SparseCM12ResidentStageId,
   type SparseCM12ResidentStageSeams,
+  type SparseCM12ResidentWorkChunk,
+  type SparseCM12CandidateTransferTimestampScope,
+  type SparseCM12TransportTimestampScope,
 } from "./webgpu-sparse-cm12-resident";
 
 /** The capture cadence matches the uniform reference's observatory lane. */
@@ -47,7 +51,7 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   },
   velocityExtension: {
     id: "velocity-extrapolation",
-    label: "Transport velocity extension into the sparse air band",
+    label: "SRR1 copied-event reset + receipt batch begin",
   },
   faceTopology: {
     id: "power-topology",
@@ -56,6 +60,42 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   coupledTransport: {
     id: "fine-sdf-advection",
     label: "Coupled conservative mass + gamma + momentum transport",
+  },
+  frameControlAuthority: {
+    id: "velocity-extrapolation",
+    label: "Frame-control authority + moving-solid roots",
+  },
+  velocityExtensionExecution: {
+    id: "velocity-extrapolation",
+    label: "VEX1 initialization + eight recurrence sweeps + commit",
+  },
+  scalarResultPlanning: {
+    id: "velocity-extrapolation",
+    label: "SRR1 scalar-result event planning",
+  },
+  packetAuthorityConstruction: {
+    id: "velocity-extrapolation",
+    label: "AEI packet-authority construction",
+  },
+  transportAuthoritySetup: {
+    id: "fine-sdf-advection",
+    label: "CM12 transport authority setup",
+  },
+  transportTrace: {
+    id: "fine-sdf-advection",
+    label: "CM12 transport trace + sharpening catalog publication",
+  },
+  transportScatter: {
+    id: "fine-sdf-advection",
+    label: "CM12 transport deficit scatter",
+  },
+  transportGather: {
+    id: "fine-sdf-advection",
+    label: "CM12 transport conservative gather",
+  },
+  producerMaskCompilation: {
+    id: "fine-sdf-advection",
+    label: "AEI producer-mask seal + compilation",
   },
   tracerAdvection: {
     id: "other",
@@ -67,7 +107,47 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   },
   surfaceConditioning: {
     id: "fine-sdf-redistance",
-    label: "CM12 surface sharpening + gamma conditioning",
+    label: "Surface-conditioning stage boundary remainder",
+  },
+  sharpeningReceiptSetup: {
+    id: "fine-sdf-redistance",
+    label: "Temporal reset + sharpening receipt/indirect setup",
+  },
+  sharpeningPrepare: {
+    id: "fine-sdf-redistance",
+    label: "Sharpening incidence statistics + dose preparation",
+  },
+  sharpeningScatter: {
+    id: "fine-sdf-redistance",
+    label: "Sharpening TEI trace + fixed-point mass scatter",
+  },
+  sharpeningFinalize: {
+    id: "fine-sdf-redistance",
+    label: "Sharpening scalar finalization + dependency publication",
+  },
+  solidExcessRepair: {
+    id: "fine-sdf-redistance",
+    label: "Cut-cell solid-excess redistribution",
+  },
+  temporalScalarClassify: {
+    id: "fine-sdf-redistance",
+    label: "Temporal scalar frontier classification",
+  },
+  temporalScalarDilate: {
+    id: "fine-sdf-redistance",
+    label: "Temporal scalar frontier two-ring dilation",
+  },
+  temporalScalarCompact: {
+    id: "fine-sdf-redistance",
+    label: "Temporal scalar cell + row compaction",
+  },
+  scalarResultCompare: {
+    id: "fine-sdf-redistance",
+    label: "SRR1 final scalar-result comparison",
+  },
+  scalarResultPublish: {
+    id: "fine-sdf-redistance",
+    label: "SRR1 receipt publication + temporal indirect copies",
   },
   symmetryAuthority: {
     id: "other",
@@ -109,6 +189,62 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
     id: "power-topology",
     label: "Budgeted shadow-topology preparation + conservative transfer",
   },
+  candidateFieldTransfer: {
+    id: "power-topology",
+    label: "Candidate scalar + momentum field transfer",
+  },
+  candidateFaceReconstruction: {
+    id: "power-topology",
+    label: "Candidate exterior-face reconstruction",
+  },
+  candidateFaceValidation: {
+    id: "power-topology",
+    label: "Candidate shadow-face validation",
+  },
+  candidateEffectsPreflight: {
+    id: "power-topology",
+    label: "Candidate effects census + preflight",
+  },
+  candidateIboConstruction: {
+    id: "power-topology",
+    label: "Candidate IBO delta construction",
+  },
+  candidateIboValidation: {
+    id: "power-topology",
+    label: "Candidate independent IBO semantic validation",
+  },
+  candidateTeiCompilation: {
+    id: "power-topology",
+    label: "Candidate TEI delta compilation",
+  },
+  candidateAuthorization: {
+    id: "power-topology",
+    label: "Candidate transaction authorization",
+  },
+  candidateScaPublication: {
+    id: "power-topology",
+    label: "Candidate SCA effects publication",
+  },
+  candidatePtrPublication: {
+    id: "power-topology",
+    label: "Candidate PTR effects publication",
+  },
+  candidateVexPublication: {
+    id: "power-topology",
+    label: "Candidate VEX effects publication",
+  },
+  candidateEffectsSeal: {
+    id: "power-topology",
+    label: "Candidate effects receipt seal",
+  },
+  candidateStatePublication: {
+    id: "power-topology",
+    label: "Candidate fields + membership publication",
+  },
+  candidateImageReplay: {
+    id: "power-topology",
+    label: "Candidate retired-image replay",
+  },
   retentionConditioning: {
     id: "adaptive-publication",
     label: "Dry-brick retirement + retained-atlas conditioning",
@@ -126,6 +262,57 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
     label: "GPU-resident frame queue completion",
   },
 } satisfies Record<string, GPUTimestampPhase>);
+
+const ADAPTIVE_MASS_TRANSPORT_SUBSCOPE_PHASE: Readonly<Record<
+  SparseCM12TransportTimestampScope,
+  GPUTimestampPhase
+>> = Object.freeze({
+  "transport-authority-setup": ADAPTIVE_MASS_ADVANCE_PHASE.transportAuthoritySetup,
+  "transport-trace": ADAPTIVE_MASS_ADVANCE_PHASE.transportTrace,
+  "transport-scatter": ADAPTIVE_MASS_ADVANCE_PHASE.transportScatter,
+  "transport-gather": ADAPTIVE_MASS_ADVANCE_PHASE.transportGather,
+  "producer-mask-compilation": ADAPTIVE_MASS_ADVANCE_PHASE.producerMaskCompilation,
+});
+
+const ADAPTIVE_MASS_RESIDENT_WORK_CHUNK_PHASE: Readonly<Record<
+  SparseCM12ResidentWorkChunk,
+  GPUTimestampPhase
+>> = Object.freeze({
+  "frame-control-authority": ADAPTIVE_MASS_ADVANCE_PHASE.frameControlAuthority,
+  "velocity-extension-execution": ADAPTIVE_MASS_ADVANCE_PHASE.velocityExtensionExecution,
+  "scalar-result-planning": ADAPTIVE_MASS_ADVANCE_PHASE.scalarResultPlanning,
+  "transport-packet-authority": ADAPTIVE_MASS_ADVANCE_PHASE.packetAuthorityConstruction,
+  "sharpening-receipt-setup": ADAPTIVE_MASS_ADVANCE_PHASE.sharpeningReceiptSetup,
+  "sharpening-prepare": ADAPTIVE_MASS_ADVANCE_PHASE.sharpeningPrepare,
+  "sharpening-scatter": ADAPTIVE_MASS_ADVANCE_PHASE.sharpeningScatter,
+  "sharpening-finalize": ADAPTIVE_MASS_ADVANCE_PHASE.sharpeningFinalize,
+  "solid-excess-repair": ADAPTIVE_MASS_ADVANCE_PHASE.solidExcessRepair,
+  "temporal-scalar-classify": ADAPTIVE_MASS_ADVANCE_PHASE.temporalScalarClassify,
+  "temporal-scalar-dilate": ADAPTIVE_MASS_ADVANCE_PHASE.temporalScalarDilate,
+  "temporal-scalar-compact": ADAPTIVE_MASS_ADVANCE_PHASE.temporalScalarCompact,
+  "scalar-result-compare": ADAPTIVE_MASS_ADVANCE_PHASE.scalarResultCompare,
+  "scalar-result-publish": ADAPTIVE_MASS_ADVANCE_PHASE.scalarResultPublish,
+});
+
+const ADAPTIVE_MASS_CANDIDATE_TRANSFER_SUBSCOPE_PHASE: Readonly<Record<
+  SparseCM12CandidateTransferTimestampScope,
+  GPUTimestampPhase
+>> = Object.freeze({
+  "candidate-field-transfer": ADAPTIVE_MASS_ADVANCE_PHASE.candidateFieldTransfer,
+  "candidate-face-reconstruction": ADAPTIVE_MASS_ADVANCE_PHASE.candidateFaceReconstruction,
+  "candidate-face-validation": ADAPTIVE_MASS_ADVANCE_PHASE.candidateFaceValidation,
+  "candidate-effects-preflight": ADAPTIVE_MASS_ADVANCE_PHASE.candidateEffectsPreflight,
+  "candidate-ibo-construction": ADAPTIVE_MASS_ADVANCE_PHASE.candidateIboConstruction,
+  "candidate-ibo-validation": ADAPTIVE_MASS_ADVANCE_PHASE.candidateIboValidation,
+  "candidate-tei-compilation": ADAPTIVE_MASS_ADVANCE_PHASE.candidateTeiCompilation,
+  "candidate-authorization": ADAPTIVE_MASS_ADVANCE_PHASE.candidateAuthorization,
+  "candidate-sca-publication": ADAPTIVE_MASS_ADVANCE_PHASE.candidateScaPublication,
+  "candidate-ptr-publication": ADAPTIVE_MASS_ADVANCE_PHASE.candidatePtrPublication,
+  "candidate-vex-publication": ADAPTIVE_MASS_ADVANCE_PHASE.candidateVexPublication,
+  "candidate-effects-seal": ADAPTIVE_MASS_ADVANCE_PHASE.candidateEffectsSeal,
+  "candidate-state-publication": ADAPTIVE_MASS_ADVANCE_PHASE.candidateStatePublication,
+  "candidate-image-replay": ADAPTIVE_MASS_ADVANCE_PHASE.candidateImageReplay,
+});
 
 /**
  * Resident stage id to trace phase. Exhaustive by type: a stage added to the
@@ -154,6 +341,98 @@ export const ADAPTIVE_MASS_RESIDENT_STAGE_PHASE: Readonly<Record<
   "brick-retirement": ADAPTIVE_MASS_ADVANCE_PHASE.retentionConditioning,
   "presentation-publication": ADAPTIVE_MASS_ADVANCE_PHASE.materialization,
 });
+
+export interface AdaptiveMassGPUWorkChunk {
+  readonly id: string;
+  readonly residentStage: SparseCM12ResidentStageId;
+  readonly rollupStage: string;
+  readonly phase: GPUTimestampPhase;
+  readonly kind: "stage" | "substage";
+}
+
+const RESIDENT_WORK_CHUNK_OWNER: Readonly<Record<
+  SparseCM12ResidentWorkChunk,
+  SparseCM12ResidentStageId
+>> = Object.freeze({
+  "frame-control-authority": "transport-velocity-extension",
+  "velocity-extension-execution": "transport-velocity-extension",
+  "scalar-result-planning": "transport-velocity-extension",
+  "transport-packet-authority": "transport-velocity-extension",
+  "sharpening-receipt-setup": "surface-sharpening",
+  "sharpening-prepare": "surface-sharpening",
+  "sharpening-scatter": "surface-sharpening",
+  "sharpening-finalize": "surface-sharpening",
+  "solid-excess-repair": "surface-sharpening",
+  "temporal-scalar-classify": "surface-sharpening",
+  "temporal-scalar-dilate": "surface-sharpening",
+  "temporal-scalar-compact": "surface-sharpening",
+  "scalar-result-compare": "surface-sharpening",
+  "scalar-result-publish": "surface-sharpening",
+});
+
+const splitStage = (stage: SparseCM12ResidentStageId): boolean =>
+  stage === "transport-velocity-extension" || stage === "conservative-transport"
+  || stage === "surface-sharpening" || stage === "candidate-transfer";
+
+const RESIDENT_STAGE_ROLLUP: Readonly<Record<SparseCM12ResidentStageId, string>> =
+  Object.freeze({
+    "transport-velocity-extension": "transport-velocity-extension",
+    "face-preparation": "receiver-topology",
+    "conservative-transport": "scalar-transport",
+    "tracer-advection": "fluid-tracers",
+    "gamma-diffusion": "gamma-diffusion",
+    "surface-sharpening": "surface-conditioning",
+    "symmetry-authority": "symmetry-authority",
+    "body-forces": "body-forces",
+    "pressure-topology": "pressure-topology",
+    "pressure-rhs": "pressure-rhs",
+    "pressure-solve": "pressure-solve",
+    "velocity-projection": "pressure-projection",
+    "projection-diagnostics": "projection-receipts",
+    "activity-measurement": "activity-measurement",
+    "resolution-planning": "resolution-planning",
+    "candidate-transfer": "candidate-transfer",
+    "brick-retirement": "retention-conditioning",
+    "presentation-publication": "presentation-publication",
+  });
+
+/**
+ * Exact ownership of every GPU timestamp phase. Rollups may sum these records,
+ * but no phase appears twice and shared diagram nodes do not fabricate chunks.
+ */
+export const ADAPTIVE_MASS_GPU_WORK_CHUNKS: readonly AdaptiveMassGPUWorkChunk[] =
+  Object.freeze([
+    ...SPARSE_CM12_RESIDENT_STAGES.map((stage) => ({
+      id: splitStage(stage) ? `${stage}/remainder` : stage,
+      residentStage: stage,
+      rollupStage: RESIDENT_STAGE_ROLLUP[stage],
+      phase: ADAPTIVE_MASS_RESIDENT_STAGE_PHASE[stage],
+      kind: "stage" as const,
+    })),
+    ...Object.entries(ADAPTIVE_MASS_RESIDENT_WORK_CHUNK_PHASE).map(([id, phase]) => ({
+      id: `${RESIDENT_WORK_CHUNK_OWNER[id as SparseCM12ResidentWorkChunk]}/${id}`,
+      residentStage: RESIDENT_WORK_CHUNK_OWNER[id as SparseCM12ResidentWorkChunk],
+      rollupStage: RESIDENT_STAGE_ROLLUP[
+        RESIDENT_WORK_CHUNK_OWNER[id as SparseCM12ResidentWorkChunk]],
+      phase,
+      kind: "substage" as const,
+    })),
+    ...Object.entries(ADAPTIVE_MASS_TRANSPORT_SUBSCOPE_PHASE).map(([id, phase]) => ({
+      id: `conservative-transport/${id}`,
+      residentStage: "conservative-transport" as const,
+      rollupStage: "scalar-transport",
+      phase,
+      kind: "substage" as const,
+    })),
+    ...Object.entries(ADAPTIVE_MASS_CANDIDATE_TRANSFER_SUBSCOPE_PHASE)
+      .map(([id, phase]) => ({
+        id: `candidate-transfer/${id}`,
+        residentStage: "candidate-transfer" as const,
+        rollupStage: "candidate-transfer",
+        phase,
+        kind: "substage" as const,
+      })),
+  ]);
 
 /** Pressure repair consumes the topology accepted before this advance. The
  * topology committed at the end of this advance is intentionally a separate
@@ -272,6 +551,21 @@ export class AdaptiveMassFrameCapture {
         this.gpu?.completePhase(this.encoder, phase);
       }
     },
+    closeWorkChunk: (chunk) => {
+      const phase = ADAPTIVE_MASS_RESIDENT_WORK_CHUNK_PHASE[chunk];
+      this.cpu.completePhase(phase);
+      if (this.encoder) this.gpu?.completePhase(this.encoder, phase);
+    },
+    closeTransportSubscope: (scope) => {
+      const phase = ADAPTIVE_MASS_TRANSPORT_SUBSCOPE_PHASE[scope];
+      this.cpu.completePhase(phase);
+      if (this.encoder) this.gpu?.completePhase(this.encoder, phase);
+    },
+    closeCandidateTransferSubscope: (scope) => {
+      const phase = ADAPTIVE_MASS_CANDIDATE_TRANSFER_SUBSCOPE_PHASE[scope];
+      this.cpu.completePhase(phase);
+      if (this.encoder) this.gpu?.completePhase(this.encoder, phase);
+    },
     anchorFinalBoundary: (source, offset) => {
       this.gpu?.anchorFinalBoundary(source, offset);
     },
@@ -341,7 +635,13 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
   stage({
     id: "transport-velocity-extension", band: "transport", side: "left",
     label: "Velocity extension",
-    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.velocityExtension.label],
+    phaseLabels: [
+      ADAPTIVE_MASS_ADVANCE_PHASE.velocityExtension.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.frameControlAuthority.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.velocityExtensionExecution.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.scalarResultPlanning.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.packetAuthorityConstruction.label,
+    ],
     tip: {
       summary: "Seeds the transport velocity from the projected liquid field and extends it outward through eight alternating source/destination sweeps, so a semi-Lagrangian trace that leaves the liquid still lands on a defined velocity.",
       reads: "projected collocated velocity, density",
@@ -367,7 +667,14 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
   stage({
     id: "scalar-transport", band: "transport", side: "left",
     label: "Mass + gamma transport",
-    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.coupledTransport.label],
+    phaseLabels: [
+      ADAPTIVE_MASS_ADVANCE_PHASE.coupledTransport.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.transportAuthoritySetup.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.transportTrace.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.transportScatter.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.transportGather.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.producerMaskCompilation.label,
+    ],
     tip: {
       summary: "Moves density integral and gamma integral through the same oriented composite face fluxes, with exact donor/receiver cancellation across 2:1 seams.",
       reads: "density, gamma, face velocity",
@@ -416,7 +723,19 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
   stage({
     id: "surface-conditioning", band: "transport", side: "right",
     label: "Surface conditioning",
-    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.surfaceConditioning.label],
+    phaseLabels: [
+      ADAPTIVE_MASS_ADVANCE_PHASE.surfaceConditioning.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.sharpeningReceiptSetup.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.sharpeningPrepare.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.sharpeningScatter.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.sharpeningFinalize.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.solidExcessRepair.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.temporalScalarClassify.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.temporalScalarDilate.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.temporalScalarCompact.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.scalarResultCompare.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.scalarResultPublish.label,
+    ],
     tip: {
       summary: "Applies the shared CM12 surface-conditioning transaction on compact resident leaves before activity is measured. Sec. 3.5's density correction and Algorithm 2's local mass return are one dispatch pair here rather than the uniform lane's two separable stages, so both trace controls live on this stage.",
       reads: "transported density and gamma",
@@ -626,7 +945,23 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
   stage({
     id: "candidate-transfer", band: "adaptivity", side: "left",
     label: "Candidate transfer",
-    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.candidateTransfer.label],
+    phaseLabels: [
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateTransfer.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateFieldTransfer.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateFaceReconstruction.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateFaceValidation.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateEffectsPreflight.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateIboConstruction.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateIboValidation.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateTeiCompilation.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateAuthorization.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateScaPublication.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidatePtrPublication.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateVexPublication.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateEffectsSeal.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateStatePublication.label,
+      ADAPTIVE_MASS_ADVANCE_PHASE.candidateImageReplay.label,
+    ],
     tip: {
       summary: "The urgent lane prepares surface and thin-fluid promotions first; a persistent GPU cursor visits ordinary split/merge requests round-robin under the per-frame budget. Density, gamma, momentum and face flux transfer into double-buffered shadow slots before one atomic physical generation flip. That end-frame flip is input to the next advance's pressure repair, never the pressure-topology timestamp earlier in this advance.",
       reads: "urgent and ordinary GPU queues, candidate levels, accepted cell and face state",

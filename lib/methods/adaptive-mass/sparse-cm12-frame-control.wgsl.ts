@@ -19,6 +19,9 @@ export interface SparseCM12FrameControlWGSLOptions {
   readonly layout: SparseCM12FrameControlLayout;
   /** Existing `array<atomic<u32>>` storage binding. */
   readonly controlName?: string;
+  /** Candidate-only post-transaction D4 seam. No FCA bytes are reserved when
+   * omitted, and the baseline WGSL/host layout remains unchanged. */
+  readonly authorizedD4Invalidation?: boolean;
 }
 
 const identifier = (value: string, label: string): string => {
@@ -39,6 +42,27 @@ export function createSparseCM12FrameControlWGSL(
   const h = (word: number) => `${l.baseWords + word}u`;
   const f = (family: number) => `${l.baseWords + SPARSE_CM12_FRAME_CONTROL_HEADER_WORDS
     + SPARSE_CM12_FRAME_CONTROL_INDIRECT_WORDS * family}u`;
+  const authorizedD4Invalidation = options.authorizedD4Invalidation ? /* wgsl */ `
+// VDA1 calls this only after its topology success latch matches the accepted
+// generation. Every fallible phase/generation check happened in preflight.
+// This function intentionally has no fault, retry, or capacity path.
+fn cm12FCInvalidateD4Authorized(cause:u32,owner:u32,generation:u32,sealed:bool){
+  cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.d4Generation)},generation);
+  cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.scalarD4Authority)},0u);
+  cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.faceD4Authority)},0u);
+  cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.d4InvalidationCause)},cause);
+  cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.d4InvalidationOwner)},owner);
+  atomicOr(&${control}[${h(SPARSE_CM12_FRAME_CONTROL_HEADER.coverage)}],
+    ${SPARSE_CM12_FRAME_CONTROL_COVERAGE.scalarD4
+      | SPARSE_CM12_FRAME_CONTROL_COVERAGE.faceD4}u);
+  if(sealed){
+    cm12FCSetTriplet(${SPARSE_CM12_FRAME_CONTROL_FAMILY.scalarD4Work}u,0u);
+    cm12FCSetTriplet(${SPARSE_CM12_FRAME_CONTROL_FAMILY.scalarD4Bypass}u,1u);
+    cm12FCSetTriplet(${SPARSE_CM12_FRAME_CONTROL_FAMILY.faceD4Work}u,0u);
+    cm12FCSetTriplet(${SPARSE_CM12_FRAME_CONTROL_FAMILY.faceD4Bypass}u,1u);
+  }
+}
+` : "";
   return /* wgsl */ `
 const cm12FCMagic:u32=0x${SPARSE_CM12_FRAME_CONTROL_MAGIC.toString(16)}u;
 const cm12FCVersion:u32=${SPARSE_CM12_FRAME_CONTROL_VERSION}u;
@@ -162,6 +186,21 @@ fn cm12FCCandidateGeneration()->u32{
 }
 fn cm12FCFrameSealed()->bool{
   return cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.phase)})==cm12FCPhaseSealed;
+}
+// Candidate effects are authorized either at the sealed tail of a physics
+// frame or between frames while the last frame is accepted.  Record the exact
+// generation belonging to that phase in VDA1; accepting any other phase would
+// make a later no-fail D4 publication ambiguous.
+fn cm12FCEffectsPhaseValid()->bool{
+  if(!cm12FCHeaderValid()){return false;}
+  let phase=cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.phase)});
+  return phase==cm12FCPhaseAccepted||phase==cm12FCPhaseSealed;
+}
+fn cm12FCEffectsGeneration()->u32{
+  let phase=cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.phase)});
+  return select(cm12FCCandidateGeneration(),
+    cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.acceptedGeneration)}),
+    phase==cm12FCPhaseAccepted);
 }
 
 fn cm12FCPublishBody(bodyCount:u32)->bool{
@@ -330,5 +369,6 @@ fn cm12FCSourceScalarParity()->u32{return cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTR
 fn cm12FCDestinationScalarParity()->u32{return cm12FCSourceScalarParity()^1u;}
 fn cm12FCSourceFaceParity()->u32{return cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.faceParity)});}
 fn cm12FCDestinationFaceParity()->u32{return cm12FCSourceFaceParity()^1u;}
+${authorizedD4Invalidation}
 `;
 }

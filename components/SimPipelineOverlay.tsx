@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { stageLensOverlayMode, type AnyStageLens } from "../lib/core/stage-lens";
 import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
 import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
 import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import { useSceneStore } from "../lib/core/stores/scene-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import {
   averagePerformanceTraces,
@@ -158,7 +160,10 @@ function NumericsSection() {
  * the frame graph, and it survives the merge as a field rather than as a second
  * diagram.
  */
-export function SimPipelineOverlay() {
+export function SimPipelineOverlay({ lenses: override }: {
+  /** Overrides the running method's own roster. For tests and previews. */
+  readonly lenses?: readonly AnyStageLens[];
+}) {
   const methodId = useMethodStore((state) => state.methodId);
   const quality = useMethodStore((state) => state.quality);
   const overrides = useMethodStore((state) => state.overrides);
@@ -166,8 +171,16 @@ export function SimPipelineOverlay() {
   const bodyCount = useDiagnosticsStore((state) => state.bodies.length);
   const scene = useSceneStore((state) => state.scene);
   const running = useRuntimeStore((state) => state.runState === "running");
+  const overlayMode = useUIStore((state) => state.gridOverlayMode);
+  const overlayAxis = useUIStore((state) => state.gridOverlayAxis);
+  const setOverlayMode = useUIStore((state) => state.setGridOverlayMode);
+  const setOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
 
   const method = getMethod(methodId);
+  // Declared on the method rather than fetched from the solver, so a row knows
+  // it has a lens before a device exists.
+  const lensByStage = new Map((override ?? method.stageLenses ?? [])
+    .map((lens) => [lens.stage, lens]));
   const values = useMemo(
     () => resolvedMethodValues({ methodId, quality, overrides }),
     [methodId, quality, overrides]);
@@ -269,6 +282,16 @@ export function SimPipelineOverlay() {
       checked ? stage.toggle.on : stage.toggle.off);
   };
 
+  // The timing row *is* the partition, so the lens opens from the row that
+  // prices the stage rather than from a list somewhere else that would have to
+  // be read against this one. A lens is a slice view like any other, so an
+  // overlay that is off adopts a plane the way the field picker does.
+  const openLens = (stageId: string, open: boolean) => {
+    if (!open) { setOverlayAxis("off"); return; }
+    setOverlayMode(stageLensOverlayMode(stageId));
+    if (overlayAxis === "off") setOverlayAxis("y");
+  };
+
   // The method's declared graph, resolved into the shared diagram's view model.
   // Computed per render rather than memoized: every input is already a render
   // input, and a memo keyed on a closure over `toggleStage` would have to list
@@ -293,6 +316,9 @@ export function SimPipelineOverlay() {
           const statusLabel = toggleable
             ? state === "on" ? "encoding" : state === "off" ? "configured off" : "not applicable to this scene"
             : "always encoded";
+          const lens = lensByStage.get(stage.id);
+          const lensOpen = Boolean(lens)
+            && overlayAxis !== "off" && overlayMode === stageLensOverlayMode(stage.id);
           return {
             id: stage.id,
             label: stage.label,
@@ -317,6 +343,12 @@ export function SimPipelineOverlay() {
                 : `Always encoded · fixed pipeline stage\n\n${tip}`,
               onToggle: toggleable ? () => toggleStage(stage.id, state !== "on") : undefined,
             },
+            tap: lens ? {
+              label: "◎",
+              title: `Draw what this stage did, phase by phase, on the slice.\n\n${lens.description}`,
+              active: lensOpen,
+              onToggle: () => openLens(stage.id, !lensOpen),
+            } : undefined,
             controls: controls[stage.id],
           };
         }),

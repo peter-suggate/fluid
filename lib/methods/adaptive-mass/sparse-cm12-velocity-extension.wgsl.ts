@@ -25,6 +25,8 @@ export interface SparseCM12VelocityExtensionWGSLOptions {
   readonly nextFrameGenerationExpression?: string;
   /** True only after FCA1 has sealed the frame authority and dispatches. */
   readonly frameAuthorityReadyExpression?: string;
+  /** Candidate transaction phase required before injection may reopen VEX. */
+  readonly injectionReopenReadyExpression?: string;
   /**
    * Optional resident provenance bridge. When supplied it must define:
    * `<prefix>VelocityExtensionRoot(cell,cause,generation)->bool`,
@@ -37,6 +39,12 @@ export interface SparseCM12VelocityExtensionWGSLOptions {
    * VEX1 itself remains independent of the resident's tile-addressing ABI.
    */
   readonly provenanceHookPrefix?: string;
+  /**
+   * Optional persistent effective-velocity publication hook. When supplied it
+   * must define `<prefix>PublishVexAcceptedEffectiveVelocity(cell, value)`.
+   * The hook runs only after a fault-free blast cell has been accepted.
+   */
+  readonly effectiveVelocityHookPrefix?: string;
 }
 
 const identifier = (value: string, label: string): string => {
@@ -64,8 +72,12 @@ export function createSparseCM12VelocityExtensionWGSL(
   const nextFrameGeneration = options.nextFrameGenerationExpression
     ?? `${sourceFrameGeneration}+1u`;
   const frameAuthorityReady = options.frameAuthorityReadyExpression ?? "true";
+  const injectionReopenReady = options.injectionReopenReadyExpression ?? "true";
   const hook = options.provenanceHookPrefix
     ? identifier(options.provenanceHookPrefix, "provenanceHookPrefix") : undefined;
+  const effectiveVelocityHook = options.effectiveVelocityHookPrefix
+    ? identifier(options.effectiveVelocityHookPrefix,
+      "effectiveVelocityHookPrefix") : undefined;
   const hookFault = hook ? `${hook}VelocityExtensionFault(cell,depth);` : "";
   const hookRoot = hook
     ? `if(!${hook}VelocityExtensionRoot(cell,cause,generation)){cm12ExtensionFail(cell,0u);return false;}`
@@ -75,6 +87,9 @@ export function createSparseCM12VelocityExtensionWGSL(
     : "";
   const hookScheduled = hook
     ? `if(!${hook}VelocityExtensionScheduled(cell,cm12ExtensionLoad(cm12ExtensionBlastDepth+cell),cm12ExtensionGeneration())){cm12ExtensionStore(cm12ExtensionCandidateDepth+cell,1u);cm12ExtensionFail(cell,cm12ExtensionLoad(cm12ExtensionBlastDepth+cell));return;}`
+    : "";
+  const publishEffectiveVelocity = effectiveVelocityHook
+    ? `${effectiveVelocityHook}PublishVexAcceptedEffectiveVelocity(cell,vec4f(\n    ${state}[output],${state}[output+1u],${state}[output+2u],${state}[output+3u]));`
     : "";
   const h = (word: number) => `${layout.headerBaseWords + word}u`;
   return /* wgsl */ `
@@ -248,7 +263,8 @@ fn beginVelocityExtensionCandidate(){
 // an exact replacement before FPL is rebuilt.
 @compute @workgroup_size(1)
 fn reopenVelocityExtensionPlanForInjection(){
-  if(!cm12ExtensionHeaderValid()||cm12ExtensionFaulted()){return;}
+  if(!(${injectionReopenReady})||!cm12ExtensionHeaderValid()
+    ||cm12ExtensionFaulted()){return;}
   let flags=cm12ExtensionLoad(${h(SPARSE_CM12_VELOCITY_EXTENSION_HEADER.flags)});
   let accepted=cm12ExtensionAcceptedGeneration();
   let candidate=cm12ExtensionGeneration();
@@ -657,6 +673,7 @@ fn commitVelocityExtensionCandidates(@builtin(global_invocation_id)gid:vec3u){
   cm12ExtensionStore(cm12ExtensionAcceptedDepth+cell,
     select(cm12ExtensionInvalid,cm12ExtensionLoad(cm12ExtensionCandidateDepth+cell),valid));
   cm12ExtensionStore(cm12ExtensionAcceptedOwner+cell,cm12ExtensionOwner(cell));
+  ${publishEffectiveVelocity}
   atomicAdd(&${arena}[${h(SPARSE_CM12_VELOCITY_EXTENSION_HEADER.executedCellCount)}],1u);
 }
 

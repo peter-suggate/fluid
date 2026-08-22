@@ -5,6 +5,8 @@ import type { EffectiveRendererStatus } from "../renderer-status";
 import type { GPUEulerianInfo } from "../webgpu-eulerian";
 import type { SparseCM12PressureJournal } from
   "../../methods/adaptive-mass/sparse-cm12-pressure-journal";
+import type { StageLensReceipt } from "../stage-lens";
+import type { StageLensLayerReport } from "../webgpu-stage-lens-overlay";
 import type { RigidBodyState, RigidStepDiagnostics } from "../rigid-body";
 import type { GPURigidBodyPose } from "../webgpu-rigid-body";
 import type { CouplingDiagnostics } from "../fluid-rigid-coupling";
@@ -83,6 +85,18 @@ interface DiagnosticsStore {
    * armed it yet.
    */
   pressureJournal: SparseCM12PressureJournal | null;
+  /**
+   * The armed stage lens's counters, as of the frame that just drew.
+   *
+   * Unlike the film above this refreshes while the run moves, because a lens
+   * reads a stage of the advance that is happening — pausing it would answer a
+   * different question. Null whenever no lens is open, and set to null the
+   * moment one closes: a receipt left behind by a view nobody is looking at
+   * would describe a frame that no longer exists.
+   */
+  stageLensReceipt: StageLensReceipt | null;
+  /** What the lens's layers actually drew, including any instance decimation. */
+  stageLensLayers: readonly StageLensLayerReport[];
   effectiveRendererStatus: EffectiveRendererStatus;
   waterSurfacePresentation: WaterSurfacePresentationDiagnostics | null;
   frameMs: number;
@@ -128,6 +142,8 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   resourceReadiness: initialResourceReadiness(),
   gpuInfo: null,
   pressureJournal: null,
+  stageLensReceipt: null,
+  stageLensLayers: [],
   effectiveRendererStatus: {
     state: "pending",
     failureReason: "missing-source",

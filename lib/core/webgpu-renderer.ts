@@ -38,6 +38,12 @@ import {
   PressureJournalOverlay,
   type PressureJournalOverlayMode,
 } from "./webgpu-pressure-journal-overlay";
+import {
+  isStageLensOverlayMode,
+  type StageLensOverlayMode,
+  type StageLensReceipt,
+} from "./stage-lens";
+import { StageLensOverlay, type StageLensLayerReport } from "./webgpu-stage-lens-overlay";
 import { TracerOverlay } from "./webgpu-tracer-overlay";
 import { VISUALIZATION_CATALOG } from "./visualization-catalog";
 import { assembleDecorations } from "./visualization-registry";
@@ -231,13 +237,16 @@ export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, n
  * textures in the overlay shader — no readback is involved.
  */
 export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation" | "density" | "tracers" | "face-velocity"
-  | PressureJournalOverlayMode | OctreeTechniqueOverlayMode | SparseCM12DirtyOverlayMode;
+  | PressureJournalOverlayMode | OctreeTechniqueOverlayMode | SparseCM12DirtyOverlayMode
+  | StageLensOverlayMode;
 
 export interface GridOverlayConfig {
   /** Slice axes, or a ray-integrated diagnostic through the complete volume. */
   axis: "off" | "z" | "x" | "y" | "volume";
   position: number;
   mode?: GridOverlayMode;
+  /** Scrubber position within the selected lens's phases. */
+  lensPhase?: number;
 }
 
 export type OptionalRendererPipeline =
@@ -251,6 +260,7 @@ export type OptionalRendererPipeline =
   | "tracer-overlay"
   | "face-velocity-overlay"
   | "pressure-journal-overlay"
+  | "stage-lens"
   | "svo-stage-overlay";
 
 /**
@@ -360,6 +370,9 @@ export function optionalRendererPipelineRequests(
     else if (gridOverlay.mode === "face-velocity") requested.push("face-velocity-overlay");
     else if (isPressureJournalOverlayMode(gridOverlay.mode)) {
       requested.push("pressure-journal-overlay");
+    }
+    else if (gridOverlay.mode && isStageLensOverlayMode(gridOverlay.mode)) {
+      requested.push("stage-lens");
     }
     else if (!technique) requested.push("grid-overlay");
     else requested.push("technique-overlay", "technique-audit-overlay");
@@ -819,6 +832,7 @@ export class FluidLabRenderer {
   private tracerOverlayPipeline?: TracerOverlay;
   private faceVelocityOverlayPipeline?: FaceVelocityOverlay;
   private pressureJournalOverlayPipeline?: PressureJournalOverlay;
+  private stageLensOverlayPipeline?: StageLensOverlay;
   private fluidCellTracePipeline?: WebGPUFluidCellTrace;
   private svoStageOverlay?: SparseVoxelRenderStageOverlay;
   private latestFluidCellTraceValue?: FluidCellTrace;
@@ -884,6 +898,12 @@ export class FluidLabRenderer {
   private adapterName = "WebGPU adapter";
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
   private gpuPressureJournalCallback?: (journal: SparseCM12PressureJournal | undefined) => void;
+  private gpuStageLensCallback?: (
+    receipt: StageLensReceipt | undefined,
+    layers: readonly StageLensLayerReport[],
+  ) => void;
+  /** Lens the last published receipt described, so the clearing post fires once. */
+  private publishedStageLens?: string;
   private gpuRigidLoadCallback?: (loads: GPURigidLoad[]) => void;
   private gpuAdvanceCompletedCallback?: (time_s: number) => void;
   private effectiveRendererStatusCallback?: (status: EffectiveRendererStatus) => void;
@@ -974,7 +994,7 @@ export class FluidLabRenderer {
 
   get presentationRevision(): number { return this.pausedPresentationRevision; }
 
-  constructor(private readonly canvas: HTMLCanvasElement | OffscreenCanvas, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void, onGPUPressureJournal?: (journal: SparseCM12PressureJournal | undefined) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuPressureJournalCallback = onGPUPressureJournal; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; }
+  constructor(private readonly canvas: HTMLCanvasElement | OffscreenCanvas, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void, onGPUPressureJournal?: (journal: SparseCM12PressureJournal | undefined) => void, onGPUStageLens?: (receipt: StageLensReceipt | undefined, layers: readonly StageLensLayerReport[]) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuPressureJournalCallback = onGPUPressureJournal; this.gpuStageLensCallback = onGPUStageLens; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; }
 
   setViewportSize(width: number, height: number, devicePixelRatio = 1): void {
     this.workerViewport = {
@@ -1260,6 +1280,16 @@ export class FluidLabRenderer {
       (pipeline) => {
         this.pressureJournalOverlayPipeline = pipeline;
         pipeline.setSource(this.gpuFluid?.pressureJournalSource);
+      },
+      (pipeline) => pipeline.destroy(),
+    );
+    if (wants.has("stage-lens")) this.ensureOptionalPipeline(
+      "stage-lens", this.stageLensOverlayPipeline,
+      (device) => new StageLensOverlay(device, this.format!),
+      (pipeline) => pipeline.initialize(),
+      (pipeline) => {
+        this.stageLensOverlayPipeline = pipeline;
+        pipeline.setSource(this.gpuFluid?.stageLensSource);
       },
       (pipeline) => pipeline.destroy(),
     );
@@ -1730,7 +1760,7 @@ export class FluidLabRenderer {
     // guards hold until initialize() completes on the replacement device.
     this.device = undefined; this.context = undefined;
     this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
-    this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined; this.tracerOverlayPipeline = undefined; this.faceVelocityOverlayPipeline = undefined; this.pressureJournalOverlayPipeline = undefined; this.svoStageOverlay = undefined;
+    this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined; this.tracerOverlayPipeline = undefined; this.faceVelocityOverlayPipeline = undefined; this.pressureJournalOverlayPipeline = undefined; this.stageLensOverlayPipeline = undefined; this.svoStageOverlay = undefined;
     this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.optionalPipelineFailures.clear(); this.svoDrySceneSource = undefined; this.svoSceneSidecar = undefined; this.svoDrySceneData = undefined; this.liveSceneAnimation = undefined; this.liveSceneAnimationFailure = undefined; this.renderSceneKey = ""; this.renderSceneStamp = 0; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingLiveSvoPresentation = undefined;
     this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoPublicationFailure = undefined; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
@@ -1994,6 +2024,36 @@ export class FluidLabRenderer {
     }
     const submittedTime_s = this.gpuFluid?.info.submittedTime_s;
     return submittedTime_s;
+  }
+
+  /**
+   * Hand the panel this frame's lens receipt, or empty it.
+   *
+   * Every armed frame rather than at a pause, unlike the film: these counters
+   * describe the advance that just ran and a lens is watched while the run
+   * moves, so the pause boundary the film needs would be the one moment the
+   * numbers are least interesting. Nothing here maps a buffer — the receipt is
+   * whatever the source already read back.
+   *
+   * The clearing post is what the tracking field exists for. Without it the
+   * panel would go on showing the last armed frame after the view closed, and a
+   * frozen receipt beside an empty viewport is the one reading that is never
+   * true of anything.
+   */
+  private publishStageLensReceipt(lensId: string | undefined): void {
+    const callback = this.gpuStageLensCallback;
+    if (!callback) return;
+    if (!lensId) {
+      if (this.publishedStageLens === undefined) return;
+      this.publishedStageLens = undefined;
+      callback(undefined, []);
+      return;
+    }
+    this.publishedStageLens = lensId;
+    callback(
+      this.gpuFluid?.stageLensSource?.receipt(lensId),
+      this.stageLensOverlayPipeline?.report ?? [],
+    );
   }
 
   /** Clear presentation samples whenever their semantic identity changes. */
@@ -2854,6 +2914,17 @@ export class FluidLabRenderer {
       this.pressureJournalOverlayPipeline?.setSource(
         this.gpuFluid?.pressureJournalSource);
     }
+    // A lens is the film's bargain again — its taps encode nothing until one is
+    // armed — but the arming belongs to `select`. The overlay is the only thing
+    // that knows which lens is current, so a second caller arming the source
+    // behind it would leave the two disagreeing about whose snapshots are in
+    // the buffers. The source is offered every frame because a rebuilt solver
+    // publishes a new one and the overlay ignores a repeat.
+    const lensMode = gridOverlay?.mode && isStageLensOverlayMode(gridOverlay.mode)
+      ? gridOverlay.mode : undefined;
+    const lensVisible = gridOverlay?.axis !== "off" && lensMode !== undefined;
+    this.stageLensOverlayPipeline?.setSource(this.gpuFluid?.stageLensSource);
+    this.stageLensOverlayPipeline?.select(lensVisible ? lensMode : undefined);
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, cameraChanging ? SVO_CAMERA_CHANGING_FRAME : -1,
       // cameraPosition.w is the aperture, tan(fov/2). It was padding until the
@@ -3258,6 +3329,29 @@ export class FluidLabRenderer {
           channel: pressureJournalOverlayChannel(journalMode, 1),
         });
       }
+      else if(lensVisible&&lensMode){
+        // The one inspection view whose slider keeps its plain meaning: a lens
+        // is authored for the slice plane, so `position` places the plane
+        // rather than dimming a cloud, and the scrub it needs instead is the
+        // phase. No scene depth either — glyphs read over the frame, because a
+        // row occluded by the water is the row a projection view is about.
+        this.stageLensOverlayPipeline?.encode(encoder,overlayView,{
+          camera: {
+            position_m: [basis.position.x, basis.position.y, basis.position.z],
+            forward: [basis.forward.x, basis.forward.y, basis.forward.z],
+            right: [basis.right.x, basis.right.y, basis.right.z],
+            up: [basis.up.x, basis.up.y, basis.up.z],
+            tanHalfFov: cameraTanHalfFov(camera),
+            aspect: viewportAspect(this.presentationTexture.width, this.presentationTexture.height),
+          },
+          viewportWidth: this.presentationTexture.width,
+          viewportHeight: this.presentationTexture.height,
+          container_m: [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
+          axis: gridOverlay.axis,
+          position: gridOverlay.position,
+          phase: gridOverlay.lensPhase ?? 0,
+        });
+      }
       else if(!techniqueModeCode)this.gridOverlayPipeline?.encode(encoder,overlayView);
       else{
         this.techniqueOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);
@@ -3265,6 +3359,7 @@ export class FluidLabRenderer {
       }
       inspectionOverlayEncoded = true;
     }
+    this.publishStageLensReceipt(lensVisible ? lensMode : undefined);
     if (pixelTraceRequested && pixelTrace && !inspectionWithheld) {
       // The probe re-traces the requested pixel against the topology this frame
       // just drew from, and the overlay draws the trace decoded from the last
@@ -3425,6 +3520,7 @@ export class FluidLabRenderer {
     try { this.tracerOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.faceVelocityOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.pressureJournalOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
+    try { this.stageLensOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.svoDryScenePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseStaging.map((slot) => slot.buffer)]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }

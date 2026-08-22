@@ -20,8 +20,6 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createWebgpuSparseCM12ResidentWGSL } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
-import type { SparseCM12TransportExperiment } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
 import { createSparseCM12IncrementalActivityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-incremental-activity";
 import { createSparseCM12CanonicalMembershipLayout } from
@@ -48,23 +46,17 @@ import { createSparseCM12FaceProjectionAuthorityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-face-projection-authority";
 import { createSparseCM12VexActivityBatchLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-vex-activity-batch";
+import type { SparseCM12InternedBoundaryLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
+import type { SparseCM12InternedRefLookupLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-interned-ref-lookup";
+import { createSparseCM12TransportProducerMaskLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-transport-producer-masks";
+import { SPARSE_CM12_LENSES } from
+  "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
+import { stageLensProgramWGSL } from "../lib/core/webgpu-stage-lens-overlay";
 
 const staticConcurrencyCheck = process.argv.includes("--static-concurrency-check");
-const productionOnly = process.argv.includes("--production-only");
-const transportExperiment = (process.argv.find((argument) =>
-  argument.startsWith("--transport-experiment="))?.split("=")[1]
-  ?? "baseline") as SparseCM12TransportExperiment;
-const transportExperiments = new Set<SparseCM12TransportExperiment>([
-  "baseline", "legacy-owner-hash", "logical-owner-directory",
-  "logical-owner-mass-rung", "face-characteristic-cache", "face-row-packets",
-  "face-direct-preparation",
-  "structure-gamma-legacy", "structure-mass-legacy", "structure-cache-legacy",
-  "mass-rung-packets", "mass-local-atomics", "mass-swept-clean",
-  "face-packets-cache", "mass-rung-local", "face-packets-mass-rung", "all-valid",
-]);
-if (!transportExperiments.has(transportExperiment)) {
-  throw new Error(`unknown transport experiment ${transportExperiment}`);
-}
 if (staticConcurrencyCheck) {
   const source = await readFile(fileURLToPath(import.meta.url), "utf8");
   const fanout = /\bPromise\.(?:all|allSettled|any|race)\s*\(/;
@@ -136,9 +128,7 @@ async function main(): Promise<void> {
     const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
     let compiledEntryPoints = 0;
     const variants: readonly (readonly [4 | 8 | 16, 4 | 8 | 16])[] =
-      transportExperiment !== "baseline" ? [[16, 16]] : productionOnly
-      ? [[4, 4], [8, 8], [16, 16]]
-      : [[4, 4], [8, 4], [8, 8], [16, 4], [16, 8], [16, 16]];
+      [[4, 4], [8, 8], [16, 16]];
     for (const [brickFineResolution, presentationPageResolution] of variants) {
       const variant = `B${brickFineResolution}/P${presentationPageResolution}`;
       const temporal = { headerBaseWords: 64,
@@ -212,6 +202,33 @@ async function main(): Promise<void> {
           stateTailFloats: 65536,
           cellCapacity: 1024,
         }) : undefined;
+      const iboLayout: SparseCM12InternedBoundaryLayout = {
+        leafCapacity: 8, canonicalCapacity: 24, templateCount: 8,
+        templatePayloadWords: 256, canonicalBaseWords: 64,
+        templateDirectoryBaseWords: 448, templatePayloadBaseWords: 512,
+        immutableWords: 1024, immutableBytes: 4096,
+        slotBaseWords: [1024, 2048], slotLeafBaseWords: [1088, 2112],
+        slotRefBaseWords: [1280, 2304], wordsPerSlot: 1024,
+        bytesPerSlot: 4096, totalWords: 3072, totalBytes: 12288,
+      };
+      const refLookupLayout: SparseCM12InternedRefLookupLayout = {
+        baseWords: 768, canonicalCapacity: 24, sideDirectoryCount: 144,
+        directoryBaseWords: 768, templateDirectoryBaseWords: 840,
+        entryBaseWords: 844, templateCount: 4, templateEntryCount: 8,
+        entryCount: 32, fallbackAnchorBaseWords: 860, fallbackAnchorCount: 24,
+        levelsPerLeaf: 3,
+        maximumEntriesPerSide: 3, totalWords: 1024, totalBytes: 1024,
+      };
+      const internedBoundaryImage = { layout: iboLayout, refLookupLayout, baseWords: 131072,
+          semanticAuthority: {
+            geometryBaseWords: 135168, geometryOffsetBaseWords: 8,
+            geometryNeighborBaseWords: 17, authorityBaseWords: 135424,
+            leafCapacity: 8, immutableContentHash: 1,
+            immutableCertificateHash: 1,
+          } };
+      const transportProducerMasks = createSparseCM12TransportProducerMaskLayout({
+        baseWords: 120000, packetCapacity: 512,
+      });
       const source = createWebgpuSparseCM12ResidentWGSL(
         brickFineResolution,
         presentationPageResolution,
@@ -222,7 +239,9 @@ async function main(): Promise<void> {
         faceProjectionAuthority,
         vexActivityBatch,
         undefined, undefined, undefined, undefined, false,
-        transportExperiment,
+        undefined, 0, 0, 0, 1, 0, undefined, undefined, undefined,
+        transportProducerMasks,
+        undefined, undefined, internedBoundaryImage,
       );
       const shaderModule = device.createShaderModule({
         label: `Sparse CM12 resident WGSL check ${variant}`,
@@ -317,9 +336,34 @@ async function main(): Promise<void> {
     }
     compiledEntryPoints += plannerEntries.length;
 
+    // Lens programs, composed exactly as the overlay composes them. Naga
+    // already parses these; Dawn is what the browser actually runs, and the
+    // failures the two disagree about — a struct a publication declares twice,
+    // a binding the preamble numbers past the backend's ceiling — are the ones
+    // that would otherwise first appear when a user opens the flyout.
+    let compiledLensPrograms = 0;
+    for (const lens of SPARSE_CM12_LENSES) {
+      for (const program of Object.keys(lens.programs)) {
+        const name = `${lens.id}#${program}`;
+        const lensModule = device.createShaderModule({
+          label: `Sparse CM12 lens WGSL check ${name}`,
+          code: stageLensProgramWGSL(lens, program),
+        });
+        const lensInfo = await lensModule.getCompilationInfo();
+        const lensErrors = lensInfo.messages.filter((message) => message.type === "error");
+        if (lensErrors.length > 0) {
+          for (const error of lensErrors) {
+            console.error(`${name} ${error.lineNum}:${error.linePos} ${error.message}`);
+          }
+          throw new Error(`${name}: ${lensErrors.length} WGSL compilation error(s)`);
+        }
+        compiledLensPrograms += 1;
+      }
+    }
+
     const scope = await device.popErrorScope();
     if (scope) throw new Error(`validation error: ${scope.message}`);
-    console.log(`Sparse CM12 resident WGSL (${transportExperiment}): ${compiledEntryPoints} entry points compiled across ${variants.length} B/P variants`);
+    console.log(`Sparse CM12 compiled-transport WGSL: ${compiledEntryPoints} entry points compiled across ${variants.length} B/P variants, ${compiledLensPrograms} stage-lens programs`);
   } finally {
     if (device) {
       try { await device.queue.onSubmittedWorkDone(); } catch { /* Device fault already reported. */ }

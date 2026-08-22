@@ -14,6 +14,9 @@ export const SPARSE_CM12_VEX_ACTIVITY_BATCH_WGSL_HOOK_ABI = Object.freeze({
     "cm12BatchVelocityExtensionOwner(u32)->u32",
     "cm12BatchVelocityExtensionFault(u32,u32)",
   ]),
+  effectiveVelocity: Object.freeze([
+    "cm12BatchPublishVexAcceptedEffectiveVelocity(u32,vec4f)",
+  ]),
 } as const);
 
 export interface SparseCM12VexActivityBatchWGSLOptions {
@@ -24,7 +27,9 @@ export interface SparseCM12VexActivityBatchWGSLOptions {
   readonly sourceFrameGenerationExpression?: string;
   readonly nextFrameGenerationExpression?: string;
   readonly frameAuthorityReadyExpression?: string;
+  readonly injectionReopenReadyExpression?: string;
   readonly provenanceHookPrefix?: string;
+  readonly effectiveVelocityHookPrefix?: string;
 }
 
 /** Append after resident helper declarations and before shader compilation. */
@@ -40,7 +45,9 @@ export function createSparseCM12VexActivityBatchWGSL(
     sourceFrameGenerationExpression: options.sourceFrameGenerationExpression,
     nextFrameGenerationExpression: options.nextFrameGenerationExpression,
     frameAuthorityReadyExpression: options.frameAuthorityReadyExpression,
+    injectionReopenReadyExpression: options.injectionReopenReadyExpression,
     provenanceHookPrefix: options.provenanceHookPrefix ?? "cm12Batch",
+    effectiveVelocityHookPrefix: options.effectiveVelocityHookPrefix,
   };
   return createSparseCM12VelocityExtensionWGSL(velocityOptions);
 }

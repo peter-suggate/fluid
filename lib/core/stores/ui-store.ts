@@ -34,6 +34,7 @@ import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type Svo
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../../svo/svo-render-tuning";
 import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../../svo/svo-pixel-trace";
 import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
+import { isStageLensOverlayMode } from "../stage-lens";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 
 /**
@@ -174,6 +175,8 @@ interface UIStore {
   gridOverlaySlice: number;
   /** Field painted on the slice, including adaptive pressure diagnostics. */
   gridOverlayMode: GridOverlayMode;
+  /** Scrubber position along a stage lens's phases. Ignored by every other mode. */
+  gridOverlayLensPhase: number;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
   /** Full-rate visibility refinement at reduced-cone geometry silhouettes. */
@@ -261,6 +264,7 @@ interface UIStore {
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
+  setGridOverlayLensPhase: (phase: number) => void;
   setSvoShadowsEnabled: (enabled: boolean) => void;
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSilhouetteRefinementEnabled: (enabled: boolean) => void;
@@ -314,6 +318,7 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
+  gridOverlayLensPhase: 0,
   svoShadowsEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled,
   svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
   silhouetteRefinementEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled ?? false,
@@ -377,7 +382,16 @@ export const useUIStore = create<UIStore>((set) => ({
   setSceneOverlay: (sceneOverlay) => set({ sceneOverlay }),
   setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
-  setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
+  // Moving to another lens drops the scrubber. A phase is a position inside one
+  // stage's reading of itself, so "phase 3" of the projection means nothing on
+  // the transport lens; carrying it over would open the new lens on a viewpoint
+  // nobody chose, and on a lens with fewer phases, on none at all.
+  setGridOverlayMode: (gridOverlayMode) => set((state) => ({
+    gridOverlayMode,
+    gridOverlayLensPhase: isStageLensOverlayMode(gridOverlayMode) && gridOverlayMode !== state.gridOverlayMode
+      ? 0 : state.gridOverlayLensPhase,
+  })),
+  setGridOverlayLensPhase: (phase) => set({ gridOverlayLensPhase: Math.max(0, Math.floor(phase)) }),
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),

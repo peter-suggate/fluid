@@ -8,6 +8,7 @@ import type { Vec3 } from "./model";
 import type { GPUSecondaryParticleSource } from "./webgpu-secondary-particles";
 import type { GPUFluidFaceVelocitySource } from "./webgpu-face-velocity-overlay";
 import type { GPUPressureJournalSource } from "./webgpu-pressure-journal-overlay";
+import type { AnyStageLens, StageLensSource } from "./stage-lens";
 import type { SparseCM12PressureJournal } from
   "../methods/adaptive-mass/sparse-cm12-pressure-journal";
 import type { GPUFluidTracerSource } from "./webgpu-tracer-overlay";
@@ -258,6 +259,15 @@ export interface GPUSolverInstance {
    * few kilobytes of scalars ever cross.
    */
   readPressureJournal?(): Promise<SparseCM12PressureJournal | undefined>;
+  /**
+   * Per-stage lenses and the buffers they draw. Absent on methods with none.
+   *
+   * A lens is a reading of one *stage*, so a method whose advance is not
+   * partitioned into named resident stages has nothing to offer here. Declaring
+   * one costs nothing: no snapshot is copied, no header read back and no
+   * pipeline compiled until a view arms a lens, and only ever one at a time.
+   */
+  readonly stageLensSource?: StageLensSource;
   /** Always-resident structural sparse scene used by production SVO rendering. */
   readonly sparseVoxelSceneSource?: SparseVoxelSceneRenderSource;
   /** Exact compact topology/geometry buffers for paper-technique overlays. */
@@ -392,6 +402,16 @@ export interface SimulationMethod {
    * method module.
    */
   supportedFieldModes?: readonly string[];
+  /**
+   * Lenses on this method's resident stages, in stage order.
+   *
+   * Separate from `supportedFieldModes` because a lens is not a field view: a
+   * field view samples what survived to the end of the frame, and a lens
+   * reports what one stage did in the middle of it. Declared on the descriptor
+   * rather than fetched from the solver so a picker can offer them before a
+   * device exists, and so a method with none simply has none.
+   */
+  stageLenses?: readonly AnyStageLens[];
   /**
    * Method-specific parameters. Common parameters (resolution, time step,
    * pressure solve effort) live in the scene numerics and are declared once

@@ -28,6 +28,7 @@ import type { GPUQuality } from "./gpu-quality";
 import { sceneStoneQuery, withSceneStoneQuery } from "./stone-look-controls";
 import { sceneRimQuery, withSceneRimQuery } from "./vessel-rim-controls";
 import { sceneCanopyQuery, withSceneCanopyQuery } from "./tree-canopy-controls";
+import { isStageLensOverlayMode } from "./stage-lens";
 import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
 
 const qualities: ReadonlyArray<GPUQuality> = ["balanced", "high", "ultra"];
@@ -97,6 +98,7 @@ type UIQueryState = {
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
   gridOverlayMode: GridOverlayMode;
+  gridOverlayLensPhase: number;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
   silhouetteRefinementEnabled: boolean;
@@ -404,14 +406,16 @@ const DENSE_GRID_OVERLAY_MODES: Readonly<Record<string, true>> = {
  * The field view a link names, or the current one when it names nothing valid.
  *
  * Every family the serializer can write has to be readable back, or picking a
- * view and reloading silently returns a different one. The three predicates are
+ * view and reloading silently returns a different one. The four predicates are
  * the passes' own, so a mode added beside its pass is parsed here without this
- * module learning its name.
+ * module learning its name — which is the whole point for the lenses, whose
+ * modes are one per solver stage and none of them written down here.
  */
 function parseGridOverlayMode(raw: string | null, fallback: GridOverlayMode): GridOverlayMode {
   if (raw === null) return fallback;
   return Object.hasOwn(DENSE_GRID_OVERLAY_MODES, raw) || isOctreeTechniqueOverlayMode(raw)
     || isSparseCM12DirtyOverlayMode(raw) || isPressureJournalOverlayMode(raw)
+    || isStageLensOverlayMode(raw)
     ? raw as GridOverlayMode : fallback;
 }
 
@@ -611,6 +615,11 @@ export function parseQueryState(search: string): QueryState {
         ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
         : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: parseGridOverlayMode(gridMode, initialUI.gridOverlayMode),
+      // Only the lens knows how many phases it has, so the ceiling is the
+      // overlay's to enforce; a link can only be stopped from naming a
+      // fractional or negative one.
+      gridOverlayLensPhase: Math.max(0,
+        Math.floor(numberParam(query, "lensPhase", initialUI.gridOverlayLensPhase, 0))),
       svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
       svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
       silhouetteRefinementEnabled: query.get("svoPrimarySeamClosure") === "1",
@@ -654,7 +663,7 @@ export function parseQueryState(search: string): QueryState {
  */
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth" || key === OVERLAY_QUERY_KEY
-    || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
+    || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode" || key === "lensPhase"
     || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === SEEDS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
@@ -713,6 +722,12 @@ export function serializeQueryState(
   if (uiState.gridOverlayAxis !== "off") query.set("grid", uiState.gridOverlayAxis);
   if (uiState.gridOverlaySlice !== 0.5) query.set("gridSlice", String(uiState.gridOverlaySlice));
   if (uiState.gridOverlayMode !== "structure") query.set("gridMode", uiState.gridOverlayMode);
+  // Gated on the mode as well as the value: a scrubber position outside a lens
+  // addresses nothing, and a key that rode along on every other field view
+  // would be noise in every link the picker writes.
+  if (uiState.gridOverlayLensPhase !== 0 && isStageLensOverlayMode(uiState.gridOverlayMode)) {
+    query.set("lensPhase", String(uiState.gridOverlayLensPhase));
+  }
 
   const presetCamera = cameraForPreset(getScenePreset(sceneState.presetId));
   const cameraValues: ReadonlyArray<[string, number, number]> = [

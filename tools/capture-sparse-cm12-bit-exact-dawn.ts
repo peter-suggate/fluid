@@ -1,5 +1,5 @@
 /**
- * Focused bit-exact Sparse CM12 optimization oracle.
+ * Raw golden-digest integration oracle for production compiled transport.
  *
  * Capture the correctness baseline:
  *   npm run oracle:sparse-cm12:bit-exact -- --write=/tmp/sparse-cm12-baseline.json
@@ -41,6 +41,8 @@ interface OracleReceipt {
   readonly schema: typeof SCHEMA;
   readonly scene: "symmetric-expansion";
   readonly dimensions: readonly [number, number, number];
+  readonly brickFineResolution?: number;
+  readonly presentationPageResolution?: number;
   readonly steps: number;
   readonly dt_s: number;
   readonly activityAcceptedSteps: number;
@@ -120,6 +122,14 @@ function compareReceipt(expected: OracleReceipt, actual: OracleReceipt): void {
   assert.equal(actual.schema, expected.schema, "oracle schema changed");
   assert.equal(actual.scene, expected.scene, "oracle scene changed");
   assert.deepEqual(actual.dimensions, expected.dimensions, "oracle dimensions changed");
+  if (expected.brickFineResolution !== undefined) {
+    assert.equal(actual.brickFineResolution, expected.brickFineResolution,
+      "oracle brick-fine resolution changed");
+  }
+  if (expected.presentationPageResolution !== undefined) {
+    assert.equal(actual.presentationPageResolution, expected.presentationPageResolution,
+      "oracle presentation-page resolution changed");
+  }
   assert.equal(actual.steps, expected.steps, "oracle step count changed");
   assert.equal(actual.dt_s, expected.dt_s, "oracle timestep changed");
   for (const field of ["density", "velocity", "pressure", "divergence"] as const) {
@@ -134,20 +144,24 @@ async function capture(
   device: GPUDevice,
   steps: number,
   runtime: OracleRuntime,
+  brickFineResolution: 4 | 8 | 16,
+  presentationPageResolution: 4 | 8 | 16,
 ): Promise<OracleReceipt> {
   const scene = runtime.createScene();
   const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
   let solver: Awaited<ReturnType<OracleRuntime["Solver"]["createAsync"]>> | undefined;
   try {
-    solver = await runtime.Solver.createAsync(
+    const createSolver = runtime.Solver.createCompiledTopologyTransport
+      ?? runtime.Solver.createAsync;
+    solver = await createSolver.call(runtime.Solver,
       device,
       scene,
       "balanced",
       undefined,
       {
         resolutionMode: "adaptive",
-        brickFineResolution: 16,
-        presentationPageResolution: 16,
+        brickFineResolution,
+        presentationPageResolution,
         surfaceFineRings: 1,
         receiverSupportRings: 3,
         receiverFloor: 1,
@@ -198,6 +212,8 @@ async function capture(
       schema: SCHEMA,
       scene: "symmetric-expansion",
       dimensions: [solver.info.nx, solver.info.ny, solver.info.nz],
+      brickFineResolution,
+      presentationPageResolution,
       steps,
       dt_s,
       activityAcceptedSteps: activity.acceptedSteps,
@@ -215,6 +231,15 @@ async function capture(
 
 const steps = positiveInteger("steps", DEFAULT_STEPS);
 const repeat = positiveInteger("repeat", 1);
+const brickFineResolution = positiveInteger("brick-fine", 16);
+const presentationPageResolution = positiveInteger("presentation-page",
+  brickFineResolution);
+if (![4, 8, 16].includes(brickFineResolution)
+  || ![4, 8, 16].includes(presentationPageResolution)
+  || presentationPageResolution > brickFineResolution
+  || brickFineResolution % presentationPageResolution !== 0) {
+  throw new RangeError("brick-fine and presentation-page must be compatible 4, 8, or 16 values");
+}
 const writePath = argument("write");
 const comparePath = argument("compare");
 if (writePath && comparePath) throw new Error("choose either --write or --compare");
@@ -246,9 +271,13 @@ try {
   device.addEventListener("uncapturederror", (event) => {
     event.preventDefault(); validationErrors.push(event.error.message);
   });
-  const receipt = await capture(device, steps, runtime);
+  const receipt = await capture(device, steps, runtime,
+    brickFineResolution as 4 | 8 | 16,
+    presentationPageResolution as 4 | 8 | 16);
   for (let run = 1; run < repeat; run += 1) {
-    compareReceipt(receipt, await capture(device, steps, runtime));
+    compareReceipt(receipt, await capture(device, steps, runtime,
+      brickFineResolution as 4 | 8 | 16,
+      presentationPageResolution as 4 | 8 | 16));
   }
   if (comparePath) {
     compareReceipt(JSON.parse(await readFile(comparePath, "utf8")) as OracleReceipt, receipt);

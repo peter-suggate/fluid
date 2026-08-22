@@ -19,6 +19,8 @@ export interface SparseCM12PressureTopologyRepairWGSLOptions {
   readonly arenaName?: string;
   readonly prefix?: string;
   readonly workgroupSize?: 64;
+  /** Opt-in TFX1 seam. Omitted output remains byte-for-byte unchanged. */
+  readonly preflightedTopologyPublication?: boolean;
 }
 
 const upper = (value: string) => value.replace(/([a-z])([A-Z])/g, "$1_$2").toUpperCase();
@@ -74,6 +76,48 @@ const ${p}${name}LevelCount=${family.treeLevelCounts.length}u;`;
   total+=atomicLoad(&${arena}[source+at]);}
  atomicStore(&${arena}[${p}${name}TreeBase(${level}u)+parent],total);}`;
     }).join("\n");
+  const preflightedTopologyPublication = options.preflightedTopologyPublication ? /* wgsl */ `
+fn ${p}PreflightWillAppend(brick:u32,generation:u32)->bool{
+ return atomicLoad(&${arena}[${p}BrickCandidate+brick])!=generation;}
+fn ${p}PreflightDirtyLeafWillAppend(leaf:u32,generation:u32)->bool{
+ return atomicLoad(&${arena}[${p}BrickDirtyStamp+leaf])!=generation;}
+fn ${p}PreflightCompatible(brick:u32,oldState:u32,newState:u32)->bool{
+ let generation=atomicLoad(&${arena}[${p}H_CANDIDATE_GENERATION]);
+ let stamp=atomicLoad(&${arena}[${p}BrickCandidate+brick]);if(stamp!=generation){return true;}
+ let acceptedOld=atomicLoad(&${arena}[${p}BrickOldState+brick]);
+ let pendingNew=atomicLoad(&${arena}[${p}BrickNewState+brick]);
+ return acceptedOld==oldState&&(pendingNew==newState||pendingNew==oldState);}
+fn ${p}PreflightReady(generation:u32,newCount:u32,newLeafCount:u32)->bool{
+ return ${p}HeaderValid()&&atomicLoad(&${arena}[${p}H_PHASE])==${p}PhaseCollecting
+  &&atomicLoad(&${arena}[${p}H_FAULT])==0u
+  &&atomicLoad(&${arena}[${p}H_CANDIDATE_GENERATION])==generation
+  &&atomicLoad(&${arena}[${p}BrickF_CANDIDATE_WRITE_COUNT])+newCount<=${p}BrickCapacity
+  &&atomicLoad(&${arena}[${p}BrickF_DIRTY_LEAF_COUNT])+newLeafCount<=${p}BrickLeafCount;}
+// TFX1 proved every bound. This helper has no failure return, retry loop,
+// capacity branch, or fault mutation.
+fn ${p}PublishPreflightedChangedBrick(brick:u32,oldState:u32,newState:u32,cause:u32,
+ ownsLeaf:bool,generation:u32){
+ let append=atomicLoad(&${arena}[${p}BrickCandidate+brick])!=generation;
+ if(append){atomicStore(&${arena}[${p}BrickOldState+brick],oldState);
+  atomicStore(&${arena}[${p}BrickNewState+brick],newState);
+  atomicStore(&${arena}[${p}BrickCause+brick],cause);
+  atomicStore(&${arena}[${p}BrickCandidate+brick],generation);
+  atomicAdd(&${arena}[${p}BrickF_CANDIDATE_WRITE_COUNT],1u);
+  atomicAdd(&${arena}[${p}H_COVERED_PRODUCER_RECEIPTS],1u);
+ }else{let pendingNew=atomicLoad(&${arena}[${p}BrickNewState+brick]);
+  if(pendingNew==oldState){atomicStore(&${arena}[${p}BrickNewState+brick],newState);}
+  atomicOr(&${arena}[${p}BrickCause+brick],cause);}
+ if(ownsLeaf){let leaf=brick/${p}LeafBits;
+  let first=atomicExchange(&${arena}[${p}BrickDirtyStamp+leaf],generation)!=generation;
+  if(first){let slot=atomicAdd(&${arena}[${p}BrickF_DIRTY_LEAF_COUNT],1u);
+   atomicStore(&${arena}[${p}BrickDirtyList+slot],leaf);}}
+ atomicOr(&${arena}[${p}H_CAUSE_MASK],cause);}
+fn ${p}SealPreflightedTopologyJournalNoFail(topologyGeneration:u32){
+ let covered=atomicLoad(&${arena}[${p}H_COVERED_PRODUCER_RECEIPTS]);
+ atomicStore(&${arena}[${p}H_EXPECTED_PRODUCER_RECEIPTS],covered);
+ atomicStore(&${arena}[${p}H_TOPOLOGY_GENERATION],topologyGeneration);
+}
+` : "";
 
   return /* wgsl */ `
 const ${p}Magic=${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_MAGIC}u;
@@ -424,5 +468,6 @@ fn ${p}RepairCell(cell:u32,current:bool,cause:u32){let previous=pcmCellContains(
  atomicStore(&${arena}[${p}H_ACCEPTED_GENERATION],atomicLoad(&${arena}[
   ${p}H_CANDIDATE_GENERATION]));${p}ZeroIndirects();atomicStore(&${arena}[
   ${p}H_PHASE],${p}PhaseAccepted);}
+${preflightedTopologyPublication}
 `;
 }

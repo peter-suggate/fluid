@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState, type KeyboardEvent } from "react";
 import { getMethod, interactiveSimulationMethods } from "@/lib/core/method-registry";
 import type { MethodParamSpec, SelectParamSpec } from "@/lib/core/method-contract";
 import type { GPUQuality } from "../lib/core/gpu-quality";
@@ -8,10 +8,17 @@ import { RangeControl } from "./controls";
 import { VISUALIZATION_FIELDS } from "../lib/core/visualization-catalog";
 import type { FieldVisualization } from "../lib/core/visualization-registry";
 import { simulation } from "../lib/core/simulation/controller";
+import {
+  stageLensOverlayMode,
+  type AnyStageLens,
+  type StageLensReceipt,
+} from "../lib/core/stage-lens";
+import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
 import { resolvedMethodValues, useMethodStore } from "../lib/core/stores/method-store";
 import { useUIStore } from "../lib/core/stores/ui-store";
 import { isPressureJournalOverlayMode } from "../lib/core/webgpu-pressure-journal-overlay";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
+import { LegendEntries } from "./VisualizationLegend";
 import {
   sparseCM12PressureJournalSchedule,
 } from "../lib/methods/adaptive-mass/sparse-cm12-pressure-journal";
@@ -107,21 +114,142 @@ function MethodParamControl({ spec, methodId }: { spec: MethodParamSpec; methodI
 const FIELD_VIEWS: readonly FieldView[] = VISUALIZATION_FIELDS
   .filter((field) => !field.hidden) as readonly FieldView[];
 
+/**
+ * The open lens's scrubber, its counters and its key.
+ *
+ * A rail of ticks rather than a select or a strip of chips because the phases
+ * are *ordered* — they are one reading of one stage walked from plan to accept,
+ * and the gesture is sweeping along it and back, not picking an item out of a
+ * list. Only the phase under the head is named: seven labels across a 200 px
+ * panel is a wall of text over the water, and the whole direction here is that
+ * the lens decorates the grid rather than annotating it.
+ *
+ * Every number the stage produced this frame is drawn, including the ones it
+ * did not: a counter the receipt has no word for reads as an em dash, never as
+ * zero, and a tap the frame never encoded is shown as a shortfall in the fault
+ * colour. Absence is drawn.
+ *
+ * The rules are inline rather than in the flyout's stylesheet, but every value
+ * is a design token, so the panel's theme still owns the look — keep it that
+ * way, since a literal colour here would be the one thing that does not follow
+ * the water into dark.
+ */
+function LensPhaseScrubber({
+  lens, phase, receipt, onPhase,
+}: {
+  readonly lens: AnyStageLens;
+  readonly phase: number;
+  readonly receipt: StageLensReceipt | undefined;
+  readonly onPhase: (index: number) => void;
+}) {
+  const index = Math.max(0, Math.min(lens.phases.length - 1, phase));
+  const current = lens.phases[index];
+  const shortfall = receipt && receipt.capturedTaps < receipt.expectedTaps;
+  // Arrow keys move the head and the focus together: a scrubber whose value
+  // stepped away from the button still holding focus would leave the next
+  // arrow press stepping from somewhere the reader cannot see.
+  const step = (event: KeyboardEvent<HTMLDivElement>) => {
+    const delta = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+    if (delta === 0) return;
+    event.preventDefault();
+    const next = Math.max(0, Math.min(lens.phases.length - 1, index + delta));
+    onPhase(next);
+    event.currentTarget.querySelectorAll("button")[next]?.focus();
+  };
+  return <div style={{ display: "grid", gap: 2, padding: "3px 4px 4px" }}>
+    <div
+      role="group"
+      aria-label={`${lens.label} phase`}
+      onKeyDown={step}
+      style={{ position: "relative", display: "flex", alignItems: "center", height: 14 }}
+    >
+      <span
+        aria-hidden="true"
+        style={{ position: "absolute", insetInline: 2, top: "50%", height: 1, background: "var(--line)" }}
+      />
+      {lens.phases.map((candidate, tick) => <button
+        key={candidate.id}
+        type="button"
+        title={candidate.label}
+        aria-label={candidate.label}
+        aria-pressed={tick === index}
+        tabIndex={tick === index ? 0 : -1}
+        onClick={() => onPhase(tick)}
+        // `display` and `minHeight` are written back over the row styling this
+        // list gives every button under it: a tick is a mark on a rail, not
+        // another 20 px row, and the same rules would stretch the dot too.
+        style={{
+          position: "relative", display: "block", flex: 1, height: "100%", minHeight: 0,
+          padding: 0, border: "none", background: "transparent", cursor: "pointer",
+        }}
+      >
+        <span style={{
+          display: "block", flex: "none", margin: "0 auto", borderRadius: "50%",
+          width: tick === index ? 7 : 3, height: tick === index ? 7 : 3,
+          background: tick === index ? "var(--accent)" : "var(--line-strong)",
+        }} />
+      </button>)}
+    </div>
+    <div style={{ display: "flex", gap: 6, justifyContent: "space-between", font: "var(--text-micro)" }}>
+      <span style={{ overflow: "hidden", color: "var(--accent)", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {current?.label ?? "—"}
+      </span>
+      <span style={{ flex: "none", color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+        {index + 1}/{lens.phases.length}
+      </span>
+    </div>
+    {shortfall && <p style={{ margin: 0, color: "var(--red)", font: "var(--text-micro)" }}>
+      taps {receipt.capturedTaps}/{receipt.expectedTaps}
+    </p>}
+    {current && current.counters.length > 0 && <dl style={{ display: "grid", gap: 1, margin: 0 }}>
+      {current.counters.map(({ word, lit }) => {
+        const value = receipt?.counters[word];
+        return <div
+          key={word}
+          style={{
+            display: "flex", gap: 6, justifyContent: "space-between",
+            color: lit ? "var(--ink)" : "var(--muted)", font: "var(--text-micro)",
+          }}
+        >
+          <dt style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{word}</dt>
+          <dd style={{ flex: "none", margin: 0, fontVariantNumeric: "tabular-nums" }}>
+            {value === undefined ? "—" : value.toLocaleString()}
+          </dd>
+        </div>;
+      })}
+    </dl>}
+    {lens.legend.length > 0 && <LegendEntries
+      entries={lens.legend}
+      leadMark
+      style={{
+        display: "grid", gap: 1, margin: 0, padding: 0,
+        color: "var(--muted)", font: "var(--text-micro)", listStyle: "none",
+      }}
+    />}
+  </div>;
+}
+
 export function FluidFieldFlyout({
   leftFraction,
   topFraction,
+  lenses: override,
 }: {
   leftFraction: number;
   topFraction: number;
+  /** Overrides the running method's own roster. For tests and previews. */
+  lenses?: readonly AnyStageLens[];
 }) {
   const methodState = useMethodStore();
   const methodId = methodState.methodId;
   const overlayMode = useUIStore((state) => state.gridOverlayMode);
   const overlayAxis = useUIStore((state) => state.gridOverlayAxis);
   const overlaySlice = useUIStore((state) => state.gridOverlaySlice);
+  const lensPhase = useUIStore((state) => state.gridOverlayLensPhase);
   const setOverlayMode = useUIStore((state) => state.setGridOverlayMode);
   const setOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
   const setOverlaySlice = useUIStore((state) => state.setGridOverlaySlice);
+  const setLensPhase = useUIStore((state) => state.setGridOverlayLensPhase);
+  const lensReceipt = useDiagnosticsStore((state) => state.stageLensReceipt);
   // Whether the view list is unfolded. Local, not stored: it is the state of a
   // disclosure on one panel, and a picker that reopened itself because the
   // camera moved would be the panel remembering the wrong thing.
@@ -138,11 +266,22 @@ export function FluidFieldFlyout({
   const coarseDials = method.params.filter((spec) => spec.tier === "coarse" && spec.kind !== "select");
   const fineParams = method.params.filter((spec) => spec.tier === "fine");
   const quality = methodState.quality;
+  // Declared on the method rather than fetched from the solver, so the section
+  // is there before a device is.
+  const lenses = override ?? method.stageLenses ?? [];
   const supported = new Set(method.supportedFieldModes ?? []);
   const views = FIELD_VIEWS.filter((view) => supported.has(view.mode));
   const active = overlayAxis !== "off"
     ? views.find((view) => view.mode === overlayMode)
     : undefined;
+  const activeLens = overlayAxis !== "off"
+    ? lenses.find((lens) => stageLensOverlayMode(lens.stage) === overlayMode)
+    : undefined;
+  // The plane buttons, HIDE and the slice scrub belong to whatever is drawing,
+  // and a lens draws on the same plane a field view does. Without this a
+  // selected lens would take the panel's only way to turn the overlay off down
+  // with the catalog row it does not have.
+  const shown = active ?? (activeLens && { label: activeLens.label, planeless: false });
   // The solver row stays even when a method registers no field views: this
   // widget is also where the method is switched, and a picker that vanished
   // with the fields would strand such a method with no way back.
@@ -164,7 +303,10 @@ export function FluidFieldFlyout({
     ? Math.round(Math.max(0, Math.min(1, overlaySlice)) * (filmSchedule.length - 1))
     : 0;
 
-  const selectView = (view: FieldView) => {
+  // Narrowed to what selecting actually reads, so a lens goes down the same
+  // path as a catalog row rather than through a second one that would have to
+  // be kept agreeing with it about what "picking the active view" means.
+  const selectView = (view: Pick<FieldView, "mode" | "axis" | "planeless">) => {
     if (overlayMode === view.mode && overlayAxis !== "off") {
       setOverlayAxis("off");
       return;
@@ -205,7 +347,7 @@ export function FluidFieldFlyout({
       >
         <summary title="Choose the field this overlay draws">
           <span>FIELD</span>
-          <strong>{active?.label ?? "Hidden"}</strong>
+          <strong>{shown?.label ?? "Hidden"}</strong>
         </summary>
         <div className="fluid-field-options">
           {views.map((view) => {
@@ -225,9 +367,9 @@ export function FluidFieldFlyout({
           })}
         </div>
       </details>
-      {active && <>
+      {shown && <>
         <div className="fluid-field-plane" role="group" aria-label="Field view plane">
-          {!active.planeless && <>
+          {!shown.planeless && <>
             {(["x", "y", "z"] as const).map((axis) => <button
               key={axis}
               type="button"
@@ -265,19 +407,19 @@ export function FluidFieldFlyout({
         <label className="fluid-field-slice">
           <input
             type="range"
-            min={filmMode ? 0 : active.planeless || overlayAxis === "volume" ? 0.05 : 0}
+            min={filmMode ? 0 : shown.planeless || overlayAxis === "volume" ? 0.05 : 0}
             max={1}
             // A film's stops are the captured iterations and nothing between
             // them, so the scrub steps between snapshots rather than sliding
             // through a continuum it cannot show.
             step={filmSchedule.length > 1 ? 1 / (filmSchedule.length - 1)
-              : active.planeless || overlayAxis === "volume" ? 0.01 : 0.005}
+              : shown.planeless || overlayAxis === "volume" ? 0.01 : 0.005}
             value={overlaySlice}
             onChange={(event) => setOverlaySlice(Number(event.currentTarget.value))}
             aria-label={filmMode
-              ? `${active.label} iteration`
-              : active.planeless
-                ? `${active.label} opacity`
+              ? `${shown.label} iteration`
+              : shown.planeless
+                ? `${shown.label} opacity`
                 : overlayAxis === "volume"
                   ? "Field volume opacity"
                   : `Field ${overlayAxis} slice position`}
@@ -296,6 +438,37 @@ export function FluidFieldFlyout({
             ? slot / (filmSchedule.length - 1) : 0)}
         />}
       </>}
+    </section>}
+    {/* What the *stages* did, as opposed to what the state is. Below the fields
+        rather than folded in with them because the two answer different
+        questions: a field row picks a publication, a lens row opens one pass's
+        own reading of itself, and the scrubber only means anything inside one. */}
+    {lenses.length > 0 && <section className="fluid-field-group">
+      <h4 className="fluid-field-heading">Stages</h4>
+      <div className="fluid-field-options" role="group" aria-label="Solver stage lenses">
+        {lenses.map((lens) => {
+          const mode = stageLensOverlayMode(lens.stage);
+          const isActive = activeLens?.id === lens.id;
+          return <Fragment key={lens.id}>
+            <button
+              type="button"
+              className={isActive ? "active" : ""}
+              aria-pressed={isActive}
+              title={lens.description}
+              onClick={() => selectView({ mode, axis: "y" })}
+            >
+              <i style={lens.legend[0] ? { background: lens.legend[0].swatch } : undefined} />
+              <span>{lens.label}</span>
+            </button>
+            {isActive && <LensPhaseScrubber
+              lens={lens}
+              phase={lensPhase}
+              receipt={lensReceipt?.lensId === lens.id ? lensReceipt : undefined}
+              onPhase={setLensPhase}
+            />}
+          </Fragment>;
+        })}
+      </div>
     </section>}
     {/* The solver behind these fields. It lives on the same widget because
         switching methods is part of the same watch-the-water loop as choosing

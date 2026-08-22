@@ -94,6 +94,8 @@ import { octreeLosassoAdaptiveMassWGSL } from "../lib/methods/losasso/webgpu-oct
 import { makeOctreeLosassoAdaptiveDynamicsWGSL } from "../lib/methods/losasso/webgpu-octree-losasso-dynamics.wgsl";
 import { webgpuSparseCM12ResidentWGSL } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
+import { SPARSE_CM12_LENSES } from "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
+import { stageLensProgramWGSL } from "../lib/core/webgpu-stage-lens-overlay";
 
 const naga = process.env.NAGA ?? "naga";
 const shaders = {
@@ -185,6 +187,13 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "sparse-scene-proxy-voxelization": sparseSceneProxyVoxelizationShader,
   "sparse-voxel-dry-scene": svoDrySceneShader,
   "sparse-voxel-thick-glass-library": svoThickGlassWGSL,
+  // Every lens program, composed exactly as the overlay composes it. A lens is
+  // declaration plus a classifier snippet, so nothing about it is checked until
+  // something assembles the module — and the overlay only assembles the one
+  // lens a user happens to open.
+  ...Object.fromEntries(SPARSE_CM12_LENSES.flatMap((lens) =>
+    Object.keys(lens.programs).map((program) =>
+      [`stage-lens/${lens.stage}/${program}`, stageLensProgramWGSL(lens, program)]))),
 };
 const directory = mkdtempSync(join(tmpdir(), "fluid-water-wgsl-"));
 // Naga still rejects the standardized `enable subgroups` directive. These
@@ -197,7 +206,9 @@ try {
       console.log(`deferred ${name} to Dawn subgroup validation`);
       continue;
     }
-    const path = join(directory, `${name}.wgsl`);
+    // A lens key carries its stage as a path segment; flatten it rather than
+    // mkdir per stage, so the reported name stays the key the roster uses.
+    const path = join(directory, `${name.replaceAll("/", "--")}.wgsl`);
     writeFileSync(path, source);
     const result = spawnSync(naga, [path], { encoding: "utf8" });
     if (result.status !== 0) throw new Error(`${name}:\n${result.stderr || result.stdout}`);

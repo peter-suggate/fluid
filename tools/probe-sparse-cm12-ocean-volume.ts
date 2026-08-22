@@ -13,8 +13,6 @@ import { createProcessRetainedDawnGPU, type NodeDawnProvider } from
   "../lib/harness/node-dawn-provider";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import type { SparseCM12TransportExperiment } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 const argument = (name: string, fallback: string): string => process.argv.slice(2)
   .find((value) => value.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
@@ -22,9 +20,6 @@ const steps = Number(argument("steps", "24"));
 const brickFineResolution = Number(argument("brick-fine", "8")) as 4 | 8 | 16;
 const resolutionMode = argument("resolution-mode", "adaptive") as
   "adaptive" | "all-fine" | "all-coarse";
-const experiment = argument("transport-experiment", "baseline") as
-  SparseCM12TransportExperiment;
-const pressureRefreshOracle = argument("pressure-refresh-oracle", "0") === "1";
 const out = resolve(argument("out", "artifacts/sparse-cm12-ocean-volume.json"));
 if (!Number.isSafeInteger(steps) || steps < 1) throw new RangeError("steps must be positive");
 if (![4, 8, 16].includes(brickFineResolution)) throw new RangeError("brick-fine must be 4, 8, or 16");
@@ -57,7 +52,7 @@ const fieldReceipt = (field: Float32Array) => {
 
 let device: GPUDevice | undefined;
 await acquireWebGPUExclusiveLock("ocean-volume",
-  `Sparse CM12 ocean B${brickFineResolution} ${experiment}`);
+  `Sparse CM12 ocean B${brickFineResolution} compiled transport`);
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
     ?? `${process.cwd()}/node_modules/webgpu/index.js`;
@@ -83,15 +78,8 @@ try {
     presentationPageResolution: brickFineResolution,
     timeStep: "scene" as const,
   };
-  const solver = pressureRefreshOracle
-    ? await WebGPUAdaptiveMassSolver.createPressureRefreshOracleForQA(
-      device, scene, "balanced", undefined, options, () => {})
-    : experiment === "baseline"
-    ? await WebGPUAdaptiveMassSolver.createAsync(
-      device, scene, "balanced", undefined, options, () => {})
-    : await WebGPUAdaptiveMassSolver.createTransportExperimentForQA(
-      experiment as Exclude<SparseCM12TransportExperiment, "baseline">,
-      device, scene, "balanced", undefined, options, () => {});
+  const solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
+    device, scene, "balanced", undefined, options, () => {});
   try {
     const initialFields = await solver.readDiagnosticFields();
     const initial = densityReceipt(initialFields.density);
@@ -207,7 +195,7 @@ try {
     const report = {
       passed: validationErrors.length === 0 && gateErrors.length === 0,
       kind: "sparse-cm12-ocean-volume",
-      brickFineResolution, resolutionMode, experiment, pressureRefreshOracle, steps,
+      brickFineResolution, resolutionMode, transport: "compiled-topology", steps,
       dt_s: scene.numerics.maxDt_s,
       initial, trajectory, adaptiveRepresentation, gateErrors, validationErrors,
     };

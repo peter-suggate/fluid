@@ -1,5 +1,6 @@
 "use client";
 
+import type { CSSProperties } from "react";
 import { visualizationMark } from "../lib/core/visualization-catalog";
 import type {
   Visualization,
@@ -57,6 +58,41 @@ export function LegendMark({
       )}
       {mark === "point" && <circle cx="9" cy="6" r="3" fill={stroke} />}
     </svg>
+  );
+}
+
+/**
+ * The cases one view distinguishes, as marks and their names.
+ *
+ * Shared with the stage lenses rather than reimplemented for them: a lens's
+ * `legend` is the same `VisualizationLegendEntry[]` a catalog view's is, and two
+ * renderings of it would be two chances for a lens colour to be drawn by a rule
+ * the field views stopped following. The only difference is `leadMark`, because
+ * a catalog row already draws its first swatch on the row itself and a lens has
+ * no row above the list to carry one.
+ */
+export function LegendEntries({
+  entries, dim, leadMark, style,
+}: {
+  readonly entries: readonly VisualizationLegendEntry[];
+  readonly dim?: boolean;
+  readonly leadMark?: boolean;
+  readonly style?: CSSProperties;
+}) {
+  return (
+    <ul style={style}>
+      {entries.map((entry, index) => (
+        <li
+          key={`${entry.swatch}:${entry.label}`}
+          data-primary={index === 0 ? "true" : "false"}
+        >
+          {(leadMark || index > 0) && (
+            <LegendMark mark={entry.mark ?? "line"} swatch={entry.swatch} dim={dim} />
+          )}
+          <span>{entry.label}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -167,19 +203,7 @@ export function VisualizationLegend({
             {row.count !== undefined && <small>{row.count}</small>}
           </button>
           {expanded && row.entries.length > 0 && (
-            <ul>
-              {row.entries.map((entry, index) => (
-                <li
-                  key={`${entry.swatch}:${entry.label}`}
-                  data-primary={index === 0 ? "true" : "false"}
-                >
-                  {index > 0 && (
-                    <LegendMark mark={entry.mark ?? "line"} swatch={entry.swatch} dim={!row.enabled} />
-                  )}
-                  <span>{entry.label}</span>
-                </li>
-              ))}
-            </ul>
+            <LegendEntries entries={row.entries} dim={!row.enabled} />
           )}
         </li>
       ))}

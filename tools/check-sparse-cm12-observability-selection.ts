@@ -46,8 +46,8 @@ const framePlanBody = resident.slice(resident.indexOf("private encodeFramePlanPr
   resident.indexOf("private encodeVelocityExtensionPlan(",
     resident.indexOf("private encodeFramePlanPresentation(")));
 assert.equal((framePlanBody.match(/dispatch\("/g) ?? []).length, 10, "FPL plan dispatch count");
-assert.equal((framePlanBody.match(/plan\.dispatchWorkgroupsIndirect/g) ?? []).length, 1,
-  "FPL VEX blast import dispatch count");
+assert.equal((framePlanBody.match(/plan\.dispatchWorkgroupsIndirect/g) ?? []).length, 2,
+  "FPL mass/VEX import dispatch count");
 assert.equal((framePlanBody.match(/execute\.dispatchWorkgroups/g) ?? []).length, 5,
   "FPP execute dispatch count");
 assert.equal((framePlanBody.match(/encoder\.copyBufferToBuffer/g) ?? []).length, 2,
@@ -128,10 +128,10 @@ assert.equal(defaultValues.presentationPageResolution, "8");
 
 console.log(JSON.stringify({ authority: "FPL1+ACT1-causes",
   currentFixedTail: {
-    fplFpp: { dispatches: 16, passes: 2, copies: 2 },
+    fplFpp: { dispatches: 17, passes: 2, copies: 2 },
     mandatoryFrameControlCommit: { dispatches: 1, passesSharedWithPrior: true },
     finalAcceptedIndirectPublication: { dispatches: 0, passes: 0, copies: 1 },
-    total: { dispatches: 17, passes: 2, copies: 3 },
+    total: { dispatches: 18, passes: 2, copies: 3 },
   },
   wholeFrameLexicalAudit: { dispatcherCallsites: wholeFrameLexicalCallsites,
     copyCommandSites: (encodeBody.match(/encoder\.copyBufferToBuffer\(/g) ?? []).length,

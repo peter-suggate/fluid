@@ -21,6 +21,8 @@ const identifier = (value: string): string => {
 export function createSparseCM12SRR1ResidentIngressWGSL(options: {
   readonly layout: SparseCM12SRR1IngressLayout;
   readonly arenaName?: string;
+  /** Opt-in TFX1 seam. Omitted output remains byte-for-byte unchanged. */
+  readonly preflightedTopologyPublication?: boolean;
 }): string {
   const l = options.layout;
   const arena = identifier(options.arenaName ?? "activity");
@@ -28,6 +30,36 @@ export function createSparseCM12SRR1ResidentIngressWGSL(options: {
   const s = SPARSE_CM12_SRR1_EVENT_STAMP;
   const e = SPARSE_CM12_SRR1_EVENT;
   const r = SPARSE_CM12_SRR1_RECEIPT;
+  const preflightedTopologyPublication = options.preflightedTopologyPublication ? /* wgsl */ `
+fn sirResidentPreflightWillAppend(tile:u32,generation:u32)->bool{
+  return atomicLoad(&${arena}[sirResidentStampBase+2u*tile+${s.generation}u])!=generation;
+}
+fn sirResidentPreflightReady(generation:u32,newCount:u32)->bool{
+  let current=atomicLoad(&${arena}[sirResidentHeader+${h.candidateGeneration}u]);
+  return sirResidentHeaderValid()
+    &&atomicLoad(&${arena}[sirResidentHeader+${h.fault}u])==0u
+    // Topology effects are the bounded producers for the *next* SRR1 frame;
+    // the current generation has already been sealed and planned.
+    &&current<0x7ffffffeu&&current+1u==generation
+    &&atomicLoad(&${arena}[sirResidentHeader+${h.eventCount}u])+newCount
+      <=sirResidentEventCapacity;
+}
+// TFX1 has already proved phase, generation, uniqueness and capacity. This
+// helper has no failure return, retry loop, capacity branch, or fault mutation.
+fn sirResidentPublishPreflightedEvent(tile:u32,generation:u32,cause:u32){
+  let stamp=sirResidentStampBase+2u*tile;
+  let append=atomicLoad(&${arena}[stamp+${s.generation}u])!=generation;
+  if(append){
+    atomicStore(&${arena}[stamp+${s.generation}u],generation);
+    atomicStore(&${arena}[stamp+${s.causeMask}u],cause);
+    let slot=atomicAdd(&${arena}[sirResidentHeader+${h.eventCount}u],1u);
+    let at=sirResidentEventBase+${SPARSE_CM12_SRR1_EVENT_WORDS}u*slot;
+    atomicStore(&${arena}[at+${e.tile}u],tile);
+    atomicStore(&${arena}[at+${e.generation}u],generation);
+    atomicStore(&${arena}[at+${e.causeMask}u],cause);
+  }else{atomicOr(&${arena}[stamp+${s.causeMask}u],cause);}
+}
+` : "";
   return /* wgsl */ `
 const sirResidentTileCapacity:u32=${l.tileCapacity}u;
 const sirResidentEventCapacity:u32=${l.eventCapacity}u;
@@ -141,5 +173,6 @@ fn sirResidentPublishReceipt(rank:u32,tile:u32,topologyGeneration:u32,
   atomicMax(&${arena}[sirResidentHeader+${h.receiptCount}u],rank+1u);
   return true;
 }
+${preflightedTopologyPublication}
 `;
 }

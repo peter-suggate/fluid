@@ -1,6 +1,8 @@
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
 import type { SparseCM12PressureJournal } from
   "../methods/adaptive-mass/sparse-cm12-pressure-journal";
+import type { StageLensReceipt } from "./stage-lens";
+import type { StageLensLayerReport } from "./webgpu-stage-lens-overlay";
 import type { InjectedLiquidBall } from "./method-contract";
 import type { SceneDescription } from "./model";
 import { terrainContentStamp, type TerrainDescription } from "./terrain";
@@ -54,6 +56,7 @@ export type WebGPURenderWorkerResponse =
   | { type: "status"; status: GPUStatus; workerNow_ms: number }
   | { type: "gpu-info"; info: GPUEulerianInfo }
   | { type: "pressure-journal"; journal: SparseCM12PressureJournal | undefined }
+  | { type: "stage-lens"; receipt?: StageLensReceipt; layers: readonly StageLensLayerReport[] }
   | { type: "rigid-loads"; loads: GPURigidLoad[] }
   | { type: "advance-completed"; time_s: number }
   | { type: "effective-renderer-status"; status: EffectiveRendererStatus }
@@ -69,6 +72,10 @@ interface WorkerClientCallbacks {
   onStatus(status: GPUStatus): void;
   onGPUInfo?(info: GPUEulerianInfo): void;
   onGPUPressureJournal?(journal: SparseCM12PressureJournal | undefined): void;
+  onGPUStageLens?(
+    receipt: StageLensReceipt | undefined,
+    layers: readonly StageLensLayerReport[],
+  ): void;
   onGPURigidLoads?(loads: GPURigidLoad[]): void;
   onGPUAdvanceCompleted?(time_s: number): void;
   onEffectiveRendererStatus?(status: EffectiveRendererStatus): void;
@@ -325,6 +332,9 @@ export class WebGPURenderWorkerClient {
     else if (message.type === "gpu-info") this.callbacks.onGPUInfo?.(message.info);
     else if (message.type === "pressure-journal") {
       this.callbacks.onGPUPressureJournal?.(message.journal);
+    }
+    else if (message.type === "stage-lens") {
+      this.callbacks.onGPUStageLens?.(message.receipt, message.layers);
     }
     else if (message.type === "rigid-loads") this.callbacks.onGPURigidLoads?.(message.loads);
     else if (message.type === "advance-completed") this.callbacks.onGPUAdvanceCompleted?.(message.time_s);

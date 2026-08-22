@@ -59,7 +59,6 @@ import {
   sparseCM12SharpeningTraceSteps,
   WebGPUSparseCM12Resident,
   type SparseCM12GPUActivityRecord,
-  type SparseCM12TransportExperiment,
 } from "./webgpu-sparse-cm12-resident";
 
 const PRESSURE_REFRESH_ORACLE_QA_TOKEN: unique symbol =
@@ -78,6 +77,8 @@ const TEMPORAL_CURRENT_SEED_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 temporal current-seed QA");
 const TEMPORAL_CHANGE_SEED_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 temporal endpoint-change seed QA");
+const PHASE1_TRANSPORT_RECEIPT_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 Phase-1 transport receipt QA");
 
 /** Method-local long-run physics receipt carried through the generic info bag. */
 export interface AdaptiveMassStepTelemetry {
@@ -454,6 +455,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   armPressureJournal(armed: boolean) { return this.resident.armPressureJournal(armed); }
   /** Header and iteration records of the last captured solve; maps a buffer. */
   readPressureJournal() { return this.resident.readPressureJournal(); }
+  /**
+   * Per-stage lenses. Built on first access, so a scene that never opens one
+   * never allocates for one.
+   */
+  get stageLensSource() { return this.resident.stageLensSource; }
   get globalFineLevelSetSource() { return this.resident.globalFineLevelSetSource; }
 
   private atlas: SparseAdaptiveMassAtlas;
@@ -649,16 +655,27 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       onProgress, signal, TEMPORAL_CHANGE_SEED_QA_TOKEN);
   }
 
-  /** Construction-only transport specialization for paired wall-clock probes. */
-  static createTransportExperimentForQA(
-    experiment: Exclude<SparseCM12TransportExperiment, "baseline">,
+  /** QA-only construction that reserves the raw Phase-1 transport receipt
+   * arena. Ordinary solver options cannot enable this instrumentation. */
+  static createPhase1TransportReceiptOracleForQA(
     device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
     onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
     options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<WebGPUAdaptiveMassSolver> {
     return this.createAsync(device, scene, quality, onRigidLoads, options,
-      onProgress, signal, undefined, experiment);
+      onProgress, signal, PHASE1_TRANSPORT_RECEIPT_QA_TOKEN);
+  }
+
+  /** Explicit construction surface for production compiled topology transport. */
+  static createCompiledTopologyTransport(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal);
   }
 
   static async createAsync(
@@ -676,8 +693,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       | typeof PRESSURE_ADDRESSING_RANK_SELECT_QA_TOKEN
       | typeof PRESSURE_ADDRESSING_MATERIALIZED_LIST_QA_TOKEN
       | typeof TEMPORAL_CURRENT_SEED_QA_TOKEN
-      | typeof TEMPORAL_CHANGE_SEED_QA_TOKEN,
-    transportExperimentForQA?: Exclude<SparseCM12TransportExperiment, "baseline">,
+      | typeof TEMPORAL_CHANGE_SEED_QA_TOKEN
+      | typeof PHASE1_TRANSPORT_RECEIPT_QA_TOKEN,
   ): Promise<WebGPUAdaptiveMassSolver> {
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
     // Compile the boundary chain's closing marker while the scene builds. A
@@ -808,8 +825,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
                         .createPressureAddressingMaterializedListForQA
                       : qaToken === TEMPORAL_CURRENT_SEED_QA_TOKEN
                         ? WebGPUSparseCM12Resident.createTemporalCurrentSeedOracleForQA
-                        : qaToken === TEMPORAL_CHANGE_SEED_QA_TOKEN
+                      : qaToken === TEMPORAL_CHANGE_SEED_QA_TOKEN
                           ? WebGPUSparseCM12Resident.createTemporalChangeSeedOracleForQA
+                        : qaToken === PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
+                          ? WebGPUSparseCM12Resident.createPhase1TransportReceiptOracleForQA
               : WebGPUSparseCM12Resident.create;
           const residentArguments = [
             device, atlas!, grid!, finestCellSize(scene, atlas!),
@@ -828,10 +847,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               : undefined,
             options.presentationPageResolution ?? options.brickFineResolution ?? 8,
           ] as const;
-          resident = transportExperimentForQA
-            ? await WebGPUSparseCM12Resident.createTransportExperimentForQA(
-              transportExperimentForQA, ...residentArguments)
-            : await createResident.call(WebGPUSparseCM12Resident, ...residentArguments);
+          resident = await createResident.call(
+            WebGPUSparseCM12Resident, ...residentArguments);
           resident.setRefinementRegionParameters(packSparseCM12RefinementRegions(
             sceneRefinementRegions(scene), refinementRegionLattice(scene)));
         },
@@ -1184,6 +1201,15 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
 
   /** Explicit Dawn/QA materialization; production rendering stays sparse. */
   readDiagnosticFields() { return this.resident.readDiagnosticFields(); }
+  readPhase1TransportReceiptQA() {
+    return this.resident.readPhase1TransportReceiptQA();
+  }
+  readPhase1TransportProfileQA() {
+    return this.resident.readPhase1TransportProfileQA();
+  }
+  readCandidateEffectsTransactionQA() {
+    return this.resident.readCandidateEffectsTransactionQA();
+  }
   /** Explicit FCA1 QA materialization; never consulted by frame scheduling. */
   readFrameControlQA() { return this.resident.readFrameControlQA(); }
   /** Explicit SAW1 QA materialization; never consulted by frame scheduling. */
@@ -1195,6 +1221,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readScalarAuthorityHeaderQA() { return this.resident.readScalarAuthorityHeaderQA(); }
   readSharpeningCellAuthorityQA() {
     return this.resident.readSharpeningCellAuthorityQA();
+  }
+  readSharpeningSpatialTileQA() {
+    return this.resident.readSharpeningSpatialTileQA();
   }
   /** Resident SIR1 ingress header; never consulted by frame scheduling. */
   readScalarIngressHeaderQA() { return this.resident.readScalarIngressHeaderQA(); }

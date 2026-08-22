@@ -132,6 +132,7 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       (time_s) => post({ type: "advance-completed", time_s }),
       (status) => post({ type: "effective-renderer-status", status }),
       (journal) => post({ type: "pressure-journal", journal }),
+      (receipt, layers) => post({ type: "stage-lens", receipt, layers }),
     );
     post({ type: "attached" });
     return;

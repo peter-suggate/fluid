@@ -65,6 +65,12 @@ assert.match(probe, /candidate\.context === expectedTraceContext/,
   "timestamp polling must reject a late prior-frame trace");
 assert.match(probe, /GPUStageTimestampRecorder\.prepare\(device\)/,
   "the observable trailing marker must be prepared before capture");
+assert.match(probe, /GPU_WORK_CHUNK_BY_LABEL[\s\S]*workChunkSamples/,
+  "the stage-cost receipt must publish disjoint concrete work chunks");
+assert.match(probe, /if \(stage\.costInsideStage\) continue;/,
+  "shared diagram nodes must not be emitted as independent numeric stages");
+assert.match(probe, /maximumStageChunkError_ms/,
+  "every concrete stage rollup must reconcile against its owned chunks");
 assert.match(probe, /createProcessRetainedDawnGPU/,
   "native Dawn must remain retained through process teardown");
 assert.match(scalarAuthority,

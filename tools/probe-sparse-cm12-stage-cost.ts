@@ -57,7 +57,10 @@ import {
   createProcessRetainedDawnGPU,
   type NodeDawnProvider,
 } from "../lib/harness/node-dawn-provider";
-import { ADAPTIVE_MASS_FLUID_PIPELINE } from
+import {
+  ADAPTIVE_MASS_FLUID_PIPELINE,
+  ADAPTIVE_MASS_GPU_WORK_CHUNKS,
+} from
   "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
 import {
   adaptiveMassMethod,
@@ -65,8 +68,6 @@ import {
 } from "../lib/methods/adaptive-mass/method";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import type { SparseCM12TransportExperiment } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { inspectSparseCM12PressureCutoverAuthorities } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-cutover-observability";
 import {
@@ -74,6 +75,18 @@ import {
 } from "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
 import { SPARSE_CM12_SCALAR_RESULT_PHASE } from
   "../lib/methods/adaptive-mass/sparse-cm12-scalar-result-receipts";
+import {
+  SPARSE_CM12_FRAME_PLAN_BRICK,
+  SPARSE_CM12_FRAME_PLAN_BRICK_FLAG,
+  SPARSE_CM12_FRAME_PLAN_BRICK_WORDS,
+  SPARSE_CM12_FRAME_PLAN_HEADER,
+  SPARSE_CM12_FRAME_PLAN_SLOT_HEADER_WORDS,
+  SPARSE_CM12_FRAME_PLAN_TILE,
+  SPARSE_CM12_FRAME_PLAN_TILE_WORDS,
+  type SparseCM12FramePlanSource,
+} from "../lib/core/sparse-cm12-frame-plan";
+import { fingerprintSparseCM12RepositorySources } from
+  "./sparse-cm12-source-content-fingerprint";
 
 const argument = (name: string, fallback: string): string =>
   process.argv.slice(2).find((value) => value.startsWith(`--${name}=`))
@@ -92,8 +105,6 @@ Options:
                                      ocean, or symmetric-expansion (default long-dam)
   --brick-fine=4|8|16                Sparse brick ladder (default 16)
   --presentation-page=4|8|16         Presentation page size (default 16)
-  --transport-experiment=NAME        Construction-static A/B specialization
-                                     (default baseline)
   --warmup=N                         Warmup hardware samples (default 8)
   --frames=N                         Measured hardware samples (default 40)
   --capture-gap-ms=N                 Timestamp capture spacing (default 110)
@@ -116,8 +127,6 @@ const warmup = Number(argument("warmup", "8"));
 const sampled = Number(argument("frames", "40"));
 const brickFineResolution = Number(argument("brick-fine", "16"));
 const presentationPageResolution = Number(argument("presentation-page", "16"));
-const transportExperiment = argument("transport-experiment", "baseline") as
-  SparseCM12TransportExperiment;
 const captureGap_ms = Number(argument("capture-gap-ms", "110"));
 const minimumCellSize = Number(argument("minimum-cell-size", "0"));
 const regionScope = argument("region-scope", "domain");
@@ -127,7 +136,10 @@ const enforceNonPressureGate = argument("enforce-non-pressure-gate",
   argument("enforce-target-gate", "0")) === "1";
 const enforcePressureReceipts = argument("enforce-pressure-receipts", "1") === "1";
 const outputPath = argument("out", "");
-for (const [name, value] of Object.entries({ warmup, sampled, brickFineResolution,
+if (!(Number.isSafeInteger(warmup) && warmup >= 0)) throw new RangeError(
+  `warmup must be a non-negative integer; received ${warmup}`,
+);
+for (const [name, value] of Object.entries({ sampled, brickFineResolution,
   presentationPageResolution, captureGap_ms, maximumTarget_ms })) {
   if (!(Number.isFinite(value) && value > 0)) throw new RangeError(
     `${name} must be finite and positive; received ${value}`,
@@ -145,18 +157,6 @@ if (![4, 8, 16].includes(brickFineResolution)
   || presentationPageResolution > brickFineResolution
   || brickFineResolution % presentationPageResolution !== 0) {
   throw new RangeError("brick-fine and presentation-page must be compatible values in 4, 8, 16");
-}
-if (!["baseline", "mass-swept-clean", "structure-sharpening-legacy",
-  "face-row-packets", "face-direct-preparation", "face-characteristic-cache",
-  "structure-face-cache-legacy",
-  "structure-mass-swept-legacy", "activity-scalar-bricks",
-  "structure-activity-scalar-legacy", "presentation-uniform-bulk",
-  "structure-presentation-uniform-legacy"]
-  .concat(["mass-rung-packets", "mass-rung-local"])
-  .includes(transportExperiment)) {
-  throw new RangeError(
-    "unsupported stage-cost transport experiment",
-  );
 }
 const buildScene = sceneName === "mini16" ? createMinimalPowerDamBreakScene
   : sceneName === "mini32" ? createMinimalPowerDamBreak32Scene
@@ -193,6 +193,27 @@ const TARGET_STAGE_IDS = Object.freeze([
   "presentation-publication",
 ] as const);
 const PRESSURE_TOPOLOGY_PHASE_LABEL = "Composite pressure topology + ghost-fluid rows";
+const CANDIDATE_TRANSFER_PHASE_LABELS = Object.freeze([
+  "Candidate scalar + momentum field transfer",
+  "Candidate exterior-face reconstruction",
+  "Candidate shadow-face validation",
+  "Candidate effects census + preflight",
+  "Candidate IBO delta construction",
+  "Candidate independent IBO semantic validation",
+  "Candidate TEI delta compilation",
+  "Candidate transaction authorization",
+  "Candidate SCA effects publication",
+  "Candidate PTR effects publication",
+  "Candidate VEX effects publication",
+  "Candidate effects receipt seal",
+  "Candidate fields + membership publication",
+  "Candidate retired-image replay",
+  "Budgeted shadow-topology preparation + conservative transfer",
+] as const);
+const GPU_WORK_CHUNK_BY_LABEL = new Map(
+  ADAPTIVE_MASS_GPU_WORK_CHUNKS.map((chunk) => [chunk.phase.label, chunk] as const));
+assert.equal(GPU_WORK_CHUNK_BY_LABEL.size, ADAPTIVE_MASS_GPU_WORK_CHUNKS.length,
+  "every GPU work chunk must own a unique timestamp label");
 const REPOSITORY_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const PINNED_BASELINE_PATH =
   "artifacts/sparse-cm12-ocean-b16-p16-stage-cost-baseline.json";
@@ -211,6 +232,7 @@ type ScalarAuthorityHeader = {
   readonly topologyGeneration: number; readonly sourceParity: number;
 };
 type StageCostQASolver = {
+  readPhase1TransportProfileQA?(): Promise<unknown>;
   readSparseWorkShapeQA(): {
     readonly finestDomainCellCount: number;
     readonly logicalBrickDimensions: readonly number[];
@@ -244,6 +266,13 @@ type StageCostQASolver = {
   readScalarIngressEventsQA(): Promise<readonly {
     readonly tile: number; readonly generation: number; readonly causeMask: number;
   }[]>;
+  readCandidateEffectsTransactionQA(): Promise<{
+    readonly vda: Readonly<Record<string, number>>;
+    readonly tfx: Readonly<Record<string, number>>;
+    readonly topology: readonly number[];
+    readonly manifest: readonly number[];
+    readonly isa?: readonly number[];
+  } | undefined>;
   readVelocityExtensionHeaderQA(): Promise<{
     readonly flags: number; readonly phase: number;
     readonly acceptedGeneration: number; readonly candidateGeneration: number;
@@ -261,12 +290,82 @@ type StageCostQASolver = {
     readonly acceptedOwner: Uint32Array; readonly velocityBits: Uint32Array;
   }>;
 };
+
+async function readFramePlanCensus(
+  device: GPUDevice,
+  solver: { readonly sparseAdaptiveGridSource?: {
+    readonly framePlan?: SparseCM12FramePlanSource;
+  } },
+) {
+  const source = solver.sparseAdaptiveGridSource?.framePlan;
+  assert.ok(source, "Sparse CM12 FPL1 source is unavailable");
+  const { layout } = source;
+  const wordCount = layout.totalWords - layout.baseWords;
+  const readback = device.createBuffer({
+    label: "Sparse CM12 FPL1 stage-cost census",
+    size: 4 * wordCount,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  try {
+    const encoder = device.createCommandEncoder({ label: "Sparse CM12 FPL1 census copy" });
+    encoder.copyBufferToBuffer(source.plan.buffer,
+      (source.plan.offset ?? 0) + 4 * layout.baseWords,
+      readback, 0, 4 * wordCount);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const words = new Uint32Array(readback.getMappedRange());
+    const h = SPARSE_CM12_FRAME_PLAN_HEADER;
+    const slot = words[h.currentSlot]!;
+    const slotBase = words[h.slot0Base + slot]! - layout.baseWords;
+    const brickBase = slotBase + SPARSE_CM12_FRAME_PLAN_SLOT_HEADER_WORDS;
+    const tileBase = brickBase + SPARSE_CM12_FRAME_PLAN_BRICK_WORDS
+      * layout.brickCapacity;
+    const stageTiles = Array.from({ length: 6 }, () => 0);
+    const executedTiles = Array.from({ length: 6 }, () => 0);
+    const originCauseTiles = Array.from({ length: 15 }, () => 0);
+    let magentaOriginTiles = 0;
+    let invalidBricks = 0;
+    for (let brick = 0; brick < layout.brickCapacity; brick += 1) {
+      const brickAt = brickBase + SPARSE_CM12_FRAME_PLAN_BRICK_WORDS * brick;
+      const flags = words[brickAt + SPARSE_CM12_FRAME_PLAN_BRICK.flags]!;
+      if ((flags & SPARSE_CM12_FRAME_PLAN_BRICK_FLAG.localFault) !== 0
+        || words[brickAt + SPARSE_CM12_FRAME_PLAN_BRICK.faultCode] !== 0) {
+        invalidBricks += 1;
+      }
+      for (let tile = 0; tile < layout.tilesPerBrick; tile += 1) {
+        const tileAt = tileBase + SPARSE_CM12_FRAME_PLAN_TILE_WORDS
+          * (brick * layout.tilesPerBrick + tile);
+        const packed = words[tileAt + SPARSE_CM12_FRAME_PLAN_TILE.packedStageMasks]!;
+        const origins = words[tileAt + SPARSE_CM12_FRAME_PLAN_TILE.packedCauseMasks]! & 0xffff;
+        if ((origins & ((1 << 11) | (1 << 12))) !== 0) magentaOriginTiles += 1;
+        for (let cause = 0; cause < originCauseTiles.length; cause += 1) {
+          if ((origins & (1 << cause)) !== 0) originCauseTiles[cause]! += 1;
+        }
+        for (let stage = 0; stage < 6; stage += 1) {
+          if ((packed & (1 << stage | 1 << (6 + stage))) !== 0) stageTiles[stage]! += 1;
+          if ((packed & (1 << (12 + stage))) !== 0) executedTiles[stage]! += 1;
+        }
+      }
+    }
+    return {
+      globalFault: words[h.faultCode]!, invalidBricks,
+      acceptedGeneration: words[h.acceptedGeneration]!, stageTiles, executedTiles,
+      magentaOriginTiles, originCauseTiles,
+    };
+  } finally {
+    if (readback.mapState === "mapped") readback.unmap();
+    readback.destroy();
+  }
+}
 const gitCommit = execFileSync("git", ["rev-parse", "HEAD"], {
   cwd: REPOSITORY_ROOT, encoding: "utf8",
 }).trim();
 const gitStatus = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
   cwd: REPOSITORY_ROOT, encoding: "utf8",
 });
+const sourceContentFingerprint = await fingerprintSparseCM12RepositorySources(
+  REPOSITORY_ROOT,
+);
 const pinnedBaselineSha256 = createHash("sha256").update(await readFile(
   new URL(`../${PINNED_BASELINE_PATH}`, import.meta.url),
 )).digest("hex");
@@ -335,18 +434,22 @@ try {
     brickFineResolution: String(brickFineResolution),
     presentationPageResolution: String(presentationPageResolution),
   });
-  const solver = transportExperiment === "baseline"
-    ? await adaptiveMassMethod.createSolverAsync!(
-      device, scene, "balanced", values, undefined, () => {})
-    : await WebGPUAdaptiveMassSolver.createTransportExperimentForQA(
-      transportExperiment, device, scene, "balanced", undefined,
-      adaptiveMassSolverOptions(values), () => {});
+  const solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
+    device, scene, "balanced", undefined, adaptiveMassSolverOptions(values), () => {});
   teardownSolver = solver;
+  // An armed lens changes how the advance is encoded — taps close passes and
+  // copy publications aside — so a measurement taken with one armed would be a
+  // measurement of the lens. Nothing here arms one; this is the guard that says
+  // so, and it also fails if the source starts arming itself.
+  assert.equal(solver.stageLensSource?.armed, undefined,
+    "stage-cost measurement requires every stage lens disarmed");
   const qaSolver = solver as typeof solver & StageCostQASolver;
   const workShape = qaSolver.readSparseWorkShapeQA();
   const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
 
   const stageSamples = new Map<string, number[]>();
+  const workChunkSamples = new Map<string, number[]>();
+  const stageChunkClosureErrors: number[] = [];
   const totals: number[] = [];
   const wallFrameSamples: number[] = [];
   const committedSamples: number[] = [];
@@ -397,7 +500,10 @@ try {
     readonly scalarAuthority: ScalarAuthorityHeader & { readonly stalled: boolean;
       readonly successorMatched: boolean; readonly valid: boolean };
     readonly scalarIngressEventCount: number;
+    readonly candidateEffects?: Awaited<ReturnType<
+      StageCostQASolver["readCandidateEffectsTransactionQA"]>>;
   }> = [];
+  const candidateTransferTimelines: Array<Record<string, unknown>> = [];
   let firstAuthorityFailure: Record<string, unknown> | undefined;
   let diagnosticFailure: string | undefined;
   let lastScalarAuthorityHeader: ScalarAuthorityHeader | undefined;
@@ -411,6 +517,7 @@ try {
   const [initialFrameControl, initialScalarAuthority] = await Promise.all([
     qaSolver.readFrameControlQA(), qaSolver.readScalarAuthorityHeaderQA(),
   ]);
+  let previousActivity = await solver.readGPUActivityPolicy();
   let priorFrameControlGeneration = initialFrameControl.acceptedGeneration;
   let priorScalarAuthorityGeneration = initialScalarAuthority.acceptedGeneration;
   lastScalarAuthorityHeader = {
@@ -427,6 +534,7 @@ try {
     if (debugProgress) process.stderr.write(`[stage-probe] ${message}\n`);
   };
   for (let frame = 1; frame <= maximumAdvances; frame += 1) {
+    const activityBeforeFrame = previousActivity;
     const wallFrameStarted_ms = performance.now();
     debug(`advance ${frame} begin`);
     while (!solver.advanceTo(frame * dt_s, [])) await new Promise(setImmediate);
@@ -436,10 +544,13 @@ try {
       wallFrameSamples.push(performance.now() - wallFrameStarted_ms);
     }
     debug(`advance ${frame} queue complete`);
-    const [frameControl, scalarAuthorityQA, scalarIngress] = await Promise.all([
+    const [frameControl, scalarAuthorityQA, scalarIngress, candidateEffects,
+      currentActivity] = await Promise.all([
       qaSolver.readFrameControlQA(), qaSolver.readScalarAuthorityHeaderQA(),
-      qaSolver.readScalarIngressHeaderQA(),
+      qaSolver.readScalarIngressHeaderQA(), qaSolver.readCandidateEffectsTransactionQA(),
+      solver.readGPUActivityPolicy(),
     ]);
+    previousActivity = currentActivity;
     debug(`advance ${frame} authority headers complete`);
     const expectedFrameControlGeneration = initialFrameControl.acceptedGeneration + frame;
     // SRR1 has no accepted construction result (generation 0); its first
@@ -484,6 +595,7 @@ try {
       scalarAuthority: { ...scalarAuthorityHeader, stalled: scalarAuthorityStalled,
         successorMatched: scalarAuthoritySuccessorMatched, valid: scalarAuthorityValid },
       scalarIngressEventCount: scalarIngress.eventCount,
+      candidateEffects,
     });
     priorFrameControlGeneration = frameControl.acceptedGeneration;
     priorScalarAuthorityGeneration = scalarAuthorityQA.acceptedGeneration;
@@ -575,12 +687,71 @@ try {
       continue;
     }
     const committed = committedThisFrame;
+    const candidateScope_ms = Object.fromEntries(CANDIDATE_TRANSFER_PHASE_LABELS.map(
+      (label) => [label, trace.phases.find((phase) => phase.label === label)?.duration_ms ?? 0],
+    ));
+    const deltaCount = candidateEffects?.manifest[10] ?? 0;
+    const deltaOffset = candidateEffects?.manifest[11] ?? 0;
+    const deltaLeaves = candidateEffects?.manifest.slice(deltaOffset,
+      deltaOffset + deltaCount) ?? [];
+    let constructionActivations = 0;
+    let cellCandidateStateWriteBytes = 0;
+    let faceCandidateStateWriteBytes = 0;
+    for (const leaf of deltaLeaves) {
+      const before = activityBeforeFrame.bricks[leaf];
+      const after = currentActivity.bricks[leaf];
+      if (!before || !after) continue;
+      const construction = !before.active && after.active
+        && before.acceptedResolution === after.acceptedResolution;
+      constructionActivations += construction ? 1 : 0;
+      if (after.active && !construction) {
+        cellCandidateStateWriteBytes += 24 * after.acceptedResolution ** 3;
+        faceCandidateStateWriteBytes += 24 * after.acceptedResolution ** 2;
+      } else if (!after.active && before.active) {
+        faceCandidateStateWriteBytes += 24 * brickFineResolution ** 2;
+      }
+    }
+    const candidateTotal_ms = Object.values(candidateScope_ms).reduce(
+      (sum, value) => sum + value, 0);
+    candidateTransferTimelines.push({
+      sampleId: trace.sampleId,
+      advance: frame,
+      committedBricks: committed,
+      topologyDeltaLeaves: deltaCount,
+      shadowCells: candidateEffects?.topology[18] ?? 0,
+      shadowRows: candidateEffects?.topology[19] ?? 0,
+      rootRequests: candidateEffects?.vda.rootInputCount ?? 0,
+      uniqueNewRoots: candidateEffects?.vda.newRootCount ?? 0,
+      scaEffects: candidateEffects?.tfx.scaCount ?? 0,
+      ptrEffects: candidateEffects?.tfx.ptrCount ?? 0,
+      iboClosureLeaves: candidateEffects?.isa?.[4] ?? 0,
+      work: {
+        constructionActivations,
+        fieldTransferWorkgroups: deltaCount,
+        fieldTransferLaneInvocations: 64 * deltaCount,
+        faceTransferWorkgroups: deltaCount,
+        faceSideLaneInvocations: 6 * 64 * deltaCount,
+        faceValidationLaneInvocations: 64 * Math.ceil(
+          (candidateEffects?.topology[19] ?? 0) / 64),
+        iboConstructionRootInvocations: deltaCount,
+        iboValidationLaneInvocations: 64 * deltaCount,
+        cellCandidateStateWriteBytes,
+        faceCandidateStateWriteBytes,
+        candidateStateWriteBytes: cellCandidateStateWriteBytes
+          + faceCandidateStateWriteBytes,
+      },
+      scopes_ms: candidateScope_ms,
+      candidateTotal_ms,
+      scopeReconciliationError_ms: 0,
+      gpuTotal_ms: trace.total_ms,
+    });
     const costs = fluidPipelinePhaseCosts(trace);
     const stageDurations = new Map<string, number>();
     for (const stage of ADAPTIVE_MASS_FLUID_PIPELINE.stages) {
       const measurement = measureFluidPipelineStage(
         stage, ADAPTIVE_MASS_FLUID_PIPELINE.stages, costs, trace.total_ms, "on");
       stageDurations.set(stage.id, measurement.duration_ms ?? 0);
+      if (stage.costInsideStage) continue;
       const changed = stage.id === "pressure-topology"
         ? pressureTopologyInputChanged : committed > 0;
       const key = changed ? `${stage.id}|changed` : `${stage.id}|quiescent`;
@@ -592,7 +763,15 @@ try {
     }
     targetSamples.push(TARGET_STAGE_IDS.reduce((sum, id) =>
       sum + (stageDurations.get(id) ?? 0), 0));
+    const frameChunkDurations = new Map<string, number>();
     for (const phase of trace.phases) {
+      const chunk = GPU_WORK_CHUNK_BY_LABEL.get(phase.label);
+      assert.ok(chunk, `GPU phase ${phase.label} has no concrete work-chunk owner`);
+      const chunkBucket = workChunkSamples.get(chunk.id) ?? [];
+      chunkBucket.push(phase.duration_ms);
+      workChunkSamples.set(chunk.id, chunkBucket);
+      frameChunkDurations.set(chunk.rollupStage,
+        (frameChunkDurations.get(chunk.rollupStage) ?? 0) + phase.duration_ms);
       const changed = phase.label === PRESSURE_TOPOLOGY_PHASE_LABEL
         ? pressureTopologyInputChanged : committed > 0;
       const key = changed ? `${phase.label}|changed` : `${phase.label}|quiescent`;
@@ -601,6 +780,11 @@ try {
         bucket.push(phase.duration_ms);
         phaseSamples.set(name, bucket);
       }
+    }
+    for (const stage of ADAPTIVE_MASS_FLUID_PIPELINE.stages) {
+      if (stage.costInsideStage) continue;
+      stageChunkClosureErrors.push((stageDurations.get(stage.id) ?? 0)
+        - (frameChunkDurations.get(stage.id) ?? 0));
     }
     const accounted_ms = trace.phases.reduce((sum, phase) => sum + phase.duration_ms, 0);
     nonPressureSamples.push(trace.phases.reduce((sum, phase) =>
@@ -615,6 +799,7 @@ try {
         const measurement = measureFluidPipelineStage(
           stage, ADAPTIVE_MASS_FLUID_PIPELINE.stages, cpuCosts, cpuTrace.total_ms, "on");
         cpuDurations.set(stage.id, measurement.duration_ms ?? 0);
+        if (stage.costInsideStage) continue;
         const duration = measurement.duration_ms ?? 0;
         const changed = stage.id === "pressure-topology"
           ? pressureTopologyInputChanged : committed > 0;
@@ -715,18 +900,46 @@ try {
     const ty = Math.floor(local / tilesPerAxis) % tilesPerAxis;
     scalarEventYHistogram[by * tilesPerAxis + ty]! += 1;
   }
+  const representationInvariants = [
+    "leafCellRangesExactlyPartitionAcceptedCells",
+    "rowRequirementsExactlyDescribeAcceptedRows",
+    "manifestExactlyMatchesActiveLeaves",
+    "topologyDeltaExactlyMatchesScheduledLeaves",
+  ] as const;
+  const failedRepresentationInvariants = representationInvariants.filter(
+    (name) => adaptiveRepresentation[name] !== true);
+  if (!diagnosticFailure && failedRepresentationInvariants.length > 0) {
+    diagnosticFailure = `accepted representation invariant failure: ${
+      failedRepresentationInvariants.join(", ")}; receipt=${
+      JSON.stringify(adaptiveRepresentation)}`;
+  }
   if (!diagnosticFailure && cpuTargetSamples.length !== sampled) {
     diagnosticFailure = `matched ${cpuTargetSamples.length}/${sampled} CPU traces by sample id`;
   }
-  if (!diagnosticFailure
-    && !closureErrors.every((error) => Math.abs(error) < 1e-6)) {
-    diagnosticFailure = `hardware stage partition did not close exactly; errors=${
-      closureErrors.join(",")}`;
+  if (!diagnosticFailure && (!closureErrors.every((error) => Math.abs(error) < 1e-6)
+    || !stageChunkClosureErrors.every((error) => Math.abs(error) < 1e-6))) {
+    diagnosticFailure = `hardware timing partition did not close exactly; frameErrors=${
+      closureErrors.join(",")}; stageChunkErrors=${stageChunkClosureErrors.join(",")}`;
   }
 
   const stages = [...stageSamples].map(([id, samples]) => ({
     stage: id, median_ms: Number(median(samples).toFixed(4)),
   })).sort((left, right) => right.median_ms - left.median_ms);
+  const workChunks = ADAPTIVE_MASS_GPU_WORK_CHUNKS.map((chunk) => {
+    const samples = workChunkSamples.get(chunk.id) ?? [];
+    return {
+      chunk: chunk.id,
+      stage: chunk.rollupStage,
+      residentStage: chunk.residentStage,
+      label: chunk.phase.label,
+      kind: chunk.kind,
+      median_ms: samples.length === 0 ? 0 : Number(median(samples).toFixed(4)),
+      samples: samples.length,
+    };
+  }).sort((left, right) => right.median_ms - left.median_ms);
+  const sharedStages = ADAPTIVE_MASS_FLUID_PIPELINE.stages
+    .filter((stage) => stage.costInsideStage)
+    .map((stage) => ({ stage: stage.id, costInsideStage: stage.costInsideStage! }));
   const total = median(totals);
   const pressure = stages.find((stage) => stage.stage === "pressure-solve")?.median_ms ?? 0;
   const nonPressureMedian_ms = median(nonPressureSamples);
@@ -735,8 +948,7 @@ try {
   const targetP95_ms = percentile(targetSamples, 0.95);
   const frameAuthorityStage = stages.find(
     (stage) => stage.stage === "transport-velocity-extension");
-  const frameAuthorityCPU = [...cpuPhaseSamples].find(
-    ([label]) => label === "Transport velocity extension into the sparse air band");
+  const frameAuthorityCPUSamples = cpuStageSamples.get("transport-velocity-extension");
   const targetConfiguration = (sceneName === "ocean" || sceneName === "ocean-seiche")
     && brickFineResolution === 16 && presentationPageResolution === 16;
   const nonPressureGate = {
@@ -749,8 +961,11 @@ try {
     passed: targetConfiguration && sampled >= 24 && nonPressureP95_ms < maximumTarget_ms,
   };
   const sharpeningCellAuthority = await qaSolver.readSharpeningCellAuthorityQA();
+  const transportProfile = await qaSolver.readPhase1TransportProfileQA?.();
+  const framePlan = await readFramePlanCensus(device, solver);
   const report = {
     probe: "sparse-cm12-stage-cost", scene: sceneName, samples: seen,
+    warmupSamples: warmup,
     diagnostic: {
       purpose: "FCA1/SRR1/VEX1 observability; not performance acceptance",
       passed: diagnosticFailure === undefined,
@@ -765,7 +980,7 @@ try {
     configuration: {
       brickFineResolution,
       presentationPageResolution,
-      transportExperiment,
+      transport: "compiled-topology",
       refinementRegion: minimumCellSize === 0 ? undefined : {
         scope: regionScope,
         minimumCellSize_cells: minimumCellSize,
@@ -778,17 +993,21 @@ try {
       dt_s,
       captureGap_ms,
       measurementSource: "gpu-hardware-timestamp",
+      timestampQuantum_us: 65.536,
     },
     workShape,
     scalarEventWorkShape: {
       count: scalarIngressEvents.length,
       yTileHistogram: scalarEventYHistogram,
     },
+    framePlan,
+    transportProfile,
     adaptiveRepresentation,
     provenance: {
       gitCommit,
       gitDirty: gitStatus.trim().length > 0,
       gitStatusSha256: createHash("sha256").update(gitStatus).digest("hex"),
+      sourceContentFingerprint,
       backend: process.env.FLUID_WEBGPU_BACKEND ?? "metal",
       methodProfile: "balanced",
       resolvedMethodValues: values,
@@ -822,6 +1041,7 @@ try {
       gate: nonPressureGate,
     },
     committedBricksPerFrame: committedSamples,
+    candidateTransferTimelines,
     pressureTopologyInputChangedPerFrame: pressureTopologyInputChangedSamples,
     pressureTopologyWork: pressureTopologyWorkSamples,
     pressureCutoverReceiptGate: {
@@ -844,6 +1064,8 @@ try {
     cpuStages: [...cpuStageSamples].map(([id, samples]) => ({
       stage: id, median_ms: Number(median(samples).toFixed(4)), samples: samples.length,
     })).sort((left, right) => right.median_ms - left.median_ms),
+    workChunks,
+    sharedStages,
     optimizationTarget: {
       stageIds: TARGET_STAGE_IDS,
       includesGammaDiffusion: true,
@@ -856,12 +1078,11 @@ try {
     frameAuthority: {
       abi: "FCA1",
       scheduling: "GPU-owned fixed indirect work/no-work families",
-      // FCA1 is intentionally coalesced into the velocity-extension phase;
-      // this is a conservative phase upper bound, not a fabricated isolated
-      // timing for four singleton authority dispatches and one device copy.
+      // This remains the whole concrete resident-stage rollup. Its disjoint
+      // FCA1, VEX1, SRR1-plan and packet-authority terms are in workChunks.
       transportVelocityExtensionUpperBound_ms: frameAuthorityStage?.median_ms,
-      cpuTransportVelocityExtensionUpperBound_ms: frameAuthorityCPU
-        ? Number(median(frameAuthorityCPU[1]).toFixed(4)) : undefined,
+      cpuTransportVelocityExtensionUpperBound_ms: frameAuthorityCPUSamples
+        ? Number(median(frameAuthorityCPUSamples).toFixed(4)) : undefined,
       hostFluidAuthority: finalInfo?.hostFluidAuthority,
       hostSimulationSizedWorkItems: finalInfo?.hostSimulationSizedWorkItems,
       hostSchedulingUsesReadback: finalInfo?.hostSchedulingUsesReadback,
@@ -878,6 +1099,7 @@ try {
     },
     closure: {
       maximumAbsoluteError_ms: Math.max(...closureErrors.map(Math.abs)),
+      maximumStageChunkError_ms: Math.max(...stageChunkClosureErrors.map(Math.abs)),
       exactWithin_ms: 1e-6,
     },
     terminalWork: finalInfo ? {

@@ -3,6 +3,7 @@ import type {
   MethodParamValues,
   SimulationMethod,
 } from "../../core/method-contract";
+import { SPARSE_CM12_LENSES } from "./sparse-cm12-stage-lenses";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
 import { SPARSE_CM12_DIRTY_OVERLAY_MODES } from "../../core/sparse-cm12-dirty-visualizations";
 import { adaptiveMassDiagnosticRows } from "./adaptive-mass-diagnostics";
@@ -466,6 +467,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   // authority. A bodyless paper-scale scene omits that substantial arena, so
   // crossing between an empty and non-empty roster rebuilds once.
   capabilities: { volumeRendering: true },
+  stageLenses: SPARSE_CM12_LENSES,
   supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure",
     "tracers", "face-velocity",
     ...SPARSE_CM12_DIRTY_OVERLAY_MODES,

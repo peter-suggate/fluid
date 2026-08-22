@@ -4,9 +4,13 @@ import test from "node:test";
 import {
   ADAPTIVE_MASS_ADVANCE_PHASE,
   ADAPTIVE_MASS_FLUID_PIPELINE,
+  ADAPTIVE_MASS_GPU_WORK_CHUNKS,
   ADAPTIVE_MASS_RESIDENT_STAGE_PHASE,
 } from "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
-import { SPARSE_CM12_RESIDENT_STAGES } from
+import {
+  SPARSE_CM12_RESIDENT_STAGES,
+  SPARSE_CM12_RESIDENT_WORK_CHUNKS,
+} from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 /**
@@ -52,11 +56,29 @@ test("every stage the encoder emits has a phase of its own", () => {
 });
 
 test("the SIM diagram names every advance seam, and only those", () => {
-  const emitted = SPARSE_CM12_RESIDENT_STAGES
-    .map((stage) => ADAPTIVE_MASS_RESIDENT_STAGE_PHASE[stage].label);
+  const emitted = ADAPTIVE_MASS_GPU_WORK_CHUNKS.map((chunk) => chunk.phase.label);
   const named = ADAPTIVE_MASS_FLUID_PIPELINE.stages.flatMap((stage) => stage.phaseLabels);
   assert.equal(new Set(named).size, named.length, "no two nodes may claim one seam");
   assert.deepEqual([...named].sort(), [...emitted].sort());
+});
+
+test("resident work chunks are closed exactly once", () => {
+  const body = residentStageSource();
+  const closed = [...body.matchAll(/closeWorkChunk\("([a-z0-9-]+)"\)/g)]
+    .map((match) => match[1]);
+  assert.deepEqual(closed, [...SPARSE_CM12_RESIDENT_WORK_CHUNKS]);
+});
+
+test("every timestamp phase has one concrete owner", () => {
+  const labels = ADAPTIVE_MASS_GPU_WORK_CHUNKS.map((chunk) => chunk.phase.label);
+  assert.equal(new Set(labels).size, labels.length);
+  for (const chunk of ADAPTIVE_MASS_GPU_WORK_CHUNKS) {
+    const stage = ADAPTIVE_MASS_FLUID_PIPELINE.stages.find(
+      (candidate) => candidate.id === chunk.rollupStage);
+    assert.ok(stage, `${chunk.id} names missing rollup ${chunk.rollupStage}`);
+    assert.ok(stage.phaseLabels.includes(chunk.phase.label),
+      `${chunk.id} is absent from its ${chunk.rollupStage} rollup`);
+  }
 });
 
 test("a node without a seam of its own says whose passes carry it", () => {
