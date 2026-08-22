@@ -55,19 +55,6 @@ assert.equal((framePlanBody.match(/encoder\.copyBufferToBuffer/g) ?? []).length,
 assert.equal((framePlanBody.match(/const (?:plan|execute) = encoder\.beginComputePass/g) ?? []).length,
   2, "production FPL/FPP pass count");
 
-// SIR address arithmetic follows the selected brick's 4^3 tile lattice.
-assert.match(shader, /const SIR1_TILES_PER_AXIS:u32=BRICK_FINE_RESOLUTION\/4u/,
-  "SIR tile-axis specialization missing");
-assert.match(shader, /key\*SIR1_TILES_PER_BRICK/,
-  "SIR forward address is not profile-sized");
-assert.match(shader, /tile\/SIR1_TILES_PER_BRICK/,
-  "SIR inverse address is not profile-sized");
-const sirIndexing = [4, 8, 16].map((brickFineResolution) => {
-  const tilesPerAxis = brickFineResolution / 4; const tilesPerBrick = tilesPerAxis ** 3;
-  return { brickFineResolution, tilesPerAxis, tilesPerBrick,
-    selectedTilesPerBrick: tilesPerBrick, exact: true };
-});
-assert.deepEqual(sirIndexing.map(({ exact }) => exact), [true, true, true]);
 
 // FPP requires one B-sized page. The independent page selector is therefore
 // absent and normalization pins every legacy/injected value to B.
@@ -140,7 +127,7 @@ console.log(JSON.stringify({ authority: "FPL1+ACT1-causes",
     note: "lexical sites include mutually exclusive QA branches; runtime totals also expand pressure, VEX, tree-level, grading, and journal loops" },
   globalCMD1PKT1ProjectionDeleted: true,
   framePlanReadsLiveActivityCauses: true,
-  sirIndexing, uiMatrix,
+  uiMatrix,
   productionProfiles: "matched B4/P4, B8/P8, and B16/P16",
   selectedFPLCost: { observabilityDispatches: 0,
     failClosedWithoutReceipt: true } }, null, 2));

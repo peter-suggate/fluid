@@ -95,8 +95,6 @@ export interface GPUEulerianInfo {
     readonly currentEndFrameCommittedBrickCount: number;
     readonly acceptedCellCount: number;
     readonly acceptedRowCount: number;
-    readonly temporalScalarCellCount: number;
-    readonly temporalScalarRowCount: number;
     readonly pressureCellCount: number;
     readonly pressureActiveRowCount: number;
     readonly pcmCellDirtyLeafCount: number;
@@ -157,10 +155,6 @@ export interface GPUEulerianInfo {
     readonly expectedProducerReceipts: number;
     readonly coveredProducerReceipts: number;
   };
-  /** Exact noncanonical scalar cells/rows in the shared temporal worklists. */
-  adaptiveTemporalScalarCellCount?: number;
-  adaptiveTemporalScalarRowCount?: number;
-  adaptiveTemporalScalarRejectionMask?: number;
   /** Wet-domain storage residency, independent from the narrow surface band. */
   fluidBulkBrickResidentCount?: number;
   fluidBulkBrickHaloCount?: number;

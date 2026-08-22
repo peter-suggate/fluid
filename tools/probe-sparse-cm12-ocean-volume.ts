@@ -90,9 +90,9 @@ try {
       assert.equal(solver.advanceTo(step * dt_s, []), true,
         `ocean step ${step} did not encode`);
       await device.queue.onSubmittedWorkDone();
-      const [fields, activity, stats, frameControl, scalarAuthority, pcm] = await Promise.all([
+      const [fields, activity, stats, frameControl, finalScalarMasks, pcm] = await Promise.all([
         solver.readDiagnosticFields(), solver.readGPUActivityPolicy(), solver.readStats(),
-        solver.readFrameControlQA(), solver.readScalarAuthorityHeaderQA(),
+        solver.readFrameControlQA(), solver.readFinalScalarMaskHeaderQA(),
         solver.readPressureCanonicalMembershipQA(),
       ]);
       const density = densityReceipt(fields.density);
@@ -152,7 +152,7 @@ try {
         frameControl,
         scheduledTransitions,
         faultCellRanges,
-        scalarAuthority,
+        finalScalarMasks,
         pcm: {
           mode: pcm.mode,
           cell: {

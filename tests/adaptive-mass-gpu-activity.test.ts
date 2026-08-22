@@ -109,23 +109,18 @@ test("resident sharpening implements CM12 Algorithm 2 trace and scatter", () => 
     "the paper trace must not fall back to the old one-face/capacity shortcut");
 });
 
-test("resident sharpening consumes producer-authored air-side packets with full receiver closure", () => {
-  const authorityBegin = webgpuSparseCM12ResidentWGSL.indexOf(
-    "fn beginSharpeningCellAuthority",
-  );
-  const authorityEnd = webgpuSparseCM12ResidentWGSL.indexOf(
-    "fn beginSparseCM12SRR1Ingress", authorityBegin,
-  );
-  assert.ok(authorityBegin >= 0 && authorityEnd > authorityBegin,
-    "SCA1 authority must be independently inspectable");
-  const authority = webgpuSparseCM12ResidentWGSL.slice(authorityBegin, authorityEnd);
-  assert.match(authority, /cm12FCCandidateGeneration\(\)/,
-    "SCA1 must use the per-frame control epoch");
-  assert.match(authority,
+test("resident sharpening consumes a dynamic mask over shared TEI packets", () => {
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /cm12TransportSharpeningMaskPublish\(cm12TransportStagedPacketId,lane,id/,
+    "the trace-family producer must publish sharpening membership in TEI packet space");
+  assert.match(webgpuSparseCM12ResidentWGSL,
     /rho>0\.0&&rho<=CM12_LIQUID_ISOVALUE/,
-    "the paper's positive air-side density must be the source characteristic");
-  assert.match(authority, /SCA1_CELL_LIST\+slot\],rank/,
-    "the existing transport producer must publish compact work packets directly");
+    "the paper's positive air-side density must remain the source characteristic");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /tpm1SharpeningLaneMarked\(packet,lane\)/,
+    "sharpening consumers must read the shared packet mask");
+  assert.doesNotMatch(webgpuSparseCM12ResidentWGSL, /SCA1|sca1/,
+    "private sharpening catalogues must not return");
 
   const source = readFileSync(new URL(
     "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
@@ -136,8 +131,10 @@ test("resident sharpening consumes producer-authored air-side packets with full 
   assert.ok(stageBegin >= 0 && stageEnd > stageBegin,
     "surface stage must be independently inspectable");
   const stage = source.slice(stageBegin, stageEnd);
-  assert.match(stage, /dispatchSharpeningCellAuthority\("prepareSharpeningField"\)/);
-  assert.match(stage, /dispatchSharpeningCellAuthority\("scatterSharpeningMass"\)/);
+  assert.match(stage,
+    /dispatchTransportPacket\("prepareSharpeningField", "traceGammaAndBeta"\)/);
+  assert.match(stage,
+    /dispatchTransportPacket\("scatterSharpeningMass", "traceGammaAndBeta"\)/);
   assert.match(stage, /dispatchAccepted\("finalizeSharpening", "cell"\)/,
     "all exact traced receivers must remain inside the conservative finalizer");
   assert.doesNotMatch(stage, /pressure(?:Cell|Row|Membership)/,
@@ -157,99 +154,22 @@ test("resident face preparation preserves the dry extrapolated velocity band", (
     "density cannot decide whether a dry receiver face carries front velocity");
 });
 
-test("resident scalar reuse consumes a receiver-complete saturated departure certificate", () => {
-  assert.match(webgpuSparseCM12ResidentWGSL,
-    /const EXP_MASS_SWEPT_CLEAN:bool=true/,
-    "the physical bulk certificate must be active in the production specialization");
-  const begin = webgpuSparseCM12ResidentWGSL.indexOf(
-    "fn transportCharacteristicStencilClearance",
-  );
-  const end = webgpuSparseCM12ResidentWGSL.indexOf(
-    "var<workgroup>sirLocalBeta", begin,
-  );
-  assert.ok(begin >= 0 && end > begin, "bulk transport certificate must be inspectable");
-  const certificate = webgpuSparseCM12ResidentWGSL.slice(begin, end);
-  assert.match(certificate, /abs\(state\[sourceDensity\(\)\+cell\]-1\.0\)>saturatedTolerance/);
-  assert.match(certificate, /p\.frame\.x\*maximumDelta<=0\.002\*supportingWidth/,
-    "qualification must use local physical deformation rather than absolute speed");
-
-  const closureBegin = webgpuSparseCM12ResidentWGSL.indexOf(
-    "fn sirPersistentBulkReceiverClosure",
-  );
-  const closureEnd = webgpuSparseCM12ResidentWGSL.indexOf(
-    "fn sirRecordFinalScalarProducer", closureBegin,
-  );
-  assert.ok(closureBegin >= 0 && closureEnd > closureBegin,
-    "receiver closure must be independently inspectable");
-  const closure = webgpuSparseCM12ResidentWGSL.slice(closureBegin, closureEnd);
-  assert.match(closure, /sirFinalPersistentBulk\(other\)/);
-  assert.match(closure, /sideMask==63u/,
-    "all six accepted incidence sides must be physically closed");
-  assert.doesNotMatch(closure, /pressure(?:Cell|Row|Membership)/,
-    "scalar reuse must never narrow or consult pressure membership");
-
-  const traceBegin = webgpuSparseCM12ResidentWGSL.indexOf("fn traceGammaAndBeta");
-  const traceEnd = webgpuSparseCM12ResidentWGSL.indexOf(
-    "fn scatterDensityDeficit", traceBegin,
-  );
-  const trace = webgpuSparseCM12ResidentWGSL.slice(traceBegin, traceEnd);
-  assert.match(trace, /departure=traceDeparture/,
-    "production conservative transport must retain its established characteristic");
-  assert.doesNotMatch(trace, /traceTransportCharacteristic|traceArrival/,
-    "authority publication must not add another characteristic trace");
-});
-
-test("resident activity consumes scalar-authored brick packets", () => {
-  assert.match(webgpuSparseCM12ResidentWGSL,
-    /const EXP_ACTIVITY_SCALAR_BRICKS:bool=true/,
-    "brick-level scalar activity publication must be active in production");
-  const compareBegin = webgpuSparseCM12ResidentWGSL.indexOf(
-    "fn compareSparseCM12MassResult",
-  );
-  const compareEnd = webgpuSparseCM12ResidentWGSL.indexOf(
-    "fn advanceTracers", compareBegin,
-  );
-  assert.ok(compareBegin >= 0 && compareEnd > compareBegin,
-    "scalar comparison producer must be independently inspectable");
-  const compare = webgpuSparseCM12ResidentWGSL.slice(compareBegin, compareEnd);
-  assert.match(compare, /incrementalActivityMarkStableTileBrick\(tile,cellBrick\(owner\)/,
-    "one scalar workgroup must publish its accepted brick directly");
-  assert.doesNotMatch(compare, /pressure(?:Cell|Row|Membership)/,
-    "scalar-authored activity must not narrow or consult pressure membership");
-
-  const source = readFileSync(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
-    import.meta.url,
-  ), "utf8");
-  const activityBegin = source.indexOf('stage("activity-measurement"');
-  const activityEnd = source.indexOf('stage("resolution-planning"', activityBegin);
-  assert.ok(activityBegin >= 0 && activityEnd > activityBegin,
-    "activity stage must be independently inspectable");
-  const activity = source.slice(activityBegin, activityEnd);
-  assert.match(activity,
-    /if \(!scalarBrickActivity\) \{\s*dispatchTemporalCell\("markIncrementalActivityTemporalCells"\)/,
-    "production must omit the broad temporal-cell discovery dispatch");
-  assert.match(activity, /dispatchActivity\("measureBrickActivity"\)/,
-    "the compact brick packet remains the measurement authority");
-});
-
 test("resident gamma diffusion uses conservative row-owned snapshot iterations", () => {
   const begin = webgpuSparseCM12ResidentWGSL.indexOf("fn scatterGammaRow");
   const end = webgpuSparseCM12ResidentWGSL.indexOf("fn conditionedDensity", begin);
   assert.ok(begin >= 0 && end > begin, "gamma transaction must be inspectable");
   const kernel = webgpuSparseCM12ResidentWGSL.slice(begin, end);
-  assert.match(kernel, /acceptedTemplateRowInvocation\(gid\.x\)/,
-    "each physical composite row must own its endpoint pairs once");
-  assert.match(kernel, /atomicAdd\(&conditioning\[negative\],rhoReceipt\)/);
-  assert.match(kernel, /atomicAdd\(&conditioning\[positive\],-rhoReceipt\)/);
-  assert.match(kernel, /atomicAdd\(&conditioning\[p\.counts\.x\+negative\],gammaReceipt\)/);
-  assert.match(kernel, /atomicAdd\(&conditioning\[p\.counts\.x\+positive\],-gammaReceipt\)/,
-    "the QA oracle must retain the exactly antisymmetric fixed-point receipt path");
-  assert.match(kernel, /writeGammaPair\(pair,rhoReceipt,gammaReceipt\)/,
-    "production must materialize each immutable pair receipt once");
-  assert.match(kernel, /gammaCellPairIncidence\(at\)/);
-  assert.match(kernel, /candidateState\[3u\*pair\+2u\]/,
-    "cell gathers must reject packets outside the current topology generation");
+  assert.match(webgpuSparseCM12ResidentWGSL,
+    /scatterSparseCM12DynamicGammaSnapshotRows/,
+    "shared DCA1 row packets must own each physical row once");
+  assert.doesNotMatch(kernel, /acceptedTemplateRowInvocation|gammaPair|tra1/,
+    "the full-row scan and private pair catalogues must not return");
+  assert.match(kernel, /negativeCount\*positiveCount/,
+    "row terms must preserve the physical subface-pair area split");
+  assert.match(kernel, /atomicAdd\(&conditioning\[negative\],rhoReceipt\)/,
+    "production must publish exact fixed-point receipts to the negative endpoint");
+  assert.match(kernel, /atomicAdd\(&conditioning\[positive\],-rhoReceipt\)/,
+    "the opposite endpoint must receive the exact inverse receipt");
   assert.match(kernel, /state\[outputRho\+cell\]=ownRho\+rhoReceipt\*inverseVolume/,
     "the paired density receipt must be resolved by physical cell volume");
   assert.doesNotMatch(webgpuSparseCM12ResidentWGSL,
@@ -260,14 +180,20 @@ test("resident gamma diffusion uses conservative row-owned snapshot iterations",
     "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
     import.meta.url,
   ), "utf8");
-  assert.match(source, /const legacyGamma = \["legacy-owner-hash"/,
-    "capacity clears must exist only in construction-time equivalence oracles");
   assert.match(source, /gamma needs neither global accumulator atomics nor domain-sized clears/);
-  assert.match(source,
-    /dispatchAccepted\("scatterGammaSnapshot", "row"\);\s*dispatchAccepted\("finalizeGammaSnapshot", "cell"\)/);
-  assert.match(source,
-    /dispatchAccepted\("scatterGammaRefinement", "row"\);\s*dispatchAccepted\("finalizeGammaRefinement", "cell"\)/,
+  const gammaBegin = source.indexOf('stage("gamma-diffusion"');
+  const gammaEnd = source.indexOf('stage("surface-sharpening"', gammaBegin);
+  assert.ok(gammaBegin >= 0 && gammaEnd > gammaBegin,
+    "gamma host stage must be independently inspectable");
+  const gammaStage = source.slice(gammaBegin, gammaEnd);
+  assert.doesNotMatch(source, /legacyGamma/);
+  assert.match(gammaStage,
+    /dispatchDynamicClosure\("scatterSparseCM12DynamicGammaSnapshotRows", 1\);\s*dispatchAccepted\("finalizeGammaSnapshot", "cell"\)/);
+  assert.match(gammaStage,
+    /dispatchDynamicClosure\("scatterSparseCM12DynamicGammaRefinementRows", 1\);\s*dispatchAccepted\("finalizeGammaRefinement", "cell"\)/,
     "a second stable snapshot iteration must recover paper-step dam-front conditioning");
+  assert.match(gammaStage, /dispatchDynamicClosure\("clearSparseCM12DynamicRows", 1\)/,
+    "the shared dynamic row mask must be cleared after both gamma phases");
 });
 
 test("resident D4 preservation has disjoint density and gamma scratch", () => {
@@ -706,7 +632,7 @@ test("Sparse CM12 exposes normalized structural and live candidate policy contro
   assert.ok(!ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("receiverFloor" as never),
     "the accepted receiver floor must rebuild rather than pretend to update live");
   assert.match(stage.tip.summary,
-    /sends deeply submerged bricks directly to the coarsest level permitted by the accepted 2:1-closed/);
+    /sends deeply submerged bricks to the coarsest rung the 2:1-closed ladder permits/);
 });
 
 test("GPU candidate levels close the full 1/2/4/8 ladder to 2:1", () => {

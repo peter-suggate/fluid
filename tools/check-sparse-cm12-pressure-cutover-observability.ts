@@ -70,7 +70,6 @@ const pcm = { cell: { phase: 1, fault: 0, firstFault: 0xffff_ffff, dirtyCount: 1
 row: { phase: 1, fault: 0, firstFault: 0xffff_ffff, dirtyCount: 1,
   totalCount: 40, candidateGeneration: 9, acceptedGeneration: 9 } };
 const work = { acceptedCellCount: 20, acceptedRowCount: 40,
-  temporalScalarCellCount: 2, temporalScalarRowCount: 3,
   pressureCellCount: 18, pressureActiveRowCount: 35, pcm, authorities: authorities() };
 const attributed = sparseCM12PressureTopologyAttribution({
   prior: { encodedStep: 9, topologyGeneration: 17, committedBrickCount: 2 },

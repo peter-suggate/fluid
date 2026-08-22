@@ -1283,13 +1283,36 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-hover-chip span { color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
 .editor-hover-chip small { color: var(--dim); font: var(--text-micro); }
 
+/* One card, two columns: the rail of standing facts and the side column
+   whatever is open occupies. The frame — border, frost, shadow, radius — lives
+   here so the two read as one panel rather than as a panel with a satellite,
+   and the width is the columns' business rather than declared, because the
+   resting panel is one column and only grows when something is opened. Height
+   is the anchoring hook's: it hands down a container-derived `max-height`, the
+   columns stretch to it, and each scrolls its own overflow — so a long field
+   list never drags the setup rows past the reader.
+
+   `overflow: hidden` is the rounded corners; nothing here scrolls. */
+.fluid-field-flyout { position: absolute; z-index: 12; display: flex; align-items: stretch; overflow: hidden; border: 1px solid var(--line); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost); border-radius: var(--radius-s); --control-height: 22px; --control-font-size: var(--size-2); --control-inline-padding: 6px; }
 /* Wide enough that the longest authored parameter label ("Pressure iteration
    budget") ellipsizes rather than pushing the panel sideways, and `clip` on the
    inline axis so nothing ever can: a scene overlay that grew a horizontal
-   scrollbar was reading as a window, not as chrome on the image. Height is the
-   anchoring hook's business — it hands down a container-derived `max-height` —
-   so all this owes it is a scroll that stays vertical and thin. */
-.fluid-field-flyout { position: absolute; z-index: 12; display: grid; gap: 6px; align-content: start; width: 200px; padding: 7px; overflow-x: clip; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost); border-radius: var(--radius-s); scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; --control-height: 22px; --control-font-size: var(--size-2); --control-inline-padding: 6px; }
+   scrollbar was reading as a window, not as chrome on the image. */
+.fluid-field-rail { display: grid; flex: none; gap: 6px; align-content: start; width: 200px; min-height: 0; padding: 7px; overflow-x: clip; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+/* Narrower than the rail on purpose: the rail is the panel and this is what it
+   opened, so a column that matched it would read as a second panel of equal
+   standing. The hairline is the same one that separates the rail's own groups,
+   turned on its side. */
+.fluid-field-aside { display: grid; flex: none; gap: 6px; align-content: start; width: 190px; min-height: 0; padding: 7px; overflow-x: clip; overflow-y: auto; overscroll-behavior: contain; border-left: 1px solid var(--line); scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.fluid-field-aside-head { display: flex; align-items: baseline; gap: 5px; }
+.fluid-field-aside-head h4 { flex: 1; min-width: 0; margin: 0; overflow: hidden; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wider); text-transform: uppercase; text-overflow: ellipsis; white-space: nowrap; }
+.fluid-field-aside-head button { flex: none; padding: 0 2px; border: none; background: transparent; color: var(--dim); font: var(--text-label); line-height: 1; cursor: pointer; }
+.fluid-field-aside-head button:hover { color: var(--accent); }
+/* The column is already a scroller of a known height, so a list inside it caps
+   itself against nothing and simply fills what it was given. */
+.fluid-field-aside .fluid-field-options { max-height: none; margin-top: 0; overflow: visible; }
+/* 190px will not hold a sentence and a button side by side. */
+.fluid-field-aside .fluid-field-film { display: grid; gap: 4px; justify-items: start; }
 .fluid-field-plane { display: flex; gap: 3px; }
 .fluid-field-plane button { flex: 1; min-width: 0; height: 19px; border: 1px solid var(--line); border-radius: var(--radius-s); background: transparent; color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); cursor: pointer; }
 .fluid-field-plane button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent-line); }
@@ -1323,8 +1346,9 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .pressure-film-caption code { color: var(--ink); font: var(--text-tag); }
 .pressure-film-caption em { color: var(--ok, #4c9); font-style: normal; }
 /* Nine rows exactly — 20px each on a 2px gap — so the list stops on a row edge
-   instead of slicing one in half, which is what a rounded max-height did. It
-   only exists while the disclosure above it is open. */
+   instead of slicing one in half, which is what a rounded max-height did. The
+   cap is for the rail, where this list is the stage roster; in the side column
+   the column is already the scroller and the rule above lifts it. */
 .fluid-field-options { display: grid; gap: 2px; max-height: 196px; margin-top: 5px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
 .fluid-field-options button { display: flex; align-items: center; gap: 6px; min-height: 20px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
 .fluid-field-options button:hover { color: var(--accent); border-color: var(--accent-line); }
@@ -1767,18 +1791,18 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .fluid-field-group + .fluid-field-group { padding-top: 7px; border-top: 1px solid var(--line); }
 .fluid-field-heading { margin: 0; padding-left: 2px; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wider); text-transform: uppercase; }
 
-/* The field picker, folded. Closed it costs one line and still answers the only
-   question worth keeping on screen — which field is drawing — which is the
-   whole reason the list may fold at all. */
-.fluid-field-views { display: grid; }
-.fluid-field-views > summary { display: flex; align-items: center; gap: 5px; padding: 1px 2px; list-style: none; cursor: pointer; }
-.fluid-field-views > summary::-webkit-details-marker { display: none; }
-.fluid-field-views > summary > span { flex: none; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wider); text-transform: uppercase; }
-.fluid-field-views > summary > strong { flex: 1; min-width: 0; overflow: hidden; color: var(--accent); font: var(--text-label); text-overflow: ellipsis; white-space: nowrap; }
-.fluid-field-views > summary::after { content: "\203A"; flex: none; display: inline-block; color: var(--dim); font: var(--text-label); line-height: 1; transition: transform .15s ease; }
-.fluid-field-views[open] > summary::after { transform: rotate(90deg); }
-.fluid-field-views > summary:hover > strong { color: var(--accent-strong); }
-.fluid-field-views > summary:hover::after { color: var(--accent); }
+/* A rail row that opens a pane. Shut it costs one line and still answers the
+   question worth keeping on screen — which field is drawing, which setup is
+   built — which is the whole reason its section may collapse to a row at all.
+   Every pane there is uses this same anatomy, so the chevron is the panel's one
+   promise that something is behind a row. */
+.fluid-field-summary { display: flex; width: 100%; align-items: center; gap: 5px; padding: 1px 2px; border: none; background: transparent; cursor: pointer; text-align: left; }
+.fluid-field-summary > span { flex: none; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wider); text-transform: uppercase; }
+.fluid-field-summary > strong { flex: 1; min-width: 0; overflow: hidden; color: var(--accent); font: var(--text-label); font-weight: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.fluid-field-summary::after { content: "\203A"; flex: none; display: inline-block; color: var(--dim); font: var(--text-label); line-height: 1; transition: transform .15s ease; }
+.fluid-field-summary[aria-expanded="true"]::after { transform: rotate(90deg); color: var(--accent); }
+.fluid-field-summary:hover > strong { color: var(--accent-strong); }
+.fluid-field-summary:hover::after { color: var(--accent); }
 
 /* Hiding the overlay is a presentation choice, so it rides the plane row rather
    than the disclosure's header, where a button would have to argue with the

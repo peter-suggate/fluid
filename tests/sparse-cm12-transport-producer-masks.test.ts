@@ -105,13 +105,13 @@ test("TPM1 WGSL publishes stamp last and compiles masks outside gather", () => {
   assert.doesNotMatch(source, /cm12ResidentRecordExtensionIncidence/);
 });
 
-test("TPM1 integration order seals masks before either authority compiler", () => {
+test("TPM1 integration order seals masks before compiled topology consumers", () => {
   assert.deepEqual(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_DISPATCH_ORDER, [
-    "beginSparseCM12TransportProducerMasks + beginTransportRowAuthority",
+    "beginSparseCM12TransportProducerMasks + beginSparseCM12DynamicClosure",
     "gatherConservativeDensity (calls cm12TransportProducerMaskPublish once per lane)",
-    "sealSparseCM12TransportProducerMasks",
-    "compileSparseCM12TransportRowMasks + compileSparseCM12VexRootMasks (VEX candidate is already collecting)",
-    "finalizeTransportRowAuthority",
+    "sealSparseCM12TransportProducerMasks + sealSparseCM12DynamicClosureSources",
+    "compileSparseCM12DynamicTRA + compileSparseCM12VexRootMasks (VEX candidate is already collecting)",
+    "sealSparseCM12DynamicClosureTargets; scatter both gamma phases; clear touched rows",
     "late frame: beginVelocityExtensionCandidate + sealVelocityExtensionRoots",
   ]);
 });

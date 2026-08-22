@@ -227,11 +227,6 @@ for (const retiredEntryPoint of [
 for (const [file, required] of [
   ["lib/methods/adaptive-mass/sparse-cm12-canonical-membership.wgsl.ts",
     ["PCM_FAULT_ATOMIC_CONTENTION", "attempt<64u"]],
-  ["lib/methods/adaptive-mass/sparse-cm12-srr1-resident-ingress.wgsl.ts",
-    ["sirResidentFail(3u,tile)", "attempt<64u",
-      "sirResidentResetCopiedEvents(tile:u32)"]],
-  ["lib/methods/adaptive-mass/sparse-cm12-scalar-result-receipts.wgsl.ts",
-    ["SPARSE_CM12_SCALAR_RESULT_FAULT.atomicContention", "attempt<64u"]],
   ["lib/methods/adaptive-mass/sparse-cm12-face-projection-authority.wgsl.ts",
     ["SPARSE_CM12_FACE_PROJECTION_FAULT.atomicContention", "attempt<64u"]],
 ] as const) {

@@ -62,7 +62,7 @@ const checked = (value: number, label: string): number => {
 };
 
 /**
- * Per-frame bridge from stable SRR1 spatial tiles to rung-major AEI packets.
+ * Per-frame packet execution authority compiled from FSM1 spatial neighborhoods.
  * The arena is deliberately separate from the immutable/plain-u32 TEI so hot
  * descriptors never become atomic storage merely to support scheduling.
  */

@@ -51,10 +51,7 @@ test("the effective vec4 plane is a VEX product, never transport materialization
 test("the AEI arm enables committed packets rather than the checkpoint tile resolver", () => {
   assert.doesNotMatch(wgsl, /EXP_ACCEPTED_EXECUTION_IMAGE_PACKETS:bool=false/);
   assert.doesNotMatch(wgsl, /packet publication is\s*\n?\/\/ disabled/i);
-  const packetCell = functionSource(wgsl, "sirMassExecutionCell",
-    "var<workgroup>sirTransportPacketOriginFine");
-  assert.match(packetCell, /cm12TransportStagedExecutionCell/);
-  assert.doesNotMatch(packetCell, /compactOwnerCellAt|ownerCellAt|cellOpenVolume/);
+  assert.match(wgsl, /fn stageSparseCM12TransportExecutionImage[\s\S]*cm12TransportStagedExecutionCell/);
 });
 
 test("transport packets are leaf/rung-major 64-cell workgroups", () => {

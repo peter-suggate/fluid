@@ -696,26 +696,21 @@ try {
       debug(`capture ${step} queue complete in ${
         (queueComplete_ms - captureStarted_ms).toFixed(3)}ms; stats begin`);
       if (step > 0) {
-        const [fca, srr, sir] = await Promise.all([
-          solver!.readFrameControlQA(), solver!.readScalarAuthorityHeaderQA(),
-          solver!.readScalarIngressHeaderQA(),
+        const [fca, fsm] = await Promise.all([
+          solver!.readFrameControlQA(), solver!.readFinalScalarMaskHeaderQA(),
         ]);
         const expectedGeneration = step + 1;
         expect(failures, fca.phase === 1 && fca.fault === 0
           && fca.acceptedGeneration === expectedGeneration,
         `step ${step}: FCA1 phase/fault/generation ${fca.phase}/${fca.fault}/${
           fca.acceptedGeneration}`);
-        expect(failures, srr.phase === 1 && srr.fault === 0
-          && srr.firstFaultTile === 0xffff_ffff
-          && srr.acceptedGeneration === expectedGeneration
-          && srr.candidateGeneration === expectedGeneration,
-        `step ${step}: SRR1 phase/fault/tile/generation ${srr.phase}/${srr.fault}/${
-          srr.firstFaultTile}/${srr.acceptedGeneration}/${srr.candidateGeneration}`);
-        expect(failures, sir.fault === 0 && sir.firstFaultTile === 0xffff_ffff,
-        `step ${step}: SIR1 fault/tile ${sir.fault}/${sir.firstFaultTile}`);
+        expect(failures, fsm.phase === 2 && fsm.fault === 0
+          && fsm.firstFaultPacket === 0xffff_ffff
+          && fsm.generation === expectedGeneration,
+        `step ${step}: FSM1 phase/fault/packet/generation ${fsm.phase}/${fsm.fault}/${
+          fsm.firstFaultPacket}/${fsm.generation}`);
         debug(`capture ${step} FCA=${fca.phase}/${fca.fault}/${fca.acceptedGeneration} `
-          + `SRR=${srr.phase}/${srr.fault}/${srr.acceptedGeneration} `
-          + `SIR=${sir.fault}/${sir.firstFaultTile}`);
+          + `FSM=${fsm.phase}/${fsm.fault}/${fsm.generation}`);
       }
       if (debugProgress) {
         const pab = await solver!.readPressureAddressingHeaderQA();
@@ -728,8 +723,8 @@ try {
           (await solver!.readAcceptedIndirectQA()).join(",")}`);
         debug(`capture ${step} FCAIndirect=${
           (await solver!.readFrameControlIndirectQA()).join(",")}`);
-        debug(`capture ${step} SRRIndirect=${
-          (await solver!.readScalarAuthorityIndirectQA()).join(",")}`);
+        debug(`capture ${step} transportPacketIndirect=${
+          (await solver!.readTransportPacketIndirectQA()).join(",")}`);
       }
       const stats = await solver!.readStats();
       const statsComplete_ms = performance.now();

@@ -13,12 +13,8 @@ import { createSparseCM12PressureTopologyRepairLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
 import { createSparseCM12ProductionPressureAddressingLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-addressing-ab";
-import { createSparseCM12ScalarResultAuthority } from
-  "../lib/methods/adaptive-mass/sparse-cm12-scalar-result-receipts";
-import { createSparseCM12ScalarWorkAuthority } from
-  "../lib/methods/adaptive-mass/sparse-cm12-scalar-work-authority";
-import { createSparseCM12ResidentScalarAuthorityLayout } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-scalar-authority";
+import { createSparseCM12FinalScalarPacketMaskLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-final-scalar-packet-masks";
 
 test("Sparse CM12 exposes and normalizes the matched B4/P4 production profile", () => {
   const spec = adaptiveMassMethod.params.find((candidate) =>
@@ -76,21 +72,14 @@ test("Sparse CM12 production authority ABIs admit matched B4/P4", () => {
     ...profile, baseWords: pressureAddressing.totalWords,
     rowCapacity: 32, cellCapacity: 64,
   });
-  const scalarResult = createSparseCM12ScalarResultAuthority({
-    ...profile, tileCapacity: 64,
+  const finalScalarMasks = createSparseCM12FinalScalarPacketMaskLayout({
+    brickFineResolution: 4, packetCapacity: 64,
   });
-  const scalarWork = createSparseCM12ScalarWorkAuthority({
-    ...profile, tileCapacity: 64,
-  });
-  const residentScalar = createSparseCM12ResidentScalarAuthorityLayout({
-    ...profile, baseWords: faceProjection.totalWords, tileCapacity: 64,
-  });
-
   assert.ok(pressureRepair.totalWords > frame.layout.totalWords);
   assert.ok(pressureAddressing.totalWords > pressureRepair.totalWords);
-  for (const layout of [frame.layout, faceProjection,
-    scalarResult.layout, scalarWork.layout, residentScalar]) {
+  for (const layout of [frame.layout, faceProjection]) {
     assert.equal(layout.brickFineResolution, 4);
     assert.equal(layout.presentationPageResolution, 4);
   }
+  assert.equal(finalScalarMasks.maximumPacketsPerLeaf, 1);
 });

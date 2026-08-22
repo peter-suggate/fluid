@@ -1,6 +1,7 @@
 import type { MethodParamValues } from "./method-contract";
 import type { GPUEulerianInfo } from "./webgpu-eulerian";
 import type { PerformanceTrace } from "./performance-trace";
+import type { AnyStageLens } from "./stage-lens";
 
 /**
  * The simulation-side sibling of `render-pipeline-graph`: one frozen graph per
@@ -110,6 +111,15 @@ export interface FluidPipelineStage {
   readonly tip: FluidPipelineTip;
   /** Controls this stage owns, rendered under its head. */
   readonly controls?: readonly FluidStageControl[];
+  /**
+   * The lens on this stage, when the method declares one.
+   *
+   * Carried on the node rather than looked up by id from the method's roster,
+   * so the row that prices a stage and the ◎ that opens its lens are one
+   * declaration: a graph whose ids and a roster whose ids had drifted apart
+   * once left a live lens with no way to open it from the panel.
+   */
+  readonly lens?: AnyStageLens;
   /** Optional user gate. Values are method parameters and therefore follow
    * the same rebuild/runtime contract as every other stage control. */
   readonly toggle?: {

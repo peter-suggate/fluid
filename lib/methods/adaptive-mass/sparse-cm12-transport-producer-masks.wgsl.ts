@@ -18,6 +18,8 @@ export interface SparseCM12TransportProducerMaskWGSLOptions {
   readonly vexCause?: number;
   /** Publish each completed packet ballot into DCA1's sparse source lists. */
   readonly dynamicClosurePublish?: boolean;
+  /** Retained only for standalone legacy fixtures; production rows use ITR1. */
+  readonly legacyRowCompiler?: boolean;
 }
 
 const identifier = (value: string, label: string): string => {
@@ -64,6 +66,8 @@ const TPM1_SURFACE_LOW:u32=${layout.surfaceLowBaseWords}u;
 const TPM1_SURFACE_HIGH:u32=${layout.surfaceHighBaseWords}u;
 const TPM1_DENSITY_LOW:u32=${layout.densityLowBaseWords}u;
 const TPM1_DENSITY_HIGH:u32=${layout.densityHighBaseWords}u;
+const TPM1_SHARPENING_LOW:u32=${layout.sharpeningLowBaseWords}u;
+const TPM1_SHARPENING_HIGH:u32=${layout.sharpeningHighBaseWords}u;
 const TPM1_PHASE_COLLECTING:u32=${SPARSE_CM12_TRANSPORT_PRODUCER_MASK_PHASE.collecting}u;
 const TPM1_PHASE_PUBLISHED:u32=${SPARSE_CM12_TRANSPORT_PRODUCER_MASK_PHASE.published}u;
 const TPM1_PHASE_FAULT:u32=${SPARSE_CM12_TRANSPORT_PRODUCER_MASK_PHASE.fault}u;
@@ -73,6 +77,8 @@ var<workgroup>tpm1SurfaceLow:atomic<u32>;
 var<workgroup>tpm1SurfaceHigh:atomic<u32>;
 var<workgroup>tpm1DensityLow:atomic<u32>;
 var<workgroup>tpm1DensityHigh:atomic<u32>;
+var<workgroup>tpm1SharpeningLow:atomic<u32>;
+var<workgroup>tpm1SharpeningHigh:atomic<u32>;
 
 fn tpm1HeaderValid()->bool{
   return arrayLength(&${arena})>=${layout.totalWords}u
@@ -111,6 +117,7 @@ fn beginSparseCM12TransportProducerMasks(){
   atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.publishedPacketCount)}],0u);
   atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.surfaceCellCount)}],0u);
   atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.densityChangedCellCount)}],0u);
+  atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.sharpeningCellCount)}],0u);
   atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.phase)}],TPM1_PHASE_COLLECTING);
 }
 
@@ -158,6 +165,40 @@ fn cm12TransportProducerMaskPublish(packet:u32,lane:u32,cell:u32,
   }
 }
 
+// Trace-family sharpening ballot. It shares TPM1's TEI-packet address space,
+// but not the gather-family stamp: every current trace packet overwrites its
+// two words before the sealed mask is consumed later in the same frame.
+fn cm12TransportSharpeningMaskPublish(packet:u32,lane:u32,cell:u32,
+ sharpeningSource:bool,cellScale:u32){
+  if(lane==0u){
+    atomicStore(&tpm1SharpeningLow,0u);atomicStore(&tpm1SharpeningHigh,0u);
+  }
+  workgroupBarrier();
+  let valid=${p}TransportProducerMaskCellValid(cell);
+  if(valid&&sharpeningSource){
+    var low=0u;var high=0u;
+    if(cellScale==1u){low=0xffffffffu;high=0xffffffffu;
+    }else if(cellScale==2u){
+      let q=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+      let base=(q.x&~1u)+4u*(q.y&~1u)+16u*(q.z&~1u);
+      for(var dz=0u;dz<2u;dz+=1u){for(var dy=0u;dy<2u;dy+=1u){
+        for(var dx=0u;dx<2u;dx+=1u){let member=base+dx+4u*dy+16u*dz;
+          if(member<32u){low|=1u<<member;}else{high|=1u<<(member-32u);}
+        }
+      }}
+    }else if(lane<32u){low=1u<<lane;}else{high=1u<<(lane-32u);}
+    _=atomicOr(&tpm1SharpeningLow,low);_=atomicOr(&tpm1SharpeningHigh,high);
+  }
+  workgroupBarrier();
+  if(lane==0u&&packet<TPM1_CAPACITY){
+    let low=atomicLoad(&tpm1SharpeningLow);let high=atomicLoad(&tpm1SharpeningHigh);
+    atomicStore(&${arena}[TPM1_SHARPENING_LOW+packet],low);
+    atomicStore(&${arena}[TPM1_SHARPENING_HIGH+packet],high);
+    atomicAdd(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.sharpeningCellCount)}],
+      countOneBits(low)+countOneBits(high));
+  }
+}
+
 @compute @workgroup_size(1)
 fn sealSparseCM12TransportProducerMasks(){
   if(atomicLoad(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.phase)}])
@@ -181,9 +222,16 @@ fn tpm1PacketReady(packet:u32)->bool{
 fn tpm1LaneMarked(low:u32,high:u32,lane:u32)->bool{
   return ((select(low,high,lane>=32u)>>(lane&31u))&1u)!=0u;
 }
+fn tpm1SharpeningLaneMarked(packet:u32,lane:u32)->bool{
+  if(packet>=TPM1_CAPACITY||atomicLoad(&${arena}[
+    ${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.phase)}])!=TPM1_PHASE_PUBLISHED){
+    return false;
+  }
+  return tpm1LaneMarked(atomicLoad(&${arena}[TPM1_SHARPENING_LOW+packet]),
+    atomicLoad(&${arena}[TPM1_SHARPENING_HIGH+packet]),lane);
+}
 
-// Brick/packet-local dilation into exact accepted TRA rows.  This is a separate
-// dispatch from gather, so the scalar producer has no incidence walk.
+${options.legacyRowCompiler === false ? "" : `// Legacy row compiler for standalone TPM1 users.
 @compute @workgroup_size(64)
 fn compileSparseCM12TransportRowMasks(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
@@ -202,7 +250,7 @@ fn compileSparseCM12TransportRowMasks(@builtin(workgroup_id)wid:vec3u,
       ${p}TransportProducerMaskMarkRow(row);
     }
   }
-}
+}`}
 
 // Exact VEX root/one-ring expansion formerly performed in gather.  Per-cell
 // root payloads are preserved; only discovery moved behind the packet mask.

@@ -13,16 +13,12 @@ if (!dawnModule) {
   process.exit(2);
 }
 const layout = createSparseCM12TopologyEffectsAuthorityLayout({
-  baseWords: 0, scaCapacity: 8, ptrCapacity: 8, ptrLeafCapacity: 1,
+  baseWords: 0, ptrCapacity: 8, ptrLeafCapacity: 1,
 });
 const source = /* wgsl */ `
 @group(0) @binding(0) var<storage,read_write> topologyArena:array<atomic<u32>>;
 fn transactionAuthorized()->bool{return true;}
-fn tfxSCATargetGeneration()->u32{return 7u;}
 fn tfxPTRTargetGeneration()->u32{return 11u;}
-fn tfxSCAReady(_generation:u32,_newCount:u32)->bool{return true;}
-fn tfxSCAWillAppend(_tile:u32,_generation:u32)->bool{return true;}
-fn tfxSCAPublish(_tile:u32,_generation:u32,_cause:u32){}
 fn tfxPTRReady(_generation:u32,_newCount:u32,_newLeafCount:u32)->bool{return true;}
 fn tfxPTRWillAppend(_brick:u32,_generation:u32)->bool{return true;}
 fn tfxPTRDirtyLeafWillAppend(_leaf:u32,_generation:u32)->bool{return true;}
@@ -33,8 +29,7 @@ ${createSparseCM12TopologyEffectsAuthorityWGSL({ layout,
   arenaName: "topologyArena", authorizationExpression: "transactionAuthorized()" })}
 `;
 const entryPoints = ["beginSparseCM12TopologyEffectsPreflight",
-  "finalizeSparseCM12TopologyEffectsPreflight", "publishSparseCM12TopologySCAEffects",
-  "publishSparseCM12TopologyPTREffects",
+  "finalizeSparseCM12TopologyEffectsPreflight", "publishSparseCM12TopologyPTREffects",
   "finishSparseCM12TopologyEffectsPublication"] as const;
 
 await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-topology-effects-authority");

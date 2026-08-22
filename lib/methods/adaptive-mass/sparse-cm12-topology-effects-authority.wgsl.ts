@@ -14,13 +14,11 @@ const id = (value: string): string => {
 
 /**
  * Binding-free candidate-effects authority. Required downstream hooks:
- * tfxSCATargetGeneration(), tfxPTRTargetGeneration(),
- * tfxSCAReady(generation,newCount), tfxSCAWillAppend(tile,generation),
- * tfxSCAPublish(tile,generation,cause), tfxPTRReady(generation,newCount,newLeafCount),
+ * tfxPTRTargetGeneration(), tfxPTRReady(generation,newCount,newLeafCount),
  * tfxPTRWillAppend(brick,generation), tfxPTRDirtyLeafWillAppend(leaf,generation),
  * tfxPTRCompatible(brick,oldState,newState),
  * tfxPTRPublish(brick,oldState,newState,cause,ownsLeaf,generation).
- * The two publication entry points may be dispatched only after the enclosing
+ * The publication entry point may be dispatched only after the enclosing
  * topology transaction authorizes. Queue ordering then makes the singleton
  * finish entry point infallible; coveredEffects is QA observability, never a
  * post-write rejection gate.
@@ -38,7 +36,6 @@ export function createSparseCM12TopologyEffectsAuthorityWGSL(options: Readonly<{
   return /* wgsl */ `
 const ${p}Invalid:u32=${SPARSE_CM12_TOPOLOGY_EFFECTS_INVALID}u;
 const ${p}GenerationBusy:u32=0x80000000u;
-const ${p}ScaCapacity:u32=${l.scaCapacity}u;
 const ${p}PtrCapacity:u32=${l.ptrCapacity}u;
 const ${p}PtrLeafCapacity:u32=${l.ptrLeafCapacity}u;
 fn ${p}HeaderValid()->bool{return atomicLoad(&${arena}[${h(H.magic)}])
@@ -51,29 +48,12 @@ fn ${p}Fail(code:u32,id:u32){if(atomicCompareExchangeWeak(&${arena}[${h(H.fault)
 @compute @workgroup_size(1) fn beginSparseCM12TopologyEffectsPreflight(){
  let generation=atomicLoad(&${arena}[${h(H.generation)}])+1u;
  if(!${p}HeaderValid()||generation==0u||generation>=${p}GenerationBusy){${p}Fail(1u,${p}Invalid);return;}
- // Clear only the prior transaction's touched causes. Stamps retain their old
- // generation, so the next atomicExchange still elects exactly one list owner.
- // This is O(previous delta), never a tile-domain clear.
- let priorScaCount=min(atomicLoad(&${arena}[${h(H.scaCount)}]),${p}ScaCapacity);
- for(var rank=0u;rank<priorScaCount;rank+=1u){let tile=atomicLoad(&${arena}[
-   ${l.scaListBaseWords}u+rank]);if(tile<${p}ScaCapacity){
-    atomicStore(&${arena}[${l.scaCauseBaseWords}u+tile],0u);}}
  atomicStore(&${arena}[${h(H.generation)}],generation);atomicStore(&${arena}[${h(H.fault)}],0u);
  atomicStore(&${arena}[${h(H.firstFaultId)}],${p}Invalid);
- atomicStore(&${arena}[${h(H.scaTargetGeneration)}],${p}SCATargetGeneration());
  atomicStore(&${arena}[${h(H.ptrTargetGeneration)}],${p}PTRTargetGeneration());
- atomicStore(&${arena}[${h(H.scaCount)}],0u);atomicStore(&${arena}[${h(H.ptrCount)}],0u);
- atomicStore(&${arena}[${h(H.ptrLeafCount)}],0u);atomicStore(&${arena}[${h(H.scaNewCount)}],0u);
+ atomicStore(&${arena}[${h(H.ptrCount)}],0u);atomicStore(&${arena}[${h(H.ptrLeafCount)}],0u);
  atomicStore(&${arena}[${h(H.ptrNewCount)}],0u);atomicStore(&${arena}[${h(H.ptrNewLeafCount)}],0u);
  atomicStore(&${arena}[${h(H.coveredEffects)}],0u);atomicStore(&${arena}[${h(H.phase)}],${PHASE.recording}u);}
-fn ${p}RecordSCATile(tile:u32,cause:u32)->bool{
- if(atomicLoad(&${arena}[${h(H.phase)}])!=${PHASE.recording}u||tile>=${p}ScaCapacity||cause==0u){
-  ${p}Fail(2u,tile);return false;}let generation=atomicLoad(&${arena}[${h(H.generation)}]);
- let previous=atomicExchange(&${arena}[${l.scaStampBaseWords}u+tile],generation);
- if(previous!=generation){let slot=atomicAdd(&${arena}[${h(H.scaCount)}],1u);
-  if(slot>=${p}ScaCapacity){${p}Fail(3u,tile);return false;}
-  atomicStore(&${arena}[${l.scaListBaseWords}u+slot],tile);}
- atomicOr(&${arena}[${l.scaCauseBaseWords}u+tile],cause);return true;}
 fn ${p}RecordPTRBrick(brick:u32,oldState:u32,newState:u32,cause:u32)->bool{
  if(atomicLoad(&${arena}[${h(H.phase)}])!=${PHASE.recording}u||brick>=${p}PtrCapacity||cause==0u){
   ${p}Fail(5u,brick);return false;}let generation=atomicLoad(&${arena}[${h(H.generation)}]);
@@ -97,14 +77,8 @@ fn ${p}RecordPTRBrick(brick:u32,oldState:u32,newState:u32,cause:u32)->bool{
  ${p}Fail(9u,brick);return false;}
 @compute @workgroup_size(1) fn finalizeSparseCM12TopologyEffectsPreflight(){
  if(atomicLoad(&${arena}[${h(H.phase)}])!=${PHASE.recording}u||atomicLoad(&${arena}[${h(H.fault)}])!=0u){return;}
- let scaGeneration=atomicLoad(&${arena}[${h(H.scaTargetGeneration)}]);
  let ptrGeneration=atomicLoad(&${arena}[${h(H.ptrTargetGeneration)}]);
- let scaCount=atomicLoad(&${arena}[${h(H.scaCount)}]);
  let ptrCount=atomicLoad(&${arena}[${h(H.ptrCount)}]);let leafCount=atomicLoad(&${arena}[${h(H.ptrLeafCount)}]);
- var scaNew=0u;var scaHash=0u;for(var rank=0u;rank<scaCount;rank+=1u){
-  let tile=atomicLoad(&${arena}[${l.scaListBaseWords}u+rank]);let cause=atomicLoad(&${arena}[${l.scaCauseBaseWords}u+tile]);
-  scaNew+=select(0u,1u,${p}SCAWillAppend(tile,scaGeneration));
-  scaHash^=${p}Hash(cause,${p}Hash(tile,0x811c9dc5u));}
  var ptrNew=0u;var ptrHash=0u;for(var rank=0u;rank<ptrCount;rank+=1u){
   let brick=atomicLoad(&${arena}[${l.ptrListBaseWords}u+rank]);let oldState=atomicLoad(&${arena}[${l.ptrOldStateBaseWords}u+brick]);
   let newState=atomicLoad(&${arena}[${l.ptrNewStateBaseWords}u+brick]);let cause=atomicLoad(&${arena}[${l.ptrCauseBaseWords}u+brick]);
@@ -114,31 +88,18 @@ fn ${p}RecordPTRBrick(brick:u32,oldState:u32,newState:u32,cause:u32)->bool{
     ${p}Hash(brick,0x811c9dc5u))));}
  var leafNew=0u;for(var rank=0u;rank<leafCount;rank+=1u){let leaf=atomicLoad(&${arena}[
    ${l.ptrLeafListBaseWords}u+rank]);leafNew+=select(0u,1u,${p}PTRDirtyLeafWillAppend(leaf,ptrGeneration));}
- atomicStore(&${arena}[${h(H.scaNewCount)}],scaNew);
  atomicStore(&${arena}[${h(H.ptrNewCount)}],ptrNew);
  atomicStore(&${arena}[${h(H.ptrNewLeafCount)}],leafNew);
- if(!${p}SCAReady(scaGeneration,scaNew)||!${p}PTRReady(ptrGeneration,ptrNew,leafNew)){
-  ${p}Fail(11u,${p}Invalid);return;}
- atomicStore(&${arena}[${h(H.scaHash)}],scaHash);
- atomicStore(&${arena}[${h(H.ptrHash)}],ptrHash);atomicStore(&${arena}[${h(H.expectedEffects)}],scaCount+ptrCount);
- atomicStore(&${arena}[${h(H.scaDispatchX)}],(scaCount+63u)/64u);atomicStore(&${arena}[${h(H.ptrDispatchX)}],(ptrCount+63u)/64u);
+ if(!${p}PTRReady(ptrGeneration,ptrNew,leafNew)){${p}Fail(11u,${p}Invalid);return;}
+ atomicStore(&${arena}[${h(H.ptrHash)}],ptrHash);atomicStore(&${arena}[${h(H.expectedEffects)}],ptrCount);
+ atomicStore(&${arena}[${h(H.ptrDispatchX)}],(ptrCount+63u)/64u);
  atomicStore(&${arena}[${h(H.phase)}],${PHASE.preflighted}u);}
-fn ${p}PreflightReady(generation:u32,scaGeneration:u32,scaCount:u32,scaHash:u32,
- ptrGeneration:u32,ptrCount:u32,ptrHash:u32)->bool{
+fn ${p}PreflightReady(generation:u32,ptrGeneration:u32,ptrCount:u32,ptrHash:u32)->bool{
  return atomicLoad(&${arena}[${h(H.phase)}])==${PHASE.preflighted}u
   &&atomicLoad(&${arena}[${h(H.fault)}])==0u&&atomicLoad(&${arena}[${h(H.generation)}])==generation
-  &&atomicLoad(&${arena}[${h(H.scaTargetGeneration)}])==scaGeneration
   &&atomicLoad(&${arena}[${h(H.ptrTargetGeneration)}])==ptrGeneration
-  &&atomicLoad(&${arena}[${h(H.scaCount)}])==scaCount&&atomicLoad(&${arena}[${h(H.scaHash)}])==scaHash
   &&atomicLoad(&${arena}[${h(H.ptrCount)}])==ptrCount&&atomicLoad(&${arena}[${h(H.ptrHash)}])==ptrHash;}
 fn ${p}Authorize(){atomicStore(&${arena}[${h(H.phase)}],${PHASE.authorized}u);}
-@compute @workgroup_size(64) fn publishSparseCM12TopologySCAEffects(
- @builtin(global_invocation_id)gid:vec3u){if(!(${a})||atomicLoad(&${arena}[${h(H.phase)}])!=${PHASE.authorized}u){return;}
- let rank=gid.x;let count=atomicLoad(&${arena}[${h(H.scaCount)}]);if(rank>=count){return;}
- let tile=atomicLoad(&${arena}[${l.scaListBaseWords}u+rank]);
- let generation=atomicLoad(&${arena}[${h(H.scaTargetGeneration)}]);
- ${p}SCAPublish(tile,generation,atomicLoad(&${arena}[${l.scaCauseBaseWords}u+tile]));
- atomicAdd(&${arena}[${h(H.coveredEffects)}],1u);}
 @compute @workgroup_size(64) fn publishSparseCM12TopologyPTREffects(
  @builtin(global_invocation_id)gid:vec3u){if(!(${a})||atomicLoad(&${arena}[${h(H.phase)}])!=${PHASE.authorized}u){return;}
  let rank=gid.x;let count=atomicLoad(&${arena}[${h(H.ptrCount)}]);if(rank>=count){return;}

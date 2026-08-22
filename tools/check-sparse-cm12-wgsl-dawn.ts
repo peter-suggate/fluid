@@ -29,15 +29,6 @@ import { createSparseCM12FramePlanPresentationLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
 import { createSparseCM12FrameControl } from
   "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
-import {
-  createSparseCM12ResidentScalarAuthorityLayout,
-  createWebgpuSparseCM12ScalarAuthorityPlannerWGSL,
-} from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-scalar-authority";
-import { createSparseCM12ScalarWorkAuthority } from
-  "../lib/methods/adaptive-mass/sparse-cm12-scalar-work-authority";
-import { createSparseCM12SRR1IngressLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-srr1-runtime-adapter";
 import { createSparseCM12PressureTopologyRepairLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
 import { createSparseCM12ResidentPersistentPressureCacheLayout } from
@@ -52,6 +43,8 @@ import type { SparseCM12InternedRefLookupLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-interned-ref-lookup";
 import { createSparseCM12TransportProducerMaskLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-transport-producer-masks";
+import { createSparseCM12DynamicClosureLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-dynamic-closure-authority";
 import { SPARSE_CM12_LENSES } from
   "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
 import { stageLensProgramWGSL } from "../lib/core/webgpu-stage-lens-overlay";
@@ -131,12 +124,6 @@ async function main(): Promise<void> {
       [[4, 4], [8, 8], [16, 16]];
     for (const [brickFineResolution, presentationPageResolution] of variants) {
       const variant = `B${brickFineResolution}/P${presentationPageResolution}`;
-      const temporal = { headerBaseWords: 64,
-        cellListBaseWords: 72,
-        rowListBaseWords: 1096,
-        cellFlagABaseWords: 2120,
-        cellFlagBBaseWords: 3144,
-        totalWords: 4168 };
       const pressure = { edgeCoefficientBaseWords: 4096, cellSlotBaseWords: 8192,
         rowSlotBaseWords: 9216, cellChangeBaseWords: 10240,
         rowChangeBaseWords: 11264, brickStateBaseWords: 12288,
@@ -145,7 +132,7 @@ async function main(): Promise<void> {
         hierarchyEdgeForAggregateBaseWords: [14464],
         headerBaseWords: 15488, totalWords: 15496 };
       const activity = createSparseCM12IncrementalActivityLayout({
-        baseWords: temporal.totalWords, stableTileCount: 512, brickCount: 8,
+        baseWords: 4168, brickCount: 8,
       });
       const canonicalMembership = createSparseCM12CanonicalMembershipLayout({
         baseWords: activity.totalWords, cellCapacity: 1024, rowCapacity: 2048,
@@ -171,10 +158,6 @@ async function main(): Promise<void> {
         boundaryCapable: false,
         brickFineResolution, presentationPageResolution,
       }) : undefined;
-      const scalarAuthority = productionMatchedProfile && presentation
-        ? createSparseCM12SRR1IngressLayout({
-          baseWords: presentation.totalWords, tileCapacity: 512,
-        }) : undefined;
       const pressureTopologyRepair = productionMatchedProfile && frameControl
         ? createSparseCM12PressureTopologyRepairLayout({
           baseWords: frameControl.layout.totalWords,
@@ -196,9 +179,9 @@ async function main(): Promise<void> {
           brickFineResolution,
           presentationPageResolution,
         }) : undefined;
-      const vexActivityBatch = productionMatchedProfile && scalarAuthority
+      const vexActivityBatch = productionMatchedProfile && presentation
         ? createSparseCM12VexActivityBatchLayout({
-          activityTailWords: scalarAuthority.totalWords,
+          activityTailWords: presentation.totalWords,
           stateTailFloats: 65536,
           cellCapacity: 1024,
         }) : undefined;
@@ -219,7 +202,10 @@ async function main(): Promise<void> {
         levelsPerLeaf: 3,
         maximumEntriesPerSide: 3, totalWords: 1024, totalBytes: 1024,
       };
-      const internedBoundaryImage = { layout: iboLayout, refLookupLayout, baseWords: 131072,
+      const internedBoundaryImage = { layout: iboLayout, refLookupLayout,
+          traSupplementLayout: { baseWords: 1024, templateCount: 4,
+            directoryBaseWords: 1040, totalWords: 2048, totalBytes: 4096 },
+          baseWords: 131072,
           semanticAuthority: {
             geometryBaseWords: 135168, geometryOffsetBaseWords: 8,
             geometryNeighborBaseWords: 17, authorityBaseWords: 135424,
@@ -229,19 +215,21 @@ async function main(): Promise<void> {
       const transportProducerMasks = createSparseCM12TransportProducerMaskLayout({
         baseWords: 120000, packetCapacity: 512,
       });
+      const dynamicClosure = createSparseCM12DynamicClosureLayout({
+        baseWords: 140000, sourcePacketCapacity: 512, targetPacketCapacity: 512,
+      });
       const source = createWebgpuSparseCM12ResidentWGSL(
         brickFineResolution,
         presentationPageResolution,
-        temporal, pressure, activity, canonicalMembership,
-        framePlan, presentation, frameControl?.layout, scalarAuthority,
-        pressureTopologyRepair,
+        pressure, activity, canonicalMembership,
+        framePlan, presentation, frameControl?.layout, pressureTopologyRepair,
         persistentPressureCache,
         faceProjectionAuthority,
         vexActivityBatch,
-        undefined, undefined, undefined, undefined, false,
-        undefined, 0, 0, 0, 1, 0, undefined, undefined, undefined,
+        undefined, undefined, false,
+        undefined, 0, undefined, undefined, undefined,
         transportProducerMasks,
-        undefined, undefined, internedBoundaryImage,
+        undefined, undefined, internedBoundaryImage, dynamicClosure,
       );
       const shaderModule = device.createShaderModule({
         label: `Sparse CM12 resident WGSL check ${variant}`,
@@ -295,47 +283,6 @@ async function main(): Promise<void> {
       }
       compiledEntryPoints += names.length;
     }
-    // The SAW1 planner is intentionally isolated from the resident bind group;
-    // compile it separately so an ABI error cannot hide behind resident-only
-    // entry-point coverage.
-    const scalarResident = createSparseCM12ResidentScalarAuthorityLayout({
-      baseWords: 4096, tileCapacity: 512,
-    });
-    const scalar = createSparseCM12ScalarWorkAuthority({ tileCapacity: 512 });
-    const plannerSource = createWebgpuSparseCM12ScalarAuthorityPlannerWGSL(
-      scalar.layout, scalarResident.candidateWords,
-    );
-    const plannerModule = device.createShaderModule({
-      label: "Sparse CM12 SAW1 dedicated planner WGSL check", code: plannerSource,
-    });
-    const plannerInfo = await plannerModule.getCompilationInfo();
-    const plannerErrors = plannerInfo.messages.filter((message) => message.type === "error");
-    if (plannerErrors.length > 0) {
-      for (const error of plannerErrors) {
-        console.error(`SAW1 ${error.lineNum}:${error.linePos} ${error.message}`);
-      }
-      throw new Error(`SAW1: ${plannerErrors.length} WGSL compilation error(s)`);
-    }
-    const plannerBindGroupLayout = device.createBindGroupLayout({
-      label: "Sparse CM12 SAW1 checker layout",
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "read-only-storage" } },
-      ],
-    });
-    const plannerLayout = device.createPipelineLayout({
-      bindGroupLayouts: [plannerBindGroupLayout],
-    });
-    const plannerEntries = entryPoints(plannerSource);
-    for (const entryPoint of plannerEntries) {
-      await device.createComputePipelineAsync({
-        label: `Sparse CM12 SAW1 WGSL check ${entryPoint}`,
-        layout: plannerLayout, compute: { module: plannerModule, entryPoint },
-      });
-    }
-    compiledEntryPoints += plannerEntries.length;
-
     // Lens programs, composed exactly as the overlay composes them. Naga
     // already parses these; Dawn is what the browser actually runs, and the
     // failures the two disagree about — a struct a publication declares twice,

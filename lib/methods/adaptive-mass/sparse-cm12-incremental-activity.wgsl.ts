@@ -27,22 +27,19 @@ export function createSparseCM12IncrementalActivityWGSL(
   return /* wgsl */ `
 const ACTIVITY_SUMMARY_MAGIC:u32=0x${SPARSE_CM12_INCREMENTAL_ACTIVITY_MAGIC.toString(16)}u;
 const ACTIVITY_SUMMARY_VERSION:u32=${SPARSE_CM12_INCREMENTAL_ACTIVITY_VERSION}u;
-const ACTIVITY_TILE_STAMP:u32=${layout.stableTileStampBaseWords}u;
-const ACTIVITY_TILE_CAUSE:u32=${layout.stableTileCauseBaseWords}u;
 const ACTIVITY_BRICK_STAMP:u32=${layout.brickStampBaseWords}u;
+const ACTIVITY_BRICK_VELOCITY_STAMP:u32=${layout.brickVelocityStampBaseWords}u;
 const ACTIVITY_BRICK_LIST:u32=${layout.brickListBaseWords}u;
 const ACTIVITY_BRICK_TOPOLOGY:u32=${layout.brickTopologyStateBaseWords}u;
 const ACTIVITY_BRICK_CENSUS:u32=${layout.brickCensusStateBaseWords}u;
-const ACTIVITY_BRICK_TILE_LOW:u32=${layout.brickTileMaskLowBaseWords}u;
-const ACTIVITY_BRICK_TILE_HIGH:u32=${layout.brickTileMaskHighBaseWords}u;
 const ACTIVITY_SCORE_HISTOGRAM:u32=${layout.scoreHistogramBaseWords}u;
-const ACTIVITY_STABLE_TILE_COUNT:u32=${layout.stableTileCount}u;
 const ACTIVITY_BRICK_COUNT:u32=${layout.brickCount}u;
 const ACTIVITY_TILES_PER_AXIS:u32=${tilesPerAxis}u;
 const ACTIVITY_TILES_PER_BRICK:u32=${tilesPerBrick}u;
 const ACTIVITY_ALL_TILE_LOW:u32=${allTileMaskLow >>> 0}u;
 const ACTIVITY_ALL_TILE_HIGH:u32=${allTileMaskHigh >>> 0}u;
 var<workgroup>incrementalActivityMaximum:array<u32,64>;
+var<workgroup>incrementalActivityBrickChanged:atomic<u32>;
 
 fn incrementalActivityHeaderValid()->bool{
   return arrayLength(&activity)>=${layout.totalWords}u
@@ -50,8 +47,6 @@ fn incrementalActivityHeaderValid()->bool{
     &&atomicLoad(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.version)}])==ACTIVITY_SUMMARY_VERSION
     &&atomicLoad(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.headerWords)}])
       ==${SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER_WORDS}u
-    &&atomicLoad(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.stableTileCount)}])
-      ==ACTIVITY_STABLE_TILE_COUNT
     &&atomicLoad(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.brickCount)}])
       ==ACTIVITY_BRICK_COUNT;
 }
@@ -70,7 +65,7 @@ fn beginIncrementalActivity(){
   if(generation==0u||generation>=0x80000000u){incrementalActivityFault();return;}
   atomicStore(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.flags)}],1u);
   atomicStore(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.generation)}],generation);
-  atomicStore(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.dirtyTileCount)}],0u);
+  atomicStore(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.reserved0)}],0u);
   atomicStore(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.dirtyBrickCount)}],0u);
   atomicStore(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.uncoveredWriteFaultCount)}],0u);
   atomicStore(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.dispatchX)}],0u);
@@ -91,8 +86,6 @@ fn incrementalActivityClaimBrick(brick:u32)->bool{
       let claim=atomicCompareExchangeWeak(&activity[ACTIVITY_BRICK_STAMP+brick],
         observed,generation|0x80000000u);
       if(claim.exchanged){
-        atomicStore(&activity[ACTIVITY_BRICK_TILE_LOW+brick],0u);
-        atomicStore(&activity[ACTIVITY_BRICK_TILE_HIGH+brick],0u);
         let slot=atomicAdd(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.dirtyBrickCount)}],1u);
         if(slot>=ACTIVITY_BRICK_COUNT){incrementalActivityFault();return false;}
         atomicStore(&activity[ACTIVITY_BRICK_LIST+slot],brick);
@@ -105,62 +98,6 @@ fn incrementalActivityClaimBrick(brick:u32)->bool{
     }
   }
   incrementalActivityFault();return false;
-}
-fn incrementalActivitySetBrickTile(brick:u32,localTile:u32){
-  if(!incrementalActivityClaimBrick(brick)){return;}
-  if(localTile>=ACTIVITY_TILES_PER_BRICK){incrementalActivityFault();return;}
-  if(localTile<32u){atomicOr(&activity[ACTIVITY_BRICK_TILE_LOW+brick],1u<<localTile);}
-  else{atomicOr(&activity[ACTIVITY_BRICK_TILE_HIGH+brick],1u<<(localTile-32u));}
-}
-fn incrementalActivitySetAllBrickTiles(brick:u32){
-  if(!incrementalActivityClaimBrick(brick)){return;}
-  atomicStore(&activity[ACTIVITY_BRICK_TILE_LOW+brick],ACTIVITY_ALL_TILE_LOW);
-  atomicStore(&activity[ACTIVITY_BRICK_TILE_HIGH+brick],ACTIVITY_ALL_TILE_HIGH);
-}
-fn incrementalActivityRecordTile(tile:u32,cause:u32){
-  if(tile>=ACTIVITY_STABLE_TILE_COUNT){incrementalActivityFault();return;}
-  let generation=incrementalActivityGeneration();
-  for(var spin=0u;spin<64u;spin+=1u){
-    let observed=atomicLoad(&activity[ACTIVITY_TILE_STAMP+tile]);
-    if(observed==generation){
-      atomicOr(&activity[ACTIVITY_TILE_CAUSE+tile],cause);
-      return;
-    }
-    if((observed&0x80000000u)==0u){
-      let claim=atomicCompareExchangeWeak(&activity[ACTIVITY_TILE_STAMP+tile],
-        observed,generation|0x80000000u);
-      if(claim.exchanged){
-        atomicStore(&activity[ACTIVITY_TILE_CAUSE+tile],cause);
-        atomicAdd(&activity[${h(SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER.dirtyTileCount)}],1u);
-        atomicStore(&activity[ACTIVITY_TILE_STAMP+tile],generation);
-        return;
-      }
-    }
-  }
-  incrementalActivityFault();
-}
-fn incrementalActivityMarkStableTileBrick(tile:u32,brick:u32,localTile:u32,cause:u32){
-  incrementalActivityRecordTile(tile,cause);
-  if(brickSpan(brick)==1u){incrementalActivitySetBrickTile(brick,localTile);}
-  else{incrementalActivitySetAllBrickTiles(brick);}
-}
-fn incrementalActivityStableTile(cell:u32)->vec2u{
-  let minimum=cellMinimum(cell);
-  let brickDimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
-    /BRICK_FINE_RESOLUTION;
-  let coordinate=minimum/BRICK_FINE_RESOLUTION;
-  let logicalBrick=coordinate.x+brickDimensions.x*(coordinate.y+brickDimensions.y*coordinate.z);
-  let local=(minimum%BRICK_FINE_RESOLUTION)/4u;
-  let localTile=local.x+ACTIVITY_TILES_PER_AXIS*(local.y+ACTIVITY_TILES_PER_AXIS*local.z);
-  return vec2u(logicalBrick*ACTIVITY_TILES_PER_BRICK+localTile,localTile);
-}
-fn incrementalActivityMarkCell(cell:u32,cause:u32){
-  if(cell==INVALID||!cellActive(cell)){return;}
-  let stable=incrementalActivityStableTile(cell);
-  incrementalActivityRecordTile(stable.x,cause);
-  let brick=cellBrick(cell);
-  if(brickSpan(brick)==1u){incrementalActivitySetBrickTile(brick,stable.y);}
-  else{incrementalActivitySetAllBrickTiles(brick);}
 }
 fn incrementalActivityPublishFaceBrickClosure(brick:u32){
   if(brick>=ACTIVITY_BRICK_COUNT){return;}
@@ -178,41 +115,34 @@ fn incrementalActivityPublishFaceBrickClosure(brick:u32){
   }}}
 }
 fn incrementalActivityMarkCellClosure(cell:u32,cause:u32){
-  incrementalActivityMarkCell(cell,cause);
-  if(cell!=INVALID&&cellActive(cell)){
-    incrementalActivityPublishFaceBrickClosure(cellBrick(cell));}
+  if(cell==INVALID||!cellActive(cell)){return;}_=cause;
+  let brick=cellBrick(cell);
+  atomicStore(&activity[ACTIVITY_BRICK_VELOCITY_STAMP+brick],
+    incrementalActivityGeneration());
+  _=incrementalActivityClaimBrick(brick);
+  incrementalActivityPublishFaceBrickClosure(brick);
 }
 
 @compute @workgroup_size(64)
-fn markIncrementalActivityTemporalCells(@builtin(global_invocation_id)gid:vec3u){
-  let cell=temporalScalarCellInvocation(gid.x);if(cell==INVALID){return;}
-  incrementalActivityMarkCell(cell,
-    ${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged
-      | SPARSE_CM12_DIRTY_CAUSE_BIT.gammaChanged
-      | SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
+fn markIncrementalActivityScalarBricks(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let brick=wid.x;if(brick>=ACTIVITY_BRICK_COUNT){return;}
+  if(lane==0u){atomicStore(&incrementalActivityBrickChanged,0u);}workgroupBarrier();
+  let packetCount=cm12FinalScalarLeafPacketCount(brick,acceptedTopologySlot());
+  for(var localPacket=0u;localPacket<packetCount;localPacket+=1u){
+    let packet=64u*brick+localPacket;
+    if(fsm1Lane(fsm1Changed(packet),lane)){_=atomicOr(&incrementalActivityBrickChanged,1u);}
+  }
+  workgroupBarrier();
+  if(lane==0u&&atomicLoad(&incrementalActivityBrickChanged)!=0u){
+    _=incrementalActivityClaimBrick(brick);
+    incrementalActivityPublishFaceBrickClosure(brick);
+  }
 }
 
 fn incrementalActivityTopologyState(brick:u32)->u32{
   let isActive=brickActive(brick);let span=brickSpan(brick);
   return acceptedBrickResolution(brick)|(span<<8u)|select(0u,0x80000000u,isActive);
-}
-fn incrementalActivityBrickStageTileMask(brick:u32,stageMask:u32,causeMask:u32)->vec2u{
-  if(brick>=ACTIVITY_BRICK_COUNT||stageMask==0u){return vec2u(0u);}
-  if(brickSpan(brick)!=1u
-    ||atomicLoad(&activity[ACTIVITY_BRICK_TOPOLOGY+brick])
-      !=incrementalActivityTopologyState(brick)){
-    return vec2u(ACTIVITY_ALL_TILE_LOW,ACTIVITY_ALL_TILE_HIGH);
-  }
-  let key=topology[p.topologyOffsets2.z+2u*brick+1u];
-  let base=key*ACTIVITY_TILES_PER_BRICK;
-  let generation=incrementalActivityGeneration();var result=vec2u(0u);
-  for(var local=0u;local<ACTIVITY_TILES_PER_BRICK;local+=1u){
-    let tile=base+local;
-    if(atomicLoad(&activity[ACTIVITY_TILE_STAMP+tile])!=generation
-      ||(atomicLoad(&activity[ACTIVITY_TILE_CAUSE+tile])&causeMask)==0u){continue;}
-    if(local<32u){result.x|=1u<<local;}else{result.y|=1u<<(local-32u);}
-  }
-  return result;
 }
 fn incrementalActivityAcceptMeasuredTopology(brick:u32){
   atomicStore(&activity[ACTIVITY_BRICK_TOPOLOGY+brick],
@@ -224,26 +154,7 @@ fn incrementalActivityMarkTopologyBrick(brick:u32){
   let previous=atomicLoad(&activity[ACTIVITY_BRICK_TOPOLOGY+brick]);
   if(previous==next){return;}
   incrementalActivityPublishFaceBrickClosure(brick);
-  let previousActive=(previous&0x80000000u)!=0u;
-  let cause=select(${SPARSE_CM12_DIRTY_CAUSE_BIT.generationMismatch
-    | SPARSE_CM12_DIRTY_CAUSE_BIT.coefficientChanged}u,
-    select(${SPARSE_CM12_DIRTY_CAUSE_BIT.topologyRetired}u,
-      ${SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated}u,isActive),isActive!=previousActive);
-  incrementalActivitySetAllBrickTiles(brick);
-  let key=topology[p.topologyOffsets2.z+2u*brick+1u];
-  let brickDimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
-    /BRICK_FINE_RESOLUTION;
-  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
-  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
-  let x=remainder-y*brickDimensions.x;let origin=vec3u(x,y,z);
-  for(var dz=0u;dz<span;dz+=1u){for(var dy=0u;dy<span;dy+=1u){
-    for(var dx=0u;dx<span;dx+=1u){
-      let q=origin+vec3u(dx,dy,dz);if(any(q>=brickDimensions)){continue;}
-      let logical=q.x+brickDimensions.x*(q.y+brickDimensions.y*q.z);
-      for(var local=0u;local<ACTIVITY_TILES_PER_BRICK;local+=1u){
-        incrementalActivityRecordTile(logical*ACTIVITY_TILES_PER_BRICK+local,cause);
-      }
-  }}}
+  _=isActive;_=span;_=incrementalActivityClaimBrick(brick);
 }
 
 @compute @workgroup_size(64)
@@ -288,13 +199,9 @@ fn incrementalActivityBrickDirty(brick:u32)->bool{
   return brick<ACTIVITY_BRICK_COUNT
     &&atomicLoad(&activity[ACTIVITY_BRICK_STAMP+brick])==incrementalActivityGeneration();
 }
-fn incrementalActivityBrickTileMask(brick:u32)->vec2u{
-  if(brick>=ACTIVITY_BRICK_COUNT
-    ||atomicLoad(&activity[ACTIVITY_BRICK_STAMP+brick])!=incrementalActivityGeneration()){
-    return vec2u(0u);
-  }
-  return vec2u(atomicLoad(&activity[ACTIVITY_BRICK_TILE_LOW+brick]),
-    atomicLoad(&activity[ACTIVITY_BRICK_TILE_HIGH+brick]));
+fn incrementalActivityBrickVelocityDirty(brick:u32)->bool{
+  return brick<ACTIVITY_BRICK_COUNT&&atomicLoad(
+    &activity[ACTIVITY_BRICK_VELOCITY_STAMP+brick])==incrementalActivityGeneration();
 }
 fn incrementalActivityRemoveCensus(brick:u32){
   if(atomicExchange(&activity[ACTIVITY_BRICK_CENSUS+brick],0u)==0u){return;}

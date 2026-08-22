@@ -58,8 +58,8 @@ import {
   SPARSE_CM12_FRAME_CONTROL_INVALID,
   SPARSE_CM12_FRAME_CONTROL_PHASE,
 } from "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
-import { SPARSE_CM12_SCALAR_RESULT_PHASE } from
-  "../lib/methods/adaptive-mass/sparse-cm12-scalar-result-receipts";
+import { SPARSE_CM12_FINAL_SCALAR_MASK_PHASE } from
+  "../lib/methods/adaptive-mass/sparse-cm12-final-scalar-packet-masks";
 import { SPARSE_CM12_VELOCITY_EXTENSION_HEADER as VEX_HEADER } from
   "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
 
@@ -515,11 +515,6 @@ type DamPerformancePhysicsStep = Readonly<{
     ReturnType<typeof summarize>>>;
   pressure: Readonly<Record<string, number | boolean | undefined>>;
   topology: Readonly<Record<string, number | undefined>>;
-  temporalAuthority: Readonly<{
-    scalarCells: number | undefined;
-    scalarRows: number | undefined;
-    rejectionMask: number | undefined;
-  }>;
 }>;
 
 interface DamPerformancePhysicsReceipt {
@@ -770,10 +765,6 @@ function comparePhysicsReceipts(
     for (const key of exactTopologyKeys) {
       exact(`${path}.topology.${key}`, Number(left.topology[key]), Number(right.topology[key]));
     }
-    for (const key of ["scalarCells", "scalarRows", "rejectionMask"] as const) {
-      exact(`${path}.temporalAuthority.${key}`, Number(left.temporalAuthority[key]),
-        Number(right.temporalAuthority[key]));
-    }
     for (const field of ["density", "velocity", "pressure"] as const) {
       maximum(`${path}.fields.${field}.maximumAbsolute`,
         left.fields[field].maximumAbsolute, right.fields[field].maximumAbsolute,
@@ -832,10 +823,6 @@ async function runDamFrontLane(): Promise<void> {
   let authorityOracle: WebGPUAdaptiveMassSolver | undefined;
   const pressureOraclePaired = hasFlag("pressure-oracle-paired");
   const authorityOraclePaired = hasFlag("fca-authority-oracle-paired");
-  const scalarOraclePaired = hasFlag("scalar-full-path-oracle-paired");
-  if (authorityOraclePaired && scalarOraclePaired) {
-    throw new Error("FCA and scalar paired oracles cannot share one comparison arm");
-  }
   const failures: string[] = [];
   try {
     const dawn = await import(pathToFileURL(modulePath).href) as NodeDawnProvider;
@@ -878,9 +865,6 @@ async function runDamFrontLane(): Promise<void> {
     }
     if (authorityOraclePaired) {
       authorityOracle = await WebGPUAdaptiveMassSolver.createLegacyHostAuthorityOracleForQA(
-        device, scene, "balanced", undefined, solverOptions("adaptive"), () => {});
-    } else if (scalarOraclePaired) {
-      authorityOracle = await WebGPUAdaptiveMassSolver.createScalarFullPathOracleForQA(
         device, scene, "balanced", undefined, solverOptions("adaptive"), () => {});
     }
     const [initialAdaptiveFields, initialAllFineFields] = await Promise.all([
@@ -943,7 +927,7 @@ async function runDamFrontLane(): Promise<void> {
         adaptivePressureMembership, allFinePressureMembership,
         adaptiveFca, allFineFca,
         oracleFields, oracleStats, oracleMembership, authorityOracleFields,
-        fppHeader, adaptiveSaw, authorityOracleSaw, adaptiveSir, authorityOracleSir,
+        fppHeader, adaptiveSaw, authorityOracleSaw,
         authorityOracleFca,
         authorityOracleActivity, authorityOracleStats, adaptiveVex, allFineVex,
         authorityOracleVex]
@@ -960,28 +944,23 @@ async function runDamFrontLane(): Promise<void> {
           ? readBufferBinding(device, presentationControl,
             4 * SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER_WORDS)
           : Promise.resolve(undefined),
-        adaptive.readScalarAuthorityQA(), authorityOracle?.readScalarAuthorityQA(),
-        adaptive.readScalarIngressHeaderQA(), authorityOracle?.readScalarIngressHeaderQA(),
+        adaptive.readFinalScalarMaskHeaderQA(), authorityOracle?.readFinalScalarMaskHeaderQA(),
         authorityOracle?.readFrameControlQA(), authorityOracle?.readGPUActivityPolicy(),
         authorityOracle?.readStats(),
         adaptive.readVelocityExtensionQA(), allFine.readVelocityExtensionQA(),
         authorityOracle?.readVelocityExtensionQA(),
       ]);
-      for (const [name, saw, sir] of [
-        ["adaptive", adaptiveSaw, adaptiveSir],
-        ...(authorityOracleSaw && authorityOracleSir
-          ? [["immutable oracle", authorityOracleSaw, authorityOracleSir] as const] : []),
+      for (const [name, saw] of [
+        ["adaptive", adaptiveSaw],
+        ...(authorityOracleSaw
+          ? [["immutable oracle", authorityOracleSaw] as const] : []),
       ] as const) {
-        expect(failures, saw.phase === 1 && saw.fault === 0
-          && saw.firstFaultTile === 0xffff_ffff,
-        `step ${step}: ${name} SRR1 phase/fault/tile ${saw.phase}/${saw.fault}/${
-          saw.firstFaultTile}`);
-        expect(failures, saw.acceptedGeneration === step + 1
-          && saw.candidateGeneration === saw.acceptedGeneration,
-        `step ${step}: ${name} SRR1 generation ${saw.acceptedGeneration}/${
-          saw.candidateGeneration}`);
-        expect(failures, sir.fault === 0 && sir.firstFaultTile === 0xffff_ffff,
-        `step ${step}: ${name} SIR1 fault/tile ${sir.fault}/${sir.firstFaultTile}`);
+        expect(failures, saw.phase === 2 && saw.fault === 0
+          && saw.firstFaultPacket === 0xffff_ffff,
+        `step ${step}: ${name} FSM1 phase/fault/packet ${saw.phase}/${saw.fault}/${
+          saw.firstFaultPacket}`);
+        expect(failures, saw.generation === step + 1,
+        `step ${step}: ${name} FSM1 generation ${saw.generation}`);
       }
       for (const [name, fca] of [["adaptive", adaptiveFca], ["all-fine", allFineFca]] as const) {
         expect(failures, fca.phase === SPARSE_CM12_FRAME_CONTROL_PHASE.accepted
@@ -1217,7 +1196,7 @@ async function runDamFrontLane(): Promise<void> {
         const localBits = bitExactFieldReceipt(adaptiveFields);
         for (const field of BIT_EXACT_PHYSICAL_FIELDS) {
           expect(failures, localBits[field] === authorityOracleReceipt[field],
-          `step ${step}: ${scalarOraclePaired ? "scalar full-path" : "FCA authority"} oracle physical mismatch in ${
+          `step ${step}: FCA authority oracle physical mismatch in ${
               field.replace("Sha256", "")}`);
         }
       }
@@ -1260,10 +1239,8 @@ async function runDamFrontLane(): Promise<void> {
         fields: fieldReceipts,
         connectivity,
         frameControl: adaptiveFca,
-        scalarAuthority: adaptiveSaw,
-        scalarIngress: adaptiveSir,
-        ...(authorityOracleSaw ? { scalarAuthorityOracle: authorityOracleSaw } : {}),
-        ...(authorityOracleSir ? { scalarIngressOracle: authorityOracleSir } : {}),
+        finalScalarMasks: adaptiveSaw,
+        ...(authorityOracleSaw ? { finalScalarMasksOracle: authorityOracleSaw } : {}),
         ...(authorityOracleFca ? { frameControlOracle: authorityOracleFca } : {}),
         velocityExtension: velocityExtensionReceipt,
         allFineVelocityExtension: allFineVelocityExtensionReceipt,
@@ -1429,7 +1406,6 @@ async function runDamFrontLane(): Promise<void> {
       runMode: hasFlag("short-smoke") ? "short-smoke" : "canonical",
       pressureOraclePaired,
       authorityOraclePaired,
-      scalarOraclePaired,
       physicalReference: physicalReferencePath ? {
         path: physicalReferencePath,
         bitExact: failures.every((failure) => !failure.includes("physical byte mismatch")),
@@ -1684,11 +1660,6 @@ async function runDamFrontPerformanceLane(): Promise<void> {
               acceptedRows: stats.adaptiveAcceptedRowCount,
               deeplySubmerged: deeplySubmergedBricks(activity.bricks).length,
             },
-            temporalAuthority: {
-              scalarCells: stats.adaptiveTemporalScalarCellCount,
-              scalarRows: stats.adaptiveTemporalScalarRowCount,
-              rejectionMask: stats.adaptiveTemporalScalarRejectionMask,
-            },
           };
           physicsSteps.push(physicsStep);
           expect(failures, fieldReceipts.pressure.maximumAbsolute > 1e-6,
@@ -1705,13 +1676,6 @@ async function runDamFrontPerformanceLane(): Promise<void> {
           `replay ${replay + 1} step ${step}: pressure topology receipt is empty`);
           expect(failures, (stats.pressureIterationsExecuted ?? stats.pressureIterations ?? 0) > 0,
             `replay ${replay + 1} step ${step}: pressure solve executed no iterations`);
-          expect(failures, Number.isSafeInteger(stats.adaptiveTemporalScalarCellCount)
-            && Number.isSafeInteger(stats.adaptiveTemporalScalarRowCount)
-            && (stats.adaptiveTemporalScalarCellCount ?? 0) > 0
-            && (stats.adaptiveTemporalScalarRowCount ?? 0) > 0
-            && Number.isSafeInteger(stats.adaptiveTemporalScalarRejectionMask)
-            && (stats.adaptiveTemporalScalarRejectionMask ?? -1) >= 0,
-          `replay ${replay + 1} step ${step}: temporal scalar authority counts are missing`);
         }
         const physics = { initialDensity, steps: physicsSteps };
         physicsReplays.push(physics);
@@ -1772,22 +1736,6 @@ async function runDamFrontPerformanceLane(): Promise<void> {
         step: index + 1, ...timingDistribution(stepValues),
       })),
     }]));
-    const temporalAuthorityReplays = physicsReplays.map((receipt, replay) => ({
-      replay: replay + 1,
-      stable: receipt.steps.every((step) => Number.isSafeInteger(
-        step.temporalAuthority.scalarCells)
-        && Number.isSafeInteger(step.temporalAuthority.scalarRows)
-        && (step.temporalAuthority.scalarCells ?? 0) > 0
-        && (step.temporalAuthority.scalarRows ?? 0) > 0
-        && Number.isSafeInteger(step.temporalAuthority.rejectionMask)
-        && (step.temporalAuthority.rejectionMask ?? -1) >= 0),
-      steps: receipt.steps.map((step) => ({
-        step: step.step,
-        ...step.temporalAuthority,
-        acceptedCells: step.topology.acceptedCells,
-        acceptedRows: step.topology.acceptedRows,
-      })),
-    }));
     const report = {
       kind: "sparse-cm12-dam-front64-performance",
       version: 1,
@@ -1825,11 +1773,6 @@ async function runDamFrontPerformanceLane(): Promise<void> {
         passed: !failures.some((failure) => failure.includes("incremental and global")),
         rule: "a stage may run incremental or global work in one frame, never both",
         samples: pathReceipts,
-      },
-      temporalAuthority: {
-        stable: temporalAuthorityReplays.every((replay) => replay.stable),
-        rule: "positive counts and canonical-rejection mask published every step; exact across replays",
-        replays: temporalAuthorityReplays,
       },
       topologyHeavyReplays,
       physicsReference,
@@ -1953,7 +1896,7 @@ async function runWeakenedSymmetryLane(): Promise<void> {
       await device.queue.onSubmittedWorkDone();
       const [fields, activity, stats, frameControl, scalarResult] = await Promise.all([
         solver.readDiagnosticFields(), solver.readGPUActivityPolicy(), solver.readStats(),
-        solver.readFrameControlQA(), solver.readScalarAuthorityQA(),
+        solver.readFrameControlQA(), solver.readFinalScalarMaskHeaderQA(),
       ]);
       const expectedGeneration = step + 1;
       const frameControlStalled = frameControl.acceptedGeneration
@@ -1963,19 +1906,18 @@ async function runWeakenedSymmetryLane(): Promise<void> {
         && frameControl.acceptedGeneration === expectedGeneration
         && frameControl.candidateGeneration === expectedGeneration
         && frameControl.sealedGeneration === expectedGeneration;
-      const scalarResultValid = scalarResult.phase === SPARSE_CM12_SCALAR_RESULT_PHASE.accepted
+      const scalarResultValid = scalarResult.phase
+          === SPARSE_CM12_FINAL_SCALAR_MASK_PHASE.published
         && scalarResult.fault === 0
-        && scalarResult.acceptedGeneration === expectedGeneration
-        && scalarResult.candidateGeneration === expectedGeneration;
+        && scalarResult.generation === expectedGeneration;
       expect(failures, frameControlValid,
         `step ${step}: FCA1 phase/fault/accepted/candidate/sealed/stalled ${
           frameControl.phase}/${frameControl.fault}/${frameControl.acceptedGeneration}/${
           frameControl.candidateGeneration}/${frameControl.sealedGeneration}/${
           Number(frameControlStalled)}`);
       expect(failures, scalarResultValid,
-        `step ${step}: SRR1 phase/fault/accepted/candidate ${scalarResult.phase}/${
-          scalarResult.fault}/${scalarResult.acceptedGeneration}/${
-          scalarResult.candidateGeneration}`);
+        `step ${step}: FSM1 phase/fault/generation ${scalarResult.phase}/${
+          scalarResult.fault}/${scalarResult.generation}`);
       if ((!frameControlValid || !scalarResultValid) && !vexFailureCaptureAttempted) {
         vexFailureCaptureAttempted = true;
         try {
@@ -2178,8 +2120,8 @@ async function runWeakenedSymmetryLane(): Promise<void> {
         (checkpoint.fields as Record<string, { maximumAbsolute: number }>).divergence
           .maximumAbsolute)),
       authority: {
-        rule: "FCA1 and SRR1 accept exactly one successor per encoded step",
-        vexCapturePolicy: "one full QA snapshot on the first FCA1/SRR1 failure only",
+        rule: "FCA1 and FSM1 publish exactly one successor per encoded step",
+        vexCapturePolicy: "one full QA snapshot on the first FCA1/FSM1 failure only",
         vexFirstFailure,
       },
       failures,
@@ -2227,7 +2169,6 @@ function commands(): readonly CommandReceipt[] {
   const shortSmoke = hasFlag("short-smoke");
   const pressureOraclePaired = hasFlag("pressure-oracle-paired");
   const authorityOraclePaired = hasFlag("fca-authority-oracle-paired");
-  const scalarOraclePaired = hasFlag("scalar-full-path-oracle-paired");
   const damSteps = String(physicsLaneSteps("dam-steps"));
   const symmetrySteps = String(physicsLaneSteps("symmetry-steps"));
   const performanceReplays = argument("performance-replays") ?? "5";
@@ -2242,7 +2183,6 @@ function commands(): readonly CommandReceipt[] {
       ...(shortSmoke ? ["--short-smoke"] : []),
       ...(pressureOraclePaired ? ["--pressure-oracle-paired"] : []),
       ...(authorityOraclePaired ? ["--fca-authority-oracle-paired"] : []),
-      ...(scalarOraclePaired ? ["--scalar-full-path-oracle-paired"] : []),
       ...(physicalReference ? [`--physical-reference=${physicalReference}`] : []),
       ...(backend ? [`--backend=${backend}`] : [])],
     expectedRuntime: shortSmoke
@@ -2418,12 +2358,6 @@ async function runCommand(receipt: CommandReceipt): Promise<Record<string, unkno
     const replayEquality = report.physicsReplayEquality;
     if (!Array.isArray(replayEquality) || replayEquality.some((equal) => equal !== true)) {
       throw new Error("dam-front performance receipt did not preserve physics across replays");
-    }
-    const temporalAuthority = report.temporalAuthority as Record<string, unknown> | undefined;
-    if (temporalAuthority?.stable !== true
-      || !Array.isArray(temporalAuthority.replays)
-      || temporalAuthority.replays.length !== report.replays) {
-      throw new Error("dam-front performance receipt omitted stable per-step temporal authority");
     }
   }
   return report;

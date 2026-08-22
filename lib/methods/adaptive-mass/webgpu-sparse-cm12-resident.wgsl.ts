@@ -42,20 +42,6 @@ import {
 } from "./sparse-cm12-face-projection-authority";
 import { createSparseCM12FaceProjectionAuthorityWGSL } from
   "./sparse-cm12-face-projection-authority.wgsl";
-import type { SparseCM12FacePreparationTileCensusLayout } from
-  "./sparse-cm12-face-preparation-tile-census";
-import { createSparseCM12FacePreparationTileCensusWGSL } from
-  "./sparse-cm12-face-preparation-tile-census.wgsl";
-import type { SparseCM12FpaVexReadCensusLayout } from
-  "./sparse-cm12-fpa-vex-read-census";
-import { createSparseCM12FpaVexReadCensusWGSL } from
-  "./sparse-cm12-fpa-vex-read-census.wgsl";
-import type { SparseCM12SRR1IngressLayout } from
-  "./sparse-cm12-srr1-runtime-adapter";
-import { createSparseCM12SRR1ResidentIngressWGSL } from
-  "./sparse-cm12-srr1-resident-ingress.wgsl";
-import { SPARSE_CM12_SCALAR_RESULT_CAUSE } from
-  "./sparse-cm12-scalar-result-receipts";
 import type { SparseCM12VexActivityBatchLayout } from
   "./sparse-cm12-vex-activity-batch";
 import { createSparseCM12VexActivityBatchWGSL } from
@@ -90,6 +76,10 @@ import type { SparseCM12TransportProducerMaskLayout } from
   "./sparse-cm12-transport-producer-masks";
 import { createSparseCM12TransportProducerMaskWGSL } from
   "./sparse-cm12-transport-producer-masks.wgsl";
+import type { SparseCM12FinalScalarPacketMaskLayout } from
+  "./sparse-cm12-final-scalar-packet-masks";
+import { createSparseCM12FinalScalarPacketMaskWGSL } from
+  "./sparse-cm12-final-scalar-packet-masks.wgsl";
 import type { SparseCM12Phase1TransportQALayout } from
   "./sparse-cm12-phase1-transport-receipt";
 import { createSparseCM12Phase1TransportQAWGSL } from
@@ -102,6 +92,16 @@ import type { SparseCM12InternedRefLookupLayout } from
   "./sparse-cm12-interned-ref-lookup";
 import { createSparseCM12InternedRefLookupWGSL } from
   "./sparse-cm12-interned-ref-lookup.wgsl";
+import type { SparseCM12IboTRASupplementLayout } from
+  "./sparse-cm12-ibo-tra-supplement";
+import { createSparseCM12IboTRASupplementWGSL } from
+  "./sparse-cm12-ibo-tra-supplement.wgsl";
+import { createSparseCM12IboTRAResidentHooksWGSL } from
+  "./sparse-cm12-ibo-tra-resident-hooks.wgsl";
+import type { SparseCM12DynamicClosureLayout } from
+  "./sparse-cm12-dynamic-closure-authority";
+import { createSparseCM12DynamicClosureAuthorityWGSL } from
+  "./sparse-cm12-dynamic-closure-authority.wgsl";
 import { createSparseCM12GeometryFaceNeighborsWGSL,
   createSparseCM12IBOSemanticAuthorityWGSL } from
   "./sparse-cm12-ibo-semantic-authority.wgsl";
@@ -128,14 +128,13 @@ import { createSparseCM12TopologyEffectsAuthorityWGSL } from
  */
 export type SparseCM12BrickFineResolution = 4 | 8 | 16;
 
-export interface SparseCM12TemporalWorklistLayout {
-  readonly headerBaseWords: number;
-  readonly cellListBaseWords: number;
-  readonly rowListBaseWords: number;
-  readonly cellFlagABaseWords: number;
-  readonly cellFlagBBaseWords: number;
-  readonly totalWords: number;
-}
+/** Construction-time specialization keeps brick geometry in WGSL constants,
+ * so the hot lookup/transfer paths pay no runtime ladder branch. */
+import {
+  createSparseCM12CellAccessWGSL,
+  createSparseCM12RowAccessWGSL,
+  SPARSE_CM12_ATOMIC_ARENA_READERS,
+} from "./sparse-cm12-row-access.wgsl";
 
 /** Persistent dense pressure membership plus bounded local change journals. */
 export interface SparseCM12PressureRepairLayout {
@@ -152,232 +151,27 @@ export interface SparseCM12PressureRepairLayout {
   readonly totalWords: number;
 }
 
-function createTemporalWorklistWGSL(
-  layout: SparseCM12TemporalWorklistLayout,
-): string {
-  const h = layout.headerBaseWords;
-  return /* wgsl */ `
-const TEMPORAL_CELL_COUNT_AT:u32=${h}u;
-const TEMPORAL_ROW_COUNT_AT:u32=${h + 4}u;
-const TEMPORAL_CELL_LIST:u32=${layout.cellListBaseWords}u;
-const TEMPORAL_ROW_LIST:u32=${layout.rowListBaseWords}u;
-const TEMPORAL_CELL_FLAG_A:u32=${layout.cellFlagABaseWords}u;
-const TEMPORAL_CELL_FLAG_B:u32=${layout.cellFlagBBaseWords}u;
-const TEMPORAL_F32_POSITIVE_ZERO:u32=0x00000000u;
-const TEMPORAL_F32_ONE:u32=0x3f800000u;
-// The exact bit-change seed is the production path. The immutable "current"
-// QA constructor overrides this to false so the former canonical-value seed
-// remains available as a byte-exact comparison oracle.
-override TEMPORAL_CHANGE_SEED_QA:bool=true;
-override TEMPORAL_SEED_COUNT_QA:bool=false;
-const TEMPORAL_SEED_COUNT_AT:u32=${h + 8}u;
-const TEMPORAL_DILATION_A_COUNT_AT:u32=${h + 9}u;
-
-// 0 = exact dry authority, 1 = exact flooded authority, 2 = unresolved.
-fn temporalScalarEndpointPhaseAt(cell:u32,densityOffset:u32,gammaOffset:u32)->u32{
-  if(!cellActive(cell)||bitcast<u32>(cellOpenFraction(cell))!=TEMPORAL_F32_ONE
-    ||bitcast<u32>(state[gammaOffset+cell])!=TEMPORAL_F32_ONE){return 2u;}
-  let rho=bitcast<u32>(state[densityOffset+cell]);
-  if(rho==TEMPORAL_F32_POSITIVE_ZERO){return 0u;}
-  if(rho==TEMPORAL_F32_ONE){return 1u;}
-  return 2u;
-}
-
-// Exact constant-field authority. This is a value/topology certificate, not a
-// scene heuristic: any cut face, non-two-term row, phase value, moving solid,
-// high local CFL, or noncanonical neighbor stays on the ordinary path.
-fn temporalScalarCellCanonicalAt(cell:u32,densityOffset:u32,gammaOffset:u32)->bool{
-  let phase=temporalScalarEndpointPhaseAt(cell,densityOffset,gammaOffset);
-  if(phase==2u){atomicOr(&activity[27],1u);return false;}
-  let velocityAt=destinationCellVelocity()+4u*cell;
-  // A dry constant field has no characteristic payload to move. Flooded cells
-  // require a bounded trace. The collocation producer deliberately clears w
-  // after projection because w is the *next extrapolation* marker, not a
-  // validity bit for the projected xyz values observed here. The next-frame
-  // mass receipt checks w again after all eight extrapolation sweeps.
-  if(phase==1u&&(length(vec3f(state[velocityAt],state[velocityAt+1u],
-      state[velocityAt+2u]))*p.frame.x
-      >0.75*cellMinimumWidth(cell))){atomicOr(&activity[27],4u);return false;}
-  var sideMask=0u;
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);
-    if(!rowAccepted(row)||rowArea(row)<=1e-8){
-      atomicOr(&activity[27],8u);return false;}
-    let coefficient=termCoefficient(incidenceTerm(incidence));
-    let side=2u*rowAxis(row)+select(0u,1u,coefficient>0.0);
-    sideMask|=1u<<side;
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);var hasNeighbor=false;
-    for(var term=begin;term<end;term+=1u){
-      let candidate=termCell(term);if(candidate==cell){continue;}
-      hasNeighbor=true;
-      if(temporalScalarEndpointPhaseAt(candidate,densityOffset,gammaOffset)!=phase){
-        atomicOr(&activity[27],16u);return false;
-      }
-    }
-    if(!hasNeighbor){atomicOr(&activity[27],16u);return false;}
-  }
-  if(sideMask!=63u){atomicOr(&activity[27],2u);return false;}
-  return true;
-}
-
-@compute @workgroup_size(1)
-fn resetTemporalScalarWorklists(){
-  atomicStore(&activity[TEMPORAL_CELL_COUNT_AT],0u);
-  atomicStore(&activity[TEMPORAL_CELL_COUNT_AT+1u],0u);
-  atomicStore(&activity[TEMPORAL_CELL_COUNT_AT+2u],1u);
-  atomicStore(&activity[TEMPORAL_CELL_COUNT_AT+3u],1u);
-  atomicStore(&activity[TEMPORAL_ROW_COUNT_AT],0u);
-  atomicStore(&activity[TEMPORAL_ROW_COUNT_AT+1u],0u);
-  atomicStore(&activity[TEMPORAL_ROW_COUNT_AT+2u],1u);
-  atomicStore(&activity[TEMPORAL_ROW_COUNT_AT+3u],1u);
-  if(TEMPORAL_SEED_COUNT_QA){
-    atomicStore(&activity[TEMPORAL_SEED_COUNT_AT],0u);
-    atomicStore(&activity[TEMPORAL_DILATION_A_COUNT_AT],0u);
-  }
-  atomicStore(&activity[27],0x80000000u);
-}
-
-// Pressure membership consumes the fully conditioned destination fields, not
-// the pre-transport source banks. This observation-only pass builds the same
-// conservative two-ring frontier after sharpening has published those values.
-@compute @workgroup_size(64)
-fn classifyTemporalPressureCells(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  // Exact endpoint transitions can look canonical on the current frame while
-  // the persistent PCM bit still carries the previous phase. The global QA
-  // census is presently our correctness authority, so explicitly root that
-  // transition without mutating pressure state; the ordinary incidence
-  // dilation below supplies the dependent row closure.
-  let membershipChanged=pressureCellMembershipPredicate(cell)!=pcmCellContains(cell);
-  var slow=false;
-  if(TEMPORAL_CHANGE_SEED_QA){
-    // Bitwise-identical scalar endpoints do not require
-    // pressure/presentation/activity repair merely because their value is
-    // noncanonical. Rigid/cut cells retain the conservative certificate.
-    let scalarChanged=bitcast<u32>(state[sourceDensity()+cell])
-        !=bitcast<u32>(state[destinationDensity()+cell])
-      ||bitcast<u32>(state[sourceGamma()+cell])
-        !=bitcast<u32>(state[destinationGamma()+cell]);
-    let conservative=hasRigidBodies()
-      ||bitcast<u32>(cellOpenFraction(cell))!=TEMPORAL_F32_ONE;
-    slow=membershipChanged||scalarChanged||conservative;
-  }else{
-    slow=membershipChanged
-      ||!temporalScalarCellCanonicalAt(cell,destinationDensity(),destinationGamma());
-  }
-  atomicStore(&activity[TEMPORAL_CELL_FLAG_A+cell],select(0u,1u,slow));
-  if(TEMPORAL_SEED_COUNT_QA&&slow){
-    atomicAdd(&activity[TEMPORAL_SEED_COUNT_AT],1u);
-  }
-}
-
-fn dilateTemporalScalarCell(cell:u32,inputBase:u32)->u32{
-  if(atomicLoad(&activity[inputBase+cell])!=0u){return 1u;}
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);if(!rowAccepted(row)){return 1u;}
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-    for(var term=begin;term<end;term+=1u){
-      let neighbor=termCell(term);
-      if(atomicLoad(&activity[inputBase+neighbor])!=0u){return 1u;}
-    }
-  }
-  return 0u;
-}
-
-@compute @workgroup_size(64)
-fn dilateTemporalScalarAtoB(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  let slow=dilateTemporalScalarCell(cell,TEMPORAL_CELL_FLAG_A);
-  atomicStore(&activity[TEMPORAL_CELL_FLAG_B+cell],slow);
-  if(TEMPORAL_SEED_COUNT_QA&&slow!=0u){
-    atomicAdd(&activity[TEMPORAL_DILATION_A_COUNT_AT],1u);
-  }
-}
-
-@compute @workgroup_size(64)
-fn dilateTemporalScalarBtoA(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  atomicStore(&activity[TEMPORAL_CELL_FLAG_A+cell],
-    dilateTemporalScalarCell(cell,TEMPORAL_CELL_FLAG_B));
-}
-
-@compute @workgroup_size(64)
-fn compactTemporalScalarCells(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID
-    ||atomicLoad(&activity[TEMPORAL_CELL_FLAG_A+cell])==0u){return;}
-  let slot=atomicAdd(&activity[TEMPORAL_CELL_COUNT_AT],1u);
-  atomicStore(&activity[TEMPORAL_CELL_LIST+slot],cell);
-}
-
-@compute @workgroup_size(64)
-fn compactTemporalScalarRows(@builtin(global_invocation_id)gid:vec3u){
-  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
-  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);var slow=false;
-  for(var term=begin;term<end;term+=1u){
-    slow=slow||atomicLoad(&activity[TEMPORAL_CELL_FLAG_A+termCell(term)])!=0u;
-  }
-  if(!slow){return;}
-  let slot=atomicAdd(&activity[TEMPORAL_ROW_COUNT_AT],1u);
-  atomicStore(&activity[TEMPORAL_ROW_LIST+slot],row);
-}
-
-@compute @workgroup_size(1)
-fn finalizeTemporalScalarWorklists(){
-  let cells=atomicLoad(&activity[TEMPORAL_CELL_COUNT_AT]);
-  let rows=atomicLoad(&activity[TEMPORAL_ROW_COUNT_AT]);
-  atomicStore(&activity[TEMPORAL_CELL_COUNT_AT+1u],(cells+63u)/64u);
-  atomicStore(&activity[TEMPORAL_ROW_COUNT_AT+1u],(rows+63u)/64u);
-  atomicStore(&activity[25],cells);atomicStore(&activity[26],rows);
-}
-
-fn temporalScalarCellInvocation(invocation:u32)->u32{
-  let count=atomicLoad(&activity[TEMPORAL_CELL_COUNT_AT]);
-  return select(INVALID,atomicLoad(&activity[TEMPORAL_CELL_LIST+invocation]),invocation<count);
-}
-fn temporalScalarRowInvocation(invocation:u32)->u32{
-  let count=atomicLoad(&activity[TEMPORAL_ROW_COUNT_AT]);
-  return select(INVALID,atomicLoad(&activity[TEMPORAL_ROW_LIST+invocation]),invocation<count);
-}
-`;
-}
-
-/** Construction-time specialization keeps brick geometry in WGSL constants,
- * so the hot lookup/transfer paths pay no runtime ladder branch. */
-import {
-  createSparseCM12CellAccessWGSL,
-  createSparseCM12RowAccessWGSL,
-  SPARSE_CM12_ATOMIC_ARENA_READERS,
-} from "./sparse-cm12-row-access.wgsl";
-
 export function createWebgpuSparseCM12ResidentWGSL(
   brickFineResolution: SparseCM12BrickFineResolution = 8,
   presentationPageResolution: SparseCM12BrickFineResolution = brickFineResolution,
-  temporalWorklistLayout?: SparseCM12TemporalWorklistLayout,
   pressureRepairLayout?: SparseCM12PressureRepairLayout,
   incrementalActivityLayout?: SparseCM12IncrementalActivityLayout,
   canonicalMembershipLayout?: SparseCM12CanonicalMembershipLayout,
   framePlanLayout?: SparseCM12FramePlanLayout,
   framePlanPresentationLayout?: SparseCM12FramePlanPresentationLayout,
   frameControlLayout?: SparseCM12FrameControlLayout,
-  scalarResultIngressLayout?: SparseCM12SRR1IngressLayout,
   pressureTopologyRepairLayout?: SparseCM12PressureTopologyRepairLayout,
   persistentPressureCacheLayout?: SparseCM12PersistentPressureCacheLayout,
   faceProjectionAuthorityLayout?: SparseCM12FaceProjectionAuthorityLayout,
   vexActivityBatchLayout?: SparseCM12VexActivityBatchLayout,
   pressureAddressingABLayout?: SparseCM12PressureAddressingABLayout,
   pressureAddressingFixedMode?: SparseCM12PressureAddressingABModeName,
-  facePreparationTileCensusLayout?: SparseCM12FacePreparationTileCensusLayout,
-  fpaVexReadCensusLayout?: SparseCM12FpaVexReadCensusLayout,
   pressureExecutionQAOracle = false,
   logicalOwnerDirectory?: {
     readonly layout: SparseCM12LogicalOwnerDirectoryLayout;
     readonly baseWords: number;
     readonly packedOwner16BaseWords?: number;
   },
-  transportRowAuthorityBaseWords = 0,
-  gammaPairGenerationBaseWords = 0,
-  sharpeningCellAuthorityBaseWords = 0,
-  sharpeningBrickCapacity = 1,
   faceVelocitySupportBaseFloats = 0,
   effectiveTransportVelocityLayout?: SparseCM12EffectiveTransportVelocityLayout,
   transportExecutionImageLayout?: SparseCM12TransportExecutionImageLayout,
@@ -388,6 +182,7 @@ export function createWebgpuSparseCM12ResidentWGSL(
   internedBoundaryImage?: Readonly<{
     layout: SparseCM12InternedBoundaryLayout;
     refLookupLayout: SparseCM12InternedRefLookupLayout;
+    traSupplementLayout: SparseCM12IboTRASupplementLayout;
     baseWords: number;
     semanticAuthority: Readonly<{
       geometryBaseWords: number;
@@ -399,8 +194,10 @@ export function createWebgpuSparseCM12ResidentWGSL(
       immutableCertificateHash: number;
     }>;
   }>,
+  dynamicClosureLayout?: SparseCM12DynamicClosureLayout,
   vexDeltaAuthorityLayout?: SparseCM12VexDeltaAuthorityLayout,
   topologyEffectsAuthorityLayout?: SparseCM12TopologyEffectsAuthorityLayout,
+  finalScalarPacketMaskLayout?: SparseCM12FinalScalarPacketMaskLayout,
 ): string {
   if (presentationPageResolution > brickFineResolution
     || brickFineResolution % presentationPageResolution !== 0) {
@@ -410,44 +207,22 @@ export function createWebgpuSparseCM12ResidentWGSL(
   const candidateCellCount = brickFineResolution ** 3;
   const candidateFaceSampleCount = brickFineResolution ** 2;
   const presentationPagesPerAxis = brickFineResolution / presentationPageResolution;
-  const transportRowCapacity = faceProjectionAuthorityLayout?.rowCapacity ?? 1;
   const transportCellCapacity = faceProjectionAuthorityLayout?.cellCapacity ?? 1;
-  const transportRowLeafCount = Math.ceil(transportRowCapacity / 256);
-  const transportRowGenerationBase = transportRowAuthorityBaseWords + 8;
-  const transportRowLeafStampBase = transportRowGenerationBase + transportRowCapacity;
-  const transportRowLeafListBase = transportRowLeafStampBase + transportRowLeafCount;
-  const sharpeningCellGenerationBase = sharpeningCellAuthorityBaseWords + 12;
-  const sharpeningCellListBase = sharpeningCellGenerationBase + transportCellCapacity;
-  const sharpeningBrickGenerationBase = sharpeningCellListBase + transportCellCapacity;
-  const sharpeningBrickListBase = sharpeningBrickGenerationBase + sharpeningBrickCapacity;
   // Span-one pages need at most (P/2 + 2)^3 samples: scale one addresses the
   // authority directly, so scale two is the finest cached reconstruction.
   // A finer macro can exceed this bounded cache and takes the direct fallback.
   const presentationCacheCapacity = (presentationPageResolution / 2 + 2) ** 3;
-  const temporalWorklistEntries = temporalWorklistLayout
-    ? createTemporalWorklistWGSL(temporalWorklistLayout)
-    : /* wgsl */ `
-const TEMPORAL_CELL_FLAG_A:u32=0u;
-fn temporalScalarCellInvocation(invocation:u32)->u32{
-  return acceptedTemplateCellInvocation(invocation);
-}
-fn temporalScalarRowInvocation(invocation:u32)->u32{
-  return acceptedTemplateRowInvocation(invocation);
-}
-`;
   const incrementalActivityEntries = incrementalActivityLayout
     ? createSparseCM12IncrementalActivityWGSL(incrementalActivityLayout,
       brickFineResolution / 4)
     : /* wgsl */ `
 fn incrementalActivityGeneration()->u32{return 0u;}
 fn incrementalActivityMarkCellClosure(cell:u32,cause:u32){_=cell;_=cause;}
-fn incrementalActivityMarkStableTileBrick(tile:u32,brick:u32,localTile:u32,cause:u32){
-  _=tile;_=brick;_=localTile;_=cause;}
 fn incrementalActivityBrickInvocation(invocation:u32)->u32{
   return select(INVALID,invocation,invocation<p.dispatch.w);
 }
 fn incrementalActivityBrickDirty(brick:u32)->bool{return brick<p.dispatch.w;}
-fn incrementalActivityBrickTileMask(brick:u32)->vec2u{_=brick;return vec2u(0u);}
+fn incrementalActivityBrickVelocityDirty(brick:u32)->bool{return brick<p.dispatch.w;}
 fn incrementalActivityAcceptMeasuredTopology(brick:u32){_=brick;}
 fn incrementalActivityRemoveCensus(brick:u32){_=brick;}
 fn incrementalActivityAddCensus(brick:u32,score:u32,reasons:u32){
@@ -518,8 +293,6 @@ fn cm12PublishTransferredEffectiveVelocity(cell:u32,velocity:vec3f){
   const phase1QAMassCapture = phase1TransportQALayout
     ? `if(id!=INVALID){cm12Phase1QACaptureMass(id,
     state[destinationDensity()+id],state[destinationGamma()+id]);}` : "";
-  const phase1QASharpeningTileCapture = phase1TransportQALayout
-    ? "cm12Phase1QACaptureSharpeningTile(rank,lane);" : "";
   const phase1QATransferredVelocityPublish = phase1TransportQALayout
     ? "cm12Phase1QAPublishTransferredEffectiveVelocity(cell,"
       + "vec3f(state[at],state[at+1u],state[at+2u]));"
@@ -606,14 +379,6 @@ const PRESSURE_MODE_FAIL_CLOSED:u32=0u;
 const PRESSURE_MODE_BOOTSTRAP:u32=1u;
 const PRESSURE_MODE_INCREMENTAL:u32=2u;
 `;
-  const presentationTemporalReuse = temporalWorklistLayout ? /* wgsl */ `
-  // Fine samples sourced from exact-authority scalar cells retain their prior
-  // payload. Keep one workgroup per page: workgroup-per-tile publication is
-  // prohibitively expensive on Metal even when most tiles return early.
-  let temporalReady=(atomicLoad(&activity[27])&0x80000000u)!=0u;
-  let reusePresentationSamples=temporalReady&&atomicLoad(&activity[17])==0u
-    &&brickActive(brick)&&scale==1u;
-` : "  let reusePresentationSamples=false;";
   const frameControlEntries = frameControlLayout
     ? createSparseCM12FrameControlWGSL({
       layout: frameControlLayout, controlName: "topologyArena",
@@ -640,36 +405,6 @@ fn cm12FCCommit()->bool{return true;}
 fn cm12FCInvalidateD4(cause:u32,owner:u32)->bool{_=cause;_=owner;return true;}
 fn cm12FCInvalidateD4Authorized(cause:u32,owner:u32,
  generation:u32,sealed:bool){_=cause;_=owner;_=generation;_=sealed;}
-`;
-  const scalarAuthorityEntries = scalarResultIngressLayout
-    ? createSparseCM12SRR1ResidentIngressWGSL({
-      layout: scalarResultIngressLayout, arenaName: "activity",
-      preflightedTopologyPublication: topologyEffectsAuthorityLayout !== undefined,
-    })
-    : /* wgsl */ `
-fn sirResidentBeginFrame(generation:u32,topologyGeneration:u32,sourceParity:u32)->bool{
-  _=generation;_=topologyGeneration;_=sourceParity;return true;}
-fn sirResidentAppendEvent(tile:u32,generation:u32,cause:u32)->bool{
-  _=tile;_=generation;_=cause;return true;}
-fn sirResidentEventStamped(tile:u32,generation:u32)->bool{
-  _=tile;_=generation;return false;}
-fn sirResidentEventCause(tile:u32,generation:u32)->u32{
-  _=tile;_=generation;return 0u;}
-fn sirResidentResetCopiedEvents(tile:u32){_=tile;}
-fn sirResidentBeginReceiptBatch(){}
-fn sirResidentCandidateGeneration()->u32{return 1u;}
-fn sirResidentTopologyGeneration()->u32{return 1u;}
-fn sirResidentSourceParity()->u32{return 0u;}
-fn sirResidentWorkTile(rank:u32)->u32{return rank;}
-fn sirResidentPublishReceipt(rank:u32,tile:u32,topologyGeneration:u32,
-  bank0Generation:u32,bank1Generation:u32,headResultGeneration:u32,
-  coveredWords:u32,expectedWords:u32,sourceMismatchCount:u32,
-  destinationMismatchCount:u32,dependencyGeneration:u32,
-  dependencyCertifiedGeneration:u32,resultKind:u32,generation:u32)->bool{
-  _=rank;_=tile;_=topologyGeneration;_=bank0Generation;_=bank1Generation;
-  _=headResultGeneration;_=coveredWords;_=expectedWords;_=sourceMismatchCount;
-  _=destinationMismatchCount;_=dependencyGeneration;_=dependencyCertifiedGeneration;
-  _=resultKind;_=generation;return true;}
 `;
   const pressureAddressingABEntries = pressureAddressingABLayout
     ? createSparseCM12PressureAddressingABWGSL({
@@ -741,17 +476,10 @@ fn vda1MarkInjectionPublishedNoFail(){}
 fn vda1MarkD4PublishedNoFail(){}
 `;
   const topologyEffectsEntries = topologyEffectsAuthorityLayout
-    && scalarResultIngressLayout && pressureTopologyRepairLayout
+    && pressureTopologyRepairLayout
     ? /* wgsl */ `
-fn tfxSCATargetGeneration()->u32{return cm12FCCandidateGeneration()+1u;}
 fn tfxPTRTargetGeneration()->u32{
  return atomicLoad(&topologyArena[ptrH_CANDIDATE_GENERATION]);}
-fn tfxSCAReady(generation:u32,newCount:u32)->bool{
- return sirResidentPreflightReady(generation,newCount);}
-fn tfxSCAWillAppend(tile:u32,generation:u32)->bool{
- return sirResidentPreflightWillAppend(tile,generation);}
-fn tfxSCAPublish(tile:u32,generation:u32,cause:u32){
- sirResidentPublishPreflightedEvent(tile,generation,cause);}
 fn tfxPTRReady(generation:u32,newCount:u32,newLeafCount:u32)->bool{
  return ptrPreflightReady(generation,newCount,newLeafCount);}
 fn tfxPTRWillAppend(brick:u32,generation:u32)->bool{
@@ -774,12 +502,6 @@ fn residentTopologyEffectsPreflightReady()->bool{
   atomicLoad(&topologyArena[${topologyEffectsAuthorityLayout.baseWords
     + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.generation}u]),
   atomicLoad(&topologyArena[${topologyEffectsAuthorityLayout.baseWords
-    + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.scaTargetGeneration}u]),
-  atomicLoad(&topologyArena[${topologyEffectsAuthorityLayout.baseWords
-    + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.scaCount}u]),
-  atomicLoad(&topologyArena[${topologyEffectsAuthorityLayout.baseWords
-    + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.scaHash}u]),
-  atomicLoad(&topologyArena[${topologyEffectsAuthorityLayout.baseWords
     + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.ptrTargetGeneration}u]),
   atomicLoad(&topologyArena[${topologyEffectsAuthorityLayout.baseWords
     + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.ptrCount}u]),
@@ -792,7 +514,6 @@ fn authorizeEmptySparseCM12CandidateEffectsNoFail(acceptedGeneration:u32)->bool{
   ${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.phase}u])
     ==${SPARSE_CM12_TOPOLOGY_EFFECTS_PHASE.preflighted}u
   &&atomicLoad(&topologyArena[tfxBase+${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.fault}u])==0u
-  &&atomicLoad(&topologyArena[tfxBase+${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.scaCount}u])==0u
   &&atomicLoad(&topologyArena[tfxBase+${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.ptrCount}u])==0u
   &&atomicLoad(&topologyArena[tfxBase+${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.ptrLeafCount}u])==0u
   &&atomicLoad(&topologyArena[tfxBase+${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.expectedEffects}u])==0u
@@ -818,7 +539,6 @@ fn authorizeEmptySparseCM12CandidateEffectsNoFail(acceptedGeneration:u32)->bool{
  vda1SealPublicationNoFail();vda1CommitSuccessNoFail(acceptedGeneration);return true;
 }
 ` : /* wgsl */ `
-fn tfxRecordSCATile(tile:u32,cause:u32)->bool{_=tile;_=cause;return true;}
 fn tfxRecordPTRBrick(brick:u32,oldState:u32,newState:u32,cause:u32)->bool{
  _=brick;_=oldState;_=newState;_=cause;return true;}
 fn residentTopologyEffectsPreflightReady()->bool{return true;}
@@ -866,25 +586,6 @@ fn fpaMarkProjectionRow(row:u32,cause:u32,depth:u32,receipt:bool)->bool{
 fn fpaMarkProjectionPressureCell(cell:u32,bits:u32,cause:u32)->bool{
   _=cell;_=bits;_=cause;return true;}
 `;
-  const facePreparationTileCensusEntries = facePreparationTileCensusLayout
-    && incrementalActivityLayout
-    ? createSparseCM12FacePreparationTileCensusWGSL({
-      layout: facePreparationTileCensusLayout, activity: incrementalActivityLayout,
-    }) : "";
-  const fpaVexReadCensusEntries = fpaVexReadCensusLayout
-    ? createSparseCM12FpaVexReadCensusWGSL(fpaVexReadCensusLayout) : "";
-  // The census is a construction-only QA specialization. Keep the ordinary
-  // production interpolation source byte-clean: no census parameter, call,
-  // or no-op seam is emitted for the production resident.
-  const fvrParameter = fpaVexReadCensusLayout ? ",censusRow:u32" : "";
-  const fvrArgument = fpaVexReadCensusLayout ? ",censusRow" : "";
-  const fvrInvalidArgument = fpaVexReadCensusLayout ? ",INVALID" : "";
-  const fvrRowArgument = fpaVexReadCensusLayout ? ",row" : "";
-  const fvrSampleRead = fpaVexReadCensusLayout
-    ? `let effective=cm12ExtensionTransportVelocity(cell);
-    fvrRecordXyzRead(censusRow,cell,effective.xyz);
-    result+=wx*wy*wz*effective.xyz;`
-    : "result+=wx*wy*wz*cm12ExtensionTransportVelocity(cell).xyz;";
   const logicalOwnerEntries = logicalOwnerDirectory
     ? createSparseCM12LogicalOwnerDirectoryWGSL({
       layout: logicalOwnerDirectory.layout,
@@ -916,6 +617,7 @@ struct CM12TransportLeaf{generation:u32,flags:u32,first:u32,count:u32,
   originKey:u32,valid:vec3u,scale:u32,scaleLog2:u32}
 struct CM12TransportOwner{cell:u32,widths:vec3u,volume:u32}
 struct CM12TransportPacket{first:u32,counts:vec3u,strideY:u32,strideZ:u32}
+struct CM12TransportSpatialTile{packetId:u32,laneMask:vec2u}
 fn cm12TeiLogicalCoordinate(key:u32)->vec3u{
   let dimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
     /BRICK_FINE_RESOLUTION;let xy=dimensions.x*dimensions.y;
@@ -943,6 +645,8 @@ fn cm12TeiPacket(_packet:u32,_slot:u32)->CM12TransportPacket{
 fn cm12TeiPacketFineOrigin(_packet:u32,_slot:u32)->vec3u{
   return vec3u(0xffffffffu);}
 fn cm12TeiPacketCell(_packet:u32,_lane:u32,_slot:u32)->u32{return 0xffffffffu;}
+fn cm12TeiSpatialTile(_tile:u32,_slot:u32)->CM12TransportSpatialTile{
+  return CM12TransportSpatialTile(0xffffffffu,vec2u(0u));}
 fn cm12TeiStagedScaleAtFine(_fine:vec3u)->u32{return 1u;}
 @compute @workgroup_size(64)
 fn compileSparseCM12TransportExecutionImageShadow(
@@ -958,9 +662,7 @@ fn replaySparseCM12TransportExecutionImageRetired(
     : /* wgsl */ `
 @compute @workgroup_size(1) fn beginSparseCM12TransportPacketAuthority(){}
 @compute @workgroup_size(64) fn clearSparseCM12TransportPacketAuthority(){}
-@compute @workgroup_size(64) fn mapSparseCM12TransportTracePackets(){}
-@compute @workgroup_size(64) fn mapSparseCM12TransportScatterPackets(){}
-@compute @workgroup_size(64) fn mapSparseCM12TransportGatherPackets(){}
+@compute @workgroup_size(64) fn compileSparseCM12TransportPacketsFromFinalScalarMasks(){}
 @compute @workgroup_size(1) fn finalizeSparseCM12TransportPacketAuthority(){}
 fn cm12TransportPacketCount(family:u32)->u32{_=family;return 0u;}
 fn cm12TransportPacketId(rank:u32,family:u32)->u32{
@@ -974,7 +676,6 @@ fn cm12TransportStagedExecutionCell(lane:u32)->u32{
   _=lane;return INVALID;}
 fn cm12TransportExecutionCell(rank:u32,lane:u32,family:u32)->u32{
   _=rank;_=lane;_=family;return INVALID;}
-fn cm12TransportReceiptCell(rank:u32,lane:u32)->u32{_=rank;_=lane;return INVALID;}
 fn cm12TransportSpatialTileCell(tile:u32,lane:u32)->u32{_=tile;_=lane;return INVALID;}
 fn cm12TransportSpatialTileId(fine:vec3u)->u32{_=fine;return INVALID;}`;
   // Production AEI resolves through the staged 27-leaf directory and the
@@ -986,7 +687,8 @@ fn cm12TransportSpatialTileId(fine:vec3u)->u32{_=fine;return INVALID;}`;
       layout: transportProducerMaskLayout,
       arenaName: "topologyArena",
       hookPrefix: "cm12Resident",
-      dynamicClosurePublish: false,
+      dynamicClosurePublish: dynamicClosureLayout !== undefined,
+      legacyRowCompiler: false,
     })
     : /* wgsl */ `
 @compute @workgroup_size(1) fn beginSparseCM12TransportProducerMasks(){}
@@ -996,7 +698,35 @@ fn cm12TransportSpatialTileId(fine:vec3u)->u32{_=fine;return INVALID;}`;
 fn cm12TransportProducerMaskPublish(packet:u32,lane:u32,cell:u32,
  surfaceFeature:bool,densityChanged:bool){
   _=packet;_=lane;_=cell;_=surfaceFeature;_=densityChanged;
+ }
+fn cm12TransportSharpeningMaskPublish(packet:u32,lane:u32,cell:u32,
+ sharpeningSource:bool,cellScale:u32){
+  _=packet;_=lane;_=cell;_=sharpeningSource;_=cellScale;
+}
+fn tpm1SharpeningLaneMarked(packet:u32,lane:u32)->bool{
+  _=packet;_=lane;return false;
 }`;
+  const finalScalarPacketMaskEntries = finalScalarPacketMaskLayout
+    ? createSparseCM12FinalScalarPacketMaskWGSL({
+      layout: finalScalarPacketMaskLayout,
+      arenaName: "topologyArena",
+    })
+    : /* wgsl */ `
+fn fsm1ChangedCell(cell:u32)->bool{_=cell;return false;}
+fn fsm1FlipCell(cell:u32)->bool{_=cell;return false;}
+fn fsm1ChangedOrFlipCell(cell:u32)->bool{_=cell;return false;}
+fn fsm1Generation()->u32{return 0u;}
+fn fsm1TopologyGeneration()->u32{return 0u;}
+fn fsm1Published()->bool{return false;}
+fn fsm1Changed(packet:u32)->vec2u{_=packet;return vec2u(0u);}
+fn fsm1Nonexact(packet:u32)->vec2u{_=packet;return vec2u(0u);}
+fn fsm1Bulk(packet:u32)->vec2u{_=packet;return vec2u(0u);}
+fn fsm1Flip(packet:u32)->vec2u{_=packet;return vec2u(0u);}
+fn fsm1Lane(mask:vec2u,lane:u32)->bool{_=mask;_=lane;return false;}
+@compute @workgroup_size(1) fn beginSparseCM12FinalScalarMasks(){}
+@compute @workgroup_size(64) fn publishSparseCM12FinalScalarMasks(){}
+@compute @workgroup_size(1) fn sealSparseCM12FinalScalarMasks(){}
+`;
   const internedBoundaryEntries = internedBoundaryImage
     ? /* wgsl */ `
 fn cm12IBOSharedAcceptedSlot()->u32{return acceptedTopologySlot();}
@@ -1311,6 +1041,30 @@ fn cm12ISASetExpectedChanged(count:u32,xorHash:u32,sumHash:u32){
 }
 @compute @workgroup_size(1) fn finalizeSparseCM12ISAChangedSetReceipt(){}
 `;
+  const dynamicClosureEntries = internedBoundaryImage && dynamicClosureLayout
+    ? /* wgsl */ `
+${createSparseCM12IboTRAResidentHooksWGSL({
+  iboPrefix: "cm12", residentPrefix: "cm12", arenaName: "topologyArena",
+})}
+${createSparseCM12IboTRASupplementWGSL({
+  layout: internedBoundaryImage.traSupplementLayout,
+  arenaName: "topologyArena", hookPrefix: "cm12",
+  baseWords: internedBoundaryImage.baseWords,
+})}
+// VEX remains on its independently ordered producer compiler in this cut.
+// DCA1 owns the shared source ABI now; VXI1 can consume the density list
+// without changing the row/gamma transaction implemented here.
+fn cm12DynamicClosureApplyVEX(packet:u32,mask:vec2u,worker16:u32){
+  _=packet;_=mask;_=worker16;
+}
+fn cm12DynamicClosureSeedVEXFrontier(packet:u32,mask:vec2u,worker64:u32){
+  _=packet;_=mask;_=worker64;
+}
+${createSparseCM12DynamicClosureAuthorityWGSL({
+  layout: dynamicClosureLayout, arenaName: "topologyArena",
+  hookPrefix: "cm12",
+})}
+` : "";
   const internedBoundaryCommitReceipt = internedBoundaryImage ? /* wgsl */ `
   let iboSlot=cm12IBOShadowSlot();let iboHeader=cm12IBOSlotBase(iboSlot);
   valid=valid&&cm12IBOLoad(iboHeader)==cm12IBOCandidateGeneration()
@@ -1344,32 +1098,6 @@ const CM12_TRANSPORT_PROFILE_BASE:u32=${phase1TransportProfileBaseWords ?? 0}u;
 // TEI2 packets are published from accepted leaf/rung state and compiled from
 // the stable SRR spatial-tile authority without changing receipt identity.
 const EXP_ACTIVITY_SCALAR_BRICKS:bool=true;
-// The legacy-owner-hash QA specialization also retains the pre-catalog gamma
-// and mass paths, making it a construction-time bit-equivalence oracle for the
-// production topology caches.
-const EXP_GAMMA_PAIR_CATALOG:bool=true;
-const EXP_SHARPENING_CELL_CATALOG:bool=true;
-const EXP_MASS_DEPARTURE_CACHE:bool=true;
-// TRA1 is a compact, generation-stamped row authority shared by transport
-// producers. Surface-characteristic cells publish their incidence shell;
-// consumers launch one 256-row packet per touched leaf without a row scan.
-const TRA1_HEADER:u32=${transportRowAuthorityBaseWords}u;
-const TRA1_ROW_GENERATION:u32=${transportRowGenerationBase}u;
-const TRA1_LEAF_STAMP:u32=${transportRowLeafStampBase}u;
-const TRA1_LEAF_LIST:u32=${transportRowLeafListBase}u;
-const TRA1_ROW_CAPACITY:u32=${transportRowCapacity}u;
-const TRA1_LEAF_CAPACITY:u32=${transportRowLeafCount}u;
-const GAMMA_PAIR_GENERATION_BASE:u32=${gammaPairGenerationBaseWords}u;
-// SCA1 is independent sharpening-source membership. It shares only the
-// producer's physical surface observation with TRA1; neither authority can
-// narrow the other or pressure.
-const SCA1_HEADER:u32=${sharpeningCellAuthorityBaseWords}u;
-const SCA1_CELL_GENERATION:u32=${sharpeningCellGenerationBase}u;
-const SCA1_CELL_LIST:u32=${sharpeningCellListBase}u;
-const SCA1_CELL_CAPACITY:u32=${transportCellCapacity}u;
-const SCA1_BRICK_GENERATION:u32=${sharpeningBrickGenerationBase}u;
-const SCA1_BRICK_LIST:u32=${sharpeningBrickListBase}u;
-const SCA1_BRICK_CAPACITY:u32=${sharpeningBrickCapacity}u;
 const ACTIVITY_HEADER_WORDS:u32=28u;
 const ACTIVITY_RECORD_WORDS:u32=39u;
 const ACTIVITY_RECOVERY_LOCK:u32=0x80000000u;
@@ -1457,7 +1185,6 @@ struct Params {
 @group(0)@binding(16)var<storage,read_write>topologyArena:array<atomic<u32>>;
 
 ${frameControlEntries}
-${temporalWorklistEntries}
 ${pressureRepairEntries}
 ${incrementalActivityEntries}
 ${canonicalMembershipEntries}
@@ -1466,8 +1193,6 @@ ${framePlanPresentationEntries}
 ${pressureTopologyRepairEntries}
 ${persistentPressureCacheEntries}
 ${faceProjectionAuthorityEntries}
-${facePreparationTileCensusEntries}
-${fpaVexReadCensusEntries}
 ${effectiveTransportVelocityEntries}
 ${vexActivityBatchEntries}
 ${pressureAddressingABEntries}
@@ -1782,13 +1507,6 @@ fn rowArea(id:u32)->f32{
   if(!hasRigidBodies()){return rowStaticArea(id);}
   return rowStaticArea(id)*rowOpenFraction(id);
 }
-fn gammaRowPairBegin(row:u32)->u32{return ta(ta(19u)+row);}
-fn gammaRowPairEnd(row:u32)->u32{return ta(ta(19u)+row+1u);}
-fn gammaPairNegative(pair:u32)->u32{return ta(ta(20u)+2u*pair);}
-fn gammaPairPositive(pair:u32)->u32{return ta(ta(20u)+2u*pair+1u);}
-fn gammaCellPairBegin(cell:u32)->u32{return ta(ta(21u)+cell);}
-fn gammaCellPairEnd(cell:u32)->u32{return ta(ta(21u)+cell+1u);}
-fn gammaCellPairIncidence(index:u32)->u32{return ta(ta(22u)+index);}
 fn candidateFaceBoundaryRowRange(brick:u32,accepted:u32,
  side:u32,boundary:u32)->vec2u{
   let configuration=(brick*TEMPLATE_LEVEL_COUNT+templateLevelIndex(accepted))*6u+side;
@@ -1991,7 +1709,9 @@ ${packedLogicalOwnerEntries}
 ${transportExecutionImageEntries}
 ${transportPacketAuthorityEntries}
 ${transportProducerMaskEntries}
+${finalScalarPacketMaskEntries}
 ${internedBoundaryEntries}
+${dynamicClosureEntries}
 
 fn brickDirectoryLookupLegacy(key:u32)->u32{
   let brickDimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
@@ -2211,7 +1931,7 @@ fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
   return restrictedPresentationDensityAt(lower,cellScale,destinationDensity());
 }
 
-fn sampleVelocity(position:vec3f${fvrParameter})->vec3f{
+fn sampleVelocity(position:vec3f)->vec3f{
   let probe=ownerCellAt(vec3i(floor(clamp(position,vec3f(0.0),
     vec3f(p.dimensions.xyz)-vec3f(1e-4)))));
   var spans=vec3f(1.0);if(probe!=INVALID){let b=cellBase(probe);spans=vec3f(taf(b+4u),taf(b+5u),taf(b+6u));}
@@ -2224,7 +1944,7 @@ fn sampleVelocity(position:vec3f${fvrParameter})->vec3f{
     let wx=select(1.0-fraction.x,fraction.x,dx==1);
     let wy=select(1.0-fraction.y,fraction.y,dy==1);
     let wz=select(1.0-fraction.z,fraction.z,dz==1);
-    ${fvrSampleRead}
+    result+=wx*wy*wz*cm12ExtensionTransportVelocity(cell).xyz;
   }}}return result;
 }
 
@@ -2269,9 +1989,9 @@ fn traceEffectiveTransportDeparture(position:vec3f)->vec3f{
 fn traceEffectiveTransportArrival(position:vec3f)->vec3f{
   return traceEffectiveTransportCharacteristic(position,1.0);}
 
-fn traceCharacteristic(position:vec3f,direction:f32${fvrParameter})->vec3f{
+fn traceCharacteristic(position:vec3f,direction:f32)->vec3f{
   let initialPosition=clampInsideEmbeddedBoundary(position);
-  let initial=sampleVelocity(initialPosition${fvrArgument});
+  let initial=sampleVelocity(initialPosition);
   let substeps=clamp(i32(ceil(length(initial)*p.frame.x)),1,16);
   let subDt=p.frame.x/f32(substeps);var traced=initialPosition;
   let lower=vec3f(0.5);let upper=vec3f(p.dimensions.xyz)-vec3f(0.5);
@@ -2279,18 +1999,18 @@ fn traceCharacteristic(position:vec3f,direction:f32${fvrParameter})->vec3f{
     // On the first substep traced is still initialPosition, whose velocity was
     // just sampled to choose the substep count. Reuse it rather than repeating
     // nine sparse owner resolutions.
-    var first=initial;if(step>0){first=sampleVelocity(traced${fvrArgument});}
+    var first=initial;if(step>0){first=sampleVelocity(traced);}
     let midpoint=clipBoundarySegment(traced,
       clamp(traced+direction*0.5*subDt*first,lower,upper));
-    let candidate=traced+direction*subDt*sampleVelocity(midpoint${fvrArgument});
+    let candidate=traced+direction*subDt*sampleVelocity(midpoint);
     traced=clipBoundarySegment(traced,clamp(candidate,lower,upper));
   }
   return traced;
 }
-fn traceDeparture(position:vec3f${fvrParameter})->vec3f{
-  return traceCharacteristic(position,-1.0${fvrArgument});}
+fn traceDeparture(position:vec3f)->vec3f{
+  return traceCharacteristic(position,-1.0);}
 fn traceArrival(position:vec3f)->vec3f{
-  return traceCharacteristic(position,1.0${fvrInvalidArgument});}
+  return traceCharacteristic(position,1.0);}
 
 struct TransportStencil{cells:array<u32,8>,weights:array<f32,8>}
 
@@ -2328,7 +2048,7 @@ fn transportStencil(position:vec3f)->TransportStencil{
 }
 
 // Same stencil geometry/order, but routed through the Phase-1 name so the
-// converted SRR1 kernels have a mechanically isolated access contract.
+// packet transport kernels have a mechanically isolated access contract.
 fn effectiveTransportStencil(position:vec3f)->TransportStencil{
   let probe=cm12TeiOwnerAtFine(vec3i(floor(clamp(position,vec3f(0.0),
     vec3f(p.dimensions.xyz)-vec3f(1e-4)))));
@@ -2350,86 +2070,21 @@ fn effectiveTransportStencil(position:vec3f)->TransportStencil{
   return result;
 }
 
-${scalarAuthorityEntries}
 ${topologyEffectsEntries}
 ${vexDeltaAuthorityEntries}
 
-const SIR1_CAUSE_SCALAR:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.scalarWrite}u;
-const SIR1_CAUSE_VELOCITY:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.velocityWrite}u;
-const SIR1_CAUSE_TOPOLOGY:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.topologyWrite}u;
-const SIR1_CAUSE_DEPENDENCY_CLOSURE:u32=${SPARSE_CM12_SCALAR_RESULT_CAUSE.dependencyClosure}u;
-fn cm12ScalarResultDirtyCauses(cause:u32)->vec2u{
-  var origin=0u;
-  if((cause&${SPARSE_CM12_SCALAR_RESULT_CAUSE.scalarWrite}u)!=0u){
-    origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged}u;}
-  if((cause&${SPARSE_CM12_SCALAR_RESULT_CAUSE.velocityWrite}u)!=0u){
-    origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u;}
-  if((cause&${SPARSE_CM12_SCALAR_RESULT_CAUSE.topologyWrite}u)!=0u){
-    origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
-      | SPARSE_CM12_DIRTY_CAUSE_BIT.coefficientChanged}u;}
-  if((cause&${SPARSE_CM12_SCALAR_RESULT_CAUSE.gammaWrite}u)!=0u){
-    origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.gammaChanged}u;}
-  if((cause&${SPARSE_CM12_SCALAR_RESULT_CAUSE.surfaceWrite}u)!=0u){
-    origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged}u;}
-  if((cause&${SPARSE_CM12_SCALAR_RESULT_CAUSE.solidWrite}u)!=0u){
-    origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.movingSolidSweep}u;}
-  if((cause&${SPARSE_CM12_SCALAR_RESULT_CAUSE.bootstrap}u)!=0u){
-    origin|=${SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated}u;}
-  var inherited=select(0u,${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u,
-    (cause&${SPARSE_CM12_SCALAR_RESULT_CAUSE.dependencyClosure}u)!=0u);
-  // A rank retained by SRR1's persistent work tree has no new ingress event.
-  // It is retry/dependency work, not a provenance or generation fault.
-  if(origin==0u){inherited|=${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u;}
-  return vec2u(origin,inherited);
-}
 const TRANSPORT_CHARACTERISTIC_CLEARANCE:u32=${vexActivityBatchLayout
     ?.velocityState.characteristicSupportFloatBase ?? 0}u;
-const SIR1_TILES_PER_AXIS:u32=BRICK_FINE_RESOLUTION/4u;
-const SIR1_TILES_PER_BRICK:u32=SIR1_TILES_PER_AXIS*SIR1_TILES_PER_AXIS*SIR1_TILES_PER_AXIS;
-fn scaLogicalBrickDimensions()->vec3u{
-  return (p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))/BRICK_FINE_RESOLUTION;
-}
-fn scaTileAtFine(qInput:vec3i)->u32{
-  let q=vec3u(clamp(qInput,vec3i(0),vec3i(p.dimensions.xyz)-vec3i(1)));
-  let brick=q/BRICK_FINE_RESOLUTION;let dims=scaLogicalBrickDimensions();
-  let key=brick.x+dims.x*(brick.y+dims.y*brick.z);
-  let local=(q%BRICK_FINE_RESOLUTION)/4u;
-  return key*SIR1_TILES_PER_BRICK+local.x
-    +SIR1_TILES_PER_AXIS*(local.y+SIR1_TILES_PER_AXIS*local.z);
-}
-fn scaCellBounds(cell:u32)->array<vec3i,2>{
-  let b=cellBase(cell);let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
-  let width=vec3f(taf(b+4u),taf(b+5u),taf(b+6u));var result:array<vec3i,2>;
-  result[0]=vec3i(round(center-0.5*width));
-  result[1]=vec3i(round(center+0.5*width))-vec3i(1);return result;
-}
-fn sirStableMassTileOrigin(tile:u32)->vec3u{
-  if(tile==INVALID){return vec3u(INVALID);}
-  let logical=tile/SIR1_TILES_PER_BRICK;
-  let localTile=tile%SIR1_TILES_PER_BRICK;let dims=scaLogicalBrickDimensions();
-  let xy=dims.x*dims.y;if(xy==0u||logical>=xy*dims.z){return vec3u(INVALID);}
-  let bz=logical/xy;let rem=logical-bz*xy;let by=rem/dims.x;let bx=rem-by*dims.x;
-  let tx=localTile%SIR1_TILES_PER_AXIS;
-  let ty=(localTile/SIR1_TILES_PER_AXIS)%SIR1_TILES_PER_AXIS;
-  let tz=localTile/(SIR1_TILES_PER_AXIS*SIR1_TILES_PER_AXIS);
-  return vec3u(bx,by,bz)*BRICK_FINE_RESOLUTION+4u*vec3u(tx,ty,tz);
-}
-fn sirMassTileOrigin(rank:u32)->vec3u{
-  return sirStableMassTileOrigin(sirResidentWorkTile(rank));}
-// Receipt geometry remains SRR1's stable spatial-tile domain. TEI2 supplies
-// the precompiled tile->packet/lane mapping without changing receipt identity.
-fn sirMassTileCell(rank:u32,lane:u32)->u32{
-  return cm12TransportReceiptCell(rank,lane);
-}
+const CM12_SPATIAL_TILES_PER_AXIS:u32=BRICK_FINE_RESOLUTION/4u;
 // The three conservative physics passes use their independently compiled,
 // deduplicated rung-packet domain. Lane zero snapshots the sealed packet once;
 // hot lanes use mask + packet arithmetic with no owner or cell-open query.
-fn sirMassExecutionCell(rank:u32,lane:u32,family:u32)->u32{
+fn cm12MassExecutionCell(rank:u32,lane:u32,family:u32)->u32{
   _=rank;_=family;return cm12TransportStagedExecutionCell(lane);
 }
 // Packet geometry every lane of a transport packet can read after the stage
 // barriers: fine min corner of packet lane q is origin+scale*q.
-var<workgroup>sirTransportPacketOriginFine:vec3u;
+var<workgroup>cm12TransportPacketOriginFine:vec3u;
 fn stageSparseCM12TransportExecutionImage(rank:u32,lane:u32,family:u32){
   cm12StageTransportPacket(rank,lane,family);
     let profileCell=cm12TransportStagedExecutionCell(lane);
@@ -2441,36 +2096,10 @@ fn stageSparseCM12TransportExecutionImage(rank:u32,lane:u32,family:u32){
     if(family==2u){return;}
     let candidate=cm12TransportStagedPacketOriginFine;
     let origin=select(vec3u(0u),candidate,candidate.x!=INVALID);
-    if(lane==0u){sirTransportPacketOriginFine=origin;}
+    if(lane==0u){cm12TransportPacketOriginFine=origin;}
   cm12TeiStageDirectory(origin,lane,cm12TransportStagedTopologySlot);
 }
-fn stageSparseCM12TransportReceiptImage(rank:u32,lane:u32){
-  let candidate=sirMassTileOrigin(rank);
-  let origin=select(vec3u(0u),candidate,candidate.x!=INVALID);
-  cm12TeiStageDirectory(origin,lane,acceptedTopologySlot());
-}
 
-fn tra1Generation()->u32{return atomicLoad(&topologyArena[TRA1_HEADER]);}
-@compute @workgroup_size(1)
-fn beginTransportRowAuthority(){
-  let generation=max(1u,cm12FCCandidateGeneration());
-  atomicStore(&topologyArena[TRA1_HEADER],generation);
-  atomicStore(&topologyArena[TRA1_HEADER+1u],0u);
-  atomicStore(&topologyArena[TRA1_HEADER+2u],0u);
-  atomicStore(&topologyArena[TRA1_HEADER+3u],1u);
-  atomicStore(&topologyArena[TRA1_HEADER+4u],1u);
-}
-fn tra1MarkRow(row:u32){
-  if(row>=TRA1_ROW_CAPACITY||!rowAccepted(row)){return;}
-  let generation=tra1Generation();
-  if(atomicExchange(&topologyArena[TRA1_ROW_GENERATION+row],generation)
-    ==generation){return;}
-  let leaf=row/256u;
-  if(atomicExchange(&topologyArena[TRA1_LEAF_STAMP+leaf],generation)
-    ==generation){return;}
-  let slot=atomicAdd(&topologyArena[TRA1_HEADER+1u],1u);
-  if(slot<TRA1_LEAF_CAPACITY){atomicStore(&topologyArena[TRA1_LEAF_LIST+slot],leaf);}
-}
 fn cm12ResidentTransportProducerMaskGeneration()->u32{
   return max(1u,cm12FCCandidateGeneration());}
 fn cm12ResidentTransportProducerMaskPacketCount()->u32{
@@ -2495,166 +2124,35 @@ fn cm12ResidentTransportProducerMaskRowTermEnd(row:u32)->u32{
   return rowTermOffset(row)+rowTermCount(row);}
 fn cm12ResidentTransportProducerMaskRowTermCell(term:u32)->u32{
   return termCell(term);}
-fn cm12ResidentTransportProducerMaskMarkRow(row:u32){tra1MarkRow(row);}
 fn cm12ResidentTransportProducerMaskRecordVexRoot(cell:u32,cause:u32){
   _=cm12ExtensionRecordRoot(cell,cause);}
-fn tra1MarkScalarCellClosure(cell:u32){
-  if(cell==INVALID){return;}
-  // Gamma conditioning only affects the presented interface when either bank
-  // lies outside the authored deep-liquid band. This physical density
-  // characteristic intentionally omits homogeneous submerged cells; it never
-  // compares scalar representations or borrows pressure membership.
-  var surfaceFeature=hasRigidBodies()||cellOpenFraction(cell)<1.0-1e-6
-    ||state[sourceDensity()+cell]<p.activityDensity.z
-    ||state[destinationDensity()+cell]<p.activityDensity.z;
-  if(!surfaceFeature){return;}
-  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-    tra1MarkRow(incidenceRow(at));
-  }
+
+// Sharpening consumes TPM1's dynamic mask in the same shared TEI packet space
+// as transport. The mask has already expanded source observations to their
+// 4^3 spatial-tile closure; this late predicate keeps post-conditioning
+// membership exact without a private per-cell generation catalogue.
+fn sharpeningSourceCell(packetRank:u32,lane:u32)->u32{
+  let packet=cm12TransportPacketId(packetRank,0u);
+  if(packet==INVALID||!tpm1SharpeningLaneMarked(packet,lane)){return INVALID;}
+  return cm12TeiPacketCell(packet,lane,acceptedTopologySlot());
 }
-@compute @workgroup_size(1)
-fn finalizeTransportRowAuthority(){
-  let count=atomicLoad(&topologyArena[TRA1_HEADER+1u]);
-  atomicStore(&topologyArena[TRA1_HEADER+2u],min(count,TRA1_LEAF_CAPACITY));
-}
-fn tra1PacketRow(packet:u32,lane:u32,slot:u32)->u32{
-  let count=atomicLoad(&topologyArena[TRA1_HEADER+2u]);
-  if(packet>=count||slot>=4u){return INVALID;}
-  let leaf=atomicLoad(&topologyArena[TRA1_LEAF_LIST+packet]);
-  let row=256u*leaf+64u*slot+lane;
-  return select(INVALID,row,row<TRA1_ROW_CAPACITY
-    &&atomicLoad(&topologyArena[TRA1_ROW_GENERATION+row])==tra1Generation());
+fn sharpeningSourceCellCurrent(cell:u32)->bool{
+  if(cell==INVALID||cell>=p.counts.x||!cellTransportActive(cell)){return false;}
+  let rho=conditionedDensity(cell);
+  return rho>0.0&&rho<=CM12_LIQUID_ISOVALUE;
 }
 
-fn sca1Generation()->u32{return atomicLoad(&topologyArena[SCA1_HEADER]);}
-@compute @workgroup_size(1)
-fn beginSharpeningCellAuthority(){
-  let generation=max(1u,cm12FCCandidateGeneration()&0x7fffffffu);
-  atomicStore(&topologyArena[SCA1_HEADER],generation);
-  atomicStore(&topologyArena[SCA1_HEADER+1u],0u);
-  atomicStore(&topologyArena[SCA1_HEADER+2u],0u);
-  atomicStore(&topologyArena[SCA1_HEADER+3u],1u);
-  atomicStore(&topologyArena[SCA1_HEADER+4u],1u);
-  atomicStore(&topologyArena[SCA1_HEADER+5u],0u);
-  atomicStore(&topologyArena[SCA1_HEADER+6u],0u);
-  atomicStore(&topologyArena[SCA1_HEADER+7u],0u);
-  atomicStore(&topologyArena[SCA1_HEADER+8u],1u);
-  atomicStore(&topologyArena[SCA1_HEADER+9u],1u);
-  atomicStore(&topologyArena[SCA1_HEADER+10u],0u);
-}
-fn sca1MarkBrick(brick:u32){
-  _=brick;
-}
-var<workgroup>sca1PacketTileSource:array<atomic<u32>,64>;
-// Packet arm of the source catalog. The trace workgroup is a rung-major leaf
-// packet, but the catalog keeps the baseline's observable unit: one entry per
-// stable SRR spatial 4^3 tile holding an interface source, replayed as that
-// whole tile. Lanes ballot per tile-within-packet (a tile is one lane at
-// scale>=4, 2^3 lanes at scale 2, the whole packet at scale 1); one
-// representative lane per tile appends the stable tile id. Same append count
-// and same replayed cell set as the work-tile catalog; no owner query or
-// per-lane open-volume check.
-fn sca1PublishPacketSourceTiles(cell:u32,lane:u32){
-  atomicStore(&sca1PacketTileSource[lane],0u);workgroupBarrier();
-  let scale=cm12TeiStagedScaleAtFine(sirTransportPacketOriginFine);
-  let local=scale*vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
-  let group=select(lane,(local.x>>2u)+4u*((local.y>>2u)+4u*(local.z>>2u)),scale<4u);
-  if(cell!=INVALID&&cellTransportActive(cell)){
-    let rho=state[sourceDensity()+cell];
-    if(rho>0.0&&rho<=CM12_LIQUID_ISOVALUE){
-      atomicStore(&sca1PacketTileSource[group],1u);sca1MarkBrick(cellBrick(cell));
-    }
-  }
-  workgroupBarrier();
-  let representative=scale>=4u||all((local&vec3u(3u))==vec3u(0u));
-  if(representative&&atomicLoad(&sca1PacketTileSource[group])!=0u){
-    let tile=cm12TransportSpatialTileId(sirTransportPacketOriginFine+local);
-    let slot=atomicAdd(&topologyArena[SCA1_HEADER+1u],1u);
-    if(slot<SCA1_CELL_CAPACITY){atomicStore(&topologyArena[SCA1_CELL_LIST+slot],tile);}
-  }
-}
-fn sca1PublishSourceWorkgroup(rank:u32,cell:u32,lane:u32){
-  // The transport source is an existing physical observation and deliberately
-  // admits a one-frame boundary lag rather than inspecting the post-transport
-  // domain. Sec. 3.5 only modifies positive air-side density.
-  _=rank;sca1PublishPacketSourceTiles(cell,lane);
-}
-@compute @workgroup_size(1)
-fn finalizeSharpeningCellAuthority(){
-  let count=atomicLoad(&topologyArena[SCA1_HEADER+1u]);
-  let bounded=min(count,SCA1_CELL_CAPACITY);
-  atomicStore(&topologyArena[SCA1_HEADER+2u],bounded);
-  atomicStore(&topologyArena[SCA1_HEADER+5u],bounded);
-  let bricks=min(atomicLoad(&topologyArena[SCA1_HEADER+6u]),SCA1_BRICK_CAPACITY);
-  atomicStore(&topologyArena[SCA1_HEADER+7u],bricks);
-  atomicStore(&topologyArena[SCA1_HEADER+10u],bricks);
-}
-fn sca1SourceTile(packet:u32)->u32{
-  return atomicLoad(&topologyArena[SCA1_CELL_LIST+packet]);}
-fn sca1SourceCell(packet:u32,lane:u32)->u32{
-  let rank=sca1SourceTile(packet);
-  // The packet arm stores stable spatial-tile ids (published per tile by the
-  // packet ballot above), replayed through TEI's tile-to-cell mapping so the
-  // workgroup-superset semantics match the baseline work-tile catalog.
-  ${phase1QASharpeningTileCapture}
-  return cm12TransportSpatialTileCell(rank,lane);
-}
-fn sca1CellCurrent(cell:u32)->bool{return !EXP_SHARPENING_CELL_CATALOG
-  ||(cell<SCA1_CELL_CAPACITY
-  &&atomicLoad(&topologyArena[SCA1_CELL_GENERATION+cell])==sca1Generation());}
-
-fn sca1AddReceipt(cell:u32,value:i32){
-  if(cell>=SCA1_CELL_CAPACITY||value==0){return;}
-  sca1MarkBrick(cellBrick(cell));
+fn addSharpeningReceipt(cell:u32,value:i32){
+  if(cell>=p.counts.x||value==0){return;}
   atomicAdd(&conditioning[3u*p.counts.x+cell],value);
 }
-fn sca1Receipt(cell:u32)->f32{
+fn sharpeningReceipt(cell:u32)->f32{
   return f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
-}
-
-@compute @workgroup_size(1)
-fn beginSparseCM12SRR1Ingress(){
-  _=sirResidentBeginFrame(cm12FCCandidateGeneration(),
-    atomicLoad(&topologyArena[topologyWorklistBase()]),cm12FCSourceScalarParity());
-}
-@compute @workgroup_size(64)
-fn resetSparseCM12SRR1CopiedEvents(@builtin(global_invocation_id)gid:vec3u){
-  sirResidentResetCopiedEvents(gid.x);
-}
-@compute @workgroup_size(1)
-fn beginSparseCM12SRR1ReceiptBatch(){sirResidentBeginReceiptBatch();}
-
-fn scaInvalidateBrickTopologyClosure(brick:u32){
-  if(brick>=p.dispatch.w){return;}let dims=scaLogicalBrickDimensions();
-  let key=topology[p.topologyOffsets2.z+2u*brick+1u];let xy=dims.x*dims.y;
-  if(xy==0u||key>=xy*dims.z){return;}let z=key/xy;let rem=key-z*xy;
-  let y=rem/dims.x;let x=rem-y*dims.x;let origin=vec3i(i32(x),i32(y),i32(z));
-  let span=i32(brickSpan(brick));let lower=max(vec3i(0),origin-vec3i(1));
-  let upper=min(vec3i(dims)-vec3i(1),origin+vec3i(span));
-  let generation=cm12FCCandidateGeneration()+1u;
-  for(var bz=lower.z;bz<=upper.z;bz+=1){for(var by=lower.y;by<=upper.y;by+=1){
-    for(var bx=lower.x;bx<=upper.x;bx+=1){let logical=u32(bx)+dims.x*(u32(by)+dims.y*u32(bz));
-      for(var local=0u;local<SIR1_TILES_PER_BRICK;local+=1u){
-        _=sirResidentAppendEvent(SIR1_TILES_PER_BRICK*logical+local,
-          generation,SIR1_CAUSE_TOPOLOGY);
-      }
-  }}}
 }
 
 fn recordCandidateTopologyEffectsWork(brick:u32,validBrick:bool){
   if(!validBrick||brick>=p.dispatch.w){return;}let output=activityRecord(brick);
   if(!topologyPreparationScheduledAt(output)){return;}
-  let dims=scaLogicalBrickDimensions();let key=topology[p.topologyOffsets2.z+2u*brick+1u];
-  let xy=dims.x*dims.y;if(xy==0u||key>=xy*dims.z){return;}
-  let z=key/xy;let rem=key-z*xy;let y=rem/dims.x;let x=rem-y*dims.x;
-  let origin=vec3i(i32(x),i32(y),i32(z));let span=i32(brickSpan(brick));
-  let lower=max(vec3i(0),origin-vec3i(1));
-  let upper=min(vec3i(dims)-vec3i(1),origin+vec3i(span));
-  for(var bz=lower.z;bz<=upper.z;bz+=1){for(var by=lower.y;by<=upper.y;by+=1){
-    for(var bx=lower.x;bx<=upper.x;bx+=1){let logical=u32(bx)+dims.x*(u32(by)+dims.y*u32(bz));
-      for(var local=0u;local<SIR1_TILES_PER_BRICK;local+=1u){
-        _=tfxRecordSCATile(SIR1_TILES_PER_BRICK*logical+local,SIR1_CAUSE_TOPOLOGY);}
-  }}}
   let accepted=atomicLoad(&activity[output+12u]);
   let candidate=atomicLoad(&activity[output+13u]);
   let acceptedActive=brickActive(brick);let candidateActive=candidateBrickActive(brick);
@@ -2679,20 +2177,6 @@ fn candidateInjectionAsymmetric()->bool{
     &&(abs(p.injectionCenter.x-0.5*f32(p.dimensions.x))>1e-6
       ||abs(p.injectionCenter.z-0.5*f32(p.dimensions.z))>1e-6
       ||abs(p.injectionRadius.x-p.injectionRadius.z)>1e-6);
-}
-fn recordCandidateInjectionSCA(cell:u32){
-  let bounds=scaCellBounds(cell);let dims=scaLogicalBrickDimensions();
-  let tileDims=SIR1_TILES_PER_AXIS*dims;
-  let lower=max(vec3i(0),bounds[0]/vec3i(4)-vec3i(1));
-  let upper=min(vec3i(tileDims)-vec3i(1),bounds[1]/vec3i(4)+vec3i(1));
-  for(var z=lower.z;z<=upper.z;z+=1){for(var y=lower.y;y<=upper.y;y+=1){
-    for(var x=lower.x;x<=upper.x;x+=1){let q=vec3u(u32(x),u32(y),u32(z));
-      let owner=q/SIR1_TILES_PER_AXIS;let sub=q%SIR1_TILES_PER_AXIS;
-      let key=owner.x+dims.x*(owner.y+dims.y*owner.z);
-      let tile=SIR1_TILES_PER_BRICK*key+sub.x
-        +SIR1_TILES_PER_AXIS*(sub.y+SIR1_TILES_PER_AXIS*sub.z);
-      _=tfxRecordSCATile(tile,SIR1_CAUSE_SCALAR);
-  }}}
 }
 fn candidateVexRootEffect(cell:u32,cause:u32,mode:u32){
   if(mode==0u){vda1CensusRoot(cell,cause);
@@ -2730,15 +2214,13 @@ fn candidateTopologyVexEffectsWork(lane:u32,brick:u32,validBrick:bool,mode:u32){
       candidateVexRetiredEffect(range.x+local,mode);}
   }
 }
-fn candidateInjectionEffectsWork(lane:u32,brick:u32,validBrick:bool,mode:u32,
- recordSCA:bool){
+fn candidateInjectionEffectsWork(lane:u32,brick:u32,validBrick:bool,mode:u32){
   if(!validBrick||brick>=p.dispatch.w||p.injectionCenter.w==0.0
     ||!candidateBrickActive(brick)){return;}
   let range=templateBrickCellRange(brick,scheduledBrickResolution(brick));
   for(var local=lane;local<range.y;local+=64u){let cell=range.x+local;
     if(cellOpenVolume(cell)<=1e-8||injectionCoverage(cell)<=0.0){continue;}
     candidateVexIncidence(cell,${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.injection}u,mode);
-    if(recordSCA){recordCandidateInjectionSCA(cell);}
   }
 }
 @compute @workgroup_size(1) fn beginSparseCM12CandidateEffectsCensus(){
@@ -2753,7 +2235,7 @@ fn candidateInjectionEffectsWork(lane:u32,brick:u32,validBrick:bool,mode:u32,
 @compute @workgroup_size(64) fn censusSparseCM12CandidateInjectionVexEffects(
  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
   let brick=topologyDeltaLeafInvocation(wid.x);
-  candidateInjectionEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,0u,false);
+  candidateInjectionEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,0u);
 }
 @compute @workgroup_size(1) fn beginSparseCM12CandidateEffectsSemanticPreflight(){
   _=vda1BeginSemanticPreflight();
@@ -2766,7 +2248,7 @@ fn candidateInjectionEffectsWork(lane:u32,brick:u32,validBrick:bool,mode:u32,
 @compute @workgroup_size(64) fn preflightSparseCM12CandidateInjectionEffects(
  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
   let brick=topologyDeltaLeafInvocation(wid.x);
-  candidateInjectionEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,1u,true);
+  candidateInjectionEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,1u);
 }
 @compute @workgroup_size(1) fn finalizeSparseCM12CandidateEffectsPreflight(){
   if(!candidateVexPlanReadyForPreflight()){
@@ -2782,7 +2264,7 @@ fn candidateInjectionEffectsWork(lane:u32,brick:u32,validBrick:bool,mode:u32,
 @compute @workgroup_size(64) fn publishSparseCM12CandidateInjectionVexEffects(
  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
   if(!vda1TransactionAuthorized()){return;}let brick=topologyDeltaLeafInvocation(wid.x);
-  candidateInjectionEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,2u,false);
+  candidateInjectionEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,2u);
 }
 @compute @workgroup_size(1) fn beginSparseCM12AuthorizedCandidateEffects(){
   if(vda1TransactionAuthorized()){reopenCandidateVexPlanAuthorizedNoFail();}
@@ -2797,35 +2279,10 @@ fn candidateInjectionEffectsWork(lane:u32,brick:u32,validBrick:bool,mode:u32,
     atomicLoad(&topologyArena[topologyWorklistBase()+1u]));
 }
 
-fn scaInvalidateCellClosure(cell:u32,generation:u32,cause:u32){
-  let bounds=scaCellBounds(cell);let dims=scaLogicalBrickDimensions();
-  let tileDims=SIR1_TILES_PER_AXIS*dims;let owner=scaTileAtFine(bounds[0]);
-  // Never suppress extent publication because the owner is already stamped:
-  // a fine-cell producer can pre-stamp it before a later coarse producer needs
-  // to publish the rest of this cell's extent. Append deduplicates each
-  // destination tile independently.
-  _=sirResidentAppendEvent(owner,generation,cause);
-  let lower=max(vec3i(0),bounds[0]/vec3i(4)-vec3i(1));
-  let upper=min(vec3i(tileDims)-vec3i(1),bounds[1]/vec3i(4)+vec3i(1));
-  for(var z=lower.z;z<=upper.z;z+=1){for(var y=lower.y;y<=upper.y;y+=1){
-    for(var x=lower.x;x<=upper.x;x+=1){let q=vec3u(u32(x),u32(y),u32(z));
-      let brick=q/SIR1_TILES_PER_AXIS;let sub=q%SIR1_TILES_PER_AXIS;
-      let key=brick.x+dims.x*(brick.y+dims.y*brick.z);
-      let tile=SIR1_TILES_PER_BRICK*key+sub.x
-        +SIR1_TILES_PER_AXIS*(sub.y+SIR1_TILES_PER_AXIS*sub.z);
-      _=sirResidentAppendEvent(tile,generation,cause|SIR1_CAUSE_DEPENDENCY_CLOSURE);
-  }}}
-}
-
-var<workgroup>sirCovered:array<u32,64>;
-var<workgroup>sirBank0Mismatch:array<u32,64>;
-var<workgroup>sirBank1Mismatch:array<u32,64>;
-var<workgroup>sirDependencyMismatch:array<u32,64>;
-
 // Exact algebraic phase certificate for the final scalar banks. Returning 0/1
 // means both physical rho banks contain exact dry/flooded capacity and both
 // gamma banks contain exact one. Two is unresolved and can never certify clean.
-fn sirExactScalarPhase(cell:u32)->u32{
+fn cm12FinalScalarExactPhase(cell:u32)->u32{
   if(bitcast<u32>(cellOpenFraction(cell))!=0x3f800000u){return 2u;}
   let rho0=bitcast<u32>(state[p.stateOffsets0.x+cell]);
   let rho1=bitcast<u32>(state[p.stateOffsets0.y+cell]);
@@ -2838,25 +2295,6 @@ fn sirExactScalarPhase(cell:u32)->u32{
   if(!cellActive(cell)){return select(2u,0u,rho0==0u);}
   if(rho0==0u){return 0u;}if(rho0==0x3f800000u){return 1u;}return 2u;
 }
-fn sirExactScalarDependency(cell:u32,phase:u32)->bool{
-  if(phase>1u){return false;}
-  if(phase==0u&&!cellActive(cell)){return true;}
-  var sideMask=0u;
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);
-    if(!rowAccepted(row)||bitcast<u32>(rowOpenFraction(row))!=0x3f800000u
-      ||rowArea(row)<=1e-8){return false;}
-    let coefficient=termCoefficient(incidenceTerm(incidence));
-    let side=2u*rowAxis(row)+select(0u,1u,coefficient>0.0);sideMask|=1u<<side;
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);var neighbor=false;
-    for(var term=begin;term<end;term+=1u){let other=termCell(term);
-      if(other==cell){continue;}neighbor=true;
-      if(sirExactScalarPhase(other)!=phase){return false;}
-    }
-    if(!neighbor){return false;}
-  }
-  return sideMask==63u;
-}
 // Persistent interior-liquid certificate. The shared characteristic producer
 // proves that both departure donors and arrival receivers lie wholly inside
 // the authored bulk-liquid band and records a spatial clearance, in fine-cell
@@ -2864,7 +2302,7 @@ fn sirExactScalarDependency(cell:u32,phase:u32)->bool{
 // trace is accepted when its actual swept support is deep. A velocity producer
 // revokes it only when the bounded RK2 trajectory shift consumes that
 // clearance; topology and scalar producers still revoke their closures.
-fn sirFinalPersistentBulk(cell:u32)->bool{
+fn cm12FinalScalarPersistentBulk(cell:u32)->bool{
   let rhoAfter=state[destinationDensity()+cell];
   let gammaAfter=state[destinationGamma()+cell];
   let saturatedTolerance=0.005;
@@ -2875,35 +2313,79 @@ fn sirFinalPersistentBulk(cell:u32)->bool{
     ||abs(gammaAfter-1.0)>saturatedTolerance){return false;}
   return true;
 }
-fn sirPersistentBulkReceiverClosure(cell:u32)->bool{
-  if(!sirFinalPersistentBulk(cell)){return false;}
-  var sideMask=0u;
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);
-    if(!rowAccepted(row)||rowArea(row)<=1e-8){return false;}
-    let coefficient=termCoefficient(incidenceTerm(incidence));
-    let side=2u*rowAxis(row)+select(0u,1u,coefficient>0.0);sideMask|=1u<<side;
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);var neighbor=false;
-    for(var term=begin;term<end;term+=1u){let other=termCell(term);
-      if(other==cell){continue;}neighbor=true;
-      if(!sirFinalPersistentBulk(other)){return false;}
-    }
-    if(!neighbor){return false;}
-  }
-  return sideMask==63u;
+fn cm12FinalScalarGeneration()->u32{return max(1u,cm12FCCandidateGeneration());}
+fn cm12FinalScalarTopologyGeneration()->u32{
+  return atomicLoad(&topologyArena[topologyWorklistBase()]);}
+fn cm12FinalScalarTopologySlot()->u32{return acceptedTopologySlot();}
+fn cm12FinalScalarLeafPacketCount(leaf:u32,slot:u32)->u32{
+  let descriptor=cm12TeiLoadLeaf(slot,leaf);
+  if((descriptor.flags&0x80000000u)==0u||descriptor.scale==0u){return 0u;}
+  let resolution=descriptor.flags&31u;let axis=max(1u,(resolution+3u)/4u);
+  return axis*axis*axis;
 }
-fn sirRecordFinalScalarProducer(cell:u32){
-  if(sirExactScalarPhase(cell)<=1u){return;}
-  if(sirFinalPersistentBulk(cell)){
-    // The conservative destination is already final. Mirroring only the dead
-    // source bank changes no current-frame mass, while making global parity
-    // flips a true no-op until a scalar, velocity, or topology producer
-    // invalidates its characteristic closure again.
+fn cm12FinalScalarPacketCell(packet:u32,lane:u32,slot:u32)->u32{
+  return cm12TeiPacketCell(packet,lane,slot);}
+fn cm12FinalScalarPacketAddress(cell:u32)->vec2u{
+  if(cell==INVALID||cell>=p.counts.x||!cellActive(cell)){return vec2u(INVALID);}
+  // Consumers run under transport and pressure bind groups; binding 14 is TEI2
+  // only in the former. Derive the stable TEI2 address from immutable cell
+  // ownership instead of reading the execution image.
+  let leafId=cellBrick(cell);let resolution=acceptedBrickResolution(leafId);
+  let spanFine=BRICK_FINE_RESOLUTION*brickSpan(leafId);
+  let scale=spanFine/resolution;
+  let logicalDimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
+    /BRICK_FINE_RESOLUTION;
+  let key=topology[p.topologyOffsets2.z+2u*leafId+1u];
+  let xy=logicalDimensions.x*logicalDimensions.y;let bz=key/xy;
+  let remainder=key-bz*xy;let by=remainder/logicalDimensions.x;
+  let bx=remainder-by*logicalDimensions.x;
+  let origin=BRICK_FINE_RESOLUTION*vec3u(bx,by,bz);
+  let minimum=cellMinimum(cell);if(any(minimum<origin)){return vec2u(INVALID);}
+  let local=(minimum-origin)/scale;
+  let packetAxis=max(1u,(resolution+3u)/4u);
+  let packetLocal=(local.x>>2u)+packetAxis*((local.y>>2u)+packetAxis*(local.z>>2u));
+  let lane=(local.x&3u)+4u*((local.y&3u)+4u*(local.z&3u));
+  return vec2u(64u*leafId+packetLocal,lane);
+}
+fn cm12FinalScalarCellFacts(cell:u32)->vec4u{
+  if(cell==INVALID||cell>=p.counts.x||!cellActive(cell)){return vec4u(0u);}
+  let changed=bitcast<u32>(state[destinationDensity()+cell])
+      !=bitcast<u32>(state[sourceDensity()+cell])
+    ||bitcast<u32>(state[destinationGamma()+cell])
+      !=bitcast<u32>(state[sourceGamma()+cell]);
+  let nonexact=cm12FinalScalarExactPhase(cell)>1u;
+  let bulk=cm12FinalScalarPersistentBulk(cell);
+  let flip=pressureCellMembershipPredicate(cell)!=pcmCellContains(cell);
+  if(bulk){
+    // Value-bearing dead-bank mirror. It remains in finalization even though
+    // every dirty carrier now consumes packet masks.
     state[sourceDensity()+cell]=state[destinationDensity()+cell];
     state[sourceGamma()+cell]=state[destinationGamma()+cell];
-    return;
   }
-  scaInvalidateCellClosure(cell,cm12FCCandidateGeneration()+1u,SIR1_CAUSE_SCALAR);
+  return vec4u(u32(changed),u32(nonexact),u32(bulk),u32(flip));
+}
+@compute @workgroup_size(64) fn compileSparseCM12FinalScalarVexRoots(
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
+  let leaf=wid.x;let slot=acceptedTopologySlot();
+  let count=cm12FinalScalarLeafPacketCount(leaf,slot);
+  for(var localPacket=0u;localPacket<count;localPacket+=1u){
+    let packet=64u*leaf+localPacket;let cell=cm12TeiPacketCell(packet,lane,slot);
+    if(cell==INVALID||!cellActive(cell)){continue;}
+    // Invert the former changed-cell fanout. Every accepted lane decides once
+    // whether it belongs to CHANGED's exact one-ring, so shared endpoints no
+    // longer re-enter the VEX root CAS from each incident changed cell.
+    var selected=fsm1Lane(fsm1Changed(packet),lane);
+    for(var incidence=incidenceBegin(cell);!selected&&incidence<incidenceEnd(cell);
+        incidence+=1u){
+      let row=incidenceRow(incidence);if(!rowAccepted(row)){continue;}
+      let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+      for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
+        if(neighbor!=cell&&cellActive(neighbor)&&fsm1ChangedCell(neighbor)){
+          selected=true;break;}
+      }
+    }
+    if(selected){_=cm12ExtensionRecordRoot(cell,4u);}
+  }
 }
 
 fn transportBeta(cell:u32)->f32{
@@ -2986,18 +2468,10 @@ fn transportDepartureCharacteristicClearance(stencil:TransportStencil)->f32{
   return select(0.0,clearance,
     p.frame.x*maximumDelta<=0.002*supportingWidth);
 }
-fn transportCharacteristicShiftConsumesReceipt(cell:u32,velocityDelta:vec3f)->bool{
-  let clearance=state[TRANSPORT_CHARACTERISTIC_CLEARANCE+cell];
-  // Both midpoint and final RK2 samples can move when the collocated field
-  // changes. Twice dt*|du| bounds that two-sample trajectory perturbation in
-  // the same finest-cell coordinates used by traceCharacteristic.
-  let shiftBound=2.0*p.frame.x*length(velocityDelta);
-  return clearance<=0.0||shiftBound>=clearance;
-}
-fn sirAccumulateBeta(rank:u32,cell:u32,value:i32){
+fn accumulateTransportBeta(rank:u32,cell:u32,value:i32){
   _=rank;atomicAdd(&conditioning[cell],value);
 }
-fn sirAccumulateDeficit(rank:u32,cell:u32,density:i32,gamma:i32){
+fn accumulateTransportDeficit(rank:u32,cell:u32,density:i32,gamma:i32){
   _=rank;atomicAdd(&conditioning[p.counts.x+cell],density);
   atomicAdd(&conditioning[2u*p.counts.x+cell],gamma);
 }
@@ -3133,7 +2607,6 @@ fn injectionReachesBrick(brick:u32)->bool{
 @compute @workgroup_size(64)
 fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
   if(!sparseCM12TopologyLifecycleAccepted()){return;}
-  atomicAnd(&activity[27],0x7fffffffu);
   let brick=gid.x;if(brick>=p.dispatch.w||!brickActive(brick)){return;}
   let range=templateBrickCellRange(brick,scheduledBrickResolution(brick));
   for(var at=0u;at<range.y;at+=1u){
@@ -3153,7 +2626,7 @@ fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
 fn traceGammaAndBeta(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   stageSparseCM12TransportExecutionImage(wid.x,lane,0u);
-  let id=sirMassExecutionCell(wid.x,lane,0u);
+  let id=cm12MassExecutionCell(wid.x,lane,0u);
   if(id!=INVALID){if(!cellTransportActive(id)){state[destinationGamma()+id]=1.0;
       state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]=0.0;}
     else{let b=cellBase(id);let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
@@ -3175,11 +2648,16 @@ fn traceGammaAndBeta(@builtin(workgroup_id)wid:vec3u,
         let coefficient=advectedGamma*weight/visible;
         let contribution=cm12VolumeWeightedBetaContribution(
           cellVolume(id),cellVolume(cell),coefficient);
-        sirAccumulateBeta(wid.x,cell,i32(round(contribution*CM12_TRANSPORT_FIXED)));
+        accumulateTransportBeta(wid.x,cell,i32(round(contribution*CM12_TRANSPORT_FIXED)));
       }}
     }
   }
-  if(EXP_SHARPENING_CELL_CATALOG){sca1PublishSourceWorkgroup(wid.x,id,lane);}
+  var sharpeningSource=false;if(id!=INVALID&&cellTransportActive(id)){
+    let rho=state[sourceDensity()+id];
+    sharpeningSource=rho>0.0&&rho<=CM12_LIQUID_ISOVALUE;
+  }
+  cm12TransportSharpeningMaskPublish(cm12TransportStagedPacketId,lane,id,
+    sharpeningSource,cm12TeiStagedScaleAtFine(cm12TransportPacketOriginFine));
 }
 
 // CM12 Sec. 3.4 steps 6-7. Every deficient donor returns its missing column
@@ -3189,7 +2667,7 @@ fn traceGammaAndBeta(@builtin(workgroup_id)wid:vec3u,
 fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   stageSparseCM12TransportExecutionImage(wid.x,lane,1u);
-  let donor=sirMassExecutionCell(wid.x,lane,1u);
+  let donor=cm12MassExecutionCell(wid.x,lane,1u);
   ${phase1QABetaCapture}
   if(donor!=INVALID&&cellTransportActive(donor)){
     let deficit=max(0.0,1.0-transportBeta(donor));
@@ -3198,7 +2676,7 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
       let arrival=traceEffectiveTransportArrival(vec3f(taf(b),taf(b+1u),taf(b+2u)));
       arrivalStencil=effectiveTransportStencil(arrival);
       for(var corner=0u;corner<8u;corner+=1u){visible+=arrivalStencil.weights[corner];}
-      if(visible<=1e-9){sirAccumulateDeficit(wid.x,donor,i32(round(
+      if(visible<=1e-9){accumulateTransportDeficit(wid.x,donor,i32(round(
           state[sourceDensity()+donor]*deficit*CM12_TRANSPORT_FIXED)),i32(round(
           state[sourceGamma()+donor]*deficit*CM12_TRANSPORT_FIXED)));
       }else{for(var corner=0u;corner<8u;corner+=1u){
@@ -3209,7 +2687,7 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
           cellVolume(donor),cellVolume(cell),deficit,normalized);
         let gammaTransfer=cm12VolumeScaledDeficitTransfer(state[sourceGamma()+donor],
           cellVolume(donor),cellVolume(cell),deficit,normalized);
-        sirAccumulateDeficit(wid.x,cell,i32(round(densityTransfer*CM12_TRANSPORT_FIXED)),
+        accumulateTransportDeficit(wid.x,cell,i32(round(densityTransfer*CM12_TRANSPORT_FIXED)),
           i32(round(gammaTransfer*CM12_TRANSPORT_FIXED)));
       }}
     }
@@ -3222,7 +2700,7 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
 fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   stageSparseCM12TransportExecutionImage(wid.x,lane,2u);
-  let id=sirMassExecutionCell(wid.x,lane,2u);var densityChanged=false;
+  let id=cm12MassExecutionCell(wid.x,lane,2u);var densityChanged=false;
   var surfaceFeature=false;
   ${phase1QADeficitCapture}
   if(id!=INVALID){if(!cellActive(id)){
@@ -3235,28 +2713,14 @@ fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
   }else{
   let advectedGamma=state[destinationGamma()+id];var visible=0.0;
   var rhoNext=0.0;var gammaNext=0.0;
-  if(EXP_MASS_DEPARTURE_CACHE){
-    for(var corner=0u;corner<8u;corner+=1u){visible+=massDepartureStencilWeight(id,corner);}
-    if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
-      let cell=massDepartureStencilCell(id,corner);
-      let weight=massDepartureStencilWeight(id,corner);if(cell==INVALID||weight<=0.0){continue;}
-      let coefficient=cm12ConditionedRowCoefficient(
-        advectedGamma,weight/visible,transportBeta(cell));
-      rhoNext+=coefficient*state[sourceDensity()+cell];gammaNext+=coefficient;
-    }}
-  }else{
-    let b=cellBase(id);
-    let departure=traceEffectiveTransportDeparture(vec3f(taf(b),taf(b+1u),taf(b+2u)));
-    let stencil=effectiveTransportStencil(departure);
-    for(var corner=0u;corner<8u;corner+=1u){visible+=stencil.weights[corner];}
-    if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
-      let cell=stencil.cells[corner];let weight=stencil.weights[corner];
-      if(cell==INVALID||weight<=0.0){continue;}
-      let coefficient=cm12ConditionedRowCoefficient(
-        advectedGamma,weight/visible,transportBeta(cell));
-      rhoNext+=coefficient*state[sourceDensity()+cell];gammaNext+=coefficient;
-    }}
-  }
+  for(var corner=0u;corner<8u;corner+=1u){visible+=massDepartureStencilWeight(id,corner);}
+  if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
+    let cell=massDepartureStencilCell(id,corner);
+    let weight=massDepartureStencilWeight(id,corner);if(cell==INVALID||weight<=0.0){continue;}
+    let coefficient=cm12ConditionedRowCoefficient(
+      advectedGamma,weight/visible,transportBeta(cell));
+    rhoNext+=coefficient*state[sourceDensity()+cell];gammaNext+=coefficient;
+  }}
   rhoNext+=f32(atomicLoad(&conditioning[p.counts.x+id]))/CM12_TRANSPORT_FIXED;
   gammaNext+=f32(atomicLoad(&conditioning[2u*p.counts.x+id]))/CM12_TRANSPORT_FIXED;
   if(rhoNext<CM12_DRY_CELL_THRESHOLD){gammaNext=1.0;}
@@ -3271,48 +2735,6 @@ fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
   ${phase1QAMassCapture}
   cm12TransportProducerMaskPublish(cm12TransportStagedPacketId,lane,id,
     surfaceFeature,densityChanged);
-}
-
-@compute @workgroup_size(64)
-fn compareSparseCM12MassResult(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  stageSparseCM12TransportReceiptImage(wid.x,lane);
-  let cell=sirMassTileCell(wid.x,lane);var covered=0u;var mismatch0=0u;
-  var mismatch1=0u;var dependencyMismatch=0u;
-  if(cell!=INVALID){var phase=2u;covered=4u;
-    // The physical receipt is authoritative for persistent bulk. Exact phase
-    // algebra remains only as the pre-existing fallback for dry/interface
-    // cells; it is not consulted to qualify this optimization.
-    let persistentBulk=sirPersistentBulkReceiverClosure(cell);
-    if(!persistentBulk){phase=sirExactScalarPhase(cell);}
-    mismatch0=select(0u,1u,phase>1u&&!persistentBulk);mismatch1=mismatch0;
-    let dependencyExact=sirExactScalarDependency(cell,phase)||persistentBulk;
-    dependencyMismatch=select(1u,0u,dependencyExact);
-  }
-  sirCovered[lane]=covered;sirBank0Mismatch[lane]=mismatch0;
-  sirBank1Mismatch[lane]=mismatch1;sirDependencyMismatch[lane]=dependencyMismatch;
-  workgroupBarrier();var width=32u;loop{if(lane<width){sirCovered[lane]+=sirCovered[lane+width];
-    sirBank0Mismatch[lane]+=sirBank0Mismatch[lane+width];
-    sirBank1Mismatch[lane]+=sirBank1Mismatch[lane+width];
-    sirDependencyMismatch[lane]+=sirDependencyMismatch[lane+width];}
-    workgroupBarrier();if(width==1u){break;}width/=2u;}
-  if(lane==0u){let tile=sirResidentWorkTile(wid.x);let generation=sirResidentCandidateGeneration();
-    if(EXP_ACTIVITY_SCALAR_BRICKS
-      &&(sirBank0Mismatch[0]!=0u||sirBank1Mismatch[0]!=0u
-        ||sirDependencyMismatch[0]!=0u)){
-      let origin=sirMassTileOrigin(wid.x);
-      if(origin.x!=INVALID&&all(origin<p.dimensions.xyz)){
-        let owner=ownerCellAt(vec3i(origin));
-        if(owner!=INVALID){incrementalActivityMarkStableTileBrick(tile,cellBrick(owner),
-          tile%SIR1_TILES_PER_BRICK,
-          ${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged
-            | SPARSE_CM12_DIRTY_CAUSE_BIT.gammaChanged}u);}
-      }
-    }
-    _=sirResidentPublishReceipt(wid.x,tile,sirResidentTopologyGeneration(),generation,
-      generation,generation,sirCovered[0],sirCovered[0],sirBank0Mismatch[0],
-      sirBank1Mismatch[0],generation,select(0u,generation,sirDependencyMismatch[0]==0u),
-      1u,generation);}
 }
 
 // Massless markers riding the same characteristic the conservative transport
@@ -3379,74 +2801,36 @@ fn advanceTracers(@builtin(global_invocation_id)gid:vec3u){
   if(stranded){state[at+3u]=0.0;}
 }
 
-// Two immutable, row-owned iterations replace the mirrored xyz/zyx chain.
-// An accepted composite row owns each physical negative/positive subface pair
-// exactly once. It quantizes integrated rho and gamma receipts and adds each
-// integer to one endpoint and its exact opposite to the other, making both
-// fields conservative independent of dispatch order and unequal cell volumes.
-fn gammaPairGeneration()->u32{
-  // A topology generation can remain unchanged across many frames, and a
-  // candidate generation may be visible before it becomes accepted. Stamp the
-  // row-owned receipts with the frame-control epoch instead: otherwise a pair belonging
-  // to a row removed by an 8->4 commit can look current on the first frame that
-  // consumes the mixed topology and be gathered a second time.
-  return max(1u,cm12FCCandidateGeneration());
-}
-fn writeGammaPair(pair:u32,rho:i32,gamma:i32){
-  candidateState[3u*pair]=bitcast<f32>(rho);
-  candidateState[3u*pair+1u]=bitcast<f32>(gamma);
-  atomicStore(&topologyArena[GAMMA_PAIR_GENERATION_BASE+pair],gammaPairGeneration());
+// ITR1 resolves each selected DCA1 row bit directly. Receipts accumulate in
+// two dead conservative-transport planes, so gamma needs no private pair CSR,
+// pair generation plane, or reverse cell-pair incidence.
+@compute @workgroup_size(64)
+fn clearGammaReceipts(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  atomicStore(&conditioning[cell],0);atomicStore(&conditioning[p.counts.x+cell],0);
 }
 fn scatterGammaRow(row:u32,inputRho:u32,inputGamma:u32){
-  if(!EXP_GAMMA_PAIR_CATALOG){
-    let rowAreaValue=rowArea(row);if(rowAreaValue<=1e-8){return;}
-    let termBegin=rowTermOffset(row);let termEnd=termBegin+rowTermCount(row);
-    var negativeCount=0.0;var positiveCount=0.0;
-    for(var term=termBegin;term<termEnd;term+=1u){let coefficient=termCoefficient(term);
-      negativeCount+=select(0.0,1.0,coefficient<0.0);
-      positiveCount+=select(0.0,1.0,coefficient>0.0);}
-    if(negativeCount==0.0||positiveCount==0.0){return;}
-    let pairArea=rowAreaValue/(negativeCount*positiveCount);
-    let scale=min(1.0,30.0*p.frame.x)/3.0;
-    for(var negativeTerm=termBegin;negativeTerm<termEnd;negativeTerm+=1u){
-      if(termCoefficient(negativeTerm)>=0.0){continue;}
-      let negative=termCell(negativeTerm);if(!cellTransportActive(negative)){continue;}
-      for(var positiveTerm=termBegin;positiveTerm<termEnd;positiveTerm+=1u){
-        if(termCoefficient(positiveTerm)<=0.0){continue;}
-        let positive=termCell(positiveTerm);if(!cellTransportActive(positive)){continue;}
-        let conductedVolume=scale*min(pairArea*cellMinimumWidth(negative),
-          pairArea*cellMinimumWidth(positive));
-        let fluxIntoNegative=cm12GammaDiffusionFluxInto(
-          state[inputRho+negative],state[inputGamma+negative],
-          state[inputRho+positive],state[inputGamma+positive],
-          conductedVolume/cellVolume(negative));
-        let rhoReceipt=i32(round(fluxIntoNegative.x*cellVolume(negative)
-          *CM12_TRANSPORT_FIXED));
-        let gammaReceipt=i32(round(fluxIntoNegative.y*cellVolume(negative)
-          *CM12_TRANSPORT_FIXED));
-        atomicAdd(&conditioning[negative],rhoReceipt);
-        atomicAdd(&conditioning[positive],-rhoReceipt);
-        atomicAdd(&conditioning[p.counts.x+negative],gammaReceipt);
-        atomicAdd(&conditioning[p.counts.x+positive],-gammaReceipt);
-      }
-    }
-    return;
-  }
-  let begin=gammaRowPairBegin(row);let end=gammaRowPairEnd(row);
-  if(begin==end){return;}
+  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+  var negativeCount=0u;var positiveCount=0u;
+  for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
+    negativeCount+=select(0u,1u,coefficient<0.0);
+    positiveCount+=select(0u,1u,coefficient>0.0);}
+  if(negativeCount==0u||positiveCount==0u){return;}
   let rowAreaValue=rowArea(row);
-  if(rowAreaValue<=1e-8){
-    for(var pair=begin;pair<end;pair+=1u){writeGammaPair(pair,0,0);}return;
-  }
-  let pairArea=rowAreaValue/f32(end-begin);
+  if(rowAreaValue<=1e-8){return;}
+  let pairArea=rowAreaValue/f32(negativeCount*positiveCount);
   // A regular interior cell participates in six rows. The CM12 flux already
   // contains its one-half diffusion coefficient, so /3 gives a convex
   // simultaneous six-neighbour update at the paper's full 1/30 s step.
   let scale=min(1.0,30.0*p.frame.x)/3.0;
-  for(var pair=begin;pair<end;pair+=1u){
-      let negative=gammaPairNegative(pair);let positive=gammaPairPositive(pair);
+  for(var negativeTerm=begin;negativeTerm<end;negativeTerm+=1u){
+    if(termCoefficient(negativeTerm)>=0.0){continue;}
+    let negative=termCell(negativeTerm);
+    for(var positiveTerm=begin;positiveTerm<end;positiveTerm+=1u){
+      if(termCoefficient(positiveTerm)<=0.0){continue;}
+      let positive=termCell(positiveTerm);
       if(!cellTransportActive(negative)||!cellTransportActive(positive)){
-        writeGammaPair(pair,0,0);continue;
+        continue;
       }
       let conductedVolume=scale*min(pairArea*cellMinimumWidth(negative),
         pairArea*cellMinimumWidth(positive));
@@ -3458,19 +2842,12 @@ fn scatterGammaRow(row:u32,inputRho:u32,inputGamma:u32){
         *CM12_TRANSPORT_FIXED));
       let gammaReceipt=i32(round(fluxIntoNegative.y*cellVolume(negative)
         *CM12_TRANSPORT_FIXED));
-      writeGammaPair(pair,rhoReceipt,gammaReceipt);
+      atomicAdd(&conditioning[negative],rhoReceipt);
+      atomicAdd(&conditioning[p.counts.x+negative],gammaReceipt);
+      atomicAdd(&conditioning[positive],-rhoReceipt);
+      atomicAdd(&conditioning[p.counts.x+positive],-gammaReceipt);
+    }
   }
-}
-
-@compute @workgroup_size(64)
-fn scatterGammaSnapshot(@builtin(global_invocation_id)gid:vec3u,
- @builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  if(EXP_GAMMA_PAIR_CATALOG){for(var slot=0u;slot<4u;slot+=1u){
-    let row=tra1PacketRow(wid.x,lane,slot);if(row!=INVALID){
-      scatterGammaRow(row,destinationDensity(),destinationGamma());}
-  }}else{let row=acceptedTemplateRowInvocation(gid.x);if(row!=INVALID){
-    scatterGammaRow(row,destinationDensity(),destinationGamma());}}
 }
 
 fn finalizeGammaCell(cell:u32,inputRho:u32,inputGamma:u32,
@@ -3483,24 +2860,9 @@ fn finalizeGammaCell(cell:u32,inputRho:u32,inputGamma:u32,
     return;
   }
   let inverseVolume=1.0/cellVolume(cell);
-  var rhoReceipt=0.0;var gammaReceipt=0.0;
-  if(EXP_GAMMA_PAIR_CATALOG){
-    var rhoBits=0u;var gammaBits=0u;
-    let generation=gammaPairGeneration();
-    for(var at=gammaCellPairBegin(cell);at<gammaCellPairEnd(cell);at+=1u){
-      let incidence=gammaCellPairIncidence(at);let pair=incidence&0x7fffffffu;
-      if(atomicLoad(&topologyArena[GAMMA_PAIR_GENERATION_BASE+pair])!=generation){continue;}
-      let rho=bitcast<u32>(candidateState[3u*pair]);
-      let gamma=bitcast<u32>(candidateState[3u*pair+1u]);
-      if((incidence&0x80000000u)==0u){rhoBits+=rho;gammaBits+=gamma;}
-      else{rhoBits-=rho;gammaBits-=gamma;}
-    }
-    rhoReceipt=f32(bitcast<i32>(rhoBits))/CM12_TRANSPORT_FIXED;
-    gammaReceipt=f32(bitcast<i32>(gammaBits))/CM12_TRANSPORT_FIXED;
-  }else{
-    rhoReceipt=f32(atomicLoad(&conditioning[cell]))/CM12_TRANSPORT_FIXED;
-    gammaReceipt=f32(atomicLoad(&conditioning[p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
-  }
+  let rhoReceipt=f32(atomicLoad(&conditioning[cell]))/CM12_TRANSPORT_FIXED;
+  let gammaReceipt=f32(atomicLoad(&conditioning[p.counts.x+cell]))
+    /CM12_TRANSPORT_FIXED;
   state[outputRho+cell]=ownRho+rhoReceipt*inverseVolume;
   state[outputGamma+cell]=ownGamma+gammaReceipt*inverseVolume;
 }
@@ -3511,17 +2873,6 @@ fn finalizeGammaSnapshot(@builtin(global_invocation_id)gid:vec3u){
     finalizeGammaCell(cell,destinationDensity(),destinationGamma(),
       p.stateOffsets2.x,p.stateOffsets2.y);
   }
-}
-
-@compute @workgroup_size(64)
-fn scatterGammaRefinement(@builtin(global_invocation_id)gid:vec3u,
- @builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  if(EXP_GAMMA_PAIR_CATALOG){for(var slot=0u;slot<4u;slot+=1u){
-    let row=tra1PacketRow(wid.x,lane,slot);if(row!=INVALID){
-      scatterGammaRow(row,p.stateOffsets2.x,p.stateOffsets2.y);}
-  }}else{let row=acceptedTemplateRowInvocation(gid.x);if(row!=INVALID){
-    scatterGammaRow(row,p.stateOffsets2.x,p.stateOffsets2.y);}}
 }
 
 @compute @workgroup_size(64)
@@ -3627,17 +2978,10 @@ fn prepareSharpeningCell(cell:u32){
     rho>CM12_LIQUID_ISOVALUE);
 }
 @compute @workgroup_size(64)
-fn prepareSharpeningField(@builtin(global_invocation_id)gid:vec3u,
- @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
-  if(EXP_SHARPENING_CELL_CATALOG){let cell=sca1SourceCell(wid.x,lane);
-    if(cell!=INVALID){let rho=conditionedDensity(cell);
-      if(rho>0.0&&rho<=CM12_LIQUID_ISOVALUE){
-        atomicStore(&topologyArena[SCA1_CELL_GENERATION+cell],sca1Generation());
-        prepareSharpeningCell(cell);
-      }
-    }
-  }else{let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID){
-    atomicStore(&conditioning[3u*p.counts.x+cell],0);prepareSharpeningCell(cell);}}
+fn prepareSharpeningField(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let cell=sharpeningSourceCell(wid.x,lane);
+  if(sharpeningSourceCellCurrent(cell)){prepareSharpeningCell(cell);}
 }
 fn sampleSharpeningField(position:vec3f)->vec4f{
   let probe=cm12TeiOwnerAtFine(vec3i(floor(clamp(position,vec3f(0.0),
@@ -3713,7 +3057,7 @@ fn scatterSharpeningCell(cell:u32){
     let weight=stencil.weights[corner];
     if(targetCell!=INVALID&&weight>0.0){total+=weight;lastCorner=corner;}}
   if(total<=1e-8){
-    sca1AddReceipt(cell,removedFixed);return;
+    addSharpeningReceipt(cell,removedFixed);return;
   }
   var remainingFixed=removedFixed;
   for(var corner=0u;corner<8u;corner+=1u){let targetCell=stencil.cells[corner];
@@ -3721,34 +3065,29 @@ fn scatterSharpeningCell(cell:u32){
     var offeredFixed=i32(round(f32(removedFixed)*weight/total));
     if(corner==lastCorner){offeredFixed=remainingFixed;}
     else{offeredFixed=clamp(offeredFixed,0,remainingFixed);}
-    sca1AddReceipt(targetCell,offeredFixed);
+    addSharpeningReceipt(targetCell,offeredFixed);
     remainingFixed-=offeredFixed;
   }
 }
 @compute @workgroup_size(64)
-fn scatterSharpeningMass(@builtin(global_invocation_id)gid:vec3u,
- @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
-  let candidate=sirStableMassTileOrigin(sca1SourceTile(wid.x));
+fn scatterSharpeningMass(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let packet=cm12TransportPacketId(wid.x,0u);
+  let candidate=cm12TeiPacketFineOrigin(packet,acceptedTopologySlot());
   let origin=select(vec3u(0u),candidate,candidate.x!=INVALID);
   cm12TeiStageDirectory(origin,lane,acceptedTopologySlot());
-  if(EXP_SHARPENING_CELL_CATALOG){let cell=sca1SourceCell(wid.x,lane);
-    if(cell!=INVALID&&sca1CellCurrent(cell)){scatterSharpeningCell(cell);}
-  }else{let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID){
-    scatterSharpeningCell(cell);}}
+  let cell=sharpeningSourceCell(wid.x,lane);
+  if(sharpeningSourceCellCurrent(cell)){scatterSharpeningCell(cell);}
 }
 fn finalizeSharpeningCell(cell:u32){
   if(!cellTransportActive(cell)){
     if(!dynamicallyCoveredCell(cell)){
       state[destinationDensity()+cell]=0.0;state[destinationGamma()+cell]=1.0;
     }
-    if(bitcast<u32>(state[destinationDensity()+cell])
-      !=bitcast<u32>(state[sourceDensity()+cell])){
-      cm12ResidentRecordExtensionIncidence(cell,4u);}
-    sirRecordFinalScalarProducer(cell);
     return;
   }
-  let delta=select(0.0,state[p.stateOffsets5.x+cell],sca1CellCurrent(cell));
-  let incoming=sca1Receipt(cell);
+  let delta=state[p.stateOffsets5.x+cell];
+  let incoming=sharpeningReceipt(cell);
   var density=max(0.0,conditionedDensity(cell)+delta+incoming/cellVolume(cell));
   let capacity=cellOpenFraction(cell);
   // Fixed-point receipts can leave a mathematically full hydrostatic cell one
@@ -3759,23 +3098,11 @@ fn finalizeSharpeningCell(cell:u32){
     abs(density-capacity)<=1.0/CM12_TRANSPORT_FIXED);
   state[destinationDensity()+cell]=density;
   state[destinationGamma()+cell]=max(0.0,conditionedGamma(cell));
-  if(bitcast<u32>(density)!=bitcast<u32>(state[sourceDensity()+cell])){
-    cm12ResidentRecordExtensionIncidence(cell,4u);}
-  sirRecordFinalScalarProducer(cell);
 }
 @compute @workgroup_size(64)
 fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID){
     finalizeSharpeningCell(cell);}
-}
-@compute @workgroup_size(64)
-fn finalizeSharpeningBricks(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  let count=atomicLoad(&topologyArena[SCA1_HEADER+10u]);if(wid.x>=count){return;}
-  let brick=atomicLoad(&topologyArena[SCA1_BRICK_LIST+wid.x]);
-  if(brick>=p.dispatch.w||!brickActive(brick)){return;}
-  let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
-  for(var local=lane;local<range.y;local+=64u){finalizeSharpeningCell(range.x+local);}
 }
 @compute @workgroup_size(64)
 fn clearSolidExcess(@builtin(global_invocation_id)gid:vec3u){
@@ -3828,18 +3155,11 @@ fn finalizeSolidExcess(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
   if(!cellTransportActive(cell)){
     if(!dynamicallyCoveredCell(cell)){state[destinationDensity()+cell]=0.0;}
-    if(bitcast<u32>(state[destinationDensity()+cell])
-      !=bitcast<u32>(state[sourceDensity()+cell])){
-      cm12ResidentRecordExtensionIncidence(cell,4u);}
-    sirRecordFinalScalarProducer(cell);return;
+    return;
   }
   let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
   state[destinationDensity()+cell]=max(0.0,state[destinationDensity()+cell]
     +state[p.stateOffsets5.x+cell]+incoming/cellVolume(cell));
-  if(bitcast<u32>(state[destinationDensity()+cell])
-    !=bitcast<u32>(state[sourceDensity()+cell])){
-    cm12ResidentRecordExtensionIncidence(cell,4u);}
-  sirRecordFinalScalarProducer(cell);
 }
 
 // The CPU sparse path retains a proven horizontal D4 invariant after surface
@@ -3991,7 +3311,8 @@ fn planPressureMembershipEpoch(){
 
 @compute @workgroup_size(64)
 fn classifyDirtyPressureCells(@builtin(global_invocation_id)gid:vec3u){
-  let id=temporalScalarCellInvocation(gid.x);if(id==INVALID){return;}
+  let id=acceptedTemplateCellInvocation(gid.x);
+  if(id==INVALID||!fsm1FlipCell(id)){return;}
   _=pcmCellSetCandidate(id,classifyPressureCellAndRecord(id),2u,false);
 }
 
@@ -4249,7 +3570,11 @@ fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(64)
 fn classifyDirtyPressureRows(@builtin(global_invocation_id)gid:vec3u){
-  let row=temporalScalarRowInvocation(gid.x);if(row==INVALID){return;}
+  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
+  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);var changed=false;
+  for(var term=begin;term<end;term+=1u){
+    changed=changed||fsm1ChangedOrFlipCell(termCell(term));}
+  if(!changed){return;}
   let enabled=classifyPressureRow(row);_=pcfStoreThetaAndRecord(row,
     state[p.stateOffsets3.x+row]);_=pcmRowSetCandidate(row,enabled,2u,false);
 }
@@ -5183,9 +4508,6 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
   if(velocityChanged){
     incrementalActivityMarkCellClosure(id,
       ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
-    if(transportCharacteristicShiftConsumesReceipt(id,velocityDelta)){
-      scaInvalidateCellClosure(id,cm12FCCandidateGeneration()+1u,SIR1_CAUSE_VELOCITY);
-    }
   }
   if(velocityChanged||cm12VelocityExtensionChangedInterfaceSeed(id,velocity)){
     cm12ResidentRecordExtensionIncidence(id,2u);
@@ -5276,9 +4598,6 @@ fn commitVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
     incrementalActivityMarkCellClosure(cell,
       ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
     cm12ResidentRecordExtensionIncidence(cell,2u);
-    if(transportCharacteristicShiftConsumesReceipt(cell,velocityDelta)){
-      scaInvalidateCellClosure(cell,cm12FCCandidateGeneration()+1u,SIR1_CAUSE_VELOCITY);
-    }
   }
   state[at]=next.x;state[at+1u]=next.y;state[at+2u]=next.z;
   cm12PublishCollocatedWetEffectiveVelocity(cell,next,
@@ -5352,7 +4671,7 @@ fn cm12ResidentCellTile(cell:u32)->vec2u{
   let brick=cellBrick(cell);let minimum=cellMinimum(cell);
   let local=(minimum%vec3u(BRICK_FINE_RESOLUTION))/4u;
   return vec2u(brick,local.x
-    +SIR1_TILES_PER_AXIS*(local.y+SIR1_TILES_PER_AXIS*local.z));
+    +CM12_SPATIAL_TILES_PER_AXIS*(local.y+CM12_SPATIAL_TILES_PER_AXIS*local.z));
 }
 fn cm12ResidentRecordExtensionIncidence(cell:u32,cause:u32){
   if(cell>=p.counts.x||!cellActive(cell)){return;}
@@ -7184,7 +6503,7 @@ fn populateSparseCM12PresentationFramePlan(
   // Stages 2..4 have not yet cut over to FPL scheduling. Publish their actual
   // global accepted-cell/row blast radius. This is conservative work, not an
   // FPL generation/provenance fault.
-  // Stage 1 is imported from SRR1's exact compact mass worklist below.
+  // Stage 1 reads FSM1 directly; ACT1 carries only its brick activity census.
   // Stage 0 is VEX-owned and may only come from its construction bootstrap or
   // its dynamic root/closure publication.
   let previousTopology=atomicLoad(&activity[ACTIVITY_BRICK_TOPOLOGY+brick]);
@@ -7193,21 +6512,23 @@ fn populateSparseCM12PresentationFramePlan(
     cm12FramePlanMarkOwnedNextTile(brick,lane,0x1cu,0u,
       ${SPARSE_CM12_DIRTY_CAUSE_BIT.coefficientChanged}u,0u,0u);
   }
-  var mask=incrementalActivityBrickStageTileMask(brick,
-    PRESENTATION_FRAME_PLAN_STAGE_BIT,PRESENTATION_FRAME_PLAN_CAUSES);
+  let stable=key*ACTIVITY_TILES_PER_BRICK+lane;
+  let tile=cm12TeiSpatialTile(stable,acceptedTopologySlot());
+  let scalarChanged=tile.packetId!=INVALID&&((fsm1Changed(tile.packetId)
+    &tile.laneMask).x|(fsm1Changed(tile.packetId)&tile.laneMask).y)!=0u;
+  let topologyChanged=previousTopology!=incrementalActivityTopologyState(brick);
+  let dynamicBrick=incrementalActivityBrickDirty(brick);
   let page=cm12FppLoad(cm12FppBrickPages+brick);
   let pageNeedsActivation=page<arrayLength(&fineMetadata)/4u
     &&fineMetadata[4u*page+2u]!=1u;
-  if(bootstrap||injected||pageNeedsActivation){
-    mask=vec2u(ACTIVITY_ALL_TILE_LOW,ACTIVITY_ALL_TILE_HIGH);
-  }
-  let scheduled=(select(mask.x,mask.y,lane>=32u)&(1u<<(lane&31u)))!=0u;
+  let scheduled=bootstrap||injected||pageNeedsActivation||scalarChanged
+    ||topologyChanged||dynamicBrick;
   if(!scheduled){return;}
-  let stable=key*ACTIVITY_TILES_PER_BRICK+lane;
-  let activityCauses=atomicLoad(&activity[ACTIVITY_TILE_CAUSE+stable])
-    &PRESENTATION_FRAME_PLAN_CAUSES;
-  var origin=activityCauses&PRESENTATION_FRAME_PLAN_DIRECT_CAUSES;
-  var inherited=activityCauses&${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u;
+  var origin=select(0u,${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged}u,scalarChanged);
+  var inherited=select(0u,${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u,
+    dynamicBrick&&!scalarChanged);
+  if(topologyChanged){origin|=${(SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
+    | SPARSE_CM12_DIRTY_CAUSE_BIT.topologyRetired) >>> 0}u;}
   if(bootstrap){origin=${(SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
     | SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged) >>> 0}u;inherited=0u;}
   if(injected){origin|=${(SPARSE_CM12_DIRTY_CAUSE_BIT.phaseCrossing
@@ -7220,29 +6541,6 @@ fn populateSparseCM12PresentationFramePlan(
     select(0u,PRESENTATION_FRAME_PLAN_STAGE_BIT,direct),
     select(PRESENTATION_FRAME_PLAN_STAGE_BIT,0u,direct),origin,inherited,
     depth<<(4u*PRESENTATION_FRAME_PLAN_STAGE));
-}
-
-// SRR1 has already rank-selected the exact 4^3 tiles that conservative mass
-// transport executed this frame. Import that immutable list directly instead
-// of reconstructing mass dirt from active bricks or scalar values. The stable
-// logical tile is resolved once to its accepted physical owner so macro/coarse
-// leaves collapse naturally to their brick-local FPL tile.
-@compute @workgroup_size(64)
-fn importSparseCM12MassWorkToFramePlanNext(
- @builtin(global_invocation_id)gid:vec3u){
-  let rank=gid.x;let workTile=sirResidentWorkTile(rank);
-  let fineOrigin=sirMassTileOrigin(rank);
-  if(fineOrigin.x==INVALID||any(fineOrigin>=p.dimensions.xyz)){return;}
-  let cell=ownerCellAt(vec3i(fineOrigin));if(cell==INVALID||!cellActive(cell)){return;}
-  let brick=cellBrick(cell);
-  let local=(cellMinimum(cell)%vec3u(BRICK_FINE_RESOLUTION))/4u;
-  let tile=local.x+SIR1_TILES_PER_AXIS*(local.y+SIR1_TILES_PER_AXIS*local.z);
-  let causes=cm12ScalarResultDirtyCauses(
-    sirResidentEventCause(workTile,sirResidentCandidateGeneration()));
-  let direct=causes.x!=0u;
-  cm12FramePlanMarkOwnedNextTile(brick,tile,
-    select(0u,1u<<1u,direct),select(1u<<1u,0u,direct),causes.x,causes.y,
-    select(1u<<4u,0u,direct));
 }
 
 @compute @workgroup_size(64)
@@ -7280,7 +6578,6 @@ var<workgroup>cm12PresentationCacheFits:u32;
 var<workgroup>cm12PresentationWet:u32;
 var<workgroup>cm12PresentationResolvedFeature:u32;
 var<workgroup>cm12PresentationUniformPhi:f32;
-var<workgroup>cm12PresentationTemporalReuse:u32;
 var<workgroup>cm12PresentationDensityOffset:u32;
 
 fn cm12PresentationSourceBrick(source:u32)->u32{
@@ -7340,7 +6637,6 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     let cacheFirst=vec3i(floor(firstShifted));
     let cacheDimensions=vec3u(vec3i(floor(lastShifted))-cacheFirst)+vec3u(2u);
     let cacheCount=cacheDimensions.x*cacheDimensions.y*cacheDimensions.z;
-    let temporalReady=(atomicLoad(&activity[27])&0x80000000u)!=0u;
     cm12PresentationBrick=brick;cm12PresentationPage=page;
     cm12PresentationPageOrigin=pageOrigin;cm12PresentationBrickOrigin=brickOrigin;
     cm12PresentationSampleScale=sampleScale;cm12PresentationResolution=resolution;
@@ -7365,8 +6661,6 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     let bulkLiquid=cm12PresentationWet!=0u
       &&activityF32(activityOutput+4u)>=CM12_LIQUID_ISOVALUE;
     cm12PresentationUniformPhi=select(4.0*p.frame.y,-4.0*p.frame.y,bulkLiquid);
-    cm12PresentationTemporalReuse=select(0u,1u,temporalReady
-      &&atomicLoad(&activity[17])==0u&&brickActive(brick)&&scale==1u);
     cm12PresentationDensityOffset=select(p.stateOffsets0.x,p.stateOffsets0.y,
       cm12FramePlanAcceptedParity()!=0u);
   }
@@ -7413,10 +6707,6 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
       let localCell=q-cm12PresentationBrickOrigin;
       let cell=range.x+localCell.x+valid.x*(localCell.y+valid.y*localCell.z);
       if(cell<range.x+range.y){
-        if(cm12PresentationTemporalReuse!=0u
-          &&atomicLoad(&activity[TEMPORAL_CELL_FLAG_A+cell])==0u){
-          return vec2u(fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+localIndex],0u);
-        }
         phi=presentationPhiAt(cell,cm12PresentationDensityOffset);
       }
     }else{
@@ -7533,7 +6823,6 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   let pageOrigin=brickOrigin+pageOffset;
   let resolution=acceptedBrickResolution(brick);
   let scale=BRICK_FINE_RESOLUTION*span/resolution;
-${presentationTemporalReuse}
   let scaleF=f32(scale);let firstShifted=(vec3f(pageOrigin)+vec3f(0.5))/scaleF-vec3f(0.5);
   let lastQ=pageOrigin+vec3u(PRESENTATION_PAGE_RESOLUTION-1u)*sampleScale;
   let lastShifted=(vec3f(lastQ)+vec3f(0.5))/scaleF-vec3f(0.5);
@@ -7576,8 +6865,6 @@ ${presentationTemporalReuse}
         let localCell=q-brickOrigin;
         let cell=range.x+localCell.x+valid.x*(localCell.y+valid.y*localCell.z);
         if(cell<range.x+range.y){
-          if(reusePresentationSamples
-            &&atomicLoad(&activity[TEMPORAL_CELL_FLAG_A+cell])==0u){continue;}
           phi=presentationPhi(cell);
         }
       }else{

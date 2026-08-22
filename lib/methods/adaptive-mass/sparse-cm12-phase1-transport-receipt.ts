@@ -1,7 +1,7 @@
 /** QA-only raw transport receipt captured at the actual pass boundaries. */
 export const SPARSE_CM12_PHASE1_TRANSPORT_QA_MAGIC = 0x5031_5451; // P1TQ
 export const SPARSE_CM12_PHASE1_TRANSPORT_QA_VERSION = 1;
-export const SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER_WORDS = 24;
+export const SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER_WORDS = 16;
 
 export const SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER = Object.freeze({
   magic: 0, version: 1, cellCapacity: 2,
@@ -11,10 +11,6 @@ export const SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER = Object.freeze({
   traceCount: 7, betaCount: 8, deficitCount: 9, massCount: 10,
   packetCellCount: 11, packetFault: 12,
   packetFaultCell: 13, packetFaultActual: 14, packetFaultPacked: 15,
-  sharpeningTileClaim: 16, sharpeningTile: 17, sharpeningSlot: 18,
-  sharpeningSlotGeneration: 19, sharpeningRecordGeneration: 20,
-  sharpeningRecordPacketId: 21, sharpeningRecordMaskLow: 22,
-  sharpeningRecordMaskHigh: 23,
 } as const);
 
 export interface SparseCM12Phase1TransportQALayout {

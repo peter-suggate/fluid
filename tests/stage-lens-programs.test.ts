@@ -107,7 +107,8 @@ test("every declared tap is captured in its own stage's encode body", () => {
   const source = readFileSync(new URL(
     "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts", import.meta.url), "utf8");
   for (const lens of SPARSE_CM12_LENSES) {
-    const sentinel = `stage("${lens.stage}", () => {`;
+    // Stages that tap a lens take it from the encode context: `({ lens }) =>`.
+    const sentinel = `stage("${lens.stage}", (`;
     const begin = source.indexOf(sentinel);
     assert.ok(begin >= 0, `the resident does not encode a stage named "${lens.stage}"`);
     const next = source.indexOf('\n    stage("', begin + sentinel.length);

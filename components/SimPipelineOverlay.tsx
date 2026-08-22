@@ -6,7 +6,7 @@ import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
 import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
 import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import { useSceneStore } from "../lib/core/stores/scene-store";
-import { useUIStore } from "../lib/core/stores/ui-store";
+import { DEFAULT_GRID_OVERLAY_AXIS, useUIStore } from "../lib/core/stores/ui-store";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import {
   averagePerformanceTraces,
@@ -177,10 +177,9 @@ export function SimPipelineOverlay({ lenses: override }: {
   const setOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
 
   const method = getMethod(methodId);
-  // Declared on the method rather than fetched from the solver, so a row knows
-  // it has a lens before a device exists.
-  const lensByStage = new Map((override ?? method.stageLenses ?? [])
-    .map((lens) => [lens.stage, lens]));
+  // An override roster (tests and previews) is matched to rows by stage id;
+  // otherwise each graph node carries its own lens.
+  const lensByStage = new Map((override ?? []).map((lens) => [lens.stage, lens]));
   const values = useMemo(
     () => resolvedMethodValues({ methodId, quality, overrides }),
     [methodId, quality, overrides]);
@@ -289,7 +288,7 @@ export function SimPipelineOverlay({ lenses: override }: {
   const openLens = (stageId: string, open: boolean) => {
     if (!open) { setOverlayAxis("off"); return; }
     setOverlayMode(stageLensOverlayMode(stageId));
-    if (overlayAxis === "off") setOverlayAxis("y");
+    if (overlayAxis === "off") setOverlayAxis(DEFAULT_GRID_OVERLAY_AXIS);
   };
 
   // The method's declared graph, resolved into the shared diagram's view model.
@@ -316,7 +315,9 @@ export function SimPipelineOverlay({ lenses: override }: {
           const statusLabel = toggleable
             ? state === "on" ? "encoding" : state === "off" ? "configured off" : "not applicable to this scene"
             : "always encoded";
-          const lens = lensByStage.get(stage.id);
+          // The node carries its own lens; the roster lookup is only for a
+          // caller that overrides the method's lenses.
+          const lens = override ? lensByStage.get(stage.id) : stage.lens;
           const lensOpen = Boolean(lens)
             && overlayAxis !== "off" && overlayMode === stageLensOverlayMode(stage.id);
           return {

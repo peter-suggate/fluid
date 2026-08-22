@@ -18,7 +18,8 @@ export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER = Object.freeze({
   surfaceCellCount: 8, densityChangedCellCount: 9, firstFaultPacket: 10,
   packetStampBase: 11, surfaceLowBase: 12, surfaceHighBase: 13,
   densityLowBase: 14, densityHighBase: 15, totalWords: 16,
-  reservedBase: 17,
+  sharpeningLowBase: 17, sharpeningHighBase: 18,
+  sharpeningCellCount: 19, reservedBase: 20,
 } as const);
 
 export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_PHASE = Object.freeze({
@@ -41,6 +42,8 @@ export interface SparseCM12TransportProducerMaskLayout {
   readonly surfaceHighBaseWords: number;
   readonly densityLowBaseWords: number;
   readonly densityHighBaseWords: number;
+  readonly sharpeningLowBaseWords: number;
+  readonly sharpeningHighBaseWords: number;
   /** Absolute exclusive end in the containing atomic arena. */
   readonly totalWords: number;
   readonly totalBytes: number;
@@ -51,6 +54,8 @@ export interface SparseCM12TransportProducerPacketMask {
   readonly surfaceHigh: number;
   readonly densityLow: number;
   readonly densityHigh: number;
+  readonly sharpeningLow?: number;
+  readonly sharpeningHigh?: number;
 }
 
 const integer = (value: number, label: string, positive = false): number => {
@@ -82,11 +87,16 @@ export function createSparseCM12TransportProducerMaskLayout(options: {
     "TPM1 density-low base");
   const densityHighBaseWords = align64(densityLowBaseWords + packetCapacity,
     "TPM1 density-high base");
-  const totalWords = align64(densityHighBaseWords + packetCapacity,
+  const sharpeningLowBaseWords = align64(densityHighBaseWords + packetCapacity,
+    "TPM1 sharpening-low base");
+  const sharpeningHighBaseWords = align64(sharpeningLowBaseWords + packetCapacity,
+    "TPM1 sharpening-high base");
+  const totalWords = align64(sharpeningHighBaseWords + packetCapacity,
     "TPM1 totalWords");
   return Object.freeze({ baseWords, packetCapacity, packetStampBaseWords,
     surfaceLowBaseWords, surfaceHighBaseWords, densityLowBaseWords,
-    densityHighBaseWords, totalWords, totalBytes: 4 * (totalWords - baseWords) });
+    densityHighBaseWords, sharpeningLowBaseWords, sharpeningHighBaseWords,
+    totalWords, totalBytes: 4 * (totalWords - baseWords) });
 }
 
 /** Initial bytes for the layout's slice, ready to upload at `4 * baseWords`. */
@@ -106,6 +116,8 @@ export function createSparseCM12TransportProducerMaskInitialWords(
   words[h.surfaceHighBase] = layout.surfaceHighBaseWords;
   words[h.densityLowBase] = layout.densityLowBaseWords;
   words[h.densityHighBase] = layout.densityHighBaseWords;
+  words[h.sharpeningLowBase] = layout.sharpeningLowBaseWords;
+  words[h.sharpeningHighBase] = layout.sharpeningHighBaseWords;
   words[h.totalWords] = layout.totalWords;
   return words;
 }
@@ -183,10 +195,10 @@ export function compileSparseCM12TransportProducerMaskReference(options: {
 
 /** Required GPU ordering; authority begin/finalize calls bracket these hooks. */
 export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_DISPATCH_ORDER = Object.freeze([
-  "beginSparseCM12TransportProducerMasks + beginTransportRowAuthority",
+  "beginSparseCM12TransportProducerMasks + beginSparseCM12DynamicClosure",
   "gatherConservativeDensity (calls cm12TransportProducerMaskPublish once per lane)",
-  "sealSparseCM12TransportProducerMasks",
-  "compileSparseCM12TransportRowMasks + compileSparseCM12VexRootMasks (VEX candidate is already collecting)",
-  "finalizeTransportRowAuthority",
+  "sealSparseCM12TransportProducerMasks + sealSparseCM12DynamicClosureSources",
+  "compileSparseCM12DynamicTRA + compileSparseCM12VexRootMasks (VEX candidate is already collecting)",
+  "sealSparseCM12DynamicClosureTargets; scatter both gamma phases; clear touched rows",
   "late frame: beginVelocityExtensionCandidate + sealVelocityExtensionRoots",
 ] as const);

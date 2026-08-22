@@ -78,12 +78,69 @@ fn cm12TransportStagedExecutionCell(lane:u32)->u32{
 fn beginSparseCM12TransportPacketAuthority(){
   for(var family=0u;family<CM12_TPA_FAMILIES;family+=1u){
     let header=cm12TransportFamilyHeader(family);
-    atomicStore(&${arena}[header],sirResidentCandidateGeneration());
+    atomicStore(&${arena}[header],max(1u,fsm1Generation()));
     atomicStore(&${arena}[header+1u],0u);atomicStore(&${arena}[header+2u],0u);
     atomicStore(&${arena}[header+3u],CM12_TPA_CAPACITY);
     atomicStore(&${arena}[header+4u],0u);atomicStore(&${arena}[header+5u],1u);
     atomicStore(&${arena}[header+6u],1u);atomicStore(&${arena}[header+7u],0u);
   }
+}
+fn cm12PublishDirectTransportPacket(packet:u32,mask:vec2u,family:u32){
+  if(packet>=CM12_TPA_CAPACITY||(mask.x|mask.y)==0u){return;}
+  let header=cm12TransportFamilyHeader(family);
+  atomicOr(&${arena}[cm12TransportFamilyMaskLow(family)+packet],mask.x);
+  atomicOr(&${arena}[cm12TransportFamilyMaskHigh(family)+packet],mask.y);
+  let generation=atomicLoad(&${arena}[header]);
+  let previous=atomicExchange(&${arena}[
+    cm12TransportFamilyStamp(family)+packet],generation);
+  if(previous==0u){let at=atomicAdd(&${arena}[header+1u],1u);
+    if(at<CM12_TPA_CAPACITY){atomicStore(
+      &${arena}[cm12TransportFamilyList(family)+at],packet);}
+    else{atomicOr(&${arena}[header+2u],2u);}}
+}
+// Compile the prior frame's final scalar facts straight into the three packet
+// execution families. Each invocation owns one stable TEI packet. Spatial-tile
+// records are used only as the immutable packet-neighbour index; no dirty fact
+// is copied into their address space.
+@compute @workgroup_size(64)
+fn compileSparseCM12TransportPacketsFromFinalScalarMasks(
+ @builtin(global_invocation_id)gid:vec3u){
+  let packetId=gid.x;if(packetId>=CM12_TPA_CAPACITY){return;}
+  let slot=acceptedTopologySlot();let packet=cm12TeiPacket(packetId,slot);
+  if(packet.first==0xffffffffu){return;}
+  let leaf=packetId/64u;let leafDescriptor=cm12TeiLoadLeaf(slot,leaf);
+  let origin=cm12TeiPacketFineOrigin(packetId,slot);
+  var packetMask=vec2u(0u);
+  for(var lane=0u;lane<64u;lane+=1u){
+    let q=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+    if(any(q>=packet.counts)){continue;}
+    if(lane<32u){packetMask.x|=1u<<lane;}else{packetMask.y|=1u<<(lane-32u);}
+  }
+  var dirty=!fsm1Published()||fsm1TopologyGeneration()
+    !=atomicLoad(&topologyArena[topologyWorklistBase()]);
+  dirty=dirty||incrementalActivityBrickVelocityDirty(leaf);
+  let tileCounts=(leafDescriptor.scale*packet.counts+vec3u(3u))/4u;
+  for(var tz=0u;!dirty&&tz<tileCounts.z;tz+=1u){
+    for(var ty=0u;!dirty&&ty<tileCounts.y;ty+=1u){
+      for(var tx=0u;!dirty&&tx<tileCounts.x;tx+=1u){
+        let tileOrigin=origin+4u*vec3u(tx,ty,tz);
+        for(var dz=-1;!dirty&&dz<=1;dz+=1){for(var dy=-1;!dirty&&dy<=1;dy+=1){
+          for(var dx=-1;!dirty&&dx<=1;dx+=1){
+            let q=vec3i(tileOrigin)+4*vec3i(dx,dy,dz);
+            if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))){continue;}
+            let neighbor=cm12TeiSpatialTile(cm12TransportSpatialTileId(vec3u(q)),slot);
+            if(neighbor.packetId==0xffffffffu){continue;}
+            let mask=fsm1Nonexact(neighbor.packetId)&~fsm1Bulk(neighbor.packetId)
+              &neighbor.laneMask;
+            dirty=(mask.x|mask.y)!=0u;
+          }
+        }}
+      }
+    }
+  }
+  if(!dirty){return;}
+  for(var family=0u;family<CM12_TPA_FAMILIES;family+=1u){
+    cm12PublishDirectTransportPacket(packetId,packetMask,family);}
 }
 @compute @workgroup_size(64)
 fn clearSparseCM12TransportPacketAuthority(@builtin(global_invocation_id)gid:vec3u){
@@ -93,40 +150,6 @@ fn clearSparseCM12TransportPacketAuthority(@builtin(global_invocation_id)gid:vec
     atomicStore(&${arena}[cm12TransportFamilyMaskLow(family)+packet],0u);
     atomicStore(&${arena}[cm12TransportFamilyMaskHigh(family)+packet],0u);
   }
-}
-fn cm12MapTransportPacketAuthority(rank:u32,lane:u32,family:u32){
-  if(lane!=0u){return;}let tileId=sirResidentWorkTile(rank);
-  let tile=cm12TeiSpatialTile(tileId,acceptedTopologySlot());
-  if(tile.packetId==0xffffffffu||all(tile.laneMask==vec2u(0u))){return;}
-  let header=cm12TransportFamilyHeader(family);
-  let packet=tile.packetId;if(packet>=CM12_TPA_CAPACITY){
-    atomicOr(&${arena}[header+2u],1u);return;}
-  atomicOr(&${arena}[cm12TransportFamilyMaskLow(family)+packet],tile.laneMask.x);
-  atomicOr(&${arena}[cm12TransportFamilyMaskHigh(family)+packet],tile.laneMask.y);
-  let generation=atomicLoad(&${arena}[header]);
-  let previous=atomicExchange(
-    &${arena}[cm12TransportFamilyStamp(family)+packet],generation);
-  if(previous==0u){let at=atomicAdd(&${arena}[header+1u],1u);
-    if(at<CM12_TPA_CAPACITY){atomicStore(
-      &${arena}[cm12TransportFamilyList(family)+at],packet);}
-    else{atomicOr(&${arena}[header+2u],2u);}
-  }
-  atomicMax(&${arena}[header+7u],rank+1u);
-}
-@compute @workgroup_size(64)
-fn mapSparseCM12TransportTracePackets(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  cm12MapTransportPacketAuthority(wid.x,lane,0u);
-}
-@compute @workgroup_size(64)
-fn mapSparseCM12TransportScatterPackets(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  cm12MapTransportPacketAuthority(wid.x,lane,1u);
-}
-@compute @workgroup_size(64)
-fn mapSparseCM12TransportGatherPackets(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  cm12MapTransportPacketAuthority(wid.x,lane,2u);
 }
 @compute @workgroup_size(1)
 fn finalizeSparseCM12TransportPacketAuthority(){
@@ -155,11 +178,8 @@ fn cm12TransportSpatialTileCell(tile:u32,lane:u32)->u32{
     return 0xffffffffu;}
   return cm12TeiPacketCell(record.packetId,lane,acceptedTopologySlot());
 }
-fn cm12TransportReceiptCell(tileRank:u32,lane:u32)->u32{
-  return cm12TransportSpatialTileCell(sirResidentWorkTile(tileRank),lane);
-}
 // Stable spatial-tile id of the fine coordinate's min corner, in the same id
-// space the SRR1 worklist and cm12TeiSpatialTile use.
+// same stable space used by cm12TeiSpatialTile.
 fn cm12TransportSpatialTileId(fine:vec3u)->u32{
   // Spatial tiles are 4 fine cells per edge at every brick resolution.
   let local=(fine%BRICK_FINE_RESOLUTION)/4u;

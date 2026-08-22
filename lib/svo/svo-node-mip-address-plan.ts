@@ -150,7 +150,10 @@ export interface SvoNodeMipAddressPlan {
   radianceFloorLevel: number;
   /** Slots the plan gives to levels below the floor; the radiance atlas starts here. */
   radianceSlotOffset: number;
-  /** Physical radiance slots, sized for the domain rather than for today's plan. */
+  /**
+   * Physical radiance slots: the domain above the floor, capped by the slot
+   * space `[radianceSlotOffset, pageCapacity)` the atlas has to live inside.
+   */
   radiancePageCapacity: number;
   radianceAtlasPages: readonly [number, number, number];
   radianceAtlasTexels: readonly [number, number, number];
@@ -390,11 +393,12 @@ export function* planSvoNodeMipAddressesSteps(
     total ? dense : planLevelCounts[level] + reservePages)));
   const pageCapacityPerLevel = Math.max(1, Math.min(denseLevelMaximum,
     total ? denseLevelMaximum : planLevelMaximum + reservePages));
-  // The radiance atlas is sized from the *domain* above the floor, never from
-  // today's plan: a later growth can add pages at any level, and the atlas is
-  // fixed for the lifetime of the world. A level can never hold more pages than
-  // the domain has at that level, because the planner's direct page table
-  // rejects coordinates outside the domain grid, so the domain sum is a bound.
+  // The radiance atlas is sized from the *domain* above the floor rather than
+  // from today's occupancy: a later growth can add pages at any level, and the
+  // atlas is fixed for the lifetime of the world. A level can never hold more
+  // pages than the domain has at that level, because the planner's direct page
+  // table rejects coordinates outside the domain grid, so the domain sum is a
+  // bound — though not the only one; see `radiancePageCapacity` below.
   // Never below the opacity floor: the radiance atlas rides the opacity
   // pyramid's slot numbering, so a radiance base at a level that owns no page
   // would ask the builder to seed a chain from records that do not exist. The
@@ -405,7 +409,33 @@ export function* planSvoNodeMipAddressesSteps(
   }));
   const radianceLevels = levelDimensions.slice(radianceFloorLevel)
     .map((dimensions) => dimensions[0] * dimensions[1] * dimensions[2]);
-  const radiancePageCapacity = Math.max(1, Math.min(pageCapacity,
+  const radianceSlotOffset = svoNodeMipRadianceSlotOffset(plan, radianceFloorLevel);
+  /**
+   * Two independent ceilings, and the atlas is the smaller of them.
+   *
+   * The domain sum is the one this file always applied: no level can hold more
+   * pages than its own grid has, so nothing above the floor can ever exceed it.
+   * The other is the *slot space*. The radiance atlas rides the opacity
+   * pyramid's numbering, and every page below the floor takes a slot without
+   * taking an atlas page — so the atlas occupies `[slotOffset, pageCapacity)`
+   * and can hold at most `pageCapacity - slotOffset` pages, which is what
+   * `WebGpuLiveSvoTetrahedralRadiance`'s constructor requires.
+   *
+   * Only the domain bound was applied, and the two are measured against
+   * different things: `pageCapacity` is today's occupancy plus a fixed byte
+   * reserve, while the domain sum is the whole lattice above the floor. On a
+   * `total` plan they agree, because the plan then *is* the domain and the two
+   * halves sum to `domainPyramidPageCount`. On a partial plan with the floor
+   * above level zero they do not, the domain figure wins, and the constructor
+   * rejects a plan the rest of this module considers sound — which reaches a
+   * user as `Lighting visibility: EXACT FALLBACK` on the first frame, with the
+   * whole cone hierarchy silently withdrawn.
+   *
+   * Growth only ever moves this the safe way: a grown plan holds at least as
+   * many pages below the floor as this one, so `pageCapacity - slotOffset`
+   * shrinks and the atlas sized here still covers every above-floor slot.
+   */
+  const radiancePageCapacity = Math.max(1, Math.min(pageCapacity - radianceSlotOffset,
     radianceLevels.reduce((total_, count) => total_ + count, 0)));
   const radianceAtlasPages = svoNodeMipAtlasPagesForCapacity(radiancePageCapacity);
   const radiancePageCapacityPerLevel = Math.max(1, Math.min(pageCapacityPerLevel, Math.max(1, ...radianceLevels)));
@@ -426,7 +456,7 @@ export function* planSvoNodeMipAddressesSteps(
     pageCapacityByLevel,
     maximumReserveBytes,
     radianceFloorLevel,
-    radianceSlotOffset: svoNodeMipRadianceSlotOffset(plan, radianceFloorLevel),
+    radianceSlotOffset,
     radiancePageCapacity,
     radianceAtlasPages,
     radianceAtlasTexels: radianceAtlasPages.map((value) => value * SVO_NODE_MIP_LAYOUT.physicalSize) as [number, number, number],

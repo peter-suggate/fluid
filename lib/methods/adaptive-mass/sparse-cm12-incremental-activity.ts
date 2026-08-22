@@ -1,16 +1,12 @@
 /** GPU-resident, generation-stamped activity summary worklist. */
 export interface SparseCM12IncrementalActivityLayout {
   readonly headerBaseWords: number;
-  readonly stableTileStampBaseWords: number;
-  readonly stableTileCauseBaseWords: number;
   readonly brickStampBaseWords: number;
+  readonly brickVelocityStampBaseWords: number;
   readonly brickListBaseWords: number;
   readonly brickTopologyStateBaseWords: number;
   readonly brickCensusStateBaseWords: number;
-  readonly brickTileMaskLowBaseWords: number;
-  readonly brickTileMaskHighBaseWords: number;
   readonly scoreHistogramBaseWords: number;
-  readonly stableTileCount: number;
   readonly brickCount: number;
   readonly totalWords: number;
 }
@@ -25,13 +21,13 @@ export const SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER = Object.freeze({
   headerWords: 2,
   flags: 3,
   generation: 4,
-  dirtyTileCount: 5,
+  reserved0: 5,
   dirtyBrickCount: 6,
   uncoveredWriteFaultCount: 7,
   dispatchX: 8,
   dispatchY: 9,
   dispatchZ: 10,
-  stableTileCount: 11,
+  reserved1: 11,
   brickCount: 12,
   measuredBrickCount: 13,
   reusedBrickCount: 14,
@@ -47,38 +43,29 @@ const checked = (value: number, label: string): number => {
 
 export function createSparseCM12IncrementalActivityLayout(options: {
   readonly baseWords: number;
-  readonly stableTileCount: number;
   readonly brickCount: number;
   readonly alignmentWords?: number;
 }): SparseCM12IncrementalActivityLayout {
   const alignment = checked(options.alignmentWords ?? 64, "alignmentWords");
   if (alignment === 0) throw new RangeError("alignmentWords must be positive");
   const base = checked(options.baseWords, "baseWords");
-  const stableTileCount = checked(options.stableTileCount, "stableTileCount");
   const brickCount = checked(options.brickCount, "brickCount");
   const headerBaseWords = Math.ceil(base / alignment) * alignment;
-  const stableTileStampBaseWords = headerBaseWords
+  const brickStampBaseWords = headerBaseWords
     + SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER_WORDS;
-  const stableTileCauseBaseWords = stableTileStampBaseWords + stableTileCount;
-  const brickStampBaseWords = stableTileCauseBaseWords + stableTileCount;
-  const brickListBaseWords = brickStampBaseWords + brickCount;
+  const brickVelocityStampBaseWords = brickStampBaseWords + brickCount;
+  const brickListBaseWords = brickVelocityStampBaseWords + brickCount;
   const brickTopologyStateBaseWords = brickListBaseWords + brickCount;
   const brickCensusStateBaseWords = brickTopologyStateBaseWords + brickCount;
-  const brickTileMaskLowBaseWords = brickCensusStateBaseWords + brickCount;
-  const brickTileMaskHighBaseWords = brickTileMaskLowBaseWords + brickCount;
-  const scoreHistogramBaseWords = brickTileMaskHighBaseWords + brickCount;
+  const scoreHistogramBaseWords = brickCensusStateBaseWords + brickCount;
   return Object.freeze({
     headerBaseWords,
-    stableTileStampBaseWords,
-    stableTileCauseBaseWords,
     brickStampBaseWords,
+    brickVelocityStampBaseWords,
     brickListBaseWords,
     brickTopologyStateBaseWords,
     brickCensusStateBaseWords,
-    brickTileMaskLowBaseWords,
-    brickTileMaskHighBaseWords,
     scoreHistogramBaseWords,
-    stableTileCount,
     brickCount,
     totalWords: scoreHistogramBaseWords + 256,
   });
@@ -94,7 +81,6 @@ export function createSparseCM12IncrementalActivityInitialWords(
   words[h.headerWords] = SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER_WORDS;
   words[h.dispatchY] = 1;
   words[h.dispatchZ] = 1;
-  words[h.stableTileCount] = layout.stableTileCount;
   words[h.brickCount] = layout.brickCount;
   // Topology state 0xffffffff guarantees a bounded first-frame bootstrap.
   words.fill(0xffff_ffff,

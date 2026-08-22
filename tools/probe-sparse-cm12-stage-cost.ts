@@ -73,8 +73,8 @@ import { inspectSparseCM12PressureCutoverAuthorities } from
 import {
   SPARSE_CM12_FRAME_CONTROL_PHASE,
 } from "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
-import { SPARSE_CM12_SCALAR_RESULT_PHASE } from
-  "../lib/methods/adaptive-mass/sparse-cm12-scalar-result-receipts";
+import { SPARSE_CM12_FINAL_SCALAR_MASK_PHASE } from
+  "../lib/methods/adaptive-mass/sparse-cm12-final-scalar-packet-masks";
 import {
   SPARSE_CM12_FRAME_PLAN_BRICK,
   SPARSE_CM12_FRAME_PLAN_BRICK_FLAG,
@@ -185,31 +185,21 @@ const percentile = (values: number[], quantile: number): number => {
 };
 
 const TARGET_STAGE_IDS = Object.freeze([
-  "receiver-topology",
-  "scalar-transport",
+  "face-preparation",
+  "conservative-transport",
   "gamma-diffusion",
-  "surface-conditioning",
+  "surface-sharpening",
   "pressure-topology",
   "presentation-publication",
 ] as const);
 const PRESSURE_TOPOLOGY_PHASE_LABEL = "Composite pressure topology + ghost-fluid rows";
-const CANDIDATE_TRANSFER_PHASE_LABELS = Object.freeze([
-  "Candidate scalar + momentum field transfer",
-  "Candidate exterior-face reconstruction",
-  "Candidate shadow-face validation",
-  "Candidate effects census + preflight",
-  "Candidate IBO delta construction",
-  "Candidate independent IBO semantic validation",
-  "Candidate TEI delta compilation",
-  "Candidate transaction authorization",
-  "Candidate SCA effects publication",
-  "Candidate PTR effects publication",
-  "Candidate VEX effects publication",
-  "Candidate effects receipt seal",
-  "Candidate fields + membership publication",
-  "Candidate retired-image replay",
-  "Budgeted shadow-topology preparation + conservative transfer",
-] as const);
+// Every seam the candidate-transfer stage closes, read from the stage
+// registry rather than listed here, so a renamed sub-seam cannot leave a
+// silent zero in the receipt.
+const CANDIDATE_TRANSFER_PHASE_LABELS: readonly string[] = Object.freeze(
+  ADAPTIVE_MASS_GPU_WORK_CHUNKS
+    .filter((chunk) => chunk.residentStage === "candidate-transfer")
+    .map((chunk) => chunk.phase.label));
 const GPU_WORK_CHUNK_BY_LABEL = new Map(
   ADAPTIVE_MASS_GPU_WORK_CHUNKS.map((chunk) => [chunk.phase.label, chunk] as const));
 assert.equal(GPU_WORK_CHUNK_BY_LABEL.size, ADAPTIVE_MASS_GPU_WORK_CHUNKS.length,
@@ -225,11 +215,12 @@ type FrameControlHeader = {
   readonly sealedGeneration: number; readonly scalarParity: number;
   readonly faceParity: number; readonly coverage: number; readonly committedFrames: number;
 };
-type ScalarAuthorityHeader = {
+type FinalScalarMaskHeader = {
   readonly phase: number; readonly fault: number;
-  readonly firstFaultTile: number;
-  readonly acceptedGeneration: number; readonly candidateGeneration: number;
-  readonly topologyGeneration: number; readonly sourceParity: number;
+  readonly firstFaultPacket: number; readonly generation: number;
+  readonly topologyGeneration: number; readonly changedCellCount: number;
+  readonly nonexactCellCount: number; readonly bulkCellCount: number;
+  readonly flipCellCount: number;
 };
 type StageCostQASolver = {
   readPhase1TransportProfileQA?(): Promise<unknown>;
@@ -248,24 +239,14 @@ type StageCostQASolver = {
     readonly pressureHierarchyEdgeCount: number;
     readonly pressureFineEdgeCount: number;
     readonly pressureCoarseEdgeCount: number;
-    readonly scalarResultTileCapacity: number;
+    readonly transportSpatialTileCapacity: number;
     readonly facePreparationLeafCount: number;
     readonly presentationPageCount: number;
     readonly allocatedBytes: number;
   };
   readAdaptiveRepresentationQA(): Promise<Record<string, number | boolean>>;
   readFrameControlQA(): Promise<FrameControlHeader>;
-  readScalarAuthorityHeaderQA(): Promise<ScalarAuthorityHeader>;
-  readSharpeningCellAuthorityQA(): Promise<{
-    readonly generation: number; readonly packetCount: number;
-  }>;
-  readScalarIngressHeaderQA(): Promise<{
-    readonly candidateGeneration: number; readonly eventCount: number;
-    readonly fault: number; readonly firstFaultTile: number;
-  }>;
-  readScalarIngressEventsQA(): Promise<readonly {
-    readonly tile: number; readonly generation: number; readonly causeMask: number;
-  }[]>;
+  readFinalScalarMaskHeaderQA(): Promise<FinalScalarMaskHeader>;
   readCandidateEffectsTransactionQA(): Promise<{
     readonly vda: Readonly<Record<string, number>>;
     readonly tfx: Readonly<Record<string, number>>;
@@ -463,8 +444,6 @@ try {
     readonly endFrameCommittedBricks: number;
     readonly acceptedCells: number;
     readonly acceptedRows: number;
-    readonly temporalCells: number;
-    readonly temporalRows: number;
     readonly pcmCellDirtyLeaves: number;
     readonly pcmRowDirtyLeaves: number;
     readonly pressureCells: number;
@@ -494,19 +473,18 @@ try {
   const cpuBySampleId = new Map<number, PerformanceTrace>();
   const authoritySamples: Array<{
     readonly advance: number; readonly expectedFrameControlGeneration: number;
-    readonly expectedScalarAuthorityGeneration: number;
+    readonly expectedFinalScalarMaskGeneration: number;
     readonly frameControl: FrameControlHeader & { readonly stalled: boolean;
       readonly successorMatched: boolean; readonly valid: boolean };
-    readonly scalarAuthority: ScalarAuthorityHeader & { readonly stalled: boolean;
+    readonly finalScalarMasks: FinalScalarMaskHeader & { readonly stalled: boolean;
       readonly successorMatched: boolean; readonly valid: boolean };
-    readonly scalarIngressEventCount: number;
     readonly candidateEffects?: Awaited<ReturnType<
       StageCostQASolver["readCandidateEffectsTransactionQA"]>>;
   }> = [];
   const candidateTransferTimelines: Array<Record<string, unknown>> = [];
   let firstAuthorityFailure: Record<string, unknown> | undefined;
   let diagnosticFailure: string | undefined;
-  let lastScalarAuthorityHeader: ScalarAuthorityHeader | undefined;
+  let lastFinalScalarMaskHeader: FinalScalarMaskHeader | undefined;
   let seen = 0;
   let priorFrameCommitted = 0;
   let priorTraceSampleId = 0;
@@ -514,20 +492,13 @@ try {
   // Seed the readback-only topology attribution with construction step 0.
   // This encodes no physics and makes a no-warmup first sample attributable.
   await solver.readStats();
-  const [initialFrameControl, initialScalarAuthority] = await Promise.all([
-    qaSolver.readFrameControlQA(), qaSolver.readScalarAuthorityHeaderQA(),
+  const [initialFrameControl, initialFinalScalarMasks] = await Promise.all([
+    qaSolver.readFrameControlQA(), qaSolver.readFinalScalarMaskHeaderQA(),
   ]);
   let previousActivity = await solver.readGPUActivityPolicy();
   let priorFrameControlGeneration = initialFrameControl.acceptedGeneration;
-  let priorScalarAuthorityGeneration = initialScalarAuthority.acceptedGeneration;
-  lastScalarAuthorityHeader = {
-    phase: initialScalarAuthority.phase, fault: initialScalarAuthority.fault,
-    firstFaultTile: initialScalarAuthority.firstFaultTile,
-    acceptedGeneration: initialScalarAuthority.acceptedGeneration,
-    candidateGeneration: initialScalarAuthority.candidateGeneration,
-    topologyGeneration: initialScalarAuthority.topologyGeneration,
-    sourceParity: initialScalarAuthority.sourceParity,
-  };
+  let priorFinalScalarMaskGeneration = initialFinalScalarMasks.generation;
+  lastFinalScalarMaskHeader = initialFinalScalarMasks;
   const maximumAdvances = warmup + sampled + 4;
   const debugProgress = process.env.FLUID_STAGE_PROBE_DEBUG === "1";
   const debug = (message: string) => {
@@ -544,62 +515,52 @@ try {
       wallFrameSamples.push(performance.now() - wallFrameStarted_ms);
     }
     debug(`advance ${frame} queue complete`);
-    const [frameControl, scalarAuthorityQA, scalarIngress, candidateEffects,
+    const [frameControl, finalScalarMasks, candidateEffects,
       currentActivity] = await Promise.all([
-      qaSolver.readFrameControlQA(), qaSolver.readScalarAuthorityHeaderQA(),
-      qaSolver.readScalarIngressHeaderQA(), qaSolver.readCandidateEffectsTransactionQA(),
+      qaSolver.readFrameControlQA(), qaSolver.readFinalScalarMaskHeaderQA(),
+      qaSolver.readCandidateEffectsTransactionQA(),
       solver.readGPUActivityPolicy(),
     ]);
     previousActivity = currentActivity;
     debug(`advance ${frame} authority headers complete`);
     const expectedFrameControlGeneration = initialFrameControl.acceptedGeneration + frame;
-    // SRR1 has no accepted construction result (generation 0); its first
-    // physics commit therefore bootstraps directly to FCA generation 2.
-    // Thereafter it advances by exactly one with FCA.
-    const expectedScalarAuthorityGeneration = expectedFrameControlGeneration;
+    // FSM1 has no construction scalar result. Its first publication is the
+    // first physical frame and thereafter advances exactly once with FCA.
+    const expectedFinalScalarMaskGeneration = expectedFrameControlGeneration;
     const frameControlStalled = frameControl.acceptedGeneration <= priorFrameControlGeneration;
-    const scalarAuthorityStalled = scalarAuthorityQA.acceptedGeneration
-      <= priorScalarAuthorityGeneration;
+    const finalScalarMasksStalled = finalScalarMasks.generation
+      <= priorFinalScalarMaskGeneration;
     const frameControlSuccessorMatched = frameControl.acceptedGeneration
         === expectedFrameControlGeneration
       && frameControl.candidateGeneration === expectedFrameControlGeneration
       && frameControl.sealedGeneration === expectedFrameControlGeneration
       && frameControl.committedFrames === initialFrameControl.committedFrames + frame;
-    const scalarAuthoritySuccessorMatched = scalarAuthorityQA.acceptedGeneration
-        === expectedScalarAuthorityGeneration
-      && scalarAuthorityQA.candidateGeneration === expectedScalarAuthorityGeneration
-      && (scalarAuthorityQA.acceptedGeneration === priorScalarAuthorityGeneration + 1
-        || (frame === 1 && priorScalarAuthorityGeneration === 0
-          && scalarAuthorityQA.acceptedGeneration === expectedFrameControlGeneration));
+    const finalScalarMasksSuccessorMatched = finalScalarMasks.generation
+        === expectedFinalScalarMaskGeneration
+      && (finalScalarMasks.generation === priorFinalScalarMaskGeneration + 1
+        || (frame === 1 && priorFinalScalarMaskGeneration === 0
+          && finalScalarMasks.generation === expectedFrameControlGeneration));
     const frameControlValid = frameControl.phase === SPARSE_CM12_FRAME_CONTROL_PHASE.accepted
       && frameControl.fault === 0
       && frameControl.firstFaultOwner === 0xffff_ffff
       && !frameControlStalled && frameControlSuccessorMatched;
-    const scalarAuthorityValid = scalarAuthorityQA.phase === SPARSE_CM12_SCALAR_RESULT_PHASE.accepted
-      && scalarAuthorityQA.fault === 0 && !scalarAuthorityStalled
-      && scalarAuthoritySuccessorMatched
-      && scalarAuthorityQA.acceptedGeneration === frameControl.acceptedGeneration;
-    const scalarAuthorityHeader = {
-      phase: scalarAuthorityQA.phase, fault: scalarAuthorityQA.fault,
-      firstFaultTile: scalarAuthorityQA.firstFaultTile,
-      acceptedGeneration: scalarAuthorityQA.acceptedGeneration,
-      candidateGeneration: scalarAuthorityQA.candidateGeneration,
-      topologyGeneration: scalarAuthorityQA.topologyGeneration,
-      sourceParity: scalarAuthorityQA.sourceParity,
-    };
-    lastScalarAuthorityHeader = scalarAuthorityHeader;
+    const finalScalarMasksValid = finalScalarMasks.phase
+      === SPARSE_CM12_FINAL_SCALAR_MASK_PHASE.published
+      && finalScalarMasks.fault === 0 && !finalScalarMasksStalled
+      && finalScalarMasksSuccessorMatched
+      && finalScalarMasks.generation === frameControl.acceptedGeneration;
+    lastFinalScalarMaskHeader = finalScalarMasks;
     authoritySamples.push({
-      advance: frame, expectedFrameControlGeneration, expectedScalarAuthorityGeneration,
+      advance: frame, expectedFrameControlGeneration, expectedFinalScalarMaskGeneration,
       frameControl: { ...frameControl, stalled: frameControlStalled,
         successorMatched: frameControlSuccessorMatched, valid: frameControlValid },
-      scalarAuthority: { ...scalarAuthorityHeader, stalled: scalarAuthorityStalled,
-        successorMatched: scalarAuthoritySuccessorMatched, valid: scalarAuthorityValid },
-      scalarIngressEventCount: scalarIngress.eventCount,
+      finalScalarMasks: { ...finalScalarMasks, stalled: finalScalarMasksStalled,
+        successorMatched: finalScalarMasksSuccessorMatched, valid: finalScalarMasksValid },
       candidateEffects,
     });
     priorFrameControlGeneration = frameControl.acceptedGeneration;
-    priorScalarAuthorityGeneration = scalarAuthorityQA.acceptedGeneration;
-    if ((!frameControlValid || !scalarAuthorityValid) && firstAuthorityFailure === undefined) {
+    priorFinalScalarMaskGeneration = finalScalarMasks.generation;
+    if ((!frameControlValid || !finalScalarMasksValid) && firstAuthorityFailure === undefined) {
       try {
         const vexHeader = await qaSolver.readVelocityExtensionHeaderQA();
         let firstFaultDetail: Record<string, unknown> | undefined;
@@ -619,7 +580,7 @@ try {
         firstAuthorityFailure = {
           advance: frame,
           frameControl: authoritySamples.at(-1)!.frameControl,
-          scalarAuthority: authoritySamples.at(-1)!.scalarAuthority,
+          finalScalarMasks: authoritySamples.at(-1)!.finalScalarMasks,
           velocityExtension: {
             header: vexHeader,
             firstFault: firstFaultDetail,
@@ -629,11 +590,11 @@ try {
         firstAuthorityFailure = {
           advance: frame,
           frameControl: authoritySamples.at(-1)!.frameControl,
-          scalarAuthority: authoritySamples.at(-1)!.scalarAuthority,
+          finalScalarMasks: authoritySamples.at(-1)!.finalScalarMasks,
           velocityExtensionCaptureError: error instanceof Error ? error.message : String(error),
         };
       }
-      diagnosticFailure = `advance ${frame} FCA1/SRR1 successor fault or stall`;
+      diagnosticFailure = `advance ${frame} FCA1/FSM1 successor fault or stall`;
       break;
     }
     if (validationErrors.length > 0) {
@@ -722,7 +683,6 @@ try {
       shadowRows: candidateEffects?.topology[19] ?? 0,
       rootRequests: candidateEffects?.vda.rootInputCount ?? 0,
       uniqueNewRoots: candidateEffects?.vda.newRootCount ?? 0,
-      scaEffects: candidateEffects?.tfx.scaCount ?? 0,
       ptrEffects: candidateEffects?.tfx.ptrCount ?? 0,
       iboClosureLeaves: candidateEffects?.isa?.[4] ?? 0,
       work: {
@@ -855,8 +815,6 @@ try {
       endFrameCommittedBricks: committed,
       acceptedCells: info.adaptiveAcceptedCellCount ?? 0,
       acceptedRows: info.adaptiveAcceptedRowCount ?? 0,
-      temporalCells: info.adaptiveTemporalScalarCellCount ?? 0,
-      temporalRows: info.adaptiveTemporalScalarRowCount ?? 0,
       pcmCellDirtyLeaves: pcm?.cell.dirtyCount ?? 0,
       pcmRowDirtyLeaves: pcm?.row.dirtyCount ?? 0,
       pressureCells: info.adaptivePressureCellCount ?? 0,
@@ -888,18 +846,6 @@ try {
       maximumAdvances} advances`;
   }
   const adaptiveRepresentation = await qaSolver.readAdaptiveRepresentationQA();
-  const scalarIngressEvents = await qaSolver.readScalarIngressEventsQA();
-  const tilesPerAxis = brickFineResolution / 4;
-  const tilesPerBrick = tilesPerAxis ** 3;
-  const [logicalX, logicalY] = workShape.logicalBrickDimensions;
-  const scalarEventYHistogram = Array.from({ length: logicalY! * tilesPerAxis }, () => 0);
-  for (const event of scalarIngressEvents) {
-    const logical = Math.floor(event.tile / tilesPerBrick);
-    const local = event.tile % tilesPerBrick;
-    const by = Math.floor(logical / logicalX!) % logicalY!;
-    const ty = Math.floor(local / tilesPerAxis) % tilesPerAxis;
-    scalarEventYHistogram[by * tilesPerAxis + ty]! += 1;
-  }
   const representationInvariants = [
     "leafCellRangesExactlyPartitionAcceptedCells",
     "rowRequirementsExactlyDescribeAcceptedRows",
@@ -960,19 +906,18 @@ try {
     eligible: targetConfiguration && sampled >= 24,
     passed: targetConfiguration && sampled >= 24 && nonPressureP95_ms < maximumTarget_ms,
   };
-  const sharpeningCellAuthority = await qaSolver.readSharpeningCellAuthorityQA();
   const transportProfile = await qaSolver.readPhase1TransportProfileQA?.();
   const framePlan = await readFramePlanCensus(device, solver);
   const report = {
     probe: "sparse-cm12-stage-cost", scene: sceneName, samples: seen,
     warmupSamples: warmup,
     diagnostic: {
-      purpose: "FCA1/SRR1/VEX1 observability; not performance acceptance",
+      purpose: "FCA1/FSM1/VEX1 observability; not performance acceptance",
       passed: diagnosticFailure === undefined,
       failure: diagnosticFailure,
       initial: {
         frameControl: initialFrameControl,
-        scalarAuthority: initialScalarAuthority,
+        finalScalarMasks: initialFinalScalarMasks,
       },
       authoritySamples,
       firstAuthorityFailure,
@@ -996,10 +941,6 @@ try {
       timestampQuantum_us: 65.536,
     },
     workShape,
-    scalarEventWorkShape: {
-      count: scalarIngressEvents.length,
-      yTileHistogram: scalarEventYHistogram,
-    },
     framePlan,
     transportProfile,
     adaptiveRepresentation,
@@ -1079,7 +1020,7 @@ try {
       abi: "FCA1",
       scheduling: "GPU-owned fixed indirect work/no-work families",
       // This remains the whole concrete resident-stage rollup. Its disjoint
-      // FCA1, VEX1, SRR1-plan and packet-authority terms are in workChunks.
+      // FCA1, VEX1, FSM1 and packet-authority terms are in workChunks.
       transportVelocityExtensionUpperBound_ms: frameAuthorityStage?.median_ms,
       cpuTransportVelocityExtensionUpperBound_ms: frameAuthorityCPUSamples
         ? Number(median(frameAuthorityCPUSamples).toFixed(4)) : undefined,
@@ -1087,15 +1028,10 @@ try {
       hostSimulationSizedWorkItems: finalInfo?.hostSimulationSizedWorkItems,
       hostSchedulingUsesReadback: finalInfo?.hostSchedulingUsesReadback,
     },
-    scalarAuthority: {
-      abi: "SRR1",
-      scheduling: "producer-authored result receipts plus GPU indirect tile ranks",
-      ...lastScalarAuthorityHeader,
-    },
-    sharpeningCellAuthority: {
-      abi: "SCA1",
-      scheduling: "producer-authored air-side SRR1 work packets",
-      ...sharpeningCellAuthority,
+    finalScalarMasks: {
+      abi: "FSM1",
+      scheduling: "persistent scalar masks compiled directly to packet execution",
+      ...lastFinalScalarMaskHeader,
     },
     closure: {
       maximumAbsoluteError_ms: Math.max(...closureErrors.map(Math.abs)),
@@ -1107,9 +1043,6 @@ try {
       acceptedRows: finalInfo.adaptiveAcceptedRowCount,
       pressureCells: finalInfo.adaptivePressureCellCount,
       pressureActiveRows: finalInfo.adaptivePressureActiveRowCount,
-      temporalScalarCells: finalInfo.adaptiveTemporalScalarCellCount,
-      temporalScalarRows: finalInfo.adaptiveTemporalScalarRowCount,
-      temporalScalarRejectionMask: finalInfo.adaptiveTemporalScalarRejectionMask,
       residentBricks: finalInfo.fluidBrickResidentCount,
       topologyPrepared: finalInfo.adaptiveTopologyPreparedBrickCount,
       topologyCommitted: finalInfo.adaptiveTopologyCommittedBrickCount,

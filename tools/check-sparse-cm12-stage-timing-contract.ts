@@ -4,13 +4,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-const [capture, recorder, resident, scalarAuthority, probe, baseline] = await Promise.all([
+const [capture, recorder, resident, probe, baseline] = await Promise.all([
   readFile(new URL("../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline.ts",
     import.meta.url), "utf8"),
   readFile(new URL("../lib/core/performance-trace.ts", import.meta.url), "utf8"),
   readFile(new URL("../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
-    import.meta.url), "utf8"),
-  readFile(new URL("../lib/methods/adaptive-mass/sparse-cm12-srr1-runtime-adapter.ts",
     import.meta.url), "utf8"),
   readFile(new URL("./probe-sparse-cm12-stage-cost.ts", import.meta.url), "utf8"),
   readFile(new URL("../artifacts/sparse-cm12-ocean-b16-p16-stage-cost-baseline.json",
@@ -73,17 +71,15 @@ assert.match(probe, /maximumStageChunkError_ms/,
   "every concrete stage rollup must reconcile against its owned chunks");
 assert.match(probe, /createProcessRetainedDawnGPU/,
   "native Dawn must remain retained through process teardown");
-assert.match(scalarAuthority,
-  /readHeaderQA\(\)[\s\S]*SPARSE_CM12_SCALAR_RESULT_HEADER_WORDS[\s\S]*copyBufferToBuffer\(this\.authorityBuffer/,
-  "per-advance scalar authority diagnosis must use a fixed 128-byte header readback");
+assert.match(resident,
+  /readFinalScalarMaskHeaderQA\(\)[\s\S]*SPARSE_CM12_FINAL_SCALAR_MASK_HEADER_WORDS/,
+  "per-advance final-scalar diagnosis must use the fixed FSM1 header readback");
 assert.match(resident,
   /readVelocityExtensionHeaderQA\(\)[\s\S]*SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS/,
   "VEX fault triage must expose a fixed 128-byte header readback");
-assert.doesNotMatch(probe, /qaSolver\.readScalarAuthorityQA\(/,
-  "the stage probe must not materialize simulation-sized scalar QA per advance");
 assert.match(probe,
-  /priorScalarAuthorityGeneration === 0[\s\S]*acceptedGeneration === expectedFrameControlGeneration/,
-  "the exact SRR successor oracle must admit its generation-0 construction bootstrap");
+  /priorFinalScalarMaskGeneration === 0[\s\S]*generation === expectedFrameControlGeneration/,
+  "the exact FSM1 successor oracle must admit its generation-0 construction bootstrap");
 assert.match(probe,
   /if \(vexHeader\.firstFault\)[\s\S]*qaSolver\.readVelocityExtensionQA\(\)/,
   "full VEX QA may be materialized only after an exact header first-fault receipt");

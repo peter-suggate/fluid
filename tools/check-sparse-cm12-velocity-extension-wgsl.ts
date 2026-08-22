@@ -15,12 +15,6 @@ const entryPoints = (source: string): readonly string[] =>
     .map((match) => match[1]!);
 
 function integratedSource(): string {
-  const temporal = { headerBaseWords: 64,
-    cellListBaseWords: 72,
-    rowListBaseWords: 4168,
-    cellFlagABaseWords: 8264,
-    cellFlagBBaseWords: 12360,
-    totalWords: 16456 };
   const pressure = { edgeCoefficientBaseWords: 4096, cellSlotBaseWords: 8192,
     rowSlotBaseWords: 12288, cellChangeBaseWords: 16384,
     rowChangeBaseWords: 20480, brickStateBaseWords: 24576,
@@ -29,13 +23,13 @@ function integratedSource(): string {
     hierarchyEdgeForAggregateBaseWords: [32896],
     headerBaseWords: 36992, totalWords: 37000 };
   const activity = createSparseCM12IncrementalActivityLayout({
-    baseWords: temporal.totalWords, stableTileCount: 512, brickCount: 8,
+    baseWords: 16456, brickCount: 8,
   });
   const extension = createSparseCM12VelocityExtensionLayout({
     baseWords: activity.totalWords, cellCapacity: 4096,
   });
   return createWebgpuSparseCM12ResidentWGSL(
-    16, 16, temporal, pressure, activity,
+    16, 16, pressure, activity,
   ) + createSparseCM12VelocityExtensionWGSL({
     layout: extension,
     // Compile-only tail address. The resident integration supplies the exact

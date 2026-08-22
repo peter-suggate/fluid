@@ -18,20 +18,6 @@ export function createSparseCM12Phase1TransportQAWGSL(options: {
     atomicStore(&activity[CM12_P1TQ_HEADER+13u],cell);
     atomicStore(&activity[CM12_P1TQ_HEADER+14u],actual);
     atomicStore(&activity[CM12_P1TQ_HEADER+15u],packet.x|(packet.y<<24u));}` : "";
-  const captureSharpeningTile = options.validateExecutionImage
-    ? `if(lane!=0u){return;}
-  let claim=atomicCompareExchangeWeak(&activity[CM12_P1TQ_HEADER+16u],0u,1u);
-  if(!claim.exchanged){return;}
-  let slot=acceptedTopologySlot();
-  let at=cm12TeiSpatialTileBase(slot)+CM12_TEI_SPATIAL_TILE_WORDS*tile;
-  atomicStore(&activity[CM12_P1TQ_HEADER+17u],tile);
-  atomicStore(&activity[CM12_P1TQ_HEADER+18u],slot);
-  atomicStore(&activity[CM12_P1TQ_HEADER+19u],fineMetadata[cm12TeiSlotBase(slot)]);
-  atomicStore(&activity[CM12_P1TQ_HEADER+20u],fineMetadata[at]);
-  atomicStore(&activity[CM12_P1TQ_HEADER+21u],fineMetadata[at+1u]);
-  atomicStore(&activity[CM12_P1TQ_HEADER+22u],fineMetadata[at+2u]);
-  atomicStore(&activity[CM12_P1TQ_HEADER+23u],fineMetadata[at+3u]);`
-    : "_=tile;_=lane;";
   return /* wgsl */ `
 const CM12_P1TQ_HEADER:u32=${l.baseWords}u;
 const CM12_P1TQ_CAPACITY:u32=${l.cellCapacity}u;
@@ -117,9 +103,6 @@ fn cm12Phase1QACaptureMass(cell:u32,density:f32,gamma:f32){
   atomicStore(&activity[CM12_P1TQ_MASS_DENSITY+cell],bitcast<u32>(density));
   atomicStore(&activity[CM12_P1TQ_MASS_GAMMA+cell],bitcast<u32>(gamma));
   atomicAdd(&activity[CM12_P1TQ_HEADER+10u],1u);
-}
-fn cm12Phase1QACaptureSharpeningTile(tile:u32,lane:u32){
-  ${captureSharpeningTile}
 }
 `;
 }

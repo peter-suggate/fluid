@@ -28,10 +28,10 @@ test("brick-owned face preparation omits the per-row preparation authority", () 
 
 test("face preparation reuses the single activity brick worklist", () => {
   const layout = createSparseCM12IncrementalActivityLayout({
-    baseWords: 0, stableTileCount: 32, brickCount: 12,
+    baseWords: 0, brickCount: 12,
   });
   assert.equal(layout.brickListBaseWords,
-    layout.brickStampBaseWords + layout.brickCount);
+    layout.brickVelocityStampBaseWords + layout.brickCount);
 });
 
 test("production face preparation consumes one contiguous owned range per dirty brick", () => {

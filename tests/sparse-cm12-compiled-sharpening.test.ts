@@ -32,9 +32,9 @@ test("the sharpening scatter workgroup stages its spatial tile before tracing", 
   assert.doesNotMatch(scatterCell, /transportStencil\(position\)/);
 
   const scatter = body("scatterSharpeningMass", "finalizeSharpeningCell");
-  assert.match(scatter, /sirStableMassTileOrigin\(sca1SourceTile\(wid\.x\)\)/);
+  assert.match(scatter, /cm12StableSpatialTileOrigin\(sca1SourceTile\(wid\.x\)\)/);
   assert.match(scatter,
     /cm12TeiStageDirectory\(origin,lane,acceptedTopologySlot\(\)\)/);
   assert.ok(scatter.indexOf("cm12TeiStageDirectory")
-    < scatter.indexOf("if(EXP_SHARPENING_CELL_CATALOG)"));
+    < scatter.indexOf("let cell=sca1SourceCell"));
 });

@@ -15,27 +15,17 @@ import { createSparseCM12FramePlanPresentationLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
 import { createSparseCM12FrameControl } from
   "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
-import { createSparseCM12SRR1IngressLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-srr1-runtime-adapter";
 import { createSparseCM12PressureTopologyRepairLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
 import { createSparseCM12ResidentPersistentPressureCacheLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-persistent-pressure-cache";
 import { createSparseCM12FaceProjectionAuthorityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-face-projection-authority";
-import { createSparseCM12FacePreparationTileCensusLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-face-preparation-tile-census";
-import { createSparseCM12FpaVexReadCensusLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-fpa-vex-read-census";
 import { createSparseCM12VexActivityBatchLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-vex-activity-batch";
 import { createSparseCM12PressureAddressingABLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-addressing-ab";
 
-const temporal = { headerBaseWords: 64,
-  cellListBaseWords: 72, rowListBaseWords: 1096,
-  cellFlagABaseWords: 2120,
-  cellFlagBBaseWords: 3144, totalWords: 4168 };
 const pressure = { edgeCoefficientBaseWords: 4096, cellSlotBaseWords: 8192,
   rowSlotBaseWords: 9216, cellChangeBaseWords: 10240, rowChangeBaseWords: 11264,
   brickStateBaseWords: 12288, rowTopologyStampBaseWords: 12352,
@@ -43,7 +33,7 @@ const pressure = { edgeCoefficientBaseWords: 4096, cellSlotBaseWords: 8192,
   hierarchyEdgeForAggregateBaseWords: [14464], headerBaseWords: 15488,
   totalWords: 15496 };
 const activity = createSparseCM12IncrementalActivityLayout({
-  baseWords: temporal.totalWords, stableTileCount: 512, brickCount: 8 });
+  baseWords: 4168, brickCount: 8 });
 const membership = createSparseCM12CanonicalMembershipLayout({
   baseWords: activity.totalWords, cellCapacity: 1024, rowCapacity: 2048 });
 const framePlan = createSparseCM12FramePlanLayout({
@@ -52,8 +42,6 @@ const framePlan = createSparseCM12FramePlanLayout({
 const presentation = createSparseCM12FramePlanPresentationLayout({
   baseWords: framePlan.totalWords, pageCapacity: 8, brickFineResolution: 16,
   pageResolution: 16, packetIndex: 5 });
-const scalar = createSparseCM12SRR1IngressLayout({
-  baseWords: presentation.totalWords, tileCapacity: 512 });
 const frameControl = createSparseCM12FrameControl({ baseWords: 32768,
   cellWorkgroups: 16, rowWorkgroups: 32, bodyCapacity: 0, d4Capable: true,
   rigidCapable: false, boundaryCapable: false });
@@ -66,17 +54,8 @@ const pcf = createSparseCM12ResidentPersistentPressureCacheLayout({
   hierarchyLevelCounts: [8], hierarchyEdgeLevelCounts: [32] });
 const fpa = createSparseCM12FaceProjectionAuthorityLayout({
   baseWords: pcf.bufferSizeWords, rowCapacity: 2048, cellCapacity: 1024 });
-const census = process.argv.includes("--ftc")
-  ? createSparseCM12FacePreparationTileCensusLayout({
-    baseWords: fpa.totalWords, rowCapacity: 2048,
-  }) : undefined;
-const fvr = process.argv.includes("--fvr")
-  ? createSparseCM12FpaVexReadCensusLayout({
-    baseWords: census?.totalWords ?? fpa.totalWords,
-    cellCapacity: 1024, rowCapacity: 2048, tileCapacity: 512,
-  }) : undefined;
 const batch = createSparseCM12VexActivityBatchLayout({
-  activityTailWords: scalar.totalWords, stateTailFloats: 65536,
+  activityTailWords: presentation.totalWords, stateTailFloats: 65536,
   cellCapacity: 1024 });
 const pressureAddressing = process.argv.includes("--pab")
   ? createSparseCM12PressureAddressingABLayout({
@@ -84,9 +63,9 @@ const pressureAddressing = process.argv.includes("--pab")
     brickFineResolution: 16, presentationPageResolution: 16,
     constructionMode: "qa-pressure-addressing-ab",
   }) : undefined;
-const source = createWebgpuSparseCM12ResidentWGSL(16, 16, temporal, pressure,
-  activity, membership, framePlan, presentation, frameControl.layout, scalar,
-  ptr, pcf, fpa, batch, pressureAddressing, undefined, census, fvr);
+const source = createWebgpuSparseCM12ResidentWGSL(16, 16, pressure,
+  activity, membership, framePlan, presentation, frameControl.layout,
+  ptr, pcf, fpa, batch, pressureAddressing, undefined);
 if (process.argv.includes("--emit-wgsl")) {
   console.log(source);
   process.exit(0);
@@ -98,7 +77,5 @@ try {
   if (result.status !== 0) throw new Error(result.stderr || result.stdout);
   const entries = [...source.matchAll(/@compute[^\n]*\nfn\s+([A-Za-z0-9_]+)/g)].length;
   console.log(`Sparse CM12 integrated VEX1${pressureAddressing ? "+PAB1" : ""}`
-    + `${census ? "+FTC1" : ""}`
-    + `${fvr ? "+FVR1" : ""}`
     + ` resident: Naga PASS (${entries} entry points)`);
 } finally { rmSync(directory, { recursive: true, force: true }); }

@@ -303,6 +303,19 @@ interface UIStore {
   toggleFluidCellTraceExpanded: () => void;
 }
 
+/**
+ * The plane an overlay adopts when it is switched on without one of its own.
+ *
+ * Z, because these scenes are read from the front: a dam collapses along X and
+ * falls along Y, so the constant-Z plane is the only one of the three holding
+ * both axes of the motion — an X or Y slice cuts across the flow and shows a
+ * cross-section of it. Every catalog field view already authors this same
+ * plane; this is the answer for the ones that cannot, which is a stage lens
+ * (it draws on whatever plane it is given) and the fallback a volume-only view
+ * takes on a method that cannot raymarch.
+ */
+export const DEFAULT_GRID_OVERLAY_AXIS: Exclude<GridOverlayConfig["axis"], "off"> = "z";
+
 export const useUIStore = create<UIStore>((set) => ({
   camera: defaultCamera,
   activeTool: DEFAULT_EDITOR_TOOL,

@@ -25,7 +25,7 @@ export interface SparseCM12Phase1FieldReceipt {
 export interface SparseCM12Phase1CheckpointReceipt {
   readonly step: number;
   readonly fields: SparseCM12Phase1FieldReceipt;
-  /** SRR1 is the producer-authored exact mass-result receipt. */
+  /** FSM1 is the producer-authored final-scalar packet-mask receipt. */
   readonly scalarResult: Readonly<Record<string, unknown>>;
   readonly frameControl: Readonly<Record<string, unknown>>;
   readonly scalarResultSha256: string;
@@ -303,17 +303,17 @@ export function assertSparseCM12Phase1ArmBitExact(
       `candidate step ${actual.step}: plane frame generation differs from FCA1`);
     assert.equal(expected.transport.transportTopologyGeneration,
       expected.scalarResult.topologyGeneration,
-      `baseline step ${expected.step}: packet topology generation differs from SRR1`);
+      `baseline step ${expected.step}: packet topology generation differs from FSM1`);
     assert.equal(actual.transport.transportTopologyGeneration,
       actual.scalarResult.topologyGeneration,
-      `candidate step ${actual.step}: packet topology generation differs from SRR1`);
+      `candidate step ${actual.step}: packet topology generation differs from FSM1`);
     for (const field of ["density", "gamma", "velocity", "pressure", "divergence",
       "combinedSha256"] as const) {
       assert.deepEqual(actual.fields[field], expected.fields[field],
         `step ${expected.step}: ${field} raw-bit receipt changed`);
     }
     assert.deepEqual(actual.scalarResult, expected.scalarResult,
-      `step ${expected.step}: SRR1 mass-result receipt changed`);
+      `step ${expected.step}: FSM1 final-scalar packet-mask receipt changed`);
     assert.deepEqual(actual.frameControl, expected.frameControl,
       `step ${expected.step}: FCA1 frame receipt changed`);
     assert.equal(actual.acceptedTopologySha256, expected.acceptedTopologySha256,

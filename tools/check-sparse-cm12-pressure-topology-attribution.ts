@@ -13,7 +13,6 @@ const pcm = (generation = 12, fault = 0) => ({
     totalCount: 140, candidateGeneration: generation, acceptedGeneration: generation },
 });
 const work = { acceptedCellCount: 100, acceptedRowCount: 220,
-  temporalScalarCellCount: 7, temporalScalarRowCount: 11,
   pressureCellCount: 80, pressureActiveRowCount: 140, pcm: pcm() };
 
 const adjacent = sparseCM12PressureTopologyAttribution({

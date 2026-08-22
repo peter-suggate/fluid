@@ -11,8 +11,6 @@ export interface SparseCM12PressureTopologyTerminalReceipt {
 export interface SparseCM12PressureTopologyWorkReceipt {
   readonly acceptedCellCount: number;
   readonly acceptedRowCount: number;
-  readonly temporalScalarCellCount: number;
-  readonly temporalScalarRowCount: number;
   readonly pressureCellCount: number;
   readonly pressureActiveRowCount: number;
   readonly pcm: NonNullable<GPUEulerianInfo["adaptivePressureCanonicalMembership"]>;
@@ -91,8 +89,6 @@ export function sparseCM12PressureTopologyAttribution(options: {
     currentEndFrameCommittedBrickCount: nonnegativeInteger(current.committedBrickCount),
     acceptedCellCount: nonnegativeInteger(options.work.acceptedCellCount),
     acceptedRowCount: nonnegativeInteger(options.work.acceptedRowCount),
-    temporalScalarCellCount: nonnegativeInteger(options.work.temporalScalarCellCount),
-    temporalScalarRowCount: nonnegativeInteger(options.work.temporalScalarRowCount),
     pressureCellCount: nonnegativeInteger(options.work.pressureCellCount),
     pressureActiveRowCount: nonnegativeInteger(options.work.pressureActiveRowCount),
     pcmCellDirtyLeafCount: nonnegativeInteger(options.work.pcm.cell.dirtyCount),

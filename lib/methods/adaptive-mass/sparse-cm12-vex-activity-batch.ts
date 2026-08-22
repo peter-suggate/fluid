@@ -311,7 +311,7 @@ export const SPARSE_CM12_VEX_ACTIVITY_BATCH_PRODUCER_HOOKS = Object.freeze({
 
 export interface SparseCM12BatchGridReceipt {
   readonly stage: 0 | 1 | 2 | 3 | 4 | 5;
-  readonly owner: "VEX1" | "SAW1" | "PCF1" | "FPP1";
+  readonly owner: "VEX1" | "FSM1" | "PCF1" | "FPP1";
   readonly requirement: string;
   readonly direct: "required";
   readonly closure: "required";
@@ -334,13 +334,13 @@ export const SPARSE_CM12_VEX_ACTIVITY_BATCH_GRID_RECEIPTS = Object.freeze([
     requirement: "direct roots + closure depth + scheduled/executed or skipped",
     direct: "required", closure: "required", disposition: "executed-or-skipped",
     generation: "accepted-frame", absent: "unknown-magenta" },
-  { stage: 1, owner: "SAW1", requirement: "mass direct/closure + executed/skipped",
+  { stage: 1, owner: "FSM1", requirement: "mass final-mask direct/closure",
     direct: "required", closure: "required", disposition: "executed-or-skipped",
     generation: "accepted-frame", absent: "unknown-magenta" },
-  { stage: 2, owner: "SAW1", requirement: "gamma direct/closure + executed/skipped",
+  { stage: 2, owner: "FSM1", requirement: "gamma final-mask direct/closure",
     direct: "required", closure: "required", disposition: "executed-or-skipped",
     generation: "accepted-frame", absent: "unknown-magenta" },
-  { stage: 3, owner: "SAW1", requirement: "surface direct/closure + executed/skipped",
+  { stage: 3, owner: "FSM1", requirement: "surface final-mask direct/closure",
     direct: "required", closure: "required", disposition: "executed-or-skipped",
     generation: "accepted-frame", absent: "unknown-magenta" },
   { stage: 4, owner: "PCF1", requirement: "coefficient direct/closure + executed/skipped",

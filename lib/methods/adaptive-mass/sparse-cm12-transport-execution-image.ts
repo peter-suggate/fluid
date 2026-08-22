@@ -56,9 +56,6 @@ export interface SparseCM12TransportExecutionImageLayout {
   readonly spatialTilesPerLogicalBrickAxis: number;
   readonly spatialTilesPerLogicalBrick: number;
   readonly spatialTileCapacity: number;
-  /** Compatibility aliases for the stable spatial-dirty-tile lattice. */
-  readonly tilesPerLogicalBrickAxis: number;
-  readonly tilesPerLogicalBrick: number;
   readonly slotBaseWords: readonly [number, number];
   readonly slotStrideWords: number;
   readonly slotLeafBaseOffsets: readonly [number, number];
@@ -164,8 +161,6 @@ export function createSparseCM12TransportExecutionImageLayout(options: {
     packetEdge: SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_EDGE,
     packetAxisCapacity: SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_AXIS_CAPACITY,
     spatialTilesPerLogicalBrickAxis, spatialTilesPerLogicalBrick, spatialTileCapacity,
-    tilesPerLogicalBrickAxis: spatialTilesPerLogicalBrickAxis,
-    tilesPerLogicalBrick: spatialTilesPerLogicalBrick,
     slotBaseWords: [slot0, slot1] as const, slotStrideWords,
     slotLeafBaseOffsets: [leaf0, leaf1] as const,
     slotPacketBaseOffsets: [packet0, packet1] as const,

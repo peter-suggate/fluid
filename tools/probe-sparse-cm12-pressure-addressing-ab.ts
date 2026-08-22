@@ -119,7 +119,7 @@ interface PartialFailureFrame {
   readonly phase: "construction" | "frame";
   readonly step: number;
   readonly fca: unknown;
-  readonly srr: unknown;
+  readonly fsm: unknown;
   readonly pcm: unknown;
   readonly pressureAttribution: unknown;
   readonly rawPressureAuthority: unknown;
@@ -190,7 +190,7 @@ interface ArmFrame {
   readonly verification_ms: number;
   readonly pressureRhs_ms: number;
   readonly pressureSolve_ms: number;
-  readonly srr: Readonly<Record<string, number>>;
+  readonly fsm: Readonly<Record<string, number>>;
   readonly pcm: Readonly<Record<string, number | string | boolean>>;
   readonly pressureReceipts: { readonly complete: boolean;
     readonly issues: readonly string[] };
@@ -308,12 +308,12 @@ async function runArm(device: GPUDevice, mode: SparseCM12PressureAddressingABMod
     // terminal. This is not a physics warmup: no advance is encoded. Without
     // it, a first read after step 1 is deliberately marked unavailable because
     // the tracker cannot infer the prior pressure input generation.
-    const [constructionStats, constructionFCA, constructionSRR, constructionPCM] =
+    const [constructionStats, constructionFCA, constructionFSM, constructionPCM] =
       await Promise.all([solver.readStats(), solver.readFrameControlQA(),
-        solver.readScalarAuthorityQA(), solver.readPressureCanonicalMembershipQA()]);
+        solver.readFinalScalarMaskHeaderQA(), solver.readPressureCanonicalMembershipQA()]);
     const constructionAttribution = constructionStats.adaptivePressureTopologyAttribution;
     rememberFailureFrame({ arm: mode, phase: "construction", step: 0,
-      fca: constructionFCA, srr: constructionSRR,
+      fca: constructionFCA, fsm: constructionFSM,
       pcm: { cell: constructionPCM.cell, row: constructionPCM.row },
       pressureAttribution: constructionAttribution ?? null,
       rawPressureAuthority: constructionAttribution?.authorities ?? null,
@@ -354,15 +354,15 @@ async function runArm(device: GPUDevice, mode: SparseCM12PressureAddressingABMod
         ...(stats.physicsTrace ? { observedSampleId: stats.physicsTrace.sampleId,
           observedSource: stats.physicsTrace.measurementSource,
           observedContext: stats.physicsTrace.context } : {}) };
-      const [qa, fcaQA, srrQA, pcmQA] = await Promise.all([
+      const [qa, fcaQA, fsmQA, pcmQA] = await Promise.all([
         solver.readPressureAddressingABQA(),
-        solver.readFrameControlQA(), solver.readScalarAuthorityQA(),
+        solver.readFrameControlQA(), solver.readFinalScalarMaskHeaderQA(),
         solver.readPressureCanonicalMembershipQA(),
       ]);
-      const srr = Object.freeze({ phase: srrQA.phase, fault: srrQA.fault,
-        acceptedGeneration: srrQA.acceptedGeneration,
-        candidateGeneration: srrQA.candidateGeneration,
-        scheduledWork: srrQA.scheduledWork, executedWork: srrQA.executedWork });
+      const fsm = Object.freeze({ phase: fsmQA.phase, fault: fsmQA.fault,
+        generation: fsmQA.generation, topologyGeneration: fsmQA.topologyGeneration,
+        changedCellCount: fsmQA.changedCellCount,
+        nonexactCellCount: fsmQA.nonexactCellCount });
       const pcm = Object.freeze({
         cellPhase: pcmQA.cell.phase, cellFault: pcmQA.cell.fault,
         cellAcceptedGeneration: pcmQA.cell.acceptedGeneration,
@@ -380,7 +380,7 @@ async function runArm(device: GPUDevice, mode: SparseCM12PressureAddressingABMod
         pressureAttribution?.authorities,
         pressureAttribution?.inputTopologyGeneration);
       rememberFailureFrame({ arm: mode, phase: "frame", step,
-        fca: fcaQA, srr: srrQA, pcm: { cell: pcmQA.cell, row: pcmQA.row },
+        fca: fcaQA, fsm: fsmQA, pcm: { cell: pcmQA.cell, row: pcmQA.row },
         pressureAttribution: pressureAttribution ?? null,
         rawPressureAuthority: pressureAttribution?.authorities ?? null,
         pressureAddressing: pressureAttribution?.authorities?.pressureAddressing ?? null,
@@ -447,7 +447,7 @@ async function runArm(device: GPUDevice, mode: SparseCM12PressureAddressingABMod
       samples.push({ step, fields, receipt: qa.receipt,
         materialization_ms: qa.materialization_ms ?? 0,
         verification_ms: qa.verification_ms ?? 0,
-        pressureRhs_ms, pressureSolve_ms, srr, pcm, pressureReceipts,
+        pressureRhs_ms, pressureSolve_ms, fsm, pcm, pressureReceipts,
         hardwareTracePoll: Object.freeze({ ...hardwareTracePoll }),
         ...(symmetry ? { symmetry } : {}) });
     }
@@ -506,8 +506,8 @@ try {
       `PAB1 physical fields differ at measured frame ${frame + 1}`);
   }
   for (let frame = 0; frame < frames; frame += 1) {
-    assert.deepEqual(list.frames[frame]!.srr, rank.frames[frame]!.srr,
-      `PAB1 SRR common-mode state differs at measured frame ${frame + 1}`);
+    assert.deepEqual(list.frames[frame]!.fsm, rank.frames[frame]!.fsm,
+      `PAB1 FSM common-mode state differs at measured frame ${frame + 1}`);
     assert.deepEqual(list.frames[frame]!.pcm, rank.frames[frame]!.pcm,
       `PAB1 PCM common-mode state differs at measured frame ${frame + 1}`);
     assert.deepEqual(list.frames[frame]!.pressureReceipts,
@@ -522,8 +522,8 @@ try {
   const summarize = (samples: readonly number[]) => ({
     samples_ms: samples, median_ms: median(samples), p95_ms: p95(samples),
   });
-  const allSRRFaultZero = [...rank.frames, ...list.frames]
-    .every((frame) => frame.srr.fault === 0);
+  const allFSMFaultZero = [...rank.frames, ...list.frames]
+    .every((frame) => frame.fsm.fault === 0);
   const symmetricCorrectnessOnly = sceneName === "symmetric-expansion";
   const artifact = {
     passed: true, scene: sceneName,
@@ -538,22 +538,22 @@ try {
     // analysis may promote these observations into a performance claim.
     performanceClaim: false,
     performanceValidity: symmetricCorrectnessOnly ? "correctness-only-no-performance-claim"
-      : allSRRFaultZero ? "sequential-order-confounded" : "common-mode-qa-only",
+      : allFSMFaultZero ? "sequential-order-confounded" : "common-mode-qa-only",
     performanceValidityReason: symmetricCorrectnessOnly
       ? "symmetric 5/20/60 ladder artifacts certify correctness and authority only"
-      : allSRRFaultZero
+      : allFSMFaultZero
         ? `${armOrder} is one sequential arm order; combine it with the complementary order before claiming a speedup`
-        : "SRR fault persisted identically in both arms; address delta is QA-only",
+        : "FSM fault persisted identically in both arms; address delta is QA-only",
     commonModeReceipts: {
       physicalHashesIdenticalEveryMeasuredFrame: requireBitExact,
       symmetryReceiptsIdenticalEveryMeasuredFrame: sceneName === "symmetric-expansion",
-      srrIdenticalEveryMeasuredFrame: true,
+      fsmIdenticalEveryMeasuredFrame: true,
       pcmIdenticalEveryMeasuredFrame: true,
       pressureReceiptsCompleteEveryMeasuredFrame: true,
-      rank: rank.frames.map(({ step, srr, pcm, pressureReceipts }) =>
-        ({ step, srr, pcm, pressureReceipts })),
-      materializedList: list.frames.map(({ step, srr, pcm, pressureReceipts }) =>
-        ({ step, srr, pcm, pressureReceipts })),
+      rank: rank.frames.map(({ step, fsm, pcm, pressureReceipts }) =>
+        ({ step, fsm, pcm, pressureReceipts })),
+      materializedList: list.frames.map(({ step, fsm, pcm, pressureReceipts }) =>
+        ({ step, fsm, pcm, pressureReceipts })),
     },
     physicalReceipts: {
       rank: rank.frames.map(({ step, fields, symmetry, hardwareTracePoll }) =>

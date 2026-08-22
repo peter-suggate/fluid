@@ -107,7 +107,6 @@ test("validation authorizes only; a distinct singleton flips after every stable 
   const validation = frame.indexOf('dispatch("validateAndAuthorizeShadowTopology", 1)');
   const beginEffects = frame.indexOf(
     'dispatch("beginSparseCM12AuthorizedCandidateEffects", 1)');
-  const scaEffects = frame.indexOf("this.pipelines.publishSparseCM12TopologySCAEffects!");
   const ptrEffects = frame.indexOf("this.pipelines.publishSparseCM12TopologyPTREffects!");
   const topologyVex = frame.indexOf(
     'dispatchTopologyDelta("publishSparseCM12CandidateTopologyVexEffects")');
@@ -121,8 +120,8 @@ test("validation authorizes only; a distinct singleton flips after every stable 
     'dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist")');
   const faces = frame.indexOf('dispatchShadow("publishCandidateShadowFaces", "row")');
   const finalizeDispatch = frame.indexOf('dispatch("finalizeAuthorizedShadowTopology", 1)');
-  assert.ok(validation >= 0 && beginEffects > validation && scaEffects > beginEffects
-    && ptrEffects > scaEffects && topologyVex > ptrEffects && injectionVex > topologyVex
+  assert.ok(validation >= 0 && beginEffects > validation && ptrEffects > beginEffects
+    && topologyVex > ptrEffects && injectionVex > topologyVex
     && sealEffects > injectionVex && finishEffects > sealEffects && fields > finishEffects
     && faces > fields && finalizeDispatch > faces,
   "candidate authorization must precede every stable effect/field publication and the sole flip must follow them");

@@ -61,11 +61,6 @@ test("accepted conservative passes consume the staged packet prologue", () => {
     "the hot prologue must not reload sealed packet authority per lane");
   assert.doesNotMatch(stage, /ownerCellAt|cellOpenVolume/);
 
-  const executionBegin = source.indexOf("fn sirMassExecutionCell");
-  const executionEnd = source.indexOf("var<workgroup>sirTransportPacket", executionBegin);
-  const execution = source.slice(executionBegin, executionEnd);
-  assert.match(execution, /return cm12TransportStagedExecutionCell\(lane\)/);
-
   const gatherBegin = source.indexOf("fn gatherConservativeDensity");
   const gatherEnd = source.indexOf("fn compareSparseCM12MassResult", gatherBegin);
   const gather = source.slice(gatherBegin, gatherEnd);

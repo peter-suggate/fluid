@@ -1,45 +1,66 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import type { AnyStageLens } from "../lib/core/stage-lens";
 import {
   ADAPTIVE_MASS_ADVANCE_PHASE,
   ADAPTIVE_MASS_FLUID_PIPELINE,
   ADAPTIVE_MASS_GPU_WORK_CHUNKS,
   ADAPTIVE_MASS_RESIDENT_STAGE_PHASE,
+  adaptiveMassPressureTopologyChip,
 } from "../lib/methods/adaptive-mass/adaptive-mass-frame-pipeline";
 import {
+  SPARSE_CM12_LENSES,
+  SPARSE_CM12_STAGE_LENSES,
+} from "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
+import { SPARSE_CM12_STAGES } from "../lib/methods/adaptive-mass/sparse-cm12-stages";
+import {
+  SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES,
   SPARSE_CM12_RESIDENT_STAGES,
-  SPARSE_CM12_RESIDENT_WORK_CHUNKS,
 } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 /**
  * The SIM panel puts a figure on a stage only when that stage's declared seam
- * label is the label the encoder actually emits. Nothing at runtime enforces
- * that identity — a renamed phase or an unstaged dispatch degrades silently to
- * a node reading "—" — so it is pinned here.
+ * label is the label the encoder actually emits. The stage registry makes a
+ * missing or renamed stage a type error; what the types cannot see — the
+ * order the encoder closes its seams, a dispatch that escapes the partition,
+ * two seams sharing a label — is pinned here against the encoder's source.
  */
 
+const residentSource = readFileSync(new URL(
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+  import.meta.url,
+), "utf8");
+
 const residentStageSource = (): string => {
-  const source = readFileSync(new URL(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
-    import.meta.url,
-  ), "utf8");
-  const begin = source.indexOf("  encode(\n    encoder: GPUCommandEncoder,");
-  const end = source.indexOf(
-    "  /** Publish generation zero without executing a physics step",
-    begin,
-  );
+  const begin = residentSource.indexOf("  encode(\n    encoder: GPUCommandEncoder,");
+  const end = residentSource.indexOf("    this.stageLenses?.endFrame(encoder);", begin);
   assert.ok(begin >= 0 && end > begin, "the resident advance must be inspectable");
-  return source.slice(begin, end);
+  return residentSource.slice(begin, end);
+};
+
+/** Each stage callback's body, keyed by stage id, in encode order. */
+const residentStageBodies = (): Map<string, string> => {
+  const body = residentStageSource();
+  const heads = [...body.matchAll(/\n {4}stage\("([a-z0-9-]+)"/g)];
+  const bodies = new Map<string, string>();
+  heads.forEach((head, index) => {
+    const start = head.index ?? 0;
+    const stop = index + 1 < heads.length ? heads[index + 1].index ?? body.length : body.length;
+    bodies.set(head[1], body.slice(start, stop));
+  });
+  return bodies;
 };
 
 test("the resident encoder closes every declared stage exactly once, in order", () => {
-  const body = residentStageSource();
-  const closed = [...body.matchAll(/\n {4}stage\("([a-z0-9-]+)"/g)]
-    .map((match) => match[1]);
-  assert.deepEqual(closed, [...SPARSE_CM12_RESIDENT_STAGES],
+  assert.deepEqual([...residentStageBodies().keys()], [...SPARSE_CM12_RESIDENT_STAGES],
     "encode order and the stage ABI must be the same list");
+});
+
+test("the stage registry lists the stages in encode order", () => {
+  // `satisfies` pins the key set; insertion order is what the diagram reads down.
+  assert.deepEqual(Object.keys(SPARSE_CM12_STAGES), [...SPARSE_CM12_RESIDENT_STAGES]);
 });
 
 test("no dispatch escapes the stage partition", () => {
@@ -48,11 +69,28 @@ test("no dispatch escapes the stage partition", () => {
     "a dispatch outside a stage callback would be timed under its neighbour");
 });
 
-test("every stage the encoder emits has a phase of its own", () => {
-  const labels = SPARSE_CM12_RESIDENT_STAGES
-    .map((stage) => ADAPTIVE_MASS_RESIDENT_STAGE_PHASE[stage].label);
+test("each stage closes exactly the sub-seams its ABI declares, in order", () => {
+  const bodies = residentStageBodies();
+  for (const stage of SPARSE_CM12_RESIDENT_STAGES) {
+    const closed = [...(bodies.get(stage) ?? "").matchAll(/closeSubstage\("([a-z0-9-]+)"\)/g)]
+      .map((match) => match[1]);
+    assert.deepEqual(closed, [...SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES[stage]],
+      `${stage} closes a different sub-seam list than it declares`);
+  }
+});
+
+test("every seam the encoder emits has a label of its own", () => {
+  const labels = ADAPTIVE_MASS_GPU_WORK_CHUNKS.map((chunk) => chunk.phase.label);
   assert.equal(new Set(labels).size, labels.length,
-    "two stages sharing a label would sum into one unattributable figure");
+    "two seams sharing a label would sum into one unattributable figure");
+  for (const stage of SPARSE_CM12_RESIDENT_STAGES) {
+    assert.equal(ADAPTIVE_MASS_RESIDENT_STAGE_PHASE[stage], SPARSE_CM12_STAGES[stage].phase);
+  }
+});
+
+test("the SIM diagram has one node per resident stage, in encode order", () => {
+  assert.deepEqual(ADAPTIVE_MASS_FLUID_PIPELINE.stages.map((stage) => stage.id),
+    [...SPARSE_CM12_RESIDENT_STAGES]);
 });
 
 test("the SIM diagram names every advance seam, and only those", () => {
@@ -62,36 +100,29 @@ test("the SIM diagram names every advance seam, and only those", () => {
   assert.deepEqual([...named].sort(), [...emitted].sort());
 });
 
-test("resident work chunks are closed exactly once", () => {
-  const body = residentStageSource();
-  const closed = [...body.matchAll(/closeWorkChunk\("([a-z0-9-]+)"\)/g)]
-    .map((match) => match[1]);
-  assert.deepEqual(closed, [...SPARSE_CM12_RESIDENT_WORK_CHUNKS]);
-});
-
-test("every timestamp phase has one concrete owner", () => {
-  const labels = ADAPTIVE_MASS_GPU_WORK_CHUNKS.map((chunk) => chunk.phase.label);
-  assert.equal(new Set(labels).size, labels.length);
+test("every timestamp phase is owned by the stage whose seam emits it", () => {
   for (const chunk of ADAPTIVE_MASS_GPU_WORK_CHUNKS) {
+    assert.equal(chunk.rollupStage, chunk.residentStage);
     const stage = ADAPTIVE_MASS_FLUID_PIPELINE.stages.find(
       (candidate) => candidate.id === chunk.rollupStage);
-    assert.ok(stage, `${chunk.id} names missing rollup ${chunk.rollupStage}`);
+    assert.ok(stage, `${chunk.id} names missing stage ${chunk.rollupStage}`);
     assert.ok(stage.phaseLabels.includes(chunk.phase.label),
-      `${chunk.id} is absent from its ${chunk.rollupStage} rollup`);
+      `${chunk.id} is absent from its ${chunk.rollupStage} node`);
+  }
+  for (const stage of SPARSE_CM12_RESIDENT_STAGES) {
+    const own = ADAPTIVE_MASS_GPU_WORK_CHUNKS.filter((chunk) => chunk.residentStage === stage);
+    assert.equal(own.filter((chunk) => chunk.kind === "stage").length, 1);
+    assert.equal(own.filter((chunk) => chunk.kind === "substage").length,
+      SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES[stage].length);
+    assert.equal(own.at(-1)?.kind, "stage", `${stage}'s own seam closes last`);
   }
 });
 
-test("a node without a seam of its own says whose passes carry it", () => {
-  const byId = new Map(ADAPTIVE_MASS_FLUID_PIPELINE.stages.map((stage) => [stage.id, stage]));
+test("every diagram node owns a seam; none borrows one", () => {
   for (const stage of ADAPTIVE_MASS_FLUID_PIPELINE.stages) {
-    if (stage.phaseLabels.length > 0) {
-      assert.equal(stage.costInsideStage, undefined,
-        `${stage.id} owns a seam and must not also borrow one`);
-      continue;
-    }
-    assert.ok(stage.costInsideStage, `${stage.id} would read as unmeasured forever`);
-    assert.ok(byId.get(stage.costInsideStage)?.phaseLabels.length,
-      `${stage.id} defers to a host that has no seam either`);
+    assert.ok(stage.phaseLabels.length > 0, `${stage.id} would read as unmeasured forever`);
+    assert.equal(stage.costInsideStage, undefined,
+      `${stage.id} owns a seam and must not also borrow one`);
   }
 });
 
@@ -104,25 +135,28 @@ test("every diagram node sits in a declared band", () => {
   for (const band of bands) assert.ok(populated.has(band), `band ${band} draws nothing`);
 });
 
-test("pressure topology presents its live row census as labeled lines", () => {
+test("a stage's lens is the lens its diagram node carries", () => {
+  // The overlay opens `stage-lens/<stage>` from the node; a lens declared
+  // under one id and drawn under another is a ◎ that opens nothing.
+  for (const stage of ADAPTIVE_MASS_FLUID_PIPELINE.stages) {
+    const declared: AnyStageLens | null =
+      SPARSE_CM12_STAGE_LENSES[stage.id as keyof typeof SPARSE_CM12_STAGE_LENSES];
+    assert.ok(stage.lens === (declared ?? undefined),
+      `${stage.id} draws a lens it does not declare`);
+    if (stage.lens) assert.equal(stage.lens.stage, stage.id);
+  }
+  assert.deepEqual(SPARSE_CM12_LENSES,
+    ADAPTIVE_MASS_FLUID_PIPELINE.stages.flatMap((stage) => stage.lens ? [stage.lens] : []));
+});
+
+test("pressure topology says when its attribution receipt is missing", () => {
   const stage = ADAPTIVE_MASS_FLUID_PIPELINE.stages.find(
     (candidate) => candidate.id === "pressure-topology",
   );
   assert.ok(stage);
-  const context = {
-    info: {
-      adaptiveAcceptedRowCount: 12_480,
-      adaptivePressureActiveRowCount: 5_940,
-      adaptiveAcceptedSameLevelCoarseRowCount: 7_216,
-      adaptiveAcceptedMixedSeamRowCount: 384,
-    },
-  } as Parameters<typeof stage.chip>[0];
-  assert.equal(stage.chip(context), [
-    "Accepted rows: 12,480",
-    "Active in solve: 5,940",
-    "Same-level coarse: 7,216",
-    "Mixed seams: 384",
-  ].join("\n"));
+  const context = { info: null } as Parameters<typeof stage.chip>[0];
+  assert.equal(stage.chip(context), adaptiveMassPressureTopologyChip(null));
+  assert.match(stage.chip(context), /awaiting paired diagnostics receipt/);
 });
 
 test("the CPU-lane brackets stay outside the diagram", () => {
