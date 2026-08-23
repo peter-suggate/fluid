@@ -92,7 +92,8 @@ export function sparseCM12PressureTopologyAttribution(options: {
     pressureCellCount: nonnegativeInteger(options.work.pressureCellCount),
     pressureActiveRowCount: nonnegativeInteger(options.work.pressureActiveRowCount),
     pcmCellDirtyLeafCount: nonnegativeInteger(options.work.pcm.cell.dirtyCount),
-    pcmRowDirtyLeafCount: nonnegativeInteger(options.work.pcm.row.dirtyCount),
+    pcmRowPublishedWordCount:
+      nonnegativeInteger(options.work.pcm.row.directWriteCount ?? 0),
     pcmCellAcceptedGeneration: nonnegativeInteger(options.work.pcm.cell.acceptedGeneration),
     pcmRowAcceptedGeneration: nonnegativeInteger(options.work.pcm.row.acceptedGeneration),
     pcmMatched,

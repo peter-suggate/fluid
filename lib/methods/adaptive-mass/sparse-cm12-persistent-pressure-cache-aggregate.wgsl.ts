@@ -23,7 +23,7 @@ function constants(name: SparseCM12PressureCacheAggregateFamilyName,
   const p = `PCFA_${label(name).toUpperCase()}`;
   return `const ${p}_HEADER:u32=${family.headerBaseWords}u;
 const ${p}_CAPACITY:u32=${family.capacity}u;const ${p}_CANDIDATE:u32=${family.candidateGenerationBaseWords}u;
-const ${p}_BITS:u32=${family.bitsBaseWords}u;const ${p}_STAMP:u32=${family.dirtyLeafStampBaseWords}u;
+const ${p}_BITS:u32=${family.bitsBaseWords}u;
 const ${p}_LIST:u32=${family.dirtyLeafListBaseWords}u;const ${p}_ACTIVE_LEAVES:u32=${family.activeLeafListBaseWords}u;
 const ${p}_LEAF_COUNT:u32=${family.leafCount}u;
 ${family.treeLevelBaseWords.map((base, level) =>
@@ -35,8 +35,8 @@ function rankSelect(name: SparseCM12PressureCacheAggregateFamilyName,
   const n = label(name), p = `PCFA_${n.toUpperCase()}`;
   const descend = Array.from({ length: family.treeLevelCounts.length - 1 }, (_, index) => {
     const level = family.treeLevelCounts.length - 2 - index;
-    return `{let begin=node*PCFA_BRANCH;var selected=PCF_INVALID;
-    for(var child=0u;child<PCFA_BRANCH;child+=1u){let candidate=begin+child;
+    return `{let begin=node*${SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_BRANCH}u;var selected=PCF_INVALID;
+    for(var child=0u;child<${SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_BRANCH}u;child+=1u){let candidate=begin+child;
       if(candidate>=${family.treeLevelCounts[level]}u){break;}
       let count=atomicLoad(&${arena}[${p}_TREE_${level}+candidate]);
       if(selected==PCF_INVALID&&remaining<count){selected=candidate;}
@@ -62,7 +62,7 @@ function repairWorkset(name: SparseCM12PressureCacheAggregateFamilyName,
   const n = label(name), p = `PCFA_${n.toUpperCase()}`;
   const familyIndex = FAMILY_NAMES.indexOf(name);
   const updates = family.treeLevelBaseWords.slice(1).map((base, index) =>
-    `node/=PCFA_BRANCH;let prior${index}=atomicAdd(&${arena}[${base}u+node],bitcast<u32>(delta));
+    `node/=${SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_BRANCH}u;let prior${index}=atomicAdd(&${arena}[${base}u+node],bitcast<u32>(delta));
     if((delta<0&&prior${index}<u32(-delta))||(delta>0&&prior${index}>0xffffffffu-u32(delta))){
       pcfaFault(${familyIndex}u,PCF_FAULT_REPAIR,leaf*PCFA_LEAF_BITS);}`)
     .join("");
@@ -131,8 +131,6 @@ export function createSparseCM12PersistentPressureCacheAggregateWGSL(
 const PCFA_MAGIC:u32=0x${SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_MAGIC.toString(16)}u;
 const PCFA_BASE:u32=${a}u;const PCFA_LEAF_BITS:u32=${SPARSE_CM12_PRESSURE_CACHE_LEAF_BITS}u;
 const PCFA_LEAF_WORDS:u32=${SPARSE_CM12_PRESSURE_CACHE_LEAF_BITS / 32}u;
-const PCFA_BRANCH:u32=${SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_BRANCH}u;
-const PCFA_QA:bool=${layout.qaFullOracle ? "true" : "false"};
 const PCFA_PHASE_AGGREGATE_REPAIR:u32=${SPARSE_CM12_PRESSURE_CACHE_PHASE.aggregateRepairing}u;
 const PCFA_PHASE_AGGREGATE_EXECUTE:u32=${SPARSE_CM12_PRESSURE_CACHE_PHASE.aggregateExecuting}u;
 const PCFA_PHASE_HIERARCHY_REPAIR:u32=${SPARSE_CM12_PRESSURE_CACHE_PHASE.hierarchyRepairing}u;
@@ -168,8 +166,7 @@ fn pcfaAggregateHeaderValid()->bool{return atomicLoad(&${arena}[PCFA_BASE+${ah.m
   &&atomicLoad(&${arena}[PCFA_BASE+${ah.brickHeaderBase}u])==PCFA_BRICK_HEADER
   &&atomicLoad(&${arena}[PCFA_BASE+${ah.aggregateEdgeHeaderBase}u])==PCFA_AGGREGATEEDGE_HEADER
   &&atomicLoad(&${arena}[PCFA_BASE+${ah.hierarchyNodeHeaderBase}u])==PCFA_HIERARCHYNODE_HEADER
-  &&atomicLoad(&${arena}[PCFA_BASE+${ah.hierarchyEdgeHeaderBase}u])==PCFA_HIERARCHYEDGE_HEADER
-  &&atomicLoad(&${arena}[PCFA_BASE+${ah.qaFullOracle}u])==select(0u,1u,PCFA_QA);}
+  &&atomicLoad(&${arena}[PCFA_BASE+${ah.hierarchyEdgeHeaderBase}u])==PCFA_HIERARCHYEDGE_HEADER;}
 fn pcfaZeroIndirects(){for(var family=0u;family<4u;family+=1u){let header=pcfaFamilyHeader(family);
   atomicStore(&${arena}[header+PCFA_F_REPAIR_X],0u);atomicStore(&${arena}[header+PCFA_F_WORK_X],0u);
   atomicStore(&${arena}[header+PCFA_F_SEED_X],0u);}}
@@ -196,12 +193,6 @@ fn pcfaBegin()->bool{if(!pcfaAggregateHeaderValid()){pcfFault(PCF_FAULT_HEADER,P
     atomicStore(&${arena}[header+PCFA_F_CAUSE],0u);atomicStore(&${arena}[header+PCFA_F_REPAIR_X],0u);
     atomicStore(&${arena}[header+PCFA_F_WORK_X],0u);
     atomicStore(&${arena}[header+PCFA_F_SEED_X],(previous+63u)/64u);}return true;}
-fn pcfCaptureConsumerGenerations(){
-  atomicStore(&${arena}[PCFA_BASE+${ah.topologyGeneration}u],pcfTopologyGeneration());
-  atomicStore(&${arena}[PCFA_BASE+${ah.pcmGeneration}u],pcfPCMGeneration());
-  atomicStore(&${arena}[PCFA_BASE+${ah.aggregateTopologyGeneration}u],
-    pcfAggregateTopologyGeneration());
-}
 fn pcfaQueueLeaf(family:u32,leaf:u32)->bool{if(leaf>=pcfaFamilyLeafCount(family)){
   pcfaFault(family,PCF_FAULT_CAPACITY,leaf*PCFA_LEAF_BITS);return false;}
   let generation=atomicLoad(&${arena}[PCF_BASE+PCF_H_CANDIDATE_GEN]);
@@ -238,33 +229,35 @@ ${FAMILY_NAMES.map((name) => rankSelect(name, layout.aggregateFamilies[name], ar
 fn pcfaFinalizeFamily(family:u32,root:u32,edgeFamily:bool){let header=pcfaFamilyHeader(family);
   if(atomicLoad(&${arena}[header+PCFA_F_REPAIRED_LEAVES])
       !=atomicLoad(&${arena}[header+PCFA_F_DIRTY_LEAVES])){pcfaFault(family,PCF_FAULT_REPAIR,family);return;}
-  let count=select(atomicLoad(&${arena}[root]),pcfaFamilyCapacity(family),PCFA_QA);
+  let count=atomicLoad(&${arena}[root]);
   atomicStore(&${arena}[header+PCFA_F_WORK_COUNT],count);
   atomicStore(&${arena}[header+PCFA_F_WORK_X],select(count,(count+63u)/64u,edgeFamily));}
-fn pcfAggregateFinalizeFineRepair(){if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCF_PHASE_REPAIRING
+fn pcfaSealFinePublication(){if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCF_PHASE_COLLECTING
     ||atomicLoad(&${arena}[PCF_BASE+PCF_H_FAULT])!=0u){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
-  if(atomicLoad(&${arena}[PCF_BASE+PCF_H_REPAIRED_LEAVES])
-    !=atomicLoad(&${arena}[PCF_BASE+PCF_H_DIRTY_LEAVES])){pcfFault(PCF_FAULT_REPAIR,PCF_INVALID);return;}
+  atomicStore(&${arena}[PCFA_BASE+${ah.topologyGeneration}u],pcfTopologyGeneration());
+  atomicStore(&${arena}[PCFA_BASE+${ah.pcmGeneration}u],pcfPCMGeneration());
+  atomicStore(&${arena}[PCFA_BASE+${ah.aggregateTopologyGeneration}u],
+    pcfAggregateTopologyGeneration());
   atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCFA_PHASE_AGGREGATE_REPAIR);
   atomicStore(&${arena}[PCFA_BRICK_HEADER+PCFA_F_REPAIR_X],atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_DIRTY_LEAVES]));
   atomicStore(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_REPAIR_X],atomicLoad(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_DIRTY_LEAVES]));}
-@compute @workgroup_size(1) fn finalizePersistentPressureFineCache(){pcfAggregateFinalizeFineRepair();}
+@compute @workgroup_size(1) fn sealPersistentPressureAggregateFrontier(){pcfaSealFinePublication();}
 @compute @workgroup_size(1) fn finalizePersistentPressureAggregatePlan(){
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCFA_PHASE_AGGREGATE_REPAIR){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
   pcfaFinalizeFamily(0u,${roots.brick}u,false);pcfaFinalizeFamily(1u,${roots.aggregateEdge}u,true);
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_FAULT])==0u){atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCFA_PHASE_AGGREGATE_EXECUTE);}}
 @compute @workgroup_size(64) fn repairPersistentPressureAggregateEdges(@builtin(global_invocation_id)gid:vec3u){
-  let edge=select(pcfAggregateEdgeRankSelect(gid.x),gid.x,PCFA_QA);
+  let edge=pcfAggregateEdgeRankSelect(gid.x);
   if(edge>=${layout.aggregateEdgeCount}u){return;}let range=pcfAggregateEdgeContributionRange(edge);var weight=0.0;
   for(var at=0u;at<range.y;at+=1u){weight+=pcfEdgeWeight(pcfAggregateEdgeContribution(range.x+at));}
   let address=${layout.brickAggregateEdgeBaseWords}u+edge;
   let changed=atomicExchange(&${arena}[address],bitcast<u32>(weight))!=bitcast<u32>(weight);
-  if(changed||PCFA_QA){pcfaMarkAggregateEdgeAncestors(edge);}atomicAdd(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_EXECUTED],1u);}
+  if(changed){pcfaMarkAggregateEdgeAncestors(edge);}atomicAdd(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_EXECUTED],1u);}
 @compute @workgroup_size(64) fn repairPersistentPressureBrickDiagonals(@builtin(local_invocation_index)lane:u32,
- @builtin(workgroup_id)wid:vec3u){let brick=select(pcfBrickRankSelect(wid.x),wid.x,PCFA_QA);
+ @builtin(workgroup_id)wid:vec3u){let brick=pcfBrickRankSelect(wid.x);
   var diagonal=0.0;var wet=0u;if(brick<${layout.brickCount}u){let range=pcfBrickCellRange(brick);
     for(var local=lane;local<range.y;local+=64u){let cell=range.x+local;if(!pcmCellContains(cell)){continue;}
-      wet=1u;diagonal+=pcfDiagonal(cell);let edges=cm12HotDirectedEdgeRange(cell);
+      wet=1u;diagonal+=pcfFineDiagonal(cell);let edges=cm12HotDirectedEdgeRange(cell);
       for(var at=0u;at<edges.y;at+=1u){let edgeId=edges.x+at;let edge=cm12HotDirectedEdge(edgeId);
         if(pcfCellBrick(edge.x)==brick){diagonal+=pcfEdgeWeight(edgeId);}}}}
   pcfaReduce[lane]=diagonal;pcfaWet[lane]=wet;workgroupBarrier();var width=32u;loop{if(lane<width){pcfaReduce[lane]+=pcfaReduce[lane+width];pcfaWet[lane]|=pcfaWet[lane+width];}
@@ -275,14 +268,15 @@ fn pcfAggregateFinalizeFineRepair(){if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE
     let range=pcfBrickCellRange(brick);var level=0u;var cells=range.y;
     while(cells>1u){cells/=8u;level+=1u;}let packed=select(0u,
       ((range.x+1u)<<3u)|(level+1u),pcfaWet[0]!=0u);
-    atomicStore(&${arena}[${layout.brickAggregateRangeBaseWords}u+brick],packed);
-    if(changed||PCFA_QA){pcfaMarkBrickAncestors(brick);}atomicAdd(&${arena}[PCFA_BRICK_HEADER+PCFA_F_EXECUTED],1u);}}
+    let oldPacked=atomicExchange(&${arena}[${layout.brickAggregateRangeBaseWords}u+brick],packed);
+    if(changed||oldPacked!=packed){pcfaMarkBrickAncestors(brick);}
+    atomicAdd(&${arena}[PCFA_BRICK_HEADER+PCFA_F_EXECUTED],1u);}}
 var<workgroup>pcfaReduce:array<f32,64>;
 var<workgroup>pcfaWet:array<u32,64>;
 @compute @workgroup_size(1) fn finalizePersistentPressureAggregateExecution(){
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCFA_PHASE_AGGREGATE_EXECUTE){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
-  if((!PCFA_QA&&atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_WORK_COUNT]))
-    ||(!PCFA_QA&&atomicLoad(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_WORK_COUNT]))){pcfFault(PCF_FAULT_REPAIR,PCF_INVALID);return;}
+  if(atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_WORK_COUNT])
+    ||atomicLoad(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_WORK_COUNT])){pcfFault(PCF_FAULT_REPAIR,PCF_INVALID);return;}
   atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCFA_PHASE_HIERARCHY_REPAIR);
   atomicStore(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_REPAIR_X],atomicLoad(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_DIRTY_LEAVES]));
   atomicStore(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_REPAIR_X],atomicLoad(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_DIRTY_LEAVES]));}
@@ -291,14 +285,14 @@ var<workgroup>pcfaWet:array<u32,64>;
   pcfaFinalizeFamily(2u,${roots.hierarchyNode}u,false);pcfaFinalizeFamily(3u,${roots.hierarchyEdge}u,true);
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_FAULT])==0u){atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCFA_PHASE_HIERARCHY_EXECUTE);}}
 @compute @workgroup_size(64) fn repairPersistentPressureHierarchyEdges(@builtin(global_invocation_id)gid:vec3u){
-  let linear=select(pcfHierarchyEdgeRankSelect(gid.x),gid.x,PCFA_QA);let address=pcfaEdgeAddress(linear);
+  let linear=pcfHierarchyEdgeRankSelect(gid.x);let address=pcfaEdgeAddress(linear);
   if(address.x==PCF_INVALID){return;}let range=pcfHierarchyEdgeContributionRange(address.x,address.y);var weight=0.0;
   for(var at=0u;at<range.y;at+=1u){let edge=pcfHierarchyEdgeContribution(address.x,range.x+at);
     weight+=bitcast<f32>(atomicLoad(&${arena}[${layout.brickAggregateEdgeBaseWords}u+edge]));}
   atomicStore(&${arena}[pcfaHierarchyEdgeWord(address.x,address.y)],bitcast<u32>(weight));
   atomicAdd(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_EXECUTED],1u);}
 @compute @workgroup_size(64) fn repairPersistentPressureHierarchyDiagonals(@builtin(local_invocation_index)lane:u32,
- @builtin(workgroup_id)wid:vec3u){let linear=select(pcfHierarchyNodeRankSelect(wid.x),wid.x,PCFA_QA);
+ @builtin(workgroup_id)wid:vec3u){let linear=pcfHierarchyNodeRankSelect(wid.x);
   let address=pcfaNodeAddress(linear);var diagonal=0.0;if(address.x!=PCF_INVALID){
     let children=pcfHierarchyChildRange(address.x,address.y);
     for(var at=lane;at<children.y;at+=64u){let brick=pcfHierarchyChild(address.x,children.x+at);
@@ -316,13 +310,11 @@ var<workgroup>pcfaWet:array<u32,64>;
     ||atomicLoad(&${arena}[PCFA_BASE+${ah.pcmGeneration}u])!=pcfPCMGeneration()
     ||atomicLoad(&${arena}[PCFA_BASE+${ah.aggregateTopologyGeneration}u])!=pcfAggregateTopologyGeneration()){
     pcfFault(PCF_FAULT_TOPOLOGY,PCF_INVALID);return;}
-  if((!PCFA_QA&&atomicLoad(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_WORK_COUNT]))
-    ||(!PCFA_QA&&atomicLoad(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_WORK_COUNT]))){pcfFault(PCF_FAULT_REPAIR,PCF_INVALID);return;}
+  if(atomicLoad(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_WORK_COUNT])
+    ||atomicLoad(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_WORK_COUNT])){pcfFault(PCF_FAULT_REPAIR,PCF_INVALID);return;}
   atomicStore(&${arena}[PCF_BASE+PCF_H_ACCEPTED_GEN],atomicLoad(&${arena}[PCF_BASE+PCF_H_CANDIDATE_GEN]));
   atomicStore(&${arena}[PCFA_BASE+${ah.acceptedAggregateTopologyGeneration}u],
     atomicLoad(&${arena}[PCFA_BASE+${ah.aggregateTopologyGeneration}u]));
   pcfaZeroIndirects();atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCF_PHASE_ACCEPTED);}
-fn pcfBrickWorkCount()->u32{return atomicLoad(&${arena}[
-  PCFA_BRICK_HEADER+PCFA_F_WORK_COUNT]);}
 `;
 }

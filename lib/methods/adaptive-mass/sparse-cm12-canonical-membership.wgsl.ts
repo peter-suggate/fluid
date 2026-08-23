@@ -10,6 +10,7 @@ import {
   SPARSE_CM12_CANONICAL_MEMBERSHIP_VERSION,
   type SparseCM12CanonicalMembershipDomainLayout,
   type SparseCM12CanonicalMembershipLayout,
+  type SparseCM12CanonicalRowImageLayout,
 } from "./sparse-cm12-canonical-membership";
 
 export interface SparseCM12CanonicalMembershipWGSLOptions {
@@ -31,9 +32,19 @@ const PCM_${prefix}_CANDIDATE_TOKENS:u32=${domain.candidateTokenBaseWords}u;
 const PCM_${prefix}_DIRTY_STAMPS:u32=${domain.dirtyStampBaseWords}u;
 const PCM_${prefix}_DIRTY_LIST:u32=${domain.dirtyListBaseWords}u;
 const PCM_${prefix}_LEAF_COUNT:u32=${domain.leafCount}u;
-const PCM_${prefix}_TREE_LEVELS:u32=${domain.treeLevelCounts.length}u;
 ${domain.treeLevelBaseWords.map((base, level) =>
     `const PCM_${prefix}_TREE_${level}:u32=${base}u;`).join("\n")}
+`;
+}
+
+function directRowConstants(
+  domain: SparseCM12CanonicalRowImageLayout,
+): string {
+  return /* wgsl */ `
+const PCM_ROW_HEADER:u32=${domain.headerBaseWords}u;
+const PCM_ROW_CAPACITY:u32=${domain.capacity}u;
+const PCM_ROW_ACTIVE_BITS:u32=${domain.activeBitsBaseWords}u;
+const PCM_ROW_ACTIVE_WORDS:u32=${domain.activeBitWordCount}u;
 `;
 }
 
@@ -171,7 +182,7 @@ const PCM_FAULT_INVALID_PHASE:u32=${SPARSE_CM12_CANONICAL_MEMBERSHIP_FAULT.inval
 const PCM_FAULT_COUNT_RANGE:u32=${SPARSE_CM12_CANONICAL_MEMBERSHIP_FAULT.countUnderflow}u;
 const PCM_FAULT_PUBLICATION_GAP:u32=${SPARSE_CM12_CANONICAL_MEMBERSHIP_FAULT.publicationGap}u;
 const PCM_FAULT_ATOMIC_CONTENTION:u32=${SPARSE_CM12_CANONICAL_MEMBERSHIP_FAULT.atomicContention}u;
-const PCM_D_CAPACITY:u32=${d.capacity}u;const PCM_D_PHASE:u32=${d.phase}u;
+const PCM_D_PHASE:u32=${d.phase}u;
 const PCM_D_CANDIDATE_GENERATION:u32=${d.candidateGeneration}u;
 const PCM_D_ACCEPTED_GENERATION:u32=${d.acceptedGeneration}u;
 const PCM_D_FAULT:u32=${d.fault}u;const PCM_D_FIRST_FAULT:u32=${d.firstFaultId}u;
@@ -184,8 +195,13 @@ const PCM_D_TOTAL:u32=${d.totalCount}u;const PCM_D_INDIRECT_X:u32=${d.repairIndi
 const PCM_D_EXPECTED_CLOSURE:u32=${d.expectedClosureCount}u;
 const PCM_D_COVERED_CLOSURE:u32=${d.coveredClosureCount}u;
 const PCM_D_FLAGS:u32=${d.flags}u;
+// The direct row image reuses three retired incremental-header words. Cell PCM
+// retains their original closure semantics.
+const PCM_ROW_ACCEPTED_TOPOLOGY:u32=PCM_D_EXPECTED_CLOSURE;
+const PCM_ROW_CANDIDATE_TOPOLOGY:u32=PCM_D_COVERED_CLOSURE;
+const PCM_ROW_PUBLISHED_WORDS:u32=PCM_D_DIRECT_WRITES;
 ${domainConstants("CELL", options.layout.cell)}
-${domainConstants("ROW", options.layout.row)}
+${directRowConstants(options.layout.row)}
 var<workgroup>pcmLeafCounts:array<u32,${SPARSE_CM12_CANONICAL_MEMBERSHIP_LEAF_BITS / 32}>;
 
 fn pcmHeaderValid()->bool{return atomicLoad(&${arena}[PCM_BASE+PCM_H_MAGIC])==PCM_MAGIC
@@ -279,14 +295,57 @@ fn pcmFinalize(header:u32,root:u32)->bool{
   atomicStore(&${arena}[header+PCM_D_PHASE],PCM_PHASE_ACCEPTED);return true;
 }
 fn pcmCellBegin(expectedClosureCount:u32)->bool{return pcmBegin(PCM_CELL_HEADER,expectedClosureCount);}
-fn pcmRowBegin(expectedClosureCount:u32)->bool{return pcmBegin(PCM_ROW_HEADER,expectedClosureCount);}
 fn pcmCellSetCandidate(id:u32,enabled:bool,cause:u32,closure:bool)->bool{
   return pcmSetCandidate(PCM_CELL_HEADER,PCM_CELL_CAPACITY,PCM_CELL_CANDIDATE_TOKENS,
     PCM_CELL_DIRTY_STAMPS,PCM_CELL_DIRTY_LIST,PCM_CELL_LEAF_COUNT,id,enabled,cause,closure);
 }
-fn pcmRowSetCandidate(id:u32,enabled:bool,cause:u32,closure:bool)->bool{
-  return pcmSetCandidate(PCM_ROW_HEADER,PCM_ROW_CAPACITY,PCM_ROW_CANDIDATE_TOKENS,
-    PCM_ROW_DIRTY_STAMPS,PCM_ROW_DIRTY_LIST,PCM_ROW_LEAF_COUNT,id,enabled,cause,closure);
+fn pcmRowBegin(topologyGeneration:u32)->bool{
+  if(!pcmHeaderValid()){pcmFault(PCM_ROW_HEADER,PCM_FAULT_INVALID_HEADER,PCM_INVALID);
+    return false;}
+  let phase=atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_PHASE]);
+  if(phase!=PCM_PHASE_UNINITIALIZED&&phase!=PCM_PHASE_ACCEPTED){
+    pcmFault(PCM_ROW_HEADER,PCM_FAULT_INVALID_PHASE,phase);return false;}
+  let accepted=atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_ACCEPTED_GENERATION]);
+  if(accepted>=0x7ffffffeu){pcmFault(PCM_ROW_HEADER,PCM_FAULT_GENERATION,PCM_INVALID);
+    return false;}
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_CANDIDATE_GENERATION],accepted+1u);
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_FAULT],0u);
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_FIRST_FAULT],PCM_INVALID);
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_TOTAL],0u);
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_ROW_PUBLISHED_WORDS],0u);
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_ROW_CANDIDATE_TOPOLOGY],topologyGeneration);
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_PHASE],PCM_PHASE_COLLECTING);
+  return true;
+}
+fn pcmRowPublicationOpen()->bool{return atomicLoad(&${arena}[
+  PCM_ROW_HEADER+PCM_D_PHASE])==PCM_PHASE_COLLECTING
+  &&atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_FAULT])==0u;}
+fn pcmRowPriorTopologyGeneration()->u32{
+  let accepted=atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_ACCEPTED_GENERATION]);
+  return select(PCM_INVALID,atomicLoad(&${arena}[
+    PCM_ROW_HEADER+PCM_ROW_ACCEPTED_TOPOLOGY]),accepted!=0u);
+}
+fn pcmRowPublishWord(word:u32,bits:u32)->bool{
+  if(!pcmRowPublicationOpen()){return false;}
+  if(word>=PCM_ROW_ACTIVE_WORDS){
+    pcmFault(PCM_ROW_HEADER,PCM_FAULT_INVALID_ID,word);return false;}
+  atomicStore(&${arena}[PCM_ROW_ACTIVE_BITS+word],bits);
+  atomicAdd(&${arena}[PCM_ROW_HEADER+PCM_D_TOTAL],countOneBits(bits));
+  atomicAdd(&${arena}[PCM_ROW_HEADER+PCM_ROW_PUBLISHED_WORDS],1u);
+  return true;
+}
+fn pcmRowFinalize(topologyGeneration:u32)->bool{
+  if(!pcmRowPublicationOpen()){return false;}
+  if(atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_ROW_CANDIDATE_TOPOLOGY])
+      !=topologyGeneration
+    ||atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_ROW_PUBLISHED_WORDS])
+      !=PCM_ROW_ACTIVE_WORDS){
+    pcmFault(PCM_ROW_HEADER,PCM_FAULT_PUBLICATION_GAP,PCM_INVALID);return false;}
+  let generation=atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_CANDIDATE_GENERATION]);
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_ROW_ACCEPTED_TOPOLOGY],topologyGeneration);
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_ACCEPTED_GENERATION],generation);
+  atomicStore(&${arena}[PCM_ROW_HEADER+PCM_D_PHASE],PCM_PHASE_ACCEPTED);
+  return true;
 }
 fn pcmContains(header:u32,bits:u32,capacity:u32,id:u32)->bool{
   let phase=atomicLoad(&${arena}[header+PCM_D_PHASE]);
@@ -308,8 +367,6 @@ fn pcmCellAcceptedCount()->u32{return pcmAcceptedCount(PCM_CELL_HEADER);}
 fn pcmRowAcceptedCount()->u32{return pcmAcceptedCount(PCM_ROW_HEADER);}
 fn pcmCellBootstrapEpoch()->bool{return atomicLoad(&${arena}[
   PCM_CELL_HEADER+PCM_D_ACCEPTED_GENERATION])==0u;}
-fn pcmRowBootstrapEpoch()->bool{return atomicLoad(&${arena}[
-  PCM_ROW_HEADER+PCM_D_ACCEPTED_GENERATION])==0u;}
 fn pcmCellCandidateGeneration()->u32{return atomicLoad(&${arena}[
   PCM_CELL_HEADER+PCM_D_CANDIDATE_GENERATION]);}
 fn pcmRowCandidateGeneration()->u32{return atomicLoad(&${arena}[
@@ -318,23 +375,14 @@ fn pcmCellFault()->u32{return atomicLoad(&${arena}[PCM_CELL_HEADER+PCM_D_FAULT])
 fn pcmRowFault()->u32{return atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_FAULT]);}
 fn pcmCellFirstFault()->u32{return atomicLoad(&${arena}[PCM_CELL_HEADER+PCM_D_FIRST_FAULT]);}
 fn pcmRowFirstFault()->u32{return atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_FIRST_FAULT]);}
-fn pcmCellPhase()->u32{return atomicLoad(&${arena}[PCM_CELL_HEADER+PCM_D_PHASE]);}
-fn pcmRowPhase()->u32{return atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_PHASE]);}
-fn pcmCellDirtyCount()->u32{return atomicLoad(&${arena}[PCM_CELL_HEADER+PCM_D_DIRTY_COUNT]);}
-fn pcmRowDirtyCount()->u32{return atomicLoad(&${arena}[PCM_ROW_HEADER+PCM_D_DIRTY_COUNT]);}
 fn pcmCellAcceptedGeneration()->u32{return atomicLoad(&${arena}[
   PCM_CELL_HEADER+PCM_D_ACCEPTED_GENERATION]);}
 fn pcmRowAcceptedGeneration()->u32{return atomicLoad(&${arena}[
   PCM_ROW_HEADER+PCM_D_ACCEPTED_GENERATION]);}
 fn pcmCellFinalizeFrontier()->bool{return pcmFinalizeFrontier(PCM_CELL_HEADER);}
-fn pcmRowFinalizeFrontier()->bool{return pcmFinalizeFrontier(PCM_ROW_HEADER);}
 fn pcmCellFinalize()->bool{return pcmFinalize(PCM_CELL_HEADER,
   PCM_CELL_TREE_${options.layout.cell.treeLevelCounts.length - 1});}
-fn pcmRowFinalize()->bool{return pcmFinalize(PCM_ROW_HEADER,
-  PCM_ROW_TREE_${options.layout.row.treeLevelCounts.length - 1});}
 ${repairBody("CELL", "Cell", options.layout.cell, arena, workgroupSize)}
-${repairBody("ROW", "Row", options.layout.row, arena, workgroupSize)}
 ${rankSelectBody("CELL", "Cell", options.layout.cell, arena)}
-${rankSelectBody("ROW", "Row", options.layout.row, arena)}
 `;
 }

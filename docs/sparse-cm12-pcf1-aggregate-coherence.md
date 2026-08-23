@@ -7,15 +7,15 @@ without adding a global runtime recovery path.
 
 ## Persistent values and work authority
 
-The numerical values use the existing non-aliased `cm12.pressure-cache`
-regions:
+The numerical values are split by ownership:
 
-- `effectiveEdgeWeights` and PCF fine diagonal;
+- unique-owner fine edges live in the ordinary frozen pressure image;
+- the accepted fine diagonal persists in the ordinary pressure state field;
 - `brickAggregateEdgeWeights` and `brickAggregateDiagonal`;
 - `hierarchyN.edgeWeights` and `hierarchyN.diagonal`.
 
-The membership tail contains the original PCF header/fine dirty leaves followed
-by a `PCA1` extension. PCA1 owns four ephemeral work authorities: aggregate
+The compact PCF header is followed by the `PCA1` extension. PCA1 owns four
+ephemeral work authorities: aggregate
 brick, aggregate edge, flattened hierarchy node, and flattened hierarchy edge.
 Each has generation tokens, 256-ID bitset leaves, generation-stamped dirty leaf
 queues, a 32-way count tree, an active-leaf list, and GPU-authored seed/repair/
@@ -24,8 +24,8 @@ selects numerical order.
 
 Previous active leaves are seeded into the next dirty set so old work bits are
 locally cleared. A quiescent frame therefore repairs only those prior leaves,
-not the domain. Construction-only `qaFullOracle` publishes physical capacities
-and returns raw stable IDs.
+not the domain. Production has one stable-rank execution path; the retired
+full-domain oracle specialization is no longer emitted.
 
 ## Exact closure
 

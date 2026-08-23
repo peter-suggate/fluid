@@ -80,30 +80,27 @@ export interface SparseCM12CanonicalMembershipDomainLayout {
   readonly treeLevelCounts: readonly number[];
 }
 
+export interface SparseCM12CanonicalRowImageLayout {
+  readonly capacity: number;
+  readonly headerBaseWords: number;
+  readonly activeBitsBaseWords: number;
+  readonly activeBitWordCount: number;
+  readonly dispatchWorkgroupCount: number;
+}
+
 export interface SparseCM12CanonicalMembershipLayout {
   readonly baseWords: number;
   readonly cell: SparseCM12CanonicalMembershipDomainLayout;
-  readonly row: SparseCM12CanonicalMembershipDomainLayout;
+  readonly row: SparseCM12CanonicalRowImageLayout;
   readonly totalWords: number;
   readonly totalBytes: number;
 }
 
-export type SparseCM12CanonicalMembershipDomain = "cell" | "row";
-
 export function sparseCM12CanonicalMembershipRepairIndirectByteOffset(
   layout: SparseCM12CanonicalMembershipLayout,
-  domain: SparseCM12CanonicalMembershipDomain,
 ): number {
-  return 4 * (layout[domain].headerBaseWords
+  return 4 * (layout.cell.headerBaseWords
     + SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER.repairIndirectX);
-}
-
-export function sparseCM12CanonicalMembershipAcceptedCountWord(
-  layout: SparseCM12CanonicalMembershipLayout,
-  domain: SparseCM12CanonicalMembershipDomain,
-): number {
-  return layout[domain].headerBaseWords
-    + SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER.totalCount;
 }
 
 const alignWords = (value: number): number => {
@@ -156,7 +153,16 @@ export function createSparseCM12CanonicalMembershipLayout(request: {
   const rowHeaderBaseWords = cellHeaderBaseWords
     + SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER_WORDS;
   const cell = domain(request.cellCapacity, cellHeaderBaseWords);
-  const row = domain(request.rowCapacity, rowHeaderBaseWords);
+  const rowCapacity = checkedCapacity(request.rowCapacity,
+    "canonical row image capacity");
+  const rowActiveBitWordCount = Math.ceil(rowCapacity / 32);
+  const rowActiveBitsBaseWords = at;
+  at = alignWords(at + rowActiveBitWordCount);
+  const row = Object.freeze({ capacity: rowCapacity,
+    headerBaseWords: rowHeaderBaseWords,
+    activeBitsBaseWords: rowActiveBitsBaseWords,
+    activeBitWordCount: rowActiveBitWordCount,
+    dispatchWorkgroupCount: Math.ceil(rowCapacity / 64) });
   const totalWords = alignWords(at);
   return Object.freeze({ baseWords, cell, row, totalWords, totalBytes: 4 * totalWords });
 }
@@ -190,7 +196,13 @@ export function initializeSparseCM12CanonicalMembershipWords(
     words[base + d.treeLevelCount] = domain.treeLevelCounts.length;
   };
   initializeDomain(layout.cell);
-  initializeDomain(layout.row);
+  const row = layout.row;
+  words[row.headerBaseWords + SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER.capacity] =
+    row.capacity;
+  words[row.headerBaseWords + SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER.phase] =
+    SPARSE_CM12_CANONICAL_MEMBERSHIP_PHASE.uninitialized;
+  words[row.headerBaseWords + SPARSE_CM12_CANONICAL_MEMBERSHIP_DOMAIN_HEADER.firstFaultId] =
+    0xffff_ffff;
 }
 
 export function createSparseCM12CanonicalMembershipInitialWords(

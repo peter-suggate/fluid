@@ -26,13 +26,9 @@ GPUAdaptivePressureLocalStageReceipt => Object.freeze({
 const authorities = (overrides: Partial<SparseCM12PressureCutoverAuthorities> = {}):
 SparseCM12PressureCutoverAuthorities => Object.freeze({
   status: "matched", inputTopologyGeneration: 17,
-  pcf: stage(),
   pca: { ...stage({ dirtyCount: 5, executedCount: 5 }),
     familyDirtyCount: [1, 1, 2, 1] as const,
     familyExecutedCount: [1, 1, 2, 1] as const },
-  pressureAddressing: { ready: true, phase: 2, fault: 0,
-    firstFaultRank: 0xffff_ffff, expectedPCMGeneration: 9,
-    materializedPCMGeneration: 9, expectedCount: 20, materializedCount: 20 },
   ...overrides,
 });
 
@@ -46,19 +42,21 @@ const wrongInput = authorities({ inputTopologyGeneration: 18 });
 assert.equal(inspectSparseCM12PressureCutoverAuthorities(wrongInput, 17).complete, false);
 assert.match(inspectSparseCM12PressureCutoverAuthorities(wrongInput, 17).issues.join(" "),
   /does not match prior-frame pressure input/);
-const faulted = authorities({ pcf: stage({ fault: 8, firstFaultId: 41 }) });
+const faulted = authorities({ pca: { ...stage({ dirtyCount: 5, executedCount: 5,
+  fault: 8, firstFaultId: 41 }), familyDirtyCount: [1, 1, 2, 1],
+familyExecutedCount: [1, 1, 2, 1] } });
 assert.equal(inspectSparseCM12PressureCutoverAuthorities(faulted, 17).complete, false);
 assert.match(formatSparseCM12PressureCutoverAuthorities(faulted, 17), /FAULT 8@41/);
 
 const localSource = "fn localInvocation(id:u32)->u32{return id;} dispatchWorkgroupsIndirect";
 assert.doesNotThrow(() => assertSparseCM12PressureCutoverLocalSources({
-  pcf: localSource, pca: localSource,
+  pca: localSource,
 }));
 assert.throws(() => assertSparseCM12PressureCutoverLocalSources({
-  pcf: `${localSource} acceptedTemplateRowInvocation`, pca: localSource,
+  pca: `${localSource} acceptedTemplateRowInvocation`,
 }), /forbidden global token acceptedTemplateRowInvocation/);
 assert.throws(() => assertSparseCM12PressureCutoverLocalSources({
-  pcf: localSource, pca: `${localSource} bakeBrickAggregateEdges`,
+  pca: `${localSource} bakeBrickAggregateEdges`,
 }), /forbidden global token bakeBrickAggregateEdges/);
 
 const pcm = { cell: { phase: 1, fault: 0, firstFault: 0xffff_ffff, dirtyCount: 1,

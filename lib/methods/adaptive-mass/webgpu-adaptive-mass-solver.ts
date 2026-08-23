@@ -61,16 +61,10 @@ import {
   type SparseCM12GPUActivityRecord,
 } from "./webgpu-sparse-cm12-resident";
 
-const PRESSURE_REFRESH_ORACLE_QA_TOKEN: unique symbol =
-  Symbol("Sparse CM12 pressure refresh oracle QA");
 const PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 presentation publisher oracle QA");
 const LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 retired host authority paired QA oracle");
-const PRESSURE_ADDRESSING_RANK_SELECT_QA_TOKEN: unique symbol =
-  Symbol("Sparse CM12 PAB1 rank-select QA");
-const PRESSURE_ADDRESSING_MATERIALIZED_LIST_QA_TOKEN: unique symbol =
-  Symbol("Sparse CM12 PAB1 materialized-list QA");
 const PHASE1_TRANSPORT_RECEIPT_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 Phase-1 transport receipt QA");
 
@@ -551,21 +545,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     };
   }
 
-  /** QA-only full pressure-classification oracle. Ordinary solver options
-   * cannot select it; construction requires this explicitly named factory. */
-  static createPressureRefreshOracleForQA(
-    device: GPUDevice,
-    scene: SceneDescription,
-    quality: GPUQuality,
-    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
-    options: AdaptiveMassSolverOptions,
-    onProgress: GPUInitializationReporter,
-    signal: AbortSignal = new AbortController().signal,
-  ): Promise<WebGPUAdaptiveMassSolver> {
-    return this.createAsync(device, scene, quality, onRigidLoads, options,
-      onProgress, signal, PRESSURE_REFRESH_ORACLE_QA_TOKEN);
-  }
-
   /** QA-only immutable HEAD presentation publisher construction. */
   static createPresentationPublisherOracleForQA(
     device: GPUDevice,
@@ -593,26 +572,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   ): Promise<WebGPUAdaptiveMassSolver> {
     return this.createAsync(device, scene, quality, onRigidLoads, options,
       onProgress, signal, LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN);
-  }
-
-  static createPressureAddressingRankSelectForQA(
-    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
-    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
-    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
-    signal: AbortSignal = new AbortController().signal,
-  ): Promise<WebGPUAdaptiveMassSolver> {
-    return this.createAsync(device, scene, quality, onRigidLoads, options,
-      onProgress, signal, PRESSURE_ADDRESSING_RANK_SELECT_QA_TOKEN);
-  }
-
-  static createPressureAddressingMaterializedListForQA(
-    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
-    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
-    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
-    signal: AbortSignal = new AbortController().signal,
-  ): Promise<WebGPUAdaptiveMassSolver> {
-    return this.createAsync(device, scene, quality, onRigidLoads, options,
-      onProgress, signal, PRESSURE_ADDRESSING_MATERIALIZED_LIST_QA_TOKEN);
   }
 
   /** QA-only construction that reserves the raw Phase-1 transport receipt
@@ -646,11 +605,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     options: AdaptiveMassSolverOptions,
     onProgress: GPUInitializationReporter,
     signal: AbortSignal = new AbortController().signal,
-    qaToken?: typeof PRESSURE_REFRESH_ORACLE_QA_TOKEN
-      | typeof PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
+    qaToken?: typeof PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
       | typeof LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN
-      | typeof PRESSURE_ADDRESSING_RANK_SELECT_QA_TOKEN
-      | typeof PRESSURE_ADDRESSING_MATERIALIZED_LIST_QA_TOKEN
       | typeof PHASE1_TRANSPORT_RECEIPT_QA_TOKEN,
   ): Promise<WebGPUAdaptiveMassSolver> {
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
@@ -767,19 +723,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         label: "Pack compact GPU topology and allocate resident frame state",
         dependencies: ["adaptive-mass.atlas", "adaptive-mass.presentation"],
         run: async () => {
-          const createResident = qaToken === PRESSURE_REFRESH_ORACLE_QA_TOKEN
-            ? WebGPUSparseCM12Resident.createPressureRefreshOracleForQA
-            : qaToken === PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
+          const createResident = qaToken === PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
               ? WebGPUSparseCM12Resident.createPresentationPublisherOracleForQA
               : qaToken === LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN
                 ? WebGPUSparseCM12Resident.createLegacyHostAuthorityOracleForQA
-                : qaToken === PRESSURE_ADDRESSING_RANK_SELECT_QA_TOKEN
-                    ? WebGPUSparseCM12Resident.createPressureAddressingRankSelectForQA
-                    : qaToken === PRESSURE_ADDRESSING_MATERIALIZED_LIST_QA_TOKEN
-                      ? WebGPUSparseCM12Resident
-                        .createPressureAddressingMaterializedListForQA
-                      : qaToken === PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
-                          ? WebGPUSparseCM12Resident.createPhase1TransportReceiptOracleForQA
+                : qaToken === PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
+                  ? WebGPUSparseCM12Resident.createPhase1TransportReceiptOracleForQA
               : WebGPUSparseCM12Resident.create;
           const residentArguments = [
             device, atlas!, grid!, finestCellSize(scene, atlas!),
@@ -1163,12 +1112,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
   /** Header-only FSM1 receipt; never consulted by frame scheduling. */
   readFinalScalarMaskHeaderQA() { return this.resident.readFinalScalarMaskHeaderQA(); }
-  /** Construction-only PAB1 receipt; ordinary solvers reject this call. */
-  readPressureAddressingABQA() { return this.resident.readPressureAddressingABQA(); }
-  /** Compact PAB1 header for production/QA fault diagnosis. */
-  readPressureAddressingHeaderQA() {
-    return this.resident.readPressureAddressingHeaderQA();
-  }
   readSparseWorkShapeQA() { return this.resident.readWorkShapeQA(); }
   readAdaptiveRepresentationQA() { return this.resident.readAdaptiveRepresentationQA(); }
   readAcceptedIndirectQA() { return this.resident.readAcceptedIndirectQA(); }

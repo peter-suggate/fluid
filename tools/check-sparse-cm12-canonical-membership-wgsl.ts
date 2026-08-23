@@ -31,13 +31,12 @@ ${helpers}
 fn checkBegin(){
   _=pcmCellBegin(0u);_=pcmCellSetCandidate(0u,true,1u,false);
   _=pcmCellSetCandidate(4096u,true,2u,false);_=pcmCellFinalizeFrontier();
-  _=pcmRowBegin(1u);_=pcmRowSetCandidate(1u,true,4u,true);_=pcmRowFinalizeFrontier();
+  _=pcmRowBegin(1u);_=pcmRowPublishWord(0u,2u);
 }
 @compute @workgroup_size(1)
-fn checkFinalize(){_=pcmCellFinalize();_=pcmRowFinalize();}
+fn checkFinalize(){_=pcmCellFinalize();_=pcmRowFinalize(1u);}
 @compute @workgroup_size(1)
-fn checkRank(){_=pcmCellRankSelect(0u);_=pcmRowRankSelect(0u);
-  _=pcmCellContains(0u);_=pcmRowContains(1u);}
+fn checkRank(){_=pcmCellRankSelect(0u);_=pcmCellContains(0u);_=pcmRowContains(1u);}
 `;
   await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-canonical-membership");
   try {
@@ -57,7 +56,7 @@ fn checkRank(){_=pcmCellRankSelect(0u);_=pcmRowRankSelect(0u);
     for (const error of errors) console.error(`${error.lineNum}:${error.linePos} ${error.message}`);
     if (errors.length > 0) throw new Error(`${errors.length} WGSL compilation error(s)`);
     for (const entryPoint of ["checkBegin", "repairCanonicalPressureCellLeaves",
-      "repairCanonicalPressureRowLeaves", "checkFinalize", "checkRank"] as const) {
+      "checkFinalize", "checkRank"] as const) {
       await device.createComputePipelineAsync({
         label: `PCM1 ${entryPoint}`,
         layout: "auto",

@@ -10,44 +10,18 @@ export function createSparseCM12TransportPacketAuthorityWGSL(options: {
   const l = options.layout;
   return /* wgsl */ `
 const CM12_TPA_CAPACITY:u32=${l.packetCapacity}u;
-const CM12_TPA_FAMILIES:u32=3u;
-const CM12_TPA_FAMILY_STRIDE:u32=${l.familyStrideWords}u;
-const CM12_TPA_HEADER:u32=${l.baseWords}u;
 const CM12_TPA_DIRECT_PACKETS_PER_LEAF:u32=${l.dispatchPacketsPerLeaf}u;
 const CM12_TPA_DIRECT_PACKET_COUNT:u32=${l.dispatchPacketCount}u;
 const CM12_TPA_DIRECT_WIDTH:u32=${l.dispatchWidth}u;
+const CM12_TPA_COMPILER_WIDTH:u32=${l.compilerDispatchWidth}u;
+const CM12_TPA_INDIRECT:u32=${l.indirectBaseWords}u;
+const CM12_TPA_TRANSPORT_LOW:u32=${l.transportMaskLowBaseWords}u;
+const CM12_TPA_TRANSPORT_HIGH:u32=${l.transportMaskHighBaseWords}u;
+const CM12_TPA_SHARPENING_LOW:u32=${l.sharpeningMaskLowBaseWords}u;
+const CM12_TPA_SHARPENING_HIGH:u32=${l.sharpeningMaskHighBaseWords}u;
+const CM12_TPA_PACKET_LIST:u32=${l.packetListBaseWords}u;
 const CM12_TPA_GAMMA_ROW_MASK:u32=${l.gammaRowMaskBaseWords}u;
 
-fn cm12TransportFamilyHeader(family:u32)->u32{
-  return CM12_TPA_HEADER+family*CM12_TPA_FAMILY_STRIDE;}
-fn cm12TransportFamilyStamp(family:u32)->u32{
-  return cm12TransportFamilyHeader(family)+8u;}
-fn cm12TransportFamilyMaskLow(family:u32)->u32{
-  return cm12TransportFamilyStamp(family)+CM12_TPA_CAPACITY;}
-fn cm12TransportFamilyMaskHigh(family:u32)->u32{
-  return cm12TransportFamilyMaskLow(family)+CM12_TPA_CAPACITY;}
-fn cm12TransportFamilyList(family:u32)->u32{
-  return cm12TransportFamilyMaskHigh(family)+CM12_TPA_CAPACITY;}
-
-fn cm12TransportPacketCount(family:u32)->u32{
-  return select(0u,atomicLoad(&${arena}[cm12TransportFamilyHeader(family)+1u]),
-    family<CM12_TPA_FAMILIES);}
-fn cm12TransportPacketId(rank:u32,family:u32)->u32{
-  let count=cm12TransportPacketCount(family);
-  return select(0xffffffffu,
-    atomicLoad(&${arena}[cm12TransportFamilyList(family)+rank]),
-    family<CM12_TPA_FAMILIES&&rank<count);
-}
-fn cm12TransportPacketMask(packet:u32,family:u32)->vec2u{
-  if(packet>=CM12_TPA_CAPACITY||family>=CM12_TPA_FAMILIES){return vec2u(0u);}
-  return vec2u(atomicLoad(&${arena}[cm12TransportFamilyMaskLow(family)+packet]),
-    atomicLoad(&${arena}[cm12TransportFamilyMaskHigh(family)+packet]));
-}
-fn cm12TransportOverwritePacketMask(packet:u32,family:u32,mask:vec2u){
-  if(packet>=CM12_TPA_CAPACITY||family>=CM12_TPA_FAMILIES){return;}
-  atomicStore(&${arena}[cm12TransportFamilyMaskLow(family)+packet],mask.x);
-  atomicStore(&${arena}[cm12TransportFamilyMaskHigh(family)+packet],mask.y);
-}
 fn cm12TransportPacketLaneSelected(mask:vec2u,lane:u32)->bool{
   return lane<64u&&((mask[lane>>5u]>>(lane&31u))&1u)!=0u;
 }
@@ -63,6 +37,33 @@ fn cm12TransportCompactOrdinal(packet:u32)->u32{
   if(local>=CM12_TPA_DIRECT_PACKETS_PER_LEAF){return 0xffffffffu;}
   let ordinal=leaf*CM12_TPA_DIRECT_PACKETS_PER_LEAF+local;
   return select(0xffffffffu,ordinal,ordinal<CM12_TPA_DIRECT_PACKET_COUNT);
+}
+fn cm12TransportPacketCount()->u32{
+  return min(atomicLoad(&${arena}[CM12_TPA_INDIRECT]),CM12_TPA_DIRECT_PACKET_COUNT);}
+fn cm12TransportPacketOrdinal(rank:u32)->u32{
+  return select(0xffffffffu,atomicLoad(&${arena}[CM12_TPA_PACKET_LIST+rank]),
+    rank<cm12TransportPacketCount());
+}
+fn cm12TransportPacketId(rank:u32)->u32{
+  let ordinal=cm12TransportPacketOrdinal(rank);
+  return select(0xffffffffu,cm12TransportDirectStablePacket(ordinal),
+    ordinal<CM12_TPA_DIRECT_PACKET_COUNT);
+}
+fn cm12TransportPacketMaskAt(ordinal:u32)->vec2u{
+  if(ordinal>=CM12_TPA_DIRECT_PACKET_COUNT){return vec2u(0u);}
+  return vec2u(atomicLoad(&${arena}[CM12_TPA_TRANSPORT_LOW+ordinal]),
+    atomicLoad(&${arena}[CM12_TPA_TRANSPORT_HIGH+ordinal]));
+}
+fn cm12TransportSharpeningMaskAt(ordinal:u32)->vec2u{
+  if(ordinal>=CM12_TPA_DIRECT_PACKET_COUNT){return vec2u(0u);}
+  return vec2u(atomicLoad(&${arena}[CM12_TPA_SHARPENING_LOW+ordinal]),
+    atomicLoad(&${arena}[CM12_TPA_SHARPENING_HIGH+ordinal]));
+}
+fn cm12TransportPublishSharpeningMask(packet:u32,mask:vec2u){
+  let ordinal=cm12TransportCompactOrdinal(packet);
+  if(ordinal==0xffffffffu){return;}
+  atomicStore(&${arena}[CM12_TPA_SHARPENING_LOW+ordinal],mask.x);
+  atomicStore(&${arena}[CM12_TPA_SHARPENING_HIGH+ordinal],mask.y);
 }
 fn cm12TransportGammaMaskWord(ordinal:u32,axis:u32,lane:u32)->u32{
   return CM12_TPA_GAMMA_ROW_MASK+6u*ordinal+2u*axis
@@ -80,21 +81,23 @@ fn cm12TransportMarkGammaMask(packet:u32,axis:u32,low:u32,high:u32){
 // descriptor for the whole workgroup. Hot lanes do arithmetic only; they do
 // not repeat atomic scheduling loads or the four-word packet decode.
 var<workgroup>cm12TransportStagedPacketId:u32;
+var<workgroup>cm12TransportStagedPacketOrdinal:u32;
 var<workgroup>cm12TransportStagedPacketMask:vec2u;
 var<workgroup>cm12TransportStagedPacket:CM12TransportPacket;
 var<workgroup>cm12TransportStagedPacketOriginFine:vec3u;
 var<workgroup>cm12TransportStagedTopologySlot:u32;
-fn cm12StageTransportPacket(packetRank:u32,lane:u32,family:u32){
+fn cm12StageTransportPacket(packetRank:u32,lane:u32){
   if(lane==0u){
-    let packet=cm12TransportPacketId(packetRank,family);
+    let ordinal=cm12TransportPacketOrdinal(packetRank);
+    let packet=select(0xffffffffu,cm12TransportDirectStablePacket(ordinal),
+      ordinal<CM12_TPA_DIRECT_PACKET_COUNT);
     let slot=acceptedTopologySlot();
     cm12TransportStagedTopologySlot=slot;
+    cm12TransportStagedPacketOrdinal=ordinal;
     cm12TransportStagedPacketId=packet;
-    cm12TransportStagedPacketMask=cm12TransportPacketMask(packet,family);
+    cm12TransportStagedPacketMask=cm12TransportPacketMaskAt(ordinal);
     cm12TransportStagedPacket=cm12TeiPacket(packet,slot);
-    cm12TransportStagedPacketOriginFine=vec3u(0xffffffffu);
-    if(family<2u){cm12TransportStagedPacketOriginFine=
-      cm12TeiPacketFineOrigin(packet,slot);}
+    cm12TransportStagedPacketOriginFine=cm12TeiPacketFineOrigin(packet,slot);
   }
   workgroupBarrier();
 }
@@ -106,38 +109,23 @@ fn cm12TransportStagedExecutionCell(lane:u32)->u32{
   return packet.first+q.x+packet.strideY*q.y+packet.strideZ*q.z;
 }
 
-@compute @workgroup_size(1)
-fn beginSparseCM12TransportPacketAuthority(){
-  for(var family=0u;family<CM12_TPA_FAMILIES;family+=1u){
-    let header=cm12TransportFamilyHeader(family);
-    atomicStore(&${arena}[header],max(1u,fsm1Generation()));
-    atomicStore(&${arena}[header+1u],0u);atomicStore(&${arena}[header+2u],0u);
-    atomicStore(&${arena}[header+3u],CM12_TPA_CAPACITY);
-    atomicStore(&${arena}[header+4u],0u);atomicStore(&${arena}[header+5u],1u);
-    atomicStore(&${arena}[header+6u],1u);atomicStore(&${arena}[header+7u],0u);
-  }
-}
-fn cm12PublishDirectTransportPacket(packet:u32,mask:vec2u,family:u32){
-  if(packet>=CM12_TPA_CAPACITY||(mask.x|mask.y)==0u){return;}
-  let header=cm12TransportFamilyHeader(family);
-  atomicOr(&${arena}[cm12TransportFamilyMaskLow(family)+packet],mask.x);
-  atomicOr(&${arena}[cm12TransportFamilyMaskHigh(family)+packet],mask.y);
-  let generation=atomicLoad(&${arena}[header]);
-  let previous=atomicExchange(&${arena}[
-    cm12TransportFamilyStamp(family)+packet],generation);
-  if(previous==0u){let at=atomicAdd(&${arena}[header+1u],1u);
-    if(at<CM12_TPA_CAPACITY){atomicStore(
-      &${arena}[cm12TransportFamilyList(family)+at],packet);}
-    else{atomicOr(&${arena}[header+2u],2u);}}
-}
 // Compile the prior frame's final scalar facts straight into the three packet
-// execution families. Each invocation owns one stable TEI packet. Spatial-tile
+// transforms. Each invocation owns one compact TEI packet. Spatial-tile
 // records are used only as the immutable packet-neighbour index; no dirty fact
 // is copied into their address space.
 @compute @workgroup_size(64)
 fn compileSparseCM12TransportPacketsFromFinalScalarMasks(
- @builtin(global_invocation_id)gid:vec3u){
-  let packetId=gid.x;if(packetId>=CM12_TPA_CAPACITY){return;}
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
+  let group=wid.x+CM12_TPA_COMPILER_WIDTH*wid.y;
+  let ordinal=64u*group+lane;
+  if(ordinal>=CM12_TPA_DIRECT_PACKET_COUNT){return;}
+  atomicStore(&${arena}[CM12_TPA_TRANSPORT_LOW+ordinal],0u);
+  atomicStore(&${arena}[CM12_TPA_TRANSPORT_HIGH+ordinal],0u);
+  atomicStore(&${arena}[CM12_TPA_SHARPENING_LOW+ordinal],0u);
+  atomicStore(&${arena}[CM12_TPA_SHARPENING_HIGH+ordinal],0u);
+  for(var word=0u;word<6u;word+=1u){
+    atomicStore(&${arena}[CM12_TPA_GAMMA_ROW_MASK+6u*ordinal+word],0u);}
+  let packetId=cm12TransportDirectStablePacket(ordinal);
   let slot=acceptedTopologySlot();let packet=cm12TeiPacket(packetId,slot);
   if(packet.first==0xffffffffu){return;}
   let leaf=packetId/64u;let leafDescriptor=cm12TeiLoadLeaf(slot,leaf);
@@ -171,36 +159,17 @@ fn compileSparseCM12TransportPacketsFromFinalScalarMasks(
     }
   }
   if(!dirty){return;}
-  for(var family=0u;family<CM12_TPA_FAMILIES;family+=1u){
-    cm12PublishDirectTransportPacket(packetId,packetMask,family);}
+  atomicStore(&${arena}[CM12_TPA_TRANSPORT_LOW+ordinal],packetMask.x);
+  atomicStore(&${arena}[CM12_TPA_TRANSPORT_HIGH+ordinal],packetMask.y);
+  let at=atomicAdd(&${arena}[CM12_TPA_INDIRECT],1u);
+  if(at<CM12_TPA_DIRECT_PACKET_COUNT){
+    atomicStore(&${arena}[CM12_TPA_PACKET_LIST+at],ordinal);}
 }
-@compute @workgroup_size(64)
-fn clearSparseCM12TransportPacketAuthority(@builtin(global_invocation_id)gid:vec3u){
-  let packet=gid.x;if(packet>=CM12_TPA_CAPACITY){return;}
-  for(var family=0u;family<CM12_TPA_FAMILIES;family+=1u){
-    atomicStore(&${arena}[cm12TransportFamilyStamp(family)+packet],0u);
-    atomicStore(&${arena}[cm12TransportFamilyMaskLow(family)+packet],0u);
-    atomicStore(&${arena}[cm12TransportFamilyMaskHigh(family)+packet],0u);
-  }
-  if(packet<CM12_TPA_DIRECT_PACKET_COUNT){
-    for(var word=0u;word<6u;word+=1u){
-      atomicStore(&${arena}[CM12_TPA_GAMMA_ROW_MASK+6u*packet+word],0u);
-    }
-  }
-}
-@compute @workgroup_size(1)
-fn finalizeSparseCM12TransportPacketAuthority(){
-  for(var family=0u;family<CM12_TPA_FAMILIES;family+=1u){
-    let header=cm12TransportFamilyHeader(family);
-    let fault=atomicLoad(&${arena}[header+2u]);
-    let count=select(atomicLoad(&${arena}[header+1u]),0u,fault!=0u);
-    atomicStore(&${arena}[header+4u],count);
-    atomicStore(&${arena}[header+5u],1u);atomicStore(&${arena}[header+6u],1u);
-  }
-}
-fn cm12TransportExecutionCell(packetRank:u32,lane:u32,family:u32)->u32{
-  let packet=cm12TransportPacketId(packetRank,family);
-  let mask=cm12TransportPacketMask(packet,family);
+fn cm12TransportExecutionCell(packetRank:u32,lane:u32)->u32{
+  let ordinal=cm12TransportPacketOrdinal(packetRank);
+  let packet=select(0xffffffffu,cm12TransportDirectStablePacket(ordinal),
+    ordinal<CM12_TPA_DIRECT_PACKET_COUNT);
+  let mask=cm12TransportPacketMaskAt(ordinal);
   if(packet==0xffffffffu||!cm12TransportPacketLaneSelected(mask,lane)){
     return 0xffffffffu;}
   return cm12TeiPacketCell(packet,lane,acceptedTopologySlot());

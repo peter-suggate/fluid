@@ -28,7 +28,7 @@ test("activation and retirement stage lifecycle intent without mutating accepted
   const activation = functionSource(wgsl, "activateSweptReceivers",
     "fn retireUnsupportedEmptyBricks");
   const retirement = functionSource(wgsl, "retireUnsupportedEmptyBricks",
-    "fn sealSparseCM12PressureTopologyJournal");
+    "const PRESENTATION_FRAME_PLAN_STAGE");
 
   assert.match(activation, /setCandidateBrickActiveAt\(output,true\)/,
     "activation must author candidate membership only");
@@ -39,7 +39,7 @@ test("activation and retirement stage lifecycle intent without mutating accepted
     assert.doesNotMatch(source, /state\[[^\]]+\]\s*=/,
       `${label} must not change accepted scalar, velocity, pressure, or face fields`);
     assert.doesNotMatch(source,
-      /scaInvalidateBrickTopologyClosure|ptrRecordChangedBrick|cm12Extension(?:RecordRoot|InvalidateRetiredCell)/,
+      /scaInvalidateBrickTopologyClosure|cm12Extension(?:RecordRoot|InvalidateRetiredCell)/,
       `${label} must not publish SCA, PTR, or VEX effects before acceptance`);
     assert.doesNotMatch(source,
       /atomic(?:Add|Sub|Store)\(&activity\[(?:8u|9u|10u|11u|output\+10u|output\+34u)/,
@@ -135,7 +135,7 @@ test("post-authorization delta publication cannot fault after its first stable w
   const firstStableWrite = publish.search(/state\[[^\]]+\]\s*=/);
   assert.ok(firstStableWrite >= 0, "delta publication must still author stable fields");
   assert.doesNotMatch(publish.slice(firstStableWrite),
-    /scaInvalidateBrickTopologyClosure|ptrRecordChangedBrick|cm12Extension(?:RecordRoot|InvalidateRetiredCell)/,
+    /scaInvalidateBrickTopologyClosure|cm12Extension(?:RecordRoot|InvalidateRetiredCell)/,
     "candidate publication may not call a fallible journal/cache helper after a stable write");
 
   const vexPublish = functionSource(wgsl, "publishSparseCM12TopologyVelocityRootsWork",

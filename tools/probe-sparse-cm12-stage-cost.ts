@@ -113,7 +113,7 @@ Options:
   --region-scope=domain|initial-dam  Region bounds (default domain)
   --max-non-pressure-ms=N            Eligible gate threshold (default 10)
   --enforce-non-pressure-gate=0|1    Exit nonzero when the eligible gate fails
-  --enforce-pressure-receipts=0|1    Require fault-free PTR/FPA/PCF/PCA receipts
+  --enforce-pressure-receipts=0|1    Require fault-free PTR/PCA receipts
                                      (default 1)
   --out=PATH                         Write the JSON receipt
 
@@ -442,17 +442,14 @@ try {
     readonly acceptedCells: number;
     readonly acceptedRows: number;
     readonly pcmCellDirtyLeaves: number;
-    readonly pcmRowDirtyLeaves: number;
+    readonly pcmRowPublishedWords: number;
     readonly pressureCells: number;
     readonly pressureRows: number;
     readonly ptrPhase: number;
     readonly ptrFault: number;
     readonly ptrChangedBricks: number;
-    readonly ptrChangedRows: number;
     readonly ptrCellExecutions: number;
-    readonly ptrRowExecutions: number;
     readonly ptrBrickDirtyLeaves: number;
-    readonly ptrRowDirtyLeaves: number;
     readonly pressureAuthorityReceiptComplete: boolean;
     readonly pressureAuthorityReceiptIssues: readonly string[];
     readonly pressureAuthorities?: NonNullable<NonNullable<
@@ -809,17 +806,14 @@ try {
       acceptedCells: info.adaptiveAcceptedCellCount ?? 0,
       acceptedRows: info.adaptiveAcceptedRowCount ?? 0,
       pcmCellDirtyLeaves: pcm?.cell.dirtyCount ?? 0,
-      pcmRowDirtyLeaves: pcm?.row.dirtyCount ?? 0,
+      pcmRowPublishedWords: pcm?.row.directWriteCount ?? 0,
       pressureCells: info.adaptivePressureCellCount ?? 0,
       pressureRows: info.adaptivePressureActiveRowCount ?? 0,
       ptrPhase: ptr?.phase ?? 0,
       ptrFault: ptr?.fault ?? 0,
       ptrChangedBricks: ptr?.changedBrickCount ?? 0,
-      ptrChangedRows: ptr?.changedRowCount ?? 0,
       ptrCellExecutions: ptr?.cellExecutionCount ?? 0,
-      ptrRowExecutions: ptr?.rowExecutionCount ?? 0,
       ptrBrickDirtyLeaves: ptr?.brickDirtyLeafCount ?? 0,
-      ptrRowDirtyLeaves: ptr?.rowDirtyLeafCount ?? 0,
       pressureAuthorityReceiptComplete: pressureReceiptComplete,
       pressureAuthorityReceiptIssues: Object.freeze(pressureReceiptIssues),
       ...(pressureAuthorities === undefined ? {} : { pressureAuthorities }),

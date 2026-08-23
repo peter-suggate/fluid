@@ -112,6 +112,5 @@ fn ${p}Authorize(){atomicStore(&${arena}[${h(H.phase)}],${PHASE.authorized}u);}
 @compute @workgroup_size(1) fn finishSparseCM12TopologyEffectsPublication(){
  if(atomicLoad(&${arena}[${h(H.phase)}])!=${PHASE.authorized}u){return;}
  atomicStore(&${arena}[${h(H.phase)}],${PHASE.published}u);}
-fn ${p}Published()->bool{return atomicLoad(&${arena}[${h(H.phase)}])==${PHASE.published}u;}
 `;
 }

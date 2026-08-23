@@ -1,11 +1,4 @@
-export const SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_HEADER_WORDS = 8;
-export const SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_FAMILY_COUNT = 3;
-
-export const SPARSE_CM12_TRANSPORT_PACKET_FAMILY = Object.freeze({
-  traceGammaAndBeta: 0,
-  scatterDensityDeficit: 1,
-  gatherConservativeDensity: 2,
-} as const);
+export const SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_INDIRECT_WORDS = 3;
 
 export const SPARSE_CM12_TRANSPORT_PACKET_INVALID = 0xffff_ffff;
 
@@ -49,12 +42,15 @@ export interface SparseCM12TransportPacketAuthorityLayout {
   readonly dispatchPacketCount: number;
   readonly dispatchWidth: number;
   readonly dispatchRows: number;
-  readonly familyStrideWords: number;
-  readonly familyHeaderBaseWords: readonly [number, number, number];
-  readonly familyStampBaseWords: readonly [number, number, number];
-  readonly familyMaskLowBaseWords: readonly [number, number, number];
-  readonly familyMaskHighBaseWords: readonly [number, number, number];
-  readonly familyListBaseWords: readonly [number, number, number];
+  readonly compilerWorkgroupCount: number;
+  readonly compilerDispatchWidth: number;
+  readonly compilerDispatchRows: number;
+  readonly indirectBaseWords: number;
+  readonly transportMaskLowBaseWords: number;
+  readonly transportMaskHighBaseWords: number;
+  readonly sharpeningMaskLowBaseWords: number;
+  readonly sharpeningMaskHighBaseWords: number;
+  readonly packetListBaseWords: number;
   readonly gammaRowMaskBaseWords: number;
   readonly gammaRowMaskWords: number;
   readonly totalWords: number;
@@ -68,9 +64,10 @@ const checked = (value: number, label: string): number => {
 };
 
 /**
- * Per-frame packet execution authority compiled from FSM1 spatial neighborhoods.
- * The arena is deliberately separate from the immutable/plain-u32 TEI so hot
- * descriptors never become atomic storage merely to support scheduling.
+ * Per-frame compact packet execution image compiled from FSM1 neighborhoods.
+ * One canonical list/mask drives all three ordered transport transforms; a
+ * separate compact sharpening mask preserves trace-time closure until its
+ * later consumer without duplicating the transport catalogue.
  */
 export function createSparseCM12TransportPacketAuthorityLayout(options: {
   readonly baseWords: number;
@@ -92,37 +89,30 @@ export function createSparseCM12TransportPacketAuthorityLayout(options: {
   }
   const dispatchWidth = Math.min(65_535, dispatchPacketCount);
   const dispatchRows = Math.ceil(dispatchPacketCount / dispatchWidth);
-  const familyStrideWords = checked(
-    SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_HEADER_WORDS + 4 * packetCapacity,
-    "familyStrideWords",
-  );
-  const familyHeaderBaseWords = [0, 1, 2].map((family) => checked(
-    baseWords + family * familyStrideWords, `familyHeaderBaseWords[${family}]`,
-  )) as [number, number, number];
-  const familyStampBaseWords = familyHeaderBaseWords.map((header, family) => checked(
-    header + SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_HEADER_WORDS,
-    `familyStampBaseWords[${family}]`,
-  )) as [number, number, number];
-  const familyMaskLowBaseWords = familyStampBaseWords.map((stamp, family) => checked(
-    stamp + packetCapacity, `familyMaskLowBaseWords[${family}]`,
-  )) as [number, number, number];
-  const familyMaskHighBaseWords = familyMaskLowBaseWords.map((low, family) => checked(
-    low + packetCapacity, `familyMaskHighBaseWords[${family}]`,
-  )) as [number, number, number];
-  const familyListBaseWords = familyMaskHighBaseWords.map((high, family) => checked(
-    high + packetCapacity, `familyListBaseWords[${family}]`,
-  )) as [number, number, number];
-  const gammaRowMaskBaseWords = checked(baseWords
-    + SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_FAMILY_COUNT * familyStrideWords,
-  "gammaRowMaskBaseWords");
+  const compilerWorkgroupCount = Math.ceil(dispatchPacketCount / 64);
+  const compilerDispatchWidth = Math.min(65_535, compilerWorkgroupCount);
+  const compilerDispatchRows = Math.ceil(compilerWorkgroupCount / compilerDispatchWidth);
+  const indirectBaseWords = baseWords;
+  const transportMaskLowBaseWords = checked(indirectBaseWords
+    + SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_INDIRECT_WORDS,
+  "transportMaskLowBaseWords");
+  const transportMaskHighBaseWords = checked(transportMaskLowBaseWords
+    + dispatchPacketCount, "transportMaskHighBaseWords");
+  const sharpeningMaskLowBaseWords = checked(transportMaskHighBaseWords
+    + dispatchPacketCount, "sharpeningMaskLowBaseWords");
+  const sharpeningMaskHighBaseWords = checked(sharpeningMaskLowBaseWords
+    + dispatchPacketCount, "sharpeningMaskHighBaseWords");
+  const packetListBaseWords = checked(sharpeningMaskHighBaseWords
+    + dispatchPacketCount, "packetListBaseWords");
+  const gammaRowMaskBaseWords = checked(packetListBaseWords + dispatchPacketCount,
+    "gammaRowMaskBaseWords");
   const gammaRowMaskWords = checked(6 * dispatchPacketCount, "gammaRowMaskWords");
   const totalWords = checked(gammaRowMaskBaseWords + gammaRowMaskWords, "totalWords");
   return Object.freeze({ baseWords, packetCapacity, dispatchPacketsPerLeaf,
-    dispatchPacketCount, dispatchWidth, dispatchRows, familyStrideWords,
-    familyHeaderBaseWords: Object.freeze(familyHeaderBaseWords),
-    familyStampBaseWords: Object.freeze(familyStampBaseWords),
-    familyMaskLowBaseWords: Object.freeze(familyMaskLowBaseWords),
-    familyMaskHighBaseWords: Object.freeze(familyMaskHighBaseWords),
-    familyListBaseWords: Object.freeze(familyListBaseWords),
+    dispatchPacketCount, dispatchWidth, dispatchRows,
+    compilerWorkgroupCount, compilerDispatchWidth, compilerDispatchRows,
+    indirectBaseWords,
+    transportMaskLowBaseWords, transportMaskHighBaseWords,
+    sharpeningMaskLowBaseWords, sharpeningMaskHighBaseWords, packetListBaseWords,
     gammaRowMaskBaseWords, gammaRowMaskWords, totalWords });
 }

@@ -1,8 +1,9 @@
 # Sparse CM12 masked full-transform migration plan
 
-Status: Phase 1 runtime migration implemented and accepted, 2026-08-23. B8/P8 is
-the target profile; B16/P16 results are secondary evidence. Performance thresholds
-are diagnostic signals for packing/access work, not release vetoes.
+Status: masked full-transform runtime migration implemented and measured through
+direct pressure-row publication, 2026-08-24. B8/P8 is the target profile; B16/P16
+results are secondary evidence. Performance thresholds are diagnostic signals for
+packing/access work, not release vetoes.
 
 Scope: every Sparse CM12 frame operation except the iterative pressure solve. The
 pressure-system build is in scope; MGPCG iteration is not. Phase 1 is one vertical
@@ -807,6 +808,8 @@ rejected arm rather than retaining parallel production paths.
 | Direct masked projection | The shared mask drives `projectPressureRow` directly and mirrors both face banks. B8/P8 projection fell from 3.9322 / 4.6531 ms to 2.8180 / 2.8836 ms median/p95. Symmetric exact, moving-solid/injection and ocean Dawn lanes pass. | **Accepted; FPA deleted** |
 | Compact gamma row masks | TPA now owns six `u32` words per compact packet. ITR compiles TPM's sealed surface ballot into the three positive-owner row families, and the same immutable mask is replayed for snapshot and refinement. One-sided sparse-air rows are exact gamma no-ops; their `ownerTerm == 0xf` sentinel is rejected before term decode. | **Accepted; DCA deleted** |
 | TPA gather-list gamma replay | Replacing direct compact replay with the existing gather-family list added list/atomic indirection. Gamma measured 2.2938 / 4.3909 ms versus 2.2282 / 3.9322 ms for direct replay, and the complete frame also worsened. | **Rejected and removed** |
+| Shared sharpening mask | The trace pass now overwrites TPA family 0's existing mask with the same scale-expanded sharpening closure. The two dedicated TPM sharpening planes, their header fields, counter and accessor were deleted. The original prepare/scatter phase boundary is retained. | **Accepted structurally; 1,310,720 B removed at B8 ocean** |
+| Canonical compact TPA | The three transport families compiled identical packet sets and structural lane masks. They now share one compact ordinal list and transport mask; trace publishes its later scale-expanded sharpening closure into a separate compact mask. | **Accepted; bit-identical B8, 7,454,804 B removed** |
 
 The face result is a data-layout finding, not a reason to abandon compiled topology.
 TEI is effective when a workgroup amortizes its directory across packet consumers;
@@ -870,6 +873,225 @@ Dawn checker compile that required path. The B8 500-step exact hash remains unch
 the three-step moving-solid/injection lane and production ocean trajectory pass with
 zero validation faults. A same-frame FSM-driven theta or pressure-membership refresh
 now calls `dfrm1MarkRow` directly, closing the bit-identical-pressure projection gap.
-The next deletion candidate is the remaining private catalogue in sharpening or
-another stage whose exact access order is already representable by the shared packet
-and row operators.
+The next deletion candidate is another stage whose exact access order is already
+representable by the shared packet and row operators.
+
+Sharpening no longer owns a private packet catalogue. Reusing TPA family 0 removes
+eight bytes per stable packet without adding a list, stamp, indirect buffer or
+fallback. A prepare/scatter fusion was implemented during the cut but removed before
+the wrap-up: the storage deletion is the clear result, while eliminating the global
+phase boundary was not needed to obtain it. The final tree therefore retains the two
+numerical passes and dense receipt/delta clears.
+
+The final post-rollout B8/P8 repeat-two oracle is deterministic over 500 steps with
+combined SHA-256
+`6b886461682152d3127f5bb979f3b469b13229cbd7dc7f3b525fbbe9def0a40b`.
+This differs from the Phase-1-only `9289e7...` receipt, so the aggregate Phase-2
+tree must not be described as bit-identical to that earlier boundary. The shift was
+not isolated during wrap-up; it spans the later projection/gamma/sharpening rollout
+and the same-frame DFRM membership-root correction. Treat the new receipt as a
+deterministic current boundary, not proof of parity with Phase 1.
+
+The follow-on TPA cut collapses three initially identical transport catalogues into
+one canonical compact image. The former layout used
+`24 + 12 * stablePacketCapacity + 6 * directPacketCount` words; the accepted layout
+uses `3 + 11 * directPacketCount` words for one indirect triple, compact transport
+and sharpening masks, one compact ordinal list and the existing six gamma words.
+At B8/P8 this is 8,355,936 -> 901,132 bytes, a 7,454,804-byte (89.22%) reduction;
+the separate indirect buffer shrinks from 36 to 12 bytes.
+
+Unique compact-ordinal compilation fully overwrites every owned mask word, so family
+generation, stamps, fault/dedup headers and begin/clear/finalize kernels are deleted.
+The host clears only the count word, runs one compact compiler and copies one
+`[count, 1, 1]` indirect record. Trace, deficit scatter, conservative gather and
+gamma compilation consume the same list; sharpening uses a separate compact physical
+mask through that same selected-list indirect dispatch, preserving the trace-time
+coarse-cell closure without mutating the transport mask still needed by later passes.
+The final B8/P8 repeat-two receipt is
+bit-identical to the immediate pre-cut boundary at
+`6b886461682152d3127f5bb979f3b469b13229cbd7dc7f3b525fbbe9def0a40b`.
+
+The first compact arm exposed a scheduling defect rather than an ABI defect: one
+workgroup per compact ordinal scrambled atomic append order, while direct sharpening
+launched all 20,480 B8 packets although only 7,520 (36.72%) were selected. The final
+compiler processes 64 adjacent compact ordinals per workgroup and sharpening reuses
+the same selected-list indirect dispatch. This restores locality without a
+count/prefix/scatter authority tower or any additional storage.
+
+Matched B8/P8 hardware timing for the locality-corrected arm reports TPA construction
+at 0.1311 / 0.1311 ms median/p95 versus 0.1966 / 0.5898 ms before the cut. Gamma is
+1.8350 / 2.2938 ms versus 2.6214 / 4.7841 ms, and the complete non-pressure total is
+36.6346 / 40.9600 ms versus 39.2561 / 46.2029 ms. Conservative transport remains a
+mixed signal: 5.1118 / 9.6338 ms versus 3.3423 / 10.2236 ms, a worse median but a
+better p95. The pre-cut capture also came from a different dirty source fingerprint
+whose authoritative pressure population collapsed late in the run; three independent
+healthy 24-frame receipts reproduce the current stable pressure trajectory. Its
+whole-frame p95 is therefore not used as TPA evidence. The accepted claim is the exact
+storage/control-plane deletion, faster construction, improved non-pressure total and
+unchanged immediate-boundary B8 physics—not a uniform improvement of every substage.
+
+## 16. Canonical PCM publication directly into PEI
+
+Production PAB was a duplicate image, not an independent authority. It materialized
+`pcmCellRankSelect(rank)` into an activity-buffer list, then
+`publishFrozenPressureCells` immediately copied the same strictly increasing cell
+stream into PEI. The accepted cut removes both PAB modules, its construction A/B
+factories, five shader entry points, production lifecycle pipelines, indirect and
+readback buffers, diagnostics, probe/check/report tools and integration document.
+
+PEI now begins after cell PCM, direct row membership, and pressure coefficients accept,
+snapshots their generations and publishes the canonical cell dispatch triplet. The host
+copies that triplet to the pressure-cell
+indirect, and `publishFrozenPressureCells` writes `pcmCellRankSelect(rank)` directly
+into PEI together with the frozen brick owner and diagonal. Membership is rebuilt
+from that sorted image, PEI finalization revalidates topology, PCM, and pressure-coefficient generations,
+and the finalized cell triplet is copied again so a fault still suppresses every
+solve consumer. There is no verifier tower and no fallback addressing mode.
+
+The post-cut B8/P8 repeat-two digest remains
+`6b886461682152d3127f5bb979f3b469b13229cbd7dc7f3b525fbbe9def0a40b`.
+The three-step ocean and moving-solid/injection Dawn lanes pass with identical
+pressure populations and zero faults. Allocation falls from 475,142,340 to
+473,137,976 bytes, a 2,004,364-byte (1.9115 MiB) reduction. Matched pressure-topology
+timing is 6.6191 / 7.2090 ms median/p95 versus 6.6191 / 7.2745 ms; this is primarily
+a code/storage/lifecycle deletion, not a large kernel-speed claim. The durable
+receipt is `artifacts/sparse-cm12-ocean-b8-p8-post-pab-stage-cost.json`.
+
+## 17. Fine pressure coefficients: direct PEI publication
+
+The first pressure-topology timing split shows where the remaining lifecycle costs
+land on B8/P8: PCM row publication and PEI publication are each 2.1627 ms median,
+while fine PCF repair is only 0.3277 ms. PCF nevertheless repairs about 1,514 of
+1,957 cell leaves per frame after roughly 0.9 million producer events, so its
+incremental fine authority is nearly full-domain and owns almost 10 MiB of mirrors,
+dirty tokens, stamps and lists. The durable pre-cut receipt is
+`artifacts/sparse-cm12-ocean-b8-p8-pre-pcf-direct-stage-cost.json`.
+
+The selected next cut keeps PTR, cell PCM, row membership and sparse PCA
+coarse/hierarchy repair. PTR is not redundant: it alone retains old topology ranges
+needed to clear retired cells and build transition incidence closure. Fine PCF is
+replaced by direct coefficient
+publication over the canonical PEI cell stream. Current cells overwrite their owned
+directed edges and diagonal using the existing edge/incidence loop order; cells present
+only in the previous PEI image have their outgoing edges and diagonal zeroed. Bitwise
+changes root the retained PCA worksets. This deletes the broad fine event fanout and
+dirty-leaf lifecycle without forcing an unconditional rebuild of the sparse coarse
+families.
+
+The first direct arm deleted the previous diagonal mirror as well. That was exact but
+made retained PCA execute about 1,430 brick reductions instead of roughly 410: the
+live diagonal plane is deliberately reused for conditioned density before pressure,
+so it cannot serve as change history. The final cut retains only one compact previous-
+diagonal word per cell. PCA brick work then returns exactly to the pre-cut per-frame
+trajectory while every other fine-PCF plane and lifecycle remains deleted.
+
+Final B8/P8 results are exact over the 500-step repeat-two oracle and both short Dawn
+behavior lanes. Allocation falls from 473,137,976 to 465,248,300 bytes, a 7,889,676-
+byte reduction. Pressure-topology timing is 6.9468 / 7.2745 ms median/p95 versus
+6.8813 / 7.2745 ms before the cut: identical p95 and a median difference of one
+65.536 us timestamp quantum. PCM row publication improves from 2.1627 / 2.8180 to
+2.0316 / 2.4904 ms, and PEI publication from 2.1627 / 2.4904 to
+1.9661 / 2.0972 ms. The durable final receipt is
+`artifacts/sparse-cm12-ocean-b8-p8-post-pcf-direct-stage-cost.json`.
+
+## 18. Direct pressure-row membership image
+
+The post-PCF timing receipt shows that incremental row membership is no longer sparse:
+5,185 of 5,733 row leaves are dirty in a typical B8/P8 ocean frame, and the
+`pcm-row-publication` seam costs 2.0316 / 2.4904 ms median/p95. Its stable row rank
+list is not consumed by production; the only encoded consumer was the unused
+`projectFaces` entry point. Live DFRM projection and direct coefficient publication
+need only membership bits, row generation, phase/fault and count.
+
+The accepted cut keeps cell PCM and PTR but replaces the row candidate tokens, dirty
+stamps/list, count tree, rank selector and repair indirect with one completely
+overwritten stable-row bit image. One 64-lane workgroup classifies 64 stable row slots
+in the original per-row term order and publishes two complete membership words. When
+the accepted topology generation and every referenced scalar fact are unchanged, the
+row reuses its previous theta and membership; changed scalar, membership or theta facts
+root DFRM directly. PTR still brackets the candidate/accepted row generation, but no
+longer writes a second candidate catalogue. The unused `projectFaces`, row invocation
+helpers, bootstrap row indirect, row repair kernels and row checker coverage are
+deleted; there is no compatibility path.
+
+B8/P8 allocation falls from 465,248,300 to 459,308,064 bytes, an exact 5,940,236-byte
+reduction including the removed 12-byte indirect slot. The retained logical row bitset
+is 183,428 bytes. Matched hardware timing improves row publication from
+2.0316 / 2.4904 to 1.1796 / 1.2452 ms and the full pressure-topology stage from
+6.9468 / 7.2745 to 6.0948 / 6.1604 ms median/p95. All 24 per-frame accepted-cell,
+accepted-row, pressure, PTR and PCA work tuples match the pre-cut receipt exactly, as
+does terminal pressure physics. The B8 repeat-two digest remains
+`6b886461682152d3127f5bb979f3b469b13229cbd7dc7f3b525fbbe9def0a40b`; adaptive
+ocean and moving-solid/injection lanes pass with zero faults. The durable receipt is
+`artifacts/sparse-cm12-ocean-b8-p8-post-pcm-row-direct-stage-cost.json`.
+
+## 19. Parallel stable PEI compaction
+
+After direct row publication, the isolated `pei-publication` seam still cost
+1.9661 ms median and p95. The cost was not cell publication: the PEI finalizer was
+one invocation serially testing every brick and hierarchy group, clearing inactive
+coarse state, and materializing the live solve lists. Those compact lists must remain;
+direct full-capacity coarse dispatch would multiply empty work across all 64 pressure
+iterations, while PCA lists contain only changed entities rather than the complete live
+solve domain.
+
+The finalizer is now one 64-lane workgroup. It scans stable brick and hierarchy slots
+in 64-item chunks, performs a fixed barrier prefix inside each chunk, carries one
+compact base between chunks, and writes the same ascending brick IDs and hierarchy
+tokens as the old serial loop. Inactive entities still have one unique deactivation
+owner, and the original generation revalidation and fail-closed indirect publication
+remain unchanged. This adds no storage, host dispatch, atomic append, prefix tower or
+fallback mode.
+
+Matched B8/P8 timing improves `pei-publication` from 1.9661 / 1.9661 to
+0.1966 / 0.2621 ms and the full pressure-topology stage from 6.0948 / 6.1604 to
+4.1943 / 4.2598 ms median/p95. All 24 pressure, PTR and PCA work receipts and terminal
+physics are identical, and the repeat-two digest is unchanged. The durable receipt is
+`artifacts/sparse-cm12-ocean-b8-p8-post-pei-parallel-stage-cost.json`.
+
+## 20. PTR row-family retirement
+
+Direct row publication also makes PTR's row family semantically empty. Changed-brick
+repair still needs to publish cell PCM closure, but it no longer needs to build row
+candidate generations: every stable row is classified and overwritten immediately
+after cell PCM accepts. The retained row PTR kernels were therefore only copying
+receipt generations through a second candidate/bit/stamp/list/tree/execution tower.
+
+The accepted cut deletes that complete row family, its three indirect-copy slots,
+row seed/repair/reduction/plan/work kernels, row incidence markers and synthetic row
+diagnostics. PTR retains its old/new brick state journal, brick repair family and cell
+transition publication. After direct row finalization, one
+`sealSparseCM12PressureTopologyRowImage` invocation checks the captured topology,
+accepted cell/row generations and coefficient candidate generation, then publishes
+the existing brick-state commit readiness. The indirect buffer now contains only
+brick seed, brick repair, brick work and commit triplets.
+
+B8/P8 allocation falls from 459,308,064 to 447,291,388 bytes, removing
+12,016,676 bytes. The production WGSL census falls from 603 to 588 entry points over
+the three compiled B/P variants. Matched pressure topology is
+4.1288 / 4.1943 ms median/p95 versus 4.1943 / 4.2598 ms before the cut; direct row
+publication is effectively flat within one timestamp quantum. All comparable
+per-frame pressure, retained PTR and PCA work receipts match, terminal physics is
+identical, the repeat-two hash is unchanged, and the moving-solid/injection topology
+transition lane passes. The durable receipt is
+`artifacts/sparse-cm12-ocean-b8-p8-post-ptr-row-retirement-stage-cost.json`.
+
+## 21. Wrap-up and restart point
+
+The main architectural result is deletion, not another control plane: VEX frontier
+planning, FPA projection authority, DCA dynamic closure and PTR row repair are gone;
+sharpening now reuses a shared TPA mask instead of owning another pair of stable packet planes.
+Production composition requires ITR/TPA/TPM/DFRM and has no no-op DFRM specialization.
+The dense face-support plane remains because the direct TEI sampler was substantially
+slower. Pressure retains canonical **cell** PCM rank order because the tested
+global/tiled reorders did not repay their extra work; row membership is a direct stable
+bit image and PEI is the only materialized solve list.
+
+When work resumes:
+
+1. Keep PTR's old/new brick journal and cell-transition closure, cell PCM while its
+   dirty-cell frontier remains materially sparse, and PCA while its changed-entity
+   worksets remain narrow. The next cut should come from a newly measured hot seam,
+   not from replacing these sparse authorities with full-capacity scans.
+2. Keep the rejected dense-face and pressure-tile arms deleted. Revisit them only
+   with a materially different data layout or operator-local reuse proof.

@@ -713,12 +713,6 @@ try {
           + `FSM=${fsm.phase}/${fsm.fault}/${fsm.generation}`);
       }
       if (debugProgress) {
-        const pab = await solver!.readPressureAddressingHeaderQA();
-        debug(`capture ${step} PAB phase=${pab.phase} fault=${pab.fault} `
-          + `generation=${pab.materializedPCMGeneration}/${pab.expectedPCMGeneration} `
-          + `count=${pab.materializedCount}/${pab.expectedCount} `
-          + `executions=${pab.materializedExecutions}/${pab.verifiedExecutions} `
-          + `accepted=${pab.acceptedReceipts}`);
         debug(`capture ${step} acceptedIndirect=${
           (await solver!.readAcceptedIndirectQA()).join(",")}`);
         debug(`capture ${step} FCAIndirect=${

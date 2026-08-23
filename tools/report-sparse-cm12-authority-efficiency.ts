@@ -55,7 +55,6 @@ interface AuthorityReceipt {
 const authorityReceipts = (authoritiesValue: unknown): readonly AuthorityReceipt[] => {
   const authorities = record(authoritiesValue, "pressure authorities");
   return [
-    { id: "PCF1", words: record(authorities.pcf, "PCF receipt") },
     { id: "PCA1", words: record(authorities.pca, "PCA receipt") },
   ];
 };

@@ -8,9 +8,11 @@ import { sparseCM12PressureTopologyAttribution } from
 
 const pcm = (generation = 12, fault = 0) => ({
   cell: { phase: 1, fault, firstFault: 0xffff_ffff, dirtyCount: 3,
-    totalCount: 80, candidateGeneration: generation, acceptedGeneration: generation },
+    directWriteCount: 80, totalCount: 80,
+    candidateGeneration: generation, acceptedGeneration: generation },
   row: { phase: 1, fault, firstFault: 0xffff_ffff, dirtyCount: 5,
-    totalCount: 140, candidateGeneration: generation, acceptedGeneration: generation },
+    directWriteCount: 5, totalCount: 140,
+    candidateGeneration: generation, acceptedGeneration: generation },
 });
 const work = { acceptedCellCount: 100, acceptedRowCount: 220,
   pressureCellCount: 80, pressureActiveRowCount: 140, pcm: pcm() };
@@ -53,7 +55,7 @@ const chip = adaptiveMassPressureTopologyChip({
 });
 assert.match(chip, /Input topology gen 17 · prior commit 4 bricks/);
 assert.match(chip, /Matched work: accepted 100 cells \/ 220 rows/);
-assert.match(chip, /PCM gen 12\/12 · dirty leaves 3\/5 · matched/);
+assert.match(chip, /PCM gen 12\/12 · cell dirty leaves 3 · row words 5 · matched/);
 assert.match(chip, /End-frame → topology gen 18 · 2 committed bricks \(next repair input\)/);
 
 console.log("Sparse CM12 pressure-topology attribution: PASS");

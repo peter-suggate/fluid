@@ -9,8 +9,6 @@ import { createSparseCM12FrameControl } from
   "../lib/methods/adaptive-mass/sparse-cm12-frame-control";
 import { createSparseCM12PressureTopologyRepairLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
-import { createSparseCM12ProductionPressureAddressingLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-pressure-addressing-ab";
 import { createSparseCM12FinalScalarPacketMaskLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-final-scalar-packet-masks";
 
@@ -61,16 +59,12 @@ test("Sparse CM12 production authority ABIs admit matched B4/P4", () => {
     ...profile, cellWorkgroups: 1, rowWorkgroups: 1,
   });
   const pressureRepair = createSparseCM12PressureTopologyRepairLayout({
-    ...profile, baseWords: frame.layout.totalWords, brickCapacity: 8, rowCapacity: 32,
-  });
-  const pressureAddressing = createSparseCM12ProductionPressureAddressingLayout({
-    ...profile, baseWords: pressureRepair.totalWords, cellCapacity: 64,
+    ...profile, baseWords: frame.layout.totalWords, brickCapacity: 8,
   });
   const finalScalarMasks = createSparseCM12FinalScalarPacketMaskLayout({
     brickFineResolution: 4, packetCapacity: 64,
   });
   assert.ok(pressureRepair.totalWords > frame.layout.totalWords);
-  assert.ok(pressureAddressing.totalWords > pressureRepair.totalWords);
   assert.equal(frame.layout.brickFineResolution, 4);
   assert.equal(frame.layout.presentationPageResolution, 4);
   assert.equal(finalScalarMasks.maximumPacketsPerLeaf, 1);

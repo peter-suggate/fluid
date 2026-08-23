@@ -142,8 +142,9 @@ export function adaptiveMassPressureTopologyChip(
     + `${receipt.pressureCellCount.toLocaleString()} / `
     + `${receipt.pressureActiveRowCount.toLocaleString()}`;
   const pcm = `PCM gen ${receipt.pcmCellAcceptedGeneration}/`
-    + `${receipt.pcmRowAcceptedGeneration} · dirty leaves `
-    + `${receipt.pcmCellDirtyLeafCount}/${receipt.pcmRowDirtyLeafCount}`
+    + `${receipt.pcmRowAcceptedGeneration} · cell dirty leaves `
+    + `${receipt.pcmCellDirtyLeafCount} · row words `
+    + `${receipt.pcmRowPublishedWordCount}`
     + ` · ${receipt.pcmMatched ? "matched" : "FAULT/INCOMPLETE"}`;
   const authorities = formatSparseCM12PressureCutoverAuthorities(
     receipt.authorities, receipt.inputTopologyGeneration,
@@ -346,7 +347,33 @@ export const SPARSE_CM12_STAGES = Object.freeze({
   },
   "pressure-topology": {
     label: "Pressure topology", band: "pressure", side: "left",
-    phase: { id: "pressure-system", label: "Composite pressure topology + ghost-fluid rows" },
+    phase: { id: "pressure-system", label: "Pressure topology stage remainder" },
+    substages: {
+      "ptr-setup-brick-plan": {
+        id: "pressure-system", label: "PTR setup, seed and brick plan",
+      },
+      "pcm-cell-publication": {
+        id: "pressure-system", label: "PCM canonical cell publication",
+      },
+      "pcm-row-publication": {
+        id: "pressure-system", label: "Direct pressure-row membership publication",
+      },
+      "pca-fine-publication": {
+        id: "pressure-system", label: "PEI direct coefficients + PCA frontier",
+      },
+      "pca-coarse-repair": {
+        id: "pressure-system", label: "PCA brick + aggregate-edge repair",
+      },
+      "pca-hierarchy-and-freeze": {
+        id: "pressure-system", label: "PCA hierarchy repair + frozen coarse publication",
+      },
+      "pei-publication": {
+        id: "pressure-system", label: "PEI canonical pressure publication",
+      },
+      "ptr-commit-and-prepare-pressure": {
+        id: "pressure-system", label: "PTR commit, reopen + pressure preparation",
+      },
+    },
     lens: null,
     tip: {
       summary: "Incremental. Seeds the persistent pressure cache and the bounded topology repair from the prior accepted generation, classifies only changed cells and rows — bootstrap plus dirty worklists — with ghost-fluid theta at sparse air, repairs the brick, aggregate-edge and hierarchy caches, and assembles one symmetric GᵀWG operator across regular and 2:1 faces. Its timestamp is attributed to the topology generation accepted at the end of the prior advance; this advance's later commit is reported separately as next-frame input.",

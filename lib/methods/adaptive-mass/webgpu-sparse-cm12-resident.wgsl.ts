@@ -43,11 +43,10 @@ import type { SparseCM12DirtyFaceRowMaskLayout } from
   "./sparse-cm12-dirty-face-row-masks";
 import { createSparseCM12DirtyFaceRowMaskWGSL } from
   "./sparse-cm12-dirty-face-row-masks.wgsl";
-import type { SparseCM12PressureAddressingABLayout,
-  SparseCM12PressureAddressingABModeName } from
-  "./sparse-cm12-pressure-addressing-ab";
-import { createSparseCM12PressureAddressingABWGSL } from
-  "./sparse-cm12-pressure-addressing-ab.wgsl";
+import type { SparseCM12PressureExecutionImageLayout } from
+  "./sparse-cm12-pressure-execution-image";
+import { createSparseCM12PressureExecutionImageWGSL } from
+  "./sparse-cm12-pressure-execution-image.wgsl";
 import type { SparseCM12LogicalOwnerDirectoryLayout } from
   "./sparse-cm12-logical-owner-directory";
 import { createSparseCM12LogicalOwnerDirectoryWGSL } from
@@ -142,9 +141,7 @@ export function createWebgpuSparseCM12ResidentWGSL(
     activity: SparseCM12VelocityExtensionLayout;
     state: SparseCM12VelocityExtensionStateLayout;
   }>,
-  pressureAddressingABLayout?: SparseCM12PressureAddressingABLayout,
-  pressureAddressingFixedMode?: SparseCM12PressureAddressingABModeName,
-  pressureExecutionQAOracle = false,
+  pressureExecutionImageLayout?: SparseCM12PressureExecutionImageLayout,
   logicalOwnerDirectory?: {
     readonly layout: SparseCM12LogicalOwnerDirectoryLayout;
     readonly baseWords: number;
@@ -175,6 +172,7 @@ export function createWebgpuSparseCM12ResidentWGSL(
   topologyEffectsAuthorityLayout?: SparseCM12TopologyEffectsAuthorityLayout,
   finalScalarPacketMaskLayout?: SparseCM12FinalScalarPacketMaskLayout,
   dirtyFaceRowMaskLayout?: SparseCM12DirtyFaceRowMaskLayout,
+  pressureFineEdgeImageBaseWords?: number,
 ): string {
   if (presentationPageResolution > brickFineResolution
     || brickFineResolution % presentationPageResolution !== 0) {
@@ -183,9 +181,19 @@ export function createWebgpuSparseCM12ResidentWGSL(
   if (!internedBoundaryImage || !dirtyFaceRowMaskLayout) {
     throw new Error("Sparse CM12 production WGSL requires compiled ITR and DFRM layouts");
   }
-  if (internedBoundaryImage
-    && (!transportPacketAuthorityLayout || !transportProducerMaskLayout)) {
-    throw new Error("ITR1 production composition requires TPA1 and TPM1");
+  if (!transportExecutionImageLayout || !logicalOwnerDirectory
+    || logicalOwnerDirectory.packedOwner16BaseWords === undefined
+    || !transportPacketAuthorityLayout || !transportProducerMaskLayout) {
+    throw new Error("Sparse CM12 production composition requires TEI2, TPA1 and TPM1");
+  }
+  if (!pressureRepairLayout || !canonicalMembershipLayout
+    || !pressureTopologyRepairLayout || !persistentPressureCacheLayout
+    || !pressureExecutionImageLayout || pressureFineEdgeImageBaseWords === undefined
+    || !topologyEffectsAuthorityLayout) {
+    throw new Error("Sparse CM12 pressure composition requires PCM/PTR/PCA/PEI/TFX images");
+  }
+  if (brickFineResolution !== 8 || presentationPageResolution !== 8) {
+    throw new Error("Sparse CM12 production pressure composition is B8/P8");
   }
   const templateLevelCount = Math.log2(brickFineResolution) + 1;
   const candidateCellCount = brickFineResolution ** 3;
@@ -280,60 +288,17 @@ fn cm12PublishTransferredEffectiveVelocity(cell:u32,velocity:vec3f){
       + "vec3f(state[at],state[at+1u],state[at+2u]));"
     : "cm12PublishTransferredEffectiveVelocity(cell,"
       + "vec3f(state[at],state[at+1u],state[at+2u]));";
-  const canonicalMembershipEntries = canonicalMembershipLayout
-    ? createSparseCM12CanonicalMembershipWGSL({
-      layout: canonicalMembershipLayout,
-      arenaName: "activity",
-      workgroupSize: 64,
-    })
-    : /* wgsl */ `
-fn pcmCellBegin(expected:u32)->bool{_=expected;return true;}
-fn pcmRowBegin(expected:u32)->bool{_=expected;return true;}
-fn pcmCellSetCandidate(id:u32,enabled:bool,cause:u32,closure:bool)->bool{
-  _=id;_=enabled;_=cause;_=closure;return true;
-}
-fn pcmRowSetCandidate(id:u32,enabled:bool,cause:u32,closure:bool)->bool{
-  _=id;_=enabled;_=cause;_=closure;return true;
-}
-fn pcmCellFinalizeFrontier()->bool{return true;}
-fn pcmRowFinalizeFrontier()->bool{return true;}
-fn pcmCellFinalize()->bool{return true;}
-fn pcmRowFinalize()->bool{return true;}
-fn pcmCellRankSelect(_rank:u32)->u32{return INVALID;}
-fn pcmRowRankSelect(_rank:u32)->u32{return INVALID;}
-fn pcmCellContains(_id:u32)->bool{return false;}
-fn pcmRowContains(_id:u32)->bool{return false;}
-fn pcmCellAcceptedCount()->u32{return 0u;}
-fn pcmRowAcceptedCount()->u32{return 0u;}
-fn pcmCellBootstrapEpoch()->bool{return true;}
-fn pcmRowBootstrapEpoch()->bool{return true;}
-fn pcmCellCandidateGeneration()->u32{return 1u;}
-fn pcmRowCandidateGeneration()->u32{return 1u;}
-fn pcmCellFault()->u32{return 0u;}
-fn pcmRowFault()->u32{return 0u;}
-fn pcmCellFirstFault()->u32{return INVALID;}
-fn pcmRowFirstFault()->u32{return INVALID;}
-fn pcmCellPhase()->u32{return 1u;}
-fn pcmRowPhase()->u32{return 1u;}
-fn pcmCellDirtyCount()->u32{return 0u;}
-fn pcmRowDirtyCount()->u32{return 0u;}
-fn pcmCellAcceptedGeneration()->u32{return 0u;}
-fn pcmRowAcceptedGeneration()->u32{return 0u;}
-`;
-  const pressureRepairEntries = pressureRepairLayout ? /* wgsl */ `
+  const canonicalMembershipEntries = createSparseCM12CanonicalMembershipWGSL({
+    layout: canonicalMembershipLayout,
+    arenaName: "activity",
+    workgroupSize: 64,
+  });
+  const pressureRepairEntries = /* wgsl */ `
 const PRESSURE_REPAIR_HEADER:u32=${pressureRepairLayout.headerBaseWords}u;
 const PRESSURE_REPAIR_CELL_FIRST_FAULT:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.cellFirstFault}u;
 const PRESSURE_REPAIR_ROW_FIRST_FAULT:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.rowFirstFault}u;
 const PRESSURE_REPAIR_FAULT:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.fault}u;
 const PRESSURE_BOOTSTRAP_CELL_INDIRECT:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.bootstrapCellIndirect}u;
-const PRESSURE_BOOTSTRAP_ROW_INDIRECT:u32=${SPARSE_CM12_PRESSURE_REPAIR_HEADER.bootstrapRowIndirect}u;
-` : /* wgsl */ `
-const PRESSURE_REPAIR_HEADER:u32=0u;
-const PRESSURE_REPAIR_CELL_FIRST_FAULT:u32=0u;
-const PRESSURE_REPAIR_ROW_FIRST_FAULT:u32=1u;
-const PRESSURE_REPAIR_FAULT:u32=2u;
-const PRESSURE_BOOTSTRAP_CELL_INDIRECT:u32=3u;
-const PRESSURE_BOOTSTRAP_ROW_INDIRECT:u32=6u;
 `;
   const frameControlEntries = frameControlLayout
     ? createSparseCM12FrameControlWGSL({
@@ -360,39 +325,20 @@ fn cm12FCInvalidateD4(cause:u32,owner:u32)->bool{_=cause;_=owner;return true;}
 fn cm12FCInvalidateD4Authorized(cause:u32,owner:u32,
  generation:u32,sealed:bool){_=cause;_=owner;_=generation;_=sealed;}
 `;
-  const pressureAddressingABEntries = pressureAddressingABLayout
-    ? createSparseCM12PressureAddressingABWGSL({
-      layout: pressureAddressingABLayout, arenaName: "activity", workgroupSize: 64,
-      fixedMode: pressureAddressingFixedMode,
-    })
-    : /* wgsl */ `
-fn pabPressureCellAddress(rank:u32)->u32{return pcmCellRankSelect(rank);}
-`;
-  const pressureTopologyRepairEntries = pressureTopologyRepairLayout
-    ? createSparseCM12PressureTopologyRepairWGSL({
+  const pressureExecutionImageEntries = createSparseCM12PressureExecutionImageWGSL({
+    layout: pressureExecutionImageLayout,
+    arenaName: "fineSamples",
+    sourcePrefix: "peiSource",
+  });
+  const pressureTopologyRepairEntries = createSparseCM12PressureTopologyRepairWGSL({
       layout: pressureTopologyRepairLayout, arenaName: "topologyArena",
       prefix: "ptr", workgroupSize: 64,
-      preflightedTopologyPublication: topologyEffectsAuthorityLayout !== undefined,
     }) + /* wgsl */ `
 fn ptrResidentTopologyDeltaReady()->bool{return ptrHeaderValid()
   &&atomicLoad(&topologyArena[ptrH_PHASE])==ptrPhaseCollecting
   &&atomicLoad(&topologyArena[ptrH_FAULT])==0u;}
-${topologyEffectsAuthorityLayout ? "" :
-  "fn ptrSealPreflightedTopologyJournalNoFail(generation:u32){_=generation;}"}
-`
-    : /* wgsl */ `
-const ptrH_COVERED_PRODUCER_RECEIPTS:u32=0u;
-fn ptrRecordChangedBrick(brick:u32,oldState:u32,newState:u32,cause:u32,
- receipt:bool)->bool{_=brick;_=oldState;_=newState;_=cause;_=receipt;return true;}
-fn ptrSealTopologyJournal(expected:u32,topologyGeneration:u32)->bool{
- _=expected;_=topologyGeneration;return true;}
-fn ptrRejectTopologyJournal()->bool{return true;}
-fn ptrResidentTopologyDeltaReady()->bool{return true;}
-fn ptrSealPreflightedTopologyJournalNoFail(generation:u32){_=generation;}
 `;
-  const topologyEffectsEntries = topologyEffectsAuthorityLayout
-    && pressureTopologyRepairLayout
-    ? /* wgsl */ `
+  const topologyEffectsEntries = /* wgsl */ `
 fn tfxPTRTargetGeneration()->u32{
  return atomicLoad(&topologyArena[ptrH_CANDIDATE_GENERATION]);}
 fn tfxPTRReady(generation:u32,newCount:u32,newLeafCount:u32)->bool{
@@ -435,39 +381,20 @@ fn authorizeEmptySparseCM12CandidateEffectsNoFail(acceptedGeneration:u32)->bool{
  if(!exactEmpty){return false;}
  tfxAuthorize();_=acceptedGeneration;return true;
 }
-` : /* wgsl */ `
-fn tfxRecordPTRBrick(brick:u32,oldState:u32,newState:u32,cause:u32)->bool{
- _=brick;_=oldState;_=newState;_=cause;return true;}
-fn residentTopologyEffectsPreflightReady()->bool{return true;}
-fn authorizeEmptySparseCM12CandidateEffectsNoFail(acceptedGeneration:u32)->bool{
- _=acceptedGeneration;return true;}
-fn tfxAuthorize(){}
-fn tfxPublished()->bool{return true;}
 `;
-  const persistentPressureCacheEntries = persistentPressureCacheLayout
-    ? createSparseCM12PersistentPressureCacheWGSL({
+  const persistentPressureCacheEntries = createSparseCM12PersistentPressureCacheWGSL({
       layout: persistentPressureCacheLayout,
       arenaName: "topologyArena",
       cellContainsFunction: "pcmCellContains",
       rowContainsFunction: "pcmRowContains",
       solidRowScaleFunction: "pcfResidentSolidRowScale",
+      ordinaryEdgeStorage: {
+        arrayName: "candidateState",
+        baseWords: pressureFineEdgeImageBaseWords!,
+      },
       workgroupSize: 64,
     })
-    : /* wgsl */ `
-fn pcfBegin(expectedEvents:u32)->bool{_=expectedEvents;return true;}
-fn pcfFinalizeFrontier()->bool{return true;}
-fn pcfRecordCellMembershipEvent(cell:u32)->bool{_=cell;return true;}
-fn pcfRecordTopologyCellEvent(cell:u32)->bool{_=cell;return true;}
-fn pcfStoreThetaAndRecord(row:u32,theta:f32)->bool{_=row;_=theta;return true;}
-fn pcfEdgeWeight(edge:u32)->f32{_=edge;return 0.0;}
-fn pcfStoreEdgeWeight(edge:u32,value:f32){_=edge;_=value;}
-fn pcfDiagonal(cell:u32)->f32{_=cell;return 0.0;}
-fn pcfCandidateGeneration()->u32{return 0u;}
-fn pcfAcceptedGeneration()->u32{return 0u;}
-fn pcfCaptureConsumerGenerations(){}
-fn pcfBrickWorkCount()->u32{return 0u;}
-fn pcfBrickRankSelect(rank:u32)->u32{_=rank;return INVALID;}
-`;
+    ;
   const logicalOwnerEntries = logicalOwnerDirectory
     ? createSparseCM12LogicalOwnerDirectoryWGSL({
       layout: logicalOwnerDirectory.layout,
@@ -489,108 +416,23 @@ fn cm12PackedLogicalOwner16AtKey(key:u32)->u32{
 }`;
   const packedLogicalOwnerLookup = logicalOwnerDirectory?.packedOwner16BaseWords === undefined
     ? "" : "if(EXP_PACKED_LOGICAL_OWNER16){return cm12PackedLogicalOwner16AtKey(key);}";
-  const transportExecutionImageEntries = transportExecutionImageLayout
-    && logicalOwnerDirectory?.packedOwner16BaseWords !== undefined
-    ? createSparseCM12TransportExecutionImageWGSL({
-      layout: transportExecutionImageLayout,
-      packedLogicalOwner16BaseWords: logicalOwnerDirectory.packedOwner16BaseWords,
-    }) : /* wgsl */ `
-struct CM12TransportLeaf{generation:u32,flags:u32,first:u32,count:u32,
-  originKey:u32,valid:vec3u,scale:u32,scaleLog2:u32}
-struct CM12TransportOwner{cell:u32,widths:vec3u,volume:u32}
-struct CM12TransportPacket{first:u32,counts:vec3u,strideY:u32,strideZ:u32}
-struct CM12TransportSpatialTile{packetId:u32,laneMask:vec2u}
-fn cm12TeiLogicalCoordinate(key:u32)->vec3u{
-  let dimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
-    /BRICK_FINE_RESOLUTION;let xy=dimensions.x*dimensions.y;
-  let z=key/xy;let remainder=key-z*xy;let y=remainder/dimensions.x;
-  return vec3u(remainder-y*dimensions.x,y,z);
-}
-fn cm12TeiLogicalKey(q:vec3u)->u32{
-  let dimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
-    /BRICK_FINE_RESOLUTION;
-  return q.x+dimensions.x*(q.y+dimensions.y*q.z);
-}
-fn cm12TeiLoadLeaf(_slot:u32,brick:u32)->CM12TransportLeaf{
-  if(brick>=p.dispatch.w||!brickActive(brick)){return CM12TransportLeaf(
-    0u,0u,0xffffffffu,0u,0xffffffffu,vec3u(0u),0u,0u);}
-  let resolution=acceptedBrickResolution(brick);let span=brickSpan(brick);
-  let scale=BRICK_FINE_RESOLUTION*span/resolution;
-  let key=topology[p.topologyOffsets2.z+2u*brick+1u];
-  let origin=cm12TeiLogicalCoordinate(key)*BRICK_FINE_RESOLUTION;
-  let extent=min(vec3u(BRICK_FINE_RESOLUTION*span),
-    p.dimensions.xyz-min(origin,p.dimensions.xyz));
-  let range=templateBrickCellRange(brick,resolution);
-  return CM12TransportLeaf(1u,resolution|0x80000000u,range.x,range.y,key,
-    (extent+vec3u(scale-1u))/scale,scale,u32(firstLeadingBit(scale)));
-}
-fn cm12TeiStageDirectory(_origin:vec3u,_lane:u32,_slot:u32){}
-fn cm12TeiOwnerAtFine(_q:vec3i)->CM12TransportOwner{
-  return CM12TransportOwner(0xffffffffu,vec3u(0u),0u);}
-fn cm12TeiPacket(_packet:u32,_slot:u32)->CM12TransportPacket{
-  return CM12TransportPacket(0xffffffffu,vec3u(0u),0u,0u);}
-fn cm12TeiPacketFineOrigin(_packet:u32,_slot:u32)->vec3u{
-  return vec3u(0xffffffffu);}
-fn cm12TeiPacketCell(_packet:u32,_lane:u32,_slot:u32)->u32{return 0xffffffffu;}
-fn cm12TeiLeafLocalPacketAddress(leaf:u32,resolution:u32,local:vec3u)->vec2u{
-  if(resolution==0u){return vec2u(0xffffffffu);}
-  let packetAxis=max(1u,(resolution+3u)/4u);let coordinate=local/4u;
-  let packet=64u*leaf+coordinate.x+packetAxis*(coordinate.y+packetAxis*coordinate.z);
-  let q=local&vec3u(3u);return vec2u(packet,q.x+4u*(q.y+4u*q.z));}
-fn cm12TeiSpatialTile(_tile:u32,_slot:u32)->CM12TransportSpatialTile{
-  return CM12TransportSpatialTile(0xffffffffu,vec2u(0u));}
-fn cm12TeiStagedScaleAtFine(_fine:vec3u)->u32{return 1u;}
-@compute @workgroup_size(64)
-fn compileSparseCM12TransportExecutionImageShadow(
- @builtin(global_invocation_id)_gid:vec3u){}
-@compute @workgroup_size(64)
-fn replaySparseCM12TransportExecutionImageRetired(
- @builtin(global_invocation_id)_gid:vec3u){}`;
-  const transportPacketAuthorityEntries = transportPacketAuthorityLayout
-    ? createSparseCM12TransportPacketAuthorityWGSL({
-      layout: transportPacketAuthorityLayout,
-      arenaName: "activity",
-    })
-    : /* wgsl */ `
-@compute @workgroup_size(1) fn beginSparseCM12TransportPacketAuthority(){}
-@compute @workgroup_size(64) fn clearSparseCM12TransportPacketAuthority(){}
-@compute @workgroup_size(64) fn compileSparseCM12TransportPacketsFromFinalScalarMasks(){}
-@compute @workgroup_size(1) fn finalizeSparseCM12TransportPacketAuthority(){}
-fn cm12TransportPacketCount(family:u32)->u32{_=family;return 0u;}
-fn cm12TransportPacketId(rank:u32,family:u32)->u32{
-  _=rank;_=family;return INVALID;}
-var<workgroup>cm12TransportStagedPacketId:u32;
-var<workgroup>cm12TransportStagedPacketOriginFine:vec3u;
-var<workgroup>cm12TransportStagedTopologySlot:u32;
-fn cm12StageTransportPacket(rank:u32,lane:u32,family:u32){
-  _=rank;_=lane;_=family;}
-fn cm12TransportStagedExecutionCell(lane:u32)->u32{
-  _=lane;return INVALID;}
-fn cm12TransportExecutionCell(rank:u32,lane:u32,family:u32)->u32{
-  _=rank;_=lane;_=family;return INVALID;}
-fn cm12TransportSpatialTileCell(tile:u32,lane:u32)->u32{_=tile;_=lane;return INVALID;}
-fn cm12TransportSpatialTileId(fine:vec3u)->u32{_=fine;return INVALID;}`;
+  const transportExecutionImageEntries = createSparseCM12TransportExecutionImageWGSL({
+    layout: transportExecutionImageLayout,
+    packedLogicalOwner16BaseWords: logicalOwnerDirectory.packedOwner16BaseWords,
+  });
+  const transportPacketAuthorityEntries = createSparseCM12TransportPacketAuthorityWGSL({
+    layout: transportPacketAuthorityLayout,
+    arenaName: "activity",
+  });
   // Production AEI resolves through the staged 27-leaf directory and the
   // dedicated vec4 plane directly. The measured per-site value halo reduced
   // Metal occupancy enough to regress all three transport passes, so it is no
   // longer an experiment or a runtime/build-time choice.
-  const transportProducerMaskEntries = transportProducerMaskLayout
-    ? createSparseCM12TransportProducerMaskWGSL({
-      layout: transportProducerMaskLayout,
-      arenaName: "topologyArena",
-      hookPrefix: "cm12Resident",
-    })
-    : /* wgsl */ `
-@compute @workgroup_size(1) fn beginSparseCM12TransportProducerMasks(){}
-@compute @workgroup_size(1) fn sealSparseCM12TransportProducerMasks(){}
-fn cm12TransportProducerMaskPublish(packet:u32,lane:u32,cell:u32,
- surfaceFeature:bool){
-  _=packet;_=lane;_=cell;_=surfaceFeature;
- }
-fn cm12TransportSharpeningMaskPublish(packet:u32,lane:u32,cell:u32,
- sharpeningSource:bool,cellScale:u32){
-  _=packet;_=lane;_=cell;_=sharpeningSource;_=cellScale;
-}`;
+  const transportProducerMaskEntries = createSparseCM12TransportProducerMaskWGSL({
+    layout: transportProducerMaskLayout,
+    arenaName: "topologyArena",
+    hookPrefix: "cm12Resident",
+  });
   const finalScalarPacketMaskEntries = finalScalarPacketMaskLayout
     ? createSparseCM12FinalScalarPacketMaskWGSL({
       layout: finalScalarPacketMaskLayout,
@@ -926,30 +768,17 @@ fn cm12ISASetExpectedChanged(count:u32,xorHash:u32,sumHash:u32){
 }
 @compute @workgroup_size(1) fn finalizeSparseCM12ISAChangedSetReceipt(){}
 `;
-  const implicitPressureInteriorEntries = internedBoundaryImage ? /* wgsl */ `
-// Resolve the canonical brick descriptor already shared by transport and
-// topology publication.  A non-INVALID result carries the three arithmetic
-// cell strides for a certified strict interior; boundary/seam cells keep the
-// compiled directed-edge path.
+  const implicitPressureInteriorEntries = /* wgsl */ `
+// One construction-compiled nibble certifies the canonical -x,+x,-y,+y,-z,+z
+// neighbour pattern. Zero selects the compiled-neighbour path; codes 1..4
+// encode the B8 rung width as log2(width)+1.
 fn pressureImplicitInteriorStrides(cell:u32)->vec3u{
-  let leaf=cellBrick(cell);let slot=cm12IBOAcceptedSlot();
-  let descriptor=cm12IBOLeafDescriptorId(slot,leaf);
-  if(descriptor==IBO1_INVALID||cm12IBOCanonicalWord(descriptor,0u)==0u){
-    return vec3u(INVALID);}
-  let first=cm12IBOLeafCellFirst(slot,leaf);
-  let dimensions=cm12IBOLeafDimensions(slot,leaf);
-  let count=dimensions.x*dimensions.y*dimensions.z;
-  if(cell<first||cell-first>=count){return vec3u(INVALID);}
-  let local=cell-first;let xy=dimensions.x*dimensions.y;
-  let z=local/xy;let remainder=local-z*xy;
-  let y=remainder/dimensions.x;let x=remainder-y*dimensions.x;
-  if(x==0u||x+1u>=dimensions.x||y==0u||y+1u>=dimensions.y
-    ||z==0u||z+1u>=dimensions.z){return vec3u(INVALID);}
-  return vec3u(1u,dimensions.x,xy);
-}
-` : /* wgsl */ `
-fn pressureImplicitInteriorStrides(cell:u32)->vec3u{
-  _=cell;return vec3u(INVALID);
+  let base=pressureTemplateWord(12u);
+  let packed=pressureTemplateWord(base+(cell>>3u));
+  let code=(packed>>(4u*(cell&7u)))&15u;
+  if(code==0u){return vec3u(INVALID);}
+  let width=1u<<(code-1u);
+  return vec3u(1u,width,width*width);
 }
 `;
   const iboTRAEntries = /* wgsl */ `
@@ -980,8 +809,6 @@ ${createCm12NumericsWGSL()}
 
 const INVALID:u32=0xffffffffu;
 const WORKGROUP:u32=64u;
-const PRESSURE_EXECUTION_QA_ORACLE:bool=${pressureExecutionQAOracle
-  ? "true" : "false"};
 // LOD1 is production. The legacy hash/span ladder remains only as a
 // construction-specialized equivalence and timing oracle.
 const EXP_LOGICAL_OWNER_DIRECTORY:bool=true;
@@ -1094,7 +921,7 @@ ${pressureTopologyRepairEntries}
 ${persistentPressureCacheEntries}
 ${effectiveTransportVelocityEntries}
 ${velocityExtensionEntries}
-${pressureAddressingABEntries}
+${pressureExecutionImageEntries}
 
 fn topologyWorklistBase()->u32{return atomicLoad(&topologyArena[14u]);}
 fn sparseCM12TopologyLifecycleAccepted()->bool{
@@ -1119,33 +946,20 @@ fn acceptedTemplateRowCount()->u32{
 fn acceptedTemplateCellWorkgroups()->u32{
   return atomicLoad(&topologyArena[topologyWorklistBase()+8u]);
 }
-fn acceptedTemplateRowWorkgroups()->u32{
-  return atomicLoad(&topologyArena[topologyWorklistBase()+11u]);
-}
 fn acceptedTemplateCellInvocation(invocation:u32)->u32{
   if(invocation>=acceptedTemplateCellCount()){return INVALID;}
   let base=topologyWorklistBase();
   let offset=atomicLoad(&topologyArena[base+14u+acceptedTopologySlot()]);
   return atomicLoad(&topologyArena[base+offset+invocation]);
 }
-// Binding 15 is the presentation sample arena in ordinary frame passes and a
-// compact ordinary-u32 pressure worklist/neighbor arena in the pressure bind
-// group. Counters are atomic only while compaction is being built; finalized
-// pressure kernels read this immutable snapshot without atomic semantics.
-fn pressureCellCount()->u32{return pcmCellAcceptedCount();}
+// Binding 15 is the presentation sample arena in ordinary frame passes and the
+// pressure aggregate/execution arena in pressure passes. Immutable cell/row/
+// edge topology is shared through binding 14.
+fn pressureCellCount()->u32{return peiPressureCellCount();}
 fn pressureCellWorkgroups()->u32{return (pressureCellCount()+63u)/64u;}
 fn pressureCellInvocation(invocation:u32)->u32{
-  let cell=pabPressureCellAddress(invocation);
-  return select(INVALID,cell,cell!=INVALID&&pcmCellContains(cell)
-    &&cellActive(cell));
+  return peiPressureCell(invocation);
 }
-fn pressureRowCount()->u32{return pcmRowAcceptedCount();}
-fn pressureRowInvocation(invocation:u32)->u32{
-  let row=pcmRowRankSelect(invocation);
-  return select(INVALID,row,row!=INVALID&&pcmRowContains(row)&&rowAccepted(row)
-    &&state[p.stateOffsets3.x+row]>0.0);
-}
-fn pressureNeighborOffset()->u32{return 0u;}
 fn acceptedTemplateRowInvocation(invocation:u32)->u32{
   if(invocation>=acceptedTemplateRowCount()){return INVALID;}
   let base=topologyWorklistBase();
@@ -1195,25 +1009,18 @@ fn pressureEdgeCount()->u32{
   return pressureTemplateWord(pressureTemplateWord(15u)+p.counts.x);
 }
 fn pressureEdgeRows()->u32{return pressureTemplateWord(15u)+p.counts.x+1u;}
-fn pressureEdgeWeights()->u32{return pressureEdgeRows()+pressureEdgeCount();}
+fn pressureEdgeNeighbors()->u32{return pressureEdgeRows()+pressureEdgeCount();}
+fn pressureEdgeWeights()->u32{return pressureEdgeNeighbors()+pressureEdgeCount();}
 fn brickAggregateTopology()->u32{return pressureTemplateWord(14u);}
-fn brickAggregateEdgeCount()->u32{
-  return pressureTemplateWord(brickAggregateTopology()+1u);
-}
 fn brickAggregateEdgeWeightOffset()->u32{return pressureEdgeCount();}
-fn brickAggregateRhsOffset()->u32{return pressureEdgeCount()+brickAggregateEdgeCount();}
+fn brickAggregateRhsOffset()->u32{return pressureEdgeCount()
+  +pressureTemplateWord(brickAggregateTopology()+1u);}
 fn brickAggregateDiagonalOffset()->u32{return brickAggregateRhsOffset()+p.dispatch.w;}
 fn brickAggregateAOffset()->u32{return brickAggregateRhsOffset()+2u*p.dispatch.w;}
 fn brickAggregateBOffset()->u32{return brickAggregateRhsOffset()+3u*p.dispatch.w;}
 fn brickAggregateRangeOffset()->u32{return brickAggregateRhsOffset()+4u*p.dispatch.w;}
 fn cachedPressureBrickRange(brick:u32)->vec2u{
-  if(PRESSURE_EXECUTION_QA_ORACLE){
-    let packed=bitcast<u32>(candidateState[brickAggregateRangeOffset()+brick]);
-    if(packed==0u){return vec2u(0u);}let level=(packed&7u)-1u;
-    return vec2u((packed>>3u)-1u,1u<<(3u*level));
-  }
-  let packed=atomicLoad(&topologyArena[
-    ${persistentPressureCacheLayout?.brickAggregateRangeBaseWords ?? 0}u+brick]);
+  let packed=bitcast<u32>(candidateState[brickAggregateRangeOffset()+brick]);
   if(packed==0u){return vec2u(0u);}
   let level=(packed&7u)-1u;
   return vec2u((packed>>3u)-1u,1u<<(3u*level));
@@ -1225,48 +1032,40 @@ fn pressureHierarchyDescriptor(level:u32)->u32{
 fn pressureHierarchyGroupCount(level:u32)->u32{
   return pressureTemplateWord(pressureHierarchyDescriptor(level));
 }
-fn pressureHierarchyLevelCount()->u32{return pressureTemplateWord(pressureHierarchyTopology());}
 fn pressureHierarchyEdgeCount(level:u32)->u32{
   let descriptor=pressureHierarchyDescriptor(level);
   let offsets=pressureTemplateWord(descriptor+6u);
   return pressureTemplateWord(offsets+pressureHierarchyGroupCount(level));
 }
+fn pressureHierarchyLevelCount()->u32{return pressureTemplateWord(pressureHierarchyTopology());}
 fn pressureHierarchyDynamicBase(level:u32)->u32{
   return brickAggregateRangeOffset()+p.dispatch.w
     +pressureTemplateWord(pressureHierarchyDescriptor(level)+9u);
 }
-fn pressureHierarchyEdgeWeightOffset(level:u32)->u32{
-  return pressureHierarchyDynamicBase(level);
+fn pressureHierarchyRhsOffset(level:u32)->u32{
+  return pressureHierarchyDynamicBase(level)+pressureHierarchyEdgeCount(level)
+    +pressureHierarchyGroupCount(level);
 }
 fn pressureHierarchyDiagonalOffset(level:u32)->u32{
   return pressureHierarchyDynamicBase(level)+pressureHierarchyEdgeCount(level);
 }
-fn pressureHierarchyRhsOffset(level:u32)->u32{
-  return pressureHierarchyDiagonalOffset(level)+pressureHierarchyGroupCount(level);
-}
 fn pressureHierarchyAOffset(level:u32)->u32{
-  return pressureHierarchyDiagonalOffset(level)+2u*pressureHierarchyGroupCount(level);
+  return pressureHierarchyRhsOffset(level)+pressureHierarchyGroupCount(level);
 }
 fn pressureHierarchyBOffset(level:u32)->u32{
-  return pressureHierarchyDiagonalOffset(level)+3u*pressureHierarchyGroupCount(level);
+  return pressureHierarchyAOffset(level)+pressureHierarchyGroupCount(level);
 }
-fn pressureDensityCacheOffset()->u32{
+fn frozenPressureCellBrickOffset()->u32{
   let last=pressureHierarchyLevelCount()-1u;
   return pressureHierarchyBOffset(last)+pressureHierarchyGroupCount(last);
+}
+fn frozenPressureCellBrick(cell:u32)->u32{
+  return bitcast<u32>(candidateState[frozenPressureCellBrickOffset()+cell]);
 }
 fn pressureHierarchyGroupAddress(linear:u32)->vec2u{
   var remainder=linear;
   for(var level=0u;level<pressureHierarchyLevelCount();level+=1u){
     let count=pressureHierarchyGroupCount(level);
-    if(remainder<count){return vec2u(level,remainder);}
-    remainder-=count;
-  }
-  return vec2u(INVALID,INVALID);
-}
-fn pressureHierarchyEdgeAddress(linear:u32)->vec2u{
-  var remainder=linear;
-  for(var level=0u;level<pressureHierarchyLevelCount();level+=1u){
-    let count=pressureHierarchyEdgeCount(level);
     if(remainder<count){return vec2u(level,remainder);}
     remainder-=count;
   }
@@ -1921,8 +1720,8 @@ ${topologyEffectsEntries}
 const TRANSPORT_CHARACTERISTIC_CLEARANCE:u32=${velocityExtensionLayouts
     ?.state.characteristicSupportFloatBase ?? 0}u;
 const CM12_SPATIAL_TILES_PER_AXIS:u32=BRICK_FINE_RESOLUTION/4u;
-// The three conservative physics passes use their independently compiled,
-// deduplicated rung-packet domain. Lane zero snapshots the sealed packet once;
+// The three conservative physics passes share one compact rung-packet domain.
+// Lane zero snapshots the sealed packet once;
 // hot lanes use mask + packet arithmetic with no owner or cell-open query.
 fn cm12MassExecutionCell(rank:u32,lane:u32,family:u32)->u32{
   _=rank;_=family;return cm12TransportStagedExecutionCell(lane);
@@ -1931,7 +1730,7 @@ fn cm12MassExecutionCell(rank:u32,lane:u32,family:u32)->u32{
 // barriers: fine min corner of packet lane q is origin+scale*q.
 var<workgroup>cm12TransportPacketOriginFine:vec3u;
 fn stageSparseCM12TransportExecutionImage(rank:u32,lane:u32,family:u32){
-  cm12StageTransportPacket(rank,lane,family);
+  cm12StageTransportPacket(rank,lane);
     let profileCell=cm12TransportStagedExecutionCell(lane);
     if(EXP_TRANSPORT_PROFILE){
       if(lane==0u){atomicAdd(&activity[CM12_TRANSPORT_PROFILE_BASE+family],1u);}
@@ -1948,9 +1747,9 @@ fn stageSparseCM12TransportExecutionImage(rank:u32,lane:u32,family:u32){
 fn cm12ResidentTransportProducerMaskGeneration()->u32{
   return max(1u,cm12FCCandidateGeneration());}
 fn cm12ResidentTransportProducerMaskPacketCount()->u32{
-  return cm12TransportPacketCount(2u);}
+  return cm12TransportPacketCount();}
 fn cm12ResidentTransportProducerMaskPacket(workRank:u32)->u32{
-  return cm12TransportPacketId(workRank,2u);}
+  return cm12TransportPacketId(workRank);}
 fn cm12ResidentTransportProducerMaskCell(packet:u32,lane:u32)->u32{
   return cm12TeiPacketCell(packet,lane,acceptedTopologySlot());}
 fn cm12ResidentTransportProducerMaskCellValid(cell:u32)->bool{
@@ -1970,10 +1769,12 @@ fn cm12ResidentTransportProducerMaskRowTermEnd(row:u32)->u32{
 fn cm12ResidentTransportProducerMaskRowTermCell(term:u32)->u32{
   return termCell(term);}
 fn cm12ResidentTransportProducerSharpeningMask(packet:u32,mask:vec2u){
-  cm12TransportOverwritePacketMask(packet,0u,mask);}
+  cm12TransportPublishSharpeningMask(packet,mask);}
 fn sharpeningSourceCell(packetRank:u32,lane:u32)->u32{
-  let packet=cm12TransportPacketId(packetRank,0u);
-  let mask=cm12TransportPacketMask(packet,0u);
+  let ordinal=cm12TransportPacketOrdinal(packetRank);
+  let packet=select(INVALID,cm12TransportDirectStablePacket(ordinal),
+    ordinal<CM12_TPA_DIRECT_PACKET_COUNT);
+  let mask=cm12TransportSharpeningMaskAt(ordinal);
   if(packet==INVALID||!cm12TransportPacketLaneSelected(mask,lane)){return INVALID;}
   return cm12TeiPacketCell(packet,lane,acceptedTopologySlot());
 }
@@ -2772,20 +2573,21 @@ fn scatterSharpeningCell(cell:u32){
     remainingFixed-=offeredFixed;
   }
 }
-// Preparation writes only this source's delta; scatter reads that same value
-// and contributes through the separate fixed-point receipt plane. There is no
-// cross-source dependency between the former dispatches.
 @compute @workgroup_size(64)
-fn sharpenAndScatterSparseCM12(@builtin(workgroup_id)wid:vec3u,
+fn prepareSharpeningField(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
-  let packet=cm12TransportPacketId(wid.x,0u);
+  let cell=sharpeningSourceCell(wid.x,lane);
+  if(sharpeningSourceCellCurrent(cell)){prepareSharpeningCell(cell);}
+}
+@compute @workgroup_size(64)
+fn scatterSharpeningMass(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let packet=cm12TransportPacketId(wid.x);
   let candidate=cm12TeiPacketFineOrigin(packet,acceptedTopologySlot());
   let origin=select(vec3u(0u),candidate,candidate.x!=INVALID);
   cm12TeiStageDirectory(origin,lane,acceptedTopologySlot());
   let cell=sharpeningSourceCell(wid.x,lane);
-  if(sharpeningSourceCellCurrent(cell)){
-    prepareSharpeningCell(cell);scatterSharpeningCell(cell);
-  }
+  if(sharpeningSourceCellCurrent(cell)){scatterSharpeningCell(cell);}
 }
 fn finalizeSharpeningCell(cell:u32){
   if(!cellTransportActive(cell)){
@@ -2982,7 +2784,7 @@ fn pressureCellMembershipPredicate(id:u32)->bool{
 }
 
 fn classifyPressureCell(id:u32)->bool{
-  let rho=pressureDensity(id);candidateState[pressureDensityCacheOffset()+id]=rho;
+  let rho=pressureDensity(id);
   let liquid=pressureCellMembershipFromDensity(id,rho);
   state[p.stateOffsets2.w+id]=select(0.0,1.0,liquid);
   if(!liquid){
@@ -2991,77 +2793,55 @@ fn classifyPressureCell(id:u32)->bool{
   }
   return liquid;
 }
-fn classifyPressureCellAndRecord(id:u32)->bool{
-  let previous=pcmCellContains(id);let enabled=classifyPressureCell(id);
-  if(previous!=enabled){_=pcfRecordCellMembershipEvent(id);}
-  return enabled;
-}
-
 @compute @workgroup_size(64)
 fn classifyPressureCells(@builtin(global_invocation_id)gid:vec3u){
   let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
-  _=pcmCellSetCandidate(id,classifyPressureCellAndRecord(id),1u,false);
+  _=pcmCellSetCandidate(id,classifyPressureCell(id),1u,false);
 }
 
 @compute @workgroup_size(1)
 fn beginCanonicalPressureCells(){_=pcmCellBegin(0u);}
 
 @compute @workgroup_size(1)
-fn beginCanonicalPressureRows(){_=pcmRowBegin(0u);}
+fn beginCanonicalPressureRows(){_=pcmRowBegin(ptrTopologyGeneration());}
 
 @compute @workgroup_size(1)
 fn planPressureMembershipEpoch(){
   let cellGroups=select(0u,acceptedTemplateCellWorkgroups(),pcmCellBootstrapEpoch());
-  let rowGroups=select(0u,acceptedTemplateRowWorkgroups(),pcmRowBootstrapEpoch());
   let cellAt=PRESSURE_REPAIR_HEADER+PRESSURE_BOOTSTRAP_CELL_INDIRECT;
-  let rowAt=PRESSURE_REPAIR_HEADER+PRESSURE_BOOTSTRAP_ROW_INDIRECT;
   fineSamples[cellAt]=cellGroups;fineSamples[cellAt+1u]=1u;fineSamples[cellAt+2u]=1u;
-  fineSamples[rowAt]=rowGroups;fineSamples[rowAt+1u]=1u;fineSamples[rowAt+2u]=1u;
 }
 
 @compute @workgroup_size(64)
 fn classifyDirtyPressureCells(@builtin(global_invocation_id)gid:vec3u){
   let id=acceptedTemplateCellInvocation(gid.x);
   if(id==INVALID||!fsm1FlipCell(id)){return;}
-  _=pcmCellSetCandidate(id,classifyPressureCellAndRecord(id),2u,false);
+  _=pcmCellSetCandidate(id,classifyPressureCell(id),2u,false);
 }
 
-fn pressureBrickStateAtResolution(brick:u32,resolution:u32)->u32{
-  return resolution|select(0u,0x80000000u,brickActive(brick));
-}
-
-// PTR1 and PCF1 are binding-free and consume the resident's canonical
-// PCM/state APIs. PCF1 lives in the non-aliased atomic topology-arena tail.
+// PTR1 and PCA1 consume mutable construction authority here. Fine edge values
+// and diagonals publish directly into ordinary persistent solve storage.
 fn ptrFrameGeneration()->u32{return atomicLoad(&activity[0]);}
 fn ptrTopologyGeneration()->u32{return atomicLoad(&topologyArena[topologyWorklistBase()]);}
 fn ptrPCMCellCandidateGeneration()->u32{return pcmCellCandidateGeneration();}
 fn ptrPCMRowCandidateGeneration()->u32{return pcmRowCandidateGeneration();}
-fn ptrPCFCandidateGeneration()->u32{return pcfCandidateGeneration();}
+fn ptrPressureCoefficientCandidateGeneration()->u32{return pcfCandidateGeneration();}
 fn ptrPCMCellAcceptedGeneration()->u32{return pcmCellAcceptedGeneration();}
 fn ptrPCMRowAcceptedGeneration()->u32{return pcmRowAcceptedGeneration();}
-fn ptrPCFAcceptedGeneration()->u32{return pcfAcceptedGeneration();}
-fn ptrTopologyJournalCount()->u32{return 0u;}
-fn ptrTopologyJournalRecord(at:u32)->vec4u{_=at;return vec4u(INVALID);}
+fn ptrPressureCoefficientAcceptedGeneration()->u32{return pcfAcceptedGeneration();}
 fn ptrCellCapacity()->u32{return p.counts.x;}
 fn ptrBrickCellRange(brick:u32,encoded:u32)->vec2u{
   if(encoded==INVALID||(encoded&0x80000000u)==0u){return vec2u(0u);}
   return templateBrickCellRange(brick,encoded&0x7fffffffu);
 }
-fn ptrCellIncidenceRange(cell:u32)->vec2u{
-  return vec2u(incidenceBegin(cell),incidenceEnd(cell));
-}
-fn ptrIncidenceRow(at:u32)->u32{return incidenceRow(at);}
 fn ptrApplyPressureCellClassification(cell:u32,current:bool)->bool{
   if(current){return classifyPressureCell(cell);}
   state[p.stateOffsets2.w+cell]=0.0;return false;
 }
-fn ptrClassifyPressureRow(row:u32)->bool{return classifyPressureRow(row);}
-fn ptrPressureTheta(row:u32)->f32{return state[p.stateOffsets3.x+row];}
 
 // HTP1 compatibility accessors preserve the resident template's exact stable
 // IDs and packed arithmetic while PCF1 is migrated into the resident arena.
 fn cm12HotHeaderValid()->bool{return true;}
-fn cm12HotRowValid(row:u32)->bool{return row<p.counts.y;}
 fn cm12HotRowTermCount(row:u32)->u32{return rowTermCount(row);}
 fn cm12HotRowTermCell(row:u32,ordinal:u32)->u32{
   return termCell(rowTermOffset(row)+ordinal);
@@ -3081,7 +2861,7 @@ fn cm12HotDirectedEdgeRange(cell:u32)->vec2u{
   return vec2u(first,pressureTemplateWord(offsets+cell+1u)-first);
 }
 fn cm12HotDirectedEdge(edge:u32)->vec3u{return vec3u(
-  fineSamples[pressureNeighborOffset()+edge],
+  pressureTemplateWord(pressureEdgeNeighbors()+edge),
   pressureTemplateWord(pressureEdgeRows()+edge),
   pressureTemplateWord(pressureEdgeWeights()+edge));
 }
@@ -3140,41 +2920,223 @@ fn pcfHierarchyEdgeContributionRange(level:u32,edge:u32)->vec2u{
     pressureTemplateWord(record+2u));
 }
 fn pcfHierarchyEdgeContribution(level:u32,at:u32)->u32{_=level;return pressureTemplateWord(at);}
-fn persistentBrickAggregateEdge(edge:u32)->f32{return select(bitcast<f32>(atomicLoad(
-  &topologyArena[${persistentPressureCacheLayout?.brickAggregateEdgeBaseWords ?? 0}u+edge])),
-  candidateState[brickAggregateEdgeWeightOffset()+edge],PRESSURE_EXECUTION_QA_ORACLE);}
-fn persistentBrickAggregateDiagonal(brick:u32)->f32{return select(bitcast<f32>(atomicLoad(
-  &topologyArena[${persistentPressureCacheLayout?.brickAggregateDiagonalBaseWords ?? 0}u+brick])),
-  candidateState[brickAggregateDiagonalOffset()+brick],PRESSURE_EXECUTION_QA_ORACLE);}
-fn persistentHierarchyEdge(level:u32,edge:u32)->f32{
-  if(PRESSURE_EXECUTION_QA_ORACLE){return candidateState[
-    pressureHierarchyEdgeWeightOffset(level)+edge];}
+fn publishedBrickAggregateEdge(edge:u32)->f32{return bitcast<f32>(atomicLoad(
+  &topologyArena[${persistentPressureCacheLayout?.brickAggregateEdgeBaseWords ?? 0}u+edge]));}
+fn publishedBrickAggregateDiagonal(brick:u32)->f32{return bitcast<f32>(atomicLoad(
+  &topologyArena[${persistentPressureCacheLayout?.brickAggregateDiagonalBaseWords ?? 0}u+brick]));}
+fn publishedBrickAggregateRange(brick:u32)->u32{return atomicLoad(&topologyArena[
+  ${persistentPressureCacheLayout?.brickAggregateRangeBaseWords ?? 0}u+brick]);}
+fn publishedHierarchyEdge(level:u32,edge:u32)->f32{
   ${persistentPressureCacheLayout?.hierarchyEdgeBaseWords.map((base, level) =>
     `if(level==${level}u){return bitcast<f32>(atomicLoad(&topologyArena[${base}u+edge]));}`)
     .join("\n  ") ?? ""}
   return 0.0;
 }
-fn persistentHierarchyDiagonal(level:u32,group:u32)->f32{
-  if(PRESSURE_EXECUTION_QA_ORACLE){return candidateState[
-    pressureHierarchyDiagonalOffset(level)+group];}
+fn publishedHierarchyDiagonal(level:u32,group:u32)->f32{
   ${persistentPressureCacheLayout?.hierarchyDiagonalBaseWords.map((base, level) =>
     `if(level==${level}u){return bitcast<f32>(atomicLoad(&topologyArena[${base}u+group]));}`)
     .join("\n  ") ?? ""}
   return 1e-12;
 }
+fn persistentBrickAggregateEdge(edge:u32)->f32{
+  return candidateState[brickAggregateEdgeWeightOffset()+edge];
+}
+fn persistentBrickAggregateDiagonal(brick:u32)->f32{
+  return candidateState[brickAggregateDiagonalOffset()+brick];
+}
+fn persistentHierarchyEdge(level:u32,edge:u32)->f32{
+  return candidateState[pressureHierarchyDynamicBase(level)+edge];
+}
+fn persistentHierarchyDiagonal(level:u32,group:u32)->f32{
+  return candidateState[pressureHierarchyDiagonalOffset(level)+group];
+}
+// Mutable PCM/PCF remain construction authorities. PEI1 freezes their
+// accepted cell, B8 membership, wet-brick and hierarchy streams for the solve.
+fn peiSourceTopologyGeneration()->u32{return ptrTopologyGeneration();}
+fn peiSourcePCMCellGeneration()->u32{return pcmCellAcceptedGeneration();}
+fn peiSourcePCMRowGeneration()->u32{return pcmRowAcceptedGeneration();}
+fn peiSourceCoefficientCandidateGeneration()->u32{return pcfCandidateGeneration();}
+fn peiSourceCoefficientAcceptedGeneration()->u32{return pcfAcceptedGeneration();}
+fn peiSourceCellCount()->u32{return pcmCellAcceptedCount();}
+fn peiSourceBrickCount()->u32{return p.dispatch.w;}
+fn peiSourceBrickLive(brick:u32)->bool{
+  return brick<p.dispatch.w&&cachedPressureBrickRange(brick).y!=0u;
+}
+fn peiSourceBrickDeactivate(brick:u32){
+  candidateState[brickAggregateRhsOffset()+brick]=0.0;
+  candidateState[brickAggregateAOffset()+brick]=0.0;
+  candidateState[brickAggregateBOffset()+brick]=0.0;
+}
+fn peiSourceHierarchyCount()->u32{
+  var total=0u;for(var level=0u;level<pressureHierarchyLevelCount();level+=1u){
+    total+=pressureHierarchyGroupCount(level);}
+  return total;
+}
+fn peiSourceHierarchyToken(linear:u32)->u32{
+  let address=pressureHierarchyGroupAddress(linear);
+  return select(INVALID,(address.x<<26u)|address.y,address.x!=INVALID);
+}
+fn peiSourceHierarchyLive(linear:u32)->bool{
+  let address=pressureHierarchyGroupAddress(linear);
+  if(address.x==INVALID){return false;}
+  let descriptor=pressureHierarchyDescriptor(address.x);
+  let offsets=pressureTemplateWord(descriptor+2u);
+  let children=pressureTemplateWord(descriptor+3u);
+  let begin=pressureTemplateWord(offsets+address.y);
+  let end=pressureTemplateWord(offsets+address.y+1u);
+  for(var at=begin;at<end;at+=1u){
+    if(peiSourceBrickLive(pressureTemplateWord(children+at))){return true;}
+  }
+  return false;
+}
+fn peiSourceHierarchyDeactivate(linear:u32){
+  let address=pressureHierarchyGroupAddress(linear);
+  if(address.x==INVALID){return;}
+  candidateState[pressureHierarchyRhsOffset(address.x)+address.y]=0.0;
+  candidateState[pressureHierarchyAOffset(address.x)+address.y]=0.0;
+  candidateState[pressureHierarchyBOffset(address.x)+address.y]=0.0;
+}
 fn stablePressureBrickInvocation(invocation:u32)->u32{
-  return select(INVALID,invocation,invocation<p.dispatch.w);
+  return peiWetBrick(invocation);
 }
 fn stablePressureHierarchyAddress(invocation:u32)->vec2u{
-  return pressureHierarchyGroupAddress(invocation);
+  let token=peiHierarchyToken(invocation);
+  return select(vec2u(INVALID),vec2u(token>>26u,token&0x03ffffffu),
+    token!=INVALID);
+}
+
+// Fine coefficients are published directly through PEI. PCA retains only the
+// compact coarse/hierarchy repair and this final ordinary-plane freeze.
+@compute @workgroup_size(64)
+fn publishFrozenPressureCoarseCache(@builtin(workgroup_id)wid:vec3u,
+ @builtin(num_workgroups)grid:vec3u,@builtin(local_invocation_index)lane:u32){
+  let at=(wid.y*grid.x+wid.x)*64u+lane;
+  let coarseEdgeCount=pressureTemplateWord(brickAggregateTopology()+1u);
+  if(at<coarseEdgeCount){
+    candidateState[brickAggregateEdgeWeightOffset()+at]
+      =publishedBrickAggregateEdge(at);
+  }
+  if(at<p.dispatch.w){
+    candidateState[brickAggregateDiagonalOffset()+at]
+      =publishedBrickAggregateDiagonal(at);
+    candidateState[brickAggregateRangeOffset()+at]
+      =bitcast<f32>(publishedBrickAggregateRange(at));
+  }
+  for(var level=0u;level<pressureHierarchyLevelCount();level+=1u){
+    if(at<pressureHierarchyEdgeCount(level)){
+      candidateState[pressureHierarchyDynamicBase(level)+at]
+        =publishedHierarchyEdge(level,at);
+    }
+    if(at<pressureHierarchyGroupCount(level)){
+      candidateState[pressureHierarchyDiagonalOffset(level)+at]
+        =publishedHierarchyDiagonal(level,at);
+    }
+  }
+}
+
+fn pcfFineDiagonal(cell:u32)->f32{return state[p.stateOffsets2.z+cell];}
+
+fn retirePressureCoefficientCell(cell:u32){
+  if(!pcfFinePublicationOpen()){return;}
+  let edgeRange=cm12HotDirectedEdgeRange(cell);
+  if(edgeRange.x==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,cell);return;}
+  for(var local=0u;local<edgeRange.y;local+=1u){
+    let edgeId=edgeRange.x+local;
+    let old=pcfExchangeEdgeWeight(edgeId,0.0);
+    if(old!=0u){pcfAggregateFineEdgeChanged(cell,edgeId);}
+  }
+  state[p.stateOffsets2.z+cell]=0.0;
+  atomicAdd(&topologyArena[PCF_BASE+PCF_H_CHANGED_DIAGONALS],1u);
+  // Wetness changes are structural even when the retired diagonal was already
+  // zero. Always rebuild the owner brick and its packed live range.
+  pcfAggregateFineDiagonalChanged(cell);
+}
+
+fn publishPressureCoefficientCell(cell:u32){
+  if(!pcfFinePublicationOpen()){return;}
+  let isActive=peiPressureCellMember(cell);
+  let edgeRange=cm12HotDirectedEdgeRange(cell);
+  if(edgeRange.x==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,cell);return;}
+  for(var local=0u;local<edgeRange.y;local+=1u){
+    let edgeId=edgeRange.x+local;let edge=cm12HotDirectedEdge(edgeId);
+    if(edge.x==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,edgeId);return;}
+    let theta=state[p.stateOffsets3.x+edge.y];var weight=0.0;
+    if(isActive&&peiPressureCellMember(edge.x)&&pcmRowContains(edge.y)&&theta>0.0){
+      weight=bitcast<f32>(edge.z)/theta;
+      weight*=pcfResidentSolidRowScale(edge.y);
+    }
+    if(!pcfFinite(weight)){pcfFault(PCF_FAULT_NONFINITE,edgeId);return;}
+    let old=pcfExchangeEdgeWeight(edgeId,weight);
+    let changed=old!=bitcast<u32>(weight);
+    if(changed){atomicAdd(&topologyArena[PCF_BASE+PCF_H_CHANGED_EDGES],1u);}
+    if(changed){pcfAggregateFineEdgeChanged(cell,edgeId);}
+  }
+  var diagonal=0.0;
+  if(isActive){
+    let range=cm12HotIncidenceRange(cell);
+    if(range.x==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,cell);return;}
+    for(var local=0u;local<range.y;local+=1u){
+      let incidence=cm12HotIncidence(range.x+local);let row=incidence.x;
+      if(row==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,cell);return;}
+      let theta=state[p.stateOffsets3.x+row];
+      if(!pcmRowContains(row)||theta<=0.0){continue;}
+      let coefficient=cm12HotRowTermCoefficient(row,incidence.y);
+      diagonal+=cm12HotRowDualWeight(row)*coefficient*coefficient/theta;
+    }
+  }
+  if(!pcfFinite(diagonal)){pcfFault(PCF_FAULT_NONFINITE,cell);return;}
+  let old=bitcast<u32>(state[p.stateOffsets2.z+cell]);
+  state[p.stateOffsets2.z+cell]=diagonal;
+  let changed=old!=bitcast<u32>(diagonal);
+  if(changed){atomicAdd(&topologyArena[PCF_BASE+PCF_H_CHANGED_DIAGONALS],1u);}
+  if(changed){pcfAggregateFineDiagonalChanged(cell);}
+}
+
+// PEI begin snapshots PCM cell/row plus PCA candidate generations and
+// publishes the one-time canonical-cell dispatch.
+@compute @workgroup_size(64)
+fn publishFrozenPressureCellIds(@builtin(global_invocation_id)gid:vec3u){
+  if(!peiPublicationOpen()){return;}
+  let cell=pcmCellRankSelect(gid.x);if(cell==INVALID){return;}
+  fineSamples[PEI_PRESSURE_CELLS+gid.x]=cell;
+  candidateState[frozenPressureCellBrickOffset()+cell]=bitcast<f32>(cellBrick(cell));
+}
+
+// One lane owns one global 32-cell word. The PCM-derived PEI cell list is
+// strictly increasing, so lower-bound plus a short forward scan compiles exact
+// canonical membership without atomics, barriers, or overlapping stores.
+@compute @workgroup_size(64)
+fn publishFrozenPressureMembership(@builtin(global_invocation_id)gid:vec3u){
+  if(!peiPublicationOpen()){return;}
+  let word=gid.x;if(word>=PEI_PRESSURE_MEMBERSHIP_WORDS){return;}
+  let first=word<<5u;let end=min(first+32u,PEI_CELL_CAPACITY);
+  let count=peiPressureCellCount();var low=0u;var high=count;
+  while(low<high){let middle=low+(high-low)/2u;
+    if(fineSamples[PEI_PRESSURE_CELLS+middle]<first){low=middle+1u;
+    }else{high=middle;}
+  }
+  var bits=0u;var rank=low;
+  while(rank<count){let cell=fineSamples[PEI_PRESSURE_CELLS+rank];
+    if(cell>=end){break;}bits|=1u<<(cell-first);rank+=1u;
+  }
+  let address=PEI_PRESSURE_MEMBERSHIP+word;let previous=fineSamples[address];
+  let retired=previous&~bits;let entered=bits&~previous;fineSamples[address]=bits;
+  for(var bit=0u;bit<32u;bit+=1u){
+    let laneBit=1u<<bit;let cell=first+bit;
+    if((retired&laneBit)!=0u){retirePressureCoefficientCell(cell);}
+    else if((entered&laneBit)!=0u){pcfAggregateFineDiagonalChanged(cell);}
+  }
+}
+
+@compute @workgroup_size(64)
+fn publishFrozenPressureCoefficients(@builtin(global_invocation_id)gid:vec3u){
+  if(!peiPublicationOpen()){return;}
+  let cell=peiPressureCell(gid.x);if(cell==INVALID){return;}
+  publishPressureCoefficientCell(cell);
 }
 
 @compute @workgroup_size(1)
-fn beginPersistentPressureCache(){_=pcfBegin(0u);}
-@compute @workgroup_size(1)
-fn finalizePersistentPressureCacheFrontier(){
-  pcfCaptureConsumerGenerations();_=pcfFinalizeFrontier();
-}
+fn beginPersistentPressureCache(){_=pcfBegin();}
 
 @compute @workgroup_size(1)
 fn finalizeCanonicalPressureCellFrontier(){_=pcmCellFinalizeFrontier();}
@@ -3231,34 +3193,51 @@ fn classifyPressureRow(row:u32)->bool{
   return true;
 }
 
-@compute @workgroup_size(64)
-fn classifyRows(@builtin(global_invocation_id)gid:vec3u){
-  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
-  let enabled=classifyPressureRow(row);_=pcfStoreThetaAndRecord(row,
-    state[p.stateOffsets3.x+row]);_=pcmRowSetCandidate(row,enabled,1u,false);
-}
+var<workgroup>pcmRowBallot:array<u32,64>;
 
 @compute @workgroup_size(64)
-fn classifyDirtyPressureRows(@builtin(global_invocation_id)gid:vec3u){
-  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
-  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);var changed=false;
-  for(var term=begin;term<end;term+=1u){
-    changed=changed||fsm1ChangedOrFlipCell(termCell(term));}
-  if(!changed){return;}
-  let enabled=classifyPressureRow(row);
-  // Scalar-driven membership or ghost-fluid theta changes occur after the
-  // dirty-brick row mask was compiled. Publish the row directly into the same
-  // production projection mask; pressure bits are allowed to remain identical.
-  dfrm1MarkRow(row);_=pcfStoreThetaAndRecord(row,
-    state[p.stateOffsets3.x+row]);_=pcmRowSetCandidate(row,enabled,2u,false);
+fn compileCanonicalPressureRows(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let row=64u*wid.x+lane;let valid=row<p.counts.y;
+  let publicationOpen=pcmRowPublicationOpen();
+  var enabled=false;
+  if(valid&&publicationOpen){
+    let previous=pcmRowContains(row);
+    let previousTheta=bitcast<u32>(state[p.stateOffsets3.x+row]);
+    let accepted=rowAccepted(row);var scalarChanged=false;
+    if(accepted){
+      let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+      for(var term=begin;term<end;term+=1u){
+        scalarChanged=scalarChanged||fsm1ChangedOrFlipCell(termCell(term));
+      }
+    }
+    let topologyStable=pcmRowPriorTopologyGeneration()==ptrTopologyGeneration();
+    if(accepted&&topologyStable&&!scalarChanged){
+      enabled=previous;
+    }else{
+      enabled=classifyPressureRow(row);
+    }
+    let thetaChanged=previousTheta!=bitcast<u32>(state[p.stateOffsets3.x+row]);
+    // DFRM was compiled before scalar classification. Preserve the old direct
+    // scalar root even if classification is bit-identical, and cover topology
+    // entry/retirement through membership/theta changes.
+    if(scalarChanged||previous!=enabled||thetaChanged){dfrm1MarkRow(row);}
+  }
+  pcmRowBallot[lane]=select(0u,1u,enabled);workgroupBarrier();
+  if(lane<2u){
+    let word=2u*wid.x+lane;
+    if(word*32u<p.counts.y){
+      var bits=0u;for(var bit=0u;bit<32u;bit+=1u){
+        bits|=pcmRowBallot[32u*lane+bit]<<bit;
+      }
+      _=pcmRowPublishWord(word,bits);
+    }
+  }
 }
-
-@compute @workgroup_size(1)
-fn finalizeCanonicalPressureRowFrontier(){_=pcmRowFinalizeFrontier();}
 
 @compute @workgroup_size(1)
 fn finalizeCanonicalPressureRows(){
-  _=pcmRowFinalize();
+  _=pcmRowFinalize(ptrTopologyGeneration());
   atomicStore(&activity[PRESSURE_ACTIVE_ROW_COUNT],pcmRowAcceptedCount());
   fineSamples[PRESSURE_REPAIR_HEADER+PRESSURE_REPAIR_ROW_FIRST_FAULT]=pcmRowFirstFault();
   let rowFault=pcmRowFault();if(rowFault!=0u){
@@ -3266,95 +3245,9 @@ fn finalizeCanonicalPressureRows(){
   }
 }
 
-// Theta and any live rigid scaling are constant throughout one pressure
-// epoch. candidateState is transient pressure scratch and every current
-// pressure member refreshes its directed edges before the solve.
+// The unique PCF source-cell owner maintains this persistent ordinary plane.
 fn effectivePressureEdgeWeight(edge:u32)->f32{
-  return pcfEdgeWeight(edge);
-}
-
-// One coarse scalar per resident brick supplies a sparse additive coarse
-// space. The Galerkin diagonal is the sum of fine diagonals plus every directed
-// internal off-diagonal, so internal fluxes cancel and only aggregate-boundary
-// and Dirichlet stiffness remains. This is topology-linear and uses the same
-// path for every scene size.
-@compute @workgroup_size(64)
-fn bakeBrickAggregateDiagonal(@builtin(local_invocation_id)lid:vec3u,
- @builtin(workgroup_id)wid:vec3u){
-  let brick=wid.x;var diagonal=0.0;var wet=0.0;
-  if(brick<p.dispatch.w&&brickActive(brick)){
-    let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
-    let edgeOffsets=pressureTemplateWord(15u);
-    for(var local=lid.x;local<range.y;local+=64u){let cell=range.x+local;
-      if(!pcmCellContains(cell)){continue;}
-      wet=1.0;
-      diagonal+=state[p.stateOffsets2.z+cell];
-      let end=pressureTemplateWord(edgeOffsets+cell+1u);
-      for(var edge=pressureTemplateWord(edgeOffsets+cell);edge<end;edge+=1u){
-        let other=fineSamples[pressureNeighborOffset()+edge];
-        if(cellBrick(other)==brick){diagonal+=effectivePressureEdgeWeight(edge);}
-      }
-    }
-  }
-  reduceA[lid.x]=diagonal;reduceB[lid.x]=wet;workgroupBarrier();var width=32u;loop{
-    if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];
-      reduceB[lid.x]+=reduceB[lid.x+width];}
-    workgroupBarrier();if(width==1u){break;}width/=2u;
-  }
-  if(lid.x==0u&&brick<p.dispatch.w){
-    candidateState[brickAggregateDiagonalOffset()+brick]=max(reduceA[0],1e-12);
-    var packed=0u;if(reduceB[0]>0.0){
-      let resolution=acceptedBrickResolution(brick);
-      let range=templateBrickCellRange(brick,resolution);
-      packed=((range.x+1u)<<3u)|(templateLevelIndex(resolution)+1u);
-    }
-    candidateState[brickAggregateRangeOffset()+brick]=bitcast<f32>(packed);
-  }
-}
-
-fn bakePressureHierarchyDiagonalWork(lid:vec3u,wid:vec3u,level:u32){
-  let group=wid.x;let count=pressureHierarchyGroupCount(level);var diagonal=0.0;
-  let descriptor=pressureHierarchyDescriptor(level);
-  let childOffsets=pressureTemplateWord(descriptor+2u);
-  let children=pressureTemplateWord(descriptor+3u);
-  let internalOffsets=pressureTemplateWord(descriptor+4u);
-  let internalEdges=pressureTemplateWord(descriptor+5u);
-  if(group<count){
-    let childBegin=pressureTemplateWord(childOffsets+group);
-    let childEnd=pressureTemplateWord(childOffsets+group+1u);
-    for(var at=childBegin+lid.x;at<childEnd;at+=64u){
-      let brick=pressureTemplateWord(children+at);
-      diagonal+=persistentBrickAggregateDiagonal(brick);
-    }
-    let edgeBegin=pressureTemplateWord(internalOffsets+group);
-    let edgeEnd=pressureTemplateWord(internalOffsets+group+1u);
-    for(var at=edgeBegin+lid.x;at<edgeEnd;at+=64u){
-      let edge=pressureTemplateWord(internalEdges+at);
-      diagonal+=persistentBrickAggregateEdge(edge);
-    }
-  }
-  reduceA[lid.x]=diagonal;workgroupBarrier();var width=32u;loop{
-    if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];}
-    workgroupBarrier();if(width==1u){break;}width/=2u;
-  }
-  if(lid.x==0u&&group<count){
-    candidateState[pressureHierarchyDiagonalOffset(level)+group]=max(reduceA[0],1e-12);
-  }
-}
-
-fn bakePressureHierarchyEdgesWork(gid:vec3u,level:u32){
-  let edge=gid.x;if(edge>=pressureHierarchyEdgeCount(level)){return;}
-  let descriptor=pressureHierarchyDescriptor(level);
-  let records=pressureTemplateWord(descriptor+7u);
-  let record=records+3u*edge;
-  let contributionBegin=pressureTemplateWord(record+1u);
-  let contributionEnd=contributionBegin+pressureTemplateWord(record+2u);
-  var weight=0.0;
-  for(var at=contributionBegin;at<contributionEnd;at+=1u){
-    let coarseEdge=pressureTemplateWord(at);
-    weight+=candidateState[brickAggregateEdgeWeightOffset()+coarseEdge];
-  }
-  candidateState[pressureHierarchyEdgeWeightOffset(level)+edge]=weight;
+  return candidateState[${pressureFineEdgeImageBaseWords ?? 0}u+edge];
 }
 
 fn restrictPressureHierarchyResidualWork(lid:vec3u,wid:vec3u,level:u32){
@@ -3405,17 +3298,6 @@ fn refinePressureHierarchyCorrectionWork(group:u32,level:u32){
 }
 
 @compute @workgroup_size(64)
-fn bakePressureHierarchyEdges(@builtin(global_invocation_id)gid:vec3u){
-  let address=pressureHierarchyEdgeAddress(gid.x);if(address.x==INVALID){return;}
-  bakePressureHierarchyEdgesWork(vec3u(address.y,0u,0u),address.x);
-}
-@compute @workgroup_size(64)
-fn bakePressureHierarchyDiagonal(@builtin(local_invocation_id)lid:vec3u,
- @builtin(workgroup_id)wid:vec3u){
-  let address=pressureHierarchyGroupAddress(wid.x);
-  bakePressureHierarchyDiagonalWork(lid,vec3u(address.y,0u,0u),address.x);
-}
-@compute @workgroup_size(64)
 fn restrictPressureHierarchyResidual(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
   let address=stablePressureHierarchyAddress(wid.x);
@@ -3448,7 +3330,9 @@ fn restrictBrickAggregateResidual(@builtin(local_invocation_id)lid:vec3u,
   if(brick!=INVALID){
     let range=cachedPressureBrickRange(brick);
     for(var local=lid.x;local<range.y;local+=64u){let cell=range.x+local;
-      if(pcmCellContains(cell)){residual+=state[p.stateOffsets3.y+cell];}
+      if(peiPressureCellMember(cell)){
+        residual+=state[p.stateOffsets3.y+cell];
+      }
     }
   }
   reduceA[lid.x]=residual;workgroupBarrier();var width=32u;loop{
@@ -3461,20 +3345,6 @@ fn restrictBrickAggregateResidual(@builtin(local_invocation_id)lid:vec3u,
     candidateState[brickAggregateAOffset()+brick]
       =select(0.0,2.8573742*reduceA[0]/diagonal,diagonal>1e-12);
   }
-}
-
-@compute @workgroup_size(64)
-fn bakeBrickAggregateEdges(@builtin(global_invocation_id)gid:vec3u){
-  let coarseEdge=gid.x;if(coarseEdge>=brickAggregateEdgeCount()){return;}
-  let topologyBase=brickAggregateTopology();
-  let recordBase=topologyBase+4u+p.dispatch.w+1u;
-  let record=recordBase+3u*coarseEdge;
-  let contributionBegin=pressureTemplateWord(record+1u);
-  let contributionCount=pressureTemplateWord(record+2u);var weight=0.0;
-  for(var at=0u;at<contributionCount;at+=1u){
-    weight+=effectivePressureEdgeWeight(pressureTemplateWord(contributionBegin+at));
-  }
-  candidateState[brickAggregateEdgeWeightOffset()+coarseEdge]=weight;
 }
 
 fn refineBrickAggregateCorrectionWork(brick:u32,sourceOffset:u32,
@@ -3544,7 +3414,8 @@ fn refineBrickAggregateAtoB7(@builtin(global_invocation_id)gid:vec3u){
 
 fn brickAggregatePreconditioned(cell:u32)->f32{
   let diagonal=state[p.stateOffsets2.z+cell];let residual=state[p.stateOffsets3.y+cell];
-  let local=select(0.0,residual/diagonal,diagonal>0.0);let brick=cellBrick(cell);
+  let local=select(0.0,residual/diagonal,diagonal>0.0);
+  let brick=frozenPressureCellBrick(cell);
   return local+candidateState[brickAggregateBOffset()+brick];
 }
 
@@ -3566,31 +3437,33 @@ fn initializeBrickAggregateDirection(@builtin(global_invocation_id)gid:vec3u,
   reducePair(lid.x,wid.x,gamma,rhs2);
 }
 
-fn applyPressureEdge(value:f32,edge:u32,inputOffset:u32,other:u32)->f32{
-  let weight=effectivePressureEdgeWeight(edge);
-  if(weight==0.0){return value;}
-  return value+weight*state[inputOffset+other];
-}
 fn applyOperator(cell:u32,inputOffset:u32)->f32{
-  // The pressure epoch has already classified rows and assembled the exact
-  // diagonal. Physical topology packing expands every off-diagonal once.
+  // The pressure epoch has assembled the exact diagonal and frozen directed
+  // neighbours. Only certified strict interiors use arithmetic addressing.
   let edgeOffsets=pressureTemplateWord(15u);
   var result=state[p.stateOffsets2.z+cell]*state[inputOffset+cell];
   let begin=pressureTemplateWord(edgeOffsets+cell);
   let end=pressureTemplateWord(edgeOffsets+cell+1u);
   let strides=pressureImplicitInteriorStrides(cell);
-  if(strides.x!=INVALID&&end-begin==6u){
-    result=applyPressureEdge(result,begin,inputOffset,cell-strides.x);
-    result=applyPressureEdge(result,begin+1u,inputOffset,cell+strides.x);
-    result=applyPressureEdge(result,begin+2u,inputOffset,cell-strides.y);
-    result=applyPressureEdge(result,begin+3u,inputOffset,cell+strides.y);
-    result=applyPressureEdge(result,begin+4u,inputOffset,cell-strides.z);
-    result=applyPressureEdge(result,begin+5u,inputOffset,cell+strides.z);
+  // The certificate proves both canonical neighbours and exact -rung weights.
+  // Membership is the only frame-varying input for a rigid-free strict row.
+  if(strides.x!=INVALID&&end-begin==6u&&!hasRigidBodies()){
+    let weight=-f32(strides.y);
+    let nx=cell-1u;let px=cell+1u;
+    let ny=cell-strides.y;let py=cell+strides.y;
+    let nz=cell-strides.z;let pz=cell+strides.z;
+    result+=select(0.0,weight,peiPressureCellMember(nx))*state[inputOffset+nx];
+    result+=select(0.0,weight,peiPressureCellMember(px))*state[inputOffset+px];
+    result+=select(0.0,weight,peiPressureCellMember(ny))*state[inputOffset+ny];
+    result+=select(0.0,weight,peiPressureCellMember(py))*state[inputOffset+py];
+    result+=select(0.0,weight,peiPressureCellMember(nz))*state[inputOffset+nz];
+    result+=select(0.0,weight,peiPressureCellMember(pz))*state[inputOffset+pz];
     return result;
   }
+  let neighbors=pressureEdgeNeighbors();
   for(var edge=begin;edge<end;edge+=1u){
     let weight=effectivePressureEdgeWeight(edge);if(weight==0.0){continue;}
-    let other=fineSamples[pressureNeighborOffset()+edge];
+    let other=pressureTemplateWord(neighbors+edge);
     result+=weight*state[inputOffset+other];
   }
   return result;
@@ -3599,7 +3472,7 @@ fn applyOperator(cell:u32,inputOffset:u32)->f32{
 fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
   let id=pressureCellInvocation(gid.x);if(id==INVALID){return;}
   let rho=pressureDensity(id);
-  var rhs=0.0;let diagonal=pcfDiagonal(id);
+  var rhs=0.0;let diagonal=state[p.stateOffsets2.z+id];
   for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
     let row=incidenceRow(at);let theta=state[p.stateOffsets3.x+row];
     if(theta<=0.0){continue;}
@@ -3616,52 +3489,6 @@ fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
   // rate with the opposite sign, gated to cells with no air neighbour so
   // free-surface and splash cells are never touched; it self-extinguishes
   // at rho' = 1.
-  var targetDivergence=select(cm12VolumeCorrectionDivergence(
-    rho,p.frame.y*cellMinimumWidth(id),p.frame.x),0.0,cellSeparatingMinimum(id));
-  if(!cellSeparatingMinimum(id)&&rho<1.0&&pressureCellSubmerged(id)){
-    targetDivergence=-min(CM12_VOLUME_CORRECTION_LAMBDA*(1.0-rho),
-      CM12_VOLUME_CORRECTION_ETA)/(p.frame.y*cellMinimumWidth(id));
-  }
-  let controlVolume=select(cellOpenVolume(id),cellVolume(id),cellSeparatingMinimum(id));
-  state[p.stateOffsets2.y+id]=rhs+controlVolume*targetDivergence;
-  state[p.stateOffsets2.z+id]=diagonal;
-}
-
-// Construction-only full coefficient oracle. It reproduces the legacy stable
-// PCM traversal into the QA instance's persistent edge arena without touching
-// PCF work headers or producer receipts. Production never dispatches it and
-// has no selector or full-work fallback path.
-@compute @workgroup_size(64)
-fn preparePressureFullOracle(@builtin(global_invocation_id)gid:vec3u){
-  let id=pressureCellInvocation(gid.x);if(id==INVALID){return;}
-  let edgeOffsets=pressureTemplateWord(15u);
-  let edgeEnd=pressureTemplateWord(edgeOffsets+id+1u);
-  for(var edge=pressureTemplateWord(edgeOffsets+id);edge<edgeEnd;edge+=1u){
-    let row=pressureTemplateWord(pressureEdgeRows()+edge);
-    let theta=state[p.stateOffsets3.x+row];let other=fineSamples[pressureNeighborOffset()+edge];
-    var weight=0.0;
-    if(theta>0.0&&pcmCellContains(other)){
-      weight=bitcast<f32>(pressureTemplateWord(pressureEdgeWeights()+edge))/theta;
-      if(hasRigidBodies()){weight*=state[p.solidOffsets.y+3u*row+2u];}
-    }
-    pcfStoreEdgeWeight(edge,weight);
-  }
-  var diagonal=0.0;
-  for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
-    let row=incidenceRow(at);let theta=state[p.stateOffsets3.x+row];
-    if(theta<=0.0||!pcmRowContains(row)){continue;}
-    let coefficient=termCoefficient(incidenceTerm(at));
-    diagonal+=rowDualWeight(row)*coefficient*coefficient/theta;
-  }
-  let rho=pressureDensity(id);var rhs=0.0;
-  for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
-    let row=incidenceRow(at);let theta=state[p.stateOffsets3.x+row];
-    if(theta<=0.0){continue;}let coefficient=termCoefficient(incidenceTerm(at));
-    let fluxWeight=select(rowDualWeight(row),rowStaticDualWeight(row),hasRigidBodies());
-    rhs+=coefficient*fluxWeight*state[destinationFaceVelocity()+row];
-  }
-  // Same submerged under-density dual as preparePressure, so the QA oracle
-  // and the production path assemble the same right-hand side.
   var targetDivergence=select(cm12VolumeCorrectionDivergence(
     rho,p.frame.y*cellMinimumWidth(id),p.frame.x),0.0,cellSeparatingMinimum(id));
   if(!cellSeparatingMinimum(id)&&rho<1.0&&pressureCellSubmerged(id)){
@@ -3898,7 +3725,7 @@ fn journalSnapshot(@builtin(global_invocation_id)gid:vec3u){
   if(slot>=journalSnapshotCapacity()){return;}
   let cell=acceptedTemplateCellInvocation(gid.x);
   if(cell==INVALID||cell>=journalCellStride()){return;}
-  let live=pcmCellContains(cell);
+  let live=peiPressureCellMember(cell);
   state[journalSnapshotField(slot,0u)+cell]=
     select(0.0,state[p.stateOffsets2.x+cell],live);
   state[journalSnapshotField(slot,1u)+cell]=
@@ -4067,15 +3894,11 @@ fn projectPressureRow(row:u32){
   let theta=state[p.stateOffsets3.x+row];if(theta<=0.0||rowArea(row)<=1e-8){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasRigidBodies());return;}
   var jump=0.0;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-  for(var at=begin;at<end;at+=1u){let cell=termCell(at);if(pcmCellContains(cell)){
+  for(var at=begin;at<end;at+=1u){let cell=termCell(at);
+    if(peiPressureCellMember(cell)){
     jump+=termCoefficient(at)*state[p.stateOffsets2.x+cell];}}
   let pressureOpen=select(1.0,rowPressureOpenFraction(row),hasRigidBodies());
   state[destinationFaceVelocity()+row]-=pressureOpen*jump/theta;
-}
-@compute @workgroup_size(64)
-fn projectFaces(@builtin(global_invocation_id)gid:vec3u){
-  let row=pressureRowInvocation(gid.x);if(row==INVALID){return;}
-  projectPressureRow(row);
 }
 @compute @workgroup_size(64)
 fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
@@ -5772,8 +5595,7 @@ fn validateAndAuthorizeShadowTopology(){
         atomicLoad(&topologyArena[base]))){
       atomicStore(&activity[21],1u);atomicStore(&topologyArena[base+3u],3u);return;
     }
-    _=ptrSealTopologyJournal(atomicLoad(&topologyArena[ptrH_COVERED_PRODUCER_RECEIPTS]),
-      atomicLoad(&topologyArena[base]));
+    ptrSealPreflightedTopologyJournalNoFail(atomicLoad(&topologyArena[base]));
     atomicStore(&activity[13],(atomicLoad(&activity[13])+p.topologyScheduling.x)
       %max(1u,p.dispatch.w));atomicStore(&topologyArena[base+3u],0u);return;
   }
@@ -5872,17 +5694,6 @@ fn retireUnsupportedEmptyBricks(@builtin(global_invocation_id)gid:vec3u){
   atomicStore(&activity[output+8u],resolution);
   atomicOr(&activity[output+9u],ACTIVITY_LIFECYCLE_CHANGED);
   setCandidateBrickActiveAt(output,false);
-}
-
-// Retirement now participates in the shadow transaction before candidate
-// validation. Seal the exact final producer count after that coupled commit so
-// the next pressure epoch can fail closed on a real coverage mismatch.
-@compute @workgroup_size(1)
-fn sealSparseCM12PressureTopologyJournal(){
-  if(atomicLoad(&topologyArena[topologyWorklistBase()+3u])!=0u){return;}
-  _=ptrSealTopologyJournal(
-    atomicLoad(&topologyArena[ptrH_COVERED_PRODUCER_RECEIPTS]),
-    ptrTopologyGeneration());
 }
 
 ${framePlanLayout && framePlanPresentationLayout ? /* wgsl */ `

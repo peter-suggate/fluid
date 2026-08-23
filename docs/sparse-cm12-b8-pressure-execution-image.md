@@ -191,7 +191,7 @@ They are not read by every lane in every PCG iteration.
 ### 3.2 Canonical cell pages
 
 The cell execution view contains 64 direct live-cell addresses per page in the
-existing canonical PAB order:
+accepted canonical PCM rank order:
 
 ```text
 page 0: canonical live cells 0..63
@@ -202,7 +202,7 @@ tail page: the only partially populated page
 
 The publication transaction validates membership, activity, generation, and slot
 once. A hot solver invocation performs a bounds check and direct address load; it
-does not repeat PAB phase checks, PCM membership checks, and `cellActive` checks.
+does not repeat PCM membership checks and `cellActive` checks.
 
 Keeping canonical order preserves the current 64-lane reduction tree and avoids the
 extra reduction pass that defeated the spatial-tile experiment.
@@ -440,8 +440,8 @@ cross the raw-bit gate. Do not retain both arms.
 
 ### PEI-4: trusted canonical cell pages
 
-Seal PAB/PCM authority once at publication and make accepted PAB finalization publish
-the solve indirect count in the same transaction. Any generation, count, or fault
+Seal PCM authority once into PEI and make accepted PEI finalization publish the
+solve indirect count in the same transaction. Any generation, count, or fault
 mismatch publishes `x = 0`. Only then reduce `pressureCellInvocation` to a bounds
 check plus direct address load. Add a forced-publication-fault gate proving no stale
 cell executes. Keep the operator and canonical reduction fused.
@@ -575,47 +575,97 @@ This is a capacity proof, not yet a bandwidth proof. Important packing rules are
 - double-buffer or seal the accepted image by generation; never expose a partially
   compiled image to pressure consumers.
 
-### 12.4 Failure modes that remain open
+### 12.4 Remaining optimization constraints
 
-1. **Reduction association.** The current brick and hierarchy adjacency sums use a
-   64-lane tree. Replacing them with a sequential per-lane loop changes f32
-   association for degree three or greater. PEI-3 is not raw-bit-preserving without
-   exact tree emulation; it must be treated as a separate numerical experiment.
-2. **SIMD contamination.** Canonical order can place regular and exceptional cells
+1. **SIMD contamination.** Canonical order can place regular and exceptional cells
    in one SIMD group. A small exception count may still force both branch paths for
    many groups. The compiler receipt must report the fraction of canonical 32- and
    64-cell pages containing exceptions and the exceptional lanes per contaminated
    page.
-3. **Scattered coarse gathers.** Lane-major CSR gives adjacent lanes unrelated edge
+2. **Scattered coarse gathers.** Lane-major CSR gives adjacent lanes unrelated edge
    ranges. Fixed six-direction regular slots plus seam overflow are required before
    assuming coalesced coarse reads.
-4. **Compile duplication.** Production already materializes a canonical PAB list.
-   PEI must relocate/trust that list and delete repeated validation reads, not build
-   a second permanent address stream.
-5. **Cross-brick arithmetic still needs one descriptor.** Packed brick IDs are not a
-   logical Cartesian index. Same-rung boundary faces need a compact logical-neighbour
-   descriptor load; they are not literally zero-topology-load faces.
-6. **Churn.** Mini64 changes topology. Image publication must be charged to pressure
+3. **Churn.** Mini64 changes topology. Image publication must be charged to pressure
    topology and must reuse the existing repair transaction rather than adding an
    independent full-domain compile.
-7. **Fail-open addressing.** PCM currently publishes the recurring pressure-cell
-   indirect independently of final PAB acceptance. Removing invocation checks before
-   PAB owns a fail-closed solve indirect can execute stale cells after a publication
-   fault.
-8. **Port identity is not the directed SpMV stream.** A mixed row with `k` pressure
+4. **Port identity is not the directed SpMV stream.** A mixed row with `k` pressure
    terms expands to `k(k−1)` ordered off-diagonal terms. Re-evaluating `GᵀWG` by port
    during SpMV changes the arithmetic association. Share identity and coefficients,
    but retain the exact directed exception view needed by the consumer.
 
 ### 12.5 Adversarial verdict
 
-The plan is viable on this M1 Max after these constraints. PEI-1 is implementation
-ready and has a supportive hardware microbenchmark. Tight packing is feasible, but
-PEI-3, PEI-4 and PEI-5 are not implementation ready until the compiler census, SIMD
-contamination receipt, exact-reduction decision, fail-closed PAB indirect, and
-binding-15 arena layout are specified.
+The plan was viable on this M1 Max after these constraints. The implementation
+receipt below supersedes the pre-implementation readiness assessment.
 
-## 13. Source anchors
+## 13. B8/P8 implementation and correctness receipt
+
+The production cutover is direct. There is no runtime selector or retained full-work
+pressure arm.
+
+- PAB finalization owns the fail-closed pressure-cell solve indirect. Recurring cell
+  invocation is now a direct accepted-list lookup; repeated PCM and activity checks
+  were removed.
+- Brick and hierarchy correction sweeps use one entity per lane. Genuine residual
+  fan-in remains a workgroup reduction.
+- Binding 15 contains a 64-word PEI header, one wet flag per brick, dense wet-brick
+  IDs and dense live-hierarchy tokens. Ocean uses 5,952 words / 23,808 bytes. No
+  canonical-cell copy, descriptor, adjacency, face-code, coefficient or exception
+  planes are allocated.
+- PEI publishes four indirect streams: brick reduction, brick lane-major,
+  hierarchy reduction and hierarchy lane-major. Dry nodes are removed from every
+  iterative sweep.
+- Strict interiors use canonical arithmetic neighbours. Certified equal-rung faces
+  resolve the normalized target term from the shared immutable IBO patch. Mixed,
+  clipped and other exceptional faces retain compiled directed neighbours.
+- The full-refresh pressure oracle and its kernels, schedule and options were
+  deleted. The old binding-15 dense-neighbour plane was deleted; the one remaining
+  immutable neighbour source is shared by PCF repair and exceptional SpMV.
+
+The final construction-topology census removes recurring neighbour-ID reads for
+2,778,416 / 3,108,016 ocean B8 directed edges (89.395%) and 927,456 / 958,176
+mini64 B8 edges (96.794%). Runtime zero-weight edges can reduce actual reads further.
+
+### 13.1 Correctness failures found and fixed
+
+Two faults were visible only after the aggressive cutover and evolving-ocean gate.
+
+1. Masked coarse sweeps omitted the zero writes formerly performed by structural
+   dry nodes. Their stale RHS/A/B values contaminated the next pressure solve. PEI
+   compaction now clears every omitted brick and hierarchy node before publishing
+   the dense streams.
+2. The first equal-rung resolver assumed equal source/target dimensions implied
+   identical tangential local coordinates. Ocean has 720 / 313,376 clipped
+   equal-rung directed faces whose patch origins differ. SpMV therefore attached a
+   valid face weight to the wrong pressure unknown while PCF and projection used the
+   authoritative row term. The resolver now reads the normalized target-domain term
+   already compiled in the IBO patch.
+
+Before these fixes, ocean executed zero pressure iterations from frame one, relative
+residual stayed near one and maximum divergence grew from 4.0 to 25.3. PCM, PAB and
+topology receipts remained healthy, which isolated the failure to solve execution
+rather than topology publication.
+
+### 13.2 Corrected ocean trajectory
+
+The corrected 32-step ocean-seiche B8/P8 run passed with unchanged source hashes:
+
+- 64 pressure iterations on every frame;
+- relative residual range 1.9618e-5 to 2.3801e-5;
+- final mass drift -0.00934%, worst -0.01025% at frame 29;
+- wet cells 1,853,440 to 1,885,913 (no collapse);
+- peak maximum divergence 0.0043616, final 0.00205445;
+- zero PCM, PAB, validation or trajectory-gate faults;
+- exact PAB expected/materialized/executed cell counts on every frame.
+
+Receipt: `artifacts/ocean-volume-b8-correctness-32.json`.
+
+The mini64 B8 gate also completes 64 iterations with no recovery or residual drift
+and relative residual 7.822539e-6. TypeScript passes and Dawn compiles 618 WGSL entry
+points across the three generated B/P variants. Unit tests were intentionally not
+run for this experiment.
+
+## 14. Source anchors
 
 - Pressure invocation and current authority checks:
   `lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts`

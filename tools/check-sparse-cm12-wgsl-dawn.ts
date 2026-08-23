@@ -33,6 +33,10 @@ import { createSparseCM12PressureTopologyRepairLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
 import { createSparseCM12ResidentPersistentPressureCacheLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-persistent-pressure-cache";
+import { createSparseCM12PressureExecutionImageLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-pressure-execution-image";
+import { createSparseCM12TopologyEffectsAuthorityLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-topology-effects-authority";
 import { createSparseCM12DirtyFaceRowMaskLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-dirty-face-row-masks";
 import { createSparseCM12VelocityExtensionResidentLayouts } from
@@ -122,8 +126,7 @@ async function main(): Promise<void> {
     });
     const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
     let compiledEntryPoints = 0;
-    const variants: readonly (readonly [4 | 8 | 16, 4 | 8 | 16])[] =
-      [[4, 4], [8, 8], [16, 16]];
+    const variants: readonly (readonly [8, 8])[] = [[8, 8]];
     for (const [brickFineResolution, presentationPageResolution] of variants) {
       const variant = `B${brickFineResolution}/P${presentationPageResolution}`;
       const pressure = { aggregateEdgeForFineEdgeBaseWords: 13376,
@@ -147,10 +150,7 @@ async function main(): Promise<void> {
           brickFineResolution, pageResolution: presentationPageResolution,
           packetIndex: 5,
         }) : undefined;
-      const productionMatchedProfile = (brickFineResolution === 4
-          || brickFineResolution === 8
-          || brickFineResolution === 16)
-        && presentationPageResolution === brickFineResolution;
+      const productionMatchedProfile = true;
       const frameControl = productionMatchedProfile ? createSparseCM12FrameControl({
         baseWords: 32768, cellWorkgroups: 16, rowWorkgroups: 32,
         bodyCapacity: 0, d4Capable: true, rigidCapable: false,
@@ -160,7 +160,7 @@ async function main(): Promise<void> {
       const pressureTopologyRepair = productionMatchedProfile && frameControl
         ? createSparseCM12PressureTopologyRepairLayout({
           baseWords: frameControl.layout.totalWords,
-          brickCapacity: 8, rowCapacity: 2048,
+          brickCapacity: 8,
           brickFineResolution,
           presentationPageResolution,
         }) : undefined;
@@ -171,6 +171,15 @@ async function main(): Promise<void> {
           brickCount: 8, aggregateEdgeCount: 32,
           hierarchyLevelCounts: [8], hierarchyEdgeLevelCounts: [32],
         }) : undefined;
+      const pressureExecutionImage = createSparseCM12PressureExecutionImageLayout({
+        baseWords: 200000, cellCapacity: 1024, brickCapacity: 8,
+        hierarchyCapacity: 8, brickFineResolution: 8,
+        presentationPageResolution: 8,
+      });
+      const topologyEffects = createSparseCM12TopologyEffectsAuthorityLayout({
+        baseWords: persistentPressureCache!.controlEndWords,
+        ptrCapacity: 8, ptrLeafCapacity: 1,
+      });
       const velocityExtension = productionMatchedProfile && presentation
         ? createSparseCM12VelocityExtensionResidentLayouts({
           activityTailWords: presentation.totalWords,
@@ -248,12 +257,13 @@ async function main(): Promise<void> {
         framePlan, presentation, frameControl?.layout, pressureTopologyRepair,
         persistentPressureCache,
         velocityExtension,
-        undefined, undefined, false,
+        pressureExecutionImage,
         logicalOwnerDirectory, 0, undefined,
         transportExecutionImage, transportPacketAuthority,
         transportProducerMasks,
         undefined, undefined, internedBoundaryImage,
-        undefined, undefined, dirtyFaceRows,
+        topologyEffects, undefined, dirtyFaceRows,
+        250000,
       );
       const shaderModule = device.createShaderModule({
         label: `Sparse CM12 resident WGSL check ${variant}`,

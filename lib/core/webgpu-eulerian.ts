@@ -98,7 +98,7 @@ export interface GPUEulerianInfo {
     readonly pressureCellCount: number;
     readonly pressureActiveRowCount: number;
     readonly pcmCellDirtyLeafCount: number;
-    readonly pcmRowDirtyLeafCount: number;
+    readonly pcmRowPublishedWordCount: number;
     readonly pcmCellAcceptedGeneration: number;
     readonly pcmRowAcceptedGeneration: number;
     readonly pcmMatched: boolean;
@@ -109,20 +109,9 @@ export interface GPUEulerianInfo {
     readonly authorities?: {
       readonly status: "matched" | "fault" | "unavailable";
       readonly inputTopologyGeneration: number;
-      readonly pcf: GPUAdaptivePressureLocalStageReceipt;
       readonly pca: GPUAdaptivePressureLocalStageReceipt & {
         readonly familyDirtyCount: readonly [number, number, number, number];
         readonly familyExecutedCount: readonly [number, number, number, number];
-      };
-      readonly pressureAddressing: {
-        readonly ready: boolean;
-        readonly phase: number;
-        readonly fault: number;
-        readonly firstFaultRank: number;
-        readonly expectedPCMGeneration: number;
-        readonly materializedPCMGeneration: number;
-        readonly expectedCount: number;
-        readonly materializedCount: number;
       };
     };
     readonly detail: string;
@@ -131,12 +120,14 @@ export interface GPUEulerianInfo {
   adaptivePressureCanonicalMembership?: {
     readonly cell: {
       readonly phase: number; readonly fault: number; readonly firstFault: number;
-      readonly dirtyCount: number; readonly totalCount: number;
+      readonly dirtyCount: number; readonly directWriteCount?: number;
+      readonly totalCount: number;
       readonly candidateGeneration: number; readonly acceptedGeneration: number;
     };
     readonly row: {
       readonly phase: number; readonly fault: number; readonly firstFault: number;
-      readonly dirtyCount: number; readonly totalCount: number;
+      readonly dirtyCount: number; readonly directWriteCount?: number;
+      readonly totalCount: number;
       readonly candidateGeneration: number; readonly acceptedGeneration: number;
     };
   };
@@ -146,9 +137,8 @@ export interface GPUEulerianInfo {
     readonly firstFaultFamily: number; readonly firstFaultId: number;
     readonly candidateGeneration: number; readonly acceptedGeneration: number;
     readonly topologyGeneration: number;
-    readonly changedBrickCount: number; readonly changedRowCount: number;
-    readonly cellExecutionCount: number; readonly rowExecutionCount: number;
-    readonly brickDirtyLeafCount: number; readonly rowDirtyLeafCount: number;
+    readonly changedBrickCount: number; readonly cellExecutionCount: number;
+    readonly brickDirtyLeafCount: number;
     readonly expectedProducerReceipts: number;
     readonly coveredProducerReceipts: number;
   };

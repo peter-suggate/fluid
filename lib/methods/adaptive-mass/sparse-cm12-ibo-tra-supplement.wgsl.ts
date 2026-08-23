@@ -107,7 +107,7 @@ fn itr1ApplyBoundary(packet:u32,mask:vec2u,worker16:u32,slot:u32){
 @compute @workgroup_size(64)
 fn compileSparseCM12GammaRowMasks(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
-  let packet=cm12TransportPacketId(wid.x,2u);
+  let packet=cm12TransportPacketId(wid.x);
   if(packet==ITR1_INVALID){return;}
   let mask=tpm1SurfaceMask(packet);let slot=${p}IBOAcceptedSlot();
   if(lane==0u){itr1ApplyCanonical(packet,mask,slot);}

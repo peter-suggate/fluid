@@ -819,9 +819,7 @@ async function runDamFrontLane(): Promise<void> {
   let device: GPUDevice | undefined;
   let adaptive: WebGPUAdaptiveMassSolver | undefined;
   let allFine: WebGPUAdaptiveMassSolver | undefined;
-  let pressureOracle: WebGPUAdaptiveMassSolver | undefined;
   let authorityOracle: WebGPUAdaptiveMassSolver | undefined;
-  const pressureOraclePaired = hasFlag("pressure-oracle-paired");
   const authorityOraclePaired = hasFlag("fca-authority-oracle-paired");
   const failures: string[] = [];
   try {
@@ -859,10 +857,6 @@ async function runDamFrontLane(): Promise<void> {
     // racing across multiple resident owners during peak allocation.
     adaptive = await createSolver("adaptive");
     allFine = await createSolver("all-fine");
-    if (pressureOraclePaired) {
-      pressureOracle = await WebGPUAdaptiveMassSolver.createPressureRefreshOracleForQA(
-        device, scene, "balanced", undefined, solverOptions("adaptive"), () => {});
-    }
     if (authorityOraclePaired) {
       authorityOracle = await WebGPUAdaptiveMassSolver.createLegacyHostAuthorityOracleForQA(
         device, scene, "balanced", undefined, solverOptions("adaptive"), () => {});
@@ -876,13 +870,6 @@ async function runDamFrontLane(): Promise<void> {
       adaptiveBitExact: bitExactFieldReceipt(initialAdaptiveFields),
       allFineBitExact: bitExactFieldReceipt(initialAllFineFields),
     };
-    if (pressureOracle) {
-      const oracleInitial = bitExactFieldReceipt(await pressureOracle.readDiagnosticFields());
-      for (const field of BIT_EXACT_PHYSICAL_FIELDS) {
-        expect(failures, oracleInitial[field] === initial.adaptiveBitExact[field],
-          `pressure oracle initial physical mismatch in ${field.replace("Sha256", "")}`);
-      }
-    }
     if (authorityOracle) {
       const oracleInitial = bitExactFieldReceipt(await authorityOracle.readDiagnosticFields());
       for (const field of BIT_EXACT_PHYSICAL_FIELDS) {
@@ -918,15 +905,13 @@ async function runDamFrontLane(): Promise<void> {
         `step ${step}: adaptive advance did not encode`);
       expect(failures, allFine.advanceTo(time_s, []),
         `step ${step}: all-fine advance did not encode`);
-      if (pressureOracle) expect(failures, pressureOracle.advanceTo(time_s, []),
-        `step ${step}: pressure oracle advance did not encode`);
       if (authorityOracle) expect(failures, authorityOracle.advanceTo(time_s, []),
         `step ${step}: FCA authority oracle advance did not encode`);
       await device.queue.onSubmittedWorkDone();
       const [adaptiveFields, allFineFields, activity, stats, allFineStats,
         adaptivePressureMembership, allFinePressureMembership,
         adaptiveFca, allFineFca,
-        oracleFields, oracleStats, oracleMembership, authorityOracleFields,
+        authorityOracleFields,
         fppHeader, adaptiveSaw, authorityOracleSaw,
         authorityOracleFca,
         authorityOracleActivity, authorityOracleStats, adaptiveVex, allFineVex,
@@ -937,8 +922,6 @@ async function runDamFrontLane(): Promise<void> {
         adaptive.readPressureCanonicalMembershipQA(),
         allFine.readPressureCanonicalMembershipQA(),
         adaptive.readFrameControlQA(), allFine.readFrameControlQA(),
-        pressureOracle?.readDiagnosticFields(), pressureOracle?.readStats(),
-        pressureOracle?.readPressureCanonicalMembershipQA(),
         authorityOracle?.readDiagnosticFields(),
         checkpointStepSet.has(step)
           ? readBufferBinding(device, presentationControl,
@@ -1038,81 +1021,6 @@ async function runDamFrontLane(): Promise<void> {
       }
       const relativeResidual = stats.pressureRelativeResidual ?? stats.pressureResidual;
       const connectivity = connectivityReceipt(adaptiveFields.density);
-      let oracleReceipt: Record<string, unknown> | undefined;
-      if (oracleFields && oracleStats && oracleMembership) {
-        const localBits = bitExactFieldReceipt(adaptiveFields);
-        const oracleBits = bitExactFieldReceipt(oracleFields);
-        for (const field of BIT_EXACT_PHYSICAL_FIELDS) {
-          expect(failures, localBits[field] === oracleBits[field],
-            `step ${step}: pressure oracle physical mismatch in ${field.replace("Sha256", "")}`);
-        }
-        for (const [domain, local, oracle] of [
-          ["cell", adaptivePressureMembership.cell, oracleMembership.cell],
-          ["row", adaptivePressureMembership.row, oracleMembership.row],
-        ] as const) {
-          expect(failures, local.totalCount === oracle.totalCount
-            && local.activeBitsSha256 === oracle.activeBitsSha256,
-          `step ${step}: pressure oracle ${domain} membership mismatch`);
-        }
-        for (const field of ["thetaSha256", "coefficientSha256", "rhsSha256"] as const) {
-          expect(failures, adaptivePressureMembership[field] === oracleMembership[field],
-            `step ${step}: pressure oracle ${field.replace("Sha256", "")} mismatch`);
-        }
-        const firstDifferentWord = (left: Uint32Array, right: Uint32Array) => {
-          const count = Math.min(left.length, right.length);
-          for (let id = 0; id < count; id += 1) if (left[id] !== right[id]) return id;
-          return left.length === right.length ? -1 : count;
-        };
-        const edgeMismatch = firstDifferentWord(
-          adaptivePressureMembership.qaRaw.coefficientBits,
-          oracleMembership.qaRaw.coefficientBits,
-        );
-        expect(failures, edgeMismatch < 0,
-          `step ${step}: PCF full-oracle first edge ${edgeMismatch} local/oracle bits ${
-            edgeMismatch < 0 ? "equal" : `${adaptivePressureMembership.qaRaw.coefficientBits[
-              edgeMismatch]}/${oracleMembership.qaRaw.coefficientBits[edgeMismatch]}`}`);
-        for (const [family, local, oracle] of [
-          ["aggregate edge", adaptivePressureMembership.qaRaw.aggregateEdgeBits,
-            oracleMembership.qaRaw.aggregateEdgeBits],
-          ["brick diagonal", adaptivePressureMembership.qaRaw.brickDiagonalBits,
-            oracleMembership.qaRaw.brickDiagonalBits],
-          ["hierarchy edge", adaptivePressureMembership.qaRaw.hierarchyEdgeBits,
-            oracleMembership.qaRaw.hierarchyEdgeBits],
-          ["hierarchy diagonal", adaptivePressureMembership.qaRaw.hierarchyDiagonalBits,
-            oracleMembership.qaRaw.hierarchyDiagonalBits],
-        ] as const) {
-          const mismatch = firstDifferentWord(local, oracle);
-          expect(failures, mismatch < 0,
-            `step ${step}: PCF full-oracle first ${family} ${mismatch} local/oracle bits ${
-              mismatch < 0 ? "equal" : `${local[mismatch]}/${oracle[mismatch]}`}`);
-        }
-        for (const [bank, local, oracle] of [
-          ["A", adaptivePressureMembership.qaRaw.faceABits,
-            oracleMembership.qaRaw.faceABits],
-          ["B", adaptivePressureMembership.qaRaw.faceBBits,
-            oracleMembership.qaRaw.faceBBits],
-        ] as const) {
-          const mismatch = firstDifferentWord(local, oracle);
-          expect(failures, mismatch < 0,
-            `step ${step}: FPA projected face bank ${bank} first row ${mismatch} local/oracle bits ${
-              mismatch < 0 ? "equal" : `${local[mismatch]}/${oracle[mismatch]}`}`);
-        }
-        oracleReceipt = {
-          bitExact: oracleBits,
-          membership: oracleMembership,
-          cells: oracleStats.adaptivePressureCellCount,
-          activeRows: oracleStats.adaptivePressureActiveRowCount,
-          topologyGeneration: oracleStats.adaptiveTopologyShadowGeneration,
-          topologyDiagnostic: {
-            localGeneration: stats.adaptiveTopologyShadowGeneration,
-            oracleGeneration: oracleStats.adaptiveTopologyShadowGeneration,
-            localAcceptedCells: stats.adaptiveAcceptedCellCount,
-            oracleAcceptedCells: oracleStats.adaptiveAcceptedCellCount,
-            localAcceptedRows: stats.adaptiveAcceptedRowCount,
-            oracleAcceptedRows: oracleStats.adaptiveAcceptedRowCount,
-          },
-        };
-      }
       let authorityOracleReceipt: BitExactFieldReceipt | undefined;
       const vexLifecycleReceipt = (name: string,
         vex: NonNullable<typeof adaptiveVex>): Record<string, unknown> => {
@@ -1255,7 +1163,6 @@ async function runDamFrontLane(): Promise<void> {
           residualDrift: allFineStats.pressureResidualDrift,
           membership: allFinePressureMembership,
         },
-        ...(oracleReceipt ? { pressureOracle: oracleReceipt } : {}),
         ...(fppReceipt ? { presentation: fppReceipt } : {}),
         topology: {
           activeMaximumFineCellX: Math.max(...activeBricks.map(
@@ -1384,7 +1291,6 @@ async function runDamFrontLane(): Promise<void> {
       dt_s: CM12_PAPER_DT_S,
       simulatedDuration_s: steps * CM12_PAPER_DT_S,
       runMode: hasFlag("short-smoke") ? "short-smoke" : "canonical",
-      pressureOraclePaired,
       authorityOraclePaired,
       physicalReference: physicalReferencePath ? {
         path: physicalReferencePath,
@@ -1418,7 +1324,6 @@ async function runDamFrontLane(): Promise<void> {
   } finally {
     adaptive?.destroy();
     allFine?.destroy();
-    pressureOracle?.destroy();
     authorityOracle?.destroy();
     if (device) {
       const compiler = gpuCompilationManagerFor(device);
@@ -2129,7 +2034,6 @@ function commands(): readonly CommandReceipt[] {
   const common = ["--import", "tsx"];
   const backend = argument("backend");
   const shortSmoke = hasFlag("short-smoke");
-  const pressureOraclePaired = hasFlag("pressure-oracle-paired");
   const authorityOraclePaired = hasFlag("fca-authority-oracle-paired");
   const damSteps = String(physicsLaneSteps("dam-steps"));
   const symmetrySteps = String(physicsLaneSteps("symmetry-steps"));
@@ -2143,7 +2047,6 @@ function commands(): readonly CommandReceipt[] {
     lane: "dam-front",
     argv: [NODE, ...common, SELF, "--internal-dam-front", `--dam-steps=${damSteps}`,
       ...(shortSmoke ? ["--short-smoke"] : []),
-      ...(pressureOraclePaired ? ["--pressure-oracle-paired"] : []),
       ...(authorityOraclePaired ? ["--fca-authority-oracle-paired"] : []),
       ...(physicalReference ? [`--physical-reference=${physicalReference}`] : []),
       ...(backend ? [`--backend=${backend}`] : [])],
