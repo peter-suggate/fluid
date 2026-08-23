@@ -76,6 +76,6 @@ try {
   const result = spawnSync(process.env.NAGA ?? "naga", [path], { encoding: "utf8" });
   if (result.status !== 0) throw new Error(result.stderr || result.stdout);
   const entries = [...source.matchAll(/@compute[^\n]*\nfn\s+([A-Za-z0-9_]+)/g)].length;
-  console.log(`Sparse CM12 integrated VEX1${pressureAddressing ? "+PAB1" : ""}`
+  console.log(`Sparse CM12 integrated VEX2${pressureAddressing ? "+PAB1" : ""}`
     + ` resident: Naga PASS (${entries} entry points)`);
 } finally { rmSync(directory, { recursive: true, force: true }); }

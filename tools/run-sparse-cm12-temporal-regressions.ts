@@ -1117,41 +1117,26 @@ async function runDamFrontLane(): Promise<void> {
       const vexLifecycleReceipt = (name: string,
         vex: NonNullable<typeof adaptiveVex>): Record<string, unknown> => {
         const header = vex.header;const invalid = 0xffff_ffff;
-        const accepted = header[VEX_HEADER.acceptedGeneration]!;
-        const candidate = header[VEX_HEADER.candidateGeneration]!;
-        const phase = header[VEX_HEADER.reserved]!;
-        const roots = header[VEX_HEADER.rootCount]!;
-        const blast = header[VEX_HEADER.blastCount]!;
+        const completed = header[VEX_HEADER.completedFrameGeneration]!;
         expect(failures, header[VEX_HEADER.faultCount] === 0
-          && header[VEX_HEADER.uncoveredWriteCount] === 0
           && header[VEX_HEADER.firstFaultCell] === invalid
           && header[VEX_HEADER.firstFaultDepth] === invalid,
-        `step ${step}: ${name} VEX1 fault/uncovered/first ${
-          header[VEX_HEADER.faultCount]}/${header[VEX_HEADER.uncoveredWriteCount]}/${
+        `step ${step}: ${name} VEX2 fault/first ${
+          header[VEX_HEADER.faultCount]}/${
           header[VEX_HEADER.firstFaultCell]}/${header[VEX_HEADER.firstFaultDepth]}`);
-        expect(failures, accepted === step && candidate === step + 1 && phase === 2,
-          `step ${step}: ${name} VEX1 accepted/candidate/phase ${accepted}/${candidate}/${phase}`);
-        expect(failures, roots <= vex.acceptedOwner.length && blast <= vex.acceptedOwner.length,
-          `step ${step}: ${name} VEX1 planned root/blast count ${roots}/${blast} exceeds capacity ${
-            vex.acceptedOwner.length}`);
+        expect(failures, completed === step,
+          `step ${step}: ${name} VEX2 completed generation ${completed}`);
         return {
-          generation: accepted, candidateGeneration: candidate, phase,
-          plannedNextRoots: roots, plannedNextBlast: blast,
-          maximumPlannedDepth: header[VEX_HEADER.maximumDepth],
-          executedCurrent: header[VEX_HEADER.executedCellCount],
-          reusedCurrent: header[VEX_HEADER.reusedCellCount],
+          generation: completed,
+          topologyGeneration: header[VEX_HEADER.topologyGeneration],
+          packetCapacity: header[VEX_HEADER.packetCapacity],
+          validCells: header[VEX_HEADER.validCellCount],
+          emptyPackets: header[VEX_HEADER.emptyPacketCount],
+          neighborLoads: header[VEX_HEADER.neighborLoadCount],
+          executedCells: header[VEX_HEADER.executedCellCount],
           faults: header[VEX_HEADER.faultCount],
-          uncovered: header[VEX_HEADER.uncoveredWriteCount],
           firstFaultCell: header[VEX_HEADER.firstFaultCell],
           firstFaultDepth: header[VEX_HEADER.firstFaultDepth],
-          firstFaultCallsite: header[VEX_HEADER.firstFaultCell] === invalid
-            ? undefined : vex.candidateDepth[header[VEX_HEADER.firstFaultCell]],
-          firstFaultOwnerBrick: header[VEX_HEADER.rootDispatchY],
-          firstFaultOwnerTile: header[VEX_HEADER.rootDispatchZ],
-          firstFaultFramePlanSlot: header[VEX_HEADER.frontierADispatchY],
-          firstFaultFramePlanTileGeneration: header[VEX_HEADER.frontierADispatchZ],
-          firstFaultFramePlanPackedStageMasks: header[VEX_HEADER.frontierBDispatchY],
-          firstFaultFramePlanStage0MaskLow: header[VEX_HEADER.frontierBDispatchZ],
         };
       };
       let velocityExtensionReceipt: Record<string, unknown> =
@@ -1162,9 +1147,8 @@ async function runDamFrontLane(): Promise<void> {
       if (adaptiveVex && authorityOracleVex) {
         let firstCell = -1;let firstLane = -1;
         const invalid = 0xffff_ffff;
-        for (let cell = 0; cell < adaptiveVex.acceptedOwner.length && firstCell < 0; cell += 1) {
-          if (adaptiveVex.acceptedOwner[cell] === invalid
-            || adaptiveVex.acceptedDepth[cell] === invalid) continue;
+        for (let cell = 0; cell < adaptiveVex.acceptedDepth.length && firstCell < 0; cell += 1) {
+          if (adaptiveVex.acceptedDepth[cell] === invalid) continue;
           for (let lane = 0; lane < 4; lane += 1) {
             if (adaptiveVex.velocityBits[4 * cell + lane]
                 !== authorityOracleVex.velocityBits[4 * cell + lane]) {
@@ -1182,13 +1166,10 @@ async function runDamFrontLane(): Promise<void> {
           firstDifferentLane: firstLane,
           productionBits: value(adaptiveVex.velocityBits, 4 * firstCell + firstLane),
           legacyBits: value(authorityOracleVex.velocityBits, 4 * firstCell + firstLane),
-          blastDepth: value(adaptiveVex.blastDepth, firstCell),
           acceptedDepth: value(adaptiveVex.acceptedDepth, firstCell),
-          acceptedOwner: value(adaptiveVex.acceptedOwner, firstCell),
-          rootCause: value(adaptiveVex.rootCause, firstCell),
         };
         expect(failures, firstCell < 0,
-          `step ${step}: VEX1 accepted cache differs from immutable eight-sweep oracle at cell ${
+          `step ${step}: VEX2 output differs from immutable eight-sweep oracle at cell ${
             firstCell} lane ${firstLane}`);
       }
       if (authorityOracleFields) {
@@ -1925,49 +1906,32 @@ async function runWeakenedSymmetryLane(): Promise<void> {
           const header = vex.header;
           const cell = header[VEX_HEADER.firstFaultCell]!;
           const cellValid = cell !== SPARSE_CM12_FRAME_CONTROL_INVALID
-            && cell < vex.acceptedOwner.length;
+            && cell < vex.acceptedDepth.length;
           vexFirstFailure = {
             step,
             frameControl,
             scalarResult,
             header: {
-              flags: header[VEX_HEADER.flags],
-              phase: header[VEX_HEADER.reserved],
-              acceptedGeneration: header[VEX_HEADER.acceptedGeneration],
-              candidateGeneration: header[VEX_HEADER.candidateGeneration],
+              completedFrameGeneration: header[VEX_HEADER.completedFrameGeneration],
               topologyGeneration: header[VEX_HEADER.topologyGeneration],
-              rootCount: header[VEX_HEADER.rootCount],
-              blastCount: header[VEX_HEADER.blastCount],
-              maximumDepth: header[VEX_HEADER.maximumDepth],
+              packetCapacity: header[VEX_HEADER.packetCapacity],
+              validCellCount: header[VEX_HEADER.validCellCount],
+              emptyPacketCount: header[VEX_HEADER.emptyPacketCount],
+              neighborLoadCount: header[VEX_HEADER.neighborLoadCount],
               executedCellCount: header[VEX_HEADER.executedCellCount],
-              reusedCellCount: header[VEX_HEADER.reusedCellCount],
               faultCount: header[VEX_HEADER.faultCount],
-              uncoveredWriteCount: header[VEX_HEADER.uncoveredWriteCount],
               firstFaultCell: cell,
               firstFaultDepth: header[VEX_HEADER.firstFaultDepth],
-              firstFaultCallsite: cellValid ? vex.candidateDepth[cell] : undefined,
             },
             firstCell: cellValid ? {
-              blastDepth: vex.blastDepth[cell],
-              candidateDepth: vex.candidateDepth[cell],
-              rootCause: vex.rootCause[cell],
               acceptedDepth: vex.acceptedDepth[cell],
-              acceptedOwner: vex.acceptedOwner[cell],
               acceptedVelocityBits: [...vex.velocityBits.slice(4 * cell, 4 * cell + 4)],
             } : undefined,
-            framePlanProvenance: {
-              ownerBrick: header[VEX_HEADER.rootDispatchY],
-              ownerTile: header[VEX_HEADER.rootDispatchZ],
-              slot: header[VEX_HEADER.frontierADispatchY],
-              tileGeneration: header[VEX_HEADER.frontierADispatchZ],
-              packedStageMasks: header[VEX_HEADER.frontierBDispatchY],
-              stage0MaskLow: header[VEX_HEADER.frontierBDispatchZ],
-            },
           };
         } catch (error) {
           vexFirstFailure = { step, frameControl, scalarResult,
             captureError: error instanceof Error ? error.message : String(error) };
-          failures.push(`step ${step}: failed to capture first VEX1 fault provenance`);
+          failures.push(`step ${step}: failed to capture first VEX2 fault detail`);
         }
       }
       previousFrameControlGeneration = frameControl.acceptedGeneration;

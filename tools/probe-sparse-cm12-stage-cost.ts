@@ -248,27 +248,23 @@ type StageCostQASolver = {
   readFrameControlQA(): Promise<FrameControlHeader>;
   readFinalScalarMaskHeaderQA(): Promise<FinalScalarMaskHeader>;
   readCandidateEffectsTransactionQA(): Promise<{
-    readonly vda: Readonly<Record<string, number>>;
     readonly tfx: Readonly<Record<string, number>>;
     readonly topology: readonly number[];
     readonly manifest: readonly number[];
     readonly isa?: readonly number[];
   } | undefined>;
   readVelocityExtensionHeaderQA(): Promise<{
-    readonly flags: number; readonly phase: number;
-    readonly acceptedGeneration: number; readonly candidateGeneration: number;
-    readonly topologyGeneration: number; readonly capacity: number;
-    readonly rootCount: number; readonly blastCount: number; readonly maximumDepth: number;
-    readonly executedCellCount: number; readonly reusedCellCount: number;
-    readonly faultCount: number; readonly uncoveredWriteCount: number;
+    readonly completedFrameGeneration: number; readonly topologyGeneration: number;
+    readonly cellCapacity: number; readonly packetCapacity: number;
+    readonly executedCellCount: number; readonly validCellCount: number;
+    readonly emptyPacketCount: number; readonly neighborLoadCount: number;
+    readonly faultCount: number;
     readonly firstFault?: { readonly cell: number; readonly depth: number };
-    readonly framePlanProvenance?: Record<string, number>;
   }>;
   readVelocityExtensionQA(): Promise<{
     readonly header: Uint32Array;
-    readonly blastDepth: Uint32Array; readonly candidateDepth: Uint32Array;
-    readonly rootCause: Uint32Array; readonly acceptedDepth: Uint32Array;
-    readonly acceptedOwner: Uint32Array; readonly velocityBits: Uint32Array;
+    readonly validityA: Uint32Array; readonly validityB: Uint32Array;
+    readonly acceptedDepth: Uint32Array; readonly velocityBits: Uint32Array;
   }>;
 };
 
@@ -566,14 +562,12 @@ try {
         let firstFaultDetail: Record<string, unknown> | undefined;
         if (vexHeader.firstFault) {
           // The capacity-sized comparison payload is read at most once, and
-          // only when VEX1 itself supplied an exact first-fault cell.
+          // only when VEX2 itself supplied an exact first-fault cell.
           const vex = await qaSolver.readVelocityExtensionQA();
           const cell = vexHeader.firstFault.cell;
           firstFaultDetail = {
             cell, depth: vexHeader.firstFault.depth,
-            blastDepth: vex.blastDepth[cell], candidateDepth: vex.candidateDepth[cell],
-            rootCause: vex.rootCause[cell], acceptedDepth: vex.acceptedDepth[cell],
-            acceptedOwner: vex.acceptedOwner[cell],
+            acceptedDepth: vex.acceptedDepth[cell],
             acceptedVelocityBits: [...vex.velocityBits.slice(4 * cell, 4 * cell + 4)],
           };
         }
@@ -681,8 +675,6 @@ try {
       topologyDeltaLeaves: deltaCount,
       shadowCells: candidateEffects?.topology[18] ?? 0,
       shadowRows: candidateEffects?.topology[19] ?? 0,
-      rootRequests: candidateEffects?.vda.rootInputCount ?? 0,
-      uniqueNewRoots: candidateEffects?.vda.newRootCount ?? 0,
       ptrEffects: candidateEffects?.tfx.ptrCount ?? 0,
       iboClosureLeaves: candidateEffects?.isa?.[4] ?? 0,
       work: {
@@ -870,6 +862,8 @@ try {
 
   const stages = [...stageSamples].map(([id, samples]) => ({
     stage: id, median_ms: Number(median(samples).toFixed(4)),
+    p95_ms: Number(percentile(samples, 0.95).toFixed(4)),
+    samples_ms: samples.map((value) => Number(value.toFixed(4))),
   })).sort((left, right) => right.median_ms - left.median_ms);
   const workChunks = ADAPTIVE_MASS_GPU_WORK_CHUNKS.map((chunk) => {
     const samples = workChunkSamples.get(chunk.id) ?? [];
@@ -880,6 +874,8 @@ try {
       label: chunk.phase.label,
       kind: chunk.kind,
       median_ms: samples.length === 0 ? 0 : Number(median(samples).toFixed(4)),
+      p95_ms: samples.length === 0 ? 0 : Number(percentile(samples, 0.95).toFixed(4)),
+      samples_ms: samples.map((value) => Number(value.toFixed(4))),
       samples: samples.length,
     };
   }).sort((left, right) => right.median_ms - left.median_ms);
@@ -912,7 +908,7 @@ try {
     probe: "sparse-cm12-stage-cost", scene: sceneName, samples: seen,
     warmupSamples: warmup,
     diagnostic: {
-      purpose: "FCA1/FSM1/VEX1 observability; not performance acceptance",
+      purpose: "FCA1/FSM1/VEX2 observability; not performance acceptance",
       passed: diagnosticFailure === undefined,
       failure: diagnosticFailure,
       initial: {
@@ -997,7 +993,10 @@ try {
     },
     quiescentFrames: committedSamples.filter((value) => value === 0).length,
     phases: [...phaseSamples].map(([label, samples]) => ({
-      label, median_ms: Number(median(samples).toFixed(4)), samples: samples.length,
+      label, median_ms: Number(median(samples).toFixed(4)),
+      p95_ms: Number(percentile(samples, 0.95).toFixed(4)),
+      samples_ms: samples.map((value) => Number(value.toFixed(4))),
+      samples: samples.length,
     })).sort((left, right) => right.median_ms - left.median_ms),
     cpuPhases: [...cpuPhaseSamples].map(([label, samples]) => ({
       label, median_ms: Number(median(samples).toFixed(4)), samples: samples.length,
@@ -1020,7 +1019,7 @@ try {
       abi: "FCA1",
       scheduling: "GPU-owned fixed indirect work/no-work families",
       // This remains the whole concrete resident-stage rollup. Its disjoint
-      // FCA1, VEX1, FSM1 and packet-authority terms are in workChunks.
+      // FCA1, VEX2, FSM1 and packet-authority terms are in workChunks.
       transportVelocityExtensionUpperBound_ms: frameAuthorityStage?.median_ms,
       cpuTransportVelocityExtensionUpperBound_ms: frameAuthorityCPUSamples
         ? Number(median(frameAuthorityCPUSamples).toFixed(4)) : undefined,

@@ -3,8 +3,7 @@
  *
  * One transport workgroup owns one 64-cell rung packet.  Its lanes publish exact
  * surface-feature and density-changed bitsets.  Later dispatches expand the
- * masks into TRA row closure and VEX root/neighbor closure; transport gather
- * never walks either graph.
+ * masks into TRA row closure; transport gather never walks that graph.
  */
 
 export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_MAGIC = 0x5450_4d31; // TPM1
@@ -30,9 +29,6 @@ export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_FAULT = Object.freeze({
   none: 0, invalidHeader: 1, packetOutOfRange: 2, generationMismatch: 3,
   duplicatePacket: 4, incompletePublication: 5,
 } as const);
-
-/** VEX cause retained from the scalar density producer's exact HEAD path. */
-export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_VEX_CAUSE = 1 << 2;
 
 export interface SparseCM12TransportProducerMaskLayout {
   readonly baseWords: number;
@@ -148,7 +144,7 @@ export function sparseCM12TransportProducerMaskHasLane(
 }
 
 /**
- * Exact CPU reference for the two compiler dispatches.  It deliberately uses
+ * Exact CPU reference for the row compiler dispatch. It deliberately uses
  * arrays (not sets) while traversing so tests can compare legacy visitation;
  * returned authorities are canonicalized only at the publication boundary.
  */
@@ -156,17 +152,15 @@ export function compileSparseCM12TransportProducerMaskReference(options: {
   readonly mask: SparseCM12TransportProducerPacketMask;
   readonly packetCells: readonly number[];
   readonly incidenceRows: (cell: number) => readonly number[];
-  readonly rowTermCells: (row: number) => readonly number[];
   readonly rowAccepted?: (row: number) => boolean;
   readonly cellActive?: (cell: number) => boolean;
-}): Readonly<{ traRows: readonly number[]; vexRoots: readonly number[] }> {
+}): readonly number[] {
   if (options.packetCells.length !== 64) {
     throw new RangeError("TPM1 reference requires exactly 64 packet cells");
   }
   const accepted = options.rowAccepted ?? (() => true);
   const active = options.cellActive ?? (() => true);
   const traRows = new Set<number>();
-  const vexRoots = new Set<number>();
   for (let lane = 0; lane < 64; lane += 1) {
     const cell = options.packetCells[lane]!;
     if (!active(cell)) continue;
@@ -175,22 +169,8 @@ export function compileSparseCM12TransportProducerMaskReference(options: {
     )) {
       for (const row of options.incidenceRows(cell)) if (accepted(row)) traRows.add(row);
     }
-    if (sparseCM12TransportProducerMaskHasLane(
-      options.mask.densityLow, options.mask.densityHigh, lane,
-    )) {
-      vexRoots.add(cell);
-      for (const row of options.incidenceRows(cell)) {
-        if (!accepted(row)) continue;
-        for (const neighbor of options.rowTermCells(row)) {
-          if (neighbor !== cell && active(neighbor)) vexRoots.add(neighbor);
-        }
-      }
-    }
   }
-  return Object.freeze({
-    traRows: Object.freeze([...traRows].sort((a, b) => a - b)),
-    vexRoots: Object.freeze([...vexRoots].sort((a, b) => a - b)),
-  });
+  return Object.freeze([...traRows].sort((a, b) => a - b));
 }
 
 /** Required GPU ordering; authority begin/finalize calls bracket these hooks. */
@@ -198,7 +178,6 @@ export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_DISPATCH_ORDER = Object.freeze(
   "beginSparseCM12TransportProducerMasks + beginSparseCM12DynamicClosure",
   "gatherConservativeDensity (calls cm12TransportProducerMaskPublish once per lane)",
   "sealSparseCM12TransportProducerMasks + sealSparseCM12DynamicClosureSources",
-  "compileSparseCM12DynamicTRA + compileSparseCM12VexRootMasks (VEX candidate is already collecting)",
+  "compileSparseCM12DynamicTRA",
   "sealSparseCM12DynamicClosureTargets; scatter both gamma phases; clear touched rows",
-  "late frame: beginVelocityExtensionCandidate + sealVelocityExtensionRoots",
 ] as const);

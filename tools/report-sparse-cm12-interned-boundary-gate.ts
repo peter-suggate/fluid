@@ -22,10 +22,6 @@ import { compareSparseCM12IBOSemanticAuthority,
   "../lib/methods/adaptive-mass/sparse-cm12-ibo-semantic-authority";
 import { createSparseCM12InternedRefLookup, sparseCM12InternedRefLookup } from
   "../lib/methods/adaptive-mass/sparse-cm12-interned-ref-lookup";
-import { compileSparseCM12VexIBO1Program } from
-  "../lib/methods/adaptive-mass/sparse-cm12-vex-ibo1-consumer";
-import { compileSparseCM12VexIBO1Image } from
-  "../lib/methods/adaptive-mass/sparse-cm12-vex-ibo1-image";
 import { initializeSparseBrickAtlasFromScene, sparseBrickSpan } from
   "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import { adaptiveMassReceiverScaleForScene, dormantReceiverDomain,
@@ -116,8 +112,6 @@ for (const patch of catalog.patches) {
 }
 const traSupplement = createSparseCM12IboTRASupplement({ ibo: compiled,
   baseWords: refLookup.layout.totalWords });
-const vexProgram = compileSparseCM12VexIBO1Program({ catalog, ibo: compiled });
-const vexSupplement = compileSparseCM12VexIBO1Image(vexProgram);
 const geometryNeighbors = compileSparseCM12GeometryFaceNeighbors({
   coordinates: atlas.bricks.map((brick) => brick.coordinate),
   spans: atlas.bricks.map((brick) => sparseBrickSpan(brick)),
@@ -228,7 +222,6 @@ const report = { schema: "sparse-cm12-interned-boundary-gate/v1", scene: name,
     combinedImmutableBytes: semanticCombinedImmutableBytes },
   semanticAuthorityDynamicMaximumBytes: 4 * (16 + 2 * atlas.bricks.length),
   traSupplementBytes: traSupplement.layout.totalBytes,
-  vexSupplementBytes: vexSupplement.layout.totalBytes,
   combinedImmutableBytes: sharedImage.layout.immutableBytes,
   bytesPerSlot: sharedImage.layout.bytesPerSlot,
   totalBytes: sharedImage.layout.totalBytes,

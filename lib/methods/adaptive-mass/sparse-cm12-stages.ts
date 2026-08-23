@@ -172,11 +172,15 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     substages: {
       "frame-control-authority": {
         id: "velocity-extrapolation",
-        label: "Frame-control authority + moving-solid roots",
+        label: "Frame-control authority + moving-solid activity",
       },
-      "velocity-extension-execution": {
+      "velocity-extension-mask-initialization": {
         id: "velocity-extrapolation",
-        label: "VEX1 initialization + eight recurrence sweeps + commit",
+        label: "VEX2 packet-mask initialization",
+      },
+      "velocity-extension-sweeps": {
+        id: "velocity-extrapolation",
+        label: "VEX2 eight direct packet sweeps + fused commit",
       },
       "transport-packet-authority": {
         id: "velocity-extrapolation",
@@ -185,12 +189,12 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     },
     lens: null,
     tip: {
-      summary: "Three sub-seams. FCA1 seals this frame's control authority — body and boundary publications, rigid voxelization, moving-solid velocity roots — into fixed indirect families. VEX1 then executes the extension blast the previous frame's presentation stage planned: initialization, eight depth-specialized recurrence sweeps and a commit into the persistent accepted-velocity cache. Last, the AEI transport packet authority is compiled from the prior frame's final-scalar masks. Planning the blast is charged to presentation publication, not here.",
-      reads: "projected face velocity, frame-control roots, prior final-scalar packet masks",
+      summary: "FCA1 seals the frame's body and boundary authority. VEX2 then initializes packet validity and runs eight direct packet sweeps over the accepted topology image; sweep 8 publishes the effective transport velocity. Last, the AEI transport packet authority is compiled from the prior frame's final-scalar masks.",
+      reads: "projected face velocity, accepted topology image, prior final-scalar packet masks",
       writes: "sealed frame control, extended transport velocity cache, transport packet families",
       feeds: "face preparation and conservative transport",
     },
-    chip: () => "FCA1 · VEX1 8-depth blast · AEI packets",
+    chip: () => "FCA1 · VEX2 8 direct sweeps · AEI packets",
   },
   "face-preparation": {
     label: "Face preparation", band: "transport", side: "right",
@@ -280,16 +284,13 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       "final-scalar-mask-publication": {
         id: "fine-sdf-redistance", label: "FSM1 final-scalar packet-mask publication",
       },
-      "final-scalar-vex-roots": {
-        id: "fine-sdf-redistance", label: "FSM1 changed-neighborhood VEX root compilation",
-      },
     },
     lens: null,
     tip: {
-      summary: "Sec. 3.5's density correction and Algorithm 2's local mass return on the compact sharpening cell authority: receipt clears and indirect setup, field preparation, the TEI trace with fixed-point mass scatter, then scalar finalization. The stage goes on to redistribute cut-cell solid excess over the frame-control solid families, publish the FSM1 final-scalar packet masks, and compile the changed-neighbourhood VEX roots that seed the next frame's extension.",
+      summary: "Sec. 3.5's density correction and Algorithm 2's local mass return on the compact sharpening cell authority: receipt clears and indirect setup, field preparation, the TEI trace with fixed-point mass scatter, then scalar finalization. The stage then redistributes cut-cell solid excess and publishes FSM1 final-scalar packet masks.",
       reads: "transported density and gamma, solid fractions",
-      writes: "conditioned density and gamma, final-scalar packet masks, VEX roots",
-      feeds: "symmetry authority, activity measurement and the next frame's velocity extension",
+      writes: "conditioned density and gamma, final-scalar packet masks",
+      feeds: "symmetry authority and activity measurement",
     },
     controls: [
       {
@@ -616,9 +617,6 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       "candidate-ptr-publication": {
         id: "power-topology", label: "Candidate PTR effects publication",
       },
-      "candidate-vex-publication": {
-        id: "power-topology", label: "Candidate VEX effects publication",
-      },
       "candidate-effects-seal": {
         id: "power-topology", label: "Candidate effects receipt seal",
       },
@@ -631,7 +629,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     },
     lens: null,
     tip: {
-      summary: "One transaction over the topology delta resolution planning built: density, gamma, momentum and exterior faces transfer into double-buffered shadow slots; shadow faces are validated; the effects census and preflight run; the interned-boundary (IBO) delta is built and independently validated and the transport execution image (TEI) shadow compiled; the transaction is authorized; PTR and VEX effects publish; the receipt seals; fields and membership publish; retired images replay. That end-frame flip is input to the next advance's pressure topology, never this advance's.",
+      summary: "One transaction over the topology delta resolution planning built: density, gamma, momentum and exterior faces transfer into double-buffered shadow slots; shadow faces are validated; the effects census and preflight run; the interned-boundary (IBO) delta is built and independently validated and the transport execution image (TEI) shadow compiled; the transaction is authorized; PTR effects publish; the receipt seals; fields and membership publish; retired images replay. That end-frame flip is input to the next advance's pressure topology, never this advance's.",
       reads: "shadow worklists, candidate levels, accepted cell and face state",
       writes: "shadow leaf/face storage, IBO + TEI deltas, pressure-row worklists, conservation receipts and accepted-generation metadata",
       feeds: "transport, pressure, projection, diagnostics and presentation through the next frame's indirect dispatches",
@@ -655,12 +653,12 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     phase: { id: "adaptive-publication", label: "Encode compact sparse presentation pages" },
     lens: null,
     tip: {
-      summary: "Plans the next frame's velocity-extension blast — root seal, eight frontier expansions, sealed plan; charged here, executed by stage one — then classifies which bricks the renderer can see, publishes their compact level-set pages in place and commits frame control. Nothing is expanded to a dense field and nothing crosses to the host.",
-      reads: "committed sparse authority, VEX roots",
-      writes: "next-frame VEX plan, compact level-set brick pages and presentation classification",
-      feeds: "renderer level-set and grid consumers; stage one of the next advance",
+      summary: "Classifies which bricks the renderer can see, publishes their compact level-set pages in place and commits frame control. Nothing is expanded to a dense field and nothing crosses to the host.",
+      reads: "committed sparse authority",
+      writes: "compact level-set brick pages and presentation classification",
+      feeds: "renderer level-set and grid consumers",
     },
-    chip: (context) => `${context.info?.fluidBrickResidentCount ?? 0} pages · resident · next VEX plan`,
+    chip: (context) => `${context.info?.fluidBrickResidentCount ?? 0} pages · resident`,
   },
 } satisfies SparseCM12StageDeclarations);
 

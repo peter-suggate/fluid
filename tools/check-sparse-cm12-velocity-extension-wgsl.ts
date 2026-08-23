@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Compile the standalone VEX1 library in the complete resident shader context. */
+/** Compile the standalone VEX2 library in the complete resident shader context. */
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createSparseCM12IncrementalActivityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-incremental-activity";
@@ -32,9 +32,6 @@ function integratedSource(): string {
     16, 16, pressure, activity,
   ) + createSparseCM12VelocityExtensionWGSL({
     layout: extension,
-    // Compile-only tail address. The resident integration supplies the exact
-    // state-layout address after the optional pressure journal.
-    acceptedVelocityFloatBase: 200_000,
   });
 }
 
@@ -91,5 +88,5 @@ async function main(dawnModule: string): Promise<void> {
   await Promise.all(names.map((entryPoint) => device.createComputePipelineAsync({
     layout: pipelineLayout, compute: { module: shaderModule, entryPoint },
   })));
-  console.log(`Sparse CM12 VEX1: ${names.length} integrated entry points compiled (B16/P16)`);
+  console.log(`Sparse CM12 VEX2: ${names.length} integrated entry points compiled (B16/P16)`);
 }

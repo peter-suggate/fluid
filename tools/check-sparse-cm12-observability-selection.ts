@@ -43,17 +43,19 @@ assert.doesNotMatch(overlay, /sparseDirtyProvenance|sparseDirtyRecordAddress|SPA
 
 // FPL/FPP remains a production presentation authority and is globally encoded.
 const framePlanBody = resident.slice(resident.indexOf("private encodeFramePlanPresentation("),
-  resident.indexOf("private encodeVelocityExtensionPlan(",
+  resident.indexOf("  /**\n   * Adopt authored cell-size boxes",
     resident.indexOf("private encodeFramePlanPresentation(")));
 assert.equal((framePlanBody.match(/dispatch\("/g) ?? []).length, 10, "FPL plan dispatch count");
-assert.equal((framePlanBody.match(/plan\.dispatchWorkgroupsIndirect/g) ?? []).length, 2,
-  "FPL mass/VEX import dispatch count");
+assert.equal((framePlanBody.match(/plan\.dispatchWorkgroupsIndirect/g) ?? []).length, 0,
+  "FPL plan must not import a VEX catalogue");
 assert.equal((framePlanBody.match(/execute\.dispatchWorkgroups/g) ?? []).length, 5,
   "FPP execute dispatch count");
 assert.equal((framePlanBody.match(/encoder\.copyBufferToBuffer/g) ?? []).length, 2,
   "FPL/FPP copy count");
 assert.equal((framePlanBody.match(/const (?:plan|execute) = encoder\.beginComputePass/g) ?? []).length,
   2, "production FPL/FPP pass count");
+assert.doesNotMatch(resident, /encodeVelocityExtensionPlan/,
+  "retired VEX root/frontier planner returned");
 
 
 // FPP requires one B-sized page. The independent page selector is therefore

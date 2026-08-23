@@ -12,13 +12,6 @@ export interface SparseCM12EffectiveTransportVelocityWGSLOptions {
   readonly layout: SparseCM12EffectiveTransportVelocityLayout;
   /** Existing `array<vec4f>` storage binding; Phase 1 maps binding 3 here. */
   readonly planeName?: string;
-  /** Existing exact selector used by the construction-only seed kernel. */
-  readonly selectorName?: string;
-  /** Existing accepted-cell invocation helper used only at construction. */
-  readonly acceptedCellInvocationName?: string;
-  readonly invalidCellExpression?: string;
-  /** Development-only plane chronology ablation; never enabled by the gate. */
-  readonly readSelectorInsteadOfPlane?: boolean;
 }
 
 /**
@@ -33,18 +26,11 @@ export function createSparseCM12EffectiveTransportVelocityWGSL(
   options: SparseCM12EffectiveTransportVelocityWGSLOptions,
 ): string {
   const plane = identifier(options.planeName ?? "partials", "planeName");
-  const selector = identifier(options.selectorName
-    ?? "cm12ExtensionTransportVelocity", "selectorName");
-  const acceptedInvocation = identifier(options.acceptedCellInvocationName
-    ?? "acceptedTemplateCellInvocation", "acceptedCellInvocationName");
-  const invalid = options.invalidCellExpression ?? "INVALID";
-  const planeRead = `return ${plane}[cell];`;
-  const selectorRead = `return ${selector}(cell);`;
   return /* wgsl */ `
 const CM12_EFFECTIVE_TRANSPORT_VELOCITY_CAPACITY:u32=${options.layout.cellCapacity}u;
 
 fn cm12EffectiveTransportVelocity(cell:u32)->vec4f{
-  ${options.readSelectorInsteadOfPlane ? selectorRead : planeRead}
+  return ${plane}[cell];
 }
 fn cm12PublishVexAcceptedEffectiveVelocity(cell:u32,value:vec4f){
   if(cell<CM12_EFFECTIVE_TRANSPORT_VELOCITY_CAPACITY){${plane}[cell]=value;}
@@ -60,14 +46,5 @@ fn cm12PublishTransferredEffectiveVelocity(cell:u32,velocity:vec3f){
   }
 }
 
-// Construction fallback and explicit QA oracle. Production construction runs
-// the full VEX blast, whose acceptance hook seeds the same cells directly.
-@compute @workgroup_size(64)
-fn seedSparseCM12EffectiveTransportVelocity(
- @builtin(global_invocation_id)gid:vec3u){
-  let cell=${acceptedInvocation}(gid.x);
-  if(cell==${invalid}||cell>=CM12_EFFECTIVE_TRANSPORT_VELOCITY_CAPACITY){return;}
-  ${plane}[cell]=${selector}(cell);
-}
 `;
 }

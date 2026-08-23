@@ -22,10 +22,8 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
-import {
-  SPARSE_CM12_VELOCITY_EXTENSION_FLAG,
-  SPARSE_CM12_VELOCITY_EXTENSION_HEADER,
-} from "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
+import { SPARSE_CM12_VELOCITY_EXTENSION_HEADER } from
+  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
 import {
   initializeSparseBrickAtlasFromScene,
   sparseBrickAtlasStats,
@@ -201,17 +199,12 @@ async function runCase(device: GPUDevice, fixture: ConstructionCase,
       solver.readStats(), solver.readFrameControlQA(), solver.readVelocityExtensionQA(),
     ]);
     const vh = SPARSE_CM12_VELOCITY_EXTENSION_HEADER;
-    const vexFlags = vex.header[vh.flags]!;
     const laneValidationErrors = allValidationErrors.slice(validationStart);
     assert.deepEqual(laneValidationErrors, [], `${fixture.id} emitted WebGPU validation errors`);
     assert.equal(fca.fault, 0, `${fixture.id} FCA1 faulted`);
     assert.equal(fca.firstFaultOwner, INVALID, `${fixture.id} FCA1 recorded a fault owner`);
     assert.equal(fca.acceptedGeneration, 2, `${fixture.id} did not accept frame generation 2`);
-    assert.equal(vexFlags & SPARSE_CM12_VELOCITY_EXTENSION_FLAG.fault, 0,
-      `${fixture.id} VEX1 faulted`);
-    assert.equal(vex.header[vh.faultCount], 0, `${fixture.id} VEX1 fault count is nonzero`);
-    assert.equal(vex.header[vh.uncoveredWriteCount], 0,
-      `${fixture.id} VEX1 has uncovered writes`);
+    assert.equal(vex.header[vh.faultCount], 0, `${fixture.id} VEX2 fault count is nonzero`);
     return {
       id: fixture.id,
       sourceScene: fixture.sourceScene,
@@ -230,11 +223,10 @@ async function runCase(device: GPUDevice, fixture: ConstructionCase,
         residentBricks: stats.fluidBrickResidentCount,
         fca,
         vex: {
-          flags: vexFlags,
-          acceptedGeneration: vex.header[vh.acceptedGeneration],
-          candidateGeneration: vex.header[vh.candidateGeneration],
+          completedFrameGeneration: vex.header[vh.completedFrameGeneration],
+          topologyGeneration: vex.header[vh.topologyGeneration],
+          packetCapacity: vex.header[vh.packetCapacity],
           faultCount: vex.header[vh.faultCount],
-          uncoveredWriteCount: vex.header[vh.uncoveredWriteCount],
           executedCellCount: vex.header[vh.executedCellCount],
         },
       },

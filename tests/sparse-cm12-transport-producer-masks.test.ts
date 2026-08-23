@@ -6,7 +6,6 @@ import {
   SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER,
   SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER_WORDS,
   SPARSE_CM12_TRANSPORT_PRODUCER_MASK_MAGIC,
-  SPARSE_CM12_TRANSPORT_PRODUCER_MASK_VEX_CAUSE,
   compileSparseCM12TransportProducerMaskReference,
   createSparseCM12TransportProducerMaskInitialWords,
   createSparseCM12TransportProducerMaskLayout,
@@ -46,7 +45,7 @@ test("TPM1 portable ballot keeps all boundary lane bits exact", () => {
   }
 });
 
-test("TPM1 compiler oracle equals legacy TRA and VEX per-cell closure", () => {
+test("TPM1 compiler oracle equals legacy TRA row closure", () => {
   const cells = Array.from({ length: 64 }, (_, lane) => 100 + lane);
   const surface = Array<boolean>(64).fill(false);
   const density = Array<boolean>(64).fill(false);
@@ -56,31 +55,20 @@ test("TPM1 compiler oracle equals legacy TRA and VEX per-cell closure", () => {
   const [densityLow, densityHigh] = packSparseCM12TransportProducerMask(density);
   const incidenceRows = (cell: number): readonly number[] => [cell, cell + 1000];
   const rowAccepted = (row: number): boolean => row !== 163;
-  const rowTermCells = (row: number): readonly number[] => [row % 1000, row % 1000 + 1, 999];
   const cellActive = (cell: number): boolean => cell !== 999;
   const compiled = compileSparseCM12TransportProducerMaskReference({
     mask: { surfaceLow, surfaceHigh, densityLow, densityHigh },
-    packetCells: cells, incidenceRows, rowAccepted, rowTermCells, cellActive,
+    packetCells: cells, incidenceRows, rowAccepted, cellActive,
   });
 
   const legacyRows = new Set<number>();
-  const legacyRoots = new Set<number>();
   for (let lane = 0; lane < 64; lane += 1) {
     const cell = cells[lane]!;
     if (surface[lane]) for (const row of incidenceRows(cell)) {
       if (rowAccepted(row)) legacyRows.add(row);
     }
-    if (density[lane]) {
-      legacyRoots.add(cell);
-      for (const row of incidenceRows(cell)) if (rowAccepted(row)) {
-        for (const neighbor of rowTermCells(row)) {
-          if (neighbor !== cell && cellActive(neighbor)) legacyRoots.add(neighbor);
-        }
-      }
-    }
   }
-  assert.deepEqual(compiled.traRows, [...legacyRows].sort((a, b) => a - b));
-  assert.deepEqual(compiled.vexRoots, [...legacyRoots].sort((a, b) => a - b));
+  assert.deepEqual(compiled, [...legacyRows].sort((a, b) => a - b));
 });
 
 test("TPM1 WGSL publishes stamp last and compiles masks outside gather", () => {
@@ -97,10 +85,7 @@ test("TPM1 WGSL publishes stamp last and compiles masks outside gather", () => {
   assert.match(source, /fn compileSparseCM12TransportRowMasks/);
   assert.match(source, /let packet=testResidentTransportProducerMaskPacket\(rank\)/);
   assert.match(source, /testResidentTransportProducerMaskMarkRow\(row\)/);
-  assert.match(source, /fn compileSparseCM12VexRootMasks/);
-  assert.match(source, new RegExp(
-    `testResidentTransportProducerMaskRecordVexRoot\\(cell,${SPARSE_CM12_TRANSPORT_PRODUCER_MASK_VEX_CAUSE}u\\)`,
-  ));
+  assert.doesNotMatch(source, /compileSparseCM12VexRootMasks|RecordVexRoot/);
   assert.doesNotMatch(source, /tra1MarkScalarCellClosure/);
   assert.doesNotMatch(source, /cm12ResidentRecordExtensionIncidence/);
 });
@@ -110,9 +95,8 @@ test("TPM1 integration order seals masks before compiled topology consumers", ()
     "beginSparseCM12TransportProducerMasks + beginSparseCM12DynamicClosure",
     "gatherConservativeDensity (calls cm12TransportProducerMaskPublish once per lane)",
     "sealSparseCM12TransportProducerMasks + sealSparseCM12DynamicClosureSources",
-    "compileSparseCM12DynamicTRA + compileSparseCM12VexRootMasks (VEX candidate is already collecting)",
+    "compileSparseCM12DynamicTRA",
     "sealSparseCM12DynamicClosureTargets; scatter both gamma phases; clear touched rows",
-    "late frame: beginVelocityExtensionCandidate + sealVelocityExtensionRoots",
   ]);
 });
 

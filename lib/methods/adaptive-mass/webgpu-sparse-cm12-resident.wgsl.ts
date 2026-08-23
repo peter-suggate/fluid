@@ -22,7 +22,6 @@ import type { SparseCM12FramePlanPresentationLayout } from
   "./sparse-cm12-frame-plan-presentation";
 import {
   SPARSE_CM12_FRAME_CONTROL_COVERAGE,
-  SPARSE_CM12_FRAME_CONTROL_FAULT,
   type SparseCM12FrameControlLayout,
 } from "./sparse-cm12-frame-control";
 import { createSparseCM12FrameControlWGSL } from "./sparse-cm12-frame-control.wgsl";
@@ -51,11 +50,6 @@ import type { SparseCM12PressureAddressingABLayout,
   "./sparse-cm12-pressure-addressing-ab";
 import { createSparseCM12PressureAddressingABWGSL } from
   "./sparse-cm12-pressure-addressing-ab.wgsl";
-import {
-  SPARSE_CM12_VELOCITY_EXTENSION_CAUSE,
-  SPARSE_CM12_VELOCITY_EXTENSION_FLAG,
-  SPARSE_CM12_VELOCITY_EXTENSION_HEADER,
-} from "./sparse-cm12-velocity-extension";
 import type { SparseCM12LogicalOwnerDirectoryLayout } from
   "./sparse-cm12-logical-owner-directory";
 import { createSparseCM12LogicalOwnerDirectoryWGSL } from
@@ -105,12 +99,6 @@ import { createSparseCM12DynamicClosureAuthorityWGSL } from
 import { createSparseCM12GeometryFaceNeighborsWGSL,
   createSparseCM12IBOSemanticAuthorityWGSL } from
   "./sparse-cm12-ibo-semantic-authority.wgsl";
-import { SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER,
-  SPARSE_CM12_VEX_DELTA_AUTHORITY_PHASE,
-  type SparseCM12VexDeltaAuthorityLayout } from
-  "./sparse-cm12-vex-delta-authority";
-import { createSparseCM12VexDeltaAuthorityWGSL } from
-  "./sparse-cm12-vex-delta-authority.wgsl";
 import { SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER,
   SPARSE_CM12_TOPOLOGY_EFFECTS_PHASE,
   type SparseCM12TopologyEffectsAuthorityLayout } from
@@ -195,7 +183,6 @@ export function createWebgpuSparseCM12ResidentWGSL(
     }>;
   }>,
   dynamicClosureLayout?: SparseCM12DynamicClosureLayout,
-  vexDeltaAuthorityLayout?: SparseCM12VexDeltaAuthorityLayout,
   topologyEffectsAuthorityLayout?: SparseCM12TopologyEffectsAuthorityLayout,
   finalScalarPacketMaskLayout?: SparseCM12FinalScalarPacketMaskLayout,
 ): string {
@@ -252,11 +239,6 @@ fn incrementalActivityAddCensus(brick:u32,score:u32,reasons:u32){
       stateName: "state",
       topologyGenerationExpression: "atomicLoad(&topologyArena[topologyWorklistBase()])",
       sourceFrameGenerationExpression: "cm12FCAcceptedGeneration()",
-      nextFrameGenerationExpression: "cm12FCCandidateGeneration()",
-      frameAuthorityReadyExpression: "cm12FCFrameSealed()",
-      injectionReopenReadyExpression:
-        "atomicLoad(&topologyArena[topologyWorklistBase()+3u])==2u",
-      provenanceHookPrefix: "cm12Resident",
       effectiveVelocityHookPrefix: phase1TransportQALayout ? "cm12Phase1QA"
         : effectiveTransportVelocityLayout ? "cm12" : undefined,
     })
@@ -268,7 +250,7 @@ fn incrementalActivityAddCensus(brick:u32,score:u32,reasons:u32){
     })
     : /* wgsl */ `
 fn cm12EffectiveTransportVelocity(cell:u32)->vec4f{
-  return cm12ExtensionTransportVelocity(cell);
+  _=cell;return vec4f(0.0);
 }
 fn cm12PublishCollocatedWetEffectiveVelocity(cell:u32,velocity:vec3f,wet:bool){
   _=cell;_=velocity;_=wet;
@@ -382,10 +364,8 @@ const PRESSURE_MODE_INCREMENTAL:u32=2u;
   const frameControlEntries = frameControlLayout
     ? createSparseCM12FrameControlWGSL({
       layout: frameControlLayout, controlName: "topologyArena",
-      authorizedD4Invalidation: vexDeltaAuthorityLayout !== undefined,
-    }) + (vexDeltaAuthorityLayout ? "" :
-      `fn cm12FCInvalidateD4Authorized(cause:u32,owner:u32,
- generation:u32,sealed:bool){_=cause;_=owner;_=generation;_=sealed;}`)
+      authorizedD4Invalidation: true,
+    })
     : /* wgsl */ `
 fn cm12FCSourceScalarParity()->u32{return select(0u,1u,p.frame.w>0.5);}
 fn cm12FCDestinationScalarParity()->u32{return cm12FCSourceScalarParity()^1u;}
@@ -436,45 +416,6 @@ fn ptrRejectTopologyJournal()->bool{return true;}
 fn ptrResidentTopologyDeltaReady()->bool{return true;}
 fn ptrSealPreflightedTopologyJournalNoFail(generation:u32){_=generation;}
 `;
-  const vexDeltaAuthorityEntries = vexDeltaAuthorityLayout && vexActivityBatchLayout
-    ? createSparseCM12VexDeltaAuthorityWGSL({
-      layout: vexDeltaAuthorityLayout,
-      velocityExtensionLayout: vexActivityBatchLayout.velocityExtension,
-      arenaName: "activity",
-      finalCellActiveFunction: "candidateTopologyCellActive",
-      finalCellRetiredFunction: "candidateTopologyCellRetired",
-      topologyGenerationExpression:
-        "atomicLoad(&topologyArena[topologyWorklistBase()])",
-      allowSealedPreflight: true,
-      frameGenerationExpression: "cm12FCEffectsGeneration()",
-      framePhaseValidExpression: "cm12FCEffectsPhaseValid()",
-    })
-    : /* wgsl */ `
-fn vda1BeginPreflight(transactionGeneration:u32,rootCount:u32,retiredCount:u32,
- rootHash:u32,retiredHash:u32,expectedFrameGeneration:u32,
- injectionRequired:bool,d4Required:bool){
- _=transactionGeneration;_=rootCount;_=retiredCount;_=rootHash;_=retiredHash;
- _=expectedFrameGeneration;_=injectionRequired;_=d4Required;}
-fn vda1BeginCensus(transactionGeneration:u32,injectionRequired:bool,d4Required:bool){
- _=transactionGeneration;_=injectionRequired;_=d4Required;}
-fn vda1CensusRoot(cell:u32,cause:u32){_=cell;_=cause;}
-fn vda1CensusRetired(cell:u32){_=cell;}
-fn vda1BeginSemanticPreflight()->bool{return true;}
-fn vda1PreflightRoot(cell:u32,cause:u32){_=cell;_=cause;}
-fn vda1PreflightRetired(cell:u32){_=cell;}
-fn vda1SealPreflight(topologyGeneration:u32,vexGeneration:u32)->bool{
- _=topologyGeneration;_=vexGeneration;return true;}
-fn vda1PreflightReady(generation:u32)->bool{_=generation;return true;}
-fn vda1Authorize(){}
-fn vda1TransactionAuthorized()->bool{return true;}
-fn vda1PublishAuthorizedRoot(cell:u32,cause:u32){_=cell;_=cause;}
-fn vda1PublishAuthorizedRetirement(cell:u32,cause:u32){_=cell;_=cause;}
-fn vda1SealPublicationNoFail(){}
-fn vda1CommitSuccessNoFail(generation:u32){_=generation;}
-fn vda1TransactionSucceeded(generation:u32)->bool{_=generation;return true;}
-fn vda1MarkInjectionPublishedNoFail(){}
-fn vda1MarkD4PublishedNoFail(){}
-`;
   const topologyEffectsEntries = topologyEffectsAuthorityLayout
     && pressureTopologyRepairLayout
     ? /* wgsl */ `
@@ -509,7 +450,6 @@ fn residentTopologyEffectsPreflightReady()->bool{
     + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.ptrHash}u]));}
 fn authorizeEmptySparseCM12CandidateEffectsNoFail(acceptedGeneration:u32)->bool{
  let tfxBase=${topologyEffectsAuthorityLayout.baseWords}u;
- let vdaBase=${vexDeltaAuthorityLayout?.baseWords ?? 0}u;
  let exactEmpty=atomicLoad(&topologyArena[tfxBase+
   ${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.phase}u])
     ==${SPARSE_CM12_TOPOLOGY_EFFECTS_PHASE.preflighted}u
@@ -517,26 +457,9 @@ fn authorizeEmptySparseCM12CandidateEffectsNoFail(acceptedGeneration:u32)->bool{
   &&atomicLoad(&topologyArena[tfxBase+${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.ptrCount}u])==0u
   &&atomicLoad(&topologyArena[tfxBase+${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.ptrLeafCount}u])==0u
   &&atomicLoad(&topologyArena[tfxBase+${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.expectedEffects}u])==0u
-  &&atomicLoad(&topologyArena[tfxBase+${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.coveredEffects}u])==0u
-  &&atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.phase}u])
-    ==${SPARSE_CM12_VEX_DELTA_AUTHORITY_PHASE.preflighted}u
-  &&atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.fault}u])==0u
-  &&atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.rootInputCount}u])==0u
-  &&atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.retiredInputCount}u])==0u
-  &&atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.rootCoverageCount}u])==0u
-  &&atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.retiredCoverageCount}u])==0u
-  &&atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.expectedRootHash}u])==0u
-  &&atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.observedRootHash}u])==0u
-  &&atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.expectedRetiredHash}u])==0u
-  &&atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.observedRetiredHash}u])==0u;
+  &&atomicLoad(&topologyArena[tfxBase+${SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.coveredEffects}u])==0u;
  if(!exactEmpty){return false;}
- tfxAuthorize();vda1Authorize();
- if(atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.d4Required}u])!=0u){
-  cm12FCInvalidateD4Authorized(1u,0u,cm12FCEffectsGeneration(),cm12FCFrameSealed());
-  vda1MarkD4PublishedNoFail();}
- if(atomicLoad(&activity[vdaBase+${SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER.injectionRequired}u])!=0u){
-  vda1MarkInjectionPublishedNoFail();}
- vda1SealPublicationNoFail();vda1CommitSuccessNoFail(acceptedGeneration);return true;
+ tfxAuthorize();_=acceptedGeneration;return true;
 }
 ` : /* wgsl */ `
 fn tfxRecordPTRBrick(brick:u32,oldState:u32,newState:u32,cause:u32)->bool{
@@ -694,7 +617,6 @@ fn cm12TransportSpatialTileId(fine:vec3u)->u32{_=fine;return INVALID;}`;
 @compute @workgroup_size(1) fn beginSparseCM12TransportProducerMasks(){}
 @compute @workgroup_size(1) fn sealSparseCM12TransportProducerMasks(){}
 @compute @workgroup_size(64) fn compileSparseCM12TransportRowMasks(){}
-@compute @workgroup_size(64) fn compileSparseCM12VexRootMasks(){}
 fn cm12TransportProducerMaskPublish(packet:u32,lane:u32,cell:u32,
  surfaceFeature:bool,densityChanged:bool){
   _=packet;_=lane;_=cell;_=surfaceFeature;_=densityChanged;
@@ -1203,7 +1125,7 @@ fn sparseCM12TopologyLifecycleAccepted()->bool{
   let topologyAccepted=phase==2u||(phase==0u
     &&atomicLoad(&topologyArena[base])==atomicLoad(&topologyArena[base+1u])
     &&atomicLoad(&activity[12])==atomicLoad(&topologyArena[base]));
-  return topologyAccepted&&vda1TransactionSucceeded(atomicLoad(&activity[12]));
+  return topologyAccepted;
 }
 fn residencyDensityThreshold()->f32{
   return max(CM12_DRY_CELL_THRESHOLD,p.sharpening.z);
@@ -1446,16 +1368,11 @@ fn publishSparseCM12FrameFaceOutput(){
 }
 @compute @workgroup_size(1)
 fn commitSparseCM12FrameControl(){
-  ${vexActivityBatchLayout ? `if(!cm12ExtensionReadyForFrameCommit()){
-    cm12FCFail(${SPARSE_CM12_FRAME_CONTROL_FAULT.velocityExtensionReceipt}u,
-      cm12ExtensionAcceptedGeneration());return;
-  }` : ""}
   _=cm12FCCommit();
 }
 @compute @workgroup_size(1)
 fn invalidateSparseCM12FrameD4ForInjection(){
   if(!sparseCM12TopologyLifecycleAccepted()){return;}
-  vda1MarkInjectionPublishedNoFail();
 }
 @compute @workgroup_size(64)
 fn sparseCM12FrameControlNoop(){ }
@@ -2071,7 +1988,6 @@ fn effectiveTransportStencil(position:vec3f)->TransportStencil{
 }
 
 ${topologyEffectsEntries}
-${vexDeltaAuthorityEntries}
 
 const TRANSPORT_CHARACTERISTIC_CLEARANCE:u32=${vexActivityBatchLayout
     ?.velocityState.characteristicSupportFloatBase ?? 0}u;
@@ -2124,9 +2040,6 @@ fn cm12ResidentTransportProducerMaskRowTermEnd(row:u32)->u32{
   return rowTermOffset(row)+rowTermCount(row);}
 fn cm12ResidentTransportProducerMaskRowTermCell(term:u32)->u32{
   return termCell(term);}
-fn cm12ResidentTransportProducerMaskRecordVexRoot(cell:u32,cause:u32){
-  _=cm12ExtensionRecordRoot(cell,cause);}
-
 // Sharpening consumes TPM1's dynamic mask in the same shared TEI packet space
 // as transport. The mask has already expanded source observations to their
 // 4^3 spatial-tile closure; this late predicate keeps post-conditioning
@@ -2178,103 +2091,23 @@ fn candidateInjectionAsymmetric()->bool{
       ||abs(p.injectionCenter.z-0.5*f32(p.dimensions.z))>1e-6
       ||abs(p.injectionRadius.x-p.injectionRadius.z)>1e-6);
 }
-fn candidateVexRootEffect(cell:u32,cause:u32,mode:u32){
-  if(mode==0u){vda1CensusRoot(cell,cause);
-  }else if(mode==1u){vda1PreflightRoot(cell,cause);
-  }else{vda1PublishAuthorizedRoot(cell,cause);}
-}
-fn candidateVexRetiredEffect(cell:u32,mode:u32){
-  if(mode==0u){vda1CensusRetired(cell);
-  }else if(mode==1u){vda1PreflightRetired(cell);
-  }else{vda1PublishAuthorizedRetirement(cell,
-    ${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.topologyOrEdgeOwnership}u);}
-}
-fn candidateVexIncidence(cell:u32,cause:u32,mode:u32){
-  if(!candidateTopologyCellActive(cell)){return;}
-  candidateVexRootEffect(cell,cause,mode);
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);if(!shadowRowScheduled(row)){continue;}
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-    for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
-      if(neighbor!=cell&&candidateTopologyCellActive(neighbor)){
-        candidateVexRootEffect(neighbor,cause,mode);}
-  }}
-}
-fn candidateTopologyVexEffectsWork(lane:u32,brick:u32,validBrick:bool,mode:u32){
-  if(!validBrick||brick>=p.dispatch.w){return;}let output=activityRecord(brick);
-  if(!topologyPreparationScheduledAt(output)){return;}
-  let accepted=atomicLoad(&activity[output+12u]);
-  let candidate=atomicLoad(&activity[output+13u]);
-  if(candidateBrickActive(brick)){let range=templateBrickCellRange(brick,candidate);
-    for(var local=lane;local<range.y;local+=64u){
-      candidateVexIncidence(range.x+local,
-        ${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.topologyOrEdgeOwnership}u,mode);}
-  }else if(brickActive(brick)){let range=templateBrickCellRange(brick,accepted);
-    for(var local=lane;local<range.y;local+=64u){
-      candidateVexRetiredEffect(range.x+local,mode);}
-  }
-}
-fn candidateInjectionEffectsWork(lane:u32,brick:u32,validBrick:bool,mode:u32){
-  if(!validBrick||brick>=p.dispatch.w||p.injectionCenter.w==0.0
-    ||!candidateBrickActive(brick)){return;}
-  let range=templateBrickCellRange(brick,scheduledBrickResolution(brick));
-  for(var local=lane;local<range.y;local+=64u){let cell=range.x+local;
-    if(cellOpenVolume(cell)<=1e-8||injectionCoverage(cell)<=0.0){continue;}
-    candidateVexIncidence(cell,${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.injection}u,mode);
-  }
-}
 @compute @workgroup_size(1) fn beginSparseCM12CandidateEffectsCensus(){
-  let generation=atomicLoad(&topologyArena[topologyWorklistBase()+1u]);
-  vda1BeginCensus(generation,p.injectionCenter.w!=0.0,candidateInjectionAsymmetric());
-}
-@compute @workgroup_size(64) fn censusSparseCM12CandidateTopologyVexEffects(
- @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
-  let brick=topologyDeltaLeafInvocation(wid.x);
-  candidateTopologyVexEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,0u);
-}
-@compute @workgroup_size(64) fn censusSparseCM12CandidateInjectionVexEffects(
- @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
-  let brick=topologyDeltaLeafInvocation(wid.x);
-  candidateInjectionEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,0u);
+  // VEX2 recomputes from current fields after the accepted-slot flip.
 }
 @compute @workgroup_size(1) fn beginSparseCM12CandidateEffectsSemanticPreflight(){
-  _=vda1BeginSemanticPreflight();
-}
-@compute @workgroup_size(64) fn preflightSparseCM12CandidateTopologyVexEffects(
- @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
-  let brick=topologyDeltaLeafInvocation(wid.x);
-  candidateTopologyVexEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,1u);
 }
 @compute @workgroup_size(64) fn preflightSparseCM12CandidateInjectionEffects(
  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
-  let brick=topologyDeltaLeafInvocation(wid.x);
-  candidateInjectionEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,1u);
+  _=lane;_=wid;
 }
 @compute @workgroup_size(1) fn finalizeSparseCM12CandidateEffectsPreflight(){
-  if(!candidateVexPlanReadyForPreflight()){
-    _=vda1SealPreflight(INVALID,INVALID);return;}
-  _=vda1SealPreflight(atomicLoad(&topologyArena[topologyWorklistBase()]),
-    cm12ExtensionGeneration());
-}
-@compute @workgroup_size(64) fn publishSparseCM12CandidateTopologyVexEffects(
- @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
-  if(!vda1TransactionAuthorized()){return;}let brick=topologyDeltaLeafInvocation(wid.x);
-  candidateTopologyVexEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,2u);
-}
-@compute @workgroup_size(64) fn publishSparseCM12CandidateInjectionVexEffects(
- @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
-  if(!vda1TransactionAuthorized()){return;}let brick=topologyDeltaLeafInvocation(wid.x);
-  candidateInjectionEffectsWork(lane,select(0u,brick,brick!=INVALID),brick!=INVALID,2u);
 }
 @compute @workgroup_size(1) fn beginSparseCM12AuthorizedCandidateEffects(){
-  if(vda1TransactionAuthorized()){reopenCandidateVexPlanAuthorizedNoFail();}
 }
 @compute @workgroup_size(1) fn finalizeSparseCM12AuthorizedCandidateEffects(){
-  if(!vda1TransactionAuthorized()){return;}
+  if(atomicLoad(&topologyArena[topologyWorklistBase()+3u])!=2u){return;}
   if(candidateInjectionAsymmetric()){cm12FCInvalidateD4Authorized(
-      1u,0u,cm12FCEffectsGeneration(),cm12FCFrameSealed());
-    vda1MarkD4PublishedNoFail();}
-  vda1SealPublicationNoFail();
+      1u,0u,cm12FCEffectsGeneration(),cm12FCFrameSealed());}
   ptrSealPreflightedTopologyJournalNoFail(
     atomicLoad(&topologyArena[topologyWorklistBase()+1u]));
 }
@@ -2364,30 +2197,6 @@ fn cm12FinalScalarCellFacts(cell:u32)->vec4u{
   }
   return vec4u(u32(changed),u32(nonexact),u32(bulk),u32(flip));
 }
-@compute @workgroup_size(64) fn compileSparseCM12FinalScalarVexRoots(
- @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
-  let leaf=wid.x;let slot=acceptedTopologySlot();
-  let count=cm12FinalScalarLeafPacketCount(leaf,slot);
-  for(var localPacket=0u;localPacket<count;localPacket+=1u){
-    let packet=64u*leaf+localPacket;let cell=cm12TeiPacketCell(packet,lane,slot);
-    if(cell==INVALID||!cellActive(cell)){continue;}
-    // Invert the former changed-cell fanout. Every accepted lane decides once
-    // whether it belongs to CHANGED's exact one-ring, so shared endpoints no
-    // longer re-enter the VEX root CAS from each incident changed cell.
-    var selected=fsm1Lane(fsm1Changed(packet),lane);
-    for(var incidence=incidenceBegin(cell);!selected&&incidence<incidenceEnd(cell);
-        incidence+=1u){
-      let row=incidenceRow(incidence);if(!rowAccepted(row)){continue;}
-      let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-      for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
-        if(neighbor!=cell&&cellActive(neighbor)&&fsm1ChangedCell(neighbor)){
-          selected=true;break;}
-      }
-    }
-    if(selected){_=cm12ExtensionRecordRoot(cell,4u);}
-  }
-}
-
 fn transportBeta(cell:u32)->f32{
   return f32(atomicLoad(&conditioning[cell]))/CM12_TRANSPORT_FIXED;
 }
@@ -2555,10 +2364,9 @@ fn prepareTransportFaceRow(row:u32){
   finishTransportFaceRow(row,characteristic,touchesLiquid);
 }
 @compute @workgroup_size(64)
-fn publishSparseCM12MovingSolidVelocityRoots(@builtin(global_invocation_id)gid:vec3u){
+fn publishSparseCM12MovingSolidActivity(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||!hasRigidBodies()){return;}
   if(cellOpenFraction(cell)<0.999||dynamicallyCoveredCell(cell)){
-    cm12ResidentRecordExtensionIncidence(cell,32u);
     incrementalActivityMarkCellClosure(cell,
       ${SPARSE_CM12_DIRTY_CAUSE_BIT.movingSolidSweep}u);
   }
@@ -4431,28 +4239,6 @@ fn executeSparseCM12FaceProjection(@builtin(global_invocation_id)gid:vec3u){
   _=fpaProjectionComplete(row);
 }
 
-// The extrapolation recurrence uses the accepted collocated liquid velocities
-// only at the liquid/air interface. Both collocated banks are recurrence
-// scratch by the time projection publishes the next accepted source, so a
-// comparison with either bank cannot prove that a boundary seed is unchanged.
-// VEX1 retains the prior accepted seed bits alongside its air cache. Publish
-// only interface seeds whose newly projected value differs from that receipt;
-// VEX1 expands the compact root set by the fixed eight-layer dependency closure.
-fn cm12VelocityExtensionChangedInterfaceSeed(cell:u32,velocity:vec3f)->bool{
-  if(state[destinationDensity()+cell]<=CM12_LIQUID_ISOVALUE){return false;}
-  let edgeOffsets=pressureTemplateWord(15u);
-  let end=pressureTemplateWord(edgeOffsets+cell+1u);
-  for(var edge=pressureTemplateWord(edgeOffsets+cell);edge<end;edge+=1u){
-    let row=pressureTemplateWord(pressureEdgeRows()+edge);if(!rowAccepted(row)){continue;}
-    let neighbor=fineSamples[pressureNeighborOffset()+edge];
-    if(neighbor<p.counts.x&&cellActive(neighbor)
-      &&state[destinationDensity()+neighbor]<=CM12_LIQUID_ISOVALUE){
-      return cm12ExtensionAcceptedVelocityChanged(cell,velocity);
-    }
-  }
-  return false;
-}
-
 @compute @workgroup_size(64)
 fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
   let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
@@ -4465,7 +4251,6 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
           | SPARSE_CM12_DIRTY_CAUSE_BIT.movingSolidSweep}u);
     }
     state[output]=0.0;state[output+1u]=0.0;state[output+2u]=0.0;state[output+3u]=0.0;
-    cm12ResidentRecordExtensionIncidence(id,2u);
     state[p.stateOffsets4.y+id]=0.0;return;
   }
   let previousAt=destinationCellVelocity()+4u*id;
@@ -4508,9 +4293,6 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
   if(velocityChanged){
     incrementalActivityMarkCellClosure(id,
       ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
-  }
-  if(velocityChanged||cm12VelocityExtensionChangedInterfaceSeed(id,velocity)){
-    cm12ResidentRecordExtensionIncidence(id,2u);
   }
   state[destinationCellVelocity()+4u*id]=velocity.x;state[destinationCellVelocity()+4u*id+1u]=velocity.y;
   state[destinationCellVelocity()+4u*id+2u]=velocity.z;state[destinationCellVelocity()+4u*id+3u]=0.0;
@@ -4597,7 +4379,6 @@ fn commitVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
   if(length(velocityDelta)>0.0){
     incrementalActivityMarkCellClosure(cell,
       ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
-    cm12ResidentRecordExtensionIncidence(cell,2u);
   }
   state[at]=next.x;state[at+1u]=next.y;state[at+2u]=next.z;
   cm12PublishCollocatedWetEffectiveVelocity(cell,next,
@@ -4638,179 +4419,6 @@ fn reduceDivergenceDiagnostics(@builtin(local_invocation_id)lid:vec3u){
     workgroupBarrier();if(width==1u){break;}width/=2u;}
   if(lid.x==0u){scalars[6]=reduceA[0];scalars[7]=reduceB[0];}
 }
-
-${vexActivityBatchLayout ? /* wgsl */ `
-// VEX1 resident bridge.
-fn candidateVexPlanReadyForPreflight()->bool{
-  if(!cm12ExtensionHeaderValid()||cm12ExtensionFaulted()){return false;}
-  let flags=cm12ExtensionLoad(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-    + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.flags}u);
-  let phase=cm12ExtensionLoad(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-    + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.reserved}u);
-  let accepted=cm12ExtensionAcceptedGeneration();let candidate=cm12ExtensionGeneration();
-  // A frame-tail topology transaction consumes the sealed FCA candidate,
-  // while inter-frame injection consumes the last accepted FCA generation.
-  // The phase-selected helper was itself captured and checked by VDA1.
-  let source=cm12FCEffectsGeneration();
-  let lifecycle=(flags==${SPARSE_CM12_VELOCITY_EXTENSION_FLAG.collectingRoots}u
-      &&phase==cm12ExtensionPhaseCollecting)
-    ||(flags==${SPARSE_CM12_VELOCITY_EXTENSION_FLAG.recurrenceSealed}u
-      &&phase==cm12ExtensionPhasePlanned);
-  return lifecycle
-    &&candidate==source&&(accepted==0u||accepted+1u==candidate);
-}
-fn reopenCandidateVexPlanAuthorizedNoFail(){
-  cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-    + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.flags}u,
-    ${SPARSE_CM12_VELOCITY_EXTENSION_FLAG.collectingRoots}u);
-  cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-    + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.reserved}u,
-    cm12ExtensionPhaseCollecting);
-}
-fn cm12ResidentCellTile(cell:u32)->vec2u{
-  let brick=cellBrick(cell);let minimum=cellMinimum(cell);
-  let local=(minimum%vec3u(BRICK_FINE_RESOLUTION))/4u;
-  return vec2u(brick,local.x
-    +CM12_SPATIAL_TILES_PER_AXIS*(local.y+CM12_SPATIAL_TILES_PER_AXIS*local.z));
-}
-fn cm12ResidentRecordExtensionIncidence(cell:u32,cause:u32){
-  if(cell>=p.counts.x||!cellActive(cell)){return;}
-  _=cm12ExtensionRecordRoot(cell,cause);
-  for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
-    let row=incidenceRow(incidence);if(!rowAccepted(row)){continue;}
-    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-    for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
-      if(neighbor!=cell&&cellActive(neighbor)){_=cm12ExtensionRecordRoot(neighbor,cause);}
-    }
-  }
-}
-fn cm12ResidentVelocityExtensionRoot(cell:u32,cause:u32,generation:u32)->bool{
-  _=cause;return cell<p.counts.x&&generation==cm12ExtensionGeneration();
-}
-fn cm12ResidentVelocityExtensionClosure(cell:u32,depth:u32,generation:u32)->bool{
-  _=depth;return cell<p.counts.x&&generation==cm12ExtensionGeneration();
-}
-fn cm12ResidentVelocityExtensionScheduled(cell:u32,depth:u32,generation:u32)->bool{
-  if(cell>=p.counts.x||generation!=cm12ExtensionGeneration()){return false;}
-  let owner=cm12ResidentCellTile(cell);
-  if(!cm12FramePlanCurrentTileScheduled(owner.x,owner.y,0u)){
-    cm12FramePlanMarkCurrentTileFault(owner.x,owner.y,0u);return false;
-  }
-  cm12FramePlanMarkCurrentTileExecuted(owner.x,owner.y,0u);_=depth;return true;
-}
-fn cm12ResidentVelocityExtensionOwner(cell:u32)->u32{
-  if(cell>=p.counts.x){return INVALID;}
-  let brick=cellBrick(cell);let rung=cellResolution(cell);
-  // The cell ID already names the local template/rung identity. The owner word is
-  // therefore the exact immutable logical brick key, accepted only while that
-  // rung remains current. Do not include the live active bit: receiver planning
-  // toggles it before accepted topology publication and used to invalidate an
-  // otherwise unchanged cache identity in the all-fine companion lane.
-  if(brick>=p.dispatch.w||rung!=acceptedBrickResolution(brick)){return INVALID;}
-  return topology[p.topologyOffsets2.z+2u*brick+1u];
-}
-fn cm12ResidentVelocityExtensionFault(cell:u32,depth:u32){
-  // Expansion authors FPL Next, so it must never mutate accepted FPL Current.
-  // Only the recurrence consumer owns a current-plan fault disposition.
-  if(cm12ExtensionLoad(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-      + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.reserved}u)
-      ==cm12ExtensionPhaseConsuming&&cell<p.counts.x){
-    let owner=cm12ResidentCellTile(cell);
-    cm12FramePlanMarkCurrentTileFault(owner.x,owner.y,0u);
-    // First-fault QA receipt in dispatch words already zeroed by fail-closed.
-    // No production decision consumes these words after a fault.
-    if(cm12ExtensionLoad(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.firstFaultCell}u)==cell
-      &&cm12ExtensionLoad(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.firstFaultDepth}u)==depth){
-      let slot=cm12FramePlanCurrentSlot();
-      let tile=cm12FramePlanTileAt(slot,owner.x,owner.y);
-      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.rootDispatchY}u,owner.x);
-      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.rootDispatchZ}u,owner.y);
-      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.frontierADispatchY}u,slot);
-      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.frontierADispatchZ}u,
-        cm12FramePlanLoad(tile));
-      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.frontierBDispatchY}u,
-        cm12FramePlanLoad(tile+1u));
-      cm12ExtensionStore(${vexActivityBatchLayout.velocityExtension.headerBaseWords
-        + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.frontierBDispatchZ}u,
-        cm12FramePlanLoad(cm12FramePlanBrickAt(slot,owner.x)+4u));
-    }
-  }
-  _=depth;
-}
-fn cm12ResidentVelocityExtensionDirtyCause(cause:u32)->u32{
-  var result=0u;
-  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.bootstrap}u)!=0u){
-    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated}u;}
-  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.projectedVelocity}u)!=0u){
-    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u;}
-  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.liquidClassification}u)!=0u){
-    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged
-      | SPARSE_CM12_DIRTY_CAUSE_BIT.phaseCrossing}u;}
-  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.topologyOrEdgeOwnership}u)!=0u){
-    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
-      | SPARSE_CM12_DIRTY_CAUSE_BIT.coefficientChanged}u;}
-  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.injection}u)!=0u){
-    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.boundarySource}u;}
-  if((cause&${SPARSE_CM12_VELOCITY_EXTENSION_CAUSE.movingSolid}u)!=0u){
-    result|=${SPARSE_CM12_DIRTY_CAUSE_BIT.movingSolidSweep}u;}
-  return result;
-}
-// Late-frame VEX planning owns the exact blast list. Import that list only
-// after FPL Next is open: depth zero is direct root evidence, positive depth
-// is dependency closure with its exact graph depth. Atomic FPL masks dedupe
-// multiple cells that share one stable B16 tile.
-@compute @workgroup_size(64)
-fn importVelocityExtensionBlastToFramePlanNext(
- @builtin(global_invocation_id)gid:vec3u){
-  let invocation=gid.x;
-  let count=cm12ExtensionLoad(
-    ${vexActivityBatchLayout.velocityExtension.headerBaseWords
-      + SPARSE_CM12_VELOCITY_EXTENSION_HEADER.blastCount}u);
-  if(invocation>=count){return;}
-  let cell=cm12ExtensionLoad(cm12ExtensionBlastList+invocation);
-  // The sealed blast is the exact recurrence authority. Seed-time pruning is
-  // its activity boundary; independently filtering here could drop FPL
-  // coverage after a same-frame retirement while the immutable blast still
-  // reaches next frame's consumer.
-  if(cell>=p.counts.x){cm12ExtensionFail(cell,0u);return;}
-  let depth=cm12ExtensionLoad(cm12ExtensionBlastDepth+cell);
-  let owner=cm12ResidentCellTile(cell);
-  if(depth==0u){
-    let cause=cm12ResidentVelocityExtensionDirtyCause(
-      cm12ExtensionLoad(cm12ExtensionRootCause+cell));
-    cm12FramePlanMarkOwnedNextTile(owner.x,owner.y,1u,0u,cause,0u,0u);
-  }else{
-    cm12FramePlanMarkOwnedNextTile(owner.x,owner.y,0u,1u,0u,
-      ${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u,depth);
-  }
-}
-
-` : /* wgsl */ `
-fn candidateVexPlanReadyForPreflight()->bool{return true;}
-fn reopenCandidateVexPlanAuthorizedNoFail(){}
-fn cm12ExtensionTransportVelocity(cell:u32)->vec4f{
-  let at=destinationCellVelocity()+4u*cell;
-  return vec4f(state[at],state[at+1u],state[at+2u],state[at+3u]);
-}
-fn cm12ExtensionAcceptedVelocityChanged(cell:u32,velocity:vec3f)->bool{
-  _=cell;_=velocity;return true;
-}
-fn cm12ExtensionRecordRoot(cell:u32,cause:u32)->bool{
-  _=cell;_=cause;return true;
-}
-fn cm12ExtensionGeneration()->u32{return 0u;}
-fn cm12ExtensionInvalidateRetiredCell(cell:u32,cause:u32)->bool{
-  _=cell;_=cause;return true;
-}
-fn cm12ResidentRecordExtensionIncidence(cell:u32,cause:u32){_=cell;_=cause;}
-`}
 
 // Advance and clear the compact receipt entirely on the device. The host
 // encodes this fixed singleton but neither supplies nor consumes a policy
@@ -6334,8 +5942,7 @@ fn validateAndAuthorizeShadowTopology(){
   var valid=shadowTemplateCellCount()<=atomicLoad(&topologyArena[base+6u])
     &&shadowTemplateRowCount()<=atomicLoad(&topologyArena[base+7u])
     &&ptrResidentTopologyDeltaReady()
-    &&residentTopologyEffectsPreflightReady()
-    &&vda1PreflightReady(atomicLoad(&topologyArena[base+1u]));
+    &&residentTopologyEffectsPreflightReady();
   ${internedBoundaryCommitReceipt}
   let leaves=acceptedLeafManifestBase();let deltaCount=atomicLoad(&topologyArena[leaves+10u]);
   for(var index=0u;index<deltaCount;index+=1u){let brick=topologyDeltaLeafInvocation(index);
@@ -6350,7 +5957,7 @@ fn validateAndAuthorizeShadowTopology(){
   // worklist/generation header remain unchanged until bounded publication
   // completes in later dispatches.
   atomicStore(&activity[17],0u);
-  tfxAuthorize();vda1Authorize();
+  tfxAuthorize();
   atomicStore(&topologyArena[base+3u],2u);
 }
 
@@ -6373,29 +5980,9 @@ fn finalizeAuthorizedShadowTopology(){
   atomicStore(&activity[12],atomicLoad(&topologyArena[base]));
   atomicStore(&activity[13],(atomicLoad(&activity[13])+p.topologyScheduling.x)
     %max(1u,p.dispatch.w));
-  vda1CommitSuccessNoFail(atomicLoad(&topologyArena[base]));
   // Sole publication point: all membership, fields, faces, cache/journal
   // effects and accepted headers are complete before this final selector flip.
   atomicStore(&topologyArena[base+2u],slot);
-}
-
-fn publishSparseCM12TopologyVelocityRootsWork(lid:vec3u,brick:u32,validBrick:bool){
-  if(!vda1TransactionAuthorized()){return;}
-  candidateTopologyVexEffectsWork(lid.x,brick,validBrick,2u);
-}
-
-@compute @workgroup_size(64)
-fn publishSparseCM12TopologyVelocityRoots(@builtin(local_invocation_id)lid:vec3u,
- @builtin(workgroup_id)wid:vec3u){
-  publishSparseCM12TopologyVelocityRootsWork(lid,wid.x,wid.x<p.dispatch.w);
-}
-
-@compute @workgroup_size(64)
-fn publishSparseCM12TopologyVelocityRootsFromTopologyDelta(
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  let brick=topologyDeltaLeafInvocation(wid.x);
-  publishSparseCM12TopologyVelocityRootsWork(
-    lid,select(0u,brick,brick!=INVALID),brick!=INVALID);
 }
 
 // Publish only the directional free-surface stencil and swept receivers from

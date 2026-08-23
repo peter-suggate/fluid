@@ -5,7 +5,6 @@ import {
   SPARSE_CM12_TRANSPORT_PRODUCER_MASK_MAGIC,
   SPARSE_CM12_TRANSPORT_PRODUCER_MASK_PHASE,
   SPARSE_CM12_TRANSPORT_PRODUCER_MASK_VERSION,
-  SPARSE_CM12_TRANSPORT_PRODUCER_MASK_VEX_CAUSE,
   type SparseCM12TransportProducerMaskLayout,
 } from "./sparse-cm12-transport-producer-masks";
 
@@ -15,7 +14,6 @@ export interface SparseCM12TransportProducerMaskWGSLOptions {
   readonly arenaName?: string;
   /** Prefix for the resident integration hooks documented below. */
   readonly hookPrefix?: string;
-  readonly vexCause?: number;
   /** Publish each completed packet ballot into DCA1's sparse source lists. */
   readonly dynamicClosurePublish?: boolean;
   /** Retained only for standalone legacy fixtures; production rows use ITR1. */
@@ -44,7 +42,6 @@ const identifier = (value: string, label: string): string => {
  * - `<p>TransportProducerMaskRowTermBegin/End(row) -> u32`
  * - `<p>TransportProducerMaskRowTermCell(term) -> u32`
  * - `<p>TransportProducerMaskMarkRow(row)`
- * - `<p>TransportProducerMaskRecordVexRoot(cell, cause)`
  */
 export function createSparseCM12TransportProducerMaskWGSL(
   options: SparseCM12TransportProducerMaskWGSLOptions,
@@ -52,10 +49,6 @@ export function createSparseCM12TransportProducerMaskWGSL(
   const layout = options.layout;
   const arena = identifier(options.arenaName ?? "topologyArena", "arenaName");
   const p = identifier(options.hookPrefix ?? "cm12Resident", "hookPrefix");
-  const cause = options.vexCause ?? SPARSE_CM12_TRANSPORT_PRODUCER_MASK_VEX_CAUSE;
-  if (!Number.isSafeInteger(cause) || cause < 0 || cause > 0xffff_ffff) {
-    throw new RangeError("vexCause must be a u32");
-  }
   const h = (word: number) => `${layout.baseWords + word}u`;
   return /* wgsl */ `
 const TPM1_MAGIC:u32=0x${SPARSE_CM12_TRANSPORT_PRODUCER_MASK_MAGIC.toString(16)}u;
@@ -252,32 +245,5 @@ fn compileSparseCM12TransportRowMasks(@builtin(workgroup_id)wid:vec3u,
   }
 }`}
 
-// Exact VEX root/one-ring expansion formerly performed in gather.  Per-cell
-// root payloads are preserved; only discovery moved behind the packet mask.
-@compute @workgroup_size(64)
-fn compileSparseCM12VexRootMasks(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  let rank=wid.x;if(rank>=${p}TransportProducerMaskPacketCount()){return;}
-  let packet=${p}TransportProducerMaskPacket(rank);
-  if(!tpm1PacketReady(packet)){return;}
-  let low=atomicLoad(&${arena}[TPM1_DENSITY_LOW+packet]);
-  let high=atomicLoad(&${arena}[TPM1_DENSITY_HIGH+packet]);
-  if(!tpm1LaneMarked(low,high,lane)){return;}
-  let cell=${p}TransportProducerMaskCell(packet,lane);
-  if(!${p}TransportProducerMaskCellValid(cell)){return;}
-  ${p}TransportProducerMaskRecordVexRoot(cell,${cause >>> 0}u);
-  for(var incidence=${p}TransportProducerMaskIncidenceBegin(cell);
-      incidence<${p}TransportProducerMaskIncidenceEnd(cell);incidence+=1u){
-    let row=${p}TransportProducerMaskIncidenceRow(incidence);
-    if(!${p}TransportProducerMaskRowAccepted(row)){continue;}
-    for(var term=${p}TransportProducerMaskRowTermBegin(row);
-        term<${p}TransportProducerMaskRowTermEnd(row);term+=1u){
-      let neighbor=${p}TransportProducerMaskRowTermCell(term);
-      if(neighbor!=cell&&${p}TransportProducerMaskCellValid(neighbor)){
-        ${p}TransportProducerMaskRecordVexRoot(neighbor,${cause >>> 0}u);
-      }
-    }
-  }
-}
 `;
 }

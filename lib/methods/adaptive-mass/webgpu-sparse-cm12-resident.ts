@@ -97,13 +97,6 @@ import { compareSparseCM12IBOSemanticAuthority,
 } from
   "./sparse-cm12-ibo-semantic-authority";
 import {
-  SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER,
-  SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS,
-  createSparseCM12VexDeltaAuthorityInitialWords,
-  createSparseCM12VexDeltaAuthorityLayout,
-  type SparseCM12VexDeltaAuthorityLayout,
-} from "./sparse-cm12-vex-delta-authority";
-import {
   SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER,
   SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS,
   createSparseCM12TopologyEffectsAuthorityInitialWords,
@@ -167,17 +160,15 @@ import {
   type SparseCM12FrameControlLayout,
 } from "./sparse-cm12-frame-control";
 import {
-  SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT,
-  createSparseCM12VexActivityBatchIndirectCopies,
   createSparseCM12VexActivityBatchInitialWords,
   createSparseCM12VexActivityBatchLayout,
   createSparseCM12VexActivityBatchPipelineDescriptors,
   type SparseCM12VexActivityBatchLayout,
-  type SparseCM12VexActivityBatchPacket,
 } from "./sparse-cm12-vex-activity-batch";
 import {
   SPARSE_CM12_VELOCITY_EXTENSION_HEADER,
   SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS,
+  SPARSE_CM12_VELOCITY_EXTENSION_DISPATCH_WIDTH,
   SPARSE_CM12_VELOCITY_EXTENSION_MAGIC,
   SPARSE_CM12_VELOCITY_EXTENSION_VERSION,
 } from "./sparse-cm12-velocity-extension";
@@ -459,7 +450,8 @@ export type SparseCM12ResidentStageId = (typeof SPARSE_CM12_RESIDENT_STAGES)[num
 export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
   "transport-velocity-extension": [
     "frame-control-authority",
-    "velocity-extension-execution",
+    "velocity-extension-mask-initialization",
+    "velocity-extension-sweeps",
     "transport-packet-authority",
   ],
   "face-preparation": [],
@@ -479,7 +471,6 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
     "sharpening-finalize",
     "solid-excess-repair",
     "final-scalar-mask-publication",
-    "final-scalar-vex-roots",
   ],
   "symmetry-authority": [],
   "body-forces": [],
@@ -500,7 +491,6 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
     "candidate-tei-compilation",
     "candidate-authorization",
     "candidate-ptr-publication",
-    "candidate-vex-publication",
     "candidate-effects-seal",
     "candidate-state-publication",
     "candidate-image-replay",
@@ -1548,8 +1538,6 @@ interface ResidentStateLayout {
    */
   readonly journal: number;
   readonly journalLayout: SparseCM12PressureJournalLayout;
-  /** VEX1 accepted air-band cache plus prior liquid-interface seed receipts. */
-  readonly velocityExtensionAcceptedVelocity: number;
   /** Persistent swept-characteristic support consumed by FSM1 packet scheduling. */
   readonly transportCharacteristicSupport: number;
   /** Dense read cache derived from TEI/effective velocity for face tracing. */
@@ -1835,27 +1823,18 @@ export interface SparseCM12FrameControlQA {
   readonly committedFrames: number;
 }
 
-/** Header-only VEX1 receipt. Capacity-sized comparison arrays remain opt-in. */
+/** Header-only receipt for the direct VEX2 packet transform. */
 export interface SparseCM12VelocityExtensionHeaderQA {
-  readonly flags: number;
-  readonly phase: number;
-  readonly acceptedGeneration: number;
-  readonly candidateGeneration: number;
+  readonly completedFrameGeneration: number;
   readonly topologyGeneration: number;
-  readonly capacity: number;
-  readonly rootCount: number;
-  readonly blastCount: number;
-  readonly maximumDepth: number;
+  readonly cellCapacity: number;
+  readonly packetCapacity: number;
   readonly executedCellCount: number;
-  readonly reusedCellCount: number;
+  readonly validCellCount: number;
+  readonly emptyPacketCount: number;
+  readonly neighborLoadCount: number;
   readonly faultCount: number;
-  readonly uncoveredWriteCount: number;
   readonly firstFault?: { readonly cell: number; readonly depth: number };
-  readonly framePlanProvenance?: {
-    readonly ownerBrick: number; readonly ownerTile: number; readonly slot: number;
-    readonly tileGeneration: number; readonly packedStageMasks: number;
-    readonly stage0MaskLow: number;
-  };
 }
 
 const align4 = (value: number): number => (value + 3) & ~3;
@@ -1979,7 +1958,6 @@ function residentStateLayout(
     faceVelocitySupport: (() => {
       const result = at; at += align4(4 * denseCellCount); return result;
     })(),
-    velocityExtensionAcceptedVelocity: cellVectors(),
     transportCharacteristicSupport: cells(),
     floatCount: at,
   };
@@ -2394,8 +2372,6 @@ export class WebGPUSparseCM12Resident {
   /** FCA1 GPU-owned frame generation, parity, predicates, and indirect ABI. */
   private readonly frameControlLayout: SparseCM12FrameControlLayout;
   private readonly vexActivityBatchLayout: SparseCM12VexActivityBatchLayout;
-  private readonly vexActivityIndirectCopies: ReadonlyMap<string,
-    ReturnType<typeof createSparseCM12VexActivityBatchIndirectCopies>[number]>;
   /** Immutable construction-time QA mode; never selected by frame state. */
   private readonly pressureRefreshOracleForQA: boolean;
   /** Immutable construction-only HEAD presentation publisher oracle. */
@@ -2406,7 +2382,6 @@ export class WebGPUSparseCM12Resident {
   private legacyHostAuthorityParityForQA = 0;
   private legacyHostD4AuthorityForQA: boolean;
   private readonly activityIndirectArguments: GPUBuffer;
-  private readonly vexActivityIndirectArguments: GPUBuffer;
   private readonly framePlanIndirectArguments: GPUBuffer;
   private readonly presentationIndirectArguments: GPUBuffer;
   private readonly frameControlIndirectArguments: GPUBuffer;
@@ -2503,7 +2478,6 @@ export class WebGPUSparseCM12Resident {
     faceProjectionAuthorityIndirectArguments: GPUBuffer,
     transportPacketIndirectArguments: GPUBuffer | undefined,
     activityIndirectArguments: GPUBuffer,
-    vexActivityIndirectArguments: GPUBuffer,
     framePlanIndirectArguments: GPUBuffer,
     presentationIndirectArguments: GPUBuffer,
     frameControlIndirectArguments: GPUBuffer,
@@ -2520,8 +2494,6 @@ export class WebGPUSparseCM12Resident {
     transportExecutionImageLayout: SparseCM12TransportExecutionImageLayout | undefined,
     private readonly topologyEffectsAuthorityLayout:
       SparseCM12TopologyEffectsAuthorityLayout | undefined,
-    private readonly vexDeltaAuthorityLayout:
-      SparseCM12VexDeltaAuthorityLayout | undefined,
     private readonly iboSemanticAuthorityBaseWords: number | undefined,
     effectiveTransportVelocity: GPUBuffer | undefined,
     pressureTemplates: GPUBuffer,
@@ -2578,10 +2550,6 @@ export class WebGPUSparseCM12Resident {
     this.framePlanPresentationLayout = framePlanPresentationLayout;
     this.frameControlLayout = frameControlLayout;
     this.vexActivityBatchLayout = vexActivityBatchLayout;
-    this.vexActivityIndirectCopies = new Map(
-      createSparseCM12VexActivityBatchIndirectCopies(vexActivityBatchLayout)
-        .map((copy) => [copy.id, copy] as const),
-    );
     this.pressureRefreshOracleForQA = pressureRefreshOracleForQA;
     this.presentationPublisherOracleForQA = presentationPublisherOracleForQA;
     this.legacyHostAuthorityOracleForQA = legacyHostAuthorityOracleForQA;
@@ -2608,7 +2576,6 @@ export class WebGPUSparseCM12Resident {
       faceProjectionAuthorityIndirectArguments;
     this.transportPacketIndirectArguments = transportPacketIndirectArguments;
     this.activityIndirectArguments = activityIndirectArguments;
-    this.vexActivityIndirectArguments = vexActivityIndirectArguments;
     this.framePlanIndirectArguments = framePlanIndirectArguments;
     this.presentationIndirectArguments = presentationIndirectArguments;
     this.frameControlIndirectArguments = frameControlIndirectArguments;
@@ -2660,7 +2627,7 @@ export class WebGPUSparseCM12Resident {
     this.allocatedBytes = [acceptedIndirectArguments, pressureCellIndirectArguments,
       pressureRowIndirectArguments, pressureMembershipIndirectArguments,
       pressureTopologyRepairIndirectArguments,
-      activityIndirectArguments, vexActivityIndirectArguments,
+      activityIndirectArguments,
       framePlanIndirectArguments, presentationIndirectArguments,
       frameControlIndirectArguments,
       pressureTemplates, pressureWorklists,
@@ -3085,16 +3052,14 @@ export class WebGPUSparseCM12Resident {
     });
     const vexActivityBatchLayout = createSparseCM12VexActivityBatchLayout({
       activityTailWords: framePlanPresentationLayout.totalWords,
-      // residentStateLayout appends VEX1 immediately after the journal.
-      stateTailFloats: layout.velocityExtensionAcceptedVelocity,
+      stateTailFloats: layout.transportCharacteristicSupport,
       cellCapacity: templates.cellCount,
+      packetCapacity: transportExecutionImageLayout.packetCapacity,
     });
-    if (vexActivityBatchLayout.velocityState.acceptedVelocityFloatBase
-        !== layout.velocityExtensionAcceptedVelocity
-      || vexActivityBatchLayout.velocityState.characteristicSupportFloatBase
+    if (vexActivityBatchLayout.velocityState.characteristicSupportFloatBase
         !== layout.transportCharacteristicSupport
       || vexActivityBatchLayout.totalStateFloats !== layout.floatCount) {
-      throw new Error("VEX1 resident activity/state composition mismatch");
+      throw new Error("VEX2 mask/transport-state composition mismatch");
     }
     const pressureAddressingMode = pressureAddressingModeForQA ?? "materializedList";
     const pressureAddressingABLayout = pressureAddressingModeForQA === undefined
@@ -3128,13 +3093,7 @@ export class WebGPUSparseCM12Resident {
     const phase1ActivityTailWords = phase1TransportProfileBaseWords === undefined
       ? (phase1TransportQALayout?.totalWords ?? activityTailWords)
       : phase1TransportProfileBaseWords + SPARSE_CM12_PHASE1_TRANSPORT_PROFILE_WORDS;
-    const vexDeltaAuthorityLayout = createSparseCM12VexDeltaAuthorityLayout({
-        baseWords: Math.ceil(phase1ActivityTailWords / 64) * 64,
-        cellCapacity: templates.cellCount,
-      });
-    const initialActivity = new Uint32Array(
-      vexDeltaAuthorityLayout?.totalWords ?? phase1ActivityTailWords,
-    );
+    const initialActivity = new Uint32Array(phase1ActivityTailWords);
     initialActivity.set(createSparseCM12IncrementalActivityInitialWords(
       incrementalActivityLayout,
     ), incrementalActivityLayout.headerBaseWords);
@@ -3158,10 +3117,6 @@ export class WebGPUSparseCM12Resident {
         = SPARSE_CM12_PHASE1_TRANSPORT_QA_VERSION;
       initialActivity[h + SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER.cellCapacity]
         = templates.cellCount;
-    }
-    if (vexDeltaAuthorityLayout) {
-      initialActivity.set(createSparseCM12VexDeltaAuthorityInitialWords(
-        vexDeltaAuthorityLayout), vexDeltaAuthorityLayout.baseWords);
     }
     initialActivity[8] = initiallyActiveBrickKeys.size;
     initialActivity[12] = 1;
@@ -3795,11 +3750,6 @@ export class WebGPUSparseCM12Resident {
       size: 12,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
     });
-    const vexActivityIndirectArguments = device.createBuffer({
-      label: "Sparse CM12 VEX1 indirect dispatches",
-      size: 4 * vexActivityBatchLayout.indirectWords,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-    });
     const pressureAddressingABQA = {
         mode: pressureAddressingMode,
         layout: pressureAddressingABLayout,
@@ -4001,7 +3951,6 @@ export class WebGPUSparseCM12Resident {
             } }
           : undefined,
         dynamicClosureLayout,
-        vexDeltaAuthorityLayout,
         topologyEffectsAuthorityLayout,
         finalScalarPacketMaskLayout,
       ) });
@@ -4019,14 +3968,13 @@ export class WebGPUSparseCM12Resident {
       "publishSparseCM12FrameScalarOutput", "publishSparseCM12FrameFaceOutput",
       "commitSparseCM12FrameControl", "invalidateSparseCM12FrameD4ForInjection",
       "sparseCM12FrameControlNoop",
-      "publishSparseCM12MovingSolidVelocityRoots",
+      "publishSparseCM12MovingSolidActivity",
       "beginSparseCM12TransportPacketAuthority",
       "clearSparseCM12TransportPacketAuthority",
       "compileSparseCM12TransportPacketsFromFinalScalarMasks",
       "finalizeSparseCM12TransportPacketAuthority",
       "beginSparseCM12TransportProducerMasks",
       "sealSparseCM12TransportProducerMasks",
-      "compileSparseCM12VexRootMasks",
       ...(dynamicClosureLayout ? [
         "beginSparseCM12DynamicClosure",
         "sealSparseCM12DynamicClosureSources",
@@ -4039,7 +3987,6 @@ export class WebGPUSparseCM12Resident {
       "beginSparseCM12FinalScalarMasks",
       "publishSparseCM12FinalScalarMasks",
       "sealSparseCM12FinalScalarMasks",
-      "compileSparseCM12FinalScalarVexRoots",
       "compileSparseCM12TransportExecutionImageShadow",
       "replaySparseCM12TransportExecutionImageRetired",
       ...(internedBoundaryImage ? [
@@ -4111,14 +4058,9 @@ export class WebGPUSparseCM12Resident {
       "validateCandidateShadowFaces", "publishCandidateShadowFaces",
       "validateAndAuthorizeShadowTopology", "finalizeAuthorizedShadowTopology",
       "beginSparseCM12CandidateEffectsCensus",
-      "censusSparseCM12CandidateTopologyVexEffects",
-      "censusSparseCM12CandidateInjectionVexEffects",
       "beginSparseCM12CandidateEffectsSemanticPreflight",
-      "preflightSparseCM12CandidateTopologyVexEffects",
       "preflightSparseCM12CandidateInjectionEffects",
       "finalizeSparseCM12CandidateEffectsPreflight",
-      "publishSparseCM12CandidateTopologyVexEffects",
-      "publishSparseCM12CandidateInjectionVexEffects",
       "beginSparseCM12AuthorizedCandidateEffects",
       "finalizeSparseCM12AuthorizedCandidateEffects",
       ...(topologyEffectsAuthorityLayout ? [
@@ -4128,14 +4070,11 @@ export class WebGPUSparseCM12Resident {
         "publishSparseCM12TopologyPTREffects",
         "finishSparseCM12TopologyEffectsPublication",
       ] as const : []),
-      "publishSparseCM12TopologyVelocityRoots",
-      "publishSparseCM12TopologyVelocityRootsFromTopologyDelta",
       "retireUnsupportedEmptyBricks", "sealSparseCM12PressureTopologyJournal",
       "classifyPresentationBricks",
       "publishSparseLevelSet",
       "beginSparseCM12FramePlanNext", "initializeSparseCM12FramePlanNext",
       "populateSparseCM12PresentationFramePlan",
-      "importVelocityExtensionBlastToFramePlanNext",
       "resolveSparseCM12FramePlanNextClosure", "sealSparseCM12FramePlanNextBricks",
       "finalizeSparseCM12FramePlanNext", "markSparseCM12GlobalFramePlanReceipts",
       "beginSparseCM12FramePlanPresentationPacket",
@@ -4182,8 +4121,7 @@ export class WebGPUSparseCM12Resident {
       // them out of the ordinary eager set shortens first-visible startup and
       // makes their construction-only ownership mechanically obvious.
       ...(legacyHostAuthorityOracleForQA ? [
-        "initializeTransportVelocity", "captureLegacyVelocityExtensionForQA",
-        "finalizeLegacyVelocityExtensionClockForQA",
+        "initializeTransportVelocity",
         "extrapolateTransportVelocityToSource",
         "extrapolateTransportVelocityToDestination",
       ] as const : []),
@@ -4281,7 +4219,6 @@ export class WebGPUSparseCM12Resident {
       faceProjectionAuthorityIndirectArguments,
       transportPacketIndirectArguments,
       activityIndirectArguments,
-      vexActivityIndirectArguments,
       framePlanIndirectArguments,
       presentationIndirectArguments,
       frameControlIndirectArguments,
@@ -4297,7 +4234,6 @@ export class WebGPUSparseCM12Resident {
       transportExecutionImageBuffer,
       transportExecutionImageLayout,
       topologyEffectsAuthorityLayout,
-      vexDeltaAuthorityLayout,
       iboSemanticAuthorityBaseWords,
       effectiveTransportVelocity,
       pressureTemplates,
@@ -4507,19 +4443,6 @@ export class WebGPUSparseCM12Resident {
       activePass.setPipeline(this.pipelines[name]!);
       activePass.dispatchWorkgroupsIndirect(this.activityIndirectArguments, 0);
     };
-    const dispatchVexActivity = (name: string, packet: SparseCM12VexActivityBatchPacket) => {
-      const activePass = openPass();
-      activePass.setPipeline(this.pipelines[name]!);
-      activePass.dispatchWorkgroupsIndirect(this.vexActivityIndirectArguments,
-        4 * SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT[packet].offsetWords);
-    };
-    const copyVexActivity = (id: string) => {
-      const copy = this.vexActivityIndirectCopies.get(id);
-      if (!copy) throw new Error(`unknown VEX1 indirect copy ${id}`);
-      closePass();
-      encoder.copyBufferToBuffer(this.activity, 4 * copy.sourceWord,
-        this.vexActivityIndirectArguments, 4 * copy.destinationWord, 12);
-    };
     const dispatchFrameControl = (
       name: string,
       family: typeof SPARSE_CM12_FRAME_CONTROL_FAMILY[
@@ -4607,7 +4530,7 @@ export class WebGPUSparseCM12Resident {
           12 * SPARSE_CM12_FRAME_CONTROL_FAMILY_COUNT);
         this.rigidCoupling?.encodeVoxelization(encoder);
         useBindGroup(this.bindGroup);
-        dispatchFrameControl("publishSparseCM12MovingSolidVelocityRoots",
+        dispatchFrameControl("publishSparseCM12MovingSolidActivity",
           SPARSE_CM12_FRAME_CONTROL_FAMILY.solidCellWork);
         dispatchFrameControl("sparseCM12FrameControlNoop",
           SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyBypass);
@@ -4615,34 +4538,20 @@ export class WebGPUSparseCM12Resident {
           SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyRowBypass);
       }
       closeSubstage("frame-control-authority");
-      // Transport extrapolation consumes the same construction-time CSR edge
-      // cache as pressure. Keep that immutable topology bound through the hot
-      // physics stages; presentation restores its own metadata binding later.
-      useBindGroup(this.pressureBindGroup);
-      if (this.legacyHostAuthorityOracleForQA) {
-        dispatchAccepted("initializeTransportVelocity", "cell");
-        for (let sweep = 0; sweep < 8; sweep += 1) {
-          dispatchAccepted(sweep % 2 === 0
-            ? "extrapolateTransportVelocityToSource"
-            : "extrapolateTransportVelocityToDestination", "cell");
-        }
-        dispatchAccepted("captureLegacyVelocityExtensionForQA", "cell");
-      } else {
-        // The prior frame sealed and copied this exact blast after its final
-        // producer. Frame start consumes it without rebuilding topology or
-        // mutating FPL Current.
-        dispatch("beginVelocityExtensionExecution", 1);
-        dispatchVexActivity("initializeVelocityExtensionCandidates", "vexSerial");
-        for (let depth = 1; depth <= 8; depth += 1) {
-          dispatchVexActivity(`advanceVelocityExtensionCandidates${depth}`, "vexSerial");
-        }
-        useBindGroup(this.effectiveVelocityPressureBindGroup);
-        dispatchVexActivity("commitVelocityExtensionCandidates", "vexSerial");
-        useBindGroup(this.pressureBindGroup);
-        dispatch("finalizeVelocityExtensionCandidate", 1);
-      }
-      closeSubstage("velocity-extension-execution");
+      // VEX2 owns no catalogue or generation protocol. One workgroup visits
+      // each stable TEI packet; inactive packets exit after descriptor lookup.
       useBindGroup(this.transportBindGroup);
+      const vexPackets = this.transportExecutionImageLayout!.packetCapacity;
+      const vexDispatchWidth = Math.min(
+        SPARSE_CM12_VELOCITY_EXTENSION_DISPATCH_WIDTH, vexPackets);
+      const vexDispatchRows = Math.ceil(vexPackets / vexDispatchWidth);
+      dispatch("initializeVelocityExtensionPackets", vexDispatchWidth, vexDispatchRows);
+      closeSubstage("velocity-extension-mask-initialization");
+      for (let depth = 1; depth <= 8; depth += 1) {
+        dispatch(`advanceVelocityExtensionPackets${depth}`,
+          vexDispatchWidth, vexDispatchRows);
+      }
+      closeSubstage("velocity-extension-sweeps");
       dispatch("beginSparseCM12TransportPacketAuthority", 1);
       dispatch("clearSparseCM12TransportPacketAuthority", Math.ceil(
         this.transportPacketAuthorityLayout!.packetCapacity / WORKGROUP_SIZE));
@@ -4680,8 +4589,6 @@ export class WebGPUSparseCM12Resident {
       dispatchTransportPacket("gatherConservativeDensity", "gatherConservativeDensity");
       closeSubstage("transport-gather");
       dispatch("sealSparseCM12TransportProducerMasks", 1);
-      dispatchTransportPacket("compileSparseCM12VexRootMasks",
-        "gatherConservativeDensity");
       dispatch("sealSparseCM12DynamicClosureSources", 1);
       dispatchTransportPacket("compileSparseCM12DynamicTRA",
         "gatherConservativeDensity");
@@ -4705,12 +4612,14 @@ export class WebGPUSparseCM12Resident {
     // no work closes at zero and the whole feature costs a branch on the host.
     stage("tracer-advection", () => {
       if (!this.tracersEnabled || this.tracerLattice.count === 0) return;
+      useBindGroup(this.effectiveVelocityPressureBindGroup);
       const groups = Math.ceil(this.tracerLattice.count / WORKGROUP_SIZE);
       if (this.tracerSeedPending) {
         dispatch("seedTracers", groups);
         this.tracerSeedPending = false;
       }
       dispatch("advanceTracers", groups);
+      useBindGroup(this.pressureBindGroup);
     });
     stage("gamma-diffusion", () => {
       // Gamma shares the producer-authored physical scalar characteristic, not
@@ -4768,8 +4677,6 @@ export class WebGPUSparseCM12Resident {
       dispatch("publishSparseCM12FinalScalarMasks", packed.brickCount);
       dispatch("sealSparseCM12FinalScalarMasks", 1);
       closeSubstage("final-scalar-mask-publication");
-      dispatch("compileSparseCM12FinalScalarVexRoots", packed.brickCount);
-      closeSubstage("final-scalar-vex-roots");
       useBindGroup(this.pressureBindGroup);
       closePass();
     });
@@ -5270,10 +5177,7 @@ export class WebGPUSparseCM12Resident {
       dispatch("beginSparseCM12TopologyEffectsPreflight", 1);
         dispatch("beginSparseCM12CandidateEffectsCensus", 1);
         dispatchTopologyDelta("recordCandidateTopologyEffectsFromTopologyDelta");
-        dispatchTopologyDelta("censusSparseCM12CandidateTopologyVexEffects");
-        dispatchTopologyDelta("censusSparseCM12CandidateInjectionVexEffects");
         dispatch("beginSparseCM12CandidateEffectsSemanticPreflight", 1);
-        dispatchTopologyDelta("preflightSparseCM12CandidateTopologyVexEffects");
         dispatchTopologyDelta("preflightSparseCM12CandidateInjectionEffects");
         dispatch("finalizeSparseCM12TopologyEffectsPreflight", 1);
       dispatch("finalizeSparseCM12CandidateEffectsPreflight", 1);
@@ -5301,9 +5205,6 @@ export class WebGPUSparseCM12Resident {
         ptrPass.setPipeline(this.pipelines.publishSparseCM12TopologyPTREffects!);
         ptrPass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments, 0);
         closeSubstage("candidate-ptr-publication");
-        dispatchTopologyDelta("publishSparseCM12CandidateTopologyVexEffects");
-        dispatchTopologyDelta("publishSparseCM12CandidateInjectionVexEffects");
-        closeSubstage("candidate-vex-publication");
         dispatch("finalizeSparseCM12AuthorizedCandidateEffects", 1);
       dispatch("finishSparseCM12TopologyEffectsPublication", 1);
       closeSubstage("candidate-effects-seal");
@@ -5338,13 +5239,6 @@ export class WebGPUSparseCM12Resident {
       // The plan and compact page count are GPU publications. Split at the
       // storage-to-indirect copy seam; no host parity/count controls this path.
       closePass();
-      if (this.legacyHostAuthorityOracleForQA) {
-        useBindGroup(this.pressureBindGroup);
-        dispatch("finalizeLegacyVelocityExtensionClockForQA", 1);
-        closePass();
-      } else {
-        this.encodeVelocityExtensionPlan(encoder, "Sparse CM12 next-frame VEX plan");
-      }
       this.encodeFramePlanPresentation(encoder, "Sparse CM12 frame presentation");
       dispatch("commitSparseCM12FrameControl", 1);
     });
@@ -5612,9 +5506,6 @@ export class WebGPUSparseCM12Resident {
     dispatch("beginSparseCM12FramePlanNext", 1);
     dispatch("initializeSparseCM12FramePlanNext", bricks);
     dispatch("populateSparseCM12PresentationFramePlan", bricks);
-    plan.setPipeline(this.pipelines.importVelocityExtensionBlastToFramePlanNext!);
-    plan.dispatchWorkgroupsIndirect(this.vexActivityIndirectArguments,
-      4 * SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT.vexSerial.offsetWords);
     dispatch("resolveSparseCM12FramePlanNextClosure", bricks);
     dispatch("sealSparseCM12FramePlanNextBricks", bricks);
     dispatch("finalizeSparseCM12FramePlanNext", 1);
@@ -5645,54 +5536,6 @@ export class WebGPUSparseCM12Resident {
     execute.end();
   }
 
-  /** Seal the producer-owned root queue and publish the exact next-frame blast. */
-  private encodeVelocityExtensionPlan(
-    encoder: GPUCommandEncoder,
-    label: string,
-  ): void {
-    let pass: GPUComputePassEncoder | undefined;
-    const openPass = () => {
-      if (!pass) {
-        pass = encoder.beginComputePass({ label });
-        pass.setBindGroup(0, this.pressureBindGroup);
-      }
-      return pass;
-    };
-    const closePass = () => { pass?.end();pass = undefined; };
-    const dispatch = (name: string, count = 1) => {
-      const active = openPass();
-      active.setPipeline(this.pipelines[name]!);
-      active.dispatchWorkgroups(count);
-    };
-    const dispatchIndirect = (name: string) => {
-      const active = openPass();
-      active.setPipeline(this.pipelines[name]!);
-      active.dispatchWorkgroupsIndirect(this.vexActivityIndirectArguments,
-        4 * SPARSE_CM12_VEX_ACTIVITY_BATCH_INDIRECT.vexSerial.offsetWords);
-    };
-    const copy = (id: string) => {
-      const receipt = this.vexActivityIndirectCopies.get(id);
-      if (!receipt) throw new Error(`unknown VEX1 indirect copy ${id}`);
-      closePass();
-      encoder.copyBufferToBuffer(this.activity, 4 * receipt.sourceWord,
-        this.vexActivityIndirectArguments, 4 * receipt.destinationWord, 12);
-    };
-    dispatch("beginVelocityExtensionCandidate");
-    dispatch("sealVelocityExtensionRoots");
-    copy("copy-vex-roots");
-    dispatchIndirect("seedVelocityExtensionRoots");
-    dispatch("sealVelocityExtensionSeedFrontier");
-    for (let depth = 1; depth <= 8; depth += 1) {
-      dispatch(`prepareVelocityExtensionFrontier${depth}`);
-      copy(depth % 2 === 1 ? "copy-vex-frontier-a" : "copy-vex-frontier-b");
-      dispatchIndirect(`expandVelocityExtensionFrontier${depth}`);
-      dispatch(`sealVelocityExtensionFrontier${depth}`);
-    }
-    dispatch("finalizeVelocityExtensionBlast");
-    copy("copy-vex-blast");
-    closePass();
-  }
-
   /**
    * Adopt authored cell-size boxes for the next topology plan.
    *
@@ -5717,17 +5560,9 @@ export class WebGPUSparseCM12Resident {
     pass.setPipeline(this.pipelines.classifyPresentationBricks!);
     pass.setBindGroup(0, this.bindGroup);
     pass.dispatchWorkgroups(Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    // Construction is the only full VEX root publication. The initial VEX
-    // header is already collecting FCA generation 1, so the recurring frame
-    // schedule contains no bootstrap branch or accepted-domain dispatch.
-    pass.setPipeline(this.pipelines.bootstrapVelocityExtensionRoots!);
-    pass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
     pass.setPipeline(this.pipelines.validateSparseCM12InternedBoundaryImmutable!);
     pass.dispatchWorkgroups(1);
     pass.end();
-    if (!this.legacyHostAuthorityOracleForQA) {
-      this.encodeVelocityExtensionPlan(encoder, "Sparse CM12 construction VEX plan");
-    }
     this.encodeFramePlanPresentation(encoder, "Sparse CM12 initial presentation");
   }
 
@@ -5825,10 +5660,7 @@ export class WebGPUSparseCM12Resident {
     dispatchTopology("beginSparseCM12TopologyEffectsPreflight", 1);
       dispatchTopology("beginSparseCM12CandidateEffectsCensus", 1);
       dispatchTopologyDelta("recordCandidateTopologyEffectsFromTopologyDelta");
-      dispatchTopologyDelta("censusSparseCM12CandidateTopologyVexEffects");
-      dispatchTopologyDelta("censusSparseCM12CandidateInjectionVexEffects");
       dispatchTopology("beginSparseCM12CandidateEffectsSemanticPreflight", 1);
-      dispatchTopologyDelta("preflightSparseCM12CandidateTopologyVexEffects");
       dispatchTopologyDelta("preflightSparseCM12CandidateInjectionEffects");
       dispatchTopology("finalizeSparseCM12TopologyEffectsPreflight", 1);
     dispatchTopology("finalizeSparseCM12CandidateEffectsPreflight", 1);
@@ -5850,8 +5682,6 @@ export class WebGPUSparseCM12Resident {
       const ptrPass = openTopologyPass();
       ptrPass.setPipeline(this.pipelines.publishSparseCM12TopologyPTREffects!);
       ptrPass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments, 0);
-      dispatchTopologyDelta("publishSparseCM12CandidateTopologyVexEffects");
-      dispatchTopologyDelta("publishSparseCM12CandidateInjectionVexEffects");
       dispatchTopology("finalizeSparseCM12AuthorizedCandidateEffects", 1);
     dispatchTopology("finishSparseCM12TopologyEffectsPublication", 1);
     useTopologyBindGroup(this.transportBindGroup);
@@ -5885,7 +5715,6 @@ export class WebGPUSparseCM12Resident {
     injectionPass.dispatchWorkgroups(bricks);
     injectionPass.end();
     if (!this.legacyHostAuthorityOracleForQA) {
-      this.encodeVelocityExtensionPlan(encoder, "Sparse CM12 injection VEX replan");
     }
     this.encodeFramePlanPresentation(encoder, "Sparse CM12 injection presentation");
   }
@@ -7323,14 +7152,13 @@ export class WebGPUSparseCM12Resident {
    * performs an explicit readback and is never called by production scheduling. */
   async readCandidateEffectsTransactionQA() {
     this.assertLive();
-    const vda = this.vexDeltaAuthorityLayout;
     const tfx = this.topologyEffectsAuthorityLayout;
-    if (!vda || !tfx) return undefined;
+    if (!tfx) return undefined;
     const topologyWords = 32;
     const manifestWords = 20 + 3 * this.lastPacked!.brickCount;
     const isaWords = this.iboSemanticAuthorityBaseWords === undefined ? 0 : 16;
-    const totalWords = SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS
-      + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords + manifestWords
+    const totalWords = SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS
+      + topologyWords + manifestWords
       + isaWords;
     const readback = this.device.createBuffer({
       label: "Sparse CM12 candidate-effects transaction QA readback",
@@ -7341,23 +7169,18 @@ export class WebGPUSparseCM12Resident {
       const encoder = this.device.createCommandEncoder({
         label: "Sparse CM12 candidate-effects transaction QA copy",
       });
-      encoder.copyBufferToBuffer(this.activity, 4 * vda.baseWords, readback, 0,
-        4 * SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS);
-      encoder.copyBufferToBuffer(this.topologyArena, 4 * tfx.baseWords, readback,
-        4 * SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS,
+      encoder.copyBufferToBuffer(this.topologyArena, 4 * tfx.baseWords, readback, 0,
         4 * SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS);
       encoder.copyBufferToBuffer(this.topologyArena, this.topologyWorklistBaseBytes,
-        readback, 4 * (SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS
-          + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS), 4 * topologyWords);
+        readback, 4 * SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS, 4 * topologyWords);
       encoder.copyBufferToBuffer(this.topologyArena, this.acceptedLeafManifestBaseBytes,
-        readback, 4 * (SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS
-          + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords),
+        readback, 4 * (SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords),
         4 * manifestWords);
       if (this.iboSemanticAuthorityBaseWords !== undefined) {
         encoder.copyBufferToBuffer(this.topologyArena,
           4 * this.iboSemanticAuthorityBaseWords, readback,
-          4 * (SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS
-            + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords + manifestWords),
+          4 * (SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS
+            + topologyWords + manifestWords),
           4 * isaWords);
       }
       this.device.queue.submit([encoder.finish()]);
@@ -7367,22 +7190,15 @@ export class WebGPUSparseCM12Resident {
         Object.fromEntries(Object.entries(header).map(([name, word]) =>
           [name, words[base + word]!])) as Readonly<Record<string, number>>;
       return Object.freeze({
-        vda: named(SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER, 0),
-        tfx: named(SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER,
-          SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS),
+        tfx: named(SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER, 0),
         topology: Array.from(words.slice(
-          SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS
-            + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS,
-          SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS
-            + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords)),
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS,
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords)),
         manifest: Array.from(words.slice(
-          SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS
-            + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords,
-          SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS
-            + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords + manifestWords)),
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords,
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords + manifestWords)),
         isa: isaWords === 0 ? undefined : Array.from(words.slice(
-          SPARSE_CM12_VEX_DELTA_AUTHORITY_HEADER_WORDS
-            + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords + manifestWords)),
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords + manifestWords)),
       });
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
@@ -7584,18 +7400,18 @@ export class WebGPUSparseCM12Resident {
     }
   }
 
-  /** Header-only VEX1 receipt; suitable for bounded per-frame fault diagnosis. */
+  /** Header-only VEX2 receipt; old catalogue fields are reported as zero. */
   async readVelocityExtensionHeaderQA(): Promise<SparseCM12VelocityExtensionHeaderQA> {
     this.assertLive();
     const layout = this.vexActivityBatchLayout.velocityExtension;
     const bytes = 4 * SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS;
     const readback = this.device.createBuffer({
-      label: "Sparse CM12 VEX1 header QA readback", size: bytes,
+      label: "Sparse CM12 VEX2 header QA readback", size: bytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
       const encoder = this.device.createCommandEncoder({
-        label: "Sparse CM12 VEX1 header QA copy",
+        label: "Sparse CM12 VEX2 header QA copy",
       });
       encoder.copyBufferToBuffer(this.activity, 4 * layout.headerBaseWords,
         readback, 0, bytes);
@@ -7607,34 +7423,24 @@ export class WebGPUSparseCM12Resident {
         || words[h.version] !== SPARSE_CM12_VELOCITY_EXTENSION_VERSION
         || words[h.headerWords] !== SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS
         || words[h.capacity] !== layout.cellCapacity) {
-        throw new Error("Sparse CM12 VEX1 header QA receipt is unavailable or incompatible");
+        throw new Error("Sparse CM12 VEX2 header QA receipt is unavailable or incompatible");
       }
       const firstFaultCell = words[h.firstFaultCell]!;
       const hasFirstFault = words[h.faultCount]! > 0
         && firstFaultCell !== SPARSE_CM12_FRAME_CONTROL_INVALID
         && firstFaultCell < layout.cellCapacity;
-      const hasFramePlanProvenance = hasFirstFault && words[h.reserved] === 3;
       return {
-        flags: words[h.flags]!, phase: words[h.reserved]!,
-        acceptedGeneration: words[h.acceptedGeneration]!,
-        candidateGeneration: words[h.candidateGeneration]!,
+        completedFrameGeneration: words[h.completedFrameGeneration]!,
         topologyGeneration: words[h.topologyGeneration]!,
-        capacity: words[h.capacity]!, rootCount: words[h.rootCount]!,
-        blastCount: words[h.blastCount]!, maximumDepth: words[h.maximumDepth]!,
+        cellCapacity: words[h.capacity]!,
+        packetCapacity: words[h.packetCapacity]!,
         executedCellCount: words[h.executedCellCount]!,
-        reusedCellCount: words[h.reusedCellCount]!, faultCount: words[h.faultCount]!,
-        uncoveredWriteCount: words[h.uncoveredWriteCount]!,
+        validCellCount: words[h.validCellCount]!,
+        emptyPacketCount: words[h.emptyPacketCount]!,
+        neighborLoadCount: words[h.neighborLoadCount]!,
+        faultCount: words[h.faultCount]!,
         ...(hasFirstFault ? {
           firstFault: { cell: firstFaultCell, depth: words[h.firstFaultDepth]! },
-        } : {}),
-        ...(hasFramePlanProvenance ? {
-          framePlanProvenance: {
-            ownerBrick: words[h.rootDispatchY]!, ownerTile: words[h.rootDispatchZ]!,
-            slot: words[h.frontierADispatchY]!,
-            tileGeneration: words[h.frontierADispatchZ]!,
-            packedStageMasks: words[h.frontierBDispatchY]!,
-            stage0MaskLow: words[h.frontierBDispatchZ]!,
-          },
         } : {}),
       };
     } finally {
@@ -7643,40 +7449,39 @@ export class WebGPUSparseCM12Resident {
     }
   }
 
-  /** Construction-only VEX comparison receipt. No frame decision consumes it. */
+  /** VEX2 mask/depth/value diagnostic. No frame decision consumes it. */
   async readVelocityExtensionQA() {
     this.assertLive();
+    if (!this.effectiveTransportVelocity) {
+      throw new Error("Sparse CM12 VEX2 effective-velocity plane is unavailable");
+    }
     const layout = this.vexActivityBatchLayout.velocityExtension;
     const capacity = layout.cellCapacity;
     const headerWords = SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS;
-    const blastDepthAt = headerWords;
-    const candidateDepthAt = blastDepthAt + capacity;
-    const rootCauseAt = candidateDepthAt + capacity;
-    const acceptedDepthAt = rootCauseAt + capacity;
-    const acceptedOwnerAt = acceptedDepthAt + capacity;
-    const velocityAt = acceptedOwnerAt + capacity;
+    const maskWords = 2 * layout.packetCapacity;
+    const validityAAt = headerWords;
+    const validityBAt = validityAAt + maskWords;
+    const acceptedDepthAt = validityBAt + maskWords;
+    const velocityAt = acceptedDepthAt + capacity;
     const totalWords = velocityAt + 4 * capacity;
     const readback = this.device.createBuffer({
-      label: "Sparse CM12 VEX1 QA readback",
+      label: "Sparse CM12 VEX2 QA readback",
       size: 4 * totalWords,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
-      const encoder = this.device.createCommandEncoder({ label: "Sparse CM12 VEX1 QA copy" });
+      const encoder = this.device.createCommandEncoder({ label: "Sparse CM12 VEX2 QA copy" });
       encoder.copyBufferToBuffer(this.activity, 4 * layout.headerBaseWords,
         readback, 0, 4 * headerWords);
-      for (const [source, destination] of [
-        [layout.blastDepthBaseWords, blastDepthAt],
-        [layout.candidateDepthBaseWords, candidateDepthAt],
-        [layout.rootCauseBaseWords, rootCauseAt],
+      for (const [source, destination, words] of [
+        [layout.validityABaseWords, validityAAt, maskWords],
+        [layout.validityBBaseWords, validityBAt, maskWords],
         [layout.acceptedDepthBaseWords, acceptedDepthAt],
-        [layout.acceptedOwnerBaseWords, acceptedOwnerAt],
       ] as const) {
         encoder.copyBufferToBuffer(this.activity, 4 * source,
-          readback, 4 * destination, 4 * capacity);
+          readback, 4 * destination, 4 * (words ?? capacity));
       }
-      encoder.copyBufferToBuffer(this.state,
-        4 * this.vexActivityBatchLayout.velocityState.acceptedVelocityFloatBase,
+      encoder.copyBufferToBuffer(this.effectiveTransportVelocity, 0,
         readback, 4 * velocityAt, 16 * capacity);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
@@ -7684,15 +7489,13 @@ export class WebGPUSparseCM12Resident {
       const header = words.slice(0, headerWords);
       if (header[SPARSE_CM12_VELOCITY_EXTENSION_HEADER.magic]
           !== SPARSE_CM12_VELOCITY_EXTENSION_MAGIC) {
-        throw new Error("Sparse CM12 VEX1 QA header is unavailable or incompatible");
+        throw new Error("Sparse CM12 VEX2 QA header is unavailable or incompatible");
       }
       return {
         header,
-        blastDepth: words.slice(blastDepthAt, blastDepthAt + capacity),
-        candidateDepth: words.slice(candidateDepthAt, candidateDepthAt + capacity),
-        rootCause: words.slice(rootCauseAt, rootCauseAt + capacity),
+        validityA: words.slice(validityAAt, validityAAt + maskWords),
+        validityB: words.slice(validityBAt, validityBAt + maskWords),
         acceptedDepth: words.slice(acceptedDepthAt, acceptedDepthAt + capacity),
-        acceptedOwner: words.slice(acceptedOwnerAt, acceptedOwnerAt + capacity),
         velocityBits: words.slice(velocityAt, velocityAt + 4 * capacity),
       };
     } finally {
@@ -7803,7 +7606,7 @@ export class WebGPUSparseCM12Resident {
       this.pressureTopologyRepairIndirectArguments,
       this.persistentPressureCacheIndirectArguments,
       this.faceProjectionAuthorityIndirectArguments,
-      this.activityIndirectArguments, this.vexActivityIndirectArguments,
+      this.activityIndirectArguments,
       this.framePlanIndirectArguments,
       this.presentationIndirectArguments,
       this.pressureTemplates, this.pressureWorklists,

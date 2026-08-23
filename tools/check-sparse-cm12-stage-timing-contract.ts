@@ -42,8 +42,19 @@ const publication = resident.slice(
   resident.indexOf("  /**\n   * Turn the marker view", resident.indexOf(
     'stage("presentation-publication", () => {')),
 );
-assert.match(publication, /this\.encodeVelocityExtensionPlan/);
+assert.doesNotMatch(publication, /VelocityExtensionPlan|VexRoot|VexBlast/,
+  "presentation publication must not plan next-frame VEX work");
 assert.match(publication, /this\.encodeFramePlanPresentation/);
+assert.match(resident,
+  /initializeVelocityExtensionPackets[\s\S]*for \(let depth = 1; depth <= 8; depth \+= 1\)[\s\S]*advanceVelocityExtensionPackets\$\{depth\}/,
+  "VEX2 must be one direct initialization and eight direct sweeps");
+assert.doesNotMatch(resident, /commitVelocityExtensionPackets/,
+  "VEX2 sweep 8 must publish directly without a redundant commit dispatch");
+for (const seamName of ["velocity-extension-mask-initialization",
+  "velocity-extension-sweeps"]) {
+  assert.match(resident, new RegExp(`closeSubstage\\("${seamName}"\\)`),
+    `VEX2 timing seam ${seamName} is missing`);
+}
 assert.match(publication, /encoder\.copyBufferToBuffer\(this\.topologyArena/,
   "the final accepted-indirect copy must remain ahead of timestamp resolve");
 assert.match(publication, /seams\?\.anchorFinalBoundary\?\.\(this\.acceptedIndirectArguments/,
@@ -76,7 +87,7 @@ assert.match(resident,
   "per-advance final-scalar diagnosis must use the fixed FSM1 header readback");
 assert.match(resident,
   /readVelocityExtensionHeaderQA\(\)[\s\S]*SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS/,
-  "VEX fault triage must expose a fixed 128-byte header readback");
+  "VEX fault triage must expose a fixed header readback");
 assert.match(probe,
   /priorFinalScalarMaskGeneration === 0[\s\S]*generation === expectedFrameControlGeneration/,
   "the exact FSM1 successor oracle must admit its generation-0 construction bootstrap");
