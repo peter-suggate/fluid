@@ -62,12 +62,8 @@ export const SPARSE_CM12_ADDRESSING_WGSL = `struct SparseCM12Addressing {
   scalars:vec4u,
   // Float bases in state: x liquid, y theta, z residual, w applied
   auxiliary:vec4u,
-  // Arena word bases for the face-projection authority: x stage header,
-  // y accepted active bits, z candidate generation, w candidate cause
-  projection0:vec4u,
-  // x candidate depth, y execution generation, z accepted pressure bits,
-  // w leaves in the authority's tree
-  projection1:vec4u,
+  reserved0:vec4u,
+  reserved1:vec4u,
   // Arena word bases for velocity extension: x root cause, y root stamp,
   // z accepted depth, w unused
   extension:vec4u,
@@ -143,14 +139,6 @@ export interface SparseCM12AddressingSpec {
   readonly theta: number;
   readonly residual: number;
   readonly applied: number;
-  readonly projectionHeaderWords: number;
-  readonly projectionActiveBitsWords: number;
-  readonly projectionCandidateGenerationWords: number;
-  readonly projectionCandidateCauseWords: number;
-  readonly projectionCandidateDepthWords: number;
-  readonly projectionExecutionGenerationWords: number;
-  readonly projectionAcceptedPressureBitsWords: number;
-  readonly projectionLeafCount: number;
   readonly extensionRootCauseWords: number;
   readonly extensionRootStampWords: number;
   readonly extensionAcceptedDepthWords: number;
@@ -172,10 +160,7 @@ export function writeSparseCM12Addressing(
   target.set([spec.faceBase, spec.faceBankStride, spec.cellFieldStride, 0], 4);
   target.set([spec.pressure, spec.rhs, spec.divergence, spec.diagonal], 8);
   target.set([spec.liquid, spec.theta, spec.residual, spec.applied], 12);
-  target.set([spec.projectionHeaderWords, spec.projectionActiveBitsWords,
-    spec.projectionCandidateGenerationWords, spec.projectionCandidateCauseWords], 16);
-  target.set([spec.projectionCandidateDepthWords, spec.projectionExecutionGenerationWords,
-    spec.projectionAcceptedPressureBitsWords, spec.projectionLeafCount], 20);
+  target.fill(0, 16, 24);
   target.set([spec.extensionRootCauseWords, spec.extensionRootStampWords,
     spec.extensionAcceptedDepthWords, 0], 24);
   target.set([spec.cellVelocityA, spec.cellVelocityB, spec.scalarParityWord, 0], 28);
@@ -218,24 +203,6 @@ fn cm12AcceptedFaceBank()->u32{
 }
 fn cm12FaceIndex(row:u32,bank:u32)->u32{
   return bank*${addressing}.faces.y+row;
-}
-/** Word holding the candidate cause bitmask for a row, in the arena. */
-fn cm12ProjectionCauseWord(row:u32)->u32{
-  return ${addressing}.projection0.w+row;
-}
-fn cm12ProjectionCandidateGeneration(row:u32)->u32{
-  return ${arena}[${addressing}.projection0.z+row];
-}
-fn cm12ProjectionExecutionGeneration(row:u32)->u32{
-  return ${arena}[${addressing}.projection1.y+row];
-}
-/** Whether a row is in the accepted work set, from the authority's bitset. */
-fn cm12ProjectionAccepted(row:u32)->bool{
-  let word=${arena}[${addressing}.projection0.y+(row>>5u)];
-  return (word&(1u<<(row&31u)))!=0u;
-}
-fn cm12ProjectionHeader(word:u32)->u32{
-  return ${arena}[${addressing}.projection0.x+word];
 }
 fn cm12AcceptedScalarBank()->u32{
   let word=${addressing}.velocity.z;

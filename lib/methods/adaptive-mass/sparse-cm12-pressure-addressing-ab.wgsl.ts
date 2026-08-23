@@ -57,6 +57,29 @@ export function createSparseCM12PressureAddressingABWGSL(
     pabFail(PAB_FAULT_LIST,pabLoad(${at(h.firstMismatchRank)}));return;
   }`
     : "";
+  const addressAccessor = options.fixedMode === "materializedList"
+    ? `
+// Production dispatches exclusively from the solve triplet published by this
+// authority. Tail lanes need only the accepted count; generation/phase/fault
+// validation has already failed the dispatch closed before this invocation.
+fn pabPressureCellAddress(rank:u32)->u32{
+  if(rank>=pabLoad(${at(h.materializedCount)})){return PAB_INVALID;}
+  return pabLoad(PAB_LIST_BASE+rank);
+}`
+    : `
+// Construction A/B only. The list arm returns INVALID on any receipt/generation
+// gap; it never falls back to canonical rank select.
+fn pabPressureCellAddress(rank:u32)->u32{
+  if(CM12_PRESSURE_ADDRESS_MODE==PAB_MODE_RANK_SELECT){
+    return pcmCellRankSelect(rank);
+  }
+  if(CM12_PRESSURE_ADDRESS_MODE!=PAB_MODE_LIST
+    ||pabLoad(${at(h.phase)})!=PAB_PHASE_ACCEPTED
+    ||pabLoad(${at(h.fault)})!=0u
+    ||pabLoad(${at(h.materializedPCMGeneration)})!=pcmCellAcceptedGeneration()
+    ||rank>=pabLoad(${at(h.materializedCount)})){return PAB_INVALID;}
+  return pabLoad(PAB_LIST_BASE+rank);
+}`;
   return /* wgsl */ `
 const PAB_MAGIC:u32=0x${SPARSE_CM12_PRESSURE_ADDRESSING_AB_MAGIC.toString(16)}u;
 const PAB_VERSION:u32=${SPARSE_CM12_PRESSURE_ADDRESSING_AB_VERSION}u;
@@ -93,6 +116,7 @@ fn pabFail(code:u32,rank:u32){
   let claimed=atomicCompareExchangeWeak(&${arena}[${at(h.fault)}],0u,code);
   if(claimed.exchanged){pabStore(${at(h.firstFaultRank)},rank);}
   pabStore(${at(h.materializeIndirectX)},0u);
+  pabStore(${at(h.solveIndirectX)},0u);
   pabStore(${at(h.phase)},PAB_PHASE_FAULT);
 }
 fn pabHash(rank:u32,cell:u32)->u32{
@@ -120,6 +144,8 @@ fn beginSparseCM12PressureAddressMaterialization(){
   pabStore(${at(h.materializedHash)},0u);pabStore(${at(h.verifiedHash)},0u);
   pabStore(${at(h.materializeIndirectX)},(count+63u)/64u);
   pabStore(${at(h.materializeIndirectY)},1u);pabStore(${at(h.materializeIndirectZ)},1u);
+  pabStore(${at(h.solveIndirectX)},0u);
+  pabStore(${at(h.solveIndirectY)},1u);pabStore(${at(h.solveIndirectZ)},1u);
   pabStore(${at(h.phase)},PAB_PHASE_COLLECTING);
 }
 
@@ -173,21 +199,12 @@ ${verifyReceiptClause}
   pabStore(${at(h.materializedCount)},count);
   atomicAdd(&${arena}[${at(h.acceptedReceipts)}],1u);
   pabStore(${at(h.phase)},PAB_PHASE_ACCEPTED);
+  // Publish the dispatch last. A consumer can only observe nonzero work after
+  // every accepted receipt and list word is globally visible at this pass seam.
+  pabStore(${at(h.solveIndirectX)},(count+63u)/64u);
 }
 
-// Compile-time only. The list arm returns INVALID on any receipt/generation
-// gap; it never falls back to canonical rank select.
-fn pabPressureCellAddress(rank:u32)->u32{
-  if(CM12_PRESSURE_ADDRESS_MODE==PAB_MODE_RANK_SELECT){
-    return pcmCellRankSelect(rank);
-  }
-  if(CM12_PRESSURE_ADDRESS_MODE!=PAB_MODE_LIST
-    ||pabLoad(${at(h.phase)})!=PAB_PHASE_ACCEPTED
-    ||pabLoad(${at(h.fault)})!=0u
-    ||pabLoad(${at(h.materializedPCMGeneration)})!=pcmCellAcceptedGeneration()
-    ||rank>=pabLoad(${at(h.materializedCount)})){return PAB_INVALID;}
-  return pabLoad(PAB_LIST_BASE+rank);
-}
+${addressAccessor}
 @compute @workgroup_size(64)
 fn exerciseSparseCM12PressureAddressing(@builtin(global_invocation_id)gid:vec3u){
   if(gid.x<pcmCellAcceptedCount()){_=pabPressureCellAddress(gid.x);}

@@ -55,6 +55,10 @@ for (const seamName of ["velocity-extension-mask-initialization",
   assert.match(resident, new RegExp(`closeSubstage\\("${seamName}"\\)`),
     `VEX2 timing seam ${seamName} is missing`);
 }
+for (const seamName of ["face-support-publication", "dirty-face-row-preparation"]) {
+  assert.match(resident, new RegExp(`closeSubstage\\("${seamName}"\\)`),
+    `face-preparation timing seam ${seamName} is missing`);
+}
 assert.match(publication, /encoder\.copyBufferToBuffer\(this\.topologyArena/,
   "the final accepted-indirect copy must remain ahead of timestamp resolve");
 assert.match(publication, /seams\?\.anchorFinalBoundary\?\.\(this\.acceptedIndirectArguments/,

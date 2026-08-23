@@ -1117,7 +1117,7 @@ async function runDamFrontLane(): Promise<void> {
       const vexLifecycleReceipt = (name: string,
         vex: NonNullable<typeof adaptiveVex>): Record<string, unknown> => {
         const header = vex.header;const invalid = 0xffff_ffff;
-        const completed = header[VEX_HEADER.completedFrameGeneration]!;
+        const completed = header[VEX_HEADER.sourceFrameGeneration]!;
         expect(failures, header[VEX_HEADER.faultCount] === 0
           && header[VEX_HEADER.firstFaultCell] === invalid
           && header[VEX_HEADER.firstFaultDepth] === invalid,
@@ -1130,10 +1130,9 @@ async function runDamFrontLane(): Promise<void> {
           generation: completed,
           topologyGeneration: header[VEX_HEADER.topologyGeneration],
           packetCapacity: header[VEX_HEADER.packetCapacity],
+          dispatchPacketCount: vex.dispatchPacketCount,
           validCells: header[VEX_HEADER.validCellCount],
           emptyPackets: header[VEX_HEADER.emptyPacketCount],
-          neighborLoads: header[VEX_HEADER.neighborLoadCount],
-          executedCells: header[VEX_HEADER.executedCellCount],
           faults: header[VEX_HEADER.faultCount],
           firstFaultCell: header[VEX_HEADER.firstFaultCell],
           firstFaultDepth: header[VEX_HEADER.firstFaultDepth],
@@ -1912,13 +1911,12 @@ async function runWeakenedSymmetryLane(): Promise<void> {
             frameControl,
             scalarResult,
             header: {
-              completedFrameGeneration: header[VEX_HEADER.completedFrameGeneration],
+              sourceFrameGeneration: header[VEX_HEADER.sourceFrameGeneration],
               topologyGeneration: header[VEX_HEADER.topologyGeneration],
               packetCapacity: header[VEX_HEADER.packetCapacity],
+              dispatchPacketCount: vex.dispatchPacketCount,
               validCellCount: header[VEX_HEADER.validCellCount],
               emptyPacketCount: header[VEX_HEADER.emptyPacketCount],
-              neighborLoadCount: header[VEX_HEADER.neighborLoadCount],
-              executedCellCount: header[VEX_HEADER.executedCellCount],
               faultCount: header[VEX_HEADER.faultCount],
               firstFaultCell: cell,
               firstFaultDepth: header[VEX_HEADER.firstFaultDepth],

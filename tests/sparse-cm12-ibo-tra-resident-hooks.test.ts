@@ -3,15 +3,14 @@ import test from "node:test";
 import { createSparseCM12IboTRAResidentHooksWGSL } from
   "../lib/methods/adaptive-mass/sparse-cm12-ibo-tra-resident-hooks.wgsl";
 
-test("IBO TRA resident hooks preserve stable packets and both gamma banks", () => {
+test("IBO TRA resident hooks preserve stable packet addresses", () => {
   const source = createSparseCM12IboTRAResidentHooksWGSL();
   assert.match(source, /IBOStablePacketLeaf\(packet\)/);
   assert.match(source, /IBOStablePacketLocal\(packet\)/);
   assert.match(source, /leaf\*IBO1_PACKETS_PER_LEAF/);
-  assert.match(source, /DynamicClosureSurfaceMask/);
-  assert.match(source, /DynamicClosureDensityMask/);
-  assert.match(source, /scatterGammaRow\(row,destinationDensity\(\),destinationGamma\(\)\)/);
-  assert.match(source, /scatterGammaRow\(row,p\.stateOffsets2\.x,p\.stateOffsets2\.y\)/);
+  assert.match(source, /IBOTRAPacketDescriptor/);
+  assert.match(source, /IBOTRAPacketLocal/);
+  assert.doesNotMatch(source, /scatterGammaRow/);
   assert.doesNotMatch(source, /TRA1|tra1|rowTermCount|incidence|ownerCellAt|fallback/i);
 });
 

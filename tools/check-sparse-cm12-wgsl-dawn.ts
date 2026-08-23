@@ -33,18 +33,20 @@ import { createSparseCM12PressureTopologyRepairLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair";
 import { createSparseCM12ResidentPersistentPressureCacheLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-persistent-pressure-cache";
-import { createSparseCM12FaceProjectionAuthorityLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-face-projection-authority";
-import { createSparseCM12VexActivityBatchLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-vex-activity-batch";
+import { createSparseCM12DirtyFaceRowMaskLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-dirty-face-row-masks";
+import { createSparseCM12VelocityExtensionResidentLayouts } from
+  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
 import type { SparseCM12InternedBoundaryLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
 import type { SparseCM12InternedRefLookupLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-interned-ref-lookup";
 import { createSparseCM12TransportProducerMaskLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-transport-producer-masks";
-import { createSparseCM12DynamicClosureLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-dynamic-closure-authority";
+import { createSparseCM12TransportExecutionImageLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-transport-execution-image";
+import { createSparseCM12TransportPacketAuthorityLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-transport-packet-authority";
 import { SPARSE_CM12_LENSES } from
   "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
 import { stageLensProgramWGSL } from "../lib/core/webgpu-stage-lens-overlay";
@@ -124,13 +126,10 @@ async function main(): Promise<void> {
       [[4, 4], [8, 8], [16, 16]];
     for (const [brickFineResolution, presentationPageResolution] of variants) {
       const variant = `B${brickFineResolution}/P${presentationPageResolution}`;
-      const pressure = { edgeCoefficientBaseWords: 4096, cellSlotBaseWords: 8192,
-        rowSlotBaseWords: 9216, cellChangeBaseWords: 10240,
-        rowChangeBaseWords: 11264, brickStateBaseWords: 12288,
-        rowTopologyStampBaseWords: 12352, aggregateEdgeForFineEdgeBaseWords: 13376,
+      const pressure = { aggregateEdgeForFineEdgeBaseWords: 13376,
         aggregateEdgeSourceBaseWords: 14400,
         hierarchyEdgeForAggregateBaseWords: [14464],
-        headerBaseWords: 15488, totalWords: 15496 };
+        headerBaseWords: 15488, totalWords: 15497 };
       const activity = createSparseCM12IncrementalActivityLayout({
         baseWords: 4168, brickCount: 8,
       });
@@ -172,18 +171,21 @@ async function main(): Promise<void> {
           brickCount: 8, aggregateEdgeCount: 32,
           hierarchyLevelCounts: [8], hierarchyEdgeLevelCounts: [32],
         }) : undefined;
-      const faceProjectionAuthority = persistentPressureCache
-        ? createSparseCM12FaceProjectionAuthorityLayout({
-          baseWords: persistentPressureCache.bufferSizeWords,
-          rowCapacity: 2048, cellCapacity: 1024,
-          brickFineResolution,
-          presentationPageResolution,
-        }) : undefined;
-      const vexActivityBatch = productionMatchedProfile && presentation
-        ? createSparseCM12VexActivityBatchLayout({
+      const velocityExtension = productionMatchedProfile && presentation
+        ? createSparseCM12VelocityExtensionResidentLayouts({
           activityTailWords: presentation.totalWords,
           stateTailFloats: 65536,
           cellCapacity: 1024,
+          packetCapacity: 8 * 64,
+          brickFineResolution,
+        }) : undefined;
+      const dirtyFaceRows = velocityExtension
+        ? createSparseCM12DirtyFaceRowMaskLayout({
+          baseWords: velocityExtension.activity.totalWords,
+          cellCapacity: 1024,
+          packetCapacity: velocityExtension.activity.packetCapacity,
+          dispatchPacketsPerLeaf: velocityExtension.activity.dispatchPacketsPerLeaf,
+          dispatchPacketCount: velocityExtension.activity.dispatchPacketCount,
         }) : undefined;
       const iboLayout: SparseCM12InternedBoundaryLayout = {
         leafCapacity: 8, canonicalCapacity: 24, templateCount: 8,
@@ -215,8 +217,29 @@ async function main(): Promise<void> {
       const transportProducerMasks = createSparseCM12TransportProducerMaskLayout({
         baseWords: 120000, packetCapacity: 512,
       });
-      const dynamicClosure = createSparseCM12DynamicClosureLayout({
-        baseWords: 140000, sourcePacketCapacity: 512, targetPacketCapacity: 512,
+      const transportExecutionImage = createSparseCM12TransportExecutionImageLayout({
+        brickFineResolution, logicalBrickDimensions: [2, 2, 2], leafCapacity: 8,
+      });
+      const logicalOwnerDirectory = {
+        layout: {
+          brickFineResolution,
+          presentationPageResolution,
+          logicalBrickDimensions: [2, 2, 2] as const,
+          logicalBrickCount: 8,
+          residentBrickCount: 8,
+          maximumSpanLog: 0,
+          atlasGeneration: 1,
+          recordBaseWords: 16,
+          totalWords: 32,
+          totalBytes: 128,
+        },
+        baseWords: 100000,
+        packedOwner16BaseWords: 100032,
+      };
+      const transportPacketAuthority = createSparseCM12TransportPacketAuthorityLayout({
+        baseWords: 160000, packetCapacity: transportExecutionImage.packetCapacity,
+        dispatchPacketsPerLeaf: velocityExtension!.activity.dispatchPacketsPerLeaf,
+        dispatchPacketCount: velocityExtension!.activity.dispatchPacketCount,
       });
       const source = createWebgpuSparseCM12ResidentWGSL(
         brickFineResolution,
@@ -224,12 +247,13 @@ async function main(): Promise<void> {
         pressure, activity, canonicalMembership,
         framePlan, presentation, frameControl?.layout, pressureTopologyRepair,
         persistentPressureCache,
-        faceProjectionAuthority,
-        vexActivityBatch,
+        velocityExtension,
         undefined, undefined, false,
-        undefined, 0, undefined, undefined, undefined,
+        logicalOwnerDirectory, 0, undefined,
+        transportExecutionImage, transportPacketAuthority,
         transportProducerMasks,
-        undefined, undefined, internedBoundaryImage, dynamicClosure,
+        undefined, undefined, internedBoundaryImage,
+        undefined, undefined, dirtyFaceRows,
       );
       const shaderModule = device.createShaderModule({
         label: `Sparse CM12 resident WGSL check ${variant}`,

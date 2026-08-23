@@ -45,12 +45,18 @@ export function sparseCM12TransportPacketLaneCell(options: {
 export interface SparseCM12TransportPacketAuthorityLayout {
   readonly baseWords: number;
   readonly packetCapacity: number;
+  readonly dispatchPacketsPerLeaf: 1 | 8 | 64;
+  readonly dispatchPacketCount: number;
+  readonly dispatchWidth: number;
+  readonly dispatchRows: number;
   readonly familyStrideWords: number;
   readonly familyHeaderBaseWords: readonly [number, number, number];
   readonly familyStampBaseWords: readonly [number, number, number];
   readonly familyMaskLowBaseWords: readonly [number, number, number];
   readonly familyMaskHighBaseWords: readonly [number, number, number];
   readonly familyListBaseWords: readonly [number, number, number];
+  readonly gammaRowMaskBaseWords: number;
+  readonly gammaRowMaskWords: number;
   readonly totalWords: number;
 }
 
@@ -69,9 +75,23 @@ const checked = (value: number, label: string): number => {
 export function createSparseCM12TransportPacketAuthorityLayout(options: {
   readonly baseWords: number;
   readonly packetCapacity: number;
+  readonly dispatchPacketsPerLeaf: 1 | 8 | 64;
+  readonly dispatchPacketCount: number;
 }): SparseCM12TransportPacketAuthorityLayout {
   const baseWords = checked(options.baseWords, "baseWords");
   const packetCapacity = checked(options.packetCapacity, "packetCapacity");
+  const dispatchPacketsPerLeaf = options.dispatchPacketsPerLeaf;
+  if (![1, 8, 64].includes(dispatchPacketsPerLeaf)) {
+    throw new RangeError("dispatchPacketsPerLeaf must be 1, 8, or 64");
+  }
+  const dispatchPacketCount = checked(options.dispatchPacketCount,
+    "dispatchPacketCount");
+  if (packetCapacity % 64 !== 0
+    || dispatchPacketCount !== (packetCapacity / 64) * dispatchPacketsPerLeaf) {
+    throw new RangeError("dispatchPacketCount does not match the stable packet profile");
+  }
+  const dispatchWidth = Math.min(65_535, dispatchPacketCount);
+  const dispatchRows = Math.ceil(dispatchPacketCount / dispatchWidth);
   const familyStrideWords = checked(
     SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_HEADER_WORDS + 4 * packetCapacity,
     "familyStrideWords",
@@ -92,13 +112,17 @@ export function createSparseCM12TransportPacketAuthorityLayout(options: {
   const familyListBaseWords = familyMaskHighBaseWords.map((high, family) => checked(
     high + packetCapacity, `familyListBaseWords[${family}]`,
   )) as [number, number, number];
-  const totalWords = checked(baseWords
+  const gammaRowMaskBaseWords = checked(baseWords
     + SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_FAMILY_COUNT * familyStrideWords,
-  "totalWords");
-  return Object.freeze({ baseWords, packetCapacity, familyStrideWords,
+  "gammaRowMaskBaseWords");
+  const gammaRowMaskWords = checked(6 * dispatchPacketCount, "gammaRowMaskWords");
+  const totalWords = checked(gammaRowMaskBaseWords + gammaRowMaskWords, "totalWords");
+  return Object.freeze({ baseWords, packetCapacity, dispatchPacketsPerLeaf,
+    dispatchPacketCount, dispatchWidth, dispatchRows, familyStrideWords,
     familyHeaderBaseWords: Object.freeze(familyHeaderBaseWords),
     familyStampBaseWords: Object.freeze(familyStampBaseWords),
     familyMaskLowBaseWords: Object.freeze(familyMaskLowBaseWords),
     familyMaskHighBaseWords: Object.freeze(familyMaskHighBaseWords),
-    familyListBaseWords: Object.freeze(familyListBaseWords), totalWords });
+    familyListBaseWords: Object.freeze(familyListBaseWords),
+    gammaRowMaskBaseWords, gammaRowMaskWords, totalWords });
 }

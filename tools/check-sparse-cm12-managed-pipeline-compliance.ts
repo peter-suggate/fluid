@@ -166,7 +166,7 @@ function isCompilationAuthority(file: string): boolean {
 // Negative fixture: this is the exact defect class introduced when the VEX
 // descriptor loop compiled its generated descriptors through the raw device.
 const vexDescriptorRegression = `
-  for (const descriptor of createSparseCM12VexActivityBatchPipelineDescriptors()) {
+  for (const descriptor of velocityExtensionPipelineDescriptors) {
     pipelines.set(descriptor.key, await device.createComputePipelineAsync({
       layout: pipelineLayout,
       compute: { module, entryPoint: descriptor.entryPoint },
@@ -175,7 +175,7 @@ const vexDescriptorRegression = `
 `;
 assert.deepEqual(
   inspectDirectComputePipelineCalls(
-    "lib/methods/adaptive-mass/sparse-cm12-vex-activity-batch-runtime.ts",
+    "lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
     vexDescriptorRegression,
   ).map(({ method }) => method),
   ["createComputePipelineAsync"],
@@ -227,8 +227,6 @@ for (const retiredEntryPoint of [
 for (const [file, required] of [
   ["lib/methods/adaptive-mass/sparse-cm12-canonical-membership.wgsl.ts",
     ["PCM_FAULT_ATOMIC_CONTENTION", "attempt<64u"]],
-  ["lib/methods/adaptive-mass/sparse-cm12-face-projection-authority.wgsl.ts",
-    ["SPARSE_CM12_FACE_PROJECTION_FAULT.atomicContention", "attempt<64u"]],
 ] as const) {
   const source = readFileSync(path.resolve(PROJECT_ROOT, file), "utf8");
   for (const token of required) assert.ok(source.includes(token),

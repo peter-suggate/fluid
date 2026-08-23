@@ -35,7 +35,6 @@ import type {
 import type { GPUTimestampPhase } from "../../core/performance-trace";
 import type { AnyStageLens, StageLens } from "../../core/stage-lens";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
-import { SPARSE_CM12_FACE_PROJECTION_LENS } from "./sparse-cm12-face-projection.lens";
 import { formatSparseCM12PressureCutoverAuthorities } from
   "./sparse-cm12-pressure-cutover-observability";
 import type {
@@ -199,6 +198,16 @@ export const SPARSE_CM12_STAGES = Object.freeze({
   "face-preparation": {
     label: "Face preparation", band: "transport", side: "right",
     phase: { id: "power-topology", label: "Composite face preparation + oriented transport rows" },
+    substages: {
+      "face-support-publication": {
+        id: "power-topology",
+        label: "Dense face-velocity support clear + publication",
+      },
+      "dirty-face-row-preparation": {
+        id: "power-topology",
+        label: "Dirty oriented face-row preparation",
+      },
+    },
     lens: null,
     tip: {
       summary: "Clears face-velocity support on retired bricks, republishes per-brick face-velocity support, and prepares the oriented regular and 2:1 face-port transport rows — for dirty bricks only, so a stable submerged brick costs nothing here.",
@@ -269,11 +278,8 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       "sharpening-receipt-setup": {
         id: "fine-sdf-redistance", label: "Sharpening receipt/indirect setup",
       },
-      "sharpening-prepare": {
-        id: "fine-sdf-redistance", label: "Sharpening incidence statistics + dose preparation",
-      },
-      "sharpening-scatter": {
-        id: "fine-sdf-redistance", label: "Sharpening TEI trace + fixed-point mass scatter",
+      "sharpening-transform": {
+        id: "fine-sdf-redistance", label: "Sharpening dose + TEI mass scatter",
       },
       "sharpening-finalize": {
         id: "fine-sdf-redistance", label: "Sharpening scalar finalization + dependency publication",
@@ -287,7 +293,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     },
     lens: null,
     tip: {
-      summary: "Sec. 3.5's density correction and Algorithm 2's local mass return on the compact sharpening cell authority: receipt clears and indirect setup, field preparation, the TEI trace with fixed-point mass scatter, then scalar finalization. The stage then redistributes cut-cell solid excess and publishes FSM1 final-scalar packet masks.",
+      summary: "Sec. 3.5's density correction and Algorithm 2's local mass return on the shared transport packet authority: receipt setup, a fused dose/TEI fixed-point mass transform, then scalar finalization. The stage then redistributes cut-cell solid excess and publishes FSM1 final-scalar packet masks.",
       reads: "transported density and gamma, solid fractions",
       writes: "conditioned density and gamma, final-scalar packet masks",
       feeds: "symmetry authority and activity measurement",
@@ -404,9 +410,9 @@ export const SPARSE_CM12_STAGES = Object.freeze({
   "velocity-projection": {
     label: "Velocity projection", band: "pressure", side: "right",
     phase: { id: "velocity-projection", label: "Composite pressure-gradient projection" },
-    lens: SPARSE_CM12_FACE_PROJECTION_LENS,
+    lens: null,
     tip: {
-      summary: "Advances the incremental-activity clock, then the face-projection authority marks the faces the pressure solve or dirty bricks touched, repairs its leaves and subtracts the pressure gradient only there through the same composite rows that built the divergence, conservative 2:1 ports included. Collocation and diagnosis follow, then the face D4 fold, the rigid-body reaction and the frame face output publication.",
+      summary: "Advances the incremental-activity clock, then projects the compiled dirty/pressure row masks directly through the same composite rows that built the divergence, conservative 2:1 ports and sparse-air boundaries included. Collocation and diagnosis follow, then the face D4 fold, the rigid-body reaction and the frame face output publication.",
       reads: "predicted face velocity, pressure, dirty bricks",
       writes: "projected face and collocated velocity, frame face output",
       feeds: "projection diagnostics and the next frame's velocity extension",

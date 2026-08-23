@@ -13,6 +13,8 @@ const wgsl = createSparseCM12TransportPacketAuthorityWGSL({
   layout: createSparseCM12TransportPacketAuthorityLayout({
     baseWords: 256,
     packetCapacity: 512,
+    dispatchPacketsPerLeaf: 8,
+    dispatchPacketCount: 64,
   }),
 });
 

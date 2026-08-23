@@ -13,6 +13,10 @@ const CM12_TPA_CAPACITY:u32=${l.packetCapacity}u;
 const CM12_TPA_FAMILIES:u32=3u;
 const CM12_TPA_FAMILY_STRIDE:u32=${l.familyStrideWords}u;
 const CM12_TPA_HEADER:u32=${l.baseWords}u;
+const CM12_TPA_DIRECT_PACKETS_PER_LEAF:u32=${l.dispatchPacketsPerLeaf}u;
+const CM12_TPA_DIRECT_PACKET_COUNT:u32=${l.dispatchPacketCount}u;
+const CM12_TPA_DIRECT_WIDTH:u32=${l.dispatchWidth}u;
+const CM12_TPA_GAMMA_ROW_MASK:u32=${l.gammaRowMaskBaseWords}u;
 
 fn cm12TransportFamilyHeader(family:u32)->u32{
   return CM12_TPA_HEADER+family*CM12_TPA_FAMILY_STRIDE;}
@@ -39,8 +43,36 @@ fn cm12TransportPacketMask(packet:u32,family:u32)->vec2u{
   return vec2u(atomicLoad(&${arena}[cm12TransportFamilyMaskLow(family)+packet]),
     atomicLoad(&${arena}[cm12TransportFamilyMaskHigh(family)+packet]));
 }
+fn cm12TransportOverwritePacketMask(packet:u32,family:u32,mask:vec2u){
+  if(packet>=CM12_TPA_CAPACITY||family>=CM12_TPA_FAMILIES){return;}
+  atomicStore(&${arena}[cm12TransportFamilyMaskLow(family)+packet],mask.x);
+  atomicStore(&${arena}[cm12TransportFamilyMaskHigh(family)+packet],mask.y);
+}
 fn cm12TransportPacketLaneSelected(mask:vec2u,lane:u32)->bool{
   return lane<64u&&((mask[lane>>5u]>>(lane&31u))&1u)!=0u;
+}
+fn cm12TransportDirectOrdinal(wid:vec3u)->u32{
+  return wid.x+CM12_TPA_DIRECT_WIDTH*wid.y;
+}
+fn cm12TransportDirectStablePacket(ordinal:u32)->u32{
+  let leaf=ordinal/CM12_TPA_DIRECT_PACKETS_PER_LEAF;
+  return 64u*leaf+(ordinal-leaf*CM12_TPA_DIRECT_PACKETS_PER_LEAF);
+}
+fn cm12TransportCompactOrdinal(packet:u32)->u32{
+  let leaf=packet/64u;let local=packet-64u*leaf;
+  if(local>=CM12_TPA_DIRECT_PACKETS_PER_LEAF){return 0xffffffffu;}
+  let ordinal=leaf*CM12_TPA_DIRECT_PACKETS_PER_LEAF+local;
+  return select(0xffffffffu,ordinal,ordinal<CM12_TPA_DIRECT_PACKET_COUNT);
+}
+fn cm12TransportGammaMaskWord(ordinal:u32,axis:u32,lane:u32)->u32{
+  return CM12_TPA_GAMMA_ROW_MASK+6u*ordinal+2u*axis
+    +select(0u,1u,lane>=32u);
+}
+fn cm12TransportMarkGammaMask(packet:u32,axis:u32,low:u32,high:u32){
+  let ordinal=cm12TransportCompactOrdinal(packet);
+  if(ordinal==0xffffffffu||axis>=3u||(low|high)==0u){return;}
+  _=atomicOr(&${arena}[cm12TransportGammaMaskWord(ordinal,axis,0u)],low);
+  _=atomicOr(&${arena}[cm12TransportGammaMaskWord(ordinal,axis,32u)],high);
 }
 
 // The packet authority is sealed before the three conservative dispatches.
@@ -149,6 +181,11 @@ fn clearSparseCM12TransportPacketAuthority(@builtin(global_invocation_id)gid:vec
     atomicStore(&${arena}[cm12TransportFamilyStamp(family)+packet],0u);
     atomicStore(&${arena}[cm12TransportFamilyMaskLow(family)+packet],0u);
     atomicStore(&${arena}[cm12TransportFamilyMaskHigh(family)+packet],0u);
+  }
+  if(packet<CM12_TPA_DIRECT_PACKET_COUNT){
+    for(var word=0u;word<6u;word+=1u){
+      atomicStore(&${arena}[CM12_TPA_GAMMA_ROW_MASK+6u*packet+word],0u);
+    }
   }
 }
 @compute @workgroup_size(1)

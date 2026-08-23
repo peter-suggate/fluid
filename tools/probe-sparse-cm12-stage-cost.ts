@@ -254,14 +254,15 @@ type StageCostQASolver = {
     readonly isa?: readonly number[];
   } | undefined>;
   readVelocityExtensionHeaderQA(): Promise<{
-    readonly completedFrameGeneration: number; readonly topologyGeneration: number;
+    readonly sourceFrameGeneration: number; readonly topologyGeneration: number;
     readonly cellCapacity: number; readonly packetCapacity: number;
-    readonly executedCellCount: number; readonly validCellCount: number;
-    readonly emptyPacketCount: number; readonly neighborLoadCount: number;
+    readonly dispatchPacketCount: number;
+    readonly validCellCount: number; readonly emptyPacketCount: number;
     readonly faultCount: number;
     readonly firstFault?: { readonly cell: number; readonly depth: number };
   }>;
   readVelocityExtensionQA(): Promise<{
+    readonly dispatchPacketCount: number;
     readonly header: Uint32Array;
     readonly validityA: Uint32Array; readonly validityB: Uint32Array;
     readonly acceptedDepth: Uint32Array; readonly velocityBits: Uint32Array;
@@ -1042,6 +1043,14 @@ try {
       acceptedRows: finalInfo.adaptiveAcceptedRowCount,
       pressureCells: finalInfo.adaptivePressureCellCount,
       pressureActiveRows: finalInfo.adaptivePressureActiveRowCount,
+      pressureIterationsExecuted: finalInfo.pressureIterationsExecuted,
+      pressureFirstToleranceCrossingIteration:
+        finalInfo.pressureFirstToleranceCrossingIteration,
+      pressureConvergenceReason: finalInfo.pressureConvergenceReason,
+      pressureCurvatureRecoveryCount: finalInfo.pressureCurvatureRecoveryCount,
+      pressureResidualDrift: finalInfo.pressureResidualDrift,
+      pressureRelativeResidual: finalInfo.pressureRelativeResidual,
+      pressureRecursiveRelativeResidual: finalInfo.pressureRecursiveRelativeResidual,
       residentBricks: finalInfo.fluidBrickResidentCount,
       topologyPrepared: finalInfo.adaptiveTopologyPreparedBrickCount,
       topologyCommitted: finalInfo.adaptiveTopologyCommittedBrickCount,

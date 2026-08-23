@@ -2,23 +2,21 @@
  * TPM1: packet-local producer masks emitted by conservative scalar transport.
  *
  * One transport workgroup owns one 64-cell rung packet.  Its lanes publish exact
- * surface-feature and density-changed bitsets.  Later dispatches expand the
+ * surface-feature bitsets. Later dispatches expand the
  * masks into TRA row closure; transport gather never walks that graph.
  */
 
 export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_MAGIC = 0x5450_4d31; // TPM1
-export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_VERSION = 1;
+export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_VERSION = 3;
 export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER_WORDS = 32;
 export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_INVALID = 0xffff_ffff;
 
 export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER = Object.freeze({
   magic: 0, version: 1, headerWords: 2, packetCapacity: 3,
   phase: 4, fault: 5, candidateGeneration: 6, publishedPacketCount: 7,
-  surfaceCellCount: 8, densityChangedCellCount: 9, firstFaultPacket: 10,
-  packetStampBase: 11, surfaceLowBase: 12, surfaceHighBase: 13,
-  densityLowBase: 14, densityHighBase: 15, totalWords: 16,
-  sharpeningLowBase: 17, sharpeningHighBase: 18,
-  sharpeningCellCount: 19, reservedBase: 20,
+  surfaceCellCount: 8, firstFaultPacket: 9,
+  packetStampBase: 10, surfaceLowBase: 11, surfaceHighBase: 12,
+  totalWords: 13, reservedBase: 14,
 } as const);
 
 export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_PHASE = Object.freeze({
@@ -36,10 +34,6 @@ export interface SparseCM12TransportProducerMaskLayout {
   readonly packetStampBaseWords: number;
   readonly surfaceLowBaseWords: number;
   readonly surfaceHighBaseWords: number;
-  readonly densityLowBaseWords: number;
-  readonly densityHighBaseWords: number;
-  readonly sharpeningLowBaseWords: number;
-  readonly sharpeningHighBaseWords: number;
   /** Absolute exclusive end in the containing atomic arena. */
   readonly totalWords: number;
   readonly totalBytes: number;
@@ -48,10 +42,6 @@ export interface SparseCM12TransportProducerMaskLayout {
 export interface SparseCM12TransportProducerPacketMask {
   readonly surfaceLow: number;
   readonly surfaceHigh: number;
-  readonly densityLow: number;
-  readonly densityHigh: number;
-  readonly sharpeningLow?: number;
-  readonly sharpeningHigh?: number;
 }
 
 const integer = (value: number, label: string, positive = false): number => {
@@ -79,19 +69,9 @@ export function createSparseCM12TransportProducerMaskLayout(options: {
     "TPM1 surface-low base");
   const surfaceHighBaseWords = align64(surfaceLowBaseWords + packetCapacity,
     "TPM1 surface-high base");
-  const densityLowBaseWords = align64(surfaceHighBaseWords + packetCapacity,
-    "TPM1 density-low base");
-  const densityHighBaseWords = align64(densityLowBaseWords + packetCapacity,
-    "TPM1 density-high base");
-  const sharpeningLowBaseWords = align64(densityHighBaseWords + packetCapacity,
-    "TPM1 sharpening-low base");
-  const sharpeningHighBaseWords = align64(sharpeningLowBaseWords + packetCapacity,
-    "TPM1 sharpening-high base");
-  const totalWords = align64(sharpeningHighBaseWords + packetCapacity,
-    "TPM1 totalWords");
+  const totalWords = align64(surfaceHighBaseWords + packetCapacity, "TPM1 totalWords");
   return Object.freeze({ baseWords, packetCapacity, packetStampBaseWords,
-    surfaceLowBaseWords, surfaceHighBaseWords, densityLowBaseWords,
-    densityHighBaseWords, sharpeningLowBaseWords, sharpeningHighBaseWords,
+    surfaceLowBaseWords, surfaceHighBaseWords,
     totalWords, totalBytes: 4 * (totalWords - baseWords) });
 }
 
@@ -110,10 +90,6 @@ export function createSparseCM12TransportProducerMaskInitialWords(
   words[h.packetStampBase] = layout.packetStampBaseWords;
   words[h.surfaceLowBase] = layout.surfaceLowBaseWords;
   words[h.surfaceHighBase] = layout.surfaceHighBaseWords;
-  words[h.densityLowBase] = layout.densityLowBaseWords;
-  words[h.densityHighBase] = layout.densityHighBaseWords;
-  words[h.sharpeningLowBase] = layout.sharpeningLowBaseWords;
-  words[h.sharpeningHighBase] = layout.sharpeningHighBaseWords;
   words[h.totalWords] = layout.totalWords;
   return words;
 }
@@ -175,9 +151,9 @@ export function compileSparseCM12TransportProducerMaskReference(options: {
 
 /** Required GPU ordering; authority begin/finalize calls bracket these hooks. */
 export const SPARSE_CM12_TRANSPORT_PRODUCER_MASK_DISPATCH_ORDER = Object.freeze([
-  "beginSparseCM12TransportProducerMasks + beginSparseCM12DynamicClosure",
+  "beginSparseCM12TransportProducerMasks",
   "gatherConservativeDensity (calls cm12TransportProducerMaskPublish once per lane)",
-  "sealSparseCM12TransportProducerMasks + sealSparseCM12DynamicClosureSources",
-  "compileSparseCM12DynamicTRA",
-  "sealSparseCM12DynamicClosureTargets; scatter both gamma phases; clear touched rows",
+  "sealSparseCM12TransportProducerMasks",
+  "compileSparseCM12GammaRowMasks over the sealed TPA gather family",
+  "direct compact-mask scatter for both ordered gamma phases",
 ] as const);

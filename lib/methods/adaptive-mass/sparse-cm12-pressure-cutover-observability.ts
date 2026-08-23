@@ -22,7 +22,6 @@ export const SPARSE_CM12_PRESSURE_CUTOVER_FORBIDDEN_RUNTIME_TOKENS = Object.free
 const localStages = (receipt: SparseCM12PressureCutoverAuthorities): readonly [
   string, GPUAdaptivePressureLocalStageReceipt,
 ][] => [
-  ["FPA projection", receipt.fpa.projection],
   ["PCF fine", receipt.pcf],
   ["PCA aggregate/hierarchy", receipt.pca],
 ];
@@ -45,7 +44,7 @@ export function inspectSparseCM12PressureCutoverAuthorities(
   expectedInputTopologyGeneration?: number,
 ): { readonly complete: boolean; readonly issues: readonly string[] } {
   if (!receipt) return Object.freeze({ complete: false,
-    issues: Object.freeze(["PCF/PCA and FPA receipts are unavailable"]) });
+    issues: Object.freeze(["PCF/PCA receipts are unavailable"]) });
   const issues: string[] = [];
   if (!validCount(receipt.inputTopologyGeneration)) {
     issues.push("authority input topology generation is invalid");
@@ -108,7 +107,7 @@ export function formatSparseCM12PressureCutoverAuthorities(
     receipt, expectedInputTopologyGeneration,
   );
   if (!receipt) {
-    return "FPA/PCF/PCA receipts: UNAVAILABLE (no accepted GPU authority receipt)";
+    return "PCF/PCA receipts: UNAVAILABLE (no accepted GPU authority receipt)";
   }
   const stage = (label: string, value: GPUAdaptivePressureLocalStageReceipt): string =>
     `${label} g${value.acceptedGeneration} · dirty ${value.dirtyCount}`
@@ -118,8 +117,7 @@ export function formatSparseCM12PressureCutoverAuthorities(
   const status = inspection.complete ? "Pressure local authorities: MATCHED"
     : `Pressure local authorities: UNAVAILABLE/FAULT — ${inspection.issues.join("; ")}`;
   return [status,
-    "Face prepare: brick-owned persistent rows (no FPA stage)",
-    stage("FPA project", receipt.fpa.projection),
+    "Face project: direct compiled dirty/pressure row masks",
     stage("PCF", receipt.pcf),
     `${stage("PCA", receipt.pca)} · family dirty ${receipt.pca.familyDirtyCount.join("/")}`,
     `Pressure addressing: ${receipt.pressureAddressing.ready ? "READY" : "FAULT"}`
@@ -130,7 +128,7 @@ export function formatSparseCM12PressureCutoverAuthorities(
 
 /** Static cutover check over isolated production entrypoint source slices. */
 export function assertSparseCM12PressureCutoverLocalSources(sources: Readonly<Record<
-  "fpaProjection" | "pcf" | "pca", string
+  "pcf" | "pca", string
 >>): void {
   for (const [authority, source] of Object.entries(sources)) {
     if (source.trim().length === 0) throw new Error(`${authority} source slice is empty`);

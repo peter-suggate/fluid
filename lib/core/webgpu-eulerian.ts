@@ -109,9 +109,6 @@ export interface GPUEulerianInfo {
     readonly authorities?: {
       readonly status: "matched" | "fault" | "unavailable";
       readonly inputTopologyGeneration: number;
-      readonly fpa: {
-        readonly projection: GPUAdaptivePressureLocalStageReceipt;
-      };
       readonly pcf: GPUAdaptivePressureLocalStageReceipt;
       readonly pca: GPUAdaptivePressureLocalStageReceipt & {
         readonly familyDirtyCount: readonly [number, number, number, number];

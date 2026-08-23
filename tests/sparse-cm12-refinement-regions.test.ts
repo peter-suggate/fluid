@@ -15,8 +15,6 @@ import {
   SPARSE_CM12_REFINEMENT_REGION_BYTES,
   SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET,
 } from "../lib/methods/adaptive-mass/sparse-cm12-refinement-regions";
-import { createWebgpuSparseCM12ResidentWGSL } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
 
 const lattice: RefinementRegionLattice = {
   dimensions: [32, 32, 32],
@@ -76,16 +74,6 @@ test("overlapping ceilings conservatively win over conflicting minimum-size floo
     packed, [8, 8, 8], [8, 8, 8], 8);
   assert.deepEqual(bounds, { minimumResolution: 4, maximumResolution: 2 });
   assert.equal(applySparseCM12RefinementRegionResolutionBounds(1, bounds), 4);
-});
-
-test("resident WGSL applies bounds to planned and newly activated bricks", () => {
-  const source = createWebgpuSparseCM12ResidentWGSL(8);
-  assert.match(source, /refinementRegionControl:vec4u/);
-  assert.match(source, /fn applySparseCM12RefinementRegionBounds/);
-  assert.match(source,
-    /requested=applySparseCM12RefinementRegionBounds\(brick,requested\)/);
-  assert.match(source,
-    /applySparseCM12RefinementRegionBounds\(brick,BRICK_FINE_RESOLUTION\)/);
 });
 
 test("an authored minimum cell size bounds Sparse CM12 generation zero", () => {

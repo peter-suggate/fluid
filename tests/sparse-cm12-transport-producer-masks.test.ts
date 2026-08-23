@@ -21,8 +21,7 @@ test("TPM1 lays out exact packet masks in an appendable atomic arena", () => {
   });
   assert.equal(layout.baseWords, 128);
   for (const value of [layout.packetStampBaseWords, layout.surfaceLowBaseWords,
-    layout.surfaceHighBaseWords, layout.densityLowBaseWords,
-    layout.densityHighBaseWords, layout.totalWords]) assert.equal(value % 64, 0);
+    layout.surfaceHighBaseWords, layout.totalWords]) assert.equal(value % 64, 0);
   assert.ok(layout.surfaceLowBaseWords >= layout.packetStampBaseWords + 129);
   const words = createSparseCM12TransportProducerMaskInitialWords(layout);
   const h = SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER;
@@ -48,16 +47,13 @@ test("TPM1 portable ballot keeps all boundary lane bits exact", () => {
 test("TPM1 compiler oracle equals legacy TRA row closure", () => {
   const cells = Array.from({ length: 64 }, (_, lane) => 100 + lane);
   const surface = Array<boolean>(64).fill(false);
-  const density = Array<boolean>(64).fill(false);
   surface[0] = true; surface[31] = true; surface[63] = true;
-  density[1] = true; density[32] = true; density[63] = true;
   const [surfaceLow, surfaceHigh] = packSparseCM12TransportProducerMask(surface);
-  const [densityLow, densityHigh] = packSparseCM12TransportProducerMask(density);
   const incidenceRows = (cell: number): readonly number[] => [cell, cell + 1000];
   const rowAccepted = (row: number): boolean => row !== 163;
   const cellActive = (cell: number): boolean => cell !== 999;
   const compiled = compileSparseCM12TransportProducerMaskReference({
-    mask: { surfaceLow, surfaceHigh, densityLow, densityHigh },
+    mask: { surfaceLow, surfaceHigh },
     packetCells: cells, incidenceRows, rowAccepted, cellActive,
   });
 
@@ -78,13 +74,11 @@ test("TPM1 WGSL publishes stamp last and compiles masks outside gather", () => {
   });
   assert.match(source, /var<workgroup>tpm1SurfaceLow:atomic<u32>/);
   assert.match(source, /atomicOr\(&tpm1SurfaceLow,1u<<lane\)/);
-  assert.match(source, /atomicOr\(&tpm1DensityHigh,1u<<\(lane-32u\)\)/);
+  assert.doesNotMatch(source, /Density|DENSITY/);
   assert.doesNotMatch(source, /@builtin\(subgroup|subgroup[A-Z]|enable\s+subgroups/i);
   assert.match(source,
-    /atomicStore\(&activity\[TPM1_DENSITY_HIGH\+packet\],highD\);[\s\S]*atomicStore\(&activity\[TPM1_STAMP\+packet\],generation\)/);
-  assert.match(source, /fn compileSparseCM12TransportRowMasks/);
-  assert.match(source, /let packet=testResidentTransportProducerMaskPacket\(rank\)/);
-  assert.match(source, /testResidentTransportProducerMaskMarkRow\(row\)/);
+    /atomicStore\(&activity\[TPM1_SURFACE_HIGH\+packet\],highS\);[\s\S]*atomicStore\(&activity\[TPM1_STAMP\+packet\],generation\)/);
+  assert.doesNotMatch(source, /compileSparseCM12TransportRowMasks/);
   assert.doesNotMatch(source, /compileSparseCM12VexRootMasks|RecordVexRoot/);
   assert.doesNotMatch(source, /tra1MarkScalarCellClosure/);
   assert.doesNotMatch(source, /cm12ResidentRecordExtensionIncidence/);
@@ -92,11 +86,11 @@ test("TPM1 WGSL publishes stamp last and compiles masks outside gather", () => {
 
 test("TPM1 integration order seals masks before compiled topology consumers", () => {
   assert.deepEqual(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_DISPATCH_ORDER, [
-    "beginSparseCM12TransportProducerMasks + beginSparseCM12DynamicClosure",
+    "beginSparseCM12TransportProducerMasks",
     "gatherConservativeDensity (calls cm12TransportProducerMaskPublish once per lane)",
-    "sealSparseCM12TransportProducerMasks + sealSparseCM12DynamicClosureSources",
-    "compileSparseCM12DynamicTRA",
-    "sealSparseCM12DynamicClosureTargets; scatter both gamma phases; clear touched rows",
+    "sealSparseCM12TransportProducerMasks",
+    "compileSparseCM12GammaRowMasks over the sealed TPA gather family",
+    "direct compact-mask scatter for both ordered gamma phases",
   ]);
 });
 

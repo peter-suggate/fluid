@@ -14,10 +14,6 @@ export interface SparseCM12TransportProducerMaskWGSLOptions {
   readonly arenaName?: string;
   /** Prefix for the resident integration hooks documented below. */
   readonly hookPrefix?: string;
-  /** Publish each completed packet ballot into DCA1's sparse source lists. */
-  readonly dynamicClosurePublish?: boolean;
-  /** Retained only for standalone legacy fixtures; production rows use ITR1. */
-  readonly legacyRowCompiler?: boolean;
 }
 
 const identifier = (value: string, label: string): string => {
@@ -42,6 +38,7 @@ const identifier = (value: string, label: string): string => {
  * - `<p>TransportProducerMaskRowTermBegin/End(row) -> u32`
  * - `<p>TransportProducerMaskRowTermCell(term) -> u32`
  * - `<p>TransportProducerMaskMarkRow(row)`
+ * - `<p>TransportProducerSharpeningMask(packet, mask)`
  */
 export function createSparseCM12TransportProducerMaskWGSL(
   options: SparseCM12TransportProducerMaskWGSLOptions,
@@ -57,10 +54,6 @@ const TPM1_CAPACITY:u32=${layout.packetCapacity}u;
 const TPM1_STAMP:u32=${layout.packetStampBaseWords}u;
 const TPM1_SURFACE_LOW:u32=${layout.surfaceLowBaseWords}u;
 const TPM1_SURFACE_HIGH:u32=${layout.surfaceHighBaseWords}u;
-const TPM1_DENSITY_LOW:u32=${layout.densityLowBaseWords}u;
-const TPM1_DENSITY_HIGH:u32=${layout.densityHighBaseWords}u;
-const TPM1_SHARPENING_LOW:u32=${layout.sharpeningLowBaseWords}u;
-const TPM1_SHARPENING_HIGH:u32=${layout.sharpeningHighBaseWords}u;
 const TPM1_PHASE_COLLECTING:u32=${SPARSE_CM12_TRANSPORT_PRODUCER_MASK_PHASE.collecting}u;
 const TPM1_PHASE_PUBLISHED:u32=${SPARSE_CM12_TRANSPORT_PRODUCER_MASK_PHASE.published}u;
 const TPM1_PHASE_FAULT:u32=${SPARSE_CM12_TRANSPORT_PRODUCER_MASK_PHASE.fault}u;
@@ -68,8 +61,6 @@ const TPM1_INVALID:u32=0xffffffffu;
 
 var<workgroup>tpm1SurfaceLow:atomic<u32>;
 var<workgroup>tpm1SurfaceHigh:atomic<u32>;
-var<workgroup>tpm1DensityLow:atomic<u32>;
-var<workgroup>tpm1DensityHigh:atomic<u32>;
 var<workgroup>tpm1SharpeningLow:atomic<u32>;
 var<workgroup>tpm1SharpeningHigh:atomic<u32>;
 
@@ -109,28 +100,21 @@ fn beginSparseCM12TransportProducerMasks(){
   atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.candidateGeneration)}],generation);
   atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.publishedPacketCount)}],0u);
   atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.surfaceCellCount)}],0u);
-  atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.densityChangedCellCount)}],0u);
-  atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.sharpeningCellCount)}],0u);
   atomicStore(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.phase)}],TPM1_PHASE_COLLECTING);
 }
 
-// Exactly one invocation by every lane of every transport packet.  The four
+// Exactly one invocation by every lane of every transport packet.  The two
 // atomics are a portable workgroup ballot; no subgroup feature is required.
 fn cm12TransportProducerMaskPublish(packet:u32,lane:u32,cell:u32,
- surfaceFeature:bool,densityChanged:bool){
+ surfaceFeature:bool){
   if(lane==0u){
     atomicStore(&tpm1SurfaceLow,0u);atomicStore(&tpm1SurfaceHigh,0u);
-    atomicStore(&tpm1DensityLow,0u);atomicStore(&tpm1DensityHigh,0u);
   }
   workgroupBarrier();
   let valid=${p}TransportProducerMaskCellValid(cell);
   if(valid&&surfaceFeature){
     if(lane<32u){_=atomicOr(&tpm1SurfaceLow,1u<<lane);}
     else{_=atomicOr(&tpm1SurfaceHigh,1u<<(lane-32u));}
-  }
-  if(valid&&densityChanged){
-    if(lane<32u){_=atomicOr(&tpm1DensityLow,1u<<lane);}
-    else{_=atomicOr(&tpm1DensityHigh,1u<<(lane-32u));}
   }
   workgroupBarrier();
   if(lane==0u){
@@ -139,28 +123,20 @@ fn cm12TransportProducerMaskPublish(packet:u32,lane:u32,cell:u32,
     }
     let generation=tpm1Generation();
     let lowS=atomicLoad(&tpm1SurfaceLow);let highS=atomicLoad(&tpm1SurfaceHigh);
-    let lowD=atomicLoad(&tpm1DensityLow);let highD=atomicLoad(&tpm1DensityHigh);
     atomicStore(&${arena}[TPM1_SURFACE_LOW+packet],lowS);
     atomicStore(&${arena}[TPM1_SURFACE_HIGH+packet],highS);
-    atomicStore(&${arena}[TPM1_DENSITY_LOW+packet],lowD);
-    atomicStore(&${arena}[TPM1_DENSITY_HIGH+packet],highD);
     atomicAdd(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.surfaceCellCount)}],
       countOneBits(lowS)+countOneBits(highS));
-    atomicAdd(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.densityChangedCellCount)}],
-      countOneBits(lowD)+countOneBits(highD));
     atomicAdd(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.publishedPacketCount)}],1u);
-    ${options.dynamicClosurePublish
-      ? "cm12DynamicClosurePublishSourcePacket(packet,vec2u(lowS,highS),vec2u(lowD,highD));"
-      : ""}
     // Publication stamp is deliberately last.  Compiler dispatches occur only
     // after this producer dispatch has completed.
     atomicStore(&${arena}[TPM1_STAMP+packet],generation);
   }
 }
 
-// Trace-family sharpening ballot. It shares TPM1's TEI-packet address space,
-// but not the gather-family stamp: every current trace packet overwrites its
-// two words before the sealed mask is consumed later in the same frame.
+// Replace family zero's mask with the exact trace-time sharpening closure.
+// The trace has already staged the transport mask and uniquely owns this list
+// entry, so later sharpening can reuse the list without a second mask plane.
 fn cm12TransportSharpeningMaskPublish(packet:u32,lane:u32,cell:u32,
  sharpeningSource:bool,cellScale:u32){
   if(lane==0u){
@@ -184,11 +160,8 @@ fn cm12TransportSharpeningMaskPublish(packet:u32,lane:u32,cell:u32,
   }
   workgroupBarrier();
   if(lane==0u&&packet<TPM1_CAPACITY){
-    let low=atomicLoad(&tpm1SharpeningLow);let high=atomicLoad(&tpm1SharpeningHigh);
-    atomicStore(&${arena}[TPM1_SHARPENING_LOW+packet],low);
-    atomicStore(&${arena}[TPM1_SHARPENING_HIGH+packet],high);
-    atomicAdd(&${arena}[${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.sharpeningCellCount)}],
-      countOneBits(low)+countOneBits(high));
+    ${p}TransportProducerSharpeningMask(packet,vec2u(
+      atomicLoad(&tpm1SharpeningLow),atomicLoad(&tpm1SharpeningHigh)));
   }
 }
 
@@ -212,38 +185,10 @@ fn tpm1PacketReady(packet:u32)->bool{
       ==TPM1_PHASE_PUBLISHED
     &&atomicLoad(&${arena}[TPM1_STAMP+packet])==tpm1Generation();
 }
-fn tpm1LaneMarked(low:u32,high:u32,lane:u32)->bool{
-  return ((select(low,high,lane>=32u)>>(lane&31u))&1u)!=0u;
+fn tpm1SurfaceMask(packet:u32)->vec2u{
+  if(!tpm1PacketReady(packet)){return vec2u(0u);}
+  return vec2u(atomicLoad(&${arena}[TPM1_SURFACE_LOW+packet]),
+    atomicLoad(&${arena}[TPM1_SURFACE_HIGH+packet]));
 }
-fn tpm1SharpeningLaneMarked(packet:u32,lane:u32)->bool{
-  if(packet>=TPM1_CAPACITY||atomicLoad(&${arena}[
-    ${h(SPARSE_CM12_TRANSPORT_PRODUCER_MASK_HEADER.phase)}])!=TPM1_PHASE_PUBLISHED){
-    return false;
-  }
-  return tpm1LaneMarked(atomicLoad(&${arena}[TPM1_SHARPENING_LOW+packet]),
-    atomicLoad(&${arena}[TPM1_SHARPENING_HIGH+packet]),lane);
-}
-
-${options.legacyRowCompiler === false ? "" : `// Legacy row compiler for standalone TPM1 users.
-@compute @workgroup_size(64)
-fn compileSparseCM12TransportRowMasks(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  let rank=wid.x;if(rank>=${p}TransportProducerMaskPacketCount()){return;}
-  let packet=${p}TransportProducerMaskPacket(rank);
-  if(!tpm1PacketReady(packet)){return;}
-  let low=atomicLoad(&${arena}[TPM1_SURFACE_LOW+packet]);
-  let high=atomicLoad(&${arena}[TPM1_SURFACE_HIGH+packet]);
-  if(!tpm1LaneMarked(low,high,lane)){return;}
-  let cell=${p}TransportProducerMaskCell(packet,lane);
-  if(!${p}TransportProducerMaskCellValid(cell)){return;}
-  for(var incidence=${p}TransportProducerMaskIncidenceBegin(cell);
-      incidence<${p}TransportProducerMaskIncidenceEnd(cell);incidence+=1u){
-    let row=${p}TransportProducerMaskIncidenceRow(incidence);
-    if(${p}TransportProducerMaskRowAccepted(row)){
-      ${p}TransportProducerMaskMarkRow(row);
-    }
-  }
-}`}
-
 `;
 }

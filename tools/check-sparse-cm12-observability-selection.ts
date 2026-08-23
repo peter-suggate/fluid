@@ -25,7 +25,7 @@ const dispatcherNames = ["dispatch", "dispatchAccepted", "dispatchScalarResult",
   "dispatchPressureCell", "dispatchPressureRow", "dispatchPressureBootstrap",
   "dispatchPressureTopologyRepair", "dispatchPersistentPressureCache",
   "dispatchPressureBrickSolve",
-  "dispatchPressureHierarchySolve", "dispatchFaceProjectionAuthority",
+  "dispatchPressureHierarchySolve",
   "dispatchTemporalCell", "dispatchTemporalRow", "dispatchActivity",
   "dispatchVexActivity", "dispatchFrameControl"] as const;
 const wholeFrameLexicalCallsites = Object.fromEntries(dispatcherNames.map((name) => [name,

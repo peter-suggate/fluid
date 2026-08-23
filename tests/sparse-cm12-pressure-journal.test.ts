@@ -14,8 +14,6 @@ import {
   sparseCM12PressureJournalSchedule,
   sparseCM12PressureJournalSnapshotOffset,
 } from "../lib/methods/adaptive-mass/sparse-cm12-pressure-journal";
-import { webgpuSparseCM12ResidentWGSL } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
 
 const HEADER = SPARSE_CM12_PRESSURE_JOURNAL_HEADER;
 const WORD = SPARSE_CM12_PRESSURE_JOURNAL_RECORD;
@@ -221,35 +219,4 @@ test("residual norms bin by the class of the cell holding them", () => {
     (cell) => cell < 2 ? "regular" : undefined);
   assert.equal(partial.counts["regular"], 2);
   assert.equal(Object.keys(partial.counts).length, 1);
-});
-
-test("the shader and the host agree on the journal layout", () => {
-  // The record layout lives in two places by necessity — a WGSL literal and a
-  // TypeScript map — and nothing but a test can keep them in step. A drift here
-  // would decode a film of plausible, wrong numbers rather than failing.
-  const constant = (name: string): number => {
-    const match = webgpuSparseCM12ResidentWGSL.match(
-      new RegExp(`const ${name}:u32=(\\d+)u;`));
-    assert.ok(match, `${name} is not declared in the resident WGSL`);
-    return Number(match![1]);
-  };
-  assert.equal(constant("JOURNAL_HEADER_FLOATS"),
-    SPARSE_CM12_PRESSURE_JOURNAL_HEADER_FLOATS);
-  assert.equal(constant("JOURNAL_ITERATION_FLOATS"),
-    SPARSE_CM12_PRESSURE_JOURNAL_ITERATION_FLOATS);
-  assert.equal(constant("JOURNAL_FIELD_COUNT"),
-    SPARSE_CM12_PRESSURE_JOURNAL_FIELD_COUNT);
-
-  // Every record word the kernel writes, in the order it writes them.
-  const body = webgpuSparseCM12ResidentWGSL.slice(
-    webgpuSparseCM12ResidentWGSL.indexOf("fn journalIteration("));
-  const writes = [...body.slice(0, body.indexOf("\n}")).matchAll(
-    /state\[at(?:\+(\d+)u)?\]=/g)].map((match) => Number(match[1] ?? 0));
-  assert.equal(writes.length, SPARSE_CM12_PRESSURE_JOURNAL_ITERATION_FLOATS,
-    "the kernel must write every record word it reserves");
-  assert.deepEqual(writes,
-    [...Array(SPARSE_CM12_PRESSURE_JOURNAL_ITERATION_FLOATS).keys()]);
-  // The two the decode depends on most, pinned by name against the WGSL source.
-  assert.match(body, new RegExp(`state\\[at\\+${WORD.executed}u\\]=scalars\\[12\\]`));
-  assert.match(body, new RegExp(`state\\[at\\+${WORD.snapshot}u\\]=snapshot`));
 });

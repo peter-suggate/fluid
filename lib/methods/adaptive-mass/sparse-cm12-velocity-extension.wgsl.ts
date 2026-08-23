@@ -22,9 +22,9 @@ const identifier = (value: string, label: string): string => {
 };
 
 /**
- * VEX2 is one direct packet initialization, eight direct Jacobi transforms,
- * and one direct commit. Masks are packet-owned and completely overwritten;
- * command order is their lifecycle.
+ * VEX2 is one direct packet initialization and eight direct Jacobi transforms.
+ * Successful sweep publication is the commit. Masks are packet-owned and
+ * completely overwritten; command order is their lifecycle.
  */
 export function createSparseCM12VelocityExtensionWGSL(
   options: SparseCM12VelocityExtensionWGSLOptions,
@@ -40,11 +40,15 @@ export function createSparseCM12VelocityExtensionWGSL(
     : undefined;
   const publish = effectiveHook
     ? `${effectiveHook}PublishVexAcceptedEffectiveVelocity(cell,value);` : "";
+  const finalValidityBaseWords = (SPARSE_CM12_VELOCITY_EXTENSION_DEPTH & 1) === 0
+    ? layout.validityABaseWords : layout.validityBBaseWords;
   const h = (word: number) => `${layout.headerBaseWords + word}u`;
   return /* wgsl */ `
 const cm12ExtensionInvalid:u32=0xffffffffu;
 const cm12ExtensionCapacity:u32=${layout.cellCapacity}u;
 const cm12ExtensionPacketCapacity:u32=${layout.packetCapacity}u;
+const cm12ExtensionDispatchPacketsPerLeaf:u32=${layout.dispatchPacketsPerLeaf}u;
+const cm12ExtensionDispatchPacketCount:u32=${layout.dispatchPacketCount}u;
 const cm12ExtensionValidityA:u32=${layout.validityABaseWords}u;
 const cm12ExtensionValidityB:u32=${layout.validityBBaseWords}u;
 const cm12ExtensionAcceptedDepth:u32=${layout.acceptedDepthBaseWords}u;
@@ -64,14 +68,23 @@ var<workgroup> cm12ExtensionInputMaskHigh:u32;
 
 fn cm12ExtensionLoad(at:u32)->u32{return atomicLoad(&${arena}[at]);}
 fn cm12ExtensionStore(at:u32,value:u32){atomicStore(&${arena}[at],value);}
-fn cm12ExtensionBeginPacket(packet:u32,lane:u32,needsLeaf:bool){
+fn cm12ExtensionStablePacket(dispatchOrdinal:u32)->u32{
+  if(dispatchOrdinal>=cm12ExtensionDispatchPacketCount){return cm12ExtensionInvalid;}
+  let leaf=dispatchOrdinal/cm12ExtensionDispatchPacketsPerLeaf;
+  let local=dispatchOrdinal%cm12ExtensionDispatchPacketsPerLeaf;
+  let packet=64u*leaf+local;
+  return select(packet,cm12ExtensionInvalid,packet>=cm12ExtensionPacketCapacity);
+}
+fn cm12ExtensionBeginPacket(packet:u32,lane:u32,needsLeaf:bool)->u32{
   if(lane==0u){
-    atomicStore(&cm12ExtensionBallotLow,0u);
-    atomicStore(&cm12ExtensionBallotHigh,0u);
     let slot=acceptedTopologySlot();let item=cm12TeiPacket(packet,slot);
     cm12ExtensionPacketFirst=item.first;cm12ExtensionPacketCounts=item.counts;
     cm12ExtensionPacketStrides=vec2u(item.strideY,item.strideZ);
-    if(needsLeaf){
+    if(item.first!=cm12ExtensionInvalid){
+      atomicStore(&cm12ExtensionBallotLow,0u);
+      atomicStore(&cm12ExtensionBallotHigh,0u);
+    }
+    if(needsLeaf&&item.first!=cm12ExtensionInvalid){
       let inputMask=select(cm12ExtensionValidityB,cm12ExtensionValidityA,
         (EXTENSION_RECURRENCE_DEPTH&1u)==1u);
       if(packet<cm12ExtensionPacketCapacity){
@@ -89,7 +102,8 @@ fn cm12ExtensionBeginPacket(packet:u32,lane:u32,needsLeaf:bool){
       cm12ExtensionPacketLocal=4u*vec3u(px,py,pz);
       cm12ExtensionLeafValid=leaf.valid;cm12ExtensionLeafScale=leaf.scale;
     }
-  }workgroupBarrier();
+  }
+  return workgroupUniformLoad(&cm12ExtensionPacketFirst);
 }
 fn cm12ExtensionPacketCell(lane:u32)->u32{
   let q=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
@@ -109,15 +123,38 @@ fn cm12ExtensionPublishBallot(base:u32,packet:u32,lane:u32,valid:bool){
   if(lane==0u&&packet<cm12ExtensionPacketCapacity){
     cm12ExtensionStore(base+2u*packet,atomicLoad(&cm12ExtensionBallotLow));
     cm12ExtensionStore(base+2u*packet+1u,atomicLoad(&cm12ExtensionBallotHigh));}}
+fn cm12ExtensionClearPacketMask(base:u32,packet:u32,lane:u32){
+  if(lane==0u&&packet<cm12ExtensionPacketCapacity){
+    cm12ExtensionStore(base+2u*packet,0u);
+    cm12ExtensionStore(base+2u*packet+1u,0u);}}
+fn cm12ExtensionPublishFrameReceipt(packet:u32,lane:u32){
+  if(packet==0u&&lane==0u){
+    cm12ExtensionStore(${h(SPARSE_CM12_VELOCITY_EXTENSION_HEADER.sourceFrameGeneration)},
+      ${frameGeneration});
+    cm12ExtensionStore(${h(SPARSE_CM12_VELOCITY_EXTENSION_HEADER.topologyGeneration)},
+      ${topologyGeneration});}}
 
 fn cm12ExtensionOutputMask(depth:u32)->u32{return select(
   cm12ExtensionValidityA,cm12ExtensionValidityB,(depth&1u)==1u);}
+fn cm12ExtendedPacketMask(packet:u32)->vec2u{
+  if(packet>=cm12ExtensionPacketCapacity){return vec2u(0u);}
+  let at=${finalValidityBaseWords}u+2u*packet;
+  return vec2u(cm12ExtensionLoad(at),cm12ExtensionLoad(at+1u));
+}
+fn cm12ExtendedPacketLaneSelected(packet:u32,lane:u32)->bool{
+  if(packet>=cm12ExtensionPacketCapacity||lane>=64u){return false;}
+  let word=cm12ExtensionLoad(${finalValidityBaseWords}u+2u*packet+(lane>>5u));
+  return ((word>>(lane&31u))&1u)!=0u;
+}
 
 @compute @workgroup_size(64)
 fn initializeVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
-  let packet=wid.x+cm12ExtensionDispatchWidth*wid.y;
-  cm12ExtensionBeginPacket(packet,lane,false);
+  let ordinal=wid.x+cm12ExtensionDispatchWidth*wid.y;
+  let packet=cm12ExtensionStablePacket(ordinal);if(packet==cm12ExtensionInvalid){return;}
+  let packetFirst=cm12ExtensionBeginPacket(packet,lane,false);
+  if(packetFirst==cm12ExtensionInvalid){
+    cm12ExtensionClearPacketMask(cm12ExtensionValidityA,packet,lane);return;}
   let cell=cm12ExtensionPacketCell(lane);
   let selected=cell!=cm12ExtensionInvalid&&cell<cm12ExtensionCapacity&&cellActive(cell);
   let wet=selected&&${state}[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
@@ -133,8 +170,13 @@ fn initializeVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
 @compute @workgroup_size(64)
 fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
-  let packet=wid.x+cm12ExtensionDispatchWidth*wid.y;
-  cm12ExtensionBeginPacket(packet,lane,true);
+  let ordinal=wid.x+cm12ExtensionDispatchWidth*wid.y;
+  let packet=cm12ExtensionStablePacket(ordinal);if(packet==cm12ExtensionInvalid){return;}
+  let packetFirst=cm12ExtensionBeginPacket(packet,lane,true);
+  if(packetFirst==cm12ExtensionInvalid){
+    cm12ExtensionClearPacketMask(cm12ExtensionOutputMask(
+      EXTENSION_RECURRENCE_DEPTH),packet,lane);
+    cm12ExtensionPublishFrameReceipt(packet,lane);return;}
   let cell=cm12ExtensionPacketCell(lane);
   let selected=cell!=cm12ExtensionInvalid&&cell<cm12ExtensionCapacity&&cellActive(cell);
   var valid=false;
@@ -190,15 +232,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
   }
   cm12ExtensionPublishBallot(cm12ExtensionOutputMask(
     EXTENSION_RECURRENCE_DEPTH),packet,lane,valid);
-  if(packet==0u&&lane==0u){
-    cm12ExtensionStore(${h(SPARSE_CM12_VELOCITY_EXTENSION_HEADER.completedFrameGeneration)},
-      ${frameGeneration});
-    cm12ExtensionStore(${h(SPARSE_CM12_VELOCITY_EXTENSION_HEADER.topologyGeneration)},
-      ${topologyGeneration});}
+  cm12ExtensionPublishFrameReceipt(packet,lane);
 }
-
-fn cm12ExtensionTransportVelocity(cell:u32)->vec4f{
-  if(cell>=cm12ExtensionCapacity||!cellActive(cell)){return vec4f(0.0);}
-  return cm12EffectiveTransportVelocity(cell);}
 `;
 }

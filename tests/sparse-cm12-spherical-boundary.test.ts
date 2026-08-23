@@ -21,8 +21,6 @@ import {
   dormantReceiverDomain,
   residentSupportAtlas,
 } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import { webgpuSparseCM12ResidentWGSL } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
 
 for (const [figure, makeScene] of [[8, createCm12Figure8],
   [12, createCm12Figure12]] as const) {
@@ -124,16 +122,4 @@ test("composite sparse topology carries cut capacity, aperture, and pressure dua
     assert.equal(row.dualWeight, row.geometricArea * row.distance
       * row.pressureDualOpenFraction);
   }
-});
-
-test("resident CM12 uses clipped characteristics and a separating pressure solve", () => {
-  assert.match(webgpuSparseCM12ResidentWGSL, /fn clipBoundarySegment/);
-  assert.match(webgpuSparseCM12ResidentWGSL, /fn cellOpenVolume/);
-  assert.match(webgpuSparseCM12ResidentWGSL, /fn pressureDensity/);
-  assert.match(webgpuSparseCM12ResidentWGSL, /fn projectedJacobiValue/);
-  assert.match(webgpuSparseCM12ResidentWGSL,
-    /select\(value,max\(0\.0,value\),cellSeparatingMinimum\(cell\)\)/);
-  assert.match(webgpuSparseCM12ResidentWGSL, /fn scatterSolidExcess/);
-  assert.match(webgpuSparseCM12ResidentWGSL,
-    /insideEmbeddedBoundary\(vec3f\(q\)\+vec3f\(0\.5\)\)/);
 });

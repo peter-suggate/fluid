@@ -50,6 +50,7 @@ export const SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER = Object.freeze({
   listCapacity: 19, listBaseWords: 20,
   materializeIndirectX: 21, materializeIndirectY: 22, materializeIndirectZ: 23,
   acceptedReceipts: 24,
+  solveIndirectX: 25, solveIndirectY: 26, solveIndirectZ: 27,
 } as const);
 
 export interface SparseCM12PressureAddressingABLayout {
@@ -130,6 +131,8 @@ export function createSparseCM12PressureAddressingABInitialWords(
   words[h.listBaseWords] = layout.listBaseWords;
   words[h.materializeIndirectY] = 1;
   words[h.materializeIndirectZ] = 1;
+  words[h.solveIndirectY] = 1;
+  words[h.solveIndirectZ] = 1;
   words.fill(SPARSE_CM12_PRESSURE_ADDRESSING_AB_INVALID,
     layout.listBaseWords - layout.baseWords,
     layout.listBaseWords - layout.baseWords + layout.cellCapacity);
@@ -206,6 +209,15 @@ export function sparseCM12PressureAddressingABReceiptAccepted(
     && receipt.verifiedExecutions === receipt.expectedCount
     && receipt.mismatchCount === 0
     && receipt.materializedHash === receipt.verifiedHash;
+}
+
+/** Copy this sealed triplet into the production pressure-cell indirect buffer.
+ * Finalization publishes X last and every fault path forces it to zero. */
+export function sparseCM12PressureAddressingSolveIndirectByteOffset(
+  layout: SparseCM12PressureAddressingABLayout,
+): number {
+  return 4 * (layout.baseWords
+    + SPARSE_CM12_PRESSURE_ADDRESSING_AB_HEADER.solveIndirectX);
 }
 
 export interface SparseCM12PressureAddressingABPipelineDescriptor {

@@ -174,6 +174,18 @@ fn cm12TeiPacketCell(packet:u32,lane:u32,slot:u32)->u32{
   if(item.first==CM12_TEI_INVALID||any(q>=item.counts)){return CM12_TEI_INVALID;}
   return item.first+q.x+item.strideY*q.y+item.strideZ*q.z;
 }
+fn cm12TeiLeafLocalPacketAddress(leaf:u32,resolution:u32,local:vec3u)->vec2u{
+  if(leaf>=CM12_TEI_LEAF_CAPACITY||resolution==0u){return vec2u(CM12_TEI_INVALID);}
+  let packetAxis=max(1u,(resolution+CM12_TEI_PACKET_EDGE-1u)/CM12_TEI_PACKET_EDGE);
+  let coordinate=local/CM12_TEI_PACKET_EDGE;
+  if(any(coordinate>=vec3u(packetAxis))){return vec2u(CM12_TEI_INVALID);}
+  let packet=leaf*CM12_TEI_PACKETS_PER_LEAF+coordinate.x+packetAxis
+    *(coordinate.y+packetAxis*coordinate.z);
+  let q=local%CM12_TEI_PACKET_EDGE;
+  let lane=q.x+CM12_TEI_PACKET_EDGE*(q.y+CM12_TEI_PACKET_EDGE*q.z);
+  return select(vec2u(packet,lane),vec2u(CM12_TEI_INVALID),
+    packet>=CM12_TEI_PACKET_CAPACITY||lane>=64u);
+}
 fn cm12TeiPacketFineOrigin(packet:u32,slot:u32)->vec3u{
   if(packet>=CM12_TEI_PACKET_CAPACITY){return vec3u(CM12_TEI_INVALID);}
   let brick=packet/CM12_TEI_PACKETS_PER_LEAF;

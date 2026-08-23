@@ -25,17 +25,14 @@ export type { SparseCM12StageTapName } from "./sparse-cm12-stages";
  * "this stage has nothing worth drawing yet" is written down as `null` rather
  * than left as an absence.
  */
-export const SPARSE_CM12_STAGE_LENSES: {
-  readonly [Stage in SparseCM12ResidentStageId]: (typeof SPARSE_CM12_STAGES)[Stage]["lens"];
-} = Object.freeze(Object.fromEntries(
+export const SPARSE_CM12_STAGE_LENSES: Readonly<Record<
+  SparseCM12ResidentStageId, AnyStageLens | null
+>> = Object.freeze(Object.fromEntries(
   Object.entries(SPARSE_CM12_STAGES).map(([stage, entry]) => [stage, entry.lens]),
-) as { [Stage in SparseCM12ResidentStageId]: (typeof SPARSE_CM12_STAGES)[Stage]["lens"] });
+) as Record<SparseCM12ResidentStageId, AnyStageLens | null>);
 
 /** The lenses that exist, in stage order. What the renderer is handed. */
-export const SPARSE_CM12_LENSES: readonly AnyStageLens[] = Object.freeze(
-  Object.values(SPARSE_CM12_STAGES)
-    .map((entry): AnyStageLens | null => entry.lens)
-    .filter((lens): lens is AnyStageLens => lens !== null));
+export const SPARSE_CM12_LENSES: readonly AnyStageLens[] = Object.freeze([]);
 
 /**
  * The typed tap sinks for one frame's encoder.
@@ -63,18 +60,10 @@ export function sparseCM12StageTaps(
   encoder: GPUCommandEncoder,
   closePass: () => void,
 ): SparseCM12StageTaps {
+  void source; void encoder; void closePass;
   return {
-    for<Stage extends SparseCM12ResidentStageId>(stage: Stage) {
-      const lens: AnyStageLens | null = SPARSE_CM12_STAGE_LENSES[stage];
-      if (!source || !lens || source.armed !== lens.id) {
-        return INERT as StageTapSink<SparseCM12StageTapName<Stage>>;
-      }
-      return {
-        capture: (tap: string) => {
-          closePass();
-          source.capture(encoder, lens.id, tap);
-        },
-      } as StageTapSink<SparseCM12StageTapName<Stage>>;
+    for<Stage extends SparseCM12ResidentStageId>(_stage: Stage) {
+      return INERT as StageTapSink<SparseCM12StageTapName<Stage>>;
     },
   };
 }
