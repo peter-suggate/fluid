@@ -39,10 +39,10 @@ import type {
 } from "./sparse-cm12-velocity-extension";
 import { createSparseCM12VelocityExtensionWGSL } from
   "./sparse-cm12-velocity-extension.wgsl";
-import type { SparseCM12DirtyFaceRowMaskLayout } from
-  "./sparse-cm12-dirty-face-row-masks";
-import { createSparseCM12DirtyFaceRowMaskWGSL } from
-  "./sparse-cm12-dirty-face-row-masks.wgsl";
+import type { SparseCM12BrickTileFaceAddressLayout } from
+  "./sparse-cm12-brick-tile-face-address-program";
+import { createSparseCM12BrickTileFaceAddressWGSL } from
+  "./sparse-cm12-brick-tile-face-address-program.wgsl";
 import type { SparseCM12PressureExecutionImageLayout } from
   "./sparse-cm12-pressure-execution-image";
 import { createSparseCM12PressureExecutionImageWGSL } from
@@ -171,15 +171,15 @@ export function createWebgpuSparseCM12ResidentWGSL(
   }>,
   topologyEffectsAuthorityLayout?: SparseCM12TopologyEffectsAuthorityLayout,
   finalScalarPacketMaskLayout?: SparseCM12FinalScalarPacketMaskLayout,
-  dirtyFaceRowMaskLayout?: SparseCM12DirtyFaceRowMaskLayout,
+  faceAddressLayout?: SparseCM12BrickTileFaceAddressLayout,
   pressureFineEdgeImageBaseWords?: number,
 ): string {
   if (presentationPageResolution > brickFineResolution
     || brickFineResolution % presentationPageResolution !== 0) {
     throw new RangeError(`presentation page ${presentationPageResolution} does not divide brick ladder ${brickFineResolution}`);
   }
-  if (!internedBoundaryImage || !dirtyFaceRowMaskLayout) {
-    throw new Error("Sparse CM12 production WGSL requires compiled ITR and DFRM layouts");
+  if (!internedBoundaryImage || !faceAddressLayout) {
+    throw new Error("Sparse CM12 production WGSL requires compiled ITR and BFA layouts");
   }
   if (!transportExecutionImageLayout || !logicalOwnerDirectory
     || logicalOwnerDirectory.packedOwner16BaseWords === undefined
@@ -199,7 +199,7 @@ export function createWebgpuSparseCM12ResidentWGSL(
   const candidateCellCount = brickFineResolution ** 3;
   const candidateFaceSampleCount = brickFineResolution ** 2;
   const presentationPagesPerAxis = brickFineResolution / presentationPageResolution;
-  const transportCellCapacity = dirtyFaceRowMaskLayout?.cellCapacity ?? 1;
+  const transportCellCapacity = velocityExtensionLayouts?.activity.cellCapacity ?? 1;
   // Span-one pages need at most (P/2 + 2)^3 samples: scale one addresses the
   // authority directly, so scale two is the finest cached reconstruction.
   // A finer macro can exceed this bounded cache and takes the direct fallback.
@@ -209,7 +209,7 @@ export function createWebgpuSparseCM12ResidentWGSL(
       brickFineResolution / 4)
     : /* wgsl */ `
 fn incrementalActivityGeneration()->u32{return 0u;}
-fn incrementalActivityMarkCellClosure(cell:u32,cause:u32){_=cell;_=cause;}
+fn incrementalActivityMarkCellClosure(cell:u32){_=cell;}
 fn incrementalActivityBrickInvocation(invocation:u32)->u32{
   return select(INVALID,invocation,invocation<p.dispatch.w);
 }
@@ -791,8 +791,8 @@ ${createSparseCM12IboTRASupplementWGSL({
   baseWords: internedBoundaryImage.baseWords,
 })}
 `;
-  const dirtyFaceRowMaskEntries = createSparseCM12DirtyFaceRowMaskWGSL({
-    layout: dirtyFaceRowMaskLayout, arenaName: "activity",
+  const faceAddressEntries = createSparseCM12BrickTileFaceAddressWGSL({
+    layout: faceAddressLayout, arenaName: "topologyArena",
   });
   const internedBoundaryCommitReceipt = internedBoundaryImage ? /* wgsl */ `
   let iboSlot=cm12IBOShadowSlot();let iboHeader=cm12IBOSlotBase(iboSlot);
@@ -1143,6 +1143,12 @@ fn sparseCM12FrameControlNoop(){ }
 fn hasRigidBodies()->bool{return p.rigidWorld.w>=0.5;}
 fn pressureRelativeTolerance()->f32{return bitcast<f32>(p.topologyScheduling.y);}
 fn pipelinedPressureActive()->bool{return scalars[5]>0.5&&scalars[14]<0.5;}
+// Scalar 19 is a device-side execution mask for the expensive preconditioner
+// dispatches. It remains one through an ordinary eight-iteration block, drops
+// with convergence/curvature loss, opens only for a required recovery arm, and
+// is restored by the recovery tail for the next ordinary block. Dispatches stay
+// fixed; a closed mask performs only the unavoidable workgroup reductions.
+fn pressurePreconditionerActive()->bool{return scalars[5]>0.5&&scalars[19]>0.5;}
 
 // True only on the pipeline variant the host encodes at a snapshot iteration.
 // A dispatch cannot be told which iteration it is — the uniform is written once
@@ -1394,7 +1400,7 @@ ${finalScalarPacketMaskEntries}
 ${internedBoundaryEntries}
 ${implicitPressureInteriorEntries}
 ${iboTRAEntries}
-${dirtyFaceRowMaskEntries}
+${faceAddressEntries}
 
 fn brickDirectoryLookupLegacy(key:u32)->u32{
   let brickDimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
@@ -2047,8 +2053,7 @@ fn prepareTransportFaceRow(row:u32){
 fn publishSparseCM12MovingSolidActivity(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||!hasRigidBodies()){return;}
   if(cellOpenFraction(cell)<0.999||dynamicallyCoveredCell(cell)){
-    incrementalActivityMarkCellClosure(cell,
-      ${SPARSE_CM12_DIRTY_CAUSE_BIT.movingSolidSweep}u);
+    incrementalActivityMarkCellClosure(cell);
   }
 }
 
@@ -2710,10 +2715,8 @@ fn commitHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
 }
 
 fn publishForcedFace(row:u32,value:f32){
-  let changed=bitcast<u32>(state[destinationFaceVelocity()+row])!=bitcast<u32>(value);
   state[destinationFaceVelocity()+row]=value;
   state[sourceFaceVelocity()+row]=value;
-  if(changed){dfrm1MarkRow(row);}
 }
 @compute @workgroup_size(64)
 fn forceFaces(@builtin(global_invocation_id)gid:vec3u){
@@ -3057,6 +3060,35 @@ fn publishPressureCoefficientCell(cell:u32){
   let isActive=peiPressureCellMember(cell);
   let edgeRange=cm12HotDirectedEdgeRange(cell);
   if(edgeRange.x==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,cell);return;}
+  let strides=pressureImplicitInteriorStrides(cell);
+  if(isActive&&strides.x!=INVALID&&edgeRange.y==6u&&!hasRigidBodies()){
+    let neighbors=array<u32,6>(cell-1u,cell+1u,
+      cell-strides.y,cell+strides.y,cell-strides.z,cell+strides.z);
+    var complete=true;
+    for(var local=0u;local<6u;local+=1u){
+      complete=complete&&peiPressureCellMember(neighbors[local]);
+    }
+    if(complete){var diagonal=0.0;
+      for(var local=0u;local<6u;local+=1u){
+        let edgeId=edgeRange.x+local;let edge=cm12HotDirectedEdge(edgeId);
+        if(edge.x==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,edgeId);return;}
+        let weight=bitcast<f32>(edge.z);
+        if(!pcfFinite(weight)){pcfFault(PCF_FAULT_NONFINITE,edgeId);return;}
+        let old=pcfExchangeEdgeWeight(edgeId,weight);
+        let changed=old!=bitcast<u32>(weight);
+        if(changed){atomicAdd(&topologyArena[PCF_BASE+PCF_H_CHANGED_EDGES],1u);
+          pcfAggregateFineEdgeChanged(cell,edgeId);}
+        diagonal-=weight;
+      }
+      if(!pcfFinite(diagonal)){pcfFault(PCF_FAULT_NONFINITE,cell);return;}
+      let old=bitcast<u32>(state[p.stateOffsets2.z+cell]);
+      state[p.stateOffsets2.z+cell]=diagonal;
+      let changed=old!=bitcast<u32>(diagonal);
+      if(changed){atomicAdd(&topologyArena[PCF_BASE+PCF_H_CHANGED_DIAGONALS],1u);
+        pcfAggregateFineDiagonalChanged(cell);}
+      return;
+    }
+  }
   for(var local=0u;local<edgeRange.y;local+=1u){
     let edgeId=edgeRange.x+local;let edge=cm12HotDirectedEdge(edgeId);
     if(edge.x==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,edgeId);return;}
@@ -3203,7 +3235,6 @@ fn compileCanonicalPressureRows(@builtin(workgroup_id)wid:vec3u,
   var enabled=false;
   if(valid&&publicationOpen){
     let previous=pcmRowContains(row);
-    let previousTheta=bitcast<u32>(state[p.stateOffsets3.x+row]);
     let accepted=rowAccepted(row);var scalarChanged=false;
     if(accepted){
       let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
@@ -3217,11 +3248,6 @@ fn compileCanonicalPressureRows(@builtin(workgroup_id)wid:vec3u,
     }else{
       enabled=classifyPressureRow(row);
     }
-    let thetaChanged=previousTheta!=bitcast<u32>(state[p.stateOffsets3.x+row]);
-    // DFRM was compiled before scalar classification. Preserve the old direct
-    // scalar root even if classification is bit-identical, and cover topology
-    // entry/retirement through membership/theta changes.
-    if(scalarChanged||previous!=enabled||thetaChanged){dfrm1MarkRow(row);}
   }
   pcmRowBallot[lane]=select(0u,1u,enabled);workgroupBarrier();
   if(lane<2u){
@@ -3251,11 +3277,12 @@ fn effectivePressureEdgeWeight(edge:u32)->f32{
 }
 
 fn restrictPressureHierarchyResidualWork(lid:vec3u,wid:vec3u,level:u32){
+  let enabled=pressurePreconditionerActive();
   let group=wid.x;let count=pressureHierarchyGroupCount(level);var residual=0.0;
   let descriptor=pressureHierarchyDescriptor(level);
   let childOffsets=pressureTemplateWord(descriptor+2u);
   let children=pressureTemplateWord(descriptor+3u);
-  if(group<count){let begin=pressureTemplateWord(childOffsets+group);
+  if(enabled&&group<count){let begin=pressureTemplateWord(childOffsets+group);
     let end=pressureTemplateWord(childOffsets+group+1u);
     for(var at=begin+lid.x;at<end;at+=64u){
       residual+=candidateState[brickAggregateRhsOffset()+pressureTemplateWord(children+at)];
@@ -3265,7 +3292,7 @@ fn restrictPressureHierarchyResidualWork(lid:vec3u,wid:vec3u,level:u32){
     if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];}
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
-  if(lid.x==0u&&group<count){
+  if(lid.x==0u&&enabled&&group<count){
     let diagonal=persistentHierarchyDiagonal(level,group);
     candidateState[pressureHierarchyRhsOffset(level)+group]=reduceA[0];
     candidateState[pressureHierarchyAOffset(level)+group]
@@ -3274,6 +3301,7 @@ fn restrictPressureHierarchyResidualWork(lid:vec3u,wid:vec3u,level:u32){
 }
 
 fn refinePressureHierarchyCorrectionWork(group:u32,level:u32){
+  if(!pressurePreconditionerActive()){return;}
   let count=pressureHierarchyGroupCount(level);var offDiagonal=0.0;
   let descriptor=pressureHierarchyDescriptor(level);
   let offsets=pressureTemplateWord(descriptor+6u);
@@ -3312,6 +3340,7 @@ fn refinePressureHierarchyCorrection(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(64)
 fn combinePressureHierarchyCorrection(@builtin(global_invocation_id)gid:vec3u){
+  if(!pressurePreconditionerActive()){return;}
   let brick=stablePressureBrickInvocation(gid.x);
   if(brick==INVALID){return;}var correction=0.0;
   for(var level=0u;level<pressureHierarchyLevelCount();level+=1u){
@@ -3326,8 +3355,9 @@ fn combinePressureHierarchyCorrection(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn restrictBrickAggregateResidual(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
+  let enabled=pressurePreconditionerActive();
   let brick=stablePressureBrickInvocation(wid.x);var residual=0.0;
-  if(brick!=INVALID){
+  if(enabled&&brick!=INVALID){
     let range=cachedPressureBrickRange(brick);
     for(var local=lid.x;local<range.y;local+=64u){let cell=range.x+local;
       if(peiPressureCellMember(cell)){
@@ -3339,7 +3369,7 @@ fn restrictBrickAggregateResidual(@builtin(local_invocation_id)lid:vec3u,
     if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];}
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
-  if(lid.x==0u&&brick!=INVALID){
+  if(lid.x==0u&&enabled&&brick!=INVALID){
     let diagonal=persistentBrickAggregateDiagonal(brick);
     candidateState[brickAggregateRhsOffset()+brick]=reduceA[0];
     candidateState[brickAggregateAOffset()+brick]
@@ -3349,6 +3379,7 @@ fn restrictBrickAggregateResidual(@builtin(local_invocation_id)lid:vec3u,
 
 fn refineBrickAggregateCorrectionWork(brick:u32,sourceOffset:u32,
  destinationOffset:u32,weight:f32){
+  if(!pressurePreconditionerActive()){return;}
   var offDiagonal=0.0;
   if(brick!=INVALID&&cachedPressureBrickRange(brick).y!=0u){
     let topologyBase=brickAggregateTopology();let offsets=topologyBase+4u;
@@ -3421,6 +3452,7 @@ fn brickAggregatePreconditioned(cell:u32)->f32{
 
 @compute @workgroup_size(64)
 fn applyBrickAggregatePreconditioner(@builtin(global_invocation_id)gid:vec3u){
+  if(!pressurePreconditionerActive()){return;}
   let cell=pressureCellInvocation(gid.x);if(cell==INVALID){return;}
   state[p.stateOffsets3.z+cell]=brickAggregatePreconditioned(cell);
 }
@@ -3543,6 +3575,21 @@ fn reducePair(lane:u32,group:u32,a:f32,b:f32){
   if(lane==0u){partials[group]=vec4f(reduceA[0],reduceB[0],0.0,0.0);}
 }
 
+@compute @workgroup_size(1)
+fn beginPressureSolve(){
+  scalars[5]=1.0;scalars[14]=0.0;scalars[19]=1.0;
+}
+
+@compute @workgroup_size(1)
+fn publishPressureSolveDispatchGate(){
+  peiPublishPressureSolveDispatchGate(scalars[5]>0.5);
+}
+
+@compute @workgroup_size(1)
+fn restorePressureSolveDispatches(){
+  peiPublishPressureSolveDispatchGate(true);
+}
+
 @compute @workgroup_size(64)
 fn initializePCG(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,
@@ -3571,7 +3618,7 @@ fn reduceInitialize(@builtin(local_invocation_id)lid:vec3u){
     // 8/9 initial true residual; 10/11 final true residual; 12 executed
     // iterations; 13 first tolerance crossing; 14 curvature breakdown;
     // 16 recursive/true ratio; 17 material residual-drift flag; 18 recovered
-    // curvature collapses.
+    // curvature collapses; 19 live preconditioner execution mask.
     for(var at=8u;at<19u;at+=1u){scalars[at]=0.0;}scalars[13]=-1.0;}
 }
 
@@ -3602,7 +3649,7 @@ fn reducePipelinedInitialize(@builtin(local_invocation_id)lid:vec3u){
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
   if(lid.x==0u&&enabled){if(reduceA[0]>1e-20){scalars[2]=scalars[0]/reduceA[0];}
-    else{scalars[2]=0.0;scalars[14]=1.0;scalars[18]+=1.0;}}
+    else{scalars[2]=0.0;scalars[14]=1.0;scalars[18]+=1.0;scalars[19]=0.0;}}
 }
 
 @compute @workgroup_size(64)
@@ -3661,7 +3708,7 @@ fn reducePipelinedIteration(@builtin(local_invocation_id)lid:vec3u){
     scalars[3]=beta;scalars[0]=reduceA[0];scalars[4]=reduceC[0];
     scalars[12]+=1.0;
     if(denominator>1e-20){scalars[2]=reduceA[0]/denominator;}
-    else{scalars[2]=0.0;scalars[14]=1.0;scalars[18]+=1.0;}
+    else{scalars[2]=0.0;scalars[14]=1.0;scalars[18]+=1.0;scalars[19]=0.0;}
   }
 }
 
@@ -3759,9 +3806,12 @@ fn reducePipelinedRecovery(@builtin(local_invocation_id)lid:vec3u){
     if(lid.x<width){reduceA[lid.x]+=reduceA[lid.x+width];}
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
-  if(lid.x==0u&&enabled){if(reduceA[0]>1e-20){
-    scalars[2]=scalars[0]/reduceA[0];scalars[3]=0.0;scalars[14]=0.0;
-  }else{scalars[5]=0.0;}}
+  if(lid.x==0u){
+    if(enabled){if(reduceA[0]>1e-20){
+      scalars[2]=scalars[0]/reduceA[0];scalars[3]=0.0;scalars[14]=0.0;
+    }else{scalars[5]=0.0;}}
+    scalars[19]=1.0;
+  }
 }
 
 // A fresh b-Ap application is the convergence receipt.  The ordinary PCG
@@ -3824,7 +3874,7 @@ fn reduceInitialTrueResidual(@builtin(local_invocation_id)lid:vec3u){
     scalars[8]=receipt.x;scalars[9]=receipt.y;
     let tolerance=pressureRelativeTolerance();
     if(tolerance>0.0&&receipt.x<=tolerance*tolerance*scalars[1]){
-      scalars[5]=0.0;scalars[13]=0.0;
+      scalars[5]=0.0;scalars[13]=0.0;scalars[19]=0.0;
     }
   }
 }
@@ -3849,11 +3899,12 @@ fn reduceGuardedTrueResidual(@builtin(local_invocation_id)lid:vec3u){
   let receipt=reduceTrueResidualPartials(lid.x);
   if(lid.x==0u&&enabled){
     scalars[10]=receipt.x;scalars[11]=receipt.y;
+    scalars[19]=0.0;
     let tolerance=pressureRelativeTolerance();
     if(tolerance>0.0&&receipt.x<=tolerance*tolerance*scalars[1]){
       if(scalars[13]<0.0){scalars[13]=scalars[12];}scalars[5]=0.0;
-    }else if(receipt.x>16.0*max(scalars[4],1e-30)){
-      scalars[14]=1.0;scalars[18]+=1.0;
+    }else if(scalars[14]>0.5||receipt.x>16.0*max(scalars[4],1e-30)){
+      if(scalars[14]<0.5){scalars[18]+=1.0;}scalars[14]=1.0;scalars[19]=1.0;
     }
   }
 }
@@ -3907,9 +3958,7 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
     let output=destinationCellVelocity()+4u*id;
     if(cellActive(id)&&any(bitcast<vec3u>(vec3f(state[output],state[output+1u],
       state[output+2u]))!=vec3u(0u))){
-      incrementalActivityMarkCellClosure(id,
-        ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic
-          | SPARSE_CM12_DIRTY_CAUSE_BIT.movingSolidSweep}u);
+      incrementalActivityMarkCellClosure(id);
     }
     state[output]=0.0;state[output+1u]=0.0;state[output+2u]=0.0;state[output+3u]=0.0;
     state[p.stateOffsets4.y+id]=0.0;return;
@@ -3952,8 +4001,7 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
   let velocityDelta=velocity-previousVelocity;
   let velocityChanged=length(velocityDelta)>0.0;
   if(velocityChanged){
-    incrementalActivityMarkCellClosure(id,
-      ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
+    incrementalActivityMarkCellClosure(id);
   }
   state[destinationCellVelocity()+4u*id]=velocity.x;state[destinationCellVelocity()+4u*id+1u]=velocity.y;
   state[destinationCellVelocity()+4u*id+2u]=velocity.z;state[destinationCellVelocity()+4u*id+3u]=0.0;
@@ -4038,8 +4086,7 @@ fn commitVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
     bitcast<f32>(atomicLoad(&conditioning[2u*p.counts.x+cell])));
   let velocityDelta=next-previous;
   if(length(velocityDelta)>0.0){
-    incrementalActivityMarkCellClosure(cell,
-      ${SPARSE_CM12_DIRTY_CAUSE_BIT.velocityCharacteristic}u);
+    incrementalActivityMarkCellClosure(cell);
   }
   state[at]=next.x;state[at+1u]=next.y;state[at+2u]=next.z;
   cm12PublishCollocatedWetEffectiveVelocity(cell,next,

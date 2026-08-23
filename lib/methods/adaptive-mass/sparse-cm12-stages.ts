@@ -116,6 +116,19 @@ const fixed = (value: unknown, digits: number): string => {
   return parsed === undefined ? "—" : parsed.toFixed(digits);
 };
 
+/** Latest queue-confirmed Sparse CM12 pressure work, for the SIM frame panel. */
+export function adaptiveMassPressureIterationReadout(
+  info: Pick<GPUEulerianInfo,
+    "pressureIterationsExecuted" | "pressureIterationsEncoded"> | null | undefined,
+  requestedBudget: unknown,
+): string {
+  const encoded = info?.pressureIterationsEncoded ?? number(requestedBudget);
+  const executed = info?.pressureIterationsExecuted;
+  if (executed === undefined) return `— / ${encoded === undefined ? "—" : Math.round(encoded)}`;
+  const ceiling = encoded === undefined ? executed : Math.max(executed, Math.round(encoded));
+  return `${executed} / ${ceiling}`;
+}
+
 /**
  * Pressure repair consumes the topology accepted before this advance. The
  * topology committed at the end of this advance is intentionally a separate
@@ -403,7 +416,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     phase: { id: "pressure-solve", label: "One-reduction sparse MGPCG pressure solve" },
     lens: null,
     tip: {
-      summary: "Pipelined conjugate gradient with a brick-aggregate + hierarchy multigrid preconditioner and one reduction per iteration. A guarded true-residual reduction on a fixed cadence restarts the direction after curvature loss, and a final true residual closes the stage.",
+      summary: "Pipelined conjugate gradient with a brick-aggregate + hierarchy multigrid preconditioner and one reduction per iteration. A guarded true-residual reduction after each fixed eight-iteration block gates later arithmetic or restarts the direction after curvature loss, and a final true residual closes the stage.",
       reads: "G rows, W, diagonal, compatible RHS, persistent pressure cache",
       writes: "compact leaf pressure, residual receipts",
       feeds: "velocity projection",
@@ -422,16 +435,27 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         param: "pressureRelativeTolerance",
         label: "Early-stop residual",
         unit: "rel. L2",
-        min: 0, max: 0.1, step: 0.001, digits: 3,
-        hint: "Stops further PCG arithmetic after the relative L2 residual reaches this value. Zero runs every budgeted iteration.",
+        min: 0, max: 1, step: 0.001, digits: 3,
+        hint: "Checks a fresh relative L2 residual every eight iterations. Once met, the fixed tail dispatches remain encoded but skip their arithmetic. Zero runs every budgeted iteration.",
+      },
+      {
+        kind: "readout",
+        label: "Iterations executed / encoded",
+        value: (context) => adaptiveMassPressureIterationReadout(
+          context.info, context.values.pressureIterations),
+        hint: "Iterations that performed solver arithmetic in the latest queue-confirmed frame, followed by the residual-gated tail and fixed encoded ceiling.",
       },
     ],
     chip: (context) => {
       const tolerance = number(context.values.pressureRelativeTolerance) ?? 0;
       const iterations = fixed(context.values.pressureIterations, 0);
+      const executed = context.info?.pressureIterationsExecuted;
+      const encoded = context.info?.pressureIterationsEncoded ?? iterations;
+      const work = executed === undefined ? `${iterations} max`
+        : `${executed}/${encoded} PCG iterations`;
       return tolerance > 0
-        ? `${iterations} max · rel ${tolerance.toFixed(3)}`
-        : `${iterations} PCG iterations · fixed`;
+        ? `${work} · rel ${tolerance.toFixed(3)}`
+        : `${work} · fixed`;
     },
   },
   "velocity-projection": {
@@ -453,8 +477,8 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     phase: { id: "other", label: "Projection residual + divergence + energy receipts" },
     lens: null,
     tip: {
-      summary: "Measures post-projection divergence per accepted cell and reduces the frame's physics receipts — residual, divergence, energy identity, mass and gamma conservation — into the published info record.",
-      reads: "projected state and solver residual",
+      summary: "The collocation traversal now publishes the complete divergence receipt before shared reduction scratch is reused; this boundary retains the explicit diagnostics phase contract without another cell traversal.",
+      reads: "published collocation divergence receipt",
       writes: "GPUEulerianInfo acceptance telemetry",
     },
     chip: () => "divergence · residual · conservation",
@@ -674,12 +698,12 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     phase: { id: "adaptive-publication", label: "Dry-brick retirement + retained-atlas conditioning" },
     lens: null,
     tip: {
-      summary: "Marks every brick the topology commit changed into the post-topology incremental-activity worklist and seals it, so the next advance's face preparation and activity measurement visit exactly the bricks that moved. The decision to retire an unsupported empty brick is taken in resolution planning; this stage is where the retired and reshaped bricks are handed to the dirty set.",
+      summary: "Marks every brick the topology commit changed in the post-topology activity mask, so the next advance's direct face and activity transforms select exactly the bricks that moved. The decision to retire an unsupported empty brick is taken in resolution planning; this stage publishes the retired and reshaped brick bits.",
       reads: "committed topology, incremental-activity state",
-      writes: "post-commit dirty-brick worklist and its indirect arguments",
+      writes: "post-commit generation-stamped brick mask",
       feeds: "the next advance's face preparation and activity measurement",
     },
-    chip: () => "post-commit dirty worklist",
+    chip: () => "post-commit brick mask",
   },
   "presentation-publication": {
     label: "Presentation pages", band: "output", side: "left",

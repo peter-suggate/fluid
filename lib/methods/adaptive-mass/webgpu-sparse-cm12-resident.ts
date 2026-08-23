@@ -163,10 +163,10 @@ import {
   sparseCM12VelocityExtensionMaskDensity,
   type SparseCM12VelocityExtensionLayout,
 } from "./sparse-cm12-velocity-extension";
-import { createSparseCM12DirtyFaceRowMaskInitialWords,
-  createSparseCM12DirtyFaceRowMaskLayout,
-  type SparseCM12DirtyFaceRowMaskLayout } from
-  "./sparse-cm12-dirty-face-row-masks";
+import {
+  compileSparseCM12BrickTileFaceAddressProgram,
+  type SparseCM12BrickTileFaceAddressLayout,
+} from "./sparse-cm12-brick-tile-face-address-program";
 import {
   SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER,
   SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS,
@@ -525,6 +525,111 @@ export interface SparseCM12StageEncodeContext<Stage extends SparseCM12ResidentSt
 }
 
 const WORKGROUP_SIZE = 64;
+
+interface SparseCM12DeviceCompilationCache {
+  readonly bindGroupLayout: GPUBindGroupLayout;
+  readonly pipelineLayout: GPUPipelineLayout;
+  readonly shaderModules: Map<string, Promise<GPUShaderModule>>;
+  readonly presentationPipelines: Map<string,
+    Promise<Readonly<Record<string, GPUComputePipeline>>>>;
+  readonly simulationPipelines: Map<string,
+    Promise<Readonly<Record<string, GPUComputePipeline>>>>;
+}
+
+const sparseCM12CompilationCacheByDevice =
+  new WeakMap<GPUDevice, SparseCM12DeviceCompilationCache>();
+
+/** Immutable CM12 binding ABI and compiled programs belong to the device, not a scene. */
+function sparseCM12DeviceCompilationCache(device: GPUDevice):
+SparseCM12DeviceCompilationCache {
+  const existing = sparseCM12CompilationCacheByDevice.get(device);
+  if (existing) return existing;
+  const bindGroupLayout = device.createBindGroupLayout({
+    label: "Sparse CM12 resident layout",
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" } },
+      ...[2, 3, 4].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" as const } })),
+      { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 14, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 15, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+    ],
+  });
+  const cache: SparseCM12DeviceCompilationCache = {
+    bindGroupLayout,
+    pipelineLayout: device.createPipelineLayout({
+      label: "Sparse CM12 resident pipeline layout",
+      bindGroupLayouts: [bindGroupLayout],
+    }),
+    shaderModules: new Map(),
+    presentationPipelines: new Map(),
+    simulationPipelines: new Map(),
+  };
+  sparseCM12CompilationCacheByDevice.set(device, cache);
+  return cache;
+}
+
+/**
+ * Retain the WGSL declarations and only the function call graph needed by a
+ * small entry-point family. Metal otherwise compiles every function in the
+ * monolithic CM12 module even when a pipeline names one presentation kernel.
+ */
+function sparseCM12WGSLForEntryPoints(source: string, roots: readonly string[]): string {
+  type FunctionSpan = { name: string; start: number; end: number; body: string };
+  const spans: FunctionSpan[] = [];
+  const declaration = /(?:@\w+(?:\([^)]*\))?\s*)*fn\s+([A-Za-z_]\w*)\s*\(/g;
+  for (let match = declaration.exec(source); match; match = declaration.exec(source)) {
+    const open = source.indexOf("{", declaration.lastIndex);
+    if (open < 0) throw new Error(`WGSL function ${match[1]} has no body`);
+    let depth = 0, end = open, lineComment = false, blockComment = false;
+    for (; end < source.length; end += 1) {
+      const character = source[end]!, next = source[end + 1];
+      if (lineComment) {
+        if (character === "\n") lineComment = false;
+        continue;
+      }
+      if (blockComment) {
+        if (character === "*" && next === "/") { blockComment = false; end += 1; }
+        continue;
+      }
+      if (character === "/" && next === "/") { lineComment = true; end += 1; continue; }
+      if (character === "/" && next === "*") { blockComment = true; end += 1; continue; }
+      if (character === "{") depth += 1;
+      else if (character === "}" && --depth === 0) { end += 1; break; }
+    }
+    if (depth !== 0) throw new Error(`WGSL function ${match[1]} has an unclosed body`);
+    spans.push({ name: match[1]!, start: match.index, end,
+      body: source.slice(open, end) });
+    declaration.lastIndex = end;
+  }
+  const byName = new Map(spans.map((span) => [span.name, span]));
+  const retained = new Set<string>();
+  const pending = roots.filter((root) => byName.has(root));
+  while (pending.length > 0) {
+    const name = pending.pop()!;
+    if (retained.has(name)) continue;
+    retained.add(name);
+    const body = byName.get(name)!.body;
+    for (const call of body.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)) {
+      const dependency = call[1]!;
+      if (byName.has(dependency) && !retained.has(dependency)) pending.push(dependency);
+    }
+  }
+  let result = "", cursor = 0;
+  for (const span of spans) {
+    result += source.slice(cursor, span.start);
+    result += retained.has(span.name)
+      ? source.slice(span.start, span.end)
+      : source.slice(span.start, span.end).replace(/[^\n]/g, " ");
+    cursor = span.end;
+  }
+  return result + source.slice(cursor);
+}
 const SPARSE_CM12_PHASE1_TRANSPORT_PROFILE_WORDS = 64;
 /** Params in the resident WGSL, including the fixed authored-region tail. */
 const SPARSE_CM12_PARAMETER_BYTES = SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
@@ -541,12 +646,13 @@ const SPARSE_CM12_PRESSURE_CUTOVER_DIAGNOSTIC_WORDS =
   + 4 * SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS;
 
 export const SPARSE_CM12_PRESSURE_ITERATIONS = 64;
-/** Immediate production cutover: guarded by a fresh b-Ap check every batch. */
-export const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE = 5e-7;
-export const SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE = 32;
+/** A conservative interactive default; zero still requests fixed-budget work. */
+export const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE = 1e-3;
+/** Eight fixed eight-iteration blocks cover the default 64-iteration ceiling. */
+export const SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE = 8;
 const SPARSE_CM12_PRESSURE_ITERATIONS_MINIMUM = 8;
 const SPARSE_CM12_PRESSURE_ITERATIONS_MAXIMUM = 256;
-const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE_MAXIMUM = 0.1;
+const SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE_MAXIMUM = 1;
 
 export interface SparseCM12PressureControl {
   readonly iterations?: number;
@@ -579,7 +685,9 @@ export const SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS = 12;
 export const sparseCM12PressureIterations = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value)
     ? Math.min(SPARSE_CM12_PRESSURE_ITERATIONS_MAXIMUM,
-      Math.max(SPARSE_CM12_PRESSURE_ITERATIONS_MINIMUM, Math.round(value)))
+      Math.max(SPARSE_CM12_PRESSURE_ITERATIONS_MINIMUM,
+        SPARSE_CM12_PRESSURE_ITERATIONS_MINIMUM
+        * Math.round(value / SPARSE_CM12_PRESSURE_ITERATIONS_MINIMUM)))
     : SPARSE_CM12_PRESSURE_ITERATIONS;
 
 export const sparseCM12PressureRelativeTolerance = (value: unknown): number =>
@@ -2337,7 +2445,6 @@ export class WebGPUSparseCM12Resident {
   private readonly legacyHostAuthorityOracleForQA: boolean;
   private legacyHostAuthorityParityForQA = 0;
   private legacyHostD4AuthorityForQA: boolean;
-  private readonly activityIndirectArguments: GPUBuffer;
   private readonly framePlanIndirectArguments: GPUBuffer;
   private readonly presentationIndirectArguments: GPUBuffer;
   private readonly frameControlIndirectArguments: GPUBuffer;
@@ -2384,7 +2491,11 @@ export class WebGPUSparseCM12Resident {
   private readonly transportExecutionImage?: GPUBuffer;
   private readonly transportExecutionImageLayout?: SparseCM12TransportExecutionImageLayout;
   private readonly effectiveTransportVelocity?: GPUBuffer;
-  private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
+  private readonly pipelines: Record<string, GPUComputePipeline>;
+  private simulationPipelinesReady = false;
+  private simulationPipelineFailure?: string;
+  private startSimulationPipelineCompilation?: () =>
+    Promise<Readonly<Record<string, GPUComputePipeline>>>;
   private readonly parameterWords = new ArrayBuffer(SPARSE_CM12_PARAMETER_BYTES);
   private readonly parameterU32 = new Uint32Array(this.parameterWords);
   private readonly parameterF32 = new Float32Array(this.parameterWords);
@@ -2430,7 +2541,6 @@ export class WebGPUSparseCM12Resident {
     pressureTopologyRepairIndirectArguments: GPUBuffer,
     persistentPressureCacheIndirectArguments: GPUBuffer,
     transportPacketIndirectArguments: GPUBuffer | undefined,
-    activityIndirectArguments: GPUBuffer,
     framePlanIndirectArguments: GPUBuffer,
     presentationIndirectArguments: GPUBuffer,
     frameControlIndirectArguments: GPUBuffer,
@@ -2459,7 +2569,7 @@ export class WebGPUSparseCM12Resident {
     framePlanPresentationLayout: SparseCM12FramePlanPresentationLayout,
     frameControlLayout: SparseCM12FrameControlLayout,
     velocityExtensionLayout: SparseCM12VelocityExtensionLayout,
-    private readonly dirtyFaceRowMaskLayout: SparseCM12DirtyFaceRowMaskLayout,
+    private readonly faceAddressLayout: SparseCM12BrickTileFaceAddressLayout,
     private readonly transportPacketAuthorityLayout:
       SparseCM12TransportPacketAuthorityLayout | undefined,
     private readonly finalScalarPacketMaskLayout:
@@ -2475,6 +2585,8 @@ export class WebGPUSparseCM12Resident {
     legacyHostAuthorityOracleForQA: boolean,
     initialHorizontalD4AuthorityForQA: boolean,
     pipelines: Readonly<Record<string, GPUComputePipeline>>,
+    startSimulationPipelineCompilation: () =>
+      Promise<Readonly<Record<string, GPUComputePipeline>>>,
     cellCount: number,
     rowCount: number,
     private readonly templateCellCount: number,
@@ -2523,7 +2635,6 @@ export class WebGPUSparseCM12Resident {
     this.persistentPressureCacheIndirectArguments =
       persistentPressureCacheIndirectArguments;
     this.transportPacketIndirectArguments = transportPacketIndirectArguments;
-    this.activityIndirectArguments = activityIndirectArguments;
     this.framePlanIndirectArguments = framePlanIndirectArguments;
     this.presentationIndirectArguments = presentationIndirectArguments;
     this.frameControlIndirectArguments = frameControlIndirectArguments;
@@ -2569,14 +2680,14 @@ export class WebGPUSparseCM12Resident {
     this.transportExecutionImageLayout = transportExecutionImageLayout;
     this.effectiveTransportVelocity = effectiveTransportVelocity;
     this.pressureTemplates = pressureTemplates;
-    this.pipelines = pipelines;
+    this.pipelines = { ...pipelines };
+    this.startSimulationPipelineCompilation = startSimulationPipelineCompilation;
     this.cellCount = cellCount;
     this.rowCount = rowCount;
     this.allocatedBytes = [acceptedIndirectArguments, pressureCellIndirectArguments,
       pressureMembershipIndirectArguments,
       pressureExecutionIndirectArguments,
       pressureTopologyRepairIndirectArguments,
-      activityIndirectArguments,
       framePlanIndirectArguments, presentationIndirectArguments,
       frameControlIndirectArguments,
       pressureTemplates, pressureWorklists,
@@ -2944,23 +3055,16 @@ export class WebGPUSparseCM12Resident {
       || velocityExtensionLayouts.state.floatCount !== layout.floatCount) {
       throw new Error("VEX2 mask/transport-state composition mismatch");
     }
-    const dirtyFaceRowMaskLayout = createSparseCM12DirtyFaceRowMaskLayout({
-      baseWords: velocityExtensionLayout.totalWords,
-      cellCapacity: templates.cellCount,
-      packetCapacity: velocityExtensionLayout.packetCapacity,
-      dispatchPacketsPerLeaf: velocityExtensionLayout.dispatchPacketsPerLeaf,
-      dispatchPacketCount: velocityExtensionLayout.dispatchPacketCount,
-    });
     const transportPacketAuthorityLayout = transportExecutionImageLayout
       ? createSparseCM12TransportPacketAuthorityLayout({
-        baseWords: Math.ceil(dirtyFaceRowMaskLayout.totalWords / 64) * 64,
+        baseWords: Math.ceil(velocityExtensionLayout.totalWords / 64) * 64,
         packetCapacity: transportExecutionImageLayout.packetCapacity,
         dispatchPacketsPerLeaf: velocityExtensionLayout.dispatchPacketsPerLeaf,
         dispatchPacketCount: velocityExtensionLayout.dispatchPacketCount,
       })
       : undefined;
     const activityTailWords = transportPacketAuthorityLayout?.totalWords
-      ?? dirtyFaceRowMaskLayout.totalWords;
+      ?? velocityExtensionLayout.totalWords;
     const phase1TransportQALayout = phase1TransportReceiptForQA
       ? createSparseCM12Phase1TransportQALayout({
         baseWords: Math.ceil(activityTailWords / 64) * 64,
@@ -2985,8 +3089,6 @@ export class WebGPUSparseCM12Resident {
     initialActivity.set(createSparseCM12VelocityExtensionInitialWords(
       velocityExtensionLayout,
     ), velocityExtensionLayout.headerBaseWords);
-    initialActivity.set(createSparseCM12DirtyFaceRowMaskInitialWords(
-      dirtyFaceRowMaskLayout), dirtyFaceRowMaskLayout.baseWords);
     if (transportPacketAuthorityLayout) {
       initialActivity[transportPacketAuthorityLayout.indirectBaseWords + 1] = 1;
       initialActivity[transportPacketAuthorityLayout.indirectBaseWords + 2] = 1;
@@ -3479,10 +3581,18 @@ export class WebGPUSparseCM12Resident {
         packetCapacity: transportExecutionImageLayout.packetCapacity,
         brickFineResolution: transportExecutionImageLayout.brickFineResolution,
       }) : undefined;
+    const faceAddressProgram = internedBoundaryCompilation
+      ? compileSparseCM12BrickTileFaceAddressProgram({
+        ibo: internedBoundaryCompilation,
+        baseWords: finalScalarPacketMaskLayout?.totalWords
+          ?? topologyAuthorityTotalWords,
+      }) : undefined;
+    if (!faceAddressProgram) {
+      throw new Error("Sparse CM12 production requires the all-rung BFA1 face program");
+    }
     const topologyArena = device.createBuffer({
       label: "Sparse CM12 physical topology templates and worklists",
-      size: Math.max(4, 4 * (finalScalarPacketMaskLayout?.totalWords
-        ?? topologyAuthorityTotalWords)),
+      size: Math.max(4, 4 * faceAddressProgram.layout.totalWords),
       usage: storage | (topologyEffectsAuthorityLayout ? GPUBufferUsage.INDIRECT : 0),
     });
     device.queue.writeBuffer(topologyArena, 0, templates.words.buffer as ArrayBuffer,
@@ -3541,6 +3651,9 @@ export class WebGPUSparseCM12Resident {
       device.queue.writeBuffer(topologyArena, 4 * finalScalarPacketMaskLayout.baseWords,
         fsmWords.buffer as ArrayBuffer, fsmWords.byteOffset, fsmWords.byteLength);
     }
+    device.queue.writeBuffer(topologyArena, 4 * faceAddressProgram.layout.baseWords,
+      faceAddressProgram.words.buffer as ArrayBuffer,
+      faceAddressProgram.words.byteOffset, faceAddressProgram.words.byteLength);
     const pressureTemplates = uploadBuffer(device,
       "Sparse CM12 read-only pressure topology", pressureTopology,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
@@ -3605,11 +3718,6 @@ export class WebGPUSparseCM12Resident {
           | GPUBufferUsage.COPY_SRC,
       })
       : undefined;
-    const activityIndirectArguments = device.createBuffer({
-      label: "Sparse CM12 incremental activity indirect dispatch",
-      size: 12,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-    });
     const framePlanIndirectArguments = device.createBuffer({
       label: "Sparse CM12 FPL1 fixed packet indirect dispatches",
       size: 4 * framePlanLayout.indirectSnapshotWords,
@@ -3658,22 +3766,8 @@ export class WebGPUSparseCM12Resident {
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
 
-    const bindGroupLayout = device.createBindGroupLayout({
-      label: "Sparse CM12 resident layout",
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-        ...[2, 3, 4].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "storage" as const } })),
-        { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 14, visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "storage" } },
-        { binding: 15, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      ],
-    });
+    const deviceCompilation = sparseCM12DeviceCompilationCache(device);
+    const bindGroupLayout = deviceCompilation.bindGroupLayout;
     const bindGroup = device.createBindGroup({ label: "Sparse CM12 resident bindings",
       layout: bindGroupLayout, entries: [
         { binding: 0, resource: { buffer: parameters } },
@@ -3742,8 +3836,7 @@ export class WebGPUSparseCM12Resident {
         ],
       }) : pressureBindGroup;
     const compiler = gpuCompilationManagerFor(device);
-    const shaderModule = compiler.createShaderModule({ label: "Sparse CM12 resident shader",
-      code: createWebgpuSparseCM12ResidentWGSL(
+    const shaderSource = createWebgpuSparseCM12ResidentWGSL(
         atlas.brickFineResolution, presentationPageResolution,
         pressureWorklistData.layout,
         incrementalActivityLayout, canonicalMembershipLayout,
@@ -3784,17 +3877,42 @@ export class WebGPUSparseCM12Resident {
           : undefined,
         topologyEffectsAuthorityLayout,
         finalScalarPacketMaskLayout,
-        dirtyFaceRowMaskLayout,
+        faceAddressProgram.layout,
         pressureFineEdgeImageBaseWords,
-      ) });
-    const shaderInfo = await shaderModule.getCompilationInfo();
-    const shaderErrors = shaderInfo.messages.filter((message) => message.type === "error");
-    if (shaderErrors.length > 0) {
-      throw new Error(shaderErrors.map((message) =>
-        `${message.lineNum}:${message.linePos} ${message.message}`).join("\n"));
-    }
-    const pipelineLayout = device.createPipelineLayout({ label: "Sparse CM12 resident pipeline layout",
-      bindGroupLayouts: [bindGroupLayout] });
+      );
+    const shaderModuleFor = (source: string, label: string) => {
+      let promise = deviceCompilation.shaderModules.get(source);
+      if (!promise) {
+        // Pipeline creation reports the errors for the entry points it consumes.
+        // A module-wide getCompilationInfo() would eagerly compile the full family.
+        promise = Promise.resolve(compiler.createShaderModule({ label, code: source }));
+        deviceCompilation.shaderModules.set(source, promise);
+      }
+      return promise;
+    };
+    const presentationShaderRoots = presentationPublisherOracleForQA
+      ? ["classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
+        "publishSparseLevelSet"]
+      : ["classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
+        "beginSparseCM12FramePlanNext", "initializeSparseCM12FramePlanNext",
+        "populateSparseCM12PresentationFramePlan",
+        "resolveSparseCM12FramePlanNextClosure", "sealSparseCM12FramePlanNextBricks",
+        "finalizeSparseCM12FramePlanNext", "markSparseCM12GlobalFramePlanReceipts",
+        "beginSparseCM12FramePlanPresentationPacket",
+        "buildSparseCM12FramePlanPresentationPacket",
+        "finalizeSparseCM12FramePlanPresentationPacket",
+        "executeSparseCM12FramePlanPresentationPacket",
+        "commitSparseCM12FramePlanPresentationPacket",
+        "verifySparseCM12FramePlanCurrentStage",
+        "finalizeSparseCM12FramePlanPresentationExecution",
+        "rejectSparseCM12FramePlanPresentationFaults"] as const;
+    const presentationShaderSource = sparseCM12WGSLForEntryPoints(
+      shaderSource, presentationShaderRoots,
+    );
+    const shaderModule = await shaderModuleFor(
+      presentationShaderSource, "Sparse CM12 presentation shader",
+    );
+    const pipelineLayout = deviceCompilation.pipelineLayout;
     const names = ["injectLiquid",
       "beginSparseCM12FrameControl", "publishSparseCM12FrameBodyAuthority",
       "publishSparseCM12FrameBoundaryAuthority", "sealSparseCM12FrameControl",
@@ -3841,6 +3959,8 @@ export class WebGPUSparseCM12Resident {
       "finalizeCanonicalPressureRows",
       "classifyDirtyPressureCells",
       "preparePressure",
+      "beginPressureSolve",
+      "publishPressureSolveDispatchGate", "restorePressureSolveDispatches",
       "restrictBrickAggregateResidual",
       "restrictPressureHierarchyResidual", "refinePressureHierarchyCorrection",
       "combinePressureHierarchyCorrection",
@@ -3859,12 +3979,12 @@ export class WebGPUSparseCM12Resident {
       "updatePipelinedState", "applyPipelinedImage", "reducePipelinedIteration",
       "applyPipelinedRecovery", "reducePipelinedRecovery",
       "reduceInitialize",
-      "collocateAndDiagnose", "measureDivergenceDiagnostics",
+      "collocateAndDiagnose",
       "reduceDivergenceDiagnostics",
       "advanceActivityClock", "beginIncrementalActivity",
       "markIncrementalActivityScalarBricks", "markIncrementalActivityTopology",
       "markIncrementalActivityPostTopology",
-      "finalizeIncrementalActivityWorklist", "measureBrickActivity",
+      "finalizeIncrementalActivityMasks", "measureBrickActivity",
       "ageIncrementalActivityHistory", "finalizeIncrementalActivityCensus",
       "planBrickResolution", "activateSweptReceivers", "closePlannedResolution",
       "validateCandidateResolution", "scheduleTopologyPreparation",
@@ -3929,9 +4049,11 @@ export class WebGPUSparseCM12Resident {
       "publishFrozenPressureCoefficients",
       "clearSparseCM12RetiredFaceVelocitySupport",
       "publishSparseCM12FaceVelocitySupport",
-      "compileSparseCM12DirtyFaceRowMasks",
-      "markSparseCM12DirtyFaceRowsFromPressure",
-      "projectSparseCM12DirtyFaceRows",
+      "prepareSparseCM12InteriorFaceTiles",
+      "prepareSparseCM12SeamFacePackets",
+      "projectSparseCM12InteriorFaceTiles",
+      "projectSparseCM12SeamFacePackets",
+      "measureDivergenceDiagnostics",
       ...sparseCM12PressureTopologyRepairEntryPoints(
         pressureTopologyRepairLayout,
       ),
@@ -3940,12 +4062,33 @@ export class WebGPUSparseCM12Resident {
       ...(layout.journal !== 0
         ? ["journalIteration", "journalSnapshot"] as const : []),
     ] as const;
-    const entries = await Promise.all(names.map(async (name) => {
+    const presentationEntryNames = new Set<string>(presentationPublisherOracleForQA
+      ? ["classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
+        "publishSparseLevelSet"]
+      : ["classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
+        "beginSparseCM12FramePlanNext", "initializeSparseCM12FramePlanNext",
+        "populateSparseCM12PresentationFramePlan",
+        "resolveSparseCM12FramePlanNextClosure", "sealSparseCM12FramePlanNextBricks",
+        "finalizeSparseCM12FramePlanNext", "markSparseCM12GlobalFramePlanReceipts",
+        "beginSparseCM12FramePlanPresentationPacket",
+        "buildSparseCM12FramePlanPresentationPacket",
+        "finalizeSparseCM12FramePlanPresentationPacket",
+        "executeSparseCM12FramePlanPresentationPacket",
+        "commitSparseCM12FramePlanPresentationPacket",
+        "finalizeSparseCM12FramePlanPresentationExecution",
+        "rejectSparseCM12FramePlanPresentationFaults"]);
+    const presentationNames = names.filter((name) => presentationEntryNames.has(name));
+    const simulationNames = names.filter((name) => !presentationEntryNames.has(name));
+    const compileNamedEntries = async (
+      selectedNames: readonly string[],
+      priority: "critical" | "background",
+      module: GPUShaderModule = shaderModule,
+    ) => Promise.all(selectedNames.map(async (name) => {
       try {
         return [name, await compiler.compileComputePipeline({
           label: `Sparse CM12 ${name}`, layout: pipelineLayout,
-          compute: { module: shaderModule, entryPoint: name },
-        }, { priority: "visible" })] as const;
+          compute: { module, entryPoint: name },
+        }, { priority })] as const;
       } catch (error) {
         const detail = error instanceof Error
           ? `${error.name}: ${error.message}${error.stack ? `\n${error.stack}` : ""}`
@@ -3963,42 +4106,81 @@ export class WebGPUSparseCM12Resident {
           constants: { EXTENSION_RECURRENCE_DEPTH: depth } };
       }),
     ] as const;
-    const velocityExtensionEntries = await Promise.all(
-      velocityExtensionDescriptors.map(async (descriptor) => [
-        descriptor.key,
-        await compiler.compileComputePipeline({
-          label: `Sparse CM12 ${descriptor.key}`,
-          layout: pipelineLayout,
-          compute: {
-            module: shaderModule,
-            entryPoint: descriptor.entryPoint,
-            constants: descriptor.constants,
-          },
-        }, { priority: "visible" }),
-      ] as const),
-    );
-    const framePlanVerifyEntry = ["verifySparseCM12FramePlanPresentation",
+    const compileFramePlanVerify = async () => ["verifySparseCM12FramePlanPresentation",
       await compiler.compileComputePipeline({
         label: "Sparse CM12 verify FPL1 presentation coverage",
         layout: pipelineLayout,
         compute: { module: shaderModule,
           entryPoint: "verifySparseCM12FramePlanCurrentStage",
           constants: { CM12_FRAME_PLAN_VERIFY_STAGE: 5 } },
-      }, { priority: "visible" })] as const;
-    // Two pipelines from one entry point: the snapshot variant additionally
-    // advances the device-side snapshot cursor and stamps its slot into the
-    // record it writes. Compiled only when a journal was actually reserved.
-    const journalEntries = layout.journal === 0 ? [] : [
-      ["journalIterationSnapshot", await compiler.compileComputePipeline({
-        label: "Sparse CM12 journalIteration with field snapshot",
-        layout: pipelineLayout,
-        compute: {
-          module: shaderModule,
-          entryPoint: "journalIteration",
-          constants: { JOURNAL_SNAPSHOT: 1 },
-        },
-      }, { priority: "visible" })] as const,
-    ];
+      }, { priority: "critical" })] as const;
+    const compilationKey = `${presentationPublisherOracleForQA ? "oracle" : "resident"}\0${shaderSource}`;
+    let presentationPipelinePromise =
+      deviceCompilation.presentationPipelines.get(compilationKey);
+    if (!presentationPipelinePromise) {
+      presentationPipelinePromise = (async () => Object.freeze(Object.fromEntries([
+        ...await compileNamedEntries(presentationNames, "critical"),
+        ...(presentationPublisherOracleForQA ? [] : [await compileFramePlanVerify()]),
+      ])))();
+      deviceCompilation.presentationPipelines.set(compilationKey,
+        presentationPipelinePromise);
+      void presentationPipelinePromise.catch(() => {
+        if (deviceCompilation.presentationPipelines.get(compilationKey)
+            === presentationPipelinePromise) {
+          deviceCompilation.presentationPipelines.delete(compilationKey);
+        }
+      });
+    }
+    const presentationPipelines = await presentationPipelinePromise;
+    const startSimulationPipelineCompilation = () => {
+      let fullPipelinePromise = deviceCompilation.simulationPipelines.get(compilationKey);
+      if (!fullPipelinePromise) {
+        fullPipelinePromise = (async () => {
+          const simulationShaderModule = await shaderModuleFor(
+            shaderSource, "Sparse CM12 simulation shader",
+          );
+          const entries = await compileNamedEntries(
+            simulationNames, "background", simulationShaderModule,
+          );
+          const velocityExtensionEntries = await Promise.all(
+            velocityExtensionDescriptors.map(async (descriptor) => [
+              descriptor.key,
+              await compiler.compileComputePipeline({
+                label: `Sparse CM12 ${descriptor.key}`,
+                layout: pipelineLayout,
+                compute: {
+                  module: simulationShaderModule,
+                  entryPoint: descriptor.entryPoint,
+                  constants: descriptor.constants,
+                },
+              }, { priority: "background" }),
+            ] as const),
+          );
+          // Two pipelines from one entry point: the snapshot variant additionally
+          // advances the device-side snapshot cursor and stamps its slot.
+          const journalEntries = layout.journal === 0 ? [] : [
+            ["journalIterationSnapshot", await compiler.compileComputePipeline({
+              label: "Sparse CM12 journalIteration with field snapshot",
+              layout: pipelineLayout,
+              compute: { module: simulationShaderModule, entryPoint: "journalIteration",
+                constants: { JOURNAL_SNAPSHOT: 1 } },
+            }, { priority: "background" })] as const,
+          ];
+          return Object.freeze(Object.fromEntries([
+            ...Object.entries(presentationPipelines),
+            ...entries, ...velocityExtensionEntries, ...journalEntries,
+          ]));
+        })();
+        deviceCompilation.simulationPipelines.set(compilationKey, fullPipelinePromise);
+        void fullPipelinePromise.catch(() => {
+          if (deviceCompilation.simulationPipelines.get(compilationKey)
+              === fullPipelinePromise) {
+            deviceCompilation.simulationPipelines.delete(compilationKey);
+          }
+        });
+      }
+      return fullPipelinePromise;
+    };
     const rigidCoupling = rigid
       ? await WebGPUSparseCM12RigidCoupling.create(device, {
         parameters,
@@ -4020,7 +4202,6 @@ export class WebGPUSparseCM12Resident {
       pressureTopologyRepairIndirectArguments,
       persistentPressureCacheIndirectArguments,
       transportPacketIndirectArguments,
-      activityIndirectArguments,
       framePlanIndirectArguments,
       presentationIndirectArguments,
       frameControlIndirectArguments,
@@ -4047,7 +4228,7 @@ export class WebGPUSparseCM12Resident {
       framePlanPresentationLayout,
       frameControl.layout,
       velocityExtensionLayout,
-      dirtyFaceRowMaskLayout,
+      faceAddressProgram.layout,
       transportPacketAuthorityLayout,
       finalScalarPacketMaskLayout!,
       phase1TransportQALayout,
@@ -4057,8 +4238,8 @@ export class WebGPUSparseCM12Resident {
       presentationPublisherOracleForQA,
       legacyHostAuthorityOracleForQA,
       horizontalD4Authority,
-      Object.fromEntries([...entries, ...velocityExtensionEntries,
-        ...journalEntries, framePlanVerifyEntry]),
+      presentationPipelines,
+      startSimulationPipelineCompilation,
       templates.cellCount, templates.rowCount,
       templates.cellCount, templates.rowCount,
       templates.maximumOwnedRowCount,
@@ -4075,6 +4256,33 @@ export class WebGPUSparseCM12Resident {
     result.writeParameters(packed, 0.004, 1, 1, [0, 0, 0], undefined, undefined,
       undefined, 0, undefined);
     return result;
+  }
+
+  /** True once every pipeline used by an advancing frame is device-resident. */
+  get simulationReady(): boolean { return this.simulationPipelinesReady; }
+
+  get simulationCompilationError(): string | undefined {
+    return this.simulationPipelineFailure;
+  }
+
+  /**
+   * Start non-critical compilation after generation zero has reached the queue.
+   * Presentation pipelines were awaited during create; physics may now warm in
+   * the worker without delaying the first visible scene.
+   */
+  warmSimulationPipelines(): void {
+    const start = this.startSimulationPipelineCompilation;
+    if (!start) return;
+    this.startSimulationPipelineCompilation = undefined;
+    void start().then((pipelines) => {
+      if (this.destroyed) return;
+      Object.assign(this.pipelines, pipelines);
+      this.simulationPipelinesReady = true;
+    }).catch((error) => {
+      if (this.destroyed) return;
+      this.simulationPipelineFailure = error instanceof Error
+        ? error.message : String(error);
+    });
   }
 
   encode(
@@ -4245,10 +4453,18 @@ export class WebGPUSparseCM12Resident {
       activePass.setPipeline(this.pipelines[name]!);
       activePass.dispatchWorkgroupsIndirect(this.pressureExecutionIndirectArguments, 36);
     };
-    const dispatchActivity = (name: string) => {
-      const activePass = openPass();
-      activePass.setPipeline(this.pipelines[name]!);
-      activePass.dispatchWorkgroupsIndirect(this.activityIndirectArguments, 0);
+    const copyPressureSolveDispatchGate = () => {
+      closePass();
+      encoder.copyBufferToBuffer(this.pressureWorklists,
+        sparseCM12PressureExecutionImageCellIndirectByteOffset(
+          this.pressureExecutionImageLayout,
+        ),
+        this.pressureCellIndirectArguments, 0, 12);
+      encoder.copyBufferToBuffer(this.pressureWorklists,
+        sparseCM12PressureExecutionImageIndirectByteOffset(
+          this.pressureExecutionImageLayout,
+        ),
+        this.pressureExecutionIndirectArguments, 0, 48);
     };
     const dispatchFrameControl = (
       name: string,
@@ -4318,7 +4534,6 @@ export class WebGPUSparseCM12Resident {
       if (snapshot) dispatchAccepted("journalSnapshot", "cell");
     };
     const bricks = Math.ceil(packed.brickCount / WORKGROUP_SIZE);
-    const scalarBrickActivity = false;
     const directPacketWidth = this.transportPacketAuthorityLayout!.dispatchWidth;
     const directPacketRows = this.transportPacketAuthorityLayout!.dispatchRows;
     stage("transport-velocity-extension", ({ closeSubstage }) => {
@@ -4372,12 +4587,19 @@ export class WebGPUSparseCM12Resident {
     });
     stage("face-preparation", ({ closeSubstage }) => {
       useBindGroup(this.transportBindGroup);
-      dispatchActivity("clearSparseCM12RetiredFaceVelocitySupport");
+      dispatch("clearSparseCM12RetiredFaceVelocitySupport",
+        this.incrementalActivityLayout.brickCount);
       dispatch("publishSparseCM12FaceVelocitySupport",
         this.incrementalActivityLayout.brickCount);
       closeSubstage("face-support-publication");
-      dispatch("compileSparseCM12DirtyFaceRowMasks",
-        directPacketWidth, directPacketRows);
+      dispatch("prepareSparseCM12InteriorFaceTiles",
+        Math.min(this.faceAddressLayout.dispatchWidth,
+          this.faceAddressLayout.interiorTileCount),
+        this.faceAddressLayout.interiorDispatchRows);
+      dispatch("prepareSparseCM12SeamFacePackets",
+        Math.min(this.faceAddressLayout.dispatchWidth,
+          this.faceAddressLayout.seamPacketCount),
+        this.faceAddressLayout.seamDispatchRows);
       closeSubstage("dirty-face-row-preparation");
     });
     stage("conservative-transport", ({ closeSubstage }) => {
@@ -4675,6 +4897,7 @@ export class WebGPUSparseCM12Resident {
       closeSubstage("ptr-commit-and-prepare-pressure");
     });
     stage("pressure-rhs", () => {
+      dispatch("beginPressureSolve", 1);
       dispatchPressureCell("initializePCG");
       dispatchPressureBrickReduction("restrictBrickAggregateResidual");
       dispatchPressureBrickLanes("refineBrickAggregateAtoB1");
@@ -4689,6 +4912,10 @@ export class WebGPUSparseCM12Resident {
       dispatch("reduceInitialTrueResidual", 1);
       dispatchPressureCell("initializePipelinedImage");
       dispatch("reducePipelinedInitialize", 1);
+      // The seed can already satisfy the tolerance. Publish the device gate
+      // before the first fixed eight-iteration block in that case.
+      dispatch("publishPressureSolveDispatchGate", 1);
+      copyPressureSolveDispatchGate();
       // Record 0 is the seed: the warm-started pressure and its true residual
       // before any iteration has touched them. The first correction is the
       // largest one in the solve, so a film that started at iteration 1 would
@@ -4729,6 +4956,11 @@ export class WebGPUSparseCM12Resident {
             dispatch("reduceCurvatureRecovery", 1);
             dispatchPressureCell("applyPipelinedRecovery");
             dispatch("reducePipelinedRecovery", 1);
+            // Keep the complete command schedule encoded, but snapshot the
+            // GPU-authored x=0 gate before the next block when this block met
+            // the tolerance. Curvature recovery republishes the live counts.
+            dispatch("publishPressureSolveDispatchGate", 1);
+            copyPressureSolveDispatchGate();
           }
           // After the cadence guard, so a record carries the true-residual
           // check and the gate closure that its own iteration earned.
@@ -4736,6 +4968,8 @@ export class WebGPUSparseCM12Resident {
       }
       // Always close the solve with a fresh b-Ap application. No convergence
       // or performance receipt may rely on the recursive residual.
+      dispatch("restorePressureSolveDispatches", 1);
+      copyPressureSolveDispatchGate();
       dispatchPressureCell("measureTrueResidual");
       dispatch("reduceFinalTrueResidual", 1);
     });
@@ -4743,15 +4977,21 @@ export class WebGPUSparseCM12Resident {
       // The brick-scalar arm opens this generation before scalar comparison;
       // legacy construction arms retain the established projection boundary.
       useBindGroup(this.bindGroup);
-      if (!scalarBrickActivity) {
-        dispatch("advanceActivityClock", 1);
-        dispatch("beginIncrementalActivity", 1);
-      }
+      dispatch("advanceActivityClock", 1);
+      dispatch("beginIncrementalActivity", 1);
       useBindGroup(this.pressureBindGroup);
-      dispatchPressureCell("markSparseCM12DirtyFaceRowsFromPressure");
-      dispatch("projectSparseCM12DirtyFaceRows", directPacketWidth, directPacketRows);
+      dispatch("projectSparseCM12InteriorFaceTiles",
+        Math.min(this.faceAddressLayout.dispatchWidth,
+          this.faceAddressLayout.interiorTileCount),
+        this.faceAddressLayout.interiorDispatchRows);
+      dispatch("projectSparseCM12SeamFacePackets",
+        Math.min(this.faceAddressLayout.dispatchWidth,
+          this.faceAddressLayout.seamPacketCount),
+        this.faceAddressLayout.seamDispatchRows);
       useBindGroup(this.effectiveVelocityPressureBindGroup);
       dispatchAccepted("collocateAndDiagnose", "cell");
+      dispatchAccepted("measureDivergenceDiagnostics", "cell");
+      dispatch("reduceDivergenceDiagnostics", 1);
       // The divergence this stage produced. Four stages downstream
       // `candidate-transfer` zeroes it on every cell whose topology changed,
       // so a lens reading it at frame end would be right everywhere except
@@ -4778,23 +5018,14 @@ export class WebGPUSparseCM12Resident {
       useBindGroup(this.bindGroup);
       dispatch("publishSparseCM12FrameFaceOutput", 1);
     });
-    stage("projection-diagnostics", () => {
-      dispatchAccepted("measureDivergenceDiagnostics", "cell");
-      dispatch("reduceDivergenceDiagnostics", 1);
-    });
+    stage("projection-diagnostics", () => {});
     stage("activity-measurement", () => {
       useBindGroup(this.bindGroup);
-      if (!scalarBrickActivity) {
-        dispatch("markIncrementalActivityScalarBricks", packed.brickCount);
-      }
+      dispatch("markIncrementalActivityScalarBricks", packed.brickCount);
       dispatch("markIncrementalActivityTopology",
         Math.ceil(packed.brickCount / WORKGROUP_SIZE));
-      dispatch("finalizeIncrementalActivityWorklist", 1);
-      closePass();
-      encoder.copyBufferToBuffer(this.activity,
-        4 * (this.incrementalActivityLayout.headerBaseWords + 8),
-        this.activityIndirectArguments, 0, 12);
-      dispatchActivity("measureBrickActivity");
+      dispatch("finalizeIncrementalActivityMasks", 1);
+      dispatch("measureBrickActivity", this.incrementalActivityLayout.brickCount);
       dispatch("ageIncrementalActivityHistory",
         Math.ceil(packed.brickCount / WORKGROUP_SIZE));
       dispatch("finalizeIncrementalActivityCensus", 1);
@@ -4893,15 +5124,8 @@ export class WebGPUSparseCM12Resident {
       // only those changed leaf spans for presentation and next-frame reuse.
       dispatch("markIncrementalActivityPostTopology",
         Math.ceil(packed.brickCount / WORKGROUP_SIZE));
-      // Post-census topology commits can append bricks to the same generation.
-      // Republish the exact final count and snapshot its indirect triplet now;
-      // otherwise next frame's FPA dispatch uses the pre-commit count while
-      // its fail-closed expected receipt reads the larger post-commit count.
-      dispatch("finalizeIncrementalActivityWorklist", 1);
-      closePass();
-      encoder.copyBufferToBuffer(this.activity,
-        4 * (this.incrementalActivityLayout.headerBaseWords + 8),
-        this.activityIndirectArguments, 0, 12);
+      // Post-census topology commits update next frame's direct brick mask.
+      dispatch("finalizeIncrementalActivityMasks", 1);
     });
     stage("presentation-publication", () => {
       // The plan and compact page count are GPU publications. Split at the
@@ -5738,6 +5962,22 @@ export class WebGPUSparseCM12Resident {
     return result;
   }
 
+  /**
+   * Copy only the executed-iteration scalar into a caller-owned staging buffer.
+   *
+   * The live SIM panel samples this beside its timestamp capture. It deliberately
+   * does not use `readDiagnostics`: that larger paired receipt is a pause-time
+   * instrument, while this four-byte copy neither schedules physics nor fences
+   * the host during a running frame.
+   */
+  encodePressureIterationReceipt(
+    encoder: GPUCommandEncoder,
+    destination: GPUBuffer,
+  ): void {
+    this.assertLive();
+    encoder.copyBufferToBuffer(this.scalars, 12 * 4, destination, 0, 4);
+  }
+
   /** QA-only PCM1 header and active-bitset receipt. This readback is never
    * consulted by frame encoding or any physics/worklist decision. */
   async readPressureCanonicalMembershipQA() {
@@ -6469,8 +6709,11 @@ export class WebGPUSparseCM12Resident {
       transportSpatialTileCapacity: this.transportExecutionImageLayout?.spatialTileCapacity ?? 0,
       facePreparationLeafCount: 0,
       facePreparationMode: "brick-owned" as const,
-      dirtyFaceRowMaskBytes: this.dirtyFaceRowMaskLayout.totalBytes,
-      directFaceRowPacketCount: this.dirtyFaceRowMaskLayout.dispatchPacketCount,
+      faceAddressProgramBytes: this.faceAddressLayout.totalBytes,
+      faceAddressInteriorTileCount: this.faceAddressLayout.interiorTileCount,
+      faceAddressSeamCount: this.faceAddressLayout.seamAddressCount,
+      faceAddressPackedSeamBytes: 4 * this.faceAddressLayout.seamAddressCount,
+      faceAddressPackingSavedBytes: 4 * this.faceAddressLayout.seamAddressCount,
       gammaRowMaskBytes: 4 * this.transportPacketAuthorityLayout!.gammaRowMaskWords,
       directGammaPacketCount: this.transportPacketAuthorityLayout!.dispatchPacketCount,
       presentationPageCount: this.lastPacked?.brickCount ?? 0,
@@ -7097,7 +7340,6 @@ export class WebGPUSparseCM12Resident {
       this.frameControlIndirectArguments,
       this.pressureTopologyRepairIndirectArguments,
       this.persistentPressureCacheIndirectArguments,
-      this.activityIndirectArguments,
       this.framePlanIndirectArguments,
       this.presentationIndirectArguments,
       this.pressureTemplates, this.pressureWorklists,

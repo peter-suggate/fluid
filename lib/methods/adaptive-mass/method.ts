@@ -182,11 +182,11 @@ const params: MethodParamSpec[] = [
     tier: "fine",
     unit: "rel. L2",
     min: 0,
-    max: 0.1,
+    max: 1,
     step: 0.001,
     digits: 3,
     update: "runtime",
-    hint: "Stops PCG arithmetic after the relative residual reaches this value. Zero preserves fixed-budget execution; a larger tolerance can save pressure time when the solve converges early.",
+    hint: "Tests a fresh relative residual after each eight-iteration block and skips arithmetic in later fixed dispatches once it is met. Zero preserves fixed-budget execution; values through 1 are available for experimentation.",
   },
   {
     kind: "number",

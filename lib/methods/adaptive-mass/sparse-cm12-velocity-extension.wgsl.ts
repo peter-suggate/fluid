@@ -65,6 +65,7 @@ var<workgroup> cm12ExtensionLeafValid:vec3u;
 var<workgroup> cm12ExtensionLeafScale:u32;
 var<workgroup> cm12ExtensionInputMaskLow:u32;
 var<workgroup> cm12ExtensionInputMaskHigh:u32;
+var<workgroup> cm12ExtensionPacketComplete:u32;
 
 fn cm12ExtensionLoad(at:u32)->u32{return atomicLoad(&${arena}[at]);}
 fn cm12ExtensionStore(at:u32,value:u32){atomicStore(&${arena}[at],value);}
@@ -75,11 +76,20 @@ fn cm12ExtensionStablePacket(dispatchOrdinal:u32)->u32{
   let packet=64u*leaf+local;
   return select(packet,cm12ExtensionInvalid,packet>=cm12ExtensionPacketCapacity);
 }
+fn cm12ExtensionExpectedMask(counts:vec3u)->vec2u{
+  var result=vec2u(0u);let rowMask=(1u<<counts.x)-1u;
+  for(var z=0u;z<counts.z;z+=1u){for(var y=0u;y<counts.y;y+=1u){
+    let first=4u*y+16u*z;
+    if(first<32u){result.x|=rowMask<<first;}else{result.y|=rowMask<<(first-32u);}
+  }}
+  return result;
+}
 fn cm12ExtensionBeginPacket(packet:u32,lane:u32,needsLeaf:bool)->u32{
   if(lane==0u){
     let slot=acceptedTopologySlot();let item=cm12TeiPacket(packet,slot);
     cm12ExtensionPacketFirst=item.first;cm12ExtensionPacketCounts=item.counts;
     cm12ExtensionPacketStrides=vec2u(item.strideY,item.strideZ);
+    cm12ExtensionPacketComplete=0u;
     if(item.first!=cm12ExtensionInvalid){
       atomicStore(&cm12ExtensionBallotLow,0u);
       atomicStore(&cm12ExtensionBallotHigh,0u);
@@ -93,14 +103,19 @@ fn cm12ExtensionBeginPacket(packet:u32,lane:u32,needsLeaf:bool)->u32{
       }else{
         cm12ExtensionInputMaskLow=0u;cm12ExtensionInputMaskHigh=0u;
       }
-      let brick=packet/64u;let localPacket=packet%64u;
-      let leaf=cm12TeiLoadLeaf(slot,brick);let resolution=leaf.flags&31u;
-      let packetAxis=max(1u,(resolution+3u)/4u);
-      let pz=localPacket/(packetAxis*packetAxis);
-      let remainder=localPacket-pz*packetAxis*packetAxis;
-      let py=remainder/packetAxis;let px=remainder-py*packetAxis;
-      cm12ExtensionPacketLocal=4u*vec3u(px,py,pz);
-      cm12ExtensionLeafValid=leaf.valid;cm12ExtensionLeafScale=leaf.scale;
+      let expected=cm12ExtensionExpectedMask(item.counts);
+      cm12ExtensionPacketComplete=u32(any(expected!=vec2u(0u))
+        &&all(vec2u(cm12ExtensionInputMaskLow,cm12ExtensionInputMaskHigh)==expected));
+      if(cm12ExtensionPacketComplete==0u){
+        let brick=packet/64u;let localPacket=packet%64u;
+        let leaf=cm12TeiLoadLeaf(slot,brick);let resolution=leaf.flags&31u;
+        let packetAxis=max(1u,(resolution+3u)/4u);
+        let pz=localPacket/(packetAxis*packetAxis);
+        let remainder=localPacket-pz*packetAxis*packetAxis;
+        let py=remainder/packetAxis;let px=remainder-py*packetAxis;
+        cm12ExtensionPacketLocal=4u*vec3u(px,py,pz);
+        cm12ExtensionLeafValid=leaf.valid;cm12ExtensionLeafScale=leaf.scale;
+      }
     }
   }
   return workgroupUniformLoad(&cm12ExtensionPacketFirst);
@@ -177,6 +192,13 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
     cm12ExtensionClearPacketMask(cm12ExtensionOutputMask(
       EXTENSION_RECURRENCE_DEPTH),packet,lane);
     cm12ExtensionPublishFrameReceipt(packet,lane);return;}
+  let packetComplete=workgroupUniformLoad(&cm12ExtensionPacketComplete);
+  if(packetComplete!=0u){
+    if(lane==0u){let output=cm12ExtensionOutputMask(EXTENSION_RECURRENCE_DEPTH);
+      cm12ExtensionStore(output+2u*packet,cm12ExtensionInputMaskLow);
+      cm12ExtensionStore(output+2u*packet+1u,cm12ExtensionInputMaskHigh);}
+    cm12ExtensionPublishFrameReceipt(packet,lane);return;
+  }
   let cell=cm12ExtensionPacketCell(lane);
   let selected=cell!=cm12ExtensionInvalid&&cell<cm12ExtensionCapacity&&cellActive(cell);
   var valid=false;

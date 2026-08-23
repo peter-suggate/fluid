@@ -1,9 +1,8 @@
-/** GPU-resident, generation-stamped activity summary worklist. */
+/** GPU-resident, generation-stamped activity summary masks. */
 export interface SparseCM12IncrementalActivityLayout {
   readonly headerBaseWords: number;
   readonly brickStampBaseWords: number;
   readonly brickVelocityStampBaseWords: number;
-  readonly brickListBaseWords: number;
   readonly brickTopologyStateBaseWords: number;
   readonly brickCensusStateBaseWords: number;
   readonly scoreHistogramBaseWords: number;
@@ -54,15 +53,13 @@ export function createSparseCM12IncrementalActivityLayout(options: {
   const brickStampBaseWords = headerBaseWords
     + SPARSE_CM12_INCREMENTAL_ACTIVITY_HEADER_WORDS;
   const brickVelocityStampBaseWords = brickStampBaseWords + brickCount;
-  const brickListBaseWords = brickVelocityStampBaseWords + brickCount;
-  const brickTopologyStateBaseWords = brickListBaseWords + brickCount;
+  const brickTopologyStateBaseWords = brickVelocityStampBaseWords + brickCount;
   const brickCensusStateBaseWords = brickTopologyStateBaseWords + brickCount;
   const scoreHistogramBaseWords = brickCensusStateBaseWords + brickCount;
   return Object.freeze({
     headerBaseWords,
     brickStampBaseWords,
     brickVelocityStampBaseWords,
-    brickListBaseWords,
     brickTopologyStateBaseWords,
     brickCensusStateBaseWords,
     scoreHistogramBaseWords,

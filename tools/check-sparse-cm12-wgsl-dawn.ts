@@ -37,8 +37,6 @@ import { createSparseCM12PressureExecutionImageLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-execution-image";
 import { createSparseCM12TopologyEffectsAuthorityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-topology-effects-authority";
-import { createSparseCM12DirtyFaceRowMaskLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-dirty-face-row-masks";
 import { createSparseCM12VelocityExtensionResidentLayouts } from
   "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
 import type { SparseCM12InternedBoundaryLayout } from
@@ -188,14 +186,6 @@ async function main(): Promise<void> {
           packetCapacity: 8 * 64,
           brickFineResolution,
         }) : undefined;
-      const dirtyFaceRows = velocityExtension
-        ? createSparseCM12DirtyFaceRowMaskLayout({
-          baseWords: velocityExtension.activity.totalWords,
-          cellCapacity: 1024,
-          packetCapacity: velocityExtension.activity.packetCapacity,
-          dispatchPacketsPerLeaf: velocityExtension.activity.dispatchPacketsPerLeaf,
-          dispatchPacketCount: velocityExtension.activity.dispatchPacketCount,
-        }) : undefined;
       const iboLayout: SparseCM12InternedBoundaryLayout = {
         leafCapacity: 8, canonicalCapacity: 24, templateCount: 8,
         templatePayloadWords: 256, canonicalBaseWords: 64,
@@ -250,6 +240,13 @@ async function main(): Promise<void> {
         dispatchPacketsPerLeaf: velocityExtension!.activity.dispatchPacketsPerLeaf,
         dispatchPacketCount: velocityExtension!.activity.dispatchPacketCount,
       });
+      const faceAddresses = {
+        baseWords: 240000, leafCapacity: 8,
+        interiorTileCount: 64, seamAddressCount: 256, seamPacketCount: 4,
+        interiorBaseWords: 240016, seamBaseWords: 240128,
+        dispatchWidth: 65535, interiorDispatchRows: 1, seamDispatchRows: 1,
+        totalWords: 240640, totalBytes: 2560,
+      };
       const source = createWebgpuSparseCM12ResidentWGSL(
         brickFineResolution,
         presentationPageResolution,
@@ -262,7 +259,7 @@ async function main(): Promise<void> {
         transportExecutionImage, transportPacketAuthority,
         transportProducerMasks,
         undefined, undefined, internedBoundaryImage,
-        topologyEffects, undefined, dirtyFaceRows,
+        topologyEffects, undefined, faceAddresses,
         250000,
       );
       const shaderModule = device.createShaderModule({

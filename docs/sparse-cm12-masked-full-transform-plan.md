@@ -817,15 +817,17 @@ it is not competitive with eight independent dense corner reads inside every RK2
 face sample. The accepted face cut therefore targets compiled row ownership while
 retaining the dense velocity plane.
 
-The first three-axis row-mask design was rejected during proof: a positive-side
+At this milestone, the first three-axis row-mask design was rejected during proof: a positive-side
 sparse-air row may contain only one negative coefficient, so it has no positive
 ITR owner and collides with the canonical incoming row if forced into that address.
-The accepted ABI gives those rows three distinct mask families beside the ordinary
+The accepted ABI gave those rows three distinct mask families beside the ordinary
 positive-owner x/y/z families. The mask is completely overwritten from dirty brick
 ownership, while persistent accepted-pressure bits are sentinel-initialized and
 bit-compared to publish first-frame and later pressure changes. `forceFaces` compares
-the before/after value and roots only changed rows. This is the exact union that full
-pressure membership alone could not provide.
+the before/after value and roots only changed rows. This was the exact union that full
+pressure membership alone could not provide. Section 23.2 supersedes this
+cached-pressure design with full fresh-predictor publication and removes the
+persistent pressure bits.
 
 On the matched 24-sample B8/P8 ocean capture, dirty face-row preparation plus mask
 compilation rose from 3.1457 / 4.0632 ms to 4.3909 / 5.1773 ms, while projection fell
@@ -872,7 +874,9 @@ composition requires ITR, TPA/TPM and DFRM, and the product build plus three-pro
 Dawn checker compile that required path. The B8 500-step exact hash remains unchanged;
 the three-step moving-solid/injection lane and production ocean trajectory pass with
 zero validation faults. A same-frame FSM-driven theta or pressure-membership refresh
-now calls `dfrm1MarkRow` directly, closing the bit-identical-pressure projection gap.
+called `dfrm1MarkRow` directly at this boundary, closing the then-current
+bit-identical-pressure projection gap. Section 23.2 subsequently deletes that
+marking path together with the cached predictor it protected.
 The next deletion candidate is another stage whose exact access order is already
 representable by the shared packet and row operators.
 
@@ -985,6 +989,14 @@ so it cannot serve as change history. The final cut retains only one compact pre
 diagonal word per cell. PCA brick work then returns exactly to the pre-cut per-frame
 trajectory while every other fine-PCF plane and lifecycle remains deleted.
 
+The later pressure-execution-image cut removed that compact mirror again to keep the
+mainline focused on masking and deletion. A 2026-08-24 back-to-back B8/P8 ocean A/B
+confirmed that restoring it changes median brick reductions from 1,430 to 417 and
+pressure-topology time from 4.7841 to 4.3909 ms, at an allocation cost of 2,003,968
+bytes. This is tracked as an optional follow-up, not part of the current masking cut.
+The receipts are `artifacts/sparse-cm12-ocean-b8-p8-ab-no-diagonal-history-stage-cost.json`
+and `artifacts/sparse-cm12-ocean-b8-p8-ab-with-diagonal-history-stage-cost.json`.
+
 Final B8/P8 results are exact over the 500-step repeat-two oracle and both short Dawn
 behavior lanes. Allocation falls from 473,137,976 to 465,248,300 bytes, a 7,889,676-
 byte reduction. Pressure-topology timing is 6.9468 / 7.2745 ms median/p95 versus
@@ -1095,3 +1107,293 @@ When work resumes:
    not from replacing these sparse authorities with full-capacity scans.
 2. Keep the rejected dense-face and pressure-tile arms deleted. Revisit them only
    with a materially different data layout or operator-local reuse proof.
+
+## 22. Direct ACT1 brick masks
+
+The next measured hot seam was activity measurement at 2.6214 / 3.0147 ms
+median/p95 on B8/P8. ACT1 already classified the exact brick closure with a
+generation stamp, but then claimed and appended every selected brick, finalized
+an indirect command, closed the compute pass, copied that command to a dedicated
+indirect buffer, and made both activity and retired-face consumers dereference the
+unordered list.
+
+The direct-mask cut keeps the exact producer and closure law but makes the stamp
+the execution mask. Consumers dispatch over the fixed physical-brick domain and
+uniformly reject bricks whose stamp is not the current generation. The brick list,
+claim spin loop, indirect copy seam, and dedicated indirect buffer are deleted.
+Topology changes publish their next-frame bits directly; no fallback or second mode
+exists.
+
+Matched B8/P8 activity timing improves from 2.6214 / 3.0147 to
+1.7695 / 2.0316 ms, a 32.5% median reduction. Face preparation remains 5.5050 ms
+median while p95 improves from 7.1434 to 6.9468 ms. Allocation falls from
+445,266,464 to 445,256,212 bytes, exactly 10,252 bytes: 2,560 list words plus
+the 12-byte indirect buffer. Terminal pressure/topology work, adaptive
+representation and final FSM1 counts match exactly; symmetric expansion and the
+moving-solid/injection lane pass without faults. Whole-frame timing was externally
+noisy and is not used for acceptance. The baseline and final receipts are
+`artifacts/sparse-cm12-ocean-b8-p8-ab-no-diagonal-history-stage-cost.json` and
+`artifacts/sparse-cm12-ocean-b8-p8-activity-direct-mask-final-stage-cost.json`.
+
+## 23. BTI1 adversarial gate and revised unified-topology architecture
+
+The next target is larger than another control-plane deletion: one compiled
+brick/tile topology epoch should serve cell transforms, point ownership and face
+operators. BTI1 is the first executable proof. It compiles the production B8
+composite grid into stable 4^3 cell tiles, a finest-lattice 4^3 point-owner
+directory, arithmetic interior face rows, and compact explicit seam/sparse-air
+ports. Equal-rung, 8:4, macro-leaf, clipped-edge and omitted-brick fixtures
+exhaustively prove that every cell, face row and finest point is represented
+exactly once. The WGSL cell, point and face services also execute bit-for-bit
+against their CPU mirrors.
+
+The first mixed-rung service fixture contains 128 leaves, 45,824 cells, 130,384
+rows, 2,240 mixed-seam rows and 65,536 finest points. BTI1 represents its tested
+services in 192,000 bytes (4.19 bytes/cell), with 119,232 implicit interior rows
+and 11,152 explicit face ports. The compiler preserves multiple explicit ports
+at one address instead of assuming seam ownership is injective; this fixture has
+no such collision, but collision storage and validation are part of the ABI.
+
+The first matched Metal microbenchmark rejected a simplistic interpretation of
+"unified":
+
+- stable BTI1 cell enumeration was 1.048x TEI2, effectively flat but not a win;
+- BTI1 point ownership was 1.079x the simplified LOD1 comparator, not faster;
+- scanning all six face families over all reserved stable tiles was 13.48x a
+  dense direct-row lower bound and invoked 393,216 lanes for 130,384 rows.
+
+These results do **not** reject unified compiled topology. They reject the
+assumption that stable identity, physical storage and execution order must be
+the same thing. A monolithic word image cannot make three different access
+patterns coherent merely by colocating them.
+
+The revised architecture is one compiler and one accepted topology generation
+publishing several physical views with shared identities:
+
+1. **Stable brick/tile identity.** `stableTile = leaf * 8 + localTile` remains the
+   cross-frame address for fields, masks, diagnostics and topology deltas.
+2. **Compact rung-major execution tiles.** A topology-time immutable map from
+   compact execution ordinal to stable tile dispatches only structurally live
+   tiles. This is not per-frame or per-consumer compaction.
+3. **Packed point-owner pages.** One finest 4^3 page lookup returns the stable
+   leaf/tile identity; brick descriptor facts are staged once per workgroup.
+   Domain dimensions are specialization/uniform facts, not three image loads per
+   sample.
+4. **Split face program.** Uniform interiors are a brick/tile kernel with row IDs,
+   neighbours and geometry derived arithmetically. Boundary, 2:1 and sparse-air
+   ports form a separate compact seam-packet stream. Interior lanes never scan an
+   exception range, and seam work never launches six families across empty tiles.
+5. **SoA physical layout under one epoch.** Hot cell descriptors, spatial owner
+   pages, seam packets, pressure hierarchy and dynamic masks may occupy separate
+   arrays/arenas. They share one compiler, stable IDs, selector and generation;
+   they are not independent topology authorities.
+6. **Brick-program fusion.** Once a workgroup stages a tile descriptor and field
+   neighbourhood, it should execute several local maps before eviction where
+   numerical ordering permits. The target is removal of passes and global loads,
+   not a marginally cheaper lookup function.
+
+The critical distinction is therefore:
+
+```text
+logical authority: one topology epoch and one stable identity space
+physical views:    cell tiles | point pages | seam packets | pressure hierarchy
+execution order:   compact immutable ordinals chosen for each algorithm family
+dynamic selection: small mask planes keyed by stable/compact tile identity
+```
+
+The next production experiment is the split face program, because it tests both
+brick-first reuse and explicit seam packets while attacking the measured 5.5 ms
+face stage. It must compare the current ITR/DFRM consumer against (a) compact
+interior tiles plus (b) compact seam packets, with mask production separately
+timed. Full six-family scans over reserved stable capacity are not an accepted
+implementation of this architecture.
+
+### 23.1 Production split-face and fused-diagnostics receipt
+
+The experiment is now implemented for production B8. BFP1 is the exact accepted
+epoch oracle used by fixtures; BFA1 is the immutable all-rung production address
+view embedded in the topology arena. BFA1 stores structurally possible interior
+tiles and seam addresses, while the live DFRM1 mask and accepted ITR1 slot remain
+the only dynamic selector and row authority. Rerungs and activation therefore do
+not rebuild or fork topology authority. Production has two row kernels and no
+broad fallback:
+
+- `projectSparseCM12InteriorFaceTiles` executes normal-family owners whose local
+  coordinate is strictly inside the brick;
+- `projectSparseCM12SeamFacePackets` executes brick-boundary, 2:1 and sparse-air
+  ports from compact explicit addresses.
+
+That strict interior predicate is essential. The first live cut accidentally
+executed coordinate-zero normal rows in both streams. The two-step transition
+lane reported post-projection divergence of order 1--14 s^-1 immediately. After
+making the streams disjoint, the same activation from 16 to 32 bricks passes at
+`7.43865966796875e-5 s^-1` against the `1.75e-4` gate, and the mini64 front Dawn
+transition test passes. The CPU BFP1 validator independently proves every accepted
+row appears in exactly one stream, while BFA1 coverage proves every accepted seam
+address exists in the all-rung view.
+
+The isolated 128-leaf service result is decisive but narrow: the split executor
+runs in 0.014671875 ms versus 0.081208375 ms for broad BTI traversal, a 5.53x
+speedup, reducing invoked lanes from 393,216 to 57,024. It remains 1.626x the
+dense direct-row lower bound. This establishes that compact physical order is the
+right row-service ABI; it does not establish a whole-stage win.
+
+The first matched ocean-seiche B8/P8 production A/B confirmed that distinction.
+Split projection alone measured 8.0609 ms versus 7.9299 ms for the former broad
+kernel, within the 65.536 us timestamp quantum and slightly worse. The row loop is
+not the stage bottleneck. Collocation then absorbed divergence classification and
+per-workgroup reduction, deleting a second accepted-cell incidence traversal and
+one production entry point. The matched result became:
+
+| production arm | velocity projection median | projection diagnostics median | combined |
+|---|---:|---:|---:|
+| former broad DFRM1 executor | 7.9299 ms | 0.5243 ms | 8.4542 ms |
+| split BFA1 before fusion | 8.0609 ms | 0.5243 ms | 8.5852 ms |
+| split BFA1 + fused divergence | 8.1265 ms | 0 ms | 8.1265 ms |
+
+The fused architecture is 0.3277 ms / 3.87% faster than the former broad stage
+and 0.4587 ms / 5.34% faster than the unfused split stage. More importantly, it
+names the next target correctly: remove pressure-cell-to-row mask construction
+and convert collocation itself from pointer-chased incidence to the shared
+interior/seam stencil. Further tuning of the final row loop is explicitly not the
+next task.
+
+### 23.2 Live-pressure cutover and adversarial correction
+
+The pressure-cell-to-row history has now been deleted, but only together with
+the cached-predictor contract that required it. Production assumes pressure is
+live every frame and performs the corresponding complete operation:
+
+1. `compileSparseCM12DirtyFaceRowMasks` rebuilds the mask for every accepted
+   face row and retraces a fresh unprojected predictor for each row;
+2. the compact BFA1 interior-tile and seam-packet streams project every
+   pressure-active row from that fresh predictor;
+3. no raw accepted-pressure bit plane, pressure comparison dispatch, incidence
+   walk from changed pressure cells, or later row-change marking remains.
+
+Reprojecting every row while retaining old projected predictors is not the same
+algorithm: it applies an absolute pressure correction twice. The live-pressure
+cutover is valid because both sides change together--full fresh predictors and
+full projection--rather than because the old history happened to be expensive.
+DFRM1 is consequently a transient accepted-face execution mask now, not a dirty
+pressure-delta cache. Its ocean B8 allocation falls from 2,986,880 bytes to
+983,040 bytes, deleting 2,003,840 bytes of pressure snapshots.
+
+Adversarial transition testing exposed two independent partition/receipt bugs:
+
+- physical interior requires both owner-local coordinate greater than zero
+  **and** resolved `rowKind == 0`. A mixed-rung row may be owned inside a coarse
+  brick; coordinate alone allowed it to execute once as interior and again as
+  seam;
+- the fused collocation diagnostic could report mixed-seam divergence larger
+  than global divergence, which is mathematically impossible because the former
+  is a subset of the latter. Restoring the independent diagnostic traversal
+  removed those false failures. The fusion is therefore withdrawn pending a
+  reduction design with a transition-safe receipt.
+
+With those corrections, the live-pressure compact split is trajectory-equivalent
+to the broad DFRM control. The two-step 16-to-32-brick activation gate passes, the
+mini64 dormant-receiver transition passes, and the 20-step symmetric gate reports
+exactly the seven inherited failures (steps 5, 10, 14, 15, 18 and 19) with no new
+divergence or topology failure. Dawn compiles 200 production entry points and the
+brick/tile unit suite passes all 13 tests.
+
+A fresh 24-sample ocean-seiche B8/P8 hardware receipt measures the complete
+velocity-projection stage at 7.6022 ms median / 7.7332 ms p95, including the
+independent diagnostic traversal. This is 0.5243 ms / 6.45% below the prior
+8.1265 ms fused result despite restoring that traversal, and 0.8520 ms / 10.08%
+below the former 8.4542 ms broad-plus-diagnostics stage. The gain comes from
+deleting pressure history and its incidence bookkeeping, not from weakening the
+compiled topology architecture.
+
+The full 20-step symmetric lane currently has seven pre-existing failures beginning
+with a pressure residual miss at step 5 and later pressure-D4/mass gates. A controlled
+temporary A/B produced the exact same failures, steps and values with the former broad
+executor, so they are not attributed to BFA1 and no fallback remains in production.
+They stay tracked against the preceding activity-mask work. Exact service timings are
+in `artifacts/sparse-cm12-brick-tile-gpu-services-split.json`; the production summary
+is in `artifacts/sparse-cm12-brick-tile-production-ab.json`.
+
+### 23.3 Velocity-closure election cutover
+
+The remaining ocean projection cost was not the compact BFA1 pressure-row executor
+or a missing strict-interior arithmetic row gather. It was activity publication at
+the tail of cell collocation. Every changed accepted cell called
+`incrementalActivityPublishFaceBrickClosure`, and each call repeated the owning
+brick's three-dimensional directory-neighbour walk. Thousands of threads in the
+same brick therefore chased the same directory and atomically claimed the same
+closure.
+
+Production now uses the existing ACT1 per-brick velocity-generation stamp as an
+election. Every changed-cell invocation still performs one `atomicExchange` and
+claims its owning brick, but only the first invocation for that brick and generation
+publishes the directory closure. The velocity stamp is deliberately separate from
+the dirty-brick stamp: a brick claimed as a neighbour cannot suppress its own later
+velocity-root publication. This is an immediate cutover with no new allocation,
+dispatch, execution arm or host decision.
+
+Short ocean-seiche hardware ablations separate the result despite incomplete trace
+capture making them screening receipts rather than acceptance artifacts:
+
+| ocean B8/P8 source arm | captured samples | projection median | p95 |
+|---|---:|---:|---:|
+| repeated per-cell closure + load hoists | 5 | 7.9299 ms | 8.1920 ms |
+| per-brick closure election | 5 | 2.5559 ms | 2.6214 ms |
+| election + load hoists, generic gather | 5 | 2.4904 ms | 3.0802 ms |
+| election + load hoists + pressure-interior shortcut | 5 | 2.4904 ms | 3.0147 ms |
+
+The election removes 5.3740 ms / 67.77% from the matched median. The proposed
+pressure-interior shortcut did not change the matched median and moved the sampled
+p95 by only one timestamp quantum, so it is refuted and absent from production.
+Likewise, manual collocation load hoists moved the median by one quantum while
+worsening the sampled p95 and were removed; the retained patch changes the work
+domain rather than relying on shader-compiler common-subexpression behaviour. The
+final ocean receipt has no validation errors, executes 40 pressure iterations to
+tolerance without residual drift, and the production mini64 dormant-receiver test
+passes.
+
+### 23.4 Cross-stage reuse and data deletion
+
+The velocity-closure result generalized where an existing compiled view could
+remove work at workgroup or address-stream granularity. Production now contains
+three further direct cuts:
+
+1. ACT1 claims the dirty owner only from the velocity-generation winner. Its
+   directory closure claims the owner once and resolves only the exterior shell;
+   interior logical coordinates are guaranteed to map back to that owner.
+2. VEX2 compares each packet's existing two-word validity mask with its TEI packet
+   extent. A complete packet copies those words to the next parity uniformly and
+   skips leaf staging, neighbour gathers and the 64-lane ballot.
+3. PEI coefficient publication reuses the pressure strict-interior certificate.
+   When the cell and all six arithmetic neighbours are pressure members, one
+   directed-edge loop publishes the weights and accumulates the diagonal; the
+   second incidence-CSR traversal is omitted.
+
+The transient DFRM1 plane is deleted rather than renamed. Under live-pressure
+projection it selected exactly `rowAccepted(row)`, so it duplicated accepted ITR1
+state while costing twelve ballot words per direct packet. BFA1 now prepares and
+projects the same proven-disjoint interior-tile and seam streams directly. Ocean
+B8/P8 deletes 983,040 DFRM bytes.
+
+BFA1 seam records are also packed from two words to one. Stable tile uses the high
+23 bits and `{family,lane}` the low nine. Ocean has 188,684 seam addresses, so this
+removes another 754,736 bytes and one global load from each seam preparation and
+projection invocation. Total allocation falls from 444,795,156 to 443,057,428
+bytes, a 1,737,728-byte reduction after alignment.
+
+Matched short ocean screens measure the retained hot substages as follows:
+
+| hot substage | before | after | median change |
+|---|---:|---:|---:|
+| VEX2 eight sweeps | 2.2282 ms | 2.0316 ms | -8.82% |
+| face-row preparation | 1.6384 ms | 1.4418 ms | -12.00% |
+| PEI fine coefficient publication | 1.5073 ms | 1.2452 ms | -17.39% |
+
+The ACT1 loser/shell cleanup is neutral within timestamp resolution when projection
+and activity measurement are summed, so it is retained as strict redundant-work
+removal rather than claimed as a timing win. A temporary split shared-memory
+pressure-operator experiment was slower because the extra dispatch and global image
+handoff outweighed neighbour reuse; it was removed completely. The pressure solve,
+iteration schedule, preconditioner and reduction order remain unchanged. Final ocean
+receipts have no validation errors and converge in 40 iterations without residual
+drift; mini64 dormant-receiver expansion passes.
