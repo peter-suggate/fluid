@@ -9,6 +9,7 @@ import { uniformMethod } from "../lib/methods/uniform/method";
 import { cloneScene, defaultScene, type RigidBodyDescription } from "../lib/core/model";
 import { initializeRigidBodies } from "../lib/core/rigid-body";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { boxTankWallFieldForScene } from "../lib/core/scene-lattice";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
@@ -32,6 +33,7 @@ device.addEventListener("uncapturederror", (event) => validationErrors.push(even
 const scene = cloneScene(defaultScene);
 scene.sceneId = "smoke-uniform-rigid-displacement";
 scene.container = {
+  ...scene.container,
   width_m: 0.8,
   height_m: 0.8,
   depth_m: 0.8,
@@ -48,6 +50,7 @@ delete scene.terrain;
 const dt_s = Number(process.env.FLUID_DISPLACEMENT_DT ?? 0.004);
 scene.numerics.fixedDt_s = scene.numerics.maxDt_s = dt_s;
 scene.voxelDomain.finestCellSize_m = 0.05;
+scene.container.wallField = boxTankWallFieldForScene(scene);
 
 const bodyCount = Math.max(1, Math.min(2, Number(process.env.FLUID_DISPLACEMENT_BODY_COUNT ?? 1)));
 const startY_m = Number(process.env.FLUID_DISPLACEMENT_START_Y ?? 0.65);

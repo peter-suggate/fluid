@@ -293,6 +293,7 @@ export function residentSupportAtlas(
     source.generation,
     source.boundary,
     source.brickFineResolution,
+    source.wallField,
   );
 }
 
@@ -469,6 +470,7 @@ export function dormantReceiverDomain(
     source.generation,
     source.boundary,
     source.brickFineResolution,
+    source.wallField,
   );
 }
 

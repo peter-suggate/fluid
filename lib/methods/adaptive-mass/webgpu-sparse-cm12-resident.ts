@@ -1536,7 +1536,7 @@ PackedResidentTopologyTemplates {
     sourceBricks: readonly SparseAdaptiveMassBrick[],
   ) => createSparseAdaptiveMassAtlas(atlas.dimensions, sourceBricks.map((brick) =>
     resampleBrick(brick, choose(brick))), atlas.generation, atlas.boundary,
-    atlas.brickFineResolution);
+    atlas.brickFineResolution, atlas.wallField);
   // One reusable full-grid scratch bounds host construction at accepted plus
   // one transient variant. Only cells/rows touching the mutable frontier are
   // copied into the persistent template library.
@@ -2714,9 +2714,6 @@ export class WebGPUSparseCM12Resident {
   private readonly pressureMembershipIndirectArguments: GPUBuffer;
   /** Copy-isolated PEI1 wet-brick and hierarchy lane/reduction dispatches. */
   private readonly pressureExecutionIndirectArguments: GPUBuffer;
-  /** Copy-isolated PTR1 indirect families: brick seed/repair/work, row
-   * seed/repair/work, and changed-brick accepted-state commit. */
-  private readonly pressureTopologyRepairIndirectArguments: GPUBuffer;
   /** Copy-isolated PCA1 seed, repair, and work dispatches. */
   private readonly persistentPressureCacheIndirectArguments: GPUBuffer;
   private readonly transportPacketIndirectArguments?: GPUBuffer;
@@ -2794,7 +2791,6 @@ export class WebGPUSparseCM12Resident {
     pressureCellIndirectArguments: GPUBuffer,
     pressureMembershipIndirectArguments: GPUBuffer,
     pressureExecutionIndirectArguments: GPUBuffer,
-    pressureTopologyRepairIndirectArguments: GPUBuffer,
     persistentPressureCacheIndirectArguments: GPUBuffer,
     transportPacketIndirectArguments: GPUBuffer | undefined,
     framePlanIndirectArguments: GPUBuffer,
@@ -2891,8 +2887,6 @@ export class WebGPUSparseCM12Resident {
     this.pressureCellIndirectArguments = pressureCellIndirectArguments;
     this.pressureMembershipIndirectArguments = pressureMembershipIndirectArguments;
     this.pressureExecutionIndirectArguments = pressureExecutionIndirectArguments;
-    this.pressureTopologyRepairIndirectArguments =
-      pressureTopologyRepairIndirectArguments;
     this.persistentPressureCacheIndirectArguments =
       persistentPressureCacheIndirectArguments;
     this.transportPacketIndirectArguments = transportPacketIndirectArguments;
@@ -2950,7 +2944,6 @@ export class WebGPUSparseCM12Resident {
     this.allocatedBytes = [acceptedIndirectArguments, pressureCellIndirectArguments,
       pressureMembershipIndirectArguments,
       pressureExecutionIndirectArguments,
-      pressureTopologyRepairIndirectArguments,
       framePlanIndirectArguments, presentationIndirectArguments,
       frameControlIndirectArguments,
       pressureTemplates, pressureWorklists,
@@ -4004,12 +3997,6 @@ export class WebGPUSparseCM12Resident {
       size: 48,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
     });
-    const pressureTopologyRepairIndirectArguments = device.createBuffer({
-      label: "Sparse CM12 bounded pressure-topology repair indirect dispatches",
-      // Brick seed, brick repair, brick work, and accepted-state commit.
-      size: 4 * 12,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-    });
     const persistentPressureCacheIndirectArguments = device.createBuffer({
       label: "Sparse CM12 persistent pressure-cache indirect dispatches",
       // Seed/repair/work for four aggregate families.
@@ -4349,6 +4336,7 @@ export class WebGPUSparseCM12Resident {
       "applyPipelinedRecovery", "reducePipelinedRecovery",
       "reduceInitialize",
       "collocateAndDiagnose",
+      "scatterOpenTankBoundaryOutflow", "finalizeOpenTankBoundaryOutflow",
       "reduceDivergenceDiagnostics",
       "advanceActivityClock", "beginIncrementalActivity",
       "markIncrementalActivityScalarBricks", "markIncrementalActivityTopology",
@@ -4587,7 +4575,6 @@ export class WebGPUSparseCM12Resident {
       pressureCellIndirectArguments,
       pressureMembershipIndirectArguments,
       pressureExecutionIndirectArguments,
-      pressureTopologyRepairIndirectArguments,
       persistentPressureCacheIndirectArguments,
       transportPacketIndirectArguments,
       framePlanIndirectArguments,
@@ -5166,7 +5153,6 @@ export class WebGPUSparseCM12Resident {
       dispatch("beginPersistentPressureCache", 1);
       dispatch("planPressureMembershipEpoch", 1);
       dispatch("beginSparseCM12PressureTopologyRepair", 1);
-      dispatch("captureSparseCM12PressureTopologyConsumerGenerations", 1);
       closePass();
       const persistentFamilies = ["brick", "aggregateEdge", "hierarchyNode",
         "hierarchyEdge"] as const;
@@ -5395,6 +5381,14 @@ export class WebGPUSparseCM12Resident {
       dispatchAccepted("collocateAndDiagnose", "cell");
       dispatchAccepted("measureDivergenceDiagnostics", "cell");
       dispatch("reduceDivergenceDiagnostics", 1);
+      // Projected sparse-air velocities are now authoritative. Convert only
+      // authored outer-side ports into a conservative scalar mass debit; the
+      // ordinary characteristic transport remains bounded and unchanged.
+      closePass();
+      encoder.clearBuffer(this.conditioning, 0, 4 * this.templateCellCount);
+      useBindGroup(this.pressureBindGroup);
+      dispatchAccepted("scatterOpenTankBoundaryOutflow", "row");
+      dispatchAccepted("finalizeOpenTankBoundaryOutflow", "cell");
       // The divergence this stage produced. Four stages downstream
       // `candidate-transfer` zeroes it on every cell whose topology changed,
       // so a lens reading it at frame end would be right everywhere except
@@ -7965,7 +7959,6 @@ export class WebGPUSparseCM12Resident {
       this.pressureMembershipIndirectArguments,
       this.pressureExecutionIndirectArguments,
       this.frameControlIndirectArguments,
-      this.pressureTopologyRepairIndirectArguments,
       this.persistentPressureCacheIndirectArguments,
       this.framePlanIndirectArguments,
       this.presentationIndirectArguments,

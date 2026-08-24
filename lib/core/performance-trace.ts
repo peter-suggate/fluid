@@ -1356,8 +1356,16 @@ export class GPUPassTimestampRecorder {
 
   /**
    * Aggregate trustworthy pass pairs under the semantic stages that owned them.
-   * Render-pass pairs are tiler windows on Apple GPUs, not costs, so a stage
-   * containing one is omitted instead of published as a false number.
+   *
+   * Render-pass pairs are tiler windows on Apple GPUs, not costs, so they are
+   * excluded from every sum — but only *they* are. A stage used to be dropped
+   * whole if it contained a single render pass or a single pass the hardware
+   * declined to sample, which threw away the compute time beside them and, far
+   * worse, made the stage indistinguishable from one that encoded nothing.
+   * Downstream that silence was read as "unmeasured", and the render panel's
+   * band-wall attribution handed the band's entire wall to whichever row was
+   * silent. A stage now reports the part of itself that is real; what it
+   * leaves out is a pass count the frame's manifest carries beside it.
    */
   async readSemanticTrace(input: {
     sampleId: number;
@@ -1370,8 +1378,10 @@ export class GPUPassTimestampRecorder {
     if (!reading) return undefined;
     const trustedPasses: GPUPassTimestampSample[] = [];
     for (const group of phases) {
-      const passes = reading.passes.slice(group.firstPass, group.endPass);
-      if (passes.length === 0 || passes.some((pass) => !pass.sampled || !pass.trusted)) continue;
+      const passes = reading.passes
+        .slice(group.firstPass, group.endPass)
+        .filter((pass) => pass.sampled && pass.trusted);
+      if (passes.length === 0) continue;
       trustedPasses.push(...passes.map((pass) => ({ ...pass, label: group.phase.label })));
     }
     if (trustedPasses.length === 0) return undefined;

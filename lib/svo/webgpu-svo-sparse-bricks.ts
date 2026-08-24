@@ -1,4 +1,5 @@
 import type { RigidBodyDescription, SceneDescription } from "../core/model";
+import type { RenderFrameSeam } from "../core/render-frame-stages";
 import { svoSceneLighting } from "./svo-dry-scene-lighting";
 import {
   cachedSvoPublication,
@@ -2869,7 +2870,11 @@ export class OctreeSparseBrickWorld {
    * payloads are reusable accelerators whose completion generation advances
    * only after the maintenance passes finish.
    */
-  encodeSceneMaintenance(encoder: GPUCommandEncoder, deferDerived = false): boolean {
+  encodeSceneMaintenance(
+    encoder: GPUCommandEncoder,
+    deferDerived = false,
+    seam?: RenderFrameSeam<"world">,
+  ): boolean {
     if (this.destroyed) return false;
     let encoded = false;
     if (!this.topologyPublished) {
@@ -2898,6 +2903,9 @@ export class OctreeSparseBrickWorld {
       this.pendingTopologyMutation = false;
       encoded = true;
     }
+    // Publish and mutate are the topology half: they change which bricks exist.
+    // Everything after this seam changes what is *in* them.
+    seam?.("world-topology-publish");
     if (this.pendingScenePublication) {
       this.proxyVoxelizer.publish(this.pendingScenePublication);
       this.pendingScenePublication = undefined;
@@ -2908,26 +2916,50 @@ export class OctreeSparseBrickWorld {
     // its first publication; stopping immediately freezes phase 0 and exposes
     // its quarter-leaf pattern, while running forever makes a complex hero
     // scene visibly breathe and spends GPU time after convergence.
-    if (!encoded) return !deferDerived && this.encodeLiveRadianceFeedback(encoder);
+    if (!encoded) {
+      // The settled path, and the one the render panel spends most of its life
+      // reporting: nothing was voxelized this frame. Both remaining seams still
+      // close, over nothing, so the manifest can say "reached, encoded no pass"
+      // — which is a zero, and is what stops a silent row from inheriting the
+      // source band's whole fence-partitioned wall.
+      seam?.("world-proxy-voxelize");
+      seam?.("world-derived-lighting");
+      const fed = !deferDerived && this.encodeLiveRadianceFeedback(encoder);
+      seam?.("world-radiance-feedback");
+      return fed;
+    }
     const broker = new PassBroker(encoder);
     const finalizer = broker.compute({ label: "Finalize live sparse voxel scene publication" });
     finalizer.setPipeline(this.structuralScenePipeline);
     finalizer.setBindGroup(0, this.structuralFinalizeBindGroup);
     finalizer.dispatchWorkgroups(1);
     broker.fence("live sparse scene publication finalized");
-    if (!deferDerived) this.encodeLiveDerivedMaintenance(encoder);
+    seam?.("world-proxy-voxelize");
+    if (deferDerived) {
+      seam?.("world-derived-lighting");
+      seam?.("world-radiance-feedback");
+    } else this.encodeLiveDerivedMaintenance(encoder, seam);
     return true;
   }
 
-  private encodeLiveDerivedMaintenance(encoder: GPUCommandEncoder): void {
-    if (!this.liveDerivedAddressPlanValid || !this.liveDerivedPlanner || !this.liveDerivedBuilder) return;
+  private encodeLiveDerivedMaintenance(
+    encoder: GPUCommandEncoder,
+    seam?: RenderFrameSeam<"world">,
+  ): void {
+    if (!this.liveDerivedAddressPlanValid || !this.liveDerivedPlanner || !this.liveDerivedBuilder) {
+      seam?.("world-derived-lighting");
+      seam?.("world-radiance-feedback");
+      return;
+    }
     const initializeEmpty = this.liveDerivedInitial;
     if (initializeEmpty) this.liveDerivedPlanner.encodeInitial(encoder);
     else this.liveDerivedPlanner.encode(encoder);
     this.liveDerivedBuilder.encode(encoder, initializeEmpty);
     this.liveDerivedFeedbackFramesRemaining = this.liveDerivedBuilder.radianceFeedbackEnabled
       ? LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount : 0;
+    seam?.("world-derived-lighting");
     this.encodeLiveRadianceFeedback(encoder);
+    seam?.("world-radiance-feedback");
     this.liveDerivedInitial = false;
     const nodeMip = this.nodeMipPyramid?.visibleGeneration();
     const radiance = this.tetrahedralRadiance?.visibleGeneration();

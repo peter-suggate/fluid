@@ -18,6 +18,7 @@ import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./te
 import type { EnvironmentId } from "./environments";
 import type { MethodProfile } from "./method-contract";
 import { sceneDamBreakFractions } from "./initial-fluid";
+import { boxTankWallFieldForScene } from "./scene-lattice";
 import { sceneWithEnvironment } from "./scenery-presets";
 import { withSceneryNodes } from "./scenery-edit";
 import type { SceneryGraph } from "./scenery-graph";
@@ -993,6 +994,7 @@ export function createTallCellsHillsideDamBreakScene(): SceneDescription {
     vessel: "none",
   };
   scene.voxelDomain = { finestCellSize_m: cell_m, brickSize_cells: 8 };
+  scene.container.wallField = boxTankWallFieldForScene(scene);
   scene.nominalResolution = { length_m: cell_m };
   scene.terrain = createTallCellsFloodTerrain();
   scene.scenery = TALL_CELLS_FLOOD_SCENERY;

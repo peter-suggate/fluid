@@ -57,7 +57,15 @@ export type PipelineRowState = "on" | "off" | "armed" | "unavailable";
  * "not encoded" means a closed method gate or a withheld render pass.
  */
 export type PipelineCostKind =
-  | "measured" | "withheld" | "shared" | "idle" | "structural" | "unmeasured" | "wall";
+  | "measured" | "withheld" | "shared" | "idle" | "structural" | "unmeasured" | "wall"
+  /**
+   * The row's passes exist and no timestamp can price them — a render pass on
+   * a tile-based GPU, whose counter pair brackets a tiler window rather than
+   * the pass. Distinct from `unmeasured`, which is an absence of evidence, and
+   * from `withheld`, which is a measured zero: only an `unpriced` row is
+   * entitled to a band's fence-partitioned wall residual.
+   */
+  | "unpriced";
 
 export interface PipelineCost {
   readonly kind: PipelineCostKind;

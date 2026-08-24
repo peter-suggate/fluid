@@ -1,3 +1,4 @@
+import type { RenderFrameManifest } from "../render-frame-stages";
 import { create } from "zustand";
 import type { GPUStatus } from "../gpu-status";
 import { webGPUPlatformResourcePlugin } from "../webgpu-platform-resource";
@@ -29,6 +30,8 @@ export interface PerformanceReport {
   presentationStages?: PerformanceTrace;
   /** Fence-partitioned band walls from a 1-in-16 sampling frame; queue-wall grain per encode band. */
   presentationBands?: PerformanceTrace;
+  /** What the frame encoded, stage by stage: which stages ran, and with how many passes of each kind. */
+  presentationStageManifest?: RenderFrameManifest;
 }
 
 export const emptyPerformanceReport: PerformanceReport = {

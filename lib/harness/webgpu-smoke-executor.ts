@@ -204,6 +204,8 @@ class Mini32UIPresentationCadence {
       directional: scene.lighting?.directional,
       grade: scene.lighting?.grade,
       container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
+      wallField: scene.container.wallField,
+      vesselVisible: scene.container.vessel !== "none",
     });
     cadence.pipeline.setVolume(
       solver.surfaceFieldTexture ?? solver.volumeTexture,
@@ -351,7 +353,7 @@ class Mini32UIPresentationCadence {
       false,
       this.solver.info.maximumNeighborDelta ?? 0,
       this.solver.info.encodedSteps ?? 0,
-      undefined, undefined, undefined, forceSurfaceDiagnostics, "clear",
+      undefined, undefined, forceSurfaceDiagnostics, "clear",
     );
     if (!encoded) throw new Error("Mini32 UI-parity water presentation did not encode");
     this.device.queue.submit([encoder.finish()]);

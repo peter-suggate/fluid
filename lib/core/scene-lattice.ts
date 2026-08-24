@@ -1,4 +1,5 @@
 import type { SceneDescription } from "./model";
+import { createBoxTankWallField, type TankWallField } from "./tank-wall-field";
 
 /**
  * The one place the container's metre extents become a cell count.
@@ -27,7 +28,7 @@ export function latticeAxisDimension(
     Math.max(MINIMUM_LATTICE_DIMENSION, Math.round(extent_m / cellSize_m)));
 }
 
-/** Finest-lattice cell counts the container resolves to, in x, y, z. */
+/** Finest-lattice cell counts occupied by the physical tank interior. */
 export function sceneLatticeDimensions(
   scene: SceneDescription,
   maximumDimension = DEFAULT_MAXIMUM_LATTICE_DIMENSION,
@@ -39,6 +40,18 @@ export function sceneLatticeDimensions(
     latticeAxisDimension(c.height_m, cellSize_m, maximumDimension),
     latticeAxisDimension(c.depth_m, cellSize_m, maximumDimension),
   ];
+}
+
+/** Complete wall field on the tank's current finest lattice. */
+export function boxTankWallFieldForScene(scene: SceneDescription): TankWallField {
+  const [x, y, z] = sceneLatticeDimensions(scene);
+  return createBoxTankWallField({ x, y, z });
+}
+
+export function tankWallFieldFitsScene(scene: SceneDescription): boolean {
+  const [x, y, z] = sceneLatticeDimensions(scene);
+  const dimensions = scene.container.wallField?.dimensions;
+  return dimensions?.x === x && dimensions.y === y && dimensions.z === z;
 }
 
 /** Finest cell size actually realized on each axis after the rounding above. */

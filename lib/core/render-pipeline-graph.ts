@@ -2,25 +2,44 @@
  * The frame graph, as a table.
  *
  * One row per pass the presentation encoder actually emits, in encode order,
- * with the trace labels that pass publishes. The render panel draws the trunk
- * from this and nothing else, so the diagram, the per-node timing, and the
- * stage-plane taps cannot disagree about what the frame did — they are three
- * projections of the same list.
+ * with the *stage ids* that pass closes its seam under. The render panel draws
+ * the trunk from this and nothing else, so the diagram, the per-node timing,
+ * and the stage-plane taps cannot disagree about what the frame did — they are
+ * three projections of the same list.
  *
- * The labels are the exact strings `SparseVoxelDrySceneRenderer.encode` and
- * `RasterWaterPipeline.encode` hand `tracePhase`, plus the coarse six-phase
- * partition (`PRESENTATION_TRACE_PHASES`) a frame falls back to when the SVO
- * path is not required — that partition names stages by position, so its labels
- * are attached to the nodes that actually occupy those positions and a
- * non-SVO scene still prices the passes it does run. Matching on the label rather
- * than the `PaperPhaseId` is deliberate: five distinct passes share the
- * `svo-primary` id and three share `svo-cone-lighting`, so an id-keyed lookup
- * would collapse primary visibility into seam closure and report one number for
- * both. `averagePerformanceTraces` keys its accumulator by `id\0label`, so the
- * labels survive averaging and are the finest grain the trace offers.
+ * ## Why stage ids and not labels
+ *
+ * Every seam used to carry its own `{ id, label }` literal at the encode site,
+ * and this table matched on the label string. Two hand-maintained lists, one
+ * of them inside three ten-thousand-line encoders: a renamed pass detached its
+ * row from its cost silently, and a detached row did not go blank — it became
+ * the band's only unmeasured row and inherited the band's whole
+ * fence-partitioned wall. That is how *world build* came to report 27.9 ms on
+ * frames whose world maintenance encoded nothing at all.
+ *
+ * The seam now names a stage id from `render-frame-stages.ts` and the trace
+ * label is looked up from it, so there is one list; `STAGE_NODE` below assigns
+ * every stage to exactly one row and is exhaustive over the ABI, so adding a
+ * stage without giving it a row is a type error rather than a pass charged to
+ * whoever closes next.
+ *
+ * ## What a row's number is a number of
+ *
+ * A row is priced from the frame's own manifest first and its timestamps
+ * second, because the manifest answers a question timestamps cannot: a stage
+ * that encoded no pass is a true zero, and a stage whose passes are render
+ * passes on a tile-based GPU is unpriceable — the two used to arrive here
+ * identically as "no measurement". Only the second kind may absorb a band's
+ * wall residual; the first kind reads zero, which is what it is.
  */
 
 import type { SvoRenderStageView } from "../svo/svo-render-diagnostics";
+import {
+  RENDER_FRAME_STAGES,
+  RENDER_FRAME_STAGE_TRACE,
+  type RenderFrameManifest,
+  type RenderFrameStageId,
+} from "./render-frame-stages";
 import type { PerformanceTrace } from "./performance-trace";
 import type { SvoConeTracingMode } from "../svo/svo-render-options";
 import type { SvoConeRadianceReconstruction, SvoRenderTuning } from "../svo/svo-render-tuning";
@@ -92,13 +111,87 @@ export interface RenderPipelineTip {
   readonly gate?: string;
 }
 
-export interface RenderPipelineNode {
-  readonly id: string;
+/**
+ * Every row of the trunk. Declared as a union so `STAGE_NODE` cannot file a
+ * stage under a row that does not exist.
+ */
+export type RenderPipelineNodeId =
+  | "sparse-world-build"
+  | "derived-lighting"
+  | "rigid-pose-mirror"
+  | "fluid-coverage"
+  | "stationary-reuse"
+  | "primary-traversal"
+  | "thin-glass"
+  | "scene-primitive"
+  | "rigid-impostor"
+  | "seam-closure"
+  | "cone-visibility"
+  | "voxel-light-cache"
+  | "world-gi-cache"
+  | "reduced-shade"
+  | "sky-lighting"
+  | "deferred-lighting"
+  | "gi-composition"
+  | "surface-extraction"
+  | "water-interfaces"
+  | "caustics"
+  | "optical-composite"
+  | "inspection-overlays"
+  | "present";
+
+/**
+ * Which row reports each stage of the frame.
+ *
+ * Exhaustive over the encoders' stage ABI: a stage added to `RENDER_FRAME_STAGES`
+ * without an entry here is a type error, which is the whole point — an
+ * unassigned stage is a pass chain nothing prices.
+ */
+const STAGE_NODE = {
+  "world-topology-publish": "sparse-world-build",
+  "world-proxy-voxelize": "sparse-world-build",
+  "world-derived-lighting": "derived-lighting",
+  "world-radiance-feedback": "derived-lighting",
+  "rigid-pose-mirror": "rigid-pose-mirror",
+  "fluid-coverage": "fluid-coverage",
+  "surface-extraction": "surface-extraction",
+  caustics: "caustics",
+  "scene-primitive-visibility": "scene-primitive",
+  "near-field-band": "scene-primitive",
+  "brick-cull": "primary-traversal",
+  "cone-prepass": "cone-visibility",
+  "primary-traversal": "primary-traversal",
+  "rigid-discovery": "rigid-impostor",
+  "thin-glass-discovery": "thin-glass",
+  "seam-closure": "seam-closure",
+  "voxel-light-cache": "voxel-light-cache",
+  "compact-cone-lighting": "cone-visibility",
+  "cone-fanout": "cone-visibility",
+  "world-gi-cache": "world-gi-cache",
+  "reduced-shade": "reduced-shade",
+  "sky-lighting": "sky-lighting",
+  "deferred-lighting": "deferred-lighting",
+  "inline-traversal-shading": "primary-traversal",
+  "fluid-only-rigid-bodies": "deferred-lighting",
+  "fluid-only-background": "deferred-lighting",
+  "dry-scene-unavailable": "deferred-lighting",
+  "water-front-interface": "water-interfaces",
+  "water-back-interface": "water-interfaces",
+  "water-rear-interfaces": "water-interfaces",
+  "optical-composite": "optical-composite",
+  "inspection-overlays": "inspection-overlays",
+  present: "present",
+} as const satisfies Record<RenderFrameStageId, RenderPipelineNodeId>;
+
+/** The stages one row owns, in encode order. */
+export const renderPipelineNodeStages = (node: RenderPipelineNodeId): readonly RenderFrameStageId[] =>
+  RENDER_FRAME_STAGES.filter((stage) => STAGE_NODE[stage] === node);
+
+export interface RenderPipelineNodeDefinition {
+  readonly id: RenderPipelineNodeId;
   readonly band: RenderPipelineBandId;
   readonly side: "left" | "right";
   readonly label: string;
-  /** Trace labels this node owns. Summed for its measured cost. */
-  readonly phaseLabels: readonly string[];
   /**
    * The ablation switch this node's lamp throws.
    *
@@ -196,14 +289,13 @@ export const RENDER_PIPELINE_COLLAPSE_GROUPS: Readonly<Record<RenderPipelineColl
 // Declared before freezing so every `state`/`chip` closure is contextually
 // typed by `RenderPipelineNode`; `Object.freeze` on a bare literal widens the
 // array and takes the parameter types with it.
-const NODES: readonly RenderPipelineNode[] = [
+const NODES: readonly RenderPipelineNodeDefinition[] = [
   {
     id: "sparse-world-build",
     band: "source",
     side: "left",
     label: "Sparse world build",
     // Incremental voxelization, encoded before any pass that marches it.
-    phaseLabels: ["Sparse world maintenance"],
     stage: "sparse-world-build",
     taps: [],
     toggleable: true,
@@ -219,11 +311,54 @@ const NODES: readonly RenderPipelineNode[] = [
       : `depth ${context.refinementDepth} · leaf ${context.leafVoxel_mm.toFixed(3).replace(/\.?0+$/, "")} mm`),
   },
   {
+    id: "derived-lighting",
+    band: "source",
+    side: "right",
+    label: "Derived lighting publish",
+    // Split out of the world-build row, which used to close one seam over the
+    // whole maintenance subtree and then report whatever the source band's
+    // wall residual happened to be. The planner and the builder are the
+    // expensive half of that subtree and they run on a different schedule from
+    // voxelization — a settled world still runs radiance feedback for a
+    // bounded window after every source revision — so one row could never be
+    // read as either.
+    taps: [],
+    toggleable: false,
+    tip: {
+      summary: "Rebuilds what the lighting passes march instead of the octree itself: the node-mip opacity pyramid's address plan, the tetrahedral radiance pages, and the bounded diffuse feedback window that follows every source revision. Runs off the world build's completion, not the camera, so it is silent on a settled scene and appears whenever the scene is touched.",
+      writes: "node-mip opacity pyramid · tetrahedral radiance pages",
+      feeds: "cone visibility · GI composition",
+      gate: "a valid derived address plan, after a source revision or while the feedback window is open",
+    },
+    state: (context) => (context.disabledStages.has("sparse-world-build") ? "off"
+      : context.rendererActive ? "on" : "unavailable"),
+    chip: (context) => (context.disabledStages.has("sparse-world-build") ? "frozen · with the world"
+      : "plan · build · feedback"),
+  },
+  {
+    id: "rigid-pose-mirror",
+    band: "source",
+    side: "left",
+    label: "Rigid pose mirror",
+    // Copies, not passes — but they are encoded work between two seams, and a
+    // seam that does not own them charges them to a neighbour. The row exists
+    // so the partition is a partition.
+    taps: [],
+    toggleable: false,
+    tip: {
+      summary: "Mirrors the solver's resident rigid poses into the renderer's own body buffer and stages a copy for the host, so a gizmo tracks a body the solver is moving. Buffer copies rather than passes: this row is here so the frame's partition has no unowned commands in it, and it should read at or near zero.",
+      reads: "solver-resident rigid pose buffer",
+      writes: "renderer body buffer · pose staging",
+      gate: "a resident rigid buffer with at least one body",
+    },
+    state: (context) => (context.rendererActive ? "on" : "unavailable"),
+    chip: () => "copy · staged readback",
+  },
+  {
     id: "fluid-coverage",
     band: "source",
     side: "right",
     label: "Fluid coverage",
-    phaseLabels: ["SVO fluid coverage"],
     stage: "fluid-coverage",
     taps: [],
     toggleable: true,
@@ -245,7 +380,6 @@ const NODES: readonly RenderPipelineNode[] = [
     label: "Stationary reuse gate",
     // A decision, not a dispatch. Its worth shows up as the primary row going
     // to zero on a hit, which is where it belongs.
-    phaseLabels: [],
     spendsNoFrameTime: true,
     switchedBy: "stationaryPrimaryReuseEnabled",
     taps: [],
@@ -263,7 +397,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "primary",
     side: "left",
     label: "Primary traversal",
-    phaseLabels: ["SVO primary visibility", "SVO traversal + dry shading", "SVO brick instance cull"],
     stage: "primary-traversal",
     taps: [
       "pass-claimant", "primary-depth", "surface-normal", "primary-failure", "publication-generation",
@@ -284,7 +417,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "primary",
     side: "right",
     label: "Thin-glass discovery",
-    phaseLabels: ["SVO raster thin-glass discovery"],
     stage: "thin-glass",
     taps: ["glass-discovery"],
     toggleable: true,
@@ -302,7 +434,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "primary",
     side: "left",
     label: "Scene-primitive tier",
-    phaseLabels: ["SVO exact live-scene primitive visibility", "SVO near-field analytic band selection"],
     stage: "scene-primitive",
     taps: [],
     toggleable: true,
@@ -319,7 +450,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "primary",
     side: "right",
     label: "Rigid impostor",
-    phaseLabels: ["SVO analytic rigid discovery"],
     stage: "rigid-impostor",
     taps: ["rigid-impostor"],
     toggleable: true,
@@ -336,7 +466,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "primary",
     side: "left",
     label: "Primary seam closure",
-    phaseLabels: ["SVO primary seam closure"],
     switchedBy: "silhouetteRefinementEnabled",
     taps: [],
     toggleable: true,
@@ -353,7 +482,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "lighting",
     side: "right",
     label: "Cone prepass + visibility",
-    phaseLabels: ["SVO compacted cone lighting", "SVO cone-lighting prepass", "SVO cone sample fan-out"],
     switchedBy: "svoConeTracingMode",
     taps: ["cone-ambient-visibility", "cone-light-visibility", "cone-geometry"],
     toggleable: true,
@@ -374,7 +502,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "lighting",
     side: "left",
     label: "Voxel light cache",
-    phaseLabels: ["SVO voxel light cache"],
     stage: "voxel-light-cache",
     taps: [],
     toggleable: true,
@@ -398,7 +525,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "lighting",
     side: "right",
     label: "World-space GI cache",
-    phaseLabels: ["SVO persistent world-space environmental GI"],
     stage: "world-gi-cache",
     taps: ["cone-radiance"],
     toggleable: true,
@@ -419,7 +545,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "shading",
     side: "left",
     label: "Reduced-rate opaque shade",
-    phaseLabels: ["SVO reduced-rate opaque shading"],
     stage: "reduced-shade",
     taps: [],
     toggleable: true,
@@ -444,7 +569,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "shading",
     side: "right",
     label: "Sky lighting",
-    phaseLabels: ["SVO deferred sky lighting"],
     stage: "sky-lighting",
     taps: [],
     toggleable: true,
@@ -463,12 +587,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "shading",
     side: "right",
     label: "Deferred lighting",
-    phaseLabels: [
-      "SVO deferred dry lighting",
-      "Dry scene lighting",
-      "Fluid-only background clear",
-      "SVO dry-scene unavailable · fail closed",
-    ],
     stage: "deferred-lighting",
     taps: ["dry-radiance", "lighting-partition"],
     toggleable: true,
@@ -488,9 +606,8 @@ const NODES: readonly RenderPipelineNode[] = [
     side: "left",
     label: "GI composition",
     // A term inside the deferred draw, not a dispatch. It has a row because it
-    // is the frame's energy balance and has to be steerable; it never claims a
-    // phase of its own, so it reports the pass it runs inside.
-    phaseLabels: [],
+    // is the frame's energy balance and has to be steerable; it owns no stage
+    // of its own, so it reports the pass it runs inside.
     costInsideNode: "deferred-lighting",
     switchedBy: "svoGlobalIlluminationEnabled",
     taps: [],
@@ -513,10 +630,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "output",
     side: "left",
     label: "Surface extraction",
-    phaseLabels: [
-      "Water surface extraction",
-      "Surface extraction + caustics",
-    ],
     stage: "surface-extraction",
     taps: [],
     toggleable: true,
@@ -536,15 +649,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "output",
     side: "right",
     label: "Water + spray interfaces",
-    phaseLabels: [
-      "Water + spray front interface",
-      "Water + spray back interface",
-      "Water rear interfaces",
-      "Front/back water interfaces",
-      "Fluid-less scene front interface clear",
-      "Fluid-less scene back interface clear",
-      "Fluid-less scene rear interface clears",
-    ],
     stage: "water-interfaces",
     taps: ["water-depth"],
     toggleable: true,
@@ -565,7 +669,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "output",
     side: "right",
     label: "Caustic map",
-    phaseLabels: ["Water caustic map"],
     stage: "caustics",
     taps: [],
     toggleable: true,
@@ -583,10 +686,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "output",
     side: "left",
     label: "Layered optical composite",
-    phaseLabels: [
-      "Layered optical composite",
-      "Optical composite",
-    ],
     stage: "optical-composite",
     taps: [],
     toggleable: true,
@@ -604,7 +703,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "output",
     side: "right",
     label: "Inspection overlays",
-    phaseLabels: ["Inspection overlays"],
     stage: "inspection-overlays",
     taps: [],
     toggleable: true,
@@ -622,10 +720,6 @@ const NODES: readonly RenderPipelineNode[] = [
     band: "output",
     side: "left",
     label: "Upscale + present",
-    phaseLabels: [
-      "Final upscale + present",
-      "Final presentation",
-    ],
     stage: "present",
     taps: [],
     toggleable: true,
@@ -644,129 +738,201 @@ const NODES: readonly RenderPipelineNode[] = [
   },
 ];
 
-export const RENDER_PIPELINE_NODES: readonly RenderPipelineNode[] = Object.freeze(NODES);
+export interface RenderPipelineNode extends RenderPipelineNodeDefinition {
+  /** The stages this node owns, in encode order. Summed for its measured cost. */
+  readonly stages: readonly RenderFrameStageId[];
+}
+
+export const RENDER_PIPELINE_NODES: readonly RenderPipelineNode[] = Object.freeze(
+  NODES.map((node) => Object.freeze({ ...node, stages: renderPipelineNodeStages(node.id) })));
+
+/** A stage's trace label back to its stage id. Derived, so it cannot drift. */
+const STAGE_BY_TRACE_LABEL: ReadonlyMap<string, RenderFrameStageId> = new Map(
+  RENDER_FRAME_STAGES.map((stage) => [RENDER_FRAME_STAGE_TRACE[stage].phase.label, stage]));
 
 /**
- * Measured milliseconds per trace label, summed across a whole averaged trace.
+ * Measured milliseconds per *stage*, summed across a whole averaged trace.
  *
- * Summed rather than replaced: a pass can publish its label more than once in a
- * frame — the cone stage does — and the node owns all of it.
+ * Summed rather than replaced: a stage can close its seam more than once in a
+ * frame — the scene-primitive tier does — and the stage owns all of it. Phases
+ * whose label names no stage are ignored here and reported separately by
+ * {@link renderPipelineUnownedPhases}, because a phase nothing owns is a
+ * measurement bug and must be visible as one rather than silently dropped.
  */
-export function renderPipelinePhaseDurations(trace: PerformanceTrace | undefined): ReadonlyMap<string, number> {
-  const durations = new Map<string, number>();
+export function renderPipelineStageDurations(
+  trace: PerformanceTrace | undefined,
+): ReadonlyMap<RenderFrameStageId, number> {
+  const durations = new Map<RenderFrameStageId, number>();
   if (!trace) return durations;
   for (const phase of trace.phases) {
-    durations.set(phase.label, (durations.get(phase.label) ?? 0) + phase.duration_ms);
+    const stage = STAGE_BY_TRACE_LABEL.get(phase.label);
+    if (stage === undefined) continue;
+    durations.set(stage, (durations.get(stage) ?? 0) + phase.duration_ms);
   }
   return durations;
+}
+
+/** Trace labels in a captured partition that belong to no stage of the ABI. */
+export function renderPipelineUnownedPhases(trace: PerformanceTrace | undefined): readonly string[] {
+  if (!trace) return [];
+  return [...new Set(trace.phases
+    .filter((phase) => !STAGE_BY_TRACE_LABEL.has(phase.label))
+    .map((phase) => phase.label))];
 }
 
 /**
  * Why a node shows the number it shows.
  *
- * The distinction that matters is `withheld` against `unmeasured`. Both used to
- * print an em dash, which said "unknown" about a pass the frame demonstrably did
- * not encode — so switching a stage off made its cost *less* legible, exactly
- * when the user had asked what it was worth.
+ * The distinction that matters is between the three ways a row can have no
+ * per-pass figure, which used to be one em dash:
  *
- * - `measured`   summed from phases this node owns in the averaged trace.
- * - `withheld`   the pass was not encoded. A true zero, not a gap.
+ * - `withheld`   the stage encoded no pass. A true zero, not a gap. This is
+ *                what the manifest is for, and it is the one state that
+ *                *disqualifies* a row from absorbing a band's wall residual.
+ * - `unpriced`   the stage encoded render passes, whose timestamp pairs are
+ *                tiler windows rather than costs on this hardware. The only
+ *                honest figure for these is a fence-partitioned band wall.
+ * - `unmeasured` no trace has arrived yet, or the partition is too coarse to
+ *                name this node.
+ *
+ * and beside them:
+ *
+ * - `measured`   summed from the stages this node owns in the averaged trace.
  * - `shared`     a term inside another node's pass; the figure is the host's.
- * - `idle`       the detailed partition arrived, but this gated pass did not run.
  * - `structural` a gate or a decision that never spends frame time either way.
- * - `unmeasured` no trace yet, or a partition too coarse to name this node.
- * - `wall` derived from the band's fence-partitioned wall: this row is the
- *   band's only pass without a trusted per-pass timestamp, so the band wall
- *   minus the band's measured compute lands at its junction.
+ * - `wall`       derived from the band's fence-partitioned wall: this row is
+ *                the band's only `unpriced` row, so the band wall minus the
+ *                band's measured compute lands at its junction.
  */
-export type RenderPipelineCostKind = "measured" | "withheld" | "shared" | "idle" | "structural" | "unmeasured" | "wall";
+export type RenderPipelineCostKind =
+  | "measured" | "withheld" | "shared" | "unpriced" | "structural" | "unmeasured" | "wall";
 
 export interface RenderPipelineMeasurement {
   readonly kind: RenderPipelineCostKind;
-  /** Undefined only when `kind` is `unmeasured`. */
+  /** Undefined only when `kind` is `unmeasured` or `unpriced`. */
   readonly duration_ms?: number;
   /** Fraction of the frame, for the node's bar. */
   readonly share: number;
   /** For `shared`, the node whose pass carries this one's work. */
   readonly insideNode?: string;
+  /** For `measured` and `unpriced`: render passes this row owns that no timestamp can price. */
+  readonly unpricedRenderPasses?: number;
 }
 
 const UNMEASURED: RenderPipelineMeasurement = Object.freeze({ kind: "unmeasured", share: 0 });
 
-function measureLabels(
-  phaseLabels: readonly string[],
-  durations: ReadonlyMap<string, number>,
+/**
+ * What the frame encoded, as the panel asks it: per stage, and only the two
+ * questions a row's cost depends on.
+ */
+export interface RenderPipelineEncoding {
+  readonly encoded: boolean;
+  readonly renderPasses: number;
+}
+
+export function renderPipelineEncodings(
+  manifest: RenderFrameManifest | undefined,
+): ReadonlyMap<RenderFrameStageId, RenderPipelineEncoding> | undefined {
+  if (!manifest) return undefined;
+  return new Map(manifest.stages.map((entry) => [entry.stage, {
+    encoded: entry.computePasses + entry.renderPasses > 0,
+    renderPasses: entry.renderPasses,
+  }]));
+}
+
+function measureStages(
+  stages: readonly RenderFrameStageId[],
+  durations: ReadonlyMap<RenderFrameStageId, number>,
+  encodings: ReadonlyMap<RenderFrameStageId, RenderPipelineEncoding> | undefined,
   total_ms: number,
 ): RenderPipelineMeasurement {
-  if (phaseLabels.length === 0) return UNMEASURED;
+  if (stages.length === 0) return UNMEASURED;
   let measured = false;
   let duration_ms = 0;
-  for (const label of phaseLabels) {
-    const value = durations.get(label);
-    if (value === undefined) continue;
-    measured = true;
-    duration_ms += value;
+  let renderPasses = 0;
+  let encodedAnything = false;
+  for (const stage of stages) {
+    const value = durations.get(stage);
+    if (value !== undefined) {
+      measured = true;
+      duration_ms += value;
+    }
+    const encoding = encodings?.get(stage);
+    if (encoding?.encoded) encodedAnything = true;
+    renderPasses += encoding?.renderPasses ?? 0;
   }
-  if (!measured) return UNMEASURED;
-  return { kind: "measured", duration_ms, share: total_ms > 0 ? Math.min(1, duration_ms / total_ms) : 0 };
+  // The manifest decides first. A stage the frame reached and encoded nothing
+  // into is zero however loud the band around it was, and saying so is the
+  // difference between this panel and the one that reported 27.9 ms of world
+  // build on a world that did not move.
+  if (encodings && !encodedAnything) return { kind: "withheld", duration_ms: 0, share: 0 };
+  if (measured && renderPasses === 0) {
+    return { kind: "measured", duration_ms, share: total_ms > 0 ? Math.min(1, duration_ms / total_ms) : 0 };
+  }
+  if (renderPasses > 0) {
+    return measured
+      // Part of this row is compute and priced, part is render and is not. The
+      // figure shown is the part that is real; the count says how much of the
+      // row it leaves out.
+      ? { kind: "measured", duration_ms, share: total_ms > 0 ? Math.min(1, duration_ms / total_ms) : 0, unpricedRenderPasses: renderPasses }
+      : { kind: "unpriced", share: 0, unpricedRenderPasses: renderPasses };
+  }
+  if (measured) {
+    return { kind: "measured", duration_ms, share: total_ms > 0 ? Math.min(1, duration_ms / total_ms) : 0 };
+  }
+  return UNMEASURED;
 }
 
 /**
  * What this node cost the frame, and on what basis.
  *
  * `state` is an input rather than something re-derived here because it already
- * encodes the whole answer for a node that did not run: a pass the encoder
- * skipped has no phase in the trace, and only the state can tell that silence
- * apart from a trace that has not arrived.
+ * encodes the whole answer for a node the user switched off. Everything else
+ * now comes from the frame's own manifest, which is why a stage that encoded
+ * nothing no longer depends on the panel guessing from a predicate.
  */
 export function measureRenderPipelineNode(
   node: RenderPipelineNode,
-  durations: ReadonlyMap<string, number>,
+  durations: ReadonlyMap<RenderFrameStageId, number>,
   total_ms: number,
   state: RenderPipelineNodeState,
-  exhaustive = true,
+  encodings?: ReadonlyMap<RenderFrameStageId, RenderPipelineEncoding>,
 ): RenderPipelineMeasurement {
   if (node.spendsNoFrameTime) return { kind: "structural", duration_ms: 0, share: 0 };
-  const own = measureLabels(node.phaseLabels, durations, total_ms);
-  if (own.kind === "measured") return own;
+  const own = measureStages(node.stages, durations, encodings, total_ms);
+  if (own.kind !== "unmeasured") return own;
   // A node the frame did not encode is zero, and saying so is the point of
   // having a switch. Claiming a measured zero without a trace is not, so this
-  // still requires one to have arrived — `durations` is empty until then.
-  if ((state === "off" || state === "unavailable") && durations.size > 0) {
+  // still requires evidence to have arrived — either a manifest or a partition.
+  if ((state === "off" || state === "unavailable") && (encodings !== undefined || durations.size > 0)) {
     return { kind: "withheld", duration_ms: 0, share: 0 };
   }
   if (node.costInsideNode) {
     const host = RENDER_PIPELINE_NODES.find((candidate) => candidate.id === node.costInsideNode);
-    const hostCost = host ? measureLabels(host.phaseLabels, durations, total_ms) : UNMEASURED;
+    const hostCost = host ? measureStages(host.stages, durations, encodings, total_ms) : UNMEASURED;
     if (hostCost.kind === "measured") {
       return { ...hostCost, kind: "shared", insideNode: node.costInsideNode };
     }
   }
-  // A detailed phase partition names every pass that actually encoded. Once
-  // at least one such phase exists, a missing label is therefore a gated pass
-  // that spent exactly zero this frame, not a missing measurement.
-  if (durations.size > 0 && exhaustive) return { kind: "idle", duration_ms: 0, share: 0 };
   return UNMEASURED;
 }
 
 /** Band totals, so a collar can price the section it heads. */
 export function measureRenderPipelineBand(
   band: RenderPipelineBandId,
-  durations: ReadonlyMap<string, number>,
+  durations: ReadonlyMap<RenderFrameStageId, number>,
   total_ms: number,
-  exhaustive = true,
+  encodings?: ReadonlyMap<RenderFrameStageId, RenderPipelineEncoding>,
 ): RenderPipelineMeasurement {
-  // Own labels only. A `costInsideNode` node's figure is its host's, so summing
+  // Own stages only. A `costInsideNode` node's figure is its host's, so summing
   // it into the band would count one pass twice and make the bands overrun the
   // frame they are shares of.
-  const measured = measureLabels(
-    RENDER_PIPELINE_NODES.filter((node) => node.band === band).flatMap((node) => node.phaseLabels),
+  return measureStages(
+    RENDER_PIPELINE_NODES.filter((node) => node.band === band).flatMap((node) => node.stages),
     durations,
+    encodings,
     total_ms,
   );
-  return measured.kind === "unmeasured" && durations.size > 0 && exhaustive
-    ? { kind: "idle", duration_ms: 0, share: 0 }
-    : measured;
 }
 
 /** The hover tip, as one string. Every word of prose in the panel comes through here. */

@@ -279,7 +279,7 @@ dawnTest("native 8-cubed ocean pages close every B16 depth rung on one uniform t
       water.setSceneOptics({ container: scene.container });
       const encoder = device.createCommandEncoder();
       assert.ok(water.encode(encoder, output, 32, 32, 32, false, 1, 1,
-        undefined, undefined, undefined, true));
+        undefined, undefined, true));
       device.queue.submit([encoder.finish()]);
       const diagnostics = await water.completeSurfaceDiagnostics();
       assert.ok(diagnostics && diagnostics.vertexCount > 0);

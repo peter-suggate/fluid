@@ -1,3 +1,4 @@
+import type { RenderFrameSeam } from "../../core/render-frame-stages";
 import type { WebGPUFineLevelSetBrickSource } from "../../core/levelset-consumer-abi";
 import type { SceneDescription } from "../../core/model";
 import {
@@ -2864,8 +2865,8 @@ export class WebGPUOctreeProjection implements OctreeTopologyEngine {
   stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]) {
     return this.sparseBrickWorld?.stageLivePrimitiveUpdates(updates) ?? false;
   }
-  encodeSceneMaintenance(encoder: GPUCommandEncoder) {
-    return this.sparseBrickWorld?.encodeSceneMaintenance(encoder) ?? false;
+  encodeSceneMaintenance(encoder: GPUCommandEncoder, seam?: RenderFrameSeam<"world">) {
+    return this.sparseBrickWorld?.encodeSceneMaintenance(encoder, false, seam) ?? false;
   }
   // QA-only lane structure names. Every consumer of these reaches the
   // projection structurally, so the names have to survive the lane split even

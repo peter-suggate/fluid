@@ -33,13 +33,19 @@ import type { CoarseLevelSetConsumerSource } from "./levelset-consumer-abi";
 import { globalFineClassifiedEmitShader, globalFineClassifiedIndirectScanShader } from "./webgpu-water-global-fine-tetra";
 import { globalFineSurfaceClassificationShader } from "./webgpu-water-global-fine-classify";
 import { marchingCubesLookupWGSL } from "./marching-cubes-lookup.wgsl";
-import type { GPUTimestampPhase } from "./performance-trace";
+import type { RenderFrameSeam } from "./render-frame-stages";
 import type { FrameBandPartitioner } from "./webgpu-frame-band-sampler";
 import {
   disabledRenderStagesEqual,
   NO_DISABLED_RENDER_STAGES,
   type DisabledRenderStages,
 } from "./render-stage-switches";
+import {
+  createBoxTankWallField,
+  PACKED_TANK_WALL_MAGIC,
+  packTankWallField,
+  type TankWallField,
+} from "./tank-wall-field";
 
 /**
  * Rasterized water presentation for the WebGPU renderer.
@@ -207,17 +213,28 @@ export interface DrySceneReplacementResult {
   readonly sampledTargetView: GPUTextureView;
 }
 
-export type RenderPathTracePhase = (phase: GPUTimestampPhase) => void;
+/**
+ * How this pipeline closes its own seams. Typed to the water pipeline's stages,
+ * so it can neither misspell one nor close a stage another encoder owns.
+ */
+export type RenderPathTraceStage = RenderFrameSeam<"water">;
 
 export interface RasterWaterPipelineOptions {
   /** Experimental mass-derived sub-cell films on solid container faces. */
   thinWallFilms?: boolean;
 }
 
+/**
+ * The dry scene, encoded into this pipeline's own background attachment.
+ *
+ * It takes no seam: the replacement owns a different encoder's stages, and the
+ * caller that supplies it already holds the seam for them. Forwarding one
+ * through here would be this pipeline handing out a closer for stages it does
+ * not own.
+ */
 export type DrySceneReplacementEncoder = (
   encoder: GPUCommandEncoder,
   target: GPUTexture | GPUTextureView,
-  tracePhase?: RenderPathTracePhase,
 ) => DrySceneReplacementResult | false;
 
 /** What to put behind raster water when no dry-scene encoder is requested. */
@@ -1219,6 +1236,7 @@ struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, c
 @group(0) @binding(13) var rearBackNormal:texture_2d<f32>;
 @group(0) @binding(14) var causticMap:texture_2d<f32>;
 ${waterSceneOpticsShaderLibrary(0, 15, 16)}
+@group(0) @binding(17) var<storage,read> tankWalls:array<u32>;
 ${cameraApertureShaderLibrary("u")}
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
@@ -1363,9 +1381,27 @@ fn causticModulation(textureUV:vec2f)->vec3f{
   let modulation=mix(vec3f(1.0),deposited,coverage);
   return mix(vec3f(1.0),modulation,strength);
 }
+fn rasterTankWallBit(side:u32,cell:u32)->bool{
+  let offset=tankWalls[4u+side];
+  return (tankWalls[offset+(cell>>5u)]&(1u<<(cell&31u)))!=0u;
+}
+fn rasterTankWallSolid(point:vec3f,normal:vec3f,size:vec3f)->bool{
+  // Floor and authored ceiling are not part of the editable side atlas.
+  if(normal.y<-.5){return true;}
+  if(normal.y>.5){return u.cameraTarget.w>.5;}
+  let nx=i32(tankWalls[1]);let ny=i32(tankWalls[2]);let nz=i32(tankWalls[3]);
+  let v=clamp(i32(floor(point.y/max(size.y,1e-6)*f32(ny))),0,ny-1);
+  if(abs(normal.x)>.5){
+    let u=clamp(i32(floor((point.z/size.z+.5)*f32(nz))),0,nz-1);
+    let side=select(1u,0u,normal.x<0.0);
+    return rasterTankWallBit(side,u32(u+nz*v));
+  }
+  let u=clamp(i32(floor((point.x/size.x+.5)*f32(nx))),0,nx-1);
+  let side=select(3u,2u,normal.z<0.0);
+  return rasterTankWallBit(side,u32(u+nx*v));
+}
 fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
-  // The garden pond has no vessel: nothing to composite in front of the water.
-  if(environmentIndex()==7){return color;}
+  if(tankWalls[0u]!=${PACKED_TANK_WALL_MAGIC}u){return color;}
   if(sphericalContainerEnabled()){
     if(!sphericalContainerGlassVisible()){return color;}
     let center=sphericalContainerCenter();let radius=sphericalContainerRadius();let hit=sphereHit(ro,rd,center,radius);
@@ -1382,9 +1418,15 @@ fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
   }
   let size=u.container.xyz;let mn=vec3f(-size.x*.5,0,-size.z*.5);let mx=vec3f(size.x*.5,size.y,size.z*.5);let hit=boxHit(ro,rd,mn,mx);
   if(hit.x>hit.y||hit.y<=0.0){return color;}
-  let glassT=select(hit.x,hit.y,hit.x<=1e-4);
+  var glassT=select(hit.x,hit.y,hit.x<=1e-4);
   if(glassT<=1e-4||glassT>resolvedDrySceneDepth(sceneDepth)+.001){return color;}
-  let center=(mn+mx)*.5;let halfSize=size*.5;let point=ro+rd*glassT;let normal=boxNormal(point,center,halfSize);
+  let center=(mn+mx)*.5;let halfSize=size*.5;var point=ro+rd*glassT;var normal=boxNormal(point,center,halfSize);
+  // A ray through a removed near-side cell can still meet an occupied far
+  // wall. Resolve the second box hit before declaring the whole ray a hole.
+  if(!rasterTankWallSolid(point,normal,size)){
+    glassT=hit.y;point=ro+rd*glassT;normal=boxNormal(point,center,halfSize);
+    if(glassT<=1e-4||!rasterTankWallSolid(point,normal,size)){return color;}
+  }
   let q=abs((point-center)/max(halfSize,vec3f(1e-5)));
   let edgeCoordinate=max(max(min(q.x,q.y),min(q.x,q.z)),min(q.y,q.z));
   let outerEdge=smoothstep(.955,.998,edgeCoordinate);
@@ -1542,6 +1584,10 @@ export interface WaterSceneOpticsInput {
   readonly terrainContentStamp?: string;
   /** The plan the caustic map projects onto, in metres. */
   readonly container?: { readonly width_m: number; readonly depth_m: number };
+  /** Same face-cell authority the solver uses for the four editable sides. */
+  readonly wallField?: TankWallField;
+  /** Whether the document asks the renderer to draw the vessel at all. */
+  readonly vesselVisible?: boolean;
 }
 
 export class RasterWaterPipeline {
@@ -1622,6 +1668,9 @@ export class RasterWaterPipeline {
   private causticTexture?: GPUTexture;
   private causticReceiver?: GPUTexture;
   private waterSceneOpticsBuffer?: GPUBuffer;
+  private tankWallBuffer?: GPUBuffer;
+  private tankWallField?: TankWallField;
+  private tankWallVisible = true;
   private readonly waterSceneOptics = new Float32Array(WATER_SCENE_OPTICS_FLOATS);
   private waterSceneOpticsDirty = true;
   private causticStrength = 0;
@@ -1711,6 +1760,23 @@ export class RasterWaterPipeline {
       input.container?.depth_m ?? 0,
       input.terrainContentStamp,
     );
+    const wallVisible = input.vesselVisible !== false;
+    if (input.wallField && (input.wallField !== this.tankWallField
+      || wallVisible !== this.tankWallVisible)) {
+      this.tankWallField = input.wallField;
+      this.tankWallVisible = wallVisible;
+      const packed = packTankWallField(input.wallField);
+      packed[0] = wallVisible ? PACKED_TANK_WALL_MAGIC : 0;
+      this.tankWallBuffer?.destroy();
+      this.tankWallBuffer = this.device.createBuffer({
+        label: "Raster tank wall face cells",
+        size: packed.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(this.tankWallBuffer, 0, packed);
+      this.compositeBindGroups = new WeakMap();
+      this.rebuildBindGroups();
+    }
     this.flushSceneOptics();
   }
 
@@ -1874,6 +1940,7 @@ export class RasterWaterPipeline {
       { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
       { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
+      ,{ binding: 17, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } }
     ] });
     // Binding 3 is the caustic receiver the optics library declares and this
     // pass never reads. It stays in the layout because the library is included
@@ -1944,6 +2011,16 @@ export class RasterWaterPipeline {
     this.globalFineRenderParams = this.device.createBuffer({ label: "Water global fine parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.fallbackSparseControl = this.device.createBuffer({ label: "Water disabled storage binding", size: WATER_DISABLED_STORAGE_BYTES, usage: GPUBufferUsage.STORAGE });
     this.waterSceneOpticsBuffer = this.device.createBuffer({ label: "Water scene optics and caustic receiver", size: WATER_SCENE_OPTICS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    if (!this.tankWallBuffer) {
+      const packed = packTankWallField(createBoxTankWallField({ x: 1, y: 1, z: 1 }));
+      packed[0] = this.tankWallVisible ? PACKED_TANK_WALL_MAGIC : 0;
+      this.tankWallBuffer = this.device.createBuffer({
+        label: "Raster tank wall face cells fallback",
+        size: packed.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(this.tankWallBuffer, 0, packed);
+    }
     // Allocated unconditionally: the composite declares the receiver whether or
     // not the scene has ground, and a bind group with a missing entry is not a
     // bind group. A container-less scene leaves it zeroed and the uniform's
@@ -2299,15 +2376,15 @@ export class RasterWaterPipeline {
   private compositeBindGroupFor(sceneView: GPUTextureView): GPUBindGroup | undefined {
     const cached = this.compositeBindGroups.get(sceneView);
     if (cached) return cached;
-    if (!this.compositeLayout || !this.frontPosition || !this.frontNormal || !this.backPosition || !this.backNormal || !this.rearFrontPosition || !this.rearFrontNormal || !this.rearBackPosition || !this.rearBackNormal || !this.sampler || !this.volume || !this.columnBases || !this.causticTexture || !this.waterSceneOpticsBuffer || !this.causticReceiver) return undefined;
+    if (!this.compositeLayout || !this.frontPosition || !this.frontNormal || !this.backPosition || !this.backNormal || !this.rearFrontPosition || !this.rearFrontNormal || !this.rearBackPosition || !this.rearBackNormal || !this.sampler || !this.volume || !this.columnBases || !this.causticTexture || !this.waterSceneOpticsBuffer || !this.causticReceiver || !this.tankWallBuffer) return undefined;
     const bindGroup = this.device.createBindGroup({ layout: this.compositeLayout, entries: [
-      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }, { binding: 14, resource: this.causticTexture.createView() }, { binding: 15, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 16, resource: this.causticReceiver.createView() }
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }, { binding: 14, resource: this.causticTexture.createView() }, { binding: 15, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 16, resource: this.causticReceiver.createView() }, { binding: 17, resource: { buffer: this.tankWallBuffer } }
     ] });
     this.compositeBindGroups.set(sceneView, bindGroup);
     return bindGroup;
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene", allowSurfaceDiagnostics = true, bandPartitioner?: FrameBandPartitioner, revisionCadenceBypass = false): RasterWaterEncodeResult | false {
+  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, tracePhase?: RenderPathTraceStage, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene", allowSurfaceDiagnostics = true, bandPartitioner?: FrameBandPartitioner, revisionCadenceBypass = false): RasterWaterEncodeResult | false {
     // Count only frames whose source has a completed GPU receipt. The
     // diagnostics/visual panels request full-rate receipts, making this an
     // exact source-mode counter while it is being used to judge fidelity.
@@ -2402,7 +2479,7 @@ export class RasterWaterPipeline {
       }
       this.surfaceDiagnosticsDirty = true;
       this.extractedRevision = revision; this.lastExtractionAt_ms = advancePresentationClock(this.lastExtractionAt_ms, now_ms);
-      tracePhase?.({ id: "surface-extraction", label: "Water surface extraction" });
+      tracePhase?.("surface-extraction");
     }
     // Diagnostics have their own bounded cadence. Retry the copy independently
     // of surface extraction: the solver revision may remain unchanged forever
@@ -2415,14 +2492,13 @@ export class RasterWaterPipeline {
     if (updateCaustics) {
       const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}]});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.causticBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();
       this.causticsValid = true;
-      tracePhase?.({ id: "water-caustics", label: "Water caustic map" });
+      tracePhase?.("caustics");
     }
-    traceBoundary?.();
     // Everything above — extraction, diagnostics, caustics — is the
     // water-surface band; the dry-scene replacement crosses its own internal
     // boundaries, so this scope's encoder must resynchronize afterwards.
     if (bandPartitioner) encoder = bandPartitioner.boundary("water-surface");
-    const sparseSceneResult = drySceneReplacement?.(encoder, this.sceneTexture, tracePhase) ?? false;
+    const sparseSceneResult = drySceneReplacement?.(encoder, this.sceneTexture) ?? false;
     if (bandPartitioner) encoder = bandPartitioner.current;
     if (sparseSceneResult) {
       // A later switch to fluid-only must clear imagery left by this frame.
@@ -2449,7 +2525,7 @@ export class RasterWaterPipeline {
         // Bodies move, so this attachment is authored every frame. The retained
         // clear below is no longer what is on it.
         this.clearBackgroundEncoded = false;
-        tracePhase?.({ id: "dry-scene", label: "Fluid-only rigid bodies" });
+        tracePhase?.("fluid-only-rigid-bodies");
       } else if (!this.clearBackgroundEncoded) {
         // No geometry, shader, draw, or recurring full-frame write. The clear is
         // retained until a dry-scene encoder writes the attachment or it resizes.
@@ -2457,7 +2533,7 @@ export class RasterWaterPipeline {
           view:this.sceneTextureView!,clearValue:FLUID_ONLY_BACKGROUND,loadOp:"clear",storeOp:"store"
         }]}).end();
         this.clearBackgroundEncoded = true;
-        tracePhase?.({ id: "dry-scene", label: "Fluid-only background clear" });
+        tracePhase?.("fluid-only-background");
       }
     } else {
       this.clearBackgroundEncoded = false;
@@ -2468,9 +2544,8 @@ export class RasterWaterPipeline {
       encoder.beginRenderPass({label:"SVO dry-scene unavailable",colorAttachments:[{
         view:this.sceneTextureView!,clearValue:{r:.18,g:0,b:.045,a:65504},loadOp:"clear",storeOp:"store"
       }]}).end();
-      tracePhase?.({ id: "dry-scene", label: "SVO dry-scene unavailable · fail closed" });
+      tracePhase?.("dry-scene-unavailable");
     }
-    traceBoundary?.();
     // Water and spray target the same interface attachments and depth state.
     // Encode both draws in one pass per side so spray does not force two extra
     // full-resolution attachment load/store cycles.
@@ -2482,28 +2557,27 @@ export class RasterWaterPipeline {
     const interfacesWithheld = this.disabledStages.has("water-interfaces");
     if (this.sceneHasFluid && !interfacesWithheld) {
       interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front");
-      tracePhase?.({ id: "water-front-interface", label: "Water + spray front interface" });
+      tracePhase?.("water-front-interface");
       interfacePass("Water + spray back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back");
-      tracePhase?.({ id: "water-back-interface", label: "Water + spray back interface" });
+      tracePhase?.("water-back-interface");
       interfacePass("Water rear front interfaces",this.surfaceRearFrontPipeline,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,"front",false,true);
       interfacePass("Water rear back interfaces",this.surfaceRearBackPipeline,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,"back",false,true);
       // Their own seam: without it these two peeled passes were charged to the
       // optical composite, the next label to close.
-      tracePhase?.({ id: "water-interfaces", label: "Water rear interfaces" });
+      tracePhase?.("water-rear-interfaces");
     } else if (!this.dryInterfaceClearsEncoded) {
       // A fluid-less scene draws no interface geometry. Clear once so the
       // compositor's no-interface input cannot retain a preceding fluid scene.
       const clearPass=(label:string,position:GPUTexture,normal:GPUTexture,depth:GPUTexture)=>{encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}}).end();};
       clearPass("Fluid-less scene front interface clear",this.frontPosition,this.frontNormal,this.frontDepth);
-      tracePhase?.({ id: "water-front-interface", label: "Fluid-less scene front interface clear" });
+      tracePhase?.("water-front-interface");
       clearPass("Fluid-less scene back interface clear",this.backPosition,this.backNormal,this.backDepth);
-      tracePhase?.({ id: "water-back-interface", label: "Fluid-less scene back interface clear" });
+      tracePhase?.("water-back-interface");
       clearPass("Fluid-less scene rear front interface clear",this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth);
       clearPass("Fluid-less scene rear back interface clear",this.rearBackPosition,this.rearBackNormal,this.rearBackDepth);
-      tracePhase?.({ id: "water-interfaces", label: "Fluid-less scene rear interface clears" });
+      tracePhase?.("water-rear-interfaces");
       this.dryInterfaceClearsEncoded = true;
     }
-    traceBoundary?.();
     const compositeBindGroup = sparseSceneResult ? this.compositeBindGroupFor(sparseSceneResult.sampledTargetView) : this.compositeBindGroup;
     if (!compositeBindGroup) return false;
     const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Layered water optical composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});
@@ -2513,10 +2587,10 @@ export class RasterWaterPipeline {
     if (!this.disabledStages.has("optical-composite")) {
       composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
     }
-    composite.end();tracePhase?.({ id: "optical-composite", label: "Layered optical composite" });traceBoundary?.();return { surfaceUpdated: updateSurface, surfaceDiagnosticsCaptured };
+    composite.end();tracePhase?.("optical-composite");return { surfaceUpdated: updateSurface, surfaceDiagnosticsCaptured };
   }
 
   destroy() {
-    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.globalCubeValues,this.globalCubeOffsets,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.globalFineRenderParams,this.fallbackSparseControl,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
+    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.globalCubeValues,this.globalCubeOffsets,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.tankWallBuffer,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.globalFineRenderParams,this.fallbackSparseControl,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

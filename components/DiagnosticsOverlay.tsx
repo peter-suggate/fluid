@@ -9,6 +9,7 @@ import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
 import { resolvedMethodValues, useMethodStore } from "../lib/core/stores/method-store";
 import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import { useSceneStore } from "../lib/core/stores/scene-store";
+import { tankWallOpeningCellCount } from "../lib/core/tank-wall-field";
 
 function telemetrySourceLabel(source?: string) {
   return ({
@@ -38,6 +39,8 @@ export function DiagnosticsOverlay() {
   const { bodies, rigidState, couplingState, gpuInfo, waterSurfacePresentation } = useDiagnosticsStore();
   const method = getMethod(methodId);
   const globalFineVolumeEstimate = gpuInfo?.volumeTelemetrySource === "global-fine";
+  const authoredMassChange = Boolean(scene.fluid.inflow)
+    || tankWallOpeningCellCount(scene.container.wallField) > 0;
   const representedVolumeAliasesPrimary = gpuInfo?.volumeDrift !== undefined
     && gpuInfo?.representedVolumeDrift !== undefined
     && gpuInfo.volumeDrift === gpuInfo.representedVolumeDrift;
@@ -72,8 +75,8 @@ export function DiagnosticsOverlay() {
       <MetricCard label="GPU component CFL" value={gpuInfo?.maxComponentCfl !== undefined ? gpuInfo.maxComponentCfl.toFixed(3) : "—"} unit={`${gpuInfo?.highCflCellCount ?? 0} wet samples above 1`} tone={gpuInfo?.maxComponentCfl !== undefined && gpuInfo.maxComponentCfl <= 4 && (gpuInfo.highCflCellCount ?? 0) < 32 ? "good" : "warn"} />
       <MetricCard label="Phi transport substeps" value={gpuInfo?.lastSubsteps !== undefined ? `${gpuInfo.lastSubsteps}×` : "—"} unit={gpuInfo?.lastDt_s !== undefined ? `${(gpuInfo.lastDt_s * 1000).toFixed(2)} ms interface dt · latest stats sample` : "GPU-governed · latest stats sample"} tone={gpuInfo?.lastSubsteps !== undefined && gpuInfo.lastSubsteps <= 1 ? "good" : "warn"} />
       <MetricCard label="GPU NaN / infinity" value={gpuInfo?.nonFiniteCount !== undefined ? String(gpuInfo.nonFiniteCount) : "—"} unit="across pre-pressure, pressure, and projected fields" tone={gpuInfo?.nonFiniteCount === 0 ? "good" : "warn"} />
-      <MetricCard label={globalFineVolumeEstimate ? "GPU pre-correction occupancy drift" : scene.fluid.inflow ? "GPU net mass change" : "GPU mass drift"} value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}${globalFineVolumeEstimate ? " · smoothed occupancy estimate" : ""}`} tone={scene.fluid.inflow ? "neutral" : gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
-      {!representedVolumeAliasesPrimary && <MetricCard label="GPU represented-volume drift" value={gpuInfo?.representedVolumeDrift !== undefined ? (gpuInfo.representedVolumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}`} tone={gpuInfo?.representedVolumeDrift !== undefined && Math.abs(gpuInfo.representedVolumeDrift) < 0.05 ? "good" : "warn"} />}
+      <MetricCard label={globalFineVolumeEstimate ? "GPU pre-correction occupancy drift" : authoredMassChange ? "GPU net mass change" : "GPU mass drift"} value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}${globalFineVolumeEstimate ? " · smoothed occupancy estimate" : ""}`} tone={authoredMassChange ? "neutral" : gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
+      {!representedVolumeAliasesPrimary && <MetricCard label={authoredMassChange ? "GPU represented-volume change" : "GPU represented-volume drift"} value={gpuInfo?.representedVolumeDrift !== undefined ? (gpuInfo.representedVolumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}`} tone={authoredMassChange ? "neutral" : gpuInfo?.representedVolumeDrift !== undefined && Math.abs(gpuInfo.representedVolumeDrift) < 0.05 ? "good" : "warn"} />}
     </section>
     {rigidState && <section className="scene-instrument-section">
       <div className="section-heading"><h2>Rigid system</h2><span>CPU binary64</span></div>

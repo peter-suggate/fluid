@@ -958,6 +958,8 @@ export async function smokeRenderHybridPresentation(
       grade: scene.lighting?.grade,
       terrain: scene.terrain,
       container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
+      wallField: scene.container.wallField,
+      vesselVisible: scene.container.vessel !== "none",
     });
     pipeline.setVolume(solver.surfaceFieldTexture ?? solver.volumeTexture,
       solver.columnBaseTexture ?? columnFallback);
@@ -980,7 +982,7 @@ export async function smokeRenderHybridPresentation(
         const encoded = pipeline.encode(
           encoder, output.createView(), solver.info.nx, solver.info.ny, solver.info.nz,
           false, solver.info.maximumNeighborDelta ?? 0,
-          revision, undefined, undefined, undefined, force,
+          revision, undefined, undefined, force,
         );
         if (!encoded) throw new Error(`${label} did not encode`);
         device.queue.submit([encoder.finish()]);
@@ -1016,7 +1018,7 @@ export async function smokeRenderHybridPresentation(
       const encoded = pipeline.encode(
         encoder, output.createView(), solver.info.nx, solver.info.ny, solver.info.nz,
         false, solver.info.maximumNeighborDelta ?? 0,
-        revision, undefined, undefined, undefined,
+        revision, undefined, undefined,
         verifyGlobalFineAuthorityTransition || verifyCoarseReceiptRecovery,
       );
       if (!encoded) throw new Error("Hybrid presentation pipeline did not encode a frame");

@@ -1,5 +1,5 @@
 import { repairSceneForContainer, sceneAtFinestCellSize } from "./scene-scale";
-import { latticeAxisDimension, sceneLatticeDimensions, DEFAULT_MAXIMUM_LATTICE_DIMENSION, MINIMUM_LATTICE_DIMENSION } from "./scene-lattice";
+import { boxTankWallFieldForScene, latticeAxisDimension, sceneLatticeDimensions, DEFAULT_MAXIMUM_LATTICE_DIMENSION, MINIMUM_LATTICE_DIMENSION } from "./scene-lattice";
 import { cloneScene, type SceneDescription, type Vec3 } from "./model";
 import {
   boxHandles,
@@ -14,6 +14,8 @@ import {
 } from "./editor-entity";
 import type { FluidBodyBox } from "./editor-fluid-body";
 import { fluidRingActions } from "./editor-fluid-body";
+import type { EditorAction } from "./editor-action";
+import { resampleTankWallField } from "./tank-wall-field";
 
 /**
  * Direct manipulation of the tank itself.
@@ -92,7 +94,11 @@ export function tankResizePatch(
   extents: { width_m: number; height_m: number; depth_m: number },
 ): Pick<SceneDescription, "container" | "fluid" | "terrain"> {
   const next = cloneScene(scene);
+  const previousWalls = next.container.wallField;
   next.container = { ...next.container, ...extents };
+  next.container.wallField = resampleTankWallField(
+    previousWalls, boxTankWallFieldForScene(next).dimensions,
+  );
   repairSceneForContainer(next);
   return { container: next.container, fluid: next.fluid, terrain: next.terrain };
 }
@@ -412,11 +418,24 @@ function tankEntityFor(context: EditorEntityContext): EditorEntity {
  */
 export const tankEntity: EditorEntityDefinition = {
   kind: "tank",
+  // The cut gesture addresses wall cells analytically. Keeping resize handles
+  // surfaced while it is armed would put a second interaction on the same wall.
   surfacedBy: (tool) => tool === "select",
   instances: (context) => [tankEntityFor(context)],
   // The same ring the water offers: see `fluidRingActions`. Pointing at an
   // empty tank and pointing at the water in it are the same question.
-  actions: (context, target) => fluidRingActions(context.scene, target),
+  actions: (context, target) => [
+    ...fluidRingActions(context.scene, target),
+    {
+      id: "cut-wall-opening",
+      label: "Cut opening",
+      icon: "erase",
+      tone: "danger",
+      hint: "Drag a rectangle on any tank wall to remove it and let water out",
+      enabled: context.scene.container.shape !== "sphere",
+      effect: { kind: "arm", tool: "tank-wall-cut" },
+    } satisfies EditorAction,
+  ],
   find: (context, id) => id === TANK_SELECTION_ID ? tankEntityFor(context) : undefined,
   pick: (context, ray, exclude) => {
     if (pickExcluded(exclude, "tank", TANK_SELECTION_ID)) return undefined;

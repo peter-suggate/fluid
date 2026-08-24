@@ -43,6 +43,7 @@ export interface SceneDraft {
 
 export type SceneDraftSubject =
   | "tank"
+  | "tank-wall"
   | "fluid-body"
   | "body"
   | "scenery"

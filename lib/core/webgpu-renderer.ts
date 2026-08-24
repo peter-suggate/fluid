@@ -120,6 +120,13 @@ import {
 } from "./performance-trace";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
 import { FencePartitionedFrameSampler } from "./webgpu-frame-band-sampler";
+import {
+  RENDER_FRAME_STAGE_TRACE,
+  RenderFrameSeamRecorder,
+  type RenderFrameManifest,
+  type RenderFrameSeam,
+  type RenderFrameStageId,
+} from "./render-frame-stages";
 import type { ResourcePluginDefinition } from "./resource-readiness";
 import {
   invalidateGPUCompilationManager,
@@ -458,7 +465,7 @@ export function sceneStructuralKey(scene: SceneDescription): string {
       .map((value) => Math.round(value / cellSize_m)).join(",")
     : "none";
   const lattice = `${sceneLatticeDimensions(scene).join("x")}:${scene.voxelDomain.brickSize_cells}:${boundsCells}`;
-  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.shape ?? "box"}:${scene.container.top}:${scene.container.fluidWallMode}:${scene.container.depthBoundary ?? "closed"}`;
+  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.shape ?? "box"}:${scene.container.top}:${scene.container.fluidWallMode}:${scene.container.depthBoundary ?? "closed"}:${JSON.stringify(scene.container.wallField.faces)}`;
 }
 
 export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
@@ -702,6 +709,16 @@ export interface RendererFrameMetrics {
    * the rolling frame mean never contains a partitioned frame.
    */
   presentationBands?: PerformanceTrace;
+  /**
+   * What the newest recorded frame encoded, stage by stage.
+   *
+   * Timestamps say how long a stage took; this says whether it ran. Without
+   * it, a stage that encoded nothing and a stage whose render passes cannot be
+   * timed both arrive as silence, and the band-wall attribution charges the
+   * band's whole wall to whichever one is silent — which is how a settled
+   * world came to report 27.9 ms of maintenance.
+   */
+  presentationStageManifest?: RenderFrameManifest;
   context: string;
   methodId: string;
   /** True only when this draw encoded and submitted a presentation command buffer. */
@@ -709,15 +726,6 @@ export interface RendererFrameMetrics {
   /** Latest presentation evidence; independent of solver publication authority. */
   waterSurfacePresentation?: WaterSurfacePresentationDiagnostics;
 }
-
-const PRESENTATION_TRACE_PHASES: readonly GPUTimestampPhase[] = [
-  { id: "surface-extraction", label: "Surface extraction + caustics" },
-  { id: "dry-scene", label: "Dry scene lighting" },
-  { id: "water-interfaces", label: "Front/back water interfaces" },
-  { id: "optical-composite", label: "Optical composite" },
-  { id: "inspection-overlay", label: "Inspection overlays" },
-  { id: "present", label: "Final presentation" },
-] as const;
 
 interface PendingInitialRasterPresentation {
   readonly solver: GPUSolverInstance;
@@ -990,6 +998,7 @@ export class FluidLabRenderer {
   private latestPresentationStageTrace?: PerformanceTrace;
   /** Fence-partitioned band walls from the last sampling frame (WP3.1). */
   private latestPresentationBandTrace?: PerformanceTrace;
+  private latestPresentationManifest?: RenderFrameManifest;
   private presentationBandSamplePending = false;
   private presentationBandFrameCounter = 0;
   /** Polled by the paused viewport; each successful transactional source attach requests one repaint. */
@@ -2153,6 +2162,7 @@ export class FluidLabRenderer {
     this.latestPresentationTrace = undefined;
     this.latestPresentationStageTrace = undefined;
     this.latestPresentationBandTrace = undefined;
+    this.latestPresentationManifest = undefined;
   }
 
   private currentFrameMetrics(
@@ -2183,6 +2193,7 @@ export class FluidLabRenderer {
       presentation,
       presentationStages,
       presentationBands,
+      presentationStageManifest: instrumentation.enabled ? this.latestPresentationManifest : undefined,
       context,
       methodId,
       presentationSubmitted,
@@ -3165,7 +3176,6 @@ export class FluidLabRenderer {
     const presentationTraceSampleId = shouldTracePresentation
       ? ++this.presentationTraceSampleId
       : 0;
-    const traceDetailedSvoRenderPath = sparsePresentationRequired;
     const presentationTrace = shouldTracePresentation
       && GPUPassTimestampRecorder.supported(this.device)
       ? new GPUPassTimestampRecorder(this.device, 512, "presentation pass timestamps")
@@ -3184,32 +3194,60 @@ export class FluidLabRenderer {
     // Boundaries ride the presentation's own passes, so the traced frame and
     // the untraced frame submit the same command graph.
     const rawEncoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
-    let encoder = presentationTrace?.instrument(rawEncoder) ?? rawEncoder;
+    // Two questions, two instruments over the same encoder. The timestamp
+    // recorder answers "how long did these passes take"; the seam recorder
+    // answers "were there any" — the question that separates a stage which
+    // spent nothing from a stage whose render passes cannot be timed, and
+    // therefore the question that decides which row a band's wall residual may
+    // land on. It is a pair of integer increments per pass and exists only
+    // while the panel is recording.
+    const seamRecorder = measurementInstrumentationEnabled ? new RenderFrameSeamRecorder() : undefined;
+    const instrumentEncoder = (target: GPUCommandEncoder) =>
+      seamRecorder?.instrument(presentationTrace?.instrument(target) ?? target)
+        ?? presentationTrace?.instrument(target) ?? target;
+    let encoder = instrumentEncoder(rawEncoder);
     const bandSampler = bandSamplingFrame
-      ? new FencePartitionedFrameSampler(this.device, encoder, ++this.presentationTraceSampleId, `${presentationContext}:band-wall`)
+      ? new FencePartitionedFrameSampler(
+        this.device, encoder, ++this.presentationTraceSampleId,
+        `${presentationContext}:band-wall`,
+        // A sampling frame finishes one encoder per band and opens the next.
+        // Uninstrumented successors would leave every stage after the first
+        // boundary reporting zero passes, which is the exact false zero this
+        // recorder exists to prevent.
+        seamRecorder ? (target) => seamRecorder.instrument(target) : undefined)
       : undefined;
     if (bandSampler) this.presentationBandSamplePending = true;
-    const detailedPresentationTrace = traceDetailedSvoRenderPath ? presentationTrace : undefined;
+    // Every path names its own stages now. The six-phase partition that used to
+    // stand in for the non-SVO frame named stages *by position*, so a frame
+    // that skipped one silently relabelled every stage after it; the water
+    // pipeline's own seams are a strictly finer and strictly honest partition
+    // of the same encode, and they close on both arms.
+    const detailedPresentationTrace = presentationTrace;
+    /**
+     * Close one stage of the frame.
+     *
+     * Two ledgers, one call: the timestamp recorder closes a semantic group
+     * over the passes since the last seam, and the seam recorder counts them.
+     * The phase's label is looked up from the stage id rather than written
+     * here, which is what makes the panel's row and this seam the same fact.
+     */
+    const closeStage = (stage: RenderFrameStageId) => {
+      seamRecorder?.close(stage);
+      detailedPresentationTrace?.completePhase(RENDER_FRAME_STAGE_TRACE[stage].phase);
+    };
     // Incremental voxelization: the only work in the frame that changes the
     // structure everything below marches. Withholding it freezes the world at
     // whatever was already built rather than emptying it, which is why this is
     // the one ablation whose image stays correct for a stationary scene.
     if (sparsePresentationRequired && !disabledStages.has("sparse-world-build")) {
-      fluidSource?.encodeSceneMaintenance?.(encoder);
-      if (sparseSceneProducer !== fluidSource) sparseSceneProducer?.encodeSceneMaintenance?.(encoder);
-      detailedPresentationTrace?.completePhase({ id: "scene-upload", label: "Sparse world maintenance" });
+      // The producers close the four world stages themselves, from inside the
+      // maintenance they encode: topology, voxelization, derived lighting and
+      // the radiance feedback window are four different schedules, and one seam
+      // over all of them could report none of them. Two producers can run, and
+      // the second one's seams merge into the first's entries.
+      fluidSource?.encodeSceneMaintenance?.(encoder, closeStage);
+      if (sparseSceneProducer !== fluidSource) sparseSceneProducer?.encodeSceneMaintenance?.(encoder, closeStage);
     }
-    // The SVO cone path names its own stages; every other path walks the fixed
-    // presentation partition in encode order.
-    let fixedPresentationPhase = 0;
-    const closeFixedPresentationPhase = () => {
-      const phase = PRESENTATION_TRACE_PHASES[fixedPresentationPhase];
-      fixedPresentationPhase += 1;
-      if (phase && !traceDetailedSvoRenderPath) presentationTrace?.completePhase(phase);
-    };
-    const completeDetailedPresentationPhase = (phase: GPUTimestampPhase) => {
-      detailedPresentationTrace?.completePhase(phase);
-    };
     if (residentRigidBuffer) encoder.copyBufferToBuffer(residentRigidBuffer, 0, this.bodyBuffer, 0, 12 * 16 * 4);
     // The same records, on their way to the host. See `publishRigidBodyPoses`.
     //
@@ -3222,6 +3260,9 @@ export class FluidLabRenderer {
     // slots are still in flight, so it neither blocks the queue nor paces it.
     const poseStaging = residentRigidBuffer && bodies.length > 0
       ? this.encodeRigidBodyPoseReadback(encoder, residentRigidBuffer) : undefined;
+    // Copies rather than passes, but they are commands between two seams, and
+    // a seam that does not own them charges them to a neighbour.
+    closeStage("rigid-pose-mirror");
     if (sparsePresentationRequired) {
       this.svoDryScenePipeline?.setRigidMotionSource(this.gpuFluid?.rigidMotionBuffer);
       this.svoDryScenePipeline?.setFluidCoverage(this.ensureFluidCoverage(readyGPUFluid, scene));
@@ -3234,7 +3275,6 @@ export class FluidLabRenderer {
     const drySceneReplacement = (
       replacementEncoder: GPUCommandEncoder,
       target: GPUTexture | GPUTextureView,
-      tracePhase?: (phase: GPUTimestampPhase) => void,
     ) => {
       // Reuse is legal only while the complete live render generation and all
       // frame inputs remain unchanged. Source replacement and authored motion
@@ -3259,7 +3299,7 @@ export class FluidLabRenderer {
       })
         ? `${presentationCoherenceKey}|viewport=${this.presentationTexture!.width}x${this.presentationTexture!.height}|scene=${this.svoDryScenePipeline?.sceneEpoch ?? 0}`
         : undefined;
-      const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, primaryCoherenceKey, tracePhase, bandSampler) ?? false;
+      const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, primaryCoherenceKey, closeStage, bandSampler) ?? false;
       svoEncoded = Boolean(replacementResult);
       requestedBundleStatus = this.svoDryScenePipeline?.presentationBundleStatus;
       if (requestedBundleStatus?.state === "failed") {
@@ -3296,6 +3336,8 @@ export class FluidLabRenderer {
       terrain: scene.terrain,
       terrainContentStamp: this.renderSceneTerrainContentStamp,
       container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
+      wallField: scene.container.wallField,
+      vesselVisible: scene.container.vessel !== "none" && environmentId !== "garden",
     });
     // Before the dry pass samples it, and outside the water pipeline's own
     // passes so the volume is complete for the whole frame. Withheld, the
@@ -3303,9 +3345,7 @@ export class FluidLabRenderer {
     // texture — so the delta is the fill + mip chain and nothing downstream.
     const fluidCoverageEncoded = !disabledStages.has("fluid-coverage")
       && (this.svoFluidCoverage?.encode(encoder) ?? false);
-    if (fluidCoverageEncoded) {
-      detailedPresentationTrace?.completePhase({ id: "scene-upload", label: "SVO fluid coverage" });
-    }
+    closeStage("fluid-coverage");
     const pendingInitialRaster = this.pendingInitialRasterPresentation;
     const initialRasterSourceReady = Boolean(pendingInitialRaster
       && !pendingInitialRaster.submitted
@@ -3323,8 +3363,7 @@ export class FluidLabRenderer {
       false, gpuInfo?.maximumNeighborDelta ?? 0,
       gpuInfo?.encodedSteps ?? 0,
       sparsePresentationRequired ? drySceneReplacement : undefined,
-      closeFixedPresentationPhase,
-      detailedPresentationTrace ? completeDetailedPresentationPhase : undefined,
+      closeStage,
       surfaceDiagnosticsRequired && initialRasterSourceReady,
       sparsePresentationRequired ? "require-dry-scene" : "clear",
       !this.simulationRunning || initialRasterSourceReady,
@@ -3542,31 +3581,29 @@ export class FluidLabRenderer {
     // Closed after the probes and the decoration draw, not before them: the
     // seam is what attributes their passes, and closing early charged every
     // probe to the upscale row.
-    if (inspectionOverlayEncoded) {
-      completeDetailedPresentationPhase({ id: "inspection-overlay", label: "Inspection overlays" });
-    }
-    closeFixedPresentationPhase();
+    // Closed whether or not anything drew: a stage that encoded nothing is a
+    // zero the panel can state, where a missing seam is a silence some other
+    // row ends up answering for.
+    closeStage("inspection-overlays");
     // The swap-chain texture is acquired and cleared either way: a frame that
     // never wrote it would leave the compositor showing an older one, so a
     // withheld blit would read as "free" while the image stopped updating for a
     // reason nothing on screen could explain.
-    const finalPresentationPhase = { id: "present", label: "Final upscale + present" } as const;
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.0194,g:0.0145,b:0.0097,a:1},loadOp:"clear",storeOp:"store"}]});
     if (!disabledStages.has("present")) {
       upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);
     }
     upscalePass.end();
-    detailedPresentationTrace?.completePhase(finalPresentationPhase);
-    closeFixedPresentationPhase();
-    // A frame that skipped part of the raster path would leave the remaining
-    // stages named by position rather than by the work they contain. Drop that
-    // sample to the queue-wall observation instead of publishing a mislabelled
-    // partition — and without retiring the recorder, which is still healthy.
-    const hardwarePresentationTrace = traceDetailedSvoRenderPath
-      || fixedPresentationPhase === PRESENTATION_TRACE_PHASES.length
-      ? presentationTrace
-      : undefined;
-    const hardwarePresentationTraceResolved = hardwarePresentationTrace?.resolve(encoder) ?? false;
+    closeStage("present");
+    // What this frame encoded, stage by stage. Published every recorded frame,
+    // including the fence-partitioned sampling frames the pass recorder skips —
+    // it is the sampling frame's manifest that decides which of its bands' rows
+    // may carry that band's wall.
+    if (seamRecorder) this.latestPresentationManifest = seamRecorder.manifest();
+    // Every stage names itself now, so there is no mislabelled partition to
+    // guard against: a stage the frame skipped is simply absent, and the
+    // manifest says it encoded nothing.
+    const hardwarePresentationTraceResolved = presentationTrace?.resolve(encoder) ?? false;
     if (!hardwarePresentationTraceResolved) presentationTrace?.destroy();
     presentationQueueTrace?.begin();
     // Every admitted advance precedes this presentation in the same WebGPU
@@ -3605,8 +3642,8 @@ export class FluidLabRenderer {
       });
     }
     const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
-    const presentationStageTraceRead = hardwarePresentationTraceResolved && hardwarePresentationTrace
-      ? hardwarePresentationTrace.readSemanticTrace({
+    const presentationStageTraceRead = hardwarePresentationTraceResolved && presentationTrace
+      ? presentationTrace.readSemanticTrace({
         sampleId: presentationTraceSampleId,
         lane: "presentation",
         context: presentationContext,

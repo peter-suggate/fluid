@@ -7,11 +7,14 @@ import { useSceneStore } from "../lib/core/stores/scene-store";
 import { useUIStore } from "../lib/core/stores/ui-store";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import { averagePerformanceTraces, type PerformanceTrace } from "../lib/core/performance-trace";
+import { mergeRenderFrameManifests, type RenderFrameManifest } from "../lib/core/render-frame-stages";
 import {
   measureRenderPipelineBand,
   measureRenderPipelineNode,
-  renderPipelinePhaseDurations,
+  renderPipelineEncodings,
+  renderPipelineStageDurations,
   renderPipelineTipText,
+  renderPipelineUnownedPhases,
   RENDER_PIPELINE_BANDS,
   RENDER_PIPELINE_COLLAPSE_GROUPS,
   RENDER_PIPELINE_NODES,
@@ -190,26 +193,56 @@ const BAND_WALL_COLLARS: Partial<Record<string, string>> = {
   "optical-composite": "output",
 };
 
+/**
+ * What is left of a band's wall once its rows are accounted for, said plainly.
+ *
+ * A band wall is a queue fence difference, so it contains the band's GPU work
+ * *and* whatever the instrument costs — submit turnaround, and the latency of
+ * the completion callback the timestamp is taken in. When every row in the
+ * band is priced or is a measured zero, the residual is not hidden work in one
+ * of them; it belongs to the measurement, and the panel says so rather than
+ * naming a row for it. That naming is what put 27.9 ms on a world build whose
+ * stages encoded nothing.
+ */
+function bandResidualNote(
+  wall_ms: number,
+  entries: readonly { cost: RenderPipelineMeasurement }[],
+  manifested: boolean,
+): string {
+  const compute_ms = entries.reduce((sum, entry) =>
+    sum + (entry.cost.kind === "measured" ? entry.cost.duration_ms ?? 0 : 0), 0);
+  const silent = entries.filter((entry) => entry.cost.kind === "withheld").length;
+  const residual_ms = Math.max(0, wall_ms - compute_ms);
+  if (!manifested) {
+    return `${formatPipelineDuration(compute_ms)} of it is measured compute; the rest is unattributed until a stage manifest arrives.`;
+  }
+  return `${formatPipelineDuration(compute_ms)} of it is measured compute and ${formatPipelineDuration(residual_ms)} is unattributed`
+    + (silent > 0
+      ? `. ${silent} row${silent === 1 ? "" : "s"} in this band encoded no pass at all this frame, so the residual is not theirs — it is submit turnaround and fence-callback latency, which a queue-wall measurement cannot separate from the work.`
+      : ", spread across this band's render passes and the instrument's own submit turnaround.");
+}
+
 /** Why the figure on the pipe is the kind of number it is, in frame terms. */
-function costExplanation(cost: RenderPipelineMeasurement, exhaustive: boolean): string {
+function costExplanation(cost: RenderPipelineMeasurement): string {
   const measuredSuffix = "GPU execution time, summed over the passes this node owns and averaged across the trace window.";
+  const unpriced = cost.unpricedRenderPasses
+    ? `\n\n${cost.unpricedRenderPasses} render pass${cost.unpricedRenderPasses === 1 ? "" : "es"} in this row cannot be priced: a Metal render pass's timestamp pair brackets a tiler window, not the pass. Only the band's fence-partitioned wall can measure them.`
+    : "";
   switch (cost.kind) {
     case "withheld":
-      return "0 ms — not encoded this frame. The switch withholds the pass, so this is a measured zero rather than a missing measurement.";
+      return "0 ms — this stage encoded no pass in the recorded frame. The frame's own stage manifest says so, which is why this is a measured zero rather than a missing measurement.";
     case "shared":
       return `Not a dispatch of its own: this work runs inside ${cost.insideNode?.replace(/-/g, " ").toUpperCase()}, and ⊂ marks the figure as that pass's.`;
-    case "idle":
-      return "0 ms — the detailed GPU partition arrived, and this gated pass did not encode in the sampled frame.";
+    case "unpriced":
+      return `This stage encoded ${cost.unpricedRenderPasses} render pass${cost.unpricedRenderPasses === 1 ? "" : "es"} and no compute, and a Metal render pass's timestamp pair is a tiler window rather than a cost. The band's fence-partitioned wall is the only honest figure for it; it reads here when this is the band's only such row.`;
     case "structural":
       return "A gate, not a pass. It spends no frame time either way — its worth shows up as the row it lets the frame skip going to zero.";
     case "wall":
-      return `${formatPipelineDuration(cost.duration_ms ?? 0)} wall-clock, derived: this is the band's only row without a trusted per-pass timestamp, so the band's fence-partitioned wall minus its measured compute lands here. Render passes included; a different basis than the compute figures around it.`;
+      return `${formatPipelineDuration(cost.duration_ms ?? 0)} wall-clock, derived: this is the band's only row whose passes no timestamp can price, so the band's fence-partitioned wall minus its measured compute lands here. Render passes included; a different basis than the compute figures around it.`;
     case "unmeasured":
-      return exhaustive
-        ? "No phase in this frame's partition names this node: either no trace has arrived yet, or this stage encoded no pass."
-        : "No trustworthy per-pass cost is available. The stage either encoded no pass, or is a Metal render pass whose timestamp pair is a whole tiler window rather than this stage's execution cost.";
+      return "No measurement has arrived for this row yet: no trace, or no stage manifest for the frame it would describe.";
     default:
-      return `${formatPipelineDuration(cost.duration_ms ?? 0)} ${measuredSuffix}`;
+      return `${formatPipelineDuration(cost.duration_ms ?? 0)} ${measuredSuffix}${unpriced}`;
   }
 }
 
@@ -226,6 +259,8 @@ function usePresentationTiming(): {
   readonly stageSource?: "gpu";
   /** Fence-partitioned band walls: real queue-wall cost per encode band, from 1-in-16 sampling frames. */
   readonly bands?: PerformanceTrace;
+  /** Which stages the recorded frames encoded, and with how many passes of each kind. */
+  readonly manifest?: RenderFrameManifest;
 } {
   const reports = useDiagnosticsStore((state) => state.performanceReports);
   return useMemo(() => {
@@ -256,6 +291,13 @@ function usePresentationTiming(): {
       stages: hardwareMean,
       stageSource: hardwareMean ? "gpu" : undefined,
       bands: averagePerformanceTraces(bands),
+      // Merged across the window rather than taken from the newest frame: an
+      // intermittent stage — caustics on mesh-move frames, world maintenance
+      // on edit frames — encodes on some frames and not others, and a row that
+      // ever encodes must not be treated as a silent one.
+      manifest: mergeRenderFrameManifests(recent
+        .map((report) => report.presentationStageManifest)
+        .filter((entry): entry is RenderFrameManifest => entry !== undefined)),
     };
   }, [reports]);
 }
@@ -339,7 +381,18 @@ export function RenderPipelineOverlay() {
   const trace = timing.frame;
   const stageTrace = timing.stages;
   const durations = useMemo(
-    () => renderPipelinePhaseDurations(liveTiming ? stageTrace : undefined), [stageTrace, liveTiming]);
+    () => renderPipelineStageDurations(liveTiming ? stageTrace : undefined), [stageTrace, liveTiming]);
+  // What the frame encoded, which is a different question from what it cost and
+  // the one that decides whether a silent row is a zero or an unpriced pass.
+  const encodings = useMemo(
+    () => renderPipelineEncodings(liveTiming ? timing.manifest : undefined), [timing.manifest, liveTiming]);
+  // A trace label that names no stage of the ABI is a measurement bug — a seam
+  // publishing a label the registry does not own — and it is louder as a
+  // console warning than as a row that quietly reads zero.
+  const unowned = useMemo(() => renderPipelineUnownedPhases(stageTrace), [stageTrace]);
+  useEffect(() => {
+    if (unowned.length > 0) console.warn("Render trace phases owned by no pipeline stage:", unowned);
+  }, [unowned]);
   const measured = liveTiming && trace !== undefined;
   const total_ms = trace?.total_ms ?? 0;
   const stageTotal_ms = stageTrace?.total_ms ?? 0;
@@ -654,32 +707,39 @@ export function RenderPipelineOverlay() {
   };
 
   const graphTotal_ms = stageSpan_ms > 0 ? stageSpan_ms : stageTotal_ms;
-  const exhaustive = stageTrace?.measurementSource !== "gpu-pass-timestamp";
   const walls = liveTiming ? bandWalls : undefined;
 
   const bands: readonly PipelineBand[] = RENDER_PIPELINE_BANDS.map((band): PipelineBand => {
-    const bandCost = measureRenderPipelineBand(band.id, durations, graphTotal_ms, exhaustive);
+    const bandCost = measureRenderPipelineBand(band.id, durations, graphTotal_ms, encodings);
     const bandWall_ms = walls?.get(band.id);
     const nodes = RENDER_PIPELINE_NODES.filter((node) => node.band === band.id);
-    // The wall reads at a row's junction, not on the collar, whenever it can
-    // be attributed: when exactly one reachable row in the band has no
-    // trusted per-pass cost, that row IS what the wall measured beyond the
-    // band's compute, so the junction that would read "—" carries the real
-    // number. The collar keeps the wall only when the band has several
-    // unmeasured rows and the split is unknowable.
     const entries = nodes.map((node) => {
       const state = node.state(context);
-      const cost: RenderPipelineMeasurement = perPassSplit
-        ? measureRenderPipelineNode(node, durations, graphTotal_ms, state, exhaustive)
+      const cost: RenderPipelineMeasurement = perPassSplit || encodings
+        ? measureRenderPipelineNode(node, durations, graphTotal_ms, state, encodings)
         : { kind: "unmeasured", share: 0 };
       return { node, state, cost };
     });
-    const unmeasuredRows = entries.filter((entry) => entry.cost.kind === "unmeasured" && entry.state !== "unavailable");
-    const wallRow = bandWall_ms !== undefined && unmeasuredRows.length === 1 ? unmeasuredRows[0] : undefined;
+    // The wall reads at a row's junction, not on the collar, whenever it can be
+    // attributed — but only a row whose passes exist and cannot be timed is a
+    // candidate. A row that encoded nothing is not "unmeasured", it is zero,
+    // and handing it the band's residual is how a settled world came to report
+    // 27.9 ms of maintenance. When more than one row is unpriceable, or none
+    // is, the split is unknowable and the figure stays on the collar where it
+    // reads as the band's own.
+    const unpricedRows = entries.filter((entry) =>
+      entry.state !== "unavailable"
+      && (entry.cost.kind === "unpriced" || (entry.cost.kind === "unmeasured" && !encodings)));
+    const wallRow = bandWall_ms !== undefined && unpricedRows.length === 1 ? unpricedRows[0] : undefined;
     if (wallRow && bandWall_ms !== undefined) {
       const compute_ms = entries.reduce((sum, entry) =>
         sum + (entry.cost.kind === "measured" ? entry.cost.duration_ms ?? 0 : 0), 0);
-      wallRow.cost = { kind: "wall", duration_ms: Math.max(0, bandWall_ms - compute_ms), share: 0 };
+      wallRow.cost = {
+        kind: "wall",
+        duration_ms: Math.max(0, bandWall_ms - compute_ms),
+        share: 0,
+        unpricedRenderPasses: wallRow.cost.unpricedRenderPasses,
+      };
     }
     const priced = perPassSplit && bandCost.duration_ms !== undefined;
     const rows: PipelineRow[] = [];
@@ -719,7 +779,7 @@ export function RenderPipelineOverlay() {
         cost: {
           kind: cost.kind,
           duration_ms: cost.duration_ms,
-          explanation: `${node.label}\n\n${costExplanation(cost, exhaustive)}`,
+          explanation: `${node.label}\n\n${costExplanation(cost)}`,
         },
         lamp: {
           kind: "switch",
@@ -763,7 +823,9 @@ export function RenderPipelineOverlay() {
       share: priced && graphTotal_ms > 0 ? bandCost.share : undefined,
       wall: bandWall_ms !== undefined && !wallRow ? {
         ms: bandWall_ms,
-        title: `${formatPipelineDuration(bandWall_ms)} wall-clock for this band's whole encode segment, render passes included.\n\nMeasured by splitting one frame in sixteen at band boundaries into separate submits and timing each queue fence. Sampling frames are excluded from the frame mean.`,
+        title: `${formatPipelineDuration(bandWall_ms)} wall-clock for this band's whole encode segment, render passes included.\n\n`
+          + `Measured by splitting one frame in sixteen at band boundaries into separate submits and timing each queue fence. Sampling frames are excluded from the frame mean.\n\n`
+          + bandResidualNote(bandWall_ms, entries, encodings !== undefined),
       } : undefined,
       rows,
     };

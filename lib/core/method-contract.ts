@@ -1,3 +1,4 @@
+import type { RenderFrameSeam } from "./render-frame-stages";
 import type { FluidPipelineGraph } from "./fluid-pipeline";
 import type { SceneDescription } from "./model";
 import type { GPUQuality } from "./gpu-quality";
@@ -348,7 +349,7 @@ export interface GPUSolverInstance {
    * Presentation calls this even while simulation is paused so sparse
    * accelerators can converge without a solver step or a queue fence.
    */
-  encodeSceneMaintenance?(encoder: GPUCommandEncoder): void;
+  encodeSceneMaintenance?(encoder: GPUCommandEncoder, seam?: RenderFrameSeam<"world">): void;
   /** User-triggered ray query against authoritative GPU rigid poses. */
   pickRigidBody?(origin: Vec3, direction: Vec3): Promise<GPURigidBodyPick | undefined>;
   /**

@@ -96,6 +96,39 @@ fn activeId(gid:vec3u)->vec3i{return vec3i(gid)+vec3i(vec3u(
 fn inflowGridDims()->vec3i{return dims();}
 fn valid(p: vec3i) -> bool { let d=dims(); return all(p >= vec3i(0)) && all(p < d); }
 fn clampCell(p: vec3i) -> vec3i { return clamp(p, vec3i(0), dims()-vec3i(1)); }
+fn tankWallWord(index:u32)->u32{
+  return activeScratch[u32(round(params.dropExtent.z))+index];
+}
+fn tankWallBit(side:u32,cell:u32)->bool{
+  let offset=tankWallWord(4u+side);
+  return (tankWallWord(offset+(cell>>5u))&(1u<<(cell&31u)))!=0u;
+}
+fn tankSideBoundaryFace(id:vec3i,axis:u32)->bool{
+  let d=dims();var neighbor=id;neighbor[axis]+=1;
+  if(axis==0u){return (id.x==-1&&neighbor.x==0)||(id.x==d.x-1&&neighbor.x==d.x);}
+  if(axis==2u){return (id.z==-1&&neighbor.z==0)||(id.z==d.z-1&&neighbor.z==d.z);}
+  return false;
+}
+fn tankSideWallSolid(id:vec3i,axis:u32)->bool{
+  let d=dims();var neighbor=id;neighbor[axis]+=1;
+  if(axis==0u){
+    let q=select(id,neighbor,id.x<0);if(q.y<0||q.y>=d.y||q.z<0||q.z>=d.z){return true;}
+    let side=select(1u,0u,id.x<0);return tankWallBit(side,u32(q.z+d.z*q.y));
+  }
+  if(axis==2u){
+    let q=select(id,neighbor,id.z<0);if(q.y<0||q.y>=d.y||q.x<0||q.x>=d.x){return true;}
+    let side=select(3u,2u,id.z<0);return tankWallBit(side,u32(q.x+d.x*q.y));
+  }
+  return true;
+}
+fn outsideThroughOpenTankSide(p:vec3i)->bool{
+  let d=dims();
+  if(p.x<0){return !tankSideWallSolid(vec3i(-1,clamp(p.y,0,d.y-1),clamp(p.z,0,d.z-1)),0u);}
+  if(p.x>=d.x){return !tankSideWallSolid(vec3i(d.x-1,clamp(p.y,0,d.y-1),clamp(p.z,0,d.z-1)),0u);}
+  if(p.z<0){return !tankSideWallSolid(vec3i(clamp(p.x,0,d.x-1),clamp(p.y,0,d.y-1),-1),2u);}
+  if(p.z>=d.z){return !tankSideWallSolid(vec3i(clamp(p.x,0,d.x-1),clamp(p.y,0,d.y-1),d.z-1),2u);}
+  return false;
+}
 // Canonical reductions for the horizontal D4 group. Reflections exchange
 // operands inside opposite-direction pairs; x/z exchange operands of the
 // horizontal pair sum. The papers prescribe the stencil, not its add order.
@@ -514,6 +547,9 @@ fn faceOpenFraction(id:vec3i,axis:u32)->f32{
     // The authored open top is exterior air, not a solid face. Every other
     // domain boundary remains a static, fully covered wall.
     if(axis==1u&&valid(id)&&id.y==dims().y-1&&neighbor.y==dims().y&&params.boundary.w>0.5){return 1.0;}
+    if(!hasSphericalContainer()&&tankSideBoundaryFace(id,axis)){
+      return select(1.0,0.0,tankSideWallSolid(id,axis));
+    }
     return 0.0;
   }
   return 1.0-faceSolidData(id,axis).w;
@@ -540,6 +576,9 @@ fn pressureFaceData(id:vec3i,axis:u32)->vec4f{
     if(axis==2u&&depthSymmetry()&&valid(id)!=valid(neighbor)){return vec4f(0.0);}
     if(axis==1u&&valid(id)&&id.y==dims().y-1&&neighbor.y==dims().y&&params.boundary.w>0.5){return vec4f(0.0,0.0,0.0,1.0);}
     if(valid(id)==valid(neighbor)){return vec4f(0.0);}
+    if(!hasSphericalContainer()&&tankSideBoundaryFace(id,axis)){
+      return vec4f(0.0,0.0,0.0,select(1.0,0.5,tankSideWallSolid(id,axis)));
+    }
     // A box wall cuts exactly half of its boundary dual cell.  A spherical
     // vessel is only tangent to the rectangular domain, however, so using
     // that planar 1/2 fraction across the whole side opens a large artificial
@@ -594,6 +633,7 @@ fn normalSurfaceOccupancy(id:vec3i)->f32{
   // gradient instead of inventing an air interface at the wall. Only an open
   // top (boundary.w) is allowed to expose liquid to exterior air.
   if(id.y>=dims().y&&params.boundary.w>0.5){return 0.0;}
+  if(outsideThroughOpenTankSide(id)){return 0.0;}
   return surfaceOccupancy(clampCell(id));
 }
 fn surfaceGradient(id:vec3i)->vec3f{

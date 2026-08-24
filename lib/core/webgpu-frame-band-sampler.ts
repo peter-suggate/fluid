@@ -69,6 +69,16 @@ export class FencePartitionedFrameSampler implements FrameBandPartitioner {
     firstEncoder: GPUCommandEncoder,
     private readonly sampleId: number,
     private readonly context: string,
+    /**
+     * Applied to every encoder this sampler opens after a boundary.
+     *
+     * A sampling frame is the one frame whose bands carry a wall, so it is the
+     * frame whose manifest decides where that wall may land. An uninstrumented
+     * successor encoder would report every stage after the first boundary as
+     * having encoded nothing — the precise false zero the manifest exists to
+     * prevent — so the caller's instrumentation has to follow the encoder.
+     */
+    private readonly instrument?: (encoder: GPUCommandEncoder) => GPUCommandEncoder,
   ) {
     this.encoder = firstEncoder;
     // Everything already queued (solver advances) retires before this does,
@@ -89,7 +99,8 @@ export class FencePartitionedFrameSampler implements FrameBandPartitioner {
     void this.device.queue.onSubmittedWorkDone().then(() => {
       fence.completedAt_ms = performance.now();
     }).catch(() => { /* Device loss voids the sample. */ });
-    this.encoder = this.device.createCommandEncoder({ label: `Fluid Lab frame · after ${band}` });
+    const opened = this.device.createCommandEncoder({ label: `Fluid Lab frame · after ${band}` });
+    this.encoder = this.instrument?.(opened) ?? opened;
     return this.encoder;
   }
 

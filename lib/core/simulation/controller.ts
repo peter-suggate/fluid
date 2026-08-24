@@ -1040,6 +1040,10 @@ class SimulationController {
         && metrics.presentationBands.capturedAt_ms >= instrumentation.enabledAt_ms
         && performanceTraceMatchesLane(metrics.presentationBands, "gpu", "presentation")
         ? metrics.presentationBands : undefined,
+      // No lane or timestamp guard: the manifest is a statement about the
+      // encode, not a measurement of it, and it is republished every recorded
+      // frame. Instrumentation being off is the only reason it can be absent.
+      presentationStageManifest: metrics.presentationStageManifest,
     };
     diagnostics.pushPerformanceReport(report);
     const activityStore = usePerformanceActivityStore.getState();

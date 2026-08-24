@@ -3073,25 +3073,14 @@ fn classifyDirtyPressureCells(@builtin(global_invocation_id)gid:vec3u){
 
 // PTR1 and PCA1 consume mutable construction authority here. Fine edge values
 // and diagonals publish directly into ordinary persistent solve storage.
-fn ptrFrameGeneration()->u32{return atomicLoad(&activity[0]);}
 fn ptrTopologyGeneration()->u32{return atomicLoad(&topologyArena[topologyWorklistBase()]);}
-fn ptrPCMCellCandidateGeneration()->u32{return pcmCellCandidateGeneration();}
-fn ptrPCMRowCandidateGeneration()->u32{return pcmRowCandidateGeneration();}
 fn ptrPressureCoefficientCandidateGeneration()->u32{return pcfCandidateGeneration();}
-fn ptrPCMCellAcceptedGeneration()->u32{return pcmCellAcceptedGeneration();}
-fn ptrPCMRowAcceptedGeneration()->u32{return pcmRowAcceptedGeneration();}
 fn ptrPressureCoefficientAcceptedGeneration()->u32{return pcfAcceptedGeneration();}
-fn ptrCellCapacity()->u32{return p.counts.x;}
 fn pcmCellAcceptedTopologyContains(cell:u32)->bool{return cellActive(cell);}
 fn ptrBrickCellRange(brick:u32,encoded:u32)->vec2u{
   if(encoded==INVALID||(encoded&0x80000000u)==0u){return vec2u(0u);}
   return templateBrickCellRange(brick,encoded&0x7fffffffu);
 }
-fn ptrApplyPressureCellClassification(cell:u32,current:bool)->bool{
-  if(current){return classifyPressureCell(cell);}
-  state[p.stateOffsets2.w+cell]=0.0;return false;
-}
-
 // HTP1 compatibility accessors preserve the resident template's exact stable
 // IDs and packed arithmetic while PCF1 is migrated into the resident arena.
 fn cm12HotHeaderValid()->bool{return true;}
@@ -4204,6 +4193,38 @@ fn projectPressureRow(row:u32){
   let pressureOpen=select(1.0,rowPressureOpenFraction(row),hasSolidBoundaries());
   state[destinationFaceVelocity()+row]-=pressureOpen*jump/theta;
 }
+
+// Authored outer-wall openings are the only sparse-air rows whose centers lie
+// on the domain box. The characteristic transport intentionally clamps to the
+// bounded lattice, so debit their projected outward flux explicitly. Receipts
+// are mass (density * finest-cell volume), accumulated before one cell writer
+// applies the total from every open side touching that cell.
+@compute @workgroup_size(64)
+fn scatterOpenTankBoundaryOutflow(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);
+  if(row==INVALID||!rowAccepted(row)||rowKind(row)!=3u||rowTermCount(row)!=1u){return;}
+  let axis=rowAxis(row);if(axis==1u){return;}
+  let position=rowCenter(row)[axis];
+  if(position>1e-4&&position<f32(p.dimensions[axis])-1e-4){return;}
+  let term=rowTermOffset(row);let cell=termCell(term);
+  let outward=-sign(termCoefficient(term))*state[destinationFaceVelocity()+row];
+  if(outward<=0.0){return;}
+  let density=max(0.0,state[destinationDensity()+cell]);
+  let mass=min(density*cellVolume(cell),density*p.frame.x*outward*rowArea(row));
+  if(mass>0.0){atomicAdd(&conditioning[cell],-i32(round(mass*CM12_TRANSPORT_FIXED)));}
+}
+
+@compute @workgroup_size(64)
+fn finalizeOpenTankBoundaryOutflow(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let receipt=f32(atomicLoad(&conditioning[cell]))/CM12_TRANSPORT_FIXED;
+  if(receipt>=0.0){return;}
+  let previous=state[destinationDensity()+cell];
+  let density=max(0.0,previous+receipt/cellVolume(cell));
+  state[destinationDensity()+cell]=density;
+  if(density<CM12_DRY_CELL_THRESHOLD){state[destinationGamma()+cell]=1.0;}
+  if(density!=previous){incrementalActivityMarkCellClosure(cell);}
+}
 @compute @workgroup_size(64)
 fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
   let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
@@ -4491,15 +4512,13 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       let row=incidenceRow(incidence);if(!rowAccepted(row)){continue;}
       let own=termCoefficient(incidenceTerm(incidence));
       if(rowArea(row)<=1e-8){continue;}
-      let axis=rowAxis(row);let rowPosition=rowCenter(row);
-      // A sparse-air row on the domain box is the closed container wall, not
-      // a liquid-air interface. Treating the floor and side walls as surface
-      // made calm bottom bricks permanently complex/hot and refined them after
-      // the tank had settled. Only omitted air strictly inside the domain is
-      // free-surface evidence.
-      let omittedAirInside=rowKind(row)==3u&&rowPosition[axis]>1e-4
-        &&rowPosition[axis]<f32(p.dimensions[axis])-1e-4;
-      var crosses=omittedAirInside&&ownWet;var sideHasFluid=false;
+      let axis=rowAxis(row);
+      let rowPosition=rowCenter(row);
+      // Closed outer faces still have no row. Therefore a sparse-air row on
+      // the domain box is necessarily an authored wall opening and carries
+      // the same free-surface evidence as omitted air inside the domain.
+      let airPort=rowKind(row)==3u;
+      var crosses=airPort&&ownWet;var sideHasFluid=false;
       var sideHasSurfaceFluid=false;
       let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
       for(var term=begin;term<end;term+=1u){

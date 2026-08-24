@@ -1,3 +1,4 @@
+import type { RenderFrameSeam } from "../core/render-frame-stages";
 import type { SceneDescription } from "../core/model";
 import type { GPUEulerianInfo } from "../core/webgpu-eulerian";
 import type { GPUSolverInstance } from "../core/method-contract";
@@ -435,7 +436,9 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
   stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]): boolean {
     return this.world.stageLivePrimitiveUpdates(updates);
   }
-  encodeSceneMaintenance(encoder: GPUCommandEncoder): boolean { return this.world.encodeSceneMaintenance(encoder); }
+  encodeSceneMaintenance(encoder: GPUCommandEncoder, seam?: RenderFrameSeam<"world">): boolean {
+    return this.world.encodeSceneMaintenance(encoder, false, seam);
+  }
 
   advanceTo(): boolean { return false; }
   readStats(): Promise<GPUEulerianInfo> { return Promise.resolve({ ...this.info }); }

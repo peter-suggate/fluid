@@ -2,6 +2,25 @@
 
 Date: 2026-08-11. Review only; nothing here is implemented.
 
+> **2026-08-24 — WP1.4 and WP5/SOURCE landed.** The frame now has a stage ABI
+> (`lib/core/render-frame-stages.ts`) modelled on `SPARSE_CM12_RESIDENT_STAGES`:
+> encoders close seams by *stage id*, the panel looks up label, phase, band and
+> prose from one registry keyed by that id, and every stage is assigned to
+> exactly one row by a table that is exhaustive over the ABI (`STAGE_NODE`), so
+> an unowned or renamed stage is a `tsc` error rather than a row that quietly
+> reports someone else's number. Alongside it the encoder publishes a per-frame
+> **manifest** of what each stage encoded (`RenderFrameSeamRecorder`), which is
+> what finally separates *encoded nothing* from *encoded render passes nobody
+> can time*. `tests/render-frame-stage-partition.test.ts` pins the partition,
+> the per-encoder seam order, and the attribution rule.
+>
+> The bug that motivated it: **Sparse world build read 27.9 ms on frames where
+> the world encoded no pass at all.** The panel's rule "if exactly one row in
+> this band has no measurement, give it the band's fence-partitioned wall" made
+> the silent row the sink for the whole source band. It now reads 0.70 ms while
+> maintenance runs and a true zero when the world is settled, and the band's
+> unattributed residual stays on the collar, where the tooltip says what it is.
+
 The question asked: does the render panel's frame pipeline reflect the passes and
 work the frame actually does, are we measuring all the stages we should, can the
 switches meaningfully buy performance, and is shader splitting warranted.
@@ -184,13 +203,19 @@ answer); WP5 is the panel restructure that the rest earns.
    `voxel-light-cache` gets the real gate; delete the dead `"Water interfaces"`
    label; `cone-visibility` drops the prepass label on the split arm (or keeps
    it — harmless — but its tip stops implying the prepass is production).
-4. **Structural fix so it cannot drift again: the encoder publishes a per-frame
-   pass manifest** — `{label, kind, switchOutcome: encoded|withheld|gated-off}`
+4. **LANDED (2026-08-24). Structural fix so it cannot drift again: the encoder
+   publishes a per-frame pass manifest** — `{label, kind, switchOutcome: encoded|withheld|gated-off}`
    per phase, assembled where `tracePhase` is called (near-zero cost, it is a
    push per seam). Node *state* for pass-owning nodes derives from the manifest;
    the static table keeps only prose, taps, ordering, and switch wiring. The
    panel then reports what the frame did rather than re-deriving predicates that
    go stale. (`armed`/`idle` fall out naturally: enabled but no manifest entry.)
+   As built, the manifest counts compute and render passes per stage rather than
+   carrying a `switchOutcome`, because the count answers both questions the
+   panel asks — *did this stage encode* (a true zero, `withheld`) and *is what
+   it encoded priceable* (`unpriced`, and therefore the only kind of row allowed
+   to absorb a band's wall). `idle` is gone as a cost kind; it was the state
+   that let a silent row look like a missing measurement.
 
 ### WP2 — Measurement truth (small)
 
@@ -319,6 +344,9 @@ yes — but split by *feature specialization*, not by fragmenting the megakernel
 
 - **SOURCE**: split `sparse-world-build` into *world build* and *derived
   lighting publish* rows (separate seams first — WP1.1); add *fluid coverage*.
+  **LANDED (2026-08-24)**: four rows — world build (topology publish + proxy
+  voxelization), derived lighting publish (plan · build · feedback), rigid pose
+  mirror, fluid coverage — each owning its own stages of the ABI.
 - **PRIMARY**: collapse the three permanently-`unavailable` raster tiers into
   one "raster arm" row that expands only when `rasterPrimaryActive` — three
   rows of `unavailable` is diagram space spent on a path the frame cannot take.

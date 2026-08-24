@@ -78,6 +78,14 @@ import {
 } from "../lib/core/editor-entity";
 import { editorBodyPoses, editorEntityContext, entityActionsAt, entityAtRay, findEntity, sceneActionsAt, surfacedEntities } from "../lib/core/editor-entity-catalog";
 import {
+  pickTankWallCell,
+  projectTankWallCellOnSide,
+  tankWallRectangleCorners,
+  withTankWallRectangle,
+  type TankWallRectangle,
+} from "../lib/core/editor-tank-wall";
+import type { TankWallField } from "../lib/core/tank-wall-field";
+import {
   advanceCarryPlane,
   carryOrientation,
   carryPlane,
@@ -124,6 +132,7 @@ import { useUIStore } from "../lib/core/stores/ui-store";
 import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import { SmoothedFrameRate } from "../lib/core/frame-rate-meter";
 import { getScenePreset } from "../lib/core/scenes";
+import { boxTankWallFieldForScene, tankWallFieldFitsScene } from "../lib/core/scene-lattice";
 import {
   DEFAULT_SVO_RENDER_DIAGNOSTICS,
   SVO_RENDER_STAGE_DEFINITIONS,
@@ -145,6 +154,12 @@ import {
 type Vec3 = RigidBodyState["position_m"];
 
 interface GPUViewportLifecycle {
+  /**
+   * Compatibility of the retained renderer, its worker messages and every GPU
+   * resource ABI it compiled. Fast Refresh may reclaim a session only when the
+   * module that created it and the module doing the reclaim agree exactly.
+   */
+  readonly runtimeAbi: string;
   readonly canvas: HTMLCanvasElement;
   readonly renderer: FluidLabRendererHandle;
   /** Point the retained render loop at the current component's refs/state. */
@@ -177,6 +192,13 @@ type GPUViewportWindow = Window & {
 };
 
 const GPU_DEVELOPMENT_REBIND_GRACE_MS = 1_000;
+// Bump whenever a hot update changes a scene field consumed by the renderer,
+// worker message arguments, pipeline bindings, or an encode method signature.
+// Schema 2's authoritative wall field landed alongside new terrain/water and
+// render-stage ABIs; retaining a pre-change renderer made the next frame read
+// the new document through stale code and fail with an unrelated `height_m`
+// access. A cold page was sound because it never crossed that ABI boundary.
+const GPU_VIEWPORT_RUNTIME_ABI = "scene-v2-wall-field-render-stages-v1";
 
 /** Duration of the pinned trace's self-drawing sweep. */
 const PIXEL_TRACE_REVEAL_MS = 1100;
@@ -270,6 +292,8 @@ export function WebGPUViewport() {
    * to explain a lock that leaves it nothing to move.
    */
   const [handleDrag, setHandleDrag] = useState<{ handleId: string } | null>(null);
+  /** The cell-aligned hole proposed by the current wall drag. */
+  const [wallRectanglePreview, setWallRectanglePreview] = useState<TankWallRectangle | null>(null);
 
   const pixelTraceEnabled = useUIStore((state) => state.pixelTraceEnabled);
   const pixelTracePinned = useUIStore((state) => state.pixelTracePinned);
@@ -741,6 +765,7 @@ export function WebGPUViewport() {
     | { id: number; action: "body"; bodyId: string; downX: number; downY: number; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
     | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
     | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
+    | { id: number; action: "tank-wall-rectangle"; rectangle: TankWallRectangle; baseField: TankWallField }
     // A rubber band on a horizontal plane through the press. `anchor` is the
     // corner the box is grown from, and `regionId` is claimed at the press so
     // every sample of the drag revises the same region instead of appending one
@@ -868,6 +893,19 @@ export function WebGPUViewport() {
         .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height)),
     }))
     : [];
+  const wallRectangleOutline = wallRectanglePreview ? (() => {
+    const corners = tankWallRectangleCorners(scene, wallRectanglePreview)
+      .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height));
+    const face = scene.container.wallField.faces[wallRectanglePreview.side];
+    return {
+      corners,
+      columns: Math.abs(wallRectanglePreview.u1 - wallRectanglePreview.u0) + 1,
+      rows: Math.abs(wallRectanglePreview.v1 - wallRectanglePreview.v0) + 1,
+      cellWidth_m: (wallRectanglePreview.side === "left" || wallRectanglePreview.side === "right"
+        ? scene.container.depth_m : scene.container.width_m) / face.uCells,
+      cellHeight_m: scene.container.height_m / face.vCells,
+    };
+  })() : undefined;
   const hoverProjection = hover ? projectToViewport(hover.position_m, camera, viewportSize.width, viewportSize.height) : undefined;
   // The field-overlay picker rides just outside the container's top corner, and
   // only while the tank or the water body is selected — the same argument that
@@ -972,7 +1010,11 @@ export function WebGPUViewport() {
     // shader edits take effect on a real page reload instead of sacrificing the
     // browser's current GPU access.
     const retainedLifecycle = gpuLifecycleRef.current ?? lifecycleWindow.__fluidLabGPUViewportLifecycle;
-    if (retainedLifecycle?.canvas === canvas && retainedLifecycle.cancelDeferredCleanup()) {
+    const retainedRuntimeIncompatible = Boolean(retainedLifecycle
+      && retainedLifecycle.runtimeAbi !== GPU_VIEWPORT_RUNTIME_ABI);
+    if (retainedLifecycle?.canvas === canvas
+      && retainedLifecycle.runtimeAbi === GPU_VIEWPORT_RUNTIME_ABI
+      && retainedLifecycle.cancelDeferredCleanup()) {
       // A session created by the immediately previous hot module version does
       // not have rebind yet. Preserve it during this one-time migration too.
       retainedLifecycle.rebind?.(renderBinding);
@@ -984,6 +1026,26 @@ export function WebGPUViewport() {
     if (retainedLifecycle) {
       retainedLifecycle.cleanupImmediately();
       gpuLifecycleRef.current = null;
+    }
+    if (retainedRuntimeIncompatible) {
+      // Zustand survives the same development replacement as the renderer. If
+      // that replacement crosses a document-schema boundary, migrate the one
+      // newly-required authority in place so an unsaved terrain edit survives
+      // the renderer rebuild. Presets and imported documents already enter
+      // through their normal construction/validation paths.
+      const sceneState = useSceneStore.getState();
+      const retainedScene = sceneState.scene;
+      if (String(retainedScene.schemaVersion) !== "2.0.0"
+        || !tankWallFieldFitsScene(retainedScene)) {
+        sceneState.setScene({
+          ...retainedScene,
+          schemaVersion: "2.0.0",
+          container: {
+            ...retainedScene.container,
+            wallField: boxTankWallFieldForScene(retainedScene),
+          },
+        }, sceneState.presetId);
+      }
     }
     const diagnostics = useDiagnosticsStore.getState();
     const safeBringup = safeBrowserGPUBringupEnabled(window.location.search);
@@ -1264,6 +1326,7 @@ export function WebGPUViewport() {
       void stopGPU("WebGPU stopped during component cleanup", false);
     };
     const lifecycle: GPUViewportLifecycle = {
+      runtimeAbi: GPU_VIEWPORT_RUNTIME_ABI,
       canvas,
       renderer,
       rebind: (binding) => { activeBinding = binding; },
@@ -1763,6 +1826,46 @@ export function WebGPUViewport() {
     return sample.brickKey;
   };
 
+  /** Revise one cell-aligned opening from the field present at pointer-down. */
+  const updateTankWallRectangleDraft = (
+    rectangle: TankWallRectangle,
+    baseField: TankWallField,
+  ) => {
+    const committed = useSceneStore.getState().scene;
+    const wallField = withTankWallRectangle(
+      baseField, rectangle.side,
+      rectangle.u0, rectangle.v0, rectangle.u1, rectangle.v1, false,
+    );
+    useSceneDraftStore.getState().updateDraft({
+      container: { ...committed.container, wallField },
+    });
+    setWallRectanglePreview(rectangle);
+  };
+
+  /** Start a one-shot, face-locked rectangle rather than an accumulating brush. */
+  const beginTankWallRectangle = (
+    event: React.PointerEvent<HTMLCanvasElement>,
+    ray: { origin: Vec3; direction: Vec3 },
+  ) => {
+    const committed = useSceneStore.getState().scene;
+    const cell = pickTankWallCell(committed, ray);
+    if (!cell) {
+      useRuntimeStore.getState().setNotice("Aim at a vertical tank wall, then drag the opening");
+      return;
+    }
+    const rectangle: TankWallRectangle = {
+      side: cell.side, u0: cell.u, v0: cell.v, u1: cell.u, v1: cell.v,
+    };
+    simulation.beginDraft("tank-wall", "Cut a rectangular tank opening");
+    pointerRef.current = {
+      id: event.pointerId,
+      action: "tank-wall-rectangle",
+      rectangle,
+      baseField: committed.container.wallField,
+    };
+    updateTankWallRectangleDraft(rectangle, committed.container.wallField);
+  };
+
   /**
    * Revise the region being drawn, as a draft over the committed document.
    *
@@ -2061,6 +2164,11 @@ export function WebGPUViewport() {
       // mid-rebuild — keeps working while the renderer replaces the image.
       if (beginEntityHandleDrag(event)) return;
       if (beginTerrainHandleDrag(event)) return;
+      const tankWallTool = useUIStore.getState().activeTool;
+      if (tankWallTool === "tank-wall-cut") {
+        beginTankWallRectangle(event, ray);
+        return;
+      }
       // Not GPU-gated, unlike the placements below: a region is a box in the
       // document, not something dropped onto a published surface, so it falls
       // back to the ground plane and stays drawable while the renderer is
@@ -2236,6 +2344,16 @@ export function WebGPUViewport() {
       pointerRef.current = { ...active, lastBrickKey: paintFluidAt(pointerRay(event), active.erase, active.lastBrickKey) };
       return;
     }
+    if (active.action === "tank-wall-rectangle") {
+      const cell = projectTankWallCellOnSide(
+        useSceneStore.getState().scene, pointerRay(event), active.rectangle.side,
+      );
+      if (!cell || (cell.u === active.rectangle.u1 && cell.v === active.rectangle.v1)) return;
+      const rectangle = { ...active.rectangle, u1: cell.u, v1: cell.v };
+      pointerRef.current = { ...active, rectangle };
+      updateTankWallRectangleDraft(rectangle, active.baseField);
+      return;
+    }
     if (active.action === "region-draw") {
       const ray = pointerRay(event);
       updateRegionDraft(active.anchor,
@@ -2384,6 +2502,13 @@ export function WebGPUViewport() {
       simulation.commitDraft();
       return;
     }
+    if (active.action === "tank-wall-rectangle") {
+      setWallRectanglePreview(null);
+      if (cancelled) { simulation.cancelDraft(); return; }
+      simulation.commitDraft();
+      useUIStore.getState().setActiveTool(DEFAULT_EDITOR_TOOL);
+      return;
+    }
     if (active.action === "fluid-ball") {
       setCursorDrop(null);
       if (cancelled) { simulation.cancelDraft(); return; }
@@ -2499,6 +2624,37 @@ export function WebGPUViewport() {
             y2={region.corners[to]!.topFraction * viewportSize.height}
           />
         )))}
+    </svg>}
+    {wallRectangleOutline && <svg
+      className="editor-gizmo editor-wall-rectangle-gizmo"
+      data-testid="editor-wall-rectangle-gizmo"
+      width={viewportSize.width}
+      height={viewportSize.height}
+      aria-hidden="true"
+    >
+      <polygon
+        className="wall-rectangle-fill"
+        points={wallRectangleOutline.corners
+          .map((corner) => `${corner.leftFraction * viewportSize.width},${corner.topFraction * viewportSize.height}`)
+          .join(" ")}
+      />
+      <polygon
+        className="wall-rectangle-outline"
+        points={wallRectangleOutline.corners
+          .map((corner) => `${corner.leftFraction * viewportSize.width},${corner.topFraction * viewportSize.height}`)
+          .join(" ")}
+      />
+      <text
+        className="wall-rectangle-label"
+        x={(wallRectangleOutline.corners[2]!.leftFraction + wallRectangleOutline.corners[3]!.leftFraction)
+          * 0.5 * viewportSize.width}
+        y={(wallRectangleOutline.corners[2]!.topFraction + wallRectangleOutline.corners[3]!.topFraction)
+          * 0.5 * viewportSize.height - 9}
+      >
+        {wallRectangleOutline.columns} × {wallRectangleOutline.rows} CELLS · {(
+          wallRectangleOutline.columns * wallRectangleOutline.cellWidth_m).toFixed(2)} × {(
+          wallRectangleOutline.rows * wallRectangleOutline.cellHeight_m).toFixed(2)} M
+      </text>
     </svg>}
     {cursorDropCircle && <svg
       className="editor-gizmo editor-ball-gizmo"

@@ -86,6 +86,7 @@
  */
 // These lanes render without a solver, but they construct the renderer, and
 // a renderer resolves a method by id on any path that reaches a scene.
+import type { RenderFrameSeam } from "../lib/core/render-frame-stages";
 import "../lib/methods";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -1063,7 +1064,7 @@ const primaryCoherenceKey = rayCoherenceMode === "static-primary"
 function encodeFrame(
   encoder: GPUCommandEncoder,
   reuseKey = primaryCoherenceKey,
-  tracePhase?: (phase: { id: PaperPhaseId; label: string }) => void,
+  tracePhase?: RenderFrameSeam<"svo">,
 ): void {
   const instrumentedEncoder = passEncoderIsolationScratch
     ? isolateComputePassEncoders(encoder, passEncoderIsolationScratch) : encoder;

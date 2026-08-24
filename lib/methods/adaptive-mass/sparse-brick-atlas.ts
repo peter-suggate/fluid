@@ -20,6 +20,7 @@ import {
   sphericalContainerOpenFractionAtCell,
   type SphericalContainerFineGeometry,
 } from "../../core/spherical-container";
+import type { TankWallField } from "../../core/tank-wall-field";
 import {
   sceneHasTerrain,
   terrainColumnHeights,
@@ -100,6 +101,8 @@ export interface SparseAdaptiveMassAtlas {
   readonly generation: number;
   /** Embedded closed boundary carried by every topology/field generation. */
   readonly boundary?: SphericalContainerFineGeometry;
+  /** Authored rectangular side-wall occupancy at the finest lattice. */
+  readonly wallField?: TankWallField;
 }
 
 export interface SparseBrickAtlasInitializationOptions {
@@ -183,6 +186,7 @@ export function createSparseAdaptiveMassAtlas(
   generation = 1,
   boundary?: SphericalContainerFineGeometry,
   brickFineResolution: SparseBrickFineResolution = DEFAULT_BRICK_FINE_RESOLUTION,
+  wallField?: TankWallField,
 ): SparseAdaptiveMassAtlas {
   positiveDimensions(dimensions);
   const ladder = sparseBrickLadder(brickFineResolution);
@@ -231,7 +235,7 @@ export function createSparseAdaptiveMassAtlas(
   return {
     dimensions, brickFineResolution, brickCellCapacity: ladder.cellCapacity,
     ladder, brickDimensions, bricks: [...bricks], directory,
-    directoriesBySpan, maximumSpanBricks, generation, boundary,
+    directoriesBySpan, maximumSpanBricks, generation, boundary, wallField,
   };
 }
 
@@ -569,7 +573,7 @@ function hierarchicalTankFillBricks(
   }
 
   const provisional = createSparseAdaptiveMassAtlas(
-    dimensions, bricks, 1, boundary, brickFineResolution,
+    dimensions, bricks, 1, boundary, brickFineResolution, scene.container.wallField,
   );
   for (const coordinate of structuralSeedBrickCoordinates(
     scene, dimensions, brickDimensions, brickFineResolution,
@@ -753,6 +757,7 @@ export function initializeSparseBrickAtlasFromScene(
     if (hierarchical) {
       return createSparseAdaptiveMassAtlas(
         options.finestDimensions, hierarchical, 1, boundary, brickFineResolution,
+        scene.container.wallField,
       );
     }
   }
@@ -875,6 +880,7 @@ export function initializeSparseBrickAtlasFromScene(
   ));
   return createSparseAdaptiveMassAtlas(
     options.finestDimensions, bricks, 1, boundary, brickFineResolution,
+    scene.container.wallField,
   );
 }
 
@@ -997,6 +1003,7 @@ export function coarsenLargeQuiescentComponents(
     atlas.generation,
     atlas.boundary,
     atlas.brickFineResolution,
+    atlas.wallField,
   );
 }
 

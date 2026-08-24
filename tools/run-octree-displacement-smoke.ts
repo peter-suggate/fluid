@@ -10,6 +10,7 @@ import { initializeRigidBodies } from "../lib/core/rigid-body";
 import type { GPURigidLoad } from "../lib/core/webgpu-eulerian";
 import { fluidExecutionDeviceFeatures } from "../lib/core/gpu-startup";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { boxTankWallFieldForScene } from "../lib/core/scene-lattice";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
@@ -34,7 +35,7 @@ device.addEventListener("uncapturederror", (event) => validationErrors.push(even
 
 const scene = cloneScene(defaultScene);
 scene.sceneId = "smoke-octree-large-solid-submersion";
-scene.container = { width_m: 0.6, height_m: 0.6, depth_m: 0.6, fillFraction: 0.45, top: "open", fluidWallMode: "free-slip" };
+scene.container = { ...scene.container, width_m: 0.6, height_m: 0.6, depth_m: 0.6, fillFraction: 0.45, top: "open", fluidWallMode: "free-slip" };
 scene.fluid.initialCondition = "tank-fill";
 scene.fluid.gravity_m_s2 = { x: 0, y: -9.80665, z: 0 };
 scene.fluid.surfaceTension_N_m = 0;
@@ -60,6 +61,7 @@ let latestLoad: GPURigidLoad | undefined;
 // 40 cubed, whose pressure rows exceed the bounded 16384-row SPGrid and
 // failed in the allocator before the first step.
 scene.voxelDomain.finestCellSize_m = Number(process.env.FLUID_VOXEL_CELL_SIZE ?? 0.025);
+scene.container.wallField = boxTankWallFieldForScene(scene);
 const values = losassoMethod.presetFor("balanced");
 // The octree publishes its t=0 sparse authority asynchronously; the first
 // substep flips a candidate epoch that only exists once that has fenced.

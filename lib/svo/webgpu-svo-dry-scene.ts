@@ -156,7 +156,8 @@ import {
   type SvoLightingVisibilityStatus,
   type SvoSilhouetteRefinementStatus,
 } from "./svo-render-options";
-import type { DrySceneReplacementResult, RenderPathTracePhase } from "../core/webgpu-water-pipeline";
+import type { DrySceneReplacementResult } from "../core/webgpu-water-pipeline";
+import type { RenderFrameSeam } from "../core/render-frame-stages";
 import { VOXEL_MATERIAL_IDS } from "../core/voxel-scene";
 import { svoFluidCoverageWGSL } from "./svo-fluid-coverage";
 import type { WebGpuSvoFluidCoverage } from "./webgpu-svo-fluid-coverage";
@@ -7517,7 +7518,7 @@ export class SparseVoxelDrySceneRenderer {
     gBufferViews: SparseVoxelGBufferViews,
     usePrepass: boolean,
     splitGroup: number,
-    tracePhase?: RenderPathTracePhase,
+    tracePhase?: RenderFrameSeam<"svo">,
   ): void {
     const tieredComputeActive = this.screenSpaceTerminationPixels > 0
       && this.targetWidth * this.targetHeight >= SVO_SCENE_PRIMITIVE_COMPUTE_MINIMUM_PIXELS;
@@ -7559,7 +7560,7 @@ export class SparseVoxelDrySceneRenderer {
       exactScene.setBindGroup(0, this.bindGroup);
       exactScene.draw(SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy, this.primitiveCount);
       exactScene.end();
-      tracePhase?.({ id: "svo-scene-primitive", label: "SVO exact live-scene primitive visibility" });
+      tracePhase?.("scene-primitive-visibility");
       return;
     }
     if (this.primitiveCount < 1) return;
@@ -7585,7 +7586,7 @@ export class SparseVoxelDrySceneRenderer {
       band.setPipeline(this.bandResolvePipeline);
       band.dispatchWorkgroups(1);
       band.end();
-      tracePhase?.({ id: "svo-band", label: "SVO near-field analytic band selection" });
+      tracePhase?.("near-field-band");
     }
     // The brick arm is finished with the arena — its overflow pass has already
     // read the counters — so both coverage passes share one allocation.
@@ -7724,7 +7725,7 @@ export class SparseVoxelDrySceneRenderer {
         SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES);
       this.coverageAuditCopied = true;
     }
-    tracePhase?.({ id: "svo-scene-primitive", label: "SVO exact live-scene primitive visibility" });
+    tracePhase?.("scene-primitive-visibility");
   }
 
   /**
@@ -7812,7 +7813,7 @@ export class SparseVoxelDrySceneRenderer {
     gBufferViews: SparseVoxelGBufferViews,
     usePrepass: boolean,
     splitGroup: number,
-    tracePhase?: RenderPathTracePhase,
+    tracePhase?: RenderFrameSeam<"svo">,
   ): void {
     // Word zero is the constant indirect vertex count; everything after it is
     // per-frame state.
@@ -7827,7 +7828,7 @@ export class SparseVoxelDrySceneRenderer {
     cull.setPipeline(this.brickScatterPipeline!);
     cull.dispatchWorkgroups(Math.ceil(this.brickLeafCapacity / SVO_BRICK_RASTER_CONTRACT.scatterWorkgroupSize));
     cull.end();
-    tracePhase?.({ id: "svo-brick-cull", label: "SVO brick instance cull" });
+    tracePhase?.("brick-cull");
 
     const attachments = (loadOp: GPULoadOp): GPURenderPassColorAttachment[] =>
       this.rasterPrimaryAttachments(gBufferViews, loadOp);
@@ -10221,7 +10222,7 @@ export class SparseVoxelDrySceneRenderer {
     }
   }
 
-  encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, reuseKey?: string, tracePhase?: RenderPathTracePhase, bandPartitioner?: FrameBandPartitioner): DrySceneReplacementResult | false {
+  encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, reuseKey?: string, tracePhase?: RenderFrameSeam<"svo">, bandPartitioner?: FrameBandPartitioner): DrySceneReplacementResult | false {
     if (!this.pipeline || !this.bindGroup) return false;
     // The coverage volume allocates lazily and only reports itself once a fill
     // has been encoded, so its validity flips mid-session. Refresh the frame
@@ -10348,7 +10349,7 @@ export class SparseVoxelDrySceneRenderer {
         shade.draw(3);
       }
       shade.end();
-      tracePhase?.({ id: "svo-cone-lighting", label: "SVO cone-lighting prepass" });
+      tracePhase?.("cone-prepass");
     }
     if (useSplit) {
       const splitGroup = usePrepass ? 2 : 1;
@@ -10395,7 +10396,7 @@ export class SparseVoxelDrySceneRenderer {
           visibility.draw(3);
           visibility.end();
         }
-        tracePhase?.({ id: "svo-primary", label: "SVO primary visibility" });
+        tracePhase?.("primary-traversal");
         if (this.rasterPrimary && !primaryWithheld && !this.disabledStages.has("scene-primitive")) {
           this.encodeScenePrimitivePrimary(encoder, gBufferViews, usePrepass, splitGroup, tracePhase);
         }
@@ -10429,7 +10430,7 @@ export class SparseVoxelDrySceneRenderer {
           bridge.setBindGroup(1, this.rasterRigidBindGroup!);
           bridge.draw(SVO_RIGID_RASTER_CONTRACT.verticesPerProxy, SVO_RIGID_RASTER_CONTRACT.maximumBodies);
           bridge.end();
-          tracePhase?.({ id: "svo-rigid", label: "SVO analytic rigid discovery" });
+          tracePhase?.("rigid-discovery");
         }
         if (this.rasterGlassDiscovery && this.rasterGlassPaneCount > 0 && !primaryWithheld) {
           const glass = encoder.beginRenderPass({
@@ -10454,7 +10455,7 @@ export class SparseVoxelDrySceneRenderer {
             glass.draw(6, this.rasterGlassRecordCount, 0, this.rasterGlassFirstRecord);
           }
           glass.end();
-          tracePhase?.({ id: "svo-glass", label: "SVO raster thin-glass discovery" });
+          tracePhase?.("thin-glass-discovery");
         }
         // Nothing to close a seam around once the primary is withheld, and the
         // pass would otherwise charge the seam node for reading an empty
@@ -10479,7 +10480,7 @@ export class SparseVoxelDrySceneRenderer {
           if (voxelLightBindingsRequired) seam.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
           seam.draw(3);
           seam.end();
-          tracePhase?.({ id: "svo-primary", label: "SVO primary seam closure" });
+          tracePhase?.("seam-closure");
         }
         this.primaryVisibilityCacheKey = this.rayCoherenceMode === "static-primary" && usePrepass
           ? primaryFrameKey
@@ -10517,7 +10518,7 @@ export class SparseVoxelDrySceneRenderer {
         // Its own boundary: both dispatches used to fall inside whichever phase
         // closed next, which priced a bounded per-frame drain as part of the
         // cone stage and left the cache node with nothing to report.
-        tracePhase?.({ id: "svo-voxel-light", label: "SVO voxel light cache" });
+        tracePhase?.("voxel-light-cache");
       }
 
       if (usePrepass && !this.voxelLightExclusive) {
@@ -10551,7 +10552,7 @@ export class SparseVoxelDrySceneRenderer {
         // Closed before the optional fan-out so the compact march is priced on
         // its own; the fan-out then reports as itself below rather than being
         // folded into a phase named for a pass it is not part of.
-        tracePhase?.({ id: "svo-cone-lighting", label: "SVO compacted cone lighting" });
+        tracePhase?.("compact-cone-lighting");
         if (this.coneFanout) {
           const fanout = encoder.beginComputePass({ label: "Sparse voxel cone sample fan-out" });
           fanout.setPipeline(this.coneFanoutWorkerPipeline!);
@@ -10571,7 +10572,7 @@ export class SparseVoxelDrySceneRenderer {
             Math.ceil(this.conePrepassHeight / SVO_CONE_FANOUT_CONTRACT.workgroupSize[1]),
           );
           reduce.end();
-          tracePhase?.({ id: "svo-cone-lighting", label: "SVO cone sample fan-out" });
+          tracePhase?.("cone-fanout");
         }
 
         if (!reconstructReducedRadiance && this.lightingOptions.globalIlluminationEnabled !== false
@@ -10599,7 +10600,7 @@ export class SparseVoxelDrySceneRenderer {
           if (voxelLightBindingsRequired) gi.setBindGroup(3, this.voxelLightConsumerBindGroup!);
           gi.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
           gi.end();
-          tracePhase?.({ id: "svo-environment-gi", label: "SVO persistent world-space environmental GI" });
+          tracePhase?.("world-gi-cache");
         }
       }
       // Band seam: lighting visibility (voxel light cache, cone stage, world
@@ -10631,7 +10632,7 @@ export class SparseVoxelDrySceneRenderer {
           shade.draw(3);
         }
         shade.end();
-        tracePhase?.({ id: "svo-cone-lighting", label: "SVO reduced-rate opaque shading" });
+        tracePhase?.("reduced-shade");
       }
 
       // Two passes over complementary depth tests: sky takes the miss pixels
@@ -10659,7 +10660,7 @@ export class SparseVoxelDrySceneRenderer {
         sky.draw(3);
       }
       sky.end();
-      tracePhase?.({ id: "dry-scene", label: "SVO deferred sky lighting" });
+      tracePhase?.("sky-lighting");
       const lighting = encoder.beginRenderPass({
         label: "Sparse voxel deferred dry lighting",
         // Load, not clear: the sky pass owns the miss pixels and already wrote
@@ -10683,7 +10684,7 @@ export class SparseVoxelDrySceneRenderer {
         lighting.draw(3);
       }
       lighting.end();
-      tracePhase?.({ id: "dry-scene", label: "SVO deferred dry lighting" });
+      tracePhase?.("deferred-lighting");
       // Band seam: deferred shading ends here; interfaces, composite, overlays
       // and present accumulate on the fresh encoder as the final band.
       if (bandPartitioner) encoder = bandPartitioner.boundary("svo-shading");
@@ -10712,7 +10713,7 @@ export class SparseVoxelDrySceneRenderer {
         pass.draw(3);
       }
       pass.end();
-      tracePhase?.({ id: "svo-primary", label: "SVO traversal + dry shading" });
+      tracePhase?.("inline-traversal-shading");
       // The inline arm marches and shades in one draw, and the panel already
       // prices it as that pair under the primary row; the band seam follows
       // the same attribution so the megakernel never hides in the composite.

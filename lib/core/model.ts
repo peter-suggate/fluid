@@ -4,6 +4,7 @@ import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { EnvironmentId } from "./environments";
 import { validateSceneryGraph, type SceneryGraph } from "./scenery-graph";
 import type { DisplayGradeAuthoring, WaterOpticsAuthoring } from "./webgpu-lighting";
+import { validateTankWallField, type TankWallField } from "./tank-wall-field";
 
 export type RunState = "paused" | "running";
 
@@ -50,7 +51,7 @@ export interface RigidBodyDescription {
 }
 
 export interface SceneDescription {
-  schemaVersion: "1.0.0";
+  schemaVersion: "2.0.0";
   sceneId: string;
   /** Optional subsystem declarations. Omission preserves all legacy systems. */
   systems?: {
@@ -100,6 +101,8 @@ export interface SceneDescription {
     fillFraction: number;
     top: "open" | "closed";
     fluidWallMode: "free-slip" | "no-slip";
+    /** Authoritative four-sided solver-face field and raster geometry. */
+    wallField: TankWallField;
     /** Use the depth faces as 2D symmetry planes instead of physical walls. */
     depthBoundary?: "closed" | "symmetry";
     /**
@@ -370,7 +373,9 @@ export const DEFAULT_GPU_CPU_TIMESTEP_RATIO = 4;
  */
 export const DEFAULT_FINEST_CELL_SIZE_M = 0.00625;
 
-export const defaultScene: SceneDescription = sharedDefaultScene as SceneDescription;
+// JSON imports widen tuple literals to number[][]; runtime validation below
+// still checks the wall-run ABI before a document is accepted.
+export const defaultScene: SceneDescription = sharedDefaultScene as unknown as SceneDescription;
 
 export const defaultCamera: CameraState = {
   azimuth_rad: 0.72,
@@ -451,7 +456,7 @@ export function validateScene(scene: SceneDescription): string[] {
   if (scene.surfaceStyle !== undefined && scene.surfaceStyle !== "smooth" && scene.surfaceStyle !== "voxel-flat") {
     errors.push(`Unknown scene surface style ${String(scene.surfaceStyle)}`);
   }
-  if (scene.schemaVersion !== "1.0.0") errors.push("Unsupported schema version");
+  if (scene.schemaVersion !== "2.0.0") errors.push("Unsupported schema version");
   if (!scene.sceneId?.trim()) errors.push("Scene ID is required");
   if (scene.systems?.fluid !== undefined && typeof scene.systems.fluid !== "boolean") errors.push("Scene fluid-system flag must be boolean");
   const lighting = scene.lighting;
@@ -495,6 +500,12 @@ export function validateScene(scene: SceneDescription): string[] {
   if (c?.shape === "sphere" && c.top !== "closed") errors.push("A spherical container must be closed");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
+  const expectedWallDimensions = c && scene.voxelDomain?.finestCellSize_m > 0 ? {
+    x: Math.min(2048, Math.max(8, Math.round(c.width_m / scene.voxelDomain.finestCellSize_m))),
+    y: Math.min(2048, Math.max(8, Math.round(c.height_m / scene.voxelDomain.finestCellSize_m))),
+    z: Math.min(2048, Math.max(8, Math.round(c.depth_m / scene.voxelDomain.finestCellSize_m))),
+  } : undefined;
+  errors.push(...validateTankWallField(c?.wallField, expectedWallDimensions));
   if (c?.depthBoundary !== undefined && c.depthBoundary !== "closed" && c.depthBoundary !== "symmetry") {
     errors.push("Unsupported depth boundary");
   }

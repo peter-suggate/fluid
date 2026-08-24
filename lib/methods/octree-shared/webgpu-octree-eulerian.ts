@@ -1,3 +1,4 @@
+import type { RenderFrameSeam } from "../../core/render-frame-stages";
 import { damBreakBoxContains, initialLiquidContainsCell, sceneDamBreakBox, sceneDamBreakFractions } from "../../core/initial-fluid";
 import { resolveOctreeRuntimeDials } from "./octree-runtime-dials";
 import type { OctreeDebugSources } from "./octree-debug-sources";
@@ -1382,7 +1383,7 @@ fn recordPhysicsPhaseBoundary(
   stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]) {
     return this.octreeProjection?.stageLivePrimitiveUpdates(updates) ?? false;
   }
-  encodeSceneMaintenance(encoder: GPUCommandEncoder) { this.octreeProjection?.encodeSceneMaintenance(encoder); }
+  encodeSceneMaintenance(encoder: GPUCommandEncoder, seam?: RenderFrameSeam<"world">) { this.octreeProjection?.encodeSceneMaintenance(encoder, seam); }
   get structuredVelocityControl() { return this.octreeProjection?.structuredVelocityControl; }
   get structuredBoundaryControl() { return this.octreeProjection?.structuredBoundaryControl; }
   get structuredRowVelocities() { return this.octreeProjection?.structuredRowVelocities; }

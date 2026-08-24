@@ -16,6 +16,7 @@
  * stays private to the render layer, which is what keeps a future non-SVO
  * residency provider a drop-in rather than a rewrite.
  */
+import type { RenderFrameSeam } from "./render-frame-stages";
 import type { SceneDescription } from "./model";
 import type { FluidBrickResidencyStats, GPUFluidBrickResidency } from "./webgpu-fluid-brick-residency";
 import type { SparseScenePrimitiveUpdate } from "./webgpu-sparse-scene-proxies";
@@ -40,7 +41,7 @@ export interface OctreeSparseResidencyWorld {
   rescaleRenderDomain(scene: SceneDescription): void;
   stageSceneUpdate(scene: SceneDescription): boolean;
   stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]): boolean;
-  encodeSceneMaintenance(encoder: GPUCommandEncoder, deferDerived?: boolean): boolean;
+  encodeSceneMaintenance(encoder: GPUCommandEncoder, deferDerived?: boolean, seam?: RenderFrameSeam<"world">): boolean;
   readBulkResidencyStats(): Promise<FluidBrickResidencyStats> | undefined;
   destroy(): void;
 }

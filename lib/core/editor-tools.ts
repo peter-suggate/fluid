@@ -28,6 +28,7 @@ export type EditorTool =
   | "terrain-lower"
   | "fluid-paint"
   | "fluid-erase"
+  | "tank-wall-cut"
   | "fluid-ball"
   | "inflow"
   | "refinement-region";
@@ -129,6 +130,13 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     label: "ERASE",
     shortcut: "y",
     hint: "click or drag to remove painted water bricks",
+    status: "active",
+  },
+  {
+    id: "tank-wall-cut",
+    label: "CUT OPENING",
+    shortcut: "k",
+    hint: "drag corner-to-corner on any tank wall to remove that rectangle · release to cut the opening",
     status: "active",
   },
   // A ball is not a coarser brush. The brushes quantize to the brick lattice,

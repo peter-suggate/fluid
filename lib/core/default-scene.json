@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "2.0.0",
   "sceneId": "interactive-water-box",
   "randomSeed": 20260712,
   "duration_s": 20,
@@ -9,7 +9,17 @@
     "depth_m": 0.8,
     "fillFraction": 0.22,
     "top": "closed",
-    "fluidWallMode": "no-slip"
+    "fluidWallMode": "no-slip",
+    "wallField": {
+      "version": 1,
+      "dimensions": { "x": 24, "y": 16, "z": 16 },
+      "faces": {
+        "left": { "uCells": 16, "vCells": 16, "solidRuns": [[0, 256]] },
+        "right": { "uCells": 16, "vCells": 16, "solidRuns": [[0, 256]] },
+        "front": { "uCells": 24, "vCells": 16, "solidRuns": [[0, 384]] },
+        "back": { "uCells": 24, "vCells": 16, "solidRuns": [[0, 384]] }
+      }
+    }
   },
   "voxelDomain": {
     "finestCellSize_m": 0.05,

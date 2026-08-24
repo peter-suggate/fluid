@@ -55,6 +55,7 @@ import type {
   FluidPipelineStage,
 } from "../../core/fluid-pipeline";
 import { UNIFORM_PAPER_DT_S, uniformPaperAdvanceReady } from "./uniform-paper";
+import { packTankWallField } from "../../core/tank-wall-field";
 
 export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
 
@@ -291,6 +292,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly velocityExtrapolator: WebGPUUniformVelocityExtrapolator;
   private readonly pressureMultigrid: WebGPUUniformPressureMultigrid;
   private readonly params: GPUBuffer;
+  private readonly tankWallScratchOffsetWords: number;
   private readonly reductions: GPUBuffer;
   private readonly conditioningScratch: GPUBuffer;
   private readonly activeRegion: GPUBuffer;
@@ -450,6 +452,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       });
     }
     this.params = device.createBuffer({ label: "Uniform reference parameters", size: 176, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const packedTankWalls = packTankWallField(scene.container.wallField);
     const activeRegionBytes = (UNIFORM_ACTIVE_LEVEL_BASE_WORD
       + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS) * 4;
     this.activeRegion = device.createBuffer({
@@ -460,11 +463,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     });
     const activeSummaryCount = Math.ceil(nx / 4) * Math.ceil(ny / 4) * Math.ceil(nz / 4);
     const activeSummaryBytes = activeSummaryCount * UNIFORM_ACTIVE_SUMMARY_BYTES;
+    this.tankWallScratchOffsetWords = (activeRegionBytes + activeSummaryBytes) / 4;
     this.activeScratch = device.createBuffer({
       label: "Uniform reference active liquid census scratch and summaries",
-      size: activeRegionBytes + activeSummaryBytes,
+      size: activeRegionBytes + activeSummaryBytes + packedTankWalls.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
+    device.queue.writeBuffer(this.activeScratch, this.tankWallScratchOffsetWords * 4, packedTankWalls);
     this.activeDispatch = device.createBuffer({
       label: "Uniform reference active indirect dispatches", size: activeRegionBytes,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
@@ -645,7 +650,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
       pressureIterations: 0, pressureSolver: `CM11a dense LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
       allocatedBytes: allocation.allocatedBytes + this.pressureMultigrid.allocatedBytes
-        + activeRegionBytes * 3 + activeSummaryBytes
+        + activeRegionBytes * 3 + activeSummaryBytes + packedTankWalls.byteLength
         + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
@@ -774,7 +779,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       sceneHasSphericalContainer(this.scene) ? 1 : 0,
       c.depthBoundary === "symmetry" ? 1 : 0,
       drop?.centre_m.x ?? 0, drop?.centre_m.y ?? 0, drop?.centre_m.z ?? 0, drop?.radius_m ?? 0,
-      drop?.halfHeight_m ?? 0, this.liquidOnlyVelocityAdvection ? 1 : 0, 0, 0,
+      drop?.halfHeight_m ?? 0, this.liquidOnlyVelocityAdvection ? 1 : 0,
+      this.tankWallScratchOffsetWords, 0,
     ]));
   }
 
@@ -1429,6 +1435,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   applySceneUniforms(scene: SceneDescription): void {
     this.scene = scene;
+    this.device.queue.writeBuffer(this.activeScratch, this.tankWallScratchOffsetWords * 4,
+      packTankWallField(scene.container.wallField));
     this.inflowBoundary = scene.fluid.inflow
       ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [this.info.nx, this.info.ny, this.info.nz])
       : undefined;

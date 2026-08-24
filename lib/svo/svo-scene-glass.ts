@@ -75,7 +75,7 @@ export interface SvoSceneGlassBuild {
   packedRecords: Uint32Array<ArrayBuffer>;
   metadata: readonly SvoSceneGlassMetadata[];
   unsupportedEntries: readonly SvoSceneGlassUnsupportedEntry[];
-  containerPolicy: "thin-glass-vessel" | "analytic-spherical-vessel" | "absent-open-environment";
+  containerPolicy: "raster-wall-vessel" | "analytic-spherical-vessel" | "absent-open-environment";
   containerPaneIndices: readonly number[];
   containerTopPaneIndex?: number;
   environmentPaneIndices: readonly number[];
@@ -91,9 +91,6 @@ const DEFAULT_ABSORPTION_M_INV = [0.18, 0.04, 0.03] as const;
 const SQRT_HALF = Math.SQRT1_2;
 
 const Q_IDENTITY: Quaternion = { w: 1, x: 0, y: 0, z: 0 };
-const Q_NORMAL_NEGATIVE_Z: Quaternion = { w: 0, x: 0, y: 1, z: 0 };
-const Q_NORMAL_POSITIVE_X: Quaternion = { w: SQRT_HALF, x: 0, y: SQRT_HALF, z: 0 };
-const Q_NORMAL_NEGATIVE_X: Quaternion = { w: SQRT_HALF, x: 0, y: -SQRT_HALF, z: 0 };
 const Q_NORMAL_POSITIVE_Y: Quaternion = { w: SQRT_HALF, x: -SQRT_HALF, y: 0, z: 0 };
 const Q_NORMAL_NEGATIVE_Y: Quaternion = { w: SQRT_HALF, x: SQRT_HALF, y: 0, z: 0 };
 
@@ -169,17 +166,21 @@ function containerPanes(scene: SceneDescription, environmentId: EnvironmentId, t
   if (!containerIsGlass(scene, environmentId) || scene.container.shape === "sphere") return [];
   const halfWidth = 0.5 * scene.container.width_m;
   const halfDepth = 0.5 * scene.container.depth_m;
-  const halfHeight = 0.5 * scene.container.height_m;
+  // The four editable sides are rendered from `container.wallField` by the
+  // raster water compositor. Publishing whole analytic panes here as well
+  // would put intact glass behind every authored opening.
   const result: AuthoredSceneGlassPane[] = [
     { key: "container/floor", side: "floor", role: "container-pane", descriptor: pane(CONTAINER_PANE_ID_BASE, [0, 0, 0], [halfWidth, halfDepth], thickness_m, Q_NORMAL_NEGATIVE_Y) },
-    { key: "container/left", side: "left", role: "container-pane", descriptor: pane(CONTAINER_PANE_ID_BASE + 1, [-halfWidth, halfHeight, 0], [halfDepth, halfHeight], thickness_m, Q_NORMAL_NEGATIVE_X) },
-    { key: "container/right", side: "right", role: "container-pane", descriptor: pane(CONTAINER_PANE_ID_BASE + 2, [halfWidth, halfHeight, 0], [halfDepth, halfHeight], thickness_m, Q_NORMAL_POSITIVE_X) },
-    { key: "container/front", side: "front", role: "container-pane", descriptor: pane(CONTAINER_PANE_ID_BASE + 3, [0, halfHeight, -halfDepth], [halfWidth, halfHeight], thickness_m, Q_NORMAL_NEGATIVE_Z) },
-    { key: "container/back", side: "back", role: "container-pane", descriptor: pane(CONTAINER_PANE_ID_BASE + 4, [0, halfHeight, halfDepth], [halfWidth, halfHeight], thickness_m, Q_IDENTITY) },
   ];
   if (scene.container.top === "closed") result.push({
     key: "container/ceiling", side: "ceiling", role: "container-top",
-    descriptor: pane(CONTAINER_PANE_ID_BASE + 5, [0, scene.container.height_m, 0], [halfWidth, halfDepth], thickness_m, Q_NORMAL_POSITIVE_Y),
+    // Compositor ownership is encoded as one contiguous pane-ID range. The
+    // editable side panes no longer live here, so retaining their former +1…+4
+    // slots put this +5 ceiling outside a two-record floor/ceiling range. It
+    // then entered dry primary depth and hid water before the raster compositor
+    // could blend the same ceiling as glass. Generated container records are
+    // compact: floor +0, ceiling +1.
+    descriptor: pane(CONTAINER_PANE_ID_BASE + 1, [0, scene.container.height_m, 0], [halfWidth, halfDepth], thickness_m, Q_NORMAL_POSITIVE_Y),
   });
   return result;
 }
@@ -257,7 +258,7 @@ export function svoSceneGlassFromEnvironmentCatalog(
   const unsupportedEntries = unsupportedCatalogGlass(catalog);
   const containerPolicy = !containerIsGlass(scene, catalog.environmentId)
     ? "absent-open-environment" as const
-    : scene.container.shape === "sphere" ? "analytic-spherical-vessel" as const : "thin-glass-vessel" as const;
+    : scene.container.shape === "sphere" ? "analytic-spherical-vessel" as const : "raster-wall-vessel" as const;
   const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     environmentId: catalog.environmentId,
     authored,
