@@ -90,7 +90,12 @@ fn incrementalActivityPublishFaceBrickClosure(brick:u32){
   if(brick>=ACTIVITY_BRICK_COUNT){return;}
   // The owning brick is the only possible directory result in the interior of
   // its span. Claim it once, then chase the directory only across the exterior
-  // shell where a distinct fine/coarse neighbour may own the coordinate.
+  // shell where a distinct fine/coarse neighbour may own the coordinate. A
+  // face/collocated velocity write changes characteristics in every member of
+  // this closure, so each member needs the velocity stamp consumed by TPA1;
+  // the generic dirty stamp alone does not schedule conservative transport.
+  let generation=incrementalActivityGeneration();
+  atomicStore(&activity[ACTIVITY_BRICK_VELOCITY_STAMP+brick],generation);
   _=incrementalActivityClaimBrick(brick);
   let dimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
     /BRICK_FINE_RESOLUTION;
@@ -104,7 +109,10 @@ fn incrementalActivityPublishFaceBrickClosure(brick:u32){
       let q=origin+vec3i(dx,dy,dz);
       if(any(q<vec3i(0))||any(q>=vec3i(dimensions))){continue;}
       let owner=brickDirectoryLookupAtCoordinate(vec3u(q));
-      if(owner!=INVALID){_=incrementalActivityClaimBrick(owner);}
+      if(owner!=INVALID){
+        atomicStore(&activity[ACTIVITY_BRICK_VELOCITY_STAMP+owner],generation);
+        _=incrementalActivityClaimBrick(owner);
+      }
   }}}
 }
 fn incrementalActivityMarkCellClosure(cell:u32){
@@ -113,9 +121,8 @@ fn incrementalActivityMarkCellClosure(cell:u32){
   let generation=incrementalActivityGeneration();
   let previous=atomicExchange(&activity[ACTIVITY_BRICK_VELOCITY_STAMP+brick],
     generation);
-  // Closure depends only on the owning brick. The velocity stamp is distinct
-  // from the dirty-brick stamp claimed by neighbouring closures, so it safely
-  // elects exactly one changed cell to publish this brick's closure.
+  // The owner stamp elects exactly one changed cell to publish this brick's
+  // complete characteristic closure.
   if(previous!=generation){incrementalActivityPublishFaceBrickClosure(brick);}
 }
 

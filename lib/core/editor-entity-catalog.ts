@@ -46,8 +46,11 @@ import type {
  * made an ordinary pipeline recompile look like the editor had lost the scene.
  */
 export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze([
-  rigidBodyEntity,
+  // A hose's authored flow may sit exactly inside a decorative static nozzle.
+  // Put the flow first so equal-distance picks open its controls rather than
+  // an incidental rigid-body panel.
   inflowEntity,
+  rigidBodyEntity,
   // Before the water body and the tank, both of which enclose it: a region is
   // drawn *over* the fluid, so a pointer within tolerance of both is over the
   // region the user just placed.
@@ -136,9 +139,19 @@ export function entityAtRay(
 ): EntityRayHit | undefined {
   if (context.pickingAvailable === false) return undefined;
   let nearest: EntityRayHit | undefined;
+  let inflow: EntityRayHit | undefined;
   for (const definition of EDITOR_ENTITIES) {
     const hit = definition.pick?.(context, ray, exclude);
+    if (hit?.selection.kind === "inflow") inflow = hit;
     if (hit && (!nearest || hit.distance_m < nearest.distance_m)) nearest = hit;
+  }
+  // A static nozzle is often the authored shell around the flow cylinder. Its
+  // body surface must not make the flow controls unreachable from viewpoints
+  // where that shell is a few centimetres nearer than the outlet entity.
+  if (inflow && nearest?.selection.kind === "body") {
+    const body = context.scene.rigidBodies.find((candidate) =>
+      candidate.id === nearest?.selection.id);
+    if (body?.motion === "static") return inflow;
   }
   return nearest;
 }

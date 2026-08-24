@@ -17,6 +17,7 @@ import { sceneLatticeDimensions } from "../../core/scene-lattice";
 import { GPUStageTimestampRecorder } from "../../core/performance-trace";
 import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
+import { averageInflowStrength, inflowOutletCenter } from "../../core/inflow-boundary";
 import {
   GPU_RIGID_EXCHANGE_BYTES,
   type GPUEulerianInfo,
@@ -998,6 +999,27 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         this.pressureIterationReceipt,
       );
     const cellSize_m = finestCellSize(this.scene, this.atlas);
+    const inflow = this.scene.fluid.inflow;
+    const inflowStrength = inflow
+      ? averageInflowStrength(inflow, this.lastTime_s, this.lastTime_s + dt_s) : 0;
+    const inflowInjection = inflow && inflowStrength > 0 ? (() => {
+      const outlet = inflowOutletCenter(inflow);
+      const tank = this.scene.container;
+      const inverseCell = 1 / cellSize_m;
+      return {
+        outletFine: [
+          (outlet.x + 0.5 * tank.width_m) * inverseCell,
+          outlet.y * inverseCell,
+          (outlet.z + 0.5 * tank.depth_m) * inverseCell,
+        ] as const,
+        radiusFine: inflow.radius_m * inverseCell,
+        velocityFinePerSecond: [
+          inflow.velocity_m_s.x * inflowStrength * inverseCell,
+          inflow.velocity_m_s.y * inflowStrength * inverseCell,
+          inflow.velocity_m_s.z * inflowStrength * inverseCell,
+        ] as const,
+      };
+    })() : undefined;
     const activeBodies = bodies.slice(0, 12);
     this.rigidSystem?.syncBodies(activeBodies);
     const gravity = this.scene.fluid.gravity_m_s2;
@@ -1065,6 +1087,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       bodyCount: this.rigidCouplingEnabled ? activeBodies.length : 0,
       worldDimensions_m: [this.scene.container.width_m, this.scene.container.height_m,
         this.scene.container.depth_m],
+      inflow: inflowInjection,
     };
     this.sparseWorld.encodeStep(encoder, {
       time: this.lastTime_s + dt_s,
@@ -1079,6 +1102,22 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     }
     frameCapture?.closeCommands();
     this.device.queue.submit([encoder.finish()]);
+    if (inflowInjection) {
+      const injectionEncoder = this.device.createCommandEncoder({
+        label: `Sparse CM12 hose injection ${(this.lastTime_s + dt_s).toFixed(6)}`,
+      });
+      this.sparseRuntime.encodeLiquidJetInjection(
+        injectionEncoder,
+        cellSize_m,
+        inflowInjection.outletFine,
+        inflowInjection.radiusFine,
+        inflowInjection.velocityFinePerSecond,
+        dt_s,
+      );
+      // Create only this step's nozzle-swept volume. The next CM12 step owns
+      // all downstream transport, projection, and gravitational curvature.
+      this.device.queue.submit([injectionEncoder.finish()]);
+    }
     if (pressureIterationReadback) {
       this.readPressureIterationReceipt(
         pressureIterationReadback,

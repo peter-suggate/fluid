@@ -891,6 +891,8 @@ struct Params {
   tracerGrid:vec4u,         // tracer lattice dimensions, tracer count
   tracerOrigin:vec4f,       // lattice origin in fine cells, isotropic spacing
   journal:vec4u,            // pressure journal base, iteration/snapshot capacity, cell stride
+  inflowOutlet:vec4f,       // centre.xyz and radius in finest-cell units
+  inflowVelocity:vec4f,     // prescribed finest-cells/second and enable
   refinementRegionControl:vec4u,
   refinementRegions:array<vec4f,16>, // min.xyz/floor, max.xyz/optional ceiling
 }
@@ -1842,10 +1844,10 @@ fn sharpeningSourceCellCurrent(cell:u32)->bool{
 
 fn addSharpeningReceipt(cell:u32,value:i32){
   if(cell>=p.counts.x||value==0){return;}
-  atomicAdd(&conditioning[3u*p.counts.x+cell],value);
+  atomicAdd(&conditioning[6u*p.counts.x+cell],value);
 }
 fn sharpeningReceipt(cell:u32)->f32{
-  return f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
+  return f32(atomicLoad(&conditioning[6u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
 }
 
 fn recordCandidateTopologyEffectsWork(brick:u32,validBrick:bool){
@@ -2065,18 +2067,25 @@ fn transportDepartureCharacteristicClearance(stencil:TransportStencil)->f32{
 fn accumulateTransportBeta(rank:u32,cell:u32,value:i32){
   _=rank;atomicAdd(&conditioning[cell],value);
 }
-fn accumulateTransportDeficit(rank:u32,cell:u32,density:i32,gamma:i32){
+fn accumulateTransportDeficit(rank:u32,cell:u32,density:i32,gamma:i32,
+ momentum:vec3i){
   _=rank;atomicAdd(&conditioning[p.counts.x+cell],density);
   atomicAdd(&conditioning[2u*p.counts.x+cell],gamma);
+  atomicAdd(&conditioning[3u*p.counts.x+cell],momentum.x);
+  atomicAdd(&conditioning[4u*p.counts.x+cell],momentum.y);
+  atomicAdd(&conditioning[5u*p.counts.x+cell],momentum.z);
 }
 
 fn finishTransportFaceRow(row:u32,characteristic:f32,touchesLiquid:bool){
-  state[destinationFaceVelocity()+row]=select(characteristic,
-    mix(characteristic,state[sourceFaceVelocity()+row],0.4),touchesLiquid);
+  // The traced characteristic is the transported face authority. Blending it
+  // back toward the old receiver value attenuates a newly wetted front every
+  // step (a constant jet loses 40% at each advancing row) and separates
+  // momentum from the conservative mass characteristic.
+  state[destinationFaceVelocity()+row]=characteristic;
   if(hasSolidBoundaries()){
     let open=rowOpenFraction(row);let fluid=state[destinationFaceVelocity()+row];
     state[destinationFaceVelocity()+row]=open*fluid+(1.0-open)*rowSolidVelocity(row);
-  }
+  }_=touchesLiquid;
 }
 fn prepareTransportFaceRow(row:u32){
   if(rowArea(row)<=1e-8){
@@ -2111,17 +2120,35 @@ fn publishSparseCM12MovingSolidActivity(@builtin(global_invocation_id)gid:vec3u)
   }
 }
 
-// Coverage of one accepted cell by the dropped ball, in the same partial-cell
-// units the authored initial volumes seed. injectionCenter.w is the only
-// enable: every ordinary frame writes zero there, so the two readers below cost
-// one uniform compare outside a drop.
+// Coverage of one accepted cell by either an editor drop or this frame's
+// nozzle-swept cylinder. injectionCenter.w is the mode (zero off, one
+// ellipsoid, two hose); downstream hose fluid is never painted here.
+fn injectionCoverageAt(point:vec3f,width:f32)->f32{
+  if(p.injectionCenter.w>1.5){
+    let halfLength=length(p.injectionRadius.xyz);
+    if(p.injectionRadius.w<=0.0||halfLength<=1e-8){return 0.0;}
+    let direction=p.injectionRadius.xyz/halfLength;
+    let relative=point-p.injectionCenter.xyz;
+    let along=dot(relative,direction);
+    let radial=length(relative-direction*along)-p.injectionRadius.w;
+    let axial=abs(along)-halfLength;
+    let outside=length(max(vec2f(radial,axial),vec2f(0.0)));
+    let signed=outside+min(max(radial,axial),0.0);
+    return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
+  }
+  let q=(point-p.injectionCenter.xyz)/max(p.injectionRadius.xyz,vec3f(1e-6));
+  let signed=length(q)-1.0;
+  return clamp(0.5-signed*min(p.injectionRadius.x,
+    min(p.injectionRadius.y,p.injectionRadius.z))/max(width,1e-6),0.0,1.0);
+}
+fn injectedJetVelocity()->vec3f{
+  if(p.injectionCenter.w<=1.5){return vec3f(0.0);}
+  return 2.0*p.injectionRadius.xyz/max(p.frame.x,1e-8);
+}
 fn injectionCoverage(id:u32)->f32{
   let b=cellBase(id);
   let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
-  let q=(center-p.injectionCenter.xyz)/max(p.injectionRadius.xyz,vec3f(1e-6));
-  let signed=length(q)-1.0;
-  return clamp(0.5-signed*min(p.injectionRadius.x,
-    min(p.injectionRadius.y,p.injectionRadius.z))/max(cellMinimumWidth(id),1e-6),0.0,1.0);
+  return injectionCoverageAt(center,cellMinimumWidth(id));
 }
 
 // A drop reaching a dormant brick is the same evidence as a free surface swept
@@ -2139,6 +2166,17 @@ fn injectionReachesBrick(brick:u32)->bool{
   let lower=vec3f(vec3u(x,y,z)*BRICK_FINE_RESOLUTION);
   let upper=min(lower+vec3f(f32(BRICK_FINE_RESOLUTION*brickSpan(brick))),
     vec3f(p.dimensions.xyz));
+  if(p.injectionCenter.w>1.5){
+    // Besides the source plug, admit one plug-length of forward capacity for
+    // the conservative reservoir-overflow sweeps below. This activates
+    // topology only; injectLiquid still creates mass solely in the nozzle
+    // cylinder.
+    let sourceA=p.injectionCenter.xyz-p.injectionRadius.xyz;
+    let sourceB=p.injectionCenter.xyz+3.0*p.injectionRadius.xyz;
+    let sourceLower=min(sourceA,sourceB)-vec3f(p.injectionRadius.w);
+    let sourceUpper=max(sourceA,sourceB)+vec3f(p.injectionRadius.w);
+    return all(sourceUpper>=lower)&&all(sourceLower<=upper);
+  }
   // Residency is conservative: use the ellipsoid's bounding box so a brick
   // sharing only a face/edge with the drop is promoted too. injectLiquid still
   // applies the exact smooth ellipsoid coverage and therefore writes no false
@@ -2160,10 +2198,112 @@ fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
     let id=range.x+at;if(cellOpenVolume(id)<=1e-8){continue;}
     let coverage=injectionCoverage(id);
     let clippedCoverage=coverage*cellOpenFraction(id);
-    state[p.stateOffsets0.x+id]=max(state[p.stateOffsets0.x+id],clippedCoverage);
-    state[p.stateOffsets0.y+id]=max(state[p.stateOffsets0.y+id],clippedCoverage);
+    // Editor drops establish an occupancy shape. A hose adds the authored
+    // swept-plug mass; the bounded conservative overflow passes below resolve
+    // temporary source compression into downstream capacity before publish.
+    let hose=p.injectionCenter.w>1.5;
+    state[p.stateOffsets0.x+id]=select(
+      max(state[p.stateOffsets0.x+id],clippedCoverage),
+      state[p.stateOffsets0.x+id]+clippedCoverage,hose);
+    state[p.stateOffsets0.y+id]=select(
+      max(state[p.stateOffsets0.y+id],clippedCoverage),
+      state[p.stateOffsets0.y+id]+clippedCoverage,hose);
     if(coverage>0.0){state[p.stateOffsets0.z+id]=1.0;state[p.stateOffsets0.w+id]=1.0;
+      if(hose){for(var bank=0u;bank<2u;bank+=1u){
+        let at=select(p.stateOffsets1.x,p.stateOffsets1.y,bank!=0u)+4u*id;
+        let prior=vec3f(state[at],state[at+1u],state[at+2u]);
+        let velocity=mix(prior,injectedJetVelocity(),coverage);
+        state[at]=velocity.x;state[at+1u]=velocity.y;state[at+2u]=velocity.z;
+        state[at+3u]=0.0;}
+        let acceptedAt=destinationCellVelocity()+4u*id;
+        cm12PublishCollocatedWetEffectiveVelocity(id,
+          vec3f(state[acceptedAt],state[acceptedAt+1u],state[acceptedAt+2u]),true);
+        // Injection lands after this frame's scalar/velocity activity seal.
+        // Stamp the accepted cell now so the next frame's transport-packet
+        // compiler includes the source brick and its face-neighbour closure.
+        incrementalActivityMarkCellClosure(id);
+      }
     }
+  }
+}
+
+@compute @workgroup_size(64)
+fn clearLiquidJetOverflowReceipts(@builtin(global_invocation_id)gid:vec3u){
+  let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
+  for(var plane=0u;plane<4u;plane+=1u){
+    atomicStore(&conditioning[plane*p.counts.x+id],0);
+  }
+}
+
+// Resolve only rho>V_i created by the virtual reservoir. Each sweep moves at
+// most one accepted-cell width along the nozzle direction and publishes equal
+// and opposite fixed-point mass/momentum receipts, so this is conservative
+// transport rather than downstream occupancy painting.
+@compute @workgroup_size(64)
+fn scatterLiquidJetOverflow(@builtin(global_invocation_id)gid:vec3u){
+  let id=acceptedTemplateCellInvocation(gid.x);
+  if(id==INVALID||!cellTransportActive(id)||p.injectionCenter.w<=1.5){return;}
+  let density=state[p.stateOffsets0.x+id];
+  let excessDensity=max(0.0,density-cellOpenFraction(id));
+  if(excessDensity<=1e-7){return;}
+  let direction=normalize(p.injectionRadius.xyz);
+  let b=cellBase(id);let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
+  let receiver=ownerCellAt(vec3i(floor(center+direction*cellMinimumWidth(id))));
+  if(receiver==INVALID||receiver==id||!cellTransportActive(receiver)){return;}
+  let mass=excessDensity*cellVolume(id);
+  let velocityAt=p.stateOffsets1.x+4u*id;
+  let velocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u]);
+  let massFixed=i32(round(mass*CM12_TRANSPORT_FIXED));
+  let momentumFixed=vec3i(round(mass*velocity*CM12_TRANSPORT_FIXED));
+  atomicAdd(&conditioning[id],-massFixed);
+  atomicAdd(&conditioning[receiver],massFixed);
+  for(var axis=0u;axis<3u;axis+=1u){
+    atomicAdd(&conditioning[(axis+1u)*p.counts.x+id],-momentumFixed[axis]);
+    atomicAdd(&conditioning[(axis+1u)*p.counts.x+receiver],momentumFixed[axis]);
+  }
+}
+
+@compute @workgroup_size(64)
+fn finalizeLiquidJetOverflow(@builtin(global_invocation_id)gid:vec3u){
+  let id=acceptedTemplateCellInvocation(gid.x);
+  if(id==INVALID||!cellTransportActive(id)){return;}
+  let massReceipt=f32(atomicLoad(&conditioning[id]))/CM12_TRANSPORT_FIXED;
+  if(massReceipt==0.0){return;}
+  let volume=cellVolume(id);let oldDensity=state[p.stateOffsets0.x+id];
+  let oldMass=oldDensity*volume;
+  let velocityAt=p.stateOffsets1.x+4u*id;
+  let oldVelocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u]);
+  let momentumReceipt=vec3f(
+    f32(atomicLoad(&conditioning[p.counts.x+id])),
+    f32(atomicLoad(&conditioning[2u*p.counts.x+id])),
+    f32(atomicLoad(&conditioning[3u*p.counts.x+id])))/CM12_TRANSPORT_FIXED;
+  let nextMass=max(0.0,oldMass+massReceipt);
+  let nextDensity=nextMass/volume;
+  let nextVelocity=select(vec3f(0.0),(oldMass*oldVelocity+momentumReceipt)/nextMass,
+    nextMass>CM12_DRY_CELL_THRESHOLD*volume);
+  for(var bank=0u;bank<2u;bank+=1u){
+    state[select(p.stateOffsets0.x,p.stateOffsets0.y,bank!=0u)+id]=nextDensity;
+    let at=select(p.stateOffsets1.x,p.stateOffsets1.y,bank!=0u)+4u*id;
+    state[at]=nextVelocity.x;state[at+1u]=nextVelocity.y;
+    state[at+2u]=nextVelocity.z;state[at+3u]=0.0;
+  }
+  cm12PublishCollocatedWetEffectiveVelocity(id,nextVelocity,
+    nextDensity>CM12_DRY_CELL_THRESHOLD);
+  incrementalActivityMarkCellClosure(id);
+}
+
+// Seed the staggered velocity authority as well as collocated transport state.
+// Density without these rows makes a hose behave like water appearing at rest.
+@compute @workgroup_size(64)
+fn injectLiquidFaces(@builtin(global_invocation_id)gid:vec3u){
+  if(p.injectionCenter.w<=1.5){return;}
+  let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID||!rowAccepted(row)){return;}
+  let center=rowCenter(row);
+  let coverage=injectionCoverageAt(center,max(0.5*rowDistance(row),1e-6));
+  if(coverage<=0.0){return;}let axis=rowAxis(row);
+  for(var bank=0u;bank<2u;bank+=1u){
+    let at=select(p.stateOffsets1.z,p.stateOffsets1.w,bank!=0u)+row;
+    state[at]=mix(state[at],injectedJetVelocity()[axis],coverage);
   }
 }
 
@@ -2223,19 +2363,26 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
       let arrival=traceEffectiveTransportArrival(vec3f(taf(b),taf(b+1u),taf(b+2u)));
       arrivalStencil=effectiveTransportStencil(arrival);
       for(var corner=0u;corner<8u;corner+=1u){visible+=arrivalStencil.weights[corner];}
-      if(visible<=1e-9){accumulateTransportDeficit(wid.x,donor,i32(round(
-          state[sourceDensity()+donor]*deficit*CM12_TRANSPORT_FIXED)),i32(round(
-          state[sourceGamma()+donor]*deficit*CM12_TRANSPORT_FIXED)));
+      let donorDensity=state[sourceDensity()+donor];
+      let velocityAt=sourceCellVelocity()+4u*donor;
+      let donorVelocity=vec3f(state[velocityAt],state[velocityAt+1u],
+        state[velocityAt+2u]);
+      if(visible<=1e-9){let densityTransfer=donorDensity*deficit;
+        accumulateTransportDeficit(wid.x,donor,
+          i32(round(densityTransfer*CM12_TRANSPORT_FIXED)),i32(round(
+          state[sourceGamma()+donor]*deficit*CM12_TRANSPORT_FIXED)),vec3i(round(
+          densityTransfer*donorVelocity*CM12_TRANSPORT_FIXED)));
       }else{for(var corner=0u;corner<8u;corner+=1u){
         var cell=INVALID;var weight=0.0;
         cell=arrivalStencil.cells[corner];weight=arrivalStencil.weights[corner];
         if(cell==INVALID||weight<=0.0){continue;}let normalized=weight/visible;
-        let densityTransfer=cm12VolumeScaledDeficitTransfer(state[sourceDensity()+donor],
+        let densityTransfer=cm12VolumeScaledDeficitTransfer(donorDensity,
           cellVolume(donor),cellVolume(cell),deficit,normalized);
         let gammaTransfer=cm12VolumeScaledDeficitTransfer(state[sourceGamma()+donor],
           cellVolume(donor),cellVolume(cell),deficit,normalized);
         accumulateTransportDeficit(wid.x,cell,i32(round(densityTransfer*CM12_TRANSPORT_FIXED)),
-          i32(round(gammaTransfer*CM12_TRANSPORT_FIXED)));
+          i32(round(gammaTransfer*CM12_TRANSPORT_FIXED)),vec3i(round(
+          densityTransfer*donorVelocity*CM12_TRANSPORT_FIXED)));
       }}
     }
   }
@@ -2259,21 +2406,34 @@ fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
     }else{state[destinationDensity()+id]=0.0;state[destinationGamma()+id]=1.0;}
   }else{
   let advectedGamma=state[destinationGamma()+id];var visible=0.0;
-  var rhoNext=0.0;var gammaNext=0.0;
+  var rhoNext=0.0;var gammaNext=0.0;var momentumNext=vec3f(0.0);
   for(var corner=0u;corner<8u;corner+=1u){visible+=massDepartureStencilWeight(id,corner);}
   if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
     let cell=massDepartureStencilCell(id,corner);
     let weight=massDepartureStencilWeight(id,corner);if(cell==INVALID||weight<=0.0){continue;}
     let coefficient=cm12ConditionedRowCoefficient(
       advectedGamma,weight/visible,transportBeta(cell));
-    rhoNext+=coefficient*state[sourceDensity()+cell];gammaNext+=coefficient;
+    let donorDensity=state[sourceDensity()+cell];
+    let velocityAt=sourceCellVelocity()+4u*cell;
+    rhoNext+=coefficient*donorDensity;gammaNext+=coefficient;
+    momentumNext+=coefficient*donorDensity*vec3f(state[velocityAt],
+      state[velocityAt+1u],state[velocityAt+2u]);
   }}
   rhoNext+=f32(atomicLoad(&conditioning[p.counts.x+id]))/CM12_TRANSPORT_FIXED;
   gammaNext+=f32(atomicLoad(&conditioning[2u*p.counts.x+id]))/CM12_TRANSPORT_FIXED;
+  momentumNext+=vec3f(f32(atomicLoad(&conditioning[3u*p.counts.x+id])),
+    f32(atomicLoad(&conditioning[4u*p.counts.x+id])),
+    f32(atomicLoad(&conditioning[5u*p.counts.x+id])))/CM12_TRANSPORT_FIXED;
   if(rhoNext<CM12_DRY_CELL_THRESHOLD){gammaNext=1.0;}
   let nextDensity=max(0.0,rhoNext);
   state[destinationDensity()+id]=nextDensity;
   state[destinationGamma()+id]=max(0.0,gammaNext);
+  let velocity=select(vec3f(0.0),momentumNext/nextDensity,
+    nextDensity>=CM12_DRY_CELL_THRESHOLD);
+  let velocityAt=destinationCellVelocity()+4u*id;
+  state[velocityAt]=velocity.x;state[velocityAt+1u]=velocity.y;
+  state[velocityAt+2u]=velocity.z;state[velocityAt+3u]=0.0;
+  cm12PublishTransferredEffectiveVelocity(id,velocity);
   surfaceFeature=hasRigidBodies()||cellOpenFraction(id)<1.0-1e-6
     ||state[sourceDensity()+id]<p.activityDensity.z
     ||state[destinationDensity()+id]<p.activityDensity.z;
@@ -2676,7 +2836,7 @@ fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn clearSolidExcess(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  atomicStore(&conditioning[3u*p.counts.x+cell],0);
+  atomicStore(&conditioning[6u*p.counts.x+cell],0);
   state[p.stateOffsets5.x+cell]=0.0;
 }
 
@@ -2717,7 +2877,7 @@ fn scatterSolidExcess(@builtin(global_invocation_id)gid:vec3u){
         *cellVolume(neighbor);if(spare<=0.0){continue;}
       var offered=i32(round(f32(movedFixed)*spare/totalSpare));
       if(neighbor==lastNeighbor){offered=remaining;}else{offered=clamp(offered,0,remaining);}
-      atomicAdd(&conditioning[3u*p.counts.x+neighbor],offered);remaining-=offered;
+      atomicAdd(&conditioning[6u*p.counts.x+neighbor],offered);remaining-=offered;
     }
   }
 }
@@ -2729,7 +2889,7 @@ fn finalizeSolidExcess(@builtin(global_invocation_id)gid:vec3u){
     if(!dynamicallyCoveredCell(cell)){state[destinationDensity()+cell]=0.0;}
     return;
   }
-  let incoming=f32(atomicLoad(&conditioning[3u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
+  let incoming=f32(atomicLoad(&conditioning[6u*p.counts.x+cell]))/CM12_TRANSPORT_FIXED;
   state[destinationDensity()+cell]=max(0.0,state[destinationDensity()+cell]
     +state[p.stateOffsets5.x+cell]+incoming/cellVolume(cell));
 }
@@ -2775,6 +2935,23 @@ fn publishForcedFace(row:u32,value:f32){
   state[destinationFaceVelocity()+row]=value;
   state[sourceFaceVelocity()+row]=value;
 }
+fn sparseCM12InflowAxis()->u32{
+  let velocity=abs(p.inflowVelocity.xyz);
+  if(velocity.y>velocity.x&&velocity.y>=velocity.z){return 1u;}
+  return select(0u,2u,velocity.z>velocity.x);
+}
+fn sparseCM12InflowFaceCoverage(row:u32)->f32{
+  if(p.inflowVelocity.w<=0.5||p.inflowOutlet.w<=0.0
+    ||length(p.inflowVelocity.xyz)<=1e-6){return 0.0;}
+  let axis=sparseCM12InflowAxis();if(rowAxis(row)!=axis){return 0.0;}
+  let direction=p.inflowVelocity.xyz/length(p.inflowVelocity.xyz);
+  let relative=rowCenter(row)-p.inflowOutlet.xyz;
+  let axial=dot(relative,direction);
+  if(abs(axial)>0.51*max(rowDistance(row),1.0)){return 0.0;}
+  let radial=length(relative-direction*axial);
+  let edge=max(0.5*rowDistance(row),0.5);
+  return clamp(0.5-(radial-p.inflowOutlet.w)/edge,0.0,1.0);
+}
 @compute @workgroup_size(64)
 fn forceFaces(@builtin(global_invocation_id)gid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
@@ -2784,8 +2961,23 @@ fn forceFaces(@builtin(global_invocation_id)gid:vec3u){
     publishForcedFace(row,boundary);return;
   }
   let open=select(1.0,rowOpenFraction(row),hasSolidBoundaries());
-  publishForcedFace(row,state[destinationFaceVelocity()+row]
-    +open*p.frame.x*p.acceleration[rowAxis(row)]);
+  let axis=rowAxis(row);
+  let forced=state[destinationFaceVelocity()+row]+open*p.frame.x*p.acceleration[axis];
+  let inflow=sparseCM12InflowFaceCoverage(row);
+  publishForcedFace(row,mix(forced,p.inflowVelocity[axis],inflow));
+}
+
+// A pressure solve may change ordinary jet faces, but the nozzle disk is a
+// prescribed external flux boundary. Reapply only that disk before
+// collocation; every downstream face remains the projected CM12 solution.
+@compute @workgroup_size(64)
+fn enforceSparseCM12InflowFaces(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedTemplateRowInvocation(gid.x);
+  if(row==INVALID||!rowAccepted(row)||rowArea(row)<=1e-8){return;}
+  let coverage=sparseCM12InflowFaceCoverage(row);if(coverage<=0.0){return;}
+  let axis=rowAxis(row);
+  publishForcedFace(row,mix(state[destinationFaceVelocity()+row],
+    p.inflowVelocity[axis],coverage));
 }
 
 fn rawPressureDensity(cell:u32)->f32{

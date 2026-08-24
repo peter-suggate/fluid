@@ -822,6 +822,12 @@ export interface SparseCM12PressureControl {
   readonly relativeTolerance?: number;
 }
 
+export interface SparseCM12InflowControl {
+  readonly outletFine: readonly [number, number, number];
+  readonly radiusFine: number;
+  readonly velocityFinePerSecond: readonly [number, number, number];
+}
+
 /**
  * Capacity of the optional pressure journal, chosen at construction.
  *
@@ -3269,9 +3275,10 @@ export class WebGPUSparseCM12Resident {
       size: SPARSE_CM12_PRESSURE_SCALAR_BYTES, usage: storage });
     const conditioning = device.createBuffer({
       label: "Sparse CM12 conservative transport and conditioning accumulators",
-      // Transport needs four cell planes. Pressure reuses the dead arena for
+      // Transport needs beta, rho/gamma deficit, three momentum-deficit, and
+      // one sharpening plane. Pressure reuses the dead arena for
       // cell and row headers plus their stable-ID compact worklists.
-      size: 4 * Math.max(4 * templates.cellCount,
+      size: 4 * Math.max(7 * templates.cellCount,
         templates.cellCount + templates.rowCount + 8),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
@@ -4271,7 +4278,9 @@ export class WebGPUSparseCM12Resident {
       presentationShaderSource, "Sparse CM12 presentation shader",
     );
     const pipelineLayout = deviceCompilation.pipelineLayout;
-    const names = ["injectLiquid",
+    const names = ["injectLiquid", "injectLiquidFaces",
+      "clearLiquidJetOverflowReceipts", "scatterLiquidJetOverflow",
+      "finalizeLiquidJetOverflow",
       "beginSparseCM12FrameControl", "publishSparseCM12FrameBodyAuthority",
       "publishSparseCM12FrameBoundaryAuthority", "sealSparseCM12FrameControl",
       "publishSparseCM12FrameScalarOutput", "publishSparseCM12FrameFaceOutput",
@@ -4310,7 +4319,8 @@ export class WebGPUSparseCM12Resident {
       "commitHorizontalD4", "preserveVelocityHorizontalD4",
       "commitVelocityHorizontalD4",
       "initializeVelocityExtensionPackets", "advanceVelocityExtensionPackets",
-      "forceFaces", "classifyPressureCells", "compileCanonicalPressureRows",
+      "forceFaces", "enforceSparseCM12InflowFaces",
+      "classifyPressureCells", "compileCanonicalPressureRows",
       "beginCanonicalPressureCells", "beginCanonicalPressureRows",
       "planPressureMembershipEpoch",
       "finalizeCanonicalPressureCellFrontier",
@@ -4709,12 +4719,14 @@ export class WebGPUSparseCM12Resident {
     seams?: SparseCM12ResidentStageSeams,
     bodyCount = 0,
     worldDimensions_m?: readonly [number, number, number],
+    inflow?: SparseCM12InflowControl,
   ): void {
     this.assertLive();
+    this.lastInflow = inflow;
     const packed = this.lastPacked!;
     this.writeParameters(packed, dt_s, finestCellSize_m, pressureScale,
       accelerationFinePerSecond2, sharpening, activityPolicy, pressureControl, bodyCount,
-      worldDimensions_m);
+      worldDimensions_m, inflow);
     const pressureIterations = sparseCM12PressureIterations(pressureControl?.iterations);
     // The header carries the two device-side cursors, so it starts each
     // captured frame at zero. The records and snapshots behind it are
@@ -4737,7 +4749,7 @@ export class WebGPUSparseCM12Resident {
     // show the previous capture's frames as though they belonged to this one.
     if (journalSnapshots) this.journalSnapshotCount = journalSnapshots.size;
     encoder.clearBuffer(this.conditioning, 0,
-      Math.max(4, 12 * this.templateCellCount));
+      Math.max(4, 24 * this.templateCellCount));
     if (this.phase1TransportQALayout) {
       const layout = this.phase1TransportQALayout;
       const first = layout.baseWords + 3;
@@ -5087,7 +5099,7 @@ export class WebGPUSparseCM12Resident {
       closePass();
       // A native fill of the receipt segment is cheaper than a lock/stamp
       // protocol on every trilinear receiver.
-      encoder.clearBuffer(this.conditioning, 12 * this.templateCellCount,
+      encoder.clearBuffer(this.conditioning, 24 * this.templateCellCount,
         4 * this.templateCellCount);
       encoder.clearBuffer(this.state, 4 * this.layout.sharpeningDelta,
         4 * this.templateCellCount);
@@ -5378,6 +5390,7 @@ export class WebGPUSparseCM12Resident {
         Math.min(this.faceAddressLayout.dispatchWidth,
           this.faceAddressLayout.seamPacketCount),
         this.faceAddressLayout.seamDispatchRows);
+      dispatchAccepted("enforceSparseCM12InflowFaces", "row");
       useBindGroup(this.effectiveVelocityPressureBindGroup);
       dispatchAccepted("collocateAndDiagnose", "cell");
       dispatchAccepted("measureDivergenceDiagnostics", "cell");
@@ -5949,6 +5962,38 @@ export class WebGPUSparseCM12Resident {
     centerFine: readonly [number, number, number],
     radiusFine: readonly [number, number, number],
   ): void {
+    this.encodeLiquidInjectionTransaction(encoder, finestCellSize_m, centerFine,
+      radiusFine, 1, 0, 0.004, true);
+  }
+
+  encodeLiquidJetInjection(
+    encoder: GPUCommandEncoder,
+    finestCellSize_m: number,
+    outletFine: readonly [number, number, number],
+    radiusFine: number,
+    velocityFinePerSecond: readonly [number, number, number],
+    dt_s: number,
+  ): void {
+    const speed = Math.hypot(...velocityFinePerSecond);
+    if (!(radiusFine > 0) || !(speed > 0) || !(dt_s > 0)) return;
+    const halfDisplacement = velocityFinePerSecond.map((value) => 0.5 * value * dt_s) as
+      [number, number, number];
+    const center = outletFine.map((value, axis) => value + halfDisplacement[axis]!) as
+      [number, number, number];
+    this.encodeLiquidInjectionTransaction(encoder, finestCellSize_m, center,
+      halfDisplacement, 2, radiusFine, dt_s, false);
+  }
+
+  private encodeLiquidInjectionTransaction(
+    encoder: GPUCommandEncoder,
+    finestCellSize_m: number,
+    centerFine: readonly [number, number, number],
+    radiusFine: readonly [number, number, number],
+    mode: 1 | 2,
+    jetRadiusFine: number,
+    injectionDt_s: number,
+    publishPresentation: boolean,
+  ): void {
     this.assertLive();
     if (this.legacyHostAuthorityOracleForQA
       && (Math.abs(centerFine[0] - 0.5 * this.dimensions[0]) > 1e-6
@@ -5956,13 +6001,13 @@ export class WebGPUSparseCM12Resident {
         || Math.abs(radiusFine[0] - radiusFine[2]) > 1e-6)) {
       this.legacyHostD4AuthorityForQA = false;
     }
-    this.writeParameters(this.lastPacked!, 0.004, finestCellSize_m, 1, [0, 0, 0]);
-    // The trailing one is the injection enable that every ordinary frame writes
-    // as zero. It is what lets `activateLiquidInjectionReceivers` and `injectLiquid` read
-    // the drop out of the shared frame uniform without costing a quiescent
-    // frame anything.
-    this.parameterF32.set([...centerFine, 1], 52);
-    this.parameterF32.set([...radiusFine, 0], 56);
+    this.writeParameters(this.lastPacked!, injectionDt_s, finestCellSize_m, 1,
+      [0, 0, 0], undefined, undefined, undefined, 0, undefined, this.lastInflow);
+    // The trailing word is the injection mode that every ordinary frame writes
+    // as zero. It lets the receiver planner and writer distinguish an editor
+    // ellipsoid from a swept hose plug at no cost to a quiescent frame.
+    this.parameterF32.set([...centerFine, mode], 52);
+    this.parameterF32.set([...radiusFine, jetRadiusFine], 56);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
     const packed = this.lastPacked!;
     const bricks = Math.ceil(packed.brickCount / WORKGROUP_SIZE);
@@ -6089,22 +6134,45 @@ export class WebGPUSparseCM12Resident {
     const injectionPass = encoder.beginComputePass({
       label: "Sparse CM12 resident liquid injection",
     });
-    injectionPass.setBindGroup(0, this.bindGroup);
+    // Conservative transport samples the persistent effective-velocity plane
+    // bound at slot 3, not the diagnostics scratch carried by the ordinary
+    // bind group. Hose wetting publishes that authority alongside both state
+    // velocity banks so the next frame actually advects the source plug.
+    injectionPass.setBindGroup(0, this.effectiveVelocityPressureBindGroup);
     // Brick-indexed rather than indirect over the accepted cell worklist: this
     // also covers a newly activated receiver in the same command buffer.
     injectionPass.setPipeline(this.pipelines.injectLiquid!);
     injectionPass.dispatchWorkgroups(bricks);
+    const overflowSweeps = mode === 2 ? Math.min(16, Math.ceil(
+      2 * Math.hypot(radiusFine[0], radiusFine[1], radiusFine[2]))) : 0;
+    for (let sweep = 0; sweep < overflowSweeps; sweep += 1) {
+      injectionPass.setPipeline(this.pipelines.clearLiquidJetOverflowReceipts!);
+      injectionPass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+      injectionPass.setPipeline(this.pipelines.scatterLiquidJetOverflow!);
+      injectionPass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+      injectionPass.setPipeline(this.pipelines.finalizeLiquidJetOverflow!);
+      injectionPass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 0);
+    }
+    injectionPass.setPipeline(this.pipelines.injectLiquidFaces!);
+    injectionPass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 12);
     injectionPass.setPipeline(this.pipelines.invalidateSparseCM12FrameD4ForInjection!);
     injectionPass.dispatchWorkgroups(1);
+    // This is accepted-state occupancy, not merely renderer bookkeeping. A
+    // post-step hose plug must publish its wet reason before the next frame's
+    // topology planner runs, otherwise that planner can retire the just-wet
+    // receiver as a dry brick before transport sees the new mass.
     injectionPass.setPipeline(this.pipelines.classifyPresentationBricks!);
     injectionPass.dispatchWorkgroups(bricks);
     injectionPass.end();
     if (!this.legacyHostAuthorityOracleForQA) {
     }
-    this.encodeFramePlanPresentation(encoder, "Sparse CM12 injection presentation");
+    if (publishPresentation) {
+      this.encodeFramePlanPresentation(encoder, "Sparse CM12 injection presentation");
+    }
   }
 
   private lastPacked?: PackedResidentTopology;
+  private lastInflow?: SparseCM12InflowControl;
   /**
    * Built on first access and never before.
    *
@@ -6126,6 +6194,7 @@ export class WebGPUSparseCM12Resident {
     pressureControl?: SparseCM12PressureControl,
     bodyCount = 0,
     worldDimensions_m?: readonly [number, number, number],
+    inflow?: SparseCM12InflowControl,
   ): void {
     this.lastPacked = packed;
     const u = this.parameterU32, f = this.parameterF32, l = this.layout;
@@ -6190,6 +6259,8 @@ export class WebGPUSparseCM12Resident {
     const journal = this.layout.journalLayout;
     u.set([this.layout.journal, journal.iterationCapacity, journal.snapshotCapacity,
       journal.cellStride], 108);
+    f.set(inflow ? [...inflow.outletFine, inflow.radiusFine] : [0, 0, 0, 0], 112);
+    f.set(inflow ? [...inflow.velocityFinePerSecond, 1] : [0, 0, 0, 0], 116);
     new Uint8Array(this.parameterWords).set(this.refinementRegionParameters,
       SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
@@ -7216,7 +7287,7 @@ export class WebGPUSparseCM12Resident {
       maximumOwnedRowCount: this.maximumOwnedRowCount,
       templateCellWorkgroups: Math.ceil(this.templateCellCount / WORKGROUP_SIZE),
       templateRowWorkgroups: Math.ceil(this.templateRowCount / WORKGROUP_SIZE),
-      conditioningClearBytesPerFrame: 12 * this.templateCellCount,
+      conditioningClearBytesPerFrame: 24 * this.templateCellCount,
       pressureScratchClearBytesPerFrame: 0,
       rowOwnershipCatalogBytes: 4 * (this.templateWords[24]! - this.templateWords[16]!),
       gammaPairCatalogBytes: 0,

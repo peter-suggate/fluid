@@ -78,17 +78,12 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
 
   if (id === "hose-tank") {
     scene.sceneId = "paper-figure-3-hose-filled-tank";
-    // Keep the 20 mm finest lattice but give the Losasso hierarchy an exact
-    // dyadic tiling: 64 x 48 x 40 admits size-8 leaves. The former 60 x 45 x 40
-    // tank had an odd Y dimension, which collapsed Losasso's structural
-    // maximum to one finest cell and made the scene uniformly fine.
+    // Keep the 20 mm finest lattice on an exact sparse-CM12 brick tiling:
+    // 64 x 48 x 40 admits complete size-8 brick pages.
     scene.container.width_m = 1.28;
     scene.container.height_m = 0.96;
-    // Section 5 chooses the timestep from the effective octree resolution.
-    // The established jet can reach roughly 2.7 finest-octree cells per
-    // 1/180 s controller step, which asks the factor-4 fine characteristic to
-    // leave its certified eight-cell resident support. Keep the authored
-    // geometry and velocity, and resolve that CFL requirement temporally.
+    // Retain a small authored scene-step lane; sparse CM12's paper-step lane
+    // injects the corresponding nozzle-swept volume once per simulation step.
     scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 360;
     scene.container.fillFraction = 0.06;
     scene.fluid.initialCondition = "tank-fill";
@@ -97,11 +92,11 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
     // injection cylinder is oriented along it), adjustable in scene config.
     scene.fluid.inflow = {
       center_m: { x: -0.44, y: 0.55, z: 0 }, radius_m: 0.08, length_m: 0.12,
-      velocity_m_s: { x: 1.60, y: 0, z: 0 }, start_s: 0, end_s: 14, ramp_s: 0
+      velocity_m_s: { x: 2.60, y: 0, z: 0 }, start_s: 0, end_s: 14, ramp_s: 0
     };
     scene.rigidBodies = [{
       id: "paper-hose-nozzle", name: "Hose nozzle", shape: "cylinder",
-      dimensions_m: { x: 0.10, y: 0.26, z: 0.10 }, density_kg_m3: 5000,
+      dimensions_m: { x: 0.16, y: 0.26, z: 0.16 }, density_kg_m3: 5000,
       // Cylinder axis defaults to +y; rotate 90 degrees about z to lie along x.
       position_m: { x: -0.51, y: 0.55, z: 0 }, orientation: { w: Math.SQRT1_2, x: 0, y: 0, z: Math.SQRT1_2 },
       linearVelocity_m_s: { x: 0, y: 0, z: 0 }, angularVelocity_rad_s: { x: 0, y: 0, z: 0 },

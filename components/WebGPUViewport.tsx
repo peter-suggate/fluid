@@ -2129,7 +2129,8 @@ export function WebGPUViewport() {
         // things inside are reachable at all. With nothing behind, the click
         // falls to the background and deselects, same as it always did.
         const hit = entityAtRay(context, ray, useUIStore.getState().selection);
-        if (hit && !(surface?.kind === "body" && surface.distance_m <= hit.distance_m)) {
+        if (hit && (hit.selection.kind === "inflow"
+          || !(surface?.kind === "body" && surface.distance_m <= hit.distance_m))) {
           selectOnClick = hit.selection;
         }
       }
@@ -2147,7 +2148,7 @@ export function WebGPUViewport() {
         const active=pointerRef.current;
         if(!active||active.id!==pointerId||active.action!=="pick")return;
         const body=picked?useDiagnosticsStore.getState().bodies[picked.bodyIndex]:undefined;
-        if(body&&picked){
+        if(body&&picked&&selectOnClick?.kind!=="inflow"){
           // A pointer already released cannot be dragged, so a fast click on a
           // body selects it without opening a throw that never ends.
           if(active.released){pointerRef.current=null;useUIStore.getState().selectBody(body.description.id);return;}

@@ -41,6 +41,11 @@ export function inflowSpeed_m_s(inflow: FluidInflow): number {
   return length(inflow.velocity_m_s);
 }
 
+/** The authored circular outlet's volume flux, in the unit shown by the UI. */
+export function inflowFlowRate_L_s(inflow: FluidInflow): number {
+  return 1000 * Math.PI * inflow.radius_m ** 2 * inflowSpeed_m_s(inflow);
+}
+
 export function inflowDirection(inflow: FluidInflow): Vec3 {
   const speed = inflowSpeed_m_s(inflow);
   return speed > 1e-9 ? scale(inflow.velocity_m_s, 1 / speed) : { x: 0, y: -1, z: 0 };
@@ -102,6 +107,22 @@ export function aimInflow(inflow: FluidInflow, tip_m: Vec3): FluidInflow {
 export function setInflowRadius(inflow: FluidInflow, radius_m: number, container: SceneDescription["container"]): FluidInflow {
   const ceiling = 0.5 * Math.min(container.width_m, container.depth_m);
   return { ...inflow, radius_m: Math.min(ceiling, Math.max(INFLOW_MINIMUM_RADIUS_M, radius_m)) };
+}
+
+/**
+ * Set volume flux without changing the launch velocity that shapes the arc.
+ * For a circular outlet Q = pi r^2 |u|, so the amount control changes only
+ * the bore area and then uses the same geometry bounds as direct resizing.
+ */
+export function setInflowFlowRate_L_s(
+  inflow: FluidInflow,
+  flowRate_L_s: number,
+  container: SceneDescription["container"],
+): FluidInflow {
+  const speed = inflowSpeed_m_s(inflow);
+  if (!(speed > 0)) return inflow;
+  const radius_m = Math.sqrt(Math.max(0, flowRate_L_s) / (1000 * Math.PI * speed));
+  return setInflowRadius(inflow, radius_m, container);
 }
 
 /**
@@ -177,7 +198,7 @@ function inflowEntityFor(context: EditorEntityContext): EditorEntity | undefined
     tone: "inflow",
     frame,
     box,
-    sizeLabel: `⌀${(2 * inflow.radius_m).toFixed(3)} m · ${speed.toFixed(2)} m/s`,
+    sizeLabel: `⌀${(2 * inflow.radius_m).toFixed(3)} m · ${speed.toFixed(2)} m/s · ${inflowFlowRate_L_s(inflow).toFixed(1)} L/s`,
     handles: [
       ...boxHandles(box, {
         drag: (sides, point_m) => {
@@ -218,6 +239,15 @@ function inflowEntityFor(context: EditorEntityContext): EditorEntity | undefined
         min: INFLOW_MINIMUM_SPEED_M_S,
         max: INFLOW_MAXIMUM_SPEED_M_S,
         apply: (value) => patch({ ...inflow, velocity_m_s: scale(direction, value) }),
+      },
+      {
+        id: "flow",
+        label: "Flow",
+        unit: "L/s",
+        value: inflowFlowRate_L_s(inflow),
+        step: 1,
+        min: 0.1,
+        apply: (value) => patch(setInflowFlowRate_L_s(inflow, value, scene.container)),
       },
     ],
     // When the jet runs, which the arrow cannot say. The nozzle's own length is

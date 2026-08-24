@@ -10,6 +10,7 @@ import {
   WebGPUSparseCM12Resident,
   type SharpeningTrace,
   type SparseCM12ActivityPolicy,
+  type SparseCM12InflowControl,
   type SparseCM12PresentationPageResolution,
   type SparseCM12PressureControl,
   type SparseCM12PressureJournalCapacityRequest,
@@ -46,6 +47,7 @@ export interface CM12SparseWorldStepConfiguration {
   readonly seams?: SparseCM12ResidentStageSeams;
   readonly bodyCount?: number;
   readonly worldDimensions_m?: readonly [number, number, number];
+  readonly inflow?: SparseCM12InflowControl;
 }
 
 export type CM12SparseWorldNumerics =
@@ -117,6 +119,14 @@ export interface CM12SparseWorldRuntime {
     finestCellSize_m: number,
     centerFine: readonly [number, number, number],
     radiusFine: readonly [number, number, number],
+  ): void;
+  encodeLiquidJetInjection(
+    encoder: GPUCommandEncoder,
+    finestCellSize_m: number,
+    outletFine: readonly [number, number, number],
+    radiusFine: number,
+    velocityFinePerSecond: readonly [number, number, number],
+    dt_s: number,
   ): void;
   encodePressureIterationReceipt(
     encoder: GPUCommandEncoder,
@@ -239,6 +249,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         configuration.seams,
         configuration.bodyCount,
         configuration.worldDimensions_m,
+        configuration.inflow,
       );
       this.generation += 1;
       this.lastAcceptedTime = input.time;
@@ -322,6 +333,12 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
     centerFine: readonly [number, number, number],
     radiusFine: readonly [number, number, number]) {
     this.resident.encodeLiquidInjection(encoder, finestCellSize_m, centerFine, radiusFine);
+  }
+  encodeLiquidJetInjection(encoder: GPUCommandEncoder, finestCellSize_m: number,
+    outletFine: readonly [number, number, number], radiusFine: number,
+    velocityFinePerSecond: readonly [number, number, number], dt_s: number) {
+    this.resident.encodeLiquidJetInjection(encoder, finestCellSize_m, outletFine,
+      radiusFine, velocityFinePerSecond, dt_s);
   }
   encodePressureIterationReceipt(encoder: GPUCommandEncoder, destination: GPUBuffer) {
     this.resident.encodePressureIterationReceipt(encoder, destination);
