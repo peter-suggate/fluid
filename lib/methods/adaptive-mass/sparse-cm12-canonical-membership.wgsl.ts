@@ -98,6 +98,9 @@ ${descend}
 function repairBody(prefix: string, label: string,
   domain: SparseCM12CanonicalMembershipDomainLayout, arena: string,
   workgroupSize: number): string {
+  const clearRetiredCell = prefix === "CELL" ? `else if(!pcmCellAcceptedTopologyContains(id)){
+        word&=~(1u<<bit);
+      }` : "";
   const ancestorUpdates = domain.treeLevelBaseWords.slice(1).map((base, level) => /* wgsl */ `
     node/=PCM_BRANCH;
     let previous${level}=atomicAdd(&${arena}[${base}u+node],bitcast<u32>(delta));
@@ -129,7 +132,7 @@ fn repairCanonicalPressure${label}Leaves(
       let token=atomicLoad(&${arena}[PCM_${prefix}_CANDIDATE_TOKENS+id]);
       if((token>>1u)==generation){
         word=select(word&~(1u<<bit),word|(1u<<bit),(token&1u)!=0u);
-      }
+      }${clearRetiredCell}
     }
     atomicStore(&${arena}[PCM_${prefix}_ACTIVE_BITS+wordIndex],word);
     pcmLeafCounts[lid.x]=countOneBits(word);
@@ -298,6 +301,26 @@ fn pcmCellBegin(expectedClosureCount:u32)->bool{return pcmBegin(PCM_CELL_HEADER,
 fn pcmCellSetCandidate(id:u32,enabled:bool,cause:u32,closure:bool)->bool{
   return pcmSetCandidate(PCM_CELL_HEADER,PCM_CELL_CAPACITY,PCM_CELL_CANDIDATE_TOKENS,
     PCM_CELL_DIRTY_STAMPS,PCM_CELL_DIRTY_LIST,PCM_CELL_LEAF_COUNT,id,enabled,cause,closure);
+}
+// Topology retirement only has to dirty the leaf. During leaf repair, stale
+// tokens are retained for accepted-topology cells and cleared for cells no
+// longer represented by the accepted sparse image. This turns an old-cell
+// traversal into O(changed bricks * touched leaves).
+fn pcmCellQueueTopologyRetiredRange(first:u32,count:u32,cause:u32)->bool{
+  if(atomicLoad(&${arena}[PCM_CELL_HEADER+PCM_D_PHASE])!=PCM_PHASE_COLLECTING
+    ||first+count<first||first+count>PCM_CELL_CAPACITY){return false;}
+  let generation=atomicLoad(&${arena}[PCM_CELL_HEADER+PCM_D_CANDIDATE_GENERATION]);
+  atomicOr(&${arena}[PCM_CELL_HEADER+PCM_D_DIRECT_CAUSES],cause);
+  if(count==0u){return true;}
+  let firstLeaf=first/PCM_LEAF_BITS;let lastLeaf=(first+count-1u)/PCM_LEAF_BITS;
+  for(var leaf=firstLeaf;leaf<=lastLeaf;leaf+=1u){
+    if(atomicExchange(&${arena}[PCM_CELL_DIRTY_STAMPS+leaf],generation)!=generation){
+      let slot=atomicAdd(&${arena}[PCM_CELL_HEADER+PCM_D_DIRTY_COUNT],1u);
+      if(slot>=PCM_CELL_LEAF_COUNT){return false;}
+      atomicStore(&${arena}[PCM_CELL_DIRTY_LIST+slot],leaf);
+    }
+  }
+  return true;
 }
 fn pcmRowBegin(topologyGeneration:u32)->bool{
   if(!pcmHeaderValid()){pcmFault(PCM_ROW_HEADER,PCM_FAULT_INVALID_HEADER,PCM_INVALID);

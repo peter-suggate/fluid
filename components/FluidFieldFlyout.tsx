@@ -19,13 +19,6 @@ import { DEFAULT_GRID_OVERLAY_AXIS, useUIStore } from "../lib/core/stores/ui-sto
 import { isPressureJournalOverlayMode } from "../lib/core/webgpu-pressure-journal-overlay";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
 import { LegendEntries } from "./VisualizationLegend";
-import {
-  sparseCM12PressureJournalSchedule,
-} from "../lib/methods/adaptive-mass/sparse-cm12-pressure-journal";
-import {
-  SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS,
-  sparseCM12PressureIterations,
-} from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { useAnchoredFlyout } from "./anchored-flyout";
 import { PressureFilmStrip } from "./PressureFilmStrip";
 
@@ -344,11 +337,10 @@ export function FluidFieldFlyout({
   // iteration ceiling and the reserved capacity, which is the same property
   // that lets the device pick its slot without the host telling it.
   const filmMode = active !== undefined && isPressureJournalOverlayMode(active.mode);
-  const filmReserved = methodValues.pressureJournal === "on";
-  const filmSchedule = filmMode && filmReserved
-    ? sparseCM12PressureJournalSchedule(
-      sparseCM12PressureIterations(methodValues.pressureIterations),
-      SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS)
+  const filmReserved = method.pressureJournal?.isReserved(methodValues) ?? false;
+  const filmReserve = method.pressureJournal?.reserve;
+  const filmSchedule = filmMode
+    ? method.pressureJournal?.schedule(methodValues) ?? []
     : [];
   const filmSlot = filmSchedule.length > 0
     ? Math.round(Math.max(0, Math.min(1, overlaySlice)) * (filmSchedule.length - 1))
@@ -445,12 +437,16 @@ export function FluidFieldFlyout({
       />
       : <p className="fluid-field-film" data-testid="fluid-field-film-off">
         <span>No film reserved — this view has nothing to replay.</span>
-        <button
+        {filmReserve && <button
           type="button"
           data-testid="fluid-field-film-reserve"
           title="Reserve room to capture one pressure solve. Rebuilds the solver once."
-          onClick={() => simulation.setMethodParam(methodId, "pressureJournal", "on")}
-        >RESERVE</button>
+          onClick={() => simulation.setMethodParam(
+            methodId,
+            filmReserve.parameter,
+            filmReserve.value,
+          )}
+        >RESERVE</button>}
       </p>;
   } else if (open?.kind === "setup") {
     paneTitle = "Setup";

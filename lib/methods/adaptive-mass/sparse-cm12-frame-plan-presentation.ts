@@ -60,11 +60,14 @@ export interface SparseCM12FramePlanPresentationLayout {
   readonly listBaseWords: number;
   readonly brickPagesBaseWords: number;
   readonly recordsBaseWords: number;
+  readonly allocatorBaseWords: number;
   readonly totalWords: number;
   readonly totalBytes: number;
   readonly brickFineResolution: 4 | 8 | 16;
   readonly pageResolution: 4 | 8 | 16;
   readonly tilesPerPage: 1 | 8 | 64;
+  /** Addressable topology leaves; unlike pageCapacity this may include dry keys. */
+  readonly brickCapacity: number;
   readonly pageCapacity: number;
   readonly packetIndex: number;
   readonly indirectBinding: Readonly<{ offset: number; size: 12 }>;
@@ -80,6 +83,7 @@ const alignWords = (value: number): number => Math.ceil(value / 64) * 64;
 
 export function createSparseCM12FramePlanPresentationLayout(options: {
   readonly pageCapacity: number;
+  readonly brickCapacity?: number;
   readonly brickFineResolution?: 4 | 8 | 16;
   readonly pageResolution?: 4 | 8 | 16;
   readonly packetIndex?: number;
@@ -92,18 +96,21 @@ export function createSparseCM12FramePlanPresentationLayout(options: {
     throw new RangeError("FPP1 requires one B-sized presentation page per physical brick");
   }
   const pageCapacity = integer(options.pageCapacity, "pageCapacity");
+  const brickCapacity = integer(options.brickCapacity ?? pageCapacity, "brickCapacity");
   const packetIndex = integer(options.packetIndex ?? 5, "packetIndex");
   if (packetIndex >= 6) throw new RangeError("FPP1 packetIndex must be in [0, 5]");
   const tilesPerPage = (pageResolution / 4) ** 3 as 1 | 8 | 64;
   const listBaseWords = baseWords + SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER_WORDS;
   const brickPagesBaseWords = listBaseWords + pageCapacity;
-  const recordsBaseWords = alignWords(brickPagesBaseWords + pageCapacity);
-  const totalWords = recordsBaseWords
-    + SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE_WORDS * pageCapacity;
+  const recordsBaseWords = alignWords(brickPagesBaseWords + brickCapacity);
+  const allocatorBaseWords = alignWords(recordsBaseWords
+    + SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE_WORDS * brickCapacity);
+  const totalWords = allocatorBaseWords + 5;
   return Object.freeze({
-    baseWords, listBaseWords, brickPagesBaseWords, recordsBaseWords, totalWords,
+    baseWords, listBaseWords, brickPagesBaseWords, recordsBaseWords,
+    allocatorBaseWords, totalWords,
     totalBytes: 4 * totalWords, brickFineResolution, pageResolution,
-    tilesPerPage, pageCapacity, packetIndex,
+    tilesPerPage, brickCapacity, pageCapacity, packetIndex,
     indirectBinding: Object.freeze({
       offset: 4 * (baseWords + SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER.indirectX),
       size: 12,
@@ -134,10 +141,10 @@ export function createSparseCM12FramePlanPresentationInitialWords(
   words[h.totalWords] = layout.totalWords;
   words[h.firstFaultBrick] = 0xffff_ffff;
   words[h.firstFaultTile] = 0xffff_ffff;
-  if (options.brickPages && options.brickPages.length !== layout.pageCapacity) {
+  if (options.brickPages && options.brickPages.length !== layout.brickCapacity) {
     throw new RangeError("FPP1 brickPages must contain one entry per physical brick");
   }
-  for (let brick = 0; brick < layout.pageCapacity; brick += 1) {
+  for (let brick = 0; brick < layout.brickCapacity; brick += 1) {
     words[layout.brickPagesBaseWords - layout.baseWords + brick]
       = options.brickPages?.[brick] ?? 0xffff_ffff;
     const at = layout.recordsBaseWords - layout.baseWords
@@ -145,6 +152,20 @@ export function createSparseCM12FramePlanPresentationInitialWords(
     words[at + SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.page] = 0xffff_ffff;
     words[at + SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.firstFaultTile] = 0xffff_ffff;
   }
+  const allocatedPages = new Set(options.brickPages?.filter((page) =>
+    page !== 0xffff_ffff) ?? []);
+  for (let page = 0; page < allocatedPages.size; page += 1) {
+    if (!allocatedPages.has(page)) {
+      throw new RangeError("FPP1 initial physical pages must form a compact prefix");
+    }
+  }
+  const allocator = layout.allocatorBaseWords - layout.baseWords;
+  words[allocator] = allocatedPages.size;
+  words[allocator + 1] = 0;
+  words[allocator + 2] = allocatedPages.size;
+  words[allocator + 3] = 0;
+  // Sorted prefix of the append-only renderer page directory.
+  words[allocator + 4] = allocatedPages.size;
   return words;
 }
 

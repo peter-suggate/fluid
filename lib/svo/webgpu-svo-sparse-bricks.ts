@@ -54,6 +54,10 @@ import {
   createSvoEnvironmentRefinement,
   svoEnvironmentRefinementMode,
 } from "./svo-environment-refinement";
+import {
+  createSvoEnvironmentCoarsening,
+  svoEnvironmentCoarseningPower,
+} from "./svo-environment-coarsening";
 import type { SvoPrimitiveDescriptor } from "./svo-primitive-abi";
 import { planSvoWideFanoutSteps } from "./svo-wide-fanout";
 import { WebGPUSvoWideFanout } from "./webgpu-svo-wide-fanout";
@@ -501,6 +505,21 @@ export function octreeLiveSceneTerrainVoxelsEnabled(
   if (raw === undefined || raw === "") return true;
   if (raw !== "0" && raw !== "1") throw new RangeError("FLUID_SVO_TERRAIN_VOXELS must be 0 or 1");
   return raw === "1";
+}
+
+/**
+ * Resolve the global migration lever against a scene's stronger document
+ * contract. Required voxel terrain always wins; an experiment may only restore
+ * the legacy path for documents that did not make unified solid publication a
+ * condition of their meaning.
+ */
+export function octreeLiveSceneUsesTerrainVoxels(
+  terrain: TerrainDescription | undefined,
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return terrain?.solidRepresentation === "voxel"
+    || octreeLiveSceneTerrainVoxelsEnabled(environment);
 }
 
 /**
@@ -1476,7 +1495,10 @@ export class OctreeSparseBrickWorld {
       completed: OCTREE_SPARSE_BRICK_WORLD_STAGES.indexOf(stage),
       total: OCTREE_SPARSE_BRICK_WORLD_STAGES.length,
     });
-    this.terrainVoxelsEnabled = octreeLiveSceneTerrainVoxelsEnabled();
+    // A scene may make the unified voxel solid part of its document contract.
+    // The global A/B lever remains useful for legacy scenes, but it must not
+    // silently turn a required ground back into the old duplicate path.
+    this.terrainVoxelsEnabled = octreeLiveSceneUsesTerrainVoxels(scene.terrain);
     reportStage("Bake the ground onto the render lattice");
     // Every `yield` below is an offer, not a suspension: the constructor drives
     // them straight through and only `create`'s driver turns one into a return
@@ -1537,6 +1559,29 @@ export class OctreeSparseBrickWorld {
         terrainField, terrainDomain: this.terrainDomain,
         crowdingTarget: OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
         planarExemption: options.environmentPlanarRefinementExemption === true,
+      })
+      : undefined;
+    /**
+     * The set's own resolution, on the one path that never had one.
+     *
+     * A simulated container pins every brick at `solverLevel`, so a wet scene's
+     * only knob was `finestCellSize_m` over the whole domain and an authored
+     * floor was drawn at the water's cell however large the floor was. See
+     * `lib/svo/svo-environment-coarsening.ts` for the rule and for why the
+     * ceiling is `log2(brickSize)`; it is offered here and taken per node.
+     *
+     * Wet only. A solverless world already has `environmentRefinementDepth`
+     * below the lattice and buried-ground coarsening above it, each with its own
+     * predicate and its own gate, and `minimumEnvironmentLevel` can only carry
+     * one meaning at a time.
+     */
+    const environmentCoarsening = !dryWorld
+      ? createSvoEnvironmentCoarsening({
+        primitives: environmentPrimitives,
+        worldOrigin_m: worldOrigin as readonly [number, number, number],
+        nodeEdge_m, brickSize, maximumDepth,
+        terrainField, terrainDomain: this.terrainDomain,
+        crowdingTarget: OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
       })
       : undefined;
     // The solid column unless `FLUID_SVO_GROUND_SHELL` narrows it to the band
@@ -1657,7 +1702,13 @@ export class OctreeSparseBrickWorld {
       maximumEnvironmentCoarseningPower: Math.min(
         buriedCoarsening
           ? BURIED_GROUND_COARSENING_POWER
-          : environmentMaximumCoarseningPower(options.environmentBrickRefinementLevels),
+          : Math.max(
+            environmentMaximumCoarseningPower(options.environmentBrickRefinementLevels),
+            // Offered, not spent: `environmentCoarsening` is the predicate that
+            // decides how much of it each node takes, and a scene whose solids
+            // are all finer than the coarse voxel takes none of it.
+            environmentCoarsening ? svoEnvironmentCoarseningPower(brickSize) : 0,
+          ),
         solverLevel,
       ),
       // Two independent reasons to split, unioned.
@@ -1726,7 +1777,12 @@ export class OctreeSparseBrickWorld {
                 terrainField, this.terrainDomain, brickSize, level, maximumDepth, coordinate) !== "buried"
               || candidatesInBrick(level, coordinate, 0) > 0
             )
-            : undefined,
+            // 5. A solid the level cannot record, on a scene the solver owns.
+            //    Arms 1 and 2 are folded into this one — see the module — so
+            //    that the wet path asks one question per node rather than three.
+            : environmentCoarsening
+              ? (level, coordinate) => environmentCoarsening.refineEnvironmentLeaf(level, coordinate)
+              : undefined,
     });
     this.finestLevel = plan.maximumDepth;
     this.sceneBrickDimensions = refinedBrickDimensions;

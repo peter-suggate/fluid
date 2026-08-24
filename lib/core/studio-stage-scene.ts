@@ -1,5 +1,6 @@
 import type { CameraState, SceneDescription } from "./model";
 import type { SceneryGraph } from "./scenery-graph";
+import { SVO_ENVIRONMENT_FEATURE_VOXELS } from "../svo/svo-environment-coarsening";
 
 /**
  * The house set: a floor, one lamp over it, and nothing else at all.
@@ -286,27 +287,53 @@ export const studioStageCamera: Partial<CameraState> = {
 };
 
 /**
- * The domain, in solver bricks, that standing the set around a container costs.
+ * The domain, in environment bricks, that standing the set around a container
+ * costs.
  *
- * The set is authored in metres but paid for in *cells*, and on a wet scene
- * those are the solver's cells: `planSparseSceneDomain` unions the proxy AABBs
- * onto the solver lattice, and `buildSteps` notes that while a solver is
- * present every container brick is pinned at the solver level, so there is no
- * coarser lattice for environment geometry to descend into. A 0.8 m tank at
- * 6.25 mm and a 6.4 m tank at 50 mm therefore cost the set exactly the same,
- * and the physical size of the scene is not the variable — its lattice is.
+ * The set is authored in metres and paid for in *cells*, and the cell is not
+ * the solver's. It used to be: `planSparseSceneDomain` unions the proxy AABBs
+ * onto the solver lattice and a claimed container pins every brick of itself at
+ * the solver level, so for as long as that was the only rule a 0.8 m tank at
+ * 6.25 mm and a 6.4 m tank at 50 mm cost the same set exactly the same, and the
+ * physical size of the scene was not the variable at all.
  *
- * Counted as the whole spanned box rather than the occupied shell because that
- * is what the structures sized off the domain charge for: the node-mip opacity
- * pyramid and the unified payload arena are both cut from the span, and the air
- * column under a lamp hung high is as expensive to them as the boards are.
+ * `lib/svo/svo-environment-coarsening.ts` is what changed that. An authored
+ * solid is now drawn at the coarsest voxel its own smallest feature survives,
+ * so the plate the whole span is made of takes the rung its thickness allows
+ * and the domain is counted in *those* bricks. The set is one similarity
+ * transform of itself at every container size, so this is the number that
+ * finally holds still across them: the reference tank and a tank ten times
+ * larger claim comparable counts rather than counts a thousand apart.
+ *
+ * Counted as the whole spanned box rather than the occupied shell because a
+ * coarse leaf publishes every opacity page in its own extent, so the air column
+ * under a lamp hung high is charged for like the boards are — one rung cheaper
+ * than the boards would have been, not free.
  */
 export function studioStageDomainBricks(scene: SceneDescription): number {
   return stageDomainBricks(scene, studioStageDimensions(scene));
 }
 
-function stageDomainBricks(scene: SceneDescription, stage: StudioStageDimensions): number {
+/**
+ * The voxel the set is drawn into, which is the plate's rung.
+ *
+ * The floor is the only piece of the set whose extent is the domain's, so it is
+ * the piece whose rung decides what the domain costs; the lamp is small enough
+ * that the levels it spends where it hangs are not a term in this. Mirrors
+ * `environmentProxyFeatureSize_m` on the slab — a box's smallest feature is its
+ * shortest full extent, and for a stage floor that is its thickness — and the
+ * planner's own ceiling of one voxel per brick cell.
+ */
+function stageEnvironmentCell_m(scene: SceneDescription, stage: StudioStageDimensions): number {
   const cellSize_m = scene.voxelDomain.finestCellSize_m;
+  const brickSize = scene.voxelDomain.brickSize_cells;
+  const feature_m = 2 * stage.floorHalfThickness_m;
+  const power = Math.floor(Math.log2(feature_m / (SVO_ENVIRONMENT_FEATURE_VOXELS * cellSize_m)));
+  return cellSize_m * 2 ** Math.min(Math.log2(brickSize), Math.max(0, power));
+}
+
+function stageDomainBricks(scene: SceneDescription, stage: StudioStageDimensions): number {
+  const cellSize_m = stageEnvironmentCell_m(scene, stage);
   const brickSize = scene.voxelDomain.brickSize_cells;
   const spanXZ_m = 2 * stage.floorHalf_m;
   const spanY_m = stage.floorHalfThickness_m + stage.lampMouthHeight_m
@@ -321,18 +348,25 @@ function stageDomainBricks(scene: SceneDescription, stage: StudioStageDimensions
  * Measured on the Dawn dry lane rather than reasoned about, because the failure
  * is not gradual. The reference water box spans ~1e3 bricks and renders in
  * 4.8 ms with a 1,426-page opacity pyramid. `ocean-seiche` — the same set
- * around an 8 m tank at 25 mm — asks for 79,507 pages, which the live radiance
- * atlas refuses; the pyramid is withdrawn, cone visibility falls back to exact
- * rays, and the frame goes to 31 ms. `cm12-figure-1` at 12.8 m asks for a
- * 12.7 GB payload arena against a 4 GB buffer limit and does not render at all.
+ * around an 8 m tank at 25 mm — asked for 79,507 pages and a 1,959 MiB octree
+ * arena when every environment brick was pinned at the water's own cell.
+ * `cm12-figure-1` at 12.8 m asked for a 12.7 GB payload arena against a 4 GB
+ * buffer limit and did not render at all.
  *
- * So the set is not something to scale until it breaks and then apologise for.
- * A scene above this line keeps the bare presentation it had before, which is
- * a worse picture and a working one; see `studioStageFits`.
+ * Those two numbers are what the environment ladder was built to remove, and
+ * this line now stands in front of a different wall. Drawn at the rung its own
+ * plate allows, the same `ocean-seiche` set plans 6,462 leaves, 7,493 pages and
+ * a 289 MiB arena — a twentieth of the first figure and inside every limit — so
+ * both scenes are staged rather than bare. What is still span-shaped is the
+ * opacity pyramid's *level count*: `liveSvoBasePageDimensions` is cut from the
+ * domain at the finest cell whatever the leaves do, and above twelve levels
+ * derived lighting withdraws outright. `ocean-seiche` sits at eight.
  *
- * The number is deliberately below the first *measured* failure rather than
- * at it — the interval between 1e3 (renders well) and 8e4 (withdrawn) has not
- * been swept, and the cost of guessing high is a scene that does not open.
+ * So the budget is retained at its measured value against a span it now counts
+ * one to three rungs coarser: a set that fails it is one two powers past the
+ * largest that has ever been rendered, and a scene above the line keeps the
+ * bare presentation rather than finding out at the pyramid. See
+ * `studioStageFits`.
  */
 export const STUDIO_STAGE_DOMAIN_BRICK_BUDGET = 32_768;
 

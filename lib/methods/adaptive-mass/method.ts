@@ -5,6 +5,7 @@ import type {
 } from "../../core/method-contract";
 import { SPARSE_CM12_LENSES } from "./sparse-cm12-stage-lenses";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
+import { pressureJournalSchedule } from "../../core/pressure-journal";
 import { SPARSE_CM12_DIRTY_OVERLAY_MODES } from "../../core/sparse-cm12-dirty-visualizations";
 import { adaptiveMassDiagnosticRows } from "./adaptive-mass-diagnostics";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from "./adaptive-mass-frame-pipeline";
@@ -16,6 +17,7 @@ import {
   sparseCM12SharpeningTraceSteps,
   SPARSE_CM12_ACTIVITY_POLICY,
   SPARSE_CM12_PRESSURE_ITERATIONS,
+  SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS,
   SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
   SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
   SPARSE_CM12_SHARPENING_TRACE_STEPS,
@@ -466,7 +468,17 @@ export const adaptiveMassMethod: SimulationMethod = {
   // Body scenes reserve sparse solid-fraction fields alongside their fluid
   // authority. A bodyless paper-scale scene omits that substantial arena, so
   // crossing between an empty and non-empty roster rebuilds once.
-  capabilities: { volumeRendering: true },
+  capabilities: { volumeRendering: true, sparseWorld: true },
+  pressureJournal: {
+    isReserved: (values) => values.pressureJournal === "on",
+    schedule: (values) => values.pressureJournal === "on"
+      ? pressureJournalSchedule(
+        sparseCM12PressureIterations(values.pressureIterations),
+        SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS,
+      )
+      : [],
+    reserve: { parameter: "pressureJournal", value: "on" },
+  },
   stageLenses: SPARSE_CM12_LENSES,
   supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure",
     "tracers", "face-velocity",

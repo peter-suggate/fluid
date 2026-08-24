@@ -150,6 +150,5 @@ export function sparseCM12PressureExecutionImageCellIndirectByteOffset(
 }
 
 export const SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_ENTRY_POINTS = Object.freeze([
-  "beginSparseCM12PressureExecutionImage",
   "finalizeSparseCM12PressureExecutionImage",
 ] as const);

@@ -116,12 +116,13 @@ try {
   for (let frame = 1; frame < frames; frame += 1) {
     while (!solver.advanceTo(frame * dt_s, [])) await new Promise(setImmediate);
   }
-  assert.ok(solver.armPressureJournal(true), "the solver reserved no journal");
+  assert.ok(solver.sparseWorldUI.control.pressureFilm!.setCaptureEnabled(true),
+    "the solver reserved no journal");
   while (!solver.advanceTo(frames * dt_s, [])) await new Promise(setImmediate);
 
-  const journal = await solver.readPressureJournal();
+  const journal = await solver.sparseWorldUI.diagnostics.readPressureFilm();
   assert.ok(journal, "the armed advance left no capture");
-  const source = solver.pressureJournalSource;
+  const source = solver.sparseWorldUI.overlays.pressureFilm;
   assert.ok(source, "the solver published no journal source");
 
   // One readback for every captured field of every captured iteration. This is

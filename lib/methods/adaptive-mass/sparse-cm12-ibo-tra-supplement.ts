@@ -3,7 +3,7 @@ import type { SparseCM12InternedBoundaryCompilation } from
 
 export const SPARSE_CM12_IBO_TRA_MAGIC = 0x4954_5231; // ITR1
 export const SPARSE_CM12_IBO_TRA_HEADER_WORDS = 16;
-export const SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS = 4;
+export const SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS = 5;
 export const SPARSE_CM12_IBO_TRA_INVALID = 0xffff_ffff;
 
 export interface SparseCM12IboTRASupplementLayout {
@@ -44,11 +44,14 @@ export function createSparseCM12IboTRASupplement(options: Readonly<{
   let at = align64(directoryBaseWords
     + SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS * templates.length);
   const records: Array<{ offsets: number[]; entries: number[]; owners: number[];
-    resolution: number; offsetsBase: number; entriesBase: number; ownersBase: number }> = [];
+    sparseAirOwners: number[]; resolution: number; offsetsBase: number;
+    entriesBase: number; ownersBase: number; sparseAirOwnersBase: number }> = [];
   for (const template of templates) {
     const resolution = template.sourceResolution, boundaryCount = resolution ** 2;
     const byBoundary: number[][] = Array.from({ length: boundaryCount }, () => []);
     const owners = new Array<number>(boundaryCount).fill(SPARSE_CM12_IBO_TRA_INVALID);
+    const sparseAirOwners = new Array<number>(boundaryCount)
+      .fill(SPARSE_CM12_IBO_TRA_INVALID);
     const termBase = 8 + 7 * template.rowCount;
     const dimensions = template.sourceDimensions;
     for (let row = 0; row < template.rowCount; row += 1) {
@@ -82,6 +85,27 @@ export function createSparseCM12IboTRASupplement(options: Readonly<{
           throw new Error(`ITR1 template ${template.id} owner collision at ${boundary}`);
         }
         owners[boundary] = row;
+      } else {
+        const metadata = template.words[rowAt + 2]!;
+        const normalized = template.words[termBase + 2 * first]!;
+        const coefficient = count === 1
+          ? f32(template.words[termBase + 2 * first + 1]!) : 0;
+        if (((metadata >>> 28) & 3) === 3 && count === 1 && coefficient < 0
+          && (normalized & 0x8000_0000) === 0) {
+          const ordinal = normalized & 0x7fff_ffff;
+          const z = Math.floor(ordinal / (dimensions[0] * dimensions[1]));
+          const remain = ordinal - z * dimensions[0] * dimensions[1];
+          const y = Math.floor(remain / dimensions[0]);
+          const x = remain - y * dimensions[0];
+          const axis = template.side >>> 1;
+          const boundary = (axis === 0 ? y : x)
+            + resolution * (axis === 2 ? y : z);
+          if (sparseAirOwners[boundary] !== SPARSE_CM12_IBO_TRA_INVALID
+            && sparseAirOwners[boundary] !== row) {
+            throw new Error(`ITR1 template ${template.id} sparse-air collision at ${boundary}`);
+          }
+          sparseAirOwners[boundary] = row;
+        }
       }
     }
     const offsets = [0], entries: number[] = [];
@@ -103,18 +127,23 @@ export function createSparseCM12IboTRASupplement(options: Readonly<{
     const offsetsBase = at;at += offsets.length;
     const entriesBase = at;at += entries.length;
     const ownersBase = at;at += owners.length;
-    records.push({ offsets, entries, owners, resolution, offsetsBase, entriesBase, ownersBase });
+    const sparseAirOwnersBase = at;at += sparseAirOwners.length;
+    records.push({ offsets, entries, owners, sparseAirOwners, resolution,
+      offsetsBase, entriesBase, ownersBase, sparseAirOwnersBase });
   }
   const totalWords = align64(at), words = new Uint32Array(totalWords - baseWords);
   const put = (absolute: number, values: readonly number[]) =>
     words.set(values, absolute - baseWords);
-  put(baseWords, [SPARSE_CM12_IBO_TRA_MAGIC, 1, templates.length,
+  put(baseWords, [SPARSE_CM12_IBO_TRA_MAGIC, 2, templates.length,
     directoryBaseWords, totalWords, 0, 0, 0]);
   records.forEach((record, template) => {
     put(directoryBaseWords + SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS * template,
       [record.offsetsBase, record.entriesBase, record.ownersBase, record.resolution]);
     put(record.offsetsBase, record.offsets);put(record.entriesBase, record.entries);
     put(record.ownersBase, record.owners);
+    put(directoryBaseWords + SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS * template + 4,
+      [record.sparseAirOwnersBase]);
+    put(record.sparseAirOwnersBase, record.sparseAirOwners);
   });
   return Object.freeze({ layout: Object.freeze({ baseWords, templateCount: templates.length,
     directoryBaseWords, totalWords, totalBytes: 4 * (totalWords - baseWords) }), words });

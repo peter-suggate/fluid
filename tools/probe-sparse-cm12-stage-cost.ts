@@ -419,7 +419,7 @@ try {
   // copy publications aside — so a measurement taken with one armed would be a
   // measurement of the lens. Nothing here arms one; this is the guard that says
   // so, and it also fails if the source starts arming itself.
-  assert.equal(solver.stageLensSource?.armed, undefined,
+  assert.equal(solver.sparseWorldUI.overlays.stageLenses?.armed, undefined,
     "stage-cost measurement requires every stage lens disarmed");
   const qaSolver = solver as typeof solver & StageCostQASolver;
   const workShape = qaSolver.readSparseWorkShapeQA();

@@ -67,6 +67,7 @@ const ${p}Magic:u32=0x${SPARSE_CM12_FRAME_PLAN_PRESENTATION_MAGIC.toString(16)}u
 const ${p}Version:u32=${SPARSE_CM12_FRAME_PLAN_PRESENTATION_VERSION}u;
 const ${p}Invalid:u32=0xffffffffu;
 const ${p}Capacity:u32=${layout.pageCapacity}u;
+const ${p}BrickCapacity:u32=${layout.brickCapacity}u;
 const ${p}Tiles:u32=${layout.tilesPerPage}u;
 const ${p}PageResolution:u32=${layout.pageResolution}u;
 const ${p}Packet:u32=${layout.packetIndex}u;
@@ -181,7 +182,7 @@ fn beginSparseCM12FramePlanPresentationPacket(){
 @compute @workgroup_size(64)
 fn buildSparseCM12FramePlanPresentationPacket(
   @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
-  let brick=wid.x;let resident=brick<${p}Capacity;
+  let brick=wid.x;let resident=brick<${p}BrickCapacity;
   if(lane==0u){
     atomicStore(&${p}DirtyLow,0u);atomicStore(&${p}DirtyHigh,0u);
     atomicStore(&${p}Causes,0u);atomicStore(&${p}Fault,${p}Invalid);
@@ -306,7 +307,7 @@ fn executeSparseCM12FramePlanPresentationPacket(
   @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
   let count=${p}Load(${h(SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER.indirectX)});
   var resident=wid.x<count;var brick=${p}Invalid;var record=${p}Records;var page=${p}Invalid;
-  if(resident){brick=${p}Load(${p}List+wid.x);resident=brick<${p}Capacity;}
+  if(resident){brick=${p}Load(${p}List+wid.x);resident=brick<${p}BrickCapacity;}
   if(resident){record=${p}Record(brick);page=${p}Load(record+
     ${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.page}u);}
   if(lane==0u){
@@ -402,7 +403,7 @@ fn commitSparseCM12FramePlanPresentationPacket(
   let count=${p}Load(${h(SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER.indirectX)});
   var resident=wid.x<count;var brick=${p}Invalid;var record=${p}Records;var page=${p}Invalid;
   if(resident){brick=${p}Load(${p}List+wid.x);}
-  if(resident&&brick<${p}Capacity){
+  if(resident&&brick<${p}BrickCapacity){
     record=${p}Record(brick);page=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.page}u);
   }else{resident=false;}
   if(resident){
@@ -467,7 +468,7 @@ fn finalizeSparseCM12FramePlanPresentationExecution(){
 // is a bounded metadata pass, not a sample-domain fallback or repair path.
 @compute @workgroup_size(1)
 fn rejectSparseCM12FramePlanPresentationFaults(@builtin(workgroup_id)wid:vec3u){
-  let brick=wid.x;if(brick>=${p}Capacity){return;}
+  let brick=wid.x;if(brick>=${p}BrickCapacity){return;}
   let flags=${p}Load(${h(SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER.flags)});
   let record=${p}Record(brick);
   let recordFlags=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.flags}u);

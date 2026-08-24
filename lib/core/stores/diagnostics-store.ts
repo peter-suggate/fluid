@@ -3,8 +3,7 @@ import type { GPUStatus } from "../gpu-status";
 import { webGPUPlatformResourcePlugin } from "../webgpu-platform-resource";
 import type { EffectiveRendererStatus } from "../renderer-status";
 import type { GPUEulerianInfo } from "../webgpu-eulerian";
-import type { SparseCM12PressureJournal } from
-  "../../methods/adaptive-mass/sparse-cm12-pressure-journal";
+import type { PressureJournal } from "../pressure-journal";
 import type { StageLensReceipt } from "../stage-lens";
 import type { StageLensLayerReport } from "../webgpu-stage-lens-overlay";
 import type { RigidBodyState, RigidStepDiagnostics } from "../rigid-body";
@@ -84,7 +83,7 @@ interface DiagnosticsStore {
    * Null means no capture: either the film was never reserved, or no view has
    * armed it yet.
    */
-  pressureJournal: SparseCM12PressureJournal | null;
+  pressureJournal: PressureJournal | null;
   /**
    * The armed stage lens's counters, as of the frame that just drew.
    *

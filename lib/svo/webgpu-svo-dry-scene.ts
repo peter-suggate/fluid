@@ -1643,7 +1643,6 @@ export function sparseVoxelDrySceneContractFailure(
   if (scene.materialRecords.byteLength > SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES) return "material arena capacity is exceeded";
   if (!canConsumeSparseVoxelPrimitiveCandidates(scene)) return "primitive candidate arena is invalid";
   if (!canConsumeSparseVoxelLighting(scene)) return "lighting publication is invalid";
-  if (scene.primitiveRecords.byteLength < SVO_PRIMITIVE_RECORD_STRIDE_BYTES) return "scene primitive arena is empty";
   if (scene.primitiveRecords.byteLength % SVO_PRIMITIVE_RECORD_STRIDE_BYTES !== 0) return "scene primitive arena stride is invalid";
   const glassBytes = scene.glassRecords?.byteLength ?? 0;
   if (glassBytes % SVO_THIN_GLASS_RECORD_STRIDE_BYTES !== 0) return "thin-glass arena stride is invalid";

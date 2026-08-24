@@ -61,12 +61,11 @@ function repairWorkset(name: SparseCM12PressureCacheAggregateFamilyName,
   family: SparseCM12PressureCacheAggregateFamilyLayout, arena: string): string {
   const n = label(name), p = `PCFA_${n.toUpperCase()}`;
   const familyIndex = FAMILY_NAMES.indexOf(name);
-  const updates = family.treeLevelBaseWords.slice(1).map((base, index) =>
-    `node/=${SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_BRANCH}u;let prior${index}=atomicAdd(&${arena}[${base}u+node],bitcast<u32>(delta));
-    if((delta<0&&prior${index}<u32(-delta))||(delta>0&&prior${index}>0xffffffffu-u32(delta))){
-      pcfaFault(${familyIndex}u,PCF_FAULT_REPAIR,leaf*PCFA_LEAF_BITS);}`)
-    .join("");
-  return `@compute @workgroup_size(64)
+  const treeCases = family.treeLevelBaseWords.map((base, level) =>
+    `case ${level}u:{return ${base}u;}`).join("");
+  return `fn pcf${n}TreeBase(level:u32)->u32{switch level{${treeCases}
+ default:{return PCF_INVALID;}}}
+@compute @workgroup_size(64)
 fn repairPersistentPressure${n}Workset(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   let dirty=atomicLoad(&${arena}[${p}_HEADER+PCFA_F_DIRTY_LEAVES]);
@@ -81,7 +80,12 @@ fn repairPersistentPressure${n}Workset(@builtin(workgroup_id)wid:vec3u,
   if(lane==0u&&valid&&leaf<${p}_LEAF_COUNT){var count=0u;
     for(var at=0u;at<PCFA_LEAF_WORDS;at+=1u){count+=pcfaLeafCounts[at];}
     let previous=atomicExchange(&${arena}[${p}_TREE_0+leaf],count);
-    let delta=i32(count)-i32(previous);var node=leaf;${updates}
+    let delta=i32(count)-i32(previous);var node=leaf;
+    for(var level=1u;level<${family.treeLevelBaseWords.length}u;level+=1u){
+      node/=${SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_BRANCH}u;
+      let prior=atomicAdd(&${arena}[pcf${n}TreeBase(level)+node],bitcast<u32>(delta));
+      if((delta<0&&prior<u32(-delta))||(delta>0&&prior>0xffffffffu-u32(delta))){
+        pcfaFault(${familyIndex}u,PCF_FAULT_REPAIR,leaf*PCFA_LEAF_BITS);}}
     if(count>0u){let slot=atomicAdd(&${arena}[${p}_HEADER+PCFA_F_ACTIVE_LEAVES],1u);
       if(slot>=${p}_LEAF_COUNT){pcfaFault(${familyIndex}u,PCF_FAULT_CAPACITY,leaf*PCFA_LEAF_BITS);}
       else{atomicStore(&${arena}[${p}_ACTIVE_LEAVES+slot],leaf);}}
@@ -306,10 +310,9 @@ var<workgroup>pcfaWet:array<u32,64>;
     bitcast<u32>(max(pcfaReduce[0],1e-12)));atomicAdd(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_EXECUTED],1u);}}
 @compute @workgroup_size(1) fn finalizePersistentPressureCache(){
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCFA_PHASE_HIERARCHY_EXECUTE){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
-  if(atomicLoad(&${arena}[PCFA_BASE+${ah.topologyGeneration}u])!=pcfTopologyGeneration()
-    ||atomicLoad(&${arena}[PCFA_BASE+${ah.pcmGeneration}u])!=pcfPCMGeneration()
-    ||atomicLoad(&${arena}[PCFA_BASE+${ah.aggregateTopologyGeneration}u])!=pcfAggregateTopologyGeneration()){
-    pcfFault(PCF_FAULT_TOPOLOGY,PCF_INVALID);return;}
+  // Each upstream authority seals its own generation before this command.
+  // Re-evaluating their complete hook graphs here duplicated validation and
+  // turned a constant-time cache commit into a compiler-scale topology seam.
   if(atomicLoad(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_WORK_COUNT])
     ||atomicLoad(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_WORK_COUNT])){pcfFault(PCF_FAULT_REPAIR,PCF_INVALID);return;}
   atomicStore(&${arena}[PCF_BASE+PCF_H_ACCEPTED_GEN],atomicLoad(&${arena}[PCF_BASE+PCF_H_CANDIDATE_GEN]));

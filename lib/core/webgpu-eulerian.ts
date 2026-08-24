@@ -1,6 +1,7 @@
 import type { PerformanceTrace } from "./performance-trace";
 import type { TallCellLayout } from "./tall-cell-grid";
 import type { GPUQuality } from "./gpu-quality";
+import type { SparseWorldDevice, SparseWorldFault, SparseWorldStatus } from "../sparse-world";
 export type GPUGridMethod = "octree";
 export type GPUVelocityTransport = "semi-lagrangian" | "maccormack";
 
@@ -27,6 +28,15 @@ export interface GPUEulerianInfo {
   initialSparseAuthorityReady?: boolean;
   /** Renderer-owned gate: a warmed octree is not transport-ready until its first t=0 raster publication is fenced. */
   initialRasterSurfaceReady?: boolean;
+  /** Presentation may be ready while non-critical simulation pipelines finish in the worker. */
+  simulationPipelinesReady?: boolean;
+  /** Background compilation failure, if a presentation-only solver could not become runnable. */
+  simulationPipelineError?: string;
+  /** Public sparse device readiness projected across the renderer worker seam. */
+  sparseWorldDeviceStatus?: SparseWorldDevice["status"];
+  sparseWorldDeviceFault?: SparseWorldFault;
+  /** Semantic sparse-world lifecycle; implementation phases never cross this boundary. */
+  sparseWorldStatus?: SparseWorldStatus;
   /** Honest distinction between GPU-only authority, a readback-confirmed crossing, and fail-closed startup. */
   initialRasterSurfaceState?: "pending" | "gpu-authoritative" | "compact-confirmed" | "crossing-confirmed" | "failed-closed";
   initialRasterSurfaceDiagnostic?: string;

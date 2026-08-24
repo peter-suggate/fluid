@@ -51,13 +51,20 @@ import { packSparseCM12RefinementRegions } from
   "./sparse-cm12-refinement-regions";
 import { WebGPUAdaptiveMassSparsePresentation } from
   "./webgpu-adaptive-mass-atlas-presentation";
+import type { SparseWorld, SparseWorldDevice, SparseWorldUI } from "../../sparse-world";
+import {
+  createCM12SparseWorldFromLegacy,
+  type CM12SparseWorldDeveloperTrace,
+  type CM12SparseWorldRuntime,
+  type CM12SparseWorldStepConfiguration,
+} from "../../sparse-world/internal/cm12-adapter";
 import {
   sparseCM12ActivityPolicy,
   sparseCM12PressureIterations,
+  sparseCM12PressureIterationsFromReceipt,
   sparseCM12PressureRelativeTolerance,
   sparseCM12SharpeningDistance,
   sparseCM12SharpeningTraceSteps,
-  WebGPUSparseCM12Resident,
   type SparseCM12GPUActivityRecord,
 } from "./webgpu-sparse-cm12-resident";
 
@@ -299,6 +306,7 @@ export function dormantReceiverDomain(
   supportRings = SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
   receiverFloor: "auto" | SparseBrickResolution = "auto",
   minimumCapacityScale = 1,
+  terrainScene?: Pick<SceneDescription, "terrain" | "container">,
 ): SparseAdaptiveMassAtlas {
   if (!Number.isSafeInteger(supportRings) || supportRings < 0) {
     throw new RangeError("Sparse CM12 receiver support rings must be a non-negative integer");
@@ -307,9 +315,12 @@ export function dormantReceiverDomain(
     throw new RangeError("Sparse CM12 receiver capacity scale must be positive and finite");
   }
   const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
+  const terrainGuidedCapacity = terrainScene && sceneHasTerrain(terrainScene)
+    ? SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY + 64
+    : SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY;
   const maximumReceiverBricks = Math.min(
     source.brickDimensions.reduce((product, value) => product * value, 1),
-    Math.max(Math.ceil(SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY * minimumCapacityScale),
+    Math.max(Math.ceil(terrainGuidedCapacity * minimumCapacityScale),
       SPARSE_CM12_RECEIVER_CAPACITY_FACTOR * source.bricks.length),
   );
   // Multi-source breadth-first growth visits exactly the retained apron.  The
@@ -333,6 +344,59 @@ export function dormantReceiverDomain(
     : mode === "all-coarse" ? source.ladder.coarseResolution
       : receiverFloor === "auto" ? (boundaryFed ? source.ladder.coarseResolution : 1)
         : Math.min(receiverFloor, source.brickFineResolution) as SparseBrickResolution;
+  // A heightfield-authored voxel solid gives a much stronger receiver prior
+  // than an isotropic dry-world halo. Reserve a two-brick-deep open band above
+  // the terrain under the authored fluid's transverse footprint and its
+  // one-brick side apron. This spends bounded physical capacity along
+  // the possible downhill trajectory instead of filling it with solid and
+  // high-air pages near generation zero. The heightfield selects pages only;
+  // their runtime boundary remains the unified voxel/cut-cell state.
+  if (terrainScene && sceneHasTerrain(terrainScene)) {
+    const wet = source.bricks.filter((brick) => brick.density.some(
+      (density) => density > 0,
+    ));
+    if (wet.length > 0) {
+      const transverseMinimum = Math.max(0,
+        Math.min(...wet.map((brick) => brick.coordinate[2])) - 1);
+      const transverseMaximum = Math.min(source.brickDimensions[2] - 1,
+        Math.max(...wet.map((brick) => brick.coordinate[2])) + 1);
+      const heights = terrainColumnHeights(terrainScene,
+        source.dimensions[0], source.dimensions[2]);
+      const finePerMetre = source.dimensions[1] / terrainScene.container.height_m;
+      const width = source.brickFineResolution;
+      for (let bx = 0; bx < source.brickDimensions[0]; bx += 1) {
+        for (let bz = transverseMinimum; bz <= transverseMaximum; bz += 1) {
+          let maximumHeight_m = 0;
+          for (let z = bz * width;
+            z < Math.min(source.dimensions[2], (bz + 1) * width); z += 1) {
+            for (let x = bx * width;
+              x < Math.min(source.dimensions[0], (bx + 1) * width); x += 1) {
+              maximumHeight_m = Math.max(maximumHeight_m,
+                heights[x + source.dimensions[0] * z]!);
+            }
+          }
+          const surfaceY = Math.min(source.brickDimensions[1] - 1,
+            Math.max(0, Math.floor(maximumHeight_m * finePerMetre / width)));
+          const layers = 2;
+          for (let layer = 0; layer < layers; layer += 1) {
+            const by = surfaceY + layer;
+            if (by >= source.brickDimensions[1]) continue;
+            const coordinate: SparseBrickVec3 = [bx, by, bz];
+            const key = sparseBrickKey(coordinate, source.brickDimensions);
+            if (bricks.has(key) || sparseBrickContainingCoordinate(source, coordinate)) {
+              continue;
+            }
+            if (bricks.size >= maximumReceiverBricks) continue;
+            const resolution: SparseBrickResolution = layer === 0
+              ? source.brickFineResolution : physicalReceiverFloor;
+            bricks.set(key, { key, coordinate, resolution,
+              density: new Float64Array(resolution ** 3),
+              gamma: new Float64Array(resolution ** 3).fill(1) });
+          }
+        }
+      }
+    }
+  }
   // If the complete authored tank already fits inside the leaf budget, retain
   // it. A fixed ring count otherwise creates a hidden numerical wall one brick
   // before the real wall (Figure 9's 40-cell reservoir plus nine rings stopped
@@ -413,7 +477,17 @@ export function dormantReceiverDomain(
  * host writes one small uniform block and encodes a fixed dispatch schedule.
  */
 export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
+  readonly sparseWorld: SparseWorld;
+  readonly sparseWorldDevice: SparseWorldDevice;
+  readonly sparseWorldUI: SparseWorldUI;
   readonly info: GPUEulerianInfo;
+  get simulationReady(): boolean {
+    return this.sparseWorldDevice.status === "ready";
+  }
+  async waitForSimulationReady(): Promise<void> {
+    await this.sparseRuntime.waitForSimulationPipelines();
+    void this.simulationReady;
+  }
   readonly volumeTexture: GPUTexture;
   readonly surfaceFieldTexture: GPUTexture;
   readonly gridCellTexture: GPUTexture;
@@ -421,34 +495,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readonly gridPressureTexture: GPUTexture;
   readonly gridDivergenceTexture: GPUTexture;
   readonly initialSparseAuthorityReady = true;
-  get sparseAdaptiveGridSource() { return this.resident.sparseAdaptiveGridSource; }
-  get tracerSource() { return this.resident.tracerSource; }
-  setTracersEnabled(enabled: boolean) { this.resident.setTracersEnabled(enabled); }
-  /** Re-read the mixing from now; the marker colours re-date to this frame. */
-  reseedTracers() { this.resident.reseedTracers(); }
-  /** QA receipt: `[x, y, z, live]` per marker, in fine-lattice units. */
-  readTracers() { return this.resident.readTracers(); }
-  /** Face velocities and the row records that place them; no enable needed. */
-  get faceVelocitySource() { return this.resident.faceVelocitySource; }
-  /**
-   * The pressure lab's capture controls.
-   *
-   * Present only when the solver was built with `pressureJournal`, because the
-   * journal is a construction-time reservation; `armPressureJournal` returning
-   * false is how a panel learns it is looking at a solver that cannot film.
-   */
-  get pressureJournalSource() { return this.resident.pressureJournalSource; }
-  get pressureJournalLayout() { return this.resident.pressureJournalLayout; }
-  get pressureJournalArmed() { return this.resident.pressureJournalArmed; }
-  armPressureJournal(armed: boolean) { return this.resident.armPressureJournal(armed); }
-  /** Header and iteration records of the last captured solve; maps a buffer. */
-  readPressureJournal() { return this.resident.readPressureJournal(); }
-  /**
-   * Per-stage lenses. Built on first access, so a scene that never opens one
-   * never allocates for one.
-   */
-  get stageLensSource() { return this.resident.stageLensSource; }
-  get globalFineLevelSetSource() { return this.resident.globalFineLevelSetSource; }
+  /** Compatibility getters backed exclusively by the public world view. */
+  get sparseAdaptiveGridSource() { return this.sparseWorld.presentation().adaptiveGrid; }
+  get globalFineLevelSetSource() { return this.sparseWorld.presentation().fineLevelSet; }
+  readPresentationPageAllocatorReceiptQA() {
+    return this.sparseWorldTrace.readPresentationPageAllocatorReceiptQA();
+  }
 
   private atlas: SparseAdaptiveMassAtlas;
   private lastTime_s = 0;
@@ -456,6 +508,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
   private lastPhysicsTraceAt_ms = -Infinity;
+  /** Small staging ring carrying completed-frame pressure demand to the host. */
+  private readonly pressureIterationReadbacks: GPUBuffer[] = [];
+  private pressureIterationReceipt?: Readonly<{ executed: number; encoded: number }>;
+  private pressureIterationReceiptSequence = 0;
+  private pressureIterationReceiptAppliedSequence = 0;
+  private pressureIterationControlGeneration = 0;
   /** One undecodable hardware sample retires the chain for this solver. */
   private hardwarePhysicsTraceInvalid = false;
   /** Diagnostics-only prior terminal tuple. Pressure topology precedes the
@@ -472,7 +530,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     private scene: SceneDescription,
     private options: AdaptiveMassSolverOptions,
     private readonly presentation: WebGPUAdaptiveMassSparsePresentation,
-    private readonly resident: WebGPUSparseCM12Resident,
+    sparseWorldDevice: SparseWorldDevice,
+    sparseWorld: SparseWorld,
+    sparseWorldUI: SparseWorldUI,
+    private readonly sparseRuntime: CM12SparseWorldRuntime,
+    readonly sparseWorldTrace: CM12SparseWorldDeveloperTrace,
+    private readonly sparseWorldNumerics: { current: CM12SparseWorldStepConfiguration },
     private readonly rigidSystem: WebGPURigidBodySystem | undefined,
     private readonly rigidExchange: GPUBuffer | undefined,
     private readonly rigidTerrainTexture: GPUTexture | undefined,
@@ -481,6 +544,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     atlas: SparseAdaptiveMassAtlas,
     quality: GPUQuality,
   ) {
+    this.sparseWorldDevice = sparseWorldDevice;
+    this.sparseWorld = sparseWorld;
+    this.sparseWorldUI = sparseWorldUI;
     this.atlas = atlas;
     this.volumeTexture = presentation.densityTexture;
     this.surfaceFieldTexture = presentation.levelSetTexture;
@@ -512,7 +578,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       cellSize_m,
       pressureIterations: 0,
       pressureSolver: "GPU-resident one-reduction composite GᵀWG sparse MGPCG",
-      allocatedBytes: presentation.allocatedBytes + resident.allocatedBytes,
+      allocatedBytes: presentation.allocatedBytes + sparseRuntime.allocatedBytes,
       quality,
       volumeCellSum: stats.integratedMassFineCells,
       representedVolumeCellSum: stats.integratedMassFineCells,
@@ -619,8 +685,16 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     let atlas: SparseAdaptiveMassAtlas | undefined;
     let presentation: WebGPUAdaptiveMassSparsePresentation | undefined;
     let grid: SparseAtlasCompositeGrid | undefined;
-    let resident: WebGPUSparseCM12Resident | undefined;
-    const rigidCouplingEnabled = scene.rigidBodies.length > 0;
+    let sparseRuntime: Awaited<ReturnType<
+      typeof createCM12SparseWorldFromLegacy>> | undefined;
+    const sparseWorldNumerics: { current: CM12SparseWorldStepConfiguration } = {
+      current: { finestCellSize_m: 1, pressureScale: 1 },
+    };
+    // Sparse CM12's Secs. 3.6-3.7 cut-cell state is shared by moving bodies and
+    // static terrain. Previously this gate followed only the rigid roster, so a
+    // terrain-only scene seeded no density below its heightfield but ran every
+    // later transport and pressure pass with V_i = V^f = 1.
+    const rigidCouplingEnabled = scene.rigidBodies.length > 0 || sceneHasTerrain(scene);
     let rigidTerrainTexture: GPUTexture | undefined;
     let rigidExchange: GPUBuffer | undefined;
     let rigidSystem: WebGPURigidBodySystem | undefined;
@@ -695,14 +769,19 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             surfaceFineRings: options.surfaceFineRings,
             ...(resolutionForBrick ? { resolutionForBrick } : {}),
           });
+          // Generation-zero production ownership is the authored fluid set.
+          // Receiver support below remains a temporary compatibility catalogue
+          // until C1 page publication consumes TCP1 directly; it must not make
+          // dry coordinates accepted, active, or presentable at attachment.
+          initiallyActiveBrickKeys = new Set(atlas.bricks.filter((brick) =>
+            brick.density.some((density) => density > 0)).map((brick) => brick.key));
           const supported = residentSupportAtlas(atlas, options.resolutionMode);
-          initiallyActiveBrickKeys = new Set(supported.bricks.map((brick) => brick.key));
           const receiverScale = adaptiveMassReceiverScaleForScene(
             scene, options.receiverSupportRings,
           );
           atlas = dormantReceiverDomain(supported, options.resolutionMode,
             receiverScale.supportRings, options.receiverFloor,
-            receiverScale.minimumCapacityScale);
+            receiverScale.minimumCapacityScale, scene);
           // The runtime is GPU-resident from generation zero. Construct only
           // the topology oracle needed by the packer; the CPU dynamics state
           // used to allocate duplicate velocity, pressure, policy and
@@ -723,33 +802,49 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         label: "Pack compact GPU topology and allocate resident frame state",
         dependencies: ["adaptive-mass.atlas", "adaptive-mass.presentation"],
         run: async () => {
-          const createResident = qaToken === PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
-              ? WebGPUSparseCM12Resident.createPresentationPublisherOracleForQA
-              : qaToken === LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN
-                ? WebGPUSparseCM12Resident.createLegacyHostAuthorityOracleForQA
-                : qaToken === PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
-                  ? WebGPUSparseCM12Resident.createPhase1TransportReceiptOracleForQA
-              : WebGPUSparseCM12Resident.create;
-          const residentArguments = [
-            device, atlas!, grid!, finestCellSize(scene, atlas!),
+          const cellSize_m = finestCellSize(scene, atlas!);
+          sparseWorldNumerics.current = {
+            finestCellSize_m: cellSize_m,
+            pressureScale: 1,
+          };
+          sparseRuntime = await createCM12SparseWorldFromLegacy({
+            device,
+            atlas: atlas!,
+            grid: grid!,
+            numerics: () => sparseWorldNumerics.current,
             initiallyActiveBrickKeys,
-            rigidCouplingEnabled ? {
+            rigid: rigidCouplingEnabled ? {
               bodies: rigidSystem!.stateBuffer,
               exchange: rigidExchange!,
+              terrain: rigidTerrainTexture!,
+              terrainPresent: sceneHasTerrain(scene),
               worldDimensions_m: [scene.container.width_m, scene.container.height_m,
                 scene.container.depth_m] as const,
             } : undefined,
             // Sized from the iteration ceiling this solver was built with, so
             // the journal can hold the longest solve it will ever encode.
-            options.pressureJournal
+            journal: options.pressureJournal
               ? { iterationCapacity: sparseCM12PressureIterations(
                 options.pressureIterations) }
               : undefined,
-            options.presentationPageResolution ?? options.brickFineResolution ?? 8,
-          ] as const;
-          resident = await createResident.call(
-            WebGPUSparseCM12Resident, ...residentArguments);
-          resident.setRefinementRegionParameters(packSparseCM12RefinementRegions(
+            presentationPageResolution:
+              options.presentationPageResolution ?? options.brickFineResolution ?? 8,
+            report: (label: string) => onProgress({
+              phase: "allocation",
+              taskId: "adaptive-mass.resident",
+              label,
+              completed: 3,
+              total: 6,
+            }),
+            mode: qaToken === PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
+              ? "presentation-publisher-qa"
+              : qaToken === LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN
+                ? "legacy-host-authority-qa"
+                : qaToken === PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
+                  ? "phase1-transport-receipt-qa"
+                  : "production",
+          });
+          sparseRuntime.runtime.setRefinementRegionParameters(packSparseCM12RefinementRegions(
             sceneRefinementRegions(scene), refinementRegionLattice(scene)));
         },
       }, {
@@ -761,7 +856,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           const encoder = device.createCommandEncoder({
             label: "Sparse CM12 initial GPU publication",
           });
-          resident!.encodeInitialPresentation(encoder, finestCellSize(scene, atlas!));
+          sparseRuntime!.runtime.encodeInitialPresentation(
+            encoder, finestCellSize(scene, atlas!));
           device.queue.submit([encoder.finish()]);
         },
       }, {
@@ -772,12 +868,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         run: () => device.queue.onSubmittedWorkDone(),
       }]);
       return new WebGPUAdaptiveMassSolver(
-        device, scene, options, presentation!, resident!,
+        device, scene, options, presentation!, sparseRuntime!.device, sparseRuntime!.world,
+        sparseRuntime!.ui,
+        sparseRuntime!.runtime, sparseRuntime!.developerTrace, sparseWorldNumerics,
         rigidSystem, rigidExchange, rigidTerrainTexture, rigidCouplingEnabled,
         grid!.mixedSeamRowCount, atlas!, quality,
       );
     } catch (error) {
-      resident?.destroy();
+      sparseRuntime?.world.destroy();
       presentation?.destroy();
       rigidSystem?.destroy();
       rigidExchange?.destroy();
@@ -808,7 +906,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const encoder = this.device.createCommandEncoder({
       label: "Sparse CM12 GPU liquid injection",
     });
-    this.resident.encodeLiquidInjection(
+    this.sparseRuntime.encodeLiquidInjection(
       encoder,
       finestCellSize(this.scene, this.atlas),
       [
@@ -838,7 +936,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    */
   applySceneUniforms(scene: SceneDescription): void {
     this.scene = scene;
-    this.resident.setRefinementRegionParameters(packSparseCM12RefinementRegions(
+    this.resetPressureIterationFeedback();
+    this.sparseRuntime.setRefinementRegionParameters(packSparseCM12RefinementRegions(
       sceneRefinementRegions(scene), refinementRegionLattice(scene)));
   }
 
@@ -858,6 +957,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const pressureIterations = sparseCM12PressureIterations(values.pressureIterations);
     const pressureRelativeTolerance =
       sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance);
+    if (pressureIterations !== this.options.pressureIterations
+      || pressureRelativeTolerance !== this.options.pressureRelativeTolerance) {
+      this.resetPressureIterationFeedback();
+    }
     const activityPolicy = sparseCM12ActivityPolicy({
       ...values,
       activitySignals: values.selectorMode === "activity",
@@ -866,8 +969,16 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       pressureIterations, pressureRelativeTolerance, activityPolicy };
   }
 
+  private resetPressureIterationFeedback(): void {
+    this.pressureIterationReceipt = undefined;
+    this.pressureIterationControlGeneration += 1;
+    delete this.info.pressureIterationsExecuted;
+    delete this.info.pressureIterationsEncoded;
+  }
+
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean {
-    if (this.disposed || !Number.isFinite(time_s) || time_s <= this.lastTime_s + 1e-9) return false;
+    if (this.disposed || this.sparseWorldDevice.status !== "ready" || !Number.isFinite(time_s)
+      || time_s <= this.lastTime_s + 1e-9) return false;
     const paperTimeStep = this.options.timeStep === "paper";
     if (paperTimeStep
       && time_s - this.lastTime_s < CM12_PAPER_DT_S - 1e-9) return false;
@@ -875,6 +986,17 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       ? CM12_PAPER_DT_S
       : Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime_s);
     if (!(dt_s > 0)) return false;
+    const pressureIterationMaximum = sparseCM12PressureIterations(
+      this.options.pressureIterations);
+    const pressureRelativeTolerance = sparseCM12PressureRelativeTolerance(
+      this.options.pressureRelativeTolerance);
+    const pressureIterations = this.sparseWorldUI.control.pressureFilm?.captureEnabled
+      ? pressureIterationMaximum
+      : sparseCM12PressureIterationsFromReceipt(
+        pressureIterationMaximum,
+        pressureRelativeTolerance,
+        this.pressureIterationReceipt,
+      );
     const cellSize_m = finestCellSize(this.scene, this.atlas);
     const activeBodies = bodies.slice(0, 12);
     this.rigidSystem?.syncBodies(activeBodies);
@@ -906,30 +1028,65 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const encoder = frameCapture
       ? frameCapture.instrument(rawEncoder, hardwareTrace)
       : rawEncoder;
+    if (this.pressureIterationReadbacks.length === 0) {
+      for (let index = 0; index < 3; index += 1) {
+        this.pressureIterationReadbacks.push(this.device.createBuffer({
+          label: `Sparse CM12 pressure-iteration receipt ${index}`,
+          size: 4,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        }));
+      }
+    }
+    const pressureIterationReadback = this.pressureIterationReadbacks.find(
+      (candidate) => candidate.mapState === "unmapped",
+    );
+    const pressureIterationReceiptSequence = pressureIterationReadback
+      ? ++this.pressureIterationReceiptSequence : 0;
+    const pressureIterationControlGeneration = this.pressureIterationControlGeneration;
     if (this.rigidExchange) encoder.clearBuffer(this.rigidExchange);
-    this.resident.encode(
-      encoder,
-      dt_s,
-      cellSize_m,
-      this.scene.fluid.density_kg_m3 * cellSize_m * cellSize_m / dt_s,
-      [gravity.x / cellSize_m, gravity.y / cellSize_m, gravity.z / cellSize_m],
-      {
+    this.sparseWorldNumerics.current = {
+      finestCellSize_m: cellSize_m,
+      pressureScale: this.scene.fluid.density_kg_m3 * cellSize_m * cellSize_m / dt_s,
+      accelerationFinePerSecond2: [
+        gravity.x / cellSize_m,
+        gravity.y / cellSize_m,
+        gravity.z / cellSize_m,
+      ],
+      sharpening: {
         distanceCells: this.options.sharpeningDistance,
         traceSteps: this.options.sharpeningTraceSteps,
       },
-      this.options.activityPolicy,
-      {
-        iterations: this.options.pressureIterations,
-        relativeTolerance: this.options.pressureRelativeTolerance,
+      activityPolicy: this.options.activityPolicy,
+      pressureControl: {
+        iterations: pressureIterations,
+        relativeTolerance: pressureRelativeTolerance,
       },
-      frameCapture?.residentStageSeams,
-      this.rigidCouplingEnabled ? activeBodies.length : 0,
-      [this.scene.container.width_m, this.scene.container.height_m,
+      seams: frameCapture?.residentStageSeams,
+      bodyCount: this.rigidCouplingEnabled ? activeBodies.length : 0,
+      worldDimensions_m: [this.scene.container.width_m, this.scene.container.height_m,
         this.scene.container.depth_m],
-    );
+    };
+    this.sparseWorld.encodeStep(encoder, {
+      time: this.lastTime_s + dt_s,
+      dt: dt_s,
+      gravity: [gravity.x, gravity.y, gravity.z],
+      interactions: [],
+    });
     this.rigidSystem?.encode(encoder, dt_s, cellSize_m ** 3, 1, cellSize_m);
+    if (pressureIterationReadback) {
+      this.sparseRuntime.encodePressureIterationReceipt(
+        encoder, pressureIterationReadback);
+    }
     frameCapture?.closeCommands();
     this.device.queue.submit([encoder.finish()]);
+    if (pressureIterationReadback) {
+      this.readPressureIterationReceipt(
+        pressureIterationReadback,
+        pressureIterations,
+        pressureIterationReceiptSequence,
+        pressureIterationControlGeneration,
+      );
+    }
 
     this.lastTime_s += dt_s;
     const nextTime_s = this.lastTime_s;
@@ -939,12 +1096,37 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.lastDt_s = dt_s;
     this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
     this.info.lastSubsteps = 1;
-    this.info.pressureIterations = sparseCM12PressureIterations(
-      this.options.pressureIterations);
+    this.info.pressureIterations = pressureIterationMaximum;
+    this.info.pressureIterationsEncoded = pressureIterations;
     this.info.hostSimulationSizedWorkItems = 0;
     const captured = frameCapture?.finish(this.device.queue);
     this.finishFrameCapture(captured, traceRequestedAt_ms);
     return true;
+  }
+
+  /** Publish the receipt and use it only as the next frame's encoded ceiling hint. */
+  private readPressureIterationReceipt(
+    readback: GPUBuffer,
+    encoded: number,
+    sequence: number,
+    controlGeneration: number,
+  ): void {
+    void readback.mapAsync(GPUMapMode.READ).then(() => {
+      const executed = Math.max(0, Math.round(
+        new Float32Array(readback.getMappedRange(), 0, 1)[0]!,
+      ));
+      readback.unmap();
+      if (this.disposed || !this.pressureIterationReadbacks.includes(readback)
+        || controlGeneration !== this.pressureIterationControlGeneration
+        || sequence <= this.pressureIterationReceiptAppliedSequence) return;
+      const boundedExecuted = Math.min(encoded, executed);
+      this.pressureIterationReceiptAppliedSequence = sequence;
+      this.pressureIterationReceipt = { executed: boundedExecuted, encoded };
+      this.info.pressureIterationsExecuted = boundedExecuted;
+      this.info.pressureIterationsEncoded = encoded;
+    }).catch(() => {
+      if (readback.mapState === "mapped") readback.unmap();
+    });
   }
 
   private finishFrameCapture(
@@ -996,10 +1178,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
 
   async readStats(): Promise<GPUEulerianInfo> {
     await this.device.queue.onSubmittedWorkDone();
-    const diagnostics = await this.resident.readDiagnostics();
-    // Telemetry readback is deliberately downstream of simulation. These
-    // values update panels only; no scheduler decision or dispatch dimension
-    // is ever derived from them on the host.
+    const diagnostics = await this.sparseWorldTrace.readDiagnostics();
+    // This full diagnostics readback remains downstream of simulation and only
+    // updates panels. Adaptive encoding consumes the separate four-byte
+    // completed-frame receipt, never this topology/physics diagnostics packet.
     const topology = diagnostics as typeof diagnostics
       & SparseCM12TopologySchedulerDiagnostics;
     this.info.adaptivePressureTopologyAttribution =
@@ -1095,31 +1277,39 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   /** Explicit Dawn/QA materialization; production rendering stays sparse. */
-  readDiagnosticFields() { return this.resident.readDiagnosticFields(); }
+  readDiagnosticFields() { return this.sparseWorldTrace.readDiagnosticFields(); }
   readPhase1TransportReceiptQA() {
-    return this.resident.readPhase1TransportReceiptQA();
+    return this.sparseWorldTrace.readPhase1TransportReceiptQA();
   }
   readPhase1TransportProfileQA() {
-    return this.resident.readPhase1TransportProfileQA();
+    return this.sparseWorldTrace.readPhase1TransportProfileQA();
   }
   readCandidateEffectsTransactionQA() {
-    return this.resident.readCandidateEffectsTransactionQA();
+    return this.sparseWorldTrace.readCandidateEffectsTransactionQA();
   }
   /** Explicit FCA1 QA materialization; never consulted by frame scheduling. */
-  readFrameControlQA() { return this.resident.readFrameControlQA(); }
+  readFrameControlQA() { return this.sparseWorldTrace.readFrameControlQA(); }
   readTransportPacketIndirectQA() {
-    return this.resident.readTransportPacketIndirectQA();
+    return this.sparseWorldTrace.readTransportPacketIndirectQA();
   }
   /** Header-only FSM1 receipt; never consulted by frame scheduling. */
-  readFinalScalarMaskHeaderQA() { return this.resident.readFinalScalarMaskHeaderQA(); }
-  readSparseWorkShapeQA() { return this.resident.readWorkShapeQA(); }
-  readAdaptiveRepresentationQA() { return this.resident.readAdaptiveRepresentationQA(); }
-  readAcceptedIndirectQA() { return this.resident.readAcceptedIndirectQA(); }
-  readFrameControlIndirectQA() { return this.resident.readFrameControlIndirectQA(); }
-  readVelocityExtensionHeaderQA() { return this.resident.readVelocityExtensionHeaderQA(); }
-  readVelocityExtensionQA() { return this.resident.readVelocityExtensionQA(); }
+  readFinalScalarMaskHeaderQA() {
+    return this.sparseWorldTrace.readFinalScalarMaskHeaderQA();
+  }
+  readSparseWorkShapeQA() { return this.sparseWorldTrace.readWorkShapeQA(); }
+  readAdaptiveRepresentationQA() {
+    return this.sparseWorldTrace.readAdaptiveRepresentationQA();
+  }
+  readAcceptedIndirectQA() { return this.sparseWorldTrace.readAcceptedIndirectQA(); }
+  readFrameControlIndirectQA() {
+    return this.sparseWorldTrace.readFrameControlIndirectQA();
+  }
+  readVelocityExtensionHeaderQA() {
+    return this.sparseWorldTrace.readVelocityExtensionHeaderQA();
+  }
+  readVelocityExtensionQA() { return this.sparseWorldTrace.readVelocityExtensionQA(); }
   readPressureCanonicalMembershipQA() {
-    return this.resident.readPressureCanonicalMembershipQA();
+    return this.sparseWorldTrace.readPressureCanonicalMembershipQA();
   }
 
   get rigidRenderBuffer(): GPUBuffer | undefined { return this.rigidSystem?.renderBuffer; }
@@ -1134,14 +1324,26 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   /** Explicit acceptance/debug readback; never consulted by advanceTo. */
   async readGPUActivityPolicy(): Promise<{
     readonly acceptedSteps: number;
+    readonly acceptedTopologyGeneration: number;
+    readonly faultFlags: number;
+    readonly newlyActivatedBrickCount: number;
+    readonly preparedBrickCount: number;
+    readonly committedBrickCount: number;
+    readonly commitFailed: boolean;
     readonly bricks: readonly AdaptiveMassGPUActivityBrick[];
   }> {
-    const snapshot = await this.resident.readActivitySnapshot();
+    const snapshot = await this.sparseWorldTrace.readActivitySnapshot();
     if (snapshot.records.length !== this.atlas.bricks.length) {
       throw new Error("Sparse CM12 GPU activity record count does not match resident bricks");
     }
     return {
       acceptedSteps: snapshot.acceptedSteps,
+      acceptedTopologyGeneration: snapshot.acceptedTopologyGeneration,
+      faultFlags: snapshot.faultFlags,
+      newlyActivatedBrickCount: snapshot.newlyActivatedBrickCount,
+      preparedBrickCount: snapshot.preparedBrickCount,
+      committedBrickCount: snapshot.committedBrickCount,
+      commitFailed: snapshot.commitFailed,
       bricks: snapshot.records.map((record, index) => {
         const brick = this.atlas.bricks[index]!;
         return { ...record, key: brick.key, coordinate: brick.coordinate,
@@ -1153,11 +1355,13 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   destroy(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.resident.destroy();
+    this.sparseWorld.destroy();
     this.presentation.destroy();
     this.rigidSystem?.destroy();
     this.rigidExchange?.destroy();
     this.rigidTerrainTexture?.destroy();
+    for (const readback of this.pressureIterationReadbacks) readback.destroy();
+    this.pressureIterationReadbacks.length = 0;
   }
 }
 

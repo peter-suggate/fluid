@@ -116,10 +116,61 @@ export function TransportBar() {
   // already showing their own disabled state beside it.
   const transportResourceWork = resourceActivitiesFor(resourceReadiness, "transport-inline")[0];
   const interaction = resourceInteractionGates(resourceReadiness, !rendererOnlyScene);
+  const sparseWorldStatus = gpuInfo?.sparseWorldStatus;
+  const sparseWorldDeviceStatus = gpuInfo?.sparseWorldDeviceStatus;
+  const sparseWorld = sparseWorldStatus !== undefined || sparseWorldDeviceStatus !== undefined;
   const initialSceneReady = !requiresFencedInitialRasterPresentation(methodId)
     || (gpuInfo?.initialSparseAuthorityReady === true
       && gpuInfo?.initialRasterSurfaceReady === true);
-  const transportLocked = rendererOnlyScene || !interaction.transportInteractive || !initialSceneReady;
+  const sparseWorldFault = sparseWorldStatus?.fault ?? gpuInfo?.sparseWorldDeviceFault;
+  const sparseWorldFaultCode = sparseWorldFault?.code
+    ?? (sparseWorldDeviceStatus === "fault" ? "device-library"
+      : sparseWorldStatus?.state === "fault" ? "internal" : undefined);
+  const sparseWorldReady = sparseWorldStatus !== undefined
+    && sparseWorldDeviceStatus === "ready"
+    && sparseWorldStatus.state !== "fault";
+  const sparseWorldLoading = sparseWorld && !sparseWorldFaultCode
+    && (!sparseWorldReady || !initialSceneReady);
+  // Legacy solvers retain their atomic-pipeline readiness flag. Sparse worlds
+  // expose only device-library readiness and semantic world status.
+  const simulationReady = sparseWorld ? sparseWorldReady
+    : gpuInfo?.simulationPipelinesReady !== false;
+  const transportLocked = rendererOnlyScene || !interaction.transportInteractive
+    || !initialSceneReady || !simulationReady;
+  const transportLockReason = sparseWorldFaultCode
+    ? `Sparse world fault: ${sparseWorldFaultCode}`
+    : sparseWorld
+      ? sparseWorldLoading ? "Sparse world is loading"
+        : "Simulation controls unlock after the sparse world is ready"
+      : gpuInfo?.simulationPipelineError
+        ? `Simulation pipeline compilation failed: ${gpuInfo.simulationPipelineError}`
+        : !simulationReady
+          ? "Simulation pipelines are compiling in the background"
+          : "Simulation controls unlock after the initial GPU scene is ready";
+  const transportStatus = sparseWorldFaultCode ? {
+    title: transportLockReason,
+    label: "Sparse world fault",
+    detail: sparseWorldFaultCode,
+  } : sparseWorldStatus?.state === "saturated" ? {
+    title: "Sparse world capacity reached",
+    label: "Sparse world capacity reached",
+    detail: `${sparseWorldStatus.residentTiles}/${sparseWorldStatus.capacityTiles} tiles`,
+  } : sparseWorldLoading ? {
+    title: "Sparse world is loading",
+    label: "Loading sparse world",
+  } : transportResourceWork ? {
+    title: sparseWorld ? "Sparse world ready" : transportResourceWork.label,
+    label: sparseWorld ? "Sparse world ready"
+      : transportResourceWork.operation ?? transportResourceWork.label,
+    detail: !sparseWorld && transportResourceWork.total > 0
+      ? `${Math.min(transportResourceWork.completed, transportResourceWork.total)}/${transportResourceWork.total}`
+      : undefined,
+  } : !sparseWorld && !simulationReady ? {
+    title: transportLockReason,
+    label: gpuInfo?.simulationPipelineError
+      ? "Simulation compile failed" : "Compiling simulation",
+    detail: gpuInfo?.simulationPipelineError,
+  } : undefined;
   const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
   const toggleRecording = () => {
     if (recordingStatus === "recording") simulationRecording.stop(simulationTime);
@@ -150,7 +201,7 @@ export function TransportBar() {
         aria-label={browserPolicyPending ? "Browser GPU safety policy is loading"
           : rendererOnlyScene ? "Fluid simulation is disabled for this renderer validation scene"
           : safeBringup ? "Continuous play is disabled during bounded GPU bring-up"
-          : transportLocked ? "Simulation controls unlock after the initial GPU scene is ready"
+          : transportLocked ? transportLockReason
           : runState === "running" ? "Pause simulation" : "Play simulation"}
       >{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
       <button
@@ -158,7 +209,7 @@ export function TransportBar() {
         disabled={browserPolicyPending || transportLocked || safeStepLocked}
         onClick={() => { if (safeBringup) setSafeStepRequested(true); simulation.singleStep(); }}
         aria-label={browserPolicyPending ? "Browser GPU safety policy is loading"
-          : transportLocked ? "Single step unavailable until the initial GPU scene is ready"
+          : transportLocked ? transportLockReason
           : safeStepLocked ? "The bounded browser GPU step has already been requested"
           : "Single fluid clock step"}
       >STEP</button>
@@ -193,15 +244,15 @@ export function TransportBar() {
           ? <i className="transport-recording-dot" aria-hidden="true" /> : null}
         <strong>{simulationTime.toFixed(4)}</strong><small>s</small>
       </output>
-      {transportResourceWork && <span
+      {transportStatus && <span
         className="transport-resource-state"
         role="status"
         aria-live="polite"
-        title={transportResourceWork.label}
+        title={transportStatus.title}
       >
         <i aria-hidden="true" />
-        <strong>{transportResourceWork.operation ?? transportResourceWork.label}</strong>
-        {transportResourceWork.total > 0 && <small>{Math.min(transportResourceWork.completed, transportResourceWork.total)}/{transportResourceWork.total}</small>}
+        <strong>{transportStatus.label}</strong>
+        {transportStatus.detail && <small>{transportStatus.detail}</small>}
       </span>}
     </div>
   );

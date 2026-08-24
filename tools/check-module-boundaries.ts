@@ -14,6 +14,9 @@
  *      about a simulation method may reach it, and it may not reach a method.
  *   8. Only a composition root may import the method catalog. Everything else
  *      resolves a method through lib/core/method-registry.
+ *   9. lib/sparse-world is a public semantic boundary shared by core and sparse
+ *      methods. Its internal adapters may reach a method implementation; its
+ *      public index may not.
  *
  * Run: node --import tsx tools/check-module-boundaries.ts [--strict]
  */
@@ -32,6 +35,7 @@ type Zone =
   | "method-power"
   | "method-adaptive-mass"
   | "octree-shared"
+  | "sparse-world"
   | "svo"
   | "harness"
   | "shape-lab"
@@ -46,6 +50,7 @@ function zoneOf(relPath: string): Zone {
   if (relPath.startsWith("lib/methods/power/")) return "method-power";
   if (relPath.startsWith("lib/methods/adaptive-mass/")) return "method-adaptive-mass";
   if (relPath.startsWith("lib/methods/octree-shared/")) return "octree-shared";
+  if (relPath.startsWith("lib/sparse-world/")) return "sparse-world";
   if (relPath.startsWith("lib/svo/")) return "svo";
   if (relPath.startsWith("lib/harness/")) return "harness";
   if (relPath.startsWith("shape-lab/")) return "shape-lab";
@@ -58,12 +63,17 @@ function zoneOf(relPath: string): Zone {
 const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
   // Core composes the SVO layer: the production renderer draws through it.
   // The reverse direction is what carries the meaning — see "svo" below.
-  core: new Set<Zone>(["core", "svo"]),
+  core: new Set<Zone>(["core", "svo", "sparse-world"]),
   "method-uniform": new Set<Zone>(["core", "method-uniform"]),
   "method-losasso": new Set<Zone>(["core", "octree-shared", "method-losasso"]),
   "method-power": new Set<Zone>(["core", "octree-shared", "method-power"]),
-  "method-adaptive-mass": new Set<Zone>(["core", "method-adaptive-mass"]),
+  "method-adaptive-mass": new Set<Zone>([
+    "core", "method-adaptive-mass", "sparse-world",
+  ]),
   "octree-shared": new Set<Zone>(["core", "octree-shared"]),
+  // The method edge exists only under sparse-world/internal during Phase A;
+  // a dedicated public-index audit below keeps it out of the semantic API.
+  "sparse-world": new Set<Zone>(["core", "sparse-world", "method-adaptive-mass"]),
   // The SVO stack encodes and traces voxels. Which solver filled them is not
   // its business, so no method zone appears here — that absence is the rule.
   svo: new Set<Zone>(["core", "svo"]),
@@ -76,6 +86,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "method-power",
     "method-adaptive-mass",
     "octree-shared",
+    "sparse-world",
   ]),
   // The lab expands SVO primitives and field programs on CPU — that is what it
   // is for. It stays barred from every method, which is the rule that matters.
@@ -89,6 +100,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "method-power",
     "method-adaptive-mass",
     "octree-shared",
+    "sparse-world",
     "harness",
   ]),
   // The UI presents the render layer's own diagnostics (pixel traces, SVO
@@ -105,6 +117,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "method-power",
     "method-adaptive-mass",
     "octree-shared",
+    "sparse-world",
     "lib-other",
     "shape-lab",
     "ui",
@@ -177,6 +190,11 @@ function main() {
           continue;
         }
         const to = zoneOf(targetRel);
+        if (from === "sparse-world" && to.startsWith("method-")
+          && !rel.startsWith("lib/sparse-world/internal/")) {
+          violations.push(`${rel} [${from}] → ${targetRel} [${to}]`);
+          continue;
+        }
         if (!ALLOWED[from].has(to)) {
           violations.push(`${rel} [${from}] → ${relative(REPO, target)} [${to}]`);
         }

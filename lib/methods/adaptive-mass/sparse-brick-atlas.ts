@@ -20,7 +20,11 @@ import {
   sphericalContainerOpenFractionAtCell,
   type SphericalContainerFineGeometry,
 } from "../../core/spherical-container";
-import { sceneHasTerrain, terrainHeightAt } from "../../core/terrain";
+import {
+  sceneHasTerrain,
+  terrainColumnHeights,
+  terrainHeightAt,
+} from "../../core/terrain";
 import {
   applySparseCM12RefinementRegionResolutionBounds,
   packSparseCM12RefinementRegions,
@@ -289,6 +293,34 @@ function brickRequiresCutBoundaryResolution(
   const maximum = coordinate.map((value) => (value + 1) * brickFineResolution) as
     [number, number, number];
   return classifyFineBoxAgainstSphericalContainer(boundary, minimum, maximum) === "cut";
+}
+
+/**
+ * A composite cell that straddles H cannot place the solid/liquid interface
+ * inside its repeated finest presentation samples. Keep the containing brick
+ * on the finest rung, exactly as the spherical cut-boundary evidence does.
+ */
+function brickRequiresTerrainBoundaryResolution(
+  terrainHeights_m: Float32Array | undefined,
+  dimensions: SparseBrickVec3,
+  containerHeight_m: number,
+  coordinate: SparseBrickVec3,
+  brickFineResolution: SparseBrickFineResolution,
+): boolean {
+  if (!terrainHeights_m) return false;
+  const [nx, ny, nz] = dimensions;
+  const lowerY = coordinate[1] * brickFineResolution;
+  const upperY = Math.min(ny, lowerY + brickFineResolution);
+  const xBegin = coordinate[0] * brickFineResolution;
+  const xEnd = Math.min(nx, xBegin + brickFineResolution);
+  const zBegin = coordinate[2] * brickFineResolution;
+  const zEnd = Math.min(nz, zBegin + brickFineResolution);
+  const inverseCellHeight = ny / containerHeight_m;
+  for (let z = zBegin; z < zEnd; z += 1) for (let x = xBegin; x < xEnd; x += 1) {
+    const heightFine = terrainHeights_m[x + nx * z]! * inverseCellHeight;
+    if (heightFine >= lowerY - 1e-6 && heightFine <= upperY + 1e-6) return true;
+  }
+  return false;
 }
 
 function brickHasInterface(
@@ -710,6 +742,9 @@ export function initializeSparseBrickAtlasFromScene(
       origin_m: { x: -0.5 * container.width_m, y: 0, z: -0.5 * container.depth_m },
     });
   const boundary = sphericalContainerFineGeometry(scene, options.finestDimensions);
+  const terrainHeights_m = sceneHasTerrain(scene)
+    ? terrainColumnHeights(scene, options.finestDimensions[0], options.finestDimensions[2])
+    : undefined;
   if (!options.resolutionForBrick) {
     const hierarchical = hierarchicalTankFillBricks(
       scene, options.finestDimensions, brickDimensions, brickFineResolution, surfaceFineRings,
@@ -795,9 +830,12 @@ export function initializeSparseBrickAtlasFromScene(
       ? 0 : Math.max(0, ladder.resolutions.length - 1 - Math.max(0, distance - surfaceFineRings + 1));
     const adaptiveResolution = (distance !== undefined && distance < surfaceFineRings
       ? brickFineResolution : ladder.resolutions[distanceRung]!) as SparseBrickResolution;
-    const evidenceSelected = brickRequiresCutBoundaryResolution(
+    const evidenceSelected = (brickRequiresCutBoundaryResolution(
       boundary, coordinate, brickFineResolution,
-    ) ? brickFineResolution
+    ) || brickRequiresTerrainBoundaryResolution(
+      terrainHeights_m, options.finestDimensions, container.height_m,
+      coordinate, brickFineResolution,
+    )) ? brickFineResolution
       : options.resolutionForBrick?.({
       coordinate, brickDimensions,
     }) ?? adaptiveResolution;

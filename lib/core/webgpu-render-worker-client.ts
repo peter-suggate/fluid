@@ -1,6 +1,5 @@
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
-import type { SparseCM12PressureJournal } from
-  "../methods/adaptive-mass/sparse-cm12-pressure-journal";
+import type { PressureJournal } from "./pressure-journal";
 import type { StageLensReceipt } from "./stage-lens";
 import type { StageLensLayerReport } from "./webgpu-stage-lens-overlay";
 import type { InjectedLiquidBall } from "./method-contract";
@@ -55,7 +54,7 @@ export type WebGPURenderWorkerResponse =
   | { type: "attached" }
   | { type: "status"; status: GPUStatus; workerNow_ms: number }
   | { type: "gpu-info"; info: GPUEulerianInfo }
-  | { type: "pressure-journal"; journal: SparseCM12PressureJournal | undefined }
+  | { type: "pressure-journal"; journal: PressureJournal | undefined }
   | { type: "stage-lens"; receipt?: StageLensReceipt; layers: readonly StageLensLayerReport[] }
   | { type: "rigid-loads"; loads: GPURigidLoad[] }
   | { type: "advance-completed"; time_s: number }
@@ -71,7 +70,7 @@ export type WebGPURenderWorkerResponse =
 interface WorkerClientCallbacks {
   onStatus(status: GPUStatus): void;
   onGPUInfo?(info: GPUEulerianInfo): void;
-  onGPUPressureJournal?(journal: SparseCM12PressureJournal | undefined): void;
+  onGPUPressureJournal?(journal: PressureJournal | undefined): void;
   onGPUStageLens?(
     receipt: StageLensReceipt | undefined,
     layers: readonly StageLensLayerReport[],

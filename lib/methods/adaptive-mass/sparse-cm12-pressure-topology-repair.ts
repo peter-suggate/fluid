@@ -1,6 +1,6 @@
 /** PTR1: bounded parallel pressure topology repair authority. */
 export const SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_MAGIC = 0x5054_5231; // PTR1
-export const SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_VERSION = 1;
+export const SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_VERSION = 2;
 export const SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_HEADER_WORDS = 39;
 export const SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAMILY_HEADER_WORDS = 19;
 export const SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_LEAF_BITS = 256;
@@ -60,6 +60,8 @@ export interface SparseCM12PressureTopologyRepairFamilyLayout {
   readonly headerBaseWords: number;
   readonly capacity: number;
   readonly candidateGenerationBaseWords: number;
+  /** Compact, generation-local IDs appended directly by topology publishers. */
+  readonly changedBrickListBaseWords: number;
   readonly activeBitsBaseWords: number;
   readonly activeBitWordCount: number;
   readonly dirtyLeafStampBaseWords: number;
@@ -112,6 +114,7 @@ export function createSparseCM12PressureTopologyRepairLayout(options: {
   const makeFamily = (capacity: number): SparseCM12PressureTopologyRepairFamilyLayout => {
     const leafCount = Math.ceil(capacity / SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_LEAF_BITS);
     const candidateGenerationBaseWords = at; at = alignWords(at + capacity);
+    const changedBrickListBaseWords = at; at = alignWords(at + capacity);
     const activeBitWordCount = Math.ceil(capacity / 32);
     const activeBitsBaseWords = at; at = alignWords(at + activeBitWordCount);
     const dirtyLeafStampBaseWords = at; at = alignWords(at + leafCount);
@@ -124,7 +127,7 @@ export function createSparseCM12PressureTopologyRepairLayout(options: {
       if (count === 1) break;
     }
     return Object.freeze({ headerBaseWords: brickHeaderBaseWords, capacity,
-      candidateGenerationBaseWords,
+      candidateGenerationBaseWords, changedBrickListBaseWords,
       activeBitsBaseWords, activeBitWordCount, dirtyLeafStampBaseWords,
       dirtyLeafListBaseWords, activeLeafListBaseWords,
       leafCount, treeLevelBaseWords: Object.freeze(treeLevelBaseWords),
@@ -208,22 +211,12 @@ export function sparseCM12PressureTopologyRepairHeaderIndirectByteOffset(
 }
 
 export function sparseCM12PressureTopologyRepairEntryPoints(
-  layout: SparseCM12PressureTopologyRepairLayout,
+  _layout: SparseCM12PressureTopologyRepairLayout,
 ): readonly string[] {
-  const reductions = layout.brick.treeLevelCounts.slice(1).map((_, level) =>
-    `reduceSparseCM12PressureTopologyBrickLevel${level + 1}`);
   return Object.freeze([
     "beginSparseCM12PressureTopologyRepair",
     "captureSparseCM12PressureTopologyConsumerGenerations",
-    "seedPreviousSparseCM12PressureTopologyBrickLeaves",
     "finalizeSparseCM12PressureTopologyBrickFrontier",
-    "repairSparseCM12PressureTopologyBrickLeaves",
-    ...reductions,
-    "finalizeSparseCM12PressureTopologyBrickPlan",
-    "repairSparseCM12PressureTopologyChangedBricks",
-    "finalizeSparseCM12PressureTopologyCellExecution",
-    "sealSparseCM12PressureTopologyRowImage",
-    "commitSparseCM12PressureTopologyBrickStates",
     "finalizeSparseCM12BoundedPressureTopologyRepair",
   ]);
 }

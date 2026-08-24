@@ -20,6 +20,9 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createWebgpuSparseCM12ResidentWGSL } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl";
+import { sparseCM12PresentationPageAllocatorWGSL,
+  sparseCM12WGSLForEntryPoints } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { createSparseCM12IncrementalActivityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-incremental-activity";
 import { createSparseCM12CanonicalMembershipLayout } from
@@ -114,6 +117,8 @@ async function main(): Promise<void> {
           buffer: { type: "read-only-storage" } },
         ...[2, 3, 4].map((binding) => ({ binding,
           visibility: GPUShaderStage.COMPUTE, buffer: storage })),
+        { binding: 5, visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: "uniform", minBindingSize: 4 } },
         ...[11, 12, 13].map((binding) => ({ binding,
           visibility: GPUShaderStage.COMPUTE, buffer: storage })),
         { binding: 14, visibility: GPUShaderStage.COMPUTE,
@@ -262,6 +267,37 @@ async function main(): Promise<void> {
         topologyEffects, undefined, faceAddresses,
         250000,
       );
+      const validationSlice = sparseCM12WGSLForEntryPoints(source,
+        ["validateSparseCM12InternedBoundaryImmutable"]);
+      const validationSliceModule = device.createShaderModule({
+        label: `Sparse CM12 declaration-sliced validation ${variant}`,
+        code: validationSlice,
+      });
+      const validationSliceInfo = await validationSliceModule.getCompilationInfo();
+      const validationSliceErrors = validationSliceInfo.messages
+        .filter((message) => message.type === "error");
+      if (validationSliceErrors.length > 0) {
+        const validationSliceLines = validationSlice.split("\n");
+        throw new Error(`Declaration-sliced validation failed:\n${validationSliceErrors
+          .map((message) => `${message.lineNum}:${message.linePos} ${message.message}\n${
+            validationSliceLines.slice(Math.max(0, message.lineNum - 3),
+              message.lineNum + 2).join("\n")}`)
+          .join("\n")}`);
+      }
+      const allocatorSource = sparseCM12WGSLForEntryPoints(
+        sparseCM12PresentationPageAllocatorWGSL(8, 64, presentation!),
+        ["sortSparseCM12PresentationPageDirectory"]);
+      const allocatorModule = device.createShaderModule({
+        label: `Sparse CM12 sliced allocator validation ${variant}`,
+        code: allocatorSource,
+      });
+      const allocatorInfo = await allocatorModule.getCompilationInfo();
+      const allocatorErrors = allocatorInfo.messages.filter((message) => message.type === "error");
+      if (allocatorErrors.length > 0) {
+        throw new Error(`Declaration-sliced allocator failed:\n${allocatorErrors
+          .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`)
+          .join("\n")}`);
+      }
       const shaderModule = device.createShaderModule({
         label: `Sparse CM12 resident WGSL check ${variant}`,
         code: source,

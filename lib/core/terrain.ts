@@ -102,6 +102,13 @@ export interface TerrainProceduralPondVessel {
 export type TerrainProcedural = TerrainProceduralPondVessel;
 
 export interface TerrainDescription {
+  /**
+   * Require the authored height source to be sampled into the unified sparse
+   * voxel scene before it is consumed as visible solid geometry. Omitted keeps
+   * older documents compatible with the terrain-voxel A/B lever; `"voxel"`
+   * makes disabling that publication invalid for this scene.
+   */
+  solidRepresentation?: "voxel";
   /** Ground level in metres above the container floor before features. */
   baseHeight_m: number;
   features: TerrainFeature[];
@@ -745,6 +752,10 @@ export function validateTerrain(
   container: Pick<SceneDescription["container"], "width_m" | "height_m" | "depth_m">
 ): string[] {
   const errors: string[] = [];
+  if (terrain.solidRepresentation !== undefined
+    && terrain.solidRepresentation !== "voxel") {
+    errors.push("Terrain solid representation must be voxel");
+  }
   if (!(terrain.baseHeight_m >= 0) || terrain.baseHeight_m >= container.height_m) {
     errors.push("Terrain base height must be inside [0, container height)");
   }

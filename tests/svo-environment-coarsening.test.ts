@@ -1,0 +1,164 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+// A renderer resolves a method by id on any path that reaches a scene, and the
+// catalog cases below build scenes without ever creating a solver.
+import "../lib/methods";
+import { presentationModeForScene, SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES } from "../lib/core/scene-definition";
+import { SCENE_CATALOG } from "../lib/core/scenes";
+import { studioStageSceneryGraph } from "../lib/core/studio-stage-scene";
+import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/core/voxel-environments";
+import type { EnvironmentProxyPrimitive } from "../lib/core/voxel-environments";
+import {
+  createSvoEnvironmentCoarsening,
+  environmentProxyFeatureSize_m,
+  SVO_ENVIRONMENT_FEATURE_VOXELS,
+  svoEnvironmentCoarseningPower,
+  svoEnvironmentPayloadBytes,
+} from "../lib/svo/svo-environment-coarsening";
+import { sceneDocument } from "../lib/core/scene-definition";
+
+/**
+ * The environment's resolution ladder, and the gate that reads the same rule.
+ *
+ * What this is here to catch is one failure with two faces, both of which were
+ * live before the ladder existed. `ocean-seiche` — a 8 m tank on a 25 mm
+ * lattice — drew its house set at the solver's own cell and claimed 62,752
+ * environment bricks and a 1,959 MiB tree for a plate, a stem and a lamp cone,
+ * so it was held back to `fluid-only` and had no floor at all. The CM12 paper
+ * figures carry their own room shell, seventy metres of it at 50 mm, and the
+ * only thing that ever kept them from trying to build it was a budget that
+ * happened to say no while measuring a different set entirely.
+ *
+ * So the cases run in both directions: the rule must coarsen the house set far
+ * enough that a large tank can afford it, and the gate must still refuse a set
+ * that no device can hold. A change that relaxes one of those usually breaks
+ * the other, which is why they are asserted together.
+ */
+
+const material = { colorLinear: [1, 1, 1] as const, roughness: 1, metallic: 0, emission: 0 };
+
+/** A box proxy with an AABB stated independently of its half sizes. */
+function boxProxy(
+  halfSize: readonly [number, number, number],
+  center: readonly [number, number, number],
+  aabbHalf: readonly [number, number, number] = halfSize,
+): EnvironmentProxyPrimitive {
+  return {
+    kind: "box", key: `box-${center.join(",")}`, ownerIndex: 0, group: "test", tags: [],
+    center_m: { x: center[0], y: center[1], z: center[2] },
+    halfSize_m: { x: halfSize[0], y: halfSize[1], z: halfSize[2] },
+    material: material as never,
+    aabb_m: {
+      min: { x: center[0] - aabbHalf[0], y: center[1] - aabbHalf[1], z: center[2] - aabbHalf[2] },
+      max: { x: center[0] + aabbHalf[0], y: center[1] + aabbHalf[1], z: center[2] + aabbHalf[2] },
+    },
+  } as EnvironmentProxyPrimitive;
+}
+
+test("a solid's feature size is its own smallest dimension, not its bounding box's", () => {
+  // A plate turned off axis has a bounding box far thicker than the plate. The
+  // box is what the planner tests overlap against and the plate is what has to
+  // stay legible, so reading thickness off the box would let a rotated plate
+  // coarsen away while the same plate axis-aligned resolved.
+  const plate = boxProxy([10, 0.025, 10], [0, 0, 0]);
+  const turned = boxProxy([10, 0.025, 10], [0, 0, 0], [10.02, 7.1, 10.02]);
+  assert.equal(environmentProxyFeatureSize_m(plate), 0.05);
+  assert.equal(environmentProxyFeatureSize_m(turned), 0.05);
+});
+
+test("coarsening stops at the brick, so every brick plane stays a voxel plane", () => {
+  // `planSparseSceneDomain` aligns the lattice minimum to the brick, so a leaf
+  // whose voxels are 2^p cells lands on whole voxels exactly while 2^p divides
+  // the brick. Past that the stage floor's top face would no longer fall on
+  // y = 0, which is a visible seam rather than a lost detail.
+  assert.equal(svoEnvironmentCoarseningPower(8), 3);
+  assert.equal(svoEnvironmentCoarseningPower(4), 2);
+  assert.equal(svoEnvironmentCoarseningPower(1), 0);
+  assert.throws(() => svoEnvironmentCoarseningPower(6), RangeError);
+  assert.throws(() => svoEnvironmentCoarseningPower(0), RangeError);
+});
+
+test("a node splits for the finest solid in it and for nothing else", () => {
+  // Level 1 of this table holds 1.6 m nodes, so its voxels are 0.2 m and the
+  // finest feature it records is 0.8 m — the boundary both slabs are placed on.
+  const coarsening = (primitives: readonly EnvironmentProxyPrimitive[], crowdingTarget = 8) =>
+    createSvoEnvironmentCoarsening({
+      primitives, worldOrigin_m: [0, 0, 0], brickSize: 8, maximumDepth: 3, crowdingTarget,
+      nodeEdge_m: [[3.2, 3.2, 3.2], [1.6, 1.6, 1.6], [0.8, 0.8, 0.8], [0.4, 0.4, 0.4]],
+      terrainDomain: { worldOrigin_m: [0, 0, 0], cellSize_m: [0.05, 0.05, 0.05], dimensionsCells: [64, 64, 64] },
+    });
+  const node = { x: 0, y: 0, z: 0 };
+
+  const thick = coarsening([boxProxy([0.8, 0.4, 0.8], [0.8, 0.4, 0.8])]);
+  assert.equal(thick.refineEnvironmentLeaf(1, node), false);
+  assert.equal(thick.statistics.resolvedLeaves, 1);
+
+  const thin = coarsening([boxProxy([0.8, 0.025, 0.8], [0.8, 0.4, 0.8])]);
+  assert.equal(thin.refineEnvironmentLeaf(1, node), true);
+  assert.equal(thin.statistics.featureSplits, 1);
+
+  // The same thin plate is not in the node above it at all. Bounds overlap is
+  // inclusive on purpose, so this probes a node that clears the plate rather
+  // than one that shares a face with it.
+  assert.equal(thin.refineEnvironmentLeaf(1, { x: 0, y: 1, z: 0 }), false);
+  assert.equal(thin.statistics.emptyLeaves, 1);
+
+  // A leaf binds a bounded number of solids and drops the surplus silently, so
+  // a coarse leaf that gathers a crowd is worse than the leaves it replaced.
+  const crowd = coarsening(
+    [0, 1, 2].map((index) => boxProxy([0.8, 0.4, 0.8], [0.8, 0.4, 0.8 + index * 0.01])), 2);
+  assert.equal(crowd.refineEnvironmentLeaf(1, node), true);
+  assert.equal(crowd.statistics.crowdingSplits, 1);
+});
+
+test("the legibility floor is what makes the house set affordable at ocean scale", () => {
+  // The same set, on the tank it was authored around and on one twelve times
+  // wider. Without a ladder the second costs the square of the first; with one
+  // both land in the same order of magnitude, because the plate that grew is
+  // also the plate that may be drawn coarser.
+  const bytes = (id: string) => {
+    const definition = SCENE_CATALOG.find((entry) => entry.id === id)!;
+    const scene = sceneDocument(definition);
+    return svoEnvironmentPayloadBytes(
+      environmentProxyPrimitives(buildEnvironmentProxyCatalog(scene, scene.environment ?? "default")),
+      { cellSize_m: scene.voxelDomain.finestCellSize_m, brickSize: scene.voxelDomain.brickSize_cells });
+  };
+  const reference = bytes("water-box-dam-break");
+  const ocean = bytes("ocean-seiche");
+  assert.ok(ocean < 4 * reference, `ocean-seiche claims ${ocean} B against ${reference} B`);
+  assert.ok(ocean < SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES);
+});
+
+test("every stage scene is on the side of the budget its set puts it on", () => {
+  // The budget is a ceiling on a ceiling, so what matters is not that it is
+  // exact but that nothing sits near it. Measured across the catalog the house
+  // set costs at most 30 MiB and an authored room shell at least 887 MiB.
+  const carried: string[] = [], authored: string[] = [];
+  for (const definition of SCENE_CATALOG) {
+    if (definition.environment !== "stage") continue;
+    const scene = sceneDocument(definition);
+    const bytes = svoEnvironmentPayloadBytes(
+      environmentProxyPrimitives(buildEnvironmentProxyCatalog(scene, scene.environment ?? "default")),
+      { cellSize_m: scene.voxelDomain.finestCellSize_m, brickSize: scene.voxelDomain.brickSize_cells });
+    const houseSet = JSON.stringify((scene.scenery?.nodes ?? []).map((node) => node.id))
+      === JSON.stringify(studioStageSceneryGraph(scene).nodes.map((node) => node.id));
+    (houseSet ? carried : authored).push(`${definition.id} ${(bytes / 1024 ** 2).toFixed(1)} MiB`);
+    assert.equal(bytes <= SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES, houseSet,
+      `${definition.id} claims ${(bytes / 1024 ** 2).toFixed(1)} MiB`);
+    assert.equal(presentationModeForScene(definition, scene),
+      houseSet ? "full-scene" : "fluid-only", definition.id);
+  }
+  assert.ok(carried.length > 20 && authored.length >= 10, `${carried.length} / ${authored.length}`);
+});
+
+test("ocean-seiche presents the floor it was missing", () => {
+  const definition = SCENE_CATALOG.find((entry) => entry.id === "ocean-seiche")!;
+  const scene = sceneDocument(definition);
+  assert.equal(presentationModeForScene(definition, scene), "full-scene");
+  assert.deepEqual((scene.scenery?.nodes ?? []).map((node) => node.id),
+    ["shell", "stage/floor", "lamp/stem", "lamp/reflector"]);
+  // Every level offered is a level the predicate may decline, so the constant
+  // the floor is expressed in is asserted rather than implied by the counts.
+  assert.equal(SVO_ENVIRONMENT_FEATURE_VOXELS, 4);
+});

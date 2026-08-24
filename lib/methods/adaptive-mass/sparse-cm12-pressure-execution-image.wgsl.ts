@@ -71,8 +71,22 @@ fn peiFail(code:u32,id:u32){${arena}[${at(h.fault)}]=code;
   ${arena}[${at(h.hierarchyReductionIndirectX)}]=0u;
   ${arena}[${at(h.phase)}]=PEI_PHASE_FAULT;}
 
-@compute @workgroup_size(1)
-fn beginSparseCM12PressureExecutionImage(){
+// Re-publish the accepted PEI work counts into the indirect header. The host
+// always encodes every eight-iteration block; the device closes these x counts
+// after convergence so later blocks are genuine zero-work indirect dispatches.
+fn peiPublishPressureSolveDispatchGate(enabled:bool){
+  let cellCount=${arena}[${at(h.pressureCellCount)}];
+  let wetCount=${arena}[${at(h.wetBrickCount)}];
+  let hierarchyCount=${arena}[${at(h.hierarchyCount)}];
+  ${arena}[${at(h.cellIndirectX)}]=select(0u,(cellCount+63u)/64u,enabled);
+  ${arena}[${at(h.brickReductionIndirectX)}]=select(0u,wetCount,enabled);
+  ${arena}[${at(h.brickIndirectX)}]=select(0u,(wetCount+63u)/64u,enabled);
+  ${arena}[${at(h.hierarchyReductionIndirectX)}]=select(0u,hierarchyCount,enabled);
+  ${arena}[${at(h.hierarchyIndirectX)}]=select(0u,
+    (hierarchyCount+63u)/64u,enabled);
+}
+
+fn peiBeginFromCanonicalPressureRows(){
   if(!peiHeaderValid()){peiFail(PEI_FAULT_HEADER,PEI_INVALID);return;}
   let phase=${arena}[${at(h.phase)}];
   if(phase!=PEI_PHASE_UNINITIALIZED&&phase!=PEI_PHASE_ACCEPTED){

@@ -443,7 +443,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         label: "Iterations executed / encoded",
         value: (context) => adaptiveMassPressureIterationReadout(
           context.info, context.values.pressureIterations),
-        hint: "Iterations that performed solver arithmetic in the latest queue-confirmed frame, followed by the residual-gated tail and fixed encoded ceiling.",
+        hint: "Iterations that performed solver arithmetic in the latest queue-confirmed frame, followed by that frame's adaptive encoded ceiling. The slider remains the hard maximum.",
       },
     ],
     chip: (context) => {

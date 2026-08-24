@@ -27,7 +27,8 @@
  *
  * INVALID unless the whole publication transaction agrees: worklist header
  * shape, generation, capacity, and the page's own metadata identity. Compact
- * publishers (worklist word 3, bit 31) binary-search key-sorted metadata;
+ * publishers (worklist word 3, bit 31) binary-search a key-sorted physical-page
+ * list; physical storage itself may be allocated in any order.
  * ordinary publishers index the domain-sized directory that follows the
  * worklist body.
  */
@@ -38,11 +39,14 @@ export const compactFineLevelSetPageLookupWGSL = /* wgsl */ `fn pageLookup(key:u
   if(key>=logicalCount){return INVALID;}
   if((fineWorklist[3]&0x80000000u)!=0u){
     let count=min(fineWorklist[1],params.table.z);var low=0u;var high=count;
-    loop{if(low>=high){break;}let middle=low+(high-low)/2u;let base=middle*4u;
-      if(base+2u>=arrayLength(&metadata)){return INVALID;}let candidate=metadata[base+1u];
+    loop{if(low>=high){break;}let middle=low+(high-low)/2u;
+      let id=fineWorklist[7u+middle];let base=id*4u;
+      if(id>=params.table.z||base+2u>=arrayLength(&metadata)){return INVALID;}
+      let candidate=metadata[base+1u];
       if(candidate<key){low=middle+1u;}else{high=middle;}}
-    let base=low*4u;return select(INVALID,low,low<count&&base+2u<arrayLength(&metadata)
-      &&metadata[base]==low&&metadata[base+1u]==key&&metadata[base+2u]==params.table.w);
+    var id=INVALID;if(low<count){id=fineWorklist[7u+low];}let base=id*4u;
+    return select(INVALID,id,id<params.table.z&&base+2u<arrayLength(&metadata)
+      &&metadata[base]==id&&metadata[base+1u]==key&&metadata[base+2u]==params.table.w);
   }
   let directoryBase=7u+params.table.z;
   if(directoryBase+key>=arrayLength(&fineWorklist)){return INVALID;}

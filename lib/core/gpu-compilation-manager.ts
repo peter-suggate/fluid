@@ -217,8 +217,8 @@ export function defineGPUCompilationManifest<
  * Device-scoped, worker-owned compilation scheduler and cache.
  *
  * `acquire()` never invokes a compilation API before returning its Promise.
- * Jobs begin in a microtask and all pipeline creation uses the asynchronous
- * WebGPU entry points. Complete bundles are published atomically.
+ * Jobs begin in a microtask and pipeline creation uses asynchronous WebGPU
+ * entry points. Complete bundles are published atomically.
  */
 export class GPUCompilationManager implements GPUCompilationService {
   readonly #device: GPUDevice;

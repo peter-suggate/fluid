@@ -3,8 +3,8 @@
 import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
 import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import type {
-  SparseCM12PressureJournal,
-} from "../lib/methods/adaptive-mass/sparse-cm12-pressure-journal";
+  PressureJournal,
+} from "../lib/core/pressure-journal";
 
 /**
  * The captured pressure solve's convergence, beside the scrub that plays it.
@@ -81,7 +81,7 @@ export function PressureFilmStrip({
 function FilmStrip({
   journal, slot, onSelectSlot,
 }: {
-  journal: SparseCM12PressureJournal;
+  journal: PressureJournal;
   slot: number;
   onSelectSlot: (slot: number) => void;
 }) {

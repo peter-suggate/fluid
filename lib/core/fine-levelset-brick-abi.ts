@@ -19,7 +19,7 @@ export const FINE_LEVELSET_BYTES_PER_SAMPLE = 4;
 export const FINE_LEVELSET_METADATA_WORDS = 4;
 export const FINE_LEVELSET_WORKSET_HEADER_WORDS = 7;
 /** Renderer-readable worksets may omit the logical-domain direct table when
- * metadata is sorted by logical brick key. */
+ * their physical-page list is sorted by logical brick key. */
 export const FINE_LEVELSET_COMPACT_LOOKUP_FLAG = 0x8000_0000;
 
 /** Word offsets in the common workset header written by `exportGPUGeneration`
@@ -108,7 +108,7 @@ export interface FineLevelSetBrickPlan {
 
 /** Shared global-fine page lookup. Ordinary publishers use the O(1) direct
  * table following the worklist body. Compact publishers omit that domain-sized
- * table and binary-search their key-sorted metadata instead. Metadata always
+ * table and binary-search their key-sorted physical-page list instead. Metadata always
  * validates identity and generation before the physical page becomes visible. */
 export function makeFineLevelSetSortedWorklistLookupWGSL(
   params: string,
@@ -127,12 +127,16 @@ fn ${functionName}(key:u32)->u32 {
   if(key>=logicalCount){return INVALID;}
   if((${worklist}[3]&0x80000000u)!=0u){
     var low=0u;var high=count;
-    loop{if(low>=high){break;}let middle=low+(high-low)/2u;let base=middle*4u;
-      if(base+2u>=arrayLength(&${metadata})){return INVALID;}let candidate=${metadata}[base+1u];
+    loop{if(low>=high){break;}let middle=low+(high-low)/2u;
+      let physicalId=${worklist}[7u+middle];let base=physicalId*4u;
+      if(physicalId>=${params}.pageCapacity||base+2u>=arrayLength(&${metadata})){return INVALID;}
+      let candidate=${metadata}[base+1u];
       if(candidate<key){low=middle+1u;}else{high=middle;}}
-    let base=low*4u;
-    return select(INVALID,low,low<count&&base+2u<arrayLength(&${metadata})
-      &&${metadata}[base]==low&&${metadata}[base+1u]==key&&${metadata}[base+2u]==${params}.generation);
+    var physicalId=INVALID;if(low<count){physicalId=${worklist}[7u+low];}
+    let base=physicalId*4u;
+    return select(INVALID,physicalId,physicalId<${params}.pageCapacity
+      &&base+2u<arrayLength(&${metadata})&&${metadata}[base]==physicalId
+      &&${metadata}[base+1u]==key&&${metadata}[base+2u]==${params}.generation);
   }
   let directoryBase=7u+${params}.worklistCapacity;
   if(7u+count>arrayLength(&${worklist})||directoryBase+key>=arrayLength(&${worklist})){return INVALID;}

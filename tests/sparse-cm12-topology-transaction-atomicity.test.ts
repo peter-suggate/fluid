@@ -14,6 +14,10 @@ const vexWgsl = readFileSync(new URL(
   "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension.wgsl.ts",
   import.meta.url,
 ), "utf8");
+const pressureRepairWgsl = readFileSync(new URL(
+  "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair.wgsl.ts",
+  import.meta.url,
+), "utf8");
 
 const functionSource = (source: string, name: string, next: string): string => {
   const begin = source.indexOf(`fn ${name}`);
@@ -25,13 +29,24 @@ const functionSource = (source: string, name: string, next: string): string => {
 const count = (source: string, pattern: RegExp): number => [...source.matchAll(pattern)].length;
 
 test("activation and retirement stage lifecycle intent without mutating accepted authority", () => {
-  const activation = functionSource(wgsl, "activateSweptReceivers",
+  const activation = functionSource(wgsl, "stageDormantReceiverActivation",
+    "fn activateSweptReceivers");
+  const injectionActivation = functionSource(wgsl, "activateLiquidInjectionReceivers",
     "fn retireUnsupportedEmptyBricks");
   const retirement = functionSource(wgsl, "retireUnsupportedEmptyBricks",
     "const PRESENTATION_FRAME_PLAN_STAGE");
 
   assert.match(activation, /setCandidateBrickActiveAt\(output,true\)/,
     "activation must author candidate membership only");
+  assert.match(activation,
+    /select\(acceptedBrickResolution\(brick\),BRICK_FINE_RESOLUTION,\s*brickCandidatePlanningEnabled\(brick\)\)/,
+    "a packed swept receiver must enter transport at the fine receiver floor");
+  assert.match(activation,
+    /select\(requested,applySparseCM12RefinementRegionBounds\(brick,requested\),\s*brickCandidatePlanningEnabled\(brick\)\)/,
+    "an unpacked receiver must remain allocatable at its complete construction rung");
+  assert.match(injectionActivation, /injectionReachesBrick\(brick\)/,
+    "liquid injection must populate source tiles without consuming swept-frame requests");
+  assert.doesNotMatch(injectionActivation, /brickRequestedAsReceiver\(brick\)/);
   assert.match(retirement, /setCandidateBrickActiveAt\(output,false\)/,
     "retirement must author candidate membership only");
   for (const [label, source] of [["activation", activation],
@@ -45,6 +60,21 @@ test("activation and retirement stage lifecycle intent without mutating accepted
       /atomic(?:Add|Sub|Store)\(&activity\[(?:8u|9u|10u|11u|output\+10u|output\+34u)/,
       `${label} must not change accepted membership, lifecycle counters, or residue`);
   }
+});
+
+test("liquid injection opens and composes its tile-population journal", () => {
+  const begin = host.indexOf("Sparse CM12 resident liquid injection topology");
+  const end = host.indexOf("Sparse CM12 resident liquid injection\"", begin + 1);
+  assert.ok(begin >= 0 && end > begin, "injection source range must remain identifiable");
+  const injection = host.slice(begin, end);
+  const openPressureTopology = injection.indexOf(
+    'dispatchTopology("beginSparseCM12PressureTopologyRepair", 1)');
+  const plan = injection.indexOf('dispatchTopology("planBrickResolution", bricks)');
+  assert.ok(openPressureTopology >= 0 && plan > openPressureTopology,
+    "a first-frame injection must open its tile-population journal before planning receivers");
+  assert.match(pressureRepairWgsl,
+    /\(acceptedOld==oldState&&pendingNew==newState\)\|\|pendingNew==oldState/,
+    "an injection after a frame topology flip must fold its B-to-C tile changes into A-to-B");
 });
 
 test("IBO compiles scheduled membership rather than eagerly-mutated accepted membership", () => {

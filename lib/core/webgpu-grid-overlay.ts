@@ -259,8 +259,11 @@ fn sparseDensityAt(q:vec3i)->f32{
 fn sparseFinePage(key:u32)->u32{
   let count=min(sparseFineWorklist[1],arrayLength(&sparseFineMetadata)/4u);
   var low=0u;var high=count;loop{if(low>=high){break;}let middle=low+(high-low)/2u;
-    if(sparseFineMetadata[4u*middle+1u]<key){low=middle+1u;}else{high=middle;}}
-  return select(SPARSE_INVALID,low,low<count&&sparseFineMetadata[4u*low+1u]==key);
+    let page=sparseFineWorklist[7u+middle];
+    if(sparseFineMetadata[4u*page+1u]<key){low=middle+1u;}else{high=middle;}}
+  var page=SPARSE_INVALID;if(low<count){page=sparseFineWorklist[7u+low];}
+  return select(SPARSE_INVALID,page,page<arrayLength(&sparseFineMetadata)/4u
+    &&sparseFineMetadata[4u*page+1u]==key);
 }
 fn sparseFineSourceSpanLog(source:u32)->u32{
   let encodedPage=(sparseFineWorklist[3]>>21u)&31u;

@@ -37,207 +37,33 @@
  * `reducePipelinedIteration` in the resident WGSL for who writes each one.
  */
 
-export const SPARSE_CM12_PRESSURE_JOURNAL_VERSION = 1 as const;
+import {
+  PRESSURE_JOURNAL_HEADER as SPARSE_CM12_PRESSURE_JOURNAL_HEADER,
+  PRESSURE_JOURNAL_ITERATION_FLOATS as SPARSE_CM12_PRESSURE_JOURNAL_ITERATION_FLOATS,
+  PRESSURE_JOURNAL_RECORD as SPARSE_CM12_PRESSURE_JOURNAL_RECORD,
+  PRESSURE_JOURNAL_VERSION as SPARSE_CM12_PRESSURE_JOURNAL_VERSION,
+  type PressureJournal as SparseCM12PressureJournal,
+  type PressureJournalIteration as SparseCM12PressureJournalIteration,
+  type PressureJournalLayout as SparseCM12PressureJournalLayout,
+} from "../../core/pressure-journal";
 
-/** Floats of journal header, before the first iteration record. */
-export const SPARSE_CM12_PRESSURE_JOURNAL_HEADER_FLOATS = 8;
-
-/** Floats per encoded-iteration record. */
-export const SPARSE_CM12_PRESSURE_JOURNAL_ITERATION_FLOATS = 16;
-
-/**
- * Cell fields a snapshot carries, in the order the GPU writes them.
- *
- * `pressure` and `residual` are the two the picture is mostly made of; `z` and
- * `direction` are what make the *mechanism* legible, because the difference
- * between the preconditioned residual and the raw one is precisely what the
- * brick-aggregate hierarchy is doing.
- */
-export const SPARSE_CM12_PRESSURE_JOURNAL_FIELDS = Object.freeze([
-  "pressure", "residual", "preconditioned", "direction",
-] as const);
-
-export type SparseCM12PressureJournalField =
-  (typeof SPARSE_CM12_PRESSURE_JOURNAL_FIELDS)[number];
-
-export const SPARSE_CM12_PRESSURE_JOURNAL_FIELD_COUNT =
-  SPARSE_CM12_PRESSURE_JOURNAL_FIELDS.length;
-
-/**
- * Header word meanings, mirrored in the WGSL.
- *
- * The two cursors are written by the GPU rather than the host because a
- * dispatch cannot be told which iteration it is: the uniform is written once
- * per frame and WebGPU has no push constant. A cursor the journal kernel
- * increments is therefore the only thing that can index the record, and since
- * that kernel is dispatched exactly once per encoded iteration, the cursor
- * *is* the encoded iteration index.
- */
-export const SPARSE_CM12_PRESSURE_JOURNAL_HEADER = Object.freeze({
-  iterationCursor: 0,
-  snapshotCursor: 1,
-  armed: 2,
-  version: 3,
-} as const);
-
-/** Iteration-record word meanings, mirrored in the WGSL. */
-export const SPARSE_CM12_PRESSURE_JOURNAL_RECORD = Object.freeze({
-  gateOpen: 0,
-  gamma: 1,
-  alpha: 2,
-  beta: 3,
-  residualSquared: 4,
-  rhsSquared: 5,
-  executed: 6,
-  curvatureBreakdown: 7,
-  guardedTrueSquared: 8,
-  guardedTrueMaximum: 9,
-  curvatureCollapses: 10,
-  firstCrossing: 11,
-  initialTrueSquared: 12,
-  initialTrueMaximum: 13,
-  recursiveToTrueRatio: 14,
-  snapshot: 15,
-} as const);
-
-export interface SparseCM12PressureJournalCapacity {
-  /**
-   * Encoded iterations the journal can record. Sized from the solve's own
-   * iteration ceiling plus one, because record 0 is the seed state before any
-   * iteration has run.
-   */
-  readonly iterationCapacity: number;
-  /** Whole-field snapshots the journal can hold. */
-  readonly snapshotCapacity: number;
-  /** Floats between one snapshot field and the next: the template cell count. */
-  readonly cellStride: number;
-}
-
-export interface SparseCM12PressureJournalLayout
-  extends SparseCM12PressureJournalCapacity {
-  /** Float offset of the first iteration record, relative to the journal base. */
-  readonly iterationsOffset: number;
-  /** Float offset of the first snapshot, relative to the journal base. */
-  readonly snapshotsOffset: number;
-  /** Total floats the journal region occupies. Zero when it is not armed. */
-  readonly floatCount: number;
-}
-
-const EMPTY_LAYOUT: SparseCM12PressureJournalLayout = Object.freeze({
-  iterationCapacity: 0, snapshotCapacity: 0, cellStride: 0,
-  iterationsOffset: 0, snapshotsOffset: 0, floatCount: 0,
-});
-
-/**
- * Reserve the journal region.
- *
- * A capacity of zero in any dimension collapses the whole region to nothing,
- * so "no journal" is the same code path as "journal", not a branch around it.
- */
-export function sparseCM12PressureJournalLayout(
-  capacity: Partial<SparseCM12PressureJournalCapacity>,
-): SparseCM12PressureJournalLayout {
-  const iterationCapacity = Math.max(0, Math.floor(capacity.iterationCapacity ?? 0));
-  const snapshotCapacity = Math.max(0, Math.floor(capacity.snapshotCapacity ?? 0));
-  const cellStride = Math.max(0, Math.floor(capacity.cellStride ?? 0));
-  if (iterationCapacity === 0 || cellStride === 0) return EMPTY_LAYOUT;
-  const iterationsOffset = SPARSE_CM12_PRESSURE_JOURNAL_HEADER_FLOATS;
-  const snapshotsOffset = iterationsOffset
-    + iterationCapacity * SPARSE_CM12_PRESSURE_JOURNAL_ITERATION_FLOATS;
-  const snapshotFloats = snapshotCapacity * SPARSE_CM12_PRESSURE_JOURNAL_FIELD_COUNT
-    * cellStride;
-  return {
-    iterationCapacity, snapshotCapacity, cellStride,
-    iterationsOffset, snapshotsOffset,
-    floatCount: snapshotsOffset + snapshotFloats,
-  };
-}
-
-/** Float offset of one snapshot field, relative to the journal base. */
-export function sparseCM12PressureJournalSnapshotOffset(
-  layout: SparseCM12PressureJournalLayout,
-  snapshot: number,
-  field: number,
-): number {
-  return layout.snapshotsOffset
-    + (snapshot * SPARSE_CM12_PRESSURE_JOURNAL_FIELD_COUNT + field) * layout.cellStride;
-}
-
-/**
- * Which encoded iterations get a whole-field snapshot.
- *
- * Powers of two, plus the seed and the final iteration, deduplicated and
- * trimmed to capacity. The seed matters because the first correction is the
- * largest one in the whole solve, and the final one matters because it is the
- * only iteration whose field the projection actually consumed.
- *
- * When capacity is short the *tail* is kept rather than the head: the early
- * doublings are visually near-identical, while the last few carry whatever
- * residual structure survived, which is the part worth looking at.
- */
-export function sparseCM12PressureJournalSchedule(
-  iterations: number,
-  snapshotCapacity: number,
-): readonly number[] {
-  if (iterations <= 0 || snapshotCapacity <= 0) return [];
-  const wanted = new Set<number>([0, iterations]);
-  for (let step = 1; step < iterations; step *= 2) wanted.add(step);
-  const ordered = [...wanted].filter((value) => value <= iterations)
-    .sort((a, b) => a - b);
-  if (ordered.length <= snapshotCapacity) return Object.freeze(ordered);
-  // Always keep the seed; drop from the dense early doublings inward.
-  const kept = [ordered[0]!, ...ordered.slice(ordered.length - (snapshotCapacity - 1))];
-  return Object.freeze(kept);
-}
-
-export interface SparseCM12PressureJournalIteration {
-  /** Encoded iteration index. Record 0 is the seed, before any iteration ran. */
-  readonly iteration: number;
-  /**
-   * Whether this iteration did work.
-   *
-   * Derived from the executed counter rather than read from the gate: the
-   * cadence check that closes the gate runs *inside* the iteration that earned
-   * the closure, so the gate as sampled at journal time already reads shut for
-   * an iteration that computed a full update. The executed counter only
-   * advances on a real update, so its delta is exact.
-   */
-  readonly active: boolean;
-  /** The gate as sampled when the record was written. See `active`. */
-  readonly gateOpen: boolean;
-  /** r·z, the Krylov curvature numerator. */
-  readonly gamma: number;
-  readonly alpha: number;
-  readonly beta: number;
-  /** Recursive ‖r‖ relative to ‖b‖. Not the convergence authority. */
-  readonly recursiveRelativeL2: number;
-  /**
-   * ‖b − Ap‖ relative to ‖b‖ at the last cadence check at or before this
-   * iteration, or undefined before the first check. This *is* the authority;
-   * the recursive value beside it is what drifts.
-   */
-  readonly guardedRelativeL2: number | undefined;
-  readonly executed: number;
-  readonly curvatureBreakdown: boolean;
-  readonly curvatureCollapses: number;
-  /** Index into the snapshot list, when this iteration carries one. */
-  readonly snapshot: number | undefined;
-}
-
-export interface SparseCM12PressureJournal {
-  readonly version: typeof SPARSE_CM12_PRESSURE_JOURNAL_VERSION;
-  readonly armed: boolean;
-  /** Encoded iteration ceiling this frame ran under. */
-  readonly encodedIterations: number;
-  /** Iterations that actually did work before the gate closed. */
-  readonly executedIterations: number;
-  /** First encoded iteration whose guarded residual crossed tolerance. */
-  readonly firstCrossingIteration: number | undefined;
-  readonly initialRelativeL2: number;
-  readonly records: readonly SparseCM12PressureJournalIteration[];
-  /** Encoded iteration index of each snapshot, in snapshot order. */
-  readonly snapshotIterations: readonly number[];
-}
+export {
+  PRESSURE_JOURNAL_FIELD_COUNT as SPARSE_CM12_PRESSURE_JOURNAL_FIELD_COUNT,
+  PRESSURE_JOURNAL_FIELDS as SPARSE_CM12_PRESSURE_JOURNAL_FIELDS,
+  PRESSURE_JOURNAL_HEADER as SPARSE_CM12_PRESSURE_JOURNAL_HEADER,
+  PRESSURE_JOURNAL_HEADER_FLOATS as SPARSE_CM12_PRESSURE_JOURNAL_HEADER_FLOATS,
+  PRESSURE_JOURNAL_ITERATION_FLOATS as SPARSE_CM12_PRESSURE_JOURNAL_ITERATION_FLOATS,
+  PRESSURE_JOURNAL_RECORD as SPARSE_CM12_PRESSURE_JOURNAL_RECORD,
+  PRESSURE_JOURNAL_VERSION as SPARSE_CM12_PRESSURE_JOURNAL_VERSION,
+  pressureJournalLayout as sparseCM12PressureJournalLayout,
+  pressureJournalSchedule as sparseCM12PressureJournalSchedule,
+  pressureJournalSnapshotOffset as sparseCM12PressureJournalSnapshotOffset,
+  type PressureJournal as SparseCM12PressureJournal,
+  type PressureJournalCapacity as SparseCM12PressureJournalCapacity,
+  type PressureJournalField as SparseCM12PressureJournalField,
+  type PressureJournalIteration as SparseCM12PressureJournalIteration,
+  type PressureJournalLayout as SparseCM12PressureJournalLayout,
+} from "../../core/pressure-journal";
 
 const relative = (squared: number, rhsSquared: number): number =>
   rhsSquared > 0 ? Math.sqrt(Math.max(0, squared) / rhsSquared) : 0;

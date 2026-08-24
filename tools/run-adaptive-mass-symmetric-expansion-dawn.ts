@@ -111,7 +111,9 @@ interface Checkpoint {
   readonly adaptiveActivityQuietBrickCount?: number;
   readonly adaptiveResidentBrickCount: number;
   readonly adaptiveActiveBrickCount: number;
+  readonly adaptiveActiveHorizontalCornerBrickCount: number;
   readonly adaptiveNewlyActivatedBrickCount: number;
+  readonly horizontalCornerMass_cells: number;
   readonly adaptiveTopologyPreparedBrickCount?: number;
   readonly adaptiveTopologyCommittedBrickCount?: number;
   readonly adaptiveTopologyDeferredBrickCount?: number;
@@ -631,8 +633,8 @@ try {
       CM12_PAPER_DT_S}; received ${requestedDt_s}`);
   }
   const dt_s = CM12_PAPER_DT_S;
-  const brickFineResolution = Number(argument("brick-fine") ?? 16);
-  const presentationPageResolution = Number(argument("presentation-page") ?? 16);
+  const brickFineResolution = Number(argument("brick-fine") ?? 8);
+  const presentationPageResolution = Number(argument("presentation-page") ?? 8);
   const massRelativeErrorLimit = brickFineResolution === 8
     ? Math.max(MASS_RELATIVE_ERROR_LIMIT, 3e-3) : MASS_RELATIVE_ERROR_LIMIT;
   const resolvedPressureRelativeResidualLimit = accuracyMode === "production"
@@ -678,6 +680,7 @@ try {
       } as const;
     solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
       device, scene, "balanced", undefined, solverOptions, () => {});
+    await solver.waitForSimulationReady();
     wallTiming.solverConstruction_ms = performance.now() - constructionStarted_ms;
     const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
     expect(failures, dimensions[0] === horizontalGrid
@@ -769,6 +772,23 @@ try {
       if (topology) expect(failures, topology.invalidOwnershipCount === 0,
         `step ${step}: ${topology.invalidOwnershipCount} ownership keys do not contain their published cells`);
       const mass_cells = summarize(density).sum;
+      const brickDimensions = dimensions.map((value) =>
+        value / brickFineResolution) as [number, number, number];
+      const horizontalCorner = (coordinate: readonly number[]) =>
+        (coordinate[0] === 0 || coordinate[0] === brickDimensions[0] - 1)
+        && (coordinate[2] === 0 || coordinate[2] === brickDimensions[2] - 1);
+      let horizontalCornerMass_cells = 0;
+      for (let z = 0; z < dimensions[2]; z += 1)
+        for (let y = 0; y < dimensions[1]; y += 1)
+          for (let x = 0; x < dimensions[0]; x += 1) {
+            if (!horizontalCorner([
+              Math.floor(x / brickFineResolution),
+              Math.floor(y / brickFineResolution),
+              Math.floor(z / brickFineResolution),
+            ])) continue;
+            horizontalCornerMass_cells += density[
+              x + dimensions[0] * (y + dimensions[1] * z)]!;
+          }
       let densityL1Change_cells = 0;
       if (initialDensity) for (let cell = 0; cell < density.length; cell += 1) {
         densityL1Change_cells += Math.abs(density[cell] - initialDensity[cell]);
@@ -857,8 +877,11 @@ try {
         adaptiveActivityQuietBrickCount: stats.adaptiveActivityQuietBrickCount,
         adaptiveResidentBrickCount: activity.bricks.length,
         adaptiveActiveBrickCount: activity.bricks.filter((brick) => brick.active).length,
+        adaptiveActiveHorizontalCornerBrickCount: activity.bricks.filter((brick) =>
+          brick.active && horizontalCorner(brick.coordinate)).length,
         adaptiveNewlyActivatedBrickCount: step > 0 ? activity.bricks.filter((brick) =>
           brick.activatedStep === step).length : 0,
+        horizontalCornerMass_cells,
         adaptiveTopologyPreparedBrickCount:
           stats.adaptiveTopologyPreparedBrickCount,
         adaptiveTopologyCommittedBrickCount:
@@ -938,6 +961,10 @@ try {
       debug(`step ${step} density=[${checkpoint.density.minimum},${checkpoint.density.maximum}]`);
       wallTiming.stepCapture_ms.push(performance.now() - stepStarted_ms);
       checkpoints.push(checkpoint);
+      if (step === 1) expect(failures,
+        checkpoint.adaptiveActiveHorizontalCornerBrickCount === 8,
+        `step 1: only ${checkpoint.adaptiveActiveHorizontalCornerBrickCount}/8 `
+          + "horizontal corner tiles were allocated");
       expect(failures, Math.abs(checkpoint.relativeMassDrift) <= massRelativeErrorLimit,
         `step ${step}: mass drift ${checkpoint.relativeMassDrift} exceeds ${massRelativeErrorLimit}`);
       expect(failures, checkpoint.density.nonFiniteCount === 0
@@ -1046,6 +1073,9 @@ try {
     expect(failures,
       finalCheckpoint.normalizedL1DensityChange >= MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE,
       `final normalized L1 density change ${finalCheckpoint.normalizedL1DensityChange} is below ${MINIMUM_FINAL_NORMALIZED_L1_DENSITY_CHANGE}; the liquid did not visibly evolve`);
+    expect(failures, finalCheckpoint.horizontalCornerMass_cells > 1e-3,
+      `final horizontal-corner mass ${finalCheckpoint.horizontalCornerMass_cells} `
+        + "shows that liquid never entered the allocated corner tiles");
     const maximumMixedSeamFaceCount = Math.max(...checkpoints.map(
       (checkpoint) => checkpoint.adaptiveMixedSeamFaceCount ?? 0));
     const maximumPromotedBrickCount = Math.max(...checkpoints.map(

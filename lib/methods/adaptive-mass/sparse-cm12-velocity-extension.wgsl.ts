@@ -12,6 +12,8 @@ export interface SparseCM12VelocityExtensionWGSLOptions {
   readonly topologyGenerationExpression?: string;
   readonly sourceFrameGenerationExpression?: string;
   readonly effectiveVelocityHookPrefix?: string;
+  /** Bake one recurrence depth into a bounded pipeline slice when requested. */
+  readonly fixedRecurrenceDepth?: number;
 }
 
 const identifier = (value: string, label: string): string => {
@@ -40,6 +42,19 @@ export function createSparseCM12VelocityExtensionWGSL(
     : undefined;
   const publish = effectiveHook
     ? `${effectiveHook}PublishVexAcceptedEffectiveVelocity(cell,value);` : "";
+  const fixedRecurrenceDepth = options.fixedRecurrenceDepth;
+  if (fixedRecurrenceDepth !== undefined
+    && (!Number.isInteger(fixedRecurrenceDepth) || fixedRecurrenceDepth < 1
+      || fixedRecurrenceDepth > SPARSE_CM12_VELOCITY_EXTENSION_DEPTH)) {
+    throw new RangeError(`fixedRecurrenceDepth must be in [1, ${SPARSE_CM12_VELOCITY_EXTENSION_DEPTH}]`);
+  }
+  const recurrenceDepthDeclaration = fixedRecurrenceDepth === undefined
+    ? /* wgsl */ `
+struct CM12ExtensionDispatch{depth:u32}
+@group(0)@binding(5)var<uniform>cm12ExtensionDispatch:CM12ExtensionDispatch;
+fn cm12ExtensionDepth()->u32{return clamp(cm12ExtensionDispatch.depth,1u,
+  ${SPARSE_CM12_VELOCITY_EXTENSION_DEPTH}u);}`
+    : /* wgsl */ `fn cm12ExtensionDepth()->u32{return ${fixedRecurrenceDepth}u;}`;
   const finalValidityBaseWords = (SPARSE_CM12_VELOCITY_EXTENSION_DEPTH & 1) === 0
     ? layout.validityABaseWords : layout.validityBBaseWords;
   const h = (word: number) => `${layout.headerBaseWords + word}u`;
@@ -53,7 +68,7 @@ const cm12ExtensionValidityA:u32=${layout.validityABaseWords}u;
 const cm12ExtensionValidityB:u32=${layout.validityBBaseWords}u;
 const cm12ExtensionAcceptedDepth:u32=${layout.acceptedDepthBaseWords}u;
 const cm12ExtensionDispatchWidth:u32=${SPARSE_CM12_VELOCITY_EXTENSION_DISPATCH_WIDTH}u;
-override EXTENSION_RECURRENCE_DEPTH:u32=1u;
+${recurrenceDepthDeclaration}
 
 var<workgroup> cm12ExtensionBallotLow:atomic<u32>;
 var<workgroup> cm12ExtensionBallotHigh:atomic<u32>;
@@ -84,7 +99,19 @@ fn cm12ExtensionExpectedMask(counts:vec3u)->vec2u{
   }}
   return result;
 }
-fn cm12ExtensionBeginPacket(packet:u32,lane:u32,needsLeaf:bool)->u32{
+fn cm12ExtensionBeginInitialPacket(packet:u32,lane:u32)->u32{
+  if(lane==0u){
+    let item=cm12TeiPacket(packet,acceptedTopologySlot());
+    cm12ExtensionPacketFirst=item.first;cm12ExtensionPacketCounts=item.counts;
+    cm12ExtensionPacketStrides=vec2u(item.strideY,item.strideZ);
+    if(item.first!=cm12ExtensionInvalid){
+      atomicStore(&cm12ExtensionBallotLow,0u);
+      atomicStore(&cm12ExtensionBallotHigh,0u);
+    }
+  }
+  return workgroupUniformLoad(&cm12ExtensionPacketFirst);
+}
+fn cm12ExtensionBeginPacket(packet:u32,lane:u32)->u32{
   if(lane==0u){
     let slot=acceptedTopologySlot();let item=cm12TeiPacket(packet,slot);
     cm12ExtensionPacketFirst=item.first;cm12ExtensionPacketCounts=item.counts;
@@ -94,9 +121,9 @@ fn cm12ExtensionBeginPacket(packet:u32,lane:u32,needsLeaf:bool)->u32{
       atomicStore(&cm12ExtensionBallotLow,0u);
       atomicStore(&cm12ExtensionBallotHigh,0u);
     }
-    if(needsLeaf&&item.first!=cm12ExtensionInvalid){
+    if(item.first!=cm12ExtensionInvalid){
       let inputMask=select(cm12ExtensionValidityB,cm12ExtensionValidityA,
-        (EXTENSION_RECURRENCE_DEPTH&1u)==1u);
+        (cm12ExtensionDepth()&1u)==1u);
       if(packet<cm12ExtensionPacketCapacity){
         cm12ExtensionInputMaskLow=cm12ExtensionLoad(inputMask+2u*packet);
         cm12ExtensionInputMaskHigh=cm12ExtensionLoad(inputMask+2u*packet+1u);
@@ -161,17 +188,33 @@ fn cm12ExtendedPacketLaneSelected(packet:u32,lane:u32)->bool{
   let word=cm12ExtensionLoad(${finalValidityBaseWords}u+2u*packet+(lane>>5u));
   return ((word>>(lane&31u))&1u)!=0u;
 }
+fn cm12ExtendedCellSelected(cell:u32)->bool{
+  return cell<cm12ExtensionCapacity
+    &&cm12ExtensionLoad(cm12ExtensionAcceptedDepth+cell)!=cm12ExtensionInvalid;
+}
 
 @compute @workgroup_size(64)
 fn initializeVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   let ordinal=wid.x+cm12ExtensionDispatchWidth*wid.y;
   let packet=cm12ExtensionStablePacket(ordinal);if(packet==cm12ExtensionInvalid){return;}
-  let packetFirst=cm12ExtensionBeginPacket(packet,lane,false);
-  if(packetFirst==cm12ExtensionInvalid){
-    cm12ExtensionClearPacketMask(cm12ExtensionValidityA,packet,lane);return;}
-  let cell=cm12ExtensionPacketCell(lane);
-  let selected=cell!=cm12ExtensionInvalid&&cell<cm12ExtensionCapacity&&cellActive(cell);
+  // Initialization is embarrassingly packet-local. Reading the four-word TEI
+  // descriptor per lane costs a few startup loads, but removes the shared
+  // Jacobi topology and its workgroup state from this pipeline altogether.
+  let item=cm12TeiPacket(packet,acceptedTopologySlot());
+  if(lane==0u){
+    cm12ExtensionStore(cm12ExtensionValidityA+2u*packet,0u);
+    cm12ExtensionStore(cm12ExtensionValidityA+2u*packet+1u,0u);
+  }
+  storageBarrier();workgroupBarrier();
+  if(item.first==cm12ExtensionInvalid){return;}
+  let q=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+  let cell=select(item.first+q.x+item.strideY*q.y+item.strideZ*q.z,
+    cm12ExtensionInvalid,any(q>=item.counts));
+  // TEI packets are emitted only for accepted active leaves; repeating the
+  // resident topology predicate here imported the complete cell-ownership
+  // graph into both otherwise packet-local programs.
+  let selected=cell!=cm12ExtensionInvalid&&cell<cm12ExtensionCapacity;
   let wet=selected&&${state}[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
   if(selected){let input=sourceCellVelocity()+4u*cell;
     let value=vec4f(select(0.0,${state}[input],wet),
@@ -179,7 +222,8 @@ fn initializeVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
       select(0.0,1.0,wet));${publish}
     cm12ExtensionStore(cm12ExtensionAcceptedDepth+cell,
       select(cm12ExtensionInvalid,0u,wet));}
-  cm12ExtensionPublishBallot(cm12ExtensionValidityA,packet,lane,wet);
+  if(wet){_=atomicOr(&${arena}[cm12ExtensionValidityA+2u*packet+(lane>>5u)],
+    1u<<(lane&31u));}
 }
 
 @compute @workgroup_size(64)
@@ -187,20 +231,20 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   let ordinal=wid.x+cm12ExtensionDispatchWidth*wid.y;
   let packet=cm12ExtensionStablePacket(ordinal);if(packet==cm12ExtensionInvalid){return;}
-  let packetFirst=cm12ExtensionBeginPacket(packet,lane,true);
+  let packetFirst=cm12ExtensionBeginPacket(packet,lane);
   if(packetFirst==cm12ExtensionInvalid){
     cm12ExtensionClearPacketMask(cm12ExtensionOutputMask(
-      EXTENSION_RECURRENCE_DEPTH),packet,lane);
+      cm12ExtensionDepth()),packet,lane);
     cm12ExtensionPublishFrameReceipt(packet,lane);return;}
   let packetComplete=workgroupUniformLoad(&cm12ExtensionPacketComplete);
   if(packetComplete!=0u){
-    if(lane==0u){let output=cm12ExtensionOutputMask(EXTENSION_RECURRENCE_DEPTH);
+    if(lane==0u){let output=cm12ExtensionOutputMask(cm12ExtensionDepth());
       cm12ExtensionStore(output+2u*packet,cm12ExtensionInputMaskLow);
       cm12ExtensionStore(output+2u*packet+1u,cm12ExtensionInputMaskHigh);}
     cm12ExtensionPublishFrameReceipt(packet,lane);return;
   }
   let cell=cm12ExtensionPacketCell(lane);
-  let selected=cell!=cm12ExtensionInvalid&&cell<cm12ExtensionCapacity&&cellActive(cell);
+  let selected=cell!=cm12ExtensionInvalid&&cell<cm12ExtensionCapacity;
   var valid=false;
   if(selected){
     valid=cm12ExtensionPacketInputValid(lane);
@@ -217,7 +261,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
         for(var ordinal=0u;ordinal<6u;ordinal+=1u){
           let neighbor=neighbors[ordinal];
           if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
-            >=EXTENSION_RECURRENCE_DEPTH){continue;}
+            >=cm12ExtensionDepth()){continue;}
           velocity+=w*cm12EffectiveTransportVelocity(neighbor).xyz;weight+=w;
         }
       }else{
@@ -229,19 +273,18 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
           if(termCount==2u){
             let ordinal=incidence.y^1u;
             let neighbor=cm12HotRowTermCell(row,ordinal);
-            if(neighbor==cm12ExtensionInvalid||!cellActive(neighbor)){continue;}
+            if(neighbor==cm12ExtensionInvalid){continue;}
             if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
-              >=EXTENSION_RECURRENCE_DEPTH){continue;}
+              >=cm12ExtensionDepth()){continue;}
             let w=abs(cm12HotRowTermCoefficient(row,ordinal));
             velocity+=w*cm12EffectiveTransportVelocity(neighbor).xyz;
             weight+=w;continue;
           }
           for(var ordinal=0u;ordinal<termCount;ordinal+=1u){
             let neighbor=cm12HotRowTermCell(row,ordinal);
-            if(neighbor==cell||neighbor==cm12ExtensionInvalid
-              ||!cellActive(neighbor)){continue;}
+            if(neighbor==cell||neighbor==cm12ExtensionInvalid){continue;}
             if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
-              >=EXTENSION_RECURRENCE_DEPTH){continue;}
+              >=cm12ExtensionDepth()){continue;}
             let w=abs(cm12HotRowTermCoefficient(row,ordinal));
             velocity+=w*cm12EffectiveTransportVelocity(neighbor).xyz;weight+=w;
           }
@@ -250,10 +293,10 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
       valid=weight>0.0;if(valid){velocity/=weight;
         let value=vec4f(velocity,1.0);${publish}
         cm12ExtensionStore(cm12ExtensionAcceptedDepth+cell,
-          EXTENSION_RECURRENCE_DEPTH);}}
+          cm12ExtensionDepth());}}
   }
   cm12ExtensionPublishBallot(cm12ExtensionOutputMask(
-    EXTENSION_RECURRENCE_DEPTH),packet,lane,valid);
+    cm12ExtensionDepth()),packet,lane,valid);
   cm12ExtensionPublishFrameReceipt(packet,lane);
 }
 `;

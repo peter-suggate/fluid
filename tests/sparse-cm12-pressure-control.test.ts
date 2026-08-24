@@ -11,6 +11,7 @@ import {
   SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
   SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE,
   sparseCM12PressureIterations,
+  sparseCM12PressureIterationsFromReceipt,
   sparseCM12PressureRelativeTolerance,
 } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
@@ -32,6 +33,20 @@ test("Sparse CM12 accepts experimental residuals beyond 0.1", () => {
   assert.equal(sparseCM12PressureRelativeTolerance(0), 0);
   assert.equal(sparseCM12PressureRelativeTolerance(0.5), 0.5);
   assert.equal(sparseCM12PressureRelativeTolerance(2), 1);
+});
+
+test("the prior frame seeds a conservative next encoded ceiling", () => {
+  assert.equal(sparseCM12PressureIterationsFromReceipt(64, 1e-3), 64);
+  assert.equal(sparseCM12PressureIterationsFromReceipt(64, 0,
+    { executed: 16, encoded: 64 }), 64);
+  assert.equal(sparseCM12PressureIterationsFromReceipt(64, 1e-3,
+    { executed: 16, encoded: 64 }), 24);
+  assert.equal(sparseCM12PressureIterationsFromReceipt(64, 1e-3,
+    { executed: 24, encoded: 32 }), 32);
+  assert.equal(sparseCM12PressureIterationsFromReceipt(64, 1e-3,
+    { executed: 32, encoded: 32 }), 64);
+  assert.equal(sparseCM12PressureIterationsFromReceipt(48, 1e-3,
+    { executed: 32, encoded: 32 }), 48);
 });
 
 test("the SIM frame pressure stage shows executed and gated iterations", () => {

@@ -8,9 +8,8 @@ import type { Vec3 } from "./model";
 import type { GPUSecondaryParticleSource } from "./webgpu-secondary-particles";
 import type { GPUFluidFaceVelocitySource } from "./webgpu-face-velocity-overlay";
 import type { GPUPressureJournalSource } from "./webgpu-pressure-journal-overlay";
+import type { PressureJournal, PressureJournalDescriptor } from "./pressure-journal";
 import type { AnyStageLens, StageLensSource } from "./stage-lens";
-import type { SparseCM12PressureJournal } from
-  "../methods/adaptive-mass/sparse-cm12-pressure-journal";
 import type { GPUFluidTracerSource } from "./webgpu-tracer-overlay";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import type {
@@ -26,6 +25,7 @@ import type { ConfigurationReadout, DiagnosticRow } from "./method-diagnostics";
 import type { WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
 import type { ViewportFailureIndicator } from "./viewport-failure-diagnostics";
 import type { MethodHarnessPlugin } from "./method-harness-contract";
+import type { SparseWorld, SparseWorldDevice, SparseWorldUI } from "../sparse-world";
 
 /**
  * Method plugin contract.
@@ -209,6 +209,27 @@ export interface InjectedLiquidBall {
 /** Minimal interface the renderer needs from a GPU solver. */
 export interface GPUSolverInstance {
   readonly info: GPUEulerianInfo;
+  /**
+   * Semantic sparse-world authority, when this solver is backed by one.
+   *
+   * Consumers take presentation and lifecycle state from this boundary. The
+   * legacy fields below remain only so other methods can migrate separately.
+   */
+  readonly sparseWorld?: SparseWorld;
+  /**
+   * Device-wide sparse program library used by `sparseWorld`.
+   *
+   * Sparse consumers gate work on this semantic readiness surface. They must
+   * not inspect a method adapter's compilation queues or pipeline names.
+   */
+  readonly sparseWorldDevice?: SparseWorldDevice;
+  /** Sparse-specific UI capabilities grouped behind one stable facade. */
+  readonly sparseWorldUI?: SparseWorldUI;
+  /**
+   * False while t=0 can be presented but the larger physics pipeline family
+   * is still compiling. Absent means ready for methods with an atomic bundle.
+   */
+  readonly simulationReady?: boolean;
   readonly volumeTexture: GPUTexture;
   /** Field the renderer contours; a smooth level set when the solver keeps one separate from volumeTexture. */
   readonly surfaceFieldTexture?: GPUTexture;
@@ -258,7 +279,7 @@ export interface GPUSolverInstance {
    * been captured. The whole-field snapshots stay on the device — only these
    * few kilobytes of scalars ever cross.
    */
-  readPressureJournal?(): Promise<SparseCM12PressureJournal | undefined>;
+  readPressureJournal?(): Promise<PressureJournal | undefined>;
   /**
    * Per-stage lenses and the buffers they draw. Absent on methods with none.
    *
@@ -412,6 +433,8 @@ export interface SimulationMethod {
    * device exists, and so a method with none simply has none.
    */
   stageLenses?: readonly AnyStageLens[];
+  /** Pressure-film scrub stops declared without importing method numerics in UI. */
+  pressureJournal?: PressureJournalDescriptor<MethodParamValues>;
   /**
    * Method-specific parameters. Common parameters (resolution, time step,
    * pressure solve effort) live in the scene numerics and are declared once
@@ -452,6 +475,8 @@ export interface SimulationMethod {
   capabilities?: {
     /** Publishes a volume the renderer can ray-march, not just a slice field. */
     volumeRendering?: boolean;
+    /** Owns simulation and presentation behind the semantic sparse-world API. */
+    sparseWorld?: boolean;
     /**
      * The initial sparse authority and adaptive raster source are published
      * separately and must cross a presentation fence before transport unlocks.

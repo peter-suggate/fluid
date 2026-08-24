@@ -919,9 +919,19 @@ if (!terrainField) {
   // a narrowed lane is 4 or 2 bytes a voxel rather than 4 per channel, so the
   // size comes from the resolved lane and the decode from the same module the
   // shaders take their packing from.
-  const sceneGeometryFormat = octreeLiveSceneSceneGeometryFormat();
+  // This lane usually opens solverless scenes, but it is also the renderer
+  // reproduction harness for full-scene presets. A scene with authored fluid
+  // forces the live world back to the full payload and f32 scene geometry;
+  // decoding that publication as the dry narrowed layout reads distance bits as
+  // fractions and reports a fictitious hole in otherwise solid terrain.
+  const scenePayloadProfile = scene.systems?.fluid === false
+    ? octreeLiveSceneDryPayloadProfile()
+    : "full";
+  const sceneGeometryFormat = scenePayloadProfile === "dry"
+    ? octreeLiveSceneSceneGeometryFormat()
+    : "f32x2";
   const sceneLanes = resolveSparseBrickPayloadLayout(
-    octreeLiveSceneDryPayloadProfile(), capacities.voxels, sceneGeometryFormat);
+    scenePayloadProfile, capacities.voxels, sceneGeometryFormat);
   const sceneGeometryLane = sceneLanes.lanes.sceneGeometry;
   if (!sceneGeometryLane?.present) throw new Error("Resolved payload layout has no sceneGeometry lane to read the ground from");
   if (!sceneGeometryLane.channels.includes("solidFraction")) {
@@ -929,8 +939,14 @@ if (!terrainField) {
   }
   const sceneGeometry = await readGpuBuffer(source.structural.sceneGeometry.buffer,
     source.structural.sceneGeometry.offset ?? 0, sceneGeometryLane.bytes);
-  const solidFractionAt = (voxel: number): number =>
-    sparseBrickSceneFractionAt(sceneGeometry, sceneGeometryFormat, voxel);
+  const fullSceneGeometry = scenePayloadProfile === "full"
+    ? new Float32Array(sceneGeometry.buffer, sceneGeometry.byteOffset, sceneGeometry.length)
+    : undefined;
+  const solidFractionAt = (voxel: number): number => fullSceneGeometry
+    // Full scene geometry preserves the four-channel solver order:
+    // fluid distance, solid distance, solid fraction, pressure.
+    ? fullSceneGeometry[voxel * 4 + 2]
+    : sparseBrickSceneFractionAt(sceneGeometry, sceneGeometryFormat, voxel);
 
   const nodeWords = SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes / 4;
   const leafWords = SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes / 4;

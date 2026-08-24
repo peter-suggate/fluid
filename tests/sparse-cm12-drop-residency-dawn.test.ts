@@ -28,8 +28,8 @@ const dawnTest = dawnModule ? test : test.skip;
  * that bit, so a drop there used to dispatch over the drop's cells, find their
  * bricks inactive, and return having written nothing — the gesture reported
  * success and the water simply did not exist. Injection now enters residency
- * through `activateSweptReceivers`, the same path a front sweeping into a
- * dormant receiver already takes.
+ * through the same complete-tile activation path a front uses, while retaining
+ * its own source-only request predicate.
  */
 dawnTest("Dawn makes a dormant apron brick resident for a dropped ball",
   { timeout: 240_000 }, async () => {
@@ -84,6 +84,7 @@ dawnTest("Dawn makes a dormant apron brick resident for a dropped ball",
         () => {},
       );
       try {
+        await solver.waitForSimulationReady();
         const before = await solver.readGPUActivityPolicy();
         const dormant = before.bricks.filter((brick) =>
           !activeAtConstruction.has(brick.key));
@@ -184,6 +185,7 @@ dawnTest("Dawn makes a dormant apron brick resident for a dropped ball",
         () => {},
       );
       try {
+        await activeSolver.waitForSimulationReady();
         for (let step = 1; step <= 3; step += 1) {
           assert.equal(activeSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
         }

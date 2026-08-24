@@ -70,6 +70,7 @@ const optionalPositiveInteger = (name: string): number | undefined => {
 
 const warmupFrames = positiveInteger("warmup", 5);
 const timedFrames = positiveInteger("frames", 40);
+const receiptOnly = process.argv.includes("--receipt-only");
 const prepareBricksPerFrame = optionalPositiveInteger("prepare-bricks");
 const surfaceFineRings = optionalPositiveInteger("surface-fine-rings");
 const pressureIterationsOverride = optionalPositiveInteger("pressure-iterations");
@@ -199,16 +200,48 @@ function frontReceipt(density: Float32Array) {
   const [nx, ny, nz] = dimensions;
   const columnMass = new Array<number>(nx).fill(0);
   const furthest = { above1e3: -1, above005: -1, liquid: -1 };
+  let maximumDensity = 0;
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1)
     for (let x = 0; x < nx; x += 1) {
       const rho = density[x + nx * (y + ny * z)]!;
       columnMass[x] += rho;
+      maximumDensity = Math.max(maximumDensity, rho);
       if (rho > 1e-3) furthest.above1e3 = Math.max(furthest.above1e3, x);
       if (rho > 0.05) furthest.above005 = Math.max(furthest.above005, x);
       if (rho >= 0.5) furthest.liquid = Math.max(furthest.liquid, x);
     }
+  const totalMass = columnMass.reduce((sum, mass) => sum + mass, 0);
+  const centerOfMassFineCellX = columnMass.reduce((sum, mass, x) =>
+    sum + mass * (x + 0.5), 0) / Math.max(Number.MIN_VALUE, totalMass);
+  const massQuantileFineCellX = (quantile: number) => {
+    const target = quantile * totalMass;
+    let cumulative = 0;
+    for (let x = 0; x < nx; x += 1) {
+      cumulative += columnMass[x]!;
+      if (cumulative >= target) return x;
+    }
+    return -1;
+  };
+  const regionMass = [0, 32, 96, 160, nx].slice(0, -1).map((begin, index) => ({
+    begin,
+    end: [0, 32, 96, 160, nx][index + 1]!,
+    mass: columnMass.slice(begin, [0, 32, 96, 160, nx][index + 1]!)
+      .reduce((sum, value) => sum + value, 0),
+  }));
   return {
     furthestFineCellX: furthest,
+    material: {
+      totalMass,
+      maximumDensity,
+      centerOfMassFineCellX,
+      massQuantileFineCellX: {
+        p50: massQuantileFineCellX(0.5),
+        p90: massQuantileFineCellX(0.9),
+        p95: massQuantileFineCellX(0.95),
+        p99: massQuantileFineCellX(0.99),
+      },
+      regionMass,
+    },
     occupiedColumnMass: columnMass.map((mass, x) => ({ x, mass }))
       .filter(({ mass }) => mass > 1e-3),
   };
@@ -336,6 +369,30 @@ async function createArm(
     undefined,
     () => {},
   );
+  if (method.id === "adaptive-mass") {
+    const readiness = solver as typeof solver & {
+      waitForSimulationReady?: () => Promise<void>;
+      resident?: {
+        readonly simulationReady: boolean;
+        readonly simulationCompilationError?: string;
+        warmSimulationPipelines(): void;
+      };
+    };
+    if (readiness.waitForSimulationReady) {
+      await readiness.waitForSimulationReady();
+    } else if (readiness.resident) {
+      // Compatibility for clean HEAD revisions predating SparseWorld's public
+      // readiness boundary. The A/B must not encode through a partially
+      // compiled pipeline map merely because one arm constructed faster.
+      readiness.resident.warmSimulationPipelines();
+      while (!readiness.resident.simulationReady) {
+        if (readiness.resident.simulationCompilationError) {
+          throw new Error(readiness.resident.simulationCompilationError);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+  }
   await device.queue.onSubmittedWorkDone();
   assert.deepEqual(
     [solver.info.nx, solver.info.ny, solver.info.nz],
@@ -631,7 +688,29 @@ try {
     failures: [...(performanceGateApplied ? verdict.failures : []),
       ...frontFailures, ...agreementFailures],
   };
-  console.log(JSON.stringify(report, null, 2));
+  console.log(JSON.stringify(receiptOnly ? {
+    scene: report.scene,
+    dt_s: report.dt_s,
+    acceptedSteps: warmupFrames + timedFrames,
+    densityAgreement: report.densityAgreement,
+    front: report.longDamFront && {
+      uniform: report.longDamFront.uniform.furthestFineCellX,
+      sparse: report.longDamFront.sparse.furthestFineCellX,
+      sparseResidentMaximumFineCellX:
+        report.longDamFront.sparseResidentMaximumFineCellX,
+    },
+    material: report.longDamFront && {
+      uniform: report.longDamFront.uniform.material,
+      sparse: report.longDamFront.sparse.material,
+    },
+    sparseState: {
+      activeCells: report.stateGrowth.sparse.activeCells.final,
+      residentBricks: report.stateGrowth.sparse.residentBricks.final,
+      fineBricks: report.stateGrowth.sparse.fineBricks.final,
+    },
+    hashes: report.exactStateHashes,
+    failures: report.failures,
+  } : report, null, 2));
   if (validationErrors.length > 0 || !passed) process.exitCode = 1;
 } finally {
   uniform?.solver.destroy();

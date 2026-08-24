@@ -14,12 +14,13 @@ import {
 } from "./hero-garden-stress-scene";
 import { studioStageCamera } from "./studio-stage-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
-import { terrainHeightAt } from "./terrain";
+import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
 import type { EnvironmentId } from "./environments";
 import type { MethodProfile } from "./method-contract";
 import { sceneDamBreakFractions } from "./initial-fluid";
 import { sceneWithEnvironment } from "./scenery-presets";
 import { withSceneryNodes } from "./scenery-edit";
+import type { SceneryGraph } from "./scenery-graph";
 import {
   defineScene,
   presentationModeForScene,
@@ -859,6 +860,171 @@ export function createSparseCM12LongDamBreakScene(): SceneDescription {
 }
 
 /**
+ * Chentanez & Mueller's tall-cell Flood case uses a 64 x (32 + 2) x 256
+ * simulation grid over uneven terrain (`docs/papers/tallCells.pdf`, Table 2
+ * and Figure 1). Our sparse world does not compress a whole water column into
+ * one tall cell, so this reconstruction rotates the paper's 256-cell travel
+ * axis onto +X and gives the terrain and falling reservoir a 64-cell physical
+ * height. The important experiment remains the same: a small active body moves
+ * through a much larger world while solid ground varies by metres beneath it.
+ */
+export const TALL_CELLS_FLOOD_CELL_SIZE_M = 0.05;
+export const TALL_CELLS_FLOOD_GRID = Object.freeze([256, 64, 64] as const);
+export const TALL_CELLS_FLOOD_UPHILL_HEIGHT_M = 2;
+export const TALL_CELLS_FLOOD_DOWNHILL_HEIGHT_M = 0.1;
+export const TALL_CELLS_FLOOD_RESERVOIR_M = Object.freeze({
+  x: 1.2,
+  y: 0.8,
+  z: 2.4,
+});
+
+/**
+ * The Flood benchmark is the terrain, not a room around the terrain.
+ *
+ * Giving the scene its own shell also prevents `finishSceneDocument` from
+ * attaching the Stage environment's scaled studio set. On this 12.8 m domain
+ * that set grows the sparse presentation world far beyond the simulation
+ * footprint and makes opening the scene allocate hundreds of megabytes of
+ * unrelated dry-world lighting data before the first frame.
+ */
+const TALL_CELLS_FLOOD_SCENERY: SceneryGraph = Object.freeze({
+  palettes: Object.freeze({}),
+  nodes: Object.freeze([
+    Object.freeze({
+      kind: "terrain-shell" as const,
+      id: "shell",
+      materialModel: "porcelain" as const,
+    }),
+    // The ordinary stage graph cannot be attached here: its floor spans the
+    // complete 12.8 m paper domain and used to dominate sparse-scene startup.
+    // Retain only its practical. This bounded reflector covers the hillside,
+    // publishes the same physical spot record to SVO lighting, and gives the
+    // water compositor a real fixture key instead of the stage's dim blue fill.
+    Object.freeze({
+      kind: "cone" as const,
+      id: "hillside/key",
+      tags: Object.freeze(["lamp", "fixture", "light", "spot-light"]),
+      place: Object.freeze({
+        position: Object.freeze({ x: 0, y: 8.5, z: 0 }),
+        units: "metres" as const,
+      }),
+      baseRadius: 1.5,
+      topRadius: 0.2,
+      halfHeight: 0.5,
+      material: Object.freeze({
+        colorLinear: Object.freeze([1, 0.955, 0.88] as const),
+        emission: 800,
+      }),
+    }),
+  ]),
+});
+
+/**
+ * Authoring samples for one voxel solid: a flat launch shelf, a long central
+ * drainage slope, and a short runout. The gentle transverse rise makes this
+ * uneven ground rather than an inclined container floor, while keeping the
+ * upper shelf flat so the initial water block rests on solid voxels everywhere.
+ */
+export function createTallCellsFloodTerrain(): TerrainDescription {
+  const [nx, , nz] = TALL_CELLS_FLOOD_GRID;
+  const width_m = nx * TALL_CELLS_FLOOD_CELL_SIZE_M;
+  const depth_m = nz * TALL_CELLS_FLOOD_CELL_SIZE_M;
+  const grid: TerrainGrid = {
+    kind: "grid",
+    origin_m: { x: -0.5 * width_m, z: -0.5 * depth_m },
+    spacing_m: TALL_CELLS_FLOOD_CELL_SIZE_M,
+    size: { nx: nx + 1, nz: nz + 1 },
+    heights_m: [],
+  };
+  const slopeStartX_m = grid.origin_m.x + TALL_CELLS_FLOOD_RESERVOIR_M.x;
+  const slopeEndX_m = 0.5 * width_m - 0.8;
+  const slopeRun_m = slopeEndX_m - slopeStartX_m;
+  for (let z = 0; z <= nz; z += 1) {
+    const worldZ_m = grid.origin_m.z + z * grid.spacing_m;
+    const transverse = Math.abs(worldZ_m) / (0.5 * depth_m);
+    for (let x = 0; x <= nx; x += 1) {
+      const worldX_m = grid.origin_m.x + x * grid.spacing_m;
+      const progress = Math.max(0, Math.min(1,
+        (worldX_m - slopeStartX_m) / slopeRun_m));
+      const slopeHeight_m = TALL_CELLS_FLOOD_UPHILL_HEIGHT_M
+        + progress * (TALL_CELLS_FLOOD_DOWNHILL_HEIGHT_M
+          - TALL_CELLS_FLOOD_UPHILL_HEIGHT_M);
+      // Zero on both shelves, strongest halfway down the hill. This shallow
+      // crossfall keeps the released sheet in view without becoming a vessel.
+      const slopeWindow = 4 * progress * (1 - progress);
+      const channelBank_m = 0.12 * slopeWindow * transverse * transverse;
+      grid.heights_m.push(slopeHeight_m + channelBank_m);
+    }
+  }
+  return {
+    solidRepresentation: "voxel",
+    baseHeight_m: TALL_CELLS_FLOOD_DOWNHILL_HEIGHT_M,
+    features: [],
+    grid,
+  };
+}
+
+/**
+ * Paper-inspired hillside dam break for the vast sparse-world path.
+ *
+ * The reservoir is exactly 3 x 2 x 6 B8 tiles and its origin is aligned to the
+ * 50 mm lattice. Everything downhill begins dry. Fluid residency therefore
+ * starts local even though the logical domain contains 1,048,576 cells, and a
+ * travelling front has to create and later retire topology while terrain
+ * remains authoritative for solid contact and rendering.
+ */
+export function createTallCellsHillsideDamBreakScene(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  const [nx, ny, nz] = TALL_CELLS_FLOOD_GRID;
+  const cell_m = TALL_CELLS_FLOOD_CELL_SIZE_M;
+  const reservoir = TALL_CELLS_FLOOD_RESERVOIR_M;
+  scene.sceneId = "tall-cells-hillside-dam-break";
+  scene.randomSeed = 2011;
+  scene.duration_s = 10;
+  scene.container = {
+    ...scene.container,
+    width_m: nx * cell_m,
+    height_m: ny * cell_m,
+    depth_m: nz * cell_m,
+    fillFraction: reservoir.x * reservoir.y * reservoir.z
+      / (nx * cell_m * ny * cell_m * nz * cell_m),
+    top: "open",
+    fluidWallMode: "free-slip",
+    vessel: "none",
+  };
+  scene.voxelDomain = { finestCellSize_m: cell_m, brickSize_cells: 8 };
+  scene.nominalResolution = { length_m: cell_m };
+  scene.terrain = createTallCellsFloodTerrain();
+  scene.scenery = TALL_CELLS_FLOOD_SCENERY;
+  scene.fluid.initialCondition = "dam-break";
+  scene.fluid.initialDamBreakDimensions_m = { ...reservoir };
+  scene.fluid.initialDamBreakOrigin_m = {
+    x: 0,
+    y: TALL_CELLS_FLOOD_UPHILL_HEIGHT_M,
+    z: 0.4,
+  };
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.initialLiquidVolumes;
+  delete scene.fluid.inflow;
+  scene.fluid.dynamicViscosity_Pa_s = 0;
+  scene.fluid.surfaceTension_N_m = 0;
+  // Preserve the clear-water look used by the small tank scenes. Optical
+  // coefficients are rates per metre; applying their tank-scale defaults to a
+  // 2.4 m reservoir makes an otherwise identical medium strongly cyan. This
+  // ten-times-lower rate gives the large paper figure the same shallow optical
+  // depth without changing the shared material used by existing scenes.
+  scene.fluid.optics = {
+    absorption_mInv: [0.045, 0.009, 0.006],
+    scatter: [0.0012, 0.0055, 0.0049],
+  };
+  scene.rigidBodies = [];
+  // Section 4 uses a 1/30 s simulation step for every example.
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
+  return scene;
+}
+
+/**
  * A watchable, room-sized version of the minimal dam break. The
  * footprint is four times longer and four times wider, while the tank is only
  * 25% taller, making the container exactly 20x larger by volume. The reservoir
@@ -1676,6 +1842,23 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
         "A 5 ms outer step: the wave-profile lane observes six seconds, and the "
         + "browser's 8 ms cap would let the 4.2 m/s front cross more than a cell a step.",
         (scene) => pinStep(scene, 0.005)),
+    },
+  }),
+  defineScene({
+    id: "tall-cells-hillside-dam-break",
+    name: "Tall cells · hillside dam break",
+    blurb: "A paper-inspired reservoir releases from a 2 m shelf down a 256-cell uneven slope. Height samples populate one unified voxel solid; the million-cell logical world starts with only a 3×2×6-tile water body so the travelling front exercises dynamic sparse-tile creation and retirement.",
+    audience: "study",
+    shelf: "Tall-cell studies",
+    environment: "stage",
+    presentationMode: "full-scene",
+    methodProfile: SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
+    build: createTallCellsHillsideDamBreakScene,
+    camera: {
+      azimuth_rad: 0.48,
+      elevation_rad: 0.3,
+      distance_m: 14.5,
+      target_m: { x: 0, y: 1.0, z: 0 },
     },
   }),
   defineScene({

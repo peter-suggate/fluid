@@ -131,21 +131,21 @@ dawnTest("Dawn seeds markers in liquid and carries them with the flow",
         () => {},
       );
       try {
-        const source = solver.tracerSource;
+        const source = solver.sparseWorldUI.overlays.tracers!;
         assert.ok(source.count > 0, "the default tank must plan a marker lattice");
 
         // Off is free, not cheap: an advance with the view off must encode no
         // marker dispatch at all, so the range stays exactly as allocated.
         assert.equal(solver.advanceTo(CM12_PAPER_DT_S, []), true);
         await device.queue.onSubmittedWorkDone();
-        const untouched = await solver.readTracers();
+        const untouched = await solver.sparseWorldUI.diagnostics.readTracers();
         assert.ok(untouched.every((value) => value === 0),
           "advancing with the marker view off must not write the marker range");
 
-        solver.setTracersEnabled(true);
+        solver.sparseWorldUI.control.tracers!.setEnabled(true);
         assert.equal(solver.advanceTo(2 * CM12_PAPER_DT_S, []), true);
         await device.queue.onSubmittedWorkDone();
-        const seeded = await solver.readTracers();
+        const seeded = await solver.sparseWorldUI.diagnostics.readTracers();
 
         const live: number[] = [];
         for (let marker = 0; marker < source.count; marker += 1) {
@@ -191,7 +191,7 @@ dawnTest("Dawn seeds markers in liquid and carries them with the flow",
           assert.equal(solver.advanceTo((3 + step) * CM12_PAPER_DT_S, []), true);
         }
         await device.queue.onSubmittedWorkDone();
-        const carried = await solver.readTracers();
+        const carried = await solver.sparseWorldUI.diagnostics.readTracers();
 
         let moved = 0, fell = 0;
         for (const marker of live) {

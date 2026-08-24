@@ -1,11 +1,11 @@
 import {
-  SPARSE_CM12_PRESSURE_JOURNAL_FIELDS,
-  SPARSE_CM12_PRESSURE_JOURNAL_HEADER_FLOATS,
-  SPARSE_CM12_PRESSURE_JOURNAL_RECORD,
-  sparseCM12PressureJournalSnapshotOffset,
-  type SparseCM12PressureJournalField,
-  type SparseCM12PressureJournalLayout,
-} from "../methods/adaptive-mass/sparse-cm12-pressure-journal";
+  PRESSURE_JOURNAL_FIELDS,
+  PRESSURE_JOURNAL_HEADER_FLOATS,
+  PRESSURE_JOURNAL_RECORD,
+  pressureJournalSnapshotOffset,
+  type PressureJournalField,
+  type PressureJournalLayout,
+} from "./pressure-journal";
 import { fieldVisualization, type Visualization } from "./visualization-registry";
 
 /**
@@ -46,7 +46,7 @@ export interface GPUPressureJournalSource {
   readonly topologyArena: GPUBuffer;
   /** Float offset of the journal region within `state`. */
   readonly journalFloatOffset: number;
-  readonly layout: SparseCM12PressureJournalLayout;
+  readonly layout: PressureJournalLayout;
   /**
    * Snapshot slots the last armed encode actually filled.
    *
@@ -131,7 +131,7 @@ export const PRESSURE_JOURNAL_PRESSURE_DECADES = 3;
 export type PressureJournalRamp = "diverging-log" | "diverging-linear" | "sequential-log";
 
 export interface PressureJournalChannel {
-  readonly field: SparseCM12PressureJournalField;
+  readonly field: PressureJournalField;
   readonly ramp: PressureJournalRamp;
   /** Value that saturates the ramp. Fixed across the film; never per-frame. */
   readonly reference: number;
@@ -552,7 +552,7 @@ export class PressureJournalOverlay {
     const filled = Math.min(layout.snapshotCapacity,
       source.snapshotCount > 0 ? source.snapshotCount : layout.snapshotCapacity);
     const snapshot = Math.max(0, Math.min(filled - 1, Math.round(frame.snapshot)));
-    const field = SPARSE_CM12_PRESSURE_JOURNAL_FIELDS.indexOf(frame.channel.field);
+    const field = PRESSURE_JOURNAL_FIELDS.indexOf(frame.channel.field);
     if (field < 0) return false;
     this.rebuildBindGroup(sceneDepth);
     if (!this.bindGroup) return false;
@@ -590,15 +590,15 @@ export class PressureJournalOverlay {
       : [0, 0, 0, 0], 32);
     u.set([
       source.journalFloatOffset
-        + sparseCM12PressureJournalSnapshotOffset(layout, snapshot, field),
+        + pressureJournalSnapshotOffset(layout, snapshot, field),
       source.cellCount, stride, source.liquidFloatOffset,
     ], 36);
     // Pressure is the one channel with no recorded scale of its own, so it
     // alone falls back to the host reference; the residual family points the
     // shader at the seed record and is normalised by the capture itself.
     const referenceWord = frame.channel.field === "pressure" ? 0
-      : source.journalFloatOffset + SPARSE_CM12_PRESSURE_JOURNAL_HEADER_FLOATS
-        + SPARSE_CM12_PRESSURE_JOURNAL_RECORD.initialTrueMaximum;
+      : source.journalFloatOffset + PRESSURE_JOURNAL_HEADER_FLOATS
+        + PRESSURE_JOURNAL_RECORD.initialTrueMaximum;
     u.set([Math.max(0, Math.round(frame.onlyResolution ?? 0)), referenceWord, 0, 0], 40);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     const pass = encoder.beginRenderPass({
@@ -642,7 +642,7 @@ export type PressureJournalOverlayMode =
   | "pressure-journal-direction";
 
 const PRESSURE_JOURNAL_MODE_FIELD:
-Readonly<Record<PressureJournalOverlayMode, SparseCM12PressureJournalField>> =
+Readonly<Record<PressureJournalOverlayMode, PressureJournalField>> =
   Object.freeze({
     "pressure-journal-residual": "residual",
     "pressure-journal-pressure": "pressure",

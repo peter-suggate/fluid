@@ -190,12 +190,13 @@ dawnTest("Dawn draws a captured film without the validator objecting",
           while (!solver.advanceTo(time_s, [])) await new Promise(setImmediate);
         };
         await advance(dt_s);
-        assert.equal(solver.armPressureJournal(true), true,
+        assert.equal(
+          solver.sparseWorldUI.control.pressureFilm!.setCaptureEnabled(true), true,
           "the 'on' option must reserve the film");
         await advance(2 * dt_s);
         await device.queue.onSubmittedWorkDone();
 
-        const source = solver.pressureJournalSource;
+        const source = solver.sparseWorldUI.overlays.pressureFilm;
         assert.ok(source, "an armed solver must publish a journal source");
         // The scrub's upper bound. Without it the slider runs to the reserved
         // capacity and its tail replays whatever a previous capture left.
@@ -238,8 +239,8 @@ dawnTest("Dawn draws a captured film without the validator objecting",
 
         // A disarmed solver keeps its source: the previous capture is still
         // there to scrub, which is what makes the film usable while paused.
-        solver.armPressureJournal(false);
-        assert.ok(solver.pressureJournalSource,
+        solver.sparseWorldUI.control.pressureFilm!.setCaptureEnabled(false);
+        assert.ok(solver.sparseWorldUI.overlays.pressureFilm,
           "disarming must not withdraw the captured film");
       } finally {
         target.destroy();

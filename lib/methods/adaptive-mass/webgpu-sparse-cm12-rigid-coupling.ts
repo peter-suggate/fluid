@@ -15,6 +15,9 @@ const WORKGROUP_SIZE = 64;
 export interface SparseCM12RigidResources {
   readonly bodies: GPUBuffer;
   readonly exchange: GPUBuffer;
+  /** Height in finest-cell units, one sample per finest x/z column. */
+  readonly terrain: GPUTexture;
+  readonly terrainPresent: boolean;
   readonly worldDimensions_m: readonly [number, number, number];
 }
 
@@ -25,6 +28,8 @@ interface SparseCM12RigidBindings {
   readonly frameControlIndirectArguments: GPUBuffer;
   readonly rigidBodies: GPUBuffer;
   readonly exchange: GPUBuffer;
+  readonly terrain: GPUTexture;
+  readonly terrainPresent: boolean;
 }
 
 const shader = /* wgsl */ `
@@ -38,7 +43,7 @@ struct Params {
   activityThresholds:vec4f, activityDensity:vec4f, activityTiming:vec4f,
   activityEpochs:vec4u, boundaryCenter:vec4f, boundaryRadii:vec4f,
   topologyScheduling:vec4u,
-  solidOffsets:vec4u, // cell open, row data, reserved, reserved
+  solidOffsets:vec4u, // cell open, row data, flags, terrain signed distance
   rigidWorld:vec4f,   // width, height, depth, body count
 }
 struct RigidBody {
@@ -51,6 +56,7 @@ struct RigidBody {
 @group(0)@binding(2)var<storage,read_write>arena:array<atomic<u32>>;
 @group(0)@binding(3)var<storage,read>bodies:array<RigidBody,12>;
 @group(0)@binding(4)var<storage,read_write>exchange:array<atomic<i32>>;
+@group(0)@binding(5)var terrain:texture_2d<f32>;
 
 fn ta(index:u32)->u32{return atomicLoad(&arena[index]);}
 fn taf(index:u32)->f32{return bitcast<f32>(ta(index));}
@@ -101,6 +107,44 @@ fn worldPoint(fine:vec3f)->vec3f{
     fine.y*p.frame.y,-0.5*p.rigidWorld.z+fine.z*p.frame.y);
 }
 fn bodyCount()->u32{return min(12u,u32(round(p.rigidWorld.w)));}
+fn hasTerrain()->bool{return (p.solidOffsets.z&2u)!=0u;}
+fn terrainHeightFine(fine:vec2f)->f32{
+  let dimensions=vec2i(textureDimensions(terrain));
+  let column=clamp(vec2i(floor(fine)),vec2i(0),dimensions-vec2i(1));
+  return textureLoad(terrain,column,0).x;
+}
+fn terrainContainsFine(fine:vec3f)->bool{
+  // A face lying exactly on H is the impermeable terrain boundary, not an
+  // aperture into the fully solid cell below it. Cell capacity still uses the
+  // continuous open interval; this closed-surface convention is for V^f.
+  return hasTerrain()&&fine.y<=terrainHeightFine(fine.xz);
+}
+// CM12 Sec. 3.6's V_i: integrate the open vertical interval over four points
+// in the composite cell footprint. Flat aligned terrain is exact; a sloping
+// heightfield produces the partial capacity consumed by rho/V and excess-mass
+// redistribution without introducing a second solid representation.
+fn terrainCellOpenFraction(center:vec3f,widths:vec3f)->f32{
+  if(!hasTerrain()){return 1.0;}
+  let bottom=center.y-0.5*widths.y;var open=0.0;
+  for(var sample=0u;sample<4u;sample+=1u){
+    let offset=vec2f(select(-0.4,0.4,(sample&1u)!=0u),
+      select(-0.4,0.4,(sample&2u)!=0u));
+    let height=terrainHeightFine(center.xz+offset*widths.xz);
+    open+=0.25*clamp((bottom+widths.y-height)/max(widths.y,1e-6),0.0,1.0);
+  }
+  return open;
+}
+fn terrainSignedDistanceFine(center:vec3f,widths:vec3f)->f32{
+  if(!hasTerrain()){return -1e6;}
+  var height=0.0;
+  for(var sample=0u;sample<4u;sample+=1u){
+    let offset=vec2f(select(-0.4,0.4,(sample&1u)!=0u),
+      select(-0.4,0.4,(sample&2u)!=0u));
+    height+=0.25*terrainHeightFine(center.xz+offset*widths.xz);
+  }
+  // Positive is inside terrain, matching the liquid phi sign convention.
+  return height-center.y;
+}
 fn cellCoverage(body:RigidBody,center:vec3f,widths:vec3f)->f32{
   var covered=0.0;
   for(var corner=0u;corner<8u;corner+=1u){
@@ -111,15 +155,24 @@ fn cellCoverage(body:RigidBody,center:vec3f,widths:vec3f)->f32{
   return covered;
 }
 
-@compute @workgroup_size(${WORKGROUP_SIZE})
-fn voxelizeCells(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedCell(gid.x);if(cell==INVALID){return;}
+fn voxelizeCell(cell:u32){
   let center=cellCenter(cell);let widths=cellWidths(cell);var best=0.0;
   for(var bodyIndex=0u;bodyIndex<bodyCount();bodyIndex+=1u){
     let covered=cellCoverage(bodies[bodyIndex],center,widths);
     best=max(best,covered);
   }
-  state[p.solidOffsets.x+cell]=1.0-best;
+  let bodyOpen=1.0-best;
+  state[p.solidOffsets.x+cell]=select(bodyOpen,
+    min(bodyOpen,terrainCellOpenFraction(center,widths)),hasTerrain());
+  state[p.solidOffsets.w+cell]=terrainSignedDistanceFine(center,widths);
+}
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn voxelizeCells(@builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedCell(gid.x);if(cell==INVALID){return;}voxelizeCell(cell);
+}
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn voxelizeAllCells(@builtin(global_invocation_id)gid:vec3u){
+  if(gid.x>=p.counts.x){return;}voxelizeCell(gid.x);
 }
 
 fn sampleOwner(world:vec3f)->u32{
@@ -129,9 +182,7 @@ fn sampleOwner(world:vec3f)->u32{
   return INVALID;
 }
 
-@compute @workgroup_size(${WORKGROUP_SIZE})
-fn voxelizeRows(@builtin(global_invocation_id)gid:vec3u){
-  let row=acceptedRow(gid.x);if(row==INVALID){return;}
+fn voxelizeRow(row:u32){
   let axis=rowAxis(row);let center=rowCenter(row);let tangent=sqrt(max(rowArea(row),1e-8));
   let tangentA=(axis+1u)%3u;let tangentB=(axis+2u)%3u;
   var faceSolid=0.0;var velocity=0.0;var owner=INVALID;
@@ -139,7 +190,9 @@ fn voxelizeRows(@builtin(global_invocation_id)gid:vec3u){
     var fine=center;fine[tangentA]+=select(-0.35,0.35,(sample&1u)!=0u)*tangent;
     fine[tangentB]+=select(-0.35,0.35,(sample&2u)!=0u)*tangent;
     let world=worldPoint(fine);let candidate=sampleOwner(world);
-    if(candidate!=INVALID){faceSolid+=0.25;owner=candidate;
+    let terrainSolid=terrainContainsFine(fine);
+    if(candidate!=INVALID||terrainSolid){faceSolid+=0.25;}
+    if(candidate!=INVALID){owner=candidate;
       velocity+=0.25*rigidVelocity(bodies[candidate],world)[axis]/p.frame.y;}
   }
   var dualSolid=0.0;
@@ -149,7 +202,8 @@ fn voxelizeRows(@builtin(global_invocation_id)gid:vec3u){
     fine[tangentA]+=select(-0.4,0.4,(sample&2u)!=0u)*tangent;
     fine[tangentB]+=select(-0.4,0.4,(sample&4u)!=0u)*tangent;
     let candidate=sampleOwner(worldPoint(fine));
-    if(candidate!=INVALID){dualSolid+=0.125;if(owner==INVALID){owner=candidate;}}
+    if(candidate!=INVALID||terrainContainsFine(fine)){dualSolid+=0.125;}
+    if(candidate!=INVALID&&owner==INVALID){owner=candidate;}
   }
   if(owner!=INVALID&&faceSolid<=0.0){
     velocity=rigidVelocity(bodies[owner],worldPoint(center))[axis]/p.frame.y;
@@ -158,18 +212,30 @@ fn voxelizeRows(@builtin(global_invocation_id)gid:vec3u){
   state[out]=1.0-faceSolid;state[out+1u]=velocity;
   state[out+2u]=1.0-dualSolid;
 }
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn voxelizeRows(@builtin(global_invocation_id)gid:vec3u){
+  let row=acceptedRow(gid.x);if(row==INVALID){return;}voxelizeRow(row);
+}
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn voxelizeAllRows(@builtin(global_invocation_id)gid:vec3u){
+  if(gid.x>=p.counts.y){return;}voxelizeRow(gid.x);
+}
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn coupleCells(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedCell(gid.x);if(cell==INVALID){return;}
-  let open=state[p.solidOffsets.x+cell];let solid=1.0-open;
-  if(solid<=0.0){return;}
+  let open=state[p.solidOffsets.x+cell];
   let center=cellCenter(cell);let widths=cellWidths(cell);var best=0.0;var bodyIndex=INVALID;
   for(var candidate=0u;candidate<bodyCount();candidate+=1u){
     let coverage=cellCoverage(bodies[candidate],center,widths);
     if(coverage>best){best=coverage;bodyIndex=candidate;}
   }
-  if(bodyIndex==INVALID){return;}let density=state[destinationDensity()+cell];
+  // Static terrain takes no reaction receipt. Where terrain and a body overlap,
+  // return only the body's own sampled displaced volume rather than all solid
+  // coverage stored in the shared open-fraction field.
+  let solid=select(1.0-open,best,hasTerrain());
+  if(bodyIndex==INVALID||solid<=0.0){return;}
+  let density=state[destinationDensity()+cell];
   let wet=clamp(density/max(open,0.125),0.0,1.0);if(wet<=0.0){return;}
   let velocityAt=destinationCellVelocity()+4u*cell;
   let fluidVelocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u])*p.frame.y;
@@ -191,6 +257,7 @@ export class WebGPUSparseCM12RigidCoupling {
   private constructor(
     private readonly bindGroup: GPUBindGroup,
     private readonly frameControlIndirectArguments: GPUBuffer,
+    private readonly terrainPresent: boolean,
     private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>,
   ) {}
 
@@ -207,6 +274,8 @@ export class WebGPUSparseCM12RigidCoupling {
         { binding: 3, visibility: GPUShaderStage.COMPUTE,
           buffer: { type: "read-only-storage" } },
         { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE,
+          texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
       ],
     });
     const bindGroup = device.createBindGroup({
@@ -218,22 +287,25 @@ export class WebGPUSparseCM12RigidCoupling {
         { binding: 2, resource: { buffer: bindings.topologyArena } },
         { binding: 3, resource: { buffer: bindings.rigidBodies } },
         { binding: 4, resource: { buffer: bindings.exchange } },
+        { binding: 5, resource: bindings.terrain.createView() },
       ],
     });
     const compiler = gpuCompilationManagerFor(device);
-    const module = compiler.createShaderModule({
+    const shaderModule = compiler.createShaderModule({
       label: "Sparse CM12 rigid coupling", code: shader,
     });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const names = ["voxelizeCells", "voxelizeRows", "coupleCells"] as const;
+    const names = ["voxelizeCells", "voxelizeRows", "voxelizeAllCells",
+      "voxelizeAllRows", "coupleCells"] as const;
     const entries = await Promise.all(names.map(async (name) => [name,
       await compiler.compileComputePipeline({
         label: `Sparse CM12 rigid ${name}`,
         layout: pipelineLayout,
-        compute: { module, entryPoint: name },
+        compute: { module: shaderModule, entryPoint: name },
       }, { priority: "visible" })] as const));
     return new WebGPUSparseCM12RigidCoupling(bindGroup,
       bindings.frameControlIndirectArguments,
+      bindings.terrainPresent,
       Object.fromEntries(entries));
   }
 
@@ -242,10 +314,31 @@ export class WebGPUSparseCM12RigidCoupling {
     pass.setBindGroup(0, this.bindGroup);
     pass.setPipeline(this.pipelines.voxelizeCells!);
     pass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments,
-      12 * SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyWork);
+      12 * (this.terrainPresent
+        ? SPARSE_CM12_FRAME_CONTROL_FAMILY.solidCellWork
+        : SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyWork));
     pass.setPipeline(this.pipelines.voxelizeRows!);
     pass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments,
-      12 * SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyRowWork);
+      12 * (this.terrainPresent
+        ? SPARSE_CM12_FRAME_CONTROL_FAMILY.solidRowWork
+        : SPARSE_CM12_FRAME_CONTROL_FAMILY.bodyRowWork));
+    pass.end();
+  }
+
+  /** Seed every immutable topology rung before the first frame can activate it. */
+  encodeInitialization(
+    encoder: GPUCommandEncoder,
+    cellCount: number,
+    rowCount: number,
+  ): void {
+    const pass = encoder.beginComputePass({
+      label: "Sparse CM12 solid topology initialization",
+    });
+    pass.setBindGroup(0, this.bindGroup);
+    pass.setPipeline(this.pipelines.voxelizeAllCells!);
+    pass.dispatchWorkgroups(Math.ceil(cellCount / WORKGROUP_SIZE));
+    pass.setPipeline(this.pipelines.voxelizeAllRows!);
+    pass.dispatchWorkgroups(Math.ceil(rowCount / WORKGROUP_SIZE));
     pass.end();
   }
 

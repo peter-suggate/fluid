@@ -27,8 +27,12 @@ const ITR1_TEMPLATE_COUNT:u32=${l.templateCount}u;
 fn itr1Load(at:u32)->u32{return atomicLoad(&${arena}[at]);}
 fn itr1Directory(templateId:u32)->vec4u{
   if(templateId>=ITR1_TEMPLATE_COUNT){return vec4u(ITR1_INVALID);}
-  let at=ITR1_DIRECTORY+4u*templateId;
+  let at=ITR1_DIRECTORY+5u*templateId;
   return vec4u(itr1Load(at),itr1Load(at+1u),itr1Load(at+2u),itr1Load(at+3u));
+}
+fn itr1SparseAirOwnerBase(templateId:u32)->u32{
+  if(templateId>=ITR1_TEMPLATE_COUNT){return ITR1_INVALID;}
+  return itr1Load(ITR1_DIRECTORY+5u*templateId+4u);
 }
 fn itr1Plane(axis:u32,q:u32)->vec2u{
   if(axis==0u){let word=0x11111111u<<q;return vec2u(word);}
@@ -137,6 +141,26 @@ fn itr1StableRowAndBucketOwner(packet:u32,axis:u32,lane:u32)->vec2u{
 fn itr1StableRowForOwner(packet:u32,axis:u32,lane:u32)->u32{
   return itr1StableRowAndBucketOwner(packet,axis,lane).x;
 }
+// BFA1's ordinary seam catalogue contains the positive row owner. For a
+// cross-leaf face that owner is necessarily on local coordinate zero, so the
+// relevant IBO reference is the negative side of the known axis. Keep this
+// direct path separate from the general owner query: asking a six-side search
+// to rediscover a topology address already encoded by BFA1 creates a large
+// Metal optimizer graph for every seam preparation/projection pipeline.
+fn itr1StableNegativeBoundaryRowForOwner(packet:u32,axis:u32,lane:u32)->u32{
+  let slot=${p}IBOAcceptedSlot();let address=${p}IBOTRAPacketLocal(packet,lane,slot);
+  if(address.w==ITR1_INVALID||axis>=3u||address[axis]!=0u){return ITR1_INVALID;}
+  let local=address.xyz;let leaf=address.w;let side=2u*axis;
+  let count=${p}IBOFaceRefCount(slot,leaf,side);
+  for(var refLocal=0u;refLocal<count;refLocal+=1u){
+    let faceRef=${p}IBORef(slot,leaf,side,refLocal);
+    let directory=itr1Directory(faceRef.x);let boundary=itr1Boundary(local,axis,directory.w);
+    let localRow=itr1Load(ITR1_BASE+directory.z+boundary);
+    if(localRow!=ITR1_INVALID){return faceRef.z+
+      ${p}IBOTemplateRowWord(faceRef.x,localRow,0u);}
+  }
+  return ITR1_INVALID;
+}
 fn itr1StablePositiveSparseAirRowAndBucketOwner(
  packet:u32,axis:u32,lane:u32)->vec2u{
   let slot=${p}IBOAcceptedSlot();let address=${p}IBOTRAPacketLocal(packet,lane,slot);
@@ -144,25 +168,15 @@ fn itr1StablePositiveSparseAirRowAndBucketOwner(
   let local=address.xyz;let leaf=address.w;let dims=${p}IBOLeafDimensions(slot,leaf);
   if(local[axis]+1u!=dims[axis]){return vec2u(ITR1_INVALID);}
   let side=2u*axis+1u;let count=${p}IBOFaceRefCount(slot,leaf,side);
-  let ordinal=local.x+dims.x*(local.y+dims.y*local.z);
   for(var refLocal=0u;refLocal<count;refLocal+=1u){
     let faceRef=${p}IBORef(slot,leaf,side,refLocal);
     if(faceRef.y!=ITR1_INVALID){continue;}
     let directory=itr1Directory(faceRef.x);let boundary=itr1Boundary(local,axis,directory.w);
-    let begin=itr1Load(ITR1_BASE+directory.x+boundary);
-    let end=itr1Load(ITR1_BASE+directory.x+boundary+1u);
-    for(var at=begin;at<end;at+=1u){let entry=itr1Load(ITR1_BASE+directory.y+at);
-      let localRow=entry&0xfffu;
-      let metadata=${p}IBOTemplateRowWord(faceRef.x,localRow,2u);
-      if(((metadata>>28u)&3u)!=3u){continue;}
-      let packed=${p}IBOTemplateRowWord(faceRef.x,localRow,1u);
-      let first=packed&0x007fffffu;
-      let normalized=${p}IBOTemplateTermWord(faceRef.x,first,0u);
-      let coefficient=bitcast<f32>(${p}IBOTemplateTermWord(faceRef.x,first,1u));
-      if(normalized==ordinal&&coefficient<0.0){
-        return vec2u(faceRef.z+${p}IBOTemplateRowWord(faceRef.x,localRow,0u),leaf);
-      }
-    }
+    let sparseAirBase=itr1SparseAirOwnerBase(faceRef.x);
+    if(sparseAirBase==ITR1_INVALID){continue;}
+    let localRow=itr1Load(ITR1_BASE+sparseAirBase+boundary);
+    if(localRow!=ITR1_INVALID){return vec2u(
+      faceRef.z+${p}IBOTemplateRowWord(faceRef.x,localRow,0u),leaf);}
   }
   return vec2u(ITR1_INVALID);
 }

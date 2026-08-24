@@ -55,6 +55,7 @@ export function createSparseCM12PressureTopologyRepairWGSL(
     return `${entries}
 const ${p}BrickCapacity=${family.capacity}u;
 const ${p}BrickCandidate=${family.candidateGenerationBaseWords}u;
+const ${p}BrickChangedList=${family.changedBrickListBaseWords}u;
 const ${p}BrickBits=${family.activeBitsBaseWords}u;
 const ${p}BrickDirtyStamp=${family.dirtyLeafStampBaseWords}u;
 const ${p}BrickDirtyList=${family.dirtyLeafListBaseWords}u;
@@ -74,6 +75,19 @@ const ${p}BrickLevelCount=${family.treeLevelCounts.length}u;`;
     family.treeLevelCounts
     .slice(1).map((_count, index) => {
       const level = index + 1;
+      const closesPlan = level === family.treeLevelCounts.length - 1;
+      const close = closesPlan ? `
+ if(gid.x==0u){let dirty=atomicLoad(&${arena}[${p}BrickF_DIRTY_LEAF_COUNT]);
+  if(atomicLoad(&${arena}[${p}BrickF_REPAIRED_LEAF_COUNT])!=dirty){
+   atomicStore(&${arena}[${p}H_FAULT],
+    ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.brickRepairGap}u);
+   atomicStore(&${arena}[${p}H_FIRST_FAULT_FAMILY],${p}BrickFamily);
+   atomicStore(&${arena}[${p}H_FIRST_FAULT_ID],${p}Invalid);
+   atomicStore(&${arena}[${p}H_PHASE],${p}PhaseFault);return;}
+  atomicStore(&${arena}[${p}H_CHANGED_BRICK_COUNT],total);
+  atomicStore(&${arena}[${p}BrickF_WORK_COUNT],total);
+  atomicStore(&${arena}[${p}BrickF_WORK_INDIRECT_X],total);
+  atomicStore(&${arena}[${p}H_PHASE],${p}PhaseExecutingCells);}` : "";
       return `@compute @workgroup_size(64) fn reduceSparseCM12PressureTopologyBrickLevel${level}(
  @builtin(global_invocation_id)gid:vec3u){let dirtyCount=atomicLoad(&${arena}[
  ${p}BrickF_DIRTY_LEAF_COUNT]);if(gid.x>=dirtyCount){return;}
@@ -83,7 +97,7 @@ const ${p}BrickLevelCount=${family.treeLevelCounts.length}u;`;
  var total=0u;for(var child=0u;child<${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_BRANCH}u;child+=1u){
   let at=first+child;if(at>=${family.treeLevelCounts[level - 1]}u){break;}
   total+=atomicLoad(&${arena}[source+at]);}
- atomicStore(&${arena}[${p}BrickTreeBase(${level}u)+parent],total);}`;
+ atomicStore(&${arena}[${p}BrickTreeBase(${level}u)+parent],total);${close}}`;
     }).join("\n");
   const preflightedTopologyPublication = /* wgsl */ `
 fn ${p}PreflightWillAppend(brick:u32,generation:u32)->bool{
@@ -95,7 +109,11 @@ fn ${p}PreflightCompatible(brick:u32,oldState:u32,newState:u32)->bool{
  let stamp=atomicLoad(&${arena}[${p}BrickCandidate+brick]);if(stamp!=generation){return true;}
  let acceptedOld=atomicLoad(&${arena}[${p}BrickOldState+brick]);
  let pendingNew=atomicLoad(&${arena}[${p}BrickNewState+brick]);
- return acceptedOld==oldState&&(pendingNew==newState||pendingNew==oldState);}
+ // A semantic injection may populate tiles after the frame topology selector
+ // has already advanced but before pressure consumes this journal. Accept that
+ // ordered chain when its old state is exactly the pending state; the no-fail
+ // publisher below then folds A->B followed by B->C into one A->C receipt.
+ return (acceptedOld==oldState&&pendingNew==newState)||pendingNew==oldState;}
 fn ${p}PreflightReady(generation:u32,newCount:u32,newLeafCount:u32)->bool{
  return ${p}HeaderValid()&&atomicLoad(&${arena}[${p}H_PHASE])==${p}PhaseCollecting
   &&atomicLoad(&${arena}[${p}H_FAULT])==0u
@@ -111,7 +129,8 @@ fn ${p}PublishPreflightedChangedBrick(brick:u32,oldState:u32,newState:u32,cause:
   atomicStore(&${arena}[${p}BrickNewState+brick],newState);
   atomicStore(&${arena}[${p}BrickCause+brick],cause);
   atomicStore(&${arena}[${p}BrickCandidate+brick],generation);
-  atomicAdd(&${arena}[${p}BrickF_CANDIDATE_WRITE_COUNT],1u);
+  let slot=atomicAdd(&${arena}[${p}BrickF_CANDIDATE_WRITE_COUNT],1u);
+  atomicStore(&${arena}[${p}BrickChangedList+slot],brick);
   atomicAdd(&${arena}[${p}H_COVERED_PRODUCER_RECEIPTS],1u);
  }else{let pendingNew=atomicLoad(&${arena}[${p}BrickNewState+brick]);
   if(pendingNew==oldState){atomicStore(&${arena}[${p}BrickNewState+brick],newState);}
@@ -213,10 +232,36 @@ fn ${p}QueueBrickLeaf(leaf:u32)->bool{if(leaf>=${p}BrickLeafCount){
  if(atomicLoad(&${arena}[${p}H_PHASE])!=${p}PhaseCollecting
   ||atomicLoad(&${arena}[${p}H_FAULT])!=0u){return;}
  if(atomicLoad(&${arena}[${p}H_EXPECTED_PRODUCER_RECEIPTS])!=atomicLoad(&${arena}[
-  ${p}H_COVERED_PRODUCER_RECEIPTS])){${p}Fail(${p}BrickFamily,
-  ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.producerCoverageGap}u,${p}Invalid);return;}
- atomicStore(&${arena}[${p}BrickF_REPAIR_INDIRECT_X],atomicLoad(&${arena}[
-  ${p}BrickF_DIRTY_LEAF_COUNT]));atomicStore(&${arena}[${p}H_PHASE],${p}PhaseRepairingBricks);}
+  ${p}H_COVERED_PRODUCER_RECEIPTS])){
+  atomicStore(&${arena}[${p}H_FAULT],
+   ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.producerCoverageGap}u);
+  atomicStore(&${arena}[${p}H_FIRST_FAULT_FAMILY],${p}BrickFamily);
+  atomicStore(&${arena}[${p}H_FIRST_FAULT_ID],${p}Invalid);
+  atomicStore(&${arena}[${p}H_PHASE],${p}PhaseFault);return;}
+ let count=atomicLoad(&${arena}[${p}BrickF_CANDIDATE_WRITE_COUNT]);
+ for(var rank=0u;rank<count;rank+=1u){
+  let brick=atomicLoad(&${arena}[${p}BrickChangedList+rank]);
+  if(brick>=${p}BrickCapacity){atomicStore(&${arena}[${p}H_FAULT],
+    ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.invalidCellRange}u);
+   atomicStore(&${arena}[${p}H_FIRST_FAULT_FAMILY],${p}BrickFamily);
+   atomicStore(&${arena}[${p}H_FIRST_FAULT_ID],brick);
+   atomicStore(&${arena}[${p}H_PHASE],${p}PhaseFault);return;}
+  let oldState=atomicLoad(&${arena}[${p}BrickOldState+brick]);
+  let newState=atomicLoad(&${arena}[${p}BrickNewState+brick]);
+  if(oldState!=newState){let oldRange=ptrBrickCellRange(brick,oldState);
+   let cause=atomicLoad(&${arena}[${p}BrickCause+brick]);
+   if(!pcmCellQueueTopologyRetiredRange(oldRange.x,oldRange.y,cause)){
+    atomicStore(&${arena}[${p}H_FAULT],
+     ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.invalidCellRange}u);
+    atomicStore(&${arena}[${p}H_FIRST_FAULT_FAMILY],${p}BrickFamily);
+    atomicStore(&${arena}[${p}H_FIRST_FAULT_ID],brick);
+    atomicStore(&${arena}[${p}H_PHASE],${p}PhaseFault);return;}}
+ }
+ atomicStore(&${arena}[${p}H_CHANGED_BRICK_COUNT],count);
+ atomicStore(&${arena}[${p}H_CELL_EXECUTION_COUNT],count);
+ atomicStore(&${arena}[${p}BrickF_WORK_COUNT],count);
+ atomicStore(&${arena}[${p}BrickF_WORK_INDIRECT_X],0u);
+ atomicStore(&${arena}[${p}H_PHASE],${p}PhaseExecutingCells);}
 var<workgroup>${p}LeafCounts:array<u32,8>;
 fn ${p}RepairBrickLeaf(lane:u32,work:u32){
  let dirtyCount=atomicLoad(&${arena}[${p}BrickF_DIRTY_LEAF_COUNT]);let invocationOk=work<dirtyCount;
@@ -242,99 +287,27 @@ fn ${p}RepairBrickLeaf(lane:u32,work:u32){
  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
  ${p}RepairBrickLeaf(lane,wid.x);}
 ${reduceEntries(layout.brick)}
-fn ptrChangedBrickInvocation(rank:u32)->u32{let root=atomicLoad(&${arena}[
- ${p}BrickTreeBase(${p}BrickLevelCount-1u)]);if(rank>=root){return ${p}Invalid;}
- var node=0u;var remaining=rank;var level=${p}BrickLevelCount-1u;loop{if(level==0u){break;}
-  let childBase=node*${p}Branch;var selected=${p}Invalid;
-  for(var child=0u;child<${p}Branch;child+=1u){let at=childBase+child;
-   if(at>=${p}BrickTreeCount(level-1u)){break;}
-   let count=atomicLoad(&${arena}[${p}BrickTreeBase(level-1u)+at]);
-   if(remaining<count){selected=at;break;}remaining-=count;}
-  if(selected==${p}Invalid){return ${p}Invalid;}node=selected;level-=1u;}
- let first=node*${p}LeafBits;for(var word=0u;word<8u;word+=1u){let bits=atomicLoad(&${arena}[
-  ${p}BrickBits+node*8u+word]);let count=countOneBits(bits);if(remaining>=count){
-  remaining-=count;continue;}for(var bit=0u;bit<32u;bit+=1u){if((bits&(1u<<bit))==0u){continue;}
-  if(remaining==0u){let id=first+word*32u+bit;return select(${p}Invalid,id,
-   id<${p}BrickCapacity);}remaining-=1u;}}return ${p}Invalid;}
-@compute @workgroup_size(1) fn finalizeSparseCM12PressureTopologyBrickPlan(){
- if(atomicLoad(&${arena}[${p}H_PHASE])!=${p}PhaseRepairingBricks){return;}
- if(atomicLoad(&${arena}[${p}BrickF_REPAIRED_LEAF_COUNT])!=atomicLoad(&${arena}[
-  ${p}BrickF_DIRTY_LEAF_COUNT])){${p}Fail(${p}BrickFamily,
-  ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.brickRepairGap}u,${p}Invalid);return;}
- let root=atomicLoad(&${arena}[${p}BrickTreeBase(${layout.brick.treeLevelCounts.length - 1}u)]);
- atomicStore(&${arena}[${p}H_CHANGED_BRICK_COUNT],root);
- atomicStore(&${arena}[${p}BrickF_WORK_COUNT],root);
- atomicStore(&${arena}[${p}BrickF_WORK_INDIRECT_X],root);
- atomicStore(&${arena}[${p}H_PHASE],${p}PhaseExecutingCells);}
-fn ${p}RepairCell(cell:u32,current:bool,cause:u32){
- let enabled=ptrApplyPressureCellClassification(cell,current);
- _=pcmCellSetCandidate(cell,enabled,cause,false);}
-@compute @workgroup_size(64) fn repairSparseCM12PressureTopologyChangedBricks(
- @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
- let phaseOk=atomicLoad(&${arena}[${p}H_PHASE])==${p}PhaseExecutingCells;
- let selected=ptrChangedBrickInvocation(wid.x);let brick=select(0u,selected,
-  phaseOk&&selected!=${p}Invalid);let selectedOk=phaseOk&&selected!=${p}Invalid;
- let oldState=atomicLoad(&${arena}[${p}BrickOldState+brick]);
- let newState=atomicLoad(&${arena}[${p}BrickNewState+brick]);
- let cause=atomicLoad(&${arena}[${p}BrickCause+brick]);
- let oldRange=ptrBrickCellRange(brick,oldState);let newRange=ptrBrickCellRange(brick,newState);
- let oldRangeOk=oldRange.x+oldRange.y>=oldRange.x
-  &&oldRange.x+oldRange.y<=ptrCellCapacity();
- let newRangeOk=newRange.x+newRange.y>=newRange.x
-  &&newRange.x+newRange.y<=ptrCellCapacity();
- let workOk=selectedOk&&oldRangeOk&&newRangeOk;
- if(lane==0u&&selectedOk&&!oldRangeOk){${p}Fail(${p}BrickFamily,
-  ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.invalidCellRange}u,brick);}
- if(lane==0u&&selectedOk&&!newRangeOk){${p}Fail(${p}BrickFamily,
-  ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.invalidCellRange}u,brick);}
- if(workOk&&oldState!=newState){for(var local=lane;local<oldRange.y;local+=64u){
-  ${p}RepairCell(oldRange.x+local,false,cause);}}
- if(workOk){for(var local=lane;local<newRange.y;local+=64u){let cell=newRange.x+local;
-  ${p}RepairCell(cell,true,cause);}}
- workgroupBarrier();if(lane==0u&&workOk){atomicAdd(&${arena}[${p}H_CELL_EXECUTION_COUNT],1u);}}
-@compute @workgroup_size(1) fn finalizeSparseCM12PressureTopologyCellExecution(){
+@compute @workgroup_size(1) fn finalizeSparseCM12BoundedPressureTopologyRepair(){
  if(atomicLoad(&${arena}[${p}H_PHASE])!=${p}PhaseExecutingCells){return;}
  if(atomicLoad(&${arena}[${p}H_CELL_EXECUTION_COUNT])!=atomicLoad(&${arena}[
-  ${p}H_CHANGED_BRICK_COUNT])){${p}Fail(${p}BrickFamily,
-  ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.cellExecutionGap}u,${p}Invalid);return;}
-}
-@compute @workgroup_size(1) fn sealSparseCM12PressureTopologyRowImage(){
- if(atomicLoad(&${arena}[${p}H_PHASE])!=${p}PhaseExecutingCells){return;}
- if(atomicLoad(&${arena}[${p}H_TOPOLOGY_GENERATION])!=ptrTopologyGeneration()){
-  ${p}Fail(${p}BrickFamily,${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.topologyGenerationGap}u,
-  ${p}Invalid);return;}
- if(atomicLoad(&${arena}[${p}H_PCM_CELL_GENERATION])!=ptrPCMCellAcceptedGeneration()
-  ||atomicLoad(&${arena}[${p}H_PCM_ROW_GENERATION])!=ptrPCMRowAcceptedGeneration()){
-  ${p}Fail(${p}BrickFamily,${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.pcmGenerationGap}u,
-  ${p}Invalid);return;}
- // The direct coefficient image consumes this topology closure after the row
- // frontier is complete. The captured PCA generation must remain its live
- // candidate until PEI accepts the complete fine/coarse image.
- if(atomicLoad(&${arena}[${p}H_COEFFICIENT_GENERATION])
-   !=ptrPressureCoefficientCandidateGeneration()){
-  ${p}Fail(${p}BrickFamily,${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.coefficientGenerationGap}u,
-  ${p}Invalid);return;}
- let count=atomicLoad(&${arena}[${p}H_CHANGED_BRICK_COUNT]);
- atomicStore(&${arena}[${p}H_COMMIT_INDIRECT_X],(count+63u)/64u);
- atomicStore(&${arena}[${p}H_COMMIT_INDIRECT_Y],1u);atomicStore(&${arena}[${p}H_COMMIT_INDIRECT_Z],1u);
- atomicStore(&${arena}[${p}H_PHASE],${p}PhaseAwaitingAcceptance);}
-@compute @workgroup_size(64) fn commitSparseCM12PressureTopologyBrickStates(
- @builtin(global_invocation_id)gid:vec3u){if(atomicLoad(&${arena}[${p}H_PHASE])
- !=${p}PhaseAwaitingAcceptance){return;}let brick=ptrChangedBrickInvocation(gid.x);
- // Never publish PTR's persistent brick state unless the coefficient image
- // which consumed the same PCM/topology epoch has accepted.
- if(atomicLoad(&${arena}[${p}H_COEFFICIENT_GENERATION])
-   !=ptrPressureCoefficientAcceptedGeneration()){return;}
- if(brick==${p}Invalid){return;}atomicAdd(&${arena}[${p}H_BRICK_STATE_COMMIT_COUNT],1u);}
-@compute @workgroup_size(1) fn finalizeSparseCM12BoundedPressureTopologyRepair(){
- if(atomicLoad(&${arena}[${p}H_PHASE])!=${p}PhaseAwaitingAcceptance){return;}
+  ${p}H_CHANGED_BRICK_COUNT])){
+  atomicStore(&${arena}[${p}H_FAULT],
+   ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.cellExecutionGap}u);
+  atomicStore(&${arena}[${p}H_FIRST_FAULT_FAMILY],${p}BrickFamily);
+  atomicStore(&${arena}[${p}H_FIRST_FAULT_ID],${p}Invalid);
+  atomicStore(&${arena}[${p}H_PHASE],${p}PhaseFault);return;}
  if(atomicLoad(&${arena}[${p}H_COEFFICIENT_GENERATION])
    !=ptrPressureCoefficientAcceptedGeneration()){
-  ${p}Fail(${p}BrickFamily,${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.coefficientGenerationGap}u,
-  ${p}Invalid);return;}
- if(atomicLoad(&${arena}[${p}H_BRICK_STATE_COMMIT_COUNT])!=atomicLoad(&${arena}[
- ${p}H_CHANGED_BRICK_COUNT])){${p}Fail(${p}BrickFamily,
-  ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.cellExecutionGap}u,${p}Invalid);return;}
+  atomicStore(&${arena}[${p}H_FAULT],
+   ${SPARSE_CM12_PRESSURE_TOPOLOGY_REPAIR_FAULT.coefficientGenerationGap}u);
+  atomicStore(&${arena}[${p}H_FIRST_FAULT_FAMILY],${p}BrickFamily);
+  atomicStore(&${arena}[${p}H_FIRST_FAULT_ID],${p}Invalid);
+  atomicStore(&${arena}[${p}H_PHASE],${p}PhaseFault);return;}
+ // The topology transaction has already published the per-brick state. Its
+ // commit is therefore one accepted-generation receipt, not another sparse
+ // traversal or indirect dispatch.
+ atomicStore(&${arena}[${p}H_BRICK_STATE_COMMIT_COUNT],atomicLoad(&${arena}[
+  ${p}H_CHANGED_BRICK_COUNT]));
  atomicStore(&${arena}[${p}H_ACCEPTED_CHANGED_BRICK_COUNT],atomicLoad(&${arena}[
   ${p}H_CHANGED_BRICK_COUNT]));
  atomicStore(&${arena}[${p}H_ACCEPTED_CELL_EXECUTION_COUNT],atomicLoad(&${arena}[
@@ -342,8 +315,12 @@ fn ${p}RepairCell(cell:u32,current:bool,cause:u32){
  atomicStore(&${arena}[${p}H_ACCEPTED_BRICK_DIRTY_LEAF_COUNT],atomicLoad(&${arena}[
   ${p}BrickF_DIRTY_LEAF_COUNT]));
  atomicStore(&${arena}[${p}H_ACCEPTED_GENERATION],atomicLoad(&${arena}[
-  ${p}H_CANDIDATE_GENERATION]));${p}ZeroIndirects();atomicStore(&${arena}[
-  ${p}H_PHASE],${p}PhaseAccepted);}
+  ${p}H_CANDIDATE_GENERATION]));
+ atomicStore(&${arena}[${p}BrickF_REPAIR_INDIRECT_X],0u);
+ atomicStore(&${arena}[${p}BrickF_WORK_INDIRECT_X],0u);
+ atomicStore(&${arena}[${p}H_COMMIT_INDIRECT_X],0u);
+ atomicStore(&${arena}[${p}H_BRICK_SEED_INDIRECT_X],0u);
+ atomicStore(&${arena}[${p}H_PHASE],${p}PhaseAccepted);}
 ${preflightedTopologyPublication}
 `;
 }

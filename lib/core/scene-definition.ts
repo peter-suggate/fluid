@@ -5,6 +5,8 @@ import { environmentIds } from "./environments";
 import type { MethodProfile } from "./method-contract";
 import { sceneWithEnvironment } from "./scenery-presets";
 import { studioStageFits } from "./studio-stage-scene";
+import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "./voxel-environments";
+import { svoEnvironmentPayloadBytes } from "../svo/svo-environment-coarsening";
 import {
   svoSceneryDetailCellSize_m,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
@@ -321,14 +323,31 @@ function finishSceneDocument(
  * are unaffected either way. What it changes is the picture in the app, and
  * there the answer is the same for an oracle as for anything else.
  *
- * The lattice is the exception, and it is a hard one rather than a preference:
- * the house set is paid for in solver cells, and a container resolved finely
- * enough makes it unaffordable — see `studioStageFits`, which is calibrated on
- * scenes that measurably fail to build. Presenting such a scene full-scene
- * anyway would construct and trace a dry world containing a shell with no
- * faces: the whole cost of the set and none of the picture.
+ * The set is the exception, and it is a hard one rather than a preference: a
+ * set is paid for in voxels, and one too large to resolve does not degrade —
+ * it fails to allocate, and the scene has no picture at all. Two things can
+ * put a stage scene there, and they are different questions with different
+ * answers.
  *
- * Only the *stage* is subject to that. A scene with any other environment has
+ * The first is the *house set* against the scene's lattice: `studioStageFits`,
+ * calibrated on scenes that measurably fail to build. A container it says no to
+ * is seeded with `bareStageSceneryGraph` instead, and presenting that scene
+ * full-scene would construct and trace a dry world containing a shell with no
+ * faces — the whole cost of the set and none of the picture.
+ *
+ * The second is the set the scene *actually carries*, which for a scene with
+ * its own authored graph is not the house set at all and can be far larger than
+ * one. The CM12 paper figures are the case: a plain room shell left to size
+ * itself off a 12.8 m tank expands to seventy metres of 50 mm wall, and 50 mm
+ * is this lattice's own cell, so every metre of it resolves at the finest level
+ * there is. That set claims about 3.5 GiB of voxel payload — more than a
+ * conformant device is obliged to give a single buffer, and eight times the
+ * whole of `ocean-seiche`, house set included. Asking `studioStageFits` about
+ * such a scene is asking about a set it will never receive; it happened to
+ * answer no for the wrong reason and now answers yes, which is why the claim
+ * is measured directly.
+ *
+ * Only the *stage* is subject to either. A scene with any other environment has
  * a room worth presenting whatever it costs, and a definition that states its
  * own mode is not second-guessed here either.
  */
@@ -338,7 +357,46 @@ export function presentationModeForScene(
 ): ScenePresentationMode {
   if (definition.presentationMode) return definition.presentationMode;
   if (definition.environment !== "stage") return "full-scene";
-  return studioStageFits(scene) ? "full-scene" : "fluid-only";
+  if (!studioStageFits(scene)) return "fluid-only";
+  return sceneEnvironmentPayloadBytes(scene) <= SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES
+    ? "full-scene" : "fluid-only";
+}
+
+/**
+ * The voxel payload a stage scene's set may claim and still be presented.
+ *
+ * 256 MiB, which is not a taste: it is WebGPU's guaranteed `maxBufferSize`, the
+ * largest single allocation every conformant device must be able to make. A set
+ * that cannot fit in that is one this gate has no business promising anywhere,
+ * and the estimate it is compared against is a ceiling rather than a reading,
+ * so the number wants to sit in open space rather than at a real limit.
+ *
+ * It does. Measured across the catalog with `svoEnvironmentPayloadBytes`, every
+ * stage scene carrying the house set lands between 2.4 and 30.0 MiB — the whole
+ * ladder, the rigid contacts, the droplet and fill sweeps, `ocean-seiche` at
+ * 10.1 and `power-hybrid-deep-ocean`, the largest, at 30.0. Every scene
+ * carrying its own set lands between 887 MiB and 3.5 GiB. The budget sits in a
+ * thirtyfold gap with nothing in it, so no scene is near enough to the line for
+ * the estimate's looseness to decide its answer.
+ */
+export const SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES = 256 * 1024 * 1024;
+
+/**
+ * What the set a scene carries will claim, at the rungs it will be drawn at.
+ *
+ * The catalog is built here rather than passed in because it is the same cached
+ * catalog the voxeliser will ask for, keyed on the scene and its environment —
+ * so on the path that goes on to build the dry world this is free, and on the
+ * path that does not it is three to seven expanded solids.
+ */
+function sceneEnvironmentPayloadBytes(scene: SceneDescription): number {
+  const environmentId = scene.environment ?? "default";
+  return svoEnvironmentPayloadBytes(
+    environmentProxyPrimitives(buildEnvironmentProxyCatalog(scene, environmentId)),
+    {
+      cellSize_m: scene.voxelDomain.finestCellSize_m,
+      brickSize: scene.voxelDomain.brickSize_cells,
+    });
 }
 
 /** The camera a definition opens on, filled out from the shared default. */

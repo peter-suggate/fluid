@@ -129,11 +129,12 @@ function finePhysicalPageForKey(
     let low = 0, high = count;
     while (low < high) {
       const middle = low + Math.floor((high - low) / 2);
-      if (metadata[4 * middle + 1]! < key) low = middle + 1;
+      const page = worklist[7 + middle]!;
+      if (metadata[4 * page + 1]! < key) low = middle + 1;
       else high = middle;
     }
-    id = low;
-    if (id >= count) return undefined;
+    if (low >= count) return undefined;
+    id = worklist[7 + low]!;
   } else {
     const directoryBase = 7 + capacity;
     if (directoryBase + key >= worklist.length) return undefined;

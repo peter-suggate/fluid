@@ -42,18 +42,25 @@ fn prepareSparseCM12InteriorFaceTiles(@builtin(workgroup_id)wid:vec3u,
     if(bfa1OwnerLocalCoordinate(stableTile,axis,lane)>0u
       &&row!=BFA1_INVALID&&rowKind(row)==0u){bfa1Prepare(row);}}
 }
+fn bfa1SeamAddress(wid:vec3u,lane:u32)->vec4u{
+  let packetOrdinal=bfa1Ordinal(wid);if(packetOrdinal>=BFA1_SEAM_PACKET_COUNT){return vec4u(BFA1_INVALID);}
+  let ordinal=64u*packetOrdinal+lane;if(ordinal>=BFA1_SEAM_COUNT){return vec4u(BFA1_INVALID);}
+  let packed=bfa1Load(BFA1_SEAM_BASE+ordinal);let stableTile=packed>>9u;
+  let address=packed&0x1ffu;let family=address/64u;let ownerLane=address&63u;
+  return vec4u(bfa1StablePacket(stableTile),family,ownerLane,0u);
+}
 @compute @workgroup_size(64)
 fn prepareSparseCM12SeamFacePackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
-  let packetOrdinal=bfa1Ordinal(wid);if(packetOrdinal>=BFA1_SEAM_PACKET_COUNT){return;}
-  let ordinal=64u*packetOrdinal+lane;if(ordinal>=BFA1_SEAM_COUNT){return;}
-  let packed=bfa1Load(BFA1_SEAM_BASE+ordinal);let stableTile=packed>>9u;
-  let address=packed&0x1ffu;let family=address/64u;let ownerLane=address&63u;
-  let packet=bfa1StablePacket(stableTile);var row=BFA1_INVALID;
-  if(family<3u){row=itr1StableRowForOwner(packet,family,ownerLane);
-  }else{row=itr1StablePositiveSparseAirRowAndBucketOwner(
-    packet,family-3u,ownerLane).x;}
-  bfa1Prepare(row);
+  let address=bfa1SeamAddress(wid,lane);if(address.x==BFA1_INVALID||address.y>=3u){return;}
+  bfa1Prepare(itr1StableNegativeBoundaryRowForOwner(address.x,address.y,address.z));
+}
+@compute @workgroup_size(64)
+fn prepareSparseCM12SparseAirFacePackets(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let address=bfa1SeamAddress(wid,lane);if(address.x==BFA1_INVALID||address.y<3u){return;}
+  bfa1Prepare(itr1StablePositiveSparseAirRowAndBucketOwner(
+    address.x,address.y-3u,address.z).x);
 }
 @compute @workgroup_size(64)
 fn projectSparseCM12InteriorFaceTiles(@builtin(workgroup_id)wid:vec3u,
@@ -69,15 +76,15 @@ fn projectSparseCM12InteriorFaceTiles(@builtin(workgroup_id)wid:vec3u,
 @compute @workgroup_size(64)
 fn projectSparseCM12SeamFacePackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
-  let packetOrdinal=bfa1Ordinal(wid);if(packetOrdinal>=BFA1_SEAM_PACKET_COUNT){return;}
-  let ordinal=64u*packetOrdinal+lane;if(ordinal>=BFA1_SEAM_COUNT){return;}
-  let packed=bfa1Load(BFA1_SEAM_BASE+ordinal);let stableTile=packed>>9u;
-  let address=packed&0x1ffu;let family=address/64u;let ownerLane=address&63u;
-  let packet=bfa1StablePacket(stableTile);var row=BFA1_INVALID;
-  if(family<3u){row=itr1StableRowForOwner(packet,family,ownerLane);
-  }else{row=itr1StablePositiveSparseAirRowAndBucketOwner(
-    packet,family-3u,ownerLane).x;}
-  bfa1Project(row);
+  let address=bfa1SeamAddress(wid,lane);if(address.x==BFA1_INVALID||address.y>=3u){return;}
+  bfa1Project(itr1StableNegativeBoundaryRowForOwner(address.x,address.y,address.z));
+}
+@compute @workgroup_size(64)
+fn projectSparseCM12SparseAirFacePackets(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let address=bfa1SeamAddress(wid,lane);if(address.x==BFA1_INVALID||address.y<3u){return;}
+  bfa1Project(itr1StablePositiveSparseAirRowAndBucketOwner(
+    address.x,address.y-3u,address.z).x);
 }
 `;
 }

@@ -5,11 +5,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { createMinimalPowerDamBreak32Scene } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { usePerformanceInstrumentationStore } from
+  "../lib/core/stores/performance-instrumentation-store";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { sparseCM12PressureIterationsFromReceipt } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import {
   assertSparseCM12PressureJournal,
   sparseCM12PressureJournalSchedule,
@@ -33,6 +37,7 @@ const PRESSURE_ITERATIONS = 32;
 
 async function withSolver<T>(
   run: (solver: WebGPUAdaptiveMassSolver, dt_s: number) => Promise<T>,
+  pressureIterations = PRESSURE_ITERATIONS,
 ): Promise<T> {
   await acquireWebGPUExclusiveLock("dawn-test", "sparse-cm12-pressure-journal");
   try {
@@ -52,7 +57,7 @@ async function withSolver<T>(
     const scene = createMinimalPowerDamBreak32Scene();
     const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
       timeStep: "scene",
-      pressureIterations: PRESSURE_ITERATIONS,
+      pressureIterations,
     });
     const solver = await adaptiveMassMethod.createSolverAsync!(
       device, scene, "balanced",
@@ -71,6 +76,7 @@ async function withSolver<T>(
 }
 
 const advance = async (solver: WebGPUAdaptiveMassSolver, time_s: number) => {
+  while (solver.simulationReady === false) await new Promise(setImmediate);
   while (!solver.advanceTo(time_s, [])) await new Promise(setImmediate);
 };
 
@@ -78,20 +84,62 @@ dawnTest("an unarmed advance leaves no capture behind", async () => {
   await withSolver(async (solver, dt_s) => {
     // Reserved but never armed: the region exists and every dispatch that would
     // fill it was skipped on the host, so the header must still read unarmed.
-    assert.ok(solver.pressureJournalLayout.floatCount > 0,
+    assert.ok(solver.sparseWorldUI.control.pressureFilm!.snapshotCapacity > 0,
       "the solver was built with the journal capability");
-    assert.equal(solver.pressureJournalArmed, false);
+    assert.equal(solver.sparseWorldUI.control.pressureFilm!.captureEnabled, false);
     await advance(solver, dt_s);
-    assert.equal(await solver.readPressureJournal(), undefined);
+    assert.equal(await solver.sparseWorldUI.diagnostics.readPressureFilm(), undefined);
   });
+});
+
+dawnTest("live SIM timing publishes the executed-iteration receipt without pausing", async () => {
+  await withSolver(async (solver, dt_s) => {
+    const instrumentation = usePerformanceInstrumentationStore.getState();
+    instrumentation.setMode("timeline");
+    try {
+      await advance(solver, dt_s);
+      const deadline = performance.now() + 10_000;
+      while (solver.info.pressureIterationsExecuted === undefined
+        && performance.now() < deadline) {
+        await new Promise(setImmediate);
+      }
+      assert.equal(solver.info.pressureIterationsEncoded, PRESSURE_ITERATIONS);
+      assert.ok(solver.info.pressureIterationsExecuted !== undefined,
+        "the sampled running frame must publish its four-byte pressure receipt");
+      assert.ok(solver.info.pressureIterationsExecuted! <= PRESSURE_ITERATIONS);
+    } finally {
+      usePerformanceInstrumentationStore.getState().setMode("off");
+    }
+  });
+});
+
+dawnTest("a completed frame seeds the next encoded pressure ceiling", async () => {
+  await withSolver(async (solver, dt_s) => {
+    await advance(solver, dt_s);
+    const deadline = performance.now() + 10_000;
+    while (solver.info.pressureIterationsExecuted === undefined
+      && performance.now() < deadline) {
+      await new Promise(setImmediate);
+    }
+    const executed = solver.info.pressureIterationsExecuted;
+    const encoded = solver.info.pressureIterationsEncoded;
+    assert.ok(executed !== undefined && encoded !== undefined);
+    const expected = sparseCM12PressureIterationsFromReceipt(
+      64, 1e-3, { executed: executed!, encoded: encoded! },
+    );
+
+    await advance(solver, 2 * dt_s);
+    assert.equal(solver.info.pressureIterationsEncoded, expected);
+    assert.ok(expected < 64, "the mini scene must leave adaptive headroom");
+  }, 64);
 });
 
 dawnTest("a captured solve records every encoded iteration, in order", async () => {
   await withSolver(async (solver, dt_s) => {
     await advance(solver, dt_s);
-    assert.equal(solver.armPressureJournal(true), true);
+    assert.equal(solver.sparseWorldUI.control.pressureFilm!.setCaptureEnabled(true), true);
     await advance(solver, 2 * dt_s);
-    const journal = await solver.readPressureJournal();
+    const journal = await solver.sparseWorldUI.diagnostics.readPressureFilm();
     assert.ok(journal, "an armed advance must leave a capture");
     assertSparseCM12PressureJournal(journal!);
 
@@ -116,9 +164,9 @@ dawnTest("a captured solve records every encoded iteration, in order", async () 
 dawnTest("the film agrees with the receipt of the frame it filmed", async () => {
   await withSolver(async (solver, dt_s) => {
     await advance(solver, dt_s);
-    solver.armPressureJournal(true);
+    solver.sparseWorldUI.control.pressureFilm!.setCaptureEnabled(true);
     await advance(solver, 2 * dt_s);
-    const journal = await solver.readPressureJournal();
+    const journal = await solver.sparseWorldUI.diagnostics.readPressureFilm();
     // `info` carries the receipt only once a readback has filled it; reading
     // the field off a solver that was never asked for stats compares the film
     // against an empty object and passes for the wrong reason.
@@ -148,15 +196,15 @@ dawnTest("the film agrees with the receipt of the frame it filmed", async () => 
 dawnTest("snapshots land on the scheduled iterations", async () => {
   await withSolver(async (solver, dt_s) => {
     await advance(solver, dt_s);
-    solver.armPressureJournal(true);
+    solver.sparseWorldUI.control.pressureFilm!.setCaptureEnabled(true);
     await advance(solver, 2 * dt_s);
-    const journal = await solver.readPressureJournal();
+    const journal = await solver.sparseWorldUI.diagnostics.readPressureFilm();
     assert.ok(journal);
     // The host chooses the schedule at encode time and the device chooses the
     // slot with its own cursor. Neither tells the other, so this is where that
     // agreement is proven.
     const expected = sparseCM12PressureJournalSchedule(PRESSURE_ITERATIONS,
-      solver.pressureJournalLayout.snapshotCapacity);
+      solver.sparseWorldUI.control.pressureFilm!.snapshotCapacity);
     assert.deepEqual([...journal!.snapshotIterations], [...expected]);
     assert.ok(expected.length > 0 && expected[0] === 0,
       "the seed must be filmed: the first correction is the largest one");
@@ -165,16 +213,16 @@ dawnTest("snapshots land on the scheduled iterations", async () => {
 
 dawnTest("disarming stops the capture without disturbing the solve", async () => {
   await withSolver(async (solver, dt_s) => {
-    solver.armPressureJournal(true);
+    solver.sparseWorldUI.control.pressureFilm!.setCaptureEnabled(true);
     await advance(solver, dt_s);
-    const captured = await solver.readPressureJournal();
+    const captured = await solver.sparseWorldUI.diagnostics.readPressureFilm();
     assert.ok(captured);
 
-    solver.armPressureJournal(false);
+    solver.sparseWorldUI.control.pressureFilm!.setCaptureEnabled(false);
     await advance(solver, 2 * dt_s);
     // The header is only cleared by an armed frame, so the previous capture
     // survives verbatim: a disarmed advance encodes nothing that touches it.
-    const after = await solver.readPressureJournal();
+    const after = await solver.sparseWorldUI.diagnostics.readPressureFilm();
     assert.ok(after);
     assert.equal(after!.records.length, captured!.records.length);
     assert.equal(after!.executedIterations, captured!.executedIterations);

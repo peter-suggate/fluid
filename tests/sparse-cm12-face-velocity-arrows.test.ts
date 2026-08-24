@@ -144,7 +144,7 @@ dawnTest("Dawn publishes the accepted face bank, and rows that place it",
       };
 
       try {
-        const before = solver.faceVelocitySource;
+        const before = solver.sparseWorldUI.overlays.faceVelocity!;
         assert.ok(before.rowCount > 0, "the default tank must publish gradient rows");
         assert.ok(before.finestCell_m > 0, "the unit face velocity is stored in must be known");
         assert.deepEqual([...before.domainFine], [...dimensions]);
@@ -155,7 +155,7 @@ dawnTest("Dawn publishes the accepted face bank, and rows that place it",
         assert.equal(solver.advanceTo(CM12_PAPER_DT_S, []), true);
         await device.queue.onSubmittedWorkDone();
 
-        const first = solver.faceVelocitySource;
+        const first = solver.sparseWorldUI.overlays.faceVelocity!;
         assert.notEqual(first.faceFloatOffset, restOffset,
           "one advance must swap the published face bank");
         const published = await readFloats(first.state, first.faceFloatOffset, first.rowCount);
@@ -197,7 +197,7 @@ dawnTest("Dawn publishes the accepted face bank, and rows that place it",
         // what the previous step left behind.
         assert.equal(solver.advanceTo(2 * CM12_PAPER_DT_S, []), true);
         await device.queue.onSubmittedWorkDone();
-        const second = solver.faceVelocitySource;
+        const second = solver.sparseWorldUI.overlays.faceVelocity!;
         assert.equal(second.faceFloatOffset, restOffset,
           "the published bank must alternate with parity");
         const latest = await readFloats(second.state, second.faceFloatOffset, second.rowCount);

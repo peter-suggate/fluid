@@ -451,3 +451,140 @@ fn svoLightConeFalloff(light:SvoLightRecord,towardLight:vec3f)->f32{
   return t*t;
 }
 `;
+
+/**
+ * The scene's dominant light, expressed as the directional the water can use.
+ *
+ * The raster water pipeline has no light table. Its entire rig is one key,
+ * resolved by `resolveWaterKeyLight` from `lighting.directional` and nothing
+ * else — so on a set whose illumination is a fixture rather than a sun, the
+ * water is keyed by a fill while everything around it is lit by a lamp. On the
+ * stage that gap is measured rather than argued: the practical delivers about
+ * eighteen at the middle of the tank against the fill's 0.25, which is the same
+ * fifty-fold the frame already shows between the lit floor and a wall the beam
+ * cannot reach.
+ *
+ * This closes it by evaluating the table at one point and handing the winner
+ * back in the shape `lighting.directional` already has, so nothing downstream
+ * has to learn what a fixture is. The evaluation is `dryLightSample`'s,
+ * deliberately restated here in the small — centre sample rather than the
+ * penumbra jitter, same range fade, same shape scale, same beam term — because
+ * the whole point is that the lamp the water is keyed by is the lamp the dry
+ * shader is lighting the floor with, and a second model of the same fixture is
+ * exactly how those two come to disagree about its strength.
+ *
+ * One point, because a directional has one direction. The receiver is the
+ * middle of the container: a fixture is hung to light a vessel, so the vessel's
+ * centre is where its beam is aimed and where the inverse square it arrives
+ * attenuated by should be read.
+ */
+export interface WaterKeyDirectional {
+  readonly direction: [number, number, number];
+  readonly colorLinear: [number, number, number];
+  readonly intensity: number;
+}
+
+const REC709 = [0.2126, 0.7152, 0.0722] as const;
+
+function rec709Luminance(color: Vec3Tuple): number {
+  return REC709[0] * color[0] + REC709[1] * color[1] + REC709[2] * color[2];
+}
+
+interface LightArrival {
+  direction: [number, number, number];
+  radiance: [number, number, number];
+}
+
+/** `dryLightSample` on the CPU, for one receiver and the record's own centre. */
+function lightArrivalAt(light: SvoLightRecord, receiver_m: Vec3Tuple): LightArrival | undefined {
+  const base = light.colorLinear.map((channel) => channel * light.intensity) as [number, number, number];
+  if (!(Math.max(...base) > 0)) return undefined;
+  if (light.kind === "directional") {
+    const length = Math.hypot(...light.direction);
+    if (!(length > 1e-6)) return undefined;
+    return { direction: light.direction.map((axis) => axis / length) as [number, number, number], radiance: base };
+  }
+  const offset = light.position_m.map((axis, index) => axis - receiver_m[index]) as [number, number, number];
+  const distanceSquared = offset[0] ** 2 + offset[1] ** 2 + offset[2] ** 2;
+  if (!(distanceSquared > 1e-10)) return undefined;
+  if (light.range_m > 0 && distanceSquared >= light.range_m ** 2) return undefined;
+  const distance = Math.sqrt(distanceSquared);
+  const towardLight = offset.map((axis) => axis / distance) as [number, number, number];
+  const rangeFade = light.range_m > 0
+    ? Math.min(1, Math.max(0, 1 - distance / light.range_m)) ** 2
+    : 1;
+  let shapeScale = 1 / Math.max(1, distanceSquared);
+  if (light.kind === "sphereArea") {
+    const area = 4 * Math.PI * light.radius_m ** 2;
+    shapeScale = area / Math.max(area, distanceSquared);
+  }
+  if (light.kind === "rectangleArea") {
+    const area = 4 * light.halfWidth_m * light.halfHeight_m;
+    const axisLength = Math.hypot(...light.direction);
+    const facing = axisLength > 1e-9
+      ? Math.max(0, -(light.direction[0] * towardLight[0] + light.direction[1] * towardLight[1]
+        + light.direction[2] * towardLight[2]) / axisLength)
+      : 0;
+    shapeScale = facing * area / Math.max(area, distanceSquared);
+  }
+  if (light.kind === "spot") {
+    const axisLength = Math.hypot(...light.direction);
+    const alignment = axisLength > 1e-9
+      ? -(light.direction[0] * towardLight[0] + light.direction[1] * towardLight[1]
+        + light.direction[2] * towardLight[2]) / axisLength
+      : -1;
+    const cosOuter = light.cone?.cosOuter ?? -1;
+    const cosInner = light.cone?.cosInner ?? 1;
+    const beam = Math.min(1, Math.max(0, (alignment - cosOuter) / Math.max(cosInner - cosOuter, 1e-4)));
+    shapeScale *= beam * beam;
+  }
+  const radiance = base.map((channel) => channel * rangeFade * shapeScale) as [number, number, number];
+  if (!(Math.max(...radiance) > 0)) return undefined;
+  return { direction: towardLight, radiance };
+}
+
+/**
+ * Reduce a published light table to the one key the water is entitled to.
+ *
+ * The authored directional is in the table as a record like any other, so it
+ * competes on the same footing and wins on any set where no fixture reaches the
+ * water — which is what keeps every sunlit scene exactly where it was.
+ */
+export function waterKeyDirectionalFromSceneLights(
+  records: readonly SvoLightRecord[],
+  receiver_m: Vec3Tuple,
+): WaterKeyDirectional | undefined {
+  let best: LightArrival | undefined;
+  let bestLuminance = 0;
+  let bestIsDirectional = false;
+  for (const light of records) {
+    const arrival = lightArrivalAt(light, receiver_m);
+    if (!arrival) continue;
+    const luminance = rec709Luminance(arrival.radiance);
+    if (!(luminance > bestLuminance)) continue;
+    bestLuminance = luminance;
+    best = arrival;
+    bestIsDirectional = light.kind === "directional";
+  }
+  // Declining is not the same as answering with the directional, and the
+  // difference is a bit. Round-tripping that record through here — normalise
+  // its direction, divide its radiance by its own luminance, let
+  // `resolveWaterKeyLight` normalise and multiply both back — is the identity
+  // in exact arithmetic and a last-place drift in floating point, so a set with
+  // no fixture over its water would have had its key move by an ULP for no
+  // reason at all. Saying nothing hands the caller back to the authored path
+  // untouched, which is what "every sunlit scene is where it was" has to mean
+  // if it is to be worth asserting.
+  if (bestIsDirectional) return undefined;
+  if (!best || !(bestLuminance > 0)) return undefined;
+  // Split back into a hue and a strength rather than handing over the radiance
+  // as a colour: `resolveWaterKeyLight` guards the intensity and not the
+  // channels, and a split that puts all of the magnitude in the guarded field
+  // is the only one that leaves that guard meaning anything. Their product is
+  // the radiance again, exactly.
+  return {
+    direction: best.direction,
+    colorLinear: best.radiance.map((channel) => channel / bestLuminance) as [number, number, number],
+    intensity: bestLuminance,
+  };
+}

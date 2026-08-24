@@ -183,8 +183,24 @@ export function buildSvoPrimitiveCandidates(
   descriptors: readonly SvoFinitePrimitiveDescriptor[],
   options: { readonly skippedOwnerId?: number } = {},
 ): SvoPrimitiveCandidatePublication {
-  if (descriptors.length < 1 || descriptors.length > SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES) {
-    throw new RangeError(`SVO primitive candidate index needs 1-${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES} primitives`);
+  if (descriptors.length > SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES) {
+    throw new RangeError(`SVO primitive candidate index supports at most ${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES} primitives`);
+  }
+  // A terrain shell is analytic metadata, not a finite primitive. Terrain-only
+  // worlds therefore have a complete and useful SVO publication with no BVH
+  // leaves. The GPU traversal already treats a zero node count as an immediate
+  // miss; publishing that state explicitly keeps the rest of the dry-scene
+  // contract total without inventing invisible placeholder geometry.
+  if (descriptors.length === 0) {
+    const packedRecords = new Uint32Array(new ArrayBuffer(0));
+    return Object.freeze({
+      version: SVO_PRIMITIVE_CANDIDATE_VERSION,
+      primitiveCount: 0,
+      rootNodeIndex: 0,
+      nodes: Object.freeze([]),
+      packedRecords,
+      cacheKey: `svo-primitive-candidates-v${SVO_PRIMITIVE_CANDIDATE_VERSION}:${hashPacked(packedRecords)}`,
+    });
   }
   const entries = descriptors.map((descriptor, primitiveIndex) => ({
     primitiveIndex,
@@ -238,6 +254,7 @@ export function refitSvoPrimitiveCandidates(
 ): SvoPrimitiveCandidatePublication {
   validateCandidatePublication(publication);
   if (descriptors.length !== publication.primitiveCount) throw new Error("SVO primitive candidate refit count mismatch");
+  if (publication.primitiveCount === 0) return publication;
   const nodes = new Array<SvoPrimitiveCandidateNode>(publication.nodes.length);
   const refit = (nodeIndex: number): SvoPrimitiveCandidateBounds => {
     const node = publication.nodes[nodeIndex];
@@ -281,6 +298,14 @@ export function createSvoPrimitiveCandidateRefitPlan(
   source: SvoPrimitiveCandidatePublication,
 ): SvoPrimitiveCandidateRefitPlan {
   validateCandidatePublication(source);
+  if (source.primitiveCount === 0) {
+    return Object.freeze({
+      publication: source,
+      parentByNode: new Int32Array(0),
+      depthByNode: new Uint16Array(0),
+      leafByPrimitive: new Int32Array(0),
+    });
+  }
   const nodes = source.nodes.map((node) => ({
     minimum_m: { ...node.minimum_m }, maximum_m: { ...node.maximum_m },
     leftOrPrimitiveIndex: node.leftOrPrimitiveIndex,
@@ -357,8 +382,15 @@ export function refitSvoPrimitiveCandidatesIncremental(
 
 function validateCandidatePublication(publication: SvoPrimitiveCandidatePublication): void {
   if (publication.version !== SVO_PRIMITIVE_CANDIDATE_VERSION) throw new Error("SVO primitive candidate version mismatch");
-  if (!Number.isSafeInteger(publication.primitiveCount) || publication.primitiveCount < 1
+  if (!Number.isSafeInteger(publication.primitiveCount) || publication.primitiveCount < 0
     || publication.primitiveCount > SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES) throw new Error("SVO primitive candidate count is invalid");
+  if (publication.primitiveCount === 0) {
+    if (publication.rootNodeIndex !== 0 || publication.nodes.length !== 0
+      || publication.packedRecords.byteLength !== 0) {
+      throw new Error("Empty SVO primitive candidate publication is invalid");
+    }
+    return;
+  }
   if (publication.nodes.length < 1 || publication.nodes.length > SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES
     || publication.packedRecords.byteLength !== publication.nodes.length * SVO_PRIMITIVE_RECORD_STRIDE_BYTES) {
     throw new Error("SVO primitive candidate node publication is incomplete");
@@ -437,6 +469,10 @@ export function querySvoPrimitiveCandidates(
   publication: SvoPrimitiveCandidatePublication,
   ray: SvoPrimitiveRay,
 ): Readonly<{ primitiveIndices: readonly number[]; nodeVisits: number; maximumStackDepth: number }> {
+  if (publication.primitiveCount === 0) {
+    validateCandidatePublication(publication);
+    return Object.freeze({ primitiveIndices: Object.freeze([]), nodeVisits: 0, maximumStackDepth: 0 });
+  }
   const stack = [publication.rootNodeIndex], candidates: number[] = [];
   let nodeVisits = 0, maximumStackDepth = 1;
   while (stack.length > 0) {
