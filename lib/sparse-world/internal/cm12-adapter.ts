@@ -6,6 +6,7 @@ import { sparseCM12TileClonePoolCapacity } from
   "../../methods/adaptive-mass/sparse-cm12-tile-clone-pool";
 import type { SparseCM12RigidResources } from
   "../../methods/adaptive-mass/webgpu-sparse-cm12-rigid-coupling";
+import type { TankWallField } from "../../core/tank-wall-field";
 import {
   WebGPUSparseCM12Resident,
   type SharpeningTrace,
@@ -112,6 +113,7 @@ export interface CM12SparseWorldRuntime {
   readTracers(): ReturnType<WebGPUSparseCM12Resident["readTracers"]>;
   armPressureJournal(armed: boolean): boolean;
   readPressureJournal(): ReturnType<WebGPUSparseCM12Resident["readPressureJournal"]>;
+  setTankWallField(field: TankWallField): void;
   setRefinementRegionParameters(parameters: ArrayBuffer): void;
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number): void;
   encodeLiquidInjection(
@@ -145,6 +147,8 @@ export interface CM12SparseWorldDeveloperTrace {
   readActivitySnapshot(): ReturnType<WebGPUSparseCM12Resident["readActivitySnapshot"]>;
   readPresentationPageAllocatorReceiptQA(): ReturnType<
     WebGPUSparseCM12Resident["readPresentationPageAllocatorReceiptQA"]>;
+  readWorldGrowthReceiptQA(): ReturnType<
+    WebGPUSparseCM12Resident["readWorldGrowthReceiptQA"]>;
   readPhase1TransportReceiptQA(): ReturnType<
     WebGPUSparseCM12Resident["readPhase1TransportReceiptQA"]>;
   readPhase1TransportProfileQA(): ReturnType<
@@ -323,6 +327,7 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   readTracers() { return this.resident.readTracers(); }
   armPressureJournal(armed: boolean) { return this.resident.armPressureJournal(armed); }
   readPressureJournal() { return this.resident.readPressureJournal(); }
+  setTankWallField(field: TankWallField) { this.resident.setTankWallField(field); }
   setRefinementRegionParameters(parameters: ArrayBuffer) {
     this.resident.setRefinementRegionParameters(parameters);
   }
@@ -353,6 +358,9 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   readActivitySnapshot() { return this.resident.readActivitySnapshot(); }
   readPresentationPageAllocatorReceiptQA() {
     return this.resident.readPresentationPageAllocatorReceiptQA();
+  }
+  readWorldGrowthReceiptQA() {
+    return this.resident.readWorldGrowthReceiptQA();
   }
   readPhase1TransportReceiptQA() { return this.resident.readPhase1TransportReceiptQA(); }
   readPhase1TransportProfileQA() { return this.resident.readPhase1TransportProfileQA(); }

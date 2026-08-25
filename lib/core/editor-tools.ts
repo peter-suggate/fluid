@@ -136,7 +136,7 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     id: "tank-wall-cut",
     label: "CUT OPENING",
     shortcut: "k",
-    hint: "drag corner-to-corner on any tank wall to remove that rectangle · release to cut the opening",
+    hint: "drag corner-to-corner on any tank wall · pull through the floor to include the bottom row",
     status: "active",
   },
   // A ball is not a coarser brush. The brushes quantize to the brick lattice,

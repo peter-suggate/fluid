@@ -5,7 +5,6 @@ import {
   type SparseAtlasCompositeCell,
   type SparseAtlasGradientRow,
 } from "./sparse-atlas-composite-projection";
-import { sparseCM12TileClonePoolCapacity } from "./sparse-cm12-tile-clone-pool";
 import { sparseAtlasScalarsHaveHorizontalD4Symmetry } from
   "./sparse-atlas-surface-conditioning";
 import {
@@ -17,6 +16,11 @@ import {
   type SparseBrickResolution,
 } from "./sparse-brick-atlas";
 import { CM12_SHARPENING_TRACE_STEPS } from "../../core/cm12-numerics";
+import {
+  tankWallOpeningFraction,
+  type TankWallField,
+  type TankWallSide,
+} from "../../core/tank-wall-field";
 import type { SphericalContainerFineGeometry } from "../../core/spherical-container";
 import type { GPUFluidFaceVelocitySource } from "../../core/webgpu-face-velocity-overlay";
 import type { GPUFluidTracerSource } from "../../core/webgpu-tracer-overlay";
@@ -54,8 +58,6 @@ import {
   type SparseCM12PressureRepairLayout,
 } from "./webgpu-sparse-cm12-resident.wgsl";
 import {
-  SPARSE_CM12_LOGICAL_OWNER_INVALID,
-  SPARSE_CM12_LOGICAL_OWNER_RECORD_WORDS,
   createSparseCM12LogicalOwnerDirectory,
 } from "./sparse-cm12-logical-owner-directory";
 import { createSparseCM12TransportExecutionImage,
@@ -101,6 +103,12 @@ import {
   sparseCM12TopologyEffectsIndirectByteOffset,
   type SparseCM12TopologyEffectsAuthorityLayout,
 } from "./sparse-cm12-topology-effects-authority";
+import {
+  SPARSE_CM12_WORLD_DIRECTORY_HEADER,
+  createSparseCM12WorldDirectoryInitialWords,
+  createSparseCM12WorldDirectoryLayout,
+  type SparseCM12WorldDirectoryLayout,
+} from "./sparse-cm12-world-directory";
 import {
   SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER,
   SPARSE_CM12_PHASE1_TRANSPORT_QA_MAGIC,
@@ -532,18 +540,23 @@ export interface SparseCM12StageEncodeContext<Stage extends SparseCM12ResidentSt
 
 const WORKGROUP_SIZE = 64;
 /** Small predefined call-graph families amortize shared helper compilation.
- * With lexical declaration slicing in place, eight roots remain bounded while
- * avoiding two hundred distinct Chrome/Metal modules per solver family. */
-const SPARSE_CM12_SIMULATION_SHADER_ENTRY_CHUNK_SIZE = 1;
+ * Chunks are submitted and released serially below. Four roots keep each Metal
+ * compiler unit modest without returning to hundreds of one-use modules. */
+const SPARSE_CM12_SIMULATION_SHADER_ENTRY_CHUNK_SIZE = 4;
 
 export function sparseCM12PresentationPageAllocatorWGSL(
   brickCount: number,
+  initialBrickCount: number,
   brickRecordBaseWords: number,
   layout: SparseCM12FramePlanPresentationLayout,
+  worldDirectoryLayout?: SparseCM12WorldDirectoryLayout,
+  coordinateOffsetPages: readonly [number, number, number] = [0, 0, 0],
+  brickDimensions: readonly [number, number, number] = [1, 1, 1],
 ): string {
   return /* wgsl */ `
 const INVALID:u32=0xffffffffu;
 const BRICK_COUNT:u32=${brickCount}u;
+const INITIAL_BRICK_COUNT:u32=${initialBrickCount}u;
 const BRICK_RECORD_BASE:u32=${brickRecordBaseWords}u;
 const ACTIVITY_HEADER:u32=${ACTIVITY_HEADER_WORDS}u;
 const ACTIVITY_RECORD_WORDS:u32=${ACTIVITY_RECORD_WORDS}u;
@@ -555,6 +568,7 @@ const WORKLIST_HEADER:u32=${FINE_LEVELSET_WORKSET_HEADER_WORDS}u;
 @group(0)@binding(1)var<storage,read_write>activity:array<atomic<u32>>;
 @group(0)@binding(2)var<storage,read_write>metadata:array<atomic<u32>>;
 @group(0)@binding(3)var<storage,read_write>worklist:array<atomic<u32>>;
+@group(0)@binding(4)var<storage,read_write>topologyArena:array<atomic<u32>>;
 
 fn reserveSparseCM12PresentationPage()->u32{
   loop{
@@ -576,7 +590,21 @@ fn allocateSparseCM12PresentationPages(@builtin(global_invocation_id)gid:vec3u){
     atomicStore(&activity[ALLOCATOR+1u],1u);
     atomicOr(&activity[7],32u);return;
   }
-  let key=topology[BRICK_RECORD_BASE+2u*brick+1u];
+  var key=topology[BRICK_RECORD_BASE+2u*min(brick,INITIAL_BRICK_COUNT-1u)+1u];
+  if(brick>=INITIAL_BRICK_COUNT){
+    let leaf=${worldDirectoryLayout?.baseWords ?? 0}u
+      +${worldDirectoryLayout?.leafBaseWords ?? 0}u+5u*brick;
+    let coordinate=vec3i(bitcast<i32>(atomicLoad(&topologyArena[leaf])),
+      bitcast<i32>(atomicLoad(&topologyArena[leaf+1u])),
+      bitcast<i32>(atomicLoad(&topologyArena[leaf+2u])))
+      +vec3i(${coordinateOffsetPages[0]},${coordinateOffsetPages[1]},${coordinateOffsetPages[2]});
+    if(any(coordinate<vec3i(0))||any(coordinate>=vec3i(
+      ${brickDimensions[0]},${brickDimensions[1]},${brickDimensions[2]}))){
+      atomicStore(&activity[ALLOCATOR+1u],3u);atomicOr(&activity[7],32u);return;
+    }
+    key=u32(coordinate.x)+${brickDimensions[0]}u
+      *(u32(coordinate.y)+${brickDimensions[1]}u*u32(coordinate.z));
+  }
   atomicStore(&metadata[4u*page],page);
   atomicStore(&metadata[4u*page+1u],key);
   atomicStore(&metadata[4u*page+2u],0u);
@@ -906,11 +934,17 @@ const candidateFloatsPerBrick = (brickFineResolution: number) =>
   + CANDIDATE_FACE_CHANNELS * brickFineResolution ** 2;
 const GPU_TOPOLOGY_PAGE_POOL_MINIMUM = 32;
 const GPU_TOPOLOGY_PAGE_POOL_MAXIMUM = 512;
-const GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS = 4;
+const GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS = 16;
 const GPU_TOPOLOGY_CELL_RECORD_WORDS = 8;
 const gpuTopologyCellPageWords = (brickFineResolution: number) =>
   GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS
-  + brickFineResolution ** 3 * GPU_TOPOLOGY_CELL_RECORD_WORDS;
+  + brickFineResolution ** 3 * GPU_TOPOLOGY_CELL_RECORD_WORDS
+  // Nine structure-of-array row planes, two reserved terms per face,
+  // one six-entry incidence list per cell, and its CSR offsets.
+  + 9 * (3 * (brickFineResolution + 1) * brickFineResolution ** 2)
+  + 4 * (3 * (brickFineResolution + 1) * brickFineResolution ** 2)
+  + brickFineResolution ** 3 + 1
+  + 12 * brickFineResolution ** 3;
 
 export interface SparseCM12TopologyPagePoolPlan {
   readonly pageCapacity: number;
@@ -1075,6 +1109,63 @@ const TEMPLATE_ROW_METADATA_OFFSET_MASK = 0x0fff_ffff;
 const templateRowWord = (
   rowOffset: number, rowCount: number, plane: number, row: number,
 ) => rowOffset + plane * rowCount + row;
+
+export function sparseCM12TankWallRowOpenFractions(
+  words: Uint32Array,
+  rowCount: number,
+  dimensions: readonly [number, number, number],
+  placement: SparseAdaptiveMassAtlas["tankWallPlacement"],
+  field: TankWallField,
+): Float32Array {
+  const result = new Float32Array(rowCount).fill(1);
+  const rowOffset = words[7]!;
+  const floats = new Float32Array(words.buffer, words.byteOffset, words.length);
+  const epsilon = 1e-4;
+  for (let row = 0; row < rowCount; row += 1) {
+    const metadata = words[templateRowWord(rowOffset, rowCount, 1, row)]!;
+    const axis = metadata >>> 30;
+    if (axis === 1 || axis > 2) continue;
+    const center: [number, number, number] = [
+      floats[templateRowWord(rowOffset, rowCount, 6, row)]!,
+      floats[templateRowWord(rowOffset, rowCount, 7, row)]!,
+      floats[templateRowWord(rowOffset, rowCount, 8, row)]!,
+    ];
+    let side: TankWallSide | undefined;
+    let minimum: readonly [number, number, number] = [0, 0, 0];
+    let maximum: readonly [number, number, number] = dimensions;
+    if (placement) {
+      minimum = placement.minimumFine;
+      maximum = placement.maximumFine;
+      if (Math.abs(center[axis] - minimum[axis]) <= epsilon) {
+        side = axis === 0 ? "left" : "front";
+      } else if (Math.abs(center[axis] - maximum[axis]) <= epsilon) {
+        side = axis === 0 ? "right" : "back";
+      }
+    } else if (Math.abs(center[axis]) <= epsilon) {
+      side = axis === 0 ? "left" : "front";
+    } else if (Math.abs(center[axis] - dimensions[axis]) <= epsilon) {
+      side = axis === 0 ? "right" : "back";
+    }
+    if (!side) continue;
+    const area = Math.max(0,
+      floats[templateRowWord(rowOffset, rowCount, 3, row)]!);
+    const width = Math.sqrt(area);
+    if (!(width > 0)) {
+      result[row] = 0;
+      continue;
+    }
+    const uAxis = axis === 0 ? 2 : 0;
+    result[row] = tankWallOpeningFraction(
+      field,
+      side,
+      center[uAxis] - 0.5 * width - minimum[uAxis],
+      center[uAxis] + 0.5 * width - minimum[uAxis],
+      center[1] - 0.5 * width - minimum[1],
+      center[1] + 0.5 * width - minimum[1],
+    );
+  }
+  return result;
+}
 
 function packedTemplateRowTerms(offset: number, count: number): number {
   if (offset > TEMPLATE_ROW_TERM_OFFSET_MASK || count > TEMPLATE_ROW_TERM_COUNT_MASK) {
@@ -1540,7 +1631,7 @@ PackedResidentTopologyTemplates {
     sourceBricks: readonly SparseAdaptiveMassBrick[],
   ) => createSparseAdaptiveMassAtlas(atlas.dimensions, sourceBricks.map((brick) =>
     resampleBrick(brick, choose(brick))), atlas.generation, atlas.boundary,
-    atlas.brickFineResolution, atlas.wallField);
+    atlas.brickFineResolution, atlas.wallField, atlas.tankWallPlacement);
   // One reusable full-grid scratch bounds host construction at accepted plus
   // one transient variant. Only cells/rows touching the mutable frontier are
   // copied into the persistent template library.
@@ -1842,6 +1933,8 @@ interface ResidentStateLayout {
   readonly sharpeningDelta: number; readonly symmetryGamma: number;
   readonly solidCellOpen: number; readonly solidTerrainPhi: number;
   readonly solidRowData: number;
+  /** Authored tank-wall openness, multiplied with moving-solid openness. */
+  readonly wallRowOpen: number;
   /** Four floats per tracer: fine-lattice position, then a live flag. */
   readonly tracers: number;
   /**
@@ -1950,6 +2043,9 @@ export function sparseCM12FinePresentationPlan(
   options: {
     readonly residentBrickKeys?: ReadonlySet<number>;
     readonly pageCapacity?: number;
+    /** Sparse addressing offset only; it allocates no logical-domain table. */
+    readonly coordinateOffsetPages?: readonly [number, number, number];
+    readonly sampleDimensions?: readonly [number, number, number];
   } = {},
 ): SparseCM12FinePresentationPlan {
   const brickFineResolution = atlas.brickFineResolution;
@@ -1958,7 +2054,12 @@ export function sparseCM12FinePresentationPlan(
     throw new RangeError(`Sparse CM12 presentation page ${presentationPageResolution} does not divide brick ladder ${brickFineResolution}`);
   }
   const pagesPerAxis = brickFineResolution / presentationPageResolution;
-  const sampleDimensions = atlas.dimensions;
+  const coordinateOffsetPages = options.coordinateOffsetPages ?? [0, 0, 0];
+  const sampleDimensions = options.sampleDimensions ?? atlas.dimensions;
+  if (coordinateOffsetPages.some((value) => !Number.isSafeInteger(value) || value < 0)
+    || sampleDimensions.some((value) => !Number.isSafeInteger(value) || value < 1)) {
+    throw new RangeError("Sparse CM12 presentation address lattice is invalid");
+  }
   const brickDimensions = sampleDimensions.map((value) =>
     Math.ceil(value / presentationPageResolution)) as
     [number, number, number];
@@ -1975,7 +2076,8 @@ export function sparseCM12FinePresentationPlan(
     // This makes cost proportional to leaves while preserving deep liquid and
     // closed walls in the global presentation.
     if (spanBricks > 1) {
-      const coordinate = source.coordinate.map((value) => pagesPerAxis * value) as
+      const coordinate = source.coordinate.map((value, axis) =>
+        coordinateOffsetPages[axis]! + pagesPerAxis * value) as
         [number, number, number];
       pages.push({
         key: coordinate[0] + brickDimensions[0]
@@ -1989,9 +2091,9 @@ export function sparseCM12FinePresentationPlan(
     for (let oz = 0; oz < pagesPerAxis; oz += 1)
       for (let oy = 0; oy < pagesPerAxis; oy += 1)
         for (let ox = 0; ox < pagesPerAxis; ox += 1) {
-          const coordinate = [pagesPerAxis * source.coordinate[0] + ox,
-            pagesPerAxis * source.coordinate[1] + oy,
-            pagesPerAxis * source.coordinate[2] + oz] as const;
+          const coordinate = [coordinateOffsetPages[0] + pagesPerAxis * source.coordinate[0] + ox,
+            coordinateOffsetPages[1] + pagesPerAxis * source.coordinate[1] + oy,
+            coordinateOffsetPages[2] + pagesPerAxis * source.coordinate[2] + oz] as const;
           if (coordinate.some((value, axis) => value >= brickDimensions[axis])) continue;
           pages.push({
             key: coordinate[0] + brickDimensions[0]
@@ -2049,7 +2151,8 @@ export function sparseCM12FinePresentationPlan(
     metadata,
     worklist,
     plan: {
-      domainOrigin: [0, 0, 0],
+      domainOrigin: coordinateOffsetPages.map((value) =>
+        -value * presentationPageResolution) as [number, number, number],
       finestCellDimensions: sampleDimensions,
       finestCellWidth: 1,
       fineFactor: 1,
@@ -2136,6 +2239,20 @@ export interface SparseCM12PresentationPageAllocatorReceipt {
   readonly highWaterMark: number;
   readonly cloneCount: number;
   readonly capacity: number;
+}
+
+export interface SparseCM12WorldGrowthReceipt {
+  readonly initialLeaves: number;
+  readonly liveLeaves: number;
+  readonly capacity: number;
+  readonly insertionFaults: number;
+  readonly capacityFaults: number;
+  readonly boundsGeneration: number;
+  readonly minimum: readonly [number, number, number];
+  readonly maximumExclusive: readonly [number, number, number];
+  readonly synthesizedTopologyPages: number;
+  readonly dynamicLiquidMassFineCells: number;
+  readonly furthestLiquidLeafCoordinate?: readonly [number, number, number];
 }
 
 /** Explicit QA materialization. Production rendering consumes sparse buffers
@@ -2262,7 +2379,8 @@ function residentStateLayout(
   cellCount: number,
   rowCount: number,
   denseCellCount: number,
-  rigidCoupling: boolean,
+  cutCellState: boolean,
+  wallField: boolean,
   tracerCount: number,
   journal: SparseCM12PressureJournalCapacityRequest = {},
 ): ResidentStateLayout {
@@ -2278,9 +2396,10 @@ function residentStateLayout(
     liquid: cells(), theta: rows(), residual: cells(), preconditioned: cells(),
     direction: cells(), applied: cells(), divergence: cells(),
     sharpeningDelta: cells(), symmetryGamma: cells(),
-    solidCellOpen: rigidCoupling ? cells() : 0,
-    solidTerrainPhi: rigidCoupling ? cells() : 0,
-    solidRowData: rigidCoupling ? solidRows() : 0,
+    solidCellOpen: cutCellState ? cells() : 0,
+    solidTerrainPhi: cutCellState ? cells() : 0,
+    solidRowData: cutCellState ? solidRows() : 0,
+    wallRowOpen: wallField ? rows() : 0,
     // Tracers are presentation-only and are sized by the domain rather than by
     // the topology, so they sit past every physics field: a re-meshed frame
     // changes cell counts, and a marker must not silently land on a pressure
@@ -2700,6 +2819,7 @@ export class WebGPUSparseCM12Resident {
   private readonly legacyHostAuthorityOracleForQA: boolean;
   private legacyHostAuthorityParityForQA = 0;
   private legacyHostD4AuthorityForQA: boolean;
+  private readonly horizontalD4Authority: boolean;
   private readonly framePlanIndirectArguments: GPUBuffer;
   private readonly presentationIndirectArguments: GPUBuffer;
   private readonly frameControlIndirectArguments: GPUBuffer;
@@ -2860,7 +2980,14 @@ export class WebGPUSparseCM12Resident {
     private readonly pressureFineEdgeImageBaseWords: number,
     private readonly topologyWorklistBaseBytes: number,
     private readonly acceptedLeafManifestBaseBytes: number,
+    private readonly topologyPageCapacity: number,
+    private readonly topologyPageDescriptorBaseBytes: number,
+    private readonly topologyPageWords: number,
+    private readonly worldDirectoryLayout: SparseCM12WorldDirectoryLayout,
+    private readonly initialWorldLeafCount: number,
     private readonly templateWords: Uint32Array,
+    private readonly tankWallPlacement: SparseAdaptiveMassAtlas["tankWallPlacement"],
+    private readonly wallFieldEnabled: boolean,
     private readonly boundary?: SphericalContainerFineGeometry,
     private readonly rigidCoupling?: WebGPUSparseCM12RigidCoupling,
     private readonly terrainPresent = false,
@@ -2877,6 +3004,7 @@ export class WebGPUSparseCM12Resident {
     this.presentationPublisherOracleForQA = presentationPublisherOracleForQA;
     this.legacyHostAuthorityOracleForQA = legacyHostAuthorityOracleForQA;
     this.legacyHostD4AuthorityForQA = initialHorizontalD4AuthorityForQA;
+    this.horizontalD4Authority = initialHorizontalD4AuthorityForQA;
     this.tracerLattice = sparseCM12TracerLattice(dimensions);
     this.tracerSource = {
       buffer: this.state,
@@ -3093,6 +3221,16 @@ export class WebGPUSparseCM12Resident {
       : new Set<number>();
     report("Pack resident ownership topology");
     const packed = packResidentTopology(atlas, grid, mutableBrickKeys);
+    const dynamicWorldGrowth = Boolean(atlas.tankWallPlacement);
+    const topologyPagePool = sparseCM12TopologyPagePoolPlan(
+      // Fixed physical headroom, independent of logical extent. Residency is
+      // claimed only by swept-front producers and can later recycle pages.
+      dynamicWorldGrowth ? 1
+        : initiallyActiveBrickKeys.size,
+      !hostTemplateVariants || dynamicWorldGrowth,
+      atlas.brickFineResolution,
+    );
+    const worldLeafCapacity = packed.brickCount + topologyPagePool.pageCapacity;
     report("Build logical owner directory");
     const logicalOwnerDirectory = createSparseCM12LogicalOwnerDirectory(atlas, {
       brickFineResolution: atlas.brickFineResolution,
@@ -3101,51 +3239,36 @@ export class WebGPUSparseCM12Resident {
     const transportExecutionImageLayout = createSparseCM12TransportExecutionImageLayout({
         brickFineResolution: atlas.brickFineResolution as 8 | 16,
         logicalBrickDimensions: logicalOwnerDirectory.layout.logicalBrickDimensions,
-        leafCapacity: atlas.bricks.length,
+        leafCapacity: worldLeafCapacity,
+        maximumSpanBricks: atlas.maximumSpanBricks,
+        logicalSlotsPerLeaf: Math.max(1, ...atlas.bricks.map((brick) => {
+          const span = sparseBrickSpan(brick);
+          const extent = brick.coordinate.map((origin, axis) => Math.max(0,
+            Math.min(span, atlas.brickDimensions[axis]! - origin)));
+          return (extent[2]! - 1) * span * span
+            + (extent[1]! - 1) * span + extent[0]!;
+        })),
       });
-    // The resident owner plane shares the immutable ownership binding. Existing
-    // offsets stay fixed; production uploads two u16 owners per word, while the
-    // self-describing LOD1 records remain available to the explicit QA oracle.
-    const logicalOwnerBaseWords = Math.ceil(packed.words.length / 16) * 16;
-    const canPackLogicalOwner16 = atlas.bricks.length < 0xffff;
-    const uploadUnpackedLogicalOwnerOracle = !canPackLogicalOwner16;
-    const logicalOwnerPacked16BaseWords = canPackLogicalOwner16
-      ? (uploadUnpackedLogicalOwnerOracle
-      ? Math.ceil((logicalOwnerBaseWords + logicalOwnerDirectory.words.length) / 16) * 16
-      : logicalOwnerBaseWords) : undefined;
-    const packedLogicalOwners = new Uint32Array(
-      canPackLogicalOwner16 ? Math.ceil(logicalOwnerDirectory.layout.logicalBrickCount / 2) : 0,
-    );
-    packedLogicalOwners.fill(0xffff_ffff);
-    for (let key = 0; canPackLogicalOwner16
-      && key < logicalOwnerDirectory.layout.logicalBrickCount; key += 1) {
-      const at = logicalOwnerDirectory.layout.recordBaseWords
-        + SPARSE_CM12_LOGICAL_OWNER_RECORD_WORDS * key;
-      const ownerAndSpan = logicalOwnerDirectory.words[at]!;
-      const owner = ownerAndSpan === SPARSE_CM12_LOGICAL_OWNER_INVALID
-        ? 0xffff : ownerAndSpan >>> 5;
-      const word = key >>> 1;
-      const shift = 16 * (key & 1);
-      packedLogicalOwners[word] = (packedLogicalOwners[word]!
-        & ~(0xffff << shift)) | (owner << shift);
-    }
-    const topologyWordCount = logicalOwnerPacked16BaseWords === undefined
-      ? logicalOwnerBaseWords + logicalOwnerDirectory.words.length
-      : logicalOwnerPacked16BaseWords + packedLogicalOwners.length;
-    const topologyWords = new Uint32Array(topologyWordCount);
+    // Runtime ownership is now the signed-coordinate WDR1 hash in the mutable
+    // arena. LOD1 remains a construction oracle for initial TEI compilation,
+    // but its world-volume-sized direct plane is no longer uploaded.
+    const logicalOwnerBaseWords = 0;
+    const logicalOwnerPacked16BaseWords = 0;
+    const topologyWords = new Uint32Array(packed.words.length);
     topologyWords.set(packed.words);
-    if (uploadUnpackedLogicalOwnerOracle) {
-      topologyWords.set(logicalOwnerDirectory.words, logicalOwnerBaseWords);
-    }
-    if (logicalOwnerPacked16BaseWords !== undefined) {
-      topologyWords.set(packedLogicalOwners, logicalOwnerPacked16BaseWords);
-    }
     report(hostTemplateVariants
       ? "Build four-rung and 2:1 seam topology templates"
       : "Pack accepted topology templates");
     const templates = hostTemplateVariants
       ? packResidentTopologyTemplates(atlas, grid)
       : packAcceptedTopologyTemplates(atlas, grid);
+    const dynamicCellsPerPage = atlas.brickFineResolution ** 3;
+    const dynamicRowsPerPage = 3 * (atlas.brickFineResolution + 1)
+      * atlas.brickFineResolution ** 2;
+    const physicsCellCapacity = templates.cellCount
+      + topologyPagePool.pageCapacity * dynamicCellsPerPage;
+    const physicsRowCapacity = templates.rowCount
+      + topologyPagePool.pageCapacity * dynamicRowsPerPage;
     report("Plan resident GPU arenas");
     if (hostTemplateVariants) {
       const cellOffset = templates.words[6]!, rangeOffset = templates.words[11]!;
@@ -3184,22 +3307,41 @@ export class WebGPUSparseCM12Resident {
         }
       }
     }
-    const presentationPageCapacity = sparseCM12TileClonePoolCapacity(
-      initiallyActiveBrickKeys.size,
-    );
+    // Presentation has exactly one physical page slot per possible live leaf.
+    // The generic clone pool's 1024-page minimum was useful for an unbounded
+    // producer, but this producer is already bounded by WDR1's physical leaf
+    // slab. Applying both headrooms retained 4 MiB of fine samples and scanned
+    // 1024 pages even in a twelve-leaf tank scene.
+    const presentationPageCapacity = worldLeafCapacity;
+    const presentationAddressHeadroom = dynamicWorldGrowth
+      ? topologyPagePool.pageCapacity : 0;
+    const presentationCoordinateOffsetPages: [number, number, number] = [
+      presentationAddressHeadroom, 0, presentationAddressHeadroom,
+    ];
+    const presentationSampleDimensions: [number, number, number] = [
+      atlas.dimensions[0] + 2 * presentationAddressHeadroom * presentationPageResolution,
+      atlas.dimensions[1] + presentationAddressHeadroom * presentationPageResolution,
+      atlas.dimensions[2] + 2 * presentationAddressHeadroom * presentationPageResolution,
+    ];
     const fine = sparseCM12FinePresentationPlan(atlas, presentationPageResolution, {
       residentBrickKeys: initiallyActiveBrickKeys,
       pageCapacity: presentationPageCapacity,
+      coordinateOffsetPages: presentationCoordinateOffsetPages,
+      sampleDimensions: presentationSampleDimensions,
     });
     (fine.plan as { finestCellWidth: number; fineCellWidth: number }).finestCellWidth =
       finestCellSize_m;
     (fine.plan as { finestCellWidth: number; fineCellWidth: number }).fineCellWidth =
       finestCellSize_m;
+    (fine.plan as unknown as { domainOrigin: [number, number, number] }).domainOrigin =
+      fine.plan.domainOrigin.map((value) => value * finestCellSize_m) as
+        [number, number, number];
     const tracerLattice = sparseCM12TracerLattice(atlas.dimensions);
     const layout = residentStateLayout(
-      templates.cellCount, templates.rowCount,
+      physicsCellCapacity, physicsRowCapacity,
       atlas.dimensions[0]! * atlas.dimensions[1]! * atlas.dimensions[2]!,
-      Boolean(rigid),
+      Boolean(rigid) || Boolean(atlas.wallField),
+      Boolean(atlas.wallField),
       tracerLattice.count,
       journal?.iterationCapacity
         ? {
@@ -3216,51 +3358,42 @@ export class WebGPUSparseCM12Resident {
       Float64Array.from(grid.cells, (cell) => cell.density),
       Float64Array.from(grid.cells, (cell) => cell.gamma),
     );
-    const cellWorkgroups = Math.ceil(templates.cellCount / WORKGROUP_SIZE);
+    const cellWorkgroups = Math.ceil(physicsCellCapacity / WORKGROUP_SIZE);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const parameters = device.createBuffer({ label: "Sparse CM12 resident parameters",
       size: SPARSE_CM12_PARAMETER_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const topology = uploadBuffer(device, "Sparse CM12 resident topology", topologyWords, storage);
-    // WebGPU buffers start zeroed. Seed only the four nonzero scalar ranges;
-    // PCM bootstrap authors persistent liquid membership for accepted cells.
-    // instead of allocating and uploading the complete (mostly-zero) resident
-    // state on the host. Rigid coupling retains its explicit initialization
-    // until its two strided row flags move to the bootstrap kernel.
-    let state: GPUBuffer;
-    if (rigid) {
-      const initialState = new Float32Array(layout.floatCount);
-      for (let cell = 0; cell < templates.cellCount; cell += 1) {
-        const density = templates.initialDensity[cell]!, gamma = templates.initialGamma[cell]!;
-        initialState[layout.densityA + cell] = density;
-        initialState[layout.densityB + cell] = density;
-        initialState[layout.gammaA + cell] = gamma;
-        initialState[layout.gammaB + cell] = gamma;
-        initialState[layout.solidCellOpen + cell] = 1;
-        initialState[layout.solidTerrainPhi + cell] = -1e6;
+    // WebGPU buffers start zeroed. Upload only the nonzero ranges instead of
+    // materializing the complete (mostly-zero) resident state on the host.
+    const state = device.createBuffer({ label: "Sparse CM12 resident state",
+      size: Math.max(4, 4 * layout.floatCount), usage: storage });
+    const seed = (floatOffset: number, values: Float32Array) => {
+      if (values.byteLength === 0) return;
+      device.queue.writeBuffer(state, 4 * floatOffset, values.buffer as ArrayBuffer,
+        values.byteOffset, values.byteLength);
+    };
+    seed(layout.densityA, templates.initialDensity);
+    seed(layout.densityB, templates.initialDensity);
+    seed(layout.gammaA, templates.initialGamma);
+    seed(layout.gammaB, templates.initialGamma);
+    if (layout.solidRowData !== 0) {
+      seed(layout.solidCellOpen, new Float32Array(physicsCellCapacity).fill(1));
+      seed(layout.solidTerrainPhi, new Float32Array(physicsCellCapacity).fill(-1e6));
+      const solidRows = new Float32Array(3 * physicsRowCapacity);
+      for (let row = 0; row < physicsRowCapacity; row += 1) {
+        solidRows[3 * row] = 1;
+        solidRows[3 * row + 2] = 1;
       }
-      for (let row = 0; row < templates.rowCount; row += 1) {
-        initialState[layout.solidRowData + 3 * row] = 1;
-        initialState[layout.solidRowData + 3 * row + 2] = 1;
-      }
-      state = uploadBuffer(device, "Sparse CM12 resident state", initialState, storage);
-    } else {
-      state = device.createBuffer({ label: "Sparse CM12 resident state",
-        size: Math.max(4, 4 * layout.floatCount), usage: storage });
-      const seed = (floatOffset: number, values: Float32Array) => {
-        if (values.byteLength === 0) return;
-        device.queue.writeBuffer(state, 4 * floatOffset, values.buffer as ArrayBuffer,
-          values.byteOffset, values.byteLength);
-      };
-      seed(layout.densityA, templates.initialDensity);
-      seed(layout.densityB, templates.initialDensity);
-      seed(layout.gammaA, templates.initialGamma);
-      seed(layout.gammaB, templates.initialGamma);
+      seed(layout.solidRowData, solidRows);
+    }
+    if (layout.wallRowOpen !== 0) {
+      seed(layout.wallRowOpen, new Float32Array(physicsRowCapacity).fill(1));
     }
     const partials = device.createBuffer({ label: "Sparse CM12 resident reductions",
       size: Math.max(16, 16 * cellWorkgroups), usage: storage });
     const effectiveTransportVelocityLayout =
-      createSparseCM12EffectiveTransportVelocityLayout(templates.cellCount);
+      createSparseCM12EffectiveTransportVelocityLayout(physicsCellCapacity);
     const effectiveTransportVelocity = effectiveTransportVelocityLayout
       ? device.createBuffer({
         label: "Sparse CM12 accepted effective transport velocity",
@@ -3275,31 +3408,31 @@ export class WebGPUSparseCM12Resident {
       // Transport needs beta, rho/gamma deficit, three momentum-deficit, and
       // one sharpening plane. Pressure reuses the dead arena for
       // cell and row headers plus their stable-ID compact worklists.
-      size: 4 * Math.max(7 * templates.cellCount,
-        templates.cellCount + templates.rowCount + 8),
+      size: 4 * Math.max(7 * physicsCellCapacity,
+        physicsCellCapacity + physicsRowCapacity + 8),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     const activityHistoryWords = ACTIVITY_HEADER_WORDS
-      + ACTIVITY_RECORD_WORDS * packed.brickCount;
+      + ACTIVITY_RECORD_WORDS * worldLeafCapacity;
     const activityAlignmentWords = 64;
     const activityHistoryTailWords = Math.ceil(
       activityHistoryWords / activityAlignmentWords,
     ) * activityAlignmentWords;
     const incrementalActivityLayout = createSparseCM12IncrementalActivityLayout({
       baseWords: activityHistoryTailWords,
-      brickCount: packed.brickCount,
+      brickCount: worldLeafCapacity,
       alignmentWords: activityAlignmentWords,
     });
     const canonicalMembershipLayout = createSparseCM12CanonicalMembershipLayout({
       baseWords: incrementalActivityLayout.totalWords,
-      cellCapacity: templates.cellCount,
-      rowCapacity: templates.rowCount,
+      cellCapacity: physicsCellCapacity,
+      rowCapacity: physicsRowCapacity,
     });
     const framePlanLayout = createSparseCM12FramePlanLayout({
       baseWords: Math.ceil(canonicalMembershipLayout.totalWords
         / activityAlignmentWords)
         * activityAlignmentWords,
-      brickCapacity: packed.brickCount,
+      brickCapacity: worldLeafCapacity,
       brickFineResolution: atlas.brickFineResolution,
       packetCount: 6,
     });
@@ -3310,7 +3443,7 @@ export class WebGPUSparseCM12Resident {
     if (pageCount !== initiallyActiveBrickKeys.size) {
       throw new Error(`FPP1 generation zero requires one page per accepted brick; found ${pageCount}/${initiallyActiveBrickKeys.size}`);
     }
-    const brickPages = new Uint32Array(packed.brickCount).fill(INVALID);
+    const brickPages = new Uint32Array(worldLeafCapacity).fill(INVALID);
     for (let page = 0; page < pageCount; page += 1) {
       const source = fine.metadata[FINE_LEVELSET_METADATA_WORDS * page + 3]!;
       const brick = (source >>> 3) & 0x00ff_ffff;
@@ -3328,7 +3461,7 @@ export class WebGPUSparseCM12Resident {
     const framePlanPresentationLayout = createSparseCM12FramePlanPresentationLayout({
       baseWords: framePlanLayout.totalWords,
       pageCapacity: presentationPageCapacity,
-      brickCapacity: packed.brickCount,
+      brickCapacity: worldLeafCapacity,
       brickFineResolution: atlas.brickFineResolution,
       pageResolution: presentationPageResolution,
       packetIndex: 5,
@@ -3336,7 +3469,7 @@ export class WebGPUSparseCM12Resident {
     const velocityExtensionLayouts = createSparseCM12VelocityExtensionResidentLayouts({
       activityTailWords: framePlanPresentationLayout.totalWords,
       stateTailFloats: layout.transportCharacteristicSupport,
-      cellCapacity: templates.cellCount,
+      cellCapacity: physicsCellCapacity,
       packetCapacity: transportExecutionImageLayout.packetCapacity,
       brickFineResolution: atlas.brickFineResolution as 4 | 8 | 16,
     });
@@ -3359,7 +3492,7 @@ export class WebGPUSparseCM12Resident {
     const phase1TransportQALayout = phase1TransportReceiptForQA
       ? createSparseCM12Phase1TransportQALayout({
         baseWords: Math.ceil(activityTailWords / 64) * 64,
-        cellCapacity: templates.cellCount,
+        cellCapacity: physicsCellCapacity,
       })
       : undefined;
     const phase1TransportProfileBaseWords = undefined;
@@ -3391,7 +3524,7 @@ export class WebGPUSparseCM12Resident {
       initialActivity[h + SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER.version]
         = SPARSE_CM12_PHASE1_TRANSPORT_QA_VERSION;
       initialActivity[h + SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER.cellCapacity]
-        = templates.cellCount;
+        = physicsCellCapacity;
     }
     initialActivity[8] = initiallyActiveBrickKeys.size;
     initialActivity[12] = 1;
@@ -3474,8 +3607,8 @@ export class WebGPUSparseCM12Resident {
         baseWords: pressureWorklistBase.words.length,
         // Mutable PAB/PCM publish once into PEI's ordinary cell-address and
         // B8 membership planes; iterative kernels never revisit their atomics.
-        cellCapacity: templates.cellCount,
-        brickCapacity: packed.brickCount,
+        cellCapacity: physicsCellCapacity,
+        brickCapacity: worldLeafCapacity,
         hierarchyCapacity: Math.max(1,
           pressureHierarchyGroupCounts.reduce((sum, count) => sum + count, 0)),
         brickFineResolution: 8,
@@ -3505,14 +3638,15 @@ export class WebGPUSparseCM12Resident {
     // coefficients need frame-to-frame persistence, so their sole authority
     // follows every transient candidate/scratch use in the same ordinary buffer.
     const pressureScratchBytes = 4 * (pressureEdgeCount + pressureCoarseEdgeCount
-      + 5 * packed.brickCount
+      + 5 * worldLeafCapacity
       + pressureHierarchyGroupCounts.reduce((sum, count, level) =>
         sum + 4 * count + pressureHierarchyEdgeCounts[level]!, 0)
-      + templates.cellCount);
+      + physicsCellCapacity);
     const candidateTransientWords = Math.max(
       pressureScratchBytes / 4,
-      14 * templates.cellCount,
-      candidateFloatsPerBrick(atlas.brickFineResolution) * packed.candidateBrickCount,
+      14 * physicsCellCapacity,
+      candidateFloatsPerBrick(atlas.brickFineResolution)
+        * Math.max(packed.candidateBrickCount, worldLeafCapacity),
     );
     const pressureFineEdgeImageBaseWords = Math.ceil(candidateTransientWords / 64) * 64;
     const candidateState = device.createBuffer({
@@ -3520,15 +3654,12 @@ export class WebGPUSparseCM12Resident {
       size: 4 * Math.max(1, pressureFineEdgeImageBaseWords + pressureEdgeCount),
       usage: storage,
     });
-    const topologyPagePool = sparseCM12TopologyPagePoolPlan(
-      initiallyActiveBrickKeys.size, !hostTemplateVariants, atlas.brickFineResolution,
-    );
     const worklistHeaderWords = 32;
     const cellList0 = worklistHeaderWords;
-    const cellList1 = cellList0 + templates.cellCount;
-    const rowList0 = cellList1 + templates.cellCount;
-    const rowList1 = rowList0 + templates.rowCount;
-    const pageFreeList = rowList1 + templates.rowCount;
+    const cellList1 = cellList0 + physicsCellCapacity;
+    const rowList0 = cellList1 + physicsCellCapacity;
+    const rowList1 = rowList0 + physicsRowCapacity;
+    const pageFreeList = rowList1 + physicsRowCapacity;
     const pageDescriptors = pageFreeList + topologyPagePool.freeListWords;
     // A compact leaf-ID list is the brick/rung view of the same double-
     // buffered accepted topology as the cell and shared-row lists. The two
@@ -3536,11 +3667,11 @@ export class WebGPUSparseCM12Resident {
     const acceptedLeafManifestBase = pageDescriptors + topologyPagePool.descriptorWords;
     const acceptedLeafHeaderWords = 20;
     const acceptedLeafList0 = acceptedLeafHeaderWords;
-    const acceptedLeafList1 = acceptedLeafList0 + packed.brickCount;
-    const acceptedLeafDeltaList = acceptedLeafList1 + packed.brickCount;
-    const acceptedRowMembershipStamps = acceptedLeafDeltaList + packed.brickCount;
-    const acceptedLeafManifestWords = acceptedLeafHeaderWords + 3 * packed.brickCount
-      + templates.rowCount;
+    const acceptedLeafList1 = acceptedLeafList0 + worldLeafCapacity;
+    const acceptedLeafDeltaList = acceptedLeafList1 + worldLeafCapacity;
+    const acceptedRowMembershipStamps = acceptedLeafDeltaList + worldLeafCapacity;
+    const acceptedLeafManifestWords = acceptedLeafHeaderWords + 3 * worldLeafCapacity
+      + physicsRowCapacity;
     const initialLeafIds = atlas.bricks.flatMap((_brick, index) =>
       initialActivity[ACTIVITY_HEADER_WORDS + ACTIVITY_RECORD_WORDS * index + 10] !== 0
         ? [index] : []);
@@ -3577,7 +3708,7 @@ export class WebGPUSparseCM12Resident {
       acceptedLeafManifestBase + acceptedLeafManifestWords,
     );
     initialWorklists.set([1, 1, 0, 0, initialCellIds.length,
-      initialRowIds.length, templates.cellCount, templates.rowCount,
+      initialRowIds.length, physicsCellCapacity, physicsRowCapacity,
       Math.ceil(initialCellIds.length / WORKGROUP_SIZE), 1, 1,
       Math.ceil(initialRowIds.length / WORKGROUP_SIZE), 1, 1,
       cellList0, cellList1, rowList0, rowList1], 0);
@@ -3636,7 +3767,7 @@ export class WebGPUSparseCM12Resident {
       brickFineResolution: atlas.brickFineResolution,
       presentationPageResolution,
       cellWorkgroups,
-      rowWorkgroups: Math.ceil(templates.rowCount / WORKGROUP_SIZE),
+      rowWorkgroups: Math.ceil(physicsRowCapacity / WORKGROUP_SIZE),
       bodyCapacity: rigid ? 12 : 0,
       d4Capable: true,
       rigidCapable: Boolean(rigid),
@@ -3647,7 +3778,7 @@ export class WebGPUSparseCM12Resident {
     const pressureTopologyRepairLayout =
       createSparseCM12PressureTopologyRepairLayout({
         baseWords: frameControl.layout.totalWords,
-        brickCapacity: packed.brickCount,
+        brickCapacity: worldLeafCapacity,
         brickFineResolution: atlas.brickFineResolution,
         presentationPageResolution,
       });
@@ -3658,10 +3789,10 @@ export class WebGPUSparseCM12Resident {
     const persistentPressureCacheLayout =
       createSparseCM12ResidentPersistentPressureCacheLayout({
         baseWords: pressureTopologyRepairLayout.totalWords,
-        cellCount: templates.cellCount,
-        rowCount: templates.rowCount,
+        cellCount: physicsCellCapacity,
+        rowCount: physicsRowCapacity,
         directedEdgeCount: pressureEdgeCount,
-        brickCount: packed.brickCount,
+        brickCount: worldLeafCapacity,
         aggregateEdgeCount: pressureCoarseEdgeCount,
         hierarchyLevelCounts: pressureHierarchyGroupCounts,
         hierarchyEdgeLevelCounts: pressureHierarchyEdgeCounts,
@@ -3866,8 +3997,8 @@ export class WebGPUSparseCM12Resident {
     const topologyEffectsAuthorityLayout = transportExecutionImageLayout
       ? createSparseCM12TopologyEffectsAuthorityLayout({
         baseWords: transportAuthorityTotalWords,
-        ptrCapacity: packed.brickCount,
-        ptrLeafCapacity: Math.ceil(packed.brickCount / 256),
+        ptrCapacity: worldLeafCapacity,
+        ptrLeafCapacity: Math.ceil(worldLeafCapacity / 256),
       }) : undefined;
     if (topologyEffectsAuthorityLayout
       && topologyEffectsAuthorityLayout.totalBytes > 524_288) {
@@ -3893,9 +4024,15 @@ export class WebGPUSparseCM12Resident {
     if (!faceAddressProgram) {
       throw new Error("Sparse CM12 production requires the all-rung BFA1 face program");
     }
+    const worldDirectoryLayout = createSparseCM12WorldDirectoryLayout({
+      initialLeaves: packed.brickCount,
+      growthLeaves: topologyPagePool.pageCapacity,
+      maximumSpanLog: Math.log2(atlas.maximumSpanBricks),
+      baseWords: faceAddressProgram.layout.totalWords,
+    });
     const topologyArena = device.createBuffer({
       label: "Sparse CM12 physical topology templates and worklists",
-      size: Math.max(4, 4 * faceAddressProgram.layout.totalWords),
+      size: Math.max(4, 4 * worldDirectoryLayout.totalWords),
       usage: storage | (topologyEffectsAuthorityLayout ? GPUBufferUsage.INDIRECT : 0),
     });
     device.queue.writeBuffer(topologyArena, 0, templates.words.buffer as ArrayBuffer,
@@ -3957,6 +4094,11 @@ export class WebGPUSparseCM12Resident {
     device.queue.writeBuffer(topologyArena, 4 * faceAddressProgram.layout.baseWords,
       faceAddressProgram.words.buffer as ArrayBuffer,
       faceAddressProgram.words.byteOffset, faceAddressProgram.words.byteLength);
+    const worldDirectoryWords = createSparseCM12WorldDirectoryInitialWords(
+      worldDirectoryLayout, atlas);
+    device.queue.writeBuffer(topologyArena, 4 * worldDirectoryLayout.baseWords,
+      worldDirectoryWords.buffer as ArrayBuffer, worldDirectoryWords.byteOffset,
+      worldDirectoryWords.byteLength);
     const pressureTemplates = uploadBuffer(device,
       "Sparse CM12 read-only pressure topology", pressureTopology,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
@@ -4062,6 +4204,8 @@ export class WebGPUSparseCM12Resident {
           buffer: { type: "storage" } },
         { binding: 3, visibility: GPUShaderStage.COMPUTE,
           buffer: { type: "storage" } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: "storage" } },
       ],
     });
     const presentationAllocatorPipelineLayout = device.createPipelineLayout({
@@ -4076,10 +4220,13 @@ export class WebGPUSparseCM12Resident {
         { binding: 1, resource: { buffer: activity } },
         { binding: 2, resource: { buffer: fineMetadata } },
         { binding: 3, resource: { buffer: fineWorklist } },
+        { binding: 4, resource: { buffer: topologyArena } },
       ],
     });
     const presentationAllocatorShaderSource = sparseCM12PresentationPageAllocatorWGSL(
-      packed.brickCount, packed.brickOffset, framePlanPresentationLayout,
+      worldLeafCapacity, packed.brickCount, packed.brickOffset,
+      framePlanPresentationLayout, worldDirectoryLayout,
+      presentationCoordinateOffsetPages, fine.plan.brickDimensions,
     );
     const diagnosticsReadback = device.createBuffer({
       label: "Sparse CM12 resident diagnostic readback",
@@ -4233,6 +4380,8 @@ export class WebGPUSparseCM12Resident {
         faceAddressProgram.layout,
         pressureFineEdgeImageBaseWords,
         velocityExtensionFixedRecurrenceDepth,
+        worldDirectoryLayout,
+        dynamicWorldGrowth,
       );
     const shaderSource = createResidentShaderSource();
     const shaderModuleFor = (source: string, label: string) => {
@@ -4308,7 +4457,8 @@ export class WebGPUSparseCM12Resident {
       "clearSolidExcess", "scatterSolidExcess",
       "finalizeSolidExcess", "preserveHorizontalD4",
       "commitHorizontalD4", "preserveVelocityHorizontalD4",
-      "commitVelocityHorizontalD4",
+      "commitVelocityHorizontalD4", "preserveActivityHorizontalD4",
+      "commitActivityHorizontalD4",
       "initializeVelocityExtensionPackets", "advanceVelocityExtensionPackets",
       "forceFaces", "enforceSparseCM12InflowFaces",
       "classifyPressureCells", "compileCanonicalPressureRows",
@@ -4351,6 +4501,10 @@ export class WebGPUSparseCM12Resident {
       "closePlannedResolution",
       "validateCandidateResolution", "scheduleTopologyPreparation",
       "allocateCandidateTopologyPages", "synthesizeCandidateCellPages",
+      "allocateSparseWorldFrontier", "synthesizeSparseWorldFrontierPages",
+      "connectSparseWorldFrontierPages",
+      "publishSparseWorldFrontierAcceptance",
+      "compileSparseWorldFrontierExecutionImage",
       "deferDynamicTopologyPublication",
       "clearShadowRowMembership", "beginShadowTopology", "buildShadowLeafWorklist",
       "buildShadowStructureWorklist",
@@ -4488,6 +4642,11 @@ export class WebGPUSparseCM12Resident {
       });
     }
     const presentationPipelines = await presentationPipelinePromise;
+    // Pipelines retain their compiled programs; the one-use source module does
+    // not need to remain in the device cache for the lifetime of the solver.
+    // Keeping every slice alive made total compiler residency proportional to
+    // entry-point count even though compilation itself was serialized.
+    deviceCompilation.shaderModules.delete(presentationShaderSource);
     report("First-frame presentation pipelines ready");
     const startSimulationPipelineCompilation = () => {
       let fullPipelinePromise = deviceCompilation.simulationPipelines.get(compilationKey);
@@ -4506,15 +4665,26 @@ export class WebGPUSparseCM12Resident {
               (chunkIndex + 1) * SPARSE_CM12_SIMULATION_SHADER_ENTRY_CHUNK_SIZE,
             ),
           );
-          const chunkEntries = await Promise.all(simulationNameChunks.map(
-            async (chunkNames, chunkIndex) => {
-              const chunkSource = sparseCM12WGSLForEntryPoints(shaderSource, chunkNames);
-              const chunkModule = await shaderModuleFor(chunkSource,
-                `Sparse CM12 simulation shader ${chunkIndex + 1}/${simulationNameChunks.length}`);
-              return compileNamedEntries(chunkNames, "background", chunkModule);
-            },
-          ));
-          const entries = chunkEntries.flat();
+          // Dawn's Metal backend retains native module/compiler state for each
+          // outstanding request. Fan-out here previously constructed every
+          // module and queued every pipeline before the first chunk settled;
+          // interrupting that backlog also exposed a Dawn ProcessEvents crash.
+          // Keep one chunk's native state live at a time. The compilation
+          // manager still serializes the pipelines within the chunk.
+          const entries: (readonly [string, GPUComputePipeline])[] = [];
+          for (let chunkIndex = 0; chunkIndex < simulationNameChunks.length;
+            chunkIndex += 1) {
+            const chunkNames = simulationNameChunks[chunkIndex]!;
+            const chunkSource = sparseCM12WGSLForEntryPoints(shaderSource, chunkNames);
+            const chunkModule = await shaderModuleFor(chunkSource,
+              `Sparse CM12 simulation shader ${chunkIndex + 1}/${simulationNameChunks.length}`);
+            try {
+              entries.push(...await compileNamedEntries(
+                chunkNames, "background", chunkModule));
+            } finally {
+              deviceCompilation.shaderModules.delete(chunkSource);
+            }
+          }
           // Two pipelines from one entry point: the snapshot variant additionally
           // advances the device-side snapshot cursor and stamps its slot.
           const journalEntries = layout.journal === 0 ? [] : await (async () => {
@@ -4522,12 +4692,18 @@ export class WebGPUSparseCM12Resident {
               sparseCM12WGSLForEntryPoints(shaderSource, ["journalIteration"]),
               "Sparse CM12 journal snapshot shader",
             );
-            return [["journalIterationSnapshot", await compiler.compileComputePipeline({
-              label: "Sparse CM12 journalIteration with field snapshot",
-              layout: pipelineLayout,
-              compute: { module: journalShaderModule, entryPoint: "journalIteration",
-                constants: { JOURNAL_SNAPSHOT: 1 } },
-            }, { priority: "background" })] as const];
+            const journalSource = sparseCM12WGSLForEntryPoints(
+              shaderSource, ["journalIteration"]);
+            try {
+              return [["journalIterationSnapshot", await compiler.compileComputePipeline({
+                label: "Sparse CM12 journalIteration with field snapshot",
+                layout: pipelineLayout,
+                compute: { module: journalShaderModule, entryPoint: "journalIteration",
+                  constants: { JOURNAL_SNAPSHOT: 1 } },
+              }, { priority: "background" })] as const];
+            } finally {
+              deviceCompilation.shaderModules.delete(journalSource);
+            }
           })();
           const presentationAllocatorEntries = await Promise.all([
             "allocateSparseCM12PresentationPages",
@@ -4537,11 +4713,17 @@ export class WebGPUSparseCM12Resident {
               sparseCM12WGSLForEntryPoints(presentationAllocatorShaderSource, [entryPoint]),
               `Sparse CM12 ${entryPoint} shader`,
             );
-            return [entryPoint, await compiler.compileComputePipeline({
-              label: `Sparse CM12 ${entryPoint}`,
-              layout: presentationAllocatorPipelineLayout,
-              compute: { module, entryPoint },
-            }, { priority: "background" })] as const;
+            const allocatorSource = sparseCM12WGSLForEntryPoints(
+              presentationAllocatorShaderSource, [entryPoint]);
+            try {
+              return [entryPoint, await compiler.compileComputePipeline({
+                label: `Sparse CM12 ${entryPoint}`,
+                layout: presentationAllocatorPipelineLayout,
+                compute: { module, entryPoint },
+              }, { priority: "background" })] as const;
+            } finally {
+              deviceCompilation.shaderModules.delete(allocatorSource);
+            }
           }));
           return Object.freeze(Object.fromEntries([
             ...Object.entries(presentationPipelines),
@@ -4623,9 +4805,9 @@ export class WebGPUSparseCM12Resident {
       presentationPipelines,
       startSimulationPipelineCompilation,
       () => compiler.snapshot(),
-      templates.cellCount, templates.rowCount,
-      templates.cellCount, templates.rowCount,
-      templates.maximumOwnedRowCount,
+      physicsCellCapacity, physicsRowCapacity,
+      physicsCellCapacity, physicsRowCapacity,
+      Math.max(templates.maximumOwnedRowCount, dynamicRowsPerPage),
       pressureCoarseEdgeCount,
       pressureEdgeCount,
       pressureHierarchyGroupCounts.reduce((sum, count) => sum + count, 0),
@@ -4634,7 +4816,14 @@ export class WebGPUSparseCM12Resident {
       pressureFineEdgeImageBaseWords,
       physicalTemplateBytes,
       physicalTemplateBytes + 4 * acceptedLeafManifestBase,
+      topologyPagePool.pageCapacity,
+      physicalTemplateBytes + 4 * pageDescriptors,
+      topologyPagePool.pageWords,
+      worldDirectoryLayout,
+      packed.brickCount,
       templates.words,
+      atlas.tankWallPlacement,
+      Boolean(atlas.wallField),
       atlas.boundary, rigidCoupling, Boolean(rigid?.terrainPresent));
     result.receiverBootstrapPending = initiallyActiveBrickKeys.size < packed.brickCount
       && atlas.bricks.some((_brick, brick) => initialActivity[
@@ -4957,7 +5146,8 @@ export class WebGPUSparseCM12Resident {
       dispatch(snapshot ? "journalIterationSnapshot" : "journalIteration", 1);
       if (snapshot) dispatchAccepted("journalSnapshot", "cell");
     };
-    const bricks = Math.ceil(packed.brickCount / WORKGROUP_SIZE);
+    const leafCapacity = this.worldDirectoryLayout.leafCapacity;
+    const bricks = Math.ceil(leafCapacity / WORKGROUP_SIZE);
     const directPacketWidth = this.transportPacketAuthorityLayout!.dispatchWidth;
     const directPacketRows = this.transportPacketAuthorityLayout!.dispatchRows;
     stage("transport-velocity-extension", ({ closeSubstage }) => {
@@ -5131,7 +5321,7 @@ export class WebGPUSparseCM12Resident {
       // longer walks incidence or appends a tile event per changed cell.
       useBindGroup(this.transportBindGroup);
       dispatch("beginSparseCM12FinalScalarMasks", 1);
-      dispatch("publishSparseCM12FinalScalarMasks", packed.brickCount);
+      dispatch("publishSparseCM12FinalScalarMasks", leafCapacity);
       dispatch("sealSparseCM12FinalScalarMasks", 1);
       closeSubstage("final-scalar-mask-publication");
       useBindGroup(this.pressureBindGroup);
@@ -5435,14 +5625,24 @@ export class WebGPUSparseCM12Resident {
     stage("projection-diagnostics", () => {});
     stage("activity-measurement", () => {
       useBindGroup(this.bindGroup);
-      dispatch("markIncrementalActivityScalarBricks", packed.brickCount);
+      dispatch("markIncrementalActivityScalarBricks", leafCapacity);
       dispatch("markIncrementalActivityTopology",
-        Math.ceil(packed.brickCount / WORKGROUP_SIZE));
+        Math.ceil(leafCapacity / WORKGROUP_SIZE));
       dispatch("finalizeIncrementalActivityMasks", 1);
       dispatch("measureBrickActivity", this.incrementalActivityLayout.brickCount);
+      if (this.horizontalD4Authority) {
+        dispatch("preserveActivityHorizontalD4", bricks);
+        dispatch("commitActivityHorizontalD4", bricks);
+      }
       dispatch("ageIncrementalActivityHistory",
-        Math.ceil(packed.brickCount / WORKGROUP_SIZE));
+        Math.ceil(leafCapacity / WORKGROUP_SIZE));
       dispatch("finalizeIncrementalActivityCensus", 1);
+      if (this.tankWallPlacement) {
+        dispatch("allocateSparseWorldFrontier",
+          Math.ceil(27 * leafCapacity / WORKGROUP_SIZE));
+        dispatch("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
+        dispatch("connectSparseWorldFrontierPages", this.topologyPageCapacity);
+      }
     });
     stage("resolution-planning", () => {
       dispatch("planBrickResolution", bricks);
@@ -5458,7 +5658,7 @@ export class WebGPUSparseCM12Resident {
       dispatch("validateCandidateResolution", bricks);
       dispatch("scheduleTopologyPreparation", 1);
       dispatch("allocateCandidateTopologyPages", bricks);
-      dispatch("synthesizeCandidateCellPages", packed.brickCount);
+      dispatch("synthesizeCandidateCellPages", leafCapacity);
       dispatch("deferDynamicTopologyPublication", 1);
       dispatchShadow("clearShadowRowMembership", "row");
       dispatch("beginShadowTopology", 1);
@@ -5526,6 +5726,12 @@ export class WebGPUSparseCM12Resident {
       useBindGroup(this.bindGroup);
       dispatchShadow("publishCandidateShadowFaces", "row");
       dispatch("finalizeAuthorizedShadowTopology", 1);
+      if (this.tankWallPlacement) {
+        dispatch("publishSparseWorldFrontierAcceptance",
+          Math.ceil(this.topologyPageCapacity / WORKGROUP_SIZE));
+        dispatch("compileSparseWorldFrontierExecutionImage",
+          this.topologyPageCapacity);
+      }
       closeSubstage("candidate-state-publication");
       useBindGroup(this.transportBindGroup);
       dispatchTopologyDelta("replaySparseCM12TransportExecutionImageRetired");
@@ -5534,10 +5740,22 @@ export class WebGPUSparseCM12Resident {
       useBindGroup(this.bindGroup);
     });
     stage("brick-retirement", () => {
+      // Candidate transfer can publish a newly accepted cell after the normal
+      // projection-side D4 authority pass.  Re-apply the same scene authority
+      // to the final accepted worklist so pressure/velocity diagnostics cannot
+      // expose whichever member of a horizontal orbit happened to transition
+      // first.  A direct capacity dispatch is intentional: the accepted
+      // indirect snapshot is not promoted until the frame commit below.
+      if (this.horizontalD4Authority) {
+        dispatch("preserveVelocityHorizontalD4",
+          Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
+        dispatch("commitVelocityHorizontalD4",
+          Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
+      }
       // Candidate commit/retirement occurs after the activity census. Re-open
       // only those changed leaf spans for presentation and next-frame reuse.
       dispatch("markIncrementalActivityPostTopology",
-        Math.ceil(packed.brickCount / WORKGROUP_SIZE));
+        Math.ceil(leafCapacity / WORKGROUP_SIZE));
       // Post-census topology commits update next frame's direct brick mask.
       dispatch("finalizeIncrementalActivityMasks", 1);
     });
@@ -5548,7 +5766,7 @@ export class WebGPUSparseCM12Resident {
       // payload. FPP1 sees the mapping only after this dispatch completes.
       useBindGroup(this.presentationAllocatorBindGroup);
       dispatch("allocateSparseCM12PresentationPages",
-        Math.ceil(packed.brickCount / WORKGROUP_SIZE));
+        Math.ceil(leafCapacity / WORKGROUP_SIZE));
       dispatch("sortSparseCM12PresentationPageDirectory", 1);
       useBindGroup(this.bindGroup);
       // The plan and compact page count are GPU publications. Split at the
@@ -5792,7 +6010,7 @@ export class WebGPUSparseCM12Resident {
       oracle.end();
       return;
     }
-    const bricks = this.lastPacked!.brickCount;
+    const bricks = this.worldDirectoryLayout.leafCapacity;
     const plan = encoder.beginComputePass({ label: `${label} FPL1/FPP1 plan` });
     plan.setBindGroup(0, this.bindGroup);
     const dispatch = (name: string, x: number) => {
@@ -5845,6 +6063,26 @@ export class WebGPUSparseCM12Resident {
         SPARSE_CM12_REFINEMENT_REGION_BYTES} bytes`);
     }
     this.refinementRegionParameters.set(new Uint8Array(parameters));
+  }
+
+  /** Adopt an authored wall edit without touching topology or fluid fields. */
+  setTankWallField(field: TankWallField): void {
+    this.assertLive();
+    if (!this.wallFieldEnabled || this.layout.wallRowOpen === 0) return;
+    const fractions = sparseCM12TankWallRowOpenFractions(
+      this.templateWords,
+      this.templateRowCount,
+      this.dimensions,
+      this.tankWallPlacement,
+      field,
+    );
+    this.device.queue.writeBuffer(
+      this.state,
+      4 * this.layout.wallRowOpen,
+      fractions.buffer as ArrayBuffer,
+      fractions.byteOffset,
+      fractions.byteLength,
+    );
   }
 
   /** Publish generation zero without executing a physics step or mapping state. */
@@ -6236,7 +6474,7 @@ export class WebGPUSparseCM12Resident {
     u.set([Math.ceil(this.cellCount / WORKGROUP_SIZE),
       Math.ceil(this.rowCount / WORKGROUP_SIZE),
       sparseCM12PressureIterations(pressureControl?.iterations),
-      packed.brickCount], 48);
+      this.worldDirectoryLayout.leafCapacity], 48);
     f.set([0, 0, 0, 0, 1, 1, 1, 0], 52);
     const policy = sparseCM12ActivityPolicy(activityPolicy ?? {});
     // CM12 Algorithm 2's trace bounds plus the sparse residency density floor.
@@ -6262,9 +6500,12 @@ export class WebGPUSparseCM12Resident {
       sharpening?.surfaceSharpeningEnabled === false ? 0 : 1], 88);
     f[89] = sparseCM12PressureRelativeTolerance(pressureControl?.relativeTolerance);
     // bit 0: cut-cell arrays are live; bit 1: their static terrain source is
-    // present. Rigid-body count remains independent in rigidWorld.w.
+    // present; bit 2: authored tank-wall row openness is live. Rigid-body
+    // count remains independent in rigidWorld.w.
     u.set([l.solidCellOpen, l.solidRowData,
-      this.rigidCoupling ? 1 | (this.terrainPresent ? 2 : 0) : 0,
+      (l.solidRowData !== 0 ? 1 : 0)
+        | (this.terrainPresent ? 2 : 0)
+        | (this.wallFieldEnabled ? 4 : 0),
       l.solidTerrainPhi], 92);
     f.set([...(worldDimensions_m ?? [0, 0, 0]), bodyCount], 96);
     u.set([...this.tracerLattice.dimensions, this.tracerLattice.count], 100);
@@ -6834,10 +7075,9 @@ export class WebGPUSparseCM12Resident {
   async readDiagnosticFields(): Promise<SparseCM12DiagnosticFields> {
     this.assertLive();
     const activitySnapshot = await this.readActivitySnapshot();
-    const pressureCellBitsBytes = 4 * this.canonicalMembershipLayout.cell.activeBitWordCount;
     const readback = this.device.createBuffer({
       label: "Sparse CM12 QA field readback",
-      size: this.state.size + pressureCellBitsBytes + 4,
+      size: this.state.size + 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
@@ -6845,23 +7085,17 @@ export class WebGPUSparseCM12Resident {
         label: "Sparse CM12 QA field copy",
       });
       encoder.copyBufferToBuffer(this.state, 0, readback, 0, this.state.size);
-      encoder.copyBufferToBuffer(this.activity,
-        4 * this.canonicalMembershipLayout.cell.activeBitsBaseWords,
-        readback, this.state.size, pressureCellBitsBytes);
       encoder.copyBufferToBuffer(this.topologyArena,
         4 * (this.frameControlLayout.baseWords
           + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity),
-        readback, this.state.size + pressureCellBitsBytes, 4);
+        readback, this.state.size, 4);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const state = new Float32Array(readback.getMappedRange());
-      const pressureCellBits = new Uint32Array(state.buffer,
-        state.byteOffset + this.state.size,
-        this.canonicalMembershipLayout.cell.activeBitWordCount);
       const acceptedParity = this.legacyHostAuthorityOracleForQA
         ? this.legacyHostAuthorityParityForQA
         : new Uint32Array(state.buffer,
-          state.byteOffset + this.state.size + pressureCellBitsBytes, 1)[0]! & 1;
+          state.byteOffset + this.state.size, 1)[0]! & 1;
       const [nx, ny, nz] = this.dimensions;
       const count = nx * ny * nz;
       const density = new Float32Array(count);
@@ -6933,12 +7167,13 @@ export class WebGPUSparseCM12Resident {
               solidOpenFraction[at] = openFraction;
               velocity[4 * at] = vx; velocity[4 * at + 1] = vy;
               velocity[4 * at + 2] = vz;
-              // Pressure is physical only on the current PCM domain. Inactive
-              // stable slots intentionally retain solver scratch, so dense QA
-              // publication canonicalizes them to zero without changing the
-              // resident numerical state or frame scheduling.
-              pressure[at] = (pressureCellBits[cell >>> 5]! & (1 << (cell & 31))) !== 0
-                ? mappedPressure : 0;
+              // Publish pressure over the accepted liquid phase. PCM is an
+              // iteration-local solve worklist and may differ for one frame
+              // across an otherwise identical topology transition; using it
+              // as a display/QA mask exposed a false asymmetric zero. Dry
+              // slots remain canonical zero, while the resident D4 authority
+              // has already cleared/averaged every accepted active slot.
+              pressure[at] = rho >= 0.5 ? mappedPressure : 0;
               divergence[at] = div;
             }
         }
@@ -7752,6 +7987,102 @@ export class WebGPUSparseCM12Resident {
         residentPages: words[0]!, faultCode: words[1]!,
         highWaterMark: words[2]!, cloneCount: words[3]!,
         capacity: this.framePlanPresentationLayout.pageCapacity,
+      });
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Signed-coordinate allocation and complete dynamic-page publication receipt. */
+  async readWorldGrowthReceiptQA(): Promise<SparseCM12WorldGrowthReceipt> {
+    this.assertLive();
+    const localDirectoryWords = this.worldDirectoryLayout.totalWords
+      - this.worldDirectoryLayout.baseWords;
+    const directoryBytes = 4 * localDirectoryWords;
+    const pageHeaderWords = 16;
+    const pageHeaderBytes = 4 * pageHeaderWords * this.topologyPageCapacity;
+    const cellsPerPage = this.brickFineResolution ** 3;
+    const dynamicFieldBytes = 4 * cellsPerPage * this.topologyPageCapacity;
+    const bytes = directoryBytes + pageHeaderBytes + 2 * dynamicFieldBytes;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 world-growth QA readback", size: Math.max(4, bytes),
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 world-growth QA copy",
+      });
+      encoder.copyBufferToBuffer(this.topologyArena,
+        4 * this.worldDirectoryLayout.baseWords,
+        readback, 0, directoryBytes);
+      for (let page = 0; page < this.topologyPageCapacity; page += 1) {
+        encoder.copyBufferToBuffer(this.topologyArena,
+          this.topologyPageDescriptorBaseBytes + 4 * page * this.topologyPageWords,
+          readback, directoryBytes + 4 * pageHeaderWords * page,
+          4 * pageHeaderWords);
+      }
+      const dynamicCellOffset = this.templateCellCount;
+      encoder.copyBufferToBuffer(this.state,
+        4 * (this.layout.densityA + dynamicCellOffset), readback,
+        directoryBytes + pageHeaderBytes, dynamicFieldBytes);
+      encoder.copyBufferToBuffer(this.state,
+        4 * (this.layout.densityB + dynamicCellOffset), readback,
+        directoryBytes + pageHeaderBytes + dynamicFieldBytes, dynamicFieldBytes);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const h = SPARSE_CM12_WORLD_DIRECTORY_HEADER;
+      const signed = (value: number) => ((value ^ 0x8000_0000) | 0);
+      let synthesizedTopologyPages = 0;
+      let dynamicLiquidMassFineCells = 0;
+      let furthestLiquidLeafCoordinate: readonly [number, number, number] | undefined;
+      const pageBase = localDirectoryWords;
+      const floats = new Float32Array(words.buffer, words.byteOffset, words.length);
+      const densityABase = (directoryBytes + pageHeaderBytes) / 4;
+      const densityBBase = densityABase + dynamicFieldBytes / 4;
+      for (let page = 0; page < this.topologyPageCapacity; page += 1) {
+        if ((words[pageBase + pageHeaderWords * page + 3]! & 0x8000_001f)
+          === 0x8000_001f) {
+          synthesizedTopologyPages += 1;
+        }
+        let pageMass = 0;
+        for (let local = 0; local < cellsPerPage; local += 1) {
+          pageMass += Math.max(0, floats[densityABase + page * cellsPerPage + local]!,
+            floats[densityBBase + page * cellsPerPage + local]!);
+        }
+        dynamicLiquidMassFineCells += pageMass;
+        if (pageMass > 1e-4) {
+          const leaf = words[pageBase + pageHeaderWords * page]!;
+          if (leaf < this.worldDirectoryLayout.leafCapacity) {
+            const leafAt = this.worldDirectoryLayout.leafBaseWords + 5 * leaf;
+            const coordinate = [words[leafAt]! | 0, words[leafAt + 1]! | 0,
+              words[leafAt + 2]! | 0] as const;
+            if (!furthestLiquidLeafCoordinate
+              || coordinate[0] > furthestLiquidLeafCoordinate[0]) {
+              furthestLiquidLeafCoordinate = coordinate;
+            }
+          }
+        }
+      }
+      return Object.freeze({
+        initialLeaves: this.initialWorldLeafCount,
+        liveLeaves: words[h.liveCount]!,
+        capacity: words[h.leafCapacity]!,
+        insertionFaults: words[h.insertionFaults]!,
+        capacityFaults: words[h.capacityFaults]!,
+        boundsGeneration: words[h.boundsGeneration]!,
+        minimum: Object.freeze([signed(words[h.minimumX]!),
+          signed(words[h.minimumY]!), signed(words[h.minimumZ]!)]) as
+          readonly [number, number, number],
+        maximumExclusive: Object.freeze([signed(words[h.maximumX]!),
+          signed(words[h.maximumY]!), signed(words[h.maximumZ]!)]) as
+          readonly [number, number, number],
+        synthesizedTopologyPages,
+        dynamicLiquidMassFineCells,
+        ...(furthestLiquidLeafCoordinate
+          ? { furthestLiquidLeafCoordinate: Object.freeze(furthestLiquidLeafCoordinate) }
+          : {}),
       });
     } finally {
       if (readback.mapState === "mapped") readback.unmap();

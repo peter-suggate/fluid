@@ -96,7 +96,7 @@ function transportClosure(atlas: SparseAdaptiveMassAtlas): SparseAdaptiveMassAtl
   }
   return createSparseAdaptiveMassAtlas(
     atlas.dimensions, [...bricks.values()], atlas.generation, atlas.boundary,
-    atlas.brickFineResolution, atlas.wallField,
+    atlas.brickFineResolution, atlas.wallField, atlas.tankWallPlacement,
   );
 }
 
@@ -175,7 +175,7 @@ export function advanceSparseBrickAtlasTranslation(
   if (source.bricks.length === 0) {
     return { atlas: createSparseAdaptiveMassAtlas(
       source.dimensions, [], source.generation + 1, source.boundary,
-      source.brickFineResolution, source.wallField,
+      source.brickFineResolution, source.wallField, source.tankWallPlacement,
     ),
       stats: { sourceBrickCount: 0, transientSupportBrickCount: 0, retainedBrickCount: 0,
         sourceLeafCount: 0, workLeafCount: 0, finalBetaMaximumAbsoluteError: 0,
@@ -255,7 +255,7 @@ export function advanceSparseBrickAtlasTranslation(
   }
   const atlas = createSparseAdaptiveMassAtlas(
     source.dimensions, retained, source.generation + 1, source.boundary,
-    source.brickFineResolution, source.wallField,
+    source.brickFineResolution, source.wallField, source.tankWallPlacement,
   );
   const sourceLeaves = sparseAtlasLeaves(source);
   const resultLeaves = sparseAtlasLeaves(atlas);

@@ -79,14 +79,15 @@ fn adaptiveNodalPublication()->bool{let count=min(powerCoarseSamples.rowCount,ar
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 ${makeCompactFineLevelSetPhiWGSL("coarsePhi")}
 fn fineOwnsCube(base:vec3i)->bool{let q=max(base-vec3i(1),vec3i(0));return all(q<vec3i(params.sampleDimensions))&&fineValid(vec3u(q));}
-fn occupancy(value:f32)->f32{let band=4.0*u.container.y/max(f32(params.sampleDimensions.y),1.0);return clamp(0.5-value/band,0.0,1.0);}
+fn physicalCellSize()->vec3f{return select(u.container.xyz/max(vec3f(params.sampleDimensions),vec3f(1.0)),params.sizing.xyz,all(params.sizing.xyz>vec3f(0.0)));}
+fn occupancy(value:f32)->f32{let band=4.0*physicalCellSize().y;return clamp(0.5-value/band,0.0,1.0);}
 // Adaptive nodal phi is a signed-distance scalar, not optical occupancy.
 // Preserve its affine map through edge interpolation: clamping the two edge
 // endpoints before solving the 0.5 crossing moves the zero set by an amount
 // that grows with leaf/sample spacing (and makes the same plane look different
 // beside span-1, span-2 and span-4 leaves). Values outside [0,1] are valid here;
 // only their relation to 0.5 and their linear interpolation are consumed.
-fn adaptiveContourValue(value:f32)->f32{let band=4.0*u.container.y/max(f32(params.sampleDimensions.y),1.0);return 0.5-value/band;}
+fn adaptiveContourValue(value:f32)->f32{let band=4.0*physicalCellSize().y;return 0.5-value/band;}
 // The ordinary halo represents one closed tank wall with an exterior air
 // sample. At an x/z tank edge a single Cartesian-product halo cube cannot
 // represent both perpendicular wall caps: marching tetrahedra turns the two

@@ -465,7 +465,7 @@ export function sceneStructuralKey(scene: SceneDescription): string {
       .map((value) => Math.round(value / cellSize_m)).join(",")
     : "none";
   const lattice = `${sceneLatticeDimensions(scene).join("x")}:${scene.voxelDomain.brickSize_cells}:${boundsCells}`;
-  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.shape ?? "box"}:${scene.container.top}:${scene.container.fluidWallMode}:${scene.container.depthBoundary ?? "closed"}:${JSON.stringify(scene.container.wallField.faces)}`;
+  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.shape ?? "box"}:${scene.container.top}:${scene.container.fluidWallMode}:${scene.container.depthBoundary ?? "closed"}`;
 }
 
 export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
@@ -594,7 +594,7 @@ function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  * the GPU as params rather than as geometry.
  */
 export function gpuSceneUniformKey(scene: SceneDescription): string {
-  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}`;
+  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${JSON.stringify(scene.container.wallField.faces)}`;
 }
 
 /**
@@ -1862,9 +1862,11 @@ export class FluidLabRenderer {
     const spansLattice = Boolean(dense) && dense!.width >= info.nx
       && dense!.height >= info.ny && dense!.depthOrArrayLayers >= info.nz;
     const container = scene.container;
-    // Both arms span the same world box — the container, centred in x/z with y
-    // from the floor, which is the frame the water pipeline rasters into. Only
-    // the lattice differs: the dense field is the solver grid, the compact
+    const fluidDomain = solver.fluidDomain;
+    // Both arms span the same physical world box. Usually that is the container,
+    // centred in x/z with y from the floor; an opened tank may instead publish a
+    // larger fluid domain so exterior receiver pages render in the same frame.
+    // Only the lattice differs: the dense field is the solver grid, the compact
     // publication is the fine one.
     //
     // Deliberately NOT `publication.domainOrigin` / `publication.fineCellWidth`.
@@ -1878,8 +1880,10 @@ export class FluidLabRenderer {
       ? [info.nx, info.ny, info.nz] : publication.sampleDimensions;
     const field: WebGpuSvoFluidCoverageOptions = {
       fieldDimensions: lattice,
-      worldOrigin_m: [-container.width_m / 2, 0, -container.depth_m / 2],
-      cellSize_m: [container.width_m / lattice[0], container.height_m / lattice[1], container.depth_m / lattice[2]],
+      worldOrigin_m: fluidDomain?.origin_m
+        ?? [-container.width_m / 2, 0, -container.depth_m / 2],
+      cellSize_m: fluidDomain?.cellSize_m
+        ?? [container.width_m / lattice[0], container.height_m / lattice[1], container.depth_m / lattice[2]],
     };
     // A compact publication's lattice is the fine one, so the dense arm's "one
     // texel per two cells" would ask for gigabytes on a large scene. Coarsen
@@ -1922,6 +1926,7 @@ export class FluidLabRenderer {
     if (!this.device || this.disposed || this.deviceLost || !texture || !columnBases || !gridCells || !velocity || !pressureSamples || !divergence || !pressure || !density) return;
     this.attachedSurfaceTexture = texture;
     this.waterPipeline?.setVolume(texture, columnBases);
+    this.waterPipeline?.setFluidDomain(this.gpuFluid?.fluidDomain);
     const sparsePresentation = this.sparseWorldPresentation(this.gpuFluid);
     const globalFineLevelSet = sparsePresentation?.fineLevelSet
       ?? this.gpuFluid?.globalFineLevelSetSource;
@@ -2978,6 +2983,7 @@ export class FluidLabRenderer {
     // tagged renderer binding after each admitted solver encode so extraction
     // follows the newly published generation without any CPU field copy.
     const sparseWorldPresentation = this.sparseWorldPresentation(readyGPUFluid);
+    this.waterPipeline.setFluidDomain(readyGPUFluid?.fluidDomain);
     const globalFineLevelSet = sparseWorldPresentation?.fineLevelSet
       ?? readyGPUFluid?.globalFineLevelSetSource;
     if (globalFineLevelSet) {

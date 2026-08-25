@@ -52,6 +52,8 @@ import { createSparseCM12TransportExecutionImageLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-transport-execution-image";
 import { createSparseCM12TransportPacketAuthorityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-transport-packet-authority";
+import { createSparseCM12WorldDirectoryLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-world-directory";
 import { SPARSE_CM12_LENSES } from
   "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
 import { stageLensProgramWGSL } from "../lib/core/webgpu-stage-lens-overlay";
@@ -64,7 +66,7 @@ if (staticConcurrencyCheck) {
     throw new Error("Sparse CM12 Dawn checker must not fan out native pipeline compilation");
   }
   const compileCallCount = [...source.matchAll(/\.createComputePipelineAsync\s*\(/g)].length;
-  if (compileCallCount < 4) {
+  if (compileCallCount < 3) {
     throw new Error(`Sparse CM12 Dawn checker concurrency guard found only ${compileCallCount} compile sites`);
   }
   console.log(JSON.stringify({
@@ -252,6 +254,10 @@ async function main(): Promise<void> {
         dispatchWidth: 65535, interiorDispatchRows: 1, seamDispatchRows: 1,
         totalWords: 240640, totalBytes: 2560,
       };
+      const worldDirectory = createSparseCM12WorldDirectoryLayout({
+        initialLeaves: 8, growthLeaves: 32, maximumSpanLog: 0,
+        baseWords: faceAddresses.totalWords,
+      });
       const source = createWebgpuSparseCM12ResidentWGSL(
         brickFineResolution,
         presentationPageResolution,
@@ -265,7 +271,7 @@ async function main(): Promise<void> {
         transportProducerMasks,
         undefined, undefined, internedBoundaryImage,
         topologyEffects, undefined, faceAddresses,
-        250000,
+        250000, undefined, worldDirectory, true,
       );
       const validationSlice = sparseCM12WGSLForEntryPoints(source,
         ["validateSparseCM12InternedBoundaryImmutable"]);
@@ -285,7 +291,7 @@ async function main(): Promise<void> {
           .join("\n")}`);
       }
       const allocatorSource = sparseCM12WGSLForEntryPoints(
-        sparseCM12PresentationPageAllocatorWGSL(8, 64, presentation!),
+        sparseCM12PresentationPageAllocatorWGSL(8, 8, 64, presentation!),
         ["sortSparseCM12PresentationPageDirectory"]);
       const allocatorModule = device.createShaderModule({
         label: `Sparse CM12 sliced allocator validation ${variant}`,

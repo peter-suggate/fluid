@@ -37,6 +37,8 @@ const CM12_TEI_PACKET_CAPACITY:u32=${layout.packetCapacity}u;
 const CM12_TEI_SPATIAL_TILE_CAPACITY:u32=${layout.spatialTileCapacity}u;
 const CM12_TEI_SPATIAL_TILES_PER_LOGICAL:u32=${layout.spatialTilesPerLogicalBrick}u;
 const CM12_TEI_SPATIAL_TILES_PER_AXIS:u32=${layout.spatialTilesPerLogicalBrickAxis}u;
+const CM12_TEI_SPATIAL_TILES_PER_LEAF:u32=${layout.spatialTilesPerLeaf}u;
+const CM12_TEI_LOGICAL_SLOTS_PER_LEAF:u32=${layout.logicalSlotsPerLeaf}u;
 const CM12_TEI_SLOT0_LEAVES:u32=${layout.slotLeafBaseOffsets[0]}u;
 const CM12_TEI_SLOT1_LEAVES:u32=${layout.slotLeafBaseOffsets[1]}u;
 const CM12_TEI_SLOT0_PACKETS:u32=${layout.slotPacketBaseOffsets[0]}u;
@@ -68,9 +70,7 @@ fn cm12TeiPacketBase(slot:u32)->u32{
 fn cm12TeiSpatialTileBase(slot:u32)->u32{return select(
   CM12_TEI_SLOT0_SPATIAL_TILES,CM12_TEI_SLOT1_SPATIAL_TILES,(slot&1u)!=0u);}
 fn cm12TeiOwnerBrick(key:u32)->u32{
-  let packed=topology[CM12_TEI_PACKED_OWNER16+(key>>1u)];
-  let brick=(packed>>(16u*(key&1u)))&0xffffu;
-  return select(brick,CM12_TEI_INVALID,brick==0xffffu);
+  return cm12WorldOwnerAt(vec3i(cm12TeiLogicalCoordinate(key)));
 }
 fn cm12TeiScaleLog2(scale:u32,descriptor:u32)->u32{
   if(scale==0u){return 0u;}
@@ -126,6 +126,9 @@ fn cm12TeiStageDirectory(tileOrigin:vec3u,lane:u32,slot:u32){
   workgroupBarrier();
 }
 fn cm12TeiLeafAtLogical(coordinate:vec3u)->CM12TransportLeaf{
+  if(EXP_DYNAMIC_WORLD_GROWTH){
+    return cm12TeiLoadLeaf(cm12TeiCacheSlot,cm12WorldOwnerAt(vec3i(coordinate)));
+  }
   let dims=vec3u(${layout.logicalBrickDimensions[0]}u,
     ${layout.logicalBrickDimensions[1]}u,${layout.logicalBrickDimensions[2]}u);
   if(any(coordinate>=dims)){return CM12TransportLeaf(
@@ -144,19 +147,32 @@ fn cm12TeiLeafAtLogical(coordinate:vec3u)->CM12TransportLeaf{
     vec3u(b.y&31u,(b.y>>5u)&31u,(b.y>>10u)&31u),b.z,b.w);
 }
 fn cm12TeiOwnerAtFine(q:vec3i)->CM12TransportOwner{
-  if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))){return CM12TransportOwner(
+  if((!EXP_DYNAMIC_WORLD_GROWTH&&(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))))
+    ||(EXP_DYNAMIC_WORLD_GROWTH&&q.y<0)){return CM12TransportOwner(
     CM12_TEI_INVALID,vec3u(0u),0u);}
-  let uq=vec3u(q);let leaf=cm12TeiLeafAtLogical(uq/BRICK_FINE_RESOLUTION);
+  let owner=select(cm12TeiOwnerBrick(cm12TeiLogicalKey(
+    vec3u(q)/BRICK_FINE_RESOLUTION)),cm12WorldOwnerAt(vec3i(
+      cm12WorldFloorToSpan(q.x,i32(BRICK_FINE_RESOLUTION))/i32(BRICK_FINE_RESOLUTION),
+      cm12WorldFloorToSpan(q.y,i32(BRICK_FINE_RESOLUTION))/i32(BRICK_FINE_RESOLUTION),
+      cm12WorldFloorToSpan(q.z,i32(BRICK_FINE_RESOLUTION))/i32(BRICK_FINE_RESOLUTION))),
+    EXP_DYNAMIC_WORLD_GROWTH);
+  let leaf=cm12TeiLoadLeaf(cm12TeiCacheSlot,owner);
   if((leaf.flags&0x80000000u)==0u||leaf.scale==0u){return CM12TransportOwner(
     CM12_TEI_INVALID,vec3u(0u),0u);}
-  let origin=cm12TeiLogicalCoordinate(leaf.originKey)*BRICK_FINE_RESOLUTION;
-  let shift=vec3u(leaf.scaleLog2);let scale=1u<<leaf.scaleLog2;
-  let local=(uq-origin)>>shift;
+  let origin=select(vec3i(cm12TeiLogicalCoordinate(leaf.originKey)),
+    cm12WorldLeafCoordinate(owner),EXP_DYNAMIC_WORLD_GROWTH)
+    *i32(BRICK_FINE_RESOLUTION);
+  let scale=1u<<leaf.scaleLog2;
+  let relative=q-origin;
+  if(any(relative<vec3i(0))){return CM12TransportOwner(
+    CM12_TEI_INVALID,vec3u(0u),0u);}
+  let local=vec3u(relative)/scale;
   if(any(local>=leaf.valid)){return CM12TransportOwner(CM12_TEI_INVALID,vec3u(0u),0u);}
   let offset=local.x+leaf.valid.x*(local.y+leaf.valid.y*local.z);
   if(offset>=leaf.count){return CM12TransportOwner(CM12_TEI_INVALID,vec3u(0u),0u);}
-  let lower=origin+((uq-origin)&~vec3u(scale-1u));
-  let widths=min(vec3u(scale),p.dimensions.xyz-lower);
+  let lower=origin+vec3i(vec3u(relative)&~vec3u(scale-1u));
+  let widths=select(min(vec3u(scale),p.dimensions.xyz-vec3u(lower)),vec3u(scale),
+    EXP_DYNAMIC_WORLD_GROWTH&&owner>=CM12_WDR_INITIAL_LEAVES);
   return CM12TransportOwner(leaf.first+offset,widths,widths.x*widths.y*widths.z);
 }
 fn cm12TeiPacket(packet:u32,slot:u32)->CM12TransportPacket{
@@ -198,7 +214,7 @@ fn cm12TeiPacketFineOrigin(packet:u32,slot:u32)->vec3u{
   let pz=localPacket/(packetAxis*packetAxis);
   let remainder=localPacket-pz*packetAxis*packetAxis;
   let py=remainder/packetAxis;let px=remainder-py*packetAxis;
-  return cm12TeiLogicalCoordinate(leaf.originKey)*BRICK_FINE_RESOLUTION
+  return vec3u(cm12WorldLeafCoordinate(brick))*BRICK_FINE_RESOLUTION
     +scale*CM12_TEI_PACKET_EDGE*vec3u(px,py,pz);
 }
 // Cell scale (fine cells per cell edge) of the staged leaf owning a fine
@@ -217,12 +233,16 @@ fn cm12TeiSpatialTileSelectsLane(tile:CM12TransportSpatialTile,lane:u32)->bool{
   return lane<64u&&((tile.laneMask[lane>>5u]>>(lane&31u))&1u)!=0u;}
 
 fn cm12TeiWriteLeaf(slot:u32,brick:u32,generation:u32,candidate:bool){
-  let record=p.topologyOffsets2.z+2u*brick;let originKey=topology[record+1u];
+  var originKey=brick;
+  if(!EXP_DYNAMIC_WORLD_GROWTH||brick<CM12_WDR_INITIAL_LEAVES){
+    originKey=topology[p.topologyOffsets2.z+2u*brick+1u];
+  }
   let span=brickSpan(brick);var resolution=acceptedBrickResolution(brick);
   if(candidate){resolution=scheduledBrickResolution(brick);}
   let spanFine=BRICK_FINE_RESOLUTION*span;let scale=spanFine/resolution;
-  let origin=cm12TeiLogicalCoordinate(originKey)*BRICK_FINE_RESOLUTION;
-  let extent=min(vec3u(spanFine),p.dimensions.xyz-min(origin,p.dimensions.xyz));
+  let origin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
+  let extent=select(min(vec3u(spanFine),p.dimensions.xyz-min(vec3u(origin),p.dimensions.xyz)),
+    vec3u(spanFine),EXP_DYNAMIC_WORLD_GROWTH&&brick>=CM12_WDR_INITIAL_LEAVES);
   let valid=(extent+vec3u(scale-1u))/scale;
   let range=templateBrickCellRange(brick,resolution);
   let flags=resolution|(u32(firstLeadingBit(span))<<8u)
@@ -252,10 +272,10 @@ fn cm12TeiWritePacket(slot:u32,packet:u32,generation:u32,candidate:bool){
   let remainder=localPacket-pz*packetAxis*packetAxis;
   let py=remainder/packetAxis;let px=remainder-py*packetAxis;
   let local=CM12_TEI_PACKET_EDGE*vec3u(px,py,pz);
-  let originKey=topology[p.topologyOffsets2.z+2u*brick+1u];
   let spanFine=BRICK_FINE_RESOLUTION*brickSpan(brick);let scale=spanFine/resolution;
-  let leafOrigin=cm12TeiLogicalCoordinate(originKey)*BRICK_FINE_RESOLUTION;
-  let extent=min(vec3u(spanFine),p.dimensions.xyz-min(leafOrigin,p.dimensions.xyz));
+  let leafOrigin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
+  let extent=select(min(vec3u(spanFine),p.dimensions.xyz-min(vec3u(leafOrigin),p.dimensions.xyz)),
+    vec3u(spanFine),EXP_DYNAMIC_WORLD_GROWTH&&brick>=CM12_WDR_INITIAL_LEAVES);
   let dimensions=(extent+vec3u(scale-1u))/scale;
   if(any(local>=dimensions)){return;}
   let counts=min(vec3u(CM12_TEI_PACKET_EDGE),dimensions-local);
@@ -270,25 +290,31 @@ fn cm12TeiWriteSpatialTile(slot:u32,tile:u32,generation:u32,candidate:bool){
   let at=cm12TeiSpatialTileBase(slot)+CM12_TEI_SPATIAL_TILE_WORDS*tile;
   ${image}[at]=generation;${image}[at+1u]=CM12_TEI_INVALID;
   ${image}[at+2u]=0u;${image}[at+3u]=0u;
-  let logical=tile/CM12_TEI_SPATIAL_TILES_PER_LOGICAL;
-  let localTile=tile%CM12_TEI_SPATIAL_TILES_PER_LOGICAL;
-  let logicalCoordinate=cm12TeiLogicalCoordinate(logical);
+  let brick=tile/CM12_TEI_SPATIAL_TILES_PER_LEAF;
+  let leafTile=tile%CM12_TEI_SPATIAL_TILES_PER_LEAF;
+  let logicalLocal=leafTile/CM12_TEI_SPATIAL_TILES_PER_LOGICAL;
+  let localTile=leafTile%CM12_TEI_SPATIAL_TILES_PER_LOGICAL;
+  let span=brickSpan(brick);
+  if(logicalLocal>=span*span*span){return;}
+  let lz=logicalLocal/(span*span);let rem=logicalLocal-lz*span*span;
+  let ly=rem/span;let lx=rem-ly*span;
+  let logicalCoordinate=cm12WorldLeafCoordinate(brick)+vec3i(vec3u(lx,ly,lz));
   let tx=localTile%CM12_TEI_SPATIAL_TILES_PER_AXIS;
   let ty=(localTile/CM12_TEI_SPATIAL_TILES_PER_AXIS)%CM12_TEI_SPATIAL_TILES_PER_AXIS;
   let tz=localTile/(CM12_TEI_SPATIAL_TILES_PER_AXIS*CM12_TEI_SPATIAL_TILES_PER_AXIS);
-  let origin=logicalCoordinate*BRICK_FINE_RESOLUTION+4u*vec3u(tx,ty,tz);
-  let brick=cm12TeiOwnerBrick(logical);
-  if(brick==CM12_TEI_INVALID
+  let origin=logicalCoordinate*i32(BRICK_FINE_RESOLUTION)+vec3i(4u*vec3u(tx,ty,tz));
+  if(brick>=CM12_TEI_LEAF_CAPACITY
     ||!select(brickActive(brick),scheduledBrickActive(brick),candidate)
-    ||any(origin>=p.dimensions.xyz)){return;}
+    ||(!EXP_DYNAMIC_WORLD_GROWTH&&(any(origin<vec3i(0))
+      ||any(vec3u(origin)>=p.dimensions.xyz)))||origin.y<0){return;}
   var resolution=acceptedBrickResolution(brick);
   if(candidate){resolution=scheduledBrickResolution(brick);}
   let spanFine=BRICK_FINE_RESOLUTION*brickSpan(brick);let scale=spanFine/resolution;
-  let originKey=topology[p.topologyOffsets2.z+2u*brick+1u];
-  let leafOrigin=cm12TeiLogicalCoordinate(originKey)*BRICK_FINE_RESOLUTION;
-  let extent=min(vec3u(spanFine),p.dimensions.xyz-min(leafOrigin,p.dimensions.xyz));
+  let leafOrigin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
+  let extent=select(min(vec3u(spanFine),p.dimensions.xyz-min(vec3u(leafOrigin),p.dimensions.xyz)),
+    vec3u(spanFine),EXP_DYNAMIC_WORLD_GROWTH&&brick>=CM12_WDR_INITIAL_LEAVES);
   let dimensions=(extent+vec3u(scale-1u))/scale;
-  let home=(origin-leafOrigin)/scale;
+  let home=vec3u(origin-leafOrigin)/scale;
   let packetAxis=max(1u,(resolution+3u)/CM12_TEI_PACKET_EDGE);
   let packetCoordinate=home/CM12_TEI_PACKET_EDGE;
   if(any(packetCoordinate>=vec3u(packetAxis))){return;}
@@ -298,9 +324,10 @@ fn cm12TeiWriteSpatialTile(slot:u32,tile:u32,generation:u32,candidate:bool){
   ${image}[at+1u]=packetId;
   var mask=vec2u(0u);
   for(var lane=0u;lane<64u;lane+=1u){
-    let q=origin+vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
-    if(any(q>=p.dimensions.xyz)){continue;}
-    let relative=q-leafOrigin;
+    let q=origin+vec3i(vec3u(lane&3u,(lane>>2u)&3u,lane>>4u));
+    if((!EXP_DYNAMIC_WORLD_GROWTH&&(any(q<vec3i(0))
+      ||any(vec3u(q)>=p.dimensions.xyz)))||q.y<0){continue;}
+    let relative=vec3u(q-leafOrigin);
     if(any(relative%vec3u(scale)!=vec3u(0u))){continue;}
     let local=relative/scale;if(any(local>=dimensions)){continue;}
     let cellPacket=local/CM12_TEI_PACKET_EDGE;
@@ -331,22 +358,12 @@ fn cm12TeiCompileTopologyDelta(lane:u32,rank:u32,candidate:bool){
   if(lane==0u){cm12TeiWriteLeaf(slot,brick,generation,candidate);}
   cm12TeiWritePacket(slot,brick*CM12_TEI_PACKETS_PER_LEAF+lane,generation,candidate);
 
-  let record=p.topologyOffsets2.z+2u*brick;
-  let originKey=topology[record+1u];let span=brickSpan(brick);
-  let origin=cm12TeiLogicalCoordinate(originKey);
-  let logicalDimensions=vec3u(${layout.logicalBrickDimensions[0]}u,
-    ${layout.logicalBrickDimensions[1]}u,${layout.logicalBrickDimensions[2]}u);
-  let logicalCount=span*span*span;
-  let tileCount=logicalCount*CM12_TEI_SPATIAL_TILES_PER_LOGICAL;
-  for(var localTile=lane;localTile<tileCount;localTile+=64u){
-    let logicalLocal=localTile/CM12_TEI_SPATIAL_TILES_PER_LOGICAL;
-    let within=localTile%CM12_TEI_SPATIAL_TILES_PER_LOGICAL;
-    let lz=logicalLocal/(span*span);let rem=logicalLocal-lz*span*span;
-    let ly=rem/span;let lx=rem-ly*span;
-    let coordinate=origin+vec3u(lx,ly,lz);if(any(coordinate>=logicalDimensions)){continue;}
-    let key=cm12TeiLogicalKey(coordinate);
-    cm12TeiWriteSpatialTile(slot,key*CM12_TEI_SPATIAL_TILES_PER_LOGICAL+within,
-      generation,candidate);
+  let span=brickSpan(brick);
+  let tileCount=min(span*span*span,CM12_TEI_LOGICAL_SLOTS_PER_LEAF)
+    *CM12_TEI_SPATIAL_TILES_PER_LOGICAL;
+  for(var within=lane;within<tileCount;within+=64u){
+    cm12TeiWriteSpatialTile(slot,
+      brick*CM12_TEI_SPATIAL_TILES_PER_LEAF+within,generation,candidate);
   }
 }
 

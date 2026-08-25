@@ -431,7 +431,7 @@ export const tankEntity: EditorEntityDefinition = {
       label: "Cut opening",
       icon: "erase",
       tone: "danger",
-      hint: "Drag a rectangle on any tank wall to remove it and let water out",
+      hint: "Drag through the floor to include the bottom row in the opening",
       enabled: context.scene.container.shape !== "sphere",
       effect: { kind: "arm", tool: "tank-wall-cut" },
     } satisfies EditorAction,

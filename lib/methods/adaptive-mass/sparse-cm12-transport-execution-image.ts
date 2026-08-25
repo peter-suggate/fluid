@@ -55,6 +55,9 @@ export interface SparseCM12TransportExecutionImageLayout {
   readonly packetAxisCapacity: 4;
   readonly spatialTilesPerLogicalBrickAxis: number;
   readonly spatialTilesPerLogicalBrick: number;
+  readonly maximumSpanBricks: number;
+  readonly logicalSlotsPerLeaf: number;
+  readonly spatialTilesPerLeaf: number;
   readonly spatialTileCapacity: number;
   readonly slotBaseWords: readonly [number, number];
   readonly slotStrideWords: number;
@@ -120,14 +123,29 @@ export function createSparseCM12TransportExecutionImageLayout(options: {
   readonly brickFineResolution: 4 | 8 | 16;
   readonly logicalBrickDimensions: readonly [number, number, number];
   readonly leafCapacity: number;
+  readonly maximumSpanBricks?: number;
+  readonly logicalSlotsPerLeaf?: number;
 }): SparseCM12TransportExecutionImageLayout {
   const spatialTilesPerLogicalBrickAxis = options.brickFineResolution
     / SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_EDGE;
   const spatialTilesPerLogicalBrick = spatialTilesPerLogicalBrickAxis ** 3;
-  const logicalCount = checked(options.logicalBrickDimensions.reduce((a, b) =>
-    checked(a * checked(b, "logicalBrickDimension"), "logicalBrickCount"), 1),
-  "logicalBrickCount");
-  const spatialTileCapacity = checked(logicalCount * spatialTilesPerLogicalBrick,
+  // TEI2's original home-tile plane was addressed by row-major logical-world
+  // key. That made an empty coordinate consume four words and was the last
+  // simulation allocation proportional to world extent. Home tiles are owned
+  // by resident leaves, so their stable address is leaf-local as well.
+  const maximumSpanBricks = checked(options.maximumSpanBricks ?? 1,
+    "maximumSpanBricks");
+  if (maximumSpanBricks < 1 || (maximumSpanBricks & (maximumSpanBricks - 1)) !== 0) {
+    throw new RangeError("TEI2 maximum span must be a positive power of two");
+  }
+  const logicalSlotsPerLeaf = checked(options.logicalSlotsPerLeaf
+    ?? maximumSpanBricks ** 3, "logicalSlotsPerLeaf");
+  if (logicalSlotsPerLeaf < 1 || logicalSlotsPerLeaf > maximumSpanBricks ** 3) {
+    throw new RangeError("TEI2 logical slots per leaf exceed the maximum span");
+  }
+  const spatialTilesPerLeaf = checked(logicalSlotsPerLeaf
+    * spatialTilesPerLogicalBrick, "spatialTilesPerLeaf");
+  const spatialTileCapacity = checked(options.leafCapacity * spatialTilesPerLeaf,
     "spatialTileCapacity");
   const leafCapacity = checked(options.leafCapacity, "leafCapacity");
   const packetCapacity = checked(leafCapacity
@@ -160,7 +178,8 @@ export function createSparseCM12TransportExecutionImageLayout(options: {
     packetCapacity,
     packetEdge: SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_EDGE,
     packetAxisCapacity: SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_PACKET_AXIS_CAPACITY,
-    spatialTilesPerLogicalBrickAxis, spatialTilesPerLogicalBrick, spatialTileCapacity,
+    spatialTilesPerLogicalBrickAxis, spatialTilesPerLogicalBrick,
+    maximumSpanBricks, logicalSlotsPerLeaf, spatialTilesPerLeaf, spatialTileCapacity,
     slotBaseWords: [slot0, slot1] as const, slotStrideWords,
     slotLeafBaseOffsets: [leaf0, leaf1] as const,
     slotPacketBaseOffsets: [packet0, packet1] as const,
@@ -261,11 +280,20 @@ function writeSlot(
     }
   }
 
-  const dims = layout.logicalBrickDimensions;
   for (let spatialTile = 0; spatialTile < layout.spatialTileCapacity; spatialTile += 1) {
-    const logicalKey = Math.floor(spatialTile / layout.spatialTilesPerLogicalBrick);
-    const tile = spatialTile % layout.spatialTilesPerLogicalBrick;
-    const logical = keyCoordinate(logicalKey, dims);
+    const brick = Math.floor(spatialTile / layout.spatialTilesPerLeaf);
+    const leafTile = spatialTile % layout.spatialTilesPerLeaf;
+    const source = atlas.bricks[brick];
+    if (!source) continue;
+    const span = sparseBrickSpan(source);
+    const logicalLocal = Math.floor(leafTile / layout.spatialTilesPerLogicalBrick);
+    if (logicalLocal >= span ** 3) continue;
+    const tile = leafTile % layout.spatialTilesPerLogicalBrick;
+    const lz = Math.floor(logicalLocal / (span * span));
+    const rem = logicalLocal - lz * span * span;
+    const ly = Math.floor(rem / span), lx = rem - ly * span;
+    const logical = [source.coordinate[0] + lx, source.coordinate[1] + ly,
+      source.coordinate[2] + lz] as const;
     const tx = tile % layout.spatialTilesPerLogicalBrickAxis;
     const ty = Math.floor(tile / layout.spatialTilesPerLogicalBrickAxis)
       % layout.spatialTilesPerLogicalBrickAxis;
@@ -281,8 +309,9 @@ function writeSlot(
     words[at + 1] = SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_INVALID;
     words[at + 2] = 0;
     words[at + 3] = 0;
-    const owner = sparseCM12LogicalOwnerAtKey(directory, logicalKey);
-    if (!owner || !runtime.brickActive(owner.brick)
+    const owner = { brick, origin: source.coordinate,
+      spanBricks: sparseBrickSpan(source) } as const;
+    if (!runtime.brickActive(owner.brick)
       || origin.some((v, axis) => v >= atlas.dimensions[axis]!)) continue;
     const resolution = runtime.acceptedBrickResolution(owner.brick);
     const spanFine = layout.brickFineResolution * owner.spanBricks;
@@ -335,6 +364,13 @@ export function createSparseCM12TransportExecutionImage(
     brickFineResolution: atlas.brickFineResolution,
     logicalBrickDimensions: directory.layout.logicalBrickDimensions,
     leafCapacity: atlas.bricks.length,
+    maximumSpanBricks: atlas.maximumSpanBricks,
+    logicalSlotsPerLeaf: Math.max(1, ...atlas.bricks.map((brick) => {
+      const span = sparseBrickSpan(brick);
+      const extent = brick.coordinate.map((origin, axis) => Math.max(0,
+        Math.min(span, atlas.brickDimensions[axis]! - origin)));
+      return (extent[2]! - 1) * span * span + (extent[1]! - 1) * span + extent[0]!;
+    })),
   });
   const generation = checked(options.generation ?? 1, "generation");
   const words = new Uint32Array(layout.totalWords);

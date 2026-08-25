@@ -111,8 +111,71 @@ export const SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE: MethodProfile = Objec
     receiverSupportRings: 9,
     timeStep: "paper",
     pressureIterations: 64,
+    pressureRelativeTolerance: 4e-6,
   }),
 });
+
+/** Conservative profile for the small bounded transfer demonstration. */
+export const BOUNDED_POOL_TRANSFER_METHOD_PROFILE: MethodProfile = Object.freeze({
+  methodId: "adaptive-mass",
+  quality: "balanced",
+  overrides: Object.freeze({
+    brickFineResolution: "8",
+    resolutionMode: "adaptive",
+    maximumMacroSpanBricks: "auto",
+    selectorMode: "surface",
+    receiverFloor: "auto",
+    surfaceFineRings: 1,
+    receiverSupportRings: 2,
+    timeStep: "scene",
+    pressureIterations: 64,
+    pressureRelativeTolerance: 4e-6,
+  }),
+});
+
+/**
+ * A deliberately bounded fluid-transfer demonstration.
+ *
+ * The outer container is the receiving pool from t=0 and a compact water
+ * column occupies its left end. There is deliberately no rigid divider: this
+ * is the smallest useful baseline for watching region A wet region B without
+ * conflating transport, dynamic sparse residency, and solid voxelization.
+ * Every possible fluid destination is inside the authored 32x12x16 lattice.
+ */
+export function createBoundedPoolTransferScene(): SceneDescription {
+  const cellSize_m = 0.05;
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = "bounded-pool-transfer";
+  scene.duration_s = 4;
+  scene.container = {
+    ...scene.container,
+    width_m: 32 * cellSize_m,
+    height_m: 12 * cellSize_m,
+    depth_m: 16 * cellSize_m,
+    // 8x9x16 initially wet cells inside a 32x12x16 pool.
+    fillFraction: (8 * 9 * 16) / (32 * 12 * 16),
+    top: "open",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { finestCellSize_m: cellSize_m, brickSize_cells: 8 };
+  scene.container.wallField = boxTankWallFieldForScene(scene);
+  scene.fluid.initialCondition = "dam-break";
+  scene.fluid.initialDamBreakDimensions_m = {
+    x: 8 * cellSize_m,
+    y: 9 * cellSize_m,
+    z: 16 * cellSize_m,
+  };
+  delete scene.fluid.initialDamBreakOrigin_m;
+  scene.fluid.surfaceTension_N_m = 0;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.initialLiquidVolumes;
+  delete scene.fluid.inflow;
+
+  scene.rigidBodies = [];
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  return scene;
+}
 
 /** Canonical factor-one adaptive LoSasso profile for interactive water.
  * This exact tuple is exercised by Dawn raster lanes before it is offered by
@@ -1794,6 +1857,22 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
           scene.fluid.surfaceTension_N_m = 0;
           pinStep(scene, 1 / 120);
         }),
+    },
+  }),
+  defineScene({
+    id: "bounded-pool-transfer",
+    name: "Water transfer · bounded pool",
+    blurb: "A compact water column releases into a much wider closed voxel pool. The receiving area is finite and present from frame zero, making sparse wet-region activation easy to watch and safe to run.",
+    audience: "explore",
+    shelf: "Tanks",
+    environment: "stage",
+    methodProfile: BOUNDED_POOL_TRANSFER_METHOD_PROFILE,
+    build: createBoundedPoolTransferScene,
+    camera: {
+      azimuth_rad: 0.18,
+      elevation_rad: 0.48,
+      distance_m: 2.15,
+      target_m: { x: -0.02, y: 0.2, z: 0 },
     },
   }),
   defineScene({

@@ -488,6 +488,38 @@ export function buildSparseAtlasCompositeGrid(
     && workspace.termCoefficientScratch.length >= seamScratchCapacity
     ? workspace.termCoefficientScratch : new Float64Array(seamScratchCapacity);
   let mixedSeamRowCount = 0, sparseAirRowCount = 0;
+  const tankWallOpenFraction = (
+    axis: SparseAtlasAxis,
+    faceCoordinate: number,
+    minimum: SparseBrickVec3,
+    maximum: SparseBrickVec3,
+  ): number | undefined => {
+    const placement = atlas.tankWallPlacement;
+    const wallField = atlas.wallField;
+    if (!placement || !wallField || axis === 1) return undefined;
+    const side = axis === 0
+      ? Math.abs(faceCoordinate - placement.minimumFine[0]) < 1e-6 ? "left"
+        : Math.abs(faceCoordinate - placement.maximumFine[0]) < 1e-6 ? "right" : undefined
+      : Math.abs(faceCoordinate - placement.minimumFine[2]) < 1e-6 ? "front"
+        : Math.abs(faceCoordinate - placement.maximumFine[2]) < 1e-6 ? "back" : undefined;
+    if (!side) return undefined;
+    const uAxis = axis === 0 ? 2 : 0;
+    const vAxis = 1;
+    const u0 = Math.max(minimum[uAxis], placement.minimumFine[uAxis]);
+    const u1 = Math.min(maximum[uAxis], placement.maximumFine[uAxis]);
+    const v0 = Math.max(minimum[vAxis], placement.minimumFine[vAxis]);
+    const v1 = Math.min(maximum[vAxis], placement.maximumFine[vAxis]);
+    const totalArea = Math.max(0, maximum[uAxis] - minimum[uAxis])
+      * Math.max(0, maximum[vAxis] - minimum[vAxis]);
+    const wallArea = Math.max(0, u1 - u0) * Math.max(0, v1 - v0);
+    if (!(totalArea > 0) || !(wallArea > 0)) return 1;
+    const wallOpen = tankWallOpeningFraction(
+      wallField, side,
+      u0 - placement.minimumFine[uAxis], u1 - placement.minimumFine[uAxis],
+      v0 - placement.minimumFine[vAxis], v1 - placement.minimumFine[vAxis],
+    );
+    return (totalArea - wallArea + wallArea * wallOpen) / totalArea;
+  };
   const appendRow = (
     kind: SparseAtlasGradientRowKind,
     axis: SparseAtlasAxis,
@@ -620,10 +652,24 @@ export function buildSparseAtlasCompositeGrid(
             termCoefficientScratch[0] = -1 / distance;
             termCellScratch[1] = positive.id;
             termCoefficientScratch[1] = 1 / distance;
+            const minimum = [
+              Math.min(negative.minimumFine[0], positive.minimumFine[0]),
+              Math.min(negative.minimumFine[1], positive.minimumFine[1]),
+              Math.min(negative.minimumFine[2], positive.minimumFine[2]),
+            ] as SparseBrickVec3;
+            const maximum = [
+              Math.max(negative.maximumFine[0], positive.maximumFine[0]),
+              Math.max(negative.maximumFine[1], positive.maximumFine[1]),
+              Math.max(negative.maximumFine[2], positive.maximumFine[2]),
+            ] as SparseBrickVec3;
+            const authoredOpenFraction = tankWallOpenFraction(
+              axis, faceCenter, minimum, maximum,
+            );
+            if (authoredOpenFraction === 0) continue;
             appendRow(
               "intra-brick", axis, center0, center1, center2, area, distance,
               negative.widthsFine[tangents[0]], negative.widthsFine[tangents[1]], 2,
-              brick.key, brick.key,
+              brick.key, brick.key, undefined, authoredOpenFraction ?? 1,
             );
           }
         }
@@ -710,6 +756,10 @@ export function buildSparseAtlasCompositeGrid(
         const area = (maximum[tangents[0]] - minimum[tangents[0]])
           * (maximum[tangents[1]] - minimum[tangents[1]]);
         if (!(area > 0)) continue;
+        const authoredOpenFraction = tankWallOpenFraction(
+          axis, faceCoordinate, minimum, maximum,
+        );
+        if (authoredOpenFraction === 0) continue;
         let negativeCount = 0, positiveCount = 0;
         let negativeCenterSum = 0, positiveCenterSum = 0;
         for (let index = 0; index < negativeCells.length; index += 1) {
@@ -790,7 +840,7 @@ export function buildSparseAtlasCompositeGrid(
           axis, center0, center1, center2, area, distance,
           maximum[tangents[0]] - minimum[tangents[0]],
           maximum[tangents[1]] - minimum[tangents[1]], termCount,
-          negative.key, positive.key,
+          negative.key, positive.key, undefined, authoredOpenFraction ?? 1,
         );
       }
     }
@@ -809,7 +859,14 @@ export function buildSparseAtlasCompositeGrid(
       const distance = cell.widthsFine[axis];
       const area = cell.widthsFine[tangents[0]] * cell.widthsFine[tangents[1]];
       let authoredOpenFraction = 1;
-      if (authoredTankOpening) {
+      const faceCoordinate = side < 0 ? cell.minimumFine[axis] : cell.maximumFine[axis];
+      const placedOpenFraction = tankWallOpenFraction(
+        axis, faceCoordinate, cell.minimumFine, cell.maximumFine,
+      );
+      if (placedOpenFraction !== undefined) {
+        authoredOpenFraction = placedOpenFraction;
+        if (!(authoredOpenFraction > 0)) continue;
+      } else if (authoredTankOpening) {
         const wallField = atlas.wallField;
         if (!wallField || axis === 1) continue;
         const wallSide = axis === 0
@@ -826,7 +883,7 @@ export function buildSparseAtlasCompositeGrid(
       let center0 = cell.centerFine[0];
       let center1 = cell.centerFine[1];
       let center2 = cell.centerFine[2];
-      const faceCenter = side < 0 ? cell.minimumFine[axis] : cell.maximumFine[axis];
+      const faceCenter = faceCoordinate;
       if (axis === 0) center0 = faceCenter;
       else if (axis === 1) center1 = faceCenter;
       else center2 = faceCenter;
@@ -876,14 +933,16 @@ export function buildSparseAtlasCompositeGrid(
       if (neighbors.length > 0) {
         for (const neighbor of neighbors) appendBrickInterface(brick, neighbor, axis);
       } else appendSparseAirFace(brick, axis, 1);
-    } else if (axis !== 1 && atlas.wallField && !atlas.boundary) {
+    } else if (axis !== 1 && atlas.wallField && !atlas.boundary
+      && !atlas.tankWallPlacement) {
       appendSparseAirFace(brick, axis, 1, true);
     }
     if (brick.coordinate[axis] > 0) {
       const hasNegativeNeighbor = (positiveFaces[axis].get(brick.coordinate[axis]) ?? [])
         .some((candidate) => tangentOverlap(candidate, brick, axis));
       if (!hasNegativeNeighbor) appendSparseAirFace(brick, axis, -1);
-    } else if (axis !== 1 && atlas.wallField && !atlas.boundary) {
+    } else if (axis !== 1 && atlas.wallField && !atlas.boundary
+      && !atlas.tankWallPlacement) {
       appendSparseAirFace(brick, axis, -1, true);
     }
   }

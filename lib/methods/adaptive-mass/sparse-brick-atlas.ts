@@ -103,6 +103,11 @@ export interface SparseAdaptiveMassAtlas {
   readonly boundary?: SphericalContainerFineGeometry;
   /** Authored rectangular side-wall occupancy at the finest lattice. */
   readonly wallField?: TankWallField;
+  /** Placement of the physical tank inside a larger sparse fluid domain. */
+  readonly tankWallPlacement?: {
+    readonly minimumFine: SparseBrickVec3;
+    readonly maximumFine: SparseBrickVec3;
+  };
 }
 
 export interface SparseBrickAtlasInitializationOptions {
@@ -187,6 +192,7 @@ export function createSparseAdaptiveMassAtlas(
   boundary?: SphericalContainerFineGeometry,
   brickFineResolution: SparseBrickFineResolution = DEFAULT_BRICK_FINE_RESOLUTION,
   wallField?: TankWallField,
+  tankWallPlacement?: SparseAdaptiveMassAtlas["tankWallPlacement"],
 ): SparseAdaptiveMassAtlas {
   positiveDimensions(dimensions);
   const ladder = sparseBrickLadder(brickFineResolution);
@@ -236,6 +242,7 @@ export function createSparseAdaptiveMassAtlas(
     dimensions, brickFineResolution, brickCellCapacity: ladder.cellCapacity,
     ladder, brickDimensions, bricks: [...bricks], directory,
     directoriesBySpan, maximumSpanBricks, generation, boundary, wallField,
+    tankWallPlacement,
   };
 }
 
@@ -1004,6 +1011,7 @@ export function coarsenLargeQuiescentComponents(
     atlas.boundary,
     atlas.brickFineResolution,
     atlas.wallField,
+    atlas.tankWallPlacement,
   );
 }
 

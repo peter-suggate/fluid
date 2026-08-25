@@ -66,6 +66,32 @@ export function createBoxTankWallField(
   };
 }
 
+/**
+ * The topology envelope used by live solvers.
+ *
+ * Every side cell is open so a later wall cut can enable an already-resident
+ * face row instead of rebuilding the solver. The authored field remains the
+ * authority for which of those rows is active.
+ */
+export function createOpenTankWallField(
+  dimensionsInput: TankWallField["dimensions"],
+): TankWallField {
+  const shell = createBoxTankWallField(dimensionsInput);
+  const openFace = (side: TankWallSide): TankWallFaceField => ({
+    ...shell.faces[side],
+    solidRuns: [],
+  });
+  return {
+    ...shell,
+    faces: {
+      left: openFace("left"),
+      right: openFace("right"),
+      front: openFace("front"),
+      back: openFace("back"),
+    },
+  };
+}
+
 function normalizedRuns(runs: readonly TankWallRun[], cellCount: number): TankWallRun[] {
   const intervals = runs
     .map(([start, count]) => [Math.max(0, Math.trunc(start)), Math.min(cellCount, Math.trunc(start + count))] as const)
@@ -240,6 +266,28 @@ export function tankWallOpeningCellCount(field: TankWallField): number {
     const solid = face.solidRuns.reduce((count, run) => count + run[1], 0);
     return sum + face.uCells * face.vCells - solid;
   }, 0);
+}
+
+/** Whether one side contains any authored opening. */
+export function tankWallSideHasOpening(
+  field: TankWallField,
+  side: TankWallSide,
+): boolean {
+  const face = field.faces[side];
+  const solid = face.solidRuns.reduce((count, run) => count + run[1], 0);
+  return solid < face.uCells * face.vCells;
+}
+
+/** Whether an authored opening on one side reaches the tank floor. */
+export function tankWallSideHasFloorOpening(
+  field: TankWallField,
+  side: TankWallSide,
+): boolean {
+  const face = field.faces[side];
+  for (let u = 0; u < face.uCells; u += 1) {
+    if (!tankWallCellIsSolid(field, side, u, 0)) return true;
+  }
+  return false;
 }
 
 /**

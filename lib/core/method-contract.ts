@@ -210,6 +210,12 @@ export interface InjectedLiquidBall {
 /** Minimal interface the renderer needs from a GPU solver. */
 export interface GPUSolverInstance {
   readonly info: GPUEulerianInfo;
+  /** Physical frame of the fluid lattice when it extends beyond the tank. */
+  readonly fluidDomain?: {
+    readonly origin_m: readonly [number, number, number];
+    readonly cellSize_m: readonly [number, number, number];
+    readonly dimensions: readonly [number, number, number];
+  };
   /**
    * Semantic sparse-world authority, when this solver is backed by one.
    *

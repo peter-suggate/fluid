@@ -40,6 +40,7 @@
     "test:unit": "node --import tsx --test tests/*.test.ts",
     "test:webgpu": "FLUID_SCENE=${FLUID_SCENE:-all} node --import tsx tools/run-webgpu-smoke.ts",
     "test:webgpu:adaptive-mass:symmetric-expansion": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/run-adaptive-mass-symmetric-expansion-dawn.ts --steps=${STEPS:-20}",
+    "test:webgpu:adaptive-mass:long-dam": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/sparse-world-long-dam-dawn.test.ts",
     "test:webgpu:adaptive-mass:mini64-front": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/sparse-cm12-mini64-front-dawn.test.ts",
     "test:webgpu:bringup-stage": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/run-webgpu-bringup-stage.ts",
     "test:webgpu:octree-runtime": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/run-webgpu-exclusive.ts --import tsx --test --test-concurrency=1 tests/octree-leaf32.test.ts tests/webgpu-octree-owner-pages.test.ts",

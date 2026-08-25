@@ -13,7 +13,7 @@ import {
 } from "../../core/refinement-regions";
 import { classifyFineBoxAgainstSphericalContainer } from "../../core/spherical-container";
 import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
-import { sceneLatticeDimensions } from "../../core/scene-lattice";
+import { sceneCellSizes_m, sceneLatticeDimensions } from "../../core/scene-lattice";
 import { GPUStageTimestampRecorder } from "../../core/performance-trace";
 import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
@@ -26,6 +26,10 @@ import {
 import { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
 import { sceneHasTerrain, terrainColumnHeights } from "../../core/terrain";
 import {
+  createOpenTankWallField,
+  tankWallSideHasOpening,
+} from "../../core/tank-wall-field";
+import {
   ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS,
   AdaptiveMassFrameCapture,
 } from "./adaptive-mass-frame-pipeline";
@@ -33,6 +37,8 @@ import type { AdaptiveMassSolverOptions } from "./method";
 import {
   createSparseAdaptiveMassAtlas,
   initializeSparseBrickAtlasFromScene,
+  materializeSparseBrickAtlasDensity,
+  sparseBrickFromDense,
   sparseBrickContainingCoordinate,
   sparseBrickKey,
   sparseBrickSpan,
@@ -75,6 +81,112 @@ const LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 retired host authority paired QA oracle");
 const PHASE1_TRANSPORT_RECEIPT_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 Phase-1 transport receipt QA");
+
+export interface AdaptiveMassFluidDomain {
+  readonly dimensions: SparseBrickVec3;
+  readonly tankDimensions: SparseBrickVec3;
+  readonly tankMinimumFine: SparseBrickVec3;
+  readonly tankMaximumFine: SparseBrickVec3;
+  readonly origin_m: readonly [number, number, number];
+  readonly cellSize_m: readonly [number, number, number];
+  readonly expanded: boolean;
+}
+
+/**
+ * Seed only the first receiver brick across an authored opening. This is the
+ * minimum topology needed for a wall row to have a conservative destination;
+ * subsequent coordinates are claimed by the signed sparse-world frontier.
+ */
+export function adaptiveMassFluidDomainForScene(
+  scene: SceneDescription,
+  brickFineResolution = 8,
+  receiverSupportRings = SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
+): AdaptiveMassFluidDomain {
+  const tankDimensions = sceneLatticeDimensions(scene) as SparseBrickVec3;
+  void receiverSupportRings;
+  const left = tankWallSideHasOpening(scene.container.wallField, "left");
+  const right = tankWallSideHasOpening(scene.container.wallField, "right");
+  const front = tankWallSideHasOpening(scene.container.wallField, "front");
+  const back = tankWallSideHasOpening(scene.container.wallField, "back");
+  const minimumPadding = [left ? brickFineResolution : 0, 0,
+    front ? brickFineResolution : 0] as const;
+  const maximumPadding = [right ? brickFineResolution : 0, 0,
+    back ? brickFineResolution : 0] as const;
+  const dimensions: SparseBrickVec3 = [
+    tankDimensions[0] + minimumPadding[0] + maximumPadding[0],
+    tankDimensions[1],
+    tankDimensions[2] + minimumPadding[2] + maximumPadding[2],
+  ];
+  const cell = sceneCellSizes_m(scene);
+  return {
+    dimensions,
+    tankDimensions,
+    tankMinimumFine: minimumPadding,
+    tankMaximumFine: [minimumPadding[0] + tankDimensions[0], tankDimensions[1],
+      minimumPadding[2] + tankDimensions[2]],
+    origin_m: [-0.5 * tankDimensions[0] * cell[0] - minimumPadding[0] * cell[0],
+      0, -0.5 * tankDimensions[2] * cell[2] - minimumPadding[2] * cell[2]],
+    cellSize_m: cell,
+    expanded: left || right || front || back,
+  };
+}
+
+/** Place the ordinary tank seed atlas in its larger, empty sparse world. */
+export function embedTankAtlasInFluidDomain(
+  source: SparseAdaptiveMassAtlas,
+  domain: AdaptiveMassFluidDomain,
+): SparseAdaptiveMassAtlas {
+  if (!domain.expanded) return source;
+  const width = source.brickFineResolution;
+  const shiftBricks: SparseBrickVec3 = [
+    domain.tankMinimumFine[0] / width,
+    0,
+    domain.tankMinimumFine[2] / width,
+  ];
+  const expandedBrickDimensions: SparseBrickVec3 = [
+    Math.ceil(domain.dimensions[0] / width),
+    Math.ceil(domain.dimensions[1] / width),
+    Math.ceil(domain.dimensions[2] / width),
+  ];
+  let dense: Float32Array | undefined;
+  const bricks = source.bricks.map((brick) => {
+    const span = sparseBrickSpan(brick);
+    if (shiftBricks.some((value) => value % span !== 0)) {
+      throw new Error(`Expanded tank domain shift is not aligned to macro span ${span}`);
+    }
+    const minimum = brick.coordinate.map((value) => value * width);
+    const maximum = minimum.map((value) => value + width);
+    const crossesTankWall = [0, 2].some((axis) => {
+      const wall = domain.tankDimensions[axis];
+      return wall > minimum[axis]! && wall < maximum[axis]!;
+    });
+    if (crossesTankWall && span !== 1) {
+      throw new Error(`macro span ${span} crosses an embedded tank wall`);
+    }
+    const resolved = crossesTankWall && brick.resolution !== width
+      ? sparseBrickFromDense(brick.key, brick.coordinate, width,
+        dense ??= materializeSparseBrickAtlasDensity(source),
+        source.dimensions, undefined, width)
+      : brick;
+    const coordinate: SparseBrickVec3 = [
+      resolved.coordinate[0] + shiftBricks[0],
+      resolved.coordinate[1] + shiftBricks[1],
+      resolved.coordinate[2] + shiftBricks[2],
+    ];
+    return {
+      ...resolved,
+      coordinate,
+      key: sparseBrickKey(coordinate, expandedBrickDimensions),
+    };
+  });
+  return createSparseAdaptiveMassAtlas(
+    domain.dimensions, bricks, source.generation, source.boundary,
+    source.brickFineResolution, source.wallField, {
+      minimumFine: domain.tankMinimumFine,
+      maximumFine: domain.tankMaximumFine,
+    },
+  );
+}
 
 /** Method-local long-run physics receipt carried through the generic info bag. */
 export interface AdaptiveMassStepTelemetry {
@@ -294,6 +406,7 @@ export function residentSupportAtlas(
     source.boundary,
     source.brickFineResolution,
     source.wallField,
+    source.tankWallPlacement,
   );
 }
 
@@ -471,6 +584,7 @@ export function dormantReceiverDomain(
     source.boundary,
     source.brickFineResolution,
     source.wallField,
+    source.tankWallPlacement,
   );
 }
 
@@ -484,6 +598,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readonly sparseWorldDevice: SparseWorldDevice;
   readonly sparseWorldUI: SparseWorldUI;
   readonly info: GPUEulerianInfo;
+  readonly fluidDomain: NonNullable<GPUSolverInstance["fluidDomain"]>;
   get simulationReady(): boolean {
     return this.sparseWorldDevice.status === "ready";
   }
@@ -503,6 +618,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   get globalFineLevelSetSource() { return this.sparseWorld.presentation().fineLevelSet; }
   readPresentationPageAllocatorReceiptQA() {
     return this.sparseWorldTrace.readPresentationPageAllocatorReceiptQA();
+  }
+  readWorldGrowthReceiptQA() {
+    return this.sparseWorldTrace.readWorldGrowthReceiptQA();
   }
 
   private atlas: SparseAdaptiveMassAtlas;
@@ -551,6 +669,19 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.sparseWorld = sparseWorld;
     this.sparseWorldUI = sparseWorldUI;
     this.atlas = atlas;
+    const tankCellSize_m = sceneCellSizes_m(scene);
+    const placement = atlas.tankWallPlacement;
+    const tankFine = placement ? placement.maximumFine.map((value, axis) =>
+      value - placement.minimumFine[axis]!) : atlas.dimensions;
+    const tankMinimum = placement?.minimumFine ?? [0, 0, 0];
+    this.fluidDomain = {
+      origin_m: [-0.5 * tankFine[0]! * tankCellSize_m[0]
+        - tankMinimum[0] * tankCellSize_m[0], 0,
+      -0.5 * tankFine[2]! * tankCellSize_m[2]
+        - tankMinimum[2] * tankCellSize_m[2]],
+      cellSize_m: tankCellSize_m,
+      dimensions: atlas.dimensions,
+    };
     this.volumeTexture = presentation.densityTexture;
     this.surfaceFieldTexture = presentation.levelSetTexture;
     this.gridCellTexture = presentation.gridCellTexture;
@@ -560,11 +691,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const stats = sparseBrickAtlasStats(atlas);
     const [nx, ny, nz] = atlas.dimensions;
     const representedFraction = stats.leafCount / Math.max(1, stats.equivalentFinestCellCount);
-    const cellSize_m = Math.min(
-      scene.container.width_m / nx,
-      scene.container.height_m / ny,
-      scene.container.depth_m / nz,
-    );
+    const cellSize_m = Math.min(...tankCellSize_m);
     this.info = {
       nx,
       ny,
@@ -679,6 +806,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       | typeof PHASE1_TRANSPORT_RECEIPT_QA_TOKEN,
   ): Promise<WebGPUAdaptiveMassSolver> {
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
+    const fluidDomainPlan = adaptiveMassFluidDomainForScene(
+      scene, options.brickFineResolution ?? 8,
+      options.receiverSupportRings ?? SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
+    );
     // Compile the boundary chain's closing marker while the scene builds. A
     // recorder constructed before it exists closes on an empty pass, which
     // Metal never samples, and that one bad sample would retire hardware
@@ -751,7 +882,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         id: "adaptive-mass.plan",
         phase: "planning",
         label: "Bound the arbitrary-scene presentation lattice",
-        run: () => { dimensions = adaptiveMassPresentationDimensionsForScene(scene); },
+        run: () => { dimensions = fluidDomainPlan.tankDimensions; },
       }, {
         id: "adaptive-mass.atlas",
         phase: "adaptive-topology",
@@ -768,10 +899,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
             brickFineResolution: fineResolution,
-            maximumMacroSpanBricks: options.maximumMacroSpanBricks,
+            maximumMacroSpanBricks: fluidDomainPlan.expanded
+              ? 1 : options.maximumMacroSpanBricks,
             surfaceFineRings: options.surfaceFineRings,
             ...(resolutionForBrick ? { resolutionForBrick } : {}),
           });
+          atlas = embedTankAtlasInFluidDomain(atlas, fluidDomainPlan);
           // Generation-zero production ownership is the authored fluid set.
           // Receiver support below remains a temporary compatibility catalogue
           // until C1 page publication consumes TCP1 directly; it must not make
@@ -783,8 +916,21 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             scene, options.receiverSupportRings,
           );
           atlas = dormantReceiverDomain(supported, options.resolutionMode,
-            receiverScale.supportRings, options.receiverFloor,
+            fluidDomainPlan.expanded ? 0 : receiverScale.supportRings,
+            options.receiverFloor,
             receiverScale.minimumCapacityScale, scene);
+          // Keep every removable tank face in the resident topology. The
+          // authored field is uploaded separately as a live row mask, so a
+          // wall edit never reconstructs cells or resets the fluid state.
+          atlas = createSparseAdaptiveMassAtlas(
+            atlas.dimensions,
+            atlas.bricks,
+            atlas.generation,
+            atlas.boundary,
+            atlas.brickFineResolution,
+            createOpenTankWallField(scene.container.wallField.dimensions),
+            atlas.tankWallPlacement,
+          );
           // The runtime is GPU-resident from generation zero. Construct only
           // the topology oracle needed by the packer; the CPU dynamics state
           // used to allocate duplicate velocity, pressure, policy and
@@ -821,8 +967,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               exchange: rigidExchange!,
               terrain: rigidTerrainTexture!,
               terrainPresent: sceneHasTerrain(scene),
-              worldDimensions_m: [scene.container.width_m, scene.container.height_m,
-                scene.container.depth_m] as const,
+              worldDimensions_m: fluidDomainPlan.dimensions.map((value, axis) =>
+                value * fluidDomainPlan.cellSize_m[axis]) as [number, number, number],
             } : undefined,
             // Sized from the iteration ceiling this solver was built with, so
             // the journal can hold the longest solve it will ever encode.
@@ -849,6 +995,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           });
           sparseRuntime.runtime.setRefinementRegionParameters(packSparseCM12RefinementRegions(
             sceneRefinementRegions(scene), refinementRegionLattice(scene)));
+          sparseRuntime.runtime.setTankWallField(scene.container.wallField);
         },
       }, {
         id: "adaptive-mass.upload",
@@ -904,8 +1051,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    */
   injectLiquidBall(ball: InjectedLiquidBall): void {
     if (this.disposed || !(ball.radius_m > 0)) return;
-    const container = this.scene.container;
-    const [nx, ny, nz] = this.atlas.dimensions;
+    const cell = this.fluidDomain.cellSize_m;
+    const origin = this.fluidDomain.origin_m;
     const encoder = this.device.createCommandEncoder({
       label: "Sparse CM12 GPU liquid injection",
     });
@@ -913,14 +1060,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       encoder,
       finestCellSize(this.scene, this.atlas),
       [
-        (ball.centre_m.x + 0.5 * container.width_m) * nx / container.width_m,
-        ball.centre_m.y * ny / container.height_m,
-        (ball.centre_m.z + 0.5 * container.depth_m) * nz / container.depth_m,
+        (ball.centre_m.x - origin[0]) / cell[0],
+        (ball.centre_m.y - origin[1]) / cell[1],
+        (ball.centre_m.z - origin[2]) / cell[2],
       ],
       [
-        ball.radius_m * nx / container.width_m,
-        ball.radius_m * ny / container.height_m,
-        (ball.halfHeight_m ?? ball.radius_m) * nz / container.depth_m,
+        ball.radius_m / cell[0],
+        ball.radius_m / cell[1],
+        (ball.halfHeight_m ?? ball.radius_m) / cell[2],
       ],
     );
     this.device.queue.submit([encoder.finish()]);
@@ -940,6 +1087,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   applySceneUniforms(scene: SceneDescription): void {
     this.scene = scene;
     this.resetPressureIterationFeedback();
+    this.sparseRuntime.setTankWallField(scene.container.wallField);
     this.sparseRuntime.setRefinementRegionParameters(packSparseCM12RefinementRegions(
       sceneRefinementRegions(scene), refinementRegionLattice(scene)));
   }
@@ -1092,8 +1240,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       },
       seams: frameCapture?.residentStageSeams,
       bodyCount: this.rigidCouplingEnabled ? activeBodies.length : 0,
-      worldDimensions_m: [this.scene.container.width_m, this.scene.container.height_m,
-        this.scene.container.depth_m],
+      worldDimensions_m: this.fluidDomain.dimensions.map((value, axis) =>
+        value * this.fluidDomain.cellSize_m[axis]) as [number, number, number],
       inflow: inflowInjection,
     };
     this.sparseWorld.encodeStep(encoder, {
@@ -1414,13 +1562,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
 export function adaptiveMassPresentationDimensionsForScene(
   scene: SceneDescription,
 ): SparseBrickVec3 {
-  return sceneLatticeDimensions(scene);
+  return adaptiveMassFluidDomainForScene(scene).dimensions;
 }
 
-function finestCellSize(scene: SceneDescription, atlas: SparseAdaptiveMassAtlas): number {
-  return Math.min(
-    scene.container.width_m / atlas.dimensions[0],
-    scene.container.height_m / atlas.dimensions[1],
-    scene.container.depth_m / atlas.dimensions[2],
-  );
+function finestCellSize(scene: SceneDescription, _atlas: SparseAdaptiveMassAtlas): number {
+  return Math.min(...sceneCellSizes_m(scene));
 }

@@ -200,12 +200,9 @@ export function validateGlobalFineLevelSetConsumerSource(source: GlobalFineLevel
     || source.domainOrigin.some((value) => !Number.isFinite(value))) {
     throw new RangeError("Global fine physical coordinates must be finite with positive spacing");
   }
-  // The current compact coarse directory and tetra emitter both use the
-  // fluid-domain-local frame. Do not pretend that an untranslated directory
-  // can safely serve a fine lattice whose configured origin is elsewhere.
-  if (source.domainOrigin.some((value) => value !== 0)) {
-    throw new RangeError("Global fine renderer currently requires a zero domain origin");
-  }
+  // Compact sparse publications may place their finite physical page pool in
+  // a larger signed address lattice. `domainOrigin` translates that lattice;
+  // no dense logical-domain table or texture is implied by a non-zero value.
   if (Boolean(source.coarsePhiDirectory) !== Boolean(source.coarsePhiRowCapacity)) {
     throw new RangeError("Global fine compact-coarse directory and row capacity must be provided together");
   }

@@ -1,6 +1,7 @@
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
+import type { GPUSolverInstance } from "./method-contract";
 import {
   GLASS_OPTICS,
   packWaterSceneOptics,
@@ -46,6 +47,8 @@ import {
   packTankWallField,
   type TankWallField,
 } from "./tank-wall-field";
+
+type FluidDomain = NonNullable<GPUSolverInstance["fluidDomain"]>;
 
 /**
  * Rasterized water presentation for the WebGPU renderer.
@@ -295,6 +298,24 @@ export function surfaceVertexCapacity(nx: number, ny: number, nz: number) {
  */
 export function activeCubeCapacity(maxVertices: number) {
   return Math.ceil(maxVertices / 3);
+}
+
+/**
+ * Geometry capacity for a sparse fine source is a function of physical pages,
+ * never of the signed address lattice those pages can occupy. Six vertices per
+ * physical sample is deliberately generous for an ordinary surface while the
+ * established 8/64 MiB bounds still contain pathological fields.
+ */
+export function globalFineSurfaceVertexCapacity(
+  pageCapacity: number,
+  samplesPerBrick: number,
+): number {
+  if (!Number.isSafeInteger(pageCapacity) || pageCapacity < 1
+    || !Number.isSafeInteger(samplesPerBrick) || samplesPerBrick < 1) {
+    throw new RangeError("Global fine geometry capacities must be positive integers");
+  }
+  return Math.max(262_144, Math.min(2_097_152,
+    pageCapacity * samplesPerBrick * 6));
 }
 
 /**
@@ -1689,6 +1710,7 @@ export class RasterWaterPipeline {
   private secondaryParticles?: SecondaryParticleRenderPipeline;
   private globalFineLevelSet?: GlobalFineLevelSetConsumerSource;
   private coarseLevelSet?: CoarseLevelSetConsumerSource;
+  private fluidDomain?: FluidDomain;
   private globalFineRenderParams?: GPUBuffer;
   private fallbackSparsePageTable?: GPUBuffer;
   private fallbackSparseActivePages?: GPUBuffer;
@@ -2040,6 +2062,18 @@ export class RasterWaterPipeline {
     this.volume = texture; this.columnBases = columnBases; this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
   }
 
+  setFluidDomain(domain: FluidDomain | undefined) {
+    const previous = this.fluidDomain;
+    if (previous && domain
+      && previous.origin_m.every((value, axis) => value === domain.origin_m[axis])
+      && previous.cellSize_m.every((value, axis) => value === domain.cellSize_m[axis])
+      && previous.dimensions.every((value, axis) => value === domain.dimensions[axis])) return;
+    if (!previous && !domain) return;
+    this.fluidDomain = domain;
+    this.writeCompactRenderParams();
+    this.extractedRevision = -1;
+  }
+
   /** Selects row-independent global fine bricks without synthesizing leaf ownership. */
   setGlobalFineLevelSet(source: GlobalFineLevelSetConsumerSource | undefined) {
     if (source) validateGlobalFineLevelSetConsumerSource(source);
@@ -2102,6 +2136,14 @@ export class RasterWaterPipeline {
       // Table state 6 is the renderer-private compact-coarse publication mode.
       u32.set([1, 6, 1, coarse!.generation], 8);
       f32.set([...coarse!.domainOrigin, coarse!.physicalCellSize], 12); f32[16] = 1;
+    }
+    if (this.fluidDomain) {
+      f32.set(this.fluidDomain.cellSize_m, 20);
+      const presentationOrigin = fine
+        ? this.fluidDomain.origin_m.map((value, axis) =>
+          value + fine.domainOrigin[axis]!)
+        : this.fluidDomain.origin_m;
+      f32.set(presentationOrigin, 24);
     }
     this.device.queue.writeBuffer(this.globalFineRenderParams, 0, bytes);
   }
@@ -2230,14 +2272,15 @@ export class RasterWaterPipeline {
     return template;
   }
 
-  private ensureGeometry(nx: number, ny: number, nz: number) {
-    const key = `${nx}x${ny}x${nz}`;
+  private ensureGeometry(nx: number, ny: number, nz: number,
+    sparseMaxVertices?: number) {
+    const key = `${nx}x${ny}x${nz}:${sparseMaxVertices ?? "dense"}`;
     if (key === this.geometryKey) return;
     this.vertexBuffer?.destroy(); this.indirectBuffer?.destroy(); this.indirectResetTemplate?.destroy(); this.activeCubeBuffer?.destroy(); this.globalCubeValues?.destroy(); this.globalCubeOffsets?.destroy();
     // Surface area, not volume, controls the normal case.  The generous factor
     // also covers breaking sheets and entrained blobs while imposing a hard
     // 64 MiB ceiling on adversarial checkerboard fields.
-    const maxVertices = surfaceVertexCapacity(nx, ny, nz);
+    const maxVertices = sparseMaxVertices ?? surfaceVertexCapacity(nx, ny, nz);
     this.vertexBuffer = this.device.createBuffer({ label: `Extracted water surface (${maxVertices} vertices)`, size: maxVertices * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     // The first 16 bytes are the standard draw-indirect ABI. Renderer-private
     // counters, global-fine authority latch, and GPU-published mesh generation
@@ -2393,7 +2436,12 @@ export class RasterWaterPipeline {
     }
     const compactSurface = this.globalFineLevelSet ?? this.coarseLevelSet;
     const geometryDimensions = compactSurface?.sampleDimensions ?? [nx, ny, nz] as const;
-    this.ensureGeometry(geometryDimensions[0],geometryDimensions[1],geometryDimensions[2]);
+    const sparseGeometryCapacity = this.globalFineLevelSet
+      ? globalFineSurfaceVertexCapacity(this.globalFineLevelSet.pageCapacity,
+        this.globalFineLevelSet.samplesPerBrick)
+      : undefined;
+    this.ensureGeometry(geometryDimensions[0], geometryDimensions[1],
+      geometryDimensions[2], sparseGeometryCapacity);
     if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractGlobalFinePipeline||!this.extractGlobalCoarsePipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.causticPipeline||!this.compositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.globalPolygoniseEmitBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.causticBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture||!this.causticReceiver) return false;
     const now_ms = performance.now();
     // A paused t=0 handoff cannot wait for a new solver revision: reset has
