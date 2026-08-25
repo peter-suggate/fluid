@@ -885,7 +885,7 @@ struct Params {
   activityEpochs:vec4u,     // cadence, promotion epochs, demotion epochs, activity signals enabled
   boundaryCenter:vec4f,
   boundaryRadii:vec4f,
-  topologyScheduling:vec4u, // ordinary shadow bricks/frame, pressure tolerance bits
+  topologyScheduling:vec4u, // shadow budget, pressure tolerance, gamma diffusion, sharpening
   solidOffsets:vec4u,       // cell open, row data, flags, terrain signed distance
   rigidWorld:vec4f,         // world metres and rigid-body count
   tracerGrid:vec4u,         // tracer lattice dimensions, tracer count
@@ -1105,6 +1105,8 @@ fn sourceGamma()->u32{return select(p.stateOffsets0.z,p.stateOffsets0.w,
   cm12FCSourceScalarParity()!=0u);}
 fn destinationGamma()->u32{return select(p.stateOffsets0.w,p.stateOffsets0.z,
   cm12FCDestinationScalarParity()==0u);}
+fn gammaDiffusionEnabled()->bool{return p.topologyScheduling.z!=0u;}
+fn surfaceSharpeningEnabled()->bool{return p.topologyScheduling.w!=0u;}
 fn sourceCellVelocity()->u32{return select(p.stateOffsets1.x,p.stateOffsets1.y,
   cm12FCSourceFaceParity()!=0u);}
 fn destinationCellVelocity()->u32{return select(p.stateOffsets1.y,p.stateOffsets1.x,
@@ -2612,8 +2614,10 @@ fn finalizeGammaRefinement(@builtin(global_invocation_id)gid:vec3u){
   }
 }
 
-fn conditionedDensity(cell:u32)->f32{return state[p.stateOffsets2.z+cell];}
-fn conditionedGamma(cell:u32)->f32{return state[p.stateOffsets2.w+cell];}
+fn conditionedDensity(cell:u32)->f32{return state[select(destinationDensity(),
+  p.stateOffsets2.z,gammaDiffusionEnabled())+cell];}
+fn conditionedGamma(cell:u32)->f32{return state[select(destinationGamma(),
+  p.stateOffsets2.w,gammaDiffusionEnabled())+cell];}
 
 struct SharpeningStats {
   maximumDifference:f32,
@@ -2813,6 +2817,11 @@ fn finalizeSharpeningCell(cell:u32){
     if(!dynamicallyCoveredCell(cell)){
       state[destinationDensity()+cell]=0.0;state[destinationGamma()+cell]=1.0;
     }
+    return;
+  }
+  if(!surfaceSharpeningEnabled()){
+    state[destinationDensity()+cell]=max(0.0,conditionedDensity(cell));
+    state[destinationGamma()+cell]=max(0.0,conditionedGamma(cell));
     return;
   }
   let delta=state[p.stateOffsets5.x+cell];

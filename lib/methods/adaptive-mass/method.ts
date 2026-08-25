@@ -50,6 +50,10 @@ export interface AdaptiveMassSolverOptions {
   readonly sharpeningDistance?: number;
   /** Forward-Euler substeps TraceAlongField may spend reaching D. */
   readonly sharpeningTraceSteps?: number;
+  /** Whether Sec. 3.4's two gamma-diffusion iterations run. */
+  readonly gammaDiffusionEnabled?: boolean;
+  /** Whether Sec. 3.5's conservative surface-sharpening transform runs. */
+  readonly surfaceSharpeningEnabled?: boolean;
   /** Maximum one-reduction sparse MGPCG iterations encoded for each pressure solve. */
   readonly pressureIterations?: number;
   /** Relative L2 residual that stops further PCG arithmetic; zero runs the full budget. */
@@ -161,6 +165,32 @@ const params: MethodParamSpec[] = [
     ],
     update: "runtime",
     hint: "Sparse CM12 defaults to the exact 1/30 s paper step. Scene mode remains available for matched-step validation and hydrostatic probes.",
+  },
+  {
+    kind: "select",
+    key: "gammaDiffusion",
+    label: "Gamma diffusion",
+    default: "on",
+    tier: "coarse",
+    update: "runtime",
+    options: [
+      { value: "on", label: "On" },
+      { value: "off", label: "Off" },
+    ],
+    hint: "Enables CM12 Sec. 3.4's two conservative gamma-diffusion iterations. Turning it off keeps conservative transport and the sparse scalar-publication chain active.",
+  },
+  {
+    kind: "select",
+    key: "surfaceSharpening",
+    label: "Surface sharpening",
+    default: "on",
+    tier: "coarse",
+    update: "runtime",
+    options: [
+      { value: "on", label: "On" },
+      { value: "off", label: "Off" },
+    ],
+    hint: "Enables CM12 Sec. 3.5 Algorithm 2 mass return. Turning it off still publishes the final sparse scalar masks required by pressure, topology, and presentation.",
   },
   {
     kind: "number",
@@ -358,6 +388,8 @@ const params: MethodParamSpec[] = [
 export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze([
   "selectorMode",
   "timeStep",
+  "gammaDiffusion",
+  "surfaceSharpening",
   "pressureIterations",
   "pressureRelativeTolerance",
   "sharpeningDistance",
@@ -425,6 +457,8 @@ export function adaptiveMassSolverOptions(
     receiverFloor: receiverFloor(values.receiverFloor, fineResolution),
     activityPolicy: activityPolicy(values),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
+    gammaDiffusionEnabled: values.gammaDiffusion !== "off",
+    surfaceSharpeningEnabled: values.surfaceSharpening !== "off",
     pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
     pressureRelativeTolerance:
       sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
@@ -511,6 +545,8 @@ export const adaptiveMassMethod: SimulationMethod = {
       surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
       receiverSupportRings: boundedInteger(values.receiverSupportRings, 9, 1, 24),
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
+      gammaDiffusion: values.gammaDiffusion === "off" ? "off" : "on",
+      surfaceSharpening: values.surfaceSharpening === "off" ? "off" : "on",
       pressureIterations: sparseCM12PressureIterations(values.pressureIterations),
       pressureRelativeTolerance:
         sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
@@ -534,6 +570,8 @@ export const adaptiveMassMethod: SimulationMethod = {
       surfaceFineRings: 1,
       receiverSupportRings: 9,
       timeStep: "paper",
+      gammaDiffusion: "on",
+      surfaceSharpening: "on",
       pressureIterations: SPARSE_CM12_PRESSURE_ITERATIONS,
       pressureRelativeTolerance: SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
       sharpeningDistance: SPARSE_CM12_SHARPENING_DISTANCE_CELLS,

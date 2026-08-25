@@ -29,6 +29,7 @@
  */
 import type {
   FluidPipelineContext,
+  FluidPipelineStage,
   FluidPipelineTip,
   FluidStageControl,
 } from "../../core/fluid-pipeline";
@@ -75,6 +76,8 @@ interface SparseCM12StageDeclarationBase<Stage extends SparseCM12ResidentStageId
   /** The short factual chip under the label. Never a description. */
   readonly chip: (context: FluidPipelineContext) => string;
   readonly controls?: readonly FluidStageControl[];
+  /** Optional live gate rendered as the stage lamp in the SIM panel. */
+  readonly toggle?: FluidPipelineStage["toggle"];
 }
 
 /**
@@ -283,7 +286,13 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       writes: "conditioned density and gamma",
       feeds: "surface sharpening",
     },
-    chip: () => "2 × row scatter + cell resolve",
+    toggle: {
+      param: "gammaDiffusion", on: "on", off: "off",
+      hint: "Toggle CM12 Sec. 3.4 gamma diffusion. Conservative transport and the sparse scalar-publication chain remain active when it is off.",
+    },
+    chip: (context) => context.values.gammaDiffusion === "off"
+      ? "disabled · transported scalars pass through"
+      : "2 × row scatter + cell resolve",
   },
   "surface-sharpening": {
     label: "Surface sharpening", band: "transport", side: "right",
@@ -312,6 +321,10 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       writes: "conditioned density and gamma, final-scalar packet masks",
       feeds: "symmetry authority and activity measurement",
     },
+    toggle: {
+      param: "surfaceSharpening", on: "on", off: "off",
+      hint: "Toggle CM12 Sec. 3.5 Algorithm 2 surface sharpening. Final sparse scalar publication remains active when it is off.",
+    },
     controls: [
       {
         kind: "param-range",
@@ -320,6 +333,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         unit: "cells",
         min: 0.1, max: 3.1, step: 0.1, digits: 1,
         hint: "Algorithm 2's D. The paper explores 1.1-3.1 cells and reads increasing it as surface tension; the sparse lane sits at the top of that range because a shorter trace strands removed mass on the tall side walls.",
+        enabled: (context) => context.values.surfaceSharpening !== "off",
       },
       {
         kind: "param-range",
@@ -328,10 +342,13 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         unit: "substeps",
         min: 1, max: 16, step: 1, digits: 0,
         hint: "Forward-Euler substeps the trace may spend, at half a cell each. Reach is min(D, half the substeps), so at the default seven the distance is what binds and lowering these is a separate, shorter-trace ablation.",
+        enabled: (context) => context.values.surfaceSharpening !== "off",
       },
     ],
-    chip: (context) => `CM12 sharpening · D ${fixed(context.values.sharpeningDistance, 1)} cells · ${
-      fixed(context.values.sharpeningTraceSteps, 0)} substeps`,
+    chip: (context) => context.values.surfaceSharpening === "off"
+      ? "Algorithm 2 disabled · sparse publication remains"
+      : `CM12 sharpening · D ${fixed(context.values.sharpeningDistance, 1)} cells · ${
+        fixed(context.values.sharpeningTraceSteps, 0)} substeps`,
   },
   "symmetry-authority": {
     label: "D4 symmetry authority", band: "transport", side: "left",

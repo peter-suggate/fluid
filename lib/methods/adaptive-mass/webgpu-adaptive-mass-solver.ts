@@ -957,6 +957,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const timeStep = values.timeStep === "scene" ? "scene" : "paper";
     const sharpeningDistance = sparseCM12SharpeningDistance(values.sharpeningDistance);
     const sharpeningTraceSteps = sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps);
+    const gammaDiffusionEnabled = values.gammaDiffusion !== "off";
+    const surfaceSharpeningEnabled = values.surfaceSharpening !== "off";
     const pressureIterations = sparseCM12PressureIterations(values.pressureIterations);
     const pressureRelativeTolerance =
       sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance);
@@ -969,6 +971,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       activitySignals: values.selectorMode === "activity",
     });
     this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps,
+      gammaDiffusionEnabled, surfaceSharpeningEnabled,
       pressureIterations, pressureRelativeTolerance, activityPolicy };
   }
 
@@ -1079,6 +1082,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       sharpening: {
         distanceCells: this.options.sharpeningDistance,
         traceSteps: this.options.sharpeningTraceSteps,
+        gammaDiffusionEnabled: this.options.gammaDiffusionEnabled,
+        surfaceSharpeningEnabled: this.options.surfaceSharpeningEnabled,
       },
       activityPolicy: this.options.activityPolicy,
       pressureControl: {

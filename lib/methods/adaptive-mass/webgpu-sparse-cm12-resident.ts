@@ -204,6 +204,10 @@ import {
 export interface SharpeningTrace {
   readonly distanceCells?: number;
   readonly traceSteps?: number;
+  /** Defaults on for direct diagnostic constructors and existing callers. */
+  readonly gammaDiffusionEnabled?: boolean;
+  /** Defaults on; the mandatory final-scalar publication is independent. */
+  readonly surfaceSharpeningEnabled?: boolean;
 }
 
 /** Live GPU-authored resolution policy. Accepted topology publication is a
@@ -4715,6 +4719,8 @@ export class WebGPUSparseCM12Resident {
       accelerationFinePerSecond2, sharpening, activityPolicy, pressureControl, bodyCount,
       worldDimensions_m, inflow);
     const pressureIterations = sparseCM12PressureIterations(pressureControl?.iterations);
+    const gammaDiffusionEnabled = sharpening?.gammaDiffusionEnabled !== false;
+    const surfaceSharpeningEnabled = sharpening?.surfaceSharpeningEnabled !== false;
     // The header carries the two device-side cursors, so it starts each
     // captured frame at zero. The records and snapshots behind it are
     // overwritten in place and never read past their cursor.
@@ -5063,6 +5069,7 @@ export class WebGPUSparseCM12Resident {
       useBindGroup(this.pressureBindGroup);
     });
     stage("gamma-diffusion", () => {
+      if (!gammaDiffusionEnabled) return;
       // Gamma shares the producer-authored physical scalar characteristic, not
       // pressure membership. ITR1 compiles the sealed TPA/TPM packet ballots
       // into a six-word compact row mask without a private catalogue.
@@ -5084,19 +5091,29 @@ export class WebGPUSparseCM12Resident {
       // timestamp writes of their own.
       // Conservative transport publishes physical air-side source packets.
       closePass();
-      // A native fill of the receipt segment is cheaper than a lock/stamp
-      // protocol on every trilinear receiver.
-      encoder.clearBuffer(this.conditioning, 24 * this.templateCellCount,
-        4 * this.templateCellCount);
-      encoder.clearBuffer(this.state, 4 * this.layout.sharpeningDelta,
-        4 * this.templateCellCount);
+      if (surfaceSharpeningEnabled) {
+        // A native fill of the receipt segment is cheaper than a lock/stamp
+        // protocol on every trilinear receiver.
+        encoder.clearBuffer(this.conditioning, 24 * this.templateCellCount,
+          4 * this.templateCellCount);
+        encoder.clearBuffer(this.state, 4 * this.layout.sharpeningDelta,
+          4 * this.templateCellCount);
+      }
       closeSubstage("sharpening-receipt-setup");
       useBindGroup(this.transportBindGroup);
-      dispatchTransportPacket("prepareSharpeningField");
-      dispatchTransportPacket("scatterSharpeningMass");
+      if (surfaceSharpeningEnabled) {
+        dispatchTransportPacket("prepareSharpeningField");
+        dispatchTransportPacket("scatterSharpeningMass");
+      }
       closeSubstage("sharpening-transform");
       useBindGroup(this.pressureBindGroup);
-      dispatchAccepted("finalizeSharpening", "cell");
+      // Diffusion finishes in immutable scratch banks. When sharpening is off,
+      // its finalizer becomes the lightweight commit that publishes those
+      // banks into the destination pair. With both transforms off, transport
+      // already owns the destination pair and no scalar transform is needed.
+      if (surfaceSharpeningEnabled || gammaDiffusionEnabled) {
+        dispatchAccepted("finalizeSharpening", "cell");
+      }
       closeSubstage("sharpening-finalize");
       if (!this.legacyHostAuthorityOracleForQA) {
         dispatchFrameControl("clearSolidExcess",
@@ -6240,7 +6257,9 @@ export class WebGPUSparseCM12Resident {
       policy.demoteEpochs, policy.activitySignals ? 1 : 0], 76);
     f.set(this.boundary ? [...this.boundary.centerFine, 0] : [0, 0, 0, 0], 80);
     f.set(this.boundary ? [...this.boundary.radiiFine, 0] : [1, 1, 1, 0], 84);
-    u.set([policy.prepareBricksPerFrame, 0, 0, 0], 88);
+    u.set([policy.prepareBricksPerFrame, 0,
+      sharpening?.gammaDiffusionEnabled === false ? 0 : 1,
+      sharpening?.surfaceSharpeningEnabled === false ? 0 : 1], 88);
     f[89] = sparseCM12PressureRelativeTolerance(pressureControl?.relativeTolerance);
     // bit 0: cut-cell arrays are live; bit 1: their static terrain source is
     // present. Rigid-body count remains independent in rigidWorld.w.

@@ -284,7 +284,11 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] =
       tip: entry.tip,
       ...(entry.controls ? { controls: entry.controls } : {}),
       ...(entry.lens ? { lens: entry.lens } : {}),
-      state: alwaysOn,
+      ...(entry.toggle ? { toggle: entry.toggle } : {}),
+      state: entry.toggle
+        ? (context) => context.values[entry.toggle!.param] === entry.toggle!.off
+          ? "off" : "on"
+        : alwaysOn,
       chip: entry.chip,
     };
   });
