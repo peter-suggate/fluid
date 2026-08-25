@@ -12,10 +12,6 @@ import { planGPUAdvance } from "../../core/tall-cell-diagnostics";
 import type { GPUQuality } from "../../core/gpu-quality";
 import { sceneHasTerrain, terrainColumnHeights } from "../../core/terrain";
 import {
-  sceneHasSphericalContainer,
-  sphericalContainerOpenFractionAtCell,
-} from "../../core/spherical-container";
-import {
   GPU_RIGID_EXCHANGE_BYTES,
   type GPUEulerianInfo,
   type GPURigidLoad,
@@ -55,7 +51,7 @@ import type {
   FluidPipelineStage,
 } from "../../core/fluid-pipeline";
 import { UNIFORM_PAPER_DT_S, uniformPaperAdvanceReady } from "./uniform-paper";
-import { packTankWallField } from "../../core/tank-wall-field";
+import { sampleSolidWorld, solidWorldForScene } from "../../core/solid-world";
 
 export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
 
@@ -292,7 +288,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly velocityExtrapolator: WebGPUUniformVelocityExtrapolator;
   private readonly pressureMultigrid: WebGPUUniformPressureMultigrid;
   private readonly params: GPUBuffer;
-  private readonly tankWallScratchOffsetWords: number;
+  private readonly solidVoxelScratchOffsetWords: number;
   private readonly reductions: GPUBuffer;
   private readonly conditioningScratch: GPUBuffer;
   private readonly activeRegion: GPUBuffer;
@@ -452,7 +448,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       });
     }
     this.params = device.createBuffer({ label: "Uniform reference parameters", size: 176, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const packedTankWalls = packTankWallField(scene.container.wallField);
+    const packSolidVoxels = (source: SceneDescription): Uint32Array => {
+      const world = solidWorldForScene(source);
+      const sx = nx + 2, sy = ny + 2, sz = nz + 2;
+      const words = new Uint32Array(4 + Math.ceil(sx * sy * sz / 32));
+      words.set([0x53565731, sx, sy, sz]);
+      for (let z = -1; z <= nz; z += 1) for (let y = -1; y <= ny; y += 1)
+        for (let x = -1; x <= nx; x += 1) {
+          if (sampleSolidWorld(world, [x, y, z]).solidFraction <= 0) continue;
+          const index = (x + 1) + sx * ((y + 1) + sy * (z + 1));
+          words[4 + (index >>> 5)]! |= 1 << (index & 31);
+        }
+      return words;
+    };
+    const packedSolidVoxels = packSolidVoxels(scene);
     const activeRegionBytes = (UNIFORM_ACTIVE_LEVEL_BASE_WORD
       + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS) * 4;
     this.activeRegion = device.createBuffer({
@@ -463,13 +472,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     });
     const activeSummaryCount = Math.ceil(nx / 4) * Math.ceil(ny / 4) * Math.ceil(nz / 4);
     const activeSummaryBytes = activeSummaryCount * UNIFORM_ACTIVE_SUMMARY_BYTES;
-    this.tankWallScratchOffsetWords = (activeRegionBytes + activeSummaryBytes) / 4;
+    this.solidVoxelScratchOffsetWords = (activeRegionBytes + activeSummaryBytes) / 4;
     this.activeScratch = device.createBuffer({
       label: "Uniform reference active liquid census scratch and summaries",
-      size: activeRegionBytes + activeSummaryBytes + packedTankWalls.byteLength,
+      size: activeRegionBytes + activeSummaryBytes + packedSolidVoxels.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(this.activeScratch, this.tankWallScratchOffsetWords * 4, packedTankWalls);
+    device.queue.writeBuffer(this.activeScratch, this.solidVoxelScratchOffsetWords * 4,
+      packedSolidVoxels.buffer as ArrayBuffer, packedSolidVoxels.byteOffset,
+      packedSolidVoxels.byteLength);
     this.activeDispatch = device.createBuffer({
       label: "Uniform reference active indirect dispatches", size: activeRegionBytes,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
@@ -650,7 +661,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
       pressureIterations: 0, pressureSolver: `CM11a dense LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
       allocatedBytes: allocation.allocatedBytes + this.pressureMultigrid.allocatedBytes
-        + activeRegionBytes * 3 + activeSummaryBytes + packedTankWalls.byteLength
+        + activeRegionBytes * 3 + activeSummaryBytes + packedSolidVoxels.byteLength
         + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
@@ -750,12 +761,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.run(encoder, "Uniform initial post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
       this.run(encoder, "Uniform initial post-process blur z", this.pipelines.postprocessBlurZ, this.postprocessBlurZGroup);
       this.run(encoder, "Uniform initial sub-grid surface resolve", this.pipelines.postprocessResolve, this.postprocessResolveGroup);
-    } else if (sceneHasSphericalContainer(this.scene)) {
-      // Curved vessels render the conserved density directly. A wall film is a
-      // rectangular-tank presentation device and produces a false inner shell
-      // when reconstructed against the analytic sphere.
-      encoder.copyTextureToTexture({ texture: this.volumeA }, { texture: this.surfaceB },
-        [this.info.nx, this.info.ny, this.info.nz]);
     } else {
       this.run(encoder, "Uniform initial wall-film resolve", this.pipelines.wallFilmResolve, this.wallFilmResolveGroup);
     }
@@ -776,11 +781,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       inflow?.velocity_m_s.x ?? 0, inflow?.velocity_m_s.y ?? 0, inflow?.velocity_m_s.z ?? 0, this.inflowBoundary?.apertureScale ?? 0,
       inflowStrength, this.referenceVolumeCells, c.fillFraction * this.info.ny, 4,
       this.sharpeningStrength, this.sharpeningDistance,
-      sceneHasSphericalContainer(this.scene) ? 1 : 0,
+      0,
       c.depthBoundary === "symmetry" ? 1 : 0,
       drop?.centre_m.x ?? 0, drop?.centre_m.y ?? 0, drop?.centre_m.z ?? 0, drop?.radius_m ?? 0,
       drop?.halfHeight_m ?? 0, this.liquidOnlyVelocityAdvection ? 1 : 0,
-      this.tankWallScratchOffsetWords, 0,
+      this.solidVoxelScratchOffsetWords, 0,
     ]));
   }
 
@@ -845,22 +850,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const terrain = terrainColumnHeights(this.scene, nx, nz);
     const cellHeight = c.height_m / ny;
     const volume = new Float32Array(nx * ny * nz);
+    const solidWorld = solidWorldForScene(this.scene);
     const dam = sceneDamBreakBox(this.scene);
     let initial = 0;
     const wetMinimum = [nx, ny, nz];
     const wetMaximum = [0, 0, 0];
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
       const aboveGround = (y + 0.5) * cellHeight > terrain[x + nx * z];
-      const containerOpen = sphericalContainerOpenFractionAtCell(this.scene, x, y, z, [nx, ny, nz]);
+      const solidOpen = 1 - sampleSolidWorld(solidWorld, [x, y, z]).solidFraction;
       const base = this.scene.fluid.initialCondition === "dam-break"
         ? damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / ny, (z + 0.5) / nz)
         : (y + 0.5) / ny <= c.fillFraction;
       const liquidFraction = aboveGround
         ? initialLiquidFractionAtCell(this.scene, x, y, z, [nx, ny, nz], base) : 0;
-      // Both fractions use the same eight sub-cell samples. Taking their
-      // intersection as a minimum preserves a hemisphere that coincides with
-      // the spherical vessel; multiplying would square its cut-cell fringe.
-      const density = Math.min(containerOpen, liquidFraction);
+      const density = Math.min(solidOpen, liquidFraction);
       volume[x + nx * (y + ny * z)] = density;
       initial += density;
       if (density > 1e-5) {
@@ -1144,8 +1147,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // moving body is skipped by beta construction and then overwritten with
     // zero by the gather, so the supposedly conservative operator loses the
     // displaced liquid before the historical post-sharpening cleanup runs.
-    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene)
-      || sceneHasSphericalContainer(this.scene))) {
+    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
       encoder.clearBuffer(this.conditioningScratch);
       this.run(encoder, "Uniform moving-solid entry excess scatter",
         this.pipelines.scatterSolidExcess, this.solidEntryScatterGroup);
@@ -1229,8 +1231,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       { texture: this.volumeB }, { texture: this.symmetryStageAuditTextures.densitySharpening },
       [this.info.nx, this.info.ny, this.info.nz],
     );
-    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene)
-      || sceneHasSphericalContainer(this.scene))) {
+    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
       encoder.clearBuffer(this.conditioningScratch);
       this.run(encoder, "Uniform partial-solid excess scatter", this.pipelines.scatterSolidExcess, this.solidExcessScatterGroup);
       this.run(encoder, "Uniform partial-solid excess resolve", this.pipelines.resolveSolidExcess, this.solidExcessResolveGroup);
@@ -1300,17 +1301,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.rigidSystem.encode(encoder, dt, cellVolume, 1, c.height_m / this.info.ny);
       seam?.(UNIFORM_ADVANCE_PHASE.rigidCoupling);
     }
-    // Sec. 3.8 remains the optional global reconstruction. Box tanks may expose
-    // mass-proportional wall films; a spherical vessel deliberately renders
-    // the conserved field directly so it never gains a false inner shell.
+    // Sec. 3.8 remains the optional global reconstruction. Container geometry
+    // is not selected here; it is already present in SolidWorld.
     if (this.densityPostProcessing) {
       this.run(encoder, "Uniform post-process blur x", this.pipelines.postprocessBlurX, this.postprocessBlurXGroup);
       this.run(encoder, "Uniform post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
       this.run(encoder, "Uniform post-process blur z", this.pipelines.postprocessBlurZ, this.postprocessBlurZGroup);
       this.run(encoder, "Uniform sub-grid surface resolve", this.pipelines.postprocessResolve, this.postprocessResolveGroup);
-    } else if (sceneHasSphericalContainer(this.scene)) {
-      encoder.copyTextureToTexture({ texture: this.volumeA }, { texture: this.surfaceB },
-        [this.info.nx, this.info.ny, this.info.nz]);
     } else {
       this.run(encoder, "Uniform wall-film resolve", this.pipelines.wallFilmResolve, this.wallFilmResolveGroup);
     }
@@ -1435,8 +1432,19 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   applySceneUniforms(scene: SceneDescription): void {
     this.scene = scene;
-    this.device.queue.writeBuffer(this.activeScratch, this.tankWallScratchOffsetWords * 4,
-      packTankWallField(scene.container.wallField));
+    const world = solidWorldForScene(scene);
+    const sx = this.info.nx + 2, sy = this.info.ny + 2, sz = this.info.nz + 2;
+    const words = new Uint32Array(4 + Math.ceil(sx * sy * sz / 32));
+    words.set([0x53565731, sx, sy, sz]);
+    for (let z = -1; z <= this.info.nz; z += 1)
+      for (let y = -1; y <= this.info.ny; y += 1)
+        for (let x = -1; x <= this.info.nx; x += 1) {
+          if (sampleSolidWorld(world, [x, y, z]).solidFraction <= 0) continue;
+          const index = (x + 1) + sx * ((y + 1) + sy * (z + 1));
+          words[4 + (index >>> 5)]! |= 1 << (index & 31);
+        }
+    this.device.queue.writeBuffer(this.activeScratch,
+      this.solidVoxelScratchOffsetWords * 4, words);
     this.inflowBoundary = scene.fluid.inflow
       ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [this.info.nx, this.info.ny, this.info.nz])
       : undefined;

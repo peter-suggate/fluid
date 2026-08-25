@@ -61,7 +61,11 @@ export function createSparseCM12InternedRefLookup(options: Readonly<{
   const maximumAllowed = options.maximumEntriesPerSide ?? 16;
   const canonicalCapacity = ibo.catalog.layout.canonicalCapacity;
   const leafCapacity = ibo.catalog.layout.leafCapacity;
-  const levelsPerLeaf = canonicalCapacity / leafCapacity;
+  // The empty-world rung has no canonical records, but its ABI still carries
+  // the ladder width. Avoid manufacturing a leaf merely to make 0/0 defined.
+  const levelsPerLeaf = leafCapacity === 0
+    ? ibo.catalog.layout.levelCount
+    : canonicalCapacity / leafCapacity;
   if (!Number.isSafeInteger(levelsPerLeaf) || levelsPerLeaf < 1) {
     throw new Error("IRL1 canonical capacity is not leaf-major");
   }

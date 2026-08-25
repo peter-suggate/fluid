@@ -1,6 +1,6 @@
 import { cloneScene, defaultScene, type SceneDescription } from "./model";
 import { defaultEnvironmentId, type EnvironmentId } from "./environments";
-import { boxTankWallFieldForScene, latticeAxisDimension } from "./scene-lattice";
+import { solidVoxelShellForScene, latticeAxisDimension } from "./scene-lattice";
 import type { SceneryGraph } from "./scenery-graph";
 
 export interface EmptySceneOptions {
@@ -85,7 +85,7 @@ export function createEmptyScene(options: EmptySceneOptions = {}): SceneDescript
     // scene is about water before its author has said so.
     vessel: "none",
   };
-  scene.container.wallField = boxTankWallFieldForScene(scene);
+  scene.solidVoxels = [...solidVoxelShellForScene(scene)];
   // 8-cell bricks even though a fluid-free scene may use 4: painting the first
   // water is meant to flip `systems.fluid` on this same document, and
   // `validateScene` rejects a fluid scene on a 4-cell brick.

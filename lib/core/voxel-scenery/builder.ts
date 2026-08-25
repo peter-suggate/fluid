@@ -161,10 +161,10 @@ export type EnvironmentProxyPrimitive =
   | EnvironmentFieldProgramProxy;
 
 export interface EnvironmentProxyShell {
-  readonly kind: "room" | "terrain-heightfield";
+  readonly kind: "room" | "open-world";
   readonly floorY_m: number;
   readonly bounds_m: EnvironmentProxyAabb;
-  /** Shell faces suitable for voxel/debug publication. Garden terrain has none: its real heightfield remains authoritative. */
+  /** Shell faces suitable for voxel/debug publication. Open worlds have no inferred floor geometry. */
   readonly primitives: readonly EnvironmentBoxProxy[];
   readonly materialModel: "conservatory" | "courtyard" | "night-lab" | "gallery" | "bathhouse" | "station" | "room" | "garden-terrain" | "porcelain";
 }

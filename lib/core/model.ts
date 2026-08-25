@@ -1,10 +1,10 @@
 import sharedDefaultScene from "./default-scene.json";
 import { validateRefinementRegions } from "./refinement-regions";
 import { validateTerrain, type TerrainDescription } from "./terrain";
+import type { SolidWorldVoxelPatch } from "./solid-world";
 import type { EnvironmentId } from "./environments";
 import { validateSceneryGraph, type SceneryGraph } from "./scenery-graph";
 import type { DisplayGradeAuthoring, WaterOpticsAuthoring } from "./webgpu-lighting";
-import { validateTankWallField, type TankWallField } from "./tank-wall-field";
 
 export type RunState = "paused" | "running";
 
@@ -101,8 +101,6 @@ export interface SceneDescription {
     fillFraction: number;
     top: "open" | "closed";
     fluidWallMode: "free-slip" | "no-slip";
-    /** Authoritative four-sided solver-face field and raster geometry. */
-    wallField: TankWallField;
     /** Use the depth faces as 2D symmetry planes instead of physical walls. */
     depthBoundary?: "closed" | "symmetry";
     /**
@@ -171,6 +169,9 @@ export interface SceneDescription {
   };
   /** Optional ground heightfield inside the container; absent means a flat floor at y = 0. */
   terrain?: TerrainDescription;
+  /** Static solids authored directly on the same signed voxel lattice as the tank shell. */
+  /** Authoritative static solids in signed finest-voxel coordinates. */
+  solidVoxels: SolidWorldVoxelPatch[];
   /**
    * Everything visible that is not water, terrain or a rigid body, as a
    * declarative graph the document owns outright. An environment preset seeds
@@ -500,12 +501,6 @@ export function validateScene(scene: SceneDescription): string[] {
   if (c?.shape === "sphere" && c.top !== "closed") errors.push("A spherical container must be closed");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
-  const expectedWallDimensions = c && scene.voxelDomain?.finestCellSize_m > 0 ? {
-    x: Math.min(2048, Math.max(8, Math.round(c.width_m / scene.voxelDomain.finestCellSize_m))),
-    y: Math.min(2048, Math.max(8, Math.round(c.height_m / scene.voxelDomain.finestCellSize_m))),
-    z: Math.min(2048, Math.max(8, Math.round(c.depth_m / scene.voxelDomain.finestCellSize_m))),
-  } : undefined;
-  errors.push(...validateTankWallField(c?.wallField, expectedWallDimensions));
   if (c?.depthBoundary !== undefined && c.depthBoundary !== "closed" && c.depthBoundary !== "symmetry") {
     errors.push("Unsupported depth boundary");
   }
@@ -637,6 +632,21 @@ export function validateScene(scene: SceneDescription): string[] {
       || inflow.center_m.z < -c.depth_m / 2 || inflow.center_m.z > c.depth_m / 2) errors.push("Inflow center must be inside the container");
   }
   if (c) errors.push(...validateRefinementRegions(scene.fluid?.refinementRegions, c));
+  if (!Array.isArray(scene.solidVoxels)) errors.push("Solid voxels must be an array");
+  else for (const [index, patch] of scene.solidVoxels.entries()) {
+      if (patch.operation !== "fill" && patch.operation !== "clear") {
+        errors.push(`Solid voxel patch ${index} has an unsupported operation`);
+      }
+      if (!patch.minimum?.every(Number.isSafeInteger)
+        || !patch.maximumExclusive?.every(Number.isSafeInteger)
+        || patch.minimum.some((value, axis) => value >= patch.maximumExclusive[axis]!)) {
+        errors.push(`Solid voxel patch ${index} must be a non-empty integer box`);
+      }
+      if (patch.materialId !== undefined && (!Number.isSafeInteger(patch.materialId)
+        || patch.materialId < 1 || patch.materialId > 0xffff)) {
+        errors.push(`Solid voxel patch ${index} material must fit non-zero u16`);
+      }
+  }
   if (scene.terrain && c) errors.push(...validateTerrain(scene.terrain, c));
   if (scene.scenery) errors.push(...validateSceneryGraph(scene.scenery));
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");

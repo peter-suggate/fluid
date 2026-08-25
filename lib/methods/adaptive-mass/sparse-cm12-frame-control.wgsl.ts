@@ -37,8 +37,8 @@ export function createSparseCM12FrameControlWGSL(
   const staticFlags = SPARSE_CM12_FRAME_CONTROL_FLAG.complete
     | SPARSE_CM12_FRAME_CONTROL_FLAG.validated
     | (l.d4Capable ? SPARSE_CM12_FRAME_CONTROL_FLAG.d4Capable : 0)
-    | (l.rigidCapable ? SPARSE_CM12_FRAME_CONTROL_FLAG.rigidCapable : 0)
-    | (l.boundaryCapable ? SPARSE_CM12_FRAME_CONTROL_FLAG.boundaryCapable : 0);
+    | (l.rigidCapable ? SPARSE_CM12_FRAME_CONTROL_FLAG.rigidCapable : 0);
+  const authorityCoverage = SPARSE_CM12_FRAME_CONTROL_COVERAGE.authority;
   const h = (word: number) => `${l.baseWords + word}u`;
   const f = (family: number) => `${l.baseWords + SPARSE_CM12_FRAME_CONTROL_HEADER_WORDS
     + SPARSE_CM12_FRAME_CONTROL_INDIRECT_WORDS * family}u`;
@@ -74,12 +74,11 @@ const cm12FCBodyCapacity:u32=${l.bodyCapacity}u;
 const cm12FCStaticFlags:u32=${staticFlags}u;
 const cm12FCD4Capable:bool=${l.d4Capable ? "true" : "false"};
 const cm12FCRigidCapable:bool=${l.rigidCapable ? "true" : "false"};
-const cm12FCBoundaryCapable:bool=${l.boundaryCapable ? "true" : "false"};
 const cm12FCPhaseAccepted:u32=${SPARSE_CM12_FRAME_CONTROL_PHASE.accepted}u;
 const cm12FCPhaseCollecting:u32=${SPARSE_CM12_FRAME_CONTROL_PHASE.collecting}u;
 const cm12FCPhaseSealed:u32=${SPARSE_CM12_FRAME_CONTROL_PHASE.sealed}u;
 const cm12FCPhaseFault:u32=${SPARSE_CM12_FRAME_CONTROL_PHASE.fault}u;
-const cm12FCCoverageAuthority:u32=${SPARSE_CM12_FRAME_CONTROL_COVERAGE.authority}u;
+const cm12FCCoverageAuthority:u32=${authorityCoverage}u;
 const cm12FCCoverageOutput:u32=${SPARSE_CM12_FRAME_CONTROL_COVERAGE.output}u;
 
 fn cm12FCLoad(word:u32)->u32{return atomicLoad(&${control}[word]);}
@@ -162,8 +161,6 @@ fn cm12FCBegin()->bool{
   cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.candidateGeneration)},candidate);
   cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.bodyGeneration)},0u);
   cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.bodyCount)},0u);
-  cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.boundaryGeneration)},0u);
-  cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.boundaryLive)},0u);
   // D4 authority is a sticky accepted producer receipt. Frame-local solid
   // predicates can suppress its work without destroying it; injection or a
   // topology producer explicitly invalidates it on device.
@@ -216,19 +213,6 @@ fn cm12FCPublishBody(bodyCount:u32)->bool{
   cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.bodyCount)},bodyCount);
   atomicOr(&${control}[${h(SPARSE_CM12_FRAME_CONTROL_HEADER.coverage)}],
     ${SPARSE_CM12_FRAME_CONTROL_COVERAGE.body}u);
-  return true;
-}
-
-fn cm12FCPublishBoundary(live:bool)->bool{
-  if(!cm12FCHeaderValid()||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.phase)})
-    !=cm12FCPhaseCollecting){cm12FCFail(${SPARSE_CM12_FRAME_CONTROL_FAULT.invalidPhase}u,0u);return false;}
-  if(live&&!cm12FCBoundaryCapable){
-    cm12FCFail(${SPARSE_CM12_FRAME_CONTROL_FAULT.capability}u,0u);return false;
-  }
-  cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.boundaryGeneration)},cm12FCCandidateGeneration());
-  cm12FCStore(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.boundaryLive)},select(0u,1u,live));
-  atomicOr(&${control}[${h(SPARSE_CM12_FRAME_CONTROL_HEADER.coverage)}],
-    ${SPARSE_CM12_FRAME_CONTROL_COVERAGE.boundary}u);
   return true;
 }
 
@@ -287,15 +271,12 @@ fn cm12FCSeal()->bool{
       cm12FCCoverageAuthority&~coverage);return false;
   }
   if(cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.bodyGeneration)})!=candidate
-    ||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.boundaryGeneration)})!=candidate
     ||cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.d4Generation)})!=candidate){
     cm12FCFail(${SPARSE_CM12_FRAME_CONTROL_FAULT.staleGeneration}u,candidate);return false;
   }
   let bodyCount=cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.bodyCount)});
   let bodyLive=cm12FCRigidCapable&&bodyCount>0u;
-  let boundaryLive=cm12FCBoundaryCapable
-    &&cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.boundaryLive)})!=0u;
-  let solidLive=bodyLive||boundaryLive;
+  let solidLive=bodyLive;
   let scalarD4=cm12FCD4Capable&&!solidLive
     &&cm12FCLoad(${h(SPARSE_CM12_FRAME_CONTROL_HEADER.scalarD4Authority)})!=0u;
   let faceD4=cm12FCD4Capable&&!solidLive

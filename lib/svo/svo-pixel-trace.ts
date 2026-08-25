@@ -253,11 +253,7 @@ export const SVO_PIXEL_TRACE_HEADER = Object.freeze({
   winnerSortBucket: 51,
   /** DDA cells stepped across *every* covering proxy, not just the winner. */
   ddaCellsAcrossProxies: 52,
-  // Word 53 is reserved. A terrain *step* count would have to be produced by a
-  // counter inside the shared `terrainField`, and the scale-1 production string
-  // is gated byte-for-byte by the frame fingerprint. The terrain record carries
-  // the bracketed interval and the outcome instead, which the probe can state
-  // without touching production code and without guessing at a number.
+  // Word 53 is reserved.
   /** {@link SVO_PIXEL_TRACE_PREPASS_STATE}. */
   prepassState: 54,
 } as const);

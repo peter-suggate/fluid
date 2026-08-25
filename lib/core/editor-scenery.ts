@@ -344,10 +344,6 @@ function pickTargets(scene: SceneDescription) {
     // a gizmo on the floor every time a click missed everything else.
     if (primitive.tags.includes("shell")) return;
     const descriptor = svoDescriptorForEnvironmentProxy(primitive);
-    // A proxy is never terrain — the heightfield is the shell's, not a
-    // prop's — but the descriptor union carries the case, and the tracer for
-    // it is a different one.
-    if (descriptor.kind === "terrain-heightfield") return;
     targets.push({ nodeId, descriptor, aabb_m: primitive.aabb_m });
   });
   pickTargetCache.set(catalog, targets);

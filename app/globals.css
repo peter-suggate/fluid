@@ -1236,12 +1236,12 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-region-gizmo .region-outline { fill: none; stroke: color-mix(in srgb, var(--tone-region) 40%, transparent); stroke-width: 1.1; stroke-dasharray: 7 5; }
 .editor-region-gizmo .region-outline.selected { stroke: color-mix(in srgb, var(--tone-region) 95%, transparent); stroke-width: 1.5; stroke-dasharray: 4 3; }
 
-/* A wall cut is destructive and cell-aligned. The translucent face says what
-   will disappear; the hard dashed edge makes the exact solver-cell boundary
-   readable against either glass or water. */
-.editor-wall-rectangle-gizmo .wall-rectangle-fill { fill: color-mix(in srgb, var(--red) 18%, transparent); stroke: none; }
-.editor-wall-rectangle-gizmo .wall-rectangle-outline { fill: none; stroke: var(--red); stroke-width: 2; stroke-dasharray: 6 3; vector-effect: non-scaling-stroke; }
-.editor-wall-rectangle-gizmo .wall-rectangle-label { fill: var(--red); stroke: var(--overlay); stroke-width: 3px; paint-order: stroke fill; font: var(--text-tag); letter-spacing: var(--track-wide); text-anchor: middle; text-transform: uppercase; }
+/* A solid-region clear is destructive and cell-aligned. Occupied voxel boxes
+   show exact affected geometry; the heavier region outline remains legible
+   when per-voxel drawing detail is truncated. */
+.editor-solid-voxel-gizmo .solid-voxel-region-outline { fill: none; stroke: var(--red); stroke-width: 2.4; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.editor-solid-voxel-gizmo .solid-voxel-outline { fill: none; stroke: var(--red); stroke-width: 2; stroke-dasharray: 6 3; vector-effect: non-scaling-stroke; }
+.editor-solid-voxel-gizmo .solid-voxel-label { fill: var(--red); stroke: var(--overlay); stroke-width: 3px; paint-order: stroke fill; font: var(--text-tag); letter-spacing: var(--track-wide); text-anchor: middle; text-transform: uppercase; }
 
 .editor-entity-gizmo .entity-handle.hovered { stroke-width: 2; }
 .editor-entity-gizmo .entity-handle.hovered { fill: var(--tone); stroke: color-mix(in srgb, var(--tone) 16%, #fff); }

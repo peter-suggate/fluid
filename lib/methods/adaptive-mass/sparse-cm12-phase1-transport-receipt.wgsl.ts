@@ -34,15 +34,11 @@ const CM12_P1TQ_PACKET_LANE:u32=${l.packetLaneBaseWords}u;
 
 fn cm12Phase1QACanonicalPacket(cell:u32)->vec2u{
   let brick=cellBrick(cell);let resolution=cellResolution(cell);
-  let record=p.topologyOffsets2.z+2u*brick;let key=topology[record+1u];
-  let brickDimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
-    /BRICK_FINE_RESOLUTION;
-  let xy=brickDimensions.x*brickDimensions.y;let z=key/xy;
-  let remainder=key-z*xy;let y=remainder/brickDimensions.x;
-  let x=remainder-y*brickDimensions.x;
-  let origin=vec3u(x,y,z)*BRICK_FINE_RESOLUTION;
+  let origin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
   let scale=BRICK_FINE_RESOLUTION*brickSpan(brick)/resolution;
-  let local=(cellMinimum(cell)-origin)/scale;
+  let minimum=cellMinimum(cell);
+  if(any(minimum<origin)){return vec2u(0xffffffffu);}
+  let local=vec3u(minimum-origin)/scale;
   let packetAxis=max(1u,(resolution+3u)/4u);let coordinate=local/4u;
   let packet=64u*brick+coordinate.x+packetAxis
     *(coordinate.y+packetAxis*coordinate.z);

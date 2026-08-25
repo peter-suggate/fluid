@@ -63,11 +63,6 @@
  * against. This is the ladder for the path that had none.
  */
 import type { EnvironmentProxyPrimitive } from "../core/voxel-environments";
-import {
-  sparseSceneTerrainNodeCoverage,
-  type SparseSceneTerrainDomain,
-  type SparseSceneTerrainField,
-} from "../core/sparse-scene-terrain-field";
 import { SPARSE_BRICK_GPU_LAYOUT, type SparseBrickCoordinate } from "./sparse-brick-octree";
 
 /**
@@ -154,8 +149,6 @@ export interface SvoEnvironmentCoarseningOptions {
   /** Node edge in metres, indexed by level. The planner's own table. */
   readonly nodeEdge_m: readonly (readonly number[])[];
   readonly brickSize: number;
-  readonly terrainField?: SparseSceneTerrainField;
-  readonly terrainDomain: SparseSceneTerrainDomain;
   readonly maximumDepth: number;
   /** Overlapping primitive boxes above which the node splits regardless. */
   readonly crowdingTarget: number;
@@ -170,8 +163,6 @@ export interface SvoEnvironmentCoarseningStatistics {
   resolvedLeaves: number;
   /** Nodes split because a solid in them is finer than this level records. */
   featureSplits: number;
-  /** Nodes split because the ground reaches them. */
-  terrainSplits: number;
   /** Nodes split because more solids overlap them than a leaf binds. */
   crowdingSplits: number;
 }
@@ -184,21 +175,13 @@ export interface SvoEnvironmentCoarsening {
 /**
  * The predicate the planner descends with, on a scene the solver owns.
  *
- * Four reasons to split, unioned, and the order is the cost order — the ground
- * answers from an aligned column pyramid in O(1) while the solid scan is
- * O(primitives).
+ * Three reasons to split, unioned in their evaluation order.
  *
- *   1. The ground reaches the node. Terrain keeps every level it has today:
- *      `buried` and `surface` both refine, and only open air above the highest
- *      column may coarsen. Coarsening buried ground is a real and separate win
- *      (`BURIED_GROUND_COARSENING_POWER`) which is deliberately held off until
- *      a blessed frame stands behind it, and this is not the change that turns
- *      it on.
- *   2. A solid whose smallest feature this level cannot record.
- *   3. More overlapping solids than the voxeliser binds per leaf — the surplus
+ *   1. A solid whose smallest feature this level cannot record.
+ *   2. More overlapping solids than the voxeliser binds per leaf — the surplus
  *      is dropped silently, so a coarse leaf that gathers a crowd is worse than
  *      the leaves it replaced.
- *   4. A non-catalog claim finer than this level, for the same reason as 2.
+ *   3. A non-catalog claim finer than this level, for the same reason as 1.
  *
  * Everything else stays coarse, which on a staged tank is the plate, the air
  * over it and nothing else.
@@ -208,11 +191,11 @@ export function createSvoEnvironmentCoarsening(
 ): SvoEnvironmentCoarsening {
   const {
     primitives, regions = [], worldOrigin_m: worldOrigin, nodeEdge_m,
-    brickSize, terrainField, terrainDomain, maximumDepth, crowdingTarget,
+    brickSize, maximumDepth, crowdingTarget,
   } = options;
   const statistics: SvoEnvironmentCoarseningStatistics = {
     nodes: 0, emptyLeaves: 0, resolvedLeaves: 0,
-    featureSplits: 0, terrainSplits: 0, crowdingSplits: 0,
+    featureSplits: 0, crowdingSplits: 0,
   };
   /**
    * Bounds and feature sizes flattened once.
@@ -247,12 +230,6 @@ export function createSvoEnvironmentCoarsening(
     statistics,
     refineEnvironmentLeaf(level: number, coordinate: SparseBrickCoordinate): boolean {
       statistics.nodes += 1;
-      if (terrainField
-        && sparseSceneTerrainNodeCoverage(
-          terrainField, terrainDomain, brickSize, level, maximumDepth, coordinate) !== "outside") {
-        statistics.terrainSplits += 1;
-        return true;
-      }
       const edge = nodeEdge_m[level];
       // The largest axis: the leaf's voxels are one per brick cell on each axis,
       // and a feature has to survive the coarsest of the three.

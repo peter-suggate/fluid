@@ -27,7 +27,6 @@ import {
   type EnvironmentProxyMaterial,
   type EnvironmentProxyPrimitive,
 } from "../core/voxel-environments";
-import { VOXEL_MATERIAL_IDS } from "../core/voxel-scene";
 import { ENVIRONMENT_VOXEL_MATERIAL_BASE, type SparseSceneSolidReach } from "./webgpu-svo-sparse-bricks";
 // The arena layout an aggregate's word-13 reference points into. Imported
 // rather than restated because a reference that does not name the region the
@@ -99,20 +98,6 @@ export interface SvoEnvironmentPrimitiveMetadata {
   coverageBounds: SvoPrimitiveCoverageBounds;
 }
 
-export interface SvoUnsupportedStaticSource {
-  kind: "terrain-heightfield";
-  fallback: "raster-terrain";
-  materialId: number;
-  reason: string;
-}
-
-export interface SvoAnalyticTerrainSource {
-  kind: "terrain-heightfield";
-  materialId: number;
-  /** Matches the central-difference normal policy in lib/terrain.ts. */
-  normalEpsilon_m: number;
-}
-
 export interface SvoScenePrimitiveBuild {
   environmentId: EnvironmentId;
   descriptors: readonly SvoPrimitiveDescriptor[];
@@ -133,11 +118,7 @@ export interface SvoScenePrimitiveBuild {
   /** Owner IDs the SVO dry-scene hit loop should ignore for an interior view. */
   skipOwnerIds: readonly number[];
   openShellOwnerId?: number;
-  unsupportedSources: readonly SvoUnsupportedStaticSource[];
-  requiresRasterTerrainFallback: boolean;
-  /** Analytic heightfield consumed directly from the packed scene uniforms. */
-  analyticTerrain?: SvoAnalyticTerrainSource;
-  /** Content hash over packed records, identities, bounds policy, and terrain. */
+  /** Content hash over packed records, identities, and bounds policy. */
   contentRevision: string;
   /** Versioned identity used to reuse immutable packed publication records. */
   cacheKey: string;
@@ -297,16 +278,10 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
   if (!Number.isFinite(coverageCellSize_m) || coverageCellSize_m < 0) {
     throw new RangeError("SVO scene primitive coverage cell size must be finite and non-negative");
   }
-  const analyticTerrain: SvoAnalyticTerrainSource | undefined = catalog.shell.kind === "terrain-heightfield" ? {
-    kind: "terrain-heightfield",
-    materialId: VOXEL_MATERIAL_IDS.terrain,
-    normalEpsilon_m: 0.02,
-  } : undefined;
   const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     environmentId: catalog.environmentId,
     coverageCellSize_m,
     primitives,
-    analyticTerrain,
   }));
   const cacheKey = `svo-scene-primitives-v${SVO_SCENE_PRIMITIVE_VERSION}:${catalog.environmentId}:${contentRevision}`;
   const cached = cachedSvoPublication(scenePrimitiveCache, cacheKey);
@@ -381,9 +356,7 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     primitiveIndexByMaterialId.set(materialId, primitiveIndex);
   }
 
-  const unsupportedSources: SvoUnsupportedStaticSource[] = [];
   const primitiveCandidates = descriptors.length <= SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES
-    && descriptors.every(({ kind }) => kind !== "terrain-heightfield")
     ? buildSvoPrimitiveCandidates(descriptors as SvoFinitePrimitiveDescriptor[], { skippedOwnerId: openShellOwnerId })
     : undefined;
 
@@ -402,9 +375,6 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     primitiveIndexByMaterialId,
     skipOwnerIds: openShellOwnerId === undefined ? [] : [openShellOwnerId],
     openShellOwnerId,
-    unsupportedSources,
-    requiresRasterTerrainFallback: unsupportedSources.length > 0,
-    analyticTerrain,
     contentRevision,
     cacheKey,
   });
@@ -461,11 +431,10 @@ export function packSvoScenePrimitiveAnimation(animation: SvoScenePrimitiveAnima
  * the CPU mirror of the same evaluation the voxeliser runs on the device, so
  * the two cannot disagree about which bricks hold geometry.
  *
- * A descriptor this evaluator cannot resolve — a terrain heightfield, whose
- * resolver is not part of the build — reports `-Infinity` rather than throwing,
- * which reads as "reaches everywhere" and keeps every brick it bounds. Being
- * wrong in that direction costs allocation; being wrong in the other costs
- * geometry.
+ * A descriptor this evaluator cannot resolve reports `-Infinity` rather than
+ * throwing, which reads as "reaches everywhere" and keeps every brick it
+ * bounds. Being wrong in that direction costs allocation; being wrong in the
+ * other costs geometry.
  */
 export function svoScenePrimitiveSolidReach(build: SvoScenePrimitiveBuild): SparseSceneSolidReach[] {
   const clusterResolver = (reference: number) => build.clusterPackings[reference];
@@ -477,7 +446,7 @@ export function svoScenePrimitiveSolidReach(build: SvoScenePrimitiveBuild): Spar
       maximum: [max.x, max.y, max.z] as const,
       distance_m: (x: number, y: number, z: number): number => {
         try {
-          const sample = sampleSvoPrimitive(descriptor, { x, y, z }, undefined, clusterResolver);
+          const sample = sampleSvoPrimitive(descriptor, { x, y, z }, clusterResolver);
           return Number.isFinite(sample.signedDistance_m) ? sample.signedDistance_m : Number.NEGATIVE_INFINITY;
         } catch {
           return Number.NEGATIVE_INFINITY;

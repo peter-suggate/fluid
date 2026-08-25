@@ -139,7 +139,6 @@ function descriptorExtents(descriptor: SvoPrimitiveDescriptor): readonly number[
  * `(a² - b²) / sqrt(2(a² + b²))` bound stays under.
  */
 export function scenerySwayExcursion_m(descriptor: SvoPrimitiveDescriptor, sway: EnvironmentProxySway): number {
-  if (descriptor.kind === "terrain-heightfield") return 0;
   const lever = Math.hypot(
     descriptor.center_m.x - sway.pivot_m.x,
     descriptor.center_m.y - sway.pivot_m.y,
@@ -160,7 +159,6 @@ export function swayedPrimitiveDescriptor(
   sway: EnvironmentProxySway,
   time_s: number,
 ): SvoPrimitiveDescriptor {
-  if (descriptor.kind === "terrain-heightfield") return descriptor;
   const bendWave = sceneryWindWave(time_s, sway.phase_rad);
   // Offset so a limb's roll leads its swing rather than peaking with it, the
   // way a real branch twists as it reaches the end of its travel.

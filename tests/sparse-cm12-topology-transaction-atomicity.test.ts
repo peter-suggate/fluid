@@ -10,10 +10,6 @@ const host = readFileSync(new URL(
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
   import.meta.url,
 ), "utf8");
-const vexWgsl = readFileSync(new URL(
-  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension.wgsl.ts",
-  import.meta.url,
-), "utf8");
 const pressureRepairWgsl = readFileSync(new URL(
   "../lib/methods/adaptive-mass/sparse-cm12-pressure-topology-repair.wgsl.ts",
   import.meta.url,
@@ -29,9 +25,9 @@ const functionSource = (source: string, name: string, next: string): string => {
 const count = (source: string, pattern: RegExp): number => [...source.matchAll(pattern)].length;
 
 test("activation and retirement stage lifecycle intent without mutating accepted authority", () => {
-  const activation = functionSource(wgsl, "stageDormantReceiverActivation",
-    "fn activateSweptReceivers");
-  const injectionActivation = functionSource(wgsl, "activateLiquidInjectionReceivers",
+  const activation = functionSource(wgsl, "stageDemandedFrontierPage",
+    "fn activateSweptFrontierPages");
+  const injectionActivation = functionSource(wgsl, "activateInjectionFrontierPages",
     "fn retireUnsupportedEmptyBricks");
   const retirement = functionSource(wgsl, "retireUnsupportedEmptyBricks",
     "const PRESENTATION_FRAME_PLAN_STAGE");
@@ -40,13 +36,13 @@ test("activation and retirement stage lifecycle intent without mutating accepted
     "activation must author candidate membership only");
   assert.match(activation,
     /select\(acceptedBrickResolution\(brick\),BRICK_FINE_RESOLUTION,\s*brickCandidatePlanningEnabled\(brick\)\)/,
-    "a packed swept receiver must enter transport at the fine receiver floor");
+    "a packed swept destination must enter transport at the fine frontier floor");
   assert.match(activation,
     /select\(requested,applySparseCM12RefinementRegionBounds\(brick,requested\),\s*brickCandidatePlanningEnabled\(brick\)\)/,
-    "an unpacked receiver must remain allocatable at its complete construction rung");
+    "an unpacked destination must remain allocatable at its complete construction rung");
   assert.match(injectionActivation, /injectionReachesBrick\(brick\)/,
     "liquid injection must populate source tiles without consuming swept-frame requests");
-  assert.doesNotMatch(injectionActivation, /brickRequestedAsReceiver\(brick\)/);
+  assert.doesNotMatch(injectionActivation, /brickHasTransportDemand\(brick\)/);
   assert.match(retirement, /setCandidateBrickActiveAt\(output,false\)/,
     "retirement must author candidate membership only");
   for (const [label, source] of [["activation", activation],
@@ -71,7 +67,7 @@ test("liquid injection opens and composes its tile-population journal", () => {
     'dispatchTopology("beginSparseCM12PressureTopologyRepair", 1)');
   const plan = injection.indexOf('dispatchTopology("planBrickResolution", bricks)');
   assert.ok(openPressureTopology >= 0 && plan > openPressureTopology,
-    "a first-frame injection must open its tile-population journal before planning receivers");
+    "a first-frame injection must open its tile-population journal before planning pages");
   assert.match(pressureRepairWgsl,
     /\(acceptedOld==oldState&&pendingNew==newState\)\|\|pendingNew==oldState/,
     "an injection after a frame topology flip must fold its B-to-C tile changes into A-to-B");
@@ -121,7 +117,7 @@ test("validation authorizes only; a distinct singleton flips after every stable 
   assert.equal(finalizeName, "finalizeAuthorizedShadowTopology",
     "the sole selector store must live in a distinct finalizer");
   const finalize = functionSource(wgsl, "finalizeAuthorizedShadowTopology",
-    "fn publishSparseCM12TopologyVelocityRootsWork");
+    "@compute @workgroup_size(64)\nfn publishSparseWorldFrontierAcceptance");
   const finalizePrefix = wgsl.slice(Math.max(0, wgsl.lastIndexOf("@compute", selectorAt)),
     selectorAt);
   assert.match(finalizePrefix, /@workgroup_size\(1\)/,
@@ -135,26 +131,34 @@ test("validation authorizes only; a distinct singleton flips after every stable 
   const frameEnd = host.indexOf('stage("brick-retirement"', frameBegin);
   const frame = host.slice(frameBegin, frameEnd);
   const validation = frame.indexOf('dispatch("validateAndAuthorizeShadowTopology", 1)');
-  const beginEffects = frame.indexOf(
-    'dispatch("beginSparseCM12AuthorizedCandidateEffects", 1)');
   const ptrEffects = frame.indexOf("this.pipelines.publishSparseCM12TopologyPTREffects!");
-  const topologyVex = frame.indexOf(
-    'dispatchTopologyDelta("publishSparseCM12CandidateTopologyVexEffects")');
-  const injectionVex = frame.indexOf(
-    'dispatchTopologyDelta("publishSparseCM12CandidateInjectionVexEffects")');
   const sealEffects = frame.indexOf(
-    'dispatch("finalizeSparseCM12AuthorizedCandidateEffects", 1)');
+    'dispatch("sealSparseCM12AuthorizedTopologyEffects", 1)');
   const finishEffects = frame.indexOf(
     'dispatch("finishSparseCM12TopologyEffectsPublication", 1)');
   const fields = frame.indexOf(
     'dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist")');
+  const frontierGraph = frame.indexOf(
+    'dispatch("connectSparseWorldFrontierPages", this.topologyPageCapacity)');
   const faces = frame.indexOf('dispatchShadow("publishCandidateShadowFaces", "row")');
   const finalizeDispatch = frame.indexOf('dispatch("finalizeAuthorizedShadowTopology", 1)');
-  assert.ok(validation >= 0 && beginEffects > validation && ptrEffects > beginEffects
-    && topologyVex > ptrEffects && injectionVex > topologyVex
-    && sealEffects > injectionVex && finishEffects > sealEffects && fields > finishEffects
-    && faces > fields && finalizeDispatch > faces,
+  assert.ok(validation >= 0 && ptrEffects > validation
+    && sealEffects > ptrEffects && finishEffects > sealEffects && fields > finishEffects
+    && frontierGraph > fields && faces > frontierGraph && finalizeDispatch > faces,
   "candidate authorization must precede every stable effect/field publication and the sole flip must follow them");
+
+  const connect = functionSource(wgsl, "connectSparseWorldFrontierPages",
+    "fn synthesizeCandidateCellPages");
+  assert.match(connect, /topologyArena\[base\+3u\]\)!=2u/,
+    "canonical seam publication must no-op unless the candidate is authorized");
+  assert.doesNotMatch(connect,
+    /topologyArena\[base\]\)!=atomicLoad\(&topologyArena\[base\+1u\]\)/,
+    "canonical seams must publish before, not after, the accepted-generation flip");
+  assert.match(connect,
+    /upperOwner\.z==BRICK_FINE_RESOLUTION&&brickActive\(upperOwner\.y\)/);
+  assert.match(connect,
+    /lowerOwner\.z==BRICK_FINE_RESOLUTION&&brickActive\(lowerOwner\.y\)/,
+    "fine dynamic seams must fail closed beside inactive or coarse host cells");
 });
 
 test("post-authorization delta publication cannot fault after its first stable write", () => {
@@ -168,22 +172,14 @@ test("post-authorization delta publication cannot fault after its first stable w
     /scaInvalidateBrickTopologyClosure|cm12Extension(?:RecordRoot|InvalidateRetiredCell)/,
     "candidate publication may not call a fallible journal/cache helper after a stable write");
 
-  const vexPublish = functionSource(wgsl, "publishSparseCM12TopologyVelocityRootsWork",
-    "@compute @workgroup_size(64)\nfn publishSparseCM12TopologyVelocityRoots(");
-  assert.match(vexPublish, /vda1TransactionAuthorized\(\)/,
-    "candidate VEX publication must consume the VDA authorization receipt");
-  assert.doesNotMatch(vexPublish,
-    /cm12ResidentRecordExtensionIncidence|cm12ExtensionInvalidateRetiredCell/,
-    "candidate VEX publication must use an infallible preflighted publication seam");
-
   const frameBegin = host.indexOf('stage("candidate-transfer"');
   const frameEnd = host.indexOf('stage("brick-retirement"', frameBegin);
   const frame = host.slice(frameBegin, frameEnd);
-  const seal = frame.indexOf('dispatch("finalizeSparseCM12AuthorizedCandidateEffects", 1)');
+  const seal = frame.indexOf('dispatch("sealSparseCM12AuthorizedTopologyEffects", 1)');
   const fields = frame.indexOf(
     'dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist")');
   assert.ok(seal >= 0 && seal < fields,
-    "the preflighted no-fail PTR/VDA seal must complete before stable delta publication");
+    "the preflighted no-fail PTR seal must complete before stable delta publication");
 });
 
 test("same-active rerung uses the same staged transaction without lifecycle field resets", () => {
@@ -221,7 +217,7 @@ test("candidate effective velocity stays unpublished until the transaction accep
     "stable face publication must no-op after rejection");
 });
 
-test("aggregate authorization consumes ISA, TFX, and VDA receipts after every fallible check", () => {
+test("aggregate authorization consumes ISA and TFX receipts after every fallible check", () => {
   const validate = functionSource(wgsl, "validateAndAuthorizeShadowTopology",
     "fn finalizeAuthorizedShadowTopology");
   const rejection = validate.indexOf("if(!valid)");
@@ -238,13 +234,9 @@ test("aggregate authorization consumes ISA, TFX, and VDA receipts after every fa
   assert.ok(iboReceiptBegin >= 0 && iboReceiptEnd > iboReceiptBegin);
   assert.match(wgsl.slice(iboReceiptBegin, iboReceiptEnd), /cm12ISAAuthorityReady\(\)/,
     "the integrated IBO receipt must include ISA generation, closure, and semantic coverage");
-  assert.match(validate, /vda1PreflightReady\(/,
-    "the aggregate decision must consume the already sealed VDA receipt");
   const tfxAuthorize = validate.indexOf("tfxAuthorize()", rejection);
-  const vdaAuthorize = validate.indexOf("vda1Authorize()", rejection);
-  assert.ok(tfxAuthorize > rejection && vdaAuthorize > rejection
-    && tfxAuthorize < mainAuthorization && vdaAuthorize < mainAuthorization,
-  "candidate authorities may authorize only after the sole rejection branch");
+  assert.ok(tfxAuthorize > rejection && tfxAuthorize < mainAuthorization,
+    "candidate effects authority may authorize only after the sole rejection branch");
 
   const frameBegin = host.indexOf('stage("candidate-transfer"');
   const frameEnd = host.indexOf('stage("brick-retirement"', frameBegin);
@@ -253,11 +245,10 @@ test("aggregate authorization consumes ISA, TFX, and VDA receipts after every fa
   const tfxRecord = frame.indexOf(
     'dispatchTopologyDelta("recordCandidateTopologyEffectsFromTopologyDelta")');
   const tfxSeal = frame.indexOf('dispatch("finalizeSparseCM12TopologyEffectsPreflight", 1)');
-  const vdaSeal = frame.indexOf('dispatch("finalizeSparseCM12CandidateEffectsPreflight", 1)');
   const validateDispatch = frame.indexOf('dispatch("validateAndAuthorizeShadowTopology", 1)');
   assert.ok(tfxBegin >= 0 && tfxRecord > tfxBegin && tfxSeal > tfxRecord
-    && vdaSeal > tfxRecord && validateDispatch > tfxSeal && validateDispatch > vdaSeal,
-  "TFX/VDA candidate recording and every fallible seal must complete before aggregate authorization");
+    && validateDispatch > tfxSeal,
+  "TFX candidate recording and every fallible seal must complete before aggregate authorization");
 });
 
 test("ISA proves the exact changed set as well as closure uniqueness and generation", () => {
@@ -283,38 +274,60 @@ test("ISA proves the exact changed set as well as closure uniqueness and generat
     "deduped closure count must equal the uniquely claimed validation count");
 });
 
-test("the success latch is immediately before the literal final selector store", () => {
+test("the literal selector store is the final executable instruction", () => {
   const finalize = functionSource(wgsl, "finalizeAuthorizedShadowTopology",
-    "fn publishSparseCM12TopologyVelocityRootsWork");
+    "@compute @workgroup_size(64)\nfn publishSparseWorldFrontierAcceptance");
   const selector = "atomicStore(&topologyArena[base+2u],slot);";
   const selectorAt = finalize.indexOf(selector);
   assert.ok(selectorAt >= 0);
   const prefix = finalize.slice(0, selectorAt);
-  assert.match(prefix, /vda1CommitSuccessNoFail\(/,
-    "the finalizer must arm the post-selector success latch");
-  const between = prefix.slice(prefix.lastIndexOf("vda1CommitSuccessNoFail("));
-  const executableBetween = between.replace(/\/\/[^\n]*/g, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s/g, "");
-  assert.equal(executableBetween,
-    "vda1CommitSuccessNoFail(atomicLoad(&topologyArena[base]));",
-    "the success latch call must be immediately before the selector store");
+  assert.match(prefix, /topologyArena\[base\+3u\]\)!=2u/,
+    "the finalizer must consume the topology authorization receipt");
   const suffix = finalize.slice(selectorAt + selector.length)
     .replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/[}\s]/g, "");
   assert.equal(suffix, "", "the literal selector store must be the final executable instruction");
 
-  const effects = functionSource(wgsl, "finalizeSparseCM12AuthorizedCandidateEffects",
-    "fn scaInvalidateCellClosure");
-  assert.match(effects, /vda1SealPublicationNoFail\(\)/,
-    "authorized candidate effects must seal VDA publication before stable topology fields");
+  const effects = functionSource(wgsl, "sealSparseCM12AuthorizedTopologyEffects",
+    "fn cm12FinalScalarExactPhase");
+  assert.match(effects, /ptrSealPreflightedTopologyJournalNoFail\(/,
+    "authorized topology effects must seal PTR publication before stable topology fields");
   assert.doesNotMatch(effects,
     /\b(?!\w*NoFail)\w*(?:Fail|Fault|Reject|Abort)\w*\s*\(|return false|atomicCompareExchange|for\s*\(|loop\s*\{/,
     "the authorized effects seal must remain non-failing and constant work");
 
   const lifecycle = functionSource(wgsl, "sparseCM12TopologyLifecycleAccepted",
     "fn residencyDensityThreshold");
-  assert.match(lifecycle, /vda1TransactionSucceeded\(/,
-    "injection must consume the post-selector VDA success latch, not phase-2 authorization");
+  assert.match(lifecycle,
+    /phase==2u\|\|\(phase==0u[\s\S]*topologyArena\[base\]\)==atomicLoad\(&topologyArena\[base\+1u\]\)/,
+    "injection must consume either this transaction's authorization or the matching accepted generation");
+});
+
+test("topology growth cannot publish unbounded loops or indirect work", () => {
+  const reserve = functionSource(wgsl, "reserveShadowWorklistRange",
+    "fn sparseWorldDynamicRowOwner");
+  assert.match(reserve, /attempt<256u/,
+    "contended shadow reservations must have a finite retry budget");
+  assert.match(reserve, /current>capacity\|\|count>capacity-current/,
+    "shadow reservations must reject before writing beyond their slab");
+  const finalize = functionSource(wgsl, "finalizeShadowWorklists",
+    "fn candidateFieldIndex");
+  assert.match(finalize,
+    /if\(!valid\)[\s\S]*topologyArena\[base\+20u\],0u[\s\S]*topologyArena\[base\+23u\],0u/,
+    "an invalid shadow census must publish zero cell and row dispatches");
+
+  const presentationReserve = functionSource(host,
+    "reserveSparseCM12PresentationPage", "@compute @workgroup_size(64)");
+  assert.match(presentationReserve, /attempt=0u;attempt<256u/,
+    "presentation allocation must not spin forever on weak CAS");
+  assert.doesNotMatch(presentationReserve, /\bloop\s*\{/);
+  const presentationAllocate = functionSource(host,
+    "allocateSparseCM12PresentationPages", "fn sparseCM12PresentationPageLess");
+  const coordinateValidation = presentationAllocate.indexOf("if(coordinate.x< -1024");
+  const pageReservation = presentationAllocate.indexOf(
+    "let page=reserveSparseCM12PresentationPage()");
+  assert.ok(coordinateValidation >= 0 && pageReservation > coordinateValidation,
+    "invalid signed coordinates must be rejected before consuming a page");
 });
 
 test("injection success publishes before flip while rejection leaves authority unopened", () => {
@@ -323,57 +336,36 @@ test("injection success publishes before flip while rejection leaves authority u
   assert.ok(begin >= 0 && end > begin, "injection source range must remain identifiable");
   const injection = host.slice(begin, end);
   const validation = injection.indexOf('dispatchTopology("validateAndAuthorizeShadowTopology", 1)');
-  const reopen = injection.indexOf('dispatchTopology("reopenVelocityExtensionPlanForInjection", 1)');
-  const candidateReopen = injection.indexOf(
-    'dispatchTopology("beginSparseCM12AuthorizedCandidateEffects", 1)');
-  assert.ok(validation >= 0 && candidateReopen > validation,
-    "the candidate VEX generation must not reopen before topology authorization");
-  assert.ok(reopen < 0 || reopen > validation,
-    "the legacy VEX generation must not reopen before topology authorization");
-  const candidateTopologyVex = injection.indexOf(
-    'dispatchTopologyDelta("publishSparseCM12CandidateTopologyVexEffects")');
-  const candidateInjectionVex = injection.indexOf(
-    'dispatchTopologyDelta("publishSparseCM12CandidateInjectionVexEffects")');
-  const candidateSeal = injection.indexOf(
-    'dispatchTopology("finalizeSparseCM12AuthorizedCandidateEffects", 1)');
+  const ptrEffects = injection.indexOf("this.pipelines.publishSparseCM12TopologyPTREffects!");
+  const effectsSeal = injection.indexOf(
+    'dispatchTopology("sealSparseCM12AuthorizedTopologyEffects", 1)');
+  const effectsFinish = injection.indexOf(
+    'dispatchTopology("finishSparseCM12TopologyEffectsPublication", 1)');
   const stableFields = injection.indexOf(
     'dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist")');
+  const frontierGraph = injection.indexOf(
+    'dispatchTopology("connectSparseWorldFrontierPages", this.topologyPageCapacity)');
+  const stableFaces = injection.indexOf(
+    'dispatchTopologyIndirect("publishCandidateShadowFaces", 36)');
   const selector = injection.indexOf(
     'dispatchTopology("finalizeAuthorizedShadowTopology", 1)');
-  assert.ok(candidateTopologyVex > candidateReopen
-    && candidateInjectionVex > candidateTopologyVex && candidateSeal > candidateInjectionVex
-    && stableFields > candidateSeal && selector > stableFields,
+  assert.ok(validation >= 0 && ptrEffects > validation && effectsSeal > ptrEffects
+    && effectsFinish > effectsSeal && stableFields > effectsFinish
+    && frontierGraph > stableFields && stableFaces > frontierGraph && selector > stableFaces,
   "an accepted injection must publish its preflighted candidate effects and fields before the selector flip");
 
-  const reopenKernel = functionSource(vexWgsl, "reopenVelocityExtensionPlanForInjection",
-    "fn cm12ExtensionRecordRoot");
   const injectKernel = functionSource(wgsl, "injectLiquid", "fn traceGammaAndBeta");
-  const d4Kernel = functionSource(wgsl, "invalidateSparseCM12FrameD4ForInjection",
-    "fn sparseCM12FrameControlNoop");
-  assert.match(vexWgsl, /if\(!\(\$\{injectionReopenReady\}\)/,
-    "the reusable VEX reopen kernel must consume its topology authorization expression");
-  assert.match(wgsl,
-    /injectionReopenReadyExpression:\s*\n?\s*"atomicLoad\(&topologyArena\[topologyWorklistBase\(\)\+3u\]\)==2u"/,
-    "resident injection must bind VEX reopen to this transaction's authorization receipt");
-  assert.match(reopenKernel, /injectionReopenReady/);
-  const candidateReopenKernel = functionSource(wgsl,
-    "reopenCandidateVexPlanAuthorizedNoFail", "fn cm12ResidentCellTile");
-  assert.doesNotMatch(candidateReopenKernel,
-    /cm12ExtensionFail|atomicCompareExchange|for\s*\(|loop\s*\{/,
-    "the candidate authorized reopen seam may not fault, retry, or contend after authorization");
-  for (const [label, source] of [["density injection", injectKernel],
-    ["D4 invalidation", d4Kernel]] as const) {
-    assert.match(source, /sparseCM12TopologyLifecycleAccepted\(\)/,
-      `${label} must no-op when the topology transaction rejects`);
-  }
+  assert.match(injectKernel, /sparseCM12TopologyLifecycleAccepted\(\)/,
+    "density injection must no-op when the topology transaction rejects");
   const firstDensityWrite = injectKernel.search(/state\[[^\]]+\]\s*=/);
   assert.ok(firstDensityWrite >= 0);
   assert.doesNotMatch(injectKernel.slice(firstDensityWrite),
     /cm12ResidentRecordExtensionIncidence|scaInvalidateCellClosure/,
     "candidate injection may not enter a fallible VEX/SCA append after its first density write");
-  assert.doesNotMatch(d4Kernel, /cm12FCInvalidateD4/,
-    "candidate post-injection D4 publication must use its preflighted infallible seam");
-  assert.match(d4Kernel, /vda1MarkInjectionPublishedNoFail\(\)/);
+  const effectsKernel = functionSource(wgsl, "sealSparseCM12AuthorizedTopologyEffects",
+    "fn cm12FinalScalarExactPhase");
+  assert.match(effectsKernel, /cm12FCInvalidateD4Authorized\(/,
+    "candidate D4 invalidation must use its authorized infallible seam before the selector flip");
 });
 
 test("injection copies the GPU delta triplet and never launches world-sized IBO work", () => {

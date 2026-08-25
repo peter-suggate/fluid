@@ -46,7 +46,7 @@ function fixture(): {
   });
   const atlas = createSparseAdaptiveMassAtlas(dimensions, [
     brick([0, 0, 0], 8), brick([1, 0, 0], 16),
-  ], 19, undefined, 16);
+  ], 19, 16);
   const grid = buildSparseAtlasCompositeGrid(atlas);
   const commonRow = grid.gradientRows.findIndex((row) => row.terms.length === 2);
   const variableRow = grid.gradientRows.findIndex((row) =>

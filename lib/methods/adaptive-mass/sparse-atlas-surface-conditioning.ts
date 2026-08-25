@@ -283,7 +283,7 @@ function scalarEdges(
       else if (row.terms[index].coefficient > 0) positiveCount += 1;
     }
     // A one-sided sparse-air row is a pressure boundary, not a resident scalar
-    // diffusion/sharpening edge. Receiver activation owns material entering it.
+    // diffusion/sharpening edge. Frontier page creation owns material entering it.
     if (negativeCount === 0 || positiveCount === 0) continue;
     const subfaceArea = row.area / (negativeCount * positiveCount);
     for (let leftIndex = 0; leftIndex < row.terms.length; leftIndex += 1) {

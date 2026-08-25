@@ -235,7 +235,7 @@ and partial publication have already been paid.
 This distinction matters in:
 
 - surface bricks containing a large air fraction;
-- predictive/dormant receiver support retained for transport;
+- demand-led frontier support retained for transport;
 - recently vacated cells that remain accepted during hysteresis;
 - large coarse bricks whose accepted storage is useful to other stages but
   whose pressure participation is small.

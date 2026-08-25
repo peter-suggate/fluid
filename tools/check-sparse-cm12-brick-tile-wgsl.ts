@@ -29,7 +29,7 @@ const brick = (x: number, resolution: SparseBrickResolution): SparseAdaptiveMass
   gamma: new Float64Array(resolution ** 3).fill(1),
 });
 const atlas = createSparseAdaptiveMassAtlas([16, 8, 8], [brick(0, 8), brick(1, 4)],
-  1, undefined, 8);
+  1, 8);
 const grid = buildSparseAtlasCompositeGrid(atlas);
 const image = compileSparseCM12BrickTileImage(grid);
 const outputWords = Math.max(image.layout.tileCapacity * 64,

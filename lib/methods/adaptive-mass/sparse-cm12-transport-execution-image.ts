@@ -220,7 +220,10 @@ function writeSlot(
     layout.spatialTileCapacity, 0, 0, 0,
   ], slotBase);
 
-  for (let brick = 0; brick < layout.leafCapacity; brick += 1) {
+  // Capacity may include device-owned growth leaves that do not exist in the
+  // construction atlas yet. Only seed authored leaves; the GPU frontier
+  // compiler owns the reserved tail.
+  for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
     const source = atlas.bricks[brick]!;
     const resolution = runtime.acceptedBrickResolution(brick);
     const active = runtime.brickActive(brick);
@@ -358,9 +361,17 @@ export function createSparseCM12TransportExecutionImage(
   atlas: SparseAdaptiveMassAtlas,
   directory: SparseCM12LogicalOwnerDirectory,
   runtime: SparseCM12LogicalOwnerRuntime,
-  options: { readonly generation?: number } = {},
+  options: {
+    readonly generation?: number;
+    /**
+     * Authoritative resident capacity, including device-owned growth leaves.
+     * Omitting it retains the exact authored-atlas capacity for standalone
+     * callers and CPU oracles.
+     */
+    readonly layout?: SparseCM12TransportExecutionImageLayout;
+  } = {},
 ): SparseCM12TransportExecutionImage {
-  const layout = createSparseCM12TransportExecutionImageLayout({
+  const requiredLayout = createSparseCM12TransportExecutionImageLayout({
     brickFineResolution: atlas.brickFineResolution,
     logicalBrickDimensions: directory.layout.logicalBrickDimensions,
     leafCapacity: atlas.bricks.length,
@@ -372,6 +383,24 @@ export function createSparseCM12TransportExecutionImage(
       return (extent[2]! - 1) * span * span + (extent[1]! - 1) * span + extent[0]!;
     })),
   });
+  const layout = options.layout ?? requiredLayout;
+  const expectedLayout = createSparseCM12TransportExecutionImageLayout({
+    brickFineResolution: requiredLayout.brickFineResolution,
+    logicalBrickDimensions: requiredLayout.logicalBrickDimensions,
+    leafCapacity: layout.leafCapacity,
+    maximumSpanBricks: requiredLayout.maximumSpanBricks,
+    logicalSlotsPerLeaf: requiredLayout.logicalSlotsPerLeaf,
+  });
+  if (layout.leafCapacity < atlas.bricks.length
+    || layout.brickFineResolution !== expectedLayout.brickFineResolution
+    || layout.maximumSpanBricks !== expectedLayout.maximumSpanBricks
+    || layout.logicalSlotsPerLeaf !== expectedLayout.logicalSlotsPerLeaf
+    || layout.logicalBrickDimensions.some((value, axis) =>
+      value !== expectedLayout.logicalBrickDimensions[axis])
+    || layout.totalWords !== expectedLayout.totalWords
+    || layout.slotStrideWords !== expectedLayout.slotStrideWords) {
+    throw new Error("TEI2 supplied layout differs from the resident capacity plan");
+  }
   const generation = checked(options.generation ?? 1, "generation");
   const words = new Uint32Array(layout.totalWords);
   words.set([

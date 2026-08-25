@@ -11,7 +11,6 @@ import {
   refinementRegionLattice,
   sceneRefinementRegions,
 } from "../../core/refinement-regions";
-import { classifyFineBoxAgainstSphericalContainer } from "../../core/spherical-container";
 import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { sceneCellSizes_m, sceneLatticeDimensions } from "../../core/scene-lattice";
 import { GPUStageTimestampRecorder } from "../../core/performance-trace";
@@ -24,27 +23,19 @@ import {
   type GPURigidLoad,
 } from "../../core/webgpu-eulerian";
 import { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
-import { sceneHasTerrain, terrainColumnHeights } from "../../core/terrain";
-import {
-  createOpenTankWallField,
-  tankWallSideHasOpening,
-} from "../../core/tank-wall-field";
+import { solidWorldForScene } from
+  "../../core/solid-world";
 import {
   ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS,
   AdaptiveMassFrameCapture,
 } from "./adaptive-mass-frame-pipeline";
 import type { AdaptiveMassSolverOptions } from "./method";
 import {
-  createSparseAdaptiveMassAtlas,
   initializeSparseBrickAtlasFromScene,
   materializeSparseBrickAtlasDensity,
   sparseBrickFromDense,
-  sparseBrickContainingCoordinate,
-  sparseBrickKey,
-  sparseBrickSpan,
   sparseBrickAtlasStats,
   type SparseAdaptiveMassAtlas,
-  type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
   type SparseBrickVec3,
 } from "./sparse-brick-atlas";
@@ -60,7 +51,7 @@ import { WebGPUAdaptiveMassSparsePresentation } from
   "./webgpu-adaptive-mass-atlas-presentation";
 import type { SparseWorld, SparseWorldDevice, SparseWorldUI } from "../../sparse-world";
 import {
-  createCM12SparseWorldFromLegacy,
+  createCM12SparseWorld,
   type CM12SparseWorldDeveloperTrace,
   type CM12SparseWorldRuntime,
   type CM12SparseWorldStepConfiguration,
@@ -77,115 +68,27 @@ import {
 
 const PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 presentation publisher oracle QA");
-const LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN: unique symbol =
-  Symbol("Sparse CM12 retired host authority paired QA oracle");
 const PHASE1_TRANSPORT_RECEIPT_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 Phase-1 transport receipt QA");
 
 export interface AdaptiveMassFluidDomain {
   readonly dimensions: SparseBrickVec3;
-  readonly tankDimensions: SparseBrickVec3;
-  readonly tankMinimumFine: SparseBrickVec3;
-  readonly tankMaximumFine: SparseBrickVec3;
   readonly origin_m: readonly [number, number, number];
   readonly cellSize_m: readonly [number, number, number];
-  readonly expanded: boolean;
 }
 
-/**
- * Seed only the first receiver brick across an authored opening. This is the
- * minimum topology needed for a wall row to have a conservative destination;
- * subsequent coordinates are claimed by the signed sparse-world frontier.
- */
+/** The authored lattice is only the initial fluid world; growth is demand-led. */
 export function adaptiveMassFluidDomainForScene(
   scene: SceneDescription,
-  brickFineResolution = 8,
-  receiverSupportRings = SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
 ): AdaptiveMassFluidDomain {
   const tankDimensions = sceneLatticeDimensions(scene) as SparseBrickVec3;
-  void receiverSupportRings;
-  const left = tankWallSideHasOpening(scene.container.wallField, "left");
-  const right = tankWallSideHasOpening(scene.container.wallField, "right");
-  const front = tankWallSideHasOpening(scene.container.wallField, "front");
-  const back = tankWallSideHasOpening(scene.container.wallField, "back");
-  const minimumPadding = [left ? brickFineResolution : 0, 0,
-    front ? brickFineResolution : 0] as const;
-  const maximumPadding = [right ? brickFineResolution : 0, 0,
-    back ? brickFineResolution : 0] as const;
-  const dimensions: SparseBrickVec3 = [
-    tankDimensions[0] + minimumPadding[0] + maximumPadding[0],
-    tankDimensions[1],
-    tankDimensions[2] + minimumPadding[2] + maximumPadding[2],
-  ];
   const cell = sceneCellSizes_m(scene);
   return {
-    dimensions,
-    tankDimensions,
-    tankMinimumFine: minimumPadding,
-    tankMaximumFine: [minimumPadding[0] + tankDimensions[0], tankDimensions[1],
-      minimumPadding[2] + tankDimensions[2]],
-    origin_m: [-0.5 * tankDimensions[0] * cell[0] - minimumPadding[0] * cell[0],
-      0, -0.5 * tankDimensions[2] * cell[2] - minimumPadding[2] * cell[2]],
+    dimensions: tankDimensions,
+    origin_m: [-0.5 * tankDimensions[0] * cell[0], 0,
+      -0.5 * tankDimensions[2] * cell[2]],
     cellSize_m: cell,
-    expanded: left || right || front || back,
   };
-}
-
-/** Place the ordinary tank seed atlas in its larger, empty sparse world. */
-export function embedTankAtlasInFluidDomain(
-  source: SparseAdaptiveMassAtlas,
-  domain: AdaptiveMassFluidDomain,
-): SparseAdaptiveMassAtlas {
-  if (!domain.expanded) return source;
-  const width = source.brickFineResolution;
-  const shiftBricks: SparseBrickVec3 = [
-    domain.tankMinimumFine[0] / width,
-    0,
-    domain.tankMinimumFine[2] / width,
-  ];
-  const expandedBrickDimensions: SparseBrickVec3 = [
-    Math.ceil(domain.dimensions[0] / width),
-    Math.ceil(domain.dimensions[1] / width),
-    Math.ceil(domain.dimensions[2] / width),
-  ];
-  let dense: Float32Array | undefined;
-  const bricks = source.bricks.map((brick) => {
-    const span = sparseBrickSpan(brick);
-    if (shiftBricks.some((value) => value % span !== 0)) {
-      throw new Error(`Expanded tank domain shift is not aligned to macro span ${span}`);
-    }
-    const minimum = brick.coordinate.map((value) => value * width);
-    const maximum = minimum.map((value) => value + width);
-    const crossesTankWall = [0, 2].some((axis) => {
-      const wall = domain.tankDimensions[axis];
-      return wall > minimum[axis]! && wall < maximum[axis]!;
-    });
-    if (crossesTankWall && span !== 1) {
-      throw new Error(`macro span ${span} crosses an embedded tank wall`);
-    }
-    const resolved = crossesTankWall && brick.resolution !== width
-      ? sparseBrickFromDense(brick.key, brick.coordinate, width,
-        dense ??= materializeSparseBrickAtlasDensity(source),
-        source.dimensions, undefined, width)
-      : brick;
-    const coordinate: SparseBrickVec3 = [
-      resolved.coordinate[0] + shiftBricks[0],
-      resolved.coordinate[1] + shiftBricks[1],
-      resolved.coordinate[2] + shiftBricks[2],
-    ];
-    return {
-      ...resolved,
-      coordinate,
-      key: sparseBrickKey(coordinate, expandedBrickDimensions),
-    };
-  });
-  return createSparseAdaptiveMassAtlas(
-    domain.dimensions, bricks, source.generation, source.boundary,
-    source.brickFineResolution, source.wallField, {
-      minimumFine: domain.tankMinimumFine,
-      maximumFine: domain.tankMaximumFine,
-    },
-  );
 }
 
 /** Method-local long-run physics receipt carried through the generic info bag. */
@@ -222,370 +125,6 @@ interface SparseCM12TopologySchedulerDiagnostics {
   readonly topologyDeferredBrickCount?: number;
   readonly acceptedFineBrickCount?: number;
   readonly acceptedCoarseBrickCount?: number;
-}
-
-/** Select a fine receiver and its strongly graded outward support rung. */
-export function dormantReceiverResolution(
-  mode: AdaptiveMassSolverOptions["resolutionMode"],
-  distance = 0,
-  sourceResolution: SparseBrickResolution = 8,
-): SparseBrickResolution {
-  if (mode === "all-fine") return sourceResolution;
-  if (mode === "all-coarse") return Math.max(1, sourceResolution / 2) as SparseBrickResolution;
-  let resolution = sourceResolution;
-  for (let step = 0; step < distance; step += 1) {
-    resolution = Math.max(1, resolution / 2) as SparseBrickResolution;
-  }
-  return resolution;
-}
-
-/**
- * Fixed construction-time capacity reach of the GPU-resident receiver pool.
- *
- * This is a capacity bound, not a domain bound. It reserves a local apron far
- * enough for several brick crossings; the GPU
- * scheduler may split and merge bricks within that capacity after attachment.
- * Crucially, a kilometre-wide authored
- * world costs the same as a small one when their live liquid sets are equal.
- */
-export const SPARSE_CM12_RECEIVER_SUPPORT_RINGS = 9;
-/** Construction capacity is proportional to represented leaves, never domain volume. */
-export const SPARSE_CM12_RECEIVER_CAPACITY_FACTOR = 4;
-export const SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY = 512;
-
-/**
- * Keep the construction-time receiver apron fixed in metres when the editor
- * moves a scene along its DETAIL axis. `nominalResolution` follows WORLD edits
- * but deliberately stays put for DETAIL edits, so their ratio is the exact
- * linear lattice scale and the receiver volume scales by its cube.
- */
-export function adaptiveMassReceiverScaleForScene(
-  scene: Pick<SceneDescription, "nominalResolution" | "voxelDomain">,
-  supportRings = SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
-): { readonly supportRings: number; readonly minimumCapacityScale: number } {
-  if (!Number.isSafeInteger(supportRings) || supportRings < 0) {
-    throw new RangeError("Sparse CM12 receiver support rings must be a non-negative integer");
-  }
-  const detailScale = scene.nominalResolution.length_m
-    / scene.voxelDomain.finestCellSize_m;
-  const finiteScale = Number.isFinite(detailScale) && detailScale > 0 ? detailScale : 1;
-  return {
-    // residentSupportAtlas contributes one immediate face-receiver shell
-    // before this dormant apron is grown. Scale their combined physical reach,
-    // then remove that still-one-brick active shell.
-    supportRings: Math.max(0, Math.round((supportRings + 1) * finiteScale) - 1),
-    minimumCapacityScale: finiteScale ** 3,
-  };
-}
-
-function receiverBoundaryResolution(
-  atlas: SparseAdaptiveMassAtlas,
-  coordinate: SparseBrickVec3,
-): SparseBrickResolution | undefined {
-  if (!atlas.boundary) return undefined;
-  const width = atlas.brickFineResolution;
-  const minimum = coordinate.map((value) => value * width) as [number, number, number];
-  const maximum = coordinate.map((value) => (value + 1) * width) as [number, number, number];
-  const classification = classifyFineBoxAgainstSphericalContainer(
-    atlas.boundary, minimum, maximum,
-  );
-  if (classification === "outside") return undefined;
-  if (classification === "cut") return atlas.ladder.coarseResolution;
-  const collarMinimum = minimum.map((value) => value - width) as [number, number, number];
-  const collarMaximum = maximum.map((value) => value + width) as [number, number, number];
-  return classifyFineBoxAgainstSphericalContainer(
-    atlas.boundary, collarMinimum, collarMaximum,
-  ) === "cut" ? Math.max(1, atlas.ladder.coarseResolution / 2) as SparseBrickResolution : 1;
-}
-
-function closeReceiverGrading(
-  source: SparseAdaptiveMassAtlas,
-  bricks: Map<number, SparseAdaptiveMassBrick>,
-): void {
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const brick of [...bricks.values()]) for (let axis = 0; axis < 3; axis += 1) {
-      if (sparseBrickSpan(brick) > 1) continue;
-      const coordinate = [...brick.coordinate] as [number, number, number];
-      coordinate[axis] += 1;
-      if (coordinate[axis] >= source.brickDimensions[axis]) continue;
-      const neighbor = bricks.get(sparseBrickKey(coordinate, source.brickDimensions));
-      if (!neighbor || sparseBrickSpan(neighbor) > 1) continue;
-      const high = Math.max(brick.resolution, neighbor.resolution);
-      const low = brick.resolution < neighbor.resolution ? brick : neighbor;
-      if (high <= 2 * low.resolution) continue;
-      const resolution = (high / 2) as SparseBrickResolution;
-      const density = new Float64Array(resolution ** 3);
-      const gamma = new Float64Array(resolution ** 3);
-      for (let z = 0; z < resolution; z += 1)
-        for (let y = 0; y < resolution; y += 1)
-          for (let x = 0; x < resolution; x += 1) {
-            const local = x + resolution * (y + resolution * z);
-            const sx = Math.min(low.resolution - 1, Math.floor(x * low.resolution / resolution));
-            const sy = Math.min(low.resolution - 1, Math.floor(y * low.resolution / resolution));
-            const sz = Math.min(low.resolution - 1, Math.floor(z * low.resolution / resolution));
-            const sourceLocal = sx + low.resolution * (sy + low.resolution * sz);
-            density[local] = low.density[sourceLocal]!;
-            gamma[local] = low.gamma[sourceLocal]!;
-          }
-      bricks.set(low.key, { ...low, resolution, density, gamma });
-      changed = true;
-    }
-  }
-}
-
-/** Reserve a compact receiver halo for the fixed-topology GPU control arms. */
-function brickFaceCarriesFluid(
-  brick: SparseAdaptiveMassBrick,
-  direction: SparseBrickVec3,
-): boolean {
-  const resolution = brick.resolution;
-  const axis = direction[0] !== 0 ? 0 : direction[1] !== 0 ? 1 : 2;
-  const fixed = direction[axis] < 0 ? 0 : resolution - 1;
-  for (let second = 0; second < resolution; second += 1)
-    for (let first = 0; first < resolution; first += 1) {
-      const coordinate = axis === 0 ? [fixed, first, second]
-        : axis === 1 ? [first, fixed, second] : [first, second, fixed];
-      const at = coordinate[0] + resolution
-        * (coordinate[1] + resolution * coordinate[2]);
-      if (brick.density[at]! > 0) return true;
-    }
-  return false;
-}
-
-export function residentSupportAtlas(
-  source: SparseAdaptiveMassAtlas,
-  mode: AdaptiveMassSolverOptions["resolutionMode"],
-): SparseAdaptiveMassAtlas {
-  const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
-  // Construction starts the immediate shell fine so the first transport step
-  // has the same destination fidelity as the represented interface. Activity
-  // can subsequently coarsen static-only support; characteristic-swept empty
-  // destinations retain the 8^3 floor.
-  const receiverResolution: SparseBrickResolution = mode === "all-coarse"
-    ? source.ladder.coarseResolution : source.brickFineResolution;
-  for (const brick of source.bricks) {
-    if (sparseBrickSpan(brick) > 1) continue;
-    for (let dz = -1; dz <= 1; dz += 1) for (let dy = -1; dy <= 1; dy += 1)
-      for (let dx = -1; dx <= 1; dx += 1) {
-        // Conservative transport crosses a face. Reserve the six immediate
-        // face receivers at the mandatory 8^3 floor; edge/corner support is
-        // supplied by the graded dormant apron below. Promoting the whole
-        // 3x3x3 cube made a curved Figure 7 source turn 400 bricks fine before
-        // its first step and dominated scene construction.
-        if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) !== 1) continue;
-        const coordinate: SparseBrickVec3 = [
-          brick.coordinate[0] + dx,
-          brick.coordinate[1] + dy,
-          brick.coordinate[2] + dz,
-        ];
-        if (coordinate.some((value, axis) => value < 0
-          || value >= source.brickDimensions[axis])) continue;
-        const key = sparseBrickKey(coordinate, source.brickDimensions);
-        if (bricks.has(key) || sparseBrickContainingCoordinate(source, coordinate)) continue;
-        if (!brickFaceCarriesFluid(brick, [dx, dy, dz])) continue;
-        const boundaryResolution = receiverBoundaryResolution(source, coordinate);
-        if (source.boundary && boundaryResolution === undefined) continue;
-        const resolution = Math.max(receiverResolution,
-          boundaryResolution ?? 1) as SparseBrickResolution;
-        const count = resolution ** 3;
-        const receiver: SparseAdaptiveMassBrick = {
-          key, coordinate, resolution,
-          density: new Float64Array(count),
-          gamma: new Float64Array(count).fill(1),
-        };
-        bricks.set(key, receiver);
-      }
-  }
-  closeReceiverGrading(source, bricks);
-  return createSparseAdaptiveMassAtlas(
-    source.dimensions,
-    [...bricks.values()].sort((left, right) => left.key - right.key),
-    source.generation,
-    source.boundary,
-    source.brickFineResolution,
-    source.wallField,
-    source.tankWallPlacement,
-  );
-}
-
-/**
- * Preallocate dormant receivers over a bounded apron around retained bricks.
- * A one-axis corridor leaves corner-authored dams capped by the transverse
- * support halo (cell 47 in the canonical 64-cubed mini dam).
- */
-export function dormantReceiverDomain(
-  source: SparseAdaptiveMassAtlas,
-  mode: AdaptiveMassSolverOptions["resolutionMode"],
-  supportRings = SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
-  receiverFloor: "auto" | SparseBrickResolution = "auto",
-  minimumCapacityScale = 1,
-  terrainScene?: Pick<SceneDescription, "terrain" | "container">,
-): SparseAdaptiveMassAtlas {
-  if (!Number.isSafeInteger(supportRings) || supportRings < 0) {
-    throw new RangeError("Sparse CM12 receiver support rings must be a non-negative integer");
-  }
-  if (!Number.isFinite(minimumCapacityScale) || minimumCapacityScale <= 0) {
-    throw new RangeError("Sparse CM12 receiver capacity scale must be positive and finite");
-  }
-  const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
-  const terrainGuidedCapacity = terrainScene && sceneHasTerrain(terrainScene)
-    ? SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY + 64
-    : SPARSE_CM12_MINIMUM_RECEIVER_CAPACITY;
-  const maximumReceiverBricks = Math.min(
-    source.brickDimensions.reduce((product, value) => product * value, 1),
-    Math.max(Math.ceil(terrainGuidedCapacity * minimumCapacityScale),
-      SPARSE_CM12_RECEIVER_CAPACITY_FACTOR * source.bricks.length),
-  );
-  // Multi-source breadth-first growth visits exactly the retained apron.  The
-  // previous three nested domain loops made an empty 128^3 Figure 7 tank build
-  // 4,096 fine bricks and made construction scale with empty world volume.
-  const distanceByKey = new Map<number, number>();
-  const queue: SparseBrickVec3[] = [];
-  // Boundary-fed liquid (dams, inlets and full-depth slabs) has an authored
-  // escape direction and can cross the whole fixed receiver apron. Its cold
-  // pool needs 4^3 physical rows to keep the advancing body from collapsing
-  // into a few immutable coarse cells. Interior droplets retain the sparse
-  // 4/2/1 cold hierarchy; applying 4^3 to their entire 19-brick-wide
-  // neighbourhood made Figure 7 construction almost twice as expensive and
-  // measurably increased its frame time.
-  const boundaryFed = !source.boundary && source.bricks.some((brick) => brick.density.some(
-    (density) => density > 0,
-  ) && brick.coordinate.some((value, axis) => value === 0
-    || value === source.brickDimensions[axis] - 1));
-  const physicalReceiverFloor: SparseBrickResolution = mode === "all-fine"
-    ? source.brickFineResolution
-    : mode === "all-coarse" ? source.ladder.coarseResolution
-      : receiverFloor === "auto" ? (boundaryFed ? source.ladder.coarseResolution : 1)
-        : Math.min(receiverFloor, source.brickFineResolution) as SparseBrickResolution;
-  // A heightfield-authored voxel solid gives a much stronger receiver prior
-  // than an isotropic dry-world halo. Reserve a two-brick-deep open band above
-  // the terrain under the authored fluid's transverse footprint and its
-  // one-brick side apron. This spends bounded physical capacity along
-  // the possible downhill trajectory instead of filling it with solid and
-  // high-air pages near generation zero. The heightfield selects pages only;
-  // their runtime boundary remains the unified voxel/cut-cell state.
-  if (terrainScene && sceneHasTerrain(terrainScene)) {
-    const wet = source.bricks.filter((brick) => brick.density.some(
-      (density) => density > 0,
-    ));
-    if (wet.length > 0) {
-      const transverseMinimum = Math.max(0,
-        Math.min(...wet.map((brick) => brick.coordinate[2])) - 1);
-      const transverseMaximum = Math.min(source.brickDimensions[2] - 1,
-        Math.max(...wet.map((brick) => brick.coordinate[2])) + 1);
-      const heights = terrainColumnHeights(terrainScene,
-        source.dimensions[0], source.dimensions[2]);
-      const finePerMetre = source.dimensions[1] / terrainScene.container.height_m;
-      const width = source.brickFineResolution;
-      for (let bx = 0; bx < source.brickDimensions[0]; bx += 1) {
-        for (let bz = transverseMinimum; bz <= transverseMaximum; bz += 1) {
-          let maximumHeight_m = 0;
-          for (let z = bz * width;
-            z < Math.min(source.dimensions[2], (bz + 1) * width); z += 1) {
-            for (let x = bx * width;
-              x < Math.min(source.dimensions[0], (bx + 1) * width); x += 1) {
-              maximumHeight_m = Math.max(maximumHeight_m,
-                heights[x + source.dimensions[0] * z]!);
-            }
-          }
-          const surfaceY = Math.min(source.brickDimensions[1] - 1,
-            Math.max(0, Math.floor(maximumHeight_m * finePerMetre / width)));
-          const layers = 2;
-          for (let layer = 0; layer < layers; layer += 1) {
-            const by = surfaceY + layer;
-            if (by >= source.brickDimensions[1]) continue;
-            const coordinate: SparseBrickVec3 = [bx, by, bz];
-            const key = sparseBrickKey(coordinate, source.brickDimensions);
-            if (bricks.has(key) || sparseBrickContainingCoordinate(source, coordinate)) {
-              continue;
-            }
-            if (bricks.size >= maximumReceiverBricks) continue;
-            const resolution: SparseBrickResolution = layer === 0
-              ? source.brickFineResolution : physicalReceiverFloor;
-            bricks.set(key, { key, coordinate, resolution,
-              density: new Float64Array(resolution ** 3),
-              gamma: new Float64Array(resolution ** 3).fill(1) });
-          }
-        }
-      }
-    }
-  }
-  // If the complete authored tank already fits inside the leaf budget, retain
-  // it. A fixed ring count otherwise creates a hidden numerical wall one brick
-  // before the real wall (Figure 9's 40-cell reservoir plus nine rings stopped
-  // at x=119 in a 128-cell tank). Large worlds still use the caller's bounded
-  // reach because their logical brick volume exceeds this same capacity.
-  const logicalBrickCount = source.brickDimensions.reduce(
-    (product, value) => product * value, 1,
-  );
-  const effectiveSupportRings = boundaryFed && logicalBrickCount <= maximumReceiverBricks
-    ? Math.max(...source.brickDimensions)
-    : supportRings;
-  for (const brick of source.bricks) {
-    distanceByKey.set(brick.key, 0);
-    if (sparseBrickSpan(brick) === 1) queue.push(brick.coordinate);
-  }
-  for (let cursor = 0; cursor < queue.length; cursor += 1) {
-    const coordinate = queue[cursor]!;
-    const ownKey = sparseBrickKey(coordinate, source.brickDimensions);
-    const distance = distanceByKey.get(ownKey)!;
-    if (distance >= effectiveSupportRings) continue;
-    for (let dz = -1; dz <= 1; dz += 1)
-      for (let dy = -1; dy <= 1; dy += 1)
-        for (let dx = -1; dx <= 1; dx += 1) {
-          if (dx === 0 && dy === 0 && dz === 0) continue;
-          const neighbor: SparseBrickVec3 = [
-            coordinate[0] + dx,
-            coordinate[1] + dy,
-            coordinate[2] + dz,
-          ];
-          if (neighbor.some((value, axis) => value < 0
-            || value >= source.brickDimensions[axis])) continue;
-          const key = sparseBrickKey(neighbor, source.brickDimensions);
-          if (distanceByKey.has(key)) continue;
-          const containingSource = sparseBrickContainingCoordinate(source, neighbor);
-          if (containingSource && sparseBrickSpan(containingSource) > 1) continue;
-          if (!bricks.has(key) && !containingSource
-            && bricks.size >= maximumReceiverBricks) continue;
-          const boundaryResolution = receiverBoundaryResolution(source, neighbor);
-          if (source.boundary && boundaryResolution === undefined) continue;
-          const nextDistance = distance + 1;
-          distanceByKey.set(key, nextDistance);
-          queue.push(neighbor);
-          if (bricks.has(key) || containingSource) continue;
-          // Packed composite rows are immutable while the solver is attached.
-          // Until a candidate topology can replace those rows, a 2^3/1^3
-          // dormant brick would remain that coarse after the GPU planner asks
-          // for 8^3, concentrating an advancing dam front into one giant cell.
-          // This is still capacity/apron-shaped rather than world-shaped. The
-          // physical floor is selected once from the retained liquid source,
-          // never from logical-domain volume or a domain scan.
-          const planned = dormantReceiverResolution(
-            mode, nextDistance, source.brickFineResolution,
-          );
-          let resolution: SparseBrickResolution = mode === "adaptive"
-            ? Math.max(physicalReceiverFloor, planned) as SparseBrickResolution : planned;
-          resolution = Math.max(resolution, boundaryResolution ?? 1) as SparseBrickResolution;
-          const count = resolution ** 3;
-          bricks.set(key, {
-            key, coordinate: neighbor, resolution,
-            density: new Float64Array(count),
-            gamma: new Float64Array(count).fill(1),
-          });
-        }
-  }
-  closeReceiverGrading(source, bricks);
-  return createSparseAdaptiveMassAtlas(
-    source.dimensions,
-    [...bricks.values()].sort((left, right) => left.key - right.key),
-    source.generation,
-    source.boundary,
-    source.brickFineResolution,
-    source.wallField,
-    source.tankWallPlacement,
-  );
 }
 
 /**
@@ -659,7 +198,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     private readonly sparseWorldNumerics: { current: CM12SparseWorldStepConfiguration },
     private readonly rigidSystem: WebGPURigidBodySystem | undefined,
     private readonly rigidExchange: GPUBuffer | undefined,
-    private readonly rigidTerrainTexture: GPUTexture | undefined,
     private readonly rigidCouplingEnabled: boolean,
     adaptiveMixedSeamFaceCount: number,
     atlas: SparseAdaptiveMassAtlas,
@@ -670,15 +208,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.sparseWorldUI = sparseWorldUI;
     this.atlas = atlas;
     const tankCellSize_m = sceneCellSizes_m(scene);
-    const placement = atlas.tankWallPlacement;
-    const tankFine = placement ? placement.maximumFine.map((value, axis) =>
-      value - placement.minimumFine[axis]!) : atlas.dimensions;
-    const tankMinimum = placement?.minimumFine ?? [0, 0, 0];
     this.fluidDomain = {
-      origin_m: [-0.5 * tankFine[0]! * tankCellSize_m[0]
-        - tankMinimum[0] * tankCellSize_m[0], 0,
-      -0.5 * tankFine[2]! * tankCellSize_m[2]
-        - tankMinimum[2] * tankCellSize_m[2]],
+      origin_m: [-0.5 * atlas.dimensions[0] * tankCellSize_m[0], 0,
+        -0.5 * atlas.dimensions[2] * tankCellSize_m[2]],
       cellSize_m: tankCellSize_m,
       dimensions: atlas.dimensions,
     };
@@ -755,21 +287,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       onProgress, signal, PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN);
   }
 
-  /** QA-only paired construction for proving FCA1 byte-equivalent to the
-   * retired host parity/D4 authority schedule. */
-  static createLegacyHostAuthorityOracleForQA(
-    device: GPUDevice,
-    scene: SceneDescription,
-    quality: GPUQuality,
-    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
-    options: AdaptiveMassSolverOptions,
-    onProgress: GPUInitializationReporter,
-    signal: AbortSignal = new AbortController().signal,
-  ): Promise<WebGPUAdaptiveMassSolver> {
-    return this.createAsync(device, scene, quality, onRigidLoads, options,
-      onProgress, signal, LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN);
-  }
-
   /** QA-only construction that reserves the raw Phase-1 transport receipt
    * arena. Ordinary solver options cannot enable this instrumentation. */
   static createPhase1TransportReceiptOracleForQA(
@@ -802,14 +319,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     onProgress: GPUInitializationReporter,
     signal: AbortSignal = new AbortController().signal,
     qaToken?: typeof PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
-      | typeof LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN
       | typeof PHASE1_TRANSPORT_RECEIPT_QA_TOKEN,
   ): Promise<WebGPUAdaptiveMassSolver> {
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
-    const fluidDomainPlan = adaptiveMassFluidDomainForScene(
-      scene, options.brickFineResolution ?? 8,
-      options.receiverSupportRings ?? SPARSE_CM12_RECEIVER_SUPPORT_RINGS,
-    );
+    const fluidDomainPlan = adaptiveMassFluidDomainForScene(scene);
+    const initialSolidWorld = solidWorldForScene(scene);
     // Compile the boundary chain's closing marker while the scene builds. A
     // recorder constructed before it exists closes on an empty pass, which
     // Metal never samples, and that one bad sample would retire hardware
@@ -820,69 +334,35 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     let presentation: WebGPUAdaptiveMassSparsePresentation | undefined;
     let grid: SparseAtlasCompositeGrid | undefined;
     let sparseRuntime: Awaited<ReturnType<
-      typeof createCM12SparseWorldFromLegacy>> | undefined;
+      typeof createCM12SparseWorld>> | undefined;
     const sparseWorldNumerics: { current: CM12SparseWorldStepConfiguration } = {
       current: { finestCellSize_m: 1, pressureScale: 1 },
     };
-    // Sparse CM12's Secs. 3.6-3.7 cut-cell state is shared by moving bodies and
-    // static terrain. Previously this gate followed only the rigid roster, so a
-    // terrain-only scene seeded no density below its heightfield but ran every
-    // later transport and pressure pass with V_i = V^f = 1.
-    const rigidCouplingEnabled = scene.rigidBodies.length > 0 || sceneHasTerrain(scene);
-    let rigidTerrainTexture: GPUTexture | undefined;
+    // Static terrain is compiled into SolidWorld before resident construction.
+    // This sidecar owns only moving-body voxelization and bilateral reaction.
+    const rigidCouplingEnabled = scene.rigidBodies.length > 0;
     let rigidExchange: GPUBuffer | undefined;
     let rigidSystem: WebGPURigidBodySystem | undefined;
     if (rigidCouplingEnabled) {
-      const rigidDimensions = sceneLatticeDimensions(scene);
-      const rigidCellHeight_m = Math.min(
-        scene.container.width_m / rigidDimensions[0],
-        scene.container.height_m / rigidDimensions[1],
-        scene.container.depth_m / rigidDimensions[2],
-      );
-      const hasRigidTerrain = sceneHasTerrain(scene);
-      const rigidTerrainWidth = hasRigidTerrain ? rigidDimensions[0] : 1;
-      const rigidTerrainDepth = hasRigidTerrain ? rigidDimensions[2] : 1;
-      rigidTerrainTexture = device.createTexture({
-        label: "Sparse CM12 rigid terrain",
-        size: [rigidTerrainWidth, rigidTerrainDepth],
-        format: "r32float",
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-      });
-      if (hasRigidTerrain) {
-        const terrain = terrainColumnHeights(scene, rigidTerrainWidth, rigidTerrainDepth);
-        const rowBytes = rigidTerrainWidth * 4;
-        const paddedRowBytes = Math.ceil(rowBytes / 256) * 256;
-        const terrainUpload = new Float32Array(paddedRowBytes / 4 * rigidTerrainDepth);
-        for (let z = 0; z < rigidTerrainDepth; z += 1) {
-          terrainUpload.set(Float32Array.from(
-            terrain.slice(z * rigidTerrainWidth, (z + 1) * rigidTerrainWidth),
-            (height) => height / rigidCellHeight_m,
-          ), z * paddedRowBytes / 4);
-        }
-        device.queue.writeTexture(
-          { texture: rigidTerrainTexture },
-          terrainUpload,
-          { bytesPerRow: paddedRowBytes, rowsPerImage: rigidTerrainDepth },
-          [rigidTerrainWidth, rigidTerrainDepth],
-        );
-      }
       rigidExchange = device.createBuffer({
         label: "Sparse CM12 rigid exchange",
         size: GPU_RIGID_EXCHANGE_BYTES,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
       });
-      rigidSystem = new WebGPURigidBodySystem(
-        device, scene, rigidExchange, rigidTerrainTexture,
-      );
+      rigidSystem = new WebGPURigidBodySystem(device, scene, rigidExchange);
       rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
     }
+    const rigidInitializationTasks = (rigidSystem?.initializationTasks() ?? []).map(
+      (task) => ({ ...task, dependencies: [...(task.dependencies ?? []),
+        "adaptive-mass.resident"] }),
+    );
     let initiallyActiveBrickKeys: ReadonlySet<number> | undefined;
     try {
-      await runner.run([...(rigidSystem?.initializationTasks() ?? []), {
+      await runner.run([{
         id: "adaptive-mass.plan",
         phase: "planning",
         label: "Bound the arbitrary-scene presentation lattice",
-        run: () => { dimensions = fluidDomainPlan.tankDimensions; },
+        run: () => { dimensions = fluidDomainPlan.dimensions; },
       }, {
         id: "adaptive-mass.atlas",
         phase: "adaptive-topology",
@@ -899,38 +379,15 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
             brickFineResolution: fineResolution,
-            maximumMacroSpanBricks: fluidDomainPlan.expanded
-              ? 1 : options.maximumMacroSpanBricks,
+            maximumMacroSpanBricks: options.maximumMacroSpanBricks,
             surfaceFineRings: options.surfaceFineRings,
             ...(resolutionForBrick ? { resolutionForBrick } : {}),
           });
-          atlas = embedTankAtlasInFluidDomain(atlas, fluidDomainPlan);
-          // Generation-zero production ownership is the authored fluid set.
-          // Receiver support below remains a temporary compatibility catalogue
-          // until C1 page publication consumes TCP1 directly; it must not make
-          // dry coordinates accepted, active, or presentable at attachment.
+          // Generation zero contains only authored fluid. Dry face neighbours
+          // are admitted by the GPU frontier if and when a swept fluid course
+          // demands them; logical extent never becomes a topology allocation.
           initiallyActiveBrickKeys = new Set(atlas.bricks.filter((brick) =>
             brick.density.some((density) => density > 0)).map((brick) => brick.key));
-          const supported = residentSupportAtlas(atlas, options.resolutionMode);
-          const receiverScale = adaptiveMassReceiverScaleForScene(
-            scene, options.receiverSupportRings,
-          );
-          atlas = dormantReceiverDomain(supported, options.resolutionMode,
-            fluidDomainPlan.expanded ? 0 : receiverScale.supportRings,
-            options.receiverFloor,
-            receiverScale.minimumCapacityScale, scene);
-          // Keep every removable tank face in the resident topology. The
-          // authored field is uploaded separately as a live row mask, so a
-          // wall edit never reconstructs cells or resets the fluid state.
-          atlas = createSparseAdaptiveMassAtlas(
-            atlas.dimensions,
-            atlas.bricks,
-            atlas.generation,
-            atlas.boundary,
-            atlas.brickFineResolution,
-            createOpenTankWallField(scene.container.wallField.dimensions),
-            atlas.tankWallPlacement,
-          );
           // The runtime is GPU-resident from generation zero. Construct only
           // the topology oracle needed by the packer; the CPU dynamics state
           // used to allocate duplicate velocity, pressure, policy and
@@ -956,7 +413,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             finestCellSize_m: cellSize_m,
             pressureScale: 1,
           };
-          sparseRuntime = await createCM12SparseWorldFromLegacy({
+          sparseRuntime = await createCM12SparseWorld({
             device,
             atlas: atlas!,
             grid: grid!,
@@ -965,8 +422,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             rigid: rigidCouplingEnabled ? {
               bodies: rigidSystem!.stateBuffer,
               exchange: rigidExchange!,
-              terrain: rigidTerrainTexture!,
-              terrainPresent: sceneHasTerrain(scene),
               worldDimensions_m: fluidDomainPlan.dimensions.map((value, axis) =>
                 value * fluidDomainPlan.cellSize_m[axis]) as [number, number, number],
             } : undefined,
@@ -985,19 +440,28 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               completed: 3,
               total: 6,
             }),
+            solidWorld: initialSolidWorld,
             mode: qaToken === PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
               ? "presentation-publisher-qa"
-              : qaToken === LEGACY_HOST_AUTHORITY_ORACLE_QA_TOKEN
-                ? "legacy-host-authority-qa"
-                : qaToken === PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
-                  ? "phase1-transport-receipt-qa"
-                  : "production",
+              : qaToken === PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
+                ? "phase1-transport-receipt-qa"
+                : "production",
           });
+          if (rigidSystem) {
+            const occupancy = sparseRuntime.runtime.solidWorldCollisionSource;
+            if (!occupancy) {
+              throw new Error("Adaptive rigid contact requires resident SolidWorld occupancy");
+            }
+            rigidSystem.setSolidWorldCollisionSource({
+              ...occupancy,
+              origin_m: fluidDomainPlan.origin_m,
+              cellSize_m: fluidDomainPlan.cellSize_m,
+            });
+          }
           sparseRuntime.runtime.setRefinementRegionParameters(packSparseCM12RefinementRegions(
             sceneRefinementRegions(scene), refinementRegionLattice(scene)));
-          sparseRuntime.runtime.setTankWallField(scene.container.wallField);
         },
-      }, {
+      }, ...rigidInitializationTasks, {
         id: "adaptive-mass.upload",
         phase: "upload",
         label: "Publish sparse atlas generation zero",
@@ -1021,7 +485,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         device, scene, options, presentation!, sparseRuntime!.device, sparseRuntime!.world,
         sparseRuntime!.ui,
         sparseRuntime!.runtime, sparseRuntime!.developerTrace, sparseWorldNumerics,
-        rigidSystem, rigidExchange, rigidTerrainTexture, rigidCouplingEnabled,
+        rigidSystem, rigidExchange, rigidCouplingEnabled,
         grid!.mixedSeamRowCount, atlas!, quality,
       );
     } catch (error) {
@@ -1029,7 +493,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       presentation?.destroy();
       rigidSystem?.destroy();
       rigidExchange?.destroy();
-      rigidTerrainTexture?.destroy();
       throw error;
     }
   }
@@ -1087,7 +550,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   applySceneUniforms(scene: SceneDescription): void {
     this.scene = scene;
     this.resetPressureIterationFeedback();
-    this.sparseRuntime.setTankWallField(scene.container.wallField);
+    this.sparseRuntime.setSolidWorld(solidWorldForScene(scene));
     this.sparseRuntime.setRefinementRegionParameters(packSparseCM12RefinementRegions(
       sceneRefinementRegions(scene), refinementRegionLattice(scene)));
   }
@@ -1486,6 +949,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readTransportPacketIndirectQA() {
     return this.sparseWorldTrace.readTransportPacketIndirectQA();
   }
+  readDynamicTransportPacketsQA() {
+    return this.sparseWorldTrace.readDynamicTransportPacketsQA();
+  }
   /** Header-only FSM1 receipt; never consulted by frame scheduling. */
   readFinalScalarMaskHeaderQA() {
     return this.sparseWorldTrace.readFinalScalarMaskHeaderQA();
@@ -1553,7 +1019,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.presentation.destroy();
     this.rigidSystem?.destroy();
     this.rigidExchange?.destroy();
-    this.rigidTerrainTexture?.destroy();
     for (const readback of this.pressureIterationReadbacks) readback.destroy();
     this.pressureIterationReadbacks.length = 0;
   }

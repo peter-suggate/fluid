@@ -143,9 +143,9 @@ fn mgBuildFinestTopology(@builtin(global_invocation_id) gid:vec3u){
   let openTop=mgOpenTopHalo(id,mg.levelDims.xyz);var topology=vec4f(select(0.0,1.0,openTop));
   // Low-side halo cells own the three missing negative face-centred dual
   // cells. Their closed, grid-aligned domain halves have V=1/2.
-  if(id.x==0&&id.y>0&&id.y<i32(mg.levelDims.y)-1&&id.z>0&&id.z<i32(mg.levelDims.z)-1){topology.y=select(0.5,pressureFaceVolumeFraction(simulation,0u),hasSphericalContainer());}
-  if(id.y==0&&id.x>0&&id.x<i32(mg.levelDims.x)-1&&id.z>0&&id.z<i32(mg.levelDims.z)-1){topology.z=select(0.5,pressureFaceVolumeFraction(simulation,1u),hasSphericalContainer());}
-  if(id.z==0&&id.x>0&&id.x<i32(mg.levelDims.x)-1&&id.y>0&&id.y<i32(mg.levelDims.y)-1){topology.w=select(0.5,pressureFaceVolumeFraction(simulation,2u),hasSphericalContainer());}
+  if(id.x==0&&id.y>0&&id.y<i32(mg.levelDims.y)-1&&id.z>0&&id.z<i32(mg.levelDims.z)-1){topology.y=pressureFaceVolumeFraction(simulation,0u);}
+  if(id.y==0&&id.x>0&&id.x<i32(mg.levelDims.x)-1&&id.z>0&&id.z<i32(mg.levelDims.z)-1){topology.z=pressureFaceVolumeFraction(simulation,1u);}
+  if(id.z==0&&id.x>0&&id.x<i32(mg.levelDims.x)-1&&id.y>0&&id.y<i32(mg.levelDims.y)-1){topology.w=pressureFaceVolumeFraction(simulation,2u);}
   textureStore(mgPhiOut,id,vec4f(0.5*min(h.x,min(h.y,h.z))));textureStore(mgVolumeOut,id,topology);
 }
 
@@ -186,11 +186,6 @@ fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
   // cell centred on a grid-aligned closed wall is half exterior at every
   // hierarchy level; averaging the adjacent interior face into it would make
   // the wall spuriously approach V=1 with each coarsening step.
-  if(!hasSphericalContainer()){
-    if(id.x==i32(mg.coarseDims.x)-2){topology.y=0.5;}
-    if(id.y==i32(mg.coarseDims.y)-2){topology.z=select(0.5,1.0,params.boundary.w>0.5);}
-    if(id.z==i32(mg.coarseDims.z)-2){topology.w=select(0.5,0.0,depthSymmetry());}
-  }
   textureStore(mgVolumeOut,id,topology);textureStore(mgPhiOut,id,vec4f(coarsePhi));
 }
 

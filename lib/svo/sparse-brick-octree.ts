@@ -1478,8 +1478,6 @@ export interface SparseBrickDenseFieldSource {
   cellSize: readonly [number, number, number];
   fluidMaterialId: number;
   solidMaterialId: number;
-  containerMaterialId?: number;
-  containerClosedTop?: boolean;
   /**
    * Optional GPU fluid-brick worklist. Header words 0..15 are followed by
    * active `(solverBrick, leafIndex)` pairs and retired pairs. When present,
@@ -1957,9 +1955,7 @@ fn materializeDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(nu
   let liquidFraction = clamp(0.5 - phi / max(h, 1e-8), 0.0, 1.0);
   payload[velocityBase] = bitcast<u32>(fieldVelocity.x); payload[velocityBase + 1u] = bitcast<u32>(fieldVelocity.y);
   payload[velocityBase + 2u] = bitcast<u32>(fieldVelocity.z); payload[velocityBase + 3u] = bitcast<u32>(liquidFraction);
-  let boundary = q.x == 0 || q.x == i32(params.dims.x) - 1 || q.z == 0 || q.z == i32(params.dims.z) - 1 || q.y == 0 || (params.materials.w != 0u && q.y == i32(params.dims.y) - 1);
   var material = select(0u, params.materials.x, phi < 0.0);
-  material = select(material, params.materials.z, boundary);
   material = select(material, params.materials.y, solid.fraction > 0.0);
   // Empty solid cells may be zero-initialized before the first raster pass.
   // Never treat their default owner 0 as rigid body 0 unless occupancy is
@@ -2323,7 +2319,7 @@ export class SparseBrickOctreeGPU {
     const [nx, ny, nz] = source.dimensions;
     const origin = source.gridOriginCells ?? [0, 0, 0];
     for (const [value, name] of [[nx, "nx"], [ny, "ny"], [nz, "nz"]] as const) positiveCapacity(value, name);
-    const materials = [source.fluidMaterialId, source.solidMaterialId, source.containerMaterialId ?? 0];
+    const materials = [source.fluidMaterialId, source.solidMaterialId];
     for (const material of materials) if (!Number.isInteger(material) || material < 0 || material > 0xffff) throw new RangeError("Material IDs must fit uint16");
     const words = new ArrayBuffer(64);
     const uints = new Uint32Array(words);
@@ -2336,7 +2332,7 @@ export class SparseBrickOctreeGPU {
     uints.set([nx, ny, nz, encodedFinestLevel | (activeWorklist ? 0x80000000 : 0)], 0);
     ints.set([origin[0], origin[1], origin[2], 0], 4);
     floats.set([source.cellSize[0], source.cellSize[1], source.cellSize[2], 0], 8);
-    uints.set([source.fluidMaterialId, source.solidMaterialId, source.containerMaterialId ?? 0, source.containerClosedTop ? 1 : 0], 12);
+    uints.set([source.fluidMaterialId, source.solidMaterialId, 0, 0], 12);
     this.device.queue.writeBuffer(this.denseFieldParams, 0, words);
     const bindGroup = this.device.createBindGroup({
       label: "Sparse brick dense-field bind group",

@@ -9,23 +9,15 @@
  * A = G^T W G (or G_l^T W/theta G_l at a free surface) are identities rather
  * than separately maintained stencils.
  *
- * Missing bricks inside the bounded atlas are sparse air. They contribute
- * one-sided Dirichlet rows only when their resident neighbour is liquid.
- * Faces on the outer domain boundary are solid/no-flow and have no row. Thus
- * empty bricks allocate neither cells nor payload, while their boundary costs
- * only the ports of adjacent resident bricks.
+ * Missing bricks are sparse air. They contribute one-sided Dirichlet rows only
+ * when their resident neighbour is liquid. Solid geometry is not encoded in
+ * this topology; SolidWorld and dynamic rigid/terrain coupling own it.
  */
 
 import {
   CM12_LIQUID_ISOVALUE,
   cm12GhostFluidTheta,
 } from "../../core/cm12-numerics";
-import {
-  pointInsideSphericalContainerFine,
-  sphericalContainerOpenFractionAtFineBox,
-  sphericalContainerOpenFractionAtFineFace,
-} from "../../core/spherical-container";
-import { tankWallOpeningFraction } from "../../core/tank-wall-field";
 import {
   sparseBrickSpan,
   type SparseAdaptiveMassAtlas,
@@ -59,9 +51,6 @@ export interface SparseAtlasCompositeCell {
   readonly volume: number;
   /** Alias documenting that `volume` is measured in finest-cell volumes. */
   readonly volumeFineCells: number;
-  readonly openFraction: number;
-  readonly openVolume: number;
-  readonly separatingPressureMinimum: boolean;
   readonly density: number;
   readonly gamma: number;
 }
@@ -79,9 +68,6 @@ export interface SparseAtlasGradientRow {
   readonly axis: SparseAtlasAxis;
   readonly centerFine: SparseBrickVec3;
   readonly area: number;
-  readonly geometricArea: number;
-  readonly openFraction: number;
-  readonly pressureDualOpenFraction: number;
   readonly distance: number;
   readonly areaFineCells2: number;
   readonly centerDistanceFine: number;
@@ -151,7 +137,6 @@ function reserveCompositeCells(
       brickResolution: 8, local: pooledVector(), localIndex: 0,
       minimumFine: pooledVector(), maximumFine: pooledVector(), centerFine: pooledVector(),
       widthsFine: pooledVector(), volume: 0, volumeFineCells: 0,
-      openFraction: 1, openVolume: 0, separatingPressureMinimum: false,
       density: 0, gamma: 1,
     });
   }
@@ -170,7 +155,6 @@ function reserveCompositeRows(
     workspace.rowPool.push({
       id: 0, kind: "intra-brick", axis: 0, centerFine: pooledVector(),
       area: 0, distance: 0, areaFineCells2: 0, centerDistanceFine: 0,
-      geometricArea: 0, openFraction: 1, pressureDualOpenFraction: 1,
       dualWeight: 0, terms: [], termPool: [first, second],
     });
   }
@@ -422,11 +406,6 @@ export function buildSparseAtlasCompositeGrid(
             0.5 * (minimum1 + maximum1), 0.5 * (minimum2 + maximum2)] as const;
           const widthsFine = [width0, width1, width2] as const;
           const volume = width0 * width1 * width2;
-          const openFraction = sphericalContainerOpenFractionAtFineBox(
-            atlas.boundary, centerFine, widthsFine,
-          );
-          const separatingPressureMinimum = atlas.boundary !== undefined
-            && !pointInsideSphericalContainerFine(atlas.boundary, centerFine);
           let cell = workspace?.cellPool[cellId];
           if (!cell) {
             cell = {
@@ -438,8 +417,6 @@ export function buildSparseAtlasCompositeGrid(
               centerFine,
               widthsFine: [width0, width1, width2],
               volume, volumeFineCells: volume,
-              openFraction, openVolume: volume * openFraction,
-              separatingPressureMinimum,
               density: brick.density[index], gamma: brick.gamma[index],
             };
             if (workspace) workspace.cellPool[cellId] = cell;
@@ -465,9 +442,6 @@ export function buildSparseAtlasCompositeGrid(
             widths[0] = width0; widths[1] = width1; widths[2] = width2;
             cell.volume = volume;
             cell.volumeFineCells = cell.volume;
-            cell.openFraction = openFraction;
-            cell.openVolume = volume * openFraction;
-            cell.separatingPressureMinimum = separatingPressureMinimum;
             cell.density = brick.density[index];
             cell.gamma = brick.gamma[index];
           }
@@ -488,38 +462,6 @@ export function buildSparseAtlasCompositeGrid(
     && workspace.termCoefficientScratch.length >= seamScratchCapacity
     ? workspace.termCoefficientScratch : new Float64Array(seamScratchCapacity);
   let mixedSeamRowCount = 0, sparseAirRowCount = 0;
-  const tankWallOpenFraction = (
-    axis: SparseAtlasAxis,
-    faceCoordinate: number,
-    minimum: SparseBrickVec3,
-    maximum: SparseBrickVec3,
-  ): number | undefined => {
-    const placement = atlas.tankWallPlacement;
-    const wallField = atlas.wallField;
-    if (!placement || !wallField || axis === 1) return undefined;
-    const side = axis === 0
-      ? Math.abs(faceCoordinate - placement.minimumFine[0]) < 1e-6 ? "left"
-        : Math.abs(faceCoordinate - placement.maximumFine[0]) < 1e-6 ? "right" : undefined
-      : Math.abs(faceCoordinate - placement.minimumFine[2]) < 1e-6 ? "front"
-        : Math.abs(faceCoordinate - placement.maximumFine[2]) < 1e-6 ? "back" : undefined;
-    if (!side) return undefined;
-    const uAxis = axis === 0 ? 2 : 0;
-    const vAxis = 1;
-    const u0 = Math.max(minimum[uAxis], placement.minimumFine[uAxis]);
-    const u1 = Math.min(maximum[uAxis], placement.maximumFine[uAxis]);
-    const v0 = Math.max(minimum[vAxis], placement.minimumFine[vAxis]);
-    const v1 = Math.min(maximum[vAxis], placement.maximumFine[vAxis]);
-    const totalArea = Math.max(0, maximum[uAxis] - minimum[uAxis])
-      * Math.max(0, maximum[vAxis] - minimum[vAxis]);
-    const wallArea = Math.max(0, u1 - u0) * Math.max(0, v1 - v0);
-    if (!(totalArea > 0) || !(wallArea > 0)) return 1;
-    const wallOpen = tankWallOpeningFraction(
-      wallField, side,
-      u0 - placement.minimumFine[uAxis], u1 - placement.minimumFine[uAxis],
-      v0 - placement.minimumFine[vAxis], v1 - placement.minimumFine[vAxis],
-    );
-    return (totalArea - wallArea + wallArea * wallOpen) / totalArea;
-  };
   const appendRow = (
     kind: SparseAtlasGradientRowKind,
     axis: SparseAtlasAxis,
@@ -534,32 +476,14 @@ export function buildSparseAtlasCompositeGrid(
     negativeBrickKey?: number,
     positiveBrickKey?: number,
     exteriorPhi?: number,
-    authoredOpenFraction = 1,
   ): void => {
-    const center = [center0, center1, center2] as const;
-    const boundaryOpenFraction = sphericalContainerOpenFractionAtFineFace(
-      atlas.boundary, center, axis, [tangentWidth0, tangentWidth1],
-    );
-    const tangents = tangentialAxes(axis);
-    const dualWidths = [0, 0, 0] as [number, number, number];
-    dualWidths[axis] = distance;
-    dualWidths[tangents[0]] = tangentWidth0;
-    dualWidths[tangents[1]] = tangentWidth1;
-    const boundaryDualOpenFraction = sphericalContainerOpenFractionAtFineBox(
-      atlas.boundary, center, dualWidths,
-    );
-    const openFraction = boundaryOpenFraction * authoredOpenFraction;
-    const pressureDualOpenFraction = boundaryDualOpenFraction * authoredOpenFraction;
-    const geometricArea = area * authoredOpenFraction;
-    area *= openFraction;
     const id = rowCountBuilt++;
     let row = workspace?.rowPool[id];
     if (!row) {
       row = {
         id, kind, axis, centerFine: [center0, center1, center2], area, distance,
         areaFineCells2: area, centerDistanceFine: distance,
-        dualWeight: geometricArea * distance * pressureDualOpenFraction,
-        geometricArea, openFraction, pressureDualOpenFraction,
+        dualWeight: area * distance,
         terms: [], negativeBrickKey,
         positiveBrickKey, exteriorPhi, termPool: [],
       };
@@ -575,10 +499,7 @@ export function buildSparseAtlasCompositeGrid(
       row.distance = distance;
       row.areaFineCells2 = area;
       row.centerDistanceFine = distance;
-      row.dualWeight = geometricArea * distance * pressureDualOpenFraction;
-      row.geometricArea = geometricArea;
-      row.openFraction = openFraction;
-      row.pressureDualOpenFraction = pressureDualOpenFraction;
+      row.dualWeight = area * distance;
       row.negativeBrickKey = negativeBrickKey;
       row.positiveBrickKey = positiveBrickKey;
       row.exteriorPhi = exteriorPhi;
@@ -652,24 +573,10 @@ export function buildSparseAtlasCompositeGrid(
             termCoefficientScratch[0] = -1 / distance;
             termCellScratch[1] = positive.id;
             termCoefficientScratch[1] = 1 / distance;
-            const minimum = [
-              Math.min(negative.minimumFine[0], positive.minimumFine[0]),
-              Math.min(negative.minimumFine[1], positive.minimumFine[1]),
-              Math.min(negative.minimumFine[2], positive.minimumFine[2]),
-            ] as SparseBrickVec3;
-            const maximum = [
-              Math.max(negative.maximumFine[0], positive.maximumFine[0]),
-              Math.max(negative.maximumFine[1], positive.maximumFine[1]),
-              Math.max(negative.maximumFine[2], positive.maximumFine[2]),
-            ] as SparseBrickVec3;
-            const authoredOpenFraction = tankWallOpenFraction(
-              axis, faceCenter, minimum, maximum,
-            );
-            if (authoredOpenFraction === 0) continue;
             appendRow(
               "intra-brick", axis, center0, center1, center2, area, distance,
               negative.widthsFine[tangents[0]], negative.widthsFine[tangents[1]], 2,
-              brick.key, brick.key, undefined, authoredOpenFraction ?? 1,
+              brick.key, brick.key,
             );
           }
         }
@@ -756,10 +663,6 @@ export function buildSparseAtlasCompositeGrid(
         const area = (maximum[tangents[0]] - minimum[tangents[0]])
           * (maximum[tangents[1]] - minimum[tangents[1]]);
         if (!(area > 0)) continue;
-        const authoredOpenFraction = tankWallOpenFraction(
-          axis, faceCoordinate, minimum, maximum,
-        );
-        if (authoredOpenFraction === 0) continue;
         let negativeCount = 0, positiveCount = 0;
         let negativeCenterSum = 0, positiveCenterSum = 0;
         for (let index = 0; index < negativeCells.length; index += 1) {
@@ -840,7 +743,7 @@ export function buildSparseAtlasCompositeGrid(
           axis, center0, center1, center2, area, distance,
           maximum[tangents[0]] - minimum[tangents[0]],
           maximum[tangents[1]] - minimum[tangents[1]], termCount,
-          negative.key, positive.key, undefined, authoredOpenFraction ?? 1,
+          negative.key, positive.key,
         );
       }
     }
@@ -850,7 +753,6 @@ export function buildSparseAtlasCompositeGrid(
     brick: SparseAdaptiveMassBrick,
     axis: SparseAtlasAxis,
     side: -1 | 1,
-    authoredTankOpening = false,
   ): void => {
     const tangents = tangentialAxes(axis);
     const cellsOnFace = faceCells(brick, axis, side, negativeFaceCells);
@@ -858,28 +760,7 @@ export function buildSparseAtlasCompositeGrid(
       const cell = cellsOnFace[index];
       const distance = cell.widthsFine[axis];
       const area = cell.widthsFine[tangents[0]] * cell.widthsFine[tangents[1]];
-      let authoredOpenFraction = 1;
       const faceCoordinate = side < 0 ? cell.minimumFine[axis] : cell.maximumFine[axis];
-      const placedOpenFraction = tankWallOpenFraction(
-        axis, faceCoordinate, cell.minimumFine, cell.maximumFine,
-      );
-      if (placedOpenFraction !== undefined) {
-        authoredOpenFraction = placedOpenFraction;
-        if (!(authoredOpenFraction > 0)) continue;
-      } else if (authoredTankOpening) {
-        const wallField = atlas.wallField;
-        if (!wallField || axis === 1) continue;
-        const wallSide = axis === 0
-          ? (side < 0 ? "left" : "right")
-          : (side < 0 ? "front" : "back");
-        const uAxis = axis === 0 ? 2 : 0;
-        authoredOpenFraction = tankWallOpeningFraction(
-          wallField, wallSide,
-          cell.minimumFine[uAxis], cell.maximumFine[uAxis],
-          cell.minimumFine[1], cell.maximumFine[1],
-        );
-        if (!(authoredOpenFraction > 0)) continue;
-      }
       let center0 = cell.centerFine[0];
       let center1 = cell.centerFine[1];
       let center2 = cell.centerFine[2];
@@ -895,7 +776,6 @@ export function buildSparseAtlasCompositeGrid(
         side > 0 ? brick.key : undefined,
         side < 0 ? brick.key : undefined,
         sparseAirPhi,
-        authoredOpenFraction,
       );
     }
   };
@@ -927,24 +807,14 @@ export function buildSparseAtlasCompositeGrid(
 
   for (const brick of bricks) for (const axis of [0, 1, 2] as const) {
     const positiveFace = brick.coordinate[axis] + sparseBrickSpan(brick);
-    if (positiveFace < atlas.brickDimensions[axis]) {
-      const neighbors = (negativeFaces[axis].get(positiveFace) ?? [])
-        .filter((candidate) => tangentOverlap(brick, candidate, axis));
-      if (neighbors.length > 0) {
-        for (const neighbor of neighbors) appendBrickInterface(brick, neighbor, axis);
-      } else appendSparseAirFace(brick, axis, 1);
-    } else if (axis !== 1 && atlas.wallField && !atlas.boundary
-      && !atlas.tankWallPlacement) {
-      appendSparseAirFace(brick, axis, 1, true);
-    }
-    if (brick.coordinate[axis] > 0) {
-      const hasNegativeNeighbor = (positiveFaces[axis].get(brick.coordinate[axis]) ?? [])
-        .some((candidate) => tangentOverlap(candidate, brick, axis));
-      if (!hasNegativeNeighbor) appendSparseAirFace(brick, axis, -1);
-    } else if (axis !== 1 && atlas.wallField && !atlas.boundary
-      && !atlas.tankWallPlacement) {
-      appendSparseAirFace(brick, axis, -1, true);
-    }
+    const positiveNeighbors = (negativeFaces[axis].get(positiveFace) ?? [])
+      .filter((candidate) => tangentOverlap(brick, candidate, axis));
+    if (positiveNeighbors.length > 0) {
+      for (const neighbor of positiveNeighbors) appendBrickInterface(brick, neighbor, axis);
+    } else appendSparseAirFace(brick, axis, 1);
+    const hasNegativeNeighbor = (positiveFaces[axis].get(brick.coordinate[axis]) ?? [])
+      .some((candidate) => tangentOverlap(candidate, brick, axis));
+    if (!hasNegativeNeighbor) appendSparseAirFace(brick, axis, -1);
   }
 
   // A reused workspace may previously have held a larger atlas variant. Keep
@@ -1012,8 +882,8 @@ export function applySparseAtlasDivergence(
     const weighted = row.dualWeight * normalVelocity[row.id];
     for (const term of row.terms) output[term.cellId] -= term.coefficient * weighted;
   }
-  for (const cell of grid.cells) output[cell.id] = cell.openVolume > 1e-12
-    ? output[cell.id] / cell.openVolume : 0;
+  for (const cell of grid.cells) output[cell.id] = cell.volume > 1e-12
+    ? output[cell.id] / cell.volume : 0;
   return output;
 }
 
@@ -1072,25 +942,7 @@ function buildLiquidSystem(
     assertVectorLength(phiInput, count, "phi");
     for (let id = 0; id < count; id += 1) phi[id] = phiInput[id];
   } else {
-    for (const cell of grid.cells) phi[cell.id] = CM12_LIQUID_ISOVALUE
-      - cell.density / Math.max(cell.openFraction, 1e-12);
-    // Continue open-liquid density into solid-centred pressure samples. These
-    // cells are the dual variables on which the separating p >= 0 constraint
-    // acts; treating their authored density as zero disconnects the wall.
-    const continuedDensity = new Float64Array(grid.cells.length);
-    for (const row of grid.gradientRows) for (const own of row.terms) {
-      if (!grid.cells[own.cellId]!.separatingPressureMinimum) continue;
-      for (const term of row.terms) {
-        if (term.cellId === own.cellId) continue;
-        const neighbor = grid.cells[term.cellId]!;
-        if (neighbor.openVolume <= 1e-12) continue;
-        continuedDensity[own.cellId] = Math.max(continuedDensity[own.cellId],
-          neighbor.density / Math.max(neighbor.openFraction, 1e-12));
-      }
-    }
-    for (const cell of grid.cells) if (cell.separatingPressureMinimum) {
-      phi[cell.id] = CM12_LIQUID_ISOVALUE - continuedDensity[cell.id];
-    }
+    for (const cell of grid.cells) phi[cell.id] = CM12_LIQUID_ISOVALUE - cell.density;
   }
   assertVectorLength(phi, grid.cells.length, "phi");
   const liquid = workspace.liquid = exactUint8(workspace.liquid, count);
@@ -1338,8 +1190,8 @@ function assembleLiquidRhs(
   // D = -M^-1 G^T W. Solving A p = G^T W u + M q leaves
   // G^T W (u-Gp) = -M q and therefore D u' = q.
   if (targetDivergence) for (const cell of system.grid.cells) {
-    if (system.liquid[cell.id]) rhs[cell.id] += (cell.separatingPressureMinimum
-      ? cell.volume : cell.openVolume) * targetDivergence[cell.id];
+    if (system.liquid[cell.id]) rhs[cell.id] += cell.volume
+      * targetDivergence[cell.id];
   }
   return rhs;
 }
@@ -1377,7 +1229,7 @@ function divergenceFromEquationResidual(
   result: Float64Array = new Float64Array(system.grid.cells.length),
 ): Float64Array {
   for (const cell of system.grid.cells) {
-    const volume = cell.separatingPressureMinimum ? cell.volume : cell.openVolume;
+    const volume = cell.volume;
     result[cell.id] = system.liquid[cell.id] && volume > 1e-12
       ? -residual[cell.id] / volume : 0;
   }
@@ -1386,7 +1238,7 @@ function divergenceFromEquationResidual(
 
 function volumeL2(grid: SparseAtlasCompositeGrid, values: ArrayLike<number>): number {
   let squared = 0;
-  for (const cell of grid.cells) squared += cell.openVolume
+  for (const cell of grid.cells) squared += cell.volume
     * values[cell.id] * values[cell.id];
   return Math.sqrt(squared);
 }
@@ -1408,18 +1260,6 @@ export function collocateSparseAtlasVelocity(
       result[offset] += weight * velocity[row.id];
       weights[offset] += weight;
     }
-  }
-  // Domain-wall faces are fixed zero-velocity ports and therefore do not need
-  // pressure rows. They still contribute one side of the MAC-to-cell average.
-  // Without their zero-valued weight, boundary cells use the sole interior
-  // face at full strength (twice Uniform CM12's collocated wall velocity).
-  for (const cell of grid.cells) for (let axisIndex = 0; axisIndex < 3; axisIndex += 1) {
-    const axis = axisIndex as SparseAtlasAxis;
-    if (cell.minimumFine[axis] !== 0
-      && cell.maximumFine[axis] !== grid.atlas.dimensions[axis]) continue;
-    const tangents = tangentialAxes(axis);
-    weights[3 * cell.id + axis] += cell.widthsFine[tangents[0]]
-      * cell.widthsFine[tangents[1]] / cell.widthsFine[axis];
   }
   for (let index = 0; index < result.length; index += 1) {
     if (weights[index] > 0) result[index] /= weights[index];

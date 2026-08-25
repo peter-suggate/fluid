@@ -144,10 +144,6 @@ const requireContiguousGrid = (grid: SparseAtlasCompositeGrid): Map<number, numb
   grid.cells.forEach((cell, index) => {
     if (cell.id !== index) throw new Error(`cell ${index} has non-canonical id ${cell.id}`);
     if (!brickByKey.has(cell.brickKey)) throw new Error(`cell ${index} has no resident brick`);
-    if (cell.openFraction !== 1 || cell.openVolume !== cell.volume
-      || cell.separatingPressureMinimum) {
-      throw new Error(`cell ${index} requires dynamic boundary geometry; HTP1 is literal open-domain topology`);
-    }
   });
   grid.gradientRows.forEach((row, index) => {
     if (row.id !== index) throw new Error(`row ${index} has non-canonical id ${row.id}`);

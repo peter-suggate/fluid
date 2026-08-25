@@ -113,7 +113,7 @@ producer proves the complete decision projection above unchanged; monotonic
 maximum plus identical score/threshold classes then produces identical public
 activity words. Any later density/topology/policy root rebuilds the full exact
 summary before use. The brick hook `cm12ActivityPublishExactBrick` must retain the
-existing score, reason, temporal moments, hot/quiet history, receiver support,
+existing score, reason, temporal moments, hot/quiet history, frontier support,
 and velocity-floor code byte-for-byte. Its QA gate compares all existing
 activity record words, the 256-bin histogram, and scene census against the old
 kernel before ACT1 is removed.

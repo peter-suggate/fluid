@@ -46,19 +46,20 @@ import type { SparseCM12InternedBoundaryLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-interned-boundary-operators";
 import type { SparseCM12InternedRefLookupLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-interned-ref-lookup";
-import { createSparseCM12TransportProducerMaskLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-transport-producer-masks";
 import { createSparseCM12TransportExecutionImageLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-transport-execution-image";
 import { createSparseCM12TransportPacketAuthorityLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-transport-packet-authority";
 import { createSparseCM12WorldDirectoryLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-world-directory";
+import { createSparseCM12SolidOccupancyLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-solid-occupancy";
 import { SPARSE_CM12_LENSES } from
   "../lib/methods/adaptive-mass/sparse-cm12-stage-lenses";
 import { stageLensProgramWGSL } from "../lib/core/webgpu-stage-lens-overlay";
 
 const staticConcurrencyCheck = process.argv.includes("--static-concurrency-check");
+const emitSourceOnly = process.argv.includes("--emit-source");
 if (staticConcurrencyCheck) {
   const source = await readFile(fileURLToPath(import.meta.url), "utf8");
   const fanout = /\bPromise\.(?:all|allSettled|any|race)\s*\(/;
@@ -79,7 +80,7 @@ if (staticConcurrencyCheck) {
 }
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
-if (!dawnModule) {
+if (!dawnModule && !emitSourceOnly) {
   console.error("WEBGPU_NODE_MODULE is required; run via npm run check:sparse-cm12:wgsl");
   process.exit(2);
 }
@@ -91,24 +92,34 @@ function entryPoints(source: string): readonly string[] {
 }
 
 async function main(): Promise<void> {
-  await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-resident");
+  if (!emitSourceOnly) {
+    await acquireWebGPUExclusiveLock("wgsl-check", "sparse-cm12-resident");
+  }
   let gpu: GPU | undefined;
   let device: GPUDevice | undefined;
   try {
-    const { create, globals } = await import(dawnModule!) as {
+    if (emitSourceOnly) {
+      Object.assign(globalThis, { GPUShaderStage: { COMPUTE: 1 } });
+      device = {
+        createBindGroupLayout: () => ({}),
+        createPipelineLayout: () => ({}),
+      } as unknown as GPUDevice;
+    } else {
+      const { create, globals } = await import(dawnModule!) as {
       create: (flags: string[]) => GPU; globals: { GPUBufferUsage: unknown };
-    };
-    Object.assign(globalThis, globals);
-    gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
-    const adapter = await gpu.requestAdapter();
-    if (!adapter) throw new Error("no WebGPU adapter");
-    // Ten storage buffers in one stage is past the WebGPU default, and the
-    // shipping solver already requests the adapter's own ceiling. A check on a
-    // default device would fail on the layout rather than on the shader.
-    device = await adapter.requestDevice({
-      requiredLimits: requiredFluidDeviceLimits(adapter.limits),
-    });
-    device.pushErrorScope("validation");
+      };
+      Object.assign(globalThis, globals);
+      gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      const adapter = await gpu.requestAdapter();
+      if (!adapter) throw new Error("no WebGPU adapter");
+      // Ten storage buffers in one stage is past the WebGPU default, and the
+      // shipping solver already requests the adapter's own ceiling. A check on a
+      // default device would fail on the layout rather than on the shader.
+      device = await adapter.requestDevice({
+        requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+      });
+      device.pushErrorScope("validation");
+    }
 
     const storage = { type: "storage" } as const;
     const bindGroupLayout = device.createBindGroupLayout({
@@ -159,7 +170,6 @@ async function main(): Promise<void> {
       const frameControl = productionMatchedProfile ? createSparseCM12FrameControl({
         baseWords: 32768, cellWorkgroups: 16, rowWorkgroups: 32,
         bodyCapacity: 0, d4Capable: true, rigidCapable: false,
-        boundaryCapable: false,
         brickFineResolution, presentationPageResolution,
       }) : undefined;
       const pressureTopologyRepair = productionMatchedProfile && frameControl
@@ -220,9 +230,6 @@ async function main(): Promise<void> {
             leafCapacity: 8, immutableContentHash: 1,
             immutableCertificateHash: 1,
           } };
-      const transportProducerMasks = createSparseCM12TransportProducerMaskLayout({
-        baseWords: 120000, packetCapacity: 512,
-      });
       const transportExecutionImage = createSparseCM12TransportExecutionImageLayout({
         brickFineResolution, logicalBrickDimensions: [2, 2, 2], leafCapacity: 8,
       });
@@ -258,6 +265,9 @@ async function main(): Promise<void> {
         initialLeaves: 8, growthLeaves: 32, maximumSpanLog: 0,
         baseWords: faceAddresses.totalWords,
       });
+      const solidOccupancy = createSparseCM12SolidOccupancyLayout({
+        baseWords: worldDirectory.totalWords, authoredPageCount: 8,
+      });
       const source = createWebgpuSparseCM12ResidentWGSL(
         brickFineResolution,
         presentationPageResolution,
@@ -268,11 +278,14 @@ async function main(): Promise<void> {
         pressureExecutionImage,
         logicalOwnerDirectory, 0, undefined,
         transportExecutionImage, transportPacketAuthority,
-        transportProducerMasks,
         undefined, undefined, internedBoundaryImage,
         topologyEffects, undefined, faceAddresses,
-        250000, undefined, worldDirectory, true,
+        250000, undefined, worldDirectory, true, solidOccupancy,
       );
+      if (emitSourceOnly) {
+        process.stdout.write(source);
+        return;
+      }
       const validationSlice = sparseCM12WGSLForEntryPoints(source,
         ["validateSparseCM12InternedBoundaryImmutable"]);
       const validationSliceModule = device.createShaderModule({
@@ -385,7 +398,7 @@ async function main(): Promise<void> {
     if (scope) throw new Error(`validation error: ${scope.message}`);
     console.log(`Sparse CM12 compiled-transport WGSL: ${compiledEntryPoints} entry points compiled across ${variants.length} B/P variants, ${compiledLensPrograms} stage-lens programs`);
   } finally {
-    if (device) {
+    if (device && !emitSourceOnly) {
       try { await device.queue.onSubmittedWorkDone(); } catch { /* Device fault already reported. */ }
       device.destroy();
       // Keep the Dawn instance strongly reachable until device retirement has
@@ -393,7 +406,7 @@ async function main(): Promise<void> {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     gpu = undefined;
-    await releaseWebGPUExclusiveLock();
+    if (!emitSourceOnly) await releaseWebGPUExclusiveLock();
   }
 }
 

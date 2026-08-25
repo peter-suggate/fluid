@@ -21,6 +21,12 @@ export const FINE_LEVELSET_WORKSET_HEADER_WORDS = 7;
 /** Renderer-readable worksets may omit the logical-domain direct table when
  * their physical-page list is sorted by logical brick key. */
 export const FINE_LEVELSET_COMPACT_LOOKUP_FLAG = 0x8000_0000;
+/**
+ * Compact metadata keys encode signed sparse page coordinates rather than a
+ * dense linear index into `brickDimensions`. This mode never implies a larger
+ * allocation: the physical page list remains the only addressable storage.
+ */
+export const FINE_LEVELSET_SIGNED_SPARSE_ADDRESS_FLAG = 0x4000_0000;
 
 /** Word offsets in the common workset header written by `exportGPUGeneration`
  * and by every GPU publication kernel. Named because the first two words are

@@ -240,29 +240,23 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     label: "Mass + gamma + momentum transport", band: "transport", side: "left",
     phase: {
       id: "fine-sdf-advection",
-      label: "Transport row + sharpening cell authority finalization",
+      label: "Conservative transport",
     },
     substages: {
-      "transport-authority-setup": {
-        id: "fine-sdf-advection", label: "CM12 transport authority setup",
-      },
       "transport-trace": {
         id: "fine-sdf-advection", label: "CM12 transport trace + sharpening catalog publication",
       },
       "transport-scatter": { id: "fine-sdf-advection", label: "CM12 transport deficit scatter" },
       "transport-gather": { id: "fine-sdf-advection", label: "CM12 transport conservative gather" },
-      "producer-mask-compilation": {
-        id: "fine-sdf-advection", label: "AEI producer-mask seal + compilation",
-      },
     },
     lens: null,
     tip: {
-      summary: "Moves density, gamma and all three momentum components through the same oriented composite face fluxes in one conservative transaction — trace, deficit scatter, conservative gather — with exact donor/receiver cancellation across 2:1 seams; momentum's share cannot be separated without double counting. The trailing sub-seams seal the producer masks and compile the transport-row and VEX-root masks the following stages dispatch over.",
+      summary: "Moves density, gamma and all three momentum components through the same oriented composite face fluxes in one conservative transaction — trace, deficit scatter, conservative gather — with exact donor/receiver cancellation across 2:1 seams; momentum's share cannot be separated without double counting.",
       reads: "density, gamma, momentum, oriented face rows",
-      writes: "transported density, gamma and momentum; producer masks",
-      feeds: "gamma diffusion, surface sharpening and the next VEX roots",
+      writes: "transported density, gamma and momentum; sharpening cell catalog",
+      feeds: "gamma diffusion and surface sharpening",
     },
-    chip: () => "trace · scatter · gather · mask compile",
+    chip: () => "trace · scatter · gather",
   },
   "tracer-advection": {
     label: "Marker advection", band: "transport", side: "right",
@@ -307,8 +301,8 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       "sharpening-finalize": {
         id: "fine-sdf-redistance", label: "Sharpening scalar finalization + dependency publication",
       },
-      "solid-excess-repair": {
-        id: "fine-sdf-redistance", label: "Cut-cell solid-excess redistribution",
+      "density-capacity-repair": {
+        id: "fine-sdf-redistance", label: "Conservative density-capacity repair",
       },
       "final-scalar-mask-publication": {
         id: "fine-sdf-redistance", label: "FSM1 final-scalar packet-mask publication",
@@ -316,7 +310,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     },
     lens: null,
     tip: {
-      summary: "Sec. 3.5's density correction and Algorithm 2's local mass return on the shared transport packet authority: receipt setup, a fused dose/TEI fixed-point mass transform, then scalar finalization. The stage then redistributes cut-cell solid excess and publishes FSM1 final-scalar packet masks.",
+      summary: "Sec. 3.5's density correction and Algorithm 2's local mass return on the shared transport packet authority: receipt setup, a fused dose/TEI fixed-point mass transform, then scalar finalization. The stage then conservatively enforces per-cell open-volume capacity and publishes FSM1 final-scalar packet masks.",
       reads: "transported density and gamma, solid fractions",
       writes: "conditioned density and gamma, final-scalar packet masks",
       feeds: "symmetry authority and activity measurement",
@@ -433,8 +427,8 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     phase: { id: "pressure-solve", label: "One-reduction sparse MGPCG pressure solve" },
     lens: null,
     tip: {
-      summary: "Pipelined conjugate gradient with a brick-aggregate + hierarchy multigrid preconditioner and one reduction per iteration. A guarded true-residual reduction after each fixed eight-iteration block gates later arithmetic or restarts the direction after curvature loss, and a final true residual closes the stage.",
-      reads: "G rows, W, diagonal, compatible RHS, persistent pressure cache",
+      summary: "Pipelined conjugate gradient with one uniform positive Jacobi preconditioner and one reduction per iteration. A guarded true-residual reduction after each fixed eight-iteration block gates later arithmetic or restarts the direction after curvature loss, and a final true residual closes the stage.",
+      reads: "canonical incidence rows, diagonal, compatible RHS",
       writes: "compact leaf pressure, residual receipts",
       feeds: "velocity projection",
     },
@@ -517,7 +511,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     phase: { id: "power-topology", label: "Hysteretic resolution planning + 2:1 candidate grading" },
     lens: null,
     tip: {
-      summary: "Plans each brick's resolution — the default surface-distance selector keeps interfaces and thin liquid fine and sends deeply submerged bricks to the coarsest rung the 2:1-closed ladder permits; surface + activity additionally refines moving or detailed liquid — then activates swept receivers, retires unsupported empty bricks, grades the plan to 2:1 closure one pass per ladder rung, validates it, schedules budgeted topology preparation, allocates candidate pages and builds the shadow leaf and structure worklists the transfer consumes.",
+      summary: "Plans each brick's resolution — the default surface-distance selector keeps interfaces and thin liquid fine and sends deeply submerged bricks to the coarsest rung the 2:1-closed ladder permits; surface + activity additionally refines moving or detailed liquid — then creates swept world pages, retires unsupported empty bricks, grades the plan to 2:1 closure one pass per ladder rung, validates it, schedules budgeted topology preparation, allocates candidate pages and builds the shadow leaf and structure worklists the transfer consumes.",
       reads: "transported density, momentum, policy history",
       writes: "score/reason history, urgent/ordinary queues, candidate levels, shadow worklists",
       feeds: "candidate transfer",
@@ -536,23 +530,9 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         ],
       },
       {
-        kind: "param-choice", param: "receiverFloor", label: "Created floor",
-        options: [
-          { value: "auto", label: "AUTO", hint: "Boundary-fed dams use 4³; interior sources may use 1³." },
-          { value: "1", label: "1³" }, { value: "2", label: "2³" },
-          { value: "4", label: "4³" }, { value: "8", label: "8³" },
-        ],
-        hint: "Structural capacity bootstrap. The GPU topology scheduler subsequently splits or merges every created receiver.",
-      },
-      {
         kind: "param-range", param: "surfaceFineRings", label: "Initial fine band",
         unit: " bricks", min: 1, max: 8, step: 1, digits: 0,
         hint: "Structural/rebuild control: occupied face-distance rings initialized at the ladder maximum around the authored surface.",
-      },
-      {
-        kind: "param-range", param: "receiverSupportRings", label: "Receiver reach",
-        unit: " bricks", min: 1, max: 24, step: 1, digits: 0,
-        hint: "Structural/rebuild control: radius of sparse receiver capacity reserved around authored liquid.",
       },
       {
         kind: "param-range", param: "finestTravelCells", label: "Finest travel",
@@ -575,7 +555,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       {
         kind: "param-range", param: "frontLookaheadSteps", label: "Front lookahead",
         unit: " steps", min: 1, max: 32, step: 1, digits: 0,
-        hint: "Accepted steps swept ahead when a surface characteristic selects receiver support.",
+        hint: "Accepted steps swept ahead when a surface characteristic selects missing-solid world pages.",
       },
       {
         kind: "param-range", param: "thinFeatureCells", label: "Thin floor",

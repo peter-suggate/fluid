@@ -105,10 +105,10 @@ for (const { id, environment, build } of targets) {
   });
 
   // The container interior is the water's; scenery that intrudes will be
-  // intersected by the free surface instead of framing it. Heightfield worlds
-  // are exempt: there the terrain carves the basin, the container is the whole
-  // garden, and the banks the scenery stands on are inside it by construction.
-  if (first.shell.kind !== "terrain-heightfield") {
+  // intersected by the free surface instead of framing it. Open worlds are
+  // exempt because their scenery intentionally occupies the same broad world
+  // as the canonical SolidWorld ground.
+  if (first.shell.kind !== "open-world") {
     const c = scene.container;
     const intruding = first.primitives.filter(({ aabb_m: box }) =>
       box.min.x < c.width_m / 2 && box.max.x > -c.width_m / 2

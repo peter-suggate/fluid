@@ -25,15 +25,13 @@ import {
   svoMaterialFromEnvironmentProxyMaterial,
 } from "./svo-material-abi";
 import { sceneTerrainSurfaceModel, type SvoTerrainSurfaceModel } from "./svo-terrain-material";
+import { sceneCellSizes_m } from "../core/scene-lattice";
 import {
-  planSparseSceneTerrainField,
-  planSparseSceneTerrainFieldSteps,
-  sparseSceneTerrainClaimCoordinatesSteps,
-  sparseSceneTerrainNodeCoverage,
-  type SparseSceneTerrainDomain,
-  type SparseSceneTerrainField,
-} from "../core/sparse-scene-terrain-field";
-import { terrainContentStamp, type TerrainDescription } from "../core/terrain";
+  SOLID_WORLD_BRICK_CELLS,
+  solidWorldContentStamp,
+  solidWorldForScene,
+  type SolidWorld,
+} from "../core/solid-world";
 import {
   SparseBrickOctreeGPU,
   SPARSE_BRICK_GPU_LAYOUT,
@@ -263,7 +261,6 @@ export interface OctreeSparseBrickWorldOptions {
  * because a progress bar that jumps through five stages in 3 ms is noise.
  */
 export const OCTREE_SPARSE_BRICK_WORLD_STAGES = [
-  "Bake the ground onto the render lattice",
   "Select the bricks the scene reaches",
   "Plan the adaptive octree",
   "Pack the octree and allocate its arenas",
@@ -489,41 +486,6 @@ export function octreeLiveSceneBrickBudget(
   return value;
 }
 /**
- * Whether the ground is baked into the scene lanes. On by default.
- *
- * A lever rather than a constant because "terrain in the pyramid" is a
- * *lighting* change — cones that used to pass through the garden floor now stop
- * at it — and a claim about how much it changed the frame has to be measurable
- * against the same binary. Turning it off restores the previous behaviour
- * exactly: no field, no ground bricks, no ground voxels, and the analytic
- * marcher still drawing the ground it always drew.
- */
-export function octreeLiveSceneTerrainVoxelsEnabled(
-  environment: Record<string, string | undefined> | undefined
-    = typeof process !== "undefined" ? process.env : undefined,
-): boolean {
-  const raw = environment?.FLUID_SVO_TERRAIN_VOXELS;
-  if (raw === undefined || raw === "") return true;
-  if (raw !== "0" && raw !== "1") throw new RangeError("FLUID_SVO_TERRAIN_VOXELS must be 0 or 1");
-  return raw === "1";
-}
-
-/**
- * Resolve the global migration lever against a scene's stronger document
- * contract. Required voxel terrain always wins; an experiment may only restore
- * the legacy path for documents that did not make unified solid publication a
- * condition of their meaning.
- */
-export function octreeLiveSceneUsesTerrainVoxels(
-  terrain: TerrainDescription | undefined,
-  environment: Record<string, string | undefined> | undefined
-    = typeof process !== "undefined" ? process.env : undefined,
-): boolean {
-  return terrain?.solidRepresentation === "voxel"
-    || octreeLiveSceneTerrainVoxelsEnabled(environment);
-}
-
-/**
  * Which per-voxel lanes a solverless world allocates. `dry` by default.
  *
  * A world with `systems.fluid === false` never writes the dynamic
@@ -634,82 +596,6 @@ export function octreeLiveSceneBrickClaim(
   return raw;
 }
 
-/**
- * Whether a dry world still claims the simulation container as bricks.
- *
- * `planSparseSceneDomain` covers the container unconditionally, because a fluid
- * kernel addresses every cell of the tank whether or not geometry is in it.
- * Nothing gated that on a solver existing, so a *dry* world paid for the whole
- * container too: on `hero-garden-hose` at 6.25 mm that is 10 368 bricks, and
- * 3 766 of them are claimed by no other producer — 26.6 % of the tree, each a
- * leaf of dry payload plus a node-mip page and its slice of the candidate arena.
- *
- * `fluid-only` is the default and `container` is the one-word rollback, on the
- * same terms as `FLUID_SVO_DRY_PAYLOAD_PROFILE` and `FLUID_SVO_BRICK_CLAIM`.
- * The lever cannot reach a world with water: `systems.fluid !== false` claims
- * the container whatever it says.
- *
- * Dropping the claim is only sound because it removes *air*. The ground is
- * claimed by `sparseSceneTerrainBrickCoordinates` — every brick from the domain
- * floor to the column height, so buried ground keeps its solid leaf — authored
- * scenery by its proxy AABBs narrowed to reachable bricks, and rigid bodies by
- * the regions added beside them below. What is left is container volume no
- * authored solid enters, and an absent page and a resident page of zeros sample
- * identically (`dryNodeMipAt` returns `valid = 1` either way).
- */
-export function octreeLiveSceneSolverClaim(
-  environment: Record<string, string | undefined> | undefined
-    = typeof process !== "undefined" ? process.env : undefined,
-): "container" | "fluid-only" {
-  const raw = environment?.FLUID_SVO_SOLVER_CLAIM;
-  if (raw === undefined || raw === "") return "fluid-only";
-  if (raw !== "container" && raw !== "fluid-only") throw new RangeError("FLUID_SVO_SOLVER_CLAIM must be \"container\" or \"fluid-only\"");
-  return raw;
-}
-
-/**
- * Levels of coarsening a uniformly buried ground node may take.
- *
- * One: a coarse leaf spans 2x2x2 finest bricks, so the buried interior costs an
- * eighth of the leaves it used to and its voxels are twice the finest cell —
- * which nothing can see, because the node is entirely below the ground surface
- * over its own footprint by construction.
- *
- * Deliberately *not* `ENVIRONMENT_MAXIMUM_COARSENING_POWER`. That constant is
- * the ceiling on the shipped `environmentBrickRefinementLevels` knob, which
- * applies to every environment leaf on wet and dry worlds alike; raising it
- * would coarsen scenery outside a fluid container with no predicate to stop it.
- * This one is only ever reached with `refineEnvironmentLeaf` in hand.
- */
-export const BURIED_GROUND_COARSENING_POWER = 1;
-
-/**
- * Whether a solverless world coarsens the ground it has buried.
- *
- * The planner may only enter *above* its finest level when something stops it
- * leaving geometry there, so this and the buried-coverage predicate are one
- * decision. `off` is the default until the lever has a blessed frame behind it:
- * the win it buys is real but an order of magnitude smaller than dropping the
- * container claim (leaves 10 370 -> 6 039, but the base-page count *rises* by
- * 352 because a coarse leaf publishes every page in its extent whether or not
- * the fine claim reached them all), and every page costs more than a leaf.
- *
- * The risk it carries is the one the whole handoff warns about: a coarse leaf
- * that fails to publish solid opacity over its extent is a hole the pyramid
- * lights through, because a non-resident page samples as *zero coverage*, not
- * as "unknown". `terrain-coverage-solid` in the dry render smoke lane is the
- * measurement that settles it; do not switch this on without reading it.
- */
-export function octreeLiveSceneBuriedCoarsening(
-  environment: Record<string, string | undefined> | undefined
-    = typeof process !== "undefined" ? process.env : undefined,
-): "off" | "on" {
-  const raw = environment?.FLUID_SVO_BURIED_COARSENING;
-  if (raw === undefined || raw === "") return "off";
-  if (raw !== "off" && raw !== "on") throw new RangeError("FLUID_SVO_BURIED_COARSENING must be \"off\" or \"on\"");
-  return raw;
-}
-
 export const OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY = 4_096;
 /**
  * Aggregate parameter blocks one live publication may carry.
@@ -744,6 +630,7 @@ interface LiveScenePrimitiveState {
 }
 
 interface LiveScenePrimitiveEntry {
+  readonly key: string;
   readonly primitive: SparseScenePrimitive;
   readonly materialSignature: string;
 }
@@ -776,6 +663,29 @@ function sparseScenePrimitiveForRigidBody(body: RigidBodyDescription, ownerId: n
     };
   }
   return { kind: "cylinder", center, radius: body.dimensions_m.x, halfHeight: body.dimensions_m.y / 2, orientation, materialId, ownerId };
+}
+
+/**
+ * Page-level topology claims for the canonical SolidWorld image.
+ *
+ * These bounds allocate no geometry records and never expand pages into host
+ * voxels or boxes. The live GPU voxelizer samples the same fraction/SDF page
+ * image used by physics; this list only ensures those samples have destination
+ * SVO bricks.
+ */
+function solidWorldPageBounds(scene: SceneDescription,
+  world: SolidWorld): SparseSceneAxisAlignedBounds[] {
+  const cell = sceneCellSizes_m(scene);
+  const origin = [-0.5 * scene.container.width_m, 0,
+    -0.5 * scene.container.depth_m] as const;
+  return world.pages.map((page) => {
+    const minimum = page.coordinate.map((value, axis) => origin[axis]!
+      + value * SOLID_WORLD_BRICK_CELLS * cell[axis]!) as
+      [number, number, number];
+    const maximum = minimum.map((value, axis) => value
+      + SOLID_WORLD_BRICK_CELLS * cell[axis]!) as [number, number, number];
+    return { minimum, maximum };
+  });
 }
 
 function coalesceDirtyRegions(
@@ -1222,7 +1132,6 @@ export class OctreeSparseBrickWorld {
   private solverGridOriginCells!: readonly [number, number, number];
   private finestLevel!: number;
   private cellSize!: readonly [number, number, number];
-  private containerClosedTop!: boolean;
   private source!: SparseBrickPublicationSource;
   private sourceBuffers!: GPUBuffer[];
   private pbrMaterialBuffer!: GPUBuffer;
@@ -1258,36 +1167,13 @@ export class OctreeSparseBrickWorld {
    */
   private liveDerivedAddressPlan?: SvoNodeMipAddressPlan;
   private liveDerivedAddressPlanValid = true;
-  private terrainDomain!: SparseSceneTerrainDomain;
-  /**
-   * The ground description the scene lanes currently hold.
-   *
-   * Identity, not a hash: scene documents are replaced rather than edited and a
-   * brush stroke returns a new grid, so `!==` is exactly "the ground changed"
-   * and costs nothing to evaluate on a still frame. The `configured` flag is
-   * separate because a scene without terrain and a scene whose terrain has not
-   * been staged yet are both `undefined`.
-   */
-  private terrainDescription?: TerrainDescription;
-  /**
-   * The content stamp of the ground currently uploaded.
-   *
-   * The identity beside it is only a fast path. `scene` arrives here through
-   * `postMessage`, which structured-clones it, so `scene.terrain` is a *fresh
-   * object* on every republication and an identity check alone misses every
-   * time — re-baking one procedural evaluation per finest column of the domain
-   * (~221k at the shipping leaf, 14.2 M at refinement depth 3) and dirtying the
-   * whole ground region for repair, on a scene where nothing moved.
-   */
-  private terrainStamp?: string;
-  private terrainConfigured = false;
-  private terrainFieldBounds?: SparseSceneAxisAlignedBounds;
-  private terrainVoxelsEnabled!: boolean;
   private liveDerivedFeedbackPhase = 0;
   private liveDerivedFeedbackFramesRemaining = 0;
   private liveDerivedInitial = true;
   /** The scene's one word about what its surfaces are made of; see the ABI. */
   private surfaceModel!: SvoTerrainSurfaceModel;
+  private solidWorld!: SolidWorld;
+  private solidWorldStamp = "";
   private liveScenePrimitiveStates = new Map<string, LiveScenePrimitiveState>();
   private liveScenePrimitives = new Map<string, LiveScenePrimitiveEntry>();
   /**
@@ -1428,23 +1314,31 @@ export class OctreeSparseBrickWorld {
     this.surfaceModel = sceneTerrainSurfaceModel(scene);
     const environmentCatalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default");
     const environmentPrimitives = environmentProxyPrimitives(environmentCatalog, true);
-    /**
-     * Whether the container itself is a reason for a brick to exist.
-     *
-     * Only on a world with a solver. See `octreeLiveSceneSolverClaim`: the
-     * claim is what a fluid kernel needs and what a dry scene pays 26.6 % of
-     * its tree for. `systems.fluid !== false` keeps it unconditionally, so the
-     * simulation lanes cannot be reached from here.
-     */
+    const initialSolidWorld = solidWorldForScene(scene);
+    this.solidWorld = initialSolidWorld;
+    this.solidWorldStamp = solidWorldContentStamp(scene);
+    const solidWorldBounds = solidWorldPageBounds(scene, initialSolidWorld);
+    // This tree is a sparse presentation consumer, not the fluid solver's
+    // address space. Fluid residency claims wet pages as they appear; static
+    // geometry claims only the exact voxel boxes compiled from SolidWorld.
+    // Claiming the whole logical container here was the render-side OOM path
+    // for long, mostly dry tanks.
     const dryWorld = scene.systems?.fluid === false;
-    const claimsContainer = !dryWorld || octreeLiveSceneSolverClaim() === "container";
+    const claimsContainer = false;
     const sceneDomain = planSparseSceneDomain(
       scene, dimensions, brickSize,
-      environmentPrimitives.map((primitive) => ({ min: primitive.aabb_m.min, max: primitive.aabb_m.max })),
+      [
+        ...environmentPrimitives.map((primitive) => ({ min: primitive.aabb_m.min,
+          max: primitive.aabb_m.max })),
+        ...solidWorldBounds.map((bounds) => {
+          return { min: { x: bounds.minimum[0], y: bounds.minimum[1], z: bounds.minimum[2] },
+            max: { x: bounds.maximum[0], y: bounds.maximum[1], z: bounds.maximum[2] } };
+        }),
+      ],
       {
         conservativePaddingCells: 1,
         worldBounds_m: scene.voxelDomain.bounds_m,
-        solverClaim: claimsContainer ? "container" : "none",
+        solverClaim: "none",
       }
     );
     this.solverGridOriginCells = sceneDomain.solverGridOriginCells;
@@ -1472,19 +1366,6 @@ export class OctreeSparseBrickWorld {
     const refinedBrickEdge = renderCellSize.map((value) => value * brickSize) as [number, number, number];
     const worldOrigin = [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z] as const;
     /**
-     * The ground, on this tree's own finest lattice.
-     *
-     * Planned here rather than at the first publication because the bricks it
-     * occupies have to exist before anything can voxelize into them, and the
-     * first publication is the one that cannot create them: topology mutation
-     * is skipped for the publication that brings a scene into existence.
-     */
-    this.terrainDomain = Object.freeze({
-      worldOrigin_m: worldOrigin as readonly [number, number, number],
-      cellSize_m: renderCellSize as readonly [number, number, number],
-      dimensionsCells: refinedBrickDimensions.map((bricks) => bricks * brickSize) as [number, number, number],
-    });
-    /**
      * Announce a stage, by its position in the declared list.
      *
      * Looking the index up rather than counting by hand means a stage cannot be
@@ -1496,18 +1377,6 @@ export class OctreeSparseBrickWorld {
       completed: OCTREE_SPARSE_BRICK_WORLD_STAGES.indexOf(stage),
       total: OCTREE_SPARSE_BRICK_WORLD_STAGES.length,
     });
-    // A scene may make the unified voxel solid part of its document contract.
-    // The global A/B lever remains useful for legacy scenes, but it must not
-    // silently turn a required ground back into the old duplicate path.
-    this.terrainVoxelsEnabled = octreeLiveSceneUsesTerrainVoxels(scene.terrain);
-    reportStage("Bake the ground onto the render lattice");
-    // Every `yield` below is an offer, not a suspension: the constructor drives
-    // them straight through and only `create`'s driver turns one into a return
-    // to the event loop, and then only once its slice budget is spent. They are
-    // placed where this instance owns no unreachable resource — see `create`.
-    yield;
-    const terrainField = this.terrainVoxelsEnabled
-      ? yield* planSparseSceneTerrainFieldSteps(scene.terrain, this.terrainDomain) : undefined;
     /**
      * Node edge in metres at each level, so the hot predicate stops calling
      * `Math.pow` three times per node. At environment refinement depth 3 the
@@ -1557,7 +1426,6 @@ export class OctreeSparseBrickWorld {
         primitives: environmentPrimitives, descriptorFor: environmentDescriptorFor,
         worldOrigin_m: worldOrigin as readonly [number, number, number],
         nodeEdge_m, brickSize, maximumDepth,
-        terrainField, terrainDomain: this.terrainDomain,
         crowdingTarget: OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
         planarExemption: options.environmentPlanarRefinementExemption === true,
       })
@@ -1581,28 +1449,10 @@ export class OctreeSparseBrickWorld {
         primitives: environmentPrimitives,
         worldOrigin_m: worldOrigin as readonly [number, number, number],
         nodeEdge_m, brickSize, maximumDepth,
-        terrainField, terrainDomain: this.terrainDomain,
         crowdingTarget: OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
       })
       : undefined;
-    // The solid column unless `FLUID_SVO_GROUND_SHELL` narrows it to the band
-    // the ground boundary passes through; see `sparseSceneTerrainShellBricks`
-    // for what the elided interior costs the pyramid, and why it is off.
-    const terrainBricks = terrainField
-      ? yield* sparseSceneTerrainClaimCoordinatesSteps(terrainField, this.terrainDomain, brickSize) : [];
-    /**
-     * Bricks another claim already owns, so the emptiness test is only paid
-     * where its answer can change the plan.
-     *
-     * The ground's claim is one of them, and deliberately so: a brick the
-     * surface passes through is not empty, and a brick *under* the ground is
-     * solid and must stay claimed. Solver coordinates are only comparable at
-     * `refinementDepth === 0`, which is the only case that hands them over, and
-     * on a dry world the set they come from is empty anyway — the container is
-     * no longer a reason to skip the emptiness test.
-     */
     const pinnedBricks = new Set<string>();
-    for (const coordinate of terrainBricks) pinnedBricks.add(brickCoordinateKey(coordinate));
     if (refinementDepth === 0) {
       for (const coordinate of sceneDomain.solverBrickCoordinates) pinnedBricks.add(brickCoordinateKey(coordinate));
     }
@@ -1617,7 +1467,9 @@ export class OctreeSparseBrickWorld {
           maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y, primitive.aabb_m.max.z] as const,
         })),
         worldOrigin, renderCellSize, brickSize, refinedBrickDimensions)
-      : sceneDomain.proxyBrickCoordinates.flat();
+      : sceneDomain.proxyBrickCoordinates.slice(0, environmentPrimitives.length).flat();
+    const solidWorldBricks = yield* liveSceneBrickCoordinatesForRegionsSteps(
+      solidWorldBounds, worldOrigin, renderCellSize, brickSize, refinedBrickDimensions);
     /**
      * The static rigid bodies, which nothing else in the claim accounts for.
      *
@@ -1647,19 +1499,6 @@ export class OctreeSparseBrickWorld {
      * refinement depth that used to stand in for it.
      */
     const plannedSolverBricks = refinementDepth > 0 ? [] : sceneDomain.solverBrickCoordinates;
-    /**
-     * Whether the planner enters one level above its finest so buried ground
-     * can stay there.
-     *
-     * Every precondition is load-bearing. A solver brick pins its node at
-     * `solverLevel`, so a claimed container leaves nothing to coarsen; the
-     * refined path already enters at `solverLevel` and only descends, so mixing
-     * the two would mean two different meanings for one power; and without a
-     * ground field there is no predicate, and entering above the finest level
-     * would coarsen the whole scene.
-     */
-    const buriedCoarsening = dryWorld && !claimsContainer && refinementDepth === 0
-      && !!terrainField && octreeLiveSceneBuriedCoarsening() === "on";
     /**
      * The narrowed primitive claim, computed *before* the plan call rather than
      * inside its argument literal.
@@ -1695,95 +1534,34 @@ export class OctreeSparseBrickWorld {
       // a resident page of zeros sample identically, so the frame does not move.
       proxyBricks: [
         ...reachablePrimitiveBricks,
-        ...terrainBricks,
+        ...solidWorldBricks,
         ...rigidBodyBricks,
       ],
       maximumDepth,
       solverLevel,
       maximumEnvironmentCoarseningPower: Math.min(
-        buriedCoarsening
-          ? BURIED_GROUND_COARSENING_POWER
-          : Math.max(
-            environmentMaximumCoarseningPower(options.environmentBrickRefinementLevels),
-            // Offered, not spent: `environmentCoarsening` is the predicate that
-            // decides how much of it each node takes, and a scene whose solids
-            // are all finer than the coarse voxel takes none of it.
-            environmentCoarsening ? svoEnvironmentCoarseningPower(brickSize) : 0,
-          ),
+        Math.max(
+          environmentMaximumCoarseningPower(options.environmentBrickRefinementLevels),
+          // Offered, not spent: `environmentCoarsening` is the predicate that
+          // decides how much of it each node takes, and a scene whose solids
+          // are all finer than the coarse voxel takes none of it.
+          environmentCoarsening ? svoEnvironmentCoarseningPower(brickSize) : 0,
+        ),
         solverLevel,
       ),
-      // Two independent reasons to split, unioned.
-      //
-      // 1. A leaf that holds more primitives than the hierarchy binds. Above
-      //    that budget the surplus is dropped *silently* — absent from the
-      //    opacity pyramid and the radiance atlas while still drawing in
-      //    primary visibility — so the geometry keeps its silhouette and stops
-      //    casting a shadow. Splitting is the direct fix and it is local; the
-      //    arena's own, larger capacity is the backstop for where splitting
-      //    runs out of depth.
-      //
-      // 2. A node the ground surface passes through. Terrain is not a primitive
-      //    and contributes nothing to `candidatesInBrick`, so before this the
-      //    ground never split for any reason: every refinement level went into
-      //    scenery and the largest surface in the scene stayed at the solver's
-      //    own cell size no matter how deep the tree was asked to go. Splitting
-      //    only where the boundary actually is, is also what keeps the claim
-      //    affordable — the buried interior is left as one coarse leaf per node
-      //    rather than one fine leaf per finest brick, so the ground costs its
-      //    area rather than its volume. That substitution is safe *because* the
-      //    coarse leaf is a real leaf with real payload: the voxeliser writes it
-      //    at its own scale over its own extent
-      //    (`lib/webgpu-sparse-scene-proxies.ts:1906-1949`), and the derived
-      //    builder resolves every finest mip page beneath it through
-      //    `deepestLeaf` + `leafLocal`, which divides the global cell by the
-      //    leaf's level scale (`lib/webgpu-svo-live-derived-builder.ts:240`).
-      //    A buried coarse voxel therefore reports full coverage to every cone,
-      //    at every level — the thing a hollow interior would not.
-      //
-      // 3. Everything, on a tree that entered one level *above* its finest —
-      //    which is what `buriedCoarsening` asks for. There the predicate is
-      //    inverted: refinement is the default and the only node allowed to stay
-      //    coarse is one the ground provably fills and no primitive is in. Same
-      //    soundness argument as (2), and the same measured invariant: the smoke
-      //    lane's `terrain-coverage-solid` counts every buried voxel that fails
-      //    to report full scene coverage, and it must stay at zero.
-      //
-      // 4. A node a *primitive's* surface passes through, when
-      //    `FLUID_SVO_REFINEMENT_MODE=surface`. That is the detail rule (2) is
-      //    for the ground and (1) never was: (1) fires on crowding, and a
-      //    mushroom cap is one primitive. Only with
-      //    `environmentPlanarRefinementExemption` does that arm stop short of a
-      //    flat crossing — and exempt flat ground from (2) — which is off by
-      //    default because a coarse leaf on a low-curvature surface reaches the
-      //    screen as a grid of axis-aligned facets.
-      //
-      // The ground test is asked first and the candidate scan is bounded by the
-      // threshold it is compared against. Both are pure reorderings of the same
-      // disjunction — the ground answers from an aligned column pyramid in O(1)
-      // while the scan is O(primitives), and at refinement depth 3 the ground is
-      // what refines most nodes, so asking it first skips the catalogue scan
-      // entirely for the majority of a quarter-million visits.
+      // Split for primitive crowding or for a non-planar primitive surface.
+      // SolidWorld boxes already claim their exact voxel bricks and therefore
+      // need no heightfield-shaped refinement arm.
       refineEnvironmentLeaf: surfaceRefinement
         ? (level, coordinate) => surfaceRefinement.refineEnvironmentLeaf(level, coordinate)
         : refinementDepth > 0
           ? (level, coordinate) => (
-            (!!terrainField && sparseSceneTerrainNodeCoverage(
-              terrainField, this.terrainDomain, brickSize, level, maximumDepth, coordinate) === "surface")
-            || candidatesInBrick(level, coordinate, OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET)
+            candidatesInBrick(level, coordinate, OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET)
               > OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET
           )
-          : buriedCoarsening && terrainField
-            ? (level, coordinate) => (
-              sparseSceneTerrainNodeCoverage(
-                terrainField, this.terrainDomain, brickSize, level, maximumDepth, coordinate) !== "buried"
-              || candidatesInBrick(level, coordinate, 0) > 0
-            )
-            // 5. A solid the level cannot record, on a scene the solver owns.
-            //    Arms 1 and 2 are folded into this one — see the module — so
-            //    that the wet path asks one question per node rather than three.
-            : environmentCoarsening
-              ? (level, coordinate) => environmentCoarsening.refineEnvironmentLeaf(level, coordinate)
-              : undefined,
+          : environmentCoarsening
+            ? (level, coordinate) => environmentCoarsening.refineEnvironmentLeaf(level, coordinate)
+            : undefined,
     });
     this.finestLevel = plan.maximumDepth;
     this.sceneBrickDimensions = refinedBrickDimensions;
@@ -1976,8 +1754,6 @@ export class OctreeSparseBrickWorld {
       environmentLighting.packedRecords,
     );
     yield;
-    const c = scene.container;
-    this.containerClosedTop = c.top === "closed";
     // The render lattice, which is the solver's divided by the refinement. Every
     // world bound downstream is `coordinate * 2^(maximumDepth - level) * brickSize
     // * cellSize`, so a deeper tree over the same world needs a proportionally
@@ -1994,16 +1770,17 @@ export class OctreeSparseBrickWorld {
       candidatesPerDirtyBrick: OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
       clusterCapacity: OCTREE_LIVE_SCENE_CLUSTER_CAPACITY,
       fieldProgramCapacity: OCTREE_LIVE_SCENE_FIELD_PROGRAM_CAPACITY,
+      solidWorld: initialSolidWorld,
+      solidWorldLattice: {
+        origin_m: [-0.5 * scene.container.width_m, 0,
+          -0.5 * scene.container.depth_m],
+        cellSize_m: sceneCellSizes_m(scene),
+      },
       // The coarse record index and the per-frame budget. Both are what turn
       // maintenance from "cheap because the scene is small" into something that
       // survives ten times the records: binning stops reading every record, and
       // invalidation stops reading every leaf.
       recordIndex: planOctreeLiveSceneRecordIndex(this.sceneBrickDimensions, this.cellSize, brickSize),
-      // One f32 per finest cell of the domain footprint, and only for a scene
-      // that has ground: 24 KB on the hero garden, nothing at all elsewhere.
-      terrainFieldCapacityColumns: terrainField
-        ? this.terrainDomain.dimensionsCells[0] * this.terrainDomain.dimensionsCells[2]
-        : 0,
       bricksPerFrameBudget: octreeLiveSceneBrickBudget(),
       label: `${environmentCatalog.environmentId} live scene geometry`,
     });
@@ -2516,6 +2293,18 @@ export class OctreeSparseBrickWorld {
    */
   stageSceneUpdate(scene: SceneDescription): boolean {
     if (this.destroyed) throw new Error("Cannot update a destroyed sparse-brick world");
+    const initialPublication = this.sceneRevision === 0;
+    const previousSolidWorld = this.solidWorld;
+    const nextSolidWorldStamp = solidWorldContentStamp(scene);
+    const solidWorldStampChanged = nextSolidWorldStamp !== this.solidWorldStamp;
+    const solidWorldChanged = initialPublication
+      || solidWorldStampChanged;
+    const nextSolidWorld = solidWorldStampChanged
+      ? solidWorldForScene(scene) : previousSolidWorld;
+    const previousSolidBounds = initialPublication ? []
+      : solidWorldPageBounds(scene, previousSolidWorld);
+    const nextSolidBounds = solidWorldChanged
+      ? solidWorldPageBounds(scene, nextSolidWorld) : [];
     const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default");
     const authored = environmentProxyPrimitives(catalog, true);
     const liveEntries = [
@@ -2550,24 +2339,17 @@ export class OctreeSparseBrickWorld {
     if (liveEntries.length > OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY) {
       throw new RangeError(`Live scene needs ${liveEntries.length} primitives but the fixed arena holds ${OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY}`);
     }
-    const initialPublication = this.liveScenePrimitiveStates.size === 0;
     const nextPrimitives = new Map<string, LiveScenePrimitiveEntry>();
     const nextStates = new Map<string, LiveScenePrimitiveState>();
     const dirtyRegions: SparseSceneAxisAlignedBounds[] = [
       ...(this.pendingScenePublication?.dirtyRegions ?? []),
+      ...(solidWorldChanged ? previousSolidBounds : []),
+      ...nextSolidBounds,
     ];
-    const newBounds: SparseSceneAxisAlignedBounds[] = [];
-    // The ground, staged alongside the records but never as one of them.
-    //
-    // It contributes a dirty *region* and no record: the per-voxel rebuild reads
-    // it from the arena, so it needs the bricks it covers to be repaired and
-    // nothing else. Skipping this would leave the ground unwritten wherever no
-    // record's bounds happened to reach — most of the footprint, and all of the
-    // ground below the lowest prop.
-    for (const bounds of this.stageTerrainField(scene)) { dirtyRegions.push(bounds); newBounds.push(bounds); }
+    const newBounds: SparseSceneAxisAlignedBounds[] = [...nextSolidBounds];
     for (const entry of liveEntries) {
       const live = entry.primitive;
-      nextPrimitives.set(entry.key, { primitive: live, materialSignature: entry.materialSignature });
+      nextPrimitives.set(entry.key, entry);
       const state = { signature: `${liveScenePrimitiveSignature(live)}:${entry.materialSignature}`, bounds: sparseScenePrimitiveBounds(live) };
       nextStates.set(entry.key, state);
       const previous = this.liveScenePrimitiveStates.get(entry.key);
@@ -2580,6 +2362,11 @@ export class OctreeSparseBrickWorld {
       if (!nextStates.has(key)) dirtyRegions.push(previous.bounds);
     }
     if (dirtyRegions.length === 0) return false;
+    if (solidWorldChanged && !initialPublication) {
+      this.proxyVoxelizer.setSolidWorld(nextSolidWorld);
+    }
+    this.solidWorld = nextSolidWorld;
+    this.solidWorldStamp = nextSolidWorldStamp;
     this.liveScenePrimitiveStates = nextStates;
     this.liveScenePrimitives = nextPrimitives;
     const revision = this.advanceSceneRevision();
@@ -2607,51 +2394,6 @@ export class OctreeSparseBrickWorld {
     this.stagePrimitivePublication(revision, dirtyRegions, newBounds, initialPublication);
     return true;
   }
-
-  /**
-   * Upload the ground when it changed, and report the region that must be
-   * repaired because of it. Empty on every frame that did not change it, which
-   * is what keeps a still scene at zero maintenance dispatches.
-   */
-  private stageTerrainField(scene: SceneDescription): readonly SparseSceneAxisAlignedBounds[] {
-    if (!this.terrainVoxelsEnabled) return [];
-    if (this.terrainConfigured && scene.terrain === this.terrainDescription) return [];
-    // The clone-surviving half of the guard. Only reached when identity already
-    // missed, so the stamp is paid once per republication rather than per frame,
-    // and re-arming the identity below returns the cheap path for the frames
-    // that follow.
-    const stamp = terrainContentStamp(scene.terrain);
-    if (this.terrainConfigured && stamp === this.terrainStamp) {
-      this.terrainDescription = scene.terrain;
-      return [];
-    }
-    const field: SparseSceneTerrainField | undefined = planSparseSceneTerrainField(scene.terrain, this.terrainDomain);
-    const previous = this.terrainFieldBounds;
-    this.proxyVoxelizer.configureTerrainField(field);
-    this.terrainDescription = scene.terrain;
-    this.terrainStamp = stamp;
-    this.terrainConfigured = true;
-    this.terrainFieldBounds = field && {
-      minimum: [...field.bounds.minimum] as [number, number, number],
-      maximum: [...field.bounds.maximum] as [number, number, number],
-    };
-    // Both, when the ground moved: the volume it left has to stop being solid
-    // just as much as the volume it now fills has to start.
-    return [previous, this.terrainFieldBounds].filter((bounds): bounds is SparseSceneAxisAlignedBounds => !!bounds);
-  }
-
-  /** Whether the ground reaches the scene lanes, for lanes that assert on it. */
-  get terrainFieldStatus(): {
-    present: boolean;
-    columns: number;
-    capacityColumns: number;
-    bounds?: SparseSceneAxisAlignedBounds;
-  } {
-    return { ...this.proxyVoxelizer.terrainFieldStatus, bounds: this.terrainFieldBounds };
-  }
-
-  /** The finest cell lattice the ground is baked onto; a CPU oracle needs it. */
-  get terrainFieldDomain(): SparseSceneTerrainDomain { return this.terrainDomain; }
 
   /** Allocation-free keyed motion/content updates shared by renderer-only and fluid worlds. */
   stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]): boolean {
@@ -2998,8 +2740,6 @@ export class OctreeSparseBrickWorld {
       cellSize: this.cellSize,
       fluidMaterialId: VOXEL_MATERIAL_IDS.fluid,
       solidMaterialId: VOXEL_MATERIAL_IDS.terrain,
-      containerMaterialId: VOXEL_MATERIAL_IDS.containerGlass,
-      containerClosedTop: this.containerClosedTop,
       gridOriginCells: this.solverGridOriginCells,
       finestLevel: this.finestLevel,
       activeBrickWorklist: this.residency.worklist,

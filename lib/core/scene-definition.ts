@@ -12,7 +12,7 @@ import {
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
 } from "../svo/svo-render-tuning";
-import { boxTankWallFieldForScene, tankWallFieldFitsScene } from "./scene-lattice";
+import { solidVoxelEditsForScene, solidVoxelShellForScene } from "./scene-lattice";
 
 /**
  * What a scene *is*, as data.
@@ -304,13 +304,11 @@ function finishSceneDocument(
     throw new Error(`Scene ${definition.id} has no variant ${variantId}`);
   }
   const scene = variant ? variant.apply(body) : body;
-  // Scene factories often resize the shared starter tank.  The face field is
-  // mandatory document geometry, so construction resolves it onto that final
-  // lattice once; loaded/edited documents never pass through this factory and
-  // therefore retain their authored openings exactly.
-  if (!tankWallFieldFitsScene(scene)) {
-    scene.container = { ...scene.container, wallField: boxTankWallFieldForScene(scene) };
-  }
+  // Preset factories carry only generic extra voxel edits. Compile the ordinary
+  // shell once on the final lattice, without inspecting edit materials or
+  // assigning any runtime behavior to a scene identity.
+  scene.solidVoxels = [...solidVoxelShellForScene(scene),
+    ...solidVoxelEditsForScene(scene)];
   return scene.scenery
     ? { ...scene, environment: definition.environment }
     : sceneWithEnvironment(scene, definition.environment);

@@ -24,7 +24,7 @@ import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE, requiredFluidDeviceLimits 
 import { RasterWaterPipeline, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import type { ScenePresentationMode } from "./scene-definition";
-import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain, terrainSampleGrid } from "./terrain";
+import { sceneHasTerrain } from "./terrain";
 import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import { cameraTanHalfFov, viewportAspect, viewportRayForPixel } from "./webgpu-camera";
@@ -54,7 +54,7 @@ import { containerDecorationSpace } from "./visualization-decorations";
 import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
 import type { FluidCellTrace } from "./fluid-cell-trace";
 import type { FineBandCellContext } from "./fine-band-cell-model";
-import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, packSvoDrySceneTerrainHeightfield, resolveSparseVoxelThickGlassBinderStatus, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SparseVoxelDrySceneData, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/webgpu-svo-dry-scene";
+import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, resolveSparseVoxelThickGlassBinderStatus, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SparseVoxelDrySceneData, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/webgpu-svo-dry-scene";
 import {
   buildSvoScenePrimitives,
 } from "../svo/svo-scene-primitives";
@@ -75,7 +75,7 @@ import {
 } from "../svo/svo-material-abi";
 import { buildSvoSceneGlass } from "../svo/svo-scene-glass";
 import { buildSvoSceneThickGlass } from "../svo/svo-scene-thick-glass";
-import { buildSvoTerrainMaterial, sceneTerrainSurfaceModel } from "../svo/svo-terrain-material";
+import { sceneTerrainSurfaceModel } from "../svo/svo-terrain-material";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   resolveSvoPrimaryTraversal,
@@ -189,7 +189,6 @@ export function svoSwayDirtyBounds(
   for (let index = 0; index < current.length; index += 1) {
     if (!sway[index]) continue;
     const before = previous[index], after = current[index];
-    if (before.kind === "terrain-heightfield" || after.kind === "terrain-heightfield") continue;
     const oldBounds = svoPrimitiveCandidateBounds(before);
     const newBounds = svoPrimitiveCandidateBounds(after);
     dirty.push({
@@ -594,7 +593,7 @@ function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  * the GPU as params rather than as geometry.
  */
 export function gpuSceneUniformKey(scene: SceneDescription): string {
-  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${JSON.stringify(scene.container.wallField.faces)}`;
+  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${JSON.stringify(scene.solidVoxels)}`;
 }
 
 /**
@@ -948,7 +947,6 @@ export class FluidLabRenderer {
   private latestRigidBodyPoses: readonly DrawnRigidBodyPose[] = [];
   private latestRigidBodyPoseRevision = 0;
   private svoSourceAvailable = false;
-  private svoTerrainSupported = true;
   private svoGlassSupported = true;
   private svoMaterialsSupported = true;
   private svoLightingSupported = true;
@@ -1793,7 +1791,7 @@ export class FluidLabRenderer {
     this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
     this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined; this.tracerOverlayPipeline = undefined; this.faceVelocityOverlayPipeline = undefined; this.pressureJournalOverlayPipeline = undefined; this.stageLensOverlayPipeline = undefined; this.svoStageOverlay = undefined;
     this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.optionalPipelineFailures.clear(); this.svoDrySceneSource = undefined; this.svoSceneSidecar = undefined; this.svoDrySceneData = undefined; this.liveSceneAnimation = undefined; this.liveSceneAnimationFailure = undefined; this.renderSceneKey = ""; this.renderSceneStamp = 0; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingLiveSvoPresentation = undefined;
-    this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoPublicationFailure = undefined; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
+    this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoPublicationFailure = undefined; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
     // The staging buffers belong to the device that is going away; the poses
     // they carried stay, because the scene they describe has not changed.
@@ -1863,9 +1861,9 @@ export class FluidLabRenderer {
       && dense!.height >= info.ny && dense!.depthOrArrayLayers >= info.nz;
     const container = scene.container;
     const fluidDomain = solver.fluidDomain;
-    // Both arms span the same physical world box. Usually that is the container,
-    // centred in x/z with y from the floor; an opened tank may instead publish a
-    // larger fluid domain so exterior receiver pages render in the same frame.
+    // Both arms span the same physical world box. Usually that is the authored
+    // lattice, centred in x/z with y from its origin; sparse flow may publish a
+    // larger fluid world so newly created frontier pages render in the same frame.
     // Only the lattice differs: the dense field is the solver grid, the compact
     // publication is the fine one.
     //
@@ -2433,14 +2431,6 @@ export class FluidLabRenderer {
     const sceneThickGlass = buildSvoSceneThickGlass(scene, { revision });
     const thickReplacedPaneKey = sceneThickGlass.metadata.find(({ replacesThinPaneKey }) => Boolean(replacesThinPaneKey))?.replacesThinPaneKey;
     const thickReplacedPaneId = sceneGlass.metadata.find(({ key }) => key === thickReplacedPaneKey)?.paneId;
-    // A porcelain ground publishes no terrain metadata at all: the metadata is
-    // what configures the lawn closure, and an unread region is a region that
-    // can go stale. Absent, the shader's policy word stays zero and its terrain
-    // branch is unreachable by construction rather than by agreement.
-    const terrainMaterial = scenePrimitives.analyticTerrain && terrainSurface === "garden-terrain"
-      ? buildSvoTerrainMaterial(scene)
-      : undefined;
-    const compositorOwnedGlass = sceneGlass.metadata.filter(({ role }) => role === "container-pane" || role === "container-top");
     const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, revision);
     if (!lightingMirrors) {
       this.svoSourceAvailable = false;
@@ -2457,24 +2447,7 @@ export class FluidLabRenderer {
       materialRevision: revision,
       ownerBase: SCENE_ENVIRONMENT_OWNER_BASE,
       skippedOwnerId: scenePrimitives.openShellOwnerId,
-      terrainMaterialId: scenePrimitives.analyticTerrain?.materialId,
-      terrainMaterialMetadata: terrainMaterial?.packedMetadata,
-      terrainMaterialCacheKey: terrainMaterial?.cacheKey,
-      // A sculpted vessel is terrain the eight-feature uniform mirror cannot
-      // express, so the grid the solver already consumes is published into the
-      // scene arena as well. Analytic scenes pass undefined and keep the
-      // closed-form evaluator they have always used.
-      //
-      // `terrainSampleGrid` rather than `scene.terrain?.grid`, because a
-      // described ground carries no samples across the worker boundary — it is
-      // derived here, at the lattice the picture is drawn at, and memoized by
-      // content so this resolves to the same object every publication (which is
-      // also what finally lets the packer's own memo hit: a structured-cloned
-      // grid was a new object every revision and re-packed 222k floats each
-      // time).
-      terrainHeightfield: packSvoDrySceneTerrainHeightfield(terrainSampleGrid(scene.terrain)),
-      // The same door as the heightfield above, for the same reason: an
-      // aggregate's packing does not fit in a 64-byte record, so the record
+      // An aggregate's packing does not fit in a 64-byte record, so the record
       // carries a reference and the numbers live in the arena. Publication
       // order assigns the references, so these arrive already in agreement
       // with the records beside them.
@@ -2489,18 +2462,15 @@ export class FluidLabRenderer {
       thickGlassRevision: sceneThickGlass.revision,
       thickGlassCacheKey: sceneThickGlass.cacheKey,
       thickGlassReplacedThinPaneId: thickReplacedPaneId,
-      primaryCompositeOwnedGlassPaneIdBase: compositorOwnedGlass[0]?.paneId,
-      primaryCompositeOwnedGlassPaneCount: compositorOwnedGlass.length,
       ...lightingMirrors,
       flatVoxelNormals: sceneUsesFlatVoxelNormals(scene),
     };
     const thickGlassBound = resolveSparseVoxelThickGlassBinderStatus(publication) === "bound";
     const replacedPaneKeys = new Set(sceneThickGlass.metadata.flatMap(({ replacesThinPaneKey }) => replacesThinPaneKey ? [replacesThinPaneKey] : []));
-    this.svoTerrainSupported = !scenePrimitives.requiresRasterTerrainFallback && (!sceneHasTerrain(scene) || Boolean(scenePrimitives.analyticTerrain));
     this.svoGlassSupported = !sceneGlass.metadata.some(({ key, opaqueCutoutKey }) => Boolean(opaqueCutoutKey) && (!thickGlassBound || !replacedPaneKeys.has(key)));
     this.svoMaterialsSupported = materialRecords.byteLength > 0;
     this.svoLightingSupported = canConsumeSparseVoxelLighting(publication);
-    const supported = this.svoTerrainSupported && this.svoGlassSupported && this.svoMaterialsSupported && this.svoLightingSupported;
+    const supported = this.svoGlassSupported && this.svoMaterialsSupported && this.svoLightingSupported;
     const contractFailure = sparseVoxelDrySceneContractFailure(source, publication);
     this.svoSourceAvailable = supported && !contractFailure;
     if (!this.svoSourceAvailable) {
@@ -2570,7 +2540,6 @@ export class FluidLabRenderer {
       const after = swayedPrimitiveDescriptor(animation.rest[index], sway, time_s);
       animation.current[index] = after;
       animation.records.set(packSvoPrimitiveRecords([after]), index * SVO_PRIMITIVE_RECORD_WORDS);
-      if (before.kind === "terrain-heightfield" || after.kind === "terrain-heightfield") continue;
       const oldBounds = svoPrimitiveCandidateBounds(before);
       const newBounds = svoPrimitiveCandidateBounds(after);
       dirtyBounds.push({
@@ -3099,12 +3068,9 @@ export class FluidLabRenderer {
       // lens became a scene property; see CAMERA_APERTURE_UNIFORM_LANE for why
       // it rides here rather than in a field of its own.
       position.x, position.y, position.z, cameraTanHalfFov(camera),
-      // cameraTarget.w is shared presentation metadata: the surface extractor
-      // uses it to distinguish a closed ceiling from an open tank top.
-      camera.target_m.x, camera.target_m.y, camera.target_m.z,
-      scene.container.shape === "sphere"
-        ? scene.container.vessel === "none" ? 3 : 2
-        : scene.container.top === "closed" ? 1 : 0,
+      // cameraTarget.w is padding. Geometry comes from SolidWorld rather than
+      // an analytic container-shape/top mode encoded in the camera uniform.
+      camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
       // options.w carries the largest represented adaptive pressure-cell
       // width. The grid overlay uses it to normalize its categorical scale
@@ -3117,23 +3083,12 @@ export class FluidLabRenderer {
       environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0,
       0
     ]);
-    // Terrain heightfield mirror for the environment shaders: meta lane plus
-    // two vec4 lanes per feature, matching lib/terrain.ts semantics exactly.
     const packed = new Float32Array(104);
     packed.set(uniform, 0);
     // Lanes 100..103 are the hover rim: the owner range under the cursor, its
-    // strength, and the falloff exponent. Appended past the terrain mirror so
-    // every other shader's view of this buffer is byte-identical.
+    // strength, and the falloff exponent. Appended at the end so every other
+    // shader's view of this buffer is byte-identical.
     if (this.hoverHighlight) packed.set([this.hoverHighlight.first, this.hoverHighlight.last, .45, 2.6], 100);
-    if (sceneHasTerrain(scene) && scene.terrain) {
-      const terrain = scene.terrain;
-      const features = terrain.features.slice(0, MAX_TERRAIN_FEATURES);
-      packed.set([1, terrain.baseHeight_m, features.length, TERRAIN_UNION_EXPONENT], 32);
-      features.forEach((feature, index) => {
-        packed.set([feature.center_m.x, feature.center_m.z, feature.radius_m.x, feature.radius_m.z], 36 + index * 8);
-        packed.set([(feature.kind === "mound" ? 1 : -1) * feature.amount_m, feature.rotation_rad ?? 0, feature.flat ?? TERRAIN_DEFAULT_FLAT, 0], 40 + index * 8);
-      });
-    }
     this.device.queue.writeBuffer(this.uniformBuffer, 0, packed);
     const residentRigidBuffer = this.gpuFluid?.rigidRenderBuffer;
     if (residentRigidBuffer) {
@@ -3342,8 +3297,6 @@ export class FluidLabRenderer {
       terrain: scene.terrain,
       terrainContentStamp: this.renderSceneTerrainContentStamp,
       container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
-      wallField: scene.container.wallField,
-      vesselVisible: scene.container.vessel !== "none" && environmentId !== "garden",
     });
     // Before the dry pass samples it, and outside the water pipeline's own
     // passes so the volume is complete for the whole frame. Withheld, the
@@ -3423,7 +3376,7 @@ export class FluidLabRenderer {
         ? requestedBundleStatus.detail
         : silhouetteRefinementStatus?.state === "compiling" ? silhouetteRefinementStatus.detail : undefined,
       sourceAvailable: this.svoSourceAvailable,
-      terrainSupported: this.svoTerrainSupported,
+      terrainSupported: true,
       glassSupported: this.svoGlassSupported,
       materialsSupported: this.svoMaterialsSupported,
       lightingSupported: this.svoLightingSupported,

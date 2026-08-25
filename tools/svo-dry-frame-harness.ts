@@ -52,19 +52,11 @@ import { svoPrimitiveCandidateBounds } from "../lib/svo/svo-primitive-candidates
 import { buildSvoSceneGlass } from "../lib/svo/svo-scene-glass";
 import { buildSvoScenePrimitives, type SvoScenePrimitiveBuild } from "../lib/svo/svo-scene-primitives";
 import { buildSvoSceneThickGlass } from "../lib/svo/svo-scene-thick-glass";
-import { buildSvoTerrainMaterial, sceneTerrainSurfaceModel } from "../lib/svo/svo-terrain-material";
-import {
-  MAX_TERRAIN_FEATURES,
-  sceneHasTerrain,
-  TERRAIN_DEFAULT_FLAT,
-  TERRAIN_UNION_EXPONENT,
-  terrainSampleGrid,
-} from "../lib/core/terrain";
+import { sceneTerrainSurfaceModel } from "../lib/svo/svo-terrain-material";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/core/webgpu-renderer";
 import {
   buildSparseVoxelDrySceneLightingMirrors,
-  packSvoDrySceneTerrainHeightfield,
   type SparseVoxelDrySceneData,
 } from "../lib/svo/webgpu-svo-dry-scene";
 import type { SparseVoxelSceneRenderSource } from "../lib/core/webgpu-voxel-debug";
@@ -226,15 +218,6 @@ export function packSvoDryViewUniforms(inputs: SvoDryViewUniformInputs): Float32
   ]);
   const packed = new Float32Array(SVO_VIEW_UNIFORM_FLOATS);
   packed.set(uniform, 0);
-  if (sceneHasTerrain(scene) && scene.terrain) {
-    const terrain = scene.terrain;
-    const features = terrain.features.slice(0, MAX_TERRAIN_FEATURES);
-    packed.set([1, terrain.baseHeight_m, features.length, TERRAIN_UNION_EXPONENT], 32);
-    features.forEach((feature, index) => {
-      packed.set([feature.center_m.x, feature.center_m.z, feature.radius_m.x, feature.radius_m.z], 36 + index * 8);
-      packed.set([(feature.kind === "mound" ? 1 : -1) * feature.amount_m, feature.rotation_rad ?? 0, feature.flat ?? TERRAIN_DEFAULT_FLAT, 0], 40 + index * 8);
-    });
-  }
   return packed;
 }
 
@@ -282,10 +265,6 @@ export function buildSvoDrySceneAssembly(
   const thickReplacedPaneKey = sceneThickGlass.metadata.find(({ replacesThinPaneKey }) => Boolean(replacesThinPaneKey))?.replacesThinPaneKey;
   const thickReplacedPaneId = sceneGlass.metadata.find(({ key }) => key === thickReplacedPaneKey)?.paneId;
   const terrainSurface = sceneTerrainSurfaceModel(scene);
-  const terrainMaterial = scenePrimitives.analyticTerrain && terrainSurface === "garden-terrain"
-    ? buildSvoTerrainMaterial(scene)
-    : undefined;
-  const compositorOwnedGlass = sceneGlass.metadata.filter(({ role }) => role === "container-pane" || role === "container-top");
   const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, 1);
   const drySceneData: SparseVoxelDrySceneData = {
     renderRevision: 1,
@@ -307,13 +286,6 @@ export function buildSvoDrySceneAssembly(
     materialRevision: 1,
     ownerBase: SCENE_ENVIRONMENT_OWNER_BASE,
     skippedOwnerId: scenePrimitives.openShellOwnerId,
-    terrainMaterialId: scenePrimitives.analyticTerrain?.materialId,
-    terrainMaterialMetadata: terrainMaterial?.packedMetadata,
-    terrainMaterialCacheKey: terrainMaterial?.cacheKey,
-    // A sculpted vessel is terrain the eight-feature uniform mirror cannot
-    // express. Production publishes the grid into the scene arena; without this
-    // a headless frame renders a flat plane at `baseHeight_m` and calls it the scene.
-    terrainHeightfield: packSvoDrySceneTerrainHeightfield(terrainSampleGrid(scene.terrain)),
     // The same door, for the aggregate kind. Without it every cluster record
     // names a zeroed arena block, the shader reads that as "not resolved", and
     // the crown of the hero's bonsai draws as nothing at all — which is what a
@@ -328,8 +300,6 @@ export function buildSvoDrySceneAssembly(
     thickGlassRevision: sceneThickGlass.revision,
     thickGlassCacheKey: sceneThickGlass.cacheKey,
     thickGlassReplacedThinPaneId: thickReplacedPaneId,
-    primaryCompositeOwnedGlassPaneIdBase: compositorOwnedGlass[0]?.paneId,
-    primaryCompositeOwnedGlassPaneCount: compositorOwnedGlass.length,
     ...lightingMirrors,
     // Presentation policy is scene data too. Omitting this made every headless
     // fidelity frame silently exercise the default baked analytic normals even
@@ -352,7 +322,7 @@ export interface SvoBrickLattice {
 }
 
 export interface SvoBrickDensity {
-  /** Finite primitives binned; the terrain heightfield is not one of them. */
+  /** Finite primitives binned. */
   readonly primitives: number;
   readonly occupiedBricks: number;
   readonly maximumPerBrick: number;
@@ -391,7 +361,6 @@ export function svoScenePrimitiveBrickDensity(
   const counts = new Map<number, number>();
   let primitives = 0;
   for (const descriptor of descriptors) {
-    if (descriptor.kind === "terrain-heightfield") continue;
     primitives += 1;
     const bounds = svoPrimitiveCandidateBounds(descriptor as never);
     const minimum = [bounds.minimum_m.x, bounds.minimum_m.y, bounds.minimum_m.z];

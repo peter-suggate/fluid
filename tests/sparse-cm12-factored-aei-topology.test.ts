@@ -33,7 +33,7 @@ function fixture(left: SparseBrickResolution, right: SparseBrickResolution,
   });
   const bricks = [brick(0, left), brick(1, right)];
   return buildSparseAtlasCompositeGrid(createSparseAdaptiveMassAtlas(
-    dimensions, reverse ? bricks.reverse() : bricks, 1, undefined, fine,
+    dimensions, reverse ? bricks.reverse() : bricks, 1, fine,
   ));
 }
 
@@ -49,20 +49,27 @@ test("factored AEI preserves authoritative atlas leaf order", () => {
   }
 });
 
-test("factored AEI certifies canonical interiors and equal-rung face patches", () => {
+test("factored AEI certifies interiors and keeps the sparse-air exterior explicit", () => {
   const catalog = compileSparseCM12FactoredAEICatalog(fixture(8, 8, 8));
   const activeDescriptors = catalog.descriptorIdByLeaf.map((id) => catalog.canonical[id]!);
   assert.equal(activeDescriptors.every((descriptor) => descriptor.certified), true);
   assert.equal(activeDescriptors.reduce((sum, descriptor) =>
     sum + descriptor.canonicalRowCount, 0), 2 * 3 * 7 * 8 * 8);
-  assert.equal(catalog.patches.length, 2);
-  assert.equal(catalog.patches.every((patch) =>
-    patch.relation === SPARSE_CM12_FACTORED_AEI_RELATION.equalRungCanonical), true);
-  assert.equal(catalog.patches.every((patch) => patch.mappingCertified), true);
-  for (const patch of catalog.patches) {
+  const equalRung = catalog.patches.filter((patch) =>
+    patch.relation === SPARSE_CM12_FACTORED_AEI_RELATION.equalRungCanonical);
+  const sparseAir = catalog.patches.filter((patch) =>
+    patch.relation === SPARSE_CM12_FACTORED_AEI_RELATION.explicitSparseAir);
+  assert.equal(equalRung.length, 2);
+  assert.equal(sparseAir.length, 10);
+  assert.equal(catalog.patches.length, equalRung.length + sparseAir.length);
+  assert.equal(equalRung.every((patch) => patch.mappingCertified), true);
+  for (const patch of equalRung) {
     assert.equal(patch.faceDimensions[0] * patch.faceDimensions[1], patch.rowCount);
   }
-  assert.equal(catalog.exceptionRows.length, 0);
+  assert.equal(sparseAir.every((patch) => !patch.mappingCertified
+    && patch.exceptionCount === patch.rowCount), true);
+  assert.equal(catalog.exceptionRows.length,
+    sparseAir.reduce((sum, patch) => sum + patch.rowCount, 0));
   assert.ok(catalog.layout.bytesPerSlot < 64 * 1024);
   assert.equal(catalog.layout.canonicalCapacity,
     catalog.layout.leafCapacity * catalog.layout.levelCount);

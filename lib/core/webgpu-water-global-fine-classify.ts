@@ -78,7 +78,10 @@ fn coarsePhi(q:vec3i)->f32{
 fn adaptiveNodalPublication()->bool{let count=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));return count>0u&&(powerCoarseSamples.entries[0].flags&0x18000000u)==0x10000000u;}
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 ${makeCompactFineLevelSetPhiWGSL("coarsePhi")}
-fn fineOwnsCube(base:vec3i)->bool{let q=max(base-vec3i(1),vec3i(0));return all(q<vec3i(params.sampleDimensions))&&fineValid(vec3u(q));}
+fn fineOwnsCube(base:vec3i)->bool{
+  let q=select(max(base-vec3i(1),vec3i(0)),base-vec3i(1),
+    compactSignedSparseAddressing());return fineValidAt(q);
+}
 fn physicalCellSize()->vec3f{return select(u.container.xyz/max(vec3f(params.sampleDimensions),vec3f(1.0)),params.sizing.xyz,all(params.sizing.xyz>vec3f(0.0)));}
 fn occupancy(value:f32)->f32{let band=4.0*physicalCellSize().y;return clamp(0.5-value/band,0.0,1.0);}
 // Adaptive nodal phi is a signed-distance scalar, not optical occupancy.
@@ -108,7 +111,9 @@ fn latticeForWall(p:vec3i,wallMode:u32)->f32{
 fn emitClassifiedCubeTagged(base:vec3i,scale:i32,lo:f32,hi:f32,a:vec4f,b:vec4f,tag:u32){
   if(lo>=0.5||hi<0.5){return;}atomicStore(&drawArgs.globalFineAuthorityLatch,1u);atomicMin(&drawArgs.vertexAllocator,0u);let slot=atomicAdd(&drawArgs.activeCubeCount,1u);
   if(slot>=arrayLength(&activeCubes)||slot*2u+1u>=arrayLength(&cubeValues)){return;}
-  activeCubes[slot]=vec2u(u32(base.x)|(u32(base.z)<<16u),u32(base.y)|((u32(scale)|tag)<<16u));cubeValues[slot*2u]=a;cubeValues[slot*2u+1u]=b;
+  activeCubes[slot]=vec2u((u32(base.x)&0xffffu)|((u32(base.z)&0xffffu)<<16u),
+    (u32(base.y)&0xffffu)|((u32(scale)|tag)<<16u));
+  cubeValues[slot*2u]=a;cubeValues[slot*2u+1u]=b;
 }
 fn emitClassifiedCube(base:vec3i,scale:i32,lo:f32,hi:f32,a:vec4f,b:vec4f){
   emitClassifiedCubeTagged(base,scale,lo,hi,a,b,0u);
@@ -220,6 +225,14 @@ fn classifySharpInteriorBoxFeature(base:vec3i,scale:i32)->bool{
   }}return false;
 }
 fn classifyScaled(base:vec3i,scale:i32){
+  if(compactSignedSparseAddressing()){
+    let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
+    var v=array<f32,8>();var lo=1.0;var hi=0.0;
+    for(var i=0;i<8;i+=1){v[i]=occupancy(phi(base+o[i]*scale-vec3i(1)));
+      lo=min(lo,v[i]);hi=max(hi,v[i]);}
+    emitClassifiedCube(base,scale,lo,hi,vec4f(v[0],v[1],v[2],v[3]),
+      vec4f(v[4],v[5],v[6],v[7]));return;
+  }
   let dims=vec3i(params.sampleDimensions);
   let lowX=base.x==0;let highX=base.x+scale-1==dims.x;
   let lowZ=base.z==0;let highZ=base.z+scale-1==dims.z;
@@ -241,14 +254,28 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   let stream=gid.x+gid.y*65535u*256u;let samples=params.samplesPerBrick;let work=stream/max(1u,samples);
   if(work>=fineWorklist[1]){return;}let id=fineWorklist[7u+work];let metadataBase=id*4u;
   if(id>=params.table.z||metadataBase+2u>=arrayLength(&metadata)||metadata[metadataBase]!=id||metadata[metadataBase+2u]!=params.table.w){return;}
-  let key=metadata[id*4u+1u];let xy=max(1u,params.brickDimensions.x*params.brickDimensions.y);let bz=key/xy;let rem=key-bz*xy;let by=rem/params.brickDimensions.x;let bx=rem-by*params.brickDimensions.x;
+  let key=metadata[id*4u+1u];var pageCoordinate=vec3i(0);
+  if(compactSignedSparseAddressing()){
+    pageCoordinate=vec3i(i32(key&0x7ffu)-1024,i32((key>>11u)&0x3ffu),
+      i32((key>>21u)&0x7ffu)-1024);
+  }else{let xy=max(1u,params.brickDimensions.x*params.brickDimensions.y);
+    let bz=key/xy;let rem=key-bz*xy;let by=rem/params.brickDimensions.x;
+    let bx=rem-by*params.brickDimensions.x;pageCoordinate=vec3i(vec3u(bx,by,bz));}
   let localIndex=stream-work*samples;let r=max(1u,params.brickResolution);let local=vec3u(localIndex%r,(localIndex/r)%r,localIndex/max(1u,r*r));
   let source=metadata[metadataBase+3u];var span=1u;
   if((fineWorklist[3]&0x80000000u)!=0u){span=1u<<compactSourceSpanLog(source);}
   let sampleScale=select(1u,compactPagesPerSolverAxis()*span,span>1u);
-  let q=vec3u(bx,by,bz)*r+local*sampleScale;
-  if(any(q>=params.sampleDimensions)){return;}let index=id*samples+localIndex;if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return;}let xb=array<i32,2>(i32(q.x+1u),0);let yb=array<i32,2>(i32(q.y+1u),0);let zb=array<i32,2>(i32(q.z+1u),0);
-  let xn=select(1u,2u,q.x==0u);let yn=select(1u,2u,q.y==0u);let zn=select(1u,2u,q.z==0u);
+  let q=pageCoordinate*i32(r)+vec3i(local)*i32(sampleScale);
+  if(!compactSignedSparseAddressing()
+    &&(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions)))){return;}
+  let index=id*samples+localIndex;if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return;}
+  let signedAddress=compactSignedSparseAddressing();
+  let lowX=select(q.x==0,local.x==0u&&!fineValidAt(q-vec3i(1,0,0)),signedAddress);
+  let lowY=select(q.y==0,local.y==0u&&!fineValidAt(q-vec3i(0,1,0)),signedAddress);
+  let lowZ=select(q.z==0,local.z==0u&&!fineValidAt(q-vec3i(0,0,1)),signedAddress);
+  let xb=array<i32,2>(q.x+1,q.x);let yb=array<i32,2>(q.y+1,q.y);
+  let zb=array<i32,2>(q.z+1,q.z);
+  let xn=select(1u,2u,lowX);let yn=select(1u,2u,lowY);let zn=select(1u,2u,lowZ);
   for(var zi=0u;zi<zn;zi+=1u){for(var yi=0u;yi<yn;yi+=1u){for(var xi=0u;xi<xn;xi+=1u){classifyScaled(vec3i(xb[xi],yb[yi],zb[zi]),i32(sampleScale));}}}
 }
 @compute @workgroup_size(256)

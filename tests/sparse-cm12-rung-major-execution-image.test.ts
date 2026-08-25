@@ -50,6 +50,7 @@ function fixture(options: {
   resolution: SparseBrickResolution;
   spanBricks?: number;
   active?: boolean;
+  leafCapacity?: number;
 }) {
   const dimensions = options.dimensions ?? [16, 16, 16];
   const brickFineResolution = 16 as const;
@@ -62,18 +63,41 @@ function fixture(options: {
     spanBricks: options.spanBricks,
     resolution: options.resolution,
     density: new Float64Array(count), gamma: new Float64Array(count),
-  }], 7, undefined, brickFineResolution);
+  }], 7, brickFineResolution);
   const directory = createSparseCM12LogicalOwnerDirectory(atlas);
   const scale = brickFineResolution * (options.spanBricks ?? 1) / options.resolution;
   const valid = dimensions.map((value) => Math.ceil(value / scale));
   const liveCount = valid[0]! * valid[1]! * valid[2]!;
+  const span = options.spanBricks ?? 1;
+  const extent = brickDimensions.map((value) => Math.min(span, value));
+  const logicalSlotsPerLeaf = (extent[2]! - 1) * span * span
+    + (extent[1]! - 1) * span + extent[0]!;
+  const layout = options.leafCapacity === undefined ? undefined
+    : createSparseCM12TransportExecutionImageLayout({
+      brickFineResolution,
+      logicalBrickDimensions: directory.layout.logicalBrickDimensions,
+      leafCapacity: options.leafCapacity,
+      maximumSpanBricks: atlas.maximumSpanBricks,
+      logicalSlotsPerLeaf,
+    });
   const image = createSparseCM12TransportExecutionImage(atlas, directory, {
     brickActive: () => options.active ?? true,
     acceptedBrickResolution: () => options.resolution,
     templateBrickCellRange: () => [1000, liveCount],
-  }, { generation: 19 });
+  }, { generation: 19, layout });
   return { image, valid, liveCount, scale };
 }
+
+test("TEI2 reserves the resident growth capacity without inventing host leaves", () => {
+  const { image } = fixture({ resolution: 16, leafCapacity: 5 });
+  assert.equal(image.layout.leafCapacity, 5);
+  assert.equal(image.words.length, image.layout.totalWords);
+  for (const leafBase of image.layout.slotLeafBaseOffsets) {
+    assert.equal(image.words[leafBase], 19);
+    assert.equal(image.words[leafBase + SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_LEAF_WORDS],
+      0);
+  }
+});
 
 test("TEI2 scale descriptors extend word 7 without changing the leaf ABI", () => {
   assert.equal(SPARSE_CM12_TRANSPORT_EXECUTION_IMAGE_LEAF_WORDS, 8);
@@ -162,19 +186,20 @@ test("TEI2 dyadic shift/mask owner arithmetic is exhaustive over supported scale
   }
 });
 
-test("TEI2 WGSL hot owner path consumes the cached scale shift", () => {
+test("TEI2 WGSL hot owner path preserves signed world coordinates", () => {
   const source = createSparseCM12TransportExecutionImageWGSL({
     layout: createSparseCM12TransportExecutionImageLayout({
       brickFineResolution: 16, logicalBrickDimensions: [2, 2, 2], leafCapacity: 4,
     }),
-    packedLogicalOwner16BaseWords: 64,
   });
   const owner = source.slice(source.indexOf("fn cm12TeiOwnerAtFine"),
     source.indexOf("fn cm12TeiPacket(", source.indexOf("fn cm12TeiOwnerAtFine")));
-  assert.match(owner, /let shift=vec3u\(leaf\.scaleLog2\)/);
   assert.match(owner, /let scale=1u<<leaf\.scaleLog2/);
-  assert.match(owner, /let local=\(uq-origin\)>>shift/);
-  assert.match(owner, /let lower=origin\+\(\(uq-origin\)&~vec3u\(scale-1u\)\)/);
+  assert.match(owner, /let relative=q-origin/);
+  assert.match(owner, /if\(any\(relative<vec3i\(0\)\)\)/);
+  assert.match(owner, /let shift=vec3u\(leaf\.scaleLog2\)/);
+  assert.match(owner, /let local=vec3u\(relative\)>>shift/);
+  assert.match(owner, /let lower=origin\+vec3i\(vec3u\(relative\)&~vec3u\(scale-1u\)\)/);
   assert.doesNotMatch(owner, /\/leaf\.scale|\*leaf\.scale/,
     "hot owner resolution must not restore runtime scale division/multiplication");
   assert.match(source, /leaf\.scale,leaf\.scaleLog2/,

@@ -78,13 +78,16 @@ import {
 } from "../lib/core/editor-entity";
 import { editorBodyPoses, editorEntityContext, entityActionsAt, entityAtRay, findEntity, sceneActionsAt, surfacedEntities } from "../lib/core/editor-entity-catalog";
 import {
-  pickTankWallCell,
-  projectTankWallCellOnSide,
-  tankWallRectangleCorners,
-  withTankWallRectangle,
-  type TankWallRectangle,
-} from "../lib/core/editor-tank-wall";
-import type { TankWallField } from "../lib/core/tank-wall-field";
+  pickSolidVoxel,
+  projectSolidVoxelClearRegion,
+  solidVoxelClearPreview,
+  solidVoxelWorldBox,
+  withSolidVoxelClearRegion,
+  type PickedSolidVoxel,
+  type SolidVoxelClearRegion,
+} from "../lib/core/editor-solid-voxel";
+import { solidWorldForScene, type SolidWorld,
+  type SolidWorldVoxelPatch } from "../lib/core/solid-world";
 import {
   advanceCarryPlane,
   carryOrientation,
@@ -132,7 +135,6 @@ import { useUIStore } from "../lib/core/stores/ui-store";
 import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import { SmoothedFrameRate } from "../lib/core/frame-rate-meter";
 import { getScenePreset } from "../lib/core/scenes";
-import { boxTankWallFieldForScene, tankWallFieldFitsScene } from "../lib/core/scene-lattice";
 import {
   DEFAULT_SVO_RENDER_DIAGNOSTICS,
   SVO_RENDER_STAGE_DEFINITIONS,
@@ -198,7 +200,7 @@ const GPU_DEVELOPMENT_REBIND_GRACE_MS = 1_000;
 // render-stage ABIs; retaining a pre-change renderer made the next frame read
 // the new document through stale code and fail with an unrelated `height_m`
 // access. A cold page was sound because it never crossed that ABI boundary.
-const GPU_VIEWPORT_RUNTIME_ABI = "scene-v2-wall-field-render-stages-v1";
+const GPU_VIEWPORT_RUNTIME_ABI = "scene-v3-solid-world-render-stages-v1";
 
 /** Duration of the pinned trace's self-drawing sweep. */
 const PIXEL_TRACE_REVEAL_MS = 1100;
@@ -292,8 +294,13 @@ export function WebGPUViewport() {
    * to explain a lock that leaves it nothing to move.
    */
   const [handleDrag, setHandleDrag] = useState<{ handleId: string } | null>(null);
-  /** The cell-aligned hole proposed by the current wall drag. */
-  const [wallRectanglePreview, setWallRectanglePreview] = useState<TankWallRectangle | null>(null);
+  /** Exact occupied voxels affected by the current generic clear-region drag. */
+  const [solidVoxelPreview, setSolidVoxelPreview] = useState<{
+    region: SolidVoxelClearRegion;
+    coordinates: readonly (readonly [number, number, number])[];
+    affectedCount: number;
+    truncated: boolean;
+  } | null>(null);
 
   const pixelTraceEnabled = useUIStore((state) => state.pixelTraceEnabled);
   const pixelTracePinned = useUIStore((state) => state.pixelTracePinned);
@@ -765,7 +772,10 @@ export function WebGPUViewport() {
     | { id: number; action: "body"; bodyId: string; downX: number; downY: number; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
     | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
     | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
-    | { id: number; action: "tank-wall-rectangle"; rectangle: TankWallRectangle; baseField: TankWallField }
+    | { id: number; action: "solid-voxel-region"; anchor: PickedSolidVoxel;
+      region: SolidVoxelClearRegion;
+      baseSolids: readonly SolidWorldVoxelPatch[];
+      baseWorld: SolidWorld }
     // A rubber band on a horizontal plane through the press. `anchor` is the
     // corner the box is grown from, and `regionId` is claimed at the press so
     // every sample of the drag revises the same region instead of appending one
@@ -893,18 +903,19 @@ export function WebGPUViewport() {
         .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height)),
     }))
     : [];
-  const wallRectangleOutline = wallRectanglePreview ? (() => {
-    const corners = tankWallRectangleCorners(scene, wallRectanglePreview)
-      .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height));
-    const face = scene.container.wallField.faces[wallRectanglePreview.side];
-    return {
-      corners,
-      columns: Math.abs(wallRectanglePreview.u1 - wallRectanglePreview.u0) + 1,
-      rows: Math.abs(wallRectanglePreview.v1 - wallRectanglePreview.v0) + 1,
-      cellWidth_m: (wallRectanglePreview.side === "left" || wallRectanglePreview.side === "right"
-        ? scene.container.depth_m : scene.container.width_m) / face.uCells,
-      cellHeight_m: scene.container.height_m / face.vCells,
-    };
+  const solidVoxelOutlines = solidVoxelPreview?.coordinates.map((coordinate) => ({
+    key: coordinate.join(","),
+    corners: boxCorners(solidVoxelWorldBox(scene, coordinate))
+      .map((corner) => projectToViewport(corner, camera,
+        viewportSize.width, viewportSize.height)),
+  })) ?? [];
+  const solidVoxelRegionCorners = solidVoxelPreview ? (() => {
+    const minimum = solidVoxelWorldBox(scene, solidVoxelPreview.region.minimum).min;
+    const maximumCell = solidVoxelPreview.region.maximumExclusive.map((value) =>
+      value - 1) as unknown as SolidVoxelClearRegion["maximumExclusive"];
+    const maximum = solidVoxelWorldBox(scene, maximumCell).max;
+    return boxCorners({ min: minimum, max: maximum }).map((corner) =>
+      projectToViewport(corner, camera, viewportSize.width, viewportSize.height));
   })() : undefined;
   const hoverProjection = hover ? projectToViewport(hover.position_m, camera, viewportSize.width, viewportSize.height) : undefined;
   // The field-overlay picker rides just outside the container's top corner, and
@@ -1026,26 +1037,6 @@ export function WebGPUViewport() {
     if (retainedLifecycle) {
       retainedLifecycle.cleanupImmediately();
       gpuLifecycleRef.current = null;
-    }
-    if (retainedRuntimeIncompatible) {
-      // Zustand survives the same development replacement as the renderer. If
-      // that replacement crosses a document-schema boundary, migrate the one
-      // newly-required authority in place so an unsaved terrain edit survives
-      // the renderer rebuild. Presets and imported documents already enter
-      // through their normal construction/validation paths.
-      const sceneState = useSceneStore.getState();
-      const retainedScene = sceneState.scene;
-      if (String(retainedScene.schemaVersion) !== "2.0.0"
-        || !tankWallFieldFitsScene(retainedScene)) {
-        sceneState.setScene({
-          ...retainedScene,
-          schemaVersion: "2.0.0",
-          container: {
-            ...retainedScene.container,
-            wallField: boxTankWallFieldForScene(retainedScene),
-          },
-        }, sceneState.presetId);
-      }
     }
     const diagnostics = useDiagnosticsStore.getState();
     const safeBringup = safeBrowserGPUBringupEnabled(window.location.search);
@@ -1826,44 +1817,42 @@ export function WebGPUViewport() {
     return sample.brickKey;
   };
 
-  /** Revise one cell-aligned opening from the field present at pointer-down. */
-  const updateTankWallRectangleDraft = (
-    rectangle: TankWallRectangle,
-    baseField: TankWallField,
-  ) => {
+  /** Preview one generic clear box against the immutable pointer-down world. */
+  const previewSolidVoxelRegion = (
+    region: SolidVoxelClearRegion,
+    baseWorld: SolidWorld,
+  ): void => {
     const committed = useSceneStore.getState().scene;
-    const wallField = withTankWallRectangle(
-      baseField, rectangle.side,
-      rectangle.u0, rectangle.v0, rectangle.u1, rectangle.v1, false,
-    );
-    useSceneDraftStore.getState().updateDraft({
-      container: { ...committed.container, wallField },
-    });
-    setWallRectanglePreview(rectangle);
+    const preview = solidVoxelClearPreview(committed, region, baseWorld);
+    setSolidVoxelPreview({ region, coordinates: preview.coordinates,
+      affectedCount: preview.affectedCount, truncated: preview.truncated });
   };
 
-  /** Start a one-shot, face-locked rectangle rather than an accumulating brush. */
-  const beginTankWallRectangle = (
+  /** Start a one-shot, face-locked box on any occupied SolidWorld voxel. */
+  const beginSolidVoxelRegion = (
     event: React.PointerEvent<HTMLCanvasElement>,
     ray: { origin: Vec3; direction: Vec3 },
   ) => {
     const committed = useSceneStore.getState().scene;
-    const cell = pickTankWallCell(committed, ray);
-    if (!cell) {
-      useRuntimeStore.getState().setNotice("Aim at a vertical tank wall, then drag the opening");
+    const baseWorld = solidWorldForScene(committed);
+    const anchor = pickSolidVoxel(committed, ray, baseWorld);
+    if (!anchor) {
+      useRuntimeStore.getState().setNotice("Aim at an occupied solid voxel, then drag a clear region");
       return;
     }
-    const rectangle: TankWallRectangle = {
-      side: cell.side, u0: cell.u, v0: cell.v, u1: cell.u, v1: cell.v,
-    };
-    simulation.beginDraft("tank-wall", "Cut a rectangular tank opening");
+    const region: SolidVoxelClearRegion = { minimum: [...anchor.coordinate],
+      maximumExclusive: anchor.coordinate.map((value) => value + 1) as
+        unknown as SolidVoxelClearRegion["maximumExclusive"] };
+    simulation.beginDraft("solid-voxels", "Clear a solid voxel region");
     pointerRef.current = {
       id: event.pointerId,
-      action: "tank-wall-rectangle",
-      rectangle,
-      baseField: committed.container.wallField,
+      action: "solid-voxel-region",
+      anchor,
+      region,
+      baseSolids: committed.solidVoxels,
+      baseWorld,
     };
-    updateTankWallRectangleDraft(rectangle, committed.container.wallField);
+    previewSolidVoxelRegion(region, baseWorld);
   };
 
   /**
@@ -2164,9 +2153,9 @@ export function WebGPUViewport() {
       // mid-rebuild — keeps working while the renderer replaces the image.
       if (beginEntityHandleDrag(event)) return;
       if (beginTerrainHandleDrag(event)) return;
-      const tankWallTool = useUIStore.getState().activeTool;
-      if (tankWallTool === "tank-wall-cut") {
-        beginTankWallRectangle(event, ray);
+      const solidVoxelTool = useUIStore.getState().activeTool;
+      if (solidVoxelTool === "solid-voxel-clear") {
+        beginSolidVoxelRegion(event, ray);
         return;
       }
       // Not GPU-gated, unlike the placements below: a region is a box in the
@@ -2344,14 +2333,16 @@ export function WebGPUViewport() {
       pointerRef.current = { ...active, lastBrickKey: paintFluidAt(pointerRay(event), active.erase, active.lastBrickKey) };
       return;
     }
-    if (active.action === "tank-wall-rectangle") {
-      const cell = projectTankWallCellOnSide(
-        useSceneStore.getState().scene, pointerRay(event), active.rectangle.side,
+    if (active.action === "solid-voxel-region") {
+      const region = projectSolidVoxelClearRegion(
+        useSceneStore.getState().scene, pointerRay(event), active.anchor,
       );
-      if (!cell || (cell.u === active.rectangle.u1 && cell.v === active.rectangle.v1)) return;
-      const rectangle = { ...active.rectangle, u1: cell.u, v1: cell.v };
-      pointerRef.current = { ...active, rectangle };
-      updateTankWallRectangleDraft(rectangle, active.baseField);
+      if (!region || (region.minimum.every((value, axis) =>
+        value === active.region.minimum[axis])
+        && region.maximumExclusive.every((value, axis) =>
+          value === active.region.maximumExclusive[axis]))) return;
+      previewSolidVoxelRegion(region, active.baseWorld);
+      pointerRef.current = { ...active, region };
       return;
     }
     if (active.action === "region-draw") {
@@ -2502,9 +2493,12 @@ export function WebGPUViewport() {
       simulation.commitDraft();
       return;
     }
-    if (active.action === "tank-wall-rectangle") {
-      setWallRectanglePreview(null);
+    if (active.action === "solid-voxel-region") {
+      setSolidVoxelPreview(null);
       if (cancelled) { simulation.cancelDraft(); return; }
+      useSceneDraftStore.getState().updateDraft({
+        solidVoxels: withSolidVoxelClearRegion(active.baseSolids, active.region),
+      });
       simulation.commitDraft();
       useUIStore.getState().setActiveTool(DEFAULT_EDITOR_TOOL);
       return;
@@ -2625,36 +2619,44 @@ export function WebGPUViewport() {
           />
         )))}
     </svg>}
-    {wallRectangleOutline && <svg
-      className="editor-gizmo editor-wall-rectangle-gizmo"
-      data-testid="editor-wall-rectangle-gizmo"
+    {solidVoxelPreview && <svg
+      className="editor-gizmo editor-solid-voxel-gizmo"
+      data-testid="editor-solid-voxel-gizmo"
       width={viewportSize.width}
       height={viewportSize.height}
       aria-hidden="true"
     >
-      <polygon
-        className="wall-rectangle-fill"
-        points={wallRectangleOutline.corners
-          .map((corner) => `${corner.leftFraction * viewportSize.width},${corner.topFraction * viewportSize.height}`)
-          .join(" ")}
-      />
-      <polygon
-        className="wall-rectangle-outline"
-        points={wallRectangleOutline.corners
-          .map((corner) => `${corner.leftFraction * viewportSize.width},${corner.topFraction * viewportSize.height}`)
-          .join(" ")}
-      />
-      <text
-        className="wall-rectangle-label"
-        x={(wallRectangleOutline.corners[2]!.leftFraction + wallRectangleOutline.corners[3]!.leftFraction)
-          * 0.5 * viewportSize.width}
-        y={(wallRectangleOutline.corners[2]!.topFraction + wallRectangleOutline.corners[3]!.topFraction)
-          * 0.5 * viewportSize.height - 9}
+      {solidVoxelRegionCorners && BOX_EDGES
+        .filter(([from, to]) => solidVoxelRegionCorners[from]!.depth_m > 1e-6
+          && solidVoxelRegionCorners[to]!.depth_m > 1e-6)
+        .map(([from, to]) => <line
+          key={`region-${from}-${to}`}
+          className="solid-voxel-region-outline"
+          x1={solidVoxelRegionCorners[from]!.leftFraction * viewportSize.width}
+          y1={solidVoxelRegionCorners[from]!.topFraction * viewportSize.height}
+          x2={solidVoxelRegionCorners[to]!.leftFraction * viewportSize.width}
+          y2={solidVoxelRegionCorners[to]!.topFraction * viewportSize.height}
+        />)}
+      {solidVoxelOutlines.flatMap((voxel) => BOX_EDGES
+        .filter(([from, to]) => voxel.corners[from]!.depth_m > 1e-6
+          && voxel.corners[to]!.depth_m > 1e-6)
+        .map(([from, to]) => <line
+          key={`${voxel.key}-${from}-${to}`}
+          className="solid-voxel-outline"
+          x1={voxel.corners[from]!.leftFraction * viewportSize.width}
+          y1={voxel.corners[from]!.topFraction * viewportSize.height}
+          x2={voxel.corners[to]!.leftFraction * viewportSize.width}
+          y2={voxel.corners[to]!.topFraction * viewportSize.height}
+        />))}
+      {solidVoxelOutlines[0] && <text
+        className="solid-voxel-label"
+        x={solidVoxelOutlines[0].corners[6]!.leftFraction * viewportSize.width}
+        y={solidVoxelOutlines[0].corners[6]!.topFraction * viewportSize.height - 9}
       >
-        {wallRectangleOutline.columns} × {wallRectangleOutline.rows} CELLS · {(
-          wallRectangleOutline.columns * wallRectangleOutline.cellWidth_m).toFixed(2)} × {(
-          wallRectangleOutline.rows * wallRectangleOutline.cellHeight_m).toFixed(2)} M
-      </text>
+        CLEAR {solidVoxelPreview.affectedCount} SOLID VOXEL{
+          solidVoxelPreview.affectedCount === 1 ? "" : "S"}
+        {solidVoxelPreview.truncated ? " · 512 SHOWN" : ""}
+      </text>}
     </svg>}
     {cursorDropCircle && <svg
       className="editor-gizmo editor-ball-gizmo"

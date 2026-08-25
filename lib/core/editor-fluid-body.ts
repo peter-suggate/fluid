@@ -558,18 +558,28 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
       label: "Solid",
       icon: "solid",
       tone: "body",
-      hint: "Put a solid here and pick it straight up",
+      hint: "Place a solid here or clear existing solid voxels",
       // The shape's own name is the icon's name: the vocabulary in
       // `EditorActionIcon` covers every `SceneShapeName`, so a shape added to
       // the table draws itself in the ring without a second table to update.
-      children: SCENE_SHAPES_BY_CODE.map((shape) => ({
-        id: shape.name,
-        label: shape.label,
-        icon: shape.name,
-        tone: "body" as const,
-        hint: `Place a ${shape.label.toLowerCase()} here and carry it`,
-        effect: { kind: "place" as const, shape: shape.name, point_m, carry: true },
-      })),
+      children: [
+        {
+          id: "clear-solid-voxels",
+          label: "Clear voxels",
+          icon: "erase",
+          tone: "danger" as const,
+          hint: "Drag a box from any occupied solid voxel to clear that region",
+          effect: { kind: "arm" as const, tool: "solid-voxel-clear" as const },
+        },
+        ...SCENE_SHAPES_BY_CODE.map((shape) => ({
+          id: shape.name,
+          label: shape.label,
+          icon: shape.name,
+          tone: "body" as const,
+          hint: `Place a ${shape.label.toLowerCase()} here and carry it`,
+          effect: { kind: "place" as const, shape: shape.name, point_m, carry: true },
+        })),
+      ],
     },
     {
       id: "region",

@@ -96,38 +96,17 @@ fn activeId(gid:vec3u)->vec3i{return vec3i(gid)+vec3i(vec3u(
 fn inflowGridDims()->vec3i{return dims();}
 fn valid(p: vec3i) -> bool { let d=dims(); return all(p >= vec3i(0)) && all(p < d); }
 fn clampCell(p: vec3i) -> vec3i { return clamp(p, vec3i(0), dims()-vec3i(1)); }
-fn tankWallWord(index:u32)->u32{
+fn solidVoxelWord(index:u32)->u32{
   return activeScratch[u32(round(params.dropExtent.z))+index];
 }
-fn tankWallBit(side:u32,cell:u32)->bool{
-  let offset=tankWallWord(4u+side);
-  return (tankWallWord(offset+(cell>>5u))&(1u<<(cell&31u)))!=0u;
-}
-fn tankSideBoundaryFace(id:vec3i,axis:u32)->bool{
-  let d=dims();var neighbor=id;neighbor[axis]+=1;
-  if(axis==0u){return (id.x==-1&&neighbor.x==0)||(id.x==d.x-1&&neighbor.x==d.x);}
-  if(axis==2u){return (id.z==-1&&neighbor.z==0)||(id.z==d.z-1&&neighbor.z==d.z);}
-  return false;
-}
-fn tankSideWallSolid(id:vec3i,axis:u32)->bool{
-  let d=dims();var neighbor=id;neighbor[axis]+=1;
-  if(axis==0u){
-    let q=select(id,neighbor,id.x<0);if(q.y<0||q.y>=d.y||q.z<0||q.z>=d.z){return true;}
-    let side=select(1u,0u,id.x<0);return tankWallBit(side,u32(q.z+d.z*q.y));
-  }
-  if(axis==2u){
-    let q=select(id,neighbor,id.z<0);if(q.y<0||q.y>=d.y||q.x<0||q.x>=d.x){return true;}
-    let side=select(3u,2u,id.z<0);return tankWallBit(side,u32(q.x+d.x*q.y));
-  }
-  return true;
-}
-fn outsideThroughOpenTankSide(p:vec3i)->bool{
-  let d=dims();
-  if(p.x<0){return !tankSideWallSolid(vec3i(-1,clamp(p.y,0,d.y-1),clamp(p.z,0,d.z-1)),0u);}
-  if(p.x>=d.x){return !tankSideWallSolid(vec3i(d.x-1,clamp(p.y,0,d.y-1),clamp(p.z,0,d.z-1)),0u);}
-  if(p.z<0){return !tankSideWallSolid(vec3i(clamp(p.x,0,d.x-1),clamp(p.y,0,d.y-1),-1),2u);}
-  if(p.z>=d.z){return !tankSideWallSolid(vec3i(clamp(p.x,0,d.x-1),clamp(p.y,0,d.y-1),d.z-1),2u);}
-  return false;
+fn staticSolidVoxelOccupied(p:vec3i)->bool{
+  if(solidVoxelWord(0u)!=0x53565731u){return false;}
+  let shape=vec3i(i32(solidVoxelWord(1u)),i32(solidVoxelWord(2u)),
+    i32(solidVoxelWord(3u)));
+  let q=p+vec3i(1);
+  if(any(q<vec3i(0))||any(q>=shape)){return false;}
+  let index=u32(q.x+shape.x*(q.y+shape.y*q.z));
+  return (solidVoxelWord(4u+(index>>5u))&(1u<<(index&31u)))!=0u;
 }
 // Canonical reductions for the horizontal D4 group. Reflections exchange
 // operands inside opposite-direction pairs; x/z exchange operands of the
@@ -146,27 +125,12 @@ fn d4Sum8Vec2(value:array<vec2f,8>)->vec2f{
 fn d4Sum6Vec3(value:array<vec3f,6>)->vec3f{return ((value[0]+value[1])+(value[4]+value[5]))+(value[2]+value[3]);}
 fn worldCell(id:vec3i)->vec3f{let h=params.cellGravity.xyz;return vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);}
 fn hasTerrain()->bool{return params.container.w>0.5;}
-fn hasSphericalContainer()->bool{return params.tuning.z>0.5;}
 fn depthSymmetry()->bool{return params.tuning.w>0.5;}
-fn sphericalContainerCenter()->vec3f{return vec3f(0.0,0.5*params.container.y,0.0);}
-fn sphericalContainerRadius()->f32{return 0.5*min(params.container.x,min(params.container.y,params.container.z));}
-fn worldInsideSphericalContainer(world:vec3f)->bool{
-  return !hasSphericalContainer()||distance(world,sphericalContainerCenter())<=sphericalContainerRadius();
-}
-fn worldInsideSphericalSolid(world:vec3f)->bool{return hasSphericalContainer()&&!worldInsideSphericalContainer(world);}
 fn terrainHeightCells(x:i32,z:i32)->f32{let d=dims();return textureLoad(terrainIn,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.z-1)),0).x;}
 // Ground handling mirrors the rigid-body solid treatment with zero velocity:
 // the heightfield closes faces, drops pressure unknowns, and blocks deposits.
 fn cellInsideTerrain(p:vec3i)->bool{if(!hasTerrain()){return false;}return f32(p.y)+0.5<terrainHeightCells(p.x,p.z);}
 fn cellTerrainFraction(p:vec3i)->f32{if(!hasTerrain()){return 0.0;}return clamp(terrainHeightCells(p.x,p.z)-f32(p.y),0.0,1.0);}
-fn cellSphericalSolidFraction(p:vec3i)->f32{
-  if(!hasSphericalContainer()||!valid(p)){return 0.0;}var solid=0.0;
-  for(var corner=0u;corner<8u;corner+=1u){
-    let offset=vec3f(select(-0.4,0.4,(corner&1u)!=0u),select(-0.4,0.4,(corner&2u)!=0u),select(-0.4,0.4,(corner&4u)!=0u));
-    if(worldInsideSphericalSolid(worldCell(p)+offset*params.cellGravity.xyz)){solid+=1.0;}
-  }
-  return solid/8.0;
-}
 ${inflowBoundaryWGSL}
 /**
  * Share of a cell covered by a ball dropped into the running solve.
@@ -239,8 +203,8 @@ fn projectPressureValue(p:vec3i)->f32{
   return textureLoad(pressureIn,clamp(p+vec3i(1),vec3i(0),pressureDims-vec3i(1)),0).x;
 }
 fn cellOpenFraction(p:vec3i)->f32{
-  if(!valid(p)){return 0.0;}
-  return clamp((1.0-cellSolidFraction(p))*(1.0-cellTerrainFraction(p))*(1.0-cellSphericalSolidFraction(p)),0.0,1.0);
+  if(!valid(p)||staticSolidVoxelOccupied(p)){return 0.0;}
+  return clamp((1.0-cellSolidFraction(p))*(1.0-cellTerrainFraction(p)),0.0,1.0);
 }
 // Chentanez--Mueller Sec. 3.7, Eq. 20.  Surface density represents mass in
 // the non-solid part of a cut cell, so pressure classification and the ghost
@@ -408,7 +372,13 @@ fn traceWorld(p:vec3f)->vec3f{
 // every shipped terrain scene.
 fn hasRigidBodies()->bool{return params.boundary.z>=0.5;}
 fn insideAnyRigid(world:vec3f)->bool{return rigidBodyIndexAt(world)>=0;}
-fn insideAnyTraceSolid(world:vec3f)->bool{return worldInsideSphericalSolid(world)||insideAnyRigid(world);}
+fn staticSolidVoxelAtWorld(world:vec3f)->bool{
+  let h=params.cellGravity.xyz;
+  let p=vec3i(floor(vec3f((world.x+0.5*params.container.x)/h.x,
+    world.y/h.y,(world.z+0.5*params.container.z)/h.z)));
+  return staticSolidVoxelOccupied(p);
+}
+fn insideAnyTraceSolid(world:vec3f)->bool{return staticSolidVoxelAtWorld(world)||insideAnyRigid(world);}
 // Sec. 3.4 stops the density characteristic at a solid boundary; the velocity
 // characteristic had no such test.  The RK2 backtrace therefore read straight
 // through a body, so liquid ahead of a moving obstacle sampled the liquid
@@ -433,7 +403,6 @@ fn clipDepartureAtSolid(position:vec3f,departure:vec3f)->vec3f{
 // body-free hydrostatic lane -- pure float reassociation, but enough to make
 // every still-scene lane need re-blessing for no physical reason.
 fn clippedDeparturePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{
-  if(!hasRigidBodies()&&!hasSphericalContainer()){return departurePoint(position,dt,h);}
   return clipDepartureAtSolid(position,departurePoint(position,dt,h));
 }
 fn velocityFaceLiquid(position:vec3f,component:u32)->bool{
@@ -448,7 +417,7 @@ fn liquidOnlyVelocityAdvection()->bool{return params.dropExtent.y>0.5;}
 fn advectVelocityComponent(position:vec3f,component:u32,dt:f32,h:vec3f)->f32{
   let rawDeparture=departurePoint(position,dt,h);
   var departure=rawDeparture;
-  if(hasRigidBodies()||hasSphericalContainer()){departure=clipDepartureAtSolid(position,rawDeparture);}
+  departure=clipDepartureAtSolid(position,rawDeparture);
   // Air-side values still need the complete hierarchy for interface transport
   // and the following extrapolation. When the toggle is on, a face belonging
   // to updated liquid gathers momentum exclusively from prior liquid faces.
@@ -507,6 +476,7 @@ fn bodySolidFraction(body:RigidBody,p:vec3i)->f32{
   return inside/8.0;
 }
 fn cellSolidFraction(p:vec3i)->f32{
+  if(staticSolidVoxelOccupied(p)){return 1.0;}
   let bodyCount=u32(round(params.boundary.z));var fraction=0.0;
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}fraction=max(fraction,bodySolidFraction(rigidBodies[bodyIndex],p));}
   return fraction;
@@ -519,7 +489,7 @@ fn worldInsideTerrain(world:vec3f)->bool{
   return world.y<terrainHeightCells(x,z)*h.y;
 }
 fn solidVelocityAtWorld(world:vec3f)->vec4f{
-  if(worldInsideSphericalSolid(world)){return vec4f(0.0,0.0,0.0,1.0);}
+  if(staticSolidVoxelAtWorld(world)){return vec4f(0.0,0.0,0.0,1.0);}
   if(worldInsideTerrain(world)){return vec4f(0.0,0.0,0.0,1.0);}
   let body=rigidBodyIndexAt(world);
   if(body>=0){return vec4f(rigidVelocityAt(body,world),1.0);}
@@ -543,14 +513,10 @@ fn faceSolidData(id:vec3i,axis:u32)->vec4f{
 }
 fn faceOpenFraction(id:vec3i,axis:u32)->f32{
   var neighbor=id;neighbor[axis]+=1;
+  if(staticSolidVoxelOccupied(id)||staticSolidVoxelOccupied(neighbor)){return 0.0;}
   if(!valid(id)||!valid(neighbor)){
-    // The authored open top is exterior air, not a solid face. Every other
-    // domain boundary remains a static, fully covered wall.
-    if(axis==1u&&valid(id)&&id.y==dims().y-1&&neighbor.y==dims().y&&params.boundary.w>0.5){return 1.0;}
-    if(!hasSphericalContainer()&&tankSideBoundaryFace(id,axis)){
-      return select(1.0,0.0,tankSideWallSolid(id,axis));
-    }
-    return 0.0;
+    return select(1.0,0.0,staticSolidVoxelOccupied(id)
+      ||staticSolidVoxelOccupied(neighbor));
   }
   return 1.0-faceSolidData(id,axis).w;
 }
@@ -570,21 +536,16 @@ fn extrapolatedRigidVelocityAtFace(world:vec3f)->vec3f{
 // authored solid exterior, so its inferred geometric fraction is 1/2.
 fn pressureFaceData(id:vec3i,axis:u32)->vec4f{
   var neighbor=id;neighbor[axis]+=1;
+  if(staticSolidVoxelOccupied(id)||staticSolidVoxelOccupied(neighbor)){
+    return vec4f(0.0,0.0,0.0,0.5);
+  }
   if(!valid(id)||!valid(neighbor)){
     // A published 2D case has no z pressure derivative. Its storage-depth
     // faces are symmetry planes, not CM11a separating solid boundaries.
     if(axis==2u&&depthSymmetry()&&valid(id)!=valid(neighbor)){return vec4f(0.0);}
-    if(axis==1u&&valid(id)&&id.y==dims().y-1&&neighbor.y==dims().y&&params.boundary.w>0.5){return vec4f(0.0,0.0,0.0,1.0);}
     if(valid(id)==valid(neighbor)){return vec4f(0.0);}
-    if(!hasSphericalContainer()&&tankSideBoundaryFace(id,axis)){
-      return vec4f(0.0,0.0,0.0,select(1.0,0.5,tankSideWallSolid(id,axis)));
-    }
-    // A box wall cuts exactly half of its boundary dual cell.  A spherical
-    // vessel is only tangent to the rectangular domain, however, so using
-    // that planar 1/2 fraction across the whole side opens a large artificial
-    // pressure channel through exterior solid.  Let the analytic samples
-    // below measure the actual tangent dual cell instead.
-    if(!hasSphericalContainer()){return vec4f(0.0,0.0,0.0,0.5);}
+    return vec4f(0.0,0.0,0.0,select(1.0,0.5,
+      staticSolidVoxelOccupied(id)||staticSolidVoxelOccupied(neighbor)));
   }
   let world=faceWorld(id,axis);let h=params.cellGravity.xyz;var solid=0.0;var solidVelocity=vec3f(0.0);
   for(var sampleIndex=0u;sampleIndex<8u;sampleIndex+=1u){
@@ -619,7 +580,7 @@ fn ambientFluidVelocity(body:RigidBody,p:vec3i,fallback:vec3f)->vec3f{
   let h=params.cellGravity.xyz;let radius=max(body.dimensions.w,0.0);let reach=vec3i(ceil(vec3f(2.0*radius)/h))+vec3i(2);
   let offsets=array<vec3i,6>(vec3i(-reach.x,0,0),vec3i(reach.x,0,0),vec3i(0,-reach.y,0),vec3i(0,reach.y,0),vec3i(0,0,-reach.z),vec3i(0,0,reach.z));
   var terms:array<vec3f,6>;var weights:array<f32,6>;
-  for(var n=0;n<6;n+=1){let q=p+offsets[n];terms[n]=vec3f(0.0);weights[n]=0.0;if(!valid(q)||cellRigidBody(q)>=0||cellInsideTerrain(q)||worldInsideSphericalSolid(worldCell(q))){continue;}let wet=surfaceOccupancy(q);terms[n]=wet*velocity(q);weights[n]=wet;}
+  for(var n=0;n<6;n+=1){let q=p+offsets[n];terms[n]=vec3f(0.0);weights[n]=0.0;if(!valid(q)||staticSolidVoxelOccupied(q)||cellRigidBody(q)>=0||cellInsideTerrain(q)){continue;}let wet=surfaceOccupancy(q);terms[n]=wet*velocity(q);weights[n]=wet;}
   let total=d4Sum6Vec3(terms);let weight=d4Sum6(weights);
   return select(fallback,total/max(weight,1e-6),weight>0.0);
 }
@@ -629,12 +590,7 @@ fn columnHeight(x:i32,z:i32)->f32{
 fn upwind(face:f32,negative:f32,positive:f32)->f32{return face*select(positive,negative,face>=0.0);}
 fn normalSurfaceOccupancy(id:vec3i)->f32{
   if(valid(id)){return surfaceOccupancy(id);}
-  // Side walls and the floor are solids, so extend alpha with a zero-normal
-  // gradient instead of inventing an air interface at the wall. Only an open
-  // top (boundary.w) is allowed to expose liquid to exterior air.
-  if(id.y>=dims().y&&params.boundary.w>0.5){return 0.0;}
-  if(outsideThroughOpenTankSide(id)){return 0.0;}
-  return surfaceOccupancy(clampCell(id));
+  return select(0.0,surfaceOccupancy(clampCell(id)),staticSolidVoxelOccupied(id));
 }
 fn surfaceGradient(id:vec3i)->vec3f{
   let h=params.cellGravity.xyz;
@@ -861,7 +817,6 @@ fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
 fn gammaDiffusionFaceOpen(lower:vec3i,axis:u32)->f32{
   var upper=lower;upper[axis]=upper[axis]+1;
   if(!valid(lower)||!valid(upper)){return 0.0;}
-  if(!(hasRigidBodies()||hasTerrain()||hasSphericalContainer())){return 1.0;}
   return clamp(faceOpenFraction(lower,axis),0.0,1.0);
 }
 
@@ -1044,7 +999,7 @@ fn domainFaceFluidVelocity(id:vec3i,axis:u32)->f32{
 }
 fn domainFaceSolidVelocity(id:vec3i,axis:u32,checkSolid:bool)->f32{
   var neighbor=id;neighbor[axis]+=1;
-  if(!valid(id)||!valid(neighbor)||(!checkSolid&&!hasTerrain()&&!hasSphericalContainer())){return 0.0;}
+  if(!valid(id)||!valid(neighbor)||(!checkSolid&&!hasTerrain())){return 0.0;}
   return pressureFaceData(id,axis)[axis];
 }
 fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
@@ -1124,7 +1079,7 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
       }
       continue;
     }
-    let pressureFace=pressureFaceData(id,axis);let open=select(1.0,pressureFace.w,hasTerrain()||hasSphericalContainer()||nearAnyBody(faceWorld(id,axis)));
+    let pressureFace=pressureFaceData(id,axis);let open=pressureFace.w;
     if(open<=1e-5){v[axis]=pressureFace[axis];continue;}
     let centreLiquid=pressureLiquid(id);let neighborLiquid=pressureLiquid(neighbor);
     if(centreLiquid||neighborLiquid){
@@ -1177,7 +1132,7 @@ fn relaxSolidPhi(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
   let phi=textureLoad(pressureIn,id,0).x;
   var result=phi;
-  if(hasSphericalContainer()||nearAnyBody(worldCell(id))){
+  if(staticSolidVoxelOccupied(id)||nearAnyBody(worldCell(id))){
     let s=cellSolidFraction(id);
     if(s>0.0){
       var open=0.0;var openSum=0.0;var total=0.0;var exteriorOpen=0.0;var exteriorSum=0.0;
@@ -1213,11 +1168,8 @@ fn relaxSolidPhi(@builtin(global_invocation_id) gid:vec3u){
 // tracing along the density gradient to the 0.5 iso-contour and depositing
 // fixed-point trilinear weights; pass 3 folds the deposits back in.
 fn cellInsideSolid(p:vec3i)->bool{
-  // TraceAlongField must stop at a closed domain wall just as it stops at an
-  // embedded solid. The only non-solid invalid coordinate is above an open
-  // top, where the exterior is deliberately air.
-  if(!valid(p)){return !(p.y>=dims().y&&params.boundary.w>0.5);}
-  if(worldInsideSphericalSolid(worldCell(p))){return true;}
+  if(staticSolidVoxelOccupied(p)){return true;}
+  if(!valid(p)){return false;}
   if(cellInsideTerrain(p)){return true;}
   let bodyCount=u32(round(params.boundary.z));if(bodyCount==0u){return false;}
   let world=worldCell(p);
@@ -1304,9 +1256,6 @@ fn sharpenResolve(@builtin(global_invocation_id) gid:vec3u){
 // of the solid signed-distance field (positive away from the union of solids).
 fn solidSignedDistance(world:vec3f)->f32{
   var distance=1e20;
-  if(hasSphericalContainer()){
-    distance=min(distance,sphericalContainerRadius()-length(world-sphericalContainerCenter()));
-  }
   if(hasTerrain()){
     let h=params.cellGravity.xyz;
     let x=i32(floor((world.x+0.5*params.container.x)/h.x));

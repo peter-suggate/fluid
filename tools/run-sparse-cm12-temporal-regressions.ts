@@ -258,17 +258,6 @@ function bitExactFieldReceipt(fields: Awaited<ReturnType<
   };
 }
 
-function fieldByteDifference(a: Float32Array, b: Float32Array) {
-  const av = new Uint32Array(a.buffer, a.byteOffset, a.length);
-  const bv = new Uint32Array(b.buffer, b.byteOffset, b.length);
-  let count = 0;const first: Array<{ index: number; actual: number; oracle: number }> = [];
-  for (let index = 0; index < av.length; index += 1) if (av[index] !== bv[index]) {
-    count += 1;
-    if (first.length < 8) first.push({ index, actual: av[index]!, oracle: bv[index]! });
-  }
-  return { count, first };
-}
-
 type BitExactFieldReceipt = ReturnType<typeof bitExactFieldReceipt>;
 const BIT_EXACT_PHYSICAL_FIELDS = ["densitySha256", "velocitySha256",
   "pressureSha256", "divergenceSha256"] as const satisfies readonly (
@@ -819,8 +808,6 @@ async function runDamFrontLane(): Promise<void> {
   let device: GPUDevice | undefined;
   let adaptive: WebGPUAdaptiveMassSolver | undefined;
   let allFine: WebGPUAdaptiveMassSolver | undefined;
-  let authorityOracle: WebGPUAdaptiveMassSolver | undefined;
-  const authorityOraclePaired = hasFlag("fca-authority-oracle-paired");
   const failures: string[] = [];
   try {
     const dawn = await import(pathToFileURL(modulePath).href) as NodeDawnProvider;
@@ -857,10 +844,6 @@ async function runDamFrontLane(): Promise<void> {
     // racing across multiple resident owners during peak allocation.
     adaptive = await createSolver("adaptive");
     allFine = await createSolver("all-fine");
-    if (authorityOraclePaired) {
-      authorityOracle = await WebGPUAdaptiveMassSolver.createLegacyHostAuthorityOracleForQA(
-        device, scene, "balanced", undefined, solverOptions("adaptive"), () => {});
-    }
     const [initialAdaptiveFields, initialAllFineFields] = await Promise.all([
       adaptive.readDiagnosticFields(), allFine.readDiagnosticFields(),
     ]);
@@ -870,13 +853,6 @@ async function runDamFrontLane(): Promise<void> {
       adaptiveBitExact: bitExactFieldReceipt(initialAdaptiveFields),
       allFineBitExact: bitExactFieldReceipt(initialAllFineFields),
     };
-    if (authorityOracle) {
-      const oracleInitial = bitExactFieldReceipt(await authorityOracle.readDiagnosticFields());
-      for (const field of BIT_EXACT_PHYSICAL_FIELDS) {
-        expect(failures, oracleInitial[field] === initial.adaptiveBitExact[field],
-          `FCA authority oracle initial physical mismatch in ${field.replace("Sha256", "")}`);
-      }
-    }
     const initialActivity = await adaptive.readGPUActivityPolicy();
     const initialStats = await adaptive.readStats();
     if (physicalReference) for (const field of BIT_EXACT_PHYSICAL_FIELDS) {
@@ -905,46 +881,30 @@ async function runDamFrontLane(): Promise<void> {
         `step ${step}: adaptive advance did not encode`);
       expect(failures, allFine.advanceTo(time_s, []),
         `step ${step}: all-fine advance did not encode`);
-      if (authorityOracle) expect(failures, authorityOracle.advanceTo(time_s, []),
-        `step ${step}: FCA authority oracle advance did not encode`);
       await device.queue.onSubmittedWorkDone();
       const [adaptiveFields, allFineFields, activity, stats, allFineStats,
         adaptivePressureMembership, allFinePressureMembership,
         adaptiveFca, allFineFca,
-        authorityOracleFields,
-        fppHeader, adaptiveSaw, authorityOracleSaw,
-        authorityOracleFca,
-        authorityOracleActivity, authorityOracleStats, adaptiveVex, allFineVex,
-        authorityOracleVex]
+        fppHeader, adaptiveSaw, adaptiveVex, allFineVex]
         = await Promise.all([
         adaptive.readDiagnosticFields(), allFine.readDiagnosticFields(),
         adaptive.readGPUActivityPolicy(), adaptive.readStats(), allFine.readStats(),
         adaptive.readPressureCanonicalMembershipQA(),
         allFine.readPressureCanonicalMembershipQA(),
         adaptive.readFrameControlQA(), allFine.readFrameControlQA(),
-        authorityOracle?.readDiagnosticFields(),
         checkpointStepSet.has(step)
           ? readBufferBinding(device, presentationControl,
             4 * SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER_WORDS)
           : Promise.resolve(undefined),
-        adaptive.readFinalScalarMaskHeaderQA(), authorityOracle?.readFinalScalarMaskHeaderQA(),
-        authorityOracle?.readFrameControlQA(), authorityOracle?.readGPUActivityPolicy(),
-        authorityOracle?.readStats(),
+        adaptive.readFinalScalarMaskHeaderQA(),
         adaptive.readVelocityExtensionQA(), allFine.readVelocityExtensionQA(),
-        authorityOracle?.readVelocityExtensionQA(),
       ]);
-      for (const [name, saw] of [
-        ["adaptive", adaptiveSaw],
-        ...(authorityOracleSaw
-          ? [["immutable oracle", authorityOracleSaw] as const] : []),
-      ] as const) {
-        expect(failures, saw.phase === 2 && saw.fault === 0
-          && saw.firstFaultPacket === 0xffff_ffff,
-        `step ${step}: ${name} FSM1 phase/fault/packet ${saw.phase}/${saw.fault}/${
-          saw.firstFaultPacket}`);
-        expect(failures, saw.generation === step + 1,
-        `step ${step}: ${name} FSM1 generation ${saw.generation}`);
-      }
+      expect(failures, adaptiveSaw.phase === 2 && adaptiveSaw.fault === 0
+        && adaptiveSaw.firstFaultPacket === 0xffff_ffff,
+      `step ${step}: adaptive FSM1 phase/fault/packet ${adaptiveSaw.phase}/${
+        adaptiveSaw.fault}/${adaptiveSaw.firstFaultPacket}`);
+      expect(failures, adaptiveSaw.generation === step + 1,
+        `step ${step}: adaptive FSM1 generation ${adaptiveSaw.generation}`);
       for (const [name, fca] of [["adaptive", adaptiveFca], ["all-fine", allFineFca]] as const) {
         expect(failures, fca.phase === SPARSE_CM12_FRAME_CONTROL_PHASE.accepted
           && fca.fault === 0 && fca.firstFaultOwner === SPARSE_CM12_FRAME_CONTROL_INVALID,
@@ -961,19 +921,6 @@ async function runDamFrontLane(): Promise<void> {
           | SPARSE_CM12_FRAME_CONTROL_COVERAGE.output)
           && fca.committedFrames === step,
         `step ${step}: ${name} FCA1 coverage/commits ${fca.coverage}/${fca.committedFrames}`);
-      }
-      if (authorityOracleFca) {
-        expect(failures, authorityOracleFca.phase === SPARSE_CM12_FRAME_CONTROL_PHASE.accepted
-          && authorityOracleFca.fault === 0
-          && authorityOracleFca.firstFaultOwner === SPARSE_CM12_FRAME_CONTROL_INVALID,
-        `step ${step}: immutable oracle FCA1 phase/fault/owner ${authorityOracleFca.phase}/${
-          authorityOracleFca.fault}/${authorityOracleFca.firstFaultOwner}`);
-        expect(failures, authorityOracleFca.acceptedGeneration === step + 1
-          && authorityOracleFca.candidateGeneration === authorityOracleFca.acceptedGeneration
-          && authorityOracleFca.sealedGeneration === authorityOracleFca.acceptedGeneration,
-        `step ${step}: immutable oracle FCA1 generation accepted/candidate/sealed ${
-          authorityOracleFca.acceptedGeneration}/${authorityOracleFca.candidateGeneration}/${
-          authorityOracleFca.sealedGeneration}`);
       }
       let fppReceipt: Record<string, number> | undefined;
       if (fppHeader) {
@@ -1021,7 +968,6 @@ async function runDamFrontLane(): Promise<void> {
       }
       const relativeResidual = stats.pressureRelativeResidual ?? stats.pressureResidual;
       const connectivity = connectivityReceipt(adaptiveFields.density);
-      let authorityOracleReceipt: BitExactFieldReceipt | undefined;
       const vexLifecycleReceipt = (name: string,
         vex: NonNullable<typeof adaptiveVex>): Record<string, unknown> => {
         const header = vex.header;const invalid = 0xffff_ffff;
@@ -1046,48 +992,9 @@ async function runDamFrontLane(): Promise<void> {
           firstFaultDepth: header[VEX_HEADER.firstFaultDepth],
         };
       };
-      let velocityExtensionReceipt: Record<string, unknown> =
+      const velocityExtensionReceipt: Record<string, unknown> =
         vexLifecycleReceipt("adaptive", adaptiveVex);
       const allFineVelocityExtensionReceipt = vexLifecycleReceipt("all-fine", allFineVex);
-      const authorityOracleVelocityExtensionReceipt = authorityOracleVex
-        ? vexLifecycleReceipt("immutable oracle", authorityOracleVex) : undefined;
-      if (adaptiveVex && authorityOracleVex) {
-        let firstCell = -1;let firstLane = -1;
-        const invalid = 0xffff_ffff;
-        for (let cell = 0; cell < adaptiveVex.acceptedDepth.length && firstCell < 0; cell += 1) {
-          if (adaptiveVex.acceptedDepth[cell] === invalid) continue;
-          for (let lane = 0; lane < 4; lane += 1) {
-            if (adaptiveVex.velocityBits[4 * cell + lane]
-                !== authorityOracleVex.velocityBits[4 * cell + lane]) {
-              firstCell = cell;firstLane = lane;break;
-            }
-          }
-        }
-        const value = (words: Uint32Array, index: number) => index < 0 ? undefined : words[index];
-        const ah = adaptiveVex.header;
-        velocityExtensionReceipt = {
-          ...velocityExtensionReceipt,
-          productionVelocitySha256: sha256Bytes(adaptiveVex.velocityBits),
-          legacyVelocitySha256: sha256Bytes(authorityOracleVex.velocityBits),
-          firstDifferentCell: firstCell,
-          firstDifferentLane: firstLane,
-          productionBits: value(adaptiveVex.velocityBits, 4 * firstCell + firstLane),
-          legacyBits: value(authorityOracleVex.velocityBits, 4 * firstCell + firstLane),
-          acceptedDepth: value(adaptiveVex.acceptedDepth, firstCell),
-        };
-        expect(failures, firstCell < 0,
-          `step ${step}: VEX2 output differs from immutable eight-sweep oracle at cell ${
-            firstCell} lane ${firstLane}`);
-      }
-      if (authorityOracleFields) {
-        authorityOracleReceipt = bitExactFieldReceipt(authorityOracleFields);
-        const localBits = bitExactFieldReceipt(adaptiveFields);
-        for (const field of BIT_EXACT_PHYSICAL_FIELDS) {
-          expect(failures, localBits[field] === authorityOracleReceipt[field],
-          `step ${step}: FCA authority oracle physical mismatch in ${
-              field.replace("Sha256", "")}`);
-        }
-      }
       expect(failures, fieldReceipts.pressure.maximumAbsolute > 1e-6,
         `step ${step}: pressure publication is identically zero`);
       expect(failures, (stats.pressureIterationsExecuted ?? stats.pressureIterations ?? 0) > 0,
@@ -1128,22 +1035,8 @@ async function runDamFrontLane(): Promise<void> {
         connectivity,
         frameControl: adaptiveFca,
         finalScalarMasks: adaptiveSaw,
-        ...(authorityOracleSaw ? { finalScalarMasksOracle: authorityOracleSaw } : {}),
-        ...(authorityOracleFca ? { frameControlOracle: authorityOracleFca } : {}),
         velocityExtension: velocityExtensionReceipt,
         allFineVelocityExtension: allFineVelocityExtensionReceipt,
-        ...(authorityOracleVelocityExtensionReceipt
-          ? { authorityOracleVelocityExtension: authorityOracleVelocityExtensionReceipt } : {}),
-        ...(authorityOracleReceipt ? { authorityOracle: {
-          ...authorityOracleReceipt,
-          differences: {
-            density: fieldByteDifference(adaptiveFields.density, authorityOracleFields!.density),
-            velocity: fieldByteDifference(adaptiveFields.velocity, authorityOracleFields!.velocity),
-            pressure: fieldByteDifference(adaptiveFields.pressure, authorityOracleFields!.pressure),
-            divergence: fieldByteDifference(adaptiveFields.divergence,
-              authorityOracleFields!.divergence),
-          },
-        } } : {}),
         pressure: {
           cells: stats.adaptivePressureCellCount,
           activeRows: stats.adaptivePressureActiveRowCount,
@@ -1185,19 +1078,6 @@ async function runDamFrontLane(): Promise<void> {
             candidateResolution: brick.candidateResolution,
           })),
         },
-        ...(authorityOracleActivity && authorityOracleStats ? { authorityOracleTopology: {
-          generation: authorityOracleStats.adaptiveTopologyShadowGeneration,
-          acceptedCells: authorityOracleStats.adaptiveAcceptedCellCount,
-          acceptedRows: authorityOracleStats.adaptiveAcceptedRowCount,
-          accepted: resolutionHistogram(authorityOracleActivity.bricks, "acceptedResolution"),
-          candidate: resolutionHistogram(authorityOracleActivity.bricks, "candidateResolution"),
-          bricks: authorityOracleActivity.bricks.map((brick) => ({
-            coordinate: brick.coordinate,
-            active: brick.active,
-            acceptedResolution: brick.acceptedResolution,
-            candidateResolution: brick.candidateResolution,
-          })),
-        } } : {}),
       });
       if (physicalReference) {
         const candidate = bitExactFieldReceipt(adaptiveFields);
@@ -1291,7 +1171,6 @@ async function runDamFrontLane(): Promise<void> {
       dt_s: CM12_PAPER_DT_S,
       simulatedDuration_s: steps * CM12_PAPER_DT_S,
       runMode: hasFlag("short-smoke") ? "short-smoke" : "canonical",
-      authorityOraclePaired,
       physicalReference: physicalReferencePath ? {
         path: physicalReferencePath,
         bitExact: failures.every((failure) => !failure.includes("physical byte mismatch")),
@@ -1324,7 +1203,6 @@ async function runDamFrontLane(): Promise<void> {
   } finally {
     adaptive?.destroy();
     allFine?.destroy();
-    authorityOracle?.destroy();
     if (device) {
       const compiler = gpuCompilationManagerFor(device);
       invalidateGPUCompilationManager(device, "dam-front QA lane complete");
@@ -2034,7 +1912,6 @@ function commands(): readonly CommandReceipt[] {
   const common = ["--import", "tsx"];
   const backend = argument("backend");
   const shortSmoke = hasFlag("short-smoke");
-  const authorityOraclePaired = hasFlag("fca-authority-oracle-paired");
   const damSteps = String(physicsLaneSteps("dam-steps"));
   const symmetrySteps = String(physicsLaneSteps("symmetry-steps"));
   const performanceReplays = argument("performance-replays") ?? "5";
@@ -2047,7 +1924,6 @@ function commands(): readonly CommandReceipt[] {
     lane: "dam-front",
     argv: [NODE, ...common, SELF, "--internal-dam-front", `--dam-steps=${damSteps}`,
       ...(shortSmoke ? ["--short-smoke"] : []),
-      ...(authorityOraclePaired ? ["--fca-authority-oracle-paired"] : []),
       ...(physicalReference ? [`--physical-reference=${physicalReference}`] : []),
       ...(backend ? [`--backend=${backend}`] : [])],
     expectedRuntime: shortSmoke

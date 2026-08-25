@@ -90,7 +90,7 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
         assert.equal(corners.length, 8,
           "all horizontal edge/corner tiles must publish before expansion reaches them");
         assert.ok(corners.every((brick) => brick.acceptedResolution === 8),
-          "each corner must activate a complete B8 receiver tile");
+          "each corner must activate a complete B8 frontier tile");
       }
 
       const density = (await solver.readDiagnosticFields()).density;

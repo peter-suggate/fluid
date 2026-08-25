@@ -26,7 +26,6 @@ import {
 import { WebGPUAdaptiveMassSolver } from "./webgpu-adaptive-mass-solver";
 import type {
   SparseBrickFineResolution,
-  SparseBrickResolution,
 } from "./sparse-brick-atlas";
 
 export type AdaptiveMassResolutionMode = "adaptive" | "all-fine" | "all-coarse";
@@ -41,8 +40,6 @@ export interface AdaptiveMassSolverOptions {
   /** Optional positive-power-of-two cap on hierarchical macro-leaf span. */
   readonly maximumMacroSpanBricks?: number;
   readonly surfaceFineRings?: number;
-  readonly receiverSupportRings?: number;
-  readonly receiverFloor?: "auto" | SparseBrickResolution;
   readonly activityPolicy?: SparseCM12ActivityPolicy;
   /** Omitted only by direct diagnostic constructors, which retain scene-step behavior. */
   readonly timeStep?: "paper" | "scene";
@@ -128,30 +125,9 @@ const params: MethodParamSpec[] = [
     hint: "Surface distance keeps interface/thin bricks at the ladder maximum and sends submerged bricks directly to 1³ before 2:1 closure, ignoring velocity and history. Activity additionally refines moving or complex liquid.",
   },
   {
-    kind: "select",
-    key: "receiverFloor",
-    label: "Created-region floor",
-    default: "auto",
-    tier: "coarse",
-    options: [
-      { value: "auto", label: "Auto · dam at coarse rung" },
-      { value: "1", label: "1³" },
-      { value: "2", label: "2³" },
-      { value: "4", label: "4³" },
-      { value: "8", label: "8³" },
-      { value: "16", label: "16³" },
-    ],
-    hint: "Structural bootstrap floor for receiver capacity. The live GPU scheduler subsequently splits or merges existing receivers from current surface evidence.",
-  },
-  {
     kind: "number", key: "surfaceFineRings", label: "Initial fine surface band",
     default: 1, tier: "fine", unit: "bricks", min: 1, max: 8, step: 1, digits: 0,
     hint: "Structural count of occupied face-distance rings initialized at the ladder maximum around the authored free surface; the coarser dyadic skirt follows outside it.",
-  },
-  {
-    kind: "number", key: "receiverSupportRings", label: "Receiver apron reach",
-    default: 9, tier: "fine", unit: "bricks", min: 1, max: 24, step: 1, digits: 0,
-    hint: "Structural radius of pre-created sparse receiver capacity at nominal detail. DETAIL edits scale its brick radius and minimum pool volume so the same physical travel remains available; it does not make unrelated empty world volume resident.",
   },
   {
     kind: "select",
@@ -204,7 +180,7 @@ const params: MethodParamSpec[] = [
     step: 8,
     digits: 0,
     update: "runtime",
-    hint: "Maximum sparse MGPCG iterations per pressure solve. Lower budgets trade incompressibility for frame time; 64 is the validated production operating point.",
+    hint: "Maximum sparse Jacobi-PCG iterations per pressure solve. Lower budgets trade incompressibility for frame time; the device stops later blocks once the residual target is met.",
   },
   {
     kind: "number",
@@ -275,7 +251,7 @@ const params: MethodParamSpec[] = [
     kind: "number", key: "fourTravelCells", label: "4³ surface travel",
     default: SPARSE_CM12_ACTIVITY_POLICY.fourTravelCells, tier: "fine", update: "runtime",
     unit: "cells/step", min: 0, max: 2, step: 0.05, digits: 2,
-    hint: "Surface/front displacement threshold for a 4³ receiver minimum. Normalization keeps it no higher than the 8³ threshold.",
+    hint: "Surface/front displacement threshold for a 4³ destination minimum. Normalization keeps it no higher than the 8³ threshold.",
   },
   {
     kind: "number", key: "twoTravelCells", label: "2³ surface travel",
@@ -287,7 +263,7 @@ const params: MethodParamSpec[] = [
     kind: "number", key: "frontLookaheadSteps", label: "Front lookahead",
     default: SPARSE_CM12_ACTIVITY_POLICY.frontLookaheadSteps, tier: "fine", update: "runtime",
     unit: "steps", min: 1, max: 32, step: 1, digits: 0,
-    hint: "Sweeps surface characteristics this many accepted steps ahead when selecting and activating receiver support. Four matches the default topology cadence.",
+    hint: "Sweeps surface characteristics this many accepted steps ahead when selecting and creating world pages. Four matches the default topology cadence.",
   },
   {
     kind: "number", key: "thinFeatureCells", label: "Thin-feature floor",
@@ -424,15 +400,6 @@ const maximumMacroSpanBricks = (value: unknown): number | undefined => {
     && Number.isInteger(Math.log2(parsed)) ? parsed : undefined;
 };
 
-const receiverFloor = (
-  value: unknown,
-  maximum: SparseBrickFineResolution = 8,
-): AdaptiveMassSolverOptions["receiverFloor"] => {
-  const parsed = value === "1" ? 1 : value === "2" ? 2 : value === "4" ? 4
-    : value === "8" ? 8 : value === "16" ? 16 : "auto";
-  return parsed === "auto" ? parsed : Math.min(parsed, maximum) as SparseBrickResolution;
-};
-
 const selectorMode = (value: unknown): "surface" | "activity" =>
   value === "activity" ? "activity" : "surface";
 
@@ -453,8 +420,6 @@ export function adaptiveMassSolverOptions(
       presentationPageResolution(values.presentationPageResolution, fineResolution),
     maximumMacroSpanBricks: maximumMacroSpanBricks(values.maximumMacroSpanBricks),
     surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
-    receiverSupportRings: boundedInteger(values.receiverSupportRings, 9, 1, 24),
-    receiverFloor: receiverFloor(values.receiverFloor, fineResolution),
     activityPolicy: activityPolicy(values),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
     gammaDiffusionEnabled: values.gammaDiffusion !== "off",
@@ -539,11 +504,7 @@ export const adaptiveMassMethod: SimulationMethod = {
         String(maximumMacroSpanBricks(values.maximumMacroSpanBricks) ?? "auto"),
       resolutionMode: resolutionMode(values.resolutionMode),
       selectorMode: selectorMode(values.selectorMode),
-      receiverFloor: String(receiverFloor(
-        values.receiverFloor, fineResolution,
-      )),
       surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
-      receiverSupportRings: boundedInteger(values.receiverSupportRings, 9, 1, 24),
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
       gammaDiffusion: values.gammaDiffusion === "off" ? "off" : "on",
       surfaceSharpening: values.surfaceSharpening === "off" ? "off" : "on",
@@ -566,9 +527,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       presentationPageResolution: "8",
       maximumMacroSpanBricks: "auto",
       selectorMode: "surface",
-      receiverFloor: "auto",
       surfaceFineRings: 1,
-      receiverSupportRings: 9,
       timeStep: "paper",
       gammaDiffusion: "on",
       surfaceSharpening: "on",

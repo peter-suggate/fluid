@@ -1,4 +1,5 @@
 import { sparseBrickSpan, type SparseAdaptiveMassAtlas } from "./sparse-brick-atlas";
+import { signedSpatialCoordinateHash } from "../../core/signed-spatial-hash";
 
 /** GPU-mutable signed-coordinate directory for resident Sparse CM12 leaves. */
 export const SPARSE_CM12_WORLD_DIRECTORY_MAGIC = 0x5744_5231; // WDR1
@@ -111,12 +112,7 @@ export function sparseCM12WorldCoordinateHash(
   coordinate: readonly [number, number, number],
   spanLog: number,
 ): number {
-  let hash = 0x811c_9dc5;
-  for (const value of [...coordinate, spanLog]) {
-    hash = Math.imul(hash ^ (value >>> 0), 0x0100_0193) >>> 0;
-    hash ^= hash >>> 16;
-  }
-  return (hash | 1) >>> 0;
+  return signedSpatialCoordinateHash(coordinate, spanLog);
 }
 
 export function createSparseCM12WorldDirectoryInitialWords(
@@ -226,6 +222,9 @@ fn cm12WorldLeafRecord(leaf:u32)->u32{
   return CM12_WDR_BASE+CM12_WDR_LEAF_BASE+leaf*CM12_WDR_LEAF_WORDS;}
 fn cm12WorldLeafAllocated(leaf:u32)->bool{
   return leaf<atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.nextLeaf}u]);}
+fn cm12WorldHasDynamicLeaves()->bool{
+  return atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.nextLeaf}u])
+    >CM12_WDR_INITIAL_LEAVES;}
 fn cm12WorldLeafCoordinate(leaf:u32)->vec3i{
   if(leaf>=CM12_WDR_LEAF_CAPACITY){return vec3i(0x7fffffffi);}
   let at=cm12WorldLeafRecord(leaf);return vec3i(
@@ -276,45 +275,6 @@ fn cm12WorldOwnerAt(q:vec3i)->u32{
   }
   return CM12_WDR_INVALID;
 }
-fn cm12WorldInsertExact(q:vec3i,spanLog:u32,leaf:u32)->bool{
-  let hash=cm12WorldHash(q,spanLog);var slot=hash&CM12_WDR_MASK;
-  for(var probe=0u;probe<CM12_WDR_CAPACITY;probe+=1u){
-    let at=cm12WorldEntry(slot);let state=atomicLoad(&${arenaName}[at+${e.state}u]);
-    if(state==2u&&atomicLoad(&${arenaName}[at+${e.hash}u])==hash
-      &&bitcast<i32>(atomicLoad(&${arenaName}[at+${e.x}u]))==q.x
-      &&bitcast<i32>(atomicLoad(&${arenaName}[at+${e.y}u]))==q.y
-      &&bitcast<i32>(atomicLoad(&${arenaName}[at+${e.z}u]))==q.z
-      &&atomicLoad(&${arenaName}[at+${e.spanLog}u])==spanLog){return false;}
-    if(state==0u){
-      let claim=atomicCompareExchangeWeak(&${arenaName}[at+${e.state}u],0u,1u);
-      if(claim.exchanged){
-        atomicStore(&${arenaName}[at+${e.hash}u],hash);
-        atomicStore(&${arenaName}[at+${e.x}u],bitcast<u32>(q.x));
-        atomicStore(&${arenaName}[at+${e.y}u],bitcast<u32>(q.y));
-        atomicStore(&${arenaName}[at+${e.z}u],bitcast<u32>(q.z));
-        atomicStore(&${arenaName}[at+${e.spanLog}u],spanLog);
-        atomicStore(&${arenaName}[at+${e.leaf}u],leaf);
-        let leafAt=cm12WorldLeafRecord(leaf);
-        atomicStore(&${arenaName}[leafAt+${l.x}u],bitcast<u32>(q.x));
-        atomicStore(&${arenaName}[leafAt+${l.y}u],bitcast<u32>(q.y));
-        atomicStore(&${arenaName}[leafAt+${l.z}u],bitcast<u32>(q.z));
-        atomicStore(&${arenaName}[leafAt+${l.spanLog}u],spanLog);
-        atomicStore(&${arenaName}[leafAt+${l.generation}u],
-          atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.generation}u]));
-        atomicStore(&${arenaName}[at+${e.state}u],2u);
-        atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.liveCount}u],1u);
-        cm12WorldUpdateBounds(q,spanLog);return true;
-      }
-      // A competing lane owns this probe slot. Revisit it after the structured
-      // branch reconverges; advancing could publish the same coordinate in a
-      // later slot while the winner is still filling this record.
-      continue;
-    }
-    if(state==1u){continue;}
-    slot=(slot+1u)&CM12_WDR_MASK;
-  }
-  atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.insertionFaults}u],1u);return false;
-}
 // Claim a physical leaf ID only after the coordinate hash slot is owned. This
 // keeps contention proportional to the frontier and prevents two swept source
 // cells from publishing duplicate pages for the same signed coordinate.
@@ -357,9 +317,13 @@ fn cm12WorldAllocateExact(q:vec3i,spanLog:u32)->u32{
         atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.liveCount}u],1u);
         cm12WorldUpdateBounds(q,spanLog);return leaf;
       }
-      continue;
+      // Another invocation owns this slot. Do not spin through the probe
+      // budget while its divergent branch is still publishing: that can
+      // prevent workgroup reconvergence and falsely report a full table.
+      // The winning allocation is visible by the next topology epoch.
+      return CM12_WDR_INVALID;
     }
-    if(state==1u){continue;}
+    if(state==1u){return CM12_WDR_INVALID;}
     slot=(slot+1u)&CM12_WDR_MASK;
   }
   atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.insertionFaults}u],1u);

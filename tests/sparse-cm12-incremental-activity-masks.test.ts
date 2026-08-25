@@ -57,6 +57,16 @@ test("resident activity consumers use direct brick-domain dispatch", () => {
   assert.match(source, /dispatch\("clearSparseCM12RetiredFaceVelocitySupport",\s*this\.incrementalActivityLayout\.brickCount\)/);
   assert.doesNotMatch(source, /activityIndirectArguments/);
   assert.doesNotMatch(source, /dispatchActivity\(/);
+
+  const shader = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+    import.meta.url,
+  ), "utf8");
+  // Empty stamp slots are expected. Their zero count must be tested before a
+  // global base is added, or INVALID+lane can wrap into a watchdog-scale loop.
+  assert.match(shader,
+    /for\(var localCell=lane;localCell<measuredCount;localCell\+=64u\)\{\s*let cell=first\+localCell;/);
+  assert.doesNotMatch(shader, /for\(var cell=first\+lane;/);
 });
 
 test("BFA1 prepares and projects accepted rows without a transient DFRM plane", () => {

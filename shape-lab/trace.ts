@@ -164,9 +164,7 @@ function prepare(
   descriptor: SvoPrimitiveDescriptor,
   colorLinear: readonly [number, number, number],
 ): PreparedRecord | undefined {
-  if (descriptor.kind === "terrain-heightfield") return undefined;
   const canonical = canonicalSvoPrimitive(descriptor);
-  if (canonical.kind === "terrain-heightfield") return undefined;
   const centre = canonical.center_m;
   const radius = svoPrimitiveBoundingRadius_m(canonical);
   const exact = EXACT_KINDS.has(canonical.kind);
@@ -649,7 +647,6 @@ export function shapeLabBounds(
   let min: Vec3 | undefined;
   let max: Vec3 | undefined;
   for (const descriptor of descriptors) {
-    if (descriptor.kind === "terrain-heightfield") continue;
     const radius = svoPrimitiveBoundingRadius_m(descriptor);
     const centre = descriptor.center_m;
     const low = { x: centre.x - radius, y: centre.y - radius, z: centre.z - radius };

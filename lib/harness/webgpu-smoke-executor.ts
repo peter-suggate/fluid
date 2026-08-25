@@ -204,8 +204,6 @@ class Mini32UIPresentationCadence {
       directional: scene.lighting?.directional,
       grade: scene.lighting?.grade,
       container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
-      wallField: scene.container.wallField,
-      vesselVisible: scene.container.vessel !== "none",
     });
     cadence.pipeline.setVolume(
       solver.surfaceFieldTexture ?? solver.volumeTexture,

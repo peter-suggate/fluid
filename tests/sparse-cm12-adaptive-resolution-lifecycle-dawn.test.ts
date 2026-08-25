@@ -65,8 +65,6 @@ dawnTest("Dawn publishes coarse-to-fine and fine-to-coarse Sparse CM12 topology"
           // Keep this lifecycle fixture on the bounded compatibility path.
           // Large domains intentionally skip host-built resolution variants;
           // Figure 9 covers that accepted-only startup path separately.
-          receiverSupportRings: 1,
-          receiverFloor: 4,
           timeStep: "scene",
           activityPolicy: {
             ...SPARSE_CM12_ACTIVITY_POLICY,

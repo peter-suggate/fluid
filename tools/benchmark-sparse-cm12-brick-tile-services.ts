@@ -45,7 +45,7 @@ for (let z = 0; z < lattice[2]; z += 1)
         resolution, density: new Float64Array(count),
         gamma: new Float64Array(count).fill(1) });
     }
-const atlas = createSparseAdaptiveMassAtlas(dimensions, bricks, 1, undefined, 8);
+const atlas = createSparseAdaptiveMassAtlas(dimensions, bricks, 1, 8);
 const grid = buildSparseAtlasCompositeGrid(atlas);
 const bti = compileSparseCM12BrickTileImage(grid);
 const faceProgram = compileSparseCM12BrickTileFaceProgram(bti, grid);

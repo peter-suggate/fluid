@@ -78,7 +78,6 @@ function terrainCutCellDamScene() {
   // Deliberately halfway through a finest cell: V_i must contain both zero and
   // partial capacities, rather than degenerating to an aligned binary floor.
   scene.terrain = {
-    solidRepresentation: "voxel",
     baseHeight_m: 0.125,
     features: [],
   };
@@ -136,7 +135,7 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
       const initialTallMetrics = tallCells
         ? tallCellsMetrics(await solver.readDiagnosticFields()) : undefined;
       // The exact Tall Cells rung must survive long enough for the released
-      // front to leave its authored reservoir and exercise dynamic receivers
+      // front to leave its authored reservoir and exercise dynamic world pages
       // on the slope; the focused 16^3 cut-cell probe stays intentionally tiny.
       const requestedSteps = Number(process.env.FLUID_TERRAIN_STEPS);
       const steps = Number.isSafeInteger(requestedSteps) && requestedSteps > 0

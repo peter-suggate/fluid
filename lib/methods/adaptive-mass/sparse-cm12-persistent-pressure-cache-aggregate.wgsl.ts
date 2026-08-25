@@ -159,6 +159,11 @@ fn pcfaNodeLinear(level:u32,group:u32)->u32{${nodeLinear}return PCF_INVALID;}
 fn pcfaEdgeLinear(level:u32,edge:u32)->u32{${edgeLinear}return PCF_INVALID;}
 fn pcfaHierarchyEdgeWord(level:u32,edge:u32)->u32{${hierarchyEdgeOffset}return PCF_INVALID;}
 fn pcfaHierarchyDiagonalWord(level:u32,group:u32)->u32{${hierarchyDiagonalOffset}return PCF_INVALID;}
+fn pcfaStoreIndirect(header:u32,offset:u32,x:u32){
+  atomicStore(&${arena}[header+offset],x);
+  atomicStore(&${arena}[header+offset+1u],1u);
+  atomicStore(&${arena}[header+offset+2u],1u);
+}
 fn pcfaAggregateHeaderValid()->bool{return atomicLoad(&${arena}[PCFA_BASE+${ah.magic}u])==PCFA_MAGIC
   &&atomicLoad(&${arena}[PCFA_BASE+${ah.headerWords}u])==${SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER_WORDS}u
   &&atomicLoad(&${arena}[PCFA_BASE+${ah.familyHeaderWords}u])==${SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER_WORDS}u
@@ -172,8 +177,8 @@ fn pcfaAggregateHeaderValid()->bool{return atomicLoad(&${arena}[PCFA_BASE+${ah.m
   &&atomicLoad(&${arena}[PCFA_BASE+${ah.hierarchyNodeHeaderBase}u])==PCFA_HIERARCHYNODE_HEADER
   &&atomicLoad(&${arena}[PCFA_BASE+${ah.hierarchyEdgeHeaderBase}u])==PCFA_HIERARCHYEDGE_HEADER;}
 fn pcfaZeroIndirects(){for(var family=0u;family<4u;family+=1u){let header=pcfaFamilyHeader(family);
-  atomicStore(&${arena}[header+PCFA_F_REPAIR_X],0u);atomicStore(&${arena}[header+PCFA_F_WORK_X],0u);
-  atomicStore(&${arena}[header+PCFA_F_SEED_X],0u);}}
+  pcfaStoreIndirect(header,PCFA_F_REPAIR_X,0u);pcfaStoreIndirect(header,PCFA_F_WORK_X,0u);
+  pcfaStoreIndirect(header,PCFA_F_SEED_X,0u);}}
 fn pcfaFault(family:u32,code:u32,id:u32){let claim=atomicCompareExchangeWeak(&${arena}[
   PCFA_BASE+${ah.firstFaultFamily}u],PCF_INVALID,family);if(claim.exchanged){
     atomicStore(&${arena}[PCFA_BASE+${ah.firstFaultId}u],id);}pcfFault(code,id);}
@@ -194,9 +199,9 @@ fn pcfaBegin()->bool{if(!pcfaAggregateHeaderValid()){pcfFault(PCF_FAULT_HEADER,P
     atomicStore(&${arena}[header+PCFA_F_DIRTY_LEAVES],0u);
     atomicStore(&${arena}[header+PCFA_F_REPAIRED_LEAVES],0u);
     atomicStore(&${arena}[header+PCFA_F_WORK_COUNT],0u);atomicStore(&${arena}[header+PCFA_F_EXECUTED],0u);
-    atomicStore(&${arena}[header+PCFA_F_CAUSE],0u);atomicStore(&${arena}[header+PCFA_F_REPAIR_X],0u);
-    atomicStore(&${arena}[header+PCFA_F_WORK_X],0u);
-    atomicStore(&${arena}[header+PCFA_F_SEED_X],(previous+63u)/64u);}return true;}
+    atomicStore(&${arena}[header+PCFA_F_CAUSE],0u);pcfaStoreIndirect(header,PCFA_F_REPAIR_X,0u);
+    pcfaStoreIndirect(header,PCFA_F_WORK_X,0u);
+    pcfaStoreIndirect(header,PCFA_F_SEED_X,(previous+63u)/64u);}return true;}
 fn pcfaQueueLeaf(family:u32,leaf:u32)->bool{if(leaf>=pcfaFamilyLeafCount(family)){
   pcfaFault(family,PCF_FAULT_CAPACITY,leaf*PCFA_LEAF_BITS);return false;}
   let generation=atomicLoad(&${arena}[PCF_BASE+PCF_H_CANDIDATE_GEN]);
@@ -222,7 +227,8 @@ fn pcfAggregateFineEdgeChanged(cell:u32,edge:u32){_=pcfaMark(0u,pcfCellBrick(cel
   if(aggregateEdge!=PCF_INVALID){_=pcfaMark(1u,aggregateEdge,1u);}}
 fn pcfAggregateFineDiagonalChanged(cell:u32){_=pcfaMark(0u,pcfCellBrick(cell),2u);}
 fn pcfaMarkBrickAncestors(brick:u32){for(var level=0u;level<${layout.hierarchyLevelCounts.length}u;level+=1u){
-  _=pcfaMark(2u,pcfaNodeLinear(level,pcfHierarchyParent(level,brick)),4u);}}
+  let parent=pcfHierarchyParent(level,brick);
+  if(parent!=PCF_INVALID){_=pcfaMark(2u,pcfaNodeLinear(level,parent),4u);}}}
 fn pcfaMarkAggregateEdgeAncestors(edge:u32){for(var level=0u;level<${layout.hierarchyLevelCounts.length}u;level+=1u){
   let hierarchyEdge=pcfHierarchyEdgeForAggregate(level,edge);
   if(hierarchyEdge!=PCF_INVALID){_=pcfaMark(3u,pcfaEdgeLinear(level,hierarchyEdge),8u);}
@@ -235,7 +241,11 @@ fn pcfaFinalizeFamily(family:u32,root:u32,edgeFamily:bool){let header=pcfaFamily
       !=atomicLoad(&${arena}[header+PCFA_F_DIRTY_LEAVES])){pcfaFault(family,PCF_FAULT_REPAIR,family);return;}
   let count=atomicLoad(&${arena}[root]);
   atomicStore(&${arena}[header+PCFA_F_WORK_COUNT],count);
-  atomicStore(&${arena}[header+PCFA_F_WORK_X],select(count,(count+63u)/64u,edgeFamily));}
+  // Reduction families contain workgroup barriers. Give an empty reduction a
+  // single synchronized no-op workgroup instead of relying on a zero-sized
+  // indirect dispatch, while WORK_COUNT remains the authoritative zero.
+  let groups=select(max(1u,count),(count+63u)/64u,edgeFamily);
+  pcfaStoreIndirect(header,PCFA_F_WORK_X,groups);}
 fn pcfaSealFinePublication(){if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCF_PHASE_COLLECTING
     ||atomicLoad(&${arena}[PCF_BASE+PCF_H_FAULT])!=0u){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
   atomicStore(&${arena}[PCFA_BASE+${ah.topologyGeneration}u],pcfTopologyGeneration());
@@ -243,8 +253,10 @@ fn pcfaSealFinePublication(){if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCF
   atomicStore(&${arena}[PCFA_BASE+${ah.aggregateTopologyGeneration}u],
     pcfAggregateTopologyGeneration());
   atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCFA_PHASE_AGGREGATE_REPAIR);
-  atomicStore(&${arena}[PCFA_BRICK_HEADER+PCFA_F_REPAIR_X],atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_DIRTY_LEAVES]));
-  atomicStore(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_REPAIR_X],atomicLoad(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_DIRTY_LEAVES]));}
+  pcfaStoreIndirect(PCFA_BRICK_HEADER,PCFA_F_REPAIR_X,
+    atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_DIRTY_LEAVES]));
+  pcfaStoreIndirect(PCFA_AGGREGATEEDGE_HEADER,PCFA_F_REPAIR_X,
+    atomicLoad(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_DIRTY_LEAVES]));}
 @compute @workgroup_size(1) fn sealPersistentPressureAggregateFrontier(){pcfaSealFinePublication();}
 @compute @workgroup_size(1) fn finalizePersistentPressureAggregatePlan(){
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCFA_PHASE_AGGREGATE_REPAIR){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
@@ -261,9 +273,21 @@ fn pcfaSealFinePublication(){if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCF
  @builtin(workgroup_id)wid:vec3u){let brick=pcfBrickRankSelect(wid.x);
   var diagonal=0.0;var wet=0u;if(brick<${layout.brickCount}u){let range=pcfBrickCellRange(brick);
     for(var local=lane;local<range.y;local+=64u){let cell=range.x+local;if(!pcmCellContains(cell)){continue;}
-      wet=1u;diagonal+=pcfFineDiagonal(cell);let edges=cm12HotDirectedEdgeRange(cell);
-      for(var at=0u;at<edges.y;at+=1u){let edgeId=edges.x+at;let edge=cm12HotDirectedEdge(edgeId);
-        if(pcfCellBrick(edge.x)==brick){diagonal+=pcfEdgeWeight(edgeId);}}}}
+      wet=1u;diagonal+=pcfFineDiagonal(cell);
+      if(cell>=ta(2u)){
+        for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
+          let row=incidenceRow(incidence);let theta=state[p.stateOffsets3.x+row];
+          if(!pcmRowContains(row)||theta<=0.0){continue;}
+          let ownTerm=incidenceTerm(incidence);let ownCoefficient=termCoefficient(ownTerm);
+          let rowBegin=rowTermOffset(row);let rowEnd=rowBegin+rowTermCount(row);
+          for(var term=rowBegin;term<rowEnd;term+=1u){let other=termCell(term);
+            if(other==cell||!peiPressureCellMember(other)||pcfCellBrick(other)!=brick){continue;}
+            diagonal+=rowDualWeight(row)*ownCoefficient*termCoefficient(term)/theta;
+          }
+        }
+      }else{let edges=cm12HotDirectedEdgeRange(cell);
+        for(var at=0u;at<edges.y;at+=1u){let edgeId=edges.x+at;let edge=cm12HotDirectedEdge(edgeId);
+          if(pcfCellBrick(edge.x)==brick){diagonal+=pcfEdgeWeight(edgeId);}}}}}
   pcfaReduce[lane]=diagonal;pcfaWet[lane]=wet;workgroupBarrier();var width=32u;loop{if(lane<width){pcfaReduce[lane]+=pcfaReduce[lane+width];pcfaWet[lane]|=pcfaWet[lane+width];}
     workgroupBarrier();if(width==1u){break;}width/=2u;}
   if(lane==0u&&brick<${layout.brickCount}u){let value=max(pcfaReduce[0],1e-12);
@@ -282,8 +306,10 @@ var<workgroup>pcfaWet:array<u32,64>;
   if(atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_WORK_COUNT])
     ||atomicLoad(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_WORK_COUNT])){pcfFault(PCF_FAULT_REPAIR,PCF_INVALID);return;}
   atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCFA_PHASE_HIERARCHY_REPAIR);
-  atomicStore(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_REPAIR_X],atomicLoad(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_DIRTY_LEAVES]));
-  atomicStore(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_REPAIR_X],atomicLoad(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_DIRTY_LEAVES]));}
+  pcfaStoreIndirect(PCFA_HIERARCHYNODE_HEADER,PCFA_F_REPAIR_X,
+    atomicLoad(&${arena}[PCFA_HIERARCHYNODE_HEADER+PCFA_F_DIRTY_LEAVES]));
+  pcfaStoreIndirect(PCFA_HIERARCHYEDGE_HEADER,PCFA_F_REPAIR_X,
+    atomicLoad(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_DIRTY_LEAVES]));}
 @compute @workgroup_size(1) fn finalizePersistentPressureHierarchyPlan(){
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCFA_PHASE_HIERARCHY_REPAIR){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
   pcfaFinalizeFamily(2u,${roots.hierarchyNode}u,false);pcfaFinalizeFamily(3u,${roots.hierarchyEdge}u,true);

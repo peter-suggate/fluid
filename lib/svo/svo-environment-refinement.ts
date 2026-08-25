@@ -75,12 +75,6 @@
  * its neighbours, and a distance the kind under-reports all answer "refine".
  */
 import type { SparseBrickCoordinate } from "./sparse-brick-octree";
-import {
-  sparseSceneTerrainNodeColumnRange,
-  sparseSceneTerrainNodeCoverage,
-  type SparseSceneTerrainDomain,
-  type SparseSceneTerrainField,
-} from "../core/sparse-scene-terrain-field";
 import { canonicalSvoPrimitive, sampleSvoPrimitive, type SvoPrimitiveDescriptor } from "./svo-primitive-abi";
 import type { EnvironmentProxyPrimitive } from "../core/voxel-environments";
 
@@ -206,10 +200,6 @@ export interface SvoEnvironmentRefinementStatistics {
   straddleSamples: number;
   /** `sampleSvoPrimitive` calls made by the planarity stencil. */
   planaritySamples: number;
-  /** Nodes split because the ground is non-planar across them. */
-  terrainSplits: number;
-  /** Nodes the ground passes through but flatly, and so did not split. */
-  terrainPlanarExemptions: number;
   /** Nodes split because a primitive surface is non-planar across them. */
   primitiveSplits: number;
   /** Nodes split by the crowding budget alone. */
@@ -234,8 +224,6 @@ export interface SvoEnvironmentRefinementOptions {
   readonly nodeEdge_m: readonly (readonly number[])[];
   readonly brickSize: number;
   readonly maximumDepth: number;
-  readonly terrainField?: SparseSceneTerrainField;
-  readonly terrainDomain: SparseSceneTerrainDomain;
   /** Overlapping primitive boxes above which the node splits regardless. */
   readonly crowdingTarget: number;
   /**
@@ -253,36 +241,6 @@ export interface SvoEnvironmentRefinementOptions {
 export interface SvoEnvironmentRefinement {
   refineEnvironmentLeaf(level: number, coordinate: SparseBrickCoordinate): boolean;
   readonly statistics: SvoEnvironmentRefinementStatistics;
-}
-
-/**
- * Whether the ground is *level* across one node, and so exactly representable
- * without subdividing it.
- *
- * Level, not merely planar. A height field's surface normal is on the Y axis
- * exactly when its gradient is zero, so this is the same test the primitive
- * half applies — see the header — expressed in the one coordinate a height
- * field has. A constant slope is a plane, but it is an *oblique* plane: it
- * terraces at one voxel however fine the leaf, and halving the leaf halves the
- * step, so the finer leaf is worth having.
- *
- * One pyramid lookup, no corners: level ground is exactly the case where the
- * column extremes over the whole footprint coincide, and the extremes are the
- * lookup {@link sparseSceneTerrainNodeCoverage} already makes. Cheaper than
- * evaluating a field, and available because the ground *is* a height field —
- * `terrainColumnHeightsForLattice` baked it at the octree's own finest lattice
- * before any of this ran.
- */
-export function sparseSceneTerrainNodePlanar(
-  field: SparseSceneTerrainField,
-  brickSize: number,
-  level: number,
-  maximumDepth: number,
-  coordinate: SparseBrickCoordinate,
-  tolerance_m: number,
-): boolean {
-  const range = sparseSceneTerrainNodeColumnRange(field, brickSize, level, maximumDepth, coordinate);
-  return range.maximum_m - range.minimum_m <= tolerance_m;
 }
 
 /**
@@ -423,13 +381,13 @@ export function createSvoEnvironmentRefinement(
 ): SvoEnvironmentRefinement {
   const {
     primitives, descriptorFor, worldOrigin_m: worldOrigin, nodeEdge_m,
-    brickSize, maximumDepth, terrainField, terrainDomain, crowdingTarget,
+    brickSize, maximumDepth, crowdingTarget,
     planarExemption = false,
   } = options;
   const statistics: SvoEnvironmentRefinementStatistics = {
     nodes: 0, fullScans: 0, narrowedScans: 0, candidateVisits: 0,
     straddleSamples: 0, planaritySamples: 0,
-    terrainSplits: 0, terrainPlanarExemptions: 0, primitiveSplits: 0, crowdingSplits: 0,
+    primitiveSplits: 0, crowdingSplits: 0,
   };
   const count = primitives.length;
   // Flat bounds, so narrowing is six typed-array reads rather than two object
@@ -533,18 +491,6 @@ export function createSvoEnvironmentRefinement(
     refineEnvironmentLeaf(level: number, coordinate: SparseBrickCoordinate): boolean {
       statistics.nodes += 1;
       const items = narrow(level, coordinate);
-      if (terrainField && sparseSceneTerrainNodeCoverage(
-        terrainField, terrainDomain, brickSize, level, maximumDepth, coordinate) === "surface") {
-        const tolerance_m = SVO_ENVIRONMENT_PLANARITY_RESIDUAL_CELLS * nodeEdge_m[level][1] / brickSize;
-        if (!planarExemption
-          || !sparseSceneTerrainNodePlanar(terrainField, brickSize, level, maximumDepth, coordinate, tolerance_m)) {
-          // Without the exemption the coverage answer is the whole rule: ground
-          // in the node is ground the finer leaf resolves at half the terrace.
-          statistics.terrainSplits += 1;
-          return true;
-        }
-        statistics.terrainPlanarExemptions += 1;
-      }
       if (items.length > crowdingTarget) { statistics.crowdingSplits += 1; return true; }
       if (surfaceSplits(level, coordinate, items)) { statistics.primitiveSplits += 1; return true; }
       return false;

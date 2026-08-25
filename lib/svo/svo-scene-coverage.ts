@@ -23,7 +23,6 @@ const shippedCoverageCache = new Map<string, SvoShippedSceneCoverageReport>();
 export type SvoSceneVisibleOwnership =
   | "analytic-primitive"
   | "analytic-rigid-body"
-  | "analytic-terrain"
   | "thin-glass"
   | "thick-glass"
   | "opaque-proxy-fallback"
@@ -32,8 +31,7 @@ export type SvoSceneVisibleOwnership =
 export type SvoSceneCollisionOwnership =
   | "solver-rigid-body"
   | "solver-environment-proxy"
-  | "solver-terrain-heightfield"
-  | "solver-container-boundary"
+  | "solid-world"
   | "none-presentation-only";
 
 export type SvoSceneLightingOwnership =
@@ -47,7 +45,7 @@ export type SvoSceneCoverageStatus = "complete" | "degraded" | "unsupported";
 
 export interface SvoSceneCoverageEntry {
   key: string;
-  category: "shell" | "prop" | "rigid-body" | "terrain" | "container-glass" | "environment-glazing" | "environment-light";
+  category: "shell" | "prop" | "rigid-body" | "environment-glazing" | "environment-light";
   status: SvoSceneCoverageStatus;
   visibleOwnership: SvoSceneVisibleOwnership;
   collisionOwnership: SvoSceneCollisionOwnership;
@@ -206,23 +204,12 @@ export function buildSvoEnvironmentCoverage(scene: SceneDescription, environment
       } : {}),
     };
   });
-  if (primitiveBuild.analyticTerrain) entries.push({
-    key: `${environmentId}/terrain-heightfield`,
-    category: "terrain",
-    status: "complete",
-    visibleOwnership: "analytic-terrain",
-    collisionOwnership: "solver-terrain-heightfield",
-    lightingOwnership: "none",
-    materialId: primitiveBuild.analyticTerrain.materialId,
-    sourceKind: primitiveBuild.analyticTerrain.kind,
-    defaultCameraPriority: true,
-  });
   for (const metadata of glass.metadata) { const replacingVolume = thickGlass.metadata.find(({ replacesThinPaneKey }) => replacesThinPaneKey === metadata.key); entries.push({
     key: metadata.key,
-    category: metadata.role === "environment-glazing" ? "environment-glazing" : "container-glass",
+    category: "environment-glazing",
     status: metadata.opaqueCutoutKey && !replacingVolume ? "unsupported" : "complete",
     visibleOwnership: replacingVolume ? "thick-glass" : "thin-glass",
-    collisionOwnership: metadata.role === "environment-glazing" ? "none-presentation-only" : "solver-container-boundary",
+    collisionOwnership: "none-presentation-only",
     lightingOwnership: "none",
     materialId: metadata.materialId,
     ownerId: metadata.ownerId,

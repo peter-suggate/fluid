@@ -85,10 +85,10 @@ fn cellVolume(id:u32)->f32{return ${f("cellBase(id)+3u")};}
 fn cellMinimumWidth(id:u32)->f32{
   let b=cellBase(id);return min(${f("b+4u")},min(${f("b+5u")},${f("b+6u")}));
 }
-fn cellMinimum(id:u32)->vec3u{
+fn cellMinimum(id:u32)->vec3i{
   let b=cellBase(id);let center=vec3f(${f("b")},${f("b+1u")},${f("b+2u")});
   let widths=vec3f(${f("b+4u")},${f("b+5u")},${f("b+6u")});
-  return vec3u(center-0.5*widths);
+  return vec3i(round(center-0.5*widths));
 }`;
 }
 
@@ -140,10 +140,13 @@ fn termCoefficient(index:u32)->f32{return ${f(`${w("8u")}+2u*index+1u`)};}`;
   let base=candidateTopologyPageBase(page);return ${w("base+" + w("base+9u") + "+within")};
 }
 fn incidenceEnd(cell:u32)->u32{
-  let host=${w("2u")};if(cell<host){return ${w(`${w("9u")}+cell+1u`)};}
+  let begin=incidenceBegin(cell);let host=${w("2u")};var end=0u;
+  if(cell<host){end=${w(`${w("9u")}+cell+1u`)};
+    return boundedIncidenceEnd(begin,end);}
   let cells=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
   let local=cell-host;let page=local/cells;let within=local%cells;
-  let base=candidateTopologyPageBase(page);return ${w("base+" + w("base+9u") + "+within+1u")};
+  let base=candidateTopologyPageBase(page);end=${w("base+" + w("base+9u") + "+within+1u")};
+  return boundedIncidenceEnd(begin,end);
 }
 fn incidenceRow(index:u32)->u32{
   let host=${w("5u")};if(index<host){return ${w(`${w("10u")}+2u*index`)};}
@@ -158,10 +161,20 @@ fn incidenceTerm(index:u32)->u32{
   let base=candidateTopologyPageBase(page);return ${w("base+" + w("base+10u") + "+2u*within+1u")};
 }`
     : `fn incidenceBegin(cell:u32)->u32{return ${w(`${w("9u")}+cell`)};}
-fn incidenceEnd(cell:u32)->u32{return ${w(`${w("9u")}+cell+1u`)};}
+fn incidenceEnd(cell:u32)->u32{
+  let begin=incidenceBegin(cell);let end=${w(`${w("9u")}+cell+1u`)};
+  return boundedIncidenceEnd(begin,end);
+}
 fn incidenceRow(index:u32)->u32{return ${w(`${w("10u")}+2u*index`)};}
 fn incidenceTerm(index:u32)->u32{return ${w(`${w("10u")}+2u*index+1u`)};}`;
   return `${rowWord}
+fn boundedIncidenceEnd(begin:u32,end:u32)->u32{
+  // One adaptive hexahedral cell can touch at most B^2 rows on each of its
+  // six faces. Treat a reversed or larger arena range as invalid instead of
+  // allowing unsigned corruption to become a multi-billion-iteration loop.
+  let maximum=6u*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  return select(begin,end,end>=begin&&end-begin<=maximum);
+}
 fn rowPackedTerms(id:u32)->u32{return ${w("rowWord(id,0u)")};}
 fn rowPackedMetadata(id:u32)->u32{return ${w("rowWord(id,1u)")};}
 fn rowTermOffset(id:u32)->u32{return rowPackedTerms(id)&0x007fffffu;}

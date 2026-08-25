@@ -456,12 +456,12 @@ function emitShell(
   panes: SceneryPane[],
 ): EnvironmentProxyShell {
   if (node.kind === "room-shell") return emitRoomShell(builder, node, context, graph, panes);
-  // The garden's heightfield is the authority — the same surface the solver
-  // collides against — so this shell publishes no boxes of its own.
+  // Open-world scenery publishes no inferred floor boxes. Static ground comes
+  // from the scene's canonical SolidWorld like every other static solid.
   const { roomHalf_m: roomHalf, floorY_m: floorY, scene } = context;
   const terrainTop = Math.max(scene.container.height_m, scene.terrain?.baseHeight_m ?? 0);
   return {
-    kind: "terrain-heightfield", floorY_m: floorY,
+    kind: "open-world", floorY_m: floorY,
     bounds_m: { min: V(-roomHalf.x, 0, -roomHalf.z), max: V(roomHalf.x, terrainTop, roomHalf.z) },
     primitives: builder.shell, materialModel: node.materialModel,
   };

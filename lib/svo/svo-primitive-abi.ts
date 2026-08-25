@@ -19,7 +19,6 @@ import {
   cupDistanceWgsl,
   cupWallThickness_m,
 } from "../core/scene-shape";
-import { terrainHeightAt, terrainNormalAt, type TerrainDescription } from "../core/terrain";
 import { materialIdForRigidShape } from "../core/voxel-scene";
 
 /** Four 16-byte lanes, directly usable as a WebGPU storage-buffer array. */
@@ -51,7 +50,6 @@ export const SVO_PRIMITIVE_KINDS = Object.freeze({
   capsule: SVO_PRIMITIVE_KIND_TABLE.capsule.code,
   cylinder: SVO_PRIMITIVE_KIND_TABLE.cylinder.code,
   ellipsoid: SVO_PRIMITIVE_KIND_TABLE.ellipsoid.code,
-  terrainHeightfield: SVO_PRIMITIVE_KIND_TABLE["terrain-heightfield"].code,
   torus: SVO_PRIMITIVE_KIND_TABLE.torus.code,
   cone: SVO_PRIMITIVE_KIND_TABLE.cone.code,
   smoothUnionCluster: SVO_PRIMITIVE_KIND_TABLE["smooth-union-cluster"].code,
@@ -326,7 +324,6 @@ export const SVO_PRIMITIVE_FEATURES = Object.freeze({
   boxFaceZ: 3,
   cylinderSide: 4,
   cylinderCap: 5,
-  terrain: 6,
 } as const);
 
 interface SvoPrimitiveIdentity {
@@ -433,16 +430,6 @@ export interface SvoRoundConePrimitive extends SvoOrientedPrimitive {
   baseRadius_m: number;
   topRadius_m: number;
   halfHeight_m: number;
-}
-
-/**
- * A terrain record references the shared scene heightfield table. Variable-size
- * terrain features deliberately do not live in every primitive record.
- */
-export interface SvoTerrainHeightfieldPrimitive extends SvoPrimitiveIdentity {
-  kind: "terrain-heightfield";
-  terrainReference: number;
-  normalEpsilon_m?: number;
 }
 
 /**
@@ -671,8 +658,7 @@ export interface SvoSmoothUnionClusterPrimitive extends SvoOrientedPrimitive {
    * The block's contents.
    *
    * Present on an authored descriptor and absent on one recovered from a packed
-   * record, exactly as a terrain record recovers a reference and not a
-   * heightfield. Evaluating a cluster without either is an error rather than a
+   * record. Evaluating a cluster without either is an error rather than a
    * plausible-looking default: a silently degenerate packing renders as a
    * smooth ellipsoid, which is a shape the scene never asked for.
    */
@@ -736,8 +722,7 @@ export type SvoPrimitiveDescriptor =
   | SvoConePrimitive
   | SvoRoundConePrimitive
   | SvoSmoothUnionClusterPrimitive
-  | SvoFieldProgramPrimitive
-  | SvoTerrainHeightfieldPrimitive;
+  | SvoFieldProgramPrimitive;
 
 export interface SvoPrimitiveSample {
   signedDistance_m: number;
@@ -745,7 +730,7 @@ export interface SvoPrimitiveSample {
   featureId: number;
 }
 
-export type SvoFinitePrimitiveDescriptor = Exclude<SvoPrimitiveDescriptor, SvoTerrainHeightfieldPrimitive>;
+export type SvoFinitePrimitiveDescriptor = SvoPrimitiveDescriptor;
 
 /** World-space ray whose interval is measured in metres along its normalized direction. */
 export interface SvoPrimitiveRay {
@@ -769,15 +754,12 @@ export interface SvoPrimitiveRayHit {
   ownerId: number;
 }
 
-export type SvoTerrainResolver = (terrainReference: number) => TerrainDescription | undefined;
-
 /**
  * Reads a cluster's packing back out of the scene arena.
  *
- * The mirror of {@link SvoTerrainResolver}, and for the same reason: a record
- * recovered from packed bytes names an arena block it cannot itself contain, so
- * whoever holds the arena supplies the contents. A descriptor that still has
- * its authored `packing` needs no resolver.
+ * A record recovered from packed bytes names an arena block it cannot itself
+ * contain, so whoever holds the arena supplies the contents. A descriptor that
+ * still has its authored `packing` needs no resolver.
  */
 export type SvoClusterResolver = (clusterReference: number) => SvoSmoothUnionClusterPacking | undefined;
 
@@ -958,11 +940,7 @@ function dimensions(descriptor: SvoPrimitiveDescriptor): Vec3 {
       z: Math.max(descriptor.envelopeRadii_m.z, derived[2]),
     };
   }
-  uint32(descriptor.terrainReference, "Terrain reference");
-  if (descriptor.terrainReference === SVO_PRIMITIVE_INVALID_REFERENCE) throw new RangeError("Terrain reference may not use the invalid sentinel");
-  const epsilon = descriptor.normalEpsilon_m ?? 0.02;
-  positive(epsilon, "Terrain normal epsilon");
-  return { x: epsilon, y: 0, z: 0 };
+  throw new TypeError("Unknown SVO primitive descriptor");
 }
 
 /**
@@ -1139,13 +1117,12 @@ export function svoPrimitiveBoundingRadius_m(descriptor: SvoPrimitiveDescriptor)
 }
 
 function descriptorCenter(descriptor: SvoPrimitiveDescriptor): Vec3 {
-  if (descriptor.kind === "terrain-heightfield") return { x: 0, y: 0, z: 0 };
   finiteVec3(descriptor.center_m, "Primitive centre");
   return descriptor.center_m;
 }
 
 function descriptorOrientation(descriptor: SvoPrimitiveDescriptor): Quaternion {
-  if (descriptor.kind === "sphere" || descriptor.kind === "terrain-heightfield") return normalizedOrientation(undefined);
+  if (descriptor.kind === "sphere") return normalizedOrientation(undefined);
   return normalizedOrientation(descriptor.orientation);
 }
 
@@ -1173,12 +1150,11 @@ export function canonicalSvoPrimitive(descriptor: SvoPrimitiveDescriptor): SvoPr
     // report a smaller extent than the record already published.
     return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), envelopeRadii_m: d };
   }
-  return { ...descriptor, ownerId, normalEpsilon_m: d.x };
+  throw new TypeError("Unknown SVO primitive descriptor");
 }
 
 /** The word-13 arena reference a kind carries, or the invalid sentinel. */
 function arenaReference(descriptor: SvoPrimitiveDescriptor): number {
-  if (descriptor.kind === "terrain-heightfield") return descriptor.terrainReference >>> 0;
   if (descriptor.kind === "smooth-union-cluster") return descriptor.clusterReference >>> 0;
   if (descriptor.kind === "field-program") return descriptor.fieldProgramReference >>> 0;
   return SVO_PRIMITIVE_INVALID_REFERENCE;
@@ -1186,7 +1162,7 @@ function arenaReference(descriptor: SvoPrimitiveDescriptor): number {
 
 /**
  * Pack `{center.xyz, kind}`, `{dimensions.xyz, material|owner}`, quaternion
- * `xyzw`, then `{primitive, terrain-reference, flags, reserved}`.
+ * `xyzw`, then `{primitive, arena-reference, flags, reserved}`.
  */
 export function packSvoPrimitiveRecords(descriptors: readonly SvoPrimitiveDescriptor[]): Uint32Array<ArrayBuffer> {
   const buffer = new ArrayBuffer(descriptors.length * SVO_PRIMITIVE_RECORD_STRIDE_BYTES);
@@ -1243,9 +1219,6 @@ function descriptorFromRecord(words: Uint32Array, floats: Float32Array, base: nu
     // envelope is the published one rather than a floor that has to be re-grown.
     return { ...identity, kind: "field-program", center_m, orientation, envelopeRadii_m: d, fieldProgramReference: words[base + 13] };
   }
-  if (kind === SVO_PRIMITIVE_KINDS.terrainHeightfield) {
-    return { ...identity, kind: "terrain-heightfield", terrainReference: words[base + 13], normalEpsilon_m: d.x };
-  }
   throw new RangeError(`Unknown SVO primitive kind ${kind}`);
 }
 
@@ -1267,7 +1240,7 @@ export function svoPrimitiveForRigidBody(
   primitiveId: number,
   ownerId: number,
   materialId = materialIdForRigidShape(body.shape),
-): Exclude<SvoPrimitiveDescriptor, SvoEllipsoidPrimitive | SvoTerrainHeightfieldPrimitive> {
+): Exclude<SvoPrimitiveDescriptor, SvoEllipsoidPrimitive> {
   const identity = { primitiveId, materialId, ownerId, center_m: { ...body.position_m } };
   if (body.shape === "sphere") return canonicalSvoPrimitive({ ...identity, kind: "sphere", radius_m: body.dimensions_m.x }) as SvoSpherePrimitive;
   if (body.shape === "box") return canonicalSvoPrimitive({
@@ -1311,7 +1284,7 @@ function normalize(v: Vec3): Vec3 | null {
   return length > NORMAL_EPSILON ? { x: v.x / length, y: v.y / length, z: v.z / length } : null;
 }
 
-function localPoint(descriptor: Exclude<SvoPrimitiveDescriptor, SvoTerrainHeightfieldPrimitive>, worldPoint_m: Vec3): { point: Vec3; orientation: Quaternion } {
+function localPoint(descriptor: SvoPrimitiveDescriptor, worldPoint_m: Vec3): { point: Vec3; orientation: Quaternion } {
   finiteVec3(worldPoint_m, "Primitive query point");
   const orientation = descriptorOrientation(descriptor);
   return {
@@ -2656,7 +2629,7 @@ function intersectCanonicalSvoPrimitive(
   };
 }
 
-/** Exact analytic finite-primitive hit oracle. Terrain is intentionally handled by its separate heightfield tracer. */
+/** Exact analytic finite-primitive hit oracle. */
 export function intersectSvoPrimitive(
   input: SvoFinitePrimitiveDescriptor,
   rayInput: SvoPrimitiveRay,
@@ -2664,7 +2637,6 @@ export function intersectSvoPrimitive(
   fieldProgramResolver?: SvoFieldProgramResolver,
 ): SvoPrimitiveRayHit | null {
   const descriptor = canonicalSvoPrimitive(input);
-  if (descriptor.kind === "terrain-heightfield") throw new TypeError("Terrain heightfield intersection uses the separate terrain tracer");
   return intersectCanonicalSvoPrimitive(descriptor, canonicalPrimitiveRay(rayInput), clusterResolver, fieldProgramResolver);
 }
 
@@ -2679,7 +2651,6 @@ export function intersectSvoPrimitives(
   let nearest: SvoPrimitiveRayHit | null = null;
   for (const input of inputs) {
     const descriptor = canonicalSvoPrimitive(input);
-    if (descriptor.kind === "terrain-heightfield") continue;
     const hit = intersectCanonicalSvoPrimitive(descriptor, ray, clusterResolver, fieldProgramResolver);
     if (hit && (!nearest || hit.t_m < nearest.t_m)) nearest = hit;
   }
@@ -2777,21 +2748,10 @@ function closestEllipsoidPoint(radii: Vec3, point: Vec3): SvoEllipsoidClosestPoi
 export function sampleSvoPrimitive(
   input: SvoPrimitiveDescriptor,
   worldPoint_m: Vec3,
-  terrainResolver?: SvoTerrainResolver,
   clusterResolver?: SvoClusterResolver,
   fieldProgramResolver?: SvoFieldProgramResolver,
 ): SvoPrimitiveSample {
   const descriptor = canonicalSvoPrimitive(input);
-  if (descriptor.kind === "terrain-heightfield") {
-    if (!terrainResolver) throw new Error("Terrain primitive evaluation requires a terrain resolver");
-    finiteVec3(worldPoint_m, "Primitive query point");
-    const terrain = terrainResolver(descriptor.terrainReference);
-    return {
-      signedDistance_m: worldPoint_m.y - terrainHeightAt(terrain, worldPoint_m.x, worldPoint_m.z),
-      normal: terrainNormalAt(terrain, worldPoint_m.x, worldPoint_m.z, descriptor.normalEpsilon_m),
-      featureId: SVO_PRIMITIVE_FEATURES.terrain,
-    };
-  }
   const { point, orientation } = localPoint(descriptor, worldPoint_m);
   if (descriptor.kind === "sphere") {
     const length = Math.hypot(point.x, point.y, point.z);
@@ -2911,10 +2871,8 @@ fn svoFieldProgramReferenceSample(reference:u32,localPoint:vec3f)->SvoFieldValue
 `;
 
 /**
- * Shared WGSL declaration/evaluation library. Terrain height and normal are
- * supplied by the scene's existing terrain evaluator using metadata.y as its
- * stable table reference. Box/cylinder normals select one feature; they never
- * average across hard boundaries.
+ * Shared WGSL declaration/evaluation library. Box/cylinder normals select one
+ * feature; they never average across hard boundaries.
  *
  * Requires the host module to have declared `svoFieldProgramReferenceSample`
  * first — see {@link svoFieldProgramAbsentWGSL} for the contract and for the
@@ -2928,7 +2886,6 @@ const SVO_FEATURE_BOX_Y: u32 = 2u;
 const SVO_FEATURE_BOX_Z: u32 = 3u;
 const SVO_FEATURE_CYLINDER_SIDE: u32 = 4u;
 const SVO_FEATURE_CYLINDER_CAP: u32 = 5u;
-const SVO_FEATURE_TERRAIN: u32 = 6u;
 const SVO_SAMPLE_NORMAL_VALID: u32 = 1u;
 const SVO_PRIMITIVE_RAY_MISS: u32 = 0u;
 const SVO_PRIMITIVE_RAY_HIT: u32 = 1u;
@@ -2970,13 +2927,10 @@ fn svoPrimitiveDimensions_m(record: SvoPrimitiveRecord) -> vec3f { return bitcas
 fn svoPrimitiveMaterialId(record: SvoPrimitiveRecord) -> u32 { return record.dimensionsIdentity.w & 0xffffu; }
 fn svoPrimitiveOwnerId(record: SvoPrimitiveRecord) -> u32 { return record.dimensionsIdentity.w >> 16u; }
 fn svoPrimitiveId(record: SvoPrimitiveRecord) -> u32 { return record.metadata.x; }
-// One word, three arena-backed kinds. A heightfield names its samples, a
-// cluster names its packing and a field program names its tape; each is a block
-// in the shared scene arena, and none of the three fits in the record's three
-// dimension floats. What the number *means* is the host's convention, not this
-// library's — see svoFieldProgramAbsentWGSL.
+// One word shared by the arena-backed kinds. A cluster names its packing and a
+// field program names its tape; neither fits in the record's three dimension
+// floats. What the number means is the host's convention.
 fn svoPrimitiveArenaReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
-fn svoPrimitiveTerrainReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
 fn svoPrimitiveClusterReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
 fn svoPrimitiveFieldProgramReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
 
@@ -4185,10 +4139,9 @@ fn svoEllipsoidDistance_m(point: vec3f, radii_m: vec3f) -> f32 {
   return select(distance_m, -distance_m, dot(point / radii_m, point / radii_m) < 1.0);
 }
 
-fn svoPrimitiveDistance_m(record: SvoPrimitiveRecord, worldPoint_m: vec3f, terrainHeight_m: f32, packing: SvoClusterPacking) -> f32 {
+fn svoPrimitiveDistance_m(record: SvoPrimitiveRecord, worldPoint_m: vec3f, packing: SvoClusterPacking) -> f32 {
   let kind = svoPrimitiveKind(record);
   let dimensions_m = svoPrimitiveDimensions_m(record);
-  if (kind == SVO_KIND_TERRAIN) { return worldPoint_m.y - terrainHeight_m; }
   let point = svoPrimitiveLocalPoint(record, worldPoint_m);
   if (kind == SVO_KIND_SPHERE) { return length(point) - dimensions_m.x; }
   if (kind == SVO_KIND_BOX) { return svoBoxDistance_m(point, dimensions_m); }
@@ -4250,12 +4203,8 @@ fn svoPrimitiveLocalNormal(record: SvoPrimitiveRecord, point: vec3f, packing: Sv
   return vec4f(0.0);
 }
 
-fn svoEvaluatePrimitive(record: SvoPrimitiveRecord, worldPoint_m: vec3f, terrainHeight_m: f32, terrainNormal: vec3f, packing: SvoClusterPacking) -> SvoPrimitiveSample {
-  let distance_m = svoPrimitiveDistance_m(record, worldPoint_m, terrainHeight_m, packing);
-  if (svoPrimitiveKind(record) == SVO_KIND_TERRAIN) {
-    let normalLength = length(terrainNormal);
-    return SvoPrimitiveSample(distance_m, SVO_FEATURE_TERRAIN, select(0u, SVO_SAMPLE_NORMAL_VALID, normalLength > 1e-8), 0u, vec4f(terrainNormal / max(normalLength, 1e-8), 0.0));
-  }
+fn svoEvaluatePrimitive(record: SvoPrimitiveRecord, worldPoint_m: vec3f, packing: SvoClusterPacking) -> SvoPrimitiveSample {
+  let distance_m = svoPrimitiveDistance_m(record, worldPoint_m, packing);
   let localPoint = svoPrimitiveLocalPoint(record, worldPoint_m);
   let local = svoPrimitiveLocalNormal(record, localPoint, packing);
   let localLength = length(local.xyz);

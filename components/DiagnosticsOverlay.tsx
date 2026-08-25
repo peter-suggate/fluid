@@ -9,7 +9,6 @@ import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
 import { resolvedMethodValues, useMethodStore } from "../lib/core/stores/method-store";
 import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import { useSceneStore } from "../lib/core/stores/scene-store";
-import { tankWallOpeningCellCount } from "../lib/core/tank-wall-field";
 
 function telemetrySourceLabel(source?: string) {
   return ({
@@ -39,8 +38,7 @@ export function DiagnosticsOverlay() {
   const { bodies, rigidState, couplingState, gpuInfo, waterSurfacePresentation } = useDiagnosticsStore();
   const method = getMethod(methodId);
   const globalFineVolumeEstimate = gpuInfo?.volumeTelemetrySource === "global-fine";
-  const authoredMassChange = Boolean(scene.fluid.inflow)
-    || tankWallOpeningCellCount(scene.container.wallField) > 0;
+  const authoredMassChange = Boolean(scene.fluid.inflow);
   const representedVolumeAliasesPrimary = gpuInfo?.volumeDrift !== undefined
     && gpuInfo?.representedVolumeDrift !== undefined
     && gpuInfo.volumeDrift === gpuInfo.representedVolumeDrift;

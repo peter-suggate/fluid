@@ -133,7 +133,7 @@ function relativeDensityL1(reference: Float32Array, candidate: Float32Array): nu
   return difference / Math.max(scale, Number.MIN_VALUE);
 }
 
-dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
+dawnTest("Sparse CM12 expands the 64-cubed mini-dam into demand-led frontier pages",
   { timeout: 240_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-mini64-front-dawn.test.ts");
@@ -283,7 +283,7 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into dormant receivers",
         assert.ok(final.relativeL1 <= 0.06,
           `adaptive/all-fine density relative L1 ${final.relativeL1} exceeds 0.06`);
         assert.ok(Math.max(...trajectory.map((sample) => sample.adaptive.maximum)) <= 2,
-          "adaptive density peak must stay bounded through the receiver transition");
+          "adaptive density peak must stay bounded through the frontier transition");
         assert.ok(trajectory.every((sample, index) => index === 0
           || sample.adaptive.front.surface >= trajectory[index - 1]!.adaptive.front.surface),
         "adaptive surface front must not retreat during the five-frame release");

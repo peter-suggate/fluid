@@ -397,7 +397,7 @@ fn labMaterial(p:vec3f,n:vec3f)->vec3f{
 fn galleryMaterial(p:vec3f,n:vec3f)->vec3f{
   if(n.y>.7){let seam=envGrid(p.xz*.82,.488);return vec3f(.105,.115,.11)+seam*vec3f(.06,.065,.06);}
   let uv=select(p.xy,p.zy,abs(n.z)>.5);let boards=envLine((uv.x+uv.y*.08)*.72,.474);let tie=smoothstep(.045,.012,length(fract(uv*.72)-.5));var concrete=vec3f(.29,.30,.28)*(0.91+.09*envHash21(floor(uv*3.0)))+boards*.045-tie*.08;
-  let portalSdf=max(abs(uv.x)-.78,max(abs(uv.y-.82)-.80,.04-uv.y));let glow=(1.0-smoothstep(-.025,.12,portalSdf))*select(0.0,1.0,abs(n.z)>.5);concrete=mix(concrete,vec3f(1.15,.54,.22),glow*.90);
+  let archwaySdf=max(abs(uv.x)-.78,max(abs(uv.y-.82)-.80,.04-uv.y));let glow=(1.0-smoothstep(-.025,.12,archwaySdf))*select(0.0,1.0,abs(n.z)>.5);concrete=mix(concrete,vec3f(1.15,.54,.22),glow*.90);
   return concrete;
 }
 

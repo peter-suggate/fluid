@@ -22,7 +22,7 @@ import {
 import { VOXEL_MATERIAL_IDS } from "../core/voxel-scene";
 import type { SvoVec3 } from "./webgpu-svo-traversal";
 
-export const SVO_SCENE_GLASS_VERSION = "1" as const;
+export const SVO_SCENE_GLASS_VERSION = "4" as const;
 /**
  * Panes one environment may declare.
  *
@@ -38,8 +38,7 @@ export const SVO_SCENE_GLASS_MAXIMUM_PANES = 256;
 
 const sceneGlassCache = new Map<string, SvoSceneGlassBuild>();
 
-export type SvoSceneGlassRole = "container-pane" | "container-top" | "environment-glazing";
-export type SvoSceneContainerGlassSide = "floor" | "left" | "right" | "front" | "back" | "ceiling";
+export type SvoSceneGlassRole = "environment-glazing";
 
 export interface SvoSceneGlassBuildOptions {
   environmentId?: EnvironmentId;
@@ -52,7 +51,6 @@ export interface SvoSceneGlassMetadata {
   recordIndex: number;
   key: string;
   role: SvoSceneGlassRole;
-  side?: SvoSceneContainerGlassSide;
   paneId: number;
   materialId: number;
   ownerId: number;
@@ -75,9 +73,6 @@ export interface SvoSceneGlassBuild {
   packedRecords: Uint32Array<ArrayBuffer>;
   metadata: readonly SvoSceneGlassMetadata[];
   unsupportedEntries: readonly SvoSceneGlassUnsupportedEntry[];
-  containerPolicy: "raster-wall-vessel" | "analytic-spherical-vessel" | "absent-open-environment";
-  containerPaneIndices: readonly number[];
-  containerTopPaneIndex?: number;
   environmentPaneIndices: readonly number[];
   /** Content hash over records, bounds policy, metadata, and diagnostics. */
   contentRevision: string;
@@ -85,20 +80,15 @@ export interface SvoSceneGlassBuild {
   cacheKey: string;
 }
 
-const CONTAINER_PANE_ID_BASE = 0x1000;
-const ENVIRONMENT_PANE_ID_BASE = 0x2000;
+export const SVO_ENVIRONMENT_GLASS_PANE_ID_BASE = 0x2000;
 const DEFAULT_ABSORPTION_M_INV = [0.18, 0.04, 0.03] as const;
-const SQRT_HALF = Math.SQRT1_2;
 
 const Q_IDENTITY: Quaternion = { w: 1, x: 0, y: 0, z: 0 };
-const Q_NORMAL_POSITIVE_Y: Quaternion = { w: SQRT_HALF, x: -SQRT_HALF, y: 0, z: 0 };
-const Q_NORMAL_NEGATIVE_Y: Quaternion = { w: SQRT_HALF, x: SQRT_HALF, y: 0, z: 0 };
 
 interface AuthoredSceneGlassPane {
   key: string;
   role: SvoSceneGlassRole;
   descriptor: SvoThinGlassPane;
-  side?: SvoSceneContainerGlassSide;
   opaqueCutoutKey?: string;
 }
 
@@ -109,20 +99,6 @@ function positiveInteger(value: number, maximum: number, label: string): number 
       + " SVO_SCENE_GLASS_MAXIMUM_PANES (lib/svo-scene-glass.ts) instead of the per-call override");
   }
   return value;
-}
-
-function cellSize(scene: SceneDescription, input: number | SvoVec3 | undefined): SvoVec3 {
-  const value: SvoVec3 = typeof input === "number"
-    ? [input, input, input]
-    : input ?? [scene.voxelDomain.finestCellSize_m, scene.voxelDomain.finestCellSize_m, scene.voxelDomain.finestCellSize_m];
-  if (value.some((component) => !Number.isFinite(component) || component <= 0)) {
-    throw new RangeError("SVO scene glass cell size must contain finite positive components");
-  }
-  return [...value];
-}
-
-function glassThickness(scene: SceneDescription): number {
-  return Math.max(0.002, Math.min(0.012, scene.voxelDomain.finestCellSize_m * 0.25));
 }
 
 function pane(
@@ -147,42 +123,18 @@ function pane(
   };
 }
 
-/**
- * Whether this document's container is a visible vessel.
- *
- * The garden has always been the open case: its water sits in the ground, and a
- * pane hanging in the air around it would read as a bug. `container.vessel`
- * generalises that from an environment the renderer happens to know the name of
- * to a property of the scene, which is what lets a fresh room start without a
- * tank in it and gain one when its author asks for one.
- */
-function containerIsGlass(scene: SceneDescription, environmentId: EnvironmentId): boolean {
-  return scene.container.vessel !== "none" && environmentId !== "garden";
+function cellSize(scene: SceneDescription, input: number | SvoVec3 | undefined): SvoVec3 {
+  const value: SvoVec3 = typeof input === "number"
+    ? [input, input, input]
+    : input ?? [scene.voxelDomain.finestCellSize_m, scene.voxelDomain.finestCellSize_m, scene.voxelDomain.finestCellSize_m];
+  if (value.some((component) => !Number.isFinite(component) || component <= 0)) {
+    throw new RangeError("SVO scene glass cell size must contain finite positive components");
+  }
+  return [...value];
 }
 
-function containerPanes(scene: SceneDescription, environmentId: EnvironmentId, thickness_m: number): AuthoredSceneGlassPane[] {
-  // Curved vessel glass is owned by the exact water compositor. Publishing
-  // six planar panes here would leave a box visibly wrapped around the sphere.
-  if (!containerIsGlass(scene, environmentId) || scene.container.shape === "sphere") return [];
-  const halfWidth = 0.5 * scene.container.width_m;
-  const halfDepth = 0.5 * scene.container.depth_m;
-  // The four editable sides are rendered from `container.wallField` by the
-  // raster water compositor. Publishing whole analytic panes here as well
-  // would put intact glass behind every authored opening.
-  const result: AuthoredSceneGlassPane[] = [
-    { key: "container/floor", side: "floor", role: "container-pane", descriptor: pane(CONTAINER_PANE_ID_BASE, [0, 0, 0], [halfWidth, halfDepth], thickness_m, Q_NORMAL_NEGATIVE_Y) },
-  ];
-  if (scene.container.top === "closed") result.push({
-    key: "container/ceiling", side: "ceiling", role: "container-top",
-    // Compositor ownership is encoded as one contiguous pane-ID range. The
-    // editable side panes no longer live here, so retaining their former +1…+4
-    // slots put this +5 ceiling outside a two-record floor/ceiling range. It
-    // then entered dry primary depth and hid water before the raster compositor
-    // could blend the same ceiling as glass. Generated container records are
-    // compact: floor +0, ceiling +1.
-    descriptor: pane(CONTAINER_PANE_ID_BASE + 1, [0, scene.container.height_m, 0], [halfWidth, halfDepth], thickness_m, Q_NORMAL_POSITIVE_Y),
-  });
-  return result;
+function glassThickness(scene: SceneDescription): number {
+  return Math.max(0.002, Math.min(0.012, scene.voxelDomain.finestCellSize_m * 0.25));
 }
 
 /**
@@ -195,7 +147,8 @@ function containerPanes(scene: SceneDescription, environmentId: EnvironmentId, t
  * assign pane ids, which stay stable because expansion order is document order.
  */
 function environmentPanes(catalog: EnvironmentProxyCatalog, thickness_m: number): AuthoredSceneGlassPane[] {
-  const environmentBase = ENVIRONMENT_PANE_ID_BASE + environmentIds.indexOf(catalog.environmentId) * 0x100;
+  const environmentBase = SVO_ENVIRONMENT_GLASS_PANE_ID_BASE
+    + environmentIds.indexOf(catalog.environmentId) * 0x100;
   return catalog.panes.map((declared, index) => ({
     key: declared.id,
     role: "environment-glazing" as const,
@@ -244,27 +197,20 @@ export function svoSceneGlassFromEnvironmentCatalog(
   const maximumPanes = positiveInteger(options.maximumPanes ?? SVO_SCENE_GLASS_MAXIMUM_PANES, SVO_SCENE_GLASS_MAXIMUM_PANES, "SVO scene glass pane limit");
   const cell = cellSize(scene, options.cellSize_m);
   const thickness_m = glassThickness(scene);
-  const authored: AuthoredSceneGlassPane[] = [
-    ...containerPanes(scene, catalog.environmentId, thickness_m),
-    ...environmentPanes(catalog, thickness_m),
-  ];
+  const authored: AuthoredSceneGlassPane[] = environmentPanes(catalog, thickness_m);
   if (authored.length > maximumPanes) {
-    throw new RangeError(`Environment ${catalog.environmentId} needs ${authored.length} glass panes, exceeding the `
+    throw new RangeError(`Scene ${catalog.environmentId} needs ${authored.length} glass panes, exceeding the `
       + `${maximumPanes} record limit. There is no degrade below this: the whole glass build fails, and the caller`
       + ` (lib/webgpu-renderer.ts) reports the scene blocked rather than dropping panes. Fix by raising`
       + ` SVO_SCENE_GLASS_MAXIMUM_PANES to at least ${authored.length} — the arena bytes and the WGSL loop bound both`
-      + ` derive from it — or by declaring fewer glazing nodes in the environment catalog.`);
+      + ` derive from it — or by reducing the authored environment glazing.`);
   }
   const unsupportedEntries = unsupportedCatalogGlass(catalog);
-  const containerPolicy = !containerIsGlass(scene, catalog.environmentId)
-    ? "absent-open-environment" as const
-    : scene.container.shape === "sphere" ? "analytic-spherical-vessel" as const : "raster-wall-vessel" as const;
   const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     environmentId: catalog.environmentId,
     authored,
     unsupportedEntries,
     cell,
-    containerPolicy,
   }));
   const cacheKey = `svo-scene-glass-v${SVO_SCENE_GLASS_VERSION}:${catalog.environmentId}:${contentRevision}`;
   const cached = cachedSvoPublication(sceneGlassCache, cacheKey);
@@ -275,14 +221,12 @@ export function svoSceneGlassFromEnvironmentCatalog(
     recordIndex,
     key: entry.key,
     role: entry.role,
-    ...(entry.side ? { side: entry.side } : {}),
     paneId: descriptors[recordIndex].paneId,
     materialId: descriptors[recordIndex].materialId,
     ownerId: descriptors[recordIndex].ownerId,
     bounds: svoThinGlassBounds(descriptors[recordIndex], cell),
     ...(entry.opaqueCutoutKey ? { opaqueCutoutKey: entry.opaqueCutoutKey } : {}),
   }));
-  const containerPaneIndices = metadata.filter(({ role }) => role === "container-pane" || role === "container-top").map(({ recordIndex }) => recordIndex);
   const environmentPaneIndices = metadata.filter(({ role }) => role === "environment-glazing").map(({ recordIndex }) => recordIndex);
   return internSvoPublication(sceneGlassCache, cacheKey, {
     environmentId: catalog.environmentId,
@@ -290,9 +234,6 @@ export function svoSceneGlassFromEnvironmentCatalog(
     packedRecords,
     metadata,
     unsupportedEntries,
-    containerPolicy,
-    containerPaneIndices,
-    containerTopPaneIndex: metadata.find(({ role }) => role === "container-top")?.recordIndex,
     environmentPaneIndices,
     contentRevision,
     cacheKey,

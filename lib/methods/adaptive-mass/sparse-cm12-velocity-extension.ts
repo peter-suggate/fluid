@@ -132,7 +132,9 @@ export function createSparseCM12VelocityExtensionStateLayout(options: {
   const cellCapacity = integer(options.cellCapacity, "cellCapacity");
   const characteristicSupportFloatBase = Math.ceil(base / 4) * 4;
   return Object.freeze({ characteristicSupportFloatBase,
-    floatCount: characteristicSupportFloatBase + cellCapacity });
+    // Resident state fields are vec4-aligned even when the logical cell count
+    // is not a multiple of four. Preserve that arena tail contract here too.
+    floatCount: Math.ceil((characteristicSupportFloatBase + cellCapacity) / 4) * 4 });
 }
 
 export function createSparseCM12VelocityExtensionLayout(options: {

@@ -11,15 +11,11 @@ import {
   TALL_CELLS_FLOOD_RESERVOIR_M,
   TALL_CELLS_FLOOD_UPHILL_HEIGHT_M,
 } from "../lib/core/scenes";
-import {
-  planSparseSceneTerrainField,
-  sparseSceneTerrainClaimCoordinates,
-} from "../lib/core/sparse-scene-terrain-field";
+import { sampleSolidWorld, solidWorldForScene,
+  SOLID_WORLD_TERRAIN_MATERIAL_ID } from "../lib/core/solid-world";
 import { terrainHeightAt } from "../lib/core/terrain";
 import { initializeSparseBrickAtlasFromScene } from
   "../lib/methods/adaptive-mass/sparse-brick-atlas";
-import { octreeLiveSceneUsesTerrainVoxels } from
-  "../lib/svo/webgpu-svo-sparse-bricks";
 import {
   buildSvoPrimitiveCandidates,
   packSvoPrimitiveCandidateArena,
@@ -75,7 +71,6 @@ test("height samples author a flat shelf, central slope, channel banks, and runo
   const minimumX = -0.5 * WIDTH_M;
   const slopeStart = minimumX + TALL_CELLS_FLOOD_RESERVOIR_M.x;
   const slopeEnd = 0.5 * WIDTH_M - 0.8;
-  assert.equal(terrain.solidRepresentation, "voxel");
   assert.deepEqual(terrain.grid?.size, { nx: NX + 1, nz: NZ + 1 });
   assert.equal(terrain.grid?.spacing_m, TALL_CELLS_FLOOD_CELL_SIZE_M);
   assert.equal(terrainHeightAt(terrain, minimumX, 0),
@@ -95,27 +90,11 @@ test("height samples author a flat shelf, central slope, channel banks, and runo
 
 test("the scene requires a unified sparse voxel solid and starts fluid-local", () => {
   const scene = createTallCellsHillsideDamBreakScene();
-  assert.equal(octreeLiveSceneUsesTerrainVoxels(scene.terrain,
-    { FLUID_SVO_TERRAIN_VOXELS: "0" }), true,
-  "the global legacy A/B must not disable this scene's required voxel ground");
-
-  const domain = {
-    worldOrigin_m: [-0.5 * WIDTH_M, 0, -0.5 * DEPTH_M] as const,
-    cellSize_m: [TALL_CELLS_FLOOD_CELL_SIZE_M, TALL_CELLS_FLOOD_CELL_SIZE_M,
-      TALL_CELLS_FLOOD_CELL_SIZE_M] as const,
-    dimensionsCells: TALL_CELLS_FLOOD_GRID,
-  };
-  const field = planSparseSceneTerrainField(scene.terrain, domain);
-  assert.ok(field);
-  assert.deepEqual(field.dimensions, [NX, NZ]);
-  assert.ok(Math.abs(field.minimumHeight_m
-    - TALL_CELLS_FLOOD_DOWNHILL_HEIGHT_M) < 1e-6);
-  assert.ok(Math.abs(field.maximumHeight_m
-    - TALL_CELLS_FLOOD_UPHILL_HEIGHT_M) < 1e-6);
-  const terrainTiles = sparseSceneTerrainClaimCoordinates(field, domain, 8, 0);
-  assert.ok(terrainTiles.length > 0);
-  assert.ok(terrainTiles.length < (NX / 8) * (NY / 8) * (NZ / 8),
-    "voxel terrain must claim its solid surface, not the logical world volume");
+  const solids = solidWorldForScene(scene);
+  assert.equal(sampleSolidWorld(solids, [NX - 1, 0, Math.floor(NZ / 2)]).materialId,
+    SOLID_WORLD_TERRAIN_MATERIAL_ID);
+  assert.equal(sampleSolidWorld(solids, [NX - 1, NY - 1, Math.floor(NZ / 2)]).solidFraction,
+    0, "SolidWorld claims terrain voxels rather than the logical world volume");
 
   const atlas = initializeSparseBrickAtlasFromScene(scene, {
     finestDimensions: TALL_CELLS_FLOOD_GRID,
@@ -128,9 +107,8 @@ test("the scene requires a unified sparse voxel solid and starts fluid-local", (
     "initial fluid residency must stay independent of the vast dry extent");
 });
 
-test("terrain plus bounded key publish a sparse primitive index", () => {
+test("bounded key publishes a sparse primitive index", () => {
   const primitives = buildSvoScenePrimitives(createTallCellsHillsideDamBreakScene());
-  assert.equal(primitives.analyticTerrain?.kind, "terrain-heightfield");
   assert.equal(primitives.descriptors.length, 1);
   assert.equal(primitives.metadata[0]?.key, "default/hillside/key");
   const candidates = primitives.primitiveCandidates

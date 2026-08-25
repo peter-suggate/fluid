@@ -41,12 +41,6 @@ import {
   NO_DISABLED_RENDER_STAGES,
   type DisabledRenderStages,
 } from "./render-stage-switches";
-import {
-  createBoxTankWallField,
-  PACKED_TANK_WALL_MAGIC,
-  packTankWallField,
-  type TankWallField,
-} from "./tank-wall-field";
 
 type FluidDomain = NonNullable<GPUSolverInstance["fluidDomain"]>;
 
@@ -145,7 +139,6 @@ export interface SurfaceExtractionDispatchPlan {
   full?: [number, number, number];
   band?: [number, number, number];
   tallSides?: [number, number, number];
-  walls?: [number, number, number];
   bandCubeRows?: number;
 }
 
@@ -222,11 +215,6 @@ export interface DrySceneReplacementResult {
  */
 export type RenderPathTraceStage = RenderFrameSeam<"water">;
 
-export interface RasterWaterPipelineOptions {
-  /** Experimental mass-derived sub-cell films on solid container faces. */
-  thinWallFilms?: boolean;
-}
-
 /**
  * The dry scene, encoded into this pipeline's own background attachment.
  *
@@ -245,9 +233,8 @@ export type RasterWaterBackgroundMode = "require-dry-scene" | "clear";
 
 /**
  * Restricted tall cells cannot contain a free surface below their cubic band.
- * The interior can therefore follow that band, while a separate perimeter
- * dispatch retains the full-height tank-side interfaces needed by the optical
- * composite. Two adjacent base steps can meet across a cube diagonal.
+ * The interior can therefore follow that band. Two adjacent base steps can
+ * meet across a cube diagonal.
  */
 export function surfaceExtractionDispatchPlan(
   nx: number,
@@ -256,21 +243,16 @@ export function surfaceExtractionDispatchPlan(
   packedNy: number,
   restrictedTallCell: boolean,
   maximumNeighborDelta: number,
-  thinWallFilms = false,
 ): SurfaceExtractionDispatchPlan {
   if (!restrictedTallCell) {
-    // The experimental uniform film lattice adds outside + wall nodes on both
-    // ends of each axis. Keep the legacy N+1 dispatch when films are disabled.
-    const cubesPerAxis = thinWallFilms ? 3 : 1;
-    return { mode: "full-volume", full: [Math.ceil((nx + cubesPerAxis) / 4), Math.ceil((ny + cubesPerAxis) / 4), Math.ceil((nz + cubesPerAxis) / 4)] };
+    return { mode: "full-volume", full: [Math.ceil((nx + 1) / 4),
+      Math.ceil((ny + 1) / 4), Math.ceil((nz + 1) / 4)] };
   }
   const bandCubeRows = Math.min(ny + 1, Math.max(1, packedNy + 2 * Math.ceil(Math.max(0, maximumNeighborDelta)) - 1));
-  const perimeterCubes = 2 * (nx + 1) + 2 * Math.max(0, nz - 1);
   return {
     mode: "restricted-band",
     band: [Math.ceil(Math.max(0, nx - 1) / 4), Math.ceil(bandCubeRows / 4), Math.ceil(Math.max(0, nz - 1) / 4)],
     tallSides: [Math.ceil(Math.max(0, nx - 1) / 8), Math.ceil(Math.max(0, nz - 1) / 8), 1],
-    walls: [Math.ceil(perimeterCubes * (ny + 1) / 64), 1, 1],
     bandCubeRows
   };
 }
@@ -368,7 +350,6 @@ export function compactCoarseSurfaceDispatch(
 }
 
 export const surfaceExtractionShader = /* wgsl */ `
-override thinWallFilmsEnabled:bool=false;
 struct Uniforms {
   viewport: vec4f,
   cameraPosition: vec4f,
@@ -499,87 +480,15 @@ fn presentationFieldCell(cell:vec3i)->f32{
   return fieldCell(cell);
 }
 
-// A cell centre lies half a cell inside the wall. Given an intended film
-// thickness a*h, lambda=2a is therefore its normalized position on the edge
-// from the wall to that centre. Solve the ordinary marching-cubes interpolation
-// equation for the solid-side ghost value. The extractor remains completely
-// unchanged: it still contours one scalar field at 0.5.
-fn wallFilmGhostValue(thicknessCells:f32,interiorValue:f32)->f32{
-  let lambda=clamp(2.0*thicknessCells,0.0,0.999);
-  if(lambda<=2e-4||interiorValue>=0.5){return 0.0;}
-  return clamp((0.5-lambda*interiorValue)/(1.0-lambda),0.5001,4.0);
-}
-
-fn wallFilmAtLatticeVertex(face:u32,p:vec3i)->f32{
-  // Augmented indices 0/1 are outside/wall and index 2 is the first cell
-  // centre at tangential coordinate 0.5.
-  if(face<2u){return wallFilmDensity(face,vec2f(vec2i(p.z,p.y))-vec2f(1.5));}
-  if(face<4u){return wallFilmDensity(face,vec2f(vec2i(p.x,p.y))-vec2f(1.5));}
-  return wallFilmDensity(face,vec2f(vec2i(p.x,p.z))-vec2f(1.5));
-}
-
-fn augmentedWallThickness(p:vec3i,dims:vec3i)->f32{
-  if(u.cameraTarget.w>1.5){return 0.0;}
-  var thicknessCells=0.0;
-  if(p.x==1){thicknessCells=max(thicknessCells,wallFilmAtLatticeVertex(0u,p));}
-  if(p.x==dims.x+2){thicknessCells=max(thicknessCells,wallFilmAtLatticeVertex(1u,p));}
-  if(p.z==1){thicknessCells=max(thicknessCells,wallFilmAtLatticeVertex(2u,p));}
-  if(p.z==dims.z+2){thicknessCells=max(thicknessCells,wallFilmAtLatticeVertex(3u,p));}
-  if(p.y==1){thicknessCells=max(thicknessCells,wallFilmAtLatticeVertex(4u,p));}
-  if(p.y==dims.y+2&&u.cameraTarget.w>0.5){thicknessCells=max(thicknessCells,wallFilmAtLatticeVertex(5u,p));}
-  // Bulk owns the wall node as soon as the adjacent presentation field reaches
-  // the ordinary isovalue. A blurred film may meet that node, but must never
-  // replace normal liquid with a film ghost (which would carve an air slot).
-  if(thicknessCells>WALL_FILM_EPS){
-    let adjacent=clamp(p-vec3i(2),vec3i(0),dims-vec3i(1));
-    if(presentationFieldCell(adjacent)>=0.5){return 0.0;}
-  }
-  return thicknessCells;
-}
-fn augmentedWallValue(p:vec3i,dims:vec3i)->f32{
-  let thicknessCells=augmentedWallThickness(p,dims);
-  let adjacent=clamp(p-vec3i(2),vec3i(0),dims-vec3i(1));
-  let interiorValue=presentationFieldCell(adjacent);
-  if(interiorValue>=0.5){return interiorValue;}
-  if(thicknessCells>WALL_FILM_EPS){return wallFilmGhostValue(thicknessCells,interiorValue);}
-  // Bulk water occupies the wall node and crosses to air in the additional
-  // outside cube. A genuinely dry wall remains below the isovalue.
-  return select(0.0,interiorValue,interiorValue>=0.5);
-}
-
-// The virtual lattice is the sole presentation field. Bulk water uses the
-// original cell samples; a sub-half-cell wall film augments only its solid-side
-// ghost samples. Marching cubes consequently emits one connected, consistently
-// oriented interface for both bulk and film, with no secondary shell to pair.
 fn latticeValue(p: vec3i) -> f32 {
   let dims = select(vec3i(u.gridInfo.xyz), vec3i(sparseParams.fineDims.xyz), sparseField);
-  if(thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5&&u.cameraTarget.w<1.5){
-    // Nonuniform augmented axis:
-    // outside, wall, first centre, ..., last centre, wall, outside.
-    if(any(p<=vec3i(0))||any(p>=dims+vec3i(3))){return 0.0;}
-    let wall=p.x==1||p.x==dims.x+2||p.z==1||p.z==dims.z+2||p.y==1
-      ||(p.y==dims.y+2&&u.cameraTarget.w>0.5);
-    if(wall){return augmentedWallValue(p,dims);}
-    let cell=p-vec3i(2);
-    if(any(cell<vec3i(0))||any(cell>=dims)){return 0.0;}
-    return presentationFieldCell(cell);
-  }
   if (p.x <= 0 || p.z <= 0 || p.x >= dims.x + 1 || p.z >= dims.z + 1 || p.y >= dims.y + 1) { return 0.0; }
   let cell = vec3i(p.x - 1, max(p.y - 1, 0), p.z - 1);
   if (sparseField) { return occupancyFromPhi(sparsePhiAt(cell)); }
   return presentationFieldCell(cell);
 }
 
-fn augmentedAxisWorld(p:f32,samples:f32,extent:f32)->f32{
-  if(p<=1.0){return 0.0;}
-  if(p>=samples+2.0){return extent;}
-  return (p-1.5)*extent/max(samples,1.0);
-}
 fn latticeWorld(p: vec3f, dims:vec3f) -> vec3f {
-  if(thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5&&u.cameraTarget.w<1.5){
-    let local=vec3f(augmentedAxisWorld(p.x,dims.x,u.container.x),augmentedAxisWorld(p.y,dims.y,u.container.y),augmentedAxisWorld(p.z,dims.z,u.container.z));
-    return vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z)+local;
-  }
   let local = clamp((p - vec3f(0.5)) / dims, vec3f(0.0), vec3f(1.0));
   return vec3f(-0.5 * u.container.x, 0.0, -0.5 * u.container.z) + local * u.container.xyz;
 }
@@ -611,16 +520,8 @@ fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f3
   var t = 0.5;
   if (abs(denominator) > 1e-20) { t = clamp((0.5 - va) / denominator, 0.0, 1.0); }
   let lattice = mix(a, b, t);
-  var film=0.0;
-  if(thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5&&u.cameraTarget.w<1.5){
-    let idims=vec3i(u.gridInfo.xyz);
-    film=max(augmentedWallThickness(vec3i(round(a)),idims),augmentedWallThickness(vec3i(round(b)),idims));
-    let base=vec3i(round(cubeBase));
-    let contactCube=base.x==0||base.x==idims.x+2||base.z==0||base.z==idims.z+2||base.y==0
-      ||(base.y==idims.y+2&&u.cameraTarget.w>0.5);
-    if(contactCube&&film>0.0){film=-film;}
-  }
-  return SurfaceVertex(vec4f(latticeWorld(lattice,dims), 1.0), vec4f(surfaceNormal(lattice, cubeBase, cubeScale, cubeValue,dims), film));
+  return SurfaceVertex(vec4f(latticeWorld(lattice,dims), 1.0),
+    vec4f(surfaceNormal(lattice, cubeBase, cubeScale, cubeValue,dims), 0.0));
 }
 
 // Slots for the current thread's reserved vertex block. Reservation happens
@@ -683,7 +584,7 @@ fn cubeTriangleCount(value: ptr<function, array<f32, 8>>) -> u32 {
 // small enough for the occupancy that hides the load latency.
 fn classifyCubeScaled(base: vec3i, scale: u32) {
   let fieldDims = select(vec3u(u.gridInfo.xyz), sparseParams.fineDims.xyz, sparseField);
-  let cubeDims = fieldDims + select(vec3u(1),vec3u(3),thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5&&u.cameraTarget.w<1.5);
+  let cubeDims = fieldDims + vec3u(1);
   if (any(base < vec3i(0)) || any(vec3u(base) >= cubeDims)) { return; }
   var value = loadCubeCornersScaled(base, i32(scale));
   var minimum = 1.0; var maximum = 0.0;
@@ -793,7 +694,7 @@ fn resetSurfaceWorklistMain() {
 // at q + 1 and a cell on a low domain boundary additionally owns base 0. The
 // Cartesian product is important: it includes wall edges, floor strips, and
 // triple corners as well as face interiors. The former face-only clauses left
-// optical pinholes wherever a sparse detail core reached two tank walls.
+// optical pinholes wherever a sparse detail core reached two domain edges.
 @compute @workgroup_size(256)
 fn extractSparseMain(@builtin(global_invocation_id) gid: vec3u) {
   if (sparseOverflow()) { return; }
@@ -869,115 +770,6 @@ fn extractTallSidesMain(@builtin(global_invocation_id) gid: vec3u) {
   for (var y = 0; y < minimumBase; y += 1) { classifyCube(vec3i(x, y, z)); }
 }
 
-// The virtual lattice closes liquid against the four tank sides. Those wall
-// strips extend below the free-surface band, so enumerate their unique
-// perimeter cubes at full height without restoring a full-volume dispatch.
-@compute @workgroup_size(64, 1, 1)
-fn extractWallMain(@builtin(global_invocation_id) gid: vec3u) {
-  let dims = vec3u(u.gridInfo.xyz);
-  let firstPair = 2u * (dims.x + 1u);
-  let wallCount = firstPair + 2u * max(0u, dims.z - 1u);
-  let total = wallCount * (dims.y + 1u);
-  if (gid.x >= total) { return; }
-  let wall = gid.x % wallCount;
-  let y = gid.x / wallCount;
-  var x = 0u;
-  var z = 0u;
-  if (wall < dims.x + 1u) {
-    x = wall;
-  } else if (wall < firstPair) {
-    x = wall - (dims.x + 1u);
-    z = dims.z;
-  } else if (wall < firstPair + dims.z - 1u) {
-    z = wall - firstPair + 1u;
-  } else {
-    x = dims.x;
-    z = wall - (firstPair + dims.z - 1u) + 1u;
-  }
-  classifyCube(vec3i(i32(x), i32(y), i32(z)));
-}
-
-// --- Conservative tank-wall films -----------------------------------------
-// Surface density is a cell-volume fraction. If it is spread over one wall
-// cell's full tangential area, its physical thickness is exactly rho*hNormal.
-// At an edge/corner, equal wall-normal thicknesses use the exact union-volume
-// relation 1-(1-a)^k=rho rather than rendering rho once on every face.
-const WALL_FILM_EPS:f32=1e-4;
-
-fn wallFilmFaceEnabled(face:u32)->bool{
-  if(u.cameraTarget.w>1.5){return false;}
-  return face<5u||(face==5u&&u.cameraTarget.w>0.5);
-}
-fn wallFilmFaceDimensions(face:u32)->vec2i{
-  let d=vec3i(u.gridInfo.xyz);
-  if(face<2u){return vec2i(d.z,d.y);}
-  if(face<4u){return vec2i(d.x,d.y);}
-  return vec2i(d.x,d.z);
-}
-fn wallFilmCell(face:u32,q:vec2i)->vec3i{
-  let d=vec3i(u.gridInfo.xyz);let size=wallFilmFaceDimensions(face);
-  let c=clamp(q,vec2i(0),size-vec2i(1));
-  if(face==0u){return vec3i(0,c.y,c.x);}
-  if(face==1u){return vec3i(d.x-1,c.y,c.x);}
-  if(face==2u){return vec3i(c.x,c.y,0);}
-  if(face==3u){return vec3i(c.x,c.y,d.z-1);}
-  if(face==4u){return vec3i(c.x,0,c.y);}
-  return vec3i(c.x,d.y-1,c.y);
-}
-fn wallFilmInwardCell(face:u32,c:vec3i)->vec3i{
-  if(face==0u){return c+vec3i(1,0,0);}if(face==1u){return c-vec3i(1,0,0);}
-  if(face==2u){return c+vec3i(0,0,1);}if(face==3u){return c-vec3i(0,0,1);}
-  if(face==4u){return c+vec3i(0,1,0);}return c-vec3i(0,1,0);
-}
-fn wallContactCount(c:vec3i)->f32{
-  let d=vec3i(u.gridInfo.xyz);var count=0u;
-  if(c.x==0){count+=1u;}if(c.x==d.x-1){count+=1u;}
-  if(c.z==0){count+=1u;}if(c.z==d.z-1){count+=1u;}
-  if(c.y==0){count+=1u;}
-  if(c.y==d.y-1&&u.cameraTarget.w>0.5&&u.cameraTarget.w<1.5){count+=1u;}
-  return f32(max(count,1u));
-}
-fn wallFilmCellDensity(face:u32,q:vec2i)->f32{
-  if(!wallFilmFaceEnabled(face)){return 0.0;}
-  let c=wallFilmCell(face,q);let rho=fieldCell(c);
-  if(rho<=WALL_FILM_EPS||rho>=0.5){return 0.0;}
-  let inward=wallFilmInwardCell(face,c);
-  // A sub-isovalue boundary cell backed immediately by bulk belongs to the
-  // ordinary volume surface; emitting a second film there creates a shelf.
-  if(all(inward>=vec3i(0))&&all(inward<vec3i(u.gridInfo.xyz))&&fieldCell(inward)>=0.5){return 0.0;}
-  return 1.0-pow(max(0.0,1.0-rho),1.0/wallContactCount(c));
-}
-fn wallFilmSupportedCellDensity(face:u32,q:vec2i)->f32{
-  let local=wallFilmCellDensity(face,q);
-  // A dry simulation cell is a hard support boundary. Smooth density only
-  // among cells that independently contain conserved liquid, so reconstruction
-  // cannot manufacture film in a rho=0 cell.
-  if(local<=WALL_FILM_EPS){return 0.0;}
-  var weightedDensity=0.0;var supportedWeight=0.0;
-  for(var j=-1;j<=1;j+=1){for(var i=-1;i<=1;i+=1){
-    let density=wallFilmCellDensity(face,q+vec2i(i,j));
-    if(density>WALL_FILM_EPS){
-      let weight=select(1.0,2.0,i==0)*select(1.0,2.0,j==0);
-      weightedDensity+=weight*density;supportedWeight+=weight;
-    }
-  }}
-  return weightedDensity/max(supportedWeight,1.0);
-}
-fn wallFilmDensity(face:u32,q:vec2f)->f32{
-  // Interpolate the conserved boundary-cell samples directly. A tangential
-  // convolution made a nonzero deposit visible in raw-zero cells as far as
-  // four cells away, so the film could intrude beneath the ordinary bulk
-  // surface. The four samples below are the only cells allowed to influence
-  // this point; a zero cell remains an explicit zero lattice node, while the
-  // linear reconstruction still gives the wet/dry edge a continuous taper.
-  let size=vec2f(wallFilmFaceDimensions(face));
-  let p=clamp(q,vec2f(0.0),size)-vec2f(0.5);let a=vec2i(floor(p));let f=fract(p);
-  let r00=wallFilmSupportedCellDensity(face,a);
-  let r10=wallFilmSupportedCellDensity(face,a+vec2i(1,0));
-  let r01=wallFilmSupportedCellDensity(face,a+vec2i(0,1));
-  let r11=wallFilmSupportedCellDensity(face,a+vec2i(1,1));
-  return mix(mix(r00,r10,f.x),mix(r01,r11,f.x),f.y);
-}
 `;
 
 // Sizes the polygonise indirect dispatch from the classify worklist. Kept in
@@ -1040,21 +832,6 @@ fn project(world:vec3f)->vec4f {
 }
 struct SurfaceOut { @location(0) position:vec4f, @location(1) normal:vec4f }
 @fragment fn surfaceFragment(input:Out)->SurfaceOut {
-  // The outside-to-wall crossing closes the augmented scalar volume but is a
-  // solid/glass contact, not an optical air-water interface. The dry/glass
-  // renderer owns it; only the inner film free surface enters water peeling.
-  if(input.film< -1e-5){discard;}
-  // Density is stored at cut-cell centres, so marching cubes can form a chord
-  // between two valid boundary samples whose triangle extends beyond the
-  // analytic curved wall. Clip coverage to the same sphere used by physics;
-  // this is presentation-only and prevents those chords from appearing as
-  // rectangular sheets or spikes through the glass silhouette.
-  if(u.cameraTarget.w>1.5){
-    let center=vec3f(0.0,0.5*u.container.y,0.0);
-    let radius=0.5*min(u.container.x,min(u.container.y,u.container.z));
-    let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));
-    if(distance(input.world,center)>radius+0.001*cellSize){discard;}
-  }
   if(peelBehindFirstExit>.5){
     let firstBack=textureLoad(firstBackPosition,vec2i(input.clip.xy),0);
     if(firstBack.a<.5){discard;}
@@ -1257,7 +1034,6 @@ struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, c
 @group(0) @binding(13) var rearBackNormal:texture_2d<f32>;
 @group(0) @binding(14) var causticMap:texture_2d<f32>;
 ${waterSceneOpticsShaderLibrary(0, 15, 16)}
-@group(0) @binding(17) var<storage,read> tankWalls:array<u32>;
 ${cameraApertureShaderLibrary("u")}
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
@@ -1337,38 +1113,6 @@ fn refineContactSurface(ro:vec3f,rd:vec3f,rasterT:f32,cellSize:f32)->ContactSurf
   let point=ro+rd*t;let e=max(3e-4,0.3*cellSize);let gradient=vec3f(contactFluidValue(point+vec3f(e,0,0))-contactFluidValue(point-vec3f(e,0,0)),contactFluidValue(point+vec3f(0,e,0))-contactFluidValue(point-vec3f(0,e,0)),contactFluidValue(point+vec3f(0,0,e))-contactFluidValue(point-vec3f(0,0,e)))/(2.0*e);
   let normal=select(-rd,-normalize(gradient),length(gradient)>1e-5);return ContactSurface(point,normal,initialError<0.42&&abs(contactFluidValue(point)-0.5)<0.12);
 }
-fn boxNormal(point:vec3f,center:vec3f,halfSize:vec3f)->vec3f{
-  let q=abs((point-center)/max(halfSize,vec3f(1e-5)));
-  if(q.x>=q.y&&q.x>=q.z){return vec3f(sign(point.x-center.x),0,0);}
-  if(q.y>=q.z){return vec3f(0,sign(point.y-center.y),0);}
-  return vec3f(0,0,sign(point.z-center.z));
-}
-fn sphericalContainerEnabled()->bool{return u.cameraTarget.w>1.5;}
-fn sphericalContainerGlassVisible()->bool{return u.cameraTarget.w>1.5&&u.cameraTarget.w<2.5;}
-fn sphericalContainerCenter()->vec3f{return vec3f(0.0,0.5*u.container.y,0.0);}
-fn sphericalContainerRadius()->f32{return 0.5*min(u.container.x,min(u.container.y,u.container.z));}
-fn sphereHit(ro:vec3f,rd:vec3f,center:vec3f,radius:f32)->vec2f{
-  let relative=ro-center;let halfB=dot(relative,rd);let c=dot(relative,relative)-radius*radius;
-  let discriminant=halfB*halfB-c;if(discriminant<0.0){return vec2f(1e20,-1e20);}
-  let root=sqrt(max(0.0,discriminant));return vec2f(-halfB-root,-halfB+root);
-}
-struct TankWallSample{distance:f32,inward:vec3f,cellWidth:f32}
-fn nearestTankWallSample(point:vec3f)->TankWallSample{
-  if(sphericalContainerEnabled()){
-    let radial=point-sphericalContainerCenter();let radialLength=max(length(radial),1e-6);
-    let h=u.container.xyz/max(u.gridInfo.xyz,vec3f(1.0));
-    let inward=-radial/radialLength;let width=1.0/max(length(inward/h),1e-6);
-    return TankWallSample(abs(sphericalContainerRadius()-radialLength),inward,width);
-  }
-  let half=0.5*u.container.xz;let h=u.container.xyz/max(u.gridInfo.xyz,vec3f(1.0));
-  var result=TankWallSample(abs(point.x+half.x),vec3f(1,0,0),h.x);
-  var d=abs(half.x-point.x);if(d<result.distance){result=TankWallSample(d,vec3f(-1,0,0),h.x);}
-  d=abs(point.z+half.y);if(d<result.distance){result=TankWallSample(d,vec3f(0,0,1),h.z);}
-  d=abs(half.y-point.z);if(d<result.distance){result=TankWallSample(d,vec3f(0,0,-1),h.z);}
-  d=abs(point.y);if(d<result.distance){result=TankWallSample(d,vec3f(0,1,0),h.y);}
-  if(u.cameraTarget.w>0.5){d=abs(u.container.y-point.y);if(d<result.distance){result=TankWallSample(d,vec3f(0,-1,0),h.y);}}
-  return result;
-}
 // The compact SVO G-buffer uses zero linear depth on a miss, while the raster
 // compatibility pass retains its historical half-float maximum sentinel.
 fn resolvedDrySceneDepth(encodedDepth:f32)->f32{return select(65504.0,encodedDepth,encodedDepth>0.0);}
@@ -1402,63 +1146,6 @@ fn causticModulation(textureUV:vec2f)->vec3f{
   let modulation=mix(vec3f(1.0),deposited,coverage);
   return mix(vec3f(1.0),modulation,strength);
 }
-fn rasterTankWallBit(side:u32,cell:u32)->bool{
-  let offset=tankWalls[4u+side];
-  return (tankWalls[offset+(cell>>5u)]&(1u<<(cell&31u)))!=0u;
-}
-fn rasterTankWallSolid(point:vec3f,normal:vec3f,size:vec3f)->bool{
-  // Floor and authored ceiling are not part of the editable side atlas.
-  if(normal.y<-.5){return true;}
-  if(normal.y>.5){return u.cameraTarget.w>.5;}
-  let nx=i32(tankWalls[1]);let ny=i32(tankWalls[2]);let nz=i32(tankWalls[3]);
-  let v=clamp(i32(floor(point.y/max(size.y,1e-6)*f32(ny))),0,ny-1);
-  if(abs(normal.x)>.5){
-    let u=clamp(i32(floor((point.z/size.z+.5)*f32(nz))),0,nz-1);
-    let side=select(1u,0u,normal.x<0.0);
-    return rasterTankWallBit(side,u32(u+nz*v));
-  }
-  let u=clamp(i32(floor((point.x/size.x+.5)*f32(nx))),0,nx-1);
-  let side=select(3u,2u,normal.z<0.0);
-  return rasterTankWallBit(side,u32(u+nx*v));
-}
-fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
-  if(tankWalls[0u]!=${PACKED_TANK_WALL_MAGIC}u){return color;}
-  if(sphericalContainerEnabled()){
-    if(!sphericalContainerGlassVisible()){return color;}
-    let center=sphericalContainerCenter();let radius=sphericalContainerRadius();let hit=sphereHit(ro,rd,center,radius);
-    if(hit.x>hit.y||hit.y<=1e-4){return color;}let glassT=select(hit.x,hit.y,hit.x<=1e-4);
-    if(glassT<=1e-4||glassT>resolvedDrySceneDepth(sceneDepth)+.001){return color;}
-    let point=ro+rd*glassT;let normal=normalize(point-center);let cosine=clamp(abs(dot(-rd,normal)),0.0,1.0);
-    let fresnel=unifiedDielectricFresnel(cosine,${GLASS_OPTICS.fresnelF0.toFixed(2)});
-    let silhouette=pow(1.0-cosine,5.0);let broadRim=smoothstep(.55,.98,1.0-cosine);
-    let glassTint=vec3f(${GLASS_OPTICS.tint.join(",")});
-    var result=mix(color,color*vec3f(.982,1.0,.997)+glassTint*.04,.008+.07*fresnel+.22*silhouette);
-    let light=environmentLightDirection();let glint=unifiedSpecularLobe(normal,-rd,light,300.0);
-    result+=environmentLightColor()*(glint*(.22+.78*broadRim)+fresnel*broadRim*.12);
-    return result;
-  }
-  let size=u.container.xyz;let mn=vec3f(-size.x*.5,0,-size.z*.5);let mx=vec3f(size.x*.5,size.y,size.z*.5);let hit=boxHit(ro,rd,mn,mx);
-  if(hit.x>hit.y||hit.y<=0.0){return color;}
-  var glassT=select(hit.x,hit.y,hit.x<=1e-4);
-  if(glassT<=1e-4||glassT>resolvedDrySceneDepth(sceneDepth)+.001){return color;}
-  let center=(mn+mx)*.5;let halfSize=size*.5;var point=ro+rd*glassT;var normal=boxNormal(point,center,halfSize);
-  // A ray through a removed near-side cell can still meet an occupied far
-  // wall. Resolve the second box hit before declaring the whole ray a hole.
-  if(!rasterTankWallSolid(point,normal,size)){
-    glassT=hit.y;point=ro+rd*glassT;normal=boxNormal(point,center,halfSize);
-    if(glassT<=1e-4||!rasterTankWallSolid(point,normal,size)){return color;}
-  }
-  let q=abs((point-center)/max(halfSize,vec3f(1e-5)));
-  let edgeCoordinate=max(max(min(q.x,q.y),min(q.x,q.z)),min(q.y,q.z));
-  let outerEdge=smoothstep(.955,.998,edgeCoordinate);
-  let innerEdge=smoothstep(.91,.975,edgeCoordinate)*(1.0-outerEdge);
-  let cosine=clamp(abs(dot(-rd,normal)),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,${GLASS_OPTICS.fresnelF0.toFixed(2)});
-  let paneAlpha=.008+.065*fresnel;let edgeAlpha=.52*outerEdge+.10*innerEdge;
-  let glassTint=vec3f(${GLASS_OPTICS.tint.join(",")});var result=mix(color,color*vec3f(.985,1.0,.998)+glassTint*.035,paneAlpha+edgeAlpha);
-  let light=environmentLightDirection();let glint=unifiedSpecularLobe(normal,-rd,light,240.0);
-  result+=environmentLightColor()*(glint*(.18+.82*outerEdge)+fresnel*outerEdge*.16);
-  return result;
-}
 // The first depth-tested pair describes only the nearest connected water
 // interval. A breaking sheet can leave another interval behind it, so the
 // interface raster peels one more front/back pair after the first exit. Shade
@@ -1476,13 +1163,7 @@ fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
   for(var iteration=0;iteration<3;iteration+=1){back=safePositionSample(rearBackPosition,exitUV);if(back.a<.5){break;}let backNormalSample=safeInterfaceSample(rearBackNormal,exitUV);let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(backNormalSample.xyz);}
   let refinedBack=safePositionSample(rearBackPosition,exitUV);let refinedBackNormal=safeInterfaceSample(rearBackNormal,exitUV);if(refinedBack.a<.5){return dryColor;}back=refinedBack;exitN=normalize(refinedBackNormal.xyz);
   var thickness=length(back.xyz-front.xyz);if(thickness<1e-4){return dryColor;}
-  let wall=nearestTankWallSample(front.xyz);let thinBoundaryFilm=filmDensity>1e-4;
-  if(thinBoundaryFilm){
-    let expectedPath=filmDensity*wall.cellWidth/max(abs(dot(inside,wall.inward)),0.08);
-    if(abs(thickness-expectedPath)>max(0.35*expectedPath,0.12*cellSize)){
-      thickness=max(expectedPath,1e-4);back=vec4f(front.xyz+inside*thickness,1.0);exitN=wall.inward;
-    }
-  }
+  let thinBoundaryFilm=filmDensity>1e-4;
   if(dot(exitN,inside)<0.0){exitN=-exitN;}var outgoing=refract(inside,-exitN,waterIndexOfRefraction());let tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}
   let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));let transmitted=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);
   let refracted=unifiedAbsorbingTransmission(transmitted,waterAbsorption(),waterScatter(),thickness);
@@ -1510,41 +1191,23 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
   // performs the same conversion for the final target; all raster-path
   // intermediate reads and world projections must do it here as well.
   let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);
-  let scene=safeSample(sceneTexture,textureUV);var front=safePositionSample(frontPosition,textureUV);if(front.a<.5){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}var frontDepth=dot(front.xyz-ro,rd);
+  let scene=safeSample(sceneTexture,textureUV);var front=safePositionSample(frontPosition,textureUV);if(front.a<.5){return finish(scene.rgb,ndc);}var frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
   let frontNormalSample=safeInterfaceSample(frontNormal,textureUV);let filmDensity=recoveredWallFilm(front,frontNormalSample);var n=normalize(frontNormalSample.xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
-  if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}}
-  if(resolvedDrySceneDepth(scene.a)+depthEpsilon<frontDepth){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}
+  if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(scene.rgb,ndc);}}
+  if(resolvedDrySceneDepth(scene.a)+depthEpsilon<frontDepth){return finish(scene.rgb,ndc);}
   if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/waterIndexOfRefraction();var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
   var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
   for(var iteration=0;iteration<3;iteration+=1){back=safePositionSample(backPosition,exitUV);if(back.a<.5){break;}let backNormalSample=safeInterfaceSample(backNormal,exitUV);let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(backNormalSample.xyz);}
   let refinedBack=safePositionSample(backPosition,exitUV);let refinedBackNormal=safeInterfaceSample(backNormal,exitUV);if(refinedBack.a>.5){back=refinedBack;exitN=normalize(refinedBackNormal.xyz);}else{back=vec4f(0);}
   var exitPoint=back.xyz;var thickness=length(exitPoint-front.xyz);var meshExitValid=back.a>=.5&&thickness>=1e-4;
-  // A low-density boundary sample represents less than half a cell of water.
-  // At its taper, independently filtered front/back coverage can otherwise
-  // select a distant bulk exit. Cap that impossible interval with the same
-  // mass-derived wall-normal thickness used by the augmented scalar lattice.
-  let wall=nearestTankWallSample(front.xyz);let thinBoundaryFilm=filmDensity>1e-4;
-  if(thinBoundaryFilm){
-    let expectedPath=filmDensity*wall.cellWidth/max(abs(dot(inside,wall.inward)),0.08);
-    if(!meshExitValid||abs(thickness-expectedPath)>max(0.35*expectedPath,0.12*cellSize)){
-      thickness=max(expectedPath,1e-4);exitPoint=front.xyz+inside*thickness;exitN=wall.inward;meshExitValid=true;
-    }
-  }
+  let thinBoundaryFilm=filmDensity>1e-4;
   let innerStep=max(.0005,cellSize*.08);let innerOrigin=front.xyz+inside*innerStep;let rigidExit=nearestRigid(innerOrigin,inside);var opaqueSolidExit=false;
   if(rigidExit.t<1e19&&(!meshExitValid||rigidExit.t+innerStep<thickness)){opaqueSolidExit=true;exitPoint=innerOrigin+inside*rigidExit.t;thickness=length(exitPoint-front.xyz);}
   else if(!meshExitValid){
-    // Solid contacts are not extracted as fake water-air sheets. When the
-    // refracted ray reaches the floor (or a mesh exit is temporarily missing),
-    // terminate it analytically at the tank boundary instead.
-    let boundsMin=vec3f(-u.container.x*.5,0,-u.container.z*.5);let boundsMax=vec3f(u.container.x*.5,u.container.y,u.container.z*.5);
-    if(sphericalContainerEnabled()){
-      let tankExit=sphereHit(innerOrigin,inside,sphericalContainerCenter(),sphericalContainerRadius());let travel=max(.002,tankExit.y);
-      thickness=length(innerOrigin-front.xyz)+travel;exitPoint=innerOrigin+inside*travel;exitN=normalize(exitPoint-sphericalContainerCenter());
-    }else{
-      let tankExit=boxHit(innerOrigin,inside,boundsMin,boundsMax);let travel=max(.002,tankExit.y);
-      thickness=length(innerOrigin-front.xyz)+travel;exitPoint=innerOrigin+inside*travel;exitN=boxNormal(exitPoint,(boundsMin+boundsMax)*.5,u.container.xyz*.5);
-    }
+    // No analytic container fallback: the dry SVO owns solid depth. A missing
+    // water back face is conservatively limited to one fluid cell.
+    thickness=max(.002,cellSize);exitPoint=innerOrigin+inside*thickness;exitN=-inside;
   }
   var outgoing=inside;var tir=false;var backgroundUV=project(exitPoint);
   if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,waterIndexOfRefraction());tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
@@ -1554,7 +1217,7 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
   // concentration twice through two layers of water.
   let transmittedScene=compositeRearWater(backgroundUV,safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV));
   // Absorption is the scene's, not the renderer's: the same clean-water rate
-  // that turns a metre of tank blue leaves a hand's breadth of pond colourless.
+  // that turns a metre of water blue leaves a hand's breadth colourless.
   // A small in-scattering term keeps thick regions luminous instead of turning
   // into opaque ink, and has to grow with the absorption it accompanies.
   let refracted=unifiedAbsorbingTransmission(transmittedScene,waterAbsorption(),waterScatter(),thickness);let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);
@@ -1571,7 +1234,7 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
   // high-contrast painted ribbon. A half-cell film retains the ordinary water
   // answer and naturally merges into bulk rendering.
   if(thinBoundaryFilm){water=mix(transmittedScene,water,smoothstep(.015,.25,filmDensity));}
-  return finish(compositeFrontGlass(water,ro,rd,scene.a),ndc);
+  return finish(water,ndc);
 }
 `;
 
@@ -1605,17 +1268,12 @@ export interface WaterSceneOpticsInput {
   readonly terrainContentStamp?: string;
   /** The plan the caustic map projects onto, in metres. */
   readonly container?: { readonly width_m: number; readonly depth_m: number };
-  /** Same face-cell authority the solver uses for the four editable sides. */
-  readonly wallField?: TankWallField;
-  /** Whether the document asks the renderer to draw the vessel at all. */
-  readonly vesselVisible?: boolean;
 }
 
 export class RasterWaterPipeline {
   private extractPipeline?: GPUComputePipeline;
   private extractBandPipeline?: GPUComputePipeline;
   private extractTallSidesPipeline?: GPUComputePipeline;
-  private extractWallPipeline?: GPUComputePipeline;
   private extractGlobalFinePipeline?: GPUComputePipeline;
   private extractGlobalCoarsePipeline?: GPUComputePipeline;
   private preparePipeline?: GPUComputePipeline;
@@ -1689,9 +1347,6 @@ export class RasterWaterPipeline {
   private causticTexture?: GPUTexture;
   private causticReceiver?: GPUTexture;
   private waterSceneOpticsBuffer?: GPUBuffer;
-  private tankWallBuffer?: GPUBuffer;
-  private tankWallField?: TankWallField;
-  private tankWallVisible = true;
   private readonly waterSceneOptics = new Float32Array(WATER_SCENE_OPTICS_FLOATS);
   private waterSceneOpticsDirty = true;
   private causticStrength = 0;
@@ -1743,7 +1398,6 @@ export class RasterWaterPipeline {
     private readonly targetFormat: GPUTextureFormat,
     private readonly uniformBuffer: GPUBuffer,
     private readonly bodyBuffer: GPUBuffer,
-    private readonly pipelineOptions: RasterWaterPipelineOptions = {},
   ) {
     // Clean water and the default key until a document says otherwise, so a
     // caller that never sets scene optics gets the frozen table verbatim.
@@ -1782,23 +1436,6 @@ export class RasterWaterPipeline {
       input.container?.depth_m ?? 0,
       input.terrainContentStamp,
     );
-    const wallVisible = input.vesselVisible !== false;
-    if (input.wallField && (input.wallField !== this.tankWallField
-      || wallVisible !== this.tankWallVisible)) {
-      this.tankWallField = input.wallField;
-      this.tankWallVisible = wallVisible;
-      const packed = packTankWallField(input.wallField);
-      packed[0] = wallVisible ? PACKED_TANK_WALL_MAGIC : 0;
-      this.tankWallBuffer?.destroy();
-      this.tankWallBuffer = this.device.createBuffer({
-        label: "Raster tank wall face cells",
-        size: packed.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
-      this.device.queue.writeBuffer(this.tankWallBuffer, 0, packed);
-      this.compositeBindGroups = new WeakMap();
-      this.rebuildBindGroups();
-    }
     this.flushSceneOptics();
   }
 
@@ -1962,7 +1599,6 @@ export class RasterWaterPipeline {
       { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
       { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
-      ,{ binding: 17, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } }
     ] });
     // Binding 3 is the caustic receiver the optics library declares and this
     // pass never reads. It stays in the layout because the library is included
@@ -1985,14 +1621,12 @@ export class RasterWaterPipeline {
     const total=17;let completed=0;
     const compute=async(label:string,descriptor:GPUComputePipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createComputePipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
     const render=async(label:string,descriptor:GPURenderPipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createRenderPipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
-    const extractionConstants = { thinWallFilmsEnabled: this.pipelineOptions.thinWallFilms ? 1 : 0 };
-    this.extractPipeline = await compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractMain", constants: extractionConstants } });
-    this.extractBandPipeline = await compute("Classifying restricted water band",{ label: "Classify restricted water band", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractBandMain", constants: extractionConstants } });
-    this.extractTallSidesPipeline = await compute("Classifying tall-cell interfaces",{ label: "Classify tall-cell side interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractTallSidesMain", constants: extractionConstants } });
-    this.extractWallPipeline = await compute("Classifying water wall interfaces",{ label: "Classify water wall interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractWallMain", constants: extractionConstants } });
+    this.extractPipeline = await compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractMain" } });
+    this.extractBandPipeline = await compute("Classifying restricted water band",{ label: "Classify restricted water band", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractBandMain" } });
+    this.extractTallSidesPipeline = await compute("Classifying tall-cell interfaces",{ label: "Classify tall-cell side interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractTallSidesMain" } });
     this.extractGlobalFinePipeline = await compute("Classifying global fine surface bricks",{ label: "Classify global fine surface bricks", layout: globalExtractionPipelineLayout, compute: { module: globalClassify, entryPoint: "extractGlobalFineMain" } });
     this.extractGlobalCoarsePipeline = await compute("Classifying compact coarse cells",{ label: "Classify compact coarse fallback", layout: globalExtractionPipelineLayout, compute: { module: globalClassify, entryPoint: "extractGlobalCoarseMain" } });
-    this.polygonisePipeline = await compute("Building water surface mesh",{ label: "Polygonise surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "polygoniseMain", constants: extractionConstants } });
+    this.polygonisePipeline = await compute("Building water surface mesh",{ label: "Polygonise surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "polygoniseMain" } });
     const globalPolygonScanLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.globalPolygoniseLayout]});
     const globalPolygonEmitLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.globalPolygoniseEmitLayout]});
     this.polygoniseGlobalFineScanPipeline=await compute("Scanning global fine water mesh",{label:"Scan classified global fine triangles",layout:globalPolygonScanLayout,compute:{module:globalScan,entryPoint:"scanGlobalFineTriangles"}});
@@ -2033,16 +1667,6 @@ export class RasterWaterPipeline {
     this.globalFineRenderParams = this.device.createBuffer({ label: "Water global fine parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.fallbackSparseControl = this.device.createBuffer({ label: "Water disabled storage binding", size: WATER_DISABLED_STORAGE_BYTES, usage: GPUBufferUsage.STORAGE });
     this.waterSceneOpticsBuffer = this.device.createBuffer({ label: "Water scene optics and caustic receiver", size: WATER_SCENE_OPTICS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    if (!this.tankWallBuffer) {
-      const packed = packTankWallField(createBoxTankWallField({ x: 1, y: 1, z: 1 }));
-      packed[0] = this.tankWallVisible ? PACKED_TANK_WALL_MAGIC : 0;
-      this.tankWallBuffer = this.device.createBuffer({
-        label: "Raster tank wall face cells fallback",
-        size: packed.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
-      this.device.queue.writeBuffer(this.tankWallBuffer, 0, packed);
-    }
     // Allocated unconditionally: the composite declares the receiver whether or
     // not the scene has ground, and a bind group with a missing entry is not a
     // bind group. A container-less scene leaves it zeroed and the uniform's
@@ -2419,9 +2043,9 @@ export class RasterWaterPipeline {
   private compositeBindGroupFor(sceneView: GPUTextureView): GPUBindGroup | undefined {
     const cached = this.compositeBindGroups.get(sceneView);
     if (cached) return cached;
-    if (!this.compositeLayout || !this.frontPosition || !this.frontNormal || !this.backPosition || !this.backNormal || !this.rearFrontPosition || !this.rearFrontNormal || !this.rearBackPosition || !this.rearBackNormal || !this.sampler || !this.volume || !this.columnBases || !this.causticTexture || !this.waterSceneOpticsBuffer || !this.causticReceiver || !this.tankWallBuffer) return undefined;
+    if (!this.compositeLayout || !this.frontPosition || !this.frontNormal || !this.backPosition || !this.backNormal || !this.rearFrontPosition || !this.rearFrontNormal || !this.rearBackPosition || !this.rearBackNormal || !this.sampler || !this.volume || !this.columnBases || !this.causticTexture || !this.waterSceneOpticsBuffer || !this.causticReceiver) return undefined;
     const bindGroup = this.device.createBindGroup({ layout: this.compositeLayout, entries: [
-      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }, { binding: 14, resource: this.causticTexture.createView() }, { binding: 15, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 16, resource: this.causticReceiver.createView() }, { binding: 17, resource: { buffer: this.tankWallBuffer } }
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }, { binding: 14, resource: this.causticTexture.createView() }, { binding: 15, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 16, resource: this.causticReceiver.createView() }
     ] });
     this.compositeBindGroups.set(sceneView, bindGroup);
     return bindGroup;
@@ -2442,7 +2066,7 @@ export class RasterWaterPipeline {
       : undefined;
     this.ensureGeometry(geometryDimensions[0], geometryDimensions[1],
       geometryDimensions[2], sparseGeometryCapacity);
-    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractGlobalFinePipeline||!this.extractGlobalCoarsePipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.causticPipeline||!this.compositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.globalPolygoniseEmitBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.causticBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture||!this.causticReceiver) return false;
+    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractGlobalFinePipeline||!this.extractGlobalCoarsePipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.causticPipeline||!this.compositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.globalPolygoniseEmitBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.causticBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture||!this.causticReceiver) return false;
     const now_ms = performance.now();
     // A paused t=0 handoff cannot wait for a new solver revision: reset has
     // already made the current revision the only one that will be presented.
@@ -2478,7 +2102,8 @@ export class RasterWaterPipeline {
       } else {
         encoder.copyBufferToBuffer(indirectReset,32,this.indirectBuffer,0,32);
       }
-      const plan = surfaceExtractionDispatchPlan(nx, ny, nz, this.volume.depthOrArrayLayers, restrictedTallCell, maximumNeighborDelta, this.pipelineOptions.thinWallFilms ?? false);
+      const plan = surfaceExtractionDispatchPlan(nx, ny, nz,
+        this.volume.depthOrArrayLayers, restrictedTallCell, maximumNeighborDelta);
       // Classify appends surface-crossing cubes to the worklist, the prepare
       // kernel sizes the indirect dispatch, and polygonise emits triangles for
       // just those cubes. The writable prepare binding and its later INDIRECT
@@ -2518,7 +2143,6 @@ export class RasterWaterPipeline {
         if (plan.mode === "restricted-band") {
           compute.setPipeline(this.extractBandPipeline); compute.dispatchWorkgroups(...plan.band!);
           compute.setPipeline(this.extractTallSidesPipeline); compute.dispatchWorkgroups(...plan.tallSides!);
-          compute.setPipeline(this.extractWallPipeline); compute.dispatchWorkgroups(...plan.walls!);
         } else {
           compute.setPipeline(this.extractPipeline); compute.dispatchWorkgroups(...plan.full!);
         }
@@ -2639,6 +2263,6 @@ export class RasterWaterPipeline {
   }
 
   destroy() {
-    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.globalCubeValues,this.globalCubeOffsets,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.tankWallBuffer,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.globalFineRenderParams,this.fallbackSparseControl,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
+    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.globalCubeValues,this.globalCubeOffsets,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.globalFineRenderParams,this.fallbackSparseControl,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

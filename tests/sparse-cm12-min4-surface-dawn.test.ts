@@ -54,8 +54,6 @@ dawnTest("a 4-cell floor retires diffuse bricks away from the represented surfac
           resolutionMode: "adaptive",
           brickFineResolution: 8,
           surfaceFineRings: 1,
-          receiverSupportRings: 9,
-          receiverFloor: "auto",
           timeStep: "paper",
           pressureIterations: 64,
           activityPolicy: {
@@ -77,7 +75,7 @@ dawnTest("a 4-cell floor retires diffuse bricks away from the represented surfac
       const active = snapshot.bricks.filter((brick) => brick.active);
       const occupied = active.filter((brick) => (brick.reasons & 64) !== 0);
       const occupiedCoordinates = new Set(occupied.map((brick) => brick.coordinate.join("/")));
-      const requestedAsReceiver = (brick: (typeof active)[number]): boolean => {
+      const requestedAsDestination = (brick: (typeof active)[number]): boolean => {
         for (let dz = -1; dz <= 1; dz += 1) for (let dy = -1; dy <= 1; dy += 1) {
           for (let dx = -1; dx <= 1; dx += 1) {
             if (dx === 0 && dy === 0 && dz === 0) continue;
@@ -93,7 +91,7 @@ dawnTest("a 4-cell floor retires diffuse bricks away from the represented surfac
         return false;
       };
       const unsupportedDry = active.filter((brick) => !occupiedCoordinates.has(
-        brick.coordinate.join("/")) && !requestedAsReceiver(brick));
+        brick.coordinate.join("/")) && !requestedAsDestination(brick));
       const coarseMist = occupied.filter((brick) => brick.acceptedResolution === 1
         && brick.meanDensity <= SPARSE_CM12_ACTIVITY_POLICY.surfaceDensityMinimum
         && (brick.reasons & 256) === 0);

@@ -163,8 +163,6 @@ async function capture(
         brickFineResolution,
         presentationPageResolution,
         surfaceFineRings: 1,
-        receiverSupportRings: 3,
-        receiverFloor: 1,
         timeStep: "scene",
         activityPolicy: runtime.activityPolicy,
       },

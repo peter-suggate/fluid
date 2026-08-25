@@ -251,7 +251,8 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
     if(!valid){var velocity=vec3f(0.0);var weight=0.0;
       let q=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
       let leafLocal=cm12ExtensionPacketLocal+q;
-      if(cm12ExtensionLeafScale!=0u&&all(leafLocal>vec3u(0u))
+      if(!hasStaticSolidVoxels()&&cm12ExtensionLeafScale!=0u
+        &&all(leafLocal>vec3u(0u))
         &&all(leafLocal+vec3u(1u)<cm12ExtensionLeafValid)){
         // Canonical intra-leaf incidences are x-, x+, y-, y+, z-, z+.
         let neighbors=array<u32,6>(cell-1u,cell+1u,
@@ -268,7 +269,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
         let incidences=cm12HotIncidenceRange(cell);
         for(var local=0u;local<incidences.y;local+=1u){
           let incidence=cm12HotIncidence(incidences.x+local);let row=incidence.x;
-          if(row==cm12ExtensionInvalid||!rowAccepted(row)){continue;}
+          if(row==cm12ExtensionInvalid||!cm12VelocityExtensionRowOpen(row)){continue;}
           let termCount=cm12HotRowTermCount(row);
           if(termCount==2u){
             let ordinal=incidence.y^1u;

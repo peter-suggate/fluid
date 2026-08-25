@@ -976,7 +976,6 @@ assert.ok(source?.structural, "live SVO scene did not publish a structural scene
 // Exact mirror of FluidLabRenderer solver-attachment dry-scene data assembly,
 // shared with tools/run-svo-dry-render-smoke.ts through the harness.
 const { drySceneData, scenePrimitives, sceneGlass } = buildSvoDrySceneAssembly(scene, source);
-assert.equal(scenePrimitives.requiresRasterTerrainFallback, false, "garden terrain must render analytically");
 assert.ok(canConsumeSparseVoxelPbrMaterials(source), "PBR material publication unavailable");
 assert.ok(canEncodeSparseVoxelDryScene(source, drySceneData), "production dry-scene contract rejected the garden source");
 const nodeMip = source.nodeMipPyramid;

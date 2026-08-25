@@ -2,11 +2,9 @@ import type { SparseAtlasCompositeGrid } from
   "../../methods/adaptive-mass/sparse-atlas-composite-projection";
 import type { SparseAdaptiveMassAtlas } from
   "../../methods/adaptive-mass/sparse-brick-atlas";
-import { sparseCM12TileClonePoolCapacity } from
-  "../../methods/adaptive-mass/sparse-cm12-tile-clone-pool";
 import type { SparseCM12RigidResources } from
   "../../methods/adaptive-mass/webgpu-sparse-cm12-rigid-coupling";
-import type { TankWallField } from "../../core/tank-wall-field";
+import type { SolidWorld } from "../../core/solid-world";
 import {
   WebGPUSparseCM12Resident,
   type SharpeningTrace,
@@ -65,14 +63,10 @@ interface AdoptCM12SparseWorldOptions {
 export type CM12SparseWorldResidentFactoryMode =
   | "production"
   | "presentation-publisher-qa"
-  | "legacy-host-authority-qa"
   | "phase1-transport-receipt-qa";
 
-/**
- * Temporary construction input used while atlas creation still lives above
- * the sparse-world module. New callers should depend on `SparseWorldConfig`.
- */
-export interface LegacyCM12SparseWorldFactoryConfig {
+/** Construction input while atlas compilation remains solver-owned. */
+export interface CM12SparseWorldFactoryConfig {
   readonly device: GPUDevice;
   readonly atlas: SparseAdaptiveMassAtlas;
   readonly grid: SparseAtlasCompositeGrid;
@@ -83,10 +77,12 @@ export interface LegacyCM12SparseWorldFactoryConfig {
   readonly journal?: SparseCM12PressureJournalCapacityRequest;
   readonly presentationPageResolution?: SparseCM12PresentationPageResolution;
   readonly report?: SparseCM12ResidentInitializationReporter;
+  /** Canonical static solid authority for construction and later live edits. */
+  readonly solidWorld: SolidWorld;
   readonly mode?: CM12SparseWorldResidentFactoryMode;
   /** Defaults to the authored active set. */
   readonly residentTiles?: number;
-  /** Defaults to the capacity policy already used by the CM12 clone pool. */
+  /** Defaults to the resident's physical presentation-page capacity. */
   readonly capacityTiles?: number;
 }
 
@@ -107,13 +103,15 @@ export interface CM12SparseWorldRuntime {
   readonly pressureJournalLayout: WebGPUSparseCM12Resident["pressureJournalLayout"];
   readonly pressureJournalArmed: boolean;
   readonly stageLensSource: WebGPUSparseCM12Resident["stageLensSource"];
+  readonly solidWorldCollisionSource:
+    WebGPUSparseCM12Resident["solidWorldCollisionSource"];
 
   setTracersEnabled(enabled: boolean): void;
   reseedTracers(): void;
   readTracers(): ReturnType<WebGPUSparseCM12Resident["readTracers"]>;
   armPressureJournal(armed: boolean): boolean;
   readPressureJournal(): ReturnType<WebGPUSparseCM12Resident["readPressureJournal"]>;
-  setTankWallField(field: TankWallField): void;
+  setSolidWorld(world: SolidWorld): void;
   setRefinementRegionParameters(parameters: ArrayBuffer): void;
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number): void;
   encodeLiquidInjection(
@@ -142,6 +140,14 @@ export interface CM12SparseWorldRuntime {
  * presentation may depend on this surface.
  */
 export interface CM12SparseWorldDeveloperTrace {
+  setStageLimitForQA(stage: Parameters<
+    WebGPUSparseCM12Resident["setStageLimitForQA"]>[0]): void;
+  setActivityPhaseLimitForQA(phase: Parameters<
+    WebGPUSparseCM12Resident["setActivityPhaseLimitForQA"]>[0]): void;
+  setTransportPhaseLimitForQA(phase: Parameters<
+    WebGPUSparseCM12Resident["setTransportPhaseLimitForQA"]>[0]): void;
+  setPressureTopologyPhaseLimitForQA(phase: Parameters<
+    WebGPUSparseCM12Resident["setPressureTopologyPhaseLimitForQA"]>[0]): void;
   readDiagnostics(): ReturnType<WebGPUSparseCM12Resident["readDiagnostics"]>;
   readDiagnosticFields(): ReturnType<WebGPUSparseCM12Resident["readDiagnosticFields"]>;
   readActivitySnapshot(): ReturnType<WebGPUSparseCM12Resident["readActivitySnapshot"]>;
@@ -158,6 +164,8 @@ export interface CM12SparseWorldDeveloperTrace {
   readFrameControlQA(): ReturnType<WebGPUSparseCM12Resident["readFrameControlQA"]>;
   readTransportPacketIndirectQA(): ReturnType<
     WebGPUSparseCM12Resident["readTransportPacketIndirectQA"]>;
+  readDynamicTransportPacketsQA(): ReturnType<
+    WebGPUSparseCM12Resident["readDynamicTransportPacketsQA"]>;
   readFinalScalarMaskHeaderQA(): ReturnType<
     WebGPUSparseCM12Resident["readFinalScalarMaskHeaderQA"]>;
   readWorkShapeQA(): ReturnType<WebGPUSparseCM12Resident["readWorkShapeQA"]>;
@@ -166,6 +174,8 @@ export interface CM12SparseWorldDeveloperTrace {
   readAcceptedIndirectQA(): ReturnType<WebGPUSparseCM12Resident["readAcceptedIndirectQA"]>;
   readFrameControlIndirectQA(): ReturnType<
     WebGPUSparseCM12Resident["readFrameControlIndirectQA"]>;
+  readPersistentPressureCacheIndirectQA(): ReturnType<
+    WebGPUSparseCM12Resident["readPersistentPressureCacheIndirectQA"]>;
   readVelocityExtensionHeaderQA(): ReturnType<
     WebGPUSparseCM12Resident["readVelocityExtensionHeaderQA"]>;
   readVelocityExtensionQA(): ReturnType<
@@ -322,12 +332,13 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   get pressureJournalLayout() { return this.resident.pressureJournalLayout; }
   get pressureJournalArmed() { return this.resident.pressureJournalArmed; }
   get stageLensSource() { return this.resident.stageLensSource; }
+  get solidWorldCollisionSource() { return this.resident.solidWorldCollisionSource; }
   setTracersEnabled(enabled: boolean) { this.resident.setTracersEnabled(enabled); }
   reseedTracers() { this.resident.reseedTracers(); }
   readTracers() { return this.resident.readTracers(); }
   armPressureJournal(armed: boolean) { return this.resident.armPressureJournal(armed); }
   readPressureJournal() { return this.resident.readPressureJournal(); }
-  setTankWallField(field: TankWallField) { this.resident.setTankWallField(field); }
+  setSolidWorld(world: SolidWorld) { this.resident.setSolidWorld(world); }
   setRefinementRegionParameters(parameters: ArrayBuffer) {
     this.resident.setRefinementRegionParameters(parameters);
   }
@@ -353,6 +364,22 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
 class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTrace {
   constructor(private readonly resident: WebGPUSparseCM12Resident) {}
 
+  setStageLimitForQA(stage: Parameters<
+    WebGPUSparseCM12Resident["setStageLimitForQA"]>[0]) {
+    this.resident.setStageLimitForQA(stage);
+  }
+  setActivityPhaseLimitForQA(phase: Parameters<
+    WebGPUSparseCM12Resident["setActivityPhaseLimitForQA"]>[0]) {
+    this.resident.setActivityPhaseLimitForQA(phase);
+  }
+  setTransportPhaseLimitForQA(phase: Parameters<
+    WebGPUSparseCM12Resident["setTransportPhaseLimitForQA"]>[0]) {
+    this.resident.setTransportPhaseLimitForQA(phase);
+  }
+  setPressureTopologyPhaseLimitForQA(phase: Parameters<
+    WebGPUSparseCM12Resident["setPressureTopologyPhaseLimitForQA"]>[0]) {
+    this.resident.setPressureTopologyPhaseLimitForQA(phase);
+  }
   readDiagnostics() { return this.resident.readDiagnostics(); }
   readDiagnosticFields() { return this.resident.readDiagnosticFields(); }
   readActivitySnapshot() { return this.resident.readActivitySnapshot(); }
@@ -369,11 +396,15 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   }
   readFrameControlQA() { return this.resident.readFrameControlQA(); }
   readTransportPacketIndirectQA() { return this.resident.readTransportPacketIndirectQA(); }
+  readDynamicTransportPacketsQA() { return this.resident.readDynamicTransportPacketsQA(); }
   readFinalScalarMaskHeaderQA() { return this.resident.readFinalScalarMaskHeaderQA(); }
   readWorkShapeQA() { return this.resident.readWorkShapeQA(); }
   readAdaptiveRepresentationQA() { return this.resident.readAdaptiveRepresentationQA(); }
   readAcceptedIndirectQA() { return this.resident.readAcceptedIndirectQA(); }
   readFrameControlIndirectQA() { return this.resident.readFrameControlIndirectQA(); }
+  readPersistentPressureCacheIndirectQA() {
+    return this.resident.readPersistentPressureCacheIndirectQA();
+  }
   readVelocityExtensionHeaderQA() { return this.resident.readVelocityExtensionHeaderQA(); }
   readVelocityExtensionQA() { return this.resident.readVelocityExtensionQA(); }
   readPressureCanonicalMembershipQA() {
@@ -431,8 +462,8 @@ function createCM12SparseWorldUI(
   });
 }
 
-export async function createCM12SparseWorldFromLegacy(
-  config: LegacyCM12SparseWorldFactoryConfig,
+export async function createCM12SparseWorld(
+  config: CM12SparseWorldFactoryConfig,
 ): Promise<CM12SparseWorldAdoption> {
   const sparseDevice = new CM12SparseWorldDevice(config.device, undefined, config.trace);
   const active = config.initiallyActiveBrickKeys
@@ -445,6 +476,7 @@ export async function createCM12SparseWorldFromLegacy(
       ? config.numerics({ time: 0, dt: 0.004, gravity: [0, 0, 0], interactions: [] })
         .finestCellSize_m
       : config.numerics.finestCellSize_m,
+    config.solidWorld,
     active,
     config.rigid,
     config.journal,
@@ -456,16 +488,14 @@ export async function createCM12SparseWorldFromLegacy(
   try {
     resident = mode === "presentation-publisher-qa"
       ? await WebGPUSparseCM12Resident.createPresentationPublisherOracleForQA(...args)
-      : mode === "legacy-host-authority-qa"
-        ? await WebGPUSparseCM12Resident.createLegacyHostAuthorityOracleForQA(...args)
-        : mode === "phase1-transport-receipt-qa"
-          ? await WebGPUSparseCM12Resident.createPhase1TransportReceiptOracleForQA(...args)
-          : await WebGPUSparseCM12Resident.create(...args);
+      : mode === "phase1-transport-receipt-qa"
+        ? await WebGPUSparseCM12Resident.createPhase1TransportReceiptOracleForQA(...args)
+        : await WebGPUSparseCM12Resident.create(...args);
   } catch (error) {
     sparseDevice.publishLibraryFault(error);
     throw error;
   }
-  const readiness = sparseDevice.adoptLegacyResident(resident, config.trace, {
+  const readiness = sparseDevice.adoptResident(resident, config.trace, {
     mode,
     brickFineResolution: config.atlas.brickFineResolution,
     presentationPageResolution:
@@ -478,7 +508,8 @@ export async function createCM12SparseWorldFromLegacy(
   const world = new AdoptedCM12SparseWorld(resident, {
     numerics: config.numerics,
     residentTiles: config.residentTiles ?? active.size,
-    capacityTiles: config.capacityTiles ?? sparseCM12TileClonePoolCapacity(active.size),
+    capacityTiles: config.capacityTiles
+      ?? resident.globalFineLevelSetSource.plan.maximumResidentBricks,
     trace: config.trace,
   }, sparseDevice);
   const runtime = new AdoptedCM12SparseWorldRuntime(resident, readiness);

@@ -9,18 +9,16 @@
     "depth_m": 0.8,
     "fillFraction": 0.22,
     "top": "closed",
-    "fluidWallMode": "no-slip",
-    "wallField": {
-      "version": 1,
-      "dimensions": { "x": 24, "y": 16, "z": 16 },
-      "faces": {
-        "left": { "uCells": 16, "vCells": 16, "solidRuns": [[0, 256]] },
-        "right": { "uCells": 16, "vCells": 16, "solidRuns": [[0, 256]] },
-        "front": { "uCells": 24, "vCells": 16, "solidRuns": [[0, 384]] },
-        "back": { "uCells": 24, "vCells": 16, "solidRuns": [[0, 384]] }
-      }
-    }
+    "fluidWallMode": "no-slip"
   },
+  "solidVoxels": [
+    { "operation": "fill", "minimum": [0, -1, 0], "maximumExclusive": [24, 0, 16], "materialId": 1 },
+    { "operation": "fill", "minimum": [-1, 0, 0], "maximumExclusive": [0, 16, 16], "materialId": 1 },
+    { "operation": "fill", "minimum": [24, 0, 0], "maximumExclusive": [25, 16, 16], "materialId": 1 },
+    { "operation": "fill", "minimum": [0, 0, -1], "maximumExclusive": [24, 16, 0], "materialId": 1 },
+    { "operation": "fill", "minimum": [0, 0, 16], "maximumExclusive": [24, 16, 17], "materialId": 1 },
+    { "operation": "fill", "minimum": [0, 16, 0], "maximumExclusive": [24, 17, 16], "materialId": 1 }
+  ],
   "voxelDomain": {
     "finestCellSize_m": 0.05,
     "brickSize_cells": 8

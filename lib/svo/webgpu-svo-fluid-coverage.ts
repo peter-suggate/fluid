@@ -217,7 +217,7 @@ fn fillFluidCoverage(@builtin(global_invocation_id) gid: vec3u) {
             let local = pageLocal + vec3u(x, y, z);
             total += sampleCoverage(pageBase + local.x + resolution * (local.y + resolution * local.z));
           } else {
-            let address = compactSampleAddress(cell);
+            let address = compactSampleAddress(vec3i(cell));
             if (address.x == INVALID) { continue; }
             total += sampleCoverage(address.x * params.samplesPerBrick + address.y);
           }

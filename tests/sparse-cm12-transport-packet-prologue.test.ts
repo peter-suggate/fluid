@@ -26,17 +26,15 @@ test("TPA1 stages one sealed descriptor for packet-lane execution", () => {
   assert.ok(begin >= 0 && end > begin);
   const stage = wgsl.slice(begin, end);
   assert.match(stage, /if\(lane==0u\)/);
-  assert.equal(stage.match(/cm12TransportPacketId\(/g)?.length, 1);
-  assert.equal(stage.match(/cm12TransportPacketMask\(/g)?.length, 1);
+  assert.equal(stage.match(/cm12TransportPacketOrdinal\(/g)?.length, 1);
+  assert.equal(stage.match(/cm12TransportPacketMaskAt\(/g)?.length, 1);
   assert.equal(stage.match(/cm12TeiPacket\(/g)?.length, 1);
   assert.equal(stage.match(/cm12TeiPacketFineOrigin\(/g)?.length, 1);
   assert.equal(stage.match(/acceptedTopologySlot\(/g)?.length, 1);
-  assert.match(stage,
-    /if\(family<2u\)\{cm12TransportStagedPacketOriginFine=\s*cm12TeiPacketFineOrigin\(packet,slot\);\}/,
-    "gather must not decode an unused packet origin/leaf");
+  assert.match(stage, /cm12TransportStagedPacketOriginFine=cm12TeiPacketFineOrigin/);
   assert.match(stage, /workgroupBarrier\(\)/);
 
-  const cellEnd = wgsl.indexOf("@compute @workgroup_size(1)", end);
+  const cellEnd = wgsl.indexOf("// Compile the prior frame", end);
   const cell = wgsl.slice(end, cellEnd);
   assert.match(cell, /packet\.first\+q\.x\+packet\.strideY\*q\.y\+packet\.strideZ\*q\.z/);
   assert.doesNotMatch(cell,
@@ -51,10 +49,10 @@ test("accepted conservative passes consume the staged packet prologue", () => {
     import.meta.url,
   ), "utf8");
   const begin = source.indexOf("fn stageSparseCM12TransportExecutionImage");
-  const end = source.indexOf("fn stageSparseCM12TransportReceiptImage", begin);
+  const end = source.indexOf("fn sharpeningSourceCell", begin);
   assert.ok(begin >= 0 && end > begin);
   const stage = source.slice(begin, end);
-  assert.match(stage, /cm12StageTransportPacket\(rank,lane,family\)/);
+  assert.match(stage, /cm12StageTransportPacket\(rank,lane\)/);
   assert.match(stage, /cm12TransportStagedExecutionCell\(lane\)/);
   assert.match(stage, /cm12TransportStagedPacketOriginFine/);
   assert.match(stage, /cm12TransportStagedTopologySlot/);
@@ -64,12 +62,11 @@ test("accepted conservative passes consume the staged packet prologue", () => {
   assert.doesNotMatch(stage, /ownerCellAt|cellOpenVolume/);
 
   const gatherBegin = source.indexOf("fn gatherConservativeDensity");
-  const gatherEnd = source.indexOf("fn compareSparseCM12MassResult", gatherBegin);
+  const gatherEnd = source.indexOf("fn tracerCount", gatherBegin);
   const gather = source.slice(gatherBegin, gatherEnd);
-  assert.match(gather,
-    /cm12TransportProducerMaskPublish\(cm12TransportStagedPacketId,lane,id/);
-  assert.doesNotMatch(gather, /cm12TransportPacketId\(/,
-    "producer-mask publication must reuse the staged packet id");
+  assert.doesNotMatch(gather, /cm12TransportPublish.*Mask/,
+    "gather must not publish a second topology representation");
+  assert.doesNotMatch(gather, /cm12TransportPacketId\(/);
 });
 
 test("staged packet arithmetic is equivalent to direct packet decode", () => {

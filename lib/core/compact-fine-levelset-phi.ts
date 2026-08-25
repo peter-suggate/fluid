@@ -36,7 +36,7 @@ export const compactFineLevelSetPageLookupWGSL = /* wgsl */ `fn pageLookup(key:u
   if(params.table.y!=7u||arrayLength(&fineWorklist)<7u||fineWorklist[0]!=params.table.w
     ||fineWorklist[2]!=params.table.z||(fineWorklist[3]&3u)!=3u||fineWorklist[5]!=1u||fineWorklist[6]!=1u){return INVALID;}
   let logicalCount=params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z;
-  if(key>=logicalCount){return INVALID;}
+  if((fineWorklist[3]&0x40000000u)==0u&&key>=logicalCount){return INVALID;}
   if((fineWorklist[3]&0x80000000u)!=0u){
     let count=min(fineWorklist[1],params.table.z);var low=0u;var high=count;
     loop{if(low>=high){break;}let middle=low+(high-low)/2u;
@@ -84,43 +84,74 @@ fn compactSourceSpanLog(source:u32)->u32{
   }
   return source>>27u;
 }
-fn compactSampleAddress(q:vec3u)->vec2u{
-  let r=max(1u,params.brickResolution);let pageCoordinate=q/r;
-  let exactKey=pageCoordinate.x+params.brickDimensions.x
-    *(pageCoordinate.y+params.brickDimensions.y*pageCoordinate.z);
+fn compactSignedSparseAddressing()->bool{
+  return (fineWorklist[3]&0x40000000u)!=0u;
+}
+fn compactSignedPageKey(page:vec3i)->u32{
+  if(page.x< -1024||page.x>1023||page.y<0||page.y>1023
+    ||page.z< -1024||page.z>1022){return INVALID;}
+  return u32(page.x+1024)|(u32(page.y)<<11u)|(u32(page.z+1024)<<21u);
+}
+fn compactPageKey(page:vec3i)->u32{
+  if(compactSignedSparseAddressing()){return compactSignedPageKey(page);}
+  if(any(page<vec3i(0))||any(page>=vec3i(params.brickDimensions))){return INVALID;}
+  let q=vec3u(page);return q.x+params.brickDimensions.x
+    *(q.y+params.brickDimensions.y*q.z);
+}
+fn compactFloorDiv(q:vec3i,divisor:i32)->vec3i{
+  var adjusted=q;for(var axis=0u;axis<3u;axis+=1u){
+    if(adjusted[axis]<0){adjusted[axis]-=divisor-1;}}
+  return adjusted/divisor;
+}
+fn compactSampleAddress(q:vec3i)->vec2u{
+  let r=max(1u,params.brickResolution);
+  let pageCoordinate=compactFloorDiv(q,i32(r));
+  let exactKey=compactPageKey(pageCoordinate);
+  if(exactKey==INVALID){return vec2u(INVALID);}
   let exact=pageLookup(exactKey);
   if(exact!=INVALID){
-    if((fineWorklist[3]&0x80000000u)==0u){let local=q-pageCoordinate*r;
+    if((fineWorklist[3]&0x80000000u)==0u){let local=vec3u(q-pageCoordinate*i32(r));
       return vec2u(exact,local.x+r*(local.y+r*local.z));}
     let source=metadata[4u*exact+3u];let spanLog=compactSourceSpanLog(source);
-    if(spanLog==0u){let local=q-pageCoordinate*r;
+    if(spanLog==0u){let local=vec3u(q-pageCoordinate*i32(r));
       return vec2u(exact,local.x+r*(local.y+r*local.z));}
-    let scale=compactPagesPerSolverAxis()*(1u<<spanLog);let origin=pageCoordinate*r;
-    let local=min((q-origin)/scale,vec3u(r-1u));
+    let scale=compactPagesPerSolverAxis()*(1u<<spanLog);
+    let origin=pageCoordinate*i32(r);
+    let local=min(vec3u((q-origin)/i32(scale)),vec3u(r-1u));
     return vec2u(exact,local.x+r*(local.y+r*local.z));
   }
   let maximumSpanLog=(fineWorklist[3]>>8u)&31u;
   for(var spanLog=1u;spanLog<=maximumSpanLog;spanLog+=1u){
     let span=1u<<spanLog;let pageSpan=compactPagesPerSolverAxis()*span;
-    let originPage=(pageCoordinate/pageSpan)*pageSpan;
-    let key=originPage.x+params.brickDimensions.x
-      *(originPage.y+params.brickDimensions.y*originPage.z);
+    let originPage=compactFloorDiv(pageCoordinate,i32(pageSpan))*i32(pageSpan);
+    let key=compactPageKey(originPage);if(key==INVALID){continue;}
     let id=pageLookup(key);if(id==INVALID){continue;}
     let source=metadata[4u*id+3u];if(compactSourceSpanLog(source)!=spanLog){continue;}
-    let scale=pageSpan;let origin=originPage*r;
-    let local=min((q-origin)/scale,vec3u(r-1u));
+    let scale=pageSpan;let origin=originPage*i32(r);
+    let local=min(vec3u((q-origin)/i32(scale)),vec3u(r-1u));
     return vec2u(id,local.x+r*(local.y+r*local.z));
   }
   return vec2u(INVALID);
 }
 fn phi(qi:vec3i)->f32{
-  if(any(qi<vec3i(0))||any(qi>=vec3i(params.sampleDimensions))){return ${coarseFallback}(qi);}
-  let address=compactSampleAddress(vec3u(qi));if(address.x==INVALID){return ${coarseFallback}(qi);}
+  if((!compactSignedSparseAddressing()
+      &&(any(qi<vec3i(0))||any(qi>=vec3i(params.sampleDimensions))))
+    ||(compactSignedSparseAddressing()&&qi.y<0)){return ${coarseFallback}(qi);}
+  let address=compactSampleAddress(qi);if(address.x==INVALID){return ${coarseFallback}(qi);}
   let index=address.x*params.samplesPerBrick+address.y;
   if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return ${coarseFallback}(qi);}
   return finePackedPhi(index);
 }
-fn fineValid(q:vec3u)->bool{if(any(q>=params.sampleDimensions)){return false;}let address=compactSampleAddress(q);if(address.x==INVALID){return false;}let index=address.x*params.samplesPerBrick+address.y;return index<arrayLength(&fineSamples)&&(finePackedFlags(index)&1u)!=0u&&finite(finePackedPhi(index));}`;
+fn fineValidAt(q:vec3i)->bool{
+  if((!compactSignedSparseAddressing()
+      &&(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions))))
+    ||(compactSignedSparseAddressing()&&q.y<0)){return false;}
+  let address=compactSampleAddress(q);if(address.x==INVALID){return false;}
+  let index=address.x*params.samplesPerBrick+address.y;
+  return index<arrayLength(&fineSamples)&&(finePackedFlags(index)&1u)!=0u
+    &&finite(finePackedPhi(index));
+}
+fn fineValid(q:vec3u)->bool{return fineValidAt(vec3i(q));}`;
 }
 
 /**

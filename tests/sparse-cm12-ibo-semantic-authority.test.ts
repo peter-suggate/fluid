@@ -28,7 +28,7 @@ const fixture = (allRungs = false) => {
     density: new Float64Array(512), gamma: new Float64Array(512).fill(1),
   });
   const atlas = createSparseAdaptiveMassAtlas([16, 8, 8], [brick(0), brick(1)],
-    1, undefined, 8); const grid = buildSparseAtlasCompositeGrid(atlas);
+    1, 8); const grid = buildSparseAtlasCompositeGrid(atlas);
   const packed = allRungs ? packSparseCM12ResidentTopologyTemplatesForQA(atlas, grid)
     : packSparseCM12AcceptedTopologyTemplatesForQA(atlas, grid);
   const catalog = compileSparseCM12FactoredAEIPackedTemplateCatalog({
@@ -57,7 +57,10 @@ test("ISA1 SCMT semantics exactly equal expanded IBO without reading IRL", () =>
     ref += SPARSE_CM12_INTERNED_BOUNDARY_SLOT_REF_WORDS;
   }
   assert.ok(ref < image.layout.slotBaseWords[1]);
-  image.words[ref + 1]! += 1;
+  // Keep the corrupted row interval disjoint from every valid exterior-face
+  // interval so the semantic comparison reports inequality rather than the
+  // stronger duplicate-row structural fault.
+  image.words[ref + 1]! += packed.rowCount;
   assert.equal(compareSparseCM12IBOSemanticAuthority({ image,
     packedWords: packed.words, activeLeaves: [0, 1],
     descriptorIdByLeaf: catalog.descriptorIdByLeaf, leaves: [0, 1], slot: 0 }).exact,

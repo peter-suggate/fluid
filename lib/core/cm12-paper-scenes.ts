@@ -213,6 +213,7 @@ export function cm12Camera(scene: SceneDescription): Partial<CameraState> {
  */
 function cm12Domain(figure: Cm12Figure): SceneDescription {
   const scene = cloneScene(defaultScene);
+  scene.solidVoxels = [];
   const [nx, ny, nz] = cm12Grid(figure);
   scene.sceneId = figure.id;
   scene.randomSeed = 2012;

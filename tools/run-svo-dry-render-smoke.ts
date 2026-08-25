@@ -175,10 +175,6 @@ import {
   octreeLiveSceneDryPayloadProfile, octreeLiveSceneSceneGeometryFormat,
 } from "../lib/svo/webgpu-svo-sparse-bricks";
 import {
-  planSparseSceneTerrainField,
-  sparseSceneTerrainColumnRange,
-} from "../lib/core/sparse-scene-terrain-field";
-import {
   SVO_NODE_MIP_LAYOUT,
   raiseSvoNodeMipSeedToFloor,
   svoNodeMipPageBytes,
@@ -199,7 +195,6 @@ import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
 import {
   OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
   OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
-  octreeLiveSceneTerrainVoxelsEnabled,
 } from "../lib/svo/webgpu-svo-sparse-bricks";
 import { SPARSE_SCENE_CLUSTER_CAPACITY } from "../lib/core/webgpu-sparse-scene-proxies";
 import { cameraPosition } from "../lib/core/math";
@@ -713,21 +708,6 @@ record("dry-scene-contract", contractFailure === undefined,
   contractFailure ?? "production dry-scene contract accepts the published source");
 record("pbr-materials", canConsumeSparseVoxelPbrMaterials(source),
   "PBR material publication is available");
-// A dry SVO scene that needs the raster terrain fallback is not being drawn by
-// the path this lane is measuring; the vessel is most of the hero frame.
-//
-// This asserts a *publication* property and always did. Its old wording — "terrain
-// renders analytically through the SVO path" — described what the renderer then did
-// with that publication, and under voxels-only shading that sentence now names a
-// bug rather than a pass: `traceTerrain` returns a miss and the ground reaches the
-// frame as ordinary voxels. The property is still worth holding, because a scene
-// that falls back to raster terrain is not publishing the heightfield the voxeliser
-// reads. Renamed so a green check cannot be read as "the analytic surface is alive".
-record("terrain-publication-native", !scenePrimitives.requiresRasterTerrainFallback,
-  scenePrimitives.requiresRasterTerrainFallback
-    ? "terrain requires the raster fallback — the SVO path never sees the heightfield"
-    : "terrain publishes natively to the SVO path; the ground is drawn from its voxels");
-
 // (1) The node-mip opacity pyramid, from the source side.
 const nodeMip = source.nodeMipPyramid;
 const radiance = source.tetrahedralRadiance;
@@ -875,198 +855,6 @@ if (source.structural.scenePayloadLanes.mode === "banded") {
     bandedReport, { blobBytesPerLeaf: SPARSE_BRICK_BANDED_BLOB_BYTES_PER_LEAF });
 }
 
-const terrainVoxelsEnabled = octreeLiveSceneTerrainVoxelsEnabled();
-const terrainField = !terrainVoxelsEnabled ? undefined : planSparseSceneTerrainField(scene.terrain, {
-  worldOrigin_m: structuralDomain.worldOrigin_m as [number, number, number],
-  cellSize_m: structuralDomain.cellSize_m as [number, number, number],
-  dimensionsCells: structuralDomain.dimensionsCells as [number, number, number],
-});
-const terrainReport: Record<string, unknown> = {
-  present: terrainField !== undefined, bakingEnabled: terrainVoxelsEnabled,
-};
-if (!terrainField) {
-  record("terrain-in-scene-lanes", true, terrainVoxelsEnabled
-    ? `${scenePresetId} authors no ground; nothing to bake`
-    : "ground baking is off (FLUID_SVO_TERRAIN_VOXELS=0); this run is the A/B reference");
-} else {
-  const brickSize = structuralDomain.brickSize;
-  const capacities = source.structural.capacities;
-  const control = await readGpuBuffer(source.structural.control.buffer,
-    source.structural.control.offset ?? 0, SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes);
-  const publishedLeaves = Math.min(control[1], capacities.leaves);
-  const leaves = await readGpuBuffer(source.structural.leaves.buffer,
-    source.structural.leaves.offset ?? 0, capacities.leaves * SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes);
-  const nodes = await readGpuBuffer(source.structural.nodes.buffer,
-    source.structural.nodes.offset ?? 0, capacities.nodes * SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes);
-  // The whole payload arena, decoded through the same block the shaders address
-  // it by. Under the banded leaf payload there is no owner lane to slice: a voxel's
-  // identity is an occupancy bit, a per-leaf header and a palette entry, and this
-  // oracle must resolve it the way the frame did or it is auditing a different
-  // scene from the one that was drawn.
-  const scenePayload = source.structural.scenePayload;
-  const scenePayloadLanes = source.structural.scenePayloadLanes;
-  const sceneWords = await readGpuBuffer(scenePayload.buffer,
-    scenePayload.offset ?? 0, scenePayload.size ?? scenePayload.buffer.size);
-  const sceneIdentityAt = (voxel: number): number =>
-    sparseBrickScenePayloadIdentityAt(sceneWords, scenePayloadLanes, voxel);
-  // The geometry lane's width is a property of the *profile*, not a constant:
-  // `dry` prunes the two channels no scene writer touches, so a hardcoded
-  // 16-byte stride over-copies past the end of the arena and a hardcoded
-  // channel 2 reads the wrong float. Both are resolved from the same function
-  // the world itself uses, so the harness cannot drift from the layout.
-  //
-  // The width is a property of the *format* too, not only the channel count:
-  // a narrowed lane is 4 or 2 bytes a voxel rather than 4 per channel, so the
-  // size comes from the resolved lane and the decode from the same module the
-  // shaders take their packing from.
-  // This lane usually opens solverless scenes, but it is also the renderer
-  // reproduction harness for full-scene presets. A scene with authored fluid
-  // forces the live world back to the full payload and f32 scene geometry;
-  // decoding that publication as the dry narrowed layout reads distance bits as
-  // fractions and reports a fictitious hole in otherwise solid terrain.
-  const scenePayloadProfile = scene.systems?.fluid === false
-    ? octreeLiveSceneDryPayloadProfile()
-    : "full";
-  const sceneGeometryFormat = scenePayloadProfile === "dry"
-    ? octreeLiveSceneSceneGeometryFormat()
-    : "f32x2";
-  const sceneLanes = resolveSparseBrickPayloadLayout(
-    scenePayloadProfile, capacities.voxels, sceneGeometryFormat);
-  const sceneGeometryLane = sceneLanes.lanes.sceneGeometry;
-  if (!sceneGeometryLane?.present) throw new Error("Resolved payload layout has no sceneGeometry lane to read the ground from");
-  if (!sceneGeometryLane.channels.includes("solidFraction")) {
-    throw new Error("Resolved sceneGeometry lane carries no solidFraction channel");
-  }
-  const sceneGeometry = await readGpuBuffer(source.structural.sceneGeometry.buffer,
-    source.structural.sceneGeometry.offset ?? 0, sceneGeometryLane.bytes);
-  const fullSceneGeometry = scenePayloadProfile === "full"
-    ? new Float32Array(sceneGeometry.buffer, sceneGeometry.byteOffset, sceneGeometry.length)
-    : undefined;
-  const solidFractionAt = (voxel: number): number => fullSceneGeometry
-    // Full scene geometry preserves the four-channel solver order:
-    // fluid distance, solid distance, solid fraction, pressure.
-    ? fullSceneGeometry[voxel * 4 + 2]
-    : sparseBrickSceneFractionAt(sceneGeometry, sceneGeometryFormat, voxel);
-
-  const nodeWords = SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes / 4;
-  const leafWords = SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes / 4;
-  const terrainPages = new Set<string>();
-  // Finest level the published pyramid gives a page. Read off the plan for the
-  // same reason the shader reads it off the uniform: it cannot then disagree
-  // with the plan it is being compared against. Zero is the unfloored pyramid.
-  const publishedOpacityFloorLevel = (nodeMip?.plan.pages ?? [])
-    .reduce((floor, { key }) => Math.min(floor, key.level), Number.MAX_SAFE_INTEGER);
-  const opacityFloorLevel = Number.isSafeInteger(publishedOpacityFloorLevel) ? publishedOpacityFloorLevel : 0;
-  let terrainVoxels = 0, buriedVoxels = 0, buriedWithoutCoverage = 0;
-  const emptyByCause: Record<string, number> = {};
-  const emptyByScale: Record<number, number> = {};
-  const emptyExamples: string[] = [];
-  /** Leaves per level, so a failure can be read against the tree that produced it. */
-  const leavesByLevel: Record<number, number> = {};
-  for (let leafIndex = 0; leafIndex < publishedLeaves; leafIndex += 1) {
-    const nodeIndex = leaves[leafIndex * leafWords];
-    const voxelOffset = leaves[leafIndex * leafWords + 1];
-    if (nodeIndex >= capacities.nodes) continue;
-    const level = nodes[nodeIndex * nodeWords + 2];
-    const brick = decodeBrickMorton(leaves[leafIndex * leafWords + 2], leaves[leafIndex * leafWords + 3], level);
-    const scale = 2 ** Math.max(0, structuralDomain.maximumDepth - level);
-    leavesByLevel[level] = (leavesByLevel[level] ?? 0) + 1;
-    for (let localIndex = 0; localIndex < brickSize ** 3; localIndex += 1) {
-      const local = [
-        localIndex % brickSize,
-        Math.floor(localIndex / brickSize) % brickSize,
-        Math.floor(localIndex / (brickSize * brickSize)),
-      ];
-      const cell = local.map((value, axis) => (brick[axis] * brickSize + value) * scale);
-      const voxel = voxelOffset + localIndex;
-      if (voxel >= capacities.voxels) continue;
-      const material = sceneIdentityAt(voxel) & 0xffff;
-      if (material === VOXEL_MATERIAL_IDS.terrain) {
-        terrainVoxels += 1;
-        // A leaf owns exactly one page, at the level whose texels are its
-        // voxels — a *finest* leaf's is one base page, and a coarse leaf's is
-        // one page `log2(scale)` levels up rather than `scale^3` base pages.
-        //
-        // Raised to the published opacity floor before it is asked about,
-        // because that is the level the plan stores. Asking at level 0 under a
-        // floored pyramid measures the oracle rather than the tree: the ground
-        // page is addressed, one level up, and eight of them share it.
-        terrainPages.add(svoNodeMipSeedKey(raiseSvoNodeMipSeedToFloor(liveSvoLeafPage({
-          coordinate: brick as [number, number, number],
-          leafLevel: level,
-          finestLevel: structuralDomain.maximumDepth,
-          brickSize: brickSize as SparseBrickSize,
-        }), opacityFloorLevel)));
-      }
-      // "Buried" is decided against the *lowest* column under the voxel's own
-      // footprint, so the test never depends on where inside the cell the
-      // surface sits — only on voxels the ground unambiguously contains.
-      const range = sparseSceneTerrainColumnRange(terrainField,
-        cell[0], cell[2], cell[0] + scale - 1, cell[2] + scale - 1);
-      const top = structuralDomain.worldOrigin_m[1] + (cell[1] + scale) * structuralDomain.cellSize_m[1];
-      if (top >= range.minimum_m) continue;
-      buriedVoxels += 1;
-      if (!(solidFractionAt(voxel) >= 0.999)) {
-        buriedWithoutCoverage += 1;
-        // Which of the three ways a buried voxel can read empty this is. They
-        // have disjoint fixes, and the count alone cannot tell them apart:
-        //
-        //  - `unwritten`: material 0 *and* fraction 0, i.e. the payload was
-        //    never touched. The leaf never reached the dirty list, or reached it
-        //    and was dropped. Nothing about the ground's arithmetic is involved.
-        //  - `terrain-partial`: the ground wrote it and wrote it short. This is
-        //    the only bucket the coverage arithmetic can produce, and a CPU
-        //    replica of that arithmetic over the real plan reports zero of them
-        //    at every leaf scale — so a non-zero count here contradicts the
-        //    replica and is the interesting case.
-        //  - `primitive`: some record won the cell. A winning record cannot
-        //    lower the fraction below one (it wins only by reporting coverage at
-        //    or below `-cellRadius`, which inverts to a fraction of at least
-        //    one), so this bucket should be unreachable too.
-        const bucket = material === 0 && !(solidFractionAt(voxel) > 0) ? "unwritten"
-          : material === VOXEL_MATERIAL_IDS.terrain ? "terrain-partial" : "primitive";
-        emptyByCause[bucket] = (emptyByCause[bucket] ?? 0) + 1;
-        // Coarse leaves are the whole difference between the depth that passes
-        // and the depths that fail, so the scale is the first thing to look at.
-        emptyByScale[scale] = (emptyByScale[scale] ?? 0) + 1;
-        if (emptyExamples.length < 6) {
-          emptyExamples.push(`leaf ${leafIndex} level ${level} scale ${scale}`
-            + ` cell ${cell.join(",")} material ${material}`
-            + ` fraction ${solidFractionAt(voxel).toFixed(4)}`);
-        }
-      }
-    }
-  }
-  const plannedBasePages = new Set((nodeMip?.plan.pages ?? [])
-    .map(({ key }) => svoNodeMipSeedKey({ level: key.level, coordinate: key.coordinate })));
-  const unplannedTerrainPages = [...terrainPages].filter((page) => !plannedBasePages.has(page));
-  Object.assign(terrainReport, {
-    voxels: terrainVoxels, pages: terrainPages.size, buriedVoxels, buriedWithoutCoverage,
-    emptyByCause, emptyByScale, emptyExamples, leavesByLevel,
-    unplannedPages: unplannedTerrainPages.length,
-    columns: terrainField.dimensions[0] * terrainField.dimensions[1],
-    heightRange_m: [terrainField.minimumHeight_m, terrainField.maximumHeight_m],
-  });
-  record("terrain-in-scene-lanes", terrainVoxels > 0 && terrainPages.size > 0,
-    `${terrainVoxels} ground voxels across ${terrainPages.size} node-mip base pages`
-    + ` (${terrainField.dimensions.join("x")} columns, ${terrainField.minimumHeight_m.toFixed(3)}`
-    + `..${terrainField.maximumHeight_m.toFixed(3)} m); zero means every cone, shadow and GI ray`
-    + " still passes through the ground",
-    { voxels: terrainVoxels, pages: terrainPages.size }, 1);
-  record("terrain-coverage-solid", buriedVoxels > 0 && buriedWithoutCoverage === 0,
-    `${buriedVoxels - buriedWithoutCoverage} of ${buriedVoxels} voxels buried under the ground carry full`
-    + " scene coverage; a buried voxel that reads empty is a hole the pyramid lights through"
-    + (buriedWithoutCoverage === 0 ? ""
-      : ` — by cause ${JSON.stringify(emptyByCause)}, by leaf scale ${JSON.stringify(emptyByScale)},`
-        + ` against leaves per level ${JSON.stringify(leavesByLevel)}; first ${emptyExamples[0]}`),
-    buriedWithoutCoverage, 0);
-  record("terrain-pages-planned", unplannedTerrainPages.length === 0,
-    unplannedTerrainPages.length === 0
-      ? `every ground page is in the ${plannedBasePages.size}-page base address plan`
-      : `${unplannedTerrainPages.length} ground pages are outside the address plan`
-        + ` (first ${unplannedTerrainPages[0]}); those pages read as empty space to every consumer`,
-    unplannedTerrainPages.length, 0);
-}
 
 // ---------------------------------------------------------------------------
 // The frame, through the production dry renderer.
@@ -2047,7 +1835,6 @@ const report = {
     },
     derivedLighting: derivedLighting ?? null,
     lightingVisibility: visibility,
-    terrain: terrainReport,
     bandedArena: bandedReport,
   },
   checks,

@@ -1,5 +1,6 @@
 import { canonicalScene, type Quaternion, type RigidBodyDescription, type RigidShape, type SceneDescription, type Vec3 } from "./model";
-import { TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, terrainCeiling, type TerrainDescription } from "./terrain";
+import { solidWorldForScene, type SolidWorldVoxelPatch } from
+  "./solid-world";
 
 /** Deterministic CPU planning schema consumed by the future GPU brick builder. */
 export const VOXEL_SCENE_PLAN_VERSION = "1.0.0" as const;
@@ -45,7 +46,7 @@ export interface VoxelMaterial {
 export const VOXEL_MATERIALS: ReadonlyArray<VoxelMaterial> = [
   {
     id: VOXEL_MATERIAL_IDS.containerGlass, key: "containerGlass", name: "Container glass", closure: "thin-dielectric",
-    baseColorLinear: [0.42, 0.78, 0.72], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.06, transmission: 0.96, ior: 1.5,
+    baseColorLinear: [0.42, 0.78, 0.72], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.04, transmission: 0.985, ior: 1.5,
     colorProvenance: "webgpu-renderer glass tint"
   },
   {
@@ -133,29 +134,13 @@ interface VoxelSourceBase {
   revisionHash: string;
 }
 
-export type ContainerBoundarySide = "floor" | "left" | "right" | "front" | "back" | "ceiling";
-
-export interface VoxelContainerBoundarySource extends VoxelSourceBase {
-  kind: "container-boundary";
+/** Compiled signed voxel edits; authoring provenance is not solver geometry. */
+export interface VoxelSolidPatchSource extends VoxelSourceBase {
+  kind: "solid-voxel-patches";
   updateClass: "scene";
-  side: ContainerBoundarySide;
-  /** Unit normal pointing from the solid shell into the fluid domain. */
-  inwardNormal: Vec3;
-  /** Exact location of the authored zero-thickness physical boundary. */
-  surfaceCoordinate_m: number;
-  /** Finite representation shell outside the domain; not physical wall thickness. */
-  compilationShellThickness_m: number;
-}
-
-export interface VoxelTerrainSource extends VoxelSourceBase {
-  kind: "terrain-heightfield";
-  updateClass: "scene";
-  terrain: TerrainDescription;
-  evaluator: {
-    unionExponent: number;
-    defaultFlat: number;
-    clampMinimum_m: 0;
-  };
+  voxelOrigin_m: Vec3;
+  voxelSize_m: number;
+  patches: ReadonlyArray<SolidWorldVoxelPatch>;
 }
 
 export interface VoxelRigidPrimitive {
@@ -189,7 +174,7 @@ export interface VoxelRigidSource extends VoxelSourceBase {
   localAllocation: VoxelLocalAllocation;
 }
 
-export type VoxelSceneSource = VoxelContainerBoundarySource | VoxelTerrainSource | VoxelRigidSource;
+export type VoxelSceneSource = VoxelSolidPatchSource | VoxelRigidSource;
 
 export interface VoxelSceneHashInputs {
   planVersion: typeof VOXEL_SCENE_PLAN_VERSION;
@@ -288,28 +273,6 @@ function hashValue(value: unknown): string {
 
 function numericRevision(hash: string): number {
   return Number.parseInt(hash.slice(-8), 16) >>> 0;
-}
-
-/**
- * Content digest of a sculpted grid's samples, so `hashValue` never sees them.
- *
- * `hashValue` serializes to JSON and then folds one BigInt multiply per *byte*,
- * which is fine for the handful of numbers every other source carries and is
- * seconds of wall clock for the hero pond's 56k heights — roughly a megabyte of
- * text. Two independent 32-bit FNV-1a walks over the f32 bit patterns give the
- * same 64 bits of identity for one machine-word multiply per sample, and the
- * grid still participates in `revisionHash` exactly as it must: a brush stroke
- * returns a new array, so a re-sculpted vessel is a new revision.
- */
-function terrainGridDigest(grid: NonNullable<TerrainDescription["grid"]>): string {
-  const samples = Float32Array.from(grid.heights_m);
-  const words = new Uint32Array(samples.buffer);
-  let low = 0x811c_9dc5, high = 0x9e37_79b9;
-  for (const word of words) {
-    low = Math.imul(low ^ word, 0x0100_0193) >>> 0;
-    high = Math.imul(high ^ (word >>> 16 | word << 16), 0x85eb_ca6b) >>> 0;
-  }
-  return (high.toString(16).padStart(8, "0")) + (low.toString(16).padStart(8, "0"));
 }
 
 function cloneVec3(value: Vec3): Vec3 {
@@ -450,97 +413,38 @@ function rigidSource(body: RigidBodyDescription, layout: SparseBrickLayoutPlan):
   };
 }
 
-function boundarySources(scene: SceneDescription, layout: SparseBrickLayoutPlan): VoxelContainerBoundarySource[] {
-  const { width_m: width, height_m: height, depth_m: depth, top } = scene.container;
-  const x0 = -width / 2, x1 = width / 2, z0 = -depth / 2, z1 = depth / 2;
-  const shell = layout.voxelSize_m;
-  const entries: Array<{ side: ContainerBoundarySide; inwardNormal: Vec3; surfaceCoordinate_m: number; exact: VoxelAabb }> = [
-    { side: "floor", inwardNormal: { x: 0, y: 1, z: 0 }, surfaceCoordinate_m: 0, exact: { min: { x: x0, y: -shell, z: z0 }, max: { x: x1, y: 0, z: z1 } } },
-    { side: "left", inwardNormal: { x: 1, y: 0, z: 0 }, surfaceCoordinate_m: x0, exact: { min: { x: x0 - shell, y: 0, z: z0 }, max: { x: x0, y: height, z: z1 } } },
-    { side: "right", inwardNormal: { x: -1, y: 0, z: 0 }, surfaceCoordinate_m: x1, exact: { min: { x: x1, y: 0, z: z0 }, max: { x: x1 + shell, y: height, z: z1 } } },
-    { side: "front", inwardNormal: { x: 0, y: 0, z: 1 }, surfaceCoordinate_m: z0, exact: { min: { x: x0, y: 0, z: z0 - shell }, max: { x: x1, y: height, z: z0 } } },
-    { side: "back", inwardNormal: { x: 0, y: 0, z: -1 }, surfaceCoordinate_m: z1, exact: { min: { x: x0, y: 0, z: z1 }, max: { x: x1, y: height, z: z1 + shell } } }
-  ];
-  if (top === "closed") entries.push({
-    side: "ceiling", inwardNormal: { x: 0, y: -1, z: 0 }, surfaceCoordinate_m: height,
-    exact: { min: { x: x0, y: height, z: z0 }, max: { x: x1, y: height + shell, z: z1 } }
+function containerSolidSource(scene: SceneDescription,
+  layout: SparseBrickLayoutPlan): VoxelSolidPatchSource {
+  const migrated = solidWorldForScene(scene);
+  const patches = migrated.patches;
+  const cellBounds = patches.reduce((result, patch) => ({
+    minimum: result.minimum.map((value, axis) =>
+      Math.min(value, patch.minimum[axis]!)) as [number, number, number],
+    maximum: result.maximum.map((value, axis) =>
+      Math.max(value, patch.maximumExclusive[axis]!)) as [number, number, number],
+  }), { minimum: [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY,
+    Number.POSITIVE_INFINITY] as [number, number, number],
+  maximum: [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY,
+    Number.NEGATIVE_INFINITY] as [number, number, number] });
+  const point = (coordinate: readonly [number, number, number]): Vec3 => ({
+    x: layout.worldOrigin_m.x + coordinate[0] * layout.voxelSize_m,
+    y: layout.worldOrigin_m.y + coordinate[1] * layout.voxelSize_m,
+    z: layout.worldOrigin_m.z + coordinate[2] * layout.voxelSize_m,
   });
-  return entries.map((entry) => {
-    const candidate = candidateBounds(entry.exact, layout.worldOrigin_m, layout.voxelSize_m, layout.brickSize_m, layout.conservativePadding_m);
-    const source = {
-      id: `container:${entry.side}`,
-      kind: "container-boundary" as const,
-      updateClass: "scene" as const,
-      side: entry.side,
-      materialId: VOXEL_MATERIAL_IDS.containerGlass,
-      composition: "union" as const,
-      inwardNormal: entry.inwardNormal,
-      surfaceCoordinate_m: entry.surfaceCoordinate_m,
-      compilationShellThickness_m: shell,
-      candidate
-    };
-    return { ...source, revisionHash: hashValue(source) };
-  });
-}
-
-/**
- * The clone exists so a published source can never alias document state, which
- * is why the sculpted grid is copied sample by sample rather than shared.
- *
- * Dropping `grid` here was the whole of why a sculpted vessel rendered as a
- * flat plane at `baseHeight_m`: the solver reads `scene.terrain` directly
- * through `terrainColumnHeights`, but everything downstream of a
- * `VoxelSceneSource` — the voxelization bounds, the SVO publication and the dry
- * scene's heightfield — sees only what this function hands on.
- */
-function cloneTerrain(terrain: TerrainDescription): TerrainDescription {
-  return {
-    baseHeight_m: terrain.baseHeight_m,
-    features: terrain.features.map((feature) => ({
-      ...feature,
-      center_m: { ...feature.center_m },
-      radius_m: { ...feature.radius_m }
-    })),
-    ...(terrain.grid ? {
-      grid: {
-        ...terrain.grid,
-        origin_m: { ...terrain.grid.origin_m },
-        size: { ...terrain.grid.size },
-        heights_m: terrain.grid.heights_m.slice()
-      }
-    } : {}),
-    // A described ground is copied as its description, which is the whole of
-    // what makes it cheap: the samples it stands for are derived and shared by
-    // content, so there is no array here to alias in the first place.
-    ...(terrain.procedural ? { procedural: { ...terrain.procedural, container: { ...terrain.procedural.container } } } : {})
-  };
-}
-
-function terrainSource(scene: SceneDescription, layout: SparseBrickLayoutPlan): VoxelTerrainSource | undefined {
-  if (!scene.terrain) return undefined;
-  const terrain = cloneTerrain(scene.terrain);
-  const maximumHeight = Math.min(scene.container.height_m, terrainCeiling(terrain));
-  const exact: VoxelAabb = {
-    min: { x: -scene.container.width_m / 2, y: 0, z: -scene.container.depth_m / 2 },
-    max: { x: scene.container.width_m / 2, y: maximumHeight, z: scene.container.depth_m / 2 }
-  };
-  const source = {
-    id: "terrain:heightfield",
-    kind: "terrain-heightfield" as const,
+  const exact = { min: point(cellBounds.minimum), max: point(cellBounds.maximum) };
+  const common = {
+    id: "solid:container",
+    kind: "solid-voxel-patches" as const,
     updateClass: "scene" as const,
-    materialId: VOXEL_MATERIAL_IDS.terrain,
+    materialId: VOXEL_MATERIAL_IDS.containerGlass,
     composition: "union" as const,
-    terrain,
-    evaluator: { unionExponent: TERRAIN_UNION_EXPONENT, defaultFlat: TERRAIN_DEFAULT_FLAT, clampMinimum_m: 0 as const },
-    candidate: candidateBounds(exact, layout.worldOrigin_m, layout.voxelSize_m, layout.brickSize_m, layout.conservativePadding_m)
+    voxelOrigin_m: cloneVec3(layout.worldOrigin_m),
+    voxelSize_m: layout.voxelSize_m,
+    patches,
+    candidate: candidateBounds(exact, layout.worldOrigin_m, layout.voxelSize_m,
+      layout.brickSize_m, layout.conservativePadding_m),
   };
-  const grid = terrain.grid;
-  if (!grid) return { ...source, revisionHash: hashValue(source) };
-  const { heights_m, ...shape } = grid;
-  return {
-    ...source,
-    revisionHash: hashValue({ ...source, terrain: { ...terrain, grid: { ...shape, heightsDigest: terrainGridDigest(grid) } } })
-  };
+  return { ...common, revisionHash: hashValue(common) };
 }
 
 function unionBounds(bounds: VoxelAabb[]): VoxelAabb {
@@ -576,9 +480,9 @@ export function planVoxelScene(scene: SceneDescription, options: PlanVoxelSceneO
 
   const rigidSources = scene.rigidBodies.map((body) => rigidSource(body, layout));
   const frameSources = rigidSources.filter((source) => source.updateClass === "frame");
-  const sceneSources: VoxelSceneSource[] = [...boundarySources(scene, layout)];
-  const terrain = terrainSource(scene, layout);
-  if (terrain) sceneSources.push(terrain);
+  // The container is compiled to the same signed voxel source as every other
+  // solid. Named face atlases do not survive into the runtime scene plan.
+  const sceneSources: VoxelSceneSource[] = [containerSolidSource(scene, layout)];
   sceneSources.push(...rigidSources.filter((source) => source.updateClass === "scene"));
 
   const materialRevisionHash = hashValue(VOXEL_MATERIALS);

@@ -23,7 +23,7 @@ export const SPARSE_CM12_REFINEMENT_REGION_BYTES = 16
   + 4 * SPARSE_CM12_REFINEMENT_REGION_WORDS * OCTREE_REFINEMENT_REGION_CAPACITY;
 
 /** Byte offset of the region tail in Sparse CM12's Params uniform. */
-export const SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET = 480;
+export const SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET = 448;
 
 export interface SparseCM12RefinementRegionResolutionBounds {
   /** Finest allowed brick resolution; enforces the authored smallest cell. */
@@ -36,7 +36,7 @@ export interface SparseCM12RefinementRegionResolutionBounds {
  * Pack scene regions for the resident topology planner.
  *
  * Bounds are finest-cell coordinates, matching every physical topology record.
- * The cell-size ladder is already capped at 32, so unlike the legacy octree
+ * The cell-size ladder is already capped at 32, so the refinement
  * packer this format needs no method-specific maximum-leaf clamp.
  */
 export function packSparseCM12RefinementRegions(
@@ -95,7 +95,7 @@ function containingCellSizeBounds(
  *
  * Overlapping minimum-size bounds choose the coarsest floor. Overlapping
  * maximum-size bounds choose the finest ceiling. If two overlapping boxes
- * conflict, the ceiling wins, matching the legacy octree gate's conservative
+ * conflict, the ceiling wins, matching the refinement gate's conservative
  * preference for additional resolution.
  */
 export function sparseCM12RefinementRegionResolutionBoundsForBrick(

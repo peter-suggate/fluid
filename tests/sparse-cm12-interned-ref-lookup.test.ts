@@ -26,7 +26,7 @@ const fixture = () => {
     density: new Float64Array(8 ** 3), gamma: new Float64Array(8 ** 3).fill(1),
   });
   const atlas = createSparseAdaptiveMassAtlas([16, 8, 8], [brick(0), brick(1)],
-    1, undefined, 8);
+    1, 8);
   const grid = buildSparseAtlasCompositeGrid(atlas);
   const packed = packSparseCM12ResidentTopologyTemplatesForQA(atlas, grid);
   const catalog = compileSparseCM12FactoredAEIPackedTemplateCatalog({

@@ -82,8 +82,7 @@ function bootstrapMedianSpeedup(pairs: ReadonlyArray<{ full: number; restricted:
 function workgroupInvocations(plan: SurfaceExtractionDispatchPlan) {
   if (plan.full) return plan.full[0] * plan.full[1] * plan.full[2] * 64;
   return (plan.band?.[0] ?? 0) * (plan.band?.[1] ?? 0) * (plan.band?.[2] ?? 0) * 64
-    + (plan.tallSides?.[0] ?? 0) * (plan.tallSides?.[1] ?? 0) * 64
-    + (plan.walls?.[0] ?? 0) * (plan.walls?.[1] ?? 0) * 64;
+    + (plan.tallSides?.[0] ?? 0) * (plan.tallSides?.[1] ?? 0) * 64;
 }
 
 interface ProductionStages {
@@ -96,12 +95,11 @@ interface ProductionStages {
 // Production timing covers the complete extraction sequence: classify sweep,
 // worklist compaction, and the indirect polygonise dispatch. Count-only runs
 // (production omitted) total triangles during classification instead.
-function encodeVariant(pass: GPUComputePassEncoder, variant: Variant, plan: SurfaceExtractionDispatchPlan, pipelines: Record<"full" | "band" | "tallSides" | "walls", GPUComputePipeline>, bindGroup: GPUBindGroup, production?: ProductionStages) {
+function encodeVariant(pass: GPUComputePassEncoder, variant: Variant, plan: SurfaceExtractionDispatchPlan, pipelines: Record<"full" | "band" | "tallSides", GPUComputePipeline>, bindGroup: GPUBindGroup, production?: ProductionStages) {
   pass.setBindGroup(0, bindGroup);
   if (variant === "restricted-band") {
     pass.setPipeline(pipelines.band); pass.dispatchWorkgroups(...plan.band!);
     pass.setPipeline(pipelines.tallSides); pass.dispatchWorkgroups(...plan.tallSides!);
-    pass.setPipeline(pipelines.walls); pass.dispatchWorkgroups(...plan.walls!);
   } else {
     pass.setPipeline(pipelines.full); pass.dispatchWorkgroups(...plan.full!);
   }
@@ -190,14 +188,12 @@ try {
     const pipelines = {
       full: device.createComputePipeline({ layout: pipelineLayout, compute: { module: extractionModule, entryPoint: "extractMain" } }),
       band: device.createComputePipeline({ layout: pipelineLayout, compute: { module: extractionModule, entryPoint: "extractBandMain" } }),
-      tallSides: device.createComputePipeline({ layout: pipelineLayout, compute: { module: extractionModule, entryPoint: "extractTallSidesMain" } }),
-      walls: device.createComputePipeline({ layout: pipelineLayout, compute: { module: extractionModule, entryPoint: "extractWallMain" } })
+      tallSides: device.createComputePipeline({ layout: pipelineLayout, compute: { module: extractionModule, entryPoint: "extractTallSidesMain" } })
     };
     const countPipelines = {
       full: device.createComputePipeline({ layout: pipelineLayout, compute: { module: extractionModule, entryPoint: "extractMain", constants: { countOnly: 1 } } }),
       band: device.createComputePipeline({ layout: pipelineLayout, compute: { module: extractionModule, entryPoint: "extractBandMain", constants: { countOnly: 1 } } }),
-      tallSides: device.createComputePipeline({ layout: pipelineLayout, compute: { module: extractionModule, entryPoint: "extractTallSidesMain", constants: { countOnly: 1 } } }),
-      walls: device.createComputePipeline({ layout: pipelineLayout, compute: { module: extractionModule, entryPoint: "extractWallMain", constants: { countOnly: 1 } } })
+      tallSides: device.createComputePipeline({ layout: pipelineLayout, compute: { module: extractionModule, entryPoint: "extractTallSidesMain", constants: { countOnly: 1 } } })
     };
     const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: [
       { binding: 0, resource: { buffer: uniformBuffer } },

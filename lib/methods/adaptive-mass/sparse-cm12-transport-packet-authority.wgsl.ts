@@ -20,7 +20,6 @@ const CM12_TPA_TRANSPORT_HIGH:u32=${l.transportMaskHighBaseWords}u;
 const CM12_TPA_SHARPENING_LOW:u32=${l.sharpeningMaskLowBaseWords}u;
 const CM12_TPA_SHARPENING_HIGH:u32=${l.sharpeningMaskHighBaseWords}u;
 const CM12_TPA_PACKET_LIST:u32=${l.packetListBaseWords}u;
-const CM12_TPA_GAMMA_ROW_MASK:u32=${l.gammaRowMaskBaseWords}u;
 
 fn cm12TransportPacketLaneSelected(mask:vec2u,lane:u32)->bool{
   return lane<64u&&((mask[lane>>5u]>>(lane&31u))&1u)!=0u;
@@ -65,15 +64,31 @@ fn cm12TransportPublishSharpeningMask(packet:u32,mask:vec2u){
   atomicStore(&${arena}[CM12_TPA_SHARPENING_LOW+ordinal],mask.x);
   atomicStore(&${arena}[CM12_TPA_SHARPENING_HIGH+ordinal],mask.y);
 }
-fn cm12TransportGammaMaskWord(ordinal:u32,axis:u32,lane:u32)->u32{
-  return CM12_TPA_GAMMA_ROW_MASK+6u*ordinal+2u*axis
-    +select(0u,1u,lane>=32u);
-}
-fn cm12TransportMarkGammaMask(packet:u32,axis:u32,low:u32,high:u32){
-  let ordinal=cm12TransportCompactOrdinal(packet);
-  if(ordinal==0xffffffffu||axis>=3u||(low|high)==0u){return;}
-  _=atomicOr(&${arena}[cm12TransportGammaMaskWord(ordinal,axis,0u)],low);
-  _=atomicOr(&${arena}[cm12TransportGammaMaskWord(ordinal,axis,32u)],high);
+var<workgroup>cm12SharpeningLow:atomic<u32>;
+var<workgroup>cm12SharpeningHigh:atomic<u32>;
+fn cm12TransportPublishSharpeningLane(packet:u32,lane:u32,
+ selected:bool,cellScale:u32){
+  if(lane==0u){
+    atomicStore(&cm12SharpeningLow,0u);atomicStore(&cm12SharpeningHigh,0u);
+  }
+  workgroupBarrier();
+  if(selected){
+    var low=0u;var high=0u;
+    if(cellScale==1u){low=0xffffffffu;high=0xffffffffu;
+    }else if(cellScale==2u){
+      let q=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+      let base=(q.x&~1u)+4u*(q.y&~1u)+16u*(q.z&~1u);
+      for(var dz=0u;dz<2u;dz+=1u){for(var dy=0u;dy<2u;dy+=1u){
+        for(var dx=0u;dx<2u;dx+=1u){let member=base+dx+4u*dy+16u*dz;
+          if(member<32u){low|=1u<<member;}else{high|=1u<<(member-32u);}
+        }
+      }}
+    }else if(lane<32u){low=1u<<lane;}else{high=1u<<(lane-32u);}
+    _=atomicOr(&cm12SharpeningLow,low);_=atomicOr(&cm12SharpeningHigh,high);
+  }
+  workgroupBarrier();
+  if(lane==0u){cm12TransportPublishSharpeningMask(packet,vec2u(
+    atomicLoad(&cm12SharpeningLow),atomicLoad(&cm12SharpeningHigh)));}
 }
 
 // The packet authority is sealed before the three conservative dispatches.
@@ -84,7 +99,7 @@ var<workgroup>cm12TransportStagedPacketId:u32;
 var<workgroup>cm12TransportStagedPacketOrdinal:u32;
 var<workgroup>cm12TransportStagedPacketMask:vec2u;
 var<workgroup>cm12TransportStagedPacket:CM12TransportPacket;
-var<workgroup>cm12TransportStagedPacketOriginFine:vec3u;
+var<workgroup>cm12TransportStagedPacketOriginFine:vec3i;
 var<workgroup>cm12TransportStagedTopologySlot:u32;
 fn cm12StageTransportPacket(packetRank:u32,lane:u32){
   if(lane==0u){
@@ -123,8 +138,6 @@ fn compileSparseCM12TransportPacketsFromFinalScalarMasks(
   atomicStore(&${arena}[CM12_TPA_TRANSPORT_HIGH+ordinal],0u);
   atomicStore(&${arena}[CM12_TPA_SHARPENING_LOW+ordinal],0u);
   atomicStore(&${arena}[CM12_TPA_SHARPENING_HIGH+ordinal],0u);
-  for(var word=0u;word<6u;word+=1u){
-    atomicStore(&${arena}[CM12_TPA_GAMMA_ROW_MASK+6u*ordinal+word],0u);}
   let packetId=cm12TransportDirectStablePacket(ordinal);
   let slot=acceptedTopologySlot();let packet=cm12TeiPacket(packetId,slot);
   if(packet.first==0xffffffffu){return;}
@@ -143,12 +156,11 @@ fn compileSparseCM12TransportPacketsFromFinalScalarMasks(
   for(var tz=0u;!dirty&&tz<tileCounts.z;tz+=1u){
     for(var ty=0u;!dirty&&ty<tileCounts.y;ty+=1u){
       for(var tx=0u;!dirty&&tx<tileCounts.x;tx+=1u){
-        let tileOrigin=origin+4u*vec3u(tx,ty,tz);
+        let tileOrigin=origin+vec3i(4u*vec3u(tx,ty,tz));
         for(var dz=-1;!dirty&&dz<=1;dz+=1){for(var dy=-1;!dirty&&dy<=1;dy+=1){
           for(var dx=-1;!dirty&&dx<=1;dx+=1){
-            let q=vec3i(tileOrigin)+4*vec3i(dx,dy,dz);
-            if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))){continue;}
-            let neighbor=cm12TeiSpatialTile(cm12TransportSpatialTileId(vec3u(q)),slot);
+            let q=tileOrigin+4*vec3i(dx,dy,dz);
+            let neighbor=cm12TeiSpatialTile(cm12TransportSpatialTileId(q),slot);
             if(neighbor.packetId==0xffffffffu){continue;}
             let mask=fsm1Nonexact(neighbor.packetId)&~fsm1Bulk(neighbor.packetId)
               &neighbor.laneMask;
@@ -186,12 +198,29 @@ fn cm12TransportSpatialTileCell(tile:u32,lane:u32)->u32{
 }
 // Stable spatial-tile id of the fine coordinate's min corner, in the same id
 // same stable space used by cm12TeiSpatialTile.
-fn cm12TransportSpatialTileId(fine:vec3u)->u32{
-  // Spatial tiles are 4 fine cells per edge at every brick resolution.
-  let local=(fine%BRICK_FINE_RESOLUTION)/4u;
-  return cm12TeiLogicalKey(fine/BRICK_FINE_RESOLUTION)
-    *CM12_TEI_SPATIAL_TILES_PER_LOGICAL+local.x+CM12_TEI_SPATIAL_TILES_PER_AXIS
+fn cm12TransportSpatialTileId(fine:vec3i)->u32{
+  // Spatial tiles are leaf-local. Resolve the signed logical coordinate first;
+  // converting a negative world origin to u32 aliases it with unrelated data.
+  let brickWidth=i32(BRICK_FINE_RESOLUTION);
+  let logical=vec3i(cm12WorldFloorToSpan(fine.x,brickWidth)/brickWidth,
+    cm12WorldFloorToSpan(fine.y,brickWidth)/brickWidth,
+    cm12WorldFloorToSpan(fine.z,brickWidth)/brickWidth);
+  let leaf=cm12WorldOwnerAt(logical);
+  if(leaf==0xffffffffu){return 0xffffffffu;}
+  let leafFine=cm12WorldLeafCoordinate(leaf)*brickWidth;
+  let signedRelative=fine-leafFine;
+  if(any(signedRelative<vec3i(0))){return 0xffffffffu;}
+  let relative=vec3u(signedRelative);
+  let logicalLocal=relative/BRICK_FINE_RESOLUTION;
+  let span=brickSpan(leaf);
+  if(any(logicalLocal>=vec3u(span))){return 0xffffffffu;}
+  let logicalIndex=logicalLocal.x+span*(logicalLocal.y+span*logicalLocal.z);
+  if(logicalIndex>=CM12_TEI_LOGICAL_SLOTS_PER_LEAF){return 0xffffffffu;}
+  let local=(relative%BRICK_FINE_RESOLUTION)/4u;
+  let localIndex=local.x+CM12_TEI_SPATIAL_TILES_PER_AXIS
     *(local.y+CM12_TEI_SPATIAL_TILES_PER_AXIS*local.z);
+  return leaf*CM12_TEI_SPATIAL_TILES_PER_LEAF
+    +logicalIndex*CM12_TEI_SPATIAL_TILES_PER_LOGICAL+localIndex;
 }
 `;
 }

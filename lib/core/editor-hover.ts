@@ -3,8 +3,7 @@ import { sceneryEntity, sceneryIdFromSelection } from "./editor-scenery";
 import { add, dot, scale, sub } from "./math";
 import type { SceneDescription, Vec3 } from "./model";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
-import { sceneHasTerrain, terrainNormalAt } from "./terrain";
-import { intersectSvoTerrainHeightfield } from "../svo/webgpu-svo-dry-scene";
+import { intersectAuthoredTerrain, sceneHasTerrain, terrainNormalAt } from "./terrain";
 
 /**
  * What the editor cursor is over.
@@ -83,7 +82,7 @@ function hoverBody(bodies: readonly RigidBodyState[], ray: { origin: Vec3; direc
 function hoverTerrain(scene: SceneDescription, ray: { origin: Vec3; direction: Vec3 }): EditorHover | undefined {
   if (!sceneHasTerrain(scene)) return undefined;
   const c = scene.container;
-  const hit = intersectSvoTerrainHeightfield(
+  const hit = intersectAuthoredTerrain(
     scene.terrain, ray.origin, ray.direction, Math.max(c.width_m, c.height_m, c.depth_m),
   );
   if (!hit || !(hit.t_m > 0)) return undefined;

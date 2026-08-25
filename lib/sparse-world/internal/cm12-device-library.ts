@@ -44,7 +44,7 @@ class CM12DeviceLibraryState {
   adopt(
     resident: WebGPUSparseCM12Resident,
     trace: SparseWorldTrace | undefined,
-    legacyVariant: unknown,
+    variant: unknown,
   ): CM12ResidentLibraryReadiness {
     this.observe(trace);
     const existing = this.readiness.get(resident);
@@ -54,8 +54,7 @@ class CM12DeviceLibraryState {
       kind: "implementation",
       subsystem: "cm12-device-library",
       detail: {
-        migrationDebt: "legacy-scene-shaped-wgsl-cache-key",
-        variant: legacyVariant,
+        variant,
       },
     });
     this.pendingResidents += 1;
@@ -153,13 +152,13 @@ export class CM12SparseWorldDevice implements SparseWorldDevice {
     return this.create(config);
   }
 
-  /** Internal migration seam: a world adopts device-owned readiness here. */
-  adoptLegacyResident(
+  /** A world adopts device-owned readiness here. */
+  adoptResident(
     resident: WebGPUSparseCM12Resident,
     trace: SparseWorldTrace | undefined,
-    legacyVariant: unknown,
+    variant: unknown,
   ): CM12ResidentLibraryReadiness {
-    return this.library.adopt(resident, trace, legacyVariant);
+    return this.library.adopt(resident, trace, variant);
   }
 
   /** Presentation-pipeline construction faults also belong to the library. */

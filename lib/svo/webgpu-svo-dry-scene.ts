@@ -14,8 +14,6 @@ import {
   type SvoClusterResolver,
   type SvoFieldProgramResolver,
   type SvoSmoothUnionClusterPacking,
-  type SvoTerrainHeightfieldPrimitive,
-  type SvoTerrainResolver,
 } from "./svo-primitive-abi";
 import {
   packSvoFieldProgramArena,
@@ -91,11 +89,12 @@ import {
 import type { SceneDescription } from "../core/model";
 import { svoSceneLighting } from "./svo-dry-scene-lighting";
 import { svoMaterialWGSL, SVO_MATERIAL_RECORD_STRIDE_BYTES } from "./svo-material-abi";
-import { SVO_SCENE_GLASS_MAXIMUM_PANES } from "./svo-scene-glass";
+import {
+  SVO_SCENE_GLASS_MAXIMUM_PANES,
+} from "./svo-scene-glass";
 import { SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES } from "./svo-scene-thick-glass";
 import { SVO_CONTACT_VISIBILITY_CONTRACT } from "./svo-contact-visibility";
 import { svoProceduralNoiseWGSL } from "./svo-procedural-material";
-import { SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES } from "./svo-terrain-material";
 import { svoThinGlassWGSL, SVO_THIN_GLASS_RECORD_STRIDE_BYTES, SVO_THIN_GLASS_RECORD_WORDS } from "./svo-thin-glass";
 import {
   SVO_RIGID_RASTER_CONTRACT,
@@ -118,17 +117,6 @@ import {
   unpackSvoThickGlassVolumes,
 } from "./svo-thick-glass";
 import { SVO_VISIBILITY_LIMITS, svoVisibilityRaysWGSL } from "./svo-visibility-rays";
-import {
-  MAX_TERRAIN_DERIVED_GRID_SAMPLES,
-  MIN_TERRAIN_GRID_SIZE,
-  terrainCeiling,
-  terrainGridExtent,
-  terrainHeightAt,
-  terrainNormalAt,
-  terrainSampleGrid,
-  type TerrainDescription,
-  type TerrainGrid,
-} from "../core/terrain";
 import { cameraApertureShaderLibrary } from "../core/webgpu-camera";
 import { unifiedLightingShaderLibrary, WATER_OPTICS } from "../core/webgpu-lighting";
 import { liveSvoDerivedPageValidityWGSL } from "./webgpu-svo-live-derived-cache";
@@ -257,18 +245,6 @@ export interface SparseVoxelDrySceneData {
   ownerBase: number;
   /** Interior-facing shell pane omitted so the camera can see into the room. */
   skippedOwnerId?: number;
-  /** Stable sparse material-table identity for an analytic terrain hit. */
-  terrainMaterialId?: number;
-  /** Packed 16-byte garden terrain material metadata; absent preserves table shading. */
-  terrainMaterialMetadata?: Uint32Array<ArrayBuffer>;
-  /** Stable identity of the packed terrain material policy for diagnostics/caches. */
-  terrainMaterialCacheKey?: string;
-  /**
-   * Packed sculpted-terrain heightfield region: header plus row-major samples.
-   * Absent means the ground is the analytic base-plus-features form, which the
-   * shader evaluates in closed form from the uniform mirror as it always has.
-   */
-  terrainHeightfield?: Uint32Array<ArrayBuffer>;
   /**
    * Packed aggregate parameter blocks, in publication order, as
    * `packSvoDrySceneClusters` produces them. Absent means this scene publishes
@@ -293,10 +269,6 @@ export interface SparseVoxelDrySceneData {
   thickGlassCacheKey?: string;
   /** Thin pane replaced by a curved volume only while the thick binder is valid. */
   thickGlassReplacedThinPaneId?: number;
-  /** First vessel-pane ID owned by the existing post-dry-scene glass compositor. */
-  primaryCompositeOwnedGlassPaneIdBase?: number;
-  /** Contiguous vessel-pane count beginning at `primaryCompositeOwnedGlassPaneIdBase`. */
-  primaryCompositeOwnedGlassPaneCount?: number;
   /** CPU-built mirror of the producer's bounded 112-byte light publication. */
   lightRecords?: Uint32Array<ArrayBuffer>;
   /** CPU-built mirror revision; must equal the authoritative source publication. */
@@ -331,35 +303,6 @@ export const SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES =
 export const SVO_DRY_SCENE_GLASS_ARENA_SIZE_BYTES =
   SVO_SCENE_GLASS_MAXIMUM_PANES * SVO_THIN_GLASS_RECORD_STRIDE_BYTES;
 const alignDrySceneArenaBytes = (value: number): number => Math.ceil(value / 256) * 256;
-/**
- * Header words in front of a sculpted terrain's samples: origin x/z, spacing and
- * slope bound as f32, then nx, nz and the lowest/highest sample.
- *
- * The region is *self-describing* on purpose. A grid's presence and extent could
- * equally have gone in `SVO_DRY_SCENE_PARAMS_LAYOUT`, but that uniform is
- * exactly full at 576 bytes, two live tests pin its shape word for word, and
- * every number the sampler wants is already being uploaded next to the samples
- * it describes. A zeroed header therefore means "analytic terrain" and the
- * shader needs nothing from anywhere else — which is also why the header is
- * reserved even when no scene has a grid: a storage read past the end of the
- * binding is not required to return zero.
- */
-export const SVO_DRY_SCENE_TERRAIN_HEADER_WORDS = 8;
-export const SVO_DRY_SCENE_TERRAIN_HEADER_BYTES =
-  SVO_DRY_SCENE_TERRAIN_HEADER_WORDS * Uint32Array.BYTES_PER_ELEMENT;
-/** Bytes a heightfield of `sampleCount` samples occupies, header included. */
-export const svoDrySceneTerrainRegionBytes = (sampleCount: number): number =>
-  SVO_DRY_SCENE_TERRAIN_HEADER_BYTES + sampleCount * Float32Array.BYTES_PER_ELEMENT;
-/**
- * Ceiling on the region, not a reservation: `ensureSceneArenaCapacity` grows the
- * arena to whatever the publication actually carries, and this is the sanity
- * bound above it. Sized on the *derived* sample budget rather than the document
- * one because a described ground (`TerrainProcedural`) is built at the lattice
- * being drawn — 1153x769 at the first refinement rung, which the document
- * budget would have rejected as a heightfield it was never being asked to hold.
- */
-export const SVO_DRY_SCENE_TERRAIN_ARENA_MAXIMUM_BYTES =
-  svoDrySceneTerrainRegionBytes(MAX_TERRAIN_DERIVED_GRID_SAMPLES);
 /**
  * How many aggregate clusters one scene may publish.
  *
@@ -410,10 +353,8 @@ export const SVO_DRY_SCENE_FIELD_PROGRAM_ARENA_SIZE_BYTES =
 /**
  * One stable renderer-owned storage allocation for every authored scene record.
  *
- * Written as a running offset rather than as nested alignment calls: the terrain
- * region's offset used to be four `alignDrySceneArenaBytes` calls deep and the
- * total five, which meant inserting a region between two of them was an edit to
- * every line below it.
+ * Written as a running offset so adding a fixed publication region does not
+ * require hand-updating every following byte offset.
  */
 const drySceneArenaRegions = (() => {
   let offsetBytes = 0;
@@ -427,10 +368,9 @@ const drySceneArenaRegions = (() => {
   const glassOffsetBytes = region(SVO_DRY_SCENE_GLASS_ARENA_SIZE_BYTES);
   const clusterOffsetBytes = region(SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES);
   const fieldProgramOffsetBytes = region(SVO_DRY_SCENE_FIELD_PROGRAM_ARENA_SIZE_BYTES);
-  const terrainOffsetBytes = region(SVO_DRY_SCENE_TERRAIN_HEADER_BYTES);
   return {
     materialOffsetBytes, primitiveOffsetBytes, glassOffsetBytes, clusterOffsetBytes, fieldProgramOffsetBytes,
-    terrainOffsetBytes, sizeBytes: offsetBytes,
+    sizeBytes: offsetBytes,
   };
 })();
 
@@ -442,20 +382,8 @@ export const SVO_DRY_SCENE_ARENA_LAYOUT = Object.freeze({
   clusterOffsetBytes: drySceneArenaRegions.clusterOffsetBytes,
   /** Fixed-capacity field-program tape blocks, addressed by a record's word-13 reference. */
   fieldProgramOffsetBytes: drySceneArenaRegions.fieldProgramOffsetBytes,
-  terrainOffsetBytes: drySceneArenaRegions.terrainOffsetBytes,
-  /**
-   * The allocation a scene with no sculpted terrain needs. Every fixed-capacity
-   * region plus a zeroed heightfield header; the samples themselves are sized
-   * per scene by `svoDrySceneArenaSizeBytes`, because reserving the 262 144-sample
-   * ceiling would cost a megabyte that no authored scene has ever wanted and
-   * would be uploaded as zeroes on every publication that has no grid at all.
-   */
   sizeBytes: drySceneArenaRegions.sizeBytes,
 } as const);
-/** Total arena bytes that hold a terrain region of `terrainBytes`, header included. */
-export const svoDrySceneArenaSizeBytes = (terrainBytes: number): number => alignDrySceneArenaBytes(
-  SVO_DRY_SCENE_ARENA_LAYOUT.terrainOffsetBytes + Math.max(SVO_DRY_SCENE_TERRAIN_HEADER_BYTES, terrainBytes),
-);
 export const SVO_DRY_RIGID_MOTION_UNIFORM_BYTES = SVO_DRY_RIGID_MOTION_CAPACITY * SVO_PRIMITIVE_MOTION_STRIDE_BYTES;
 export const SVO_DRY_THICK_GLASS_BINDER_VERSION = 1;
 export const SVO_DRY_THICK_GLASS_ARENA_LAYOUT = Object.freeze({
@@ -572,102 +500,6 @@ export function packSparseVoxelDrySceneThickGlassArena(
   return arena;
 }
 
-/** Everything the WGSL sampler recovers from a packed heightfield region. */
-export interface SvoDrySceneTerrainHeightfield {
-  origin_m: { x: number; z: number };
-  spacing_m: number;
-  size: { nx: number; nz: number };
-  minimum_m: number;
-  maximum_m: number;
-  slopeBound: number;
-  heights_m: Float32Array;
-}
-
-/**
- * Pack a sculpted grid into the arena's terrain region.
- *
- * Memoized on the grid object because publication runs on every scene revision
- * while the vessel is baked once: the hero pond is 289 x 193 samples, and
- * copying a quarter of a megabyte per republication to produce a byte-identical
- * result is exactly the sort of cost that only shows up as jank.
- */
-const terrainHeightfieldRegionCache = new WeakMap<TerrainGrid, Uint32Array<ArrayBuffer>>();
-export function packSvoDrySceneTerrainHeightfield(grid: TerrainGrid | undefined): Uint32Array<ArrayBuffer> | undefined {
-  if (!grid) return undefined;
-  const cached = terrainHeightfieldRegionCache.get(grid);
-  if (cached) return cached;
-  const { nx, nz } = grid.size;
-  if (!Number.isInteger(nx) || !Number.isInteger(nz) || nx < MIN_TERRAIN_GRID_SIZE || nz < MIN_TERRAIN_GRID_SIZE) {
-    throw new RangeError(`Sculpted terrain region needs at least ${MIN_TERRAIN_GRID_SIZE} samples per axis`);
-  }
-  // The *derived* budget, not the document one. `MAX_TERRAIN_GRID_SAMPLES` is
-  // what a scene may carry as JSON; a ground the document only describes is
-  // built at the lattice in use (`terrainSampleGrid`) and can legitimately be
-  // finer than any document would be allowed to spell out — 1153x769 at the
-  // first refinement rung, which is where the coverage holes were.
-  if (nx * nz > MAX_TERRAIN_DERIVED_GRID_SAMPLES) throw new RangeError(`Sculpted terrain region exceeds ${MAX_TERRAIN_DERIVED_GRID_SAMPLES} samples`);
-  if (grid.heights_m.length !== nx * nz) throw new RangeError("Sculpted terrain region heights must be row-major nx * nz samples");
-  if (!(grid.spacing_m > 0) || !Number.isFinite(grid.spacing_m)) throw new RangeError("Sculpted terrain region spacing must be positive and finite");
-  const extent = terrainGridExtent(grid);
-  const buffer = new ArrayBuffer(svoDrySceneTerrainRegionBytes(nx * nz));
-  const words = new Uint32Array(buffer), floats = new Float32Array(buffer);
-  floats.set([grid.origin_m.x, grid.origin_m.z, grid.spacing_m, extent.slopeBound], 0);
-  words.set([nx, nz], 4);
-  floats.set([extent.minimum_m, extent.maximum_m], 6);
-  floats.set(grid.heights_m, SVO_DRY_SCENE_TERRAIN_HEADER_WORDS);
-  terrainHeightfieldRegionCache.set(grid, words);
-  return words;
-}
-
-/**
- * CPU mirror of the WGSL header decode. A zeroed header is the "no sculpted
- * terrain" encoding, so this returns undefined for it rather than throwing.
- */
-export function unpackSvoDrySceneTerrainHeightfield(
-  packed: Uint32Array,
-): SvoDrySceneTerrainHeightfield | undefined {
-  if (packed.length < SVO_DRY_SCENE_TERRAIN_HEADER_WORDS) return undefined;
-  const floats = new Float32Array(packed.buffer, packed.byteOffset, packed.length);
-  const nx = packed[4], nz = packed[5];
-  if (nx < MIN_TERRAIN_GRID_SIZE || nz < MIN_TERRAIN_GRID_SIZE) return undefined;
-  if (packed.length !== SVO_DRY_SCENE_TERRAIN_HEADER_WORDS + nx * nz) {
-    throw new RangeError(`Sculpted terrain region declares ${nx}x${nz} samples but carries ${packed.length - SVO_DRY_SCENE_TERRAIN_HEADER_WORDS}`);
-  }
-  return {
-    origin_m: { x: floats[0], z: floats[1] },
-    spacing_m: floats[2],
-    slopeBound: floats[3],
-    size: { nx, nz },
-    minimum_m: floats[6],
-    maximum_m: floats[7],
-    heights_m: floats.slice(SVO_DRY_SCENE_TERRAIN_HEADER_WORDS),
-  };
-}
-
-/**
- * What a `terrainReference` denotes: the u32 word offset of the heightfield
- * region inside the scene arena.
- *
- * The SVO ABI has carried a `terrainHeightfield` primitive kind, an
- * `externalTerrain` flag and a `terrainReference` word since it was written,
- * with nothing to point the reference at and therefore no producer. The arena
- * region is that thing — a shader handed this number can read the header and
- * the samples with no further indirection, exactly as the sampler above does —
- * so the reference is the offset itself rather than an index into a table that
- * would have to exist first.
- */
-export const SVO_DRY_SCENE_TERRAIN_REFERENCE = SVO_DRY_SCENE_ARENA_LAYOUT.terrainOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;
-
-/**
- * The scene's sculpted ground as an ordinary SVO primitive descriptor.
- *
- * This is the first producer of the kind. It does not yet reach the sparse
- * scene voxelizer — that consumer only knows the six finite proxy shapes, and
- * `sparseScenePrimitiveForSvoDescriptor` still refuses terrain outright — so
- * what this closes today is the ABI half: a heightfield can be named, packed,
- * unpacked and evaluated through the same record every other primitive uses,
- * against the same arena region the renderer already uploads.
- */
 /**
  * Word offset of aggregate cluster block `index` in the scene arena.
  *
@@ -961,53 +793,11 @@ export function svoDrySceneClusterResolver(packed: Uint32Array | undefined): Svo
   };
 }
 
-export function svoDrySceneTerrainPrimitive(identity: {
-  primitiveId: number;
-  materialId: number;
-  ownerId?: number;
-  normalEpsilon_m?: number;
-}): SvoTerrainHeightfieldPrimitive {
-  return {
-    kind: "terrain-heightfield",
-    primitiveId: identity.primitiveId,
-    materialId: identity.materialId,
-    ...(identity.ownerId === undefined ? {} : { ownerId: identity.ownerId }),
-    terrainReference: SVO_DRY_SCENE_TERRAIN_REFERENCE,
-    normalEpsilon_m: identity.normalEpsilon_m ?? 0.02,
-  };
-}
-
-/**
- * Resolve a packed region back into something `sampleSvoPrimitive` can query,
- * which is the CPU half of what the GPU does from the same bytes.
- *
- * The reconstruction carries no analytic fields because it cannot and must not:
- * `terrainHeightAt` short-circuits to the grid whenever one is present, so a
- * base height recovered from somewhere else could only ever disagree with the
- * samples. A reference that does not name this region resolves to nothing
- * rather than to a plausible-looking flat plane.
- */
-export function svoDrySceneTerrainResolver(packed: Uint32Array | undefined): SvoTerrainResolver {
-  const region = packed && unpackSvoDrySceneTerrainHeightfield(packed);
-  const terrain: TerrainDescription | undefined = region && {
-    baseHeight_m: 0,
-    features: [],
-    grid: {
-      kind: "grid",
-      origin_m: region.origin_m,
-      spacing_m: region.spacing_m,
-      size: region.size,
-      heights_m: [...region.heights_m],
-    },
-  };
-  return (terrainReference: number) => terrainReference === SVO_DRY_SCENE_TERRAIN_REFERENCE ? terrain : undefined;
-}
-
 /** Packed dry-scene parameters. */
 export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
   sizeBytes: 624,
-  terrainWordOffset: 24,
-  terrainMaterialWordOffset: 28,
+  glassWordOffset: 24,
+  reservedSceneWordOffset: 28,
   materialPublicationWordOffset: 32,
   nodeMipWordOffset: 36,
   nodeMipAtlasWordOffset: 40,
@@ -1113,49 +903,6 @@ export const SVO_DRY_NODE_MIP_PUBLICATION_MODE = Object.freeze({
   pageValidity: 2,
 } as const);
 
-export const SVO_TERRAIN_FAST_MIN_VERTICAL = 0.35;
-export const SVO_TERRAIN_FAST_BRACKET_STEPS = 2;
-export const SVO_TERRAIN_FAST_REFINEMENTS = 5;
-export const SVO_TERRAIN_FALLBACK_STEPS = 20;
-export const SVO_TERRAIN_FALLBACK_REFINEMENTS = 8;
-/** Includes four terrain-height evaluations used by the central-difference normal. */
-export const SVO_TERRAIN_FAST_MAX_HEIGHT_EVALUATIONS = 12;
-/**
- * Steps a sculpted heightfield march may take before it gives up on converging.
- *
- * The bracket above cannot be reused for a sculpted grid and the reason is not
- * tuning. It samples the field at *three* points across the whole entry-to-floor
- * interval and refines the first sign change it finds, which is sound only when
- * the ground varies slowly enough that no feature fits between two of those
- * samples. The hero pond's coping is a 5.5 cm bullnose about 11 cm across on a
- * 6.25 mm lattice: over a metre-long interval it lives inside a tenth of one
- * bracket step, so the rim is not aliased, it is *invisible* — the ray samples
- * above it and below it and concludes the ground is where the basin is.
- *
- * What replaces it is a march that provably cannot skip anything. A grid carries
- * a Lipschitz bound on its own slope (`terrainGridExtent`), so the field
- * y - h(p(t)) changes by at most `|rd.y| + slopeBound * |rd.xz|` per metre of
- * ray, and advancing by the current |field| divided by that quantity can never
- * cross a root. The step is large over the flat plaster and collapses to
- * millimetres against the rim, without either being tuned: it is the Nyquist
- * limit `spacing_m` expressed as a bound on the surface rather than as a fixed
- * step, which is both cheaper and stricter than marching at `spacing_m`.
- *
- * The count is what a nearly-vertical ray never approaches and a 6-degree
- * grazing ray still exhausts. It is a budget, not a correctness parameter:
- * exhaustion falls through to bisection of the interval the march has already
- * proven the surface lies in, so the failure mode is a hit resolved late rather
- * than a hole in the ground.
- */
-export const SVO_TERRAIN_GRID_MARCH_STEPS = 64;
-export const SVO_TERRAIN_GRID_REFINEMENTS = 8;
-/**
- * Convergence window as a fraction of the grid spacing. A quarter of a sample
- * is below anything the bake can express, so tightening it buys accuracy the
- * heightfield does not have while costing steps that are geometric in it.
- */
-export const SVO_TERRAIN_GRID_EPSILON_SAMPLES = 0.25;
-/** Normal-projected sparse-cell widths used to offset the hard shadow ray. */
 /** Reversed-Z near plane the dry pass writes device depth against. */
 export const SVO_DRY_SCENE_REVERSED_Z_NEAR_M = 0.01;
 export const SVO_DRY_SCENE_SHADOW_BIAS_CELLS = 0.02;
@@ -1318,202 +1065,6 @@ export function directionalLightSceneExitDistance(
   return Number.isFinite(exit) ? Math.max(0, exit) : 0;
 }
 
-export interface SvoTerrainRayHit {
-  t_m: number;
-  position_m: { x: number; y: number; z: number };
-  normal: { x: number; y: number; z: number };
-  /**
-   * Which of the three solvers resolved the hit. `sculpted` is the Lipschitz
-   * march a `TerrainGrid` takes; the other two are the analytic bracket and its
-   * grazing-ray fallback.
-   */
-  solver: "fast" | "fallback" | "sculpted";
-  heightEvaluations: number;
-}
-
-/**
- * Lipschitz-bounded march over a sculpted grid, and the CPU oracle for
- * `traceTerrainHeightfield` in the WGSL below.
- *
- * See `SVO_TERRAIN_GRID_MARCH_STEPS` for why a sculpted vessel cannot be traced
- * by the analytic bracket. The two properties this relies on are that the grid's
- * slope bound makes `|field| / rate` a step that provably cannot cross a root,
- * and that below the grid's lowest sample the ray is under every column the
- * heightfield can express — so the interval ends there, and ends with the field
- * non-positive. That second fact is what turns exhausting the step budget into
- * a bisection rather than a dropped pixel.
- */
-function marchSvoSculptedTerrain(
-  terrain: TerrainDescription,
-  grid: TerrainGrid,
-  origin_m: { x: number; y: number; z: number },
-  rd: { x: number; y: number; z: number },
-  ceiling: number,
-  sceneScale_m: number,
-  normalEpsilon_m: number,
-): SvoTerrainRayHit | undefined {
-  const extent = terrainGridExtent(grid);
-  let t0 = 0.005;
-  if (origin_m.y > ceiling) {
-    if (rd.y >= -0.0005) return undefined;
-    t0 = (ceiling - origin_m.y) / rd.y;
-  }
-  const span = t0 + 10 * sceneScale_m;
-  let t1 = span;
-  let bracketed = false;
-  if (rd.y < -0.0005) {
-    const lowestT = (extent.minimum_m - origin_m.y) / rd.y;
-    if (lowestT > t0 && lowestT <= span) { t1 = lowestT; bracketed = true; }
-  } else if (rd.y > 0.0005) {
-    t1 = Math.min(t1, Math.max(t0, (ceiling - origin_m.y) / rd.y));
-  }
-  if (!(t1 > t0)) return undefined;
-
-  const pointAt = (t: number) => ({ x: origin_m.x + rd.x * t, y: origin_m.y + rd.y * t, z: origin_m.z + rd.z * t });
-  let heightEvaluations = 0;
-  const fieldAt = (t: number) => {
-    const point = pointAt(t);
-    heightEvaluations += 1;
-    return point.y - terrainHeightAt(terrain, point.x, point.z);
-  };
-  const surfaceHit = (t_m: number): SvoTerrainRayHit => {
-    const position_m = pointAt(t_m);
-    heightEvaluations += 4;
-    return { t_m, position_m, normal: terrainNormalAt(terrain, position_m.x, position_m.z, normalEpsilon_m), solver: "sculpted", heightEvaluations };
-  };
-
-  const rate = Math.max(1e-4, Math.abs(rd.y) + extent.slopeBound * Math.hypot(rd.x, rd.z));
-  const epsilon = Math.max(1e-6, SVO_TERRAIN_GRID_EPSILON_SAMPLES * grid.spacing_m);
-  let t = t0, lastOutside = t0, lastOutsideField = 0;
-  for (let step = 0; step < SVO_TERRAIN_GRID_MARCH_STEPS && t <= t1; step += 1) {
-    const field = fieldAt(t);
-    // The acceptance window is vertical, and a vertical tolerance is a long one
-    // along a shallow ray: a quarter-sample of clearance is 3 cm of ray at six
-    // degrees. One secant step on the two samples that closed the window costs a
-    // single evaluation, removes that amplification wherever the surface is
-    // locally well conditioned, and is discarded rather than trusted where it is
-    // not — which is why it is guarded on the residual instead of iterated.
-    if (Math.abs(field) <= epsilon) {
-      if (!(t > lastOutside)) return surfaceHit(t);
-      const slope = (field - lastOutsideField) / (t - lastOutside);
-      if (!(Math.abs(slope) > 1e-6)) return surfaceHit(t);
-      const corrected = Math.min(t1, Math.max(t0, t - field / slope));
-      return Math.abs(fieldAt(corrected)) < Math.abs(field) ? surfaceHit(corrected) : surfaceHit(t);
-    }
-    lastOutside = t;
-    lastOutsideField = field;
-    t += Math.abs(field) / rate;
-  }
-  // Bisection is only sound where the march left the surface strictly ahead of
-  // it and the interval is known to end inside solid, so a ray that started
-  // under the ground reports the miss the analytic paths report as well.
-  if (!bracketed || !(lastOutsideField > 0)) return undefined;
-  let a = lastOutside, b = t1;
-  for (let refinement = 0; refinement < SVO_TERRAIN_GRID_REFINEMENTS; refinement += 1) {
-    const middle = 0.5 * (a + b);
-    if (fieldAt(middle) > 0) a = middle; else b = middle;
-  }
-  return surfaceHit(0.5 * (a + b));
-}
-
-/** CPU mirror of the bounded WGSL terrain bracket/refinement path. */
-export function intersectSvoTerrainHeightfield(
-  terrain: TerrainDescription | undefined,
-  origin_m: { x: number; y: number; z: number },
-  direction: { x: number; y: number; z: number },
-  sceneScale_m: number,
-  normalEpsilon_m = 0.02,
-): SvoTerrainRayHit | undefined {
-  if (!terrain) return undefined;
-  const directionLength = Math.hypot(direction.x, direction.y, direction.z);
-  if (!(directionLength > 1e-9) || !(sceneScale_m > 0) || !Number.isFinite(sceneScale_m)) return undefined;
-  const rd = { x: direction.x / directionLength, y: direction.y / directionLength, z: direction.z / directionLength };
-  const ceiling = terrainCeiling(terrain);
-  // `terrainSampleGrid` rather than `terrain.grid`: a described ground is a
-  // heightfield too, and this mirror must take the sculpted bracket for it or it
-  // would trace the eight-feature closed form — a flat plane at `baseHeight_m`.
-  const grid = terrainSampleGrid(terrain);
-  if (grid) return marchSvoSculptedTerrain(terrain, grid, origin_m, rd, ceiling, sceneScale_m, normalEpsilon_m);
-  let t0 = 0.005;
-  if (origin_m.y > ceiling) {
-    if (rd.y >= -0.0005) return undefined;
-    t0 = (ceiling - origin_m.y) / rd.y;
-  }
-  let t1 = t0 + 10 * sceneScale_m;
-  if (rd.y < -0.0005) t1 = Math.min(t1, (-0.02 - origin_m.y) / rd.y);
-  else if (rd.y > 0.0005) t1 = Math.min(t1, Math.max(t0, (ceiling - origin_m.y) / rd.y));
-  if (!(t1 > t0)) return undefined;
-  const pointAt = (t: number) => ({ x: origin_m.x + rd.x * t, y: origin_m.y + rd.y * t, z: origin_m.z + rd.z * t });
-  let heightEvaluations = 0;
-  const fieldAt = (t: number) => {
-    const point = pointAt(t);
-    heightEvaluations += 1;
-    return point.y - terrainHeightAt(terrain, point.x, point.z);
-  };
-  const surfaceHit = (t_m: number, solver: SvoTerrainRayHit["solver"]): SvoTerrainRayHit => {
-    const position_m = pointAt(t_m);
-    heightEvaluations += 4;
-    return { t_m, position_m, normal: terrainNormalAt(terrain, position_m.x, position_m.z, normalEpsilon_m), solver, heightEvaluations };
-  };
-  const initialField = fieldAt(t0);
-  const ordinaryRay = Math.abs(rd.y) >= SVO_TERRAIN_FAST_MIN_VERTICAL;
-  if (Math.abs(initialField) <= 1e-4) return surfaceHit(t0, ordinaryRay ? "fast" : "fallback");
-
-  if (ordinaryRay) {
-    let previousT = t0, previousField = initialField;
-    for (let bracket = 1; bracket <= SVO_TERRAIN_FAST_BRACKET_STEPS; bracket += 1) {
-      const candidateT = t0 + (t1 - t0) * bracket / SVO_TERRAIN_FAST_BRACKET_STEPS;
-      const candidateField = fieldAt(candidateT);
-      if (Math.abs(candidateField) <= 1e-4) return surfaceHit(candidateT, "fast");
-      if ((previousField < 0) !== (candidateField < 0)) {
-        let a = previousT, b = candidateT, fieldA = previousField, fieldB = candidateField;
-        let bestT = Math.abs(fieldA) < Math.abs(fieldB) ? a : b;
-        let bestAbsoluteField = Math.min(Math.abs(fieldA), Math.abs(fieldB));
-        for (let refinement = 0; refinement < SVO_TERRAIN_FAST_REFINEMENTS; refinement += 1) {
-          const span = b - a;
-          const secant = b - fieldB * span / (fieldB - fieldA);
-          const t = Math.max(a + span * 0.05, Math.min(b - span * 0.05, Number.isFinite(secant) ? secant : 0.5 * (a + b)));
-          const field = fieldAt(t), absoluteField = Math.abs(field);
-          if (absoluteField < bestAbsoluteField) { bestAbsoluteField = absoluteField; bestT = t; }
-          if (absoluteField <= 1e-4) return surfaceHit(t, "fast");
-          if ((fieldA < 0) === (field < 0)) { a = t; fieldA = field; }
-          else { b = t; fieldB = field; }
-        }
-        if (bestAbsoluteField <= 1e-4) return surfaceHit(bestT, "fast");
-        break;
-      }
-      previousT = candidateT;
-      previousField = candidateField;
-    }
-  }
-
-  let previousT = t0;
-  let previousField = initialField;
-  let closestT = t0;
-  let closestAbsoluteField = Math.abs(initialField);
-  for (let iteration = 1; iteration <= SVO_TERRAIN_FALLBACK_STEPS; iteration += 1) {
-    const t = t0 + (t1 - t0) * (iteration / SVO_TERRAIN_FALLBACK_STEPS) ** 1.4;
-    const field = fieldAt(t);
-    const absoluteField = Math.abs(field);
-    if (absoluteField < closestAbsoluteField) { closestAbsoluteField = absoluteField; closestT = t; }
-    if ((previousField < 0) !== (field < 0)) {
-      let a = previousT, b = t, fieldA = previousField;
-      for (let refinement = 0; refinement < SVO_TERRAIN_FALLBACK_REFINEMENTS; refinement += 1) {
-        const middle = 0.5 * (a + b), middleField = fieldAt(middle);
-        if ((fieldA < 0) === (middleField < 0)) { a = middle; fieldA = middleField; }
-        else b = middle;
-      }
-      return surfaceHit(0.5 * (a + b), "fallback");
-    }
-    if (absoluteField <= 1e-4) return surfaceHit(t, "fallback");
-    previousT = t;
-    previousField = field;
-  }
-  // Tangent rays do not change sign. Accept only a tightly bounded near-zero
-  // sample so near-grazing misses cannot turn into floating terrain specks.
-  return closestAbsoluteField <= 5e-4 ? surfaceHit(closestT, "fallback") : undefined;
-}
-
 /**
  * Structural fields an SVO-accelerated primary ray needs before it may leave the camera.
  * Primary and secondary traversal both refuse to consume the SVO until the
@@ -1648,18 +1199,6 @@ export function sparseVoxelDrySceneContractFailure(
   const glassBytes = scene.glassRecords?.byteLength ?? 0;
   if (glassBytes % SVO_THIN_GLASS_RECORD_STRIDE_BYTES !== 0) return "thin-glass arena stride is invalid";
   if (glassBytes / SVO_THIN_GLASS_RECORD_STRIDE_BYTES > SVO_SCENE_GLASS_MAXIMUM_PANES) return "thin-glass arena capacity is exceeded";
-  if (scene.terrainMaterialMetadata !== undefined
-    && scene.terrainMaterialMetadata.byteLength !== SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES) {
-    return "terrain material record is invalid";
-  }
-  if (scene.terrainHeightfield !== undefined) {
-    if (scene.terrainHeightfield.byteLength > SVO_DRY_SCENE_TERRAIN_ARENA_MAXIMUM_BYTES) return "terrain heightfield capacity is exceeded";
-    try {
-      if (!unpackSvoDrySceneTerrainHeightfield(scene.terrainHeightfield)) return "terrain heightfield header is invalid";
-    } catch {
-      return "terrain heightfield header is invalid";
-    }
-  }
   if (source.structural.fields.topology.residency === "unavailable") return "topology field is unavailable";
   if (source.structural.fields.sceneGeometry.residency === "unavailable") return "scene geometry field is unavailable";
   if (source.structural.fields.materialOwner.residency === "unavailable") return "material-owner payload field is unavailable";
@@ -3370,6 +2909,7 @@ fn traceLeafPayloadVisibilityFineInterval(ray:SvoVisibilityRay,tMin_m:f32,hit:Sv
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(cellMinimum))||any(cell>=vec3i(cellMaximum))||entry>intervalExit||entry>ray.tMax_m){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,workItems,DRY_MISS);}if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);if(payloadIndex>=dryVoxelCapacity()){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
+    ${cellSolidGateWGSL("payloadIndex", "let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}if(dryMaterialThinDielectric(material,materialId)){let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let normal=dryVoxelFaceNormal(cellBounds,ray.origin_m+ray.direction*entry);let cellExit=min(nextT.x,min(nextT.y,nextT.z));return dryVisibilityTransmissionStep(0u,0u,workItems,min(max(cellExit,entry),ray.tMax_m),dryThinDielectricTransmittance(material,normal,ray.direction));}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,entry);")}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
@@ -3635,7 +3175,7 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
 ` : "";
   const voxelLightCacheShortcutWGSL = voxelLightCache ? /* wgsl */ `let cachedVoxelVisibility=dryVoxelLightVisibility(position,geometricNormal);if(cachedVoxelVisibility.y>0.0){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);let raw=select(cachedVoxelVisibility.x,0.0,rigidBlocker.t<ray.tMax_m);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}if(dryCurrentLightSlot==0u&&(dryVoxelLight.control.w&2u)!=0u){dryCurrentLightSlot=0xffffffffu;}` : "";
   const prepassResolveCallWGSL = reduced
-    ? /* wgsl */ `dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryPrepassExactEdgeState=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){if(dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}else{dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;}}${voxelLightCache ? "if((dryVoxelLight.control.w&2u)!=0u){dryPrepassRadianceState=0u;dryPrepassGiState=0u;}" : ""}`
+    ? /* wgsl */ `dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryPrepassExactEdgeState=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&!dryHitThinDielectric(opaque)&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){if(dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}else{dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;}}${voxelLightCache ? "if((dryVoxelLight.control.w&2u)!=0u){dryPrepassRadianceState=0u;dryPrepassGiState=0u;}" : ""}`
     : "";
   const prepassShadowShortcutWGSL = reduced
     ? /* wgsl */ `if(dryPrepassState==1u&&dryCurrentLightSlot<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u){let prepassRigidBlocked=anyBodyBlockerIgnoring(ray.origin_m,towardLight,ownerId,ray.tMax_m);let raw=select(dryPrepassChannel(1u+dryCurrentLightSlot),0.0,prepassRigidBlocked);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}`
@@ -3664,7 +3204,7 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
     : "";
   const splitVisibilityGlassDiscoveryWGSL = rasterGlassDiscovery
     ? /* wgsl */ `let coordinate=vec2i(input.position.xy);textureStore(drySplitGeometryWrite,coordinate,vec4f(opaque.normal,opaque.t));let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);textureStore(drySplitOpaqueIdentityWrite,coordinate,vec4u(opaque.materialId,opaqueMetadata,0u,0u));let generation=dryPublicationGeneration();`
-    : /* wgsl */ `let glass=traceGlass(ro,rd,0.0,opaque.t,true);let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;let coordinate=vec2i(input.position.xy);textureStore(drySplitGeometryWrite,coordinate,vec4f(opaque.normal,opaque.t));let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);let glassKey=select(0u,glass.recordIndex+1u,glassVisible);let packedOpaqueMaterial=(opaque.materialId&0x8000ffffu)|((glassKey&0x1ffu)<<16u);textureStore(drySplitOpaqueIdentityWrite,coordinate,vec4u(packedOpaqueMaterial,opaqueMetadata,0u,0u));let generation=dryPublicationGeneration();`;
+    : /* wgsl */ `let glass=traceGlass(ro,rd,0.0,opaque.t);let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;let coordinate=vec2i(input.position.xy);textureStore(drySplitGeometryWrite,coordinate,vec4f(opaque.normal,opaque.t));let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);let glassKey=select(0u,glass.recordIndex+1u,glassVisible);let packedOpaqueMaterial=(opaque.materialId&0x8000ffffu)|((glassKey&0x1ffu)<<16u);textureStore(drySplitOpaqueIdentityWrite,coordinate,vec4u(packedOpaqueMaterial,opaqueMetadata,0u,0u));let generation=dryPublicationGeneration();`;
   const splitVisibilityGlassReturnWGSL = rasterGlassDiscovery
     ? ""
     : /* wgsl */ `if(glassVisible){let record=dryGlassPane(glass.recordIndex);let media=dryMediumPair(rd,glass.hit.geometricNormal,DRY_MEDIUM_GLASS);let targets=svoGBufferSurface(vec3f(0.0),glass.hit.t_m,glass.hit.geometricNormal,glass.hit.geometricNormal,vec4u(svoThinGlassMaterialId(record),svoThinGlassOwnerId(record),media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_GLASS),SVO_FEATURE_SMOOTH);return drySplitVisibilityOut(targets,dryHardwareDepth(glass.hit.t_m,rd,forward));}`;
@@ -4497,7 +4037,7 @@ fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
       ||dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u){return vec4f(gi.radiance,select(-1.0,gi.visibility,gi.valid!=0u));}
     if(gi.valid==0u){return vec4f(0.0,0.0,0.0,-1.0);}dryPrepassGi=vec4f(gi.radiance,gi.visibility);dryPrepassGiState=1u;
   }
-  return vec4f(shadeDryOpaque(opaque,ro,rd),opaque.t);
+  return vec4f(shadeDrySurface(opaque,ro,rd),opaque.t);
 }
 ` : "";
   const splitEntryWGSL = split ? /* wgsl */ `struct DryVisibilityOut{
@@ -4541,14 +4081,14 @@ fn dryPrimarySeamHit(sample:DryPrimarySeamSample)->DryHit{
 @fragment fn dryPrimarySeamMain(input:VertexOut)->DryVisibilityOut{
   let coordinate=vec2i(input.position.xy);let seam=dryPrimarySeamSample(coordinate);if(seam.valid==0u){discard;}
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
-  let opaque=dryPrimarySeamHit(seam);let generation=dryPublicationGeneration();let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
+  let opaque=dryPrimarySeamHit(seam);let generation=dryPublicationGeneration();let voxelGlass=dryHitThinDielectric(opaque);let media=dryMediumPair(rd,opaque.normal,select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_GLASS,voxelGlass));let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let producer=select(SVO_GBUFFER_PRODUCER_TRACED,SVO_GBUFFER_PRODUCER_GLASS,voxelGlass);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(producer);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
   return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));
 }
 @fragment fn dryVisibilityMain(input:VertexOut)->DryVisibilityOut{
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
   let opaque=${splitPrimaryTraceWGSL};${splitVisibilityGlassDiscoveryWGSL}
   ${splitVisibilityGlassReturnWGSL}
-  if(opaque.t<DRY_MISS){let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
+  if(opaque.t<DRY_MISS){let voxelGlass=dryHitThinDielectric(opaque);let media=dryMediumPair(rd,opaque.normal,select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_GLASS,voxelGlass));let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let producer=select(SVO_GBUFFER_PRODUCER_TRACED,SVO_GBUFFER_PRODUCER_GLASS,voxelGlass);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(producer);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
   return drySplitVisibilityOut(svoGBufferMiss(vec3f(0.0),0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
 }
 ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@location(0) vec4f{
@@ -4563,7 +4103,7 @@ ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@locati
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
   let coordinate=vec2i(input.position.xy);var geometry=drySplitGeometryAt(coordinate);var opaqueIdentity=drySplitIdentityAt(coordinate);if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.silhouetteRefinement}u)!=0u){let seam=dryPrimarySeamSample(coordinate);if(seam.valid!=0u){geometry=seam.geometry;opaqueIdentity=vec4u(seam.identity,0u,0u);}}var opaque=missHit();
   let packedOpaqueMaterial=opaqueIdentity.x;${splitOpaqueMaterialDecodeWGSL}if(geometry.w<DRY_MISS){let metadata=opaqueIdentity.y;opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,metadata&0xffffu,(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u));}
-  ${prepassResolveCallWGSL}var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}${reduced ? `if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&dryPrepassRadianceState==1u&&glassKey==0u){discard;}` : ""}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.terrain.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;if(glassVisible){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
+  ${prepassResolveCallWGSL}var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}${reduced ? `if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&dryPrepassRadianceState==1u&&glassKey==0u){discard;}` : ""}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.glass.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDrySurface(opaque,ro,rd);var depth=opaque.t;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;if(glassVisible){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
 @fragment fn drySkyLightingMain(input:VertexOut)->@location(0) vec4f{
@@ -4573,7 +4113,7 @@ ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@locati
   // but without raster glass discovery the glass key is packed into that very
   // plane, so there it has to be read after all.
   ${rasterGlassDiscovery ? "" : "let packedOpaqueMaterial=drySplitIdentityAt(coordinate).x;"}
-  var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.terrain.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;
+  var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.glass.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDrySurface(opaque,ro,rd);var depth=opaque.t;
   if(glass.hit.valid!=0u&&glass.hit.t_m<opaque.t){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
@@ -4822,24 +4362,21 @@ ${svoTetrahedralRadianceWGSL}
 ${svoTetrahedralRadianceConeCoreWGSL}
 ${svoFluidCoverageWGSL}
 // highlight is (firstOwner, lastOwner, strength, falloff) for the object under
-// the editor cursor, appended after the terrain mirror so no other shader's view
-// of this buffer moves. A range rather than one id because a described object is
+// the editor cursor, appended without moving any earlier uniform lane. A range
+// rather than one id because a described object is
 // several primitives — a lantern is three, a grown tree is thirty — and they are
 // contiguous in owner order by construction. See lib/scenery-expand.ts.
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16>, highlight:vec4f }
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, reservedSceneMeta:vec4f, reservedSceneLanes:array<vec4f,16>, highlight:vec4f }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 struct DryParams {
   mapping:SvoMapping,
   metadata:vec4u,
   lightDirection:vec4f,
   lightColor:vec4f,
-  // x: terrain material ID; y: pane count; zw: post-compositor-owned pane ID range.
-  terrain:vec4u,
-  // The terrain colour policy's parameters. Nothing in this module reads them
-  // any more — surface colour comes from the PBR record — but the lane is still
-  // written by \`packDryParams\` and the uniform's layout is a published ABI, so
-  // it stays as reserved space rather than shifting every field after it.
-  terrainMaterialReserved:vec4f,
+  // x: reserved; y: environment/SolidWorld face-worklist count; zw: reserved.
+  glass:vec4u,
+  // Reserved ABI lane.
+  reservedScene:vec4f,
   // x: dense slot count; y: table revision; z: 96-byte stride; w: bounded contact-visibility gate.
   materialPublication:vec4u,
   // x: stable address-plan generation; y: directory pages; z: levels; w: publication mode.
@@ -5261,9 +4798,8 @@ fn dryDirectionalRayLeavesDomain(maximumDistance:f32)->bool{return !(maximumDist
 //
 // The heightfield is still authored and still voxelised — it is the largest
 // single voxel population in the hero lane — so what was deleted is a duplicate
-// surface, not the ground. intersectSvoTerrainHeightfield in the TypeScript
-// above survives because editor hover picks against the authored heightfield,
-// which is a question about the document rather than about the frame.
+// surface, not the ground. Editor hover resolves authored terrain separately;
+// that document query is not part of this renderer.
 
 fn bodyHit(ro:vec3f,rd:vec3f,body:BodyGPU)->DryHit {
   let localOrigin=qinvWxyz(body.orientation,ro-body.positionRadius.xyz);
@@ -5431,15 +4967,15 @@ ${macroHddaPrimaryWGSL}
 // Measured on the hero at 800x460, cone scale 0.5, all arms interleaved in one
 // process (serialized submit-to-fence): 292.5 -> 222.0 ms at 501 records and
 // 1564.4 -> 546.3 ms at 5 039. It is the single largest term in the 10x gap.
-fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
+fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
   // An unpublished scene has no voxels, and voxels are the only surface. Drawing
   // it analytically here would hide exactly the failure worth seeing: a frame
   // that looks perfect because the voxel path never ran. Miss instead and let
   // the existing publication tripwire say why.
   if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){return missHit();}
-  ${analyticPrimaryUnbounded ? "let seeded=traceScenePrimitives(ro,rd,0.0,DRY_MISS,DRY_OWNER_NONE);" : "let seeded=missHit();"}
+  ${analyticPrimaryUnbounded ? "let seeded=traceScenePrimitives(ro,rd,initialMinimum,DRY_MISS,DRY_OWNER_NONE);" : "let seeded=missHit();"}
   var voxel=missHit();
-  var minimum=0.0;
+  var minimum=max(initialMinimum,0.0);
   let mapping=dryConfiguredMapping();
   let leafBudget=clamp(dry.tuningCounts0.x,1u,${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u);
   var continuation:DryTraversalCursor;
@@ -5472,6 +5008,7 @@ fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
   if(!traversalFinished){}
   ${analyticPrimaryUnbounded ? "if(voxel.t<seeded.t){return voxel;}return seeded;" : "return voxel;"}
 }
+fn traceStatic(ro:vec3f,rd:vec3f)->DryHit{return traceStaticFrom(ro,rd,0.0);}
 
 struct DryGlassHit{hit:SvoThinGlassHit,recordIndex:u32}
 fn dryGlassMiss()->DryGlassHit{return DryGlassHit(svoThinGlassMiss(),0u);}
@@ -5479,11 +5016,11 @@ fn dryGlassBoundingSphereVisible(record:SvoThinGlassRecord,ro:vec3f,rd:vec3f,tMi
   let offset=record.centerThickness.xyz-ro;let projected=clamp(dot(offset,rd),tMin,tMax);let closest=ro+rd*projected;let radius=length(vec3f(record.extentIorEpsilon.xy,.5*record.centerThickness.w))+record.extentIorEpsilon.w+1e-5;
   return dot(closest-record.centerThickness.xyz,closest-record.centerThickness.xyz)<=radius*radius;
 }
-fn traceGlass(ro:vec3f,rd:vec3f,tMin_m:f32,tMax_m:f32,skipCompositeOwned:bool)->DryGlassHit {
+fn traceGlass(ro:vec3f,rd:vec3f,tMin_m:f32,tMax_m:f32)->DryGlassHit {
   var best=dryGlassMiss();var bestT=tMax_m;
-  let paneCount=min(dry.terrain.y,${SVO_SCENE_GLASS_MAXIMUM_PANES}u);
+  let paneCount=min(dry.glass.y,${SVO_SCENE_GLASS_MAXIMUM_PANES}u);
   for(var paneIndex=0u;paneIndex<${SVO_SCENE_GLASS_MAXIMUM_PANES}u;paneIndex+=1u){
-    if(paneIndex>=paneCount){break;}let record=dryGlassPane(paneIndex);let paneId=svoThinGlassPaneId(record);let compositeOwned=skipCompositeOwned&&dry.terrain.w>0u&&paneId>=dry.terrain.z&&paneId-dry.terrain.z<dry.terrain.w;let thickReplaced=dryThickGlassEnabled!=0u&&paneId==thickGlass.metadata.z;if(compositeOwned||thickReplaced||!dryGlassBoundingSphereVisible(record,ro,rd,tMin_m,bestT)){continue;}let candidate=svoThinGlassIntersect(record,ro,rd,tMin_m,bestT,1e-6,record.extentIorEpsilon.w);
+    if(paneIndex>=paneCount){break;}let record=dryGlassPane(paneIndex);let paneId=svoThinGlassPaneId(record);let thickReplaced=dryThickGlassEnabled!=0u&&paneId==thickGlass.metadata.z;if(thickReplaced||!dryGlassBoundingSphereVisible(record,ro,rd,tMin_m,bestT)){continue;}let candidate=svoThinGlassIntersect(record,ro,rd,tMin_m,bestT,1e-6,record.extentIorEpsilon.w);
     if(candidate.valid!=0u&&candidate.t_m<bestT){best=DryGlassHit(candidate,paneIndex);bestT=candidate.t_m;}
   }
   return best;
@@ -5508,6 +5045,23 @@ fn dryVisibilityStep(status:u32,nodeVisits:u32,leafVisits:u32,workItems:u32,t:f3
 }
 fn dryVisibilityTransmissionStep(nodeVisits:u32,leafVisits:u32,workItems:u32,t:f32,transmittance:vec3f)->SvoVisibilityStep {
   return SvoVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,t,0u,clamp(transmittance,vec3f(0.0),vec3f(1.0)),0u);
+}
+fn dryMaterialPublished(material:SvoMaterialRecord,index:u32)->bool{
+  return index<dry.materialPublication.x&&svoMaterialValid(material,index)&&material.identity.y==dry.materialPublication.y;
+}
+fn dryMaterialThinDielectric(material:SvoMaterialRecord,index:u32)->bool{
+  let required=SVO_MATERIAL_FLAG_DIELECTRIC|SVO_MATERIAL_FLAG_THIN_WALL;
+  return dryMaterialPublished(material,index)&&(material.identity.w&required)==required;
+}
+fn dryHitThinDielectric(hit:DryHit)->bool{
+  let materialId=dryResolvedMaterialId(hit);
+  return materialId<dry.materialPublication.x&&dryMaterialThinDielectric(dryMaterial(materialId),materialId);
+}
+fn dryThinDielectricTransmittance(material:SvoMaterialRecord,normal:vec3f,direction:vec3f)->vec3f{
+  let cosine=clamp(abs(dot(normalize(normal),normalize(direction))),0.0,1.0);
+  let f0=svoMaterialDielectricF0(material);let fresnel=f0+(1.0-f0)*pow(1.0-cosine,5.0);
+  let tint=mix(vec3f(1.0),clamp(material.scatteringColorAnisotropy.xyz,vec3f(0.0),vec3f(1.0)),clamp(material.baseColorOpacity.w,0.0,1.0));
+  return tint*clamp(material.surface.w*(1.0-fresnel),0.0,1.0);
 }
 
 // Renderer-local unit-vector variant of the shared bias contract. Surface
@@ -5545,7 +5099,7 @@ fn traceLeafPayloadVisibility(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHi
     ${shadowMacroSkipWGSL}if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex>=dryVoxelCapacity()){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
-    ${cellSolidGateWGSL("payloadIndex", "return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,entry);")}
+    ${cellSolidGateWGSL("payloadIndex", "let materialId=sceneIdentityMaterial(identity);if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let material=dryMaterial(materialId);if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}if(dryMaterialThinDielectric(material,materialId)){let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let normal=dryVoxelFaceNormal(cellBounds,ray.origin_m+ray.direction*entry);let cellExit=min(nextT.x,min(nextT.y,nextT.z));return dryVisibilityTransmissionStep(0u,0u,workItems,min(max(cellExit,entry),ray.tMax_m),dryThinDielectricTransmittance(material,normal,ray.direction));}return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,entry);")}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
@@ -5559,13 +5113,13 @@ fn dryThinGlassIncidentIor()->f32{return 1.0;}
 // transmissive candidate and never calls the lighting closure recursively.
 fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudget)->SvoVisibilityStep {
   if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){dryVisibilityStepInvalidReason=1u;return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,0u,DRY_MISS);}
-  if(dry.terrain.y>${SVO_SCENE_GLASS_MAXIMUM_PANES}u){dryVisibilityStepInvalidReason=2u;return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,0u,DRY_MISS);}
+  if(dry.glass.y>${SVO_SCENE_GLASS_MAXIMUM_PANES}u){dryVisibilityStepInvalidReason=2u;return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,0u,DRY_MISS);}
   var nodeVisits=0u;var leafVisits=0u;var workItems=0u;var bestT=ray.tMax_m;var found=false;var opaque=true;var glassTransmission=vec3f(0.0);
 
   let bodyCount=min(u32(round(max(uniforms.options.z,0.0))),12u);
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}if(bodyIndex==dryVisibilityIgnoredBody){continue;}if(workItems>=remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=1u;
-    let body=bodies[bodyIndex];if(!bodyBoundingSphereVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let candidate=bodyHit(ray.origin_m,ray.direction,body);if(candidate.t>=tMin_m&&candidate.t<bestT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,candidate.t);}
+    let body=bodies[bodyIndex];if(!bodyBoundingSphereVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let candidate=bodyHit(ray.origin_m,ray.direction,body);if(candidate.t>=tMin_m&&candidate.t<bestT){bestT=candidate.t;found=true;opaque=true;}
   }
 
   // The voxel-resolved tier, and there is no second tier behind it.
@@ -5593,18 +5147,16 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
     let payloadRay=SvoVisibilityRay(ray.origin_m,bestT,ray.direction,ray.originBias_m);let payload=${shadowLeafTraceCallWGSL}(payloadRay,tMin_m,leaf,remaining.workItems-workItems);workItems+=payload.workItems;
     // Leaves partition space and are visited front to back, so the first payload
     // hit is the nearest voxel occluder and no later leaf can beat it.
-    if(payload.status==SVO_VIS_STEP_HIT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,payload.t_m);}
+    if(payload.status==SVO_VIS_STEP_HIT){bestT=payload.t_m;found=true;opaque=payload.opaque!=0u;glassTransmission=payload.transmittance;break;}
     if(payload.status!=SVO_VIS_STEP_MISS){if(payload.status==SVO_VIS_STEP_INVALID){dryVisibilityStepInvalidReason=3u;}return dryVisibilityStep(payload.status,nodeVisits,leafVisits,workItems,payload.t_m);}
     cursor=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);
   }
   if(cursor<bestT&&leafVisits>=remaining.leafVisits){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
 
-  let paneCount=dry.terrain.y;if(workItems+paneCount>remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=paneCount;
-  // The water compositor already owns the vessel panes' visible dielectric
-  // treatment. Skip those same panes in lighting visibility so they cannot
-  // project a bright/dark tank-shaped cutout onto nearby dry surfaces. Other
-  // authored glazing remains in the query and keeps bounded transmission.
-  let glass=traceGlass(ray.origin_m,ray.direction,tMin_m,bestT,true);if(glass.hit.valid!=0u&&glass.hit.t_m<bestT){let optics=svoThinGlassOptics(dryGlassPane(glass.recordIndex),glass.hit,dryThinGlassIncidentIor());bestT=glass.hit.t_m;found=true;opaque=false;glassTransmission=optics.netTransmittance;}
+  let paneCount=dry.glass.y;if(workItems+paneCount>remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=paneCount;
+  // Authored environment glazing remains a finite-pane query. SolidWorld glass
+  // was already resolved above from the voxel's published material record.
+  let glass=traceGlass(ray.origin_m,ray.direction,tMin_m,bestT);if(glass.hit.valid!=0u&&glass.hit.t_m<bestT){let optics=svoThinGlassOptics(dryGlassPane(glass.recordIndex),glass.hit,dryThinGlassIncidentIor());bestT=glass.hit.t_m;found=true;opaque=false;glassTransmission=optics.netTransmittance;}
   if(!found){return dryVisibilityStep(SVO_VIS_STEP_MISS,nodeVisits,leafVisits,workItems,DRY_MISS);}if(opaque){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,bestT);}return dryVisibilityTransmissionStep(nodeVisits,leafVisits,workItems,bestT,glassTransmission);
 }
 
@@ -5821,10 +5373,11 @@ fn dryLightSample(light:SvoLightRecord,sampleIndex:u32,position:vec3f)->DryLight
 // terrain trace, and the wrapper that folded the two together is gone with the
 // second surface: a name whose whole content is "voxels, or the ground drawn
 // twice" outlives its own meaning quietly.
-fn traceDrySolidScene(ro:vec3f,rd:vec3f)->DryHit {
-  var hit=traceStatic(ro,rd);let rigid=nearestBody(ro,rd);if(rigid.t<hit.t){hit=rigid;}
+fn traceDrySolidSceneFrom(ro:vec3f,rd:vec3f,tMin:f32)->DryHit {
+  var hit=traceStaticFrom(ro,rd,tMin);let rigid=nearestBody(ro,rd);if(rigid.t>=tMin&&rigid.t<hit.t){hit=rigid;}
   return dryPresentationHit(hit);
 }
+fn traceDrySolidScene(ro:vec3f,rd:vec3f)->DryHit{return traceDrySolidSceneFrom(ro,rd,0.0);}
 fn traceOpaqueScene(ro:vec3f,rd:vec3f)->DryHit {
   return traceDrySolidScene(ro,rd);
 }
@@ -5839,7 +5392,7 @@ fn dryResolvedMaterialId(hit:DryHit)->u32{
   return hit.materialId;
 }
 fn dryPublishedMaterialValid(material:SvoMaterialRecord,index:u32)->bool{
-  return index<dry.materialPublication.x&&svoMaterialValid(material,index)&&material.identity.y==dry.materialPublication.y&&(material.identity.w&SVO_MATERIAL_FLAG_OPAQUE)!=0u;
+  return dryMaterialPublished(material,index)&&(material.identity.w&SVO_MATERIAL_FLAG_OPAQUE)!=0u;
 }
 // The surface's material, from the published PBR record and nothing else.
 //
@@ -5889,12 +5442,46 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   shaded*=dryVoxelFaceEdgeFactor(position,hit.normal,hit.t);
   return shaded;
 }
+fn dryThinWallContinuation_m(rd:vec3f)->f32{
+  let distance=select(vec3f(DRY_MISS),dry.mapping.cellSize/max(abs(rd),vec3f(1e-9)),abs(rd)>vec3f(1e-9));
+  return max(1e-5,min(distance.x,min(distance.y,distance.z))*1.001);
+}
+fn dryTraceBeyondThinWall(hit:DryHit,ro:vec3f,rd:vec3f)->DryHit{
+  var cursor=hit.t+dryThinWallContinuation_m(rd);var behind=traceDrySolidSceneFrom(ro,rd,cursor);
+  // A SolidWorld wall can span more than one render voxel. Treat the contiguous
+  // run as one thin sheet, not as nested panes that multiply Fresnel eight times.
+  for(var layer=0u;layer<16u;layer+=1u){
+    if(!dryHitThinDielectric(behind)){break;}
+    cursor=behind.t+dryThinWallContinuation_m(rd);behind=traceDrySolidSceneFrom(ro,rd,cursor);
+  }
+  return behind;
+}
+fn shadeDryThinDielectric(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
+  var surface=hit;var throughput=vec3f(1.0);var color=vec3f(0.0);
+  // A ray may cross both tank walls. Resolve a bounded sequence iteratively;
+  // this is deliberately not recursive shader control flow.
+  for(var sheet=0u;sheet<4u;sheet+=1u){
+    let materialId=dryResolvedMaterialId(surface);if(materialId>=dry.materialPublication.x){return vec3f(0.0);}
+    let material=dryMaterial(materialId);if(!dryMaterialThinDielectric(material,materialId)){return vec3f(0.0);}
+    let f0=svoMaterialDielectricF0(material);let cosine=clamp(abs(dot(normalize(surface.normal),normalize(rd))),0.0,1.0);let fresnel=f0+(1.0-f0)*pow(1.0-cosine,5.0);
+    color+=throughput*dryEnvironment(reflect(rd,surface.normal),material.emissiveRoughness.w)*fresnel;
+    throughput*=dryThinDielectricTransmittance(material,surface.normal,rd);
+    let behind=dryTraceBeyondThinWall(surface,ro,rd);
+    if(!dryHitThinDielectric(behind)){return max(color+throughput*shadeDryOpaque(behind,ro,rd),vec3f(0.0));}
+    surface=behind;
+  }
+  return max(color+throughput*dryEnvironment(rd,0.0),vec3f(0.0));
+}
+fn shadeDrySurface(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
+  if(dryHitThinDielectric(hit)){return shadeDryThinDielectric(hit,ro,rd);}
+  return shadeDryOpaque(hit,ro,rd);
+}
 struct DryGlassSurface{color:vec3f,depth:f32,materialId:u32,ownerId:u32,paneId:u32,_padding:u32}
 fn shadeThinGlass(glass:DryGlassHit,opaque:DryHit,ro:vec3f,rd:vec3f)->DryGlassSurface {
   let record=dryGlassPane(glass.recordIndex);let incidentIor=dryThinGlassIncidentIor();let optics=svoThinGlassOptics(record,glass.hit,incidentIor);
   // A collapsed sheet has no net Snell bend, so the already-resolved collinear
   // opaque hit is exactly the transmitted scene query; never traverse it twice.
-  let reflected=dryEnvironment(reflect(rd,glass.hit.geometricNormal),.04);let transmitted=shadeDryOpaque(opaque,ro,rd);
+  let reflected=dryEnvironment(reflect(rd,glass.hit.geometricNormal),.04);let transmitted=shadeDrySurface(opaque,ro,rd);
   let color=reflected*optics.fresnel+transmitted*optics.netTransmittance;
   return DryGlassSurface(color,glass.hit.t_m,svoThinGlassMaterialId(record),svoThinGlassOwnerId(record),svoThinGlassPaneId(record),0u);
 }
@@ -5908,12 +5495,12 @@ fn shadeThickGlass(glass:DryThickGlassHit,ro:vec3f,rd:vec3f)->DryGlassSurface{
   let fromIor=select(1.0,ior,glass.interval.insideAtStart!=0u);let toIor=select(ior,1.0,glass.interval.insideAtStart!=0u);
   let firstOptics=svoThickGlassInterface(record,first,rd,fromIor,toIor,0.0);let reflected=dryEnvironment(firstOptics.reflectedDirection,.04);var transmitted=vec3f(0.0);var transmission=vec3f(0.0);
   if(firstOptics.totalInternalReflection==0u){
-    if(glass.interval.insideAtStart!=0u){let origin=first.position_m+firstOptics.refractedDirection*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(origin,firstOptics.refractedDirection);transmitted=shadeDryOpaque(opaque,origin,firstOptics.refractedDirection);transmission=vec3f(1.0-firstOptics.fresnel);}
-    else if(glass.interval.tangent!=0u){let origin=first.position_m+rd*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(origin,rd);transmitted=shadeDryOpaque(opaque,origin,rd);transmission=vec3f(1.0-firstOptics.fresnel);}
+    if(glass.interval.insideAtStart!=0u){let origin=first.position_m+firstOptics.refractedDirection*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(origin,firstOptics.refractedDirection);transmitted=shadeDrySurface(opaque,origin,firstOptics.refractedDirection);transmission=vec3f(1.0-firstOptics.fresnel);}
+    else if(glass.interval.tangent!=0u){let origin=first.position_m+rd*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(origin,rd);transmitted=shadeDrySurface(opaque,origin,rd);transmission=vec3f(1.0-firstOptics.fresnel);}
     else{
       let insideOrigin=first.position_m+firstOptics.refractedDirection*record.radiiYzIorEpsilon.w;let inside=svoThickGlassIntersect(record,insideOrigin,firstOptics.refractedDirection,0.0,record.absorptionPath.w,thickGlass.metadata.y);
       if(inside.status==SVO_THICK_GLASS_HIT){let exitSurface=inside.exit;let exitOptics=svoThickGlassInterface(record,exitSurface,firstOptics.refractedDirection,ior,1.0,inside.opticalPath_m);
-        if(exitOptics.totalInternalReflection==0u){let outsideOrigin=exitSurface.position_m+exitOptics.refractedDirection*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(outsideOrigin,exitOptics.refractedDirection);transmitted=shadeDryOpaque(opaque,outsideOrigin,exitOptics.refractedDirection);transmission=exitOptics.absorptionTint*(1.0-firstOptics.fresnel)*(1.0-exitOptics.fresnel);}
+        if(exitOptics.totalInternalReflection==0u){let outsideOrigin=exitSurface.position_m+exitOptics.refractedDirection*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(outsideOrigin,exitOptics.refractedDirection);transmitted=shadeDrySurface(opaque,outsideOrigin,exitOptics.refractedDirection);transmission=exitOptics.absorptionTint*(1.0-firstOptics.fresnel)*(1.0-exitOptics.fresnel);}
       }
     }
   }
@@ -5953,7 +5540,7 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
   // Curved thick glass is compiled separately from this Metal-sensitive pass.
   // Its authored pane therefore remains visible through the exact thin fallback.
   dryThickGlassEnabled=0u;
-  let opaque=traceOpaqueScene(ro,rd);${prepassResolveCallWGSL}let glass=traceGlass(ro,rd,0.0,opaque.t,true);var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;
+  let opaque=traceOpaqueScene(ro,rd);${prepassResolveCallWGSL}let glass=traceGlass(ro,rd,0.0,opaque.t);var color=shadeDrySurface(opaque,ro,rd);var depth=opaque.t;
   let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;var glassSurface=DryGlassSurface(vec3f(0.0),DRY_MISS,0u,DRY_OWNER_NONE,0u,0u);
   if(glassVisible){glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);let radiance=max(color*vignette,vec3f(0.0));let generation=dryPublicationGeneration();
@@ -5963,7 +5550,7 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
     return dryFragmentOut(targets,dryHardwareDepth(depth,rd,forward));
   }
   if(opaque.t<DRY_MISS){
-    let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}
+    let voxelGlass=dryHitThinDielectric(opaque);let media=dryMediumPair(rd,opaque.normal,select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_GLASS,voxelGlass));let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let producer=select(SVO_GBUFFER_PRODUCER_TRACED,SVO_GBUFFER_PRODUCER_GLASS,voxelGlass);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(producer);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}
     let targets=svoGBufferSurface(radiance,opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
     return dryFragmentOut(targets,dryHardwareDepth(opaque.t,rd,forward));
   }
@@ -6053,8 +5640,8 @@ struct VertexOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
  */
 export const svoDryRasterGlassShader = /* wgsl */ `
 ${svoThinGlassWGSL}
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
-struct GlassRasterParams { paneCount:u32, compositePaneIdBase:u32, compositePaneCount:u32, _padding:u32 }
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, reservedSceneMeta:vec4f, reservedSceneLanes:array<vec4f,16> }
+struct GlassRasterParams { paneCount:u32, _padding0:u32, _padding1:u32, _padding2:u32 }
 struct GlassRasterVertexOut {
   @builtin(position) position:vec4f,
   @location(0) @interpolate(flat) recordIndex:u32,
@@ -6090,43 +5677,11 @@ fn dryRasterGlassRay(pixel:vec2f)->mat2x3f{
 }
 @fragment fn glassRasterFragment(input:GlassRasterVertexOut)->GlassRasterFragmentOut{
   if(input.recordIndex>=glassRaster.paneCount){discard;}
-  let record=dryRasterGlassPane(input.recordIndex);let paneId=svoThinGlassPaneId(record);let compositeOwned=glassRaster.compositePaneCount>0u&&paneId>=glassRaster.compositePaneIdBase&&paneId-glassRaster.compositePaneIdBase<glassRaster.compositePaneCount;if(compositeOwned){discard;}
+  let record=dryRasterGlassPane(input.recordIndex);
   let coordinate=vec2i(input.position.xy);let opaqueDepth=textureLoad(dryRasterOpaqueGeometry,coordinate,0).w;let ray=dryRasterGlassRay(input.position.xy);let hit=svoThinGlassIntersect(record,ray[0],ray[1],0.0,opaqueDepth,1e-6,record.extentIorEpsilon.w);if(hit.valid==0u||!(hit.t_m<opaqueDepth)){discard;}
   let forward=normalize(uniforms.cameraTarget.xyz-uniforms.cameraPosition.xyz);let viewDepth=hit.t_m*max(dot(ray[1],forward),1e-6);let hardwareDepth=clamp(DRY_RASTER_GLASS_NEAR_M/viewDepth,0.0,1.0);return GlassRasterFragmentOut(input.recordIndex+1u,hardwareDepth);
 }
 `;
-
-export interface SvoDryRasterGlassRecordRange {
-  readonly firstRecord: number;
-  readonly recordCount: number;
-}
-
-/**
- * Omit a contiguous compositor-owned prefix from the raster discovery draw.
- * Interleaved ownership deliberately falls back to drawing every record; the
- * fragment shader's pane-ID check remains the authoritative correctness gate.
- */
-export function svoDryRasterGlassRecordRange(
-  records: Uint32Array | undefined,
-  compositePaneIdBase: number,
-  compositePaneCount: number,
-): SvoDryRasterGlassRecordRange {
-  if (!records || records.length % SVO_THIN_GLASS_RECORD_WORDS !== 0) {
-    return { firstRecord: 0, recordCount: 0 };
-  }
-  const paneCount = records.length / SVO_THIN_GLASS_RECORD_WORDS;
-  if (compositePaneCount <= 0) return { firstRecord: 0, recordCount: paneCount };
-  const isCompositeOwned = (recordIndex: number): boolean => {
-    const paneId = records[recordIndex * SVO_THIN_GLASS_RECORD_WORDS + 16];
-    return paneId >= compositePaneIdBase && paneId - compositePaneIdBase < compositePaneCount;
-  };
-  let firstRecord = 0;
-  while (firstRecord < paneCount && isCompositeOwned(firstRecord)) firstRecord += 1;
-  for (let recordIndex = firstRecord; recordIndex < paneCount; recordIndex += 1) {
-    if (isCompositeOwned(recordIndex)) return { firstRecord: 0, recordCount: paneCount };
-  }
-  return { firstRecord, recordCount: paneCount - firstRecord };
-}
 
 async function checkedModule(device: GPUDevice, label: string, code: string): Promise<GPUShaderModule> {
   const shaderModule = device.createShaderModule({ label, code });
@@ -6504,12 +6059,7 @@ export class SparseVoxelDrySceneRenderer {
   private conePrepassHeight = 0;
   private targetWidth = 0;
   private targetHeight = 0;
-  /**
-   * Not readonly, because the terrain region at its tail is the one part of the
-   * arena whose size the scene chooses. See `ensureSceneArenaCapacity`.
-   */
   private sceneArenaBuffer: GPUBuffer;
-  private sceneArenaTerrainCapacityBytes = SVO_DRY_SCENE_TERRAIN_HEADER_BYTES;
   private primitiveCount = 0;
   private primitiveCandidateArena?: SvoPrimitiveCandidateArena;
   private readonly paramsBuffer: GPUBuffer;
@@ -6626,7 +6176,7 @@ export class SparseVoxelDrySceneRenderer {
       && (!(this.rasterPrimary && !this.rasterPrimaryDirect) || this.screenSpaceTerminationPixels > 0);
     this.paramsBuffer = device.createBuffer({ label: "Sparse voxel dry scene parameters", size: SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.sceneArenaBuffer = device.createBuffer({
-      label: "Live authored scene arena (materials, primitives/BVH, thin glass, terrain)",
+      label: "Live authored scene arena (materials, primitives/BVH, thin glass)",
       size: SVO_DRY_SCENE_ARENA_LAYOUT.sizeBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
@@ -9162,34 +8712,6 @@ export class SparseVoxelDrySceneRenderer {
    * input retains the preceding complete scene instead of exposing a partial
    * update.
    */
-  /**
-   * Grow the arena so a scene's sculpted terrain fits behind the fixed regions.
-   *
-   * The heightfield is the only variable-length thing in here, and it is
-   * variable by three orders of magnitude: the hero pond's 289 x 193 lattice is
-   * 224 KB while the authored ceiling is a megabyte and most scenes want
-   * nothing at all. Reserving the ceiling would cost every scene the worst
-   * case, so the allocation follows the scene instead — which the arena can
-   * afford precisely because it is republished whole on a scene change.
-   *
-   * Capacity only ever grows. Shrinking would reclaim a few hundred kilobytes
-   * at the price of reallocating and re-uploading every region each time the
-   * user stepped between a sculpted scene and a flat one, and the bind groups
-   * that name this buffer would churn with it.
-   */
-  private ensureSceneArenaCapacity(terrainBytes: number): boolean {
-    if (terrainBytes <= this.sceneArenaTerrainCapacityBytes) return false;
-    const sizeBytes = svoDrySceneArenaSizeBytes(terrainBytes);
-    this.sceneArenaBuffer.destroy();
-    this.sceneArenaBuffer = this.device.createBuffer({
-      label: "Live authored scene arena (materials, primitives/BVH, thin glass, terrain)",
-      size: sizeBytes,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    this.sceneArenaTerrainCapacityBytes = sizeBytes - SVO_DRY_SCENE_ARENA_LAYOUT.terrainOffsetBytes;
-    return true;
-  }
-
   publishScene(scene: SparseVoxelDrySceneData): boolean {
     const source = this.source;
     if (!canEncodeSparseVoxelDryScene(source, scene)) return false;
@@ -9197,8 +8719,6 @@ export class SparseVoxelDrySceneRenderer {
     if (primitiveArena.packedRecords.byteLength > SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES) throw new RangeError("Live scene primitive arena capacity exceeded");
     if (scene.materialRecords.byteLength > SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES) throw new RangeError("Live scene material arena capacity exceeded");
     if ((scene.glassRecords?.byteLength ?? 0) > SVO_DRY_SCENE_GLASS_ARENA_SIZE_BYTES) throw new RangeError("Live scene thin-glass arena capacity exceeded");
-    if ((scene.terrainHeightfield?.byteLength ?? 0) > SVO_DRY_SCENE_TERRAIN_ARENA_MAXIMUM_BYTES) throw new RangeError("Live scene terrain heightfield capacity exceeded");
-    const arenaReallocated = this.ensureSceneArenaCapacity(scene.terrainHeightfield?.byteLength ?? 0);
 
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;
@@ -9225,26 +8745,22 @@ export class SparseVoxelDrySceneRenderer {
       }));
     }
     const paneCount = (scene.glassRecords?.byteLength ?? 0) / SVO_THIN_GLASS_RECORD_STRIDE_BYTES;
-    this.rasterGlassPaneCount = paneCount;
-    const paneIdBase = scene.primaryCompositeOwnedGlassPaneIdBase ?? 0xffff_ffff;
-    const compositePaneCount = scene.primaryCompositeOwnedGlassPaneCount ?? 0;
     const records = scene.glassRecords;
-    const rasterRange = svoDryRasterGlassRecordRange(records, paneIdBase, compositePaneCount);
-    this.rasterGlassFirstRecord = rasterRange.firstRecord;
-    this.rasterGlassRecordCount = rasterRange.recordCount;
+    this.rasterGlassPaneCount = paneCount;
+    this.rasterGlassFirstRecord = 0;
+    this.rasterGlassRecordCount = paneCount;
     this.device.queue.writeBuffer(this.rasterGlassParamsBuffer, 0, new Uint32Array([
       paneCount,
-      paneIdBase,
-      compositePaneCount,
+      0,
+      0,
       0,
     ]));
     this.device.queue.writeBuffer(this.sceneArenaBuffer, SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes, primitiveArena.packedRecords);
     this.device.queue.writeBuffer(this.sceneArenaBuffer, SVO_DRY_SCENE_ARENA_LAYOUT.materialOffsetBytes, scene.materialRecords);
     if (records?.byteLength) this.device.queue.writeBuffer(this.sceneArenaBuffer, SVO_DRY_SCENE_ARENA_LAYOUT.glassOffsetBytes, records);
-    // Written on every publication for the same reason the terrain header is:
-    // a stale block left behind by the previous scene would be resolved by a
-    // new scene's cluster record and grow the wrong packing inside its lobe.
-    // Zeroes are the "not resolved" encoding, which draws nothing.
+    // Written on every publication: a stale block left behind by the previous
+    // scene would be resolved by a new scene's cluster record and grow the wrong
+    // packing inside its lobe. Zeroes are the "not resolved" encoding.
     this.device.queue.writeBuffer(
       this.sceneArenaBuffer,
       SVO_DRY_SCENE_ARENA_LAYOUT.clusterOffsetBytes,
@@ -9261,19 +8777,11 @@ export class SparseVoxelDrySceneRenderer {
         ?? new Uint32Array(SVO_DRY_SCENE_FIELD_PROGRAM_ARENA_SIZE_BYTES / Uint32Array.BYTES_PER_ELEMENT),
     );
     warnOnUnresolvedClusters(scene);
-    // The header is written on every publication, never conditionally: a zeroed
-    // header is what tells the shader this scene is analytic, and skipping it
-    // would leave the previous scene's vessel standing under the new ground.
-    this.device.queue.writeBuffer(
-      this.sceneArenaBuffer,
-      SVO_DRY_SCENE_ARENA_LAYOUT.terrainOffsetBytes,
-      scene.terrainHeightfield ?? new Uint32Array(SVO_DRY_SCENE_TERRAIN_HEADER_WORDS),
-    );
     this.writeParams(source!, scene);
     const lightingArena = packSparseVoxelDrySceneLightingArena(scene);
     if (lightingArena) this.device.queue.writeBuffer(this.lightingBuffer, 0, lightingArena);
     this.device.queue.writeBuffer(this.thickGlassUniformBuffer, 0, packSparseVoxelDrySceneThickGlassArena(scene));
-    if (!this.bindGroup || arenaReallocated) this.rebuild();
+    if (!this.bindGroup) this.rebuild();
     return true;
   }
 
@@ -9533,8 +9041,9 @@ export class SparseVoxelDrySceneRenderer {
     words.set([this.primitiveCount, scene.ownerBase, scene.skippedOwnerId ?? 0xffff_ffff, materialCount], 12);
     floats.set(scene.lightDirection ?? [-0.45, 0.86, 0.28], 16);
     floats.set(scene.lightColor ?? [1.04, 1.0, 0.91], 20);
-    words.set([scene.terrainMaterialId ?? 0xffff_ffff, (scene.glassRecords?.byteLength ?? 0) / SVO_THIN_GLASS_RECORD_STRIDE_BYTES, scene.primaryCompositeOwnedGlassPaneIdBase ?? 0xffff_ffff, scene.primaryCompositeOwnedGlassPaneCount ?? 0], SVO_DRY_SCENE_PARAMS_LAYOUT.terrainWordOffset);
-    if (scene.terrainMaterialMetadata) words.set(scene.terrainMaterialMetadata, SVO_DRY_SCENE_PARAMS_LAYOUT.terrainMaterialWordOffset);
+    words.set([0,
+      (scene.glassRecords?.byteLength ?? 0) / SVO_THIN_GLASS_RECORD_STRIDE_BYTES,
+      0, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.glassWordOffset);
     const coneTracingMode = this.lightingOptions.coneTracingMode ?? "cones";
     // `off` strictly removes lighting-visibility work: with shadows and AO
     // held false no exact-ray flag is written either, and every visibility

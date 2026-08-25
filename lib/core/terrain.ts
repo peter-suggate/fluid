@@ -102,13 +102,6 @@ export interface TerrainProceduralPondVessel {
 export type TerrainProcedural = TerrainProceduralPondVessel;
 
 export interface TerrainDescription {
-  /**
-   * Require the authored height source to be sampled into the unified sparse
-   * voxel scene before it is consumed as visible solid geometry. Omitted keeps
-   * older documents compatible with the terrain-voxel A/B lever; `"voxel"`
-   * makes disabling that publication invalid for this scene.
-   */
-  solidRepresentation?: "voxel";
   /** Ground level in metres above the container floor before features. */
   baseHeight_m: number;
   features: TerrainFeature[];
@@ -136,7 +129,7 @@ export interface TerrainDescription {
  * evaluations a CPU ray march makes. Across the render-worker boundary the
  * scene is structured-cloned every revision and *every* object identity is new,
  * so the `WeakMap` can never hit there — which is exactly the trap that made
- * `packSvoDrySceneTerrainHeightfield`'s own memo useless. The content key is
+ * repeated authoring-grid derivation expensive. The content key is
  * what actually survives the clone, and it is cheap to compute because the
  * description is a few dozen numbers rather than a few hundred thousand.
  */
@@ -360,11 +353,11 @@ export function terrainHeightAt(terrain: TerrainDescription | undefined, x: numb
   // that materializes a fourteen-million-sample ground. See
   // `sampleProceduralTerrain`, which answers with the same bits.
   if (terrain.procedural) return sampleProceduralTerrain(terrain.procedural, x, z);
-  return analyticTerrainHeightAt(terrain, x, z);
+  return describedTerrainHeightAt(terrain, x, z);
 }
 
 /** The eight-feature closed form alone, for callers that already resolved the grid. */
-function analyticTerrainHeightAt(terrain: TerrainDescription, x: number, z: number): number {
+function describedTerrainHeightAt(terrain: TerrainDescription, x: number, z: number): number {
   let mounds = 0;
   let carvePower = 0;
   for (const feature of terrain.features) {
@@ -555,8 +548,7 @@ export function terrainColumnHeightsForLattice(
  * consumer reads, so a suspended bake is always a whole prefix of the output
  * and never a partially written row. Nothing but this function's own array
  * exists at a yield, so an abandoned bake is collected rather than released —
- * and it is never memoized, because `planSparseSceneTerrainField` only records
- * a field the bake returned.
+ * and it is never memoized by this iterator.
  *
  * What is *not* sliced is the derivation above the loop: the first build of a
  * procedural ground pays one `bakeProceduralTerrain`, measured at 282 ms on
@@ -594,7 +586,7 @@ export function* terrainColumnHeightsForLatticeSteps(
   const procedural = terrain.procedural;
   const heightAt = grid ? (x: number, z: number) => sampleTerrainGrid(grid, x, z)
     : procedural ? (x: number, z: number) => sampleProceduralTerrain(procedural, x, z)
-      : (x: number, z: number) => analyticTerrainHeightAt(terrain, x, z);
+      : (x: number, z: number) => describedTerrainHeightAt(terrain, x, z);
   // Rows per yield offer, chosen so a batch is well inside a frame even on the
   // widest domain this bake sees: 1536 columns a row at depth 3, at about
   // 0.2 us a column.
@@ -747,15 +739,190 @@ function validateTerrainProcedural(procedural: TerrainProcedural): string[] {
   return errors;
 }
 
+const TERRAIN_AUTHORING_RAY_FAST_MIN_VERTICAL = 0.35;
+const TERRAIN_AUTHORING_RAY_FAST_BRACKET_STEPS = 2;
+const TERRAIN_AUTHORING_RAY_FAST_REFINEMENTS = 5;
+const TERRAIN_AUTHORING_RAY_FALLBACK_STEPS = 20;
+const TERRAIN_AUTHORING_RAY_FALLBACK_REFINEMENTS = 8;
+const TERRAIN_AUTHORING_RAY_GRID_MARCH_STEPS = 64;
+const TERRAIN_AUTHORING_RAY_GRID_REFINEMENTS = 8;
+const TERRAIN_AUTHORING_RAY_GRID_EPSILON_SAMPLES = 0.25;
+
+/** CPU-only hit used by editor picking against authored terrain metadata. */
+export interface TerrainAuthoringRayHit {
+  t_m: number;
+  position_m: { x: number; y: number; z: number };
+  normal: { x: number; y: number; z: number };
+  solver: "fast" | "fallback" | "sculpted";
+  heightEvaluations: number;
+}
+
+function marchAuthoredTerrainGrid(
+  terrain: TerrainDescription,
+  grid: TerrainGrid,
+  origin_m: { x: number; y: number; z: number },
+  rd: { x: number; y: number; z: number },
+  ceiling: number,
+  sceneScale_m: number,
+  normalEpsilon_m: number,
+): TerrainAuthoringRayHit | undefined {
+  const extent = terrainGridExtent(grid);
+  let t0 = 0.005;
+  if (origin_m.y > ceiling) {
+    if (rd.y >= -0.0005) return undefined;
+    t0 = (ceiling - origin_m.y) / rd.y;
+  }
+  const span = t0 + 10 * sceneScale_m;
+  let t1 = span;
+  let bracketed = false;
+  if (rd.y < -0.0005) {
+    const lowestT = (extent.minimum_m - origin_m.y) / rd.y;
+    if (lowestT > t0 && lowestT <= span) { t1 = lowestT; bracketed = true; }
+  } else if (rd.y > 0.0005) {
+    t1 = Math.min(t1, Math.max(t0, (ceiling - origin_m.y) / rd.y));
+  }
+  if (!(t1 > t0)) return undefined;
+
+  const pointAt = (t: number) => ({ x: origin_m.x + rd.x * t, y: origin_m.y + rd.y * t, z: origin_m.z + rd.z * t });
+  let heightEvaluations = 0;
+  const fieldAt = (t: number) => {
+    const point = pointAt(t);
+    heightEvaluations += 1;
+    return point.y - terrainHeightAt(terrain, point.x, point.z);
+  };
+  const surfaceHit = (t_m: number): TerrainAuthoringRayHit => {
+    const position_m = pointAt(t_m);
+    heightEvaluations += 4;
+    return { t_m, position_m, normal: terrainNormalAt(terrain, position_m.x, position_m.z, normalEpsilon_m), solver: "sculpted", heightEvaluations };
+  };
+
+  const rate = Math.max(1e-4, Math.abs(rd.y) + extent.slopeBound * Math.hypot(rd.x, rd.z));
+  const epsilon = Math.max(1e-6, TERRAIN_AUTHORING_RAY_GRID_EPSILON_SAMPLES * grid.spacing_m);
+  let t = t0, lastOutside = t0, lastOutsideField = 0;
+  for (let step = 0; step < TERRAIN_AUTHORING_RAY_GRID_MARCH_STEPS && t <= t1; step += 1) {
+    const field = fieldAt(t);
+    if (Math.abs(field) <= epsilon) {
+      if (!(t > lastOutside)) return surfaceHit(t);
+      const slope = (field - lastOutsideField) / (t - lastOutside);
+      if (!(Math.abs(slope) > 1e-6)) return surfaceHit(t);
+      const corrected = Math.min(t1, Math.max(t0, t - field / slope));
+      return Math.abs(fieldAt(corrected)) < Math.abs(field) ? surfaceHit(corrected) : surfaceHit(t);
+    }
+    lastOutside = t;
+    lastOutsideField = field;
+    t += Math.abs(field) / rate;
+  }
+  if (!bracketed || !(lastOutsideField > 0)) return undefined;
+  let a = lastOutside, b = t1;
+  for (let refinement = 0; refinement < TERRAIN_AUTHORING_RAY_GRID_REFINEMENTS; refinement += 1) {
+    const middle = 0.5 * (a + b);
+    if (fieldAt(middle) > 0) a = middle; else b = middle;
+  }
+  return surfaceHit(0.5 * (a + b));
+}
+
+/**
+ * CPU-only intersection for editor hover and vessel-rim picking.
+ * Terrain descriptions remain authoring metadata; render publication consumes
+ * their voxelized SolidWorld result instead of this analytic query.
+ */
+export function intersectAuthoredTerrain(
+  terrain: TerrainDescription | undefined,
+  origin_m: { x: number; y: number; z: number },
+  direction: { x: number; y: number; z: number },
+  sceneScale_m: number,
+  normalEpsilon_m = 0.02,
+): TerrainAuthoringRayHit | undefined {
+  if (!terrain) return undefined;
+  const directionLength = Math.hypot(direction.x, direction.y, direction.z);
+  if (!(directionLength > 1e-9) || !(sceneScale_m > 0) || !Number.isFinite(sceneScale_m)) return undefined;
+  const rd = { x: direction.x / directionLength, y: direction.y / directionLength, z: direction.z / directionLength };
+  const ceiling = terrainCeiling(terrain);
+  const grid = terrainSampleGrid(terrain);
+  if (grid) return marchAuthoredTerrainGrid(terrain, grid, origin_m, rd, ceiling, sceneScale_m, normalEpsilon_m);
+  let t0 = 0.005;
+  if (origin_m.y > ceiling) {
+    if (rd.y >= -0.0005) return undefined;
+    t0 = (ceiling - origin_m.y) / rd.y;
+  }
+  let t1 = t0 + 10 * sceneScale_m;
+  if (rd.y < -0.0005) t1 = Math.min(t1, (-0.02 - origin_m.y) / rd.y);
+  else if (rd.y > 0.0005) t1 = Math.min(t1, Math.max(t0, (ceiling - origin_m.y) / rd.y));
+  if (!(t1 > t0)) return undefined;
+  const pointAt = (t: number) => ({ x: origin_m.x + rd.x * t, y: origin_m.y + rd.y * t, z: origin_m.z + rd.z * t });
+  let heightEvaluations = 0;
+  const fieldAt = (t: number) => {
+    const point = pointAt(t);
+    heightEvaluations += 1;
+    return point.y - terrainHeightAt(terrain, point.x, point.z);
+  };
+  const surfaceHit = (t_m: number, solver: TerrainAuthoringRayHit["solver"]): TerrainAuthoringRayHit => {
+    const position_m = pointAt(t_m);
+    heightEvaluations += 4;
+    return { t_m, position_m, normal: terrainNormalAt(terrain, position_m.x, position_m.z, normalEpsilon_m), solver, heightEvaluations };
+  };
+  const initialField = fieldAt(t0);
+  const ordinaryRay = Math.abs(rd.y) >= TERRAIN_AUTHORING_RAY_FAST_MIN_VERTICAL;
+  if (Math.abs(initialField) <= 1e-4) return surfaceHit(t0, ordinaryRay ? "fast" : "fallback");
+
+  if (ordinaryRay) {
+    let previousT = t0, previousField = initialField;
+    for (let bracket = 1; bracket <= TERRAIN_AUTHORING_RAY_FAST_BRACKET_STEPS; bracket += 1) {
+      const candidateT = t0 + (t1 - t0) * bracket / TERRAIN_AUTHORING_RAY_FAST_BRACKET_STEPS;
+      const candidateField = fieldAt(candidateT);
+      if (Math.abs(candidateField) <= 1e-4) return surfaceHit(candidateT, "fast");
+      if ((previousField < 0) !== (candidateField < 0)) {
+        let a = previousT, b = candidateT, fieldA = previousField, fieldB = candidateField;
+        let bestT = Math.abs(fieldA) < Math.abs(fieldB) ? a : b;
+        let bestAbsoluteField = Math.min(Math.abs(fieldA), Math.abs(fieldB));
+        for (let refinement = 0; refinement < TERRAIN_AUTHORING_RAY_FAST_REFINEMENTS; refinement += 1) {
+          const span = b - a;
+          const secant = b - fieldB * span / (fieldB - fieldA);
+          const t = Math.max(a + span * 0.05, Math.min(b - span * 0.05, Number.isFinite(secant) ? secant : 0.5 * (a + b)));
+          const field = fieldAt(t), absoluteField = Math.abs(field);
+          if (absoluteField < bestAbsoluteField) { bestAbsoluteField = absoluteField; bestT = t; }
+          if (absoluteField <= 1e-4) return surfaceHit(t, "fast");
+          if ((fieldA < 0) === (field < 0)) { a = t; fieldA = field; }
+          else { b = t; fieldB = field; }
+        }
+        if (bestAbsoluteField <= 1e-4) return surfaceHit(bestT, "fast");
+        break;
+      }
+      previousT = candidateT;
+      previousField = candidateField;
+    }
+  }
+
+  let previousT = t0;
+  let previousField = initialField;
+  let closestT = t0;
+  let closestAbsoluteField = Math.abs(initialField);
+  for (let iteration = 1; iteration <= TERRAIN_AUTHORING_RAY_FALLBACK_STEPS; iteration += 1) {
+    const t = t0 + (t1 - t0) * (iteration / TERRAIN_AUTHORING_RAY_FALLBACK_STEPS) ** 1.4;
+    const field = fieldAt(t);
+    const absoluteField = Math.abs(field);
+    if (absoluteField < closestAbsoluteField) { closestAbsoluteField = absoluteField; closestT = t; }
+    if ((previousField < 0) !== (field < 0)) {
+      let a = previousT, b = t, fieldA = previousField;
+      for (let refinement = 0; refinement < TERRAIN_AUTHORING_RAY_FALLBACK_REFINEMENTS; refinement += 1) {
+        const middle = 0.5 * (a + b), middleField = fieldAt(middle);
+        if ((fieldA < 0) === (middleField < 0)) { a = middle; fieldA = middleField; }
+        else b = middle;
+      }
+      return surfaceHit(0.5 * (a + b), "fallback");
+    }
+    if (absoluteField <= 1e-4) return surfaceHit(t, "fallback");
+    previousT = t;
+    previousField = field;
+  }
+  return closestAbsoluteField <= 5e-4 ? surfaceHit(closestT, "fallback") : undefined;
+}
+
 export function validateTerrain(
   terrain: TerrainDescription,
   container: Pick<SceneDescription["container"], "width_m" | "height_m" | "depth_m">
 ): string[] {
   const errors: string[] = [];
-  if (terrain.solidRepresentation !== undefined
-    && terrain.solidRepresentation !== "voxel") {
-    errors.push("Terrain solid representation must be voxel");
-  }
   if (!(terrain.baseHeight_m >= 0) || terrain.baseHeight_m >= container.height_m) {
     errors.push("Terrain base height must be inside [0, container height)");
   }

@@ -51,8 +51,6 @@ export interface SparseCM12TransportPacketAuthorityLayout {
   readonly sharpeningMaskLowBaseWords: number;
   readonly sharpeningMaskHighBaseWords: number;
   readonly packetListBaseWords: number;
-  readonly gammaRowMaskBaseWords: number;
-  readonly gammaRowMaskWords: number;
   readonly totalWords: number;
 }
 
@@ -104,15 +102,12 @@ export function createSparseCM12TransportPacketAuthorityLayout(options: {
     + dispatchPacketCount, "sharpeningMaskHighBaseWords");
   const packetListBaseWords = checked(sharpeningMaskHighBaseWords
     + dispatchPacketCount, "packetListBaseWords");
-  const gammaRowMaskBaseWords = checked(packetListBaseWords + dispatchPacketCount,
-    "gammaRowMaskBaseWords");
-  const gammaRowMaskWords = checked(6 * dispatchPacketCount, "gammaRowMaskWords");
-  const totalWords = checked(gammaRowMaskBaseWords + gammaRowMaskWords, "totalWords");
+  const totalWords = checked(packetListBaseWords + dispatchPacketCount, "totalWords");
   return Object.freeze({ baseWords, packetCapacity, dispatchPacketsPerLeaf,
     dispatchPacketCount, dispatchWidth, dispatchRows,
     compilerWorkgroupCount, compilerDispatchWidth, compilerDispatchRows,
     indirectBaseWords,
     transportMaskLowBaseWords, transportMaskHighBaseWords,
     sharpeningMaskLowBaseWords, sharpeningMaskHighBaseWords, packetListBaseWords,
-    gammaRowMaskBaseWords, gammaRowMaskWords, totalWords });
+    totalWords });
 }

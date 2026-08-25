@@ -31,7 +31,7 @@ function fixtureInput(): SparseCM12PhaseArenaPlannerInput {
     gamma: new Float64Array(resolution ** 3).fill(1),
   });
   const atlas = createSparseAdaptiveMassAtlas(dimensions,
-    [brick([0, 0, 0], 8), brick([1, 0, 0], 16)], 23, undefined, 16);
+    [brick([0, 0, 0], 8), brick([1, 0, 0], 16)], 23, 16);
   const grid = buildSparseAtlasCompositeGrid(atlas);
   const htp1 = createSparseCM12HotTopology(grid).layout;
   return {

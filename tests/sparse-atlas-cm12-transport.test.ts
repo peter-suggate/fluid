@@ -11,7 +11,6 @@ import {
   applySparseAtlasDivergence,
   applySparseAtlasGradient,
   buildSparseAtlasCompositeGrid,
-  collocateSparseAtlasVelocity,
 } from
   "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
 import { initializeSparseAtlasDynamics, stepSparseAtlasDynamics } from
@@ -78,7 +77,7 @@ test("the complete 1/2/4/8 ladder is strongly 2:1 graded", () => {
   ]), /exceeds 2:1 grading/);
 });
 
-test("fixed coarse initialization overrides the usual fine interface floor", () => {
+test("SolidWorld boundary evidence overrides a requested coarse initialization", () => {
   const atlas = initializeSparseBrickAtlasFromScene(
     createSymmetricExpansionScene(),
     {
@@ -87,7 +86,8 @@ test("fixed coarse initialization overrides the usual fine interface floor", () 
     },
   );
   assert.ok(atlas.bricks.length > 0);
-  assert.equal(atlas.bricks.every((candidate) => candidate.resolution === 4), true);
+  assert.equal(atlas.bricks.every((candidate) => candidate.resolution === 8), true,
+    "a scene-level resolution hint must not coarsen across voxel-solid faces");
 });
 
 test("CM12 sharpening dose scales inversely with physical finest-cell size", () => {
@@ -149,22 +149,6 @@ test("CM12 Algorithm 2 traces sharpening mass across a 2:1 seam", () => {
   assert.ok(coarseMass(traced.fields.density) - before > 1e-3,
     "the paper-distance trace must deposit into the coarse brick");
   assert.ok(traced.massAbsoluteError < 1e-10, `${traced.massAbsoluteError}`);
-});
-
-test("MAC collocation includes zero-valued domain-wall faces", () => {
-  const atlas = createSparseAdaptiveMassAtlas([8, 8, 8], [
-    { ...brick(0, [0, 0, 0], 4), density: new Float64Array(64).fill(1) },
-  ]);
-  const grid = buildSparseAtlasCompositeGrid(atlas);
-  const collocated = collocateSparseAtlasVelocity(
-    grid, new Float64Array(grid.gradientRows.length).fill(1),
-  );
-  const negativeBoundary = grid.cells.find((cell) => cell.minimumFine[0] === 0);
-  const interior = grid.cells.find((cell) =>
-    cell.minimumFine[0] > 0 && cell.maximumFine[0] < 8);
-  assert.ok(negativeBoundary && interior);
-  assert.equal(collocated[3 * negativeBoundary.id], 0.5);
-  assert.equal(collocated[3 * interior.id], 1);
 });
 
 test("CM12 characteristic rows conserve mass across an arbitrary 2:1 tiling", () => {

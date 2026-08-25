@@ -73,8 +73,6 @@ dawnTest("large hydrostatic stays still, refines on impact, and restores deep co
           resolutionMode: "adaptive",
           brickFineResolution: 8,
           surfaceFineRings: 1,
-          receiverSupportRings: 9,
-          receiverFloor: "auto",
           timeStep: "paper",
           activityPolicy: SPARSE_CM12_ACTIVITY_POLICY,
           pressureIterations: 128,

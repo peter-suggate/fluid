@@ -14,18 +14,9 @@ import {
 } from "../../core/initial-fluid";
 import type { SceneDescription } from "../../core/model";
 import { sceneRefinementRegions } from "../../core/refinement-regions";
-import {
-  classifyFineBoxAgainstSphericalContainer,
-  sphericalContainerFineGeometry,
-  sphericalContainerOpenFractionAtCell,
-  type SphericalContainerFineGeometry,
-} from "../../core/spherical-container";
-import type { TankWallField } from "../../core/tank-wall-field";
-import {
-  sceneHasTerrain,
-  terrainColumnHeights,
-  terrainHeightAt,
-} from "../../core/terrain";
+import { sampleSolidWorld, solidWorldForScene, SOLID_WORLD_BRICK_CELLS,
+  type SolidWorld } from
+  "../../core/solid-world";
 import {
   applySparseCM12RefinementRegionResolutionBounds,
   packSparseCM12RefinementRegions,
@@ -99,15 +90,6 @@ export interface SparseAdaptiveMassAtlas {
   readonly directoriesBySpan: ReadonlyMap<number, ReadonlyMap<number, SparseAdaptiveMassBrick>>;
   readonly maximumSpanBricks: number;
   readonly generation: number;
-  /** Embedded closed boundary carried by every topology/field generation. */
-  readonly boundary?: SphericalContainerFineGeometry;
-  /** Authored rectangular side-wall occupancy at the finest lattice. */
-  readonly wallField?: TankWallField;
-  /** Placement of the physical tank inside a larger sparse fluid domain. */
-  readonly tankWallPlacement?: {
-    readonly minimumFine: SparseBrickVec3;
-    readonly maximumFine: SparseBrickVec3;
-  };
 }
 
 export interface SparseBrickAtlasInitializationOptions {
@@ -189,10 +171,7 @@ export function createSparseAdaptiveMassAtlas(
   dimensions: SparseBrickVec3,
   bricks: readonly SparseAdaptiveMassBrick[],
   generation = 1,
-  boundary?: SphericalContainerFineGeometry,
   brickFineResolution: SparseBrickFineResolution = DEFAULT_BRICK_FINE_RESOLUTION,
-  wallField?: TankWallField,
-  tankWallPlacement?: SparseAdaptiveMassAtlas["tankWallPlacement"],
 ): SparseAdaptiveMassAtlas {
   positiveDimensions(dimensions);
   const ladder = sparseBrickLadder(brickFineResolution);
@@ -241,8 +220,7 @@ export function createSparseAdaptiveMassAtlas(
   return {
     dimensions, brickFineResolution, brickCellCapacity: ladder.cellCapacity,
     ladder, brickDimensions, bricks: [...bricks], directory,
-    directoriesBySpan, maximumSpanBricks, generation, boundary, wallField,
-    tankWallPlacement,
+    directoriesBySpan, maximumSpanBricks, generation,
   };
 }
 
@@ -276,61 +254,95 @@ function initialDensityAt(
   if (scene.systems?.fluid === false
     || x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return 0;
   const dam = sceneDamBreakBox(scene);
-  if (sceneHasTerrain(scene)) {
-    const worldX = -0.5 * scene.container.width_m
-      + (x + 0.5) * scene.container.width_m / nx;
-    const worldZ = -0.5 * scene.container.depth_m
-      + (z + 0.5) * scene.container.depth_m / nz;
-    if ((y + 0.5) * scene.container.height_m / ny
-      <= terrainHeightAt(scene.terrain, worldX, worldZ)) return 0;
-  }
   const baseWet = scene.fluid.initialCondition === "tank-fill"
     ? (y + 0.5) / ny <= scene.container.fillFraction
     : damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / ny, (z + 0.5) / nz);
-  return Math.min(
-    sphericalContainerOpenFractionAtCell(scene, x, y, z, dimensions),
-    initialLiquidFractionAtCell(scene, x, y, z, dimensions, baseWet),
-  );
+  let world = initialSolidWorldCache.get(scene);
+  if (!world) {
+    world = solidWorldForScene(scene);
+    initialSolidWorldCache.set(scene, world);
+  }
+  return (1 - sampleSolidWorld(world, [x, y, z]).solidFraction)
+    * initialLiquidFractionAtCell(scene, x, y, z, dimensions, baseWet);
 }
 
-function brickRequiresCutBoundaryResolution(
-  boundary: SphericalContainerFineGeometry | undefined,
+const initialSolidWorldCache = new WeakMap<SceneDescription, SolidWorld>();
+
+/**
+ * A fluid leaf can meet a later signed page only across two non-solid finest
+ * voxels. Keep that initial exterior face at B8 so the page-local graph joins
+ * it one voxel face at a time; no second coarse/fine seam representation is
+ * needed. This reads only SolidWorld occupancy and therefore treats a cut,
+ * open top, or any future voxel edit identically.
+ */
+function brickHasOpenExteriorVoxelFace(
+  scene: SceneDescription,
+  dimensions: SparseBrickVec3,
   coordinate: SparseBrickVec3,
   brickFineResolution: SparseBrickFineResolution,
+  spanBricks = 1,
 ): boolean {
-  if (!boundary) return false;
-  const minimum = coordinate.map((value) => value * brickFineResolution) as
+  let world = initialSolidWorldCache.get(scene);
+  if (!world) {
+    world = solidWorldForScene(scene);
+    initialSolidWorldCache.set(scene, world);
+  }
+  const lower = coordinate.map((value) => value * brickFineResolution) as
     [number, number, number];
-  const maximum = coordinate.map((value) => (value + 1) * brickFineResolution) as
-    [number, number, number];
-  return classifyFineBoxAgainstSphericalContainer(boundary, minimum, maximum) === "cut";
+  const upper = lower.map((value, axis) => Math.min(dimensions[axis],
+    value + spanBricks * brickFineResolution)) as [number, number, number];
+  for (let axis = 0; axis < 3; axis += 1) for (const side of [-1, 1] as const) {
+    if ((side < 0 && lower[axis] !== 0)
+      || (side > 0 && upper[axis] !== dimensions[axis])) continue;
+    const uAxis = (axis + 1) % 3, vAxis = (axis + 2) % 3;
+    for (let v = lower[vAxis]; v < upper[vAxis]; v += 1)
+      for (let u = lower[uAxis]; u < upper[uAxis]; u += 1) {
+        const inside = [0, 0, 0] as [number, number, number];
+        inside[axis] = side < 0 ? 0 : dimensions[axis] - 1;
+        inside[uAxis] = u; inside[vAxis] = v;
+        const outside = [...inside] as [number, number, number];
+        outside[axis] += side;
+        if (sampleSolidWorld(world, inside).solidFraction < 1 - 1e-8
+          && sampleSolidWorld(world, outside).solidFraction < 1 - 1e-8) return true;
+      }
+  }
+  return false;
 }
 
 /**
- * A composite cell that straddles H cannot place the solid/liquid interface
- * inside its repeated finest presentation samples. Keep the containing brick
- * on the finest rung, exactly as the spherical cut-boundary evidence does.
+ * A composite cell cannot reproduce a finest-voxel solid face inside its
+ * repeated presentation samples. Keep every brick that touches a change in
+ * the uniform SolidWorld field on the finest rung. Terrain, tank shells and
+ * authored edits consequently follow one rule and one source of truth.
  */
-function brickRequiresTerrainBoundaryResolution(
-  terrainHeights_m: Float32Array | undefined,
+function brickRequiresStaticSolidBoundaryResolution(
+  scene: SceneDescription,
   dimensions: SparseBrickVec3,
-  containerHeight_m: number,
   coordinate: SparseBrickVec3,
   brickFineResolution: SparseBrickFineResolution,
 ): boolean {
-  if (!terrainHeights_m) return false;
-  const [nx, ny, nz] = dimensions;
-  const lowerY = coordinate[1] * brickFineResolution;
-  const upperY = Math.min(ny, lowerY + brickFineResolution);
-  const xBegin = coordinate[0] * brickFineResolution;
-  const xEnd = Math.min(nx, xBegin + brickFineResolution);
-  const zBegin = coordinate[2] * brickFineResolution;
-  const zEnd = Math.min(nz, zBegin + brickFineResolution);
-  const inverseCellHeight = ny / containerHeight_m;
-  for (let z = zBegin; z < zEnd; z += 1) for (let x = xBegin; x < xEnd; x += 1) {
-    const heightFine = terrainHeights_m[x + nx * z]! * inverseCellHeight;
-    if (heightFine >= lowerY - 1e-6 && heightFine <= upperY + 1e-6) return true;
+  let world = initialSolidWorldCache.get(scene);
+  if (!world) {
+    world = solidWorldForScene(scene);
+    initialSolidWorldCache.set(scene, world);
   }
+  const lower = coordinate.map((value) => value * brickFineResolution) as
+    [number, number, number];
+  const upper = lower.map((value, axis) => Math.min(dimensions[axis],
+    value + brickFineResolution)) as [number, number, number];
+  const directions = [[-1, 0, 0], [1, 0, 0], [0, -1, 0],
+    [0, 1, 0], [0, 0, -1], [0, 0, 1]] as const;
+  for (let z = lower[2]; z < upper[2]; z += 1)
+    for (let y = lower[1]; y < upper[1]; y += 1)
+      for (let x = lower[0]; x < upper[0]; x += 1) {
+        const fraction = sampleSolidWorld(world, [x, y, z]).solidFraction;
+        if (fraction > 1e-8 && fraction < 1 - 1e-8) return true;
+        for (const [dx, dy, dz] of directions) {
+          const adjacent = sampleSolidWorld(world,
+            [x + dx, y + dy, z + dz]).solidFraction;
+          if (Math.abs(adjacent - fraction) > 1e-8) return true;
+        }
+      }
   return false;
 }
 
@@ -480,17 +492,37 @@ function hierarchicalTankFillBricks(
   brickFineResolution: SparseBrickFineResolution,
   surfaceFineRings: number,
   maximumMacroSpanBricks: number,
-  boundary: SphericalContainerFineGeometry | undefined,
   refinementRegionParameters: ArrayBuffer,
 ): SparseAdaptiveMassBrick[] | undefined {
   if (scene.systems?.fluid === false) return [];
   if (scene.fluid.initialCondition !== "tank-fill"
     || initialFluidBrickCoordinates(scene, dimensions, scene.voxelDomain.brickSize_cells)
-    || sceneHasTerrain(scene) || boundary || sceneInitialLiquidVolumes(scene).length > 0) {
+    || sceneInitialLiquidVolumes(scene).length > 0) {
     return undefined;
   }
   const fullFineY = Math.max(0, Math.min(dimensions[1],
     Math.floor(scene.container.fillFraction * dimensions[1] + 0.5)));
+  let world = initialSolidWorldCache.get(scene);
+  if (!world) {
+    world = solidWorldForScene(scene);
+    initialSolidWorldCache.set(scene, world);
+  }
+  // Macro leaves are valid only for unobstructed liquid bulk. Inspect the one
+  // static authority directly; this covers terrain, a spherical shell and any
+  // authored voxel edit without naming any of those authoring concepts.
+  for (const page of world.pages) for (let local = 0;
+    local < page.solidFraction.length; local += 1) {
+    if (page.solidFraction[local] === 0) continue;
+    const lx = local % SOLID_WORLD_BRICK_CELLS;
+    const ly = Math.floor(local / SOLID_WORLD_BRICK_CELLS)
+      % SOLID_WORLD_BRICK_CELLS;
+    const lz = Math.floor(local / (SOLID_WORLD_BRICK_CELLS ** 2));
+    const x = page.coordinate[0] * SOLID_WORLD_BRICK_CELLS + lx;
+    const y = page.coordinate[1] * SOLID_WORLD_BRICK_CELLS + ly;
+    const z = page.coordinate[2] * SOLID_WORLD_BRICK_CELLS + lz;
+    if (x >= 0 && x < dimensions[0] && y >= 0 && y < fullFineY
+      && z >= 0 && z < dimensions[2]) return undefined;
+  }
   const fullBrickY = Math.floor(fullFineY / brickFineResolution);
   // A cut surface brick is itself distance ring zero. Without this offset the
   // last completely flooded brick was also assigned ring zero, producing two
@@ -537,7 +569,10 @@ function hierarchicalTankFillBricks(
         && deepestAllowedCellWidth !== allowedCellWidth;
       const requiredResolution = initialResolutionWithRefinementRegionBounds(
         refinementRegionParameters, dimensions, origin, span,
-        edgeFine / allowedCellWidth, brickFineResolution);
+        brickHasOpenExteriorVoxelFace(
+          scene, dimensions, origin, brickFineResolution, span,
+        ) ? brickFineResolution : edgeFine / allowedCellWidth,
+        brickFineResolution);
       // A macro at B^3 would refine all tangential directions merely to grade
       // one normal face. Split that last rung into base bricks instead; this
       // keeps the page census surface-shaped and substantially smaller.
@@ -580,7 +615,7 @@ function hierarchicalTankFillBricks(
   }
 
   const provisional = createSparseAdaptiveMassAtlas(
-    dimensions, bricks, 1, boundary, brickFineResolution, scene.container.wallField,
+    dimensions, bricks, 1, brickFineResolution,
   );
   for (const coordinate of structuralSeedBrickCoordinates(
     scene, dimensions, brickDimensions, brickFineResolution,
@@ -752,19 +787,14 @@ export function initializeSparseBrickAtlasFromScene(
         container.depth_m / options.finestDimensions[2]],
       origin_m: { x: -0.5 * container.width_m, y: 0, z: -0.5 * container.depth_m },
     });
-  const boundary = sphericalContainerFineGeometry(scene, options.finestDimensions);
-  const terrainHeights_m = sceneHasTerrain(scene)
-    ? terrainColumnHeights(scene, options.finestDimensions[0], options.finestDimensions[2])
-    : undefined;
   if (!options.resolutionForBrick) {
     const hierarchical = hierarchicalTankFillBricks(
       scene, options.finestDimensions, brickDimensions, brickFineResolution, surfaceFineRings,
-      maximumMacroSpanBricks, boundary, refinementRegionParameters,
+      maximumMacroSpanBricks, refinementRegionParameters,
     );
     if (hierarchical) {
       return createSparseAdaptiveMassAtlas(
-        options.finestDimensions, hierarchical, 1, boundary, brickFineResolution,
-        scene.container.wallField,
+        options.finestDimensions, hierarchical, 1, brickFineResolution,
       );
     }
   }
@@ -842,12 +872,11 @@ export function initializeSparseBrickAtlasFromScene(
       ? 0 : Math.max(0, ladder.resolutions.length - 1 - Math.max(0, distance - surfaceFineRings + 1));
     const adaptiveResolution = (distance !== undefined && distance < surfaceFineRings
       ? brickFineResolution : ladder.resolutions[distanceRung]!) as SparseBrickResolution;
-    const evidenceSelected = (brickRequiresCutBoundaryResolution(
-      boundary, coordinate, brickFineResolution,
-    ) || brickRequiresTerrainBoundaryResolution(
-      terrainHeights_m, options.finestDimensions, container.height_m,
-      coordinate, brickFineResolution,
-    )) ? brickFineResolution
+    const evidenceSelected = brickRequiresStaticSolidBoundaryResolution(
+      scene, options.finestDimensions, coordinate, brickFineResolution,
+    ) || brickHasOpenExteriorVoxelFace(
+      scene, options.finestDimensions, coordinate, brickFineResolution,
+    ) ? brickFineResolution
       : options.resolutionForBrick?.({
       coordinate, brickDimensions,
     }) ?? adaptiveResolution;
@@ -886,8 +915,7 @@ export function initializeSparseBrickAtlasFromScene(
     resolutionByKey.get(candidate.key)!, brickFineResolution,
   ));
   return createSparseAdaptiveMassAtlas(
-    options.finestDimensions, bricks, 1, boundary, brickFineResolution,
-    scene.container.wallField,
+    options.finestDimensions, bricks, 1, brickFineResolution,
   );
 }
 
@@ -1008,10 +1036,7 @@ export function coarsenLargeQuiescentComponents(
     atlas.dimensions,
     bricks.sort((left, right) => left.key - right.key),
     atlas.generation,
-    atlas.boundary,
     atlas.brickFineResolution,
-    atlas.wallField,
-    atlas.tankWallPlacement,
   );
 }
 

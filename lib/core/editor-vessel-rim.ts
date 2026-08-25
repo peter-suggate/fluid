@@ -7,7 +7,7 @@ import { rayProbeAction } from "./editor-probe-actions";
 import type { PondVesselSpec } from "./voxel-scenery/pond-vessel";
 import { pondVesselPlanCurve } from "./voxel-scenery/pond-vessel";
 import { rimBandReach_m, sceneVessel, sceneVessels, vesselRimAt } from "./vessel-rim-controls";
-import { intersectSvoTerrainHeightfield } from "../svo/webgpu-svo-dry-scene";
+import { intersectAuthoredTerrain } from "./terrain";
 
 /**
  * Selecting the pond's coping.
@@ -83,7 +83,7 @@ export const vesselRimEntity: EditorEntityDefinition = {
     const terrain = context.scene.terrain;
     if (!terrain) return undefined;
     const c = context.scene.container;
-    const hit = intersectSvoTerrainHeightfield(
+    const hit = intersectAuthoredTerrain(
       terrain, ray.origin, ray.direction, Math.max(c.width_m, c.height_m, c.depth_m));
     if (!hit || !(hit.t_m > 0)) return undefined;
     const name = vesselRimAt(context.scene, hit.position_m.x, hit.position_m.z);

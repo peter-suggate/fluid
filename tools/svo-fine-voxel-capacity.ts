@@ -125,7 +125,6 @@ function surfaceBricks(scene: SceneDescription, cells: readonly [number, number,
     }
   }
   for (const descriptor of buildSvoScenePrimitives(scene).descriptors) {
-    if (descriptor.kind === "terrain-heightfield") continue;
     const bounds = svoPrimitiveCandidateBounds(descriptor as never);
     const minimum = [bounds.minimum_m.x, bounds.minimum_m.y, bounds.minimum_m.z];
     const maximum = [bounds.maximum_m.x, bounds.maximum_m.y, bounds.maximum_m.z];

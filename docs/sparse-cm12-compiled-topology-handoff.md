@@ -21,8 +21,8 @@ It did not deliver the whole Level 0/3 cutover described below:
 
 - face preparation, sharpening, D4, tracers, and presentation have not all converged
   on the same compiled sampler;
-- TPM1 records exact producer ballots, but its production row/VEX compilers still
-  walk incidence, row acceptance, and row terms;
+- gamma diffusion now consumes the accepted physical row worklist directly, with no
+  packet-local topology compiler or mask image;
 - ITR1, VXI1, and DCA1 exist as independently tested exact transforms, but the current
   resident IBO image contains only IRL1 and geometry supplements, so those transforms
   are not production authority yet;
@@ -32,9 +32,9 @@ It did not deliver the whole Level 0/3 cutover described below:
   and timing acceptance runs have not been captured.
 
 The review found one concrete authority defect: construction initialized the leaf
-manifest from active leaves but initialized cell and row lists from every resident
-template, including dormant receivers. That made the ocean receipt contain 48,640
-unexpected cells (95 dormant B8 leaves × 512) and 144,704 unexpected rows. Construction
+manifest from active leaves but initialized cell and row lists from every preallocated
+dry page. That made the ocean receipt contain 48,640 unexpected cells
+(95 dry B8 leaves × 512) and 144,704 unexpected rows. Construction
 now derives all three views from the same active leaf/rung set. The stage-cost probe
 hard-fails unless cell partition, row requirements, leaf manifest, and topology delta
 all agree. A construction-only solver factory now exposes raw Phase-1 transport
@@ -48,8 +48,8 @@ The remaining rollout is therefore gated as follows:
    path; mini64 measures launch cost and useful dry/bulk skipping. Long-dam is not an
    acceptance lane for this migration. Do not claim a timing gate from an unpaired
    dirty-tree comparison.
-2. Integrate ITR1/VXI1/DCA1 into the resident IBO image and replace TPM1's incidence
-   walks. Gate row masks, VEX roots, both gamma banks, and rerung publication before
+2. Keep ITR1 as the resident face-row address supplement while both gamma banks consume
+   the accepted physical row worklist. Gate VEX roots and rerung publication before
    converting any further stage.
 3. Apply the same compiled acceptance/edge authority to face preparation and
    sharpening first, then projection/collocation and activity measurement. Each

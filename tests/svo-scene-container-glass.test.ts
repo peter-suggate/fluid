@@ -2,40 +2,38 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { buildSvoSceneGlass } from "../lib/svo/svo-scene-glass";
-import { svoDryRasterGlassRecordRange } from "../lib/svo/webgpu-svo-dry-scene";
+import { createSvoDrySceneFragmentWGSL } from "../lib/svo/webgpu-svo-dry-scene";
+import { liveSvoDerivedBuildWGSLFor } from "../lib/svo/webgpu-svo-live-derived-builder";
 
-test("closed tank floor and ceiling form one compositor-owned pane range", () => {
+test("the pane arena contains authored environment glazing only", () => {
   const scene = cloneScene(defaultScene);
-  scene.environment = "stage";
-  scene.container.top = "closed";
-  const glass = buildSvoSceneGlass(scene, { environmentId: "stage" });
-  const container = glass.metadata.filter(({ role }) =>
-    role === "container-pane" || role === "container-top");
+  scene.environment = "conservatory";
+  scene.scenery = undefined;
+  const glass = buildSvoSceneGlass(scene, { environmentId: "conservatory" });
 
-  assert.deepEqual(container.map(({ side }) => side), ["floor", "ceiling"]);
-  assert.equal(container[1]!.paneId, container[0]!.paneId + 1,
-    "the dry renderer can only exclude compositor ownership as one contiguous pane-ID range");
+  assert.ok(glass.descriptors.length > 0);
+  assert.equal(glass.environmentPaneIndices.length, glass.descriptors.length);
+  assert.ok(glass.metadata.every(({ role }) => role === "environment-glazing"));
 
-  const range = svoDryRasterGlassRecordRange(
-    glass.packedRecords, container[0]!.paneId, container.length,
-  );
-  assert.equal(range.firstRecord, container.length);
-  assert.equal(range.recordCount, glass.descriptors.length - container.length,
-    "neither the floor nor ceiling may enter dry primary depth ahead of water");
+  const before = glass.cacheKey;
+  scene.solidVoxels.push({ operation: "clear", minimum: [-1, 0, 0],
+    maximumExclusive: [0, 1, 1] });
+  assert.equal(buildSvoSceneGlass(scene, { environmentId: "conservatory" }).cacheKey, before,
+    "SolidWorld edits must not expand into or invalidate the authored-pane arena");
 });
 
-test("an open tank publishes only its compositor-owned floor", () => {
-  const scene = cloneScene(defaultScene);
-  scene.environment = "stage";
-  scene.container.top = "open";
-  const glass = buildSvoSceneGlass(scene, { environmentId: "stage" });
-  const container = glass.metadata.filter(({ role }) =>
-    role === "container-pane" || role === "container-top");
+test("thin dielectric SVO hits shade and transmit from their material record", () => {
+  const shader = createSvoDrySceneFragmentWGSL();
 
-  assert.deepEqual(container.map(({ side }) => side), ["floor"]);
-  const range = svoDryRasterGlassRecordRange(
-    glass.packedRecords, container[0]!.paneId, container.length,
-  );
-  assert.equal(range.firstRecord, 1);
-  assert.equal(range.recordCount, glass.descriptors.length - 1);
+  assert.match(shader, /fn dryMaterialThinDielectric/);
+  assert.match(shader, /fn shadeDryThinDielectric/);
+  assert.match(shader, /dryTraceBeyondThinWall/);
+  assert.match(shader, /let cellExit=min\(nextT\.x,min\(nextT\.y,nextT\.z\)\)/);
+  assert.match(shader, /opaque=payload\.opaque!=0u;glassTransmission=payload\.transmittance/);
+});
+
+test("derived cone opacity excludes SolidWorld glass", () => {
+  const shader = liveSvoDerivedBuildWGSLFor();
+  assert.match(shader, /Container glass remains structural geometry, but it is not an opacity/);
+  assert.match(shader, /let sceneSolid=select\(sceneCoverage,0\.,\(sceneIdentity&0xffffu\)==1u\)/);
 });

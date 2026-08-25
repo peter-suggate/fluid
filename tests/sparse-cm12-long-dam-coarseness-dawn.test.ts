@@ -22,21 +22,9 @@ import {
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
-import { initializeSparseBrickAtlasFromScene } from
-  "../lib/methods/adaptive-mass/sparse-brick-atlas";
-import {
-  cloneSparseCM12TilePoolReceiver,
-  createSparseCM12TileClonePool,
-  sparseCM12TileClonePoolLookup,
-  sparseCM12TileCloneSeedsFromBricks,
-  SPARSE_CM12_TILE_CLONE_POOL_HEADER,
-} from "../lib/methods/adaptive-mass/sparse-cm12-tile-clone-pool";
 import { SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER as FPP_HEADER } from
   "../lib/methods/adaptive-mass/sparse-cm12-frame-plan-presentation";
-import {
-  adaptiveMassPresentationDimensionsForScene,
-  WebGPUAdaptiveMassSolver,
-} from
+import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
@@ -161,7 +149,7 @@ async function classifySparsePresentationSurface(
   }
 }
 
-dawnTest("long dam keeps deep work coarse and publishes new front receivers",
+dawnTest("long dam keeps deep work coarse and publishes new frontier pages",
   { timeout: 240_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-long-dam-coarseness-dawn.test.ts");
@@ -197,62 +185,28 @@ dawnTest("long dam keeps deep work coarse and publishes new front receivers",
       });
 
       const scene = createSparseCM12LongDamBreakScene();
-      // C0/C1 tile-clone cutover gate. Generation zero is authored directly
-      // from wet bricks; capacity headroom is a physical slab, not pre-created
-      // logical residency. The shipping solver assertions below remain the
-      // front-motion gate while consumers move onto this ABI.
-      const initialAtlas = initializeSparseBrickAtlasFromScene(scene, {
-        finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
-        brickFineResolution: 8,
-        surfaceFineRings: 1,
-      });
-      const cloneSeeds = sparseCM12TileCloneSeedsFromBricks(initialAtlas.bricks);
-      const clonePool = createSparseCM12TileClonePool(cloneSeeds);
-      const cloneHeader = SPARSE_CM12_TILE_CLONE_POOL_HEADER;
-      const logicalBrickCount = initialAtlas.brickDimensions.reduce(
-        (product, value) => product * value, 1,
-      );
-      assert.equal(cloneSeeds.length, 80,
-        "Long Dam generation zero must contain exactly its authored-fluid tiles");
-      assert.equal(clonePool.words[cloneHeader.residentCount], cloneSeeds.length);
-      assert.ok(clonePool.layout.capacity < logicalBrickCount,
-        "tile-pool headroom must not expand to logical-domain volume");
-      const seedCoordinates = new Set(cloneSeeds.map((seed) => seed.coordinate.join("/")));
-      const firstReceiver = cloneSeeds.map((seed) => [seed.coordinate[0] + 1,
-        seed.coordinate[1], seed.coordinate[2]] as [number, number, number])
-        .find((coordinate) => coordinate[0] < initialAtlas.brickDimensions[0]
-          && !seedCoordinates.has(coordinate.join("/")));
-      assert.ok(firstReceiver, "Long Dam authored set must expose a dry receiver face");
-      assert.equal(sparseCM12TileClonePoolLookup(clonePool, firstReceiver), undefined);
-      const clonedPool = cloneSparseCM12TilePoolReceiver(clonePool, firstReceiver, 8);
-      assert.notEqual(sparseCM12TileClonePoolLookup(clonedPool, firstReceiver), undefined);
-      assert.equal(clonedPool.words[cloneHeader.residentCount], cloneSeeds.length + 1);
-      assert.equal(clonedPool.words[cloneHeader.cloneCount], 1);
-
       const values = resolveMethodValues(adaptiveMassMethod, "balanced",
         SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides ?? {});
       solver = await adaptiveMassMethod.createSolverAsync!(
         device, scene, "balanced", values, undefined, () => {},
       ) as WebGPUAdaptiveMassSolver;
       assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], [192, 96, 32]);
-      assert.equal(solver.globalFineLevelSetSource.plan.maximumResidentBricks,
-        clonePool.layout.capacity,
-        "presentation allocation must follow physical pool capacity, not 1,152 dry keys");
+      const fineSource = solver.globalFineLevelSetSource;
+      const presentationCapacity = fineSource.plan.maximumResidentBricks;
       await solver.waitForSimulationReady();
       const initialPresentationPages =
         await solver.readPresentationPageAllocatorReceiptQA();
       assert.deepEqual(initialPresentationPages, {
         residentPages: 80, faultCode: 0, highWaterMark: 80,
-        cloneCount: 0, capacity: clonePool.layout.capacity,
+        cloneCount: 0, capacity: presentationCapacity,
       });
-      const fineSource = solver.globalFineLevelSetSource;
       const initialPresentationHeader = await readGPUWords(device,
         fineSource.worklist, 7);
       assert.deepEqual(Array.from(initialPresentationHeader.slice(0, 3)),
-        [1, 80, clonePool.layout.capacity],
+        [1, 80, presentationCapacity],
         "renderer publication must distinguish resident count from slab capacity");
       const initialPresentationMetadata = await readGPUWords(device,
-        fineSource.metadata, 4 * clonePool.layout.capacity);
+        fineSource.metadata, 4 * presentationCapacity);
       const presentationControl = fineSource.presentationControl!;
       const initialFPP = await readGPUWords(device, presentationControl.buffer,
         32, presentationControl.offset ?? 0);
@@ -289,13 +243,10 @@ dawnTest("long dam keeps deep work coarse and publishes new front receivers",
 
       const initial = await solver.readGPUActivityPolicy();
       const initialActive = initial.bricks.filter((brick) => brick.active);
-      assert.equal(initialActive.length, cloneSeeds.length,
+      assert.equal(initialActive.length, 80,
         "production generation zero must accept only authored-fluid tiles");
-      assert.deepEqual(new Set(initialActive.map((brick) => brick.coordinate.join("/"))),
-        new Set(cloneSeeds.map((seed) => seed.coordinate.join("/"))),
-        "production generation-zero keys must equal the authored-fluid set");
       assert.ok(initialActive.some((brick) => brick.supportMask !== 0),
-        "authored wet faces must seed receiver intent without allocating receivers");
+        "authored wet faces must seed frontier intent without allocating pages");
       assert.ok(initialActive.some((brick) => brick.acceptedResolution < 8));
       assert.ok(initialActive.some((brick) => brick.acceptedResolution === 8));
 
@@ -361,9 +312,9 @@ dawnTest("long dam keeps deep work coarse and publishes new front receivers",
       let finalSnapshot = evolved;
       let materialCenterAt24 = Number.NaN;
       const coordinateKey = (coordinate: readonly number[]) => coordinate.join("/");
-      // Mirror brickRequestedAsReceiver: a target consumes the bit pointing
+      // Mirror the shader's directional frontier request: a target consumes the bit pointing
       // back from each active neighbour's immutable support snapshot.
-      const requestedAsReceiver = (target: (typeof evolved.bricks)[number],
+      const requestedAsDestination = (target: (typeof evolved.bricks)[number],
         bricks: typeof evolved.bricks): boolean => {
         const byCoordinate = new Map(bricks.map((brick) =>
           [coordinateKey(brick.coordinate), brick]));
@@ -383,8 +334,8 @@ dawnTest("long dam keeps deep work coarse and publishes new front receivers",
         return false;
       };
 
-      // Run far enough for the fast leading face to clone dry receivers. A
-      // protected receiver must publish at B8 before transport targets it;
+      // Run far enough for the fast leading face to create dry frontier pages. A
+      // protected destination must publish at B8 before transport targets it;
       // accepting its coarse construction rung changes the material flow.
       for (let step = 3; step <= 96; step += 1) {
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
@@ -404,9 +355,9 @@ dawnTest("long dam keeps deep work coarse and publishes new front receivers",
         for (const brick of snapshot.bricks) {
           if (!brick.active || initialActiveKeys.has(brick.key)) continue;
           const movingSurface = (brick.reasons & (1 | 128)) === (1 | 128);
-          const urgentReceiver = requestedAsReceiver(brick, snapshot.bricks)
+          const urgentDestination = requestedAsDestination(brick, snapshot.bricks)
             && ((brick.reasons & 64) === 0 || (brick.reasons & 128) !== 0);
-          if (!movingSurface && !urgentReceiver) continue;
+          if (!movingSurface && !urgentDestination) continue;
           protectedNewKeys.add(brick.key);
           assert.equal(brick.acceptedResolution, 8,
             `new front brick ${brick.coordinate.join(",")} was accepted at ${
@@ -419,15 +370,15 @@ dawnTest("long dam keeps deep work coarse and publishes new front receivers",
       const evolvedPresentationPages =
         await solver.readPresentationPageAllocatorReceiptQA();
       const evolvedPresentationWorklist = await readGPUWords(device,
-        fineSource.worklist, 7 + clonePool.layout.capacity);
+        fineSource.worklist, 7 + presentationCapacity);
       const evolvedPresentationMetadata = await readGPUWords(device,
-        fineSource.metadata, 4 * clonePool.layout.capacity);
+        fineSource.metadata, 4 * presentationCapacity);
       const evolvedDirectoryCount = evolvedPresentationWorklist[1]!;
       const evolvedDirectoryPages = Array.from(evolvedPresentationWorklist.slice(
         7, 7 + evolvedDirectoryCount));
       const evolvedDirectoryKeys = evolvedDirectoryPages.map((page) =>
         evolvedPresentationMetadata[4 * page + 1]!);
-      assert.equal(evolvedPresentationWorklist[2], clonePool.layout.capacity);
+      assert.equal(evolvedPresentationWorklist[2], presentationCapacity);
       assert.equal(evolvedPresentationWorklist[4],
         Math.ceil(evolvedDirectoryCount / 64));
       assert.deepEqual(evolvedDirectoryKeys,
@@ -455,7 +406,7 @@ dawnTest("long dam keeps deep work coarse and publishes new front receivers",
       const finalActive = finalSnapshot.bricks.filter((brick) => brick.active);
       const finalNew = finalActive.filter((brick) => !initialActiveKeys.has(brick.key));
       assert.ok(protectedNewKeys.size > 0,
-        `the long-dam front must enter a protected receiver; finalActive=${
+        `the long-dam front must enter a protected destination page; finalActive=${
           finalActive.length} new=${finalNew.length} pages=${
           JSON.stringify(evolvedPresentationPages)} epoch=${JSON.stringify({
             steps: finalSnapshot.acceptedSteps,
@@ -474,7 +425,7 @@ dawnTest("long dam keeps deep work coarse and publishes new front receivers",
           })))}`);
       assert.ok(materialCenterAt24 >= 100,
         `Long Dam material flow regressed at paper step 24: center x=${
-          materialCenterAt24}; HEAD receipt is x=104.405 and the coarse-receiver `
+          materialCenterAt24}; HEAD receipt is x=104.405 and the coarse-destination `
           + "regression was x=92.747");
       assert.equal(evolvedPresentationPages.faultCode, 0,
         `presentation allocator must remain within its physical working set: ${
@@ -486,7 +437,7 @@ dawnTest("long dam keeps deep work coarse and publishes new front receivers",
       assert.equal(evolvedPresentationPages.highWaterMark,
         evolvedPresentationPages.residentPages);
       assert.ok(evolvedPresentationPages.highWaterMark
-        < initialAtlas.brickDimensions.reduce((product, value) => product * value, 1),
+        < fineSource.plan.brickDimensions.reduce((product, value) => product * value, 1),
       "presentation high-water must remain below logical-domain volume");
       assert.deepEqual(validationErrors, []);
     } finally {

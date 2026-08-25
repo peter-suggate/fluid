@@ -18,7 +18,7 @@ import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./te
 import type { EnvironmentId } from "./environments";
 import type { MethodProfile } from "./method-contract";
 import { sceneDamBreakFractions } from "./initial-fluid";
-import { boxTankWallFieldForScene } from "./scene-lattice";
+import { solidVoxelShellForScene } from "./scene-lattice";
 import { sceneWithEnvironment } from "./scenery-presets";
 import { withSceneryNodes } from "./scenery-edit";
 import type { SceneryGraph } from "./scenery-graph";
@@ -33,6 +33,14 @@ import {
   type ScenePresentationMode,
   type SceneVariant,
 } from "./scene-definition";
+
+/** Preset factories author only their extra solid edits; the catalog compiler
+ * adds the ordinary tank shell once, after the final lattice is known. */
+function sceneBody(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.solidVoxels = [];
+  return scene;
+}
 
 /**
  * The preset view of a catalog entry.
@@ -106,12 +114,8 @@ export const SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE: MethodProfile = Objec
     resolutionMode: "adaptive",
     maximumMacroSpanBricks: "auto",
     selectorMode: "surface",
-    receiverFloor: "auto",
     surfaceFineRings: 1,
-    receiverSupportRings: 9,
     timeStep: "paper",
-    pressureIterations: 64,
-    pressureRelativeTolerance: 4e-6,
   }),
 });
 
@@ -124,49 +128,69 @@ export const BOUNDED_POOL_TRANSFER_METHOD_PROFILE: MethodProfile = Object.freeze
     resolutionMode: "adaptive",
     maximumMacroSpanBricks: "auto",
     selectorMode: "surface",
-    receiverFloor: "auto",
     surfaceFineRings: 1,
-    receiverSupportRings: 2,
-    timeStep: "scene",
-    pressureIterations: 64,
-    pressureRelativeTolerance: 4e-6,
+    timeStep: "paper",
   }),
 });
 
 /**
- * A deliberately bounded fluid-transfer demonstration.
+ * A deliberately small uniform-solid transfer demonstration.
  *
- * The outer container is the receiving pool from t=0 and a compact water
- * column occupies its left end. There is deliberately no rigid divider: this
- * is the smallest useful baseline for watching region A wet region B without
- * conflating transport, dynamic sparse residency, and solid voxelization.
- * Every possible fluid destination is inside the authored 32x12x16 lattice.
+ * The authored fluid lattice is only the left tank. Ordinary SolidWorld
+ * voxels extend a catch basin beyond its positive-X wall, and a generic clear
+ * edit cuts a six-by-four floor-level opening through that wall. The solver
+ * therefore has no pre-authored fluid owner on the far side: it must create
+ * signed pages along the escaping fluid course, while the wider voxel basin is
+ * the finite catastrophe boundary.
  */
-export function createBoundedPoolTransferScene(): SceneDescription {
+function createExternalVoxelPoolTransferScene(sceneId: string): SceneDescription {
   const cellSize_m = 0.05;
-  const scene = cloneScene(defaultScene);
-  scene.sceneId = "bounded-pool-transfer";
+  const scene = sceneBody();
+  scene.sceneId = sceneId;
   scene.duration_s = 4;
   scene.container = {
     ...scene.container,
-    width_m: 32 * cellSize_m,
+    width_m: 8 * cellSize_m,
     height_m: 12 * cellSize_m,
     depth_m: 16 * cellSize_m,
-    // 8x9x16 initially wet cells inside a 32x12x16 pool.
-    fillFraction: (8 * 9 * 16) / (32 * 12 * 16),
+    fillFraction: 0.75,
     top: "open",
     fluidWallMode: "free-slip",
   };
   scene.voxelDomain = { finestCellSize_m: cellSize_m, brickSize_cells: 8 };
-  scene.container.wallField = boxTankWallFieldForScene(scene);
-  scene.fluid.initialCondition = "dam-break";
-  scene.fluid.initialDamBreakDimensions_m = {
-    x: 8 * cellSize_m,
-    y: 9 * cellSize_m,
-    z: 16 * cellSize_m,
-  };
+  scene.fluid.initialCondition = "tank-fill";
+  delete scene.fluid.initialDamBreakDimensions_m;
   delete scene.fluid.initialDamBreakOrigin_m;
   scene.fluid.surfaceTension_N_m = 0;
+  scene.solidVoxels = [
+    // The catalog compiler authors the small tank shell first. This clear is
+    // therefore literally a missing SolidWorld voxel region, not an opening
+    // descriptor consumed by the solver.
+    { operation: "clear", minimum: [8, 0, 5], maximumExclusive: [9, 4, 11] },
+    // Catch-basin floor, depth walls, and far wall. Its open top and open near
+    // end are closed by the small tank's existing shell everywhere except the
+    // clear above.
+    { operation: "fill", minimum: [8, -1, 0], maximumExclusive: [32, 0, 16],
+      materialId: 2 },
+    { operation: "fill", minimum: [8, 0, -1], maximumExclusive: [32, 16, 0],
+      materialId: 2 },
+    { operation: "fill", minimum: [8, 0, 16], maximumExclusive: [32, 16, 17],
+      materialId: 2 },
+    { operation: "fill", minimum: [32, 0, 0], maximumExclusive: [33, 16, 16],
+      materialId: 2 },
+    // The initial tank is twelve cells high but the connectivity unit is an
+    // eight-cell page. Extend only its vertical side voxels through the
+    // remainder of the second page so empty support cannot route around a wall
+    // before fluid reaches the open top. There is still no ceiling.
+    { operation: "fill", minimum: [-1, 12, 0], maximumExclusive: [0, 16, 16],
+      materialId: 2 },
+    { operation: "fill", minimum: [8, 12, 0], maximumExclusive: [9, 16, 16],
+      materialId: 2 },
+    { operation: "fill", minimum: [0, 12, -1], maximumExclusive: [8, 16, 0],
+      materialId: 2 },
+    { operation: "fill", minimum: [0, 12, 16], maximumExclusive: [8, 16, 17],
+      materialId: 2 },
+  ];
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.initialLiquidVolumes;
@@ -175,6 +199,10 @@ export function createBoundedPoolTransferScene(): SceneDescription {
   scene.rigidBodies = [];
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
   return scene;
+}
+
+export function createBoundedPoolTransferScene(): SceneDescription {
+  return createExternalVoxelPoolTransferScene("bounded-pool-transfer");
 }
 
 /** Canonical factor-one adaptive LoSasso profile for interactive water.
@@ -616,7 +644,7 @@ export function powerFillReservoirCells(liquidCells: PowerFillLiquidCells) {
  * other end of the plane.
  */
 export function createPowerFillScene(liquidCells: PowerFillLiquidCells): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = `power-fill-${POWER_FILL_EDGE_CELLS}-${liquidCells}`;
   scene.duration_s = 1;
   scene.rigidBodies = [];
@@ -649,6 +677,7 @@ export function createPowerFillScene(liquidCells: PowerFillLiquidCells): SceneDe
   delete scene.fluid.inflow;
   scene.fluid.surfaceTension_N_m = 0;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
 
@@ -722,7 +751,7 @@ export const BRICK_QUAD_DAM_SEED_M = { x: -0.2, y: 0.2, z: -0.2 };
  * 0.05 m lattice resolves the 0.8 m cube as exactly 16 cells per axis.
  */
 export function createTinyHydrostaticScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = "tiny-hydrostatic-two-level";
   scene.duration_s = 0.1;
   scene.rigidBodies = [];
@@ -751,7 +780,7 @@ export function createTinyHydrostaticScene(): SceneDescription {
  * pressure layout while remaining small enough for an isolated Dawn smoke.
  */
 export function createLargeHydrostaticScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = "large-hydrostatic-offset";
   scene.duration_s = 0.1;
   scene.rigidBodies = [];
@@ -784,7 +813,7 @@ export function createLargeHydrostaticScene(): SceneDescription {
  * preserves authoritative generalized-face projection at t=0.
  */
 export function createMinimalPowerDamBreakScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = "minimal-power-dam-break";
   scene.duration_s = 0.1;
   scene.rigidBodies = [];
@@ -815,7 +844,7 @@ export function createMinimalPowerDamBreakScene(): SceneDescription {
  * decomposition that is itself not an invariant of the octree algorithm.
  */
 export function createSymmetricExpansionScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = "symmetric-expansion";
   scene.duration_s = 1;
   scene.rigidBodies = [];
@@ -844,6 +873,7 @@ export function createSymmetricExpansionScene(): SceneDescription {
   scene.fluid.dynamicViscosity_Pa_s = 0;
   scene.fluid.surfaceTension_N_m = 0;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
 
@@ -920,6 +950,7 @@ export function createSparseCM12LongDamBreakScene(): SceneDescription {
   scene.fluid.initialDamBreakDimensions_m = { x: 0.4, y: 0.5, z: 0.4 };
   delete scene.fluid.initialDamBreakOrigin_m;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
 
@@ -1021,7 +1052,6 @@ export function createTallCellsFloodTerrain(): TerrainDescription {
     }
   }
   return {
-    solidRepresentation: "voxel",
     baseHeight_m: TALL_CELLS_FLOOD_DOWNHILL_HEIGHT_M,
     features: [],
     grid,
@@ -1038,7 +1068,7 @@ export function createTallCellsFloodTerrain(): TerrainDescription {
  * remains authoritative for solid contact and rendering.
  */
 export function createTallCellsHillsideDamBreakScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   const [nx, ny, nz] = TALL_CELLS_FLOOD_GRID;
   const cell_m = TALL_CELLS_FLOOD_CELL_SIZE_M;
   const reservoir = TALL_CELLS_FLOOD_RESERVOIR_M;
@@ -1057,7 +1087,6 @@ export function createTallCellsHillsideDamBreakScene(): SceneDescription {
     vessel: "none",
   };
   scene.voxelDomain = { finestCellSize_m: cell_m, brickSize_cells: 8 };
-  scene.container.wallField = boxTankWallFieldForScene(scene);
   scene.nominalResolution = { length_m: cell_m };
   scene.terrain = createTallCellsFloodTerrain();
   scene.scenery = TALL_CELLS_FLOOD_SCENERY;
@@ -1225,7 +1254,7 @@ export function createDeepPowerHydrostaticScene(): SceneDescription {
  * instrument: whatever the wall does across the sweep is not the fluid.
  */
 export function createPowerDropletScene(edgeCells: PowerDropletEdgeCells): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = `power-droplet-${edgeCells}`;
   scene.duration_s = 1;
   scene.rigidBodies = [];
@@ -1260,12 +1289,12 @@ export function createPowerDropletScene(edgeCells: PowerDropletEdgeCells): Scene
  * Bet-4 work-verdict scene: a genuinely volumetric pool, but bounded enough to
  * run as a one-step shipping-path gate. The topology-aligned 64x64x48 lattice
  * has 56 wet layers, so the regular deep interior dominates the free-surface
- * and tank-wall bands. It deliberately has no wave seed: D4 correctness remains
+ * and solid-contact bands. It deliberately has no wave seed: D4 correctness remains
  * the separate symmetric-expansion gate, while this scene measures only avoided
  * machinery.
  */
 export function createPowerHybridDeepOceanScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = "power-hybrid-deep-ocean";
   scene.rigidBodies = [];
   scene.container = { ...scene.container, width_m: 3.2, height_m: 3.2, depth_m: 2.4,
@@ -1311,7 +1340,7 @@ function createFreeFallDropScene(id: FreeFallDropSceneId): SceneDescription {
   const cornered = id === "corner-brick-drop" || id === "midair-corner-drop";
   const finestCellSize_m = 0.05;
   const dimensions_cells = { x: 24, y: lidAttached ? 16 : 24, z: 24 };
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = id;
   scene.duration_s = 0.5;
   scene.rigidBodies = [];
@@ -1367,7 +1396,7 @@ export type RigidCouplingOracleSceneId = "rigid-hydrostatic" | "rigid-float" | "
 
 /** Three small analytic sphere/tank scenes used by the Dawn coupling oracle. */
 export function createRigidCouplingOracleScene(id: RigidCouplingOracleSceneId): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = id;
   scene.duration_s = id === "rigid-hydrostatic" ? 0.5 : id === "rigid-float" ? 2 : 1;
   scene.container = { ...scene.container, width_m: 0.8, height_m: 0.8, depth_m: 0.8,
@@ -1408,7 +1437,7 @@ export const createRigidSinkScene = () => createRigidCouplingOracleScene("rigid-
  * atlas, and seam quality.
  */
 export function createBrickQuadDamBreakScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = "brick-quad-dam-break";
   scene.rigidBodies = [];
   scene.container = { ...scene.container, width_m: 0.8, height_m: 0.4, depth_m: 0.8, fillFraction: 0.25, top: "closed", fluidWallMode: "no-slip" };
@@ -1457,7 +1486,7 @@ const TWIN_DAM_BRICK_TIERS = Object.freeze({
  *    remesh, which loses most of their volume over half a second.
  */
 export function createTwinDamCollisionScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = "twin-dam-collision";
   scene.rigidBodies = [];
   scene.container = {
@@ -1506,7 +1535,7 @@ export function createTwinDamCollisionScene(): SceneDescription {
  * is raised to 32.
  */
 export function createOceanSeicheScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = "ocean-seiche";
   scene.rigidBodies = [];
   scene.container = { ...scene.container, width_m: 8.0, height_m: 2.4, depth_m: 2.0, fillFraction: 0.75, top: "closed", fluidWallMode: "no-slip" };
@@ -1538,7 +1567,7 @@ const paperCamera: Partial<CameraState> = { distance_m: 2.45, target_m: { x: 0, 
 const gardenCamera: Partial<CameraState> = { azimuth_rad: 0.58, elevation_rad: 0.38, distance_m: 2.95, target_m: { x: 0, y: 0.26, z: 0 } };
 
 export function createGardenPondScene(): SceneDescription {
-  const scene = applyGardenPool(cloneScene(defaultScene));
+  const scene = applyGardenPool(sceneBody());
   scene.sceneId = "garden-pond-still";
   scene.fluid.initialCondition = "tank-fill";
   const terrain = gardenPoolTerrain();
@@ -1660,13 +1689,13 @@ export function createHeroGardenHoseSceneWithSet(
 export type SparseCM12ComplexitySceneId =
   | "empty-16"
   | "full-16"
-  | "cut-receiver-seam-16"
+  | "cut-mixed-seam-16"
   | "double-x-32"
   | "planar-interface-16"
   | "first-split-bundle"
   | "recursive-split"
-  | "receiver-create"
-  | "receiver-activate"
+  | "frontier-create"
+  | "frontier-advance"
   | "row-only-replace"
   | "retire-reuse"
   | "symmetric-2d"
@@ -1688,24 +1717,24 @@ export type SparseCM12ComplexityScene = Readonly<{
  * so adding a rung cannot leave it hidden from the scene library.
  */
 export const SPARSE_CM12_COMPLEXITY_SCENES: readonly SparseCM12ComplexityScene[] = Object.freeze([
-  { id: "empty-16", ordinal: 0, title: "Empty complete B16/P16 domain",
+  { id: "empty-16", ordinal: 0, title: "Empty 16³-cell world",
     introducedFeature: "construction and advance with no accepted fluid ownership", defaultSteps: 2 },
-  { id: "full-16", ordinal: 1, title: "Smallest fully wet quiescent domain",
-    introducedFeature: "one complete B16/P16 macro owner, one accepted cell and no pressure rows", defaultSteps: 2 },
-  { id: "cut-receiver-seam-16", ordinal: 2, title: "Smallest production cut/receiver/seam bundle",
-    introducedFeature: "smallest one-cell cut, dry receivers, cross-owner rows and mixed seams", defaultSteps: 2 },
+  { id: "full-16", ordinal: 1, title: "Smallest fully wet quiescent world",
+    introducedFeature: "one complete macro owner, one accepted cell and no pressure rows", defaultSteps: 2 },
+  { id: "cut-mixed-seam-16", ordinal: 2, title: "Smallest production cut/mixed-seam bundle",
+    introducedFeature: "smallest one-cell cut, cross-owner rows and mixed seams", defaultSteps: 2 },
   { id: "double-x-32", ordinal: 3, title: "Doubled x extent",
     introducedFeature: "double domain/reservoir x extent with the same owner closure", defaultSteps: 2 },
   { id: "planar-interface-16", ordinal: 4, title: "Planar interface fanout",
     introducedFeature: "larger free-surface support and row fanout", defaultSteps: 2 },
   { id: "first-split-bundle", ordinal: 5, title: "First production split bundle",
-    introducedFeature: "first accepted moving rung/split/receiver transaction", defaultSteps: 8 },
+    introducedFeature: "first accepted moving rung/split/page transaction", defaultSteps: 8 },
   { id: "recursive-split", ordinal: 6, title: "Recursive split lineage",
     introducedFeature: "a child created in one generation later becomes a split parent", defaultSteps: 40 },
-  { id: "receiver-create", ordinal: 7, title: "Receiver creation beyond the support halo",
-    introducedFeature: "front travel beyond rings9 commits receiver creation", defaultSteps: 160 },
-  { id: "receiver-activate", ordinal: 8, title: "Receiver activation",
-    introducedFeature: "a later moving front consumes an existing receiver", defaultSteps: 240 },
+  { id: "frontier-create", ordinal: 7, title: "Demand-led frontier creation",
+    introducedFeature: "front travel commits a new world page", defaultSteps: 160 },
+  { id: "frontier-advance", ordinal: 8, title: "Repeated frontier advance",
+    introducedFeature: "a moving front advances through successive missing-solid pages", defaultSteps: 240 },
   { id: "row-only-replace", ordinal: 9, title: "Row-only seam replacement",
     introducedFeature: "row pages change while accepted cell IDs and scalar bits remain exact", defaultSteps: 40 },
   { id: "retire-reuse", ordinal: 10, title: "Stable-slot retirement and reuse",
@@ -1715,7 +1744,7 @@ export const SPARSE_CM12_COMPLEXITY_SCENES: readonly SparseCM12ComplexityScene[]
   { id: "symmetric-3d", ordinal: 12, title: "Three-dimensional D4 symmetric expansion",
     introducedFeature: "the production D4 correctness oracle", defaultSteps: 20 },
   { id: "brick-quad", ordinal: 13, title: "Brick-quad moving topology",
-    introducedFeature: "four-owner x/z-transpose topology and receiver churn", defaultSteps: 20 },
+    introducedFeature: "four-owner x/z-transpose topology and frontier churn", defaultSteps: 20 },
   { id: "long-dam", ordinal: 14, title: "Long dam traversal",
     introducedFeature: "large sparse moving front with repeated topology transactions", defaultSteps: 30 },
 ]);
@@ -1728,7 +1757,7 @@ function createSparseCM12LadderBox(
   fillFraction: number,
   options: Readonly<{ gravity?: boolean; dam?: readonly [number, number, number] }> = {},
 ): SceneDescription {
-  const scene = cloneScene(defaultScene);
+  const scene = sceneBody();
   scene.sceneId = `sparse-cm12-ladder-${id}`;
   scene.duration_s = 1;
   scene.rigidBodies = [];
@@ -1771,7 +1800,7 @@ export function createSparseCM12ComplexityScene(id: SparseCM12ComplexitySceneId)
       return createSparseCM12LadderBox(id, [16, 16, 16], 0, { gravity: false });
     case "full-16":
       return createSparseCM12LadderBox(id, [16, 16, 16], 1, { gravity: false });
-    case "cut-receiver-seam-16":
+    case "cut-mixed-seam-16":
       return createSparseCM12LadderBox(id, [16, 16, 16], 1 / 4096,
         { gravity: false, dam: [1, 1, 1] });
     case "double-x-32":
@@ -1786,11 +1815,10 @@ export function createSparseCM12ComplexityScene(id: SparseCM12ComplexitySceneId)
       // transactions and durations by the ladder.
       return createSparseCM12LadderBox("first-split-bundle", [32, 32, 16], 1 / 32,
         { gravity: true, dam: [8, 8, 16] });
-    case "receiver-create":
-    case "receiver-activate":
+    case "frontier-create":
+    case "frontier-advance":
     case "retire-reuse":
-      return createSparseCM12LadderBox("receiver-activate", [64, 32, 16], 1 / 64,
-        { gravity: true, dam: [8, 8, 16] });
+      return createExternalVoxelPoolTransferScene(`sparse-cm12-ladder-${id}`);
     case "symmetric-2d": {
       const scene = createSparseCM12LadderBox(id, [32, 16, 16], 1 / 8,
         { gravity: true, dam: [8, 8, 16] });
@@ -1828,7 +1856,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     shelf: "Tanks",
     environment: "stage",
     build: () => {
-      const scene = cloneScene(defaultScene);
+      const scene = sceneBody();
       scene.rigidBodies = [];
       return scene;
     },
@@ -1842,7 +1870,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     shelf: "Tanks",
     environment: "bathhouse",
     build: () => {
-      const scene = cloneScene(defaultScene);
+      const scene = sceneBody();
       scene.sceneId = "interactive-water-box-settled";
       scene.fluid.initialCondition = "tank-fill";
       return scene;
@@ -1862,7 +1890,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "bounded-pool-transfer",
     name: "Water transfer · bounded pool",
-    blurb: "A compact water column releases into a much wider closed voxel pool. The receiving area is finite and present from frame zero, making sparse wet-region activation easy to watch and safe to run.",
+    blurb: "A compact reservoir drains through a floor-level opening in a voxel dam. A wider closed voxel pool catches the jet while fluid pages appear only along the advancing front.",
     audience: "explore",
     shelf: "Tanks",
     environment: "stage",
@@ -2149,7 +2177,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     shelf: "Method comparisons",
     environment: "research-station",
     build: () => {
-      const scene = cloneScene(defaultScene);
+      const scene = sceneBody();
       scene.sceneId = "deep-water-grid-comparison";
       scene.container.height_m = 20;
       scene.container.fillFraction = 0.8;
@@ -2381,7 +2409,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "sparse-cm12-symmetric-expansion",
     name: "Sparse CM12 · symmetric expansion",
-    blurb: "The exact 32×16×32 D4 expansion oracle on the production Sparse CM12 B16/P16 resident. The card uses the real-time production pressure budget; a separate 108-iteration Dawn lane preserves the stricter accuracy oracle.",
+    blurb: "The exact 32×16×32 D4 expansion oracle on the production Sparse CM12 B8/P8 resident. The card uses the real-time production pressure budget; a separate 108-iteration Dawn lane preserves the stricter accuracy oracle.",
     audience: "validation",
     shelf: "Symmetry",
     environment: "stage",

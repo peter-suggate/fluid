@@ -28,7 +28,7 @@ export type EditorTool =
   | "terrain-lower"
   | "fluid-paint"
   | "fluid-erase"
-  | "tank-wall-cut"
+  | "solid-voxel-clear"
   | "fluid-ball"
   | "inflow"
   | "refinement-region";
@@ -133,10 +133,10 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     status: "active",
   },
   {
-    id: "tank-wall-cut",
-    label: "CUT OPENING",
+    id: "solid-voxel-clear",
+    label: "CLEAR SOLIDS",
     shortcut: "k",
-    hint: "drag corner-to-corner on any tank wall · pull through the floor to include the bottom row",
+    hint: "drag corner-to-corner from any occupied solid voxel · the highlighted voxels will be cleared",
     status: "active",
   },
   // A ball is not a coarser brush. The brushes quantize to the brick lattice,

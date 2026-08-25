@@ -33,19 +33,21 @@ const brick = (
   gamma: new Float64Array(resolution ** 3).fill(1),
 });
 
-test("BTI1 exactly enumerates equal-rung B8 cells, faces, and point owners", () => {
+test("BTI1 exactly enumerates equal-rung B8 cells, sparse-air faces, and point owners", () => {
   const brickDimensions = [2, 1, 1] as const;
   const atlas = createSparseAdaptiveMassAtlas([16, 8, 8], [
     brick([0, 0, 0], brickDimensions, 8),
     brick([1, 0, 0], brickDimensions, 8),
-  ], 7, undefined, 8);
+  ], 7, 8);
   const grid = buildSparseAtlasCompositeGrid(atlas);
   const image = compileSparseCM12BrickTileImage(grid);
   const receipt = validateSparseCM12BrickTileImage(image, grid);
 
   assert.equal(receipt.cellCount, 1024);
   assert.equal(receipt.activeTileCount, 16);
-  assert.equal(receipt.explicitFaceRowCount, 64);
+  // 64 rows join the two leaves. The other 640 are their exposed voxel faces;
+  // an authored domain edge is sparse air, not an implicit enclosing wall.
+  assert.equal(receipt.explicitFaceRowCount, 704);
   assert.equal(receipt.explicitAddressCollisionCount, 0);
   assert.equal(receipt.implicitInteriorRowCount + receipt.explicitFaceRowCount,
     grid.gradientRows.length);
@@ -64,7 +66,7 @@ test("BTI1 keeps a mixed 8:4 seam explicit while interiors remain arithmetic", (
   const atlas = createSparseAdaptiveMassAtlas([16, 8, 8], [
     brick([0, 0, 0], brickDimensions, 8),
     brick([1, 0, 0], brickDimensions, 4),
-  ], 3, undefined, 8);
+  ], 3, 8);
   const grid = buildSparseAtlasCompositeGrid(atlas);
   const image = compileSparseCM12BrickTileImage(grid);
   const receipt = validateSparseCM12BrickTileImage(image, grid);
@@ -88,7 +90,7 @@ test("BTI1 point directory covers a macro leaf without expanding cell topology",
   const brickDimensions = [2, 2, 2] as const;
   const atlas = createSparseAdaptiveMassAtlas([16, 16, 16], [
     brick([0, 0, 0], brickDimensions, 8, 2),
-  ], 11, undefined, 8);
+  ], 11, 8);
   const grid = buildSparseAtlasCompositeGrid(atlas);
   const image = compileSparseCM12BrickTileImage(grid);
   const receipt = validateSparseCM12BrickTileImage(image, grid);
@@ -104,7 +106,7 @@ test("BTI1 handles clipped edge bricks and leaves omitted spatial tiles invalid"
   const atlas = createSparseAdaptiveMassAtlas([14, 8, 8], [
     brick([0, 0, 0], brickDimensions, 8),
     brick([1, 0, 0], brickDimensions, 8),
-  ], 5, undefined, 8);
+  ], 5, 8);
   const grid = buildSparseAtlasCompositeGrid(atlas);
   const image = compileSparseCM12BrickTileImage(grid);
   const receipt = validateSparseCM12BrickTileImage(image, grid);
@@ -120,7 +122,7 @@ test("BTI1 sparse-air face families cover omitted in-domain bricks exactly", () 
   const atlas = createSparseAdaptiveMassAtlas([24, 8, 8], [
     brick([0, 0, 0], brickDimensions, 8),
     brick([2, 0, 0], brickDimensions, 8),
-  ], 2, undefined, 8);
+  ], 2, 8);
   const grid = buildSparseAtlasCompositeGrid(atlas);
   const image = compileSparseCM12BrickTileImage(grid);
   const receipt = validateSparseCM12BrickTileImage(image, grid);
@@ -136,7 +138,7 @@ test("BTI1 publishes one composable WGSL service ABI", () => {
   const brickDimensions = [1, 1, 1] as const;
   const atlas = createSparseAdaptiveMassAtlas([8, 8, 8], [
     brick([0, 0, 0], brickDimensions, 8),
-  ], 1, undefined, 8);
+  ], 1, 8);
   const image = compileSparseCM12BrickTileImage(buildSparseAtlasCompositeGrid(atlas));
   const source = createSparseCM12BrickTileImageWGSL({ layout: image.layout,
     arenaName: "acceptedTopology" });

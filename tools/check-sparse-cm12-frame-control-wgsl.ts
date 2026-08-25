@@ -25,7 +25,7 @@ const MODE_INVALIDATE_AFTER_SEAL = 3;
 const MODE_MISSING_BODY_EVIDENCE = 4;
 
 type Commands = readonly [
-  mode: number, bodyCount: number, boundaryLive: number,
+  mode: number, bodyCount: number, reserved: number,
   scalarD4: number, faceD4: number, cause: number, owner: number, outputMask: number,
 ];
 
@@ -54,8 +54,8 @@ fn snapshot(){
   output[5]=checkFCHeader(${SPARSE_CM12_FRAME_CONTROL_HEADER.faceParity}u);
   output[6]=checkFCHeader(${SPARSE_CM12_FRAME_CONTROL_HEADER.bodyGeneration}u);
   output[7]=checkFCHeader(${SPARSE_CM12_FRAME_CONTROL_HEADER.bodyCount}u);
-  output[8]=checkFCHeader(${SPARSE_CM12_FRAME_CONTROL_HEADER.boundaryGeneration}u);
-  output[9]=checkFCHeader(${SPARSE_CM12_FRAME_CONTROL_HEADER.boundaryLive}u);
+  output[8]=checkFCHeader(${SPARSE_CM12_FRAME_CONTROL_HEADER.reserved20}u);
+  output[9]=checkFCHeader(${SPARSE_CM12_FRAME_CONTROL_HEADER.reserved21}u);
   output[10]=checkFCHeader(${SPARSE_CM12_FRAME_CONTROL_HEADER.d4Generation}u);
   output[11]=checkFCHeader(${SPARSE_CM12_FRAME_CONTROL_HEADER.scalarD4Authority}u);
   output[12]=checkFCHeader(${SPARSE_CM12_FRAME_CONTROL_HEADER.faceD4Authority}u);
@@ -84,7 +84,7 @@ fn checkFrameControl(){
       if(commands[0]!=${MODE_MISSING_BODY_EVIDENCE}u){
         bodyOK=cm12FCPublishBody(commands[1]);
       }
-      let boundaryOK=cm12FCPublishBoundary(commands[2]!=0u);
+      let boundaryOK=true;
       var d4OK=false;
       if(commands[0]==${MODE_INVALIDATE_BEFORE_SEAL}u){
         d4OK=cm12FCInvalidateD4(commands[5],commands[6]);
@@ -259,7 +259,7 @@ async function main(): Promise<void> {
   if (!dawnModule) throw new Error("WEBGPU_NODE_MODULE is required");
   const control = createSparseCM12FrameControl({
     cellWorkgroups: 7, rowWorkgroups: 11, bodyCapacity: 8, initialGeneration: 5,
-    d4Capable: true, rigidCapable: true, boundaryCapable: true, baseWords: 64,
+    d4Capable: true, rigidCapable: true, baseWords: 64,
   });
   const byteMap = sparseCM12FrameControlByteMap(control);
   if (byteMap.length !== 1 + SPARSE_CM12_FRAME_CONTROL_FAMILY_COUNT

@@ -40,7 +40,7 @@ function region(
 test("Sparse CM12 packs authored cell-size bounds into its uniform tail", () => {
   const packed = packSparseCM12RefinementRegions([region("bounded", 4, 8)], lattice);
   assert.equal(packed.byteLength, SPARSE_CM12_REFINEMENT_REGION_BYTES);
-  assert.equal(SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET, 480);
+  assert.equal(SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET, 448);
   assert.equal(new Uint32Array(packed, 0, 4)[0], 1);
   assert.deepEqual(Array.from(new Float32Array(packed, 16, 8)),
     [8, 8, 8, 4, 24, 24, 24, 8]);

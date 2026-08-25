@@ -180,14 +180,9 @@ export const HERO_GARDEN_SOLVER_CELL_M = 0.025;
  * the node. The ground the water meets is therefore the ground that was
  * generated, with no resampling error between them.
  *
- * The renderer sees it too, which it did not always. `TerrainGrid` was once a
- * CPU-and-solver feature — the dry scene's WGSL evaluated terrain from
- * `terrainMeta` plus eight analytic features with no grid sampler anywhere, so
- * a sculpted vessel drew as a flat plane at `baseHeight_m` and this scene could
- * not be looked at at all. `packSvoDrySceneTerrainHeightfield` is the producer
- * the `terrainHeightfield` primitive kind was waiting for, and the ray now hits
- * the surface that was generated here. Sample spacing is therefore a *visual*
- * decision as well as a solver one.
+ * The canonical SolidWorld bake uses these samples too, so solver contact and
+ * presentation see the same voxel fractions and signed distances. Sample
+ * spacing is therefore a visual decision as well as a solver one.
  *
  * ---------------------------------------------------------------------------
  * The alignment argument, generalized — and it is the whole of the rule
@@ -946,6 +941,7 @@ export interface HeroGardenHoseOptions {
 
 export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): SceneDescription {
   const scene = cloneScene(defaultScene);
+  scene.solidVoxels = [];
   // The global lattice, coarsened only for a document that asks to be solved.
   // Every scene wants the finest picture; the solver is the one system that
   // cannot carry it, so it is the one that pays — rather than the whole product

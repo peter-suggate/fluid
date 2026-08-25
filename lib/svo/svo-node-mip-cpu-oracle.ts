@@ -11,8 +11,15 @@ import {
   type SvoNodeMipPyramidPlan,
   type SvoNodeMipRgba8,
 } from "./svo-node-mip-pyramid";
-import { terrainHeightAt } from "../core/terrain";
 import type { EnvironmentProxyPrimitive } from "../core/voxel-environments";
+import {
+  SOLID_WORLD_BRICK_CELLS,
+  sampleSolidWorld,
+  solidWorldForScene,
+  type SolidWorld,
+} from "../core/solid-world";
+import { sceneCellSizes_m } from "../core/scene-lattice";
+import { VOXEL_MATERIAL_IDS } from "../core/voxel-scene";
 
 /** WebGPU guarantees at least 8192 texels on a 2D axis; directory height is one row per page. */
 export const SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY = 8_192;
@@ -45,7 +52,7 @@ export interface SvoNodeMipCpuOraclePublication {
   selectedBasePageCount: number;
   omittedBasePageCount: number;
   proxyCandidatePageCount: number;
-  terrainCandidatePageCount: number;
+  solidWorldCandidatePageCount: number;
   /**
    * Pages the pyramid would need to represent every candidate. Capacity
    * selection drops base pages in Morton order once the budget is spent, and a
@@ -142,31 +149,35 @@ function pageRangeForProxy(
   return result;
 }
 
-function terrainSurfacePages(scene: SceneDescription, domain: SparseSceneDomainPlan, basePageDimensions: Triple): SvoNodeMipCoordinate[] {
-  if (!scene.terrain) return [];
+function solidWorldDestinationPages(scene: SceneDescription, world: SolidWorld,
+  domain: SparseSceneDomainPlan,
+  basePageDimensions: Triple): SvoNodeMipCoordinate[] {
   const result = new Map<string, SvoNodeMipCoordinate>();
-  const n = SVO_NODE_MIP_LAYOUT.interiorSize;
-  const solverFirstX = domain.solverGridOriginCells[0], solverFirstZ = domain.solverGridOriginCells[2];
-  const solverLastX = solverFirstX + domain.solverDimensionsCells[0], solverLastZ = solverFirstZ + domain.solverDimensionsCells[2];
-  for (let pageZ = Math.floor(solverFirstZ / n); pageZ <= Math.floor((solverLastZ - 1) / n); pageZ += 1) {
-    for (let pageX = Math.floor(solverFirstX / n); pageX <= Math.floor((solverLastX - 1) / n); pageX += 1) {
-      const firstX = Math.max(solverFirstX, pageX * n), lastX = Math.min(solverLastX, (pageX + 1) * n);
-      const firstZ = Math.max(solverFirstZ, pageZ * n), lastZ = Math.min(solverLastZ, (pageZ + 1) * n);
-      for (let cellZ = firstZ; cellZ < lastZ; cellZ += 1) for (let cellX = firstX; cellX < lastX; cellX += 1) {
-        const x = domain.worldOrigin_m.x + (cellX + .5) * domain.cellSize_m[0];
-        const z = domain.worldOrigin_m.z + (cellZ + .5) * domain.cellSize_m[2];
-        const height = terrainHeightAt(scene.terrain, x, z);
-        const surfaceCell = Math.floor((height - domain.worldOrigin_m.y) / domain.cellSize_m[1]);
-        // Include the cell containing the surface and its lower neighbour. This
-        // retains exact-boundary surfaces without allocating the deep solid volume.
-        for (const cellY of [surfaceCell - 1, surfaceCell]) {
-          const pageY = Math.floor(cellY / n);
-          if (pageX < 0 || pageZ < 0 || pageX >= basePageDimensions[0] || pageY < 0 || pageY >= basePageDimensions[1] || pageZ >= basePageDimensions[2]) continue;
-          const coordinate: SvoNodeMipCoordinate = [pageX, pageY, pageZ];
+  const cell = sceneCellSizes_m(scene);
+  const sourceOrigin: Triple = [-0.5 * scene.container.width_m, 0,
+    -0.5 * scene.container.depth_m];
+  const destinationPageSize = domain.cellSize_m.map((value) => value
+    * SVO_NODE_MIP_LAYOUT.interiorSize) as Triple;
+  for (const page of world.pages) {
+    if (!page.solidFraction.some((fraction, voxel) => fraction > 0
+      && page.materialId[voxel] !== VOXEL_MATERIAL_IDS.containerGlass)) continue;
+    const minimum = page.coordinate.map((value, axis) => sourceOrigin[axis]!
+      + value * SOLID_WORLD_BRICK_CELLS * cell[axis]!) as Triple;
+    const maximum = minimum.map((value, axis) => value
+      + SOLID_WORLD_BRICK_CELLS * cell[axis]!) as Triple;
+    const first = minimum.map((value, axis) => Math.max(0, Math.floor((value
+      - domain.worldOrigin_m[(['x', 'y', 'z'] as const)[axis]])
+      / destinationPageSize[axis]!))) as Triple;
+    const last = maximum.map((value, axis) => Math.min(basePageDimensions[axis]! - 1,
+      Math.ceil((value - domain.worldOrigin_m[(['x', 'y', 'z'] as const)[axis]])
+        / destinationPageSize[axis]!) - 1)) as Triple;
+    if (first.some((value, axis) => value > last[axis]!)) continue;
+    for (let z = first[2]; z <= last[2]; z += 1)
+      for (let y = first[1]; y <= last[1]; y += 1)
+        for (let x = first[0]; x <= last[0]; x += 1) {
+          const coordinate: SvoNodeMipCoordinate = [x, y, z];
           result.set(coordinateKey(coordinate), coordinate);
         }
-      }
-    }
   }
   return [...result.values()];
 }
@@ -191,38 +202,36 @@ function selectedWithinCapacity(candidates: readonly SvoNodeMipCoordinate[], lev
 
 function buildBaseInterior(
   page: SvoNodeMipCoordinate,
-  scene: SceneDescription,
   domain: SparseSceneDomainPlan,
   proxies: readonly EnvironmentProxyPrimitive[],
+  solidWorld: SolidWorld,
+  solidWorldOrigin: Triple,
+  solidWorldCell: Triple,
   samplesPerAxis: number,
 ): Uint8Array {
   const n = SVO_NODE_MIP_LAYOUT.interiorSize, channels = SVO_NODE_MIP_LAYOUT.channelCount;
   const result = new Uint8Array(n ** 3 * channels);
-  const hasTerrain = !!scene.terrain;
   for (let z = 0; z < n; z += 1) for (let y = 0; y < n; y += 1) for (let x = 0; x < n; x += 1) {
     const globalCell = [page[0] * n + x, page[1] * n + y, page[2] * n + z] as const;
     if (globalCell.some((value, axis) => value < 0 || value >= domain.sceneDimensionsCells[axis])) continue;
     const bounds = cellBounds(domain, globalCell), candidates = proxies.filter((proxy) => aabbOverlapsCell(proxy, bounds.minimum, bounds.maximum));
-    let occupied = 0;
+    let occupied = 0, solidCouldIntersect = false;
     const sampleCount = samplesPerAxis ** 3;
     for (let sampleZ = 0; sampleZ < samplesPerAxis; sampleZ += 1) for (let sampleY = 0; sampleY < samplesPerAxis; sampleY += 1) for (let sampleX = 0; sampleX < samplesPerAxis; sampleX += 1) {
       const point = bounds.minimum.map((minimum, axis) => minimum + ([sampleX, sampleY, sampleZ][axis] + .5) * domain.cellSize_m[axis] / samplesPerAxis) as Triple;
-      const insideTerrain = hasTerrain
-        && point[0] >= domain.solverBounds_m.min.x && point[0] <= domain.solverBounds_m.max.x
-        && point[2] >= domain.solverBounds_m.min.z && point[2] <= domain.solverBounds_m.max.z
-        && point[1] <= terrainHeightAt(scene.terrain, point[0], point[2]);
-      if (insideTerrain || candidates.some((proxy) => pointInsideProxy(proxy, point))) occupied += 1;
+      const solidCoordinate = point.map((value, axis) => Math.floor((value
+        - solidWorldOrigin[axis]!) / solidWorldCell[axis]!)) as Triple;
+      const solid = sampleSolidWorld(solidWorld, solidCoordinate);
+      const opaqueSolidFraction = solid.materialId === VOXEL_MATERIAL_IDS.containerGlass
+        ? 0 : solid.solidFraction;
+      solidCouldIntersect ||= opaqueSolidFraction > 0;
+      occupied += Math.max(opaqueSolidFraction,
+        Number(candidates.some((proxy) => pointInsideProxy(proxy, point))));
     }
-    const terrainCouldIntersect = hasTerrain && bounds.minimum[0] <= domain.solverBounds_m.max.x && bounds.maximum[0] >= domain.solverBounds_m.min.x
-      && bounds.minimum[2] <= domain.solverBounds_m.max.z && bounds.maximum[2] >= domain.solverBounds_m.min.z
-      && Math.max(...[
-        [bounds.minimum[0], bounds.minimum[2]], [bounds.maximum[0], bounds.minimum[2]],
-        [bounds.minimum[0], bounds.maximum[2]], [bounds.maximum[0], bounds.maximum[2]],
-        [.5 * (bounds.minimum[0] + bounds.maximum[0]), .5 * (bounds.minimum[2] + bounds.maximum[2])],
-      ].map(([x, z]) => terrainHeightAt(scene.terrain, x, z))) >= bounds.minimum[1];
     const offset = ((z * n + y) * n + x) * channels;
     result[offset] = Math.round(255 * occupied / sampleCount);
-    result[offset + 1] = occupied > 0 || candidates.length > 0 || terrainCouldIntersect ? 255 : 0;
+    result[offset + 1] = occupied > 0 || candidates.length > 0
+      || solidCouldIntersect ? 255 : 0;
     // Fluid lanes are deliberately zero: dynamic unified-octree fluid remains authoritative.
     result[offset + 2] = 0; result[offset + 3] = 0;
   }
@@ -257,10 +266,16 @@ export function buildSvoNodeMipCpuOraclePublication(
   if (!Number.isSafeInteger(levelCount) || levelCount < 1 || levelCount > 32) throw new RangeError("Node-mip CPU oracle level count must be in [1, 32]");
   const includeProxy = options.includeProxy ?? defaultProxyOpacity;
   const proxies = environmentPrimitives.filter(includeProxy);
+  const solidWorld = solidWorldForScene(scene);
+  const solidWorldOrigin: Triple = [-0.5 * scene.container.width_m, 0,
+    -0.5 * scene.container.depth_m];
+  const solidWorldCell = [...sceneCellSizes_m(scene)] as Triple;
   const proxyPages = new Map<string, SvoNodeMipCoordinate>();
   for (const proxy of proxies) for (const page of pageRangeForProxy(proxy, domain, basePageDimensions)) proxyPages.set(coordinateKey(page), page);
-  const terrainPages = new Map(terrainSurfacePages(scene, domain, basePageDimensions).map((page) => [coordinateKey(page), page]));
-  const candidates = new Map<string, SvoNodeMipCoordinate>([...proxyPages, ...terrainPages]);
+  const solidWorldPages = new Map(solidWorldDestinationPages(scene, solidWorld,
+    domain, basePageDimensions).map((page) => [coordinateKey(page), page]));
+  const candidates = new Map<string, SvoNodeMipCoordinate>([...proxyPages,
+    ...solidWorldPages]);
   const orderedCandidates = [...candidates.values()].sort((a, b) => {
     const ma = encodeSvoNodeMipMorton(a), mb = encodeSvoNodeMipMorton(b);
     return ma < mb ? -1 : ma > mb ? 1 : 0;
@@ -281,7 +296,9 @@ export function buildSvoNodeMipCpuOraclePublication(
   const values = new Map<string, Uint8Array>();
   const selectedSet = new Set(selected.map(coordinateKey));
   for (const page of plan.pages.filter(({ key }) => key.level === 0 && selectedSet.has(coordinateKey(key.coordinate)))) {
-    values.set(interiorKey(0, page.key.coordinate), buildBaseInterior(page.key.coordinate, scene, domain, proxies, samplesPerAxis));
+    values.set(interiorKey(0, page.key.coordinate), buildBaseInterior(
+      page.key.coordinate, domain, proxies, solidWorld, solidWorldOrigin,
+      solidWorldCell, samplesPerAxis));
   }
   for (let level = 1; level < levelCount; level += 1) {
     for (const page of plan.pages.filter(({ key }) => key.level === level)) {
@@ -315,7 +332,7 @@ export function buildSvoNodeMipCpuOraclePublication(
     selectedBasePageCount: selected.length,
     omittedBasePageCount: candidates.size - selected.length,
     proxyCandidatePageCount: proxyPages.size,
-    terrainCandidatePageCount: terrainPages.size,
+    solidWorldCandidatePageCount: solidWorldPages.size,
     requiredPageCount: requiredPageCount ?? plan.requestedPageCount,
   };
 }

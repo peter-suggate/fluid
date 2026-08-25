@@ -10,7 +10,7 @@ import { initializeRigidBodies } from "../lib/core/rigid-body";
 import type { GPURigidLoad } from "../lib/core/webgpu-eulerian";
 import { fluidExecutionDeviceFeatures } from "../lib/core/gpu-startup";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { boxTankWallFieldForScene } from "../lib/core/scene-lattice";
+import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
@@ -61,7 +61,7 @@ let latestLoad: GPURigidLoad | undefined;
 // 40 cubed, whose pressure rows exceed the bounded 16384-row SPGrid and
 // failed in the allocator before the first step.
 scene.voxelDomain.finestCellSize_m = Number(process.env.FLUID_VOXEL_CELL_SIZE ?? 0.025);
-scene.container.wallField = boxTankWallFieldForScene(scene);
+scene.solidVoxels = [...solidVoxelShellForScene(scene)];
 const values = losassoMethod.presetFor("balanced");
 // The octree publishes its t=0 sparse authority asynchronously; the first
 // substep flips a candidate epoch that only exists once that has fenced.

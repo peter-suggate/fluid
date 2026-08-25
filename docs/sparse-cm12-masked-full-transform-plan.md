@@ -387,7 +387,6 @@ The implementation is expected to touch, delete from or retire code in:
 - `lib/methods/adaptive-mass/sparse-cm12-vex-packet-frontier.wgsl.ts`
 - `lib/methods/adaptive-mass/sparse-cm12-vex-ibo1-image.ts`
 - `lib/methods/adaptive-mass/sparse-cm12-vex-ibo1-image.wgsl.ts`
-- `lib/methods/adaptive-mass/sparse-cm12-transport-producer-masks.wgsl.ts`
 - candidate topology/VEX effect publication and obsolete source-contract assertions.
 
 This is a deletion-led integration. Do not leave the prior production VEX selectable
@@ -806,9 +805,8 @@ rejected arm rather than retaining parallel production paths.
 | Full pressure-row projection | A direct full-PCM-row prototype was stopped before simulation: clean rows retain already-projected face values, so replaying every row would subtract an unchanged pressure jump twice. | **Rejected before timing** |
 | Exact compiled dirty-row transform | Six row families over 12 mask words per compact packet preserve the positive-owner x/y/z rows and the otherwise-unaddressable positive-side, negative-only sparse-air rows. Dirty preparation, pressure-bit changes, first-frame bootstrap and value-changing force/solid/boundary roots OR into the same direct mask. | **Accepted** |
 | Direct masked projection | The shared mask drives `projectPressureRow` directly and mirrors both face banks. B8/P8 projection fell from 3.9322 / 4.6531 ms to 2.8180 / 2.8836 ms median/p95. Symmetric exact, moving-solid/injection and ocean Dawn lanes pass. | **Accepted; FPA deleted** |
-| Compact gamma row masks | TPA now owns six `u32` words per compact packet. ITR compiles TPM's sealed surface ballot into the three positive-owner row families, and the same immutable mask is replayed for snapshot and refinement. One-sided sparse-air rows are exact gamma no-ops; their `ownerTerm == 0xf` sentinel is rejected before term decode. | **Accepted; DCA deleted** |
-| TPA gather-list gamma replay | Replacing direct compact replay with the existing gather-family list added list/atomic indirection. Gamma measured 2.2938 / 4.3909 ms versus 2.2282 / 3.9322 ms for direct replay, and the complete frame also worsened. | **Rejected and removed** |
-| Shared sharpening mask | The trace pass now overwrites TPA family 0's existing mask with the same scale-expanded sharpening closure. The two dedicated TPM sharpening planes, their header fields, counter and accessor were deleted. The original prepare/scatter phase boundary is retained. | **Accepted structurally; 1,310,720 B removed at B8 ocean** |
+| Accepted-row gamma diffusion | Snapshot and refinement both dispatch the accepted physical row worklist directly. `rowArea` applies the same SolidWorld aperture to initial and signed-frontier rows; no packet-local gamma topology is retained. | **Accepted; packet gamma masks deleted** |
+| Direct sharpening selection | Trace publishes the scale-expanded sharpening closure straight into TPA's compact sharpening mask. It does not publish a second topology representation. | **Accepted** |
 | Canonical compact TPA | The three transport families compiled identical packet sets and structural lane masks. They now share one compact ordinal list and transport mask; trace publishes its later scale-expanded sharpening closure into a separate compact mask. | **Accepted; bit-identical B8, 7,454,804 B removed** |
 
 The face result is a data-layout finding, not a reason to abandon compiled topology.
@@ -853,24 +851,13 @@ agreement; 24-sample ocean pass with zero validation errors and exact timing clo
 TypeScript, managed-pipeline, stage-timing and three-profile Dawn WGSL checks all
 pass.
 
-DCA's gamma row-scatter deletion is also complete. Its two source lists, row/cell stamps, six
-row and two cell planes, touched lists, header, indirect words, 12-byte indirect
-buffer, seven resident pipelines and copy-induced pass seam were deleted. Its VEX
-and cell halves were already production no-ops and were removed rather than kept as
-compatibility hooks. TPM's dead density ballot, counter and two stable density planes
-were deleted with it. Executable source contains no DCA or dynamic-closure symbols.
-
-The replacement adds a 491,520-byte gamma mask at B8/P8 and removes 10,486,272 bytes
-of DCA plus dead TPM storage, for a net 9,994,752-byte reduction. The first direct
-24-sample arm measured gamma diffusion at 2.2282 / 3.9322 ms versus 2.0316 / 2.4248 ms
-immediately before the cut, and producer-mask compilation at 0.5243 / 0.9175 ms
-versus 0.2621 / 0.5243 ms. This is accepted as a deletion-led result, not presented
-as a stage speedup. The rejected gather-list replay confirms that the remaining cost
-is packing/load shape: selecting fewer packets through an atomic list was slower than
-the uniform direct packet plane.
+DCA gamma row-scatter and the later packet-local gamma-mask replacement are both
+deleted. Gamma diffusion now consumes the accepted row worklist directly, leaving no
+row/cell stamps, packet gamma planes, touched lists, indirect buffer, compiler passes,
+or compatibility hooks for the retired representations.
 
 Production has no layout-free shader specialization or no-op DFRM hook. Resident
-composition requires ITR, TPA/TPM and DFRM, and the product build plus three-profile
+composition requires ITR, TPA and DFRM, and the product build plus three-profile
 Dawn checker compile that required path. The B8 500-step exact hash remains unchanged;
 the three-step moving-solid/injection lane and production ocean trajectory pass with
 zero validation faults. A same-frame FSM-driven theta or pressure-membership refresh
@@ -1093,7 +1080,7 @@ transition lane passes. The durable receipt is
 The main architectural result is deletion, not another control plane: VEX frontier
 planning, FPA projection authority, DCA dynamic closure and PTR row repair are gone;
 sharpening now reuses a shared TPA mask instead of owning another pair of stable packet planes.
-Production composition requires ITR/TPA/TPM/DFRM and has no no-op DFRM specialization.
+Production composition requires ITR/TPA/DFRM and has no no-op DFRM specialization.
 The dense face-support plane remains because the direct TEI sampler was substantially
 slower. Pressure retains canonical **cell** PCM rank order because the tested
 global/tiled reorders did not repay their extra work; row membership is a direct stable

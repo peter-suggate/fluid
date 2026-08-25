@@ -1,5 +1,4 @@
 import type { Quaternion, RigidBodyDescription, Vec3 } from "../core/model";
-import { terrainHeightAt, terrainNormalAt, type TerrainDescription } from "../core/terrain";
 
 /**
  * Deterministic CPU reference for the implicit surfaces consumed by the SVO
@@ -49,20 +48,12 @@ export interface SvoEllipsoidReference extends OrientedImplicitReference {
   radii_m: Vec3;
 }
 
-export interface SvoTerrainHeightfieldReference {
-  kind: "terrain-heightfield";
-  terrain?: TerrainDescription;
-  /** Central-difference spacing used by the existing terrain normal model. */
-  normalEpsilon_m?: number;
-}
-
 export type SvoImplicitReference =
   | SvoSphereReference
   | SvoBoxReference
   | SvoCapsuleReference
   | SvoCylinderReference
-  | SvoEllipsoidReference
-  | SvoTerrainHeightfieldReference;
+  | SvoEllipsoidReference;
 
 const NORMAL_EPSILON = 1e-12;
 
@@ -314,33 +305,18 @@ function sampleEllipsoid(reference: SvoEllipsoidReference, worldPoint_m: Vec3): 
   return worldSample({ signedDistance_m: inside ? -distance : distance, normal }, orientation);
 }
 
-function sampleTerrain(reference: SvoTerrainHeightfieldReference, worldPoint_m: Vec3): SvoImplicitSample {
-  assertFiniteVec3(worldPoint_m, "Implicit query point");
-  const epsilon_m = reference.normalEpsilon_m ?? 0.02;
-  assertPositive(epsilon_m, "Terrain normal epsilon");
-  const height_m = terrainHeightAt(reference.terrain, worldPoint_m.x, worldPoint_m.z);
-  return {
-    // The renderer's terrain implicit is an exact vertical height residual in
-    // metres. It has the correct sign and zero set; it is not an exact
-    // Euclidean distance away from sloping terrain.
-    signedDistance_m: worldPoint_m.y - height_m,
-    normal: terrainNormalAt(reference.terrain, worldPoint_m.x, worldPoint_m.z, epsilon_m),
-  };
-}
-
 export function sampleSvoImplicit(reference: SvoImplicitReference, worldPoint_m: Vec3): SvoImplicitSample {
   if (reference.kind === "sphere") return sampleSphere(reference, worldPoint_m);
   if (reference.kind === "box") return sampleBox(reference, worldPoint_m);
   if (reference.kind === "capsule") return sampleCapsule(reference, worldPoint_m);
   if (reference.kind === "cylinder") return sampleCylinder(reference, worldPoint_m);
-  if (reference.kind === "ellipsoid") return sampleEllipsoid(reference, worldPoint_m);
-  return sampleTerrain(reference, worldPoint_m);
+  return sampleEllipsoid(reference, worldPoint_m);
 }
 
 /** Map the repository's rigid-body dimension semantics to renderer primitives. */
 export function svoImplicitReferenceForRigidBody(
   body: Pick<RigidBodyDescription, "shape" | "dimensions_m" | "position_m" | "orientation">,
-): Exclude<SvoImplicitReference, SvoEllipsoidReference | SvoTerrainHeightfieldReference> {
+): Exclude<SvoImplicitReference, SvoEllipsoidReference> {
   const dimensions = body.dimensions_m;
   if (body.shape === "sphere") {
     return { kind: "sphere", center_m: { ...body.position_m }, radius_m: dimensions.x };

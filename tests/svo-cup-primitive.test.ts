@@ -172,7 +172,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let index = id.x;
   if (index >= arrayLength(&points)) { return; }
   let record = SvoPrimitiveRecord(recordWords[0], recordWords[1], bitcast<vec4f>(recordWords[2]), recordWords[3]);
-  let sample = svoEvaluatePrimitive(record, points[index].xyz, 0.0, vec3f(0.0), svoInvalidClusterPacking());
+  let sample = svoEvaluatePrimitive(record, points[index].xyz, svoInvalidClusterPacking());
   answers[index] = vec4f(sample.signedDistance_m, sample.normal.xyz);
 }`;
   device.pushErrorScope("validation");

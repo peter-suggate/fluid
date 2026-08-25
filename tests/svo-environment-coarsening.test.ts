@@ -86,7 +86,6 @@ test("a node splits for the finest solid in it and for nothing else", () => {
     createSvoEnvironmentCoarsening({
       primitives, worldOrigin_m: [0, 0, 0], brickSize: 8, maximumDepth: 3, crowdingTarget,
       nodeEdge_m: [[3.2, 3.2, 3.2], [1.6, 1.6, 1.6], [0.8, 0.8, 0.8], [0.4, 0.4, 0.4]],
-      terrainDomain: { worldOrigin_m: [0, 0, 0], cellSize_m: [0.05, 0.05, 0.05], dimensionsCells: [64, 64, 64] },
     });
   const node = { x: 0, y: 0, z: 0 };
 
@@ -130,11 +129,11 @@ test("the legibility floor is what makes the house set affordable at ocean scale
   assert.ok(ocean < SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES);
 });
 
-test("every stage scene is on the side of the budget its set puts it on", () => {
+test("automatic stage presentation follows its set budget; explicit modes remain explicit", () => {
   // The budget is a ceiling on a ceiling, so what matters is not that it is
   // exact but that nothing sits near it. Measured across the catalog the house
   // set costs at most 30 MiB and an authored room shell at least 887 MiB.
-  const carried: string[] = [], authored: string[] = [];
+  const carried: string[] = [], authored: string[] = [], explicit: string[] = [];
   for (const definition of SCENE_CATALOG) {
     if (definition.environment !== "stage") continue;
     const scene = sceneDocument(definition);
@@ -143,6 +142,12 @@ test("every stage scene is on the side of the budget its set puts it on", () => 
       { cellSize_m: scene.voxelDomain.finestCellSize_m, brickSize: scene.voxelDomain.brickSize_cells });
     const houseSet = JSON.stringify((scene.scenery?.nodes ?? []).map((node) => node.id))
       === JSON.stringify(studioStageSceneryGraph(scene).nodes.map((node) => node.id));
+    if (definition.presentationMode) {
+      explicit.push(`${definition.id} ${(bytes / 1024 ** 2).toFixed(1)} MiB`);
+      assert.equal(presentationModeForScene(definition, scene),
+        definition.presentationMode, definition.id);
+      continue;
+    }
     (houseSet ? carried : authored).push(`${definition.id} ${(bytes / 1024 ** 2).toFixed(1)} MiB`);
     assert.equal(bytes <= SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES, houseSet,
       `${definition.id} claims ${(bytes / 1024 ** 2).toFixed(1)} MiB`);
@@ -150,6 +155,8 @@ test("every stage scene is on the side of the budget its set puts it on", () => 
       houseSet ? "full-scene" : "fluid-only", definition.id);
   }
   assert.ok(carried.length > 20 && authored.length >= 10, `${carried.length} / ${authored.length}`);
+  assert.ok(explicit.some((entry) => entry.startsWith("tall-cells-hillside-dam-break 0.9 MiB")),
+    `expected the explicitly full-scene sparse hillside set, got ${explicit.join(", ")}`);
 });
 
 test("ocean-seiche presents the floor it was missing", () => {

@@ -33,21 +33,15 @@ import {
 } from "../svo/svo-field-program";
 import { svoProceduralNoiseWGSL } from "../svo/svo-procedural-material";
 import { cupWallThickness_m } from "./scene-shape";
-import type { SparseSceneTerrainField } from "./sparse-scene-terrain-field";
-import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
-
-/**
- * The material a ground voxel publishes, the same one the solver's own dense
- * terrain bake uses.
- *
- * It used to be a packed material/owner pair whose ownerless half was the
- * load-bearing part: ground was invisible to primary visibility so the analytic
- * marcher could stay the sole depth authority for it. The primary shades from
- * voxels alone now and the identity word's high half carries a baked normal
- * instead of an owner, so the ground is drawn by the same path as everything
- * else and this is a material id and nothing more.
- */
-export const SPARSE_SCENE_TERRAIN_MATERIAL_ID = VOXEL_MATERIAL_IDS.terrain;
+import type { SolidWorld } from "./solid-world";
+import {
+  WEBGPU_SOLID_WORLD_ENTRY_WORDS,
+  WEBGPU_SOLID_WORLD_FRACTION_WORDS,
+  WEBGPU_SOLID_WORLD_PHYSICS_PAGE_WORDS,
+  createWebgpuSolidWorldPageLayout,
+  writeWebgpuSolidWorldPages,
+  type WebgpuSolidWorldPageLayout,
+} from "./webgpu-solid-world-pages";
 
 export type SparseSceneVector3 = readonly [number, number, number];
 export type SparseSceneQuaternion = readonly [number, number, number, number];
@@ -358,7 +352,6 @@ export interface SparseScenePrimitiveUpdate {
 
 /** Adapt the analytic render descriptor into the shared live voxel vocabulary. */
 export function sparseScenePrimitiveForSvoDescriptor(descriptor: SvoPrimitiveDescriptor): SparseScenePrimitive {
-  if (descriptor.kind === "terrain-heightfield") throw new RangeError("Terrain heightfields are not finite live primitive updates");
   const center: SparseSceneVector3 = [descriptor.center_m.x, descriptor.center_m.y, descriptor.center_m.z];
   const orientation: SparseSceneQuaternion | undefined = "orientation" in descriptor && descriptor.orientation
     ? [descriptor.orientation.x, descriptor.orientation.y, descriptor.orientation.z, descriptor.orientation.w]
@@ -483,6 +476,13 @@ export interface SparseSceneProxyVoxelizerOptions {
   cellSize: SparseSceneVector3;
   /** World-space position of cell-coordinate (0, 0, 0)'s minimum corner. */
   worldOrigin?: SparseSceneVector3;
+  /** Canonical static-solid pages sampled directly by the rebuild shader. */
+  solidWorld?: SolidWorld;
+  /** Physical lattice of the canonical SolidWorld voxels. */
+  solidWorldLattice?: Readonly<{
+    origin_m: SparseSceneVector3;
+    cellSize_m: SparseSceneVector3;
+  }>;
   /** Maximum topology level. */
   finestLevel?: number;
   /** Fixed live primitive arena capacity. */
@@ -515,14 +515,6 @@ export interface SparseSceneProxyVoxelizerOptions {
    * each other on one device.
    */
   recordIndex?: SparseSceneRecordIndexOptions;
-  /**
-   * Columns the terrain field may hold, or zero for a world with no ground.
-   *
-   * One f32 per finest cell of the domain footprint — 24 KB for the hero garden
-   * — and it is a capacity rather than the field itself so that a sculpting
-   * stroke republishes heights without reallocating anything.
-   */
-  terrainFieldCapacityColumns?: number;
   /**
    * Maximum dirty bricks one encoded frame repairs. Zero — the default —
    * repairs a publication in one go, exactly as this pass always has.
@@ -638,17 +630,6 @@ export const SPARSE_SCENE_MAINTENANCE_FLAGS = Object.freeze({
   indexedInvalidation: 1,
   /** Binning reads the coarse record grid, not every record. */
   indexedBinning: 2,
-  /**
-   * A terrain column field is configured, so the derived header describing it
-   * exists and may be read.
-   *
-   * A flag rather than a zero test on the header's own dimension words, because
-   * the header is not allocated for a world that has neither an index nor
-   * terrain — and an out-of-bounds storage read is *clamped*, not zeroed, so
-   * "no ground" would have been decided by whatever the arena's last word
-   * happened to hold.
-   */
-  terrainField: 4,
 } as const);
 
 /**
@@ -656,12 +637,7 @@ export const SPARSE_SCENE_MAINTENANCE_FLAGS = Object.freeze({
  * arena. Its offset is derived on the GPU from the parameter block's cluster
  * offset and capacity, so everything described here costs no uniform lane.
  *
- * It began as the record index's own header and now also carries the terrain
- * column field, because the uniform's two spare lanes were already spent and
- * these are the only words in the arena whose address the shader can reach
- * without being told. It is allocated unconditionally for the same reason: a
- * world may have terrain and no record index, or the reverse, and a header that
- * exists only sometimes cannot describe either.
+ * The header exists exactly when the record index exists.
  */
 export const SPARSE_SCENE_INDEX_HEADER = Object.freeze({
   gridDimensionX: 0,
@@ -674,16 +650,7 @@ export const SPARSE_SCENE_INDEX_HEADER = Object.freeze({
   gridExtentX: 6,
   gridExtentY: 7,
   gridExtentZ: 8,
-  /** First word of the terrain column field, or anything when it is absent. */
-  terrainFieldOffset: 9,
-  /**
-   * Columns along x and z, at the finest cell size. Zero switches the whole
-   * terrain path off — there is no separate enable flag, because a field with
-   * no columns and a field that is not there are the same thing.
-   */
-  terrainFieldDimensionX: 10,
-  terrainFieldDimensionZ: 11,
-  wordCount: 16,
+  wordCount: 9,
 } as const);
 
 /** Bits per axis in a packed grid-cell coordinate; three of them share one word. */
@@ -1318,7 +1285,6 @@ export function sparseScenePrimitiveSignedDistance(
     primitiveExtent(primitive);
     const descriptor = abiDescriptorForPrimitive(primitive);
     return sampleSvoPrimitive(descriptor, { x: worldPoint[0], y: worldPoint[1], z: worldPoint[2] },
-      undefined,
       primitive.kind === "smooth-union-cluster" ? () => primitive.packing : undefined,
       primitive.kind === "field-program" ? () => primitive.program : undefined).signedDistance_m;
   }
@@ -1469,10 +1435,80 @@ export function sampleSparseScenePrimitiveCell(
  * in one, so the store becomes bit-disjoint atomics and the payload binding becomes
  * atomic with it — keyed on the payload mode, not the geometry format.
  */
+function solidWorldProxyWGSL(layout?: WebgpuSolidWorldPageLayout): string {
+  if (!layout) return /* wgsl */ `
+struct SolidWorldSample{fraction:f32,distance:f32,material:u32,normal:vec3f}
+fn sampleSolidWorld(_world:vec3f)->SolidWorldSample{
+  return SolidWorldSample(0.0,1e20,0u,vec3f(0.0));}`;
+  return /* wgsl */ `
+const SW_BASE:u32=${layout.baseWords}u;
+const SW_DIRECTORY_CAPACITY:u32=${layout.directoryCapacity}u;
+const SW_DIRECTORY_MASK:u32=${layout.directoryCapacity - 1}u;
+const SW_DIRECTORY_BASE:u32=${layout.directoryBaseWords}u;
+const SW_PAGE_BASE:u32=${layout.pageBaseWords}u;
+const SW_PAGE_WORDS:u32=${layout.pageWords}u;
+fn swHash(q:vec3i)->u32{var h=0x811c9dc5u;
+  h=(h^bitcast<u32>(q.x))*0x01000193u;h=h^(h>>16u);
+  h=(h^bitcast<u32>(q.y))*0x01000193u;h=h^(h>>16u);
+  h=(h^bitcast<u32>(q.z))*0x01000193u;h=h^(h>>16u);
+  h=h*0x01000193u;h=h^(h>>16u);return h|1u;}
+fn swFloorDiv8(v:i32)->i32{return select(v/8,(v-7)/8,v<0);}
+fn swPageAt(q:vec3i)->u32{let hash=swHash(q);var slot=hash&SW_DIRECTORY_MASK;
+  for(var probe=0u;probe<SW_DIRECTORY_CAPACITY;probe+=1u){
+    let at=SW_BASE+SW_DIRECTORY_BASE+slot*${WEBGPU_SOLID_WORLD_ENTRY_WORDS}u;
+    let state=atomicLoad(&maintenance[at]);if(state==0u){return INVALID_INDEX;}
+    if(state==2u&&atomicLoad(&maintenance[at+1u])==hash
+      &&bitcast<i32>(atomicLoad(&maintenance[at+2u]))==q.x
+      &&bitcast<i32>(atomicLoad(&maintenance[at+3u]))==q.y
+      &&bitcast<i32>(atomicLoad(&maintenance[at+4u]))==q.z){return atomicLoad(&maintenance[at+5u]);}
+    slot=(slot+1u)&SW_DIRECTORY_MASK;}return INVALID_INDEX;}
+fn swAddress(q:vec3i)->vec2u{let pageQ=vec3i(swFloorDiv8(q.x),swFloorDiv8(q.y),swFloorDiv8(q.z));
+  let local=q-pageQ*8;return vec2u(swPageAt(pageQ),u32(local.x+8*(local.y+8*local.z)));}
+fn swFractionQ8(q:vec3i)->u32{let a=swAddress(q);if(a.x==INVALID_INDEX){return 0u;}
+  let word=atomicLoad(&maintenance[SW_BASE+SW_PAGE_BASE+a.x*SW_PAGE_WORDS+(a.y>>2u)]);
+  return (word>>(8u*(a.y&3u)))&255u;}
+fn swSdfQ8(q:vec3i)->i32{let a=swAddress(q);if(a.x==INVALID_INDEX){return 32767;}
+  let word=atomicLoad(&maintenance[SW_BASE+SW_PAGE_BASE+a.x*SW_PAGE_WORDS
+    +${WEBGPU_SOLID_WORLD_FRACTION_WORDS}u+(a.y>>1u)]);let v=(word>>(16u*(a.y&1u)))&65535u;
+  return bitcast<i32>(select(v,v|0xffff0000u,(v&0x8000u)!=0u));}
+fn swMaterial(q:vec3i)->u32{let a=swAddress(q);if(a.x==INVALID_INDEX){return 0u;}
+  let word=atomicLoad(&maintenance[SW_BASE+SW_PAGE_BASE+a.x*SW_PAGE_WORDS
+    +${WEBGPU_SOLID_WORLD_PHYSICS_PAGE_WORDS}u+(a.y>>1u)]);
+  return (word>>(16u*(a.y&1u)))&65535u;}
+fn swOrigin()->vec3f{return vec3f(bitcast<f32>(atomicLoad(&maintenance[SW_BASE+16u])),
+  bitcast<f32>(atomicLoad(&maintenance[SW_BASE+17u])),bitcast<f32>(atomicLoad(&maintenance[SW_BASE+18u])));}
+fn swCell()->vec3f{return vec3f(bitcast<f32>(atomicLoad(&maintenance[SW_BASE+20u])),
+  bitcast<f32>(atomicLoad(&maintenance[SW_BASE+21u])),bitcast<f32>(atomicLoad(&maintenance[SW_BASE+22u])));}
+struct SolidWorldSample{fraction:f32,distance:f32,material:u32,normal:vec3f}
+fn sampleSolidWorld(world:vec3f)->SolidWorldSample{let cell=max(swCell(),vec3f(1e-8));
+  let latticePoint=(world-swOrigin())/cell;let q=vec3i(floor(latticePoint));
+  let fractionQ8=swFractionQ8(q);let fraction=f32(fractionQ8)/255.0;
+  let sdfDistance=f32(swSdfQ8(q))*min(cell.x,min(cell.y,cell.z))/256.0;
+  let g=vec3f(f32(swSdfQ8(q+vec3i(1,0,0))-swSdfQ8(q-vec3i(1,0,0)))/cell.x,
+    f32(swSdfQ8(q+vec3i(0,1,0))-swSdfQ8(q-vec3i(0,1,0)))/cell.y,
+    f32(swSdfQ8(q+vec3i(0,0,1))-swSdfQ8(q-vec3i(0,0,1)))/cell.z);
+  let sdfNormal=select(vec3f(0.0),normalize(g),dot(g,g)>1e-8);
+  // A full voxel is the exact cell AABB. Its centre SDF cannot distinguish
+  // opposite faces (an isolated voxel has symmetric empty neighbours), so use
+  // the same fraction lane to select its nearest face without introducing a
+  // second geometry record or path. Partial voxels retain the authored SDF.
+  let within=(latticePoint-floor(latticePoint))*cell;
+  let faceDistance=min(within,cell-within);var axis=0u;
+  if(faceDistance.y<faceDistance.x){axis=1u;}
+  if(faceDistance.z<faceDistance[axis]){axis=2u;}
+  var fullNormal=vec3f(0.0);fullNormal[axis]=select(-1.0,1.0,
+    within[axis]>=0.5*cell[axis]);
+  let full=fractionQ8==255u;
+  let distance=select(sdfDistance,-faceDistance[axis],full);
+  let normal=select(sdfNormal,fullNormal,full);
+  return SolidWorldSample(fraction,distance,swMaterial(q),normal);}`;
+}
+
 export function sparseSceneProxyVoxelizationShaderFor(
   profile: SparseBrickPayloadProfileName = "full",
   sceneGeometryFormat: SparseBrickSceneGeometryFormat = "f32x2",
   leafPayloadMode: SparseBrickLeafPayloadMode = "dense",
+  solidWorldLayout?: WebgpuSolidWorldPageLayout,
 ): string {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
@@ -1573,6 +1609,7 @@ ${SVO_GBUFFER_NORMAL_OCT8_WGSL}
 ${sparseBrickSceneIdentityWordCodecWGSL()}
 ${bandedCodec}
 ${bandedEncoder}
+${solidWorldProxyWGSL(solidWorldLayout)}
 
 const BRICK_ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;
 const BRICK_DIRTY:u32=${SVO_BRICK_LIFECYCLE.dirtyBit}u;
@@ -1587,7 +1624,6 @@ const TOPOLOGY_INCOMPLETE:u32=${SPARSE_SCENE_MAINTENANCE_OVERFLOW.topology}u;
 const NO_MATERIAL_OWNER:u32=0xffff0000u;
 const INVALID_INDEX:u32=${SPARSE_BRICK_INVALID_INDEX}u;
 const INDEXED_BINNING:u32=${SPARSE_SCENE_MAINTENANCE_FLAGS.indexedBinning}u;
-const TERRAIN_FIELD:u32=${SPARSE_SCENE_MAINTENANCE_FLAGS.terrainField}u;
 const CHUNK_BEGIN:u32=${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.chunkBegin}u;
 const CHUNK_END:u32=${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.chunkEnd}u;
 const CHUNK_CURSOR:u32=${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.chunkCursor}u;
@@ -1681,16 +1717,6 @@ fn globalRecordsOffset()->u32{
  * or orientation has to be transmitted or agreed. Zero columns is the encoding
  * for "no ground", which is why there is no separate enable bit.
  */
-fn terrainFieldDimensions()->vec2u{
-  return vec2u(indexWord(${SPARSE_SCENE_INDEX_HEADER.terrainFieldDimensionX}u),
-    indexWord(${SPARSE_SCENE_INDEX_HEADER.terrainFieldDimensionZ}u));
-}
-fn terrainFieldPresent()->bool{return (maintenanceFlags()&TERRAIN_FIELD)!=0u;}
-fn terrainColumnHeight(dimensions:vec2u,column:vec2u)->f32{
-  let clamped=min(column,dimensions-vec2u(1u));
-  return bitcast<f32>(loadArenaWord(indexWord(${SPARSE_SCENE_INDEX_HEADER.terrainFieldOffset}u)
-    +clamped.y*dimensions.x+clamped.x));
-}
 fn primitiveCapacity()->u32{return (dirtyRegionOffset()-primitiveBoundsOffset())/8u;}
 fn recordCellRangeOffset()->u32{return globalRecordsOffset()+primitiveCapacity();}
 fn unpackGridCoordinate(word:u32)->vec3u{
@@ -1879,11 +1905,9 @@ fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
   if (primitiveType == 4u) { return capsuleDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y); }
   if (primitiveType == 5u) { return torusDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y); }
   if (primitiveType == 6u) { return coneDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y, primitive.extentIdentity.z); }
-  // Shapes 7-10 are the render ABI's, evaluated by the render ABI. Terrain height
-  // is unreachable here: a heightfield is not a finite live primitive and the
-  // adapters refuse it before it can be packed.
+  // Shapes 7-10 are the render ABI's, evaluated by the render ABI.
   if (primitiveType == ${SPARSE_SCENE_PRIMITIVE_TYPES["smooth-union-cluster"]}u) {
-    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_SMOOTH_UNION_CLUSTER), world, 0.0,
+    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_SMOOTH_UNION_CLUSTER), world,
       sceneClusterPacking(scenePrimitiveArenaSlot(primitive)));
   }
   // The ABI's arm already divides by the tape's Lipschitz constant, so what comes
@@ -1891,19 +1915,19 @@ fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
   // exactly what the centre-sample occupancy argument and the corner sweep below
   // are built on. See svoFieldProgramDistance_m in lib/svo-primitive-abi.ts.
   if (primitiveType == ${SPARSE_SCENE_PRIMITIVE_TYPES["field-program"]}u) {
-    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_FIELD_PROGRAM), world, 0.0,
+    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_FIELD_PROGRAM), world,
       svoInvalidClusterPacking());
   }
   if (primitiveType == ${SPARSE_SCENE_PRIMITIVE_TYPES["round-cone"]}u) {
-    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_ROUND_CONE), world, 0.0,
+    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_ROUND_CONE), world,
       svoInvalidClusterPacking());
   }
   if (primitiveType == ${SPARSE_SCENE_PRIMITIVE_TYPES["rounded-cylinder"]}u) {
-    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_ROUNDED_CYLINDER), world, 0.0,
+    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_ROUNDED_CYLINDER), world,
       svoInvalidClusterPacking());
   }
   if (primitiveType == ${SPARSE_SCENE_PRIMITIVE_TYPES.cup}u) {
-    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_CUP), world, 0.0,
+    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_CUP), world,
       svoInvalidClusterPacking());
   }
   return 1e20;
@@ -1982,37 +2006,6 @@ fn primitiveSurfaceNormal(primitive: ScenePrimitive, world: vec3f) -> vec3f {
   let magnitude = length(local.xyz);
   if (!(magnitude > 1e-8)) { return vec3f(0.0); }
   return svoQuaternionRotate(record.orientation, local.xyz / magnitude);
-}
-/**
- * The ground's normal, differentiated from the heightfield the writer sampled.
- *
- * \`(-dh/dx, 1, -dh/dz)\`, not the gradient of the \`y - h\` pseudo-distance stored
- * in the geometry lane: that pseudo-distance's gradient is the surface normal on
- * a gentle slope and collapses toward +Y on a steep one, which is what drew the
- * pond coping's vertical wall as columns pointing at the sky.
- *
- * The one-sided differences are minmod-limited for the reason the per-pixel
- * version was: a centred difference at an arris straddles the drop, so the flat
- * top within a cell of the edge is handed a normal tilted out over the wall and
- * every upper silhouette grows a dark serrated fringe. The limiter takes the
- * smaller of the two slopes and zero where they disagree in sign, so it can only
- * ever reduce a slope and never invent one.
- *
- * The window is the voxel's own column spacing rather than a tuned epsilon,
- * because at bake time the sample lattice and the differencing lattice are the
- * same lattice — which the per-pixel version could not assume.
- */
-fn terrainColumnNormal(dimensions: vec2u, column: vec2u, scale: u32, columnExtent: vec2f) -> vec3f {
-  let step = max(scale, 1u);
-  let centre = terrainColumnHeight(dimensions, column);
-  let ahead = vec2f(
-    terrainColumnHeight(dimensions, column + vec2u(step, 0u)) - centre,
-    terrainColumnHeight(dimensions, column + vec2u(0u, step)) - centre) / columnExtent;
-  let behind = vec2f(
-    centre - terrainColumnHeight(dimensions, column - min(column, vec2u(step, 0u))),
-    centre - terrainColumnHeight(dimensions, column - min(column, vec2u(0u, step)))) / columnExtent;
-  let slope = select(vec2f(0.0), select(ahead, behind, abs(behind) < abs(ahead)), ahead * behind > vec2f(0.0));
-  return normalize(vec3f(-slope.x, 1.0, -slope.y));
 }
 fn linearIndex64(gid:vec3u,groups:vec3u)->u32{
   return gid.x+gid.y*groups.x*64u+gid.z*groups.x*groups.y*64u;
@@ -2269,38 +2262,12 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   // marched kind's normal is the most expensive thing in this loop.
   var bestPrimitive = INVALID_INDEX;
   var bestNormal = vec3f(0.0);
-  // The ground, folded in before the candidates and on exactly the same terms.
-  //
-  // It is not a candidate and never occupies a slot: a heightfield covers the
-  // whole footprint, so binning it per brick would put one copy of it in every
-  // brick of the domain and buy nothing — every brick that has ground has *the*
-  // ground. Coverage is the exact column fraction rather than a distance read
-  // through the planar law, expressed as the pseudo-distance that law inverts
-  // to it: \`0.5 - coverage/(2*cellRadius)\` is the fraction, so handing it
-  // \`cellRadius*(1 - 2f)\` yields f. That keeps one reduction for every source
-  // of coverage in this pass instead of a second, terrain-shaped one, and the
-  // two agree at both ends (+cellRadius is empty, -cellRadius is full).
-  //
-  // The distance lane keeps \`y - h\`, which is the field the derived builder
-  // differentiates for radiance normals; the fraction takes the tallest column
-  // under the voxel's own footprint so a ridge crossing a coarse voxel is not
-  // lost to a centre sample.
-  if(terrainFieldPresent()){
-    let dimensions=terrainFieldDimensions();
-    let first=worldCell.xz;
-    let last=first+vec2u(scale-1u);
-    let centre=first+vec2u(scale>>1u);
-    bestDistance=world.y-terrainColumnHeight(dimensions,centre);
-    var tallest=terrainColumnHeight(dimensions,centre);
-    tallest=max(tallest,terrainColumnHeight(dimensions,first));
-    tallest=max(tallest,terrainColumnHeight(dimensions,vec2u(last.x,first.y)));
-    tallest=max(tallest,terrainColumnHeight(dimensions,vec2u(first.x,last.y)));
-    tallest=max(tallest,terrainColumnHeight(dimensions,last));
-    // Mirrors terrainCellSolidFraction in lib/terrain.ts.
-    let fraction=clamp((tallest-(world.y-0.5*cellExtent.y))/cellExtent.y,0.0,1.0);
-    bestCoverage=cellRadius*(1.0-2.0*fraction);
-    bestMaterial=${SPARSE_SCENE_TERRAIN_MATERIAL_ID}u;
-    bestNormal=terrainColumnNormal(dimensions,centre,scale,cellExtent.xz);
+  let staticSolid=sampleSolidWorld(world);
+  if(staticSolid.fraction>0.0){
+    bestDistance=staticSolid.distance;
+    bestCoverage=cellRadius*(1.0-2.0*staticSolid.fraction);
+    bestMaterial=staticSolid.material;
+    bestNormal=staticSolid.normal;
   }
   let candidateCount=min(atomicLoad(&maintenance[record+1u]),candidatesPerBrick());
   for(var slot=0u;slot<candidateCount;slot+=1u){
@@ -2791,6 +2758,7 @@ export class SparseSceneProxyVoxelizer {
   private readonly primitiveBuffer: GPUBuffer;
   private readonly clusterCapacity: number;
   private readonly fieldProgramCapacity: number;
+  private readonly solidWorldLayout?: WebgpuSolidWorldPageLayout;
   private readonly maintenanceArena: GPUBuffer;
   private readonly maintenanceDispatch: GPUBuffer;
   private readonly paramsBuffer: GPUBuffer;
@@ -2818,11 +2786,6 @@ export class SparseSceneProxyVoxelizer {
   private readonly regionCellOffsetWords: number;
   private readonly gridItemCapacity: number;
   private readonly globalRecordCapacity: number;
-  private readonly terrainFieldOffsetWords: number;
-  private readonly terrainFieldCapacityColumns: number;
-  private readonly derivedHeaderAllocated: boolean;
-  /** Columns of the configured ground, or `undefined` for a world without one. */
-  private terrainFieldDimensions?: readonly [number, number];
   private readonly brickBudget: number;
   private pending = false;
   private destroyed = false;
@@ -2896,17 +2859,9 @@ export class SparseSceneProxyVoxelizer {
     this.gridItemCapacity = index ? positiveInteger(index.itemCapacity ?? primitiveCapacity * 16, "Record index item capacity") : 0;
     this.globalRecordCapacity = index ? primitiveCapacity : 0;
     const gridCells = index ? index.dimensions[0] * index.dimensions[1] * index.dimensions[2] : 0;
-    // The header is the one place in the arena whose address the shader derives
-    // rather than being told, so it exists whenever *anything* it describes
-    // does — and a world may have terrain without a record index, or the
-    // reverse. A world with neither still allocates and writes exactly what it
-    // always did.
-    this.terrainFieldCapacityColumns = nonNegativeInteger(
-      options.terrainFieldCapacityColumns ?? 0, "Terrain field capacity");
-    this.derivedHeaderAllocated = index !== undefined || this.terrainFieldCapacityColumns > 0;
     this.regionCellOffsetWords = checkedArenaWords(
-      this.indexHeaderOffsetWords + (this.derivedHeaderAllocated ? SPARSE_SCENE_INDEX_HEADER.wordCount : 0),
-      "Derived block header");
+      this.indexHeaderOffsetWords + (index ? SPARSE_SCENE_INDEX_HEADER.wordCount : 0),
+      "Record index header");
     const leafClaimOffsetWords = checkedArenaWords(
       this.regionCellOffsetWords + (index ? dirtyRegionCapacity * SPARSE_SCENE_REGION_CELL_WORDS : 0), "Dirty region cell arena");
     const gridOffsetsOffsetWords = checkedArenaWords(
@@ -2917,13 +2872,20 @@ export class SparseSceneProxyVoxelizer {
       gridItemsOffsetWords + this.gridItemCapacity, "Record grid items");
     const recordCellRangeOffsetWords = checkedArenaWords(
       globalRecordsOffsetWords + this.globalRecordCapacity, "Unlocalized record list");
-    // Last block in the arena, and the only one whose offset is transmitted
-    // rather than derived — in the header, because both spare uniform lanes are
-    // already spent. Putting it last keeps every existing offset untouched.
-    this.terrainFieldOffsetWords = checkedArenaWords(
-      recordCellRangeOffsetWords + (index ? primitiveCapacity * 2 : 0), "Unlocalized record cell ranges");
+    const solidWorldBaseWords = checkedArenaWords(
+      recordCellRangeOffsetWords + (index ? primitiveCapacity * 2 : 0),
+      "Unlocalized record cell ranges");
+    if (options.solidWorld && !options.solidWorldLattice) {
+      throw new RangeError("A SolidWorld GPU image needs its physical lattice");
+    }
+    this.solidWorldLayout = options.solidWorld ? createWebgpuSolidWorldPageLayout({
+      baseWords: solidWorldBaseWords,
+      authoredPageCount: options.solidWorld.pages.length,
+      includesMaterial: true,
+    }) : undefined;
     const arenaWords = checkedArenaWords(
-      this.terrainFieldOffsetWords + this.terrainFieldCapacityColumns, "Scene maintenance arena");
+      this.solidWorldLayout?.totalWords ?? solidWorldBaseWords,
+      "Scene maintenance arena");
     this.brickBudget = nonNegativeInteger(options.bricksPerFrameBudget ?? 0, "Bricks per frame budget");
     const maintenanceDispatchBytes = 4 * 3 * 4;
     this.allocatedBytes = primitiveBytes + arenaWords * 4 + maintenanceDispatchBytes + 128;
@@ -2939,6 +2901,10 @@ export class SparseSceneProxyVoxelizer {
       label: `${label} fixed maintenance arena`, size: arenaWords * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
+    if (this.solidWorldLayout && options.solidWorld && options.solidWorldLattice) {
+      writeWebgpuSolidWorldPages(device.queue, this.maintenanceArena,
+        this.solidWorldLayout, options.solidWorld, [0, 0, 0], options.solidWorldLattice);
+    }
     this.maintenanceDispatch = device.createBuffer({
       label: `${label} maintenance dispatch arguments`, size: maintenanceDispatchBytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
@@ -2981,7 +2947,8 @@ export class SparseSceneProxyVoxelizer {
     this.shaderModule = this.device.createShaderModule({
       label: `${this.label} live maintenance shader`,
       code: sparseSceneProxyVoxelizationShaderFor(
-        this.tree.payloadProfile, this.tree.sceneGeometryFormat, this.tree.leafPayloadMode),
+        this.tree.payloadProfile, this.tree.sceneGeometryFormat,
+        this.tree.leafPayloadMode, this.solidWorldLayout),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,
@@ -3001,66 +2968,6 @@ export class SparseSceneProxyVoxelizer {
     }
   }
 
-  /**
-   * Upload the ground, or clear it.
-   *
-   * Independent of `publish` on purpose: the ground is static in every scene
-   * that has one, so it is written once and read by every rebuild from then on,
-   * and a still scene stays at zero maintenance dispatches because nothing about
-   * terrain is republished per revision. A sculpting stroke calls this again and
-   * separately dirties the field's bounds — the caller owns that pairing,
-   * because the caller owns the revision the dirty region belongs to.
-   */
-  configureTerrainField(field: SparseSceneTerrainField | undefined): void {
-    if (this.destroyed) throw new Error("Cannot configure terrain on a destroyed scene voxelizer");
-    if (!field) {
-      this.terrainFieldDimensions = undefined;
-      this.writeDerivedHeaderTerrain();
-      return;
-    }
-    const [nx, nz] = field.dimensions;
-    const columns = nx * nz;
-    if (!Number.isSafeInteger(columns) || columns < 1) throw new RangeError("Terrain field must hold at least one column");
-    if (columns !== field.heights_m.length) throw new RangeError("Terrain field dimensions do not match its heights");
-    if (columns > this.terrainFieldCapacityColumns) {
-      throw new RangeError(`Terrain field needs ${columns} columns but the fixed arena holds ${this.terrainFieldCapacityColumns}`);
-    }
-    this.terrainFieldDimensions = [nx, nz];
-    this.device.queue.writeBuffer(this.maintenanceArena, this.terrainFieldOffsetWords * 4, field.heights_m);
-    this.writeDerivedHeaderTerrain();
-  }
-
-  /** Whether the ground reaches the scene lanes, and how wide its lattice is. */
-  get terrainFieldStatus(): { present: boolean; columns: number; capacityColumns: number } {
-    const dimensions = this.terrainFieldDimensions;
-    return {
-      present: dimensions !== undefined,
-      columns: dimensions ? dimensions[0] * dimensions[1] : 0,
-      capacityColumns: this.terrainFieldCapacityColumns,
-    };
-  }
-
-  /** The three header words describing the ground, in the layout the shader reads. */
-  private terrainHeaderWords(): Uint32Array<ArrayBuffer> {
-    const dimensions = this.terrainFieldDimensions;
-    return new Uint32Array([
-      this.terrainFieldOffsetWords,
-      dimensions?.[0] ?? 0,
-      dimensions?.[1] ?? 0,
-    ]);
-  }
-
-  private writeDerivedHeaderTerrain(): void {
-    // A world with neither an index nor a terrain capacity has no header block
-    // at all, and writing one would run off the end of the arena. Nothing reads
-    // these words in that configuration — the uniform flag is what decides
-    // whether the ground exists — so there is nothing to write.
-    if (!this.derivedHeaderAllocated) return;
-    this.device.queue.writeBuffer(this.maintenanceArena,
-      (this.indexHeaderOffsetWords + SPARSE_SCENE_INDEX_HEADER.terrainFieldOffset) * 4,
-      this.terrainHeaderWords());
-  }
-
   /** Whether a budgeted publication is still converging, and how far it has to go. */
   get budgetStatus(): { budget: number; plannedChunks: number; chunksRemaining: number; converging: boolean } {
     return {
@@ -3069,6 +2976,22 @@ export class SparseSceneProxyVoxelizer {
       chunksRemaining: this.chunksRemaining,
       converging: this.chunksRemaining > 0 || this.pending,
     };
+  }
+
+  /** Replace the canonical static-solid image without allocating a host mirror. */
+  setSolidWorld(world: SolidWorld): void {
+    const layout = this.solidWorldLayout;
+    const lattice = this.options.solidWorldLattice;
+    if (!layout || !lattice) {
+      if (world.pages.length > 0) throw new Error("This voxelizer has no SolidWorld capacity");
+      return;
+    }
+    const clear = this.device.createCommandEncoder({ label: "Clear SVO SolidWorld image" });
+    clear.clearBuffer(this.maintenanceArena, 4 * layout.baseWords,
+      4 * (layout.totalWords - layout.baseWords));
+    this.device.queue.submit([clear.finish()]);
+    writeWebgpuSolidWorldPages(this.device.queue, this.maintenanceArena,
+      layout, world, [0, 0, 0], lattice);
   }
 
   /** What the last publication asked of the record index, for lanes that measure it. */
@@ -3154,8 +3077,7 @@ export class SparseSceneProxyVoxelizer {
     floats.set(worldOrigin, 0);
     floats.set(this.options.cellSize, 4);
     uints[3] = budgeted ? this.brickBudget : 0;
-    uints[7] = (index ? SPARSE_SCENE_MAINTENANCE_FLAGS.indexedBinning : 0)
-      | (this.terrainFieldDimensions ? SPARSE_SCENE_MAINTENANCE_FLAGS.terrainField : 0);
+    uints[7] = index ? SPARSE_SCENE_MAINTENANCE_FLAGS.indexedBinning : 0;
     uints.set([publication.primitives.length, publication.dirtyRegions.length, this.options.finestLevel ?? 0xffffffff, publication.revision], 8);
     uints.set([this.options.dirtyBrickCapacity, this.options.candidatesPerDirtyBrick, this.primitiveBoundsOffsetWords, this.dirtyRegionOffsetWords], 12);
     uints.set([this.dirtyBrickOffsetWords, this.candidateOffsetWords, this.stateOffsetWords, this.clusterOffsetWords], 16);
@@ -3206,10 +3128,6 @@ export class SparseSceneProxyVoxelizer {
     header[SPARSE_SCENE_INDEX_HEADER.invalidationCellCount] = regionCells.cellCount;
     header[SPARSE_SCENE_INDEX_HEADER.gridItemCapacity] = this.gridItemCapacity;
     headerFloats.set(index.cellExtent_m, SPARSE_SCENE_INDEX_HEADER.gridExtentX);
-    // The header is shared, and this write covers all sixteen words: restating
-    // the terrain lanes here is what stops a publication from zeroing a ground
-    // it knows nothing about.
-    header.set(this.terrainHeaderWords(), SPARSE_SCENE_INDEX_HEADER.terrainFieldOffset);
     header.set(regionCells.words, SPARSE_SCENE_INDEX_HEADER.wordCount);
     this.device.queue.writeBuffer(this.maintenanceArena, this.indexHeaderOffsetWords * 4, header);
     const gridOffsetsOffsetWords = this.regionCellOffsetWords

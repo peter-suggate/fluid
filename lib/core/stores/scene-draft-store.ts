@@ -43,7 +43,7 @@ export interface SceneDraft {
 
 export type SceneDraftSubject =
   | "tank"
-  | "tank-wall"
+  | "solid-voxels"
   | "fluid-body"
   | "body"
   | "scenery"

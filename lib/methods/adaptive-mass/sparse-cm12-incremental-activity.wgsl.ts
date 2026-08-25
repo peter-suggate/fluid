@@ -97,18 +97,12 @@ fn incrementalActivityPublishFaceBrickClosure(brick:u32){
   let generation=incrementalActivityGeneration();
   atomicStore(&activity[ACTIVITY_BRICK_VELOCITY_STAMP+brick],generation);
   _=incrementalActivityClaimBrick(brick);
-  let dimensions=(p.dimensions.xyz+vec3u(BRICK_FINE_RESOLUTION-1u))
-    /BRICK_FINE_RESOLUTION;
-  let key=topology[p.topologyOffsets2.z+2u*brick+1u];
-  let xy=dimensions.x*dimensions.y;let z=key/xy;let remainder=key-z*xy;
-  let y=remainder/dimensions.x;let x=remainder-y*dimensions.x;
-  let origin=vec3i(i32(x),i32(y),i32(z));let span=i32(brickSpan(brick));
+  let origin=cm12WorldLeafCoordinate(brick);let span=i32(brickSpan(brick));
   for(var dz=-1;dz<=span;dz+=1){for(var dy=-1;dy<=span;dy+=1){
     for(var dx=-1;dx<=span;dx+=1){
       if(dx>=0&&dx<span&&dy>=0&&dy<span&&dz>=0&&dz<span){continue;}
       let q=origin+vec3i(dx,dy,dz);
-      if(any(q<vec3i(0))||any(q>=vec3i(dimensions))){continue;}
-      let owner=brickDirectoryLookupAtCoordinate(vec3u(q));
+      let owner=brickDirectoryLookupAtSignedCoordinate(q);
       if(owner!=INVALID){
         atomicStore(&activity[ACTIVITY_BRICK_VELOCITY_STAMP+owner],generation);
         _=incrementalActivityClaimBrick(owner);

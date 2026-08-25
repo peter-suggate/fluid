@@ -246,7 +246,7 @@ function fixtureArenaOwners(): Set<SparseCM12PhaseArenaOwner> {
     key: sparseBrickKey([0, 0, 0], logical), coordinate: [0, 0, 0], resolution: 4,
     density: new Float64Array(4 ** 3), gamma: new Float64Array(4 ** 3).fill(1),
   };
-  const atlas = createSparseAdaptiveMassAtlas([16, 16, 16], [source], 31, undefined, 16);
+  const atlas = createSparseAdaptiveMassAtlas([16, 16, 16], [source], 31, 16);
   const grid = buildSparseAtlasCompositeGrid(atlas);
   const htp1 = createSparseCM12HotTopology(grid).layout;
   const plan = createSparseCM12PhaseArenaPlan({

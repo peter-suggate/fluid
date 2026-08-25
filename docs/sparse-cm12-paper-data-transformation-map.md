@@ -84,15 +84,15 @@ blessed on.
 
 ## 2. What runs today, sweep by sweep
 
-One row per encoded launch group, production branch only (`legacyHostAuthorityOracleForQA`
-and QA layouts excluded). "×n" is the launch count in that row. The K column names the
+One row per encoded launch group; optional QA instrumentation layouts are excluded.
+"×n" is the launch count in that row. The K column names the
 paper kernel the row serves; blank means it serves none.
 
 ### 2.1 transport-velocity-extension — 3.867 / 6.226 ms — K1
 
 | sweep | ×n | class | domain / access | notes |
 |---|---|---|---|---|
-| begin / publish body / publish boundary / seal frame control (FCA) | 4 singletons + 1 copy | B | — | translates host inputs into indirect families; never reads fields |
+| begin / publish body / publish terrain / seal frame control (FCA) | 4 singletons + 1 copy | B | — | translates external rigid/terrain inputs into indirect families; never reads fields |
 | rigid voxelization; moving-solid roots; 2 bypass noops | 3 | B/P | solid cells list (L) | only the roots dispatch does physics, and only with moving bodies |
 | begin VEX execution; initialize candidates | 2 | B/T | blast list (L) | the blast was sealed by last frame's presentation stage |
 | `advanceVelocityExtensionCandidates{1..8}` | 8 | P + T | arrival-ordered blast list (L); per edge: pressure CSR neighbour (C), `rowAccepted` 4–10 loads, `cellActive` 5 loads, stamp, 4 velocity loads (+ `atomicExchange` on cached corners) | **this is K1**; 8 depth-specialised pipelines doing the same Jacobi sweep; adjacency is the *pressure* edge CSR, not T2 |
@@ -115,11 +115,11 @@ mini: 0.92 → 0.13 ms (launches free, loop bodies are the cost).
 
 | sweep | ×n | class | domain / access | notes |
 |---|---|---|---|---|
-| begin DCA; begin TPM | 2 | B | — | |
+| begin DCA | 1 | B | — | |
 | `traceGammaAndBeta` | 1 | P + T | trace family packets (P); RK2 1–16 substeps; each corner `cm12TeiOwnerAtFine` (T3 via TEI, ~10 loads/4 levels at HEAD); β fixed-point atomics (A); publishes sharpening mask | **K2** + writes the 56 B/cell departure cache (= the paper's "A not stored explicitly") |
 | `scatterDensityDeficit` | 1 | P + T | deficit packets (P); forward RK2; 8-corner TEI; atomics | **K4** |
 | `gatherConservativeDensity` | 1 | P + B | packets (P); reloads cached 8 corners (S); writes ρ', γ'; publishes SURFACE / DENSITY-CHANGED masks; `tra1MarkScalarCellClosure` | **K3** + mask publication |
-| seal TPM; `compileSparseCM12VexRootMasks`; seal DCA sources; `compileSparseCM12DynamicTRA`; seal targets + 1 copy | 5 + 1 | B (+T) | gather packets; VEX-root compile still walks cell incidence/row terms (C) | turns "density changed" into VEX roots and gamma row masks |
+| `compileSparseCM12VexRootMasks`; seal DCA sources; `compileSparseCM12DynamicTRA`; seal targets + 1 copy | 4 + 1 | B (+T) | gather packets; VEX-root compile still walks cell incidence/row terms (C) | turns "density changed" into VEX roots |
 
 Ablation (ocean fast lane, 7.7 ms): trace 4.6 / closures 1.8 / tile floor 1.3 /
 stencil 0.5 / launch 0.13. The trace is a **dependent-chain latency** (constant-velocity
@@ -149,7 +149,7 @@ sides compute the identical flow) needs no receipts, no clears, no row masks.
 | sweep | ×n | class | domain / access | notes |
 |---|---|---|---|---|
 | native clears of receipts and ∆ρ | 2 clearBuffer | B | template cell count | |
-| `prepareSharpeningField` | 1 | P + T | TPM sharpening-mask packets (P); 6-stencil via incidence (C) for δ±/max-diff; `sharpeningStats` incidence + opposite-side term walks | **K6** |
+| `prepareSharpeningField` | 1 | P + T | TPA sharpening selection (P); 6-stencil via incidence (C) for δ±/max-diff; `sharpeningStats` incidence + opposite-side term walks | **K6** |
 | `scatterSharpeningMass` | 1 | P + T | same packets; ∇ρ trace, default 7 substeps, TEI point owners (T3) + 8-corner stencil; fixed-point atomics | **K7** |
 | `finalizeSharpening` | 1 | P | all accepted cells | apply receipts (was 1.90 ms before the FSM rewrite removed its CAS fan-out; arithmetic 0.13) |
 | `clearSolidExcess` / `scatterSolidExcess` / `finalizeSolidExcess` / bypass noop | 4 | P + T | FCA solid-cell family (L); two incidence sweeps (C); atomics | **K8** |
@@ -279,7 +279,7 @@ arena binding; a level is a load whose address depends on a previous load).
 | **T2 neighbours** | pressure/incidence CSR: incidence begin/end → row → `rowAccepted` (4–10) → term begin/end → cell, coefficient; gamma pair CSR; pressure edge CSR for VEX | 10–16 / 4–5 per row | K5 (ITR rows), K6 stats, K8, K10 RHS + submerged (twice), K11 rows, K12 collocate, diagnostics, A1 census, VEX sweeps ×8, VEX-root compile, final-scalar one-ring | uniform tile bit: neighbours are `±1, ±r, ±r²` arithmetic (0 loads); seam/wall tiles: a compiled accepted-edge list, 2 loads / 1 level, template order preserved; `rowAccepted` a bitset | IBO1/ITR1 exist as transforms but only DCA gamma rows consume ITR; the resident image carries IRL + geometry, not a per-cell accepted-edge view, so every other consumer still walks the pressure CSR |
 | **T3 point → corners** | `ownerCellAt`: LOD1 directory → brickSpan → acceptedBrickResolution → template cell range ×2 → brickActive → cellResolution → cellOpenVolume; transport uses TEI packet-staged owners; face-prep uses a 33 MB dense raster; sharpening/tracers/D4/presentation use the legacy chain | 10–12 / 4 per corner (≈140 loads / 6 levels per trilinear sample) | K2 ×≤16 substeps × 8 corners, K4, K7 ×7 substeps × 11, K8, K9 (via raster), tracers, D4 ×8, presentation | one widened brick descriptor (slot, rung, cellBase, origin, extent) staged per workgroup for the 27-neighbourhood: 1 shared-memory read + local arithmetic, then 8 plain field loads; one collocated velocity plane written by VEX commit + collocate so every sampler reads the same expression | three ownership representations coexist (LOD1, packed-u16, TEI2); the plane exists but only transport reads it; the face raster is still the only path that beat the gate — because the trace is latency-bound and an owner lookup deeper than ~1 level loses to a raster |
 | **T4 face → cells** | row record + `rowAccepted` + template owner range; projection rows through FPA's private catalogue | 4–10 / 3 | K9 forces, K11, K12 faces, body forces, VEX per-edge | row tiles × `rowAccepted` bit; the two cells by arithmetic on (brick, rung, axis, local) | FPA's catalogue duplicates the row identity ITR already provides |
-| **T5 classify** | computed in ≥6 places: TPM masks in transport, FSM ballots in sharpening, `pressureCellSubmerged` twice, PCM membership classify, FPA marks, activity marks, VEX roots (6 causes) — each via its own incidence walk + CAS | 3 M CAS spins / frame on ocean | every stage that selects | **one** per-cell classification written once per frame (at collocate, when ρ⁵ and u are final): liquid / air / band-depth / solid / over-full / changed, as 64-bit tile ballots per brick; every consumer reads the ballot | FSM (this tree) is the first instance of the right shape; it is consumed by transport packets and VEX roots only, and projection/pressure/activity still author their own |
+| **T5 classify** | computed in ≥6 places: transport, FSM ballots in sharpening, `pressureCellSubmerged` twice, PCM membership classify, FPA marks, activity marks, VEX roots (6 causes) — each via its own incidence walk + CAS | 3 M CAS spins / frame on ocean | every stage that selects | **one** per-cell classification written once per frame (at collocate, when ρ⁵ and u are final): liquid / air / band-depth / solid / over-full / changed, as 64-bit tile ballots per brick; every consumer reads the ballot | FSM (this tree) is the first instance of the right shape; it is consumed by transport packets and VEX roots only, and projection/pressure/activity still author their own |
 
 The single sentence: **every consumer re-derives T1–T5 per visit because each was
 built as a separate authority with its own exact dirty set; the fix is one lattice
@@ -293,7 +293,7 @@ Ordered by how much structure they delete per unit of physics risk. Each names w
 removes, what it keeps, and the receipt that says it is safe to try.
 
 ### S1. The frame is fourteen maps over one lattice image
-Replace per-stage authorities (FCA, TPA, DCA, TPM, FSM, VEX roots/blast, FPA, PCM
+Replace per-stage authorities (FCA, TPA, DCA, FSM, VEX roots/blast, FPA, PCM
 frontier) with: a lattice image compiled in candidate-transfer (T1–T4) and one
 classification ballot written in collocate (T5). Every kernel dispatches tile-major
 over ballots. Launch budget: ~30 physics + ~30 adaptivity + ~10 pressure setup +
@@ -359,7 +359,7 @@ launches compute is a property of K11's output, so K11 ballots it. Then one cell
 collocate u_c, divergence max (workgroup partials), and **write the T5 ballots for the
 next frame** (liquid / band / changed / over-full) — the one place the classification
 is authored. Deletes FPA's catalogue, diagnostics' re-walk, VEX-root CAS, activity-mark
-CAS, TPM/FSM publication passes (they become reads of this ballot).
+CAS and FSM publication passes (they become reads of this ballot).
 *Evidence:* FPA on ocean selects every pressure row whenever the solve ran; finalize
 CAS fan-out 1.77 of 1.90 ms; diagnostics 0.52 ms to ask a static question.
 

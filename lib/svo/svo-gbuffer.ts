@@ -48,7 +48,7 @@ export const SVO_GBUFFER_PRECISION = Object.freeze({
 
 export const SVO_GBUFFER_FIELD_SOURCES = Object.freeze({
   none: 0, structuralDiscrete: 1,
-  analyticPrimitive: 4, terrainHeightfield: 5, rasterFallback: 6,
+  analyticPrimitive: 4, rasterFallback: 6,
 } as const);
 export type SvoGBufferFieldSource = typeof SVO_GBUFFER_FIELD_SOURCES[keyof typeof SVO_GBUFFER_FIELD_SOURCES];
 

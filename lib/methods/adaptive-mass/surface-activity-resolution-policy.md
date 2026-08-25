@@ -85,7 +85,7 @@ becoming a planning floor. The separate thin-feature predicate continues to
 protect represented sheets that never cross `rho = 0.5`.
 
 This is one planner, not a second surface-only implementation. Both selector
-modes use the same surface/thin/receiver classification, 2:1 closure,
+modes use the same surface/thin/frontier classification, 2:1 closure,
 conservative transfer, and generation commit. The selector only gates the
 activity-derived floors and cadence/history checks. Initial hierarchical tank
 fills use the same 1/2/4/8 distance ladder, including immutable deep macros, so
@@ -180,10 +180,9 @@ The SIM panel's **Activity + resolution** stage exposes the selector rather
 than requiring shader edits. Its controls fall into two deliberately explicit
 classes:
 
-- `Created-region floor`, `Initial fine band`, and `Receiver reach` are
-  structural. They rebuild the accepted packed atlas. Until live topology
-  publication is complete, setting the created-region floor to `8^3` is the
-  conservative guarantee that a fast front cannot enter a coarse receiver.
+- `Initial fine band` is structural and rebuilds the accepted packed atlas.
+- travel lookahead creates only the missing-solid world pages selected by the
+  advancing fluid front; no dry topology apron is constructed up front.
 - travel thresholds for the `8^3/4^3/2^3` rungs, front lookahead, thin-feature
   width/density, partial-surface bounds, restriction-error tolerance, topology
   cadence, promotion/demotion persistence, and score thresholds are runtime
@@ -243,12 +242,12 @@ otherwise                                   -> retain resolution
 ```
 
 Refinement always wins over demotion. A brick changes by one rung in an epoch.
-Newly resident receiver bricks start `8^3`, `Unknown`, with zero quiet epochs in
+Newly resident frontier bricks start `8^3`, `Unknown`, with zero quiet epochs in
 the first rung. A surface row whose outward characteristic can reach another
 brick before the next topology epoch sets `PredictedFace` and immediately
-requests that receiver fine. This uses
+requests that destination brick fine. This uses
 `topologyCadenceSteps * dt * max(abs(faceVelocity))`; it is a surface-motion
-guard, not camera adaptation. A receiver may coarsen only after it is wet,
+guard, not camera adaptation. A frontier brick may coarsen only after it is wet,
 enclosed, and no longer part of the free-surface support band.
 
 Run a refine-only balance closure over all face neighbors after snapshot
@@ -261,10 +260,10 @@ one-finest-cell integrated-mass floor rather than exact floating-point zero or
 CM12's much smaller arithmetic epsilon. A brick that fails either liveness test
 may retire once it is outside directional surface support. Its discarded
 integrated mass is published in the activity receipt and its fields are cleared,
-so later receiver activation cannot resurrect stale residue. Actual retirement
+so later page recreation cannot resurrect stale residue. Actual retirement
 receipts remain the authority for conservation diagnostics.
 
-Every span-one surface/receiver brick retains candidate storage and topology
+Every span-one surface/frontier brick retains candidate storage and topology
 templates through `8^3`, independently of its authored resolution. Deep
 quiescent liquid is represented by immutable dyadic macro-bricks; those leaves
 allocate only their accepted cells and no candidate or fine-presentation page.
@@ -356,7 +355,7 @@ the shadow transaction and leaves the accepted generation untouched.
 
 The queue has two lanes:
 
-- **urgent**: surface/thin-fluid promotion, swept-front receivers, and every
+- **urgent**: surface/thin-fluid promotion, swept-front pages, and every
   balance brick needed to make those requests 2:1. Urgent work is prepared
   first and may exceed the ordinary budget. It is never delayed behind a bulk
   merge.
@@ -367,7 +366,7 @@ The queue has two lanes:
 Coarsening is lower priority than refinement. If new surface evidence touches a
 brick while an older shadow transaction wants to merge it, the GPU cancels that
 merge, raises the shadow requirement, and requeues its seam ring. If accepted
-physics activates a dormant receiver during preparation, its `8^3` urgent
+physics creates a frontier page during preparation, its `8^3` urgent
 request is folded into the same transaction or starts the next one if shadow
 capacity is already sealed.
 
@@ -543,7 +542,7 @@ object graphs exceeds the ordinary host heap.
 
 The small-lane library contains:
 
-- four intra-brick templates per receiver (`1^3`, `2^3`, `4^3`, `8^3`);
+- four intra-brick templates per brick (`1^3`, `2^3`, `4^3`, `8^3`);
 - one face template for every ordered neighbour-level pair (4 x 4 = 16), for
   each resident face adjacency;
 - level-specific embedded-boundary geometry, exterior rows, term incidence,

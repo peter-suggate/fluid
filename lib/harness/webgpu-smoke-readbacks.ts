@@ -958,8 +958,6 @@ export async function smokeRenderHybridPresentation(
       grade: scene.lighting?.grade,
       terrain: scene.terrain,
       container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
-      wallField: scene.container.wallField,
-      vesselVisible: scene.container.vessel !== "none",
     });
     pipeline.setVolume(solver.surfaceFieldTexture ?? solver.volumeTexture,
       solver.columnBaseTexture ?? columnFallback);

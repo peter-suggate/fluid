@@ -15,7 +15,6 @@ export const SPARSE_CM12_FRAME_CONTROL_FLAG = Object.freeze({
   validated: 1 << 1,
   d4Capable: 1 << 2,
   rigidCapable: 1 << 3,
-  boundaryCapable: 1 << 4,
 } as const);
 
 export const SPARSE_CM12_FRAME_CONTROL_PHASE = Object.freeze({
@@ -28,12 +27,11 @@ export const SPARSE_CM12_FRAME_CONTROL_PHASE = Object.freeze({
 
 export const SPARSE_CM12_FRAME_CONTROL_COVERAGE = Object.freeze({
   body: 1 << 0,
-  boundary: 1 << 1,
   scalarD4: 1 << 2,
   faceD4: 1 << 3,
   scalarOutput: 1 << 4,
   faceOutput: 1 << 5,
-  authority: (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3),
+  authority: (1 << 0) | (1 << 2) | (1 << 3),
   output: (1 << 4) | (1 << 5),
 } as const);
 
@@ -71,8 +69,8 @@ export const SPARSE_CM12_FRAME_CONTROL_HEADER = Object.freeze({
   faceParity: 17,
   bodyGeneration: 18,
   bodyCount: 19,
-  boundaryGeneration: 20,
-  boundaryLive: 21,
+  reserved20: 20,
+  reserved21: 21,
   d4Generation: 22,
   scalarD4Authority: 23,
   faceD4Authority: 24,
@@ -113,7 +111,6 @@ export interface SparseCM12FrameControlLayout {
   readonly presentationPageResolution: 4 | 8 | 16;
   readonly d4Capable: boolean;
   readonly rigidCapable: boolean;
-  readonly boundaryCapable: boolean;
   readonly cellWorkgroups: number;
   readonly rowWorkgroups: number;
   readonly bodyCapacity: number;
@@ -161,7 +158,6 @@ export function createSparseCM12FrameControl(
     readonly presentationPageResolution?: 4 | 8 | 16;
     readonly d4Capable?: boolean;
     readonly rigidCapable?: boolean;
-    readonly boundaryCapable?: boolean;
     readonly cellWorkgroups: number;
     readonly rowWorkgroups: number;
     readonly bodyCapacity?: number;
@@ -187,7 +183,6 @@ export function createSparseCM12FrameControl(
   if (initialGeneration >= 0x7fff_fffe) throw new RangeError("initial generation is exhausted");
   const d4Capable = options.d4Capable ?? false;
   const rigidCapable = options.rigidCapable ?? false;
-  const boundaryCapable = options.boundaryCapable ?? false;
   const initialScalarD4Authority = options.initialScalarD4Authority ?? false;
   const initialFaceD4Authority = options.initialFaceD4Authority ?? false;
   if ((initialScalarD4Authority || initialFaceD4Authority) && !d4Capable) {
@@ -196,12 +191,11 @@ export function createSparseCM12FrameControl(
   const flags = SPARSE_CM12_FRAME_CONTROL_FLAG.complete
     | SPARSE_CM12_FRAME_CONTROL_FLAG.validated
     | (d4Capable ? SPARSE_CM12_FRAME_CONTROL_FLAG.d4Capable : 0)
-    | (rigidCapable ? SPARSE_CM12_FRAME_CONTROL_FLAG.rigidCapable : 0)
-    | (boundaryCapable ? SPARSE_CM12_FRAME_CONTROL_FLAG.boundaryCapable : 0);
+    | (rigidCapable ? SPARSE_CM12_FRAME_CONTROL_FLAG.rigidCapable : 0);
   const layout: SparseCM12FrameControlLayout = Object.freeze({
     baseWords,
     brickFineResolution, presentationPageResolution, d4Capable, rigidCapable,
-    boundaryCapable, cellWorkgroups, rowWorkgroups, bodyCapacity, initialGeneration,
+    cellWorkgroups, rowWorkgroups, bodyCapacity, initialGeneration,
     indirectBaseWords: baseWords + SPARSE_CM12_FRAME_CONTROL_HEADER_WORDS,
     controlWords: SPARSE_CM12_FRAME_CONTROL_TOTAL_WORDS,
     controlBytes: SPARSE_CM12_FRAME_CONTROL_TOTAL_BYTES,
@@ -217,7 +211,7 @@ export function createSparseCM12FrameControl(
     SPARSE_CM12_FRAME_CONTROL_HEADER_WORDS, cellWorkgroups, rowWorkgroups, bodyCapacity,
     SPARSE_CM12_FRAME_CONTROL_PHASE.accepted,
     initialGeneration, initialGeneration, 0, 0,
-    initialGeneration, 0, initialGeneration, 0,
+    initialGeneration, 0, 0, 0,
     initialGeneration, initialScalarD4Authority ? 1 : 0,
     initialFaceD4Authority ? 1 : 0, 0, SPARSE_CM12_FRAME_CONTROL_INVALID,
     SPARSE_CM12_FRAME_CONTROL_COVERAGE.authority
@@ -242,8 +236,7 @@ export function sparseCM12FrameControlHeaderValid(control: SparseCM12FrameContro
   const at = (word: number) => base + word;
   const flags = words[at(SPARSE_CM12_FRAME_CONTROL_HEADER.flags)] ?? 0;
   const capabilityFlags = (l.d4Capable ? SPARSE_CM12_FRAME_CONTROL_FLAG.d4Capable : 0)
-    | (l.rigidCapable ? SPARSE_CM12_FRAME_CONTROL_FLAG.rigidCapable : 0)
-    | (l.boundaryCapable ? SPARSE_CM12_FRAME_CONTROL_FLAG.boundaryCapable : 0);
+    | (l.rigidCapable ? SPARSE_CM12_FRAME_CONTROL_FLAG.rigidCapable : 0);
   return words.length >= l.totalWords && l.controlWords === SPARSE_CM12_FRAME_CONTROL_TOTAL_WORDS
     && l.totalWords === l.baseWords + l.controlWords
     && l.totalBytes === 4 * l.totalWords
@@ -273,8 +266,7 @@ export function sparseCM12FrameControlHeaderValid(control: SparseCM12FrameContro
       === (SPARSE_CM12_FRAME_CONTROL_FLAG.complete
         | SPARSE_CM12_FRAME_CONTROL_FLAG.validated)
     && (flags & (SPARSE_CM12_FRAME_CONTROL_FLAG.d4Capable
-      | SPARSE_CM12_FRAME_CONTROL_FLAG.rigidCapable
-      | SPARSE_CM12_FRAME_CONTROL_FLAG.boundaryCapable)) === capabilityFlags
+      | SPARSE_CM12_FRAME_CONTROL_FLAG.rigidCapable)) === capabilityFlags
     && words.subarray(at(SPARSE_CM12_FRAME_CONTROL_HEADER.reservedBase),
       at(SPARSE_CM12_FRAME_CONTROL_HEADER_WORDS)).every((value) => value === 0);
 }
@@ -285,7 +277,7 @@ export function validateSparseCM12FrameControl(control: SparseCM12FrameControl):
   const base = control.layout.baseWords;
   const phase = words[base + SPARSE_CM12_FRAME_CONTROL_HEADER.phase]!;
   if (phase > SPARSE_CM12_FRAME_CONTROL_PHASE.fault) throw new Error("invalid FCA1 phase");
-  for (const name of ["scalarParity", "faceParity", "boundaryLive",
+  for (const name of ["scalarParity", "faceParity",
     "scalarD4Authority", "faceD4Authority"] as const) {
     if (words[base + SPARSE_CM12_FRAME_CONTROL_HEADER[name]]! > 1) {
       throw new Error(`invalid FCA1 ${name}`);

@@ -28,8 +28,6 @@ AdaptiveMassSolverOptions => ({
   resolutionMode: "adaptive",
   brickFineResolution: 8,
   surfaceFineRings: 1,
-  receiverSupportRings: 9,
-  receiverFloor: "auto",
   timeStep: "paper",
   activityPolicy: {
     ...SPARSE_CM12_ACTIVITY_POLICY,
@@ -124,8 +122,6 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
         device, calm, "balanced", undefined,
         options({
           resolutionMode: "all-fine",
-          receiverSupportRings: 1,
-          receiverFloor: 1,
           activityPolicy: {
             ...SPARSE_CM12_ACTIVITY_POLICY,
             activitySignals: true,
@@ -162,8 +158,6 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
         device, calm, "balanced", undefined,
         options({
           resolutionMode: "all-fine",
-          receiverSupportRings: 1,
-          receiverFloor: 1,
           activityPolicy: {
             ...SPARSE_CM12_ACTIVITY_POLICY,
             activitySignals: false,

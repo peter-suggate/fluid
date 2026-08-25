@@ -35,7 +35,7 @@ interface TerrainBoundaryRung {
 }
 
 function flatTerrain(height_m: number): TerrainDescription {
-  return { solidRepresentation: "voxel", baseHeight_m: height_m, features: [] };
+  return { baseHeight_m: height_m, features: [] };
 }
 
 function singleStepTerrain(nx: number, nz: number): TerrainDescription {
@@ -44,7 +44,6 @@ function singleStepTerrain(nx: number, nz: number): TerrainDescription {
     heights_m.push(x < nx / 2 ? CELL_M : 3 * CELL_M);
   }
   return {
-    solidRepresentation: "voxel",
     baseHeight_m: CELL_M,
     features: [],
     grid: {

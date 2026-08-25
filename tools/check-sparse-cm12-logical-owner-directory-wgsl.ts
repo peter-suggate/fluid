@@ -56,7 +56,7 @@ function fixture(): {
     brick([1, 0, 0], 8),
     brick([2, 0, 0], 16),
     brick([3, 1, 0], 8),
-  ], 7, undefined, 16);
+  ], 7, 16);
   const active = [true, true, false, true] as const;
   const runtime: SparseCM12LogicalOwnerRuntime = {
     brickActive: (id) => active[id] ?? false,

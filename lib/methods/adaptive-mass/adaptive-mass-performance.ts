@@ -24,7 +24,7 @@ export const SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE = Object.freeze({
   ...SPARSE_CM12_PERFORMANCE_ACCEPTANCE,
   sceneId: "minimal-power-dam-break-32",
   finestDimensions: [32, 32, 32] as const,
-  // Rung A protects a moving interface/receiver set, not one historical seam
+  // Rung A protects a moving interface/frontier set, not one historical seam
   // seed. Require useful mixed topology without freezing a scene-specific count.
   minimumInitialFineBrickCount: 1,
   minimumInitialCoarseBrickCount: 1,

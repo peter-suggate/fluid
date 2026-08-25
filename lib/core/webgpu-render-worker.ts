@@ -24,33 +24,9 @@ const scope = self as DedicatedWorkerGlobalScope;
  * framework's own keys and nothing else, so every one of those reads returns
  * `undefined` and the *default* branch is the only branch the product can ever
  * take. That is fine for the levers whose default is the shipped behaviour —
- * `FLUID_SVO_BRICK_CLAIM`, `FLUID_SVO_SOLVER_CLAIM`,
+ * `FLUID_SVO_BRICK_CLAIM`,
  * `FLUID_SVO_DRY_PAYLOAD_PROFILE`, `FLUID_SVO_NODE_MIP_NARROW_OPACITY`,
- * `FLUID_SVO_RADIANCE_LEVEL_FLOOR` and `FLUID_SVO_TERRAIN_VOXELS` all default
- * to the arm that shipped — and fatal for one that does not.
- *
- * `FLUID_SVO_GROUND_SHELL` is that one. Off, the ground claims every brick from
- * the domain floor up to the column height (`sparseSceneTerrainBrickCoordinates`).
- * That column is affordable at the 6.25 mm lattice and nowhere above it: each
- * environment refinement level multiplies the column count by four and its depth
- * by two, so refinement depth 3 asks for 512x the terrain bricks depth 0 pays
- * for — an allocation that does not fail fast, it grinds. Measured here, depth 3
- * sat on one CPU for seven minutes at 2 GB without reaching its first frame,
- * while depth 0 presents in about three.
- *
- * The shell narrows that claim to the band the ground boundary actually passes
- * through, plus one buried brick of margin — the configuration
- * `sparseSceneTerrainShellBricks` documents its measurements against.
- *
- * Seeded rather than assigned: an environment that already names the lever keeps
- * its value, so this cannot mask a deliberate setting, and it does not collide
- * with the same default moving to `sparseSceneTerrainShellBricks` itself. It
- * lives in the worker entry rather than in the renderer because this is the
- * browser's only render path (`WebGPUViewport` constructs nothing else), and
- * seeding it here cannot reach a Node lane that measures the arms.
- *
- * Set at module scope but read lazily — `sparseSceneTerrainShellBricks` is called
- * per world construction, long after this runs.
+ * `FLUID_SVO_RADIANCE_LEVEL_FLOOR` all default to the arm that shipped.
  */
 /**
  * `FLUID_SVO_REFINEMENT_MODE` is the second such lever, for the opposite reason:
@@ -60,9 +36,7 @@ const scope = self as DedicatedWorkerGlobalScope;
  * `OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET` primitive bounds overlap it.
  * That is a per-brick owner budget — a cost control — standing in for a detail
  * rule, so a single large primitive never refines however close the camera gets.
- * The ground, which has a real surface test, refines while the objects sitting
- * on it do not. The `surface` arm gives scenery the same treatment the ground
- * already had: refine wherever an isosurface passes through the node.
+ * The `surface` arm instead refines wherever an isosurface passes through a node.
  *
  * Whether it may also *stop* short of that — on a node the surface crosses
  * flatly — is no longer part of this lever. It is
@@ -75,14 +49,9 @@ const scope = self as DedicatedWorkerGlobalScope;
  * because the browser is the only place the choice is a product decision rather
  * than a measurement. Measured against `hero-garden-hose` at refinement depth 2,
  * `surface` costs +62% node-mip pages (76 812 -> 124 080), and
- * `garden-svo-lighting-study` pays +181% at the same depth. Most of the hero's
- * bill is its *ground*: the pond basin is a large smooth slope, and a slope is
- * not level, so it refines. Both figures were taken with the planarity
- * exemption on and are therefore a floor now that it is not — the hero's 660
- * terrain exemptions and every flat authored face now split too.
+ * `garden-svo-lighting-study` pays +181% at the same depth.
  */
 if (typeof process !== "undefined" && process.env) {
-  process.env.FLUID_SVO_GROUND_SHELL ??= "1";
   process.env.FLUID_SVO_REFINEMENT_MODE ??= "surface";
 }
 

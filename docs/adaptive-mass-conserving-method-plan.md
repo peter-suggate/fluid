@@ -28,17 +28,17 @@ Current implementation checkpoint (2026-08-15):
 - Free-surface pressure (using one SPD ghost fraction per composite row),
   composite gamma diffusion/sharpening, GPU transport-operator parity, and a
   symmetric density-slice A/B are now executable companion receipts.
-- The interactive solver omits empty bricks, activates face-local transport
-  receivers, conservatively transports density/gamma/momentum, conditions the
+- The interactive solver omits empty bricks, creates face-local frontier pages,
+  conservatively transports density/gamma/momentum, conditions the
   CM12 surface, and projects one globally coupled composite pressure system.
   The short mixed-resolution symmetric-expansion receipt is stable and the
   matched mini-dam performance lane is inside the `1.20x` median target; the
   canonical two-second blockers are recorded below.
-- Logical residency is now adaptive for the long-tank rung: construction packs
-  bounded dormant receiver slots, but a GPU activity transaction alone decides
-  when each slot becomes active. Each surface brick publishes a directional
-  27-bit boundary-stencil/swept-receiver mask from its accepted cells and
-  velocity; only mask-addressed empty slots remain as air support. Exact
+- Logical residency is adaptive for the long-tank rung: a GPU activity
+  transaction allocates a page only when the moving front demands it. Each
+  surface brick publishes a directional 27-bit boundary-stencil/swept-front
+  mask from its accepted cells and velocity; only mask-addressed pages remain
+  as air support. Exact
   `rho > 0` occupancy separately retains its own brick, so a conservative trace
   is never deleted but also cannot pin 26 additional empty bricks. Resolution
   inside an allocated slot remains fixed; conservative

@@ -42,7 +42,6 @@ export type SvoPrimitiveKindName =
   | "capsule"
   | "cylinder"
   | "ellipsoid"
-  | "terrain-heightfield"
   | "torus"
   | "cone"
   | "smooth-union-cluster"
@@ -54,7 +53,6 @@ export type SvoPrimitiveKindName =
 export const SVO_PRIMITIVE_KIND_FLAGS = Object.freeze({
   exactDistance: 1,
   hardFeatures: 2,
-  externalTerrain: 4,
   /**
    * The kind's ray hit is a bounded sphere trace of its own distance instead of
    * a closed-form root. This is what makes a new shape cheap: it costs one
@@ -68,8 +66,7 @@ export const SVO_PRIMITIVE_KIND_FLAGS = Object.freeze({
    *
    * Sixty-four bytes leave three floats of per-kind space, which is enough for a
    * frustum and not enough for a packing. Rather than widen a record every kind
-   * pays for, an aggregate names an arena block — the pattern
-   * `terrain-heightfield` has used since it was written.
+   * pays for, an aggregate names a block in the shared scene arena.
    */
   arenaBacked: 16,
 } as const);
@@ -99,7 +96,7 @@ export interface SvoPrimitiveKindEntry {
    * and a segment half length for a capsule, and nothing in the record says so.
    */
   readonly dimensionLabels: readonly [string, string, string];
-  /** A finite solid the ray ABI can intersect. Terrain is traced separately. */
+  /** A finite solid the ray ABI can intersect. */
   readonly finite: boolean;
   /**
    * Conservative half-extent of the kind about its own centre, along its own
@@ -108,8 +105,7 @@ export interface SvoPrimitiveKindEntry {
    * This is the single formula behind the raster proxy box, the voxelizer's
    * world bounds, the coverage footprint, the candidate BVH leaf and the sway
    * excursion budget. A negative component means "this kind has no finite local
-   * box" — terrain — and every consumer must treat that as a refusal rather
-   * than clamp it to zero.
+   * box", which every consumer must treat as a refusal rather than clamp to zero.
    */
   readonly localExtent_m: (dimensions_m: Vec3) => Vec3;
   /**
@@ -119,8 +115,7 @@ export interface SvoPrimitiveKindEntry {
   readonly boundingRadius_m: (dimensions_m: Vec3) => number;
 }
 
-const NO_LOCAL_BOX: Vec3 = { x: -1, y: -1, z: -1 };
-const { exactDistance, hardFeatures, externalTerrain, marchedIntersection, arenaBacked } = SVO_PRIMITIVE_KIND_FLAGS;
+const { exactDistance, hardFeatures, marchedIntersection, arenaBacked } = SVO_PRIMITIVE_KIND_FLAGS;
 
 /**
  * Every primitive kind, keyed by its TypeScript discriminant.
@@ -189,17 +184,6 @@ export const SVO_PRIMITIVE_KIND_TABLE = Object.freeze({
     // An ellipsoid is contained in a sphere of its longest half-axis, not of
     // its corner: the corner belongs to the box around it.
     boundingRadius_m: (d) => Math.max(d.x, d.y, d.z),
-  },
-  "terrain-heightfield": {
-    name: "terrain-heightfield",
-    code: 6,
-    wgslConstant: "SVO_KIND_TERRAIN",
-    flags: externalTerrain | arenaBacked,
-    normalPolicy: "smooth",
-    dimensionLabels: ["normal epsilon", "unused", "unused"],
-    finite: false,
-    localExtent_m: () => ({ ...NO_LOCAL_BOX }),
-    boundingRadius_m: () => -1,
   },
   torus: {
     name: "torus",
