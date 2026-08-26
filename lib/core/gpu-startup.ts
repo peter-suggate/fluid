@@ -46,8 +46,8 @@ export interface SafeBrowserGPUBringupConfig {
   readonly canonicalMethodValues: Readonly<Record<string, unknown>>;
   readonly exactScene: boolean;
   readonly gridOverlayAxis: string;
-  /** Armed WYSIWYG editor tool; authoring gestures mutate the pinned workload. */
-  readonly activeTool: string;
+  /** Armed authoring gesture, if any; authoring mutates the pinned workload. */
+  readonly armedGesture: string | undefined;
   readonly search: string;
 }
 
@@ -79,7 +79,7 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     values.maximumLeafSize !== "16" && "maximum leaf size must be 16",
     parameterDrift.length > 0 && `method profile drifted: ${parameterDrift.join(", ")}`,
     config.gridOverlayAxis !== "off" && "grid overlays must remain off",
-    config.activeTool !== "select" && "editor tools must remain on select",
+    config.armedGesture !== undefined && "no authoring gesture may be armed",
     unapprovedQueryKeys.length > 0 && `unapproved safe-mode query flags: ${unapprovedQueryKeys.join(", ")}`,
     query.get("gpuRecovery") === "1" && "automatic GPU recovery must be off",
   ].filter((value): value is string => typeof value === "string");

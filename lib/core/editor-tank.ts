@@ -418,7 +418,6 @@ export const tankEntity: EditorEntityDefinition = {
   kind: "tank",
   // The cut gesture addresses wall cells analytically. Keeping resize handles
   // surfaced while it is armed would put a second interaction on the same wall.
-  surfacedBy: (tool) => tool === "select",
   instances: (context) => [tankEntityFor(context)],
   // The same ring the water offers: see `fluidRingActions`. Pointing at an
   // empty tank and pointing at the water in it are the same question.

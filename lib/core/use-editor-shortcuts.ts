@@ -2,8 +2,9 @@
 
 import { useEffect } from "react";
 import { editorAxisForKey, toggleAxisConstraint } from "./editor-axis-constraint";
+import { toggledViewportMode, VIEWPORT_MODE_SHORTCUT } from "./editor-viewport-mode";
 import { cameraForFraming, cameraFramingForKey } from "./editor-camera-framing";
-import { DEFAULT_EDITOR_TOOL, editorToolForShortcut, editorToolIsActive } from "./editor-tools";
+import { editorGestureForShortcut } from "./editor-gesture-catalog";
 import { stepFluidCellTraceHit } from "./fluid-cell-trace";
 import { editorEntityContext, findEntity } from "./editor-entity-catalog";
 import { sceneInstrumentForShortcut } from "./scene-instruments";
@@ -11,7 +12,7 @@ import { simulation } from "./simulation/controller";
 import { useDiagnosticsStore } from "./stores/diagnostics-store";
 import { useUIStore } from "./stores/ui-store";
 
-/** Typing in a form control must never arm a tool or delete a body. */
+/** Typing in a form control must never arm a gesture or delete a body. */
 function editingText(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   if (target.isContentEditable) return true;
@@ -19,7 +20,7 @@ function editingText(target: EventTarget | null): boolean {
 }
 
 /**
- * Editor keyboard chassis: tool arming, camera framing, undo/redo, selection
+ * Editor keyboard chassis: gesture arming, camera framing, undo/redo, selection
  * escape, delete, and focus-on-selection. Registered once by the shell so
  * shortcuts work wherever focus happens to be, not only over the canvas.
  */
@@ -31,7 +32,7 @@ export function useEditorShortcuts(): void {
       const accelerator = event.metaKey || event.ctrlKey;
 
       // While something is being carried, the viewport owns the keyboard except
-      // for undo/redo: Q and E tilt what is in hand rather than arming a tool,
+      // for undo/redo: Q and E tilt what is in hand rather than arming anything,
       // and Escape puts it back rather than dropping the selection. A carry is
       // the innermost mode, and modes are left from the inside out.
       if (ui.carry && !accelerator) return;
@@ -51,6 +52,16 @@ export function useEditorShortcuts(): void {
       }
       if (accelerator || event.altKey) return;
 
+      // The mode swap, ahead of everything the mode contains. It is the only key
+      // that means something in both modes, and it has to keep working while a
+      // selection or an axis lock is up — leaving LOOK is how you put all of
+      // that down (see `setViewportMode`), so a guard that made you clear them
+      // first would have the dependency backwards.
+      if (event.key === VIEWPORT_MODE_SHORTCUT && !event.shiftKey) {
+        event.preventDefault();
+        ui.setViewportMode(toggledViewportMode(ui.viewportMode));
+        return;
+      }
       // Axis constraints, on the letters every 3D editor uses for them. A
       // selection claims x/y/z outright rather than only while a handle is held:
       // a constraint you can only reach mid-drag cannot be seen before you
@@ -75,7 +86,14 @@ export function useEditorShortcuts(): void {
         // it goes before anything about the selection under it moves.
         if (ui.sceneOverlay) { ui.setSceneOverlay(null); return; }
         if (ui.axisConstraint) { ui.setAxisConstraint(undefined); return; }
-        ui.setActiveTool("select");
+        // INTERACT is the outermost of all of them, so it is the last thing
+        // Escape reaches: with nothing armed and nothing selected there is
+        // nothing left inside the mode to leave, and the next Escape is the mode.
+        if (!ui.armedGesture && !ui.selection) {
+          ui.setViewportMode("camera");
+          return;
+        }
+        ui.setArmedGesture(undefined);
         ui.select(undefined);
         return;
       }
@@ -144,12 +162,22 @@ export function useEditorShortcuts(): void {
         ui.setCamera(cameraForFraming(framing));
         return;
       }
-      const tool = editorToolForShortcut(event.key);
-      if (tool && editorToolIsActive(tool)) {
+      const gesture = editorGestureForShortcut(event.key);
+      if (gesture) {
         event.preventDefault();
-        // Pressing the armed tool's own key disarms it, so every mode can be
+        // Asking for a gesture is asking to edit, so the key enters INTERACT
+        // rather than being swallowed by LOOK. A shortcut that silently did
+        // nothing in one of two modes is how a reader learns the shortcuts are
+        // unreliable. Order matters: `setViewportMode("camera")` disarms, so
+        // entering has to happen first.
+        if (ui.viewportMode !== "interact") {
+          ui.setViewportMode("interact");
+          ui.setArmedGesture(gesture);
+          return;
+        }
+        // Pressing the armed gesture's own key disarms it, so every mode can be
         // left the same way it was entered rather than only via Escape.
-        ui.setActiveTool(ui.activeTool === tool ? DEFAULT_EDITOR_TOOL : tool);
+        ui.setArmedGesture(ui.armedGesture === gesture ? undefined : gesture);
       }
     };
     window.addEventListener("keydown", onKeyDown);

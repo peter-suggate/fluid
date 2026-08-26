@@ -53,7 +53,7 @@ import { assembleDecorations } from "./visualization-registry";
 import { containerDecorationSpace, DecorationBuilder } from "./visualization-decorations";
 import { buildVesselOutlineGeometry, sceneVesselPresentation } from "./vessel-outline";
 import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
-import type { FluidCellTrace } from "./fluid-cell-trace";
+import type { FluidCellLattice, FluidCellTrace } from "./fluid-cell-trace";
 import type { FineBandCellContext } from "./fine-band-cell-model";
 import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, resolveSparseVoxelThickGlassBinderStatus, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SparseVoxelDrySceneData, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/webgpu-svo-dry-scene";
 import {
@@ -1462,6 +1462,20 @@ export class FluidLabRenderer {
   get fluidCellTraceRevision(): number { return this.fluidCellTraceRevisionValue; }
   /** Ready once the gather pipeline exists and has a published topology to read. */
   get fluidCellTraceReady(): boolean { return this.fluidCellTracePipeline?.ready === true; }
+
+  /**
+   * The physical frame the trace's index space sits in, when the solver has one.
+   *
+   * Not folded into the trace: the trace ABI is written by a shader that has no
+   * idea where the domain is in metres, and a host-side copy inside a
+   * GPU-authored record is exactly how two answers to one question start
+   * disagreeing. Undefined means "the tank is the domain", which the host
+   * resolves against the scene it already holds — see `fluidCellTraceLattice`.
+   */
+  get fluidCellTraceDomain(): FluidCellLattice | undefined {
+    const domain = this.gpuFluid?.fluidDomain;
+    return domain ? { origin_m: domain.origin_m, cellSize_m: domain.cellSize_m } : undefined;
+  }
 
   /**
    * The band widths and redistance ladder the HUD reads a cell against.

@@ -32,6 +32,8 @@ export interface WebGPURenderWorkerSnapshot {
   fluidCellTraceRevision: number;
   fluidCellTraceReady: boolean;
   fluidCellTraceFineBand: FluidLabRenderer["fluidCellTraceFineBand"];
+  /** Absent means the tank is the domain; the host resolves it against the scene. */
+  fluidCellTraceDomain: FluidLabRenderer["fluidCellTraceDomain"];
   /** Poses the drawn frame used, in roster order. See FluidLabRenderer. */
   rigidBodyPoses: FluidLabRenderer["rigidBodyPoses"];
   rigidBodyPoseRevision: number;
@@ -94,6 +96,7 @@ const EMPTY_SNAPSHOT: WebGPURenderWorkerSnapshot = {
   fluidCellTraceRevision: 0,
   fluidCellTraceReady: false,
   fluidCellTraceFineBand: undefined,
+  fluidCellTraceDomain: undefined,
   rigidBodyPoses: [],
   rigidBodyPoseRevision: 0,
 };
@@ -166,6 +169,7 @@ export class WebGPURenderWorkerClient {
   get fluidCellTraceRevision() { return this.snapshot.fluidCellTraceRevision; }
   get fluidCellTraceReady() { return this.snapshot.fluidCellTraceReady; }
   get fluidCellTraceFineBand() { return this.snapshot.fluidCellTraceFineBand; }
+  get fluidCellTraceDomain() { return this.snapshot.fluidCellTraceDomain; }
   get rigidBodyPoses() { return this.snapshot.rigidBodyPoses; }
   get rigidBodyPoseRevision() { return this.snapshot.rigidBodyPoseRevision; }
 

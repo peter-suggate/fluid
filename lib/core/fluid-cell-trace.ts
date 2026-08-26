@@ -417,6 +417,89 @@ export interface FluidCellTrace {
   readonly hitOverflow: number;
 }
 
+/**
+ * Where the trace's index space is in the world.
+ *
+ * The one thing a decoded trace cannot tell you about itself. Sparse CM12
+ * publishes its frame as *index space* — `domainOrigin: [0, 0, 0]`,
+ * `fineCellWidth: 1` — so `leafOrigin` counts finest cells from the corner of
+ * the fluid domain and `leafSize` counts finest cells across. Reading either as
+ * metres puts the cell at the world origin at one metre per cell: a box in the
+ * wrong place at the wrong scale that still looks like a box. The same trap is
+ * called out at the SVO coverage source in `webgpu-renderer.ts`.
+ */
+export interface FluidCellLattice {
+  readonly origin_m: readonly [number, number, number];
+  readonly cellSize_m: readonly [number, number, number];
+}
+
+/** The container extents this module needs, so it stays free of the scene type. */
+export interface FluidCellContainerExtents {
+  readonly width_m: number;
+  readonly height_m: number;
+  readonly depth_m: number;
+}
+
+/**
+ * The frame to read a trace's leaves in.
+ *
+ * `domain` is the solver's own, and is authoritative when it exists: sparse flow
+ * publishes a fluid world that can be *larger* than the tank, so assuming the
+ * container would put every leaf of an overflowing scene in the wrong place.
+ * Without one, the lattice is the container divided by the dimensions the trace
+ * itself reports — which is the same fallback the renderer's coverage source
+ * uses, and the reason the trace carries `dimensions` at all.
+ */
+export function fluidCellTraceLattice(
+  trace: FluidCellTrace,
+  container: FluidCellContainerExtents,
+  domain?: FluidCellLattice,
+): FluidCellLattice | undefined {
+  if (domain) return domain;
+  const [nx, ny, nz] = trace.dimensions;
+  if (!(nx > 0) || !(ny > 0) || !(nz > 0)) return undefined;
+  return {
+    origin_m: [-0.5 * container.width_m, 0, -0.5 * container.depth_m],
+    cellSize_m: [container.width_m / nx, container.height_m / ny, container.depth_m / nz],
+  };
+}
+
+/** The world box of one leaf: its index-space corner and its width in cells. */
+export function fluidCellLeafBox(
+  lattice: FluidCellLattice,
+  leafOrigin: FluidCellTraceVec3,
+  leafSize: number,
+): { readonly min: FluidCellTraceVec3; readonly max: FluidCellTraceVec3 } {
+  const size = Math.max(1, leafSize);
+  const corner = (axis: 0 | 1 | 2, cells: number) =>
+    lattice.origin_m[axis] + (leafOrigin[axis] + cells) * lattice.cellSize_m[axis];
+  return {
+    min: [corner(0, 0), corner(1, 0), corner(2, 0)],
+    max: [corner(0, size), corner(1, size), corner(2, size)],
+  };
+}
+
+/** A published trace together with the frame its index space is read in. */
+export interface FluidCellPublication {
+  readonly trace: FluidCellTrace;
+  readonly lattice: FluidCellLattice;
+}
+
+/**
+ * The publication as the editor sees it.
+ *
+ * `pinned` is composed on rather than published, because it is the reader's
+ * intent and not the frame's output — and because it changes what the trace
+ * *means*: a live trace describes the pixel the pointer is over, and a pinned
+ * one describes a pixel the reader chose earlier and has since moved away from.
+ * A probe that ignored the difference would light up a cell nowhere near the
+ * cursor. Publishing it would also make it stale the moment a pin was taken
+ * without a new gather, which is exactly when it matters.
+ */
+export interface FluidCellTraceSnapshot extends FluidCellPublication {
+  readonly pinned: boolean;
+}
+
 const flagged = (flags: number, bit: number) => (flags & bit) !== 0;
 
 export function decodeFluidCellTrace(words: ArrayLike<number>): FluidCellTrace | undefined {

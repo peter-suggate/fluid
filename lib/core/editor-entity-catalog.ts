@@ -5,12 +5,14 @@ import { sceneryEntity } from "./editor-scenery";
 import { rigidBodyEntity } from "./editor-rigid-body";
 import { tankEntity } from "./editor-tank";
 import { vesselRimEntity } from "./editor-vessel-rim";
-import type { EditorSelection, EditorTool } from "./editor-tools";
+import { voxelRegionEntity } from "./editor-voxel-region";
+import type { EditorSelection } from "./editor-tools";
 import type { SceneDescription, Vec3 } from "./model";
 import { SCENE_INSTRUMENTS, sceneInstrumentAction } from "./scene-instruments";
 import { resourceInteractionGates } from "./resource-readiness";
 import { drawnBodies, useDiagnosticsStore } from "./stores/diagnostics-store";
 import { displaySceneSnapshot } from "./stores/scene-draft-store";
+import { useUIStore } from "./stores/ui-store";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
 import type {
   EditorEntity,
@@ -62,6 +64,10 @@ export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze(
   vesselRimEntity,
   fluidBodyEntity,
   tankEntity,
+  // Last, and pickless. A voxel region is a box drawn *around* things that are
+  // themselves the pick targets, so it never competes for a ray; it is here to
+  // be found by id, to describe itself, and to offer its one verb.
+  voxelRegionEntity,
 ]);
 
 /**
@@ -74,6 +80,8 @@ export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze(
 export function editorEntityContext(): EditorEntityContext {
   return {
     scene: displaySceneSnapshot(),
+    voxelRegion: useUIStore.getState().voxelRegion,
+    fluidCell: fluidCellSnapshot(),
     // One definition of "a ray can hit something", shared with the viewport:
     // the capability gate, not a second reading of the renderer's status enum.
     pickingAvailable: resourceInteractionGates(
@@ -91,6 +99,20 @@ export function editorEntityContext(): EditorEntityContext {
  * gizmo, a hover chip or a grab resolved against the roster lands nowhere near
  * the object it belongs to. See `bodyPoses` in the diagnostics store.
  */
+/**
+ * The published cell trace with the reader's pin state folded in.
+ *
+ * Two stores, because they answer two questions: the diagnostics store holds
+ * what the frame published, and the UI store holds whether the reader has held
+ * it on a pixel. Only together do they say whether the trace describes where the
+ * cursor is now — which is the whole of what the fluid-cell probe needs.
+ */
+function fluidCellSnapshot(): EditorEntityContext["fluidCell"] {
+  const publication = useDiagnosticsStore.getState().fluidCellTrace;
+  if (!publication) return undefined;
+  return { ...publication, pinned: useUIStore.getState().fluidCellTracePinned };
+}
+
 export function editorBodyPoses(bodies = drawnBodies()): EditorEntityContext["bodies"] {
   return bodies.map((body) => ({
     id: body.description.id,
@@ -111,13 +133,10 @@ export function editorBodyPoses(bodies = drawnBodies()): EditorEntityContext["bo
  */
 export function surfacedEntities(
   context: EditorEntityContext,
-  tool: EditorTool,
   selection: EditorSelection | undefined,
 ): EditorEntity[] {
   const entity = findEntity(context, selection);
-  if (!entity) return [];
-  const definition = EDITOR_ENTITIES.find((candidate) => candidate.kind === selection?.kind);
-  return definition?.surfacedBy(tool, selection) ? [entity] : [];
+  return entity ? [entity] : [];
 }
 
 /**
@@ -241,9 +260,26 @@ export function entityActionsAt(
  * refuses without a fenced presentation because selecting the wrong object is
  * worse than selecting none; placing water at an analytically-traced point has
  * no such hazard, and the fallback card already promises the editor still works.
+ *
+ * `placement: false` is the LOOK ring: the instruments and the document verbs,
+ * with everything that would put something into the scene withheld. The split is
+ * here rather than at the caller because the two halves are already composed
+ * here, and because "what can be reached without editing" is a fact about the
+ * ring rather than about the viewport that opened it.
  */
-export function sceneActionsAt(scene: SceneDescription, point_m: Vec3): readonly EditorAction[] {
-  return [...fluidPlayActions(point_m), sceneInstrumentWedge(scene), ...sceneDocumentActions()];
+export function sceneActionsAt(
+  scene: SceneDescription,
+  point_m: Vec3,
+  // The surface's own normal, because the placements that used to be modes rest
+  // things *on* a surface: a prop dropped on a sloped stone should sit on the
+  // slope, and this ring is the only place that still knows which surface the
+  // click landed on. Up when the caller has no better answer — the room's
+  // fallback point is a floor.
+  normal: Vec3 = { x: 0, y: 1, z: 0 },
+  options: { readonly placement?: boolean } = {},
+): readonly EditorAction[] {
+  const placement = options.placement !== false ? fluidPlayActions(point_m, normal) : [];
+  return [...placement, sceneInstrumentWedge(scene)];
 }
 
 /**
@@ -269,38 +305,6 @@ function sceneInstrumentWedge(scene: SceneDescription): EditorAction {
       sceneInstrumentAction(SCENE_INSTRUMENTS.diagnostics),
     ],
   };
-}
-
-/**
- * The verbs that are about the *document* rather than about anything in it: go
- * and find another scene, or bring one in from a file.
- *
- * They are composed here rather than declared by an entity because they belong
- * to no entity — which is also why they appear only on the ring opened over
- * empty space. Pointing at the tank asks what can be done to the tank; pointing
- * at the room is the closest thing the viewport has to asking about the scene
- * itself, and it is where the transport bar's Load/Import buttons went when the
- * bar became a transport cluster.
- */
-function sceneDocumentActions(): readonly EditorAction[] {
-  return [
-    {
-      id: "library",
-      label: "Library",
-      icon: "library",
-      tone: "prop",
-      hint: "Browse every scene, your saved ones included",
-      effect: { kind: "navigate", href: "/" },
-    },
-    {
-      id: "import",
-      label: "Import",
-      icon: "import",
-      tone: "prop",
-      hint: "Open a scene JSON file from this machine",
-      effect: { kind: "import-scene" },
-    },
-  ];
 }
 
 export function findEntity(

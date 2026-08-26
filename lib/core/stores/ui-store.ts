@@ -1,7 +1,10 @@
 import { create } from "zustand";
 import type { EditorAction } from "../editor-action";
-import { bodySelection, DEFAULT_EDITOR_TOOL, selectedBodyIdOf, type EditorSelection, type EditorTool } from "../editor-tools";
+import type { EditorGestureId } from "../editor-gesture-catalog";
+import { bodySelection, selectedBodyIdOf, type EditorSelection } from "../editor-tools";
 import type { AxisConstraint } from "../editor-axis-constraint";
+import { DEFAULT_VIEWPORT_MODE, type ViewportMode } from "../editor-viewport-mode";
+import { VOXEL_REGION_SELECTION, type VoxelSelectionRegion } from "../editor-voxel-region";
 import { defaultCamera, type CameraState, type RigidShape } from "../model";
 
 /**
@@ -133,16 +136,32 @@ export interface TracePinRequest {
 /** Viewport state: camera, selection, and debug controls. */
 interface UIStore {
   camera: CameraState;
-  /** Armed direct-manipulation tool; the pointer machine dispatches on it. */
-  activeTool: EditorTool;
+  /**
+   * Whether the pointer edits the scene or only looks at it.
+   *
+   * Read before anything else in the pointer machine: in CAMERA there is no
+   * hover, no pick, no gesture and no object ring, so none of the state below
+   * is reachable. See `editor-viewport-mode.ts`.
+   */
+  viewportMode: ViewportMode;
+  /**
+   * The one gesture a reader has armed, or undefined — which is the resting
+   * state and the common one.
+   *
+   * Undefined is not "SELECT": there is no select mode any more. INTERACT *is*
+   * selecting, and a press resolves against whatever is under it. What can be
+   * armed is only the handful of strokes that genuinely reinterpret a drag —
+   * see the rule at the top of `editor-gesture-catalog.ts`.
+   */
+  armedGesture?: EditorGestureId;
   /**
    * Axes a handle drag is allowed to move, or undefined for all three.
    *
    * Store state rather than drag state because it outlives the gesture: an axis
    * armed before the press constrains the drag that follows, and a lock set
    * mid-drag survives into the next one, which is what a run of single-axis
-   * adjustments actually wants. `setActiveTool` clears it, so it can never leak
-   * out of a mode that was drawing it.
+   * adjustments actually wants. `setArmedGesture` clears it, so it can never
+   * leak out of a mode that was drawing it.
    */
   axisConstraint: AxisConstraint;
   /**
@@ -152,6 +171,15 @@ interface UIStore {
    */
   selection?: EditorSelection;
   selectedBodyId?: string;
+  /**
+   * The box of solid voxels the last sweep swept out.
+   *
+   * Held here rather than in the document because it is a selection: it must not
+   * be saved, must not enter the undo history, and must not re-seed the solver
+   * just by existing. `select` clears it whenever the selection moves off it, so
+   * a stale box can never outlive the thing it was about.
+   */
+  voxelRegion?: VoxelSelectionRegion;
   /** The body bound to the cursor, or undefined when both hands are free. */
   carry?: CarrySession;
   /** The contextual ring, or undefined when it is closed. */
@@ -166,8 +194,6 @@ interface UIStore {
   selectionControlsOpen: boolean;
   /** Shape the body-place tool drops on the next click. */
   placementShape: RigidShape;
-  /** Shape the scenery-place tool rests on the next surface. */
-  propShape: SceneryPropKind;
   /** The pipeline or diagnostics instrument drawn over the scene, if any. */
   sceneOverlay: SceneOverlay | null;
   /** Fig. 2-style grid cross-section drawn on a slice plane in the scene. */
@@ -247,7 +273,11 @@ interface UIStore {
    */
   fluidCellTraceExpanded: boolean;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
-  setActiveTool: (tool: EditorTool) => void;
+  setViewportMode: (mode: ViewportMode) => void;
+  /** Adopt a swept box as the selection, or clear it with `undefined`. */
+  selectVoxelRegion: (region: VoxelSelectionRegion | undefined) => void;
+  /** Arm a gesture, or disarm with `undefined`. */
+  setArmedGesture: (gesture: EditorGestureId | undefined) => void;
   setAxisConstraint: (constraint: AxisConstraint) => void;
   select: (selection?: EditorSelection) => void;
   selectBody: (bodyId?: string) => void;
@@ -258,7 +288,6 @@ interface UIStore {
   setCarryTilt: (tiltDegrees: number) => void;
   endCarry: () => void;
   setPlacementShape: (shape: RigidShape) => void;
-  setPropShape: (shape: SceneryPropKind) => void;
   /** Show one instrument over the scene, or `null` to clear the one that is up. */
   setSceneOverlay: (overlay: SceneOverlay | null) => void;
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
@@ -318,15 +347,16 @@ export const DEFAULT_GRID_OVERLAY_AXIS: Exclude<GridOverlayConfig["axis"], "off"
 
 export const useUIStore = create<UIStore>((set) => ({
   camera: defaultCamera,
-  activeTool: DEFAULT_EDITOR_TOOL,
+  viewportMode: DEFAULT_VIEWPORT_MODE,
+  armedGesture: undefined,
   axisConstraint: undefined,
   selection: undefined,
   selectedBodyId: undefined,
+  voxelRegion: undefined,
   carry: undefined,
   radialMenu: undefined,
   selectionControlsOpen: false,
   placementShape: "sphere",
-  propShape: "box",
   sceneOverlay: null,
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
@@ -357,16 +387,44 @@ export const useUIStore = create<UIStore>((set) => ({
   fluidCellTraceInterfaceHits: [],
   fluidCellTraceExpanded: false,
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
-  // Changing tools drops the axis lock: it is only ever drawn while handles are
-  // on screen, and a constraint still armed on the way into the next mode would
+  // Leaving INTERACT puts down everything it was holding. A selection, an armed
+  // tool or an axis lock surviving into LOOK would be invisible state waiting to
+  // surprise whoever comes back — and the gizmos belonging to a selection would
+  // still be drawn over a scene nothing can touch. The ring closes for the same
+  // reason: it is a menu about a thing, and there are no things in LOOK.
+  setViewportMode: (viewportMode) => set(viewportMode === "interact" ? { viewportMode } : {
+    viewportMode,
+    selection: undefined,
+    selectedBodyId: undefined,
+    voxelRegion: undefined,
+    selectionControlsOpen: false,
+    armedGesture: undefined,
+    axisConstraint: undefined,
+    radialMenu: undefined,
+  }),
+  // Arming drops the axis lock: it is only ever drawn while handles are on
+  // screen, and a constraint still armed on the way into the next gesture would
   // be a hidden state that silently ate two thirds of the next drag.
-  setActiveTool: (activeTool) => set({ activeTool, axisConstraint: undefined }),
+  setArmedGesture: (armedGesture) => set({ armedGesture, axisConstraint: undefined }),
   setAxisConstraint: (axisConstraint) => set({ axisConstraint }),
+  // One call, because the box and the selection that names it must land in the
+  // same update: a render between the two would draw a selection whose entity
+  // does not exist yet, or a box nothing is pointing at.
+  selectVoxelRegion: (voxelRegion) => set({
+    voxelRegion,
+    selection: voxelRegion ? VOXEL_REGION_SELECTION : undefined,
+    selectedBodyId: undefined,
+    selectionControlsOpen: false,
+  }),
   // Selecting something else folds the numbers away: they described the last
   // thing, and leaving them open silently re-points every field at the new one.
   select: (selection) => set((state) => ({
     selection,
     selectedBodyId: selectedBodyIdOf(selection),
+    // The region and its selection are one thing. Selecting anything else is
+    // what ends the sweep, so the box goes with it rather than being left
+    // outlined over a scene that has moved on.
+    voxelRegion: selection?.kind === "voxel-region" ? state.voxelRegion : undefined,
     carry: carryForSelection(state.carry, selectedBodyIdOf(selection)),
     selectionControlsOpen: state.selection?.id === selection?.id && state.selection?.kind === selection?.kind
       ? state.selectionControlsOpen : false,
@@ -389,7 +447,6 @@ export const useUIStore = create<UIStore>((set) => ({
     ? { carry: { ...state.carry, tiltDegrees } } : {}),
   endCarry: () => set({ carry: undefined }),
   setPlacementShape: (placementShape) => set({ placementShape }),
-  setPropShape: (propShape) => set({ propShape }),
   // Assignment rather than a toggle set: opening one instrument closes whichever
   // was up, because the field can only hold one and the ring writes it directly.
   setSceneOverlay: (sceneOverlay) => set({ sceneOverlay }),

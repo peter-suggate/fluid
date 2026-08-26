@@ -510,7 +510,7 @@ function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefi
  * Placing one carries it: a solid you asked for at a point is a solid you are
  * holding, and making you find it again afterwards is the step the pie removes.
  */
-export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
+export function fluidPlayActions(point_m: Vec3, normal: Vec3): readonly EditorAction[] {
   return [
     {
       id: "water",
@@ -525,7 +525,7 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
           icon: "water-ball",
           tone: "fluid",
           hint: "Click inside the tank to drop a ball of water \u00b7 drag out to size it",
-          effect: { kind: "arm", tool: "fluid-ball" },
+          effect: { kind: "arm", gesture: "fluid-ball" },
         },
         {
           id: "paint",
@@ -533,7 +533,7 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
           icon: "paint",
           tone: "fluid",
           hint: "Click to add a water brick \u00b7 drag to paint a body of water",
-          effect: { kind: "arm", tool: "fluid-paint" },
+          effect: { kind: "arm", gesture: "fluid-paint" },
         },
         {
           id: "erase",
@@ -541,15 +541,15 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
           icon: "erase",
           tone: "fluid",
           hint: "Click or drag to remove painted water bricks",
-          effect: { kind: "arm", tool: "fluid-erase" },
+          effect: { kind: "arm", gesture: "fluid-erase" },
         },
         {
           id: "hose",
           label: "Hose",
           icon: "hose",
           tone: "inflow",
-          hint: "Click a surface to aim the hose there",
-          effect: { kind: "arm", tool: "inflow" },
+          hint: "Aim the hose here",
+          effect: { kind: "place-inflow", point_m, normal },
         },
       ],
     },
@@ -558,19 +558,15 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
       label: "Solid",
       icon: "solid",
       tone: "body",
-      hint: "Place a solid here or clear existing solid voxels",
+      // Clearing is not here any more: solids are cleared by dragging across
+      // them, which selects the region, and the verb then lives on that
+      // selection's own ring. A wedge that armed a mode to do the same drag was
+      // a second way to start the same gesture. See `editor-voxel-region.ts`.
+      hint: "Place a solid here",
       // The shape's own name is the icon's name: the vocabulary in
       // `EditorActionIcon` covers every `SceneShapeName`, so a shape added to
       // the table draws itself in the ring without a second table to update.
       children: [
-        {
-          id: "clear-solid-voxels",
-          label: "Clear voxels",
-          icon: "erase",
-          tone: "danger" as const,
-          hint: "Drag a box from any occupied solid voxel to clear that region",
-          effect: { kind: "arm" as const, tool: "solid-voxel-clear" as const },
-        },
         ...SCENE_SHAPES_BY_CODE.map((shape) => ({
           id: shape.name,
           label: shape.label,
@@ -587,7 +583,7 @@ export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
       icon: "region",
       tone: "region",
       hint: "Drag a box over the water to cap how finely it is solved there",
-      effect: { kind: "arm", tool: "refinement-region" },
+      effect: { kind: "arm", gesture: "region-draw" },
     },
   ];
 }
@@ -643,7 +639,7 @@ export function fluidRingActions(
   target: EditorActionTarget,
 ): readonly EditorAction[] {
   return [
-    ...fluidPlayActions(target.point_m),
+    ...fluidPlayActions(target.point_m, target.normal ?? { x: 0, y: 1, z: 0 }),
     {
       id: "inspect",
       label: "Inspect",
@@ -663,7 +659,6 @@ export function fluidRingActions(
 
 export const fluidBodyEntity: EditorEntityDefinition = {
   kind: "fluid-body",
-  surfacedBy: (tool) => tool === "select",
   instances: (context) => {
     const base = fluidBodyEntityFor(context);
     const seeds = fluidSeedBodies(context.scene);

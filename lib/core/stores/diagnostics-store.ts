@@ -5,6 +5,7 @@ import { webGPUPlatformResourcePlugin } from "../webgpu-platform-resource";
 import type { EffectiveRendererStatus } from "../renderer-status";
 import type { GPUEulerianInfo } from "../webgpu-eulerian";
 import type { PressureJournal } from "../pressure-journal";
+import type { FluidCellPublication } from "../fluid-cell-trace";
 import type { StageLensReceipt } from "../stage-lens";
 import type { StageLensLayerReport } from "../webgpu-stage-lens-overlay";
 import type { RigidBodyState, RigidStepDiagnostics } from "../rigid-body";
@@ -99,6 +100,20 @@ interface DiagnosticsStore {
   stageLensReceipt: StageLensReceipt | null;
   /** What the lens's layers actually drew, including any instance decimation. */
   stageLensLayers: readonly StageLensLayerReport[];
+  /**
+   * The pressure cell the last published trace described, with the frame that
+   * turns its index space into a world box.
+   *
+   * Here rather than in the viewport's own state because two unrelated readers
+   * need it: the HUD, which narrates the cell, and the editor's fluid-cell
+   * probe, which lights up the leaf under the cursor. It is a read-only output
+   * of the running simulation like everything else in this store, and the probe
+   * cannot reach into a React component to get one.
+   *
+   * Null whenever the `C` instrument is off — the gather does not run, so there
+   * is nothing to describe and no cell to point at.
+   */
+  fluidCellTrace: FluidCellPublication | null;
   effectiveRendererStatus: EffectiveRendererStatus;
   waterSurfacePresentation: WaterSurfacePresentationDiagnostics | null;
   frameMs: number;
@@ -146,6 +161,7 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   pressureJournal: null,
   stageLensReceipt: null,
   stageLensLayers: [],
+  fluidCellTrace: null,
   effectiveRendererStatus: {
     state: "pending",
     failureReason: "missing-source",

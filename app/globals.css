@@ -356,6 +356,10 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .gpu-canvas { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
 .gpu-canvas:active { cursor: grabbing; }
 /* A click pins the traced ray, so the pointer is aiming rather than grabbing. */
+/* LOOK is a hand on the scene; EDIT is a pointer at a thing in it. The cursor is
+   the one part of the mode that is under the reader's eye the whole time. */
+.gpu-canvas[data-viewport-mode="interact"] { cursor: default; }
+.gpu-canvas[data-viewport-mode="interact"]:active { cursor: default; }
 .gpu-canvas[data-pixel-trace="live"] { cursor: crosshair; }
 .gpu-canvas[data-pixel-trace="live"]:active { cursor: grabbing; }
 /* The top-right corner: what the frame costs, and the way into the readings
@@ -367,6 +371,19 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .fps-cluster { position: absolute; z-index: 6; top: 15px; right: 16px; display: flex; align-items: center; gap: 6px; pointer-events: none; transition: right .2s ease; }
 .fps-meter { min-width: 68px; height: 26px; padding: 0 9px; display: grid; place-items: center; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); opacity: .62; pointer-events: none; backdrop-filter: var(--frost); transition: opacity .2s ease; }
 .viewport-shell:hover .fps-meter { opacity: 1; }
+/* Look, or edit. The one control in this corner that is fully lit at rest: the
+   rest of the cluster is a glance you can go and find, and this is the reason
+   the pointer does or does not reach the scene. Quiet in LOOK, accent in EDIT —
+   the loud state is deliberately the one where a click changes something. */
+.viewport-mode-toggle { height: 26px; padding: 0 8px 0 7px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--line-strong); background: var(--overlay); color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); pointer-events: auto; backdrop-filter: var(--frost); cursor: pointer; transition: color .18s ease, border-color .18s ease, background .18s ease; }
+.viewport-mode-toggle svg { flex: none; opacity: .85; }
+.viewport-mode-toggle strong { font: inherit; }
+.viewport-mode-toggle em { padding: 1px 4px; border: 1px solid currentColor; border-radius: var(--radius-s); font: var(--text-micro); font-style: normal; letter-spacing: var(--track-wide); opacity: 0; transition: opacity .18s ease; }
+.viewport-shell:hover .viewport-mode-toggle em, .viewport-mode-toggle:focus-visible em { opacity: .55; }
+.viewport-mode-toggle:hover { border-color: var(--line-strong); background: var(--hover); color: var(--text); }
+.viewport-mode-toggle[data-viewport-mode="interact"] { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+.viewport-mode-toggle[data-viewport-mode="interact"]:hover { background: var(--accent); color: var(--on-accent); }
+@media (prefers-reduced-motion: reduce) { .viewport-mode-toggle, .viewport-mode-toggle em { transition: none; } }
 .fps-instruments { display: flex; align-items: center; gap: 4px; }
 .fps-instruments button { height: 26px; padding: 0 8px; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); opacity: 0; pointer-events: none; backdrop-filter: var(--frost); cursor: pointer; transition: opacity .2s ease, color .2s ease, border-color .2s ease, background .2s ease; }
 .viewport-shell:hover .fps-instruments button { opacity: .5; pointer-events: auto; }
@@ -1192,6 +1209,35 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .radial-readout strong { color: var(--muted); font: var(--text-eyebrow); letter-spacing: var(--track-wide); text-transform: uppercase; }
 .radial-readout span { color: var(--dim); font: var(--text-note); }
 
+/* What the cursor is over. One layer, one vocabulary, every probe.
+
+   Below the gizmos (z-index 11) on purpose: handles belong to the selection and
+   are the thing being aimed at, so a hover outline must never draw over one.
+
+   At rest the highlight is a hairline in the target's own tone — present enough
+   to say "this is what a click means", quiet enough to sweep across a whole
+   scene without strobing. A gesture's live shape (`data-live`) is the loud one:
+   it is a commitment rather than a report, so it is solid, thicker, and carries
+   the caption that says what will happen. */
+.editor-highlight-layer { position: absolute; z-index: 10; left: 0; top: 0; pointer-events: none; }
+.editor-highlight { --tone: var(--tone-prop); }
+.editor-highlight[data-tone="fluid"] { --tone: var(--tone-fluid); }
+.editor-highlight[data-tone="tank"] { --tone: var(--tone-tank); }
+.editor-highlight[data-tone="body"] { --tone: var(--tone-body); }
+.editor-highlight[data-tone="prop"] { --tone: var(--tone-prop); }
+.editor-highlight[data-tone="inflow"] { --tone: var(--tone-inflow); }
+.editor-highlight[data-tone="region"] { --tone: var(--tone-region); }
+.editor-highlight .highlight-edge { fill: none; stroke: color-mix(in srgb, var(--tone) 72%, transparent); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
+/* A wall is a plane, not a wireframe: a stroked rectangle over a whole tank side
+   reads as a box floating in the room, while a wash reads as the surface it is. */
+.editor-highlight .highlight-face { fill: color-mix(in srgb, var(--tone) 9%, transparent); stroke: color-mix(in srgb, var(--tone) 55%, transparent); stroke-width: 1.1; vector-effect: non-scaling-stroke; }
+.editor-highlight .highlight-mark { fill: none; stroke: color-mix(in srgb, var(--tone) 62%, transparent); stroke-width: 1.1; vector-effect: non-scaling-stroke; }
+.editor-highlight .highlight-pip { fill: color-mix(in srgb, var(--tone) 85%, transparent); }
+.editor-highlight .highlight-caption { fill: var(--tone); stroke: var(--overlay); stroke-width: 3px; paint-order: stroke fill; font: var(--text-tag); letter-spacing: var(--track-wide); text-anchor: middle; text-transform: uppercase; }
+.editor-highlight .highlight-member { stroke: color-mix(in srgb, var(--tone) 34%, transparent); stroke-width: 1; stroke-dasharray: 5 3; }
+.editor-highlight[data-live="true"] .highlight-edge { stroke: color-mix(in srgb, var(--tone) 96%, transparent); stroke-width: 1.9; }
+.editor-highlight[data-live="true"] .highlight-member { stroke: color-mix(in srgb, var(--tone) 46%, transparent); stroke-width: 1.1; }
+.editor-highlight[data-live="true"] .highlight-face { fill: color-mix(in srgb, var(--tone) 16%, transparent); stroke: color-mix(in srgb, var(--tone) 90%, transparent); stroke-width: 1.6; }
 .editor-gizmo { position: absolute; z-index: 11; left: 0; top: 0; pointer-events: none; }
 .editor-gizmo .gizmo-axis line { stroke-width: 1.5; }
 .editor-gizmo .gizmo-axis circle { stroke: none; }
@@ -1239,9 +1285,6 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 /* A solid-region clear is destructive and cell-aligned. Occupied voxel boxes
    show exact affected geometry; the heavier region outline remains legible
    when per-voxel drawing detail is truncated. */
-.editor-solid-voxel-gizmo .solid-voxel-region-outline { fill: none; stroke: var(--red); stroke-width: 2.4; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
-.editor-solid-voxel-gizmo .solid-voxel-outline { fill: none; stroke: var(--red); stroke-width: 2; stroke-dasharray: 6 3; vector-effect: non-scaling-stroke; }
-.editor-solid-voxel-gizmo .solid-voxel-label { fill: var(--red); stroke: var(--overlay); stroke-width: 3px; paint-order: stroke fill; font: var(--text-tag); letter-spacing: var(--track-wide); text-anchor: middle; text-transform: uppercase; }
 
 .editor-entity-gizmo .entity-handle.hovered { stroke-width: 2; }
 .editor-entity-gizmo .entity-handle.hovered { fill: var(--tone); stroke: color-mix(in srgb, var(--tone) 16%, #fff); }

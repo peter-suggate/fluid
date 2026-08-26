@@ -1,6 +1,6 @@
 import { intersectBox, type EditorRay } from "./editor-entity";
 import type { SceneDescription, Vec3 } from "./model";
-import { sceneCellSizes_m } from "./scene-lattice";
+import { sceneCellSizes_m, solidVoxelShellForScene } from "./scene-lattice";
 import { solidWorldForScene, type SolidWorld, type SolidWorldCoordinate,
   type SolidWorldVoxelPatch } from "./solid-world";
 
@@ -43,10 +43,63 @@ export function solidVoxelWorldBox(scene: SceneDescription,
   };
 }
 
+/**
+ * Is this cell part of the container's own shell?
+ *
+ * The shell is authored, so it is in `scene.solidVoxels` like any other patch
+ * and the solid world cannot tell it apart from a dam the reader built. The
+ * editor has to, because the vessel is glass: the reader looks *through* the
+ * near wall at the water and the far wall behind it, and a pick that stopped on
+ * the first solid cell would answer "a voxel of the front pane" for every pixel
+ * of the tank — which is how the tank and the fluid both became unselectable.
+ *
+ * Derived from `solidVoxelShellForScene` rather than from a rule about indices,
+ * so the box shell (six slabs outside the lattice) and the spherical one (every
+ * cell outside an inscribed sphere, corners included) are both exact and neither
+ * can drift from the authoring. Memoized per scene document: a hover asks this
+ * once per candidate cell, and the answer only changes when the lattice does.
+ */
+const containerShellCells = new WeakMap<SceneDescription, ReadonlySet<string>>();
+
+export function containerShellContains(
+  scene: SceneDescription,
+  coordinate: SolidWorldCoordinate,
+): boolean {
+  let cells = containerShellCells.get(scene);
+  if (!cells) {
+    const built = new Set<string>();
+    for (const patch of solidVoxelShellForScene(scene)) {
+      if (patch.operation !== "fill") continue;
+      for (let x = patch.minimum[0]; x < patch.maximumExclusive[0]; x += 1) {
+        for (let y = patch.minimum[1]; y < patch.maximumExclusive[1]; y += 1) {
+          for (let z = patch.minimum[2]; z < patch.maximumExclusive[2]; z += 1) {
+            built.add(`${x},${y},${z}`);
+          }
+        }
+      }
+    }
+    cells = built;
+    containerShellCells.set(scene, cells);
+  }
+  return cells.has(coordinate.join(","));
+}
+
+export interface SolidVoxelPickOptions {
+  /**
+   * Cells the pick may not answer with, tested before the ray is intersected.
+   *
+   * A skipped cell is passed *through*, not stopped at — the search keeps going
+   * to whatever stands behind it. That is the whole difference between glass and
+   * a hole: the wall is still there, the editor just does not point at it.
+   */
+  readonly skip?: (coordinate: SolidWorldCoordinate) => boolean;
+}
+
 /** Ray-pick the authoritative occupied voxels, independent of authored shape. */
 export function pickSolidVoxel(scene: SceneDescription,
   ray: EditorRay,
-  world: SolidWorld = solidWorldForScene(scene)): PickedSolidVoxel | undefined {
+  world: SolidWorld = solidWorldForScene(scene),
+  options: SolidVoxelPickOptions = {}): PickedSolidVoxel | undefined {
   if (world.pages.length === 0) return undefined;
   const rayLength = Math.hypot(ray.direction.x, ray.direction.y, ray.direction.z);
   if (!(rayLength > 1e-12)) return undefined;
@@ -77,6 +130,7 @@ export function pickSolidVoxel(scene: SceneDescription,
       const coordinate = [8 * page.coordinate[0] + local % 8,
         8 * page.coordinate[1] + Math.floor(local / 8) % 8,
         8 * page.coordinate[2] + Math.floor(local / 64)] as const;
+      if (options.skip?.(coordinate)) continue;
       const box = solidVoxelWorldBox(scene, coordinate);
       const span = intersectBox(normalizedRay, box);
       if (!span) continue;

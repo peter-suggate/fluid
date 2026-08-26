@@ -307,7 +307,6 @@ function inflowEntityFor(context: EditorEntityContext): EditorEntity | undefined
 /** The nozzle is clicked on its own channel, like any other solid. */
 export const inflowEntity: EditorEntityDefinition = {
   kind: "inflow",
-  surfacedBy: (tool) => tool === "select" || tool === "inflow",
   instances: (context) => {
     const entity = inflowEntityFor(context);
     return entity ? [entity] : [];

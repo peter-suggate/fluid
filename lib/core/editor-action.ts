@@ -1,4 +1,5 @@
-import type { EditorSelection, EditorTool } from "./editor-tools";
+import type { EditorGestureId } from "./editor-gesture-catalog";
+import type { EditorSelection } from "./editor-tools";
 import type { RigidShape, SceneDescription, Vec3 } from "./model";
 import type { SceneOverlay, SceneryPropKind, TracePinAim } from "./stores/ui-store";
 
@@ -34,18 +35,15 @@ export type EditorActionEffect =
     readonly reseed?: boolean;
   }
   /**
-   * Arm a tool, so the *next* click means something else.
+   * Arm a gesture, so the *next drag* means something else.
    *
-   * The shape rides along because "drop a cup here" is one intention: arming
-   * BODY and then hunting for the shape in a tray is the two-step the radial
-   * exists to collapse.
+   * Only ever a gesture that reinterprets a stroke — see the rule at the top of
+   * `editor-gesture-catalog.ts`. The three placements that used to be armed are
+   * `place`, `place-prop` and `place-inflow` below, because the ring is opened
+   * at a point and already carries it: arming a mode so a second click could say
+   * *where* was answering a question that had already been answered.
    */
-  | {
-    readonly kind: "arm";
-    readonly tool: EditorTool;
-    readonly shape?: RigidShape;
-    readonly prop?: SceneryPropKind;
-  }
+  | { readonly kind: "arm"; readonly gesture: EditorGestureId }
   /**
    * Put a solid here, and optionally hand it straight to the cursor.
    *
@@ -60,6 +58,21 @@ export type EditorActionEffect =
     readonly point_m: Vec3;
     readonly carry?: boolean;
   }
+  /**
+   * Rest decorative geometry on the surface the ring was opened on.
+   *
+   * The normal rides along with the point because a prop stands *on* a surface:
+   * a cup dropped on a sloped stone should sit on the slope, and the ring is the
+   * only place that still knows which surface was clicked.
+   */
+  | {
+    readonly kind: "place-prop";
+    readonly prop: SceneryPropKind;
+    readonly point_m: Vec3;
+    readonly normal: Vec3;
+  }
+  /** Aim the hose at the surface the ring was opened on. */
+  | { readonly kind: "place-inflow"; readonly point_m: Vec3; readonly normal: Vec3 }
   /** Bind a body to the cursor until a click puts it down. */
   | { readonly kind: "carry"; readonly bodyId: string }
   /** Hand a body back to gravity from above the tank. */
@@ -77,7 +90,6 @@ export type EditorActionEffect =
    * a noun: this module is core, it may not import the framework, and the ring
    * is not the only surface that will ever want to send someone to the library.
    */
-  | { readonly kind: "navigate"; readonly href: string }
   /**
    * Ask for a scene document from the reader's own machine.
    *
@@ -85,7 +97,6 @@ export type EditorActionEffect =
    * exactly what choosing a wedge is — so the effect carries no payload and the
    * performer does the asking.
    */
-  | { readonly kind: "import-scene" }
   /**
    * Raise an instrument over the scene: a pipeline graph, or the metric cards.
    *
@@ -151,8 +162,6 @@ export type EditorActionIcon =
   | "capsule"
   | "cup"
   | "ellipsoid"
-  | "library"
-  | "import"
   | "pipeline"
   | "render-pipeline"
   | "diagnostics"

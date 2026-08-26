@@ -1,6 +1,8 @@
 import { constrainedAxes, EDITOR_AXES, type AxisConstraint, type EditorAxis } from "./editor-axis-constraint";
 import { GIZMO_AXIS_DIRECTIONS, gizmoHandleLength_m } from "./editor-gizmo";
-import type { EditorSelection, EditorSelectionKind, EditorTool } from "./editor-tools";
+import type { EditorSelection, EditorSelectionKind } from "./editor-tools";
+import type { VoxelSelectionRegion } from "./editor-voxel-region";
+import type { FluidCellTraceSnapshot } from "./fluid-cell-trace";
 import { add, scale, sub } from "./math";
 import { quaternionInverseRotate, quaternionRotate } from "./rigid-body";
 import type { CameraState, Quaternion, SceneDescription, Vec3 } from "./model";
@@ -301,14 +303,19 @@ export function positionFields(
 /**
  * A declaration, exported beside the implementation it describes.
  *
- * `instances` returns everything whose handles the given tool surfaces, in the
- * order pick ties resolve — see `entityHandleAtPointer`. `find` resolves a
- * selection back to an entity and is deliberately separate: a selection outlives
- * the tool that made it, so it must resolve even when nothing is surfaced.
+ * `instances` returns everything whose handles are on screen, in the order pick
+ * ties resolve — see `entityHandleAtPointer`. `find` resolves a selection back to
+ * an entity and is deliberately separate: a selection outlives the gesture that
+ * made it, so it must resolve even when nothing is surfaced.
+ *
+ * There is no `surfacedBy` any more. It existed to ask "does the armed tool draw
+ * this entity's handles", and with the tools gone every implementation of it had
+ * collapsed to `tool === "select"` — which is to say, to `true`. A predicate that
+ * is always true is not a plugin point, it is noise; what is surfaced is simply
+ * what is selected. See `editor-gesture-catalog.ts`.
  */
 export interface EditorEntityDefinition {
   readonly kind: EditorSelectionKind;
-  readonly surfacedBy: (tool: EditorTool, selection: EditorSelection | undefined) => boolean;
   readonly instances: (context: EditorEntityContext) => readonly EditorEntity[];
   readonly find: (context: EditorEntityContext, id: string) => EditorEntity | undefined;
   /**
@@ -423,6 +430,70 @@ export function pickRoomInterior(ray: EditorRay, box: BoxExtent): number | undef
   return span && span.far_m > 0 ? span.far_m : undefined;
 }
 
+/** One side of a box: which axis it is perpendicular to, and which end. */
+export interface BoxFace {
+  readonly axis: EditorAxis;
+  readonly sign: -1 | 1;
+  readonly distance_m: number;
+  readonly normal: Vec3;
+  /** Corners in winding order, for drawing the face. */
+  readonly corners: readonly [Vec3, Vec3, Vec3, Vec3];
+}
+
+/**
+ * Which wall of a room a ray leaves through.
+ *
+ * `pickRoomInterior` answers *how far*; the tank-wall probe needs *which*, so
+ * the exit slab is identified here rather than re-derived from the hit point.
+ * Comparing coordinates against the box after the fact would tie on an edge and
+ * disagree with the distance the pick already returned, which is exactly the
+ * class of bug that makes a highlight flicker between two walls along a seam.
+ */
+export function pickRoomExitFace(ray: EditorRay, box: BoxExtent): BoxFace | undefined {
+  let exit: { axis: EditorAxis; sign: -1 | 1; distance_m: number } | undefined;
+  let near = -Infinity;
+  for (const axis of EDITOR_AXES) {
+    const direction = ray.direction[axis];
+    if (Math.abs(direction) < 1e-9) {
+      if (ray.origin[axis] < box.min[axis] || ray.origin[axis] > box.max[axis]) return undefined;
+      continue;
+    }
+    const a = (box.min[axis] - ray.origin[axis]) / direction;
+    const b = (box.max[axis] - ray.origin[axis]) / direction;
+    near = Math.max(near, Math.min(a, b));
+    const far = Math.max(a, b);
+    if (!exit || far < exit.distance_m) {
+      exit = { axis, sign: far === b ? 1 : -1, distance_m: far };
+    }
+  }
+  if (!exit || !(exit.distance_m > 0) || exit.distance_m < near) return undefined;
+  return { ...exit, normal: faceNormal(exit.axis, exit.sign), corners: boxFaceCorners(box, exit.axis, exit.sign) };
+}
+
+function faceNormal(axis: EditorAxis, sign: -1 | 1): Vec3 {
+  // Inward, because a room's walls are seen from inside: an outward normal here
+  // would point every placement that rests on this face out through the wall.
+  return { x: axis === "x" ? -sign : 0, y: axis === "y" ? -sign : 0, z: axis === "z" ? -sign : 0 };
+}
+
+/** The four corners of one side of a box, wound so a stroke closes cleanly. */
+export function boxFaceCorners(
+  box: BoxExtent,
+  axis: EditorAxis,
+  sign: -1 | 1,
+): readonly [Vec3, Vec3, Vec3, Vec3] {
+  const [u, v] = EDITOR_AXES.filter((candidate) => candidate !== axis) as [EditorAxis, EditorAxis];
+  const fixed = sign > 0 ? box.max[axis] : box.min[axis];
+  const corner = (uEnd: "min" | "max", vEnd: "min" | "max"): Vec3 => {
+    const point = { x: 0, y: 0, z: 0 };
+    point[axis] = fixed;
+    point[u] = box[uEnd][u];
+    point[v] = box[vEnd][v];
+    return point;
+  };
+  return [corner("min", "min"), corner("max", "min"), corner("max", "max"), corner("min", "max")];
+}
+
 /**
  * What a definition may read. Bodies are passed alongside the scene because
  * their live pose is runtime state — a body being dragged is not where the
@@ -440,6 +511,26 @@ export interface EditorEntityContext {
    * lifecycle state; the viewport always supplies it explicitly.
    */
   readonly pickingAvailable?: boolean;
+  /**
+   * The box of solid voxels the last drag-select swept out, when there is one.
+   *
+   * Runtime state passed alongside the scene for the same reason `bodies` is:
+   * it is not in the document and must not be — it is a selection, so it belongs
+   * to neither the undo history nor the saved file — but an entity has to be
+   * able to describe it. See `editor-voxel-region.ts`.
+   */
+  readonly voxelRegion?: VoxelSelectionRegion;
+  /**
+   * The pressure cell the last frame's trace described, when the `C` instrument
+   * is running.
+   *
+   * The one target that is not derivable from the scene document: a leaf's
+   * extent is decided by the solver's topology, which only the GPU knows and
+   * only a readback reports. It arrives here for the same reason `bodies` does
+   * — runtime state a probe must be able to describe without reaching into the
+   * renderer — and its absence simply means no fluid cell can be pointed at.
+   */
+  readonly fluidCell?: FluidCellTraceSnapshot;
 }
 
 /** The runtime pose an entity definition needs, without importing the solver. */

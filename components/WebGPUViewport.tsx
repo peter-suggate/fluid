@@ -12,9 +12,9 @@ import { PixelTraceHud } from "./PixelTraceHud";
 import { FluidCellTraceHud, type FluidCellTraceStatusHint } from "./FluidCellTraceHud";
 import { visualizationIdsForGroups } from "../lib/core/visualization-catalog";
 import {
+  fluidCellTraceLattice,
   fluidCellTraceScheduleFor,
   stepFluidCellTraceHit,
-  type FluidCellTrace,
   type FluidCellTraceSchedule,
 } from "../lib/core/fluid-cell-trace";
 import type { FineBandCellContext } from "../lib/core/fine-band-cell-model";
@@ -37,13 +37,15 @@ import {
   closestPointOnAxis,
   GIZMO_AXIS_DIRECTIONS,
 } from "../lib/core/editor-gizmo";
-import { CLICK_SLOP_PX, DEFAULT_EDITOR_TOOL, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "../lib/core/editor-tools";
+import { CLICK_SLOP_PX, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "../lib/core/editor-tools";
 import { hoverSceneAt, restInContainer, type EditorHover } from "../lib/core/editor-hover";
-import { sceneryHighlightRange, sceneryIdFromSelection, sceneryPlacementPreview } from "../lib/core/editor-scenery";
+import { roomPointForRay, targetActionsAt, targetAtRay } from "../lib/core/editor-probe-catalog";
+import { highlightInstanceRange, type EditorHighlight, type EditorTarget } from "../lib/core/editor-target";
+import { EditorHighlightLayer } from "./EditorHighlightLayer";
+import { sceneryIdFromSelection } from "../lib/core/editor-scenery";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
 import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
 import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
-import { createInflowAt, INFLOW_SELECTION_ID } from "../lib/core/editor-inflow";
 import {
   addFluidBall,
   defaultFluidBallRadius_m,
@@ -76,18 +78,17 @@ import {
   type EditorEntityContext,
   type EditorHandle,
 } from "../lib/core/editor-entity";
-import { editorBodyPoses, editorEntityContext, entityActionsAt, entityAtRay, findEntity, sceneActionsAt, surfacedEntities } from "../lib/core/editor-entity-catalog";
+import { editorBodyPoses, editorEntityContext, findEntity, sceneActionsAt, surfacedEntities } from "../lib/core/editor-entity-catalog";
+import { gestureForPress } from "../lib/core/editor-gesture-catalog";
 import {
-  pickSolidVoxel,
   projectSolidVoxelClearRegion,
   solidVoxelClearPreview,
   solidVoxelWorldBox,
-  withSolidVoxelClearRegion,
   type PickedSolidVoxel,
   type SolidVoxelClearRegion,
 } from "../lib/core/editor-solid-voxel";
-import { solidWorldForScene, type SolidWorld,
-  type SolidWorldVoxelPatch } from "../lib/core/solid-world";
+import { voxelDragAnchor, voxelRegionBox, voxelRegionExtent } from "../lib/core/editor-voxel-region";
+import { solidWorldForScene, type SolidWorld } from "../lib/core/solid-world";
 import {
   advanceCarryPlane,
   carryOrientation,
@@ -114,10 +115,8 @@ import {
 } from "../lib/core/refinement-regions";
 import {
   applyTerrainFeatureDrag,
-  terrainFeatureAt,
   terrainFeatureHandles,
   terrainFeatureIndex,
-  terrainFeatureSelectionId,
   type TerrainHandleKind,
 } from "../lib/core/editor-terrain";
 import { FluidFieldFlyout } from "./FluidFieldFlyout";
@@ -126,6 +125,7 @@ import { TreeCanopyFlyout } from "./TreeCanopyFlyout";
 import { VesselRimFlyout } from "./VesselRimFlyout";
 import { SelectionFlyout } from "./SelectionFlyout";
 import { SceneInstrumentTags } from "./PipelineOverlay";
+import { ViewportModeToggle } from "./ViewportModeToggle";
 import { useSceneStore } from "../lib/core/stores/scene-store";
 import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore, type SceneDraftSubject } from "../lib/core/stores/scene-draft-store";
 import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
@@ -257,13 +257,18 @@ export function WebGPUViewport() {
   const stageViewIsDefaultPresentation = DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView === svoStageView;
   const svoStageRamp = `linear-gradient(90deg,${svoStageDefinition.legend
     .map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
-  const activeTool = useUIStore((state) => state.activeTool);
+  const armedGesture = useUIStore((state) => state.armedGesture);
   const axisConstraint = useUIStore((state) => state.axisConstraint);
   const selection = useUIStore((state) => state.selection);
+  const voxelRegion = useUIStore((state) => state.voxelRegion);
   const bodies = useDiagnosticsStore((state) => state.bodies);
   // Subscribed, so a gizmo drawn around a body follows it while it moves.
   const bodyPoses = useDiagnosticsStore((state) => state.bodyPoses);
-  const [hover, setHover] = useState<EditorHover | null>(null);
+  // What the cursor is over, as the probe catalog answers it. Replaces the
+  // four-kind `EditorHover` union the viewport used to keep: a target names the
+  // same things and three more, and it carries its own highlight, so nothing
+  // here has to know that a wall is drawn differently from a voxel.
+  const [hoverTarget, setHoverTarget] = useState<EditorTarget | null>(null);
   // The object the cursor is currently carrying towards a click: a ball of
   // water, a solid, or a prop. Held as state rather than read off the draft
   // because none of the three is drawn by the renderer until the click lands —
@@ -273,10 +278,10 @@ export function WebGPUViewport() {
     { centre_m: Vec3; radius_m: number; tone: "fluid" | "body" | "prop" } | null>(null);
   // Disarming takes the cursor's object with it, even if the pointer never
   // moves again: the circle promises the *next* click puts something there, and
-  // it must not outlive the tool that would.
-  const [cursorDropTool, setCursorDropTool] = useState(activeTool);
-  if (activeTool !== cursorDropTool) {
-    setCursorDropTool(activeTool);
+  // it must not outlive the gesture that would.
+  const [cursorDropGesture, setCursorDropGesture] = useState(armedGesture);
+  if (armedGesture !== cursorDropGesture) {
+    setCursorDropGesture(armedGesture);
     if (cursorDrop) setCursorDrop(null);
   }
   /** Handle under the pointer, so it can announce what it does before the press. */
@@ -294,12 +299,17 @@ export function WebGPUViewport() {
    * to explain a lock that leaves it nothing to move.
    */
   const [handleDrag, setHandleDrag] = useState<{ handleId: string } | null>(null);
-  /** Exact occupied voxels affected by the current generic clear-region drag. */
-  const [solidVoxelPreview, setSolidVoxelPreview] = useState<{
-    region: SolidVoxelClearRegion;
-    coordinates: readonly (readonly [number, number, number])[];
-    affectedCount: number;
-    truncated: boolean;
+  /**
+   * The live shape of a voxel-region sweep, ready-made for the highlight layer.
+   *
+   * Held as an `EditorHighlight` rather than as coordinates because that is the
+   * only thing done with it: the drawing, the clipping and the tone all belong
+   * to `EditorHighlightLayer` now, and keeping raw cells here only meant a
+   * fifth hand-rolled projected-box overlay downstream to turn them into lines.
+   */
+  const [voxelSweep, setVoxelSweep] = useState<{
+    readonly highlight: EditorHighlight;
+    readonly caption: string;
   } | null>(null);
 
   const pixelTraceEnabled = useUIStore((state) => state.pixelTraceEnabled);
@@ -337,7 +347,16 @@ export function WebGPUViewport() {
   const cellTraceRevisionRef = useRef(-1);
   /** Last rigid-pose readback published to the editor; see publishBodyPoses. */
   const bodyPoseRevisionRef = useRef(-1);
-  const [fluidCellTrace, setFluidCellTraceValue] = useState<FluidCellTrace | undefined>(undefined);
+  /**
+   * The cell the last gather described, read back from where it is published.
+   *
+   * Component state until the fluid-cell probe needed it: a probe is called from
+   * `editorEntityContext()` with no React around it, so a trace only this
+   * component could see was a trace the editor could not point at. It lives in
+   * the diagnostics store with the rest of the run's published output now, and
+   * this is one of its two readers.
+   */
+  const fluidCellTrace = useDiagnosticsStore((state) => state.fluidCellTrace?.trace);
   const [fluidCellTraceStatus, setFluidCellTraceStatus] = useState<FluidCellTraceStatusHint>("waiting");
   /**
    * Band widths and the ladder that ran, refreshed with the trace.
@@ -471,7 +490,17 @@ export function WebGPUViewport() {
 
   const publishFluidCellTrace = (renderer: FluidLabRendererHandle) => {
     const ui = useUIStore.getState();
-    if (!ui.fluidCellTraceEnabled) return;
+    if (!ui.fluidCellTraceEnabled) {
+      // The instrument going dark takes the published cell with it. Left behind,
+      // the editor would keep lighting up a leaf from a frame nobody is looking
+      // at any more — and the revision guard below would never republish it,
+      // because the renderer's revision does not move while the gather is off.
+      if (useDiagnosticsStore.getState().fluidCellTrace) {
+        useDiagnosticsStore.getState().set({ fluidCellTrace: null });
+        cellTraceRevisionRef.current = -1;
+      }
+      return;
+    }
     // A pin asked for from the HUD or from a ring wedge becomes the same request
     // a click makes, so all three record an exact aim and none can re-aim
     // afterwards. The ring carries its own — the pixel it was opened on — and
@@ -498,7 +527,14 @@ export function WebGPUViewport() {
     if (revision === cellTraceRevisionRef.current) return;
     cellTraceRevisionRef.current = revision;
     const trace = renderer.latestFluidCellTrace;
-    setFluidCellTraceValue(trace);
+    // The lattice is resolved here, where both halves are in hand: the solver's
+    // own domain when it publishes one, and the scene it is drawn in otherwise.
+    // Without it `leafOrigin` is a count of cells with no idea where it starts.
+    const lattice = trace && fluidCellTraceLattice(
+      trace, displaySceneSnapshot().container, renderer.fluidCellTraceDomain);
+    useDiagnosticsStore.getState().set({
+      fluidCellTrace: trace && lattice ? { trace, lattice } : null,
+    });
     setFluidCellFineBand(renderer.fluidCellTraceFineBand);
     // The gather clamps the requested step to the run it actually walked, so the
     // store follows what it settled on. Without this a run that shortens under
@@ -772,10 +808,13 @@ export function WebGPUViewport() {
     | { id: number; action: "body"; bodyId: string; downX: number; downY: number; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
     | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
     | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
+    // A face-locked box swept across solids. It carries no `baseSolids`: the
+    // release makes a *selection*, not an edit, so there is no patch to build
+    // against a pre-drag document. See `editor-voxel-region.ts`.
     | { id: number; action: "solid-voxel-region"; anchor: PickedSolidVoxel;
       region: SolidVoxelClearRegion;
-      baseSolids: readonly SolidWorldVoxelPatch[];
-      baseWorld: SolidWorld }
+      baseWorld: SolidWorld;
+      downX: number; downY: number; selectOnClick?: EditorSelection }
     // A rubber band on a horizontal plane through the press. `anchor` is the
     // corner the box is grown from, and `regionId` is claimed at the press so
     // every sample of the drag revises the same region instead of appending one
@@ -805,7 +844,7 @@ export function WebGPUViewport() {
   // A brush stroke lands on the surface the ray meets, so the brush is only
   // armed once there is a published surface for it to land on.
   const fluidToolArmed = pickingInteractive
-    && (activeTool === "fluid-paint" || activeTool === "fluid-erase");
+    && (armedGesture === "fluid-paint" || armedGesture === "fluid-erase");
 
   // The selection's handles.
   //
@@ -817,7 +856,7 @@ export function WebGPUViewport() {
   // hitch that made the gesture unusable. Preview here, simulate on release.
   const entityContext: EditorEntityContext = { scene, pickingAvailable: pickingInteractive,
     bodies: editorBodyPoses(mergeDrawnPoses(bodies, bodyPoses)) };
-  const entities = surfacedEntities(entityContext, activeTool, selection);
+  const entities = surfacedEntities(entityContext, selection);
   const heldEntity = entities[0];
   const entityGizmos = entities.map((entity) => ({
     entity,
@@ -876,7 +915,7 @@ export function WebGPUViewport() {
   // Terrain handles are the selection's gizmo, drawn from `scene.terrain`, so
   // like every other handle they outlive the generation that was on screen when
   // the feature was picked.
-  const selectedTerrainFeature = selection?.kind === "terrain-feature" && activeTool === "select"
+  const selectedTerrainFeature = selection?.kind === "terrain-feature" && !armedGesture
     ? terrainFeatureIndex(selection.id, scene.terrain)
     : undefined;
   const terrainHandles = selectedTerrainFeature !== undefined && scene.terrain
@@ -894,7 +933,7 @@ export function WebGPUViewport() {
   // keeps handles off unselected objects: a viewport permanently crosshatched
   // with wireframes is worse than one where they appear when relevant. Read
   // from the display scene, so the rubber band is the same code path.
-  const regionsVisible = activeTool === "refinement-region" || selection?.kind === "refinement-region";
+  const regionsVisible = armedGesture === "region-draw" || selection?.kind === "refinement-region";
   const regionOutlines = regionsVisible
     ? sceneRefinementRegions(scene).map((region) => ({
       id: region.id,
@@ -903,21 +942,24 @@ export function WebGPUViewport() {
         .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height)),
     }))
     : [];
-  const solidVoxelOutlines = solidVoxelPreview?.coordinates.map((coordinate) => ({
-    key: coordinate.join(","),
-    corners: boxCorners(solidVoxelWorldBox(scene, coordinate))
-      .map((corner) => projectToViewport(corner, camera,
-        viewportSize.width, viewportSize.height)),
-  })) ?? [];
-  const solidVoxelRegionCorners = solidVoxelPreview ? (() => {
-    const minimum = solidVoxelWorldBox(scene, solidVoxelPreview.region.minimum).min;
-    const maximumCell = solidVoxelPreview.region.maximumExclusive.map((value) =>
-      value - 1) as unknown as SolidVoxelClearRegion["maximumExclusive"];
-    const maximum = solidVoxelWorldBox(scene, maximumCell).max;
-    return boxCorners({ min: minimum, max: maximum }).map((corner) =>
-      projectToViewport(corner, camera, viewportSize.width, viewportSize.height));
-  })() : undefined;
-  const hoverProjection = hover ? projectToViewport(hover.position_m, camera, viewportSize.width, viewportSize.height) : undefined;
+  /**
+   * What the highlight layer holds: the sweep while one is running, and the
+   * standing selection once it has been released.
+   *
+   * The same shape either way, which is the point — a region is a box over
+   * solids, and a selected one differs from a live one only by whether the
+   * pointer is still down. The standing form deliberately draws the box alone
+   * and not the cells inside it: enumerating them costs a solid-world walk per
+   * render, and the count is already on the flyout that opens beside it.
+   */
+  const heldHighlight = voxelSweep
+    ?? (voxelRegion && selection?.kind === "voxel-region"
+      ? {
+        highlight: { kind: "box", box: voxelRegionBox(scene, voxelRegion) } as EditorHighlight,
+        caption: `${voxelRegionExtent(voxelRegion).join(" × ")} VOXELS`,
+      }
+      : null);
+  const hoverProjection = hoverTarget ? projectToViewport(hoverTarget.point_m, camera, viewportSize.width, viewportSize.height) : undefined;
   // The field-overlay picker rides just outside the container's top corner, and
   // only while the tank or the water body is selected — the same argument that
   // gates the scale overlay: inspecting the fluid is part of the "edit the
@@ -1128,7 +1170,7 @@ export function WebGPUViewport() {
         canonicalMethodValues: canonicalSafeMethodValues,
         exactScene: canonicalScene(sceneState.scene) === canonicalScene(getScenePreset("water-box-dam-break").create()),
         gridOverlayAxis: ui.gridOverlayAxis,
-        activeTool: ui.activeTool,
+        armedGesture: ui.armedGesture,
         search: window.location.search,
       });
     };
@@ -1354,13 +1396,16 @@ export function WebGPUViewport() {
    * them. Resolving that here keeps the shader from having to learn what a
    * scenery node is. See dryHoverRim in lib/webgpu-svo-dry-scene.ts.
    */
-  const publishHoverHighlight = (hovered: EditorHover | null) => {
-    const renderer = rendererRef.current;
-    if (!renderer) return;
-    const range = hovered?.kind === "scenery" && hovered.sceneryNodeId
-      ? sceneryHighlightRange(useSceneStore.getState().scene, hovered.sceneryNodeId)
-      : undefined;
-    renderer.setHoverHighlight(range && { first: range.first, last: range.last });
+  /**
+   * The one highlight the GPU draws.
+   *
+   * Instanced proxy sets — stones, trees — are rimmed by the renderer on the
+   * geometry itself, because an axis-aligned outline around a branch is a crate.
+   * Every other highlight is a shape the SVG layer strokes, so this asks the
+   * target for its instance range and passes on nothing when there is not one.
+   */
+  const publishHoverHighlight = (target: EditorTarget | null) => {
+    rendererRef.current?.setHoverHighlight(highlightInstanceRange(target?.highlight));
   };
   const planeHit = (origin: Vec3, direction: Vec3, point: Vec3, normal: Vec3) => {
     const denominator = dot(direction, normal); if (Math.abs(denominator) < 1e-6) return point;
@@ -1481,11 +1526,23 @@ export function WebGPUViewport() {
   /**
    * Right-click: ask whatever is under the pointer what it offers.
    *
-   * The whole contextual story is these six lines. The ray resolves to an
-   * entity through the same picker a left-click uses, the catalog composes that
-   * entity's own actions, and the ring draws them. Nothing here knows what a
-   * tank offers or what a body offers, which is why adding a verb to either is
-   * a change to that entity's file and to nothing else.
+   * The whole contextual story is these six lines. The ray resolves to a
+   * *target* through the same probe catalog the hover highlight uses, the
+   * catalog composes what that target offers, and the ring draws it. Nothing
+   * here knows what a tank offers, what a body offers or what a voxel offers,
+   * which is why adding a verb to any of them is a change to that one file.
+   *
+   * The ring and the highlight now cannot disagree. They were two pickers
+   * before — `hoverSceneAt` lit the rim, `entityAtRay` composed the menu — so
+   * right-clicking a lit stone could open the tank's ring, and a pixel with no
+   * entity behind it opened nothing at all. One resolution removes both.
+   *
+   * LOOK gets the *room's* ring and never a thing's. The ring is the only route
+   * to the library, to an import and to the three instruments, and a mode that
+   * took it away would make watching a scene mean losing the way to ask what it
+   * costs. Pointing at the room is not pointing at anything in it, so nothing
+   * here is inconsistent with LOOK touching nothing: the wedges that place
+   * water are gone with the target, and what is left is about the document.
    */
   const openRadialMenuAt = (event: React.MouseEvent<HTMLCanvasElement>) => {
     event.preventDefault();
@@ -1495,38 +1552,37 @@ export function WebGPUViewport() {
     const rect = event.currentTarget.getBoundingClientRect();
     const ray = viewportRayForPointer(useUIStore.getState().camera, event.clientX, event.clientY, rect);
     const context = editorEntityContext();
-    const hover = hoverSceneAt(context.scene, drawnBodies(), ray);
-    const hit = entityAtRay(context, ray);
-    // A thing under the cursor answers for itself; a bare point in the room is
-    // answered by the room. Both are rings — see `sceneActionsAt`.
-    const entity = hit && findEntity(context, hit.selection);
-    const actions = hit
-      ? entityActionsAt(context, {
-        selection: hit.selection,
-        point_m: add(ray.origin, scale(ray.direction, hit.distance_m)),
-        normal: hover?.normal,
-        // The pixel this ring was opened on, for the wedges that aim a probe at
-        // it. Captured here because by the time a wedge is chosen the pointer is
-        // out on the ring: only the composing surface still knows where the
-        // click was, which is the whole reason the ring is composed here.
-        aim: {
-          normalizedX: (event.clientX - rect.left) / Math.max(rect.width, 1),
-          normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
-        },
-      })
-      : hover ? sceneActionsAt(context.scene, hover.position_m) : [];
+    const interacting = useUIStore.getState().viewportMode === "interact";
+    const target = interacting ? targetAtRay(context, ray) : undefined;
+    // The pixel this ring was opened on, for the wedges that aim a probe at it.
+    // Captured here because by the time a wedge is chosen the pointer is out on
+    // the ring: only the composing surface still knows where the click was,
+    // which is the whole reason the ring is composed here.
+    const aim = {
+      normalizedX: (event.clientX - rect.left) / Math.max(rect.width, 1),
+      normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
+    };
+    const actions = target
+      ? targetActionsAt(context, target, aim)
+      // LOOK has no target by construction, so the room answers from the point
+      // the ray reaches rather than from a thing.
+      : sceneActionsAt(context.scene, roomPointForRay(context.scene, ray), undefined, { placement: false });
     if (actions.length === 0) { useUIStore.getState().closeRadialMenu(); return; }
     // Client coordinates: the ring is a fixed-position layer over the window,
     // not a child of the canvas, so it must not be told canvas-relative ones.
     useUIStore.getState().openRadialMenu({
       x: event.clientX,
       y: event.clientY,
-      title: entity?.label ?? hover?.label ?? "Scene",
+      title: target?.label ?? "Scene",
       actions,
     });
   };
 
   const carrySession = useUIStore((state) => state.carry);
+  // Reactive, unlike the `getState()` reads in the pointer handlers: the cursor
+  // and the gating of the hover chip both have to redraw the instant the mode
+  // flips, not on the next pointer event.
+  const viewportMode = useUIStore((state) => state.viewportMode);
 
   /**
    * Pick the body up when the store says something is being carried, and put it
@@ -1605,23 +1661,11 @@ export function WebGPUViewport() {
   const TERRAIN_HANDLE_TOLERANCE_PX = 12;
   const FILL_HANDLE_TOLERANCE_PX = 12;
 
-  /** Place (or re-place) the single nozzle on the surface under the cursor. */
-  const placeInflowAt = (ray: { origin: Vec3; direction: Vec3 }) => {
-    const sceneStore = useSceneStore.getState();
-    const scene = sceneStore.scene;
-    const hit = hoverSceneAt(scene, drawnBodies(), ray);
-    if (!hit) return;
-    simulation.beginEdit(scene.fluid.inflow ? "Moved the hose" : "Placed a hose");
-    sceneStore.patchFluid({ inflow: createInflowAt(hit.position_m, hit.normal, scene) });
-    useUIStore.getState().select({ kind: "inflow", id: INFLOW_SELECTION_ID });
-    simulation.commitEdit(undefined, { reseed: true });
-  };
-
   /** The tank-fill surface rides a corner post, clear of painting targets. */
   const beginFillLevelDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const ui = useUIStore.getState();
     const scene = useSceneStore.getState().scene;
-    if (ui.activeTool !== "fluid-paint" && ui.activeTool !== "fluid-erase") return false;
+    if (ui.armedGesture !== "fluid-paint" && ui.armedGesture !== "fluid-erase") return false;
     if (scene.fluid.initialCondition !== "tank-fill") return false;
     const rect = event.currentTarget.getBoundingClientRect();
     const projection = projectToViewport(fillLevelHandlePosition(scene), ui.camera, rect.width, rect.height);
@@ -1672,7 +1716,7 @@ export function WebGPUViewport() {
   const beginEntityHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const ui = useUIStore.getState();
     const context = editorEntityContext();
-    const surfaced = surfacedEntities(context, ui.activeTool, ui.selection);
+    const surfaced = surfacedEntities(context, ui.selection);
     if (surfaced.length === 0) return false;
     const rect = event.currentTarget.getBoundingClientRect();
     const pick = entityHandleAtPointer(surfaced, ui.camera, rect.width, rect.height,
@@ -1760,7 +1804,7 @@ export function WebGPUViewport() {
   const beginTerrainHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const ui = useUIStore.getState();
     const terrain = useSceneStore.getState().scene.terrain;
-    if (ui.activeTool !== "select" || ui.selection?.kind !== "terrain-feature" || !terrain) return false;
+    if (ui.armedGesture || ui.selection?.kind !== "terrain-feature" || !terrain) return false;
     const index = terrainFeatureIndex(ui.selection.id, terrain);
     if (index === undefined) return false;
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1817,42 +1861,76 @@ export function WebGPUViewport() {
     return sample.brickKey;
   };
 
-  /** Preview one generic clear box against the immutable pointer-down world. */
+  /**
+   * Preview one swept box against the immutable pointer-down world.
+   *
+   * The region box comes first in `boxes` because the caption anchors to
+   * `boxes[0]`, and the count belongs to the whole sweep rather than to
+   * whichever cell happened to be listed first.
+   */
   const previewSolidVoxelRegion = (
     region: SolidVoxelClearRegion,
     baseWorld: SolidWorld,
   ): void => {
     const committed = useSceneStore.getState().scene;
     const preview = solidVoxelClearPreview(committed, region, baseWorld);
-    setSolidVoxelPreview({ region, coordinates: preview.coordinates,
-      affectedCount: preview.affectedCount, truncated: preview.truncated });
+    setVoxelSweep({
+      highlight: {
+        kind: "boxes",
+        boxes: [
+          voxelRegionBox(committed, region),
+          ...preview.coordinates.map((coordinate) => solidVoxelWorldBox(committed, coordinate)),
+        ],
+        truncated: preview.truncated,
+      },
+      // What is *solid* inside the box, not the box's own volume: a sweep
+      // across a wall covers a slab that is mostly air, and the number the
+      // verb will act on is the only honest one to show while aiming.
+      caption: `${preview.affectedCount} SOLID VOXEL${preview.affectedCount === 1 ? "" : "S"}`
+        + (preview.truncated ? " · 512 SHOWN" : ""),
+    });
   };
 
-  /** Start a one-shot, face-locked box on any occupied SolidWorld voxel. */
-  const beginSolidVoxelRegion = (
+  /**
+   * Start a face-locked box on whatever solid the press landed on.
+   *
+   * Both target kinds that can start one supply the same three facts — a cell,
+   * an axis and a sign — so one gesture serves an authored voxel, a sculpted
+   * terrain cell and a bare tank wall, which is just the face of the layer that
+   * lines it. A sweep begun on a voxel keeps extending once it runs onto a
+   * wall, because the projection is onto the anchor's face plane and does not
+   * care what is standing on it.
+   *
+   * No draft is opened. The release makes a selection, and a selection is not
+   * document data: it must not be saved, must not enter undo, and must not
+   * re-seed the solver. The verb that does edit the document lives on that
+   * selection's ring afterwards.
+   */
+  const beginVoxelRegionSweep = (
     event: React.PointerEvent<HTMLCanvasElement>,
-    ray: { origin: Vec3; direction: Vec3 },
-  ) => {
+    target: EditorTarget,
+  ): boolean => {
     const committed = useSceneStore.getState().scene;
-    const baseWorld = solidWorldForScene(committed);
-    const anchor = pickSolidVoxel(committed, ray, baseWorld);
-    if (!anchor) {
-      useRuntimeStore.getState().setNotice("Aim at an occupied solid voxel, then drag a clear region");
-      return;
-    }
+    const anchor = voxelDragAnchor(committed, target);
+    if (!anchor) return false;
     const region: SolidVoxelClearRegion = { minimum: [...anchor.coordinate],
       maximumExclusive: anchor.coordinate.map((value) => value + 1) as
         unknown as SolidVoxelClearRegion["maximumExclusive"] };
-    simulation.beginDraft("solid-voxels", "Clear a solid voxel region");
     pointerRef.current = {
       id: event.pointerId,
       action: "solid-voxel-region",
       anchor,
       region,
-      baseSolids: committed.solidVoxels,
-      baseWorld,
+      baseWorld: solidWorldForScene(committed),
+      downX: event.clientX,
+      downY: event.clientY,
+      // Carried from the press rather than re-resolved on release: the scene may
+      // have moved under a long hold, and a click must select what was pointed
+      // at when the button went down.
+      selectOnClick: target.selection,
     };
-    previewSolidVoxelRegion(region, baseWorld);
+    previewSolidVoxelRegion(region, pointerRef.current.baseWorld);
+    return true;
   };
 
   /**
@@ -1954,31 +2032,33 @@ export function WebGPUViewport() {
    * object — a circle over a place the click will not use is a promise broken
    * as soon as it is tested.
    */
-  const previewCursorDrop = (ray: { origin: Vec3; direction: Vec3 }, hover: EditorHover | undefined) => {
+  const previewCursorDrop = (ray: { origin: Vec3; direction: Vec3 }) => {
     const ui = useUIStore.getState();
     const scene = useSceneStore.getState().scene;
-    if (ui.activeTool === "fluid-ball") {
+    // Resolved here rather than handed in from the hover path, and only for the
+    // three arms that need it. "What is under the cursor" and "what would this
+    // rest on" are different questions with different right answers — a body's
+    // hover target reports no useful surface normal, while `hoverSceneAt`
+    // returns the exact one a prop has to stand on — so the placement arms keep
+    // asking their own question instead of reinterpreting the highlight's.
+    const hover = ui.armedGesture ? hoverSceneAt(scene, drawnBodies(), ray) : undefined;
+    if (ui.armedGesture === "fluid-ball") {
       const radius_m = defaultFluidBallRadius_m(scene);
       const centre_m = restInContainer(scene, ray, hover, radius_m);
       if (!centre_m) { setCursorDrop(null); return; }
       setCursorDrop({ centre_m, radius_m, tone: "fluid" });
       return;
     }
-    if (ui.activeTool === "body-place") {
+    if (ui.armedGesture === "body-drag") {
       const radius_m = boundingRadius(createBodyDescription(ui.placementShape, 1, scene.container.height_m));
       const centre_m = restInContainer(scene, ray, hover, radius_m);
       if (!centre_m) { setCursorDrop(null); return; }
       setCursorDrop({ centre_m, radius_m, tone: "body" });
       return;
     }
-    // A prop rests *on* something, so with no surface under the cursor there is
-    // nothing for it to stand on and the click does nothing either.
-    if (ui.activeTool === "prop-place") {
-      if (!hover) { setCursorDrop(null); return; }
-      const preview = sceneryPlacementPreview(scene, ui.propShape, hover.position_m, hover.normal);
-      setCursorDrop({ ...preview, tone: "prop" });
-      return;
-    }
+    // A prop has no preview any more: resting one is a ring verb chosen at a
+    // point, not a mode whose next click lands somewhere, so there is no "next
+    // click" for a circle to promise anything about.
     setCursorDrop(null);
   };
 
@@ -2061,22 +2141,6 @@ export function WebGPUViewport() {
     return Number.isFinite(reach) ? reach : undefined;
   };
 
-  /** Drop the armed placement shape onto whatever the cursor is over. */
-  const placeBodyAt = (ray: { origin: Vec3; direction: Vec3 }) => {
-    const ui = useUIStore.getState();
-    const scene = useSceneStore.getState().scene;
-    const shape = ui.placementShape;
-    const template = createBodyDescription(shape, 1, scene.container.height_m);
-    const radius_m = boundingRadius(template);
-    const target = hoverSceneAt(scene, drawnBodies(), ray);
-    // With no surface *in the tank* under the cursor the container supplies the
-    // depth, so aiming high in the tank places a body there rather than on the
-    // stage floor behind it. See `restInContainer`.
-    const position = restInContainer(scene, ray, target, radius_m);
-    if (!position) return;
-    simulation.addBodyAt(shape, position, { autoRun: false });
-  };
-
   /**
    * DRAG: grab a body and sweep it through the water.
    *
@@ -2134,18 +2198,35 @@ export function WebGPUViewport() {
     // would open over a viewport that had just discarded the thing it is about.
     if (event.button === 2) return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    // LOOK is navigation and nothing else. Deliberately above the trace-pin
+    // arming and every branch below rather than folded into them: a mode that
+    // still armed half a gesture, or still resolved a pick it then threw away,
+    // would be a mode only in name — and the per-move analytic pick it skips is
+    // the whole cost of hover for a reader who is only watching. See
+    // `editor-viewport-mode.ts`.
+    if (useUIStore.getState().viewportMode !== "interact") {
+      pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
+        downX: event.clientX, downY: event.clientY,
+        action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
+      return;
+    }
     // Arm before any of the early returns below claim the press: the release, not
     // the press, is what decides whether this was a click.
     const traceUI = useUIStore.getState();
-    const pickGesture = traceUI.activeTool === "select" && event.button === 0 && !event.shiftKey
+    const pickGesture = !traceUI.armedGesture && event.button === 0 && !event.shiftKey
       ? { id: event.pointerId, downX: event.clientX, downY: event.clientY }
       : null;
     tracePinGestureRef.current = traceUI.pixelTraceEnabled ? pickGesture : null;
     cellTracePinGestureRef.current = traceUI.fluidCellTraceEnabled ? pickGesture : null;
     // pointerRef is a ref, so clearing hover here is what actually re-renders
     // the chip away for the duration of the gesture.
-    setHover(null);
+    setHoverTarget(null);
     publishHoverHighlight(null);
+    // Read before the guard below narrows them: inside a button-0 branch the
+    // compiler knows shift is false and the button is not the middle one, and a
+    // catalog that was handed two constants would have its pan rule compiled
+    // away rather than merely unreached.
+    const modifiers = { shift: event.shiftKey, middleButton: event.button === 1 };
     if (event.button === 0 && !event.shiftKey) {
       const ray = pointerRay(event);
       // Handles first, and never GPU-gated: they are the selection's own
@@ -2153,86 +2234,101 @@ export function WebGPUViewport() {
       // mid-rebuild — keeps working while the renderer replaces the image.
       if (beginEntityHandleDrag(event)) return;
       if (beginTerrainHandleDrag(event)) return;
-      const solidVoxelTool = useUIStore.getState().activeTool;
-      if (solidVoxelTool === "solid-voxel-clear") {
-        beginSolidVoxelRegion(event, ray);
-        return;
-      }
-      // Not GPU-gated, unlike the placements below: a region is a box in the
-      // document, not something dropped onto a published surface, so it falls
-      // back to the ground plane and stays drawable while the renderer is
-      // rebuilding. Handles win over it, so dragging an existing region's face
-      // reshapes that region instead of starting a new one on top of it.
-      if (useUIStore.getState().activeTool === "refinement-region") {
-        beginRegionDraw(event, ray);
-        return;
-      }
-      // DRAG claims the press ahead of the gate below. It resolves entirely
-      // against analytic geometry and the host body mirror, so unlike the
-      // placement tools it has nothing to read out of a published generation
-      // and no reason to wait for one.
-      if (useUIStore.getState().activeTool === "body-drag" && event.button === 0) {
-        beginBodySweep(event, ray);
-        return;
-      }
-      // Everything below drops something onto, or reads something out of, the
-      // surface the ray meets, and only a complete published generation has
-      // one. With no generation attached each of these falls through to the
-      // orbit/pan fallback at the end rather than acting on a scene the user
-      // cannot see.
-      if (pickingInteractive) {
-        if (useUIStore.getState().activeTool === "inflow") { placeInflowAt(ray); return; }
-        // Armed tools claim the click before the slice/pick/orbit fallback so a
-        // placement never orbits the camera instead.
-        if (useUIStore.getState().activeTool === "body-place") { placeBodyAt(ray); return; }
-        if (useUIStore.getState().activeTool === "prop-place") {
-          const target = hoverSceneAt(useSceneStore.getState().scene, drawnBodies(), ray);
-          if (target) simulation.addScenery(useUIStore.getState().propShape, target.position_m, target.normal);
+      // The slice grab is a handle too, and it has to be claimed ahead of the
+      // sweep below for the same reason: its band rides the container rim,
+      // which is exactly where the tank-wall probe answers, so a sweep would
+      // swallow it on every scene with the grid overlay up.
+      const grab = sliceGrabHit(ray.origin, ray.direction);
+      if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
+      // What the press landed on, resolved once and used twice below: to pick
+      // the gesture, and to decide what a click would select — so the ring, the
+      // highlight and the click all name the same thing.
+      //
+      // The current selection stays transparent to the pick: the tank and the
+      // water enclose everything else, so clicking *through* the selected one
+      // is the only way the things inside are reachable at all.
+      const pressTarget = targetAtRay(editorEntityContext(), ray, useUIStore.getState().selection);
+      // The one place a press is turned into a meaning. Everything above this
+      // line is a screen-space grab — a handle, a slice band — which is a rule
+      // about pixels and so cannot be declared against a target; everything
+      // below is the catalog's answer performed. See
+      // `editor-gesture-catalog.ts` for the resolution rules.
+      const gesture = gestureForPress(
+        useUIStore.getState().armedGesture,
+        pressTarget,
+        modifiers,
+        pickingInteractive,
+      );
+      switch (gesture) {
+        // Everything solid sweeps. A press on a voxel — authored or sculpted —
+        // or on a bare tank wall opens a face-locked box and drags it out; the
+        // room is what still orbits, so the camera keeps the empty pixels and
+        // the scene keeps the solid ones. Peter's call, 2026-08-26.
+        case "voxel-sweep":
+          if (beginVoxelRegionSweep(event, pressTarget)) return;
+          break;
+        case "region-draw":
+          beginRegionDraw(event, ray);
           return;
-        }
-        if (beginFillLevelDrag(event)) return;
-        if (useUIStore.getState().activeTool === "fluid-ball") { beginFluidBallDrop(event, ray); return; }
-        const paintTool = useUIStore.getState().activeTool;
-        if (paintTool === "fluid-paint" || paintTool === "fluid-erase") {
-          const erase = paintTool === "fluid-erase";
+        case "body-drag":
+          beginBodySweep(event, ray);
+          return;
+        case "fluid-ball":
+          beginFluidBallDrop(event, ray);
+          return;
+        case "fluid-paint":
+        case "fluid-erase": {
+          // The fill handle is a grab on the water line and belongs to these two
+          // alone, so it is tested here rather than up with the other handles —
+          // there is no fill handle to hit while nothing is armed.
+          if (beginFillLevelDrag(event)) return;
+          const erase = gesture === "fluid-erase";
           simulation.beginDraft("fluid-body", erase ? "Erased water" : "Painted water");
-          pointerRef.current = { id: event.pointerId, action: "fluid-paint", erase, lastBrickKey: paintFluidAt(ray, erase) };
+          pointerRef.current = { id: event.pointerId, action: "fluid-paint", erase,
+            lastBrickKey: paintFluidAt(ray, erase) };
           return;
         }
+        // Resolved below, where the GPU pick can refine the grab point and the
+        // release decides click-versus-drag. The catalog's job was to say that
+        // this press is about a body at all.
+        case "body-throw":
+        case "orbit":
+        case "pan":
+          break;
+        // Screen-space grabs, already claimed above; the catalog never returns
+        // them from `gestureForPress`. Listed so a new gesture is a compile
+        // error here rather than a press that silently falls through to orbit.
+        case "entity-handle":
+        case "terrain-handle":
+        case "slice-grab":
+        case "fill-level":
+          break;
       }
       // What a click on the scene itself would select. Resolved now, acted on at
       // the release: the press has to stay available as an orbit, and only the
       // release knows whether the pointer travelled. This is the same rule the
       // background click has always followed, with something to select rather
       // than nothing.
-      let selectOnClick: EditorSelection | undefined;
-      if (pickingInteractive && useUIStore.getState().activeTool === "select") {
-        const context = editorEntityContext();
-        const surface = hoverSceneAt(context.scene, drawnBodies(), ray);
-        // Clicking the ground selects the terrain feature under the cursor, so
-        // basins and mounds are addressable without a roster.
-        if (surface?.kind === "terrain") {
-          const feature = terrainFeatureAt(context.scene.terrain, surface.position_m.x, surface.position_m.z);
-          if (feature !== undefined) {
-            useUIStore.getState().select({ kind: "terrain-feature", id: terrainFeatureSelectionId(feature) });
-            return;
-          }
-        }
-        // Everything else clickable answers here. A rigid body in front of it is
-        // left to the GPU pick below, which is exact where this is a bounding
-        // sphere and which also opens the throw gesture. The current selection
-        // is transparent to the pick: the tank and the water enclose everything
-        // else, so clicking *through* the selected one is the only way the
-        // things inside are reachable at all. With nothing behind, the click
-        // falls to the background and deselects, same as it always did.
-        const hit = entityAtRay(context, ray, useUIStore.getState().selection);
-        if (hit && (hit.selection.kind === "inflow"
-          || !(surface?.kind === "body" && surface.distance_m <= hit.distance_m))) {
-          selectOnClick = hit.selection;
-        }
+      // The same resolution the highlight and the ring use, so a click cannot
+      // select something other than the thing that was lit under the cursor.
+      // The target already carries what to select — a wall names its tank, a
+      // terrain feature names itself, a solid voxel names whichever of those it
+      // belongs to, and only the room names nothing — which is what replaced the
+      // three-way branch this used to be.
+      //
+      // The current selection stays transparent to the pick: the tank and the
+      // water enclose everything else, so clicking *through* the selected one is
+      // the only way the things inside are reachable at all. With nothing
+      // behind, the click falls to the room and deselects, same as it always did.
+      const selectOnClick: EditorSelection | undefined = pressTarget?.selection;
+      // A body is left to the GPU pick below, which is exact where the analytic
+      // one is a bounding sphere, and which also opens the throw. An inflow is
+      // exempt: a flow authored inside a static nozzle is nearer in the
+      // document than the nozzle body the pick would return.
+      if (selectOnClick?.kind === "terrain-feature") {
+        useUIStore.getState().select(selectOnClick);
+        return;
       }
-      const grab = sliceGrabHit(ray.origin, ray.direction);
-      if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
       // The GPU pick reads the published frame, so it answers to the same gate.
       if (pickingInteractive && rendererRef.current) {
         const pointerId=event.pointerId,timeStamp=event.timeStamp,x=event.clientX,y=event.clientY;
@@ -2287,12 +2383,18 @@ export function WebGPUViewport() {
       normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
     };
     if (!active) {
+      // Nothing under the cursor is named in LOOK, so nothing is asked. The
+      // clears are what retire a chip and a rim left lit by the mode just left.
+      if (useUIStore.getState().viewportMode !== "interact") {
+        setHandleHover(null); setHoverTarget(null); publishHoverHighlight(null); setCursorDrop(null);
+        return;
+      }
       // A handle under the pointer outranks whatever is behind it: while
       // something is selected its handles are the interface, and a hover chip
       // describing the wall behind a corner would be answering a question nobody
       // asked.
       const ui = useUIStore.getState();
-      const surfaced = surfacedEntities(editorEntityContext(), ui.activeTool, ui.selection);
+      const surfaced = surfacedEntities(editorEntityContext(), ui.selection);
       const pick = surfaced.length > 0 ? entityHandleAtPointer(
         surfaced, ui.camera, rect.width, rect.height,
         { x: event.clientX - rect.left, y: event.clientY - rect.top }) : undefined;
@@ -2306,25 +2408,25 @@ export function WebGPUViewport() {
           entityLabel: pick.entity.label,
           leftFraction: projection.leftFraction, topFraction: projection.topFraction,
         });
-        setHover(null);
+        setHoverTarget(null);
         publishHoverHighlight(null);
         setCursorDrop(null);
         return;
       }
       setHandleHover(null);
-      // Analytic hover: no GPU readback, so it is safe at pointer-move rate. It
-      // still names the thing under the cursor *in the presented image*, so it
-      // waits for a generation to be presented — unlike the handle hover above,
-      // which reads the document and stays live through a rebuild.
-      if (!pickingInteractive) { setHover(null); publishHoverHighlight(null); setCursorDrop(null); return; }
-      // Scenery is asked for only under the select tool — see EditorHoverOptions.
+      // Analytic all the way down: no GPU readback, so it is safe at
+      // pointer-move rate. Deliberately *not* gated on a fenced presentation any
+      // more. The entity probe carries that gate itself — `entityAtRay` still
+      // refuses to name an object the reader cannot see — while the wall, voxel,
+      // terrain and room probes read the document and stay live through a
+      // rebuild. Gating the lot, as this once did, made an ordinary pipeline
+      // recompile look like the cursor had gone dead, which is precisely the
+      // "nothing under the pointer" state INTERACT promises never to have.
       const ray = pointerRay(event);
-      const hovered = hoverSceneAt(
-        useSceneStore.getState().scene, drawnBodies(), ray,
-        { scenery: ui.activeTool === "select" }) ?? null;
-      setHover(hovered);
-      publishHoverHighlight(hovered);
-      previewCursorDrop(ray, hovered ?? undefined);
+      const target = targetAtRay(editorEntityContext(), ray, ui.selection);
+      setHoverTarget(target);
+      publishHoverHighlight(target);
+      previewCursorDrop(ray);
       return;
     }
     if (active.id !== event.pointerId) return;
@@ -2493,14 +2595,28 @@ export function WebGPUViewport() {
       simulation.commitDraft();
       return;
     }
+    // The sweep becomes the selection, and the verbs it offers arrive with it:
+    // right-clicking the outline that is now standing there opens a ring whose
+    // Clear wedge does what the armed CLEAR SOLIDS tool used to do on release.
+    // Aiming and acting are separate, so a box swept one cell too far is
+    // re-swept rather than undone.
+    //
+    // Only a drag sweeps. A press that never travelled is a click, and a click
+    // selects the object under the cursor — the tank whose wall it landed on,
+    // the terrain feature it was baked from, the region it already stands in.
+    // Answering a click with a one-cell region instead put a selection nobody
+    // asked for over every single click on anything solid, which is exactly
+    // what made the tank and the water feel unclickable.
     if (active.action === "solid-voxel-region") {
-      setSolidVoxelPreview(null);
-      if (cancelled) { simulation.cancelDraft(); return; }
-      useSceneDraftStore.getState().updateDraft({
-        solidVoxels: withSolidVoxelClearRegion(active.baseSolids, active.region),
-      });
-      simulation.commitDraft();
-      useUIStore.getState().setActiveTool(DEFAULT_EDITOR_TOOL);
+      setVoxelSweep(null);
+      if (cancelled) return;
+      if (pointerStayedWithinClickSlop(event.clientX - active.downX, event.clientY - active.downY)) {
+        const ui = useUIStore.getState();
+        if (active.selectOnClick) ui.select(active.selectOnClick);
+        else ui.select(undefined);
+        return;
+      }
+      useUIStore.getState().selectVoxelRegion(active.region);
       return;
     }
     if (active.action === "fluid-ball") {
@@ -2521,7 +2637,7 @@ export function WebGPUViewport() {
     if (active.action === "region-draw") {
       if (cancelled) { simulation.cancelDraft(); return; }
       simulation.commitDraft();
-      useUIStore.getState().setActiveTool(DEFAULT_EDITOR_TOOL);
+      useUIStore.getState().setArmedGesture(undefined);
       useUIStore.getState().select({
         kind: "refinement-region", id: refinementRegionSelectionId(active.regionId),
       });
@@ -2531,7 +2647,8 @@ export function WebGPUViewport() {
     // clicking through to whatever the scene has there — an entity, or, when the
     // ray left the tank entirely, the background. Either way the selection
     // becomes what was clicked, which is how a click deselects.
-    if (!cancelled && (active.action === "orbit" || active.action === "pan")
+    if (!cancelled && useUIStore.getState().viewportMode === "interact"
+      && (active.action === "orbit" || active.action === "pan")
       && emptySpaceClickDeselects(active.action, event.clientX - active.downX, event.clientY - active.downY)) {
       useUIStore.getState().select(active.selectOnClick);
     }
@@ -2551,14 +2668,15 @@ export function WebGPUViewport() {
       data-camera-azimuth={camera.azimuth_rad.toFixed(6)}
       data-camera-elevation={camera.elevation_rad.toFixed(6)}
       data-scene-presentation={pickingInteractive ? "active" : "unavailable"}
+      data-viewport-mode={viewportMode}
       aria-disabled={!pickingInteractive}
-      data-pixel-trace={pixelTraceEnabled && activeTool === "select" && !pixelTracePinned ? "live" : undefined}
+      data-pixel-trace={pixelTraceEnabled && !armedGesture && !pixelTracePinned ? "live" : undefined}
       data-shape-grab={handleHover ? "true" : undefined}
       onPointerDown={pointerDown}
       onPointerMove={pointerMove}
       onPointerUp={pointerUp}
       onPointerCancel={pointerUp}
-      onPointerLeave={() => { setHover(null); publishHoverHighlight(null); setHandleHover(null); setCursorDrop(null); }}
+      onPointerLeave={() => { setHoverTarget(null); publishHoverHighlight(null); setHandleHover(null); setCursorDrop(null); }}
       onWheel={(event) => {
         // The wheel is the carry's one extra degree of freedom: a single pointer
         // cannot say "further away", and reaching across the tank is most of
@@ -2582,6 +2700,10 @@ export function WebGPUViewport() {
         (`C`) is unchanged. The tags sit to the *left* of the number so the
         number never moves when they reveal. */}
     <div className="fps-cluster" data-testid="fps-cluster">
+      {/* First in the corner, and the one thing here that never fades: it is
+          the answer to "why did my click do nothing", so it cannot itself be
+          discovered by hovering. */}
+      <ViewportModeToggle />
       <SceneInstrumentTags />
       <output
         ref={fpsRef}
@@ -2619,45 +2741,21 @@ export function WebGPUViewport() {
           />
         )))}
     </svg>}
-    {solidVoxelPreview && <svg
-      className="editor-gizmo editor-solid-voxel-gizmo"
-      data-testid="editor-solid-voxel-gizmo"
+    {/* What the cursor is over, drawn once for every probe. Deliberately ahead
+        of the gesture-specific overlays below, which it will absorb as each of
+        those gestures moves onto the catalog. */}
+    <EditorHighlightLayer
+      // No gesture guard needed: `pointerDown` clears the target before it
+      // claims the press and `pointerMove` never revises it while one is
+      // running, so a held pointer already has nothing hovered.
+      target={viewportMode === "interact" ? hoverTarget ?? undefined : undefined}
+      // A sweep is about the region it is making, not about the cell it started
+      // on, so it carries its own tone rather than inheriting the anchor's.
+      held={heldHighlight ? { ...heldHighlight, tone: "region" } : undefined}
+      camera={camera}
       width={viewportSize.width}
       height={viewportSize.height}
-      aria-hidden="true"
-    >
-      {solidVoxelRegionCorners && BOX_EDGES
-        .filter(([from, to]) => solidVoxelRegionCorners[from]!.depth_m > 1e-6
-          && solidVoxelRegionCorners[to]!.depth_m > 1e-6)
-        .map(([from, to]) => <line
-          key={`region-${from}-${to}`}
-          className="solid-voxel-region-outline"
-          x1={solidVoxelRegionCorners[from]!.leftFraction * viewportSize.width}
-          y1={solidVoxelRegionCorners[from]!.topFraction * viewportSize.height}
-          x2={solidVoxelRegionCorners[to]!.leftFraction * viewportSize.width}
-          y2={solidVoxelRegionCorners[to]!.topFraction * viewportSize.height}
-        />)}
-      {solidVoxelOutlines.flatMap((voxel) => BOX_EDGES
-        .filter(([from, to]) => voxel.corners[from]!.depth_m > 1e-6
-          && voxel.corners[to]!.depth_m > 1e-6)
-        .map(([from, to]) => <line
-          key={`${voxel.key}-${from}-${to}`}
-          className="solid-voxel-outline"
-          x1={voxel.corners[from]!.leftFraction * viewportSize.width}
-          y1={voxel.corners[from]!.topFraction * viewportSize.height}
-          x2={voxel.corners[to]!.leftFraction * viewportSize.width}
-          y2={voxel.corners[to]!.topFraction * viewportSize.height}
-        />))}
-      {solidVoxelOutlines[0] && <text
-        className="solid-voxel-label"
-        x={solidVoxelOutlines[0].corners[6]!.leftFraction * viewportSize.width}
-        y={solidVoxelOutlines[0].corners[6]!.topFraction * viewportSize.height - 9}
-      >
-        CLEAR {solidVoxelPreview.affectedCount} SOLID VOXEL{
-          solidVoxelPreview.affectedCount === 1 ? "" : "S"}
-        {solidVoxelPreview.truncated ? " · 512 SHOWN" : ""}
-      </text>}
-    </svg>}
+    />
     {cursorDropCircle && <svg
       className="editor-gizmo editor-ball-gizmo"
       data-testid="editor-ball-gizmo"
@@ -2796,14 +2894,19 @@ export function WebGPUViewport() {
       leftFraction={rimFlyoutAnchor.leftFraction}
       topFraction={rimFlyoutAnchor.topFraction}
     />}
-    {hover && hoverProjection?.visible && !pointerRef.current && <div
-      className={`editor-hover-chip kind-${hover.kind}`}
+    {/* The mode is read here as well as in `pointerMove`, because the toggle can
+        flip it with the pointer sitting still over a lit object: a chip that
+        survived until the next move would name a thing the mode no longer
+        reaches. */}
+    {viewportMode === "interact" && hoverTarget && hoverProjection?.visible && !pointerRef.current && <div
+      className={`editor-hover-chip kind-${hoverTarget.kind}`}
       data-testid="editor-hover-chip"
+      data-tone={hoverTarget.tone}
       style={{ left: `${hoverProjection.leftFraction * 100}%`, top: `${hoverProjection.topFraction * 100}%` }}
       aria-hidden="true"
     >
-      <i /><span>{hover.label}</span>
-      <small>{hover.position_m.x.toFixed(2)} · {hover.position_m.y.toFixed(2)} · {hover.position_m.z.toFixed(2)} m</small>
+      <i /><span>{hoverTarget.label}</span>
+      <small>{hoverTarget.point_m.x.toFixed(2)} · {hoverTarget.point_m.y.toFixed(2)} · {hoverTarget.point_m.z.toFixed(2)} m</small>
     </div>}
     {pixelTraceEnabled && <>
       {traceReticle?.visible && <div

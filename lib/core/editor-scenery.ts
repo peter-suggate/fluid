@@ -367,7 +367,6 @@ const PROP_ACTION_SHAPES: ReadonlyArray<{
 
 export const sceneryEntity: EditorEntityDefinition = {
   kind: "scenery",
-  surfacedBy: (tool) => tool === "select",
   instances: (context) => selectableNodes(context.scene)
     .map((node) => entityForNode(context, node))
     .filter((entity): entity is EditorEntity => entity !== undefined),
@@ -393,14 +392,17 @@ export const sceneryEntity: EditorEntityDefinition = {
     label: "Prop",
     icon: "prop",
     tone: "prop",
-    hint: "Click a surface to rest decorative geometry on it \u00b7 props never enter the solve",
+    hint: "Rest decorative geometry here \u00b7 props never enter the solve",
     children: PROP_ACTION_SHAPES.map((prop) => ({
       id: prop.kind,
       label: prop.label,
       icon: prop.icon,
       tone: "prop" as const,
-      hint: `Rest a ${prop.label.toLowerCase()} on the next surface you click`,
-      effect: { kind: "arm" as const, tool: "prop-place" as const, prop: prop.kind },
+      hint: `Rest a ${prop.label.toLowerCase()} here`,
+      // Up when the pick knew no normal: a prop with nothing to stand on stands
+      // upright, which is the only defined answer and the one it had before.
+      effect: { kind: "place-prop" as const, prop: prop.kind, point_m: target.point_m,
+        normal: target.normal ?? { x: 0, y: 1, z: 0 } },
     })),
   }, rayProbeAction(target)],
   pick: (context, ray, exclude) => {

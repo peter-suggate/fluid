@@ -64,7 +64,6 @@ function vesselRimEntityFor(name: string, spec: PondVesselSpec): EditorEntity {
 
 export const vesselRimEntity: EditorEntityDefinition = {
   kind: "vessel-rim",
-  surfacedBy: (tool) => tool === "select",
   instances: (context) => sceneVessels(context.scene)
     .map(([name, spec]) => vesselRimEntityFor(name, spec)),
   /**

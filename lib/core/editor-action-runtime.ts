@@ -1,47 +1,10 @@
 "use client";
 
 import type { EditorActionEffect } from "./editor-action";
+import { createInflowAt, INFLOW_SELECTION_ID } from "./editor-inflow";
 import { simulation } from "./simulation/controller";
 import { useSceneStore } from "./stores/scene-store";
 import { useUIStore } from "./stores/ui-store";
-
-/**
- * How the studio leaves its own route, when the caller has a client router.
- *
- * The ring is drawn by a React component that can hold one; nothing else in this
- * module can. Passing it in keeps the performer total and framework-free, and
- * the fallback below means a caller without one still works — a hard load costs
- * a re-parse of the app, not the navigation.
- */
-export interface EditorActionServices {
-  readonly navigate?: (href: string) => void;
-}
-
-/**
- * Ask for a scene document and load it.
- *
- * The input is created, clicked and dropped rather than mounted by some
- * component that would then have to exist wherever an import can be asked for.
- * It is appended to the document first because Safari will not open a picker
- * for a detached input, and removed as soon as the dialog has answered.
- */
-function importSceneFromFile(): void {
-  if (typeof document === "undefined") return;
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = "application/json,.json";
-  input.hidden = true;
-  const finish = () => input.remove();
-  input.addEventListener("cancel", finish);
-  input.addEventListener("change", () => {
-    const file = input.files?.[0];
-    finish();
-    if (!file) return;
-    void file.text().then((contents) => simulation.importScene(file.name, contents));
-  });
-  document.body.append(input);
-  input.click();
-}
 
 /**
  * Where a declared action becomes something that happened.
@@ -55,10 +18,7 @@ function importSceneFromFile(): void {
  * here, and a new effect kind is a compile error in this file rather than a
  * wedge that silently does nothing.
  */
-export function performEditorAction(
-  effect: EditorActionEffect,
-  services: EditorActionServices = {},
-): void {
+export function performEditorAction(effect: EditorActionEffect): void {
   const ui = useUIStore.getState();
   switch (effect.kind) {
     case "scene": {
@@ -70,9 +30,7 @@ export function performEditorAction(
       return;
     }
     case "arm": {
-      ui.setActiveTool(effect.tool);
-      if (effect.shape) ui.setPlacementShape(effect.shape);
-      if (effect.prop) ui.setPropShape(effect.prop);
+      ui.setArmedGesture(effect.gesture);
       return;
     }
     case "place": {
@@ -81,6 +39,24 @@ export function performEditorAction(
       // them. Carrying it does, on the first move.
       const created = simulation.addBodyAt(effect.shape, effect.point_m, { autoRun: false });
       if (created && effect.carry) ui.beginCarry(created.id, created.name);
+      return;
+    }
+    // The two placements that were modes. Both are single clicks at a point the
+    // ring already carries, so neither needs the reader to say "where" twice.
+    case "place-prop": {
+      simulation.addScenery(effect.prop, effect.point_m, effect.normal);
+      return;
+    }
+    case "place-inflow": {
+      const sceneStore = useSceneStore.getState();
+      simulation.beginEdit(sceneStore.scene.fluid.inflow ? "Moved the hose" : "Placed a hose");
+      sceneStore.patchFluid({
+        inflow: createInflowAt(effect.point_m, effect.normal, sceneStore.scene),
+      });
+      ui.select({ kind: "inflow", id: INFLOW_SELECTION_ID });
+      // The nozzle is a boundary condition, so the run restarts from a defined
+      // t=0 rather than continuing against a wall that changed under it.
+      simulation.commitEdit(undefined, { reseed: true });
       return;
     }
     case "carry": {
@@ -99,15 +75,6 @@ export function performEditorAction(
     case "select": {
       ui.select(effect.selection);
       if (effect.openControls) ui.setSelectionControlsOpen(true);
-      return;
-    }
-    case "navigate": {
-      if (services.navigate) services.navigate(effect.href);
-      else if (typeof window !== "undefined") window.location.assign(effect.href);
-      return;
-    }
-    case "import-scene": {
-      importSceneFromFile();
       return;
     }
     case "open-overlay": {

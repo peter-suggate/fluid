@@ -252,7 +252,6 @@ function rigidBodyEntityFor(
  */
 export const rigidBodyEntity: EditorEntityDefinition = {
   kind: "body",
-  surfacedBy: (tool) => tool === "select",
   instances: (context) => context.scene.rigidBodies.map(
     (description) => rigidBodyEntityFor(context, description)),
   find: (context, id) => {

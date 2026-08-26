@@ -15,7 +15,13 @@ import type { EditorAction, EditorActionTarget } from "./editor-action";
  * Both are aimed instruments and the aim is the click's, not the pointer's — see
  * `EditorActionTarget.aim`. Passing the target straight through is what keeps
  * that true: an entity never has to know that a probe has an aim at all.
+ *
+ * The parameter is narrowed to the aim alone rather than taking a whole
+ * `EditorActionTarget`, because the aim is genuinely all either one reads — and
+ * the callers that are not entities have no selection to offer. A probe pointing
+ * at a bare voxel or a tank wall composes these the same way the water does.
  */
+type AimedTarget = Pick<EditorActionTarget, "aim">;
 
 /**
  * Read the ray behind this pixel.
@@ -25,7 +31,7 @@ import type { EditorAction, EditorActionTarget } from "./editor-action";
  * the same over a stone and over the water, and a wedge that changed colour with
  * whatever it happened to be over would read as a different verb each time.
  */
-export function rayProbeAction(target: EditorActionTarget): EditorAction {
+export function rayProbeAction(target: AimedTarget): EditorAction {
   return {
     id: "trace-ray",
     label: "Trace ray",
@@ -45,7 +51,7 @@ export function rayProbeAction(target: EditorActionTarget): EditorAction {
  * interior unknown is reached — the pixel alone can only ever name the nearest
  * leaf, and on a liquid that is a surface cell.
  */
-export function cellProbeAction(target: EditorActionTarget): EditorAction {
+export function cellProbeAction(target: AimedTarget): EditorAction {
   return {
     id: "inspect-cell",
     label: "Inspect cell",

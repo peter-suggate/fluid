@@ -479,7 +479,6 @@ function refinementRegionEntityFor(
  */
 export const refinementRegionEntity: EditorEntityDefinition = {
   kind: "refinement-region",
-  surfacedBy: (tool) => tool === "select" || tool === "refinement-region",
   instances: (context) => sceneRefinementRegions(context.scene)
     .map((region) => refinementRegionEntityFor(context, region)),
   find: (context, id) => {
