@@ -57,6 +57,7 @@ import {
 } from "./svo-environment-refinement";
 import {
   createSvoEnvironmentCoarsening,
+  solidWorldTerrainSurfaceCoarseningRegions,
   svoEnvironmentCoarseningPower,
 } from "./svo-environment-coarsening";
 import type { SvoPrimitiveDescriptor } from "./svo-primitive-abi";
@@ -1533,6 +1534,7 @@ export class OctreeSparseBrickWorld {
     const environmentCoarsening = !dryWorld
       ? createSvoEnvironmentCoarsening({
         primitives: environmentPrimitives,
+        regions: solidWorldTerrainSurfaceCoarseningRegions(scene, initialSolidWorld),
         worldOrigin_m: worldOrigin as readonly [number, number, number],
         nodeEdge_m, brickSize, maximumDepth,
         crowdingTarget: OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,

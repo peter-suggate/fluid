@@ -63,6 +63,13 @@
  * against. This is the ladder for the path that had none.
  */
 import type { EnvironmentProxyPrimitive } from "../core/voxel-environments";
+import type { SceneDescription } from "../core/model";
+import { sceneCellSizes_m } from "../core/scene-lattice";
+import {
+  SOLID_WORLD_BRICK_CELLS,
+  SOLID_WORLD_TERRAIN_MATERIAL_ID,
+  type SolidWorld,
+} from "../core/solid-world";
 import { SPARSE_BRICK_GPU_LAYOUT, type SparseBrickCoordinate } from "./sparse-brick-octree";
 import { isSvoPlanarBoundaryProxy } from "./svo-planar-boundary";
 
@@ -140,6 +147,61 @@ export interface SvoEnvironmentCoarseningRegion {
   readonly maximum_m: readonly [number, number, number];
   /** Zero pins the region's nodes at the finest level. */
   readonly feature_m: number;
+}
+
+/**
+ * Finest-level refinement hints for pages that own a terrain/air interface.
+ *
+ * A coarsened SolidWorld leaf samples one source cell at the centre of each
+ * coarse render voxel. That is conservative for buried volume, but it turns a
+ * heightfield into one large step per coarse voxel. Only exposed terrain pages
+ * need to retain the source lattice; pages below them may still coarsen.
+ */
+export function solidWorldTerrainSurfaceCoarseningRegions(
+  scene: SceneDescription,
+  world: SolidWorld,
+): SvoEnvironmentCoarseningRegion[] {
+  if (!scene.terrain) return [];
+  const cell = sceneCellSizes_m(scene);
+  const origin = [-0.5 * scene.container.width_m, 0,
+    -0.5 * scene.container.depth_m] as const;
+  return world.pages.flatMap((page) => {
+    let exposed = false;
+    for (let local = 0; local < page.materialId.length && !exposed; local += 1) {
+      if (page.materialId[local] !== SOLID_WORLD_TERRAIN_MATERIAL_ID
+        || page.solidFraction[local] === 0) continue;
+      const y = Math.floor(local / SOLID_WORLD_BRICK_CELLS)
+        % SOLID_WORLD_BRICK_CELLS;
+      if (y + 1 < SOLID_WORLD_BRICK_CELLS) {
+        exposed = page.solidFraction[local + SOLID_WORLD_BRICK_CELLS] === 0;
+        continue;
+      }
+      const x = local % SOLID_WORLD_BRICK_CELLS;
+      const z = Math.floor(local / (SOLID_WORLD_BRICK_CELLS ** 2));
+      const abovePage = world.directory.lookup([
+        page.coordinate[0], page.coordinate[1] + 1, page.coordinate[2],
+      ]);
+      exposed = abovePage === undefined
+        || world.pages[abovePage]!.solidFraction[
+          x + SOLID_WORLD_BRICK_CELLS * (SOLID_WORLD_BRICK_CELLS * z)
+        ] === 0;
+    }
+    if (!exposed) return [];
+    const pageMinimum = page.coordinate.map((value, axis) => origin[axis]!
+      + value * SOLID_WORLD_BRICK_CELLS * cell[axis]!) as [number, number, number];
+    const pageMaximum = pageMinimum.map((value, axis) => value
+      + SOLID_WORLD_BRICK_CELLS * cell[axis]!) as [number, number, number];
+    return [{
+      // These are refinement hints, not conservative geometry bounds. Keep
+      // them inside their source page so inclusive overlap does not also pin
+      // every face-touching neighbour.
+      minimum_m: pageMinimum.map((value, axis) =>
+        value + 0.25 * cell[axis]!) as [number, number, number],
+      maximum_m: pageMaximum.map((value, axis) =>
+        value - 0.25 * cell[axis]!) as [number, number, number],
+      feature_m: 0,
+    }];
+  });
 }
 
 export interface SvoEnvironmentCoarseningOptions {

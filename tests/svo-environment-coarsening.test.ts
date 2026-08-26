@@ -13,10 +13,13 @@ import {
   createSvoEnvironmentCoarsening,
   environmentProxyFeatureSize_m,
   SVO_ENVIRONMENT_FEATURE_VOXELS,
+  solidWorldTerrainSurfaceCoarseningRegions,
   svoEnvironmentCoarseningPower,
   svoEnvironmentPayloadBytes,
 } from "../lib/svo/svo-environment-coarsening";
 import { sceneDocument } from "../lib/core/scene-definition";
+import { createTallCellsHillsideDamBreakScene, getScenePreset } from "../lib/core/scenes";
+import { solidWorldForScene } from "../lib/core/solid-world";
 
 /**
  * The environment's resolution ladder, and the gate that reads the same rule.
@@ -113,6 +116,33 @@ test("a node splits for the finest solid in it and for nothing else", () => {
     [0, 1, 2].map((index) => boxProxy([0.8, 0.4, 0.8], [0.8, 0.4, 0.8 + index * 0.01])), 2);
   assert.equal(crowd.refineEnvironmentLeaf(1, node), true);
   assert.equal(crowd.statistics.crowdingSplits, 1);
+
+  const terrainPage = createSvoEnvironmentCoarsening({
+    primitives: [],
+    regions: [{ minimum_m: [0.01, 0.01, 0.01], maximum_m: [1.59, 1.59, 1.59],
+      feature_m: 0 }],
+    worldOrigin_m: [0, 0, 0], brickSize: 8, maximumDepth: 3, crowdingTarget: 8,
+    nodeEdge_m: [[3.2, 3.2, 3.2], [1.6, 1.6, 1.6], [0.8, 0.8, 0.8], [0.4, 0.4, 0.4]],
+  });
+  assert.equal(terrainPage.refineEnvironmentLeaf(1, node), true,
+    "an exposed terrain page must retain the source-cell step size");
+  assert.equal(terrainPage.refineEnvironmentLeaf(1, { x: 1, y: 1, z: 1 }), false,
+    "terrain refinement must remain local to its exposed page");
+});
+
+test("only exposed terrain pages opt out of voxel coarsening", () => {
+  const hillside = createTallCellsHillsideDamBreakScene();
+  const hillsideWorld = solidWorldForScene(hillside);
+  const regions = solidWorldTerrainSurfaceCoarseningRegions(hillside, hillsideWorld);
+  assert.ok(regions.length > 0);
+  assert.ok(regions.length < hillsideWorld.pages.length,
+    "buried terrain pages must remain eligible for coarsening");
+  assert.ok(regions.every(({ feature_m }) => feature_m === 0));
+
+  const waterBox = getScenePreset("water-box").create();
+  assert.deepEqual(solidWorldTerrainSurfaceCoarseningRegions(
+    waterBox, solidWorldForScene(waterBox)), [],
+  "terrain-free tank floors stay on their exact planar path");
 });
 
 test("the planar terminal ladder keeps the ocean-scale set within budget", () => {
