@@ -540,7 +540,7 @@ export class WebGPURigidBodySystem {
   // bodies is a scene that can still be given one, and the first body dropped
   // into a running bodyless scene used to reach `encode` with no pipeline at
   // all. Both callers passed their own defer flag through and it named nothing.
-  constructor(private readonly device: GPUDevice, private readonly scene: SceneDescription,
+  constructor(private readonly device: GPUDevice, private scene: SceneDescription,
     readonly exchangeBuffer: GPUBuffer, private readonly terrainTexture?: GPUTexture) {
     this.pipelinesDeferred = true;
     this.stateBuffer = device.createBuffer({ label: "GPU authoritative rigid-body state", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
@@ -556,6 +556,9 @@ export class WebGPURigidBodySystem {
     this.pickParamsBuffer = device.createBuffer({ label: "GPU rigid-body pick ray", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickResultBuffer = device.createBuffer({ label: "GPU rigid-body pick result", size: GPU_RIGID_PICK_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   }
+
+  /** Adopt authored scene scalars and roster metadata without replacing GPU state. */
+  setScene(scene: SceneDescription): void { this.scene = scene; }
 
   private descriptor(entryPoint: "integrate" | "pickRigidBody"): GPUComputePipelineDescriptor {
     if (!this.terrainTexture && !this.solidWorldCollisionSource) {

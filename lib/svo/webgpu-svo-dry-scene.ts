@@ -29,6 +29,10 @@ import {
   type DisabledRenderStages,
 } from "../core/render-stage-switches";
 import type { FrameBandPartitioner } from "../core/webgpu-frame-band-sampler";
+import {
+  planarBoundaryWGSL,
+  PLANAR_BOUNDARY_PATCH_BYTES,
+} from "../core/planar-boundary";
 
 /** Lifecycle metadata lives with the sparse presentation programs it describes. */
 export const svoPresentationResourcePlugin: ResourcePluginDefinition = Object.freeze({
@@ -234,7 +238,7 @@ import {
 export interface SparseVoxelDrySceneData {
   /** Monotonic renderer publication, independent of the solver generation. */
   renderRevision: number;
-  /** Packed `SvoPrimitiveRecord` values in dense live-scene owner order. */
+  /** Packed `SvoPrimitiveRecord` values in dense live-scene publication order. */
   primitiveRecords: Uint32Array<ArrayBuffer>;
   /** Required exact secondary-ray acceleration for the same primitive records. */
   primitiveCandidates: SvoPrimitiveCandidatePublication;
@@ -395,13 +399,9 @@ export const SVO_DRY_THICK_GLASS_ARENA_LAYOUT = Object.freeze({
 /** Single source of truth for every group-0 declaration and production layout entry. */
 export const SVO_DRY_SCENE_BINDING_CONTRACT = Object.freeze([
   ...[0, 1].map((binding) => ({ binding, type: "uniform" as const })),
-  // structure, scene-owner payload, authored scene arena, optional derived traversal.
-  ...[2, 3, 4, 5].map((binding) => ({ binding, type: "read-only-storage" as const })),
-  // Binding 6 was the scene-geometry lane, bound so the primary could
-  // central-difference the stored distance field for a smooth normal. The normal
-  // is baked into the voxel now, so the render path reads no distance at all and
-  // the binding is gone — which also hands back the seventh of eight storage
-  // buffers the shipping raster-primary composition was spending.
+  // Structure, scene-owner payload, authored scene arena, optional derived
+  // traversal, and the accepted exact planar-terminal catalogue.
+  ...[2, 3, 4, 5, 6].map((binding) => ({ binding, type: "read-only-storage" as const })),
   { binding: 9, type: "uniform" as const },
   ...[13, 14, 15].map((binding) => ({ binding, type: "uniform" as const })),
   { binding: 16, type: "texture-3d-float" as const },
@@ -430,7 +430,7 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(
   // inputs, but not material shading, glass, or dormant traversal variants.
   // Keeping those fragment-only also stays below WebGPU's per-stage storage
   // binding limit on Apple GPUs.
-  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
+  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 6, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
   // Raster analytic impostors consume the camera/body uniforms, their scene
   // record arena, and the live primitive-count/structural-offset parameters.
   const vertexBindings = new Set([0, 1, 4, 9]);
@@ -797,7 +797,8 @@ export function svoDrySceneClusterResolver(packed: Uint32Array | undefined): Svo
 export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
   sizeBytes: 624,
   glassWordOffset: 24,
-  reservedSceneWordOffset: 28,
+  /** count, generation, stride bytes, reserved for accepted planar terminals. */
+  planarBoundaryWordOffset: 28,
   materialPublicationWordOffset: 32,
   nodeMipWordOffset: 36,
   nodeMipAtlasWordOffset: 40,
@@ -1202,6 +1203,13 @@ export function sparseVoxelDrySceneContractFailure(
   if (source.structural.fields.topology.residency === "unavailable") return "topology field is unavailable";
   if (source.structural.fields.sceneGeometry.residency === "unavailable") return "scene geometry field is unavailable";
   if (source.structural.fields.materialOwner.residency === "unavailable") return "material-owner payload field is unavailable";
+  const planar = source.structural.planarBoundaries;
+  if (!Number.isSafeInteger(planar.count) || planar.count < 0
+    || planar.count * PLANAR_BOUNDARY_PATCH_BYTES > (planar.records.size ?? planar.records.buffer.size)) {
+    return "planar boundary catalogue count is invalid";
+  }
+  if (planar.strideBytes !== PLANAR_BOUNDARY_PATCH_BYTES) return "planar boundary catalogue stride is invalid";
+  if (!Number.isSafeInteger(planar.generation) || planar.generation <= 0) return "planar boundary catalogue generation is invalid";
   return undefined;
 }
 
@@ -1505,16 +1513,6 @@ export type SvoBrickOccupancyMode = "off" | "bounds" | "macro" | "macro-hdda";
 export type SvoDryShadingPath = "inline" | "split";
 
 /**
- * Exact primary-ray reuse experiment for render-only/static-camera frames.
- * The caller-owned key must change whenever camera, geometry, or rigid bodies
- * change. No key means no reuse, so production callers cannot opt in by
- * accident.
- */
-export type SvoDryRayCoherenceMode = "off" | "static-primary";
-
-export type SvoDryPrimaryCoherenceDecision = "trace" | "reuse";
-
-/**
  * Dawn occupancy experiments. Every arm remains independently selectable for
  * controlled A/Bs; only the safe reduced-split diagnostic diet is enabled by
  * the renderer default.
@@ -1750,17 +1748,6 @@ export const SVO_DRY_PRIMARY_VISIT_TERMINALS = Object.freeze([
   "voxel-hit", "tree-miss", "leaf-budget-exhausted", "node-work-exhausted",
   "stack-overflow", "source-overflow", "invalid-topology", "no-traversal",
 ] as const);
-
-/** Pure policy seam used by the renderer and by fail-closed contract tests. */
-export function svoDryPrimaryCoherenceDecision(
-  mode: SvoDryRayCoherenceMode,
-  splitActive: boolean,
-  frameKey: string | undefined,
-  cachedKey: string | undefined,
-): SvoDryPrimaryCoherenceDecision {
-  return mode === "static-primary" && splitActive && frameKey !== undefined && frameKey === cachedKey
-    ? "reuse" : "trace";
-}
 
 /** Exact float normal + primary hit distance crossing the split pass boundary. */
 export const SVO_DRY_SPLIT_GEOMETRY_FORMAT = "rgba32float" as GPUTextureFormat;
@@ -2226,7 +2213,23 @@ fn dryLeafFlags(nodeIndex:u32)->u32{return svoNodeLoad(nodeIndex).links.w;}
 fn dryLeafLevel(nodeIndex:u32)->u32{return svoNodeLoad(nodeIndex).address.z;}
 `;
   const liveLeafLifecycleWGSL = /* wgsl */ `
-fn dryLeafCurrent(hit:SvoTraversalHit)->bool{return svoBrickLifecycleCurrent(svoBrickLifecycleDecode(dryLeafFlags(hit.nodeIndex)));}
+fn dryLeafStructuralPlanar(hit:SvoTraversalHit)->bool{
+  if(hit.nodeIndex>=svoControlLoad(0u)){return false;}
+  let node=svoNodeLoad(hit.nodeIndex);let leafIndex=node.links.z;
+  if(leafIndex==SVO_INVALID||leafIndex>=svoControlLoad(1u)){return false;}
+  let leaf=svoLeafLoad(leafIndex);
+  return leaf.topology.x==hit.nodeIndex
+    &&leaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY;
+}
+fn dryLeafCurrent(hit:SvoTraversalHit)->bool{
+  // A planar terminal is immutable structural topology and deliberately owns
+  // no voxel payload for the scene voxeliser to stamp current. Requiring the
+  // payload lifecycle here skips the terminal before its exact intersection is
+  // even attempted, so validate its node/leaf link instead. Ordinary leaves
+  // retain the live publication gate unchanged.
+  return dryLeafStructuralPlanar(hit)
+    ||svoBrickLifecycleCurrent(svoBrickLifecycleDecode(dryLeafFlags(hit.nodeIndex)));
+}
 `;
   // The shading normal, read back out of the voxel that was hit.
   //
@@ -2289,8 +2292,14 @@ fn dryPresentationHit(hitIn:DryHit)->DryHit{
  * coarsen occupancy, alter silhouettes, or reopen the coping gaps caused by a
  * coarse geometry bake.
  */
-fn dryVoxelFaceEdgeFactor(position:vec3f,faceNormal:vec3f,depth_m:f32)->f32{
+fn dryVoxelFaceEdgeFactor(position:vec3f,faceNormal:vec3f,depth_m:f32,fieldSource:u32)->f32{
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals}u)==0u){return 1.0;}
+  // The seam is a presentation of individually articulated *voxel* faces. An
+  // analytic terminal retains the exact thin surface specifically so a large
+  // floor or wall reads as one plane; projecting the finest-cell lattice over
+  // that hit would throw away the visual half of the planar cutover while the
+  // traversal still paid for the exact answer.
+  if(fieldSource==DRY_GBUFFER_FIELD_ANALYTIC){return 1.0;}
   let cellCoordinate=(position-dry.nodeMipOrigin.xyz)/max(dry.mapping.cellSize,vec3f(1e-6));
   let phase=abs(fract(cellCoordinate)-vec3f(.5));
   let edgeDistance=vec3f(.5)-phase;
@@ -2565,7 +2574,13 @@ fn dryPrimaryLeafAggregateHit(ro:vec3f,rd:vec3f,bounds:mat2x3f,tEnter:f32,tExit:
 // still picks the material, because a proxy box is tens of pixels across at a
 // high threshold and the along-ray cell beats one representative for all of it.
 fn dryPrimaryLeafProxyHit(ro:vec3f,rd:vec3f,nodeIndex:u32,proxyBounds:mat2x3f,tEnter:f32,tExit:f32,voxelOffset:u32)->DryHit{
-  let node=svoNodeLoad(nodeIndex);let bounds=svoNodeBounds(node,dry.mapping);
+  let node=svoNodeLoad(nodeIndex);
+  if(node.links.z!=SVO_INVALID){let leaf=svoLeafLoad(node.links.z);
+    if(leaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){
+      return dryPlanarTerminalHit(ro,rd,nodeIndex,tEnter,tExit);
+    }
+  }
+  let bounds=svoNodeBounds(node,dry.mapping);
   let occupancy=svoBrickOccupancyDecode(node.links.w);
   let stride=dryLodCellStride(bounds,node.address.z);
   let descended=dryPrimaryLeafAggregateHit(ro,rd,bounds,tEnter,tExit,voxelOffset,occupancy,stride);
@@ -2896,6 +2911,12 @@ fn traceLeafPayloadFineInterval(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat
   return missHit();
 }
 fn traceLeafPayloadMacroHdda(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit{
+  let terminalNode=svoNodeLoad(hit.nodeIndex);
+  if(terminalNode.links.z!=SVO_INVALID){let terminalLeaf=svoLeafLoad(terminalNode.links.z);
+    if(terminalLeaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){
+      return dryPlanarTerminalHit(ro,rd,hit.nodeIndex,hit.tEnter,hit.tExit);
+    }
+  }
   ${leafNodeSetupWGSL}let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);let summary=svoBrickOccupancyDecode(leafNode.links.w);
   if(summary.ready==0u){return traceLeafPayloadFineInterval(ro,rd,hit,bounds,extent,hit.tEnter,hit.tExit,vec3u(0u),vec3u(dry.mapping.brickSize));}
   if(summary.occupied==0u){return missHit();}
@@ -2926,6 +2947,13 @@ fn traceLeafPayloadVisibilityFineInterval(ray:SvoVisibilityRay,tMin_m:f32,hit:Sv
   return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
 }
 fn traceLeafPayloadVisibilityMacroHdda(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHit,workLimit:u32)->SvoVisibilityStep{
+  let terminalNode=svoNodeLoad(hit.nodeIndex);
+  if(terminalNode.links.z!=SVO_INVALID){let terminalLeaf=svoLeafLoad(terminalNode.links.z);
+    if(terminalLeaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){
+      if(workLimit==0u){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,0u,DRY_MISS);}
+      return dryPlanarTerminalVisibility(ray,hit);
+    }
+  }
   ${shadowLeafNodeSetupWGSL}let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);let summary=svoBrickOccupancyDecode(leafNode.links.w);
   if(summary.ready==0u){return traceLeafPayloadVisibilityFineInterval(ray,tMin_m,hit,bounds,extent,hit.tEnter,min(hit.tExit,ray.tMax_m),vec3u(0u),vec3u(dry.mapping.brickSize),workLimit);}if(summary.occupied==0u){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,0u,DRY_MISS);}
   let interval=svoRayAabbWithInverse(SvoRay(ray.origin_m,max(max(hit.tEnter,tMin_m),0.0),ray.direction,min(hit.tExit,ray.tMax_m)),1.0/ray.direction,svoBrickOccupiedBounds(summary,bounds[0],extent));if(interval.x==0.0){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,0u,DRY_MISS);}
@@ -4382,6 +4410,7 @@ ${svoNodeMipSamplingWGSL}
 ${svoTetrahedralRadianceWGSL}
 ${svoTetrahedralRadianceConeCoreWGSL}
 ${svoFluidCoverageWGSL}
+${planarBoundaryWGSL}
 // highlight is (firstOwner, lastOwner, strength, falloff) for the object under
 // the editor cursor, appended without moving any earlier uniform lane. A range
 // rather than one id because a described object is
@@ -4396,8 +4425,8 @@ struct DryParams {
   lightColor:vec4f,
   // x: reserved; y: environment/SolidWorld face-worklist count; zw: reserved.
   glass:vec4u,
-  // Reserved ABI lane.
-  reservedScene:vec4f,
+  // x: record count; y: accepted generation; z: 64-byte record stride.
+  planarBoundaries:vec4u,
   // x: dense slot count; y: table revision; z: 96-byte stride; w: bounded contact-visibility gate.
   materialPublication:vec4u,
   // x: stable address-plan generation; y: directory pages; z: levels; w: publication mode.
@@ -4481,9 +4510,10 @@ ${cameraApertureShaderLibrary()}
 // occupancy bit, a per-leaf header and a palette entry in four lanes of this one
 // buffer, so the bases come from dry.payloadLanes and every read goes through
 // sceneIdentityAt/sceneIdentityOf. The binding *type* is unchanged, which is
-// what keeps the seven-storage-buffer ceiling recorded above intact.
+// what leaves the accepted planar catalogue as the only new storage binding.
 @group(0) @binding(3) var<storage,read> scenePayload:array<u32>;
 @group(0) @binding(4) var<storage,read> drySceneArena:array<u32>;
+@group(0) @binding(6) var<storage,read> dryPlanarBoundaries:array<PlanarBoundaryPatch>;
 @group(0) @binding(9) var<uniform> dry:DryParams;
 @group(0) @binding(13) var<uniform> dryLighting:DryLightingArena;
 @group(0) @binding(14) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>;
@@ -4887,6 +4917,50 @@ fn primitiveHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->
   return DryHit(exact.t_m,exact.normal.xyz,svoPrimitiveMaterialId(record),svoPrimitiveOwnerId(record),exact.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
 }
 
+// A planar terminal resolves one exact finite slab from the immutable
+// structural catalogue and never enters the 8^3 DDA. Geometry and leaf index
+// are accepted together; no source primitive ordering participates in a hit.
+fn dryPlanarTerminalHit(ro:vec3f,rd:vec3f,nodeIndex:u32,tEnter:f32,tExit:f32)->DryHit{
+  if(nodeIndex>=svoControlLoad(0u)){return missHit();}
+  let node=svoNodeLoad(nodeIndex);let leafIndex=node.links.z;
+  if(leafIndex==SVO_INVALID||leafIndex>=svoControlLoad(1u)){return missHit();}
+  let leaf=svoLeafLoad(leafIndex);
+  if(leaf.topology.x!=nodeIndex||leaf.topology.z!=SVO_LEAF_TERMINAL_PLANAR_BOUNDARY
+    ||dry.planarBoundaries.y==0u||dry.planarBoundaries.z!=${PLANAR_BOUNDARY_PATCH_BYTES}u
+    ||leaf.topology.w>=dry.planarBoundaries.x||leaf.topology.w>=arrayLength(&dryPlanarBoundaries)){return missHit();}
+  let boundary=dryPlanarBoundaries[leaf.topology.w];
+  let exact=intersectPlanarBoundary(boundary,ro,rd,max(tEnter,1e-4),tExit);
+  if(exact.valid==0u){return missHit();}
+  let identity=planarBoundaryIdentity(boundary);
+  return DryHit(exact.tHit,exact.normal,identity&0xffffu,identity>>16u,
+    SVO_FEATURE_BOX_X+exact.featureAxis,DRY_GBUFFER_FIELD_ANALYTIC,
+    DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+}
+
+// Exact planar geometry is a first-class structural visibility set, not a
+// second copy of the voxel payload. Testing the compact catalogue globally is
+// what keeps mixed leaves correct: their brick contains only non-planar
+// residual geometry, while every admitted plane remains visible regardless of
+// which side of a leaf boundary contains its finite slab.
+fn dryPlanarCatalogHit(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
+  var best=missHit();best.t=tMax;
+  if(dry.planarBoundaries.y==0u
+    ||dry.planarBoundaries.z!=${PLANAR_BOUNDARY_PATCH_BYTES}u){return best;}
+  let count=min(dry.planarBoundaries.x,arrayLength(&dryPlanarBoundaries));
+  for(var boundaryIndex=0u;boundaryIndex<count;boundaryIndex+=1u){
+    let boundary=dryPlanarBoundaries[boundaryIndex];
+    let exact=intersectPlanarBoundary(boundary,ro,rd,max(tMin,1e-4),best.t);
+    if(exact.valid==0u){continue;}
+    let identity=planarBoundaryIdentity(boundary);
+    let owner=identity>>16u;
+    if(dryOpaqueOwnerSuppressed(owner)){continue;}
+    best=DryHit(exact.tHit,exact.normal,identity&0xffffu,owner,
+      SVO_FEATURE_BOX_X+exact.featureAxis,DRY_GBUFFER_FIELD_ANALYTIC,
+      DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+  }
+  return best;
+}
+
 // Exact live-scene acceleration. Candidate nodes occupy the same fixed arena
 // as primitives, after the primitive span, so this adds no storage binding.
 fn traceScenePrimitives(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,ignoredOwner:u32)->DryHit{
@@ -4931,6 +5005,12 @@ fn dryVoxelFaceNormal(bounds:mat2x3f,point:vec3f)->vec3f{
 }
 ${surfaceReconstructionWGSL}
 fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
+  let terminalNode=svoNodeLoad(hit.nodeIndex);
+  if(terminalNode.links.z!=SVO_INVALID){let terminalLeaf=svoLeafLoad(terminalNode.links.z);
+    if(terminalLeaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){
+      return dryPlanarTerminalHit(ro,rd,hit.nodeIndex,hit.tEnter,hit.tExit);
+    }
+  }
   ${primaryBrickSetupWGSL}
   ${primaryLodStrideWGSL}
   let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0)); let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
@@ -4998,7 +5078,8 @@ fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
   // that looks perfect because the voxel path never ran. Miss instead and let
   // the existing publication tripwire say why.
   if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){return missHit();}
-  ${analyticPrimaryUnbounded ? "let seeded=traceScenePrimitives(ro,rd,initialMinimum,DRY_MISS,DRY_OWNER_NONE);" : "let seeded=missHit();"}
+  var seeded=dryPlanarCatalogHit(ro,rd,initialMinimum,DRY_MISS);
+  ${analyticPrimaryUnbounded ? "let primitiveBest=traceScenePrimitives(ro,rd,initialMinimum,seeded.t,DRY_OWNER_NONE);if(primitiveBest.t<seeded.t){seeded=primitiveBest;}" : ""}
   var voxel=missHit();
   var minimum=max(initialMinimum,0.0);
   let mapping=dryConfiguredMapping();
@@ -5018,20 +5099,17 @@ fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
       break;
     }
     if(!dryLeafCurrent(leaf)){minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);continue;}
-
-
     let payloadHit=${primaryLeafTraceCallWGSL}(ro,rd,leaf);
     // Leaves partition space and are visited front to back, so the first payload
     // hit is the nearest voxel-resolved surface and no later leaf can beat it.
     if(payloadHit.t<seeded.t){voxel=payloadHit;break;}
-
     minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);
   }
   // Reaching the uniform budget without an authoritative hierarchy miss is a
   // traversal exhaustion, not an empty scene. Keep that visible in the
   // existing failure heatmap instead of silently returning black.
   if(!traversalFinished){}
-  ${analyticPrimaryUnbounded ? "if(voxel.t<seeded.t){return voxel;}return seeded;" : "return voxel;"}
+  if(voxel.t<seeded.t){return voxel;}return seeded;
 }
 fn traceStatic(ro:vec3f,rd:vec3f)->DryHit{return traceStaticFrom(ro,rd,0.0);}
 
@@ -5088,6 +5166,20 @@ fn dryThinDielectricTransmittance(material:SvoMaterialRecord,normal:vec3f,direct
   let tint=mix(vec3f(1.0),clamp(material.scatteringColorAnisotropy.xyz,vec3f(0.0),vec3f(1.0)),clamp(material.baseColorOpacity.w,0.0,1.0));
   return tint*clamp(material.surface.w*(1.0-fresnel),0.0,1.0);
 }
+fn dryPlanarTerminalVisibility(ray:SvoVisibilityRay,hit:SvoTraversalHit)->SvoVisibilityStep{
+  let candidate=dryPlanarTerminalHit(ray.origin_m,ray.direction,hit.nodeIndex,hit.tEnter,
+    min(hit.tExit,ray.tMax_m));
+  if(!(candidate.t<DRY_MISS)){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,1u,DRY_MISS);}
+  let materialId=dryResolvedMaterialId(candidate);
+  if(materialId>=dry.materialPublication.x){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,1u,DRY_MISS);}
+  let material=dryMaterial(materialId);
+  if(!dryMaterialPublished(material,materialId)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,1u,DRY_MISS);}
+  if(dryMaterialThinDielectric(material,materialId)){
+    return dryVisibilityTransmissionStep(0u,0u,1u,min(hit.tExit,ray.tMax_m),
+      dryThinDielectricTransmittance(material,candidate.normal,ray.direction));
+  }
+  return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,1u,candidate.t);
+}
 
 // Renderer-local unit-vector variant of the shared bias contract. Surface
 // normals and light/contact directions are normalized at their construction
@@ -5101,6 +5193,13 @@ fn dryBiasedVisibilityRayUnit(surfacePosition_m:vec3f,geometricNormal:vec3f,dire
 // Shadow payload lookup mirrors the production leaf DDA, but reports invalid
 // data and bounded-work exhaustion explicitly so direct light fails closed.
 fn traceLeafPayloadVisibility(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHit,workLimit:u32)->SvoVisibilityStep {
+  let terminalNode=svoNodeLoad(hit.nodeIndex);
+  if(terminalNode.links.z!=SVO_INVALID){let terminalLeaf=svoLeafLoad(terminalNode.links.z);
+    if(terminalLeaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){
+      if(workLimit==0u){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,0u,DRY_MISS);}
+      return dryPlanarTerminalVisibility(ray,hit);
+    }
+  }
   ${shadowBrickSetupWGSL}
   let step=select(vec3i(-1),vec3i(1),ray.direction>=vec3f(0.0));let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
   var nextT=select(vec3f(DRY_MISS),(nextBoundary-ray.origin_m)/ray.direction,abs(ray.direction)>vec3f(1e-9));let deltaT=select(vec3f(DRY_MISS),abs(extent/ray.direction),abs(ray.direction)>vec3f(1e-9));
@@ -5464,7 +5563,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(hit.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIllumination(position,hit.normal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;let indirectDiffuse=diffuseColor*gi.radiance;
   var shaded=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
-  shaded*=dryVoxelFaceEdgeFactor(position,hit.normal,hit.t);
+  shaded*=dryVoxelFaceEdgeFactor(position,hit.normal,hit.t,hit.fieldSource);
   return shaded;
 }
 // Where the ray leaves the render voxel it just entered.
@@ -6147,12 +6246,6 @@ export class SparseVoxelDrySceneRenderer {
   private readonly pickingReadback: SparseVoxelGpuPickingReadbackRing;
   private lastPickingTarget?: GPUTexture;
   private readonly targetViews = new WeakMap<GPUTexture, GPUTextureView>();
-  private reusableKey?: string;
-  private reusableStableFrames = 0;
-  private reusableTarget?: GPUTexture;
-  private reusableResult?: DrySceneReplacementResult;
-  /** Last exact split-visibility publication authorized by a caller-owned static-frame key. */
-  private primaryVisibilityCacheKey?: string;
   /** Resource/source epoch. Later compatible frames do not invalidate a copy already ordered on the queue. */
   private pickingFrameToken = 1;
   private paramsWords?: Uint32Array<ArrayBuffer>;
@@ -6186,7 +6279,6 @@ export class SparseVoxelDrySceneRenderer {
     private readonly brickOccupancyMode: SvoBrickOccupancyMode = "bounds",
     private readonly shadingPath: SvoDryShadingPath = "inline",
     private readonly screenSpaceTerminationPixels = 0,
-    private readonly rayCoherenceMode: SvoDryRayCoherenceMode = "off",
     private readonly rasterGlassDiscovery = false,
     private readonly rasterRigidDiscovery = false,
     private readonly coneFanout = false,
@@ -6196,8 +6288,6 @@ export class SparseVoxelDrySceneRenderer {
       throw new Error(`Sparse voxel dry scene location 0 must use ${SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat}`);
     }
     if (shadingPath !== "inline" && shadingPath !== "split") throw new RangeError(`Unsupported dry-scene shading path: ${shadingPath}`);
-    if (rayCoherenceMode !== "off" && rayCoherenceMode !== "static-primary") throw new RangeError(`Unsupported dry-scene ray coherence mode: ${rayCoherenceMode}`);
-    if (rayCoherenceMode === "static-primary" && shadingPath !== "split") throw new RangeError("Static-primary ray coherence requires split shading");
     if (screenSpaceTerminationPixels > 0
       && !((traversalMode === "canonical" && shadingPath === "inline")
         || (traversalMode === "raster-primary" && shadingPath === "split"))) {
@@ -6502,8 +6592,6 @@ export class SparseVoxelDrySceneRenderer {
         || (this.rasterPrimary && bodyCount > 0));
     if (active === this.rasterRigidActive) return;
     this.rasterRigidActive = active;
-    this.clearReusableFrame();
-    this.clearPrimaryVisibilityCache();
   }
 
   private async ensureRasterGlassPipeline(): Promise<void> {
@@ -6629,9 +6717,8 @@ export class SparseVoxelDrySceneRenderer {
           texture: { sampleType: "uint" },
         }],
       });
-      // Binding 6 joins the resolve set because `traceLeafPayload` reads the
-      // scene-geometry lane for its shading normal, and the brick resolve
-      // fragment is the entry point that calls it on the shipping path.
+      // Binding 6 joins the resolve set because `traceLeafPayload` resolves
+      // accepted planar terminal records, including from raster-generated hits.
       const resolveBindings = new Set([0, 1, 2, 3, 4, 6, 9, 14, 15]);
       this.brickResolveSceneLayout = this.device.createBindGroupLayout({
         label: "Sparse voxel conservative brick resolve scene bindings",
@@ -6968,6 +7055,7 @@ export class SparseVoxelDrySceneRenderer {
         { binding: 2, resource: structural.structure },
         { binding: 3, resource: structural.scenePayload },
         { binding: 4, resource: { buffer: this.sceneArenaBuffer } },
+        { binding: 6, resource: structural.planarBoundaries.records },
         { binding: 9, resource: { buffer: this.paramsBuffer } },
         { binding: 14, resource: { buffer: this.rigidMotionUniformBuffer } },
         { binding: 15, resource: { buffer: this.thickGlassUniformBuffer } },
@@ -8082,7 +8170,6 @@ export class SparseVoxelDrySceneRenderer {
       const bundle = await compile;
       if (variantCurrent()) {
         this.activateSplitPipelineBundle(scale, bundle);
-        this.clearReusableFrame();
       }
     } finally {
       if (this.splitPipelineCompiles.get(variantKey) === compile) this.splitPipelineCompiles.delete(variantKey);
@@ -8106,7 +8193,6 @@ export class SparseVoxelDrySceneRenderer {
       || (this.screenSpaceTerminationPixels > 0 && !this.scenePrimitiveComputeDepth)
       || (this.rasterRigidDiscovery && !this.rasterRigidPrimaryGeometry)
       || this.splitWidth !== this.targetWidth || this.splitHeight !== this.targetHeight) {
-      this.clearPrimaryVisibilityCache();
       this.splitGeometry?.destroy();
       this.splitOpaqueIdentity?.destroy();
       this.splitGlassKey?.destroy();
@@ -8391,7 +8477,6 @@ export class SparseVoxelDrySceneRenderer {
       const bundle = await compile;
       if (scale === this.coneScale) {
         this.activateConePipelineBundle(scale, bundle);
-        this.clearReusableFrame();
       }
       await this.ensureSplitPipelines(scale);
     } finally {
@@ -8576,7 +8661,6 @@ export class SparseVoxelDrySceneRenderer {
     }
     this.conePrepassWidth = width;
     this.conePrepassHeight = height;
-    this.clearReusableFrame();
   }
 
   private releaseConePrepassTargets(): void {
@@ -8741,8 +8825,6 @@ export class SparseVoxelDrySceneRenderer {
       // their metre mapping on the same source object. Refresh the uniforms
       // rather than treating object identity as proof that nothing changed.
       if (source && this.scene && canEncodeSparseVoxelDryScene(source, this.scene)) {
-        this.clearReusableFrame();
-        this.clearPrimaryVisibilityCache();
         this.worldGiCacheDirty = true;
         this.writeParams(source, this.scene);
       }
@@ -8750,8 +8832,6 @@ export class SparseVoxelDrySceneRenderer {
     }
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;
-    this.clearReusableFrame();
-    this.clearPrimaryVisibilityCache();
     this.worldGiCacheDirty = true;
     this.source = source;
     this.ensureVoxelLightCache(source, this.scene);
@@ -8775,8 +8855,6 @@ export class SparseVoxelDrySceneRenderer {
 
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;
-    this.clearReusableFrame();
-    this.clearPrimaryVisibilityCache();
     this.worldGiCacheDirty = true;
     this.invalidateVoxelLightCache();
     this.primitiveDirtyBounds = [];
@@ -8921,12 +8999,6 @@ export class SparseVoxelDrySceneRenderer {
     this.writeParams(this.source, this.scene);
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;
-    this.clearReusableFrame();
-    // sceneEpoch (pickingFrameToken above) is part of the primary reuse key, so
-    // an incremental pose cannot reuse the previous G-buffer. Avoid separately
-    // destroying the cache: stationary visibility remains reusable again as
-    // soon as the caller's generation stops changing.
-    if (!incremental) this.clearPrimaryVisibilityCache();
     this.primitiveDirtyBounds = change.dirtyBounds;
     const invalidation = svoDryPrimitiveArenaCacheInvalidation(change);
     if (invalidation.worldGi) this.worldGiCacheDirty = true;
@@ -8952,8 +9024,6 @@ export class SparseVoxelDrySceneRenderer {
     const staleWorldGi = this.disabledStages.has("world-gi-cache") !== disabled.has("world-gi-cache")
       || this.disabledStages.has("primary-traversal") !== disabled.has("primary-traversal");
     this.disabledStages = new Set(disabled);
-    this.clearReusableFrame();
-    this.primaryVisibilityCacheKey = undefined;
     if (staleWorldGi) this.worldGiCacheDirty = true;
   }
 
@@ -8991,7 +9061,6 @@ export class SparseVoxelDrySceneRenderer {
       const splitBundle = this.splitPipelineBundles.get(this.currentSplitVariantKey(coneLightingScale));
       if (splitBundle) this.activateSplitPipelineBundle(coneLightingScale, splitBundle);
     }
-    this.clearReusableFrame();
     if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) {
       this.writeParams(this.source, this.scene);
     }
@@ -9053,7 +9122,6 @@ export class SparseVoxelDrySceneRenderer {
     if (lodOnly) {
       this.renderTuning = normalized;
       this.writeLodParams();
-      this.clearReusableFrame();
       return;
     }
     const invalidateVoxelVisibility = normalized.coneStepBudget !== this.renderTuning.coneStepBudget
@@ -9066,7 +9134,6 @@ export class SparseVoxelDrySceneRenderer {
     // those presentation-only changes is what makes camera/view-tier A/Bs a
     // valid warm-cache measurement. March-shape changes still invalidate.
     if (invalidateVoxelVisibility) this.invalidateVoxelLightCache();
-    this.clearReusableFrame();
     this.worldGiCacheDirty = true;
     this.writeBandParams();
     if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) this.writeParams(this.source, this.scene);
@@ -9097,6 +9164,12 @@ export class SparseVoxelDrySceneRenderer {
     words.set([0,
       (scene.glassRecords?.byteLength ?? 0) / SVO_THIN_GLASS_RECORD_STRIDE_BYTES,
       0, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.glassWordOffset);
+    words.set([
+      structural.planarBoundaries.count,
+      structural.planarBoundaries.generation,
+      structural.planarBoundaries.strideBytes,
+      0,
+    ], SVO_DRY_SCENE_PARAMS_LAYOUT.planarBoundaryWordOffset);
     const coneTracingMode = this.lightingOptions.coneTracingMode ?? "cones";
     // `off` strictly removes lighting-visibility work: with shadows and AO
     // held false no exact-ray flag is written either, and every visibility
@@ -9316,6 +9389,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 3, resource: structural.scenePayload },
       { binding: 4, resource: { buffer: this.sceneArenaBuffer } },
       ...(derivedTraversal ? [{ binding: 5, resource: derivedTraversal }] : []),
+      { binding: 6, resource: structural.planarBoundaries.records },
       { binding: 9, resource: { buffer: this.paramsBuffer } },
       { binding: 13, resource: { buffer: this.lightingBuffer } },
       { binding: 14, resource: { buffer: this.rigidMotionUniformBuffer } },
@@ -9387,7 +9461,6 @@ export class SparseVoxelDrySceneRenderer {
     if (this.voxelLightUserEnabled === enabled) return;
     this.voxelLightUserEnabled = enabled;
     this.ensureVoxelLightCache(this.source, this.scene);
-    this.clearReusableFrame();
   }
 
   setRigidMotionSource(source: GPUBuffer | undefined): void {
@@ -9396,7 +9469,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   ensureSize(width: number, height: number): void {
-    if (this.gBufferTargets.ensureSize(width, height)) { this.pickingFrameToken += 1; this.lastPickingTarget = undefined; this.clearReusableFrame(); this.clearPrimaryVisibilityCache(); }
+    if (this.gBufferTargets.ensureSize(width, height)) { this.pickingFrameToken += 1; this.lastPickingTarget = undefined; }
     this.targetWidth = width;
     this.targetHeight = height;
     this.ensureConePrepassTargets();
@@ -9407,8 +9480,6 @@ export class SparseVoxelDrySceneRenderer {
   setDiagnosticOverlayActive(active: boolean): void {
     if (active === this.splitDiagnosticsActive) return;
     this.splitDiagnosticsActive = active;
-    this.clearReusableFrame();
-    this.clearPrimaryVisibilityCache();
   }
 
   /** Copies the compacted boundary count for offline Dawn experiment diagnosis. */
@@ -9784,7 +9855,7 @@ export class SparseVoxelDrySceneRenderer {
     }
   }
 
-  encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, reuseKey?: string, tracePhase?: RenderFrameSeam<"svo">, bandPartitioner?: FrameBandPartitioner): DrySceneReplacementResult | false {
+  encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, tracePhase?: RenderFrameSeam<"svo">, bandPartitioner?: FrameBandPartitioner): DrySceneReplacementResult | false {
     if (!this.pipeline || !this.bindGroup) return false;
     // The coverage volume allocates lazily and only reports itself once a fill
     // has been encoded, so its validity flips mid-session. Refresh the frame
@@ -9856,17 +9927,7 @@ export class SparseVoxelDrySceneRenderer {
       this.requestedBundleResourceFailure = `Requested SVO split bundle at scale ${this.coneScale} has incomplete frame resources`;
       return false;
     }
-    const frameKey = reuseKey === undefined ? undefined : `${reuseKey}|cone=${effectiveScale}|shading=${useSplit ? "split" : "inline"}|rasterRigid=${this.rasterRigidActive}`;
-    const primaryFrameKey = reuseKey === undefined ? undefined : `${reuseKey}|primary=${useSplit ? "split" : "inline"}|rasterRigid=${this.rasterRigidActive}`;
-    const reusePrimaryVisibility = !this.rasterRigidActive && svoDryPrimaryCoherenceDecision(
-      // Reduced split shading computes a complete cone-visibility plane every
-      // frame, so its primary G-buffer is parity-invariant. Scale 1 still owns
-      // checkerboard shadow-deferred flags and must always retrace.
-      this.rayCoherenceMode, useSplit && usePrepass, primaryFrameKey, this.primaryVisibilityCacheKey,
-    ) === "reuse";
     const targetTexture = "width" in target ? target as GPUTexture : undefined;
-    if (this.rayCoherenceMode === "off" && frameKey && targetTexture && frameKey === this.reusableKey && targetTexture === this.reusableTarget
-      && this.reusableStableFrames >= 1 && this.reusableResult) return this.reusableResult;
     let targetView = target as GPUTextureView;
     if (targetTexture) {
       targetView = this.targetViews.get(targetTexture) ?? targetTexture.createView();
@@ -9915,7 +9976,6 @@ export class SparseVoxelDrySceneRenderer {
     }
     if (useSplit) {
       const splitGroup = usePrepass ? 2 : 1;
-      if (!reusePrimaryVisibility) {
         // A withheld primary still clears. The G-buffer has to be a defined
         // miss everywhere so the frame resolves to sky and the delta is exactly
         // what the traversal was worth; presenting whatever the last traced
@@ -10044,10 +10104,6 @@ export class SparseVoxelDrySceneRenderer {
           seam.end();
           tracePhase?.("seam-closure");
         }
-        this.primaryVisibilityCacheKey = this.rayCoherenceMode === "static-primary" && usePrepass
-          ? primaryFrameKey
-          : undefined;
-      }
       // Band seam on fence-partitioned sampling frames: everything above is
       // primary visibility, everything until the next seam is lighting
       // visibility. The reassignment is load-bearing — the old encoder was
@@ -10283,10 +10339,6 @@ export class SparseVoxelDrySceneRenderer {
     }
     this.lastPickingTarget = targetTexture;
     const result = { encoded: true, sampledTargetView: targetView } as const;
-    if (this.rayCoherenceMode === "off" && frameKey && targetTexture) {
-      this.reusableStableFrames = frameKey === this.reusableKey && targetTexture === this.reusableTarget ? this.reusableStableFrames + 1 : 1;
-      this.reusableKey = frameKey; this.reusableTarget = targetTexture; this.reusableResult = result;
-    } else this.clearReusableFrame();
     return result;
   }
 
@@ -10441,21 +10493,12 @@ export class SparseVoxelDrySceneRenderer {
     this.gBufferTargets.destroy();
     this.pickingReadback.destroy();
     this.lastPickingTarget = undefined;
-    this.clearReusableFrame();
-    this.clearPrimaryVisibilityCache();
     this.pickingFrameToken += 1;
     this.bindGroup = undefined;
     this.primitiveCandidateArena = undefined;
     this.paramsWords = undefined;
   }
 
-  private clearReusableFrame(): void {
-    this.reusableKey = undefined; this.reusableStableFrames = 0; this.reusableTarget = undefined; this.reusableResult = undefined;
-  }
-
-  private clearPrimaryVisibilityCache(): void {
-    this.primaryVisibilityCacheKey = undefined;
-  }
 }
 
 export const svoDrySceneShader = drySceneShader;

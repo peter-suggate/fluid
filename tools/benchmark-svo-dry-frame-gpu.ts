@@ -44,8 +44,6 @@
  *      / _SHORT_STACK
  *      / _TINY_STACK
  *      (1 enables the named Dawn experiment),
- *      FLUID_SVO_DRY_FRAME_COHERENCE (off | static-primary; default off;
- *      static-primary requires split and reuses exact primary visibility),
  *      FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS (0 disables; diagnostic canonical primary-ray proxy),
  *      FLUID_SVO_DRY_FRAME_SCENE (default garden-svo-lighting),
  *      FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT (0..3; unset means the depth-0
@@ -146,7 +144,6 @@ import {
   type SvoConeLightingScale,
   type SvoDryTraversalMode,
   type SvoDryShadingPath,
-  type SvoDryRayCoherenceMode,
   type SvoDryOptimizationExperiments,
 } from "../lib/svo/webgpu-svo-dry-scene";
 import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/webgpu-svo-gbuffer-targets";
@@ -309,7 +306,6 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   scenePrimitiveUnboundedMarch: process.env.FLUID_SVO_DRY_FRAME_UNBOUNDED_MARCH === "1",
 };
 const voxelLightCacheEnabled = optimizationExperiments.voxelLightCache !== false;
-const rayCoherenceModeRaw = process.env.FLUID_SVO_DRY_FRAME_COHERENCE ?? "off";
 const screenSpaceTerminationPixels = Number(process.env.FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS ?? 0);
 const renderBrickSizeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_SIZE;
 const renderBrickSize = renderBrickSizeRaw === undefined ? undefined : Number(renderBrickSizeRaw);
@@ -370,10 +366,6 @@ assert.ok(["off", "bounds", "macro", "macro-hdda"].includes(brickOccupancyModeRa
   "FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY must be off, bounds, macro, or macro-hdda");
 assert.ok(["inline", "split"].includes(shadingPathRaw),
   "FLUID_SVO_DRY_FRAME_SHADING must be inline or split");
-assert.ok(["off", "static-primary"].includes(rayCoherenceModeRaw),
-  "FLUID_SVO_DRY_FRAME_COHERENCE must be off or static-primary");
-assert.ok(rayCoherenceModeRaw === "off" || shadingPathRaw === "split",
-  "FLUID_SVO_DRY_FRAME_COHERENCE=static-primary requires FLUID_SVO_DRY_FRAME_SHADING=split");
 assert.ok(Number.isFinite(screenSpaceTerminationPixels) && screenSpaceTerminationPixels >= 0,
   "FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS must be a non-negative finite number");
 assert.ok(["cones", "exact", "off"].includes(coneTracingModeRaw),
@@ -395,7 +387,6 @@ const derivedTraversalStructures =
   traversalMode === "compact" || traversalMode === "wide" || traversalMode === "hybrid";
 const brickOccupancyMode = brickOccupancyModeRaw as SvoBrickOccupancyMode;
 const shadingPath = shadingPathRaw as SvoDryShadingPath;
-const rayCoherenceMode = rayCoherenceModeRaw as SvoDryRayCoherenceMode;
 
 const log = (message: string) => process.stderr.write(`${message}\n`);
 
@@ -582,7 +573,7 @@ if (recordScaleMultipliers) {
     }));
     device.queue.writeBuffer(armBodyBuffer, 0, armBodies.data);
     const armRenderer = new SparseVoxelDrySceneRenderer(device, armUniforms, armBodyBuffer, "rgba16float",
-      traversalMode, brickOccupancyMode, shadingPath, screenSpaceTerminationPixels, rayCoherenceMode,
+      traversalMode, brickOccupancyMode, shadingPath, screenSpaceTerminationPixels,
       rasterGlassDiscovery, rasterRigidDiscovery, coneFanout, optimizationExperiments);
     await armRenderer.initialize();
     armRenderer.setRigidBodyCount(armBodies.count);
@@ -996,7 +987,7 @@ device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, activeCamera,
 device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
-  shadingPath, screenSpaceTerminationPixels, rayCoherenceMode, rasterGlassDiscovery, rasterRigidDiscovery, coneFanout,
+  shadingPath, screenSpaceTerminationPixels, rasterGlassDiscovery, rasterRigidDiscovery, coneFanout,
   optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
@@ -1054,20 +1045,13 @@ const target = device.createTexture({
 const passEncoderIsolationScratch = isolateProfilePassEncoders
   ? createPassEncoderIsolationScratch(device) : undefined;
 
-// Deliberately explicit: this benchmark scene, camera, viewport, and rigid-body
-// publication are frozen. Production callers must construct an equivalent key
-// from their own revisions; undefined always traces.
-const primaryCoherenceKey = rayCoherenceMode === "static-primary"
-  ? JSON.stringify({ scenePresetId, width, height, camera, bodyCount: bodies.count, sourceRevision: source.revision })
-  : undefined;
 function encodeFrame(
   encoder: GPUCommandEncoder,
-  reuseKey = primaryCoherenceKey,
   tracePhase?: RenderFrameSeam<"svo">,
 ): void {
   const instrumentedEncoder = passEncoderIsolationScratch
     ? isolateComputePassEncoders(encoder, passEncoderIsolationScratch) : encoder;
-  const result = renderer.encode(instrumentedEncoder, target, reuseKey, tracePhase);
+  const result = renderer.encode(instrumentedEncoder, target, tracePhase);
   assert.ok(result && result.encoded, "production dry-scene encode declined the frame (raster fallback)");
 }
 
@@ -1164,7 +1148,7 @@ if (phaseTraceEnabled && profileSeconds <= 0 && GPUPassTimestampRecorder.support
     const encoder = device.createCommandEncoder({ label: `SVO configured phase trace ${attempt}` });
     const recorder = new GPUPassTimestampRecorder(device, 512, "SVO configured phase trace");
     const instrumented = recorder.instrument(encoder);
-    encodeFrame(instrumented, primaryCoherenceKey === undefined ? undefined : `${primaryCoherenceKey}|phase-trace-${attempt}`);
+    encodeFrame(instrumented);
     if (!recorder.resolve(encoder)) { recorder.destroy(); continue; }
     device.queue.submit([encoder.finish()]);
     const reading = await recorder.read();
@@ -1694,7 +1678,6 @@ if (coneScale !== 1) {
 }
 if (orbitStabilityEnabled) {
   assert.ok(coneScale !== 1 && reducedRows, "orbit stability requires a reduced configured capture");
-  assert.equal(rayCoherenceMode, "off", "orbit stability requires primary coherence off");
   activeCamera = { ...camera, azimuth_rad: camera.azimuth_rad + 0.4 };
   writeViewUniforms(false);
   for (let frame = 0; frame < 8; frame += 1) {
@@ -2009,7 +1992,6 @@ const result = {
   traversalMode,
   brickOccupancyMode,
   shadingPath,
-  rayCoherenceMode,
   optimizationExperiments,
   screenSpaceTermination: {
     thresholdPixels: screenSpaceTerminationPixels,
@@ -2028,15 +2010,6 @@ const result = {
     extraGiBPerSecondAt60Fps: width * height * SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL * 60 / (1024 ** 3),
     residentBytesPerPixel: SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL,
     residentMiB: width * height * SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL / (1024 * 1024),
-  } : undefined,
-  rayCoherence: rayCoherenceMode === "static-primary" ? {
-    exact: true,
-    scope: "unchanged camera + geometry + rigid-body publication",
-    warmupPrimaryFrames: 1,
-    steadyPrimaryRaysTracedPerFrame: 0,
-    steadyPrimaryRaysReusedPerFrame: width * height,
-    shadowAndConeRaysRemainPerFrame: true,
-    incrementalResidentBytes: 0,
   } : undefined,
   resolution: { width, height },
   timing: {

@@ -152,7 +152,7 @@ export const SVO_RIGID_RASTER_FEATURES = Object.freeze({
  * an analytic rigid hit does today.
  */
 export const SVO_RIGID_RASTER_INTEGRATION = Object.freeze({
-  stage: "inside-svo-renderer-after-static-primary-before-cone-prepass" as const,
+  stage: "inside-svo-renderer-after-primary-before-cone-prepass" as const,
   splitBridge: "second-proxy-raster-pass-unpacks-current-frame-winner-certificate" as const,
   deferredMaterial: "resolve-body-material-marker-from-current-BodyGPU" as const,
   motion: "resolve-current-surface-velocity-from-rigidMotion" as const,

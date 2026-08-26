@@ -215,7 +215,7 @@ export interface SparseVoxelStructuralRenderSource {
   control: GPUBufferBinding;
   /** Eight-u32 node records: Morton key, level, child links, leaf, flags. */
   nodes: GPUBufferBinding;
-  /** Four-u32 leaf records: node, voxel offset, Morton key. */
+  /** Four-u32 leaf records: node, voxel offset, terminal kind, terminal record index. */
   leaves: GPUBufferBinding;
   /** vec4f: fluid SDF, dynamic-solid SDF/fraction, pressure. */
   geometry: GPUBufferBinding;
@@ -241,6 +241,15 @@ export interface SparseVoxelStructuralRenderSource {
   /** Authoritative producer-owned brick residency; never inferred from payload values. */
   fluidResidency?: SparseVoxelFluidResidencySource;
   capacities: Readonly<{ nodes: number; leaves: number; voxels: number }>;
+  /** Accepted initial topology census; runtime fluid growth adds voxel terminals. */
+  terminalCounts: Readonly<{ voxel: number; planarBoundary: number }>;
+  /** Immutable exact records addressed by planar terminal leaf indices. */
+  planarBoundaries: Readonly<{
+    records: GPUBufferBinding;
+    count: number;
+    strideBytes: number;
+    generation: number;
+  }>;
   strides: Readonly<{
     control: number;
     node: number;

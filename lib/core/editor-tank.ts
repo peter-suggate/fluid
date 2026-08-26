@@ -202,13 +202,13 @@ function tankGroups(scene: SceneDescription): EditorControlGroup[] {
           ],
         },
         {
-          // Whether the domain is *drawn* as a tank, which is separate from the
-          // boundary it always is. A fresh scene starts as a room, so this is
-          // how its author asks for the vessel.
+          // How the domain is drawn is separate from the physical boundary it
+          // always is. The default cue is the canonical voxel-volume wireframe.
           id: "vessel",
           label: "Vessel",
-          value: c.vessel ?? "glass",
+          value: c.vessel ?? "outline",
           options: [
+            { id: "outline", label: c.shape === "sphere" ? "Voxel sphere outline" : "Voxel tank outline", apply: () => container({ vessel: "outline" }) },
             { id: "glass", label: c.shape === "sphere" ? "Glass sphere" : "Glass tank", apply: () => container({ vessel: "glass" }) },
             { id: "none", label: "No vessel", apply: () => container({ vessel: "none" }) },
           ],

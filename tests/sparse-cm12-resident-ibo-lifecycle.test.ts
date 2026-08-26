@@ -24,7 +24,7 @@ test("resident topology authorization consumes IBO before the distinct selector 
   assert.ok(receipt >= 0 && authorize > receipt,
     "IBO must participate in the aggregate decision before phase-2 authorization");
   const finalize = functionSource(wgsl, "finalizeAuthorizedShadowTopology",
-    "fn publishSparseCM12TopologyVelocityRootsWork");
+    "fn publishSparseWorldFrontierAcceptance");
   assert.match(finalize, /topologyArena\[base\+3u\]\)!=2u/);
   assert.match(finalize, /atomicStore\(&topologyArena\[base\+2u\],slot\)/);
   assert.match(wgsl, /cm12IBOLoad\(iboHeader\+1u\)==2u/);
@@ -46,4 +46,27 @@ test("IBO faults cannot disappear on weak CAS and replay mirrors either outcome"
     assert.ok(authorize > begin && finalize > authorize && replay > finalize,
       `${marker} must authorize, publish/flip, then replay only the retired slot`);
   }
+});
+
+test("signed SparseWorld retains the authored all-rung mutation catalogue", () => {
+  assert.match(host,
+    /const mutableBrickKeysForBudget = atlas\.bricks\.filter\(\(brick\) =>\s*sparseBrickSpan\(brick\) === 1\)/);
+  assert.match(host,
+    /const mutableBrickKeys[^=]*= hostTemplateVariants\s*\? new Set\(mutableBrickKeysForBudget\)/);
+  assert.match(host, /packResidentTopology\(atlas, grid, mutableBrickKeys\)/);
+  assert.match(host,
+    /const templates = hostTemplateVariants\s*\? packResidentTopologyTemplates\(atlas, grid\)\s*: packAcceptedTopologyTemplates\(atlas, grid\)/);
+  assert.match(host, /\(candidateSlotByBrick\[brick\]! \+ 1\) << 5/,
+    "authored leaf records must expose candidate slots to GPU lifecycle planning");
+});
+
+test("IBO semantic receipts validate authored SCMT independently of SparseWorld overlays", () => {
+  const scheduled = functionSource(wgsl, "cm12ISAScheduledRow",
+    "${createSparseCM12IBOSemanticAuthorityWGSL");
+  assert.match(scheduled, /if\(row>=ta\(3u\)\)\{return false;\}/,
+    "dynamic rows are outside the immutable authored IBO catalogue");
+  assert.match(scheduled,
+    /scheduledBrickActive\(brick\)[\s\S]*scheduledBrickResolution\(brick\)==resolution/);
+  assert.doesNotMatch(scheduled, /shadowRowScheduled|hostExteriorRowSuperseded/,
+    "runtime SparseWorld row suppression must not poison authored IBO authority");
 });

@@ -58,6 +58,17 @@ test("activation and retirement stage lifecycle intent without mutating accepted
   }
 });
 
+test("GPU-grown page-local leaves may validate same-rung retirement", () => {
+  const validate = functionSource(wgsl, "validateCandidateResolution",
+    "// All refinement is urgent");
+  assert.match(validate,
+    /dynamicRetirement=brick>=CM12_WDR_INITIAL_LEAVES&&brickActive\(brick\)/);
+  assert.match(validate, /!candidateBrickActive\(brick\)/);
+  assert.match(validate,
+    /!brickCandidatePlanningEnabled\(brick\)&&!constructionActivation\s*&&!dynamicRetirement/,
+    "page-local dynamic leaves must bypass only the template-slot early return");
+});
+
 test("liquid injection opens and composes its tile-population journal", () => {
   const begin = host.indexOf("Sparse CM12 resident liquid injection topology");
   const end = host.indexOf("Sparse CM12 resident liquid injection\"", begin + 1);

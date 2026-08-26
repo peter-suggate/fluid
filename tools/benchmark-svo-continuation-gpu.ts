@@ -51,7 +51,7 @@ function denseFixture(maximumDepth: number): {
       } else {
         nodes[base + 4] = INVALID;
         nodes[base + 6] = local;
-        leaves.set([nodeIndex, local * 64, nodes[base], nodes[base + 1]], local * 4);
+        leaves.set([nodeIndex, local * 64, 0, INVALID], local * 4);
       }
     }
   }

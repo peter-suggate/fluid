@@ -223,6 +223,8 @@ async function proveNodeIndexTripwireOnGPU(): Promise<void> {
   leafNodeIndices.forEach((nodeIndex, index) => {
     leafRecords[index * 4] = nodeIndex;
     leafRecords[index * 4 + 1] = index * brickSize ** 3;
+    leafRecords[index * 4 + 2] = 0;
+    leafRecords[index * 4 + 3] = 0xffff_ffff;
   });
   const control = new Uint32Array(32);
   control[0] = nodeCount;
@@ -470,7 +472,7 @@ if (!tripwiresOnly) {
       // overflow rate is the capacity this sweep is most needed for. It also
       // implies both raster arms, which is what production runs on this path.
       const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float",
-        "raster-primary", "macro-hdda", "split", 0, "off", true, true, false, {});
+        "raster-primary", "macro-hdda", "split", 0, true, true, false, {});
       owned.push(renderer);
       await renderer.initialize();
       renderer.setRigidBodyCount(bodies.count);

@@ -22,6 +22,8 @@ export interface EffectiveRendererStatus {
   silhouetteRefinement?: SvoSilhouetteRefinementStatus;
   /** Requested versus effective shadows/AO/GI path. */
   lightingVisibility?: SvoLightingVisibilityStatus;
+  /** Accepted structural leaf census from the live unified SVO publication. */
+  terminalCounts?: Readonly<{ voxel: number; planarBoundary: number }>;
 }
 
 export interface EffectiveRendererConditions {
@@ -43,16 +45,18 @@ export interface EffectiveRendererConditions {
   contractFailure?: string;
   silhouetteRefinement?: SvoSilhouetteRefinementStatus;
   lightingVisibility?: SvoLightingVisibilityStatus;
+  terminalCounts?: Readonly<{ voxel: number; planarBoundary: number }>;
 }
 
 /** Resolve one frame's production renderer without changing simulation state. */
 export function resolveEffectiveRendererStatus(
   conditions: EffectiveRendererConditions,
 ): EffectiveRendererStatus {
-  const status = (renderer: Omit<EffectiveRendererStatus, "silhouetteRefinement" | "lightingVisibility">): EffectiveRendererStatus => ({
+  const status = (renderer: Omit<EffectiveRendererStatus, "silhouetteRefinement" | "lightingVisibility" | "terminalCounts">): EffectiveRendererStatus => ({
     ...renderer,
     ...(conditions.silhouetteRefinement ? { silhouetteRefinement: conditions.silhouetteRefinement } : {}),
     ...(conditions.lightingVisibility ? { lightingVisibility: conditions.lightingVisibility } : {}),
+    ...(conditions.terminalCounts ? { terminalCounts: conditions.terminalCounts } : {}),
   });
   if (conditions.required === false) return status({ state: "not-required" });
   // An absent pipeline means two very different things. Startup and a primary

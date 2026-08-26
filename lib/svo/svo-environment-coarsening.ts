@@ -22,13 +22,13 @@
  * ---------------------------------------------------------------------------
  * The rule
  * ---------------------------------------------------------------------------
- * A primitive is never drawn at a voxel coarser than its own smallest feature
- * divided by {@link SVO_ENVIRONMENT_FEATURE_VOXELS}. The floor slab's smallest
- * feature is its thickness, the lamp stem's is its diameter, and each one gets
- * the level that resolves it — so the plate coarsens and the fixture beside it
- * does not. Nodes no authored solid reaches terminate at the coarsest level the
- * planner is allowed to offer, which costs nothing at all: they are air, and an
- * air voxel samples the same at any size.
+ * A primitive is never drawn at a voxel coarser than the smallest feature the
+ * voxel payload still owns divided by {@link SVO_ENVIRONMENT_FEATURE_VOXELS}.
+ * For ordinary solids that is the geometric minimum. For an admitted planar
+ * terminal the exact record owns thickness, so the payload owns only its
+ * smaller in-plane feature. The floor therefore coarsens while a lamp stem
+ * beside it does not. Nodes no authored solid reaches terminate at the coarsest
+ * offered level.
  *
  * The size is the *primitive's*, not its bounding box's. A rotated capsule's
  * box is larger than the capsule and a cone's box says nothing about its
@@ -64,18 +64,14 @@
  */
 import type { EnvironmentProxyPrimitive } from "../core/voxel-environments";
 import { SPARSE_BRICK_GPU_LAYOUT, type SparseBrickCoordinate } from "./sparse-brick-octree";
+import { isSvoPlanarBoundaryProxy } from "./svo-planar-boundary";
 
 /**
  * Voxels the smallest feature of an authored solid must span.
  *
- * Four, which is two on each side of the surface. Below that a slab is one or
- * two voxels thick and the six-axis face normal the primary shades with has
- * nothing to read: a two-voxel plate quantises to one or three depending on
- * where its faces fall, and the difference between those is visible as a change
- * in the plate's *thickness* rather than in its detail. Four is also where the
- * stage floor lands on the rung its own composition implies — a 0.69 m slab on
- * a 25 mm lattice takes 100 mm voxels, which is the size the same set is drawn
- * at around a tank a tenth of the size.
+ * Four samples across an unresolved feature. Planar terminals do not apply it
+ * to thickness: their exact slab record carries both faces independent of the
+ * leaf's voxel width.
  *
  * Not a quality slider. Raising it costs leaves everywhere and changes no
  * silhouette; lowering it puts authored solids under the sampling floor of the
@@ -84,7 +80,7 @@ import { SPARSE_BRICK_GPU_LAYOUT, type SparseBrickCoordinate } from "./sparse-br
 export const SVO_ENVIRONMENT_FEATURE_VOXELS = 4;
 
 /**
- * The smallest feature an authored solid has, in metres.
+ * The smallest feature still represented by voxels, in metres.
  *
  * Read off the primitive's own parameters rather than its AABB, because the box
  * is an extent and this is a *size*: a rotated capsule's box is larger than the
@@ -100,8 +96,13 @@ export const SVO_ENVIRONMENT_FEATURE_VOXELS = 4;
  */
 export function environmentProxyFeatureSize_m(primitive: EnvironmentProxyPrimitive): number {
   switch (primitive.kind) {
-    case "box":
-      return 2 * Math.min(primitive.halfSize_m.x, primitive.halfSize_m.y, primitive.halfSize_m.z);
+    case "box": {
+      const dimensions = [primitive.halfSize_m.x, primitive.halfSize_m.y,
+        primitive.halfSize_m.z].sort((left, right) => left - right);
+      // A promoted slab retains its thin dimension analytically. Its resolution
+      // floor is therefore the smaller in-plane feature, not thickness.
+      return 2 * (isSvoPlanarBoundaryProxy(primitive) ? dimensions[1] : dimensions[0]);
+    }
     case "cylinder":
       return 2 * Math.min(primitive.radius_m, primitive.halfHeight_m);
     case "ellipsoid":

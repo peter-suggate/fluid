@@ -1,4 +1,8 @@
-import { SPARSE_BRICK_INVALID_INDEX, type SparseBrickSize } from "./sparse-brick-octree";
+import {
+  SPARSE_BRICK_INVALID_INDEX,
+  type SparseBrickLeafTerminalKind,
+  type SparseBrickSize,
+} from "./sparse-brick-octree";
 
 /** Three-component world-space value. */
 export type SvoVec3 = readonly [number, number, number];
@@ -30,8 +34,9 @@ export interface SvoRayInterval {
  * is `firstChild + popcount(childMask & ((1 << o) - 1))`.
  *
  * `leaves` contains four u32 words per leaf:
- * `[nodeIndex, voxelOffset, mortonLo, mortonHi]`. Payload voxels begin at
- * `voxelOffset` and retain the existing x-major brick-local addressing.
+ * `[nodeIndex, voxelOffset, terminalKind, terminalIndex]`. Payload voxels begin
+ * at `voxelOffset` for kind zero and retain x-major brick-local addressing;
+ * other kinds resolve `terminalIndex` through their accepted scene record.
  * Published counts must be supplied when the arrays are capacity-sized rather
  * than tightly packed, so traversal never reads unpublished storage.
  */
@@ -110,6 +115,8 @@ export interface SvoLeafHit extends SvoRayInterval {
   level: number;
   /** Node coordinate in its own level's brick lattice. */
   coordinate: readonly [number, number, number];
+  terminalKind: SparseBrickLeafTerminalKind;
+  terminalIndex: number;
   bounds: SvoAabb;
 }
 
@@ -395,6 +402,8 @@ export function traversePackedSvo(
           voxelOffset: topology.leaves[leafBase + 1],
           level,
           coordinate: decodeMorton(topology.nodes[base], topology.nodes[base + 1], level),
+          terminalKind: topology.leaves[leafBase + 2] as SparseBrickLeafTerminalKind,
+          terminalIndex: topology.leaves[leafBase + 3],
           bounds,
           tEnter: current.tEnter,
           tExit: current.tExit,
@@ -476,6 +485,8 @@ const SVO_STATUS_STACK_OVERFLOW: u32 = 3u;
 const SVO_STATUS_SOURCE_OVERFLOW: u32 = 4u;
 const SVO_STATUS_INVALID_TOPOLOGY: u32 = 5u;
 const SVO_STATUS_CONTINUE: u32 = 6u;
+const SVO_LEAF_TERMINAL_VOXELS: u32 = 0u;
+const SVO_LEAF_TERMINAL_PLANAR_BOUNDARY: u32 = 1u;
 const SVO_STACK_CAPACITY: u32 = 32u;
 const SVO_MAX_VISITS: u32 = 256u;
 

@@ -253,8 +253,6 @@ export interface SvoRenderTuning {
   readonly environmentPlanarRefinementExemption: boolean;
   readonly coneLightingScale: SvoConeLightingScale;
   readonly coneRadianceReconstruction: SvoConeRadianceReconstruction;
-  /** Reuse an exact primary G-buffer while an eligible camera and scene remain unchanged. */
-  readonly stationaryPrimaryReuseEnabled: boolean;
   /** Which predicate stops the descent. See `SvoLodMode`. */
   readonly lodMode: SvoLodMode;
   /**
@@ -352,21 +350,6 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   // relighting preserves material and edge detail at either reduced rate.
   coneLightingScale: 0.5,
   coneRadianceReconstruction: "full-res-relight",
-  // On. The reused plane is the traced plane, byte for byte: on
-  // `water-box-dam-break` the scale-1 G-buffer hashes are identical across the
-  // arm — packedSurface 0x4340f762, identityMedia 0x91647960, hardwareDepth
-  // 0x65bab534 with reuse off and with it on — so this is a skipped
-  // recomputation rather than an approximation of one, and there is no image
-  // to trade away for the time.
-  //
-  // What it costs is the whole primary band, which is 46% of the frame at both
-  // resolutions measured (2026-08-20, dry-frame lane, Dawn/Metal): 13.63 ->
-  // 7.34 ms at 1791x904 and 25.95 -> 14.09 ms at 2488x1256. The key is the
-  // safety, not this flag — camera, viewport, scene epoch, body roster,
-  // selection, hover, tuning and withheld stages all invalidate it — so the
-  // flag was only ever protecting against the key being wrong, and the arm it
-  // was protecting is the one every acceptance lane already renders.
-  stationaryPrimaryReuseEnabled: true,
   lodMode: "screen-space",
   // Off by default.
   //
@@ -560,11 +543,6 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     environmentPlanarRefinementExemption: Boolean(value.environmentPlanarRefinementExemption),
     coneLightingScale,
     coneRadianceReconstruction,
-    // `??`, not `Boolean`: this is the one boolean here that defaults on, so a
-    // stored tuning written before the field existed must fall back to the
-    // default rather than to `false`. An explicit `false` still survives.
-    stationaryPrimaryReuseEnabled: value.stationaryPrimaryReuseEnabled
-      ?? DEFAULT_SVO_RENDER_TUNING.stationaryPrimaryReuseEnabled,
     lodMode: value.lodMode === "fixed-level" ? "fixed-level" : "screen-space",
     // Not `integer`: the threshold is a continuous angular measure, and rounding
     // it would quantise the one control that sweeps the quality/cost curve.

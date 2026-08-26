@@ -5,6 +5,14 @@ import type { SparseAdaptiveMassAtlas } from
 import type { SparseCM12RigidResources } from
   "../../methods/adaptive-mass/webgpu-sparse-cm12-rigid-coupling";
 import type { SolidWorld } from "../../core/solid-world";
+import { solidWorldForScene } from "../../core/solid-world";
+import {
+  refinementRegionLattice,
+  sceneRefinementRegions,
+} from "../../core/refinement-regions";
+import type { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
+import { packSparseCM12RefinementRegions } from
+  "../../methods/adaptive-mass/sparse-cm12-refinement-regions";
 import {
   WebGPUSparseCM12Resident,
   type SharpeningTrace,
@@ -19,6 +27,8 @@ import {
 import type {
   SparseWorld,
   SparseWorldDevice,
+  SparseWorldEdit,
+  SparseWorldEditReceipt,
   SparseWorldFault,
   SparseWorldPresentation,
   SparseWorldStatus,
@@ -30,6 +40,8 @@ import type {
   SparseWorldUIDiagnostics,
   SparseWorldUIOverlays,
 } from "../index";
+
+type SparseWorldFluidEdit = Exclude<SparseWorldEdit, { readonly kind: "set-scene" }>;
 import {
   CM12SparseWorldDevice,
   type CM12ResidentLibraryReadiness,
@@ -38,15 +50,15 @@ import {
 export interface CM12SparseWorldStepConfiguration {
   readonly finestCellSize_m: number;
   readonly pressureScale: number;
+  /** World-space origin of fine cell zero. Defaults to `[0, 0, 0]`. */
+  readonly origin_m?: readonly [number, number, number];
   /** Defaults to `input.gravity / finestCellSize_m`. */
   readonly accelerationFinePerSecond2?: readonly [number, number, number];
   readonly sharpening?: SharpeningTrace;
   readonly activityPolicy?: SparseCM12ActivityPolicy;
   readonly pressureControl?: SparseCM12PressureControl;
   readonly seams?: SparseCM12ResidentStageSeams;
-  readonly bodyCount?: number;
   readonly worldDimensions_m?: readonly [number, number, number];
-  readonly inflow?: SparseCM12InflowControl;
 }
 
 export type CM12SparseWorldNumerics =
@@ -54,10 +66,13 @@ export type CM12SparseWorldNumerics =
   | ((input: SparseWorldStepInput) => CM12SparseWorldStepConfiguration);
 
 interface AdoptCM12SparseWorldOptions {
+  readonly gpuDevice: GPUDevice;
   readonly numerics: CM12SparseWorldNumerics;
   readonly residentTiles: number;
   readonly capacityTiles: number;
   readonly trace?: SparseWorldTrace;
+  readonly rigidSystem?: WebGPURigidBodySystem;
+  readonly rigidExchange?: GPUBuffer;
 }
 
 export type CM12SparseWorldResidentFactoryMode =
@@ -74,6 +89,7 @@ export interface CM12SparseWorldFactoryConfig {
   readonly trace?: SparseWorldTrace;
   readonly initiallyActiveBrickKeys?: ReadonlySet<number>;
   readonly rigid?: SparseCM12RigidResources;
+  readonly rigidSystem?: WebGPURigidBodySystem;
   readonly journal?: SparseCM12PressureJournalCapacityRequest;
   readonly presentationPageResolution?: SparseCM12PresentationPageResolution;
   readonly report?: SparseCM12ResidentInitializationReporter;
@@ -111,23 +127,7 @@ export interface CM12SparseWorldRuntime {
   readTracers(): ReturnType<WebGPUSparseCM12Resident["readTracers"]>;
   armPressureJournal(armed: boolean): boolean;
   readPressureJournal(): ReturnType<WebGPUSparseCM12Resident["readPressureJournal"]>;
-  setSolidWorld(world: SolidWorld): void;
-  setRefinementRegionParameters(parameters: ArrayBuffer): void;
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number): void;
-  encodeLiquidInjection(
-    encoder: GPUCommandEncoder,
-    finestCellSize_m: number,
-    centerFine: readonly [number, number, number],
-    radiusFine: readonly [number, number, number],
-  ): void;
-  encodeLiquidJetInjection(
-    encoder: GPUCommandEncoder,
-    finestCellSize_m: number,
-    outletFine: readonly [number, number, number],
-    radiusFine: number,
-    velocityFinePerSecond: readonly [number, number, number],
-    dt_s: number,
-  ): void;
   encodePressureIterationReceipt(
     encoder: GPUCommandEncoder,
     destination: GPUBuffer,
@@ -218,6 +218,83 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     });
   }
 
+  edit(edit: SparseWorldEdit): SparseWorldEditReceipt {
+    if (this.destroyed) {
+      const error = new Error("Sparse world has been destroyed");
+      this.publishFault("world-destroyed", error);
+      throw error;
+    }
+    if (edit.kind === "set-scene") {
+      if (edit.scene.rigidBodies.length > 0 && !this.options.rigidSystem) {
+        return Object.freeze({
+          disposition: "rebuild-required",
+          acceptedGeneration: this.generation,
+          reason: "this world was created without rigid-body coupling storage",
+        });
+      }
+      try {
+        this.resident.setSolidWorld(solidWorldForScene(edit.scene));
+        this.resident.setRefinementRegionParameters(packSparseCM12RefinementRegions(
+          sceneRefinementRegions(edit.scene), refinementRegionLattice(edit.scene)));
+        this.options.rigidSystem?.setScene(edit.scene);
+        this.generation += 1;
+        this.state = "running";
+        return Object.freeze({
+          disposition: "applied",
+          acceptedGeneration: this.generation,
+        });
+      } catch (error) {
+        this.publishFault("internal", error);
+        throw error;
+      }
+    }
+    try {
+      const interaction = this.validInteraction(edit);
+      const configuration = typeof this.options.numerics === "function"
+        ? this.options.numerics({
+          time: this.lastAcceptedTime,
+          dt: 0.004,
+          gravity: [0, 0, 0],
+        }) : this.options.numerics;
+      const inverseCell = 1 / configuration.finestCellSize_m;
+      const origin = configuration.origin_m ?? [0, 0, 0];
+      const encoder = this.options.gpuDevice.createCommandEncoder({
+        label: "Sparse-world liquid interaction",
+      });
+      if (interaction.kind === "liquid-ellipsoid") {
+        this.resident.encodeLiquidInjection(
+          encoder,
+          configuration.finestCellSize_m,
+          interaction.center_m.map((value, axis) =>
+            (value - origin[axis]!) * inverseCell) as [number, number, number],
+          interaction.radii_m.map((value) => value * inverseCell) as
+            [number, number, number],
+        );
+      } else {
+        this.resident.encodeLiquidJetInjection(
+          encoder,
+          configuration.finestCellSize_m,
+          interaction.outlet_m.map((value, axis) =>
+            (value - origin[axis]!) * inverseCell) as [number, number, number],
+          interaction.radius_m * inverseCell,
+          interaction.velocity_m_s.map((value) => value * inverseCell) as
+            [number, number, number],
+          interaction.dt,
+        );
+      }
+      this.options.gpuDevice.queue.submit([encoder.finish()]);
+      this.generation += 1;
+      this.state = "running";
+      return Object.freeze({
+        disposition: "applied",
+        acceptedGeneration: this.generation,
+      });
+    } catch (error) {
+      this.publishFault("invalid-interaction", error);
+      throw error;
+    }
+  }
+
   encodeStep(encoder: GPUCommandEncoder, input: SparseWorldStepInput): SparseWorldStep {
     if (this.destroyed) {
       const error = new Error("Sparse world has been destroyed");
@@ -232,25 +309,25 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     const configuration = typeof this.options.numerics === "function"
       ? this.options.numerics(input) : this.options.numerics;
     try {
-      for (const interaction of input.interactions) {
-        if (interaction.kind !== "liquid-ellipsoid") {
-          throw new Error(`Unsupported sparse-world interaction: ${interaction.kind}`);
-        }
-        const inverseCell = 1 / configuration.finestCellSize_m;
-        this.resident.encodeLiquidInjection(
-          encoder,
-          configuration.finestCellSize_m,
-          interaction.center_m.map((value) => value * inverseCell) as
-            [number, number, number],
-          interaction.radii_m.map((value) => value * inverseCell) as
-            [number, number, number],
-        );
-      }
       const acceleration = configuration.accelerationFinePerSecond2 ?? [
         input.gravity[0] / configuration.finestCellSize_m,
         input.gravity[1] / configuration.finestCellSize_m,
         input.gravity[2] / configuration.finestCellSize_m,
       ] as const;
+      const rigidBodies = input.rigidBodies ?? [];
+      const inverseCell = 1 / configuration.finestCellSize_m;
+      const origin = configuration.origin_m ?? [0, 0, 0];
+      const inflow: SparseCM12InflowControl | undefined = input.liquidInflow
+        ? {
+          outletFine: input.liquidInflow.outlet_m.map((value, axis) =>
+            (value - origin[axis]!) * inverseCell) as [number, number, number],
+          radiusFine: input.liquidInflow.radius_m * inverseCell,
+          velocityFinePerSecond: input.liquidInflow.velocity_m_s.map(
+            (value) => value * inverseCell,
+          ) as [number, number, number],
+        } : undefined;
+      this.options.rigidSystem?.syncBodies(rigidBodies);
+      if (this.options.rigidExchange) encoder.clearBuffer(this.options.rigidExchange);
       this.resident.encode(
         encoder,
         input.dt,
@@ -261,9 +338,16 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         configuration.activityPolicy,
         configuration.pressureControl,
         configuration.seams,
-        configuration.bodyCount,
+        rigidBodies.length,
         configuration.worldDimensions_m,
-        configuration.inflow,
+        inflow,
+      );
+      this.options.rigidSystem?.encode(
+        encoder,
+        input.dt,
+        configuration.finestCellSize_m ** 3,
+        1,
+        configuration.finestCellSize_m,
       );
       this.generation += 1;
       this.lastAcceptedTime = input.time;
@@ -314,6 +398,47 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     this.state = "fault";
     this.options.trace?.record({ kind: "fault", fault: this.currentFault });
   }
+
+  private validInteraction(
+    interaction: SparseWorldFluidEdit,
+  ): SparseWorldFluidEdit {
+    if (interaction.kind === "liquid-ellipsoid") {
+      if (interaction.center_m.some((value) => !Number.isFinite(value))
+        || interaction.radii_m.some((value) => !(value > 0) || !Number.isFinite(value))) {
+        throw new RangeError(
+          "Sparse-world liquid ellipsoids require a finite centre and positive radii",
+        );
+      }
+      return Object.freeze({
+        kind: interaction.kind,
+        center_m: Object.freeze([...interaction.center_m]) as
+          readonly [number, number, number],
+        radii_m: Object.freeze([...interaction.radii_m]) as
+          readonly [number, number, number],
+      });
+    }
+    if (interaction.kind === "liquid-jet") {
+      if (interaction.outlet_m.some((value) => !Number.isFinite(value))
+        || interaction.velocity_m_s.some((value) => !Number.isFinite(value))
+        || !(interaction.radius_m > 0) || !Number.isFinite(interaction.radius_m)
+        || !(interaction.dt > 0) || !Number.isFinite(interaction.dt)) {
+        throw new RangeError(
+          "Sparse-world liquid jets require finite vectors, positive radius, and positive dt",
+        );
+      }
+      return Object.freeze({
+        kind: interaction.kind,
+        outlet_m: Object.freeze([...interaction.outlet_m]) as
+          readonly [number, number, number],
+        radius_m: interaction.radius_m,
+        velocity_m_s: Object.freeze([...interaction.velocity_m_s]) as
+          readonly [number, number, number],
+        dt: interaction.dt,
+      });
+    }
+    throw new Error(`Unsupported sparse-world interaction: ${
+      String((interaction as { kind?: unknown }).kind)}`);
+  }
 }
 
 class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
@@ -338,23 +463,8 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   readTracers() { return this.resident.readTracers(); }
   armPressureJournal(armed: boolean) { return this.resident.armPressureJournal(armed); }
   readPressureJournal() { return this.resident.readPressureJournal(); }
-  setSolidWorld(world: SolidWorld) { this.resident.setSolidWorld(world); }
-  setRefinementRegionParameters(parameters: ArrayBuffer) {
-    this.resident.setRefinementRegionParameters(parameters);
-  }
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number) {
     this.resident.encodeInitialPresentation(encoder, finestCellSize_m);
-  }
-  encodeLiquidInjection(encoder: GPUCommandEncoder, finestCellSize_m: number,
-    centerFine: readonly [number, number, number],
-    radiusFine: readonly [number, number, number]) {
-    this.resident.encodeLiquidInjection(encoder, finestCellSize_m, centerFine, radiusFine);
-  }
-  encodeLiquidJetInjection(encoder: GPUCommandEncoder, finestCellSize_m: number,
-    outletFine: readonly [number, number, number], radiusFine: number,
-    velocityFinePerSecond: readonly [number, number, number], dt_s: number) {
-    this.resident.encodeLiquidJetInjection(encoder, finestCellSize_m, outletFine,
-      radiusFine, velocityFinePerSecond, dt_s);
   }
   encodePressureIterationReceipt(encoder: GPUCommandEncoder, destination: GPUBuffer) {
     this.resident.encodePressureIterationReceipt(encoder, destination);
@@ -473,7 +583,7 @@ export async function createCM12SparseWorld(
     config.atlas,
     config.grid,
     typeof config.numerics === "function"
-      ? config.numerics({ time: 0, dt: 0.004, gravity: [0, 0, 0], interactions: [] })
+      ? config.numerics({ time: 0, dt: 0.004, gravity: [0, 0, 0] })
         .finestCellSize_m
       : config.numerics.finestCellSize_m,
     config.solidWorld,
@@ -506,11 +616,14 @@ export async function createCM12SparseWorld(
     journal: config.journal !== undefined,
   });
   const world = new AdoptedCM12SparseWorld(resident, {
+    gpuDevice: config.device,
     numerics: config.numerics,
     residentTiles: config.residentTiles ?? active.size,
     capacityTiles: config.capacityTiles
       ?? resident.globalFineLevelSetSource.plan.maximumResidentBricks,
     trace: config.trace,
+    rigidSystem: config.rigidSystem,
+    rigidExchange: config.rigid?.exchange,
   }, sparseDevice);
   const runtime = new AdoptedCM12SparseWorldRuntime(resident, readiness);
   return Object.freeze({

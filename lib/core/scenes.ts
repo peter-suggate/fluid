@@ -1858,6 +1858,16 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: () => {
       const scene = sceneBody();
       scene.rigidBodies = [];
+      // Give the canonical B8 Sparse CM12 layout one genuinely featureless
+      // wet corner page. The legacy fill-derived reservoir was narrower than
+      // eight finest cells in depth, so every wet page also contained a
+      // liquid-air interface and correctly stayed B8; no wall classifier could
+      // demonstrate physical coarsening without weakening surface fidelity.
+      // This 12x14x10-cell column preserves the familiar corner dam break while
+      // leaving [0,0,0] separated from all three liquid-air faces.
+      scene.fluid.initialDamBreakDimensions_m = { x: 0.6, y: 0.7, z: 0.5 };
+      scene.container.fillFraction = 0.6 * 0.7 * 0.5
+        / (scene.container.width_m * scene.container.height_m * scene.container.depth_m);
       return scene;
     },
     camera: studioStageCamera,

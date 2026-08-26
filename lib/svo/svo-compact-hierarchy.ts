@@ -189,7 +189,9 @@ export function traverseCompactSvo(
       }
       const coordinate = decodeMorton(node.mortonLow, node.mortonHigh, node.level);
       const hit: SvoLeafHit = { nodeIndex: current.nodeIndex, leafIndex, voxelOffset: leaves[leafIndex * 4 + 1],
-        level: node.level, coordinate, bounds: boundsFor(node, mapping), tEnter: current.tEnter, tExit: current.tExit };
+        terminalKind: leaves[leafIndex * 4 + 2] as SvoLeafHit["terminalKind"],
+        terminalIndex: leaves[leafIndex * 4 + 3], level: node.level, coordinate,
+        bounds: boundsFor(node, mapping), tEnter: current.tEnter, tExit: current.tExit };
       return { status: "hit", visits, hit };
     }
     if (node.childMask === 0) continue;

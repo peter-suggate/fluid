@@ -4,10 +4,12 @@ import {
   boxSolidVoxelShell,
   createSolidWorld,
   planSolidWorldMemory,
+  planarBoundaryForSolidWorldVoxelPatch,
   sampleSolidWorld,
   solidWorldForScene,
   solidWorldContentStamp,
   solidWorldPageAddress,
+  solidWorldVoxelPatchBounds_m,
   SolidWorldDirectory,
 } from "../lib/core/solid-world";
 import { sparseCM12FinePresentationPlan } from
@@ -23,6 +25,47 @@ import {
   packSparseCM12SolidOccupancy,
   SPARSE_CM12_SOLID_OCCUPANCY_MAGIC,
 } from "../lib/methods/adaptive-mass/sparse-cm12-solid-occupancy";
+
+test("thin authored tank voxels compile to exact planar slabs", () => {
+  const scene = getScenePreset("bounded-pool-transfer").create();
+  scene.container.width_m = 16;
+  scene.container.height_m = 8.4;
+  scene.container.depth_m = 16.4;
+  scene.voxelDomain.finestCellSize_m = 1;
+  const shell = boxSolidVoxelShell([16, 8, 16]);
+
+  const floor = planarBoundaryForSolidWorldVoxelPatch(scene, shell[0]!);
+  assert.ok(floor);
+  assert.deepEqual(solidWorldVoxelPatchBounds_m(scene, shell[0]!), {
+    minimum: [-8, -1.05, -8.2],
+    maximum: [8, 0, 8.2],
+  });
+  assert.deepEqual(floor.center_m, [0, -0.525, 0]);
+  assert.deepEqual(floor.normal, [0, 1, 0]);
+  assert.deepEqual(floor.tangentU, [1, 0, 0]);
+  assert.deepEqual(floor.tangentV, [0, 0, 1]);
+  assert.equal(floor.halfExtentU_m, 8);
+  assert.equal(floor.halfExtentV_m, 8.2);
+  assert.equal(floor.halfThickness_m, 0.525,
+    "the slab retains one exact anisotropic voxel of thickness");
+
+  const accepted = shell.map((patch) =>
+    planarBoundaryForSolidWorldVoxelPatch(scene, patch));
+  assert.equal(accepted.filter(Boolean).length, 5,
+    "all five open tank faces meet the canonical thin-slab criterion");
+  assert.equal(accepted[1]!.halfThickness_m, 0.5,
+    "the x wall retains its realized x-cell thickness");
+  assert.equal(accepted[1]!.halfExtentU_m, 4.2,
+    "the x wall uses the anisotropic y extent");
+  assert.equal(accepted[1]!.halfExtentV_m, 8.2);
+
+  assert.equal(planarBoundaryForSolidWorldVoxelPatch(scene, {
+    operation: "clear", minimum: [0, 0, 0], maximumExclusive: [16, 1, 16],
+  }), null, "subtractive edits remain residual geometry");
+  assert.equal(planarBoundaryForSolidWorldVoxelPatch(scene, {
+    operation: "fill", minimum: [0, 0, 0], maximumExclusive: [7, 1, 16],
+  }), null, "a box below the exact 8:1 second-axis threshold remains residual");
+});
 
 test("SolidWorld content stamp ignores unrelated scene edits", () => {
   const scene = getScenePreset("bounded-pool-transfer").create();

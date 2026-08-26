@@ -35,7 +35,29 @@ export interface SparseBrickLeafPlan {
   morton: bigint;
   coordinate: SparseBrickCoordinate;
   voxelOffset: number;
+  /** Terminal representation. Zero is a conventional voxel brick. */
+  terminalKind: SparseBrickLeafTerminalKind;
+  /** Kind-specific accepted-record index; invalid for a voxel terminal. */
+  terminalIndex: number;
 }
+
+export const SPARSE_BRICK_LEAF_TERMINAL = Object.freeze({
+  voxels: 0,
+  planarBoundary: 1,
+} as const);
+
+export type SparseBrickLeafTerminalKind =
+  typeof SPARSE_BRICK_LEAF_TERMINAL[keyof typeof SPARSE_BRICK_LEAF_TERMINAL];
+
+export interface SparseBrickLeafTerminal {
+  readonly kind: SparseBrickLeafTerminalKind;
+  readonly index: number;
+}
+
+export const SPARSE_BRICK_VOXEL_TERMINAL: SparseBrickLeafTerminal = Object.freeze({
+  kind: SPARSE_BRICK_LEAF_TERMINAL.voxels,
+  index: 0xffff_ffff,
+});
 
 export interface SparseBrickPlan {
   brickSize: SparseBrickSize;
@@ -1405,7 +1427,12 @@ export function planSparseBrickOctree(
       const node = nodes[nodeIndex];
       const index = leaves.length;
       node.leafIndex = index;
-      leaves.push({ index, nodeIndex, morton: node.morton, coordinate: node.coordinate, voxelOffset: index * voxelCountPerBrick });
+      leaves.push({
+        index, nodeIndex, morton: node.morton, coordinate: node.coordinate,
+        voxelOffset: index * voxelCountPerBrick,
+        terminalKind: SPARSE_BRICK_VOXEL_TERMINAL.kind,
+        terminalIndex: SPARSE_BRICK_VOXEL_TERMINAL.index,
+      });
     }
   }
   return {
@@ -1421,7 +1448,7 @@ export function planSparseBrickOctree(
 export interface PackedSparseBrickPlan {
   /** Eight u32 words per node: key lo/hi, level, child mask, first child, child count, leaf, flags. */
   nodes: Uint32Array<ArrayBuffer>;
-  /** Four u32 words per leaf: node, voxel offset, key lo/hi. */
+  /** Four u32 words per leaf: node, voxel offset, terminal kind, terminal record index. */
   leaves: Uint32Array<ArrayBuffer>;
   /** Nodes followed immediately by leaves; preferred by the portable eight-storage-binding publication path. */
   topology: Uint32Array<ArrayBuffer>;
@@ -1443,8 +1470,15 @@ export function packSparseBrickPlan(plan: SparseBrickPlan, generation = 0): Pack
   }
   const leafWords = new Uint32Array(plan.leaves.length * 4);
   for (const leaf of plan.leaves) {
-    const [low, high] = splitMorton(leaf.morton);
-    leafWords.set([leaf.nodeIndex, leaf.voxelOffset, low, high], leaf.index * 4);
+    if ((leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.voxels
+      && leaf.terminalIndex !== SPARSE_BRICK_INVALID_INDEX)
+      || (leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary
+        && leaf.terminalIndex === SPARSE_BRICK_INVALID_INDEX)) {
+      throw new RangeError(`Sparse brick leaf ${leaf.index} has an invalid terminal record`);
+    }
+    leafWords.set([
+      leaf.nodeIndex, leaf.voxelOffset, leaf.terminalKind, leaf.terminalIndex,
+    ], leaf.index * 4);
   }
   const topology = new Uint32Array(nodeWords.length + leafWords.length);
   topology.set(nodeWords); topology.set(leafWords, nodeWords.length);
@@ -1927,8 +1961,9 @@ fn materializeDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(nu
   let leafBase = control[16] + leafIndex * 4u;
   let nodeIndex = topology[leafBase];
   let voxelOffset = topology[leafBase + 1u];
-  let level = topology[nodeIndex * 8u + 2u];
-  let brick = decodeMorton(topology[leafBase + 2u], topology[leafBase + 3u], level);
+  let nodeBase = nodeIndex * 8u;
+  let level = topology[nodeBase + 2u];
+  let brick = decodeMorton(topology[nodeBase], topology[nodeBase + 1u], level);
   var scale = 1u;
   let finest = finestLevel();
   if (finest != 0x7fffffffu && finest > level) { scale = 1u << (finest - level); }

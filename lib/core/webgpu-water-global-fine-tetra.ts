@@ -243,6 +243,7 @@ const factorOneFilteredNormalShader = /* wgsl */ `
 @group(0)@binding(12)var<storage,read>metadata:array<u32>;
 ${makeOctreePowerCoarseLevelSetSampleWGSL(16)}
 const INVALID:u32=0xffffffffu;
+fn signedSparseAddressing()->bool{return (fineWorklist[3]&0x40000000u)!=0u;}
 ${fineLevelSetPackedSampleWGSL("fineSamples", false)}
 fn finitePhi(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn finePage(key:u32)->u32{
@@ -280,28 +281,47 @@ fn compactSourceSpanLog(source:u32)->u32{
   }
   return source>>27u;
 }
-fn compactSampleAddress(q:vec3u)->vec2u{
-  let r=max(1u,p.sample.w);let pageCoordinate=q/r;
-  let exactKey=pageCoordinate.x+p.bricks.x*(pageCoordinate.y+p.bricks.y*pageCoordinate.z);
+fn compactFloorDiv(q:vec3i,divisor:i32)->vec3i{
+  var adjusted=q;for(var axis=0u;axis<3u;axis+=1u){
+    if(adjusted[axis]<0){adjusted[axis]-=divisor-1;}}
+  return adjusted/divisor;
+}
+fn compactSignedPageKey(page:vec3i)->u32{
+  if(page.x< -1024||page.x>1023||page.y<0||page.y>1023
+    ||page.z< -1024||page.z>1022){return INVALID;}
+  return u32(page.x+1024)|(u32(page.y)<<11u)|(u32(page.z+1024)<<21u);
+}
+fn compactPageKey(page:vec3i)->u32{
+  if(signedSparseAddressing()){return compactSignedPageKey(page);}
+  if(any(page<vec3i(0))||any(page>=vec3i(p.bricks.xyz))){return INVALID;}
+  let q=vec3u(page);return q.x+p.bricks.x*(q.y+p.bricks.y*q.z);
+}
+fn compactSampleAddress(q:vec3i)->vec2u{
+  let r=max(1u,p.sample.w);
+  let pageCoordinate=compactFloorDiv(q,i32(r));
+  let exactKey=compactPageKey(pageCoordinate);
+  if(exactKey==INVALID){return vec2u(INVALID);}
   let exact=finePage(exactKey);
   if(exact!=INVALID){
-    if((fineWorklist[3]&0x80000000u)==0u){let local=q-pageCoordinate*r;
+    if((fineWorklist[3]&0x80000000u)==0u){let local=vec3u(q-pageCoordinate*i32(r));
       return vec2u(exact,local.x+r*(local.y+r*local.z));}
     let spanLog=compactSourceSpanLog(metadata[4u*exact+3u]);
-    if(spanLog==0u){let local=q-pageCoordinate*r;
+    if(spanLog==0u){let local=vec3u(q-pageCoordinate*i32(r));
       return vec2u(exact,local.x+r*(local.y+r*local.z));}
-    let scale=compactPagesPerSolverAxis()*(1u<<spanLog);let origin=pageCoordinate*r;
-    let local=min((q-origin)/scale,vec3u(r-1u));
+    let scale=compactPagesPerSolverAxis()*(1u<<spanLog);
+    let origin=pageCoordinate*i32(r);
+    let local=min(vec3u((q-origin)/i32(scale)),vec3u(r-1u));
     return vec2u(exact,local.x+r*(local.y+r*local.z));
   }
   let maximumSpanLog=(fineWorklist[3]>>8u)&31u;
   for(var spanLog=1u;spanLog<=maximumSpanLog;spanLog+=1u){
     let span=1u<<spanLog;let pageSpan=compactPagesPerSolverAxis()*span;
-    let originPage=(pageCoordinate/pageSpan)*pageSpan;
-    let key=originPage.x+p.bricks.x*(originPage.y+p.bricks.y*originPage.z);
+    let originPage=compactFloorDiv(pageCoordinate,i32(pageSpan))*i32(pageSpan);
+    let key=compactPageKey(originPage);if(key==INVALID){continue;}
     let id=finePage(key);if(id==INVALID){continue;}
     if(compactSourceSpanLog(metadata[4u*id+3u])!=spanLog){continue;}
-    let origin=originPage*r;let local=min((q-origin)/pageSpan,vec3u(r-1u));
+    let origin=originPage*i32(r);
+    let local=min(vec3u((q-origin)/i32(pageSpan)),vec3u(r-1u));
     return vec2u(id,local.x+r*(local.y+r*local.z));
   }
   return vec2u(INVALID);
@@ -320,7 +340,11 @@ fn signedPhi(qi:vec3i)->f32{
     let q=clamp(qi,vec3i(0),dims);
     return sampleAdaptiveCoarseOctreePhiAtGrid(vec3f(q));
   }
-  let q=vec3u(clamp(qi,vec3i(0),dims-vec3i(1)));
+  // Only the dense publication has an in-domain sample worth repeating. A
+  // signed sparse page legitimately sits outside [0,dims), so clamping there
+  // would fold a frontier vertex onto an unrelated page instead of extending
+  // the field; its own lookup already reports a miss where there is no page.
+  let q=select(clamp(qi,vec3i(0),dims-vec3i(1)),qi,signedSparseAddressing());
   let address=compactSampleAddress(q);
   if(address.x!=INVALID){
     let index=address.x*p.bricks.w+address.y;
@@ -404,13 +428,13 @@ struct U{viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,
 @group(0)@binding(0)var<uniform>u:U;@group(0)@binding(3)var<storage,read_write>out:array<V>;@group(0)@binding(4)var<storage,read_write>args:A;@group(0)@binding(5)var<storage,read>cubes:array<vec2u>;@group(0)@binding(6)var<storage,read>values:array<vec4f>;@group(0)@binding(7)var<storage,read_write>offsets:array<u32>;@group(0)@binding(10)var<uniform>p:P;
 ${factorOneFilteredNormalShader}
 ${globalFineCubeContourWGSL}
-fn signedSparseAddressing()->bool{return (fineWorklist[3]&0x40000000u)!=0u;}fn unpackSigned16(word:u32)->i32{return bitcast<i32>((word&0xffffu)<<16u)>>16;}fn domainCell()->vec3f{let dims=max(vec3f(p.sample.xyz),vec3f(1));return select(u.container.xyz/dims,p.sizing.xyz,all(p.sizing.xyz>vec3f(0)));}fn domainOrigin()->vec3f{return select(vec3f(-.5*u.container.x,0.,-.5*u.container.z),p.physical.xyz,all(p.sizing.xyz>vec3f(0)));}fn world(q:vec3f)->vec3f{let dims=vec3f(p.sample.xyz);let bounded=select(clamp(q,vec3f(.5),dims+vec3f(.5)),q,signedSparseAddressing());return domainOrigin()+(bounded-vec3f(.5))*domainCell();}fn edge(x:vec3f,y:vec3f,a:f32,b:f32)->vec3f{return mix(x,y,clamp((.5-a)/(b-a),0.,1.));}fn countTet(a:f32,b:f32,c:f32,d:f32)->u32{let n=select(0u,1u,a>=.5)+select(0u,1u,b>=.5)+select(0u,1u,c>=.5)+select(0u,1u,d>=.5);if(n==0u||n==4u){return 0u;}return select(3u,6u,n==2u);}
+fn unpackSigned16(word:u32)->i32{return bitcast<i32>((word&0xffffu)<<16u)>>16;}fn domainCell()->vec3f{let dims=max(vec3f(p.sample.xyz),vec3f(1));return select(u.container.xyz/dims,p.sizing.xyz,all(p.sizing.xyz>vec3f(0)));}fn domainOrigin()->vec3f{return select(vec3f(-.5*u.container.x,0.,-.5*u.container.z),p.physical.xyz,all(p.sizing.xyz>vec3f(0)));}fn world(q:vec3f)->vec3f{let dims=vec3f(p.sample.xyz);let bounded=select(clamp(q,vec3f(.5),dims+vec3f(.5)),q,signedSparseAddressing());return domainOrigin()+(bounded-vec3f(.5))*domainCell();}fn edge(x:vec3f,y:vec3f,a:f32,b:f32)->vec3f{return mix(x,y,clamp((.5-a)/(b-a),0.,1.));}fn countTet(a:f32,b:f32,c:f32,d:f32)->u32{let n=select(0u,1u,a>=.5)+select(0u,1u,b>=.5)+select(0u,1u,c>=.5)+select(0u,1u,d>=.5);if(n==0u||n==4u){return 0u;}return select(3u,6u,n==2u);}
 fn tri(cursor:ptr<function,u32>,a:vec3f,b:vec3f,c:vec3f,n:vec3f,filterEnabled:bool){let first=*cursor;*cursor=first+3u;let limit=min(atomicLoad(&args.vertexCount),arrayLength(&out));if(first+3u>limit){return;}let x=V(vec4f(world(a),1),vec4f(filteredNormalAt(a,n,filterEnabled),0));let y=V(vec4f(world(b),1),vec4f(filteredNormalAt(b,n,filterEnabled),0));let z=V(vec4f(world(c),1),vec4f(filteredNormalAt(c,n,filterEnabled),0));out[first]=x;if(dot(cross(y.position.xyz-x.position.xyz,z.position.xyz-x.position.xyz),n)>=0.){out[first+1u]=y;out[first+2u]=z;}else{out[first+1u]=z;out[first+2u]=y;}}
 fn tet(cursor:ptr<function,u32>,pa:vec3f,pb:vec3f,pc:vec3f,pd:vec3f,va:f32,vb:f32,vc:f32,vd:f32,n:vec3f,filterEnabled:bool){let m=select(0u,1u,va>=.5)|select(0u,2u,vb>=.5)|select(0u,4u,vc>=.5)|select(0u,8u,vd>=.5);if(m==1u||m==14u){tri(cursor,edge(pa,pb,va,vb),edge(pa,pc,va,vc),edge(pa,pd,va,vd),n,filterEnabled);}else if(m==2u||m==13u){tri(cursor,edge(pb,pa,vb,va),edge(pb,pd,vb,vd),edge(pb,pc,vb,vc),n,filterEnabled);}else if(m==4u||m==11u){tri(cursor,edge(pc,pa,vc,va),edge(pc,pb,vc,vb),edge(pc,pd,vc,vd),n,filterEnabled);}else if(m==8u||m==7u){tri(cursor,edge(pd,pa,vd,va),edge(pd,pc,vd,vc),edge(pd,pb,vd,vb),n,filterEnabled);}else if(m==3u||m==12u){let ac=edge(pa,pc,va,vc);let ad=edge(pa,pd,va,vd);let bc=edge(pb,pc,vb,vc);let bd=edge(pb,pd,vb,vd);tri(cursor,ac,bc,bd,n,filterEnabled);tri(cursor,ac,bd,ad,n,filterEnabled);}else if(m==5u||m==10u){let ab=edge(pa,pb,va,vb);let ad=edge(pa,pd,va,vd);let cb=edge(pc,pb,vc,vb);let cd=edge(pc,pd,vc,vd);tri(cursor,ab,cb,cd,n,filterEnabled);tri(cursor,ab,cd,ad,n,filterEnabled);}else if(m==6u||m==9u){let ba=edge(pb,pa,vb,va);let bd=edge(pb,pd,vb,vd);let ca=edge(pc,pa,vc,va);let cd=edge(pc,pd,vc,vd);tri(cursor,ba,ca,cd,n,filterEnabled);tri(cursor,ba,cd,bd,n,filterEnabled);}}
 fn clipped(base:vec3f,scale:f32,q:vec3f,descriptor:u32)->vec3f{let nodal=(descriptor&255u)==0u;var r=base+scale*q+select(vec3f(0),vec3f(.5),nodal);let mask=(descriptor>>8u)&7u;for(var axis=0u;axis<3u;axis+=1u){if((mask&(1u<<axis))!=0u){let high=((descriptor>>(11u+axis))&1u)!=0u;r[axis]=base[axis]+scale*select(.5*q[axis],.5+.5*q[axis],high)+select(0.,.5,nodal);}}return r;}
 ${globalFineDirectSharpPatchWGSL}
 ${globalFineContourEmitWGSL}
-@compute @workgroup_size(64)fn emitGlobalFineTetra${tetraIndex}(@builtin(global_invocation_id)g:vec3u){let i=g.x;let count=min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),arrayLength(&offsets)/6u));if(i>=count||i*2u+1u>=arrayLength(&values)){return;}let packed=cubes[i];let descriptor=packed.y>>16u;let code=descriptor&255u;let wallFace=code==252u||code==253u;let nativeFace=(code==2u||code==3u)&&((descriptor>>8u)&7u)!=0u;let scale=select(f32(max(1u,code)),1.,nativeFace||wallFace);let base=vec3f(f32(unpackSigned16(packed.x)),f32(packed.y&0xffffu),f32(unpackSigned16(packed.x>>16u)));let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);let domainExtent=domainCell()*vec3f(p.sample.xyz);let n=contourNormal(samples,vec3f(p.sample.xyz),domainExtent);let clipMask=(descriptor>>8u)&7u;let filterEnabled=!signedSparseAddressing()&&!nativeFace&&!wallFace&&clipMask==0u&&base.x>0.0&&base.y>0.0&&base.z>0.0&&base.x<f32(p.sample.x)&&base.y<f32(p.sample.y)&&base.z<f32(p.sample.z);var cursor=offsets[i*6u+${tetraIndex}u];if(wallFace){emitWallLane(&cursor,base,descriptor,samples,${tetraIndex}u);return;}if(clipMask!=0u){if(${tetraIndex}u==0u){directPatch(&cursor,base,scale,descriptor,n);}return;}emitContourLane(&cursor,base,scale,descriptor,samples,n,filterEnabled,${tetraIndex}u);}
+@compute @workgroup_size(64)fn emitGlobalFineTetra${tetraIndex}(@builtin(global_invocation_id)g:vec3u){let i=g.x;let count=min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),arrayLength(&offsets)/6u));if(i>=count||i*2u+1u>=arrayLength(&values)){return;}let packed=cubes[i];let descriptor=packed.y>>16u;let code=descriptor&255u;let wallFace=code==252u||code==253u;let nativeFace=(code==2u||code==3u)&&((descriptor>>8u)&7u)!=0u;let scale=select(f32(max(1u,code)),1.,nativeFace||wallFace);let base=vec3f(f32(unpackSigned16(packed.x)),f32(packed.y&0xffffu),f32(unpackSigned16(packed.x>>16u)));let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);let domainExtent=domainCell()*vec3f(p.sample.xyz);let n=contourNormal(samples,vec3f(p.sample.xyz),domainExtent);let clipMask=(descriptor>>8u)&7u;let denseInterior=base.x>0.0&&base.y>0.0&&base.z>0.0&&base.x<f32(p.sample.x)&&base.y<f32(p.sample.y)&&base.z<f32(p.sample.z);let filterEnabled=!nativeFace&&!wallFace&&clipMask==0u&&(signedSparseAddressing()||denseInterior);var cursor=offsets[i*6u+${tetraIndex}u];if(wallFace){emitWallLane(&cursor,base,descriptor,samples,${tetraIndex}u);return;}if(clipMask!=0u){if(${tetraIndex}u==0u){directPatch(&cursor,base,scale,descriptor,n);}return;}emitContourLane(&cursor,base,scale,descriptor,samples,n,filterEnabled,${tetraIndex}u);}
 `;
 }
 
@@ -419,5 +443,5 @@ export const globalFineClassifiedEmitShaders = TETS.map((_, index) => emitShader
 /** One bounded 2-D dispatch: x selects a classified cube, y one of six exact tetrahedra. */
 export const globalFineClassifiedEmitShader = emitShader(0).replace(
   /@compute @workgroup_size\(64\)fn emitGlobalFineTetra0[\s\S]*$/,
-  `@compute @workgroup_size(64)fn emitGlobalFineTetrahedra(@builtin(global_invocation_id)g:vec3u){let i=g.x;let lane=g.y;if(lane>=6u){return;}let count=min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),arrayLength(&offsets)/6u));if(i>=count||i*2u+1u>=arrayLength(&values)){return;}let packed=cubes[i];let descriptor=packed.y>>16u;let code=descriptor&255u;let wallFace=code==252u||code==253u;let nativeFace=(code==2u||code==3u)&&((descriptor>>8u)&7u)!=0u;let scale=select(f32(max(1u,code)),1.,nativeFace||wallFace);let base=vec3f(f32(unpackSigned16(packed.x)),f32(packed.y&0xffffu),f32(unpackSigned16(packed.x>>16u)));let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);let domainExtent=domainCell()*vec3f(p.sample.xyz);let n=contourNormal(samples,vec3f(p.sample.xyz),domainExtent);let clipMask=(descriptor>>8u)&7u;let filterEnabled=!signedSparseAddressing()&&!nativeFace&&!wallFace&&clipMask==0u&&base.x>0.0&&base.y>0.0&&base.z>0.0&&base.x<f32(p.sample.x)&&base.y<f32(p.sample.y)&&base.z<f32(p.sample.z);var cursor=offsets[i*6u+lane];if(wallFace){emitWallLane(&cursor,base,descriptor,samples,lane);return;}if(clipMask!=0u){if(lane==0u){directPatch(&cursor,base,scale,descriptor,n);}return;}emitContourLane(&cursor,base,scale,descriptor,samples,n,filterEnabled,lane);}`,
+  `@compute @workgroup_size(64)fn emitGlobalFineTetrahedra(@builtin(global_invocation_id)g:vec3u){let i=g.x;let lane=g.y;if(lane>=6u){return;}let count=min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),arrayLength(&offsets)/6u));if(i>=count||i*2u+1u>=arrayLength(&values)){return;}let packed=cubes[i];let descriptor=packed.y>>16u;let code=descriptor&255u;let wallFace=code==252u||code==253u;let nativeFace=(code==2u||code==3u)&&((descriptor>>8u)&7u)!=0u;let scale=select(f32(max(1u,code)),1.,nativeFace||wallFace);let base=vec3f(f32(unpackSigned16(packed.x)),f32(packed.y&0xffffu),f32(unpackSigned16(packed.x>>16u)));let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);let domainExtent=domainCell()*vec3f(p.sample.xyz);let n=contourNormal(samples,vec3f(p.sample.xyz),domainExtent);let clipMask=(descriptor>>8u)&7u;let denseInterior=base.x>0.0&&base.y>0.0&&base.z>0.0&&base.x<f32(p.sample.x)&&base.y<f32(p.sample.y)&&base.z<f32(p.sample.z);let filterEnabled=!nativeFace&&!wallFace&&clipMask==0u&&(signedSparseAddressing()||denseInterior);var cursor=offsets[i*6u+lane];if(wallFace){emitWallLane(&cursor,base,descriptor,samples,lane);return;}if(clipMask!=0u){if(lane==0u){directPatch(&cursor,base,scale,descriptor,n);}return;}emitContourLane(&cursor,base,scale,descriptor,samples,n,filterEnabled,lane);}`,
 );

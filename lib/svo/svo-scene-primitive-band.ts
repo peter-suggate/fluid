@@ -53,6 +53,7 @@
  */
 import { svoFieldProgramAbsentWGSL, svoPrimitiveWGSL } from "./svo-primitive-abi";
 import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "./svo-primitive-candidates";
+import { svoProceduralNoiseWGSL } from "./svo-procedural-material";
 import { svoScreenSpaceTerminationWGSL } from "./svo-screen-space-termination";
 import { cameraApertureShaderLibrary } from "../core/webgpu-camera";
 
@@ -313,6 +314,12 @@ struct SvoBandControls{thresholds:vec2f,budget:u32,flags:u32}
 // evaluates a field. No tape arena is bound here, and a field-program record
 // therefore resolves to nothing rather than to its conservative box.
 ${svoFieldProgramAbsentWGSL}
+// The shared primitive ABI contains every shape evaluator in one declaration
+// block. Some of those evaluators reference the canonical procedural noise even
+// though this band only asks for record bounds. WGSL validates the complete
+// module rather than pruning unreachable functions, so keep that ABI dependency
+// explicit in this standalone shader.
+${svoProceduralNoiseWGSL}
 ${svoPrimitiveWGSL}
 ${svoScreenSpaceTerminationWGSL}
 

@@ -594,7 +594,23 @@ fn cm12ISACandidateFaceRange(descriptor:u32,side:u32,boundary:u32)->vec2u{
     cm12IBOCanonicalWord(descriptor,2u),side,boundary);
 }
 fn cm12ISACandidateFaceRow(index:u32)->u32{return candidateFaceRow(index);}
-fn cm12ISAScheduledRow(row:u32)->bool{return shadowRowScheduled(row);}
+// ISA1 certifies the immutable authored SCMT/IBO catalogue. SparseWorld rows
+// and its runtime suppression of an authored exterior row are a separate
+// overlay on the pressure graph, so including that suppression in the SCMT
+// receipt makes an otherwise exact authored IBO delta fail as soon as a
+// dynamic page touches the leaf.
+fn cm12ISAScheduledRow(row:u32)->bool{
+  if(row>=ta(3u)){return false;}
+  let requirements=rowRequirementOffset(row);let count=ta(requirements);
+  var enabled=true;
+  for(var at=0u;at<count;at+=1u){let metadata=ta(requirements+1u+at);
+    let brick=metadata>>TEMPLATE_CELL_RESOLUTION_BITS;
+    let resolution=metadata&TEMPLATE_CELL_RESOLUTION_MASK;
+    enabled=enabled&&scheduledBrickActive(brick)
+      &&scheduledBrickResolution(brick)==resolution;
+  }
+  return enabled;
+}
 ${createSparseCM12IBOSemanticAuthorityWGSL({ hookPrefix: "cm12", iboPrefix: "cm12" })}
 // The selected IBO refs are the exact delta program for one leaf.  Validation
 // executes that program packet-wise: SCMT supplies an independent expected
@@ -866,13 +882,29 @@ ${createSparseCM12IboTRASupplementWGSL({
   const internedBoundaryCommitReceipt = internedBoundaryImage ? /* wgsl */ `
   if(deltaCount!=0u){
     let iboSlot=cm12IBOShadowSlot();let iboHeader=cm12IBOSlotBase(iboSlot);
-    valid=valid&&cm12IBOLoad(iboHeader)==cm12IBOCandidateGeneration()
-      &&cm12IBOLoad(iboHeader+1u)==2u
-      &&cm12IBOLoad(iboHeader+2u)==cm12IBOAcceptedGeneration()
-      &&cm12IBOLoad(iboHeader+5u)==0u
-      &&cm12ISAAuthorityReady()
-      &&cm12IBOSelectorMirror()==acceptedTopologySlot()
-      &&cm12IBOGenerationMirror()==cm12IBOAcceptedGeneration();
+    for(var word=0u;word<7u;word+=1u){atomicStore(&topologyArena[${
+      topologyEffectsAuthorityLayout.baseWords
+        + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.reservedBase}u+word],
+      cm12IBOLoad(iboHeader+word));}
+    let iboGenerationReady=cm12IBOLoad(iboHeader)==cm12IBOCandidateGeneration();
+    let iboStateReady=cm12IBOLoad(iboHeader+1u)==2u;
+    let iboAcceptedReady=cm12IBOLoad(iboHeader+2u)==cm12IBOAcceptedGeneration();
+    let iboFaultReady=cm12IBOLoad(iboHeader+5u)==0u;
+    let isaReady=cm12ISAAuthorityReady();
+    let iboSelectorReady=cm12IBOSelectorMirror()==acceptedTopologySlot();
+    let iboMirrorGenerationReady=cm12IBOGenerationMirror()==cm12IBOAcceptedGeneration();
+    let iboReady=iboGenerationReady&&iboStateReady&&iboAcceptedReady&&iboFaultReady
+      &&isaReady&&iboSelectorReady&&iboMirrorGenerationReady;
+    atomicStore(&topologyArena[tfxReserved+13u],select(0u,1u,iboGenerationReady));
+    atomicStore(&topologyArena[tfxReserved+14u],select(0u,1u,iboStateReady));
+    atomicStore(&topologyArena[tfxReserved+15u],select(0u,1u,iboAcceptedReady));
+    atomicStore(&topologyArena[tfxReserved+16u],select(0u,1u,iboFaultReady));
+    atomicStore(&topologyArena[tfxReserved+17u],select(0u,1u,isaReady));
+    atomicStore(&topologyArena[tfxReserved+18u],select(0u,1u,iboSelectorReady));
+    atomicStore(&topologyArena[tfxReserved+19u],select(0u,1u,iboMirrorGenerationReady));
+    atomicStore(&topologyArena[${topologyEffectsAuthorityLayout.baseWords
+      + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.reservedBase + 11}u],select(0u,1u,iboReady));
+    valid=valid&&iboReady;
   }
 ` : "";
   return /* wgsl */ `
@@ -4945,7 +4977,13 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
   let candidate=atomicLoad(&activity[output+8u]);
   let constructionActivation=
     constructionActivationIntentWithoutSlot(brick,candidate);
-  if(!brickCandidatePlanningEnabled(brick)&&!constructionActivation){
+  // GPU-grown leaves own a complete page-local B8 topology rather than a host
+  // template slot. They cannot rerung, but their same-rung active->inactive
+  // lifecycle delta must enter the ordinary shadow transaction.
+  let dynamicRetirement=brick>=CM12_WDR_INITIAL_LEAVES&&brickActive(brick)
+    &&!candidateBrickActive(brick)&&atomicLoad(&activity[output+37u])!=INVALID;
+  if(!brickCandidatePlanningEnabled(brick)&&!constructionActivation
+    &&!dynamicRetirement){
     let accepted=atomicLoad(&activity[output+12u]);
     atomicStore(&activity[output+13u],accepted);atomicStore(&activity[output+14u],0u);
     return;
@@ -5103,6 +5141,33 @@ fn candidateTopologyPageBase(page:u32)->u32{
 // A signed-coordinate frontier consumes a page only when an accepted liquid
 // leaf's immutable support snapshot reaches an absent coordinate through the
 // uniform voxel-solid field. No coordinate plane is an implicit boundary.
+@compute @workgroup_size(4,4,4)
+fn allocateSparseWorldInteractionPages(@builtin(global_invocation_id)gid:vec3u){
+  if(p.injectionCenter.w<0.5||p.injectionCenter.w>1.5){return;}
+  let width=f32(BRICK_FINE_RESOLUTION);
+  let lower=vec3i(floor((p.injectionCenter.xyz-p.injectionRadius.xyz)/width));
+  let upper=vec3i(floor((p.injectionCenter.xyz+p.injectionRadius.xyz)/width));
+  let extent=vec3u(upper-lower+vec3i(1));
+  if(any(gid>=extent)){return;}
+  let targetCoordinate=lower+vec3i(gid);
+  if(cm12WorldOwnerAt(targetCoordinate)!=CM12_WDR_INVALID){return;}
+  let leaf=cm12WorldAllocateExact(targetCoordinate,0u);
+  if(leaf==CM12_WDR_INVALID||leaf<CM12_WDR_INITIAL_LEAVES){return;}
+  let page=leaf-CM12_WDR_INITIAL_LEAVES;
+  let base=topologyWorklistBase();
+  if(page>=atomicLoad(&topologyArena[base+27u])){return;}
+  let pageBase=candidateTopologyPageBase(page);
+  let claim=atomicCompareExchangeWeak(&topologyArena[pageBase+2u],0u,0xffffffffu);
+  if(!claim.exchanged){return;}
+  atomicStore(&topologyArena[pageBase],leaf);
+  atomicStore(&topologyArena[pageBase+1u],BRICK_FINE_RESOLUTION);
+  atomicStore(&topologyArena[pageBase+3u],0u);
+  atomicStore(&topologyArena[pageBase+11u],atomicLoad(
+    &topologyArena[CM12_WDR_BASE+10u]));
+  atomicStore(&topologyArena[pageBase+2u],BRICK_FINE_RESOLUTION
+    *BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION);
+}
+
 @compute @workgroup_size(64)
 fn allocateSparseWorldFrontier(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x/6u;let side=gid.x%6u;
@@ -5303,6 +5368,11 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
     // worklist membership, pressure classification, and the accepted
     // generation flip; geometry alone never becomes visible to physics.
     let output=activityRecord(leaf);
+    // A recycled physical leaf must not inherit activity, lifecycle or
+    // topology receipts from its previous coordinate identity.
+    for(var word=0u;word<ACTIVITY_RECORD_WORDS;word+=1u){
+      atomicStore(&activity[output+word],0u);
+    }
     atomicStore(&activity[output+8u],resolution);
     atomicStore(&activity[output+9u],2u);
     atomicStore(&activity[output+10u],0u);
@@ -6337,18 +6407,30 @@ fn validateAndAuthorizeShadowTopology(){
     atomicStore(&activity[13],(atomicLoad(&activity[13])+p.topologyScheduling.x)
       %max(1u,p.dispatch.w));atomicStore(&topologyArena[base+3u],0u);return;
   }
-  var valid=shadowTemplateCellCount()<=atomicLoad(&topologyArena[base+6u])
-    &&shadowTemplateRowCount()<=atomicLoad(&topologyArena[base+7u])
-    &&ptrResidentTopologyDeltaReady()
-    &&residentTopologyEffectsPreflightReady();
+  let cellCapacityReady=shadowTemplateCellCount()<=atomicLoad(&topologyArena[base+6u]);
+  let rowCapacityReady=shadowTemplateRowCount()<=atomicLoad(&topologyArena[base+7u]);
+  let ptrReady=ptrResidentTopologyDeltaReady();
+  let effectsReady=residentTopologyEffectsPreflightReady();
+  let tfxReserved=${topologyEffectsAuthorityLayout.baseWords
+    + SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.reservedBase}u;
+  atomicStore(&topologyArena[tfxReserved+7u],select(0u,1u,cellCapacityReady));
+  atomicStore(&topologyArena[tfxReserved+8u],select(0u,1u,rowCapacityReady));
+  atomicStore(&topologyArena[tfxReserved+9u],select(0u,1u,ptrReady));
+  atomicStore(&topologyArena[tfxReserved+10u],select(0u,1u,effectsReady));
+  atomicStore(&topologyArena[tfxReserved+11u],1u);
+  atomicStore(&topologyArena[tfxReserved+12u],INVALID);
+  var valid=cellCapacityReady&&rowCapacityReady&&ptrReady&&effectsReady;
   let leaves=acceptedLeafManifestBase();
   let deltaCount=atomicLoad(&topologyArena[leaves+10u]);
   ${internedBoundaryCommitReceipt}
   for(var index=0u;index<deltaCount;index+=1u){let brick=topologyDeltaLeafInvocation(index);
     if(brick==INVALID){valid=false;continue;}let output=activityRecord(brick);
-    valid=valid&&atomicLoad(&activity[output+23u])==1u
+    let leafReady=atomicLoad(&activity[output+23u])==1u
       &&atomicLoad(&activity[output+31u])==1u
       &&atomicLoad(&activity[output+36u])==atomicLoad(&topologyArena[base+1u]);
+    if(!leafReady&&atomicLoad(&topologyArena[tfxReserved+12u])==INVALID){
+      atomicStore(&topologyArena[tfxReserved+12u],brick);}
+    valid=valid&&leafReady;
   }
   if(!valid){atomicStore(&activity[21],1u);
     atomicStore(&topologyArena[base+3u],3u);return;}

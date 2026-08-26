@@ -61,6 +61,7 @@ export interface SparseCM12FramePlanPresentationLayout {
   readonly brickPagesBaseWords: number;
   readonly recordsBaseWords: number;
   readonly allocatorBaseWords: number;
+  readonly allocatorFreeListBaseWords: number;
   readonly totalWords: number;
   readonly totalBytes: number;
   readonly brickFineResolution: 4 | 8 | 16;
@@ -105,10 +106,14 @@ export function createSparseCM12FramePlanPresentationLayout(options: {
   const recordsBaseWords = alignWords(brickPagesBaseWords + brickCapacity);
   const allocatorBaseWords = alignWords(recordsBaseWords
     + SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE_WORDS * brickCapacity);
-  const totalWords = allocatorBaseWords + 5;
+  // Six allocator header words are followed by a complete physical-page free
+  // list. Renderer pages are working-set storage, so retirement must return a
+  // slot here instead of permanently consuming the append cursor.
+  const allocatorFreeListBaseWords = allocatorBaseWords + 6;
+  const totalWords = allocatorFreeListBaseWords + pageCapacity;
   return Object.freeze({
     baseWords, listBaseWords, brickPagesBaseWords, recordsBaseWords,
-    allocatorBaseWords, totalWords,
+    allocatorBaseWords, allocatorFreeListBaseWords, totalWords,
     totalBytes: 4 * totalWords, brickFineResolution, pageResolution,
     tilesPerPage, brickCapacity, pageCapacity, packetIndex,
     indirectBinding: Object.freeze({
@@ -164,8 +169,14 @@ export function createSparseCM12FramePlanPresentationInitialWords(
   words[allocator + 1] = 0;
   words[allocator + 2] = allocatedPages.size;
   words[allocator + 3] = 0;
-  // Sorted prefix of the append-only renderer page directory.
+  // Sorted prefix of the compact renderer page directory.
   words[allocator + 4] = allocatedPages.size;
+  words[allocator + 5] = layout.pageCapacity - allocatedPages.size;
+  for (let page = allocatedPages.size; page < layout.pageCapacity; page += 1) {
+    words[layout.allocatorFreeListBaseWords - layout.baseWords
+      + page - allocatedPages.size] = layout.pageCapacity - 1
+        - (page - allocatedPages.size);
+  }
   return words;
 }
 

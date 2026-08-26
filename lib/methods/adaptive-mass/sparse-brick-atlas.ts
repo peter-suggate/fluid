@@ -13,6 +13,11 @@ import {
   sceneInitialLiquidVolumes,
 } from "../../core/initial-fluid";
 import type { SceneDescription } from "../../core/model";
+import {
+  compileE0PlanarFluidBoundaries,
+  e0PlanarFluidBoundaryFaceMask,
+  PLANAR_FLUID_BOUNDARY_FACE_BIT,
+} from "../../core/planar-fluid-boundary";
 import { sceneRefinementRegions } from "../../core/refinement-regions";
 import { sampleSolidWorld, solidWorldForScene, SOLID_WORLD_BRICK_CELLS,
   type SolidWorld } from
@@ -320,6 +325,7 @@ function brickRequiresStaticSolidBoundaryResolution(
   dimensions: SparseBrickVec3,
   coordinate: SparseBrickVec3,
   brickFineResolution: SparseBrickFineResolution,
+  planarClosedFaceMask: number,
 ): boolean {
   let world = initialSolidWorldCache.get(scene);
   if (!world) {
@@ -338,8 +344,26 @@ function brickRequiresStaticSolidBoundaryResolution(
         const fraction = sampleSolidWorld(world, [x, y, z]).solidFraction;
         if (fraction > 1e-8 && fraction < 1 - 1e-8) return true;
         for (const [dx, dy, dz] of directions) {
+          const adjacentPosition = [x + dx, y + dy, z + dz] as const;
+          const admittedDomainFace = adjacentPosition[0] < 0
+            ? PLANAR_FLUID_BOUNDARY_FACE_BIT.xLow
+            : adjacentPosition[0] >= dimensions[0]
+              ? PLANAR_FLUID_BOUNDARY_FACE_BIT.xHigh
+              : adjacentPosition[1] < 0
+                ? PLANAR_FLUID_BOUNDARY_FACE_BIT.yLow
+                : adjacentPosition[1] >= dimensions[1]
+                  ? PLANAR_FLUID_BOUNDARY_FACE_BIT.yHigh
+                  : adjacentPosition[2] < 0
+                    ? PLANAR_FLUID_BOUNDARY_FACE_BIT.zLow
+                    : adjacentPosition[2] >= dimensions[2]
+                      ? PLANAR_FLUID_BOUNDARY_FACE_BIT.zHigh : 0;
+          // The exact E0 plane owns this exterior Neumann face. Its fine
+          // SolidWorld shell remains available to apertures and rendering,
+          // but the repeated occupancy transition is no longer a resolution
+          // feature of the adjacent fluid brick.
+          if ((planarClosedFaceMask & admittedDomainFace) !== 0) continue;
           const adjacent = sampleSolidWorld(world,
-            [x + dx, y + dy, z + dz]).solidFraction;
+            adjacentPosition).solidFraction;
           if (Math.abs(adjacent - fraction) > 1e-8) return true;
         }
       }
@@ -779,6 +803,9 @@ export function initializeSparseBrickAtlasFromScene(
   const brickDimensions = options.finestDimensions.map((value) =>
     Math.ceil(value / brickFineResolution)) as [number, number, number];
   const container = scene.container;
+  const planarClosedFaceMask = e0PlanarFluidBoundaryFaceMask(
+    compileE0PlanarFluidBoundaries(scene),
+  );
   const refinementRegionParameters = packSparseCM12RefinementRegions(
     sceneRefinementRegions(scene), {
       dimensions: options.finestDimensions,
@@ -874,6 +901,7 @@ export function initializeSparseBrickAtlasFromScene(
       ? brickFineResolution : ladder.resolutions[distanceRung]!) as SparseBrickResolution;
     const evidenceSelected = brickRequiresStaticSolidBoundaryResolution(
       scene, options.finestDimensions, coordinate, brickFineResolution,
+      planarClosedFaceMask,
     ) || brickHasOpenExteriorVoxelFace(
       scene, options.finestDimensions, coordinate, brickFineResolution,
     ) ? brickFineResolution

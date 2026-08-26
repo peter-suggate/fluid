@@ -24,20 +24,22 @@ the SVO frame at both resolutions tested.
 
 ---
 
-## Part 1 — Bounded reuse of the primary G-buffer (LANDED)
+## Part 1 — Bounded reuse of the primary G-buffer (RETIRED)
+
+> **Current status (2026-08-26):** the temporal primary-G-buffer cache described
+> below has been removed. Primary visibility is traversed on every frame for
+> every scene and tuning profile. The measurements remain as historical context
+> only; they are not an available performance lever or an accepted benchmark
+> arm. Spatial acceleration must earn its speedup while still performing current-
+> frame primary visibility.
 
 ### What was wrong
 
-`FluidLabRenderer.draw()` built a primary-visibility coherence key only when
-
-```ts
-activeSvoTuning.stationaryPrimaryReuseEnabled && (!sceneRuntime.fluidSolver || !this.simulationRunning)
-```
-
-— that is, the exact-reuse cache was switched off for the whole of every fluid
-scene the moment the solver ran. And `stationaryPrimaryReuseEnabled` itself was
-`false` in `balancedTuning`, which all three tiers inherit, so the cache was
-also off by default everywhere else.
+`FluidLabRenderer.draw()` once built a primary-visibility coherence key only
+when a stationary-reuse tuning flag was enabled and either no fluid solver was
+present or the simulation was paused. That made the exact-reuse cache disappear
+for the whole of every running fluid scene. The cache was subsequently removed
+rather than broadening that gate.
 
 The solver clause looks like a safety and is not one. **The fluid never enters
 this G-buffer.** The dry scene is the background that the raster water pipeline
@@ -53,18 +55,13 @@ key is built from is a *readback* of that buffer rather than its source, so the
 key can be a frame behind the geometry. That — not the water — is the input the
 key is blind to.
 
-### What landed
+### What was evaluated
 
-- `svoPrimaryReuseEligible()` in `lib/core/webgpu-renderer.ts`: a pure predicate
-  that refuses reuse only for `residentRigidPoses && bodyCount > 0 && running`.
-  The argument for the gate lives in its doc comment so a test can hold it.
-- `stationaryPrimaryReuseEnabled: true` in `balancedTuning`.
-- `normalizeSvoRenderTuning` now falls back to the *default* rather than to
-  `false` for that field, so a tuning stored before the field existed does not
-  silently keep the cache off. An explicit `false` still survives.
-- `tests/svo-primary-reuse-gate.test.ts` pins both halves — each one alone is a
-  plausible-looking gate and the wrong one in either direction is silent.
-- The Render panel's `stationary-reuse` tip now states the real gate.
+- A camera/scene coherence key once guarded an exact primary-G-buffer cache.
+- The cache and its tuning/UI controls were subsequently removed as a temporal
+  shortcut that concealed traversal cost and complicated correctness.
+- `tests/svo-primary-reuse-gate.test.ts` now pins that removal: no tuning field
+  and no stationary-reuse frame-graph node may return.
 
 ### Measured
 
@@ -98,12 +95,13 @@ GPUs at all (see `render-pipeline-accuracy-handoff.md` §A1). Read the top-line
 
 ---
 
-## Part 2 — Spatial invalidation for rigid bodies (NOT STARTED)
+## Part 2 — Spatial invalidation for rigid bodies (REJECTED WITH THE CACHE)
 
-Part 1 leaves one case fully unreused: a scene with solver-owned rigid bodies
-while the solver runs. The principled fix is to make invalidation *spatial* —
-project the bodies' previous and current bounds to a screen rect, retrace only
-that rect with `setScissorRect`, and keep the cached G-buffer everywhere else.
+The retired cache left one case fully unreused: a scene with solver-owned rigid
+bodies while the solver ran. A proposed extension made invalidation *spatial* —
+projecting previous/current body bounds to a screen rect and preserving cached
+G-buffer data elsewhere. That extension is intentionally not part of the current
+design because primary visibility must be current-frame work everywhere.
 
 Four things make this a project rather than a follow-on tweak, and all four were
 found by reading the encode path rather than by trying it:
@@ -115,11 +113,9 @@ found by reading the encode path rather than by trying it:
    and revealing background behind it. It needs a second pipeline variant with
    `depthCompare: "always"`, and the split-variant key already fans out over
    scale × GI × raster-rigid.
-2. **The coherence key is one opaque string.** Deciding "this frame differs only
-   in body pose" requires splitting `presentationCoherenceKey` into a static
-   half and a body half and threading both from `webgpu-renderer.ts` through
-   `encode()` into `svoDryPrimaryCoherenceDecision` — a contract change with
-   several call sites, the benchmark harness included.
+2. **Coherence contracts spread temporal state.** Deciding "this frame differs
+   only in body pose" required threading cache identity through the renderer and
+   benchmark harness; those contracts have now been deleted.
 3. **Downstream passes read the whole G-buffer.** Primary seam closure and the
    raster-rigid certificate bridge both `loadOp: "load"` the same attachments
    and write compacted pixels; they need the same scissor or they write refined
@@ -129,9 +125,9 @@ found by reading the encode path rather than by trying it:
 
 There is also an existing mechanism in this space: past
 `SVO_DRY_RASTER_RIGID_BODY_THRESHOLD`, `svoDryRigidPrimaryStrategy` rasterizes
-rigid impostors into the primary G-buffer instead of tracing them, and that path
-deliberately re-encodes the primary (`!this.rasterRigidActive` in the reuse
-decision). Any scissor work should be designed against that, not beside it.
+rigid impostors into the primary G-buffer instead of tracing them. Any future
+spatial work must compose with that path and still produce current-frame primary
+visibility.
 
 `FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_MOTION=1` in
 `tools/benchmark-svo-dry-frame-gpu.ts` marks one body moving and reports its

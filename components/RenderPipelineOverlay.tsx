@@ -490,18 +490,16 @@ export function RenderPipelineOverlay() {
   // The lamp is the node's own switch, and every node has one.
   //
   // Most route through the encode-time ablation set, which withholds the pass
-  // outright. Four do not: cone visibility, GI composition, seam closure and
-  // the reuse gate are switched by contracts the shaders already compile
-  // against, and giving those a second switch would be two sources of truth for
-  // one bit. The graph says which is which.
+  // outright. Cone visibility, GI composition and seam closure are switched by
+  // contracts the shaders already compile against. The graph says which is
+  // which.
   const toggleNode = (id: string) => {
     const node = RENDER_PIPELINE_NODES.find((candidate) => candidate.id === id);
     if (node?.stage) {
       setRenderStageDisabled(node.stage, !disabledStages.has(node.stage));
       return;
     }
-    if (id === "stationary-reuse") updateTuning("stationaryPrimaryReuseEnabled", !tuning.stationaryPrimaryReuseEnabled);
-    else if (id === "seam-closure") setSilhouetteRefinementEnabled(!silhouetteRefinementEnabled);
+    if (id === "seam-closure") setSilhouetteRefinementEnabled(!silhouetteRefinementEnabled);
     else if (id === "cone-visibility") setSvoConeTracingMode(svoConeTracingMode === "off" ? "cones" : "off");
     else if (id === "gi-composition") setSvoGlobalIlluminationEnabled(!svoGlobalIlluminationEnabled);
   };
@@ -847,6 +845,10 @@ export function RenderPipelineOverlay() {
           ? `Frame source: ${trace?.measurementSource === "gpu-hardware-timestamp" ? "hardware timestamps" : "GPU queue wall"}. Stage source: ${hardwarePerPassSplit ? "hardware timestamps" : "unavailable"}. ${TRACE_WINDOW}-frame mean.`
           : "No trace yet."}`} />
       <code data-testid="render-frame-cost" title={timingHint}>{timingLabel}</code>
+      {effectiveRendererStatus.terminalCounts && <code data-testid="svo-terminal-counts"
+        title="Accepted unified SVO leaf terminals. Planar terminals keep exact thin slab geometry without voxel payload traversal.">
+        {effectiveRendererStatus.terminalCounts.planarBoundary} planar · {effectiveRendererStatus.terminalCounts.voxel} voxel
+      </code>}
     </div>
 
     {/* The profile rung is the question asked before any node is opened — how

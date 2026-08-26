@@ -1820,8 +1820,9 @@ fn decodeMorton(low: u32, high: u32, level: u32) -> vec3u {
 fn leafBounds(leafIndex:u32)->mat2x3f{
   let leafBase=controlLoad(16u)+leafIndex*4u;
   let nodeIndex=topologyLoad(leafBase);
-  let level=topologyLoad(nodeIndex*8u+2u);
-  let brick=decodeMorton(topologyLoad(leafBase+2u),topologyLoad(leafBase+3u),level);
+  let nodeBase=nodeIndex*8u;
+  let level=topologyLoad(nodeBase+2u);
+  let brick=decodeMorton(topologyLoad(nodeBase),topologyLoad(nodeBase+1u),level);
   var scale=1u;
   if(finestLevel()!=0xffffffffu&&finestLevel()>level){scale=1u<<(finestLevel()-level);}
   let brickSize=controlLoad(11u);
@@ -2241,8 +2242,9 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   let leafBase = controlLoad(16u) + leafIndex * 4u;
   let nodeIndex = topologyLoad(leafBase);
   let voxelOffset = topologyLoad(leafBase + 1u);
-  let level = topologyLoad(nodeIndex * 8u + 2u);
-  let brick = decodeMorton(topologyLoad(leafBase + 2u),topologyLoad(leafBase + 3u),level);
+  let nodeBase = nodeIndex * 8u;
+  let level = topologyLoad(nodeBase + 2u);
+  let brick = decodeMorton(topologyLoad(nodeBase),topologyLoad(nodeBase + 1u),level);
   var scale = 1u;
   if (finestLevel() != 0xffffffffu && finestLevel() > level) { scale = 1u << (finestLevel() - level); }
   let worldCell = (brick * brickSize + local) * scale;

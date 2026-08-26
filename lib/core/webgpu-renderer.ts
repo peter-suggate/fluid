@@ -50,7 +50,8 @@ import { StageLensOverlay, type StageLensLayerReport } from "./webgpu-stage-lens
 import { TracerOverlay } from "./webgpu-tracer-overlay";
 import { VISUALIZATION_CATALOG } from "./visualization-catalog";
 import { assembleDecorations } from "./visualization-registry";
-import { containerDecorationSpace } from "./visualization-decorations";
+import { containerDecorationSpace, DecorationBuilder } from "./visualization-decorations";
+import { buildVesselOutlineGeometry, sceneVesselPresentation } from "./vessel-outline";
 import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
 import type { FluidCellTrace } from "./fluid-cell-trace";
 import type { FineBandCellContext } from "./fine-band-cell-model";
@@ -382,6 +383,7 @@ export function optionalRendererPipelineRequests(
   fluidCellTraceActive = false,
   stageViewActive = false,
   sparsePresentationRequired = true,
+  vesselOutlineActive = false,
 ): OptionalRendererPipeline[] {
   const requested: OptionalRendererPipeline[] = [];
   if (gridOverlay && gridOverlay.axis !== "off") {
@@ -401,8 +403,8 @@ export function optionalRendererPipelineRequests(
   }
   if (sparsePresentationRequired) requested.push("svo-dry-scene");
   if (simulationRunning && secondaryParticlesAvailable) requested.push("secondary-particles");
-  // The trace overlay is only meaningful over the sparse path it explains.
-  if (pixelTraceActive) requested.push("decoration-overlay");
+  // One generic line compositor serves diagnostics and the cheap vessel cue.
+  if (pixelTraceActive || vesselOutlineActive) requested.push("decoration-overlay");
   if (fluidCellTraceActive) requested.push("fluid-cell-trace", "decoration-overlay");
   // A session that never opens a render stage view never compiles its pass.
   if (stageViewActive) requested.push("svo-stage-overlay");
@@ -661,40 +663,6 @@ export function svoDryRigidBounds(bodies: readonly RigidBodyState[]): SvoDryRigi
   return { centre_m: centre, radius_m: radius };
 }
 
-/** What the renderer knows about a frame that decides whether reuse is legal. */
-export interface SvoPrimaryReuseEligibility {
-  /** The tuning switch. Off means never reuse, whatever the rest says. */
-  readonly reuseEnabled: boolean;
-  /** True when the shader reads rigid poses out of a solver-owned buffer. */
-  readonly residentRigidPoses: boolean;
-  readonly bodyCount: number;
-  readonly simulationRunning: boolean;
-}
-
-/**
- * Whether this frame may carry a primary-visibility coherence key at all.
- *
- * The key itself is the safety — it covers camera, viewport, scene epoch, the
- * body roster, selection, hover and tuning, and a reused G-buffer is byte for
- * byte the traced one whenever it holds. This predicate answers the one
- * question the key cannot: is there an input the key is blind to?
- *
- * There is exactly one, and it is not the water. The fluid never enters this
- * G-buffer — the dry scene is the background the raster water pipeline
- * composites its surface over, and the publication reaches the renderer only
- * as the cone-shadow coverage volume that the lighting pass resamples every
- * frame. It is solver-owned rigid pose: with a resident rigid buffer the
- * shader reads the poses straight out of it, while the roster the key is built
- * from is a readback of that buffer rather than its source, so the key can be
- * a frame behind the geometry. Paused, that buffer is not moving and the
- * staleness cannot arise.
- */
-export function svoPrimaryReuseEligible(frame: SvoPrimaryReuseEligibility): boolean {
-  if (!frame.reuseEnabled) return false;
-  const solverOwnedRigidPoses = frame.residentRigidPoses && frame.bodyCount > 0;
-  return !solverOwnedRigidPoses || !frame.simulationRunning;
-}
-
 export interface RendererFrameMetrics {
   cpu?: PerformanceTrace;
   presentation?: PerformanceTrace;
@@ -808,7 +776,6 @@ export function createProductionSparseVoxelDrySceneRenderer(
     "off",
     "split",
     rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
-    rasterArms ? "off" : "static-primary",
     rasterArms,
     rasterArms,
     true,
@@ -1037,7 +1004,9 @@ export class FluidLabRenderer {
       && previous.silhouetteRefinement?.detail === status.silhouetteRefinement?.detail
       && previous.lightingVisibility?.state === status.lightingVisibility?.state
       && previous.lightingVisibility?.fallback === status.lightingVisibility?.fallback
-      && previous.lightingVisibility?.detail === status.lightingVisibility?.detail) return;
+      && previous.lightingVisibility?.detail === status.lightingVisibility?.detail
+      && previous.terminalCounts?.voxel === status.terminalCounts?.voxel
+      && previous.terminalCounts?.planarBoundary === status.terminalCounts?.planarBoundary) return;
     this.lastEffectiveRendererStatus = status;
     this.effectiveRendererStatusCallback?.(status);
   }
@@ -1240,9 +1209,9 @@ export class FluidLabRenderer {
     );
     if (wants.has("svo-dry-scene")) this.ensureOptionalPipeline(
       "svo-dry-scene", this.svoDryScenePipeline,
-      // Relight already pays a full-resolution material/BRDF pass. Isolating
-      // primary traversal raises Metal occupancy substantially. Exact-keyed
-      // coherence can then retain that G-buffer for static/paused dry scenes.
+      // Relight already pays a full-resolution material/BRDF pass. Primary
+      // traversal is isolated and encoded on every frame so its cost remains
+      // visible under paused and stationary cameras.
       // Canonical-parametric removes the wide/canonical hybrid cursor and was
       // revalidated against split full-res relighting: 12.55 ms versus
       // 22.10-23.60 ms hybrid at 660x662 with identical output hashes.
@@ -1568,6 +1537,7 @@ export class FluidLabRenderer {
   ): boolean {
     const overlay = this.decorationOverlayPipeline;
     if (!overlay?.ready || !this.presentationTexture) return false;
+    const vesselOutline = buildVesselOutlineGeometry(scene);
     const cellTrace = fluidCellTrace ? this.latestFluidCellTraceValue : undefined;
     const subjects: unknown[] = [];
     if (pixelTrace && this.latestPixelTraceValue) subjects.push(this.latestPixelTraceValue);
@@ -1579,7 +1549,7 @@ export class FluidLabRenderer {
         ? { ...cellTrace, solvePolicy: fluidCellTrace.solvePolicy }
         : cellTrace);
     }
-    if (subjects.length === 0) {
+    if (subjects.length === 0 && !vesselOutline) {
       if (this.decorationGeometryKey !== "") { overlay.clear(); this.decorationGeometryKey = ""; }
       return false;
     }
@@ -1602,9 +1572,18 @@ export class FluidLabRenderer {
       widthScale: pixelTrace?.widthScale ?? fluidCellTrace?.widthScale,
       enabled: (definition) => enabledIds.has(definition.id),
     });
-    if (assembled.key !== this.decorationGeometryKey) {
-      overlay.setGeometry(assembled.geometry);
-      this.decorationGeometryKey = assembled.key;
+    const builder = new DecorationBuilder(containerDecorationSpace([1, 1, 1],
+      [scene.container.width_m, scene.container.height_m, scene.container.depth_m]));
+    if (vesselOutline) {
+      builder.append(vesselOutline.geometry.segments,
+        vesselOutline.geometry.segmentCount);
+    }
+    builder.append(assembled.geometry.segments, assembled.geometry.segmentCount);
+    const geometry = builder.finish();
+    const geometryKey = `${vesselOutline?.key ?? "no-vessel"}|${assembled.key}`;
+    if (geometryKey !== this.decorationGeometryKey) {
+      overlay.setGeometry(geometry);
+      this.decorationGeometryKey = geometryKey;
     }
     const width = this.presentationTexture.width, height = this.presentationTexture.height;
     overlay.encode(encoder, this.cachedTextureView(this.presentationTexture), this.pixelTraceSceneDepthView(), {
@@ -1621,7 +1600,7 @@ export class FluidLabRenderer {
       // Only the ray probe's work is a sequence, so only it has a sweep to
       // reveal; everything else is emitted at order zero and always drawn.
       reveal: pixelTrace?.reveal ?? 1,
-      occludedAlpha: pixelTrace?.occludedAlpha,
+      occludedAlpha: pixelTrace?.occludedAlpha ?? (vesselOutline ? 0.18 : undefined),
       depthNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M,
     });
     return true;
@@ -2884,6 +2863,7 @@ export class FluidLabRenderer {
       pixelTraceRequested, Boolean(fluidCellTrace),
       sparsePresentationRequired && activeSvoDiagnostics.stageView !== "off",
       sparsePresentationRequired,
+      sceneVesselPresentation(scene) === "outline",
     ), config.methodId);
     // The probe's answer depends on the scene epoch, the presentation, and the
     // traversal tuning as much as on the pixel. Tracking them as one revision is
@@ -3237,30 +3217,10 @@ export class FluidLabRenderer {
       replacementEncoder: GPUCommandEncoder,
       target: GPUTexture | GPUTextureView,
     ) => {
-      // Reuse is legal only while the complete live render generation and all
-      // frame inputs remain unchanged. Source replacement and authored motion
-      // advance sceneEpoch; this key also covers camera, viewport, bodies,
-      // selection, tuning and environment.
-      //
-      // What a running solver owns in this G-buffer is rigid pose, not water.
-      // The fluid never enters it: the dry scene is the background the raster
-      // water pipeline composites its surface over, and the publication
-      // reaches this renderer only as the cone-shadow coverage volume, which
-      // the lighting pass — never withheld — resamples every frame. So a
-      // running solver is not by itself a reason to retrace, and gating on one
-      // cost every fluid scene the whole primary band.
-      //
-      // A *resident* rigid buffer is a reason; see `svoPrimaryReuseEligible`,
-      // which is where that argument lives so a contract test can hold it.
-      const primaryCoherenceKey = svoPrimaryReuseEligible({
-        reuseEnabled: activeSvoTuning.stationaryPrimaryReuseEnabled,
-        residentRigidPoses: Boolean(residentRigidBuffer),
-        bodyCount: bodies.length,
-        simulationRunning: this.simulationRunning,
-      })
-        ? `${presentationCoherenceKey}|viewport=${this.presentationTexture!.width}x${this.presentationTexture!.height}|scene=${this.svoDryScenePipeline?.sceneEpoch ?? 0}`
-        : undefined;
-      const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, primaryCoherenceKey, closeStage, bandSampler) ?? false;
+      // Primary visibility is deliberately recomputed every frame. A paused
+      // or stationary frame is still a real traversal measurement; no
+      // coherence key is published to the dry-scene renderer.
+      const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, closeStage, bandSampler) ?? false;
       svoEncoded = Boolean(replacementResult);
       requestedBundleStatus = this.svoDryScenePipeline?.presentationBundleStatus;
       if (requestedBundleStatus?.state === "failed") {
@@ -3384,6 +3344,7 @@ export class FluidLabRenderer {
       contractFailure: this.svoPublicationFailure,
       silhouetteRefinement: silhouetteRefinementStatus,
       lightingVisibility: lightingVisibilityStatus,
+      terminalCounts: this.svoDrySceneSource?.structural?.terminalCounts,
     }));
     let inspectionOverlayEncoded = false;
     // Render stage views replace the composited image with a decode of a plane
@@ -3532,9 +3493,12 @@ export class FluidLabRenderer {
       }
     }
     // One assembled draw for every decoration any pass contributed this frame.
-    if (!inspectionWithheld) {
+    const vesselOutlineActive = sceneVesselPresentation(scene) === "outline";
+    if (!inspectionWithheld || vesselOutlineActive) {
       inspectionOverlayEncoded = this.encodeDecorationOverlay(
-        encoder, basis, cameraTanHalfFov(camera), scene, pixelTraceRequested ? pixelTrace : undefined, fluidCellTrace)
+        encoder, basis, cameraTanHalfFov(camera), scene,
+        !inspectionWithheld && pixelTraceRequested ? pixelTrace : undefined,
+        !inspectionWithheld ? fluidCellTrace : undefined)
         || inspectionOverlayEncoded;
     }
     // Closed after the probes and the decoration draw, not before them: the

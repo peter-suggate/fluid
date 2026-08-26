@@ -64,8 +64,8 @@ export const RENDER_PIPELINE_BANDS: readonly RenderPipelineBand[] = Object.freez
  * What a node is doing this frame.
  *
  * `armed` is not a third kind of "on": it is a node the user has enabled whose
- * work the frame declined to do — a reuse gate that missed, a cache that was
- * already warm. Drawing that as `on` would credit it with time it never spent,
+ * work the frame declined to do — for example, a cache that was already warm.
+ * Drawing that as `on` would credit it with time it never spent,
  * and drawing it as `off` would say the user turned it off.
  */
 export type RenderPipelineNodeState = "on" | "off" | "armed" | "unavailable";
@@ -120,7 +120,6 @@ export type RenderPipelineNodeId =
   | "derived-lighting"
   | "rigid-pose-mirror"
   | "fluid-coverage"
-  | "stationary-reuse"
   | "primary-traversal"
   | "thin-glass"
   | "scene-primitive"
@@ -195,9 +194,9 @@ export interface RenderPipelineNodeDefinition {
   /**
    * The ablation switch this node's lamp throws.
    *
-   * Absent on the four nodes switched by a contract the shaders already compile
-   * against — cone visibility, GI composition, seam closure and the reuse gate.
-   * Those keep their own flag; a second way to turn one off would be two
+   * Absent on the three nodes switched by a contract the shaders already compile
+   * against — cone visibility, GI composition, and seam closure. Those keep
+   * their own flag; a second way to turn one off would be two
    * sources of truth for one bit. {@link switchedBy} names the flag instead.
    */
   readonly stage?: RenderStageSwitchId;
@@ -372,25 +371,6 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
       : context.sceneHasFluid && context.rendererActive ? "on" : "unavailable"),
     chip: (context) => (context.disabledStages.has("fluid-coverage") ? "withheld · volume frozen"
       : context.sceneHasFluid ? "fill + mip chain" : "dry scene"),
-  },
-  {
-    id: "stationary-reuse",
-    band: "primary",
-    side: "right",
-    label: "Stationary reuse gate",
-    // A decision, not a dispatch. Its worth shows up as the primary row going
-    // to zero on a hit, which is where it belongs.
-    spendsNoFrameTime: true,
-    switchedBy: "stationaryPrimaryReuseEnabled",
-    taps: [],
-    toggleable: true,
-    tip: {
-      summary: "Reuses the previous frame's primary G-buffer while the camera, viewport, scene epoch, body roster and tuning are all unchanged. A hit skips the whole primary band, byte for byte. Measured 13.63 → 7.34 ms at 1791×904 on water-box-dam-break, and 47.6 → 20.7 ms at 1500².",
-      reads: "camera · viewport · scene epoch · body roster · tuning key",
-      gate: "static-primary coherence. Running water does not block it — the fluid is never in this G-buffer — but solver-owned rigid poses do, because the roster this key reads is a readback of them rather than their source",
-    },
-    state: (context) => (context.tuning.stationaryPrimaryReuseEnabled ? "armed" : "off"),
-    chip: (context) => (context.tuning.stationaryPrimaryReuseEnabled ? "static-primary" : "always retrace"),
   },
   {
     id: "primary-traversal",

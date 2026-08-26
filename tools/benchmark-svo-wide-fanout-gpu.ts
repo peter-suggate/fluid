@@ -49,7 +49,7 @@ function denseFixture() {
           z |= ((local >>> (3 * bit + 2)) & 1) << bit;
         }
         nodes[base + 4] = INVALID; nodes[base + 6] = local;
-        leaves.set([node, local * brickSize ** 3, local, 0], local * 4);
+        leaves.set([node, local * brickSize ** 3, 0, INVALID], local * 4);
         terminals.push({ sourceNodeIndex: node, sourceLeafIndex: local, level, coordinate: [x, y, z] });
       }
     }

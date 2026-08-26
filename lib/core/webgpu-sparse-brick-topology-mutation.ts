@@ -198,8 +198,10 @@ fn activateTerminal(node:u32)->bool{
   let leafBase=loadControl(16u)+leaf*4u;
   atomicStore(&structure[TOPOLOGY_BASE+leafBase],node);
   atomicStore(&structure[TOPOLOGY_BASE+leafBase+1u],leaf*voxelsPerBrick);
-  atomicStore(&structure[TOPOLOGY_BASE+leafBase+2u],loadNode(node,0u));
-  atomicStore(&structure[TOPOLOGY_BASE+leafBase+3u],loadNode(node,1u));
+  // Runtime topology growth is fluid/voxel residency. Planar terminals are
+  // authored by the scene planner and never inferred from a mutation request.
+  atomicStore(&structure[TOPOLOGY_BASE+leafBase+2u],0u);
+  atomicStore(&structure[TOPOLOGY_BASE+leafBase+3u],INVALID);
   storeNode(node,6u,leaf);
   storeNode(node,7u,ACTIVE|DIRTY|QUEUED);
   atomicStore(&structure[23],leaf+1u);atomicStore(&structure[1],leaf+1u);

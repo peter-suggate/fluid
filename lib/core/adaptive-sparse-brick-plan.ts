@@ -8,6 +8,9 @@ import {
   type SparseBrickNodePlan,
   type SparseBrickPlan,
   type SparseBrickSize,
+  type SparseBrickLeafTerminal,
+  SPARSE_BRICK_LEAF_TERMINAL,
+  SPARSE_BRICK_VOXEL_TERMINAL,
 } from "../svo/sparse-brick-octree";
 import { completeCooperativeBuild } from "./cooperative-build";
 
@@ -44,6 +47,11 @@ export interface AdaptiveSparseBrickPlanOptions {
    * their size.
    */
   refineEnvironmentLeaf?: (level: number, coordinate: SparseBrickCoordinate) => boolean;
+  /** Representation selected after topology has admitted an environment leaf. */
+  classifyEnvironmentLeaf?: (
+    level: number,
+    coordinate: SparseBrickCoordinate,
+  ) => SparseBrickLeafTerminal;
 }
 
 export interface AdaptiveSparseBrickReductionReport {
@@ -377,6 +385,24 @@ export function* planAdaptiveSparseBrickOctreeSteps(
     if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
     if (!leafKeys.has(`${node.level}:${node.morton}`)) continue;
     const index: number = leaves.length;
+    const terminal = !solverCovers(node.level, node.morton)
+      ? options.classifyEnvironmentLeaf?.(node.level, node.coordinate)
+        ?? SPARSE_BRICK_VOXEL_TERMINAL
+      : SPARSE_BRICK_VOXEL_TERMINAL;
+    if (terminal.kind !== SPARSE_BRICK_LEAF_TERMINAL.voxels
+      && terminal.kind !== SPARSE_BRICK_LEAF_TERMINAL.planarBoundary) {
+      throw new RangeError(`Sparse brick leaf terminal kind ${terminal.kind} is unsupported`);
+    }
+    if (!Number.isSafeInteger(terminal.index) || terminal.index < 0
+      || terminal.index > 0xffff_ffff) {
+      throw new RangeError("Sparse brick leaf terminal index must fit uint32");
+    }
+    if ((terminal.kind === SPARSE_BRICK_LEAF_TERMINAL.voxels
+      && terminal.index !== SPARSE_BRICK_INVALID_INDEX)
+      || (terminal.kind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary
+        && terminal.index === SPARSE_BRICK_INVALID_INDEX)) {
+      throw new RangeError("Sparse brick leaf terminal index does not match its kind");
+    }
     node.leafIndex = index;
     leaves.push({
       index,
@@ -384,6 +410,8 @@ export function* planAdaptiveSparseBrickOctreeSteps(
       morton: node.morton,
       coordinate: node.coordinate,
       voxelOffset: index * voxelsPerBrick,
+      terminalKind: terminal.kind,
+      terminalIndex: terminal.index,
     });
   }
 

@@ -33,6 +33,7 @@ export const SPARSE_CM12_WORLD_DIRECTORY_HEADER = Object.freeze({
   maximumY: 20,
   maximumZ: 21,
   boundsGeneration: 22,
+  freeCount: 23,
 } as const);
 
 export const SPARSE_CM12_WORLD_DIRECTORY_ENTRY = Object.freeze({
@@ -60,6 +61,7 @@ export interface SparseCM12WorldDirectoryLayout {
   readonly entryBaseWords: number;
   readonly leafBaseWords: number;
   readonly leafCapacity: number;
+  readonly freeListBaseWords: number;
   readonly maximumSpanLog: number;
   readonly totalWords: number;
   readonly totalBytes: number;
@@ -92,7 +94,9 @@ export function createSparseCM12WorldDirectoryLayout(options: {
   const leafCapacity = initialLeaves + growthLeaves;
   const entryBaseWords = SPARSE_CM12_WORLD_DIRECTORY_HEADER_WORDS;
   const leafBaseWords = entryBaseWords + capacity * SPARSE_CM12_WORLD_DIRECTORY_ENTRY_WORDS;
-  const localWords = leafBaseWords + leafCapacity * SPARSE_CM12_WORLD_DIRECTORY_LEAF_WORDS;
+  const freeListBaseWords = leafBaseWords
+    + leafCapacity * SPARSE_CM12_WORLD_DIRECTORY_LEAF_WORDS;
+  const localWords = freeListBaseWords + growthLeaves;
   const totalWords = baseWords + localWords;
   return Object.freeze({
     baseWords,
@@ -100,6 +104,7 @@ export function createSparseCM12WorldDirectoryLayout(options: {
     capacity,
     entryBaseWords,
     leafBaseWords,
+    freeListBaseWords,
     leafCapacity,
     maximumSpanLog,
     totalWords,
@@ -207,6 +212,8 @@ const CM12_WDR_ENTRY_WORDS:u32=${SPARSE_CM12_WORLD_DIRECTORY_ENTRY_WORDS}u;
 const CM12_WDR_LEAF_BASE:u32=${layout.leafBaseWords}u;
 const CM12_WDR_LEAF_CAPACITY:u32=${layout.leafCapacity}u;
 const CM12_WDR_LEAF_WORDS:u32=${SPARSE_CM12_WORLD_DIRECTORY_LEAF_WORDS}u;
+const CM12_WDR_FREE_LIST:u32=${layout.freeListBaseWords}u;
+const CM12_WDR_GROWTH_CAPACITY:u32=${layout.leafCapacity - layout.initialLeaves}u;
 
 fn cm12WorldHash(q:vec3i,spanLog:u32)->u32{
   var hash=0x811c9dc5u;
@@ -221,7 +228,9 @@ fn cm12WorldEntry(slot:u32)->u32{
 fn cm12WorldLeafRecord(leaf:u32)->u32{
   return CM12_WDR_BASE+CM12_WDR_LEAF_BASE+leaf*CM12_WDR_LEAF_WORDS;}
 fn cm12WorldLeafAllocated(leaf:u32)->bool{
-  return leaf<atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.nextLeaf}u]);}
+  return leaf<atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.nextLeaf}u])
+    &&atomicLoad(&${arenaName}[cm12WorldLeafRecord(leaf)+${l.generation}u])
+      !=CM12_WDR_INVALID;}
 fn cm12WorldHasDynamicLeaves()->bool{
   return atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.nextLeaf}u])
     >CM12_WDR_INITIAL_LEAVES;}
@@ -261,6 +270,30 @@ fn cm12WorldUpdateBounds(q:vec3i,spanLog:u32){
   atomicStore(&${arenaName}[CM12_WDR_BASE+${h.boundsGeneration}u],
     atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.generation}u]));
 }
+fn cm12WorldRecomputeBounds(){
+  var minimum=vec3u(0xffffffffu);var maximum=vec3u(0u);var found=false;
+  let limit=min(atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.nextLeaf}u]),
+    CM12_WDR_LEAF_CAPACITY);
+  for(var leaf=0u;leaf<limit;leaf+=1u){
+    if(!cm12WorldLeafAllocated(leaf)){continue;}
+    let q=cm12WorldLeafCoordinate(leaf);
+    let span=i32(1u<<cm12WorldLeafSpanLog(leaf));let upper=q+vec3i(span);
+    minimum=min(minimum,vec3u(cm12WorldSignedOrder(q.x),cm12WorldSignedOrder(q.y),
+      cm12WorldSignedOrder(q.z)));
+    maximum=max(maximum,vec3u(cm12WorldSignedOrder(upper.x),
+      cm12WorldSignedOrder(upper.y),cm12WorldSignedOrder(upper.z)));
+    found=true;
+  }
+  if(!found){let zero=cm12WorldSignedOrder(0);minimum=vec3u(zero);maximum=vec3u(zero);}
+  atomicStore(&${arenaName}[CM12_WDR_BASE+${h.minimumX}u],minimum.x);
+  atomicStore(&${arenaName}[CM12_WDR_BASE+${h.minimumY}u],minimum.y);
+  atomicStore(&${arenaName}[CM12_WDR_BASE+${h.minimumZ}u],minimum.z);
+  atomicStore(&${arenaName}[CM12_WDR_BASE+${h.maximumX}u],maximum.x);
+  atomicStore(&${arenaName}[CM12_WDR_BASE+${h.maximumY}u],maximum.y);
+  atomicStore(&${arenaName}[CM12_WDR_BASE+${h.maximumZ}u],maximum.z);
+  atomicStore(&${arenaName}[CM12_WDR_BASE+${h.boundsGeneration}u],
+    atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.generation}u]));
+}
 fn cm12WorldFloorToSpan(value:i32,span:i32)->i32{
   var quotient=value/span;let remainder=value%span;
   if(remainder<0){quotient-=1;}return quotient*span;
@@ -291,14 +324,29 @@ fn cm12WorldAllocateExact(q:vec3i,spanLog:u32)->u32{
       &&atomicLoad(&${arenaName}[at+${e.spanLog}u])==spanLog){
       return atomicLoad(&${arenaName}[at+${e.leaf}u]);
     }
-    if(state==0u){
-      let claim=atomicCompareExchangeWeak(&${arenaName}[at+${e.state}u],0u,1u);
+    if(state==0u||state==3u){
+      let claim=atomicCompareExchangeWeak(&${arenaName}[at+${e.state}u],state,1u);
       if(claim.exchanged){
-        let leaf=atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.nextLeaf}u],1u);
-        if(leaf>=CM12_WDR_LEAF_CAPACITY){
-          atomicSub(&${arenaName}[CM12_WDR_BASE+${h.nextLeaf}u],1u);
+        var leaf=CM12_WDR_INVALID;
+        for(var attempt=0u;attempt<256u;attempt+=1u){
+          let free=atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.freeCount}u]);
+          if(free==0u){break;}
+          let pop=atomicCompareExchangeWeak(
+            &${arenaName}[CM12_WDR_BASE+${h.freeCount}u],free,free-1u);
+          if(pop.exchanged){leaf=atomicLoad(&${arenaName}[
+            CM12_WDR_BASE+CM12_WDR_FREE_LIST+free-1u]);break;}
+        }
+        if(leaf==CM12_WDR_INVALID){
+          leaf=atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.nextLeaf}u],1u);
+          if(leaf>=CM12_WDR_LEAF_CAPACITY){
+            atomicSub(&${arenaName}[CM12_WDR_BASE+${h.nextLeaf}u],1u);
+            leaf=CM12_WDR_INVALID;
+          }
+        }
+        if(leaf==CM12_WDR_INVALID||leaf<CM12_WDR_INITIAL_LEAVES
+          ||leaf>=CM12_WDR_LEAF_CAPACITY){
           atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.capacityFaults}u],1u);
-          atomicStore(&${arenaName}[at+${e.state}u],0u);return CM12_WDR_INVALID;
+          atomicStore(&${arenaName}[at+${e.state}u],state);return CM12_WDR_INVALID;
         }
         atomicStore(&${arenaName}[at+${e.hash}u],hash);
         atomicStore(&${arenaName}[at+${e.x}u],bitcast<u32>(q.x));
@@ -328,6 +376,34 @@ fn cm12WorldAllocateExact(q:vec3i,spanLog:u32)->u32{
   }
   atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.insertionFaults}u],1u);
   return CM12_WDR_INVALID;
+}
+fn cm12WorldReleaseLeaf(leaf:u32)->bool{
+  if(leaf<CM12_WDR_INITIAL_LEAVES||!cm12WorldLeafAllocated(leaf)){return false;}
+  let leafAt=cm12WorldLeafRecord(leaf);let q=cm12WorldLeafCoordinate(leaf);
+  let spanLog=cm12WorldLeafSpanLog(leaf);let hash=cm12WorldHash(q,spanLog);
+  var slot=hash&CM12_WDR_MASK;
+  for(var probe=0u;probe<CM12_WDR_CAPACITY;probe+=1u){
+    let at=cm12WorldEntry(slot);let state=atomicLoad(&${arenaName}[at+${e.state}u]);
+    if(state==0u){return false;}
+    if(state==2u&&atomicLoad(&${arenaName}[at+${e.hash}u])==hash
+      &&atomicLoad(&${arenaName}[at+${e.leaf}u])==leaf){
+      let claim=atomicCompareExchangeWeak(&${arenaName}[at+${e.state}u],2u,1u);
+      if(!claim.exchanged){return false;}
+      atomicStore(&${arenaName}[leafAt+${l.generation}u],CM12_WDR_INVALID);
+      atomicStore(&${arenaName}[at+${e.state}u],3u);
+      atomicSub(&${arenaName}[CM12_WDR_BASE+${h.liveCount}u],1u);
+      let free=atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.freeCount}u],1u);
+      if(free<CM12_WDR_GROWTH_CAPACITY){
+        atomicStore(&${arenaName}[CM12_WDR_BASE+CM12_WDR_FREE_LIST+free],leaf);
+        return true;
+      }
+      atomicSub(&${arenaName}[CM12_WDR_BASE+${h.freeCount}u],1u);
+      atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.capacityFaults}u],1u);
+      return false;
+    }
+    slot=(slot+1u)&CM12_WDR_MASK;
+  }
+  return false;
 }
 `;
 }

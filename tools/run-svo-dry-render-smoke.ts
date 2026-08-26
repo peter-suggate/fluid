@@ -138,6 +138,9 @@
  *   FLUID_SVO_DRY_SMOKE_PRIMITIVE_HEADROOM fraction of 4 096 allowed (default 0.9)
  *   FLUID_SVO_DRY_SMOKE_FRAME_BUDGET_MS   optional frame-time ceiling
  *   FLUID_SVO_DRY_SMOKE_IMAGE_HASH        optional 0x… settled-frame pin
+ *   FLUID_SVO_DRY_SMOKE_REQUIRE_PLANAR_OWNER
+ *                                         environment primitive key whose visible
+ *                                         material pixels must all be analytic
  *   FLUID_SVO_DRY_SMOKE_OUT               optional JSON report path
  *   FLUID_SVO_DRY_SMOKE_PNG               optional settled-frame PNG path
  *   FLUID_SVO_DRY_SMOKE_PNG_CROP          optional `x,y,w,h` region of that PNG
@@ -210,6 +213,7 @@ import {
   type SvoDryOptimizationExperiments,
 } from "../lib/svo/webgpu-svo-dry-scene";
 import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/webgpu-svo-gbuffer-targets";
+import { SVO_GBUFFER_FIELD_SOURCES } from "../lib/svo/svo-gbuffer";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE } from "../lib/core/webgpu-device-limits";
 import { resolveDisplayGrade } from "../lib/core/webgpu-lighting";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/svo-screen-space-termination";
@@ -327,6 +331,7 @@ const primitiveHeadroom = Number(process.env.FLUID_SVO_DRY_SMOKE_PRIMITIVE_HEADR
 const frameBudget_ms = process.env.FLUID_SVO_DRY_SMOKE_FRAME_BUDGET_MS === undefined
   ? undefined : Number(process.env.FLUID_SVO_DRY_SMOKE_FRAME_BUDGET_MS);
 const pinnedImageHash = process.env.FLUID_SVO_DRY_SMOKE_IMAGE_HASH;
+const requiredPlanarOwnerKey = process.env.FLUID_SVO_DRY_SMOKE_REQUIRE_PLANAR_OWNER;
 const outPath = process.env.FLUID_SVO_DRY_SMOKE_OUT;
 const pngPath = process.env.FLUID_SVO_DRY_SMOKE_PNG;
 /** `x,y,w,h` in frame pixels. Absent writes the whole frame. */
@@ -632,6 +637,11 @@ await device.queue.onSubmittedWorkDone();
 const source = solver.sparseVoxelSceneSource;
 assert.ok(source?.structural, "live SVO scene did not publish a structural scene source");
 const { drySceneData, scenePrimitives } = buildSvoDrySceneAssembly(scene, source);
+const requiredPlanarOwner = requiredPlanarOwnerKey === undefined
+  ? undefined : scenePrimitives.metadata.find(({ key }) => key === requiredPlanarOwnerKey);
+if (requiredPlanarOwnerKey !== undefined && !requiredPlanarOwner) {
+  throw new RangeError(`FLUID_SVO_DRY_SMOKE_REQUIRE_PLANAR_OWNER=${requiredPlanarOwnerKey} does not name a published environment primitive`);
+}
 
 // ---------------------------------------------------------------------------
 // Static checks, before a single pixel. These are the ones that are silent in
@@ -1016,7 +1026,7 @@ log(`Brick occupancy: ${occupancyArm}`);
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float",
   traversalMode, occupancyArm, "split",
   rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
-  "off", rasterArms, rasterArms, true, experiments);
+  rasterArms, rasterArms, true, experiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(bodies.count);
 // Level of detail, swept from the environment rather than by editing a default.
@@ -1160,7 +1170,7 @@ if (pairArm !== "none") {
   pairRenderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float",
     traversalMode, pairOccupancy, "split",
     rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
-    "off", rasterArms, rasterArms, true, pairExperiments);
+    rasterArms, rasterArms, true, pairExperiments);
   await pairRenderer.initialize();
   pairRenderer.setRigidBodyCount(bodies.count);
   pairRenderer.setRenderTuning({
@@ -1327,6 +1337,83 @@ const firstRows = await captureFrame("Smoke fingerprint frame");
 const secondRows = await captureFrame("Smoke fingerprint repeat");
 record("fingerprint-encode", !encodeDeclined,
   encodeDeclined ? "dry-scene encode declined a fingerprint frame" : "both fingerprint frames encoded");
+
+/**
+ * Representation-level planar acceptance, read from the production G-buffer.
+ *
+ * A terminal census only proves that some planar leaves exist. It says nothing
+ * about which representation won the pixels the user can see. Environment
+ * materials are owner-specific, so the requested primitive's material selects
+ * its visible pixels without reconstructing world positions from half-float
+ * depth. Every selected pixel must then name the analytic field source.
+ */
+let planarOwnerCensus: {
+  key: string;
+  materialId: number;
+  visiblePixels: number;
+  analyticPixels: number;
+  fieldSources: Record<string, number>;
+} | undefined;
+if (requiredPlanarOwner) {
+  const gBuffer = renderer.gBufferTextures;
+  assert.ok(gBuffer, "planar-owner acceptance requires the split G-buffer");
+  const packedBytesPerPixel = 16;
+  const identityBytesPerPixel = 8;
+  const packedBytesPerRow = Math.ceil(width * packedBytesPerPixel / 256) * 256;
+  const identityBytesPerRow = Math.ceil(width * identityBytesPerPixel / 256) * 256;
+  const packedReadback = device.createBuffer({
+    label: "Smoke planar-owner packed-surface readback",
+    size: packedBytesPerRow * height,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const identityReadback = device.createBuffer({
+    label: "Smoke planar-owner identity readback",
+    size: identityBytesPerRow * height,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const encoder = device.createCommandEncoder({ label: "Smoke planar-owner G-buffer census" });
+  encoder.copyTextureToBuffer({ texture: gBuffer.packedSurface }, {
+    buffer: packedReadback, bytesPerRow: packedBytesPerRow, rowsPerImage: height,
+  }, [width, height]);
+  encoder.copyTextureToBuffer({ texture: gBuffer.identityMedia }, {
+    buffer: identityReadback, bytesPerRow: identityBytesPerRow, rowsPerImage: height,
+  }, [width, height]);
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  await Promise.all([
+    packedReadback.mapAsync(GPUMapMode.READ),
+    identityReadback.mapAsync(GPUMapMode.READ),
+  ]);
+  const packed = new DataView(packedReadback.getMappedRange());
+  const identity = new DataView(identityReadback.getMappedRange());
+  const fieldSources: Record<string, number> = {};
+  let visiblePixels = 0;
+  let analyticPixels = 0;
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+    const materialId = identity.getUint16(y * identityBytesPerRow + x * identityBytesPerPixel, true);
+    if (materialId !== requiredPlanarOwner.materialId) continue;
+    visiblePixels += 1;
+    const metadata = packed.getUint32(y * packedBytesPerRow + x * packedBytesPerPixel + 12, true);
+    const fieldSource = metadata & 0xf;
+    fieldSources[fieldSource] = (fieldSources[fieldSource] ?? 0) + 1;
+    if (fieldSource === SVO_GBUFFER_FIELD_SOURCES.analyticPrimitive) analyticPixels += 1;
+  }
+  packedReadback.unmap();
+  identityReadback.unmap();
+  packedReadback.destroy();
+  identityReadback.destroy();
+  planarOwnerCensus = {
+    key: requiredPlanarOwner.key,
+    materialId: requiredPlanarOwner.materialId,
+    visiblePixels,
+    analyticPixels,
+    fieldSources,
+  };
+  const minimumVisiblePixels = Math.max(64, Math.floor(width * height * 0.01));
+  record("planar-owner-primary", visiblePixels >= minimumVisiblePixels && analyticPixels === visiblePixels,
+    `${requiredPlanarOwner.key}: ${analyticPixels}/${visiblePixels} visible material pixels use the analytic primary representation`,
+    planarOwnerCensus, { minimumVisiblePixels, requiredFieldSource: SVO_GBUFFER_FIELD_SOURCES.analyticPrimitive });
+}
 if (pngPath) {
   // Graded with the scene's own curve, so the file matches what the app shows
   // rather than a raw HDR readback that would look black on an ACES scene.
@@ -1808,12 +1895,14 @@ const report = {
       : undefined,
     litGridSamples: litSamples,
     gridSize,
+    planarOwner: planarOwnerCensus,
   },
   world: {
     dimensionsCells: structuralDomain.dimensionsCells,
     brickSize: structuralDomain.brickSize,
     cellSize_mm: structuralDomain.cellSize_m.map((value) => Number((value * 1000).toFixed(3))),
     maximumDepth: structuralDomain.maximumDepth,
+    terminals: source.structural.terminalCounts,
     primitiveCount,
     primitiveCeiling: SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES,
     rigidBodyCount: scene.rigidBodies.length,

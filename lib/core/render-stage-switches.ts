@@ -11,9 +11,8 @@
  * in the encoder are the same name. Only stages whose removal is *structural*
  * live here; four nodes are switched by contracts that already existed and that
  * the shaders compile against — cone visibility (`coneTracingMode`), GI
- * composition (`globalIlluminationEnabled`), primary seam closure
- * (`silhouetteRefinementEnabled`) and the stationary reuse gate
- * (`stationaryPrimaryReuseEnabled`) — and adding a second way to turn those off
+ * composition (`globalIlluminationEnabled`) and primary seam closure
+ * (`silhouetteRefinementEnabled`) — and adding a second way to turn those off
  * would be two sources of truth for one bit.
  *
  * Every gate keeps the *clears* its consumers depend on and drops only the
@@ -80,9 +79,7 @@ export function disabledRenderStagesFrom(ids: readonly string[] | undefined): Di
  *
  * Frame reuse and the presentation trace context are both keyed by "what this
  * frame was asked to draw", and an ablation changes that. Without the key in
- * both, the stationary-primary gate would hand back a G-buffer traced before
- * the stage was switched, and the averaged trace would mix two different
- * pipelines into one mean.
+ * both, instrumentation would mix two different pipelines into one mean.
  */
 export function disabledRenderStagesKey(disabled: DisabledRenderStages): string {
   if (disabled.size === 0) return "";

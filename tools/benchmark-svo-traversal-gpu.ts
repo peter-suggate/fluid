@@ -81,8 +81,8 @@ function fullDenseFixture(maximumDepth: number): PackedFixture {
         const leafBase = local * 4;
         leaves[leafBase] = nodeIndex;
         leaves[leafBase + 1] = local * 64;
-        leaves[leafBase + 2] = nodes[base];
-        leaves[leafBase + 3] = nodes[base + 1];
+        leaves[leafBase + 2] = 0; // voxel terminal
+        leaves[leafBase + 3] = INVALID;
       }
     }
   }
@@ -106,6 +106,8 @@ function deepSparseFixture(maximumDepth = 21): PackedFixture {
       nodes[base + 6] = 0;
       leaves[0] = level;
       leaves[1] = 0;
+      leaves[2] = 0;
+      leaves[3] = INVALID;
     }
   }
   return { nodes, leaves, depth: maximumDepth, brickSize: 4 };

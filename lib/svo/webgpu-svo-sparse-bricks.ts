@@ -28,6 +28,7 @@ import { sceneTerrainSurfaceModel, type SvoTerrainSurfaceModel } from "./svo-ter
 import { sceneCellSizes_m } from "../core/scene-lattice";
 import {
   SOLID_WORLD_BRICK_CELLS,
+  solidWorldVoxelPatchBounds_m,
   solidWorldContentStamp,
   solidWorldForScene,
   type SolidWorld,
@@ -37,6 +38,7 @@ import {
   SPARSE_BRICK_GPU_LAYOUT,
   SPARSE_BRICK_SCENE_GEOMETRY_FORMATS,
   SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES,
+  SPARSE_BRICK_LEAF_TERMINAL,
   octreeLiveSceneLeafPayloadMode,
   octreeLiveSceneSceneGeometryFormat,
   packSparseBrickPlan,
@@ -128,6 +130,17 @@ import {
   type CooperativeBuildOptions,
 } from "../core/cooperative-build";
 import { PassBroker } from "../core/webgpu-pass-broker";
+import {
+  packPlanarBoundaryPatches,
+  PLANAR_BOUNDARY_PATCH_BYTES,
+} from "../core/planar-boundary";
+import {
+  buildSvoPlanarBoundaryCatalog,
+  buildSvoSolidWorldPlanarBoundaryCatalog,
+  createSvoPlanarLeafClassifier,
+  svoPlanarResidualEnvironmentPrimitives,
+  svoPlanarResidualSolidWorld,
+} from "./svo-planar-boundary";
 
 export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
@@ -665,6 +678,31 @@ function sparseScenePrimitiveForRigidBody(body: RigidBodyDescription, ownerId: n
   return { kind: "cylinder", center, radius: body.dimensions_m.x, halfHeight: body.dimensions_m.y / 2, orientation, materialId, ownerId };
 }
 
+/** Geometry inputs whose bounds and exact records are baked into macro leaves. */
+function planarBoundaryTopologyStamp(
+  scene: SceneDescription,
+  environmentPrimitives: readonly EnvironmentProxyPrimitive[],
+): string {
+  return JSON.stringify({
+    solidWorld: solidWorldContentStamp(scene),
+    environment: environmentPrimitives.map((primitive) => ({
+      key: primitive.key,
+      ownerIndex: primitive.ownerIndex,
+      kind: primitive.kind,
+      tags: primitive.tags,
+      sway: "sway" in primitive ? primitive.sway : undefined,
+      geometry: sparseScenePrimitiveForProxy(primitive, {
+        materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
+        ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
+      }),
+    })),
+    staticRigidBodies: scene.rigidBodies.flatMap((body, ownerId) =>
+      body.motion === "static"
+        ? [sparseScenePrimitiveForRigidBody(body, ownerId)]
+        : []),
+  });
+}
+
 /**
  * Page-level topology claims for the canonical SolidWorld image.
  *
@@ -1174,6 +1212,8 @@ export class OctreeSparseBrickWorld {
   private surfaceModel!: SvoTerrainSurfaceModel;
   private solidWorld!: SolidWorld;
   private solidWorldStamp = "";
+  /** Non-empty only when immutable planar terminals make geometry structural. */
+  private planarTopologyStamp = "";
   private liveScenePrimitiveStates = new Map<string, LiveScenePrimitiveState>();
   private liveScenePrimitives = new Map<string, LiveScenePrimitiveEntry>();
   /**
@@ -1388,6 +1428,52 @@ export class OctreeSparseBrickWorld {
       const scale = 2 ** (maximumDepth - level);
       nodeEdge_m.push(refinedBrickEdge.map((value) => value * scale));
     }
+    const planarCatalog = buildSvoPlanarBoundaryCatalog(environmentPrimitives, (primitive) => ({
+        materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
+        ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
+      }));
+    const solidPlanarCatalog = scene.terrain ? undefined
+      : buildSvoSolidWorldPlanarBoundaryCatalog(scene, initialSolidWorld.patches,
+        planarCatalog.sources.length);
+    const planarSources = [
+      ...planarCatalog.sources,
+      ...(solidPlanarCatalog?.sources ?? []),
+    ];
+    const residualSolidWorld = svoPlanarResidualSolidWorld(initialSolidWorld,
+      solidPlanarCatalog);
+    // Terrain is page-native and may share pages with authored edits, so its
+    // exact geometry cannot be separated into an immutable slab record here.
+    // A terrain-free SolidWorld can use its authored boxes directly: accepted
+    // thin fills become exact terminals while clear, thick and intersecting
+    // boxes remain ordinary voxel residuals.
+    const planarLeafClassifier = createSvoPlanarLeafClassifier({
+      sources: planarSources,
+      blockers: [
+        ...environmentPrimitives.map((primitive) => ({
+          minimum: [primitive.aabb_m.min.x, primitive.aabb_m.min.y,
+            primitive.aabb_m.min.z] as const,
+          maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y,
+            primitive.aabb_m.max.z] as const,
+          planarSourceIndex: planarCatalog.patchIndexByOwner.get(primitive.ownerIndex),
+        })),
+        ...(scene.terrain
+          ? solidWorldBounds.map((bounds) => ({
+            minimum: bounds.minimum,
+            maximum: bounds.maximum,
+          }))
+          : initialSolidWorld.patches.map((patch, patchIndex) => ({
+            ...solidWorldVoxelPatchBounds_m(scene, patch),
+            planarSourceIndex: solidPlanarCatalog?.patchIndexByPatch.get(patchIndex),
+          }))),
+        ...scene.rigidBodies.flatMap((body, ownerId) => {
+          if (body.motion !== "static") return [];
+          const bounds = sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId));
+          return [{ minimum: bounds.minimum, maximum: bounds.maximum }];
+        }),
+      ],
+      worldOrigin_m: worldOrigin,
+      nodeEdge_m,
+    });
     /**
      * Primitives whose bounds touch a brick — what the voxeliser bins per leaf.
      *
@@ -1552,16 +1638,15 @@ export class OctreeSparseBrickWorld {
       // Split for primitive crowding or for a non-planar primitive surface.
       // SolidWorld boxes already claim their exact voxel bricks and therefore
       // need no heightfield-shaped refinement arm.
-      refineEnvironmentLeaf: surfaceRefinement
-        ? (level, coordinate) => surfaceRefinement.refineEnvironmentLeaf(level, coordinate)
-        : refinementDepth > 0
-          ? (level, coordinate) => (
-            candidatesInBrick(level, coordinate, OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET)
+      refineEnvironmentLeaf: (level, coordinate) =>
+        planarLeafClassifier.requiresFineVoxelResidual(level, coordinate)
+        || (surfaceRefinement
+          ? surfaceRefinement.refineEnvironmentLeaf(level, coordinate)
+          : refinementDepth > 0
+            ? candidatesInBrick(level, coordinate, OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET)
               > OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET
-          )
-          : environmentCoarsening
-            ? (level, coordinate) => environmentCoarsening.refineEnvironmentLeaf(level, coordinate)
-            : undefined,
+            : environmentCoarsening?.refineEnvironmentLeaf(level, coordinate) ?? false),
+      classifyEnvironmentLeaf: planarLeafClassifier,
     });
     this.finestLevel = plan.maximumDepth;
     this.sceneBrickDimensions = refinedBrickDimensions;
@@ -1716,7 +1801,10 @@ export class OctreeSparseBrickWorld {
     const geometry = storageBuffer(device, "Sparse brick source geometry", initialVoxelCount * 16);
     const velocity = storageBuffer(device, "Sparse brick source velocity", initialVoxelCount * 16);
     const materialOwners = storageBuffer(device, "Sparse brick source material owners", initialVoxelCount * 4);
-    this.sourceBuffers = [counts, topology, geometry, velocity, materialOwners];
+    const planarBoundaryRecords = packPlanarBoundaryPatches(planarSources.map(({ patch }) => patch));
+    const planarBoundaries = storageBuffer(device, "Accepted SVO planar boundary records",
+      Math.max(PLANAR_BOUNDARY_PATCH_BYTES, planarBoundaryRecords.byteLength), planarBoundaryRecords);
+    this.sourceBuffers = [counts, topology, geometry, velocity, materialOwners, planarBoundaries];
     this.source = { counts, topology, geometry, velocity, materialOwners, capacities: {
       nodes: plan.nodes.length, leaves: plan.leaves.length, voxels: plan.voxelCount,
     } };
@@ -1770,7 +1858,7 @@ export class OctreeSparseBrickWorld {
       candidatesPerDirtyBrick: OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
       clusterCapacity: OCTREE_LIVE_SCENE_CLUSTER_CAPACITY,
       fieldProgramCapacity: OCTREE_LIVE_SCENE_FIELD_PROGRAM_CAPACITY,
-      solidWorld: initialSolidWorld,
+      solidWorld: residualSolidWorld,
       solidWorldLattice: {
         origin_m: [-0.5 * scene.container.width_m, 0,
           -0.5 * scene.container.depth_m],
@@ -2045,6 +2133,15 @@ export class OctreeSparseBrickWorld {
       entryStrideBytes: residencyLayout.entryStrideBytes,
       capacity: this.residency.capacity,
     };
+    const terminalCounts = {
+      voxel: plan.leaves.filter((leaf) =>
+        leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.voxels).length,
+      planarBoundary: plan.leaves.filter((leaf) =>
+        leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary).length,
+    };
+    if (planarSources.length > 0) {
+      this.planarTopologyStamp = planarBoundaryTopologyStamp(scene, environmentPrimitives);
+    }
     const structural: SparseVoxelStructuralRenderSource = {
       structure: { buffer: this.tree.structure, size: this.tree.structure.size },
       structureOffsetsWords: {
@@ -2103,6 +2200,13 @@ export class OctreeSparseBrickWorld {
         owner: "GPUFluidBrickResidency",
       },
       capacities: { nodes: this.tree.nodeCapacity, leaves: this.tree.leafCapacity, voxels: this.tree.voxelCapacity },
+      terminalCounts,
+      planarBoundaries: {
+        records: { buffer: planarBoundaries, size: planarBoundaries.size },
+        count: planarSources.length,
+        strideBytes: PLANAR_BOUNDARY_PATCH_BYTES,
+        generation: 1,
+      },
       strides: {
         control: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes,
         node: SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes,
@@ -2264,6 +2368,9 @@ export class OctreeSparseBrickWorld {
    * old size while their authored centres move with the enlarged tank.
    */
   rescaleRenderDomain(scene: SceneDescription): void {
+    if (this.planarTopologyStamp) {
+      throw new Error("A sparse world with planar terminals must be rebuilt to rescale its render domain");
+    }
     const structural = this.sceneSource.structural;
     if (!structural) return;
     const dimensions = structural.domain.dimensionsCells;
@@ -2307,6 +2414,21 @@ export class OctreeSparseBrickWorld {
       ? solidWorldPageBounds(scene, nextSolidWorld) : [];
     const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default");
     const authored = environmentProxyPrimitives(catalog, true);
+    const planarCatalog = buildSvoPlanarBoundaryCatalog(authored, (primitive) => ({
+      materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
+      ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
+    }));
+    const residualAuthored = svoPlanarResidualEnvironmentPrimitives(authored,
+      planarCatalog);
+    const solidPlanarCatalog = scene.terrain ? undefined
+      : buildSvoSolidWorldPlanarBoundaryCatalog(scene, nextSolidWorld.patches,
+        planarCatalog.sources.length);
+    const nextResidualSolidWorld = svoPlanarResidualSolidWorld(nextSolidWorld,
+      solidPlanarCatalog);
+    if (!initialPublication && this.planarTopologyStamp
+      && planarBoundaryTopologyStamp(scene, authored) !== this.planarTopologyStamp) {
+      throw new Error("Authored geometry affecting planar terminals requires a sparse-world rebuild");
+    }
     const liveEntries = [
       // Only the bodies that cannot move. A dynamic body is solver-owned: the
       // GPU advances its pose every step while the document keeps the authored
@@ -2327,7 +2449,7 @@ export class OctreeSparseBrickWorld {
         primitive: sparseScenePrimitiveForRigidBody(body, ownerId),
         materialSignature: body.shape,
       }] : []),
-      ...authored.map((primitive) => ({
+      ...residualAuthored.map((primitive) => ({
         key: primitive.key,
         primitive: sparseScenePrimitiveForProxy(primitive, {
           materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
@@ -2343,6 +2465,12 @@ export class OctreeSparseBrickWorld {
     const nextStates = new Map<string, LiveScenePrimitiveState>();
     const dirtyRegions: SparseSceneAxisAlignedBounds[] = [
       ...(this.pendingScenePublication?.dirtyRegions ?? []),
+      ...(initialPublication ? authored.map((primitive) => ({
+        minimum: [primitive.aabb_m.min.x, primitive.aabb_m.min.y,
+          primitive.aabb_m.min.z] as const,
+        maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y,
+          primitive.aabb_m.max.z] as const,
+      })) : []),
       ...(solidWorldChanged ? previousSolidBounds : []),
       ...nextSolidBounds,
     ];
@@ -2363,7 +2491,7 @@ export class OctreeSparseBrickWorld {
     }
     if (dirtyRegions.length === 0) return false;
     if (solidWorldChanged && !initialPublication) {
-      this.proxyVoxelizer.setSolidWorld(nextSolidWorld);
+      this.proxyVoxelizer.setSolidWorld(nextResidualSolidWorld);
     }
     this.solidWorld = nextSolidWorld;
     this.solidWorldStamp = nextSolidWorldStamp;

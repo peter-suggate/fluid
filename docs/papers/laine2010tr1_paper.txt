@@ -1,0 +1,1904 @@
+      Efficient Sparse Voxel Octrees – Analysis, Extensions, and Implementation
+
+                                                         Samuli Laine    Tero Karras
+                                                              NVIDIA Research∗
+
+
+Abstract                                                                         Assuming that such megatexturing will become commonplace in
+                                                                                 the future, we need to store a color value per resolution sample
+This technical report extends our previous paper on sparse voxel                 for all surfaces. If megatextured displacement mapping is used to
+octrees. We first discuss the benefits and drawbacks of voxel repre-             achieve higher geometric complexity, we effectively need to also
+sentations and how the storage space requirements behave for dif-                store some amount of geometry data per sample. At this point, we
+ferent kinds of content. Then, we explain in detail our compact data             may quite reasonably ask why a separation between coarse geom-
+structure for storing voxels and an efficient ray cast algorithm that            etry (base mesh) and fine detail (color and displacement maps) is
+utilizes this structure, including the contributions of the original pa-         necessary in the first place. If we have to store color and geometry
+per: additional voxel contour information, normal compression for-               data per resolution sample anyway, why not use a simpler represen-
+mat for storing high-precision object-space normals, post-process                tation that utilizes the same data structure for both purposes?
+filtering technique for smoothing out blockiness of shading, and
+                                                                                 Data resolutions. The goal of streaming data is to achieve a con-
+beam optimization for accelerating ray casts.
+                                                                                 stant texel-per-pixel ratio so that enough resolution will always be
+Management of voxel data in memory and on disk is covered in                     available for image synthesis. To facilitate discussion, we will call
+more detail, as well as the construction of voxel hierarchy. We ex-              this the target resolution of the data. It may be different from the
+tend the results section considerably, providing detailed statistics of          resolution available on the storage medium (storage resolution),
+our test cases. Finally, we discuss the technological barriers and               and it may vary across the data. For example, target resolution of
+problems that would need to be overcome before voxels could be                   terrain is smaller in the distance than near the camera. If the stor-
+widely adopted as a generic content format.                                      age resolution is less than target resolution, the synthesized image
+                                                                                 will be coarser than desired. In this case, measures must be taken
+Our voxel codebase is open sourced and available at                              to avoid the blockiness of voxels from becoming visible.
+http://code.google.com/p/efficient-sparse-voxel-octrees/
+                                                                                 No deformation. Deformation is probably the most important ben-
+                                                                                 efit of separating the base mesh from fine detail. Deforming the
+1    Introduction                                                                base mesh is usually easy, and ideally the detail layer follows it
+                                                                                 naturally. If this is not possible, other deformation methods need
+Voxels can be seen as a simpler alternative to the triangle pipeline             to be used, none of which is quite as intuitive and powerful as
+that has become relatively complicated in the current GPUs. Tra-                 vertex-based deformation. Therefore, it seems that currently vox-
+ditionally, voxels have been used for representing volumetric data               els would be feasible only for static parts of the scene. Possible
+such as MRI scans, but in this paper we concentrate on using them                methods for deforming voxel-based geometry are discussed briefly
+as a densely sampled representation of opaque surfaces. Contrary                 in Section 3.4, but in this paper we will restrict our scope to non-
+to common belief, there is no fundamental requirement that voxel                 deforming geometry only.
+data would need to be volumetric.
+                                                                                 2   Previous Work
+A compelling reason for using triangles has been their compactness
+for representing planar surfaces. Only a handful of triangles are
+                                                                                 There is a vast body of literature on visualizing volumetric struc-
+required for representing flat-sided objects such as buildings, no
+                                                                                 tures, so we will focus on papers that are most directly related to
+matter how large they are spatially. This advantage is less signifi-
+                                                                                 our work. We specifically omit methods that are restricted to height
+cant today, because memory consumption is already dominated by
+                                                                                 fields (see e.g. [Dick et al. 2009] for a recent contribution) or are
+color textures and normal maps that are required for realistic look.
+                                                                                 based on a combination of rasterization and per-pixel ray casting
+Displacement maps can be used to obtain true geometric detail, but
+                                                                                 in shaders (see [Szirmay-Kalos and Umenhoffer 2008] for an ex-
+only the latest GPUs are able to rasterize them efficiently. Displaced
+                                                                                 cellent survey) because these are not capable of performing generic
+geometry is also more difficult to ray trace than flat triangles.
+                                                                                 ray casts.
+It is customary to use the same textures over and over to con-                   Amanatides and Woo [1987] were the first to present the regular
+serve GPU memory. Unfortunately, this results in repetitive look                 grid traversal algorithm that is the basis of most derivative work,
+for materials and makes it difficult to add variation in the scene,              including ours. The idea is to compute the 𝑡 values of the next
+although small details can be easily added using decal texture                   subdivision planes along each axis and choose the smallest one in
+patches. id Software pioneered the use of a single large texture                 every iteration to determine the direction for the next step.
+for terrain in its id Tech 4 engine, and the current id Tech 5 engine
+extends the technique to all textures. Only a subset of this so-called           Knoll et al. [2006] present an algorithm for ray tracing octrees con-
+megatexture is kept in memory, and missing parts are streamed from               taining volumetric data that needs to be visualized using different
+disk as they are needed.                                                         isosurface levels. Their method is conceptually similar to kd-tree
+                                                                                 traversal, and it proceeds in a hierarchical fashion by first deter-
+∗ e-mail: {slaine,tkarras}@nvidia.com                                            mining the order of the child nodes and then processing them re-
+                                                                                 cursively. The algorithm is not as such well suited for GPU im-
+This technical report is revised and extended from ”Efficient Sparse Voxel
+                                                                                 plementation. An extension to coherent ray bundles is given by
+Octrees” published in the proceedings of I3D 2010 [Laine and Karras 2010].
+                                                                                 Knoll et al. [2009], where a principal axis is chosen and a slice of
+NVIDIA Technical Report NVR-2010-001, February 2010.                             voxels, corresponding to the beam of rays, is propagated within the
+⃝
+c NVIDIA Corporation. All rights reserved.                                       volume. As with other packet traversal algorithms, the benefit ob-
+
+
+                                                                             1
+tained on a CPU-based implementation seems unlikely to translate                                                         voxels
+                                                                                                         triangles
+readily to massively parallel GPUs.                                                                                   with contours
+                                                                                           geometry          1              1
+Gobbetti et al. [2005] discuss a framework for rendering mas-                              color            0.5             1
+sive voxel datasets on graphics hardware. Their rendering utilizes                         normals           0              2
+the graphics pipeline by drawing antialiased point primitives, and                         contours          –              1
+hence does not support ray tracing. However, their system is no-                           total            1.5             5
+table for employing a generic shading method that is based on sam-
+pling the original data from various directions. They then choose,           Table 1: Memory usage per voxel for uniquely textured, displaced
+on a per-voxel basis, a shader that can best express the observed            triangles, and voxels. All numbers are in bytes.
+results and compute the shading parameters based on the observa-
+tions. A method like this could be very useful in real-world applica-
+tions, because no manual tuning is required and shading of different
+                                                                             and displacement detail maps. Assuming DX texture compression,
+LOD levels is handled automatically.
+                                                                             colors can be encoded using 4 bits per sample, and for three-axis
+Crassin et al. [2009] present a GPU-based voxel rendering algo-              displacement 8 bits per sample might be sufficient using e.g. DXT5
+rithm that combines two traversal methods. The first stage casts             compression [van Waveren and Castaño 2008], totalling 1.5 bytes
+rays against a regular octree using kd-restart algorithm to avoid the        per sample. Normals are not required, because it should be possible
+need for a stack. The leaves of this octree are bricks, i.e. 3D grids,       to derive them from the displacement map.
+that contain the actual voxel data. When a brick is found, its con-
+tents are sampled along the ray. Bricks typically contain 163 or 323         Voxels. A comprehensive analysis of voxel memory consumption
+voxels, yielding a lot of wasted memory except for truly volumetric          is presented later in Section 5.6. In total, voxels with colors, nor-
+or fuzzy data. On the other hand, mipmapped 3D texture lookups               mals and contours (Section 5.2) require approximately 5 bytes per
+supported by hardware make the brick sampling very efficient, and            voxel. The memory consumption is therefore 3.33 times as high as
+the result is automatically antialiased. An interesting feature of the       with triangle-based representation. The relevant values are summa-
+algorithm is the data management between CPU and GPU. While                  rized in Table 1. If we consider memory usage per leaf voxel, i.e.
+traversing the octree, the renderer detects when data is missing in          target-resolution sample, we need to multiply per-voxel cost by 43 ,
+GPU memory and signals this to the CPU, which then streams the               yielding 6.67 bytes per sample. For triangles, the same multiplier is
+needed data in. This way, only a subset of nodes and bricks needs            required for taking mipmaps into account, which yields 2 bytes per
+to reside in GPU memory at any time.                                         highest-resolution sample.
+
+Our approach is different from Crassin et al. in several ways. We            It is important to note that texture resolution cannot be controlled
+aim for storing representations of large-scale scenes in GPU mem-            on a fine-grained basis, but voxel resolution can. For instance, if a
+ory with enough detail for high-quality rendering, which necessi-            color texture contains a large patch of constant color, textures can-
+tates a small memory footprint. Also, our primary interest is in rep-        not easily take advantage of this, but with hierarchical voxel encod-
+resenting surfaces instead of volumes, because surfaces arguably             ing it is possible to simply leave out further detail levels where they
+play a more significant role in most real-world content. Because             would not make any difference. The same applies to displacement
+of these considerations, we use of a single hierarchical structure           maps, and therefore to geometric detail as well. In this sense, direct
+instead of separate schemes for coarse and fine data. We also intro-         comparison between textures and voxels is somewhat crude, as the
+duce additional contour data to allow accurate surface placement             nature of the content determines how much voxels can benefit from
+within individual voxels.                                                    local resolution fine-tuning.
+                                                                             To estimate how much data one can fit in e.g. 4GB video mem-
+3     Triangles vs. Voxels                                                   ory available on NVIDIA Quardo FX 5800 board, let us assume
+                                                                             1 mm × 1 mm constant resolution for geometry. This gives us one
+In this section, we consider the main differences and similari-              sample per pixel when content is viewed not closer than approxi-
+ties between triangle- and voxel-based geometry representations.             mately one meter away using 90∘ FOV in 1080p display resolution
+For triangle-based representation, we assume a (coarse) base mesh            (1920 × 1080). For triangles, we could fit 232 /2 = 231 samples
+equipped with unique color textures as well as displacement maps             into GPU memory, giving 231 /106 = 2147 sq.m (≈ 23000 sq.ft).
+for achieving geometric detail. In this way, both representations            For voxels, the same calculation gives 644 sq.m (≈ 6900 sq.ft).
+are more or less equally powerful for representing static, highly de-
+tailed objects. There are major differences in other aspects, though,        Note that this estimation is inaccurate because it does not ac-
+as we will see in a moment.                                                  count for diminishing resolution requirements as distance to camera
+                                                                             grows. In the scenario above, assuming that one sample per pixel
+                                                                             is enough, the full resolution would only be needed in a sphere
+3.1   Memory Usage                                                           with radius of two meters, and after this the memory requirements
+                                                                             would start to drop drastically. This effect will be analyzed in detail
+Voxels are generally assumed to consume huge amounts of mem-                 in Section 4.
+ory. This is true if the data is truly volumetric 3D such as an MRI
+scan, but if we only encode surfaces, the memory usage drops to
+                                                                             3.2   Downsampling
+𝑂(𝑁 2 ) where 𝑁 is the resolution along one spatial dimension. The
+resolution could be defined, for example, as the maximum number
+of distinguishable features per unit length. In terms of complexity,         Downsampling of triangle meshes is fairly straightforward, and in-
+this is the same as with triangles, where the total surface area is          dividual displacement and color maps can also be trivially down-
+also the factor that most affects memory usage, assuming unique              sampled. A major remaining problem—that is to our knowledge
+texturing.                                                                   not properly solved yet—is how to make high-frequency geomet-
+                                                                             ric occlusion (e.g. fur, grass, dense grating) transform into partial
+Triangles. Let us assume that the base meshes are coarse enough              transparency when downsampled. There are also situations where
+so that we can ignore them altogether. What remains is the color             triangle meshes cannot represent downsampled data appropriately,
+
+
+                                                                         2
+e.g. when fur should turn into partially transparent volumetric mass          3.4   Deformation
+after enough downsampling.
+                                                                              Triangle meshes are easy to animate by applying transformations to
+Downsampling voxel data is theoretically very simple. The appear-             the vertices and allowing the rest of the surface to follow. Blending
+ance of a parent voxel needs to match the combined appearance of              multiple transformations by interpolating vertex positions is the de
+its child voxels with occlusion and transparency taken into account.          facto method for animating triangle meshes today.
+This is much easier to achieve than generic triangle-based level of
+detail, and volumetric transparency can also be easily represented.           Animating voxel data is considerably different from animating tri-
+During rendering, the level of detail can be efficiently decided on           angle data. A trivial method for animating voxel data would be
+the fly. For example, our ray caster always uses a level of detail that       having separate datasets for each animation frame. As a brute-force
+is appropriate for the distance that the ray has traversed.                   solution this is close to a video sequence that consists of a series of
+                                                                              individual bitmap frames. The amount of raw data may be over-
+However, there are practical difficulties in downsampling voxel               whelming, but compression methods similar to what is being used
+data. Firstly, partial binary occlusion in finer detail should trans-         in video compression might bring the datasets to tolerable sizes. A
+late to transparency in coarser detail level. We have not yet at-             major downside is that only pre-recorded animations can be played.
+tempted to incorporate this into our builder, so there could be un-           All in all, this is not a particularly attractive solution.
+foreseen difficulties along the way. Also, some detail is invariably          There is an increasing amount of research targeted at more generic
+lost when downsampling the data. For example, if child voxels have            deformation of spatial data. The model is usually enclosed in a hull
+highly specular BRDFs and different normals, the parent’s BRDF                that is deformed so that the object follows as naturally as possible
+should have multiple spikes according to the child voxels’ normals.           while taking constraints such as volume conservation into account.
+It would not be practical to have BRDFs with variable amount of               Rendering the deformed dataset is a concern. For ray tracing, there
+detail, so an optimization problem arises: how to set the parent              would need to be inverse mapping for the final deformation function
+BRDF (or more generally, shading model) parameters so that they               so that the rays can be bent while the model remains in a reference
+mimic the combined BRDFs of the child voxels as well as possible.             pose.
+Our builder computes colors and normals by spatially filtering input          The main problem with deforming voxel data is that voxels can-
+data so that filter size is chosen according to voxel scale. Handling         not be easily moved from one place to another. Because of this,
+each parameter separately works well in most cases, but obviously             another sample-based representation, surface splats [Zwicker et al.
+there are situations that are not properly handled. An example is             2001; Weyrich et al. 2007], might be better suited for deformable
+a highly specular surface with very high-frequency displacement.              objects. Splats can be easily organized into a standard BVH tree
+When such a surface is downsampled, the high-frequency bumpi-                 that can be updated in linear time when splats are moved according
+ness is lost. The proper way to compensate for the lost frequencies           to deformation. The required BVH size also grows linearly with
+would be to increase the surface roughness of the BRDF. Consider-             respect to number of splats, so even though the memory usage is
+ing downsampling, another limitation of our current builder is that           higher than for voxels, it is only a constant multiplier away.
+it does not work bottom-up, i.e. parent data is not derived from child
+data. This would result in better matching between LOD levels.                3.5   Authoring
+
+It should be noted that exactly the same difficulties arise when using        There is a well established content pipeline for triangle-based 3D
+mipmapped normal maps and surfaces with varying BRDF param-                   modeling. Automated tools can be used to generate UV atlases
+eters, both common in games today. We expect that solutions that              for textures, and artists can freely paint on the models themselves
+are currently in use for handling these issues can be accommodated            without modifying the textures directly.
+to handle downsampling voxel data as well.
+                                                                              A different methodology is usually employed when the content
+                                                                              needs to be geometrically detailed. In this case, the content is typ-
+3.3   Zooming                                                                 ically generated using sculpting software such as ZBrush or Mud-
+                                                                              box. ZBrush utilizes voxel-like data structures whereas Mudbox
+A common argument against voxels is that they become blocky                   works with meshes with locally adjustable resolution. Both tools
+when viewed up close. This is true in the same sense that bitmap              allow the artist to modify the geometry using sculpting tools and to
+images become blocky when zoomed enough, and the same holds                   paint textures on the model. The finished model can then be reduced
+for textures in traditional triangle-based graphics.                          into low-polygon base mesh detailed with normal or displacement
+                                                                              maps.
+The loss of color, normal, etc. detail in surfaces can be battled by          Considering voxels, the sculpting-like interface seems to be cur-
+filtering the data. In triangle-based graphics this is done at texture        rently the only method for authoring highly detailed data directly.
+lookup stage by performing interpolated fetches. Similar interpola-           Conversion from triangle meshes is another approach, and the only
+tion is possible for voxels as well, but the cost is higher because the       one we so far support in our system. Unfortunately, converting tri-
+data is not organized into a 2D array that can be easily addressed.           angle meshes into voxels has the drawback of combining the lim-
+We have found that post-process filtering is a better alternative, as         itations of both paradigms. Unless the source data is extremely
+discussed in Section 6.3. In any case, achieving smoothly textured            detailed, voxels are not used to their full potential.
+surfaces is equally possible with voxels as with textured triangles.
+                                                                              More generally, authoring content with extremely high geometric
+A more severe problem is the blockiness of silhouettes that is not            detail seems to be in its early stages. Digital sculpting, acquisi-
+equally easily solved by means of blurring. Our experiences with              tion using laser scanning devices, procedural generation, and sev-
+this are briefly described in Section 6.4. However, the additional            eral ad hoc methods for e.g. scanning faces are currently in use. Of
+contour data, explained in detail in Section 5.2, reduces the blocki-         these, only the sculpting-to-mesh pipeline can be considered ma-
+ness of silhouettes to a great extent and also has other benefits such        ture enough for wide adoption. It remains to be seen how the field
+as lower memory usage and faster rendering. This is our preferred             develops when real-time rendering of highly detailed geometry be-
+solution for fixing the silhouettes.                                          comes possible.
+
+
+                                                                          3
+3.6   Acquisition                                                               ally be removed to great extent, but sharp features cannot always be
+                                                                                represented well without increasing the resolution.
+Acquiring real-world data using cameras or scanning devices is
+where voxels and other sample-based representations excel. It is                Generic deformation of voxel data is, with current knowledge, im-
+difficult to imagine a device that would produce something other                possible to do efficiently, whereas triangles have no problems with
+than discrete data points over the 2D or 3D domain being scanned.               it. However, fracturing voxel data, i.e. separating chunks of it, is
+Point clouds can certainly be converted to detailed, colored trian-             easy, and this could be enough for e.g. simulating destructible walls
+gle meshes, which can in turn be converted to a base mesh and a                 and buildings.
+displacement map. However, for structures that are badly suited for             Authoring is an open question for both triangles and voxels. While
+such representation, such as thin branches or undersampled data, it             manual triangle modeling is the de facto method of content creation
+can be very difficult to perform either stage of the conversion.                today, the transition to extremely detailed geometry is non-trivial.
+Such conversion chain is unnecessary if we can directly translate               The key issues are the kind of data that can be represented, and the
+the raw input data into splat or voxel data. If we have e.g. a badly            set of tools required by artists. The winning data structure is the
+undersampled blade of grass that has only a handful of samples that             one that fulfills the real-world requirements best.
+do not form a continuous surface, it is not a problem for sample-               The acquisition pipeline from scanned samples to voxels appears
+based representation (as long as the object is not viewed from too              simpler than conversion of raw data into triangles and displacement
+close). We could still render the samples we have, and there would              maps. Especially the handling of imperfect data should be more
+be little risk of catastrophic failures.                                        easily achieved in samples-to-samples conversion.
+
+3.7   Rendering                                                                 Finally, rendering of triangle data enjoys the benefits of immensely
+                                                                                fast rasterization. On the other hand, ray casting geometrically de-
+Displacement-mapped triangles can be directly rasterized using                  tailed surfaces is probably more efficient with voxels than with tri-
+GPU hardware tessellation. This keeps the rendering process simi-               angles, as our results suggest (Section 8). Voxels would therefore
+lar to current triangle-based graphics. Ray casting such meshes is,             seem more suitable for rendering with advanced illumination ef-
+however, much more difficult. The power of displacement maps                    fects such as reflections and path tracing.
+lies in their ability to compactly encode the equivalent of millions
+of triangles, and therefore it would be unfeasible to ”decompress”              4    Dimensional Analysis of Memory
+them into individual triangles and place them into an acceleration                   Consumption
+hierarchy for efficient ray casting. In practice, the ray caster would
+therefore need to consider the two detail levels separately, first inter-       When rendering images from voxel data, it is desirable to keep in
+secting the rays against bounding volumes of displaced geometry,                GPU memory high resolution data near the camera, and lower res-
+and then against the displacement maps themselves.                              olution data for things that are far away. While this is clear, it is
+Voxels can also be rasterized directly, but as explained in Sec-                not obvious how much data is needed for obtaining a given viewing
+tion 6.4, this does not seem to be as efficient as ray casting. On the          distance, or how the memory requirements vary according to scene
+other hand, ray casting a voxel hierarchy is very simple and efficient          resolution, image resolution, and viewing distance. In this section,
+thanks to the regular structure of an octree. Very little arithmetic has        we will provide a theoretical framework for analyzing these issues.
+to be carried out during ray casts, except for the contour evaluation           Let us consider the contents of the world around a cube centered
+which requires intersecting the ray against a pair of parallel planes.          at an arbitrary point and having side length of 2𝑙 . Suppose we are
+Benchmark results from our implementation can be found in Sec-                  inspecting voxels, i.e. non-empty cubical pieces of space, of scale
+tion 8. As mentioned earlier in Section 3.2, rays cast into voxel               𝑠, meaning that each voxel cube has side length of 2𝑠 . Neglecting
+structure can work on appropriate level of detail according to dis-             the position of the cube, we define voxel count function 𝑁 (𝑙, 𝑠) to
+tance from ray origin. This reduces the amount of computation and               give the number of scale-𝑠 voxels in a scale-𝑙 cube. Because we
+memory bandwidth usage, and simultaneously decreases aliasing                   only consider non-empty voxels, this is generally much less than
+caused by high-frequency content.
+                                                                                the upper bound of 23(𝑙−𝑠) .
+3.8   Summary                                                                   To examine how the number of voxels changes when changing
+                                                                                voxel scale 𝑠 or cube size 𝑙, we define two auxiliary functions. Let
+Considering memory usage, triangles and displacement maps are                   us first consider how the number of voxels changes when voxel
+more compact than voxels, but only by a multiplier of 3.33. Tak-                scale is doubled. This yields the local dimensionality function
+ing into account that voxel representation can adapt to data reso-              𝐷local defined as:
+lution on much finer scale than displacement maps, the difference
+is smaller in practice. In Section 5.7, we also propose additional                                                         𝑁 (𝑙, 𝑠)
+methods for decreasing memory usage of voxels.                                                    𝐷local (𝑙, 𝑠) = log2                ,
+                                                                                                                         𝑁 (𝑙, 𝑠 + 1)
+The downsampling of voxels is attractive because a single algo-
+rithm should be able to handle all possible content, properly trans-            The logarithm converts the ratio of voxels into a dimensionality, i.e.
+forming dense partially occluding geometry into volumetric trans-               3 if the number of voxels increases eight-fold, 2 if it increases four-
+parency. Also, combining shading models of eight child voxels into              fold, and so on. It should be noted that the dimensionalities are
+parent voxel is probably more straightforward than doing the same               not necessarily integer numbers but may assume any real in range
+for triangles. Voxels have the ability to represent downsampled                 ]0, 3].
+dense opaque data, e.g. fur, correctly as partially transparent, volu-
+metric ”cloud”. This is something that displacement maps cannot                 The local dimensionality tells how the data behaves when its reso-
+do.                                                                             lution is increased or decreased. Therefore, a planar surface would
+                                                                                have local dimensionality of 2, and a volumetric chunk would have
+Triangle data handles zooming better than voxels, and parametric                a local dimensionality of 3. If most of the content we are represent-
+patches handle it even better. The blockiness of voxel data can usu-            ing consists of surfaces, we can expect the local dimensionality to
+
+
+                                                                            4
+hover around 2. Figure 24 shows the measured dimensionalities of
+our test scenes on different scales.                                                   child descriptors                     contour data
+                                                                                                             info section
+Let us now define the global dimensionality function which tells
+how the number of voxels changes when cube size 𝑙 is doubled, i.e.                   raw attachment lookup          raw attachment data
+𝑙 is increased by 1. This is defined as
+                                                                                    compressed attachment
+                                        𝑁 (𝑙 + 1, 𝑠)
+                  𝐷global (𝑙, 𝑠) = log2              .
+                                          𝑁 (𝑙, 𝑠)                            Figure 1: Single block of octree data. The child descriptor and at-
+                                                                              tachment arrays are addressed with the same index. The gaps in the
+The global dimensionality tells how expanding our observed re-                arrays are due to page headers and far pointers. Page headers are
+gion affects the amount of data. For instance, in a world where the           placed at every 8 kilobyte boundary, and point to the info section.
+content is located above a ground plane, the global dimensionality
+would be about 2 for scales that encompass the entire vertical range
+of the data. This holds even if there is e.g. a layer of volumetric fog
+above the ground—doubling the radius of our observed universe                 when 𝐷global > 𝐷local , the complexity is logarithm raised to a
+does not increase the amount of data eight-fold, which would be               power.
+the local dimensionality of the fog data, but only four-fold.                 The effect of increasing display resolution is simpler to analyze. If
+The combined effect of doubling the cube size and doubling the                the display resolution is multiplied by two, this means that 𝐷local
+voxel scale can now be expressed as a combination of local and                and 𝐷global will be evaluated with scale parameter 𝑠 − 1 instead of
+global scale changes. We call this the scale dimensionality because           𝑠. This is equivalent to applying scaling by 2𝐷local . Therefore, it is
+it tells how the amount of data changes along with viewing scale.             only the local dimensionality (in appropriate scales due to distance)
+                                                                              that affects the memory usage when display resolution is varied.
+                                                                              Locally low-dimensional data such as surface fragments and hair
+                                  𝑁 (𝑙 + 1, 𝑠 + 1)
+       𝐷scale (𝑙, 𝑠)    =    log2                                             thus behaves more nicely than high-dimensional volumetric data.
+                                        𝑁 (𝑙, 𝑠)
+                        =    𝐷global (𝑙, 𝑠) − 𝐷local (𝑙 + 1, 𝑠).
+                                                                              5    Voxel Data Structure
+Decomposing the dimensionality of the scaling into local and global
+parts is useful, because these parts are governed by different fea-           We store voxel data in GPU memory using a sparse octree data
+tures of the voxel content. The local dimensionality depends on the           structure where each node represents a voxel, i.e. an axis aligned
+shapes of small neighborhoods, whereas the global dimensionality              cube that is intersected by surface geometry. Voxels may be further
+depends on large-scale features of the scene.                                 subdivided into smaller ones, in which case both the parent voxel
+                                                                              and its children are included in the octree. The data structure has
+The rationale for calculating the combined effect of the two scales is        been designed to minimize the memory footprint while supporting
+as follows. Assume that we have some part of the world in memory              efficient ray casts. Sometimes both can be achieved at the same
+with resolution that is sufficient for high-quality rendering. Now            time, because more compact data layout also reduces the memory
+assume that we want to double the radius (or side) of the area we             bandwidth requirements.
+can see, i.e. double the viewing distance. If we kept the resolution
+the same, we would require 2𝐷global as much data, but because the             To this end, we adopt a scheme where most of the data associated
+new content is on the average twice as far as the data we originally          with a voxel is stored in conjunction with its parent. This removes
+had, we can decrease the resolution according to 2𝐷local for that             the need to allocate storage for individual leaf voxels and makes
+part.                                                                         compression of shading attributes more convenient.
+We can see that especially the case where local dimensionality is             On the highest level, our octree data is divided into blocks. Blocks
+lower than global dimensionality causes the information content to            are contiguous areas of memory that correspond to localized por-
+grow rapidly as a function of the view distance. Vegetation is a good         tions of voxels in the tree, storing the octree topology along with
+example of this kind of data, because leaves and grass blades are             voxel geometry and shading attributes. All memory references
+two- or perhaps only one-dimensional, but they (more or less) fill            within a block are relative, making it easy to reorganize blocks in
+the entire space until a certain scale is reached. On the other hand,         memory. This facilitates dynamic octree updates, for example when
+a layer of fog behaves much more nicely, because the resolution               streaming data from disk.
+requirement drops eight-fold when distance grows, but only four
+times as much content is contained in the larger region. Therefore,           Each block consists of an array of child descriptors, an info section,
+doubling the viewing distance gets cheaper as the distance grows.             contour data, and a variable number of attachments. This is illus-
+                                                                              trated in Figure 1. The child descriptors (Section 5.1) and contour
+Assuming constant scale dimensionality 𝐷, we can obtain the com-              data (Section 5.2) encode the topology of the octree and the ge-
+plexity of the total amount of data required to obtain view distance          ometrical shape of voxels, respectively. Attachments (Section 5.5)
+of 𝑟 by taking the integral of 𝑥𝐷 up to log2 (𝑟), i.e.                        are separate arrays that store a number of shading attributes for each
+                                                                              voxel. The info section encompasses a directory of the available at-
+      ∫ log2 𝑟
+                        ⎧
+                        ⎨ 𝑂((log 𝑟)𝐷+1 )           , 𝐷 > −1                   tachments as well as a pointer to the first child descriptor.
+                  𝐷
+                 𝑥 d𝑥 =   𝑂(log log 𝑟)             , 𝐷 = −1                   We access child descriptors and contour data during ray casts. Once
+       0                  𝑂(−(log 𝑟)𝐷+1 )          , 𝐷 < −1
+                        ⎩
+                                                                              a ray hits surface geometry, we execute a shader that looks up the
+                                                                              attachments contained by the particular block and decodes the shad-
+We can see that the memory usage complexity always grows sub-                 ing attributes. For the datasets presented in this paper, we use a sim-
+linearly with respect to radius. The usual situation with 𝐷scale = 0          ple Phong shading model with a unique color and a normal vector
+yields logarithmic complexity with respect to view radius, whereas            associated with each voxel.
+
+
+                                                                          5
+              child pointer             far   valid mask    leaf mask                          thickness position    nx     ny     nz
+                   15                    1         8             8                                 7        7         6      6     6
+                      contour pointer                      contour mask
+                            24                                   8
+                                                                                Figure 4: Bitfields in a contour value. Components of the normal
+ Figure 2: 64-bit child descriptor stored for each non-leaf voxel.              vector as well as spatial position are encoded as signed integers.
+                                                                                Thickness is encoded as an unsigned integer.
+
+                                                    page header
+                 A                      A       0 01001010 00000000             sorting child descriptors in an approximate depth-first order within
+                                                                                each block.
+                                        B       0 00010100 00010100
+                                        C       0 00011001 00010001
+      B          C            D                                                 In addition to traversing the voxel hierarchy, we must also be able to
+                                        D       0 00100000 00100000
+                                                                                tell which block a given voxel resides in. This is accomplished us-
+                                        E       1 01001010 01001000             ing 32-bit page headers spread amongst the child descriptors. Page
+                 E                                  far pointer                 headers are placed at every 8 kilobyte boundary, and each contains
+                                                       ...                      a relative pointer to the block info section. By placing the begin-
+                                                    page header
+                     F                                 ...                      ning of the child descriptor array at such a boundary, we can always
+                                         F      0 10000000 10000000             find a page header by simply clearing the lowest bits of any child
+                                                       ...                      descriptor pointer.
+                                                    info section
+                                                                                5.2   Contours
+Figure 3: Layout of the child descriptor array. Left: Example voxel
+hierarchy. Right: Child descriptor array containing one descriptor              The most straightforward way to visualize voxel data is to approx-
+for each non-leaf voxel in the example hierarchy.                               imate the geometry contained within each voxel as a cube. The
+                                                                                resulting visual quality is acceptable as long as the data is oversam-
+                                                                                pled, i.e. the projection of each voxel on the screen is smaller than a
+                                                                                pixel. However, if voxels are considerably larger due to undersam-
+5.1   Child Descriptors                                                         pling, the approximation produces very noticeable artifacts near the
+                                                                                silhouettes of objects. This is due to the fact that replacing each
+We encode the topology of the octree using 64-bit child descrip-                intersection between a voxel and the actual surface with a full cube
+tors, each corresponding to a single non-leaf voxel. Leaf voxels do             effectively expands the surface. This introduces significant approx-
+not require a descriptor of their own, as they are described by their           imation error as illustrated in top row of Figure 5.
+parents. As illustrated in Figure 2, the child descriptors are divided
+into two 32-bit parts. The first part describes the set of child voxels,        To reduce the approximation error, we constrain the spatial extent of
+while the second part is related to contours (Section 5.2).                     each voxel by intersecting it with a pair of parallel planes matching
+                                                                                the orientation of the approximated surface. We refer to such a pair
+Each voxel is subdivided spatially into 8 child slots of equal size.            of planes as a contour. The result is a collection of oriented slabs
+The child descriptor contains two bitmasks, each storing one bit per            that define a tight bounding volume for the surface, as illustrated
+child slot. valid mask tells whether each of the child slots actually           in the middle and bottom rows of Figure 5. For flat and relatively
+contains a voxel, while leaf mask further specifies whether each of             smooth surfaces, the planes can be oriented with the average surface
+these voxels is a leaf. Based on the bitmasks, the status of a child            normal to obtain a good fit. For curved and undersampled surfaces,
+slot can be interpreted as follows:                                             the planes can still be used to reduce the approximation error, as
+                                                                                can be seen in Figure 6.
+   ∙ Neither bit is set: the slot is not intersected by a surface, and
+     is therefore empty.                                                        We use 32 bits to store the contour corresponding to one voxel. The
+   ∙ The bit in valid mask is set: the slot contains a non-leaf voxel           value is divided into five components: three to define the normal
+     that is subdivided further.                                                vector of the two planes, and two to define their positions within
+                                                                                the voxel. See Figure 4 for details.
+   ∙ Both bits are set: the slot contains a leaf voxel.
+                                                                                The mapping between voxels and their corresponding contours is
+If the voxel contains any non-leaf children, we store an unsigned               established by two fields in the child descriptor (Figure 2). contour
+15-bit child pointer in order to reference their data. These children,          mask is an 8-bit mask telling whether the voxel in each child slot
+in turn, store their own child descriptors at consecutive memory                has an associated contour. Storing a separate bitmask allows omit-
+addresses, and the child pointer points to the first one of them as             ting contours in voxels where they do not significantly reduce the
+illustrated in Figure 3. This way, we can find a particular child by            approximation error. Similar to the child pointer, the unsigned 24-
+incrementing the pointer based on the bitmasks. The children can                bit contour pointer references a list of consecutive contour values,
+reside either in the same block as the parent or in a different one,            one for each bit in contour mask that is set.
+making it possible to traverse the octree without having to consider
+block boundaries.
+                                                                                5.3   Cooperation Between Contours
+In case the children are located far away from the referencing de-
+scriptor, the 15-bit field may not be large enough to hold the relative         While using only one contour per leaf voxel would be enough to
+pointer. To indicate this, we include a far bit in the child descriptor.        represent smooth surfaces, it would also introduce distracting arti-
+If the bit is set, the child pointer is interpreted as an indirect refer-       facts near sharp edges of objects. This is because the orientation of
+ence to a separate 32-bit far pointer. The far pointer is interleaved           the surface varies a lot within voxels containing such an edge, and
+within the same array and has to be placed close enough to the refer-           no single orientation can be chosen as a good representative for all
+encing descriptor. In practice, far pointers can be made very rare by           the points on the surface.
+
+
+                                                                            6
+              Level 1                              Level 2                               Level 3                              Result
+
+
+
+
+              Level 1                              Level 2                               Level 3                              Result
+
+
+
+
+              Level 1                              Level 2                               Level 3                              Result
+Figure 5: Effect of contours on surface approximation. Top row: cubical voxels. Middle row: voxels enhanced with contours. The resulting
+approximation follows the original surface much more closely than in the top row, with some jaggedness remaining in the areas of high
+curvature. Note that in absence of sharp corners, contours on the most detailed level would be sufficient for obtaining the final result. Bottom
+row: surface with sharp edges. The result is obtained by intersecting the overlapping contours of each level. In the highlighted area, all three
+levels contribute to the final shape of a voxel.
+
+
+Fortunately, we can utilize the fact that we are storing a full hierar-       the attachments available for the particular voxel and decode the
+chy of overlapping voxels. To enable cooperation between multiple             attributes it needs.
+contours, we define the final shape of a voxel as the intersection of
+its cube with all the contours of its ancestors. This way, we can in-         The Phong shading model we use needs a color and a normal vec-
+crementally augment the set of representative surface orientations            tor for each voxel. We have two different schemes for storing these
+by selecting different normal vectors for the contours on each level          attributes. In this section, we describe a straightforward storage for-
+of the octree, yielding significant quality increase. The effect can be       mat for uncompressed, i.e. raw, attribute data, and the next section
+seen near the areas of high curvature in the bottom row of Figure 5.          (Section 5.5 will introduce a more compact block-based compres-
+                                                                              sion scheme. Even though we only consider colors and normals,
+5.4   Uncompressed Shading Attributes                                         we expect the same ideas to apply to a wide range of other material
+                                                                              attributes as well.
+In addition to the geometrical shape of voxels, we also need to store
+a number of material attributes for shading. Such attribute data is           In the simple but inefficient uncompressed storage format, we use a
+included within octree blocks in the form of one or more attach-              64-bit encoding to store the color and normal vector associated with
+ments. Attachments are auxiliary data buffers whose interpretation            a single voxel. The 64-bit value is divided into 32 bits for the color
+is specific to their type. The info section of each block stores a di-        and 32 bits for the normal as illustrated in Figures 7a and 7b, re-
+rectory of attachments contained by the block, each identified by a           spectively. We use a standard ABGR-encoding for the color value,
+type ID and a relative data pointer. The access model is such that            storing each channel as a separate 8-bit integer. For the normal
+once a ray hits a surface during rendering, the shader can query              vector, however, we have to use a more specialized encoding.
+
+
+                                                                          7
+                (a)                                       (b)                              (c)                                  (d)
+Figure 6: (a) and (c): Cubical voxels. (b) and (d): The same voxels with contours. In this kind of situation where surfaces are reason-
+ably smooth, contours can provide several hierarchy levels’ worth of geometric resolution improvement. Note that the models have been
+deliberately undersampled to illustrate the effect. In practical content, the improvement would be seen in details, not in the overall shape.
+
+                                                                               int lookupUncompressedAttributeAddress(
+          (a)         alpha      blue     green     red                            int childDescAddr,
+                        8         8         8        8                             int childSlotIdx,
+                                                                                   int attachmentIdx)
+          (b)    sign axis u coordinate       v coordinate
+                                                                               {
+                  1    2        15                 14                              // Find the info section.
+          (c)                 value pointer         mask
+                                                                                    int pageSize = 8192;
+                                   24                8                              int pageAddr = childDescAddr & ˜(pageSize - 1);
+                                                                                    int infoAddr = pageAddr + *((int*)pageAddr) * 4;
+                                                                                    InfoSection* info = (InfoSection*)infoAddr;
+Figure 7: Bitfields related to storing uncompressed attributes. (a)
+Color value. (b) Normal vector. (c) Lookup entry.                                   // Determine index of child descriptor in block.
+
+                                                                                    int blockAddr = infoAddr + info->blockPtr * 4;
+                                                                                    int childDescIdx = (childDescAddr - blockAddr) / 8;
+Contrary to how normal maps are traditionally stored in triangle-
+based representations, we have to use object-space normals in-                      // Find and decode the lookup entry.
+stead of tangent-space normals. Experimentation shows that on                       int attachPtr = info->attachPtr[attachmentIdx];
+large smoothly curved surfaces, object-space normals need at least                  int attachAddr = infoAddr + attachPtr * 4;
+12 bits of precision to avoid visible quantization artifacts. To maxi-              int lookupAddr = attachAddr + childDescIdx * 4;
+mize precision, we store each normal as a point on a cube. The face                 int lookupEntry = *(int*)lookupAddr;
+                                                                                    int attribMask = lookupEntry & 0xFF;
+is identified using 3 bits (sign and axis), and the coordinates on the              int valuePtr = (lookupEntry >> 8) & 0xFFFFFF;
+face are stored using two fixed-point integers, one with 14 bits and
+one with 15 bits, totalling 32 bits.                                                // Is the attribute omitted for the voxel?
+
+The attachment storing uncompressed colors and normals consists                     int childBit = 1 << childSlotIdx;
+of two parts. The first part is an array of lookup entries matching the             if ((attribMask & childBit) == 0)
+                                                                                        return 0;
+layout of the child descriptor array. The second part is a collection
+of 64-bit attribute values referenced by the lookup entries. Every                  // Find value for the requested child slot.
+entry in the child descriptor array has a direct correspondence to
+an entry in the lookup array, including the gaps due to far pointers                int valueIdx = popc8(attribMask & (childBit - 1));
+                                                                                    return attachAddr + valuePtr * 4 + valueIdx * 8;
+and page headers. This makes it possible to map child descriptor               }
+pointers to their corresponding lookup entries without the need for
+additional data structures. See Figure 1 for an illustration.
+                                                                              Figure 8: Example code for finding uncompressed attribute value
+The encoding of a lookup entry is illustrated in Figure 7c, and is            for a given voxel. The voxel is specified using a child slot index and
+similar to the second part of a child descriptor. The 8-bit attribute         the memory address of the corresponding child descriptor.
+mask tells whether a child voxel in each slot of the voxel has an at-
+tribute value. Child slots whose corresponding bit is not set inherit
+their attributes from the parent voxel, allowing attributes to be omit-
+                                                                              into account), which is quite compact. However, raw encoding of
+ted in areas where they do not vary significantly. The value pointer
+                                                                              shading attributes can easily ruin this compactness. Since the ma-
+references a list of consecutive attribute values in the second part
+                                                                              jority of rendering time is spent in ray casts which do not access
+of the attachment, one for each bit that is set in the attribute mask.
+                                                                              the attribute data at all, it makes sense to trade attribute decoding
+The pointer is relative to the beginning of the attachment.
+                                                                              performance for reduced memory footprint.
+The example code in Figure 8 summarizes the process of finding the            To do this, we encode colors and normals together, employing a
+uncompressed attribute value corresponding to a given voxel. Even             block-based compression scheme that spends an average of 1 byte
+though the process involves multiple indirect memory lookups, it is           for colors and 2 bytes for normals per voxel. As in DXT (see e.g.
+relatively cheap compared to the cost of ray casts.                           [van Waveren and Castaño 2008]), each compression block is able
+                                                                              to represent 16 values. Since voxels have 8 child slots, we assign
+5.5   Compressed Shading Attributes                                           the voxels described by two consecutive child descriptors to the
+                                                                              same compression block to establish a direct correspondence be-
+Assuming an average branching factor of four, the child descrip-              tween compressed values and child slots. Roughly half of the child
+tor array takes approximately 2 bytes per voxel (taking leaf voxels           slots are empty on average, resulting in 8 used and 8 unused val-
+
+
+                                                                          8
+                 r1        g1      b1    r0        g0      b0
+                  5        6       5      5        6       5
+                 node B color bits      node A color bits
+                      8x2                     8x2
+                                  base normal
+                                     32
+                node B u-axis bits node A u-axis bits
+                                                                              Figure 10: Illustration of our normal compression scheme. Base
+                      8x2                8x2
+                                                                              normal nb specifies a point on a unit cube, and two axis vectors
+                vx    vy        vz vexp ux    uy        uz uexp               nu and nv define an arbitrary 4 × 4 grid around this point. There
+                4      4        4    4  4     4         4    4                are no orthogonality requirements between the three vectors, and
+                node B v-axis bits node A v-axis bits                         the axis vectors are not constrained to lie on the face of the cube,
+                      8x2                8x2                                  allowing maximal flexibility. The dashed arrows indicate two of the
+                                                                              16 normals defined by this set of vectors.
+Figure 9: Compression block consisting of six 32-bit words. The
+first two words encode the colors of 16 child slots, while the remain-
+ing four words encode the corresponding normals.                              vectors. The remainder of the compression block contains two 𝑢-
+                                                                              axis bits and two 𝑣-axis bits for each individual normal specifying
+                                                                              the values of 𝑐𝑢 and 𝑐𝑣 , respectively.
+ues per block. We avoid placing values from different parts of the            The compression scheme is flexible in its ability to handle differ-
+hierarchy into the same compression block by simply leaving gaps              ent kinds of cases. If the variance of the normals within a block
+in the child descriptor array to ensure that we only pair descriptors         is small, nb can be used to store the average normal with a high
+having the same parent voxel.                                                 precision while using small exponents for nu and nv to minimize
+Even though our scheme wastes approximately half of the capacity              quantization errors. If the normals vary only in one direction, nu
+available in the compression blocks, it avoids the cost of an addi-           and nv can be set to have the same direction but different length
+tional lookup table. It also has the benefit that individual values           in order to maximize the precision along that particular direction.
+can be represented more accurately, since there is less competition           Finally, if the normals are oriented in entirely different directions,
+within each compression block. An alternative would be to intro-              one of the directions can be selected as nb while using nu and nv
+duce a lookup table similar to the one used with uncompressed at-             to approximate two other directions.
+tributes, and encode each consecutive run of 16 attributes as a single
+block.                                                                        5.6   Memory Usage Analysis
+The encoding of the compression block is shown in Figure 9.                   Let us first consider the voxel hierarchy and later the attributes (col-
+Colors. Voxel colors are encoded using a simplified variant of                ors, normals, contours). For every non-leaf voxel, our hierarchy en-
+DXT1 that omits the semantics related to transparency. The first              coding requires two 8-bit masks and a 15+1 -bit child pointer. For
+32 bits of a compression block store two reference colors, c0 and             offsets larger than what the 15-bit field can accommodate, we need
+c1 , using 16-bit RGB-565 encoding. The remaining 32 bits store               separate far pointers, but the amount of memory taken by these is
+two-bit interpolation factors to choose each of the 16 colors from            negligible. For leaf voxels, which correspond to finest-resolution
+the set {c0 , c1 , 32 c0 + 13 c1 , 31 c0 + 32 c1 }.                           samples, no hierarchy data is stored. With average branching fac-
+                                                                              tor of four, we thus have 1 byte of hierarchy data per voxel on the
+Normals. Most of the existing literature on normal compression                average.
+considers only tangent-space normals (e.g. [ATI 2005; Munkberg
+et al. 2006; Munkberg et al. 2007]), and therefore is not applicable          Contours require 32 bits for each voxel where they are used. How-
+in our case because no tangent frame can be implicitly derived. For           ever, contours are only required in voxels where they enhance the
+voxel normals, one could utilize existing normal map compression              surface quality, which in most cases is a small subset of all voxels.
+techniques such as object-space DXT5 [van Waveren and Castaño                Nonetheless, a 32-bit lookup entry (contour pointer and mask) is
+2008]. Unfortunately, the 8-bit precision provided by such methods            required per non-leaf voxel, which makes the total cost of contours
+is insufficent for smooth highlights and reflections. We thus employ          slightly above 1 byte per voxel.
+a novel compression scheme that provides up to 14 bits of precision           Let us now consider the attribute data sizes. As described above,
+for smoothly varying normals.                                                 colors can be compressed into 4 bits per slot, making it preferable
+Our normal compression scheme is based on placing a linear 4×4                to not use attribute data pointers and instead allow empty space in
+grid of points in the 3-dimensional normal space and selecting each           attribute data buffers. All eight children will always need to be
+individual normal from the 16 candidates. The grid is defined using           encoded, so we need 32 color bits per non-leaf voxel, yielding 1
+a base normal nb and two axis vectors nu and nv , as illustrated in           byte per voxel. Our normal compression format requires 8 bits per
+Figure 10. Each candidate normal is defined as nb + 𝑐𝑢 nu + 𝑐𝑣 nv ,           sample, which yields 2 bytes per voxel in total, assuming an average
+with 𝑐𝑢 and 𝑐𝑣 selected independently from the set {−1, − 31 , 13 , 1}.       branching factor of 4.
+For better adaptation to various kinds of data, we do not make any            Counting together hierarchy, contours, colors, and normals, we ar-
+orthogonality requirements for nb , nu , and nv .                             rive at approximately 5 bytes per voxel (Table 1).
+The base normal nb is encoded as a point on a cube using the
+same encoding as with raw attributes (Figure 7b). Axis vector nu is           5.7   Potential Improvements
+stored using three signed 4-bit integers and a single 4-bit exponent,
+i.e. a floating-point vector with common exponent. The nv axis is             In this section we list a number of potential but yet untested im-
+stored in a similar fashion, yielding a total of 32 bits for the axis         provements to the data structure. Some of these have easily pre-
+
+
+                                                                          9
+dictable outcomes, while the impact of others cannot be evaluated                            N1 C1 N2 a1 N3 b1 SE a2 a3 b3
+without empirical tests. Note that some of the following ideas are
+not compatible with each other.
+                                                                              Figure 11: The hypothetical interleaving scheme for child descrip-
+Combined indirect attribute lookups. Using lookup entries (Fig-               tor entries and lookup entries. Illustrated is a span with three non-
+ure 7c) is beneficial when the size of the attribute is large enough.         leaf voxels N1–N3. All boxes correspond to 32 bits. Only the first
+With average of 4 children per voxel, the breakeven point is 1 byte,          voxel has a contour lookup entry C1. Attachment lookup entries
+so neither colors or normals, compressed down to 4 and 8 bits per             a1–a3 and b1,b3 are stored in an unintuitive but efficient way on
+voxel, benefit from the additional indirection. However, since we             both sides of span entry field SE. See text for discussion.
+always store color and normal together, it would make sense to have
+the lookup entry.
+Currently color-normal pair takes effectively 24 bits per voxel due           have contours. The amount of data touched by the ray caster would
+to wasted slots in compressed tiles, but with lookups we could cut            therefore not change from the current encoding.
+this down to 12 bits for payload and approximately 8 bits for the
+                                                                              After the child descriptor entries, the span continues with a 32-bit
+lookup entry, totalling 20 bits. Furthermore, the lookup entry would
+                                                                              span entry. The span entry acts as a directory for the child descrip-
+allow omitting attributes where they are not required, unlike the di-
+                                                                              tor span, indicating which voxels have contour pointers, and which
+rect addressing scheme. This could allow some amount of com-
+                                                                              attribute lookup entries are present in each child voxel. These at-
+pression near the leaf voxels without sacrificing quality.
+                                                                              tribute lookup entries can then be stored partially into the unused
+Repurposing unused child pointers. Voxels that contain only                   halves of child descriptors, partially after then span entry.
+leaf voxels as children waste the 16 bits reserved for far and child
+                                                                              Consider the situation depicted in Figure 11. There are three voxels
+pointer in the child descriptor (see Figure 2). Because this is ob-
+                                                                              in the span, labeled N1–N3. Only N1 has children with contours, so
+viously a common situation near the leaves of the tree, it would
+                                                                              it has a contour lookup entry C1 next to it. Attribute lookup entries
+make sense to repurpose the unused fields. One interesting possi-
+                                                                              a1 and b1 are stored in the unused contour pointer slots.
+bility would be storing the contour pointer and contour mask in the
+vacant space.                                                                 What is most important in this scheme is that it would allow omit-
+                                                                              ting contour and attachment lookup entries selectively. For exam-
+Since there would be only 8 bits left for the contour pointer this            ple, if we had an attachment that had data for very few voxels, the
+way, we would need to interleave the contour data with the child              current encoding would always need to store at least the lookup en-
+descriptors, unlike in the current approach. Also, having some child          try, yielding 1 byte per voxel. This overhead could be removed with
+descriptors take 32 bits and some take 64 bits would complicate the           the suggested encoding.
+memory fetches. Whereas we currently always fetch 64 bits, we
+would then need to fetch 32 bits first and check the contents of leaf         The unused combination. We currently use only three out of four
+mask. If not, another 32 bits would need to be fetched. Note that             possible combinations in valid mask and leaf mask (Figure 2). We
+always reading 64 bits would not be possible, because the child               have so far refrained from taking this combination in use, because
+descriptors would not be suitably aligned anymore.                            the best way to utilize it is not obvious.
+If all leaf voxels were on the same level, we could save approx-              One interesting extension to the current scheme would be indicat-
+imately 1 byte per leaf with this scheme. Taking the rest of the              ing partially transparent voxels using the unused combination. This
+levels into account, this translates to about 0.75 bytes per voxel,           would allow e.g. accumulating occlusion factor or performing color
+thus removing most of the contour-related memory consumption.                 accumulation and attenuation during raycasting. A slight compli-
+In practice, the savings would be less than this, because a voxel can         cation is that one cannot distinguish transparent leaf voxels from
+have both leaf and non-leaf children, and in this case the optimiza-          transparent non-leaf voxels. Therefore, all transparent voxels would
+tion would not be possible. We have not measured how common it                need to have a corresponding child descriptor entry, even when they
+is for a voxel to contain only leaves as children, so the true impact         are leaf voxels.
+of this optimization is still somewhat speculative.
+Repurposing unused contour pointers. This potential optimiza-                 6   Rendering
+tion is a major reorganization of child descriptors and contour and
+attachment lookup entries. The idea is to store attribute lookup en-          The regularity of the octree data structure is the key factor in en-
+tries within the node array, utilizing unused contour pointers when-          abling efficient ray casts. As most of the data associated with a
+ever possible.                                                                voxel is actually stored within its parent, we need to express the
+                                                                              voxel that the ray is currently traversing using its parent voxel
+In the following, we assume that all attributes are accessed indi-            parent and a child slot index idx ranging from 0 to 7. Since we
+rectly using lookup entries. Let us consider a list of child descrip-         do not store information about the spatial location of voxels, we
+tors laid out consecutively in GPU memory. Currently each voxel               also need to maintain a cube corresponding to the current voxel.
+has a 64-bit entry, half of which encodes the hierarchy and half of           We express the cube using position vector pos ranging from 0 to
+which points to the contour data. Attachment lookup entries are               1 in each dimension, and a non-negative integer scale that defines
+stored in a separate array.                                                   the extent of the cube as exp2 (scale − 𝑠max ). The entire octree is
+To improve the memory utilization, the child descriptor span could            contained within a cube of scale 𝑠max positioned at the origin.
+be laid out as follows. Each child descriptor of a non-leaf voxel             Basics. Let our ray be defined as pt (𝑡) = p + 𝑡d. Solving 𝑡 for
+still consumes 64 bits, allowing fast lookup based on the index of            an axis-aligned plane gives
+the child in the parent voxel. However, the latter 32 bits of the                                           (        )        (         )
+child descriptor may or may not contain the contour lookup entry.                                                1                −𝑝𝑥
+Contour lookup entries are identified by e.g. setting their highest                             𝑡𝑥 (𝑥) =                 𝑥+
+                                                                                                                𝑑𝑥                𝑑𝑥
+bit, whereas other possible contents for this space have their highest
+bit cleared. This way, the ray caster can peek at the bit and if the          for the 𝑥-axis, and similar formulas for the 𝑦 and 𝑧 axes. With
+entry is not a contour lookup entry, none of the voxel’s children             precomputed ray coefficients this amounts to a single multiply-
+
+
+                                                                         10
+Figure 12: Advancing through voxels of equal scale. The ray is
+defined by the origin vector p and direction vector d. It enters 𝑣 at
+𝑡 = 𝑡𝑥 (𝑥0 ) and exits it at 𝑡 = 𝑡𝑦 (𝑦1 ), proceeding to 𝑣 ′ .                   Figure 13: Order of hierarhicy traversal. The algorithm starts at
+                                                                                 voxel 2, which is a child of the root 1. It executes PUSH twice to
+                                                                                 reach voxel 3 and then leaf 4. After executing ADVANCE twice to
+add instruction per axis. We can represent an axis-aligned cube                  traverse siblings 5 and 6, the algorithm notices that the ray exits
+as a pair of opposite corners (𝑥0 , 𝑦0 , 𝑧0 ) and (𝑥1 , 𝑦1 , 𝑧1 ) so that        their common parent 3. It thus executes POP, reching voxel 7. The
+𝑡𝑥 (𝑥0 ) ≤ 𝑡𝑥 (𝑥1 ), 𝑡𝑦 (𝑦0 ) ≤ 𝑡𝑦 (𝑦1 ), and 𝑡𝑧 (𝑧0 ) ≤ 𝑡𝑧 (𝑧1 ). Us-           traversal terminates after leaf 22 when the ray exits the root. Note
+ing this definition, the span of 𝑡-values intersected by the cube                that the voxels in the image have been shrunk to make the number-
+is given by 𝑡𝑐min = max(𝑡𝑥 (𝑥0 ), 𝑡𝑦 (𝑦0 ), 𝑡𝑧 (𝑧0 )) and 𝑡𝑐max =                ing clearer.
+min(𝑡𝑥 (𝑥1 ), 𝑡𝑦 (𝑦1 ), 𝑡𝑧 (𝑧1 )).
+Let us consider the problem of determining the next voxel 𝑣 ′ along              The algorithm incorporates a stack of parent voxels and contour
+the ray, given the current voxel 𝑣 as specified by parent and idx .              𝑡 values associated with the ancestors of the current voxel. The
+We will start by assuming that 𝑣 and 𝑣 ′ are siblings of each other,             depth of the stack is 𝑠max , making it possible to address its entries
+implying that they are of the same scale as depicted in Figure 12. In            directly using cube scale values. Whenever the algorithm descends
+this particular case, the current voxel’s cube spans the range [𝑥0 , 𝑥1 ]        the hierarchy by executing PUSH, it potentially stores the previous
+horizontally and [𝑦0 , 𝑦1 ] vertically. This means that the ray must             parent into the stack at scale based on a conservative check. When
+exit 𝑣 through either 𝑥1 or 𝑦1 , whichever it happens to intersect first.        the ray exits the current parent voxel, the algorithm ascends the
+The values of 𝑡 corresponding to the intersections are given by the              hierarchy by executing POP. It first uses the current position pos to
+functions 𝑡𝑥 and 𝑡𝑦 . We see that 𝑡𝑦 (𝑦1 ) < 𝑡𝑥 (𝑥1 ), meaning that the          determine the new pos ′, scale ′, and idx ′ as described below. It then
+ray intersects 𝑦1 before 𝑥1 . With reasoning similar to [Amanatides              reads the stack at scale ′ to restore the previous parent.
+and Woo 1987], we can thus conclude that 𝑣 ′ lies directly above 𝑣.
+                                                                                 Determining the child voxel that the ray enters first in the case of
+Therefore, we can determine the next voxel of the same scale by                  PUSH is similar to selecting the next sibling in ADVANCE. We eval-
+comparing 𝑡𝑥 (𝑥1 ), 𝑡𝑦 (𝑦1 ), and 𝑡𝑧 (𝑧1 ) against 𝑡𝑐max and advancing           uate 𝑡𝑥 , 𝑡𝑦 , and 𝑡𝑧 at the center of the voxel and compare them
+the cube position along each axis for which the values are equal.                against 𝑡𝑐min to determine each bit of the new idx ′.
+Assuming that the two voxels share the same parent, we obtain the
+new child slot index idx ′ by flipping the bits of idx corresponding             To differentiate between ADVANCE and POP, we need to find out
+to the same axes.                                                                whether the ray stays within the same parent voxel. We start by
+                                                                                 assuming that it does, and compute candidate position pos ∗ and
+Hierarchy traversal. We will now extend the idea of incremen-                    child slot index idx ∗. We then check whether the resulting idx ∗
+tal traversal to a hierarchy of voxels. This is necessary since our              is actually valid considering the direction of the ray. As described
+octree data structure is sparse in the sense that we do not include              previously, we obtain idx ∗ by flipping one or more bits of idx , each
+the subtrees corresponding to empty space. Doing the traversal in                corresponding to an axis-aligned plane crossed by the ray. For idx ∗
+a hierarchical fashion also has the benefit of being able to improve             to be valid, the direction of the flips must agree with sign of the
+the performance by using contours as bounding volumes of their                   corresponding component of ray direction d. For example if 𝑑𝑥 >
+corresponding subtrees.                                                          0, the bit corresponding to the 𝑥-axis is only allowed to increase. If
+                                                                                 all of the flips agree with the ray direction, we execute ADVANCE
+Our algorithm traverses the set of voxels intersected by the ray in
+                                                                                 by using pos ∗ and idx ∗ as the new pos ′ and idx ′ , respectively. If
+depth-first order. In each iteration, there are three distinct cases for
+                                                                                 we encounter any conflicting flips, we proceed with POP.
+selecting the next voxel:
+                                                                                 In the case of POP, we can determine the next voxel by looking at
+   ∙ PUSH: Proceed to the child voxel that the ray enters first.
+                                                                                 the bit representations of pos and pos ∗. Figure 14 illustrates the con-
+   ∙ ADVANCE: Proceed to the next sibling voxel.                                 nection between cube positions and child slot indices. Each triplet
+   ∙ POP: Proceed to the next sibling of the highest ancestor that               of bits at a given bit position forms a child slot index corresponding
+     the ray exits.                                                              to a particular cube scale. Starting from the highest bit position,
+                                                                                 the child slot indices define a path in the octree from the root to the
+Figure 13 shows an example of the resulting traversal order.                     current voxel.
+
+
+                                                                            11
+                                                                                                  1: (𝑡min , 𝑡max ) ← (0, 1)
+                                                                                               ⎡
+               scale        9 8 7 6 5 4 3 2 1 0                                                   2: 𝑡′ ← project cube(root, ray)
+               pos.x     0. 1 0 1 1 0 0 1 0 0 0
+
+                                                                                  INITIALIZE
+                                                                                               ⎢
+                                                                                                  3: 𝑡 ← intersect(𝑡, 𝑡′ )
+                                                                                               ⎢
+               pos.y     0. 0 0 0 1 1 1 0 0 0 0
+                                                                                               ⎢
+                                                                                                  4: ℎ ← 𝑡′max
+                                                                                               ⎢
+               pos.z     0. 0 1 1 1 0 1 1 0 0 0
+                                                                                               ⎢
+                                                                                                  5: parent ← root
+                                                                                               ⎢
+                 idx        1 4 5 7 2 6 5
+                                                                                               ⎢
+                                                                                                  6: idx ← select child(root, ray, 𝑡min )
+                                                                                               ⎣
+                                                                                                  7: (pos, scale) ← child cube(root, idx )
+Figure 14: Connection between pos and child slot indices. Each                                    8: while not terminated do
+bit position of pos corresponds to a cube scale value. Interpreting                               9: 𝑡𝑐 ← project cube(pos, scale, ray)
+the bit triplet corresponding to scale as an integer yields idx . Bits                           10:    if voxel exists and 𝑡min ≤ 𝑡max then
+above scale define a progression of child slot indices that forms a                              11:       if voxel is small enough then return 𝑡min
+path from the root to the current voxel. Bits below scale are zero.                              12:       𝑡𝑣 ← intersect(𝑡𝑐, 𝑡)
+                                                                                               ⎡
+
+
+                                                                                  INTERSECT
+                                                                                               ⎢ 13:       if voxel has a contour then
+                                                                                               ⎢ 14:          𝑡′ ← project contour(pos, scale, ray)
+                                                                                               ⎢
+                                                                                                 15:          𝑡𝑣 ← intersect(𝑡𝑣, 𝑡′ )
+                                                                                               ⎣
+Let us denote the paths corresponding to pos and pos ∗ with 𝑝 and                                16:       end if
+𝑝∗, respectively. We know that the traversal must have visited all the                           17:       if 𝑡𝑣min ≤ 𝑡𝑣max then
+voxels along 𝑝 in order to reach the current voxel, and that 𝑝∗ must                             18:          if voxel is a leaf then return 𝑡𝑣min
+diverge from this set of voxels at some point along the path. The                              ⎡
+                                                                                                 19:          if 𝑡𝑐max < ℎ then stack [scale] ← (parent, 𝑡max )
+fact that a ray can never re-enter a voxel after exiting it implies that                       ⎢ 20:          ℎ ← 𝑡𝑐max
+the first differing voxel in 𝑝∗ is necessarily unvisited. In a depth-                                         parent ← find child descriptor(parent, idx )
+                                                                                               ⎢
+                                                                                               ⎢ 21:
+first traversal it is also the voxel that we should visit next.                   PUSH                        idx ← select child(pos, scale, ray, 𝑡𝑣min )
+                                                                                               ⎢
+                                                                                               ⎢ 22:
+                                                                                                              𝑡 ← 𝑡𝑣
+                                                                                               ⎢
+                                                                                               ⎢ 23:
+Therefore, we determine the next voxel as follows. We first obtain                             ⎣
+                                                                                                 24:          (pos, scale) ← child cube(pos, scale, idx )
+the new scale ′ by finding the highest bit that differs between pos                              25:          continue
+and pos ∗. We then find child slot index idx ′ by extracting the bit                             26:       end if
+triplet of pos ∗ corresponding to scale ′. To obtain pos ′, we take                              27:    end if
+
+
+                                                                                  ADVANCE
+pos ∗ but clear the bits below scale ′. This yields a cube with the                              28:    oldpos ← pos
+                                                                                               [
+correct scale that contains pos ∗. Finally, we restore the parent voxel                          29:    (pos, idx ) ← step along ray(pos, scale, ray)
+from the stack entry at scale ′.                                                                 30:    𝑡min ← 𝑡𝑐max
+                                                                                                 31:    if idx update disagrees with ray then
+                                                                                                 32:       scale ← highest differing bit(pos, oldpos)
+                                                                                               ⎡
+6.1   Ray Cast Implementation                                                                  ⎢ 33:       if scale ≥ 𝑠max then return miss
+                                                                                                           (parent, 𝑡max ) ← stack [scale]
+                                                                                               ⎢
+                                                                                               ⎢ 34:
+                                                                                  POP
+Pseudocode for the complete ray cast algorithm is given in Fig-                                ⎢ 35:
+                                                                                               ⎢
+                                                                                                           pos ← round position(pos, scale)
+ure 15. The code consists of initialization phase followed by a loop                           ⎣
+                                                                                                 36:       idx ← extract child slot index(pos, scale)
+traversing each individual voxel along the ray.                                                  37:       ℎ←0
+                                                                                                 38:    end if
+The algorithm starts by initializing state variables on lines 1–7. The                           39: end while
+active span of the ray is stored as an interval between two 𝑡-values,
+𝑡min and 𝑡max , and is initialized to the intersection of the ray with                               Figure 15: Pseudocode for the ray cast algorithm.
+the root. ℎ is a threshold value for 𝑡max used to prevent unnecessary
+writes to the stack. The current voxel in the octree is identified using
+parent and child slot index idx . It is initialized to a child of the root
+by comparing 𝑡min against 𝑡𝑥 , 𝑡𝑦 , and 𝑡𝑧 at the center of the octree.           Lines 12–16 compute the span 𝑡𝑣 as the intersection of the cur-
+Finally, pos and scale are initialized to represent the corresponding             rent cube with the active span and voxel contour. The effect of the
+cube.                                                                             contours corresponding to the ancestor voxels is included in the ac-
+                                                                                  tive span, so 𝑡𝑣 represents the exact intersection with the geometric
+The loop on lines 8–39 is iterated until the ray either hits a voxel or           shape of the current voxel. Line 17 checks whether the intersection
+leaves the octree. Each iteration intersects the current voxel against            is non-empty, and if so, proceeds to execute PUSH. Otherwise, the
+the active span on lines 11–16 and potentially descends to its chil-              voxel is skipped by executing ADVANCE.
+dren on lines 18–25. If the voxel is not intersected by the ray, the
+algorithm executes ADVANCE on lines 28–30, potentially followed                   If the current voxel is a leaf, as seen from the leaf mask of parent,
+by POP on lines 32–37.                                                            line 18 terminates the traversal because the desired intersection has
+                                                                                  been found. Line 19 stores the old values of parent and 𝑡max to the
+Line 9 computes the span 𝑡𝑐 corresponding to the current cube to be               stack if necessary. The decision is based on the limit ℎ as follows:
+used by INTERSECT and ADVANCE, and line 10 checks whether to
+process the current voxel or skip it. If the bit corresponding to the                           ∙ Normally, ℎ corresponds to the 𝑡 value at which the ray exits
+voxel in valid mask is not set, or the active span 𝑡 is empty, the code                           parent. 𝑡𝑐max = ℎ means that the ray exits both the voxel
+determines that the ray cannot intersect the voxel and skips directly                             and its parent at the same time, in which case we do not need
+to ADVANCE. Otherwise, the voxel may intersect the ray and is thus                                to store parent as it will not be accessed again.
+processed further.
+                                                                                                ∙ If parent has already been stored to the stack, we set ℎ to 0.
+Line 11 checks whether the voxel is small enough to justify termi-                                As 𝑡𝑐max ≥ 0 is always true, this has the effect of preventing
+nation of the traversal. This provides a way to pre-filter the geom-                              the same parent from being stored again.
+etry by dynamically adapting voxel resolution to match the screen
+resolution, and is accomplished by comparing exp2 (scale) against                 Descending the hierarchy, lines 20–24 replace parent with the cur-
+a linear function of 𝑡𝑐max . The check can be executed before it is               rent voxel and set idx , pos, and scale to match the first child voxel
+known for sure whether the voxel actually intersects the ray, since               that the ray enters. Finally, line 25 restarts the loop to process the
+the exactness of the result is not relevant for very small voxels.                child voxel.
+
+
+                                                                             12
+Lines 28–30 execute ADVANCE. The current cube position is first
+stored into a temporary variable. pos and idx are then advanced to
+the next cube of the same scale along the ray. All 𝑡 values required
+for deciding the axes to advance along have already been computed
+on line 9, and can be reused here. Finally, the active span of the
+ray is shortened by replacing 𝑡min with the value at which the ray
+enters the new cube. Line 31 checks whether the child index bit
+flips agree with the direction of the ray, i.e. whether the traversal
+stays in the same parent voxel. If so, the loop restarts. Otherwise,
+the algorithm proceeds to execute POP.
+                                                                              Figure 16: Illustration of the effect of beam optimization on itera-
+Lines 32–36 execute POP as described previously. If the new scale             tion counts. Left: S IBENIK -D with no beam optimization. Right:
+exceeds 𝑠max , line 33 determines that the ray exits the octree and           with beam optimization in 8×8 blocks. White corresponds to 64
+terminates the traversal with a miss. Finally, line 37 sets ℎ to 0            iterations in both images.
+to prevent the parent that was just read from the stack from being
+stored again.
+                                                                              individual rays. However, with voxel data we can make this guar-
+For the sake of clarity, a few implementation details have been left          antee by terminating the traversal as soon as we encounter a voxel
+out of the pseudocode. The most important of them are outlined                that is not large enough to certainly cover at least one ray in the
+below. The actual ray caster code is given in Appendix A.                     coarse grid. Note that contour tests must be disabled in the coarse
+Alternate coordinate system. The algorithm contains multiple
+                                                                              pass in order for this to work.
+operations that have to explicitly check the signs of the ray direc-          In practice, we divide the image into 4×4 or 8×8 pixel blocks and
+tion. These checks can be avoided by mirroring the entire octree              cast a distance ray for the corners of these blocks in the coarse pass.
+to redefine the coordinate system so that each component of d be-             For each ray in the actual rendering pass, we identify the corre-
+comes negative. In practice, we accomplish this by determining an             sponding block and fetch the distance values for the four corners.
+octant bitmask based on the ray direction during initialization. We           We then subtract an appropriate constant from their minimum to de-
+then use this mask to flip the bits of idx whenever we interpret the          termine the starting point of the ray. Figure 16 illustrates the effect
+fields of a child descriptor. In the same vein, we can also offset the        of beam optimization on iteration counts.
+origin of pos to make its components range within [1, 2] instead of
+[0, 1]. This has the benefit of enabling us to operate directly on the
+                                                                              6.3   Post-Process Filtering
+corresponding floating point bit representations in POP.
+Caching the current child descriptor. Whenever the algorithm                  To smooth out the blockiness caused by discrete sampling of shad-
+executes ADVANCE, parent remains unchanged for the next itera-                ing attributes, we apply an adaptive blur filter on the rendered im-
+tion. It is thus reasonable to conserve memory bandwidth by fetch-            age as a post-processing step. Without filtering, the result would
+ing the corresponding child descriptor only once. This is accom-              resemble the effect of nearest-sampled texture lookups. Note that
+plished by invalidating the local copy of it in PUSH and POP, and             silhouette edges are generally represented well by contours, so we
+fetching the descriptor from memory in the beginning of the loop              want to avoid excess blurring around them.
+only if it is invalid.
+                                                                              The most reliable way to estimate the proper filter radius is to look
+Sharing computation between INTERSECT and PUSH. It is pos-                    at the size of the intersected voxel on the screen. However, adjacent
+sible to organize the computation of contour projections so that it           voxels on the same surface may reside on different hierarchy levels
+utilizes the values of 𝑡𝑥 , 𝑡𝑦 , and 𝑡𝑧 evaluated at the center of the        due to the fact that the voxel resolution is allowed to vary depend-
+voxel. The same values are also used to determine the first child             ing on the local geometrical complexity and variance in shading
+voxel that the ray enters in PUSH. It is thus beneficial to compute           attributes. As a result, the desired filter radius also varies across the
+the values in the beginning of INTERSECT and re-use them in PUSH.             surface. This can cause rendering artifacts due to abrupt changes in
+                                                                              the filter radius at voxel boundaries, as illustrated in Figure 17.
+Hit position. In most cases, the position where the ray intersects
+voxel geometry is also needed in addition to the 𝑡 value. Computing           Our method is based on a sparse set of sampling points, stored in
+the position simply as p + 𝑡d is not robust in practice, as floating          a look-up table in ascending order according to distance from the
+point inaccuracies can cause the resulting point to lie outside the           center. We use a set of 96 samples distributed in a disc with radius
+cube corresponding to the intersected voxel. It is thus necessary to          of 24 pixels. The density of the samples falls as the square root of
+explicitly clamp each component of the position to the minimum                distance from the center, and each sample has an associated weight
+and maximum coordinates of the cube.                                          corresponding to the area of the disc it represents. Algorithms that
+                                                                              smooth out undersampled data such as single-sample shadows or
+                                                                              reflections tend to require two passes (e.g. [Fernando 2005; Robi-
+6.2   Beam Optimization                                                       son and Shirley 2009]), but the ordered look-up table allows us to
+                                                                              perform the computation in a single pass. The kernel we have used
+There is a relatively simple way to accelerate the ray casting pro-           for the images in this paper is shown in Figure 18.
+cess for primary rays. With cubical voxels, it is possible to render
+a coarse, conservative distance image and then use it to adjust the           Pseudocode of the algorithm is given in Figure 19. To process a
+starting positions of individual rays. This has the effect of making          pixel, we start by determining the desired filter radius 𝑟 based on
+the individual rays skip majority of the empty space at their begin-          the voxel in the pixel itself. If the radius is one pixel or less, there
+ning before intersecting a surface.                                           is no need for filtering, and we return the original color. Otherwise,
+                                                                              we start processing sampling points in the order determined by the
+For many acceleration structures this kind of approach is not feasi-          look-up table until their distance from the center exceeds 𝑟. For
+ble, because it is generally impossible to guarantee that the coarse          each sample, color 𝑐′ and blur radius 𝑟′ of the corresponding pixel
+grid of rays does not miss features that would be important for the           are fetched. To adapt blur radius to the neighborhood, we clamp 𝑟
+
+
+                                                                         13
+                                                                              Figure 18: Filter kernel used for the images in this paper. The sam-
+               (a)                                 (b)                        ples are stored in constant memory and ordered in ascending order
+                                                                              of distance from the center. Each sample has a weight proportional
+                                                                              to the disc area it represents. Kernel radius is 24 pixels and it has
+                                                                              96 samples. This particular kernel causes some banding artifacts
+                                                                              as can be seen in e.g. Figure 17d, but we expect that tweaking the
+                                                                              sample positions manually or using a more sophisticated relaxation
+                                                                              method could improve the situation considerably.
+
+
+                                                                               1: (𝑐, 𝑟) ← fetch(𝑥, 𝑦)
+                                                                               2: if 𝑟 ≤ 1 then return 𝑐
+               (c)                                 (d)                         3: accum ← (0, 0, 0, 0)
+                                                                               4: for each sample 𝑠 in kernel do
+                                                                               5: (𝑐′ , 𝑟′ ) ← fetch(𝑥+𝑠.𝑥, 𝑦+𝑠.𝑦)
+                                                                               6: 𝑟 ← min(𝑟, 𝑟′ )
+                                                                               7: if 𝑠.dist > 𝑟 then break
+                                                                               8: 𝑤 ← 𝑠.weight ⋅ min(𝑟 − 𝑠.dist, 1)
+                                                                               9: accum.rgb ← accum.rgb + 𝑐′ ⋅ 𝑤
+                                                                              10: accum.𝑤 ← accum.𝑤 + 𝑤
+                                                                              11: end for
+                                                                              12: return accum.rgb/accum.𝑤
+               (e)                                 (f)                         Figure 19: Pseudocode for the post-process filtering algorithm.
+Figure 17: The problem with varying filter radii. (a) False-colored
+voxels on an oblique surface. (b) Octree depth of each point,
+brighter tone indicating shallower tree, i.e. larger voxel. (c) Fil-          this pixel is plotted into a small frame buffer kept in local memory,
+tering each pixel with a radius deduced from the size of the corre-           and the children of the voxel are not visited.
+sponding voxel. Seams are visible at hierarchy level changes. (d)
+Our method adjusts the filter radius while accumulating neighbor-             The main benefit of this approach is that there is strictly less traver-
+ing colors, yielding smooth transition between levels. (e) and (f):           sal work to be done, because the common part of traversal for rays
+standard and our method applied to FAIRY’s hand built with ag-                in each beam is performed only once. However, there are two major
+gressive pruning and few voxel levels.                                        complications. Firstly, the result is not quite exact because voxels
+                                                                              are drawn in the frame buffer as points, and no exact ray vs voxel
+                                                                              test is performed. Secondly, leaf voxels that are larger than a pixel
+                                                                              require specific handling.
+to min(𝑟, 𝑟′ ). This prevents visible seams from forming by making
+filter radius agree between nearby regions. Accumulation weight is            Besides these issues, it seems that there is very little coherence
+calculated by taking sample weight and adjusting it so that it tapers         between beams, and this can make the execution and memory ac-
+off to zero linearly between 𝑟 − 1 and 𝑟. This ensures smooth tran-           cesses diverge significantly between SIMD threads. Updating the
+sition between different filter radii. Finally, color is accumulated          frame buffer in local memory has no coherence between threads,
+according to the computed weight.                                             making the updates expensive. Even when only updating a depth
+                                                                              buffer and without specific handling of large voxels, the rasterizer
+In practice, we store the logarithm of the voxel size into the alpha
+                                                                              was several times slower than the ray caster. Beating the ray caster
+channel of the result image when casting the rays. One byte is
+                                                                              seemed very unlikely, and therefore the development of the raster-
+sufficient when the value is stored as 3.5 fixed point, yielding range
+                                                                              izer was ceased.
+from 1 (no blur) to about 128 pixels.
+                                                                              We hypothesize that the main benefit of rasterization—shared pro-
+6.4   Failed Approaches                                                       cessing of the common part of traversal—is already adequately han-
+                                                                              dled by the beam optimization for the ray caster. Also, the common
+We tried out a number of ideas that seemed feasible, but ultimately           part is cheap to execute because of high data and execution coher-
+proved not to be. This section collects some of the most fundamen-            ence.
+tal ones in terms of expected gain and observed results.
+                                                                              Short stack. Thanks to profiling (Section 8.5) we noted that our
+Rasterizing voxels. We wrote a simple hierarchical voxel ras-                 ray caster causes a significant amount of stack traffic. Therefore,
+terizer that was inspired by the micro-rendering technique of                 it would seem like a good idea to reduce it by storing only the top
+Ritschel et al. [2009]. Each thread is given a beam of 4 × 4 or               of the stack in registers. This is known as short stack [Horn et al.
+8 × 8 rays to process. The thread traverses the voxel hierarchy so            2007]. The downside of using a short stack is that whenever the
+that voxels outside the beam are culled. This can be done quite               stack is exhausted, the traversal has to be restarted from the root.
+efficiently using box vs frustum intersection tests. Whenever the             Restarts are quite expensive, but it can be argued that the restarts
+traversal encounters a voxel that projects to about one pixel in size,        are so infrequent that their total cost is small.
+
+
+                                                                         14
+We have previously found short stack to be somewhat slower than                 voxels, but enforcing continuity between different voxel levels is
+full stack in case of triangle ray casting, and with voxels the penalty         tricky.
+is even more pronounced. The reason is that the stack is used for
+different purposes in the two cases.                                            Currently it seems that it is better to smooth the surfaces using
+                                                                                the post-process blur than to perform interpolated attribute lookups.
+For triangle ray caster, the stack acts as a list of nodes to visit, and        More data can be fit in memory without interpolation, and this al-
+each pop removes the topmost item. With voxels, however, the                    ready increases the quality more than interpolation in many cases.
+stack is used for storing the path to the current voxel, and the level          The post-process blur also has the advantage of smoothing the sil-
+that is popped depends on which boundary is crossed by the ray                  houettes between areas with large blur radii, and this cannot be
+while traversing. Consider, for example, the axis-aligned planes                achieved with interpolation.
+that lie at the middle of the octree. When the ray crosses any of
+these, we need to pop all the way to the very first, i.e. the bottom,           Silhouette blurring. Before the advent of contours, we attempted
+entry of the stack. This kind of random access is much less suitable            to hide the blockiness of silhouettes by simply blurring them. This
+for short stack approach than the usual pops.                                   proved to be much more difficult than it initially seemed. An ob-
+                                                                                vious problem is that the blur can only operate outwards from the
+Re-use of ray cast stack. This optimization is related to secondary             surface, because due to occlusion we cannot know what lies behind
+rays. Because the ray cast stack always contains the path to the                the silhouette. This has the consequence of making objects appear
+current voxel, it is possible to take the final stack of a primary ray          to thicken as they come closer to the camera. Blurring around a
+and use it as a starting point for the secondary ray, given that the            silhouette also causes unwanted blurring of details that should re-
+secondary ray starts where the primary ray ended.                               main sharp, e.g. distant geometry that is visible right outside the
+                                                                                silhouette.
+In an ideal world this would work as-is, but in practice it is neces-
+sary to move the starting point of the secondary ray a bit to account           We tried to counter the unwanted effects in various ways, but no
+for inaccuracies. It turns out that this can be handled as long as the          adequate solution was found. Ultimately, contours removed the
+offset is in the same coordinate octant as the direction of the ray,            need to hide silhouette blockiness in a neat and memory-friendly
+but offset to other octants is complicated. Therefore, the only prac-           way, while simultaneously offering much better geometry resolu-
+tical offset direction is to the direction of the secondary ray, which          tion than cubical voxels could provide.
+is fortunately fine for most purposes. However, the larger the offset,
+the less useful the re-using of the stack is.
+                                                                                7    Data management
+We are still not entirely certain why stack re-use failed to pro-
+vide speedup for rendering, but we observed that while the itera-               Because we are working with data sets that may be larger than what
+tion counts for the secondary rays did decrease, the overall perfor-            can be fit in GPU memory at one time, our data format is designed
+mance degraded a bit. A possible reason is that starting each of the            to be suitable for localized on-demand resolution adjustment. As
+secondary rays with its own stack decreases the overall coherence.              noted in Section 4, the resolution requirements drop quickly when
+Also, the initial descent in the voxel hierarchy is very coherent and           distance from camera increases, and we want to be able to exploit
+cheap. It looks like avoiding it is not worth even the small amount             this.
+of extra code that is required for handling the offsetting of the sec-
+ondary ray starting point.                                                      Storage on disk. Our octree data is stored as slices that are kept in
+                                                                                a single file that has a directory of slices it contains. A slice contains
+Attribute interpolation. We spent a lot of effort in trying to re-              voxel data on one resolution level in a particular cubical part of the
+move the blockiness of the surfaces in the same way that the con-               octree. To facilitate on-demand streaming, we constrain the amount
+ventional graphics pipeline of GPUs does it with textures. Initial              of data that one slice can contain to about 1 MB. The slices are
+experiments with interpolated attribute fetch were discouraging—                organized in a hierarchy, and if the next resolution level of a slice
+finding the neighbors and decoding and interpolating the attributes             consumes more memory than allowed, the slice is split spatially
+was more expensive than performing the actual ray cast.                         so that it has more than one child slice. Figure 20a illustrates the
+                                                                                storage of octree as slices on disk.
+From this, it became apparent that some amount of redundancy is
+required for the attribute storage so that the costly neighbor search           The structure of the slice hierarchy, without slice contents, is small
+could be avoided. After many experiments, we converged to a                     enough to be kept in memory. This makes it efficient to find the
+scheme where each non-leaf voxel has a 3 × 3 × 3 grid of attribute              slice that contains data in desired resolution in a particular spatial
+points, each of which could be occupied or empty. These points                  region. In our implementation, all data updates are performed by
+correspond to the corners of the child voxels, and the data points on           the CPU.
+the faces of the parent voxel are duplicated between adjacent voxels
+so that neighbor lookups are never required.                                    The contents of a slice differ considerably from the contents of a
+                                                                                block in memory, because whenever we want to load a slice, we
+This scheme yields approximately 4.5 attribute points per voxel,                have all voxels above it in the octree already present in memory.
+which is quite a big expansion factor. It would be possible to                  In particular, we already know which voxels the slice will contain,
+decrease this by using smart compression schemes, e.g. by using                 because the parent level contains this information. Therefore, we
+fewer than 8 corners per voxel where possible, but it seems that at             do not need to store any spatial positions, pointers, or indices in the
+least twice the ideal amount of data would be required even in the              voxels contained in the slice.
+best case.
+                                                                                Storage in memory. As discussed in Section 5, the loaded portion
+Attribute lookup is quite fast in this kind of structure, because no            of the octree is stored in GPU memory as blocks. In practice, we
+neighbor search is needed. However, block-based texture compres-                need two kinds of blocks because of dynamic resolution changes.
+sion cannot be easily used, because the natural unit of compression             The highest octree levels are stored in the trunk which is a pool
+would be a set of eight children, where up to 27 attribute points               where child descriptors can be allocated and freed easily. The trunk
+may be occupied. Finally, the construction of attributes becomes                is stored as blocks so that the ray caster does not need to handle
+non-trivial. It is easy to guarantee continuity between neighboring             voxels in the trunk differently.
+
+
+                                                                           15
+                                                                                                   block                      result
+(a)
+                                                                                                    slice
+                                                                                                 slice child
+
+
+
+                                    disk
+                                                                                                   block
+                                                                                                                         result   result
+                                                                                                    slice
+                                                                                          slice child slice child
+(b)
+                                                                               Figure 21: The process of loading a slice. Top: When loading a
+                                                                               slice that has only one child, the block is augmented with slice data
+                                                                               and one result block is produced. Bottom: If the slice has multiple
+                                                                               children, one result block is produced per slice child. The original
+                                  memory                                       block root is moved to the trunk.
+
+Figure 20: Octree data on disk and in memory. (a) The octree is
+stored on disk as a set of slices. Each box represents a slice that is         mate the size of a leaf voxel on the screen. Our heuristics attempts
+constrained to contain at most a given amount of data. The lines               to maintain a constant voxel-to-pixel ratio, utilizing all available
+between the boxes indicate the slice hierarchy. (b) In memory, the             memory resources. For every slice in memory and on disk, we can
+octree is stored as a set of blocks. The top part is the trunk, and the        calculate a score that approximates how big quality impact the slice
+bottom boxes represent leaf blocks where new slices may be added.              has for the current camera position. Slices are loaded in the or-
+When a leaf block has to be split, some of its contents are moved to           der determined by the scores. When GPU memory becomes full,
+the trunk.                                                                     slices are unloaded from memory to make room for new ones as
+                                                                               long as this improves the overall score. Asynchronous I/O is used
+                                                                               for streaming multiple requests to the operating system, increasing
+                                                                               the total data throughput.
+Child descriptors in the trunk are allocated so that they always have
+space for far pointers and every possible attribute. This makes the            We use a custom memory manager that allocates a large arena of
+trunk blocks flexible, which is necessary because loading and un-              GPU memory and handles the allocation and freeing of blocks.
+loading of slices often requires small modifications in the trunk.             Due to loading and unloading of variable-sized blocks, the mem-
+Because of high branching factor and large blocks, there are only a            ory space will gradually become fragmented. When fragmentation
+handful of trunk blocks in memory at any time.                                 prevents memory allocation from succeeding, the blocks are com-
+The vast majority of voxel data is stored in ordinary, or leaf blocks.         pacted so that a larger continuous free space is obtained. To avoid
+Voxels in a leaf block are organized in depth-first order in mem-              major hiccups, the compactor only moves as much data as is neces-
+ory to make them as compact and efficient as possible. Figure 20b              sary at any given moment.
+illustrates the storage of octree as blocks in memory.
+                                                                               7.1   Voxel Hierarchy Construction
+Loading slices. Let us consider the situation where we have an
+octree in memory and wish to augment a given block by adding an
+                                                                               The octree hierarchy is constructed in a top-down fashion one slice
+extra level of resolution. For now, let us assume that the slice is not
+                                                                               at a time. We insert special unbuilt slices in the slice hierarchy
+split, i.e. has only one child. We first locate the slice that contains
+                                                                               in places where we want to continue construction. Unbuilt slices
+the desired part of the octree and load the slice data from disk. We
+                                                                               contain all data required to construct the voxels for the slice, re-
+also transfer the relevant block from GPU to host memory. We
+                                                                               ferred to as the build data. There are no dependencies between
+then merge the block with data from the slice to produce a result
+                                                                               slices, making it trivial to use all CPU cores for the construction
+block that contains the desired extra level of resolution. Finally, we
+                                                                               simultaneously. The build data contains the following information
+transfer the result block back to GPU memory.
+                                                                               for each voxel: flags (REFINE - GEOMETRY, REFINE - ATTRIBUTES),
+At all times, we maintain one-to-one correspondence between non-               voxel position, indices of input triangles and displacement prim-
+trunk blocks in memory and next-level slices on disk. To accom-                itives (Section 7.4) intersecting the voxel, and the most important
+plish this, we must be able to split blocks when loading slices. If            ancestor contours. The flags indicate whether the shape or attributes
+the slice that was loaded has more than one children, we split the             of the voxel are outside given error tolerances. When variable build
+block by contructing one result block for each of the child slices.            resolution is enabled, at least one of these flags is therefore always
+This ensures that each result block again has exactly one slice cor-           active, because otherwise the voxel would be fine as it is and would
+responding to next resolution level. When a block is split into mul-           not need to be subdivided further.
+tiple blocks, there are one or more voxels near the root of the orig-
+inal block that are not in any of the result blocks. These voxels are          The construction begins by taking the input mesh and creating an
+transferred to the trunk. See Figure 21 for illustration.                      unbuilt root slice covering all input triangles. When the builder pro-
+                                                                               cesses an unbuilt slice, it reads the build data and replaces the con-
+Dynamic loading. We use simple heuristics for dynamically se-                  tents of the slice with actual voxel data. One or more child slices are
+lecting slices to load into memory. Based on the distance from the             also created with their respective build data. Processing of a single
+camera to a block and the resolution of the block, we can approxi-             voxel in the build data consists of filtering the triangles and dis-
+
+
+                                                                          16
+placement primitives to eight child voxels, determining appropriate
+contours (if requested by flag REFINE - GEOMETRY) and attributes
+(if REFINE - ATTRIBUTES is set) for them, and finally, creating the
+build data entries for the child voxels.
+Each unbuilt slice contains a description of how the slice should
+be split into child slices. It is important to allow a slice to be split
+into more than eight child slices. Otherwise we would need to pre-
+pare for the worst-case data expansion, which in turn would lead to
+very small slices on the average. Consider, for example, a situation
+where we have increased the voxel resolution for many levels with-
+out splitting the slice, as the data has been low-dimensional in large
+scales. As a consequence, there is a large gap between the voxel
+level and slice split level, making the slice spatially large compared
+to the size of the voxels it contains. Now, assume that the data
+starts to behave in a volumetric fashion so that the number of vox-
+els grows eight-fold on each level. Remembering that the data was                 Figure 22: Evaluation of candidate direction in cooperative con-
+low-dimensional in large scales, splitting the slice once does not                tour construction. Left: one contour has already been defined (blue
+decrease the amount of data as much as increasing the resolution                  lines) and candidate direction d is being considered for the next
+increases it. Therefore, the amount of data per slice could grow                  contour. Outermost dashed lines indicate current voxel extent ℎ in
+uncontrollably.                                                                   candidate direction, whereas inner dashed lines show the result-
+Even if this example may sound a bit artificial, the problem is severe            ing extent ℎ′ if a contour is inserted in this direction. The score of
+in practice unless splits to more than eight children are allowed.                the candidate direction is determined by difference ℎ − ℎ′ . Right:
+Note that the parent slice must decide the split strategy for each of             situation if the candidate direction on the left is chosen.
+its child slices before seeing how much data the child slices will
+actually contain after being built, so there is some chance that the
+estimate is overrun and a slightly larger slice than what was hoped
+for is generated.                                                                 sider only a relatively small subset of these directions in order to
+                                                                                  speed up the processing.
+7.2   Contour Construction
+                                                                                  In addition to constructing contours, we also want to detect the
+To simplify the task of approximating a given surface with contours,              case where the shape of the voxel as defined by its ancestor con-
+we observe that the result does not necessarily need to be smooth.                tours already approximates the original surface well enough. This
+As long as we ensure that the original surface is fully enclosed by               is a common situation with smooth input geometry, and omitting
+each contour, we are guaranteed to get an approximation that con-                 unnecessary contours generally yields significant memory savings.
+tains no holes. While discontinuities at voxel boundaries may in-                 One way to perform the test is to check whether the distance from
+troduce problems such as false self-shadowing or interreflections in              every point within the polyhedron to the original surface is below
+ray tracing, these can be usually worked around by offsetting the                 a fixed threshold. In practice, an efficient approximation can be
+starting positions of secondary rays by a small amount. Thus, the                 obtained by considering only the vertices of the polyhedron. The
+construction process can be defined in terms of minimizing the spa-               contour quality threshold is currently specified as an effective cubi-
+tial extent of each voxel, regardless of its neighbors. It should be              cal octree level, meaning that the shape of the voxel is considered
+noted that even though we do not enforce smoothness, the resulting                to be good enough if the geometrical error is smaller than the size
+contour surface tends to be relatively smooth.                                    of a cubical voxel on the given level.
+
+We employ a greedy algorithm that constructs a contour for each                   7.3   Attribute Construction
+voxel in a hierarchical top-down manner. The construction is based
+on the original surface contained within a given voxel, as well as the
+ancestor contours that have already been determined. We first con-                Attribute values are computed by integrating over all input surfaces
+struct a polyhedron by taking the intersection between the voxel’s                within the voxel. We experimented with weighted filters, e.g. pyra-
+cube and each of its ancestor contours. We then pick a number of                  midal filter that extends beyond the voxel boundaries, but the re-
+candidate directions and determine how much the original surface                  sults were not any better than with the simple box filter. Filters
+is being overestimated by the polyhedron in each direction. Overes-               with larger support tend to blur the content. We also tried taking
+timation is calculated as the difference between the spatial extents              the midpoint of the attribute extents, reasoning that this would min-
+of the polyhedron and the original surface along the given candidate              imize the error metric, but the resulting quality was bad. An obvious
+direction, as illustrated in Figure 22. Finally, we select the direction          problem in treating all surfaces within a voxel as equally important
+with the largest overestimation and construct a contour perpendicu-               is that for close-by surfaces even the parts that are not visible to
+lar to it so that it encloses the original surface as tightly as possible.        the outside can influence the attributes. The correct solution would
+                                                                                  be to somehow figure out which are the ”outermost” surfaces and
+Due to the greedy nature of the construction process, the quality of              take only them into account, but this seems non-trivial and is left as
+the resulting approximation depends heavily on the chosen set of                  future work.
+candidate directions. Since we have a limited number of hierarchy
+levels, we want to avoid choosing directions that would only reduce               The decision whether the attributes are represented adequately is
+the spatial extent locally without contributing to the final shape of             made by looking at the input geometry in the voxel and checking if
+leaf voxels. We thus restrict the set of candidate directions to nor-             it contains values that are too far from the encoded ones. Attribute
+mals of the original surface as well as perpendiculars of surface                 quantization and compression is performed before the test. This en-
+boundaries, since these directions are most likely to contribute to               sures that artifacts caused by them are properly taken into account.
+the final shape. In practice, we have found that it is enough to con-             Note that different error tolerances are used for different attributes.
+
+
+                                                                             17
+The way textures are sampled has a significant effect on the quality          scene           10   11   12   13            14  15  16 bytes
+of the results. We build mip-maps of the textures and take one tri-                            8   34  152 655           2724   –   –  4.99
+                                                                              C ITY
+linear sample per triangle within the voxel. This is not particulatly                         13   39  131 432           1368   –   –  5.44
+accurate, but works satisfactorily. More accurate solutions might                             33 132 530 2120               –   –   –  5.18
+                                                                              S IBENIK
+provide some quality improvement, especially if highly anisotropic                            41 141 440 1034            1857   –   –  5.68
+texture parameterizations are used.                                                           47 184 744 2734               –   –   –  5.52
+                                                                              S IBENIK -D
+                                                                                              79 314 1192 2806              –   –   –  8.10
+When attribute compression is enabled, the attributes are encoded                             262 1157   –    –             –   –   –  5.27
+                                                                              H AIRBALL
+into every voxel. This is necessary because our current implementa-                           442 1552   –    –             –   –   –  7.48
+tion does not allow leaving DXT compression blocks out. Further-                              10   36  145 606           2669   –   –  5.56
+                                                                              FAIRY
+more, because color and normal are encoded together, leaving one                              11   35   99  239           376 639 1109 5.62
+out is not possible either. Note that compression artifacts are de-                           21   89  362 1459             –   –   –  5.09
+                                                                              C ONFERENCE
+tected by the attribute error metric, as the actual compressed value                          17   40   96  220           512 1328  –  5.16
+is used as the reference. Adding more resolution makes the com-
+pression blocks spatially smaller and more likely to contain similar         Table 2: GPU memory usage of the test scenes with different octree
+colors, so encoding with variable resolution automatically fixes the         depths (MB). For each scene, the upper row denotes dataset with
+compression artifacts where they occur, unless the maximum level             cubical voxels (no contours) and the lower row denotes one with
+limit is reached.                                                            contours. The bytes column on the right shows the average memory
+                                                                             consumption per voxel in the largest built dataset.
+7.4   Displacement Mapping
+                                                                              scene             8   9  10 11   12  13  14 15 16
+Displacement-mapped triangles are handled by first converting                                   5   6   8  16  45 141 505 –    –
+                                                                              C ITY
+them into displacement primitives. These are processed similarly to                             9 11 14 23     48 115 311 –    –
+ordinary triangles, with the exception that they may be split when                              1   3   7  28 104 395   –  –   –
+                                                                              S IBENIK
+necessary. The displacement primitive is represented as a pair of                               2   4  10 31   90 194 336 –    –
+a power-of-two square in displacement map space and the orig-                                   9 21 56 190 839 2079 –     –   –
+                                                                              S IBENIK -D
+inal triangle. As voxels are subdivided, the displacement primi-                                10 24 70 274 1342 2541 –   –   –
+tives are split until they become smaller than the voxel in world                               45 70 136 335   –   –   –  –   –
+                                                                              H AIRBALL
+space, and primitives that are certainly outside the voxel are culled                           77 132 294 628  –   –   –  –   –
+away. Operations such as determining geometry extents or inte-                                  1   2   4  12  42 153 592 –    –
+                                                                              FAIRY
+grating over the contents of the voxel are approximative, as they are                           2   3   6  15  38  86 121 178 282
+carried out conservatively. For example, the geometry extents are                               1   2   4  14  55 222   –  –   –
+                                                                              C ONFERENCE
+                                                                                                3   4   7  13  24  51 115 288 –
+calculated based on minimum and maximum displacement values
+fetched from a mip-map.
+                                                                             Table 3: Voxel hierarchy construction time for various level counts.
+                                                                             Values are in seconds, and each value denotes the total build time
+8     Results                                                                up to the level indicated. The cost of building a single level is thus
+                                                                             the difference between adjacent numbers. For each scene, the upper
+The main tests were performed on an NVIDIA Quadro FX 5800                    row denotes cube voxelization (no contours) and the lower row with
+with 4 GB of RAM installed in a PC with 2.5 GHz Q9300 Intel                  contour voxelization.
+Core2 Quad CPU and 4 GB of RAM. The operating system was
+64-bit edition of Windows XP Professional. The public CUDA 2.1
+driver and compiler was used.
+                                                                             The rightmost column in the table shows the average number of
+Additional rendering tests were performed on NVIDIA GeForce                  bytes consumed by a single voxel in the highest-resolution repre-
+GTX 285 with 1 GB of RAM installed in a PC with 2.66 GHz                     sentation, including all overhead. Comparing to the theoretical fig-
+E6750 Intel Core2 Dual CPU and 2 GB of RAM. The operating                    ures (Section 5.6) and taking the one wasted byte for cubes into
+system in this machine was 32-bit Windows Vista Enterprise.                  account, we see that these measured values are about 0–0.5 bytes
+                                                                             higher than expected without contours, and 0.2–0.7 bytes higher
+Figure 23 shows the test scenes used in this paper along with their          with contours, excluding H AIRBALL and S IBENIK -D where a dis-
+triangle counts. Due to general lack of large-scale high-resolution          proportionally large fraction of voxels require contours.
+voxel datasets, all of our voxel datasets were built from triangle
+meshes.                                                                      The differences are explained by variance in branching factor, gaps
+                                                                             in child descriptor array, and variance in the amount of contour data.
+8.1   Memory Usage and Build Time                                            Our attribute compression method requires that every span of child
+                                                                             voxels is aligned at a 128-bit boundary, which causes a bloat of
+Table 2 shows the amount of GPU memory consumed by the voxel                 about 1/8 of data size, assuming an average of 4 children per voxel.
+datasets using various voxel levels. We can see that the represen-           There is also a slight overhead in page headers, far pointers, etc. that
+tations with contours (lower rows) are much more compact than                are included in this figure.
+representation without them (upper rows). S IBENIK -D and H AIR -
+BALL are exceptions, because there contours cannot represent the             Table 3 lists the build times for the test scenes. Note that each
+surface well enough to allow omitting finer levels. Naturally, the           number is the total build time up to the level indicated, and the time
+contour version of the scene is also a much more faithful represen-          required to load the mesh is not included in these figures. We can
+tation of the original mesh. The encoding of cubical voxels cur-             see that for most scenes, the build time with contours falls below
+rently wastes about one byte per voxel, because we do not omit the           the build time without contours. This happens because voxels cease
+contour pointer even when contours are not enabled. Nevertheless,            to subdivide when contours start to approximate the surfaces well
+this accounts for only about 20% of the total memory usage.                  enough.
+
+
+                                                                        18
+        C ITY, 879K tris       S IBENIK -D, 77K tris + disp.     H AIRBALL, 2.88M tris             FAIRY, 93K tris          C ONFERENCE, 283K tris
+
+                    Figure 23: Test scenes used in measurements. S IBENIK is the same as S IBENIK -D but with flat triangles.
+
+
+      3.5                                                                                                        triangle cubical   con-     cont.
+                                                                                 Scene             resolution     caster  voxels    tours   w/beam
+       3                                                                                                        (Mrays/s)         (Mrays/s)
+                                                                                                   512×384          46.7   45.1      79.9     88.6
+      2.5                                                                        C ITY            1024×768          68.5   54.3      89.1    106.0
+                                                                                                  2048×1536         77.1   63.9      97.4    123.8
+       2                                                                                           512×384          64.3   38.7      80.0     82.5
+                                                                                 S IBENIK         1024×768          94.1   46.5      94.1    103.6
+      1.5
+                                                                                                  2048×1536       107.1    55.1     103.9    122.0
+       1                                                                                           512×384           –     24.8      32.6     37.5
+                                                                                 S IBENIK -D      1024×768           –     30.2      38.7     48.3
+      0.5                                                                                         2048×1536          –     37.1      43.6     60.9
+                                                                                                   512×384          11.6   22.4      24.1     24.1
+       0                                                                         H AIRBALL        1024×768          20.5   22.5      27.9     28.4
+            1 2 3 4 5       6 7 8 9 10 11 12 13 14 15 16                                          2048×1536         31.2   29.2      36.5     38.2
+                                                                                                   512×384          63.9   62.1     128.2    132.6
+             city              sibenik-d            fairy                        FAIRY            1024×768        125.1    69.4     145.4    150.9
+                                                                                                  2048×1536       155.8    78.6     160.4    169.2
+             sibenik           hairball             conference                                     512×384          69.1   35.8      97.9    104.4
+                                                                                 C ONFERENCE      1024×768        111.9    43.8     110.3    124.3
+Figure 24: Local dimensionality of our test scenes on different                                   2048×1536       134.0    52.3     120.2    140.8
+voxel levels. We can see that all scenes converge towards the two-
+dimensional setting.                                                            Table 4: Ray cast performance for primary rays at various screen
+                                                                                resolutions. Values are in millions of rays per second. The largest
+                                                                                datasets that could be fit in 4 GB were used in the voxel tests.
+8.2     Scene Dimensionalities
+
+Figure 24 illustrates the local dimensionality 𝐷local (Section 4)               The triangle caster column refers to the fastest GPU ray caster de-
+of our test scenes depending on voxel level. The dimensionality                 scribed in our previous paper [Aila and Laine 2009]. The cubi-
+curve has been calculated by taking base-2 logarithm of the aver-               cal voxels column shows voxel ray cast performance with cubical
+age branching factor of each level. As the voxels get smaller, the              voxel data, while the contours column shows the results for voxel
+scenes mostly converge towards two-dimensional setting, i.e. aver-              data that includes contours. It should be noted that the two datasets
+age of about 4 children per voxel. H AIRBALL looks almost volu-                 are different in terms of their average depth, as the improved ap-
+metric for a long while, until the surface structure of the individual          proximation provided by contours makes it possible to prune the
+hairs starts to dominate. It is worth noting that in this case, the one-        hierarchy more aggressively. Finally, the last column shows the re-
+dimensional nature of individual hairs never leads to dimensionality            sult with the beam optimization enabled (Section 6.2). It can be
+less than two. This is because at the point where the surface of the            seen that the voxel ray caster consistently outperforms the triangle
+individual hairs is not yet discernible, the object is so dense that            ray caster in the test scenes.
+the volume-like jumble near the center dominates. In FAIRY, the
+dimensionality remains less than two until the surface of the indi-             Obviously, the comparison between triangle and voxel ray cast per-
+vidual limbs becomes visible.                                                   formance is between apples and oranges because of the different
+                                                                                type of data we are casting against. The triangle-based representa-
+                                                                                tion is able to discern every edge and corner perfectly, whereas the
+8.3     Rendering Performance                                                   voxel representation may be inaccurate in such places. On the other
+                                                                                hand, the voxel representation contains unique, i.e. non-repetitive,
+Arguably the most interesting piece of information is the rendering             color and normal information on a per-sample basis, and allows
+performance using voxel data. In our case, the dominant factor                  representing unique high-resolution geometry—it is not possible to
+is the efficiency of ray casts, as shading costs are negligible and             render S IBENIK -D using the triangle ray caster.
+post-process filtering is one to two magnitudes faster than the ray
+casting. Table 4 summarizes the ray cast performance in our test                It is worth noting that the triangle ray caster is painstakingly op-
+scenes at various resolutions. The values in the table have been                timized for fast processing of triangles, and the performance is
+measured as averages over several viewpoints, repeating each frame              severely affected by the slightest addition of complexity. It is there-
+several times to amortize startup and flush delays. The increase in             fore likely that adding support for displacement maps would de-
+performance as the resolution grows is therefore explained solely               grade its performance below the voxel ray caster. Admittedly, this
+by better ray coherence.                                                        claim remains unproven as currently there exists no such implemen-
+
+
+                                                                           19
+                   octree           Quadro     GeForce       speedup          that with beam optimization we are suffering from limited memory
+ scene                      MB
+                   depth            FX 5800    GTX 285          %             bandwidth to some degree.
+ C ITY              13      432      109.5      126.6          15.6
+ S IBENIK           12      440      110.1      127.4          15.7           Memory bandwidth bw GB/s is calculated by adding the global and
+ H AIRBALL          10      442       32.1       39.3          22.4           local memory bytes accessed per ray, multiplying this with rays per
+ FAIRY              15      639      152.7      182.2          19.3           second, and dividing by 230 . This figure does not take coalescing or
+ C ONFERENCE        14      512      124.4      144.8          16.4           any other real-world memory subsystem features into account. We
+                                                                              can see that the beam optimization reduces bandwidth requirements
+Table 5: Comparison between two boards with identical GPUs.                   significantly. The final row in the top section shows how much of
+The values are in million rays per second, and measured by render-            the total rendering time was spent in rendering the coarse frame for
+ing 1024×768 primary rays using contours and beam optimization.               beam optimization.
+To make comparison fair, the memory usage of both runs were lim-
+ited to 1 GB available on our GTX 285 board. This explains why                The next section details the execution counts of various parts of
+the reported numbers for Quadro are higher than in Table 4.                   code. The first row shows the average number of instructions ex-
+                                                                              ecuted per ray, not taking SIMD execution into account. Not in-
+                                                                              cluded in the table is the overall SIMD efficiency, i.e. how many
+tation optimized for current GPUs. In any case, we hypothesize that           threads in a warp are enabled on the average. This hovers usually
+in a static scene with extremely detailed geometry, the ray cast per-         around 70% when no beam optimization is used, and 60% with
+formance is greater when ray casting in a voxel hierarchy instead of          beam optimization enabled.
+triangles and displacement maps.                                              The iterations row tells the number of main loop iterations in the ray
+                                                                              caster, and intersect shows how many voxel-ray intersection tests
+8.4   GTX 285 Experiments                                                     (INTERSECT in pseudocode of Figure 15) were performed. Row
+                                                                              push tells the number of times the PUSH branch was executed, and
+Because Quadro boards are generally slightly slower than GeForce              store shows the number of actual stack writes. Rows advance and
+boards with the same GPU, we wanted to measure how different                  pop correspond to their respective parts of the pseudocode as well.
+our results would be on a GeForce GTX 285 board. Because our                  All figures are per-ray, and SIMD execution is not taken into ac-
+GTX board has only 1 GB of RAM, we ran the tests with smaller                 count. We can see that by far the most common case is descending
+datasets that fit in 1 GB. For instance, in C ITY we could only use           to a child voxel (push), and the least frequent is ascending in the
+13 levels instead of the 14 used in other tests.                              hierarchy (pop). Comparing rows push and store, we can see that
+                                                                              the optimization to eliminate unnecessary stack writes was able to
+The core clock speed in GTX 285 is about 14% faster than in the               remove over half of them.
+Quadro board, and the peak memory bandwidth is a staggering 56%
+greater. Table 5 gives a summary of rendering results with contours           The bottom section in the table lists memory transfer statistics. The
+and beam optimization enabled. Based on the results, the rendering            first row glob acc counts the total number of global memory fetch
+is 15–22% faster on GTX 285 with an average speedup of 18%.                   instructions executed per ray, and the next row glob bytes counts
+The observed speedup indicates that the ray caster is not strictly            the number of bytes that were fetched. Coalescing is not taken into
+limited by memory bandwidth, because the difference in core clock             account in these figures. However, the next row glob trans. counts
+speed is almost sufficient to explain the results. If we were severely        the number of fetches after coalescing. This figure is calculated by
+limited by memory performance, the speedups should be higher.                 taking all fetch instructions executed in parallel and counting how
+                                                                              many requests these generate after the coalescing logic in the GPU
+                                                                              is applied. Again, the grand total is divided by the number of rays
+8.5   Detailed Execution Profile
+                                                                              to get a per-ray figure. It is easy to see that the fetches are quite well
+                                                                              coalesced, and the actual transaction count is mostly between 12%
+Table 6 lists a number of profiling counters from rendering the test          and 16% of fetch instruction count, except for H AIRBALL where
+scenes in 1024×768 resolution using contours. All values are per-             the ratio is as high as 37%.
+ray averages except for those that consider the entire frame. As can
+be seen by contrasting the Mrays/s figures with Table 4, there is             The next three rows show the same statistics for local memory. All
+some (less than 1%) fluctuation between benchmark runs that we                local memory accesses are due to stack traffic, as there are no lo-
+have not been able to remove.                                                 cal memory spills in the ray cast kernel. We have assumed that
+                                                                              local memory is striped so that the same local memory address in
+The top row Mrays/s indicates the measured rendering performance              each thread’s address space is stored consecutively in GPU mem-
+in millions of rays per second. The next row simulated shows a                ory. Calculated this way, the coalescing reduces the request count to
+simulated performance figure obtained by counting the warp-wide               around 13–20%. H AIRBALL is in its own league with transactions
+execution counts of each code block and weighting with the corre-             per request ratio of 44%.
+sponding instruction counts. The effects of warp divergence have
+been included in this figure, and it is therefore an upper bound for          Low transaction/request ratios thanks to coalescing are explained
+how fast the ray casting could optimally be executed. This assumes            by high coherence between rays. It is worth keeping in mind that
+that every instruction that could possibly dual-issue does so, and            these figures were measured for primary rays only, and other types
+there are no memory latencies or other hiccups of any kind. The               of rays will probably exhibit less coherent traversal. However, most
+same technique has been used before for estimating theoretical ray            of the per-ray figures will be the same or almost the same for other
+cast performance on GPUs [Aila and Laine 2009].                               types of long rays, too.
+The next row shows how much of the simulation performance we
+reach in our measurements. The triangle ray caster consistently               9    Adoption of Voxels
+performed over 80% of simulated performance for primary rays,
+and without beam optimization we obtain close to similar figures              In this section, we take a look at the feasibility of voxels as a generic
+with voxels. However, with beam optimization enabled, our figures             geometry representation in quantitative terms and make rough ex-
+fall to 60–80% range and even below that in FAIRY. This suggests              trapolations into the future regarding the remaining bottlenecks.
+
+
+                                                                         20
+                        C ITY              S IBENIK             S IBENIK -D              H AIRBALL               FAIRY           C ONFERENCE
+ statistic
+                no beam      w/beam   no beam    w/beam     no beam    w/beam        no beam   w/beam     no beam    w/beam    no beam   w/beam
+ Mrays/s           89.1       106.0      94.1     103.6        38.7        48.3         27.9      28.4     145.4      150.8     110.5     124.3
+ simulated         96.5       133.8    107.1      142.2        46.4        73.5         38.9      41.3     182.4      268.0     122.2     163.0
+ % of sim.         92.4        79.3      87.9       72.8       83.4        65.8         71.8      68.7       79.7      56.3       90.4     76.3
+ bw GB/s           33.8        25.5      32.1       23.2       25.6        16.3         12.0      10.3       26.7      14.5       32.3     23.1
+ coarse %             –        15.9         –       15.5          –       10.3             –       3.6          –      15.3          –     18.2
+ instructions     2238         1370     1983       1256       3866        1953         2627      2220       1103        563      1766      1109
+ iterations        29.4        19.1      25.8       17.7       52.8        27.2         34.2      29.5       14.8       8.1       22.4     15.3
+ intersect         25.4        16.7      22.6       15.2       38.8        21.5         28.0      23.9       11.5       6.4       20.0     13.3
+ push              19.5        14.7      17.0       13.4       30.6        18.3         18.4      16.7        8.0       5.6       14.1     11.2
+   store            8.8         7.3       8.0        6.7       12.3         8.3          7.6       7.0        3.5       2.6        6.1      5.0
+ advance            8.9         3.4       7.8        3.2       21.2         7.9         15.3      12.2        6.5       2.1        7.3      3.0
+ pop                4.1         1.5       3.9        1.4       10.3         3.7          7.4       6.1        3.3       1.1        3.6      1.3
+ glob acc          51.4        33.1      45.8       31.0       89.2        47.6         58.7      50.3       23.9      13.5       40.4     27.1
+ glob bytes      303.9        192.6    270.9      179.5      528.9       272.5        340.0     289.4      142.2       77.1     236.2     153.8
+ glob trans.        6.0         4.5       6.0        4.9       16.3        11.4         19.7      18.7        3.2       2.5        4.8      3.9
+ local acc         12.9         8.8      11.9        8.1       22.5        12.0         15.1      13.1        6.8       3.6        9.7      6.3
+ local bytes     102.8         65.7      95.5       60.6     180.4         90.3       120.5     101.9        54.6      26.4       77.8     45.7
+ local trans.       1.7         1.4       1.7        1.5        4.7         3.5          6.0       5.8        1.0       0.8        1.3      1.1
+
+Table 6: Profiling statistics from runs in 1024×768 resolution. Only contour variants have been included in this table. For each scene,
+the left column corresponds to rendering without beam optimization and the right column with beam optimization. All values are per-ray
+averages except for the top section that concerns the entire frame. When beam optimization is enabled, the values are calculated by summing
+the counters over both the coarse frame and the full-resolution frame, and dividing by the number of rays in the full-resolution frame. Note
+that code execution statistics are calculated on a per-ray basis, and actual values are higher due to SIMD execution of 32 rays in parallel.
+See text for description of individual rows.
+
+
+9.1   Rendering Performance                                                    savings in terms of memory usage.
+                                                                               In any case, it is comforting that the memory requirements are rel-
+According to the benchmark results, we can cast approximately
+                                                                               atively sensible compared to memory sizes available today. GPU
+50 million primary rays per second in a moderately detailed scene
+                                                                               memory size does not seem to be the worst bottleneck in potential
+(S IBENIK -D) using a single GT200 class GPU. This is enough for
+                                                                               adoption of voxel rendering.
+first-hit rendering in 1080p resolution with 25 frames per second,
+assuming that shading costs are negligible.
+                                                                               9.3    Media Size and Speed
+The simplest and reasonably good-looking antialiasing takes 4 sam-
+ples per pixel, which according to our tests costs about three times           While the amount of GPU memory in today’s boards is relatively
+as much as taking one sample per pixel. In addition, shadow rays               high, the same cannot be said about the media used for deploying
+and reflections require additional rays. These secondary rays are              digital content. A dual-layer Blu-Ray disc has capacity of 50 GB,
+less coherent than the primary rays, but based on preliminary tests            which is just 12.5 times the GPU memory size. Obviously, if the
+they seem to cost roughly as much as primary rays. Incoherent sec-             goal is to make the content so detailed that a couple of gigabytes
+ondary rays would undoubtedly be more expensive, but we have not               worth of data is used for rendering a single viewpoint, the total
+tested those yet.                                                              amount of data must be much higher.
+Assuming that, on the average, four secondary rays are generated               Unsurprisingly, larger storage media are being researched. Holo-
+per primary ray sample, we end up having five times as expensive               graphic Versatile Disc (HVD) is a technology being developed by
+samples as in the first-hit-only case. Brute-force antialiasing triples        a consortium of several companies, and it will theoretically have
+this figure, yielding per-pixel cost multiplier of 15. Extrapolating           storage capacity of 6 TB. However, the first releases with 1 TB ca-
+GPU performance with 50% growth per year, doing 25 frames per                  pacity are not planned until 2016. Also, the planned transfer rate is
+second with such rendering would take about 7 years to reach.                  only 125 MB/s, so it would take 32 seconds to completely refresh
+                                                                               the contents of a 4 GB video memory assuming zero time wasted
+This estimate disregards the cost of shading, post-process filtering,          in seeking, and much longer when seek time is taken into account.
+and other operations such as data transfers. On the other hand, it is
+likely that algorithmic improvements will emerge.                              This estimate assumes that the size of the data on the disk is the
+                                                                               same as in GPU memory, and thus neglects the possibility of com-
+                                                                               pressing the data on the disk. It is difficult to estimate what kind
+9.2   Memory Size
+                                                                               of (lossy) compression ratios could be achieved without intolerable
+                                                                               decrease in data quality. This is an important practical issue that
+Considering that we can fit over 600 square meters of surface data in          would deserve a closer look.
+1mm×1mm resolution into 4 GB of memory (Section 3.1), and that
+memory consumption increases only logarithmically with respect to              Considering the situation today, the only storage media large
+viewing distance (Section 4), the GPU memory size appears to be                enough to accommodate a reasonable amount of content is the hard
+less of a concern than might seem at first. However, more complex              disk drive, where 1 TB of storage can be currently bought for
+shading models can increase per-voxel memory usage significantly.              well below $0.10/GB. The data transfer rate is typically less than
+Also, it cannot be assumed that every voxel in memory would be                 100 MB/s, which remains a problem. Solid-state drives can have
+stored at exactly the right resolution. On the other hand, occlusion-          much better transfer rates, so this problem might get resolved if
+based on-demand streaming [Crassin et al. 2009] could offer huge               their price drops significantly.
+
+
+                                                                          21
+Without digging deeper into the issue of storage technology, it              ATI. 2005. Radeon X800: 3Dc white paper. http://www.ati.com/
+seems that the size and speed of distribution media are among the              products/radeonx800/3DcWhitePaper.pdf .
+biggest challenges in data-intensive content representations.
+                                                                             C RASSIN , C., N EYRET, F., L EFEBVRE , S., AND E ISEMANN , E.
+                                                                                2009. Gigavoxels: ray-guided streaming for efficient and de-
+9.4   Remote Rendering                                                          tailed voxel rendering. In I3D ’09: Proceedings of the 2009
+                                                                                symposium on Interactive 3D graphics and games, 15–22.
+There is an interesting possibility of sidestepping the storage and
+media problems by running the game in a dedicated server farm                D ICK , C., K R ÜGER , J., AND W ESTERMANN , R. 2009. GPU
+and streaming the rendered graphics to the client. There are ven-               ray-casting for scalable terrain rendering. In Proc. Eurographics
+tures in this direction, such as OnLive, OTOY, and Gaikai, who                  2009–Areas Papers, 43–50.
+promise high-quality gaming over broadband connection. De-                   F ERNANDO , R. 2005. Percentage-closer soft shadows. In SIG-
+spite all kinds of technological challenges associated with such ap-            GRAPH ’05: ACM SIGGRAPH 2005 Sketches, ACM, New
+proaches, they could provide something that home gaming cannot                  York, NY, USA, 35.
+by storing tremendously large assets in high-performance RAID
+clusters.                                                                    G OBBETTI , E., AND M ARTON , F. 2005. Far Voxels – a multires-
+                                                                                olution framework for interactive rendering of huge complex 3D
+10    Future Work                                                               models on commodity graphics platforms. ACM Transactions on
+                                                                                Graphics 24, 3, 878–885.
+An obvious step forward would be experimenting with truly vol-               H ORN , D. R., S UGERMAN , J., H OUSTON , M., AND H ANRAHAN ,
+umetric effects such as fog or partially transparent materials. Our             P. 2007. Interactive k-d tree gpu raytracing. In I3D ’07: Pro-
+data structure is readily able to represent them, and we assume that            ceedings of the 2007 symposium on Interactive 3D graphics and
+it would be reasonably efficient to e.g. accumulate extinction coef-            games, 167–174.
+ficients or collect illumination during ray casts.
+                                                                             K NOLL , A., WALD , I., PARKER , S. G., AND H ANSEN , C. D.
+We have used the simple Phong shading model due to availabil-                   2006. Interactive Isosurface Ray Tracing of Large Octree Vol-
+ity of material data in this form, and when downsampling, we                    umes. In Proceedings of the 2006 IEEE Symposium on Interac-
+combine the shading attributes of multiple primitives by averag-                tive Ray Tracing, 115–124.
+ing them. This produces reasonably good results in most cases, but
+it would be better to take occlusion into account when calculating           K NOLL , A. M., WALD , I., AND H ANSEN , C. D. 2009. Coherent
+aggregate shading attributes for large voxels. Moreover, it is not              multiresolution isosurface ray tracing. Vis. Comput. 25, 3, 209–
+at all clear if the Phong model is a good choice for representing               225.
+the appearance of such voxels. For instance, the approach taken by           L AINE , S., AND K ARRAS , T. 2010. Efficient sparse voxel oc-
+Gobbetti et al. [2005]—employing a generic shading method that is               trees. In Proceedings of ACM SIGGRAPH 2010 Symposium on
+based on sampling the original data from various directions—seems               Interactive 3D Graphics and Games.
+eminently suitable for our purposes as well.
+                                                                             M UNKBERG , J., A KENINE -M ÖLLER , T., AND S TR ÖM , J. 2006.
+While the proposed data structure is demonstrably efficient for ren-           High quality normal map compression. In Proc. Graphics Hard-
+dering purposes, it still requires a fair amount of storage. The mem-          ware 2006, 95–102.
+ory capacity available in GPUs today is adequate for rendering pur-
+poses, but storing large amounts of high-resolution content on an            M UNKBERG , J., O LSSON , O., S TR ÖM , J., AND A KENINE -
+optical disk or streaming it over network seems impossible with-               M ÖLLER , T. 2007. Tight frame normal map compression. In
+out some form of compression. Finding efficient, presumably lossy,             Proc. Graphics Hardware 2007, 37–40.
+compression algorithms would make voxel-based content more fea-              R ITSCHEL , T., E NGELHARDT, T., G ROSCH , T., S EIDEL , H.-P.,
+sible for practical applications.                                               K AUTZ , J., AND DACHSBACHER , C. 2009. Micro-rendering
+In our benchmarks we load the entire scenes in full resolution into             for scalable, parallel final gathering. ACM Trans. Graph. (Proc.
+GPU memory, while only a small portion would be required for                    SIGGRAPH Asia 2009) 28, 5.
+rendering any single image due to occlusions and resolution re-              ROBISON , A., AND S HIRLEY, P. 2009. Image space gathering. In
+quirements falling with distance. Our system already supports on-              Proc. High Performance Graphics 2009, 91–98.
+demand streaming based on distance to camera, but it would be
+interesting to see how much visibility-based streaming (in spirit of         S ZIRMAY-K ALOS , L., AND U MENHOFFER , T. 2008. Displace-
+Crassin et al. [2009]) would further reduce the memory footprint.               ment mapping on the GPU - State of the Art. Computer Graphics
+                                                                                Forum 27, 1.
+Acknowledgments. We thank Timo Aila and David Luebke for
+discussions and helpful suggestions. Sibenik model courtesy of               VAN WAVEREN , J. M. P., AND C ASTA ÑO , I.   2008. Real-time
+Marko Dabrovic. Fairy model courtesy of Ingo Wald, University                  normal map DXT compression. http://developer.nvidia.com/
+of Utah. Conference room model courtesy of Anat Grynberg and                   object/real-time-normal-map-dxt-compression.html.
+Greg Ward, Lawrence Berkeley Laboratory.                                     W EYRICH , T., H EINZLE , S., A ILA , T., FASNACHT, D. B.,
+                                                                               O ETIKER , S., B OTSCH , M., F LAIG , C., M ALL , S., ROHRER ,
+References                                                                     K., F ELBER , N., K AESLIN , H., AND G ROSS , M. 2007. A
+                                                                               hardware architecture for surface splatting. ACM Transactions
+A ILA , T., AND L AINE , S. 2009. Understanding the efficiency                 on Graphics (Proc. SIGGRAPH) 26, 3 (Aug.).
+   of ray traversal on GPUs. In Proceedings of High-Performance              Z WICKER , M., P FISTER , H., VAN BAAR , J., AND G ROSS , M.
+   Graphics 2009, 145–149.                                                      2001. Surface splatting. In SIGGRAPH ’01: Proceedings of the
+A MANATIDES , J., AND W OO , A. 1987. A fast voxel traversal                    28th annual conference on Computer graphics and interactive
+  algorithm for ray tracing. In In Eurographics 87, 3–10.                       techniques, 371–378.
+
+
+                                                                        22
+Figure 25: S IBENIK -D represented as voxels with high-resolution surface displacement and rendered with precomputed ambient occlusion
+and a single shadow ray per primary ray. Four samples per pixel antialiasing was used with a reconstruction filter that uses 12 samples,
+including 8 from neighboring pixels. 13 octree levels could be fit in memory, corresponding to voxel spacing of about 5mm.
+
+
+
+                                                                  23
+  C ITY                                                     H AIRBALL
+
+
+
+
+  FAIRY                                                    C ONFERENCE
+
+
+
+
+S IBENIK -D
+
+              Figure 26: Test scenes used in this paper.
+
+
+
+
+                                 24
+                   7 levels                                       8 levels                                        9 levels
+
+
+
+
+                  10 levels                                       11 levels                                      12 levels
+
+Figure 27: Voxel renderings of C ITY using octrees of different depths. Note how only a few levels are required to make the overall appearance
+adequate for e.g. far-field gathering for global illumination.
+
+
+
+
+             Figure 28: Voxel renderings of FAIRY. The hair close-up highlights the limitations of the polygonal source data.
+
+
+
+
+         1 sample/pixel                     4 samples/pixel                      1 sample/pixel                     4 samples/pixel
+
+Figure 29: Effects of antialiasing in C ITY close-ups. The images are 180 × 180 pixels in size. As can be seen, automatic downsampling of
+voxels does not remove the need for antialiasing.
+
+
+
+                                                                     25
+Figure 30: Effects of post-process filtering. All images are 768 × 768 pixels in size. Voxel resolution is limited in order to make the effect
+stand out better. The leftmost image is from a car scene that was not used in benchmarks.
+
+
+
+
+Figure 31: Voxel renderings without (upper row) and with (lower row) contours. Post-process filtering is disabled to better visualize the
+individual voxels. Voxel resolution is limited in order to highlight the differences. For example, in FAIRY it would be impossible to find a
+badly undersampled region if all voxel levels were used.
+
+
+
+
+                                                                     26
+Figure 32: Iteration count images without (upper row) and with (lower row) beam optimization. The scale from black to white corresponds
+to 0–64 iterations.
+
+
+
+
+                                                                  27
+Appendix A       CUDA source for the ray cast algorithm
+
+__device__ void cast_ray(
+    int*                root,            // In: Octree root (pointer to global mem).
+    volatile float3&    p,               // In: Ray origin (shared mem).
+    volatile float3&    d,               // In: Ray direction (shared mem).
+    volatile float&     ray_size_coef, // In: LOD at ray origin (shared mem).
+    float               ray_size_bias, // In: LOD increase along ray (register).
+    float&              hit_t,           // Out: Hit t-value (register).
+    float3&             hit_pos,         // Out: Hit position (register).
+    int*&               hit_parent,      // Out: Hit parent voxel (pointer to global mem).
+    int&                hit_idx,         // Out: Hit child slot index (register).
+    int&                hit_scale)       // Out: Hit scale (register).
+{
+    const int s_max = 23; // Maximum scale (number of float mantissa bits).
+    const float epsilon = exp2f(-s_max);
+
+    int2 stack[s_max + 1]; // Stack of parent voxels (local mem).
+
+    // Get rid of small ray direction components to avoid division by zero.
+
+    if (fabsf(d.x) < epsilon) d.x = copysignf(epsilon, d.x);
+    if (fabsf(d.y) < epsilon) d.y = copysignf(epsilon, d.y);
+    if (fabsf(d.z) < epsilon) d.z = copysignf(epsilon, d.z);
+
+    // Precompute the coefficients of tx(x), ty(y), and tz(z).
+    // The octree is assumed to reside at coordinates [1, 2].
+
+    float tx_coef = 1.0f / -fabs(d.x);
+    float ty_coef = 1.0f / -fabs(d.y);
+    float tz_coef = 1.0f / -fabs(d.z);
+
+    float tx_bias = tx_coef * p.x;
+    float ty_bias = ty_coef * p.y;
+    float tz_bias = tz_coef * p.z;
+
+    // Select octant mask to mirror the coordinate system so
+    // that ray direction is negative along each axis.
+
+    int octant_mask = 7;
+    if (d.x > 0.0f) octant_mask ˆ= 1, tx_bias = 3.0f * tx_coef - tx_bias;
+    if (d.y > 0.0f) octant_mask ˆ= 2, ty_bias = 3.0f * ty_coef - ty_bias;
+    if (d.z > 0.0f) octant_mask ˆ= 4, tz_bias = 3.0f * tz_coef - tz_bias;
+
+    // Initialize the active span of t-values.
+
+    float t_min = fmaxf(fmaxf(2.0f * tx_coef - tx_bias, 2.0f * ty_coef - ty_bias), 2.0f * tz_coef - tz_bias);
+    float t_max = fminf(fminf(tx_coef - tx_bias, ty_coef - ty_bias), tz_coef - tz_bias);
+    float h = t_max;
+    t_min = fmaxf(t_min, 0.0f);
+    t_max = fminf(t_max, 1.0f);
+
+    // Initialize the current voxel to the first child of the root.
+
+    int*   parent           = root;
+    int2   child_descriptor = make_int2(0, 0); // invalid until fetched
+    int    idx              = 0;
+    float3 pos              = make_float3(1.0f, 1.0f, 1.0f);
+    int    scale            = s_max - 1;
+    float scale_exp2        = 0.5f; // exp2f(scale - s_max)
+
+    if (1.5f * tx_coef - tx_bias > t_min) idx ˆ= 1, pos.x = 1.5f;
+    if (1.5f * ty_coef - ty_bias > t_min) idx ˆ= 2, pos.y = 1.5f;
+    if (1.5f * tz_coef - tz_bias > t_min) idx ˆ= 4, pos.z = 1.5f;
+
+    // Traverse voxels along the ray as long as the current voxel
+    // stays within the octree.
+
+    while (scale < s_max)
+    {
+        // Fetch child descriptor unless it is already valid.
+
+        if (child_descriptor.x == 0)
+            child_descriptor = *(int2*)parent;
+
+        // Determine maximum t-value of the cube by evaluating
+        // tx(), ty(), and tz() at its corner.
+
+        float tx_corner = pos.x * tx_coef - tx_bias;
+        float ty_corner = pos.y * ty_coef - ty_bias;
+        float tz_corner = pos.z * tz_coef - tz_bias;
+        float tc_max = fminf(fminf(tx_corner, ty_corner), tz_corner);
+
+
+
+
+                                                           28
+// Process voxel if the corresponding bit in valid mask is set
+// and the active t-span is non-empty.
+
+int child_shift = idx ˆ octant_mask; // permute child slots based on the mirroring
+int child_masks = child_descriptor.x << child_shift;
+if ((child_masks & 0x8000) != 0 && t_min <= t_max)
+{
+    // Terminate if the voxel is small enough.
+
+    if (tc_max * ray_size_coef + ray_size_bias >= scale_exp2)
+        break; // at t_min
+
+    // INTERSECT
+    // Intersect active t-span with the cube and evaluate
+    // tx(), ty(), and tz() at the center of the voxel.
+
+    float tv_max = fminf(t_max, tc_max);
+    float half = scale_exp2 * 0.5f;
+    float tx_center = half * tx_coef + tx_corner;
+    float ty_center = half * ty_coef + ty_corner;
+    float tz_center = half * tz_coef + tz_corner;
+
+    // Intersect with contour if the corresponding bit in contour mask is set.
+
+    int contour_mask = child_descriptor.y << child_shift;
+    if ((contour_mask & 0x80) != 0)
+    {
+        int   ofs    = (unsigned int)child_descriptor.y >> 8;       // contour pointer
+        int   value = parent[ofs + popc8(contour_mask & 0x7F)];     // contour value
+        float cthick = (float)(unsigned int)value * scale_exp2 * 0.75f; // thickness
+        float cpos   = (float)(value << 7) * scale_exp2 * 1.5f;     // position
+        float cdirx = (float)(value << 14) * d.x;                   // nx
+        float cdiry = (float)(value << 20) * d.y;                   // ny
+        float cdirz = (float)(value << 26) * d.z;                   // nz
+        float tcoef = 1.0f / (cdirx + cdiry + cdirz);
+        float tavg   = tx_center * cdirx + ty_center * cdiry + tz_center * cdirz + cpos;
+        float tdiff = cthick * tcoef;
+
+        t_min = fmaxf(t_min, tcoef * tavg - fabsf(tdiff)); // Override t_min with tv_min.
+        tv_max = fminf(tv_max, tcoef * tavg + fabsf(tdiff));
+    }
+
+    // Descend to the first child if the resulting t-span is non-empty.
+
+    if (t_min <= tv_max)
+    {
+        // Terminate if the corresponding bit in the non-leaf mask is not set.
+
+        if ((child_masks & 0x0080) == 0)
+            break; // at t_min (overridden with tv_min).
+
+        // PUSH
+        // Write current parent to the stack.
+
+        if (tc_max < h)
+            stack[scale] = make_int2((int)parent, __float_as_int(t_max));
+        h = tc_max;
+
+        // Find child descriptor corresponding to the current voxel.
+
+        int ofs = (unsigned int)child_descriptor.x >> 17; // child pointer
+        if ((child_descriptor.x & 0x10000) != 0) // far
+            ofs = parent[ofs * 2]; // far pointer
+        ofs += popc8(child_masks & 0x7F);
+        parent += ofs * 2;
+
+        // Select child voxel that the ray enters first.
+
+        idx = 0;
+        scale--;
+        scale_exp2 = half;
+
+        if (tx_center > t_min) idx ˆ= 1, pos.x += scale_exp2;
+        if (ty_center > t_min) idx ˆ= 2, pos.y += scale_exp2;
+        if (tz_center > t_min) idx ˆ= 4, pos.z += scale_exp2;
+
+        // Update active t-span and invalidate cached child descriptor.
+
+        t_max = tv_max;
+        child_descriptor.x = 0;
+        continue;
+    }
+}
+
+
+
+                                                    29
+        // ADVANCE
+        // Step along the ray.
+
+        int step_mask = 0;
+        if (tx_corner <= tc_max) step_mask ˆ= 1, pos.x -= scale_exp2;
+        if (ty_corner <= tc_max) step_mask ˆ= 2, pos.y -= scale_exp2;
+        if (tz_corner <= tc_max) step_mask ˆ= 4, pos.z -= scale_exp2;
+
+        // Update active t-span and flip bits of the child slot index.
+
+        t_min = tc_max;
+        idx ˆ= step_mask;
+
+        // Proceed with pop if the bit flips disagree with the ray direction.
+
+        if ((idx & step_mask) != 0)
+        {
+            // POP
+            // Find the highest differing bit between the two positions.
+
+            unsigned int differing_bits = 0;
+            if ((step_mask & 1) != 0) differing_bits |= __float_as_int(pos.x) ˆ __float_as_int(pos.x + scale_exp2);
+            if ((step_mask & 2) != 0) differing_bits |= __float_as_int(pos.y) ˆ __float_as_int(pos.y + scale_exp2);
+            if ((step_mask & 4) != 0) differing_bits |= __float_as_int(pos.z) ˆ __float_as_int(pos.z + scale_exp2);
+            scale = (__float_as_int((float)differing_bits) >> 23) - 127; // position of the highest bit
+            scale_exp2 = __int_as_float((scale - s_max + 127) << 23); // exp2f(scale - s_max)
+
+            // Restore parent voxel from the stack.
+
+            int2 stackEntry = stack[scale];
+            parent = (int*)stackEntry.x;
+            t_max = __int_as_float(stackEntry.y);
+
+            // Round cube position and extract child slot index.
+
+            int shx = __float_as_int(pos.x) >> scale;
+            int shy = __float_as_int(pos.y) >> scale;
+            int shz = __float_as_int(pos.z) >> scale;
+            pos.x = __int_as_float(shx << scale);
+            pos.y = __int_as_float(shy << scale);
+            pos.z = __int_as_float(shz << scale);
+            idx = (shx & 1) | ((shy & 1) << 1) | ((shz & 1) << 2);
+
+            // Prevent same parent from being stored again and invalidate cached child descriptor.
+
+            h = 0.0f;
+            child_descriptor.x = 0;
+        }
+    }
+
+    // Indicate miss if we are outside the octree.
+
+    if (scale >= s_max)
+        t_min = 2.0f;
+
+    // Undo mirroring of the coordinate system.
+
+    if ((octant_mask & 1) == 0) pos.x = 3.0f - scale_exp2 - pos.x;
+    if ((octant_mask & 2) == 0) pos.y = 3.0f - scale_exp2 - pos.y;
+    if ((octant_mask & 4) == 0) pos.z = 3.0f - scale_exp2 - pos.z;
+
+    // Output results.
+
+    hit_t = t_min;
+    hit_pos.x = fminf(fmaxf(p.x + t_min * d.x, pos.x + epsilon), pos.x + scale_exp2 - epsilon);
+    hit_pos.y = fminf(fmaxf(p.y + t_min * d.y, pos.y + epsilon), pos.y + scale_exp2 - epsilon);
+    hit_pos.z = fminf(fmaxf(p.z + t_min * d.z, pos.z + epsilon), pos.z + scale_exp2 - epsilon);
+    hit_parent = parent;
+    hit_idx = idx ˆ octant_mask ˆ 7;
+    hit_scale = scale;
+}
+
+
+
+
+                                                           30
+

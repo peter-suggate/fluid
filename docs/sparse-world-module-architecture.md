@@ -34,6 +34,7 @@ export interface SparseWorldDevice {
 }
 
 export interface SparseWorld {
+  edit(edit: SparseWorldEdit): SparseWorldEditReceipt;
   encodeStep(encoder: GPUCommandEncoder, input: SparseWorldStepInput): SparseWorldStep;
   presentation(): SparseWorldPresentation;
   status(): SparseWorldStatus;
@@ -53,7 +54,8 @@ export interface SparseWorldStepInput {
   readonly time: number;
   readonly dt: number;
   readonly gravity: readonly [number, number, number];
-  readonly interactions: readonly SparseWorldInteraction[];
+  readonly rigidBodies?: readonly RigidBodyState[];
+  readonly liquidInflow?: SparseWorldLiquidJet;
 }
 
 export interface SparseWorldStep {
@@ -61,6 +63,12 @@ export interface SparseWorldStep {
   readonly submittedTime: number;
 }
 ```
+
+Application features submit semantic edits to the world. The edit union covers
+transient fluid additions and complete authored-scene revisions. Rigid-body roster
+changes and semantic hose boundary conditions travel with the authoritative step input.
+Callers do not translate metres to cells, derive solid occupancy, pack refinement
+controls, or invoke implementation passes.
 
 `SparseWorldPresentation` is the renderer's stable, read-only resource contract. It
 contains the accepted generation and the few GPU bindings needed to extract the

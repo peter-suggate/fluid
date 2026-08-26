@@ -693,8 +693,9 @@ for (let leaf = 0; leaf < leafCount; leaf += 1) {
   const leafWord = leafBaseWord + leaf * 4;
   const nodeIndex = topology(leafWord);
   const voxelOffset = topology(leafWord + 1);
-  const level = topology(nodeIndex * 8 + 2);
-  const brick = decodeMorton(topology(leafWord + 2), topology(leafWord + 3), level);
+  const nodeWord = nodeIndex * 8;
+  const level = topology(nodeWord + 2);
+  const brick = decodeMorton(topology(nodeWord), topology(nodeWord + 1), level);
   const scale = finestLevel > level ? 2 ** (finestLevel - level) : 1;
   for (let local = 0; local < brickSize ** 3; local += 1) {
     const lx = local % brickSize, ly = Math.floor(local / brickSize) % brickSize, lz = Math.floor(local / (brickSize * brickSize));

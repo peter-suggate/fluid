@@ -7,10 +7,6 @@ import type {
   MethodParamValues,
 } from "../../core/method-contract";
 import type { SceneDescription } from "../../core/model";
-import {
-  refinementRegionLattice,
-  sceneRefinementRegions,
-} from "../../core/refinement-regions";
 import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { sceneCellSizes_m, sceneLatticeDimensions } from "../../core/scene-lattice";
 import { GPUStageTimestampRecorder } from "../../core/performance-trace";
@@ -45,8 +41,6 @@ import {
 } from "./sparse-atlas-composite-projection";
 import { SparseCM12PressureTopologyAttributionTracker } from
   "./sparse-cm12-pressure-topology-attribution";
-import { packSparseCM12RefinementRegions } from
-  "./sparse-cm12-refinement-regions";
 import { WebGPUAdaptiveMassSparsePresentation } from
   "./webgpu-adaptive-mass-atlas-presentation";
 import type { SparseWorld, SparseWorldDevice, SparseWorldUI } from "../../sparse-world";
@@ -412,6 +406,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           sparseWorldNumerics.current = {
             finestCellSize_m: cellSize_m,
             pressureScale: 1,
+            origin_m: fluidDomainPlan.origin_m,
           };
           sparseRuntime = await createCM12SparseWorld({
             device,
@@ -425,6 +420,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               worldDimensions_m: fluidDomainPlan.dimensions.map((value, axis) =>
                 value * fluidDomainPlan.cellSize_m[axis]) as [number, number, number],
             } : undefined,
+            rigidSystem,
             // Sized from the iteration ceiling this solver was built with, so
             // the journal can hold the longest solve it will ever encode.
             journal: options.pressureJournal
@@ -458,8 +454,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               cellSize_m: fluidDomainPlan.cellSize_m,
             });
           }
-          sparseRuntime.runtime.setRefinementRegionParameters(packSparseCM12RefinementRegions(
-            sceneRefinementRegions(scene), refinementRegionLattice(scene)));
+          const sceneReceipt = sparseRuntime.world.edit({ kind: "set-scene", scene });
+          if (sceneReceipt.disposition !== "applied") {
+            throw new Error(sceneReceipt.reason ?? "Sparse world rejected its initial scene");
+          }
         },
       }, ...rigidInitializationTasks, {
         id: "adaptive-mass.upload",
@@ -497,43 +495,15 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     }
   }
 
-  /**
-   * Add a ball of liquid to the atlas the running solve is stepping.
-   *
-   * Without this the editor authors the ball into the scene document instead,
-   * which re-seeds this solver at t = 0 — the user drops water into a running
-   * tank and the tank restarts. The ball is converted from metres to finest
-   * cells here because the atlas is the only thing that knows the lattice, and
-   * its radius becomes three radii: a metric sphere is an ellipsoid on any
-   * lattice whose cells are not cubes.
-   *
-   * The drop is applied to the atlas immediately rather than deferred to the
-   * next step, and the presentation is republished from it so the fields the
-   * renderer and the diagnostics read agree with the atlas before that step.
-   * The ball is drawn from the step after the drop, like any other water.
-   */
+  /** Add a semantic liquid interaction through the public sparse-world API. */
   injectLiquidBall(ball: InjectedLiquidBall): void {
     if (this.disposed || !(ball.radius_m > 0)) return;
-    const cell = this.fluidDomain.cellSize_m;
-    const origin = this.fluidDomain.origin_m;
-    const encoder = this.device.createCommandEncoder({
-      label: "Sparse CM12 GPU liquid injection",
+    this.sparseWorld.edit({
+      kind: "liquid-ellipsoid",
+      center_m: [ball.centre_m.x, ball.centre_m.y, ball.centre_m.z],
+      radii_m: [ball.radius_m, ball.radius_m,
+        ball.halfHeight_m ?? ball.radius_m],
     });
-    this.sparseRuntime.encodeLiquidInjection(
-      encoder,
-      finestCellSize(this.scene, this.atlas),
-      [
-        (ball.centre_m.x - origin[0]) / cell[0],
-        (ball.centre_m.y - origin[1]) / cell[1],
-        (ball.centre_m.z - origin[2]) / cell[2],
-      ],
-      [
-        ball.radius_m / cell[0],
-        ball.radius_m / cell[1],
-        (ball.halfHeight_m ?? ball.radius_m) / cell[2],
-      ],
-    );
-    this.device.queue.submit([encoder.finish()]);
   }
 
   /**
@@ -548,11 +518,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    * tiers already match, so the incoming document differs in scalars alone.
    */
   applySceneUniforms(scene: SceneDescription): void {
+    const receipt = this.sparseWorld.edit({ kind: "set-scene", scene });
+    if (receipt.disposition !== "applied") {
+      throw new Error(receipt.reason ?? "Sparse world requires a rebuild for this scene edit");
+    }
     this.scene = scene;
     this.resetPressureIterationFeedback();
-    this.sparseRuntime.setSolidWorld(solidWorldForScene(scene));
-    this.sparseRuntime.setRefinementRegionParameters(packSparseCM12RefinementRegions(
-      sceneRefinementRegions(scene), refinementRegionLattice(scene)));
   }
 
   /**
@@ -618,26 +589,23 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const inflow = this.scene.fluid.inflow;
     const inflowStrength = inflow
       ? averageInflowStrength(inflow, this.lastTime_s, this.lastTime_s + dt_s) : 0;
-    const inflowInjection = inflow && inflowStrength > 0 ? (() => {
+    const liquidInflow = inflow && inflowStrength > 0 ? (() => {
       const outlet = inflowOutletCenter(inflow);
-      const tank = this.scene.container;
-      const inverseCell = 1 / cellSize_m;
       return {
-        outletFine: [
-          (outlet.x + 0.5 * tank.width_m) * inverseCell,
-          outlet.y * inverseCell,
-          (outlet.z + 0.5 * tank.depth_m) * inverseCell,
+        outlet_m: [
+          outlet.x,
+          outlet.y,
+          outlet.z,
         ] as const,
-        radiusFine: inflow.radius_m * inverseCell,
-        velocityFinePerSecond: [
-          inflow.velocity_m_s.x * inflowStrength * inverseCell,
-          inflow.velocity_m_s.y * inflowStrength * inverseCell,
-          inflow.velocity_m_s.z * inflowStrength * inverseCell,
+        radius_m: inflow.radius_m,
+        velocity_m_s: [
+          inflow.velocity_m_s.x * inflowStrength,
+          inflow.velocity_m_s.y * inflowStrength,
+          inflow.velocity_m_s.z * inflowStrength,
         ] as const,
       };
     })() : undefined;
     const activeBodies = bodies.slice(0, 12);
-    this.rigidSystem?.syncBodies(activeBodies);
     const gravity = this.scene.fluid.gravity_m_s2;
     const instrumentation = usePerformanceInstrumentationStore.getState();
     const traceRequestedAt_ms = instrumentation.enabled ? performance.now() : 0;
@@ -681,10 +649,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const pressureIterationReceiptSequence = pressureIterationReadback
       ? ++this.pressureIterationReceiptSequence : 0;
     const pressureIterationControlGeneration = this.pressureIterationControlGeneration;
-    if (this.rigidExchange) encoder.clearBuffer(this.rigidExchange);
     this.sparseWorldNumerics.current = {
       finestCellSize_m: cellSize_m,
       pressureScale: this.scene.fluid.density_kg_m3 * cellSize_m * cellSize_m / dt_s,
+      origin_m: this.fluidDomain.origin_m,
       accelerationFinePerSecond2: [
         gravity.x / cellSize_m,
         gravity.y / cellSize_m,
@@ -702,39 +670,30 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         relativeTolerance: pressureRelativeTolerance,
       },
       seams: frameCapture?.residentStageSeams,
-      bodyCount: this.rigidCouplingEnabled ? activeBodies.length : 0,
       worldDimensions_m: this.fluidDomain.dimensions.map((value, axis) =>
         value * this.fluidDomain.cellSize_m[axis]) as [number, number, number],
-      inflow: inflowInjection,
     };
     this.sparseWorld.encodeStep(encoder, {
       time: this.lastTime_s + dt_s,
       dt: dt_s,
       gravity: [gravity.x, gravity.y, gravity.z],
-      interactions: [],
+      rigidBodies: activeBodies,
+      liquidInflow,
     });
-    this.rigidSystem?.encode(encoder, dt_s, cellSize_m ** 3, 1, cellSize_m);
     if (pressureIterationReadback) {
       this.sparseRuntime.encodePressureIterationReceipt(
         encoder, pressureIterationReadback);
     }
     frameCapture?.closeCommands();
     this.device.queue.submit([encoder.finish()]);
-    if (inflowInjection) {
-      const injectionEncoder = this.device.createCommandEncoder({
-        label: `Sparse CM12 hose injection ${(this.lastTime_s + dt_s).toFixed(6)}`,
+    if (liquidInflow) {
+      this.sparseWorld.edit({
+        kind: "liquid-jet",
+        ...liquidInflow,
+        dt: dt_s,
       });
-      this.sparseRuntime.encodeLiquidJetInjection(
-        injectionEncoder,
-        cellSize_m,
-        inflowInjection.outletFine,
-        inflowInjection.radiusFine,
-        inflowInjection.velocityFinePerSecond,
-        dt_s,
-      );
       // Create only this step's nozzle-swept volume. The next CM12 step owns
       // all downstream transport, projection, and gravitational curvature.
-      this.device.queue.submit([injectionEncoder.finish()]);
     }
     if (pressureIterationReadback) {
       this.readPressureIterationReceipt(
@@ -985,6 +944,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   async readGPUActivityPolicy(): Promise<{
     readonly acceptedSteps: number;
     readonly acceptedTopologyGeneration: number;
+    readonly residentBrickCount: number;
     readonly faultFlags: number;
     readonly newlyActivatedBrickCount: number;
     readonly preparedBrickCount: number;
@@ -999,6 +959,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     return {
       acceptedSteps: snapshot.acceptedSteps,
       acceptedTopologyGeneration: snapshot.acceptedTopologyGeneration,
+      residentBrickCount: snapshot.residentBrickCount,
       faultFlags: snapshot.faultFlags,
       newlyActivatedBrickCount: snapshot.newlyActivatedBrickCount,
       preparedBrickCount: snapshot.preparedBrickCount,

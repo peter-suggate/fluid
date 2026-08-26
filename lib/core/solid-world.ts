@@ -1,6 +1,11 @@
 import { signedSpatialCoordinateHash } from "./signed-spatial-hash";
 import type { SceneDescription } from "./model";
-import { sceneLatticeDimensions } from "./scene-lattice-dimensions";
+import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice-dimensions";
+import {
+  PLANAR_BOUNDARY_MINIMUM_ASPECT_RATIO,
+  type PlanarBoundaryPatch,
+  type PlanarBoundaryVec3,
+} from "./planar-boundary";
 import {
   terrainCellSolidFraction,
   terrainColumnHeights,
@@ -24,6 +29,76 @@ export interface SolidWorldVoxelPatch {
   readonly minimum: SolidWorldCoordinate;
   readonly maximumExclusive: SolidWorldCoordinate;
   readonly materialId?: number;
+}
+
+export interface SolidWorldVoxelPatchBounds {
+  readonly minimum: PlanarBoundaryVec3;
+  readonly maximum: PlanarBoundaryVec3;
+}
+
+/** Exact metre-space bounds of one signed-lattice voxel edit box. */
+export function solidWorldVoxelPatchBounds_m(
+  scene: SceneDescription,
+  patch: SolidWorldVoxelPatch,
+): SolidWorldVoxelPatchBounds {
+  const cell = sceneCellSizes_m(scene);
+  const origin = [-0.5 * scene.container.width_m, 0,
+    -0.5 * scene.container.depth_m] as const;
+  return {
+    minimum: [
+      origin[0] + patch.minimum[0] * cell[0],
+      origin[1] + patch.minimum[1] * cell[1],
+      origin[2] + patch.minimum[2] * cell[2],
+    ],
+    maximum: [
+      origin[0] + patch.maximumExclusive[0] * cell[0],
+      origin[1] + patch.maximumExclusive[1] * cell[1],
+      origin[2] + patch.maximumExclusive[2] * cell[2],
+    ],
+  };
+}
+
+/** Compile a thin filled voxel box into the same exact slab used by SVO rays. */
+export function planarBoundaryForSolidWorldVoxelPatch(
+  scene: SceneDescription,
+  patch: SolidWorldVoxelPatch,
+  ownerId = 0xffff,
+): PlanarBoundaryPatch | null {
+  if (patch.operation !== "fill") return null;
+  const bounds = solidWorldVoxelPatchBounds_m(scene, patch);
+  const dimensions: [number, number, number] = [
+    bounds.maximum[0] - bounds.minimum[0],
+    bounds.maximum[1] - bounds.minimum[1],
+    bounds.maximum[2] - bounds.minimum[2],
+  ];
+  const ordered = dimensions.map((value, axis) => ({ value, axis }))
+    .sort((left, right) => left.value - right.value);
+  const thinnest = ordered[0]!;
+  const next = ordered[1]!;
+  if (!(thinnest.value > 0)
+    || next.value < thinnest.value * PLANAR_BOUNDARY_MINIMUM_ASPECT_RATIO) {
+    return null;
+  }
+  const normalAxis = thinnest.axis;
+  const tangentAxes = [0, 1, 2].filter((axis) => axis !== normalAxis);
+  const basis = [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const;
+  const tangentUAxis = tangentAxes[0]!;
+  const tangentVAxis = tangentAxes[1]!;
+  return {
+    center_m: [
+      0.5 * (bounds.minimum[0] + bounds.maximum[0]),
+      0.5 * (bounds.minimum[1] + bounds.maximum[1]),
+      0.5 * (bounds.minimum[2] + bounds.maximum[2]),
+    ],
+    normal: basis[normalAxis]!,
+    tangentU: basis[tangentUAxis]!,
+    tangentV: basis[tangentVAxis]!,
+    halfExtentU_m: 0.5 * dimensions[tangentUAxis]!,
+    halfExtentV_m: 0.5 * dimensions[tangentVAxis]!,
+    halfThickness_m: 0.5 * dimensions[normalAxis],
+    materialId: patch.materialId ?? 1,
+    ownerId,
+  };
 }
 
 export interface SolidWorldPage {

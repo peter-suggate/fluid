@@ -76,6 +76,7 @@ dawnTest("Dawn publishes coarse-to-fine and fine-to-coarse Sparse CM12 topology"
         },
         () => {},
       );
+      await solver.waitForSimulationReady();
 
       const initial = await solver.readGPUActivityPolicy();
       const initialAccepted = new Map(initial.bricks.map((brick) =>

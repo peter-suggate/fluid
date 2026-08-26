@@ -2,6 +2,8 @@ import type {
   SparseAdaptiveGridConsumerSource,
   WebGPUFineLevelSetBrickSource,
 } from "../core/levelset-consumer-abi";
+import type { SceneDescription } from "../core/model";
+import type { RigidBodyState } from "../core/rigid-body";
 
 export type {
   SparseWorldUI,
@@ -46,25 +48,51 @@ export interface SparseWorldConfig {
   readonly trace?: SparseWorldTrace;
 }
 
-export interface SparseWorldInteractionBase {
-  readonly kind: string;
-}
-
 /** A semantic liquid source. The implementation converts metres to tile space. */
-export interface SparseWorldLiquidEllipsoidInteraction
-  extends SparseWorldInteractionBase {
+export interface SparseWorldLiquidEllipsoidEdit {
   readonly kind: "liquid-ellipsoid";
+  /** Centre in the world's metre-space coordinate frame. */
   readonly center_m: readonly [number, number, number];
   readonly radii_m: readonly [number, number, number];
 }
 
-export type SparseWorldInteraction = SparseWorldLiquidEllipsoidInteraction;
+export interface SparseWorldLiquidJet {
+  readonly outlet_m: readonly [number, number, number];
+  readonly radius_m: number;
+  readonly velocity_m_s: readonly [number, number, number];
+}
+
+export interface SparseWorldLiquidJetEdit extends
+  SparseWorldLiquidJet {
+  readonly kind: "liquid-jet";
+  readonly dt: number;
+}
+
+export interface SparseWorldSceneEdit {
+  readonly kind: "set-scene";
+  readonly scene: SceneDescription;
+}
+
+/** Every application-authored change enters the world through this union. */
+export type SparseWorldEdit =
+  | SparseWorldLiquidEllipsoidEdit
+  | SparseWorldLiquidJetEdit
+  | SparseWorldSceneEdit;
+
+export interface SparseWorldEditReceipt {
+  readonly disposition: "applied" | "rebuild-required";
+  readonly acceptedGeneration: number;
+  readonly reason?: string;
+}
 
 export interface SparseWorldStepInput {
   readonly time: number;
   readonly dt: number;
   readonly gravity: readonly [number, number, number];
-  readonly interactions: readonly SparseWorldInteraction[];
+  /** Authoritative live roster; additions and removals are ordinary world input. */
+  readonly rigidBodies?: readonly RigidBodyState[];
+  /** Semantic hose boundary condition for this step, in world-space SI units. */
+  readonly liquidInflow?: SparseWorldLiquidJet;
 }
 
 export interface SparseWorldStep {
@@ -108,6 +136,8 @@ export interface SparseWorldStatus {
 }
 
 export interface SparseWorld {
+  /** Apply one authored edit without exposing implementation encoders or buffers. */
+  edit(edit: SparseWorldEdit): SparseWorldEditReceipt;
   encodeStep(
     encoder: GPUCommandEncoder,
     input: SparseWorldStepInput,

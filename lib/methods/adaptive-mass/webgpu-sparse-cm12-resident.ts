@@ -110,6 +110,7 @@ import {
   SPARSE_CM12_WORLD_DIRECTORY_HEADER,
   createSparseCM12WorldDirectoryInitialWords,
   createSparseCM12WorldDirectoryLayout,
+  createSparseCM12WorldDirectoryWGSL,
   type SparseCM12WorldDirectoryLayout,
 } from "./sparse-cm12-world-directory";
 import {
@@ -567,6 +568,7 @@ const ACTIVITY_HEADER:u32=${ACTIVITY_HEADER_WORDS}u;
 const ACTIVITY_RECORD_WORDS:u32=${ACTIVITY_RECORD_WORDS}u;
 const BRICK_PAGES:u32=${layout.brickPagesBaseWords}u;
 const ALLOCATOR:u32=${layout.allocatorBaseWords}u;
+const FREE_LIST:u32=${layout.allocatorFreeListBaseWords}u;
 const PAGE_CAPACITY:u32=${layout.pageCapacity}u;
 const WORKLIST_HEADER:u32=${FINE_LEVELSET_WORKSET_HEADER_WORDS}u;
 @group(0)@binding(0)var<storage,read>topology:array<u32>;
@@ -574,6 +576,9 @@ const WORKLIST_HEADER:u32=${FINE_LEVELSET_WORKSET_HEADER_WORDS}u;
 @group(0)@binding(2)var<storage,read_write>metadata:array<atomic<u32>>;
 @group(0)@binding(3)var<storage,read_write>worklist:array<atomic<u32>>;
 @group(0)@binding(4)var<storage,read_write>topologyArena:array<atomic<u32>>;
+${worldDirectoryLayout
+    ? createSparseCM12WorldDirectoryWGSL(worldDirectoryLayout)
+    : ""}
 
 fn reserveSparseCM12PresentationPage()->u32{
   // Weak CAS is permitted to fail spuriously and has no forward-progress
@@ -581,10 +586,13 @@ fn reserveSparseCM12PresentationPage()->u32{
   // so an unbounded retry is a GPU-watchdog loop. Fail closed and retry the
   // still-unmapped brick next frame instead.
   for(var attempt=0u;attempt<256u;attempt+=1u){
-    let next=atomicLoad(&activity[ALLOCATOR]);
-    if(next>=PAGE_CAPACITY){return INVALID;}
-    let reservation=atomicCompareExchangeWeak(&activity[ALLOCATOR],next,next+1u);
-    if(reservation.exchanged){return next;}
+    let count=atomicLoad(&activity[ALLOCATOR+5u]);
+    if(count==0u){return INVALID;}
+    let reservation=atomicCompareExchangeWeak(&activity[ALLOCATOR+5u],count,count-1u);
+    if(reservation.exchanged){
+      let page=atomicLoad(&activity[FREE_LIST+count-1u]);
+      return select(INVALID,page,page<PAGE_CAPACITY);
+    }
   }
   return INVALID;
 }
@@ -633,6 +641,7 @@ fn allocateSparseCM12PresentationPages(@builtin(global_invocation_id)gid:vec3u){
   }
   atomicStore(&worklist[WORKLIST_HEADER+work],page);
   atomicMax(&worklist[4],(work+64u)/64u);
+  atomicAdd(&activity[ALLOCATOR],1u);
   atomicMax(&activity[ALLOCATOR+2u],page+1u);
   atomicAdd(&activity[ALLOCATOR+3u],1u);
 }
@@ -663,6 +672,74 @@ fn sortSparseCM12PresentationPageDirectory(){
     atomicStore(&worklist[WORKLIST_HEADER+cursor],page);
   }
   atomicStore(&activity[ALLOCATOR+4u],count);
+}
+
+// Presentation retirement is deliberately after FPP1 execution. The retiring
+// generation first publishes its complete all-air page transaction; only then
+// may the renderer directory stop naming the page and return its physical slot.
+@compute @workgroup_size(64)
+fn retireSparseCM12PresentationPages(@builtin(global_invocation_id)gid:vec3u){
+  let brick=gid.x;if(brick>=BRICK_COUNT){return;}
+  let activityRecord=ACTIVITY_HEADER+ACTIVITY_RECORD_WORDS*brick;
+  // Candidate-active or scheduled inactive leaves are frontier reservations,
+  // not garbage. Reclaim only a fully accepted, quiescent retirement.
+  if(atomicLoad(&activity[activityRecord+10u])!=0u
+    ||atomicLoad(&activity[activityRecord+35u])!=0u){return;}
+  let page=atomicExchange(&activity[BRICK_PAGES+brick],INVALID);
+  if(page!=INVALID){
+    if(page>=PAGE_CAPACITY){
+      atomicStore(&activity[ALLOCATOR+1u],4u);atomicOr(&activity[7],32u);return;
+    }
+    atomicStore(&metadata[4u*page],INVALID);
+    atomicStore(&metadata[4u*page+1u],INVALID);
+    atomicStore(&metadata[4u*page+2u],0u);
+    atomicStore(&metadata[4u*page+3u],INVALID);
+    let free=atomicAdd(&activity[ALLOCATOR+5u],1u);
+    if(free<PAGE_CAPACITY){
+      atomicStore(&activity[FREE_LIST+free],page);
+      atomicSub(&activity[ALLOCATOR],1u);
+    }else{
+      atomicSub(&activity[ALLOCATOR+5u],1u);
+      atomicStore(&activity[ALLOCATOR+1u],4u);atomicOr(&activity[7],32u);
+    }
+  }
+  ${worldDirectoryLayout ? /* wgsl */ `if(brick>=CM12_WDR_INITIAL_LEAVES){
+    let topologyPage=atomicLoad(&activity[activityRecord+37u]);
+    if(topologyPage!=INVALID&&cm12WorldReleaseLeaf(brick)){
+    let topologyBase=atomicLoad(&topologyArena[14u]);
+    let descriptor=topologyBase+atomicLoad(&topologyArena[topologyBase+30u])
+      +topologyPage*atomicLoad(&topologyArena[topologyBase+31u]);
+    atomicStore(&topologyArena[descriptor],INVALID);
+    atomicStore(&topologyArena[descriptor+1u],0u);
+    atomicStore(&topologyArena[descriptor+2u],0u);
+    atomicStore(&topologyArena[descriptor+3u],0u);
+    atomicStore(&activity[activityRecord+37u],INVALID);
+    }
+  }` : ""}
+}
+
+fn sparseCM12PresentationRecomputeWorldBounds(){
+  ${worldDirectoryLayout ? "cm12WorldRecomputeBounds();" : ""}
+}
+
+@compute @workgroup_size(1)
+fn compactSparseCM12PresentationPageDirectory(){
+  let count=min(atomicLoad(&worklist[1]),PAGE_CAPACITY);var retained=0u;
+  sparseCM12PresentationRecomputeWorldBounds();
+  for(var index=0u;index<count;index+=1u){
+    let page=atomicLoad(&worklist[WORKLIST_HEADER+index]);
+    if(page<PAGE_CAPACITY&&atomicLoad(&metadata[4u*page])==page){
+      atomicStore(&worklist[WORKLIST_HEADER+retained],page);retained+=1u;
+    }
+  }
+  for(var index=retained;index<count;index+=1u){
+    atomicStore(&worklist[WORKLIST_HEADER+index],INVALID);
+  }
+  atomicStore(&worklist[1],retained);
+  atomicStore(&worklist[4],(retained+63u)/64u);
+  // Compaction preserves key order, so next frame's insertion sort can begin
+  // at the retained prefix and touch only newly allocated pages.
+  atomicStore(&activity[ALLOCATOR+4u],retained);
 }
 `;
 }
@@ -2213,6 +2290,8 @@ export interface SparseCM12GPUActivityRecord {
 export interface SparseCM12GPUActivitySnapshot {
   readonly acceptedSteps: number;
   readonly acceptedTopologyGeneration: number;
+  /** Complete accepted census, including GPU-grown world leaves. */
+  readonly residentBrickCount: number;
   readonly faultFlags: number;
   readonly newlyActivatedBrickCount: number;
   readonly preparedBrickCount: number;
@@ -2425,6 +2504,7 @@ function setF32(words: Uint32Array, index: number, value: number): void {
 function packResidentTopology(
   atlas: SparseAdaptiveMassAtlas,
   grid: SparseAtlasCompositeGrid,
+  mutableBrickKeys: ReadonlySet<number>,
 ): PackedResidentTopology {
   // Physical cells, rows, terms and incidence live in topologyArena. Older
   // versions serialized the complete graph a second time into `topology`,
@@ -2447,7 +2527,22 @@ function packResidentTopology(
   const words = new Uint32Array(at);
   words.fill(INVALID, brickLookupOffset, brickOffset);
 
-  words[backgroundOwnerOffset] = 0;
+  // The high bits of an authored leaf record identify its topology-complete
+  // candidate field slot. SparseWorld's signed-page cutover accidentally
+  // cleared this catalogue for every authored leaf, which made
+  // brickCandidatePlanningEnabled false and silently discarded both rerung
+  // and active-to-inactive lifecycle requests. Dynamic leaves still use their
+  // page-local same-rung path; only span-one authored leaves with prepacked
+  // all-rung templates receive a slot here.
+  const candidateSlotByBrick = new Uint32Array(atlas.bricks.length).fill(INVALID);
+  let candidateBrickCount = 0;
+  for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
+    const source = atlas.bricks[brick]!;
+    if (sparseBrickSpan(source) === 1 && mutableBrickKeys.has(source.key)) {
+      candidateSlotByBrick[brick] = candidateBrickCount++;
+    }
+  }
+  words[backgroundOwnerOffset] = candidateBrickCount;
   words[backgroundOwnerOffset + 1] = (0x8000_0000
     | maximumSpanLog) >>> 0;
   for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
@@ -2458,14 +2553,16 @@ function packResidentTopology(
     }
     words[brickLookupOffset + slot] = brick;
     const record = brickOffset + 2 * brick;
-    // Cell ranges live only in the immutable template table, so the compact
-    // owner directory stores only log2(span) and the stable key.
-    words[record] = Math.log2(sparseBrickSpan(atlas.bricks[brick]!));
+    // Cell ranges live only in the immutable template table. Log2(span) and
+    // the optional candidate slot therefore share this compact owner word.
+    words[record] = Math.log2(sparseBrickSpan(source))
+      | (candidateSlotByBrick[brick] === INVALID
+        ? 0 : ((candidateSlotByBrick[brick]! + 1) << 5));
     words[record + 1] = source.key;
   }
   return { words, cellOffset: 0, rowOffset: 0, termOffset: 0, incidenceOffset: 0,
     incidenceRecordOffset: 0, brickLookupOffset, brickOffset, backgroundOwnerOffset,
-    brickCount: atlas.bricks.length, candidateBrickCount: 0, incidenceCount };
+    brickCount: atlas.bricks.length, candidateBrickCount, incidenceCount };
 }
 
 function uploadBuffer(
@@ -2919,6 +3016,7 @@ export class WebGPUSparseCM12Resident {
     private readonly topologyEffectsAuthorityLayout:
       SparseCM12TopologyEffectsAuthorityLayout | undefined,
     private readonly iboSemanticAuthorityBaseWords: number | undefined,
+    private readonly iboSlotBaseWords: readonly [number, number] | undefined,
     effectiveTransportVelocity: GPUBuffer | undefined,
     private readonly velocityExtensionDepths: GPUBuffer,
     pressureTemplates: GPUBuffer,
@@ -3179,8 +3277,20 @@ export class WebGPUSparseCM12Resident {
     const initialSolidWorld = solidWorld;
     const dynamicWorldGrowth = true;
     const signedWorldGrowth = true;
+    // GPU-grown SparseWorld pages own a complete fixed-B8 graph, but authored
+    // span-one leaves still need the prepacked dyadic catalogue for physical
+    // 1/2/4/8 refinement and coarsening. Keep the catalogue bounded by the
+    // established resident-work threshold; macro leaves remain immutable.
+    const mutableBrickKeysForBudget = atlas.bricks.filter((brick) =>
+      sparseBrickSpan(brick) === 1).map((brick) => brick.key);
+    const hostTemplateVariants = sparseCM12HostTemplateVariantsEnabled(
+      grid.cells.length, grid.gradientRows.length, mutableBrickKeysForBudget.length,
+      atlas.brickFineResolution,
+    );
+    const mutableBrickKeys: ReadonlySet<number> = hostTemplateVariants
+      ? new Set(mutableBrickKeysForBudget) : new Set<number>();
     report("Pack resident ownership topology");
-    const packed = packResidentTopology(atlas, grid);
+    const packed = packResidentTopology(atlas, grid, mutableBrickKeys);
     // Sparse residency has one policy in every scene. A demanded adjacent page
     // is admitted from face-adjacent non-solid voxels; there is no tank-bound,
     // opening, or scene opt-in classification.
@@ -3219,8 +3329,12 @@ export class WebGPUSparseCM12Resident {
     // but its world-volume-sized direct plane is no longer uploaded.
     const logicalOwnerBaseWords = 0;
     const logicalOwnerPacked16BaseWords = 0;
-    report("Pack accepted topology templates");
-    const templates = packAcceptedTopologyTemplates(atlas, grid);
+    report(hostTemplateVariants
+      ? "Build four-rung and 2:1 seam topology templates"
+      : "Pack accepted topology templates");
+    const templates = hostTemplateVariants
+      ? packResidentTopologyTemplates(atlas, grid)
+      : packAcceptedTopologyTemplates(atlas, grid);
     const dynamicCellsPerPage = atlas.brickFineResolution ** 3;
     const dynamicRowsPerPage = 3 * (atlas.brickFineResolution + 1)
       * atlas.brickFineResolution ** 2;
@@ -4407,7 +4521,8 @@ export class WebGPUSparseCM12Resident {
       "closePlannedResolution",
       "validateCandidateResolution", "scheduleTopologyPreparation",
       "allocateCandidateTopologyPages", "synthesizeCandidateCellPages",
-      "allocateSparseWorldFrontier", "synthesizeSparseWorldFrontierPages",
+      "allocateSparseWorldFrontier", "allocateSparseWorldInteractionPages",
+      "synthesizeSparseWorldFrontierPages",
       "connectSparseWorldFrontierPages",
       "publishSparseWorldFrontierAcceptance",
       "compileSparseWorldFrontierExecutionImage",
@@ -4631,6 +4746,8 @@ export class WebGPUSparseCM12Resident {
           const presentationAllocatorEntries = await Promise.all([
             "allocateSparseCM12PresentationPages",
             "sortSparseCM12PresentationPageDirectory",
+            "retireSparseCM12PresentationPages",
+            "compactSparseCM12PresentationPageDirectory",
           ].map(async (entryPoint) => {
             const module = await shaderModuleFor(
               sparseCM12WGSLForEntryPoints(presentationAllocatorShaderSource, [entryPoint]),
@@ -4702,6 +4819,10 @@ export class WebGPUSparseCM12Resident {
       transportExecutionImageLayout,
       topologyEffectsAuthorityLayout,
       iboSemanticAuthorityBaseWords,
+      internedBoundaryImage && internedBoundaryBaseWords !== undefined
+        ? [internedBoundaryBaseWords + internedBoundaryImage.layout.slotBaseWords[0],
+          internedBoundaryBaseWords + internedBoundaryImage.layout.slotBaseWords[1]]
+        : undefined,
       effectiveTransportVelocity,
       velocityExtensionDepths,
       pressureTemplates,
@@ -5639,6 +5760,14 @@ export class WebGPUSparseCM12Resident {
       // storage-to-indirect copy seam; no host parity/count controls this path.
       closePass();
       this.encodeFramePlanPresentation(encoder, "Sparse CM12 frame presentation");
+      // FPP1 has now published the retiring generation's complete all-air
+      // pages. Remove those pages from renderer lookup and return their slots
+      // before accepting the next frame-plan generation.
+      useBindGroup(this.presentationAllocatorBindGroup);
+      dispatch("retireSparseCM12PresentationPages",
+        Math.ceil(leafCapacity / WORKGROUP_SIZE));
+      dispatch("compactSparseCM12PresentationPageDirectory", 1);
+      useBindGroup(this.bindGroup);
       dispatch("commitSparseCM12FrameControl", 1);
     });
     closePass();
@@ -6040,7 +6169,15 @@ export class WebGPUSparseCM12Resident {
     this.parameterF32.set([...radiusFine, jetRadiusFine], 56);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
     const packed = this.lastPacked!;
-    const bricks = Math.ceil(packed.brickCount / WORKGROUP_SIZE);
+    const leafCapacity = this.worldDirectoryLayout.leafCapacity;
+    const bricks = Math.ceil(leafCapacity / WORKGROUP_SIZE);
+    const interactionPageCount = [0, 1, 2].map((axis) => {
+      const lower = Math.floor((centerFine[axis]! - radiusFine[axis]!)
+        / this.brickFineResolution);
+      const upper = Math.floor((centerFine[axis]! + radiusFine[axis]!)
+        / this.brickFineResolution);
+      return Math.max(1, upper - lower + 1);
+    }) as [number, number, number];
     let topologyPass: GPUComputePassEncoder | undefined;
     let topologyBindGroup = this.bindGroup;
     const openTopologyPass = () => {
@@ -6081,6 +6218,11 @@ export class WebGPUSparseCM12Resident {
     // a journal is collecting, so an injection between ordinary frames keeps
     // the frame's already-recorded topology effects intact.
     dispatchTopology("beginSparseCM12PressureTopologyRepair", 1);
+    dispatchTopology("allocateSparseWorldInteractionPages",
+      Math.ceil(interactionPageCount[0] / 4),
+      Math.ceil(interactionPageCount[1] / 4),
+      Math.ceil(interactionPageCount[2] / 4));
+    dispatchTopology("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
     // Promote every intersected brick before writing any density. The planner
     // treats the enabled injection as refine-only: untouched accepted bricks
     // are preserved, while closure may still grow the required 2:1 support.
@@ -6093,7 +6235,7 @@ export class WebGPUSparseCM12Resident {
     dispatchTopology("validateCandidateResolution", bricks);
     dispatchTopology("scheduleTopologyPreparation", 1);
     dispatchTopology("allocateCandidateTopologyPages", bricks);
-    dispatchTopology("synthesizeCandidateCellPages", packed.brickCount);
+    dispatchTopology("synthesizeCandidateCellPages", leafCapacity);
     dispatchTopologyIndirect("clearShadowRowMembership", 36);
     dispatchTopology("beginShadowTopology", 1);
     dispatchTopology("buildShadowLeafWorklist", 1);
@@ -7547,9 +7689,10 @@ export class WebGPUSparseCM12Resident {
     const topologyWords = 32;
     const manifestWords = 20 + 3 * this.lastPacked!.brickCount;
     const isaWords = this.iboSemanticAuthorityBaseWords === undefined ? 0 : 16;
+    const iboWords = this.iboSlotBaseWords === undefined ? 0 : 14;
     const totalWords = SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS
       + topologyWords + manifestWords
-      + isaWords;
+      + isaWords + iboWords;
     const readback = this.device.createBuffer({
       label: "Sparse CM12 candidate-effects transaction QA readback",
       size: 4 * totalWords,
@@ -7573,6 +7716,14 @@ export class WebGPUSparseCM12Resident {
             + topologyWords + manifestWords),
           4 * isaWords);
       }
+      if (this.iboSlotBaseWords !== undefined) {
+        const destination = SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS
+          + topologyWords + manifestWords + isaWords;
+        encoder.copyBufferToBuffer(this.topologyArena,
+          4 * this.iboSlotBaseWords[0], readback, 4 * destination, 7 * 4);
+        encoder.copyBufferToBuffer(this.topologyArena,
+          4 * this.iboSlotBaseWords[1], readback, 4 * (destination + 7), 7 * 4);
+      }
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
@@ -7581,6 +7732,12 @@ export class WebGPUSparseCM12Resident {
           [name, words[base + word]!])) as Readonly<Record<string, number>>;
       return Object.freeze({
         tfx: named(SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER, 0),
+        iboPreAuthorization: Array.from(words.slice(
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.reservedBase,
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.reservedBase + 7)),
+        authorizationChecks: Array.from(words.slice(
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.reservedBase + 7,
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER.reservedBase + 20)),
         topology: Array.from(words.slice(
           SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS,
           SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords)),
@@ -7588,7 +7745,13 @@ export class WebGPUSparseCM12Resident {
           SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords,
           SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords + manifestWords)),
         isa: isaWords === 0 ? undefined : Array.from(words.slice(
-          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords + manifestWords)),
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords + manifestWords,
+          SPARSE_CM12_TOPOLOGY_EFFECTS_HEADER_WORDS + topologyWords
+            + manifestWords + isaWords)),
+        ibo: iboWords === 0 ? undefined : {
+          slot0: Array.from(words.slice(totalWords - 14, totalWords - 7)),
+          slot1: Array.from(words.slice(totalWords - 7, totalWords)),
+        },
       });
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
@@ -8259,6 +8422,7 @@ export class WebGPUSparseCM12Resident {
       });
       return {
         acceptedSteps: words[0]!, acceptedTopologyGeneration: words[12]!,
+        residentBrickCount: words[8]!,
         faultFlags: words[7]!, newlyActivatedBrickCount: words[9]!,
         preparedBrickCount: words[16]!, committedBrickCount: words[17]!,
         commitFailed: words[21] !== 0, records,
