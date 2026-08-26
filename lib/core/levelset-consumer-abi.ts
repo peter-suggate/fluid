@@ -62,6 +62,18 @@ export interface SparseAdaptiveGridConsumerSource {
   readonly fineMetadata: GPUBufferBinding;
   readonly fineWorklist: GPUBufferBinding;
   readonly fineSamples: GPUBufferBinding;
+  /**
+   * Word offset of the WDR1 signed-coordinate directory in `topologyArena`.
+   *
+   * Older sparse publications used the dense logical-key hash embedded in
+   * `topology`; current SparseWorld publications grow beyond that lattice and
+   * resolve ownership through WDR1 instead. Keeping the offset with the source
+   * lets read-only overlays follow the same authority without knowing the
+   * resident arena layout.
+  */
+  readonly worldDirectoryBaseWords?: number;
+  /** Number of immutable atlas leaves preceding WDR1's dynamic frontier leaves. */
+  readonly worldDirectoryInitialLeaves?: number;
   /** Optional versioned 4³ temporal-dirty publication. Missing is UNKNOWN. */
   /** Optional GPU-authored FPL1 schedule/receipt publication. Missing falls back to CMD1. */
   readonly framePlan?: SparseCM12FramePlanSource;

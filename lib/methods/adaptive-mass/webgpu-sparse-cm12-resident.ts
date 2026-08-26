@@ -3039,6 +3039,8 @@ export class WebGPUSparseCM12Resident {
       fineMetadata: { buffer: this.fineMetadata },
       fineWorklist: { buffer: this.fineWorklist },
       fineSamples: { buffer: this.fineSamples },
+      worldDirectoryBaseWords: this.worldDirectoryLayout.baseWords,
+      worldDirectoryInitialLeaves: this.worldDirectoryLayout.initialLeaves,
     };
     this.diagnosticsReadback = diagnosticsReadback;
     this.bindGroup = bindGroup;
@@ -6222,7 +6224,12 @@ export class WebGPUSparseCM12Resident {
     u.fill(0);
     u.set([this.cellCount, this.rowCount, packed.incidenceCount,
       this.dimensions[0] * this.dimensions[1] * this.dimensions[2]], 0);
-    u.set([...this.dimensions, 0], 4);
+    // dimensions.w retains the public sparse-consumer ABI: bit zero used to
+    // advertise the retired analytic boundary, while the upper bits publish
+    // twice the brick's fine resolution. Removing the old boundary flag must
+    // not erase the resolution; grid overlays and FPL1 validation decode B8
+    // from this lane without importing the resident's compile-time profile.
+    u.set([...this.dimensions, this.brickFineResolution << 1], 4);
     u.set([packed.cellOffset, packed.rowOffset, packed.termOffset, packed.incidenceOffset], 8);
     u.set([packed.incidenceRecordOffset, packed.brickLookupOffset,
       packed.brickOffset, packed.backgroundOwnerOffset], 12);
