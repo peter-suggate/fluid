@@ -13,6 +13,7 @@ import {
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
 } from "../svo/svo-render-tuning";
 import { solidVoxelEditsForScene, solidVoxelShellForScene } from "./scene-lattice";
+import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 
 /**
  * What a scene *is*, as data.
@@ -304,11 +305,21 @@ function finishSceneDocument(
     throw new Error(`Scene ${definition.id} has no variant ${variantId}`);
   }
   const scene = variant ? variant.apply(body) : body;
-  // Preset factories carry only generic extra voxel edits. Compile the ordinary
-  // shell once on the final lattice, without inspecting edit materials or
-  // assigning any runtime behavior to a scene identity.
-  scene.solidVoxels = [...solidVoxelShellForScene(scene),
-    ...solidVoxelEditsForScene(scene)];
+  const authoredEdits = solidVoxelEditsForScene(scene);
+  if (definition.environment === "garden") {
+    // The garden's generated terrain is the vessel. An additional rectangular
+    // container is both visually wrong (a glass tank around the set) and, now
+    // that SolidWorld is the renderer's geometry authority, catastrophically
+    // expensive to look through. Keep ordinary opaque/clear edits, but remove
+    // both a factory's legacy shell and any independently authored glass fill.
+    scene.solidVoxels = authoredEdits.filter((patch) => patch.operation !== "fill"
+      || (patch.materialId ?? VOXEL_MATERIAL_IDS.containerGlass)
+        !== VOXEL_MATERIAL_IDS.containerGlass);
+  } else {
+    // Preset factories carry only generic extra voxel edits. Compile the
+    // ordinary shell once on the final lattice.
+    scene.solidVoxels = [...solidVoxelShellForScene(scene), ...authoredEdits];
+  }
   return scene.scenery
     ? { ...scene, environment: definition.environment }
     : sceneWithEnvironment(scene, definition.environment);

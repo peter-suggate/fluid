@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cloneScene, defaultScene } from "../lib/core/model";
+import { sceneDocument } from "../lib/core/scene-definition";
+import { SCENE_CATALOG } from "../lib/core/scenes";
+import { VOXEL_MATERIAL_IDS } from "../lib/core/voxel-scene";
 import { buildSvoSceneGlass } from "../lib/svo/svo-scene-glass";
 import { createSvoDrySceneFragmentWGSL } from "../lib/svo/webgpu-svo-dry-scene";
 import { liveSvoDerivedBuildWGSLFor } from "../lib/svo/webgpu-svo-live-derived-builder";
@@ -28,8 +31,28 @@ test("thin dielectric SVO hits shade and transmit from their material record", (
   assert.match(shader, /fn dryMaterialThinDielectric/);
   assert.match(shader, /fn shadeDryThinDielectric/);
   assert.match(shader, /dryTraceBeyondThinWall/);
+  assert.match(shader, /var<private> drySurfaceOcclusionDepth_m:f32/);
+  assert.match(shader, /var depth=drySurfaceOcclusionDepth_m/);
+  assert.doesNotMatch(shader, /fn dryOcclusionDepth_m/,
+    "water-sort depth must reuse the glass shading traversal");
   assert.match(shader, /let cellExit=min\(nextT\.x,min\(nextT\.y,nextT\.z\)\)/);
   assert.match(shader, /opaque=payload\.opaque!=0u;glassTransmission=payload\.transmittance/);
+});
+
+test("garden scene documents contain terrain without a glass container", () => {
+  const gardenDefinitions = SCENE_CATALOG.filter(({ environment }) => environment === "garden");
+  assert.ok(gardenDefinitions.length > 0);
+
+  for (const definition of gardenDefinitions) {
+    const scene = sceneDocument(definition);
+    assert.ok(scene.terrain, `${definition.id} must retain its generated terrain vessel`);
+    assert.ok(scene.solidVoxels.every((patch) => patch.operation !== "fill"
+      || (patch.materialId ?? VOXEL_MATERIAL_IDS.containerGlass)
+        !== VOXEL_MATERIAL_IDS.containerGlass),
+    `${definition.id} must not compile a glass tank into SolidWorld`);
+    assert.equal(buildSvoSceneGlass(scene, { environmentId: definition.environment })
+      .descriptors.length, 0, `${definition.id} must not publish analytic glazing`);
+  }
 });
 
 test("derived cone opacity excludes SolidWorld glass", () => {

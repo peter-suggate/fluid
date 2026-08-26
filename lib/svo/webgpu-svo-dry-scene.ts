@@ -2318,6 +2318,17 @@ fn dryVoxelFaceEdgeFactor(position:vec3f,faceNormal:vec3f,depth_m:f32)->f32{
  * cell radius off the surface, so a thin feature crossing the cell can hand back
  * the far side's orientation — and the face is the better answer there.
  *
+ * *More than* ninety degrees. It used to reject ninety exactly, and ninety
+ * exactly is a flat surface entered through one of its side faces: dot(+y, -z)
+ * is zero to the bit for a box's baked normal against an axis face. That is the
+ * grazing view of a floor, and it is where the baked normal matters most —
+ * rejecting it there paints a floor voxel with the orientation of the wall of
+ * its own cube, which under a lamp pointing straight down is black. It is the
+ * dark skirting seen through the glass at the base of a tank: the studio floor's
+ * top row of voxels, entered edge-on through the wall, shading as if each were a
+ * vertical face. From outside the glass that side is never entered and the same
+ * voxel shades as floor, which is why it read as a glass bug.
+ *
  * The feature id is always smooth. It was the analytic normal's own hard-feature
  * classification and there is nowhere in sixteen bits to keep it; the only thing
  * downstream of it for a voxel hit is the contact-visibility ray bias, 0.025
@@ -2329,7 +2340,7 @@ fn dryShadingNormal(identity:u32,faceNormal:vec3f)->DryShadingNormal{
   }
   if(sceneIdentityHasNormal(identity)){
     let baked=sceneIdentityNormal(identity);
-    if(dot(baked,faceNormal)>0.0){return DryShadingNormal(baked,SVO_FEATURE_SMOOTH);}
+    if(dot(baked,faceNormal)>-1e-4){return DryShadingNormal(baked,SVO_FEATURE_SMOOTH);}
   }
   return DryShadingNormal(faceNormal,SVO_FEATURE_SMOOTH);
 }
@@ -4031,13 +4042,21 @@ fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   // closure first so shadeDryOpaque consumes this exact sample without tracing
   // it a second time. Invalid samples carry a negative alpha and are rejected
   // by the full-rate reconstruction, which then falls through to exact relight.
-  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)==0u){return vec4f(dryPrepassShadeNoGi(opaque,ro,rd),opaque.t);}
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)==0u){
+    var depth=opaque.t;
+    // The no-GI shortcut does not enter shadeDrySurface, so glass still needs
+    // one continuation trace here. Store it beside the cached radiance; the
+    // full-rate reconstruction then consumes this alpha without tracing again.
+    if(dryHitThinDielectric(opaque)){let behind=dryTraceBeyondThinWall(opaque,ro,rd);depth=select(0.0,behind.t,behind.t<DRY_MISS);}
+    return vec4f(dryPrepassShadeNoGi(opaque,ro,rd),depth);
+  }
   {let ignoredBodyOwner=select(DRY_OWNER_NONE,opaque.ownerId,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIllumination(ro+rd*opaque.t,opaque.normal,ignoredBodyOwner);
     if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u
       ||dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u){return vec4f(gi.radiance,select(-1.0,gi.visibility,gi.valid!=0u));}
     if(gi.valid==0u){return vec4f(0.0,0.0,0.0,-1.0);}dryPrepassGi=vec4f(gi.radiance,gi.visibility);dryPrepassGiState=1u;
   }
-  return vec4f(shadeDrySurface(opaque,ro,rd),opaque.t);
+  let radiance=shadeDrySurface(opaque,ro,rd);
+  return vec4f(radiance,drySurfaceOcclusionDepth_m);
 }
 ` : "";
   const splitEntryWGSL = split ? /* wgsl */ `struct DryVisibilityOut{
@@ -4097,13 +4116,15 @@ ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@locati
   dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryPrepassExactEdgeState=0u;dryCurrentLightSlot=0xffffffffu;
   if(dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}if(dryPrepassRadianceState!=1u){discard;}
   ${rasterGlassDiscovery ? "let glassKey=textureLoad(drySplitGlassKeyRead,coordinate,0).x;" : "let glassKey=(packedOpaqueMaterial>>16u)&0x1ffu;"}if(glassKey>0u){discard;}
-  let ndc=input.uv*2.0-1.0;let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(dryPrepassRadiance.rgb,vec3f(0.0))*vignette,opaque.t);
+  // Radiance and its water-sort depth are a single cached result. In
+  // particular, a glass sample's alpha is the opaque surface behind the pane.
+  let ndc=input.uv*2.0-1.0;let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(dryPrepassRadiance.rgb,vec3f(0.0))*vignette,dryPrepassRadiance.a);
 }
 ` : ""}@fragment fn dryLightingMain(input:VertexOut)->@location(0) vec4f{
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
   let coordinate=vec2i(input.position.xy);var geometry=drySplitGeometryAt(coordinate);var opaqueIdentity=drySplitIdentityAt(coordinate);if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.silhouetteRefinement}u)!=0u){let seam=dryPrimarySeamSample(coordinate);if(seam.valid!=0u){geometry=seam.geometry;opaqueIdentity=vec4u(seam.identity,0u,0u);}}var opaque=missHit();
   let packedOpaqueMaterial=opaqueIdentity.x;${splitOpaqueMaterialDecodeWGSL}if(geometry.w<DRY_MISS){let metadata=opaqueIdentity.y;opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,metadata&0xffffu,(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u));}
-  ${prepassResolveCallWGSL}var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}${reduced ? `if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&dryPrepassRadianceState==1u&&glassKey==0u){discard;}` : ""}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.glass.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDrySurface(opaque,ro,rd);var depth=opaque.t;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;if(glassVisible){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
+  ${prepassResolveCallWGSL}var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}${reduced ? `if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&dryPrepassRadianceState==1u&&glassKey==0u){discard;}` : ""}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.glass.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDrySurface(opaque,ro,rd);var depth=drySurfaceOcclusionDepth_m;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;if(glassVisible){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
 @fragment fn drySkyLightingMain(input:VertexOut)->@location(0) vec4f{
@@ -4113,7 +4134,7 @@ ${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@locati
   // but without raster glass discovery the glass key is packed into that very
   // plane, so there it has to be read after all.
   ${rasterGlassDiscovery ? "" : "let packedOpaqueMaterial=drySplitIdentityAt(coordinate).x;"}
-  var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.glass.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDrySurface(opaque,ro,rd);var depth=opaque.t;
+  var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.glass.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDrySurface(opaque,ro,rd);var depth=drySurfaceOcclusionDepth_m;
   if(glass.hit.valid!=0u&&glass.hit.t_m<opaque.t){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
@@ -4723,6 +4744,10 @@ const DRY_REVERSED_Z_NEAR_M:f32=${SVO_DRY_SCENE_REVERSED_Z_NEAR_M};
 // namespaces overlap numerically — body 3 and record 3 are different objects
 // that compared equal. Named for the one meaning it has left.
 var<private> dryVisibilityIgnoredBody:u32;var<private> dryVisibilityStepInvalidReason:u32;var<private> dryThickGlassEnabled:u32;var<private> dryThickGlassFailure:u32;
+// The material traversal owns both radiance and the depth used to sort water.
+// Keeping the latter invocation-local lets a thin-dielectric ray publish the
+// opaque hit it already found instead of launching the same traversal twice.
+var<private> drySurfaceOcclusionDepth_m:f32;
 var<private> dryWorldGiIgnoreRigidBodies:u32;
 var<private> dryWorldGiBodyMask:u32=0xffffffffu;
 
@@ -5442,17 +5467,35 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   shaded*=dryVoxelFaceEdgeFactor(position,hit.normal,hit.t);
   return shaded;
 }
-fn dryThinWallContinuation_m(rd:vec3f)->f32{
-  let distance=select(vec3f(DRY_MISS),dry.mapping.cellSize/max(abs(rd),vec3f(1e-9)),abs(rd)>vec3f(1e-9));
-  return max(1e-5,min(distance.x,min(distance.y,distance.z))*1.001);
+// Where the ray leaves the render voxel it just entered.
+//
+// This used to advance by the *largest* crossing a voxel can take — one whole
+// cell along the ray's dominant axis — which is only the true exit for a ray
+// that entered on that axis' face. Every other ray overshot, and an overshoot
+// at a tank's base steps clean over the entry face of the floor the wall stands
+// on and restarts the trace *inside* that solid, where the entered face is
+// reconstructed from an interior point. The face it picks there is arbitrary,
+// usually points away from the key light, and the wall's whole base shades
+// black. Exiting exactly cannot skip a face, so the surface behind the glass is
+// always entered where it is actually entered.
+fn dryVoxelExit_m(position:vec3f,rd:vec3f)->f32{
+  let cell=max(dry.mapping.cellSize,vec3f(1e-9));
+  let nudge=1e-3*min(cell.x,min(cell.y,cell.z));
+  // The hit sits *on* a voxel face, so name the voxel by a point just inside it
+  // along the ray rather than by the face itself.
+  let interior=position+rd*nudge;
+  let base=dry.nodeMipOrigin.xyz+floor((interior-dry.nodeMipOrigin.xyz)/cell)*cell;
+  let inverse=select(vec3f(DRY_MISS),vec3f(1.0)/rd,abs(rd)>vec3f(1e-9));
+  let far=max((base-position)*inverse,(base+cell-position)*inverse);
+  return max(nudge,min(far.x,min(far.y,far.z))+nudge);
 }
 fn dryTraceBeyondThinWall(hit:DryHit,ro:vec3f,rd:vec3f)->DryHit{
-  var cursor=hit.t+dryThinWallContinuation_m(rd);var behind=traceDrySolidSceneFrom(ro,rd,cursor);
+  var cursor=hit.t+dryVoxelExit_m(ro+rd*hit.t,rd);var behind=traceDrySolidSceneFrom(ro,rd,cursor);
   // A SolidWorld wall can span more than one render voxel. Treat the contiguous
   // run as one thin sheet, not as nested panes that multiply Fresnel eight times.
   for(var layer=0u;layer<16u;layer+=1u){
     if(!dryHitThinDielectric(behind)){break;}
-    cursor=behind.t+dryThinWallContinuation_m(rd);behind=traceDrySolidSceneFrom(ro,rd,cursor);
+    cursor=behind.t+dryVoxelExit_m(ro+rd*behind.t,rd);behind=traceDrySolidSceneFrom(ro,rd,cursor);
   }
   return behind;
 }
@@ -5461,18 +5504,28 @@ fn shadeDryThinDielectric(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   // A ray may cross both tank walls. Resolve a bounded sequence iteratively;
   // this is deliberately not recursive shader control flow.
   for(var sheet=0u;sheet<4u;sheet+=1u){
+    // Invalid glass still behaves as a stopping surface. Once the material is
+    // valid, the continuation below replaces this with the first opaque hit.
+    drySurfaceOcclusionDepth_m=surface.t;
     let materialId=dryResolvedMaterialId(surface);if(materialId>=dry.materialPublication.x){return vec3f(0.0);}
     let material=dryMaterial(materialId);if(!dryMaterialThinDielectric(material,materialId)){return vec3f(0.0);}
     let f0=svoMaterialDielectricF0(material);let cosine=clamp(abs(dot(normalize(surface.normal),normalize(rd))),0.0,1.0);let fresnel=f0+(1.0-f0)*pow(1.0-cosine,5.0);
     color+=throughput*dryEnvironment(reflect(rd,surface.normal),material.emissiveRoughness.w)*fresnel;
     throughput*=dryThinDielectricTransmittance(material,surface.normal,rd);
     let behind=dryTraceBeyondThinWall(surface,ro,rd);
-    if(!dryHitThinDielectric(behind)){return max(color+throughput*shadeDryOpaque(behind,ro,rd),vec3f(0.0));}
+    if(!dryHitThinDielectric(behind)){
+      // This is the depth at which the scene actually occludes water. A miss
+      // publishes zero, the compact G-buffer's far-sentinel encoding.
+      drySurfaceOcclusionDepth_m=select(0.0,behind.t,behind.t<DRY_MISS);
+      return max(color+throughput*shadeDryOpaque(behind,ro,rd),vec3f(0.0));
+    }
     surface=behind;
   }
+  drySurfaceOcclusionDepth_m=0.0;
   return max(color+throughput*dryEnvironment(rd,0.0),vec3f(0.0));
 }
 fn shadeDrySurface(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
+  drySurfaceOcclusionDepth_m=select(0.0,hit.t,hit.t<DRY_MISS);
   if(dryHitThinDielectric(hit)){return shadeDryThinDielectric(hit,ro,rd);}
   return shadeDryOpaque(hit,ro,rd);
 }
@@ -5540,7 +5593,7 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
   // Curved thick glass is compiled separately from this Metal-sensitive pass.
   // Its authored pane therefore remains visible through the exact thin fallback.
   dryThickGlassEnabled=0u;
-  let opaque=traceOpaqueScene(ro,rd);${prepassResolveCallWGSL}let glass=traceGlass(ro,rd,0.0,opaque.t);var color=shadeDrySurface(opaque,ro,rd);var depth=opaque.t;
+  let opaque=traceOpaqueScene(ro,rd);${prepassResolveCallWGSL}let glass=traceGlass(ro,rd,0.0,opaque.t);var color=shadeDrySurface(opaque,ro,rd);var depth=drySurfaceOcclusionDepth_m;
   let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;var glassSurface=DryGlassSurface(vec3f(0.0),DRY_MISS,0u,DRY_OWNER_NONE,0u,0u);
   if(glassVisible){glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);let radiance=max(color*vignette,vec3f(0.0));let generation=dryPublicationGeneration();
@@ -5551,7 +5604,7 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
   }
   if(opaque.t<DRY_MISS){
     let voxelGlass=dryHitThinDielectric(opaque);let media=dryMediumPair(rd,opaque.normal,select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_GLASS,voxelGlass));let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let producer=select(SVO_GBUFFER_PRODUCER_TRACED,SVO_GBUFFER_PRODUCER_GLASS,voxelGlass);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(producer);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}
-    let targets=svoGBufferSurface(radiance,opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
+    let targets=svoGBufferSurface(radiance,depth,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
     return dryFragmentOut(targets,dryHardwareDepth(opaque.t,rd,forward));
   }
   return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
