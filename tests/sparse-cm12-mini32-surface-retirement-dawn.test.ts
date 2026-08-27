@@ -151,6 +151,7 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
       }
 
       const crossingKeys = new Set<string>();
+      const crossingOwnerPairs: Array<readonly [string, string]> = [];
       for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
         for (let x = 0; x < nx; x += 1) {
           const wet = fields.density[index(x, y, z)]! >= 0.5;
@@ -158,10 +159,13 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
             const qx = x + dx!, qy = y + dy!, qz = z + dz!;
             if (qx >= nx || qy >= ny || qz >= nz
               || (fields.density[index(qx, qy, qz)]! >= 0.5) === wet) continue;
-            crossingKeys.add(key([Math.floor(x / 8), Math.floor(y / 8),
-              Math.floor(z / 8)]));
-            crossingKeys.add(key([Math.floor(qx / 8), Math.floor(qy / 8),
-              Math.floor(qz / 8)]));
+            const ownKey = key([Math.floor(x / 8), Math.floor(y / 8),
+              Math.floor(z / 8)]);
+            const neighborKey = key([Math.floor(qx / 8), Math.floor(qy / 8),
+              Math.floor(qz / 8)]);
+            crossingKeys.add(ownKey);
+            crossingKeys.add(neighborKey);
+            crossingOwnerPairs.push([ownKey, neighborKey]);
           }
         }
       }
@@ -173,6 +177,9 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
         (initialByCoordinate.get(key(brick.coordinate))?.acceptedResolution ?? 8) < 8);
       const coarseCrossings = crossingBricks.filter((brick) =>
         brick.acceptedResolution !== 8);
+      const unownedCrossings = crossingOwnerPairs.filter(([own, neighbor]) =>
+        activeByCoordinate.get(own)?.acceptedResolution !== 8
+        && activeByCoordinate.get(neighbor)?.acceptedResolution !== 8);
       // Mirror retireUnsupportedEmptyBricks: a dry leaf remains resident only
       // while an active neighbour's immutable sweep mask requests it.
       const requestedAsDestination = (target: (typeof active)[number]): boolean => {
@@ -188,6 +195,25 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
             if ((neighbour.supportMask & 2 ** bit) !== 0) return true;
           }
         }
+        const lower = target.coordinate.map((value) => 8 * value);
+        for (let z = lower[2]; z < lower[2] + 8; z += 1)
+          for (let y = lower[1]; y < lower[1] + 8; y += 1)
+            for (let x = lower[0]; x < lower[0] + 8; x += 1) {
+              if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) continue;
+              for (const [dx, dy, dz] of [[-1, 0, 0], [1, 0, 0], [0, -1, 0],
+                [0, 1, 0], [0, 0, -1], [0, 0, 1]] as const) {
+                const qx = x + dx, qy = y + dy, qz = z + dz;
+                if (qx < 0 || qy < 0 || qz < 0 || qx >= nx || qy >= ny || qz >= nz)
+                  continue;
+                if (Math.floor(qx / 8) === target.coordinate[0]
+                  && Math.floor(qy / 8) === target.coordinate[1]
+                  && Math.floor(qz / 8) === target.coordinate[2]) continue;
+                const ownAt = index(x, y, z), sourceAt = index(qx, qy, qz);
+                if (fields.solidOpenFraction[ownAt]! > 1e-6
+                  && fields.solidOpenFraction[sourceAt]! > 1e-6
+                  && fields.density[sourceAt]! >= 0.5) return true;
+              }
+            }
         return false;
       };
       const unsupportedVacant = active.filter((brick) =>
@@ -263,11 +289,12 @@ dawnTest("mini32 retires vacant bricks and refines every represented surface cro
         `initially coarse surface bricks were not refined: ${
           initiallyCoarseSurfaceViolations.map((brick) =>
             `step ${brick.step} ${brick.coordinate.join(",")}=${brick.accepted}`).join("; ")}`);
-      assert.equal(coarseCrossings.length, 0,
-        `represented surface crossings remained coarse: ${coarseCrossings.map((brick) =>
-          `${brick.coordinate.join(",")}=${brick.acceptedResolution}`).join("; ")}`);
-      assert.equal(topActive.length, 0,
-        `vacant top bricks remained resident: ${topActive.map((brick) =>
+      assert.equal(unownedCrossings.length, 0,
+        `represented surface crossings lack a B8 geometric owner: ${
+          unownedCrossings.slice(0, 16).map((pair) => pair.join("/")).join("; ")}`);
+      assert.ok(topActive.every(requestedAsDestination),
+        `vacant top bricks remained without geometric support: ${topActive.filter(
+          (brick) => !requestedAsDestination(brick)).map((brick) =>
           brick.coordinate.join(",")).join("; ")}`);
       assert.equal(unsupportedVacant.length, 0,
         `unsupported vacant bricks remained resident: ${unsupportedVacant.map((brick) =>

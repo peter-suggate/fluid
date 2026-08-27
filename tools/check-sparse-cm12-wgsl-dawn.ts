@@ -148,6 +148,8 @@ async function main(): Promise<void> {
       const pressure = { aggregateEdgeForFineEdgeBaseWords: 13376,
         aggregateEdgeSourceBaseWords: 14400,
         hierarchyEdgeForAggregateBaseWords: [14464],
+        aggregateEdgeMaximumContributionCount: 64,
+        hierarchyEdgeMaximumContributionCount: 64,
         headerBaseWords: 15488, totalWords: 15497 };
       const activity = createSparseCM12IncrementalActivityLayout({
         baseWords: 4168, brickCount: 8,
@@ -280,7 +282,7 @@ async function main(): Promise<void> {
         transportExecutionImage, transportPacketAuthority,
         undefined, undefined, internedBoundaryImage,
         topologyEffects, undefined, faceAddresses,
-        250000, undefined, worldDirectory, true, solidOccupancy,
+        250000, undefined, worldDirectory, true, solidOccupancy, 260000,
       );
       if (emitSourceOnly) {
         process.stdout.write(source);

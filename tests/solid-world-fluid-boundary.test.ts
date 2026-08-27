@@ -24,7 +24,7 @@ test("Sparse CM12 has no inferred tank-plane boundary authority", () => {
     "row openness must come directly from SolidWorld voxels");
 });
 
-test("SolidWorld boundary transitions keep touching wet bricks on the finest rung", () => {
+test("SolidWorld planes do not blanket-refine touching wet bricks", () => {
   const scene = getScenePreset("water-box-dam-break").create();
   const atlas = initializeSparseBrickAtlasFromScene(scene, {
     finestDimensions: [24, 16, 16],
@@ -36,6 +36,12 @@ test("SolidWorld boundary transitions keep touching wet bricks on the finest run
       && (brick.coordinate[0] === 0 || brick.coordinate[1] === 0
         || brick.coordinate[2] === 0));
   assert.ok(wetBoundaryBricks.length > 0);
-  assert.ok(wetBoundaryBricks.every((brick) =>
-    brick.resolution === atlas.brickFineResolution));
+  const deepCorner = wetBoundaryBricks.find((brick) =>
+    brick.coordinate.every((value) => value === 0));
+  assert.ok(deepCorner);
+  assert.ok(deepCorner.resolution < atlas.brickFineResolution,
+    "an exact floor/wall intersection must be allowed onto a coarse rung");
+  assert.ok(wetBoundaryBricks.some((brick) =>
+    brick.resolution === atlas.brickFineResolution),
+  "the independent liquid-surface policy must still retain exposed bricks");
 });

@@ -32,12 +32,17 @@ function waterKey(scene: SceneDescription) {
  * was before the table was consulted at all.
  */
 test("a sunlit set keys its water off the authored directional, unchanged", () => {
-  const scene = getScenePreset("hero-garden-hose").create();
-  const { before, after } = waterKey(scene);
+  // The hillside stands on the stage but is lit like a landscape: it carries no
+  // fixture at all, so the competition has one entrant and the sun it authored
+  // is the key its water gets.
+  for (const id of ["hero-garden-hose", "tall-cells-hillside-dam-break"]) {
+    const scene = getScenePreset(id).create();
+    const { before, after } = waterKey(scene);
 
-  assert.deepEqual(after.direction, before.direction, "sunlit key direction must not move");
-  assert.deepEqual(after.radianceLinear, before.radianceLinear, "sunlit key radiance must not move");
-  assert.equal(after.authored, before.authored);
+    assert.deepEqual(after.direction, before.direction, `${id}: sunlit key direction must not move`);
+    assert.deepEqual(after.radianceLinear, before.radianceLinear, `${id}: sunlit key radiance must not move`);
+    assert.equal(after.authored, before.authored);
+  }
 });
 
 /**
@@ -49,8 +54,7 @@ test("a sunlit set keys its water off the authored directional, unchanged", () =
  * fill the water is lit at a fiftieth of the floor beneath it.
  */
 test("a spotlit stage keys its water off the practical, not the fill", () => {
-  for (const id of ["ocean-seiche", "water-box-dam-break",
-    "tall-cells-hillside-dam-break"]) {
+  for (const id of ["ocean-seiche", "water-box-dam-break"]) {
     const scene = getScenePreset(id).create();
     assert.equal(scene.environment, "stage", `${id} is expected to stand on the stage`);
     const { before, after } = waterKey(scene);

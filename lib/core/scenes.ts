@@ -969,14 +969,51 @@ export function createSparseCM12LongDamBreakScene(): SceneDescription {
  * simulation grid over uneven terrain (`docs/papers/tallCells.pdf`, Table 2
  * and Figure 1). Our sparse world does not compress a whole water column into
  * one tall cell, so this reconstruction rotates the paper's 256-cell travel
- * axis onto +X and gives the terrain and falling reservoir a 64-cell physical
- * height. The important experiment remains the same: a small active body moves
+ * axis onto +X and gives the terrain and falling reservoir a physical height of
+ * its own. The important experiment remains the same: a small active body moves
  * through a much larger world while solid ground varies by metres beneath it.
+ *
+ * The vertical extent is the one axis sized by the scene rather than the paper.
+ * It has to hold the shelf, the reservoir standing on it, and the air the
+ * released sheet throws, and every one of those cells is paid for in domain
+ * bricks — so it is the smallest multiple of the 8-cell brick that clears the
+ * reservoir's crown with room to spare: 112 cells is 5.6 m over a 4 m shelf
+ * carrying a 0.8 m block, and the runout below has 5.5 m of air above it.
  */
 export const TALL_CELLS_FLOOD_CELL_SIZE_M = 0.05;
-export const TALL_CELLS_FLOOD_GRID = Object.freeze([256, 64, 64] as const);
-export const TALL_CELLS_FLOOD_UPHILL_HEIGHT_M = 2;
+export const TALL_CELLS_FLOOD_GRID = Object.freeze([256, 112, 64] as const);
+export const TALL_CELLS_FLOOD_UPHILL_HEIGHT_M = 4;
 export const TALL_CELLS_FLOOD_DOWNHILL_HEIGHT_M = 0.1;
+/**
+ * How much flat ground the far end keeps.
+ *
+ * The slope is short so that it can be steep, and what it gives up is spent
+ * here: the front leaves the toe at several metres a second and needs somewhere
+ * to spread rather than a wall to pile against. Four metres is a third of the
+ * travel axis.
+ */
+export const TALL_CELLS_FLOOD_RUNOUT_M = 4;
+/**
+ * The hillside is a ski jump, not a ramp.
+ *
+ * A single straight grade over this drop is either steep everywhere — in which
+ * case the sheet arrives at the runout still falling and simply stops — or
+ * gentle everywhere, which is the shallow 10-degree hill this scene used to be.
+ * Raising `(1 - progress)` to a power instead gives a convex profile that
+ * leaves the crest at 46 degrees and reaches the toe *tangent* to the flat
+ * runout, so the front accelerates hard, is turned rather than stopped, and
+ * spreads. Two is the lowest exponent with both of those properties; higher
+ * ones push the whole drop into the first metre and leave a shelf below it.
+ */
+export const TALL_CELLS_FLOOD_SLOPE_EASE_EXPONENT = 2;
+/**
+ * Peak height of the transverse bank, at the domain's z edges and mid-slope.
+ *
+ * A sixteenth of the drop, which is what the previous 0.12 m was against the
+ * previous 1.9 m: enough crossfall to keep the released sheet in the middle of
+ * the course, not enough to make the hillside a flume.
+ */
+export const TALL_CELLS_FLOOD_CHANNEL_BANK_M = 0.25;
 export const TALL_CELLS_FLOOD_RESERVOIR_M = Object.freeze({
   x: 1.2,
   y: 0.8,
@@ -995,40 +1032,41 @@ export const TALL_CELLS_FLOOD_RESERVOIR_M = Object.freeze({
 const TALL_CELLS_FLOOD_SCENERY: SceneryGraph = Object.freeze({
   palettes: Object.freeze({}),
   nodes: Object.freeze([
+    // Ground, and nothing else. The ordinary stage graph cannot be attached
+    // here: its floor spans the complete 12.8 m paper domain and used to
+    // dominate sparse-scene startup.
+    //
+    // It used to keep the stage's practical — one emissive cone hung at
+    // y = 8.5 — on the argument that a set needs a fixture. On a hillside it
+    // needed the opposite. The lamp was the only thing lighting a 12.8 m
+    // landscape, so everything outside its beam was the stage rig's near-black
+    // fill, the beam's own centre blew the ground out, and the cone itself sat
+    // in frame as a stair-stepped white blob. A landscape is lit by the sky,
+    // not by a lamp, so the light is a sun now: `scene.lighting` in
+    // `createTallCellsHillsideDamBreakScene` raises the directional (which is
+    // also the water's only key, via `resolveWaterKeyLight`) and gives the
+    // environment a real daylight hemisphere. There is no fixture to publish
+    // and nothing in frame that is not terrain or water.
     Object.freeze({
       kind: "terrain-shell" as const,
       id: "shell",
-      materialModel: "porcelain" as const,
-    }),
-    // The ordinary stage graph cannot be attached here: its floor spans the
-    // complete 12.8 m paper domain and used to dominate sparse-scene startup.
-    // Retain only its practical. This bounded reflector covers the hillside,
-    // publishes the same physical spot record to SVO lighting, and gives the
-    // water compositor a real fixture key instead of the stage's dim blue fill.
-    Object.freeze({
-      kind: "cone" as const,
-      id: "hillside/key",
-      tags: Object.freeze(["lamp", "fixture", "light", "spot-light"]),
-      place: Object.freeze({
-        position: Object.freeze({ x: 0, y: 8.5, z: 0 }),
-        units: "metres" as const,
-      }),
-      baseRadius: 1.5,
-      topRadius: 0.2,
-      halfHeight: 0.5,
-      material: Object.freeze({
-        colorLinear: Object.freeze([1, 0.955, 0.88] as const),
-        emission: 800,
-      }),
+      // Not porcelain: a 0.90-albedo ground clips the moment it is lit like
+      // outdoors, and this is a hillside rather than a studio prop.
+      materialModel: "garden-terrain" as const,
     }),
   ]),
 });
 
 /**
- * Authoring samples for one voxel solid: a flat launch shelf, a long central
- * drainage slope, and a short runout. The gentle transverse rise makes this
- * uneven ground rather than an inclined container floor, while keeping the
- * upper shelf flat so the initial water block rests on solid voxels everywhere.
+ * Authoring samples for one voxel solid: a flat launch shelf, a steep central
+ * drop that eases into a long flat runout, and a transverse bank. The bank
+ * makes this uneven ground rather than an inclined container floor, while the
+ * shelf stays exactly level under the whole reservoir footprint so the initial
+ * water block rests on solid voxels everywhere.
+ *
+ * All three sections are one expression of `progress`, which is clamped, so the
+ * shelf and the runout are the clamped ends of the slope rather than separate
+ * pieces that could drift apart from it.
  */
 export function createTallCellsFloodTerrain(): TerrainDescription {
   const [nx, , nz] = TALL_CELLS_FLOOD_GRID;
@@ -1042,7 +1080,7 @@ export function createTallCellsFloodTerrain(): TerrainDescription {
     heights_m: [],
   };
   const slopeStartX_m = grid.origin_m.x + TALL_CELLS_FLOOD_RESERVOIR_M.x;
-  const slopeEndX_m = 0.5 * width_m - 0.8;
+  const slopeEndX_m = 0.5 * width_m - TALL_CELLS_FLOOD_RUNOUT_M;
   const slopeRun_m = slopeEndX_m - slopeStartX_m;
   for (let z = 0; z <= nz; z += 1) {
     const worldZ_m = grid.origin_m.z + z * grid.spacing_m;
@@ -1051,13 +1089,17 @@ export function createTallCellsFloodTerrain(): TerrainDescription {
       const worldX_m = grid.origin_m.x + x * grid.spacing_m;
       const progress = Math.max(0, Math.min(1,
         (worldX_m - slopeStartX_m) / slopeRun_m));
-      const slopeHeight_m = TALL_CELLS_FLOOD_UPHILL_HEIGHT_M
-        + progress * (TALL_CELLS_FLOOD_DOWNHILL_HEIGHT_M
-          - TALL_CELLS_FLOOD_UPHILL_HEIGHT_M);
+      // Written as a two-term blend rather than `uphill + fall * drop` so both
+      // ends land on their constant exactly: the shelf under the reservoir has
+      // to be bit-flat, and the runout has to agree with `baseHeight_m`.
+      const fall = (1 - progress) ** TALL_CELLS_FLOOD_SLOPE_EASE_EXPONENT;
+      const slopeHeight_m = TALL_CELLS_FLOOD_UPHILL_HEIGHT_M * fall
+        + TALL_CELLS_FLOOD_DOWNHILL_HEIGHT_M * (1 - fall);
       // Zero on both shelves, strongest halfway down the hill. This shallow
       // crossfall keeps the released sheet in view without becoming a vessel.
       const slopeWindow = 4 * progress * (1 - progress);
-      const channelBank_m = 0.12 * slopeWindow * transverse * transverse;
+      const channelBank_m = TALL_CELLS_FLOOD_CHANNEL_BANK_M * slopeWindow
+        * transverse * transverse;
       grid.heights_m.push(slopeHeight_m + channelBank_m);
     }
   }
@@ -1072,8 +1114,9 @@ export function createTallCellsFloodTerrain(): TerrainDescription {
  * Paper-inspired hillside dam break for the vast sparse-world path.
  *
  * The reservoir is exactly 3 x 2 x 6 B8 tiles and its origin is aligned to the
- * 50 mm lattice. Everything downhill begins dry. Fluid residency therefore
- * starts local even though the logical domain contains 1,048,576 cells, and a
+ * 50 mm lattice — the shelf height is a whole number of tiles for that reason,
+ * not by coincidence. Everything downhill begins dry. Fluid residency therefore
+ * starts local even though the logical domain contains 1,835,008 cells, and a
  * travelling front has to create and later retire topology while terrain
  * remains authoritative for solid contact and rendering.
  */
@@ -1100,6 +1143,48 @@ export function createTallCellsHillsideDamBreakScene(): SceneDescription {
   scene.nominalResolution = { length_m: cell_m };
   scene.terrain = createTallCellsFloodTerrain();
   scene.scenery = TALL_CELLS_FLOOD_SCENERY;
+  // Daylight, over the stage's base rig.
+  //
+  // `environment: "stage"` is kept for what it does *not* cost — no studio set,
+  // no 12.8 m floor — but its rig is a dark room under one practical, and this
+  // scene has no practical and no room. Left alone it rendered as a black frame
+  // with a clipped white hillside in it. Every field below is therefore a
+  // deliberate override of `STUDIO_STAGE_DRY_SCENE_LIGHTING`; `svoSceneLighting`
+  // merges per field, so the stage's tone curve is all that survives.
+  //
+  // The directional is doing two jobs and both want it near daylight strength:
+  // it is the sun the hillside is modelled by, and it is the water's only key
+  // (`resolveWaterKeyLight` — the raster water pipeline never sees the light
+  // table). Aimed high and from the front-left of the travel axis so the slope
+  // has a lit face and a shaded one, and so the released sheet catches a
+  // highlight on its way downhill.
+  //
+  // The hemisphere is the other half of an outdoor frame, and on a set with no
+  // walls it is also the backdrop: a miss shades as `svoEnvironmentPrefilteredSpecular`,
+  // so `upper` and `lower` are literally the sky and the ground haze the camera
+  // sees past the terrain. Cool above, warm and dim below.
+  scene.lighting = {
+    directional: {
+      direction: [-0.45, 0.80, 0.35],
+      colorLinear: [1, 0.90, 0.74],
+      intensity: 2.8,
+    },
+    environment: {
+      diffuseScale: 1.2,
+      specularScale: 1,
+      upperRadianceLinear: [0.34, 0.44, 0.64],
+      lowerRadianceLinear: [0.030, 0.024, 0.018],
+      accentRadianceLinear: [0.36, 0.25, 0.15],
+    },
+    // Exposure is the camera, not the rig: the sun above is a physical
+    // brightness and this is the stop that puts the lit hillside in the middle
+    // of the range instead of on the shoulder.
+    grade: {
+      toneCurve: "aces",
+      exposure: 0.58,
+      whiteBalance: [1.08, 1, 0.92],
+    },
+  };
   scene.fluid.initialCondition = "dam-break";
   scene.fluid.initialDamBreakDimensions_m = { ...reservoir };
   scene.fluid.initialDamBreakOrigin_m = {
@@ -1985,18 +2070,33 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "tall-cells-hillside-dam-break",
     name: "Tall cells · hillside dam break",
-    blurb: "A paper-inspired reservoir releases from a 2 m shelf down a 256-cell uneven slope. Height samples populate one unified voxel solid; the million-cell logical world starts with only a 3×2×6-tile water body so the travelling front exercises dynamic sparse-tile creation and retirement.",
+    blurb: "A paper-inspired reservoir releases from a 4 m shelf, over a 46-degree crest that eases into a 4 m runout. Height samples populate one unified voxel solid; the 1.8-million-cell logical world starts with only a 3×2×6-tile water body so the travelling front exercises dynamic sparse-tile creation and retirement.",
     audience: "study",
     shelf: "Tall-cell studies",
     environment: "stage",
     presentationMode: "full-scene",
     methodProfile: SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
     build: createTallCellsHillsideDamBreakScene,
+    // Aimed at the drop rather than at the domain.
+    //
+    // The azimuth and elevation are unchanged — a three-quarter view from off
+    // the downhill end, so the front comes towards the lens with the slope
+    // modelled by the sun — but the subject is no longer a 1.9 m fall. The
+    // target sits at mid-drop (the shelf is 4 m, the toe 0.1 m) instead of near
+    // the old shelf's foot, which was low enough on this hillside to put the
+    // reservoir off the top of the frame.
+    //
+    // The distance moves barely at all, and that is a fact about the framing
+    // rather than an oversight: what binds this shot is the 12.8 m travel axis
+    // seen close to side-on, not the height. The minimum enclosing distance for
+    // the whole terrain-plus-reservoir box goes from 9.6 m to 9.9 m at a 1.4
+    // aspect, so 15.0 m holds the same ~1.5x of air around the subject that
+    // 14.5 m did before.
     camera: {
       azimuth_rad: 0.48,
       elevation_rad: 0.3,
-      distance_m: 14.5,
-      target_m: { x: 0, y: 1.0, z: 0 },
+      distance_m: 15.0,
+      target_m: { x: 0, y: 2.2, z: 0 },
     },
   }),
   defineScene({

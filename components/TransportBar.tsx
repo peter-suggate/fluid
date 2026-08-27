@@ -13,11 +13,79 @@ import { useSafeBrowserGPUBringup } from "../lib/core/use-safe-browser-gpu-bring
 import { planSceneRuntime } from "../lib/core/scene-runtime";
 import { resourceActivitiesFor, resourceInteractionGates } from "../lib/core/resource-readiness";
 import { requiresFencedInitialRasterPresentation } from "../lib/core/gpu-t0-presentation";
+import { effectiveSimulationStep_s, methodPinsSimulationStep } from "../lib/core/simulation-step";
 
 /** How long the pointer has to be still before the cluster recedes. */
 const POINTER_IDLE_MS = 2600;
 /** How long a notice stays on the cluster after it was last said. */
 const NOTICE_LIFETIME_MS = 6000;
+/** The step-size control's range, in milliseconds. */
+const STEP_MIN_MS = 1;
+const STEP_MAX_MS = 50;
+
+/**
+ * The fixed simulation step, as one control on the transport.
+ *
+ * The clock's step is the one solve parameter a reader changes while watching
+ * the scene — to slow a splash down, or to find where a scene goes unstable —
+ * so reaching into the pipeline overlay's folded Numerics drawer for it was a
+ * detour every time. This is the same setter the drawer calls, shown as the
+ * *effective* step: when a method pins the clock (the uniform paper profile),
+ * the number shown is the one the simulation actually takes, and editing it
+ * releases the pin rather than presenting a number that refuses to move.
+ */
+function StepSizeControl({ disabled }: { readonly disabled: boolean }) {
+  const scene = useSceneStore((state) => state.scene);
+  const methodId = useMethodStore((state) => state.methodId);
+  const quality = useMethodStore((state) => state.quality);
+  const overrides = useMethodStore((state) => state.overrides);
+  const method = { methodId, quality, overrides };
+  const step_ms = effectiveSimulationStep_s(scene, method) * 1000;
+  const pinned = methodPinsSimulationStep(scene, method);
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = (value_ms: number) => {
+    if (!Number.isFinite(value_ms)) return;
+    const clamped = Math.min(STEP_MAX_MS, Math.max(STEP_MIN_MS, value_ms));
+    simulation.setStepSize(clamped / 1000);
+  };
+  // Halve and double rather than ±1 ms: the step is a log-scale knob — 4, 8,
+  // 16, 33 ms are the settings a reader actually moves between, and reaching
+  // 4 ms from 33 one millisecond at a time is not a control.
+  const nudge = (factor: number) => commit(step_ms * factor);
+  const shown = draft ?? (Number.isInteger(+step_ms.toFixed(2)) ? String(Math.round(step_ms)) : step_ms.toFixed(2).replace(/0$/, ""));
+  return (
+    <span
+      className="transport-step"
+      role="group"
+      aria-label="Simulation step size"
+      title={pinned
+        ? "The active method pins the clock to this step; editing it releases the method to the scene-authored step."
+        : "Fixed simulation step. Rigid bodies and fluid advance on the same step; changes apply live without resetting the clock."}
+      data-pinned={pinned ? "true" : "false"}
+      data-testid="transport-step"
+    >
+      <small>dt</small>
+      <button type="button" disabled={disabled || step_ms <= STEP_MIN_MS}
+        onClick={() => nudge(0.5)} aria-label="Halve the simulation step">−</button>
+      <input
+        type="number" inputMode="decimal"
+        min={STEP_MIN_MS} max={STEP_MAX_MS} step={0.5}
+        value={shown}
+        disabled={disabled}
+        aria-label="Simulation step in milliseconds"
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => { if (draft !== null) commit(parseFloat(draft)); setDraft(null); }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") { event.currentTarget.blur(); }
+          else if (event.key === "Escape") { setDraft(null); event.currentTarget.blur(); }
+        }}
+      />
+      <small>ms</small>
+      <button type="button" disabled={disabled || step_ms >= STEP_MAX_MS}
+        onClick={() => nudge(2)} aria-label="Double the simulation step">+</button>
+    </span>
+  );
+}
 
 /**
  * Whether the pointer has been still long enough for chrome to get out of the
@@ -239,6 +307,7 @@ export function TransportBar() {
         title="Play back the recorded simulation"
       >Playback</button>}
       {safeBringup && <button type="button" className="stop-gpu-button" onClick={requestManualGPUStop}>STOP GPU</button>}
+      <StepSizeControl disabled={browserSafetyLocked || rendererOnlyScene} />
       <output className="transport-time" aria-label="Simulation time in seconds">
         {recordingStatus === "recording" && recordingStart !== null
           ? <i className="transport-recording-dot" aria-hidden="true" /> : null}

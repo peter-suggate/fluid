@@ -22,8 +22,7 @@ export const SPARSE_CM12_IBO_TRA_HOST_CHRONOLOGY = Object.freeze([
   "seal source indirects; copy TRA/VEX indirect records to the isolated indirect buffer",
   "compile exact IBO TRA spatial row masks and VEX cell masks",
   "seal target indirects; copy row-scatter/VEX-seed records to the isolated indirect buffer",
-  "scatter gamma snapshot directly from persistent spatial row masks; finalize snapshot",
-  "scatter gamma refinement from the same masks and its distinct input bank; finalize refinement",
+  "scatter the single configured gamma iteration from persistent spatial row masks; finalize its immutable snapshot",
   "seed packetized VEX frontier; retain touched masks until next-frame sparse clear",
 ] as const);
 

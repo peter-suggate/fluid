@@ -35,21 +35,34 @@ test("Sparse CM12 exposes live gamma-diffusion and sharpening controls", () => {
   );
   assert.equal(defaults.gammaDiffusionEnabled, true);
   assert.equal(defaults.surfaceSharpeningEnabled, true);
+  assert.equal(defaults.sharpeningStrength, 1);
+
+  const strengthSpec = adaptiveMassMethod.params.find(
+    (candidate) => candidate.key === "sharpeningStrength",
+  );
+  assert.equal(strengthSpec?.kind, "number");
+  assert.equal(strengthSpec?.update, "runtime");
+  assert.ok(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("sharpeningStrength"));
 
   const disabled = adaptiveMassSolverOptions(
     resolveMethodValues(adaptiveMassMethod, "balanced", {
       gammaDiffusion: "off",
       surfaceSharpening: "off",
+      sharpeningStrength: 0.5,
     }),
   );
   assert.equal(disabled.gammaDiffusionEnabled, false);
   assert.equal(disabled.surfaceSharpeningEnabled, false);
+  assert.equal(disabled.sharpeningStrength, 0.5);
 });
 
 test("conditioning controls preserve the mandatory sparse scalar-publication suffix", () => {
   const gammaStage = resident.slice(resident.indexOf('stage("gamma-diffusion"'),
     resident.indexOf('stage("surface-sharpening"'));
   assert.match(gammaStage, /if \(!gammaDiffusionEnabled\) return/);
+  assert.equal(gammaStage.match(/dispatchAccepted\("scatterGammaSnapshotRows"/g)?.length, 1);
+  assert.equal(gammaStage.match(/dispatchAccepted\("finalizeGammaSnapshot"/g)?.length, 1);
+  assert.doesNotMatch(gammaStage, /GammaRefinement/);
 
   const sharpeningStage = resident.slice(resident.indexOf('stage("surface-sharpening"'),
     resident.indexOf('stage("symmetry-authority"'));
@@ -61,7 +74,14 @@ test("conditioning controls preserve the mandatory sparse scalar-publication suf
 
   assert.match(wgsl, /fn conditionedDensity[\s\S]*gammaDiffusionEnabled\(\)/);
   assert.match(wgsl,
+    /fn conditionedDensity\(cell:u32\)->f32\{return state\[select\(destinationDensity\(\),\s*p\.stateOffsets2\.x,gammaDiffusionEnabled\(\)\)\+cell\];\}/);
+  assert.match(wgsl,
+    /fn conditionedGamma\(cell:u32\)->f32\{return state\[select\(destinationGamma\(\),\s*p\.stateOffsets2\.y,gammaDiffusionEnabled\(\)\)\+cell\];\}/);
+  assert.doesNotMatch(wgsl, /fn scatterGammaRefinementRows|fn finalizeGammaRefinement/);
+  assert.match(wgsl,
     /if\(!surfaceSharpeningEnabled\(\)\)[\s\S]*state\[destinationDensity\(\)\+cell\]=max\(0\.0,conditionedDensity\(cell\)\)/);
+  assert.match(wgsl,
+    /return min\(0\.0,delta\*surfaceSharpeningStrength\(\)\)/);
 });
 
 test("the SIM pipeline exposes both transforms as live stage switches", () => {

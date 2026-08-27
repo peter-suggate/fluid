@@ -48,6 +48,49 @@ test("the effective vec4 plane is a VEX product, never transport materialization
   assert.doesNotMatch(sample, /state\[/);
 });
 
+test("transport and sharpening use a continuous finest-cell interpolation lattice", () => {
+  const stencil = functionSource(wgsl, "effectiveTransportStencilAtSpans",
+    "${topologyEffectsEntries}");
+  assert.match(stencil, /let spans=vec3f\(1\.0\)/);
+  assert.doesNotMatch(stencil, /cm12TeiOwnerAtFine[\s\S]*widths/);
+
+  const sharpeningDensity = functionSource(wgsl, "sampleSharpeningDensity",
+    "fn sampleSharpeningField");
+  assert.match(sharpeningDensity, /let spans=vec3f\(1\.0\)/);
+  assert.match(sharpeningDensity,
+    /let atUpper=select\(vec3(?:b|<bool>)\(false\),clamped>=upper,hasInteriorInterval\)/);
+  assert.match(sharpeningDensity, /lower=select\(lower,lower-vec3i\(1\),atUpper\)/);
+  assert.match(sharpeningDensity, /fraction=select\(fraction,vec3f\(1\.0\),atUpper\)/);
+  const sharpeningField = functionSource(wgsl, "sampleSharpeningField",
+    "fn traceSharpeningMass");
+  assert.match(sharpeningField,
+    /sampleSharpeningDensity\(position\+dx\)-sampleSharpeningDensity\(position-dx\)/);
+});
+
+test("fixed-point remainders remain at their source, independent of traversal order", () => {
+  const sharpeningScatter = functionSource(wgsl, "scatterSharpeningCell",
+    "@compute @workgroup_size(64)\nfn prepareSharpeningField");
+  assert.match(sharpeningScatter,
+    /addSharpeningReceipt\(cell,removedFixed-distributedFixed\)/);
+  assert.doesNotMatch(sharpeningScatter, /lastCorner/);
+
+  const capacityScatter = functionSource(wgsl, "scatterDensityCapacityRepair",
+    "fn finalizeDensityCapacityRepair");
+  assert.match(capacityScatter, /let distributed=share\*neighborCount/);
+  assert.match(capacityScatter,
+    /atomicAdd\(&conditioning\[6u\*p\.counts\.x\+cell\],-distributed\)/);
+  assert.doesNotMatch(capacityScatter, /lastNeighbor/);
+});
+
+test("dry transport retains cumulative gamma instead of injecting a new value", () => {
+  const gather = functionSource(wgsl, "gatherConservativeDensity",
+    "fn seedTracers");
+  assert.match(gather,
+    /if\(rhoNext<CM12_DRY_CELL_THRESHOLD\)\{gammaNext=state\[sourceGamma\(\)\+id\];\}/);
+  assert.doesNotMatch(gather,
+    /if\(rhoNext<CM12_DRY_CELL_THRESHOLD\)\{gammaNext=1\.0;\}/);
+});
+
 test("the AEI arm enables committed packets rather than the checkpoint tile resolver", () => {
   assert.doesNotMatch(wgsl, /EXP_ACCEPTED_EXECUTION_IMAGE_PACKETS:bool=false/);
   assert.doesNotMatch(wgsl, /packet publication is\s*\n?\/\/ disabled/i);
@@ -100,10 +143,10 @@ test("raw Phase-1 receipts are reachable only through a construction specializat
     resident.indexOf("static createPhase1TransportReceiptOracleForQA("),
     resident.indexOf("private static async createConfigured("));
   assert.match(factory,
-    /false, false, false, false, undefined, undefined, true\)/);
+    /false, true, report\)/);
   const productionFactory = resident.slice(resident.indexOf("static create("),
-    resident.indexOf("static createPressureRefreshOracleForQA("));
-  assert.doesNotMatch(productionFactory, /undefined, undefined, true/);
+    resident.indexOf("static createPresentationPublisherOracleForQA("));
+  assert.doesNotMatch(productionFactory, /false, true, report/);
   assert.match(solver, /static createPhase1TransportReceiptOracleForQA\(/);
   assert.match(solver,
     /PHASE1_TRANSPORT_RECEIPT_QA_TOKEN[\s\S]*createPhase1TransportReceiptOracleForQA/);

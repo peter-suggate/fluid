@@ -283,7 +283,7 @@ dawnTest("long dam keeps deep work coarse and publishes new frontier pages",
       const active = evolved.bricks.filter((brick) => brick.active);
       const coarse = active.filter((brick) => brick.acceptedResolution < 8);
       const fine = active.filter((brick) => brick.acceptedResolution === 8);
-      const deepBottomLeft = active.find((brick) =>
+      const deepPlanarBottom = active.find((brick) =>
         brick.coordinate[0] === 0
           && brick.coordinate[1] === 0
           && brick.coordinate[2] === 1);
@@ -300,9 +300,11 @@ dawnTest("long dam keeps deep work coarse and publishes new frontier pages",
         "surface activity must not erase every coarse rung in two frames");
       assert.ok(fine.length < active.length,
         "the active set must not collapse to blanket 8-cubed resolution");
-      assert.ok(deepBottomLeft && deepBottomLeft.acceptedResolution < 8,
-        `deep bottom-left bulk must stay coarse; got ${
-          deepBottomLeft?.acceptedResolution ?? "no active brick"}`);
+      assert.ok(deepPlanarBottom && deepPlanarBottom.acceptedResolution < 8,
+        `deep planar-bottom bulk must stay coarse; got ${
+          deepPlanarBottom?.acceptedResolution ?? "no active brick"}`);
+      assert.equal(deepPlanarBottom.reasons & 1, 0,
+        "a connected planar-bottom row must not be classified as sparse air");
       assert.ok(acceptedCells <= 0.8 * allFineCells,
         `expected at least 20% active-cell reduction; got ${acceptedCells}/${allFineCells} ${
           JSON.stringify(census)} wet=${JSON.stringify(wetCensus)}`);
@@ -342,6 +344,18 @@ dawnTest("long dam keeps deep work coarse and publishes new frontier pages",
         await device.queue.onSubmittedWorkDone();
         const snapshot = await solver.readGPUActivityPolicy();
         finalSnapshot = snapshot;
+        if (step <= 16) {
+          const planarBottom = snapshot.bricks.find((brick) => brick.active
+            && brick.coordinate[0] === 0 && brick.coordinate[1] === 0
+            && brick.coordinate[2] === 1);
+          assert.ok(planarBottom,
+            `deep planar-bottom brick disappeared at step ${step}`);
+          assert.equal(planarBottom.reasons & 1, 0,
+            `deep planar-bottom brick became a false surface at step ${step}`);
+          assert.ok(planarBottom.acceptedResolution <= 4,
+            `deep planar-bottom brick refined to ${
+              planarBottom.acceptedResolution}^3 at step ${step}`);
+        }
         if (step === 24) {
           const density = (await solver.readDiagnosticFields()).density;
           let mass = 0, firstMoment = 0;

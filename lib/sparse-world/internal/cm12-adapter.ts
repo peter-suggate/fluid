@@ -148,10 +148,13 @@ export interface CM12SparseWorldDeveloperTrace {
     WebGPUSparseCM12Resident["setActivityPhaseLimitForQA"]>[0]): void;
   setTransportPhaseLimitForQA(phase: Parameters<
     WebGPUSparseCM12Resident["setTransportPhaseLimitForQA"]>[0]): void;
+  setSharpeningPhaseLimitForQA(phase: Parameters<
+    WebGPUSparseCM12Resident["setSharpeningPhaseLimitForQA"]>[0]): void;
   setPressureTopologyPhaseLimitForQA(phase: Parameters<
     WebGPUSparseCM12Resident["setPressureTopologyPhaseLimitForQA"]>[0]): void;
   readDiagnostics(): ReturnType<WebGPUSparseCM12Resident["readDiagnostics"]>;
-  readDiagnosticFields(includeWorldLeaves?: boolean):
+  readDiagnosticFields(includeWorldLeaves?: boolean,
+    frameBank?: "accepted" | "candidate"):
     ReturnType<WebGPUSparseCM12Resident["readDiagnosticFields"]>;
   readActivitySnapshot(includeWorldLeaves?: boolean):
     ReturnType<WebGPUSparseCM12Resident["readActivitySnapshot"]>;
@@ -159,7 +162,7 @@ export interface CM12SparseWorldDeveloperTrace {
     WebGPUSparseCM12Resident["readPresentationPageAllocatorReceiptQA"]>;
   readWorldGrowthReceiptQA(): ReturnType<
     WebGPUSparseCM12Resident["readWorldGrowthReceiptQA"]>;
-  readPhase1TransportReceiptQA(): ReturnType<
+  readPhase1TransportReceiptQA(allowStageLimitedCandidate?: boolean): ReturnType<
     WebGPUSparseCM12Resident["readPhase1TransportReceiptQA"]>;
   readPhase1TransportProfileQA(): ReturnType<
     WebGPUSparseCM12Resident["readPhase1TransportProfileQA"]>;
@@ -494,13 +497,18 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
     WebGPUSparseCM12Resident["setTransportPhaseLimitForQA"]>[0]) {
     this.resident.setTransportPhaseLimitForQA(phase);
   }
+  setSharpeningPhaseLimitForQA(phase: Parameters<
+    WebGPUSparseCM12Resident["setSharpeningPhaseLimitForQA"]>[0]) {
+    this.resident.setSharpeningPhaseLimitForQA(phase);
+  }
   setPressureTopologyPhaseLimitForQA(phase: Parameters<
     WebGPUSparseCM12Resident["setPressureTopologyPhaseLimitForQA"]>[0]) {
     this.resident.setPressureTopologyPhaseLimitForQA(phase);
   }
   readDiagnostics() { return this.resident.readDiagnostics(); }
-  readDiagnosticFields(includeWorldLeaves = false) {
-    return this.resident.readDiagnosticFields(includeWorldLeaves);
+  readDiagnosticFields(includeWorldLeaves = false,
+    frameBank: "accepted" | "candidate" = "accepted") {
+    return this.resident.readDiagnosticFields(includeWorldLeaves, frameBank);
   }
   readActivitySnapshot(includeWorldLeaves = false) {
     return this.resident.readActivitySnapshot(includeWorldLeaves);
@@ -511,7 +519,9 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   readWorldGrowthReceiptQA() {
     return this.resident.readWorldGrowthReceiptQA();
   }
-  readPhase1TransportReceiptQA() { return this.resident.readPhase1TransportReceiptQA(); }
+  readPhase1TransportReceiptQA(allowStageLimitedCandidate = false) {
+    return this.resident.readPhase1TransportReceiptQA(allowStageLimitedCandidate);
+  }
   readPhase1TransportProfileQA() { return this.resident.readPhase1TransportProfileQA(); }
   readCandidateEffectsTransactionQA() {
     return this.resident.readCandidateEffectsTransactionQA();

@@ -14,12 +14,14 @@ import {
   sparseCM12PressureIterations,
   sparseCM12PressureRelativeTolerance,
   sparseCM12SharpeningDistance,
+  sparseCM12SharpeningStrength,
   sparseCM12SharpeningTraceSteps,
   SPARSE_CM12_ACTIVITY_POLICY,
   SPARSE_CM12_PRESSURE_ITERATIONS,
   SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS,
   SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
   SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
+  SPARSE_CM12_SHARPENING_STRENGTH,
   SPARSE_CM12_SHARPENING_TRACE_STEPS,
   type SparseCM12ActivityPolicy,
 } from "./webgpu-sparse-cm12-resident";
@@ -47,6 +49,8 @@ export interface AdaptiveMassSolverOptions {
   readonly sharpeningDistance?: number;
   /** Forward-Euler substeps TraceAlongField may spend reaching D. */
   readonly sharpeningTraceSteps?: number;
+  /** Fraction of CM12 Algorithm 2's per-step removed-density dose. */
+  readonly sharpeningStrength?: number;
   /** Whether Sec. 3.4's two gamma-diffusion iterations run. */
   readonly gammaDiffusionEnabled?: boolean;
   /** Whether Sec. 3.5's conservative surface-sharpening transform runs. */
@@ -225,6 +229,20 @@ const params: MethodParamSpec[] = [
     hint: "How many forward-Euler substeps the trace may spend. Each is half a cell, so the reach is whichever of D and half the substep count is smaller — at the default 7 the substeps are not the binding constraint anywhere in the paper's D range, and lowering them deliberately shortens the trace along a curving gradient.",
   },
   {
+    kind: "number",
+    key: "sharpeningStrength",
+    label: "Sharpening strength",
+    default: SPARSE_CM12_SHARPENING_STRENGTH,
+    tier: "fine",
+    unit: "dose",
+    min: 0,
+    max: 1,
+    step: 0.05,
+    digits: 2,
+    update: "runtime",
+    hint: "Scales Algorithm 2's per-step removed-density dose before its conservative mass-return trace. One is the paper dose; zero leaves gamma diffusion active but suppresses sharpening.",
+  },
+  {
     kind: "select",
     key: "pressureJournal",
     label: "Pressure film capture",
@@ -370,6 +388,7 @@ export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze([
   "pressureRelativeTolerance",
   "sharpeningDistance",
   "sharpeningTraceSteps",
+  "sharpeningStrength",
   "finestTravelCells", "fourTravelCells", "twoTravelCells",
   "frontLookaheadSteps", "thinFeatureCells", "thinFeatureDensity", "residencyDensity",
   "residencyMassFineCells",
@@ -429,6 +448,7 @@ export function adaptiveMassSolverOptions(
       sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
     sharpeningDistance: sparseCM12SharpeningDistance(values.sharpeningDistance),
     sharpeningTraceSteps: sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps),
+    sharpeningStrength: sparseCM12SharpeningStrength(values.sharpeningStrength),
     // Capability, not a tuning knob: it only reserves the journal region so a
     // later frame can be armed. Off by default, so a solver that never asked
     // for the film pays nothing — not a float of state, not a dispatch.
@@ -513,6 +533,7 @@ export const adaptiveMassMethod: SimulationMethod = {
         sparseCM12PressureRelativeTolerance(values.pressureRelativeTolerance),
       sharpeningDistance: sparseCM12SharpeningDistance(values.sharpeningDistance),
       sharpeningTraceSteps: sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps),
+      sharpeningStrength: sparseCM12SharpeningStrength(values.sharpeningStrength),
       ...normalizedActivity,
     };
   },
@@ -535,6 +556,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       pressureRelativeTolerance: SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE,
       sharpeningDistance: SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
       sharpeningTraceSteps: SPARSE_CM12_SHARPENING_TRACE_STEPS,
+      sharpeningStrength: SPARSE_CM12_SHARPENING_STRENGTH,
       ...activityDefaults,
     };
   },

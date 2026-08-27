@@ -96,7 +96,16 @@ fn repairPersistentPressure${n}Workset(@builtin(workgroup_id)wid:vec3u,
 export function createSparseCM12PersistentPressureCacheAggregateWGSL(
   layout: SparseCM12PersistentPressureCacheLayout,
   arena: string,
+  contributionBounds: Readonly<{
+    aggregateEdgeMaximumContributionCount: number;
+    hierarchyEdgeMaximumContributionCount: number;
+  }>,
 ): string {
+  for (const [name, count] of Object.entries(contributionBounds)) {
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new RangeError(`${name} must be a non-negative safe integer`);
+    }
+  }
   const a = layout.aggregateHeaderBaseWords;
   const ah = SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_HEADER;
   const fh = SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_FAMILY_HEADER;
@@ -124,6 +133,10 @@ export function createSparseCM12PersistentPressureCacheAggregateWGSL(
   const roots = Object.fromEntries(FAMILY_NAMES.map((name) => [name,
     layout.aggregateFamilies[name].treeLevelBaseWords.at(-1)!])) as
     Record<SparseCM12PressureCacheAggregateFamilyName, number>;
+  const aggregateEdgeBatchCount = Math.max(1,
+    Math.ceil(contributionBounds.aggregateEdgeMaximumContributionCount / 64));
+  const hierarchyEdgeBatchCount = Math.max(1,
+    Math.ceil(contributionBounds.hierarchyEdgeMaximumContributionCount / 64));
   return /* wgsl */ `
 // Aggregate integration hooks preserve the existing packed-list order:
 // pcfCellBrick, pcfBrickCellRange
@@ -135,6 +148,8 @@ export function createSparseCM12PersistentPressureCacheAggregateWGSL(
 const PCFA_MAGIC:u32=0x${SPARSE_CM12_PRESSURE_CACHE_AGGREGATE_MAGIC.toString(16)}u;
 const PCFA_BASE:u32=${a}u;const PCFA_LEAF_BITS:u32=${SPARSE_CM12_PRESSURE_CACHE_LEAF_BITS}u;
 const PCFA_LEAF_WORDS:u32=${SPARSE_CM12_PRESSURE_CACHE_LEAF_BITS / 32}u;
+const PCFA_AGGREGATE_EDGE_BATCHES:u32=${aggregateEdgeBatchCount}u;
+const PCFA_HIERARCHY_EDGE_BATCHES:u32=${hierarchyEdgeBatchCount}u;
 const PCFA_PHASE_AGGREGATE_REPAIR:u32=${SPARSE_CM12_PRESSURE_CACHE_PHASE.aggregateRepairing}u;
 const PCFA_PHASE_AGGREGATE_EXECUTE:u32=${SPARSE_CM12_PRESSURE_CACHE_PHASE.aggregateExecuting}u;
 const PCFA_PHASE_HIERARCHY_REPAIR:u32=${SPARSE_CM12_PRESSURE_CACHE_PHASE.hierarchyRepairing}u;
@@ -236,16 +251,15 @@ fn pcfaMarkAggregateEdgeAncestors(edge:u32){for(var level=0u;level<${layout.hier
     pcfAggregateEdgeSourceBrick(edge))),8u);}}}
 ${FAMILY_NAMES.map((name) => repairWorkset(name, layout.aggregateFamilies[name], arena)).join("\n")}
 ${FAMILY_NAMES.map((name) => rankSelect(name, layout.aggregateFamilies[name], arena)).join("\n")}
-fn pcfaFinalizeFamily(family:u32,root:u32,edgeFamily:bool){let header=pcfaFamilyHeader(family);
+fn pcfaFinalizeFamily(family:u32,root:u32){let header=pcfaFamilyHeader(family);
   if(atomicLoad(&${arena}[header+PCFA_F_REPAIRED_LEAVES])
       !=atomicLoad(&${arena}[header+PCFA_F_DIRTY_LEAVES])){pcfaFault(family,PCF_FAULT_REPAIR,family);return;}
   let count=atomicLoad(&${arena}[root]);
   atomicStore(&${arena}[header+PCFA_F_WORK_COUNT],count);
-  // Reduction families contain workgroup barriers. Give an empty reduction a
+  // Every reduction owns one item per workgroup. Give an empty reduction a
   // single synchronized no-op workgroup instead of relying on a zero-sized
   // indirect dispatch, while WORK_COUNT remains the authoritative zero.
-  let groups=select(max(1u,count),(count+63u)/64u,edgeFamily);
-  pcfaStoreIndirect(header,PCFA_F_WORK_X,groups);}
+  pcfaStoreIndirect(header,PCFA_F_WORK_X,max(1u,count));}
 fn pcfaSealFinePublication(){if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCF_PHASE_COLLECTING
     ||atomicLoad(&${arena}[PCF_BASE+PCF_H_FAULT])!=0u){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
   atomicStore(&${arena}[PCFA_BASE+${ah.topologyGeneration}u],pcfTopologyGeneration());
@@ -260,15 +274,25 @@ fn pcfaSealFinePublication(){if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCF
 @compute @workgroup_size(1) fn sealPersistentPressureAggregateFrontier(){pcfaSealFinePublication();}
 @compute @workgroup_size(1) fn finalizePersistentPressureAggregatePlan(){
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCFA_PHASE_AGGREGATE_REPAIR){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
-  pcfaFinalizeFamily(0u,${roots.brick}u,false);pcfaFinalizeFamily(1u,${roots.aggregateEdge}u,true);
+  pcfaFinalizeFamily(0u,${roots.brick}u);pcfaFinalizeFamily(1u,${roots.aggregateEdge}u);
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_FAULT])==0u){atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCFA_PHASE_AGGREGATE_EXECUTE);}}
-@compute @workgroup_size(64) fn repairPersistentPressureAggregateEdges(@builtin(global_invocation_id)gid:vec3u){
-  let edge=pcfAggregateEdgeRankSelect(gid.x);
-  if(edge>=${layout.aggregateEdgeCount}u){return;}let range=pcfAggregateEdgeContributionRange(edge);var weight=0.0;
-  for(var at=0u;at<range.y;at+=1u){weight+=pcfEdgeWeight(pcfAggregateEdgeContribution(range.x+at));}
-  let address=${layout.brickAggregateEdgeBaseWords}u+edge;
-  let changed=atomicExchange(&${arena}[address],bitcast<u32>(weight))!=bitcast<u32>(weight);
-  if(changed){pcfaMarkAggregateEdgeAncestors(edge);}atomicAdd(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_EXECUTED],1u);}
+@compute @workgroup_size(64) fn repairPersistentPressureAggregateEdges(
+ @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
+  let edge=pcfAggregateEdgeRankSelect(wid.x);let valid=edge<${layout.aggregateEdgeCount}u;
+  var range=vec2u(0u);if(valid){range=pcfAggregateEdgeContributionRange(edge);}var weight=0.0;
+  // Fetch in parallel, but accumulate on lane zero in canonical contribution
+  // order. This preserves the previous f32 result bit-for-bit while exposing
+  // the otherwise serial, pointer-chasing loads to the GPU.
+  for(var batchIndex=0u;batchIndex<PCFA_AGGREGATE_EDGE_BATCHES;batchIndex+=1u){
+    let batch=64u*batchIndex;var count=0u;if(batch<range.y){count=min(64u,range.y-batch);}
+    if(lane<count){pcfaEdgeBatch[lane]=pcfEdgeWeight(
+      pcfAggregateEdgeContribution(range.x+batch+lane));}
+    workgroupBarrier();if(lane==0u){for(var local=0u;local<count;local+=1u){
+      weight+=pcfaEdgeBatch[local];}}workgroupBarrier();}
+  if(lane==0u&&valid){let address=${layout.brickAggregateEdgeBaseWords}u+edge;
+    let changed=atomicExchange(&${arena}[address],bitcast<u32>(weight))!=bitcast<u32>(weight);
+    if(changed){pcfaMarkAggregateEdgeAncestors(edge);}
+    atomicAdd(&${arena}[PCFA_AGGREGATEEDGE_HEADER+PCFA_F_EXECUTED],1u);}}
 @compute @workgroup_size(64) fn repairPersistentPressureBrickDiagonals(@builtin(local_invocation_index)lane:u32,
  @builtin(workgroup_id)wid:vec3u){let brick=pcfBrickRankSelect(wid.x);
   var diagonal=0.0;var wet=0u;if(brick<${layout.brickCount}u){let range=pcfBrickCellRange(brick);
@@ -301,6 +325,7 @@ fn pcfaSealFinePublication(){if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCF
     atomicAdd(&${arena}[PCFA_BRICK_HEADER+PCFA_F_EXECUTED],1u);}}
 var<workgroup>pcfaReduce:array<f32,64>;
 var<workgroup>pcfaWet:array<u32,64>;
+var<workgroup>pcfaEdgeBatch:array<f32,64>;
 @compute @workgroup_size(1) fn finalizePersistentPressureAggregateExecution(){
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCFA_PHASE_AGGREGATE_EXECUTE){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
   if(atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_EXECUTED])!=atomicLoad(&${arena}[PCFA_BRICK_HEADER+PCFA_F_WORK_COUNT])
@@ -312,15 +337,22 @@ var<workgroup>pcfaWet:array<u32,64>;
     atomicLoad(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_DIRTY_LEAVES]));}
 @compute @workgroup_size(1) fn finalizePersistentPressureHierarchyPlan(){
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCFA_PHASE_HIERARCHY_REPAIR){pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return;}
-  pcfaFinalizeFamily(2u,${roots.hierarchyNode}u,false);pcfaFinalizeFamily(3u,${roots.hierarchyEdge}u,true);
+  pcfaFinalizeFamily(2u,${roots.hierarchyNode}u);pcfaFinalizeFamily(3u,${roots.hierarchyEdge}u);
   if(atomicLoad(&${arena}[PCF_BASE+PCF_H_FAULT])==0u){atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCFA_PHASE_HIERARCHY_EXECUTE);}}
-@compute @workgroup_size(64) fn repairPersistentPressureHierarchyEdges(@builtin(global_invocation_id)gid:vec3u){
-  let linear=pcfHierarchyEdgeRankSelect(gid.x);let address=pcfaEdgeAddress(linear);
-  if(address.x==PCF_INVALID){return;}let range=pcfHierarchyEdgeContributionRange(address.x,address.y);var weight=0.0;
-  for(var at=0u;at<range.y;at+=1u){let edge=pcfHierarchyEdgeContribution(address.x,range.x+at);
-    weight+=bitcast<f32>(atomicLoad(&${arena}[${layout.brickAggregateEdgeBaseWords}u+edge]));}
-  atomicStore(&${arena}[pcfaHierarchyEdgeWord(address.x,address.y)],bitcast<u32>(weight));
-  atomicAdd(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_EXECUTED],1u);}
+@compute @workgroup_size(64) fn repairPersistentPressureHierarchyEdges(
+ @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
+  let linear=pcfHierarchyEdgeRankSelect(wid.x);let address=pcfaEdgeAddress(linear);
+  let valid=address.x!=PCF_INVALID;var range=vec2u(0u);
+  if(valid){range=pcfHierarchyEdgeContributionRange(address.x,address.y);}var weight=0.0;
+  for(var batchIndex=0u;batchIndex<PCFA_HIERARCHY_EDGE_BATCHES;batchIndex+=1u){
+    let batch=64u*batchIndex;var count=0u;if(batch<range.y){count=min(64u,range.y-batch);}
+    if(lane<count){let edge=pcfHierarchyEdgeContribution(address.x,range.x+batch+lane);
+      pcfaEdgeBatch[lane]=bitcast<f32>(atomicLoad(&${arena}[
+        ${layout.brickAggregateEdgeBaseWords}u+edge]));}
+    workgroupBarrier();if(lane==0u){for(var local=0u;local<count;local+=1u){
+      weight+=pcfaEdgeBatch[local];}}workgroupBarrier();}
+  if(lane==0u&&valid){atomicStore(&${arena}[pcfaHierarchyEdgeWord(address.x,address.y)],
+    bitcast<u32>(weight));atomicAdd(&${arena}[PCFA_HIERARCHYEDGE_HEADER+PCFA_F_EXECUTED],1u);}}
 @compute @workgroup_size(64) fn repairPersistentPressureHierarchyDiagonals(@builtin(local_invocation_index)lane:u32,
  @builtin(workgroup_id)wid:vec3u){let linear=pcfHierarchyNodeRankSelect(wid.x);
   let address=pcfaNodeAddress(linear);var diagonal=0.0;if(address.x!=PCF_INVALID){

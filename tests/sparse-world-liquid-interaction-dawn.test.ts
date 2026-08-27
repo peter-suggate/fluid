@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
+import { sceneAtContainerExtents } from "../lib/core/scene-scale";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
@@ -40,11 +41,11 @@ dawnTest("a public sparse-world edit adds a dropped liquid ball",
         validationErrors.push(event.error.message);
       });
 
-      const scene = sceneDocument(getSceneDefinition("water-box-tank-fill"));
+      const scene = sceneAtContainerExtents(
+        sceneDocument(getSceneDefinition("water-box-tank-fill")),
+        { width_m: 1.6, height_m: 2.4, depth_m: 1.6 },
+      );
       scene.rigidBodies = [];
-      scene.container.width_m = 1.6;
-      scene.container.height_m = 2.4;
-      scene.container.depth_m = 1.6;
       scene.container.fillFraction = 0.2;
       scene.voxelDomain.finestCellSize_m = 0.05;
       scene.fluid.surfaceTension_N_m = 0;

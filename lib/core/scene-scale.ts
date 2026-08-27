@@ -3,6 +3,8 @@ import {
   DEFAULT_MAXIMUM_LATTICE_DIMENSION,
   MINIMUM_LATTICE_DIMENSION,
   sceneLatticeDimensions,
+  solidVoxelEditsForScene,
+  solidVoxelShellForScene,
 } from "./scene-lattice";
 import { applyInitialFluidLayout, initialFluidLayout } from "./initial-fluid-layout";
 
@@ -54,6 +56,12 @@ export interface SceneScaleSummary {
   readonly options: readonly SceneScaleOption[];
 }
 
+export interface SceneContainerExtents {
+  readonly width_m: number;
+  readonly height_m: number;
+  readonly depth_m: number;
+}
+
 function scaleVec3(value: Vec3, factor: number): Vec3 {
   return { x: value.x * factor, y: value.y * factor, z: value.z * factor };
 }
@@ -84,6 +92,31 @@ export function sceneAtFinestCellSize(
   const next = cloneScene(scene);
   next.voxelDomain.finestCellSize_m = finestCellSize_m;
   applyInitialFluidLayout(next, water);
+  return repairSceneForContainer(next);
+}
+
+/**
+ * Move the container walls onto new metric extents as one structural edit.
+ *
+ * A finished scene stores its tank as ordinary SolidWorld voxel patches. Raw
+ * mutation of `scene.container` therefore does not resize the physical walls:
+ * it strands the old shell inside the new lattice and leaves the enlarged
+ * exterior open. Capture independent voxel edits while the old lattice still
+ * identifies its derived shell, then compile that shell on the new lattice.
+ */
+export function sceneAtContainerExtents(
+  scene: SceneDescription,
+  extents: SceneContainerExtents,
+): SceneDescription {
+  for (const [axis, extent] of Object.entries(extents)) {
+    if (!(extent > 0) || !Number.isFinite(extent)) {
+      throw new RangeError(`Container ${axis} must be positive and finite`);
+    }
+  }
+  const next = cloneScene(scene);
+  const authoredEdits = solidVoxelEditsForScene(next);
+  next.container = { ...next.container, ...extents };
+  next.solidVoxels = [...solidVoxelShellForScene(next), ...authoredEdits];
   return repairSceneForContainer(next);
 }
 

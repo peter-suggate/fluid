@@ -141,6 +141,20 @@ const enforcePressureReceipts = argument("enforce-pressure-receipts", "1") === "
 const finalQAEnabled = argument("final-qa", "1") !== "0";
 const quiet = argument("quiet", "0") === "1";
 const outputPath = argument("out", "");
+const pressureTopologyCutoff = argument("pressure-topology-cutoff", "") as
+  "" | "setup" | "cells" | "rows" | "fine" | "coarse-plan" | "coarse-indirect"
+  | "coarse-edge" | "coarse-work" | "coarse" | "hierarchy";
+const pressureTopologyCutoffFrame = Number(argument("pressure-topology-cutoff-frame", "0"));
+if (pressureTopologyCutoff !== "" && !["setup", "cells", "rows", "fine",
+  "coarse-plan", "coarse-indirect", "coarse-edge", "coarse-work", "coarse",
+  "hierarchy"].includes(pressureTopologyCutoff)) {
+  throw new RangeError(`unknown pressure-topology cutoff ${pressureTopologyCutoff}`);
+}
+if (!Number.isSafeInteger(pressureTopologyCutoffFrame)
+  || pressureTopologyCutoffFrame < 0
+  || (pressureTopologyCutoff === "") !== (pressureTopologyCutoffFrame === 0)) {
+  throw new RangeError("pressure-topology cutoff and positive cutoff frame must be supplied together");
+}
 if (!(Number.isSafeInteger(warmup) && warmup >= 0)) throw new RangeError(
   `warmup must be a non-negative integer; received ${warmup}`,
 );
@@ -355,6 +369,10 @@ const pinnedBaselineSha256 = createHash("sha256").update(await readFile(
 assert.equal(pinnedBaselineSha256, PINNED_BASELINE_SHA256,
   `pinned 08:05 baseline ${PINNED_BASELINE_PATH} changed`);
 
+class PressureTopologyCutoffComplete extends Error {
+  constructor(readonly trace: PerformanceTrace) { super("pressure-topology cutoff complete"); }
+}
+
 await acquireWebGPUExclusiveLock("dawn-probe", "tools/probe-sparse-cm12-stage-cost.ts");
 let device: GPUDevice | undefined;
 let teardownSolver: { destroy(): void } | undefined;
@@ -507,9 +525,29 @@ try {
     const activityBeforeFrame = previousActivity;
     const wallFrameStarted_ms = performance.now();
     debug(`advance ${frame} begin`);
+    if (pressureTopologyCutoff !== "" && frame === pressureTopologyCutoffFrame) {
+      solver.sparseWorldTrace.setStageLimitForQA("pressure-topology");
+      solver.sparseWorldTrace.setPressureTopologyPhaseLimitForQA(pressureTopologyCutoff);
+    }
     while (!solver.advanceTo(frame * dt_s, [])) await new Promise(setImmediate);
     debug(`advance ${frame} encoded`);
     await device.queue.onSubmittedWorkDone();
+    if (frame === pressureTopologyCutoffFrame) {
+      const expectedTraceContext = `adaptive-mass:sim-${(frame * dt_s).toFixed(6)}`;
+      const deadline_ms = performance.now() + Math.max(250, captureGap_ms);
+      let cutoffTrace: PerformanceTrace | undefined;
+      do {
+        const candidate = solver.readPerformanceTraceSnapshot!().physicsTrace;
+        if (candidate?.measurementSource === "gpu-hardware-timestamp"
+          && candidate.context === expectedTraceContext) {
+          cutoffTrace = candidate;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      } while (performance.now() < deadline_ms);
+      assert.ok(cutoffTrace, `no hardware trace for pressure-topology cutoff frame ${frame}`);
+      throw new PressureTopologyCutoffComplete(cutoffTrace);
+    }
     if (frame > warmup && frame <= warmup + sampled) {
       wallFrameSamples.push(performance.now() - wallFrameStarted_ms);
     }
@@ -1107,6 +1145,18 @@ try {
     assert.equal(incomplete.length, 0,
       `pressure cutover receipts missing/faulted: ${JSON.stringify(incomplete)}`);
   }
+} catch (error) {
+  if (!(error instanceof PressureTopologyCutoffComplete)) throw error;
+  console.log(JSON.stringify({
+    probe: "sparse-cm12-pressure-topology-cutoff",
+    cutoff: pressureTopologyCutoff,
+    frame: pressureTopologyCutoffFrame,
+    total_ms: error.trace.total_ms,
+    phases: error.trace.phases.map((phase) => ({
+      label: phase.label,
+      duration_ms: phase.duration_ms,
+    })),
+  }));
 } finally {
   if (device) {
     const manager = gpuCompilationManagerFor(device);

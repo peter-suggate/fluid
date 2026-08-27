@@ -48,30 +48,32 @@ dawnTest("Sparse CM12 advances through every surface-conditioning toggle combina
       while (!solver.simulationReady) await new Promise(setImmediate);
 
       const combinations = [
-        ["on", "on"],
-        ["off", "on"],
-        ["on", "off"],
-        ["off", "off"],
+        ["on", "on", 1],
+        ["off", "on", 1],
+        ["on", "off", 1],
+        ["off", "off", 1],
+        ["on", "on", 0.5],
       ] as const;
       const dt = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
-      for (const [index, [gammaDiffusion, surfaceSharpening]]
+      for (const [index, [gammaDiffusion, surfaceSharpening, sharpeningStrength]]
         of combinations.entries()) {
         solver.applyRuntimeValues(resolveMethodValues(adaptiveMassMethod, "balanced", {
           ...baseline,
           gammaDiffusion,
           surfaceSharpening,
+          sharpeningStrength,
         }));
         assert.equal(solver.advanceTo((index + 1) * dt, []), true,
-          `${gammaDiffusion}/${surfaceSharpening} must encode an advance`);
+          `${gammaDiffusion}/${surfaceSharpening}/${sharpeningStrength} must encode an advance`);
         await device.queue.onSubmittedWorkDone();
 
         const fields = await solver.readDiagnosticFields();
         const frameReceipt = await solver.readFrameControlQA();
         const maskReceipt = await solver.readFinalScalarMaskHeaderQA();
         assert.equal(frameReceipt.fault, 0,
-          `${gammaDiffusion}/${surfaceSharpening} frame fault`);
+          `${gammaDiffusion}/${surfaceSharpening}/${sharpeningStrength} frame fault`);
         assert.equal(maskReceipt.fault, 0,
-          `${gammaDiffusion}/${surfaceSharpening} mask fault`);
+          `${gammaDiffusion}/${surfaceSharpening}/${sharpeningStrength} mask fault`);
         assert.ok(fields.density.every(Number.isFinite));
         assert.ok(fields.gamma.every(Number.isFinite));
         assert.ok(fields.density.every((value) => value >= 0));

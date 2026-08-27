@@ -136,6 +136,7 @@ const candidatePlanTimedWork = Object.freeze({
     {
       label: "resolution requests, retirement and one 2:1 grading pass per rung",
       entryPoints: Object.freeze([
+        "classifyAcceptedLiquidFrontier",
         "planBrickResolution",
         "activateSweptFrontierPages",
         "retireUnsupportedEmptyBricks",
@@ -407,6 +408,15 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     controls: [
       {
         kind: "param-range",
+        param: "sharpeningStrength",
+        label: "Sharpening strength",
+        unit: "dose",
+        min: 0, max: 1, step: 0.05, digits: 2,
+        hint: "Fraction of Algorithm 2's per-step removed-density dose. One is the paper dose; reducing it tempers sharpening without disabling gamma diffusion.",
+        enabled: (context) => context.values.surfaceSharpening !== "off",
+      },
+      {
+        kind: "param-range",
         param: "sharpeningDistance",
         label: "Trace distance",
         unit: "cells",
@@ -426,7 +436,8 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     ],
     chip: (context) => context.values.surfaceSharpening === "off"
       ? "Algorithm 2 disabled · sparse publication remains"
-      : `CM12 sharpening · D ${fixed(context.values.sharpeningDistance, 1)} cells · ${
+      : `CM12 sharpening · ${fixed(context.values.sharpeningStrength, 2)} dose · D ${
+        fixed(context.values.sharpeningDistance, 1)} cells · ${
         fixed(context.values.sharpeningTraceSteps, 0)} substeps`,
   },
   "symmetry-authority": {

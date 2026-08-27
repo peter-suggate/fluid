@@ -26,6 +26,14 @@ export interface SparseCM12Phase1TransportQALayout {
   readonly massGammaBaseWords: number;
   readonly packetIdBaseWords: number;
   readonly packetLaneBaseWords: number;
+  readonly sharpeningDepartureBaseWords: number;
+  readonly sharpeningStencilCellBaseWords: number;
+  readonly sharpeningStencilWeightBaseWords: number;
+  readonly sharpeningDeltaBaseWords: number;
+  readonly sharpeningDensityBaseWords: number;
+  readonly sharpeningRemovedFixedBaseWords: number;
+  readonly gammaSnapshotDensityBaseWords: number;
+  readonly gammaSnapshotGammaBaseWords: number;
   readonly totalWords: number;
 }
 
@@ -62,11 +70,41 @@ export function createSparseCM12Phase1TransportQALayout(options: {
     "packetIdBaseWords");
   const packetLaneBaseWords = checked(packetIdBaseWords + cellCapacity,
     "packetLaneBaseWords");
-  const totalWords = checked(packetLaneBaseWords + cellCapacity, "totalWords");
+  const sharpeningDepartureBaseWords = checked(packetLaneBaseWords + cellCapacity,
+    "sharpeningDepartureBaseWords");
+  const sharpeningStencilCellBaseWords = checked(
+    sharpeningDepartureBaseWords + 3 * cellCapacity,
+    "sharpeningStencilCellBaseWords",
+  );
+  const sharpeningStencilWeightBaseWords = checked(
+    sharpeningStencilCellBaseWords + 8 * cellCapacity,
+    "sharpeningStencilWeightBaseWords",
+  );
+  const sharpeningDeltaBaseWords = checked(
+    sharpeningStencilWeightBaseWords + 8 * cellCapacity,
+    "sharpeningDeltaBaseWords",
+  );
+  const sharpeningDensityBaseWords = checked(
+    sharpeningDeltaBaseWords + cellCapacity,
+    "sharpeningDensityBaseWords",
+  );
+  const sharpeningRemovedFixedBaseWords = checked(
+    sharpeningDensityBaseWords + cellCapacity,
+    "sharpeningRemovedFixedBaseWords",
+  );
+  const gammaSnapshotDensityBaseWords = checked(
+    sharpeningRemovedFixedBaseWords + cellCapacity, "gammaSnapshotDensityBaseWords");
+  const gammaSnapshotGammaBaseWords = checked(
+    gammaSnapshotDensityBaseWords + cellCapacity, "gammaSnapshotGammaBaseWords");
+  const totalWords = checked(gammaSnapshotGammaBaseWords + cellCapacity, "totalWords");
   return Object.freeze({ baseWords, cellCapacity, departureBaseWords,
     stencilCellBaseWords, stencilWeightBaseWords, betaBaseWords,
     deficitDensityBaseWords, deficitGammaBaseWords, massDensityBaseWords,
-    massGammaBaseWords, packetIdBaseWords, packetLaneBaseWords, totalWords });
+    massGammaBaseWords, packetIdBaseWords, packetLaneBaseWords,
+    sharpeningDepartureBaseWords, sharpeningStencilCellBaseWords,
+    sharpeningStencilWeightBaseWords, sharpeningDeltaBaseWords,
+    sharpeningDensityBaseWords, sharpeningRemovedFixedBaseWords,
+    gammaSnapshotDensityBaseWords, gammaSnapshotGammaBaseWords, totalWords });
 }
 
 export interface SparseCM12Phase1TransportReceipt {
@@ -94,6 +132,18 @@ export interface SparseCM12Phase1TransportReceipt {
   readonly publishedPacketGeneration: number;
   readonly effectiveVelocityTopologyGeneration: number;
   readonly effectiveVelocityFrameGeneration: number;
+  readonly reflectedZ: Readonly<Record<
+    "betaFixed" | "deficitDensityFixed" | "gatheredDensity" | "gatheredGamma"
+      | "departureFineCells"
+      | "sharpeningReceiptMass" | "gammaSnapshotDensity" | "gammaSnapshotGamma"
+      | "sharpeningSourceDensity" | "sharpeningDeltaDensity",
+    Readonly<{
+      compared: number;
+      mismatchCount: number;
+      maximumAbsoluteError: number;
+      worst?: Readonly<Record<string, unknown>>;
+    }>
+  >>;
 }
 
 export async function sparseCM12Phase1Sha256(view: ArrayBufferView): Promise<string> {

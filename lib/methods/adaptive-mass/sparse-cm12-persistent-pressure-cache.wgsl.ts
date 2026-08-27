@@ -26,6 +26,9 @@ export interface SparseCM12PersistentPressureCacheWGSLOptions {
     readonly arrayName: string;
     readonly baseWords: number;
   }>;
+  /** Construction-time bounds keep cooperative edge-fetch loops uniform. */
+  readonly aggregateEdgeMaximumContributionCount: number;
+  readonly hierarchyEdgeMaximumContributionCount: number;
   readonly workgroupSize?: number;
 }
 
@@ -131,6 +134,11 @@ fn pcfCandidateGeneration()->u32{
 fn pcfAcceptedGeneration()->u32{
   return atomicLoad(&${arena}[PCF_BASE+PCF_H_ACCEPTED_GEN]);
 }
-${createSparseCM12PersistentPressureCacheAggregateWGSL(l, arena)}
+${createSparseCM12PersistentPressureCacheAggregateWGSL(l, arena, {
+    aggregateEdgeMaximumContributionCount:
+      options.aggregateEdgeMaximumContributionCount,
+    hierarchyEdgeMaximumContributionCount:
+      options.hierarchyEdgeMaximumContributionCount,
+  })}
 `;
 }

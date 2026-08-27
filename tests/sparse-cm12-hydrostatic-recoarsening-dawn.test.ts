@@ -6,6 +6,7 @@ import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
+import { sceneAtContainerExtents } from "../lib/core/scene-scale";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
   acquireWebGPUExclusiveLock,
@@ -71,9 +72,13 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
       // A deep tank contains immutable macro-bricks. They must not disable the
       // ordinary 1/2/4/8 transaction in enclosed bulk, while genuine surface
       // bricks retain the fine interface invariant.
-      const tank = sceneDocument(getSceneDefinition("water-box-tank-fill"));
+      const sourceTank = sceneDocument(getSceneDefinition("water-box-tank-fill"));
+      const tank = sceneAtContainerExtents(sourceTank, {
+        width_m: sourceTank.container.width_m,
+        height_m: 2.4,
+        depth_m: sourceTank.container.depth_m,
+      });
       tank.rigidBodies = [];
-      tank.container.height_m = 2.4;
       tank.container.fillFraction = 0.7;
       tank.voxelDomain.finestCellSize_m = 0.05;
       const tankSolver = await WebGPUAdaptiveMassSolver.createAsync(

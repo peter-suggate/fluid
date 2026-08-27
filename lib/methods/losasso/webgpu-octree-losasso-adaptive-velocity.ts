@@ -236,7 +236,7 @@ const BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze(
   seedAdaptiveVelocityLiquidLeaves: [0, 1, 2, 3, 4],
   propagateAdaptiveVelocityFrontier: [0, 1, 2, 3, 6, 7],
   constrainAdaptiveVelocity: [0, 1, 2, 3, 6],
-  finalizeAdaptiveVelocity: [0, 1, 2, 3, 6, 7],
+  finalizeAdaptiveVelocity: [0, 1, 2, 3, 4, 6, 7, 8],
   finishAdaptiveVelocity: [0, 3, 51, 52],
 });
 
@@ -536,7 +536,8 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
       constrainA: this.createGroup("constrainAdaptiveVelocity", [p, topology,
         this.mutableArena, this.controlArena, source.graph.nodalVelocity]),
       finalize: this.createGroup("finalizeAdaptiveVelocity", [p, topology, this.mutableArena,
-        this.controlArena, source.graph.nodalVelocity, source.graph.nodeValidity]),
+        this.controlArena, source.transportBandMask, source.graph.nodalVelocity,
+        source.graph.nodeValidity, source.graph.phi]),
       finish: this.createGroup("finishAdaptiveVelocity", [p, this.controlArena,
         source.graph.control, source.graph.leafLocator]),
       liveDispatch: source.graph.control,

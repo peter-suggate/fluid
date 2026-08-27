@@ -62,6 +62,7 @@ import {
   sparseCM12PressureIterationsFromReceipt,
   sparseCM12PressureRelativeTolerance,
   sparseCM12SharpeningDistance,
+  sparseCM12SharpeningStrength,
   sparseCM12SharpeningTraceSteps,
   type SparseCM12GPUActivityRecord,
 } from "./webgpu-sparse-cm12-resident";
@@ -108,6 +109,8 @@ export interface AdaptiveMassStepTelemetry {
 export interface AdaptiveMassGPUActivityBrick extends SparseCM12GPUActivityRecord {
   readonly key: number;
   readonly coordinate: SparseBrickVec3;
+  /** Logical B8 pages covered along each axis by this accepted leaf. */
+  readonly spanBricks: number;
   readonly resolution: SparseBrickResolution;
 }
 
@@ -542,6 +545,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const timeStep = values.timeStep === "scene" ? "scene" : "paper";
     const sharpeningDistance = sparseCM12SharpeningDistance(values.sharpeningDistance);
     const sharpeningTraceSteps = sparseCM12SharpeningTraceSteps(values.sharpeningTraceSteps);
+    const sharpeningStrength = sparseCM12SharpeningStrength(values.sharpeningStrength);
     const gammaDiffusionEnabled = values.gammaDiffusion !== "off";
     const surfaceSharpeningEnabled = values.surfaceSharpening !== "off";
     const pressureIterations = sparseCM12PressureIterations(values.pressureIterations);
@@ -556,6 +560,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       activitySignals: values.selectorMode === "activity",
     });
     this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps,
+      sharpeningStrength,
       gammaDiffusionEnabled, surfaceSharpeningEnabled,
       pressureIterations, pressureRelativeTolerance, activityPolicy };
   }
@@ -664,6 +669,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       sharpening: {
         distanceCells: this.options.sharpeningDistance,
         traceSteps: this.options.sharpeningTraceSteps,
+        strength: this.options.sharpeningStrength,
         gammaDiffusionEnabled: this.options.gammaDiffusionEnabled,
         surfaceSharpeningEnabled: this.options.surfaceSharpeningEnabled,
       },
@@ -896,11 +902,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   /** Explicit Dawn/QA materialization; production rendering stays sparse. */
-  readDiagnosticFields(includeWorldLeaves = false) {
-    return this.sparseWorldTrace.readDiagnosticFields(includeWorldLeaves);
+  readDiagnosticFields(includeWorldLeaves = false,
+    frameBank: "accepted" | "candidate" = "accepted") {
+    return this.sparseWorldTrace.readDiagnosticFields(includeWorldLeaves, frameBank);
   }
-  readPhase1TransportReceiptQA() {
-    return this.sparseWorldTrace.readPhase1TransportReceiptQA();
+  readPhase1TransportReceiptQA(allowStageLimitedCandidate = false) {
+    return this.sparseWorldTrace.readPhase1TransportReceiptQA(
+      allowStageLimitedCandidate,
+    );
   }
   readPhase1TransportProfileQA() {
     return this.sparseWorldTrace.readPhase1TransportProfileQA();
@@ -976,12 +985,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       bricks: snapshot.records.map((record) => {
         const brick = this.atlas.bricks[record.leafId];
         if (brick) return { ...record, key: brick.key, coordinate: brick.coordinate,
-          resolution: brick.resolution };
+          spanBricks: brick.spanBricks ?? 1, resolution: brick.resolution };
         if (!record.coordinate) {
           throw new Error(`Sparse CM12 dynamic leaf ${record.leafId} has no WDR coordinate`);
         }
         return { ...record, key: record.leafId, coordinate: record.coordinate,
-          resolution: record.acceptedResolution };
+          spanBricks: 1, resolution: record.acceptedResolution };
       }),
     };
   }

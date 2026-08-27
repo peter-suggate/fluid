@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import {
+  createMinimalPowerDamBreak32Scene,
   getScenePreset,
   SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE,
   SPARSE_CM12_COMPLEXITY_SCENES,
@@ -22,10 +23,14 @@ import type { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 
 const isWorker = process.env.FLUID_CM12_LADDER_WORKER === "1";
+const sceneOverride = process.env.FLUID_CM12_LADDER_SCENE;
+if (sceneOverride !== undefined && sceneOverride !== "mini32") {
+  throw new Error(`Unknown Sparse CM12 ladder scene override ${sceneOverride}`);
+}
 const rung = (process.env.FLUID_CM12_LADDER_RUNG ?? "empty-16") as
   SparseCM12ComplexitySceneId;
 const rungDefinition = SPARSE_CM12_COMPLEXITY_SCENES.find((entry) => entry.id === rung);
-if (!rungDefinition) {
+if (!rungDefinition && sceneOverride === undefined) {
   throw new Error(`Unknown Sparse CM12 ladder rung ${rung}`);
 }
 const steps = Number(process.env.FLUID_CM12_LADDER_STEPS ?? 1);
@@ -101,9 +106,12 @@ async function worker(): Promise<void> {
     // Use the catalog document, not the raw preset body. This is the same
     // construction path as the UI and is where the ordinary SolidWorld voxel
     // shell is authored after the final lattice is known.
-    const scene = getScenePreset(`sparse-cm12-ladder-${rung}`).create();
+    const scene = sceneOverride === "mini32"
+      ? createMinimalPowerDamBreak32Scene()
+      : getScenePreset(`sparse-cm12-ladder-${rung}`).create();
     const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
       ...(SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE.overrides ?? {}),
+      ...(sceneOverride === "mini32" ? { timeStep: "scene" as const } : {}),
       ...(process.env.FLUID_CM12_LADDER_PRESSURE_ITERATIONS
         ? { pressureIterations: Number(
           process.env.FLUID_CM12_LADDER_PRESSURE_ITERATIONS) }
@@ -139,7 +147,10 @@ async function worker(): Promise<void> {
       (solver as WebGPUAdaptiveMassSolver).sparseWorldTrace
         .setPressureTopologyPhaseLimitForQA(stageLimitStep === 0 || stageLimitStep === step
           ? pressureTopologyPhase : undefined);
-      if (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) {
+      const step_s = sceneOverride === "mini32"
+        ? scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s
+        : CM12_PAPER_DT_S;
+      if (!solver.advanceTo(step * step_s, [])) {
         throw new Error(`solver refused ladder frame ${step}`);
       }
       await device.queue.onSubmittedWorkDone();
@@ -150,6 +161,7 @@ async function worker(): Promise<void> {
       console.log(JSON.stringify({ phase: "frame", rung, step,
         stageLimit: frameStageLimit ?? "complete",
         activityPhase: activityPhase ?? "complete",
+        pressureTopologyPhase: pressureTopologyPhase ?? "complete",
         wall_ms: performance.now() - frameStarted,
         submittedTime_s: solver.info.submittedTime_s }));
     }

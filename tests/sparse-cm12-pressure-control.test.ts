@@ -35,14 +35,14 @@ test("Sparse CM12 accepts experimental residuals beyond 0.1", () => {
   assert.equal(sparseCM12PressureRelativeTolerance(2), 1);
 });
 
-test("the prior frame seeds a conservative next encoded ceiling", () => {
+test("a prior frame cannot truncate the next encoded pressure ceiling", () => {
   assert.equal(sparseCM12PressureIterationsFromReceipt(64, 1e-3), 64);
   assert.equal(sparseCM12PressureIterationsFromReceipt(64, 0,
     { executed: 16, encoded: 64 }), 64);
   assert.equal(sparseCM12PressureIterationsFromReceipt(64, 1e-3,
-    { executed: 16, encoded: 64 }), 24);
+    { executed: 16, encoded: 64 }), 64);
   assert.equal(sparseCM12PressureIterationsFromReceipt(64, 1e-3,
-    { executed: 24, encoded: 32 }), 32);
+    { executed: 24, encoded: 32 }), 64);
   assert.equal(sparseCM12PressureIterationsFromReceipt(64, 1e-3,
     { executed: 32, encoded: 32 }), 64);
   assert.equal(sparseCM12PressureIterationsFromReceipt(48, 1e-3,

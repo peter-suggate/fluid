@@ -189,7 +189,11 @@ test("automatic stage presentation follows its set budget; explicit modes remain
   }
   assert.ok(affordable.length > 20, affordable.join(", "));
   assert.ok(affordable.length + unaffordable.length > 30);
-  assert.ok(explicit.some((entry) => entry.startsWith("tall-cells-hillside-dam-break 0.9 MiB")),
+  // The hillside is the cheapest explicit set in the catalog and now costs
+  // nothing at all: its scenery is one terrain shell, which is analytic
+  // metadata rather than a proxy, and the emissive practical it used to hang
+  // over the slope is gone in favour of an authored sun.
+  assert.ok(explicit.some((entry) => entry.startsWith("tall-cells-hillside-dam-break 0.0 MiB")),
     `expected the explicitly full-scene sparse hillside set, got ${explicit.join(", ")}`);
 });
 

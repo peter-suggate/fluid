@@ -126,6 +126,8 @@ export type AdaptiveD4Transform = "reflect-x" | "reflect-z" | "swap-xz";
 export interface AdaptiveSurfacePublicationSnapshot {
   readonly authorityControl: Uint32Array;
   readonly faceGeometry: Uint32Array;
+  readonly pressureFaces: Uint32Array;
+  readonly pressureRowToGraphLeaf: Uint32Array;
   readonly projectedFaceVelocity: Uint32Array;
   readonly predictedFaceVelocity: Uint32Array;
   readonly advectedFaceVelocity: Uint32Array;
@@ -210,7 +212,7 @@ export function decodeAdaptiveVelocityGPUFailureDiagnostics(words: readonly numb
       const item = words[at + 1] ?? 0xffff_ffff;
       return Object.freeze({ node: words[at] ?? 0xffff_ffff, item,
         position: position(item), missingComponents: words[at + 2] ?? 0,
-        constraintCount: words[at + 3] ?? 0xffff_ffff,
+        transportBandMask: words[at + 3] ?? 0,
         phi: float(words[at + 4] ?? 0), causeBits,
         causes: Object.freeze([
           ...(causeBits & 1 ? ["no-adjacency"] : []),
@@ -224,6 +226,7 @@ export function decodeAdaptiveVelocityGPUFailureDiagnostics(words: readonly numb
           phi: (words[at + 12 + direction] ?? 0xffff_ffff) === 0xffff_ffff
             ? undefined : float(words[at + 12 + direction]!),
           mask: (words[at + 18 + direction] ?? 0) & 7,
+          transportBand: ((words[at + 18 + direction] ?? 0) & 0x100) !== 0,
         }))),
       });
     });
@@ -690,6 +693,151 @@ export function adaptiveVelocityInputD4Audit(snapshot: AdaptiveSurfacePublicatio
     }));
     return [name, Object.freeze({ missingFaces, fields: Object.freeze(fieldResult) })];
   })));
+}
+
+/** Physical coefficient equivariance of the accepted pressure faces. */
+export function adaptivePressureFaceSwapAudit(snapshot: AdaptiveSurfacePublicationSnapshot) {
+  const { authorityControl, faceGeometry, pressureFaces, pressureRowToGraphLeaf,
+    leaves, acceptedMass, dimensions } = snapshot;
+  const faceCount = Math.min(authorityControl[2] ?? 0, Math.floor(faceGeometry.length / 4),
+    Math.floor(pressureFaces.length / 8));
+  const geometry = (face: number) => {
+    const at = 4 * face, packed = faceGeometry[at] ?? 0;
+    return { axis: packed & 3, span: 1 << (packed >>> 2),
+      q: [faceGeometry[at + 1] ?? 0, faceGeometry[at + 2] ?? 0,
+        faceGeometry[at + 3] ?? 0] as const };
+  };
+  const key = (g: ReturnType<typeof geometry>) =>
+    `${g.axis}:${g.span}:${g.q[0]}:${g.q[1]}:${g.q[2]}`;
+  const byGeometry = new Map<string, number>();
+  for (let face = 0; face < faceCount; face += 1) byGeometry.set(key(geometry(face)), face);
+  const bits = new Uint32Array(1);
+  const float = (word: number) => {
+    bits[0] = word >>> 0; return new Float32Array(bits.buffer)[0]!;
+  };
+  const fields = ["area", "inverseDistance", "openFraction", "normalVelocity",
+    "coefficient"] as const;
+  const rowEvidence = (row: number) => {
+    if (row >= pressureRowToGraphLeaf.length) return Object.freeze({ row });
+    const leaf = pressureRowToGraphLeaf[row] ?? 0xffff_ffff;
+    if (leaf >= Math.floor(leaves.length / 16)) return Object.freeze({ row, leaf });
+    const at = 16 * leaf;
+    return Object.freeze({ row, leaf,
+      originSpan: [leaves[at], leaves[at + 1], leaves[at + 2], leaves[at + 3]],
+      surfaceMass_m3: acceptedMass[leaf],
+    });
+  };
+  const cellOwners = new Uint32Array(dimensions[0] * dimensions[1] * dimensions[2]);
+  cellOwners.fill(0xffff_ffff);
+  for (let leaf = 0; leaf < Math.floor(leaves.length / 16); leaf += 1) {
+    const at = 16 * leaf, ox = leaves[at]!, oy = leaves[at + 1]!, oz = leaves[at + 2]!;
+    const span = leaves[at + 3]!;
+    for (let z = oz; z < oz + span; z += 1) for (let y = oy; y < oy + span; y += 1) {
+      for (let x = ox; x < ox + span; x += 1) {
+        cellOwners[x + dimensions[0] * (y + dimensions[1] * z)] = leaf;
+      }
+    }
+  }
+  const leafEvidence = (leaf: number) => {
+    if (leaf >= Math.floor(leaves.length / 16)) return undefined;
+    const at = 16 * leaf;
+    return Object.freeze({ leaf,
+      originSpan: [leaves[at], leaves[at + 1], leaves[at + 2], leaves[at + 3]],
+      surfaceMass_m3: acceptedMass[leaf],
+    });
+  };
+  const ghostEvidence = (faceAt: number) => {
+    const negativeRow = pressureFaces[faceAt]!, positiveRow = pressureFaces[faceAt + 1]!;
+    if (negativeRow >= pressureRowToGraphLeaf.length
+      || positiveRow < pressureRowToGraphLeaf.length) return undefined;
+    const wetLeaf = pressureRowToGraphLeaf[negativeRow]!;
+    if (wetLeaf >= Math.floor(leaves.length / 16)) return undefined;
+    const leafAt = 16 * wetLeaf, axis = pressureFaces[faceAt + 2]!;
+    const wetCentre = [leaves[leafAt]! + 0.5 * leaves[leafAt + 3]!,
+      leaves[leafAt + 1]! + 0.5 * leaves[leafAt + 3]!,
+      leaves[leafAt + 2]! + 0.5 * leaves[leafAt + 3]!] as [number, number, number];
+    const direction = (pressureFaces[faceAt + 3]! & 0x8000_0000) !== 0 ? -1 : 1;
+    const probe = [...wetCentre] as [number, number, number];
+    probe[axis] += direction * (0.5 * leaves[leafAt + 3]! + 0.0001);
+    const cell = probe.map(Math.floor) as [number, number, number];
+    const airLeaf = cell.some((q, a) => q < 0 || q >= dimensions[a]!)
+      ? 0xffff_ffff
+      : cellOwners[cell[0] + dimensions[0] * (cell[1] + dimensions[1] * cell[2])]!;
+    return Object.freeze({ axis, direction, wetCentre, probe, cell,
+      wet: leafEvidence(wetLeaf), air: leafEvidence(airLeaf) });
+  };
+  const leafByOrigin = new Map<string, number>();
+  for (let leaf = 0; leaf < Math.floor(leaves.length / 16); leaf += 1) {
+    const at = 16 * leaf;
+    leafByOrigin.set(`${leaves[at]}:${leaves[at + 1]}:${leaves[at + 2]}:${leaves[at + 3]}`,
+      leaf);
+  }
+  let surfaceMassMismatches = 0, surfaceMassMaximumAbsoluteError_m3 = 0;
+  let firstSurfaceMassMismatch: Readonly<Record<string, unknown>> | undefined;
+  for (let leaf = 0; leaf < Math.floor(leaves.length / 16); leaf += 1) {
+    const at = 16 * leaf, target = leafByOrigin.get(
+      `${leaves[at + 2]}:${leaves[at + 1]}:${leaves[at]}:${leaves[at + 3]}`);
+    if (target === undefined || Object.is(acceptedMass[leaf], acceptedMass[target])) continue;
+    surfaceMassMismatches += 1;
+    const error = Math.abs((acceptedMass[leaf] ?? Number.NaN)
+      - (acceptedMass[target] ?? Number.NaN));
+    if (Number.isFinite(error)) surfaceMassMaximumAbsoluteError_m3 = Math.max(
+      surfaceMassMaximumAbsoluteError_m3, error);
+    firstSurfaceMassMismatch ??= Object.freeze({ source: leafEvidence(leaf),
+      target: leafEvidence(target), absoluteError_m3: error });
+  }
+  const metrics = Object.fromEntries(fields.map((field) => [field,
+    { mismatches: 0, maximumAbsoluteError: 0,
+      first: undefined as Readonly<Record<string, unknown>> | undefined }])) as Record<
+        typeof fields[number], { mismatches: number; maximumAbsoluteError: number;
+          first?: Readonly<Record<string, unknown>> }>;
+  let missingFaces = 0;
+  for (let face = 0; face < faceCount; face += 1) {
+    const sourceGeometry = geometry(face);
+    const targetGeometry = { axis: sourceGeometry.axis === 0 ? 2
+      : sourceGeometry.axis === 2 ? 0 : 1, span: sourceGeometry.span,
+    q: [sourceGeometry.q[2], sourceGeometry.q[1], sourceGeometry.q[0]] as const };
+    const target = byGeometry.get(key(targetGeometry));
+    if (target === undefined) { missingFaces += 1; continue; }
+    const sourceAt = 8 * face, targetAt = 8 * target;
+    const sourceValues = {
+      area: float(pressureFaces[sourceAt + 4]!),
+      inverseDistance: float(pressureFaces[sourceAt + 5]!),
+      openFraction: float(pressureFaces[sourceAt + 6]!),
+      normalVelocity: float(pressureFaces[sourceAt + 7]!),
+      coefficient: (float(pressureFaces[sourceAt + 6]!)
+        * float(pressureFaces[sourceAt + 4]!)) * float(pressureFaces[sourceAt + 5]!),
+    };
+    const targetValues = {
+      area: float(pressureFaces[targetAt + 4]!),
+      inverseDistance: float(pressureFaces[targetAt + 5]!),
+      openFraction: float(pressureFaces[targetAt + 6]!),
+      normalVelocity: float(pressureFaces[targetAt + 7]!),
+      coefficient: (float(pressureFaces[targetAt + 6]!)
+        * float(pressureFaces[targetAt + 4]!)) * float(pressureFaces[targetAt + 5]!),
+    };
+    for (const field of fields) {
+      if (Object.is(sourceValues[field], targetValues[field])) continue;
+      const metric = metrics[field], error = Math.abs(sourceValues[field] - targetValues[field]);
+      metric.mismatches += 1;
+      if (error > metric.maximumAbsoluteError) metric.maximumAbsoluteError = error;
+      metric.first ??= Object.freeze({ face, geometry: sourceGeometry, target, targetGeometry,
+        source: sourceValues[field], actual: targetValues[field], error,
+        sourceRows: [rowEvidence(pressureFaces[sourceAt]!),
+          rowEvidence(pressureFaces[sourceAt + 1]!)],
+        targetRows: [rowEvidence(pressureFaces[targetAt]!),
+          rowEvidence(pressureFaces[targetAt + 1]!)],
+        sourceGhost: ghostEvidence(sourceAt), targetGhost: ghostEvidence(targetAt),
+      });
+    }
+  }
+  return Object.freeze({ faceCount, missingFaces,
+    surfaceMass: Object.freeze({ mismatches: surfaceMassMismatches,
+      maximumAbsoluteError_m3: surfaceMassMaximumAbsoluteError_m3,
+      first: firstSurfaceMassMismatch }),
+    fields: Object.freeze(Object.fromEntries(fields.map((field) =>
+      [field, Object.freeze(metrics[field])]))),
+  });
 }
 
 export function adaptiveVelocityStencilAudit(snapshot: AdaptiveSurfacePublicationSnapshot) {

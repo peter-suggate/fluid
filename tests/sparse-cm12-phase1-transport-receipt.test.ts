@@ -10,17 +10,32 @@ import {
 import { createSparseCM12Phase1TransportQAWGSL } from
   "../lib/methods/adaptive-mass/sparse-cm12-phase1-transport-receipt.wgsl";
 
-test("Phase-1 QA layout is an exact non-overlapping 26-word-per-cell receipt", () => {
+test("Phase-1 QA layout is an exact non-overlapping 50-word-per-cell receipt", () => {
   const layout = createSparseCM12Phase1TransportQALayout({
     baseWords: 64, cellCapacity: 17,
   });
   assert.equal(layout.departureBaseWords,
     64 + SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER_WORDS);
-  assert.equal(layout.totalWords - layout.departureBaseWords, 26 * 17);
+  assert.equal(layout.totalWords - layout.departureBaseWords, 50 * 17);
   assert.equal(layout.stencilCellBaseWords - layout.departureBaseWords, 3 * 17);
   assert.equal(layout.stencilWeightBaseWords - layout.stencilCellBaseWords, 8 * 17);
   assert.equal(layout.betaBaseWords - layout.stencilWeightBaseWords, 8 * 17);
   assert.equal(layout.massGammaBaseWords - layout.massDensityBaseWords, 17);
+  assert.equal(layout.sharpeningStencilCellBaseWords
+    - layout.sharpeningDepartureBaseWords, 3 * 17);
+  assert.equal(layout.sharpeningStencilWeightBaseWords
+    - layout.sharpeningStencilCellBaseWords, 8 * 17);
+  assert.equal(layout.sharpeningDeltaBaseWords
+    - layout.sharpeningStencilWeightBaseWords, 8 * 17);
+  assert.equal(layout.sharpeningRemovedFixedBaseWords
+    - layout.sharpeningDensityBaseWords, 17);
+  assert.equal(layout.sharpeningDensityBaseWords
+    - layout.sharpeningDeltaBaseWords, 17);
+  assert.equal(layout.gammaSnapshotDensityBaseWords
+    - layout.sharpeningRemovedFixedBaseWords, 17);
+  assert.equal(layout.gammaSnapshotGammaBaseWords
+    - layout.gammaSnapshotDensityBaseWords, 17);
+  assert.equal(layout.totalWords - layout.gammaSnapshotGammaBaseWords, 17);
 });
 
 test("Phase-1 WGSL captures the real pass-boundary bit representations", () => {
@@ -36,6 +51,8 @@ test("Phase-1 WGSL captures the real pass-boundary bit representations", () => {
   assert.match(wgsl, /CM12_P1TQ_BETA\+cell/);
   assert.match(wgsl, /CM12_P1TQ_DEFICIT_DENSITY\+cell/);
   assert.match(wgsl, /CM12_P1TQ_MASS_DENSITY\+cell/);
+  assert.match(wgsl, /CM12_P1TQ_SHARPENING_DEPARTURE\+3u\*cell\+axis/);
+  assert.match(wgsl, /CM12_P1TQ_SHARPENING_REMOVED\+cell/);
   assert.match(wgsl, /cm12PublishVexAcceptedEffectiveVelocity\(cell,value\)/);
   assert.match(wgsl, /cm12TeiPacketCell\(packet\.x,packet\.y,acceptedTopologySlot\(\)\)/);
 });

@@ -268,83 +268,164 @@ function initialDensityAt(
 
 const initialSolidWorldCache = new WeakMap<SceneDescription, SolidWorld>();
 
-/**
- * A fluid leaf can meet a later signed page only across two non-solid finest
- * voxels. Keep that initial exterior face at B8 so the page-local graph joins
- * it one voxel face at a time; no second coarse/fine seam representation is
- * needed. This reads only SolidWorld occupancy and therefore treats a cut,
- * open top, or any future voxel edit identically.
- */
-function brickHasOpenExteriorVoxelFace(
-  scene: SceneDescription,
-  dimensions: SparseBrickVec3,
-  coordinate: SparseBrickVec3,
+/** Maximum fine-field RMS discarded by one static-solid restriction rung. */
+export const SPARSE_CM12_SOLID_RESTRICTION_TOLERANCE = 0.08;
+
+function solidWorldMayAffectBrick(
+  world: SolidWorld,
+  origin: SparseBrickVec3,
   brickFineResolution: SparseBrickFineResolution,
-  spanBricks = 1,
 ): boolean {
-  let world = initialSolidWorldCache.get(scene);
-  if (!world) {
-    world = solidWorldForScene(scene);
-    initialSolidWorldCache.set(scene, world);
+  const minimum = origin.map((value) => value - 1) as [number, number, number];
+  const maximumExclusive = origin.map((value) =>
+    value + brickFineResolution + 1) as [number, number, number];
+  for (const region of world.regions ?? []) {
+    if (region.minimum.every((value, axis) =>
+      value < maximumExclusive[axis]!
+        && region.maximumExclusive[axis]! > minimum[axis]!)) return true;
   }
-  const lower = coordinate.map((value) => value * brickFineResolution) as
-    [number, number, number];
-  const upper = lower.map((value, axis) => Math.min(dimensions[axis],
-    value + spanBricks * brickFineResolution)) as [number, number, number];
-  for (let axis = 0; axis < 3; axis += 1) for (const side of [-1, 1] as const) {
-    if ((side < 0 && lower[axis] !== 0)
-      || (side > 0 && upper[axis] !== dimensions[axis])) continue;
-    const uAxis = (axis + 1) % 3, vAxis = (axis + 2) % 3;
-    for (let v = lower[vAxis]; v < upper[vAxis]; v += 1)
-      for (let u = lower[uAxis]; u < upper[uAxis]; u += 1) {
-        const inside = [0, 0, 0] as [number, number, number];
-        inside[axis] = side < 0 ? 0 : dimensions[axis] - 1;
-        inside[uAxis] = u; inside[vAxis] = v;
-        const outside = [...inside] as [number, number, number];
-        outside[axis] += side;
-        if (sampleSolidWorld(world, inside).solidFraction < 1 - 1e-8
-          && sampleSolidWorld(world, outside).solidFraction < 1 - 1e-8) return true;
+  const pageMinimum = minimum.map((value) =>
+    Math.floor(value / SOLID_WORLD_BRICK_CELLS));
+  const pageMaximum = maximumExclusive.map((value) =>
+    Math.floor((value - 1) / SOLID_WORLD_BRICK_CELLS));
+  for (let pageZ = pageMinimum[2]!; pageZ <= pageMaximum[2]!; pageZ += 1)
+    for (let pageY = pageMinimum[1]!; pageY <= pageMaximum[1]!; pageY += 1)
+      for (let pageX = pageMinimum[0]!; pageX <= pageMaximum[0]!; pageX += 1) {
+        const page = world.directory.lookup([pageX, pageY, pageZ]);
+        if (page !== undefined && world.pages[page]!.solidFraction.some(
+          (fraction) => fraction !== 0)) return true;
       }
-  }
   return false;
 }
 
+function sparseCM12StaticSolidSampleCube(
+  world: SolidWorld,
+  origin: SparseBrickVec3,
+  brickFineResolution: SparseBrickFineResolution,
+): Float64Array | null {
+  if (!solidWorldMayAffectBrick(world, origin, brickFineResolution)) return null;
+  const width = brickFineResolution + 2;
+  const samples = new Float64Array(width ** 3);
+  for (let z = -1; z <= brickFineResolution; z += 1)
+    for (let y = -1; y <= brickFineResolution; y += 1)
+      for (let x = -1; x <= brickFineResolution; x += 1) {
+        samples[(x + 1) + width * ((y + 1) + width * (z + 1))] =
+          sampleSolidWorld(world, [origin[0] + x, origin[1] + y,
+            origin[2] + z]).solidFraction;
+      }
+  return samples;
+}
+
 /**
- * A composite cell cannot reproduce a finest-voxel solid face inside its
- * repeated presentation samples. Keep every brick that touches a change in
- * the uniform SolidWorld field on the finest rung. Terrain, tank shells and
- * authored edits consequently follow one rule and one source of truth.
+ * Measure the SolidWorld information discarded by direct restriction to one
+ * candidate rung. Cell occupancy and each oriented face aperture are compared
+ * only with their own conservative macro average. An axis-aligned plane is
+ * therefore exact, as is the intersection of two or three such planes: the
+ * different wall orientations are never incorrectly averaged together.
  */
-function brickRequiresStaticSolidBoundaryResolution(
+export function sparseCM12StaticSolidRestrictionError(
   scene: SceneDescription,
   dimensions: SparseBrickVec3,
   coordinate: SparseBrickVec3,
   brickFineResolution: SparseBrickFineResolution,
-): boolean {
+  candidateResolution: SparseBrickResolution,
+  cachedSamples?: Float64Array | null,
+): number {
+  if (candidateResolution >= brickFineResolution) return 0;
+  if (brickFineResolution % candidateResolution !== 0) {
+    throw new RangeError("candidateResolution must divide brickFineResolution");
+  }
   let world = initialSolidWorldCache.get(scene);
   if (!world) {
     world = solidWorldForScene(scene);
     initialSolidWorldCache.set(scene, world);
   }
-  const lower = coordinate.map((value) => value * brickFineResolution) as
+  const origin = coordinate.map((value) => value * brickFineResolution) as
     [number, number, number];
-  const upper = lower.map((value, axis) => Math.min(dimensions[axis],
-    value + brickFineResolution)) as [number, number, number];
-  const directions = [[-1, 0, 0], [1, 0, 0], [0, -1, 0],
-    [0, 1, 0], [0, 0, -1], [0, 0, 1]] as const;
-  for (let z = lower[2]; z < upper[2]; z += 1)
-    for (let y = lower[1]; y < upper[1]; y += 1)
-      for (let x = lower[0]; x < upper[0]; x += 1) {
-        const fraction = sampleSolidWorld(world, [x, y, z]).solidFraction;
-        if (fraction > 1e-8 && fraction < 1 - 1e-8) return true;
-        for (const [dx, dy, dz] of directions) {
-          const adjacentPosition = [x + dx, y + dy, z + dz] as const;
-          const adjacent = sampleSolidWorld(world,
-            adjacentPosition).solidFraction;
-          if (Math.abs(adjacent - fraction) > 1e-8) return true;
+  const samples = cachedSamples === undefined
+    ? sparseCM12StaticSolidSampleCube(world, origin, brickFineResolution)
+    : cachedSamples;
+  if (samples === null) return 0;
+  const sample = (x: number, y: number, z: number) => {
+    const width = brickFineResolution + 2;
+    return samples[(x + 1) + width * ((y + 1) + width * (z + 1))]!;
+  };
+  const span = brickFineResolution / candidateResolution;
+  let maximumError = 0;
+  const rms = (sum: number, squareSum: number, count: number) => {
+    const mean = sum / count;
+    return Math.sqrt(Math.max(0, squareSum / count - mean * mean));
+  };
+
+  for (let macroZ = 0; macroZ < candidateResolution; macroZ += 1)
+    for (let macroY = 0; macroY < candidateResolution; macroY += 1)
+      for (let macroX = 0; macroX < candidateResolution; macroX += 1) {
+        let sum = 0, squareSum = 0, count = 0;
+        for (let z = 0; z < span; z += 1)
+          for (let y = 0; y < span; y += 1)
+            for (let x = 0; x < span; x += 1) {
+              const value = sample(macroX * span + x,
+                macroY * span + y, macroZ * span + z);
+              sum += value; squareSum += value * value; count += 1;
+            }
+        maximumError = Math.max(maximumError, rms(sum, squareSum, count));
+  }
+
+  for (let axis = 0; axis < 3; axis += 1) {
+    for (let face = 0; face <= candidateResolution; face += 1)
+      for (let macroV = 0; macroV < candidateResolution; macroV += 1)
+        for (let macroU = 0; macroU < candidateResolution; macroU += 1) {
+          let sum = 0, squareSum = 0, count = 0;
+          for (let v = 0; v < span; v += 1)
+            for (let u = 0; u < span; u += 1) {
+              const plane = face * span;
+              const uCoordinate = macroU * span + u;
+              const vCoordinate = macroV * span + v;
+              let px = uCoordinate, py = vCoordinate, pz = plane;
+              if (axis === 0) {
+                px = plane; py = uCoordinate; pz = vCoordinate;
+              } else if (axis === 1) {
+                px = vCoordinate; py = plane; pz = uCoordinate;
+              }
+              const value = 1 - Math.max(
+                sample(px - Number(axis === 0), py - Number(axis === 1),
+                  pz - Number(axis === 2)), sample(px, py, pz),
+              );
+              sum += value; squareSum += value * value; count += 1;
+            }
+          maximumError = Math.max(maximumError, rms(sum, squareSum, count));
         }
-      }
-  return false;
+  }
+  return maximumError;
+}
+
+export function sparseCM12StaticSolidResolutionFloor(
+  scene: SceneDescription,
+  dimensions: SparseBrickVec3,
+  coordinate: SparseBrickVec3,
+  brickFineResolution: SparseBrickFineResolution,
+): SparseBrickResolution {
+  const ladder = sparseBrickLadder(brickFineResolution);
+  let world = initialSolidWorldCache.get(scene);
+  if (!world) {
+    world = solidWorldForScene(scene);
+    initialSolidWorldCache.set(scene, world);
+  }
+  const origin = coordinate.map((value) => value * brickFineResolution) as
+    [number, number, number];
+  const samples = sparseCM12StaticSolidSampleCube(
+    world, origin, brickFineResolution,
+  );
+  if (samples === null) return 1;
+  for (const resolution of ladder.resolutions) {
+    if (resolution === brickFineResolution) break;
+    if (sparseCM12StaticSolidRestrictionError(scene, dimensions, coordinate,
+      brickFineResolution, resolution, samples)
+      <= SPARSE_CM12_SOLID_RESTRICTION_TOLERANCE) {
+      return resolution;
+    }
+  }
+  return brickFineResolution;
 }
 
 function brickHasInterface(
@@ -432,13 +513,22 @@ function uniformInitialBrick(
   };
 }
 
-/** Structural bricks overlapped by the scene's authored (normally 8-cell) seed bricks. */
+/**
+ * Structural span-one leaves whose topology may become fluid-active later.
+ *
+ * Besides authored liquid seeds, retain the mixed (solid/open) pages of the
+ * canonical SolidWorld.  GPU-grown pages deliberately own only a fixed-B8
+ * graph; if a dry wall page is omitted here, later wetting can never publish
+ * the ordinary 8/4/2/1 ladder.  Mixed pages are surface-shaped geometry, so
+ * this does not turn the sparse world into a domain-volume catalogue.
+ */
 function structuralSeedBrickCoordinates(
   scene: SceneDescription,
   dimensions: SparseBrickVec3,
   brickDimensions: SparseBrickVec3,
   brickFineResolution: SparseBrickFineResolution,
 ): SparseBrickVec3[] {
+  const maximumMixedSolidPages = 2048;
   const authoredWidth = scene.voxelDomain.brickSize_cells;
   const result = new Map<number, SparseBrickVec3>();
   for (const authored of initialFluidSeedBrickCoordinates(scene, dimensions, authoredWidth)) {
@@ -454,6 +544,57 @@ function structuralSeedBrickCoordinates(
           const coordinate = [x, y, z] as const;
           result.set(sparseBrickKey(coordinate, brickDimensions), coordinate);
         }
+  }
+  let world = initialSolidWorldCache.get(scene);
+  if (!world) {
+    world = solidWorldForScene(scene);
+    initialSolidWorldCache.set(scene, world);
+  }
+  const mixedSolidCoordinates = new Map<number, SparseBrickVec3>();
+  let mixedSolidCatalogueFits = true;
+  for (const page of world.pages) {
+    let hasSolid = false, hasOpen = false;
+    for (const fraction of page.solidFraction) {
+      hasSolid ||= fraction > 0;
+      hasOpen ||= fraction < 255;
+      if (hasSolid && hasOpen) break;
+    }
+    if (!hasSolid || !hasOpen) continue;
+    const pageOffsets = [[0, 0, 0], [-1, 0, 0], [1, 0, 0], [0, -1, 0],
+      [0, 1, 0], [0, 0, -1], [0, 0, 1]] as const;
+    for (const offset of pageOffsets) {
+      const fineLower = page.coordinate.map((value, axis) =>
+        (value + offset[axis]!) * SOLID_WORLD_BRICK_CELLS) as
+          [number, number, number];
+      const fineUpper = fineLower.map((value) =>
+        value + SOLID_WORLD_BRICK_CELLS) as [number, number, number];
+      const lower = fineLower.map((value) => Math.floor(
+        value / brickFineResolution)) as [number, number, number];
+      const upper = fineUpper.map((value, axis) => Math.min(brickDimensions[axis],
+        Math.ceil(Math.min(dimensions[axis], value) / brickFineResolution))) as
+          [number, number, number];
+      for (let z = Math.max(0, lower[2]); z < upper[2]; z += 1)
+        for (let y = Math.max(0, lower[1]); y < upper[1]; y += 1)
+          for (let x = Math.max(0, lower[0]); x < upper[0]; x += 1) {
+            const coordinate = [x, y, z] as const;
+            mixedSolidCoordinates.set(
+              sparseBrickKey(coordinate, brickDimensions), coordinate,
+            );
+            if (mixedSolidCoordinates.size > maximumMixedSolidPages) {
+              // The resident all-rung template ABI has the same 2,048-leaf
+              // ceiling.  Beyond it, adding dry structural leaves would disable
+              // every host candidate slot while making initialization scale with
+              // the remote boundary. Keep the ordinary SparseWorld growth path.
+              mixedSolidCatalogueFits = false;
+              break;
+            }
+          }
+      if (!mixedSolidCatalogueFits) break;
+    }
+    if (!mixedSolidCatalogueFits) break;
+  }
+  if (mixedSolidCatalogueFits) for (const [key, coordinate] of mixedSolidCoordinates) {
+    result.set(key, coordinate);
   }
   return [...result.values()];
 }
@@ -570,9 +711,7 @@ function hierarchicalTankFillBricks(
         && deepestAllowedCellWidth !== allowedCellWidth;
       const requiredResolution = initialResolutionWithRefinementRegionBounds(
         refinementRegionParameters, dimensions, origin, span,
-        brickHasOpenExteriorVoxelFace(
-          scene, dimensions, origin, brickFineResolution, span,
-        ) ? brickFineResolution : edgeFine / allowedCellWidth,
+        edgeFine / allowedCellWidth,
         brickFineResolution);
       // A macro at B^3 would refine all tangential directions merely to grade
       // one normal face. Split that last rung into base bricks instead; this
@@ -799,6 +938,11 @@ export function initializeSparseBrickAtlasFromScene(
       );
     }
   }
+  const structuralCoordinates = structuralSeedBrickCoordinates(
+    scene, options.finestDimensions, brickDimensions, brickFineResolution,
+  );
+  const structuralKeys = new Set(structuralCoordinates.map((coordinate) =>
+    sparseBrickKey(coordinate, brickDimensions)));
   const candidates: Array<{
     readonly coordinate: SparseBrickVec3;
     readonly key: number;
@@ -819,10 +963,11 @@ export function initializeSparseBrickAtlasFromScene(
           ) > epsilon) {
             nonempty = true; break;
           }
-    if (!nonempty) continue;
+    const key = sparseBrickKey(coordinate, brickDimensions);
+    if (!nonempty && !structuralKeys.has(key)) continue;
     candidates.push({
       coordinate,
-      key: sparseBrickKey(coordinate, brickDimensions),
+      key,
       interfaceBrick: brickHasInterface(
         scene, options.finestDimensions, coordinate, epsilon, brickFineResolution,
       ),
@@ -873,14 +1018,14 @@ export function initializeSparseBrickAtlasFromScene(
       ? 0 : Math.max(0, ladder.resolutions.length - 1 - Math.max(0, distance - surfaceFineRings + 1));
     const adaptiveResolution = (distance !== undefined && distance < surfaceFineRings
       ? brickFineResolution : ladder.resolutions[distanceRung]!) as SparseBrickResolution;
-    const evidenceSelected = brickRequiresStaticSolidBoundaryResolution(
+    const staticSolidResolutionFloor = sparseCM12StaticSolidResolutionFloor(
       scene, options.finestDimensions, coordinate, brickFineResolution,
-    ) || brickHasOpenExteriorVoxelFace(
-      scene, options.finestDimensions, coordinate, brickFineResolution,
-    ) ? brickFineResolution
-      : options.resolutionForBrick?.({
+    );
+    const policySelected = options.resolutionForBrick?.({
       coordinate, brickDimensions,
     }) ?? adaptiveResolution;
+    const evidenceSelected = Math.max(policySelected,
+      staticSolidResolutionFloor) as SparseBrickResolution;
     const selected = initialResolutionWithRefinementRegionBounds(
       refinementRegionParameters, options.finestDimensions, coordinate, 1,
       evidenceSelected, brickFineResolution);

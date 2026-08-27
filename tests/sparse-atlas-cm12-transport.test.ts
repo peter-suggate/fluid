@@ -77,17 +77,26 @@ test("the complete 1/2/4/8 ladder is strongly 2:1 graded", () => {
   ]), /exceeds 2:1 grading/);
 });
 
-test("SolidWorld boundary evidence overrides a requested coarse initialization", () => {
-  const atlas = initializeSparseBrickAtlasFromScene(
-    createSymmetricExpansionScene(),
-    {
-      finestDimensions: [32, 16, 32],
-      resolutionForBrick: () => 4,
-    },
+test("SolidWorld restriction evidence overrides coarse policy only for lost detail", () => {
+  const options = {
+    finestDimensions: [32, 16, 32] as const,
+    resolutionForBrick: () => 4 as const,
+  };
+  const planar = initializeSparseBrickAtlasFromScene(
+    createSymmetricExpansionScene(), options,
   );
-  assert.ok(atlas.bricks.length > 0);
-  assert.equal(atlas.bricks.every((candidate) => candidate.resolution === 8), true,
-    "a scene-level resolution hint must not coarsen across voxel-solid faces");
+  assert.ok(planar.bricks.length > 0);
+  assert.equal(planar.bricks.every((candidate) => candidate.resolution === 4), true,
+    "restriction-exact tank planes must honor a coarse scene policy");
+
+  const detailedScene = createSymmetricExpansionScene();
+  detailedScene.solidVoxels.push({ operation: "fill", minimum: [8, 0, 8],
+    maximumExclusive: [9, 1, 9] });
+  const detailed = initializeSparseBrickAtlasFromScene(detailedScene, options);
+  assert.equal(detailed.bricks.find((candidate) =>
+    candidate.coordinate[0] === 1 && candidate.coordinate[1] === 0
+      && candidate.coordinate[2] === 1)?.resolution, 8,
+  "a sub-macro-cell solid edit must retain its finest representation rung");
 });
 
 test("CM12 sharpening dose scales inversely with physical finest-cell size", () => {

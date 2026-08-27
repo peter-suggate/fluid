@@ -27,6 +27,7 @@ import {
 } from "./webgpu-octree-losasso-adaptive-mass";
 import {
   adaptivePhiRedistanceUnresolvedAudit,
+  adaptivePressureFaceSwapAudit,
   adaptiveSurfacePublicationD4Audit,
   adaptiveVelocityD4Audit,
   adaptiveVelocityInputD4Audit,
@@ -192,6 +193,8 @@ async function losassoCutoverOracle(
     ? adaptiveVelocityD4Audit(adaptivePublication) : undefined;
   const adaptiveVelocityInputD4 = adaptivePublication
     ? adaptiveVelocityInputD4Audit(adaptivePublication) : undefined;
+  const adaptivePressureSwap = adaptivePublication
+    ? adaptivePressureFaceSwapAudit(adaptivePublication) : undefined;
   const adaptiveVelocityStencil = adaptivePublication
     ? adaptiveVelocityStencilAudit(adaptivePublication) : undefined;
   const adaptiveVelocityCandidateFaceD4 = adaptivePublication
@@ -223,6 +226,8 @@ async function losassoCutoverOracle(
   if (adaptiveVelocityD4) records.push(({ phase: "losasso-adaptive-velocity-d4", metrics: adaptiveVelocityD4 }));
   if (adaptiveVelocityInputD4) records.push(({ phase: "losasso-adaptive-velocity-input-d4",
     metrics: adaptiveVelocityInputD4 }));
+  if (adaptivePressureSwap) records.push(({ phase: "losasso-pressure-face-swap",
+    metrics: adaptivePressureSwap }));
   if (adaptiveVelocityStencil) records.push(({ phase: "losasso-adaptive-velocity-stencil-audit",
     metrics: adaptiveVelocityStencil }));
   if (adaptiveVelocityCandidateFaceD4) records.push(({ phase: "losasso-adaptive-velocity-candidate-face-d4",

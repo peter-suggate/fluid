@@ -31,6 +31,14 @@ const CM12_P1TQ_MASS_DENSITY:u32=${l.massDensityBaseWords}u;
 const CM12_P1TQ_MASS_GAMMA:u32=${l.massGammaBaseWords}u;
 const CM12_P1TQ_PACKET_ID:u32=${l.packetIdBaseWords}u;
 const CM12_P1TQ_PACKET_LANE:u32=${l.packetLaneBaseWords}u;
+const CM12_P1TQ_SHARPENING_DEPARTURE:u32=${l.sharpeningDepartureBaseWords}u;
+const CM12_P1TQ_SHARPENING_STENCIL_CELL:u32=${l.sharpeningStencilCellBaseWords}u;
+const CM12_P1TQ_SHARPENING_STENCIL_WEIGHT:u32=${l.sharpeningStencilWeightBaseWords}u;
+const CM12_P1TQ_SHARPENING_DELTA:u32=${l.sharpeningDeltaBaseWords}u;
+const CM12_P1TQ_SHARPENING_DENSITY:u32=${l.sharpeningDensityBaseWords}u;
+const CM12_P1TQ_SHARPENING_REMOVED:u32=${l.sharpeningRemovedFixedBaseWords}u;
+const CM12_P1TQ_GAMMA_SNAPSHOT_DENSITY:u32=${l.gammaSnapshotDensityBaseWords}u;
+const CM12_P1TQ_GAMMA_SNAPSHOT_GAMMA:u32=${l.gammaSnapshotGammaBaseWords}u;
 
 fn cm12Phase1QACanonicalPacket(cell:u32)->vec2u{
   let brick=cellBrick(cell);let resolution=cellResolution(cell);
@@ -99,6 +107,28 @@ fn cm12Phase1QACaptureMass(cell:u32,density:f32,gamma:f32){
   atomicStore(&activity[CM12_P1TQ_MASS_GAMMA+cell],bitcast<u32>(gamma));
   atomicAdd(&activity[CM12_P1TQ_HEADER+10u],1u);
 }
+fn cm12Phase1QACaptureSharpening(cell:u32,departure:vec3f,
+ stencil:TransportStencil,density:f32,delta:f32,removedFixed:i32){
+  if(cell>=CM12_P1TQ_CAPACITY){return;}
+  for(var axis=0u;axis<3u;axis+=1u){
+    atomicStore(&activity[CM12_P1TQ_SHARPENING_DEPARTURE+3u*cell+axis],
+      bitcast<u32>(departure[axis]));
+  }
+  for(var corner=0u;corner<8u;corner+=1u){
+    atomicStore(&activity[CM12_P1TQ_SHARPENING_STENCIL_CELL+8u*cell+corner],
+      stencil.cells[corner]);
+    atomicStore(&activity[CM12_P1TQ_SHARPENING_STENCIL_WEIGHT+8u*cell+corner],
+      bitcast<u32>(stencil.weights[corner]));
+  }
+  atomicStore(&activity[CM12_P1TQ_SHARPENING_DENSITY+cell],bitcast<u32>(density));
+  atomicStore(&activity[CM12_P1TQ_SHARPENING_DELTA+cell],bitcast<u32>(delta));
+  atomicStore(&activity[CM12_P1TQ_SHARPENING_REMOVED+cell],bitcast<u32>(removedFixed));
+}
+fn cm12Phase1QACaptureGammaSnapshot(cell:u32,density:f32,gamma:f32){
+  if(cell>=CM12_P1TQ_CAPACITY){return;}
+  atomicStore(&activity[CM12_P1TQ_GAMMA_SNAPSHOT_DENSITY+cell],bitcast<u32>(density));
+  atomicStore(&activity[CM12_P1TQ_GAMMA_SNAPSHOT_GAMMA+cell],bitcast<u32>(gamma));
+}
 `;
 }
 
@@ -111,6 +141,13 @@ fn cm12Phase1QACaptureDeficit(cell:u32,density:i32,gamma:i32){
   _=cell;_=density;_=gamma;
 }
 fn cm12Phase1QACaptureMass(cell:u32,density:f32,gamma:f32){
+  _=cell;_=density;_=gamma;
+}
+fn cm12Phase1QACaptureSharpening(cell:u32,departure:vec3f,
+ stencil:TransportStencil,density:f32,delta:f32,removedFixed:i32){
+  _=cell;_=departure;_=stencil;_=density;_=delta;_=removedFixed;
+}
+fn cm12Phase1QACaptureGammaSnapshot(cell:u32,density:f32,gamma:f32){
   _=cell;_=density;_=gamma;
 }
 `;

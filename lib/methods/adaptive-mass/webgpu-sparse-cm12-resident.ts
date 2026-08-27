@@ -224,6 +224,8 @@ import {
 export interface SharpeningTrace {
   readonly distanceCells?: number;
   readonly traceSteps?: number;
+  /** Multiplies Algorithm 2's removed-density dose. Defaults to the paper's full dose. */
+  readonly strength?: number;
   /** Defaults on for direct diagnostic constructors and existing callers. */
   readonly gammaDiffusionEnabled?: boolean;
   /** Defaults on; the mandatory final-scalar publication is independent. */
@@ -353,6 +355,8 @@ export function sparseCM12ActivityPolicy(
  */
 export const SPARSE_CM12_SHARPENING_DISTANCE_CELLS = 3.1;
 export const SPARSE_CM12_SHARPENING_TRACE_STEPS = CM12_SHARPENING_TRACE_STEPS;
+export const SPARSE_CM12_SHARPENING_STRENGTH = 1;
+const SPARSE_CM12_TRANSPORT_FIXED_SCALE = 65_536;
 
 /** Kept inside the paper's own D range; the panel spec declares the same bounds. */
 export const sparseCM12SharpeningDistance = (value: unknown): number =>
@@ -364,6 +368,11 @@ export const sparseCM12SharpeningTraceSteps = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value)
     ? Math.min(16, Math.max(1, Math.round(value)))
     : SPARSE_CM12_SHARPENING_TRACE_STEPS;
+
+export const sparseCM12SharpeningStrength = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value)
+    ? Math.min(1, Math.max(0, value))
+    : SPARSE_CM12_SHARPENING_STRENGTH;
 
 export interface SparseCM12InternedBoundaryMemoryPlan {
   readonly immutableMaximumBytes: number;
@@ -1004,12 +1013,13 @@ export const sparseCM12PressureRelativeTolerance = (value: unknown): number =>
     : SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE;
 
 /**
- * Choose the next encoded ceiling from the last queue-confirmed solve.
+ * Retain the caller's hard encoded ceiling for every frame.
  *
- * A converged frame keeps one residual block in reserve. A frame that consumed
- * its entire smaller ceiling doubles that ceiling so a newly disturbed scene
- * returns to the hard budget quickly. No receipt, a disabled tolerance, and an
- * explicitly armed pressure journal retain the caller's complete ceiling.
+ * The device-side residual gate already prevents arithmetic after convergence.
+ * A previous frame's executed count cannot safely predict the next system:
+ * free-surface membership and topology can change before the solve, and a
+ * harder frame must not be truncated merely because its predecessor was easy.
+ * The receipt remains a diagnostic, never a correctness-affecting work limit.
  */
 export function sparseCM12PressureIterationsFromReceipt(
   maximum: unknown,
@@ -1017,16 +1027,8 @@ export function sparseCM12PressureIterationsFromReceipt(
   previous?: Readonly<{ executed: number; encoded: number }>,
 ): number {
   const hardMaximum = sparseCM12PressureIterations(maximum);
-  if (!(sparseCM12PressureRelativeTolerance(relativeTolerance) > 0) || !previous
-    || !Number.isFinite(previous.executed) || !Number.isFinite(previous.encoded)) {
-    return hardMaximum;
-  }
-  const executed = Math.max(0, Math.round(previous.executed));
-  const encoded = sparseCM12PressureIterations(previous.encoded);
-  const next = executed >= encoded
-    ? Math.max(encoded + SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE, 2 * encoded)
-    : executed + SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE;
-  return Math.min(hardMaximum, sparseCM12PressureIterations(next));
+  void relativeTolerance; void previous;
+  return hardMaximum;
 }
 const ACTIVITY_HEADER_WORDS = 28;
 const ACTIVITY_RECORD_WORDS = 39;
@@ -2374,9 +2376,15 @@ export interface SparseCM12WorldGrowthReceipt {
 export interface SparseCM12DiagnosticFields {
   readonly density: Float32Array;
   readonly gamma: Float32Array;
+  /** QA scratch after the sharpening transform/finalize phase limit. */
+  readonly sharpeningDelta: Float32Array;
+  /** QA fixed-point mass receipt after the sharpening transform phase limit. */
+  readonly sharpeningReceiptMass: Float32Array;
   /** CM12 Sec. 3.6 non-solid capacity V_i, expanded over accepted cells. */
   readonly solidOpenFraction: Float32Array;
   readonly velocity: Float32Array;
+  /** Pressure equation source assembled from physical face flux and volume correction. */
+  readonly pressureRhs: Float32Array;
   readonly pressure: Float32Array;
   readonly divergence: Float32Array;
 }
@@ -2852,19 +2860,42 @@ function pressureAuxiliaryArena(
     { length: hierarchyLevelCount },
     (_, level) => aggregateEdgeSourceBaseWords + coarseEdgeCount * (level + 1),
   );
+  let aggregateEdgeMaximumContributionCount = 0;
+  const coarseRecordBase = coarseBase + 4 + brickCount + 1;
+  for (let edge = 0; edge < coarseEdgeCount; edge += 1) {
+    aggregateEdgeMaximumContributionCount = Math.max(
+      aggregateEdgeMaximumContributionCount,
+      pressureTopology[coarseRecordBase + 3 * edge + 2]!,
+    );
+  }
+  let hierarchyEdgeMaximumContributionCount = 0;
+  for (let level = 0; level < hierarchyLevelCount; level += 1) {
+    const descriptor = hierarchyBase + 1 + 10 * level;
+    const groupCount = pressureTopology[descriptor]!;
+    const edgeOffsetsAt = pressureTopology[descriptor + 6]!;
+    const records = pressureTopology[descriptor + 7]!;
+    const edgeCountAtLevel = pressureTopology[edgeOffsetsAt + groupCount]!;
+    for (let edge = 0; edge < edgeCountAtLevel; edge += 1) {
+      hierarchyEdgeMaximumContributionCount = Math.max(
+        hierarchyEdgeMaximumContributionCount,
+        pressureTopology[records + 3 * edge + 2]!,
+      );
+    }
+  }
   const headerBaseWords = aggregateEdgeSourceBaseWords
     + coarseEdgeCount * (hierarchyLevelCount + 1);
   const layout: SparseCM12PressureRepairLayout = Object.freeze({
     aggregateEdgeForFineEdgeBaseWords,
     aggregateEdgeSourceBaseWords,
     hierarchyEdgeForAggregateBaseWords: Object.freeze(hierarchyEdgeForAggregateBaseWords),
+    aggregateEdgeMaximumContributionCount,
+    hierarchyEdgeMaximumContributionCount,
     headerBaseWords,
     totalWords: headerBaseWords + SPARSE_CM12_PRESSURE_REPAIR_HEADER_WORDS,
   });
   const result = new Uint32Array(layout.totalWords);
   result.fill(INVALID, aggregateEdgeForFineEdgeBaseWords,
     aggregateEdgeForFineEdgeBaseWords + edgeCount);
-  const coarseRecordBase = coarseBase + 4 + brickCount + 1;
   const coarseOffsets = coarseBase + 4;
   for (let brick = 0; brick < brickCount; brick += 1) {
     for (let edge = pressureTopology[coarseOffsets + brick]!;
@@ -3021,6 +3052,7 @@ export class WebGPUSparseCM12Resident {
   private activityPhaseLimitForQA?: "scalar" | "topology" | "masks" | "measure"
     | "history" | "census" | "allocation" | "synthesis" | "connection";
   private transportPhaseLimitForQA?: "setup" | "trace" | "scatter" | "gather";
+  private sharpeningPhaseLimitForQA?: "setup" | "transform" | "finalize" | "capacity";
   private pressureTopologyPhaseLimitForQA?: "setup" | "cells" | "rows" | "fine"
     | "coarse-plan" | "coarse-indirect" | "coarse-edge" | "coarse-work"
     | "coarse" | "hierarchy";
@@ -3224,6 +3256,11 @@ export class WebGPUSparseCM12Resident {
     phase: "setup" | "trace" | "scatter" | "gather" | undefined,
   ): void {
     this.transportPhaseLimitForQA = phase;
+  }
+  setSharpeningPhaseLimitForQA(
+    phase: "setup" | "transform" | "finalize" | "capacity" | undefined,
+  ): void {
+    this.sharpeningPhaseLimitForQA = phase;
   }
   setPressureTopologyPhaseLimitForQA(
     phase: "setup" | "cells" | "rows" | "fine" | "coarse-plan"
@@ -4484,9 +4521,11 @@ export class WebGPUSparseCM12Resident {
     };
     const presentationShaderRoots = presentationPublisherOracleForQA
       ? ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
+        "refreshSparseCM12StaticSolidGeometryEvidence",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "publishSparseLevelSet"]
       : ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
+        "refreshSparseCM12StaticSolidGeometryEvidence",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "beginSparseCM12FramePlanNext", "initializeSparseCM12FramePlanNext",
         "populateSparseCM12PresentationFramePlan",
@@ -4517,7 +4556,7 @@ export class WebGPUSparseCM12Resident {
       "commitSparseCM12FrameControl", "sparseCM12FrameControlNoop",
       "publishSparseCM12MovingSolidActivity",
       "compileSparseCM12TransportPacketsFromFinalScalarMasks",
-      "scatterGammaSnapshotRows", "scatterGammaRefinementRows",
+      "scatterGammaSnapshotRows",
       "beginSparseCM12FinalScalarMasks",
       "publishSparseCM12FinalScalarMasks",
       "sealSparseCM12FinalScalarMasks",
@@ -4536,7 +4575,7 @@ export class WebGPUSparseCM12Resident {
       "traceGammaAndBeta", "scatterDensityDeficit",
       "gatherConservativeDensity",
       "seedTracers", "advanceTracers",
-      "clearGammaReceipts", "finalizeGammaSnapshot", "finalizeGammaRefinement",
+      "clearGammaReceipts", "finalizeGammaSnapshot",
       "prepareSharpeningField", "scatterSharpeningMass", "finalizeSharpening",
       "initializeDensityCapacityRepair", "scatterDensityCapacityRepair",
       "finalizeDensityCapacityRepair", "preserveHorizontalD4",
@@ -4574,6 +4613,7 @@ export class WebGPUSparseCM12Resident {
       "markIncrementalActivityPostTopology",
       "finalizeIncrementalActivityMasks", "measureBrickActivity",
       "ageIncrementalActivityHistory", "finalizeIncrementalActivityCensus",
+      "classifyAcceptedLiquidFrontier",
       "planBrickResolution", "activateSweptFrontierPages", "activateInjectionFrontierPages",
       "closePlannedResolution",
       "validateCandidateResolution", "scheduleTopologyPreparation",
@@ -4603,6 +4643,7 @@ export class WebGPUSparseCM12Resident {
       ] as const : []),
       "retireUnsupportedEmptyBricks",
       "refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
+      "refreshSparseCM12StaticSolidGeometryEvidence",
       "refreshSparseCM12FrontierSolidWorld",
       "classifyPresentationBricks",
       ...(presentationPublisherOracleForQA ? ["publishSparseLevelSet"] as const : []),
@@ -4656,9 +4697,11 @@ export class WebGPUSparseCM12Resident {
     ] as const;
     const presentationEntryNames = new Set<string>(presentationPublisherOracleForQA
       ? ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
+        "refreshSparseCM12StaticSolidGeometryEvidence",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "publishSparseLevelSet"]
       : ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
+        "refreshSparseCM12StaticSolidGeometryEvidence",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "beginSparseCM12FramePlanNext", "initializeSparseCM12FramePlanNext",
         "populateSparseCM12PresentationFramePlan",
@@ -5180,6 +5223,8 @@ export class WebGPUSparseCM12Resident {
     this.activityPhaseLimitForQA = undefined;
     const transportPhaseLimitForQA = this.transportPhaseLimitForQA;
     this.transportPhaseLimitForQA = undefined;
+    const sharpeningPhaseLimitForQA = this.sharpeningPhaseLimitForQA;
+    this.sharpeningPhaseLimitForQA = undefined;
     const pressureTopologyPhaseLimitForQA = this.pressureTopologyPhaseLimitForQA;
     this.pressureTopologyPhaseLimitForQA = undefined;
     let stageLimitReached = false;
@@ -5337,12 +5382,14 @@ export class WebGPUSparseCM12Resident {
       // Gamma shares the accepted physical row topology with pressure and
       // SolidWorld. No host-only boundary image or packet mask is a second
       // authority for which rows exist.
+      // The configured/paper default is one diffusion iteration: one immutable
+      // row snapshot followed by one Jacobi finalization. The former second
+      // all-axis pass was an unrequested extra iteration; near the dry cutoff
+      // it converted a harmless cumulative-gamma difference back into resolved
+      // density on the following pass.
       dispatchAccepted("clearGammaReceipts", "cell");
       dispatchAccepted("scatterGammaSnapshotRows", "row");
       dispatchAccepted("finalizeGammaSnapshot", "cell");
-      dispatchAccepted("clearGammaReceipts", "cell");
-      dispatchAccepted("scatterGammaRefinementRows", "row");
-      dispatchAccepted("finalizeGammaRefinement", "cell");
     });
     stage("surface-sharpening", ({ closeSubstage }) => {
       // Start the stage with real, already-required GPU work. Besides resetting
@@ -5361,12 +5408,14 @@ export class WebGPUSparseCM12Resident {
           4 * this.templateCellCount);
       }
       closeSubstage("sharpening-receipt-setup");
+      if (sharpeningPhaseLimitForQA === "setup") return;
       useBindGroup(this.transportBindGroup);
       if (surfaceSharpeningEnabled) {
         dispatchTransportPacket("prepareSharpeningField");
         dispatchTransportPacket("scatterSharpeningMass");
       }
       closeSubstage("sharpening-transform");
+      if (sharpeningPhaseLimitForQA === "transform") return;
       useBindGroup(this.pressureBindGroup);
       // Diffusion finishes in immutable scratch banks. When sharpening is off,
       // its finalizer becomes the lightweight commit that publishes those
@@ -5376,6 +5425,7 @@ export class WebGPUSparseCM12Resident {
         dispatchAccepted("finalizeSharpening", "cell");
       }
       closeSubstage("sharpening-finalize");
+      if (sharpeningPhaseLimitForQA === "finalize") return;
       // Relay over no more than one B8 page width (the accepted support reach).
       // One pass only moved an over-capacity packet into an already-full
       // neighbour; after floor impact that concentrated conserved mass into a
@@ -5388,6 +5438,7 @@ export class WebGPUSparseCM12Resident {
         dispatchAccepted("finalizeDensityCapacityRepair", "cell");
       }
       closeSubstage("density-capacity-repair");
+      if (sharpeningPhaseLimitForQA === "capacity") return;
       // Final scalar facts are authored once in the accepted TEI packet space.
       // Every remaining dirty carrier below is a mask consumer; finalization no
       // longer walks incidence or appends a tile event per changed cell.
@@ -5687,12 +5738,13 @@ export class WebGPUSparseCM12Resident {
       }
     });
     stage("resolution-planning", () => {
+      dispatch("classifyAcceptedLiquidFrontier", leafCapacity);
       dispatch("planBrickResolution", bricks);
-      dispatch("activateSweptFrontierPages", bricks);
+      dispatch("activateSweptFrontierPages", leafCapacity);
       // Lifecycle membership is a topology candidate, not a post-publication
       // mutation.  Retirement marks same-rung delta work consumed by the
       // shadow worklists and the single selector flip below.
-      dispatch("retireUnsupportedEmptyBricks", bricks);
+      dispatch("retireUnsupportedEmptyBricks", leafCapacity);
       for (let gradingPass = 0;
         gradingPass < Math.log2(this.brickFineResolution); gradingPass += 1) {
         dispatch("closePlannedResolution", bricks);
@@ -6163,9 +6215,11 @@ export class WebGPUSparseCM12Resident {
     });
     pass.setBindGroup(0, this.bindGroup);
     pass.setPipeline(this.pipelines.refreshSparseCM12SolidWorldCells!);
-    pass.dispatchWorkgroups(Math.ceil(this.cellCount / WORKGROUP_SIZE));
+    pass.dispatchWorkgroups(Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
     pass.setPipeline(this.pipelines.refreshSparseCM12SolidWorldRows!);
-    pass.dispatchWorkgroups(Math.ceil(this.rowCount / WORKGROUP_SIZE));
+    pass.dispatchWorkgroups(Math.ceil(this.templateRowCount / WORKGROUP_SIZE));
+    pass.setPipeline(this.pipelines.refreshSparseCM12StaticSolidGeometryEvidence!);
+    pass.dispatchWorkgroups(this.initialWorldLeafCount);
     pass.end();
   }
 
@@ -6487,13 +6541,15 @@ export class WebGPUSparseCM12Resident {
     f[81] = sparseCM12PressureRelativeTolerance(pressureControl?.relativeTolerance);
     // bit 0: a static or dynamic cut-cell source is live; bit 2: SolidWorld
     // row openness is live. Authored vessel shells, terrain and edits all use
-    // this single voxel authority. solidOffsets.w is reserved.
+    // this single voxel authority. The otherwise-reserved fourth lane carries
+    // the sharpening dose as float bits without changing the uniform ABI.
     const staticSolidWorld = Boolean(this.solidOccupancyLayout);
     const dynamicSolidWorld = bodyCount > 0 && l.solidRowData !== 0;
     u.set([l.solidCellOpen, l.solidRowData,
       (staticSolidWorld || dynamicSolidWorld ? 1 : 0)
         | (staticSolidWorld ? 4 : 0),
       0], 84);
+    f[87] = sparseCM12SharpeningStrength(sharpening?.strength);
     f.set([...(worldDimensions_m ?? [0, 0, 0]), bodyCount], 88);
     u.set([...this.tracerLattice.dimensions, this.tracerLattice.count], 92);
     f.set([...this.tracerLattice.originFine, this.tracerLattice.spacingFine], 96);
@@ -7054,12 +7110,14 @@ export class WebGPUSparseCM12Resident {
 
   async readDiagnosticFields(
     includeWorldLeaves = false,
+    frameBank: "accepted" | "candidate" = "accepted",
   ): Promise<SparseCM12DiagnosticFields> {
     this.assertLive();
     const activitySnapshot = await this.readActivitySnapshot(includeWorldLeaves);
+    const readbackBytes = this.state.size + this.conditioning.size + 4;
     const readback = this.device.createBuffer({
       label: "Sparse CM12 QA field readback",
-      size: this.state.size + 4,
+      size: readbackBytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
@@ -7067,26 +7125,34 @@ export class WebGPUSparseCM12Resident {
         label: "Sparse CM12 QA field copy",
       });
       encoder.copyBufferToBuffer(this.state, 0, readback, 0, this.state.size);
+      encoder.copyBufferToBuffer(this.conditioning, 0, readback,
+        this.state.size, this.conditioning.size);
       encoder.copyBufferToBuffer(this.topologyArena,
         4 * (this.frameControlLayout.baseWords
           + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity),
-        readback, this.state.size, 4);
+        readback, this.state.size + this.conditioning.size, 4);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const state = new Float32Array(readback.getMappedRange());
       const acceptedParity = new Uint32Array(state.buffer,
-        state.byteOffset + this.state.size, 1)[0]! & 1;
+        state.byteOffset + this.state.size + this.conditioning.size, 1)[0]! & 1;
+      const conditioning = new Int32Array(state.buffer,
+        state.byteOffset + this.state.size, this.conditioning.size / 4);
+      const fieldParity = acceptedParity ^ Number(frameBank === "candidate");
       const [nx, ny, nz] = this.dimensions;
       const count = nx * ny * nz;
       const density = new Float32Array(count);
       const gamma = new Float32Array(count);
+      const sharpeningDelta = new Float32Array(count);
+      const sharpeningReceiptMass = new Float32Array(count);
       const solidOpenFraction = new Float32Array(count); solidOpenFraction.fill(1);
       const velocity = new Float32Array(4 * count);
+      const pressureRhs = new Float32Array(count);
       const pressure = new Float32Array(count);
       const divergence = new Float32Array(count);
-      const densityOffset = acceptedParity !== 0 ? this.layout.densityB : this.layout.densityA;
-      const gammaOffset = acceptedParity !== 0 ? this.layout.gammaB : this.layout.gammaA;
-      const velocityOffset = acceptedParity !== 0
+      const densityOffset = fieldParity !== 0 ? this.layout.densityB : this.layout.densityA;
+      const gammaOffset = fieldParity !== 0 ? this.layout.gammaB : this.layout.gammaA;
+      const velocityOffset = fieldParity !== 0
         ? this.layout.cellVelocityB : this.layout.cellVelocityA;
       const cellWidth_m = this.parameterF32[41]!;
       const pressureScale = this.parameterF32[42]!;
@@ -7148,9 +7214,13 @@ export class WebGPUSparseCM12Resident {
               const at = lower[0] + dx + nx * (lower[1] + dy + ny * (lower[2] + dz));
               density[at] = rho;
               gamma[at] = gammaValue;
+              sharpeningDelta[at] = state[this.layout.sharpeningDelta + cell]!;
+              sharpeningReceiptMass[at] = conditioning[6 * this.templateCellCount + cell]!
+                / SPARSE_CM12_TRANSPORT_FIXED_SCALE;
               solidOpenFraction[at] = openFraction;
               velocity[4 * at] = vx; velocity[4 * at + 1] = vy;
               velocity[4 * at + 2] = vz;
+              pressureRhs[at] = state[this.layout.rhs + cell]!;
               // Publish pressure over the accepted liquid phase. PCM is an
               // iteration-local solve worklist and may differ for one frame
               // across an otherwise identical topology transition; using it
@@ -7196,17 +7266,22 @@ export class WebGPUSparseCM12Resident {
               : 1;
             const velocityAt = velocityOffset + 4 * cell;
             density[at] = rho; gamma[at] = gammaValue;
+            sharpeningDelta[at] = state[this.layout.sharpeningDelta + cell]!;
+            sharpeningReceiptMass[at] = conditioning[6 * this.templateCellCount + cell]!
+              / SPARSE_CM12_TRANSPORT_FIXED_SCALE;
             solidOpenFraction[at] = openFraction;
             velocity[4 * at] = state[velocityAt]! * cellWidth_m;
             velocity[4 * at + 1] = state[velocityAt + 1]! * cellWidth_m;
             velocity[4 * at + 2] = state[velocityAt + 2]! * cellWidth_m;
+            pressureRhs[at] = state[this.layout.rhs + cell]!;
             pressure[at] = rho >= 0.5
               ? state[this.layout.pressure + cell]! * pressureScale : 0;
             divergence[at] = state[this.layout.divergence + cell]!;
           }
         }
       }
-      return { density, gamma, solidOpenFraction, velocity, pressure, divergence };
+      return { density, gamma, sharpeningDelta, sharpeningReceiptMass,
+        solidOpenFraction, velocity, pressureRhs, pressure, divergence };
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
       readback.destroy();
@@ -7219,7 +7294,9 @@ export class WebGPUSparseCM12Resident {
    * stable accepted cell id. Production and timed experiment constructions do
    * not reserve this arena and reject the read.
    */
-  async readPhase1TransportReceiptQA(): Promise<SparseCM12Phase1TransportReceipt> {
+  async readPhase1TransportReceiptQA(
+    allowStageLimitedCandidate = false,
+  ): Promise<SparseCM12Phase1TransportReceipt> {
     this.assertLive();
     const layout = this.phase1TransportQALayout;
     if (!layout) throw new Error(
@@ -7265,6 +7342,18 @@ export class WebGPUSparseCM12Resident {
     const massGamma = plane(layout.massGammaBaseWords, capacity);
     const packetIds = plane(layout.packetIdBaseWords, capacity);
     const packetLanes = plane(layout.packetLaneBaseWords, capacity);
+    const sharpeningDeparture = plane(layout.sharpeningDepartureBaseWords,
+      3 * capacity);
+    const sharpeningStencilCells = plane(layout.sharpeningStencilCellBaseWords,
+      8 * capacity);
+    const sharpeningStencilWeights = plane(layout.sharpeningStencilWeightBaseWords,
+      8 * capacity);
+    const sharpeningDelta = plane(layout.sharpeningDeltaBaseWords, capacity);
+    const sharpeningDensity = plane(layout.sharpeningDensityBaseWords, capacity);
+    const sharpeningRemovedFixed = plane(layout.sharpeningRemovedFixedBaseWords,
+      capacity);
+    const gammaSnapshotDensity = plane(layout.gammaSnapshotDensityBaseWords, capacity);
+    const gammaSnapshotGamma = plane(layout.gammaSnapshotGammaBaseWords, capacity);
     const mass = new Uint32Array(2 * capacity);
     mass.set(massDensity); mass.set(massGamma, capacity);
     const transportPackets = new Uint32Array(2 * capacity);
@@ -7272,6 +7361,8 @@ export class WebGPUSparseCM12Resident {
     const betaSigned = new Int32Array(beta.buffer, beta.byteOffset, beta.length);
     const deficitDensitySigned = new Int32Array(deficitDensity.buffer,
       deficitDensity.byteOffset, deficitDensity.length);
+    const sharpeningRemovedSigned = new Int32Array(sharpeningRemovedFixed.buffer,
+      sharpeningRemovedFixed.byteOffset, sharpeningRemovedFixed.length);
     let minimumBetaFixed = 0;
     let maximumBetaFixed = 0;
     let minimumDeficitDensityFixed = 0;
@@ -7296,10 +7387,12 @@ export class WebGPUSparseCM12Resident {
     const frameGeneration = frameControl.acceptedGeneration;
     const capturedFrame = raw[h.frameGeneration]!;
     const capturedTopology = raw[h.topologyGeneration]!;
-    if (capturedFrame !== 0 && capturedFrame !== frameGeneration) {
+    if (!allowStageLimitedCandidate && capturedFrame !== 0
+      && capturedFrame !== frameGeneration) {
       throw new Error(`Phase-1 trace frame ${capturedFrame} != FCA1 ${frameGeneration}`);
     }
-    if (capturedTopology !== 0 && capturedTopology !== transportTopologyGeneration) {
+    if (!allowStageLimitedCandidate && capturedTopology !== 0
+      && capturedTopology !== transportTopologyGeneration) {
       throw new Error(`Phase-1 trace topology ${capturedTopology} != FSM1 ${
         transportTopologyGeneration}`);
     }
@@ -7410,7 +7503,8 @@ export class WebGPUSparseCM12Resident {
     }
 
     let publishedPacketGeneration = topologyGeneration;
-    if (this.transportExecutionImage && this.transportExecutionImageLayout
+    if (!allowStageLimitedCandidate && this.transportExecutionImage
+      && this.transportExecutionImageLayout
       && this.transportPacketAuthorityLayout) {
       const imageLayout = this.transportExecutionImageLayout;
       const authorityLayout = this.transportPacketAuthorityLayout;
@@ -7496,12 +7590,279 @@ export class WebGPUSparseCM12Resident {
       : raw[h.effectiveVelocityFrameGeneration]! || frameGeneration;
     const effectiveTopology = transportTopologyGeneration === 0 ? 0
       : raw[h.effectiveVelocityTopologyGeneration]! || transportTopologyGeneration;
-    if (effectiveFrame !== frameGeneration
-      || effectiveTopology !== transportTopologyGeneration) {
+    if (!allowStageLimitedCandidate && (effectiveFrame !== frameGeneration
+      || effectiveTopology !== transportTopologyGeneration)) {
       throw new Error(`Phase-1 effective velocity provenance ${effectiveFrame}/${
         effectiveTopology} != frame/transport-topology ${frameGeneration}/${
         transportTopologyGeneration}`);
     }
+    const [nx, ny, nz] = this.dimensions;
+    const denseCell = new Uint32Array(nx * ny * nz); denseCell.fill(0xffff_ffff);
+    const coordinateByCell = new Map<number, readonly [number, number, number]>();
+    const spanByCell = new Map<number, readonly [number, number, number]>();
+    const topologyFloats = new Float32Array(this.templateWords.buffer,
+      this.templateWords.byteOffset, this.templateWords.length);
+    const cellOffset = this.templateWords[6]!;
+    const reflectionRangeOffset = this.templateWords[11]!;
+    const templateLevelCount = Math.log2(this.brickFineResolution) + 1;
+    for (const record of activity.records) {
+      const brick = record.leafId;
+      if (!record.active || brick >= this.lastPacked!.brickCount) continue;
+      const level = Math.log2(record.acceptedResolution);
+      const rangeAt = reflectionRangeOffset + 2 * (templateLevelCount * brick + level);
+      const first = this.templateWords[rangeAt]!;
+      const count = this.templateWords[rangeAt + 1]!;
+      for (let cell = first; cell < first + count; cell += 1) {
+        const base = cellOffset + TEMPLATE_CELL_RECORD_WORDS * cell;
+        const lower = [0, 1, 2].map((axis) => Math.round(
+          topologyFloats[base + axis]! - 0.5 * topologyFloats[base + 4 + axis]!,
+        ));
+        const span = [0, 1, 2].map((axis) =>
+          Math.round(topologyFloats[base + 4 + axis]!));
+        if (!coordinateByCell.has(cell)) {
+          coordinateByCell.set(cell, lower as [number, number, number]);
+          spanByCell.set(cell, span as [number, number, number]);
+        }
+        for (let dz = 0; dz < span[2]! && lower[2]! + dz < nz; dz += 1)
+          for (let dy = 0; dy < span[1]! && lower[1]! + dy < ny; dy += 1)
+            for (let dx = 0; dx < span[0]! && lower[0]! + dx < nx; dx += 1) {
+              const x = lower[0]! + dx, y = lower[1]! + dy, z = lower[2]! + dz;
+              if (x >= 0 && y >= 0 && z >= 0) {
+                denseCell[x + nx * (y + ny * z)] = cell;
+              }
+            }
+      }
+    }
+    const geometryCells = new Map<string, number[]>();
+    for (const [cell, lower] of coordinateByCell) {
+      const key = `${lower.join(",")}|${spanByCell.get(cell)!.join(",")}`;
+      const peers = geometryCells.get(key) ?? [];
+      peers.push(cell); geometryCells.set(key, peers);
+    }
+    type ReflectionMetric = { compared: number; mismatchCount: number;
+      maximumAbsoluteError: number; worst?: Readonly<Record<string, unknown>> };
+    const reflectionMetric = (): ReflectionMetric => ({ compared: 0,
+      mismatchCount: 0, maximumAbsoluteError: 0 });
+    const betaMetric = reflectionMetric(), deficitMetric = reflectionMetric();
+    const massMetric = reflectionMetric(), departureMetric = reflectionMetric();
+    const massGammaMetric = reflectionMetric();
+    const sharpeningReceiptMetric = reflectionMetric();
+    const sharpeningSourceDensityMetric = reflectionMetric();
+    const sharpeningDeltaMetric = reflectionMetric();
+    const gammaSnapshotDensityMetric = reflectionMetric();
+    const gammaSnapshotGammaMetric = reflectionMetric();
+    const massDensityFloat = new Float32Array(massDensity.buffer,
+      massDensity.byteOffset, massDensity.length);
+    const massGammaFloat = new Float32Array(massGamma.buffer,
+      massGamma.byteOffset, massGamma.length);
+    const departureFloat = new Float32Array(departure.buffer,
+      departure.byteOffset, departure.length);
+    const sharpeningDepartureFloat = new Float32Array(sharpeningDeparture.buffer,
+      sharpeningDeparture.byteOffset, sharpeningDeparture.length);
+    const sharpeningStencilWeightFloat = new Float32Array(
+      sharpeningStencilWeights.buffer, sharpeningStencilWeights.byteOffset,
+      sharpeningStencilWeights.length,
+    );
+    const sharpeningDeltaFloat = new Float32Array(sharpeningDelta.buffer,
+      sharpeningDelta.byteOffset, sharpeningDelta.length);
+    const sharpeningDensityFloat = new Float32Array(sharpeningDensity.buffer,
+      sharpeningDensity.byteOffset, sharpeningDensity.length);
+    const gammaSnapshotDensityFloat = new Float32Array(gammaSnapshotDensity.buffer,
+      gammaSnapshotDensity.byteOffset, gammaSnapshotDensity.length);
+    const gammaSnapshotGammaFloat = new Float32Array(gammaSnapshotGamma.buffer,
+      gammaSnapshotGamma.byteOffset, gammaSnapshotGamma.length);
+    // Reconstruct the exact integer receipt before the shared conditioning
+    // arena is reused by capacity repair. This is QA provenance only; the
+    // simulation consumed atomics authored by these same independent floors.
+    const sharpeningReceiptFixed = new Int32Array(capacity);
+    for (let source = 0; source < capacity; source += 1) {
+      const removed = sharpeningRemovedSigned[source]!;
+      if (removed <= 0) continue;
+      let total = 0;
+      for (let corner = 0; corner < 8; corner += 1) {
+        if (sharpeningStencilCells[8 * source + corner] !== 0xffff_ffff) {
+          total += sharpeningStencilWeightFloat[8 * source + corner]!;
+        }
+      }
+      if (total <= 1e-8) {
+        sharpeningReceiptFixed[source] = sharpeningReceiptFixed[source]! + removed;
+        continue;
+      }
+      let distributed = 0;
+      for (let corner = 0; corner < 8; corner += 1) {
+        const target = sharpeningStencilCells[8 * source + corner]!;
+        const weight = sharpeningStencilWeightFloat[8 * source + corner]!;
+        if (target === 0xffff_ffff || weight <= 0) continue;
+        const offered = Math.floor(removed * weight / total);
+        sharpeningReceiptFixed[target] = sharpeningReceiptFixed[target]! + offered;
+        distributed += offered;
+      }
+      sharpeningReceiptFixed[source] = sharpeningReceiptFixed[source]!
+        + removed - distributed;
+    }
+    const compare = (metric: ReflectionMetric, source: number, reflected: number,
+      tolerance: number, detail: Readonly<Record<string, unknown>>) => {
+      metric.compared += 1;
+      const error = Math.abs(source - reflected);
+      if (error > tolerance) metric.mismatchCount += 1;
+      if (error > metric.maximumAbsoluteError) {
+        metric.maximumAbsoluteError = error;
+        metric.worst = Object.freeze({ ...detail, source, reflected, absoluteError: error });
+      }
+    };
+    for (const [cell, lower] of coordinateByCell) {
+        const span = spanByCell.get(cell)!;
+        const reflectedLower = [lower[0], lower[1], nz - lower[2] - span[2]] as const;
+        const reflectedCell = denseCell[reflectedLower[0] + nx * (reflectedLower[1]
+          + ny * reflectedLower[2])]!;
+        if (cell === 0xffff_ffff || reflectedCell === 0xffff_ffff) continue;
+        const detail = { sourceCell: lower, reflectedCell: reflectedLower,
+          sourceStableCell: cell, reflectedStableCell: reflectedCell };
+        compare(betaMetric, betaSigned[cell]!, betaSigned[reflectedCell]!, 0, detail);
+        compare(deficitMetric, deficitDensitySigned[cell]!,
+          deficitDensitySigned[reflectedCell]!, 0, detail);
+        compare(massMetric, massDensityFloat[cell]!, massDensityFloat[reflectedCell]!,
+          1e-5, detail);
+        compare(massGammaMetric, massGammaFloat[cell]!, massGammaFloat[reflectedCell]!,
+          1e-5, detail);
+        compare(sharpeningReceiptMetric,
+          sharpeningReceiptFixed[cell]! / SPARSE_CM12_TRANSPORT_FIXED_SCALE,
+          sharpeningReceiptFixed[reflectedCell]! / SPARSE_CM12_TRANSPORT_FIXED_SCALE,
+          1e-5, detail);
+        compare(sharpeningSourceDensityMetric, sharpeningDensityFloat[cell]!,
+          sharpeningDensityFloat[reflectedCell]!, 1e-5, detail);
+        compare(sharpeningDeltaMetric, sharpeningDeltaFloat[cell]!,
+          sharpeningDeltaFloat[reflectedCell]!, 1e-5, detail);
+        compare(gammaSnapshotDensityMetric, gammaSnapshotDensityFloat[cell]!,
+          gammaSnapshotDensityFloat[reflectedCell]!, 1e-5, detail);
+        compare(gammaSnapshotGammaMetric, gammaSnapshotGammaFloat[cell]!,
+          gammaSnapshotGammaFloat[reflectedCell]!, 1e-5, detail);
+        for (let axis = 0; axis < 3; axis += 1) {
+          const source = departureFloat[3 * cell + axis]!;
+          const reflected = departureFloat[3 * reflectedCell + axis]!;
+          const expected = axis === 2 ? nz - source : source;
+          compare(departureMetric, expected, reflected, 1e-5, { ...detail, axis });
+        }
+    }
+    const gatheredGammaWorst = massGammaMetric.worst;
+    if (gatheredGammaWorst) {
+      const sourceCell = Number(gatheredGammaWorst.sourceStableCell);
+      const reflectedCell = Number(gatheredGammaWorst.reflectedStableCell);
+      massGammaMetric.worst = Object.freeze({ ...gatheredGammaWorst,
+        sourceDensity: massDensityFloat[sourceCell],
+        reflectedDensity: massDensityFloat[reflectedCell] });
+    }
+    const stencilWeightFloat = new Float32Array(stencilWeights.buffer,
+      stencilWeights.byteOffset, stencilWeights.length);
+    const betaWorst = betaMetric.worst as Readonly<Record<string, unknown>> | undefined;
+    if (betaWorst) {
+      const contributions = (donor: number) => {
+        let normalizedWeightSum = 0;
+        const receivers: Array<Readonly<Record<string, unknown>>> = [];
+        for (let receiver = 0; receiver < capacity; receiver += 1) {
+          let visible = 0;
+          for (let corner = 0; corner < 8; corner += 1) {
+            visible += stencilWeightFloat[8 * receiver + corner]!;
+          }
+          if (visible <= 1e-9) continue;
+          for (let corner = 0; corner < 8; corner += 1) {
+            if (stencilCells[8 * receiver + corner] !== donor) continue;
+            const weight = stencilWeightFloat[8 * receiver + corner]! / visible;
+            if (weight <= 0) continue;
+            normalizedWeightSum += weight;
+            const coordinate = coordinateByCell.get(receiver);
+            const span = spanByCell.get(receiver);
+            const reflectedCoordinate = coordinate && span
+              ? [coordinate[0], coordinate[1], nz - coordinate[2] - span[2]] as const
+              : undefined;
+            const reflectedReceiver = reflectedCoordinate
+              ? denseCell[reflectedCoordinate[0] + nx * (reflectedCoordinate[1]
+                + ny * reflectedCoordinate[2])] : undefined;
+            receivers.push(Object.freeze({ receiver, coordinate,
+              reflectedCoordinate, reflectedReceiver, corner, normalizedWeight: weight,
+              departure: Array.from(departureFloat.slice(3 * receiver, 3 * receiver + 3)),
+              reflectedDeparture: reflectedReceiver === undefined ? undefined
+                : Array.from(departureFloat.slice(
+                  3 * reflectedReceiver, 3 * reflectedReceiver + 3)) }));
+          }
+        }
+        receivers.sort((a, b) => Number(b.normalizedWeight) - Number(a.normalizedWeight));
+        return Object.freeze({ normalizedWeightSum, receiverCount: receivers.length,
+          receivers: Object.freeze(receivers.slice(0, 12)) });
+      };
+      betaMetric.worst = Object.freeze({ ...betaWorst,
+        sourceContributions: contributions(Number(betaWorst.sourceStableCell)),
+        reflectedContributions: contributions(Number(betaWorst.reflectedStableCell)) });
+    }
+    const sharpeningWorst = sharpeningReceiptMetric.worst as
+      Readonly<Record<string, unknown>> | undefined;
+    if (sharpeningWorst) {
+      const contributions = (target: number) => {
+        const sources: Array<Readonly<Record<string, unknown>>> = [];
+        for (let source = 0; source < capacity; source += 1) {
+          const removed = sharpeningRemovedSigned[source]!;
+          if (removed <= 0) continue;
+          let total = 0;
+          for (let corner = 0; corner < 8; corner += 1) {
+            if (sharpeningStencilCells[8 * source + corner] !== 0xffff_ffff) {
+              total += sharpeningStencilWeightFloat[8 * source + corner]!;
+            }
+          }
+          let contribution = 0, distributed = 0;
+          if (total > 1e-8) {
+            for (let corner = 0; corner < 8; corner += 1) {
+              const destination = sharpeningStencilCells[8 * source + corner]!;
+              const weight = sharpeningStencilWeightFloat[8 * source + corner]!;
+              if (destination === 0xffff_ffff || weight <= 0) continue;
+              const offered = Math.floor(removed * weight / total);
+              if (destination === target) contribution += offered;
+              distributed += offered;
+            }
+          }
+          if (source === target) contribution += removed - distributed;
+          if (contribution === 0) continue;
+          const coordinate = coordinateByCell.get(source);
+          const span = spanByCell.get(source);
+          const reflectedCoordinate = coordinate && span
+            ? [coordinate[0], coordinate[1], nz - coordinate[2] - span[2]] as const
+            : undefined;
+          const reflectedSource = reflectedCoordinate
+            ? denseCell[reflectedCoordinate[0] + nx * (reflectedCoordinate[1]
+              + ny * reflectedCoordinate[2])] : undefined;
+          const geometryPeers = coordinate && span
+            ? geometryCells.get(`${coordinate.join(",")}|${span.join(",")}`) : undefined;
+          const reflectedGeometryPeers = reflectedCoordinate && span
+            ? geometryCells.get(`${reflectedCoordinate.join(",")}|${span.join(",")}`)
+            : undefined;
+          sources.push(Object.freeze({ source, coordinate, reflectedCoordinate,
+            reflectedSource, geometryPeers, reflectedGeometryPeers,
+            contributionFixed: contribution,
+            contributionMass: contribution / SPARSE_CM12_TRANSPORT_FIXED_SCALE,
+            removedFixed: removed, density: sharpeningDensityFloat[source],
+            delta: sharpeningDeltaFloat[source],
+            departure: Array.from(sharpeningDepartureFloat.slice(
+              3 * source, 3 * source + 3)) }));
+        }
+        sources.sort((a, b) => Math.abs(Number(b.contributionFixed))
+          - Math.abs(Number(a.contributionFixed)));
+        return Object.freeze({ sourceCount: sources.length,
+          sources: Object.freeze(sources.slice(0, 20)) });
+      };
+      sharpeningReceiptMetric.worst = Object.freeze({ ...sharpeningWorst,
+        sourceContributions: contributions(Number(sharpeningWorst.sourceStableCell)),
+        reflectedContributions: contributions(
+          Number(sharpeningWorst.reflectedStableCell)) });
+    }
+    const reflectedZ = Object.freeze({ betaFixed: Object.freeze(betaMetric),
+      deficitDensityFixed: Object.freeze(deficitMetric),
+      gatheredDensity: Object.freeze(massMetric),
+      gatheredGamma: Object.freeze(massGammaMetric),
+      departureFineCells: Object.freeze(departureMetric),
+      sharpeningReceiptMass: Object.freeze(sharpeningReceiptMetric),
+      sharpeningSourceDensity: Object.freeze(sharpeningSourceDensityMetric),
+      sharpeningDeltaDensity: Object.freeze(sharpeningDeltaMetric),
+      gammaSnapshotDensity: Object.freeze(gammaSnapshotDensityMetric),
+      gammaSnapshotGamma: Object.freeze(gammaSnapshotGammaMetric) });
     const [stencilCellsSha256, stencilWeightBitsSha256, departureBitsSha256,
       betaFixedSha256, deficitDensityFixedSha256, deficitGammaFixedSha256,
       massReceiptSha256, packetSha256, publishedPacketSha256] = await Promise.all([
@@ -7524,7 +7885,7 @@ export class WebGPUSparseCM12Resident {
       frameGeneration, packetGeneration: transportTopologyGeneration,
       publishedPacketGeneration,
       effectiveVelocityTopologyGeneration: effectiveTopology,
-      effectiveVelocityFrameGeneration: effectiveFrame });
+      effectiveVelocityFrameGeneration: effectiveFrame, reflectedZ });
   }
 
   async readFramePlanPresentationFaultRecordQA() {

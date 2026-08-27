@@ -2,6 +2,8 @@ import { pathToFileURL } from "node:url";
 import type { GPUSolverInstance, SimulationMethod } from "../core/method-contract";
 import { octreeDebugSources } from "../methods/octree-shared/octree-debug-sources";
 import { losassoMethod } from "../methods/losasso/method";
+import { decodeAdaptiveVelocityGPUFailureDiagnostics }
+  from "../methods/losasso/harness-adaptive-audits";
 import { powerLiquidsMethod } from "../methods/power/method";
 import { uniformMethod } from "../methods/uniform/method";
 import { initializeRigidBodies } from "../core/rigid-body";
@@ -1013,6 +1015,27 @@ function comparisonKinematicSymmetry(
   let scalarWorst: Readonly<Record<string, unknown>> | undefined;
   let vectorWorst: Readonly<Record<string, unknown>> | undefined;
   const transforms = ["reflect-x", "reflect-z", "swap-xz"] as const;
+  // Exact equality remains useful for the deliberately D4-symmetric expansion
+  // oracle, but the corner-authored mini dam needs a physical error receipt for
+  // its authored x/z exchange. Keep the transforms separate so the two invalid
+  // reflections cannot hide that valid comparison.
+  const volumeTolerance = 1e-5;
+  const velocityTolerance_m_s = 1e-5;
+  const byTransform = Object.fromEntries(transforms.map((transform) => [transform, {
+    volume: { comparedValues: 0, nonFiniteCount: 0, mismatchAboveToleranceCount: 0,
+      maximumAbsoluteError: 0, squaredErrorSum: 0 },
+    velocity: { comparedValues: 0, nonFiniteCount: 0, mismatchAboveToleranceCount: 0,
+      maximumAbsoluteError: 0, squaredErrorSum: 0 },
+    volumeWorst: undefined as Readonly<Record<string, unknown>> | undefined,
+    velocityWorst: undefined as Readonly<Record<string, unknown>> | undefined,
+  }])) as Record<typeof transforms[number], {
+    volume: { comparedValues: number; nonFiniteCount: number;
+      mismatchAboveToleranceCount: number; maximumAbsoluteError: number; squaredErrorSum: number };
+    velocity: { comparedValues: number; nonFiniteCount: number;
+      mismatchAboveToleranceCount: number; maximumAbsoluteError: number; squaredErrorSum: number };
+    volumeWorst: Readonly<Record<string, unknown>> | undefined;
+    velocityWorst: Readonly<Record<string, unknown>> | undefined;
+  }>;
   const target = (transform: typeof transforms[number], x: number, y: number, z: number) =>
     transform === "reflect-x" ? [nx - 1 - x, y, z]
       : transform === "reflect-z" ? [x, y, nz - 1 - z] : [z, y, x];
@@ -1032,16 +1055,26 @@ function comparisonKinematicSymmetry(
         if (!Number.isFinite(Number(velocity[3 * sourceCell + axis]))) velocityNonFiniteCount += 1;
       }
       for (const transform of transforms) {
+        const transformMetrics = byTransform[transform];
         const [tx, ty, tz] = target(transform, x, y, z);
         const targetCell = tx + nx * (ty + ny * tz);
         const sourceVolume = Number(volume[sourceCell]);
         const targetVolume = Number(volume[targetCell]);
         scalar.comparedValues += 1;
+        transformMetrics.volume.comparedValues += 1;
         if (!Number.isFinite(sourceVolume) || !Number.isFinite(targetVolume)) {
           scalar.nonFiniteCount += 1;
+          transformMetrics.volume.nonFiniteCount += 1;
         } else {
           const error = Math.abs(targetVolume - sourceVolume);
           if (!Object.is(targetVolume, sourceVolume)) scalar.exactMismatchCount += 1;
+          transformMetrics.volume.squaredErrorSum += error * error;
+          if (error > volumeTolerance) transformMetrics.volume.mismatchAboveToleranceCount += 1;
+          if (error > transformMetrics.volume.maximumAbsoluteError) {
+            transformMetrics.volume.maximumAbsoluteError = error;
+            transformMetrics.volumeWorst = { source: [x, y, z], target: [tx, ty, tz],
+              sourceValue: sourceVolume, targetValue: targetVolume, absoluteError: error };
+          }
           if (error > scalar.maximumAbsoluteError) {
             scalar.maximumAbsoluteError = error;
             scalarWorst = { transform, source: [x, y, z], target: [tx, ty, tz],
@@ -1053,11 +1086,23 @@ function comparisonKinematicSymmetry(
           const observed = Number(velocity[3 * targetCell + targetAxis(transform, axis)]);
           const wanted = expected(transform, axis, sourceVelocity);
           vector.comparedValues += 1;
+          transformMetrics.velocity.comparedValues += 1;
           if (!Number.isFinite(wanted) || !Number.isFinite(observed)) {
             vector.nonFiniteCount += 1;
+            transformMetrics.velocity.nonFiniteCount += 1;
           } else {
             const error = Math.abs(observed - wanted);
             if (!Object.is(observed, wanted)) vector.exactMismatchCount += 1;
+            transformMetrics.velocity.squaredErrorSum += error * error;
+            if (error > velocityTolerance_m_s) {
+              transformMetrics.velocity.mismatchAboveToleranceCount += 1;
+            }
+            if (error > transformMetrics.velocity.maximumAbsoluteError) {
+              transformMetrics.velocity.maximumAbsoluteError = error;
+              transformMetrics.velocityWorst = { source: [x, y, z], target: [tx, ty, tz], axis,
+                targetAxis: targetAxis(transform, axis), sourceValue: sourceVelocity,
+                expectedValue: wanted, targetValue: observed, absoluteError: error };
+            }
             if (error > vector.maximumAbsoluteError) {
               vector.maximumAbsoluteError = error;
               vectorWorst = { transform, source: [x, y, z], target: [tx, ty, tz], axis,
@@ -1069,9 +1114,28 @@ function comparisonKinematicSymmetry(
       }
     }
   }
+  const physicalByTransform = Object.fromEntries(transforms.map((transform) => {
+    const metrics = byTransform[transform];
+    const finish = (field: typeof metrics.volume) => Object.freeze({
+      comparedValues: field.comparedValues,
+      nonFiniteCount: field.nonFiniteCount,
+      mismatchAboveToleranceCount: field.mismatchAboveToleranceCount,
+      mismatchAboveToleranceFraction: field.mismatchAboveToleranceCount
+        / Math.max(1, field.comparedValues - field.nonFiniteCount),
+      maximumAbsoluteError: field.maximumAbsoluteError,
+      rmsError: Math.sqrt(field.squaredErrorSum
+        / Math.max(1, field.comparedValues - field.nonFiniteCount)),
+    });
+    return [transform, Object.freeze({
+      volume: finish(metrics.volume), velocity: finish(metrics.velocity),
+      volumeWorst: metrics.volumeWorst, velocityWorst: metrics.velocityWorst,
+    })];
+  }));
   return Object.freeze({ volume: Object.freeze({ ...scalar, worst: scalarWorst }),
     velocity: Object.freeze({ ...vector, worst: vectorWorst }),
     volumeNonFiniteCount, velocityNonFiniteCount,
+    physicalTolerance: Object.freeze({ volume: volumeTolerance, velocity_m_s: velocityTolerance_m_s }),
+    byTransform: Object.freeze(physicalByTransform),
     frontCircularity: measureHorizontalFrontCircularity(volume, grid) });
 }
 
@@ -3042,7 +3106,29 @@ async function runGPU(
         continue;
       }
     }
-    const accepted = solver.advanceTo(requestedTime, bodies);
+    let accepted: boolean;
+    try {
+      accepted = solver.advanceTo(requestedTime, bodies);
+    } catch (error) {
+      // Mini32's physical exchange-symmetry lane uses this only after the
+      // fail-closed solver has already rejected a real candidate field.  The
+      // readback names the missing physical donor path; it never alters or
+      // repairs the simulation state.
+      if (comparisonMetricsRequested && scenarioId === "minimal-power-dam-break-32") {
+        await device.queue.onSubmittedWorkDone();
+        const projection = (solver as GPUSolverInstance & { octreeProjection?: {
+          readAdaptiveVelocityDiagnostics?: () => Promise<readonly number[] | undefined>;
+        } }).octreeProjection;
+        const diagnostics = await projection?.readAdaptiveVelocityDiagnostics?.();
+        if (diagnostics) console.log(JSON.stringify({ scenario: scenarioId,
+          method: resultMethod, phase: "mini32-physics-symmetry-failure-cause",
+          step: steps + 1, requestedTime_s: requestedTime,
+          adaptiveVelocity: decodeAdaptiveVelocityGPUFailureDiagnostics(diagnostics,
+            [solver.info.nx, solver.info.ny, solver.info.nz]),
+        }));
+      }
+      throw error;
+    }
     if (!accepted) {
       // WebGPURenderer still presents an admitted frame when advanceTo declines
       // to move its submitted clock; only saturated RAF callbacks skip render.

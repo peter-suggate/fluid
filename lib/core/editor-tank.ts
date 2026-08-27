@@ -1,5 +1,5 @@
-import { repairSceneForContainer, sceneAtFinestCellSize } from "./scene-scale";
-import { solidVoxelEditsForScene, solidVoxelShellForScene, latticeAxisDimension, sceneLatticeDimensions, DEFAULT_MAXIMUM_LATTICE_DIMENSION, MINIMUM_LATTICE_DIMENSION } from "./scene-lattice";
+import { sceneAtContainerExtents, sceneAtFinestCellSize } from "./scene-scale";
+import { latticeAxisDimension, sceneLatticeDimensions, DEFAULT_MAXIMUM_LATTICE_DIMENSION, MINIMUM_LATTICE_DIMENSION } from "./scene-lattice";
 import { cloneScene, type SceneDescription, type Vec3 } from "./model";
 import {
   boxHandles,
@@ -92,11 +92,7 @@ export function tankResizePatch(
   scene: SceneDescription,
   extents: { width_m: number; height_m: number; depth_m: number },
 ): Pick<SceneDescription, "container" | "fluid" | "terrain" | "solidVoxels"> {
-  const next = cloneScene(scene);
-  const authoredEdits = solidVoxelEditsForScene(next);
-  next.container = { ...next.container, ...extents };
-  next.solidVoxels = [...solidVoxelShellForScene(next), ...authoredEdits];
-  repairSceneForContainer(next);
+  const next = sceneAtContainerExtents(scene, extents);
   return { container: next.container, fluid: next.fluid, terrain: next.terrain,
     solidVoxels: next.solidVoxels };
 }

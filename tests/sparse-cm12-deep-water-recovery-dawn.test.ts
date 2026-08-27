@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
+import { sceneAtContainerExtents } from "../lib/core/scene-scale";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
   acquireWebGPUExclusiveLock,
@@ -18,9 +19,10 @@ import { SPARSE_CM12_ACTIVITY_POLICY } from
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
 
-const maximumSpeed = (velocity: Float32Array): number => {
+const maximumLiquidSpeed = (velocity: Float32Array, density: Float32Array): number => {
   let maximum = 0;
   for (let at = 0; at < velocity.length; at += 4) {
+    if (density[at / 4]! < 0.5) continue;
     maximum = Math.max(maximum, Math.hypot(
       velocity[at]!, velocity[at + 1]!, velocity[at + 2]!,
     ));
@@ -59,11 +61,11 @@ dawnTest("large hydrostatic stays still, refines on impact, and restores deep co
         uncaptured.push(event.error.message);
       });
 
-      const scene = sceneDocument(getSceneDefinition("water-box-tank-fill"));
+      const scene = sceneAtContainerExtents(
+        sceneDocument(getSceneDefinition("water-box-tank-fill")),
+        { width_m: 1.6, height_m: 2.4, depth_m: 1.6 },
+      );
       scene.rigidBodies = [];
-      scene.container.width_m = 1.6;
-      scene.container.height_m = 2.4;
-      scene.container.depth_m = 1.6;
       scene.container.fillFraction = 0.7;
       scene.voxelDomain.finestCellSize_m = 0.05;
       scene.fluid.surfaceTension_N_m = 0;
@@ -80,7 +82,27 @@ dawnTest("large hydrostatic stays still, refines on impact, and restores deep co
         },
         () => {},
       );
+      await solver.waitForSimulationReady();
       assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], [32, 48, 32]);
+
+      const initialActivity = await solver.readGPUActivityPolicy();
+      const initialEffectiveRungs = new Set(initialActivity.bricks
+        .filter((brick) => brick.active && (brick.reasons & 64) !== 0)
+        .map((brick) => brick.acceptedResolution / brick.spanBricks));
+      assert.deepEqual([...initialEffectiveRungs].sort((left, right) => left - right),
+        [1, 2, 4, 8],
+        "the resized tank must publish the complete effective 8/4/2/1 ladder");
+      const bottomCorners = initialActivity.bricks.filter((brick) => brick.active
+        && brick.coordinate[1] === 0
+        && (brick.coordinate[0] === 0 || brick.coordinate[0] + brick.spanBricks === 4)
+        && (brick.coordinate[2] === 0 || brick.coordinate[2] + brick.spanBricks === 4));
+      assert.equal(bottomCorners.length, 4,
+        "all four resized tank corners must have an accepted bottom leaf");
+      assert.ok(bottomCorners.every((brick) =>
+        brick.acceptedResolution / brick.spanBricks === 1),
+      `every bottom corner must reach the coarsest effective rung; ${bottomCorners
+        .map((brick) => `${brick.coordinate.join(",")}:${brick.acceptedResolution}`
+          + `/span${brick.spanBricks}`).join(" ")}`);
 
       const initialDensity = (await solver.readDiagnosticFields()).density;
       let oneSecondTopology = "";
@@ -91,9 +113,9 @@ dawnTest("large hydrostatic stays still, refines on impact, and restores deep co
         const fields = await solver.readDiagnosticFields();
         assertExactField(fields.density, initialDensity,
           `hydrostatic density at ${step * CM12_PAPER_DT_S}s`);
-        assert.ok(maximumSpeed(fields.velocity) <= 5e-6,
+        assert.ok(maximumLiquidSpeed(fields.velocity, fields.density) <= 5e-6,
           `hydrostatic maximum speed at ${step * CM12_PAPER_DT_S}s was ${
-            maximumSpeed(fields.velocity)} m/s`);
+            maximumLiquidSpeed(fields.velocity, fields.density)} m/s`);
         if (step === 30) {
           const activity = await solver.readGPUActivityPolicy();
           oneSecondTopology = activity.bricks.filter((brick) => brick.active)
@@ -146,7 +168,8 @@ dawnTest("large hydrostatic stays still, refines on impact, and restores deep co
         const exactDeepTopology = [...deepBaseline].every(([key, baseline]) =>
           recoveredByKey.get(key) === baseline);
         if (!exactDeepTopology) continue;
-        const speed = maximumSpeed((await solver.readDiagnosticFields()).velocity);
+        const fields = await solver.readDiagnosticFields();
+        const speed = maximumLiquidSpeed(fields.velocity, fields.density);
         quietestRecoveredSpeed = Math.min(quietestRecoveredSpeed, speed);
         if (speed <= 0.1) recoveredAt_s = (step - 60) * CM12_PAPER_DT_S;
       }

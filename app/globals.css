@@ -698,6 +698,17 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .transport-cluster .record-button { color: var(--red); }
 .transport-cluster .record-button.active { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
 .transport-cluster .stop-gpu-button { border-color: var(--amber-line); color: var(--amber); }
+/* The step, between the buttons and the clock it paces: a pair of nudge
+   buttons narrower than the transport's verbs, around a number that is typed
+   into as readily as it is nudged. */
+.transport-step { display: flex; align-items: center; gap: 3px; margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--line); color: var(--ink); font-variant-numeric: tabular-nums; }
+.transport-step small { color: var(--dim); font: var(--text-micro); }
+.transport-cluster .transport-step button { min-width: 22px; height: 22px; padding: 0; font-size: var(--size-2); }
+.transport-step input { width: 52px; height: 22px; padding: 0 4px; border: 1px solid var(--line); background: transparent; color: var(--ink); font: var(--text-readout); text-align: right; -moz-appearance: textfield; appearance: textfield; }
+.transport-step input::-webkit-outer-spin-button, .transport-step input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.transport-step input:focus { outline: none; border-color: var(--accent-line); }
+.transport-step input:disabled { opacity: .45; }
+.transport-step[data-pinned="true"] input { color: var(--amber); }
 .transport-time { display: flex; align-items: baseline; gap: 4px; margin-left: 4px; padding: 0 8px; color: var(--ink); font-variant-numeric: tabular-nums; }
 /* Wide enough for the four decimals it prints, and no wider — the unit belongs
    beside the number, not a space away from it. */

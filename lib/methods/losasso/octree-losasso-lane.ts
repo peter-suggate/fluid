@@ -1569,6 +1569,8 @@ export class OctreeLosassoCoarseDynamicsLane implements OctreeCoarseDynamicsLane
       return undefined;
     }
     const authorityControl = backend.sources.operator.control;
+    const pressureFaces = backend.sources.operator.faces;
+    const pressureRowToGraphLeaf = graph.pressureRowToGraphLeaf;
     const faceGeometry = backend.sources.dynamics.faceGeometry;
     const projectedFaceVelocity = backend.sources.dynamics.projectedVelocity;
     const predictedFaceVelocity = backend.sources.dynamics.predictedVelocity;
@@ -1578,7 +1580,10 @@ export class OctreeLosassoCoarseDynamicsLane implements OctreeCoarseDynamicsLane
     const phiControlBytes = 80;
     const authorityControlOffset = graphControlBytes + phiControlBytes;
     const faceGeometryOffset = authorityControlOffset + authorityControl.size;
-    const projectedFaceVelocityOffset = faceGeometryOffset + faceGeometry.size;
+    const pressureFacesOffset = faceGeometryOffset + faceGeometry.size;
+    const pressureRowToGraphLeafOffset = pressureFacesOffset + pressureFaces.size;
+    const projectedFaceVelocityOffset = pressureRowToGraphLeafOffset
+      + pressureRowToGraphLeaf.size;
     const predictedFaceVelocityOffset = projectedFaceVelocityOffset
       + projectedFaceVelocity.size;
     const advectedFaceVelocityOffset = predictedFaceVelocityOffset
@@ -1625,6 +1630,10 @@ export class OctreeLosassoCoarseDynamicsLane implements OctreeCoarseDynamicsLane
       authorityControl.size);
     encoder.copyBufferToBuffer(faceGeometry, 0, readback, faceGeometryOffset,
       faceGeometry.size);
+    encoder.copyBufferToBuffer(pressureFaces, 0, readback, pressureFacesOffset,
+      pressureFaces.size);
+    encoder.copyBufferToBuffer(pressureRowToGraphLeaf, 0, readback,
+      pressureRowToGraphLeafOffset, pressureRowToGraphLeaf.size);
     encoder.copyBufferToBuffer(projectedFaceVelocity, 0, readback,
       projectedFaceVelocityOffset, projectedFaceVelocity.size);
     encoder.copyBufferToBuffer(predictedFaceVelocity, 0, readback,
@@ -1699,6 +1708,10 @@ export class OctreeLosassoCoarseDynamicsLane implements OctreeCoarseDynamicsLane
       const stencilWords = Math.min(stencil.records.size / 4, 3 * 36 * nodeCount);
       const acceptedFaceGeometry = Uint32Array.from(new Uint32Array(mapped,
         faceGeometryOffset, 4 * faceCount));
+      const acceptedPressureFaces = Uint32Array.from(new Uint32Array(mapped,
+        pressureFacesOffset, 8 * faceCount));
+      const acceptedPressureRowToGraphLeaf = Uint32Array.from(new Uint32Array(mapped,
+        pressureRowToGraphLeafOffset, pressureRowToGraphLeaf.size / 4));
       const projectedFaces = Uint32Array.from(new Uint32Array(mapped,
         projectedFaceVelocityOffset, faceCount));
       const predictedFaces = Uint32Array.from(new Uint32Array(mapped,
@@ -1752,6 +1765,8 @@ export class OctreeLosassoCoarseDynamicsLane implements OctreeCoarseDynamicsLane
         phiReceiptsOffset, phi.receipts.size / 4));
       return Object.freeze({ authorityControl: authority,
         faceGeometry: acceptedFaceGeometry,
+        pressureFaces: acceptedPressureFaces,
+        pressureRowToGraphLeaf: acceptedPressureRowToGraphLeaf,
         projectedFaceVelocity: projectedFaces,
         predictedFaceVelocity: predictedFaces,
         advectedFaceVelocity: advectedFaces,
