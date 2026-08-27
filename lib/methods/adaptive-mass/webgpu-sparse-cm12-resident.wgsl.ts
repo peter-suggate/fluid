@@ -1382,9 +1382,7 @@ fn rowArea(id:u32)->f32{
 // kernels project occupied voxels into finite-volume apertures on the device;
 // moving rigid coverage remains in its separate coupling state plane.
 fn refreshSparseCM12SolidWorldCell(cell:u32){
-  let b=cellBase(cell);
-  let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
-  let widths=vec3f(taf(b+4u),taf(b+5u),taf(b+6u));
+  let center=cellCenter(cell);let widths=cellWidths(cell);
   let lower=vec3i(round(center-0.5*widths));
   let upper=vec3i(round(center+0.5*widths));
   var solidQ8=0u;var volume=0u;
@@ -1982,8 +1980,7 @@ ${phase1TransportQAEntries}
 fn transportStencil(position:vec3f)->TransportStencil{
   let bounded=cm12ClampToResidentWorld(position,vec3f(1e-4));
   let probe=ownerCellAt(vec3i(floor(bounded)));
-  var spans=vec3f(1.0);if(probe!=INVALID){let b=cellBase(probe);
-    spans=vec3f(taf(b+4u),taf(b+5u),taf(b+6u));}
+  var spans=vec3f(1.0);if(probe!=INVALID){spans=cellWidths(probe);}
   // Clamp to the local half-span and pull out-of-domain corners back inside,
   // as the CPU sampleWeights does. Without the clamp a cell wider than one
   // fine unit loses stencil weight at the wall (the outside corner resolves to
@@ -2380,9 +2377,7 @@ fn injectedJetVelocity()->vec3f{
   return 2.0*p.injectionRadius.xyz/max(p.frame.x,1e-8);
 }
 fn injectionCoverage(id:u32)->f32{
-  let b=cellBase(id);
-  let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
-  return injectionCoverageAt(center,cellMinimumWidth(id));
+  return injectionCoverageAt(cellCenter(id),cellMinimumWidth(id));
 }
 
 // A drop reaching an inactive brick is the same evidence as a free surface
@@ -2479,8 +2474,7 @@ fn scatterLiquidJetOverflow(@builtin(global_invocation_id)gid:vec3u){
   let density=state[p.stateOffsets0.x+id];
   let excessDensity=max(0.0,density-cellOpenFraction(id));
   if(excessDensity<=1e-7){return;}
-  let direction=normalize(p.injectionRadius.xyz);
-  let b=cellBase(id);let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
+  let direction=normalize(p.injectionRadius.xyz);let center=cellCenter(id);
   let receiver=ownerCellAt(vec3i(floor(center+direction*cellMinimumWidth(id))));
   if(receiver==INVALID||receiver==id||!cellTransportActive(receiver)){return;}
   let mass=excessDensity*cellVolume(id);
@@ -2549,7 +2543,7 @@ fn traceGammaAndBeta(@builtin(workgroup_id)wid:vec3u,
   let id=cm12MassExecutionCell(wid.x,lane,0u);
   if(id!=INVALID){if(!cellTransportActive(id)){state[destinationGamma()+id]=1.0;
       state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]=0.0;}
-    else{let b=cellBase(id);let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
+    else{let center=cellCenter(id);
       var departure=vec3f(0.0);var stencil:TransportStencil;
       departure=traceEffectiveTransportDeparture(center);
       stencil=effectiveTransportStencil(departure);
@@ -2592,9 +2586,9 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
   ${phase1QABetaCapture}
   if(donor!=INVALID&&cellTransportActive(donor)){
     let deficit=max(0.0,1.0-transportBeta(donor));
-    if(deficit>1.0/CM12_SPARSE_TRANSPORT_FIXED){let b=cellBase(donor);
+    if(deficit>1.0/CM12_SPARSE_TRANSPORT_FIXED){
       var visible=0.0;var arrivalStencil:TransportStencil;
-      let arrival=traceEffectiveTransportArrival(vec3f(taf(b),taf(b+1u),taf(b+2u)));
+      let arrival=traceEffectiveTransportArrival(cellCenter(donor));
       arrivalStencil=effectiveTransportStencil(arrival);
       for(var corner=0u;corner<8u;corner+=1u){visible+=arrivalStencil.weights[corner];}
       let donorDensity=state[sourceDensity()+donor];
@@ -2986,7 +2980,7 @@ fn sampleSharpeningField(position:vec3f)->vec4f{
 // gradient until rho=.5 or the configured paper-range D bound is reached. An invalid
 // or inactive owner is the sparse equivalent of the paper's solid-stop rule.
 fn traceSharpeningMass(source:u32)->vec3f{
-  let b=cellBase(source);var position=vec3f(taf(b),taf(b+1u),taf(b+2u));
+  var position=cellCenter(source);
   let sourceWidth=cellMinimumWidth(source);let maximumDistance=p.sharpening.x*sourceWidth;
   var travelled=0.0;
   for(var step=0u;step<40u;step+=1u){
@@ -3148,11 +3142,11 @@ fn finalizeDensityCapacityRepair(@builtin(global_invocation_id)gid:vec3u){
 // authored material are D4 symmetric.
 @compute @workgroup_size(64)
 fn preserveHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}let b=cellBase(cell);
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
   if(!cellActive(cell)){
     state[p.stateOffsets5.x+cell]=0.0;state[p.stateOffsets5.y+cell]=1.0;return;
   }
-  let center=vec3f(taf(b),taf(b+1u),taf(b+2u));let extent=f32(p.dimensions.x);
+  let center=cellCenter(cell);let extent=f32(p.dimensions.x);
   let xs=array<f32,8>(center.x,extent-center.x,center.x,extent-center.x,
     center.z,extent-center.z,center.z,extent-center.z);
   let zs=array<f32,8>(center.z,center.z,extent-center.z,extent-center.z,
@@ -4384,7 +4378,7 @@ fn preserveVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
     state[p.stateOffsets5.x+cell]=0.0;
     return;
   }
-  let b=cellBase(cell);let center=vec3f(taf(b),taf(b+1u),taf(b+2u));
+  let center=cellCenter(cell);
   let extent=f32(p.dimensions.x);
   let xs=array<f32,8>(center.x,extent-center.x,center.x,extent-center.x,
     center.z,extent-center.z,center.z,extent-center.z);
@@ -4646,7 +4640,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     }
     let ownWet=fill>=CM12_LIQUID_ISOVALUE;
     let featureDensity=max(residencyDensity,p.activityDensity.x);
-    let b=cellBase(cell);let cellCenter=vec3f(taf(b),taf(b+1u),taf(b+2u));
+    let center=cellCenter(cell);
     var exposedSides=0u;var surfaceAirSides=0u;
     let incidenceRangeForCell=incidenceRange(cell);
     let firstIncidence=incidenceRangeForCell.x;let incidenceLimit=incidenceRangeForCell.y;
@@ -4695,11 +4689,11 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
           *inverseDeformationDistance);
       }
       if(rho>featureDensity&&!sideHasFluid){
-        let side=select(0u,1u,rowPosition[axis]>cellCenter[axis]);
+        let side=select(0u,1u,rowPosition[axis]>center[axis]);
         exposedSides|=1u<<(2u*axis+side);
       }
       if(fractionalCell&&!sideHasSurfaceFluid){
-        let side=select(0u,1u,rowPosition[axis]>cellCenter[axis]);
+        let side=select(0u,1u,rowPosition[axis]>center[axis]);
         surfaceAirSides|=1u<<(2u*axis+side);
       }
       if(crosses){
@@ -5412,22 +5406,20 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
     &&!complete;
   let leaf=atomicLoad(&topologyArena[pageBase]);
   let faceCount=3u*(resolution+1u)*resolution*resolution;
-  let cellBase=16u;
-  let rowBase=cellBase+8u*cellCount;
-  let termBase=rowBase+9u*faceCount;
-  let incidenceOffsets=termBase+4u*faceCount;
-  let incidenceRecords=incidenceOffsets+cellCount+1u;
+  let rowBase=16u;
+  let termBase=rowBase+7u*faceCount;
+  let incidenceRecords=termBase+4u*faceCount;
   let globalCellBase=ta(2u)+page*cellCount;
   let globalRowBase=ta(3u)+page*faceCount;
   let globalTermBase=ta(4u)+page*(2u*faceCount);
-  let globalIncidenceBase=ta(5u)+page*(6u*cellCount);
   if(synthesize&&lane==0u){
     atomicStore(&topologyArena[pageBase+4u],faceCount);
     atomicStore(&topologyArena[pageBase+5u],6u*cellCount);
-    atomicStore(&topologyArena[pageBase+6u],cellBase);
+    // Dynamic B8 cell geometry is implicit in leaf + stable local index.
+    atomicStore(&topologyArena[pageBase+6u],0u);
     atomicStore(&topologyArena[pageBase+7u],rowBase);
     atomicStore(&topologyArena[pageBase+8u],termBase);
-    atomicStore(&topologyArena[pageBase+9u],incidenceOffsets);
+    atomicStore(&topologyArena[pageBase+9u],0u);
     atomicStore(&topologyArena[pageBase+10u],incidenceRecords);
     atomicStore(&topologyArena[pageBase+12u],0u);
     atomicStore(&topologyArena[pageBase+13u],0u);
@@ -5437,15 +5429,6 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
     let z=local/(resolution*resolution);let rem=local-z*resolution*resolution;
     let y=rem/resolution;let x=rem-y*resolution;
     let lower=origin+vec3i(i32(x),i32(y),i32(z));
-    let cell=pageBase+cellBase+8u*local;
-    atomicStore(&topologyArena[cell],bitcast<u32>(f32(lower.x)+0.5));
-    atomicStore(&topologyArena[cell+1u],bitcast<u32>(f32(lower.y)+0.5));
-    atomicStore(&topologyArena[cell+2u],bitcast<u32>(f32(lower.z)+0.5));
-    atomicStore(&topologyArena[cell+3u],bitcast<u32>(1.0));
-    atomicStore(&topologyArena[cell+4u],bitcast<u32>(1.0));
-    atomicStore(&topologyArena[cell+5u],bitcast<u32>(1.0));
-    atomicStore(&topologyArena[cell+6u],bitcast<u32>(1.0));
-    atomicStore(&topologyArena[cell+7u],(leaf<<5u)|resolution);
     let stableCell=globalCellBase+local;
     state[p.stateOffsets0.x+stableCell]=0.0;
     state[p.stateOffsets0.y+stableCell]=0.0;
@@ -5465,8 +5448,6 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
       state[solidVoxelCellOpenOffset()+stableCell]=1.0
         -f32(cm12SolidVoxelFractionQ8(lower))/255.0;
     }
-    atomicStore(&topologyArena[pageBase+incidenceOffsets+local],
-      globalIncidenceBase+6u*local);
     for(var side=0u;side<6u;side+=1u){
       let axis=side/2u;let positive=(side&1u)!=0u;
       let q=vec3u(x,y,z);let faceAxis=q[axis]+select(0u,1u,positive);
@@ -5475,13 +5456,13 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
         +faceAxis+(resolution+1u)*(u+resolution*v);
       let boundary=faceAxis==0u||faceAxis==resolution;
       let term=2u*row+select(1u,0u,positive||boundary);
-      let incidence=pageBase+incidenceRecords+2u*(6u*local+side);
-      atomicStore(&topologyArena[incidence],globalRowBase+row);
-      atomicStore(&topologyArena[incidence+1u],globalTermBase+term);
+      let incidence=dynamicIncidenceOverrideAt(pageBase,local,side);
+      if(incidence!=INVALID){
+        atomicStore(&topologyArena[incidence],globalRowBase+row);
+        atomicStore(&topologyArena[incidence+1u],globalTermBase+term);
+      }
     }
   }
-  if(synthesize&&lane==0u){atomicStore(&topologyArena[pageBase+incidenceOffsets+cellCount],
-    globalIncidenceBase+6u*cellCount);}
   for(var row=lane;row<select(0u,faceCount,synthesize);row+=64u){
     let perAxis=(resolution+1u)*resolution*resolution;
     let axis=row/perAxis;let local=row-axis*perAxis;
@@ -5511,14 +5492,11 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
     atomicStore(&topologyArena[pageBase+rowBase+faceCount+row],metadata);
     atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+row],
       bitcast<u32>(select(1.0,2.0,boundary)));
-    atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+row],bitcast<u32>(1.0));
-    atomicStore(&topologyArena[pageBase+rowBase+4u*faceCount+row],
+    atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+row],
       bitcast<u32>(select(1.0,0.5,boundary)));
-    atomicStore(&topologyArena[pageBase+rowBase+5u*faceCount+row],
-      bitcast<u32>(select(0.0,0.5,boundary)));
-    atomicStore(&topologyArena[pageBase+rowBase+6u*faceCount+row],bitcast<u32>(center.x));
-    atomicStore(&topologyArena[pageBase+rowBase+7u*faceCount+row],bitcast<u32>(center.y));
-    atomicStore(&topologyArena[pageBase+rowBase+8u*faceCount+row],bitcast<u32>(center.z));
+    atomicStore(&topologyArena[pageBase+rowBase+4u*faceCount+row],bitcast<u32>(center.x));
+    atomicStore(&topologyArena[pageBase+rowBase+5u*faceCount+row],bitcast<u32>(center.y));
+    atomicStore(&topologyArena[pageBase+rowBase+6u*faceCount+row],bitcast<u32>(center.z));
     let stableRow=globalRowBase+row;
     state[p.stateOffsets1.z+stableRow]=0.0;
     state[p.stateOffsets1.w+stableRow]=0.0;
@@ -5604,7 +5582,6 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
   let faceCount=3u*(resolution+1u)*resolution*resolution;
   let rowBase=atomicLoad(&topologyArena[pageBase+7u]);
   let termBase=atomicLoad(&topologyArena[pageBase+8u]);
-  let incidenceRecords=atomicLoad(&topologyArena[pageBase+10u]);
   let globalCellBase=ta(2u)+page*cellCount;
   let globalRowBase=ta(3u)+page*faceCount;
   let globalTermBase=ta(4u)+page*(2u*faceCount);
@@ -5629,8 +5606,7 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
           let upperLocal=upperQ.x+resolution*(upperQ.y+resolution*upperQ.z);
           let upperCell=ta(2u)+upperPage*cellCount+upperLocal;
           let term=pageBase+termBase+4u*positiveRow;
-          let upperIncidenceBase=atomicLoad(&topologyArena[upperBase+10u]);
-          let incidence=upperBase+upperIncidenceBase+2u*(6u*upperLocal+2u*axis);
+          let incidence=dynamicIncidenceOverrideAt(upperBase,upperLocal,2u*axis);
           if(pageEnabled&&candidateBrickActive(upperLeaf)){
             atomicStore(&topologyArena[term+2u],upperCell);
             atomicStore(&topologyArena[term+3u],bitcast<u32>(1.0));
@@ -5639,7 +5615,7 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
             atomicStore(&topologyArena[pageBase+rowBase+faceCount+positiveRow],axis<<30u);
             atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+positiveRow],
               bitcast<u32>(1.0));
-            atomicStore(&topologyArena[pageBase+rowBase+4u*faceCount+positiveRow],
+            atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+positiveRow],
               bitcast<u32>(1.0));
             atomicStore(&topologyArena[incidence],globalRowBase+positiveRow);
             atomicStore(&topologyArena[incidence+1u],globalTermBase+2u*positiveRow+1u);
@@ -5652,7 +5628,7 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
               (axis<<30u)|(3u<<28u));
             atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+positiveRow],
               bitcast<u32>(2.0));
-            atomicStore(&topologyArena[pageBase+rowBase+4u*faceCount+positiveRow],
+            atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+positiveRow],
               bitcast<u32>(0.5));
             let upperRows=3u*(resolution+1u)*resolution*resolution;
             let upperGlobalRow=ta(3u)+upperPage*upperRows
@@ -5690,7 +5666,7 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
           atomicStore(&topologyArena[pageBase+rowBase+faceCount+positiveRow],axis<<30u);
           atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+positiveRow],
             bitcast<u32>(1.0));
-          atomicStore(&topologyArena[pageBase+rowBase+4u*faceCount+positiveRow],
+          atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+positiveRow],
             bitcast<u32>(1.0));
           let hostIncidenceBase=ta(10u);
           var hostIncidencePatched=false;
@@ -5723,7 +5699,7 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
               (axis<<30u)|(3u<<28u));
             atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+positiveRow],
               bitcast<u32>(2.0));
-            atomicStore(&topologyArena[pageBase+rowBase+4u*faceCount+positiveRow],
+            atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+positiveRow],
               bitcast<u32>(0.5));
           }
         }else{
@@ -5734,7 +5710,7 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
             (axis<<30u)|(3u<<28u));
           atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+positiveRow],
             bitcast<u32>(2.0));
-          atomicStore(&topologyArena[pageBase+rowBase+4u*faceCount+positiveRow],
+          atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+positiveRow],
             bitcast<u32>(0.5));
         }
       }
@@ -5771,7 +5747,7 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
         atomicStore(&topologyArena[pageBase+rowBase+faceCount+negativeRow],axis<<30u);
         atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+negativeRow],
           bitcast<u32>(1.0));
-        atomicStore(&topologyArena[pageBase+rowBase+4u*faceCount+negativeRow],
+        atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+negativeRow],
           bitcast<u32>(1.0));
         for(var hostIncidence=begin;hostIncidence<end;hostIncidence+=1u){
           let hostRow=atomicLoad(&topologyArena[
@@ -5797,7 +5773,7 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
       }else{
         restoreHostExteriorIncidence(lowerOwner.x,seamRow,seamTerm);
       }
-      let incidence=pageBase+incidenceRecords+2u*(6u*ownLocal+2u*axis);
+      let incidence=dynamicIncidenceOverrideAt(pageBase,ownLocal,2u*axis);
       if(hostSeamEnabled&&hostIncidencePatched){
         atomicStore(&topologyArena[incidence],seamRow);
         atomicStore(&topologyArena[incidence+1u],seamTerm+1u);
@@ -5810,7 +5786,7 @@ fn connectSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
           (axis<<30u)|(3u<<28u));
         atomicStore(&topologyArena[pageBase+rowBase+2u*faceCount+negativeRow],
           bitcast<u32>(2.0));
-        atomicStore(&topologyArena[pageBase+rowBase+4u*faceCount+negativeRow],
+        atomicStore(&topologyArena[pageBase+rowBase+3u*faceCount+negativeRow],
           bitcast<u32>(0.5));
         atomicStore(&topologyArena[incidence],seamRow);
         atomicStore(&topologyArena[incidence+1u],seamTerm);

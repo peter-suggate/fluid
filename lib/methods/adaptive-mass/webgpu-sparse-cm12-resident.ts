@@ -1041,16 +1041,14 @@ const candidateFloatsPerBrick = (brickFineResolution: number) =>
 const GPU_TOPOLOGY_PAGE_POOL_MINIMUM = 32;
 const GPU_TOPOLOGY_PAGE_POOL_MAXIMUM = 512;
 const GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS = 16;
-const GPU_TOPOLOGY_CELL_RECORD_WORDS = 8;
 const gpuTopologyCellPageWords = (brickFineResolution: number) =>
   GPU_TOPOLOGY_CELL_PAGE_HEADER_WORDS
-  + brickFineResolution ** 3 * GPU_TOPOLOGY_CELL_RECORD_WORDS
-  // Nine structure-of-array row planes, two reserved terms per face,
-  // one six-entry incidence list per cell, and its CSR offsets.
-  + 9 * (3 * (brickFineResolution + 1) * brickFineResolution ** 2)
+  // Seven structure-of-array row planes (two uniform values are implicit),
+  // with two words per term and one two-word incidence override per boundary
+  // cell face. Uniform geometry and interior incidences are arithmetic.
+  + 7 * (3 * (brickFineResolution + 1) * brickFineResolution ** 2)
   + 4 * (3 * (brickFineResolution + 1) * brickFineResolution ** 2)
-  + brickFineResolution ** 3 + 1
-  + 12 * brickFineResolution ** 3;
+  + 12 * brickFineResolution ** 2;
 
 export interface SparseCM12TopologyPagePoolPlan {
   readonly pageCapacity: number;
