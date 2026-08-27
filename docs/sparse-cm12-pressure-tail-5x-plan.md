@@ -330,3 +330,62 @@ compact PEEI pressure-rank vectors and hierarchy planes first, then make restric
 smoothing, coarse solve and prolongation replace fine-vector/operator traffic inside a
 symmetric V-cycle. A future preconditioner arm must beat the Jacobi fixed-state solve in
 absolute GPU time, not merely reduce iterations.
+
+## PEEI checkpoint — reject rank-only Krylov compaction
+
+The next arm kept pressure, RHS and diagonal in stable-cell space while moving every
+recurring Krylov field (`r`, `z`, `d`, `Ad`, `Az` and guarded residual) into canonical
+pressure-rank order. The retired frozen cell-brick plane supplied a stable-cell-to-rank
+map without increasing allocation. The operator then exchanged each membership probe plus
+stable vector read for one reverse-rank read plus one compact vector read.
+
+This was numerically contained and compiled across all resident shader entry points, but
+mini32 pressure solve rose to **10.3547 ms median** (11.9276 ms p95) with the same fixed
+iteration budget, versus the committed 9.0440 ms median. The arm was removed.
+
+The result invalidates the assumption that vector address compaction alone is useful here.
+Canonical stable IDs are already monotonically ordered and page-local; paying a reverse-map
+dependency for every neighbour costs more than the denser vector load saves. The revised
+PEEI rule is therefore: **compile the operator and its vector address together**. A future
+rank-space arm must publish neighbour ranks (or a direction-major regular stencil) so a hot
+SpMV never performs stable-to-rank lookup. Until then, keep the proven stable-cell arithmetic
+operator and direct the next work at removing downstream generic topology traversal.
+
+## Solve-envelope checkpoint — retain cadence-8 true residual guards
+
+Reducing the guarded true-residual cadence from 8 to 16 removed three full `b-Ap`
+applications before mini32's iteration-48 crossing and lowered its solve median to 7.8643 ms.
+That local result did not survive the symmetric-expansion A/B. The baseline's cadence-8
+drift recovery is numerically active there: cadence 16 changed the evolving fields and
+topology and raised maximum pressure relative residual from **2.3756e-6** to **1.6210e-5**.
+Cadence 32 also delayed mini32 convergence from iteration 48 to 64. Both arms were removed.
+
+The convergence envelope is therefore part of the solver, not dispatch bookkeeping. Future
+solve work must reduce the cost of the guarded operator application itself or improve the SPD
+preconditioner while preserving the cadence-8 recovery trajectory exactly.
+
+## Preconditioner checkpoint — reject accepted-leaf block polynomial
+
+A two-step damped-Jacobi block map was implemented with one workgroup per accepted brick.
+Its intermediate vector occupied 2 KiB of workgroup memory, so the second local operator
+application read neighbour values on chip. It nevertheless failed on both tested damping
+bounds: ω=2/3 and the conservative ω=1/4 each triggered all 16 curvature guards, missed the
+pressure tolerance, changed the evolving census, and cost 18.2190–20.3817 ms.
+
+This exposed two non-negotiable requirements for the eventual V-cycle:
+
+- its brick work stream must be pressure-owned and prove complete coverage of the PEI cell
+  list; the accepted-leaf manifest is not that authority;
+- its local operator must be compiled alongside that stream. Re-entering canonical
+  incidence/row/term storage for a second intra-brick traversal more than doubles solve cost,
+  even when the vector itself is in workgroup memory.
+
+Do not retry block smoothing on accepted topology leaves. The next solve architecture must
+first publish pressure-brick ranges plus direct regular/exceptional local terms, and validate
+that every pressure rank is covered exactly once before any numerical kernel consumes it.
+
+A follow-up publication-only arm proved that PEI can derive the exact 7,186-cell wet-brick
+stream from finalized membership, but the serial-in-one-workgroup brick scan added
+0.065–0.13 ms to pressure topology. With no numerical consumer yet, that arm was also
+removed. The stream and its direct operator must land atomically and show a net frame win;
+dormant execution-image planes are not accepted as “infrastructure.”
