@@ -1698,6 +1698,21 @@ export class RasterWaterPipeline {
     this.extractedRevision = -1;
   }
 
+  /**
+   * Forget the retained water mesh after a live field edit.
+   *
+   * Solver steps carry their own monotonically increasing revision into
+   * `encode`. Editor injections do not: they update the same GPU buffers
+   * between steps, so a paused renderer would otherwise keep drawing the mesh
+   * extracted before the edit. Invalidating here makes the next presentation
+   * extract exactly once from the newly published field.
+   */
+  invalidateSurface() {
+    this.extractedRevision = -1;
+    this.lastExtractionAt_ms = -Infinity;
+    this.causticsValid = false;
+  }
+
   /** Selects row-independent global fine bricks without synthesizing leaf ownership. */
   setGlobalFineLevelSet(source: GlobalFineLevelSetConsumerSource | undefined) {
     if (source) validateGlobalFineLevelSetConsumerSource(source);

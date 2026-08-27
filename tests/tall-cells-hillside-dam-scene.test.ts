@@ -91,6 +91,12 @@ test("height samples author a flat shelf, central slope, channel banks, and runo
 test("the scene requires a unified sparse voxel solid and starts fluid-local", () => {
   const scene = createTallCellsHillsideDamBreakScene();
   const solids = solidWorldForScene(scene);
+  assert.equal(sampleSolidWorld(solids, [-1, NY - 1, Math.floor(NZ / 2)]).solidFraction,
+    1, "the hidden vessel still authors its editable low-X wall in SolidWorld");
+  assert.equal(sampleSolidWorld(solids, [Math.floor(NX / 2), NY - 1, -1]).solidFraction,
+    1, "the hidden vessel still authors its editable low-Z wall in SolidWorld");
+  assert.equal(sampleSolidWorld(solids, [Math.floor(NX / 2), NY, Math.floor(NZ / 2)])
+    .solidFraction, 0, "the Flood tank retains its open top");
   assert.equal(sampleSolidWorld(solids, [NX - 1, 0, Math.floor(NZ / 2)]).materialId,
     SOLID_WORLD_TERRAIN_MATERIAL_ID);
   assert.equal(sampleSolidWorld(solids, [NX - 1, NY - 1, Math.floor(NZ / 2)]).solidFraction,

@@ -166,10 +166,12 @@ test("validation authorizes only; a distinct singleton flips after every stable 
     /topologyArena\[base\]\)!=atomicLoad\(&topologyArena\[base\+1u\]\)/,
     "canonical seams must publish before, not after, the accepted-generation flip");
   assert.match(connect,
-    /upperOwner\.z==BRICK_FINE_RESOLUTION&&brickActive\(upperOwner\.y\)/);
+    /upperOwner\.z==BRICK_FINE_RESOLUTION&&scheduledBrickActive\(upperOwner\.y\)/);
   assert.match(connect,
-    /lowerOwner\.z==BRICK_FINE_RESOLUTION&&brickActive\(lowerOwner\.y\)/,
+    /lowerOwner\.z==BRICK_FINE_RESOLUTION&&scheduledBrickActive\(lowerOwner\.y\)/,
     "fine dynamic seams must fail closed beside inactive or coarse host cells");
+  assert.match(connect, /IMMUTABLE_HOST_INCIDENCE_BASE\+2u\*hostIncidence/,
+    "recycled pages must recover host seam slots from immutable incidence authority");
 });
 
 test("post-authorization delta publication cannot fault after its first stable write", () => {
@@ -294,6 +296,8 @@ test("the literal selector store is the final executable instruction", () => {
   const prefix = finalize.slice(0, selectorAt);
   assert.match(prefix, /topologyArena\[base\+3u\]\)!=2u/,
     "the finalizer must consume the topology authorization receipt");
+  assert.match(prefix, /\$\{internedBoundaryAcceptedMirrorPublication\}/,
+    "IBO accepted mirrors must publish in the selector singleton before the next candidate validates them");
   const suffix = finalize.slice(selectorAt + selector.length)
     .replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/[}\s]/g, "");
@@ -334,6 +338,9 @@ test("topology growth cannot publish unbounded loops or indirect work", () => {
   assert.doesNotMatch(presentationReserve, /\bloop\s*\{/);
   const presentationAllocate = functionSource(host,
     "allocateSparseCM12PresentationPages", "fn sparseCM12PresentationPageLess");
+  assert.match(presentationAllocate,
+    /if\(\$\{worldDirectoryLayout \? "true" : "brick>=INITIAL_BRICK_COUNT"\}\)/,
+    "WDR presence must derive every allocated page key from its signed coordinate, including initially inactive authored leaves");
   const coordinateValidation = presentationAllocate.indexOf("if(coordinate.x< -1024");
   const pageReservation = presentationAllocate.indexOf(
     "let page=reserveSparseCM12PresentationPage()");

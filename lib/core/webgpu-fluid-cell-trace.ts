@@ -332,10 +332,28 @@ var<workgroup> probeRecords:atomic<u32>;
  */
 struct FineProbe { address:u32, state:u32 }
 
+fn fineSignedSparseAddressing()->bool{
+  return arrayLength(&fineWorklist)>=4u&&(fineWorklist[3]&0x40000000u)!=0u;
+}
+fn fineSignedPageKey(page:vec3i)->u32{
+  if(page.x< -1024||page.x>1023||page.y<0||page.y>1023
+    ||page.z< -1024||page.z>1022){return INVALID;}
+  return u32(page.x+1024)|(u32(page.y)<<11u)|(u32(page.z+1024)<<21u);
+}
+fn finePageKey(page:vec3i)->u32{
+  // page is already in the publication's fine index lattice. domainOrigin
+  // maps that lattice to metres; it is not an additional page-coordinate
+  // offset (signed Sparse CM12 explicitly forbids a padded address lattice).
+  if(fineSignedSparseAddressing()){return fineSignedPageKey(page);}
+  if(any(page<vec3i(0))||any(page>=vec3i(fine.brickDimensions))){return INVALID;}
+  let q=vec3u(page);return q.x+fine.brickDimensions.x
+    *(q.y+fine.brickDimensions.y*q.z);
+}
+
 fn fineProbeAt(q:vec3u)->FineProbe {
   if(config.hasFine==0u||any(q>=fine.sampleDimensions)){return FineProbe(INVALID,PAGE_MISSING);}
   let brick=q/max(fine.brickResolution,1u);
-  let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);
+  let key=finePageKey(vec3i(brick));if(key==INVALID){return FineProbe(INVALID,PAGE_MISSING);}
   let page=finePageOf(key);
   if(page==INVALID||page>=fine.pageCapacity||page*4u+2u>=arrayLength(&fineMetadata)){
     return FineProbe(INVALID,PAGE_MISSING);
@@ -351,18 +369,24 @@ fn fineProbeAt(q:vec3u)->FineProbe {
   return FineProbe(address,PAGE_RESIDENT);
 }
 
-/** Fine-lattice cell of a sample address, matching the redistance addressing. */
-fn fineSampleCell(address:u32)->vec3u {
+/** Fine-lattice cell of a sample address, matching the signed page ABI. */
+fn fineSampleCell(address:u32)->vec3i {
   let perBrick=max(fine.samplesPerBrick,1u);
   let id=address/perBrick;
   let local=address-id*perBrick;
   let key=fineMetadata[id*4u+1u];
-  let xy=max(fine.brickDimensions.x*fine.brickDimensions.y,1u);
-  let bz=key/xy;let rest=key-bz*xy;let by=rest/max(fine.brickDimensions.x,1u);
-  let brick=vec3u(rest-by*fine.brickDimensions.x,by,bz);
+  var brick=vec3i(0);
+  if(fineSignedSparseAddressing()){
+    brick=vec3i(i32(key&0x7ffu)-1024,i32((key>>11u)&0x3ffu),
+      i32((key>>21u)&0x7ffu)-1024);
+  }else{
+    let xy=max(fine.brickDimensions.x*fine.brickDimensions.y,1u);
+    let bz=key/xy;let rest=key-bz*xy;let by=rest/max(fine.brickDimensions.x,1u);
+    brick=vec3i(vec3u(rest-by*fine.brickDimensions.x,by,bz));
+  }
   let r=max(fine.brickResolution,1u);
   let lz=local/(r*r);let lrest=local-lz*r*r;let ly=lrest/r;
-  return brick*r+vec3u(lrest-ly*r,ly,lz);
+  return brick*i32(r)+vec3i(vec3u(lrest-ly*r,ly,lz));
 }
 
 /** Row authority only: four storage bindings, including the trace target. */
@@ -593,7 +617,7 @@ fn resolveFineSeeds(@builtin(local_invocation_index) lid:u32) {
       let seedPage=seed/max(fine.samplesPerBrick,1u);
       if(seedPage*4u+1u>=arrayLength(&fineMetadata)){continue;}
       let seedCell=fineSampleCell(seed);let sampleCell=fineSampleCell(address);
-      let delta=abs(vec3i(seedCell)-vec3i(sampleCell));let hop=u32(max(max(delta.x,delta.y),delta.z));
+      let delta=abs(seedCell-sampleCell);let hop=u32(max(max(delta.x,delta.y),delta.z));
       atomicAdd(&probeResolved,1u);atomicMax(&probeMaximumHop,hop);
       let pz=probe/(PROBE_EDGE*PROBE_EDGE);let rest=probe-pz*PROBE_EDGE*PROBE_EDGE;
       let py=rest/PROBE_EDGE;let px=rest-py*PROBE_EDGE;
@@ -601,9 +625,9 @@ fn resolveFineSeeds(@builtin(local_invocation_index) lid:u32) {
         let slot=(px>>1u)+RECORD_EDGE*((py>>1u)+RECORD_EDGE*(pz>>1u));
         let base=FINE_RECORDS_OFFSET+slot*FINE_RECORD_WORDS;
         trace[base+${FLUID_CELL_TRACE_FINE_RECORD.flags}u]|=${FLUID_CELL_TRACE_FINE_FLAGS.resolved}u;
-        trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCell}u]=seedCell.x;
-        trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCell}u+1u]=seedCell.y;
-        trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCell}u+2u]=seedCell.z;
+        trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCell}u]=bitcast<u32>(seedCell.x);
+        trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCell}u+1u]=bitcast<u32>(seedCell.y);
+        trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCell}u+2u]=bitcast<u32>(seedCell.z);
         trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCode}u]=finePackedFlags(seed)>>${FINE_FLOOD_SAMPLE_FLAG_BITS}u;
         trace[base+${FLUID_CELL_TRACE_FINE_RECORD.hop}u]=hop;
       }

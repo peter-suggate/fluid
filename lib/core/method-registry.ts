@@ -56,10 +56,9 @@ export function interactiveSimulationMethods(): ReadonlyArray<SimulationMethod> 
 }
 
 /**
- * The method a scene runs when it authors no profile of its own.
- *
- * Profiled presets are untouched: `profile?.methodId` wins over this
- * everywhere it is read.
+ * The method the application selects when a scene is opened without an
+ * explicit method in its URL. Scene profiles may seed method-specific tuning,
+ * but they do not replace this product-wide default.
  */
 export function defaultMethodId(): string {
   return installation().defaultId;

@@ -73,6 +73,14 @@ test("retirement follows all-air publication and clears the recorded topology pa
   const shader = sparseCM12PresentationPageAllocatorWGSL(
     8, 2, 0, presentation, world,
   );
+  assert.match(shader, /if\(true\)\{/,
+    "a WDR-backed allocator must always use the signed SparseWorld key path");
+  assert.match(shader,
+    /key=u32\(coordinate\.x\+1024\)\|\(u32\(coordinate\.y\)<<11u\)\s*\|\(u32\(coordinate\.z\+1024\)<<21u\)/,
+  "authored and dynamic WDR leaves must share the signed presentation-key ABI");
+  assert.doesNotMatch(shader,
+    /key=u32\(coordinate\.x\)\+\d+u\s*\*\(u32\(coordinate\.y\)/,
+  "a WDR-backed allocator must not retain the dense atlas-key fallback");
   assert.match(shader,
     /let topologyPage=atomicLoad\(&activity\[activityRecord\+37u\]\)/);
   assert.doesNotMatch(shader, /topologyPage=brick-CM12_WDR_INITIAL_LEAVES/);

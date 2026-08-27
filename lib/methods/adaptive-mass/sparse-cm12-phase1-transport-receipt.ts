@@ -83,6 +83,10 @@ export interface SparseCM12Phase1TransportReceipt {
   readonly packetCellCount: number;
   readonly duplicateScatterCellCount: number;
   readonly omittedAcceptedCellCount: number;
+  readonly minimumBetaFixed: number;
+  readonly maximumBetaFixed: number;
+  readonly minimumDeficitDensityFixed: number;
+  readonly maximumDeficitDensityFixed: number;
   readonly acceptedTopologyGeneration: number;
   readonly transportTopologyGeneration: number;
   readonly frameGeneration: number;

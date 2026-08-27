@@ -507,8 +507,11 @@ export function decodeFluidCellTrace(words: ArrayLike<number>): FluidCellTrace |
   const unsigned = words instanceof Uint32Array ? words : Uint32Array.from(words);
   if (unsigned[FLUID_CELL_TRACE_HEADER.magic] !== FLUID_CELL_TRACE_MAGIC) return undefined;
   const floats = new Float32Array(unsigned.buffer, unsigned.byteOffset, unsigned.length);
+  const signed = new Int32Array(unsigned.buffer, unsigned.byteOffset, unsigned.length);
   const vec3 = (offset: number): FluidCellTraceVec3 =>
     Object.freeze([unsigned[offset], unsigned[offset + 1], unsigned[offset + 2]]) as FluidCellTraceVec3;
+  const signedVec3 = (offset: number): FluidCellTraceVec3 =>
+    Object.freeze([signed[offset], signed[offset + 1], signed[offset + 2]]) as FluidCellTraceVec3;
 
   const neighborCount = Math.min(
     unsigned[FLUID_CELL_TRACE_HEADER.neighborCount], FLUID_CELL_TRACE_NEIGHBOR_CAPACITY);
@@ -550,7 +553,7 @@ export function decodeFluidCellTrace(words: ArrayLike<number>): FluidCellTrace |
       cell: vec3(base + FLUID_CELL_TRACE_FINE_RECORD.cell),
       flags,
       phi: floats[base + FLUID_CELL_TRACE_FINE_RECORD.phi],
-      seedCell: vec3(base + FLUID_CELL_TRACE_FINE_RECORD.seedCell),
+      seedCell: signedVec3(base + FLUID_CELL_TRACE_FINE_RECORD.seedCell),
       seedCode: unsigned[base + FLUID_CELL_TRACE_FINE_RECORD.seedCode],
       hop: unsigned[base + FLUID_CELL_TRACE_FINE_RECORD.hop],
       resident: flagged(flags, FLUID_CELL_TRACE_FINE_FLAGS.resident),

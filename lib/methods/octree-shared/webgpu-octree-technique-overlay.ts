@@ -257,9 +257,28 @@ ${visualizationBindingPreambleWGSL(OCTREE_TECHNIQUE_PROGRAMS.fine)}
 ${fineLevelSetPackedSampleWGSL("sampleFlags", false, "debugFine")}
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const INTERFACE:u32=2u;
 ${makeFineLevelSetSortedWorklistLookupWGSL("fine", "metadata", "worklist", "pageOf")}
+fn finePageKey(brick:vec3u)->u32{
+  // domainOrigin is the physical position of fine coordinate zero, not a
+  // second page offset. Signed metadata already stores WDR world-page coords.
+  if(arrayLength(&worklist)>=4u&&(worklist[3]&0x40000000u)!=0u){
+    if(brick.x>1023u||brick.y>1023u||brick.z>1022u){return INVALID;}
+    return (brick.x+1024u)|(brick.y<<11u)|((brick.z+1024u)<<21u);
+  }
+  return brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);
+}
+fn finePageCoordinate(key:u32)->vec3i{
+  if(arrayLength(&worklist)>=4u&&(worklist[3]&0x40000000u)!=0u){
+    return vec3i(i32(key&0x7ffu)-1024,i32((key>>11u)&0x3ffu),
+      i32((key>>21u)&0x7ffu)-1024);
+  }
+  let xy=max(fine.brickDimensions.x*fine.brickDimensions.y,1u);
+  let bz=key/xy;let remainder=key-bz*xy;
+  let by=remainder/max(fine.brickDimensions.x,1u);
+  return vec3i(vec3u(remainder-by*fine.brickDimensions.x,by,bz));
+}
 fn fineAddress(q:vec3i)->u32 {
   if(any(q<vec3i(0))||any(q>=vec3i(fine.sampleDimensions))){return INVALID;}
-  let uq=vec3u(q);let brick=uq/max(fine.brickResolution,1u);let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);let page=pageOf(key);
+  let uq=vec3u(q);let brick=uq/max(fine.brickResolution,1u);let key=finePageKey(brick);let page=pageOf(key);
   if(page==INVALID||page>=fine.pageCapacity||page*4u+3u>=arrayLength(&metadata)||metadata[page*4u+2u]!=fine.generation){return INVALID;}
   let local=uq-brick*fine.brickResolution;let localIndex=local.x+fine.brickResolution*(local.y+fine.brickResolution*local.z);let address=page*fine.samplesPerBrick+localIndex;
   return select(INVALID,address,address<arrayLength(&sampleFlags)&&(debugFinePackedFlags(address)&VALID)!=0u);
@@ -272,7 +291,7 @@ fn renderWorldToFine(point:vec3f)->vec3f {
   return (point-minimum)/max(fine.fineCellWidth,1e-9);
 }
 fn fineState(point:vec3f)->FineState {
-  let relative=renderWorldToFine(point);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return FineState(vec3f(0.0),0.0,INVALID);}let q=vec3u(floor(relative));let brick=q/max(fine.brickResolution,1u);let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);
+  let relative=renderWorldToFine(point);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return FineState(vec3f(0.0),0.0,INVALID);}let q=vec3u(floor(relative));let brick=q/max(fine.brickResolution,1u);let key=finePageKey(brick);if(key==INVALID){return FineState(vec3f(0.0),0.0,INVALID);}
   if(arrayLength(&topologyControl)>0u&&topologyControl[0]!=0u){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}if(arrayLength(&redistanceControl)>4u&&redistanceControl[4]!=0u){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}
   let page=pageOf(key);if(page==INVALID){let desired=arrayLength(&topologyControl)>4u&&topologyControl[4]==0u;return FineState(select(vec3f(0.03,0.10,0.34),vec3f(1.0,0.34,0.04),desired),select(0.045,0.34,desired),key);}
   let local=q-brick*fine.brickResolution;let localIndex=local.x+fine.brickResolution*(local.y+fine.brickResolution*local.z);let address=page*fine.samplesPerBrick+localIndex;if(address>=arrayLength(&sampleFlags)){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}let flags=debugFinePackedFlags(address);
@@ -370,16 +389,13 @@ fn bandResidency(point:vec3f)->vec4f {
  * information had to travel to reach them", which is the cost of residency
  * rather than its extent.
  */
-fn floodSampleCell(index:u32)->vec3u {
+fn floodSampleCell(index:u32)->vec3i {
   let perBrick=max(fine.samplesPerBrick,1u);
   let id=index/perBrick;let local=index-id*perBrick;
-  let key=metadata[id*4u+1u];
-  let xy=max(fine.brickDimensions.x*fine.brickDimensions.y,1u);
-  let bz=key/xy;let brickRemainder=key-bz*xy;let by=brickRemainder/max(fine.brickDimensions.x,1u);
-  let brick=vec3u(brickRemainder-by*fine.brickDimensions.x,by,bz);
+  let brick=finePageCoordinate(metadata[id*4u+1u]);
   let r=max(fine.brickResolution,1u);
   let lz=local/(r*r);let localRemainder=local-lz*r*r;let ly=localRemainder/r;
-  return brick*r+vec3u(localRemainder-ly*r,ly,lz);
+  return brick*i32(r)+vec3i(vec3u(localRemainder-ly*r,ly,lz));
 }
 /**
  * Returns 0 for a self-seeded sample, k for a hop the first k encoded passes
@@ -416,7 +432,7 @@ fn floodProvenance(point:vec3f)->vec4f {
   // A resident, valid sample with no seed is a correctness fact, not a cost
   // one, so it gets its own ink rather than the deepest pass colour.
   if(seed==INVALID||seed>=arrayLength(&sampleFlags)){return vec4f(1.0,0.02,0.14,0.92);}
-  let delta=abs(vec3i(floodSampleCell(seed))-vec3i(floodSampleCell(address)));
+  let delta=abs(floodSampleCell(seed)-floodSampleCell(address));
   let passIndex=floodPass(u32(max(max(delta.x,delta.y),delta.z)));
   if(passIndex==0u){return vec4f(1.0,1.0,1.0,0.85);}
   if(passIndex>bands.ladderPasses){return vec4f(floodColor(passIndex),0.80);}

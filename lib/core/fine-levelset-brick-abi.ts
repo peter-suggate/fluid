@@ -130,7 +130,10 @@ fn ${functionName}(key:u32)->u32 {
     ||${worklist}[5]!=1u||${worklist}[6]!=1u){return INVALID;}
   let count=min(${worklist}[1],min(${params}.worklistCapacity,${params}.pageCapacity));
   let logicalCount=${params}.${brickDimensions}.x*${params}.${brickDimensions}.y*${params}.${brickDimensions}.z;
-  if(key>=logicalCount){return INVALID;}
+  // Signed sparse publishers use the full u32 key as a packed coordinate;
+  // comparing it with the retired dense logical volume rejects every such
+  // page before the compact binary search can see it.
+  if((${worklist}[3]&0x40000000u)==0u&&key>=logicalCount){return INVALID;}
   if((${worklist}[3]&0x80000000u)!=0u){
     var low=0u;var high=count;
     loop{if(low>=high){break;}let middle=low+(high-low)/2u;

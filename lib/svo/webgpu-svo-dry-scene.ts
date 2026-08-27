@@ -188,7 +188,7 @@ import {
 import {
   SPARSE_BRICK_NO_OWNER, octreeLiveSceneSceneGeometryFormat, octreeLiveSceneLeafPayloadMode,
   sparseBrickBandedLeafCodecWGSL, sparseBrickSceneIdentityCodecWGSL,
-  sparseBrickSceneIdentityWordCodecWGSL,
+  sparseBrickSceneGeometryCodecWGSL, sparseBrickSceneIdentityWordCodecWGSL,
   type SparseBrickLeafPayloadMode,
   type SparseBrickSceneGeometryFormat,
 } from "./sparse-brick-octree";
@@ -285,7 +285,7 @@ export interface SparseVoxelDrySceneData {
   contactVisibilityEnabled?: boolean;
   /** Scene capability gate for shadow visibility; omission keeps shadows available. */
   shadowVisibilityEnabled?: boolean;
-  /** Use the entered voxel face instead of the baked analytic normal. */
+  /** Use the entered voxel face instead of sub-voxel tangent-surface reconstruction. */
   flatVoxelNormals?: boolean;
   lightDirection?: readonly [number, number, number];
   lightColor?: readonly [number, number, number];
@@ -865,15 +865,15 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
    */
   payloadLaneWordOffset: 148,
   /**
-   * x: banded record arena base; y: the flat owner lane's base, read by the
-   * `dense` arm; z: voxel capacity, which is the bound every identity read
-   * replaced `arrayLength(&materialOwners)` with once binding 3 stopped being a
-   * lane slice; w: the leaf payload mode code, carried for provenance only.
+   * x: dense scene-geometry lane base; y: the flat owner lane's base, read by
+   * the `dense` arm; z: voxel capacity. w packs the payload mode in bits 0..7,
+   * geometry stride words in 8..15, fraction word in 16..23, and packed-format
+   * presence in bit 24.
    */
   payloadLane1WordOffset: 152,
 } as const);
 
-/** `dry.payloadLanes1.w` codes. Mirrors `SparseBrickLeafPayloadMode`. */
+/** Low-byte `dry.payloadLanes1.w` codes. Mirrors `SparseBrickLeafPayloadMode`. */
 export const SVO_DRY_LEAF_PAYLOAD_MODES = Object.freeze({
   dense: 0, occupancy: 1, banded: 2,
 } satisfies Record<SparseBrickLeafPayloadMode, number>);
@@ -1073,21 +1073,19 @@ export function directionalLightSceneExitDistance(
  * the structural source but never finalizes its current revision renders every
  * accelerated surface as a miss; analytic glass and rigid bodies keep drawing.
  *
- * The set is exactly the two lanes a ray reads: the tree it descends, and the
- * per-voxel identity word — material in the low half, baked normal in the high —
- * that decides both solidity and shading. `sceneGeometry`, the signed-distance
- * lane, used to be required alongside them and is no longer read here at all: it
- * is a derived-lighting input now, and the marchers stopped reconstructing a
- * surface from it when the primary became voxels-only. Requiring it made a
- * lagging distance publication black out a frame that had everything it needed,
- * which is a tripwire for a lane nobody consumes.
+ * The set is the tree, per-voxel identity, and scene geometry. Identity decides
+ * solidity and supplies the baked normal; smooth surface reconstruction reads
+ * the geometry lane's coverage fraction to place its tangent plane. A lagging
+ * geometry publication must therefore withhold the SVO instead of mixing a new
+ * identity with old sub-voxel depths.
  *
  * Today's producer finalizes all three in one pass
- * ({@link OCTREE_SPARSE_BRICK_SCENE_VALID_FIELDS}), so this narrowing changes no
+ * ({@link OCTREE_SPARSE_BRICK_SCENE_VALID_FIELDS}), so this requirement changes no
  * frame that renders now. It changes which *future* publication is legal.
  */
 export const SVO_DRY_SCENE_REQUIRED_VALID_FIELDS =
   SPARSE_VOXEL_VALID_FIELDS.topology
+  | SPARSE_VOXEL_VALID_FIELDS.sceneGeometry
   | SPARSE_VOXEL_VALID_FIELDS.materialOwner;
 
 /** Metadata-level validation for the producer-owned direct-index PBR table. */
@@ -2016,14 +2014,13 @@ export function createSvoDrySceneFragmentWGSL(
   // that resolve one cell, and `sceneIdentitySourceAt`/`sceneIdentityOf` for the
   // DDAs, which hoist everything that depends only on the leaf out of the loop.
   //
-  // `records: false` — the geometry-record accessors are the codec's only reach
-  // outside itself and nothing in this module reads the scene-geometry lane at
-  // all any more. The distance field is a derived-lighting input now, not a
-  // render one.
+  // `records: false` — smooth primary reconstruction reads the retained dense
+  // geometry lane. Compact records cannot cover every first-hit voxel at leaf
+  // boundaries, so they remain outside this identity-only codec.
   const sceneIdentityWGSL = /* wgsl */ `${leafPayloadMode === "dense" ? "" : sparseBrickBandedLeafCodecWGSL({
     occupancyBase: "dry.payloadLanes.x", recordMaskBase: "dry.payloadLanes.y",
     headerBase: "dry.payloadLanes.z", blobBase: "dry.payloadLanes.w",
-    recordsBase: "dry.payloadLanes1.x",
+    recordsBase: "0u",
     load: (index) => `scenePayload[${index}]`, mode: leafPayloadMode, records: false,
   })}
 ${sparseBrickSceneIdentityCodecWGSL({
@@ -2038,6 +2035,27 @@ ${sparseBrickSceneIdentityWordCodecWGSL()}
 // has no lane to measure at all. Published rather than derived so the dense and
 // banded arms reject exactly the same voxel indices.
 fn dryVoxelCapacity()->u32{return dry.payloadLanes1.z;}`;
+  // Coverage and the baked normal are the two halves of the sub-voxel surface
+  // sample. The normal supplies orientation; coverage inverts the voxelizer's
+  // planar coverage law to recover the plane's signed offset from cell centre.
+  //
+  // The dense geometry lane is deliberately used for every payload mode. A
+  // banded world still retains that lane as the encoder's staging input today,
+  // and first-hit voxels are not guaranteed to own compact records at a leaf
+  // boundary. Reading a record opportunistically would therefore make the
+  // reconstruction acquire seams at exactly those boundaries.
+  const sceneSurfaceGeometryWGSL = /* wgsl */ `
+${sparseBrickSceneGeometryCodecWGSL("f16-unorm8")}
+fn drySceneFractionOfVoxel(voxel:u32)->f32{
+  let descriptor=dry.payloadLanes1.w;
+  let stride=(descriptor>>8u)&0xffu;
+  let fractionWord=(descriptor>>16u)&0xffu;
+  let packed=(descriptor&(1u<<24u))!=0u;
+  let word=dry.payloadLanes1.x+voxel*stride+fractionWord;
+  if(word>=arrayLength(&scenePayload)){return 0.0;}
+  let fraction=select(bitcast<f32>(scenePayload[word]),sceneFractionOf(scenePayload[word],voxel),packed);
+  return clamp(fraction,0.0,1.0);
+}`;
   /**
    * The per-leaf identity storage, resolved once before a voxel scan.
    *
@@ -2147,16 +2165,11 @@ fn dryVoxelCapacity()->u32{return dry.payloadLanes1.z;}`;
   // whether this generalises to another scene, not rejection rate.
   const brickContour = experiments.brickContour !== false;
   const analyticPrimaryUnbounded = experiments.unboundedAnalyticPrimary === true;
-  // The first solid cell along the DDA is the surface. `entry` is the ray's
-  // distance to the face it crossed to reach this cell, so the hit sits exactly
-  // on the cell boundary and its geometric normal is that face — read back off
-  // the cell bounds, where the entry point's zero-distance axis is the one it
-  // came in through. No march, no owner solve, no upgrade budget.
-  //
-  // What the *shading* normal is then allowed to be was a separate question with
-  // a uniform behind it, and it no longer is: the voxel carries its own baked
-  // normal and `dryShadingNormal` unpacks it. The surviving control is the
-  // right-angle test against this face, which the analytic arm also applied.
+  // The first solid cell along the DDA bounds the surface. Voxel-flat mode keeps
+  // the face at `entry`; smooth mode intersects the sub-voxel tangent plane
+  // encoded by that cell's coverage and baked normal. The plane must intersect
+  // its own cell or it falls back to the face, so reconstruction cannot create a
+  // visibility hole.
   //
   // The owner is gone from the returned hit. A voxel has no back-pointer to an
   // authored record any more, so hover, picking and per-owner suppression of
@@ -2166,7 +2179,9 @@ fn dryVoxelCapacity()->u32{return dry.payloadLanes1.z;}`;
       let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);
       let faceNormal=dryVoxelFaceNormal(cellBounds,ro+rd*entry);
       let shaded=dryShadingNormal(cellIdentity,faceNormal);
-      return DryHit(entry,shaded.normal,sceneIdentityMaterial(cellIdentity),DRY_OWNER_NONE,
+      let cellExit=min(nextT.x,min(nextT.y,nextT.z));
+      let surfaceT=drySmoothVoxelSurfaceT(cellIdentity,payloadIndex,cellBounds,ro,rd,entry,cellExit,shaded.normal);
+      return DryHit(surfaceT,shaded.normal,sceneIdentityMaterial(cellIdentity),DRY_OWNER_NONE,
         shaded.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));
     }`;
   // The exact hit is unchanged either way — this only decides how much empty
@@ -2233,9 +2248,10 @@ fn dryLeafCurrent(hit:SvoTraversalHit)->bool{
 `;
   // The shading normal, read back out of the voxel that was hit.
   //
-  // This used to be a three-tier ladder — the owner's analytic normal, a
+  // This used to be a three-tier normal ladder — the owner's analytic normal, a
   // heightfield gradient for the ground, and an eight-tap trilinear stencil of
-  // the stored distance field underneath both — and all three are gone. The
+  // the stored distance field underneath both — and all three normal paths are
+  // gone. The
   // voxeliser now evaluates the winning primitive's own outward normal at bake
   // time and packs it oct8 into the high half of the identity word the DDA
   // already loaded (`sparseBrickSceneIdentityWordCodecWGSL`), so the shaded
@@ -2252,6 +2268,7 @@ fn dryLeafCurrent(hit:SvoTraversalHit)->bool{
   // and that is the correct thing to draw where the field genuinely has no
   // surface orientation. It is not reachable on any authored surface.
   const surfaceReconstructionWGSL = /* wgsl */ `
+${sceneSurfaceGeometryWGSL}
 struct DryShadingNormal{normal:vec3f,featureId:u32}
 /**
  * Presentation-wide six-face classification.
@@ -2352,6 +2369,41 @@ fn dryShadingNormal(identity:u32,faceNormal:vec3f)->DryShadingNormal{
     if(dot(baked,faceNormal)>-1e-4){return DryShadingNormal(baked,SVO_FEATURE_SMOOTH);}
   }
   return DryShadingNormal(faceNormal,SVO_FEATURE_SMOOTH);
+}
+/**
+ * Intersect the sub-voxel tangent plane represented by this cell.
+ *
+ * The voxelizer's coverage law is
+ *
+ *   fraction = 0.5 - signedOffset / (2 * cellRadius)
+ *
+ * so the stored fraction recovers a point on a plane whose orientation is the
+ * baked normal. Unlike changing only \`DryHit.normal\`, this changes \`DryHit.t\`
+ * and therefore the visible surface and hardware depth. The intersection must
+ * remain inside the occupied cell; a full/binary cell or a plane that misses
+ * its own cell has insufficient sub-voxel evidence and keeps the watertight
+ * voxel face instead of opening a crack.
+ */
+fn drySmoothVoxelSurfaceT(identity:u32,voxel:u32,bounds:mat2x3f,ro:vec3f,rd:vec3f,
+  entry:f32,cellExit:f32,normalIn:vec3f)->f32{
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals}u)!=0u
+    ||!sceneIdentityHasNormal(identity)){return entry;}
+  let fraction=drySceneFractionOfVoxel(voxel);
+  if(!(fraction>0.0&&fraction<1.0)){return entry;}
+  let normal=normalize(normalIn);
+  let denominator=dot(rd,normal);
+  if(abs(denominator)<1e-6){return entry;}
+  let extent=bounds[1]-bounds[0];
+  let centre=0.5*(bounds[0]+bounds[1]);
+  let radius=0.5*length(extent);
+  let signedOffset=radius*(1.0-2.0*fraction);
+  let planePoint=centre-normal*signedOffset;
+  let candidate=dot(planePoint-ro,normal)/denominator;
+  let tolerance=max(1e-6,1e-4*radius);
+  if(candidate<entry-tolerance||candidate>cellExit+tolerance){return entry;}
+  let point=ro+rd*candidate;
+  if(any(point<bounds[0]-vec3f(tolerance))||any(point>bounds[1]+vec3f(tolerance))){return entry;}
+  return clamp(candidate,entry,cellExit);
 }
 `;
   // The compile flag decides whether the LOD machinery exists; the uniform
@@ -2905,7 +2957,7 @@ fn traceLeafPayloadFineInterval(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(cellMinimum))||any(cell>=vec3i(cellMaximum))||entry>intervalExit){break;}
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
-    if(payloadIndex<dryVoxelCapacity()){${cellSolidGateWGSL("payloadIndex", "let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let shaded=dryShadingNormal(identity,dryVoxelFaceNormal(cellBounds,ro+rd*entry));return DryHit(entry,shaded.normal,sceneIdentityMaterial(identity),DRY_OWNER_NONE,shaded.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));")}}
+    if(payloadIndex<dryVoxelCapacity()){${cellSolidGateWGSL("payloadIndex", "let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);let faceNormal=dryVoxelFaceNormal(cellBounds,ro+rd*entry);let shaded=dryShadingNormal(identity,faceNormal);let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,intervalExit));let surfaceT=drySmoothVoxelSurfaceT(identity,payloadIndex,cellBounds,ro,rd,entry,cellExit,shaded.normal);return DryHit(surfaceT,shaded.normal,sceneIdentityMaterial(identity),DRY_OWNER_NONE,shaded.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));")}}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return missHit();
@@ -4474,7 +4526,7 @@ struct DryParams {
   lod:vec4f,
   // Banded lane bases inside the payload arena: occupancy, record mask, header, blob.
   payloadLanes:vec4u,
-  // x: record arena; y: flat owner lane; z: voxel capacity; w: payload mode code.
+  // x: dense scene geometry; y: flat owner lane; z: voxel capacity; w: layout descriptor.
   payloadLanes1:vec4u,
 }
 struct DryLightingArena {
@@ -9237,8 +9289,12 @@ export class SparseVoxelDrySceneRenderer {
       payloadLanes.headerWords, payloadLanes.blobWords,
     ], SVO_DRY_SCENE_PARAMS_LAYOUT.payloadLaneWordOffset);
     words.set([
-      payloadLanes.recordWords, payloadLanes.materialOwnerWords,
-      structural.capacities.voxels, SVO_DRY_LEAF_PAYLOAD_MODES[payloadLanes.mode],
+      payloadLanes.geometryWords, payloadLanes.materialOwnerWords,
+      structural.capacities.voxels,
+      SVO_DRY_LEAF_PAYLOAD_MODES[payloadLanes.mode]
+        | (payloadLanes.geometryStrideWords << 8)
+        | (payloadLanes.geometryFractionWord << 16)
+        | (payloadLanes.geometryPacked ? 1 << 24 : 0),
     ], SVO_DRY_SCENE_PARAMS_LAYOUT.payloadLane1WordOffset);
     if (nodeMip && nodeMip.generation > 0 && nodeMip.plan.complete) {
       // Folded rather than spread. `Math.max(1, ...pages.map(...))` passes one

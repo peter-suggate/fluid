@@ -38,7 +38,7 @@ import {
   GIZMO_AXIS_DIRECTIONS,
 } from "../lib/core/editor-gizmo";
 import { CLICK_SLOP_PX, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "../lib/core/editor-tools";
-import { hoverSceneAt, restInContainer, type EditorHover } from "../lib/core/editor-hover";
+import { hoverSceneAt, restFluidInWorld, restInContainer, type EditorHover } from "../lib/core/editor-hover";
 import { roomPointForRay, targetActionsAt, targetAtRay } from "../lib/core/editor-probe-catalog";
 import { highlightInstanceRange, type EditorHighlight, type EditorTarget } from "../lib/core/editor-target";
 import { EditorHighlightLayer } from "./EditorHighlightLayer";
@@ -49,7 +49,7 @@ import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
 import {
   addFluidBall,
   defaultFluidBallRadius_m,
-  fluidDropVolume,
+  fluidInteractionDropVolume,
 } from "../lib/core/editor-fluid-volume";
 import {
   fillFractionForHeight,
@@ -72,6 +72,7 @@ import {
   handleWorldEnds,
   handleWorldPosition,
   sceneContainerBox,
+  containerContains,
   BOX_EDGES,
   boxCorners,
   type EditorEntity,
@@ -1976,8 +1977,8 @@ export function WebGPUViewport() {
   };
 
   /**
-   * Where a dropped ball's centre goes: resting on the surface under the press,
-   * or on the camera-facing plane when the press met nothing.
+   * Where a dropped ball's centre goes: resting on any scene surface under the
+   * press, or on the open world floor when no bounded surface answers.
    *
    * Re-evaluated at every radius rather than fixed at the press, so growing the
    * ball lifts it off the floor instead of burying half of it.
@@ -1986,7 +1987,7 @@ export function WebGPUViewport() {
     ray: { origin: Vec3; direction: Vec3 },
     hover: EditorHover | undefined,
     radius_m: number,
-  ) => restInContainer(useSceneStore.getState().scene, ray, hover, radius_m);
+  ) => restFluidInWorld(useSceneStore.getState().scene, ray, hover, radius_m);
 
   /**
    * Revise the ball being dropped, as a draft over the committed document.
@@ -2009,7 +2010,13 @@ export function WebGPUViewport() {
     // sizing the ball here, not aiming it again.
     const centre = fluidBallCentre(ray, hover, radius_m);
     if (!centre) return;
-    useSceneDraftStore.getState().updateDraft({ fluid: addFluidBall(committed, centre, radius_m).fluid });
+    // Authored t=0 volumes remain tank contents. Outside it, the draft is only
+    // the cursor shape; release sends the ball to the live SparseWorld instead
+    // of writing an initial condition that bounded solvers cannot represent.
+    const fluid = containerContains(committed, centre)
+      ? addFluidBall(committed, centre, radius_m).fluid
+      : committed.fluid;
+    useSceneDraftStore.getState().updateDraft({ fluid });
     setCursorDrop({ centre_m: centre, radius_m, tone: "fluid" });
   };
 
@@ -2044,7 +2051,7 @@ export function WebGPUViewport() {
     const hover = ui.armedGesture ? hoverSceneAt(scene, drawnBodies(), ray) : undefined;
     if (ui.armedGesture === "fluid-ball") {
       const radius_m = defaultFluidBallRadius_m(scene);
-      const centre_m = restInContainer(scene, ray, hover, radius_m);
+      const centre_m = restFluidInWorld(scene, ray, hover, radius_m);
       if (!centre_m) { setCursorDrop(null); return; }
       setCursorDrop({ centre_m, radius_m, tone: "fluid" });
       return;
@@ -2072,10 +2079,7 @@ export function WebGPUViewport() {
     const scene = useSceneStore.getState().scene;
     const hover = hoverSceneAt(scene, drawnBodies(), ray);
     const radius_m = defaultFluidBallRadius_m(scene);
-    const anchor = restInContainer(scene, ray, hover, radius_m);
-    // A press that is not aimed at the tank is not a drop at all: it falls
-    // through to the camera, the same as a press on the background under any
-    // other tool.
+    const anchor = restFluidInWorld(scene, ray, hover, radius_m);
     if (!anchor) return;
     simulation.beginDraft("fluid-body", "Dropped a ball of water");
     pointerRef.current = {
@@ -2105,21 +2109,28 @@ export function WebGPUViewport() {
   const finishFluidBallDrop = async (active: {
     anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; radius_m: number; selectionId: string;
   }) => {
+    const committed = useSceneStore.getState().scene;
     const authored = () => {
       simulation.commitDraft();
       useUIStore.getState().select({ kind: "fluid-body", id: active.selectionId });
     };
-    if (simulation.time() <= 0) { authored(); return; }
+    const centre = fluidBallCentre(active.ray, active.hover, active.radius_m) ?? active.anchor;
+    if (simulation.time() <= 0 && containerContains(committed, centre)) { authored(); return; }
     // The same shape the draft authored, so a drop into a running 2D case is
     // the disk that scene's water is and not a ball floating inside its slab.
-    const drop = fluidDropVolume(scene,
-      fluidBallCentre(active.ray, active.hover, active.radius_m) ?? active.anchor, active.radius_m);
+    const drop = fluidInteractionDropVolume(committed, centre, active.radius_m);
     const taken = await rendererRef.current?.injectLiquidBall({
       centre_m: drop.center_m,
       radius_m: drop.radius_m,
       ...(drop.shape === "cylinder" ? { halfHeight_m: drop.halfHeight_m } : {}),
     });
-    if (!taken) { authored(); return; }
+    if (!taken) {
+      if (containerContains(committed, centre)) { authored(); return; }
+      simulation.cancelDraft();
+      useRuntimeStore.getState().setNotice(
+        "Open-world liquid placement requires a ready Sparse CM12 solve");
+      return;
+    }
     // Nothing to record: the document did not change, and the water is now part
     // of the field like every other litre in it.
     simulation.cancelDraft();

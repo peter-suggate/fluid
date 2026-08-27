@@ -49,6 +49,7 @@ import {
 } from "../lib/svo/svo-render-tuning";
 import { findSceneDefinition } from "../lib/core/scenes";
 import { sceneDefinitionTakesLattice } from "../lib/core/scene-definition";
+import { sceneUsesFlatVoxelNormals } from "../lib/core/model";
 import { simulation } from "../lib/core/simulation/controller";
 import { PipeChoice, PipeRange, PipeToggle } from "./PipeControls";
 
@@ -342,7 +343,10 @@ export function RenderPipelineOverlay() {
   const finestCellSize_m = useSceneStore((state) => state.scene.voxelDomain.finestCellSize_m);
   const sceneIsDry = useSceneStore((state) => state.scene.systems?.fluid === false);
   const voxelDomain = useSceneStore((state) => state.scene.voxelDomain);
+  const surfaceStyle = useSceneStore((state) => state.scene.surfaceStyle);
+  const patchScene = useSceneStore((state) => state.patchScene);
   const presetId = useSceneStore((state) => state.presetId);
+  const smoothSurfaceEnabled = !sceneUsesFlatVoxelNormals({ surfaceStyle });
   const authoredRefinementDepth = svoSceneryRefinementDepth(voxelDomain, { fluid: !sceneIsDry });
   // Read off the document rather than recomputed: the ladder is signed now, and
   // a negative rung enlarges the dry lattice itself, so the leaf is a published
@@ -874,6 +878,13 @@ export function RenderPipelineOverlay() {
         onClick={() => { for (const stage of disabledRenderStages) setRenderStageDisabled(stage, false); }}>
         {disabledRenderStages.length} withheld ↺
       </button>}
+    </div>
+
+    <div className="render-frame-options" role="group" aria-label="Frame surface options">
+      <span>Surface</span>
+      <PipeToggle label="Smooth surface" checked={smoothSurfaceEnabled}
+        onChange={(enabled) => patchScene({ surfaceStyle: enabled ? "smooth" : "voxel-flat" })}
+        hint="Reconstruct a sub-voxel tangent surface from each cell's coverage and baked normal, changing both surface depth and orientation. Off draws the entered axis-aligned voxel face." />
     </div>
 
     {effectiveRendererStatus.failureReason && <p className="render-inline-warning">SVO unavailable: {effectiveRendererStatus.detail

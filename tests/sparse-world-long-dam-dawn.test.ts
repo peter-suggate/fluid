@@ -3,6 +3,8 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
+import { FINE_LEVELSET_SIGNED_SPARSE_ADDRESS_FLAG } from
+  "../lib/core/fine-levelset-brick-abi";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import {
   createSparseCM12LongDamBreakScene,
@@ -20,6 +22,8 @@ import {
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import { decodeSparseCM12SignedPresentationKey } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import type { SparseWorld, SparseWorldPresentation } from "../lib/sparse-world";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
@@ -199,7 +203,10 @@ async function publishedNegativeFront(device: GPUDevice,
       first + source.plan.samplesPerBrick).reduce((count, sample) =>
       count + (((sample >>> 16) & 16) !== 0 ? 1 : 0), 0);
     if (negativeCount === 0) continue;
-    const x = metadata[4 * page + 1]! % source.plan.brickDimensions[0]!;
+    const key = metadata[4 * page + 1]!;
+    const x = (directory[3]! & FINE_LEVELSET_SIGNED_SPARSE_ADDRESS_FLAG) !== 0
+      ? decodeSparseCM12SignedPresentationKey(key)[0]
+      : key % source.plan.brickDimensions[0]!;
     pageX = Math.max(pageX, x);
     negativeSamplesByPageX[x]! += negativeCount;
     negativePagesByPageX[x]! += 1;

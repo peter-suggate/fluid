@@ -49,7 +49,7 @@ const CM12_TEI_SLOT1:u32=${layout.slotBaseWords[1]}u;
 const CM12_TEI_INVALID_FINE:i32=0x7fffffffi;
 
 struct CM12TransportLeaf{generation:u32,flags:u32,first:u32,count:u32,
-  originKey:u32,valid:vec3u,scale:u32,scaleLog2:u32}
+  owner:u32,valid:vec3u,scale:u32,scaleLog2:u32}
 struct CM12TransportOwner{cell:u32,widths:vec3u,volume:u32}
 struct CM12TransportPacket{first:u32,counts:vec3u,strideY:u32,strideZ:u32}
 struct CM12TransportSpatialTile{packetId:u32,laneMask:vec2u}
@@ -86,7 +86,7 @@ fn cm12TeiLoadLeaf(slot:u32,brick:u32)->CM12TransportLeaf{
   let scale=${image}[at+${l.scale}u];
   return CM12TransportLeaf(generation,${image}[at+${l.flags}u],
     ${image}[at+${l.cellFirst}u],${image}[at+${l.cellCount}u],
-    ${image}[at+${l.originKey}u],vec3u(packed&31u,(packed>>5u)&31u,
+    brick,vec3u(packed&31u,(packed>>5u)&31u,
       (packed>>10u)&31u),scale,cm12TeiScaleLog2(
         scale,${image}[at+${l.scaleDescriptor}u]));
 }
@@ -103,7 +103,7 @@ fn cm12TeiStageDirectory(tileOrigin:vec3i,lane:u32,slot:u32){
       0u,0u,CM12_TEI_INVALID,0u,CM12_TEI_INVALID,vec3u(0u),0u,0u);
     if(owner!=CM12_TEI_INVALID){leaf=cm12TeiLoadLeaf(slot,owner);}
     cm12TeiCache0[lane]=vec4u(leaf.generation,leaf.flags,leaf.first,leaf.count);
-    cm12TeiCache1[lane]=vec4u(leaf.originKey,
+    cm12TeiCache1[lane]=vec4u(leaf.owner,
       leaf.valid.x|(leaf.valid.y<<5u)|(leaf.valid.z<<10u),leaf.scale,leaf.scaleLog2);}
   workgroupBarrier();
 }
@@ -115,18 +115,18 @@ fn cm12TeiLeafAtLogical(coordinate:vec3i)->CM12TransportLeaf{
     a=cm12TeiCache0[index];b=cm12TeiCache1[index];
   }else{let leaf=cm12TeiLoadLeaf(cm12TeiCacheSlot,cm12WorldOwnerAt(coordinate));
     a=vec4u(leaf.generation,leaf.flags,leaf.first,leaf.count);
-    b=vec4u(leaf.originKey,leaf.valid.x|(leaf.valid.y<<5u)|(leaf.valid.z<<10u),
+    b=vec4u(leaf.owner,leaf.valid.x|(leaf.valid.y<<5u)|(leaf.valid.z<<10u),
       leaf.scale,leaf.scaleLog2);}
   return CM12TransportLeaf(a.x,a.y,a.z,a.w,b.x,
     vec3u(b.y&31u,(b.y>>5u)&31u,(b.y>>10u)&31u),b.z,b.w);
 }
 fn cm12TeiOwnerAtFine(q:vec3i)->CM12TransportOwner{
   let brickWidth=i32(BRICK_FINE_RESOLUTION);
-  let owner=cm12WorldOwnerAt(vec3i(
+  let logical=vec3i(
     cm12WorldFloorToSpan(q.x,brickWidth)/brickWidth,
     cm12WorldFloorToSpan(q.y,brickWidth)/brickWidth,
-    cm12WorldFloorToSpan(q.z,brickWidth)/brickWidth));
-  let leaf=cm12TeiLoadLeaf(cm12TeiCacheSlot,owner);
+    cm12WorldFloorToSpan(q.z,brickWidth)/brickWidth);
+  let leaf=cm12TeiLeafAtLogical(logical);let owner=leaf.owner;
   if((leaf.flags&0x80000000u)==0u||leaf.scale==0u){return CM12TransportOwner(
     CM12_TEI_INVALID,vec3u(0u),0u);}
   let origin=cm12WorldLeafCoordinate(owner)*i32(BRICK_FINE_RESOLUTION);

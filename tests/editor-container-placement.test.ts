@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { sceneContainerBox } from "../lib/core/editor-entity";
-import { hoverSceneAt, restInContainer } from "../lib/core/editor-hover";
-import { defaultFluidBallRadius_m } from "../lib/core/editor-fluid-volume";
+import { hoverSceneAt, restFluidInWorld, restInContainer } from "../lib/core/editor-hover";
+import { defaultFluidBallRadius_m, fluidInteractionDropVolume } from "../lib/core/editor-fluid-volume";
 import { sceneDefinitionCamera } from "../lib/core/scene-definition";
 import { findSceneDefinition, getScenePreset } from "../lib/core/scenes";
 import { projectToViewport, viewportRayForPointer } from "../lib/core/webgpu-camera";
@@ -76,7 +76,62 @@ test("aiming up the tank places up the tank, rather than always on the floor", (
   assert.ok(heights.size >= 5, `aiming up the tank produced ${heights.size} distinct heights`);
 });
 
+test("a ball aimed at the larger hydrostatic pool starts above its free surface", () => {
+  const definition = findSceneDefinition("hydrostatic-power-large-offset")!;
+  const hydrostatic = definition.build();
+  const hydroCamera = sceneDefinitionCamera(definition);
+  const surfaceY = hydrostatic.container.fillFraction * hydrostatic.container.height_m;
+  const target = { x: 0, y: surfaceY, z: 0 };
+  const projected = projectToViewport(target, hydroCamera, rect.width, rect.height);
+  const ray = viewportRayForPointer(hydroCamera,
+    projected.leftFraction * rect.width, projected.topFraction * rect.height, rect);
+  const hover = hoverSceneAt(hydrostatic, [], ray);
+  const radius = defaultFluidBallRadius_m(hydrostatic);
+  const centre = restInContainer(hydrostatic, ray, hover, radius);
+
+  assert.equal(hover?.kind, "fluid");
+  assert.ok(centre);
+  assert.ok(centre.y - radius >= surfaceY + hydrostatic.voxelDomain.finestCellSize_m - 1e-9,
+    `ball bottom ${centre.y - radius} must start clear of surface ${surfaceY}`);
+});
+
 test("a press that is not aimed at the tank is still refused", () => {
   const ray = viewportRayForPointer(camera, 8, rect.height - 8, rect);
   assert.equal(restInContainer(scene, ray, hoverSceneAt(scene, [], ray), radius_m), undefined);
+});
+
+test("a liquid interaction may land on the open world floor outside the tank", () => {
+  const outsideX = scene.container.width_m / 2 + 4 * radius_m;
+  const ray = {
+    origin: { x: outsideX, y: scene.container.height_m, z: 0 },
+    direction: { x: 0, y: -1, z: 0 },
+  };
+  const centre = restFluidInWorld(scene, ray,
+    hoverSceneAt(scene, [], ray, { scenery: false }), radius_m);
+  assert.ok(centre);
+  assert.equal(centre.x, outsideX);
+  assert.equal(centre.y, radius_m);
+  assert.ok(Math.abs(centre.x) > scene.container.width_m / 2);
+  assert.equal(fluidInteractionDropVolume(scene, centre, radius_m).center_m.x, outsideX,
+    "the runtime interaction must not clamp back to the vessel");
+});
+
+test("the tank remains promoted over a later outside-scene hit", () => {
+  const projected = projectToViewport({ x: 0, y: box.max.y, z: 0 },
+    camera, rect.width, rect.height);
+  const ray = viewportRayForPointer(camera,
+    projected.leftFraction * rect.width, projected.topFraction * rect.height, rect);
+  const outsideHover = {
+    kind: "floor" as const,
+    position_m: { x: 8, y: 0, z: 8 },
+    normal: { x: 0, y: 1, z: 0 },
+    distance_m: 20,
+    label: "stage floor",
+  };
+  const promoted = restFluidInWorld(scene, ray, outsideHover, radius_m);
+  const established = restInContainer(scene, ray, outsideHover, radius_m);
+  assert.deepEqual(promoted, established);
+  assert.ok(promoted);
+  assert.ok(Math.abs(promoted.x) <= scene.container.width_m / 2 - radius_m + 1e-9);
+  assert.ok(Math.abs(promoted.z) <= scene.container.depth_m / 2 - radius_m + 1e-9);
 });

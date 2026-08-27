@@ -60,8 +60,8 @@ installSimulationMethods({
   // link would have hydrated as the default method and simulated something
   // else.
   interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, adaptiveMassMethod],
-  // Sparse CM12 is the default for any scene that does not author a method
-  // profile. Uniform CM12 remains the pinned method of the paper-figure
-  // reproductions, which name it explicitly.
+  // Sparse CM12 is the application default for every scene. A scene profile
+  // seeds settings for an explicitly selected comparison method; opening the
+  // scene does not switch to that method.
   defaultId: adaptiveMassMethod.id,
 });

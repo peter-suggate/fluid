@@ -70,6 +70,10 @@ try {
         solver.readGPUActivityPolicy(), solver.readDiagnosticFields(), solver.readStats(),
       ]);
       const active = activity.bricks.filter((brick) => brick.active);
+      const outsideBricks = active.filter((brick) => brick.coordinate.some(
+        (coordinate, axis) => coordinate < 0
+          || coordinate >= Math.ceil([nx, ny, nz][axis]! / brickFineResolution),
+      ));
       const faceWet = (coordinate: readonly number[], face: string) => {
         const lo = coordinate.map((value) => value * brickFineResolution);
         const hi = lo.map((value, axis) => Math.min(
@@ -108,6 +112,7 @@ try {
         topologyGeneration: activity.acceptedTopologyGeneration,
         faults: activity.faultFlags,
         activeBricks: active.length,
+        outsideBricks: outsideBricks.map((brick) => brick.coordinate),
         resolutionCounts: Object.fromEntries([1, 2, 4, 8].map((resolution) => [resolution,
           active.filter((brick) => brick.acceptedResolution === resolution).length])),
         walls,
@@ -131,6 +136,8 @@ try {
     const initialMassFineCells = report[0]!.massFineCells;
     for (const receipt of report) {
       assert.equal(receipt.faults, 0, `topology faults at step ${receipt.step}`);
+      assert.deepEqual(receipt.outsideBricks, [],
+        `planar walls leaked resident pages at step ${receipt.step}`);
       assert.ok(receipt.resolutionCounts[4]! > 0,
         `step ${receipt.step} must retain a coarse Sparse CM12 page`);
       for (const face of ["xLow", "yLow", "zLow"] as const) {

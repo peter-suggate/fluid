@@ -1,6 +1,7 @@
 import type { SceneDescription } from "./model";
 import type { PlanarBoundaryPatch } from "./planar-boundary";
 import { solidVoxelShellForScene } from "./scene-lattice";
+import { sceneHasTerrain } from "./terrain";
 import {
   planarBoundaryForSolidWorldVoxelPatch,
   type SolidWorldVoxelPatch,
@@ -32,11 +33,35 @@ export interface E0PlanarFluidBoundaryCompilation {
   readonly rejectedFaces: readonly PlanarFluidBoundaryFace[];
 }
 
+export interface E0PlanarFluidBoundaryRuntimeConfiguration {
+  readonly planarFluidBoundaryFaceMask: number;
+  readonly genericSolidBoundaries: boolean;
+}
+
 export function e0PlanarFluidBoundaryFaceMask(
   compilation: E0PlanarFluidBoundaryCompilation,
 ): number {
   return compilation.admitted.reduce((mask, boundary) =>
     mask | PLANAR_FLUID_BOUNDARY_FACE_BIT[boundary.face], 0);
+}
+
+/**
+ * Solver routing for a scene's authored solid patches. Exact vessel planes
+ * keep the implicit MAC boundary; every residual patch stays on SolidWorld's
+ * generic cut-cell path.
+ */
+export function e0PlanarFluidBoundaryRuntimeConfiguration(
+  scene: SceneDescription,
+): E0PlanarFluidBoundaryRuntimeConfiguration {
+  const compilation = compileE0PlanarFluidBoundaries(scene);
+  const admittedSources = new Set(compilation.admitted.map(
+    (boundary) => boundary.sourcePatchIndex,
+  ));
+  return {
+    planarFluidBoundaryFaceMask: e0PlanarFluidBoundaryFaceMask(compilation),
+    genericSolidBoundaries: sceneHasTerrain(scene)
+      || scene.solidVoxels.some((_, index) => !admittedSources.has(index)),
+  };
 }
 
 const BOX_SHELL_FACES: readonly PlanarFluidBoundaryFace[] = [

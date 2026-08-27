@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -42,4 +43,17 @@ test("Phase-1 WGSL captures the real pass-boundary bit representations", () => {
 test("Phase-1 receipt hashes raw bytes", async () => {
   assert.equal(await sparseCM12Phase1Sha256(new Uint32Array([0x3f80_0000])),
     "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c");
+});
+
+test("Sparse CM12 receipts retain mixed-resolution signed range", () => {
+  const resident = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.match(resident,
+    /const CM12_SPARSE_TRANSPORT_FIXED:f32=65536\.0/);
+  const phase1 = resident.slice(resident.indexOf("fn transportBeta"),
+    resident.indexOf("fn preserveHorizontalD4"));
+  assert.doesNotMatch(phase1, /CM12_TRANSPORT_FIXED/);
+  assert.match(phase1, /CM12_SPARSE_TRANSPORT_FIXED/);
 });

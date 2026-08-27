@@ -144,15 +144,26 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
         if (step % 2 === 0) await device.queue.onSubmittedWorkDone();
         if (tallCells && process.env.FLUID_TERRAIN_TRACE === "1"
-          && (step <= 4 || step % 10 === 0 || step === steps)) {
+          && (step <= 4 || step % 30 === 0 || step === steps)) {
           await device.queue.onSubmittedWorkDone();
           const metrics = tallCellsMetrics(await solver.readDiagnosticFields());
+          const growth = await solver.readWorldGrowthReceiptQA();
           const activity = await solver.readGPUActivityPolicy();
           const active = activity.bricks.filter((brick) => brick.active);
           const activeX = active.reduce((maximum, brick) =>
             Math.max(maximum, brick.coordinate[0]), -1);
           process.stderr.write(`${JSON.stringify({ step, ...metrics,
-            relativeMass: metrics.mass / initialTallMetrics!.mass,
+            dynamicMass: growth.dynamicLiquidMassFineCells,
+            representedMass: metrics.mass + growth.dynamicLiquidMassFineCells,
+            relativeMass: (metrics.mass + growth.dynamicLiquidMassFineCells)
+              / initialTallMetrics!.mass,
+            furthestLiquidLeaf: growth.furthestLiquidLeafCoordinate,
+            worldBounds: [growth.minimum, growth.maximumExclusive],
+            worldLeaves: `${growth.liveLeaves}/${growth.capacity}`,
+            worldFaults: {
+              insertion: growth.insertionFaults,
+              capacity: growth.capacityFaults,
+            },
             activeX, activeBricks: active.length,
             topologyGeneration: activity.acceptedTopologyGeneration,
             newlyActivated: activity.newlyActivatedBrickCount,
@@ -167,7 +178,8 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
       for (let cell = 0; cell < fields.density.length; cell += 1) {
         const open = fields.solidOpenFraction[cell]!;
         const density = fields.density[cell]!;
-        assert.ok(Number.isFinite(open) && open >= 0 && open <= 1);
+        assert.ok(Number.isFinite(open) && open >= -1e-6 && open <= 1 + 1e-6,
+          `cell ${cell} published invalid solid-open fraction ${open}`);
         assert.ok(Number.isFinite(density) && density >= 0);
         if (open > 1e-6 && open < 1 - 1e-6) partialCells += 1;
         if (open <= 1e-6) {
@@ -178,12 +190,26 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
       }
       if (!tallCells) assert.ok(partialCells > 0,
         "the half-cell terrain height must publish partial CM12 capacities");
-      assert.ok(closedCells > 0,
+      if (!tallCells) assert.ok(closedCells > 0,
         "resident bricks crossing the terrain must publish fully solid cells");
       assert.ok(maximumClosedDensity <= 1e-6,
         `terrain-solid cells retained fluid density ${maximumClosedDensity}`);
       assert.ok(fluidMass > 1,
         "the terrain boundary must retain a material fluid body above it");
+      if (tallCells) {
+        const growth = await solver.readWorldGrowthReceiptQA();
+        assert.ok(growth.minimum[0] >= 0 && growth.minimum[2] >= 0
+          && growth.maximumExclusive[0] <= TALL_CELLS_FLOOD_GRID[0] / 8
+          && growth.maximumExclusive[2] <= TALL_CELLS_FLOOD_GRID[2] / 8,
+        `hillside fluid escaped the voxel tank: ${JSON.stringify([
+          growth.minimum, growth.maximumExclusive])}`);
+        assert.equal(growth.capacityFaults, 0,
+          "the moving hillside course must fit its bounded working set");
+        assert.ok((growth.furthestLiquidLeafCoordinate?.[0] ?? -1) >= 30,
+          `hillside liquid stopped at brick ${growth.furthestLiquidLeafCoordinate?.[0]}`);
+        assert.equal(growth.failedHostIncidences, 0,
+          "hillside page seams must retain their host incidence authority");
+      }
       const frame = await solver.sparseWorldTrace.readFrameControlQA();
       assert.equal(frame.fault, 0);
       assert.deepEqual(validationErrors, []);

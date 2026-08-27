@@ -66,8 +66,7 @@ fn cm12Phase1QAPublishVexAcceptedEffectiveVelocity(cell:u32,value:vec4f){
 }
 fn cm12Phase1QAPublishTransferredEffectiveVelocity(cell:u32,velocity:vec3f){
   ${publishTransferred}
-  atomicStore(&activity[CM12_P1TQ_HEADER+6u],
-    atomicLoad(&topologyArena[topologyWorklistBase()+1u]));
+  atomicStore(&activity[CM12_P1TQ_HEADER+6u],ptrTopologyGeneration());
 }
 fn cm12Phase1QACaptureTrace(cell:u32,departure:vec3f,stencil:TransportStencil){
   if(cell>=CM12_P1TQ_CAPACITY){return;}

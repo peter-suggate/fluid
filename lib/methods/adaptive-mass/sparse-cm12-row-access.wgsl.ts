@@ -118,7 +118,15 @@ export function createSparseCM12RowAccessWGSL(
 }`
     : `fn rowWord(id:u32,plane:u32)->u32{return ${w("7u")}+plane*${w("3u")}+id;}`;
   const termCell = dynamicPages
-    ? `fn termCell(index:u32)->u32{
+    ? `fn termRecord(index:u32)->vec2u{
+  let host=${w("4u")};if(index<host){let at=${w("8u")}+2u*index;
+    return vec2u(${w("at")},${w("at+1u")});}
+  let terms=6u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=index-host;let page=local/terms;let within=local%terms;
+  let base=candidateTopologyPageBase(page);let at=base+${w("base+8u")}+2u*within;
+  return vec2u(${w("at")},${w("at+1u")});
+}
+fn termCell(index:u32)->u32{
   let host=${w("4u")};if(index<host){return ${w(`${w("8u")}+2u*index`)};}
   let terms=6u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
   let local=index-host;let page=local/terms;let within=local%terms;
@@ -130,10 +138,22 @@ fn termCoefficient(index:u32)->f32{
   let local=index-host;let page=local/terms;let within=local%terms;
   let base=candidateTopologyPageBase(page);return ${f("base+" + w("base+8u") + "+2u*within+1u")};
 }`
-    : `fn termCell(index:u32)->u32{return ${w(`${w("8u")}+2u*index`)};}
+    : `fn termRecord(index:u32)->vec2u{let at=${w("8u")}+2u*index;
+  return vec2u(${w("at")},${w("at+1u")});}
+fn termCell(index:u32)->u32{return ${w(`${w("8u")}+2u*index`)};}
 fn termCoefficient(index:u32)->f32{return ${f(`${w("8u")}+2u*index+1u`)};}`;
   const incidence = dynamicPages
-    ? `fn incidenceBegin(cell:u32)->u32{
+    ? `fn incidenceRange(cell:u32)->vec2u{
+  let host=${w("2u")};if(cell<host){let at=${w("9u")}+cell;
+    let begin=${w("at")};let end=${w("at+1u")};
+    return vec2u(begin,boundedIncidenceEnd(begin,end));}
+  let cells=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=cell-host;let page=local/cells;let within=local%cells;
+  let base=candidateTopologyPageBase(page);let at=base+${w("base+9u")}+within;
+  let begin=${w("at")};let end=${w("at+1u")};
+  return vec2u(begin,boundedIncidenceEnd(begin,end));
+}
+fn incidenceBegin(cell:u32)->u32{
   let host=${w("2u")};if(cell<host){return ${w(`${w("9u")}+cell`)};}
   let cells=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
   let local=cell-host;let page=local/cells;let within=local%cells;
@@ -148,6 +168,14 @@ fn incidenceEnd(cell:u32)->u32{
   let base=candidateTopologyPageBase(page);end=${w("base+" + w("base+9u") + "+within+1u")};
   return boundedIncidenceEnd(begin,end);
 }
+fn incidenceRecord(index:u32)->vec2u{
+  let host=${w("5u")};if(index<host){let at=${w("10u")}+2u*index;
+    return vec2u(${w("at")},${w("at+1u")});}
+  let records=6u*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=index-host;let page=local/records;let within=local%records;
+  let base=candidateTopologyPageBase(page);let at=base+${w("base+10u")}+2u*within;
+  return vec2u(${w("at")},${w("at+1u")});
+}
 fn incidenceRow(index:u32)->u32{
   let host=${w("5u")};if(index<host){return ${w(`${w("10u")}+2u*index`)};}
   let records=6u*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
@@ -160,13 +188,29 @@ fn incidenceTerm(index:u32)->u32{
   let local=index-host;let page=local/records;let within=local%records;
   let base=candidateTopologyPageBase(page);return ${w("base+" + w("base+10u") + "+2u*within+1u")};
 }`
-    : `fn incidenceBegin(cell:u32)->u32{return ${w(`${w("9u")}+cell`)};}
+    : `fn incidenceRange(cell:u32)->vec2u{let at=${w("9u")}+cell;
+  let begin=${w("at")};let end=${w("at+1u")};
+  return vec2u(begin,boundedIncidenceEnd(begin,end));}
+fn incidenceBegin(cell:u32)->u32{return ${w(`${w("9u")}+cell`)};}
 fn incidenceEnd(cell:u32)->u32{
   let begin=incidenceBegin(cell);let end=${w(`${w("9u")}+cell+1u`)};
   return boundedIncidenceEnd(begin,end);
 }
+fn incidenceRecord(index:u32)->vec2u{let at=${w("10u")}+2u*index;
+  return vec2u(${w("at")},${w("at+1u")});}
 fn incidenceRow(index:u32)->u32{return ${w(`${w("10u")}+2u*index`)};}
 fn incidenceTerm(index:u32)->u32{return ${w(`${w("10u")}+2u*index+1u`)};}`;
+  const rowCenter = dynamicPages
+    ? `fn rowCenter(id:u32)->vec3f{
+  let host=${w("3u")};if(id<host){let base=${w("7u")}+id;
+    return vec3f(${f("base+6u*host")},${f("base+7u*host")},${f("base+8u*host")});}
+  let rows=3u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+  let local=id-host;let page=local/rows;let within=local%rows;
+  let pageBase=candidateTopologyPageBase(page);
+  let base=pageBase+${w("pageBase+7u")}+within;
+  return vec3f(${f("base+6u*rows")},${f("base+7u*rows")},${f("base+8u*rows")});
+}`
+    : `fn rowCenter(id:u32)->vec3f{return vec3f(${f("rowWord(id,6u)")},${f("rowWord(id,7u)")},${f("rowWord(id,8u)")});}`;
   return `${rowWord}
 fn boundedIncidenceEnd(begin:u32,end:u32)->u32{
   // One adaptive hexahedral cell can touch at most B^2 rows on each of its
@@ -186,7 +230,7 @@ fn rowStaticDualWeight(id:u32)->f32{return ${f("rowWord(id,2u)")};}
 fn rowStaticArea(id:u32)->f32{return ${f("rowWord(id,3u)")};}
 fn rowDistance(id:u32)->f32{return ${f("rowWord(id,4u)")};}
 fn rowExteriorPhi(id:u32)->f32{return ${f("rowWord(id,5u)")};}
-fn rowCenter(id:u32)->vec3f{return vec3f(${f("rowWord(id,6u)")},${f("rowWord(id,7u)")},${f("rowWord(id,8u)")});}
+${rowCenter}
 ${termCell}
 ${incidence}`;
 }

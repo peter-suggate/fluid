@@ -9,6 +9,10 @@ import type {
 import type { SceneDescription } from "../../core/model";
 import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { sceneCellSizes_m, sceneLatticeDimensions } from "../../core/scene-lattice";
+import {
+  refinementRegionLattice,
+  sceneRefinementRegions,
+} from "../../core/refinement-regions";
 import { GPUStageTimestampRecorder } from "../../core/performance-trace";
 import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
@@ -21,6 +25,9 @@ import {
 import { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
 import { solidWorldForScene } from
   "../../core/solid-world";
+import {
+  e0PlanarFluidBoundaryRuntimeConfiguration,
+} from "../../core/planar-fluid-boundary";
 import {
   ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS,
   AdaptiveMassFrameCapture,
@@ -41,6 +48,8 @@ import {
 } from "./sparse-atlas-composite-projection";
 import { SparseCM12PressureTopologyAttributionTracker } from
   "./sparse-cm12-pressure-topology-attribution";
+import { packSparseCM12RefinementRegions } from
+  "./sparse-cm12-refinement-regions";
 import { WebGPUAdaptiveMassSparsePresentation } from
   "./webgpu-adaptive-mass-atlas-presentation";
 import type { SparseWorld, SparseWorldDevice, SparseWorldUI } from "../../sparse-world";
@@ -403,10 +412,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         dependencies: ["adaptive-mass.atlas", "adaptive-mass.presentation"],
         run: async () => {
           const cellSize_m = finestCellSize(scene, atlas!);
+          const boundary = e0PlanarFluidBoundaryRuntimeConfiguration(scene);
           sparseWorldNumerics.current = {
             finestCellSize_m: cellSize_m,
             pressureScale: 1,
             origin_m: fluidDomainPlan.origin_m,
+            ...boundary,
           };
           sparseRuntime = await createCM12SparseWorld({
             device,
@@ -437,6 +448,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               total: 6,
             }),
             solidWorld: initialSolidWorld,
+            refinementRegionParameters: packSparseCM12RefinementRegions(
+              sceneRefinementRegions(scene), refinementRegionLattice(scene)),
             mode: qaToken === PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
               ? "presentation-publisher-qa"
               : qaToken === PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
@@ -453,10 +466,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               origin_m: fluidDomainPlan.origin_m,
               cellSize_m: fluidDomainPlan.cellSize_m,
             });
-          }
-          const sceneReceipt = sparseRuntime.world.edit({ kind: "set-scene", scene });
-          if (sceneReceipt.disposition !== "applied") {
-            throw new Error(sceneReceipt.reason ?? "Sparse world rejected its initial scene");
           }
         },
       }, ...rigidInitializationTasks, {
@@ -649,6 +658,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const pressureIterationReceiptSequence = pressureIterationReadback
       ? ++this.pressureIterationReceiptSequence : 0;
     const pressureIterationControlGeneration = this.pressureIterationControlGeneration;
+    const boundary = e0PlanarFluidBoundaryRuntimeConfiguration(this.scene);
     this.sparseWorldNumerics.current = {
       finestCellSize_m: cellSize_m,
       pressureScale: this.scene.fluid.density_kg_m3 * cellSize_m * cellSize_m / dt_s,
@@ -672,6 +682,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       seams: frameCapture?.residentStageSeams,
       worldDimensions_m: this.fluidDomain.dimensions.map((value, axis) =>
         value * this.fluidDomain.cellSize_m[axis]) as [number, number, number],
+      ...boundary,
     };
     this.sparseWorld.encodeStep(encoder, {
       time: this.lastTime_s + dt_s,
@@ -902,6 +913,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
   readCandidateEffectsTransactionQA() {
     return this.sparseWorldTrace.readCandidateEffectsTransactionQA();
+  }
+  readFramePlanPresentationHeaderQA() {
+    return this.sparseWorldTrace.readFramePlanPresentationHeaderQA();
+  }
+  readFramePlanPresentationFaultRecordQA() {
+    return this.sparseWorldTrace.readFramePlanPresentationFaultRecordQA();
   }
   /** Explicit FCA1 QA materialization; never consulted by frame scheduling. */
   readFrameControlQA() { return this.sparseWorldTrace.readFrameControlQA(); }

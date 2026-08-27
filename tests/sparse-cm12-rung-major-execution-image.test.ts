@@ -194,6 +194,10 @@ test("TEI2 WGSL hot owner path preserves signed world coordinates", () => {
   });
   const owner = source.slice(source.indexOf("fn cm12TeiOwnerAtFine"),
     source.indexOf("fn cm12TeiPacket(", source.indexOf("fn cm12TeiOwnerAtFine")));
+  assert.match(owner, /let leaf=cm12TeiLeafAtLogical\(logical\);let owner=leaf\.owner;/,
+    "the hot fine owner resolver must consume the staged WDR owner");
+  assert.doesNotMatch(owner, /cm12WorldOwnerAt/,
+    "the hot fine owner resolver must not bypass the staged directory");
   assert.match(owner, /let scale=1u<<leaf\.scaleLog2/);
   assert.match(owner, /let relative=q-origin/);
   assert.match(owner, /if\(any\(relative<vec3i\(0\)\)\)/);
@@ -204,6 +208,8 @@ test("TEI2 WGSL hot owner path preserves signed world coordinates", () => {
     "hot owner resolution must not restore runtime scale division/multiplication");
   assert.match(source, /leaf\.scale,leaf\.scaleLog2/,
     "the 27-leaf cache must carry the decoded shift");
+  assert.match(source, /cm12TeiCache1\[lane\]=vec4u\(leaf\.owner,/,
+    "the 27-leaf cache must carry signed-world physical ownership");
   assert.match(source,
     /\[at\+7u\]=CM12_TEI_SCALE_LOG2_ENCODED[\s\S]*firstLeadingBit\(scale\)/,
     "the topology compiler must publish the backwards-compatible descriptor");

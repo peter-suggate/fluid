@@ -2080,6 +2080,14 @@ function alignBytes(value: number, alignment = 256): number {
  */
 export interface SparseBrickScenePayloadLanes {
   readonly mode: SparseBrickLeafPayloadMode;
+  /** Dense scene-geometry base. Retained while the voxelizer stages banded records from it. */
+  readonly geometryWords: number;
+  /** Dense geometry record stride, in u32 words. */
+  readonly geometryStrideWords: number;
+  /** Solid-fraction word inside an unpacked dense geometry record. */
+  readonly geometryFractionWord: number;
+  /** Packed f16-distance/unorm8-fraction record, rather than plain f32 channels. */
+  readonly geometryPacked: boolean;
   readonly materialOwnerWords: number;
   readonly occupancyWords: number;
   readonly recordMaskWords: number;
@@ -2209,6 +2217,11 @@ export class SparseBrickOctreeGPU {
     ];
     this.scenePayloadLanes = Object.freeze({
       mode: this.leafPayloadMode,
+      geometryWords: layout.lanes.sceneGeometry.offsetBytes / 4,
+      geometryStrideWords: layout.lanes.sceneGeometry.strideBytes / 4,
+      geometryFractionWord: this.payloadProfile === "full" ? 2
+        : this.sceneGeometryFormat === "f32x2" ? 1 : 0,
+      geometryPacked: this.payloadProfile === "dry" && this.sceneGeometryFormat === "f16-unorm8",
       materialOwnerWords: layout.lanes.sceneMaterialOwners.offsetBytes / 4,
       occupancyWords: this.bandedLaneWordOffsets[0],
       recordMaskWords: this.bandedLaneWordOffsets[1],

@@ -115,6 +115,9 @@ Options:
   --enforce-non-pressure-gate=0|1    Exit nonzero when the eligible gate fails
   --enforce-pressure-receipts=0|1    Require fault-free PTR/PCA receipts
                                      (default 1)
+  --final-qa=0|1                    Run full catalogue/transport/frame-plan QA
+                                     after timing (default 1; disable for A/B)
+  --quiet=0|1                       Print a compact summary instead of full JSON
   --out=PATH                         Write the JSON receipt
 
 The non-pressure gate is eligible only for ocean-seiche B16/P16 with at least
@@ -135,6 +138,8 @@ const maximumTarget_ms = Number(argument("max-non-pressure-ms",
 const enforceNonPressureGate = argument("enforce-non-pressure-gate",
   argument("enforce-target-gate", "0")) === "1";
 const enforcePressureReceipts = argument("enforce-pressure-receipts", "1") === "1";
+const finalQAEnabled = argument("final-qa", "1") !== "0";
+const quiet = argument("quiet", "0") === "1";
 const outputPath = argument("out", "");
 if (!(Number.isSafeInteger(warmup) && warmup >= 0)) throw new RangeError(
   `warmup must be a non-negative integer; received ${warmup}`,
@@ -715,6 +720,17 @@ try {
       sum + (stageDurations.get(id) ?? 0), 0));
     const frameChunkDurations = new Map<string, number>();
     for (const phase of trace.phases) {
+      // `partitionPerformanceTrace` closes timestamp gaps with one synthetic
+      // residual phase. It is measured GPU time, but it is deliberately not a
+      // resident shader work chunk and must not be assigned to an arbitrary
+      // stage merely to make the ownership assertion pass. Keep it in the
+      // phase/non-pressure totals below while excluding it from stage closure.
+      if (phase.label === "Other measured work") {
+        const bucket = phaseSamples.get(phase.label) ?? [];
+        bucket.push(phase.duration_ms);
+        phaseSamples.set(phase.label, bucket);
+        continue;
+      }
       const chunk = GPU_WORK_CHUNK_BY_LABEL.get(phase.label);
       assert.ok(chunk, `GPU phase ${phase.label} has no concrete work-chunk owner`);
       const chunkBucket = workChunkSamples.get(chunk.id) ?? [];
@@ -832,15 +848,18 @@ try {
     diagnosticFailure = `captured ${seen}/${sampled} requested hardware traces in ${
       maximumAdvances} advances`;
   }
-  const adaptiveRepresentation = await qaSolver.readAdaptiveRepresentationQA();
+  const adaptiveRepresentation: Record<string, number | boolean | string> = finalQAEnabled
+    ? await qaSolver.readAdaptiveRepresentationQA()
+    : { skipped: true, reason: "--final-qa=0 A/B timing run" };
   const representationInvariants = [
     "leafCellRangesExactlyPartitionAcceptedCells",
     "rowRequirementsExactlyDescribeAcceptedRows",
     "manifestExactlyMatchesActiveLeaves",
     "topologyDeltaExactlyMatchesScheduledLeaves",
   ] as const;
-  const failedRepresentationInvariants = representationInvariants.filter(
-    (name) => adaptiveRepresentation[name] !== true);
+  const failedRepresentationInvariants = finalQAEnabled
+    ? representationInvariants.filter((name) => adaptiveRepresentation[name] !== true)
+    : [];
   if (!diagnosticFailure && failedRepresentationInvariants.length > 0) {
     diagnosticFailure = `accepted representation invariant failure: ${
       failedRepresentationInvariants.join(", ")}; receipt=${
@@ -897,8 +916,12 @@ try {
     eligible: targetConfiguration && sampled >= 24,
     passed: targetConfiguration && sampled >= 24 && nonPressureP95_ms < maximumTarget_ms,
   };
-  const transportProfile = await qaSolver.readPhase1TransportProfileQA?.();
-  const framePlan = await readFramePlanCensus(device, solver);
+  const transportProfile = finalQAEnabled
+    ? await qaSolver.readPhase1TransportProfileQA?.()
+    : { skipped: true, reason: "--final-qa=0 A/B timing run" };
+  const framePlan = finalQAEnabled
+    ? await readFramePlanCensus(device, solver)
+    : { skipped: true, reason: "--final-qa=0 A/B timing run" };
   const report = {
     probe: "sparse-cm12-stage-cost", scene: sceneName, samples: seen,
     warmupSamples: warmup,
@@ -928,6 +951,8 @@ try {
       finestGrid: [solver.info.nx, solver.info.ny, solver.info.nz],
       dt_s,
       captureGap_ms,
+      finalQAEnabled,
+      quiet,
       measurementSource: "gpu-hardware-timestamp",
       timestampQuantum_us: 65.536,
     },
@@ -1052,7 +1077,20 @@ try {
     } : undefined,
     stages, validationErrors,
   };
-  console.log(JSON.stringify(report, null, 2));
+  if (quiet) {
+    console.log(JSON.stringify({
+      outputPath,
+      samples: seen,
+      medianAdvance_ms: report.medianAdvance_ms,
+      nonPressure: report.nonPressure,
+      optimizationTarget: report.optimizationTarget,
+      closure: report.closure,
+      validationErrors,
+      diagnosticPassed: report.diagnostic.passed,
+    }, null, 2));
+  } else {
+    console.log(JSON.stringify(report, null, 2));
+  }
   if (outputPath) await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   assert.equal(diagnosticFailure, undefined, diagnosticFailure);
   assert.deepEqual(validationErrors, []);

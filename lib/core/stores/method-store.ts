@@ -44,8 +44,8 @@ export const useMethodStore = create<MethodStore>((set) => ({
     overrides: { ...state.overrides, [methodId]: { ...overrides } },
   })),
   // Catalog profiles retain the exact settings needed when their historical
-  // method is selected, but opening a card no longer overrides the product's
-  // Uniform default merely because those comparison settings exist.
+  // method is selected, but opening a card never switches away from the
+  // product-wide Sparse CM12 default merely because comparison settings exist.
   seedProfile: ({ methodId, overrides }) => set((state) => ({
     overrides: { ...state.overrides, [methodId]: { ...overrides } },
   })),

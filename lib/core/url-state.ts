@@ -39,6 +39,7 @@ const deletedValue = "~delete";
 // the rigid-body roster without inventing array-index patch semantics.
 const sceneQueryPaths = [
   "sceneId",
+  "surfaceStyle",
   "randomSeed",
   "duration_s",
   "container.width_m",
@@ -528,12 +529,18 @@ export function parseQueryState(search: string): QueryState {
   for (const path of sceneQueryPaths) {
     const raw = query.get(`scene.${path}`);
     if (raw === null) continue;
-    if (raw === deletedValue && path === "fluid.inflow") {
+    if (raw === deletedValue && (path === "fluid.inflow" || path === "surfaceStyle")) {
       setAtPath(patched, path, undefined);
       continue;
     }
     try {
       const value = JSON.parse(raw);
+      // Most presets omit the default voxel-flat style, so this optional path
+      // has no baseline type for the generic compatibility check to inspect.
+      if (path === "surfaceStyle") {
+        if (value === "smooth" || value === "voxel-flat") setAtPath(patched, path, value);
+        continue;
+      }
       if (compatibleSceneValue(getAtPath(baseScene, path), value)) setAtPath(patched, path, value);
     }
     catch { /* Malformed external values are ignored and canonicalized away. */ }

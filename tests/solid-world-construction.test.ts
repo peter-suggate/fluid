@@ -132,6 +132,13 @@ test("SolidWorld uses exact signed pages and a floor-reaching voxel cut", () => 
   });
   assert.deepEqual(presentation.plan.sampleDimensions, atlas.dimensions,
     "signed presentation must not advertise page-capacity headroom as extent");
+  assert.ok(presentation.plan.domainOrigin.every((value) => value === 0),
+    "signed WDR page coordinates are already global fine-lattice addresses");
   assert.notEqual(presentation.worklist[3]!
     & FINE_LEVELSET_SIGNED_SPARSE_ADDRESS_FLAG, 0);
+  assert.throws(() => sparseCM12FinePresentationPlan(atlas, 8, {
+    signedSparseAddressing: true,
+    coordinateOffsetPages: [1, 0, 0],
+  }), /cannot advertise a padded address lattice/,
+  "signed consumers must never add a second domain-origin page offset");
 });

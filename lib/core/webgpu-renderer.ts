@@ -2072,6 +2072,12 @@ export class FluidLabRenderer {
       || !this.sparseDeviceReady(this.gpuFluid)
       || !this.gpuFluid?.injectLiquidBall) return false;
     this.gpuFluid.injectLiquidBall(ball);
+    // Injection is a source publication, but not a solver step, so
+    // `info.encodedSteps` does not change. Explicitly retire the retained mesh
+    // and wake a paused presentation; the queue orders the next extraction
+    // after the injection transaction.
+    this.waterPipeline?.invalidateSurface();
+    this.pausedPresentationRevision += 1;
     return true;
   }
 

@@ -18,7 +18,7 @@ import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./te
 import type { EnvironmentId } from "./environments";
 import type { MethodProfile } from "./method-contract";
 import { sceneDamBreakFractions } from "./initial-fluid";
-import { solidVoxelShellForScene } from "./scene-lattice";
+import { solidVoxelEditsForScene, solidVoxelShellForScene } from "./scene-lattice";
 import { sceneWithEnvironment } from "./scenery-presets";
 import { withSceneryNodes } from "./scenery-edit";
 import type { SceneryGraph } from "./scenery-graph";
@@ -884,11 +884,16 @@ export function createSymmetricExpansionScene(): SceneDescription {
  */
 export function createMinimalPowerDamBreak64Scene(): SceneDescription {
   const scene = createMinimalPowerDamBreakScene();
+  // The source scene carries a shell expressed in its 16^3 lattice. Strip it
+  // before changing the lattice; otherwise the document compiler cannot
+  // recognise it at 64^3 and preserves it as an internal solid obstacle.
+  scene.solidVoxels = solidVoxelEditsForScene(scene);
   scene.sceneId = "minimal-power-dam-break-64";
   scene.voxelDomain = {
     ...scene.voxelDomain,
     finestCellSize_m: scene.voxelDomain.finestCellSize_m / 4,
   };
+  scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
 
@@ -900,23 +905,27 @@ export function createMinimalPowerDamBreak64Scene(): SceneDescription {
  */
 export function createHighResolutionDamBreakScene(): SceneDescription {
   const scene = createMinimalPowerDamBreakScene();
+  scene.solidVoxels = solidVoxelEditsForScene(scene);
   scene.sceneId = "high-resolution-dam-break";
   scene.duration_s = 20;
   scene.voxelDomain = {
     ...scene.voxelDomain,
     finestCellSize_m: scene.voxelDomain.finestCellSize_m / 8,
   };
+  scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
 
 /** The same physical mini dam on the midpoint 32³ coarse-only lattice. */
 export function createMinimalPowerDamBreak32Scene(): SceneDescription {
   const scene = createMinimalPowerDamBreakScene();
+  scene.solidVoxels = solidVoxelEditsForScene(scene);
   scene.sceneId = "minimal-power-dam-break-32";
   scene.voxelDomain = {
     ...scene.voxelDomain,
     finestCellSize_m: scene.voxelDomain.finestCellSize_m / 2,
   };
+  scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
 
@@ -931,6 +940,7 @@ export function createMinimalPowerDamBreak32Scene(): SceneDescription {
  */
 export function createSparseCM12LongDamBreakScene(): SceneDescription {
   const scene = createMinimalPowerDamBreakScene();
+  scene.solidVoxels = solidVoxelEditsForScene(scene);
   scene.sceneId = "sparse-cm12-long-dam-break";
   scene.duration_s = 4;
   scene.container = {
@@ -1103,6 +1113,11 @@ export function createTallCellsHillsideDamBreakScene(): SceneDescription {
   delete scene.fluid.inflow;
   scene.fluid.dynamicViscosity_Pa_s = 0;
   scene.fluid.surfaceTension_N_m = 0;
+  // `vessel: "none"` hides the rendered glass/outline; it does not make the
+  // Flood benchmark an unbounded fluid domain. Keep the open-top box shell in
+  // SolidWorld so its fixed side/end walls use the same editable voxel
+  // authority as every ordinary tank (including clear patches cut into it).
+  scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   // Preserve the clear-water look used by the small tank scenes. Optical
   // coefficients are rates per metre; applying their tank-scale defaults to a
   // 2.4 m reservoir makes an otherwise identical medium strongly cyan. This
@@ -1127,6 +1142,7 @@ export function createTallCellsHillsideDamBreakScene(): SceneDescription {
  */
 export function createLargePowerDamBreakScene(): SceneDescription {
   const scene = createMinimalPowerDamBreakScene();
+  scene.solidVoxels = solidVoxelEditsForScene(scene);
   const miniDam = sceneDamBreakFractions(scene);
   const initialDamBreakDimensions_m = {
     x: miniDam.width * scene.container.width_m,
@@ -1142,6 +1158,7 @@ export function createLargePowerDamBreakScene(): SceneDescription {
     fillFraction: scene.container.fillFraction / 20,
   };
   scene.fluid.initialDamBreakDimensions_m = initialDamBreakDimensions_m;
+  scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
 
@@ -1216,6 +1233,7 @@ export function createLargePowerHydrostaticScene(): SceneDescription {
  */
 export function createDeepPowerHydrostaticScene(): SceneDescription {
   const scene = createLargePowerHydrostaticScene();
+  scene.solidVoxels = solidVoxelEditsForScene(scene);
   scene.sceneId = "deep-power-hydrostatic";
   scene.container = {
     ...scene.container,
@@ -1228,6 +1246,7 @@ export function createDeepPowerHydrostaticScene(): SceneDescription {
   // point is that no liquid cell is near a lateral free surface.
   scene.fluid.initialCondition = "tank-fill";
   delete scene.fluid.initialDamBreakDimensions_m;
+  scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
 

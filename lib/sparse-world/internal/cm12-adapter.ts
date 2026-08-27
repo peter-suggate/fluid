@@ -59,6 +59,10 @@ export interface CM12SparseWorldStepConfiguration {
   readonly pressureControl?: SparseCM12PressureControl;
   readonly seams?: SparseCM12ResidentStageSeams;
   readonly worldDimensions_m?: readonly [number, number, number];
+  /** Exact authored vessel faces that use the legacy tank-wall MAC condition. */
+  readonly planarFluidBoundaryFaceMask?: number;
+  /** Whether edited/embedded SolidWorld geometry remains after planar admission. */
+  readonly genericSolidBoundaries?: boolean;
 }
 
 export type CM12SparseWorldNumerics =
@@ -95,6 +99,8 @@ export interface CM12SparseWorldFactoryConfig {
   readonly report?: SparseCM12ResidentInitializationReporter;
   /** Canonical static solid authority for construction and later live edits. */
   readonly solidWorld: SolidWorld;
+  /** Packed initial refinement policy, installed without publishing a live edit. */
+  readonly refinementRegionParameters: ArrayBuffer;
   readonly mode?: CM12SparseWorldResidentFactoryMode;
   /** Defaults to the authored active set. */
   readonly residentTiles?: number;
@@ -161,6 +167,10 @@ export interface CM12SparseWorldDeveloperTrace {
     WebGPUSparseCM12Resident["readPhase1TransportProfileQA"]>;
   readCandidateEffectsTransactionQA(): ReturnType<
     WebGPUSparseCM12Resident["readCandidateEffectsTransactionQA"]>;
+  readFramePlanPresentationHeaderQA(): ReturnType<
+    WebGPUSparseCM12Resident["readFramePlanPresentationHeaderQA"]>;
+  readFramePlanPresentationFaultRecordQA(): ReturnType<
+    WebGPUSparseCM12Resident["readFramePlanPresentationFaultRecordQA"]>;
   readFrameControlQA(): ReturnType<WebGPUSparseCM12Resident["readFrameControlQA"]>;
   readTransportPacketIndirectQA(): ReturnType<
     WebGPUSparseCM12Resident["readTransportPacketIndirectQA"]>;
@@ -341,6 +351,8 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         rigidBodies.length,
         configuration.worldDimensions_m,
         inflow,
+        configuration.planarFluidBoundaryFaceMask,
+        configuration.genericSolidBoundaries,
       );
       this.options.rigidSystem?.encode(
         encoder,
@@ -504,6 +516,12 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   readCandidateEffectsTransactionQA() {
     return this.resident.readCandidateEffectsTransactionQA();
   }
+  readFramePlanPresentationHeaderQA() {
+    return this.resident.readFramePlanPresentationHeaderQA();
+  }
+  readFramePlanPresentationFaultRecordQA() {
+    return this.resident.readFramePlanPresentationFaultRecordQA();
+  }
   readFrameControlQA() { return this.resident.readFrameControlQA(); }
   readTransportPacketIndirectQA() { return this.resident.readTransportPacketIndirectQA(); }
   readDynamicTransportPacketsQA() { return this.resident.readDynamicTransportPacketsQA(); }
@@ -601,6 +619,7 @@ export async function createCM12SparseWorld(
       : mode === "phase1-transport-receipt-qa"
         ? await WebGPUSparseCM12Resident.createPhase1TransportReceiptOracleForQA(...args)
         : await WebGPUSparseCM12Resident.create(...args);
+    resident.setRefinementRegionParameters(config.refinementRegionParameters);
   } catch (error) {
     sparseDevice.publishLibraryFault(error);
     throw error;

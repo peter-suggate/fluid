@@ -289,7 +289,7 @@ export function defaultFluidBallRadius_m(scene: SceneDescription): number {
  * into the running solve after it — build the shape here, so the water that
  * lands is the same water either way.
  */
-export function fluidDropVolume(
+function describedFluidDrop(
   scene: SceneDescription,
   centre_m: Vec3,
   radius_m: number,
@@ -301,9 +301,27 @@ export function fluidDropVolume(
     // Centred in the slab, spanning it: a 2D case has no off-plane position to
     // drop at, and water that stopped short of the walls would not be 2D.
     : { shape: "cylinder", center_m: { ...centre_m, z: 0 }, radius_m: radius, halfHeight_m };
+  return seed;
+}
+
+export function fluidDropVolume(
+  scene: SceneDescription,
+  centre_m: Vec3,
+  radius_m: number,
+): InitialLiquidSphere | InitialLiquidCylinder {
+  const seed = describedFluidDrop(scene, centre_m, radius_m);
   // Through the move so a drop aimed past a wall lands on it rather than
   // authoring a centre `validateScene` will reject.
   return moveFluidVolume(scene, seed, seed.center_m) as InitialLiquidSphere | InitialLiquidCylinder;
+}
+
+/** The same drop shape for a live SparseWorld edit, without a vessel clamp. */
+export function fluidInteractionDropVolume(
+  scene: SceneDescription,
+  centre_m: Vec3,
+  radius_m: number,
+): InitialLiquidSphere | InitialLiquidCylinder {
+  return describedFluidDrop(scene, centre_m, radius_m);
 }
 
 /** Drop a new ball into the document, and say what to select. */

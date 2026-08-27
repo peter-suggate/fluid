@@ -1,5 +1,6 @@
 import { containerContains, containerPlacementPoint } from "./editor-entity";
 import { sceneryEntity, sceneryIdFromSelection } from "./editor-scenery";
+import { sceneCellSizes_m } from "./scene-lattice";
 import { add, dot, scale, sub } from "./math";
 import type { SceneDescription, Vec3 } from "./model";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
@@ -19,7 +20,7 @@ import { intersectAuthoredTerrain, sceneHasTerrain, terrainNormalAt } from "./te
  * the terrain brush.
  */
 
-export type EditorHoverKind = "body" | "scenery" | "terrain" | "floor";
+export type EditorHoverKind = "body" | "fluid" | "scenery" | "terrain" | "floor";
 
 export interface EditorHover {
   readonly kind: EditorHoverKind;
@@ -79,6 +80,31 @@ function hoverBody(bodies: readonly RigidBodyState[], ray: { origin: Vec3; direc
   return nearest;
 }
 
+/** Authored water is a placement surface too: a dropped ball sits on the pool. */
+function hoverFluid(scene: SceneDescription, ray: { origin: Vec3; direction: Vec3 }): EditorHover | undefined {
+  if (scene.systems?.fluid === false || scene.fluid.initialCondition !== "tank-fill"
+    || (scene.fluid.initialBrickSeeds_m?.length
+      && scene.fluid.initialBrickSeedsAdditive !== true)
+    || !(ray.direction.y < -1e-6)) return undefined;
+  const surfaceY = scene.container.fillFraction * scene.container.height_m;
+  if (!(surfaceY > 0)) return undefined;
+  const distance_m = (surfaceY - ray.origin.y) / ray.direction.y;
+  if (!(distance_m > 0)) return undefined;
+  const position_m = add(ray.origin, scale(ray.direction, distance_m));
+  if (Math.abs(position_m.x) > scene.container.width_m / 2
+    || Math.abs(position_m.z) > scene.container.depth_m / 2) return undefined;
+  return {
+    kind: "fluid",
+    position_m,
+    // Water is not a rigid support with a meaningful side normal. A drop rests
+    // above the surface it is entering, which also keeps its visible volume
+    // out of the pool until the simulation advances it.
+    normal: { x: 0, y: 1, z: 0 },
+    distance_m,
+    label: "water",
+  };
+}
+
 function hoverTerrain(scene: SceneDescription, ray: { origin: Vec3; direction: Vec3 }): EditorHover | undefined {
   if (!sceneHasTerrain(scene)) return undefined;
   const c = scene.container;
@@ -113,7 +139,7 @@ export interface EditorHoverOptions {
   readonly scenery?: boolean;
 }
 
-/** Nearest analytic hit under the pointer across bodies, terrain, and the floor. */
+/** Nearest analytic hit under the pointer across bodies, water, terrain, and the floor. */
 export function hoverSceneAt(
   scene: SceneDescription,
   bodies: readonly RigidBodyState[],
@@ -122,6 +148,7 @@ export function hoverSceneAt(
 ): EditorHover | undefined {
   const candidates = [
     hoverBody(bodies, ray),
+    hoverFluid(scene, ray),
     options.scenery === false ? undefined : hoverScenery(scene, ray),
     hoverTerrain(scene, ray),
     hoverFloor(scene, ray),
@@ -140,13 +167,65 @@ export function hoverSceneAt(
  */
 export function restOnHover(hover: EditorHover, radius_m: number, scene: SceneDescription): Vec3 {
   const c = scene.container;
-  const normal = hover.kind === "body" ? hover.normal : terrainSurfaceNormal(scene, hover);
-  const placed = add(hover.position_m, scale(normal, radius_m));
+  const normal = hover.kind === "body" || hover.kind === "fluid" ? hover.normal
+    : hover.kind === "terrain" ? terrainSurfaceNormal(scene, hover)
+      : { x: 0, y: 1, z: 0 };
+  // A liquid ball touching the pool is already one connected implicit body;
+  // Sparse CM12 correctly unions it into a small cap before it can look like a
+  // ball. Leave one finest cell of air so the paused frame shows the drop and
+  // the running frame has room to let it fall.
+  const airGap_m = hover.kind === "fluid" ? Math.min(...sceneCellSizes_m(scene)) : 0;
+  const placed = add(hover.position_m, scale(normal, radius_m + airGap_m));
   return {
     x: Math.min(c.width_m / 2 - radius_m, Math.max(-c.width_m / 2 + radius_m, placed.x)),
     y: Math.min(c.height_m + 0.8, Math.max(radius_m, placed.y)),
     z: Math.min(c.depth_m / 2 - radius_m, Math.max(-c.depth_m / 2 + radius_m, placed.z)),
   };
+}
+
+/**
+ * Rest a liquid interaction in the open sparse world.
+ *
+ * Unlike authored tank contents and rigid-body placement, a live drop is not
+ * constrained by the vessel after the ray has missed it. Rays addressing the
+ * tank retain its established promoted placement; otherwise a surface hit
+ * anywhere is authoritative, and the open y=0 world floor supplies depth when
+ * no bounded scene surface answers. Only the lower world bound remains: Sparse
+ * CM12's vertical page coordinate is non-negative, so the ball must not extend
+ * below y=0.
+ */
+export function restFluidInWorld(
+  scene: SceneDescription,
+  ray: { origin: Vec3; direction: Vec3 },
+  hover: EditorHover | undefined,
+  radius_m: number,
+): Vec3 | undefined {
+  // The tank is a promoted drop target. In particular, a ray through its open
+  // upper volume may eventually hit stage geometry outside it; the established
+  // container path deliberately resolves that ray inside the vessel instead.
+  // Open-world placement is only the fallback for a genuine tank miss.
+  const tankPlacement = restInContainer(scene, ray, hover, radius_m);
+  if (tankPlacement) return tankPlacement;
+  let surface = hover;
+  if (!surface && ray.direction.y < -1e-6) {
+    const distance_m = -ray.origin.y / ray.direction.y;
+    if (distance_m > 0) {
+      surface = {
+        kind: "floor",
+        position_m: add(ray.origin, scale(ray.direction, distance_m)),
+        normal: { x: 0, y: 1, z: 0 },
+        distance_m,
+        label: "world floor",
+      };
+    }
+  }
+  if (!surface) return undefined;
+  const normal = surface.kind === "body" || surface.kind === "fluid" ? surface.normal
+    : surface.kind === "terrain" ? terrainSurfaceNormal(scene, surface)
+      : { x: 0, y: 1, z: 0 };
+  const airGap_m = surface.kind === "fluid" ? Math.min(...sceneCellSizes_m(scene)) : 0;
+  const placed = add(surface.position_m, scale(normal, radius_m + airGap_m));
+  return { ...placed, y: Math.max(radius_m, placed.y) };
 }
 
 /**

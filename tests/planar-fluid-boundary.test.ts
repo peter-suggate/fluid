@@ -4,6 +4,7 @@ import { compileE0PlanarFluidBoundaries } from
   "../lib/core/planar-fluid-boundary";
 import {
   e0PlanarFluidBoundaryFaceMask,
+  e0PlanarFluidBoundaryRuntimeConfiguration,
 } from "../lib/core/planar-fluid-boundary";
 import { getScenePreset } from "../lib/core/scenes";
 import { initializeSparseBrickAtlasFromScene } from
@@ -18,6 +19,10 @@ test("water-box shell compiles all six exact E0 planar faces", () => {
   assert.ok(compiled.admitted.every(({ patch }) =>
     Math.abs(patch.halfThickness_m - 0.025) < 1e-12));
   assert.equal(e0PlanarFluidBoundaryFaceMask(compiled), 0b11_1111);
+  assert.deepEqual(e0PlanarFluidBoundaryRuntimeConfiguration(scene), {
+    planarFluidBoundaryFaceMask: 0b11_1111,
+    genericSolidBoundaries: false,
+  });
 });
 
 test("open tops and wall cuts fail closed in the E0 compiler", () => {
@@ -35,6 +40,19 @@ test("open tops and wall cuts fail closed in the E0 compiler", () => {
   compiled = compileE0PlanarFluidBoundaries(scene);
   assert.equal(compiled.admitted.some(({ face }) => face === "xHigh"), false);
   assert.ok(compiled.rejectedFaces.includes("xHigh"));
+  assert.deepEqual(e0PlanarFluidBoundaryRuntimeConfiguration(scene), {
+    planarFluidBoundaryFaceMask: 0b11_0101,
+    genericSolidBoundaries: true,
+  });
+});
+
+test("terrain keeps the SolidWorld cut-cell path live beside exact tank faces", () => {
+  const scene = getScenePreset("water-box").create();
+  scene.terrain = { baseHeight_m: 0.1, features: [] };
+  assert.deepEqual(e0PlanarFluidBoundaryRuntimeConfiguration(scene), {
+    planarFluidBoundaryFaceMask: 0b11_1111,
+    genericSolidBoundaries: true,
+  });
 });
 
 test("Sparse CM12 keeps featureless wet water-box wall bricks coarse", () => {
