@@ -272,6 +272,14 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] =
   SPARSE_CM12_RESIDENT_STAGES.map((id): FluidPipelineStage => {
     const entry = sparseCM12Stage(id);
     const substages: readonly string[] = SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES[id];
+    const timedEntryPoints = entry.timedWork?.groups.reduce(
+      (count, group) => count + group.entryPoints.length, 0) ?? 0;
+    const commandCopies = entry.timedWork?.commandCopies ?? 0;
+    const timing = entry.timedWork
+      ? `${entry.timedWork.groups.map((group) => group.label).join("; ")} `
+        + `(${timedEntryPoints} shader entry points${commandCopies > 0
+          ? ` + ${commandCopies} command-buffer copies` : ""})`
+      : undefined;
     return {
       id,
       band: entry.band,
@@ -281,7 +289,7 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] =
         ...substages.map((substage) => sparseCM12SubstagePhase(id, substage as never).label),
         entry.phase.label,
       ],
-      tip: entry.tip,
+      tip: timing ? { ...entry.tip, timing } : entry.tip,
       ...(entry.controls ? { controls: entry.controls } : {}),
       ...(entry.lens ? { lens: entry.lens } : {}),
       ...(entry.toggle ? { toggle: entry.toggle } : {}),

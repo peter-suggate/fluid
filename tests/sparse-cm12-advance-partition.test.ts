@@ -79,6 +79,30 @@ test("each stage closes exactly the sub-seams its ABI declares, in order", () =>
   }
 });
 
+test("truth-sensitive timing rows inventory the shader work their UI describes", () => {
+  const bodies = residentStageBodies();
+  for (const stage of ["activity-measurement", "resolution-planning"] as const) {
+    const manifest = SPARSE_CM12_STAGES[stage].timedWork;
+    assert.ok(manifest, `${stage} must publish timed-work detail to the UI`);
+    const body = bodies.get(stage) ?? "";
+    const dispatched = [...body.matchAll(
+      /\bdispatch[A-Za-z]*\("([A-Za-z0-9]+)"/g,
+    )].map((match) => match[1]).sort();
+    assert.doesNotMatch(body, /\.setPipeline\(/,
+      `${stage} bypasses the dispatch helpers and therefore its UI manifest`);
+    const declared = manifest.groups.flatMap((group) => group.entryPoints).sort();
+    assert.deepEqual(declared, dispatched,
+      `${stage} shader dispatches changed; update its UI timed-work manifest`);
+    assert.equal(new Set(declared).size, declared.length,
+      `${stage} timed-work manifest lists one shader twice`);
+    const commandCopies = [...body.matchAll(/encoder\.copyBufferToBuffer\(/g)].length;
+    const declaredCommandCopies = "commandCopies" in manifest
+      ? manifest.commandCopies : 0;
+    assert.equal(declaredCommandCopies, commandCopies,
+      `${stage} command-copy count changed; update its UI timed-work manifest`);
+  }
+});
+
 test("every seam the encoder emits has a label of its own", () => {
   const labels = ADAPTIVE_MASS_GPU_WORK_CHUNKS.map((chunk) => chunk.phase.label);
   assert.equal(new Set(labels).size, labels.length,
@@ -91,6 +115,16 @@ test("every seam the encoder emits has a label of its own", () => {
 test("the SIM diagram has one node per resident stage, in encode order", () => {
   assert.deepEqual(ADAPTIVE_MASS_FLUID_PIPELINE.stages.map((stage) => stage.id),
     [...SPARSE_CM12_RESIDENT_STAGES]);
+});
+
+test("adaptivity timing labels describe the complete bracketed work", () => {
+  const stages = new Map(ADAPTIVE_MASS_FLUID_PIPELINE.stages.map((stage) => [stage.id, stage]));
+  assert.equal(stages.get("activity-measurement")?.label, "Activity census + frontier");
+  assert.match(stages.get("activity-measurement")?.tip.timing ?? "", /10 shader entry points/);
+  assert.equal(stages.get("resolution-planning")?.label, "Candidate topology build");
+  assert.match(stages.get("resolution-planning")?.tip.timing ?? "",
+    /13 shader entry points \+ 4 command-buffer copies/);
+  assert.equal(stages.get("brick-retirement")?.label, "Post-commit activity mask");
 });
 
 test("the SIM diagram names every advance seam, and only those", () => {

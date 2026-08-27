@@ -48,7 +48,7 @@ export const SPARSE_CM12_STAGE_BANDS = Object.freeze({
   transport: "Transport velocity + conservative CM12 transport",
   momentum: "Momentum prediction",
   pressure: "Composite pressure projection + receipts",
-  adaptivity: "Brick activity + candidate resolution",
+  adaptivity: "Activity census + candidate topology",
   output: "Sparse presentation publication",
 });
 export type SparseCM12StageBand = keyof typeof SPARSE_CM12_STAGE_BANDS;
@@ -67,6 +67,14 @@ interface SparseCM12StageDeclarationBase<Stage extends SparseCM12ResidentStageId
    */
   readonly phase: GPUTimestampPhase;
   /**
+   * Shader entry points and non-shader command work bracketed by this row.
+   *
+   * Truth-sensitive rows use this manifest to derive their UI timing detail.
+   * The advance-partition contract compares it with the encoder source, so a
+   * dispatch cannot be added or removed without updating what the UI says.
+   */
+  readonly timedWork?: SparseCM12TimedWorkManifest;
+  /**
    * The lens on this stage, or the written-down decision that there is none.
    * The lens's own `stage` must be this key: a lens filed under the wrong
    * stage is a type error here, not a ◎ that opens the wrong picture.
@@ -79,6 +87,83 @@ interface SparseCM12StageDeclarationBase<Stage extends SparseCM12ResidentStageId
   /** Optional live gate rendered as the stage lamp in the SIM panel. */
   readonly toggle?: FluidPipelineStage["toggle"];
 }
+
+export interface SparseCM12TimedWorkGroup {
+  /** Short, user-facing description shown in the stage timing tooltip. */
+  readonly label: string;
+  /** Unique WGSL entry points invoked by this group. */
+  readonly entryPoints: readonly string[];
+}
+
+export interface SparseCM12TimedWorkManifest {
+  readonly groups: readonly SparseCM12TimedWorkGroup[];
+  /** Copies/clears that consume time inside the seam but are not shaders. */
+  readonly commandCopies?: number;
+}
+
+const activityTimedWork = Object.freeze({
+  groups: Object.freeze([
+    {
+      label: "dirty-brick mask publication",
+      entryPoints: Object.freeze([
+        "markIncrementalActivityScalarBricks",
+        "markIncrementalActivityTopology",
+        "finalizeIncrementalActivityMasks",
+      ]),
+    },
+    {
+      label: "brick activity census, D4 fold and history",
+      entryPoints: Object.freeze([
+        "measureBrickActivity",
+        "preserveActivityHorizontalD4",
+        "commitActivityHorizontalD4",
+        "ageIncrementalActivityHistory",
+        "finalizeIncrementalActivityCensus",
+      ]),
+    },
+    {
+      label: "sparse-world frontier allocation and page synthesis",
+      entryPoints: Object.freeze([
+        "allocateSparseWorldFrontier",
+        "synthesizeSparseWorldFrontierPages",
+      ]),
+    },
+  ]),
+} satisfies SparseCM12TimedWorkManifest);
+
+const candidatePlanTimedWork = Object.freeze({
+  groups: Object.freeze([
+    {
+      label: "resolution requests, retirement and one 2:1 grading pass per rung",
+      entryPoints: Object.freeze([
+        "planBrickResolution",
+        "activateSweptFrontierPages",
+        "retireUnsupportedEmptyBricks",
+        "closePlannedResolution",
+        "validateCandidateResolution",
+      ]),
+    },
+    {
+      label: "budget scheduling, candidate-page allocation and cell synthesis",
+      entryPoints: Object.freeze([
+        "scheduleTopologyPreparation",
+        "allocateCandidateTopologyPages",
+        "synthesizeCandidateCellPages",
+      ]),
+    },
+    {
+      label: "shadow row, leaf and structure worklist construction",
+      entryPoints: Object.freeze([
+        "clearShadowRowMembership",
+        "beginShadowTopology",
+        "buildShadowLeafWorklist",
+        "buildShadowStructureWorklist",
+        "finalizeShadowWorklists",
+      ]),
+    },
+  ]),
+  commandCopies: 4,
+} satisfies SparseCM12TimedWorkManifest);
 
 /**
  * A stage's declaration, shaped by its sub-seams.
@@ -495,23 +580,25 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     chip: () => "divergence · residual · conservation",
   },
   "activity-measurement": {
-    label: "Activity measurement", band: "adaptivity", side: "left",
-    phase: { id: "power-topology", label: "Compact brick activity measurement" },
+    label: "Activity census + frontier", band: "adaptivity", side: "left",
+    phase: { id: "power-topology", label: "Activity masks, census + sparse-world frontier discovery" },
+    timedWork: activityTimedWork,
     lens: null,
     tip: {
-      summary: "Marks scalar- and topology-dirty bricks into the incremental worklist, measures one activity record per dirty brick — occupied travel, surface and thin-feature evidence, restriction detail, the density moments the planner scores — then ages the history and seals the census.",
+      summary: "This interval is larger than its historical ‘activity measurement’ name implied. It publishes scalar/topology masks, measures and ages brick activity, seals the census and, when dynamic sparse-world growth is enabled, scans and synthesizes frontier pages.",
       reads: "conditioned density, momentum, previous records, dirty-brick worklist",
-      writes: "per-brick score, reasons and epoch history",
-      feeds: "resolution planning",
+      writes: "activity masks, per-brick score/history and discovered sparse-world pages",
+      feeds: "candidate topology planning",
     },
-    chip: (context) => `${context.info?.adaptiveActivityMeasuredBrickCount ?? 0} bricks measured`,
+    chip: (context) => `${context.info?.adaptiveActivityMeasuredBrickCount ?? 0} measured · masks/history/frontier included`,
   },
   "resolution-planning": {
-    label: "Resolution planning", band: "adaptivity", side: "right",
-    phase: { id: "power-topology", label: "Hysteretic resolution planning + 2:1 candidate grading" },
+    label: "Candidate topology build", band: "adaptivity", side: "right",
+    phase: { id: "power-topology", label: "Resolution grading + candidate pages and shadow worklists" },
+    timedWork: candidatePlanTimedWork,
     lens: null,
     tip: {
-      summary: "Plans each brick's resolution — the default surface-distance selector keeps interfaces and thin liquid fine and sends deeply submerged bricks to the coarsest rung the 2:1-closed ladder permits; surface + activity additionally refines moving or detailed liquid — then creates swept world pages, retires unsupported empty bricks, grades the plan to 2:1 closure one pass per ladder rung, validates it, schedules budgeted topology preparation, allocates candidate pages and builds the shadow leaf and structure worklists the transfer consumes.",
+      summary: "This is a candidate-topology construction interval, not just a policy decision. It scores and grades resolutions, activates and retires pages, schedules the budget, allocates and synthesizes candidate cells, builds shadow row/leaf/structure worklists and publishes four indirect command copies for the following transaction.",
       reads: "transported density, momentum, policy history",
       writes: "score/reason history, urgent/ordinary queues, candidate levels, shadow worklists",
       feeds: "candidate transfer",
@@ -637,7 +724,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     ],
     chip: (context) => `${activityOnly(context)
       ? `surface + activity · plan every ${fixed(context.values.topologyCadenceSteps, 0)} steps`
-      : "surface distance · direct 1³ bulk"} · ${
+      : "surface distance · direct 1³ bulk"} · grade/allocate/shadow · ${
       fixed(context.values.prepareBricksPerFrame, 0)}/frame`,
   },
   "candidate-transfer": {
@@ -691,8 +778,8 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     chip: (context) => `${context.info?.adaptiveTopologyUrgentQueuedBrickCount ?? 0} urgent · ${context.info?.adaptiveTopologyOrdinaryQueuedBrickCount ?? 0} queued · end-frame generation ${context.info?.adaptiveTopologyShadowGeneration ?? 0} → next pressure repair`,
   },
   "brick-retirement": {
-    label: "Brick retirement", band: "adaptivity", side: "right",
-    phase: { id: "adaptive-publication", label: "Dry-brick retirement + retained-atlas conditioning" },
+    label: "Post-commit activity mask", band: "adaptivity", side: "right",
+    phase: { id: "adaptive-publication", label: "Post-topology D4 + activity-mask publication" },
     lens: null,
     tip: {
       summary: "Marks every brick the topology commit changed in the post-topology activity mask, so the next advance's direct face and activity transforms select exactly the bricks that moved. The decision to retire an unsupported empty brick is taken in resolution planning; this stage publishes the retired and reshaped brick bits.",

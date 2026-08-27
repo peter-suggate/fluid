@@ -51,6 +51,8 @@ export interface FluidPipelineContext {
 
 export interface FluidPipelineTip {
   readonly summary: string;
+  /** The concrete GPU work bracketed by this row's timing seams. */
+  readonly timing?: string;
   readonly reads?: string;
   readonly writes?: string;
   readonly feeds?: string;
@@ -275,6 +277,7 @@ export function measureFluidPipelineBand(
 export function fluidPipelineTipText(stage: FluidPipelineStage, chip: string): string {
   const lines = [stage.label, chip ? `· ${chip}` : "", "", stage.tip.summary];
   const detail = [
+    stage.tip.timing ? `Timed work: ${stage.tip.timing}` : "",
     stage.tip.reads ? `Reads: ${stage.tip.reads}` : "",
     stage.tip.writes ? `Writes: ${stage.tip.writes}` : "",
     stage.tip.feeds ? `Feeds: ${stage.tip.feeds}` : "",
