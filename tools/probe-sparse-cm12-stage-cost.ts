@@ -211,6 +211,18 @@ const TARGET_STAGE_IDS = Object.freeze([
   "pressure-topology",
   "presentation-publication",
 ] as const);
+const PRESSURE_TAIL_STAGE_IDS = Object.freeze([
+  "pressure-topology",
+  "pressure-rhs",
+  "pressure-solve",
+  "velocity-projection",
+  "projection-diagnostics",
+  "activity-measurement",
+  "resolution-planning",
+  "candidate-transfer",
+  "brick-retirement",
+  "presentation-publication",
+] as const);
 const PRESSURE_TOPOLOGY_PHASE_LABEL = "Composite pressure topology + ghost-fluid rows";
 // Every seam the candidate-transfer stage closes, read from the stage
 // registry rather than listed here, so a renamed sub-seam cannot leave a
@@ -483,6 +495,7 @@ try {
   const cpuPhaseSamples = new Map<string, number[]>();
   const cpuStageSamples = new Map<string, number[]>();
   const targetSamples: number[] = [];
+  const pressureTailSamples: number[] = [];
   const cpuTargetSamples: number[] = [];
   const nonPressureSamples: number[] = [];
   const cpuNonPressureSamples: number[] = [];
@@ -756,6 +769,8 @@ try {
     }
     targetSamples.push(TARGET_STAGE_IDS.reduce((sum, id) =>
       sum + (stageDurations.get(id) ?? 0), 0));
+    pressureTailSamples.push(PRESSURE_TAIL_STAGE_IDS.reduce((sum, id) =>
+      sum + (stageDurations.get(id) ?? 0), 0));
     const frameChunkDurations = new Map<string, number>();
     for (const phase of trace.phases) {
       // `partitionPerformanceTrace` closes timestamp gaps with one synthetic
@@ -940,6 +955,8 @@ try {
   const nonPressureP95_ms = percentile(nonPressureSamples, 0.95);
   const targetMedian_ms = median(targetSamples);
   const targetP95_ms = percentile(targetSamples, 0.95);
+  const pressureTailMedian_ms = median(pressureTailSamples);
+  const pressureTailP95_ms = percentile(pressureTailSamples, 0.95);
   const frameAuthorityStage = stages.find(
     (stage) => stage.stage === "transport-velocity-extension");
   const frameAuthorityCPUSamples = cpuStageSamples.get("transport-velocity-extension");
@@ -1026,6 +1043,13 @@ try {
       p95_ms: Number(percentile(wallFrameSamples, 0.95).toFixed(4)),
     },
     pressureSolve_ms: Number(pressure.toFixed(4)),
+    pressureTail: {
+      stageIds: PRESSURE_TAIL_STAGE_IDS,
+      samples_ms: pressureTailSamples.map((value) => Number(value.toFixed(4))),
+      median_ms: Number(pressureTailMedian_ms.toFixed(4)),
+      p95_ms: Number(pressureTailP95_ms.toFixed(4)),
+      maximum_ms: Number(Math.max(...pressureTailSamples).toFixed(4)),
+    },
     nonPressure_ms: Number(nonPressureMedian_ms.toFixed(4)),
     nonPressure: {
       samples_ms: nonPressureSamples.map((value) => Number(value.toFixed(4))),
@@ -1121,6 +1145,7 @@ try {
       samples: seen,
       medianAdvance_ms: report.medianAdvance_ms,
       pressureSolve_ms: report.pressureSolve_ms,
+      pressureTail: report.pressureTail,
       nonPressure: report.nonPressure,
       optimizationTarget: report.optimizationTarget,
       closure: report.closure,

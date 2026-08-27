@@ -39,7 +39,8 @@ node --import tsx tools/probe-sparse-cm12-stage-cost.ts \
   --warmup=8 --frames=24 --final-qa=0 --quiet=1
 ```
 
-The run had zero WebGPU validation errors and passed its diagnostic receipts.
+The original run had zero WebGPU validation errors and passed its diagnostic receipts, but
+its timing is now retained only as historical evidence:
 
 | Stage | HEAD median | p95 |
 |---|---:|---:|
@@ -53,18 +54,27 @@ The run had zero WebGPU validation errors and passed its diagnostic receipts.
 | Brick retirement | 0.0655 ms | 0.0655 ms |
 | Presentation publication | 0.4588 ms | 3.3423 ms |
 
-The sum of these stage medians is **39.5837 ms**. A 5× result therefore needs to be at or below **7.9167 ms** under the same measurement contract.
+The sum of those stage medians was 39.5837 ms. A later same-machine reconstruction could not
+reproduce it, so neither 39.5837 ms nor its 7.9167 ms derivative is an acceptance baseline.
 
-### The SparseWorld solve regression is real
+### Fresh paired baseline supersedes the historical regression claim
 
-| Receipt | Pressure cells | Iterations | Solve | Cost / iteration |
-|---|---:|---:|---:|---:|
-| Pre-change `10c691bb` | 6,150 | 40 | 9.5027 ms | 0.2376 ms |
-| HEAD `1daf91d4` | 7,186 | 48 | 28.1149 ms | 0.5857 ms |
+Reconstructing `1daf91d4` in a detached worktree and running the same 24-frame hardware lane
+on 2026-08-28 produced the exact 7,186-cell/48-iteration receipt below:
 
-Pressure cells increased 16.8%; normalized iteration cost increased **146.5%**, or **2.46×**. Population growth is not the explanation.
+| Arm | Pressure solve median | Paired pressure-tail median |
+|---|---:|---:|
+| Untouched `1daf91d4` | 10.4202 ms | 16.4495 ms |
+| Current retained code | 9.9615 ms | 15.3354 ms |
 
-The pre-change source is the checked-in [August 27 receipt](../artifacts/sparse-cm12-mini32-b8-p8-20260827-planning-wdr-bracket-control-stage-cost.json). The HEAD numbers above are from the clean capture made for this analysis.
+An A/B/A on `1daf91d4` isolated duplicate-Jacobi removal at 11.010 ms versus
+9.2406/9.8304 ms. Thus the reproducible solve gain is roughly 1.2–1.8 ms; the old 28.1149
+and 21.8890 ms values were measurement/control mismatch, not code causality. The fresh 5×
+gate is **3.2899 ms median for the paired pressure-tail span** (and 3.8273 ms p95 from the
+fresh 19.1365 ms control).
+
+The older pre-SparseWorld receipt remains useful for population context, but it is not a
+paired frozen-state A/B and cannot establish a 2.46× per-iteration regression.
 
 ## Root causes
 
@@ -165,25 +175,32 @@ operation order. True exceptions continue to use the canonical matrix.
 
 ## The 5× budget
 
-| Block | HEAD | Target | Required leverage |
-|---|---:|---:|---|
-| Pressure topology + RHS | 4.4565 ms | 0.80 ms | delete dead PCA; direct accepted streams; publish PEEI/diagonal/RHS once |
-| Pressure solve | 28.1149 ms | 3.80 ms | page-local exact operator; remove duplicate Jacobi; 12–16 MGPCG iterations |
-| Projection | 0.3932 ms | 0.25 ms | consume PEEI row/port image; compiled collocation |
-| Activity | 2.6870 ms | 0.65 ms | ATEI cell/face tiles; precompiled crossing owner; tile reduction |
-| Planning | 2.2282 ms | 0.70 ms | one compact brick-facts record; staged neighbour descriptors |
-| Candidate + retirement + presentation | 1.7039 ms | 1.00 ms | delta-local ATEI build; direct point pages; no repeated topology decode |
-| **Total** | **39.5837 ms** | **7.20 ms** | **5.50×** |
+The fresh untouched tail is 16.4495 ms, so 5× means 3.2899 ms—not the earlier 7.9 ms
+threshold. The current retained tail is 15.3354 ms; almost the entire program remains.
 
-The target has 0.72 ms of margin below the strict 5× threshold. These are portfolio gates: an individual cut lands on measured merit, but the program is not complete until the total is met.
+| Block | Current scale | Target | Required leverage |
+|---|---:|---:|---|
+| Pressure topology + RHS | ~1.6 ms | 0.35 ms | finish dead-cache deletion; publish accepted numerical facts once |
+| Pressure solve | 9.96 ms | 1.80 ms | page-local exact operator plus 12–16-iteration symmetric V-cycle |
+| Projection + diagnostics | ~0.4 ms | 0.15 ms | consume the existing compiled face programs completely |
+| Activity | ~1.6 ms | 0.35 ms | page-local cell/face view; precompiled crossing owner |
+| Planning | ~0.7 ms | 0.20 ms | compact brick facts and staged neighbour data |
+| Candidate + retirement + presentation | ~1.1 ms | 0.25 ms | delta-local compilation and direct point pages |
+| **Total** | **15.3354 ms measured span** | **3.10 ms** | **4.95× from current, 5.31× from fresh control** |
+
+The 3.10 ms design budget leaves 0.19 ms below the strict fresh 5× threshold. These are
+portfolio gates: an individual cut lands on measured merit, but the program is not complete
+until the paired tail span meets the total.
 
 ### Why solve needs both throughput and convergence work
 
-Restoring the old 0.238 ms/iteration at 48 iterations still costs 11.4 ms; that alone misses the entire 7.9 ms tail budget. Conversely, reducing iterations while each dynamic-page application remains pointer-chased leaves too much cost and poor scaling.
+At roughly 10 ms for 48 iterations, throughput improvement alone cannot reach a 3.29 ms
+whole-tail budget. Conversely, reducing iterations while each exact row application remains
+pointer-chased leaves too much cost and poor scaling.
 
 The solve target therefore requires:
 
-1. **≤0.22 ms per fixed-budget iteration** from page-local reuse and fewer dependent loads; then
+1. **≤0.15 ms per fixed-budget iteration** from page-local reuse and fewer dependent loads; then
 2. **12–16 iterations** at the same true residual using a valid SPD multigrid preconditioner.
 
 The new preconditioner must use a symmetric V-cycle: topology-time aggregation, volume-compatible `R = Pᵀ` (or its explicitly weighted equivalent), Galerkin `A_c`, symmetric pre/post smoothing, and correct Dirichlet/null-space propagation. Do not revive the old aggregate correction that the source itself records as non-SPD.
@@ -283,12 +300,17 @@ Required scenes:
 6. ocean — high wet occupancy and capacity negative control;
 7. static-solid and moving-solid fixtures — dynamic coefficient path.
 
-Final acceptance is **≤7.9 ms median from pressure topology through presentation**, **≤10 ms p95**, unchanged pressure tolerance and physical gates, no new authority/fallback, and no dense logical-world allocation. The 7.2 ms design budget is the working target.
+Final acceptance is **≤3.2899 ms median from pressure topology through presentation** and
+**≤3.8273 ms p95**, unchanged pressure tolerance and physical gates, no new
+authority/fallback, and no dense logical-world allocation. The 3.10 ms design budget is the
+working target.
 
 ## Evidence limitations
 
-- The 39.5837 ms baseline is the sum of per-stage medians, not the median of a paired per-frame tail sum. The implementation gate should add a direct tail-span timestamp.
-- The pre-change comparison is closely matched but not a frozen identical state. Its population-normalized result strongly localizes the regression; Phase 0 makes it causal.
+- The old 39.5837 ms baseline was both a sum of medians and irreproducible. The probe now
+  reports a paired per-frame pressure-tail span; only that span sets the gate.
+- The pre-SparseWorld comparison is not a frozen identical state. It is contextual evidence,
+  not a causal regression measurement.
 - The current xctrace harness cannot profile `adaptive-mass`, so this report does not invent utilization percentages.
 - Current ocean B8 construction fails its u16 IRL1 capacity guard; no HEAD ocean timing is claimed.
 
@@ -300,23 +322,20 @@ mini32 consumer.
 
 | Change | mini32 median | Result |
 |---|---:|---|
-| Original clean pressure solve | 28.1149 ms | 48 iterations, 0.5857 ms/iteration |
-| Delete duplicate Jacobi pass | 21.8890 ms | exact true/recursive residual receipt |
+| Fresh untouched `1daf91d4` | 10.4202 ms solve / 16.4495 ms tail | exact 7,186-cell/48-iteration receipt |
+| Duplicate Jacobi A/B/A | 11.010 → 9.2406/9.8304 ms solve | exact true/recursive residual receipt |
 | Retire unused PCA numerical work | 1.7695 ms pressure topology | PCA repair/freeze substages are zero |
-| Combined retained checkpoint | 9.0440 ms pressure solve | 48 iterations, **0.1884 ms/iteration** |
+| Current paired checkpoint | 9.9615 ms solve / 15.3354 ms tail | same exact pressure receipt |
 | Remove unused runtime arithmetic branch | 9.70 vs 9.76 ms median A/B | neutral within one timestamp quantum |
 
-The large solve change between 21.8890 and 9.0440 was originally attributed to the runtime
-branch. That attribution is invalid: terminal mini32 executes it zero times, as does the
-dynamic-interior class in mini64. The combined checkpoint is real and repeatable, but its
-remaining causal split is unresolved. Do not use the branch as evidence for a page-stencil
-architecture or claim its delta as an isolated win.
+The old large solve change was a stale control, not an unexplained code delta. Terminal
+mini32 executes the runtime branch zero times, as does the dynamic-interior class in mini64.
+Do not use it as evidence for a page-stencil architecture or claim its delta as a win.
 
-The current mini32 sum from pressure topology through presentation is approximately
-**14.0904 ms**, down from 39.5837 ms (**2.81×**). Fixed-iteration operator throughput
-already beats the Phase 3 gate of 0.22 ms/iteration. The next critical path is therefore
-Phase 4's SPD preconditioner: at current throughput, reducing 48 applications to 16 would
-put the solve near 3.0 ms and the measured tail near the 5× boundary.
+The current paired mini32 pressure tail is **15.3354 ms**, only 1.07× below the fresh
+untouched control. The next critical path is page-local exact SpMV followed by an SPD
+preconditioner; reaching 5× now requires both solve and post-solve access architecture to
+change materially.
 
 Two cleanup items remain intentionally separate from the accepted numerical cut:
 
@@ -341,7 +360,7 @@ solve-time gate:
 
 | Physical implementation | Iterations | Solve median | p95 |
 |---|---:|---:|---:|
-| Committed Jacobi baseline | 48 | 9.0440 ms | 11.2067 ms |
+| Historical Jacobi checkpoint | 48 | 9.0440 ms | 11.2067 ms |
 | Separate restrict/prolong vector passes | 32 | 10.4858 ms | 11.1411 ms |
 | Fused brick update, full accepted-cell scan | 32 | 9.3061 ms | 17.5636 ms |
 | Fused brick update, exact pressure-rank intervals | 32 | 9.9615 ms | 18.2190 ms |
@@ -367,7 +386,7 @@ stable vector read for one reverse-rank read plus one compact vector read.
 
 This was numerically contained and compiled across all resident shader entry points, but
 mini32 pressure solve rose to **10.3547 ms median** (11.9276 ms p95) with the same fixed
-iteration budget, versus the committed 9.0440 ms median. The arm was removed.
+iteration budget, versus the then-current 9.0440 ms median. The arm was removed.
 
 The result invalidates the assumption that vector address compaction alone is useful here.
 Canonical stable IDs are already monotonically ordered and page-local; paying a reverse-map
@@ -422,7 +441,7 @@ Two attempts isolated the remaining generic incidence path after B8 interior ari
 
 | Arm | Pressure solve median | Structural cost |
 |---|---:|---|
-| Committed arithmetic baseline | 9.0440 ms | none |
+| Historical canonical baseline | 9.0440 ms | none |
 | Pairwise-row shortcut inside generic SpMV | 9.4372 ms | branch and alternate code shape |
 | Exact six-slot SoA exception image | 9.8304 ms | five scalar planes, neighbour plane and class plane |
 
@@ -514,8 +533,8 @@ ordinary baseline-equivalent SpMV rather than an additional numerical pass.
 
 ### 5. The remaining 5× gap is primarily convergence, but extra fine passes do not help
 
-The current tail is about 14.09 ms versus the 7.92 ms 5× threshold; pressure solve alone is
-about 9–10 ms at 48 iterations. The additive brick correction reduced the iteration count to
+The current paired tail is 15.3354 ms versus the 3.2899 ms 5× threshold; pressure solve alone
+is about 9–10 ms at 48 iterations. The additive brick correction reduced the iteration count to
 32 but was slower in absolute time, while the block polynomial lost positive curvature.
 
 The required preconditioner must replace fine work inside a symmetric V-cycle. It cannot add
@@ -532,9 +551,10 @@ kept only on net frame time. There is no permanent “infrastructure” arm.
 ### 7. Retained-change audit
 
 - Keep duplicate Jacobi removal: it deletes one recurring full-vector read/write and has an
-  exact numerical A/B.
+  exact numerical A/B/A worth roughly 1.2–1.8 ms in the tested runs.
 - Keep unused PCA scheduling removal: production Jacobi never consumed its aggregate or
-  hierarchy results, and pressure topology fell from 3.80 ms toward 1.11 ms.
+  hierarchy results; it materially simplifies the topology stage even though the old 3.80 ms
+  attribution is not used as a fresh gate.
 - Keep the unused PCG initialization-reduction deletion: it removes dead shader work and
   state without changing output.
 - Remove the runtime B8 arithmetic branch: the census found no consumer and add/remove timing
@@ -542,23 +562,23 @@ kept only on net frame time. There is no permanent “infrastructure” arm.
 - Remove the frozen cell→brick publication: its accessor and stored plane had no consumer.
 - Keep no failed rank, SoA, pairwise, block, cadence or mask representation.
 
-The 9.044 ms combined solve checkpoint remains valid, but only 6.226 ms of its improvement is
-currently isolated to duplicate-Jacobi removal. The rest must not be attributed to the now
-proven-dead runtime branch. A frozen-state ablation is required before making another causal
-claim.
+The fresh current solve checkpoint is 9.9615 ms. No remaining solve delta is assigned to the
+proven-dead runtime branch; the retained solve improvement is the duplicate-pass deletion.
 
 ## Revised experiment sequence
 
-### Experiment A — make the current checkpoint causal
+### Experiment A — refresh the causal baseline — complete
 
-Capture one frozen accepted pressure epoch and time the existing exact operator, vector update
-and reductions separately with hardware timestamps and Metal utilization counters. Ablate the
-remaining source/scheduling differences between the 21.889 and 9.044 ms checkpoints without
-changing the matrix or iteration trajectory. Report bytes, dependent loads, SIMD occupancy,
-cache behaviour and bandwidth; dispatch count is not an objective.
+Reconstruction and A/B/A showed that the historical 28.1149/21.8890 ms solve controls do not
+reproduce. The direct probe now reports the paired pressure-tail span. Fresh `1daf91d4` is
+10.4202 ms solve / 16.4495 ms tail; current is 9.9615 ms / 15.3354 ms with identical pressure
+receipts. Duplicate-Jacobi removal is the only isolated solve win.
 
-Gate: account for the unexplained solve delta. If it cannot be reproduced on the frozen epoch,
-replace the 9.044 checkpoint with a new paired baseline before doing more design work.
+The generic xctrace harness cannot launch adaptive-mass because the product smoke registry
+exposes only Losasso, Power and Uniform. That attempted profiler extension was removed. GPU
+utilization must be captured from the direct adaptive-mass harness when the page-local
+prototype exists, so the experiment compares two real consumers rather than a synthetic
+dispatch-count microbenchmark.
 
 ### Experiment B — pressure-owned page-local exact SpMV
 
@@ -569,7 +589,8 @@ loads. Do not publish neighbour/weight planes and do not change PCG mathematics.
 
 Gate: exact mini32 pressure receipt, bit-identical symmetric-expansion fields relative to its
 five-failure baseline, complete one-owner pressure coverage, pressure solve at most 8.2 ms and
-topology increase at most 0.1 ms. If this misses, remove it and revisit the architecture before
+topology increase at most 0.1 ms. Capture occupancy, ALU, read/write bandwidth and cache
+utilization for both consumers. If this misses, remove it and revisit the architecture before
 any multilevel work—the 87.5% locality premise would not be translating into GPU utilization.
 
 ### Experiment C — ordered local regular certificate
@@ -597,7 +618,7 @@ the same true-residual and symmetry receipts. Iteration reduction alone is a rej
 Projection already uses regular/seam face programs. Collocation and activity should receive
 their own compact page-local views derived from the same accepted topology generation, not the
 pressure matrix layout. Each view must remove generic traversal and win its own stage A/B. The
-portfolio gate remains ≤7.92 ms median from pressure topology through presentation.
+portfolio gate remains ≤3.2899 ms median from pressure topology through presentation.
 
 ### Symmetric-expansion control
 
