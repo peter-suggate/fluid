@@ -4071,20 +4071,14 @@ fn restorePressureSolveDispatches(){
 }
 
 @compute @workgroup_size(64)
-fn initializePCG(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,
-  @builtin(workgroup_id)wid:vec3u){
+fn initializePCG(@builtin(global_invocation_id)gid:vec3u){
   let id=pressureCellInvocation(gid.x);
-  var rz=0.0;var rhs2=0.0;
   if(id!=INVALID){
     let image=applyOperator(id,p.stateOffsets2.x);
     let residual=state[p.stateOffsets2.y+id]-image;
     let diagonal=state[p.stateOffsets2.z+id];let z=select(0.0,residual/diagonal,diagonal>0.0);
     state[p.stateOffsets3.y+id]=residual;state[p.stateOffsets3.z+id]=z;
-    state[p.stateOffsets3.w+id]=z;rz=residual*z;
-    let rhs=state[p.stateOffsets2.y+id];rhs2=rhs*rhs;
   }
-  reducePair(lid.x,wid.x,rz,rhs2);
 }
 
 @compute @workgroup_size(64)

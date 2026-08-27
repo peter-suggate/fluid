@@ -298,3 +298,35 @@ Two cleanup items remain intentionally separate from the accepted numerical cut:
 - page-boundary, seam, solid, and authored exception cells still use the canonical generic
   incidence graph. They should move only when an access-specific compiled exception image
   wins against this measured arithmetic baseline.
+
+## Phase 4 checkpoint — reject additive brick correction
+
+A topology-complete SPD additive brick correction was tested before committing to a full
+V-cycle:
+
+```text
+M^-1 = D^-1 + P diag(P^T A P)^-1 P^T
+```
+
+`P` contained one constant basis vector per accepted authored or runtime brick, and the
+Galerkin diagonal used the canonical fine operator. The map reduced mini32 from 48 to 32
+iterations with zero curvature recovery, but every physical implementation missed the
+solve-time gate:
+
+| Physical implementation | Iterations | Solve median | p95 |
+|---|---:|---:|---:|
+| Committed Jacobi baseline | 48 | 9.0440 ms | 11.2067 ms |
+| Separate restrict/prolong vector passes | 32 | 10.4858 ms | 11.1411 ms |
+| Fused brick update, full accepted-cell scan | 32 | 9.3061 ms | 17.5636 ms |
+| Fused brick update, exact pressure-rank intervals | 32 | 9.9615 ms | 18.2190 ms |
+
+The first arm retained the same 7,186-cell final census; the fused arms changed the evolving
+mini32 trajectory and ended at 6,047 pressure cells, so their apparent medians are not a
+fixed-state speedup. More importantly, even the same-census arm was slower: the local
+reduction and second `z` traversal cost more than the sixteen avoided operator applications.
+
+Plan revision: do not layer a coarse correction onto stable-cell PCG storage. Complete the
+compact PEEI pressure-rank vectors and hierarchy planes first, then make restriction,
+smoothing, coarse solve and prolongation replace fine-vector/operator traffic inside a
+symmetric V-cycle. A future preconditioner arm must beat the Jacobi fixed-state solve in
+absolute GPU time, not merely reduce iterations.
