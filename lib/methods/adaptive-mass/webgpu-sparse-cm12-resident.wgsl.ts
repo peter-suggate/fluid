@@ -1238,13 +1238,6 @@ fn pressureHierarchyAOffset(level:u32)->u32{
 fn pressureHierarchyBOffset(level:u32)->u32{
   return pressureHierarchyAOffset(level)+pressureHierarchyGroupCount(level);
 }
-fn frozenPressureCellBrickOffset()->u32{
-  let last=pressureHierarchyLevelCount()-1u;
-  return pressureHierarchyBOffset(last)+pressureHierarchyGroupCount(last);
-}
-fn frozenPressureCellBrick(cell:u32)->u32{
-  return bitcast<u32>(candidateState[frozenPressureCellBrickOffset()+cell]);
-}
 fn pressureHierarchyGroupAddress(linear:u32)->vec2u{
   var remainder=linear;
   for(var level=0u;level<pressureHierarchyLevelCount();level+=1u){
@@ -3664,7 +3657,6 @@ fn publishFrozenPressureCellIds(@builtin(global_invocation_id)gid:vec3u){
   if(!peiPublicationOpen()){return;}
   let cell=pcmCellRankSelect(gid.x);if(cell==INVALID){return;}
   fineSamples[PEI_PRESSURE_CELLS+gid.x]=cell;
-  candidateState[frozenPressureCellBrickOffset()+cell]=bitcast<f32>(cellBrick(cell));
 }
 
 // One lane owns one global 32-cell word. The PCM-derived PEI cell list is
@@ -3855,31 +3847,6 @@ fn applyOperator(cell:u32,inputOffset:u32)->f32{
       let nx=cell-1u;let px=cell+1u;
       let ny=cell-strides.y;let py=cell+strides.y;
       let nz=cell-strides.z;let pz=cell+strides.z;
-      result+=select(0.0,weight,peiPressureCellMember(nx))*state[inputOffset+nx];
-      result+=select(0.0,weight,peiPressureCellMember(px))*state[inputOffset+px];
-      result+=select(0.0,weight,peiPressureCellMember(ny))*state[inputOffset+ny];
-      result+=select(0.0,weight,peiPressureCellMember(py))*state[inputOffset+py];
-      result+=select(0.0,weight,peiPressureCellMember(nz))*state[inputOffset+nz];
-      result+=select(0.0,weight,peiPressureCellMember(pz))*state[inputOffset+pz];
-      return result;
-    }
-  }else if(!hasSolidBoundaries()){
-    // SparseWorld runtime pages are uniform B8 bricks with x-major contiguous
-    // stable cell IDs. Interior cells therefore have the same certified six
-    // neighbours for the lifetime of the accepted page; only page-boundary
-    // cells need the compiled seam/exception graph.
-    let within=dynamicCellWithin(dynamicCellLocal(cell));
-    let plane=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
-    let z=within/plane;let remainder=within-z*plane;
-    let y=remainder/BRICK_FINE_RESOLUTION;
-    let x=remainder-y*BRICK_FINE_RESOLUTION;
-    if(x>0u&&x+1u<BRICK_FINE_RESOLUTION
-      &&y>0u&&y+1u<BRICK_FINE_RESOLUTION
-      &&z>0u&&z+1u<BRICK_FINE_RESOLUTION){
-      let weight=-1.0;
-      let nx=cell-1u;let px=cell+1u;
-      let ny=cell-BRICK_FINE_RESOLUTION;let py=cell+BRICK_FINE_RESOLUTION;
-      let nz=cell-plane;let pz=cell+plane;
       result+=select(0.0,weight,peiPressureCellMember(nx))*state[inputOffset+nx];
       result+=select(0.0,weight,peiPressureCellMember(px))*state[inputOffset+px];
       result+=select(0.0,weight,peiPressureCellMember(ny))*state[inputOffset+ny];

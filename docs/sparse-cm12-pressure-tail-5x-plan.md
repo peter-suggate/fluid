@@ -6,14 +6,25 @@ Target hardware: Apple M1 Max / Metal first, portable WebGPU execution model
 
 ## Executive decision
 
-The next performance program should be built around two compiled images:
+The accepted pressure matrix—not SparseWorld pages—is the numerical authority. Keep vectors
+in stable-cell space, compile a pressure-owned page schedule for locality, and preserve the
+canonical row graph for coefficients, ordering and symmetry. Pages should improve GPU reuse;
+they must not be treated as proof of a six-point stencil.
 
-1. **Accepted Topology Execution Image (ATEI)** — compiled when candidate topology is accepted, normally at the previous frame's tail. It owns one topology epoch and publishes access-specific physical views: compact cell tiles, packed point-owner pages, split regular/seam face programs, and brick-neighbour descriptors.
-2. **Pressure Epoch Execution Image (PEEI)** — compiled after scalar conditioning from ATEI plus current pressure membership and `theta`. It publishes compact canonical-rank vectors, regular neighbour/weight planes, ordered exceptional terms, diagonal, RHS inputs, and one submerged flag.
+The path to 5× now has three coupled parts:
 
-The pressure solve, projection, collocation, activity census, planning, and presentation then consume those images directly. They must not re-enter the generic authored/dynamic cell → incidence → row → term machinery.
+1. make the current 9–10 ms solve checkpoint causally understood with frozen-state hardware
+   profiling;
+2. execute the exact row operator page-locally so the 87.5% intra-brick neighbour traffic can
+   reuse staged vector data without a duplicate coefficient image;
+3. use that pressure-owned coverage and halo authority for a complete symmetric V-cycle that
+   reduces 48 iterations to roughly 12–16 in absolute time.
 
-This is the credible path to 5×. Dispatch-count work is explicitly not the program: the gains come from deleting unused computations, turning dependent pointer chains into coalesced SoA reads, keeping hot state in compact pressure-rank order, and reducing operator applications with a mathematically valid preconditioner.
+ATEI remains the shared topology-generation authority for downstream consumers, but each
+consumer gets an access-specific physical view. PEEI remains the pressure epoch transaction;
+it does not compact Krylov vectors or publish a large per-cell neighbour/weight SoA. The
+program targets GPU utilization, dependent data access, working-set size and deleted work—not
+dispatch count.
 
 ## What HEAD actually costs
 
@@ -57,22 +68,25 @@ The pre-change source is the checked-in [August 27 receipt](../artifacts/sparse-
 
 ## Root causes
 
-### 1. Runtime B8 pressure cells miss the arithmetic operator
+### 1. The pressure matrix is an accepted masked row graph, not a hidden B8 stencil
 
-`applyOperator` permits only authored cells to enter its six-neighbour fast path:
+The original diagnosis blamed runtime B8 cells missing the six-neighbour arithmetic path.
+A post-frame structural census disproved that explanation. At mini32's terminal state all
+7,186 pressure cells are authored-template cells and all execute the generic incidence → row
+→ term path. Mini64 has only 846 dynamic pressure cells out of 20,442, and none qualifies
+for the runtime-interior branch. Adding or removing that branch is timing-neutral.
 
-```wgsl
-if (cell < ta(2u)) {
-  // arithmetic interior
-}
-// every runtime page falls through to incidence -> row -> term
-```
+The generic path is not merely an addressing accident. Mini32 contains 48,556 incidences,
+but only 41,976 accepted row incidences; 4,334 pressure cells touch at least one inactive or
+zero-`theta` row. Incidence counts range from 6 to 12, 1,557 cells touch multi-term/non-unit
+geometry, and 1,391 touch sparse-air or dry-neighbour structure. A world-wide
+`hasSolidBoundaries()` flag also disables every authored arithmetic path even though no
+accepted mini32 pressure row has a non-unit local solid scale.
 
-See [webgpu-sparse-cm12-resident.wgsl.ts](../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts#L3871).
-
-SparseWorld runtime pages are uniform B8 pages, but every recurring SpMV reconstructs their six incidences, row identity, term identity, membership, `theta`, dual weight, coefficient, and neighbour value. The dynamic accessors repeatedly divide IDs into page/local coordinates and reload the page base; see [sparse-cm12-row-access.wgsl.ts](../lib/methods/adaptive-mass/sparse-cm12-row-access.wgsl.ts#L87) and its dynamic incidence reconstruction at [line 196](../lib/methods/adaptive-mass/sparse-cm12-row-access.wgsl.ts#L196).
-
-This is the direct mechanism behind the per-iteration regression: the new cells are structurally regular but execute as maximally general topology.
+The root problem is therefore **global capability invalidation plus repeated traversal of an
+irregular accepted matrix**, not runtime-page division by itself. A page is still valuable as
+a scheduling and locality unit—87.5% of active off-diagonals remain within a brick—but it is
+not a certificate that the operator is a six-point stencil.
 
 ### 2. A full pressure-vector pass recomputes an unchanged value
 
@@ -100,7 +114,8 @@ The current pressure stage separately publishes PCM cells, PCM rows, PEI members
 
 Runtime-page coefficient publication also walks generic incidence. Once any dynamic leaf exists, the old authored directed-edge image is deliberately not authoritative across the host/runtime seam. Yet its cache lifecycle survives around the replacement path.
 
-The fix is one pressure-rank compiler, not another repair authority.
+The fix is one pressure-epoch transaction with pressure-owned page coverage and
+access-specific consumers, not another full per-cell coefficient authority.
 
 ### 5. Post-solve stages throw away the compiled face program
 
@@ -129,28 +144,31 @@ Do not use global `u16` interning for stable identities. The current ocean B8 bu
 
 ### PEEI: immutable for one pressure epoch
 
-Preserve canonical PCM rank order so the established 64-lane reduction tree does not change. Store numerical vectors by **pressure rank**, not stable cell ID.
+Preserve canonical PCM rank order for work selection and reductions, but keep numerical
+vectors in stable-cell space. Rank-only Krylov compaction was slower because every neighbour
+then required a reverse-map dependency; stable IDs are already monotone and page-local.
 
 | Plane | Representation |
 |---|---|
-| Rank → stable cell | one `u32` per pressure rank, used only at frame boundaries/diagnostics |
-| Stable cell → rank | page-local rank map or `INVALID`, compiled once per pressure epoch |
-| Solver vectors | compact SoA `p, r, z, d, w`, diagonal and RHS indexed directly by rank |
-| Regular operator | six direction-major neighbour-rank `u32` planes and exact `f32` weight planes |
-| Exceptions | one rank-local range plus compact ordered neighbour-rank/weight records |
+| Rank → stable cell | existing monotone `u32` pressure stream |
+| Solver vectors | existing stable-cell `p, r, z, d, w`, directly addressed by neighbour ID |
+| Pressure pages | pressure-owned brick IDs plus exact rank ranges/coverage receipt |
+| Matrix authority | accepted active row graph; inactive rows removed only by a proved compiler |
+| Optional regular certificate | one small ordered descriptor only for operand tuples proven bit-equivalent |
 | Row projection | compact regular face ranks plus ordered exception ports; current `theta` attached |
 | Per-cell facts | `submerged`, control volume and any dynamic-solid scale actually read downstream |
 
-For 7,186 mini32 pressure cells, a literal six-neighbour/weight image is only about 345 KiB. At the historical 245k-cell ocean scale it is about 11.2 MiB—small enough to justify direct, coalesced access and still far below the current general topology working set. If regular weight classes can be coded without adding hot unpacking, do so after the direct baseline wins.
-
-Regular and exceptional planes are physically separate. A regular lane never reads an exception range; exceptional terms preserve canonical arithmetic order.
+A literal per-cell six-neighbour/scalar image is no longer the baseline design. The exact-SoA
+arm added up to 30 words per cell and regressed solve time by 8.7%. Any compiled descriptor
+must be materially smaller than the topology it removes and preserve the generic row's
+operation order. True exceptions continue to use the canonical matrix.
 
 ## The 5× budget
 
 | Block | HEAD | Target | Required leverage |
 |---|---:|---:|---|
 | Pressure topology + RHS | 4.4565 ms | 0.80 ms | delete dead PCA; direct accepted streams; publish PEEI/diagonal/RHS once |
-| Pressure solve | 28.1149 ms | 3.80 ms | compact vectors; direct operator; remove duplicate Jacobi; 12–16 MGPCG iterations |
+| Pressure solve | 28.1149 ms | 3.80 ms | page-local exact operator; remove duplicate Jacobi; 12–16 MGPCG iterations |
 | Projection | 0.3932 ms | 0.25 ms | consume PEEI row/port image; compiled collocation |
 | Activity | 2.6870 ms | 0.65 ms | ATEI cell/face tiles; precompiled crossing owner; tile reduction |
 | Planning | 2.2282 ms | 0.70 ms | one compact brick-facts record; staged neighbour descriptors |
@@ -165,12 +183,16 @@ Restoring the old 0.238 ms/iteration at 48 iterations still costs 11.4 ms; that 
 
 The solve target therefore requires:
 
-1. **≤0.22 ms per fixed-budget iteration** from compact vectors and the direct operator; then
+1. **≤0.22 ms per fixed-budget iteration** from page-local reuse and fewer dependent loads; then
 2. **12–16 iterations** at the same true residual using a valid SPD multigrid preconditioner.
 
 The new preconditioner must use a symmetric V-cycle: topology-time aggregation, volume-compatible `R = Pᵀ` (or its explicitly weighted equivalent), Galerkin `A_c`, symmetric pre/post smoothing, and correct Dirichlet/null-space propagation. Do not revive the old aggregate correction that the source itself records as non-SPD.
 
-## Implementation sequence
+## Original implementation sequence (superseded)
+
+This sequence records the initial hypotheses. The measured experiment sequence at the end of
+the document is authoritative; rank compaction and a literal regular/exception SoA were
+rejected by A/B.
 
 ### Phase 0 — Make the regression causal
 
@@ -272,20 +294,23 @@ Final acceptance is **≤7.9 ms median from pressure topology through presentati
 
 ## Implementation checkpoint — 2026-08-28
 
-The first throughput slice validates arithmetic specialization and dead-work removal. Later
-falsification arms revise the original global-rank PEEI design substantially; see
-"Architectural conclusions" below.
+The first throughput slice validates dead-work removal. It does **not** validate the original
+runtime arithmetic diagnosis; the later structural census showed that branch had no live
+mini32 consumer.
 
 | Change | mini32 median | Result |
 |---|---:|---|
 | Original clean pressure solve | 28.1149 ms | 48 iterations, 0.5857 ms/iteration |
 | Delete duplicate Jacobi pass | 21.8890 ms | exact true/recursive residual receipt |
 | Retire unused PCA numerical work | 1.7695 ms pressure topology | PCA repair/freeze substages are zero |
-| Arithmetic SparseWorld B8 page interiors | 9.0440 ms pressure solve | 48 iterations, **0.1884 ms/iteration** |
+| Combined retained checkpoint | 9.0440 ms pressure solve | 48 iterations, **0.1884 ms/iteration** |
+| Remove unused runtime arithmetic branch | 9.70 vs 9.76 ms median A/B | neutral within one timestamp quantum |
 
-The dynamic-interior result also scales on mini64: solve median fell from 18.8088 ms to
-8.7818 ms for the same 14,320 pressure cells, 48 iterations, true residual, recursive
-residual, and zero curvature recovery.
+The large solve change between 21.8890 and 9.0440 was originally attributed to the runtime
+branch. That attribution is invalid: terminal mini32 executes it zero times, as does the
+dynamic-interior class in mini64. The combined checkpoint is real and repeatable, but its
+remaining causal split is unresolved. Do not use the branch as evidence for a page-stencil
+architecture or claim its delta as an isolated win.
 
 The current mini32 sum from pressure topology through presentation is approximately
 **14.0904 ms**, down from 39.5837 ms (**2.81×**). Fixed-iteration operator throughput
@@ -297,9 +322,8 @@ Two cleanup items remain intentionally separate from the accepted numerical cut:
 
 - legacy PCA storage and QA hash surfaces still exist, although their numerical entry
   points and recurring work are retired;
-- page-boundary, seam, solid, and authored exception cells still use the canonical generic
-  incidence graph. They should move only when an access-specific compiled exception image
-  wins against this measured arithmetic baseline.
+- every measured mini32 pressure cell uses the canonical generic incidence graph. It should
+  move only when a structurally proved consumer wins against this measured baseline.
 
 ## Phase 4 checkpoint — reject additive brick correction
 
@@ -350,7 +374,7 @@ Canonical stable IDs are already monotonically ordered and page-local; paying a 
 dependency for every neighbour costs more than the denser vector load saves. The revised
 PEEI rule is therefore: **compile the operator and its vector address together**. A future
 rank-space arm must publish neighbour ranks (or a direction-major regular stencil) so a hot
-SpMV never performs stable-to-rank lookup. Until then, keep the proven stable-cell arithmetic
+SpMV never performs stable-to-rank lookup. Until then, keep the proven stable-cell canonical
 operator and direct the next work at removing downstream generic topology traversal.
 
 ## Solve-envelope checkpoint — retain cadence-8 true residual guards
@@ -417,120 +441,167 @@ topology-time descriptor, leaving true exceptions on the existing canonical path
 
 ## Architectural conclusions after falsification
 
-### 1. The profitable transformation is topology elimination, not topology repacking
+### Measured matrix shape
 
-The dominant accepted win replaced runtime-page interior incidence/row/term traversal with
-six arithmetic neighbours and constant weights. It did not compact IDs or coefficients.
-Conversely, three representations that looked denser—rank-only Krylov vectors, a pairwise
-shortcut and an exact SoA exception image—were all slower. On this M1 Max, fewer dependent
-instructions wins only when it also removes enough memory traffic and does not enlarge the
-hot working set.
+The temporary classifier was run after timing and then removed; none of its buffers,
+pipelines or entry points remains in production.
 
-Experiment rule: state the old and new bytes, dependent loads and address calculations per
-cell before implementation. Reject a design that merely converts cached topology reads into
-an equal or larger number of new image reads.
+| Terminal mini32 fact | Count |
+|---|---:|
+| Pressure cells | 7,186 |
+| Authored generic / runtime generic | 7,186 / 0 |
+| Incidences / accepted row incidences | 48,556 / 41,976 |
+| Active off-diagonals / cross-brick off-diagonals | 45,222 / 5,636 |
+| Cells touching inactive or zero-`theta` rows | 4,334 |
+| Cells touching multi-term/non-unit rows | 1,557 |
+| Cells touching sparse-air or dry-neighbour structure | 1,391 |
+| Six-incidence cells | 3,466 |
 
-### 2. Stable cell IDs are already the useful compact address
+Mini64 confirms the same direction: 19,596 of 20,442 pressure cells are authored generic;
+the remaining 846 are dynamic generic, with zero certified dynamic interiors.
 
-SparseWorld stable IDs are contiguous within each B8 page, and the canonical pressure list is
-monotone. The current solve therefore streams page-local state even though the global arrays
-contain holes. Global pressure-rank vectors save unused slots but require stable-to-rank
-translation at every neighbour; the measured dependency costs more than the saved density.
+### 1. Separate mathematical authority from locality scheduling
 
-Experiment rule: keep fine vectors in stable/page-local address space unless the operator
-publishes neighbour addresses in the same representation and removes every reverse lookup.
-Do not treat “compact rank” as intrinsically cache-friendly.
+The mathematical object is the accepted masked row graph. Bricks/pages are a useful physical
+schedule because 87.5% of active off-diagonals stay within a brick, but they do not imply a
+six-point matrix. Future code must say which role a structure serves:
 
-### 3. The next structural unit is a page, not a pressure cell
+- the row graph owns coefficients, active membership, order and symmetry;
+- stable IDs own vector addresses and are already monotone/page-local;
+- pressure pages may own workgroup scheduling and vector reuse;
+- a compact stencil descriptor is only an optimization certificate for a proved subset.
 
-The current arithmetic path covers the 6^3 interior cells of each B8 page. Many of the
-remaining boundary cells border another equal-rung B8 page and are structurally regular, but
-fall back to the generic graph because the hot kernel has no cached neighbour-page base.
-Publishing six neighbour descriptors per pressure page can extend arithmetic across those
-faces with O(pages) storage. Publishing six records and five scalars per pressure cell uses
-O(cells) storage and lost.
+Conflating these roles caused both the runtime-B8 misdiagnosis and the accepted-leaf block
+coverage failure.
 
-True host/runtime seams, 2:1 transitions, sparse-air faces and solid-scaled rows should remain
-in the canonical exception path until a census proves they dominate. Regular lanes must not
-read an exception offset or class plane.
+### 2. Global capability flags destroy local regularity
 
-### 4. Publication is part of the cost, not free infrastructure
+`hasSolidBoundaries()` selects the generic operator for the whole world. In mini32 that makes
+all 7,186 cells generic even though every accepted pressure row observed by the census has an
+exact unit local solid scale. Similar global authored/runtime splits force hot kernels to
+discard row-local facts already known at pressure publication.
 
-The exact wet-brick stream cost 0.065–0.13 ms with no consumer. The exact-SoA image increased
-allocation and code even though its publication fit under the existing topology median.
-Images must therefore land with their first consumer and demonstrate a net frame win in the
-same A/B. A future authority is not accepted merely because its standalone compiler is cheap.
+The architectural fix is not to ignore solids. It is to compile a **local certificate from
+the accepted numerical row image**. A world may contain solids while a particular pressure
+row remains exactly regular. Local facts should select the physical path; global flags should
+only select which compiler is needed.
 
-### 5. Extra fine-grid passes are more expensive than the iterations they save
+### 3. Packing must preserve operands and operation order, not just the final coefficient
 
-The topology-complete additive correction removed sixteen PCG iterations and still made the
-solve slower. Restriction/prolongation, a second `z` traversal and generic local operator work
-consumed more than the avoided SpMVs. Workgroup memory did not rescue the accepted-leaf block
-polynomial because topology and coverage, not just vector locality, remained wrong.
+Rank-only vectors, pairwise shortcuts and the five-scalar exact SoA image all increased
+dependencies or working-set size and lost. A later one-word mask appeared to classify 3,466
+cells and made the broken solve very fast, but it mapped incidence ordinal directly to axis
+direction. Canonical incidence order is not a direction-order contract; the arm produced zero
+accepted iterations, curvature recovery and a relative residual of 6.75, so it was removed.
 
-Experiment rule: a preconditioner must replace fine-grid work, not sit beside Jacobi as more
-fine-grid work. Its work stream must be pressure-owned, its halo/operator page-native, and its
-complete application—including restrict, smooth, coarse solve and prolong—must fit inside the
-per-iteration time saved by the iteration reduction.
+Even fixing that permutation is insufficient as a proof. The generic expression evaluates
+`dual * own * other * value / theta`; equality of a precombined weight does not guarantee
+bit-equivalent multiplication order. A valid compact class must certify the individual
+operand tuple, encode directions in canonical incidence order, and pass a dual-operator
+bitwise audit before it enters PCG.
 
-### 6. Solver guards are numerical architecture
+### 4. Page-local reuse is still plausible, page-stencil replacement is not
 
-Cadence 16 looked like a clean 13% solve win on mini32 but changed symmetric-expansion's
-recovery trajectory and residual by nearly 7x. Guard cadence, reduction order and recovery are
-part of the accepted algorithm. Performance experiments must hold all three fixed and compare
-true residual, projected velocity and divergence, not only iteration count.
+Only 5,636 of 45,222 active off-diagonals cross a brick. A pressure-owned page kernel could
+therefore stage most input-vector values once in workgroup memory while executing the exact
+canonical row loops and arithmetic order. This attacks repeated vector traffic and dependent
+global loads without duplicating all coefficients. It also creates the correct coverage and
+halo authority for a later multilevel solver.
 
-### 7. The retained production changes meet the stricter keep rule
+This is different from the rejected accepted-leaf block polynomial: pressure membership,
+not accepted topology, must compile the page work stream, and the first consumer is an
+ordinary baseline-equivalent SpMV rather than an additional numerical pass.
 
-- Duplicate Jacobi removal deleted one recurring full-vector read/write and reduced mini32
-  solve by 6.2259 ms.
-- Retiring numerically unused PCA work deleted repair/freeze scheduling and cut pressure
-  topology from 3.8011 ms toward the current 1.1141 ms.
-- Runtime B8 interior arithmetic reduced solve from 21.8890 ms to 9.0440 ms and also scaled on
-  mini64.
-- Removing the unused PCG initialization reduction is a small neutral simplification: seven
-  shader lines and a dead reduction value disappeared without adding data or authority.
+### 5. The remaining 5× gap is primarily convergence, but extra fine passes do not help
 
-No failed performance representation remains in production.
+The current tail is about 14.09 ms versus the 7.92 ms 5× threshold; pressure solve alone is
+about 9–10 ms at 48 iterations. The additive brick correction reduced the iteration count to
+32 but was slower in absolute time, while the block polynomial lost positive curvature.
+
+The required preconditioner must replace fine work inside a symmetric V-cycle. It cannot add
+restriction, a second fine operator and prolongation beside every existing Jacobi iteration.
+Its complete application must be cheaper than the operator applications it removes, use the
+pressure-owned coverage stream, and keep cadence-8 true-residual guards unchanged.
+
+### 6. Publication is charged to its consumer
+
+The exact wet-brick stream cost 0.065–0.13 ms with no consumer; the exact-SoA image enlarged
+code and data while slowing SpMV. New images land atomically with their first consumer and are
+kept only on net frame time. There is no permanent “infrastructure” arm.
+
+### 7. Retained-change audit
+
+- Keep duplicate Jacobi removal: it deletes one recurring full-vector read/write and has an
+  exact numerical A/B.
+- Keep unused PCA scheduling removal: production Jacobi never consumed its aggregate or
+  hierarchy results, and pressure topology fell from 3.80 ms toward 1.11 ms.
+- Keep the unused PCG initialization-reduction deletion: it removes dead shader work and
+  state without changing output.
+- Remove the runtime B8 arithmetic branch: the census found no consumer and add/remove timing
+  was neutral.
+- Remove the frozen cell→brick publication: its accessor and stored plane had no consumer.
+- Keep no failed rank, SoA, pairwise, block, cadence or mask representation.
+
+The 9.044 ms combined solve checkpoint remains valid, but only 6.226 ms of its improvement is
+currently isolated to duplicate-Jacobi removal. The rest must not be attributed to the now
+proven-dead runtime branch. A frozen-state ablation is required before making another causal
+claim.
 
 ## Revised experiment sequence
 
-### Experiment A — classify the remaining operator work
+### Experiment A — make the current checkpoint causal
 
-Add QA-only counters for authored arithmetic, dynamic interior arithmetic, equal-rung
-cross-page candidates, host/runtime seams, 2:1 rows, sparse-air rows and solid-scaled rows.
-Capture counts and isolated SpMV time on a frozen mini32 state; do not add a production image.
-This establishes the maximum possible gain before changing layout.
+Capture one frozen accepted pressure epoch and time the existing exact operator, vector update
+and reductions separately with hardware timestamps and Metal utilization counters. Ablate the
+remaining source/scheduling differences between the 21.889 and 9.044 ms checkpoints without
+changing the matrix or iteration trajectory. Report bytes, dependent loads, SIMD occupancy,
+cache behaviour and bandwidth; dispatch count is not an objective.
 
-Gate: the proposed class must account for enough recurring operator time to deliver at least
-0.8 ms net solve improvement. Population alone is insufficient.
+Gate: account for the unexplained solve delta. If it cannot be reproduced on the frozen epoch,
+replace the 9.044 checkpoint with a new paired baseline before doing more design work.
 
-### Experiment B — page-neighbour arithmetic A/B
+### Experiment B — pressure-owned page-local exact SpMV
 
-At topology acceptance, publish only six neighbour-page bases plus face-kind bits per live B8
-page. During SpMV, keep current interior arithmetic and use the descriptor only for boundary
-coordinates certified equal-rung and solid-free. Compute the neighbour stable ID
-arithmetically; retain stable-cell vectors and canonical membership. All other cells execute
-the unchanged generic path.
+Publish the exact pressure-page coverage stream together with its consumer. Run one workgroup
+per pressure page, stage page-local input-vector values in workgroup memory, and execute the
+existing incidence/row/term loop in identical order. Cross-page values remain direct stable-ID
+loads. Do not publish neighbour/weight planes and do not change PCG mathematics.
 
-Gate: symmetric-expansion exactness, unchanged mini32 census/48-iteration receipt, pressure
-solve at most 8.2 ms median, and no more than 0.1 ms topology increase. Otherwise remove the
-descriptor and revisit the cost model.
+Gate: exact mini32 pressure receipt, bit-identical symmetric-expansion fields relative to its
+five-failure baseline, complete one-owner pressure coverage, pressure solve at most 8.2 ms and
+topology increase at most 0.1 ms. If this misses, remove it and revisit the architecture before
+any multilevel work—the 87.5% locality premise would not be translating into GPU utilization.
 
-### Experiment C — page-native symmetric multilevel prototype
+### Experiment C — ordered local regular certificate
 
-Only if Experiment B wins, reuse its pressure-page/halo descriptor to prototype one complete
-symmetric V-cycle over page-local fine vectors and compact coarse page values. Compile
-pressure-owned page coverage in parallel and prove every pressure cell is covered exactly
-once. Benchmark the whole preconditioner application before integrating it into PCG.
+Only after the exact page kernel establishes a reliable baseline, census individual operand
+tuples and canonical direction permutations. If a large class has exact discrete operands,
+encode one small ordered descriptor and verify baseline and compiled `A*x` bitwise on multiple
+full pressure vectors before routing that class through the hot operator. Never infer safety
+from a combined coefficient or six-incidence count.
 
-Gate: absolute mini32 solve at or below 4.0 ms with cadence 8, zero curvature recovery and the
-same true-residual/symmetry receipts. An iteration-count win without this wall-time win is a
-rejection.
+Gate: at least 0.8 ms net solve improvement, no larger topology working set than the topology
+reads removed, and the same numerical gates as Experiment B. Otherwise remove the descriptor.
 
-### Experiment D — downstream page consumers
+### Experiment D — page-native symmetric V-cycle
 
-After the pressure page descriptor proves itself, test the same authority with separate
-access-specific physical views for collocation and activity. Do not force those consumers
-through the pressure layout. Each view must remove canonical topology traversal and win its
-own absolute stage A/B before the old path is deleted.
+Reuse the proven pressure-page coverage and exact halo path for one complete symmetric V-cycle.
+Compile volume-compatible restriction/prolongation and a Galerkin coarse operator from the
+accepted row graph. Benchmark the entire preconditioner before PCG integration.
+
+Gate: absolute mini32 solve at or below 3.5–4.0 ms with cadence 8, zero curvature recovery and
+the same true-residual and symmetry receipts. Iteration reduction alone is a rejection.
+
+### Experiment E — downstream access-specific consumers
+
+Projection already uses regular/seam face programs. Collocation and activity should receive
+their own compact page-local views derived from the same accepted topology generation, not the
+pressure matrix layout. Each view must remove generic traversal and win its own stage A/B. The
+portfolio gate remains ≤7.92 ms median from pressure topology through presentation.
+
+### Symmetric-expansion control
+
+The cleaned working tree and committed `3a88f82a` baseline produce identical 20-step results:
+the same fields and maxima, plus the same five existing gates (four step-1 publication/setup
+failures and the step-18 mass-drift threshold). The cleanup therefore introduces no symmetric
+regression; future arms compare against this five-failure control.

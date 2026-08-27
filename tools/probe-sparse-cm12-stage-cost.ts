@@ -1120,9 +1120,11 @@ try {
       outputPath,
       samples: seen,
       medianAdvance_ms: report.medianAdvance_ms,
+      pressureSolve_ms: report.pressureSolve_ms,
       nonPressure: report.nonPressure,
       optimizationTarget: report.optimizationTarget,
       closure: report.closure,
+      terminalWork: report.terminalWork,
       validationErrors,
       diagnosticPassed: report.diagnostic.passed,
     }, null, 2));
