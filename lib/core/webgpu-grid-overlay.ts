@@ -400,9 +400,9 @@ fn sparseFloorDiv(q:vec3i,divisor:i32)->vec3i{
   return adjusted/divisor;
 }
 fn sparseSignedFineKey(page:vec3i)->u32{
-  if(page.x< -1024||page.x>1023||page.y<0||page.y>1023
+  if(page.x< -1024||page.x>1023||page.y< -512||page.y>511
     ||page.z< -1024||page.z>1022){return SPARSE_INVALID;}
-  return u32(page.x+1024)|(u32(page.y)<<11u)|(u32(page.z+1024)<<21u);
+  return u32(page.x+1024)|(u32(page.y+512)<<11u)|(u32(page.z+1024)<<21u);
 }
 fn sparseFineKey(page:vec3i,pageDims:vec3u)->u32{
   if(sparseSignedFineAddressing()){return sparseSignedFineKey(page);}

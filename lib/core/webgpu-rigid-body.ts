@@ -88,6 +88,9 @@ export interface GPURigidSolidWorldCollisionSource {
   readonly baseWords: number;
   readonly directoryCapacity: number;
   readonly directoryBaseWords: number;
+  readonly regionCapacity: number;
+  readonly regionBaseWords: number;
+  readonly regionWords: number;
   readonly entryWords: number;
   readonly pageBaseWords: number;
   readonly pageWords: number;
@@ -184,6 +187,9 @@ const rigidSolidWorldContactWGSL = (
 const RIGID_SOC_BASE:u32=${source.baseWords}u;
 const RIGID_SOC_DIRECTORY_CAPACITY:u32=${source.directoryCapacity}u;
 const RIGID_SOC_DIRECTORY_BASE:u32=${source.directoryBaseWords}u;
+const RIGID_SOC_REGION_CAPACITY:u32=${source.regionCapacity}u;
+const RIGID_SOC_REGION_BASE:u32=${source.regionBaseWords}u;
+const RIGID_SOC_REGION_WORDS:u32=${source.regionWords}u;
 const RIGID_SOC_PAGE_BASE:u32=${source.pageBaseWords}u;
 const RIGID_SOC_ENTRY_WORDS:u32=${source.entryWords}u;
 const RIGID_SOC_PAGE_WORDS:u32=${source.pageWords}u;
@@ -223,6 +229,21 @@ fn rigidSolidPageAt(q:vec3i)->u32{
   return RIGID_SOC_INVALID;
 }
 fn rigidSolidSdfQ8(worldFine:vec3i)->i32{
+  var regionOperation=-1;
+  for(var region=0u;region<RIGID_SOC_REGION_CAPACITY;region+=1u){
+    let at=RIGID_SOC_BASE+RIGID_SOC_REGION_BASE+region*RIGID_SOC_REGION_WORDS;
+    let minimum=vec3i(bitcast<i32>(solidWorldOccupancy[at+1u]),
+      bitcast<i32>(solidWorldOccupancy[at+2u]),
+      bitcast<i32>(solidWorldOccupancy[at+3u]));
+    let maximum=vec3i(bitcast<i32>(solidWorldOccupancy[at+4u]),
+      bitcast<i32>(solidWorldOccupancy[at+5u]),
+      bitcast<i32>(solidWorldOccupancy[at+6u]));
+    if(all(worldFine>=minimum)&&all(worldFine<maximum)){
+      regionOperation=i32(solidWorldOccupancy[at]);
+    }
+  }
+  if(regionOperation==1){return -128;}
+  if(regionOperation==0){return 32767;}
   let q=worldFine-rigidSolidOriginFine();
   let pageQ=vec3i(rigidSolidFloorDiv8(q.x),rigidSolidFloorDiv8(q.y),
     rigidSolidFloorDiv8(q.z));let local=q-pageQ*8;let page=rigidSolidPageAt(pageQ);
@@ -305,6 +326,36 @@ fn solidVoxelContact(body:ptr<function,RigidBody>){
           bestPenetration=penetration;bestNormal=normal;bestRadius=radius;
         }
       }
+  }
+  // Large exact collider boxes remain compact regions instead of expanding
+  // their area into voxel pages. Resolve the same support contact analytically.
+  for(var region=0u;region<RIGID_SOC_REGION_CAPACITY;region+=1u){
+    let at=RIGID_SOC_BASE+RIGID_SOC_REGION_BASE+region*RIGID_SOC_REGION_WORDS;
+    if(solidWorldOccupancy[at]!=1u){continue;}
+    let minimumFine=vec3i(bitcast<i32>(solidWorldOccupancy[at+1u]),
+      bitcast<i32>(solidWorldOccupancy[at+2u]),
+      bitcast<i32>(solidWorldOccupancy[at+3u]));
+    let maximumFine=vec3i(bitcast<i32>(solidWorldOccupancy[at+4u]),
+      bitcast<i32>(solidWorldOccupancy[at+5u]),
+      bitcast<i32>(solidWorldOccupancy[at+6u]));
+    let minimum=origin+vec3f(minimumFine)*cell;
+    let maximum=origin+vec3f(maximumFine)*cell;
+    if(any(bodyMaximum<minimum)||any(bodyMinimum>maximum)){continue;}
+    let closest=clamp((*body).positionShape.xyz,minimum,maximum);
+    let delta=(*body).positionShape.xyz-closest;let separation=length(delta);
+    if(separation>broadRadius){continue;}
+    var normal=vec3f(0,1,0);var penetration=0.0;var radius=0.0;
+    if(separation>1e-7){
+      normal=delta/separation;radius=supportRadius(*body,normal);
+      penetration=radius-separation;
+    }else{
+      let interior=voxelInteriorContact((*body).positionShape.xyz,minimum,maximum);
+      normal=interior.xyz;radius=supportRadius(*body,normal);
+      penetration=radius+interior.w;
+    }
+    if(penetration>bestPenetration){
+      bestPenetration=penetration;bestNormal=normal;bestRadius=radius;
+    }
   }
   if(bestPenetration>0.0){
     resolveStaticContact(body,bestNormal,bestPenetration,bestRadius);
@@ -601,10 +652,12 @@ export class WebGPURigidBodySystem {
       throw new Error("SolidWorld collision source must be attached before rigid compilation");
     }
     if (![source.baseWords, source.directoryCapacity, source.directoryBaseWords,
+      source.regionCapacity, source.regionBaseWords, source.regionWords,
       source.entryWords, source.pageBaseWords, source.pageWords, source.fractionPageWords]
       .every((value) => Number.isSafeInteger(value) && value >= 0)
       || source.directoryCapacity < 1
       || source.entryWords < 6
+      || source.regionWords < 8
       || source.pageWords < source.fractionPageWords
       || (source.directoryCapacity & (source.directoryCapacity - 1)) !== 0
       || !source.origin_m.every(Number.isFinite)

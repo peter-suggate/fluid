@@ -256,7 +256,7 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   if(id>=params.table.z||metadataBase+2u>=arrayLength(&metadata)||metadata[metadataBase]!=id||metadata[metadataBase+2u]!=params.table.w){return;}
   let key=metadata[id*4u+1u];var pageCoordinate=vec3i(0);
   if(compactSignedSparseAddressing()){
-    pageCoordinate=vec3i(i32(key&0x7ffu)-1024,i32((key>>11u)&0x3ffu),
+    pageCoordinate=vec3i(i32(key&0x7ffu)-1024,i32((key>>11u)&0x3ffu)-512,
       i32((key>>21u)&0x7ffu)-1024);
   }else{let xy=max(1u,params.brickDimensions.x*params.brickDimensions.y);
     let bz=key/xy;let rem=key-bz*xy;let by=rem/params.brickDimensions.x;

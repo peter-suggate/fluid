@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   boxSolidVoxelShell,
   createSolidWorld,
+  fluidColliderVoxelPatchesForScene,
+  fluidSolidWorldForScene,
   planSolidWorldMemory,
   planarBoundaryForSolidWorldVoxelPatch,
   sampleSolidWorld,
@@ -16,7 +18,8 @@ import { sparseCM12FinePresentationPlan } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { FINE_LEVELSET_SIGNED_SPARSE_ADDRESS_FLAG } from
   "../lib/core/fine-levelset-brick-abi";
-import { getScenePreset } from "../lib/core/scenes";
+import { findSceneDefinition, getScenePreset } from "../lib/core/scenes";
+import { sceneDocument } from "../lib/core/scene-definition";
 import { initializeSparseBrickAtlasFromScene } from
   "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
@@ -141,4 +144,35 @@ test("SolidWorld uses exact signed pages and a floor-reaching voxel cut", () => 
     coordinateOffsetPages: [1, 0, 0],
   }), /cannot advertise a padded address lattice/,
   "signed consumers must never add a second domain-origin page offset");
+});
+
+test("the finite studio slab, not y=0, supports outside-tank fluid", () => {
+  const definition = findSceneDefinition("hydrostatic-power-large-offset");
+  assert.ok(definition);
+  const scene = sceneDocument(definition);
+  const patches = fluidColliderVoxelPatchesForScene(scene);
+  assert.equal(patches.length, 1);
+  assert.ok(patches[0]!.minimum[1] < 0);
+  assert.equal(patches[0]!.maximumExclusive[1], 0,
+    "the collider ends at its authored top face without filling y=0 cells");
+  const world = fluidSolidWorldForScene(scene);
+  assert.equal(world.pages.length, solidWorldForScene(scene).pages.length,
+    "a planar collider must remain a compact region, not expand into voxel pages");
+  assert.deepEqual(world.regions, patches);
+  const outsideX = sceneLatticeDimensions(scene)[0] + 1;
+  assert.equal(sampleSolidWorld(world, [outsideX, -1, 0]).solidFraction, 1);
+  assert.equal(sampleSolidWorld(world, [outsideX, 0, 0]).solidFraction, 0,
+    "empty space above the slab remains open");
+
+  const longDam = sceneDocument(findSceneDefinition(
+    "sparse-cm12-ladder-long-dam",
+  )!);
+  const longDamWorld = fluidSolidWorldForScene(longDam);
+  const layout = createSparseCM12SolidOccupancyLayout({ baseWords: 64,
+    authoredPageCount: longDamWorld.pages.length,
+    authoredRegionCount: longDamWorld.regions?.length ?? 0 });
+  assert.ok(layout.totalBytes < 8 * 1024 * 1024,
+    "the long dam's planar stage floor must stay inside the SolidWorld budget");
+  assert.doesNotThrow(() => packSparseCM12SolidOccupancy(
+    layout, longDamWorld, [0, 0, 0]));
 });

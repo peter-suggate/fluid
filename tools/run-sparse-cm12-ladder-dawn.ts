@@ -154,6 +154,11 @@ async function worker(): Promise<void> {
         submittedTime_s: solver.info.submittedTime_s }));
     }
     const growth = await (solver as WebGPUAdaptiveMassSolver).readWorldGrowthReceiptQA();
+    if (rung === "long-dam"
+      && growth.publishedTopologyPageCoordinates.some((coordinate) => coordinate[1] < 0)) {
+      throw new Error(`long-dam discovery crossed its SolidWorld floor: ${JSON.stringify(
+        growth.publishedTopologyPageCoordinates.filter((coordinate) => coordinate[1] < 0))}`);
+    }
     console.log(JSON.stringify({ phase: "world-growth", rung, ...growth }));
     if (rung !== "frontier-create" && rung !== "frontier-advance"
       && rung !== "retire-reuse") {

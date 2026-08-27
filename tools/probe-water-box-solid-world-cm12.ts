@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import "../lib/methods";
 import { getScenePreset } from "../lib/core/scenes";
-import { compileE0PlanarFluidBoundaries } from "../lib/core/planar-fluid-boundary";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
 import type { WebGPUAdaptiveMassSolver } from
@@ -12,15 +11,15 @@ import {
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 
-const requestedSteps = Number(process.env.FLUID_PLANAR_CM12_STEPS ?? 2);
+const requestedSteps = Number(process.env.FLUID_SOLID_WORLD_CM12_STEPS ?? 2);
 assert.ok(Number.isSafeInteger(requestedSteps) && requestedSteps >= 0);
-const brickFineResolution = Number(process.env.FLUID_PLANAR_CM12_BRICK_FINE ?? 8);
+const brickFineResolution = Number(process.env.FLUID_SOLID_WORLD_CM12_BRICK_FINE ?? 8);
 assert.ok(brickFineResolution === 4 || brickFineResolution === 8
   || brickFineResolution === 16);
 const checkpoints = new Set([0, 1, 2, 4, 8, 16, 24, requestedSteps]
   .filter((step) => step <= requestedSteps));
 
-await acquireWebGPUExclusiveLock("dawn-benchmark", "probe-water-box-planar-cm12");
+await acquireWebGPUExclusiveLock("dawn-benchmark", "probe-water-box-solid-world-cm12");
 let device: GPUDevice | undefined;
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -47,8 +46,7 @@ try {
     validationErrors.push(event.error.message);
   });
   const scene = getScenePreset("water-box-dam-break").create();
-  const compiled = compileE0PlanarFluidBoundaries(scene);
-  assert.deepEqual(compiled.rejectedFaces, []);
+  const shellFaces = ["yLow", "xLow", "xHigh", "zLow", "zHigh", "yHigh"] as const;
   const values = {
     ...adaptiveMassMethod.presetFor("balanced"),
     resolutionMode: "adaptive",
@@ -90,7 +88,7 @@ try {
             }
         return false;
       };
-      const walls = Object.fromEntries(compiled.admitted.map(({ face }) => {
+      const walls = Object.fromEntries(shellFaces.map((face) => {
         const touching = active.filter((brick) => {
           const [x, y, z] = brick.coordinate;
           return (face === "xLow" && x === 0)
@@ -131,19 +129,15 @@ try {
       if (checkpoints.has(step)) report.push(await sample(step));
     }
     await device.queue.onSubmittedWorkDone();
-    console.log(JSON.stringify({ phase: "water-box-planar-sparse-cm12", report,
+    console.log(JSON.stringify({ phase: "water-box-solid-world-sparse-cm12", report,
       validationErrors }));
     const initialMassFineCells = report[0]!.massFineCells;
     for (const receipt of report) {
       assert.equal(receipt.faults, 0, `topology faults at step ${receipt.step}`);
       assert.deepEqual(receipt.outsideBricks, [],
-        `planar walls leaked resident pages at step ${receipt.step}`);
-      assert.ok(receipt.resolutionCounts[4]! > 0,
-        `step ${receipt.step} must retain a coarse Sparse CM12 page`);
-      for (const face of ["xLow", "yLow", "zLow"] as const) {
-        assert.ok(receipt.walls[face].coarseWetBricks > 0,
-          `step ${receipt.step} must retain coarse wet contact on ${face}`);
-      }
+        `SolidWorld shell leaked resident pages at step ${receipt.step}`);
+      assert.ok(receipt.walls.yLow.wetBricks > 0,
+        `step ${receipt.step} must retain wet SolidWorld floor contact`);
       assert.ok(receipt.pressureSolveConverged,
         `pressure must converge at step ${receipt.step}`);
       assert.equal(receipt.pressureIterationCapReached, false,

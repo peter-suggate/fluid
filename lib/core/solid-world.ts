@@ -11,6 +11,10 @@ import {
   terrainColumnHeights,
   terrainContentStamp,
 } from "./terrain";
+import {
+  buildEnvironmentProxyCatalog,
+  environmentProxyPrimitives,
+} from "./voxel-environments";
 
 export const SOLID_WORLD_VERSION = 1;
 export const SOLID_WORLD_BRICK_CELLS = 8;
@@ -259,6 +263,9 @@ export interface SolidWorld {
   readonly pages: readonly SolidWorldPage[];
   readonly directory: SolidWorldDirectory;
   readonly patches: readonly SolidWorldVoxelPatch[];
+  /** Compact ordered boxes evaluated beside sparse voxel pages. Large planar
+   * colliders stay exact without expanding their area into page payload. */
+  readonly regions?: readonly SolidWorldVoxelPatch[];
 }
 
 /**
@@ -406,6 +413,49 @@ export function solidWorldForScene(scene: SceneDescription): SolidWorld {
     scene.solidVoxels, false);
 }
 
+/**
+ * Static scenery surfaces explicitly authored as fluid colliders.
+ *
+ * Scenery is normally presentation-only and must not silently become physics.
+ * A `fluid-collider` tag opts an axis-aligned box into the same signed voxel
+ * authority as terrain and document voxel edits. This is what makes the finite
+ * studio slab support an outside-tank drop without inventing an infinite y=0
+ * floor. Non-box and rotated colliders need a proper voxelizer before they can
+ * opt in; using their AABB here would create solid space the scene does not own.
+ */
+export function fluidColliderVoxelPatchesForScene(
+  scene: SceneDescription,
+): readonly SolidWorldVoxelPatch[] {
+  const environmentId = scene.environment ?? "default";
+  const catalog = buildEnvironmentProxyCatalog(scene, environmentId);
+  const cell = sceneCellSizes_m(scene);
+  const origin = [-0.5 * scene.container.width_m, 0,
+    -0.5 * scene.container.depth_m] as const;
+  const epsilon = 1e-9;
+  return environmentProxyPrimitives(catalog).flatMap((primitive) => {
+    if (!primitive.tags.includes("fluid-collider") || primitive.kind !== "box"
+      || primitive.orientation) return [];
+    const minimum = [primitive.aabb_m.min.x, primitive.aabb_m.min.y,
+      primitive.aabb_m.min.z].map((value, axis) =>
+      Math.floor((value - origin[axis]!) / cell[axis]! + epsilon)) as
+      [number, number, number];
+    const maximumExclusive = [primitive.aabb_m.max.x, primitive.aabb_m.max.y,
+      primitive.aabb_m.max.z].map((value, axis) =>
+      Math.ceil((value - origin[axis]!) / cell[axis]! - epsilon) || 0) as
+      [number, number, number];
+    if (minimum.some((value, axis) => value >= maximumExclusive[axis]!)) return [];
+    return [{ operation: "fill" as const, minimum, maximumExclusive }];
+  });
+}
+
+/** SolidWorld used by fluid dynamics, including explicitly opted-in scenery. */
+export function fluidSolidWorldForScene(scene: SceneDescription): SolidWorld {
+  const world = solidWorldForScene(scene);
+  const regions = fluidColliderVoxelPatchesForScene(scene);
+  return regions.length === 0 ? world : { ...world,
+    regions: [...(world.regions ?? []), ...regions] };
+}
+
 /** Generic voxel-box authoring helper; runtime consumers never infer this shell. */
 export function boxSolidVoxelShell(
   dimensions: SolidWorldCoordinate,
@@ -462,12 +512,21 @@ export function sampleSolidWorld(
   readonly materialId: number } {
   const address = solidWorldPageAddress(coordinate);
   const pageIndex = world.directory.lookup(address.page);
-  if (pageIndex === undefined) {
-    return { solidFraction: 0, signedDistance_cells: Number.POSITIVE_INFINITY,
-      materialId: 0 };
+  const page = pageIndex === undefined ? undefined : world.pages[pageIndex]!;
+  let solidFraction = page?.solidFraction[address.localIndex] ?? 0;
+  let signedDistanceQ8 = page?.signedDistanceQ8[address.localIndex] ?? 0x7fff;
+  let materialId = page?.materialId[address.localIndex] ?? 0;
+  let regionMatched = false;
+  for (const region of world.regions ?? []) {
+    if (!coordinate.every((value, axis) => value >= region.minimum[axis]!
+      && value < region.maximumExclusive[axis]!)) continue;
+    regionMatched = true;
+    const fill = region.operation === "fill";
+    solidFraction = fill ? 255 : 0;
+    signedDistanceQ8 = fill ? -128 : 0x7fff;
+    materialId = fill ? (region.materialId ?? 1) : 0;
   }
-  const page = world.pages[pageIndex]!;
-  return { solidFraction: page.solidFraction[address.localIndex]! / 255,
-    signedDistance_cells: page.signedDistanceQ8[address.localIndex]! / 256,
-    materialId: page.materialId[address.localIndex]! };
+  return { solidFraction: solidFraction / 255,
+    signedDistance_cells: page === undefined && !regionMatched
+      ? Number.POSITIVE_INFINITY : signedDistanceQ8 / 256, materialId };
 }

@@ -1,7 +1,6 @@
 import type { SceneDescription } from "./model";
-import { compileE0PlanarFluidBoundaries } from "./planar-fluid-boundary";
 import { sceneLatticeDimensions, solidVoxelShellForScene } from "./scene-lattice";
-import { solidWorldVoxelPatchBounds_m } from "./solid-world";
+import { solidWorldVoxelPatchBounds_m, type SolidWorldVoxelPatch } from "./solid-world";
 import {
   containerDecorationSpace,
   DecorationBuilder,
@@ -62,13 +61,12 @@ function appendBoxEdges(
 }
 
 /**
- * Build the persistent cue from the same admitted voxel slabs CM12 samples.
+ * Build the persistent cue from the same authored voxel slabs CM12 samples.
  *
  * The box is deliberately not the ideal container envelope. Each accepted
  * floor/wall/lid patch contributes the exact metre-space bounds of its finite
- * one-voxel thickness. If a shell patch was cut or replaced, the E0 compiler
- * rejects it and it contributes no line work; that region remains owned by the
- * ordinary residual voxel renderer instead.
+ * one-voxel thickness. A cut or replaced shell patch contributes no line work;
+ * that region remains owned by the ordinary residual voxel renderer instead.
  */
 export function buildVesselOutlineGeometry(
   scene: SceneDescription,
@@ -87,17 +85,36 @@ export function buildVesselOutlineGeometry(
   const shape = scene.container.shape ?? "box";
   if (shape === "box") {
     const seen = new Set<string>();
-    const admitted = compileE0PlanarFluidBoundaries(scene).admitted;
-    for (const boundary of admitted) {
-      const patch = scene.solidVoxels[boundary.sourcePatchIndex];
-      if (!patch) continue;
+    const sameCoordinate = (left: readonly number[], right: readonly number[]) =>
+      left.every((value, axis) => value === right[axis]);
+    const sameFill = (left: SolidWorldVoxelPatch, right: SolidWorldVoxelPatch) =>
+      left.operation === "fill"
+        && sameCoordinate(left.minimum, right.minimum)
+        && sameCoordinate(left.maximumExclusive, right.maximumExclusive);
+    const overlapsVolume = (left: SolidWorldVoxelPatch, right: SolidWorldVoxelPatch) =>
+      left.maximumExclusive[0] > right.minimum[0]
+        && left.minimum[0] < right.maximumExclusive[0]
+        && left.maximumExclusive[1] > right.minimum[1]
+        && left.minimum[1] < right.maximumExclusive[1]
+        && left.maximumExclusive[2] > right.minimum[2]
+        && left.minimum[2] < right.maximumExclusive[2];
+    const names = ["yLow", "xLow", "xHigh", "zLow", "zHigh", "yHigh"] as const;
+    const shell = solidVoxelShellForScene(scene).flatMap((expected, shellIndex) => {
+      const sourcePatchIndex = scene.solidVoxels.findIndex((patch) =>
+        sameFill(patch, expected));
+      if (sourcePatchIndex < 0 || scene.solidVoxels.some((patch) =>
+        patch.operation === "clear" && overlapsVolume(patch, expected))) return [];
+      return [{ name: names[shellIndex]!, sourcePatchIndex }];
+    });
+    for (const { sourcePatchIndex } of shell) {
+      const patch = scene.solidVoxels[sourcePatchIndex]!;
       const bounds = solidWorldVoxelPatchBounds_m(scene, patch);
       appendBoxEdges(builder, bounds.minimum, bounds.maximum, seen, style);
     }
     if (builder.segmentCount === 0) return undefined;
-    const stamp = admitted.map(({ face, sourcePatchIndex }) => {
+    const stamp = shell.map(({ name, sourcePatchIndex }) => {
       const patch = scene.solidVoxels[sourcePatchIndex]!;
-      return `${face}:${patch.minimum.join(",")}:${patch.maximumExclusive.join(",")}`;
+      return `${name}:${patch.minimum.join(",")}:${patch.maximumExclusive.join(",")}`;
     }).join("|");
     return {
       key: `vessel-voxel-volume:${stamp}`,

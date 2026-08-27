@@ -76,7 +76,7 @@ test("retirement follows all-air publication and clears the recorded topology pa
   assert.match(shader, /if\(true\)\{/,
     "a WDR-backed allocator must always use the signed SparseWorld key path");
   assert.match(shader,
-    /key=u32\(coordinate\.x\+1024\)\|\(u32\(coordinate\.y\)<<11u\)\s*\|\(u32\(coordinate\.z\+1024\)<<21u\)/,
+    /key=u32\(coordinate\.x\+1024\)\|\(u32\(coordinate\.y\+512\)<<11u\)\s*\|\(u32\(coordinate\.z\+1024\)<<21u\)/,
   "authored and dynamic WDR leaves must share the signed presentation-key ABI");
   assert.doesNotMatch(shader,
     /key=u32\(coordinate\.x\)\+\d+u\s*\*\(u32\(coordinate\.y\)/,

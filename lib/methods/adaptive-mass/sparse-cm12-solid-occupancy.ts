@@ -5,6 +5,7 @@ import {
   WEBGPU_SOLID_WORLD_HEADER_WORDS,
   WEBGPU_SOLID_WORLD_MAGIC,
   WEBGPU_SOLID_WORLD_PHYSICS_PAGE_WORDS,
+  WEBGPU_SOLID_WORLD_REGION_WORDS,
   WEBGPU_SOLID_WORLD_SDF_WORDS,
   WEBGPU_SOLID_WORLD_VERSION,
   createWebgpuSolidWorldPageLayout,
@@ -21,6 +22,7 @@ export const SPARSE_CM12_SOLID_OCCUPANCY_ENTRY_WORDS = WEBGPU_SOLID_WORLD_ENTRY_
 export const SPARSE_CM12_SOLID_FRACTION_PAGE_WORDS = WEBGPU_SOLID_WORLD_FRACTION_WORDS;
 export const SPARSE_CM12_SOLID_SDF_PAGE_WORDS = WEBGPU_SOLID_WORLD_SDF_WORDS;
 export const SPARSE_CM12_SOLID_OCCUPANCY_PAGE_WORDS = WEBGPU_SOLID_WORLD_PHYSICS_PAGE_WORDS;
+export const SPARSE_CM12_SOLID_REGION_WORDS = WEBGPU_SOLID_WORLD_REGION_WORDS;
 export const SPARSE_CM12_SOLID_OCCUPANCY_MAX_BYTES = 8 * 1024 * 1024;
 
 export type SparseCM12SolidOccupancyLayout = WebgpuSolidWorldPageLayout;
@@ -28,6 +30,7 @@ export type SparseCM12SolidOccupancyLayout = WebgpuSolidWorldPageLayout;
 export function createSparseCM12SolidOccupancyLayout(options: {
   readonly baseWords: number;
   readonly authoredPageCount: number;
+  readonly authoredRegionCount?: number;
 }): SparseCM12SolidOccupancyLayout {
   return createWebgpuSolidWorldPageLayout({ ...options, includesMaterial: false,
     maximumBytes: SPARSE_CM12_SOLID_OCCUPANCY_MAX_BYTES });

@@ -740,7 +740,7 @@ try {
       debug(`capture ${step} activity complete in ${
         (activityComplete_ms - statsComplete_ms).toFixed(3)}ms; fields begin`);
       const adaptiveStats = stats as typeof stats & AdaptiveMassStepTelemetry;
-      const diagnosticFields = await solver!.readDiagnosticFields();
+      const diagnosticFields = await solver!.readDiagnosticFields(true);
       const fieldsComplete_ms = performance.now();
       debug(`capture ${step} fields complete in ${
         (fieldsComplete_ms - activityComplete_ms).toFixed(3)}ms; total ${
@@ -1066,9 +1066,16 @@ try {
         `step ${step}: host scheduled ${checkpoint.hostSimulationSizedWorkItems ?? "missing"} simulation-sized work items`);
       expect(failures, checkpoint.adaptiveActivityAcceptedSteps === step,
         `step ${step}: GPU activity clock is ${checkpoint.adaptiveActivityAcceptedSteps}`);
+      // The measured count is the dirty census captured before residency
+      // retirement.  The activity snapshot below is the post-retirement live
+      // census, so a transition frame may legitimately measure more leaves
+      // than remain resident by the time QA reads them back.  Bound it by the
+      // finite scene domain instead of comparing two different frame phases.
+      const domainBrickCount = dimensions.reduce((count, extent) =>
+        count * (extent / brickFineResolution), 1);
       expect(failures, (checkpoint.adaptiveActivityMeasuredBrickCount ?? 0) > 0
         && (checkpoint.adaptiveActivityMeasuredBrickCount ?? Number.POSITIVE_INFINITY)
-          <= checkpoint.adaptiveResidentBrickCount,
+          <= domainBrickCount,
       `step ${step}: GPU measured ${checkpoint.adaptiveActivityMeasuredBrickCount ?? "missing"} activity bricks`);
       expect(failures, checkpoint.adaptiveActivityD4MismatchCount === 0,
         `step ${step}: GPU activity/history map has ${checkpoint.adaptiveActivityD4MismatchCount} D4 mismatches`);
@@ -1141,6 +1148,8 @@ try {
       initializationCensus: readInitializationCensus(),
       expectedInitialMass_cells,
       observedInitialMass_cells: checkpoints[0]!.mass_cells,
+      maximumDensity: maximum((sample) => sample.density.maximum),
+      maximumAbsoluteVelocity_m_s: maximum((sample) => sample.velocity?.maximumAbsolute),
       maximumAbsoluteRelativeMassDrift: maximum((sample) => Math.abs(sample.relativeMassDrift)),
       finalNormalizedL1DensityChange: finalCheckpoint.normalizedL1DensityChange,
       maximumDensityD4Error: maximum((sample) => sample.symmetry.density?.maximumAbsoluteError),
@@ -1228,6 +1237,8 @@ try {
       steps: report.steps,
       expectedInitialMass_cells: report.expectedInitialMass_cells,
       observedInitialMass_cells: report.observedInitialMass_cells,
+      maximumDensity: report.maximumDensity,
+      maximumAbsoluteVelocity_m_s: report.maximumAbsoluteVelocity_m_s,
       maximumAbsoluteRelativeMassDrift: report.maximumAbsoluteRelativeMassDrift,
       finalNormalizedL1DensityChange: report.finalNormalizedL1DensityChange,
       maximumDensityD4Error: report.maximumDensityD4Error,

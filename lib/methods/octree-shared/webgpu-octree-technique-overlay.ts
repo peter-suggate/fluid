@@ -261,14 +261,14 @@ fn finePageKey(brick:vec3u)->u32{
   // domainOrigin is the physical position of fine coordinate zero, not a
   // second page offset. Signed metadata already stores WDR world-page coords.
   if(arrayLength(&worklist)>=4u&&(worklist[3]&0x40000000u)!=0u){
-    if(brick.x>1023u||brick.y>1023u||brick.z>1022u){return INVALID;}
-    return (brick.x+1024u)|(brick.y<<11u)|((brick.z+1024u)<<21u);
+    if(brick.x>1023u||brick.y>511u||brick.z>1022u){return INVALID;}
+    return (brick.x+1024u)|((brick.y+512u)<<11u)|((brick.z+1024u)<<21u);
   }
   return brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);
 }
 fn finePageCoordinate(key:u32)->vec3i{
   if(arrayLength(&worklist)>=4u&&(worklist[3]&0x40000000u)!=0u){
-    return vec3i(i32(key&0x7ffu)-1024,i32((key>>11u)&0x3ffu),
+    return vec3i(i32(key&0x7ffu)-1024,i32((key>>11u)&0x3ffu)-512,
       i32((key>>21u)&0x7ffu)-1024);
   }
   let xy=max(fine.brickDimensions.x*fine.brickDimensions.y,1u);

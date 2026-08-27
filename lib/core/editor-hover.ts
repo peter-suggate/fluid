@@ -188,11 +188,10 @@ export function restOnHover(hover: EditorHover, radius_m: number, scene: SceneDe
  *
  * Unlike authored tank contents and rigid-body placement, a live drop is not
  * constrained by the vessel after the ray has missed it. Rays addressing the
- * tank retain its established promoted placement; otherwise a surface hit
- * anywhere is authoritative, and the open y=0 world floor supplies depth when
- * no bounded scene surface answers. Only the lower world bound remains: Sparse
- * CM12's vertical page coordinate is non-negative, so the ball must not extend
- * below y=0.
+ * tank retain its established promoted placement; otherwise an actual surface
+ * hit anywhere is authoritative. There is deliberately no implicit world
+ * floor: unsupported fluid falls through open SparseWorld until it reaches
+ * authored solid voxels or planes.
  */
 export function restFluidInWorld(
   scene: SceneDescription,
@@ -206,26 +205,14 @@ export function restFluidInWorld(
   // Open-world placement is only the fallback for a genuine tank miss.
   const tankPlacement = restInContainer(scene, ray, hover, radius_m);
   if (tankPlacement) return tankPlacement;
-  let surface = hover;
-  if (!surface && ray.direction.y < -1e-6) {
-    const distance_m = -ray.origin.y / ray.direction.y;
-    if (distance_m > 0) {
-      surface = {
-        kind: "floor",
-        position_m: add(ray.origin, scale(ray.direction, distance_m)),
-        normal: { x: 0, y: 1, z: 0 },
-        distance_m,
-        label: "world floor",
-      };
-    }
-  }
+  const surface = hover;
   if (!surface) return undefined;
   const normal = surface.kind === "body" || surface.kind === "fluid" ? surface.normal
     : surface.kind === "terrain" ? terrainSurfaceNormal(scene, surface)
       : { x: 0, y: 1, z: 0 };
   const airGap_m = surface.kind === "fluid" ? Math.min(...sceneCellSizes_m(scene)) : 0;
   const placed = add(surface.position_m, scale(normal, radius_m + airGap_m));
-  return { ...placed, y: Math.max(radius_m, placed.y) };
+  return placed;
 }
 
 /**

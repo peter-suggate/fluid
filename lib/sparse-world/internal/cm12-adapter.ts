@@ -5,7 +5,7 @@ import type { SparseAdaptiveMassAtlas } from
 import type { SparseCM12RigidResources } from
   "../../methods/adaptive-mass/webgpu-sparse-cm12-rigid-coupling";
 import type { SolidWorld } from "../../core/solid-world";
-import { solidWorldForScene } from "../../core/solid-world";
+import { fluidSolidWorldForScene } from "../../core/solid-world";
 import {
   refinementRegionLattice,
   sceneRefinementRegions,
@@ -59,10 +59,6 @@ export interface CM12SparseWorldStepConfiguration {
   readonly pressureControl?: SparseCM12PressureControl;
   readonly seams?: SparseCM12ResidentStageSeams;
   readonly worldDimensions_m?: readonly [number, number, number];
-  /** Exact authored vessel faces that use the legacy tank-wall MAC condition. */
-  readonly planarFluidBoundaryFaceMask?: number;
-  /** Whether edited/embedded SolidWorld geometry remains after planar admission. */
-  readonly genericSolidBoundaries?: boolean;
 }
 
 export type CM12SparseWorldNumerics =
@@ -155,8 +151,10 @@ export interface CM12SparseWorldDeveloperTrace {
   setPressureTopologyPhaseLimitForQA(phase: Parameters<
     WebGPUSparseCM12Resident["setPressureTopologyPhaseLimitForQA"]>[0]): void;
   readDiagnostics(): ReturnType<WebGPUSparseCM12Resident["readDiagnostics"]>;
-  readDiagnosticFields(): ReturnType<WebGPUSparseCM12Resident["readDiagnosticFields"]>;
-  readActivitySnapshot(): ReturnType<WebGPUSparseCM12Resident["readActivitySnapshot"]>;
+  readDiagnosticFields(includeWorldLeaves?: boolean):
+    ReturnType<WebGPUSparseCM12Resident["readDiagnosticFields"]>;
+  readActivitySnapshot(includeWorldLeaves?: boolean):
+    ReturnType<WebGPUSparseCM12Resident["readActivitySnapshot"]>;
   readPresentationPageAllocatorReceiptQA(): ReturnType<
     WebGPUSparseCM12Resident["readPresentationPageAllocatorReceiptQA"]>;
   readWorldGrowthReceiptQA(): ReturnType<
@@ -243,7 +241,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         });
       }
       try {
-        this.resident.setSolidWorld(solidWorldForScene(edit.scene));
+        this.resident.setSolidWorld(fluidSolidWorldForScene(edit.scene));
         this.resident.setRefinementRegionParameters(packSparseCM12RefinementRegions(
           sceneRefinementRegions(edit.scene), refinementRegionLattice(edit.scene)));
         this.options.rigidSystem?.setScene(edit.scene);
@@ -351,8 +349,6 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         rigidBodies.length,
         configuration.worldDimensions_m,
         inflow,
-        configuration.planarFluidBoundaryFaceMask,
-        configuration.genericSolidBoundaries,
       );
       this.options.rigidSystem?.encode(
         encoder,
@@ -503,8 +499,12 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
     this.resident.setPressureTopologyPhaseLimitForQA(phase);
   }
   readDiagnostics() { return this.resident.readDiagnostics(); }
-  readDiagnosticFields() { return this.resident.readDiagnosticFields(); }
-  readActivitySnapshot() { return this.resident.readActivitySnapshot(); }
+  readDiagnosticFields(includeWorldLeaves = false) {
+    return this.resident.readDiagnosticFields(includeWorldLeaves);
+  }
+  readActivitySnapshot(includeWorldLeaves = false) {
+    return this.resident.readActivitySnapshot(includeWorldLeaves);
+  }
   readPresentationPageAllocatorReceiptQA() {
     return this.resident.readPresentationPageAllocatorReceiptQA();
   }

@@ -100,17 +100,28 @@ test("a press that is not aimed at the tank is still refused", () => {
   assert.equal(restInContainer(scene, ray, hoverSceneAt(scene, [], ray), radius_m), undefined);
 });
 
-test("a liquid interaction may land on the open world floor outside the tank", () => {
+test("a liquid interaction requires an actual surface outside the tank", () => {
   const outsideX = scene.container.width_m / 2 + 4 * radius_m;
   const ray = {
     origin: { x: outsideX, y: scene.container.height_m, z: 0 },
     direction: { x: 0, y: -1, z: 0 },
   };
-  const centre = restFluidInWorld(scene, ray,
-    hoverSceneAt(scene, [], ray, { scenery: false }), radius_m);
+  assert.equal(restFluidInWorld(scene, ray,
+    hoverSceneAt(scene, [], ray, { scenery: false }), radius_m), undefined,
+  "open SparseWorld must not synthesize a y=0 floor");
+  const surface = {
+    kind: "scenery" as const,
+    position_m: { x: outsideX, y: -2, z: 0 },
+    normal: { x: 0, y: 1, z: 0 },
+    distance_m: scene.container.height_m + 2,
+    sceneryNodeId: "platform",
+    label: "platform",
+  };
+  const centre = restFluidInWorld(scene, ray, surface, radius_m);
   assert.ok(centre);
   assert.equal(centre.x, outsideX);
-  assert.equal(centre.y, radius_m);
+  assert.equal(centre.y, -2 + radius_m,
+    "open-world placement must not clamp an authored surface back above y=0");
   assert.ok(Math.abs(centre.x) > scene.container.width_m / 2);
   assert.equal(fluidInteractionDropVolume(scene, centre, radius_m).center_m.x, outsideX,
     "the runtime interaction must not clamp back to the vessel");

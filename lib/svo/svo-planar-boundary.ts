@@ -5,7 +5,6 @@ import {
 } from "../core/planar-boundary";
 import type { EnvironmentBoxProxy, EnvironmentProxyPrimitive } from "../core/voxel-environments";
 import type { SceneDescription } from "../core/model";
-import { compileE0PlanarFluidBoundaries } from "../core/planar-fluid-boundary";
 import { solidVoxelShellForScene } from "../core/scene-lattice";
 import {
   createSolidWorld,
@@ -190,34 +189,39 @@ export function buildSvoSolidWorldPlanarBoundaryCatalog(
       && authored.operation === candidate.operation
       && sameCoordinate(authored.minimum, candidate.minimum)
       && sameCoordinate(authored.maximumExclusive, candidate.maximumExclusive);
-  // Membership and admission are different facts. Even a cut canonical face
-  // remains a vessel source and must never fall through into the generic
-  // opaque thin-plate promoter; admission below only decides whether its
-  // unedited voxel payload may be replaced by the cheap outline.
+  const overlapsVolume = (left: SolidWorldVoxelPatch, right: SolidWorldVoxelPatch) =>
+    left.maximumExclusive[0] > right.minimum[0]
+      && left.minimum[0] < right.maximumExclusive[0]
+      && left.maximumExclusive[1] > right.minimum[1]
+      && left.minimum[1] < right.maximumExclusive[1]
+      && left.maximumExclusive[2] > right.minimum[2]
+      && left.minimum[2] < right.maximumExclusive[2];
+  // Canonical shell fills remain voxels for physics. Presentation may omit an
+  // unedited fill in favour of the vessel outline, but it must never promote a
+  // shell slab into the explicit embedded-plane catalogue.
   const canonicalTankShellSources = new Set<number>();
+  const uncutCanonicalTankShellSources = new Set<number>();
   const expectedTankShell = solidVoxelShellForScene(scene);
-  expectedTankShell.forEach((expected, expectedIndex) => {
-    const authored = scene.solidVoxels[expectedIndex];
-    const candidate = patches[expectedIndex];
+  expectedTankShell.forEach((expected) => {
+    const sourceIndex = scene.solidVoxels.findIndex((authored) =>
+      samePatch(authored, expected));
+    const authored = scene.solidVoxels[sourceIndex];
+    const candidate = patches[sourceIndex];
     if (samePatch(authored, expected) && samePatch(candidate, expected)) {
-      canonicalTankShellSources.add(expectedIndex);
+      canonicalTankShellSources.add(sourceIndex);
+      const cut = scene.solidVoxels.some((patch) =>
+        patch.operation === "clear" && overlapsVolume(patch, expected));
+      if (!cut) uncutCanonicalTankShellSources.add(sourceIndex);
     }
   });
-  const e0CanonicalTankShell = new Set(compileE0PlanarFluidBoundaries(scene)
-    .admitted.filter(({ sourcePatchIndex }) => {
-      const authored = scene.solidVoxels[sourcePatchIndex];
-      const candidate = patches[sourcePatchIndex];
-      return samePatch(authored, candidate);
-    }).map(({ sourcePatchIndex }) => sourcePatchIndex));
-  // A canonical sphere has no planar E0 faces, but outline/hidden presentation
-  // still replaces its expensive dielectric exterior as one atomic source.
+  // A canonical sphere is replaced as one atomic presentation source.
   // Any clear edit makes the substitution ineligible so the exact edited
   // voxel surface remains visible.
   const canonicalTankShell = (scene.container.shape === "sphere"
     && canonicalTankShellSources.size === expectedTankShell.length
     && !scene.solidVoxels.some(({ operation }) => operation === "clear"))
     ? canonicalTankShellSources
-    : e0CanonicalTankShell;
+    : uncutCanonicalTankShellSources;
   // Explicit glass keeps the historical voxel/dielectric presentation. The
   // default outline and hidden modes have no filled wall surface, so their
   // canonical shell is removed from the opaque/voxel render residual entirely.
@@ -228,7 +232,7 @@ export function buildSvoSolidWorldPlanarBoundaryCatalog(
     // The canonical vessel shell is physical SolidWorld authority for the
     // solver. Glass retains the dielectric voxel surface; outline/hidden omit
     // it from the ray field. None of those modes may also promote it to an
-    // opaque planar hit, which caused the black tank floor.
+    // opaque embedded-plane hit, which caused the black tank floor.
     if (canonicalTankShellSources.has(patchIndex)) return;
     const patch = planarBoundaryForSolidWorldVoxelPatch(scene, voxelPatch);
     if (!patch) return;

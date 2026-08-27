@@ -336,9 +336,9 @@ fn fineSignedSparseAddressing()->bool{
   return arrayLength(&fineWorklist)>=4u&&(fineWorklist[3]&0x40000000u)!=0u;
 }
 fn fineSignedPageKey(page:vec3i)->u32{
-  if(page.x< -1024||page.x>1023||page.y<0||page.y>1023
+  if(page.x< -1024||page.x>1023||page.y< -512||page.y>511
     ||page.z< -1024||page.z>1022){return INVALID;}
-  return u32(page.x+1024)|(u32(page.y)<<11u)|(u32(page.z+1024)<<21u);
+  return u32(page.x+1024)|(u32(page.y+512)<<11u)|(u32(page.z+1024)<<21u);
 }
 fn finePageKey(page:vec3i)->u32{
   // page is already in the publication's fine index lattice. domainOrigin
@@ -377,7 +377,7 @@ fn fineSampleCell(address:u32)->vec3i {
   let key=fineMetadata[id*4u+1u];
   var brick=vec3i(0);
   if(fineSignedSparseAddressing()){
-    brick=vec3i(i32(key&0x7ffu)-1024,i32((key>>11u)&0x3ffu),
+    brick=vec3i(i32(key&0x7ffu)-1024,i32((key>>11u)&0x3ffu)-512,
       i32((key>>21u)&0x7ffu)-1024);
   }else{
     let xy=max(fine.brickDimensions.x*fine.brickDimensions.y,1u);

@@ -1,9 +1,21 @@
-# Planar boundary acceleration for Sparse CM12 and SVO visibility
+# Archived planar-fluid proposal and retained SVO embedded planes
 
 Date: 2026-08-26
 
-Status: **E0 aligned-wall and render-terminal cutover accepted; oblique,
-multi-fragment, exact liquid-contact closure, and beam phases remain future work**
+Status: **The planar-fluid path is retired. Sparse CM12 uses SolidWorld voxels
+as its only authored static-boundary authority. Explicit embedded planes remain
+a render/SVO geometry representation.**
+
+Current decision (2026-08-27):
+
+- Container shells, terrain and authored edits reach fluid physics only through
+  the unified SolidWorld occupancy/aperture path.
+- Sparse CM12 has no inferred tank-face compiler, face mask, coordinate-plane
+  closure, or alternate generic-solid routing switch.
+- Explicit finite embedded planes remain valid for SVO acceleration and authored
+  thin geometry, but they do not override or replace fluid-solid voxel authority.
+- The material below is retained as historical design context, not as an active
+  implementation plan.
 
 Primary target: static tank walls and other large, flat, featureless solid
 surfaces that currently force finest-rung Sparse CM12 bricks and expensive SVO
@@ -40,12 +52,8 @@ Implementation snapshot (2026-08-26):
   CPU tests pass. A guarded Dawn test compiles the full canonical production
   fragment shader and executes packed-record ray parity on a tiny compute
   dispatch.
-- `lib/core/planar-fluid-boundary.ts` strictly compiles the six canonical box
-  shell faces as E0 authority. Open tops, subtractive wall edits, non-box shells,
-  partial solids, and residual occupancy fail closed.
-- Sparse CM12 construction removes admitted exterior E0 planes from the
-  static-solid finest-rung predicate while retaining liquid-air surface,
-  transport, activity, residual-solid, and 2:1 grading floors.
+- The former inferred tank-face compiler and Sparse CM12 mask path have been
+  removed. Static-solid resolution evidence follows SolidWorld transitions.
 - The canonical water-box reservoir is explicitly 12x14x10 finest cells so the
   B8/P8 method contains one genuinely featureless wet corner page. Its accepted
   atlas is one coarse 4^3 page plus seven interface 8^3 pages; the rule that a

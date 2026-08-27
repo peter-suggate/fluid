@@ -99,6 +99,7 @@ import {
 import {
   SPARSE_CM12_SOLID_FRACTION_PAGE_WORDS,
   SPARSE_CM12_SOLID_OCCUPANCY_PAGE_WORDS,
+  SPARSE_CM12_SOLID_REGION_WORDS,
   type SparseCM12SolidOccupancyLayout,
 } from "./sparse-cm12-solid-occupancy";
 
@@ -137,6 +138,7 @@ fn cm12SolidVoxelFractionQ8(_q:vec3i)->u32{return 0u;}
 fn cm12SolidVoxelSignedDistanceQ8(_q:vec3i)->i32{return 32767;}
 fn cm12SolidVoxelOccupied(_q:vec3i)->bool{return false;}
 fn cm12FluidFaceHasEmptyVoxelPair(_sourcePage:vec3i,_offset:vec3i)->bool{return true;}
+fn cm12FluidNeighborReachable(_sourcePage:vec3i,_offset:vec3i)->bool{return true;}
 `;
   return /* wgsl */ `
 const CM12_SOC_BASE:u32=${layout.baseWords}u;
@@ -144,6 +146,9 @@ const CM12_SOC_DIRECTORY_CAPACITY:u32=${layout.directoryCapacity}u;
 const CM12_SOC_DIRECTORY_MASK:u32=${layout.directoryCapacity - 1}u;
 const CM12_SOC_DIRECTORY_BASE:u32=${layout.directoryBaseWords}u;
 const CM12_SOC_ENTRY_WORDS:u32=6u;
+const CM12_SOC_REGION_CAPACITY:u32=${layout.regionCapacity}u;
+const CM12_SOC_REGION_BASE:u32=${layout.regionBaseWords}u;
+const CM12_SOC_REGION_WORDS:u32=${SPARSE_CM12_SOLID_REGION_WORDS}u;
 const CM12_SOC_PAGE_BASE:u32=${layout.pageBaseWords}u;
 const CM12_SOC_PAGE_WORDS:u32=${SPARSE_CM12_SOLID_OCCUPANCY_PAGE_WORDS}u;
 const CM12_SOC_FRACTION_WORDS:u32=${SPARSE_CM12_SOLID_FRACTION_PAGE_WORDS}u;
@@ -180,14 +185,39 @@ fn cm12SolidVoxelAddress(worldFine:vec3i)->vec2u{
   let voxel=u32(local.x+8*(local.y+8*local.z));
   return vec2u(page,voxel);
 }
-fn cm12SolidVoxelFractionQ8(worldFine:vec3i)->u32{
+fn cm12SolidPageFractionQ8(worldFine:vec3i)->u32{
   let address=cm12SolidVoxelAddress(worldFine);
   if(address.x==INVALID){return 0u;}
   let word=atomicLoad(&topologyArena[CM12_SOC_BASE+CM12_SOC_PAGE_BASE
     +address.x*CM12_SOC_PAGE_WORDS+(address.y>>2u)]);
   return (word>>(8u*(address.y&3u)))&255u;
 }
+fn cm12SolidRegionOperation(worldFine:vec3i)->i32{
+  var operation=-1;
+  for(var region=0u;region<CM12_SOC_REGION_CAPACITY;region+=1u){
+    let at=CM12_SOC_BASE+CM12_SOC_REGION_BASE+region*CM12_SOC_REGION_WORDS;
+    let minimum=vec3i(bitcast<i32>(atomicLoad(&topologyArena[at+1u])),
+      bitcast<i32>(atomicLoad(&topologyArena[at+2u])),
+      bitcast<i32>(atomicLoad(&topologyArena[at+3u])));
+    let maximum=vec3i(bitcast<i32>(atomicLoad(&topologyArena[at+4u])),
+      bitcast<i32>(atomicLoad(&topologyArena[at+5u])),
+      bitcast<i32>(atomicLoad(&topologyArena[at+6u])));
+    if(all(worldFine>=minimum)&&all(worldFine<maximum)){
+      operation=i32(atomicLoad(&topologyArena[at]));
+    }
+  }
+  return operation;
+}
+fn cm12SolidVoxelFractionQ8(worldFine:vec3i)->u32{
+  var fraction=cm12SolidPageFractionQ8(worldFine);
+  let operation=cm12SolidRegionOperation(worldFine);
+  if(operation>=0){fraction=select(0u,255u,operation==1);}
+  return fraction;
+}
 fn cm12SolidVoxelSignedDistanceQ8(worldFine:vec3i)->i32{
+  let operation=cm12SolidRegionOperation(worldFine);
+  if(operation==1){return -128;}
+  if(operation==0){return 32767;}
   let address=cm12SolidVoxelAddress(worldFine);
   if(address.x==INVALID){return 32767;}
   let word=atomicLoad(&topologyArena[CM12_SOC_BASE+CM12_SOC_PAGE_BASE
@@ -196,8 +226,7 @@ fn cm12SolidVoxelSignedDistanceQ8(worldFine:vec3i)->i32{
   return bitcast<i32>(select(packed,packed|0xffff0000u,(packed&0x8000u)!=0u));
 }
 fn cm12SolidVoxelOccupied(worldFine:vec3i)->bool{
-  return cm12SolidVoxelFractionQ8(worldFine)>=128u
-    ||cm12SolidVoxelSignedDistanceQ8(worldFine)<=0;
+  return cm12SolidVoxelFractionQ8(worldFine)>=128u;
 }
 // A finite-volume page neighbour exists only where at least one pair of
 // face-adjacent voxels is non-solid. This is derived directly from SolidWorld;
@@ -213,6 +242,31 @@ fn cm12FluidFaceHasEmptyVoxelPair(sourcePage:vec3i,offset:vec3i)->bool{
     let source=sourceOrigin+local;
     if(cm12SolidVoxelFractionQ8(source)<255u
       &&cm12SolidVoxelFractionQ8(source+offset)<255u){return true;}
+  }
+  return false;
+}
+// A diagonal transport receiver is reachable when at least one ordering of
+// its cardinal page crossings stays open in SolidWorld. SparseWorld must
+// materialize that complete 3^3 support stencil: the pre-SparseWorld resident
+// catalog already contained these inactive edge/corner leaves, and activity's
+// 27-bit support mask can demand them before any face-only page becomes active.
+fn cm12FluidNeighborReachable(sourcePage:vec3i,offset:vec3i)->bool{
+  let distance=abs(offset.x)+abs(offset.y)+abs(offset.z);
+  if(distance==0||distance>3){return false;}
+  for(var firstAxis=0u;firstAxis<3u;firstAxis+=1u){
+    if(offset[firstAxis]==0){continue;}
+    var first=vec3i(0);first[firstAxis]=offset[firstAxis];
+    if(!cm12FluidFaceHasEmptyVoxelPair(sourcePage,first)){continue;}
+    let afterFirst=sourcePage+first;let remaining=offset-first;
+    if(distance==1){return true;}
+    for(var secondAxis=0u;secondAxis<3u;secondAxis+=1u){
+      if(remaining[secondAxis]==0){continue;}
+      var second=vec3i(0);second[secondAxis]=remaining[secondAxis];
+      if(!cm12FluidFaceHasEmptyVoxelPair(afterFirst,second)){continue;}
+      if(distance==2){return true;}
+      let afterSecond=afterFirst+second;let last=remaining-second;
+      if(cm12FluidFaceHasEmptyVoxelPair(afterSecond,last)){return true;}
+    }
   }
   return false;
 }
@@ -1254,18 +1308,6 @@ fn sparseCM12FrameControlNoop(){ }
 fn hasRigidBodies()->bool{return p.rigidWorld.w>=0.5;}
 fn hasSolidBoundaries()->bool{return (p.solidOffsets.z&1u)!=0u;}
 fn hasStaticSolidVoxels()->bool{return (p.solidOffsets.z&4u)!=0u;}
-fn planarFluidBoundaryFace(face:u32)->bool{
-  return (p.solidOffsets.w&(1u<<face))!=0u;
-}
-fn hasPlanarFluidBoundaries()->bool{return (p.solidOffsets.w&63u)!=0u;}
-fn planarFluidRowOpenFraction(id:u32)->f32{
-  if(!hasPlanarFluidBoundaries()){return 1.0;}
-  let axis=rowAxis(id);let coordinate=rowCenter(id)[axis];
-  if(planarFluidBoundaryFace(2u*axis)&&coordinate<=1e-4){return 0.0;}
-  if(planarFluidBoundaryFace(2u*axis+1u)
-    &&coordinate>=f32(p.dimensions[axis])-1e-4){return 0.0;}
-  return 1.0;
-}
 fn solidVoxelRowOpenOffset()->u32{
   return p.solidOffsets.y+((3u*p.counts.y+3u)&0xfffffffcu);
 }
@@ -1316,23 +1358,23 @@ fn cellOpenVolume(id:u32)->f32{
 }
 fn rowOpenFraction(id:u32)->f32{
   let solid=select(1.0,state[p.solidOffsets.y+3u*id],hasSolidBoundaries());
-  return solid*solidVoxelRowOpenFraction(id)*planarFluidRowOpenFraction(id);
+  return solid*solidVoxelRowOpenFraction(id);
 }
 fn rowSolidVelocity(id:u32)->f32{
   if(!hasSolidBoundaries()){return 0.0;}return state[p.solidOffsets.y+3u*id+1u];
 }
 fn rowPressureOpenFraction(id:u32)->f32{
   let solid=select(1.0,state[p.solidOffsets.y+3u*id+2u],hasSolidBoundaries());
-  return solid*solidVoxelRowOpenFraction(id)*planarFluidRowOpenFraction(id);
+  return solid*solidVoxelRowOpenFraction(id);
 }
 fn rowDualWeight(id:u32)->f32{
-  if(!hasSolidBoundaries()&&!hasPlanarFluidBoundaries()){
+  if(!hasSolidBoundaries()){
     return rowStaticDualWeight(id);
   }
   return rowStaticDualWeight(id)*rowPressureOpenFraction(id);
 }
 fn rowArea(id:u32)->f32{
-  if(!hasSolidBoundaries()&&!hasPlanarFluidBoundaries()){return rowStaticArea(id);}
+  if(!hasSolidBoundaries()){return rowStaticArea(id);}
   return rowStaticArea(id)*rowOpenFraction(id);
 }
 
@@ -3816,7 +3858,7 @@ fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
     if(theta<=0.0){continue;}
     let coefficient=termCoefficient(incidenceTerm(at));
     let fluxWeight=select(rowDualWeight(row),rowStaticDualWeight(row),
-      hasSolidBoundaries()||hasPlanarFluidBoundaries());
+      hasSolidBoundaries());
     rhs+=coefficient*fluxWeight*state[destinationFaceVelocity()+row];
   }
   // Sec. 3.7's source only corrects rho' > 1. The dual defect -- a submerged
@@ -4286,7 +4328,7 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
     if(!rowAccepted(row)){continue;}
     let term=incidenceTerm(at);let axis=rowAxis(row);
     let fluxWeight=select(rowDualWeight(row),rowStaticDualWeight(row),
-      hasSolidBoundaries()||hasPlanarFluidBoundaries());
+      hasSolidBoundaries());
     let w=abs(termCoefficient(term))*fluxWeight;var faceVelocity=state[destinationFaceVelocity()+row];
     if(hasSolidBoundaries()){
       let open=rowOpenFraction(row);
@@ -4296,28 +4338,6 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
     velocity[axis]+=w*faceVelocity;weight[axis]+=w;
     if(pcmCellContains(id)){let value=termCoefficient(term)*fluxWeight*state[destinationFaceVelocity()+row];
       let adjusted=value-correction;let next=equation+adjusted;correction=(next-equation)-adjusted;equation=next;}}
-  // An admitted planar tank wall is an exact zero-normal-velocity MAC port.
-  // Its SolidWorld row has zero open area and therefore contributes no dual
-  // weight above. Omitting the zero-valued port makes a boundary cell use its
-  // sole interior face at full strength instead of averaging it with the wall:
-  // the normal transport velocity doubles once per touched wall plane and a
-  // bottom corner becomes an 8x compressive characteristic sink. Restore the
-  // pre-SparseWorld tank condition only on the six strictly compiled planes;
-  // edited and embedded solids continue through the generic cut-cell path.
-  {let base=cellBase(id);
-    let center=vec3f(taf(base),taf(base+1u),taf(base+2u));
-    let widths=vec3f(taf(base+4u),taf(base+5u),taf(base+6u));
-    for(var axis=0u;axis<3u;axis+=1u){
-      let t0=(axis+1u)%3u;let t1=(axis+2u)%3u;
-      let port=widths[t0]*widths[t1];
-      if(planarFluidBoundaryFace(2u*axis)
-        &&center[axis]-0.5*widths[axis]<=1e-4){weight[axis]+=port;}
-      if(planarFluidBoundaryFace(2u*axis+1u)
-        &&center[axis]+0.5*widths[axis]>=f32(p.dimensions[axis])-1e-4){
-        weight[axis]+=port;
-      }
-    }
-  }
   for(var axis=0u;axis<3u;axis+=1u){if(weight[axis]>0.0){velocity[axis]/=weight[axis];}}
   let velocityDelta=velocity-previousVelocity;
   let velocityChanged=length(velocityDelta)>0.0;
@@ -5331,7 +5351,7 @@ fn allocateSparseWorldInteractionPages(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(64)
 fn allocateSparseWorldFrontier(@builtin(global_invocation_id)gid:vec3u){
-  let brick=gid.x/6u;let side=gid.x%6u;
+  let brick=gid.x/26u;let localNeighbor=gid.x%26u;
   if(brick>=p.dispatch.w||!brickActive(brick)){return;}
   // A page-local B8 graph can join another B8 graph face-for-face. If the
   // resident source is coarser, its candidate planner above first refines it;
@@ -5341,21 +5361,18 @@ fn allocateSparseWorldFrontier(@builtin(global_invocation_id)gid:vec3u){
   let output=activityRecord(brick);
   if((atomicLoad(&activity[output+1u])&64u)==0u){return;}
   // Grow from either immediate occupied support or characteristic-swept
-  // support. Immediate adjacency is required for a hydrostatic opening: an
-  // outward velocity cannot exist until the neighbouring finite-volume page
-  // exists for pressure and transport. SolidWorld still vetoes every blocked
-  // face below, so this creates only the first missing-solid page touching the
-  // current fluid course, never an authored-domain apron.
-  let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
-    vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  let supportBits=array<u32,6>(12u,14u,10u,16u,4u,22u);
+  // support. Activity publishes the complete 3^3 receiver stencil, including
+  // diagonal characteristic travel. The old fixed leaf catalog could activate
+  // every one of those receivers; allocate the same 26 possible neighbours in
+  // SparseWorld rather than silently dropping edge/corner demand.
   let sweptSupport=atomicLoad(&activity[output+3u])&0x07ffffffu;
   let immediateSupport=atomicLoad(&activity[output+32u])&0x07ffffffu;
-  let sideBit=1u<<supportBits[side];
-  if(((sweptSupport|immediateSupport)&sideBit)==0u){return;}
-  let offset=directions[side];
+  let supportBit=select(localNeighbor,localNeighbor+1u,localNeighbor>=13u);
+  if(((sweptSupport|immediateSupport)&(1u<<supportBit))==0u){return;}
+  let offset=vec3i(i32(supportBit%3u)-1,i32((supportBit/3u)%3u)-1,
+    i32(supportBit/9u)-1);
   let sourceCoordinate=cm12WorldLeafCoordinate(brick);
-  if(!cm12FluidFaceHasEmptyVoxelPair(sourceCoordinate,offset)){return;}
+  if(!cm12FluidNeighborReachable(sourceCoordinate,offset)){return;}
   let targetCoordinate=sourceCoordinate+offset;
   if(cm12WorldOwnerAt(targetCoordinate)!=CM12_WDR_INVALID){return;}
   let leaf=cm12WorldAllocateExact(targetCoordinate,0u);
@@ -6881,12 +6898,12 @@ const PRESENTATION_FRAME_PLAN_DIRECT_CAUSES:u32=${(
 fn cm12PresentationLogicalKey(brick:u32)->u32{
   if(brick>=p.dispatch.w||!cm12WorldLeafAllocated(brick)){return INVALID;}
   let coordinate=cm12WorldLeafCoordinate(brick);
-  // 11 signed-biased x bits, 10 unsigned y bits and 11 signed-biased z
+  // 11 signed-biased x bits, 10 signed-biased y bits and 11 signed-biased z
   // bits. The all-one key remains INVALID, so z=1023 is deliberately not
   // representable; WDR1's proven maximum reachable coordinate is 767.
-  if(coordinate.x< -1024||coordinate.x>1023||coordinate.y<0
-    ||coordinate.y>1023||coordinate.z< -1024||coordinate.z>1022){return INVALID;}
-  return u32(coordinate.x+1024)|(u32(coordinate.y)<<11u)
+  if(coordinate.x< -1024||coordinate.x>1023||coordinate.y< -512
+    ||coordinate.y>511||coordinate.z< -1024||coordinate.z>1022){return INVALID;}
+  return u32(coordinate.x+1024)|(u32(coordinate.y+512)<<11u)
     |(u32(coordinate.z+1024)<<21u);
 }
 

@@ -220,7 +220,8 @@ export function studioStageSceneryGraph(scene: SceneDescription): SceneryGraph {
         ceiling: { palette: "stage", value: 0.62 },
       },
       {
-        kind: "box", id: "stage/floor", group: "stage", tags: ["stage", "floor"],
+        kind: "box", id: "stage/floor", group: "stage",
+        tags: ["stage", "floor", "fluid-collider"],
         place: { position: { x: 0, y: -stage.floorHalfThickness_m, z: 0 }, units: "metres" },
         halfSize: { x: stage.floorHalf_m, y: stage.floorHalfThickness_m, z: stage.floorHalf_m },
         // Charcoal, not the mid grey a floor usually wants. The pool has to be

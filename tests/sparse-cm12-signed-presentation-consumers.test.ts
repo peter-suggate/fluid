@@ -14,6 +14,32 @@ import {
 import { fluidCellTraceGatherShader } from "../lib/core/webgpu-fluid-cell-trace";
 import { octreeTechniqueFineLifecycleShader } from
   "../lib/methods/octree-shared/webgpu-octree-technique-overlay";
+import {
+  decodeSparseCM12SignedPresentationKey,
+  encodeSparseCM12SignedPresentationKey,
+  sparseCM12SignedPresentationInitialWorldFits,
+} from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+
+test("signed sparse presentation keys preserve negative vertical pages", () => {
+  const coordinate = [-17, -23, 41] as const;
+  assert.deepEqual(decodeSparseCM12SignedPresentationKey(
+    encodeSparseCM12SignedPresentationKey(coordinate)), coordinate);
+  assert.deepEqual(decodeSparseCM12SignedPresentationKey(
+    encodeSparseCM12SignedPresentationKey([0, -512, 0])), [0, -512, 0]);
+  assert.deepEqual(decodeSparseCM12SignedPresentationKey(
+    encodeSparseCM12SignedPresentationKey([0, 511, 0])), [0, 511, 0]);
+  assert.throws(() => encodeSparseCM12SignedPresentationKey([0, -513, 0]),
+    /not representable/);
+  assert.throws(() => encodeSparseCM12SignedPresentationKey([0, 512, 0]),
+    /not representable/);
+});
+
+test("signed sparse presentation construction reserves actual pages, not the pool in every direction", () => {
+  assert.equal(sparseCM12SignedPresentationInitialWorldFits([24, 12, 4]), true,
+    "the long-dam authored page box fits the signed presentation ABI");
+  assert.equal(sparseCM12SignedPresentationInitialWorldFits([1, 513, 1]), false,
+    "an authored page outside the signed Y envelope is still rejected");
+});
 
 test("shared fine-page lookup accepts packed signed SparseWorld keys", () => {
   const wgsl = makeFineLevelSetSortedWorklistLookupWGSL(
@@ -32,7 +58,7 @@ test("fluid-cell trace addresses and decodes signed sparse presentation pages", 
     /let key=finePageKey\(vec3i\(brick\)\)/,
   "probe lookup must not construct the retired dense atlas key directly");
   assert.match(fluidCellTraceGatherShader,
-    /brick=vec3i\(i32\(key&0x7ffu\)-1024,i32\(\(key>>11u\)&0x3ffu\),\s*i32\(\(key>>21u\)&0x7ffu\)-1024\)/,
+    /brick=vec3i\(i32\(key&0x7ffu\)-1024,i32\(\(key>>11u\)&0x3ffu\)-512,\s*i32\(\(key>>21u\)&0x7ffu\)-1024\)/,
   "seed provenance must decode the same signed key that presentation publishes");
   assert.doesNotMatch(fluidCellTraceGatherShader,
     /let key=brick\.x\+fine\.brickDimensions\.x\*\(brick\.y/);

@@ -22,6 +22,7 @@ import {
   SPARSE_CM12_SOLID_OCCUPANCY_ENTRY_WORDS,
   SPARSE_CM12_SOLID_FRACTION_PAGE_WORDS,
   SPARSE_CM12_SOLID_OCCUPANCY_PAGE_WORDS,
+  SPARSE_CM12_SOLID_REGION_WORDS,
   writeSparseCM12SolidOccupancy,
   type SparseCM12SolidOccupancyLayout,
 } from "./sparse-cm12-solid-occupancy";
@@ -108,6 +109,10 @@ import {
 } from "./sparse-cm12-topology-effects-authority";
 import {
   SPARSE_CM12_WORLD_DIRECTORY_HEADER,
+  SPARSE_CM12_WORLD_DIRECTORY_HEADER_WORDS,
+  SPARSE_CM12_WORLD_DIRECTORY_INVALID,
+  SPARSE_CM12_WORLD_DIRECTORY_LEAF,
+  SPARSE_CM12_WORLD_DIRECTORY_LEAF_WORDS,
   createSparseCM12WorldDirectoryInitialWords,
   createSparseCM12WorldDirectoryLayout,
   createSparseCM12WorldDirectoryWGSL,
@@ -619,10 +624,10 @@ fn allocateSparseCM12PresentationPages(@builtin(global_invocation_id)gid:vec3u){
       bitcast<i32>(atomicLoad(&topologyArena[leaf+1u])),
       bitcast<i32>(atomicLoad(&topologyArena[leaf+2u])));
     ${signedSparseAddressing ? /* wgsl */ `if(coordinate.x< -1024||coordinate.x>1023
-      ||coordinate.y<0||coordinate.y>1023||coordinate.z< -1024||coordinate.z>1022){
+      ||coordinate.y< -512||coordinate.y>511||coordinate.z< -1024||coordinate.z>1022){
       atomicStore(&activity[ALLOCATOR+1u],3u);atomicOr(&activity[7],32u);return;
     }
-    key=u32(coordinate.x+1024)|(u32(coordinate.y)<<11u)
+    key=u32(coordinate.x+1024)|(u32(coordinate.y+512)<<11u)
       |(u32(coordinate.z+1024)<<21u);` : /* wgsl */ `if(any(coordinate<vec3i(0))
       ||any(coordinate>=vec3i(${brickDimensions[0]},${brickDimensions[1]},${brickDimensions[2]}))){
       atomicStore(&activity[ALLOCATOR+1u],3u);atomicOr(&activity[7],32u);return;
@@ -1988,12 +1993,14 @@ export interface SparseCM12FinePresentationPlan {
 export type SparseCM12PresentationPageResolution = 4 | 8 | 16;
 export const SPARSE_CM12_PRESENTATION_PAGE_SHIFT = 21;
 // Signed sparse presentation keys use every metadata-key bit without creating
-// a dense logical lattice: x/z are biased 11-bit coordinates and y is an
-// unsigned 10-bit coordinate. Dynamic CM12 is B8/P8, so the WDR1 maximum of
-// 512 mutable leaves plus the <=256-page authored axis fits with margin.
+// a dense logical lattice: x/z are biased 11-bit coordinates and y is a
+// biased signed 10-bit coordinate. This is a presentation-address limit, not a
+// physical floor: WDR1 remains signed i32 and rejects a publication only if it
+// reaches the finite compact-key envelope.
 export const SPARSE_CM12_SIGNED_PAGE_XZ_MIN = -1024;
 export const SPARSE_CM12_SIGNED_PAGE_X_MAX = 1023;
-export const SPARSE_CM12_SIGNED_PAGE_Y_MAX = 1023;
+export const SPARSE_CM12_SIGNED_PAGE_Y_MIN = -512;
+export const SPARSE_CM12_SIGNED_PAGE_Y_MAX = 511;
 // 0xffffffff is the shared INVALID sentinel, so its sole coordinate is kept
 // outside the valid key space. The reachable WDR1 bound is at most 767.
 export const SPARSE_CM12_SIGNED_PAGE_Z_MAX = 1022;
@@ -2004,11 +2011,11 @@ export function encodeSparseCM12SignedPresentationKey(
   const [x, y, z] = coordinate;
   if (![x, y, z].every(Number.isSafeInteger)
     || x < SPARSE_CM12_SIGNED_PAGE_XZ_MIN || x > SPARSE_CM12_SIGNED_PAGE_X_MAX
-    || y < 0 || y > SPARSE_CM12_SIGNED_PAGE_Y_MAX
+    || y < SPARSE_CM12_SIGNED_PAGE_Y_MIN || y > SPARSE_CM12_SIGNED_PAGE_Y_MAX
     || z < SPARSE_CM12_SIGNED_PAGE_XZ_MIN || z > SPARSE_CM12_SIGNED_PAGE_Z_MAX) {
     throw new RangeError(`Sparse CM12 signed presentation coordinate ${coordinate.join(",")} is not representable`);
   }
-  return ((x + 1024) | (y << 11) | ((z + 1024) << 21)) >>> 0;
+  return ((x + 1024) | ((y + 512) << 11) | ((z + 1024) << 21)) >>> 0;
 }
 
 export function decodeSparseCM12SignedPresentationKey(
@@ -2017,8 +2024,25 @@ export function decodeSparseCM12SignedPresentationKey(
   if (!Number.isSafeInteger(key) || key < 0 || key > 0xffff_ffff || key === INVALID) {
     throw new RangeError(`Sparse CM12 signed presentation key ${key} is invalid`);
   }
-  return [(key & 0x7ff) - 1024, (key >>> 11) & 0x3ff,
+  return [(key & 0x7ff) - 1024, ((key >>> 11) & 0x3ff) - 512,
     ((key >>> 21) & 0x7ff) - 1024];
+}
+
+/** The authored page box must fit; each later growth publication is checked
+ * against the exact coordinate it actually consumes. The physical growth pool
+ * cannot be projected independently onto all six directions here: the same
+ * finite page slots are shared by those directions. */
+export function sparseCM12SignedPresentationInitialWorldFits(
+  pageDimensions: readonly [number, number, number],
+): boolean {
+  if (!pageDimensions.every((value) => Number.isSafeInteger(value) && value > 0)) {
+    return false;
+  }
+  return 0 >= SPARSE_CM12_SIGNED_PAGE_XZ_MIN
+    && 0 >= SPARSE_CM12_SIGNED_PAGE_Y_MIN
+    && pageDimensions[0] - 1 <= SPARSE_CM12_SIGNED_PAGE_X_MAX
+    && pageDimensions[1] - 1 <= SPARSE_CM12_SIGNED_PAGE_Y_MAX
+    && pageDimensions[2] - 1 <= SPARSE_CM12_SIGNED_PAGE_Z_MAX;
 }
 export type SparseCM12ResidentInitializationReporter = (label: string) => void;
 
@@ -2246,6 +2270,10 @@ export function sparseCM12FinePresentationPlan(
 }
 
 export interface SparseCM12GPUActivityRecord {
+  /** Stable WDR leaf identifier; equal to the packed brick index for authored leaves. */
+  readonly leafId: number;
+  /** Signed SparseWorld page coordinate when the complete-world QA lane is requested. */
+  readonly coordinate?: readonly [number, number, number];
   readonly scoreByte: number;
   readonly reasons: number;
   /** True when reason bit 8 identifies represented fluid under two fine cells thick. */
@@ -2334,6 +2362,11 @@ export interface SparseCM12WorldGrowthReceipt {
   readonly failedHostIncidences: number;
   readonly publishedTopologyPageCoordinates: readonly (readonly [number, number, number])[];
   readonly dynamicLiquidMassFineCells: number;
+  /** Finest-lattice bounds of represented liquid in GPU-grown pages. */
+  readonly dynamicLiquidBoundsFine?: {
+    readonly minimum: readonly [number, number, number];
+    readonly maximumExclusive: readonly [number, number, number];
+  };
   readonly dynamicMaximumAbsFaceVelocityFineCells_s: number;
   readonly furthestLiquidLeafCoordinate?: readonly [number, number, number];
 }
@@ -3362,11 +3395,9 @@ export class WebGPUSparseCM12Resident {
     if (signedWorldGrowth) {
       const initialPages = atlas.dimensions.map((value) =>
         Math.ceil(value / presentationPageResolution));
-      const reach = topologyPagePool.pageCapacity;
-      if (-reach < SPARSE_CM12_SIGNED_PAGE_XZ_MIN
-        || initialPages[0]! - 1 + reach > SPARSE_CM12_SIGNED_PAGE_X_MAX
-        || initialPages[1]! - 1 + reach > SPARSE_CM12_SIGNED_PAGE_Y_MAX
-        || initialPages[2]! - 1 + reach > SPARSE_CM12_SIGNED_PAGE_Z_MAX) {
+      if (!sparseCM12SignedPresentationInitialWorldFits(
+        initialPages as [number, number, number],
+      )) {
         throw new RangeError("Sparse CM12 dynamic world exceeds the signed presentation address ABI");
       }
     }
@@ -4069,6 +4100,7 @@ export class WebGPUSparseCM12Resident {
       ? createSparseCM12SolidOccupancyLayout({
         baseWords: worldDirectoryLayout.totalWords,
         authoredPageCount: initialSolidWorld.pages.length,
+        authoredRegionCount: initialSolidWorld.regions?.length ?? 0,
       })
       : undefined;
     // Live host incidence records are the only mutable words in the physical
@@ -4972,15 +5004,13 @@ export class WebGPUSparseCM12Resident {
     bodyCount = 0,
     worldDimensions_m?: readonly [number, number, number],
     inflow?: SparseCM12InflowControl,
-    planarFluidBoundaryFaceMask = 0,
-    genericSolidBoundaries = true,
   ): void {
     this.assertLive();
     this.lastInflow = inflow;
     const packed = this.lastPacked!;
     this.writeParameters(packed, dt_s, finestCellSize_m, pressureScale,
       accelerationFinePerSecond2, sharpening, activityPolicy, pressureControl, bodyCount,
-      worldDimensions_m, inflow, planarFluidBoundaryFaceMask, genericSolidBoundaries);
+      worldDimensions_m, inflow);
     const pressureIterations = sparseCM12PressureIterations(pressureControl?.iterations);
     const gammaDiffusionEnabled = sharpening?.gammaDiffusionEnabled !== false;
     const surfaceSharpeningEnabled = sharpening?.surfaceSharpeningEnabled !== false;
@@ -5348,12 +5378,13 @@ export class WebGPUSparseCM12Resident {
         dispatchAccepted("finalizeSharpening", "cell");
       }
       closeSubstage("sharpening-finalize");
-      // Correct only into directly adjacent open capacity in this internal
-      // step. Repeating the relay across a whole brick numerically outruns
-      // transport, seeds distant residency, and turns a boundedness repair
-      // into an artificial flow mechanism. Every debit remains paired with
-      // its atomic neighbour credit.
-      for (let capacityPass = 0; capacityPass < 1; capacityPass += 1) {
+      // Relay over no more than one B8 page width (the accepted support reach).
+      // One pass only moved an over-capacity packet into an already-full
+      // neighbour; after floor impact that concentrated conserved mass into a
+      // shrinking set of cells (rho > 6) and looked like volume loss. Eight
+      // paired debit/credit passes reach nearby free-surface capacity without
+      // turning the repair into an unbounded flood across SparseWorld.
+      for (let capacityPass = 0; capacityPass < 8; capacityPass += 1) {
         dispatchAccepted("initializeDensityCapacityRepair", "cell");
         dispatchAccepted("scatterDensityCapacityRepair", "cell");
         dispatchAccepted("finalizeDensityCapacityRepair", "cell");
@@ -5651,7 +5682,7 @@ export class WebGPUSparseCM12Resident {
       if (activityPhaseLimitForQA === "census") return;
       if (this.solidOccupancyLayout) {
         dispatch("allocateSparseWorldFrontier",
-          Math.ceil(6 * leafCapacity / WORKGROUP_SIZE));
+          Math.ceil(26 * leafCapacity / WORKGROUP_SIZE));
         if (activityPhaseLimitForQA === "allocation") return;
         dispatch("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
         if (activityPhaseLimitForQA === "synthesis") return;
@@ -6116,6 +6147,9 @@ export class WebGPUSparseCM12Resident {
       baseWords: layout.baseWords,
       directoryCapacity: layout.directoryCapacity,
       directoryBaseWords: layout.directoryBaseWords,
+      regionCapacity: layout.regionCapacity,
+      regionBaseWords: layout.regionBaseWords,
+      regionWords: SPARSE_CM12_SOLID_REGION_WORDS,
       entryWords: SPARSE_CM12_SOLID_OCCUPANCY_ENTRY_WORDS,
       pageBaseWords: layout.pageBaseWords,
       pageWords: SPARSE_CM12_SOLID_OCCUPANCY_PAGE_WORDS,
@@ -6396,8 +6430,6 @@ export class WebGPUSparseCM12Resident {
     bodyCount = 0,
     worldDimensions_m?: readonly [number, number, number],
     inflow?: SparseCM12InflowControl,
-    planarFluidBoundaryFaceMask = 0,
-    genericSolidBoundaries = true,
   ): void {
     this.lastPacked = packed;
     const u = this.parameterU32, f = this.parameterF32, l = this.layout;
@@ -6455,16 +6487,15 @@ export class WebGPUSparseCM12Resident {
       sharpening?.gammaDiffusionEnabled === false ? 0 : 1,
       sharpening?.surfaceSharpeningEnabled === false ? 0 : 1], 80);
     f[81] = sparseCM12PressureRelativeTolerance(pressureControl?.relativeTolerance);
-    // bit 0: dynamic rigid cut-cell arrays are live; bit 2: SolidWorld row
-    // openness is live. solidOffsets.w carries the six exact planar vessel
-    // faces; these retain the old tank-wall MAC condition even though their
-    // geometry is also present in SolidWorld.
-    const genericSolidWorld = genericSolidBoundaries && Boolean(this.solidOccupancyLayout);
+    // bit 0: a static or dynamic cut-cell source is live; bit 2: SolidWorld
+    // row openness is live. Authored vessel shells, terrain and edits all use
+    // this single voxel authority. solidOffsets.w is reserved.
+    const staticSolidWorld = Boolean(this.solidOccupancyLayout);
     const dynamicSolidWorld = bodyCount > 0 && l.solidRowData !== 0;
     u.set([l.solidCellOpen, l.solidRowData,
-      (genericSolidWorld || dynamicSolidWorld ? 1 : 0)
-        | (genericSolidWorld ? 4 : 0),
-      planarFluidBoundaryFaceMask & 0x3f], 84);
+      (staticSolidWorld || dynamicSolidWorld ? 1 : 0)
+        | (staticSolidWorld ? 4 : 0),
+      0], 84);
     f.set([...(worldDimensions_m ?? [0, 0, 0]), bodyCount], 88);
     u.set([...this.tracerLattice.dimensions, this.tracerLattice.count], 92);
     f.set([...this.tracerLattice.originFine, this.tracerLattice.spacingFine], 96);
@@ -7023,9 +7054,11 @@ export class WebGPUSparseCM12Resident {
     }
   }
 
-  async readDiagnosticFields(): Promise<SparseCM12DiagnosticFields> {
+  async readDiagnosticFields(
+    includeWorldLeaves = false,
+  ): Promise<SparseCM12DiagnosticFields> {
     this.assertLive();
-    const activitySnapshot = await this.readActivitySnapshot();
+    const activitySnapshot = await this.readActivitySnapshot(includeWorldLeaves);
     const readback = this.device.createBuffer({
       label: "Sparse CM12 QA field readback",
       size: this.state.size + 4,
@@ -7062,8 +7095,9 @@ export class WebGPUSparseCM12Resident {
       const topologyFloats = new Float32Array(this.templateWords.buffer,
         this.templateWords.byteOffset, this.templateWords.length);
       const cellOffset = this.templateWords[6]!, rangeOffset = this.templateWords[11]!;
-      for (let brick = 0; brick < activitySnapshot.records.length; brick += 1) {
-        const record = activitySnapshot.records[brick]!;
+      for (const record of activitySnapshot.records) {
+        const brick = record.leafId;
+        if (brick >= this.lastPacked!.brickCount) continue;
         if (!record.active || (record.reasons & 64) === 0) continue;
         const level = Math.log2(record.acceptedResolution);
         const templateLevelCount = Math.log2(this.brickFineResolution) + 1;
@@ -7128,6 +7162,50 @@ export class WebGPUSparseCM12Resident {
               pressure[at] = rho >= 0.5 ? mappedPressure : 0;
               divergence[at] = div;
             }
+        }
+      }
+      // GPU-grown leaves live in the fixed B8 suffix of the same state planes,
+      // not in the immutable host-template catalog above. Materialize them by
+      // their signed WDR coordinates so diagnostic fields and correctness
+      // oracles observe the complete accepted world rather than silently
+      // clipping back to the authored seed atlas.
+      if (includeWorldLeaves) {
+        const cellsPerPage = this.brickFineResolution ** 3;
+        const dynamicCellOffset = this.templateCellCount
+          - cellsPerPage * this.topologyPageCapacity;
+        for (const record of activitySnapshot.records) {
+          if (record.leafId < this.initialWorldLeafCount || !record.active
+            || record.topologyPage === undefined || !record.coordinate) continue;
+          const first = dynamicCellOffset + record.topologyPage * cellsPerPage;
+          const origin = record.coordinate.map((value) =>
+            value * this.brickFineResolution) as [number, number, number];
+          for (let local = 0; local < cellsPerPage; local += 1) {
+            const z = Math.floor(local / (this.brickFineResolution ** 2));
+            const yz = local - z * this.brickFineResolution ** 2;
+            const y = Math.floor(yz / this.brickFineResolution);
+            const x = yz - y * this.brickFineResolution;
+            const q = [origin[0] + x, origin[1] + y, origin[2] + z] as const;
+            if (q[0] < 0 || q[0] >= nx || q[1] < 0 || q[1] >= ny
+              || q[2] < 0 || q[2] >= nz) continue;
+            const cell = first + local;
+            const at = q[0] + nx * (q[1] + ny * q[2]);
+            const rho = state[densityOffset + cell]!;
+            const gammaValue = state[gammaOffset + cell]!;
+            const openFraction = this.layout.solidCellOpen !== 0
+              ? state[this.layout.solidCellOpen + cell]!
+                * (this.layout.solidVoxelCellOpen !== 0
+                  ? state[this.layout.solidVoxelCellOpen + cell]! : 1)
+              : 1;
+            const velocityAt = velocityOffset + 4 * cell;
+            density[at] = rho; gamma[at] = gammaValue;
+            solidOpenFraction[at] = openFraction;
+            velocity[4 * at] = state[velocityAt]! * cellWidth_m;
+            velocity[4 * at + 1] = state[velocityAt + 1]! * cellWidth_m;
+            velocity[4 * at + 2] = state[velocityAt + 2]! * cellWidth_m;
+            pressure[at] = rho >= 0.5
+              ? state[this.layout.pressure + cell]! * pressureScale : 0;
+            divergence[at] = state[this.layout.divergence + cell]!;
+          }
         }
       }
       return { density, gamma, solidOpenFraction, velocity, pressure, divergence };
@@ -8255,6 +8333,8 @@ export class WebGPUSparseCM12Resident {
       const publishedTopologyPageCoordinates: (readonly [number, number, number])[] = [];
       let claimedTopologyPages = 0;
       let dynamicLiquidMassFineCells = 0;
+      let dynamicLiquidMinimumFine: [number, number, number] | undefined;
+      let dynamicLiquidMaximumExclusiveFine: [number, number, number] | undefined;
       let dynamicMaximumAbsFaceVelocityFineCells_s = 0;
       let furthestLiquidLeafCoordinate: readonly [number, number, number] | undefined;
       const pageBase = localDirectoryWords;
@@ -8296,8 +8376,33 @@ export class WebGPUSparseCM12Resident {
         }
         let pageMass = 0;
         for (let local = 0; local < cellsPerPage; local += 1) {
-          pageMass += Math.max(0, floats[densityABase + page * cellsPerPage + local]!,
+          const density = Math.max(0, floats[densityABase + page * cellsPerPage + local]!,
             floats[densityBBase + page * cellsPerPage + local]!);
+          pageMass += density;
+          if (density <= 0.05) continue;
+          const leaf = words[pageBase + pageHeaderWords * page]!;
+          if (leaf >= this.worldDirectoryLayout.leafCapacity) continue;
+          const leafAt = this.worldDirectoryLayout.leafBaseWords + 5 * leaf;
+          const coordinate = [words[leafAt]! | 0, words[leafAt + 1]! | 0,
+            words[leafAt + 2]! | 0] as const;
+          const z = Math.floor(local / (this.brickFineResolution ** 2));
+          const yz = local - z * this.brickFineResolution ** 2;
+          const y = Math.floor(yz / this.brickFineResolution);
+          const x = yz - y * this.brickFineResolution;
+          const fine = [coordinate[0] * this.brickFineResolution + x,
+            coordinate[1] * this.brickFineResolution + y,
+            coordinate[2] * this.brickFineResolution + z] as const;
+          if (!dynamicLiquidMinimumFine) {
+            dynamicLiquidMinimumFine = [...fine];
+            dynamicLiquidMaximumExclusiveFine = fine.map((value) => value + 1) as
+              [number, number, number];
+          } else {
+            for (let axis = 0; axis < 3; axis += 1) {
+              dynamicLiquidMinimumFine[axis] = Math.min(dynamicLiquidMinimumFine[axis]!, fine[axis]!);
+              dynamicLiquidMaximumExclusiveFine![axis] = Math.max(
+                dynamicLiquidMaximumExclusiveFine![axis]!, fine[axis]! + 1);
+            }
+          }
         }
         dynamicLiquidMassFineCells += pageMass;
         if (pageMass > 1e-4) {
@@ -8341,6 +8446,12 @@ export class WebGPUSparseCM12Resident {
         failedHostIncidences,
         publishedTopologyPageCoordinates: Object.freeze(publishedTopologyPageCoordinates),
         dynamicLiquidMassFineCells,
+        ...(dynamicLiquidMinimumFine && dynamicLiquidMaximumExclusiveFine ? {
+          dynamicLiquidBoundsFine: Object.freeze({
+            minimum: Object.freeze(dynamicLiquidMinimumFine),
+            maximumExclusive: Object.freeze(dynamicLiquidMaximumExclusiveFine),
+          }),
+        } : {}),
         dynamicMaximumAbsFaceVelocityFineCells_s,
         ...(furthestLiquidLeafCoordinate
           ? { furthestLiquidLeafCoordinate: Object.freeze(furthestLiquidLeafCoordinate) }
@@ -8472,13 +8583,22 @@ export class WebGPUSparseCM12Resident {
   }
 
   /** QA-only policy readback. It is never called by frame scheduling. */
-  async readActivitySnapshot(): Promise<SparseCM12GPUActivitySnapshot> {
+  async readActivitySnapshot(
+    includeWorldLeaves = false,
+  ): Promise<SparseCM12GPUActivitySnapshot> {
     this.assertLive();
+    const recordCapacity = includeWorldLeaves
+      ? this.worldDirectoryLayout.leafCapacity : this.lastPacked!.brickCount;
     const wordsToRead = ACTIVITY_HEADER_WORDS
-      + ACTIVITY_RECORD_WORDS * this.lastPacked!.brickCount;
+      + ACTIVITY_RECORD_WORDS * recordCapacity;
+    const worldHeaderAt = wordsToRead;
+    const worldLeavesAt = worldHeaderAt + SPARSE_CM12_WORLD_DIRECTORY_HEADER_WORDS;
+    const totalWords = includeWorldLeaves
+      ? worldLeavesAt + SPARSE_CM12_WORLD_DIRECTORY_LEAF_WORDS * recordCapacity
+      : wordsToRead;
     const readback = this.device.createBuffer({
       label: "Sparse CM12 activity QA readback",
-      size: 4 * wordsToRead,
+      size: 4 * totalWords,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     try {
@@ -8486,12 +8606,34 @@ export class WebGPUSparseCM12Resident {
         label: "Sparse CM12 activity QA copy",
       });
       encoder.copyBufferToBuffer(this.activity, 0, readback, 0, 4 * wordsToRead);
+      if (includeWorldLeaves) {
+        encoder.copyBufferToBuffer(this.topologyArena,
+          4 * this.worldDirectoryLayout.baseWords, readback, 4 * worldHeaderAt,
+          4 * SPARSE_CM12_WORLD_DIRECTORY_HEADER_WORDS);
+        encoder.copyBufferToBuffer(this.topologyArena,
+          4 * (this.worldDirectoryLayout.baseWords
+            + this.worldDirectoryLayout.leafBaseWords),
+          readback, 4 * worldLeavesAt,
+          4 * SPARSE_CM12_WORLD_DIRECTORY_LEAF_WORDS * recordCapacity);
+      }
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
-      const records = Array.from({ length: this.lastPacked!.brickCount }, (_, brick) => {
+      const leafLimit = includeWorldLeaves ? Math.min(recordCapacity,
+        words[worldHeaderAt + SPARSE_CM12_WORLD_DIRECTORY_HEADER.nextLeaf]!)
+        : recordCapacity;
+      const leafIds = Array.from({ length: leafLimit }, (_, leaf) => leaf).filter((leaf) =>
+        !includeWorldLeaves || words[worldLeavesAt
+          + SPARSE_CM12_WORLD_DIRECTORY_LEAF_WORDS * leaf
+          + SPARSE_CM12_WORLD_DIRECTORY_LEAF.generation]
+            !== SPARSE_CM12_WORLD_DIRECTORY_INVALID);
+      const records = leafIds.map((brick) => {
         const at = ACTIVITY_HEADER_WORDS + ACTIVITY_RECORD_WORDS * brick;
+        const leafAt = worldLeavesAt + SPARSE_CM12_WORLD_DIRECTORY_LEAF_WORDS * brick;
         return {
+          leafId: brick,
+          ...(includeWorldLeaves ? { coordinate: [words[leafAt]! | 0,
+            words[leafAt + 1]! | 0, words[leafAt + 2]! | 0] as const } : {}),
           scoreByte: words[at]!,
           reasons: words[at + 1]!,
           thinFluid: (words[at + 1]! & 256) !== 0,

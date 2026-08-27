@@ -143,3 +143,29 @@ test("BFA1 prepares and projects accepted rows without a transient DFRM plane", 
   assert.doesNotMatch(resident, /DirtyFaceRowMask|compileSparseCM12DirtyFaceRowMasks/);
   assert.match(resident, /dispatchAccepted\("measureDivergenceDiagnostics", "cell"\)/);
 });
+
+test("SparseWorld frontier allocation covers all 26 activity-support neighbours", () => {
+  const resident = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.match(resident,
+    /dispatch\("allocateSparseWorldFrontier",\s*Math\.ceil\(26 \* leafCapacity \/ WORKGROUP_SIZE\)\)/);
+
+  const shader = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+    import.meta.url,
+  ), "utf8");
+  const allocation = shader.slice(shader.indexOf("fn allocateSparseWorldFrontier"),
+    shader.indexOf("fn synthesizeSparseWorldFrontierPages"));
+  assert.match(allocation, /let brick=gid\.x\/26u;let localNeighbor=gid\.x%26u;/);
+  assert.match(allocation,
+    /let supportBit=select\(localNeighbor,localNeighbor\+1u,localNeighbor>=13u\);/);
+  assert.match(allocation, /cm12FluidNeighborReachable\(sourceCoordinate,offset\)/);
+
+  const mapped = Array.from({ length: 26 }, (_, local) => local >= 13 ? local + 1 : local);
+  assert.equal(new Set(mapped).size, 26);
+  assert.ok(!mapped.includes(13), "the center bit must not allocate the source page");
+  assert.deepEqual(mapped, Array.from({ length: 27 }, (_, bit) => bit)
+    .filter((bit) => bit !== 13));
+});

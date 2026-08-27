@@ -63,7 +63,7 @@ test("signed-distance visualization uses compact signed fine-page keys", () => {
   assert.match(gridOverlayShader,
     /fn sparseSignedFineAddressing\(\)->bool\{return \(sparseFineWorklist\[3\]&0x40000000u\)!=0u;\}/);
   assert.match(gridOverlayShader,
-    /return u32\(page\.x\+1024\)\|\(u32\(page\.y\)<<11u\)\|\(u32\(page\.z\+1024\)<<21u\);/,
+    /return u32\(page\.x\+1024\)\|\(u32\(page\.y\+512\)<<11u\)\|\(u32\(page\.z\+1024\)<<21u\);/,
   "the overlay key must match the resident's signed fine-page ABI");
   assert.match(gridOverlayShader,
     /let pageCoordinate=sparseFloorDiv\(q,i32\(pageResolution\)\);/,

@@ -5,6 +5,7 @@ export const WEBGPU_SOLID_WORLD_MAGIC = 0x534f_4331;
 export const WEBGPU_SOLID_WORLD_VERSION = 2;
 export const WEBGPU_SOLID_WORLD_HEADER_WORDS = 24;
 export const WEBGPU_SOLID_WORLD_ENTRY_WORDS = 6;
+export const WEBGPU_SOLID_WORLD_REGION_WORDS = 8;
 export const WEBGPU_SOLID_WORLD_FRACTION_WORDS = 128;
 export const WEBGPU_SOLID_WORLD_SDF_WORDS = 256;
 export const WEBGPU_SOLID_WORLD_MATERIAL_WORDS = 256;
@@ -17,6 +18,8 @@ export interface WebgpuSolidWorldPageLayout {
   readonly baseWords: number;
   readonly pageCapacity: number;
   readonly directoryCapacity: number;
+  readonly regionCapacity: number;
+  readonly regionBaseWords: number;
   readonly directoryBaseWords: number;
   readonly pageBaseWords: number;
   readonly pageWords: number;
@@ -34,6 +37,7 @@ const nextPowerOfTwo = (value: number): number => {
 export function createWebgpuSolidWorldPageLayout(options: {
   readonly baseWords: number;
   readonly authoredPageCount: number;
+  readonly authoredRegionCount?: number;
   readonly includesMaterial?: boolean;
   readonly maximumBytes?: number;
 }): WebgpuSolidWorldPageLayout {
@@ -42,10 +46,16 @@ export function createWebgpuSolidWorldPageLayout(options: {
     || options.authoredPageCount < 0) {
     throw new RangeError("SolidWorld GPU page capacities are invalid");
   }
+  const regionCapacity = options.authoredRegionCount ?? 0;
+  if (!Number.isSafeInteger(regionCapacity) || regionCapacity < 0) {
+    throw new RangeError("SolidWorld GPU region capacity is invalid");
+  }
   const pageCapacity = nextPowerOfTwo(Math.max(16,
     Math.ceil(1.5 * options.authoredPageCount)));
   const directoryCapacity = nextPowerOfTwo(2 * pageCapacity);
-  const directoryBaseWords = WEBGPU_SOLID_WORLD_HEADER_WORDS;
+  const regionBaseWords = WEBGPU_SOLID_WORLD_HEADER_WORDS;
+  const directoryBaseWords = regionBaseWords
+    + regionCapacity * WEBGPU_SOLID_WORLD_REGION_WORDS;
   const pageBaseWords = directoryBaseWords
     + directoryCapacity * WEBGPU_SOLID_WORLD_ENTRY_WORDS;
   const includesMaterial = options.includesMaterial === true;
@@ -58,6 +68,7 @@ export function createWebgpuSolidWorldPageLayout(options: {
       + `the fixed budget permits ${maximumBytes}`);
   }
   return Object.freeze({ baseWords: options.baseWords, pageCapacity,
+    regionCapacity, regionBaseWords,
     directoryCapacity, directoryBaseWords, pageBaseWords, pageWords,
     includesMaterial, totalWords: options.baseWords + localWords,
     totalBytes: 4 * (options.baseWords + localWords) });
@@ -92,7 +103,8 @@ function header(layout: WebgpuSolidWorldPageLayout, pageCount: number,
     layout.directoryBaseWords, layout.pageBaseWords, layout.pageCapacity,
     pageCount, originFine[0] >>> 0, originFine[1] >>> 0, originFine[2] >>> 0,
     WEBGPU_SOLID_WORLD_ENTRY_WORDS, layout.pageWords,
-    layout.includesMaterial ? 1 : 0]);
+    layout.includesMaterial ? 1 : 0, layout.regionCapacity,
+    layout.regionBaseWords]);
   if (lattice) {
     new Float32Array(words.buffer).set(lattice.origin_m, 16);
     new Float32Array(words.buffer).set(lattice.cellSize_m, 20);
@@ -108,6 +120,17 @@ export function packWebgpuSolidWorldPages(layout: WebgpuSolidWorldPageLayout,
     `SolidWorld has ${world.pages.length} pages; GPU capacity is ${layout.pageCapacity}`);
   const words = new Uint32Array(layout.totalWords - layout.baseWords);
   words.set(header(layout, world.pages.length, originFine, lattice));
+  const regions = world.regions ?? [];
+  if (regions.length > layout.regionCapacity) throw new RangeError(
+    `SolidWorld has ${regions.length} regions; GPU capacity is ${layout.regionCapacity}`);
+  for (let index = 0; index < regions.length; index += 1) {
+    const region = regions[index]!;
+    words.set([region.operation === "fill" ? 1 : 0,
+      region.minimum[0] >>> 0, region.minimum[1] >>> 0, region.minimum[2] >>> 0,
+      region.maximumExclusive[0] >>> 0, region.maximumExclusive[1] >>> 0,
+      region.maximumExclusive[2] >>> 0, region.materialId ?? 1],
+    layout.regionBaseWords + index * WEBGPU_SOLID_WORLD_REGION_WORDS);
+  }
   const occupied = new Uint8Array(layout.directoryCapacity);
   for (let pageIndex = 0; pageIndex < world.pages.length; pageIndex += 1) {
     const page = world.pages[pageIndex]!;

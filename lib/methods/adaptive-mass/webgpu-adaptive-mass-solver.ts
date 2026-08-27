@@ -23,11 +23,8 @@ import {
   type GPURigidLoad,
 } from "../../core/webgpu-eulerian";
 import { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
-import { solidWorldForScene } from
+import { fluidSolidWorldForScene } from
   "../../core/solid-world";
-import {
-  e0PlanarFluidBoundaryRuntimeConfiguration,
-} from "../../core/planar-fluid-boundary";
 import {
   ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS,
   AdaptiveMassFrameCapture,
@@ -164,7 +161,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readWorldGrowthReceiptQA() {
     return this.sparseWorldTrace.readWorldGrowthReceiptQA();
   }
-
   private atlas: SparseAdaptiveMassAtlas;
   private lastTime_s = 0;
   private disposed = false;
@@ -326,7 +322,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   ): Promise<WebGPUAdaptiveMassSolver> {
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
     const fluidDomainPlan = adaptiveMassFluidDomainForScene(scene);
-    const initialSolidWorld = solidWorldForScene(scene);
+    const initialSolidWorld = fluidSolidWorldForScene(scene);
     // Compile the boundary chain's closing marker while the scene builds. A
     // recorder constructed before it exists closes on an empty pass, which
     // Metal never samples, and that one bad sample would retire hardware
@@ -412,12 +408,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         dependencies: ["adaptive-mass.atlas", "adaptive-mass.presentation"],
         run: async () => {
           const cellSize_m = finestCellSize(scene, atlas!);
-          const boundary = e0PlanarFluidBoundaryRuntimeConfiguration(scene);
           sparseWorldNumerics.current = {
             finestCellSize_m: cellSize_m,
             pressureScale: 1,
             origin_m: fluidDomainPlan.origin_m,
-            ...boundary,
           };
           sparseRuntime = await createCM12SparseWorld({
             device,
@@ -658,7 +652,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const pressureIterationReceiptSequence = pressureIterationReadback
       ? ++this.pressureIterationReceiptSequence : 0;
     const pressureIterationControlGeneration = this.pressureIterationControlGeneration;
-    const boundary = e0PlanarFluidBoundaryRuntimeConfiguration(this.scene);
     this.sparseWorldNumerics.current = {
       finestCellSize_m: cellSize_m,
       pressureScale: this.scene.fluid.density_kg_m3 * cellSize_m * cellSize_m / dt_s,
@@ -682,7 +675,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       seams: frameCapture?.residentStageSeams,
       worldDimensions_m: this.fluidDomain.dimensions.map((value, axis) =>
         value * this.fluidDomain.cellSize_m[axis]) as [number, number, number],
-      ...boundary,
     };
     this.sparseWorld.encodeStep(encoder, {
       time: this.lastTime_s + dt_s,
@@ -904,7 +896,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   /** Explicit Dawn/QA materialization; production rendering stays sparse. */
-  readDiagnosticFields() { return this.sparseWorldTrace.readDiagnosticFields(); }
+  readDiagnosticFields(includeWorldLeaves = false) {
+    return this.sparseWorldTrace.readDiagnosticFields(includeWorldLeaves);
+  }
   readPhase1TransportReceiptQA() {
     return this.sparseWorldTrace.readPhase1TransportReceiptQA();
   }
@@ -969,10 +963,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     readonly commitFailed: boolean;
     readonly bricks: readonly AdaptiveMassGPUActivityBrick[];
   }> {
-    const snapshot = await this.sparseWorldTrace.readActivitySnapshot();
-    if (snapshot.records.length !== this.atlas.bricks.length) {
-      throw new Error("Sparse CM12 GPU activity record count does not match resident bricks");
-    }
+    const snapshot = await this.sparseWorldTrace.readActivitySnapshot(true);
     return {
       acceptedSteps: snapshot.acceptedSteps,
       acceptedTopologyGeneration: snapshot.acceptedTopologyGeneration,
@@ -982,10 +973,15 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       preparedBrickCount: snapshot.preparedBrickCount,
       committedBrickCount: snapshot.committedBrickCount,
       commitFailed: snapshot.commitFailed,
-      bricks: snapshot.records.map((record, index) => {
-        const brick = this.atlas.bricks[index]!;
-        return { ...record, key: brick.key, coordinate: brick.coordinate,
+      bricks: snapshot.records.map((record) => {
+        const brick = this.atlas.bricks[record.leafId];
+        if (brick) return { ...record, key: brick.key, coordinate: brick.coordinate,
           resolution: brick.resolution };
+        if (!record.coordinate) {
+          throw new Error(`Sparse CM12 dynamic leaf ${record.leafId} has no WDR coordinate`);
+        }
+        return { ...record, key: record.leafId, coordinate: record.coordinate,
+          resolution: record.acceptedResolution };
       }),
     };
   }

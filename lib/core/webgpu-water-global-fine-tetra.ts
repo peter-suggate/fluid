@@ -287,9 +287,9 @@ fn compactFloorDiv(q:vec3i,divisor:i32)->vec3i{
   return adjusted/divisor;
 }
 fn compactSignedPageKey(page:vec3i)->u32{
-  if(page.x< -1024||page.x>1023||page.y<0||page.y>1023
+  if(page.x< -1024||page.x>1023||page.y< -512||page.y>511
     ||page.z< -1024||page.z>1022){return INVALID;}
-  return u32(page.x+1024)|(u32(page.y)<<11u)|(u32(page.z+1024)<<21u);
+  return u32(page.x+1024)|(u32(page.y+512)<<11u)|(u32(page.z+1024)<<21u);
 }
 fn compactPageKey(page:vec3i)->u32{
   if(signedSparseAddressing()){return compactSignedPageKey(page);}

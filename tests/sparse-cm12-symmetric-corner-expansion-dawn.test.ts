@@ -93,15 +93,25 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
           "each corner must activate a complete B8 frontier tile");
       }
 
-      const density = (await solver.readDiagnosticFields()).density;
+      const density = (await solver.readDiagnosticFields(true)).density;
       let cornerMass = 0;
+      let totalMass = 0;
+      let maximumDensity = 0;
       for (let z = 0; z < horizontalCells; z += 1)
         for (let y = 0; y < horizontalCells / 2; y += 1)
           for (let x = 0; x < horizontalCells; x += 1) {
+            const rho = density[x + horizontalCells * (y + horizontalCells / 2 * z)]!;
+            totalMass += rho;
+            maximumDensity = Math.max(maximumDensity, rho);
             if (!horizontalCorner([Math.floor(x / brickSize), Math.floor(y / brickSize),
               Math.floor(z / brickSize)])) continue;
-            cornerMass += density[x + horizontalCells * (y + horizontalCells / 2 * z)]!;
+            cornerMass += rho;
           }
+      const initialMass = (scene.fluid.initialBrickSeeds_m?.length ?? 0) * brickSize ** 3;
+      assert.ok(Math.abs(totalMass - initialMass) / initialMass <= 3e-3,
+        `symmetric expansion lost fluid mass: ${totalMass}/${initialMass}`);
+      assert.ok(maximumDensity <= 2.5,
+        `conserved mass collapsed into rho=${maximumDensity}, shrinking visible volume`);
       assert.ok(cornerMass > 1e-3,
         `allocated corner tiles must accept transported liquid; measured ${cornerMass}`);
       assert.deepEqual(validationErrors, []);
