@@ -22,7 +22,9 @@ export const SPARSE_CM12_PRESSURE_CUTOVER_FORBIDDEN_RUNTIME_TOKENS = Object.free
 const localStages = (receipt: SparseCM12PressureCutoverAuthorities): readonly [
   string, GPUAdaptivePressureLocalStageReceipt,
 ][] => [
-  ["PCA aggregate/hierarchy", receipt.pca],
+  // The public receipt field retains its ABI name while the production
+  // authority is now the fine coefficient publication only.
+  ["PCF fine publication", receipt.pca],
 ];
 
 const validCount = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
@@ -43,7 +45,7 @@ export function inspectSparseCM12PressureCutoverAuthorities(
   expectedInputTopologyGeneration?: number,
 ): { readonly complete: boolean; readonly issues: readonly string[] } {
   if (!receipt) return Object.freeze({ complete: false,
-    issues: Object.freeze(["PCA receipt is unavailable"]) });
+    issues: Object.freeze(["pressure coefficient receipt is unavailable"]) });
   const issues: string[] = [];
   if (!validCount(receipt.inputTopologyGeneration)) {
     issues.push("authority input topology generation is invalid");
@@ -73,9 +75,11 @@ export function inspectSparseCM12PressureCutoverAuthorities(
   }
   const familyDirty = receipt.pca.familyDirtyCount.reduce((sum, value) => sum + value, 0);
   const familyExecuted = receipt.pca.familyExecutedCount.reduce((sum, value) => sum + value, 0);
-  if (familyDirty !== receipt.pca.dirtyCount) issues.push("PCA family dirty census mismatch");
+  if (familyDirty !== receipt.pca.dirtyCount) {
+    issues.push("pressure coefficient family dirty census mismatch");
+  }
   if (familyExecuted !== receipt.pca.executedCount) {
-    issues.push("PCA family execution census mismatch");
+    issues.push("pressure coefficient family execution census mismatch");
   }
   const complete = receipt.status === "matched" && issues.length === 0;
   if (receipt.status === "fault" && issues.length === 0) {
@@ -94,7 +98,7 @@ export function formatSparseCM12PressureCutoverAuthorities(
     receipt, expectedInputTopologyGeneration,
   );
   if (!receipt) {
-    return "PCA receipt: UNAVAILABLE (no accepted GPU authority receipt)";
+    return "Pressure coefficient receipt: UNAVAILABLE (no accepted GPU authority receipt)";
   }
   const stage = (label: string, value: GPUAdaptivePressureLocalStageReceipt): string =>
     `${label} g${value.acceptedGeneration} · dirty ${value.dirtyCount}`
@@ -105,7 +109,8 @@ export function formatSparseCM12PressureCutoverAuthorities(
     : `Pressure local authorities: UNAVAILABLE/FAULT — ${inspection.issues.join("; ")}`;
   return [status,
     "Face project: direct compiled dirty/pressure row masks",
-    `${stage("PCA", receipt.pca)} · family dirty ${receipt.pca.familyDirtyCount.join("/")}`,
+    `${stage("PCF", receipt.pca)} · retired-family dirty ${
+      receipt.pca.familyDirtyCount.join("/")}`,
   ].join("\n");
 }
 

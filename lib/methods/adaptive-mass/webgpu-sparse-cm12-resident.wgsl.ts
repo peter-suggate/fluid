@@ -3502,44 +3502,16 @@ fn peiSourcePCMRowGeneration()->u32{return pcmRowAcceptedGeneration();}
 fn peiSourceCoefficientCandidateGeneration()->u32{return pcfCandidateGeneration();}
 fn peiSourceCoefficientAcceptedGeneration()->u32{return pcfAcceptedGeneration();}
 fn peiSourceCellCount()->u32{return pcmCellAcceptedCount();}
-fn peiSourceBrickCount()->u32{return p.dispatch.w;}
-fn peiSourceBrickLive(brick:u32)->bool{
-  return brick<p.dispatch.w&&cachedPressureBrickRange(brick).y!=0u;
-}
-fn peiSourceBrickDeactivate(brick:u32){
-  candidateState[brickAggregateRhsOffset()+brick]=0.0;
-  candidateState[brickAggregateAOffset()+brick]=0.0;
-  candidateState[brickAggregateBOffset()+brick]=0.0;
-}
-fn peiSourceHierarchyCount()->u32{
-  var total=0u;for(var level=0u;level<pressureHierarchyLevelCount();level+=1u){
-    total+=pressureHierarchyGroupCount(level);}
-  return total;
-}
-fn peiSourceHierarchyToken(linear:u32)->u32{
-  let address=pressureHierarchyGroupAddress(linear);
-  return select(INVALID,(address.x<<26u)|address.y,address.x!=INVALID);
-}
-fn peiSourceHierarchyLive(linear:u32)->bool{
-  let address=pressureHierarchyGroupAddress(linear);
-  if(address.x==INVALID){return false;}
-  let descriptor=pressureHierarchyDescriptor(address.x);
-  let offsets=pressureTemplateWord(descriptor+2u);
-  let children=pressureTemplateWord(descriptor+3u);
-  let begin=pressureTemplateWord(offsets+address.y);
-  let end=pressureTemplateWord(offsets+address.y+1u);
-  for(var at=begin;at<end;at+=1u){
-    if(peiSourceBrickLive(pressureTemplateWord(children+at))){return true;}
-  }
-  return false;
-}
-fn peiSourceHierarchyDeactivate(linear:u32){
-  let address=pressureHierarchyGroupAddress(linear);
-  if(address.x==INVALID){return;}
-  candidateState[pressureHierarchyRhsOffset(address.x)+address.y]=0.0;
-  candidateState[pressureHierarchyAOffset(address.x)+address.y]=0.0;
-  candidateState[pressureHierarchyBOffset(address.x)+address.y]=0.0;
-}
+// The production preconditioner is cell-local Jacobi. Coarse brick and
+// hierarchy streams had no numerical consumer, so PEI publishes no work for
+// those retired planes while retaining the cell execution-image transaction.
+fn peiSourceBrickCount()->u32{return 0u;}
+fn peiSourceBrickLive(brick:u32)->bool{_=brick;return false;}
+fn peiSourceBrickDeactivate(brick:u32){_=brick;}
+fn peiSourceHierarchyCount()->u32{return 0u;}
+fn peiSourceHierarchyToken(linear:u32)->u32{_=linear;return INVALID;}
+fn peiSourceHierarchyLive(linear:u32)->bool{_=linear;return false;}
+fn peiSourceHierarchyDeactivate(linear:u32){_=linear;}
 fn stablePressureBrickInvocation(invocation:u32)->u32{
   return peiWetBrick(invocation);
 }
@@ -3732,6 +3704,9 @@ fn publishFrozenPressureCoefficients(@builtin(global_invocation_id)gid:vec3u){
 fn beginPersistentPressureCache(){_=pcfBegin();}
 
 @compute @workgroup_size(1)
+fn finalizePersistentPressureFineCache(){_=pcfFinalizeFine();}
+
+@compute @workgroup_size(1)
 fn finalizeCanonicalPressureCellFrontier(){_=pcmCellFinalizeFrontier();}
 
 @compute @workgroup_size(1)
@@ -3850,13 +3825,6 @@ fn jacobiPreconditioned(cell:u32)->f32{
 }
 
 @compute @workgroup_size(64)
-fn applyJacobiPreconditioner(@builtin(global_invocation_id)gid:vec3u){
-  if(!pressurePreconditionerActive()){return;}
-  let cell=pressureCellInvocation(gid.x);if(cell==INVALID){return;}
-  state[p.stateOffsets3.z+cell]=jacobiPreconditioned(cell);
-}
-
-@compute @workgroup_size(64)
 fn initializeJacobiDirection(@builtin(global_invocation_id)gid:vec3u,
  @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
   let cell=pressureCellInvocation(gid.x);var gamma=0.0;var rhs2=0.0;
@@ -3887,6 +3855,31 @@ fn applyOperator(cell:u32,inputOffset:u32)->f32{
       let nx=cell-1u;let px=cell+1u;
       let ny=cell-strides.y;let py=cell+strides.y;
       let nz=cell-strides.z;let pz=cell+strides.z;
+      result+=select(0.0,weight,peiPressureCellMember(nx))*state[inputOffset+nx];
+      result+=select(0.0,weight,peiPressureCellMember(px))*state[inputOffset+px];
+      result+=select(0.0,weight,peiPressureCellMember(ny))*state[inputOffset+ny];
+      result+=select(0.0,weight,peiPressureCellMember(py))*state[inputOffset+py];
+      result+=select(0.0,weight,peiPressureCellMember(nz))*state[inputOffset+nz];
+      result+=select(0.0,weight,peiPressureCellMember(pz))*state[inputOffset+pz];
+      return result;
+    }
+  }else if(!hasSolidBoundaries()){
+    // SparseWorld runtime pages are uniform B8 bricks with x-major contiguous
+    // stable cell IDs. Interior cells therefore have the same certified six
+    // neighbours for the lifetime of the accepted page; only page-boundary
+    // cells need the compiled seam/exception graph.
+    let within=dynamicCellWithin(dynamicCellLocal(cell));
+    let plane=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
+    let z=within/plane;let remainder=within-z*plane;
+    let y=remainder/BRICK_FINE_RESOLUTION;
+    let x=remainder-y*BRICK_FINE_RESOLUTION;
+    if(x>0u&&x+1u<BRICK_FINE_RESOLUTION
+      &&y>0u&&y+1u<BRICK_FINE_RESOLUTION
+      &&z>0u&&z+1u<BRICK_FINE_RESOLUTION){
+      let weight=-1.0;
+      let nx=cell-1u;let px=cell+1u;
+      let ny=cell-BRICK_FINE_RESOLUTION;let py=cell+BRICK_FINE_RESOLUTION;
+      let nz=cell-plane;let pz=cell+plane;
       result+=select(0.0,weight,peiPressureCellMember(nx))*state[inputOffset+nx];
       result+=select(0.0,weight,peiPressureCellMember(px))*state[inputOffset+px];
       result+=select(0.0,weight,peiPressureCellMember(ny))*state[inputOffset+ny];

@@ -194,6 +194,29 @@ fn pcfaAggregateHeaderValid()->bool{return atomicLoad(&${arena}[PCFA_BASE+${ah.m
 fn pcfaZeroIndirects(){for(var family=0u;family<4u;family+=1u){let header=pcfaFamilyHeader(family);
   pcfaStoreIndirect(header,PCFA_F_REPAIR_X,0u);pcfaStoreIndirect(header,PCFA_F_WORK_X,0u);
   pcfaStoreIndirect(header,PCFA_F_SEED_X,0u);}}
+fn pcfaBeginReceiptOnly()->bool{
+  if(!pcfaAggregateHeaderValid()){pcfFault(PCF_FAULT_HEADER,PCF_INVALID);return false;}
+  atomicStore(&${arena}[PCFA_BASE+${ah.topologyGeneration}u],pcfTopologyGeneration());
+  atomicStore(&${arena}[PCFA_BASE+${ah.pcmGeneration}u],pcfPCMGeneration());
+  atomicStore(&${arena}[PCFA_BASE+${ah.aggregateTopologyGeneration}u],
+    pcfAggregateTopologyGeneration());
+  atomicStore(&${arena}[PCFA_BASE+${ah.firstFaultFamily}u],PCF_INVALID);
+  atomicStore(&${arena}[PCFA_BASE+${ah.firstFaultId}u],PCF_INVALID);
+  for(var family=0u;family<4u;family+=1u){let header=pcfaFamilyHeader(family);
+    atomicStore(&${arena}[header+PCFA_F_DIRTY_LEAVES],0u);
+    atomicStore(&${arena}[header+PCFA_F_REPAIRED_LEAVES],0u);
+    atomicStore(&${arena}[header+PCFA_F_WORK_COUNT],0u);
+    atomicStore(&${arena}[header+PCFA_F_EXECUTED],0u);
+    atomicStore(&${arena}[header+PCFA_F_CAUSE],0u);
+    atomicStore(&${arena}[header+PCFA_F_PREVIOUS_LEAVES],0u);
+    atomicStore(&${arena}[header+PCFA_F_ACTIVE_LEAVES],0u);}
+  pcfaZeroIndirects();return true;
+}
+fn pcfaFinalizeReceiptOnly(){
+  atomicStore(&${arena}[PCFA_BASE+${ah.acceptedAggregateTopologyGeneration}u],
+    atomicLoad(&${arena}[PCFA_BASE+${ah.aggregateTopologyGeneration}u]));
+  pcfaZeroIndirects();
+}
 fn pcfaFault(family:u32,code:u32,id:u32){let claim=atomicCompareExchangeWeak(&${arena}[
   PCFA_BASE+${ah.firstFaultFamily}u],PCF_INVALID,family);if(claim.exchanged){
     atomicStore(&${arena}[PCFA_BASE+${ah.firstFaultId}u],id);}pcfFault(code,id);}
@@ -237,10 +260,8 @@ fn pcfaSeedPrevious(family:u32,invocation:u32){let header=pcfaFamilyHeader(famil
 @compute @workgroup_size(64) fn seedPreviousPCFAggregateEdgeLeaves(@builtin(global_invocation_id)gid:vec3u){pcfaSeedPrevious(1u,gid.x);}
 @compute @workgroup_size(64) fn seedPreviousPCFHierarchyNodeLeaves(@builtin(global_invocation_id)gid:vec3u){pcfaSeedPrevious(2u,gid.x);}
 @compute @workgroup_size(64) fn seedPreviousPCFHierarchyEdgeLeaves(@builtin(global_invocation_id)gid:vec3u){pcfaSeedPrevious(3u,gid.x);}
-fn pcfAggregateFineEdgeChanged(cell:u32,edge:u32){_=pcfaMark(0u,pcfCellBrick(cell),1u);
-  let aggregateEdge=pcfAggregateEdgeForFineEdge(edge);
-  if(aggregateEdge!=PCF_INVALID){_=pcfaMark(1u,aggregateEdge,1u);}}
-fn pcfAggregateFineDiagonalChanged(cell:u32){_=pcfaMark(0u,pcfCellBrick(cell),2u);}
+fn pcfAggregateFineEdgeChanged(cell:u32,edge:u32){_=cell;_=edge;}
+fn pcfAggregateFineDiagonalChanged(cell:u32){_=cell;}
 fn pcfaMarkBrickAncestors(brick:u32){for(var level=0u;level<${layout.hierarchyLevelCounts.length}u;level+=1u){
   let parent=pcfHierarchyParent(level,brick);
   if(parent!=PCF_INVALID){_=pcfaMark(2u,pcfaNodeLinear(level,parent),4u);}}}

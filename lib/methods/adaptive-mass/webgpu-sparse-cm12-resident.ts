@@ -208,7 +208,6 @@ import {
   SPARSE_CM12_PRESSURE_CACHE_HEADER_WORDS,
   createSparseCM12ResidentPersistentPressureCacheLayout,
   initializeSparseCM12PersistentPressureCacheWords,
-  sparseCM12PersistentPressureCacheAggregateIndirectByteOffset,
   type SparseCM12PersistentPressureCacheLayout,
 } from "./sparse-cm12-persistent-pressure-cache";
 import {
@@ -4595,7 +4594,6 @@ export class WebGPUSparseCM12Resident {
       "preparePressure",
       "beginPressureSolve",
       "publishPressureSolveDispatchGate", "restorePressureSolveDispatches",
-      "applyJacobiPreconditioner",
       "initializeJacobiDirection",
       "initializePCG", "measureTrueResidual", "measureGuardedTrueResidual",
       "reduceInitialTrueResidual", "reduceGuardedTrueResidual",
@@ -4658,23 +4656,8 @@ export class WebGPUSparseCM12Resident {
       "commitSparseCM12FramePlanPresentationPacket",
       "finalizeSparseCM12FramePlanPresentationExecution",
       "rejectSparseCM12FramePlanPresentationFaults",
-      "beginPersistentPressureCache", "sealPersistentPressureAggregateFrontier",
+      "beginPersistentPressureCache", "finalizePersistentPressureFineCache",
       ...SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_ENTRY_POINTS,
-      "seedPreviousPCFBrickLeaves", "seedPreviousPCFAggregateEdgeLeaves",
-      "seedPreviousPCFHierarchyNodeLeaves", "seedPreviousPCFHierarchyEdgeLeaves",
-      "repairPersistentPressureBrickWorkset",
-      "repairPersistentPressureAggregateEdgeWorkset",
-      "repairPersistentPressureHierarchyNodeWorkset",
-      "repairPersistentPressureHierarchyEdgeWorkset",
-      "finalizePersistentPressureAggregatePlan",
-      "repairPersistentPressureAggregateEdges",
-      "repairPersistentPressureBrickDiagonals",
-      "finalizePersistentPressureAggregateExecution",
-      "finalizePersistentPressureHierarchyPlan",
-      "repairPersistentPressureHierarchyEdges",
-      "repairPersistentPressureHierarchyDiagonals",
-      "finalizePersistentPressureCache",
-      "publishFrozenPressureCoarseCache",
       "publishFrozenPressureCellIds",
       "publishFrozenPressureMembership",
       "publishFrozenPressureCoefficients",
@@ -5113,17 +5096,6 @@ export class WebGPUSparseCM12Resident {
       activePass.setPipeline(this.pipelines[name]!);
       activePass.dispatchWorkgroups(count, y, z);
     };
-    const pressureFrozenCoarseWorkgroupCount = Math.ceil(Math.max(
-      this.pressureCoarseEdgeCount,
-      this.pressureHierarchyGroupCount,
-      this.pressureHierarchyEdgeCount,
-    ) / WORKGROUP_SIZE);
-    const pressureFrozenCoarseWorkgroupsX = Math.ceil(
-      Math.sqrt(pressureFrozenCoarseWorkgroupCount),
-    );
-    const pressureFrozenCoarseWorkgroupsY = Math.ceil(
-      pressureFrozenCoarseWorkgroupCount / pressureFrozenCoarseWorkgroupsX,
-    );
     const pressureMembershipWorkgroups = Math.ceil(
       this.pressureExecutionImageLayout.pressureMembershipWordCount / WORKGROUP_SIZE,
     );
@@ -5168,13 +5140,6 @@ export class WebGPUSparseCM12Resident {
       const activePass = openPass();
       activePass.setPipeline(this.pipelines[name]!);
       activePass.dispatchWorkgroupsIndirect(this.pressureMembershipIndirectArguments, 0);
-    };
-    const dispatchPersistentPressureCache = (name: string, slot: number) => {
-      const activePass = openPass();
-      activePass.setPipeline(this.pipelines[name]!);
-      activePass.dispatchWorkgroupsIndirect(
-        this.persistentPressureCacheIndirectArguments, 12 * slot,
-      );
     };
     const copyPressureSolveDispatchGate = () => {
       closePass();
@@ -5477,18 +5442,6 @@ export class WebGPUSparseCM12Resident {
       dispatch("planPressureMembershipEpoch", 1);
       dispatch("beginSparseCM12PressureTopologyRepair", 1);
       closePass();
-      const persistentFamilies = ["brick", "aggregateEdge", "hierarchyNode",
-        "hierarchyEdge"] as const;
-      persistentFamilies.forEach((family, index) => {
-        encoder.copyBufferToBuffer(this.topologyArena,
-          sparseCM12PersistentPressureCacheAggregateIndirectByteOffset(
-            this.persistentPressureCacheLayout, family, "seed"),
-          this.persistentPressureCacheIndirectArguments, 12 * index, 12);
-      });
-      dispatchPersistentPressureCache("seedPreviousPCFBrickLeaves", 0);
-      dispatchPersistentPressureCache("seedPreviousPCFAggregateEdgeLeaves", 1);
-      dispatchPersistentPressureCache("seedPreviousPCFHierarchyNodeLeaves", 2);
-      dispatchPersistentPressureCache("seedPreviousPCFHierarchyEdgeLeaves", 3);
       dispatch("finalizeSparseCM12PressureTopologyBrickFrontier", 1);
       // Indirect arguments are copied out of GPU-authored headers. WebGPU
       // forbids transfer commands while the shared compute pass is open.
@@ -5519,9 +5472,9 @@ export class WebGPUSparseCM12Resident {
       closePass();
       closeSubstage("pcm-row-publication");
       if (pressureTopologyPhaseLimitForQA === "rows") return;
-      // Fine coefficients are now a complete PEI publication, not a private
-      // PCF dirty-leaf repair. PTR captured the already-open PCA candidate;
-      // publish the canonical PEI image before any aggregate reduction.
+      // Fine coefficients are the complete production pressure-cache
+      // publication. PEI snapshots that generation directly; the retired
+      // aggregate/hierarchy substages intentionally publish no numerical work.
       encoder.copyBufferToBuffer(this.pressureWorklists,
         sparseCM12PressureExecutionImageCellIndirectByteOffset(
           this.pressureExecutionImageLayout,
@@ -5530,61 +5483,16 @@ export class WebGPUSparseCM12Resident {
       dispatchPressureCell("publishFrozenPressureCellIds");
       dispatch("publishFrozenPressureMembership", pressureMembershipWorkgroups);
       dispatchPressureCell("publishFrozenPressureCoefficients");
-      dispatch("sealPersistentPressureAggregateFrontier", 1);
+      dispatch("finalizePersistentPressureFineCache", 1);
       closePass();
       closeSubstage("pca-fine-publication");
       if (pressureTopologyPhaseLimitForQA === "fine") return;
-      (persistentFamilies.slice(0, 2) as readonly (typeof persistentFamilies[number])[])
-        .forEach((family, index) => {
-          encoder.copyBufferToBuffer(this.topologyArena,
-            sparseCM12PersistentPressureCacheAggregateIndirectByteOffset(
-              this.persistentPressureCacheLayout, family, "repair"),
-            this.persistentPressureCacheIndirectArguments, 12 * (4 + index), 12);
-        });
-      dispatchPersistentPressureCache("repairPersistentPressureBrickWorkset", 4);
-      dispatchPersistentPressureCache("repairPersistentPressureAggregateEdgeWorkset", 5);
-      dispatch("finalizePersistentPressureAggregatePlan", 1);
-      closePass();
-      if (pressureTopologyPhaseLimitForQA === "coarse-plan") return;
-      (persistentFamilies.slice(0, 2) as readonly (typeof persistentFamilies[number])[])
-        .forEach((family, index) => {
-          encoder.copyBufferToBuffer(this.topologyArena,
-            sparseCM12PersistentPressureCacheAggregateIndirectByteOffset(
-              this.persistentPressureCacheLayout, family, "work"),
-            this.persistentPressureCacheIndirectArguments, 12 * (8 + index), 12);
-        });
-      if (pressureTopologyPhaseLimitForQA === "coarse-indirect") return;
-      dispatchPersistentPressureCache("repairPersistentPressureAggregateEdges", 9);
-      if (pressureTopologyPhaseLimitForQA === "coarse-edge") return;
-      dispatchPersistentPressureCache("repairPersistentPressureBrickDiagonals", 8);
-      if (pressureTopologyPhaseLimitForQA === "coarse-work") return;
-      dispatch("finalizePersistentPressureAggregateExecution", 1);
-      closePass();
       closeSubstage("pca-coarse-repair");
-      if (pressureTopologyPhaseLimitForQA === "coarse") return;
-      (persistentFamilies.slice(2) as readonly (typeof persistentFamilies[number])[])
-        .forEach((family, index) => {
-          encoder.copyBufferToBuffer(this.topologyArena,
-            sparseCM12PersistentPressureCacheAggregateIndirectByteOffset(
-              this.persistentPressureCacheLayout, family, "repair"),
-            this.persistentPressureCacheIndirectArguments, 12 * (6 + index), 12);
-        });
-      dispatchPersistentPressureCache("repairPersistentPressureHierarchyNodeWorkset", 6);
-      dispatchPersistentPressureCache("repairPersistentPressureHierarchyEdgeWorkset", 7);
-      dispatch("finalizePersistentPressureHierarchyPlan", 1);
-      closePass();
-      (persistentFamilies.slice(2) as readonly (typeof persistentFamilies[number])[])
-        .forEach((family, index) => {
-          encoder.copyBufferToBuffer(this.topologyArena,
-            sparseCM12PersistentPressureCacheAggregateIndirectByteOffset(
-              this.persistentPressureCacheLayout, family, "work"),
-            this.persistentPressureCacheIndirectArguments, 12 * (10 + index), 12);
-        });
-      dispatchPersistentPressureCache("repairPersistentPressureHierarchyDiagonals", 10);
-      dispatchPersistentPressureCache("repairPersistentPressureHierarchyEdges", 11);
-      dispatch("finalizePersistentPressureCache", 1);
-      dispatch("publishFrozenPressureCoarseCache", pressureFrozenCoarseWorkgroupsX,
-        pressureFrozenCoarseWorkgroupsY);
+      if (pressureTopologyPhaseLimitForQA === "coarse-plan"
+        || pressureTopologyPhaseLimitForQA === "coarse-indirect"
+        || pressureTopologyPhaseLimitForQA === "coarse-edge"
+        || pressureTopologyPhaseLimitForQA === "coarse-work"
+        || pressureTopologyPhaseLimitForQA === "coarse") return;
       closeSubstage("pca-hierarchy-and-freeze");
       if (pressureTopologyPhaseLimitForQA === "hierarchy") return;
       dispatch("finalizeSparseCM12PressureExecutionImage", 1);
@@ -5603,8 +5511,7 @@ export class WebGPUSparseCM12Resident {
         ),
         this.pressureExecutionIndirectArguments, 0, 48);
       // PTR and PCF form one GPU-authored transaction. Once PCF accepts the
-      // captured coefficient generation, one scalar receipt closes PTR; the
-      // per-brick states were already published by the topology transaction.
+      // captured fine-coefficient generation, one scalar receipt closes PTR.
       dispatch("finalizeSparseCM12BoundedPressureTopologyRepair", 1);
       // Open the next topology journal immediately. Resolution/activation/
       // retirement producers later in this frame append without host state.
@@ -5636,7 +5543,6 @@ export class WebGPUSparseCM12Resident {
       for (let iteration = 0;
         iteration < pressureIterations; iteration += 1) {
           dispatchPressureCell("updatePipelinedState");
-          dispatchPressureCell("applyJacobiPreconditioner");
           dispatchPressureCell("applyPipelinedImage");
           dispatch("reducePipelinedIteration", 1);
           if ((iteration + 1) % SPARSE_CM12_PRESSURE_TRUE_RESIDUAL_CADENCE === 0

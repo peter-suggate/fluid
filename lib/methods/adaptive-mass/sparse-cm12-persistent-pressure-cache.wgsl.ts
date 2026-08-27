@@ -121,8 +121,18 @@ fn pcfBegin()->bool{
   atomicStore(&${arena}[PCF_BASE+PCF_H_FIRST_FAULT],PCF_INVALID);
   atomicStore(&${arena}[PCF_BASE+PCF_H_CHANGED_EDGES],0u);
   atomicStore(&${arena}[PCF_BASE+PCF_H_CHANGED_DIAGONALS],0u);
-  if(!pcfaBegin()){return false;}
+  if(!pcfaBeginReceiptOnly()){return false;}
   atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCF_PHASE_COLLECTING);
+  return true;
+}
+fn pcfFinalizeFine()->bool{
+  if(atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])!=PCF_PHASE_COLLECTING
+    ||atomicLoad(&${arena}[PCF_BASE+PCF_H_FAULT])!=0u){
+    pcfFault(PCF_FAULT_PHASE,PCF_INVALID);return false;}
+  atomicStore(&${arena}[PCF_BASE+PCF_H_ACCEPTED_GEN],
+    atomicLoad(&${arena}[PCF_BASE+PCF_H_CANDIDATE_GEN]));
+  pcfaFinalizeReceiptOnly();
+  atomicStore(&${arena}[PCF_BASE+PCF_H_PHASE],PCF_PHASE_ACCEPTED);
   return true;
 }
 fn pcfFinePublicationOpen()->bool{return atomicLoad(&${arena}[PCF_BASE+PCF_H_PHASE])
