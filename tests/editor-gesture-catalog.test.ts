@@ -7,6 +7,7 @@ import {
   editorGestureForShortcut,
   gestureForPress,
   getEditorGesture,
+  probeClaimsPress,
   type EditorGestureId,
 } from "../lib/core/editor-gesture-catalog";
 import { targetAtRay } from "../lib/core/editor-probe-catalog";
@@ -125,4 +126,48 @@ test("every gesture id resolves to its own definition", () => {
     assert.equal(getEditorGesture(gesture.id).id, gesture.id);
   }
   assert.throws(() => getEditorGesture("not-a-gesture" as EditorGestureId));
+});
+
+// ---- the probes' claim on the press ---------------------------------------
+//
+// The rule that made the ray probe usable: a pixel is chosen by clicking it, so
+// while a probe is up the click cannot also be a selection. Before it, a click
+// on the floor opened a voxel sweep and selected the tank, and the pin it fired
+// arrived underneath a flyout nobody had asked for.
+
+const NO_PROBE = { ray: false, cell: false };
+const RAY = { ray: true, cell: false };
+const CELL = { ray: false, cell: true };
+
+test("a raised probe claims the press; no probe claims nothing", () => {
+  assert.equal(probeClaimsPress(RAY, undefined, NONE), true);
+  assert.equal(probeClaimsPress(CELL, undefined, NONE), true);
+  assert.equal(probeClaimsPress({ ray: true, cell: true }, undefined, NONE), true);
+  assert.equal(probeClaimsPress(NO_PROBE, undefined, NONE), false);
+});
+
+// Arming is a choice about what a drag means, and it was made second. A probe
+// left up must not swallow the stroke the reader armed a tool for.
+test("an armed gesture outranks a raised probe", () => {
+  for (const gesture of ARMABLE_GESTURES) {
+    assert.equal(probeClaimsPress(RAY, gesture.id, NONE), false, gesture.id);
+  }
+});
+
+// The navigation request the whole catalog honours first. Without this a raised
+// probe would be a mode with no way to pan out of it.
+test("shift and the middle button navigate, probe or no probe", () => {
+  assert.equal(probeClaimsPress(RAY, undefined, { shift: true, middleButton: false }), false);
+  assert.equal(probeClaimsPress(RAY, undefined, { shift: false, middleButton: true }), false);
+});
+
+// The claim is answered without ever looking at what is under the cursor, which
+// is the point: every target used to have to remember to yield the press, and
+// the ones that did not — everything solid, via the sweep — swallowed it.
+test("the claim does not depend on the target", () => {
+  const scene = cloneScene(defaultScene);
+  const target = skyTarget(scene);
+  assert.equal(gestureForPress(undefined, target, NONE, true), "orbit");
+  // Same press, same target: the probe's claim is decided before this is asked.
+  assert.equal(probeClaimsPress(RAY, undefined, NONE), true);
 });

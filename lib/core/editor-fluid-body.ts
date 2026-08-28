@@ -1,7 +1,7 @@
 import { damBreakFractions, initialFluidBrickComponents } from "./initial-fluid";
 import { SCENE_SHAPES_BY_CODE } from "./scene-shape";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
-import { cellProbeAction, rayProbeAction } from "./editor-probe-actions";
+import { cellProbeAction } from "./editor-probe-actions";
 import {
   boxCenter,
   boxHandles,
@@ -649,9 +649,10 @@ export function fluidRingActions(
       children: [
         ...fluidInstrumentActions(scene),
         cellProbeAction(target),
-        // A ray through water is as real as a ray into a stone, and the water
-        // is where the expensive ones are, so the ray probe is offered here too.
-        rayProbeAction(target),
+        // The ray probe lands here too, appended by `targetActionsAt` to
+        // whichever ring carries this group — a ray through water is as real as
+        // a ray into a stone, and the water is where the expensive ones are.
+        // Declared there and not here so that exactly one thing composes it.
       ],
     },
   ];

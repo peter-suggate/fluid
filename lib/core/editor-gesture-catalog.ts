@@ -228,6 +228,48 @@ export function editorGestureForShortcut(key: string): EditorGestureId | undefin
 }
 
 /**
+ * The pointer probes that are up. Both answer a *pixel*, so both want the click.
+ */
+export interface RaisedPointerProbes {
+  /** The ray probe: what work drew this pixel. */
+  readonly ray: boolean;
+  /** The cell probe: which pressure unknown is behind it. */
+  readonly cell: boolean;
+}
+
+/**
+ * Whether a raised probe owns this press, ahead of every gesture below.
+ *
+ * The one press rule that is not about the target, which is why it is answered
+ * before `gestureForPress` is even asked: a probe is aimed at a pixel, and the
+ * pixel is chosen by clicking it, so while one is up the click cannot also be a
+ * selection. It was, and the result was an instrument that looked broken while
+ * working — a press on anything solid opens a face-locked voxel sweep, and a
+ * release that never travelled selects what it landed on, so clicking the floor
+ * to read the ray behind it selected the tank and raised its flyout over the
+ * answer the probe had just pinned underneath.
+ *
+ * Two things still outrank it, and both are explicit requests:
+ *
+ * - **An armed gesture.** Arming is a choice about what a drag means and it was
+ *   made second; a probe left up must not swallow the stroke it was armed for.
+ * - **Shift and the middle button**, which are the navigation request the whole
+ *   catalog honours ahead of everything — see `gestureForPress`.
+ *
+ * What the claimed press keeps is the camera: a still click aims the probe, a
+ * drag orbits, which is what makes a pinned ray legible in three dimensions.
+ */
+export function probeClaimsPress(
+  probes: RaisedPointerProbes,
+  armed: EditorGestureId | undefined,
+  modifiers: GestureModifiers,
+): boolean {
+  if (!probes.ray && !probes.cell) return false;
+  if (armed) return false;
+  return !modifiers.shift && !modifiers.middleButton;
+}
+
+/**
  * What this press does: the armed gesture if one is armed and claims, otherwise
  * the first implicit gesture that claims the target.
  *

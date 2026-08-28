@@ -1671,23 +1671,28 @@ export interface SvoPixelTracePinRequest {
 }
 
 /**
- * What one viewport click does to the diagnostic.
+ * What one viewport click asks the diagnostic for: this pixel.
  *
- * A click is a toggle, not a re-aim. Once a ray is pinned the camera is free to
- * orbit away from the pixel that produced it, so the pixel under a second click
- * bears no relation to the frozen ray; going live is the only honest answer, and
- * the click after that pins wherever the pointer has since gone.
+ * A click is a re-aim, not a toggle. It used to be a toggle, on the argument
+ * that once a ray is pinned the camera is free to orbit away from the pixel that
+ * produced it, so the pixel under a second click bears no relation to the frozen
+ * ray. True, and it is an argument for re-aiming: the second click names a new
+ * ray, from where the camera now stands, and freezing *that* is what was asked.
+ * Going live instead spent every other click doing nothing a reader could see,
+ * which is unaffordable now that the click is how a pixel is chosen at all — see
+ * the probe's claim on the press in `WebGPUViewport`. Releasing without aiming
+ * somewhere new is the HUD's Unpin button, and putting the probe down.
+ *
+ * A request already in flight is simply replaced. The one in flight is the
+ * pixel the reader has since moved on from, and the handshake only ever pins a
+ * request whose own pixel came back — see `resolveSvoPixelTracePin`.
  */
 export function svoPixelTracePinClick(state: {
-  readonly pinned: boolean;
-  /** True while an earlier click is still waiting for its pixel. */
-  readonly pending: boolean;
   readonly normalizedX: number;
   readonly normalizedY: number;
   readonly cameraKey: string;
   readonly revision: number;
-}): { readonly request: SvoPixelTracePinRequest | undefined } {
-  if (state.pinned || state.pending) return { request: undefined };
+}): { readonly request: SvoPixelTracePinRequest } {
   return {
     request: {
       normalizedX: Math.max(0, Math.min(1, state.normalizedX)),

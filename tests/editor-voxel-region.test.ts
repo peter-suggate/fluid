@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EditorEntityContext } from "../lib/core/editor-entity";
+import type { EditorAction } from "../lib/core/editor-action";
 import { targetActionsAt, targetAtRay } from "../lib/core/editor-probe-catalog";
 import { projectSolidVoxelClearRegion, withSolidVoxelClearRegion } from "../lib/core/editor-solid-voxel";
 import {
@@ -142,10 +143,18 @@ test("a voxel inside the standing region names it, and one outside names the tan
 
 // A pixel is traceable wherever it is drawn, and a solid was the one surface
 // nothing in the document named — so nothing could offer the probe for it.
+//
+// Reached recursively, because *where* the wedge sits is the ring's business,
+// not this test's: a vessel groups its instruments under `Inspect` and offers it
+// there, while a target with no instrument group of its own gets it as the ring's
+// last wedge. What is asserted here is only that it is reachable.
 test("a voxel and a wall both offer the ray probe", () => {
+  const offersRay = (actions: readonly EditorAction[]): boolean => actions.some(
+    (action) => action.id === "trace-ray" || offersRay(action.children ?? []));
+
   const { scene, rayAt } = slabScene();
   const voxel = targetAtRay(context(scene), rayAt(4, 2));
-  assert.ok(targetActionsAt(context(scene), voxel).some((a) => a.id === "trace-ray"));
+  assert.ok(offersRay(targetActionsAt(context(scene), voxel)));
 
   const bare = cloneScene(defaultScene);
   bare.solidVoxels = [];
@@ -153,5 +162,5 @@ test("a voxel and a wall both offer the ray probe", () => {
     origin: { x: 0, y: 0.5 * bare.container.height_m, z: -2 * bare.container.depth_m },
     direction: { x: 0, y: 0, z: 1 },
   });
-  assert.ok(targetActionsAt(context(bare), wall).some((a) => a.id === "trace-ray"));
+  assert.ok(offersRay(targetActionsAt(context(bare), wall)));
 });

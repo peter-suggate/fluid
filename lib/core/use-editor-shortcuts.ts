@@ -84,6 +84,18 @@ export function useEditorShortcuts(): void {
         // drops the axis lock and the second leaves the tool. A raised
         // instrument is the outermost of those: it covers part of the scene, so
         // it goes before anything about the selection under it moves.
+        //
+        // A raised *probe* goes before even that, because it governs the pointer
+        // and not just some pixels: while one is up the click aims it rather than
+        // selecting (see the probe's claim on the press in `WebGPUViewport`), so
+        // this is the key that gives the click back. Both go together — they are
+        // one layer, two questions about the same pixel — and one Escape putting
+        // down "the probes" is a simpler thing to know than an order between them.
+        if (ui.pixelTraceEnabled || ui.fluidCellTraceEnabled) {
+          ui.setPixelTraceEnabled(false);
+          ui.setFluidCellTraceEnabled(false);
+          return;
+        }
         if (ui.sceneOverlay) { ui.setSceneOverlay(null); return; }
         if (ui.axisConstraint) { ui.setAxisConstraint(undefined); return; }
         // INTERACT is the outermost of all of them, so it is the last thing
@@ -134,6 +146,18 @@ export function useEditorShortcuts(): void {
       if (event.key.toLowerCase() === "c") {
         event.preventDefault();
         ui.setFluidCellTraceEnabled(!ui.fluidCellTraceEnabled);
+        return;
+      }
+      // The ray picker, on the same bargain. "r" for ray, claimed by no tool and
+      // by no instrument. It exists for the same reason the cell key does: a
+      // right-click is the only other route to it, and a right-click needs
+      // something to land on — so a scene being watched rather than edited, or
+      // one whose pick is rebuilding, could not ask what drawing a pixel cost.
+      // Enabling only arms the probe: it then follows the pointer, and the pixel
+      // is chosen by clicking it, which is why this key does not also pin.
+      if (event.key.toLowerCase() === "r") {
+        event.preventDefault();
+        ui.setPixelTraceEnabled(!ui.pixelTraceEnabled);
         return;
       }
       // Walking the cell picker along the pointer ray. Bracket keys because the

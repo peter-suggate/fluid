@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EDITOR_PROBES, targetAtRay } from "../lib/core/editor-probe-catalog";
+import { EDITOR_PROBES, targetActionsAt, targetAtRay } from "../lib/core/editor-probe-catalog";
 import { TANK_SELECTION_ID } from "../lib/core/editor-tank";
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/core/model";
 import { sceneCellSizes_m } from "../lib/core/scene-lattice";
 import type { EditorEntityContext, EditorRay } from "../lib/core/editor-entity";
+import type { EditorAction } from "../lib/core/editor-action";
+
+/** A pixel a click could plausibly have landed on. */
+const AIM = { normalizedX: 0.25, normalizedY: 0.75 } as const;
 
 function context(scene: SceneDescription): EditorEntityContext {
   // `pickingAvailable: true` stands in for a fenced presentation, which is what
@@ -62,6 +66,80 @@ test("every ray from every direction lands on a target", () => {
     }
   }
   assert.ok(sampled > 300, `expected a broad sweep, sampled ${sampled}`);
+});
+
+// The companion property to the one above: every pixel names something, and
+// every one of those somethings can say what drawing it cost. Asserted as a
+// sweep rather than as a list of entities, because the failure this replaces was
+// exactly an entity nobody remembered to give the wedge to.
+test("every target the sweep reaches offers the ray probe, exactly once", () => {
+  const scene = cloneScene(defaultScene);
+  const c = scene.container;
+  const centre = { x: 0, y: 0.5 * c.height_m, z: 0 };
+  const radius = 3 * Math.max(c.width_m, c.height_m, c.depth_m);
+  const count = (actions: readonly EditorAction[]): number => actions.reduce(
+    (total, action) => total + (action.id === "trace-ray" ? 1 : 0) + count(action.children ?? []), 0);
+  const seen = new Set<string>();
+  for (const eye of [
+    { x: radius, y: 0.6 * radius, z: radius },
+    { x: -radius, y: 0.2 * radius, z: 0 },
+    { x: 0, y: 2 * radius, z: 0 },
+    centre,
+  ]) {
+    for (let u = -1; u <= 1; u += 0.25) {
+      for (let v = -1; v <= 1; v += 0.25) {
+        const aim = { x: centre.x + u * radius, y: centre.y + v * radius, z: centre.z + u * v * radius };
+        if (aim.x === eye.x && aim.y === eye.y && aim.z === eye.z) continue;
+        const target = targetAtRay(context(scene), rayFrom(eye, aim));
+        seen.add(target.probeId);
+        assert.equal(count(targetActionsAt(context(scene), target, AIM)), 1,
+          `${target.probeId} ring must offer exactly one ray probe`);
+      }
+    }
+  }
+  assert.ok(seen.size >= 3, `expected several kinds of target in the sweep, saw ${[...seen].join(", ")}`);
+});
+
+// Instruments live under Inspect, so a ring that has that group gets the ray
+// probe inside it rather than as a loose wedge beside it.
+test("a ring with an Inspect group offers the ray probe inside it", () => {
+  const scene = cloneScene(defaultScene);
+  const c = scene.container;
+  const target = targetAtRay(context(scene), {
+    origin: { x: 0, y: 0.1 * c.height_m, z: -2 * c.depth_m },
+    direction: { x: 0, y: 0, z: 1 },
+  });
+  const actions = targetActionsAt(context(scene), target, AIM);
+  assert.equal(actions.filter((action) => action.id === "trace-ray").length, 0,
+    "a ring with instruments nests it with them rather than at the top");
+  const inspect = actions.find((action) => action.id === "inspect");
+  assert.ok(inspect, "the vessel's ring carries the instrument group");
+  assert.equal((inspect.children ?? []).filter((action) => action.id === "trace-ray").length, 1);
+  // Beside the cell probe, which is the other question asked of this pixel.
+  assert.ok((inspect.children ?? []).some((action) => action.id === "inspect-cell"));
+});
+
+// Every ray wedge carries the pixel it was composed on. Without it the probe
+// re-aims at wherever the pointer ended up out on the ring.
+test("the ray probe carries the click's aim", () => {
+  const scene = cloneScene(defaultScene);
+  const c = scene.container;
+  const target = targetAtRay(context(scene), {
+    origin: { x: 0, y: 4 * c.height_m, z: 4 * c.depth_m },
+    direction: { x: 0, y: 0.7071, z: 0.7071 },
+  });
+  const find = (actions: readonly EditorAction[]): EditorAction | undefined => {
+    for (const action of actions) {
+      if (action.id === "trace-ray") return action;
+      const nested = find(action.children ?? []);
+      if (nested) return nested;
+    }
+    return undefined;
+  };
+  const ray = find(targetActionsAt(context(scene), target, AIM));
+  assert.ok(ray, "the room is a drawn pixel too");
+  assert.equal(ray.effect?.kind, "probe");
+  assert.deepEqual(ray.effect?.kind === "probe" ? ray.effect.aim : undefined, AIM);
 });
 
 test("a ray down the middle of an empty tank reaches a wall, not the room", () => {

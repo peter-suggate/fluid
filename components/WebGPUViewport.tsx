@@ -80,7 +80,7 @@ import {
   type EditorHandle,
 } from "../lib/core/editor-entity";
 import { editorBodyPoses, editorEntityContext, findEntity, sceneActionsAt, surfacedEntities } from "../lib/core/editor-entity-catalog";
-import { gestureForPress } from "../lib/core/editor-gesture-catalog";
+import { gestureForPress, probeClaimsPress } from "../lib/core/editor-gesture-catalog";
 import {
   projectSolidVoxelClearRegion,
   solidVoxelClearPreview,
@@ -633,11 +633,10 @@ export function WebGPUViewport() {
         // canvas would report itself as having nothing to trace.
         tracePointerRef.current = { ...aim };
         tracePinRequestRef.current = svoPixelTracePinClick({
-          pinned: false, pending: false,
           ...aim,
           cameraKey: pixelTraceCameraKey(ui.camera),
           revision,
-        }).request ?? null;
+        }).request;
         useUIStore.setState({ pixelTracePinRequest: null });
       }
     }
@@ -727,17 +726,21 @@ export function WebGPUViewport() {
     // A drag is an orbit, not a pick.
     if (Math.hypot(event.clientX - gesture.downX, event.clientY - gesture.downY) > CLICK_SLOP_PX) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    // A click is a pointer observation in its own right: without this a click
-    // that never moved first would have nowhere to aim.
-    tracePointerRef.current = {
+    const pointer = {
       normalizedX: (event.clientX - rect.left) / Math.max(rect.width, 1),
       normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
     };
+    // A click is a pointer observation in its own right: without this a click
+    // that never moved first would have nowhere to aim.
+    tracePointerRef.current = pointer;
     const ui = useUIStore.getState();
-    // Releasing needs no handshake — there is nothing to wait for — so unpin is
-    // immediate while pinning goes through the request the frame loop aims.
+    // A click names a cell, every time — see the re-aim argument on
+    // `svoPixelTracePinClick`. The pin is released first because a pinned trace
+    // outranks a pending request when the frame loop picks what to gather, and
+    // because `setFluidCellTracePinned` clears the request; releasing after
+    // asking would throw the ask away.
     if (ui.fluidCellTracePinned) ui.setFluidCellTracePinned(false);
-    else ui.requestFluidCellTracePin();
+    ui.requestFluidCellTracePin({ aim: pointer });
   };
 
   const resolvePixelTracePinGesture = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -754,17 +757,16 @@ export function WebGPUViewport() {
     // that never moved first would have nowhere to trace.
     tracePointerRef.current = pointer;
     const ui = useUIStore.getState();
-    const { request } = svoPixelTracePinClick({
-      pinned: ui.pixelTracePinned,
-      pending: tracePinRequestRef.current !== null,
+    // Released before the new aim is recorded, and for a mechanical reason as
+    // much as a doctrinal one: `pixelTraceDrawConfig` lets a pinned ray outrank a
+    // pending request, so a probe left pinned would go on tracing the old pixel
+    // and the new request could never be answered.
+    if (ui.pixelTracePinned) ui.setPixelTracePinned(false);
+    tracePinRequestRef.current = svoPixelTracePinClick({
       ...pointer,
       cameraKey: pixelTraceCameraKey(ui.camera),
       revision: rendererRef.current?.pixelTraceRevision ?? 0,
-    });
-    tracePinRequestRef.current = request ?? null;
-    // Releasing needs no handshake: there is nothing to wait for, and the frozen
-    // work should give way to the pointer on the very next frame.
-    if (!request && ui.pixelTracePinned) ui.setPixelTracePinned(false);
+    }).request;
   };
   /**
    * The object in the user's hand.
@@ -797,7 +799,9 @@ export function WebGPUViewport() {
     // `selectOnClick` is what a press on empty space resolved to before it became
     // an orbit. A press has to stay available as a camera drag, so the selection
     // it would make is carried here and spent only if the pointer never moved.
-    | { id: number; x: number; y: number; downX: number; downY: number; action: "orbit" | "pan"; selectOnClick?: EditorSelection }
+    // `probe` marks a press a raised pointer probe has claimed: it may orbit,
+    // but its click belongs to the probe and must not touch the selection.
+    | { id: number; x: number; y: number; downX: number; downY: number; action: "orbit" | "pan"; selectOnClick?: EditorSelection; probe?: true }
     // `released` records a pointerup that arrived while the GPU pick readback
     // was still in flight, so a fast click still resolves instead of being
     // dropped along with the gesture.
@@ -2223,21 +2227,37 @@ export function WebGPUViewport() {
     }
     // Arm before any of the early returns below claim the press: the release, not
     // the press, is what decides whether this was a click.
+    //
+    // Read here rather than inside the button-0 branch below, where the compiler
+    // would know shift is false and the button is not the middle one, and a
+    // catalog handed two constants would have its rules compiled away rather
+    // than merely unreached.
+    const modifiers = { shift: event.shiftKey, middleButton: event.button === 1 };
     const traceUI = useUIStore.getState();
-    const pickGesture = !traceUI.armedGesture && event.button === 0 && !event.shiftKey
+    const probes = { ray: traceUI.pixelTraceEnabled, cell: traceUI.fluidCellTraceEnabled };
+    const probeClaim = probeClaimsPress(probes, traceUI.armedGesture, modifiers);
+    const pickGesture = probeClaim
       ? { id: event.pointerId, downX: event.clientX, downY: event.clientY }
       : null;
-    tracePinGestureRef.current = traceUI.pixelTraceEnabled ? pickGesture : null;
-    cellTracePinGestureRef.current = traceUI.fluidCellTraceEnabled ? pickGesture : null;
+    tracePinGestureRef.current = probes.ray ? pickGesture : null;
+    cellTracePinGestureRef.current = probes.cell ? pickGesture : null;
     // pointerRef is a ref, so clearing hover here is what actually re-renders
     // the chip away for the duration of the gesture.
     setHoverTarget(null);
     publishHoverHighlight(null);
-    // Read before the guard below narrows them: inside a button-0 branch the
-    // compiler knows shift is false and the button is not the middle one, and a
-    // catalog that was handed two constants would have its pan rule compiled
-    // away rather than merely unreached.
-    const modifiers = { shift: event.shiftKey, middleButton: event.button === 1 };
+    // A raised probe owns the press: the click aims it and selects nothing, and
+    // the drag still orbits — which is what the wedge's own hint promises
+    // ("orbit to see it in 3D"). Why, and what outranks it, is `probeClaimsPress`
+    // in the gesture catalog; this is only the performance of it. Nothing is
+    // lost that a right-click cannot reach: the ring still opens on whatever is
+    // under the cursor, Select included.
+    if (probeClaim) {
+      setHandleHover(null);
+      setCursorDrop(null);
+      pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
+        downX: event.clientX, downY: event.clientY, action: "orbit", probe: true };
+      return;
+    }
     if (event.button === 0 && !event.shiftKey) {
       const ray = pointerRay(event);
       // Handles first, and never GPU-gated: they are the selection's own
@@ -2660,6 +2680,11 @@ export function WebGPUViewport() {
     // becomes what was clicked, which is how a click deselects.
     if (!cancelled && useUIStore.getState().viewportMode === "interact"
       && (active.action === "orbit" || active.action === "pan")
+      // A probe's click aimed the probe and nothing else. Without this the same
+      // click would also deselect, since a claimed press carries no
+      // `selectOnClick` — so reading a pixel would quietly put down whatever the
+      // reader was working on.
+      && !active.probe
       && emptySpaceClickDeselects(active.action, event.clientX - active.downX, event.clientY - active.downY)) {
       useUIStore.getState().select(active.selectOnClick);
     }

@@ -180,11 +180,6 @@ const solidVoxelProbe: EditorProbeDefinition = {
       },
     };
   },
-  // A voxel is a drawn pixel like any other, so it offers the ray probe on the
-  // same argument `editor-probe-actions.ts` makes: the question "what work drew
-  // this dot" belongs to the pixel, not to an entity, and a solid was the one
-  // surface that could never be asked because nothing in the document named it.
-  actions: (_context, _target, aim) => [rayProbeAction({ aim })],
 };
 
 /**
@@ -261,9 +256,6 @@ const tankWallProbe: EditorProbeDefinition = {
       detail: { axis: face.axis, sign: face.sign },
     };
   },
-  // The wall itself is drawn, so it can be traced. The tank's own verbs arrive
-  // underneath these, composed by `targetActionsAt` from the `selection` above.
-  actions: (_context, _target, aim) => [rayProbeAction({ aim })],
 };
 
 function wallLabel(axis: "x" | "y" | "z", sign: -1 | 1): string {
@@ -544,16 +536,57 @@ export function targetActionsAt(
 ): readonly EditorAction[] {
   const definition = EDITOR_PROBES.find((candidate) => candidate.id === target.probeId);
   const particular = definition?.actions?.(context, target, aim) ?? [];
-  if (!target.selection) {
-    return [...particular, ...sceneActionsAt(context.scene, target.point_m, target.normal)];
-  }
-  return [...particular, ...entityActionsAt(context, {
-    selection: target.selection,
-    point_m: target.point_m,
-    normal: target.normal,
-    aim,
-  })];
+  const composed = !target.selection
+    ? [...particular, ...sceneActionsAt(context.scene, target.point_m, target.normal)]
+    : [...particular, ...entityActionsAt(context, {
+      selection: target.selection,
+      point_m: target.point_m,
+      normal: target.normal,
+      aim,
+    })];
+  return withRayProbe(composed, aim);
 }
+
+/**
+ * Every target is a drawn pixel, so every ring offers the ray probe.
+ *
+ * Composed here rather than declared by each answer, on the argument
+ * `editor-probe-actions.ts` makes: the question "what work drew this dot" belongs
+ * to the pixel and not to the thing under it. Declared per target it was also
+ * *missed* per target — a refinement region, a rigid body, an inflow, the ground
+ * and the open room each withheld an instrument that means exactly what it means
+ * over a wall, while the tank wall offered it twice, once on its own account and
+ * once inside the ring its vessel composes. Both failures are structural, so the
+ * fix is: exactly one call site, and it is this one.
+ *
+ * Placement follows the ring rather than being fixed. Where the target already
+ * groups its instruments under `Inspect` — the water's ring and the room's both
+ * do — the ray probe joins them there, beside the cell probe and the pipelines it
+ * is a peer of. Where there is no such group it is the ring's last wedge. What
+ * a reader learns is one rule, "instruments are under Inspect", rather than a
+ * wedge that moves for reasons only the catalog knows.
+ */
+function withRayProbe(
+  actions: readonly EditorAction[],
+  aim: EditorActionTarget["aim"],
+): readonly EditorAction[] {
+  const offersRay = (candidates: readonly EditorAction[]): boolean =>
+    candidates.some((action) => action.id === "trace-ray" || offersRay(action.children ?? []));
+  if (offersRay(actions)) return actions;
+  const probe = rayProbeAction({ aim });
+  const instruments = actions.findIndex((action) => action.id === INSTRUMENT_GROUP_ID);
+  if (instruments < 0) return [...actions, probe];
+  const group = actions[instruments];
+  return actions.with(instruments, { ...group, children: [...(group.children ?? []), probe] });
+}
+
+/**
+ * The wedge that collects instruments, by the id its two composers share —
+ * `sceneInstrumentWedge` for the room and `fluidRingActions` for the water and
+ * the vessel. A constant rather than a string in a condition, because it is a
+ * contract between three files.
+ */
+const INSTRUMENT_GROUP_ID = "inspect";
 
 /** The four corners of one wall of the tank, for callers drawing a face. */
 export { boxFaceCorners };
