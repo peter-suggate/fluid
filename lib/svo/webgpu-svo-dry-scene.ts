@@ -2946,7 +2946,7 @@ fn dryBrickMacroSkip(summary:SvoBrickOccupancy,local:vec3u,bounds:mat2x3f,extent
     return dryPrimaryLeafAggregateHit(ro,rd,bounds,entry,${primaryBrickExitWGSL},hit.voxelOffset,
       svoBrickOccupancyDecode(leafNode.links.w),lodStride);
   }` : "";
-  const primaryLeafTraceCallWGSL = brickOccupancyMode === "macro-hdda" ? "traceLeafPayloadMacroHdda" : "traceLeafPayload";
+  const primaryLeafVoxelTraceCallWGSL = brickOccupancyMode === "macro-hdda" ? "traceLeafVoxelPayloadMacroHdda" : "traceLeafVoxelPayload";
   const shadowLeafTraceCallWGSL = brickOccupancyMode === "macro-hdda" ? "traceLeafPayloadVisibilityMacroHdda" : "traceLeafPayloadVisibility";
   const macroHddaPrimaryWGSL = brickOccupancyMode === "macro-hdda" ? /* wgsl */ `
 fn traceLeafPayloadFineInterval(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat2x3f,extent:vec3f,intervalEnter:f32,intervalExit:f32,cellMinimum:vec3u,cellMaximum:vec3u)->DryHit{
@@ -2962,13 +2962,7 @@ fn traceLeafPayloadFineInterval(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat
   }
   return missHit();
 }
-fn traceLeafPayloadMacroHdda(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit{
-  let terminalNode=svoNodeLoad(hit.nodeIndex);
-  if(terminalNode.links.z!=SVO_INVALID){let terminalLeaf=svoLeafLoad(terminalNode.links.z);
-    if(terminalLeaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){
-      return dryPlanarTerminalHit(ro,rd,hit.nodeIndex,hit.tEnter,hit.tExit);
-    }
-  }
+fn traceLeafVoxelPayloadMacroHdda(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit{
   ${leafNodeSetupWGSL}let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);let summary=svoBrickOccupancyDecode(leafNode.links.w);
   if(summary.ready==0u){return traceLeafPayloadFineInterval(ro,rd,hit,bounds,extent,hit.tEnter,hit.tExit,vec3u(0u),vec3u(dry.mapping.brickSize));}
   if(summary.occupied==0u){return missHit();}
@@ -4969,24 +4963,36 @@ fn primitiveHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->
   return DryHit(exact.t_m,exact.normal.xyz,svoPrimitiveMaterialId(record),svoPrimitiveOwnerId(record),exact.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
 }
 
-// A planar terminal resolves one exact finite slab from the immutable
-// structural catalogue and never enters the 8^3 DDA. Geometry and leaf index
-// are accepted together; no source primitive ordering participates in a hit.
-fn dryPlanarTerminalHit(ro:vec3f,rd:vec3f,nodeIndex:u32,tEnter:f32,tExit:f32)->DryHit{
-  if(nodeIndex>=svoControlLoad(0u)){return missHit();}
-  let node=svoNodeLoad(nodeIndex);let leafIndex=node.links.z;
-  if(leafIndex==SVO_INVALID||leafIndex>=svoControlLoad(1u)){return missHit();}
-  let leaf=svoLeafLoad(leafIndex);
-  if(leaf.topology.x!=nodeIndex||leaf.topology.z!=SVO_LEAF_TERMINAL_PLANAR_BOUNDARY
-    ||dry.planarBoundaries.y==0u||dry.planarBoundaries.z!=${PLANAR_BOUNDARY_PATCH_BYTES}u
-    ||leaf.topology.w>=dry.planarBoundaries.x||leaf.topology.w>=arrayLength(&dryPlanarBoundaries)){return missHit();}
-  let boundary=dryPlanarBoundaries[leaf.topology.w];
+// The patch half of a planar terminal: one exact finite slab out of the
+// immutable structural catalogue, never the 8^3 DDA, and no source primitive
+// ordering participating in a hit.
+//
+// Split out because the wrapper below resolves a *leaf index* into a patch
+// index, and the primary walk has already done that resolution itself — it has
+// to, to decide whether the payload lifecycle gate applies at all
+// (\`dryPrimaryLeafResolve\`). Handing the patch index straight in is what stops
+// the same node and leaf being read again to recover it.
+fn dryPlanarPatchHit(ro:vec3f,rd:vec3f,patchIndex:u32,tEnter:f32,tExit:f32)->DryHit{
+  if(dry.planarBoundaries.y==0u||dry.planarBoundaries.z!=${PLANAR_BOUNDARY_PATCH_BYTES}u
+    ||patchIndex>=dry.planarBoundaries.x||patchIndex>=arrayLength(&dryPlanarBoundaries)){return missHit();}
+  let boundary=dryPlanarBoundaries[patchIndex];
   let exact=intersectPlanarBoundary(boundary,ro,rd,max(tEnter,1e-4),tExit);
   if(exact.valid==0u){return missHit();}
   let identity=planarBoundaryIdentity(boundary);
   return DryHit(exact.tHit,exact.normal,identity&0xffffu,identity>>16u,
     SVO_FEATURE_BOX_X+exact.featureAxis,DRY_GBUFFER_FIELD_ANALYTIC,
     DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+}
+// Geometry and leaf index are accepted together: the node's leaf link, the
+// leaf's back-reference and its terminal kind all have to agree before the
+// patch above is allowed to answer.
+fn dryPlanarTerminalHit(ro:vec3f,rd:vec3f,nodeIndex:u32,tEnter:f32,tExit:f32)->DryHit{
+  if(nodeIndex>=svoControlLoad(0u)){return missHit();}
+  let node=svoNodeLoad(nodeIndex);let leafIndex=node.links.z;
+  if(leafIndex==SVO_INVALID||leafIndex>=svoControlLoad(1u)){return missHit();}
+  let leaf=svoLeafLoad(leafIndex);
+  if(leaf.topology.x!=nodeIndex||leaf.topology.z!=SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){return missHit();}
+  return dryPlanarPatchHit(ro,rd,leaf.topology.w,tEnter,tExit);
 }
 
 // Exact planar geometry is a first-class structural visibility set, not a
@@ -5056,13 +5062,7 @@ fn dryVoxelFaceNormal(bounds:mat2x3f,point:vec3f)->vec3f{
   return normal;
 }
 ${surfaceReconstructionWGSL}
-fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
-  let terminalNode=svoNodeLoad(hit.nodeIndex);
-  if(terminalNode.links.z!=SVO_INVALID){let terminalLeaf=svoLeafLoad(terminalNode.links.z);
-    if(terminalLeaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){
-      return dryPlanarTerminalHit(ro,rd,hit.nodeIndex,hit.tEnter,hit.tExit);
-    }
-  }
+fn traceLeafVoxelPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
   ${primaryBrickSetupWGSL}
   ${primaryLodStrideWGSL}
   let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0)); let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
@@ -5103,7 +5103,57 @@ fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
   }
   return missHit();
 }
+// The terminal-kind test, for callers holding nothing but a leaf reference.
+//
+// The raster arms enter here with a synthesised hit and no records in hand, so
+// this pair of loads is theirs to pay. The primary walk resolves the same two
+// records once per visit and calls the halves directly.
+fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
+  let terminalNode=svoNodeLoad(hit.nodeIndex);
+  if(terminalNode.links.z!=SVO_INVALID){let terminalLeaf=svoLeafLoad(terminalNode.links.z);
+    if(terminalLeaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){
+      return dryPlanarTerminalHit(ro,rd,hit.nodeIndex,hit.tEnter,hit.tExit);
+    }
+  }
+  return traceLeafVoxelPayload(ro,rd,hit);
+}
 ${macroHddaPrimaryWGSL}
+
+// One node and one leaf record per primary leaf visit.
+//
+// The cursor reads the node and leaf to report the hit (webgpu-svo-traversal.ts),
+// and that read stays. What followed it was three more reads of the same pair:
+// \`dryLeafCurrent\` for the structural-planar test — which short-circuits before
+// the lifecycle word on a planar leaf, so the node is not read a fourth time —
+// \`traceLeafPayload\` to decide the terminal kind, and \`dryPlanarTerminalHit\`
+// to recover the patch index. Three further pairs, strictly dependent, on the
+// path that dominates a flat scene. This collapses them to one and answers all
+// three questions from registers.
+//
+// The three outcomes reproduce the old pair exactly:
+//   - a structurally valid planar terminal bypasses the payload lifecycle
+//     gate, because it owns no voxel payload for the voxeliser to stamp;
+//   - a leaf whose terminal word says planar but whose node/leaf link does not
+//     validate resolved to \`missHit()\` under both gates before, i.e. skipped;
+//   - anything else is a voxel brick, admitted on the live publication gate.
+const DRY_LEAF_SKIP:u32=0u;
+const DRY_LEAF_VOXELS:u32=1u;
+const DRY_LEAF_PLANAR:u32=2u;
+struct DryLeafResolution{kind:u32,patchIndex:u32}
+fn dryPrimaryLeafResolve(nodeIndex:u32)->DryLeafResolution{
+  let node=svoNodeLoad(nodeIndex);
+  let leafIndex=node.links.z;
+  if(leafIndex!=SVO_INVALID){
+    let leaf=svoLeafLoad(leafIndex);
+    if(leaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){
+      if(nodeIndex>=svoControlLoad(0u)||leafIndex>=svoControlLoad(1u)
+        ||leaf.topology.x!=nodeIndex){return DryLeafResolution(DRY_LEAF_SKIP,0u);}
+      return DryLeafResolution(DRY_LEAF_PLANAR,leaf.topology.w);
+    }
+  }
+  if(!svoBrickLifecycleCurrent(svoBrickLifecycleDecode(node.links.w))){return DryLeafResolution(DRY_LEAF_SKIP,0u);}
+  return DryLeafResolution(DRY_LEAF_VOXELS,0u);
+}
 
 // The voxel-resolved surface first, the analytic set bounded by it second.
 //
@@ -5134,13 +5184,26 @@ fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
   ${analyticPrimaryUnbounded ? "let primitiveBest=traceScenePrimitives(ro,rd,initialMinimum,seeded.t,DRY_OWNER_NONE);if(primitiveBest.t<seeded.t){seeded=primitiveBest;}" : ""}
   var voxel=missHit();
   var minimum=max(initialMinimum,0.0);
+  // The hierarchy is walked in front of a surface that is already known.
+  //
+  // \`seeded\` is the exact nearest hit of the structural planar catalogue, and
+  // nothing behind it can be drawn: the return below picks the voxel only when
+  // it is nearer. The cursor nevertheless used to run to \`DRY_MISS\`, so every
+  // node and leaf under the stage floor was still expanded, interval-tested and
+  // visited before the root finally exited — on a flat scene, most of the walk.
+  //
+  // Clamping the cursor's far bound to the seed deletes exactly that tail.
+  // \`svoRayAabbWithInverse\` is inclusive at \`tMax\`, so the leaf holding the
+  // seeded surface is still reached and any voxel in front of it is still
+  // found; with nothing seeded the bound is \`DRY_MISS\`, i.e. unchanged.
+  let traversalMaximum=seeded.t;
   let mapping=dryConfiguredMapping();
   let leafBudget=clamp(dry.tuningCounts0.x,1u,${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u);
   var continuation:DryTraversalCursor;
   var traversalFinished=false;
-  dryTraversalCursorBegin(SvoRay(ro,minimum,rd,DRY_MISS),mapping,&continuation);
+  dryTraversalCursorBegin(SvoRay(ro,minimum,rd,traversalMaximum),mapping,&continuation);
   for(var leafVisit=0u;leafVisit<${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u&&leafVisit<leafBudget;leafVisit+=1u){
-    let ray=SvoRay(ro,minimum,rd,DRY_MISS);
+    let ray=SvoRay(ro,minimum,rd,traversalMaximum);
     let leaf=dryTraversalCursorNextPrimary(ray,mapping,&continuation);
 
     ${screenSpaceProxyTraceWGSL}
@@ -5150,11 +5213,35 @@ fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
       else if(leaf.status!=SVO_STATUS_MISS){}
       break;
     }
-    if(!dryLeafCurrent(leaf)){minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);continue;}
-    let payloadHit=${primaryLeafTraceCallWGSL}(ro,rd,leaf);
+    let resolved=dryPrimaryLeafResolve(leaf.nodeIndex);
+    if(resolved.kind==DRY_LEAF_SKIP){minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);continue;}
+    var payloadHit:DryHit;
+    if(resolved.kind==DRY_LEAF_PLANAR){payloadHit=dryPlanarPatchHit(ro,rd,resolved.patchIndex,leaf.tEnter,leaf.tExit);}
+    else{payloadHit=${primaryLeafVoxelTraceCallWGSL}(ro,rd,leaf);}
     // Leaves partition space and are visited front to back, so the first payload
     // hit is the nearest voxel-resolved surface and no later leaf can beat it.
-    if(payloadHit.t<seeded.t){voxel=payloadHit;break;}
+    if(payloadHit.t<seeded.t){voxel=payloadHit;traversalFinished=true;break;}
+    // A hit that is not nearer says the seed is the answer, so stop here too.
+    //
+    // The case this catches is a planar terminal re-reporting the very
+    // catalogue record that seeded the ray. \`intersectPlanarBoundary\` derives
+    // the slab's \`enter\`/\`exit\` from the ray and the record alone and then
+    // picks between them on \`enter >= tMin\`; the catalogue's tMin is the ray's
+    // own start and the terminal's is the leaf entry, so wherever the ray meets
+    // the slab from outside the leaf both take the \`enter\` branch and report
+    // bit-identical t. \`<\` alone therefore never fires on the stage floor and
+    // the walk grinds on underneath it. Where the two tMins disagree — a
+    // grazing ray whose slab entry precedes the leaf entry — the terminal takes
+    // the \`exit\` branch instead, lands past the clamped tExit and misses, and
+    // the walk ends on the next cursor call, which the clamp has already bounded
+    // at the seed. Both routes return \`seeded\`.
+    //
+    // One arm this does move pixels in: with screen-space termination on
+    // (\`screenSpaceProxyTraceWGSL\`, raster-primary/split only), a sub-pixel
+    // proxy node beneath the floor used to be returned over the floor, because
+    // that early return never compares against the seed. The clamp stops at the
+    // seed instead. Production compiles the arm out.
+    if(payloadHit.t<DRY_MISS){traversalFinished=true;break;}
     minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);
   }
   // Reaching the uniform budget without an authoritative hierarchy miss is a

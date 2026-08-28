@@ -278,11 +278,14 @@ test("the production shader binds and resolves the accepted planar catalogue", (
   assert.equal(planarBinding?.type, "read-only-storage");
   const shader = createSvoDrySceneFragmentWGSL(1, "canonical", "bounds", "inline");
   assert.match(shader, /@group\(0\) @binding\(6\) var<storage,read> dryPlanarBoundaries/);
-  const start = shader.indexOf("fn dryPlanarTerminalHit(");
-  const end = shader.indexOf("// Exact live-scene acceleration", start);
+  // The patch half is where the record is resolved and intersected; slice to the
+  // next function so the assertion cannot be satisfied by a neighbour's body.
+  const start = shader.indexOf("fn dryPlanarPatchHit(");
+  const end = shader.indexOf("\nfn ", start + 1);
   const terminalFunction = shader.slice(start, end);
   assert.match(terminalFunction, /intersectPlanarBoundary\(boundary/);
   assert.doesNotMatch(terminalFunction, /dryPrimitive\(/);
+  assert.match(shader, /fn dryPlanarTerminalHit\(/);
   assert.match(shader, /fn dryLeafStructuralPlanar\(hit:SvoTraversalHit\)->bool/);
   assert.match(shader, /return dryLeafStructuralPlanar\(hit\)\s*\|\|svoBrickLifecycleCurrent/);
   assert.match(shader, /fn dryPlanarCatalogHit\(/);
