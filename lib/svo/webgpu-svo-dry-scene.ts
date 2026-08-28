@@ -180,6 +180,14 @@ import {
   SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT,
 } from "./webgpu-svo-brick-raster";
 import {
+  createSvoPrimaryEntryPrepassWGSL,
+  svoPrimaryEntryCullBindGroupLayoutEntries,
+  svoPrimaryEntryDrawBindGroupLayoutEntries,
+  svoPrimaryEntryInstanceOffsetBytes,
+  svoPrimaryEntryPublicationBytes,
+  SVO_PRIMARY_ENTRY_PREPASS_CONTRACT,
+} from "./webgpu-svo-primary-entry-prepass";
+import {
   createSvoBrickRasterProbeWGSL,
   svoBrickRasterProbeBindGroupLayoutEntries,
   SparseVoxelBrickRasterProbeBuffers,
@@ -795,7 +803,7 @@ export function svoDrySceneClusterResolver(packed: Uint32Array | undefined): Svo
 
 /** Packed dry-scene parameters. */
 export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
-  sizeBytes: 624,
+  sizeBytes: 640,
   glassWordOffset: 24,
   /** count, generation, stride bytes, reserved for accepted planar terminals. */
   planarBoundaryWordOffset: 28,
@@ -871,6 +879,22 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
    * presence in bit 24.
    */
   payloadLane1WordOffset: 152,
+  /**
+   * x: is the primary entry-seed plane live this frame?
+   *
+   * A uniform rather than a shader constant for the same reason `lod` is one:
+   * the RENDER panel's `primary-entry-prepass` switch has to withhold the pass
+   * without rebuilding a pipeline, and an A/B over it has to be interleavable.
+   * It cannot be inferred from the plane itself — an unwritten texel *means*
+   * "no voxel leaf on this ray", which is a proof of absence the prepass earns
+   * by drawing every leaf, so a stale or cleared plane would read as a legal
+   * answer and resolve the frame to sky. Zero here is the only signal that
+   * says "unknown": the fragment then descends from the root, exactly as a
+   * build compiled without the prepass does.
+   *
+   * yzw reserved.
+   */
+  primaryEntryWordOffset: 156,
 } as const);
 
 /** Low-byte `dry.payloadLanes1.w` codes. Mirrors `SparseBrickLeafPayloadMode`. */
@@ -1718,6 +1742,72 @@ export interface SvoDryOptimizationExperiments {
    * which is a diagnostic price and not a rendering one.
    */
   readonly primaryLeafVisitHistogram?: boolean;
+  /**
+   * Seed the primary megakernel with a rasterized conservative entry depth
+   * instead of starting every ray at the root AABB the camera sits inside.
+   *
+   * Default on. `false` withdraws the whole pass — the compute cull, the depth
+   * draw, the texture, and the seed binding and every consumer of it in the
+   * fragment — so the arm it selects is exactly the pre-prepass program rather
+   * than the same program with a never-taken branch left priced into it.
+   *
+   * The pass is the spatial half of the answer the retired temporal cache used
+   * to give (docs/svo-primary-visibility-handoff.md part 3): current-frame
+   * work, no camera coherence key, nothing carried across frames. What it
+   * removes is the descent, not the visibility.
+   *
+   * The seed is also the cursor's near bound, not only an early-out test.
+   * Moving `ray.tMin` off zero re-associates every interval the parametric
+   * traversal computes from it, so a leaf's reported `tEnter` — and with it the
+   * in-leaf DDA's first cell — can shift by an ULP. That is why the acceptance
+   * oracle for this arm is the packed-surface and identity-media planes, which
+   * carry visibility and identity and are bit-identical either way, rather than
+   * the hardware-depth and image planes, which move at ULP scale on
+   * `garden-svo-lighting`. Skipping the descent is the point of the pass, so
+   * the drift is the price, not a defect.
+   */
+  readonly primaryEntryPrepass?: boolean;
+  /**
+   * Fetch octree records at record width instead of one scalar at a time, and
+   * stop refetching the ones the cursor already holds.
+   *
+   * The structural arena is one buffer typed `array<u32>`, which makes every
+   * node fetch eight separately range-clamped scalar loads and every leaf fetch
+   * four — the shape the reference `array<SvoNode>` binding never had. This arm
+   * types it `array<vec4u>` (two loads a node, one a leaf) and additionally
+   * collapses the leaf path's duplicates: a primary leaf visit used to read the
+   * same 32-byte node three times — cursor, `dryPrimaryLeafResolve`,
+   * `svoNodeBounds` inside the payload walk — and the leaf record twice, and the
+   * cursor now hands both out with the hit.
+   *
+   * **Off by default, because it does not pay.** Measured on Dawn/Metal at
+   * 2488x1256 with the entry prepass on, frame median against the reference
+   * fetch shape: `large-power-dam-break` 21.234 -> 21.234 ms, `garden-
+   * svo-lighting` 24.183 -> 23.921 ms. Both are inside the lane's own ~1-3%
+   * spread and the two scenes do not agree in sign. Bit-exact — all four
+   * fingerprints match the reference arm on both scenes — so what it buys is
+   * fewer loads and no measurable time, which says the primary is not bound on
+   * structural fetch once the prepass has removed the descent from most pixels.
+   */
+  readonly traversalVectorRecords?: boolean;
+  /**
+   * Drop the arithmetic the parametric child expansion repeats per node.
+   *
+   * The segment octant is derived once per segment instead of three times, the
+   * midpoint crossing multiplies by the reciprocal the cursor already holds
+   * instead of dividing, and the Morton decode stops at the low address word
+   * below level 11. Only the reciprocal is inexact, and only at the ULP that
+   * decides whether a crossing is an exact tie; a tie routes the node through
+   * the AABB fallback, which is a different expansion of the same node, not a
+   * different answer.
+   *
+   * **Off by default, for the same reason as the fetch shape above.** Same lane:
+   * `large-power-dam-break` 21.234 -> 20.972 ms, `garden-svo-lighting`
+   * 24.183 -> 24.379 ms. Inside noise, opposite signs, and the two arms together
+   * are 21.692 / 25.362 — no better than either alone. The parametric expansion
+   * is not what the primary window is made of.
+   */
+  readonly traversalLeanExpansion?: boolean;
 }
 
 /**
@@ -1968,6 +2058,12 @@ export function createSvoDrySceneFragmentWGSL(
   // the same module — the reduced cone prepass, the diagnostic megakernel —
   // legitimately keep traversing, so they simply omit the raster entries.
   const rasterPrimary = traversalMode === "raster-primary" && shadingPath === "split";
+  // The rasterized conservative entry depth is the split megakernel's seed and
+  // nothing else's. `raster-primary` already resolves visibility from proxy
+  // boxes of its own and has no root descent left to shorten, and the inline
+  // composition has no pass ordered before its fragment to write a seed from.
+  const primaryEntrySeed = shadingPath === "split" && traversalMode !== "raster-primary"
+    && experiments.primaryEntryPrepass !== false;
   // The point of the mode is to unfuse the megakernel: panes reach the brick
   // fragment only as an already-rasterized key, never as a loop. Bodies are
   // likewise a renderer-level requirement, checked where the passes are wired.
@@ -2207,13 +2303,21 @@ fn drySceneFractionOfVoxel(voxel:u32)->f32{
     } });
   const compactTraversalWGSL = secondaryTraversalMode === "compact" ? createWebgpuSvoCompactTraversalWGSL(5) : "";
   const compactTraversal = secondaryTraversalMode === "compact";
+  const traversalVectorRecords = experiments.traversalVectorRecords === true;
+  // Only the canonical cursor holds a 32-byte node record to hand over, so the
+  // primary leaf path takes its records from the visit on that arm alone; the
+  // compact and wide arms keep fetching their own, which is what they have.
+  const primaryVisitRecords = traversalVectorRecords && canonicalTraversal;
   const canonicalTraversalWGSL = createWebgpuSvoTraversalWGSL({ arena: {
       binding: 2,
       controlOffset: "dry.structureOffsets.x",
       nodeOffset: "dry.structureOffsets.z",
       leafOffset: "dry.structureOffsets.w",
+      vectorRecords: traversalVectorRecords,
     },
     childEnumeration: secondaryTraversalMode === "canonical-parametric" ? "parametric" : "aabb",
+    publishVisitRecords: primaryVisitRecords,
+    leanExpansion: experiments.traversalLeanExpansion === true,
     stackCapacity: experiments.tinyTraversalStack ? 8 : experiments.shortTraversalStack ? 16 : 32 });
   const screenSpaceTraversalWGSL = screenSpaceTerminationPixels > 0
     ? createSvoScreenSpaceTraversalWGSL(canonicalTraversalWGSL) : "";
@@ -2795,9 +2899,16 @@ fn dryBrickMacroSkip(summary:SvoBrickOccupancy,local:vec3u,bounds:mat2x3f,extent
   // when the flags or level word is actually wanted.
   const leafNodeRecordNeeded = brickOccupancyMode !== "off" || screenSpaceTerminationPixels > 0
     || brickContour;
+  // The visit's own record where the cursor published one; a fresh fetch of the
+  // same 32 bytes otherwise. `svoNodeBounds` reads the same fields either way,
+  // so the bounds — and the DDA seeded from them — are bit-identical.
   const leafNodeSetupWGSL = compactTraversal
     ? `${leafNodeRecordNeeded ? "let leafNode=svoNodeLoad(hit.nodeIndex);" : ""}let bounds=dryLeafBounds(hit.nodeIndex);`
-    : "let leafNode=svoNodeLoad(hit.nodeIndex);let bounds=svoNodeBounds(leafNode,dry.mapping);";
+    : primaryVisitRecords
+      ? "let leafNode=visitNode;let bounds=svoNodeBounds(leafNode,dry.mapping);"
+      : "let leafNode=svoNodeLoad(hit.nodeIndex);let bounds=svoNodeBounds(leafNode,dry.mapping);";
+  /** The trailing record parameter the leaf payload walk takes on that arm. */
+  const visitNodeParameterWGSL = primaryVisitRecords ? ",visitNode:SvoNode" : "";
   // Where the DDA is allowed to step, published so the loop escape test reads
   // it rather than the whole brick.
   //
@@ -2947,6 +3058,21 @@ fn dryBrickMacroSkip(summary:SvoBrickOccupancy,local:vec3u,bounds:mat2x3f,extent
       svoBrickOccupancyDecode(leafNode.links.w),lodStride);
   }` : "";
   const primaryLeafVoxelTraceCallWGSL = brickOccupancyMode === "macro-hdda" ? "traceLeafVoxelPayloadMacroHdda" : "traceLeafVoxelPayload";
+  // The resolver reads five words out of two records the cursor has just read.
+  // Taking them as parameters is what turns the second fetch of each into
+  // nothing; the tests it applies are unchanged, including the two the cursor
+  // has already made — they cost a component extract off one control vector,
+  // and dropping them would make this function's contract depend on the
+  // caller's, which is the kind of coupling a publication bug hides in.
+  const primaryLeafResolveSignatureWGSL = primaryVisitRecords
+    ? "fn dryPrimaryLeafResolve(nodeIndex:u32,node:SvoNode,leaf:SvoLeaf)->DryLeafResolution{"
+    : "fn dryPrimaryLeafResolve(nodeIndex:u32)->DryLeafResolution{\n  let node=svoNodeLoad(nodeIndex);";
+  const primaryLeafResolveLeafLoadWGSL = primaryVisitRecords ? "" : "let leaf=svoLeafLoad(leafIndex);";
+  /** Taken once, immediately after the cursor call that wrote them. */
+  const primaryVisitRecordTakeWGSL = primaryVisitRecords
+    ? "let visitNode=svoVisitNode;let visitLeaf=svoVisitLeaf;" : "";
+  const primaryLeafResolveCallWGSL = primaryVisitRecords
+    ? "dryPrimaryLeafResolve(leaf.nodeIndex,visitNode,visitLeaf)" : "dryPrimaryLeafResolve(leaf.nodeIndex)";
   const shadowLeafTraceCallWGSL = brickOccupancyMode === "macro-hdda" ? "traceLeafPayloadVisibilityMacroHdda" : "traceLeafPayloadVisibility";
   const macroHddaPrimaryWGSL = brickOccupancyMode === "macro-hdda" ? /* wgsl */ `
 fn traceLeafPayloadFineInterval(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat2x3f,extent:vec3f,intervalEnter:f32,intervalExit:f32,cellMinimum:vec3u,cellMaximum:vec3u)->DryHit{
@@ -2962,7 +3088,7 @@ fn traceLeafPayloadFineInterval(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat
   }
   return missHit();
 }
-fn traceLeafVoxelPayloadMacroHdda(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit{
+fn traceLeafVoxelPayloadMacroHdda(ro:vec3f,rd:vec3f,hit:SvoTraversalHit${visitNodeParameterWGSL})->DryHit{
   ${leafNodeSetupWGSL}let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);let summary=svoBrickOccupancyDecode(leafNode.links.w);
   if(summary.ready==0u){return traceLeafPayloadFineInterval(ro,rd,hit,bounds,extent,hit.tEnter,hit.tExit,vec3u(0u),vec3u(dry.mapping.brickSize));}
   if(summary.occupied==0u){return missHit();}
@@ -3149,6 +3275,77 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f,hit:DryHit){
 fn drySplitGeometryAt(coordinate:vec2i)->vec4f{return textureLoad(drySplitGeometryRead,coordinate,0);}
 fn drySplitIdentityAt(coordinate:vec2i)->vec4u{return textureLoad(drySplitOpaqueIdentityRead,coordinate,0);}
 `;
+  // One texel per pixel, written by the entry prepass and read by the primary
+  // fragment alone. It is declared inside the split visibility group rather than
+  // beside the lighting planes precisely so no other pipeline layout can reach
+  // it: a secondary ray must never consult a plane built for primary rays.
+  const primaryEntrySeedDeclarationWGSL = primaryEntrySeed ? /* wgsl */ `
+@group(${splitGroup}) @binding(${SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.seedBinding}) var dryPrimaryEntrySeedRead:texture_2d<u32>;
+` : "";
+  // The seed is a *per-ray* fact, not a per-pixel one. The primary fragment
+  // loads it for the one ray it owns and `traceStaticFrom` takes it, which
+  // clears it: every later ray from the same invocation — the walk behind a
+  // thin dielectric, a refraction, anything reached through shading — starts
+  // somewhere this plane was never asked about, and must fall back to the root.
+  const primaryEntrySeedLibraryWGSL = primaryEntrySeed ? /* wgsl */ `
+const DRY_PRIMARY_ENTRY_UNSEEDED:u32=0u;
+// No voxel leaf covers this ray. Not "none was found" — the prepass draws every
+// leaf the cursor could report, so an empty texel is a proof of absence and the
+// exact planar seed is already the whole answer.
+const DRY_PRIMARY_ENTRY_EMPTY:u32=1u;
+const DRY_PRIMARY_ENTRY_LEAF:u32=2u;
+var<private> dryPrimaryEntryState:u32;
+var<private> dryPrimaryEntryMinimum:f32;
+struct DryPrimaryEntrySeed{state:u32,minimum:f32}
+fn dryPrimaryEntrySeedLoad(coordinate:vec2i){
+  // The plane is only an answer on a frame that drew it. Withheld, the private
+  // state stays at its zero-initialized UNSEEDED and every consumer below
+  // no-ops, which is the root descent a build without the prepass compiles.
+  if(dry.primaryEntry.x==0u){
+    dryPrimaryEntryState=DRY_PRIMARY_ENTRY_UNSEEDED;dryPrimaryEntryMinimum=0.0;return;
+  }
+  let texel=textureLoad(dryPrimaryEntrySeedRead,coordinate,0);
+  if(texel.y==${SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.emptyKey}u){
+    dryPrimaryEntryState=DRY_PRIMARY_ENTRY_EMPTY;dryPrimaryEntryMinimum=0.0;return;
+  }
+  dryPrimaryEntryState=DRY_PRIMARY_ENTRY_LEAF;
+  dryPrimaryEntryMinimum=max(bitcast<f32>(texel.x),0.0);
+}
+fn dryPrimaryEntrySeedTake(initialMinimum:f32)->DryPrimaryEntrySeed{
+  // A caller that already starts past the origin is continuing some earlier
+  // ray, so the plane is not about it even on the first take.
+  let state=select(DRY_PRIMARY_ENTRY_UNSEEDED,dryPrimaryEntryState,initialMinimum<=0.0);
+  dryPrimaryEntryState=DRY_PRIMARY_ENTRY_UNSEEDED;
+  return DryPrimaryEntrySeed(state,dryPrimaryEntryMinimum);
+}
+` : "";
+  const primaryEntrySeedTakeWGSL = primaryEntrySeed
+    ? "let entrySeed=dryPrimaryEntrySeedTake(initialMinimum);" : "";
+  // The one writer. Every other entry point in this module leaves the private
+  // state at its zero-initialized `UNSEEDED`, which is why the seed plane is
+  // reachable from the primary fragment and from nowhere else.
+  const primaryEntrySeedLoadWGSL = primaryEntrySeed
+    ? "dryPrimaryEntrySeedLoad(vec2i(input.position.xy));" : "";
+  const primaryEntrySeedResolveWGSL = primaryEntrySeed ? /* wgsl */ `
+  // Two of the three seed states retire the cursor outright.
+  //
+  // \`EMPTY\` says no voxel leaf covers this ray at all, so the planar seed is
+  // the answer and there is nothing to descend for. \`LEAF\` with an entry at or
+  // behind the seed says the same thing by distance: the return below keeps the
+  // voxel only when it is strictly nearer, and every voxel on this ray lies at
+  // or beyond \`entrySeed.minimum\`.
+  if(entrySeed.state==DRY_PRIMARY_ENTRY_EMPTY){return seeded;}
+  if(entrySeed.state==DRY_PRIMARY_ENTRY_LEAF&&!(entrySeed.minimum<seeded.t)){return seeded;}
+` : "";
+  const primaryEntrySeedMinimumWGSL = primaryEntrySeed ? /* wgsl */ `
+  // Everything nearer than the first voxel leaf is empty space by construction,
+  // so the cursor's near bound moves there. \`svoRayAabbWithInverse\` seeds
+  // \`enter\` from \`ray.tMin\`, so every child box the ray meets only in front of
+  // it fails its interval test instead of being expanded, and the reported
+  // \`tEnter\` of every surviving leaf is unchanged — the recorded entry is a
+  // lower bound on all of them.
+  if(entrySeed.state==DRY_PRIMARY_ENTRY_LEAF){minimum=max(minimum,entrySeed.minimum);}
+` : "";
   const splitDeclarationsWGSL = split ? /* wgsl */ `// Split visibility/lighting bridge. The visibility entry writes exact primary
 // geometry while the lighting entry reads it together with the final G-buffer.
 // Separate pipelines expose only the bindings reachable from their entry point.
@@ -3156,7 +3353,7 @@ fn drySplitIdentityAt(coordinate:vec2i)->vec4u{return textureLoad(drySplitOpaque
 @group(${splitGroup}) @binding(1) var drySplitGeometryRead:texture_2d<f32>;
 @group(${splitGroup}) @binding(4) var drySplitOpaqueIdentityWrite:texture_storage_2d<rg32uint,write>;
 @group(${splitGroup}) @binding(5) var drySplitOpaqueIdentityRead:texture_2d<u32>;
-${splitGlassKeyDeclarationWGSL}
+${splitGlassKeyDeclarationWGSL}${primaryEntrySeedDeclarationWGSL}
 ${splitRigidReadWGSL}
 ` : "";
   const voxelLightCacheGroup = splitGroup + 1;
@@ -4179,6 +4376,7 @@ fn dryPrimarySeamHit(sample:DryPrimarySeamSample)->DryHit{
 }
 @fragment fn dryVisibilityMain(input:VertexOut)->DryVisibilityOut{
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
+  ${primaryEntrySeedLoadWGSL}
   let opaque=${splitPrimaryTraceWGSL};${splitVisibilityGlassDiscoveryWGSL}
   ${splitVisibilityGlassReturnWGSL}
   if(opaque.t<DRY_MISS){let voxelGlass=dryHitThinDielectric(opaque);let media=dryMediumPair(rd,opaque.normal,select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_GLASS,voxelGlass));let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let producer=select(SVO_GBUFFER_PRODUCER_TRACED,SVO_GBUFFER_PRODUCER_GLASS,voxelGlass);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(producer);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
@@ -4522,6 +4720,8 @@ struct DryParams {
   payloadLanes:vec4u,
   // x: dense scene geometry; y: flat owner lane; z: voxel capacity; w: layout descriptor.
   payloadLanes1:vec4u,
+  // x: primary entry-seed plane written this frame; zero means descend from the root.
+  primaryEntry:vec4u,
 }
 struct DryLightingArena {
   // x: light count; y: light revision; z: environment revision; w: environment ABI version.
@@ -4646,7 +4846,7 @@ fn dryGlassPane(index:u32)->SvoThinGlassRecord{
   return SvoThinGlassRecord(bitcast<vec4f>(drySceneWords4(base)),bitcast<vec4f>(drySceneWords4(base+4u)),
     bitcast<vec4f>(drySceneWords4(base+8u)),bitcast<vec4f>(drySceneWords4(base+12u)),drySceneWords4(base+16u));
 }
-fn dryPublicationWord(index:u32)->u32{return svoStructure[dry.structureOffsets.y+index];}
+fn dryPublicationWord(index:u32)->u32{return svoStructureWord(dry.structureOffsets.y+index);}
 
 // Page failures remain typed inside the invocation so dependent cone/GI work
 // can fail closed. They are diagnostics, not scene colour output.
@@ -5062,7 +5262,7 @@ fn dryVoxelFaceNormal(bounds:mat2x3f,point:vec3f)->vec3f{
   return normal;
 }
 ${surfaceReconstructionWGSL}
-fn traceLeafVoxelPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
+fn traceLeafVoxelPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit${visitNodeParameterWGSL})->DryHit {
   ${primaryBrickSetupWGSL}
   ${primaryLodStrideWGSL}
   let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0)); let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
@@ -5115,7 +5315,7 @@ fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
       return dryPlanarTerminalHit(ro,rd,hit.nodeIndex,hit.tEnter,hit.tExit);
     }
   }
-  return traceLeafVoxelPayload(ro,rd,hit);
+  return traceLeafVoxelPayload(ro,rd,hit${primaryVisitRecords ? ",terminalNode" : ""});
 }
 ${macroHddaPrimaryWGSL}
 
@@ -5140,11 +5340,10 @@ const DRY_LEAF_SKIP:u32=0u;
 const DRY_LEAF_VOXELS:u32=1u;
 const DRY_LEAF_PLANAR:u32=2u;
 struct DryLeafResolution{kind:u32,patchIndex:u32}
-fn dryPrimaryLeafResolve(nodeIndex:u32)->DryLeafResolution{
-  let node=svoNodeLoad(nodeIndex);
+${primaryLeafResolveSignatureWGSL}
   let leafIndex=node.links.z;
   if(leafIndex!=SVO_INVALID){
-    let leaf=svoLeafLoad(leafIndex);
+    ${primaryLeafResolveLeafLoadWGSL}
     if(leaf.topology.z==SVO_LEAF_TERMINAL_PLANAR_BOUNDARY){
       if(nodeIndex>=svoControlLoad(0u)||leafIndex>=svoControlLoad(1u)
         ||leaf.topology.x!=nodeIndex){return DryLeafResolution(DRY_LEAF_SKIP,0u);}
@@ -5155,6 +5354,7 @@ fn dryPrimaryLeafResolve(nodeIndex:u32)->DryLeafResolution{
   return DryLeafResolution(DRY_LEAF_VOXELS,0u);
 }
 
+${primaryEntrySeedLibraryWGSL}
 // The voxel-resolved surface first, the analytic set bounded by it second.
 //
 // Both tiers answer the same question and the frame keeps whichever is nearer,
@@ -5180,10 +5380,13 @@ fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
   // that looks perfect because the voxel path never ran. Miss instead and let
   // the existing publication tripwire say why.
   if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){return missHit();}
+  ${primaryEntrySeedTakeWGSL}
   var seeded=dryPlanarCatalogHit(ro,rd,initialMinimum,DRY_MISS);
   ${analyticPrimaryUnbounded ? "let primitiveBest=traceScenePrimitives(ro,rd,initialMinimum,seeded.t,DRY_OWNER_NONE);if(primitiveBest.t<seeded.t){seeded=primitiveBest;}" : ""}
+  ${primaryEntrySeedResolveWGSL}
   var voxel=missHit();
   var minimum=max(initialMinimum,0.0);
+  ${primaryEntrySeedMinimumWGSL}
   // The hierarchy is walked in front of a surface that is already known.
   //
   // \`seeded\` is the exact nearest hit of the structural planar catalogue, and
@@ -5213,11 +5416,12 @@ fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
       else if(leaf.status!=SVO_STATUS_MISS){}
       break;
     }
-    let resolved=dryPrimaryLeafResolve(leaf.nodeIndex);
+    ${primaryVisitRecordTakeWGSL}
+    let resolved=${primaryLeafResolveCallWGSL};
     if(resolved.kind==DRY_LEAF_SKIP){minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);continue;}
     var payloadHit:DryHit;
     if(resolved.kind==DRY_LEAF_PLANAR){payloadHit=dryPlanarPatchHit(ro,rd,resolved.patchIndex,leaf.tEnter,leaf.tExit);}
-    else{payloadHit=${primaryLeafVoxelTraceCallWGSL}(ro,rd,leaf);}
+    else{payloadHit=${primaryLeafVoxelTraceCallWGSL}(ro,rd,leaf${primaryVisitRecords ? ",visitNode" : ""});}
     // Leaves partition space and are visited front to back, so the first payload
     // hit is the nearest voxel-resolved surface and no later leaf can beat it.
     if(payloadHit.t<seeded.t){voxel=payloadHit;traversalFinished=true;break;}
@@ -6209,6 +6413,28 @@ export class SparseVoxelDrySceneRenderer {
   private rasterRigidActive: boolean;
   /** Raster-assisted primary visibility (traversal mode `raster-primary`). */
   private readonly rasterPrimary: boolean;
+  /**
+   * Rasterized conservative entry depth in front of the primary megakernel.
+   *
+   * Everything below is withdrawn together when it is off — pipelines, buffers,
+   * texture, bind-group entry and the fragment's binding — so the disabled arm
+   * is the program that existed before the pass, not that program plus a
+   * never-taken branch.
+   */
+  private readonly primaryEntryPrepassEnabled: boolean;
+  private primaryEntryCullLayout?: GPUBindGroupLayout;
+  private primaryEntryDrawLayout?: GPUBindGroupLayout;
+  private primaryEntryCullPipeline?: GPUComputePipeline;
+  private primaryEntryDrawPipeline?: GPURenderPipeline;
+  private primaryEntryCullBindGroup?: GPUBindGroup;
+  private primaryEntryDrawBindGroup?: GPUBindGroup;
+  private primaryEntryPublicationBuffer?: GPUBuffer;
+  private primaryEntryLeafCapacity = 0;
+  private primaryEntrySeed?: GPUTexture;
+  private primaryEntrySeedView?: GPUTextureView;
+  private primaryEntryDepth?: GPUTexture;
+  private primaryEntryDepthView?: GPUTextureView;
+  private primaryEntryCompilation?: Promise<void>;
   /** Exact historical direct-fragment arm retained as a benchmark control. */
   private readonly rasterPrimaryDirect: boolean;
   /** The same control for the scene-primitive arm, selectable on its own. */
@@ -6433,6 +6659,11 @@ export class SparseVoxelDrySceneRenderer {
       throw new RangeError("Screen-space termination requires canonical inline or raster-primary split traversal");
     }
     this.rasterPrimary = traversalMode === "raster-primary";
+    // Matches `primaryEntrySeed` in the shader builder exactly: the pass and the
+    // fragment binding that reads it are one decision, and a disagreement would
+    // be a pipeline whose layout carries a plane nothing writes.
+    this.primaryEntryPrepassEnabled = shadingPath === "split" && traversalMode !== "raster-primary"
+      && experiments.primaryEntryPrepass !== false;
     this.rasterPrimaryDirect = experiments.rasterPrimaryDirect === true
       || experiments.rasterPrimaryNoFragmentDepth === true
       || experiments.rasterPrimaryHsrProbe === true;
@@ -6588,6 +6819,7 @@ export class SparseVoxelDrySceneRenderer {
     // instance emission compiles first.
     report(3);
     await this.ensureBrickCullPipelines();
+    await this.ensurePrimaryEntryPrepassPipelines();
     report(4);
     // These bundles are independent. Track each completion while retaining the
     // parallel compile that keeps overall startup bounded by the slowest
@@ -7079,6 +7311,149 @@ export class SparseVoxelDrySceneRenderer {
       }
     })();
     await this.brickProbeCompilation;
+  }
+
+  /**
+   * The entry prepass module: one emission kernel and one depth draw.
+   *
+   * Compiled beside the brick cull and for the same reason it is separate from
+   * the megakernel — it reads the camera uniform, the published topology and the
+   * `SvoMapping` prefix of `DryParams`, and nothing the fragment stage owns.
+   */
+  private async ensurePrimaryEntryPrepassPipelines(): Promise<void> {
+    if (!this.primaryEntryPrepassEnabled || this.primaryEntryCullPipeline) return;
+    this.primaryEntryCompilation ??= (async () => {
+      this.primaryEntryCullLayout = this.device.createBindGroupLayout({
+        label: "Sparse voxel primary entry proxy emission bindings",
+        entries: svoPrimaryEntryCullBindGroupLayoutEntries(),
+      });
+      this.primaryEntryDrawLayout = this.device.createBindGroupLayout({
+        label: "Sparse voxel primary entry depth draw bindings",
+        entries: svoPrimaryEntryDrawBindGroupLayoutEntries(),
+      });
+      const module = await checkedModule(this.device, "Sparse voxel primary entry prepass",
+        createSvoPrimaryEntryPrepassWGSL({ reversedZNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M }));
+      const [cull, draw] = await Promise.all([
+        this.device.createComputePipelineAsync({
+          label: "Sparse voxel primary entry proxy emission",
+          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.primaryEntryCullLayout] }),
+          compute: { module, entryPoint: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.entryPoints.emit },
+        }),
+        this.device.createRenderPipelineAsync({
+          label: "Sparse voxel primary entry depth",
+          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.primaryEntryDrawLayout] }),
+          vertex: { module, entryPoint: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.entryPoints.vertex },
+          fragment: {
+            module, entryPoint: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.entryPoints.fragment,
+            targets: [{ format: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.seedFormat }],
+          },
+          primitive: { topology: "triangle-list", cullMode: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.cullMode },
+          // The same reversed-Z convention the G-buffer uses, on a private
+          // depth plane: nearest entry wins under `greater`, and the primary
+          // pass must be free to write its own farther surface depth after.
+          depthStencil: {
+            format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+            depthWriteEnabled: true,
+            depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+          },
+        }),
+      ]);
+      this.primaryEntryCullPipeline = cull;
+      this.primaryEntryDrawPipeline = draw;
+      this.ensurePrimaryEntryBuffers();
+    })();
+    await this.primaryEntryCompilation;
+  }
+
+  /** Instance arena sized by published leaf capacity, not by leaf count. */
+  private ensurePrimaryEntryBuffers(): void {
+    const leafCapacity = this.source?.structural?.capacities.leaves ?? 0;
+    if (!this.primaryEntryPrepassEnabled || leafCapacity < 1
+      || this.primaryEntryLeafCapacity === leafCapacity) return;
+    this.primaryEntryPublicationBuffer?.destroy();
+    this.primaryEntryPublicationBuffer = this.device.createBuffer({
+      label: "Sparse voxel primary entry proxy publication (draw args and instances)",
+      size: svoPrimaryEntryPublicationBytes(leafCapacity),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    // Word zero is the constant indirect vertex count; the frame clears word one
+    // alone, so this is written exactly once per allocation.
+    this.device.queue.writeBuffer(this.primaryEntryPublicationBuffer, 0,
+      Uint32Array.of(SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.verticesPerInstance));
+    this.primaryEntryLeafCapacity = leafCapacity;
+    this.primaryEntryCullBindGroup = undefined;
+    this.primaryEntryDrawBindGroup = undefined;
+  }
+
+  private rebuildPrimaryEntryBindGroups(): void {
+    const structural = this.source?.structural;
+    if (!this.primaryEntryPrepassEnabled || !structural || !this.primaryEntryCullLayout
+      || !this.primaryEntryDrawLayout || !this.primaryEntryPublicationBuffer) return;
+    const { bindings } = SVO_PRIMARY_ENTRY_PREPASS_CONTRACT;
+    this.primaryEntryCullBindGroup = this.device.createBindGroup({
+      label: "Sparse voxel primary entry proxy emission binding",
+      layout: this.primaryEntryCullLayout,
+      entries: [
+        { binding: bindings.uniforms, resource: { buffer: this.uniformBuffer } },
+        { binding: bindings.mapping, resource: { buffer: this.paramsBuffer, offset: 0, size: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.mappingBindingBytes } },
+        { binding: bindings.structure, resource: structural.structure },
+        { binding: bindings.publication, resource: { buffer: this.primaryEntryPublicationBuffer } },
+      ],
+    });
+    this.primaryEntryDrawBindGroup = this.device.createBindGroup({
+      label: "Sparse voxel primary entry depth draw binding",
+      layout: this.primaryEntryDrawLayout,
+      entries: [
+        { binding: bindings.uniforms, resource: { buffer: this.uniformBuffer } },
+        { binding: bindings.mapping, resource: { buffer: this.paramsBuffer, offset: 0, size: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.mappingBindingBytes } },
+        { binding: bindings.instances, resource: { buffer: this.primaryEntryPublicationBuffer, offset: svoPrimaryEntryInstanceOffsetBytes() } },
+      ],
+    });
+  }
+
+  /** Every resource the seeded primary needs before the megakernel may read the plane. */
+  private get primaryEntryPrepassReady(): boolean {
+    return Boolean(this.primaryEntryCullPipeline && this.primaryEntryDrawPipeline
+      && this.primaryEntryCullBindGroup && this.primaryEntryDrawBindGroup
+      && this.primaryEntryPublicationBuffer && this.primaryEntrySeedView && this.primaryEntryDepthView);
+  }
+
+  /**
+   * Emit one padded proxy per voxel leaf, then resolve the nearest entry per
+   * pixel with the depth test.
+   *
+   * The clear is the pass's other half and is never skipped: an unwritten texel
+   * is read as "no voxel leaf on this ray", which is only true because this pass
+   * wrote the whole plane this frame.
+   */
+  private encodePrimaryEntryPrepass(encoder: GPUCommandEncoder): void {
+    encoder.clearBuffer(this.primaryEntryPublicationBuffer!, Uint32Array.BYTES_PER_ELEMENT,
+      Uint32Array.BYTES_PER_ELEMENT);
+    const cull = encoder.beginComputePass({ label: "Sparse voxel primary entry proxy emission" });
+    cull.setPipeline(this.primaryEntryCullPipeline!);
+    cull.setBindGroup(0, this.primaryEntryCullBindGroup!);
+    cull.dispatchWorkgroups(Math.ceil(this.primaryEntryLeafCapacity
+      / SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.emitWorkgroupSize));
+    cull.end();
+    const depth = encoder.beginRenderPass({
+      label: "Sparse voxel primary entry depth",
+      colorAttachments: [{
+        view: this.primaryEntrySeedView!,
+        clearValue: { r: 0, g: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.emptyKey, b: 0, a: 0 },
+        loadOp: "clear", storeOp: "store",
+      }],
+      depthStencilAttachment: {
+        view: this.primaryEntryDepthView!,
+        depthClearValue: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthClearValue,
+        depthLoadOp: "clear",
+        // Nothing downstream reads this plane; only the colour it resolved.
+        depthStoreOp: "discard",
+      },
+    });
+    depth.setPipeline(this.primaryEntryDrawPipeline!);
+    depth.setBindGroup(0, this.primaryEntryDrawBindGroup!);
+    depth.drawIndirect(this.primaryEntryPublicationBuffer!, 0);
+    depth.end();
   }
 
   private rebuildBrickRasterBindGroups(): void {
@@ -7876,6 +8251,12 @@ export class SparseVoxelDrySceneRenderer {
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: "write-only", format: SVO_DRY_SPLIT_GEOMETRY_FORMAT } },
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: "write-only", format: SVO_DRY_SPLIT_IDENTITY_FORMAT } },
+        // The entry-depth seed rides the visibility group because only the
+        // visibility entry point reaches it: no lighting or compute-resolve
+        // pipeline carries this layout, so no secondary ray can consult it.
+        ...(this.primaryEntryPrepassEnabled
+          ? [{ binding: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.seedBinding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint" as const } }]
+          : []),
       ],
     });
     this.splitLightingLayout ??= this.device.createBindGroupLayout({
@@ -8331,6 +8712,7 @@ export class SparseVoxelDrySceneRenderer {
     if (!this.splitGeometry || !this.splitOpaqueIdentity || (this.rasterGlassDiscovery && (!this.splitGlassKey || !this.splitGlassDepth))
       || (this.screenSpaceTerminationPixels > 0 && !this.scenePrimitiveComputeDepth)
       || (this.rasterRigidDiscovery && !this.rasterRigidPrimaryGeometry)
+      || (this.primaryEntryPrepassEnabled && (!this.primaryEntrySeed || !this.primaryEntryDepth))
       || this.splitWidth !== this.targetWidth || this.splitHeight !== this.targetHeight) {
       this.splitGeometry?.destroy();
       this.splitOpaqueIdentity?.destroy();
@@ -8338,6 +8720,8 @@ export class SparseVoxelDrySceneRenderer {
       this.splitGlassDepth?.destroy();
       this.rasterRigidPrimaryGeometry?.destroy();
       this.scenePrimitiveComputeDepth?.destroy();
+      this.primaryEntrySeed?.destroy();
+      this.primaryEntryDepth?.destroy();
       this.splitGeometry = this.device.createTexture({
         label: "Sparse voxel split exact primary geometry",
         size: [this.targetWidth, this.targetHeight],
@@ -8372,6 +8756,24 @@ export class SparseVoxelDrySceneRenderer {
         });
         this.rasterRigidPrimaryGeometryView = this.rasterRigidPrimaryGeometry.createView();
       }
+      if (this.primaryEntryPrepassEnabled) {
+        // Sized with the primary G-buffer, because the seed is read at the
+        // fragment's own pixel and nowhere else.
+        this.primaryEntrySeed = this.device.createTexture({
+          label: "Sparse voxel primary entry depth seed",
+          size: [this.targetWidth, this.targetHeight],
+          format: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.seedFormat,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+        this.primaryEntrySeedView = this.primaryEntrySeed.createView();
+        this.primaryEntryDepth = this.device.createTexture({
+          label: "Sparse voxel primary entry depth resolve",
+          size: [this.targetWidth, this.targetHeight],
+          format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        this.primaryEntryDepthView = this.primaryEntryDepth.createView();
+      }
       if (this.rasterGlassDiscovery) {
         this.splitGlassKey = this.device.createTexture({
           label: "Sparse voxel nearest raster-glass record",
@@ -8392,12 +8794,17 @@ export class SparseVoxelDrySceneRenderer {
       this.splitHeight = this.targetHeight;
     }
     this.rebuildBrickRasterBindGroups();
+    this.ensurePrimaryEntryBuffers();
+    this.rebuildPrimaryEntryBindGroups();
     this.splitVisibilityBindGroup = this.device.createBindGroup({
       label: "Sparse voxel split visibility output binding",
       layout: this.splitVisibilityLayout,
       entries: [
         { binding: 0, resource: this.splitGeometryView! },
         { binding: 4, resource: this.splitOpaqueIdentityView! },
+        ...(this.primaryEntryPrepassEnabled
+          ? [{ binding: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.seedBinding, resource: this.primaryEntrySeedView! }]
+          : []),
       ],
     });
     this.splitLightingBindGroup = this.device.createBindGroup({
@@ -9162,8 +9569,14 @@ export class SparseVoxelDrySceneRenderer {
     // describe a frame this pipeline is no longer drawing.
     const staleWorldGi = this.disabledStages.has("world-gi-cache") !== disabled.has("world-gi-cache")
       || this.disabledStages.has("primary-traversal") !== disabled.has("primary-traversal");
+    const entrySeedMoved = this.disabledStages.has("primary-entry-prepass") !== disabled.has("primary-entry-prepass");
     this.disabledStages = new Set(disabled);
     if (staleWorldGi) this.worldGiCacheDirty = true;
+    // The seed plane's "no voxel leaf on this ray" is a proof of absence the
+    // prepass earns by drawing every leaf, so a plane left behind by the last
+    // frame that ran it is not a stale answer — it is a wrong one, read as
+    // legal. The fragment has to learn the pass is gone before it reads it.
+    if (entrySeedMoved) this.writePrimaryEntryParams();
   }
 
   setLightingOptions(options: SparseVoxelDrySceneLightingOptions): void {
@@ -9383,6 +9796,7 @@ export class SparseVoxelDrySceneRenderer {
         | (payloadLanes.geometryFractionWord << 16)
         | (payloadLanes.geometryPacked ? 1 << 24 : 0),
     ], SVO_DRY_SCENE_PARAMS_LAYOUT.payloadLane1WordOffset);
+    words[SVO_DRY_SCENE_PARAMS_LAYOUT.primaryEntryWordOffset] = this.primaryEntrySeedLive() ? 1 : 0;
     if (nodeMip && nodeMip.generation > 0 && nodeMip.plan.complete) {
       // Folded rather than spread. `Math.max(1, ...pages.map(...))` passes one
       // argument per page, and the hero garden reaches 28 232 bricks at a
@@ -9490,6 +9904,36 @@ export class SparseVoxelDrySceneRenderer {
     this.paramsWords?.set(words, SVO_DRY_SCENE_PARAMS_LAYOUT.lodWordOffset);
   }
 
+  /**
+   * Whether this frame's fragment may believe the entry-seed plane.
+   *
+   * Two conditions, and they are different in kind. `primaryEntryPrepassEnabled`
+   * is a property of the *build* — the pass and the shader's seed path are
+   * compiled together or not at all. The switch is a property of this *frame*:
+   * the pipeline is unchanged and only the encode is withheld, so the fragment
+   * has to be told, and this is what tells it.
+   */
+  private primaryEntrySeedLive(): boolean {
+    return this.primaryEntryPrepassEnabled && !this.disabledStages.has("primary-entry-prepass");
+  }
+
+  /**
+   * Rewrite only the entry-seed lane.
+   *
+   * The panel's switch withholds a pass; it does not change a shader, a bind
+   * group or a bundle, and the ablation is only honest if the two arms differ
+   * by the pass and nothing else. A full `writeParams` would be correct but
+   * needs a live source and scene, which a switch thrown between frames has no
+   * business requiring.
+   */
+  private writePrimaryEntryParams(): void {
+    const words = new Uint32Array([this.primaryEntrySeedLive() ? 1 : 0, 0, 0, 0]);
+    this.device.queue.writeBuffer(this.paramsBuffer,
+      SVO_DRY_SCENE_PARAMS_LAYOUT.primaryEntryWordOffset * 4, words);
+    // Keep the memoized snapshot in step, exactly as writeLodParams does.
+    this.paramsWords?.set(words, SVO_DRY_SCENE_PARAMS_LAYOUT.primaryEntryWordOffset);
+  }
+
   private rebuild(): void {
     const source = this.source, structural = source?.structural;
     if (!this.layout || !this.pipeline || !source || !structural || !this.scene) {
@@ -9570,6 +10014,8 @@ export class SparseVoxelDrySceneRenderer {
       : undefined;
     this.ensureBrickRasterBuffers();
     this.rebuildBrickRasterBindGroups();
+    this.ensurePrimaryEntryBuffers();
+    this.rebuildPrimaryEntryBindGroups();
   }
 
   /** GPU-authored storage is copied into this pass's uniform mirror to preserve the ten-storage adapter budget. */
@@ -10061,6 +10507,11 @@ export class SparseVoxelDrySceneRenderer {
         && (!this.rasterRigidActive || (this.rasterRigidPipeline && this.rasterRigidBridgePipeline
           && this.rasterRigidInputBindGroup && this.rasterRigidBindGroup && this.rasterRigidPrimaryGeometryView))
         && (!voxelLightBindingsRequired || voxelLightBindingsReady)
+        // The seed plane's cleared value is read as a proof that no voxel leaf
+        // covers the pixel, which is only true if this pass wrote the whole
+        // plane this frame. Half-built prepass resources must fall back rather
+        // than let the megakernel read a plane nobody filled.
+        && (!this.primaryEntryPrepassEnabled || this.primaryEntryPrepassReady)
         && this.splitVisibilityBindGroup && this.splitLightingBindGroup && this.splitGeometryView);
     if (this.coneScale !== 1 && !usePrepass) {
       this.requestedBundleResourceFailure = `Requested SVO cone bundle at scale ${this.coneScale} has incomplete frame resources`;
@@ -10141,6 +10592,12 @@ export class SparseVoxelDrySceneRenderer {
         } else if (this.rasterPrimary) {
           this.encodeRasterPrimary(encoder, gBufferViews, usePrepass, splitGroup, tracePhase);
         } else {
+          if (this.primaryEntryPrepassEnabled) {
+            // The seam closes either way: a withheld stage that encoded no pass
+            // is a true zero, and that is what the panel has to be able to say.
+            if (this.primaryEntrySeedLive()) this.encodePrimaryEntryPrepass(encoder);
+            tracePhase?.("primary-entry-prepass");
+          }
           const visibility = encoder.beginRenderPass({
             label: "Sparse voxel primary visibility",
             colorAttachments: [
@@ -10547,6 +11004,20 @@ export class SparseVoxelDrySceneRenderer {
     this.scenePrimitiveCoverageResolvePipeline = undefined;
     this.scenePrimitiveCoverageOverflowPipeline = undefined;
     this.brickLeafCapacity = 0;
+    this.primaryEntryPublicationBuffer?.destroy();
+    this.primaryEntrySeed?.destroy();
+    this.primaryEntryDepth?.destroy();
+    this.primaryEntryPublicationBuffer = undefined;
+    this.primaryEntrySeed = undefined;
+    this.primaryEntrySeedView = undefined;
+    this.primaryEntryDepth = undefined;
+    this.primaryEntryDepthView = undefined;
+    this.primaryEntryCullBindGroup = undefined;
+    this.primaryEntryDrawBindGroup = undefined;
+    this.primaryEntryCullPipeline = undefined;
+    this.primaryEntryDrawPipeline = undefined;
+    this.primaryEntryCompilation = undefined;
+    this.primaryEntryLeafCapacity = 0;
     this.splitGeometry?.destroy();
     this.splitOpaqueIdentity?.destroy();
     this.splitGlassKey?.destroy();

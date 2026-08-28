@@ -915,14 +915,48 @@ fn svoTraverse(ray: SvoRay, mapping: SvoMapping) -> SvoTraversalHit {
 }
 `;
 
-const SVO_PARAMETRIC_CHILD_HELPERS_WGSL = /* wgsl */ `
+/**
+ * The parametric child-segment helpers, in a reference form and a lean one.
+ *
+ * `lean` changes no result the traversal can observe except through the
+ * midpoint crossings themselves. Three things move:
+ *
+ *   - **The octant of a segment is derived once.** The reference form probes
+ *     the midpoint of every segment three separate times — once to reject exact
+ *     ties, once in the forward scan for the nearest child, once in the reverse
+ *     scan that defers the rest — recomputing `origin + direction * probeT` and
+ *     the three plane comparisons each time. The tie sweep already visits every
+ *     segment in order, so it packs each octant into the spare struct word and
+ *     the two scans read it back. Same expression, same rounding, evaluated
+ *     once.
+ *   - **The crossing uses the reciprocal the cursor already holds.** Every
+ *     other interval in this file is `(plane - origin) * inverseDirection`
+ *     (`svoRayAabbWithInverse`); only the midpoint crossing divided. This is
+ *     the one part of `lean` that is not bit-exact — a reciprocal-multiply and
+ *     a divide differ by up to an ULP — so a crossing can land on the other
+ *     side of an exact tie and route a ray through the AABB fallback that used
+ *     to take the parametric path, or the reverse. Both are correct expansions
+ *     of the same node.
+ *   - **The Morton decode stops at the low word.** `svoDecodeMorton` compacts
+ *     both address words on every node bounds computation, but the high word
+ *     only contributes bits 11 and above per axis, which `levelMask` erases
+ *     outright below level 11. No shipped tree is within a factor of a hundred
+ *     of that depth. Bit-exact by masking.
+ */
+function parametricChildHelpersWGSL(lean: boolean): string {
+  return /* wgsl */ `
 struct SvoParametricSegments {
   crossings: vec4f,
   tExit: f32,
   crossingCount: u32,
   valid: u32,
-  _padding: u32,
+  /** Four bits a segment, low segment first. Zero unless the lean form built it. */
+  octants: u32,
 }
+${lean ? /* wgsl */ `
+fn svoParametricSegmentOctantAt(segments: SvoParametricSegments, segment: u32) -> u32 {
+  return (segments.octants >> (segment * 4u)) & 7u;
+}` : ""}
 
 fn svoParametricSegmentInterval(segments: SvoParametricSegments, segment: u32) -> vec2f {
   let lower = segments.crossings[segment];
@@ -943,7 +977,7 @@ fn svoParametricSegmentOctant(ray: SvoRay, parentBounds: mat2x3f, interval: vec2
 // A line crosses at most three midpoint planes and therefore at most four open
 // octree children. Exact plane/edge/point ties return valid=0 so the caller can
 // preserve the reference traversal's inclusive touching-child behavior.
-fn svoParametricSegments(ray: SvoRay, parentBounds: mat2x3f, current: SvoStackEntry) -> SvoParametricSegments {
+fn svoParametricSegments(ray: SvoRay, ${lean ? "inverseDirection: vec3f, " : ""}parentBounds: mat2x3f, current: SvoStackEntry) -> SvoParametricSegments {
   let tEnter = max(current.tEnter, ray.tMin);
   let tExit = min(current.tExit, ray.tMax);
   var crossings = vec4f(tEnter, 0.0, 0.0, 0.0);
@@ -956,7 +990,7 @@ fn svoParametricSegments(ray: SvoRay, parentBounds: mat2x3f, current: SvoStackEn
       if (ray.origin[axis] == middle[axis]) { return SvoParametricSegments(crossings, tExit, crossingCount, 0u, 0u); }
       continue;
     }
-    let crossing = (middle[axis] - ray.origin[axis]) / direction;
+    let crossing = (middle[axis] - ray.origin[axis]) ${lean ? "* inverseDirection[axis]" : "/ direction"};
     if (crossing == tEnter || crossing == tExit) {
       return SvoParametricSegments(crossings, tExit, crossingCount, 0u, 0u);
     }
@@ -975,15 +1009,34 @@ fn svoParametricSegments(ray: SvoRay, parentBounds: mat2x3f, current: SvoStackEn
     crossings[insertion] = crossing;
     crossingCount += 1u;
   }
-  let segments = SvoParametricSegments(crossings, tExit, crossingCount, 1u, 0u);
+  var segments = SvoParametricSegments(crossings, tExit, crossingCount, 1u, 0u);
+  ${lean ? "var octants = 0u;" : ""}
   for (var segment = 0u; segment <= crossingCount; segment += 1u) {
     let interval = svoParametricSegmentInterval(segments, segment);
     let probeT = interval.x + (interval.y - interval.x) * 0.5;
     let point = ray.origin + ray.direction * probeT;
     if (any(point == middle)) { return SvoParametricSegments(crossings, tExit, crossingCount, 0u, 0u); }
+    ${lean ? `octants |= (select(0u, 1u, point.x > middle.x)
+      | select(0u, 2u, point.y > middle.y)
+      | select(0u, 4u, point.z > middle.z)) << (segment * 4u);` : ""}
   }
+  ${lean ? "segments.octants = octants;" : ""}
   return segments;
 }
+`;
+}
+
+/**
+ * The cursor's own copy of the records behind the visit it is about to report.
+ *
+ * Not part of `SvoTraversalHit` because that struct is the contract of five
+ * different traversals — compact, wide fan-out, screen-space, the depth-limited
+ * restart walk — and only this one holds a canonical 32-byte node record to
+ * hand over. A private pair keeps the handoff where it is true instead of
+ * putting a field on every hit that four producers would have to fake.
+ */
+const SVO_VISIT_RECORD_DECLARATIONS_WGSL = /* wgsl */ `var<private> svoVisitNode: SvoNode;
+var<private> svoVisitLeaf: SvoLeaf;
 `;
 
 function sectionBetween(source: string, begin: string, end: string): string {
@@ -998,9 +1051,15 @@ function replaceSection(source: string, begin: string, end: string, body: string
   return source.slice(0, beginIndex + begin.length) + body + source.slice(endIndex);
 }
 
-function parametricContinuationExpansion(aabbFallback: string): string {
+function parametricContinuationExpansion(aabbFallback: string, lean: boolean): string {
+  const octantAt = lean
+    ? "svoParametricSegmentOctantAt(parametricSegments, segment)"
+    : "svoParametricSegmentOctant(ray, parentBounds, interval)";
+  const reverseOctantAt = lean
+    ? "svoParametricSegmentOctantAt(parametricSegments, reverseSegment)"
+    : "svoParametricSegmentOctant(ray, parentBounds, interval)";
   return /* wgsl */ `
-    let parametricSegments = svoParametricSegments(ray, parentBounds, current);
+    let parametricSegments = svoParametricSegments(ray, ${lean ? "(*continuation).inverseDirection, " : ""}parentBounds, current);
     if (parametricSegments.valid == 0u) {
 ${aabbFallback}
     } else {
@@ -1021,7 +1080,7 @@ ${aabbFallback}
       let segmentCount = parametricSegments.crossingCount + 1u;
       for (var segment = 0u; segment < segmentCount; segment += 1u) {
         let interval = svoParametricSegmentInterval(parametricSegments, segment);
-        let octant = svoParametricSegmentOctant(ray, parentBounds, interval);
+        let octant = ${octantAt};
         if ((mask & (1u << octant)) == 0u) { continue; }
         let childIndex = node.links.x + svoPopcountBefore(mask, octant);
         if (candidateCount == 0u) {
@@ -1047,7 +1106,7 @@ ${aabbFallback}
         reverseSegment -= 1u;
         if (reverseSegment == nearestSegment) { continue; }
         let interval = svoParametricSegmentInterval(parametricSegments, reverseSegment);
-        let octant = svoParametricSegmentOctant(ray, parentBounds, interval);
+        let octant = ${reverseOctantAt};
         if ((mask & (1u << octant)) == 0u) { continue; }
         let childIndex = node.links.x + svoPopcountBefore(mask, octant);
         (*continuation).stack[(*continuation).stackSize] = SvoStackEntry(childIndex, interval.x, interval.y);
@@ -1060,9 +1119,15 @@ ${aabbFallback}
 `;
 }
 
-function parametricRestartExpansion(aabbFallback: string): string {
+function parametricRestartExpansion(aabbFallback: string, lean: boolean): string {
+  const octantAt = lean
+    ? "svoParametricSegmentOctantAt(parametricSegments, segment)"
+    : "svoParametricSegmentOctant(ray, parentBounds, interval)";
+  const reverseOctantAt = lean
+    ? "svoParametricSegmentOctantAt(parametricSegments, reverseSegment)"
+    : "svoParametricSegmentOctant(ray, parentBounds, interval)";
   return /* wgsl */ `
-    let parametricSegments = svoParametricSegments(ray, parentBounds, current);
+    let parametricSegments = svoParametricSegments(ray, ${lean ? "inverseDirection, " : ""}parentBounds, current);
     if (parametricSegments.valid == 0u) {
 ${aabbFallback}
     } else {
@@ -1076,7 +1141,7 @@ ${aabbFallback}
       let segmentCount = parametricSegments.crossingCount + 1u;
       for (var segment = 0u; segment < segmentCount; segment += 1u) {
         let interval = svoParametricSegmentInterval(parametricSegments, segment);
-        let octant = svoParametricSegmentOctant(ray, parentBounds, interval);
+        let octant = ${octantAt};
         if ((mask & (1u << octant)) == 0u) { continue; }
         let childIndex = node.links.x + svoPopcountBefore(mask, octant);
         if (candidateCount == 0u) {
@@ -1101,7 +1166,7 @@ ${aabbFallback}
         reverseSegment -= 1u;
         if (reverseSegment == nearestSegment) { continue; }
         let interval = svoParametricSegmentInterval(parametricSegments, reverseSegment);
-        let octant = svoParametricSegmentOctant(ray, parentBounds, interval);
+        let octant = ${reverseOctantAt};
         if ((mask & (1u << octant)) == 0u) { continue; }
         let childIndex = node.links.x + svoPopcountBefore(mask, octant);
         stack[stackSize] = SvoStackEntry(childIndex, interval.x, interval.y);
@@ -1123,12 +1188,55 @@ export interface WebgpuSvoTraversalBindings {
   childEnumeration?: "aabb" | "parametric";
   /** Experimental private stack capacity; omitted keeps the 32-entry production stack. */
   stackCapacity?: 8 | 16 | 32;
+  /**
+   * Drop the arithmetic the parametric expansion repeats.
+   *
+   * See {@link parametricChildHelpersWGSL} for what moves and which part of it
+   * is not bit-exact. Only meaningful with `childEnumeration: "parametric"`,
+   * apart from the Morton decode's level cut-off, which every arm shares.
+   */
+  leanExpansion?: boolean;
+  /**
+   * Keep the node and leaf records the cursor read for the visit it just
+   * reported, so the caller does not fetch them again.
+   *
+   * `SvoTraversalHit` carries the four fields the traversal itself needs and
+   * drops the rest, which used to make every consumer re-read a record the
+   * cursor had in registers a moment earlier — the primary leaf path read the
+   * 32-byte node three times and the 16-byte leaf twice for one visit. These
+   * are written by the continuation's hit path alone and are only meaningful
+   * immediately after a `SVO_STATUS_HIT` return; the depth-limited restart
+   * traversal and the screen-space proxy returns leave them alone, which is
+   * why the one reader takes them at the call site and passes them down
+   * explicitly rather than reaching for them later.
+   *
+   * Omitted, the shader is textually what it was before the option existed.
+   */
+  publishVisitRecords?: boolean;
   /** One raw structural arena. Offsets are WGSL u32 word-offset expressions. */
   arena?: Readonly<{
     binding: number;
     controlOffset: string;
     nodeOffset: string;
     leafOffset: string;
+    /**
+     * Fetch whole records as `vec4u` instead of four consecutive scalars.
+     *
+     * The semantic binding form declares `array<SvoNode>` and gets two 16-byte
+     * loads per node for free. The arena form flattens the same bytes to
+     * `array<u32>` and rebuilds the vectors with `vec4u(a[i],a[i+1],a[i+2],a[i+3])`
+     * — eight scalar loads a node, four a leaf, each one separately
+     * range-clamped by the robustness transform, which is exactly what stops
+     * the backend from re-fusing them. Typing the arena as `array<vec4u>`
+     * restores the record-shaped load without giving up the single binding.
+     *
+     * Legal because every offset the arena hands out is 16-byte aligned by
+     * construction: control sits at zero, publication at 256, topology at 512,
+     * and the leaf slice follows a 256-aligned node span
+     * (SPARSE_BRICK_GPU_LAYOUT). Scalar reads remain available through
+     * `svoStructureWord`, which both forms declare.
+     */
+    vectorRecords?: boolean;
   }>;
 }
 
@@ -1140,6 +1248,8 @@ export function createWebgpuSvoTraversalWGSL(bindings: WebgpuSvoTraversalBinding
   const leaves = bindings.leaves ?? 2;
   const childEnumeration = bindings.childEnumeration ?? "aabb";
   const stackCapacity = bindings.stackCapacity ?? 32;
+  const publishVisitRecords = bindings.publishVisitRecords === true;
+  const leanExpansion = bindings.leanExpansion === true;
   const arena = bindings.arena;
   for (const [label, value] of Object.entries({ group, control, nodes, leaves })) {
     if (!Number.isInteger(value) || value < 0) throw new RangeError(`SVO WGSL ${label} must be a non-negative integer`);
@@ -1156,16 +1266,33 @@ export function createWebgpuSvoTraversalWGSL(bindings: WebgpuSvoTraversalBinding
     throw new RangeError("SVO WGSL stack capacity must be 8, 16, or 32");
   }
   let source = webgpuSvoTraversalWGSL;
+  if (publishVisitRecords) {
+    source = source
+      .replace("fn svoMiss(status: u32, visits: u32) -> SvoTraversalHit {", `${SVO_VISIT_RECORD_DECLARATIONS_WGSL}
+fn svoMiss(status: u32, visits: u32) -> SvoTraversalHit {`)
+      .replace(`      let hit = SvoTraversalHit(SVO_STATUS_HIT, visits, current.nodeIndex, node.links.z,`,
+        `      svoVisitNode = node;
+      svoVisitLeaf = leaf;
+      let hit = SvoTraversalHit(SVO_STATUS_HIT, visits, current.nodeIndex, node.links.z,`);
+  }
   if (childEnumeration === "parametric") {
     const continuationBegin = "// SVO_CONTINUATION_CHILD_EXPANSION_BEGIN";
     const continuationEnd = "// SVO_CONTINUATION_CHILD_EXPANSION_END";
     const restartBegin = "// SVO_RESTART_CHILD_EXPANSION_BEGIN";
     const restartEnd = "// SVO_RESTART_CHILD_EXPANSION_END";
-    source = source.replace("fn svoTraversalContinuationAdvance", `${SVO_PARAMETRIC_CHILD_HELPERS_WGSL}\nfn svoTraversalContinuationAdvance`);
+    source = source.replace("fn svoTraversalContinuationAdvance", `${parametricChildHelpersWGSL(leanExpansion)}\nfn svoTraversalContinuationAdvance`);
     source = replaceSection(source, continuationBegin, continuationEnd,
-      parametricContinuationExpansion(sectionBetween(source, continuationBegin, continuationEnd)));
+      parametricContinuationExpansion(sectionBetween(source, continuationBegin, continuationEnd), leanExpansion));
     source = replaceSection(source, restartBegin, restartEnd,
-      parametricRestartExpansion(sectionBetween(source, restartBegin, restartEnd)));
+      parametricRestartExpansion(sectionBetween(source, restartBegin, restartEnd), leanExpansion));
+  }
+  if (leanExpansion) {
+    // Bits 11 and above per axis cannot survive `levelMask` below level 11, so
+    // the high address word's compaction is dead work on every shipped tree.
+    source = source.replace(`  let lowBits = svoCompactMortonBits(vec3u(low, low >> 1u, low >> 2u));
+  let highBits`, `  let lowBits = svoCompactMortonBits(vec3u(low, low >> 1u, low >> 2u));
+  if (level <= 10u) { return lowBits & vec3u(levelMask); }
+  let highBits`);
   }
   if (stackCapacity !== 32) {
     source = source
@@ -1179,12 +1306,29 @@ export function createWebgpuSvoTraversalWGSL(bindings: WebgpuSvoTraversalBinding
 fn svoControlLoad(index:u32)->u32{return svoControl[index];}
 fn svoNodeLoad(index:u32)->SvoNode{return svoNodes[index];}
 fn svoLeafLoad(index:u32)->SvoLeaf{return svoLeaves[index];}`;
-    const arenaDeclarations = `@group(${group}) @binding(${arena.binding}) var<storage,read> svoStructure:array<u32>;
+    // Word-addressed arena: one scalar load per word, and one bounds clamp with it.
+    const scalarArenaDeclarations = `@group(${group}) @binding(${arena.binding}) var<storage,read> svoStructure:array<u32>;
+fn svoStructureWord(offset:u32)->u32{return svoStructure[offset];}
 fn svoStructureWords4(offset:u32)->vec4u{return vec4u(svoStructure[offset],svoStructure[offset+1u],svoStructure[offset+2u],svoStructure[offset+3u]);}
 fn svoControlLoad(index:u32)->u32{return svoStructure[${arena.controlOffset}+index];}
 fn svoNodeLoad(index:u32)->SvoNode{let base=${arena.nodeOffset}+index*8u;return SvoNode(svoStructureWords4(base),svoStructureWords4(base+4u));}
 fn svoLeafLoad(index:u32)->SvoLeaf{let base=${arena.leafOffset}+index*4u;return SvoLeaf(svoStructureWords4(base));}`;
-    return source.replace(declarations, arenaDeclarations);
+    // Record-addressed arena: the same bytes, fetched at the width they are used.
+    //
+    // A node is two 16-byte loads and a leaf is one, which is what the
+    // `array<SvoNode>` binding form has always emitted. The word accessors stay
+    // for the handful of control and publication reads a ray makes, and they
+    // pick their lane with two `select`s rather than a dynamic component index:
+    // an index the compiler cannot fold is free to become a scratch round-trip,
+    // which would put a thread-memory access on the publication gate every ray
+    // and every visibility step passes through.
+    const vectorArenaDeclarations = `@group(${group}) @binding(${arena.binding}) var<storage,read> svoStructure:array<vec4u>;
+fn svoStructureWord(offset:u32)->u32{let record=svoStructure[offset>>2u];let lane=offset&3u;return select(select(record.x,record.y,lane==1u),select(record.z,record.w,lane==3u),lane>=2u);}
+fn svoControlLoad(index:u32)->u32{return svoStructureWord(${arena.controlOffset}+index);}
+fn svoNodeLoad(index:u32)->SvoNode{let base=((${arena.nodeOffset})>>2u)+index*2u;return SvoNode(svoStructure[base],svoStructure[base+1u]);}
+fn svoLeafLoad(index:u32)->SvoLeaf{return SvoLeaf(svoStructure[((${arena.leafOffset})>>2u)+index]);}`;
+    return source.replace(declarations,
+      arena.vectorRecords ? vectorArenaDeclarations : scalarArenaDeclarations);
   }
   return source
     .replace("@group(0) @binding(0) var<storage, read> svoControl", `@group(${group}) @binding(${control}) var<storage, read> svoControl`)

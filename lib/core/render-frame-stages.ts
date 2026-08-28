@@ -72,6 +72,7 @@ export const RENDER_FRAME_STAGES = Object.freeze([
   "near-field-band",
   "brick-cull",
   "cone-prepass",
+  "primary-entry-prepass",
   "primary-traversal",
   "rigid-discovery",
   "thin-glass-discovery",
@@ -167,6 +168,10 @@ export const RENDER_FRAME_STAGE_TRACE = Object.freeze({
   "cone-prepass": {
     owner: "svo",
     phase: { id: "svo-cone-lighting", label: "SVO cone-lighting prepass" },
+  },
+  "primary-entry-prepass": {
+    owner: "svo",
+    phase: { id: "svo-primary", label: "SVO primary entry-depth prepass" },
   },
   "primary-traversal": {
     owner: "svo",

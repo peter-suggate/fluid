@@ -41,6 +41,9 @@
  *      FLUID_SVO_DRY_FRAME_STRIP_DIAGNOSTICS / _INLINE_CONE_BOUNDARIES /
  *      _CLEAR_CONE_QUEUE_BLIT / _F16 / _DROP_GI_PAGE_CACHE
  *      / _EDGE_RECEIVER_RECOVERY (0 disables the bounded exact-identity edge tier)
+ *      FLUID_SVO_DRY_FRAME_DISABLE_STAGES (comma-separated RENDER-panel stage ids to withhold
+ *      at runtime, e.g. primary-entry-prepass — the panel switch's own arm, which withholds the
+ *      encode without recompiling the pipeline)
  *      / _SHORT_STACK
  *      / _TINY_STACK
  *      (1 enables the named Dawn experiment),
@@ -104,6 +107,7 @@ import {
   type PaperPhaseId,
   type PerformanceTrace,
 } from "../lib/core/performance-trace";
+import { disabledRenderStagesFrom } from "../lib/core/render-stage-switches";
 import { heroGardenCamera } from "../lib/core/hero-garden-scene";
 import { createHeroGardenHoseStressScene } from "../lib/core/hero-garden-stress-scene";
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "../lib/core/scene-definition";
@@ -304,6 +308,18 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   rasterPrimaryHsrProbe: process.env.FLUID_SVO_DRY_FRAME_HSR_PROBE === "1",
   scenePrimitiveHsrProbe: process.env.FLUID_SVO_DRY_FRAME_SCENE_HSR_PROBE === "1",
   scenePrimitiveUnboundedMarch: process.env.FLUID_SVO_DRY_FRAME_UNBOUNDED_MARCH === "1",
+  /**
+   * The rasterized conservative entry-depth seed for the primary megakernel.
+   *
+   * Default on, so the shipping arm is the measured one; `=0` withdraws the
+   * pass entirely and gives the unseeded baseline out of the same build, which
+   * is what makes the paired G-buffer hashes a proof rather than a coincidence.
+   */
+  primaryEntryPrepass: process.env.FLUID_SVO_DRY_FRAME_PRIMARY_ENTRY_PREPASS !== "0",
+  /** Record-width octree fetches. Measured null; see the experiment's own note. */
+  traversalVectorRecords: process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL_VECTOR_RECORDS === "1",
+  /** The parametric expansion's repeated arithmetic. Measured null; same note. */
+  traversalLeanExpansion: process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL_LEAN_EXPANSION === "1",
 };
 const voxelLightCacheEnabled = optimizationExperiments.voxelLightCache !== false;
 const screenSpaceTerminationPixels = Number(process.env.FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS ?? 0);
@@ -986,6 +1002,8 @@ const bodies = packSvoDryRigidBodies(scene);
 device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, activeCamera, environmentId, solver.info, bodies.count));
 device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 
+const disabledStageIds = (process.env.FLUID_SVO_DRY_FRAME_DISABLE_STAGES ?? "")
+  .split(",").map((id) => id.trim()).filter((id) => id.length > 0);
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
   shadingPath, screenSpaceTerminationPixels, rasterGlassDiscovery, rasterRigidDiscovery, coneFanout,
   optimizationExperiments);
@@ -1000,6 +1018,14 @@ const configuredRenderTuning = { ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale
   }),
 };
 renderer.setRenderTuning(configuredRenderTuning);
+// The RENDER panel's ablation switches, from the lane. This is the *runtime*
+// withhold — the pipeline is the shipped one and only the encode is dropped —
+// which is a different arm from compiling a stage out through its experiment
+// flag, and the only one that exercises what the panel's switch does.
+if (disabledStageIds.length > 0) {
+  renderer.setDisabledStages(disabledRenderStagesFrom(disabledStageIds));
+  log(`Withholding stages: ${disabledStageIds.join(", ")}`);
+}
 function applyLighting(
   scale: SvoConeLightingScale,
   shadows = shadowsEnabled,
