@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-08-28",
+  "backend": "Dawn/Metal",
+  "referenceHardware": "Apple M1 Max",
+  "method": "Sparse CM12",
+  "performance": {
+    "mini32-b8-p8": {
+      "metric": "median hardware-timestamped GPU advance",
+      "warmupFrames": 3,
+      "measuredFrames": 12,
+      "referenceMs": 24.576,
+      "maximumMs": 40
+    },
+    "mini64-b8-p8": {
+      "metric": "median hardware-timestamped GPU advance",
+      "warmupFrames": 3,
+      "measuredFrames": 12,
+      "referenceMs": 33.4889,
+      "maximumMs": 50
+    }
+  },
+  "policy": "Ceilings include approximately 50 percent headroom for run-to-run noise. Update only from a reviewed clean-tree capture on the reference machine."
+}

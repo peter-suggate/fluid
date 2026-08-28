@@ -89,10 +89,16 @@ export function createSparseCM12InternedRefLookup(options: Readonly<{
   if (maximumEntriesPerSide > maximumAllowed) {
     throw new Error(`IRL1 side fanout ${maximumEntriesPerSide} exceeds ${maximumAllowed}`);
   }
-  if (ibo.catalog.patches.length >= SPARSE_CM12_INTERNED_REF_LOOKUP_INVALID16
-    || canonicalCapacity >= SPARSE_CM12_INTERNED_REF_LOOKUP_INVALID16
+  // The raw patch count is written to the IRL header as a u32 and patches are
+  // consumed while constructing the normalized templates below. It is not an
+  // interned u16 identity. Only values actually packed into u16 fields belong
+  // in this early capacity check; normalized template/entry counts are checked
+  // after interning.
+  if (canonicalCapacity >= SPARSE_CM12_INTERNED_REF_LOOKUP_INVALID16
     || ibo.templates.length >= SPARSE_CM12_INTERNED_REF_LOOKUP_INVALID16) {
-    throw new Error("IRL1 u16 identity capacity exceeded");
+    throw new Error("IRL1 u16 identity capacity exceeded: "
+      + `canonicals=${canonicalCapacity}, templates=${ibo.templates.length}, limit=${
+        SPARSE_CM12_INTERNED_REF_LOOKUP_INVALID16 - 1}`);
   }
   const fallbackAnchors = new Uint32Array(canonicalCapacity)
     .fill(SPARSE_CM12_FACTORED_AEI_INVALID);

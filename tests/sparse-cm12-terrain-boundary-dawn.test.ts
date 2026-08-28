@@ -138,8 +138,12 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
       // front to leave its authored reservoir and exercise dynamic world pages
       // on the slope; the focused 16^3 cut-cell probe stays intentionally tiny.
       const requestedSteps = Number(process.env.FLUID_TERRAIN_STEPS);
+      // At the paper's 1/30 s step, the 12.8 m hillside front reaches the
+      // opposite wall in about three physical seconds. Thirty steps sampled
+      // only the first second (front cell 86) while asserting wall arrival at
+      // brick 30. Ninety keeps the lane short and measures the event it names.
       const steps = Number.isSafeInteger(requestedSteps) && requestedSteps > 0
-        ? requestedSteps : tallCells ? 30 : 8;
+        ? requestedSteps : tallCells ? 90 : 8;
       for (let step = 1; step <= steps; step += 1) {
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
         if (step % 2 === 0) await device.queue.onSubmittedWorkDone();

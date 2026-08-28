@@ -31,7 +31,11 @@ const dawnTest = dawnModule ? test : test.skip;
 
 const INITIAL_LONG_DAM_TILE_COUNT = 80;
 const LONG_DAM_FAR_WALL_PAGE_X = 23;
-const LONG_DAM_GATE_STEPS = 1_200;
+// The Sparse CM12 profile advances at the paper's 1/30 s, so the authored
+// four-second scene is 120 steps. The previous 1,200 retained the old 4 ms
+// scene-step count after this lane moved to the paper timestep and simulated
+// forty seconds instead of four.
+const LONG_DAM_GATE_STEPS = 120;
 const LONG_DAM_CHECKPOINT_INTERVAL = 50;
 
 async function readGPUWords(device: GPUDevice, source: GPUBuffer,

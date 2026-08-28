@@ -94,6 +94,18 @@ npm run dev
 
 Use `npm test` for the deterministic shell contract and production build.
 
+Large Sparse CM12 changes have one canonical, time-bounded native-Dawn
+confidence gate:
+
+```bash
+npm run test:dawn:sparse-cm12
+```
+
+It covers correctness, adaptivity, live edits, both far-wall maps, and mini32 /
+mini64 hardware-timestamped performance baselines in at most three minutes.
+See [`docs/SPARSE_CM12_DAWN_REGRESSION.md`](docs/SPARSE_CM12_DAWN_REGRESSION.md)
+for the matrix, focused lane commands, and rebaseline policy.
+
 ## Current numerical boundary
 
 The CPU MAC/PCG path remains the pressure-validation oracle. The adaptive GPU

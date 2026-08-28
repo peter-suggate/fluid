@@ -12,6 +12,50 @@ import { WebGPUAdaptiveMassSolver } from
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
+const SYMMETRY_STEPS = 8;
+const DENSITY_D4_LIMIT = 6e-3;
+const VELOCITY_D4_LIMIT_M_S = 5e-3;
+const PRESSURE_D4_LIMIT_PA = 5;
+
+function scalarD4Error(field: ArrayLike<number>, nx: number, ny: number,
+  nz: number): number {
+  let maximum = 0;
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) {
+      const source = field[x + nx * (y + ny * z)]!;
+      for (const [tx, tz] of [[nx - 1 - x, z], [x, nz - 1 - z], [z, x]]) {
+        maximum = Math.max(maximum,
+          Math.abs(source - field[tx! + nx * (y + ny * tz!)]!));
+      }
+    }
+  }
+  return maximum;
+}
+
+function velocityD4Error(field: ArrayLike<number>, nx: number, ny: number,
+  nz: number): number {
+  let maximum = 0;
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) {
+      const sourceAt = 4 * (x + nx * (y + ny * z));
+      const source = [field[sourceAt]!, field[sourceAt + 1]!, field[sourceAt + 2]!];
+      const comparisons = [
+        { coordinate: [nx - 1 - x, z], expected: [-source[0]!, source[1]!, source[2]!] },
+        { coordinate: [x, nz - 1 - z], expected: [source[0]!, source[1]!, -source[2]!] },
+        { coordinate: [z, x], expected: [source[2]!, source[1]!, source[0]!] },
+      ] as const;
+      for (const comparison of comparisons) {
+        const targetAt = 4 * (comparison.coordinate[0]
+          + nx * (y + ny * comparison.coordinate[1]));
+        for (let component = 0; component < 3; component += 1) {
+          maximum = Math.max(maximum,
+            Math.abs(comparison.expected[component]! - field[targetAt + component]!));
+        }
+      }
+    }
+  }
+  return maximum;
+}
 
 dawnTest("symmetric expansion allocates and wets sparse corner tiles",
   { timeout: 240_000 }, async () => {
@@ -80,20 +124,43 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
         brick.active && horizontalCorner(brick.coordinate)).length, 0,
       "corner tiles must begin absent rather than hiding a preallocated apron");
 
-      for (let step = 1; step <= 20; step += 1) {
+      for (let step = 1; step <= SYMMETRY_STEPS; step += 1) {
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
         await device.queue.onSubmittedWorkDone();
-        if (step !== 1) continue;
-        const first = await solver.readGPUActivityPolicy();
-        const corners = first.bricks.filter((brick) =>
+        if (step !== 1 && step !== 3) continue;
+        const activity = await solver.readGPUActivityPolicy();
+        const corners = activity.bricks.filter((brick) =>
           brick.active && horizontalCorner(brick.coordinate));
-        assert.equal(corners.length, 8,
-          "all horizontal edge/corner tiles must publish before expansion reaches them");
-        assert.ok(corners.every((brick) => brick.acceptedResolution === 8),
-          "each corner must activate a complete B8 frontier tile");
+        if (step === 1) {
+          assert.equal(activity.bricks.filter((brick) => brick.active).length, 16,
+            "the first demand wave must publish the symmetric face-neighbour ring");
+          assert.equal(corners.length, 0,
+            "diagonal corners must not bypass demand-led frontier propagation");
+        } else {
+          assert.equal(corners.length, 8,
+            "the complete horizontal corner orbit must publish by step 3");
+          assert.ok(corners.every((brick) => brick.acceptedResolution === 8),
+            "each corner must activate a complete B8 frontier tile");
+        }
       }
 
-      const density = (await solver.readDiagnosticFields(true)).density;
+      const [fields, finalActivity] = await Promise.all([
+        solver.readDiagnosticFields(true), solver.readGPUActivityPolicy(),
+      ]);
+      const density = fields.density;
+      const topology = new Uint8Array(horizontalCells * horizontalCells / 2
+        * horizontalCells);
+      for (const brick of finalActivity.bricks.filter((candidate) => candidate.active)) {
+        for (let z = 0; z < brickSize; z += 1)
+          for (let y = 0; y < brickSize; y += 1)
+            for (let x = 0; x < brickSize; x += 1) {
+              const qx = brickSize * brick.coordinate[0] + x;
+              const qy = brickSize * brick.coordinate[1] + y;
+              const qz = brickSize * brick.coordinate[2] + z;
+              topology[qx + horizontalCells * (qy + horizontalCells / 2 * qz)] =
+                brick.acceptedResolution;
+            }
+      }
       let cornerMass = 0;
       let totalMass = 0;
       let maximumDensity = 0;
@@ -114,6 +181,16 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
         `conserved mass collapsed into rho=${maximumDensity}, shrinking visible volume`);
       assert.ok(cornerMass > 1e-3,
         `allocated corner tiles must accept transported liquid; measured ${cornerMass}`);
+      assert.ok(scalarD4Error(fields.density, 32, 16, 32) <= DENSITY_D4_LIMIT,
+        "expanded density must retain horizontal D4 symmetry");
+      assert.equal(scalarD4Error(topology, 32, 16, 32), 0,
+        "expanded accepted topology must retain exact horizontal D4 symmetry");
+      assert.ok(velocityD4Error(fields.velocity, 32, 16, 32)
+        <= VELOCITY_D4_LIMIT_M_S,
+        "expanded velocity must retain horizontal D4 symmetry");
+      assert.ok(scalarD4Error(fields.pressure, 32, 16, 32)
+        <= PRESSURE_D4_LIMIT_PA,
+        "expanded pressure must retain horizontal D4 symmetry");
       assert.deepEqual(validationErrors, []);
     } finally {
       solver?.destroy();

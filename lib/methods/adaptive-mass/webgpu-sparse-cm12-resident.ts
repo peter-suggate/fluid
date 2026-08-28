@@ -3370,6 +3370,8 @@ export class WebGPUSparseCM12Resident {
     // Sparse residency has one policy in every scene. A demanded adjacent page
     // is admitted from face-adjacent non-solid voxels; there is no tank-bound,
     // opening, or scene opt-in classification.
+    const residentInactiveBrickCount = Math.max(0,
+      packed.brickCount - initiallyActiveBrickKeys.size);
     const topologyPagePool = sparseCM12TopologyPagePoolPlan(
       // Physical working-set headroom follows authored liquid occupancy, not
       // the logical scene extent. A moving three-dimensional surface needs a
@@ -3378,10 +3380,14 @@ export class WebGPUSparseCM12Resident {
       // far voxel wall. Retired pages still recycle as the course advances.
       // The fixed floor supports later injection into an initially empty scene.
       // A narrow reservoir can expose many dry course pages before its wake
-      // becomes old enough to retire. Twelve pages per initially wet brick
-      // covers that simultaneous moving band; the fixed 512-page ceiling
-      // still bounds large scenes and page recycling remains authoritative.
-      Math.max(1, 12 * initiallyActiveBrickKeys.size),
+      // becomes old enough to retire. Twelve non-wet pages per initially wet
+      // brick covers that simultaneous moving band. Already-packed inactive
+      // leaves are usable dry course pages, so count them before reserving new
+      // GPU-grown pages; otherwise a terrain or shell-pregrown atlas silently
+      // turns sparse physical capacity into the complete logical volume. The
+      // fixed 512-page ceiling still bounds large scenes and page recycling
+      // remains authoritative.
+      Math.max(1, 12 * initiallyActiveBrickKeys.size - residentInactiveBrickCount),
       true,
       atlas.brickFineResolution,
     );

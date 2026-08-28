@@ -1863,10 +1863,12 @@ fn clearSparseCM12RetiredFaceVelocitySupport(@builtin(workgroup_id)wid:vec3u,
 }
 
 fn sampleFaceVelocitySupport(position:vec3f)->vec3f{
-  let q=vec3i(floor(clamp(position,vec3f(0.0),
-    vec3f(p.dimensions.xyz)-vec3f(1e-4))));
-  let probe=faceVelocitySupportAt(q);
-  let spans=max(vec3f(1.0),probe.spans);
+  // FACE_VELOCITY_SUPPORT is already a dense finest-lattice cache. Choosing
+  // interpolation spacing from the point owner makes the sampled field jump
+  // when an RK2 departure crosses a 2:1 seam: an infinitesimal move changes
+  // the complete stencil from scale one to scale two. Use the cache's actual
+  // unit lattice, matching sampleEffectiveTransportVelocity below.
+  let spans=vec3f(1.0);
   let clamped=clamp(position,0.5*spans,vec3f(p.dimensions.xyz)-0.5*spans);
   let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
   let fraction=fract(shifted);var result=vec3f(0.0);
