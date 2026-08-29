@@ -13,6 +13,7 @@ import {
   type AnyStageLens,
   type StageLensReceipt,
 } from "../lib/core/stage-lens";
+import { pickFieldOverlay, type FieldOverlayView } from "../lib/core/field-overlay-pick";
 import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
 import { resolvedMethodValues, useMethodStore } from "../lib/core/stores/method-store";
 import { DEFAULT_GRID_OVERLAY_AXIS, useUIStore } from "../lib/core/stores/ui-store";
@@ -361,23 +362,14 @@ export function FluidFieldFlyout({
 
   // Narrowed to what selecting actually reads, so a lens goes down the same
   // path as a catalog row rather than through a second one that would have to
-  // be kept agreeing with it about what "picking the active view" means.
-  const selectView = (view: Pick<FieldView, "mode" | "axis" | "planeless">) => {
-    if (overlayMode === view.mode && overlayAxis !== "off") {
-      setOverlayAxis("off");
-      return;
-    }
-    setOverlayMode(view.mode);
-    // A view changes the publication, not the user's chosen presentation.
-    // Only an inactive overlay needs the view's authored default.
-    if (overlayAxis === "off") {
-      // A planeless view has no slice to fall back to: it draws its own geometry
-      // over the frame, so the raymarch's volume capability does not apply.
-      const axis = view.planeless || !(view.axis === "volume" && !volumeCapable)
-        ? view.axis : DEFAULT_GRID_OVERLAY_AXIS;
-      setOverlayAxis(axis);
-      if (axis === "volume") setOverlaySlice(0.42);
-    }
+  // be kept agreeing with it about what "picking the active view" means. The
+  // rule itself is shared with the quick bar, for the same reason.
+  const selectView = (view: FieldOverlayView) => {
+    const change = pickFieldOverlay(
+      { mode: overlayMode, axis: overlayAxis }, view, volumeCapable, DEFAULT_GRID_OVERLAY_AXIS);
+    if (change.mode !== undefined) setOverlayMode(change.mode);
+    if (change.axis !== undefined) setOverlayAxis(change.axis);
+    if (change.slice !== undefined) setOverlaySlice(change.slice);
   };
 
   // Anchored against the shell's measured box, so orbiting the camera

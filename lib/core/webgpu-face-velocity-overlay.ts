@@ -543,7 +543,7 @@ export const faceVelocityOverlayVisualizations: readonly Visualization[] = Objec
     label: "Face velocity",
     description: "One arrow per cell face, drawn along that face's own axis with its length and colour set by the speed through it. This is the MAC field the solver solves for, not a reconstruction of it: a coarse brick shows a few long arrows and a refined one many short ones, because that is how many faces exist there. Scaled to a fixed speed derived from the container rather than to the current frame, so an arrow means the same thing at the first step and the thousandth.",
     source: "Solver-resident face velocities and gradient-row records, read at draw time",
-    mode: "face-velocity", axis: "volume", planeless: true,
+    mode: "face-velocity", axis: "volume", planeless: true, icon: "flow",
     swatch: "#4ec9f5",
     legend: [
       { swatch: "linear-gradient(90deg,#2650bd,#29b8d7,#61cf5c,#f5d43d,#e83e2b)", mark: "line", label: "slow → full scale" },

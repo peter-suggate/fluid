@@ -400,7 +400,7 @@ export const tracerOverlayVisualizations: readonly Visualization[] = Object.free
     label: "Marker spectrum",
     description: "Massless markers seeded through the liquid and coloured by where they started, then carried along the same characteristic the conservative transport integrates. Follows which water ends up where — mixing, overturning, and the parcels a surface render cannot tell apart. Enabling re-seeds from the current liquid, so the colours always date from the moment the view was switched on.",
     source: "Solver-resident marker positions, advected on the GPU without readback",
-    mode: "tracers", axis: "volume", planeless: true,
+    mode: "tracers", axis: "volume", planeless: true, icon: "tracers",
     swatch: "#c86ed2",
     legend: [
       { swatch: "linear-gradient(90deg,#d43f3f,#d9d341,#48c46b)", mark: "point", label: "seeded left → right" },

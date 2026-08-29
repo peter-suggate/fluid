@@ -110,7 +110,7 @@ export const octreeFieldVisualizations: readonly Visualization[] = Object.freeze
     figure: "FIG. 6/8", label: "Adaptive coarse grid",
     description: "Current compact leaf scale and refinement transitions throughout the live volume.",
     source: "Published octree owner map and compact leaf records",
-    mode: "resolution", axis: "volume",
+    mode: "resolution", axis: "volume", icon: "levels",
     legend: [
       { swatch: "#38adbd", label: "finest compact leaf" },
       { swatch: "#55a8ba", label: "intermediate dyadic leaf" },
@@ -220,7 +220,7 @@ export const octreeFieldVisualizations: readonly Visualization[] = Object.freeze
     figure: "§4", label: "Evaluated pressure",
     description: "Affine pressure potential dt·p/ρ reconstructed from the live leaf degrees of freedom.",
     source: "Current pressure leaf field",
-    mode: "pressure", axis: "volume",
+    mode: "pressure", axis: "volume", icon: "pressure",
     legend: [{ swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "low → high pressure potential" }],
   }),
   fieldVisualization({

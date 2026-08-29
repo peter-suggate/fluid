@@ -20,7 +20,6 @@ import { fluidCellVisualizations } from "./fluid-cell-visualizations";
 import { gridOverlayVisualizations } from "./grid-overlay-visualizations";
 import { octreeFieldVisualizations } from "./octree-technique-debug";
 import { pressureJournalOverlayVisualizations } from "./webgpu-pressure-journal-overlay";
-import { sparseCM12DirtyVisualizations } from "./sparse-cm12-dirty-visualizations";
 import { svoPixelTraceVisualizations } from "../svo/svo-pixel-trace";
 import { tracerOverlayVisualizations } from "./webgpu-tracer-overlay";
 import {
@@ -47,7 +46,6 @@ export const VISUALIZATION_CATALOG: readonly Visualization[] = Object.freeze([
   ...gridOverlayVisualizations,
   ...tracerOverlayVisualizations,
   ...faceVelocityOverlayVisualizations,
-  ...sparseCM12DirtyVisualizations,
   // Last of the overlay draws: a captured solve is drawn over the live scene,
   // and it is the one view that answers a question about a frame that has
   // already finished rather than about the frame on screen.
@@ -57,6 +55,19 @@ export const VISUALIZATION_CATALOG: readonly Visualization[] = Object.freeze([
 
 /** Field views, in catalog order — the list the mode UI is built from. */
 export const VISUALIZATION_FIELDS = fieldVisualizations(VISUALIZATION_CATALOG);
+
+/**
+ * The field views a pass claimed an icon for, in catalog order.
+ *
+ * What the tank-corner quick bar is built from. Derived rather than listed
+ * here for the same reason the catalog is assembled rather than registered:
+ * the passes decide which of their views is worth a glyph, and this module only
+ * decides the order they appear in — which is the order they are declared, so
+ * the strip reads state, then structure, then the derived fields, exactly as
+ * the full picker does.
+ */
+export const VISUALIZATION_QUICK_FIELDS = Object.freeze(
+  VISUALIZATION_FIELDS.filter((field) => field.icon !== undefined && !field.hidden));
 
 /** Decorations, whether or not any are applicable to the current selection. */
 export const VISUALIZATION_DECORATIONS = decorationVisualizations(VISUALIZATION_CATALOG);

@@ -1,13 +1,22 @@
 /**
- * Sparse CM12 temporal-coherence publications and field views.
+ * Sparse CM12 temporal-coherence publications, and the overlay modes that read
+ * them.
  *
  * These modes deliberately use the generic grid overlay: the dirty records
  * are indexed by stable logical 4³ work tiles in the same finest-domain frame
  * as Grid structure, so the existing slice/volume controls are the honest way
  * to inspect them. The solver may omit the optional source while bringing the
  * producer up; the shader renders that state as UNKNOWN rather than as clean.
+ *
+ * **No catalog entries.** Ten coherence views is more than half the field
+ * picker spent on one solver's bookkeeping, and none of them answer a question
+ * about the water — so they were withdrawn from the catalog and from the
+ * method's `supportedFieldModes`, which is the only thing the picker and the
+ * quick bar are built from. The overlay codes below and the shader that
+ * dispatches on them are untouched: `parseGridOverlayMode` still accepts these
+ * mode names, so a link that names one still draws it, and re-listing them is
+ * one entry per view whenever a coherence audit wants them back.
  */
-import { fieldVisualization, type Visualization } from "./visualization-registry";
 
 export const SPARSE_CM12_DIRTY_GPU_MAGIC = 0x434d_4431;
 export const SPARSE_CM12_DIRTY_GPU_VERSION = 1;
@@ -215,112 +224,3 @@ export const SPARSE_CM12_DIRTY_OVERLAY_CODES: Readonly<Record<SparseCM12DirtyOve
 export function sparseCM12DirtyOverlayCode(value: unknown): number {
   return isSparseCM12DirtyOverlayMode(value) ? SPARSE_CM12_DIRTY_OVERLAY_CODES[value] : 0;
 }
-
-const stageLegend = [
-  { swatch: "#f5a524", label: "direct origin" },
-  { swatch: "#2979ff", label: "dependency closure" },
-  { swatch: "#174f3b", label: "proven reused / skipped" },
-  { swatch: "#ff2fa4", label: "unknown, stale, or uncovered write" },
-] as const;
-
-function stageView(input: {
-  readonly id: string;
-  readonly label: string;
-  readonly description: string;
-  readonly mode: SparseCM12DirtyOverlayMode;
-}): Visualization {
-  return fieldVisualization({
-    kind: "field", id: input.id, pass: "Sparse CM12 coherence",
-    figure: "4³", label: input.label, description: input.description,
-    source: "GPU-resident FPL1 FramePlan, with CMD1 compatibility fallback; no readback",
-    mode: input.mode, axis: "volume", legend: stageLegend,
-  });
-}
-
-export const sparseCM12DirtyVisualizations: readonly Visualization[] = Object.freeze([
-  stageView({
-    id: "sparse-cm12-dirty/face-preparation", label: "Face preparation dirt",
-    description: "Direct and closure 4³ tiles feeding oriented faces, characteristic donors, solids, and boundary sources.",
-    mode: "dirty-face-preparation",
-  }),
-  stageView({
-    id: "sparse-cm12-dirty/mass-transport", label: "Mass transport dirt",
-    description: "Density origins and conservative donor/receiver closure actually scheduled for transport.",
-    mode: "dirty-mass-transport",
-  }),
-  stageView({
-    id: "sparse-cm12-dirty/gamma-transport", label: "Gamma transport dirt",
-    description: "Gamma support, inherited mass events, diffusion neighbours, and conservation partners.",
-    mode: "dirty-gamma-transport",
-  }),
-  stageView({
-    id: "sparse-cm12-dirty/surface-conditioning", label: "Surface conditioning dirt",
-    description: "Transported phase changes and the sharpening, scatter, and local-return closure they induce.",
-    mode: "dirty-surface-conditioning",
-  }),
-  stageView({
-    id: "sparse-cm12-dirty/pressure-coefficients", label: "Pressure coefficient dirt",
-    description: "Changed liquid rows, edges, aggregates, and hierarchy ancestors—not global pressure-solution influence.",
-    mode: "dirty-pressure-coefficients",
-  }),
-  stageView({
-    id: "sparse-cm12-dirty/presentation", label: "Presentation dirt",
-    description: "Conditioned-density and topology changes through the exact 4³ subtile filter/restriction footprint.",
-    mode: "dirty-presentation",
-  }),
-  fieldVisualization({
-    kind: "field", id: "sparse-cm12-dirty/causes", pass: "Sparse CM12 coherence",
-    figure: "WHY", label: "Dirty origins",
-    description: "Physical/structural origin causes, with inherited dependency causes retained rather than relabelled downstream.",
-    source: "FPL1 tile cause masks, with CMD1 compatibility fallback",
-    mode: "dirty-causes", axis: "volume",
-    legend: [
-      { swatch: "#f5f5e6", label: "topology / coefficient" },
-      { swatch: "#f5d442", label: "density / gamma / phase" },
-      { swatch: "#14c7d9", label: "velocity / CFL / moving solid" },
-      { swatch: "#f28b30", label: "boundary source" },
-      { swatch: "#ff2fa4", label: "generation / capacity / unknown" },
-    ],
-  }),
-  fieldVisualization({
-    kind: "field", id: "sparse-cm12-dirty/closure-depth", pass: "Sparse CM12 coherence",
-    figure: "DEPTH", label: "Dirty closure depth",
-    description: "Maximum declared dilation/dependency depth from a direct origin across all six stage worksets.",
-    source: "FPL1 packed per-stage closure depths, with CMD1 compatibility fallback",
-    mode: "dirty-closure-depth", axis: "volume",
-    legend: [
-      { swatch: "#ffffff", label: "depth 0 — direct" },
-      { swatch: "linear-gradient(90deg,#44b9ff,#3153d6,#7b32bd)", label: "closure depth 1 → 15" },
-      { swatch: "#174f3b", label: "proven reused" },
-      { swatch: "#ff2fa4", label: "unknown / overflow" },
-    ],
-  }),
-  fieldVisualization({
-    kind: "field", id: "sparse-cm12-dirty/generations", pass: "Sparse CM12 coherence",
-    figure: "GEN", label: "Dirty generation coherence",
-    description: "Producer/consumer stamps against accepted, candidate, and provenance generations; mixed state is an alarm.",
-    source: "FPL1 frame/brick/tile generations, with CMD1 per-stage compatibility fallback",
-    mode: "dirty-generations", axis: "volume",
-    legend: [
-      { swatch: "#32c982", label: "coherent producer → consumer chain" },
-      { swatch: "#2aa7dc", label: "candidate-generation work" },
-      { swatch: "#ff2fa4", label: "stale, incomplete, rejected, or unavailable" },
-      { swatch: "#ff312e", label: "uncovered write" },
-    ],
-  }),
-  fieldVisualization({
-    kind: "field", id: "sparse-cm12-dirty/pass-packing", pass: "Sparse CM12 coherence",
-    figure: "PACK", label: "Dirty pass packing",
-    description: "Physical dispatch packets and epochs over the logical stage masks they coalesce; equal saturated colours share one pass.",
-    source: "FPL1 physical packet assignments, with PKT1 compatibility fallback",
-    mode: "dirty-pass-packing", axis: "volume",
-    legend: [
-      { swatch: "linear-gradient(90deg,#20c7b7,#4279e8,#b75be8,#ef776f)", label: "physical packet / epoch identity" },
-      { swatch: "#36cdb7", label: "saturated — two or more logical stages share the packet" },
-      { swatch: "#74879a", label: "muted — one logical stage in the packet" },
-      { swatch: "#174f3b", label: "all logical stages proven skipped" },
-      { swatch: "#ff2fa4", label: "missing, stale, invalid, or local brick fault" },
-      { swatch: "#ff312e", label: "invalid physical packet mapping or packet capacity" },
-    ],
-  }),
-]);

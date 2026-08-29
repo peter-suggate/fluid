@@ -17,7 +17,7 @@ export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze
     label: "Grid structure",
     description: "Represented cells with wet occupancy, grid lines, and sample centres through the chosen plane.",
     source: "Solver occupancy and represented-cell textures",
-    mode: "structure", axis: "z",
+    mode: "structure", axis: "z", icon: "grid",
     legend: [
       { swatch: "#3380bd", label: "wet cell" },
       { swatch: "#d9e8e3", label: "dry represented cell" },
@@ -29,7 +29,7 @@ export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze
     label: "Surface density",
     description: "Mass per cell in cell volumes, from the solver's own transported field: dilute sub-half mass on a logarithmic ramp so residue reads decade by decade, liquid, and the overfull cells the projection has to drain.",
     source: "Live volume texture, before the render-only wall-film reconstruction",
-    mode: "density", axis: "z",
+    mode: "density", axis: "z", icon: "density",
     swatch: "#2f8fd6",
     legend: [
       { swatch: "linear-gradient(90deg,#46327e,#23a186,#6ece58)", label: "ρ 10⁻⁶ → ½, per decade — carried, not liquid" },
@@ -53,7 +53,7 @@ export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze
     label: "Speed heatmap",
     description: "Velocity magnitude per cell against the scene's expected maximum speed.",
     source: "Live velocity texture",
-    mode: "speed", axis: "z",
+    mode: "speed", axis: "z", icon: "speed",
     legend: [
       { swatch: "linear-gradient(90deg,#21388c,#0f9ecc,#38bf57,#fad133,#e63826)", label: "still → expected max" },
     ],
@@ -63,7 +63,7 @@ export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze
     label: "Signed distance",
     description: "The level set through the chosen plane: liquid interior, air, and the φ = 0 interface.",
     source: "Published level set, or a density-derived proxy on dense solvers",
-    mode: "phi", axis: "z",
+    mode: "phi", axis: "z", icon: "surface",
     legend: [
       { swatch: "linear-gradient(90deg,#1a73eb,#f5f5e6,#ed7829)", label: "liquid (−) · zero · air (+)" },
     ],

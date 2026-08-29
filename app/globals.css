@@ -1346,6 +1346,61 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-hover-chip span { color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
 .editor-hover-chip small { color: var(--dim); font: var(--text-micro); }
 
+/* The resting form of the tank's top corner: a column of glyphs, hung off the
+   corner and falling down the outside of the tank. A row laid across it ran out
+   over the water it was describing; a column has the one dimension the scene is
+   not using.
+
+   No panel around them. A card here would be a permanent rectangle over the
+   image to hold eight 24px marks that are already legible on their own — the
+   glyphs are the chrome, and the only thing that gets a background is the one
+   that is on. Glyph-sized like the transport's buttons, and opting out of the
+   studio's control floor for the same reason: this is chrome on the image, not
+   a form. */
+.field-quick-bar { position: absolute; z-index: 12; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; pointer-events: none; }
+/* One row per glyph, left-aligned rather than centred, so the row that grows a
+   scrub widens to the right instead of sliding the whole column of glyphs
+   sideways under the pointer. The row is the tip's frame too: anchored here
+   rather than on the button, the tip opens clear of the scrub instead of over
+   it. */
+.field-quick-row { position: relative; display: flex; align-items: center; gap: 6px; }
+/* The column has no background any more, so its own box and the gaps between
+   the glyphs would be an invisible ribbon swallowing clicks on the tank edge
+   behind it. Only the controls take the pointer. */
+.field-quick-bar button, .field-quick-slice { pointer-events: auto; }
+.field-quick-bar button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; min-height: 0; padding: 0; border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--muted); cursor: pointer; }
+.field-quick-bar button:hover { border-color: var(--accent-line); color: var(--accent); }
+/* No frost on the lit chip, deliberately: `backdrop-filter` makes an element a
+   containing block for absolutely positioned descendants, so the one chip that
+   had it was the one chip whose tip measured itself against the button instead
+   of the row — and opened straight over its own scrub. A 24px wash reads
+   perfectly well without it. */
+.field-quick-bar button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.field-quick-more i { color: var(--dim); font: var(--text-label); font-style: normal; line-height: 1; }
+
+/* The panel's own tooltip, because the browser's arrives a second late and a
+   strip of unlabelled glyphs cannot afford that. It opens to the *right*, away
+   from the scene: a tip on the inboard side covers the water at exactly the
+   moment the reader is choosing how to look at it. One fixed side rather than a
+   flip, because a tip that changed sides as the camera moved would be one more
+   thing moving under the pointer. `visibility` rather than `display` keeps it in
+   the accessibility tree, where it is the button's only name. */
+.field-quick-tip { position: absolute; left: calc(100% + 7px); top: -1px; z-index: 1; display: grid; gap: 1px; width: max-content; max-width: 220px; padding: 4px 7px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); text-align: left; visibility: hidden; opacity: 0; pointer-events: none; }
+.field-quick-bar button:hover .field-quick-tip,
+.field-quick-bar button:focus-visible .field-quick-tip { visibility: visible; opacity: 1; }
+.field-quick-tip strong { color: var(--ink); font: var(--text-tag); letter-spacing: var(--track-wide); }
+.field-quick-tip small { color: var(--muted); font: var(--text-micro); }
+
+/* The scrub belongs to the view that is on, so it sits beside that glyph
+   rather than at the foot of the column: the thing being adjusted and the
+   control adjusting it are one row, and the rest of the strip does not move to
+   make room for it. Written against `.lab-shell input[type="range"]`, which
+   pins every control in the studio to a 32px form height — this is chrome on
+   the image, not a form. */
+.field-quick-slice { display: flex; align-items: center; height: 24px; }
+.field-quick-bar .field-quick-slice input[type="range"] { width: 76px; min-height: 0; height: 12px; background: linear-gradient(90deg, var(--accent-wash), var(--accent-line)) center / 100% 3px no-repeat; }
+.field-quick-bar .field-quick-slice input[type="range"]::-webkit-slider-thumb { width: 11px; height: 11px; }
+
 /* One card, two columns: the rail of standing facts and the side column
    whatever is open occupies. The frame — border, frost, shadow, radius — lives
    here so the two read as one panel rather than as a panel with a satellite,

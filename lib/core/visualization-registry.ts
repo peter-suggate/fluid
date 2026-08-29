@@ -33,6 +33,21 @@ import type { DecorationGeometry } from "./webgpu-decoration-overlay";
 export type VisualizationKind = "decoration" | "field";
 
 /**
+ * The picture a field view is offered under when a surface has room for a
+ * glyph and not for a name.
+ *
+ * A closed vocabulary declared here rather than a component import, for the
+ * reason `EditorActionIcon` is: core may not import React, so a pass says
+ * *what* its view is a picture of and the component layer decides what that
+ * picture looks like. Declaring one is also the only way a view reaches the
+ * quick bar at the tank corner — the strip is the handful of views worth
+ * turning on without opening anything, and the passes that own them are the
+ * only ones who can say which those are.
+ */
+export type FieldVisualizationIcon =
+  | "grid" | "levels" | "density" | "surface" | "speed" | "pressure" | "flow" | "tracers";
+
+/**
  * The glyph a legend entry stands for.
  *
  * A swatch alone cannot tell an arrow from a box from a dashed box, and those
@@ -159,6 +174,17 @@ export interface FieldVisualization extends VisualizationCommon {
    * additions from silently expanding that panel or the Performance picker.
    */
   readonly hidden?: boolean;
+  /**
+   * The view is worth one glyph on the quick bar, and this is what it is a
+   * picture of.
+   *
+   * Deliberately sparse: the bar is the short list a reader turns on while
+   * watching the water, and a catalog where every entry claimed an icon would
+   * be the full picker again with the labels taken away. Declaring one here is
+   * the pass asserting that its view answers a question worth asking before
+   * anything is selected.
+   */
+  readonly icon?: FieldVisualizationIcon;
 }
 
 export type Visualization = DecorationVisualization<never> | FieldVisualization;
