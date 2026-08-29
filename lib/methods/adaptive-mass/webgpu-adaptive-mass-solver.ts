@@ -33,6 +33,7 @@ import type { AdaptiveMassSolverOptions } from "./method";
 import {
   initializeSparseBrickAtlasFromScene,
   materializeSparseBrickAtlasDensity,
+  sparseCM12InitialActiveBrickKeys,
   sparseBrickFromDense,
   sparseBrickAtlasStats,
   type SparseAdaptiveMassAtlas,
@@ -185,7 +186,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
 
   private constructor(
     private readonly device: GPUDevice,
-    // Not readonly: `applySceneUniforms` swaps in scalar-only scene revisions,
+    // Not readonly: `applySceneUniforms` swaps in live scene-policy revisions,
     // and `applyRuntimeValues` swaps the clock lane. Both are read fresh on
     // every advance rather than baked into an allocation, which is the whole
     // reason they can be adopted instead of rebuilt for.
@@ -388,8 +389,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           // Generation zero contains only authored fluid. Dry face neighbours
           // are admitted by the GPU frontier if and when a swept fluid course
           // demands them; logical extent never becomes a topology allocation.
-          initiallyActiveBrickKeys = new Set(atlas.bricks.filter((brick) =>
-            brick.density.some((density) => density > 0)).map((brick) => brick.key));
+          initiallyActiveBrickKeys = sparseCM12InitialActiveBrickKeys(scene, atlas);
           // The runtime is GPU-resident from generation zero. Construct only
           // the topology oracle needed by the packer; the CPU dynamics state
           // used to allocate duplicate velocity, pressure, policy and
@@ -418,6 +418,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           };
           sparseRuntime = await createCM12SparseWorld({
             device,
+            scene,
             atlas: atlas!,
             grid: grid!,
             numerics: () => sparseWorldNumerics.current,
@@ -513,15 +514,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   /**
-   * Adopt scene scalars on the running solver.
+   * Adopt scene scalars and refinement policy on the running solver.
    *
    * Everything this method reads out of the document below — `numerics.maxDt_s`,
    * `fluid.gravity_m_s2`, `fluid.density_kg_m3` — is read per advance, never
-   * baked into a buffer, a pipeline or an atlas. Without this the renderer had
-   * no way to deliver a changed scalar except by constructing a new solver, so
-   * nudging the step slider rebuilt the whole sparse world to arrive at an
-   * identical one. The renderer only calls this once the structural and seed
-   * tiers already match, so the incoming document differs in scalars alone.
+   * baked into a pipeline or atlas. Refinement regions travel through the
+   * sparse world's small policy buffer and are consumed by the next ordinary
+   * topology plan. Without this seam either edit would construct a new world
+   * and discard the timeline.
    */
   applySceneUniforms(scene: SceneDescription): void {
     const receipt = this.sparseWorld.edit({ kind: "set-scene", scene });
@@ -906,9 +906,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     frameBank: "accepted" | "candidate" = "accepted") {
     return this.sparseWorldTrace.readDiagnosticFields(includeWorldLeaves, frameBank);
   }
-  readPhase1TransportReceiptQA(allowStageLimitedCandidate = false) {
+  readPhase1TransportReceiptQA(allowStageLimitedCandidate = false,
+    probeCells: readonly number[] = []) {
     return this.sparseWorldTrace.readPhase1TransportReceiptQA(
-      allowStageLimitedCandidate,
+      allowStageLimitedCandidate, probeCells,
     );
   }
   readPhase1TransportProfileQA() {

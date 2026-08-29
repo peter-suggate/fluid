@@ -26,14 +26,21 @@ function region(
   id: string,
   minimumCellSize_cells: number,
   maximumCellSize_cells?: number,
+  bounds: {
+    readonly min_m: { readonly x: number; readonly y: number; readonly z: number };
+    readonly max_m: { readonly x: number; readonly y: number; readonly z: number };
+  } = {
+    min_m: { x: 8, y: 8, z: 8 },
+    max_m: { x: 24, y: 24, z: 24 },
+  },
 ): FluidRefinementRegion {
   return {
     id,
     rule: "minimum-cell-size",
     minimumCellSize_cells,
     ...(maximumCellSize_cells === undefined ? {} : { maximumCellSize_cells }),
-    min_m: { x: 8, y: 8, z: 8 },
-    max_m: { x: 24, y: 24, z: 24 },
+    min_m: bounds.min_m,
+    max_m: bounds.max_m,
   };
 }
 
@@ -74,6 +81,62 @@ test("overlapping ceilings conservatively win over conflicting minimum-size floo
     packed, [8, 8, 8], [8, 8, 8], 8);
   assert.deepEqual(bounds, { minimumResolution: 4, maximumResolution: 2 });
   assert.equal(applySparseCM12RefinementRegionResolutionBounds(1, bounds), 4);
+});
+
+test("multiple disjoint regions independently contribute to the cell-size envelope", () => {
+  const left = region("left", 4, undefined, {
+    min_m: { x: 0, y: 0, z: 0 }, max_m: { x: 16, y: 32, z: 32 },
+  });
+  const right = region("right", 1, 2, {
+    min_m: { x: 16, y: 0, z: 0 }, max_m: { x: 32, y: 32, z: 32 },
+  });
+  for (const authored of [[left, right], [right, left]]) {
+    const packed = packSparseCM12RefinementRegions(authored, lattice);
+    assert.deepEqual(sparseCM12RefinementRegionResolutionBoundsForBrick(
+      packed, [0, 8, 8], [8, 8, 8], 8,
+    ), { minimumResolution: 1, maximumResolution: 2 });
+    assert.deepEqual(sparseCM12RefinementRegionResolutionBoundsForBrick(
+      packed, [16, 8, 8], [8, 8, 8], 8,
+    ), { minimumResolution: 4, maximumResolution: 8 });
+  }
+});
+
+test("a nested later region is not swallowed by a macro selected for the first", () => {
+  const base = createDeepPowerHydrostaticScene();
+  const bounded = structuredClone(base);
+  bounded.fluid.refinementRegions = [{
+    id: "coarse-domain",
+    rule: "minimum-cell-size",
+    minimumCellSize_cells: 4,
+    min_m: { x: -0.5 * base.container.width_m, y: 0,
+      z: -0.5 * base.container.depth_m },
+    max_m: { x: 0.5 * base.container.width_m, y: base.container.height_m,
+      z: 0.5 * base.container.depth_m },
+  }, {
+    id: "fine-centre",
+    rule: "minimum-cell-size",
+    minimumCellSize_cells: 1,
+    maximumCellSize_cells: 1,
+    min_m: { x: -0.4, y: 0.8, z: -0.4 },
+    max_m: { x: 0.4, y: 1.6, z: 0.4 },
+  }];
+  const atlas = initializeSparseBrickAtlasFromScene(bounded, {
+    finestDimensions: sceneLatticeDimensions(bounded),
+  });
+  const innerBricks = atlas.bricks.filter((brick) => {
+    const span = sparseBrickSpan(brick);
+    const low = brick.coordinate.map((value) => value * atlas.brickFineResolution);
+    const high = low.map((value) => value + span * atlas.brickFineResolution);
+    return low[0]! >= 24 && low[1]! >= 16 && low[2]! >= 24
+      && high[0]! <= 40 && high[1]! <= 32 && high[2]! <= 40;
+  });
+  assert.ok(innerBricks.length > 0);
+  for (const brick of innerBricks) {
+    const cellSize = atlas.brickFineResolution * sparseBrickSpan(brick)
+      / brick.resolution;
+    assert.equal(cellSize, 1,
+      `nested region brick ${brick.key} ignored the finer envelope`);
+  }
 });
 
 test("an authored minimum cell size bounds Sparse CM12 generation zero", () => {

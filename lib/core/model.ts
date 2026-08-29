@@ -232,11 +232,10 @@ export interface SceneDescription {
      * Authored boxes that bound the pressure-octree cell sizes inside them.
      * See `lib/core/refinement-regions.ts`.
      *
-     * Uniform-tier: the regions reach the GPU through the projection's params
-     * buffer, so drawing or retuning one is a buffer write on the running
-     * solver rather than a re-seed. That is what makes them an experiment
-     * surface — `gpuSceneUniformKey` carries them and `gpuSceneSeedKey`
-     * deliberately does not.
+     * Octree methods carry the regions through the projection params buffer as
+     * a live uniform edit. Sparse CM12 includes their spatial envelope in its
+     * construction identity because an immutable resident macro leaf cannot be
+     * split around a newly drawn box.
      */
     refinementRegions?: FluidRefinementRegion[];
   };

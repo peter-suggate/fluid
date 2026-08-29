@@ -180,6 +180,19 @@ export function sceneCardGlyph(card: SceneCard): SceneIsoGlyph | undefined {
 }
 
 /**
+ * The mark a card *already* has, without building one.
+ *
+ * A surface that draws its thumbnails lazily still wants to paint whole when
+ * the work has already been done — the scene selector opens over a running
+ * viewport, and a reader who has been on the library page, or who is opening
+ * the popover a second time, should not watch cached marks fade in one row at
+ * a time. Peeking rather than building is the difference.
+ */
+export function cachedSceneCardGlyph(card: SceneCard): SceneIsoGlyph | undefined {
+  return glyphCache.get(previewKey(card));
+}
+
+/**
  * Free-text match over what a card actually shows.
  *
  * Deliberately not fuzzy: someone typing "garden" is naming a shelf, and

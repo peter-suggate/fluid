@@ -157,6 +157,65 @@ export function sceneSearchOrder(groups: readonly SceneSearchGroup[]): readonly 
 }
 
 /**
+ * The same cards, laid out as the rows a grid of `columns` actually draws.
+ *
+ * A selector that shows thumbnails is read in two dimensions, so its arrow keys
+ * have to move in two — and "up" is not `index - columns`: every group starts a
+ * new row, because a shelf of four does not spill its fourth tile under the
+ * next shelf's heading. That makes the layout a fact about the *groups* rather
+ * than about the flat index, which is why it is computed here beside them and
+ * not divided out of a count in the component.
+ *
+ * Indices are into `sceneSearchOrder`, so the rows and the keyboard's cursor
+ * are the same numbers and neither has to be translated into the other.
+ */
+export function sceneSearchRows(
+  groups: readonly SceneSearchGroup[],
+  columns: number,
+): readonly (readonly number[])[] {
+  const rows: number[][] = [];
+  let flat = 0;
+  for (const group of groups) {
+    for (let at = 0; at < group.cards.length; at += columns) {
+      const width = Math.min(columns, group.cards.length - at);
+      rows.push(Array.from({ length: width }, () => flat++));
+    }
+  }
+  return rows;
+}
+
+/** The four keys that move a grid cursor. */
+export type SceneGridKey = "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight";
+
+/**
+ * Where an arrow key lands, given the rows and where the cursor is.
+ *
+ * Left and right walk the flat order, so they cross a shelf heading the way
+ * reading does. Up and down hold the column and clamp it, so a ragged last row
+ * — three shelves in this catalog have one — catches the cursor at its end
+ * instead of swallowing the keystroke. Both axes wrap: a list this shallow is
+ * faster to walk round than to walk back through, and wrapping is also what
+ * makes Up from the very first tile reach the last one.
+ */
+export function sceneSearchStep(
+  rows: readonly (readonly number[])[],
+  active: number,
+  key: SceneGridKey,
+): number {
+  const total = rows.reduce((sum, row) => sum + row.length, 0);
+  if (total === 0) return active;
+  if (key === "ArrowLeft" || key === "ArrowRight") {
+    const delta = key === "ArrowRight" ? 1 : -1;
+    return (active + delta + total) % total;
+  }
+  const row = rows.findIndex((entry) => entry.includes(active));
+  if (row < 0) return active;
+  const column = rows[row].indexOf(active);
+  const next = rows[(row + (key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length];
+  return next[Math.min(column, next.length - 1)];
+}
+
+/**
  * The span of a card's name the needle matched, for the row to mark.
  *
  * Only the name, and only a literal substring: the point is to show the reader

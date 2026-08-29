@@ -13,7 +13,11 @@ import {
   sceneInitialLiquidVolumes,
 } from "../../core/initial-fluid";
 import type { SceneDescription } from "../../core/model";
-import { sceneRefinementRegions } from "../../core/refinement-regions";
+import {
+  refinementRegionCellBounds,
+  sceneRefinementRegions,
+  type RefinementRegionLattice,
+} from "../../core/refinement-regions";
 import { sampleSolidWorld, solidWorldForScene, SOLID_WORLD_BRICK_CELLS,
   type SolidWorld } from
   "../../core/solid-world";
@@ -918,19 +922,37 @@ export function initializeSparseBrickAtlasFromScene(
   const brickDimensions = options.finestDimensions.map((value) =>
     Math.ceil(value / brickFineResolution)) as [number, number, number];
   const container = scene.container;
+  const refinementRegions = sceneRefinementRegions(scene);
+  const refinementLattice: RefinementRegionLattice = {
+    dimensions: options.finestDimensions,
+    cellSize_m: [container.width_m / options.finestDimensions[0],
+      container.height_m / options.finestDimensions[1],
+      container.depth_m / options.finestDimensions[2]],
+    origin_m: { x: -0.5 * container.width_m, y: 0, z: -0.5 * container.depth_m },
+  };
   const refinementRegionParameters = packSparseCM12RefinementRegions(
-    sceneRefinementRegions(scene), {
-      dimensions: options.finestDimensions,
-      cellSize_m: [container.width_m / options.finestDimensions[0],
-        container.height_m / options.finestDimensions[1],
-        container.depth_m / options.finestDimensions[2]],
-      origin_m: { x: -0.5 * container.width_m, y: 0, z: -0.5 * container.depth_m },
-    });
+    refinementRegions, refinementLattice);
   if (!options.resolutionForBrick) {
-    const hierarchical = hierarchicalTankFillBricks(
-      scene, options.finestDimensions, brickDimensions, brickFineResolution, surfaceFineRings,
-      maximumMacroSpanBricks, refinementRegionParameters,
-    );
+    // A macro leaf may be rerung, but it cannot be spatially split after it is
+    // packed into the resident catalogue. It is therefore safe only when the
+    // authored cell-size envelope is uniform over the whole domain. With a
+    // partial box (or several boxes forming a piecewise envelope), accepting a
+    // macro around the first constraint can swallow a later, finer constraint;
+    // neither box then fully contains the macro and the finer request is lost.
+    // The base-brick builder below evaluates the complete envelope per brick
+    // and runs the ordinary refine-only 2:1 closure across every boundary.
+    const regionBoundsEpsilon = 1e-4;
+    const spatiallyUniformRefinementEnvelope = refinementRegions.every((region) => {
+      const bounds = refinementRegionCellBounds(region, refinementLattice);
+      return bounds.min.every((value) => value <= regionBoundsEpsilon)
+        && bounds.max.every((value, axis) =>
+          value >= options.finestDimensions[axis]! - regionBoundsEpsilon);
+    });
+    const hierarchical = spatiallyUniformRefinementEnvelope
+      ? hierarchicalTankFillBricks(
+        scene, options.finestDimensions, brickDimensions, brickFineResolution,
+        surfaceFineRings, maximumMacroSpanBricks, refinementRegionParameters,
+      ) : undefined;
     if (hierarchical) {
       return createSparseAdaptiveMassAtlas(
         options.finestDimensions, hierarchical, 1, brickFineResolution,
@@ -973,13 +995,72 @@ export function initializeSparseBrickAtlasFromScene(
     });
   }
 
+  const policyTileForCoordinate = (coordinate: SparseBrickVec3) => {
+    const origin: SparseBrickVec3 = [coordinate[0] * brickFineResolution,
+      coordinate[1] * brickFineResolution, coordinate[2] * brickFineResolution];
+    const extent: SparseBrickVec3 = [Math.max(0, Math.min(brickFineResolution,
+      options.finestDimensions[0] - origin[0])), Math.max(0, Math.min(
+      brickFineResolution, options.finestDimensions[1] - origin[1])),
+    Math.max(0, Math.min(brickFineResolution,
+      options.finestDimensions[2] - origin[2]))];
+    const bounds = sparseCM12RefinementRegionResolutionBoundsForBrick(
+      refinementRegionParameters, origin, extent, brickFineResolution,
+      brickFineResolution,
+    );
+    const scale = Math.max(1, Math.round(
+      brickFineResolution / bounds.maximumResolution,
+    ));
+    const tileOrigin: SparseBrickVec3 = [Math.floor(coordinate[0] / scale) * scale,
+      Math.floor(coordinate[1] / scale) * scale,
+      Math.floor(coordinate[2] / scale) * scale];
+    return { scale, tileOrigin, key: `${scale}:${tileOrigin.join(",")}` };
+  };
+
+  // Sparse omission is part of the physical operator: a represented coarse
+  // brick contains both its wet cells and the adjacent dry pressure faces. A
+  // finer authored scene whose two-brick policy tile contains only its wet
+  // sub-bricks otherwise drops those faces, even though restriction produces
+  // the same density and RHS. Close residency over the policy tile so the
+  // finer partition represents exactly the same physical support.
+  const candidateByKey = new Map(candidates.map((candidate) =>
+    [candidate.key, candidate] as const));
+  if (sceneRefinementRegions(scene).length > 0) {
+    for (const candidate of [...candidates]) {
+      const tile = policyTileForCoordinate(candidate.coordinate);
+      if (tile.scale <= 1) continue;
+      for (let z = 0; z < tile.scale; z += 1) {
+        for (let y = 0; y < tile.scale; y += 1) {
+          for (let x = 0; x < tile.scale; x += 1) {
+            const coordinate: SparseBrickVec3 = [tile.tileOrigin[0] + x,
+              tile.tileOrigin[1] + y, tile.tileOrigin[2] + z];
+            if (coordinate.some((value, axis) => value < 0
+              || value >= brickDimensions[axis])) continue;
+            const siblingTile = policyTileForCoordinate(coordinate);
+            if (siblingTile.key !== tile.key) continue;
+            const key = sparseBrickKey(coordinate, brickDimensions);
+            if (candidateByKey.has(key)) continue;
+            const sibling = {
+              coordinate,
+              key,
+              interfaceBrick: brickHasInterface(
+                scene, options.finestDimensions, coordinate, epsilon,
+                brickFineResolution,
+              ),
+            };
+            candidateByKey.set(key, sibling);
+            candidates.push(sibling);
+          }
+        }
+      }
+    }
+    candidates.sort((left, right) => left.key - right.key);
+  }
+
   // Seed an exact face-distance transform from the free surface. This makes
   // the initial accepted topology agree with the GPU activity policy's full
   // 8/4/2/1 ladder. Previously every saturated interior brick was fixed at
   // 4^3; later GPU requests for 2^3 and 1^3 remained candidate-only, so deep
   // pools such as ocean-seiche could never visibly or physically coarsen.
-  const candidateByKey = new Map(candidates.map((candidate) =>
-    [candidate.key, candidate] as const));
   const faceDirections = [
     [-1, 0, 0], [1, 0, 0], [0, -1, 0],
     [0, 1, 0], [0, 0, -1], [0, 0, 1],
@@ -999,21 +1080,7 @@ export function initializeSparseBrickAtlasFromScene(
     readonly neighbors: Set<string>;
   }>();
   for (const candidate of candidates) {
-    const origin = candidate.coordinate.map((value) =>
-      value * brickFineResolution) as [number, number, number];
-    const extent = origin.map((value, axis) => Math.max(0,
-      Math.min(brickFineResolution, options.finestDimensions[axis]! - value))) as
-      [number, number, number];
-    const bounds = sparseCM12RefinementRegionResolutionBoundsForBrick(
-      refinementRegionParameters, origin, extent, brickFineResolution,
-      brickFineResolution,
-    );
-    const scale = Math.max(1, Math.round(
-      brickFineResolution / bounds.maximumResolution,
-    ));
-    const tileOrigin = candidate.coordinate.map((value) =>
-      Math.floor(value / scale) * scale);
-    const tileKey = `${scale}:${tileOrigin.join(",")}`;
+    const { scale, key: tileKey } = policyTileForCoordinate(candidate.coordinate);
     policyScaleByKey.set(candidate.key, scale);
     policyTileByBrick.set(candidate.key, tileKey);
     let tile = policyTiles.get(tileKey);
@@ -1110,6 +1177,71 @@ export function initializeSparseBrickAtlasFromScene(
   return createSparseAdaptiveMassAtlas(
     options.finestDimensions, bricks, 1, brickFineResolution,
   );
+}
+
+/**
+ * Generation-zero membership closed over authored refinement-policy tiles.
+ *
+ * A coarse active brick represents dry cells adjacent to its liquid as part
+ * of the pressure stencil. When the same physical brick is authored as a
+ * group of finer sparse bricks, activating only the sub-bricks that contain
+ * liquid removes those dry-side faces. Keep every resident sibling in a
+ * minimum-cell-size policy tile active whenever any sibling is wet.
+ */
+export function sparseCM12InitialActiveBrickKeys(
+  scene: SceneDescription,
+  atlas: SparseAdaptiveMassAtlas,
+): ReadonlySet<number> {
+  const active = new Set(atlas.bricks.filter((brick) =>
+    brick.density.some((density) => density > 0)).map((brick) => brick.key));
+  if (sceneRefinementRegions(scene).length === 0) return active;
+  const container = scene.container;
+  const packed = packSparseCM12RefinementRegions(
+    sceneRefinementRegions(scene), {
+      dimensions: atlas.dimensions,
+      cellSize_m: [container.width_m / atlas.dimensions[0],
+        container.height_m / atlas.dimensions[1],
+        container.depth_m / atlas.dimensions[2]],
+      origin_m: { x: -0.5 * container.width_m, y: 0,
+        z: -0.5 * container.depth_m },
+    });
+  for (const key of [...active]) {
+    const brick = atlas.directory.get(key);
+    if (!brick || sparseBrickSpan(brick) !== 1) continue;
+    const origin: SparseBrickVec3 = [brick.coordinate[0] * atlas.brickFineResolution,
+      brick.coordinate[1] * atlas.brickFineResolution,
+      brick.coordinate[2] * atlas.brickFineResolution];
+    const extent: SparseBrickVec3 = [Math.max(0, Math.min(atlas.brickFineResolution,
+      atlas.dimensions[0] - origin[0])), Math.max(0, Math.min(
+      atlas.brickFineResolution, atlas.dimensions[1] - origin[1])),
+    Math.max(0, Math.min(atlas.brickFineResolution,
+      atlas.dimensions[2] - origin[2]))];
+    const bounds = sparseCM12RefinementRegionResolutionBoundsForBrick(
+      packed, origin, extent, atlas.brickFineResolution,
+      atlas.brickFineResolution,
+    );
+    const scale = Math.max(1, Math.round(
+      atlas.brickFineResolution / bounds.maximumResolution,
+    ));
+    if (scale <= 1) continue;
+    const tileOrigin: SparseBrickVec3 = [
+      Math.floor(brick.coordinate[0] / scale) * scale,
+      Math.floor(brick.coordinate[1] / scale) * scale,
+      Math.floor(brick.coordinate[2] / scale) * scale,
+    ];
+    for (let z = 0; z < scale; z += 1) for (let y = 0; y < scale; y += 1) {
+      for (let x = 0; x < scale; x += 1) {
+        const coordinate = [tileOrigin[0] + x, tileOrigin[1] + y,
+          tileOrigin[2] + z] as SparseBrickVec3;
+        if (coordinate.some((value, axis) => value >= atlas.brickDimensions[axis])) continue;
+        const sibling = atlas.directory.get(sparseBrickKey(
+          coordinate, atlas.brickDimensions,
+        ));
+        if (sibling) active.add(sibling.key);
+      }
+    }
+  }
+  return active;
 }
 
 export function sparseAtlasLeaves(atlas: SparseAdaptiveMassAtlas): SparseAtlasLeaf[] {

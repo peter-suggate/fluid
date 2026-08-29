@@ -520,14 +520,21 @@ button.card[data-active] { border-color: var(--accent); }
    dialog demanding to be dismissed. Inside its own pane, at the corner where
    the scene's name is already written, so the popover appears where the
    question was asked.
+
+   A grid of thumbnails rather than a list of names, because a name is not
+   enough to recognise a scene by — half this catalog is a room with water in
+   it. The mark, the well and its wash are the library's, only smaller: a scene
+   is the same picture wherever it is offered, and one rule at `.card-art`
+   restyles both. What the tile drops is everything the library does *to* a
+   scene rather than with it — the chips, the blurb, the rename and the delete.
    --------------------------------------------------------------------------- */
 .scene-selector {
   --instrument-pane: light-dark(rgba(255, 253, 248, .9), rgba(20, 17, 12, .74));
   --instrument-veil: light-dark(rgba(255, 253, 248, .62), rgba(28, 24, 18, .52));
   --instrument-hair: light-dark(rgba(66, 56, 38, .12), rgba(244, 214, 166, .1));
   position: absolute; z-index: 14; left: 16px; top: 66px;
-  width: min(330px, calc(100% - 32px));
-  max-height: min(52vh, calc(100% - 150px));
+  width: min(376px, calc(100% - 32px));
+  max-height: min(60vh, calc(100% - 150px));
   display: flex; flex-direction: column; min-height: 0;
   overflow: hidden;
   border: 1px solid var(--instrument-hair);
@@ -560,37 +567,64 @@ button.card[data-active] { border-color: var(--accent); }
 .scene-selector-search input::placeholder { color: var(--dim); }
 .scene-selector-search input::-webkit-search-cancel-button { appearance: none; }
 
-.scene-selector-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0 6px; }
-/* A shelf heading, not a section: the eyebrow says which family the rows below
-   belong to and then gets out of the way of the names, which are the thing
-   being read. */
+.scene-selector-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0 8px; }
+/* A shelf heading, not a section: the eyebrow says which family the tiles below
+   belong to and then gets out of the way of them. */
 .scene-selector-shelf {
-  margin: 6px 0 2px; padding: 0 11px;
+  margin: 9px 0 5px; padding: 0 11px;
   color: var(--dim); font: var(--text-eyebrow);
   letter-spacing: var(--track-wider); text-transform: uppercase;
 }
-.scene-selector-list > .scene-selector-shelf:first-child { margin-top: 2px; }
-.scene-selector-row {
-  width: 100%; padding: 5px 11px;
-  display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 8px;
-  border: 0; background: transparent; text-align: left; cursor: pointer;
+.scene-selector-group:first-child .scene-selector-shelf { margin-top: 2px; }
+/* Three across, matching the column count the arrow keys assume — see COLUMNS
+   in components/SceneSelector.tsx. An auto-fill track would let the layout and
+   the keyboard disagree about where "up" is. */
+.scene-selector-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px; padding: 0 9px;
 }
-.scene-selector-row strong {
-  min-width: 0; overflow: hidden;
-  color: var(--ink); font-size: var(--size-4); font-weight: 500;
+.scene-selector-tile {
+  min-width: 0; padding: 3px;
+  display: grid; align-content: start; gap: 5px;
+  border: 0; border-radius: var(--radius-s);
+  background: transparent; text-align: left; cursor: pointer;
+}
+/* The library's thumbnail well — `.card-art` above carries the wash, so the
+   gradient is stated once for the whole product — at a tile's proportions and
+   padding. Only the frame is this surface's own: a hairline from the popover's
+   glass rather than the page's line token, because this sits over a live image
+   and not on paper. */
+.scene-selector-art {
+  overflow: hidden;
+  aspect-ratio: 100 / 72; padding: 7px 8px 1px;
+  border: 1px solid var(--instrument-hair); border-radius: var(--radius-s);
+}
+/* A tile whose mark has not been built yet. Nothing: the well is already drawn,
+   so the grid keeps its shape and the mark simply arrives in it. A document
+   that will not build at all draws `.card-art-missing` instead — the library's
+   dashed frame, which says something different. */
+.scene-selector-art-blank { display: block; height: 100%; }
+.scene-selector-name { min-width: 0; display: grid; gap: 1px; padding: 0 1px; }
+.scene-selector-name strong {
+  display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  color: var(--ink); font-size: var(--size-3); font-weight: 500; line-height: 1.3;
+}
+.scene-selector-name small {
+  overflow: hidden;
+  color: var(--dim); font: var(--text-micro);
   text-overflow: ellipsis; white-space: nowrap;
 }
-.scene-selector-row small { color: var(--dim); font: var(--text-micro); white-space: nowrap; }
-.scene-selector-row mark { background: transparent; color: var(--accent-strong); font-weight: 650; }
+.scene-selector-tile mark { background: transparent; color: var(--accent-strong); font-weight: 650; }
 /* One highlight, moved by both the pointer and the arrow keys, because they
-   have to agree about which row Enter opens. */
-.scene-selector-row[data-active="true"] { background: var(--accent-wash); }
-.scene-selector-row[data-active="true"] strong { color: var(--accent-strong); }
-/* The scene already running. A dot rather than a word: the row is a name and a
-   shelf, and "current" spelled out would be a third column of prose. */
-.scene-selector-row[data-current="true"] strong::before {
+   have to agree about which tile Enter opens. */
+.scene-selector-tile[data-active="true"] { background: var(--accent-wash); }
+.scene-selector-tile[data-active="true"] .scene-selector-art { border-color: var(--accent-line); }
+.scene-selector-tile[data-active="true"] .scene-selector-name strong { color: var(--accent-strong); }
+/* The scene already running. A dot rather than a word: the tile is a picture
+   and a name, and "current" spelled out would be a third thing to read. */
+.scene-selector-tile[data-current="true"] .scene-selector-name strong::before {
   content: ""; display: inline-block; vertical-align: middle;
-  width: 5px; height: 5px; margin-right: 6px;
+  width: 5px; height: 5px; margin-right: 5px;
   border-radius: 50%; background: var(--accent);
 }
 .scene-selector-empty { margin: 8px 11px; color: var(--dim); font: var(--text-micro); }

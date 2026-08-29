@@ -5,7 +5,11 @@ import type { SparseAdaptiveMassAtlas } from
 import type { SparseCM12RigidResources } from
   "../../methods/adaptive-mass/webgpu-sparse-cm12-rigid-coupling";
 import type { SolidWorld } from "../../core/solid-world";
-import { fluidSolidWorldForScene } from "../../core/solid-world";
+import {
+  fluidSolidWorldForScene,
+  solidWorldContentStamp,
+} from "../../core/solid-world";
+import type { SceneDescription } from "../../core/model";
 import {
   refinementRegionLattice,
   sceneRefinementRegions,
@@ -73,6 +77,8 @@ interface AdoptCM12SparseWorldOptions {
   readonly trace?: SparseWorldTrace;
   readonly rigidSystem?: WebGPURigidBodySystem;
   readonly rigidExchange?: GPUBuffer;
+  /** Construction authority used to classify later live scene edits. */
+  readonly initialScene: SceneDescription;
 }
 
 export type CM12SparseWorldResidentFactoryMode =
@@ -83,6 +89,8 @@ export type CM12SparseWorldResidentFactoryMode =
 /** Construction input while atlas compilation remains solver-owned. */
 export interface CM12SparseWorldFactoryConfig {
   readonly device: GPUDevice;
+  /** Scene whose static world and refinement policy produced generation zero. */
+  readonly scene: SceneDescription;
   readonly atlas: SparseAdaptiveMassAtlas;
   readonly grid: SparseAtlasCompositeGrid;
   readonly numerics: CM12SparseWorldNumerics;
@@ -162,7 +170,8 @@ export interface CM12SparseWorldDeveloperTrace {
     WebGPUSparseCM12Resident["readPresentationPageAllocatorReceiptQA"]>;
   readWorldGrowthReceiptQA(): ReturnType<
     WebGPUSparseCM12Resident["readWorldGrowthReceiptQA"]>;
-  readPhase1TransportReceiptQA(allowStageLimitedCandidate?: boolean): ReturnType<
+  readPhase1TransportReceiptQA(allowStageLimitedCandidate?: boolean,
+    probeCells?: readonly number[]): ReturnType<
     WebGPUSparseCM12Resident["readPhase1TransportReceiptQA"]>;
   readPhase1TransportProfileQA(): ReturnType<
     WebGPUSparseCM12Resident["readPhase1TransportProfileQA"]>;
@@ -215,6 +224,10 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   private state: SparseWorldStatus["state"] = "ready";
   private currentFault: SparseWorldFault | undefined;
   private destroyed = false;
+  private solidWorldStamp: string;
+  private solidEnvironment: SceneDescription["environment"];
+  private solidScenery: SceneDescription["scenery"];
+  private rigidBodies: SceneDescription["rigidBodies"];
 
   constructor(
     private readonly resident: WebGPUSparseCM12Resident,
@@ -222,6 +235,10 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     private readonly device: SparseWorldDevice,
   ) {
     this.generation = resident.globalFineLevelSetSource.generation;
+    this.solidWorldStamp = solidWorldContentStamp(options.initialScene);
+    this.solidEnvironment = options.initialScene.environment;
+    this.solidScenery = options.initialScene.scenery;
+    this.rigidBodies = options.initialScene.rigidBodies;
     options.trace?.record({
       kind: "world-created",
       residentTiles: options.residentTiles,
@@ -244,10 +261,25 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         });
       }
       try {
-        this.resident.setSolidWorld(fluidSolidWorldForScene(edit.scene));
+        // Region/scalar edits must stay a small uniform update. Static fluid
+        // colliders depend on the SolidWorld stamp plus the environment graph;
+        // only a change to that authority pays the voxel upload.
+        const nextSolidWorldStamp = solidWorldContentStamp(edit.scene);
+        const solidWorldChanged = nextSolidWorldStamp !== this.solidWorldStamp
+          || edit.scene.environment !== this.solidEnvironment
+          || edit.scene.scenery !== this.solidScenery;
+        if (solidWorldChanged) {
+          this.resident.setSolidWorld(fluidSolidWorldForScene(edit.scene));
+          this.solidWorldStamp = nextSolidWorldStamp;
+          this.solidEnvironment = edit.scene.environment;
+          this.solidScenery = edit.scene.scenery;
+        }
         this.resident.setRefinementRegionParameters(packSparseCM12RefinementRegions(
           sceneRefinementRegions(edit.scene), refinementRegionLattice(edit.scene)));
-        this.options.rigidSystem?.setScene(edit.scene);
+        if (edit.scene.rigidBodies !== this.rigidBodies) {
+          this.options.rigidSystem?.setScene(edit.scene);
+          this.rigidBodies = edit.scene.rigidBodies;
+        }
         this.generation += 1;
         this.state = "running";
         return Object.freeze({
@@ -519,8 +551,11 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   readWorldGrowthReceiptQA() {
     return this.resident.readWorldGrowthReceiptQA();
   }
-  readPhase1TransportReceiptQA(allowStageLimitedCandidate = false) {
-    return this.resident.readPhase1TransportReceiptQA(allowStageLimitedCandidate);
+  readPhase1TransportReceiptQA(allowStageLimitedCandidate = false,
+    probeCells: readonly number[] = []) {
+    return this.resident.readPhase1TransportReceiptQA(
+      allowStageLimitedCandidate, probeCells,
+    );
   }
   readPhase1TransportProfileQA() { return this.resident.readPhase1TransportProfileQA(); }
   readCandidateEffectsTransactionQA() {
@@ -653,6 +688,7 @@ export async function createCM12SparseWorld(
     trace: config.trace,
     rigidSystem: config.rigidSystem,
     rigidExchange: config.rigid?.exchange,
+    initialScene: config.scene,
   }, sparseDevice);
   const runtime = new AdoptedCM12SparseWorldRuntime(resident, readiness);
   return Object.freeze({

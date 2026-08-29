@@ -144,6 +144,22 @@ export interface SparseCM12Phase1TransportReceipt {
       worst?: Readonly<Record<string, unknown>>;
     }>
   >>;
+  /** Optional cells requested by a targeted QA read. */
+  readonly probes?: readonly Readonly<{
+    readonly cell: number;
+    readonly departure: readonly number[];
+    readonly donors: readonly Readonly<{
+      readonly cell: number;
+      readonly weight: number;
+      readonly betaFixed?: number;
+    }>[];
+    readonly betaFixed: number;
+    readonly deficitDensityFixed: number;
+    readonly gatheredDensity: number;
+    readonly gatheredGamma: number;
+    readonly packetId: number;
+    readonly packetLane: number;
+  }>[];
 }
 
 export async function sparseCM12Phase1Sha256(view: ArrayBufferView): Promise<string> {

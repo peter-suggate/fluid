@@ -1,7 +1,41 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { FluidLabRenderer } from "../lib/core/webgpu-renderer";
+import "../lib/methods";
+import { createMinimalPowerDamBreak64Scene } from "../lib/core/scenes";
+import {
+  FluidLabRenderer,
+  gpuSceneSolverKey,
+  gpuSceneUniformKey,
+  sceneEditRequiresReset,
+  type SimulationRunConfig,
+} from "../lib/core/webgpu-renderer";
+
+test("Sparse CM12 refinement regions are a live policy edit", () => {
+  const before = createMinimalPowerDamBreak64Scene();
+  const after = structuredClone(before);
+  after.fluid.refinementRegions = [{
+    id: "live-whole-domain-two-cell-floor",
+    rule: "minimum-cell-size",
+    minimumCellSize_cells: 2,
+    min_m: { x: -0.5 * after.container.width_m, y: 0,
+      z: -0.5 * after.container.depth_m },
+    max_m: { x: 0.5 * after.container.width_m, y: after.container.height_m,
+      z: 0.5 * after.container.depth_m },
+  }];
+  const config: SimulationRunConfig = {
+    methodId: "adaptive-mass",
+    quality: "balanced",
+    values: {},
+  };
+
+  assert.equal(sceneEditRequiresReset(before, after, "adaptive-mass"), false,
+    "drawing a refinement box must not reset the simulation timeline");
+  assert.equal(gpuSceneSolverKey(before, config), gpuSceneSolverKey(after, config),
+    "a region edit must retain the attached Sparse CM12 solver");
+  assert.notEqual(gpuSceneUniformKey(before), gpuSceneUniformKey(after),
+    "the retained solver must still observe and upload the new policy");
+});
 
 test("a live liquid edit retires the retained water mesh", () => {
   let injected = 0;

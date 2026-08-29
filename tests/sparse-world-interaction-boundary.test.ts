@@ -74,3 +74,15 @@ test("scene and rigid-body edits cross the same public world boundary", () => {
     /encodeLiquidInjection|encodeLiquidJetInjection|setSolidWorld|setRefinementRegionParameters/,
   "application edits must not regain implementation-specific escape hatches");
 });
+
+test("a refinement-only scene edit does not rebuild SolidWorld", () => {
+  const interaction = sourceBetween(adapter,
+    "  edit(edit: SparseWorldEdit): SparseWorldEditReceipt {",
+    "  encodeStep(encoder: GPUCommandEncoder, input: SparseWorldStepInput): SparseWorldStep {");
+  assert.match(interaction,
+    /if \(solidWorldChanged\) \{\s*this\.resident\.setSolidWorld\(/,
+    "static collider uploads must be guarded by their own authority stamp");
+  assert.match(interaction,
+    /this\.resident\.setRefinementRegionParameters\(packSparseCM12RefinementRegions/,
+    "the small refinement policy remains independently live");
+});

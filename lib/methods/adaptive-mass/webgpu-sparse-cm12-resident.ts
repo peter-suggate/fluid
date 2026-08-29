@@ -356,6 +356,39 @@ export const SPARSE_CM12_SHARPENING_DISTANCE_CELLS = 3.1;
 export const SPARSE_CM12_SHARPENING_TRACE_STEPS = CM12_SHARPENING_TRACE_STEPS;
 export const SPARSE_CM12_SHARPENING_STRENGTH = 1;
 const SPARSE_CM12_TRANSPORT_FIXED_SCALE = 65_536;
+const solidWorldHasClosedBoxShell = (
+  world: SolidWorld,
+  dimensions: readonly [number, number, number],
+): boolean => {
+  const [nx, ny, nz] = dimensions;
+  const expected = [
+    [[0, -1, 0], [nx, 0, nz]],
+    [[-1, 0, 0], [0, ny, nz]],
+    [[nx, 0, 0], [nx + 1, ny, nz]],
+    [[0, 0, -1], [nx, ny, 0]],
+    [[0, 0, nz], [nx, ny, nz + 1]],
+    [[0, ny, 0], [nx, ny + 1, nz]],
+  ] as const;
+  return expected.every(([minimum, maximumExclusive]) => world.patches.some((patch) =>
+    patch.operation === "fill"
+      && patch.minimum.every((value, axis) => value === minimum[axis])
+      && patch.maximumExclusive.every((value, axis) =>
+        value === maximumExclusive[axis]),
+  ));
+};
+const sparseCM12PhysicalMassFixedScale = (
+  finestCellSize_m: number,
+  closedSolidShell: boolean,
+): number => {
+  // 2.5 cm is the matched-mini receipt quantum. Refining the same
+  // physical scene by two divides a lattice cell's physical volume by eight,
+  // so its integrated-mass scale must do the same. A closed shell bounds the
+  // total receipt and can retain that precision on coarser lattices; an open
+  // sparse world caps at the original scale to preserve signed-atomic range.
+  const physicalRatio = Math.max(0, finestCellSize_m) / 0.025;
+  const ratio = closedSolidShell ? physicalRatio : Math.min(1, physicalRatio);
+  return SPARSE_CM12_TRANSPORT_FIXED_SCALE * ratio ** 3;
+};
 
 /** Kept inside the paper's own D range; the panel spec declares the same bounds. */
 export const sparseCM12SharpeningDistance = (value: unknown): number =>
@@ -3021,6 +3054,8 @@ export class WebGPUSparseCM12Resident {
   private readonly parameterF32 = new Float32Array(this.parameterWords);
   private readonly refinementRegionParameters =
     new Uint8Array(SPARSE_CM12_REFINEMENT_REGION_BYTES);
+  /** Region intersection is cached per brick and rebuilt only after an edit. */
+  private refinementPolicyDirty = false;
   private destroyed = false;
   /**
    * Derived here rather than threaded in from `create`, so the region
@@ -3137,6 +3172,7 @@ export class WebGPUSparseCM12Resident {
     private readonly worldDirectoryLayout: SparseCM12WorldDirectoryLayout,
     private readonly solidOccupancyLayout:
       SparseCM12SolidOccupancyLayout | undefined,
+    private closedSolidShell: boolean,
     private readonly initialWorldLeafCount: number,
     private readonly initialBrickCoordinates:
       readonly (readonly [number, number, number])[],
@@ -4952,6 +4988,7 @@ export class WebGPUSparseCM12Resident {
       topologyPagePool.pageWords,
       worldDirectoryLayout,
       solidOccupancyLayout,
+      solidWorldHasClosedBoxShell(initialSolidWorld, atlas.dimensions),
       packed.brickCount,
       atlas.bricks.map((brick) => brick.coordinate),
       templates.words,
@@ -5294,6 +5331,7 @@ export class WebGPUSparseCM12Resident {
         this.incrementalActivityLayout.brickCount);
       dispatch("publishSparseCM12FaceVelocitySupport",
         this.incrementalActivityLayout.brickCount);
+      this.refinementPolicyDirty = false;
       closeSubstage("face-support-publication");
       dispatch("prepareSparseCM12InteriorFaceTiles",
         Math.min(this.faceAddressLayout.dispatchWidth,
@@ -6073,13 +6111,24 @@ export class WebGPUSparseCM12Resident {
       throw new RangeError(`Sparse CM12 refinement-region parameters must occupy ${
         SPARSE_CM12_REFINEMENT_REGION_BYTES} bytes`);
     }
-    this.refinementRegionParameters.set(new Uint8Array(parameters));
+    const next = new Uint8Array(parameters);
+    let changed = false;
+    for (let index = 0; index < next.length; index += 1) {
+      if (next[index] !== this.refinementRegionParameters[index]) {
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) return;
+    this.refinementRegionParameters.set(next);
+    this.refinementPolicyDirty = true;
   }
 
   /** Adopt one accepted uniform solid generation without rebuilding fluid topology. */
   setSolidWorld(solidWorld: SolidWorld): void {
     this.assertLive();
     if (!this.solidOccupancyLayout) return;
+    this.closedSolidShell = solidWorldHasClosedBoxShell(solidWorld, this.dimensions);
     const clear = this.device.createCommandEncoder({
       label: "Sparse CM12 replace SolidWorld occupancy",
     });
@@ -6459,7 +6508,8 @@ export class WebGPUSparseCM12Resident {
     const dynamicSolidWorld = bodyCount > 0 && l.solidRowData !== 0;
     u.set([l.solidCellOpen, l.solidRowData,
       (staticSolidWorld || dynamicSolidWorld ? 1 : 0)
-        | (staticSolidWorld ? 4 : 0),
+        | (staticSolidWorld ? 4 : 0)
+        | (this.closedSolidShell ? 8 : 0),
       0], 84);
     f[87] = sparseCM12SharpeningStrength(sharpening?.strength);
     f.set([...(worldDimensions_m ?? [0, 0, 0]), bodyCount], 88);
@@ -6472,6 +6522,14 @@ export class WebGPUSparseCM12Resident {
     f.set(inflow ? [...inflow.velocityFinePerSecond, 1] : [0, 0, 0, 0], 108);
     new Uint8Array(this.parameterWords).set(this.refinementRegionParameters,
       SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET);
+    // refinementRegionControl.y is outside the authored-region ABI. Publish
+    // the physical receipt quantum once per frame rather than recomputing its
+    // finest-cell-volume normalization in every gamma, sharpening, and
+    // capacity invocation.
+    f[SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET / 4 + 1]
+      = sparseCM12PhysicalMassFixedScale(finestCellSize_m, this.closedSolidShell);
+    u[SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET / 4 + 2]
+      = this.refinementPolicyDirty ? 1 : 0;
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
   }
 
@@ -7068,13 +7126,21 @@ export class WebGPUSparseCM12Resident {
         ? this.layout.cellVelocityB : this.layout.cellVelocityA;
       const cellWidth_m = this.parameterF32[41]!;
       const pressureScale = this.parameterF32[42]!;
+      const physicalMassFixedScale = sparseCM12PhysicalMassFixedScale(
+        cellWidth_m, this.closedSolidShell,
+      );
       const topologyFloats = new Float32Array(this.templateWords.buffer,
         this.templateWords.byteOffset, this.templateWords.length);
       const cellOffset = this.templateWords[6]!, rangeOffset = this.templateWords[11]!;
       for (const record of activitySnapshot.records) {
         const brick = record.leafId;
         if (brick >= this.lastPacked!.brickCount) continue;
-        if (!record.active || (record.reasons & 64) === 0) continue;
+        // Active dry support is part of the physical state: transport may
+        // write a newly wetted receiver before the next activity census sets
+        // its occupied bit. Filtering at brick granularity made that value
+        // disappear only when a finer authoring lattice placed the receiver
+        // in a separate policy sibling.
+        if (!record.active) continue;
         const level = Math.log2(record.acceptedResolution);
         const templateLevelCount = Math.log2(this.brickFineResolution) + 1;
         const first = this.templateWords[
@@ -7128,7 +7194,7 @@ export class WebGPUSparseCM12Resident {
               gamma[at] = gammaValue;
               sharpeningDelta[at] = state[this.layout.sharpeningDelta + cell]!;
               sharpeningReceiptMass[at] = conditioning[6 * this.templateCellCount + cell]!
-                / SPARSE_CM12_TRANSPORT_FIXED_SCALE;
+                / physicalMassFixedScale;
               solidOpenFraction[at] = openFraction;
               velocity[4 * at] = vx; velocity[4 * at + 1] = vy;
               velocity[4 * at + 2] = vz;
@@ -7180,7 +7246,7 @@ export class WebGPUSparseCM12Resident {
             density[at] = rho; gamma[at] = gammaValue;
             sharpeningDelta[at] = state[this.layout.sharpeningDelta + cell]!;
             sharpeningReceiptMass[at] = conditioning[6 * this.templateCellCount + cell]!
-              / SPARSE_CM12_TRANSPORT_FIXED_SCALE;
+              / physicalMassFixedScale;
             solidOpenFraction[at] = openFraction;
             velocity[4 * at] = state[velocityAt]! * cellWidth_m;
             velocity[4 * at + 1] = state[velocityAt + 1]! * cellWidth_m;
@@ -7208,6 +7274,7 @@ export class WebGPUSparseCM12Resident {
    */
   async readPhase1TransportReceiptQA(
     allowStageLimitedCandidate = false,
+    probeCells: readonly number[] = [],
   ): Promise<SparseCM12Phase1TransportReceipt> {
     this.assertLive();
     const layout = this.phase1TransportQALayout;
@@ -7289,6 +7356,40 @@ export class WebGPUSparseCM12Resident {
         maximumDeficitDensityFixed, deficitDensitySigned[cell]!,
       );
     }
+    const departureProbe = new Float32Array(departure.buffer,
+      departure.byteOffset, departure.length);
+    const stencilWeightProbe = new Float32Array(stencilWeights.buffer,
+      stencilWeights.byteOffset, stencilWeights.length);
+    const massDensityProbe = new Float32Array(massDensity.buffer,
+      massDensity.byteOffset, massDensity.length);
+    const massGammaProbe = new Float32Array(massGamma.buffer,
+      massGamma.byteOffset, massGamma.length);
+    const probes = probeCells.map((cell) => {
+      if (!Number.isSafeInteger(cell) || cell < 0 || cell >= capacity) {
+        throw new RangeError(`Phase-1 transport probe cell ${cell} is outside capacity`);
+      }
+      const donors = Array.from({ length: 8 }, (_, corner) => {
+        const donor = stencilCells[8 * cell + corner]!;
+        return Object.freeze({
+          cell: donor,
+          weight: stencilWeightProbe[8 * cell + corner]!,
+          betaFixed: donor < capacity ? betaSigned[donor] : undefined,
+        });
+      });
+      return Object.freeze({
+        cell,
+        departure: Object.freeze(Array.from(
+          departureProbe.slice(3 * cell, 3 * cell + 3),
+        )),
+        donors: Object.freeze(donors),
+        betaFixed: betaSigned[cell]!,
+        deficitDensityFixed: deficitDensitySigned[cell]!,
+        gatheredDensity: massDensityProbe[cell]!,
+        gatheredGamma: massGammaProbe[cell]!,
+        packetId: packetIds[cell]!,
+        packetLane: packetLanes[cell]!,
+      });
+    });
 
     const [activity, scalarHeader, frameControl] = await Promise.all([
       this.readActivitySnapshot(), this.readFinalScalarMaskHeaderQA(),
@@ -7587,6 +7688,9 @@ export class WebGPUSparseCM12Resident {
     // arena is reused by capacity repair. This is QA provenance only; the
     // simulation consumed atomics authored by these same independent floors.
     const sharpeningReceiptFixed = new Int32Array(capacity);
+    const physicalMassFixedScale = sparseCM12PhysicalMassFixedScale(
+      this.parameterF32[41]!, this.closedSolidShell,
+    );
     for (let source = 0; source < capacity; source += 1) {
       const removed = sharpeningRemovedSigned[source]!;
       if (removed <= 0) continue;
@@ -7638,8 +7742,8 @@ export class WebGPUSparseCM12Resident {
         compare(massGammaMetric, massGammaFloat[cell]!, massGammaFloat[reflectedCell]!,
           1e-5, detail);
         compare(sharpeningReceiptMetric,
-          sharpeningReceiptFixed[cell]! / SPARSE_CM12_TRANSPORT_FIXED_SCALE,
-          sharpeningReceiptFixed[reflectedCell]! / SPARSE_CM12_TRANSPORT_FIXED_SCALE,
+          sharpeningReceiptFixed[cell]! / physicalMassFixedScale,
+          sharpeningReceiptFixed[reflectedCell]! / physicalMassFixedScale,
           1e-5, detail);
         compare(sharpeningSourceDensityMetric, sharpeningDensityFloat[cell]!,
           sharpeningDensityFloat[reflectedCell]!, 1e-5, detail);
@@ -7749,7 +7853,7 @@ export class WebGPUSparseCM12Resident {
           sources.push(Object.freeze({ source, coordinate, reflectedCoordinate,
             reflectedSource, geometryPeers, reflectedGeometryPeers,
             contributionFixed: contribution,
-            contributionMass: contribution / SPARSE_CM12_TRANSPORT_FIXED_SCALE,
+            contributionMass: contribution / physicalMassFixedScale,
             removedFixed: removed, density: sharpeningDensityFloat[source],
             delta: sharpeningDeltaFloat[source],
             departure: Array.from(sharpeningDepartureFloat.slice(
@@ -7797,7 +7901,8 @@ export class WebGPUSparseCM12Resident {
       frameGeneration, packetGeneration: transportTopologyGeneration,
       publishedPacketGeneration,
       effectiveVelocityTopologyGeneration: effectiveTopology,
-      effectiveVelocityFrameGeneration: effectiveFrame, reflectedZ });
+      effectiveVelocityFrameGeneration: effectiveFrame, reflectedZ,
+      ...(probes.length > 0 ? { probes: Object.freeze(probes) } : {}) });
   }
 
   async readFramePlanPresentationFaultRecordQA() {

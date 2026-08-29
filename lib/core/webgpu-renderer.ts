@@ -482,7 +482,11 @@ export function sceneStructuralKey(scene: SceneDescription): string {
 }
 
 export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
-  return `${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${sceneStructuralKey(scene)}`;
+  // Refinement boxes are planning policy, not allocation identity. Sparse CM12
+  // carries their complete envelope in resident params and refreshes its
+  // compact per-leaf policy cache at the next topology epoch. Keeping the
+  // envelope in this key made drawing a box discard the resident timeline.
+  return `${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${sceneStructuralKey(scene)}:refinement-live`;
 }
 
 /**
@@ -613,18 +617,18 @@ export function gpuSceneUniformKey(scene: SceneDescription): string {
 /**
  * The authored refinement regions.
  *
- * Uniform tier by construction rather than by concession: a region only changes
- * the topology gate's split decision, and the topology is re-derived from the
- * reset size every epoch, so a new box is adopted by the next candidate epoch
- * of the running solver. Nothing it can say changes an allocation, a seed or
- * the lattice — which is exactly what makes drawing one an experiment you can
- * watch rather than a restart you wait for.
+ * Every adaptive method carries these in its live planning-policy tier. Sparse
+ * CM12 additionally caches the resolved bounds per resident leaf; changing the
+ * authored envelope dirties that cache without changing solver identity.
  */
 function refinementRegionKey(scene: SceneDescription): string {
   const regions = scene.fluid.refinementRegions;
   if (!regions || regions.length === 0) return "none";
   return regions
     .map((region) => `${region.rule}@${region.minimumCellSize_cells}-${region.maximumCellSize_cells ?? "auto"}:${region.min_m.x},${region.min_m.y},${region.min_m.z}>${region.max_m.x},${region.max_m.y},${region.max_m.z}`)
+    // Region constraints form a spatial envelope; authoring order has no
+    // semantic weight and must not provoke a Sparse CM12 rebuild by itself.
+    .sort()
     .join("|");
 }
 

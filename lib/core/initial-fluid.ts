@@ -76,8 +76,16 @@ function intervalCellOverlapFraction(
 ): number {
   const lower = cell / cellCount;
   const upper = (cell + 1) / cellCount;
-  return Math.max(0, Math.min(upper, maximum) - Math.max(lower, minimum))
-    * cellCount;
+  const overlapInCells = Math.max(0,
+    Math.min(upper, maximum) - Math.max(lower, minimum)) * cellCount;
+  // Authored metre dimensions commonly become repeating normalized fractions
+  // (0.4 / 2.4, for example). Their mathematically coincident face can then
+  // land a few ulps beyond a cell boundary and seed a positive ~1e-14 film in
+  // the next brick. Sparse membership treats every positive density as wet,
+  // so snap only those round-off residues (and their full-cell counterpart).
+  if (overlapInCells <= 1e-12) return 0;
+  if (overlapInCells >= 1 - 1e-12) return 1;
+  return overlapInCells;
 }
 
 /**

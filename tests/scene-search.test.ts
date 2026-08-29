@@ -9,6 +9,8 @@ import {
   sceneNameMatch,
   sceneSearchGroups,
   sceneSearchOrder,
+  sceneSearchRows,
+  sceneSearchStep,
   searchSceneCards,
 } from "../lib/core/scene-search";
 
@@ -106,4 +108,49 @@ test("the highlight marks only what the name actually matched", () => {
   // Matched by its blurb: there is nothing in the name to mark, and claiming a
   // span would misreport why the row is on screen.
   assert.equal(sceneNameMatch(CARDS[4]!, "sloshing"), undefined);
+});
+
+/**
+ * The grid the selector's arrow keys move over.
+ *
+ * Three shelves of one, two and five cards: the shapes that break a naive
+ * `index ± columns` are exactly these — a group shorter than a row, a row that
+ * ends early, and a wrap at either end of the list.
+ */
+const GROUPS = sceneSearchGroups(CARDS, "", { recent: [CARDS[4]!] });
+
+test("a group starts a new row rather than spilling into the one below", () => {
+  // Recent (1), Dam breaks (2), Garden (1), Free-fall contact (1), Oceans (1).
+  assert.deepEqual(sceneSearchRows(GROUPS, 3), [[0], [1, 2], [3], [4], [5]]);
+  // And a shelf longer than a row does break across rows, at the column count.
+  const wide = [{ shelf: "Wide", cards: CARDS }];
+  assert.deepEqual(sceneSearchRows(wide, 3), [[0, 1, 2], [3, 4]]);
+});
+
+test("down holds the column and clamps it to a short row", () => {
+  const rows = sceneSearchRows([{ shelf: "Wide", cards: CARDS }], 3);
+  assert.equal(sceneSearchStep(rows, 2, "ArrowDown"), 4, "the third column lands on the last tile");
+  assert.equal(sceneSearchStep(rows, 4, "ArrowUp"), 1, "and comes back to the column it is in");
+});
+
+test("both axes wrap, so the first tile reaches the last", () => {
+  const rows = sceneSearchRows(GROUPS, 3);
+  const total = sceneSearchOrder(GROUPS).length;
+  assert.equal(sceneSearchStep(rows, 0, "ArrowLeft"), total - 1);
+  assert.equal(sceneSearchStep(rows, total - 1, "ArrowRight"), 0);
+  assert.equal(sceneSearchStep(rows, 0, "ArrowUp"), 5, "up from the first row is the last row");
+  assert.equal(sceneSearchStep(rows, 5, "ArrowDown"), 0);
+});
+
+test("left and right read across a shelf heading rather than stopping at it", () => {
+  // Flat order is reading order, so the last tile of one shelf and the first of
+  // the next are neighbours — which is what makes a one-card shelf walkable.
+  const rows = sceneSearchRows(GROUPS, 3);
+  assert.equal(sceneSearchStep(rows, 0, "ArrowRight"), 1);
+  assert.equal(sceneSearchStep(rows, 2, "ArrowRight"), 3);
+});
+
+test("an empty grid leaves the cursor where it is", () => {
+  assert.equal(sceneSearchStep([], 0, "ArrowDown"), 0);
+  assert.equal(sceneSearchStep(sceneSearchRows([], 3), 0, "ArrowRight"), 0);
 });

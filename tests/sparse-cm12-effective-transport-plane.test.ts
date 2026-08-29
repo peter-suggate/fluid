@@ -76,18 +76,69 @@ test("transport holds a scale-invariant source lattice while sharpening stays co
 });
 
 test("fixed-point remainders remain at their source, independent of traversal order", () => {
+  const physicalMassScale = functionSource(wgsl, "cm12PhysicalMassFixedScale",
+    "fn sharpeningReceipt");
+  assert.match(physicalMassScale,
+    /bitcast<f32>\(p\.refinementRegionControl\.y\)/,
+    "integrated-mass receipts must consume the precomputed physical quantum");
+  const gammaScatter = functionSource(wgsl, "scatterGammaRow",
+    "@compute @workgroup_size(64)\nfn scatterGammaSnapshotRows");
+  assert.equal(gammaScatter.match(/cm12PhysicalMassFixedScale\(\)/g)?.length, 2,
+    "paired gamma diffusion receipts must share the physical mass quantum");
   const sharpeningScatter = functionSource(wgsl, "scatterSharpeningCell",
     "@compute @workgroup_size(64)\nfn prepareSharpeningField");
+  assert.match(sharpeningScatter,
+    /removed\*cm12PhysicalMassFixedScale\(\)/);
   assert.match(sharpeningScatter,
     /addSharpeningReceipt\(cell,removedFixed-distributedFixed\)/);
   assert.doesNotMatch(sharpeningScatter, /lastCorner/);
 
   const capacityScatter = functionSource(wgsl, "scatterDensityCapacityRepair",
     "fn finalizeDensityCapacityRepair");
+  assert.match(capacityScatter,
+    /excessMass\*cm12PhysicalMassFixedScale\(\)/);
   assert.match(capacityScatter, /let distributed=share\*neighborCount/);
   assert.match(capacityScatter,
     /atomicAdd\(&conditioning\[6u\*p\.counts\.x\+cell\],-distributed\)/);
   assert.doesNotMatch(capacityScatter, /lastNeighbor/);
+});
+
+test("region-equivalent face transport scales the shared cache without taxing defaults",
+  () => {
+  const cachePublication = functionSource(wgsl,
+    "publishSparseCM12FaceVelocitySupport",
+    "@compute @workgroup_size(256)\nfn clearSparseCM12RetiredFaceVelocitySupport");
+  assert.match(cachePublication, /let value=cm12EffectiveTransportVelocity\(cell\)/);
+  assert.doesNotMatch(cachePublication, /incidenceBegin\(cell\)/);
+
+  const trace = functionSource(wgsl, "traceFaceDeparture",
+    "fn traceFaceDepartureAtSpans");
+  assert.match(trace, /sampleFaceVelocitySupport/);
+  assert.doesNotMatch(trace, /\/spans/,
+    "ordinary scenes must retain the original face-trace arithmetic");
+  assert.doesNotMatch(trace, /sampleFaceVelocityComponentSupport/);
+  const scaledTrace = functionSource(wgsl, "traceFaceDepartureAtSpans",
+    "fn presentationPhiAt");
+  assert.match(scaledTrace, /length\(initial\/spans\)/,
+    "face RK2 substeps must measure travel in accepted-cell spans");
+  assert.match(wgsl,
+    /characteristic=sampleFaceVelocitySupportAtSpans\(departure,spans\)\[axis\]/);
+
+  const policyCache = functionSource(wgsl, "refreshSparseCM12RefinementPolicyCache",
+    "fn policyTileMembershipRequired");
+  assert.match(policyCache,
+    /let bounds=sparseCM12RefinementRegionResolutionBounds\(brick\)/);
+  assert.match(policyCache, /refinementPolicyResolutionBits\(bounds\)/);
+  const applyBounds = functionSource(wgsl,
+    "applySparseCM12RefinementRegionBounds", "fn templateBrickCellRange");
+  assert.match(applyBounds, /cachedRefinementPolicyResolutionBounds\(brick\)/);
+  assert.doesNotMatch(applyBounds,
+    /sparseCM12RefinementRegionResolutionBounds\(brick\)/,
+    "per-frame planning must consume the cached constraint, not rescan boxes");
+  assert.match(cachePublication,
+    /lane==0u&&p\.refinementRegionControl\.z!=0u[\s\S]*refreshSparseCM12RefinementPolicyCache\(brick\)/,
+    "policy edits must reuse face publication instead of adding a pipeline");
+  assert.doesNotMatch(resident, /dispatch\("cacheSparseCM12RefinementPolicy"/);
 });
 
 test("dry transport retains cumulative gamma instead of injecting a new value", () => {

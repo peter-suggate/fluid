@@ -374,11 +374,10 @@ export interface GPUSolverInstance {
   /** Lazily allocate dense adaptive fields when a scientific grid slice needs them. */
   ensureGridDiagnosticTextures?(): void;
   /**
-   * Adopt scene scalars that no lattice or seed depends on — density,
-   * viscosity, surface tension, gravity. Solvers read these from the retained
-   * scene when they write per-step params, so adopting a new scene is a
-   * uniform write rather than a rebuild. Implementing this is what lets
-   * `gpuSceneUniformKey` stay out of the rebuild trigger.
+   * Adopt live scene policy that no lattice or seed depends on — density,
+   * viscosity, surface tension, gravity, and method-owned refinement bounds.
+   * Solvers read these from the retained scene or a compact policy buffer, so
+   * adopting a new scene is a uniform update rather than a rebuild.
    */
   applySceneUniforms?(scene: SceneDescription): void;
   /**
