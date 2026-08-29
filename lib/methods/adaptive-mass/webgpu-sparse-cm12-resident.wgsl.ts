@@ -1371,7 +1371,8 @@ fn rowSolidVelocity(id:u32)->f32{
 }
 fn rowPressureOpenFraction(id:u32)->f32{
   let solid=select(1.0,state[p.solidOffsets.y+3u*id+2u],hasSolidBoundaries());
-  return solid*solidVoxelRowOpenFraction(id);
+  let open=solid*solidVoxelRowOpenFraction(id);
+  return select(open,1.0,rowSeparatingFromClosedWorld(id));
 }
 fn rowDualWeight(id:u32)->f32{
   if(!hasSolidBoundaries()){
@@ -1382,6 +1383,26 @@ fn rowDualWeight(id:u32)->f32{
 fn rowArea(id:u32)->f32{
   if(!hasSolidBoundaries()){return rowStaticArea(id);}
   return rowStaticArea(id)*rowOpenFraction(id);
+}
+
+// CM12 Sec. 3.7's separating contact branch has p=0. For a closed one-sided
+// world row, its incidence coefficient orients motion into the fluid domain.
+// Scalar traces remain clipped at the solid; only the separating face is free.
+fn rowSeparatingFromClosedWorldState(row:u32,densityOffset:u32,
+ velocityOffset:u32)->bool{
+  if(!hasSolidBoundaries()||rowKind(row)!=3u
+    ||rowTermCount(row)!=1u||rowOpenFraction(row)>1e-8){return false;}
+  let term=rowTermOffset(row);let cell=termCell(term);
+  if(!cellTransportActive(cell)
+    ||max(state[sourceDensity()+cell],state[densityOffset+cell])
+      <=CM12_LIQUID_ISOVALUE){return false;}
+  let axis=rowAxis(row);let velocityAt=velocityOffset+4u*cell;
+  let predicted=state[velocityAt+axis]+p.frame.x*p.acceleration[axis];
+  return termCoefficient(term)*(predicted-rowSolidVelocity(row))>1e-7;
+}
+fn rowSeparatingFromClosedWorld(row:u32)->bool{
+  return rowSeparatingFromClosedWorldState(row,destinationDensity(),
+    destinationCellVelocity());
 }
 
 // SolidWorld is the sole authored-solid authority. These edit/initialization
@@ -3264,6 +3285,12 @@ fn sparseCM12InflowFaceCoverage(row:u32)->f32{
 fn forceFaces(@builtin(global_invocation_id)gid:vec3u){
   let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID){return;}
   if(!rowAccepted(row)){publishForcedFace(row,0.0);return;}
+  if(rowSeparatingFromClosedWorld(row)){
+    let cell=termCell(rowTermOffset(row));let axis=rowAxis(row);
+    let velocityAt=destinationCellVelocity()+4u*cell;
+    publishForcedFace(row,state[velocityAt+axis]+p.frame.x*p.acceleration[axis]);
+    return;
+  }
   if(rowArea(row)<=1e-8){
     let boundary=select(0.0,rowSolidVelocity(row),hasSolidBoundaries());
     publishForcedFace(row,boundary);return;
@@ -4385,7 +4412,9 @@ fn reduceCurvatureRecovery(@builtin(local_invocation_id)lid:vec3u){
 }
 
 fn projectPressureRow(row:u32){
-  let theta=state[p.stateOffsets3.x+row];if(theta<=0.0||rowArea(row)<=1e-8){
+  let separating=rowSeparatingFromClosedWorld(row);
+  let theta=state[p.stateOffsets3.x+row];
+  if(theta<=0.0||(!separating&&rowArea(row)<=1e-8)){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasSolidBoundaries());return;}
   var jump=0.0;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);
@@ -4425,9 +4454,11 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
       hasSolidBoundaries());
     let w=abs(termCoefficient(term))*fluxWeight;var faceVelocity=state[destinationFaceVelocity()+row];
     if(hasSolidBoundaries()){
-      let open=rowOpenFraction(row);
-      faceVelocity=select(rowSolidVelocity(row),
-        (faceVelocity-(1.0-open)*rowSolidVelocity(row))/max(open,1e-6),open>1e-6);
+      if(!rowSeparatingFromClosedWorld(row)){
+        let open=rowOpenFraction(row);
+        faceVelocity=select(rowSolidVelocity(row),
+          (faceVelocity-(1.0-open)*rowSolidVelocity(row))/max(open,1e-6),open>1e-6);
+      }
     }
     velocity[axis]+=w*faceVelocity;weight[axis]+=w;
     if(pcmCellContains(id)){let value=termCoefficient(term)*fluxWeight*state[destinationFaceVelocity()+row];
@@ -4831,8 +4862,18 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       let incidenceEntry=incidenceRecord(incidence);let row=incidenceEntry.x;
       if(!rowAccepted(row)){continue;}
       let own=termCoefficient(incidenceEntry.y);
-      if(rowArea(row)<=1e-8){continue;}
       let packedMetadata=rowPackedMetadata(row);let axis=packedMetadata>>30u;
+      // Separation against the world can create a free surface without an
+      // in-domain density crossing. Keep that moving contact at B8 until the
+      // ordinary phase-crossing activity signal takes over.
+      if(rowSeparatingFromClosedWorld(row)
+        &&own*(state[destinationFaceVelocity()+row]-rowSolidVelocity(row))>1e-7){
+        interfaceCell=true;surfaceAxes|=1u<<axis;
+        let distance=rowDistance(row);
+        predictedMotion=max(predictedMotion,p.frame.x
+          *abs(state[destinationFaceVelocity()+row])/max(0.25*distance,1e-12));
+      }
+      if(rowArea(row)<=1e-8){continue;}
       let rowPosition=rowCenter(row);
       // A sparse-air row carries the same free-surface evidence as any other
       // omitted neighbour. Static closure comes only from SolidWorld.
