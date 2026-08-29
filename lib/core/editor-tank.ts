@@ -13,7 +13,12 @@ import {
   type EditorEntityDefinition,
 } from "./editor-entity";
 import type { FluidBodyBox } from "./editor-fluid-body";
-import { fluidRingActions } from "./editor-fluid-body";
+import {
+  fluidBodyCount,
+  fluidMaterialGroup,
+  fluidRingActions,
+  fluidStartChoice,
+} from "./editor-fluid-body";
 import type { EditorAction } from "./editor-action";
 
 /**
@@ -146,8 +151,6 @@ function tankGroups(scene: SceneDescription): EditorControlGroup[] {
   const fluidEnabled = scene.systems?.fluid !== false;
   const container = (patch: Partial<SceneDescription["container"]>) =>
     ({ container: { ...c, ...patch } });
-  const patchFluid = (patch: Partial<SceneDescription["fluid"]>) =>
-    ({ fluid: { ...fluid, ...patch } });
   const lattice = tankLatticeForExtents(scene, {
     width_m: c.width_m, height_m: c.height_m, depth_m: c.depth_m,
   });
@@ -238,62 +241,18 @@ function tankGroups(scene: SceneDescription): EditorControlGroup[] {
         },
       }],
     },
-    {
+    // The water's own settings live on the water — see `fluidMaterialGroup`.
+    // The tank keeps them only while the scene has no body to hang them off: an
+    // empty tank, a dry document, or one whose painted seeds have replaced the
+    // base condition still has to be able to say what will stand in it, and
+    // there is nothing else on screen to ask.
+    ...(fluidBodyCount(scene) > 0 ? [] : [{
+      ...fluidMaterialGroup(scene),
       id: "fluid",
       label: "Water",
       hint: "The material the solver carries, and how it starts",
-      choices: [{
-        id: "initial-condition",
-        label: "Start as",
-        value: fluid.initialCondition,
-        options: [
-          { id: "dam-break", label: "Dam break", apply: () => patchFluid({ initialCondition: "dam-break" }) },
-          { id: "tank-fill", label: "Tank fill", apply: () => patchFluid({ initialCondition: "tank-fill" }) },
-        ],
-      }],
-      fields: [
-        {
-          id: "density",
-          label: "Density",
-          unit: "kg/m³",
-          value: fluid.density_kg_m3,
-          step: 10,
-          min: 700,
-          max: 1300,
-          apply: (value: number) => patchFluid({ density_kg_m3: value }),
-        },
-        {
-          id: "viscosity",
-          label: "Viscosity",
-          unit: "Pa·s",
-          value: fluid.dynamicViscosity_Pa_s,
-          step: 0.0005,
-          min: 0,
-          max: 0.02,
-          apply: (value: number) => patchFluid({ dynamicViscosity_Pa_s: value }),
-        },
-        {
-          id: "surface-tension",
-          label: "Surface σ",
-          unit: "N/m",
-          value: fluid.surfaceTension_N_m,
-          step: 0.005,
-          min: 0,
-          max: 0.15,
-          apply: (value: number) => patchFluid({ surfaceTension_N_m: value }),
-        },
-        {
-          id: "gravity",
-          label: "Gravity Y",
-          unit: "m/s²",
-          value: fluid.gravity_m_s2.y,
-          step: 0.1,
-          min: -20,
-          max: 0,
-          apply: (value: number) => patchFluid({ gravity_m_s2: { ...fluid.gravity_m_s2, y: value } }),
-        },
-      ],
-    },
+      choices: [fluidStartChoice(scene)],
+    }]),
     {
       id: "domain",
       label: "Voxel domain",
@@ -387,7 +346,10 @@ function tankEntityFor(context: EditorEntityContext): EditorEntity {
     // rests on y = 0, so there is nothing else about it to type.
     fields: (["width_m", "height_m", "depth_m"] as const).map((key, axis) => ({
       id: key,
-      label: ["W", "H", "D"][axis]!,
+      // Spelled out rather than "W"/"H"/"D": these are read in a column wide
+      // enough for the words, and an initial is a tag the reader has to decode
+      // against a tooltip that would then say nothing else.
+      label: ["Width", "Height", "Depth"][axis]!,
       unit: "m",
       value: size[axis]!,
       step: scene.voxelDomain.finestCellSize_m,

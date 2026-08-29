@@ -10,7 +10,7 @@ import {
   moveBoxWithinLimits,
   moveHandles,
   pickSolidBox,
-  positionFields,
+  positionGroup,
   resizeBox,
   sceneContainerBox,
   WORLD_FRAME,
@@ -18,6 +18,8 @@ import {
   type BoxExtent,
   type BoxResizePolicy,
   type BoxSides,
+  type EditorChoiceGroup,
+  type EditorControlGroup,
   type EditorEntity,
   type EditorEntityContext,
   type EditorEntityDefinition,
@@ -387,6 +389,123 @@ export function moveFluidSeedBody(
   return { ...scene.fluid, initialBrickSeeds_m: seeds };
 }
 
+// ---- material -------------------------------------------------------------
+
+/**
+ * How many bodies of water the scene describes.
+ *
+ * The base condition, the painted seeds and the analytic volumes are three
+ * document fields and one idea; anything that has to speak about *the water*
+ * rather than about one body counts them together.
+ */
+export function fluidBodyCount(scene: SceneDescription): number {
+  return (fluidBodyBox(scene) ? 1 : 0)
+    + fluidSeedBodies(scene).length
+    + fluidVolumeBodies(scene).length;
+}
+
+/**
+ * What the base body is: a dam held against a wall, or a level fill.
+ *
+ * Only the base condition has one. A painted blob and an analytic ball *are*
+ * their shape, so this is declared apart from the material below rather than
+ * folded into it — a ball of water that offered to become a dam break would be
+ * describing the scene's other body.
+ */
+export function fluidStartChoice(scene: SceneDescription): EditorChoiceGroup {
+  const fluid = scene.fluid;
+  return {
+    id: "initial-condition",
+    label: "Start as",
+    value: fluid.initialCondition,
+    options: [
+      {
+        id: "dam-break",
+        label: "Dam break",
+        hint: "A column standing in one corner, released at t = 0",
+        apply: () => ({ fluid: { ...fluid, initialCondition: "dam-break" } }),
+      },
+      {
+        id: "tank-fill",
+        label: "Tank fill",
+        hint: "The container's whole footprint, filled to its fill fraction",
+        apply: () => ({ fluid: { ...fluid, initialCondition: "tank-fill" } }),
+      },
+    ],
+  };
+}
+
+/**
+ * What the water is made of, and what it falls under.
+ *
+ * These were declared on the tank, because the tank was the only thing on the
+ * strip that could hold them. They belong to the water: someone who wants
+ * thicker water selects the water. The tank keeps them only while the scene has
+ * no body to hang them off — see `tankGroups`.
+ *
+ * `scene.fluid` describes one liquid, so this is the same group whichever body
+ * it is opened from. Where a scene has several bodies it says so, rather than
+ * letting a reader believe they are thickening one puddle of two.
+ */
+export function fluidMaterialGroup(scene: SceneDescription): EditorControlGroup {
+  const fluid = scene.fluid;
+  const patch = (next: Partial<SceneDescription["fluid"]>) => ({ fluid: { ...fluid, ...next } });
+  return {
+    id: "material",
+    label: "Material",
+    hint: "What the solver carries, and what it falls under",
+    fields: [
+      {
+        id: "density",
+        label: "Density",
+        unit: "kg/m\u00b3",
+        value: fluid.density_kg_m3,
+        step: 10,
+        min: 700,
+        max: 1300,
+        apply: (value: number) => patch({ density_kg_m3: value }),
+      },
+      {
+        id: "viscosity",
+        label: "Viscosity",
+        unit: "Pa\u00b7s",
+        value: fluid.dynamicViscosity_Pa_s,
+        step: 0.0005,
+        min: 0,
+        max: 0.02,
+        apply: (value: number) => patch({ dynamicViscosity_Pa_s: value }),
+      },
+      {
+        id: "surface-tension",
+        label: "Surface \u03c3",
+        unit: "N/m",
+        value: fluid.surfaceTension_N_m,
+        step: 0.005,
+        min: 0,
+        max: 0.15,
+        apply: (value: number) => patch({ surfaceTension_N_m: value }),
+      },
+      {
+        id: "gravity",
+        // Named for the axis it writes, because that is the only component the
+        // control moves: a row called "Gravity" beside a single scrub would be
+        // promising a vector.
+        label: "Gravity Y",
+        unit: "m/s\u00b2",
+        value: fluid.gravity_m_s2.y,
+        step: 0.1,
+        min: -20,
+        max: 0,
+        apply: (value: number) => patch({ gravity_m_s2: { ...fluid.gravity_m_s2, y: value } }),
+      },
+    ],
+    summary: fluidBodyCount(scene) > 1
+      ? "One liquid: the document describes a single material, so these are the settings of"
+        + " every body of water in the scene."
+      : undefined,
+  };
+}
+
 // ---- entity ---------------------------------------------------------------
 
 function fluidSeedBodyEntityFor(
@@ -418,7 +537,11 @@ function fluidSeedBodyEntityFor(
     ],
     draftSubject: "fluid-body",
     editLabel: (handle) => handle.space === "world" ? `Moved ${label}` : `Reshaped ${label}`,
-    fields: positionFields(boxCenter(body.box), move),
+    // The material, but no start condition and no volume: `initialCondition`
+    // describes the base body alone, and a blob's volume is its bricks rather
+    // than the box drawn round them — a figure taken from that box would
+    // overstate a diagonal splash by half.
+    groups: [fluidMaterialGroup(scene), positionGroup(boxCenter(body.box), move)],
     remove: () => ({ ...scene, fluid: fluidSeedBodyPatch(scene, body, undefined) }),
   };
 }
@@ -463,8 +586,20 @@ function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefi
     draftSubject: "fluid-body",
     editLabel: (handle) => handle.space === "world"
       ? "Moved the water body" : "Reshaped the water body",
-    fields: positionFields(boxCenter(box),
-      (centre) => fluidBodyBoxPatch(scene, moveFluidBodyBox(box, centre, scene))),
+    // What this body *is* comes before where it is, for the reason every
+    // entity's choices do: the numbers underneath only mean something once the
+    // reader knows whether they are shaping a dam or a level.
+    choices: [fluidStartChoice(scene)],
+    // The material is promoted and the coordinates are not, because the
+    // handles are already on screen saying where this box is and nothing on
+    // screen says what is in it.
+    groups: [
+      fluidMaterialGroup(scene),
+      positionGroup(boxCenter(box),
+        (centre) => fluidBodyBoxPatch(scene, moveFluidBodyBox(box, centre, scene))),
+    ],
+    summary: `${(size[0]! * size[1]! * size[2]!).toFixed(3)} m\u00b3 of water, seeded as a`
+      + ` ${scene.fluid.initialCondition === "tank-fill" ? "tank fill" : "dam break"} at t = 0`,
   };
 }
 
@@ -707,11 +842,21 @@ export const fluidBodyEntity: EditorEntityDefinition = {
   },
 };
 
-/** The volume entity, under the label its place in the scene's water earns it. */
+/**
+ * The volume entity, under the label its place in the scene's water earns it,
+ * and carrying the same material as every other body of water.
+ *
+ * The group is added here rather than in `editor-fluid-volume.ts` because it is
+ * a fact about the scene's water and not about balls: that file describes one
+ * analytic shape, and it is this one that knows the shape is water.
+ */
 function volumeEntityFor(
   scene: SceneDescription,
   body: FluidVolumeBody,
   ordinal: number,
 ): EditorEntity {
-  return fluidVolumeEntity(scene, body, fluidBodyLabel(scene, ordinal));
+  return {
+    ...fluidVolumeEntity(scene, body, fluidBodyLabel(scene, ordinal)),
+    groups: [fluidMaterialGroup(scene)],
+  };
 }

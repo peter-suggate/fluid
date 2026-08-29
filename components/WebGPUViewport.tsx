@@ -42,10 +42,6 @@ import { hoverSceneAt, restFluidInWorld, restInContainer, type EditorHover } fro
 import { roomPointForRay, targetActionsAt, targetAtRay } from "../lib/core/editor-probe-catalog";
 import { highlightInstanceRange, type EditorHighlight, type EditorTarget } from "../lib/core/editor-target";
 import { EditorHighlightLayer } from "./EditorHighlightLayer";
-import { sceneryIdFromSelection } from "../lib/core/editor-scenery";
-import { sceneStoneNode } from "../lib/core/stone-look-controls";
-import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
-import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
 import {
   addFluidBall,
   defaultFluidBallRadius_m,
@@ -63,7 +59,6 @@ import {
   type AxisConstraint,
 } from "../lib/core/editor-axis-constraint";
 import {
-  entityCentre,
   entityHandleAtPointer,
   entityOutline,
   frameDirectionToLocal,
@@ -120,12 +115,7 @@ import {
   terrainFeatureIndex,
   type TerrainHandleKind,
 } from "../lib/core/editor-terrain";
-import { FieldQuickBar } from "./FieldQuickBar";
-import { FluidFieldFlyout } from "./FluidFieldFlyout";
-import { StoneLookFlyout } from "./StoneLookFlyout";
-import { TreeCanopyFlyout } from "./TreeCanopyFlyout";
-import { VesselRimFlyout } from "./VesselRimFlyout";
-import { SelectionFlyout } from "./SelectionFlyout";
+import { ContainerToolstrip, EntityToolstrip } from "./SceneToolstrip";
 import { SceneInstrumentTags } from "./PipelineOverlay";
 import { ViewportModeToggle } from "./ViewportModeToggle";
 import { useSceneStore } from "../lib/core/stores/scene-store";
@@ -239,6 +229,13 @@ const PRESENTED_DRAFT_SUBJECTS: ReadonlySet<SceneDraftSubject> = new Set<SceneDr
  * Undefined when the box has no visible top corner at all, which is the caller's
  * cue to draw nothing.
  */
+/**
+ * How wide a column of the strip has to be assumed to be, for keeping two of
+ * them apart: one row at its widest plus the gap it hangs off its anchor by.
+ * See `.toolstrip-key` and `useAnchoredFlyout` for both halves.
+ */
+const TOOLSTRIP_COLUMN_PX = 228;
+
 function rightmostTopCorner(
   corners: readonly Vec3[] | undefined,
   camera: CameraState,
@@ -908,10 +905,6 @@ export function WebGPUViewport() {
       };
     }),
   }));
-  // The flyout rides the selection's own origin, which is the one point on it
-  // that means the same thing for every entity.
-  const entityAnchor = heldEntity && projectToViewport(
-    entityCentre(heldEntity), camera, viewportSize.width, viewportSize.height);
   // The wireframe is drawn only while a gesture is open: at rest the handles
   // already say what is selected, and a permanent box around everything would
   // fight the object's own silhouette.
@@ -998,34 +991,37 @@ export function WebGPUViewport() {
   // whichever way the camera has been swung.
   const containerTopCorner = sceneDraft ? undefined
     : rightmostTopCorner(boxCorners(sceneContainerBox(scene)), camera, viewportSize);
-  // The full field picker rides it only while the tank or the water body is
-  // selected — the same argument that gates the scale overlay: inspecting the
-  // fluid is part of the "edit the world" decision, not a fourth permanent
-  // cluster of viewport chrome. The quick strip below is what stands there the
-  // rest of the time.
-  const fieldFlyoutAnchor = selection?.kind === "tank" || selection?.kind === "fluid-body"
-    ? containerTopCorner : undefined;
-  // The canopy dials ride the selected tree's own crown corner, on the same
-  // argument as the field picker on the tank: sculpting the foliage is part of
-  // the "look at the tree" gesture, not a trip to a panel. Gated on the node
-  // actually holding active foliage pads, so a lantern never grows leaf dials.
-  const selectedSceneryId = selection?.kind === "scenery" ? sceneryIdFromSelection(selection.id) : undefined;
-  const canopyFlyoutAnchor = selectedSceneryId !== undefined && heldEntity && !sceneDraft
-    && sceneCanopyPads(scene, selectedSceneryId).length > 0
+  // Selecting the tank grows the container's own strip rather than opening a
+  // second one: the tank's outline *is* the container's, so two strips would be
+  // two columns at one corner arguing about which is in front.
+  const tankSelected = selection?.kind === "tank";
+  // Everything else hangs its options off its own corner, on the same argument
+  // that puts the field views on the tank's: sculpting a tree is part of the
+  // "look at the tree" gesture, not a trip to a panel. The water included — its
+  // seed box is its own object with its own extents, and a reader who reached
+  // for it by clicking the water should find what they can change about it
+  // beside the water rather than out at the container's corner.
+  const entityTopCorner = heldEntity && !sceneDraft && !tankSelected
     ? rightmostTopCorner(entityOutline(heldEntity), camera, viewportSize)
     : undefined;
-  // The rim dials ride the selected coping band the same way.
-  const selectedVesselName = selection?.kind === "vessel-rim" ? vesselNameFromSelection(selection.id) : undefined;
-  const rimFlyoutAnchor = selectedVesselName !== undefined && heldEntity && !sceneDraft
-    ? rightmostTopCorner(entityOutline(heldEntity), camera, viewportSize)
-    : undefined;
-  // The stone dials ride a selected boulder the same way. Gated on the node
-  // being a capped-boulder generator, so the beds and the path — which stay
-  // single entities on purpose — never grow stone dials.
-  const stoneFlyoutAnchor = selectedSceneryId !== undefined && heldEntity && !sceneDraft
-    && sceneStoneNode(scene, selectedSceneryId) !== undefined
-    ? rightmostTopCorner(entityOutline(heldEntity), camera, viewportSize)
-    : undefined;
+  // Two columns of controls may not stand in the same place, and a selected
+  // object's corner is often within a strip's width of the container's — a
+  // reservoir fills most of its tank, so the water's top corner and the tank's
+  // are the same corner to within a few centimetres.
+  //
+  // The container's strip is the one that gives way, because it is the ambient
+  // one: it stands there whether or not anything is selected, while the other
+  // column is the answer to a click the reader has just made. It gives way
+  // *outward* — the container encloses whatever is selected, so its corner is
+  // already the further one from the water, and pushing it further out moves
+  // the chrome away from the image rather than across it.
+  const containerStripCorner = containerTopCorner && entityTopCorner
+    ? {
+      ...containerTopCorner,
+      leftFraction: Math.max(containerTopCorner.leftFraction,
+        entityTopCorner.leftFraction + TOOLSTRIP_COLUMN_PX / Math.max(1, viewportSize.width)),
+    }
+    : containerTopCorner;
   // Where the traced ray currently appears on screen. Projecting a point on the
   // ray rather than reusing the pointer is what keeps the marker on a pinned ray
   // while the camera orbits away from the pixel that produced it.
@@ -2918,38 +2914,18 @@ export function WebGPUViewport() {
         />
       ))}
     </svg>}
-    {heldEntity && !sceneDraft && entityAnchor?.visible && <SelectionFlyout
+    {/* Only in EDIT, because LOOK is deliberately bare — a scene opens to be
+        watched, and chrome over the water is the thing that mode exists to keep
+        off it. */}
+    {viewportMode === "interact" && containerStripCorner && <ContainerToolstrip
+      leftFraction={containerStripCorner.leftFraction}
+      topFraction={containerStripCorner.topFraction}
+      entity={tankSelected ? heldEntity : undefined}
+    />}
+    {viewportMode === "interact" && heldEntity && entityTopCorner && <EntityToolstrip
       entity={heldEntity}
-      leftFraction={entityAnchor.leftFraction}
-      topFraction={entityAnchor.topFraction}
-    />}
-    {fieldFlyoutAnchor && <FluidFieldFlyout
-      leftFraction={fieldFlyoutAnchor.leftFraction}
-      topFraction={fieldFlyoutAnchor.topFraction}
-    />}
-    {/* The same corner at rest. Only in EDIT, because LOOK is deliberately bare
-        — a scene opens to be watched, and chrome over the water is the thing
-        that mode exists to keep off it — and only while the full picker is not
-        already standing here, since that panel is this strip with everything it
-        left out. */}
-    {viewportMode === "interact" && !fieldFlyoutAnchor && containerTopCorner && <FieldQuickBar
-      leftFraction={containerTopCorner.leftFraction}
-      topFraction={containerTopCorner.topFraction}
-    />}
-    {selectedSceneryId !== undefined && canopyFlyoutAnchor && <TreeCanopyFlyout
-      nodeId={selectedSceneryId}
-      leftFraction={canopyFlyoutAnchor.leftFraction}
-      topFraction={canopyFlyoutAnchor.topFraction}
-    />}
-    {selectedSceneryId !== undefined && stoneFlyoutAnchor && <StoneLookFlyout
-      nodeId={selectedSceneryId}
-      leftFraction={stoneFlyoutAnchor.leftFraction}
-      topFraction={stoneFlyoutAnchor.topFraction}
-    />}
-    {selectedVesselName !== undefined && rimFlyoutAnchor && <VesselRimFlyout
-      vesselName={selectedVesselName}
-      leftFraction={rimFlyoutAnchor.leftFraction}
-      topFraction={rimFlyoutAnchor.topFraction}
+      leftFraction={entityTopCorner.leftFraction}
+      topFraction={entityTopCorner.topFraction}
     />}
     {/* The mode is read here as well as in `pointerMove`, because the toggle can
         flip it with the pointer sitting still over a lit object: a chip that

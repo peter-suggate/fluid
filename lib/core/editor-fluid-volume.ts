@@ -7,7 +7,7 @@ import {
   moveHandles,
   pickSolidBox,
   pickSolidSphere,
-  positionFields,
+  positionGroup,
   sceneContainerBox,
   WORLD_FRAME,
   type BoxExtent,
@@ -459,7 +459,10 @@ export function fluidVolumeEntity(
     ],
     draftSubject: "fluid-body",
     editLabel: (handle) => handle.space === "world" ? `Moved ${label}` : `Resized ${label}`,
-    fields: [...positionFields(fluidVolumeCentre(volume), move), ...radiusField],
+    // A ball's size is the one thing about it that nothing else on screen
+    // states, so it stays a row; where it is, is what the handles are for.
+    fields: radiusField,
+    groups: [positionGroup(fluidVolumeCentre(volume), move)],
     summary: `${fluidVolumeVolume_m3(volume).toFixed(3)} m³ of water, seeded as a ${noun} at t = 0`,
     remove: () => ({ ...scene, fluid: fluidVolumePatch(scene, target, undefined) }),
   };

@@ -285,6 +285,28 @@ export interface EditorControlGroup {
 }
 
 /** X, Y and Z of a position, as three fields that each move only their axis. */
+/**
+ * The same three numbers, folded into one row of the strip.
+ *
+ * Where a thing's position is already on screen as a gizmo, three rows of exact
+ * entry are three lines of column spent on the fallback for a gesture the
+ * reader can already make. This is that fallback kept — a reader who knows the
+ * coordinate they want must always be able to type it — one click further back
+ * than what the handles cannot say.
+ */
+export function positionGroup(
+  position_m: Vec3,
+  move: (position_m: Vec3) => Partial<SceneDescription>,
+  step = 0.01,
+): EditorControlGroup {
+  return {
+    id: "place",
+    label: "Place",
+    hint: "Exact coordinates, for when the handles are not the right instrument",
+    fields: positionFields(position_m, move, step),
+  };
+}
+
 export function positionFields(
   position_m: Vec3,
   move: (position_m: Vec3) => Partial<SceneDescription>,

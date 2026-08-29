@@ -10,11 +10,12 @@ import {
   withStoneSeedRerolled,
   type StoneDials,
 } from "../lib/core/stone-look-controls";
-import { useAnchoredFlyout } from "./anchored-flyout";
+import { SculptDialRows } from "./SculptDials";
+import { ToolstripRow } from "./toolstrip";
 
 /**
- * The stone sculptor, riding the selected boulder's own corner — the same
- * gesture as the canopy flyout on the tree. The three dials are the
+ * The stone sculptor, as rows on the selected boulder's own strip — the same
+ * gesture as the canopy dials on the tree. The three dials are the
  * family-shaped projection of the fourteen-number capped-boulder form (see
  * lib/stone-look-controls.ts), and VARY re-rolls the seed: the same stone,
  * another individual.
@@ -30,19 +31,7 @@ const DIALS: readonly { id: keyof StoneDials; label: string; hint: string }[] = 
   { id: "lip", label: "LIP", hint: "How far the cap overhangs the stem beneath it" },
 ];
 
-export function StoneLookFlyout({
-  nodeId,
-  leftFraction,
-  topFraction,
-}: {
-  nodeId: string;
-  leftFraction: number;
-  topFraction: number;
-}) {
-  // Anchored against the shell's measured box, so orbiting the camera
-  // until this corner nears an edge slides the panel instead of clipping it.
-  const { ref, style } = useAnchoredFlyout<HTMLDivElement>({ leftFraction, topFraction });
-
+export function StoneDialRows({ nodeId }: { nodeId: string }) {
   const scene = useSceneStore((state) => state.scene);
   const gestureOpen = useRef(false);
   const endGesture = () => {
@@ -81,37 +70,22 @@ export function StoneLookFlyout({
     simulation.commitEdit(undefined, { reseed: true });
   };
 
-  return <div
-    ref={ref}
-    className="stone-look-flyout"
-    data-testid="stone-look-flyout"
-    style={style}
-  >
-    <header>
-      <span>STONE</span>
-      <strong>{nodeId.replace(/^stone\//, "")}</strong>
-      <button
-        type="button"
-        data-testid="stone-vary"
-        title="Re-roll this stone: the same form, another individual"
-        onClick={reroll}
-      >VARY</button>
-    </header>
-    {DIALS.map((dial) => <label key={dial.id} className="stone-look-dial" title={dial.hint}>
-      <span>{dial.label}</span>
-      <input
-        type="range"
-        min={0}
-        max={1}
-        step={0.01}
-        value={dials[dial.id]}
-        data-testid={`stone-${dial.id}`}
-        aria-label={dial.hint}
-        onChange={(event) => setDial(dial.id, Number(event.currentTarget.value))}
-        onPointerUp={endGesture}
-        onBlur={endGesture}
-      />
-      <output>{Math.round(dials[dial.id] * 100)}%</output>
-    </label>)}
-  </div>;
+  return <>
+    <SculptDialRows
+      dials={DIALS}
+      values={dials}
+      testPrefix="stone"
+      onSet={setDial}
+      onEndGesture={endGesture}
+    />
+    {/* A verb, not a setting — so it is a row that acts on the click rather
+        than one that opens a control. */}
+    <ToolstripRow
+      tag="VARY"
+      name="Re-roll this stone"
+      hint="The same form, another individual."
+      testId="stone-vary"
+      onClick={reroll}
+    />
+  </>;
 }

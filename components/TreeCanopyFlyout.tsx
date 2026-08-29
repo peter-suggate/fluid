@@ -9,16 +9,16 @@ import {
   withCanopyDials,
   type CanopyDials,
 } from "../lib/core/tree-canopy-controls";
-import { useAnchoredFlyout } from "./anchored-flyout";
+import { SculptDialRows } from "./SculptDials";
 
 /**
- * The canopy sculptor, riding the selected tree's crown corner.
+ * The canopy sculptor, as rows on the strip at the selected tree's crown
+ * corner.
  *
- * Same argument as the fluid-field flyout on the tank: thinning a canopy is an
- * edit made a dozen times while looking at the tree, so the dials live on the
- * selection rather than behind a panel. The three dials are the tree-shaped
- * projection of the six-number density field — see lib/tree-canopy-controls.ts
- * for why they co-vary the raw parameters.
+ * Thinning a canopy is an edit made a dozen times while looking at the tree, so
+ * the dials live on the selection rather than behind a panel. The three are the
+ * tree-shaped projection of the six-number density field — see
+ * lib/tree-canopy-controls.ts for why they co-vary the raw parameters.
  *
  * A held slider is one gesture: the document is patched live for preview (a
  * canopy edit revoxelizes only its own dirty region and never reseeds the
@@ -31,19 +31,7 @@ const DIALS: readonly { id: keyof CanopyDials; label: string; hint: string }[] =
   { id: "breakup", label: "BREAKUP", hint: "Fine leaf speckle versus smooth cloud masses" },
 ];
 
-export function TreeCanopyFlyout({
-  nodeId,
-  leftFraction,
-  topFraction,
-}: {
-  nodeId: string;
-  leftFraction: number;
-  topFraction: number;
-}) {
-  // Anchored against the shell's measured box, so orbiting the camera
-  // until this corner nears an edge slides the panel instead of clipping it.
-  const { ref, style } = useAnchoredFlyout<HTMLDivElement>({ leftFraction, topFraction });
-
+export function CanopyDialRows({ nodeId }: { nodeId: string }) {
   const scene = useSceneStore((state) => state.scene);
   const gestureOpen = useRef(false);
   const endGesture = () => {
@@ -74,31 +62,11 @@ export function TreeCanopyFlyout({
     );
   };
 
-  return <div
-    ref={ref}
-    className="tree-canopy-flyout"
-    data-testid="tree-canopy-flyout"
-    style={style}
-  >
-    <header>
-      <span>CANOPY</span>
-      <strong>{pads.length === 1 ? "Foliage" : `Foliage · ${pads.length} pads`}</strong>
-    </header>
-    {DIALS.map((dial) => <label key={dial.id} className="tree-canopy-dial" title={dial.hint}>
-      <span>{dial.label}</span>
-      <input
-        type="range"
-        min={0}
-        max={1}
-        step={0.01}
-        value={dials[dial.id]}
-        data-testid={`canopy-${dial.id}`}
-        aria-label={dial.hint}
-        onChange={(event) => setDial(dial.id, Number(event.currentTarget.value))}
-        onPointerUp={endGesture}
-        onBlur={endGesture}
-      />
-      <output>{Math.round(dials[dial.id] * 100)}%</output>
-    </label>)}
-  </div>;
+  return <SculptDialRows
+    dials={DIALS}
+    values={dials}
+    testPrefix="canopy"
+    onSet={setDial}
+    onEndGesture={endGesture}
+  />;
 }

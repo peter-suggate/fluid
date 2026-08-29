@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type KeyboardEvent, type ReactNode } from "react";
+import { useState, type KeyboardEvent } from "react";
 import { getMethod, interactiveSimulationMethods } from "@/lib/core/method-registry";
 import type { MethodParamSpec, SelectParamSpec } from "@/lib/core/method-contract";
 import type { GPUQuality } from "../lib/core/gpu-quality";
@@ -20,34 +20,40 @@ import { DEFAULT_GRID_OVERLAY_AXIS, useUIStore } from "../lib/core/stores/ui-sto
 import { isPressureJournalOverlayMode } from "../lib/core/webgpu-pressure-journal-overlay";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
 import { LegendEntries } from "./VisualizationLegend";
-import { useAnchoredFlyout } from "./anchored-flyout";
 import { PressureFilmStrip } from "./PressureFilmStrip";
+import {
+  ToolstripChoice,
+  ToolstripPane,
+  ToolstripRow,
+  ToolstripScrub,
+  useToolstripSection,
+  type ToolstripTab,
+} from "./toolstrip";
 
 /**
- * The field-overlay picker, riding a corner of the fluid container.
+ * Everything about the water that is not one of the glyphs above it.
  *
- * The Performance panel's observatory remains the annotated read of these
- * views — legends, sources, live stats — but choosing one and sweeping a slice
- * are edits worth making dozens of times while watching the water, and a panel
- * you have to open first is the wrong home for that loop. Like the scale
- * overlay, this shows while the tank or the water body is selected, so "inspect
- * the fluid" is part of the same gesture as "edit the fluid" rather than a
- * fourth permanent cluster of viewport chrome.
+ * These are rows on the tank's own toolstrip rather than a panel of their own:
+ * selecting the tank *grows* the strip that is already standing at that corner
+ * instead of swapping it for a card. What the glyph rows leave out is the rest
+ * of the catalog, the plane the overlay is drawn through, the solver behind it
+ * and that solver's construction — four rows, each reporting its own current
+ * answer, each opening beside itself rather than pushing the others down.
+ *
+ * The Performance panel's observatory remains the annotated read of these views
+ * — legends, sources, live stats — but choosing one and sweeping a slice are
+ * edits worth making dozens of times while watching the water, and a panel you
+ * have to open first is the wrong home for that loop.
  *
  * Selection semantics match the observatory cards: picking the active view
  * hides the overlay, picking another switches the publication without touching
  * the chosen plane, and only an inactive overlay adopts the view's authored
- * axis.
+ * axis. The rule itself is `pickFieldOverlay`, shared with the glyph rows.
  *
- * Two columns. The **rail** is what is true right now, a line per fact: which
- * field is drawing, on which plane, at which depth, by which solver, at which
- * setup. Everything with more to say than a line — the dozen field rows, a
- * lens's phases, a captured solve's film, the construction settings — opens in
- * the **side column** instead. That column is deliberately generic: it takes
- * one occupant at a time and every rail row that owns one opens it the same
- * way, so the next thing worth inspecting reuses it rather than becoming a
- * fifth stacked group. The scene is the hero, and the resting height is the
- * price of admission.
+ * A row that has more to say than a line opens a **pane** — the dozen field
+ * rows, a lens's phases, a captured solve's film, the construction settings.
+ * That pane is deliberately generic and there is one at a time, so the next
+ * thing worth inspecting reuses it rather than becoming a fifth stacked group.
  */
 type FieldView = FieldVisualization & { mode: GridOverlayMode };
 
@@ -63,6 +69,7 @@ type FieldDetail =
   | { readonly kind: "views" }
   | { readonly kind: "lens"; readonly id: string }
   | { readonly kind: "film" }
+  | { readonly kind: "solver" }
   | { readonly kind: "setup" };
 
 function sameDetail(a: FieldDetail | undefined, b: FieldDetail): boolean {
@@ -130,34 +137,6 @@ function MethodParamControl({ spec, methodId }: { spec: MethodParamSpec; methodI
 
 const FIELD_VIEWS: readonly FieldView[] = VISUALIZATION_FIELDS
   .filter((field) => !field.hidden) as readonly FieldView[];
-
-/**
- * A rail row that owns a pane in the side column.
- *
- * Tag, current answer, chevron. One anatomy for every pane there is, so which
- * rows lead somewhere is legible before any of them is clicked — and the answer
- * stays on the rail while the pane is shut, which is the whole reason a row may
- * stand in for a section at all.
- */
-function DetailRow({ tag, value, title, open, onToggle }: {
-  readonly tag: string;
-  readonly value: string;
-  readonly title: string;
-  readonly open: boolean;
-  readonly onToggle: () => void;
-}) {
-  return <button
-    type="button"
-    className="fluid-field-summary"
-    data-testid={`fluid-field-row-${tag.toLowerCase()}`}
-    aria-expanded={open}
-    title={title}
-    onClick={onToggle}
-  >
-    <span>{tag}</span>
-    <strong>{value}</strong>
-  </button>;
-}
 
 /**
  * The open lens's scrubber, its counters and its key.
@@ -274,13 +253,7 @@ function LensPhaseScrubber({
   </div>;
 }
 
-export function FluidFieldFlyout({
-  leftFraction,
-  topFraction,
-  lenses: override,
-}: {
-  leftFraction: number;
-  topFraction: number;
+export function FieldControlRows({ lenses: override }: {
   /** Overrides the running method's own roster. For tests and previews. */
   lenses?: readonly AnyStageLens[];
 }) {
@@ -304,13 +277,6 @@ export function FluidFieldFlyout({
   const method = getMethod(methodId);
   const volumeCapable = method.capabilities?.volumeRendering === true;
   const methodValues = resolvedMethodValues(methodState);
-  const importantOptions = method.params.filter((spec): spec is SelectParamSpec =>
-    spec.tier === "coarse" && spec.kind === "select");
-  // The rest of what the Method panel held. Coarse dials sit under the selects
-  // they qualify; the fine tier stays behind a disclosure, as it always was.
-  const coarseDials = method.params.filter((spec) => spec.tier === "coarse" && spec.kind !== "select");
-  const fineParams = method.params.filter((spec) => spec.tier === "fine");
-  const quality = methodState.quality;
   // Declared on the method rather than fetched from the solver, so the section
   // is there before a device is.
   const lenses = override ?? method.stageLenses ?? [];
@@ -357,8 +323,15 @@ export function FluidFieldFlyout({
       : detail.kind === "lens" ? (activeLens?.id === detail.id ? detail : undefined)
         : detail.kind === "film" ? (filmMode ? detail : undefined)
           : detail;
-  const toggle = (next: FieldDetail) =>
-    setDetail((current) => (sameDetail(current, next) ? undefined : next));
+  // One row open across the whole strip, not one per section: these rows and
+  // the selected object's own hang their cards off the same corner, so two open
+  // at once overlap.
+  const { claim } = useToolstripSection("field", () => setDetail(undefined));
+  const openDetail = (next: FieldDetail | undefined) => {
+    claim(next !== undefined);
+    setDetail(next);
+  };
+  const toggle = (next: FieldDetail) => openDetail(sameDetail(open, next) ? undefined : next);
 
   // Narrowed to what selecting actually reads, so a lens goes down the same
   // path as a catalog row rather than through a second one that would have to
@@ -372,211 +345,140 @@ export function FluidFieldFlyout({
     if (change.slice !== undefined) setOverlaySlice(change.slice);
   };
 
-  // Anchored against the shell's measured box, so orbiting the camera
-  // until this corner nears an edge slides the panel instead of clipping it.
-  const { ref, style } = useAnchoredFlyout<HTMLDivElement>({ leftFraction, topFraction });
+  const closePane = () => openDetail(undefined);
+  // The plane buttons and HIDE are one chooser, not a strip plus an exception:
+  // "off" is a value of the same setting, and splitting it out was what put a
+  // button inside the summary line that had to argue with its own disclosure.
+  const planeOptions = [
+    ...(shown && !shown.planeless ? (["x", "y", "z"] as const).map((axis) => ({
+      value: axis, label: axis.toUpperCase(),
+    })) : []),
+    ...(shown && !shown.planeless ? [{
+      value: "volume",
+      label: "VOL",
+      disabled: !volumeCapable,
+      title: volumeCapable ? undefined : "Volume views need an adaptive octree method",
+    }] : []),
+    { value: "off", label: "HIDE" },
+  ];
 
-  // Built here rather than in the column's own component so the pane and the
-  // rail row that opens it stay in one place per subject: adding a pane is a
-  // row above and a case below, and nothing in between has to learn about it.
-  let paneTitle = "";
-  let pane: ReactNode = null;
-  if (open?.kind === "views") {
-    paneTitle = "Field";
-    pane = <div className="fluid-field-options">
-      {views.map((view) => {
-        const isActive = active?.mode === view.mode;
-        return <button
-          key={view.id}
-          type="button"
-          className={isActive ? "active" : ""}
-          aria-pressed={isActive}
-          title={view.description}
-          onClick={() => {
-            selectView(view);
-            // Picking is the list's whole job, so it stands down afterwards and
-            // hands the column to the chosen view's own control surface — which
-            // for a film is the curve, and for everything else is nothing.
-            setDetail(isPressureJournalOverlayMode(view.mode) ? { kind: "film" } : undefined);
-          }}
-        >
-          <i style={view.swatch ? { background: view.swatch } : undefined} />
-          <span>{view.label}</span>
-          <small>{view.figure ?? ""}</small>
-        </button>;
-      })}
-    </div>;
-  } else if (open?.kind === "lens" && activeLens) {
-    paneTitle = activeLens.label;
-    pane = <LensPhaseScrubber
-      lens={activeLens}
-      phase={lensPhase}
-      receipt={lensReceipt?.lensId === activeLens.id ? lensReceipt : undefined}
-      onPhase={setLensPhase}
-    />;
-  } else if (open?.kind === "film") {
-    paneTitle = "Film";
-    // The curve belongs beside the scrub, not under it: a frame of the film
-    // means something different at the third iteration than at the thirtieth,
-    // and knowing which needs the plot and the slider both on screen at once —
-    // which a column beside the rail gives and a stacked panel did not.
-    // Selecting a stop drives the same slider.
-    pane = filmReserved
-      ? <PressureFilmStrip
-        slot={filmSlot}
-        onSelectSlot={(slot) => setOverlaySlice(filmSchedule.length > 1
-          ? slot / (filmSchedule.length - 1) : 0)}
-      />
-      : <p className="fluid-field-film" data-testid="fluid-field-film-off">
-        <span>No film reserved — this view has nothing to replay.</span>
-        {filmReserve && <button
-          type="button"
-          data-testid="fluid-field-film-reserve"
-          title="Reserve room to capture one pressure solve. Rebuilds the solver once."
-          onClick={() => simulation.setMethodParam(
-            methodId,
-            filmReserve.parameter,
-            filmReserve.value,
-          )}
-        >RESERVE</button>}
-      </p>;
-  } else if (open?.kind === "setup") {
-    paneTitle = "Setup";
-    pane = <div
-      className="fluid-field-settings"
-      role="group"
-      aria-label="Important fluid solver options"
-    >
-      {/* Quality is the method's own coarsest dial — how much grid it is given
-          — so it leads the options it scales. */}
-      {method.showQualityControl !== false && <label className="select-control" title={method.pressureMapping}>
-        <span>Quality</span>
-        <select
-          aria-label="Simulation quality"
-          value={quality}
-          onChange={(event) => simulation.setQuality(event.currentTarget.value as GPUQuality)}
-        >
-          {(["balanced", "high", "ultra"] as const).map((level) => (
-            <option key={level} value={level}>{level[0]!.toUpperCase() + level.slice(1)} · {method.qualityLabels[level]}</option>
-          ))}
-        </select>
-      </label>}
-      {importantOptions.map((spec) => {
-        return <label className="select-control" key={spec.key} title={paramTitle(spec)}>
-          <span>{spec.label}</span>
-          <select
-            value={String(methodValues[spec.key])}
-            onChange={(event) => simulation.setMethodParam(
-              methodId, spec.key, event.currentTarget.value)}
-          >
-            {spec.options.map((option) => <option key={option.value} value={option.value}>
-              {option.label}
-            </option>)}
-          </select>
-        </label>;
-      })}
-      {coarseDials.map((spec) => <MethodParamControl key={spec.key} spec={spec} methodId={methodId} />)}
-      {fineParams.length > 0 && <details className="advanced-params">
-        <summary>Advanced</summary>
-        {fineParams.map((spec) => <MethodParamControl key={spec.key} spec={spec} methodId={methodId} />)}
-      </details>}
-    </div>;
-  }
-
-  return <div
-    ref={ref}
-    className="fluid-field-flyout"
-    data-testid="fluid-field-flyout"
-    style={style}
-  >
-    <div className="fluid-field-rail">
-      {hasViews && <section className="fluid-field-group">
-        {/* A dozen radio rows is half the panel spent on a choice made once a
-            session, and the one fact worth keeping on screen — which field is
-            drawing — is a single line. So the list moves to the side column,
-            and the summary is the answer; the plane and the scrub stay out
-            here, because those are the controls a reader works while the water
-            moves. */}
-        <DetailRow
-          tag="FIELD"
-          value={shown?.label ?? "Hidden"}
-          title="Choose the field this overlay draws"
-          open={open?.kind === "views"}
-          onToggle={() => toggle({ kind: "views" })}
-        />
-        {shown && <>
-          <div className="fluid-field-plane" role="group" aria-label="Field view plane">
-            {!shown.planeless && <>
-              {(["x", "y", "z"] as const).map((axis) => <button
-                key={axis}
-                type="button"
-                className={overlayAxis === axis ? "active" : ""}
-                onClick={() => setOverlayAxis(axis)}
-              >{axis.toUpperCase()}</button>)}
-              <button
-                type="button"
-                className={overlayAxis === "volume" ? "active" : ""}
-                disabled={!volumeCapable}
-                title={volumeCapable ? undefined : "Volume views need an adaptive octree method"}
-                onClick={() => setOverlayAxis("volume")}
-              >VOL</button>
-            </>}
-            {/* Turning the overlay off belongs with the presentation controls,
-                not on the summary line: a button inside a disclosure's own
-                header is a click that has to argue with the fold. */}
-            <button
+  // The whole catalog, hung off the row that names what is currently drawing.
+  const viewsPane = open?.kind === "views"
+    && <ToolstripPane label="Field" onClose={closePane}>
+        <div className="fluid-field-options">
+          {views.map((view) => {
+            const isActive = active?.mode === view.mode;
+            return <button
+              key={view.id}
               type="button"
-              className="fluid-field-off"
-              data-testid="fluid-field-hide"
-              title="Hide the field overlay"
-              onClick={() => setOverlayAxis("off")}
-            >HIDE</button>
-          </div>
-          <label className="fluid-field-slice">
-            <input
-              type="range"
-              min={filmMode ? 0 : shown.planeless || overlayAxis === "volume" ? 0.05 : 0}
-              max={1}
-              // A film's stops are the captured iterations and nothing between
-              // them, so the scrub steps between snapshots rather than sliding
-              // through a continuum it cannot show.
-              step={filmSchedule.length > 1 ? 1 / (filmSchedule.length - 1)
-                : shown.planeless || overlayAxis === "volume" ? 0.01 : 0.005}
-              value={overlaySlice}
-              onChange={(event) => setOverlaySlice(Number(event.currentTarget.value))}
-              aria-label={filmMode
-                ? `${shown.label} iteration`
-                : shown.planeless
-                  ? `${shown.label} opacity`
-                  : overlayAxis === "volume"
-                    ? "Field volume opacity"
-                    : `Field ${overlayAxis} slice position`}
-            />
-            <output>{filmSchedule.length > 0
-              ? `iter ${filmSchedule[filmSlot]}`
-              : filmMode ? "—" : `${Math.round(overlaySlice * 100)}%`}</output>
-          </label>
-          {/* A film's curve is the one pane that is not reachable from a row of
-              its own kind — the view that produces it is chosen in the field
-              list, which then stands down. Without this the column could be
-              closed and never reopened, and the scrub above would be stepping
-              through stops with nothing plotting them. */}
-          {filmMode && <DetailRow
-            tag="FILM"
-            value={filmReserved ? `${filmSchedule.length} stops` : "none reserved"}
-            title="The captured solve this scrub replays"
-            open={open?.kind === "film"}
-            onToggle={() => toggle({ kind: "film" })}
-          />}
-        </>}
-      </section>}
-      {/* What the *stages* did, as opposed to what the state is. Below the
-          fields rather than folded in with them because the two answer
-          different questions: a field row picks a publication, a lens row opens
-          one pass's own reading of itself, and the scrubber only means anything
-          inside one. */}
-      {lenses.length > 0 && <section className="fluid-field-group">
-        <h4 className="fluid-field-heading">Stages</h4>
+              className={isActive ? "active" : ""}
+              aria-pressed={isActive}
+              title={view.description}
+              onClick={() => {
+                selectView(view);
+                // Picking is the list's whole job, so it stands down afterwards
+                // and hands the pane to the chosen view's own control surface —
+                // which for a film is the curve, and for everything else is
+                // nothing.
+                openDetail(isPressureJournalOverlayMode(view.mode) ? { kind: "film" } : undefined);
+              }}
+            >
+              <i style={view.swatch ? { background: view.swatch } : undefined} />
+              <span>{view.label}</span>
+              <small>{view.figure ?? ""}</small>
+            </button>;
+          })}
+        </div>
+      </ToolstripPane>;
+
+  return <>
+    {hasViews && <ToolstripRow
+      tag="FIELD"
+      value={shown?.label ?? "Hidden"}
+      name="Field view"
+      hint="Every view this solver publishes. The strip above is the short list; this is all of it."
+      active={open?.kind === "views"}
+      testId="fluid-field-row-field"
+      onClick={() => toggle({ kind: "views" })}
+    >{viewsPane}</ToolstripRow>}
+    {/* Always shown rather than opened, because this is the control a reader
+        works while the water moves — and it is the only way to put away a view
+        the glyph strip has no row for. */}
+    {shown && <ToolstripRow
+      tag="PLANE"
+      name="Overlay plane"
+      hint="Which plane the overlay is drawn through, and the way to put it away."
+    >
+      <ToolstripChoice
+        ariaLabel="Field view plane"
+        value={overlayAxis}
+        options={planeOptions}
+        onChange={(value) => setOverlayAxis(value as typeof overlayAxis)}
+      />
+    </ToolstripRow>}
+    {/* A film's curve is the one pane not reachable from a row of its own kind:
+        the view that produces it is chosen in the field list, which then stands
+        down. Without this the pane could be closed and never reopened, and the
+        scrub above would be stepping through stops with nothing plotting them. */}
+    {filmMode && <ToolstripRow
+      tag="FILM"
+      value={filmReserved ? `${filmSchedule.length} stops` : "none reserved"}
+      name="Captured solve"
+      hint="The pressure solve this scrub replays, iteration by iteration."
+      active={open?.kind === "film"}
+      testId="fluid-field-row-film"
+      onClick={() => toggle({ kind: "film" })}
+    >
+      {open?.kind === "film" && <ToolstripPane label="Film" onClose={closePane}>
+        {/* The curve belongs beside the scrub, not under it: a frame of the film
+            means something different at the third iteration than at the
+            thirtieth, and knowing which needs the plot and the slider both on
+            screen at once. Selecting a stop drives the same slider. */}
+        {filmReserved && <ToolstripScrub
+          min={0}
+          max={1}
+          // A film's stops are the captured iterations and nothing between them,
+          // so the scrub steps between snapshots rather than sliding through a
+          // continuum it cannot show.
+          step={filmSchedule.length > 1 ? 1 / (filmSchedule.length - 1) : 1}
+          value={overlaySlice}
+          readout={filmSchedule.length > 0 ? `iter ${filmSchedule[filmSlot]}` : "—"}
+          ariaLabel={`${shown?.label ?? "Film"} iteration`}
+          onChange={setOverlaySlice}
+        />}
+        {filmReserved
+          ? <PressureFilmStrip
+            slot={filmSlot}
+            onSelectSlot={(slot) => setOverlaySlice(filmSchedule.length > 1
+              ? slot / (filmSchedule.length - 1) : 0)}
+          />
+          : <p className="fluid-field-film" data-testid="fluid-field-film-off">
+            <span>No film reserved — this view has nothing to replay.</span>
+            {filmReserve && <button
+              type="button"
+              data-testid="fluid-field-film-reserve"
+              title="Reserve room to capture one pressure solve. Rebuilds the solver once."
+              onClick={() => simulation.setMethodParam(methodId, filmReserve.parameter, filmReserve.value)}
+            >RESERVE</button>}
+          </p>}
+      </ToolstripPane>}
+    </ToolstripRow>}
+    {/* What the *stages* did, as opposed to what the state is. A field row picks
+        a publication; a lens row opens one pass's own reading of itself, and the
+        scrubber only means anything inside one. */}
+    {lenses.length > 0 && <ToolstripRow
+      tag="STAGES"
+      value={activeLens?.label ?? `${lenses.length} lenses`}
+      name="Solver stage lenses"
+      hint="What one pass did this frame, walked from plan to accept."
+      active={open?.kind === "lens"}
+      testId="fluid-field-row-stages"
+      onClick={() => toggle({ kind: "lens", id: activeLens?.id ?? lenses[0]!.id })}
+    >
+      {open?.kind === "lens" && <ToolstripPane
+        label={activeLens?.label ?? "Stages"}
+        onClose={closePane}
+      >
         <div className="fluid-field-options" role="group" aria-label="Solver stage lenses">
           {lenses.map((lens) => {
             const mode = stageLensOverlayMode(lens.stage);
@@ -589,10 +491,7 @@ export function FluidFieldFlyout({
               title={lens.description}
               onClick={() => {
                 selectView({ mode, axis: DEFAULT_GRID_OVERLAY_AXIS });
-                // Opening a lens opens its scrubber, because the phases are the
-                // lens: a selected lens with no scrubber on screen is one
-                // reading of a stage with no way to walk to the other six.
-                setDetail(isActive ? undefined : { kind: "lens", id: lens.id });
+                openDetail({ kind: "lens", id: lens.id });
               }}
             >
               <i style={lens.legend[0] ? { background: lens.legend[0].swatch } : undefined} />
@@ -600,55 +499,117 @@ export function FluidFieldFlyout({
             </button>;
           })}
         </div>
-      </section>}
-      {/* The solver behind these fields. It lives on the same widget because
-          switching methods is part of the same watch-the-water loop as choosing
-          a view. One chip per method under one heading — the label used to sit
-          in the first cell of the same grid the chips wrapped through, which
-          read as a select above a segment strip rather than as one chooser. */}
-      <section className="fluid-field-group">
-        <h4 className="fluid-field-heading">Solver</h4>
-        <div className="fluid-field-solver" role="group" aria-label="Fluid solver method">
-          {interactiveSimulationMethods().map((candidate) => <button
-            key={candidate.id}
-            type="button"
-            className={candidate.id === methodId ? "active" : ""}
-            aria-pressed={candidate.id === methodId}
-            title={candidate.description}
-            onClick={() => { if (candidate.id !== methodId) simulation.setMethod(candidate.id); }}
-          >{candidate.shortLabel}</button>)}
-        </div>
-      </section>
-      {/* The construction choices that follow from the method. Seven selects and
-          a dial ladder was the tallest thing on the panel and the least often
-          touched — changing one of these rebuilds the solver — so it is a row
-          reporting the coarsest of them and a pane holding the rest. */}
-      <section className="fluid-field-group">
-        <DetailRow
-          tag="SETUP"
-          value={method.showQualityControl !== false
-            ? `${quality[0]!.toUpperCase()}${quality.slice(1)} · ${method.qualityLabels[quality]}`
-            : `${importantOptions.length + coarseDials.length} options`}
-          title="Construction choices for this solver"
-          open={open?.kind === "setup"}
-          onToggle={() => toggle({ kind: "setup" })}
-        />
-      </section>
-    </div>
-    {/* Gated on the pane rather than on the request for one, so an unresolvable
-        detail is a closed column and never an empty one. */}
-    {pane && <aside className="fluid-field-aside" data-testid="fluid-field-aside" aria-label={paneTitle}>
-      <div className="fluid-field-aside-head">
-        <h4>{paneTitle}</h4>
-        <button
-          type="button"
-          title="Close"
-          aria-label="Close"
-          data-testid="fluid-field-aside-close"
-          onClick={() => setDetail(undefined)}
-        >×</button>
-      </div>
-      {pane}
-    </aside>}
+        {/* Opening a lens opens its scrubber, because the phases *are* the lens:
+            a selected lens with no scrubber on screen is one reading of a stage
+            with no way to walk to the other six. */}
+        {activeLens && <LensPhaseScrubber
+          lens={activeLens}
+          phase={lensPhase}
+          receipt={lensReceipt?.lensId === activeLens.id ? lensReceipt : undefined}
+          onPhase={setLensPhase}
+        />}
+      </ToolstripPane>}
+    </ToolstripRow>}
+    {/* The solver behind these fields. It lives on this strip because switching
+        methods is part of the same watch-the-water loop as choosing a view. */}
+    <ToolstripRow
+      tag="SOLVER"
+      value={method.shortLabel}
+      name="Fluid solver"
+      hint={method.description}
+      active={open?.kind === "solver"}
+      testId="fluid-field-row-solver"
+      onClick={() => toggle({ kind: "solver" })}
+    >
+      {open?.kind === "solver" && <ToolstripChoice
+        ariaLabel="Fluid solver method"
+        value={methodId}
+        options={interactiveSimulationMethods().map((candidate) => ({
+          value: candidate.id, label: candidate.shortLabel, title: candidate.description,
+        }))}
+        onChange={(value) => simulation.setMethod(value)}
+      />}
+    </ToolstripRow>
+  </>;
+}
+
+/**
+ * The solver's construction settings, as the panel's first face.
+ *
+ * These moved off the strip. As a row they were one line reporting the quality
+ * and a card holding nine controls — the tallest thing the column opened, and
+ * by a distance the thing most often opened, which is a bad trade for a strip
+ * whose rows are meant to be readable at a glance. They are now the tab the
+ * panel opens on, with the room to say what they are.
+ *
+ * Quality leads because it is the method's own coarsest dial — how much grid the
+ * solver is given — so it stands above the options it scales.
+ */
+export function MethodSetupTab() {
+  const methodState = useMethodStore();
+  const methodId = methodState.methodId;
+  const method = getMethod(methodId);
+  const values = resolvedMethodValues(methodState);
+  const selects = method.params.filter((spec): spec is SelectParamSpec =>
+    spec.tier === "coarse" && spec.kind === "select");
+  const dials = method.params.filter((spec) => spec.tier === "coarse" && spec.kind !== "select");
+  return <div className="fluid-field-settings" role="group" aria-label="Solver setup">
+    {method.showQualityControl !== false && <label className="select-control" title={method.pressureMapping}>
+      <span>Quality</span>
+      <select
+        aria-label="Simulation quality"
+        value={methodState.quality}
+        onChange={(event) => simulation.setQuality(event.currentTarget.value as GPUQuality)}
+      >
+        {(["balanced", "high", "ultra"] as const).map((level) => (
+          <option key={level} value={level}>{level[0]!.toUpperCase() + level.slice(1)} · {method.qualityLabels[level]}</option>
+        ))}
+      </select>
+    </label>}
+    {selects.map((spec) => <label className="select-control" key={spec.key} title={paramTitle(spec)}>
+      <span>{spec.label}</span>
+      <select
+        value={String(values[spec.key])}
+        onChange={(event) => simulation.setMethodParam(methodId, spec.key, event.currentTarget.value)}
+      >
+        {spec.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+      </select>
+    </label>)}
+    {dials.map((spec) => <MethodParamControl key={spec.key} spec={spec} methodId={methodId} />)}
   </div>;
+}
+
+/**
+ * The fine tier, as its own face.
+ *
+ * A disclosure at the foot of the setup list, which is where these used to be,
+ * is a scroll away from the settings that are actually reached for — and it made
+ * the panel's height depend on whether it had been opened. A tab of its own
+ * costs one word in the bar and keeps the first face one screenful.
+ */
+export function MethodAdvancedTab() {
+  const methodState = useMethodStore();
+  const methodId = methodState.methodId;
+  const fine = getMethod(methodId).params.filter((spec) => spec.tier === "fine");
+  return <div className="fluid-field-settings" role="group" aria-label="Advanced solver parameters">
+    {fine.map((spec) => <MethodParamControl key={spec.key} spec={spec} methodId={methodId} />)}
+  </div>;
+}
+
+/**
+ * The faces this method's setup is worth showing, for the panel to lead with.
+ *
+ * A plain function rather than a hook: the caller decides whether the panel
+ * exists at all, and a method that declares no fine parameters must not grow an
+ * empty Advanced tab.
+ */
+export function methodSetupTabs(methodId: string): readonly ToolstripTab[] {
+  const method = getMethod(methodId);
+  const setup = method.showQualityControl !== false || method.params.some((spec) => spec.tier === "coarse");
+  return [
+    ...(setup ? [{ id: "setup", label: "Setup", content: <MethodSetupTab /> }] : []),
+    ...(method.params.some((spec) => spec.tier === "fine")
+      ? [{ id: "advanced", label: "Advanced", content: <MethodAdvancedTab /> }]
+      : []),
+  ];
 }

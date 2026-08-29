@@ -9,11 +9,11 @@ import {
   withRimDials,
   type RimDials,
 } from "../lib/core/vessel-rim-controls";
-import { useAnchoredFlyout } from "./anchored-flyout";
+import { SculptDialRows } from "./SculptDials";
 
 /**
- * The coping sculptor, riding the selected rim's corner — the same gesture as
- * the canopy and stone flyouts. The three dials rewrite the vessel in both
+ * The coping sculptor, as rows on the selected rim's own strip — the same
+ * gesture as the canopy and stone dials. The three dials rewrite the vessel in both
  * places the document holds it (the scenery graph's vessel table and the
  * procedural terrain), so the ground, the beds and the path all re-derive
  * together — see lib/vessel-rim-controls.ts.
@@ -28,19 +28,7 @@ const DIALS: readonly { id: keyof RimDials; label: string; hint: string }[] = [
   { id: "rough", label: "ROUGH", hint: "Machined extrusion to hand-formed: relief and section swell together" },
 ];
 
-export function VesselRimFlyout({
-  vesselName,
-  leftFraction,
-  topFraction,
-}: {
-  vesselName: string;
-  leftFraction: number;
-  topFraction: number;
-}) {
-  // Anchored against the shell's measured box, so orbiting the camera
-  // until this corner nears an edge slides the panel instead of clipping it.
-  const { ref, style } = useAnchoredFlyout<HTMLDivElement>({ leftFraction, topFraction });
-
+export function RimDialRows({ vesselName }: { vesselName: string }) {
   const scene = useSceneStore((state) => state.scene);
   const gestureOpen = useRef(false);
   const endGesture = () => {
@@ -69,31 +57,11 @@ export function VesselRimFlyout({
     );
   };
 
-  return <div
-    ref={ref}
-    className="vessel-rim-flyout"
-    data-testid="vessel-rim-flyout"
-    style={style}
-  >
-    <header>
-      <span>COPING</span>
-      <strong>{vesselName}</strong>
-    </header>
-    {DIALS.map((dial) => <label key={dial.id} className="vessel-rim-dial" title={dial.hint}>
-      <span>{dial.label}</span>
-      <input
-        type="range"
-        min={0}
-        max={1}
-        step={0.01}
-        value={dials[dial.id]}
-        data-testid={`rim-${dial.id}`}
-        aria-label={dial.hint}
-        onChange={(event) => setDial(dial.id, Number(event.currentTarget.value))}
-        onPointerUp={endGesture}
-        onBlur={endGesture}
-      />
-      <output>{Math.round(dials[dial.id] * 100)}%</output>
-    </label>)}
-  </div>;
+  return <SculptDialRows
+    dials={DIALS}
+    values={dials}
+    testPrefix="rim"
+    onSet={setDial}
+    onEndGesture={endGesture}
+  />;
 }

@@ -1,0 +1,448 @@
+"use client";
+
+import { useState, type ReactNode } from "react";
+import { formatNumber } from "./controls";
+import { simulation } from "../lib/core/simulation/controller";
+import { length } from "../lib/core/math";
+import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import { useSceneStore } from "../lib/core/stores/scene-store";
+import { HERO_GARDEN_SOLVER_CELL_M } from "../lib/core/hero-garden-scene";
+import { findSceneDefinition } from "../lib/core/scenes";
+import { sceneDefinitionTakesLattice } from "../lib/core/scene-definition";
+import {
+  svoSceneryRefinementDepth,
+  SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
+  SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
+} from "../lib/svo/svo-render-tuning";
+import type {
+  EditorChoice,
+  EditorChoiceGroup,
+  EditorEntity,
+  EditorField,
+} from "../lib/core/editor-entity";
+import {
+  ToolstripChoice,
+  ToolstripMoreRow,
+  ToolstripNumber,
+  ToolstripPane,
+  ToolstripRow,
+  ToolstripScrub,
+  ToolstripTabbedPane,
+  useToolstripSection,
+  type ToolstripTab,
+} from "./toolstrip";
+
+/**
+ * Whether this scene has water at all, and — for a dry one — which lattice its
+ * set is authored at.
+ *
+ * Both reload the run: `setFluidSystem` swaps the solver for the live sparse
+ * scene and puts the clock back to zero, and `rebuildSceneAtLattice` regenerates
+ * the document through the preset's own factory so terrain bakes and every
+ * generator's legibility floor re-resolve. Neither is a patch a choice's `apply`
+ * could return, which is why the tank declares `offersSceneRebuild` and the
+ * controls live here — the same bargain `FluidMethodChoice` makes.
+ */
+function SceneRebuildControls() {
+  const scene = useSceneStore((state) => state.scene);
+  const presetId = useSceneStore((state) => state.presetId);
+  const patchScene = useSceneStore((state) => state.patchScene);
+  const fluidEnabled = scene.systems?.fluid !== false;
+  const voxelDomain = scene.voxelDomain;
+  const definition = findSceneDefinition(presetId);
+  // Whether this scene's factory takes a lattice, and can therefore be
+  // *re-authored* at one rather than only patched. See
+  // `simulation.rebuildSceneAtLattice` for why the two are not the same edit.
+  const rebuildable = definition !== undefined && sceneDefinitionTakesLattice(definition);
+  const authoredDepth = svoSceneryRefinementDepth(voxelDomain, { fluid: fluidEnabled });
+  const zeroRungCell_m = voxelDomain.environmentRefinementBaseCellSize_m ?? voxelDomain.finestCellSize_m;
+  const depths = Array.from(
+    { length: SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM - SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM + 1 },
+    (_unused, index) => index + SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM);
+  return <>
+    {/* The gate `planSceneRuntime` reads. Off attaches the live sparse scene
+        instead of a solver, so a set can be looked at while its water is still
+        in bring-up — and everything in the groups below stays authored,
+        describing the pond that returns when it is on.
+
+        Turning water on coarsens the lattice back to one the solver can carry:
+        a dry hero garden opens four times finer than its solver rung, so
+        enabling fluid on a document already open would otherwise hand the
+        solver a lattice it overruns. */}
+    <PaneRow label="Water">
+      <ToolstripChoice
+        ariaLabel="Fluid system"
+        value={fluidEnabled ? "on" : "off"}
+        options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]}
+        onChange={(value) => {
+          if (value === "on" && voxelDomain.finestCellSize_m < HERO_GARDEN_SOLVER_CELL_M) {
+            patchScene({ voxelDomain: { ...voxelDomain, finestCellSize_m: HERO_GARDEN_SOLVER_CELL_M } });
+          }
+          simulation.setFluidSystem(value === "on");
+        }}
+      />
+    </PaneRow>
+    <p className="toolstrip-pane-note">{fluidEnabled
+      ? "The solver owns this scene. Off renders the set alone, with nothing waiting on fluid."
+      : "Renderer only: the set draws from the live sparse scene. The settings below stay authored."}</p>
+    {rebuildable && <div className="toolstrip-pane-block" data-testid="scene-lattice-rebuild">
+      <PaneRow label="Re-author at">
+        <ToolstripChoice
+          ariaLabel="Set detail lattice"
+          value={String(Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
+            Math.max(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM, authoredDepth)))}
+          options={depths.map((depth) => ({
+            value: String(depth),
+            label: depth < 0 ? `×${2 ** -depth}` : depth === 0 ? "Cell" : `÷${2 ** depth}`,
+            disabled: fluidEnabled,
+            title: fluidEnabled
+              ? "A solver brick pins its node, so a wet document cannot move on this environment-only ladder. Turn water off first."
+              : `Rebuild with the set drawn at ${(zeroRungCell_m * 1000) / 2 ** depth} mm`,
+          }))}
+          onChange={(value) => simulation.rebuildSceneAtLattice({ environmentRefinementDepth: Number(value) })}
+        />
+      </PaneRow>
+      <p className="toolstrip-pane-note">
+        Regenerates {definition.name} through its own factory, so the heightfield is re-baked and every
+        generator re-resolves its legibility floors — which patching the cell above cannot do. It reloads
+        the preset, so edits made since it was opened do not survive it; that is why it is undoable.
+      </p>
+    </div>}
+  </>;
+}
+
+/**
+ * What the solver is currently doing to this body.
+ *
+ * Read-only, and here rather than in the diagnostics overlay because it is the
+ * one block in that panel that described *an object* — the pose, the forces on
+ * it and the volume it displaces are properties of the thing under the cursor,
+ * not of the run. In a cards panel it silently re-pointed itself whenever the
+ * selection changed somewhere else on screen; attached to the selection it can
+ * only ever describe what is selected.
+ *
+ * Folded away by default: these are figures somebody comes looking for, and the
+ * fields above them are the ones a reader is usually here to change.
+ */
+function BodyStateReadout({ bodyId }: { bodyId: string }) {
+  const body = useDiagnosticsStore((state) =>
+    state.bodies.find((candidate) => candidate.description.id === bodyId));
+  const fixedDt_s = useSceneStore((state) => state.scene.numerics.fixedDt_s);
+  if (!body) return null;
+  return (
+    <details className="selection-group selected-diagnostics" data-testid="selected-body-diagnostics">
+      <summary>Live state</summary>
+      <div className="body-vectors">
+        <div><span>Position</span><strong>{formatNumber(body.position_m.x, 3)}, {formatNumber(body.position_m.y, 3)}, {formatNumber(body.position_m.z, 3)}</strong><small>m</small></div>
+        <div><span>Linear velocity</span><strong>{formatNumber(body.linearVelocity_m_s.x, 3)}, {formatNumber(body.linearVelocity_m_s.y, 3)}, {formatNumber(body.linearVelocity_m_s.z, 3)}</strong><small>m/s</small></div>
+        <div><span>Angular velocity</span><strong>{formatNumber(body.angularVelocity_rad_s.x, 2)}, {formatNumber(body.angularVelocity_rad_s.y, 2)}, {formatNumber(body.angularVelocity_rad_s.z, 2)}</strong><small>rad/s</small></div>
+        <div><span>Orientation q</span><strong>{body.orientation.w.toFixed(3)}, {body.orientation.x.toFixed(3)}, {body.orientation.y.toFixed(3)}, {body.orientation.z.toFixed(3)}</strong><small>w, x, y, z</small></div>
+      </div>
+      <div className="force-grid">
+        <div><small>Mass</small><strong>{body.mass_kg.toFixed(3)}</strong><span>kg</span></div>
+        <div><small>Net force</small><strong>{length(body.netForce_N).toFixed(2)}</strong><span>N</span></div>
+        <div><small>Net torque</small><strong>{length(body.netTorque_N_m).toFixed(3)}</strong><span>N·m</span></div>
+        <div><small>Collision force*</small><strong>{(length(body.collisionImpulse_N_s) / fixedDt_s).toFixed(1)}</strong><span>N</span></div>
+        <div><small>Buoyancy</small><strong>{length(body.buoyantForce_N).toFixed(2)}</strong><span>N</span></div>
+        <div><small>Hydrodynamic force</small><strong>{length(body.hydrodynamicForce_N).toFixed(2)}</strong><span>N</span></div>
+        <div><small>Displaced volume</small><strong>{body.displacedFluidVolume_m3.toExponential(2)}</strong><span>m³</span></div>
+      </div>
+      <small className="diagnostic-footnote">* collision impulse divided by the current fixed step · GPU moving-solid penalization with conservative impulse readback</small>
+    </details>
+  );
+}
+
+/** One enumeration, committed as a single history entry. */
+/**
+ * One setting inside a pane: its name, and its control to the right of it.
+ *
+ * The same two-column line the strip's own rows are — name left, answer right —
+ * rather than the studio's form controls, which stack a label above a
+ * full-width widget. A pane hangs off a strip row and is read as a continuation
+ * of that column; a stack of headings and 32px fields inside it reads as a
+ * different application in a box, which is exactly what the strip replaced.
+ */
+function PaneRow({ label, children }: { label: string; children: ReactNode }) {
+  return <div className="toolstrip-pane-row">
+    <b className="toolstrip-tag">{label}</b>
+    {children}
+  </div>;
+}
+
+function ChoiceRow({ group, entityLabel }: { group: EditorChoiceGroup; entityLabel: string }) {
+  return <PaneRow label={group.label}>
+    <ToolstripChoice
+      ariaLabel={group.label}
+      value={group.value}
+      options={group.options.map((option) => ({
+        value: option.id,
+        label: option.label,
+        title: option.hint,
+        disabled: option.enabled === false,
+      }))}
+      onChange={(value) => {
+        const option = group.options.find((candidate) => candidate.id === value);
+        if (!option || option.enabled === false) return;
+        simulation.beginEdit(`Set ${entityLabel} ${group.label}`);
+        simulation.commitEdit(option.apply(), { reseed: true });
+      }}
+    />
+  </PaneRow>;
+}
+
+/** One quantity, committed as a single history entry. */
+function FieldRow({ field, entityLabel }: { field: EditorField; entityLabel: string }) {
+  // Previewed locally and written once on release, for the same reason the
+  // strip's own scrubs are: a commit is a history entry and a re-seed.
+  const [preview, setPreview] = useState<number | undefined>(undefined);
+  const commit = (value: number) => {
+    setPreview(undefined);
+    if (value === field.value) return;
+    simulation.beginEdit(`Set ${entityLabel} ${field.label}`);
+    simulation.commitEdit(field.apply(value), { reseed: true });
+  };
+  const bounded = field.min !== undefined && field.max !== undefined;
+  const shown = preview ?? field.value;
+  return <PaneRow label={field.label}>
+    {bounded
+      ? <ToolstripScrub
+        min={field.min!}
+        max={field.max!}
+        step={field.step}
+        value={shown}
+        readout={`${formatNumber(shown, field.step < 0.01 ? 3 : 2)}${field.unit ? ` ${field.unit}` : ""}`}
+        ariaLabel={`${entityLabel} ${field.label}`}
+        onChange={setPreview}
+        onCommit={commit}
+      />
+      : <ToolstripNumber
+        value={field.value}
+        step={field.step}
+        min={field.min}
+        max={field.max}
+        unit={field.unit}
+        ariaLabel={`${entityLabel} ${field.label}`}
+        onCommit={commit}
+      />}
+  </PaneRow>;
+}
+
+/**
+ * A selected thing's own options, as rows on the strip at its corner.
+ *
+ * This replaced a chip that expanded into a stacked panel. The chip was the
+ * whole problem: it named the selection and hid everything about it behind a
+ * click, so a reader who did not already know a tank had a wall mode had no way
+ * to find out that it did. The rows say what the thing is set to before they are
+ * touched, and the control for one appears beside it rather than pushing the
+ * others down a form.
+ *
+ * Driven entirely by what the entity declares, exactly as the panel was: a new
+ * editable thing arrives here with its own choices, fields and groups without
+ * this file changing. Choices come before fields because they are what the thing
+ * *is* — for a refinement region, "what does this box mean" is the first
+ * question, and the numbers underneath only make sense once it is answered.
+ * Groups come last and each opens a pane, for the mirror-image reason: they are
+ * the settings a gesture on the object never touches.
+ *
+ * The gizmo remains the primary instrument. These are the same quantities the
+ * handles move, written as numbers for when a handle is not the right one.
+ */
+export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
+  // Which row is open, and what a scrub currently reads mid-drag. Both local:
+  // they are the state of one strip in front of one selection, and the caller
+  // keys this component by selection so neither survives a click on something
+  // else.
+  const [open, setOpen] = useState<string | undefined>(undefined);
+  const [preview, setPreview] = useState<{ id: string; value: number } | undefined>(undefined);
+  // One row open across the whole strip, not one per section: the sections all
+  // hang their cards off the same corner, so two open at once overlap.
+  const { claim } = useToolstripSection("entity", () => setOpen(undefined));
+  const toggle = (id: string) => setOpen((current) => {
+    const next = current === id ? undefined : id;
+    claim(next !== undefined);
+    return next;
+  });
+  const fields = entity.fields ?? [];
+  const choices = entity.choices ?? [];
+  const groups = entity.groups ?? [];
+
+  const commitChoice = (group: EditorChoiceGroup, option: EditorChoice) => {
+    simulation.beginEdit(`Set ${entity.label} ${group.label}`);
+    simulation.commitEdit(option.apply(), { reseed: true });
+  };
+  const commitField = (field: EditorField, value: number) => {
+    setPreview(undefined);
+    if (value === field.value) return;
+    simulation.beginEdit(`Set ${entity.label} ${field.label}`);
+    simulation.commitEdit(field.apply(value), { reseed: true });
+  };
+
+  return <>
+    {choices.map((group) => {
+      const current = group.options.find((option) => option.id === group.value);
+      return <ToolstripRow
+        key={group.id}
+        tag={group.label}
+        value={current?.label ?? group.value}
+        name={group.label}
+        hint={current?.hint}
+        active={open === group.id}
+        testId={`entity-option-${group.id}`}
+        onClick={() => toggle(group.id)}
+      >
+        {open === group.id && <ToolstripChoice
+          ariaLabel={group.label}
+          value={group.value}
+          options={group.options.map((option) => ({
+            value: option.id,
+            label: option.label,
+            title: option.hint,
+            disabled: option.enabled === false,
+          }))}
+          onChange={(value) => {
+            const option = group.options.find((candidate) => candidate.id === value);
+            if (option && option.enabled !== false) commitChoice(group, option);
+          }}
+        />}
+      </ToolstripRow>;
+    })}
+    {fields.map((field) => {
+      // A scrub needs two ends to slide between. A position or an extent has
+      // neither, so it gets exact entry instead of a slider that would have to
+      // invent its own range and then lie about where the value sits in it.
+      const bounded = field.min !== undefined && field.max !== undefined;
+      const shown = preview?.id === field.id ? preview.value : field.value;
+      const readout = `${formatNumber(shown, field.step < 0.01 ? 3 : 2)}${field.unit ? ` ${field.unit}` : ""}`;
+      return <ToolstripRow
+        key={field.id}
+        tag={field.label}
+        value={readout}
+        name={field.label}
+        active={open === field.id}
+        testId={`entity-option-${field.id}`}
+        onClick={() => toggle(field.id)}
+      >
+        {open === field.id && (bounded
+          ? <ToolstripScrub
+            min={field.min!}
+            max={field.max!}
+            step={field.step}
+            value={shown}
+            ariaLabel={`${entity.label} ${field.label}`}
+            // Previewed locally and written once, on release: every commit is a
+            // history entry and a re-seed of the solver, so a scrub that wrote
+            // per pointer-move would rebuild the run dozens of times a second.
+            onChange={(value) => setPreview({ id: field.id, value })}
+            onCommit={(value) => commitField(field, value)}
+          />
+          : <ToolstripNumber
+            value={field.value}
+            step={field.step}
+            min={field.min}
+            max={field.max}
+            unit={field.unit}
+            ariaLabel={`${entity.label} ${field.label}`}
+            onCommit={(value) => commitField(field, value)}
+          />)}
+      </ToolstripRow>;
+    })}
+    {groups.map((group) => <ToolstripRow
+      key={group.id}
+      tag={group.label}
+      value={`${(group.choices?.length ?? 0) + (group.fields?.length ?? 0)} settings`}
+      name={group.label}
+      hint={group.hint}
+      active={open === group.id}
+      testId={`entity-group-${group.id}`}
+      onClick={() => toggle(group.id)}
+    >
+      {open === group.id && <ToolstripPane label={group.label} onClose={() => setOpen(undefined)}>
+        {group.choices?.map((choice) => (
+          <ChoiceRow key={choice.id} group={choice} entityLabel={entity.label} />
+        ))}
+        {group.fields?.map((field) => (
+          <FieldRow key={field.id} field={field} entityLabel={entity.label} />
+        ))}
+        {group.summary && <p className="toolstrip-pane-note">{group.summary}</p>}
+      </ToolstripPane>}
+    </ToolstripRow>)}
+  </>;
+}
+
+/** What the object's settings add up to, and the switches that rebuild its world. */
+function EntitySceneTab({ entity }: { entity: EditorEntity }) {
+  return <>
+    {entity.summary && <p className="toolstrip-pane-note">{entity.summary}</p>}
+    {entity.offersSceneRebuild && <SceneRebuildControls />}
+  </>;
+}
+
+/** What the solver makes of this object, and the verbs that act on it. */
+function EntityObjectTab({ entity }: { entity: EditorEntity }) {
+  return <>
+    {entity.simulatedBodyId && <BodyStateReadout bodyId={entity.simulatedBodyId} />}
+    {(entity.remove || entity.simulatedBodyId) && <div className="selection-actions">
+      {entity.remove && <button
+        type="button"
+        onClick={() => simulation.removeEntity(`Removed ${entity.label}`, entity.remove!())}
+      >Remove</button>}
+      {entity.simulatedBodyId && <button
+        type="button"
+        onClick={() => simulation.dropBody(entity.simulatedBodyId!)}
+      >Drop</button>}
+      {/* Put it back where the document says it is, at rest. The one verb of the
+          old body tray that is neither a document edit nor a throw: it undoes a
+          run, not an edit. */}
+      {entity.simulatedBodyId && <button
+        type="button"
+        title="Return it to its authored pose, at rest"
+        onClick={() => simulation.resetBody(entity.simulatedBodyId!)}
+      >Reset</button>}
+    </div>}
+  </>;
+}
+
+/**
+ * The door at the foot of the column, and the one panel behind it.
+ *
+ * Rendered by the strip rather than by the option rows, because what is behind
+ * it is not all the object's: the tank's door also leads to the solver's
+ * construction settings, which belong to the method and not to the document.
+ * The caller passes those in as `leadingTabs`, and an object with no solver
+ * simply has none — the same door, two lengths of panel.
+ *
+ * It is its own claim on the strip, so opening it closes whichever row had a
+ * card out, and vice versa.
+ */
+export function EntityMoreRow({ entity, leadingTabs = [] }: {
+  entity: EditorEntity;
+  /** Faces to put before the object's own, for a strip that owns a solver. */
+  leadingTabs?: readonly ToolstripTab[];
+}) {
+  const [open, setOpen] = useState(false);
+  const { claim } = useToolstripSection(`more:${entity.selection.id}`, () => setOpen(false));
+  const hasScene = entity.summary !== undefined || entity.offersSceneRebuild === true;
+  const hasObject = entity.simulatedBodyId !== undefined || entity.remove !== undefined;
+  const tabs: readonly ToolstripTab[] = [
+    ...leadingTabs,
+    ...(hasScene ? [{ id: "scene", label: "Scene", content: <EntitySceneTab entity={entity} /> }] : []),
+    ...(hasObject ? [{ id: "object", label: "Object", content: <EntityObjectTab entity={entity} /> }] : []),
+  ];
+  if (tabs.length === 0) return null;
+  const toggle = () => setOpen((current) => {
+    claim(!current);
+    return !current;
+  });
+  return <ToolstripMoreRow
+    name={`${entity.label} — setup and more`}
+    hint={leadingTabs.length > 0
+      ? "The solver's construction settings, this scene's own switches, and what can be done to this object."
+      : "What these settings add up to, and what can be done to this object."}
+    active={open}
+    testId="entity-option-more"
+    onClick={toggle}
+  >
+    {open && <ToolstripTabbedPane label={`${entity.label} settings`} tabs={tabs} />}
+  </ToolstripMoreRow>;
+}

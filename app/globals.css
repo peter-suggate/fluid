@@ -1346,104 +1346,179 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-hover-chip span { color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
 .editor-hover-chip small { color: var(--dim); font: var(--text-micro); }
 
-/* The resting form of the tank's top corner: a column of glyphs, hung off the
-   corner and falling down the outside of the tank. A row laid across it ran out
-   over the water it was describing; a column has the one dimension the scene is
-   not using.
+/* The toolstrip: a column of controls hung off a corner of the thing they
+   belong to, and the editor's answer to "where are this object's options".
 
-   No panel around them. A card here would be a permanent rectangle over the
-   image to hold eight 24px marks that are already legible on their own — the
-   glyphs are the chrome, and the only thing that gets a background is the one
-   that is on. Glyph-sized like the transport's buttons, and opting out of the
-   studio's control floor for the same reason: this is chrome on the image, not
-   a form. */
-.field-quick-bar { position: absolute; z-index: 12; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; pointer-events: none; }
-/* One row per glyph, left-aligned rather than centred, so the row that grows a
-   scrub widens to the right instead of sliding the whole column of glyphs
-   sideways under the pointer. The row is the tip's frame too: anchored here
-   rather than on the button, the tip opens clear of the scrub instead of over
-   it. */
-.field-quick-row { position: relative; display: flex; align-items: center; gap: 6px; }
-/* The column has no background any more, so its own box and the gaps between
-   the glyphs would be an invisible ribbon swallowing clicks on the tank edge
-   behind it. Only the controls take the pointer. */
-.field-quick-bar button, .field-quick-slice { pointer-events: auto; }
-.field-quick-bar button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; min-height: 0; padding: 0; border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--muted); cursor: pointer; }
-.field-quick-bar button:hover { border-color: var(--accent-line); color: var(--accent); }
-/* No frost on the lit chip, deliberately: `backdrop-filter` makes an element a
-   containing block for absolutely positioned descendants, so the one chip that
-   had it was the one chip whose tip measured itself against the button instead
-   of the row — and opened straight over its own scrub. A 24px wash reads
-   perfectly well without it. */
-.field-quick-bar button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
-.field-quick-more i { color: var(--dim); font: var(--text-label); font-style: normal; line-height: 1; }
+   It replaced cards, and every rule below is one half of that argument. It is
+   *anchored* rather than docked, so what it is about is said by where it is. It
+   has no background, because a card here would be a permanent rectangle over
+   the image to hold marks that are already legible on it — the rows are the
+   chrome, and the only one that gets a background is the one that is on. It
+   opens to the *right*, away from the scene, since a control on the inboard
+   side covers the water at exactly the moment the reader is adjusting how it
+   looks. And it is a column rather than a row because a row laid across the
+   corner ran out over the water it was describing, while a column falls down
+   the outside of the box where the scene is not.
 
-/* The panel's own tooltip, because the browser's arrives a second late and a
-   strip of unlabelled glyphs cannot afford that. It opens to the *right*, away
-   from the scene: a tip on the inboard side covers the water at exactly the
-   moment the reader is choosing how to look at it. One fixed side rather than a
-   flip, because a tip that changed sides as the camera moved would be one more
-   thing moving under the pointer. `visibility` rather than `display` keeps it in
-   the accessibility tree, where it is the button's only name. */
-.field-quick-tip { position: absolute; left: calc(100% + 7px); top: -1px; z-index: 1; display: grid; gap: 1px; width: max-content; max-width: 220px; padding: 4px 7px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); text-align: left; visibility: hidden; opacity: 0; pointer-events: none; }
-.field-quick-bar button:hover .field-quick-tip,
-.field-quick-bar button:focus-visible .field-quick-tip { visibility: visible; opacity: 1; }
-.field-quick-tip strong { color: var(--ink); font: var(--text-tag); letter-spacing: var(--track-wide); }
-.field-quick-tip small { color: var(--muted); font: var(--text-micro); }
+   Rows are glyph-sized like the transport's buttons and opt out of the studio's
+   32px control floor for the same reason: this is chrome on the image, not a
+   form. */
+.toolstrip { position: absolute; z-index: 12; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; pointer-events: none; }
+/* The column has no background, so its own box and the gaps between the rows
+   would be an invisible ribbon swallowing clicks on the box edge behind it.
+   Only the controls take the pointer. */
+.toolstrip-key, .toolstrip-scrub, .toolstrip-choice, .toolstrip-pane { pointer-events: auto; }
+/* Left-aligned rather than centred, so a row that grows a control widens to the
+   right instead of sliding the whole column sideways under the pointer. The row
+   is also the tip's frame: anchored here rather than on the key, a tip opens
+   clear of that control instead of over it. */
+.toolstrip-row { position: relative; display: flex; align-items: center; gap: 6px; }
+/* A pane is out of flow (below), so its row stays one line tall in the column;
+   it only has to out-paint the rows underneath, which are `relative` too and
+   would otherwise draw over the card hanging past them. */
+.toolstrip-row:has(.toolstrip-pane) { z-index: 5; }
+.toolstrip-title { padding: 0 0 2px 6px; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
+/* One column, two subjects — the water's views above, the object's own settings
+   below — needs the seam drawn, or the reader has to infer it from the tags. */
+.toolstrip-rule { width: 152px; height: 1px; margin: 5px 0 5px 6px; background: var(--line); }
 
-/* The scrub belongs to the view that is on, so it sits beside that glyph
-   rather than at the foot of the column: the thing being adjusted and the
-   control adjusting it are one row, and the rest of the strip does not move to
-   make room for it. Written against `.lab-shell input[type="range"]`, which
-   pins every control in the studio to a 32px form height — this is chrome on
-   the image, not a form. */
-.field-quick-slice { display: flex; align-items: center; height: 24px; }
-.field-quick-bar .field-quick-slice input[type="range"] { width: 76px; min-height: 0; height: 12px; background: linear-gradient(90deg, var(--accent-wash), var(--accent-line)) center / 100% 3px no-repeat; }
-.field-quick-bar .field-quick-slice input[type="range"]::-webkit-slider-thumb { width: 11px; height: 11px; }
+.toolstrip-key { display: flex; align-items: center; gap: 8px; height: 22px; min-height: 0; padding: 0 5px; border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
+/* One width for every tag row, so the values line up in a column and every
+   control opens at the same left edge: ragged keys put each row's slider at its
+   own x, and the column reads as a pile of unrelated widgets rather than as one
+   panel. A minimum rather than a width, so the rare long tag widens its own row
+   instead of ellipsizing its value away. */
+.toolstrip-key { width: max-content; min-width: 158px; max-width: 216px; }
+.toolstrip-key.is-glyph { width: 24px; min-width: 0; max-width: none; height: 24px; justify-content: center; padding: 0; }
+.toolstrip-key:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }
+/* No frost on the lit row, deliberately: `backdrop-filter` makes an element a
+   containing block for absolutely positioned descendants, so a frosted key
+   would be the one key whose tip measured itself against the key instead of the
+   row — and opened straight over its own control. */
+.toolstrip-key.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.toolstrip-key:disabled { color: var(--dim); cursor: not-allowed; }
+/* Names left, values right, against the two edges the fixed key width gives
+   them. Packing both to the left instead lines the values up behind the tags,
+   so a five-letter tag and a twelve-letter one start their values 34px apart
+   and the column has no readable edge anywhere — which is what a settings list
+   is for. */
+.toolstrip-tag { flex: none; font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; white-space: nowrap; }
+/* Pushed to the right edge rather than the row being spread: `space-between`
+   spreads whatever is in the row, so a view row — a mark and a name, no value —
+   had its name flung against the value column and the section read
+   right-aligned. */
+.toolstrip-value { margin-left: auto; padding-left: 10px; overflow: hidden; color: var(--ink); font: var(--text-micro); font-variant-numeric: tabular-nums; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.toolstrip-key:hover .toolstrip-value, .toolstrip-key.active .toolstrip-value { color: inherit; }
+/* An open row states its value once. A number field and a segmented strip each
+   show the current setting inside the control itself, so the row's copy of it
+   would be the same fact twice, 6px apart. A scrub is the exception — it has no
+   readout of its own, and the row's value is what it is scrubbing. */
+.toolstrip-row.is-open:has(.toolstrip-number, .toolstrip-choice) .toolstrip-value { display: none; }
+.toolstrip-row.is-more .toolstrip-key { color: var(--dim); }
+.toolstrip-row.is-more i { font: var(--text-label); font-style: normal; line-height: 1; }
 
-/* One card, two columns: the rail of standing facts and the side column
-   whatever is open occupies. The frame — border, frost, shadow, radius — lives
-   here so the two read as one panel rather than as a panel with a satellite,
-   and the width is the columns' business rather than declared, because the
-   resting panel is one column and only grows when something is opened. Height
-   is the anchoring hook's: it hands down a container-derived `max-height`, the
-   columns stretch to it, and each scrolls its own overflow — so a long field
-   list never drags the setup rows past the reader.
+/* The strip's own tooltip, because the browser's arrives a second late and a
+   column of short marks cannot afford that. One fixed side rather than a flip,
+   because a tip that changed sides as the camera moved would be one more thing
+   moving under the pointer. `visibility` rather than `display` keeps it in the
+   accessibility tree, where it is a glyph row's only name. It stands down
+   entirely for a row holding a pane: that row has already said what it is, at
+   length, in the thing it opened. */
+.toolstrip-tip { position: absolute; left: calc(100% + 7px); top: -1px; z-index: 3; display: grid; gap: 1px; width: max-content; max-width: 220px; padding: 4px 7px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); text-align: left; visibility: hidden; opacity: 0; pointer-events: none; }
+.toolstrip-key:hover .toolstrip-tip,
+.toolstrip-key:focus-visible .toolstrip-tip { visibility: visible; opacity: 1; }
+.toolstrip-row.is-open .toolstrip-tip { display: none; }
+.toolstrip-tip strong { color: var(--ink); font: var(--text-tag); letter-spacing: var(--track-wide); }
+/* Clamped, because several catalog descriptions are a paragraph and a tip is a
+   thing read in passing: past three lines it stops being a label and becomes a
+   wall of text over the water. The full text still lives in the pane the row
+   opens. */
+.toolstrip-tip small { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; color: var(--muted); font: var(--text-micro); }
+.toolstrip-key.is-static { cursor: default; }
 
-   `overflow: hidden` is the rounded corners; nothing here scrolls. */
-.fluid-field-flyout { position: absolute; z-index: 12; display: flex; align-items: stretch; overflow: hidden; border: 1px solid var(--line); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost); border-radius: var(--radius-s); --control-height: 22px; --control-font-size: var(--size-2); --control-inline-padding: 6px; }
-/* Wide enough that the longest authored parameter label ("Pressure iteration
-   budget") ellipsizes rather than pushing the panel sideways, and `clip` on the
-   inline axis so nothing ever can: a scene overlay that grew a horizontal
-   scrollbar was reading as a window, not as chrome on the image. */
-.fluid-field-rail { display: grid; flex: none; gap: 6px; align-content: start; width: 200px; min-height: 0; padding: 7px; overflow-x: clip; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
-/* Narrower than the rail on purpose: the rail is the panel and this is what it
-   opened, so a column that matched it would read as a second panel of equal
-   standing. The hairline is the same one that separates the rail's own groups,
-   turned on its side. */
-.fluid-field-aside { display: grid; flex: none; gap: 6px; align-content: start; width: 190px; min-height: 0; padding: 7px; overflow-x: clip; overflow-y: auto; overscroll-behavior: contain; border-left: 1px solid var(--line); scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
-.fluid-field-aside-head { display: flex; align-items: baseline; gap: 5px; }
-.fluid-field-aside-head h4 { flex: 1; min-width: 0; margin: 0; overflow: hidden; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wider); text-transform: uppercase; text-overflow: ellipsis; white-space: nowrap; }
-.fluid-field-aside-head button { flex: none; padding: 0 2px; border: none; background: transparent; color: var(--dim); font: var(--text-label); line-height: 1; cursor: pointer; }
-.fluid-field-aside-head button:hover { color: var(--accent); }
-/* The column is already a scroller of a known height, so a list inside it caps
-   itself against nothing and simply fills what it was given. */
-.fluid-field-aside .fluid-field-options { max-height: none; margin-top: 0; overflow: visible; }
-/* 190px will not hold a sentence and a button side by side. */
-.fluid-field-aside .fluid-field-film { display: grid; gap: 4px; justify-items: start; }
-.fluid-field-plane { display: flex; gap: 3px; }
-.fluid-field-plane button { flex: 1; min-width: 0; height: 19px; border: 1px solid var(--line); border-radius: var(--radius-s); background: transparent; color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); cursor: pointer; }
-.fluid-field-plane button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent-line); }
-.fluid-field-plane button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
-.fluid-field-plane button:disabled { opacity: .35; cursor: not-allowed; }
-.fluid-field-slice { display: flex; align-items: center; gap: 5px; padding: 0 2px; }
-.fluid-field-slice input { flex: 1; min-width: 0; }
-/* Wide enough for "iter 128": the film's scrub reports the iteration it landed
-   on rather than a percentage, and a clipped number is worse than none. */
-.fluid-field-slice output { width: 48px; flex: none; color: var(--ink); font: var(--text-tag); text-align: right; }
-.fluid-field-film { display: flex; align-items: center; gap: 5px; margin: 0; padding: 4px 5px; border: 1px solid var(--accent-line); border-radius: var(--radius-s); background: var(--accent-wash); }
-.fluid-field-film span { flex: 1; min-width: 0; color: var(--muted); font: var(--text-micro); }
-.fluid-field-film button { flex: none; padding: 1px 5px; border: 1px solid var(--accent-line); border-radius: var(--radius-s); background: transparent; color: var(--accent-strong); font: var(--text-tag); cursor: pointer; }
+/* A control beside the mark it belongs to, not under a column of things it does
+   not. Written against `.lab-shell input[type="range"]`, which pins every
+   control in the studio to a 32px form height. */
+.toolstrip-scrub { display: flex; align-items: center; gap: 7px; height: 24px; }
+.toolstrip .toolstrip-scrub input[type="range"] { width: 76px; min-height: 0; height: 12px; background: linear-gradient(90deg, var(--accent-wash), var(--accent-line)) center / 100% 3px no-repeat; }
+.toolstrip .toolstrip-scrub input[type="range"]::-webkit-slider-thumb { width: 11px; height: 11px; }
+.toolstrip-scrub output { color: var(--muted); font: var(--text-micro); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.toolstrip-number { display: flex; align-items: center; gap: 5px; height: 24px; }
+.toolstrip .toolstrip-number input { width: 74px; height: 20px; min-height: 0; padding: 0 5px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--overlay); color: var(--ink); font: var(--text-micro); font-variant-numeric: tabular-nums; }
+.toolstrip .toolstrip-number input:focus-visible { border-color: var(--accent-line); outline: none; }
+.toolstrip-number span { color: var(--dim); font: var(--text-micro); }
+.toolstrip-choice { display: flex; align-items: center; gap: 3px; }
+.toolstrip-choice button { height: 20px; min-height: 0; padding: 0 7px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--overlay); color: var(--muted); font: var(--text-micro); white-space: nowrap; cursor: pointer; }
+.toolstrip-choice button:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }
+.toolstrip-choice button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.toolstrip-choice button:disabled { color: var(--dim); cursor: not-allowed; }
+
+/* The card the strip refuses to be, granted to the one row currently asking for
+   it — a dozen field rows, a solve's curve, a method's construction settings.
+   Bordered because it is content rather than chrome, and inside the row so it
+   hangs off what opened it and leaves with it. */
+/* Absolutely placed rather than laid out in the row: in flow it made its row
+   as tall as the card, which shoved every row under it down the screen — the
+   column reflowing itself around whichever row was open. Out of flow it hangs
+   beside its row and the column behind it does not move. */
+.toolstrip-pane { position: absolute; left: calc(100% + 6px); top: 0; display: flex; flex-direction: column; gap: 5px; --control-height: 22px; --control-font-size: var(--size-2); --control-inline-padding: 6px; width: 236px; max-height: 46vh; padding: 6px 8px 8px; overflow: hidden auto; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); }
+.toolstrip-pane.is-left { left: auto; right: calc(100% + 6px); }
+/* A pane's contents are the strip's rows, in a box: name left, control right,
+   one line each. The studio's form controls — a heading over a full-width
+   widget — are what the strip replaced, and a stack of them inside a pane the
+   strip opened reads as a different application in a box. */
+.toolstrip-pane-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 3px 10px; min-height: 22px; }
+.toolstrip-pane-row .toolstrip-tag { color: var(--dim); }
+/* Wrapping rather than squeezing: three vessel names will not sit on one 220px
+   line, and a chip that ellipsizes its own label is a button you cannot read. */
+.toolstrip-pane .toolstrip-choice { flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
+.toolstrip-pane-block { display: flex; flex-direction: column; gap: 3px; }
+.toolstrip-pane-note { margin: 0 0 2px; color: var(--dim); font: var(--text-micro); line-height: 1.4; }
+.toolstrip-pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.toolstrip-pane-head h4 { margin: 0; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
+.toolstrip-pane-head > button { width: 18px; height: 18px; min-height: 0; flex: none; padding: 0; border: 0; background: transparent; color: var(--dim); font-size: 13px; line-height: 1; cursor: pointer; }
+.toolstrip-pane-head > button:hover { color: var(--accent); }
+
+/* The panel's tab bar, which is also its head: the card that used to title
+   itself was saying the name of the row six pixels to its left, so the names of
+   what it holds do that job instead. Underlined rather than boxed — a row of
+   filled chips at the top of a card reads as five buttons to press, when the
+   question a tab bar answers is which one you are already looking at. */
+.toolstrip-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 0; margin: -1px 0 1px -4px; }
+/* Scoped through the pane, because `.lab-shell button` gives every button in the
+   studio a 1px border and a 9px radius and is written later in this file — at
+   equal specificity a tab would come out as a pill. */
+.toolstrip-pane .toolstrip-tabs button { height: 20px; min-height: 0; padding: 0 4px; border: 0; border-bottom: 1px solid transparent; border-radius: 0; background: transparent; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; white-space: nowrap; cursor: pointer; }
+.toolstrip-pane .toolstrip-tabs button:hover { color: var(--accent); }
+.toolstrip-pane .toolstrip-tabs button.active { border-bottom-color: var(--accent); color: var(--accent-strong); }
+.toolstrip-tabpanel { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+
+/* Wide enough for a name and its control on one line. The 236px card was sized
+   for a list of views; the setup face is nine labelled selects, and at that
+   width every one of them is a label on its own line over a full-width widget —
+   the form layout the strip exists to avoid, in a smaller box. */
+/* Taller as well as wider. 46vh is right for a card a row opened in passing;
+   this is the panel the reader works in, and a fine-parameter face that scrolls
+   at half a screen when the screen has room is the drawer this replaced. */
+.toolstrip-pane.is-wide { width: 384px; max-height: 66vh; }
+.toolstrip-pane.is-wide .fluid-field-settings .select-control { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* Two lines rather than "Surface representati…": these names are the only thing
+   saying what the control beside them does, and the panel is 384px wide
+   precisely so they do not have to be truncated. */
+.toolstrip-pane.is-wide .fluid-field-settings .select-control > span { overflow: visible; text-overflow: clip; white-space: normal; line-height: 1.25; }
+/* 202px, which is the width at which the longest authored name — "Surface
+   representation" — still sits on one line. A wider select buys a few more
+   characters of the option text, which the native menu shows in full anyway,
+   and costs a wrapped name and a row of a different height. */
+.toolstrip-pane.is-wide .fluid-field-settings .select-control select { width: 202px; flex: none; }
+.toolstrip-pane.is-wide .control-heading { margin: 3px 0 0; }
+.toolstrip-pane.is-wide .toolstrip-pane-row .toolstrip-choice { flex-wrap: nowrap; }
+
+/* A pane's width will not hold a sentence and a button side by side. */
+.fluid-field-film { display: grid; gap: 4px; justify-items: start; margin: 0; padding: 4px 5px; border: 1px solid var(--accent-line); border-radius: var(--radius-s); background: var(--accent-wash); }
+.fluid-field-film span { color: var(--muted); font: var(--text-micro); }
+.fluid-field-film button { padding: 1px 5px; border: 1px solid var(--accent-line); border-radius: var(--radius-s); background: transparent; color: var(--accent-strong); font: var(--text-tag); cursor: pointer; }
 .fluid-field-film button:hover { background: var(--accent-line); }
 .pressure-film { display: grid; gap: 3px; margin: 0; padding: 0 2px; }
 .pressure-film > span { color: var(--muted); font: var(--text-micro); }
@@ -1463,25 +1538,16 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .pressure-film-caption { display: flex; align-items: baseline; gap: 5px; margin: 0; color: var(--muted); font: var(--text-micro); }
 .pressure-film-caption code { color: var(--ink); font: var(--text-tag); }
 .pressure-film-caption em { color: var(--ok, #4c9); font-style: normal; }
-/* Nine rows exactly — 20px each on a 2px gap — so the list stops on a row edge
-   instead of slicing one in half, which is what a rounded max-height did. The
-   cap is for the rail, where this list is the stage roster; in the side column
-   the column is already the scroller and the rule above lifts it. */
-.fluid-field-options { display: grid; gap: 2px; max-height: 196px; margin-top: 5px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+/* The catalog list, inside the pane a row opened. The pane is already a
+   scroller of a known height, so the list simply fills what it was given —
+   nesting a second scrollbar inside it read as a bug. */
+.fluid-field-options { display: grid; gap: 2px; }
 .fluid-field-options button { display: flex; align-items: center; gap: 6px; min-height: 20px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
 .fluid-field-options button:hover { color: var(--accent); border-color: var(--accent-line); }
 .fluid-field-options button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 .fluid-field-options button i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--dim); }
 .fluid-field-options button span { flex: 1; overflow: hidden; font: var(--text-label); text-overflow: ellipsis; white-space: nowrap; }
 .fluid-field-options button small { flex: none; color: var(--dim); font: var(--text-micro); }
-/* One chooser, not two controls. The heading used to be the first cell of this
-   same grid, which pushed the methods into a ragged wrap and read as a select
-   above a segment strip; it is a section heading now and every method is one
-   chip in an even ladder. */
-.fluid-field-solver { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; align-items: stretch; }
-.fluid-field-solver button { display: block; overflow: hidden; padding: 5px 4px; border: 1px solid var(--line); border-radius: var(--radius-s); background: transparent; color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); line-height: 1.2; text-align: center; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-.fluid-field-solver button:hover { color: var(--accent); border-color: var(--accent-line); }
-.fluid-field-solver button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 .fluid-field-settings { display: grid; gap: 6px; }
 /* Stacked, not a fixed label column: these labels are authored per method
    parameter and are arbitrarily long, so 58px truncated most of them to
@@ -1503,31 +1569,6 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .fluid-field-settings .advanced-params > summary { padding: 3px 0 1px; letter-spacing: var(--track-wider); }
 .fluid-field-settings .advanced-params[open] > summary { margin-bottom: 0; }
 
-.tree-canopy-flyout, .stone-look-flyout, .vessel-rim-flyout { position: absolute; z-index: 12; display: grid; gap: 5px; align-content: start; width: 172px; padding: 5px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); border-radius: var(--radius-s); }
-.tree-canopy-flyout header, .stone-look-flyout header, .vessel-rim-flyout header { display: flex; align-items: center; gap: 5px; padding: 1px 2px; }
-.tree-canopy-flyout header span, .stone-look-flyout header span, .vessel-rim-flyout header span { color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); }
-.tree-canopy-flyout header strong, .stone-look-flyout header strong, .vessel-rim-flyout header strong { flex: 1; overflow: hidden; color: var(--accent); font: var(--text-label); text-overflow: ellipsis; white-space: nowrap; }
-.stone-look-flyout header button { flex: none; padding: 2px 5px; border: 1px solid var(--line); background: none; color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); border-radius: var(--radius-s); cursor: pointer; }
-.stone-look-flyout header button:hover { color: var(--accent); border-color: var(--accent); }
-.tree-canopy-dial, .stone-look-dial, .vessel-rim-dial { display: grid; grid-template-columns: 44px minmax(0, 1fr) 27px; align-items: center; gap: 5px; padding: 0 2px; }
-.tree-canopy-dial > span, .stone-look-dial > span, .vessel-rim-dial > span { color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); }
-.tree-canopy-dial input, .stone-look-dial input, .vessel-rim-dial input { min-width: 0; margin: 0; }
-.tree-canopy-dial output, .stone-look-dial output, .vessel-rim-dial output { color: var(--ink); font: var(--text-tag); font-variant-numeric: tabular-nums; text-align: right; }
-
-.selection-flyout { position: absolute; z-index: 12; width: max-content; max-width: 100%; overflow-y: auto; overscroll-behavior: contain; }
-.selection-flyout-body { display: grid; gap: 4px; justify-items: start; }
-.selection-chip { display: flex; align-items: center; gap: 6px; padding: 4px 7px; border: 1px solid var(--accent-line); background: var(--overlay); color: var(--accent); white-space: nowrap; cursor: pointer; backdrop-filter: var(--frost); }
-.selection-chip strong { font: var(--text-label); }
-.selection-chip small { color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); }
-/* Bounded by the window rather than by its contents: a tank declares enough
-   groups to run the panel off the bottom of the shell, and a panel that scrolls
-   itself keeps the chip it hangs off in view. The cap clears the transport's
-   band and the chip above it, so this is the only thing that scrolls — the
-   flyout around it carries a cap of its own and two nested scrollbars on one
-   panel read as a bug. The width is the field flyout's, less its narrower
-   gutter: the two panels carry the same solver chooser, and at 178 px the
-   longest method name could not be spelled in half of one. */
-.selection-precision { display: grid; gap: 7px; width: 196px; max-height: calc(100vh - 132px); padding: 9px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--accent-line); background: var(--overlay); backdrop-filter: var(--frost); scrollbar-width: thin; scrollbar-color: var(--dim) transparent; }
 /* What the thing IS, above what size it is. The label sits over its own row
    because an enumeration needs the full width for its options. */
 .selection-choice { display: grid; gap: 4px; }
@@ -1538,15 +1579,16 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    hold four options at this width, and "Sparse CM12" wrapped to two lines under
    its neighbour's active pill. Three classes deep because that is what outranks
    the studio's control floor further down the sheet, which sizes a segmented
-   control as a 38 px form row of 11 px type. */
-.selection-precision .selection-choice .segmented { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 4px; width: 100%; height: auto; min-height: 0; padding: 0; border: 0; background: none; }
+   control as a 38 px form row of 11 px type. Scoped to the pane, which is now
+   the only place an entity's groups are drawn. */
+.toolstrip-pane .selection-choice .segmented { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 4px; width: 100%; height: auto; min-height: 0; padding: 0; border: 0; background: none; }
 /* Five options or more is a ladder of glyphs (×8 … ÷8), not a row of words: a
    72 px track would stack seven of them four rows deep. */
-.selection-precision .selection-choice .segmented:has(> button:nth-child(5)) { grid-template-columns: repeat(auto-fit, minmax(34px, 1fr)); }
-.selection-precision .selection-choice .segmented button { display: block; overflow: hidden; min-width: 0; padding: 5px 4px; border: 1px solid var(--line); border-radius: var(--radius-s); font: var(--text-tag); letter-spacing: var(--track-wide); line-height: 1.2; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
-.selection-precision .selection-choice .segmented button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent-line); }
-.selection-precision .selection-choice .segmented button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); box-shadow: none; }
-.selection-precision .selection-choice .segmented button:disabled { opacity: .45; cursor: not-allowed; }
+.toolstrip-pane .selection-choice .segmented:has(> button:nth-child(5)) { grid-template-columns: repeat(auto-fit, minmax(34px, 1fr)); }
+.toolstrip-pane .selection-choice .segmented button { display: block; overflow: hidden; min-width: 0; padding: 5px 4px; border: 1px solid var(--line); border-radius: var(--radius-s); font: var(--text-tag); letter-spacing: var(--track-wide); line-height: 1.2; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.toolstrip-pane .selection-choice .segmented button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent-line); }
+.toolstrip-pane .selection-choice .segmented button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); box-shadow: none; }
+.toolstrip-pane .selection-choice .segmented button:disabled { opacity: .45; cursor: not-allowed; }
 .selection-summary { margin: 0; color: var(--dim); font: var(--text-note); }
 /* Configuration that belongs to the thing but is not what a handle moves. The
    summary is a disclosure so the chip stays a chip: expanding a tank must not
@@ -1677,7 +1719,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .gpu-badge, .health-chip, .fps-meter, .fps-instruments button, .camera-toolbar, .scene-overlay,
 .transport-cluster, .resource-activity-pill, .scene-scale-overlay,
 .entity-hover-chip, .editor-hover-chip, .shape-readout, .shape-axis-lock,
-.editor-fill-handle, .selection-chip, .selection-precision,
+.editor-fill-handle, .toolstrip-pane, .toolstrip-tip,
 .gpu-build-card, .svo-cost-legend, .gpu-fallback,
 .recording-modal, .viewport-failure-alert {
   border-color: var(--line-strong);
@@ -1901,31 +1943,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
    which is the whole mechanism behind the horizontal scrollbar this had. Zero
    at every level is what lets the ellipsis further down actually fire.
    `:where()` keeps the specificity at one class so the rules below still win. */
-.fluid-field-flyout :where(section, div, label, details, summary, p, .control-heading, .control-heading > span) { min-width: 0; }
-
-/* The rhythm between sections: one hairline and equal air, so the panel reads
-   as three parts rather than as one run-on column. */
-.fluid-field-group { display: grid; gap: 6px; min-width: 0; }
-.fluid-field-group + .fluid-field-group { padding-top: 7px; border-top: 1px solid var(--line); }
-.fluid-field-heading { margin: 0; padding-left: 2px; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wider); text-transform: uppercase; }
-
-/* A rail row that opens a pane. Shut it costs one line and still answers the
-   question worth keeping on screen — which field is drawing, which setup is
-   built — which is the whole reason its section may collapse to a row at all.
-   Every pane there is uses this same anatomy, so the chevron is the panel's one
-   promise that something is behind a row. */
-.fluid-field-summary { display: flex; width: 100%; align-items: center; gap: 5px; padding: 1px 2px; border: none; background: transparent; cursor: pointer; text-align: left; }
-.fluid-field-summary > span { flex: none; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wider); text-transform: uppercase; }
-.fluid-field-summary > strong { flex: 1; min-width: 0; overflow: hidden; color: var(--accent); font: var(--text-label); font-weight: inherit; text-overflow: ellipsis; white-space: nowrap; }
-.fluid-field-summary::after { content: "\203A"; flex: none; display: inline-block; color: var(--dim); font: var(--text-label); line-height: 1; transition: transform .15s ease; }
-.fluid-field-summary[aria-expanded="true"]::after { transform: rotate(90deg); color: var(--accent); }
-.fluid-field-summary:hover > strong { color: var(--accent-strong); }
-.fluid-field-summary:hover::after { color: var(--accent); }
-
-/* Hiding the overlay is a presentation choice, so it rides the plane row rather
-   than the disclosure's header, where a button would have to argue with the
-   fold for every click. */
-.fluid-field-plane .fluid-field-off { flex: none; margin-left: auto; padding: 0 7px; }
+.toolstrip-pane :where(section, div, label, details, summary, p, .control-heading, .control-heading > span) { min-width: 0; }
 
 /* The one label idiom. `.control-heading` is the shared dial's heading row;
    here it is a tag over a full-width slider with the readout right-aligned on
@@ -1934,7 +1952,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
    without it a flex item refuses to shrink and a long label pushes the whole
    column past the edge instead of ellipsizing inside it. The full label
    survives in the row's `title`. */
-.fluid-field-flyout .control-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; margin: 0 0 1px; padding-left: 2px; }
+.toolstrip-pane .control-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; margin: 0 0 1px; padding-left: 2px; }
 /* This one wraps instead of ellipsizing, which is the opposite of the select
    rows above it, and deliberately: the readout takes a third of the row, so one
    line turned "Pressure iteration budget" into "Pressure iterat…" — a label a
@@ -1943,15 +1961,24 @@ button:hover .iso-water-side { fill-opacity: .26; }
    (`max-height`, `-webkit-line-clamp`) hides exactly the affordance that says
    the value is no longer the method's. `min-width: 0` is still what keeps the
    wrap from becoming an overflow. */
-.fluid-field-flyout .control-heading > span { display: block; flex: 1; min-width: 0; color: var(--dim); font: var(--text-tag); line-height: 1.35; letter-spacing: var(--track-wide); }
-.fluid-field-flyout .control-heading output { flex: none; color: var(--ink); font: var(--text-micro); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.fluid-field-flyout .control-heading output small { color: var(--dim); font: var(--text-tag); }
-.fluid-field-flyout .control-heading .value-edit { flex: none; width: 62px; font: var(--text-micro); }
-.fluid-field-flyout .reset-chip { margin-left: 4px; padding: 0 2px; font-size: var(--size-2); }
+.toolstrip-pane .control-heading > span { display: block; flex: 1; min-width: 0; color: var(--dim); font: var(--text-tag); line-height: 1.35; letter-spacing: var(--track-wide); }
+.toolstrip-pane .control-heading output { flex: none; color: var(--ink); font: var(--text-micro); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.toolstrip-pane .control-heading output small { color: var(--dim); font: var(--text-tag); }
+.toolstrip-pane .control-heading .value-edit { flex: none; width: 62px; font: var(--text-micro); }
+.toolstrip-pane .reset-chip { margin-left: 4px; padding: 0 2px; font-size: var(--size-2); }
 
 /* A 32px slider under a 22px select is the studio's form floor applied to a
    panel that is not a form. The grab is still comfortable at 26. */
-.fluid-field-flyout input[type="range"] { min-height: 26px; height: 26px; }
+.toolstrip-pane input[type="range"] { min-height: 14px; height: 14px; }
+/* The studio's own controls, brought down to the pane's row language rather
+   than copied into it: a tag-sized name in the same type as every other row's,
+   and a control at strip scale under or beside it. Left alone they are form
+   fields — a sentence-case label at body size over a 31px widget — which is
+   the panel this strip replaced, reappearing inside it. */
+.toolstrip-pane .select-control { display: grid; gap: 2px; margin: 0; }
+.toolstrip-pane .select-control > span { color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
+.toolstrip-pane .select-control select { height: 22px; padding: 0 6px; border-radius: var(--radius-s); font: var(--text-micro); }
+.toolstrip-pane .control-heading > span { text-transform: uppercase; }
 
 /* ---------------------------------------------------------------------------
    Scene instruments, part two: the drawers, and the overrides that have to sit
