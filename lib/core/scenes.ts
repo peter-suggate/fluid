@@ -833,6 +833,7 @@ export function createMinimalPowerDamBreakScene(): SceneDescription {
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
 

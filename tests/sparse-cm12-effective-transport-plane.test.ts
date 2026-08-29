@@ -48,11 +48,19 @@ test("the effective vec4 plane is a VEX product, never transport materialization
   assert.doesNotMatch(sample, /state\[/);
 });
 
-test("transport and sharpening use a continuous finest-cell interpolation lattice", () => {
+test("transport holds a scale-invariant source lattice while sharpening stays continuous", () => {
   const stencil = functionSource(wgsl, "effectiveTransportStencilAtSpans",
     "${topologyEffectsEntries}");
-  assert.match(stencil, /let spans=vec3f\(1\.0\)/);
+  assert.match(stencil, /let spans=max\(vec3f\(1\.0\),inputSpans\)/);
   assert.doesNotMatch(stencil, /cm12TeiOwnerAtFine[\s\S]*widths/);
+
+  const velocity = functionSource(wgsl, "sampleEffectiveTransportVelocityAtSpans",
+    "fn traceEffectiveTransportCharacteristic");
+  assert.match(velocity, /let spans=max\(vec3f\(1\.0\),spansInput\)/);
+  const characteristic = functionSource(wgsl, "traceEffectiveTransportCharacteristic",
+    "fn traceEffectiveTransportDeparture");
+  assert.match(characteristic,
+    /sampleEffectiveTransportVelocityAtSpans\(midpoint,spans\)/);
 
   const sharpeningDensity = functionSource(wgsl, "sampleSharpeningDensity",
     "fn sampleSharpeningField");

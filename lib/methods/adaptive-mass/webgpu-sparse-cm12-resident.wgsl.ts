@@ -1578,6 +1578,7 @@ fn applySparseCM12RefinementRegionBounds(brick:u32,requested:u32)->u32{
   // A finer ceiling wins if overlapping authored boxes conflict.
   return max(bounds.x,min(bounds.y,requested));
 }
+
 fn templateBrickCellRange(brick:u32,resolution:u32)->vec2u{
   if(brick>=CM12_WDR_INITIAL_LEAVES){
     let count=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
@@ -1965,11 +1966,13 @@ fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
 
 // Shared compiled-topology sampler for transport, sharpening, and tracers. The
 // expression and dz/dy/dx corner order retain the canonical interpolation.
-fn sampleEffectiveTransportVelocity(position:vec3f)->vec3f{
-  // Use the same unambiguous finest-cell lattice as scalar transport. Choosing
-  // the lattice from the point owner makes the RK2 velocity field itself jump
-  // at a 2:1 boundary before the scalar stencil is even evaluated.
-  let spans=vec3f(1.0);
+fn sampleEffectiveTransportVelocityAtSpans(position:vec3f,spansInput:vec3f)->vec3f{
+  // Hold the source control-volume lattice fixed for the complete RK2 trace.
+  // Re-selecting it from the point owner would jump at a 2:1 seam, while a
+  // hard-coded finest lattice creates a half-cell dead zone inside every
+  // coarse owner and changes the operator when the authored finest lattice is
+  // uniformly rescaled. Fixed source spans avoid both ambiguities.
+  let spans=max(vec3f(1.0),spansInput);
   let clamped=cm12ClampToResidentWorld(position,0.5*spans);
   let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));let fraction=fract(shifted);
   var result=vec3f(0.0);
@@ -1988,14 +1991,17 @@ fn traceEffectiveTransportCharacteristic(position:vec3f,direction:f32)->vec3f{
   // The characteristic starts at an accepted cell sample. SolidWorld clips
   // every subsequent segment uniformly, including spherical voxel shells.
   let initialPosition=position;
-  let initial=sampleEffectiveTransportVelocity(initialPosition);
+  let source=cm12TeiOwnerAtFine(vec3i(floor(initialPosition))).cell;
+  let spans=select(vec3f(1.0),cellWidths(source),source!=INVALID);
+  let initial=sampleEffectiveTransportVelocityAtSpans(initialPosition,spans);
   let substeps=clamp(i32(ceil(length(initial)*p.frame.x)),1,16);
   let subDt=p.frame.x/f32(substeps);var traced=initialPosition;
   for(var step=0;step<substeps;step+=1){
-    var first=initial;if(step>0){first=sampleEffectiveTransportVelocity(traced);}
+    var first=initial;if(step>0){first=sampleEffectiveTransportVelocityAtSpans(traced,spans);}
     let midpoint=clipBoundarySegment(traced,
       cm12ClampToResidentWorld(traced+direction*0.5*subDt*first,vec3f(0.5)));
-    let candidate=traced+direction*subDt*sampleEffectiveTransportVelocity(midpoint);
+    let candidate=traced+direction*subDt
+      *sampleEffectiveTransportVelocityAtSpans(midpoint,spans);
     traced=clipBoundarySegment(traced,cm12ClampToResidentWorld(candidate,vec3f(0.5)));
   }
   return traced;
@@ -2049,14 +2055,12 @@ fn effectiveTransportStencilAtSpans(position:vec3f,inputSpans:vec3f)->TransportS
   // stencil from the coarse lattice to the fine lattice and change a beta
   // column by O(1). Fixed row-owner spans retain the adaptive resolution while
   // making the physical transport operator continuous across the seam.
-  // Sample on the finest cell-centred lattice and collapse coincident owners
-  // through the eight packet entries. A coarse centre can sit exactly on a
-  // fine-cell boundary; probing that boundary for one owner introduces a
-  // global half-open bias whose reflected point chooses the other fine cell.
-  // The finest lattice has half-integer centres, so its ownership is
-  // unambiguous, and repeated fine samples naturally restrict to a coarse
-  // donor without changing total weight.
-  let spans=vec3f(1.0);_=inputSpans;
+  // Keep the receiver's physical interpolation lattice. Using the authored
+  // finest lattice and collapsing coincident owners is not scale invariant:
+  // a width-two cell samples both finest points from itself until the trace
+  // crosses half a physical cell, while the identical width-one scene begins
+  // transferring mass immediately.
+  let spans=max(vec3f(1.0),inputSpans);
   let clamped=cm12ClampToResidentWorld(position,0.5*spans);
   let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
   let fraction=fract(shifted);var result:TransportStencil;
@@ -5391,6 +5395,26 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
     let neighborResolution=atomicLoad(&activity[neighborOutput+8u]);
     let neighborAccepted=atomicLoad(&activity[neighborOutput+12u]);
     required=max(required,max(neighborResolution,neighborAccepted)/2u);
+  }
+  // A refinement floor defines the physical policy-tile scale as well as a
+  // resolution cap. Keep every authored sub-brick in that tile at one rung,
+  // just as the physically identical coarser scene must. Otherwise an interior
+  // sub-brick can demote below its siblings merely because the finer authoring
+  // lattice exposed an extra brick boundary.
+  let regionBounds=sparseCM12RefinementRegionResolutionBounds(brick);
+  let policyScale=max(1u,BRICK_FINE_RESOLUTION/max(1u,regionBounds.y));
+  if(brickSpan(brick)==1u&&policyScale>1u){
+    let groupOrigin=(coordinate/i32(policyScale))*i32(policyScale);
+    for(var z=0u;z<policyScale;z+=1u){for(var y=0u;y<policyScale;y+=1u){
+      for(var x=0u;x<policyScale;x+=1u){
+        let sibling=cm12WorldOwnerAt(
+          groupOrigin+vec3i(i32(x),i32(y),i32(z)));
+        if(sibling==INVALID||!brickActive(sibling)){continue;}
+        let siblingOutput=activityRecord(sibling);
+        required=max(required,max(atomicLoad(&activity[siblingOutput+8u]),
+          atomicLoad(&activity[siblingOutput+12u])));
+      }
+    }}
   }
   atomicMax(&activity[activityRecord(brick)+8u],required);
 }

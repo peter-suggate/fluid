@@ -68,6 +68,46 @@ export function damBreakBoxContains(box: DamBreakBox, x: number, y: number, z: n
     && z > box.min.z && z <= box.max.z;
 }
 
+function intervalCellOverlapFraction(
+  cell: number,
+  cellCount: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const lower = cell / cellCount;
+  const upper = (cell + 1) / cellCount;
+  return Math.max(0, Math.min(upper, maximum) - Math.max(lower, minimum))
+    * cellCount;
+}
+
+/**
+ * Exact fractional occupancy of the procedural tank-fill or dam-break body.
+ *
+ * Sparse CM12 may construct the same physical leaf by restricting different
+ * authored finest lattices. A centre-sampled boolean does not commute with
+ * that restriction when an analytic face crosses a finest cell. Measuring
+ * the box/cell overlap does: summing two 32-grid cells produces exactly the
+ * same fraction as evaluating their corresponding 16-grid cell directly.
+ */
+export function baseInitialLiquidFractionAtCell(
+  scene: SceneDescription,
+  x: number,
+  y: number,
+  z: number,
+  dimensions: readonly [number, number, number],
+): number {
+  const [nx, ny, nz] = dimensions;
+  if (scene.systems?.fluid === false
+    || x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return 0;
+  if (scene.fluid.initialCondition === "tank-fill") {
+    return intervalCellOverlapFraction(y, ny, 0, scene.container.fillFraction);
+  }
+  const dam = sceneDamBreakBox(scene);
+  return intervalCellOverlapFraction(x, nx, dam.min.x, dam.max.x)
+    * intervalCellOverlapFraction(y, ny, dam.min.y, dam.max.y)
+    * intervalCellOverlapFraction(z, nz, dam.min.z, dam.max.z);
+}
+
 /**
  * True when the reservoir has been moved off the container's minimum corner.
  *
@@ -184,12 +224,18 @@ export function initialLiquidFractionAtCell(
   y: number,
   z: number,
   dimensions: readonly [number, number, number],
-  baseWet: boolean,
+  baseWet: boolean | number,
 ): number {
   const brick = initialFluidBrickContainsCell(scene, x, y, z, dimensions);
-  if (combineInitialBrickWet(scene, brick, baseWet)) return 1;
+  const baseFraction = typeof baseWet === "boolean" ? Number(baseWet)
+    : Math.max(0, Math.min(1, baseWet));
+  const resolvedBase = brick === undefined ? baseFraction
+    : scene.fluid.initialBrickSeedsAdditive
+      ? brick ? 1 : baseFraction
+      : Number(brick);
+  if (resolvedBase >= 1) return 1;
   const volumes = sceneInitialLiquidVolumes(scene);
-  if (volumes.length === 0) return 0;
+  if (volumes.length === 0) return resolvedBase;
   const c = scene.container;
   const h = [c.width_m / dimensions[0], c.height_m / dimensions[1], c.depth_m / dimensions[2]] as const;
   const center = {
@@ -206,7 +252,7 @@ export function initialLiquidFractionAtCell(
     };
     if (volumes.some((volume) => initialLiquidVolumeContainsPoint(volume, point))) wetSamples += 1;
   }
-  return wetSamples / 8;
+  return Math.max(resolvedBase, wetSamples / 8);
 }
 
 /**

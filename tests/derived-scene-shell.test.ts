@@ -7,10 +7,22 @@ import {
   createDeepPowerHydrostaticScene,
   createHighResolutionDamBreakScene,
   createLargePowerDamBreakScene,
+  createMinimalPowerDamBreakScene,
   createMinimalPowerDamBreak32Scene,
   createMinimalPowerDamBreak64Scene,
   createSparseCM12LongDamBreakScene,
 } from "../lib/core/scenes";
+
+test("the source Mini16 dam carries its closed solid shell", () => {
+  const world = solidWorldForScene(createMinimalPowerDamBreakScene());
+  assert.equal(sampleSolidWorld(world, [-1, 8, 8]).solidFraction, 1);
+  assert.equal(sampleSolidWorld(world, [16, 8, 8]).solidFraction, 1);
+  assert.equal(sampleSolidWorld(world, [8, -1, 8]).solidFraction, 1);
+  assert.equal(sampleSolidWorld(world, [8, 16, 8]).solidFraction, 1);
+  assert.equal(sampleSolidWorld(world, [8, 8, -1]).solidFraction, 1);
+  assert.equal(sampleSolidWorld(world, [8, 8, 16]).solidFraction, 1);
+  assert.equal(sampleSolidWorld(world, [8, 8, 8]).solidFraction, 0);
+});
 
 test("derived dam scenes replace their inherited shell on the final lattice", () => {
   const scenes = [

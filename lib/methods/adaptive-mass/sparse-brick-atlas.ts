@@ -5,7 +5,7 @@
  */
 
 import {
-  damBreakBoxContains,
+  baseInitialLiquidFractionAtCell,
   initialFluidBrickCoordinates,
   initialFluidSeedBrickCoordinates,
   initialLiquidFractionAtCell,
@@ -253,17 +253,16 @@ function initialDensityAt(
   const [nx, ny, nz] = dimensions;
   if (scene.systems?.fluid === false
     || x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return 0;
-  const dam = sceneDamBreakBox(scene);
-  const baseWet = scene.fluid.initialCondition === "tank-fill"
-    ? (y + 0.5) / ny <= scene.container.fillFraction
-    : damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / ny, (z + 0.5) / nz);
+  const baseFraction = baseInitialLiquidFractionAtCell(
+    scene, x, y, z, dimensions,
+  );
   let world = initialSolidWorldCache.get(scene);
   if (!world) {
     world = solidWorldForScene(scene);
     initialSolidWorldCache.set(scene, world);
   }
   return (1 - sampleSolidWorld(world, [x, y, z]).solidFraction)
-    * initialLiquidFractionAtCell(scene, x, y, z, dimensions, baseWet);
+    * initialLiquidFractionAtCell(scene, x, y, z, dimensions, baseFraction);
 }
 
 const initialSolidWorldCache = new WeakMap<SceneDescription, SolidWorld>();
@@ -981,29 +980,73 @@ export function initializeSparseBrickAtlasFromScene(
   // pools such as ocean-seiche could never visibly or physically coarsen.
   const candidateByKey = new Map(candidates.map((candidate) =>
     [candidate.key, candidate] as const));
-  const interfaceDistance = new Map<number, number>();
-  const queue: typeof candidates = [];
-  for (const candidate of candidates) {
-    if (!candidate.interfaceBrick) continue;
-    interfaceDistance.set(candidate.key, 0);
-    queue.push(candidate);
-  }
   const faceDirections = [
     [-1, 0, 0], [1, 0, 0], [0, -1, 0],
     [0, 1, 0], [0, 0, -1], [0, 0, 1],
   ] as const;
+
+  // A minimum-cell-size region is also a physical policy scale. For example,
+  // a two-fine-cell floor on a 32^3 scene must classify the same 0.4 m policy
+  // tile as one B8 brick in the physically identical 16^3 scene. Classifying
+  // each of the eight smaller authored bricks independently made only the
+  // brick that actually crossed the interface stay fine, so the adaptive
+  // topology depended on the otherwise irrelevant authoring lattice.
+  const policyScaleByKey = new Map<number, number>();
+  const policyTileByBrick = new Map<number, string>();
+  const policyTiles = new Map<string, {
+    readonly bricks: typeof candidates;
+    interfaceBrick: boolean;
+    readonly neighbors: Set<string>;
+  }>();
+  for (const candidate of candidates) {
+    const origin = candidate.coordinate.map((value) =>
+      value * brickFineResolution) as [number, number, number];
+    const extent = origin.map((value, axis) => Math.max(0,
+      Math.min(brickFineResolution, options.finestDimensions[axis]! - value))) as
+      [number, number, number];
+    const bounds = sparseCM12RefinementRegionResolutionBoundsForBrick(
+      refinementRegionParameters, origin, extent, brickFineResolution,
+      brickFineResolution,
+    );
+    const scale = Math.max(1, Math.round(
+      brickFineResolution / bounds.maximumResolution,
+    ));
+    const tileOrigin = candidate.coordinate.map((value) =>
+      Math.floor(value / scale) * scale);
+    const tileKey = `${scale}:${tileOrigin.join(",")}`;
+    policyScaleByKey.set(candidate.key, scale);
+    policyTileByBrick.set(candidate.key, tileKey);
+    let tile = policyTiles.get(tileKey);
+    if (!tile) {
+      tile = { bricks: [], interfaceBrick: false, neighbors: new Set() };
+      policyTiles.set(tileKey, tile);
+    }
+    tile.bricks.push(candidate);
+    tile.interfaceBrick ||= candidate.interfaceBrick;
+  }
+  for (const candidate of candidates) for (const direction of faceDirections) {
+    const coordinate = candidate.coordinate.map((value, axis) =>
+      value + direction[axis]) as [number, number, number];
+    if (coordinate.some((value, axis) =>
+      value < 0 || value >= brickDimensions[axis])) continue;
+    const neighbor = candidateByKey.get(sparseBrickKey(coordinate, brickDimensions));
+    if (!neighbor) continue;
+    const ownTile = policyTileByBrick.get(candidate.key)!;
+    const neighborTile = policyTileByBrick.get(neighbor.key)!;
+    if (ownTile !== neighborTile) policyTiles.get(ownTile)!.neighbors.add(neighborTile);
+  }
+  const interfaceDistance = new Map<string, number>();
+  const queue: string[] = [];
+  for (const [key, tile] of policyTiles) if (tile.interfaceBrick) {
+    interfaceDistance.set(key, 0);
+    queue.push(key);
+  }
   for (let cursor = 0; cursor < queue.length; cursor += 1) {
-    const candidate = queue[cursor]!;
-    const distance = interfaceDistance.get(candidate.key)!;
-    for (const direction of faceDirections) {
-      const coordinate = candidate.coordinate.map((value, axis) =>
-        value + direction[axis]) as [number, number, number];
-      if (coordinate.some((value, axis) =>
-        value < 0 || value >= brickDimensions[axis])) continue;
-      const key = sparseBrickKey(coordinate, brickDimensions);
-      const neighbor = candidateByKey.get(key);
-      if (!neighbor || interfaceDistance.has(key)) continue;
-      interfaceDistance.set(key, distance + 1);
+    const key = queue[cursor]!;
+    const distance = interfaceDistance.get(key)!;
+    for (const neighbor of policyTiles.get(key)!.neighbors) {
+      if (interfaceDistance.has(neighbor)) continue;
+      interfaceDistance.set(neighbor, distance + 1);
       queue.push(neighbor);
     }
   }
@@ -1011,13 +1054,17 @@ export function initializeSparseBrickAtlasFromScene(
   const resolutionByKey = new Map<number, SparseBrickResolution>();
   for (const candidate of candidates) {
     const { coordinate } = candidate;
-    const distance = interfaceDistance.get(candidate.key);
+    const tileKey = policyTileByBrick.get(candidate.key)!;
+    const distance = interfaceDistance.get(tileKey);
+    const policyFineResolution = brickFineResolution
+      / policyScaleByKey.get(candidate.key)!;
     // A component without a free surface (for example a completely full,
     // closed tank) is quiescent bulk and therefore starts at 1^3.
-    const distanceRung = distance === undefined
-      ? 0 : Math.max(0, ladder.resolutions.length - 1 - Math.max(0, distance - surfaceFineRings + 1));
+    const distanceRung = distance === undefined ? 0 : Math.max(0,
+      Math.log2(policyFineResolution) - Math.max(0,
+        distance - surfaceFineRings + 1));
     const adaptiveResolution = (distance !== undefined && distance < surfaceFineRings
-      ? brickFineResolution : ladder.resolutions[distanceRung]!) as SparseBrickResolution;
+      ? policyFineResolution : 2 ** distanceRung) as SparseBrickResolution;
     const staticSolidResolutionFloor = sparseCM12StaticSolidResolutionFloor(
       scene, options.finestDimensions, coordinate, brickFineResolution,
     );

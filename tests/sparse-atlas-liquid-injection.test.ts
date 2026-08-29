@@ -42,8 +42,14 @@ test("an injected ball adds its own volume of liquid to a running state", () => 
   // The point of injecting rather than authoring: the run continues from where
   // it was. A restart would put the clock back to zero.
   assert.equal(after.time_s, before.time_s);
-  assert.ok(after.atlas.bricks.length > before.atlas.bricks.length,
-    "a ball dropped into air must bring its own bricks");
+  // A closed SolidWorld shell may preseed the target as an empty structural
+  // brick. Injection must still add liquid authority; it need not duplicate
+  // an already represented page merely to make the brick count increase.
+  const wetBricks = (state: typeof before) => state.atlas.bricks.filter((brick) =>
+    brick.density.some((density) => density > 0)).length;
+  assert.ok(after.atlas.bricks.length > before.atlas.bricks.length
+    || wetBricks(after) > wetBricks(before),
+  "a ball dropped into air must add or wet represented bricks");
   assert.equal(after.cellVelocity.length, 3 * after.grid.cells.length);
   assert.equal(after.faceNormalVelocity.length, after.grid.gradientRows.length);
   assert.equal(after.cellPressure.length, after.grid.cells.length);
