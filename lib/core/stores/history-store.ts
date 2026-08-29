@@ -51,7 +51,7 @@ function owned(snapshot: EditorHistorySnapshot): EditorHistorySnapshot {
   return { label: snapshot.label, scene: cloneScene(snapshot.scene), presetId: snapshot.presetId };
 }
 
-export const useEditorHistoryStore = create<EditorHistoryStore>((set, get) => ({
+export const createEditorHistoryStore = () => create<EditorHistoryStore>((set, get) => ({
   past: [],
   future: [],
   lastCoalesceKey: undefined,
@@ -103,3 +103,14 @@ export const useEditorHistoryStore = create<EditorHistoryStore>((set, get) => ({
   },
   clear: () => set({ past: [], future: [], lastCoalesceKey: undefined, lastRecordedAt_ms: Number.NEGATIVE_INFINITY }),
 }));
+
+export type EditorHistoryStoreHook = ReturnType<typeof createEditorHistoryStore>;
+
+/**
+ * The default (pane A) instance.
+ *
+ * Per-pane instances come from `createPaneSession`; this one is what a tree
+ * with no `SessionProvider` mounted reads, and what non-React callers that
+ * have not yet been threaded a session resolve to.
+ */
+export const useEditorHistoryStore = createEditorHistoryStore();

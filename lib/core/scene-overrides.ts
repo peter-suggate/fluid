@@ -1,3 +1,10 @@
+import {
+  COMPARE_ABSENT,
+  COMPARE_ACTIVE_KEY,
+  COMPARE_KEY_PREFIX,
+  COMPARE_LINK_KEY,
+  isCompareQueryKey,
+} from "./compare/compare-query";
 import { withRefinementRegionsFromQuery, refinementRegionsToQuery } from "./editor-refinement-region";
 import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
 import { defaultMethodId, getMethod, registeredSimulationMethods } from "./method-registry";
@@ -34,9 +41,13 @@ import { sceneRimQuery, withSceneRimQuery } from "./vessel-rim-controls";
  *              anything is overridden, so they are listed but never counted,
  *  - `link`    keys this build does not manage, of which `gpu` is the one that
  *              matters: it is read once during module startup, so clearing it
- *              is a navigation rather than a store edit.
+ *              is a navigation rather than a store edit,
+ *  - `compare` the `b.*` block: pane B's diff. Listed under its own heading and
+ *              never counted, because it is not something done to *this* scene —
+ *              it is the second pane, and the second pane is the whole point of
+ *              the link it appears in.
  */
-export type SceneOverrideGroup = "scene" | "method" | "render" | "view" | "link";
+export type SceneOverrideGroup = "scene" | "method" | "render" | "view" | "link" | "compare";
 
 export interface SceneOverride {
   /** Every query key this row owns; clearing the row clears all of them. */
@@ -102,7 +113,7 @@ const LINK_OVERRIDES: Readonly<Record<string, { readonly label: string; readonly
   gpuRecovery: { label: "Automatic GPU recovery", hint: "Read once when the page loads; clearing it reloads" },
 };
 
-const GROUP_ORDER: readonly SceneOverrideGroup[] = ["scene", "method", "render", "view", "link"];
+const GROUP_ORDER: readonly SceneOverrideGroup[] = ["scene", "method", "render", "view", "compare", "link"];
 
 function shortValue(raw: string, boolish = false) {
   if (boolish) return raw === "1" ? "on" : raw === "0" ? "off" : raw;
@@ -154,6 +165,25 @@ export function sceneOverridesInQuery(search: string, context: SceneOverrideCont
   for (const [key, raw] of query) {
     if (IDENTITY_KEYS.has(key)) continue;
     if (key.startsWith("camera.")) { cameraKeys.push(key); continue; }
+
+    // Pane B, before anything else claims one of its keys: `b.scene.…` and
+    // `b.param.…` would otherwise be read as edits to pane A's own document.
+    if (isCompareQueryKey(key)) {
+      overrides.push({
+        keys: [key], group: "compare",
+        label: key === COMPARE_ACTIVE_KEY ? "Second pane"
+          : key === COMPARE_LINK_KEY ? "Unlinked groups"
+          : key.slice(COMPARE_KEY_PREFIX.length),
+        value: shortValue(raw === COMPARE_ABSENT ? "not set in B" : raw),
+        hint: key === COMPARE_ACTIVE_KEY
+          ? "Compare mode is open with an empty diff — pane B is pane A"
+          : key === COMPARE_LINK_KEY
+            ? "Groups a reader unlinked, so the two panes may differ in them"
+            : "Pane B's value for this key; pane A keeps its own",
+        counted: false, clearedBy: "stores",
+      });
+      continue;
+    }
 
     if (key.startsWith("scene.")) {
       if (!context.hasPresetBaseline) continue;
@@ -262,6 +292,8 @@ export function sceneOverrideClearPlan(
 ): SceneOverrideClearPlan {
   const cleared = new Set(keys);
   const preset = getScenePreset(document.presetId);
+  // Session-invariant: the factory's authored defaults, not a pane's state,
+  // so this plan is the same whichever session asked for it.
   const initialUI = useUIStore.getInitialState();
   const methodParams: { methodId: string; key: string; value?: MethodParamValue }[] = [];
   const ui: Partial<ReturnType<typeof useUIStore.getState>> = {};

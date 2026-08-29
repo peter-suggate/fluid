@@ -2,11 +2,9 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { stageLensOverlayMode, type AnyStageLens } from "../lib/core/stage-lens";
-import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
-import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
-import { useRuntimeStore } from "../lib/core/stores/runtime-store";
-import { useSceneStore } from "../lib/core/stores/scene-store";
-import { DEFAULT_GRID_OVERLAY_AXIS, useUIStore } from "../lib/core/stores/ui-store";
+import { useSession } from "../lib/core/session/session-context";
+import { resolvedMethodValues } from "../lib/core/stores/method-store";
+import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import {
   averagePerformanceTraces,
@@ -47,7 +45,8 @@ function usePhysicsTiming(methodId: string): {
   readonly total?: PerformanceTrace;
   readonly stages?: PerformanceTrace;
 } {
-  const reports = useDiagnosticsStore((state) => state.performanceReports);
+  const session = useSession();
+  const reports = session.diagnostics((state) => state.performanceReports);
   return useMemo(() => {
     const newest = reports.findLast((report) => report.methodId === methodId && report.physics);
     if (!newest) return {};
@@ -125,9 +124,10 @@ function costExplanation(
  * of them being in the same panel.
  */
 function NumericsSection() {
-  const scene = useSceneStore((state) => state.scene);
-  const patchScene = useSceneStore((state) => state.patchScene);
-  const patchNumerics = useSceneStore((state) => state.patchNumerics);
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
+  const patchScene = session.scene((state) => state.patchScene);
+  const patchNumerics = session.scene((state) => state.patchNumerics);
   // Folded shut. These three are set once for a run and then watched rather
   // than touched, so they are the one part of this instrument that can be a
   // drawer without making "where does this live?" a question again: the drawer
@@ -137,7 +137,7 @@ function NumericsSection() {
     <div className="field-grid">
       <NumberField label="Shared simulation step" unit="ms"
         value={Math.round(scene.numerics.fixedDt_s * 1000)} step={1} min={1} max={50}
-        onChange={(value) => simulation.setStepSize(value / 1000)} />
+        onChange={(value) => simulation.setStepSize(value / 1000, session.id)} />
       <NumberField label="Oracle cell" unit="m"
         value={scene.nominalResolution.length_m} step={0.0025} min={0.0125} max={0.08}
         onChange={(value) => patchScene({ nominalResolution: { length_m: value } })} />
@@ -164,17 +164,18 @@ export function SimPipelineOverlay({ lenses: override }: {
   /** Overrides the running method's own roster. For tests and previews. */
   readonly lenses?: readonly AnyStageLens[];
 }) {
-  const methodId = useMethodStore((state) => state.methodId);
-  const quality = useMethodStore((state) => state.quality);
-  const overrides = useMethodStore((state) => state.overrides);
-  const info = useDiagnosticsStore((state) => state.gpuInfo);
-  const bodyCount = useDiagnosticsStore((state) => state.bodies.length);
-  const scene = useSceneStore((state) => state.scene);
-  const running = useRuntimeStore((state) => state.runState === "running");
-  const overlayMode = useUIStore((state) => state.gridOverlayMode);
-  const overlayAxis = useUIStore((state) => state.gridOverlayAxis);
-  const setOverlayMode = useUIStore((state) => state.setGridOverlayMode);
-  const setOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
+  const session = useSession();
+  const methodId = session.method((state) => state.methodId);
+  const quality = session.method((state) => state.quality);
+  const overrides = session.method((state) => state.overrides);
+  const info = session.diagnostics((state) => state.gpuInfo);
+  const bodyCount = session.diagnostics((state) => state.bodies.length);
+  const scene = session.scene((state) => state.scene);
+  const running = session.runtime((state) => state.runState === "running");
+  const overlayMode = session.ui((state) => state.gridOverlayMode);
+  const overlayAxis = session.ui((state) => state.gridOverlayAxis);
+  const setOverlayMode = session.ui((state) => state.setGridOverlayMode);
+  const setOverlayAxis = session.ui((state) => state.setGridOverlayAxis);
 
   const method = getMethod(methodId);
   // An override roster (tests and previews) is matched to rows by stage id;
@@ -250,14 +251,14 @@ export function SimPipelineOverlay({ lenses: override }: {
           return <PipeChoice key={key} label={control.label}
             value={String(values[control.param] ?? "")}
             options={control.options.map((option) => ({ ...option }))}
-            onChange={(value) => simulation.setMethodParam(methodId, control.param, value)} />;
+            onChange={(value) => simulation.setMethodParam(methodId, control.param, value, session.id)} />;
         case "param-range":
           return <PipeRange key={key} label={control.label} unit={control.unit}
             value={Number(values[control.param] ?? control.min)}
             min={control.min} max={control.max} step={control.step} digits={control.digits ?? 0}
             hint={control.hint}
             disabled={control.enabled ? !control.enabled(context) : false}
-            onChange={(value) => simulation.setMethodParam(methodId, control.param, value)} />;
+            onChange={(value) => simulation.setMethodParam(methodId, control.param, value, session.id)} />;
         case "readout":
           return <label key={key} className="pipe-field" title={control.hint}>
             <span>{control.label}</span>
@@ -278,7 +279,7 @@ export function SimPipelineOverlay({ lenses: override }: {
     const stage = graph?.stages.find((candidate) => candidate.id === stageId);
     if (!stage?.toggle) return;
     simulation.setMethodParam(methodId, stage.toggle.param,
-      checked ? stage.toggle.on : stage.toggle.off);
+      checked ? stage.toggle.on : stage.toggle.off, session.id);
   };
 
   // The timing row *is* the partition, so the lens opens from the row that

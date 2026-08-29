@@ -1,12 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { SceneOverridesChip } from "./SceneOverridesChip";
 import { findSceneDefinition } from "../lib/core/scenes";
 import { simulation } from "../lib/core/simulation/controller";
-import { useSceneStore } from "../lib/core/stores/scene-store";
 import { planSceneRuntime } from "../lib/core/scene-runtime";
+import { useSession } from "../lib/core/session/session-context";
 
 /** How far into the corner the pointer has to come before the chip appears. */
 const REVEAL_WIDTH_PX = 420;
@@ -52,9 +51,11 @@ function usePointerNearTopLeft() {
  * corner or anything inside it takes focus.
  */
 export function SceneOverlay() {
-  const router = useRouter();
-  const presetId = useSceneStore((state) => state.presetId);
-  const scene = useSceneStore((state) => state.scene);
+  const session = useSession();
+  const presetId = session.scene((state) => state.presetId);
+  const scene = session.scene((state) => state.scene);
+  const selectorOpen = session.ui((state) => state.sceneSelectorOpen);
+  const setSelectorOpen = session.ui((state) => state.setSceneSelectorOpen);
   const pointerNear = usePointerNearTopLeft();
   const definition = findSceneDefinition(presetId);
   const runtime = planSceneRuntime(scene).fluidSolver ? `seed ${scene.randomSeed}` : "live SVO · no fluid";
@@ -65,12 +66,21 @@ export function SceneOverlay() {
       data-revealed={pointerNear ? "true" : "false"}
     >
       <span className="brand-mark" title="Fluid Lab · WebGPU CFD workbench">FL</span>
+      {/* The name is the switch. It used to be the way to the library, which
+          meant that changing scene was a route change: the viewport unmounted,
+          the device went away, and coming back rebuilt everything — for a
+          gesture that is usually "try the next one". It now raises this pane's
+          selector, which swaps the document in place and keeps the library one
+          row away inside it. */}
       <button
         type="button"
         className="scene-overlay-chip"
-        onClick={() => router.push("/")}
+        onClick={() => setSelectorOpen(!selectorOpen)}
+        data-scene-selector-toggle=""
         data-testid="open-scene-library"
-        title={definition ? `${definition.blurb}\n\nBrowse all scenes` : "Browse all scenes"}
+        aria-haspopup="dialog"
+        aria-expanded={selectorOpen}
+        title={definition ? `${definition.blurb}\n\nChoose another scene` : "Choose another scene"}
       >
         <strong>{definition?.name ?? scene.sceneId}</strong>
         <small>{scene.sceneId} · {runtime}</small>
@@ -86,7 +96,7 @@ export function SceneOverlay() {
       <button
         type="button"
         className="scene-overlay-action"
-        onClick={() => simulation.saveNamedScene(scene.sceneId)}
+        onClick={() => simulation.saveNamedScene(scene.sceneId, session.id)}
         data-testid="save-scene"
         title={`Save this document to the library as “${scene.sceneId}”, replacing an earlier save of the same name`}
       >

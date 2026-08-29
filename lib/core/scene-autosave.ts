@@ -11,8 +11,7 @@ import {
   type SceneLibraryStorage,
 } from "./scene-library";
 import { findSceneDefinition } from "./scenes";
-import { useSceneStore } from "./stores/scene-store";
-import { useMethodStore } from "./stores/method-store";
+import { resolveSession, type PaneSession } from "./session/session";
 import { useShellStore } from "./stores/shell-store";
 
 /**
@@ -174,18 +173,23 @@ export function createSceneAutosave(options: SceneAutosaveOptions = {}): SceneAu
  *
  * Subscribed to the stores rather than threaded through the controller, as
  * `startQueryStateSync` is, because every path that changes the document
- * already ends in `useSceneStore` and none of them should have to remember
- * this. `studioEntered` is the gate: on a cold load the store holds the default
+ * already ends in the session's scene store and none of them should have to
+ * remember this. `studioEntered` is the gate: on a cold load the store holds the default
  * preset that nobody chose, and offering that as *Continue* would be a lie.
  * Entering the studio is itself a trigger, so a scene opened and left alone is
  * still where the reader is.
  */
-export function startSceneAutosave(options: SceneAutosaveOptions = {}): () => void {
+export function startSceneAutosave(
+  options: SceneAutosaveOptions = {},
+  // Pane A only, by design: pane B is a diff and never a library entry unless
+  // it is promoted. WP3 is where a promotion hands this the session it saves.
+  session: PaneSession = resolveSession(),
+): () => void {
   const autosave = createSceneAutosave(options);
   const schedule = () => {
     if (!useShellStore.getState().studioEntered) return;
-    const { scene, presetId } = useSceneStore.getState();
-    const { methodId, quality, overrides } = useMethodStore.getState();
+    const { scene, presetId } = session.scene.getState();
+    const { methodId, quality, overrides } = session.method.getState();
     autosave.request({ scene, presetId, methodProfile: {
       methodId, quality, overrides: { ...(overrides[methodId] ?? {}) },
     } });
@@ -193,8 +197,8 @@ export function startSceneAutosave(options: SceneAutosaveOptions = {}): () => vo
   // A closing tab is exactly the case this exists for, and it never runs an
   // unmount; `visibilitychange` is the last callback a browser reliably gives.
   const onHidden = () => { if (document.visibilityState === "hidden") autosave.flush(); };
-  const stopScene = useSceneStore.subscribe(schedule);
-  const stopMethod = useMethodStore.subscribe(schedule);
+  const stopScene = session.scene.subscribe(schedule);
+  const stopMethod = session.method.subscribe(schedule);
   const stopShell = useShellStore.subscribe(schedule);
   if (typeof document !== "undefined") document.addEventListener("visibilitychange", onHidden);
   schedule();

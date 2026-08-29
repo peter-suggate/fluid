@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from "react";
 import { simulation } from "../lib/core/simulation/controller";
-import { useSceneStore } from "../lib/core/stores/scene-store";
 import {
   canopyDials,
   sceneCanopyPads,
@@ -10,6 +9,7 @@ import {
   type CanopyDials,
 } from "../lib/core/tree-canopy-controls";
 import { SculptDialRows } from "./SculptDials";
+import { useSession } from "../lib/core/session/session-context";
 
 /**
  * The canopy sculptor, as rows on the strip at the selected tree's crown
@@ -32,12 +32,13 @@ const DIALS: readonly { id: keyof CanopyDials; label: string; hint: string }[] =
 ];
 
 export function CanopyDialRows({ nodeId }: { nodeId: string }) {
-  const scene = useSceneStore((state) => state.scene);
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
   const gestureOpen = useRef(false);
   const endGesture = () => {
     if (!gestureOpen.current) return;
     gestureOpen.current = false;
-    simulation.commitEdit(undefined, { reseed: true });
+    simulation.commitEdit(undefined, { reseed: true }, session.id);
   };
   // Deselecting mid-drag must still close the gesture, or the next edit's
   // undo snapshot would be this one's.
@@ -54,10 +55,10 @@ export function CanopyDialRows({ nodeId }: { nodeId: string }) {
       // Opened here rather than on pointerdown so keyboard nudges are
       // bracketed too; closed on release/blur either way.
       gestureOpen.current = true;
-      simulation.beginEdit(`Adjusted ${nodeId} canopy`);
+      simulation.beginEdit(`Adjusted ${nodeId} canopy`, session.id);
     }
-    const current = useSceneStore.getState().scene;
-    useSceneStore.getState().patchScene(
+    const current = session.scene.getState().scene;
+    session.scene.getState().patchScene(
       withCanopyDials(current, nodeId, { ...canopyDials(sceneCanopyPads(current, nodeId)[0]!), [id]: value }),
     );
   };

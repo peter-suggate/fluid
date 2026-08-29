@@ -1,10 +1,15 @@
 "use client";
 
+import {
+  closeCompareMode,
+  keepComparePaneB,
+  swapComparePanesInPlace,
+  toggleCompareMode,
+} from "./compare/compare-mode";
 import type { EditorActionEffect } from "./editor-action";
 import { createInflowAt, INFLOW_SELECTION_ID } from "./editor-inflow";
 import { simulation } from "./simulation/controller";
-import { useSceneStore } from "./stores/scene-store";
-import { useUIStore } from "./stores/ui-store";
+import { resolveSession, type PaneSession } from "./session/session";
 
 /**
  * Where a declared action becomes something that happened.
@@ -18,15 +23,18 @@ import { useUIStore } from "./stores/ui-store";
  * here, and a new effect kind is a compile error in this file rather than a
  * wedge that silently does nothing.
  */
-export function performEditorAction(effect: EditorActionEffect): void {
-  const ui = useUIStore.getState();
+export function performEditorAction(
+  effect: EditorActionEffect,
+  session: PaneSession = resolveSession(),
+): void {
+  const ui = session.ui.getState();
   switch (effect.kind) {
     case "scene": {
       // Whole scene rather than a patch, because the effects that use this are
       // removals and a merge patch cannot express an absence.
-      simulation.beginEdit(effect.label);
-      useSceneStore.getState().setScene(effect.scene);
-      simulation.commitEdit(undefined, { reseed: effect.reseed });
+      simulation.beginEdit(effect.label, session.id);
+      session.scene.getState().setScene(effect.scene);
+      simulation.commitEdit(undefined, { reseed: effect.reseed }, session.id);
       return;
     }
     case "arm": {
@@ -37,30 +45,30 @@ export function performEditorAction(effect: EditorActionEffect): void {
       // autoRun false for the same reason the DRAG tool passes it: a solid the
       // user asked for and has not yet moved should not start the clock under
       // them. Carrying it does, on the first move.
-      const created = simulation.addBodyAt(effect.shape, effect.point_m, { autoRun: false });
+      const created = simulation.addBodyAt(effect.shape, effect.point_m, { autoRun: false }, session.id);
       if (created && effect.carry) ui.beginCarry(created.id, created.name);
       return;
     }
     // The two placements that were modes. Both are single clicks at a point the
     // ring already carries, so neither needs the reader to say "where" twice.
     case "place-prop": {
-      simulation.addScenery(effect.prop, effect.point_m, effect.normal);
+      simulation.addScenery(effect.prop, effect.point_m, effect.normal, session.id);
       return;
     }
     case "place-inflow": {
-      const sceneStore = useSceneStore.getState();
-      simulation.beginEdit(sceneStore.scene.fluid.inflow ? "Moved the hose" : "Placed a hose");
+      const sceneStore = session.scene.getState();
+      simulation.beginEdit(sceneStore.scene.fluid.inflow ? "Moved the hose" : "Placed a hose", session.id);
       sceneStore.patchFluid({
         inflow: createInflowAt(effect.point_m, effect.normal, sceneStore.scene),
       });
       ui.select({ kind: "inflow", id: INFLOW_SELECTION_ID });
       // The nozzle is a boundary condition, so the run restarts from a defined
       // t=0 rather than continuing against a wall that changed under it.
-      simulation.commitEdit(undefined, { reseed: true });
+      simulation.commitEdit(undefined, { reseed: true }, session.id);
       return;
     }
     case "carry": {
-      const description = useSceneStore.getState().scene.rigidBodies
+      const description = session.scene.getState().scene.rigidBodies
         .find((body) => body.id === effect.bodyId);
       if (!description) return;
       ui.selectBody(description.id);
@@ -69,7 +77,7 @@ export function performEditorAction(effect: EditorActionEffect): void {
     }
     case "release": {
       if (ui.carry?.bodyId === effect.bodyId) ui.endCarry();
-      simulation.dropBody(effect.bodyId);
+      simulation.dropBody(effect.bodyId, session.id);
       return;
     }
     case "select": {
@@ -79,6 +87,23 @@ export function performEditorAction(effect: EditorActionEffect): void {
     }
     case "open-overlay": {
       ui.setSceneOverlay(effect.overlay);
+      return;
+    }
+    case "compare": {
+      // Every arm resolves against pane *A*, which is where the diff is applied
+      // and where a promoted override has to land. The ring may have been
+      // opened on either pane; the operation is about the pair.
+      const paneA = resolveSession();
+      if (effect.action === "toggle") toggleCompareMode();
+      else if (effect.action === "close") closeCompareMode();
+      else if (effect.action === "keep") keepComparePaneB(paneA);
+      else swapComparePanesInPlace(paneA);
+      return;
+    }
+    case "choose-scene": {
+      // The session this ring was composed under, so the wedge chooses a scene
+      // for the pane it was opened on rather than for pane A.
+      ui.setSceneSelectorOpen(true);
       return;
     }
     case "probe": {

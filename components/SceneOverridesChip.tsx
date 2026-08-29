@@ -1,6 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  COMPARE_ACTIVE_KEY,
+  COMPARE_KEY_PREFIX,
+  COMPARE_LINK_GROUPS,
+  COMPARE_LINK_KEY,
+  isCompareQueryKey,
+  type CompareLinkGroup,
+} from "../lib/core/compare/compare-query";
+import { closeCompareMode } from "../lib/core/compare/compare-mode";
 import { simulation } from "../lib/core/simulation/controller";
 import {
   cleanSceneLink,
@@ -10,10 +19,9 @@ import {
   type SceneOverride,
   type SceneOverrideGroup,
 } from "../lib/core/scene-overrides";
-import { useMethodStore } from "../lib/core/stores/method-store";
-import { useSceneStore } from "../lib/core/stores/scene-store";
+import type { PaneSession } from "../lib/core/session/session";
+import { useSession } from "../lib/core/session/session-context";
 import { useShellStore } from "../lib/core/stores/shell-store";
-import { useUIStore } from "../lib/core/stores/ui-store";
 import { createSceneQueryLayerCache, replaceQueryStateUrl, serializeQueryState } from "../lib/core/url-state";
 
 /**
@@ -32,6 +40,7 @@ const GROUP_LABELS: Readonly<Record<SceneOverrideGroup, string>> = {
   render: "Presentation",
   view: "Also in the link",
   link: "Startup flags",
+  compare: "B",
 };
 
 /**
@@ -43,12 +52,30 @@ const GROUP_LABELS: Readonly<Record<SceneOverrideGroup, string>> = {
  * override this clear had just removed — the flag would go and nothing else
  * would, which is the exact opposite of what the button says.
  */
-function reloadWithout(keys: readonly string[]) {
-  replaceQueryStateUrl();
+function reloadWithout(keys: readonly string[], session: PaneSession) {
+  replaceQueryStateUrl(undefined, session);
   const query = new URLSearchParams(window.location.search);
   for (const key of keys) query.delete(key);
   const search = query.toString();
   window.location.replace(`${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`);
+}
+
+/** Retire `b.*` rows: an override leaves the diff, a padlock re-locks, `b` closes. */
+function clearCompareKeys(keys: readonly string[]) {
+  const shell = useShellStore.getState();
+  if (keys.includes(COMPARE_ACTIVE_KEY)) { closeCompareMode(); return; }
+  shell.setCompare((current) => {
+    const diff = { ...current.diff };
+    const links = { ...current.links };
+    for (const key of keys) {
+      if (key === COMPARE_LINK_KEY) {
+        for (const group of COMPARE_LINK_GROUPS) links[group as CompareLinkGroup] = true;
+        continue;
+      }
+      delete diff[key.slice(COMPARE_KEY_PREFIX.length)];
+    }
+    return { ...current, diff, links };
+  });
 }
 
 function OverrideRow({ override, onClear }: { override: SceneOverride; onClear: () => void }) {
@@ -87,11 +114,13 @@ function OverrideRow({ override, onClear }: { override: SceneOverride; onClear: 
  * meaning anything.
  */
 export function SceneOverridesChip() {
-  const scene = useSceneStore((state) => state.scene);
-  const presetId = useSceneStore((state) => state.presetId);
-  const methodState = useMethodStore();
-  const uiState = useUIStore();
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
+  const presetId = session.scene((state) => state.presetId);
+  const methodState = session.method();
+  const uiState = session.ui();
   const shellView = useShellStore((state) => state.view);
+  const compare = useShellStore((state) => state.compare);
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   // The query is only canonical in the browser, and the studio's first paint is
@@ -120,18 +149,26 @@ export function SceneOverridesChip() {
     { presetId, scene },
     methodState,
     uiState,
-    { view: shellView },
+    { view: shellView, compare },
     cachedSceneLayer({ presetId, scene }),
   );
   const overrides = sceneOverridesInQuery(search, { hasPresetBaseline: sceneHasPresetBaseline(presetId) });
   const counted = countedSceneOverrides(overrides);
   if (overrides.length === 0) return null;
 
+  // The `b.*` block is not an override of this scene and is not cleared like
+  // one: it is pane B, and it is retired by editing the compare record rather
+  // than by restoring an authored value. Splitting here keeps the controller
+  // unaware that a second pane exists.
   const clear = (keys: readonly string[]) => {
-    const { reload } = simulation.clearOverrides(keys);
-    if (reload.length > 0) reloadWithout(reload);
+    const compareKeys = keys.filter(isCompareQueryKey);
+    if (compareKeys.length > 0) clearCompareKeys(compareKeys);
+    const rest = keys.filter((key) => !isCompareQueryKey(key));
+    if (rest.length === 0) return;
+    const { reload } = simulation.clearOverrides(rest, session.id);
+    if (reload.length > 0) reloadWithout(reload, session);
   };
-  const groups = (["scene", "method", "render", "link", "view"] as const)
+  const groups = (["scene", "method", "render", "link", "view", "compare"] as const)
     .map((group) => [group, overrides.filter((override) => override.group === group)] as const)
     .filter(([, rows]) => rows.length > 0);
 

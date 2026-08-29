@@ -95,9 +95,28 @@ interface BrowserLockManager {
   ): Promise<void>;
 }
 
+/**
+ * Which viewport pane a GPU session belongs to.
+ *
+ * `"a"` is the only pane in single-pane mode; compare mode adds `"b"` as a
+ * diff over it. Everything that used to be one page-wide slot — the retained
+ * viewport lifecycle, the in-page share of the WebGPU lock, a manual
+ * start/stop request — is keyed by this.
+ */
+export type PaneId = "a" | "b";
+
+export const PANE_IDS: readonly PaneId[] = ["a", "b"];
+
+export function isPaneId(value: unknown): value is PaneId {
+  return value === "a" || value === "b";
+}
+
 export type BrowserGPULeaseResult =
   | { readonly status: "acquired"; readonly release: () => void }
-  | { readonly status: "held" | "unsupported" | "error"; readonly message: string };
+  // `exhausted` is raised only by the in-page pane broker
+  // (`lib/core/session/pane-lease.ts`) when every pane lease is already out;
+  // `acquireBrowserGPULease` itself never returns it.
+  | { readonly status: "held" | "unsupported" | "error" | "exhausted"; readonly message: string };
 
 /**
  * Hold one Web Lock for the lifetime of the browser GPU device. `ifAvailable`
@@ -185,10 +204,36 @@ export function fluidExecutionDeviceFeatures(
 export const GPU_MANUAL_START_EVENT = "fluid-lab:start-gpu";
 export const GPU_MANUAL_STOP_EVENT = "fluid-lab:stop-gpu";
 
-export function requestManualGPUStart(): void {
-  if (typeof window !== "undefined") window.dispatchEvent(new Event(GPU_MANUAL_START_EVENT));
+/** An absent pane id addresses every pane, which is what page chrome wants. */
+export interface GPUManualControlDetail {
+  readonly paneId?: PaneId;
 }
 
-export function requestManualGPUStop(): void {
-  if (typeof window !== "undefined") window.dispatchEvent(new Event(GPU_MANUAL_STOP_EVENT));
+/**
+ * Address a manual start/stop at one pane, or at all of them.
+ *
+ * The argument is `unknown` because the page's START/STOP buttons pass these
+ * straight to `onClick` and would otherwise hand a pointer event to the pane
+ * selector. Anything that is not a pane id means "every pane", which is the
+ * behaviour those buttons have always had.
+ */
+function dispatchManualGPUControl(type: string, paneId: unknown): void {
+  if (typeof window === "undefined") return;
+  const detail: GPUManualControlDetail = { paneId: isPaneId(paneId) ? paneId : undefined };
+  window.dispatchEvent(new CustomEvent<GPUManualControlDetail>(type, { detail }));
+}
+
+export function requestManualGPUStart(paneId?: unknown): void {
+  dispatchManualGPUControl(GPU_MANUAL_START_EVENT, paneId);
+}
+
+export function requestManualGPUStop(paneId?: unknown): void {
+  dispatchManualGPUControl(GPU_MANUAL_STOP_EVENT, paneId);
+}
+
+/** A pane acts on a manual start/stop that names no pane, or names its own. */
+export function manualGPUControlTargetsPane(event: Event, paneId: PaneId): boolean {
+  const detail = (event as CustomEvent<GPUManualControlDetail | undefined>).detail;
+  const addressed = detail?.paneId;
+  return addressed === undefined || addressed === paneId;
 }

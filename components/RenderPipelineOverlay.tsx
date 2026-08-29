@@ -1,10 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
-import { useRuntimeStore } from "../lib/core/stores/runtime-store";
-import { useSceneStore } from "../lib/core/stores/scene-store";
-import { useUIStore } from "../lib/core/stores/ui-store";
+import { useSession } from "../lib/core/session/session-context";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import { averagePerformanceTraces, type PerformanceTrace } from "../lib/core/performance-trace";
 import { mergeRenderFrameManifests, type RenderFrameManifest } from "../lib/core/render-frame-stages";
@@ -263,7 +260,8 @@ function usePresentationTiming(): {
   /** Which stages the recorded frames encoded, and with how many passes of each kind. */
   readonly manifest?: RenderFrameManifest;
 } {
-  const reports = useDiagnosticsStore((state) => state.performanceReports);
+  const session = useSession();
+  const reports = session.diagnostics((state) => state.performanceReports);
   return useMemo(() => {
     const newest = reports.findLast((report) => report.presentation || report.presentationStages);
     if (!newest) return {};
@@ -312,40 +310,41 @@ function usePresentationTiming(): {
  * node is opened, so they stay above the graph rather than inside a node.
  */
 export function RenderPipelineOverlay() {
-  const effectiveRendererStatus = useDiagnosticsStore((state) => state.effectiveRendererStatus);
-  const svoShadowsEnabled = useUIStore((state) => state.svoShadowsEnabled);
-  const setSvoShadowsEnabled = useUIStore((state) => state.setSvoShadowsEnabled);
-  const svoAmbientOcclusionEnabled = useUIStore((state) => state.svoAmbientOcclusionEnabled);
-  const setSvoAmbientOcclusionEnabled = useUIStore((state) => state.setSvoAmbientOcclusionEnabled);
-  const silhouetteRefinementEnabled = useUIStore((state) => state.silhouetteRefinementEnabled);
-  const setSilhouetteRefinementEnabled = useUIStore((state) => state.setSilhouetteRefinementEnabled);
-  const svoConeTracingMode = useUIStore((state) => state.svoConeTracingMode);
-  const setSvoConeTracingMode = useUIStore((state) => state.setSvoConeTracingMode);
-  const svoGlobalIlluminationEnabled = useUIStore((state) => state.svoGlobalIlluminationEnabled);
-  const setSvoGlobalIlluminationEnabled = useUIStore((state) => state.setSvoGlobalIlluminationEnabled);
-  const disabledRenderStages = useUIStore((state) => state.disabledRenderStages);
-  const setRenderStageDisabled = useUIStore((state) => state.setRenderStageDisabled);
-  const svoStageView = useUIStore((state) => state.svoStageView);
-  const setSvoStageView = useUIStore((state) => state.setSvoStageView);
-  const svoStageLightSlot = useUIStore((state) => state.svoStageLightSlot);
-  const setSvoStageLightSlot = useUIStore((state) => state.setSvoStageLightSlot);
-  const svoMaximumTraversalDepth = useUIStore((state) => state.svoMaximumTraversalDepth);
-  const setSvoMaximumTraversalDepth = useUIStore((state) => state.setSvoMaximumTraversalDepth);
-  const svoMaximumNodeVisits = useUIStore((state) => state.svoMaximumNodeVisits);
-  const setSvoMaximumNodeVisits = useUIStore((state) => state.setSvoMaximumNodeVisits);
-  const tuning = useUIStore((state) => state.svoRenderTuning);
-  const setTuning = useUIStore((state) => state.setSvoRenderTuning);
+  const session = useSession();
+  const effectiveRendererStatus = session.diagnostics((state) => state.effectiveRendererStatus);
+  const svoShadowsEnabled = session.ui((state) => state.svoShadowsEnabled);
+  const setSvoShadowsEnabled = session.ui((state) => state.setSvoShadowsEnabled);
+  const svoAmbientOcclusionEnabled = session.ui((state) => state.svoAmbientOcclusionEnabled);
+  const setSvoAmbientOcclusionEnabled = session.ui((state) => state.setSvoAmbientOcclusionEnabled);
+  const silhouetteRefinementEnabled = session.ui((state) => state.silhouetteRefinementEnabled);
+  const setSilhouetteRefinementEnabled = session.ui((state) => state.setSilhouetteRefinementEnabled);
+  const svoConeTracingMode = session.ui((state) => state.svoConeTracingMode);
+  const setSvoConeTracingMode = session.ui((state) => state.setSvoConeTracingMode);
+  const svoGlobalIlluminationEnabled = session.ui((state) => state.svoGlobalIlluminationEnabled);
+  const setSvoGlobalIlluminationEnabled = session.ui((state) => state.setSvoGlobalIlluminationEnabled);
+  const disabledRenderStages = session.ui((state) => state.disabledRenderStages);
+  const setRenderStageDisabled = session.ui((state) => state.setRenderStageDisabled);
+  const svoStageView = session.ui((state) => state.svoStageView);
+  const setSvoStageView = session.ui((state) => state.setSvoStageView);
+  const svoStageLightSlot = session.ui((state) => state.svoStageLightSlot);
+  const setSvoStageLightSlot = session.ui((state) => state.setSvoStageLightSlot);
+  const svoMaximumTraversalDepth = session.ui((state) => state.svoMaximumTraversalDepth);
+  const setSvoMaximumTraversalDepth = session.ui((state) => state.setSvoMaximumTraversalDepth);
+  const svoMaximumNodeVisits = session.ui((state) => state.svoMaximumNodeVisits);
+  const setSvoMaximumNodeVisits = session.ui((state) => state.setSvoMaximumNodeVisits);
+  const tuning = session.ui((state) => state.svoRenderTuning);
+  const setTuning = session.ui((state) => state.setSvoRenderTuning);
 
   // The scene facts the build node has to state for itself: what a leaf
   // actually measures, and whether the depth is legal at all. A simulated scene
   // pins every brick's node at the solver level, so the ladder is a no-op there
   // and has to say so rather than move.
-  const finestCellSize_m = useSceneStore((state) => state.scene.voxelDomain.finestCellSize_m);
-  const sceneIsDry = useSceneStore((state) => state.scene.systems?.fluid === false);
-  const voxelDomain = useSceneStore((state) => state.scene.voxelDomain);
-  const surfaceStyle = useSceneStore((state) => state.scene.surfaceStyle);
-  const patchScene = useSceneStore((state) => state.patchScene);
-  const presetId = useSceneStore((state) => state.presetId);
+  const finestCellSize_m = session.scene((state) => state.scene.voxelDomain.finestCellSize_m);
+  const sceneIsDry = session.scene((state) => state.scene.systems?.fluid === false);
+  const voxelDomain = session.scene((state) => state.scene.voxelDomain);
+  const surfaceStyle = session.scene((state) => state.scene.surfaceStyle);
+  const patchScene = session.scene((state) => state.patchScene);
+  const presetId = session.scene((state) => state.presetId);
   const smoothSurfaceEnabled = !sceneUsesFlatVoxelNormals({ surfaceStyle });
   const authoredRefinementDepth = svoSceneryRefinementDepth(voxelDomain, { fluid: !sceneIsDry });
   // Read off the document rather than recomputed: the ladder is signed now, and
@@ -517,7 +516,7 @@ export function RenderPipelineOverlay() {
   // from a different tuning, run state or stage view priced a different
   // pipeline; the signature alone could not see that, so an off-sample taken
   // under one tuning was differenced against an on-sample taken under another.
-  const runState = useRuntimeStore((state) => state.runState);
+  const runState = session.runtime((state) => state.runState);
   const ablationContextKey = `${tuningKey}|${svoConeTracingMode}|${runState}|view=${svoStageView !== "off" ? "1" : "0"}`;
   const deltas = useStageAblation(pipelineSignature, ablationContextKey, total_ms, measured);
 
@@ -537,7 +536,7 @@ export function RenderPipelineOverlay() {
         unit="levels" value={authoredRefinementDepth}
         min={SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM} max={SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM}
         step={1} digits={0} disabled={!sceneIsDry}
-        onChange={(value) => { simulation.setEnvironmentRefinementDepth(value); }}
+        onChange={(value) => { simulation.setEnvironmentRefinementDepth(value, session.id); }}
         hint={sceneIsDry
           ? `Leaf voxel ${trimmed(leafVoxel_mm)} mm, and the set is drawn at that size — ${authoredRefinementDepth < 0
             ? `${-authoredRefinementDepth} coarser level${authoredRefinementDepth === -1 ? "" : "s"} above`

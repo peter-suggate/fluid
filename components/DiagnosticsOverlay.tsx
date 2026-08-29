@@ -5,10 +5,8 @@ import { length } from "../lib/core/math";
 import { formatGridLocation } from "../lib/core/method-diagnostics";
 import { getMethod } from "@/lib/core/method-registry";
 import { BUILD_ID } from "../lib/core/model";
-import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
-import { resolvedMethodValues, useMethodStore } from "../lib/core/stores/method-store";
-import { useRuntimeStore } from "../lib/core/stores/runtime-store";
-import { useSceneStore } from "../lib/core/stores/scene-store";
+import { useSession } from "../lib/core/session/session-context";
+import { resolvedMethodValues } from "../lib/core/stores/method-store";
 
 function telemetrySourceLabel(source?: string) {
   return ({
@@ -29,13 +27,14 @@ function telemetrySourceLabel(source?: string) {
  * Everything here is about the run rather than about one object in it.
  */
 export function DiagnosticsOverlay() {
-  const scene = useSceneStore((state) => state.scene);
-  const methodState = useMethodStore();
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
+  const methodState = session.method();
   const methodId = methodState.methodId;
   const methodValues = resolvedMethodValues(methodState);
-  const runState = useRuntimeStore((state) => state.runState);
-  const simulationTime = useRuntimeStore((state) => state.simulationTime);
-  const { bodies, rigidState, couplingState, gpuInfo, waterSurfacePresentation } = useDiagnosticsStore();
+  const runState = session.runtime((state) => state.runState);
+  const simulationTime = session.runtime((state) => state.simulationTime);
+  const { bodies, rigidState, couplingState, gpuInfo, waterSurfacePresentation } = session.diagnostics();
   const method = getMethod(methodId);
   const globalFineVolumeEstimate = gpuInfo?.volumeTelemetrySource === "global-fine";
   const authoredMassChange = Boolean(scene.fluid.inflow);

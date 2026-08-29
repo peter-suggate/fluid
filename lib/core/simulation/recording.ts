@@ -1,7 +1,7 @@
 import { BufferTarget, Mp4OutputFormat, Output, QUALITY_HIGH, VideoSample, VideoSampleSource, canEncodeVideo } from "mediabunny";
 import { SIMULATION_VIDEO_FRAME_DURATION_S, SIMULATION_VIDEO_FRAME_RATE, simulationFramesDue } from "../recording-timing";
-import { useRecordingStore, type SimulationRecordingResult } from "../stores/recording-store";
-import { useRuntimeStore } from "../stores/runtime-store";
+import { resolveSession } from "../session/session";
+import type { SimulationRecordingResult } from "../stores/recording-store";
 
 const MIME_CANDIDATES = [
   "video/webm;codecs=vp9",
@@ -12,6 +12,13 @@ const MIME_CANDIDATES = [
 /** Records the presentation canvas on a 60 Hz simulation-time timeline, with
  * a wall-clock compatibility path calibrated against simulation time. */
 class SimulationRecordingController {
+  /**
+   * The realm this recorder writes into.
+   *
+   * WP3 gives the REC wedge the pane it was opened on and this becomes a
+   * constructor argument; until then every read and write is pane A's.
+   */
+  private get session() { return resolveSession(); }
   private recorder: MediaRecorder | null = null;
   private stream: MediaStream | null = null;
   private chunks: Blob[] = [];
@@ -34,14 +41,14 @@ class SimulationRecordingController {
   }
 
   async start(simulationTime_s: number): Promise<boolean> {
-    if (this.recorder || useRecordingStore.getState().status === "processing") return false;
+    if (this.recorder || this.session.recording.getState().status === "processing") return false;
     const canvas = document.querySelector<HTMLCanvasElement>("[data-testid='gpu-viewport']");
     if (!canvas) {
       this.fail("Video capture is not supported in this browser.");
       return false;
     }
 
-    useRecordingStore.getState().set({ status: "processing", startedAtSimulation_s: null, modalOpen: false, error: null });
+    this.session.recording.getState().set({ status: "processing", startedAtSimulation_s: null, modalOpen: false, error: null });
     try {
       const width = Math.max(2, canvas.width - canvas.width % 2);
       const height = Math.max(2, canvas.height - canvas.height % 2);
@@ -79,13 +86,13 @@ class SimulationRecordingController {
     this.latestPresentedSimulation_s = simulationTime_s;
     this.nextFrameSimulation_s = simulationTime_s + SIMULATION_VIDEO_FRAME_DURATION_S;
     this.enqueueSimulationFrame(canvas);
-    useRecordingStore.getState().set({
+    this.session.recording.getState().set({
       status: "recording",
       startedAtSimulation_s: simulationTime_s,
       modalOpen: false,
       error: null
     });
-    useRuntimeStore.getState().setNotice("Capturing fine states at 60 frames per simulated second");
+    this.session.runtime.getState().setNotice("Capturing fine states at 60 frames per simulated second");
   }
 
   private enqueueSimulationFrame(canvas: HTMLCanvasElement) {
@@ -138,7 +145,7 @@ class SimulationRecordingController {
         if (event.data.size > 0) this.chunks.push(event.data);
       };
       this.recorder.onerror = () => this.fail("The browser stopped the video capture unexpectedly.");
-      this.unsubscribeRuntime = useRuntimeStore.subscribe((state, previous) => {
+      this.unsubscribeRuntime = this.session.runtime.subscribe((state, previous) => {
         if (state.runState === previous.runState || !this.recorder) return;
         if (state.runState === "paused" && this.recorder.state === "recording") {
           this.finishActiveSegment();
@@ -149,13 +156,13 @@ class SimulationRecordingController {
         }
       });
       this.recorder.start(1000);
-      useRecordingStore.getState().set({
+      this.session.recording.getState().set({
         status: "recording",
         startedAtSimulation_s: simulationTime_s,
         modalOpen: false,
         error: null
       });
-      useRuntimeStore.getState().setNotice("Recording viewport · timing will be calibrated to simulation time");
+      this.session.runtime.getState().setNotice("Recording viewport · timing will be calibrated to simulation time");
       return true;
     } catch (error) {
       this.fail(error instanceof Error ? error.message : "Unable to start video capture.");
@@ -177,7 +184,7 @@ class SimulationRecordingController {
     const simulationStart_s = this.startedAtSimulation_s;
     const simulationEnd_s = Math.max(simulationStart_s, simulationTime_s);
     const simulationDuration_s = simulationEnd_s - simulationStart_s;
-    useRecordingStore.getState().set({ status: "processing", startedAtSimulation_s: null, error: null });
+    this.session.recording.getState().set({ status: "processing", startedAtSimulation_s: null, error: null });
 
     recorder.onstop = () => {
       const mimeType = recorder.mimeType || this.chunks[0]?.type || "video/webm";
@@ -187,7 +194,7 @@ class SimulationRecordingController {
         this.fail(simulationDuration_s <= 0 ? "Record at least one simulation step before stopping." : "No video frames were captured.");
         return;
       }
-      const previous = useRecordingStore.getState().recording;
+      const previous = this.session.recording.getState().recording;
       if (previous) URL.revokeObjectURL(previous.url);
       const recording: SimulationRecordingResult = {
         url: URL.createObjectURL(blob),
@@ -203,8 +210,8 @@ class SimulationRecordingController {
         fileExtension: "webm",
         createdAt: Date.now()
       };
-      useRecordingStore.getState().set({ status: "ready", recording, modalOpen: true, error: null });
-      useRuntimeStore.getState().setNotice(`Captured ${simulationDuration_s.toFixed(2)} s of simulation · ready for real-time playback`);
+      this.session.recording.getState().set({ status: "ready", recording, modalOpen: true, error: null });
+      this.session.runtime.getState().setNotice(`Captured ${simulationDuration_s.toFixed(2)} s of simulation · ready for real-time playback`);
     };
     recorder.stop();
   }
@@ -213,7 +220,7 @@ class SimulationRecordingController {
     const output = this.frameOutput;
     const source = this.frameSource;
     if (!output || !source) return;
-    useRecordingStore.getState().set({ status: "processing", startedAtSimulation_s: null, error: null });
+    this.session.recording.getState().set({ status: "processing", startedAtSimulation_s: null, error: null });
     try {
       await this.frameQueue;
       if (this.frameError) throw this.frameError;
@@ -242,11 +249,11 @@ class SimulationRecordingController {
         createdAt: Date.now()
       };
       recording.url = URL.createObjectURL(recording.blob);
-      const previous = useRecordingStore.getState().recording;
+      const previous = this.session.recording.getState().recording;
       if (previous) URL.revokeObjectURL(previous.url);
       await this.releaseFrameCapture(false);
-      useRecordingStore.getState().set({ status: "ready", recording, modalOpen: true, error: null });
-      useRuntimeStore.getState().setNotice(`Encoded ${recording.frameCount} frames · 1 video second per simulated second`);
+      this.session.recording.getState().set({ status: "ready", recording, modalOpen: true, error: null });
+      this.session.runtime.getState().setNotice(`Encoded ${recording.frameCount} frames · 1 video second per simulated second`);
     } catch (error) {
       await this.releaseFrameCapture(true);
       this.fail(error instanceof Error ? error.message : "Unable to encode the 60 fps simulation video.");
@@ -254,15 +261,15 @@ class SimulationRecordingController {
   }
 
   open(): void {
-    if (useRecordingStore.getState().recording) useRecordingStore.getState().set({ modalOpen: true });
+    if (this.session.recording.getState().recording) this.session.recording.getState().set({ modalOpen: true });
   }
 
   close(): void {
-    useRecordingStore.getState().set({ modalOpen: false });
+    this.session.recording.getState().set({ modalOpen: false });
   }
 
   download(): void {
-    const recording = useRecordingStore.getState().recording;
+    const recording = this.session.recording.getState().recording;
     if (!recording) return;
     const link = document.createElement("a");
     link.href = recording.url;
@@ -305,8 +312,8 @@ class SimulationRecordingController {
     }
     this.releaseRecorder();
     void this.releaseFrameCapture(true);
-    useRecordingStore.getState().set({ status: "error", startedAtSimulation_s: null, error: message });
-    useRuntimeStore.getState().setNotice(message, "warn");
+    this.session.recording.getState().set({ status: "error", startedAtSimulation_s: null, error: message });
+    this.session.runtime.getState().setNotice(message, "warn");
   }
 }
 

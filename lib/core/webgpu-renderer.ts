@@ -418,6 +418,18 @@ export interface SimulationRunConfig {
   values: MethodParamValues;
   /** Controller-owned identity for a fresh t=0 simulation. */
   simulationEpoch?: number;
+  /**
+   * How many advances this pane's transport may hold at once.
+   *
+   * The host owns it, because it is a property of the *clock* rather than of
+   * the solver: compare mode pins the window to one advance so neither pane
+   * can drift a frame ahead of the other inside the barrier's own tolerance.
+   * Deliberately absent from every construction key — `structuralMethodValues`
+   * reads `values`, and the structural, seed and solver keys are built from
+   * `methodId`, `quality`, those values and the document — so entering or
+   * leaving lockstep changes throughput and never rebuilds a solver.
+   */
+  inFlightDepth?: number;
 }
 
 export function structuralMethodValues(config: SimulationRunConfig): MethodParamValues {
@@ -2397,7 +2409,26 @@ export class FluidLabRenderer {
     if (stampedRevision === undefined
       ? sceneKey === this.renderSceneKey
       : stampedRevision === this.renderSceneStamp) return;
-    solver?.stageSceneUpdate?.(scene);
+    // Staging is the *live-edit* seam: it folds an authored change into the
+    // world already resident. A scene the reader chose for this pane is not
+    // that. The whole document changed, `currentGPUFluid` ran earlier this
+    // frame and is already rebuilding the solver for it, and the world
+    // attached right now was voxelized for the previous document — so its
+    // planar terminals refuse, correctly. Waiting is what the rebuild is for:
+    // the new world publishes this scene as its initial publication, and until
+    // it lands the previous frame's image stands. Releasing the device instead
+    // would end a scene change that is going perfectly well.
+    //
+    // Only while a rebuild is actually in flight. A live edit refused with no
+    // replacement coming is still a fault, and still travels.
+    if (solver?.stageSceneUpdate) {
+      try {
+        solver.stageSceneUpdate(scene);
+      } catch (error) {
+        if (this.gpuFluidPendingKey) return;
+        throw error;
+      }
+    }
     const source = solver?.sparseVoxelSceneSource ?? this.svoDrySceneSource;
     if (!source) {
       this.svoSourceAvailable = false;
@@ -2934,7 +2965,7 @@ export class FluidLabRenderer {
       this.svoDryScenePipeline?.clearPixelTraceRequest();
       if (this.latestPixelTraceValue) { this.latestPixelTraceValue = undefined; this.pixelTraceRevisionValue += 1; }
     }
-    if (this.presentationsInFlight >= BROWSER_GPU_THROUGHPUT_DEPTH) {
+    if (this.presentationsInFlight >= (config.inFlightDepth ?? BROWSER_GPU_THROUGHPUT_DEPTH)) {
       // The next draw uses the newest camera and solver state. Do not append a
       // stale presentation to a saturated FIFO: double buffering is sufficient
       // to keep execution dense without turning throughput into input latency.
@@ -2944,7 +2975,7 @@ export class FluidLabRenderer {
     if (readyGPUFluid) {
       gpuInfo = this.submitPreparedGPUFluid(
         readyGPUFluid, time_s, bodies,
-        this.simulationRunning ? BROWSER_GPU_THROUGHPUT_DEPTH : 1,
+        this.simulationRunning ? config.inFlightDepth ?? BROWSER_GPU_THROUGHPUT_DEPTH : 1,
         getMethod(config.methodId).resource,
       );
     }

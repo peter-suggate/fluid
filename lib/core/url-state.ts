@@ -8,8 +8,14 @@ import { isSparseCM12DirtyOverlayMode } from "./sparse-cm12-dirty-visualizations
 import { isPressureJournalOverlayMode } from "./webgpu-pressure-journal-overlay";
 import { cameraForPreset, defaultScenePresetId, findSceneDefinition, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
-import { useMethodStore } from "./stores/method-store";
-import { useSceneStore } from "./stores/scene-store";
+import { resolveSession, type PaneSession } from "./session/session";
+import {
+  compareQueryEntries,
+  INITIAL_COMPARE_STATE,
+  isCompareQueryKey,
+  parseCompareQuery,
+  type CompareState,
+} from "./compare/compare-query";
 import { useShellStore, type ShellView } from "./stores/shell-store";
 import { useUIStore, type SceneOverlay } from "./stores/ui-store";
 import {
@@ -73,7 +79,7 @@ const sceneQueryPaths = [
   "rigidBodies"
 ] as const;
 
-type QueryState = {
+export type QueryState = {
   methodId: string;
   quality: GPUQuality;
   overrides: Record<string, MethodParamValues>;
@@ -83,7 +89,7 @@ type QueryState = {
   ui: UIQueryState;
 };
 
-type UIQueryState = {
+export type UIQueryState = {
   camera: CameraState;
   /**
    * The instrument drawn over the scene, or `null` for a bare view.
@@ -119,9 +125,16 @@ type UIQueryState = {
   svoRenderTuning: SvoRenderTuning;
 };
 
-type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
-type SerializableSceneState = Pick<QueryState, "presetId" | "scene">;
-type SerializableShellState = Pick<QueryState, "view">;
+export type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
+export type SerializableSceneState = Pick<QueryState, "presetId" | "scene">;
+/**
+ * The page-level half of the address: which shell layer is in front, and pane
+ * B's diff. Both are properties of the page rather than of a pane, which is
+ * why they arrive from `shell-store` rather than from a session.
+ */
+type SerializableShellState = Pick<QueryState, "view"> & {
+  readonly compare?: CompareState;
+};
 type SerializableUIState = UIQueryState;
 
 export interface ShellSessionState {
@@ -461,11 +474,16 @@ function migrateLegacyOctreeMethodQuery(query: URLSearchParams): void {
   }
 }
 
-/** Parse external URL input into a complete, validated store snapshot. */
-export function parseQueryState(search: string): QueryState {
-  const query = new URLSearchParams(search);
-  migrateLegacyOctreeMethodQuery(query);
-  const preset = exactPreset(query.get("scene")) ?? getScenePreset(defaultScenePresetId);
+/**
+ * The solver layer of a query, on its own.
+ *
+ * Split out for the compare mirror, which has to push pane A's method onto
+ * pane B without rebuilding pane B's document: `parseQueryState` runs the
+ * preset factory, and the hero pond bakes a 289 x 193 heightfield to produce
+ * one. Reading the halves separately is what keeps a solver swap in pane B
+ * from costing a scene rebuild in pane A.
+ */
+function methodQueryState(query: URLSearchParams, preset: ScenePreset): SerializableMethodState {
   // Profiles preserve comparison settings for their named method, but method
   // selection itself has one product-wide default. A bare scene URL must not
   // silently switch back to an adaptive solver merely because the card stores
@@ -492,6 +510,34 @@ export function parseQueryState(search: string): QueryState {
       overrides[method.id] = { ...overrides[method.id], ...values };
     }
   }
+  return { methodId, quality, overrides };
+}
+
+/** The solver layer of an external query string. See `methodQueryState`. */
+export function parseMethodQueryState(search: string): SerializableMethodState {
+  const query = new URLSearchParams(search);
+  migrateLegacyOctreeMethodQuery(query);
+  return methodQueryState(query, exactPreset(query.get("scene")) ?? getScenePreset(defaultScenePresetId));
+}
+
+/**
+ * The view layer of an external query string.
+ *
+ * The preset is named rather than derived, so the compare mirror can read pane
+ * A's camera keys against the preset pane *B* is actually holding — the two
+ * differ exactly when the diff has forked the scene, which is the case where
+ * falling back to a preset camera has to fall back to the right one.
+ */
+export function parseUIQueryState(search: string, presetId: string): UIQueryState {
+  return uiQueryState(new URLSearchParams(search), getScenePreset(presetId));
+}
+
+/** Parse external URL input into a complete, validated store snapshot. */
+export function parseQueryState(search: string): QueryState {
+  const query = new URLSearchParams(search);
+  migrateLegacyOctreeMethodQuery(query);
+  const preset = exactPreset(query.get("scene")) ?? getScenePreset(defaultScenePresetId);
+  const { methodId, quality, overrides } = methodQueryState(query, preset);
 
   /**
    * The lattice comes back through the factory, not as a patched number.
@@ -589,10 +635,6 @@ export function parseQueryState(search: string): QueryState {
   const scene = rimQuery === null
     ? withStones
     : withSceneRimQuery(withStones, rimQuery);
-  const initialUI = useUIStore.getInitialState();
-  const presetCamera = cameraForPreset(preset);
-  const grid = query.get("grid");
-  const gridMode = query.get("gridMode");
 
   return {
     methodId,
@@ -601,60 +643,75 @@ export function parseQueryState(search: string): QueryState {
     presetId: preset.id,
     scene: validateScene(scene).length === 0 ? scene : baseScene,
     view: shellViewFromQuery(search),
-    ui: {
-      camera: {
-        azimuth_rad: numberParam(query, "camera.azimuth", presetCamera.azimuth_rad),
-        elevation_rad: numberParam(query, "camera.elevation", presetCamera.elevation_rad, -1.45, 1.45),
-        distance_m: numberParam(query, "camera.distance", presetCamera.distance_m, 0.65, 12),
-        // Carried from the preset rather than the query: the aperture is the
-        // scene's lens, not a view the user orbited to, so it has no URL key to
-        // restore from and must not be dropped while rebuilding the rest.
-        tanHalfFov: presetCamera.tanHalfFov,
-        target_m: {
-          x: numberParam(query, "camera.targetX", presetCamera.target_m.x),
-          y: numberParam(query, "camera.targetY", presetCamera.target_m.y),
-          z: numberParam(query, "camera.targetZ", presetCamera.target_m.z)
-        }
-      },
-      sceneOverlay: parseSceneOverlay(query.get(OVERLAY_QUERY_KEY)),
-      gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" || grid === "volume" ? grid : initialUI.gridOverlayAxis,
-      gridOverlaySlice: grid === "volume"
-        ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
-        : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
-      gridOverlayMode: parseGridOverlayMode(gridMode, initialUI.gridOverlayMode),
-      // Only the lens knows how many phases it has, so the ceiling is the
-      // overlay's to enforce; a link can only be stopped from naming a
-      // fractional or negative one.
-      gridOverlayLensPhase: Math.max(0,
-        Math.floor(numberParam(query, "lensPhase", initialUI.gridOverlayLensPhase, 0))),
-      svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
-      svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
-      silhouetteRefinementEnabled: query.get("svoPrimarySeamClosure") === "1",
-      svoConeTracingMode: query.get("svoCones") === "exact" || query.get("svoCones") === "off"
-        ? query.get("svoCones") as SvoConeTracingMode
-        : DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
-      svoPrimaryTraversal: query.get("svoPrimary") === "traced" || query.get("svoPrimary") === "raster"
-        ? query.get("svoPrimary") as SvoPrimaryTraversalMode
-        : DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal,
-      svoStageView: SVO_RENDER_STAGE_VIEWS.includes(query.get("svoStage") as SvoRenderStageView)
-        ? query.get("svoStage") as SvoRenderStageView
-        : DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView,
-      // Normalized rather than trusted: these are the tuning fields a link can
-      // carry, and the numbers are clamped by the same function the store
-      // applies, so an out-of-range external value lands on the ceiling instead
-      // of reaching the octree as an unbounded depth request.
-      svoRenderTuning: normalizeSvoRenderTuning({
-        ...DEFAULT_SVO_RENDER_TUNING,
-        // The refinement depth is deliberately absent. It is not a tuning value
-        // any more — it is `scene.voxelDomain.detailCellSize_m`, which
-        // `sceneQueryPaths` already round-trips as `scene.voxelDomain`. A second
-        // copy in the query is a second thing that can disagree, which is the
-        // failure this collapse removes.
-        environmentPlanarRefinementExemption: query.get("svoFlatExempt") === "1",
-        lodScreenSpacePixels: numberParam(query, "svoLodPixels",
-          initialUI.svoRenderTuning.lodScreenSpacePixels, 0, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM),
-      }),
-    }
+    ui: uiQueryState(query, preset),
+  };
+}
+
+/**
+ * Everything a link says about how the scene is *looked at*, as opposed to what
+ * it is. Reads no document, so the compare mirror can push a camera orbit or a
+ * slice change across the seam at pointer rate.
+ */
+function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState {
+  // Session-invariant: every UI store instance is built by the same factory,
+  // so this is the authored default rather than any pane's live state.
+  const initialUI = useUIStore.getInitialState();
+  const presetCamera = cameraForPreset(preset);
+  const grid = query.get("grid");
+  const gridMode = query.get("gridMode");
+  return {
+    camera: {
+      azimuth_rad: numberParam(query, "camera.azimuth", presetCamera.azimuth_rad),
+      elevation_rad: numberParam(query, "camera.elevation", presetCamera.elevation_rad, -1.45, 1.45),
+      distance_m: numberParam(query, "camera.distance", presetCamera.distance_m, 0.65, 12),
+      // Carried from the preset rather than the query: the aperture is the
+      // scene's lens, not a view the user orbited to, so it has no URL key to
+      // restore from and must not be dropped while rebuilding the rest.
+      tanHalfFov: presetCamera.tanHalfFov,
+      target_m: {
+        x: numberParam(query, "camera.targetX", presetCamera.target_m.x),
+        y: numberParam(query, "camera.targetY", presetCamera.target_m.y),
+        z: numberParam(query, "camera.targetZ", presetCamera.target_m.z)
+      }
+    },
+    sceneOverlay: parseSceneOverlay(query.get(OVERLAY_QUERY_KEY)),
+    gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" || grid === "volume" ? grid : initialUI.gridOverlayAxis,
+    gridOverlaySlice: grid === "volume"
+      ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
+      : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
+    gridOverlayMode: parseGridOverlayMode(gridMode, initialUI.gridOverlayMode),
+    // Only the lens knows how many phases it has, so the ceiling is the
+    // overlay's to enforce; a link can only be stopped from naming a
+    // fractional or negative one.
+    gridOverlayLensPhase: Math.max(0,
+      Math.floor(numberParam(query, "lensPhase", initialUI.gridOverlayLensPhase, 0))),
+    svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
+    svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
+    silhouetteRefinementEnabled: query.get("svoPrimarySeamClosure") === "1",
+    svoConeTracingMode: query.get("svoCones") === "exact" || query.get("svoCones") === "off"
+      ? query.get("svoCones") as SvoConeTracingMode
+      : DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
+    svoPrimaryTraversal: query.get("svoPrimary") === "traced" || query.get("svoPrimary") === "raster"
+      ? query.get("svoPrimary") as SvoPrimaryTraversalMode
+      : DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal,
+    svoStageView: SVO_RENDER_STAGE_VIEWS.includes(query.get("svoStage") as SvoRenderStageView)
+      ? query.get("svoStage") as SvoRenderStageView
+      : DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView,
+    // Normalized rather than trusted: these are the tuning fields a link can
+    // carry, and the numbers are clamped by the same function the store
+    // applies, so an out-of-range external value lands on the ceiling instead
+    // of reaching the octree as an unbounded depth request.
+    svoRenderTuning: normalizeSvoRenderTuning({
+      ...DEFAULT_SVO_RENDER_TUNING,
+      // The refinement depth is deliberately absent. It is not a tuning value
+      // any more — it is `scene.voxelDomain.detailCellSize_m`, which
+      // `sceneQueryPaths` already round-trips as `scene.voxelDomain`. A second
+      // copy in the query is a second thing that can disagree, which is the
+      // failure this collapse removes.
+      environmentPlanarRefinementExemption: query.get("svoFlatExempt") === "1",
+    lodScreenSpacePixels: numberParam(query, "svoLodPixels",
+      initialUI.svoRenderTuning.lodScreenSpacePixels, 0, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM),
+    }),
   };
 }
 
@@ -671,6 +728,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth" || key === OVERLAY_QUERY_KEY
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode" || key === "lensPhase"
+    || isCompareQueryKey(key)
     || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === SEEDS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
@@ -679,6 +737,7 @@ export function serializeQueryState(
   search: string,
   sceneState: SerializableSceneState,
   methodState: SerializableMethodState,
+  // As above: the authored default, not pane A's state.
   uiState: SerializableUIState = useUIStore.getInitialState(),
   shellState: SerializableShellState = { view: "studio" },
   preparedSceneEntries?: readonly SceneQueryEntry[],
@@ -759,7 +818,29 @@ export function serializeQueryState(
       }
     }
   }
+  // Pane B last, and as a diff over everything above it: the address reads as
+  // one scene plus the handful of keys the second pane disagrees about, which
+  // is exactly what compare mode *is*. See `compare/compare-query.ts`.
+  for (const [key, value] of compareQueryEntries(shellState.compare)) query.set(key, value);
   return query.toString();
+}
+
+/**
+ * Write a whole query onto one pane's stores.
+ *
+ * The same three writes `startQueryStateSync` performs on hydration, reachable
+ * from outside it because the compare mirror needs them for pane B, which has
+ * no address of its own — B's address *is* pane A's plus the diff.
+ */
+export function applyQueryStateToSession(session: PaneSession, search: string): void {
+  const state = parseQueryState(search);
+  session.method.setState({
+    methodId: interactiveMethodId(state.methodId),
+    quality: state.quality,
+    overrides: state.overrides,
+  });
+  session.scene.getState().setScene(state.scene, state.presetId);
+  session.ui.setState(state.ui);
 }
 
 /**
@@ -771,22 +852,29 @@ export function serializeQueryState(
  * on screen, and a back button that stepped through every panel toggle and
  * library visit would never reach the page the reader actually arrived from.
  */
-export function replaceQueryStateUrl(preparedSceneEntries?: readonly SceneQueryEntry[]) {
-  const search = serializeQueryState(window.location.search, useSceneStore.getState(), useMethodStore.getState(), useUIStore.getState(), useShellStore.getState(), preparedSceneEntries);
+export function replaceQueryStateUrl(
+  preparedSceneEntries?: readonly SceneQueryEntry[],
+  // WP3: the one writer serializes pane A from this session and pane B as a
+  // `b.*` diff beside it. Today there is one pane and it is A.
+  session: PaneSession = resolveSession(),
+) {
+  const search = serializeQueryState(window.location.search, session.scene.getState(), session.method.getState(), session.ui.getState(), useShellStore.getState(), preparedSceneEntries);
   const next = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next !== current) window.history.replaceState(window.history.state, "", next);
 }
 
 /** The canonical location for the document currently held by the stores. */
-export function currentScenePageUrl(): string {
-  const search = serializeQueryState(window.location.search, useSceneStore.getState(), useMethodStore.getState(), useUIStore.getState(), { view: "studio" });
+export function currentScenePageUrl(session: PaneSession = resolveSession()): string {
+  const search = serializeQueryState(window.location.search, session.scene.getState(), session.method.getState(), session.ui.getState(), { view: "studio" });
   return `/scene${search ? `?${search}` : ""}`;
 }
 
 export interface QueryStateSyncOptions {
   /** False when a client navigation or Fast Refresh already retained the document stores. */
   readonly hydrateFromUrl?: boolean;
+  /** The realm the address describes. Defaults to pane A. */
+  readonly session?: PaneSession;
 }
 
 /**
@@ -796,6 +884,7 @@ export interface QueryStateSyncOptions {
  * coherent store snapshot.
  */
 export function startQueryStateSync(onHydrated: (presetId: string) => void, options: QueryStateSyncOptions = {}) {
+  const session = options.session ?? resolveSession();
   let active = true;
   let queued = false;
   let applyingUrl = false;
@@ -807,7 +896,7 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
     // URL belongs to the library and must neither mirror nor hydrate the hidden
     // studio until navigation returns to /scene.
     if (!active || applyingUrl || !scenePageActive()) return;
-    replaceQueryStateUrl(cachedSceneLayer(useSceneStore.getState()));
+    replaceQueryStateUrl(cachedSceneLayer(session.scene.getState()), session);
   };
 
   const scheduleWrite = () => {
@@ -822,16 +911,23 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
     const state = parseQueryState(search);
     const shellState = useShellStore.getState();
     const restoredShell = shellSessionFromQuery(search, shellState);
+    // The `b.*` block restores both panes: a compare link is one address, and
+    // reloading it has to bring back the second pane and the diff it carried,
+    // not just pane A with a stray flag.
+    const restoredCompare = parseCompareQuery(search);
     useShellStore.setState({
       view: restoredShell.view,
       studioEntered: restoredShell.studioEntered,
+      compare: restoredCompare.active
+        ? { ...restoredCompare, focusedPane: shellState.compare.focusedPane }
+        : INITIAL_COMPARE_STATE,
       ...(restoredShell.view === "studio" ? { librarySearch: "" } : {}),
     });
     // Offline comparison methods remain parseable and serializable, while the
     // interactive application admits only the choices exposed by its picker.
-    useMethodStore.setState({ methodId: interactiveMethodId(state.methodId), quality: state.quality, overrides: state.overrides });
-    useSceneStore.getState().setScene(state.scene, state.presetId);
-    useUIStore.setState(state.ui);
+    session.method.setState({ methodId: interactiveMethodId(state.methodId), quality: state.quality, overrides: state.overrides });
+    session.scene.getState().setScene(state.scene, state.presetId);
+    session.ui.setState(state.ui);
     applyingUrl = false;
     onHydrated(state.presetId);
     writeUrl();
@@ -839,13 +935,15 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
 
   if (options.hydrateFromUrl === false) writeUrl();
   else hydrate();
-  const stopMethod = useMethodStore.subscribe(scheduleWrite);
-  const stopScene = useSceneStore.subscribe(scheduleWrite);
-  const stopUI = useUIStore.subscribe(scheduleWrite);
+  const stopMethod = session.method.subscribe(scheduleWrite);
+  const stopScene = session.scene.subscribe(scheduleWrite);
+  const stopUI = session.ui.subscribe(scheduleWrite);
   // Search text and section disclosure are intentionally session-only; only
   // the layer in front belongs in the address bar.
   const stopShell = useShellStore.subscribe((shell, previous) => {
-    if (shell.view !== previous.view) scheduleWrite();
+    // The compare record is in the address for the same reason the view is: it
+    // says which page this is, and a reload has to land on the same one.
+    if (shell.view !== previous.view || shell.compare !== previous.compare) scheduleWrite();
   });
   const hydrateScenePage = () => { if (scenePageActive()) hydrate(); };
   window.addEventListener("popstate", hydrateScenePage);

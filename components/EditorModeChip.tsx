@@ -1,8 +1,7 @@
 "use client";
 
 import { getEditorGesture } from "../lib/core/editor-gesture-catalog";
-import { useSceneStore } from "../lib/core/stores/scene-store";
-import { useUIStore } from "../lib/core/stores/ui-store";
+import { useSession } from "../lib/core/session/session-context";
 
 /**
  * What the next drag will do, and how to stop doing it.
@@ -25,13 +24,14 @@ import { useUIStore } from "../lib/core/stores/ui-store";
  * report, and with no mode armed and nothing in hand there is no state.
  */
 export function EditorModeChip() {
-  const armedGesture = useUIStore((state) => state.armedGesture);
-  const setArmedGesture = useUIStore((state) => state.setArmedGesture);
-  const carry = useUIStore((state) => state.carry);
+  const session = useSession();
+  const armedGesture = session.ui((state) => state.armedGesture);
+  const setArmedGesture = session.ui((state) => state.setArmedGesture);
+  const carry = session.ui((state) => state.carry);
   // A carry started by a selection carries no name — the UI store must not read
   // the document to get one — so the chip resolves it here, where the document
   // is already a legitimate dependency.
-  const carriedName = useSceneStore((state) =>
+  const carriedName = session.scene((state) =>
     state.scene.rigidBodies.find((body) => body.id === carry?.bodyId)?.name);
   const gesture = armedGesture ? getEditorGesture(armedGesture) : undefined;
   if (!carry && !gesture) return null;

@@ -6,7 +6,9 @@ import {
   Beaker,
   Box,
   Brush,
+  Check,
   Circle,
+  Columns2,
   Crosshair,
   Cylinder,
   Droplet,
@@ -14,7 +16,9 @@ import {
   Eraser,
   Gauge,
   Hand,
+  Library,
   Pill,
+  PanelLeftClose,
   ScanSearch,
   Shapes,
   SlidersHorizontal,
@@ -22,6 +26,7 @@ import {
   Square,
   SquareDashed,
   Trash2,
+  ArrowLeftRight,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
@@ -65,6 +70,13 @@ const ICONS = {
   // a framed magnifier for the one that reads the cell behind it.
   "trace-ray": Crosshair,
   "inspect-cell": ScanSearch,
+  // The shelf a scene comes off, for the wedge that raises the chooser.
+  scene: Library,
+  // The mode itself is two panes; its three verbs are what happens to them.
+  compare: Columns2,
+  "compare-close": PanelLeftClose,
+  "compare-keep": Check,
+  "compare-swap": ArrowLeftRight,
 } satisfies Record<EditorActionIconName, LucideIcon>;
 
 /**

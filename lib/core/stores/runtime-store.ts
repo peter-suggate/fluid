@@ -28,7 +28,7 @@ interface RuntimeStore {
   setSimRate: (simRate: number | null) => void;
 }
 
-export const useRuntimeStore = create<RuntimeStore>((set) => ({
+export const createRuntimeStore = () => create<RuntimeStore>((set) => ({
   runState: "running",
   simulationTime: 0,
   simulationEpoch: 0,
@@ -42,3 +42,14 @@ export const useRuntimeStore = create<RuntimeStore>((set) => ({
   setNotice: (notice, tone = "info") => set((state) => ({ notice, noticeTone: tone, noticeSaid: state.noticeSaid + 1 })),
   setSimRate: (simRate) => set({ simRate })
 }));
+
+export type RuntimeStoreHook = ReturnType<typeof createRuntimeStore>;
+
+/**
+ * The default (pane A) instance.
+ *
+ * Per-pane instances come from `createPaneSession`; this one is what a tree
+ * with no `SessionProvider` mounted reads, and what non-React callers that
+ * have not yet been threaded a session resolve to.
+ */
+export const useRuntimeStore = createRuntimeStore();

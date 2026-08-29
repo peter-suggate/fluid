@@ -25,12 +25,12 @@ import {
   summarizeBlastRadius,
 } from "../lib/core/fluid-blast-radius";
 import { getMethod } from "@/lib/core/method-registry";
-import { canonicalScene, type CameraState } from "../lib/core/model";
+import { canonicalScene, type CameraState, type RunState } from "../lib/core/model";
 import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "../lib/core/math";
 import { boundingRadius, createBodyDescription, type RigidBodyState } from "../lib/core/rigid-body";
 import type { RigidBodyDescription } from "../lib/core/model";
 import { resourceInteractionGates } from "../lib/core/resource-readiness";
-import { simulation } from "../lib/core/simulation/controller";
+import { PRIMARY_PANE_ID, simulation } from "../lib/core/simulation/controller";
 import { simulationRecording } from "../lib/core/simulation/recording";
 import { cameraTanHalfFov, projectToViewport, viewportRayForPointer } from "../lib/core/webgpu-camera";
 import {
@@ -118,13 +118,12 @@ import {
 import { ContainerToolstrip, EntityToolstrip } from "./SceneToolstrip";
 import { SceneInstrumentTags } from "./PipelineOverlay";
 import { ViewportModeToggle } from "./ViewportModeToggle";
-import { useSceneStore } from "../lib/core/stores/scene-store";
-import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore, type SceneDraftSubject } from "../lib/core/stores/scene-draft-store";
-import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
-import { drawnBodies, mergeDrawnPoses, useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import { applySceneDraft, displaySceneSnapshot, useDisplayScene, type SceneDraftSubject } from "../lib/core/stores/scene-draft-store";
+import { resolvedMethodValues } from "../lib/core/stores/method-store";
+import { drawnBodies, mergeDrawnPoses } from "../lib/core/stores/diagnostics-store";
 import { samePublishedBodyPoses, type GPURigidBodyPose } from "../lib/core/webgpu-rigid-body";
-import { useUIStore } from "../lib/core/stores/ui-store";
-import { useRuntimeStore } from "../lib/core/stores/runtime-store";
+import type { UIStoreHook } from "../lib/core/stores/ui-store";
+import { useSession } from "../lib/core/session/session-context";
 import { SmoothedFrameRate } from "../lib/core/frame-rate-meter";
 import { getScenePreset } from "../lib/core/scenes";
 import {
@@ -135,15 +134,17 @@ import {
 import { projectViewportFailure, viewportFailureIndicator } from "../lib/core/viewport-failure-diagnostics";
 import { dawnReproductionForGPUFailure } from "../lib/core/webgpu-failure-reproduction";
 import {
-  acquireBrowserGPULease,
   GPU_MANUAL_START_EVENT,
   GPU_MANUAL_STOP_EVENT,
+  manualGPUControlTargetsPane,
   resolveGPUStartupMode,
   safeBrowserGPUBringupEnabled,
   safeBrowserGPUBringupViolations,
   safeBrowserSimulationEpochChanged,
   shutdownBrowserGPUSession,
+  type PaneId,
 } from "../lib/core/gpu-startup";
+import { acquirePaneGPULease, type PaneLeaseResult } from "../lib/core/session/pane-lease";
 
 type Vec3 = RigidBodyState["position_m"];
 
@@ -166,24 +167,49 @@ interface GPUViewportLifecycle {
   readonly cleanupImmediately: () => void;
 }
 
+/**
+ * The UI state a draw reads, named rather than derived from a store
+ * singleton: the shape is the same in every pane, and this declaration sits
+ * above the component, where no session is in scope.
+ */
+type UIViewState = ReturnType<UIStoreHook["getState"]>;
+
 interface GPUViewportRenderBinding {
   readonly publishFrameRate: (fps: number | undefined) => void;
   readonly pixelTraceDrawConfig: (
-    ui: ReturnType<typeof useUIStore.getState>,
+    ui: UIViewState,
     renderer: FluidLabRendererHandle,
   ) => PixelTraceConfig | undefined;
   readonly publishPixelTrace: (renderer: FluidLabRendererHandle) => void;
   readonly fluidCellTraceDrawConfig: (
-    ui: ReturnType<typeof useUIStore.getState>,
+    ui: UIViewState,
   ) => FluidCellTraceConfig | undefined;
   readonly publishFluidCellTrace: (renderer: FluidLabRendererHandle) => void;
   readonly publishBodyPoses: (renderer: FluidLabRendererHandle) => void;
 }
 
 type GPUViewportWindow = Window & {
-  /** Survives Vinext RSC program reloads, which can replace the React ref. */
-  __fluidLabGPUViewportLifecycle?: GPUViewportLifecycle;
+  /**
+   * Survives Vinext RSC program reloads, which can replace the React ref.
+   *
+   * Keyed by pane, because compare mode mounts two viewports in one page and a
+   * single slot made the second mount reclaim — or tear down — the first one's
+   * device. The retain-on-canvas-identity rule is per pane and unchanged.
+   */
+  __fluidLabGPUViewportLifecycle?: Map<PaneId, GPUViewportLifecycle>;
 };
+
+/**
+ * The pane ledger, tolerating a slot written by a module version that predates
+ * pane keying (a single lifecycle object rather than a map).
+ */
+function gpuViewportLifecycles(host: GPUViewportWindow): Map<PaneId, GPUViewportLifecycle> {
+  const retained = host.__fluidLabGPUViewportLifecycle;
+  if (retained instanceof Map) return retained;
+  const lifecycles = new Map<PaneId, GPUViewportLifecycle>();
+  host.__fluidLabGPUViewportLifecycle = lifecycles;
+  return lifecycles;
+}
 
 const GPU_DEVELOPMENT_REBIND_GRACE_MS = 1_000;
 // Bump whenever a hot update changes a scene field consumed by the renderer,
@@ -242,47 +268,58 @@ function rightmostTopCorner(
       best === undefined || projection.leftFraction > best.leftFraction ? projection : best, undefined);
 }
 
-export function WebGPUViewport() {
+export interface WebGPUViewportProps {
+  /**
+   * Which pane of a compare this viewport is. Single-pane mode is pane `"a"`,
+   * so an unadorned `<WebGPUViewport />` behaves exactly as it always has.
+   */
+  readonly paneId?: PaneId;
+}
+
+export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps = {}) {
+  // This pane's realm. Every store this component reads or writes is reached
+  // through it, so a second pane authors and reports its own experiment.
+  const session = useSession();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fpsRef = useRef<HTMLOutputElement>(null);
   const rendererRef = useRef<FluidLabRendererHandle | null>(null);
   const gpuLifecycleRef = useRef<GPUViewportLifecycle | null>(null);
-  const camera = useUIStore((state) => state.camera);
-  const setCamera = useUIStore((state) => state.setCamera);
+  const camera = session.ui((state) => state.camera);
+  const setCamera = session.ui((state) => state.setCamera);
   // Presentation reads the display scene, so every handle, outline and readout
   // below follows an open drag. The physics still reads the committed store —
-  // the render loop and the commit paths go through `useSceneStore` directly.
-  const scene = useDisplayScene();
-  const sceneDraft = useSceneDraftStore((state) => state.draft);
-  const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
-  const waterSurfacePresentation = useDiagnosticsStore((state) => state.waterSurfacePresentation);
+  // the render loop and the commit paths go through `session.scene` directly.
+  const scene = useDisplayScene(session.scene, session.sceneDraft);
+  const sceneDraft = session.sceneDraft((state) => state.draft);
+  const gpuInfo = session.diagnostics((state) => state.gpuInfo);
+  const waterSurfacePresentation = session.diagnostics((state) => state.waterSurfacePresentation);
   // Subscribed rather than read from `getState()` because the failure banner is
   // rendered, not encoded: a method switch has to redraw the alert its own
   // publications justify, not leave the previous method's verdict on screen.
-  const methodId = useMethodStore((state) => state.methodId);
+  const methodId = session.method((state) => state.methodId);
   // Two gates, not one. A rebuild replaces the image, so it may only take away
   // the things that read that image: a ray into the scene, the hover chip, a
   // drop onto a surface. The camera is ours and keeps moving, and so does every
   // gizmo, because those are drawn from the document — see
   // `resourceInteractionGates` and EDITOR_ENTITY_ARCHITECTURE.md.
-  const resourceReadiness = useDiagnosticsStore((state) => state.resourceReadiness);
+  const resourceReadiness = session.diagnostics((state) => state.resourceReadiness);
   const { cameraInteractive, pickingInteractive } = resourceInteractionGates(resourceReadiness, false);
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
-  const svoStageView = useUIStore((state) => state.svoStageView);
-  const svoStageLightSlot = useUIStore((state) => state.svoStageLightSlot);
+  const svoStageView = session.ui((state) => state.svoStageView);
+  const svoStageLightSlot = session.ui((state) => state.svoStageLightSlot);
   const svoStageDefinition = SVO_RENDER_STAGE_DEFINITIONS[svoStageView];
   // The global default plane is the clean presentation, not an investigation,
   // so the diagnostic legend must not sit on top of every scene's artwork.
   const stageViewIsDefaultPresentation = DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView === svoStageView;
   const svoStageRamp = `linear-gradient(90deg,${svoStageDefinition.legend
     .map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
-  const armedGesture = useUIStore((state) => state.armedGesture);
-  const axisConstraint = useUIStore((state) => state.axisConstraint);
-  const selection = useUIStore((state) => state.selection);
-  const voxelRegion = useUIStore((state) => state.voxelRegion);
-  const bodies = useDiagnosticsStore((state) => state.bodies);
+  const armedGesture = session.ui((state) => state.armedGesture);
+  const axisConstraint = session.ui((state) => state.axisConstraint);
+  const selection = session.ui((state) => state.selection);
+  const voxelRegion = session.ui((state) => state.voxelRegion);
+  const bodies = session.diagnostics((state) => state.bodies);
   // Subscribed, so a gizmo drawn around a body follows it while it moves.
-  const bodyPoses = useDiagnosticsStore((state) => state.bodyPoses);
+  const bodyPoses = session.diagnostics((state) => state.bodyPoses);
   // What the cursor is over, as the probe catalog answers it. Replaces the
   // four-kind `EditorHover` union the viewport used to keep: a target names the
   // same things and three more, and it carries its own highlight, so nothing
@@ -331,25 +368,25 @@ export function WebGPUViewport() {
     readonly caption: string;
   } | null>(null);
 
-  const pixelTraceEnabled = useUIStore((state) => state.pixelTraceEnabled);
-  const pixelTracePinned = useUIStore((state) => state.pixelTracePinned);
-  const pixelTraceLayers = useUIStore((state) => state.pixelTraceLayers);
-  const setPixelTraceEnabled = useUIStore((state) => state.setPixelTraceEnabled);
-  const setPixelTracePinned = useUIStore((state) => state.setPixelTracePinned);
-  const requestPixelTracePin = useUIStore((state) => state.requestPixelTracePin);
-  const fluidCellTraceEnabled = useUIStore((state) => state.fluidCellTraceEnabled);
-  const fluidCellTracePinned = useUIStore((state) => state.fluidCellTracePinned);
-  const fluidCellTraceLayers = useUIStore((state) => state.fluidCellTraceLayers);
-  const fluidCellTraceHitIndex = useUIStore((state) => state.fluidCellTraceHitIndex);
-  const setFluidCellTraceHitIndex = useUIStore((state) => state.setFluidCellTraceHitIndex);
-  const setFluidCellTraceEnabled = useUIStore((state) => state.setFluidCellTraceEnabled);
-  const jumpFluidCellTraceToInterface = useUIStore((state) => state.jumpFluidCellTraceToInterface);
-  const setFluidCellTracePinned = useUIStore((state) => state.setFluidCellTracePinned);
-  const requestFluidCellTracePin = useUIStore((state) => state.requestFluidCellTracePin);
-  const toggleFluidCellTraceLayer = useUIStore((state) => state.toggleFluidCellTraceLayer);
-  const fluidCellTraceExpanded = useUIStore((state) => state.fluidCellTraceExpanded);
-  const toggleFluidCellTraceExpanded = useUIStore((state) => state.toggleFluidCellTraceExpanded);
-  const togglePixelTraceLayer = useUIStore((state) => state.togglePixelTraceLayer);
+  const pixelTraceEnabled = session.ui((state) => state.pixelTraceEnabled);
+  const pixelTracePinned = session.ui((state) => state.pixelTracePinned);
+  const pixelTraceLayers = session.ui((state) => state.pixelTraceLayers);
+  const setPixelTraceEnabled = session.ui((state) => state.setPixelTraceEnabled);
+  const setPixelTracePinned = session.ui((state) => state.setPixelTracePinned);
+  const requestPixelTracePin = session.ui((state) => state.requestPixelTracePin);
+  const fluidCellTraceEnabled = session.ui((state) => state.fluidCellTraceEnabled);
+  const fluidCellTracePinned = session.ui((state) => state.fluidCellTracePinned);
+  const fluidCellTraceLayers = session.ui((state) => state.fluidCellTraceLayers);
+  const fluidCellTraceHitIndex = session.ui((state) => state.fluidCellTraceHitIndex);
+  const setFluidCellTraceHitIndex = session.ui((state) => state.setFluidCellTraceHitIndex);
+  const setFluidCellTraceEnabled = session.ui((state) => state.setFluidCellTraceEnabled);
+  const jumpFluidCellTraceToInterface = session.ui((state) => state.jumpFluidCellTraceToInterface);
+  const setFluidCellTracePinned = session.ui((state) => state.setFluidCellTracePinned);
+  const requestFluidCellTracePin = session.ui((state) => state.requestFluidCellTracePin);
+  const toggleFluidCellTraceLayer = session.ui((state) => state.toggleFluidCellTraceLayer);
+  const fluidCellTraceExpanded = session.ui((state) => state.fluidCellTraceExpanded);
+  const toggleFluidCellTraceExpanded = session.ui((state) => state.toggleFluidCellTraceExpanded);
+  const togglePixelTraceLayer = session.ui((state) => state.togglePixelTraceLayer);
   const [pixelTraceState, setPixelTraceState] = useState<{
     trace: SvoPixelTrace | undefined;
     status: PixelTraceStatus;
@@ -370,12 +407,12 @@ export function WebGPUViewport() {
    * The cell the last gather described, read back from where it is published.
    *
    * Component state until the fluid-cell probe needed it: a probe is called from
-   * `editorEntityContext()` with no React around it, so a trace only this
+   * `editorEntityContext(session)` with no React around it, so a trace only this
    * component could see was a trace the editor could not point at. It lives in
    * the diagnostics store with the rest of the run's published output now, and
    * this is one of its two readers.
    */
-  const fluidCellTrace = useDiagnosticsStore((state) => state.fluidCellTrace?.trace);
+  const fluidCellTrace = session.diagnostics((state) => state.fluidCellTrace?.trace);
   const [fluidCellTraceStatus, setFluidCellTraceStatus] = useState<FluidCellTraceStatusHint>("waiting");
   /**
    * Band widths and the ladder that ran, refreshed with the trace.
@@ -485,7 +522,7 @@ export function WebGPUViewport() {
     `${view.azimuth_rad}|${view.elevation_rad}|${view.distance_m}|${view.target_m.x},${view.target_m.y},${view.target_m.z}`;
 
   const fluidCellTraceDrawConfig = (
-    ui: ReturnType<typeof useUIStore.getState>,
+    ui: UIViewState,
   ): FluidCellTraceConfig | undefined => {
     if (!ui.fluidCellTraceEnabled) {
       cellTracePinRequestRef.current = null; cellTracePinnedRef.current = null; return undefined;
@@ -508,14 +545,14 @@ export function WebGPUViewport() {
   };
 
   const publishFluidCellTrace = (renderer: FluidLabRendererHandle) => {
-    const ui = useUIStore.getState();
+    const ui = session.ui.getState();
     if (!ui.fluidCellTraceEnabled) {
       // The instrument going dark takes the published cell with it. Left behind,
       // the editor would keep lighting up a leaf from a frame nobody is looking
       // at any more — and the revision guard below would never republish it,
       // because the renderer's revision does not move while the gather is off.
-      if (useDiagnosticsStore.getState().fluidCellTrace) {
-        useDiagnosticsStore.getState().set({ fluidCellTrace: null });
+      if (session.diagnostics.getState().fluidCellTrace) {
+        session.diagnostics.getState().set({ fluidCellTrace: null });
         cellTraceRevisionRef.current = -1;
       }
       return;
@@ -550,8 +587,8 @@ export function WebGPUViewport() {
     // own domain when it publishes one, and the scene it is drawn in otherwise.
     // Without it `leafOrigin` is a count of cells with no idea where it starts.
     const lattice = trace && fluidCellTraceLattice(
-      trace, displaySceneSnapshot().container, renderer.fluidCellTraceDomain);
-    useDiagnosticsStore.getState().set({
+      trace, displaySceneSnapshot(session.scene, session.sceneDraft).container, renderer.fluidCellTraceDomain);
+    session.diagnostics.getState().set({
       fluidCellTrace: trace && lattice ? { trace, lattice } : null,
     });
     setFluidCellFineBand(renderer.fluidCellTraceFineBand);
@@ -570,7 +607,7 @@ export function WebGPUViewport() {
   };
 
   const pixelTraceDrawConfig = (
-    ui: ReturnType<typeof useUIStore.getState>,
+    ui: UIViewState,
     renderer: FluidLabRendererHandle,
   ): PixelTraceConfig | undefined => {
     if (!ui.pixelTraceEnabled) { tracePinRequestRef.current = null; tracePinnedRef.current = null; return undefined; }
@@ -629,9 +666,9 @@ export function WebGPUViewport() {
     for (const { id, position_m, orientation } of renderer.rigidBodyPoses) {
       published[id] = { position_m, orientation };
     }
-    const previous = useDiagnosticsStore.getState().bodyPoses;
+    const previous = session.diagnostics.getState().bodyPoses;
     if (samePublishedBodyPoses(previous, published)) return;
-    useDiagnosticsStore.getState().set({ bodyPoses: published });
+    session.diagnostics.getState().set({ bodyPoses: published });
   };
 
   const publishPixelTrace = (renderer: FluidLabRendererHandle) => {
@@ -642,7 +679,7 @@ export function WebGPUViewport() {
     // request a click makes, so all three record an exact aim and none can
     // re-aim later. The ring carries its own — the pixel it was opened on —
     // and everything else is aimed here, at the live pointer, because it has none.
-    const ui = useUIStore.getState();
+    const ui = session.ui.getState();
     if (ui.pixelTracePinRequest && !ui.pixelTracePinned && !tracePinRequestRef.current) {
       const aim = ui.pixelTracePinRequest.aim ?? tracePointerRef.current;
       if (aim) {
@@ -655,7 +692,7 @@ export function WebGPUViewport() {
           cameraKey: pixelTraceCameraKey(ui.camera),
           revision,
         }).request;
-        useUIStore.setState({ pixelTracePinRequest: null });
+        session.ui.setState({ pixelTracePinRequest: null });
       }
     }
     const pinRequest = tracePinRequestRef.current;
@@ -664,7 +701,7 @@ export function WebGPUViewport() {
       // only once that pixel is what came back.
       const resolution = resolveSvoPixelTracePin(pinRequest, {
         answered: renderer.pixelTraceAnswersRequest,
-        cameraKey: pixelTraceCameraKey(useUIStore.getState().camera),
+        cameraKey: pixelTraceCameraKey(session.ui.getState().camera),
         probeCanAnswer: status !== "unsupported" && status !== "path-inactive",
         revision,
       });
@@ -682,7 +719,7 @@ export function WebGPUViewport() {
         }
       }
     }
-    const pinnedNow = useUIStore.getState().pixelTracePinned;
+    const pinnedNow = session.ui.getState().pixelTracePinned;
     // A pin with no aim on record can never be refreshed, so it must never be
     // possible: an aim invented from the current pointer and camera would let a
     // later refresh answer a ray the user never pinned. Controls outside the
@@ -695,7 +732,7 @@ export function WebGPUViewport() {
       pinned: pinnedNow,
       sceneChanged: renderer.pixelTraceStale,
       aimCameraKey: tracePinnedRef.current?.cameraKey,
-      cameraKey: pixelTraceCameraKey(useUIStore.getState().camera),
+      cameraKey: pixelTraceCameraKey(session.ui.getState().camera),
     });
     const published = tracePublishRef.current;
     // Why nothing is showing matters as much as what is showing, and a frozen
@@ -751,7 +788,7 @@ export function WebGPUViewport() {
     // A click is a pointer observation in its own right: without this a click
     // that never moved first would have nowhere to aim.
     tracePointerRef.current = pointer;
-    const ui = useUIStore.getState();
+    const ui = session.ui.getState();
     // A click names a cell, every time — see the re-aim argument on
     // `svoPixelTracePinClick`. The pin is released first because a pinned trace
     // outranks a pending request when the frame loop picks what to gather, and
@@ -774,7 +811,7 @@ export function WebGPUViewport() {
     // A click is a pointer observation in its own right: without this a click
     // that never moved first would have nowhere to trace.
     tracePointerRef.current = pointer;
-    const ui = useUIStore.getState();
+    const ui = session.ui.getState();
     // Released before the new aim is recorded, and for a mechanical reason as
     // much as a doctrinal one: `pixelTraceDrawConfig` lets a pinned ray outrank a
     // pending request, so a probe left pinned would go on tracing the old pixel
@@ -1049,6 +1086,7 @@ export function WebGPUViewport() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const lifecycleWindow = window as GPUViewportWindow;
+    const lifecycles = gpuViewportLifecycles(lifecycleWindow);
     const renderBinding: GPUViewportRenderBinding = {
       publishFrameRate: (fps) => {
         if (fpsRef.current) fpsRef.current.textContent = fps === undefined ? "— FPS" : `${fps.toFixed(1)} FPS`;
@@ -1066,7 +1104,9 @@ export function WebGPUViewport() {
     // In particular, this leaves compiled shader and pipeline objects alone;
     // shader edits take effect on a real page reload instead of sacrificing the
     // browser's current GPU access.
-    const retainedLifecycle = gpuLifecycleRef.current ?? lifecycleWindow.__fluidLabGPUViewportLifecycle;
+    // Only ever this pane's slot. A second pane mounting must not find — and
+    // must not tear down — the first pane's live session.
+    const retainedLifecycle = gpuLifecycleRef.current ?? lifecycles.get(paneId);
     const retainedRuntimeIncompatible = Boolean(retainedLifecycle
       && retainedLifecycle.runtimeAbi !== GPU_VIEWPORT_RUNTIME_ABI);
     if (retainedLifecycle?.canvas === canvas
@@ -1076,7 +1116,7 @@ export function WebGPUViewport() {
       // not have rebind yet. Preserve it during this one-time migration too.
       retainedLifecycle.rebind?.(renderBinding);
       gpuLifecycleRef.current = retainedLifecycle;
-      lifecycleWindow.__fluidLabGPUViewportLifecycle = retainedLifecycle;
+      lifecycles.set(paneId, retainedLifecycle);
       rendererRef.current = retainedLifecycle.renderer;
       return retainedLifecycle.deferCleanup;
     }
@@ -1084,12 +1124,12 @@ export function WebGPUViewport() {
       retainedLifecycle.cleanupImmediately();
       gpuLifecycleRef.current = null;
     }
-    const diagnostics = useDiagnosticsStore.getState();
+    const diagnostics = session.diagnostics.getState();
     const safeBringup = safeBrowserGPUBringupEnabled(window.location.search);
     const canonicalSafeMethodValues = resolvedMethodValues({ methodId: "losasso", quality: "balanced", overrides: {} });
     const startupMode = () => resolveGPUStartupMode(window.location.search, {
-      presetId: useSceneStore.getState().presetId,
-      methodId: useMethodStore.getState().methodId,
+      presetId: session.scene.getState().presetId,
+      methodId: session.method.getState().methodId,
     });
     if (startupMode() === "off") {
       diagnostics.set({ gpuStatus: { state: "unavailable", label: "WebGPU disabled by gpu=off (UI-only mode)", resource: webGPUPlatformResourcePlugin } });
@@ -1104,47 +1144,50 @@ export function WebGPUViewport() {
           queueMicrotask(() => { if (initializationStarted && !stopping && !stopped) void stopGPU(status.label); });
           return;
         }
-        const current = useDiagnosticsStore.getState().gpuStatus;
+        const current = session.diagnostics.getState().gpuStatus;
         // The controller publishes the user's intent before the next render
         // can start expensive work. Preserve that context as detailed task
         // progress arrives from the renderer.
         const rendererOnlyReady = status.state === "ready" && status.label === "WebGPU renderer ready"
-          && getMethod(useMethodStore.getState().methodId).backend === "webgpu";
+          && getMethod(session.method.getState().methodId).backend === "webgpu";
         // Close the platform plugin before opening the fluid plugin. Replacing
         // this event used to leave the completed 4/4 renderer task permanently
         // active while its label claimed the solver was being prepared.
-        if (rendererOnlyReady) useDiagnosticsStore.getState().set({ gpuStatus: status });
+        if (rendererOnlyReady) session.diagnostics.getState().set({ gpuStatus: status });
         const reportedStatus = rendererOnlyReady
-          ? { state: "initializing" as const, label: "Renderer ready; preparing fenced t=0 solver authority", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup" as const, resource: getMethod(useMethodStore.getState().methodId).resource }
+          ? { state: "initializing" as const, label: "Renderer ready; preparing fenced t=0 solver authority", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup" as const, resource: getMethod(session.method.getState().methodId).resource }
           : status;
         const gpuStatus = reportedStatus.state === "initializing" && current.state === "initializing" && current.operation
           ? { ...reportedStatus, operation: current.operation, kind: reportedStatus.kind ?? current.kind, retainingPrevious: reportedStatus.retainingPrevious ?? current.retainingPrevious }
           : reportedStatus;
-        useDiagnosticsStore.getState().set({ gpuStatus });
+        session.diagnostics.getState().set({ gpuStatus });
       },
-      onGPUInfo: (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
+      onGPUInfo: (info) => session.diagnostics.getState().set({ gpuInfo: info }),
       onGPUPressureJournal: (journal) =>
-        useDiagnosticsStore.getState().set({ pressureJournal: journal ?? null }),
-      onGPUStageLens: (receipt, layers) => useDiagnosticsStore.getState()
+        session.diagnostics.getState().set({ pressureJournal: journal ?? null }),
+      onGPUStageLens: (receipt, layers) => session.diagnostics.getState()
         .set({ stageLensReceipt: receipt ?? null, stageLensLayers: layers }),
-      onGPUAdvanceCompleted: (time_s) => simulation.gpuAdvanceCompleted(time_s),
-      onEffectiveRendererStatus: (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus }),
+      // Named, because the host's completed time is the *minimum* over the
+      // panes: an unattributed completion would let one pane's progress
+      // stand for the other's and break the barrier it exists to keep.
+      onGPUAdvanceCompleted: (time_s) => simulation.gpuAdvanceCompleted(time_s, paneId),
+      onEffectiveRendererStatus: (effectiveRendererStatus) => session.diagnostics.getState().set({ effectiveRendererStatus }),
     });
     let safeSimulationEpoch: number | undefined;
     let runStateSyncRevision = 0;
-    const syncRunState = (runState: ReturnType<typeof useRuntimeStore.getState>["runState"]) => {
+    const syncRunState = (runState: RunState) => {
       const revision = ++runStateSyncRevision;
       void renderer.setSimulationRunning(runState === "running").then((submittedTime_s) => {
         if (revision !== runStateSyncRevision
           || runState !== "paused"
-          || useRuntimeStore.getState().runState !== "paused") return;
-        simulation.gpuSchedulingPaused(submittedTime_s);
+          || session.runtime.getState().runState !== "paused") return;
+        simulation.gpuSchedulingPaused(submittedTime_s, paneId);
       }).catch(() => {
         // Worker failure is published through the renderer status callback.
       });
     };
-    syncRunState(useRuntimeStore.getState().runState);
-    const unsubscribeRunState = useRuntimeStore.subscribe((state, previous) => {
+    syncRunState(session.runtime.getState().runState);
+    const unsubscribeRunState = session.runtime.subscribe((state, previous) => {
       if (state.simulationEpoch !== previous.simulationEpoch) {
         if (safeBrowserSimulationEpochChanged(safeBringup, initializationStarted, safeSimulationEpoch, state.simulationEpoch)) {
           void stopGPU("Safe WebGPU session stopped after a reset/rebuild attempt");
@@ -1162,10 +1205,10 @@ export function WebGPUViewport() {
     let initializationStarted = false;
     let stopping = false;
     let stopped = false;
-    let leaseAcquisition: ReturnType<typeof acquireBrowserGPULease> | undefined;
+    let leaseAcquisition: Promise<PaneLeaseResult> | undefined;
     let stopPromise: Promise<void> | undefined;
     const safeViolations = () => {
-      const sceneState = useSceneStore.getState(), methodState = useMethodStore.getState(), ui = useUIStore.getState();
+      const sceneState = session.scene.getState(), methodState = session.method.getState(), ui = session.ui.getState();
       return safeBrowserGPUBringupViolations({
         presetId: sceneState.presetId,
         methodId: methodState.methodId,
@@ -1182,13 +1225,13 @@ export function WebGPUViewport() {
       if (stopPromise) return stopPromise;
       stopping = true;
       running = false;
-      useRuntimeStore.getState().setRunState("paused");
+      session.runtime.getState().setRunState("paused");
       cancelAnimationFrame(frame);
       if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: "Stopping WebGPU; waiting for initialization and solver tasks to drain", resource: webGPUPlatformResourcePlugin } });
       const pendingLease = leaseAcquisition;
       const releasedLabel = label.includes("device released") ? label : `${label}; device released — safe to close this tab`;
-      const sceneState = useSceneStore.getState();
-      const methodState = useMethodStore.getState();
+      const sceneState = session.scene.getState();
+      const methodState = session.method.getState();
       const failureScene = sceneState.scene;
       const h = failureScene.voxelDomain.finestCellSize_m;
       const reproduction = dawnReproductionForGPUFailure(label, {
@@ -1221,17 +1264,17 @@ export function WebGPUViewport() {
           diagnostics.set({ gpuStatus: { state: "manual", label: `Safe WebGPU start refused: ${violations.join("; ")}`, resource: webGPUPlatformResourcePlugin } });
           return;
         }
-        useRuntimeStore.getState().setRunState("paused");
-        safeSimulationEpoch = useRuntimeStore.getState().simulationEpoch;
+        session.runtime.getState().setRunState("paused");
+        safeSimulationEpoch = session.runtime.getState().simulationEpoch;
       }
       initializationStarted = true;
-      window.removeEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
+      window.removeEventListener(GPU_MANUAL_START_EVENT, manualStart);
       unsubscribeAutomaticStart();
       diagnostics.set({ gpuStatus: { state: "initializing", label: "Acquiring exclusive browser WebGPU lease", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup", resource: webGPUPlatformResourcePlugin } });
-      const lockManager = "locks" in navigator
-        ? navigator.locks as Parameters<typeof acquireBrowserGPULease>[0]
-        : undefined;
-      const acquisition = acquireBrowserGPULease(lockManager);
+      // One page-exclusive Web Lock, leased per pane. A second *tab* is still
+      // refused by the lock itself; a second pane rides the lock this page
+      // already holds, and the lock is released when the last pane lets go.
+      const acquisition = acquirePaneGPULease(paneId);
       leaseAcquisition = acquisition;
       const lease = await acquisition;
       if (leaseAcquisition === acquisition) leaseAcquisition = undefined;
@@ -1240,14 +1283,14 @@ export function WebGPUViewport() {
         initializationStarted = false;
         if (safeBringup || lease.status !== "unsupported") {
           diagnostics.set({ gpuStatus: { state: "manual", label: `WebGPU start refused: ${lease.message}`, resource: webGPUPlatformResourcePlugin } });
-          window.addEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
+          window.addEventListener(GPU_MANUAL_START_EVENT, manualStart);
           return;
         }
       } else releaseGPULease = lease.release;
       diagnostics.set({ gpuStatus: { state: "initializing", label: "Initializing WebGPU", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup", resource: webGPUPlatformResourcePlugin } });
       void renderer.initialize().then(async () => {
       if (!alive || stopping || stopped) return;
-      const status = useDiagnosticsStore.getState().gpuStatus;
+      const status = session.diagnostics.getState().gpuStatus;
       if (status.state === "lost" || status.state === "unavailable") {
         await stopGPU(status.label);
         return;
@@ -1255,17 +1298,17 @@ export function WebGPUViewport() {
       const render = () => {
         if (!alive || !running) return;
         frame = requestAnimationFrame(render);
-        const sceneState = useSceneStore.getState();
+        const sceneState = session.scene.getState();
         const scene = sceneState.scene;
-        const draft = useSceneDraftStore.getState().draft;
+        const draft = session.sceneDraft.getState().draft;
         const presentationScene = PRESENTED_DRAFT_SUBJECTS.has(draft?.subject as SceneDraftSubject)
           ? applySceneDraft(scene, draft)
           : scene;
         renderer.setSimulationScene(presentationScene === scene ? undefined : scene);
-        const ui = useUIStore.getState();
-        const method = useMethodStore.getState();
-        const state = useDiagnosticsStore.getState();
-        const runtime = useRuntimeStore.getState();
+        const ui = session.ui.getState();
+        const method = session.method.getState();
+        const state = session.diagnostics.getState();
+        const runtime = session.runtime.getState();
         const scenePreset = getScenePreset(sceneState.presetId);
         // Pausing freezes simulation time, not presentation. Attempt every
         // browser animation frame; the renderer's double buffer bounds latency
@@ -1274,7 +1317,16 @@ export function WebGPUViewport() {
         try {
           metrics = renderer.draw(
             simulation.time(), presentationScene, ui.camera, state.bodies, ui.selectedBodyId,
-            { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method), simulationEpoch: runtime.simulationEpoch },
+            {
+              methodId: method.methodId,
+              quality: method.quality,
+              values: resolvedMethodValues(method),
+              simulationEpoch: runtime.simulationEpoch,
+              // Read every frame rather than captured: entering compare mode
+              // pins the window to one advance, and a depth captured at mount
+              // would leave this pane two deep inside the barrier.
+              inFlightDepth: simulation.inFlightDepth(),
+            },
             { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode, lensPhase: ui.gridOverlayLensPhase },
             scenePreset.background,
             scenePreset.id === sceneState.presetId ? scenePreset.presentationMode : "full-scene",
@@ -1304,7 +1356,7 @@ export function WebGPUViewport() {
         activeBinding.publishBodyPoses(renderer);
         activeBinding.publishPixelTrace(renderer);
         activeBinding.publishFluidCellTrace(renderer);
-        simulation.recordFrame(metrics, renderer.presentationResolution);
+        simulation.recordFrame(metrics, renderer.presentationResolution, paneId);
         activeBinding.publishFrameRate(frameRate.sampleCompleted(renderer.completedPresentationCount, performance.now()));
         if (metrics.presentationSubmitted) {
           simulationRecording.capturePresentedState(canvas, runtime.simulationTime);
@@ -1315,27 +1367,34 @@ export function WebGPUViewport() {
       if (!stopping && !stopped) void stopGPU(error instanceof Error ? error.message : "WebGPU initialization failed");
       });
     };
+    // A START request that names no pane starts every pane; one that names a
+    // pane is that pane's alone.
+    const manualStart = (event: Event) => {
+      if (manualGPUControlTargetsPane(event, paneId)) void beginInitialization();
+    };
     const maybeStartAutomatically = () => {
       if (startupMode() === "automatic") beginInitialization();
     };
-    const unsubscribeScene = useSceneStore.subscribe(maybeStartAutomatically);
-    const unsubscribeMethod = useMethodStore.subscribe(maybeStartAutomatically);
+    const unsubscribeScene = session.scene.subscribe(maybeStartAutomatically);
+    const unsubscribeMethod = session.method.subscribe(maybeStartAutomatically);
     const unsubscribeAutomaticStart = () => { unsubscribeScene(); unsubscribeMethod(); };
     const enforceSafeConfiguration = () => {
       if (!safeBringup || !initializationStarted || stopped) return;
       const violations = safeViolations();
       if (violations.length > 0) stopGPU(`Safe WebGPU session stopped after configuration drift: ${violations.join("; ")}`);
     };
-    const unsubscribeSafeScene = useSceneStore.subscribe(enforceSafeConfiguration);
-    const unsubscribeSafeMethod = useMethodStore.subscribe(enforceSafeConfiguration);
-    const unsubscribeSafeUI = useUIStore.subscribe(enforceSafeConfiguration);
-    const manualStop = () => { void stopGPU(); };
+    const unsubscribeSafeScene = session.scene.subscribe(enforceSafeConfiguration);
+    const unsubscribeSafeMethod = session.method.subscribe(enforceSafeConfiguration);
+    const unsubscribeSafeUI = session.ui.subscribe(enforceSafeConfiguration);
+    const manualStop = (event: Event) => {
+      if (manualGPUControlTargetsPane(event, paneId)) void stopGPU();
+    };
     window.addEventListener(GPU_MANUAL_STOP_EVENT, manualStop);
     const pageHide = () => { void stopGPU("WebGPU stopped during page close", false); };
     window.addEventListener("pagehide", pageHide, { once: true });
     if (startupMode() === "manual" || startupMode() === "safe") {
       diagnostics.set({ gpuStatus: { state: "manual", label: "WebGPU is waiting for explicit startup", resource: webGPUPlatformResourcePlugin } });
-      window.addEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
+      window.addEventListener(GPU_MANUAL_START_EVENT, manualStart);
     } else beginInitialization();
     let cleanupTimer: number | undefined;
     let cleanupCompleted = false;
@@ -1346,7 +1405,7 @@ export function WebGPUViewport() {
       cleanupTimer = undefined;
       alive = false;
       running = false;
-      window.removeEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
+      window.removeEventListener(GPU_MANUAL_START_EVENT, manualStart);
       window.removeEventListener(GPU_MANUAL_STOP_EVENT, manualStop);
       window.removeEventListener("pagehide", pageHide);
       unsubscribeAutomaticStart();
@@ -1357,9 +1416,7 @@ export function WebGPUViewport() {
       cancelAnimationFrame(frame);
       if (rendererRef.current === renderer) rendererRef.current = null;
       if (gpuLifecycleRef.current?.renderer === renderer) gpuLifecycleRef.current = null;
-      if (lifecycleWindow.__fluidLabGPUViewportLifecycle?.renderer === renderer) {
-        lifecycleWindow.__fluidLabGPUViewportLifecycle = undefined;
-      }
+      if (lifecycles.get(paneId)?.renderer === renderer) lifecycles.delete(paneId);
       void stopGPU("WebGPU stopped during component cleanup", false);
     };
     const lifecycle: GPUViewportLifecycle = {
@@ -1383,14 +1440,28 @@ export function WebGPUViewport() {
       cleanupImmediately,
     };
     gpuLifecycleRef.current = lifecycle;
-    lifecycleWindow.__fluidLabGPUViewportLifecycle = lifecycle;
+    lifecycles.set(paneId, lifecycle);
     return lifecycle.deferCleanup;
-  }, []);
+  }, [paneId, session]);
+
+  /**
+   * Join the host clock for as long as this pane is mounted.
+   *
+   * Pane A is registered at the controller's construction and is never
+   * unregistered — it is the session. A second pane registering is precisely
+   * what puts the host in lockstep, so unmounting it must hand the clock back
+   * to the single-pane arithmetic rather than leave a barrier no one can pass.
+   */
+  useEffect(() => {
+    if (paneId === PRIMARY_PANE_ID) return;
+    simulation.registerPane(paneId);
+    return () => simulation.unregisterPane(paneId);
+  }, [paneId]);
 
   // Any event that carries a viewport pixel: pointer moves, and the wheel while
   // something is being carried.
   const pointerRay = (event: React.MouseEvent<HTMLCanvasElement>) =>
-    viewportRayForPointer(useUIStore.getState().camera, event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
+    viewportRayForPointer(session.ui.getState().camera, event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
 
   /**
    * Light the hovered object's rim in the renderer.
@@ -1420,10 +1491,10 @@ export function WebGPUViewport() {
   // the horizontal Y plane uses its perimeter. Grabbing either sweeps the
   // slice through the volume.
   const sliceGrabHit = (origin: Vec3, direction: Vec3) => {
-    const ui = useUIStore.getState();
+    const ui = session.ui.getState();
     if (ui.gridOverlayAxis === "off" || ui.gridOverlayAxis === "volume") return undefined;
     const axis = ui.gridOverlayAxis;
-    const c = useSceneStore.getState().scene.container;
+    const c = session.scene.getState().scene.container;
     const planeCoordinate = axis === "z" ? -c.depth_m / 2 + ui.gridOverlaySlice * c.depth_m : axis === "x" ? -c.width_m / 2 + ui.gridOverlaySlice * c.width_m : ui.gridOverlaySlice * c.height_m;
     const denominator = axis === "z" ? direction.z : axis === "x" ? direction.x : direction.y;
     if (Math.abs(denominator) < 1e-5) return undefined;
@@ -1455,11 +1526,11 @@ export function WebGPUViewport() {
     // body, and the first pointer move would go to whichever won. The drag owns
     // it now; its release re-selects and the carry starts cleanly from there,
     // unless the release was a throw, which is a putting-down of its own.
-    useUIStore.getState().endCarry();
-    const basis = cameraBasis(useUIStore.getState().camera);
+    session.ui.getState().endCarry();
+    const basis = cameraBasis(session.ui.getState().camera);
     const dragPoint = planeHit(ray.origin, ray.direction, surfacePosition, basis.forward), grabOffset = sub(position, dragPoint);
     pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };
-    simulation.dragBody(body.description.id, position, { x: 0, y: 0, z: 0 }, "start", orientation);
+    simulation.dragBody(body.description.id, position, { x: 0, y: 0, z: 0 }, "start", orientation, paneId);
   };
 
   /**
@@ -1477,18 +1548,18 @@ export function WebGPUViewport() {
   const updateCarry = (ray: { origin: Vec3; direction: Vec3 }, timeStamp: number) => {
     const carry = carryRef.current;
     if (!carry) return;
-    const description = useSceneStore.getState().scene.rigidBodies
+    const description = session.scene.getState().scene.rigidBodies
       .find((body) => body.id === carry.bodyId);
     if (!description) { finishCarry(); return; }
     const hit = carryPlaneHit(carry.plane, ray);
     if (!hit) return;
-    const position = clampCarryPosition(useSceneStore.getState().scene, description,
+    const position = clampCarryPosition(session.scene.getState().scene, description,
       carryPositionFor(carry.anchor, hit, carry.fine));
     const velocity = carryVelocity(carry.position_m, position,
       (timeStamp - carry.lastTime_ms) / 1000);
     carryRef.current = { ...carry, position_m: position, lastPointer_m: hit, lastTime_ms: timeStamp };
     simulation.dragBody(carry.bodyId, position, velocity, "move",
-      carryOrientation(useUIStore.getState().camera, carry.tilt_rad));
+      carryOrientation(session.ui.getState().camera, carry.tilt_rad), paneId);
   };
 
   /**
@@ -1502,11 +1573,11 @@ export function WebGPUViewport() {
   const finishCarry = (restore = false) => {
     const carry = carryRef.current;
     carryRef.current = null;
-    useUIStore.getState().endCarry();
+    session.ui.getState().endCarry();
     if (!carry) return;
     const at = restore ? carry.origin_m : carry.position_m;
     simulation.dragBody(carry.bodyId, at, { x: 0, y: 0, z: 0 }, "end",
-      restore ? { w: 1, x: 0, y: 0, z: 0 } : carryOrientation(useUIStore.getState().camera, carry.tilt_rad));
+      restore ? { w: 1, x: 0, y: 0, z: 0 } : carryOrientation(session.ui.getState().camera, carry.tilt_rad), paneId);
   };
 
   /** Re-anchor without moving anything — how a gear change avoids a jump. */
@@ -1522,9 +1593,9 @@ export function WebGPUViewport() {
     const tilt_rad = clampCarryTilt(carry.tilt_rad + steps * CARRY_TILT_STEP_RAD);
     if (tilt_rad === carry.tilt_rad) return;
     carryRef.current = { ...carry, tilt_rad };
-    useUIStore.getState().setCarryTilt(Math.round((tilt_rad * 180) / Math.PI));
+    session.ui.getState().setCarryTilt(Math.round((tilt_rad * 180) / Math.PI));
     simulation.dragBody(carry.bodyId, carry.position_m, { x: 0, y: 0, z: 0 }, "move",
-      carryOrientation(useUIStore.getState().camera, tilt_rad));
+      carryOrientation(session.ui.getState().camera, tilt_rad), paneId);
   };
 
   /**
@@ -1554,9 +1625,9 @@ export function WebGPUViewport() {
     // that puts the object down.
     if (carryRef.current) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    const ray = viewportRayForPointer(useUIStore.getState().camera, event.clientX, event.clientY, rect);
-    const context = editorEntityContext();
-    const interacting = useUIStore.getState().viewportMode === "interact";
+    const ray = viewportRayForPointer(session.ui.getState().camera, event.clientX, event.clientY, rect);
+    const context = editorEntityContext(session);
+    const interacting = session.ui.getState().viewportMode === "interact";
     const target = interacting ? targetAtRay(context, ray) : undefined;
     // The pixel this ring was opened on, for the wedges that aim a probe at it.
     // Captured here because by the time a wedge is chosen the pointer is out on
@@ -1571,10 +1642,10 @@ export function WebGPUViewport() {
       // LOOK has no target by construction, so the room answers from the point
       // the ray reaches rather than from a thing.
       : sceneActionsAt(context.scene, roomPointForRay(context.scene, ray), undefined, { placement: false });
-    if (actions.length === 0) { useUIStore.getState().closeRadialMenu(); return; }
+    if (actions.length === 0) { session.ui.getState().closeRadialMenu(); return; }
     // Client coordinates: the ring is a fixed-position layer over the window,
     // not a child of the canvas, so it must not be told canvas-relative ones.
-    useUIStore.getState().openRadialMenu({
+    session.ui.getState().openRadialMenu({
       x: event.clientX,
       y: event.clientY,
       title: target?.label ?? "Scene",
@@ -1582,11 +1653,11 @@ export function WebGPUViewport() {
     });
   };
 
-  const carrySession = useUIStore((state) => state.carry);
+  const carrySession = session.ui((state) => state.carry);
   // Reactive, unlike the `getState()` reads in the pointer handlers: the cursor
   // and the gating of the hover chip both have to redraw the instant the mode
   // flips, not on the next pointer event.
-  const viewportMode = useUIStore((state) => state.viewportMode);
+  const viewportMode = session.ui((state) => state.viewportMode);
 
   /**
    * Pick the body up when the store says something is being carried, and put it
@@ -1610,11 +1681,11 @@ export function WebGPUViewport() {
     // cancellation: a carry that ends itself is a body dropped without a click,
     // and the roster is empty for a whole rebuild — long enough to lose one.
     // The document always has the body, or the session could not name it.
-    const pose = drawnBodies().find((body) => body.description.id === carrySession.bodyId)
-      ?? useSceneStore.getState().scene.rigidBodies
+    const pose = drawnBodies(session.diagnostics).find((body) => body.description.id === carrySession.bodyId)
+      ?? session.scene.getState().scene.rigidBodies
         .find((body) => body.id === carrySession.bodyId);
     if (!pose) return;
-    const plane = carryPlane(useUIStore.getState().camera, pose.position_m);
+    const plane = carryPlane(session.ui.getState().camera, pose.position_m);
     carryRef.current = {
       bodyId: carrySession.bodyId,
       plane,
@@ -1627,9 +1698,9 @@ export function WebGPUViewport() {
       fine: false,
     };
     simulation.dragBody(carrySession.bodyId, pose.position_m, { x: 0, y: 0, z: 0 }, "start",
-      carryOrientation(useUIStore.getState().camera, 0));
+      carryOrientation(session.ui.getState().camera, 0), paneId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [carrySession?.bodyId]);
+  }, [carrySession?.bodyId, session]);
 
   /**
    * The keys a carry answers to.
@@ -1667,8 +1738,8 @@ export function WebGPUViewport() {
 
   /** The tank-fill surface rides a corner post, clear of painting targets. */
   const beginFillLevelDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const ui = useUIStore.getState();
-    const scene = useSceneStore.getState().scene;
+    const ui = session.ui.getState();
+    const scene = session.scene.getState().scene;
     if (ui.armedGesture !== "fluid-paint" && ui.armedGesture !== "fluid-erase") return false;
     if (scene.fluid.initialCondition !== "tank-fill") return false;
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1680,7 +1751,7 @@ export function WebGPUViewport() {
     );
     if (distance_px > FILL_HANDLE_TOLERANCE_PX) return false;
     pointerRef.current = { id: event.pointerId, action: "fill-level" };
-    simulation.beginDraft("fill-level", "Set fill level");
+    simulation.beginDraft("fill-level", "Set fill level", paneId);
     return true;
   };
 
@@ -1709,7 +1780,7 @@ export function WebGPUViewport() {
   ) => {
     const local = handle.space === "entity";
     const ray = local ? frameRayToLocal(entity.frame, worldRay) : worldRay;
-    const forward = cameraBasis(useUIStore.getState().camera).forward;
+    const forward = cameraBasis(session.ui.getState().camera).forward;
     const axis = axisDragDirection(handle.axes, constraint);
     return axis
       ? closestPointOnAxis(ray.origin, ray.direction, handle.position_m, axis)
@@ -1718,8 +1789,8 @@ export function WebGPUViewport() {
   };
 
   const beginEntityHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const ui = useUIStore.getState();
-    const context = editorEntityContext();
+    const ui = session.ui.getState();
+    const context = editorEntityContext(session);
     const surfaced = surfacedEntities(context, ui.selection);
     if (surfaced.length === 0) return false;
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1729,7 +1800,7 @@ export function WebGPUViewport() {
     // The gesture is resolved against the committed scene from here on, so the
     // entity it holds must be the committed one too.
     const committed = findEntity(
-      { ...context, scene: useSceneStore.getState().scene }, pick.entity.selection);
+      { ...context, scene: session.scene.getState().scene }, pick.entity.selection);
     const entity = committed ?? pick.entity;
     const handle = entity.handles.find((candidate) => candidate.id === pick.handle.id) ?? pick.handle;
     // A move must not teleport the entity to the pointer, so the offset between
@@ -1749,10 +1820,10 @@ export function WebGPUViewport() {
     if (entity.simulatedBodyId) {
       // The renderer is already drawing this from the solver, so the gesture
       // opens a runtime manipulation and the document waits for the release.
-      simulation.beginEdit(label);
-      simulation.manipulateBody(entity.simulatedBodyId, entity.frame.origin_m, "start", entity.frame.orientation);
+      simulation.beginEdit(label, paneId);
+      simulation.manipulateBody(entity.simulatedBodyId, entity.frame.origin_m, "start", entity.frame.orientation, paneId);
     } else {
-      simulation.beginDraft(entity.draftSubject, label);
+      simulation.beginDraft(entity.draftSubject, label, paneId);
     }
     return true;
   };
@@ -1776,20 +1847,20 @@ export function WebGPUViewport() {
     active: { entity: EditorEntity; handle: EditorHandle; grabOffset: Vec3 },
     ray: { origin: Vec3; direction: Vec3 },
   ) => {
-    const constraint = useUIStore.getState().axisConstraint;
+    const constraint = session.ui.getState().axisConstraint;
     const point = entityHandlePoint(active.entity, active.handle, constraint, ray);
     if (!point) return;
     const patch = active.handle.drag(add(point, active.grabOffset), constraint);
     if (!patch) return;
     const bodyId = active.entity.simulatedBodyId;
-    if (!bodyId) { useSceneDraftStore.getState().updateDraft(patch); return; }
+    if (!bodyId) { session.sceneDraft.getState().updateDraft(patch); return; }
     const described = patch.rigidBodies?.find((body) => body.id === bodyId);
     if (!described) return;
     const current = pointerRef.current;
     if (current?.action === "entity-handle") {
       pointerRef.current = { ...current, pose: described.position_m, described };
     }
-    simulation.manipulateBody(bodyId, described.position_m, "move");
+    simulation.manipulateBody(bodyId, described.position_m, "move", undefined, paneId);
   };
 
   // An axis pressed mid-drag re-resolves the drag where the pointer already is,
@@ -1806,8 +1877,8 @@ export function WebGPUViewport() {
 
   /** Terrain feature handles are grabbed in screen space, like the body gizmo. */
   const beginTerrainHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const ui = useUIStore.getState();
-    const terrain = useSceneStore.getState().scene.terrain;
+    const ui = session.ui.getState();
+    const terrain = session.scene.getState().scene.terrain;
     if (ui.armedGesture || ui.selection?.kind !== "terrain-feature" || !terrain) return false;
     const index = terrainFeatureIndex(ui.selection.id, terrain);
     if (index === undefined) return false;
@@ -1824,7 +1895,7 @@ export function WebGPUViewport() {
     }
     if (!best) return false;
     pointerRef.current = { id: event.pointerId, action: "terrain-handle", index, kind: best.kind, anchor: best.anchor };
-    simulation.beginDraft("terrain", `Shaped terrain ${terrain.features[index]?.kind ?? "feature"}`);
+    simulation.beginDraft("terrain", `Shaped terrain ${terrain.features[index]?.kind ?? "feature"}`, paneId);
     return true;
   };
 
@@ -1852,16 +1923,16 @@ export function WebGPUViewport() {
    * gesture in the editor already keeps.
    */
   const paintFluidAt = (ray: { origin: Vec3; direction: Vec3 }, erase: boolean, lastBrickKey?: string) => {
-    const proposed = displaySceneSnapshot();
-    const hit = hoverSceneAt(proposed, drawnBodies(), ray);
+    const proposed = displaySceneSnapshot(session.scene, session.sceneDraft);
+    const hit = hoverSceneAt(proposed, drawnBodies(session.diagnostics), ray);
     // Paint onto whatever surface is under the cursor; with nothing there,
     // fall back to the fill-level plane so open air is still paintable.
     const point = hit?.position_m
       ?? planeHit(ray.origin, ray.direction, { x: 0, y: fillLevelHandlePosition(proposed).y, z: 0 }, { x: 0, y: 1, z: 0 });
-    const sample = fluidBrushSample(useSceneStore.getState().scene, proposed, point, erase);
+    const sample = fluidBrushSample(session.scene.getState().scene, proposed, point, erase);
     if (!sample) return lastBrickKey;
     if (sample.brickKey === lastBrickKey) return sample.brickKey;
-    if (sample.patch) useSceneDraftStore.getState().updateDraft(sample.patch);
+    if (sample.patch) session.sceneDraft.getState().updateDraft(sample.patch);
     return sample.brickKey;
   };
 
@@ -1876,7 +1947,7 @@ export function WebGPUViewport() {
     region: SolidVoxelClearRegion,
     baseWorld: SolidWorld,
   ): void => {
-    const committed = useSceneStore.getState().scene;
+    const committed = session.scene.getState().scene;
     const preview = solidVoxelClearPreview(committed, region, baseWorld);
     setVoxelSweep({
       highlight: {
@@ -1914,7 +1985,7 @@ export function WebGPUViewport() {
     event: React.PointerEvent<HTMLCanvasElement>,
     target: EditorTarget,
   ): boolean => {
-    const committed = useSceneStore.getState().scene;
+    const committed = session.scene.getState().scene;
     const anchor = voxelDragAnchor(committed, target);
     if (!anchor) return false;
     const region: SolidVoxelClearRegion = { minimum: [...anchor.coordinate],
@@ -1946,9 +2017,9 @@ export function WebGPUViewport() {
    * gesture: the draft previews, the release writes once.
    */
   const updateRegionDraft = (anchor: Vec3, drag: Vec3, regionId: string) => {
-    const committed = useSceneStore.getState().scene;
+    const committed = session.scene.getState().scene;
     const region = refinementRegionFromDrag(committed, anchor, drag, { id: regionId });
-    useSceneDraftStore.getState().updateDraft({
+    session.sceneDraft.getState().updateDraft({
       fluid: withRefinementRegion(committed, regionId, region).fluid,
     });
   };
@@ -1963,18 +2034,18 @@ export function WebGPUViewport() {
    * resolve unambiguously.
    */
   const beginRegionDraw = (event: React.PointerEvent<HTMLCanvasElement>, ray: { origin: Vec3; direction: Vec3 }) => {
-    const scene = useSceneStore.getState().scene;
+    const scene = session.scene.getState().scene;
     if (refinementRegionCapacityRemaining(scene) === 0) {
-      useRuntimeStore.getState().setNotice(
+      session.runtime.getState().setNotice(
         `At most ${OCTREE_REFINEMENT_REGION_CAPACITY} refinement regions — remove one first`);
       return;
     }
-    const hit = pickingInteractive ? hoverSceneAt(scene, drawnBodies(), ray) : undefined;
+    const hit = pickingInteractive ? hoverSceneAt(scene, drawnBodies(session.diagnostics), ray) : undefined;
     const anchor = hit?.position_m
       ?? planeHit(ray.origin, ray.direction, { x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
     if (!anchor || !Number.isFinite(anchor.x)) return;
     const regionId = nextRefinementRegionId(scene);
-    simulation.beginDraft("refinement-region", "Drew a refinement region");
+    simulation.beginDraft("refinement-region", "Drew a refinement region", paneId);
     pointerRef.current = { id: event.pointerId, action: "region-draw", anchor, regionId };
     updateRegionDraft(anchor, anchor, regionId);
   };
@@ -1990,7 +2061,7 @@ export function WebGPUViewport() {
     ray: { origin: Vec3; direction: Vec3 },
     hover: EditorHover | undefined,
     radius_m: number,
-  ) => restFluidInWorld(useSceneStore.getState().scene, ray, hover, radius_m);
+  ) => restFluidInWorld(session.scene.getState().scene, ray, hover, radius_m);
 
   /**
    * Revise the ball being dropped, as a draft over the committed document.
@@ -2006,7 +2077,7 @@ export function WebGPUViewport() {
     hover: EditorHover | undefined,
     radius_m: number,
   ) => {
-    const committed = useSceneStore.getState().scene;
+    const committed = session.scene.getState().scene;
     // Re-rested at every radius rather than held at the press point, so a ball
     // dragged larger goes on sitting on what it was dropped on instead of
     // growing through it. The press ray, never the moving one: the pointer is
@@ -2019,7 +2090,7 @@ export function WebGPUViewport() {
     const fluid = containerContains(committed, centre)
       ? addFluidBall(committed, centre, radius_m).fluid
       : committed.fluid;
-    useSceneDraftStore.getState().updateDraft({ fluid });
+    session.sceneDraft.getState().updateDraft({ fluid });
     setCursorDrop({ centre_m: centre, radius_m, tone: "fluid" });
   };
 
@@ -2043,15 +2114,15 @@ export function WebGPUViewport() {
    * as soon as it is tested.
    */
   const previewCursorDrop = (ray: { origin: Vec3; direction: Vec3 }) => {
-    const ui = useUIStore.getState();
-    const scene = useSceneStore.getState().scene;
+    const ui = session.ui.getState();
+    const scene = session.scene.getState().scene;
     // Resolved here rather than handed in from the hover path, and only for the
     // three arms that need it. "What is under the cursor" and "what would this
     // rest on" are different questions with different right answers — a body's
     // hover target reports no useful surface normal, while `hoverSceneAt`
     // returns the exact one a prop has to stand on — so the placement arms keep
     // asking their own question instead of reinterpreting the highlight's.
-    const hover = ui.armedGesture ? hoverSceneAt(scene, drawnBodies(), ray) : undefined;
+    const hover = ui.armedGesture ? hoverSceneAt(scene, drawnBodies(session.diagnostics), ray) : undefined;
     if (ui.armedGesture === "fluid-ball") {
       const radius_m = defaultFluidBallRadius_m(scene);
       const centre_m = restFluidInWorld(scene, ray, hover, radius_m);
@@ -2079,12 +2150,12 @@ export function WebGPUViewport() {
    * is a complete gesture and a drag is the same gesture continued.
    */
   const beginFluidBallDrop = (event: React.PointerEvent<HTMLCanvasElement>, ray: { origin: Vec3; direction: Vec3 }) => {
-    const scene = useSceneStore.getState().scene;
-    const hover = hoverSceneAt(scene, drawnBodies(), ray);
+    const scene = session.scene.getState().scene;
+    const hover = hoverSceneAt(scene, drawnBodies(session.diagnostics), ray);
     const radius_m = defaultFluidBallRadius_m(scene);
     const anchor = restFluidInWorld(scene, ray, hover, radius_m);
     if (!anchor) return;
-    simulation.beginDraft("fluid-body", "Dropped a ball of water");
+    simulation.beginDraft("fluid-body", "Dropped a ball of water", paneId);
     pointerRef.current = {
       id: event.pointerId, action: "fluid-ball", anchor, ray, hover,
       downX: event.clientX, downY: event.clientY, moved: false, radius_m,
@@ -2112,10 +2183,10 @@ export function WebGPUViewport() {
   const finishFluidBallDrop = async (active: {
     anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; radius_m: number; selectionId: string;
   }) => {
-    const committed = useSceneStore.getState().scene;
+    const committed = session.scene.getState().scene;
     const authored = () => {
-      simulation.commitDraft();
-      useUIStore.getState().select({ kind: "fluid-body", id: active.selectionId });
+      simulation.commitDraft(undefined, paneId);
+      session.ui.getState().select({ kind: "fluid-body", id: active.selectionId });
     };
     const centre = fluidBallCentre(active.ray, active.hover, active.radius_m) ?? active.anchor;
     if (simulation.time() <= 0 && containerContains(committed, centre)) { authored(); return; }
@@ -2129,15 +2200,15 @@ export function WebGPUViewport() {
     });
     if (!taken) {
       if (containerContains(committed, centre)) { authored(); return; }
-      simulation.cancelDraft();
-      useRuntimeStore.getState().setNotice(
+      simulation.cancelDraft(paneId);
+      session.runtime.getState().setNotice(
         "Open-world liquid placement requires a ready Sparse CM12 solve");
       return;
     }
     // Nothing to record: the document did not change, and the water is now part
     // of the field like every other litre in it.
-    simulation.cancelDraft();
-    useRuntimeStore.getState().setNotice("Dropped a ball of water into the running solve");
+    simulation.cancelDraft(paneId);
+    session.runtime.getState().setNotice("Dropped a ball of water into the running solve");
   };
 
   /**
@@ -2150,7 +2221,7 @@ export function WebGPUViewport() {
    */
   const fluidBallDragRadius = (active: { anchor: Vec3 }, ray: { origin: Vec3; direction: Vec3 }) => {
     const point = planeHit(ray.origin, ray.direction, active.anchor,
-      cameraBasis(useUIStore.getState().camera).forward);
+      cameraBasis(session.ui.getState().camera).forward);
     const reach = length(sub(point, active.anchor));
     return Number.isFinite(reach) ? reach : undefined;
   };
@@ -2172,14 +2243,14 @@ export function WebGPUViewport() {
    * the container centre, the same fallback the tray drop uses.
    */
   const beginBodySweep = (event: React.PointerEvent<HTMLCanvasElement>, ray: { origin: Vec3; direction: Vec3 }) => {
-    const ui = useUIStore.getState();
-    const scene = useSceneStore.getState().scene;
-    const bodies = drawnBodies();
+    const ui = session.ui.getState();
+    const scene = session.scene.getState().scene;
+    const bodies = drawnBodies(session.diagnostics);
     const surface = hoverSceneAt(scene, bodies, ray);
     const bodyHit = surface?.kind === "body" ? surface : undefined;
     const grabbed = bodyHit && bodies.find((candidate) => candidate.description.id === bodyHit.bodyId);
     if (grabbed && bodyHit) {
-      useUIStore.getState().selectBody(grabbed.description.id);
+      session.ui.getState().selectBody(grabbed.description.id);
       // The live pose, not the authored one: the GPU owns rigid motion once the
       // clock starts, so grabbing from the description would teleport a settled
       // body back to where it was authored. Same reason the GPU pick passes its
@@ -2193,9 +2264,9 @@ export function WebGPUViewport() {
     if (!position) return;
     // autoRun false: the clock starts on the drag itself, so a spawn that the
     // user never moves does not quietly begin the simulation under them.
-    const created = simulation.addBodyAt(ui.placementShape, position, { autoRun: false });
+    const created = simulation.addBodyAt(ui.placementShape, position, { autoRun: false }, paneId);
     if (!created) return;
-    const spawned = drawnBodies().find((candidate) => candidate.description.id === created.id);
+    const spawned = drawnBodies(session.diagnostics).find((candidate) => candidate.description.id === created.id);
     if (!spawned) return;
     beginBodyDrag(event.pointerId, event.timeStamp, event.clientX, event.clientY, ray, spawned,
       spawned.position_m, spawned.orientation);
@@ -2218,7 +2289,7 @@ export function WebGPUViewport() {
     // would be a mode only in name — and the per-move analytic pick it skips is
     // the whole cost of hover for a reader who is only watching. See
     // `editor-viewport-mode.ts`.
-    if (useUIStore.getState().viewportMode !== "interact") {
+    if (session.ui.getState().viewportMode !== "interact") {
       pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
         downX: event.clientX, downY: event.clientY,
         action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
@@ -2232,7 +2303,7 @@ export function WebGPUViewport() {
     // catalog handed two constants would have its rules compiled away rather
     // than merely unreached.
     const modifiers = { shift: event.shiftKey, middleButton: event.button === 1 };
-    const traceUI = useUIStore.getState();
+    const traceUI = session.ui.getState();
     const probes = { ray: traceUI.pixelTraceEnabled, cell: traceUI.fluidCellTraceEnabled };
     const probeClaim = probeClaimsPress(probes, traceUI.armedGesture, modifiers);
     const pickGesture = probeClaim
@@ -2269,7 +2340,7 @@ export function WebGPUViewport() {
       // which is exactly where the tank-wall probe answers, so a sweep would
       // swallow it on every scene with the grid overlay up.
       const grab = sliceGrabHit(ray.origin, ray.direction);
-      if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
+      if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: session.ui.getState().gridOverlaySlice }; return; }
       // What the press landed on, resolved once and used twice below: to pick
       // the gesture, and to decide what a click would select — so the ring, the
       // highlight and the click all name the same thing.
@@ -2277,14 +2348,14 @@ export function WebGPUViewport() {
       // The current selection stays transparent to the pick: the tank and the
       // water enclose everything else, so clicking *through* the selected one
       // is the only way the things inside are reachable at all.
-      const pressTarget = targetAtRay(editorEntityContext(), ray, useUIStore.getState().selection);
+      const pressTarget = targetAtRay(editorEntityContext(session), ray, session.ui.getState().selection);
       // The one place a press is turned into a meaning. Everything above this
       // line is a screen-space grab — a handle, a slice band — which is a rule
       // about pixels and so cannot be declared against a target; everything
       // below is the catalog's answer performed. See
       // `editor-gesture-catalog.ts` for the resolution rules.
       const gesture = gestureForPress(
-        useUIStore.getState().armedGesture,
+        session.ui.getState().armedGesture,
         pressTarget,
         modifiers,
         pickingInteractive,
@@ -2313,7 +2384,7 @@ export function WebGPUViewport() {
           // there is no fill handle to hit while nothing is armed.
           if (beginFillLevelDrag(event)) return;
           const erase = gesture === "fluid-erase";
-          simulation.beginDraft("fluid-body", erase ? "Erased water" : "Painted water");
+          simulation.beginDraft("fluid-body", erase ? "Erased water" : "Painted water", paneId);
           pointerRef.current = { id: event.pointerId, action: "fluid-paint", erase,
             lastBrickKey: paintFluidAt(ray, erase) };
           return;
@@ -2356,7 +2427,7 @@ export function WebGPUViewport() {
       // exempt: a flow authored inside a static nozzle is nearer in the
       // document than the nozzle body the pick would return.
       if (selectOnClick?.kind === "terrain-feature") {
-        useUIStore.getState().select(selectOnClick);
+        session.ui.getState().select(selectOnClick);
         return;
       }
       // The GPU pick reads the published frame, so it answers to the same gate.
@@ -2370,25 +2441,25 @@ export function WebGPUViewport() {
         });
         const active=pointerRef.current;
         if(!active||active.id!==pointerId||active.action!=="pick")return;
-        const body=picked?useDiagnosticsStore.getState().bodies[picked.bodyIndex]:undefined;
+        const body=picked?session.diagnostics.getState().bodies[picked.bodyIndex]:undefined;
         if(body&&picked&&selectOnClick?.kind!=="inflow"){
           // A pointer already released cannot be dragged, so a fast click on a
           // body selects it without opening a throw that never ends.
-          if(active.released){pointerRef.current=null;useUIStore.getState().selectBody(body.description.id);return;}
+          if(active.released){pointerRef.current=null;session.ui.getState().selectBody(body.description.id);return;}
           beginBodyDrag(pointerId,timeStamp,x,y,ray,body,picked.position_m,picked.orientation,"surfacePosition_m" in picked?picked.surfacePosition_m:picked.position_m);return;
         }
         // No body under the cursor: a released pointer was a click on whatever
         // the analytic pick found there — an entity, or the background — and a
         // held one becomes the orbit fallback that decides the same thing when
         // it comes up.
-        if(active.released){pointerRef.current=null;useUIStore.getState().select(selectOnClick);return;}
+        if(active.released){pointerRef.current=null;session.ui.getState().select(selectOnClick);return;}
         pointerRef.current={...active,action:"orbit",selectOnClick};
         return;
       }
       // The analytic body pick is the non-WebGPU fallback for the block above
       // and answers to the same gate: an unpresented body must not be grabbable.
       let nearest: { body: RigidBodyState; t: number } | undefined;
-      for (const body of pickingInteractive ? drawnBodies() : []) {
+      for (const body of pickingInteractive ? drawnBodies(session.diagnostics) : []) {
         const oc = sub(ray.origin, body.position_m), radius = boundingRadius(body), b = dot(oc, ray.direction), c = dot(oc, oc) - radius * radius, discriminant = b * b - c;
         if (discriminant < 0) continue; const t = -b - Math.sqrt(discriminant);
         if (t > 0 && (!nearest || t < nearest.t)) nearest = { body, t };
@@ -2415,7 +2486,7 @@ export function WebGPUViewport() {
     if (!active) {
       // Nothing under the cursor is named in LOOK, so nothing is asked. The
       // clears are what retire a chip and a rim left lit by the mode just left.
-      if (useUIStore.getState().viewportMode !== "interact") {
+      if (session.ui.getState().viewportMode !== "interact") {
         setHandleHover(null); setHoverTarget(null); publishHoverHighlight(null); setCursorDrop(null);
         return;
       }
@@ -2423,8 +2494,8 @@ export function WebGPUViewport() {
       // something is selected its handles are the interface, and a hover chip
       // describing the wall behind a corner would be answering a question nobody
       // asked.
-      const ui = useUIStore.getState();
-      const surfaced = surfacedEntities(editorEntityContext(), ui.selection);
+      const ui = session.ui.getState();
+      const surfaced = surfacedEntities(editorEntityContext(session), ui.selection);
       const pick = surfaced.length > 0 ? entityHandleAtPointer(
         surfaced, ui.camera, rect.width, rect.height,
         { x: event.clientX - rect.left, y: event.clientY - rect.top }) : undefined;
@@ -2453,7 +2524,7 @@ export function WebGPUViewport() {
       // recompile look like the cursor had gone dead, which is precisely the
       // "nothing under the pointer" state INTERACT promises never to have.
       const ray = pointerRay(event);
-      const target = targetAtRay(editorEntityContext(), ray, ui.selection);
+      const target = targetAtRay(editorEntityContext(session), ray, ui.selection);
       setHoverTarget(target);
       publishHoverHighlight(target);
       previewCursorDrop(ray);
@@ -2467,7 +2538,7 @@ export function WebGPUViewport() {
     }
     if (active.action === "solid-voxel-region") {
       const region = projectSolidVoxelClearRegion(
-        useSceneStore.getState().scene, pointerRay(event), active.anchor,
+        session.scene.getState().scene, pointerRay(event), active.anchor,
       );
       if (!region || (region.minimum.every((value, axis) =>
         value === active.region.minimum[axis])
@@ -2500,12 +2571,12 @@ export function WebGPUViewport() {
     }
     if (active.action === "fill-level") {
       const ray = pointerRay(event);
-      const committed = useSceneStore.getState().scene;
+      const committed = session.scene.getState().scene;
       // The handle rides the *proposed* surface, so it tracks the pointer.
-      const corner = fillLevelHandlePosition(displaySceneSnapshot());
+      const corner = fillLevelHandlePosition(displaySceneSnapshot(session.scene, session.sceneDraft));
       const point = closestPointOnAxis(ray.origin, ray.direction, corner, GIZMO_AXIS_DIRECTIONS.y);
       if (!point) return;
-      useSceneDraftStore.getState().updateDraft({
+      session.sceneDraft.getState().updateDraft({
         container: { ...committed.container, fillFraction: fillFractionForHeight(committed, point.y) },
       });
       return;
@@ -2513,14 +2584,14 @@ export function WebGPUViewport() {
     if (active.action === "terrain-handle") {
       const point = terrainHandlePoint(active, pointerRay(event));
       if (!point) return;
-      const committed = useSceneStore.getState().scene;
+      const committed = session.scene.getState().scene;
       const terrain = committed.terrain;
       if (!terrain) return;
       // Terrain *is* in the seed tier, so this cannot patch the document: it
       // would re-seed the solver on every pointer-move. The draft redraws the
       // ground — the render loop presents terrain proposals — and the release
       // is what re-seeds.
-      useSceneDraftStore.getState().updateDraft({
+      session.sceneDraft.getState().updateDraft({
         terrain: applyTerrainFeatureDrag(terrain, active.index, active.kind, point, committed.container),
       });
       return;
@@ -2528,7 +2599,7 @@ export function WebGPUViewport() {
     if (active.action === "slice") {
       if (active.axis === "y") {
         const rect = event.currentTarget.getBoundingClientRect();
-        useUIStore.getState().setGridOverlaySlice(active.startSlice + (active.startClientY - event.clientY) / Math.max(rect.height, 1));
+        session.ui.getState().setGridOverlaySlice(active.startSlice + (active.startClientY - event.clientY) / Math.max(rect.height, 1));
         return;
       }
       // Keep the grab height fixed and slide the plane along its normal.
@@ -2537,16 +2608,16 @@ export function WebGPUViewport() {
       const t = (active.grabY - ray.origin.y) / ray.direction.y;
       if (t <= 0) return;
       const point = add(ray.origin, scale(ray.direction, t));
-      const c = useSceneStore.getState().scene.container;
+      const c = session.scene.getState().scene.container;
       const fraction = active.axis === "z" ? (point.z + c.depth_m / 2) / c.depth_m : (point.x + c.width_m / 2) / c.width_m;
-      useUIStore.getState().setGridOverlaySlice(fraction);
+      session.ui.getState().setGridOverlaySlice(fraction);
       return;
     }
     if (active.action === "body") {
       const ray = pointerRay(event), position = add(planeHit(ray.origin, ray.direction, active.planePoint, active.planeNormal), active.grabOffset);
       const dt = Math.max((event.timeStamp - active.lastTime) / 1000, 1 / 240), rawVelocity = scale(sub(position, active.lastPosition), 1 / dt), speed = length(rawVelocity), velocity = speed > 6 ? scale(rawVelocity, 6 / speed) : rawVelocity;
       pointerRef.current = { ...active, lastPosition: position, lastTime: event.timeStamp };
-      simulation.dragBody(active.bodyId, position, velocity, "move"); return;
+      simulation.dragBody(active.bodyId, position, velocity, "move", undefined, paneId); return;
     }
     const dx = event.clientX - active.x;
     const dy = event.clientY - active.y;
@@ -2579,16 +2650,16 @@ export function WebGPUViewport() {
     // with it. Same slop as the background click, so the two agree on what
     // "moved" means.
     if (active.action === "body") {
-      simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end");
+      simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end", undefined, paneId);
       if (!cancelled && pointerStayedWithinClickSlop(event.clientX - active.downX, event.clientY - active.downY)) {
-        useUIStore.getState().selectBody(active.bodyId);
+        session.ui.getState().selectBody(active.bodyId);
       }
       return;
     }
     // Terrain reaches the solver only through a re-seed.
     if (active.action === "terrain-handle") {
-      if (cancelled) { simulation.cancelDraft(); return; }
-      simulation.commitDraft();
+      if (cancelled) { simulation.cancelDraft(paneId); return; }
+      simulation.commitDraft(undefined, paneId);
       return;
     }
     // Brick seeds and fill fraction are already in the solver key, so the
@@ -2602,27 +2673,27 @@ export function WebGPUViewport() {
         // The runtime manipulation ends either way, or the body would stay
         // pinned to a gesture that is over.
         const landed = active.pose ?? active.entity.frame.origin_m;
-        simulation.manipulateBody(bodyId, landed, "end");
-        if (cancelled || !active.described) { simulation.cancelEdit(); return; }
-        simulation.updateBody(bodyId, { ...active.described, linearVelocity_m_s: { x: 0, y: 0, z: 0 } });
-        simulation.commitEdit();
+        simulation.manipulateBody(bodyId, landed, "end", undefined, paneId);
+        if (cancelled || !active.described) { simulation.cancelEdit(paneId); return; }
+        simulation.updateBody(bodyId, { ...active.described, linearVelocity_m_s: { x: 0, y: 0, z: 0 } }, undefined, paneId);
+        simulation.commitEdit(undefined, undefined, paneId);
         return;
       }
       // A cancelled gesture keeps the scene it started with; only a real
       // release is allowed to spend a re-seed.
-      if (cancelled) { simulation.cancelDraft(); return; }
+      if (cancelled) { simulation.cancelDraft(paneId); return; }
       simulation.commitDraft(active.entity.announceRebuild
-        ? { announceRebuild: active.entity.announceRebuild } : {});
+        ? { announceRebuild: active.entity.announceRebuild } : {}, paneId);
       return;
     }
     if (active.action === "fill-level") {
-      if (cancelled) { simulation.cancelDraft(); return; }
-      simulation.commitDraft();
+      if (cancelled) { simulation.cancelDraft(paneId); return; }
+      simulation.commitDraft(undefined, paneId);
       return;
     }
     if (active.action === "fluid-paint") {
-      if (cancelled) { simulation.cancelDraft(); return; }
-      simulation.commitDraft();
+      if (cancelled) { simulation.cancelDraft(paneId); return; }
+      simulation.commitDraft(undefined, paneId);
       return;
     }
     // The sweep becomes the selection, and the verbs it offers arrive with it:
@@ -2641,17 +2712,17 @@ export function WebGPUViewport() {
       setVoxelSweep(null);
       if (cancelled) return;
       if (pointerStayedWithinClickSlop(event.clientX - active.downX, event.clientY - active.downY)) {
-        const ui = useUIStore.getState();
+        const ui = session.ui.getState();
         if (active.selectOnClick) ui.select(active.selectOnClick);
         else ui.select(undefined);
         return;
       }
-      useUIStore.getState().selectVoxelRegion(active.region);
+      session.ui.getState().selectVoxelRegion(active.region);
       return;
     }
     if (active.action === "fluid-ball") {
       setCursorDrop(null);
-      if (cancelled) { simulation.cancelDraft(); return; }
+      if (cancelled) { simulation.cancelDraft(paneId); return; }
       void finishFluidBallDrop(active);
       return;
     }
@@ -2665,10 +2736,10 @@ export function WebGPUViewport() {
     // pointer. `setActiveTool` clears the axis lock, so the selection is set
     // afterwards — it survives, the lock does not.
     if (active.action === "region-draw") {
-      if (cancelled) { simulation.cancelDraft(); return; }
-      simulation.commitDraft();
-      useUIStore.getState().setArmedGesture(undefined);
-      useUIStore.getState().select({
+      if (cancelled) { simulation.cancelDraft(paneId); return; }
+      simulation.commitDraft(undefined, paneId);
+      session.ui.getState().setArmedGesture(undefined);
+      session.ui.getState().select({
         kind: "refinement-region", id: refinementRegionSelectionId(active.regionId),
       });
       return;
@@ -2677,7 +2748,7 @@ export function WebGPUViewport() {
     // clicking through to whatever the scene has there — an entity, or, when the
     // ray left the tank entirely, the background. Either way the selection
     // becomes what was clicked, which is how a click deselects.
-    if (!cancelled && useUIStore.getState().viewportMode === "interact"
+    if (!cancelled && session.ui.getState().viewportMode === "interact"
       && (active.action === "orbit" || active.action === "pan")
       // A probe's click aimed the probe and nothing else. Without this the same
       // click would also deselect, since a claimed press carries no
@@ -2685,7 +2756,7 @@ export function WebGPUViewport() {
       // reader was working on.
       && !active.probe
       && emptySpaceClickDeselects(active.action, event.clientX - active.downX, event.clientY - active.downY)) {
-      useUIStore.getState().select(active.selectOnClick);
+      session.ui.getState().select(active.selectOnClick);
     }
   };
 

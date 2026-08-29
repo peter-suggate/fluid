@@ -1,10 +1,9 @@
 "use client";
 
-import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
-import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import type {
   PressureJournal,
 } from "../lib/core/pressure-journal";
+import { useSession } from "../lib/core/session/session-context";
 
 /**
  * The captured pressure solve's convergence, beside the scrub that plays it.
@@ -63,8 +62,9 @@ export function PressureFilmStrip({
   slot: number;
   onSelectSlot: (slot: number) => void;
 }) {
-  const journal = useDiagnosticsStore((state) => state.pressureJournal);
-  const runState = useRuntimeStore((state) => state.runState);
+  const session = useSession();
+  const journal = session.diagnostics((state) => state.pressureJournal);
+  const runState = session.runtime((state) => state.runState);
   if (!journal) {
     return <p className="pressure-film" data-testid="pressure-film-empty">
       <span>{runState === "running"

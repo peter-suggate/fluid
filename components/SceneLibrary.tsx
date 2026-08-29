@@ -31,8 +31,8 @@ import {
 import { readSceneRecents, recentSceneCards, recordSceneOpen, type RecentSceneOpen } from "../lib/core/scene-recents";
 import { planSceneRuntime } from "../lib/core/scene-runtime";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
+import { useSession } from "../lib/core/session/session-context";
 import { useShellStore } from "../lib/core/stores/shell-store";
-import { useSceneStore } from "../lib/core/stores/scene-store";
 import { SceneIsoGlyph } from "./SceneIsoGlyph";
 import { ThemeSwitch } from "./ThemeSwitch";
 
@@ -426,7 +426,8 @@ export function SceneLibrary() {
   const router = useRouter();
   const search = useShellStore((state) => state.librarySearch);
   const setSearch = useShellStore((state) => state.setLibrarySearch);
-  const presetId = useSceneStore((state) => state.presetId);
+  const session = useSession();
+  const presetId = session.scene((state) => state.presetId);
   const [entries, setEntries] = useState<SceneLibraryEntry[]>([]);
   const [recents, setRecents] = useState<RecentSceneOpen[]>([]);
   const [edit, setEdit] = useState<SceneCardEdit | undefined>();
@@ -447,9 +448,9 @@ export function SceneLibrary() {
   }, []);
 
   const open = (card: SceneCard) => {
-    if (!simulation.openSceneCard(card)) return;
+    if (!simulation.openSceneCard(card, session.id)) return;
     recordSceneOpen(browserSceneLibraryStorage(), card.id, Date.now());
-    router.push(currentScenePageUrl());
+    router.push(currentScenePageUrl(session));
   };
 
   /**

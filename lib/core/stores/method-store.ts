@@ -21,7 +21,7 @@ interface MethodStore {
   seedProfile: (profile: MethodProfile) => void;
 }
 
-export const useMethodStore = create<MethodStore>((set) => ({
+export const createMethodStore = () => create<MethodStore>((set) => ({
   methodId: defaultMethodId(),
   quality: "balanced",
   overrides: {},
@@ -50,6 +50,17 @@ export const useMethodStore = create<MethodStore>((set) => ({
     overrides: { ...state.overrides, [methodId]: { ...overrides } },
   })),
 }));
+
+export type MethodStoreHook = ReturnType<typeof createMethodStore>;
+
+/**
+ * The default (pane A) instance.
+ *
+ * Per-pane instances come from `createPaneSession`; this one is what a tree
+ * with no `SessionProvider` mounted reads, and what non-React callers that
+ * have not yet been threaded a session resolve to.
+ */
+export const useMethodStore = createMethodStore();
 
 /** Effective values for the active method: defaults ← quality preset ← user overrides. */
 export function resolvedMethodValues(state: Pick<MethodStore, "methodId" | "quality" | "overrides">): MethodParamValues {

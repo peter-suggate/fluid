@@ -2,7 +2,7 @@
 
 import { MousePointer2, Orbit } from "lucide-react";
 import { toggledViewportMode, VIEWPORT_MODES } from "../lib/core/editor-viewport-mode";
-import { useUIStore } from "../lib/core/stores/ui-store";
+import { useSession } from "../lib/core/session/session-context";
 
 /**
  * The one permanent control in the top-right: look, or edit.
@@ -19,8 +19,9 @@ import { useUIStore } from "../lib/core/stores/ui-store";
  * The icon is the mode you are *in*; the label beside it names it.
  */
 export function ViewportModeToggle() {
-  const viewportMode = useUIStore((state) => state.viewportMode);
-  const setViewportMode = useUIStore((state) => state.setViewportMode);
+  const session = useSession();
+  const viewportMode = session.ui((state) => state.viewportMode);
+  const setViewportMode = session.ui((state) => state.setViewportMode);
   const spec = VIEWPORT_MODES[viewportMode];
   const Icon = viewportMode === "interact" ? MousePointer2 : Orbit;
   return (

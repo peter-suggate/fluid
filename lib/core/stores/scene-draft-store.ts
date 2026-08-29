@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { markSceneRevision, type SceneDescription } from "../model";
-import { useSceneStore } from "./scene-store";
+import { useSceneStore, type SceneStoreHook } from "./scene-store";
 
 /**
  * The client-only half of direct manipulation.
@@ -64,7 +64,7 @@ interface SceneDraftStore {
   clearDraft: () => void;
 }
 
-export const useSceneDraftStore = create<SceneDraftStore>((set) => ({
+export const createSceneDraftStore = () => create<SceneDraftStore>((set) => ({
   draft: undefined,
   beginDraft: (subject, label) => set({ draft: { subject, label, patch: {} } }),
   updateDraft: (patch) => set((state) => state.draft
@@ -72,6 +72,17 @@ export const useSceneDraftStore = create<SceneDraftStore>((set) => ({
     : {}),
   clearDraft: () => set((state) => (state.draft ? { draft: undefined } : {})),
 }));
+
+export type SceneDraftStoreHook = ReturnType<typeof createSceneDraftStore>;
+
+/**
+ * The default (pane A) instance.
+ *
+ * Per-pane instances come from `createPaneSession`; this one is what a tree
+ * with no `SessionProvider` mounted reads, and what non-React callers that
+ * have not yet been threaded a session resolve to.
+ */
+export const useSceneDraftStore = createSceneDraftStore();
 
 /** The scene as the pointer currently proposes it. */
 let cachedDraftBase: SceneDescription | undefined;
@@ -95,13 +106,25 @@ export function applySceneDraft(
  * gesture is open, so nothing downstream re-renders or re-derives while the
  * scene is at rest.
  */
-export function useDisplayScene(): SceneDescription {
-  const scene = useSceneStore((state) => state.scene);
-  const draft = useSceneDraftStore((state) => state.draft);
+export function useDisplayScene(
+  sceneStore: SceneStoreHook = useSceneStore,
+  draftStore: SceneDraftStoreHook = useSceneDraftStore,
+): SceneDescription {
+  const scene = sceneStore((state) => state.scene);
+  const draft = draftStore((state) => state.draft);
   return useMemo(() => applySceneDraft(scene, draft), [scene, draft]);
 }
 
-/** Non-reactive read, for the render loop and pointer handlers. */
-export function displaySceneSnapshot(): SceneDescription {
-  return applySceneDraft(useSceneStore.getState().scene, useSceneDraftStore.getState().draft);
+/**
+ * Non-reactive read, for the render loop and pointer handlers.
+ *
+ * The two halves are passed as store hooks rather than as a `PaneSession` so
+ * that this file stays a leaf of the store layer: the session module imports
+ * the stores, never the other way round.
+ */
+export function displaySceneSnapshot(
+  sceneStore: SceneStoreHook = useSceneStore,
+  draftStore: SceneDraftStoreHook = useSceneDraftStore,
+): SceneDescription {
+  return applySceneDraft(sceneStore.getState().scene, draftStore.getState().draft);
 }

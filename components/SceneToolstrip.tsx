@@ -6,9 +6,6 @@ import { TANK_SELECTION_ID } from "../lib/core/editor-tank";
 import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
 import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
-import { useMethodStore } from "../lib/core/stores/method-store";
-import { useSceneStore } from "../lib/core/stores/scene-store";
-import { useUIStore } from "../lib/core/stores/ui-store";
 import { EntityDeleteRow, EntityMoreRow, EntityOptionRows } from "./EntityOptions";
 import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
 import { FieldControlRows, methodSetupTabs } from "./FluidFieldFlyout";
@@ -16,6 +13,7 @@ import { StoneDialRows } from "./StoneLookFlyout";
 import { CanopyDialRows } from "./TreeCanopyFlyout";
 import { RimDialRows } from "./VesselRimFlyout";
 import { Toolstrip, ToolstripMoreRow, ToolstripRule, ToolstripTitle } from "./toolstrip";
+import { useSession } from "../lib/core/session/session-context";
 
 /**
  * The strip at the container's corner: what can be seen, and — when the tank is
@@ -51,8 +49,9 @@ export function ContainerToolstrip({
   /** The tank, when it is selected. Its own settings join the column. */
   entity?: EditorEntity;
 }) {
-  const methodId = useMethodStore((state) => state.methodId);
-  const select = useUIStore((state) => state.select);
+  const session = useSession();
+  const methodId = session.method((state) => state.methodId);
+  const select = session.ui((state) => state.select);
   const hasFields = methodHasQuickFields(methodId);
   if (!hasFields && entity === undefined) return null;
 
@@ -116,7 +115,8 @@ export function EntityToolstrip({
   topFraction: number;
   entity: EditorEntity;
 }) {
-  const scene = useSceneStore((state) => state.scene);
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
   const selection = entity.selection;
   const sceneryId = selection.kind === "scenery" ? sceneryIdFromSelection(selection.id) : undefined;
   const vesselName = selection.kind === "vessel-rim"

@@ -37,42 +37,64 @@
   /* Both, and the system decides — until the reader says otherwise. */
   color-scheme: light dark;
 
-  /* Light is paper: warm, low-contrast, generous. Dark is the same room after
-     hours — a warm charcoal ground rather than a green-black one, so the
-     accent reads as a mark on a surface instead of as the surface itself.
-     Every ambient wash in dark is amber; the jade is spent only where
-     something is live, selected, or wet. */
+  /* Light is paper: warm and generous, and — since it was measured — legible.
+     "Low-contrast" was the old word for it, and it turned out to mean the
+     product's commonest label sat at 2.4:1 on its own page. The five greys
+     below are now a real ladder, spaced in L* rather than by eye: 19 / 29 / 35
+     / 40 / 45, every rung clearing 4.5:1 on every surface the sheet puts text
+     on, and the top two clearing 7:1 on `--bg`. Warm still, just not faint.
+     Dark is the same room after hours — a warm charcoal ground rather than a
+     green-black one, so the accent reads as a mark on a surface instead of as
+     the surface itself. Every ambient wash in dark is amber; the jade is spent
+     only where something is live, selected, or wet. */
   --bg: light-dark(#f5f2eb, #13100c);
   --panel: light-dark(#fffdf8, rgba(32, 28, 22, .94));
   --panel-soft: light-dark(#f0ebe1, rgba(44, 38, 30, .78));
   --ink: light-dark(#26302d, #f4eee3);
-  --muted: light-dark(#616e6a, #a89c8c);
-  --dim: light-dark(#98a29d, #736858);
-  /* Text that wants to recede. `--dim` cannot do this job: measured against a
-     recessed instrument field it is 2.2:1 in light and 3.2:1 in dark, which
-     fails AA at every size, and it is spent all over this sheet on borders,
-     toggle tracks and disclosure glyphs where a contrast floor does not apply.
-     These two sit between `--muted` and `--ink` — measured 7.4:1 and 5.9:1 in
-     light, 8.8:1 and 7.0:1 in dark, against `--well` over `--panel` — so a
-     label can be quiet without being unreadable and `--dim` keeps its
-     hairlines. Authored as their own pair rather than mixed from the tokens
-     either side: these are contrast targets that were measured, and the ratio
-     a mix lands on is whatever the two endpoints happen to make. The mix would
-     also drift every time a neighbouring token moved. */
-  --label: light-dark(#48554f, #c6baa9);
-  --micro: light-dark(#57645f, #b1a595);
+  --muted: light-dark(#55615d, #b0a494);
+  /* The bottom rung, and a *text* colour — which is what it had to become.
+     The note here used to say `--dim` was spent on borders and toggle tracks
+     where a contrast floor does not apply; measuring the sheet said otherwise.
+     Ninety rules set `color: var(--dim)` — captions, eyebrows, units, table
+     columns, the diff strip, half the toolstrip — and every border in the
+     product reads `--line` or `--line-strong` instead. At its old #98a29d that
+     text measured 2.2-2.6:1 in light, so the single most common label colour
+     in the product was also its least readable. It now clears 4.5:1 on every
+     surface it lands on, the worst being the diff strip's row wash over an
+     instrument pane over a mid-grey scene. The eleven non-text uses are all
+     status dots, toggle knobs and glyph strokes — foreground marks, which a
+     darker value only helps. */
+  --dim: light-dark(#636b66, #9a8c78);
+  /* Text that wants to recede, between `--muted` and `--ink`: 8.8:1 and 7.2:1
+     in light, 9.5:1 and 7.5:1 in dark, against `--well` over `--panel`. So a
+     label can be quiet without being unreadable. Authored as their own pair
+     rather than mixed from the tokens either side: these are contrast targets
+     that were measured, and the ratio a mix lands on is whatever the two
+     endpoints happen to make. The mix would also drift every time a
+     neighbouring token moved. */
+  --label: light-dark(#3b4842, #c6baa9);
+  --micro: light-dark(#48554f, #b1a595);
   --line: light-dark(#e2dacb, rgba(244, 214, 166, .14));
   --line-strong: light-dark(#cabfa8, rgba(244, 214, 166, .24));
-  --accent: light-dark(#2f8f7f, #7fd7b4);
-  --accent-strong: light-dark(#1f6d61, #a8ecce);
-  --accent-wash: light-dark(rgba(47, 143, 127, .075), rgba(127, 215, 180, .08));
-  --accent-line: light-dark(rgba(47, 143, 127, .3), rgba(127, 215, 180, .3));
-  --amber: light-dark(#b0743a, #f7c66d);
-  /* The readable half of the amber pair, exactly as `--alert-ink` is for
-     `--alert`: `--amber` is 3.2:1 on `--amber-wash` in light, so it can carry
-     a border and a glyph but not a sentence. Dark needs no second value. */
+  /* Jade, one step deeper in light than it was. Forty-eight rules spend the
+     accent as *text* — a live value, a linked figure, the B column of the
+     divergence table — and at #2f8f7f those read 3.3-3.9:1 on paper. The wash
+     and the line restate the same RGB so the family cannot fork. */
+  --accent: light-dark(#227064, #7fd7b4);
+  --accent-strong: light-dark(#1a5f55, #a8ecce);
+  --accent-wash: light-dark(rgba(34, 112, 100, .075), rgba(127, 215, 180, .08));
+  --accent-line: light-dark(rgba(34, 112, 100, .3), rgba(127, 215, 180, .3));
+  --amber: light-dark(#96622f, #f7c66d);
+  /* The darker half of the amber pair. The note here used to say `--amber`
+     could carry a border and a glyph but not a sentence — while twenty-two
+     rules spent it on exactly that: every `.fine-band-warning`, every
+     `.gpu-fallback strong`, the whole warn tone of the transport bar. Rather
+     than repoint twenty-two selectors, light's `--amber` is now itself
+     readable (4.5:1 on the washes, 5.1:1 on `--panel`), and this token stays a
+     step below it for the worst composite there is: a wash inside a
+     translucent pane over a mid-grey scene. Dark needs no second value. */
   --amber-ink: light-dark(#8a5424, #f7c66d);
-  --red: light-dark(#bd584c, #ff877c);
+  --red: light-dark(#a54b40, #ff877c);
   /* The warm half of the page: a second, quieter wash so a surface reads as
      paper rather than as white — and, in dark, the amber that carries the
      room's temperature. Both halves are now the same hue family, which is the
@@ -102,10 +124,10 @@
   --frost: blur(16px);
   --frost-chip: blur(8px);
   --on-accent: light-dark(#fffdf8, #101a15);
-  --amber-line: light-dark(rgba(176, 116, 58, .4), rgba(247, 198, 109, .4));
-  --amber-wash: light-dark(rgba(176, 116, 58, .08), rgba(247, 198, 109, .09));
-  --red-line: light-dark(rgba(189, 88, 76, .4), rgba(255, 135, 124, .42));
-  --red-wash: light-dark(rgba(189, 88, 76, .07), rgba(255, 135, 124, .1));
+  --amber-line: light-dark(rgba(150, 98, 47, .4), rgba(247, 198, 109, .4));
+  --amber-wash: light-dark(rgba(150, 98, 47, .08), rgba(247, 198, 109, .09));
+  --red-line: light-dark(rgba(165, 75, 64, .4), rgba(255, 135, 124, .42));
+  --red-wash: light-dark(rgba(165, 75, 64, .07), rgba(255, 135, 124, .1));
   --alert: light-dark(#c62a3f, #ff1738);
   --alert-ink: light-dark(#a8384a, #ff6278);
   --alert-line: light-dark(rgba(198, 42, 63, .45), rgba(255, 23, 56, .6));
@@ -125,9 +147,9 @@
   /* The editor's third axis. X is `--red` and Y is `--accent`; Z is the only
      one the palette did not already have a name for. */
   --axis-z: #7cb6ff;
-  --violet: light-dark(#6b4bd6, #c2a6ff);
-  --violet-line: light-dark(rgba(107, 75, 214, .35), rgba(194, 166, 255, .42));
-  --violet-wash: light-dark(rgba(107, 75, 214, .06), rgba(194, 166, 255, .08));
+  --violet: light-dark(#5f43c0, #c2a6ff);
+  --violet-line: light-dark(rgba(95, 67, 192, .35), rgba(194, 166, 255, .42));
+  --violet-wash: light-dark(rgba(95, 67, 192, .06), rgba(194, 166, 255, .08));
 
   /* The two stripes of every "no measurement here" hatch in the activity grid.
      They were six hardcoded green-blacks, which is why the empty half of that
@@ -309,8 +331,14 @@ button.card[data-active] { border-color: var(--accent); }
 
 /* One area, edge to edge. The shell used to reserve a right column for a docked
    panel and a 58 px bottom row for the transport footer; both are gone, and
-   everything that still has to be on screen is an overlay on the scene. */
+   everything that still has to be on screen is an overlay on the scene.
+
+   `position: relative` because the host chrome — the scene chip, the transport,
+   the diff strip — is positioned against the *shell* rather than against a
+   pane. With one column the two rectangles coincide, so nothing moved; with two
+   the transport stays centred over the pair instead of duplicating itself. */
 .lab-shell {
+  position: relative;
   height: 100vh;
   min-height: 480px;
   display: grid;
@@ -318,6 +346,265 @@ button.card[data-active] { border-color: var(--accent); }
   grid-template-rows: minmax(0, 1fr);
   background: var(--bg);
 }
+/* Compare: two panes and the seam between them. The exact split is an inline
+   style, because the splitter writes it; this is only the shape. */
+.lab-shell[data-compare="true"] { grid-template-columns: minmax(0, 1fr) 6px minmax(0, 1fr); }
+
+/* ---------------------------------------------------------------------------
+   A/B compare.
+
+   Two `.viewport-shell`s, a 6 px seam, and one readout on it. Nothing docks and
+   nothing new is permanent: leaving the mode leaves the studio exactly as it
+   was, which is why none of these rules reach outside `[data-compare]`.
+   --------------------------------------------------------------------------- */
+
+/* The seam itself: a hairline with a grab area, not a bar. */
+.compare-splitter {
+  position: relative; z-index: 12;
+  background: var(--line);
+  cursor: col-resize;
+  touch-action: none;
+}
+.compare-splitter::after {
+  content: ""; position: absolute; inset: 0 -5px;
+}
+.compare-splitter:hover, .compare-splitter:focus-visible { background: var(--accent-line); outline: none; }
+/* What follows the pointer during a drag. The columns themselves are written
+   once, at the release: every change reallocates two G-buffers. */
+.compare-splitter-ghost {
+  position: absolute; z-index: 13; top: 0; bottom: 0;
+  width: 1px; margin-left: -1px;
+  background: var(--accent);
+  opacity: 0; pointer-events: none;
+  /* No fade. This is a drag affordance and it has to be under the pointer on
+     the first move, not a tenth of a second after it — and on a page running
+     two solvers the animation clock is the first thing to stall. */
+}
+.compare-splitter-ghost[data-dragging="true"] { opacity: .9; }
+
+/* Which pane is which, and which one the keyboard is in.
+
+   Halfway down each pane's *outer* edge, which is the one berth both panes
+   still have free. Every corner is taken by something that is only sometimes
+   there — the transport straddles the seam, the mode chip and the instrument
+   tags hold the top right, the scale readout appears at the bottom right of
+   whichever pane is being edited — and a label that lands under a control half
+   the time is worse than no label. The size of a caption rather than a badge:
+   this answers "which one am I typing into", and it is the reader's own
+   pointer that put it there. */
+.pane-tag {
+  position: absolute; z-index: 7; left: 12px; top: 50%;
+  transform: translateY(-50%);
+  min-width: 22px; height: 22px; padding: 0 6px;
+  display: grid; place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--overlay);
+  color: var(--dim);
+  font: var(--text-tag); letter-spacing: var(--track-wide);
+  backdrop-filter: var(--frost-chip);
+  /* Quiet, and *only* through the token. This tag carried `opacity: .5` at
+     rest, which took its letter to 1.5:1 — the mark that answers "which pane
+     am I typing into" was the least legible text in the product. The colour
+     step from `--dim` to `--accent` is what reads as lighting up. */
+  transition: color .18s ease, border-color .18s ease;
+  /* Clickable, because the mark that says "this pane" is also where its scene
+     is chosen — see `.scene-selector`. It was inert while it was only a label. */
+  cursor: pointer;
+}
+.pane-tag[data-pane="b"] { left: auto; right: 12px; }
+.pane-tag:hover, .pane-tag:focus-visible { border-color: var(--accent-line); color: var(--accent); outline: none; }
+.pane-tag[data-pane-focused="true"] { border-color: var(--accent-line); color: var(--accent); }
+
+/* The diff strip: what differs, on the seam. Instrument language throughout —
+   translucent, hairline, sentence case — because it is a caption on the scene
+   and not a dialog over it. */
+.compare-diff-strip {
+  /* The instrument tokens, redeclared for the same reason `.scene-instrument`
+     declares them rather than `:root`: they mean "over a live image", and this
+     pane hangs over two of them. */
+  /* The light half is far opaquer than the dark one on purpose. A dark pane
+     over a bright viewport gains contrast from the image behind it; a pale one
+     loses it, and at .74 every readout on this pane measured a full point of
+     contrast below the same readout on `--panel`. .9 keeps the frost — the
+     blur and the saturate are still what make it a plate — and puts the text
+     back on paper. */
+  --instrument-pane: light-dark(rgba(255, 253, 248, .9), rgba(20, 17, 12, .66));
+  --instrument-hair: light-dark(rgba(66, 56, 38, .12), rgba(244, 214, 166, .1));
+  --instrument-hair-soft: light-dark(rgba(66, 56, 38, .04), rgba(244, 214, 166, .05));
+  position: absolute; z-index: 14; top: 62px; left: 50%;
+  width: min(340px, calc(100% - 40px));
+  transform: translateX(-50%);
+  display: grid; gap: 7px;
+  padding: 9px 10px 8px;
+  border: 1px solid var(--instrument-hair);
+  border-radius: var(--radius-m);
+  background: var(--instrument-pane);
+  box-shadow: 0 1px 2px var(--shadow-soft), 0 26px 52px -30px var(--shadow-tint);
+  backdrop-filter: blur(20px) saturate(140%);
+  max-height: min(50%, 460px); overflow: auto;
+  overscroll-behavior: contain;
+}
+.compare-diff-strip > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.compare-diff-strip > header > strong { color: var(--dim); font: var(--text-eyebrow); letter-spacing: var(--track-wider); text-transform: uppercase; }
+.compare-diff-strip > header > strong i { font-style: normal; font-weight: 400; }
+.compare-padlocks { display: flex; align-items: center; gap: 2px; }
+.compare-padlocks button {
+  height: 20px; padding: 0 5px;
+  display: flex; align-items: center; gap: 3px;
+  border: 1px solid transparent; border-radius: var(--radius-s);
+  background: transparent; color: var(--dim);
+  font: var(--text-micro); letter-spacing: var(--track-wide);
+  cursor: pointer; transition: color .16s ease, border-color .16s ease, background .16s ease;
+}
+.compare-padlocks button:hover { border-color: var(--instrument-hair); color: var(--ink); }
+/* Linked is the resting state, so it is the quiet one. An *unlinked* group is
+   the thing a reader has to notice: it means that difference is not the solver. */
+.compare-padlocks button[data-linked="false"] { border-color: var(--amber-line); color: var(--amber); }
+.compare-diff-strip ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.compare-diff-strip li {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 6px;
+  padding: 3px 4px; border-radius: var(--radius-s);
+  background: var(--instrument-hair-soft);
+}
+.compare-key { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--size-2); text-overflow: ellipsis; white-space: nowrap; }
+.compare-values { display: flex; align-items: baseline; gap: 4px; font: var(--text-micro); font-variant-numeric: tabular-nums; }
+.compare-values em { max-width: 92px; overflow: hidden; color: var(--dim); font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.compare-values i { color: var(--dim); font-style: normal; }
+.compare-values strong { max-width: 92px; overflow: hidden; color: var(--accent); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.compare-op {
+  width: 18px; height: 18px; display: grid; place-items: center;
+  border: 1px solid transparent; border-radius: var(--radius-s);
+  background: transparent; color: var(--dim); font-size: var(--size-2);
+  cursor: pointer; transition: color .16s ease, border-color .16s ease;
+}
+.compare-op:hover { border-color: var(--line-strong); color: var(--ink); }
+.compare-identical { margin: 0; color: var(--dim); font: var(--text-micro); }
+.compare-note { margin: 0; color: var(--dim); font: var(--text-micro); }
+.compare-note[data-tone="warn"] { color: var(--amber); }
+/* The divergence oracle: two columns of figures the panes each report about
+   themselves. Tabular, because the only reading anyone takes off it is "do
+   these two numbers differ" — and digits that do not line up cannot be
+   compared at a glance. A hairline above it, not a box: it is the same caption
+   continuing, not a second instrument stacked on the seam. */
+.compare-stats { width: 100%; border-collapse: collapse; border-top: 1px solid var(--instrument-hair); font: var(--text-micro); font-variant-numeric: tabular-nums; }
+.compare-stats th, .compare-stats td { padding: 2px 0; text-align: right; font-weight: 400; }
+/* The faded half of this table was `opacity` rather than a token — .7 and .8
+   over `--dim`, which is 2.4:1 and 2.7:1 no matter how readable `--dim` itself
+   is. A quiet column is quiet by which token it names. */
+.compare-stats thead th { padding-top: 5px; color: var(--dim); letter-spacing: var(--track-wide); text-transform: uppercase; }
+.compare-stats tbody th { color: var(--muted); text-align: left; white-space: nowrap; }
+.compare-stats tbody th small { margin-left: 3px; color: var(--dim); font-size: inherit; }
+/* B is the pane being read against A, so it carries the accent the diff rows
+   give B's value; A stays the quiet baseline. */
+.compare-stats tbody td:first-of-type { color: var(--dim); }
+.compare-stats tbody td:first-of-type + td { color: var(--accent); }
+.compare-stat-delta { min-width: 66px; color: var(--dim); }
+/* A figure that should agree and does not. The row goes amber whole, because
+   the divergence is between the two cells rather than in either of them. */
+.compare-stats tr[data-tone="warn"] th, .compare-stats tr[data-tone="warn"] td { color: var(--amber); }
+@media (prefers-reduced-motion: reduce) {
+  .pane-tag, .compare-padlocks button, .compare-op { transition: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   The scene selector.
+
+   A popover per pane, raised from the pane's own tag, from the scene chip, from
+   the ring's Scene wedge or from `o`. Not compare-only — a single pane has one
+   of these too — but it is what makes compare mode's coarsest diff sayable, so
+   it lives beside those rules.
+
+   Instrument language, like the diff strip and for the same reason: it hangs
+   over a live image and has to read as a caption on the scene rather than as a
+   dialog demanding to be dismissed. Inside its own pane, at the corner where
+   the scene's name is already written, so the popover appears where the
+   question was asked.
+   --------------------------------------------------------------------------- */
+.scene-selector {
+  --instrument-pane: light-dark(rgba(255, 253, 248, .9), rgba(20, 17, 12, .74));
+  --instrument-veil: light-dark(rgba(255, 253, 248, .62), rgba(28, 24, 18, .52));
+  --instrument-hair: light-dark(rgba(66, 56, 38, .12), rgba(244, 214, 166, .1));
+  position: absolute; z-index: 14; left: 16px; top: 66px;
+  width: min(330px, calc(100% - 32px));
+  max-height: min(52vh, calc(100% - 150px));
+  display: flex; flex-direction: column; min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--instrument-hair);
+  border-radius: var(--radius-m);
+  background: var(--instrument-pane);
+  box-shadow:
+    inset 0 1px 0 light-dark(rgba(255, 255, 255, .5), rgba(255, 236, 205, .06)),
+    0 1px 2px var(--shadow-soft),
+    0 32px 64px -30px var(--shadow-tint);
+  backdrop-filter: blur(20px) saturate(140%);
+}
+/* Pane B's chrome hugs the outer edge, and so does its popover: two selectors
+   both opening at the left would put B's list over the seam it shares with A. */
+.viewport-shell[data-pane="b"] .scene-selector { left: auto; right: 16px; }
+
+.scene-selector-search {
+  flex: none;
+  height: 34px; padding: 0 10px;
+  display: flex; align-items: center; gap: 8px;
+  border-bottom: 1px solid var(--instrument-hair);
+  background: var(--instrument-veil);
+  cursor: text;
+}
+.scene-selector-search svg { width: 13px; height: 13px; flex: none; fill: none; stroke: var(--dim); stroke-width: 1.5; stroke-linecap: round; }
+.scene-selector-search input {
+  min-width: 0; flex: 1; height: 100%;
+  border: 0; outline: 0; appearance: none; background: transparent;
+  color: var(--ink); font-size: var(--size-4);
+}
+.scene-selector-search input::placeholder { color: var(--dim); }
+.scene-selector-search input::-webkit-search-cancel-button { appearance: none; }
+
+.scene-selector-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0 6px; }
+/* A shelf heading, not a section: the eyebrow says which family the rows below
+   belong to and then gets out of the way of the names, which are the thing
+   being read. */
+.scene-selector-shelf {
+  margin: 6px 0 2px; padding: 0 11px;
+  color: var(--dim); font: var(--text-eyebrow);
+  letter-spacing: var(--track-wider); text-transform: uppercase;
+}
+.scene-selector-list > .scene-selector-shelf:first-child { margin-top: 2px; }
+.scene-selector-row {
+  width: 100%; padding: 5px 11px;
+  display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 8px;
+  border: 0; background: transparent; text-align: left; cursor: pointer;
+}
+.scene-selector-row strong {
+  min-width: 0; overflow: hidden;
+  color: var(--ink); font-size: var(--size-4); font-weight: 500;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.scene-selector-row small { color: var(--dim); font: var(--text-micro); white-space: nowrap; }
+.scene-selector-row mark { background: transparent; color: var(--accent-strong); font-weight: 650; }
+/* One highlight, moved by both the pointer and the arrow keys, because they
+   have to agree about which row Enter opens. */
+.scene-selector-row[data-active="true"] { background: var(--accent-wash); }
+.scene-selector-row[data-active="true"] strong { color: var(--accent-strong); }
+/* The scene already running. A dot rather than a word: the row is a name and a
+   shelf, and "current" spelled out would be a third column of prose. */
+.scene-selector-row[data-current="true"] strong::before {
+  content: ""; display: inline-block; vertical-align: middle;
+  width: 5px; height: 5px; margin-right: 6px;
+  border-radius: 50%; background: var(--accent);
+}
+.scene-selector-empty { margin: 8px 11px; color: var(--dim); font: var(--text-micro); }
+
+.scene-selector-browse {
+  flex: none;
+  height: 30px; padding: 0 11px;
+  display: flex; align-items: center;
+  border: 0; border-top: 1px solid var(--instrument-hair);
+  background: var(--instrument-veil);
+  color: var(--muted); font: var(--text-micro); text-align: left;
+  cursor: pointer;
+}
+.scene-selector-browse:hover { color: var(--ink); }
 
 .brand-mark { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border: 1.5px solid var(--accent-line); border-radius: var(--radius-s, 0); color: var(--accent); font: 800 12px/1 var(--display, var(--sans)); letter-spacing: -.04em; }
 .segmented button { border: 0; background: transparent; color: var(--muted); cursor: pointer; transition: .18s ease; }
@@ -369,8 +656,11 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    that is open. They reserve their width at rest so revealing them never nudges
    the number, and they sit left of it so the digits keep the corner. */
 .fps-cluster { position: absolute; z-index: 6; top: 15px; right: 16px; display: flex; align-items: center; gap: 6px; pointer-events: none; transition: right .2s ease; }
-.fps-meter { min-width: 68px; height: 26px; padding: 0 9px; display: grid; place-items: center; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); opacity: .62; pointer-events: none; backdrop-filter: var(--frost); transition: opacity .2s ease; }
-.viewport-shell:hover .fps-meter { opacity: 1; }
+/* "Quiet" here is a token, not an opacity. At `.62` these digits measured
+   2.5:1 — a readout nobody could take the glance off. `--dim` to `--ink` is
+   the same two-step reveal, at contrast the whole way. */
+.fps-meter { min-width: 68px; height: 26px; padding: 0 9px; display: grid; place-items: center; border: 1px solid var(--line); background: var(--overlay); color: var(--dim); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); pointer-events: none; backdrop-filter: var(--frost); transition: color .2s ease; }
+.viewport-shell:hover .fps-meter { color: var(--ink); }
 /* Look, or edit. The one control in this corner that is fully lit at rest: the
    rest of the cluster is a glance you can go and find, and this is the reason
    the pointer does or does not reach the scene. Quiet in LOOK, accent in EDIT —
@@ -379,16 +669,22 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .viewport-mode-toggle svg { flex: none; opacity: .85; }
 .viewport-mode-toggle strong { font: inherit; }
 .viewport-mode-toggle em { padding: 1px 4px; border: 1px solid currentColor; border-radius: var(--radius-s); font: var(--text-micro); font-style: normal; letter-spacing: var(--track-wide); opacity: 0; transition: opacity .18s ease; }
-.viewport-shell:hover .viewport-mode-toggle em, .viewport-mode-toggle:focus-visible em { opacity: .55; }
-.viewport-mode-toggle:hover { border-color: var(--line-strong); background: var(--hover); color: var(--text); }
+.viewport-shell:hover .viewport-mode-toggle em, .viewport-mode-toggle:focus-visible em { opacity: 1; }
+/* `var(--text)` — no such token. It resolved to the guaranteed-invalid value,
+   so `color` fell back to the inherited ink and this happened to look right;
+   name the token it meant. */
+.viewport-mode-toggle:hover { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
 .viewport-mode-toggle[data-viewport-mode="interact"] { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
 .viewport-mode-toggle[data-viewport-mode="interact"]:hover { background: var(--accent); color: var(--on-accent); }
 @media (prefers-reduced-motion: reduce) { .viewport-mode-toggle, .viewport-mode-toggle em { transition: none; } }
 .fps-instruments { display: flex; align-items: center; gap: 4px; }
-.fps-instruments button { height: 26px; padding: 0 8px; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); opacity: 0; pointer-events: none; backdrop-filter: var(--frost); cursor: pointer; transition: opacity .2s ease, color .2s ease, border-color .2s ease, background .2s ease; }
-.viewport-shell:hover .fps-instruments button { opacity: .5; pointer-events: auto; }
-.fps-instruments:hover button, .fps-instruments:focus-within button, .fps-instruments button[aria-pressed="true"] { opacity: 1; }
-.fps-instruments button:hover { border-color: var(--line-strong); background: var(--hover); color: var(--text); }
+/* Opacity here is presence — absent, or on the screen. Once a tag is on the
+   screen it is a word to read, so the "dim until the pointer is on them" step
+   is `--dim` to `--ink` rather than half an alpha. */
+.fps-instruments button { height: 26px; padding: 0 8px; border: 1px solid var(--line); background: var(--overlay); color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); opacity: 0; pointer-events: none; backdrop-filter: var(--frost); cursor: pointer; transition: opacity .2s ease, color .2s ease, border-color .2s ease, background .2s ease; }
+.viewport-shell:hover .fps-instruments button { opacity: 1; pointer-events: auto; }
+.fps-instruments:hover button, .fps-instruments:focus-within button, .fps-instruments button[aria-pressed="true"] { color: var(--ink); }
+.fps-instruments button:hover { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
 .fps-instruments button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 /* An open pane takes this corner, and a tag under it can neither be read nor
    clicked — which would make switching instruments a close-then-reopen. So the
@@ -444,7 +740,8 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .scene-overrides-popover h4 { margin: 0 0 5px; color: var(--label); font: var(--text-tag); letter-spacing: var(--track-wider); text-transform: uppercase; }
 .scene-overrides-popover ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; }
 .scene-overrides-popover li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: baseline; gap: 8px; }
-.scene-overrides-popover li[data-counted="false"] { opacity: .62; }
+/* "Not counted" is the value going grey, below — the row does not also need to
+   fade. At `.62` its label measured 4.1:1 and its value 2.5:1. */
 .override-label { overflow: hidden; color: var(--ink); font: var(--text-note); text-overflow: ellipsis; white-space: nowrap; }
 .override-value { max-width: 140px; overflow: hidden; color: var(--amber-ink); font: var(--text-readout); text-overflow: ellipsis; white-space: nowrap; }
 .scene-overrides-popover li[data-counted="false"] .override-value { color: var(--dim); }
@@ -537,10 +834,16 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    than in `:root` because they mean "over a live image": the same hairline over
    paper would be invisible, and the same pane alpha over paper would be grey. */
 .scene-instrument {
-  --instrument-pane: light-dark(rgba(255, 253, 248, .74), rgba(20, 17, 12, .66));
+  /* The light half is far opaquer than the dark one on purpose. A dark pane
+     over a bright viewport gains contrast from the image behind it; a pale one
+     loses it, and at .74 every readout on this pane measured a full point of
+     contrast below the same readout on `--panel`. .9 keeps the frost — the
+     blur and the saturate are still what make it a plate — and puts the text
+     back on paper. */
+  --instrument-pane: light-dark(rgba(255, 253, 248, .9), rgba(20, 17, 12, .66));
   --instrument-veil: light-dark(rgba(255, 253, 248, .62), rgba(28, 24, 18, .52));
   --instrument-hair: light-dark(rgba(66, 56, 38, .12), rgba(244, 214, 166, .1));
-  --instrument-hair-soft: light-dark(rgba(66, 56, 38, .06), rgba(244, 214, 166, .05));
+  --instrument-hair-soft: light-dark(rgba(66, 56, 38, .04), rgba(244, 214, 166, .05));
   position: absolute; z-index: 10; top: 14px; right: 14px; bottom: 62px;
   /* Narrow on purpose. The graph is one rail now, so a card is wider here at
      420px than it was in the 560px pane that drew two of them side by side —
@@ -965,10 +1268,16 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    dock slides left of the instrument column when one is up — that pane owns the
    right edge from top to bottom, so a HUD under it is a HUD nobody can read. */
 .pixel-trace-hud {
-  --instrument-pane: light-dark(rgba(255, 253, 248, .74), rgba(20, 17, 12, .66));
+  /* The light half is far opaquer than the dark one on purpose. A dark pane
+     over a bright viewport gains contrast from the image behind it; a pale one
+     loses it, and at .74 every readout on this pane measured a full point of
+     contrast below the same readout on `--panel`. .9 keeps the frost — the
+     blur and the saturate are still what make it a plate — and puts the text
+     back on paper. */
+  --instrument-pane: light-dark(rgba(255, 253, 248, .9), rgba(20, 17, 12, .66));
   --instrument-veil: light-dark(rgba(255, 253, 248, .62), rgba(28, 24, 18, .52));
   --instrument-hair: light-dark(rgba(66, 56, 38, .12), rgba(244, 214, 166, .1));
-  --instrument-hair-soft: light-dark(rgba(66, 56, 38, .06), rgba(244, 214, 166, .05));
+  --instrument-hair-soft: light-dark(rgba(66, 56, 38, .04), rgba(244, 214, 166, .05));
   --hud-width: 352px;
   --hud-dock-right: 16px;
   position: absolute; z-index: 8; right: var(--hud-dock-right); bottom: 70px;
@@ -997,6 +1306,14 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
      fully readable. */
   .pixel-trace-hud[data-trace="fluid-cell"] { right: auto; left: 16px; }
 }
+/* A pane is half a shell, so the same arrangement applies whatever the window
+   is: the berth is a property of the `.viewport-shell` the HUDs dock in, not of
+   the page they happen to be on. */
+.lab-shell[data-compare="true"] .pixel-trace-hud[data-trace="fluid-cell"] { right: auto; left: 16px; }
+/* Both panes dock their bring-up tray to the right, which in pane A is the
+   seam — under the diff strip, and beside pane B's own copy of the same card.
+   Sent to the pair's outer edges instead, where the pane tags already are. */
+.lab-shell[data-compare="true"] .viewport-shell[data-pane="a"] .resource-activity-tray { right: auto; left: 17px; }
 /* Pinned and stale are the two states worth spending the edge on, so they keep
    their coloured border against the hairline everything else gets. */
 .pixel-trace-hud[data-pinned="true"] { border-color: var(--amber-line); }
@@ -1155,7 +1472,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .mode-chip { margin: 0; display: flex; align-items: center; gap: 8px; min-height: 27px; max-width: clamp(200px, calc(50vw - 400px), 610px); padding: 5px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost); box-shadow: var(--shadow-card); text-align: left; }
 .mode-chip strong { flex: none; font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
 .mode-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font: var(--text-micro); }
-.mode-chip em { flex: none; padding: 2px 5px; border: 1px solid currentColor; border-radius: var(--radius-s); font: var(--text-tag); font-style: normal; letter-spacing: var(--track-wide); opacity: .7; }
+.mode-chip em { flex: none; padding: 2px 5px; border: 1px solid currentColor; border-radius: var(--radius-s); font: var(--text-tag); font-style: normal; letter-spacing: var(--track-wide); }
 /* Armed and carrying are the two states where the next click does something
    other than select, so both take the accent outright rather than a tint. */
 .mode-chip.armed { border-color: var(--accent); background: var(--accent); color: var(--on-accent); cursor: pointer; }
@@ -1713,9 +2030,12 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .visualization-legend > li > button small { margin-left: auto; padding-left: 6px; color: var(--muted); font-variant-numeric: tabular-nums; }
 /* Off and empty rows stay in the list — the row is also the switch, and
    flicking a layer off to see under it and back on is the whole gesture. */
-.visualization-legend > li[data-enabled="false"] > button { opacity: .55; }
+/* `data-enabled="false"` is the same flag as `aria-pressed="false"`, which is
+   already the resting look — `--dim` on a plain hairline, against the on row's
+   `--muted` on `--hover` inside a `--line-strong`. The `opacity: .55` on top
+   of that was a third signal that only cost legibility. */
 .visualization-legend > li[data-empty="true"] > button { color: var(--dim); }
-.visualization-legend > li[data-empty="true"] > button small { opacity: .55; }
+.visualization-legend > li[data-empty="true"] > button small { color: var(--dim); }
 .visualization-legend ul { margin: 3px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; }
 .visualization-legend ul li { display: flex; align-items: center; gap: 6px; padding-left: 7px; color: var(--dim); font: var(--text-note); }
 /* The first entry is what this row's own mark means, so it lines up under the
@@ -2073,7 +2393,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
 }
 .scene-instrument .metric-card > span { color: var(--micro); font: 400 var(--size-2)/1.35 var(--sans); }
 .scene-instrument .metric-card strong { margin-top: 3px; color: var(--ink); font: 500 var(--size-4)/1.2 var(--mono); font-variant-numeric: tabular-nums; }
-.scene-instrument .metric-card small { margin-top: 2px; color: var(--micro); font: 400 var(--size-1)/1.4 var(--mono); opacity: .82; }
+.scene-instrument .metric-card small { margin-top: 2px; color: var(--micro); font: 400 var(--size-1)/1.4 var(--mono); }
 .scene-instrument .metric-card.tone-good strong { color: var(--accent-strong); }
 .scene-instrument .metric-card.tone-warn strong { color: var(--amber-ink); }
 

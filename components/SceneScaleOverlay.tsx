@@ -1,8 +1,8 @@
 "use client";
 
 import { simulation } from "../lib/core/simulation/controller";
+import { useSession } from "../lib/core/session/session-context";
 import { useDisplayScene } from "../lib/core/stores/scene-draft-store";
-import { useUIStore } from "../lib/core/stores/ui-store";
 import { sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "../lib/core/scene-scale";
 import { fluidBodyBox, fluidWaterVolume_m3 } from "../lib/core/editor-fluid-body";
 
@@ -43,11 +43,12 @@ const AXES: ReadonlyArray<{
 ];
 
 export function SceneScaleOverlay() {
-  const shapeMode = useUIStore((state) =>
+  const session = useSession();
+  const shapeMode = session.ui((state) =>
     state.selection?.kind === "tank" || state.selection?.kind === "fluid-body");
   // The display scene, so the litres and the extents count up as a shape drag
   // is happening rather than jumping when it lands.
-  const scene = useDisplayScene();
+  const scene = useDisplayScene(session.scene, session.sceneDraft);
   const summary = sceneScaleSummary(scene);
   // Two questions, and they stopped having the same answer once a scene could
   // hold several bodies: the readout reports all the water in the document,
@@ -72,7 +73,7 @@ export function SceneScaleOverlay() {
         title={option.available
           ? `${factor === 2 ? "Double" : "Halve"} the ${axis === "world" ? "world and fluid size" : "cell size"} · ${ax}×${ay}×${az} cells`
           : `Unavailable — ${option.blocked}`}
-        onClick={() => simulation.scaleScene(axis, factor)}
+        onClick={() => simulation.scaleScene(axis, factor, session.id)}
       >{factor === 2 ? "×2" : "÷2"}</button>
     );
   };
@@ -99,7 +100,7 @@ export function SceneScaleOverlay() {
           disabled={!body}
           data-testid="fluid-body-shrink"
           title="Halve the water body"
-          onClick={() => simulation.scaleFluidBody(0.5)}
+          onClick={() => simulation.scaleFluidBody(0.5, session.id)}
         >÷2</button>
         <output>{water_m3 > 0 ? `${(water_m3 * 1000).toFixed(1)} L` : "none"}</output>
         <button
@@ -107,7 +108,7 @@ export function SceneScaleOverlay() {
           disabled={!body}
           data-testid="fluid-body-grow"
           title="Double the water body"
-          onClick={() => simulation.scaleFluidBody(2)}
+          onClick={() => simulation.scaleFluidBody(2, session.id)}
         >×2</button>
       </div>}
     </div>

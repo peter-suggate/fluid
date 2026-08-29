@@ -134,8 +134,8 @@ interface DiagnosticsStore {
  * frame itself still gets `bodies`, because that is the channel it commands
  * through.
  */
-export function drawnBodies(): RigidBodyState[] {
-  const state = useDiagnosticsStore.getState();
+export function drawnBodies(diagnostics: DiagnosticsStoreHook = useDiagnosticsStore): RigidBodyState[] {
+  const state = diagnostics.getState();
   return mergeDrawnPoses(state.bodies, state.bodyPoses);
 }
 
@@ -150,7 +150,7 @@ export function mergeDrawnPoses(
   });
 }
 
-export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
+export const createDiagnosticsStore = () => create<DiagnosticsStore>((set) => ({
   bodies: [],
   bodyPoses: {},
   rigidState: null,
@@ -194,3 +194,14 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
     samples: sample ? [...state.samples.slice(-79), sample] : state.samples,
   })),
 }));
+
+export type DiagnosticsStoreHook = ReturnType<typeof createDiagnosticsStore>;
+
+/**
+ * The default (pane A) instance.
+ *
+ * Per-pane instances come from `createPaneSession`; this one is what a tree
+ * with no `SessionProvider` mounted reads, and what non-React callers that
+ * have not yet been threaded a session resolve to.
+ */
+export const useDiagnosticsStore = createDiagnosticsStore();

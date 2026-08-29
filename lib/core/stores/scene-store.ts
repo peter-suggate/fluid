@@ -19,7 +19,7 @@ interface SceneStore {
   patchNumerics: (patch: Partial<SceneDescription["numerics"]>) => void;
 }
 
-export const useSceneStore = create<SceneStore>((set) => ({
+export const createSceneStore = () => create<SceneStore>((set) => ({
   scene: markSceneRevision(getScenePreset(defaultScenePresetId).create()),
   presetId: defaultScenePresetId,
   setScene: (scene, presetId) => set((state) => ({ scene: markSceneRevision(scene), presetId: presetId ?? state.presetId })),
@@ -28,3 +28,14 @@ export const useSceneStore = create<SceneStore>((set) => ({
   patchFluid: (patch) => set((state) => ({ scene: markSceneRevision({ ...state.scene, fluid: { ...state.scene.fluid, ...patch } }) })),
   patchNumerics: (patch) => set((state) => ({ scene: markSceneRevision({ ...state.scene, numerics: { ...state.scene.numerics, ...patch } }) }))
 }));
+
+export type SceneStoreHook = ReturnType<typeof createSceneStore>;
+
+/**
+ * The default (pane A) instance.
+ *
+ * Per-pane instances come from `createPaneSession`; this one is what a tree
+ * with no `SessionProvider` mounted reads, and what non-React callers that
+ * have not yet been threaded a session resolve to.
+ */
+export const useSceneStore = createSceneStore();

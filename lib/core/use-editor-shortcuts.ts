@@ -4,13 +4,14 @@ import { useEffect } from "react";
 import { editorAxisForKey, toggleAxisConstraint } from "./editor-axis-constraint";
 import { toggledViewportMode, VIEWPORT_MODE_SHORTCUT } from "./editor-viewport-mode";
 import { cameraForFraming, cameraFramingForKey } from "./editor-camera-framing";
+import { toggleCompareMode } from "./compare/compare-mode";
 import { editorGestureForShortcut } from "./editor-gesture-catalog";
 import { stepFluidCellTraceHit } from "./fluid-cell-trace";
 import { editorEntityContext, findEntity } from "./editor-entity-catalog";
 import { sceneInstrumentForShortcut } from "./scene-instruments";
+import type { PaneSession } from "./session/session";
+import { useSession } from "./session/session-context";
 import { simulation } from "./simulation/controller";
-import { useDiagnosticsStore } from "./stores/diagnostics-store";
-import { useUIStore } from "./stores/ui-store";
 
 /** Typing in a form control must never arm a gesture or delete a body. */
 function editingText(target: EventTarget | null): boolean {
@@ -24,11 +25,16 @@ function editingText(target: EventTarget | null): boolean {
  * escape, delete, and focus-on-selection. Registered once by the shell so
  * shortcuts work wherever focus happens to be, not only over the canvas.
  */
-export function useEditorShortcuts(): void {
+export function useEditorShortcuts(focused?: PaneSession): void {
+  // Keys route to the *focused* pane: the last one pointed at. The compare host
+  // hands it in; anywhere else, the session this hook is mounted under is the
+  // only one there is.
+  const mounted = useSession();
+  const session = focused ?? mounted;
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (editingText(event.target)) return;
-      const ui = useUIStore.getState();
+      const ui = session.ui.getState();
       const accelerator = event.metaKey || event.ctrlKey;
 
       // While something is being carried, the viewport owns the keyboard except
@@ -42,15 +48,25 @@ export function useEditorShortcuts(): void {
 
       if (accelerator && event.key.toLowerCase() === "z") {
         event.preventDefault();
-        if (event.shiftKey) simulation.redo(); else simulation.undo();
+        if (event.shiftKey) simulation.redo(session.id); else simulation.undo(session.id);
         return;
       }
       if (accelerator && event.key.toLowerCase() === "y") {
         event.preventDefault();
-        simulation.redo();
+        simulation.redo(session.id);
         return;
       }
       if (accelerator || event.altKey) return;
+
+      // The split. A host key rather than a pane key — it is about how many
+      // panes there are — and the backslash because it is the vertical bar the
+      // splitter draws. Ahead of everything below it so it also works as the
+      // way *out* of a mode nothing else can leave.
+      if (event.key === "\\") {
+        event.preventDefault();
+        toggleCompareMode();
+        return;
+      }
 
       // The mode swap, ahead of everything the mode contains. It is the only key
       // that means something in both modes, and it has to keep working while a
@@ -91,6 +107,11 @@ export function useEditorShortcuts(): void {
         // this is the key that gives the click back. Both go together — they are
         // one layer, two questions about the same pixel — and one Escape putting
         // down "the probes" is a simpler thing to know than an order between them.
+        // The scene chooser is outside all of it: a popover over the image,
+        // like the ring. Reachable from here only when focus has wandered off
+        // its own field — which swallows the key itself so that Escape means
+        // "discard the typing" first.
+        if (ui.sceneSelectorOpen) { ui.setSceneSelectorOpen(false); return; }
         if (ui.pixelTraceEnabled || ui.fluidCellTraceEnabled) {
           ui.setPixelTraceEnabled(false);
           ui.setFluidCellTraceEnabled(false);
@@ -113,15 +134,15 @@ export function useEditorShortcuts(): void {
       // cannot be removed — the tank, the water body — simply do not offer one,
       // so the key falls through rather than being denied by a list here.
       if (event.key === "Delete" || event.key === "Backspace") {
-        const entity = findEntity(editorEntityContext(), ui.selection);
+        const entity = findEntity(editorEntityContext(session), ui.selection);
         if (entity?.remove) {
           event.preventDefault();
-          simulation.removeEntity(`Removed ${entity.label}`, entity.remove());
+          simulation.removeEntity(`Removed ${entity.label}`, entity.remove(), session.id);
           return;
         }
       }
       if (event.key.toLowerCase() === "f" && ui.selection?.kind === "body") {
-        const body = useDiagnosticsStore.getState().bodies.find((candidate) => candidate.description.id === ui.selection?.id);
+        const body = session.diagnostics.getState().bodies.find((candidate) => candidate.description.id === ui.selection?.id);
         if (!body) return;
         event.preventDefault();
         ui.setCamera((current) => ({ ...current, target_m: { ...body.position_m } }));
@@ -138,6 +159,17 @@ export function useEditorShortcuts(): void {
       if (instrument) {
         event.preventDefault();
         ui.setSceneOverlay(ui.sceneOverlay === instrument.id ? null : instrument.id);
+        return;
+      }
+      // The scene chooser, on the focused pane. "o" for open — free of every
+      // tool letter (b, t, y, g, d), every instrument (s, v, h), both probes
+      // (c, r) and the axis locks (x, y, z), which is the whole reason it and
+      // not "s" for scene. Same toggle bargain as everything else here, and the
+      // popover's own field swallows the key once it is up, so this can only
+      // ever open one.
+      if (event.key.toLowerCase() === "o") {
+        event.preventDefault();
+        ui.setSceneSelectorOpen(!ui.sceneSelectorOpen);
         return;
       }
       // Entering and leaving pick mode. "c" for cell, and no editor tool claims
@@ -206,5 +238,5 @@ export function useEditorShortcuts(): void {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [session]);
 }

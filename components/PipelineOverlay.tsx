@@ -1,10 +1,10 @@
 "use client";
 
 import { SCENE_INSTRUMENTS, SCENE_INSTRUMENT_ORDER } from "../lib/core/scene-instruments";
-import { useUIStore } from "../lib/core/stores/ui-store";
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay";
 import { RenderPipelineOverlay } from "./RenderPipelineOverlay";
 import { SimPipelineOverlay } from "./SimPipelineOverlay";
+import { useSession } from "../lib/core/session/session-context";
 
 /**
  * The one host every scene instrument is drawn in.
@@ -29,8 +29,9 @@ import { SimPipelineOverlay } from "./SimPipelineOverlay";
  */
 
 export function PipelineOverlay() {
-  const overlay = useUIStore((state) => state.sceneOverlay);
-  const setSceneOverlay = useUIStore((state) => state.setSceneOverlay);
+  const session = useSession();
+  const overlay = session.ui((state) => state.sceneOverlay);
+  const setSceneOverlay = session.ui((state) => state.setSceneOverlay);
   if (!overlay) return null;
   const chrome = SCENE_INSTRUMENTS[overlay];
   return <aside
@@ -82,8 +83,9 @@ export function PipelineOverlay() {
  * names its own key in the tooltip so the cluster is where they are learned.
  */
 export function SceneInstrumentTags() {
-  const overlay = useUIStore((state) => state.sceneOverlay);
-  const setSceneOverlay = useUIStore((state) => state.setSceneOverlay);
+  const session = useSession();
+  const overlay = session.ui((state) => state.sceneOverlay);
+  const setSceneOverlay = session.ui((state) => state.setSceneOverlay);
   return <div className="fps-instruments" data-testid="scene-instrument-tags">
     {SCENE_INSTRUMENT_ORDER.map((instrument) => {
       const open = overlay === instrument.id;

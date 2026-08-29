@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from "react";
 import { simulation } from "../lib/core/simulation/controller";
-import { useSceneStore } from "../lib/core/stores/scene-store";
 import {
   rimDials,
   sceneVessel,
@@ -10,6 +9,7 @@ import {
   type RimDials,
 } from "../lib/core/vessel-rim-controls";
 import { SculptDialRows } from "./SculptDials";
+import { useSession } from "../lib/core/session/session-context";
 
 /**
  * The coping sculptor, as rows on the selected rim's own strip — the same
@@ -29,12 +29,13 @@ const DIALS: readonly { id: keyof RimDials; label: string; hint: string }[] = [
 ];
 
 export function RimDialRows({ vesselName }: { vesselName: string }) {
-  const scene = useSceneStore((state) => state.scene);
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
   const gestureOpen = useRef(false);
   const endGesture = () => {
     if (!gestureOpen.current) return;
     gestureOpen.current = false;
-    simulation.commitEdit(undefined, { reseed: true });
+    simulation.commitEdit(undefined, { reseed: true }, session.id);
   };
   // Deselecting mid-drag must still close the gesture, or the next edit's
   // undo snapshot would be this one's.
@@ -47,12 +48,12 @@ export function RimDialRows({ vesselName }: { vesselName: string }) {
   const setDial = (id: keyof RimDials, value: number) => {
     if (!gestureOpen.current) {
       gestureOpen.current = true;
-      simulation.beginEdit(`Adjusted ${vesselName} rim`);
+      simulation.beginEdit(`Adjusted ${vesselName} rim`, session.id);
     }
-    const current = useSceneStore.getState().scene;
+    const current = session.scene.getState().scene;
     const held = sceneVessel(current, vesselName);
     if (held === undefined) return;
-    useSceneStore.getState().patchScene(
+    session.scene.getState().patchScene(
       withRimDials(current, vesselName, { ...rimDials(held), [id]: value }),
     );
   };

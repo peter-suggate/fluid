@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { actionIsChoosable, type EditorAction } from "../lib/core/editor-action";
 import { EditorActionIconMark } from "./EditorActionIcon";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
-import { useUIStore } from "../lib/core/stores/ui-store";
+import { useSession } from "../lib/core/session/session-context";
 
 /**
  * The contextual ring.
@@ -145,8 +145,9 @@ function wedgePath(from_rad: number, to_rad: number): string {
 }
 
 export function RadialMenu() {
-  const menu = useUIStore((state) => state.radialMenu);
-  const closeRadialMenu = useUIStore((state) => state.closeRadialMenu);
+  const session = useSession();
+  const menu = session.ui((state) => state.radialMenu);
+  const closeRadialMenu = session.ui((state) => state.closeRadialMenu);
   // The ring currently drawn: the root, or a wedge's children after opening it.
   const [path, setPath] = useState<readonly number[]>([]);
   const [focused, setFocused] = useState(0);
@@ -222,7 +223,7 @@ export function RadialMenu() {
     if (action.children?.length) { setPath([...path, index]); setFocused(0); return; }
     if (!action.effect) return;
     closeRadialMenu();
-    performEditorAction(action.effect);
+    performEditorAction(action.effect, session);
   };
 
   const back = () => {

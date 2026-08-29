@@ -4,8 +4,6 @@ import { useState, type ReactNode } from "react";
 import { formatNumber } from "./controls";
 import { simulation } from "../lib/core/simulation/controller";
 import { length } from "../lib/core/math";
-import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
-import { useSceneStore } from "../lib/core/stores/scene-store";
 import { HERO_GARDEN_SOLVER_CELL_M } from "../lib/core/hero-garden-scene";
 import { findSceneDefinition } from "../lib/core/scenes";
 import { sceneDefinitionTakesLattice } from "../lib/core/scene-definition";
@@ -34,6 +32,7 @@ import {
   type ToolstripTab,
 } from "./toolstrip";
 import { EditorActionGlyph } from "./EditorActionIcon";
+import { useSession } from "../lib/core/session/session-context";
 
 /**
  * Whether this scene has water at all, and — for a dry one — which lattice its
@@ -47,9 +46,10 @@ import { EditorActionGlyph } from "./EditorActionIcon";
  * controls live here — the same bargain `FluidMethodChoice` makes.
  */
 function SceneRebuildControls() {
-  const scene = useSceneStore((state) => state.scene);
-  const presetId = useSceneStore((state) => state.presetId);
-  const patchScene = useSceneStore((state) => state.patchScene);
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
+  const presetId = session.scene((state) => state.presetId);
+  const patchScene = session.scene((state) => state.patchScene);
   const fluidEnabled = scene.systems?.fluid !== false;
   const voxelDomain = scene.voxelDomain;
   const definition = findSceneDefinition(presetId);
@@ -81,7 +81,7 @@ function SceneRebuildControls() {
           if (value === "on" && voxelDomain.finestCellSize_m < HERO_GARDEN_SOLVER_CELL_M) {
             patchScene({ voxelDomain: { ...voxelDomain, finestCellSize_m: HERO_GARDEN_SOLVER_CELL_M } });
           }
-          simulation.setFluidSystem(value === "on");
+          simulation.setFluidSystem(value === "on", session.id);
         }}
       />
     </PaneRow>
@@ -102,7 +102,7 @@ function SceneRebuildControls() {
               ? "A solver brick pins its node, so a wet document cannot move on this environment-only ladder. Turn water off first."
               : `Rebuild with the set drawn at ${(zeroRungCell_m * 1000) / 2 ** depth} mm`,
           }))}
-          onChange={(value) => simulation.rebuildSceneAtLattice({ environmentRefinementDepth: Number(value) })}
+          onChange={(value) => simulation.rebuildSceneAtLattice({ environmentRefinementDepth: Number(value) }, session.id)}
         />
       </PaneRow>
       <p className="toolstrip-pane-note">
@@ -128,9 +128,10 @@ function SceneRebuildControls() {
  * fields above them are the ones a reader is usually here to change.
  */
 function BodyStateReadout({ bodyId }: { bodyId: string }) {
-  const body = useDiagnosticsStore((state) =>
+  const session = useSession();
+  const body = session.diagnostics((state) =>
     state.bodies.find((candidate) => candidate.description.id === bodyId));
-  const fixedDt_s = useSceneStore((state) => state.scene.numerics.fixedDt_s);
+  const fixedDt_s = session.scene((state) => state.scene.numerics.fixedDt_s);
   if (!body) return null;
   return (
     <details className="selection-group selected-diagnostics" data-testid="selected-body-diagnostics">
@@ -173,6 +174,7 @@ function PaneRow({ label, children }: { label: string; children: ReactNode }) {
 }
 
 function ChoiceRow({ group, entityLabel }: { group: EditorChoiceGroup; entityLabel: string }) {
+  const session = useSession();
   return <PaneRow label={group.label}>
     <ToolstripChoice
       ariaLabel={group.label}
@@ -186,8 +188,8 @@ function ChoiceRow({ group, entityLabel }: { group: EditorChoiceGroup; entityLab
       onChange={(value) => {
         const option = group.options.find((candidate) => candidate.id === value);
         if (!option || option.enabled === false) return;
-        simulation.beginEdit(`Set ${entityLabel} ${group.label}`);
-        simulation.commitEdit(option.apply(), { reseed: true });
+        simulation.beginEdit(`Set ${entityLabel} ${group.label}`, session.id);
+        simulation.commitEdit(option.apply(), { reseed: true }, session.id);
       }}
     />
   </PaneRow>;
@@ -195,14 +197,15 @@ function ChoiceRow({ group, entityLabel }: { group: EditorChoiceGroup; entityLab
 
 /** One quantity, committed as a single history entry. */
 function FieldRow({ field, entityLabel }: { field: EditorField; entityLabel: string }) {
+  const session = useSession();
   // Previewed locally and written once on release, for the same reason the
   // strip's own scrubs are: a commit is a history entry and a re-seed.
   const [preview, setPreview] = useState<number | undefined>(undefined);
   const commit = (value: number) => {
     setPreview(undefined);
     if (value === field.value) return;
-    simulation.beginEdit(`Set ${entityLabel} ${field.label}`);
-    simulation.commitEdit(field.apply(value), { reseed: true });
+    simulation.beginEdit(`Set ${entityLabel} ${field.label}`, session.id);
+    simulation.commitEdit(field.apply(value), { reseed: true }, session.id);
   };
   const bounded = field.min !== undefined && field.max !== undefined;
   const shown = preview ?? field.value;
@@ -302,6 +305,7 @@ function foldFieldRows(fields: readonly EditorField[]): FieldEntry[] {
  * handles move, written as numbers for when a handle is not the right one.
  */
 export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
+  const session = useSession();
   // Which row is open, and what a scrub currently reads mid-drag. Both local:
   // they are the state of one strip in front of one selection, and the caller
   // keys this component by selection so neither survives a click on something
@@ -321,14 +325,14 @@ export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
   const groups = entity.groups ?? [];
 
   const commitChoice = (group: EditorChoiceGroup, option: EditorChoice) => {
-    simulation.beginEdit(`Set ${entity.label} ${group.label}`);
-    simulation.commitEdit(option.apply(), { reseed: true });
+    simulation.beginEdit(`Set ${entity.label} ${group.label}`, session.id);
+    simulation.commitEdit(option.apply(), { reseed: true }, session.id);
   };
   const commitField = (field: EditorField, value: number) => {
     setPreview(undefined);
     if (value === field.value) return;
-    simulation.beginEdit(`Set ${entity.label} ${field.label}`);
-    simulation.commitEdit(field.apply(value), { reseed: true });
+    simulation.beginEdit(`Set ${entity.label} ${field.label}`, session.id);
+    simulation.commitEdit(field.apply(value), { reseed: true }, session.id);
   };
 
   return <>
@@ -473,6 +477,7 @@ export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
  * strip off the screen the moment its subject stops existing.
  */
 export function EntityDeleteRow({ entity }: { entity: EditorEntity }) {
+  const session = useSession();
   const remove = entity.remove;
   if (remove === undefined) return null;
   return <ToolstripActionRow
@@ -482,7 +487,7 @@ export function EntityDeleteRow({ entity }: { entity: EditorEntity }) {
     hint="Takes it out of the document and re-seeds the run. Undoable, and the Delete key does the same."
     tone="danger"
     testId="entity-delete"
-    onClick={() => simulation.removeEntity(`Removed ${entity.label}`, remove())}
+    onClick={() => simulation.removeEntity(`Removed ${entity.label}`, remove(), session.id)}
   />;
 }
 
@@ -505,12 +510,13 @@ function EntitySceneTab({ entity }: { entity: EditorEntity }) {
  * state they change.
  */
 function EntityObjectTab({ entity }: { entity: EditorEntity }) {
+  const session = useSession();
   return <>
     {entity.simulatedBodyId && <BodyStateReadout bodyId={entity.simulatedBodyId} />}
     {entity.simulatedBodyId && <div className="selection-actions">
       <button
         type="button"
-        onClick={() => simulation.dropBody(entity.simulatedBodyId!)}
+        onClick={() => simulation.dropBody(entity.simulatedBodyId!, session.id)}
       >Drop</button>
       {/* Put it back where the document says it is, at rest. The one verb of the
           old body tray that is neither a document edit nor a throw: it undoes a
@@ -518,7 +524,7 @@ function EntityObjectTab({ entity }: { entity: EditorEntity }) {
       <button
         type="button"
         title="Return it to its authored pose, at rest"
-        onClick={() => simulation.resetBody(entity.simulatedBodyId!)}
+        onClick={() => simulation.resetBody(entity.simulatedBodyId!, session.id)}
       >Reset</button>
     </div>}
   </>;

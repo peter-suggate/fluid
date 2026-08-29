@@ -125,7 +125,27 @@ export type EditorActionEffect =
     /** The ray behind the pixel, or the pressure cell behind it. */
     readonly probe: "ray" | "cell";
     readonly aim?: TracePinAim;
-  };
+  }
+  /**
+   * Open, close or resolve the A/B compare.
+   *
+   * A verb on the room's ring like any other, and the only route to the mode
+   * besides the backslash key: the ring is where the studio's modes live, and a
+   * compare is a mode of looking at the scene rather than a thing in it.
+   * `keep` and `swap` are diff operations — see `compare/compare-model.ts` —
+   * and both are only offered while the mode is open.
+   */
+  | { readonly kind: "compare"; readonly action: "toggle" | "close" | "keep" | "swap" }
+  /**
+   * Raise this pane's scene selector.
+   *
+   * On the room's ring rather than on anything in the scene, for the reason
+   * compare is: which scene is loaded is a property of the *pane*, not of the
+   * tank or the water inside it. It carries no id — the ring is a route to the
+   * chooser, not a chooser itself, because a wedge per scene would be a
+   * fifty-slice pie and the thing a reader actually does is type three letters.
+   */
+  | { readonly kind: "choose-scene" };
 
 /** Palette token, shared with `EditorEntityTone` so a wedge is coloured like its entity. */
 export type EditorActionTone = "fluid" | "tank" | "body" | "prop" | "inflow" | "region" | "danger";
@@ -166,7 +186,12 @@ export type EditorActionIcon =
   | "render-pipeline"
   | "diagnostics"
   | "trace-ray"
-  | "inspect-cell";
+  | "inspect-cell"
+  | "scene"
+  | "compare"
+  | "compare-close"
+  | "compare-keep"
+  | "compare-swap";
 
 export interface EditorAction {
   /** Unique within the ring it appears in. */

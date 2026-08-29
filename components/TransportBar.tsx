@@ -3,17 +3,13 @@
 import { useEffect, useState } from "react";
 import { simulation } from "../lib/core/simulation/controller";
 import { simulationRecording } from "../lib/core/simulation/recording";
-import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
-import { useRecordingStore } from "../lib/core/stores/recording-store";
-import { useRuntimeStore } from "../lib/core/stores/runtime-store";
-import { useSceneStore } from "../lib/core/stores/scene-store";
-import { useMethodStore } from "../lib/core/stores/method-store";
 import { requestManualGPUStop } from "../lib/core/gpu-startup";
 import { useSafeBrowserGPUBringup } from "../lib/core/use-safe-browser-gpu-bringup";
 import { planSceneRuntime } from "../lib/core/scene-runtime";
 import { resourceActivitiesFor, resourceInteractionGates } from "../lib/core/resource-readiness";
 import { requiresFencedInitialRasterPresentation } from "../lib/core/gpu-t0-presentation";
 import { effectiveSimulationStep_s, methodPinsSimulationStep } from "../lib/core/simulation-step";
+import { useSession } from "../lib/core/session/session-context";
 
 /** How long the pointer has to be still before the cluster recedes. */
 const POINTER_IDLE_MS = 2600;
@@ -35,10 +31,11 @@ const STEP_MAX_MS = 50;
  * releases the pin rather than presenting a number that refuses to move.
  */
 function StepSizeControl({ disabled }: { readonly disabled: boolean }) {
-  const scene = useSceneStore((state) => state.scene);
-  const methodId = useMethodStore((state) => state.methodId);
-  const quality = useMethodStore((state) => state.quality);
-  const overrides = useMethodStore((state) => state.overrides);
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
+  const methodId = session.method((state) => state.methodId);
+  const quality = session.method((state) => state.quality);
+  const overrides = session.method((state) => state.overrides);
   const method = { methodId, quality, overrides };
   const step_ms = effectiveSimulationStep_s(scene, method) * 1000;
   const pinned = methodPinsSimulationStep(scene, method);
@@ -46,7 +43,7 @@ function StepSizeControl({ disabled }: { readonly disabled: boolean }) {
   const commit = (value_ms: number) => {
     if (!Number.isFinite(value_ms)) return;
     const clamped = Math.min(STEP_MAX_MS, Math.max(STEP_MIN_MS, value_ms));
-    simulation.setStepSize(clamped / 1000);
+    simulation.setStepSize(clamped / 1000, session.id);
   };
   // Halve and double rather than ±1 ms: the step is a log-scale knob — 4, 8,
   // 16, 33 ms are the settings a reader actually moves between, and reaching
@@ -158,19 +155,25 @@ function useNoticeStale(notice: string, said: number, lifetime_ms = NOTICE_LIFET
  * control that disappears from the tab order is a control that is gone.
  */
 export function TransportBar() {
-  const runState = useRuntimeStore((state) => state.runState);
-  const setRunState = useRuntimeStore((state) => state.setRunState);
-  const simulationTime = useRuntimeStore((state) => state.simulationTime);
-  const notice = useRuntimeStore((state) => state.notice);
-  const noticeTone = useRuntimeStore((state) => state.noticeTone);
-  const noticeSaid = useRuntimeStore((state) => state.noticeSaid);
-  const rendererOnlyScene = useSceneStore((state) => !planSceneRuntime(state.scene).fluidSolver);
-  const resourceReadiness = useDiagnosticsStore((state) => state.resourceReadiness);
-  const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
-  const methodId = useMethodStore((state) => state.methodId);
-  const recordingStatus = useRecordingStore((state) => state.status);
-  const recordingStart = useRecordingStore((state) => state.startedAtSimulation_s);
-  const recording = useRecordingStore((state) => state.recording);
+  // The host's realm. This component is mounted once by `CompareHost`, outside
+  // pane B's provider, so `useSession()` here is pane A — which *is* the host:
+  // `runState` is the transport's own state and `simulationTime` is the host
+  // clock's minimum, published into every pane. What the controls write goes
+  // back through `simulation`, never into this one session, because a transport
+  // gesture is about the experiment and reaches every attached pane.
+  const session = useSession();
+  const runState = session.runtime((state) => state.runState);
+  const simulationTime = session.runtime((state) => state.simulationTime);
+  const notice = session.runtime((state) => state.notice);
+  const noticeTone = session.runtime((state) => state.noticeTone);
+  const noticeSaid = session.runtime((state) => state.noticeSaid);
+  const rendererOnlyScene = session.scene((state) => !planSceneRuntime(state.scene).fluidSolver);
+  const resourceReadiness = session.diagnostics((state) => state.resourceReadiness);
+  const gpuInfo = session.diagnostics((state) => state.gpuInfo);
+  const methodId = session.method((state) => state.methodId);
+  const recordingStatus = session.recording((state) => state.status);
+  const recordingStart = session.recording((state) => state.startedAtSimulation_s);
+  const recording = session.recording((state) => state.recording);
   const safeBringupPolicy = useSafeBrowserGPUBringup();
   const noticeStale = useNoticeStale(notice, noticeSaid);
   const safeBringup = safeBringupPolicy === true;
@@ -243,7 +246,7 @@ export function TransportBar() {
   const toggleRecording = () => {
     if (recordingStatus === "recording") simulationRecording.stop(simulationTime);
     else {
-      setRunState("running");
+      simulation.setRunState("running");
       simulationRecording.start(simulationTime);
     }
   };
@@ -265,7 +268,7 @@ export function TransportBar() {
         type="button"
         className="transport-main"
         disabled={transportLocked || browserSafetyLocked}
-        onClick={() => setRunState(runState === "running" ? "paused" : "running")}
+        onClick={() => simulation.setRunState(runState === "running" ? "paused" : "running")}
         aria-label={browserPolicyPending ? "Browser GPU safety policy is loading"
           : rendererOnlyScene ? "Fluid simulation is disabled for this renderer validation scene"
           : safeBringup ? "Continuous play is disabled during bounded GPU bring-up"
@@ -289,7 +292,7 @@ export function TransportBar() {
         disabled={browserSafetyLocked}
         onClick={() => {
           if (recordingStatus === "recording") simulationRecording.stop(simulationTime);
-          simulation.reset();
+          simulation.resetAll();
         }}
         aria-label="Reset the simulation to its authored initial state"
       >RESET</button>

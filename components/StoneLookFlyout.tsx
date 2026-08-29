@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from "react";
 import { simulation } from "../lib/core/simulation/controller";
-import { useSceneStore } from "../lib/core/stores/scene-store";
 import {
   sceneStoneNode,
   stoneDials,
@@ -12,6 +11,7 @@ import {
 } from "../lib/core/stone-look-controls";
 import { SculptDialRows } from "./SculptDials";
 import { ToolstripRow } from "./toolstrip";
+import { useSession } from "../lib/core/session/session-context";
 
 /**
  * The stone sculptor, as rows on the selected boulder's own strip — the same
@@ -32,12 +32,13 @@ const DIALS: readonly { id: keyof StoneDials; label: string; hint: string }[] = 
 ];
 
 export function StoneDialRows({ nodeId }: { nodeId: string }) {
-  const scene = useSceneStore((state) => state.scene);
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
   const gestureOpen = useRef(false);
   const endGesture = () => {
     if (!gestureOpen.current) return;
     gestureOpen.current = false;
-    simulation.commitEdit(undefined, { reseed: true });
+    simulation.commitEdit(undefined, { reseed: true }, session.id);
   };
   // Deselecting mid-drag must still close the gesture, or the next edit's
   // undo snapshot would be this one's.
@@ -50,12 +51,12 @@ export function StoneDialRows({ nodeId }: { nodeId: string }) {
   const setDial = (id: keyof StoneDials, value: number) => {
     if (!gestureOpen.current) {
       gestureOpen.current = true;
-      simulation.beginEdit(`Adjusted ${nodeId}`);
+      simulation.beginEdit(`Adjusted ${nodeId}`, session.id);
     }
-    const current = useSceneStore.getState().scene;
+    const current = session.scene.getState().scene;
     const held = sceneStoneNode(current, nodeId);
     if (held === undefined) return;
-    useSceneStore.getState().patchScene(
+    session.scene.getState().patchScene(
       withStoneDials(current, nodeId, { ...stoneDials(held.params), [id]: value }),
     );
   };
@@ -63,11 +64,11 @@ export function StoneDialRows({ nodeId }: { nodeId: string }) {
   // A press is its own complete gesture: one undo entry, one revoxelize.
   const reroll = () => {
     endGesture();
-    simulation.beginEdit(`Re-rolled ${nodeId}`);
-    useSceneStore.getState().patchScene(
-      withStoneSeedRerolled(useSceneStore.getState().scene, nodeId),
+    simulation.beginEdit(`Re-rolled ${nodeId}`, session.id);
+    session.scene.getState().patchScene(
+      withStoneSeedRerolled(session.scene.getState().scene, nodeId),
     );
-    simulation.commitEdit(undefined, { reseed: true });
+    simulation.commitEdit(undefined, { reseed: true }, session.id);
   };
 
   return <>

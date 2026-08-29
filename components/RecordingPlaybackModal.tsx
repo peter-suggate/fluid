@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { realTimePlaybackRate, sourceDurationForPlayback } from "../lib/core/recording-timing";
 import { simulationRecording } from "../lib/core/simulation/recording";
-import { useRecordingStore } from "../lib/core/stores/recording-store";
+import { useSession } from "../lib/core/session/session-context";
 
 type PlaybackMode = "real-time" | "source";
 
@@ -20,8 +20,9 @@ function applyPlaybackRate(video: HTMLVideoElement, rate: number) {
 }
 
 export function RecordingPlaybackModal() {
-  const open = useRecordingStore((state) => state.modalOpen);
-  const recording = useRecordingStore((state) => state.recording);
+  const session = useSession();
+  const open = session.recording((state) => state.modalOpen);
+  const recording = session.recording((state) => state.recording);
   const videoRef = useRef<HTMLVideoElement>(null);
   const playbackAnchorRef = useRef<{ wall_ms: number; media_s: number } | null>(null);
   const [mode, setMode] = useState<PlaybackMode>("real-time");

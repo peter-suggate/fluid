@@ -18,8 +18,8 @@ import { TANK_SELECTION_ID } from "../lib/core/editor-tank";
 import { VISUALIZATION_FIELDS, VISUALIZATION_QUICK_FIELDS } from "../lib/core/visualization-catalog";
 import type { FieldVisualization, FieldVisualizationIcon } from "../lib/core/visualization-registry";
 import { isPressureJournalOverlayMode } from "../lib/core/webgpu-pressure-journal-overlay";
-import { useMethodStore } from "../lib/core/stores/method-store";
-import { DEFAULT_GRID_OVERLAY_AXIS, useUIStore } from "../lib/core/stores/ui-store";
+import { useSession } from "../lib/core/session/session-context";
+import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
 import { Toolstrip, ToolstripMoreRow, ToolstripRow, ToolstripScrub } from "./toolstrip";
 
@@ -71,13 +71,14 @@ export function methodHasQuickFields(methodId: string): boolean {
  * swapping these for a panel.
  */
 export function FieldViewRows() {
-  const methodId = useMethodStore((state) => state.methodId);
-  const overlayMode = useUIStore((state) => state.gridOverlayMode);
-  const overlayAxis = useUIStore((state) => state.gridOverlayAxis);
-  const overlaySlice = useUIStore((state) => state.gridOverlaySlice);
-  const setOverlayMode = useUIStore((state) => state.setGridOverlayMode);
-  const setOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
-  const setOverlaySlice = useUIStore((state) => state.setGridOverlaySlice);
+  const session = useSession();
+  const methodId = session.method((state) => state.methodId);
+  const overlayMode = session.ui((state) => state.gridOverlayMode);
+  const overlayAxis = session.ui((state) => state.gridOverlayAxis);
+  const overlaySlice = session.ui((state) => state.gridOverlaySlice);
+  const setOverlayMode = session.ui((state) => state.setGridOverlayMode);
+  const setOverlayAxis = session.ui((state) => state.setGridOverlayAxis);
+  const setOverlaySlice = session.ui((state) => state.setGridOverlaySlice);
   const method = getMethod(methodId);
   const volumeCapable = method.capabilities?.volumeRendering === true;
   const supported = new Set(method.supportedFieldModes ?? []);
@@ -166,8 +167,9 @@ export function FieldQuickBar({ leftFraction, topFraction }: {
   leftFraction: number;
   topFraction: number;
 }) {
-  const methodId = useMethodStore((state) => state.methodId);
-  const select = useUIStore((state) => state.select);
+  const session = useSession();
+  const methodId = session.method((state) => state.methodId);
+  const select = session.ui((state) => state.select);
   if (!methodHasQuickFields(methodId)) return null;
 
   return <Toolstrip

@@ -192,6 +192,18 @@ interface UIStore {
    * the numbers folded away would be indistinguishable from an ordinary click.
    */
   selectionControlsOpen: boolean;
+  /**
+   * Whether this pane's scene selector is open.
+   *
+   * Per session rather than per component, because three surfaces raise the
+   * same popover — the pane's A/B tag, the scene chip, and the ring's Scene
+   * wedge — and in compare mode the keyboard raises it on whichever pane was
+   * last pointed at. A component-local flag would give each of those its own
+   * popover; a page-level one could not tell the two panes apart. Deliberately
+   * *not* serialized: a link to a scene should not reopen the box you chose it
+   * with.
+   */
+  sceneSelectorOpen: boolean;
   /** Shape the body-place tool drops on the next click. */
   placementShape: RigidShape;
   /** The pipeline or diagnostics instrument drawn over the scene, if any. */
@@ -284,6 +296,7 @@ interface UIStore {
   openRadialMenu: (menu: RadialMenuState) => void;
   closeRadialMenu: () => void;
   setSelectionControlsOpen: (open: boolean) => void;
+  setSceneSelectorOpen: (open: boolean) => void;
   beginCarry: (bodyId: string, label: string) => void;
   setCarryTilt: (tiltDegrees: number) => void;
   endCarry: () => void;
@@ -345,7 +358,7 @@ interface UIStore {
  */
 export const DEFAULT_GRID_OVERLAY_AXIS: Exclude<GridOverlayConfig["axis"], "off"> = "z";
 
-export const useUIStore = create<UIStore>((set) => ({
+export const createUIStore = () => create<UIStore>((set) => ({
   camera: defaultCamera,
   viewportMode: DEFAULT_VIEWPORT_MODE,
   armedGesture: undefined,
@@ -356,6 +369,7 @@ export const useUIStore = create<UIStore>((set) => ({
   carry: undefined,
   radialMenu: undefined,
   selectionControlsOpen: false,
+  sceneSelectorOpen: false,
   placementShape: "sphere",
   sceneOverlay: null,
   gridOverlayAxis: "off",
@@ -438,6 +452,10 @@ export const useUIStore = create<UIStore>((set) => ({
   openRadialMenu: (radialMenu) => set({ radialMenu }),
   closeRadialMenu: () => set({ radialMenu: undefined }),
   setSelectionControlsOpen: (selectionControlsOpen) => set({ selectionControlsOpen }),
+  // Raising the selector puts the ring down: they are two answers to the same
+  // right-click, and the ring's own wedge is one of the ways here.
+  setSceneSelectorOpen: (sceneSelectorOpen) => set(
+    sceneSelectorOpen ? { sceneSelectorOpen, radialMenu: undefined } : { sceneSelectorOpen }),
   // Carrying arms nothing and disarms nothing: the tool decides what a click on
   // the scene means, and while something is in hand the click means "put it
   // down" whatever is armed underneath. Restoring the tool on release is what
@@ -571,3 +589,14 @@ export const useUIStore = create<UIStore>((set) => ({
     fluidCellTraceExpanded: !state.fluidCellTraceExpanded,
   })),
 }));
+
+export type UIStoreHook = ReturnType<typeof createUIStore>;
+
+/**
+ * The default (pane A) instance.
+ *
+ * Per-pane instances come from `createPaneSession`; this one is what a tree
+ * with no `SessionProvider` mounted reads, and what non-React callers that
+ * have not yet been threaded a session resolve to.
+ */
+export const useUIStore = createUIStore();

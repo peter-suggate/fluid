@@ -10,8 +10,11 @@ import type { EditorSelection } from "./editor-tools";
 import type { SceneDescription, Vec3 } from "./model";
 import { SCENE_INSTRUMENTS, sceneInstrumentAction } from "./scene-instruments";
 import { resourceInteractionGates } from "./resource-readiness";
+import type { PaneSession } from "./session/session";
 import { drawnBodies, useDiagnosticsStore } from "./stores/diagnostics-store";
-import { displaySceneSnapshot } from "./stores/scene-draft-store";
+import { displaySceneSnapshot, useSceneDraftStore } from "./stores/scene-draft-store";
+import { useSceneStore } from "./stores/scene-store";
+import { useShellStore } from "./stores/shell-store";
 import { useUIStore } from "./stores/ui-store";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
 import type {
@@ -21,6 +24,25 @@ import type {
   EditorRay,
   EntityRayHit,
 } from "./editor-entity";
+
+/**
+ * The four stores this file reads, as a slice of one pane's `PaneSession`.
+ *
+ * Taken as a slice, with a type-only import of the session, so that the module
+ * graph is unchanged: the editor catalog is reachable from the CPU test lane,
+ * and importing the session module for its `resolveSession` would drag the
+ * method registry in behind it and make a pure geometry test require an
+ * installed method package. A whole `PaneSession` is structurally assignable
+ * here, which is what WP2/WP3 will hand it.
+ */
+export type EditorCatalogSession = Pick<PaneSession, "scene" | "sceneDraft" | "ui" | "diagnostics">;
+
+const defaultCatalogSession: EditorCatalogSession = {
+  scene: useSceneStore,
+  sceneDraft: useSceneDraftStore,
+  ui: useUIStore,
+  diagnostics: useDiagnosticsStore,
+};
 
 /**
  * The editable things, composed in the order pick ties resolve.
@@ -77,16 +99,16 @@ export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze(
  * Non-reactive, for pointer handlers and the keyboard. React renders build the
  * same shape from their subscribed scene so a redraw follows an open gesture.
  */
-export function editorEntityContext(): EditorEntityContext {
+export function editorEntityContext(session: EditorCatalogSession = defaultCatalogSession): EditorEntityContext {
   return {
-    scene: displaySceneSnapshot(),
-    voxelRegion: useUIStore.getState().voxelRegion,
-    fluidCell: fluidCellSnapshot(),
+    scene: displaySceneSnapshot(session.scene, session.sceneDraft),
+    voxelRegion: session.ui.getState().voxelRegion,
+    fluidCell: fluidCellSnapshot(session),
     // One definition of "a ray can hit something", shared with the viewport:
     // the capability gate, not a second reading of the renderer's status enum.
     pickingAvailable: resourceInteractionGates(
-      useDiagnosticsStore.getState().resourceReadiness, false).pickingInteractive,
-    bodies: editorBodyPoses(),
+      session.diagnostics.getState().resourceReadiness, false).pickingInteractive,
+    bodies: editorBodyPoses(drawnBodies(session.diagnostics)),
   };
 }
 
@@ -107,10 +129,10 @@ export function editorEntityContext(): EditorEntityContext {
  * it on a pixel. Only together do they say whether the trace describes where the
  * cursor is now — which is the whole of what the fluid-cell probe needs.
  */
-function fluidCellSnapshot(): EditorEntityContext["fluidCell"] {
-  const publication = useDiagnosticsStore.getState().fluidCellTrace;
+function fluidCellSnapshot(session: EditorCatalogSession): EditorEntityContext["fluidCell"] {
+  const publication = session.diagnostics.getState().fluidCellTrace;
   if (!publication) return undefined;
-  return { ...publication, pinned: useUIStore.getState().fluidCellTracePinned };
+  return { ...publication, pinned: session.ui.getState().fluidCellTracePinned };
 }
 
 export function editorBodyPoses(bodies = drawnBodies()): EditorEntityContext["bodies"] {
@@ -279,7 +301,94 @@ export function sceneActionsAt(
   options: { readonly placement?: boolean } = {},
 ): readonly EditorAction[] {
   const placement = options.placement !== false ? fluidPlayActions(point_m, normal) : [];
-  return [...placement, sceneInstrumentWedge(scene)];
+  return [...placement, sceneWedge(), sceneInstrumentWedge(scene), compareWedge()];
+}
+
+/**
+ * The scene itself, on the ring that belongs to no object.
+ *
+ * Which scene is loaded is a property of the *pane*, like compare and unlike
+ * anything in the document, so it belongs out here beside it rather than on the
+ * tank — and in compare mode this is the wedge that makes the mode worth
+ * opening at its coarsest: pane B running a different scene. One wedge and no
+ * children, because the chooser is a search box: fifty scenes cannot be a pie,
+ * and the reader who knows which one they want is going to type it.
+ */
+function sceneWedge(): EditorAction {
+  return {
+    id: "choose-scene",
+    label: "Scene…",
+    icon: "scene",
+    tone: "prop",
+    hint: "Choose the scene this pane runs, without leaving the studio",
+    effect: { kind: "choose-scene" },
+  };
+}
+
+/**
+ * A/B compare, on the ring that belongs to no object.
+ *
+ * Here rather than on an entity because the mode is about the *experiment*, not
+ * about anything in the scene: it splits the shell in two and puts the second
+ * pane's whole configuration in a diff. One wedge closed, a small ring of three
+ * open — closing keeps A, keeping promotes B, swapping exchanges them — which
+ * is the same weapon-wheel bargain the instruments make.
+ *
+ * The shell store is read directly, and deliberately: compare is a property of
+ * the page, so there is no session to thread and no signature for the viewport
+ * that composes this ring to grow. See `compare/compare-query.ts`.
+ */
+function compareWedge(): EditorAction {
+  const compare = useShellStore.getState().compare;
+  if (!compare.active) {
+    return {
+      id: "compare",
+      label: "Compare",
+      icon: "compare",
+      tone: "prop",
+      hint: "Split the shell: pane B is this scene plus a diff, advancing in lockstep",
+      effect: { kind: "compare", action: "toggle" },
+    };
+  }
+  return {
+    id: "compare",
+    label: "Compare",
+    icon: "compare",
+    tone: "prop",
+    hint: "The second pane, and the three ways out of it",
+    children: [
+      {
+        id: "compare-close",
+        label: "Close",
+        icon: "compare-close",
+        tone: "prop",
+        hint: "Leave compare and keep pane A",
+        effect: { kind: "compare", action: "close" },
+      },
+      {
+        // Offered on pane B's ring only: promoting is "keep *this* one", and on
+        // pane A it would mean keeping what is already kept.
+        id: "compare-keep",
+        label: "Keep this",
+        icon: "compare-keep",
+        tone: "prop",
+        enabled: compare.focusedPane === "b",
+        hint: compare.focusedPane === "b"
+          ? "Adopt every override into pane A, then close"
+          : "Open this on pane B: it promotes pane B's overrides into pane A",
+        effect: { kind: "compare", action: "keep" },
+      },
+      {
+        id: "compare-swap",
+        label: "Swap",
+        icon: "compare-swap",
+        tone: "prop",
+        enabled: Object.keys(compare.diff).length > 0,
+        hint: "Exchange the panes: B's values become A's and A's become the diff",
+        effect: { kind: "compare", action: "swap" },
+      },
+    ],
+  };
 }
 
 /**

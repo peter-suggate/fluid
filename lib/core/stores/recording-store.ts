@@ -26,7 +26,7 @@ interface RecordingStore {
   set: (patch: Partial<Omit<RecordingStore, "set">>) => void;
 }
 
-export const useRecordingStore = create<RecordingStore>((set) => ({
+export const createRecordingStore = () => create<RecordingStore>((set) => ({
   status: "idle",
   startedAtSimulation_s: null,
   recording: null,
@@ -34,3 +34,14 @@ export const useRecordingStore = create<RecordingStore>((set) => ({
   error: null,
   set: (patch) => set(patch)
 }));
+
+export type RecordingStoreHook = ReturnType<typeof createRecordingStore>;
+
+/**
+ * The default (pane A) instance.
+ *
+ * Per-pane instances come from `createPaneSession`; this one is what a tree
+ * with no `SessionProvider` mounted reads, and what non-React callers that
+ * have not yet been threaded a session resolve to.
+ */
+export const useRecordingStore = createRecordingStore();

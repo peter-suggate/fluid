@@ -14,9 +14,9 @@ import {
   type StageLensReceipt,
 } from "../lib/core/stage-lens";
 import { pickFieldOverlay, type FieldOverlayView } from "../lib/core/field-overlay-pick";
-import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
-import { resolvedMethodValues, useMethodStore } from "../lib/core/stores/method-store";
-import { DEFAULT_GRID_OVERLAY_AXIS, useUIStore } from "../lib/core/stores/ui-store";
+import { useSession } from "../lib/core/session/session-context";
+import { resolvedMethodValues } from "../lib/core/stores/method-store";
+import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
 import { isPressureJournalOverlayMode } from "../lib/core/webgpu-pressure-journal-overlay";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
 import { LegendEntries } from "./VisualizationLegend";
@@ -104,7 +104,8 @@ function paramTitle(spec: { label: string; hint?: string }) {
  * a second copy of the control.
  */
 function MethodParamControl({ spec, methodId }: { spec: MethodParamSpec; methodId: string }) {
-  const methodState = useMethodStore();
+  const session = useSession();
+  const methodState = session.method();
   const values = resolvedMethodValues(methodState);
   const overridden = spec.key in (methodState.overrides[methodId] ?? {});
   if (spec.kind === "select") {
@@ -113,7 +114,7 @@ function MethodParamControl({ spec, methodId }: { spec: MethodParamSpec; methodI
         <span>{spec.label}</span>
         <select
           value={String(values[spec.key])}
-          onChange={(event) => simulation.setMethodParam(methodId, spec.key, event.currentTarget.value)}
+          onChange={(event) => simulation.setMethodParam(methodId, spec.key, event.currentTarget.value, session.id)}
         >
           {spec.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
@@ -129,8 +130,8 @@ function MethodParamControl({ spec, methodId }: { spec: MethodParamSpec; methodI
       displayDigits={spec.digits ?? 3}
       hint={paramTitle(spec)}
       modified={overridden}
-      onReset={() => simulation.resetMethodParam(methodId, spec.key)}
-      onChange={(value) => simulation.setMethodParam(methodId, spec.key, value)}
+      onReset={() => simulation.resetMethodParam(methodId, spec.key, session.id)}
+      onChange={(value) => simulation.setMethodParam(methodId, spec.key, value, session.id)}
     />
   );
 }
@@ -257,17 +258,18 @@ export function FieldControlRows({ lenses: override }: {
   /** Overrides the running method's own roster. For tests and previews. */
   lenses?: readonly AnyStageLens[];
 }) {
-  const methodState = useMethodStore();
+  const session = useSession();
+  const methodState = session.method();
   const methodId = methodState.methodId;
-  const overlayMode = useUIStore((state) => state.gridOverlayMode);
-  const overlayAxis = useUIStore((state) => state.gridOverlayAxis);
-  const overlaySlice = useUIStore((state) => state.gridOverlaySlice);
-  const lensPhase = useUIStore((state) => state.gridOverlayLensPhase);
-  const setOverlayMode = useUIStore((state) => state.setGridOverlayMode);
-  const setOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
-  const setOverlaySlice = useUIStore((state) => state.setGridOverlaySlice);
-  const setLensPhase = useUIStore((state) => state.setGridOverlayLensPhase);
-  const lensReceipt = useDiagnosticsStore((state) => state.stageLensReceipt);
+  const overlayMode = session.ui((state) => state.gridOverlayMode);
+  const overlayAxis = session.ui((state) => state.gridOverlayAxis);
+  const overlaySlice = session.ui((state) => state.gridOverlaySlice);
+  const lensPhase = session.ui((state) => state.gridOverlayLensPhase);
+  const setOverlayMode = session.ui((state) => state.setGridOverlayMode);
+  const setOverlayAxis = session.ui((state) => state.setGridOverlayAxis);
+  const setOverlaySlice = session.ui((state) => state.setGridOverlaySlice);
+  const setLensPhase = session.ui((state) => state.setGridOverlayLensPhase);
+  const lensReceipt = session.diagnostics((state) => state.stageLensReceipt);
   // Which pane the side column holds. Local, not stored: it is the state of a
   // disclosure on one panel, and a column that reopened itself because the
   // camera moved would be the panel remembering the wrong thing.
@@ -458,7 +460,7 @@ export function FieldControlRows({ lenses: override }: {
               type="button"
               data-testid="fluid-field-film-reserve"
               title="Reserve room to capture one pressure solve. Rebuilds the solver once."
-              onClick={() => simulation.setMethodParam(methodId, filmReserve.parameter, filmReserve.value)}
+              onClick={() => simulation.setMethodParam(methodId, filmReserve.parameter, filmReserve.value, session.id)}
             >RESERVE</button>}
           </p>}
       </ToolstripPane>}
@@ -527,7 +529,7 @@ export function FieldControlRows({ lenses: override }: {
         options={interactiveSimulationMethods().map((candidate) => ({
           value: candidate.id, label: candidate.shortLabel, title: candidate.description,
         }))}
-        onChange={(value) => simulation.setMethod(value)}
+        onChange={(value) => simulation.setMethod(value, session.id)}
       />}
     </ToolstripRow>
   </>;
@@ -546,7 +548,8 @@ export function FieldControlRows({ lenses: override }: {
  * solver is given — so it stands above the options it scales.
  */
 export function MethodSetupTab() {
-  const methodState = useMethodStore();
+  const session = useSession();
+  const methodState = session.method();
   const methodId = methodState.methodId;
   const method = getMethod(methodId);
   const values = resolvedMethodValues(methodState);
@@ -559,7 +562,7 @@ export function MethodSetupTab() {
       <select
         aria-label="Simulation quality"
         value={methodState.quality}
-        onChange={(event) => simulation.setQuality(event.currentTarget.value as GPUQuality)}
+        onChange={(event) => simulation.setQuality(event.currentTarget.value as GPUQuality, session.id)}
       >
         {(["balanced", "high", "ultra"] as const).map((level) => (
           <option key={level} value={level}>{level[0]!.toUpperCase() + level.slice(1)} · {method.qualityLabels[level]}</option>
@@ -570,7 +573,7 @@ export function MethodSetupTab() {
       <span>{spec.label}</span>
       <select
         value={String(values[spec.key])}
-        onChange={(event) => simulation.setMethodParam(methodId, spec.key, event.currentTarget.value)}
+        onChange={(event) => simulation.setMethodParam(methodId, spec.key, event.currentTarget.value, session.id)}
       >
         {spec.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
       </select>
@@ -588,7 +591,8 @@ export function MethodSetupTab() {
  * costs one word in the bar and keeps the first face one screenful.
  */
 export function MethodAdvancedTab() {
-  const methodState = useMethodStore();
+  const session = useSession();
+  const methodState = session.method();
   const methodId = methodState.methodId;
   const fine = getMethod(methodId).params.filter((spec) => spec.tier === "fine");
   return <div className="fluid-field-settings" role="group" aria-label="Advanced solver parameters">
