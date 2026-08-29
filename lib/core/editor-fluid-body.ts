@@ -417,6 +417,9 @@ export function fluidStartChoice(scene: SceneDescription): EditorChoiceGroup {
   return {
     id: "initial-condition",
     label: "Start as",
+    // "Dam break" is nine characters of value, and on the object column the tag
+    // has to leave room for it.
+    tag: "Start",
     value: fluid.initialCondition,
     options: [
       {

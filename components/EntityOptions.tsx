@@ -19,8 +19,10 @@ import type {
   EditorChoiceGroup,
   EditorEntity,
   EditorField,
+  EditorFieldRow,
 } from "../lib/core/editor-entity";
 import {
+  ToolstripActionRow,
   ToolstripChoice,
   ToolstripMoreRow,
   ToolstripNumber,
@@ -31,6 +33,7 @@ import {
   useToolstripSection,
   type ToolstripTab,
 } from "./toolstrip";
+import { EditorActionGlyph } from "./EditorActionIcon";
 
 /**
  * Whether this scene has water at all, and — for a dry one — which lattice its
@@ -210,7 +213,7 @@ function FieldRow({ field, entityLabel }: { field: EditorField; entityLabel: str
         max={field.max!}
         step={field.step}
         value={shown}
-        readout={`${formatNumber(shown, field.step < 0.01 ? 3 : 2)}${field.unit ? ` ${field.unit}` : ""}`}
+        readout={`${formatNumber(shown, fieldDecimals(field.step))}${field.unit ? ` ${field.unit}` : ""}`}
         ariaLabel={`${entityLabel} ${field.label}`}
         onChange={setPreview}
         onCommit={commit}
@@ -225,6 +228,56 @@ function FieldRow({ field, entityLabel }: { field: EditorField; entityLabel: str
         onCommit={commit}
       />}
   </PaneRow>;
+}
+
+/**
+ * How many decimals a readout carries: the ones the field's own step can reach.
+ *
+ * The rule was "three below a hundredth, two otherwise", which wrote a density
+ * that moves in steps of 10 as `1000.00` — two digits that can never change,
+ * holding open a column whose whole problem is width. A step is a statement
+ * about resolution, so it is the right thing to read the precision off.
+ */
+function fieldDecimals(step: number): number {
+  return step >= 1 ? 0 : step >= 0.01 ? 2 : 3;
+}
+
+/** One line of the column: a field on its own, or the several that share a row. */
+interface FieldEntry {
+  /** The open-state key, unique across the strip's rows. */
+  readonly id: string;
+  /** Absent for an ordinary field, which is its own row. */
+  readonly row?: EditorFieldRow;
+  readonly members: EditorField[];
+}
+
+/**
+ * The declared fields, with the ones naming a shared row folded onto it.
+ *
+ * Order is the declaration's, taken at the *first* member: a fold must not move
+ * a quantity up or down the column, or an entity that adds a row would find its
+ * other settings rearranged. Everything else passes through as a row of one, so
+ * the caller has a single list to walk rather than two interleaved ones.
+ */
+function foldFieldRows(fields: readonly EditorField[]): FieldEntry[] {
+  const entries: FieldEntry[] = [];
+  const folded = new Map<string, FieldEntry>();
+  for (const field of fields) {
+    const row = field.row;
+    if (row === undefined) {
+      entries.push({ id: field.id, members: [field] });
+      continue;
+    }
+    const existing = folded.get(row.id);
+    if (existing !== undefined) {
+      existing.members.push(field);
+      continue;
+    }
+    const entry: FieldEntry = { id: `row:${row.id}`, row, members: [field] };
+    folded.set(row.id, entry);
+    entries.push(entry);
+  }
+  return entries;
 }
 
 /**
@@ -263,7 +316,7 @@ export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
     claim(next !== undefined);
     return next;
   });
-  const fields = entity.fields ?? [];
+  const fields = foldFieldRows(entity.fields ?? []);
   const choices = entity.choices ?? [];
   const groups = entity.groups ?? [];
 
@@ -283,7 +336,7 @@ export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
       const current = group.options.find((option) => option.id === group.value);
       return <ToolstripRow
         key={group.id}
-        tag={group.label}
+        tag={group.tag ?? group.label}
         value={current?.label ?? group.value}
         name={group.label}
         hint={current?.hint}
@@ -307,16 +360,44 @@ export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
         />}
       </ToolstripRow>;
     })}
-    {fields.map((field) => {
+    {fields.map((entry) => {
+      // A folded row: the members' readouts side by side on the column, and the
+      // members themselves in what it opens. It borrows the pane rather than
+      // laying three controls along one line, because three number fields in a
+      // row would be three times the width of the strip they hang off — and
+      // because stacked, each keeps its axis letter beside it.
+      if (entry.row !== undefined) {
+        const row = entry.row;
+        return <ToolstripRow
+          key={entry.id}
+          tag={row.tag}
+          value={entry.members
+            .map((field) => formatNumber(
+              preview?.id === field.id ? preview.value : field.value, fieldDecimals(field.step)))
+            .join(" ")}
+          name={row.label}
+          hint={row.hint}
+          active={open === entry.id}
+          testId={`entity-option-${row.id}`}
+          onClick={() => toggle(entry.id)}
+        >
+          {open === entry.id && <ToolstripPane label={row.label} onClose={() => setOpen(undefined)}>
+            {entry.members.map((field) => (
+              <FieldRow key={field.id} field={field} entityLabel={entity.label} />
+            ))}
+          </ToolstripPane>}
+        </ToolstripRow>;
+      }
+      const field = entry.members[0]!;
       // A scrub needs two ends to slide between. A position or an extent has
       // neither, so it gets exact entry instead of a slider that would have to
       // invent its own range and then lie about where the value sits in it.
       const bounded = field.min !== undefined && field.max !== undefined;
       const shown = preview?.id === field.id ? preview.value : field.value;
-      const readout = `${formatNumber(shown, field.step < 0.01 ? 3 : 2)}${field.unit ? ` ${field.unit}` : ""}`;
+      const readout = `${formatNumber(shown, fieldDecimals(field.step))}${field.unit ? ` ${field.unit}` : ""}`;
       return <ToolstripRow
         key={field.id}
-        tag={field.label}
+        tag={field.tag ?? field.label}
         value={readout}
         name={field.label}
         active={open === field.id}
@@ -370,6 +451,41 @@ export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
   </>;
 }
 
+/**
+ * The end of the object, at the foot of its own column.
+ *
+ * Removal used to be reachable three ways, two of them unguessable: the Delete
+ * key, the ring's wedge, and a button on the Object face of the panel behind
+ * the "⋯" door. None of those is visible while a reader is looking at the thing
+ * they want gone, and "how do I get rid of this" is a question the strip should
+ * be able to answer by being read rather than by being explored. So the verb
+ * stands on the column, once, for anything that declares it can be removed.
+ *
+ * Last of the rows that are about the object, just above the door. Everything
+ * over it reports or adjusts and can be walked back by moving the same control
+ * the other way; this one ends the object, and a row that ends things does not
+ * belong in the middle of a list of rows that do not. The red is the ring's own
+ * `tone-danger`, so the wedge and the row are recognisably the same verb.
+ *
+ * `removeEntity` is the whole path — the same call the key and the wedge make —
+ * so the history entry, the re-seed and the notice are identical however the
+ * reader got here, and it clears the selection itself, which is what takes this
+ * strip off the screen the moment its subject stops existing.
+ */
+export function EntityDeleteRow({ entity }: { entity: EditorEntity }) {
+  const remove = entity.remove;
+  if (remove === undefined) return null;
+  return <ToolstripActionRow
+    icon={<EditorActionGlyph name="delete" />}
+    label="Delete"
+    name={`Delete ${entity.label}`}
+    hint="Takes it out of the document and re-seeds the run. Undoable, and the Delete key does the same."
+    tone="danger"
+    testId="entity-delete"
+    onClick={() => simulation.removeEntity(`Removed ${entity.label}`, remove())}
+  />;
+}
+
 /** What the object's settings add up to, and the switches that rebuild its world. */
 function EntitySceneTab({ entity }: { entity: EditorEntity }) {
   return <>
@@ -378,27 +494,32 @@ function EntitySceneTab({ entity }: { entity: EditorEntity }) {
   </>;
 }
 
-/** What the solver makes of this object, and the verbs that act on it. */
+/**
+ * What the solver makes of this object, and the verbs that act on it.
+ *
+ * Removal is no longer among them: it is a row on the column now, and a second
+ * copy of an irreversible verb two clicks further in is the buried version this
+ * strip was built to replace. What is left here are the two verbs that act on
+ * the *run* rather than the document — throw it, and put it back — which have
+ * no reading beside a list of the object's settings and belong with the live
+ * state they change.
+ */
 function EntityObjectTab({ entity }: { entity: EditorEntity }) {
   return <>
     {entity.simulatedBodyId && <BodyStateReadout bodyId={entity.simulatedBodyId} />}
-    {(entity.remove || entity.simulatedBodyId) && <div className="selection-actions">
-      {entity.remove && <button
-        type="button"
-        onClick={() => simulation.removeEntity(`Removed ${entity.label}`, entity.remove!())}
-      >Remove</button>}
-      {entity.simulatedBodyId && <button
+    {entity.simulatedBodyId && <div className="selection-actions">
+      <button
         type="button"
         onClick={() => simulation.dropBody(entity.simulatedBodyId!)}
-      >Drop</button>}
+      >Drop</button>
       {/* Put it back where the document says it is, at rest. The one verb of the
           old body tray that is neither a document edit nor a throw: it undoes a
           run, not an edit. */}
-      {entity.simulatedBodyId && <button
+      <button
         type="button"
         title="Return it to its authored pose, at rest"
         onClick={() => simulation.resetBody(entity.simulatedBodyId!)}
-      >Reset</button>}
+      >Reset</button>
     </div>}
   </>;
 }
@@ -423,7 +544,11 @@ export function EntityMoreRow({ entity, leadingTabs = [] }: {
   const [open, setOpen] = useState(false);
   const { claim } = useToolstripSection(`more:${entity.selection.id}`, () => setOpen(false));
   const hasScene = entity.summary !== undefined || entity.offersSceneRebuild === true;
-  const hasObject = entity.simulatedBodyId !== undefined || entity.remove !== undefined;
+  // Only a simulated body now: removal moved out to its own row on the column,
+  // so a thing whose only verb was Remove no longer opens a face containing one
+  // button — it has nothing left behind the door, and says so by not offering
+  // the tab.
+  const hasObject = entity.simulatedBodyId !== undefined;
   const tabs: readonly ToolstripTab[] = [
     ...leadingTabs,
     ...(hasScene ? [{ id: "scene", label: "Scene", content: <EntitySceneTab entity={entity} /> }] : []),

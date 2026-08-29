@@ -9,7 +9,7 @@ import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
 import { useMethodStore } from "../lib/core/stores/method-store";
 import { useSceneStore } from "../lib/core/stores/scene-store";
 import { useUIStore } from "../lib/core/stores/ui-store";
-import { EntityMoreRow, EntityOptionRows } from "./EntityOptions";
+import { EntityDeleteRow, EntityMoreRow, EntityOptionRows } from "./EntityOptions";
 import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
 import { FieldControlRows, methodSetupTabs } from "./FluidFieldFlyout";
 import { StoneDialRows } from "./StoneLookFlyout";
@@ -32,6 +32,14 @@ import { Toolstrip, ToolstripMoreRow, ToolstripRule, ToolstripTitle } from "./to
  * other object — only the tank grows this one, because the tank's outline *is*
  * the container's and two columns at one corner would argue about which is in
  * front.
+ *
+ * And when anything other than the tank is selected this strip is not drawn at
+ * all: the viewport withholds its corner. It is the ambient column — it stands
+ * there because nothing has been asked — so it gives way entirely to the column
+ * that is an answer, rather than shuffling outward to stand beside it. Two
+ * columns a few centimetres apart at the same corner read as one panel about
+ * two different subjects, which is worse than briefly losing the field views;
+ * deselecting brings them back.
  */
 export function ContainerToolstrip({
   leftFraction,
@@ -89,12 +97,15 @@ export function ContainerToolstrip({
  * The strip at any other selected thing's own corner.
  *
  * Titled, because a boulder's outline does not say "boulder" the way the tank's
- * does — and because two strips can be on screen at once, one about the water
- * and one about the thing standing in it.
+ * does, and because while this column is up it is the only one on screen — the
+ * container's stands down for it — so nothing else is left saying what the
+ * reader is looking at.
  *
  * The sculpting dials come before the declared options: a canopy's three dials
  * are what a reader came to the tree for, and the node's extents are what they
- * reach for afterwards.
+ * reach for afterwards. Delete is last of the object's own rows, for the reason
+ * it always is: it is the one row that cannot be walked back by moving the same
+ * control the other way.
  */
 export function EntityToolstrip({
   leftFraction,
@@ -121,6 +132,7 @@ export function EntityToolstrip({
     leftFraction={leftFraction}
     topFraction={topFraction}
     ariaLabel={`${entity.label} options`}
+    narrow
     testId="entity-toolstrip"
   >
     <ToolstripTitle>{entity.label}</ToolstripTitle>
@@ -128,6 +140,13 @@ export function EntityToolstrip({
     {stoneId !== undefined && <StoneDialRows nodeId={stoneId} />}
     {vesselName !== undefined && <RimDialRows vesselName={vesselName} />}
     <EntityOptionRows key={selection.id} entity={entity} />
+    {/* Last of the rows that are about the object, and above the door rather
+        than below it: the "⋯" is the foot of every column in this editor, the
+        container's included, and a row hung under it would break the one shape
+        the two strips share. Everything above this row reports or adjusts and
+        can be walked back by moving the same control the other way; this one
+        ends the object, so it is where the object's own list ends. */}
+    <EntityDeleteRow key={`delete:${selection.id}`} entity={entity} />
     <EntityMoreRow key={`more:${selection.id}`} entity={entity} />
   </Toolstrip>;
 }

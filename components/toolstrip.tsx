@@ -93,12 +93,24 @@ export function Toolstrip({
   leftFraction,
   topFraction,
   ariaLabel,
+  narrow,
   testId,
   children,
 }: {
   leftFraction: number;
   topFraction: number;
   ariaLabel: string;
+  /**
+   * A column sized for one object rather than for the scene.
+   *
+   * The tag width is a single decision for the whole column — every row shares
+   * it so the values line up — so it is set here rather than per row. An
+   * object's strip hangs off the object, often near the middle of the frame
+   * with water on both sides, and its rows are short: a tag and a number.
+   * The container's stands at the edge of the image carrying sentences like
+   * "Re-author at", and narrowing it would only ellipsize them.
+   */
+  narrow?: boolean;
   testId?: string;
   children: ReactNode;
 }) {
@@ -110,7 +122,7 @@ export function Toolstrip({
   const section = useMemo(() => ({ open, claim: setOpen }), [open]);
   return <ToolstripSectionContext.Provider value={section}><div
     ref={ref}
-    className="toolstrip"
+    className={`toolstrip${narrow ? " is-narrow" : ""}`}
     data-testid={testId}
     style={style}
     role="group"
@@ -206,6 +218,61 @@ export function ToolstripRow({
         onClick={onClick}
       >{body}</button>}
     {children}
+  </div>;
+}
+
+/**
+ * A row that *does* something rather than reporting what something is set to.
+ *
+ * The column's two authored flavours are both statements — a glyph row is a
+ * picture of a view, a tag row is a name and its current value — and neither
+ * fits a verb. A verb has no value to show and no open state to hold; it has a
+ * name, a picture, and a consequence. Written as a tag row it would be a
+ * setting with a permanently blank answer; written as a glyph row it would be a
+ * lone pictogram whose only label arrives on hover, which is the wrong bargain
+ * for something irreversible. So: mark *and* name, on one full-width row, and
+ * `tone` so the destructive one can say so in the same red the ring's wedge
+ * uses — one verb, one colour, wherever the reader meets it.
+ */
+export function ToolstripActionRow({
+  icon,
+  label,
+  name,
+  hint,
+  tone,
+  disabled,
+  testId,
+  onClick,
+}: {
+  /** The verb's picture, drawn from the editor's one icon vocabulary. */
+  icon: ReactNode;
+  /** The verb, in the column's tag style. */
+  label: string;
+  /** The full phrase — the verb and what it acts on — on the tip. */
+  name: string;
+  /** One line saying what it does, and how it can be undone. */
+  hint?: string;
+  /** Binds `--tone`; `danger` is the red every destructive mark shares. */
+  tone?: "danger";
+  disabled?: boolean;
+  testId?: string;
+  onClick: () => void;
+}) {
+  return <div className="toolstrip-row is-verb">
+    <button
+      type="button"
+      className={`toolstrip-key is-verb${tone ? ` tone-${tone}` : ""}`}
+      disabled={disabled}
+      data-testid={testId}
+      onClick={onClick}
+    >
+      {icon}
+      <b className="toolstrip-tag">{label}</b>
+      <span className="toolstrip-tip">
+        <strong>{name}</strong>
+        {hint !== undefined && <small>{hint}</small>}
+      </span>
+    </button>
   </div>;
 }
 

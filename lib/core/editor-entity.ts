@@ -219,14 +219,50 @@ export interface EditorEntity {
   readonly remove?: () => SceneDescription;
 }
 
+/**
+ * Several fields that are really one quantity, folded onto one row.
+ *
+ * A position is the case that forced it: three numbers, no one of which means
+ * anything alone, spending three lines of a column that hangs beside the water
+ * — while the gizmo on screen is already the better instrument for all three.
+ * Fields naming the same row are drawn as a single line whose value is their
+ * readouts side by side, and the row opens onto the fields themselves.
+ *
+ * Declared on the field rather than as a fourth list on the entity, so folding
+ * is a property of the numbers and the declaration order stays the render
+ * order: the fold happens where the first member was.
+ */
+export interface EditorFieldRow {
+  /** Fields carrying the same id are folded together. */
+  readonly id: string;
+  /** The short name, in the column. */
+  readonly tag: string;
+  /** The full name, on the tip and over what the row opens. */
+  readonly label: string;
+  /** One line on the tip — the place for the units the joined readout drops. */
+  readonly hint?: string;
+}
+
 export interface EditorField {
   readonly id: string;
   readonly label: string;
+  /**
+   * The name in the column, when the full one is too long for it.
+   *
+   * The strip is a narrow column beside the image, and a tag is read against
+   * its neighbours rather than in prose: "SMALLEST CELL" is a sentence where
+   * "MIN" is a label. The full `label` still names the field on its tip, in its
+   * aria-label and inside any pane it opens, so nothing is actually shortened —
+   * only what stands on the column is.
+   */
+  readonly tag?: string;
   readonly unit?: string;
   readonly value: number;
   readonly step: number;
   readonly min?: number;
   readonly max?: number;
+  /** Folded onto one row with the other fields naming the same row. */
+  readonly row?: EditorFieldRow;
   /** The scene this field's new value describes. */
   readonly apply: (value: number) => Partial<SceneDescription>;
 }
@@ -258,6 +294,8 @@ export interface EditorChoice {
 export interface EditorChoiceGroup {
   readonly id: string;
   readonly label: string;
+  /** The name in the column, when the full one is too long for it. */
+  readonly tag?: string;
   /** The `EditorChoice.id` currently in force. */
   readonly value: string;
   readonly options: readonly EditorChoice[];
@@ -284,15 +322,14 @@ export interface EditorControlGroup {
   readonly summary?: string;
 }
 
-/** X, Y and Z of a position, as three fields that each move only their axis. */
 /**
- * The same three numbers, folded into one row of the strip.
+ * The same three numbers, put away behind the door entirely.
  *
- * Where a thing's position is already on screen as a gizmo, three rows of exact
- * entry are three lines of column spent on the fallback for a gesture the
- * reader can already make. This is that fallback kept — a reader who knows the
- * coordinate they want must always be able to type it — one click further back
- * than what the handles cannot say.
+ * One step further back than `positionFields`, for the two water bodies, whose
+ * seed box is the one thing on screen that is *only* a box: its handles say
+ * where it is more plainly than any coordinate can, and what nothing else says
+ * is what is in it. Everything else keeps its coordinates on the column, as one
+ * folded row.
  */
 export function positionGroup(
   position_m: Vec3,
@@ -307,17 +344,33 @@ export function positionGroup(
   };
 }
 
+/**
+ * X, Y and Z of a position, as three fields that each move only their axis —
+ * folded onto one row of the strip.
+ *
+ * They stay three fields, because each writes its own axis and the pane the row
+ * opens is three ordinary entries. What the fold changes is only the column: a
+ * position reads there as one fact, `AT 0.00 0.40 0.00`, which is how it reads
+ * everywhere else in the product and on every gizmo readout.
+ */
 export function positionFields(
   position_m: Vec3,
   move: (position_m: Vec3) => Partial<SceneDescription>,
   step = 0.01,
 ): EditorField[] {
+  const row: EditorFieldRow = {
+    id: "position",
+    tag: "At",
+    label: "Position",
+    hint: "Metres, in world X Y Z — for when the handles are not the right instrument",
+  };
   return EDITOR_AXES.map((axis) => ({
     id: axis,
     label: axis.toUpperCase(),
     unit: "m",
     value: position_m[axis],
     step,
+    row,
     apply: (value: number) => move({ ...position_m, [axis]: value }),
   }));
 }

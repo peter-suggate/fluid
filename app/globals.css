@@ -1390,6 +1390,22 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    instead of ellipsizing its value away. */
 .toolstrip-key { width: max-content; min-width: 158px; max-width: 216px; }
 .toolstrip-key.is-glyph { width: 24px; min-width: 0; max-width: none; height: 24px; justify-content: center; padding: 0; }
+/* A column about one object, rather than about the scene.
+
+   Both strips are the same instrument, but they are not the same size of
+   subject. The container's stands at the edge of the frame and carries the
+   solver's vocabulary — "Re-author at", "Finest cell" — where a narrower tag
+   column would only ellipsize the values beside it. An object's hangs off the
+   object, which is usually somewhere in the middle of the image with water on
+   both sides, and every row on it is a short tag and a number: at the scene
+   column's width it was a slab of empty gutter laid over the thing it was
+   describing, wider than the region it belonged to.
+
+   Excluding the glyph keys, which are 24px squares in either column: without
+   that they would inherit the tag width and the "⋯" door would be a 112px
+   button holding three dots. */
+.toolstrip.is-narrow .toolstrip-key:not(.is-glyph) { min-width: 112px; max-width: 136px; }
+.toolstrip.is-narrow .toolstrip-rule { width: 112px; }
 .toolstrip-key:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }
 /* No frost on the lit row, deliberately: `backdrop-filter` makes an element a
    containing block for absolutely positioned descendants, so a frosted key
@@ -1416,6 +1432,31 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .toolstrip-row.is-open:has(.toolstrip-number, .toolstrip-choice) .toolstrip-value { display: none; }
 .toolstrip-row.is-more .toolstrip-key { color: var(--dim); }
 .toolstrip-row.is-more i { font: var(--text-label); font-style: normal; line-height: 1; }
+/* A verb, and the one row in the column that is not a statement about the
+   object. It keeps the tag row's width so the column still has one left edge,
+   but it carries its mark as well as its name: a destructive row identified
+   only by a word is a word among twelve other words, and one identified only by
+   a pictogram is a hover away from being read at all.
+
+   Its colour comes from `--tone`, which `.tone-danger` binds to the same red
+   the ring's delete wedge uses — one verb, one hue, wherever it is met. At rest
+   it is held back from full strength, because a red row shouting at the foot of
+   every selected object's column would be the loudest thing on a screen whose
+   subject is the water; it comes up to the full tone under the pointer, where
+   the reader is about to commit to it. */
+/* Read through an alias with a fallback, so a verb that declares no tone is the
+   column's own muted grey rather than an invalid colour: `--tone` is set by the
+   `tone-` class on the key itself, and a key without one has none to read. */
+.toolstrip-key.is-verb { --verb-tone: var(--tone, var(--muted)); color: color-mix(in srgb, var(--verb-tone) 74%, transparent); }
+.toolstrip-key.is-verb:hover:not(:disabled),
+.toolstrip-key.is-verb:focus-visible:not(:disabled) {
+  border-color: color-mix(in srgb, var(--verb-tone) 52%, transparent);
+  background: color-mix(in srgb, var(--verb-tone) 11%, transparent);
+  color: var(--verb-tone);
+}
+/* The mark keeps its own size against the flex row rather than being squeezed
+   by the tag beside it. */
+.toolstrip-key.is-verb > svg { flex: none; }
 
 /* The strip's own tooltip, because the browser's arrives a second late and a
    column of short marks cannot afford that. One fixed side rather than a flip,

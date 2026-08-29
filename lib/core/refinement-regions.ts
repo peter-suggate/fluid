@@ -52,7 +52,9 @@ export const DEFAULT_REFINEMENT_REGION_CELL_SIZE = 8;
 export const REFINEMENT_REGION_RULES = Object.freeze([
   {
     id: "minimum-cell-size" as const,
-    label: "Cell size bounds",
+    // The label is the value shown beside MEANS on a narrow column, so it is a
+    // word rather than a phrase; the sentence it stands for is the hint.
+    label: "Bounds",
     hint: "Choose the smallest allowed pressure cell and, optionally, the largest. Equal bounds hold fully contained leaves at one tier.",
   },
 ]);

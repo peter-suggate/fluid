@@ -229,13 +229,6 @@ const PRESENTED_DRAFT_SUBJECTS: ReadonlySet<SceneDraftSubject> = new Set<SceneDr
  * Undefined when the box has no visible top corner at all, which is the caller's
  * cue to draw nothing.
  */
-/**
- * How wide a column of the strip has to be assumed to be, for keeping two of
- * them apart: one row at its widest plus the gap it hangs off its anchor by.
- * See `.toolstrip-key` and `useAnchoredFlyout` for both halves.
- */
-const TOOLSTRIP_COLUMN_PX = 228;
-
 function rightmostTopCorner(
   corners: readonly Vec3[] | undefined,
   camera: CameraState,
@@ -1004,24 +997,22 @@ export function WebGPUViewport() {
   const entityTopCorner = heldEntity && !sceneDraft && !tankSelected
     ? rightmostTopCorner(entityOutline(heldEntity), camera, viewportSize)
     : undefined;
-  // Two columns of controls may not stand in the same place, and a selected
-  // object's corner is often within a strip's width of the container's — a
-  // reservoir fills most of its tank, so the water's top corner and the tank's
-  // are the same corner to within a few centimetres.
+  // The container's strip gives way *entirely* while something else is
+  // selected. It used to give way outward — shifted a column's width further
+  // from the water so both could stand — on the argument that the field views
+  // are worth keeping reachable. In front of a real selection that argument
+  // does not survive: two columns of unrelated controls, a few centimetres
+  // apart at the same corner of nearly the same box, read as one panel whose
+  // top half is about the thing that was clicked and whose bottom half is about
+  // the tank. A reader selecting a refinement region got the region's extents
+  // and the water's views side by side with nothing saying which was which.
   //
-  // The container's strip is the one that gives way, because it is the ambient
-  // one: it stands there whether or not anything is selected, while the other
-  // column is the answer to a click the reader has just made. It gives way
-  // *outward* — the container encloses whatever is selected, so its corner is
-  // already the further one from the water, and pushing it further out moves
-  // the chrome away from the image rather than across it.
-  const containerStripCorner = containerTopCorner && entityTopCorner
-    ? {
-      ...containerTopCorner,
-      leftFraction: Math.max(containerTopCorner.leftFraction,
-        entityTopCorner.leftFraction + TOOLSTRIP_COLUMN_PX / Math.max(1, viewportSize.width)),
-    }
-    : containerTopCorner;
+  // So one selection, one column. The container's is the one that goes, because
+  // it is the ambient one — it stands there whether or not anything is
+  // selected, while the other column is the answer to a click just made — and
+  // it comes straight back on deselecting, which is now the gesture that means
+  // "show me the scene's own controls again".
+  const containerStripCorner = entityTopCorner ? undefined : containerTopCorner;
   // Where the traced ray currently appears on screen. Projecting a point on the
   // ray rather than reusing the pointer is what keeps the marker on a pinned ray
   // while the camera orbits away from the pixel that produced it.

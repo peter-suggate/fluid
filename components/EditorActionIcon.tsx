@@ -68,6 +68,25 @@ const ICONS = {
 } satisfies Record<EditorActionIconName, LucideIcon>;
 
 /**
+ * Draw one inline, for a verb that appears in ordinary layout.
+ *
+ * The ring is no longer the only place a verb is offered — a toolstrip row can
+ * carry one too — and a row is a `<div>`, where `EditorActionIconMark`'s `<g>`
+ * is not legal. Both go through the one table above on purpose: "delete" has to
+ * be the same picture whether the reader met it on a wedge or on a row, and
+ * that only holds while one place decides what it looks like. Sized for a strip
+ * row by default, which is smaller than a wedge's; the stroke stays a hair
+ * heavier so it survives at 14px.
+ */
+export function EditorActionGlyph({ name, size = 14 }: {
+  name: EditorActionIconName;
+  size?: number;
+}) {
+  const Icon = ICONS[name];
+  return <Icon width={size} height={size} strokeWidth={1.7} aria-hidden />;
+}
+
+/**
  * Draw one, centred on a point in an SVG's own coordinate system.
  *
  * Nested `<svg>` inside a `<g>` rather than a `<foreignObject>`: the icon is

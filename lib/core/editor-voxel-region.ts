@@ -145,9 +145,10 @@ function voxelRegionEntityFor(
     editLabel: () => "Adjusted the voxel selection",
     // Delete means what it means everywhere else: the scene without what is
     // selected. It is the same patch the Clear verb writes, offered on the key
-    // and on the flyout button rather than only on the ring — and withheld when
-    // the box is all air, so the key falls through instead of committing an
-    // edit that changes nothing. `removeEntity` re-seeds, which solids need.
+    // and on the strip's own delete row rather than only on the ring — and
+    // withheld when the box is all air, so the key falls through instead of
+    // committing an edit that changes nothing, and the row does not appear at
+    // all. `removeEntity` re-seeds, which solids need.
     remove: preview.affectedCount > 0
       ? () => ({
         ...context.scene,

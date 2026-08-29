@@ -352,6 +352,11 @@ function refinementRegionChoices(
     {
       id: "rule",
       label: "This box means",
+      // Short tags throughout, because a region's column is the narrow one and
+      // "THIS BOX MEANS" is a sentence where the reader needs a label. The full
+      // phrasing is still on each row's tip, which is where a first reader
+      // meets it.
+      tag: "Means",
       value: region.rule,
       options: REFINEMENT_REGION_RULES.map((rule) => ({
         id: rule.id,
@@ -364,6 +369,7 @@ function refinementRegionChoices(
     {
       id: "minimumCellSize",
       label: "Smallest cell",
+      tag: "Min",
       value: String(minimumCells),
       options: OCTREE_REFINEMENT_REGION_CELL_SIZES.map((cells) => ({
         id: String(cells),
@@ -387,6 +393,7 @@ function refinementRegionChoices(
     {
       id: "maximumCellSize",
       label: "Largest cell",
+      tag: "Max",
       value: maximumCells === undefined ? "auto" : String(maximumCells),
       options: [
         {
