@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type KeyboardEvent } from "react";
-import { getMethod, interactiveSimulationMethods } from "@/lib/core/method-registry";
+import { getMethod } from "@/lib/core/method-registry";
 import type { MethodParamSpec, SelectParamSpec } from "@/lib/core/method-contract";
 import type { GPUQuality } from "../lib/core/gpu-quality";
 import { RangeControl } from "./controls";
@@ -67,10 +67,8 @@ type FieldView = FieldVisualization & { mode: GridOverlayMode };
  * drawing one lens's phases under another lens's name.
  */
 type FieldDetail =
-  | { readonly kind: "views" }
   | { readonly kind: "lens"; readonly id: string }
   | { readonly kind: "film" }
-  | { readonly kind: "solver" }
   | { readonly kind: "setup" };
 
 function sameDetail(a: FieldDetail | undefined, b: FieldDetail): boolean {
@@ -296,10 +294,6 @@ export function FieldControlRows({ lenses: override }: {
   // selected lens would take the panel's only way to turn the overlay off down
   // with the catalog row it does not have.
   const shown = active ?? (activeLens && { label: activeLens.label, planeless: false });
-  // The solver row stays even when a method registers no field views: this
-  // widget is also where the method is switched, and a picker that vanished
-  // with the fields would strand such a method with no way back.
-  const hasViews = views.length > 0;
 
   // A film view's slider is a scrub through the captured iterations, not an
   // opacity. The iteration each stop lands on is knowable here without asking
@@ -322,10 +316,9 @@ export function FieldControlRows({ lenses: override }: {
   // column closes itself instead of holding a stale reading open beside a scene
   // that no longer produces it.
   const open = detail === undefined ? undefined
-    : detail.kind === "views" ? (hasViews ? detail : undefined)
-      : detail.kind === "lens" ? (activeLens?.id === detail.id ? detail : undefined)
-        : detail.kind === "film" ? (filmMode ? detail : undefined)
-          : detail;
+    : detail.kind === "lens" ? (activeLens?.id === detail.id ? detail : undefined)
+      : detail.kind === "film" ? (filmMode ? detail : undefined)
+        : detail;
   // One row open across the whole strip, not one per section: these rows and
   // the selected object's own hang their cards off the same corner, so two open
   // at once overlap.
@@ -365,45 +358,7 @@ export function FieldControlRows({ lenses: override }: {
     { value: "off", label: "HIDE" },
   ];
 
-  // The whole catalog, hung off the row that names what is currently drawing.
-  const viewsPane = open?.kind === "views"
-    && <ToolstripPane label="Field" onClose={closePane}>
-        <div className="fluid-field-options">
-          {views.map((view) => {
-            const isActive = active?.mode === view.mode;
-            return <button
-              key={view.id}
-              type="button"
-              className={isActive ? "active" : ""}
-              aria-pressed={isActive}
-              title={view.description}
-              onClick={() => {
-                selectView(view);
-                // Picking is the list's whole job, so it stands down afterwards
-                // and hands the pane to the chosen view's own control surface —
-                // which for a film is the curve, and for everything else is
-                // nothing.
-                openDetail(isPressureJournalOverlayMode(view.mode) ? { kind: "film" } : undefined);
-              }}
-            >
-              <i style={view.swatch ? { background: view.swatch } : undefined} />
-              <span>{view.label}</span>
-              <small>{view.figure ?? ""}</small>
-            </button>;
-          })}
-        </div>
-      </ToolstripPane>;
-
   return <>
-    {hasViews && <ToolstripRow
-      tag="FIELD"
-      value={shown?.label ?? "Hidden"}
-      name="Field view"
-      hint="Every view this solver publishes. The strip above is the short list; this is all of it."
-      active={open?.kind === "views"}
-      testId="fluid-field-row-field"
-      onClick={() => toggle({ kind: "views" })}
-    >{viewsPane}</ToolstripRow>}
     {/* Always shown rather than opened, because this is the control a reader
         works while the water moves — and it is the only way to put away a lens,
         which has no row of its own anywhere else.
@@ -520,26 +475,6 @@ export function FieldControlRows({ lenses: override }: {
         />}
       </ToolstripPane>}
     </ToolstripRow>}
-    {/* The solver behind these fields. It lives on this strip because switching
-        methods is part of the same watch-the-water loop as choosing a view. */}
-    <ToolstripRow
-      tag="SOLVER"
-      value={method.shortLabel}
-      name="Fluid solver"
-      hint={method.description}
-      active={open?.kind === "solver"}
-      testId="fluid-field-row-solver"
-      onClick={() => toggle({ kind: "solver" })}
-    >
-      {open?.kind === "solver" && <ToolstripChoice
-        ariaLabel="Fluid solver method"
-        value={methodId}
-        options={interactiveSimulationMethods().map((candidate) => ({
-          value: candidate.id, label: candidate.shortLabel, title: candidate.description,
-        }))}
-        onChange={(value) => simulation.setMethod(value, session.id)}
-      />}
-    </ToolstripRow>
   </>;
 }
 

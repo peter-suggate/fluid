@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Boxes,
-  ChevronDown,
   CircleGauge,
   Droplets,
   Eye,
@@ -24,6 +23,9 @@ import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
 import {
   ToolstripChoice,
+  ToolstripMenuButton,
+  ToolstripMenuItem,
+  ToolstripMenuRule,
   ToolstripRow,
   ToolstripScrub,
   useToolstripSection,
@@ -97,13 +99,17 @@ export function methodHasQuickFields(methodId: string): boolean {
  * away without disturbing which view is selected, so turning it back on is one
  * click on the same mark.
  *
- * Which views the chevron offers is not decided here. A pass declares an `icon`
- * on the view it thinks is worth the room (see `FieldVisualizationIcon`), and
- * the running method's `supportedFieldModes` narrows that to what this solver
+ * The chevron offers everything the solver publishes, in two halves: the views a
+ * pass claimed an `icon` for (see `FieldVisualizationIcon`) lead with their
+ * marks, then a hairline, then the rest with their swatches. That second half
+ * used to be a FIELD row of its own opening a pane, which was a row reporting
+ * one word over a list this menu already is.
+ *
+ * Which views those are is not decided here. The pass declares its mark, and the
+ * running method's `supportedFieldModes` narrows the catalog to what this solver
  * can honestly publish — so a method that draws no volume never offers a volume
  * view, and a view added beside its pass reaches this row without this file
- * learning its name. Everything the short list leaves out is behind the door at
- * the foot of the column.
+ * learning its name.
  *
  * Exported as rows rather than as a strip because the tank's own strip grows out
  * of this one: selecting the tank adds sections underneath rather than swapping
@@ -128,22 +134,20 @@ export function FieldViewRows() {
     claim(open);
     setPicking(open);
   };
-  // Escape closes it, which a dropdown owes the reader and a settings card does
-  // not: this one is up *while* the reader is deciding, and the gesture that
-  // abandons a decision is the same everywhere.
-  useEffect(() => {
-    if (!picking) return;
-    const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setPicking(false);
-    };
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
-  }, [picking]);
 
   const method = getMethod(methodId);
   const volumeCapable = method.capabilities?.volumeRendering === true;
   const supported = new Set(method.supportedFieldModes ?? []);
+  // Two lists, one menu. `views` is the short list a pass claimed a glyph for —
+  // the handful worth turning on while watching the water — and `rest` is
+  // everything else this solver publishes: twenty more on the Losasso methods,
+  // which used to be a row of their own opening a pane. That row is gone, so
+  // this menu is the whole picker, and the seam between the two halves is a
+  // hairline rather than a second surface to go and find.
   const views = QUICK_FIELDS.filter((view) => supported.has(view.mode));
+  const rest = FIELDS.filter((view) => !view.hidden
+    && supported.has(view.mode)
+    && !views.some((quick) => quick.mode === view.mode));
   // What is drawing, whether or not this strip could have chosen it: the full
   // catalog and a link can both leave a view on that has no glyph here, and a
   // reader who cannot see what is drawn cannot turn it off either.
@@ -157,12 +161,12 @@ export function FieldViewRows() {
   const shown = drawing
     ?? views.find((view) => view.mode === overlayMode)
     ?? views[0];
-  // A view chosen from the full catalog is not on the short list, so it joins
-  // it: a list that omitted the thing that is lit would be a list the reader
-  // cannot use to move off it.
-  const offered = shown !== undefined && !views.some((view) => view.mode === shown.mode)
-    ? [shown, ...views]
-    : views;
+  // A hidden view is in neither list — it is one a focused panel selected — so
+  // it joins the short list while it is drawing: a menu that omitted the thing
+  // that is lit is a menu the reader cannot use to move off it.
+  const listed = (view: Field) => views.some((quick) => quick.mode === view.mode)
+    || rest.some((other) => other.mode === view.mode);
+  const offered = shown !== undefined && !listed(shown) ? [shown, ...views] : views;
 
   const choose = (view: FieldOverlayView) => {
     const change = pickFieldOverlay(
@@ -213,41 +217,23 @@ export function FieldViewRows() {
     onChange={setOverlaySlice}
   />;
 
-  // A dropdown under its own chevron rather than the strip's pane, which is
-  // measured out past the whole column's right edge — correct for a card of
-  // settings a row opens, wrong for a list of alternatives to the mark beside
-  // it: it left the list hanging past the scrub with nothing tying it to what
-  // it was changing. It is the same material as the strip's tips, since it is
-  // the same kind of thing: a small surface that appears over the water for one
-  // decision and goes away.
-  const menu = picking && <div
-    className="toolstrip-menu fluid-field-options"
-    role="menu"
-    aria-label="Field view"
-  >
-    {offered.map((view) => {
-      const active = drawing?.mode === view.mode;
-      return <button
-        key={view.id}
-        type="button"
-        className={active ? "active" : ""}
-        role="menuitemradio"
-        aria-checked={active}
-        title={view.description}
-        data-testid={`field-quick-pick-${view.mode}`}
-        onClick={() => {
-          choose(view);
-          // Picking is the list's whole job: it stands down and hands the row
-          // back its plane and its scrub, which is what the reader came to this
-          // corner to move.
-          pick(false);
-        }}
-      >
-        {glyphOf(view, 13)}
-        <span>{view.label}</span>
-      </button>;
-    })}
-  </div>;
+  const item = (view: Field, glyph: boolean) => <ToolstripMenuItem
+    key={view.id}
+    icon={glyph ? glyphOf(view, 13) : undefined}
+    swatch={view.swatch}
+    label={view.label}
+    note={view.figure}
+    title={view.description}
+    active={drawing?.mode === view.mode}
+    testId={`field-quick-pick-${view.mode}`}
+    onClick={() => {
+      choose(view);
+      // Picking is the list's whole job: it stands down and hands the row back
+      // its plane and its scrub, which is what the reader came to this corner
+      // to move.
+      pick(false);
+    }}
+  />;
 
   const open = planes || scrub ? <>{planes}{scrub}</> : undefined;
 
@@ -258,23 +244,16 @@ export function FieldViewRows() {
     active={drawing !== undefined}
     testId={`field-quick-${shown.mode}`}
     onClick={() => choose(shown)}
-    after={offered.length > 1 && <span className="toolstrip-anchor">
-      <button
-        type="button"
-        className={`toolstrip-key is-chevron${picking ? " active" : ""}`}
-        aria-label="Choose a field view"
-        aria-haspopup="menu"
-        aria-expanded={picking}
-        data-testid="field-quick-pick"
-        onClick={() => pick(!picking)}
-      >
-        <ChevronDown width={12} height={12} strokeWidth={2} aria-hidden />
-        <span className="toolstrip-tip">
-          <strong>Field view</strong>
-          <small>The views worth turning on while the water runs. The door below has the rest.</small>
-        </span>
-      </button>
-      {menu}
-    </span>}
+    after={offered.length + rest.length > 1 && <ToolstripMenuButton
+      label="Field view"
+      hint="Every view this solver publishes; the ones with a mark are the short list."
+      open={picking}
+      testId="field-quick-pick"
+      onOpen={pick}
+    >
+      {offered.map((view) => item(view, true))}
+      {offered.length > 0 && rest.length > 0 && <ToolstripMenuRule />}
+      {rest.map((view) => item(view, false))}
+    </ToolstripMenuButton>}
   >{open}</ToolstripRow>;
 }

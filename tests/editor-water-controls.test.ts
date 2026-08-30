@@ -51,7 +51,9 @@ test("the water carries its own material, and the tank does not repeat it", () =
   assert.ok(tank);
   assert.equal(materialFieldsOf(tank.groups), undefined,
     "the tank must not offer a second copy of the water's material");
-  assert.deepEqual(groupIds(tank), ["container", "domain"]);
+  // Nothing at all, now that the Container and Voxel domain groups are gone: a
+  // filled tank's only group was ever the water's, and the water is holding it.
+  assert.deepEqual(groupIds(tank), []);
 });
 
 test("an empty tank keeps the water's settings, because nothing else can hold them", () => {

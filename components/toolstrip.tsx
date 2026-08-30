@@ -10,6 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { ChevronDown } from "lucide-react";
 import { useAnchoredFlyout } from "./anchored-flyout";
 
 /**
@@ -181,8 +182,9 @@ export function ToolstripRow({
   active?: boolean;
   disabled?: boolean;
   /**
-   * A second control belonging to the key rather than to what the key opens —
-   * a chevron onto the alternatives to the thing it names.
+   * What belongs to the key rather than to what the key opens — a chevron onto
+   * the alternatives to the thing it names, and the name of whatever is
+   * currently chosen.
    *
    * Kept apart from `children` because it is there whether or not the row is
    * open, and a row that counted it as open state would be a row that never
@@ -325,6 +327,123 @@ export function ToolstripMoreRow({
     </button>
     {children}
   </div>;
+}
+
+/**
+ * A chevron beside a key, and the list of alternatives it drops.
+ *
+ * The strip's other disclosure is `ToolstripPane`, which is measured out past
+ * the whole column's right edge. That is right for a card of settings a row
+ * opens and wrong for a list of alternatives to the mark beside it: such a list
+ * ends up floating past whatever else the row is carrying, with nothing tying it
+ * to the thing it changes. This one hangs off the chevron itself.
+ *
+ * The open flag is the caller's, not this component's, because the strip allows
+ * one open thing at a time and the token that claims it belongs to the section
+ * (see `useToolstripSection`) — a menu that owned its own state would be a
+ * second answer to "what is open" for the column to disagree with.
+ */
+export function ToolstripMenuButton({
+  label,
+  hint,
+  open,
+  testId,
+  onOpen,
+  children,
+}: {
+  /** Names the trigger and the list; on the tip, and on both aria labels. */
+  label: string;
+  hint?: string;
+  open: boolean;
+  testId?: string;
+  onOpen: (open: boolean) => void;
+  /** `ToolstripMenuItem`s, and any `ToolstripMenuRule` between them. */
+  children: ReactNode;
+}) {
+  // Escape closes it, which a dropdown owes the reader and a settings card does
+  // not: this one is up *while* the reader is deciding, and the gesture that
+  // abandons a decision is the same everywhere. Read through a ref so the
+  // listener is bound once per opening rather than re-bound on every render the
+  // caller happens to do underneath it.
+  const close = useRef(onOpen);
+  useEffect(() => {
+    close.current = onOpen;
+  });
+  useEffect(() => {
+    if (!open) return;
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close.current(false);
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [open]);
+  return <span className="toolstrip-anchor">
+    <button
+      type="button"
+      className={`toolstrip-key is-chevron${open ? " active" : ""}`}
+      aria-label={label}
+      aria-haspopup="menu"
+      aria-expanded={open}
+      data-testid={testId}
+      onClick={() => onOpen(!open)}
+    >
+      <ChevronDown width={12} height={12} strokeWidth={2} aria-hidden />
+      <span className="toolstrip-tip">
+        <strong>{label}</strong>
+        {hint !== undefined && <small>{hint}</small>}
+      </span>
+    </button>
+    {open && <div className="toolstrip-menu" role="menu" aria-label={label}>{children}</div>}
+  </span>;
+}
+
+/**
+ * One alternative in a menu.
+ *
+ * `icon` for something with an inherent picture and `swatch` for something whose
+ * only mark is the colour it draws in — the same split the column itself makes,
+ * and the reason a menu can carry the handful of views that earned a glyph above
+ * the two dozen that did not without the two halves looking like one list that
+ * lost its icons.
+ */
+export function ToolstripMenuItem({
+  icon,
+  swatch,
+  label,
+  note,
+  title,
+  active,
+  testId,
+  onClick,
+}: {
+  icon?: ReactNode;
+  swatch?: string;
+  label: string;
+  /** A word at the right edge — the paper figure a view reproduces, say. */
+  note?: string;
+  title?: string;
+  active?: boolean;
+  testId?: string;
+  onClick: () => void;
+}) {
+  return <button
+    type="button"
+    role="menuitemradio"
+    className={active ? "active" : ""}
+    aria-checked={active}
+    title={title}
+    data-testid={testId}
+    onClick={onClick}
+  >
+    {icon ?? <i style={swatch ? { background: swatch } : undefined} />}
+    <span>{label}</span>
+    {note !== undefined && <small>{note}</small>}
+  </button>;
+}
+
+/** The seam between two kinds of alternative in one menu. */
+export function ToolstripMenuRule() {
+  return <hr />;
 }
 
 /**
@@ -559,6 +678,7 @@ export function ToolstripNumber({
   step,
   min,
   max,
+  tag,
   unit,
   ariaLabel,
   onCommit,
@@ -567,21 +687,40 @@ export function ToolstripNumber({
   step: number;
   min?: number;
   max?: number;
+  /**
+   * The one or two letters that say which quantity this is, for a field
+   * standing beside its siblings rather than under its own name.
+   *
+   * A row of three bare boxes is three numbers a reader has to count along to
+   * identify; the same three behind W/H/D are read at a glance. The full name
+   * is still on `ariaLabel`, so nothing is actually shortened.
+   */
+  tag?: string;
   unit?: string;
   ariaLabel: string;
   onCommit: (value: number) => void;
 }) {
+  // What the field prints, at the step's own precision. A quantity snapped to a
+  // lattice arrives as 0.6000000000000001, and a box sized for the number it
+  // means shows "0.60000000" and clips the rest. Rounded here rather than at the
+  // caller, so the document keeps holding the exact figure it computed.
+  const text = printedNumber(value, step);
+  // …and the commit compares against *that*, not against the stored value: a
+  // field entered and left untouched must not read its own rounding back as an
+  // edit. These commits are structural — every one of them reseeds the solver.
+  const shown = Number(text);
   const commit = (raw: string) => {
     const next = Number(raw);
-    if (Number.isFinite(next) && next !== value) onCommit(next);
+    if (Number.isFinite(next) && next !== shown) onCommit(next);
   };
   return <label className="toolstrip-number">
+    {tag !== undefined && <b>{tag}</b>}
     <input
       type="number"
-      // Keyed off the value so a commit that the document clamped or refused
-      // shows the document's answer rather than the reader's typing.
-      key={value}
-      defaultValue={value}
+      // Keyed off the printed value so a commit that the document clamped or
+      // refused shows the document's answer rather than the reader's typing.
+      key={text}
+      defaultValue={text}
       step={step}
       min={min}
       max={max}
@@ -593,6 +732,26 @@ export function ToolstripNumber({
     />
     {unit !== undefined && <span>{unit}</span>}
   </label>;
+}
+
+/**
+ * A number at its step's precision, as a string.
+ *
+ * The step is the field's grain — a cell size, a tenth, a whole unit — so it is
+ * also how many decimals are worth printing: rounding to it drops the float
+ * noise a snapped quantity carries without ever rounding away a figure the
+ * arrows can reach. Read off the step's own decimal text rather than its
+ * logarithm, because a step of 0.0125 is four decimals even though it is under
+ * a tenth, and a field that printed two would turn one press of the up arrow
+ * into a value the reader never chose.
+ */
+function printedNumber(value: number, step: number): string {
+  const text = String(step);
+  const dot = text.indexOf(".");
+  const decimals = text.includes("e") ? 6
+    : dot < 0 ? 0
+    : Math.min(6, text.length - dot - 1);
+  return String(Number(value.toFixed(decimals)));
 }
 
 /** A row's enumeration, small enough to live on one line beside its tag. */

@@ -45,7 +45,10 @@ export function performEditorAction(
       // autoRun false for the same reason the DRAG tool passes it: a solid the
       // user asked for and has not yet moved should not start the clock under
       // them. Carrying it does, on the first move.
-      const created = simulation.addBodyAt(effect.shape, effect.point_m, { autoRun: false }, session.id);
+      // The size the strip is showing for this shape, so "place a cup here" from
+      // the ring and dropping one from the placement row put down the same cup.
+      const created = simulation.addBodyAt(effect.shape, effect.point_m,
+        { autoRun: false, dimensions_m: ui.placementDimensions[effect.shape] }, session.id);
       if (created && effect.carry) ui.beginCarry(created.id, created.name);
       return;
     }

@@ -1715,10 +1715,23 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    32px control floor for the same reason: this is chrome on the image, not a
    form. */
 .toolstrip { position: absolute; z-index: 12; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; pointer-events: none; }
+/* The strip resolves the dark half of every token, whatever the page is set to.
+   The theme switches the *page*; the viewport underneath this column does not —
+   it is a fixed dark clear the renderer writes, the same colour in either theme
+   — so a strip following the page put light-theme ink and a cream pane material
+   over a black image: a field read as a paper pill, and the marks beside it
+   nearly vanished. `color-scheme` is the whole fix, since every colour here is
+   a `light-dark()` token; nothing below restates a hue.
+
+   And the studio's form floor is written for a panel — 38px tall, 11px inside,
+   13px type — which is a form's scale, not chrome's. The strip states the same
+   three tokens the pane already states, one level up, so the floor lands at the
+   size the rows are instead of each control fighting it back down. */
+.toolstrip { color-scheme: dark; --control-height: 20px; --control-inline-padding: 6px; --control-font-size: var(--size-2); }
 /* The column has no background, so its own box and the gaps between the rows
    would be an invisible ribbon swallowing clicks on the box edge behind it.
    Only the controls take the pointer. */
-.toolstrip-key, .toolstrip-scrub, .toolstrip-choice, .toolstrip-pane { pointer-events: auto; }
+.toolstrip-key, .toolstrip-scrub, .toolstrip-choice, .toolstrip-number, .toolstrip-pane { pointer-events: auto; }
 /* Left-aligned rather than centred, so a row that grows a control widens to the
    right instead of sliding the whole column sideways under the pointer. The row
    is also the tip's frame: anchored here rather than on the key, a tip opens
@@ -1753,11 +1766,28 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    beside it, which ends up floating past the scrub with nothing tying it to
    what it changes. */
 .toolstrip-anchor { position: relative; display: flex; align-items: center; pointer-events: auto; }
+/* The chevron's footprint, held open on a row that has none, so every mark's
+   controls start at one x. It is the glyph column's version of the fixed tag
+   width: ragged left edges make a column read as a pile of unrelated widgets
+   rather than as one instrument. */
+.toolstrip-gutter { width: 12px; flex: none; }
 /* Same material as the strip's tips, because it is the same kind of thing: a
    small surface that appears over the water for one decision and goes away. It
    is not the pane's card — no head, no close, no border weight — since the
    chevron that opened it is right there and closes it. */
-.toolstrip-menu { position: absolute; z-index: 6; left: -5px; top: calc(100% + 4px); width: max-content; min-width: 140px; max-width: 220px; max-height: 46vh; padding: 4px; overflow: hidden auto; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); }
+.toolstrip-menu { position: absolute; z-index: 6; left: -5px; top: calc(100% + 4px); display: grid; gap: 1px; width: max-content; min-width: 148px; max-width: 232px; max-height: 46vh; padding: 4px; overflow: hidden auto; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); }
+.toolstrip-menu button { display: flex; align-items: center; gap: 7px; min-height: 21px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
+.toolstrip-menu button:hover { border-color: var(--accent-line); color: var(--accent); }
+.toolstrip-menu button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+/* Two kinds of mark on one list: the glyph a pass claimed for the handful worth
+   turning on, and — under the rule — the swatch of everything else the solver
+   publishes. Sized to the same box, so both halves keep one left edge for the
+   names to start at. */
+.toolstrip-menu button > svg { flex: none; width: 13px; }
+.toolstrip-menu button > i { width: 13px; height: 6px; flex: none; border-radius: 3px; background: var(--dim); }
+.toolstrip-menu button span { flex: 1; overflow: hidden; font: var(--text-label); text-overflow: ellipsis; white-space: nowrap; }
+.toolstrip-menu button small { flex: none; color: var(--dim); font: var(--text-micro); }
+.toolstrip-menu hr { height: 1px; margin: 3px 5px; border: 0; background: var(--line); }
 /* Out of flow, so it has to out-paint the rows under it — which are `relative`
    themselves and would otherwise draw straight through the list. */
 .toolstrip-row:has(.toolstrip-menu) { z-index: 6; }
@@ -1860,9 +1890,37 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .toolstrip-scrub output { color: var(--muted); font: var(--text-micro); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .toolstrip-number { display: flex; align-items: center; gap: 5px; height: 24px; }
-.toolstrip .toolstrip-number input { width: 74px; height: 20px; min-height: 0; padding: 0 5px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--overlay); color: var(--ink); font: var(--text-micro); font-variant-numeric: tabular-nums; }
+/* A well rather than a pane material: `--overlay` is the surface a card is made
+   of, and a bare field wearing it floats on the image as a filled pill instead
+   of reading as something to type in. Recessed, outlined, and the same shape as
+   the transport's step field — which is the other number typed straight onto
+   the image. The type selector is load-bearing: `.lab-shell input:is([type=…])`
+   carries an attribute, so a rule without one ties on specificity and loses on
+   order, and the field silently comes back at form scale. */
+.toolstrip .toolstrip-number input[type="number"] { width: 66px; height: var(--control-height); min-height: 0; padding: 0 var(--control-inline-padding); border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--well); color: var(--ink); font: var(--text-micro); font-variant-numeric: tabular-nums; text-align: right; appearance: textfield; }
+/* The spinners cost more room than the digits in a field this size, and step is
+   still on the arrow keys. */
+.toolstrip .toolstrip-number input::-webkit-outer-spin-button,
+.toolstrip .toolstrip-number input::-webkit-inner-spin-button { appearance: none; margin: 0; }
+.toolstrip .toolstrip-number input:hover { border-color: var(--line-strong); }
 .toolstrip .toolstrip-number input:focus-visible { border-color: var(--accent-line); outline: none; }
 .toolstrip-number span { color: var(--dim); font: var(--text-micro); }
+/* The axis letter, in the tag's own type but at the field's scale: it is not a
+   row label — the row already has a mark — it is the one character that says
+   which of three identical boxes this is. */
+.toolstrip-number b { flex: none; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); }
+/* Three extents on one line. Narrower fields than a lone number row, because
+   this is a shape read across rather than a quantity read down: at the 74px
+   default the three of them plus their mark were wider than anything else the
+   column carries. */
+.toolstrip-dimensions { display: flex; align-items: center; gap: 5px; pointer-events: auto; }
+.toolstrip-dimensions .toolstrip-number { gap: 3px; }
+.toolstrip .toolstrip-dimensions .toolstrip-number input[type="number"] { width: 52px; }
+.toolstrip-dimensions > span { color: var(--dim); font: var(--text-micro); }
+/* What a mark is currently set to, beside it. The row's `value` is the tag
+   row's answer column and is pinned to a 158px key; a glyph row has no such
+   column, so its answer simply follows the chevron. */
+.toolstrip-name { color: var(--ink); font: var(--text-micro); white-space: nowrap; }
 .toolstrip-choice { display: flex; align-items: center; gap: 3px; }
 .toolstrip-choice button { height: 20px; min-height: 0; padding: 0 7px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--overlay); color: var(--muted); font: var(--text-micro); white-space: nowrap; cursor: pointer; }
 .toolstrip-choice button:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }
@@ -1871,12 +1929,10 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 /* A chooser standing on the bare strip is chrome on the image, not a form field
    on a panel — so it wears the key's material rather than the pane's. Inside a
    pane the plate is what lifts a button off the pane's own ground; out here the
-   ground is the water, and `--overlay` is the theme's *page* surface: under the
-   light theme it painted four cream slabs over a scene that is dark whatever the
-   theme is, because the studio's ground is a GPU clear and not a CSS colour.
-   Transparent until hovered, washed only when on, exactly like the rows above
-   it. Direct children only: a choice inside a pane is nested deeper and keeps
-   its plate. */
+   ground is the water, and four plates laid across it are four slabs over the
+   thing being looked at. Transparent until hovered, washed only when on, exactly
+   like the rows above it. Direct children only: a choice inside a pane is nested
+   deeper and keeps its plate. */
 .toolstrip-row > .toolstrip-choice button { border-color: transparent; background: transparent; }
 .toolstrip-row > .toolstrip-choice button:hover:not(:disabled) { border-color: var(--accent-line); }
 .toolstrip-row > .toolstrip-choice button.active { border-color: var(--accent-line); background: var(--accent-wash); }
@@ -1973,10 +2029,6 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .fluid-field-options button:hover { color: var(--accent); border-color: var(--accent-line); }
 .fluid-field-options button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 .fluid-field-options button i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--dim); }
-/* A field view that earned a glyph brings it here too, in place of the dot:
-   the row it is picked from is the same mark, and a list that swapped it for a
-   colour swatch would make the reader match the two by position. */
-.fluid-field-options button > svg { flex: none; }
 .fluid-field-options button span { flex: 1; overflow: hidden; font: var(--text-label); text-overflow: ellipsis; white-space: nowrap; }
 .fluid-field-options button small { flex: none; color: var(--dim); font: var(--text-micro); }
 .fluid-field-settings { display: grid; gap: 6px; }

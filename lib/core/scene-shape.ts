@@ -33,6 +33,16 @@ import type { Vec3 } from "./model";
  * `length(vec2f(a, b))` and `sqrt(a*a + b*b)` do not always agree in the last
  * ulp. The one deliberate exception is noted on `boundingRadius` below.
  */
+/**
+ * The label a dimension slot carries when the shape does not use it.
+ *
+ * A word rather than a hole, because `dimensions_m` is always three floats: a
+ * sphere stores its radius in `x` and nothing meaningful in `y` or `z`, and
+ * anything reading the labels to decide what to *show* has to be able to tell
+ * that apart from a dimension that happens to be unnamed.
+ */
+export const UNUSED_DIMENSION = "unused";
+
 export type SceneShapeName = "sphere" | "box" | "capsule" | "cylinder" | "cup";
 
 export interface SceneShapeKind {
@@ -49,7 +59,13 @@ export interface SceneShapeKind {
    * Never reassigned: recordings, captures and authored documents hold it.
    */
   readonly code: number;
-  /** What the three dimension floats mean, in order. Documentation the packer can be checked against. */
+  /**
+   * What the three dimension floats mean, in order. Documentation the packer can
+   * be checked against — and the vocabulary the editor labels a shape's own
+   * numbers with, which is why the slots a shape does not use say so with
+   * `UNUSED_DIMENSION` rather than with a bare string: a picker that offered a
+   * cylinder a third box would be offering a float nothing reads.
+   */
   readonly dimensionLabels: readonly [string, string, string];
   /** Whether the shape encloses a cavity the fluid can occupy. Drives the resolution advice below. */
   readonly hollow: boolean;
@@ -186,7 +202,7 @@ export const SCENE_SHAPE_TABLE = Object.freeze({
     name: "sphere",
     label: "Sphere",
     code: 0,
-    dimensionLabels: ["radius", "unused", "unused"],
+    dimensionLabels: ["radius", UNUSED_DIMENSION, UNUSED_DIMENSION],
     hollow: false,
     inside: (d, p) => Math.hypot(p.x, p.y, p.z) <= d.x,
     distance_m: (d, p) => Math.hypot(p.x, p.y, p.z) - d.x,
@@ -243,7 +259,7 @@ export const SCENE_SHAPE_TABLE = Object.freeze({
     name: "capsule",
     label: "Capsule",
     code: 2,
-    dimensionLabels: ["radius", "segment length", "unused"],
+    dimensionLabels: ["radius", "segment length", UNUSED_DIMENSION],
     hollow: false,
     inside: (d, p) => {
       const cy = clamp(p.y, -0.5 * d.y, 0.5 * d.y);
@@ -285,7 +301,7 @@ export const SCENE_SHAPE_TABLE = Object.freeze({
     name: "cylinder",
     label: "Cylinder",
     code: 3,
-    dimensionLabels: ["radius", "height", "unused"],
+    dimensionLabels: ["radius", "height", UNUSED_DIMENSION],
     hollow: false,
     inside: (d, p) => p.x * p.x + p.z * p.z <= d.x * d.x && Math.abs(p.y) <= 0.5 * d.y,
     distance_m: (d, p) => {

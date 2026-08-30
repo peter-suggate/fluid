@@ -1,4 +1,4 @@
-import { sceneAtContainerExtents, sceneAtFinestCellSize } from "./scene-scale";
+import { sceneAtContainerExtents } from "./scene-scale";
 import { latticeAxisDimension, sceneLatticeDimensions, DEFAULT_MAXIMUM_LATTICE_DIMENSION, MINIMUM_LATTICE_DIMENSION } from "./scene-lattice";
 import { cloneScene, type SceneDescription, type Vec3 } from "./model";
 import {
@@ -11,6 +11,7 @@ import {
   type EditorEntity,
   type EditorEntityContext,
   type EditorEntityDefinition,
+  type EditorField,
 } from "./editor-entity";
 import type { FluidBodyBox } from "./editor-fluid-body";
 import {
@@ -127,178 +128,72 @@ export function tankResizeIsStructural(
 
 // ---- configuration --------------------------------------------------------
 
-/** Cell sizes the domain may be moved between, matching the halving ladder. */
-const FINEST_CELL_FLOOR_M = 0.0015625;
-const FINEST_CELL_CEILING_M = 0.25;
-
 /**
  * What the tank *is configured as*, as opposed to how big it is.
  *
- * These were the Container and Fluid sections of the configuration popover, and
- * they are here because every one of them is a statement about the vessel the
- * pointer is already on: the walls it presents to the solve, the water standing
- * in it, and the lattice both are resolved on. Reaching them by selecting the
- * tank is one gesture; the popover was a trip to a modal that then had to name
- * which scene it was configuring.
+ * Only the water is left here. The Container group — shape, top, wall mode,
+ * vessel, fill — and the Voxel domain group — leaf size, finest cell — were rows
+ * on the tank's column and are gone: the column is three fixed rows now (the
+ * field view, the tank's own extents, the solver), and a document's boundary
+ * style and lattice are authored facts rather than dials a reader reaches for
+ * while watching the water. Scenes carry whatever they were written with.
  *
- * They are groups rather than plain `fields` because they are not what a handle
- * moves — see `EditorEntity.groups`.
+ * The water's own settings live on the water — see `fluidMaterialGroup`. The
+ * tank keeps them only while the scene has no body to hang them off: an empty
+ * tank, a dry document, or one whose painted seeds have replaced the base
+ * condition still has to be able to say what will stand in it, and there is
+ * nothing else on screen to ask.
+ *
+ * A group rather than plain `fields` because it is not what a handle moves —
+ * see `EditorEntity.groups`.
  */
 function tankGroups(scene: SceneDescription): EditorControlGroup[] {
-  const c = scene.container;
-  const fluid = scene.fluid;
-  const domain = scene.voxelDomain;
-  const fluidEnabled = scene.systems?.fluid !== false;
-  const container = (patch: Partial<SceneDescription["container"]>) =>
-    ({ container: { ...c, ...patch } });
-  const lattice = tankLatticeForExtents(scene, {
-    width_m: c.width_m, height_m: c.height_m, depth_m: c.depth_m,
-  });
-  return [
-    {
-      id: "container",
-      label: "Container",
-      hint: "The boundary the solve sees, and whether it is drawn as a vessel",
-      choices: [
-        {
-          id: "shape",
-          label: "Shape",
-          value: c.shape ?? "box",
-          options: [
-            { id: "box", label: "Box", apply: () => container({ shape: "box" }) },
-            {
-              id: "sphere",
-              label: "Sphere",
-              hint: "The largest sphere the three extents contain; always closed",
-              // The top follows, because a spherical boundary has no opening to
-              // author and `validateScene` would be asked to hold both.
-              apply: () => container({ shape: "sphere", top: "closed" }),
-            },
-          ],
-        },
-        {
-          id: "top",
-          label: "Top",
-          value: c.top,
-          options: [
-            {
-              id: "open",
-              label: "Open",
-              enabled: c.shape !== "sphere",
-              hint: "A spherical boundary is closed.",
-              apply: () => container({ top: "open" }),
-            },
-            { id: "closed", label: "Closed", apply: () => container({ top: "closed" }) },
-          ],
-        },
-        {
-          id: "walls",
-          label: "Walls",
-          value: c.fluidWallMode,
-          options: [
-            { id: "no-slip", label: "No slip", apply: () => container({ fluidWallMode: "no-slip" }) },
-            { id: "free-slip", label: "Free slip", apply: () => container({ fluidWallMode: "free-slip" }) },
-          ],
-        },
-        {
-          // How the domain is drawn is separate from the physical boundary it
-          // always is. The default cue is the canonical voxel-volume wireframe.
-          id: "vessel",
-          label: "Vessel",
-          value: c.vessel ?? "outline",
-          options: [
-            { id: "outline", label: c.shape === "sphere" ? "Voxel sphere outline" : "Voxel tank outline", apply: () => container({ vessel: "outline" }) },
-            { id: "glass", label: c.shape === "sphere" ? "Glass sphere" : "Glass tank", apply: () => container({ vessel: "glass" }) },
-            { id: "none", label: "No vessel", apply: () => container({ vessel: "none" }) },
-          ],
-        },
-      ],
-      fields: [{
-        id: "fill",
-        label: "Fill",
-        unit: "%",
-        value: Math.round(c.fillFraction * 1000) / 10,
-        step: 1,
-        min: 0,
-        max: 100,
-        /**
-         * Fill is the reservoir's share of the tank, and where a reservoir has
-         * been shaped by hand that share is *derived* from the box —
-         * `validateScene` rejects a document where the two disagree. So setting
-         * it here hands the water back to the fill, dropping the authored box
-         * rather than writing a number the document would contradict. A scene
-         * that never shaped one is unaffected: its box was always this
-         * fraction's own `damBreakFractions`.
-         */
-        apply: (value: number) => {
-          const derived = { ...fluid };
-          delete derived.initialDamBreakDimensions_m;
-          delete derived.initialDamBreakOrigin_m;
-          return {
-            container: { ...c, fillFraction: Math.max(0, Math.min(1, value / 100)) },
-            fluid: derived,
-          };
-        },
-      }],
-    },
-    // The water's own settings live on the water — see `fluidMaterialGroup`.
-    // The tank keeps them only while the scene has no body to hang them off: an
-    // empty tank, a dry document, or one whose painted seeds have replaced the
-    // base condition still has to be able to say what will stand in it, and
-    // there is nothing else on screen to ask.
-    ...(fluidBodyCount(scene) > 0 ? [] : [{
-      ...fluidMaterialGroup(scene),
-      id: "fluid",
-      label: "Water",
-      hint: "The material the solver carries, and how it starts",
-      choices: [fluidStartChoice(scene)],
-    }]),
-    {
-      id: "domain",
-      label: "Voxel domain",
-      hint: "The one lattice scene geometry, the sparse renderer and the solver share",
-      choices: [{
-        id: "brick",
-        label: "Leaves",
-        value: String(domain.brickSize_cells),
-        options: [
-          {
-            id: "4",
-            label: "4³ cells",
-            enabled: !fluidEnabled,
-            hint: fluidEnabled
-              ? "4³ leaves require a renderer-only scene; fluid owner pages currently use 8³ bricks."
-              : undefined,
-            apply: () => ({ voxelDomain: { ...domain, brickSize_cells: 4 as const } }),
-          },
-          {
-            id: "8",
-            label: "8³ cells",
-            apply: () => ({ voxelDomain: { ...domain, brickSize_cells: 8 as const } }),
-          },
-        ],
-      }],
-      fields: [{
-        // Floors at 1.5625 mm, the bottom of the halving ladder every container
-        // dimension stays a whole number of 8-cell bricks at. This moves a built
-        // document onto another lattice, so seeded water is re-rasterized to
-        // preserve its physical region. Terrain bakes and generator legibility
-        // ladders remain construction inputs — the rebuild below is what
-        // re-resolves those.
-        id: "cell",
-        label: "Finest cell",
-        unit: "m",
-        value: domain.finestCellSize_m,
-        step: FINEST_CELL_FLOOR_M,
-        min: FINEST_CELL_FLOOR_M,
-        max: FINEST_CELL_CEILING_M,
-        apply: (value: number) =>
-          sceneAtFinestCellSize(scene, Math.max(FINEST_CELL_FLOOR_M, value)),
-      }],
-      summary: `${lattice.join(" × ")} finest cells. The sparse world grows to include authored`
-        + " environment objects and any authored bounds.",
-    },
-  ];
+  if (fluidBodyCount(scene) > 0) return [];
+  return [{
+    ...fluidMaterialGroup(scene),
+    id: "fluid",
+    label: "Water",
+    hint: "The material the solver carries, and how it starts",
+    choices: [fluidStartChoice(scene)],
+  }];
+}
+
+/**
+ * The tank's three extents, as fields.
+ *
+ * Exported because they are no longer rendered as rows of the selected tank's
+ * options: they are the strip's second fixed row, laid along one line beside the
+ * tank's mark, and that row is drawn whether or not the tank is selected. The
+ * declaration stays here beside `tankResizePatch`, which is what each of them
+ * commits — the row only chooses the shape they are drawn in.
+ *
+ * Extents rather than a position: the container is centred on x and z and rests
+ * on y = 0, so there is nothing else about it to type.
+ */
+export function tankExtentFields(scene: SceneDescription): EditorField[] {
+  const box = tankBox(scene);
+  const size = [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z];
+  const cell = scene.voxelDomain.finestCellSize_m;
+  return (["width_m", "height_m", "depth_m"] as const).map((key, axis) => ({
+    id: key,
+    label: ["Width", "Height", "Depth"][axis]!,
+    // An initial, because these three stand side by side on one line: read
+    // against each other rather than in a column, "W" is the label and "Width"
+    // is a word taking up the room the number needs. The full name is still on
+    // the field's own aria-label.
+    tag: ["W", "H", "D"][axis]!,
+    unit: "m",
+    value: size[axis]!,
+    step: cell,
+    min: TANK_MINIMUM_CELLS * cell,
+    max: TANK_MAXIMUM_CELLS * cell,
+    apply: (value: number) => tankResizePatch(scene, {
+      width_m: scene.container.width_m,
+      height_m: scene.container.height_m,
+      depth_m: scene.container.depth_m,
+      [key]: value,
+    }),
+  }));
 }
 
 // ---- entity ---------------------------------------------------------------
@@ -342,26 +237,10 @@ function tankEntityFor(context: EditorEntityContext): EditorEntity {
     // than patching the document, which is why they are a flag and not choices.
     offersSceneRebuild: true,
     groups: tankGroups(scene),
-    // Extents rather than a position: the container is centred on x and z and
-    // rests on y = 0, so there is nothing else about it to type.
-    fields: (["width_m", "height_m", "depth_m"] as const).map((key, axis) => ({
-      id: key,
-      // Spelled out rather than "W"/"H"/"D": these are read in a column wide
-      // enough for the words, and an initial is a tag the reader has to decode
-      // against a tooltip that would then say nothing else.
-      label: ["Width", "Height", "Depth"][axis]!,
-      unit: "m",
-      value: size[axis]!,
-      step: scene.voxelDomain.finestCellSize_m,
-      min: TANK_MINIMUM_CELLS * scene.voxelDomain.finestCellSize_m,
-      max: TANK_MAXIMUM_CELLS * scene.voxelDomain.finestCellSize_m,
-      apply: (value: number) => tankResizePatch(scene, {
-        width_m: scene.container.width_m,
-        height_m: scene.container.height_m,
-        depth_m: scene.container.depth_m,
-        [key]: value,
-      }),
-    })),
+    // No `fields`: the extents are the strip's own second row now, drawn beside
+    // the tank's mark whether or not the tank is selected — see
+    // `tankExtentFields`. Declaring them here as well would put the same three
+    // numbers on the column twice the moment it is.
   };
 }
 

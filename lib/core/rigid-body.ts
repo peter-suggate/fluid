@@ -461,12 +461,24 @@ export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDe
  */
 const CUP_DIMENSIONS_M: Vec3 = { x: 0.15, y: 0.26, z: 0.05 };
 
-export function createBodyDescription(shape: RigidShape, index: number, containerHeight: number): RigidBodyDescription {
+/**
+ * The size a shape arrives at, before anything resizes it.
+ *
+ * Split out of `createBodyDescription` because the editor now *shows* these:
+ * the strip's placement row draws the next body's own dimensions, and it has to
+ * be able to ask what they are without making a body to read them off. One
+ * answer either way, so a default changed here changes what the row says.
+ */
+export function defaultBodyDimensions_m(shape: RigidShape): Vec3 {
   const radius = 0.075;
-  const dimensions = shape === "cup" ? { ...CUP_DIMENSIONS_M }
+  return shape === "cup" ? { ...CUP_DIMENSIONS_M }
     : shape === "box" ? { x: 0.15, y: 0.12, z: 0.13 }
     : shape === "sphere" ? { x: radius, y: radius, z: radius }
     : { x: radius, y: 0.14, z: radius };
+}
+
+export function createBodyDescription(shape: RigidShape, index: number, containerHeight: number): RigidBodyDescription {
+  const dimensions = defaultBodyDimensions_m(shape);
   return {
     id: `body-${shape}-${index}`,
     name: `${shape[0].toUpperCase()}${shape.slice(1)} ${index}`,

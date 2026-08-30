@@ -1,7 +1,7 @@
 import { BUILD_ID, canonicalScene, cloneScene, parseScene, type RunState, type SceneDescription } from "../model";
 import { adoptRigidBodyRoster, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "../rigid-body";
 import type { RigidBodyDescription } from "../model";
-import type { RigidShape } from "../model";
+import type { RigidShape, Vec3 } from "../model";
 import { BROWSER_GPU_THROUGHPUT_DEPTH, sceneEditRequiresReset } from "../webgpu-renderer";
 import type { RendererFrameMetrics } from "../webgpu-renderer";
 import { getMethod } from "../method-registry";
@@ -1264,14 +1264,19 @@ class SimulationController {
    * it immediately — the DRAG tool grabbing what an empty click just dropped —
    * does not have to re-find it by guessing the generated id.
    */
-  addBodyAt(shape: RigidShape, position: RigidBodyState["position_m"], options: { autoRun?: boolean } = {}, paneId: PaneId = PRIMARY_PANE_ID): RigidBodyDescription | undefined {
+  addBodyAt(shape: RigidShape, position: RigidBodyState["position_m"], options: { autoRun?: boolean; dimensions_m?: Vec3 } = {}, paneId: PaneId = PRIMARY_PANE_ID): RigidBodyDescription | undefined {
     const sceneStore = this.session(paneId).scene.getState();
     const scene = sceneStore.scene;
     if (scene.rigidBodies.length >= MAX_BODIES) { this.session(paneId).runtime.getState().setNotice(`Renderer limit is ${MAX_BODIES} bodies in this verified increment`, "warn"); return undefined; }
     this.recordHistory(`place ${shape}`, undefined, paneId);
     let bodyIndex = 1;
     while (scene.rigidBodies.some((body) => body.id === `body-${shape}-${bodyIndex}`)) bodyIndex += 1;
-    const template = createBodyDescription(shape, bodyIndex, scene.container.height_m);
+    // The size the placement row is showing, when it is showing one. Applied
+    // before the radius is taken, or a body sized up in the strip would be
+    // rested against the footprint of the one the table ships.
+    const template = options.dimensions_m === undefined
+      ? createBodyDescription(shape, bodyIndex, scene.container.height_m)
+      : { ...createBodyDescription(shape, bodyIndex, scene.container.height_m), dimensions_m: options.dimensions_m };
     const radius = boundingRadius(template);
     const description = { ...template, position_m: {
       x: Math.min(scene.container.width_m / 2 - radius, Math.max(-scene.container.width_m / 2 + radius, position.x)),

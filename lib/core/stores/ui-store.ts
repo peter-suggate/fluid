@@ -5,6 +5,7 @@ import { bodySelection, selectedBodyIdOf, type EditorSelection } from "../editor
 import type { AxisConstraint } from "../editor-axis-constraint";
 import { DEFAULT_VIEWPORT_MODE, type ViewportMode } from "../editor-viewport-mode";
 import { VOXEL_REGION_SELECTION, type VoxelSelectionRegion } from "../editor-voxel-region";
+import type { PlacementDimensions } from "../editor-placement";
 import { defaultCamera, type CameraState, type RigidShape } from "../model";
 
 /**
@@ -206,6 +207,12 @@ interface UIStore {
   sceneSelectorOpen: boolean;
   /** Shape the body-place tool drops on the next click. */
   placementShape: RigidShape;
+  /**
+   * Sizes typed for the next body, per shape. Empty is every shape's own
+   * default — see `PlacementDimensions`, which is where the sparseness is
+   * argued for.
+   */
+  placementDimensions: PlacementDimensions;
   /** The pipeline or diagnostics instrument drawn over the scene, if any. */
   sceneOverlay: SceneOverlay | null;
   /** Fig. 2-style grid cross-section drawn on a slice plane in the scene. */
@@ -301,6 +308,7 @@ interface UIStore {
   setCarryTilt: (tiltDegrees: number) => void;
   endCarry: () => void;
   setPlacementShape: (shape: RigidShape) => void;
+  setPlacementDimensions: (shape: RigidShape, dimensions_m: PlacementDimensions[RigidShape]) => void;
   /** Show one instrument over the scene, or `null` to clear the one that is up. */
   setSceneOverlay: (overlay: SceneOverlay | null) => void;
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
@@ -371,6 +379,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   selectionControlsOpen: false,
   sceneSelectorOpen: false,
   placementShape: "sphere",
+  placementDimensions: {},
   sceneOverlay: null,
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
@@ -465,6 +474,12 @@ export const createUIStore = () => create<UIStore>((set) => ({
     ? { carry: { ...state.carry, tiltDegrees } } : {}),
   endCarry: () => set({ carry: undefined }),
   setPlacementShape: (placementShape) => set({ placementShape }),
+  // Per shape, so switching to a box and back finds the sphere the reader sized
+  // rather than the one the table ships. The shape's key is written even when
+  // the value equals the default: what was typed is what is held.
+  setPlacementDimensions: (shape, dimensions_m) => set((state) => ({
+    placementDimensions: { ...state.placementDimensions, [shape]: dimensions_m },
+  })),
   // Assignment rather than a toggle set: opening one instrument closes whichever
   // was up, because the field can only hold one and the ring writes it directly.
   setSceneOverlay: (sceneOverlay) => set({ sceneOverlay }),

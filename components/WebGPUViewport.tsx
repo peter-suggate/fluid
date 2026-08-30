@@ -27,7 +27,8 @@ import {
 import { getMethod } from "@/lib/core/method-registry";
 import { canonicalScene, type CameraState, type RunState } from "../lib/core/model";
 import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "../lib/core/math";
-import { boundingRadius, createBodyDescription, type RigidBodyState } from "../lib/core/rigid-body";
+import { boundingRadius, type RigidBodyState } from "../lib/core/rigid-body";
+import { placementBodyDescription } from "../lib/core/editor-placement";
 import type { RigidBodyDescription } from "../lib/core/model";
 import { resourceInteractionGates } from "../lib/core/resource-readiness";
 import { PRIMARY_PANE_ID, simulation } from "../lib/core/simulation/controller";
@@ -854,9 +855,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // `selectOnClick` is what a press on empty space resolved to before it became
     // an orbit. A press has to stay available as a camera drag, so the selection
     // it would make is carried here and spent only if the pointer never moved.
-    // `probe` marks a press a raised pointer probe has claimed: it may orbit,
-    // but its click belongs to the probe and must not touch the selection.
-    | { id: number; x: number; y: number; downX: number; downY: number; action: "orbit" | "pan"; selectOnClick?: EditorSelection; probe?: true }
+    // `claimed` marks a press that something other than the selection owns: a
+    // raised pointer probe, or an armed stroke that could not run this frame. It
+    // may orbit, but its click belongs to that thing and must not touch the
+    // selection — in either direction. A claimed press carries no
+    // `selectOnClick`, so without this the click would still *deselect*, and
+    // reading a pixel or pressing while the renderer rebuilt would quietly put
+    // down whatever the reader was working on.
+    | { id: number; x: number; y: number; downX: number; downY: number; action: "orbit" | "pan"; selectOnClick?: EditorSelection; claimed?: true }
     // `released` records a pointerup that arrived while the GPU pick readback
     // was still in flight, so a fast click still resolves instead of being
     // dropped along with the gesture.
@@ -2131,7 +2137,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       return;
     }
     if (ui.armedGesture === "body-drag") {
-      const radius_m = boundingRadius(createBodyDescription(ui.placementShape, 1, scene.container.height_m));
+      const radius_m = boundingRadius(
+        placementBodyDescription(ui.placementShape, ui.placementDimensions, 1, scene.container.height_m));
       const centre_m = restInContainer(scene, ray, hover, radius_m);
       if (!centre_m) { setCursorDrop(null); return; }
       setCursorDrop({ centre_m, radius_m, tone: "body" });
@@ -2259,12 +2266,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         grabbed.position_m, grabbed.orientation, bodyHit.position_m);
       return;
     }
-    const template = createBodyDescription(ui.placementShape, 1, scene.container.height_m);
+    const template = placementBodyDescription(
+      ui.placementShape, ui.placementDimensions, 1, scene.container.height_m);
     const position = restInContainer(scene, ray, surface, boundingRadius(template));
     if (!position) return;
     // autoRun false: the clock starts on the drag itself, so a spawn that the
     // user never moves does not quietly begin the simulation under them.
-    const created = simulation.addBodyAt(ui.placementShape, position, { autoRun: false }, paneId);
+    const created = simulation.addBodyAt(ui.placementShape, position,
+      { autoRun: false, dimensions_m: template.dimensions_m }, paneId);
     if (!created) return;
     const spawned = drawnBodies(session.diagnostics).find((candidate) => candidate.description.id === created.id);
     if (!spawned) return;
@@ -2325,7 +2334,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       setHandleHover(null);
       setCursorDrop(null);
       pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
-        downX: event.clientX, downY: event.clientY, action: "orbit", probe: true };
+        downX: event.clientX, downY: event.clientY, action: "orbit", claimed: true };
       return;
     }
     if (event.button === 0 && !event.shiftKey) {
@@ -2354,12 +2363,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // about pixels and so cannot be declared against a target; everything
       // below is the catalog's answer performed. See
       // `editor-gesture-catalog.ts` for the resolution rules.
-      const gesture = gestureForPress(
-        session.ui.getState().armedGesture,
-        pressTarget,
-        modifiers,
-        pickingInteractive,
-      );
+      const armed = session.ui.getState().armedGesture;
+      const gesture = gestureForPress(armed, pressTarget, modifiers, pickingInteractive);
       switch (gesture) {
         // Everything solid sweeps. A press on a voxel — authored or sculpted —
         // or on a bare tank wall opens a face-locked box and drags it out; the
@@ -2421,7 +2426,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // water enclose everything else, so clicking *through* the selected one is
       // the only way the things inside are reachable at all. With nothing
       // behind, the click falls to the room and deselects, same as it always did.
-      const selectOnClick: EditorSelection | undefined = pressTarget?.selection;
+      // …but not while a stroke is armed. Arming is a statement about what the
+      // next press means, and the catalog already refuses to answer an armed
+      // press with an implicit gesture — a press that fell through to the camera
+      // because the renderer was mid-rebuild must not come back as a selection
+      // either. `claimed` below is what keeps it from deselecting instead.
+      const selectOnClick: EditorSelection | undefined = armed === undefined
+        ? pressTarget?.selection
+        : undefined;
       // A body is left to the GPU pick below, which is exact where the analytic
       // one is a bounding sphere, and which also opens the throw. An inflow is
       // exempt: a flow authored inside a static nozzle is nearer in the
@@ -2468,7 +2480,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         beginBodyDrag(event.pointerId,event.timeStamp,event.clientX,event.clientY,ray,nearest.body,nearest.body.position_m,nearest.body.orientation);
         return;
       }
-      pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: "orbit", selectOnClick };
+      pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
+        downX: event.clientX, downY: event.clientY, action: "orbit", selectOnClick,
+        claimed: armed === undefined ? undefined : true };
       return;
     }
     pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
@@ -2524,7 +2538,16 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // recompile look like the cursor had gone dead, which is precisely the
       // "nothing under the pointer" state INTERACT promises never to have.
       const ray = pointerRay(event);
-      const target = targetAtRay(editorEntityContext(session), ray, ui.selection);
+      // Nothing under the cursor is named while a stroke is armed. A press then
+      // means the stroke and only the stroke — see `gestureForPress` — so a lit
+      // tank wall and a chip naming the water are the interface offering
+      // something it will not do: the reader is aiming a drop, and what they are
+      // aiming it *at* is already drawn, as the circle `previewCursorDrop` rests
+      // on the surface under the ray. Skipping the probe is also what stops the
+      // per-move analytic pick during the one gesture that never reads it.
+      const target = ui.armedGesture === undefined
+        ? targetAtRay(editorEntityContext(session), ray, ui.selection)
+        : null;
       setHoverTarget(target);
       publishHoverHighlight(target);
       previewCursorDrop(ray);
@@ -2750,11 +2773,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // becomes what was clicked, which is how a click deselects.
     if (!cancelled && session.ui.getState().viewportMode === "interact"
       && (active.action === "orbit" || active.action === "pan")
-      // A probe's click aimed the probe and nothing else. Without this the same
-      // click would also deselect, since a claimed press carries no
-      // `selectOnClick` — so reading a pixel would quietly put down whatever the
-      // reader was working on.
-      && !active.probe
+      // …unless something else claimed the press. See `claimed` on the union.
+      && !active.claimed
       && emptySpaceClickDeselects(active.action, event.clientX - active.downX, event.clientY - active.downY)) {
       session.ui.getState().select(active.selectOnClick);
     }
