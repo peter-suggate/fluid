@@ -14,6 +14,7 @@ export type SparseCM12DawnCoverage =
   | "mini32-correctness"
   | "mini32-performance"
   | "mini64-performance"
+  | "mini64-min8-surface"
   | "long-dam-far-wall"
   | "tall-cells-hills-far-wall"
   | "live-rigid-body-coupling"
@@ -103,6 +104,19 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     referenceMedianAdvanceMs: 33.4889,
     maximumMedianAdvanceMs: 50,
     timeoutMs: 30_000,
+  },
+  {
+    id: "mini64-min8-surface",
+    coverage: "mini64-min8-surface",
+    kind: "correctness",
+    description: "evolved mini64 min8 presentation avoids complete-cell surface ridges",
+    testFile: "tools/probe-sparse-cm12-mini64-surface-dawn.ts",
+    environment: {
+      FLUID_MINI64_MIN8_SURFACE_STEPS: "7",
+      FLUID_MINI64_MIN8_SURFACE_OUT: "/tmp/sparse-cm12-mini64-min8-surface.json",
+      FLUID_MINI64_MIN8_SURFACE_PNG: "/tmp/sparse-cm12-mini64-min8-surface.png",
+    },
+    timeoutMs: 40_000,
   },
   {
     id: "long-dam-far-wall",

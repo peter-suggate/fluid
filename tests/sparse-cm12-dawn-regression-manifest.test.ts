@@ -14,6 +14,7 @@ const expectedCoverage: readonly SparseCM12DawnCoverage[] = [
   "mini32-correctness",
   "mini32-performance",
   "mini64-performance",
+  "mini64-min8-surface",
   "long-dam-far-wall",
   "tall-cells-hills-far-wall",
   "live-rigid-body-coupling",

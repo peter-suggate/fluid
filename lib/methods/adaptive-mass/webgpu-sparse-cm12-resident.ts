@@ -2353,6 +2353,11 @@ export interface SparseCM12GPUActivityRecord {
   /** QA receipt for a device-claimed dynamic topology page. Undefined for
    * packed host-template candidates and bricks that have not claimed a page. */
   readonly topologyPage: number | undefined;
+  /** Cached authored-policy tile scale; 1 means one ordinary B8 leaf. */
+  readonly refinementPolicyTileScale: number;
+  /** Cached candidate-resolution bounds, expressed as cells per B8 leaf. */
+  readonly refinementPolicyMinimumResolution: number;
+  readonly refinementPolicyMaximumResolution: number;
 }
 
 export interface SparseCM12GPUActivitySnapshot {
@@ -9064,6 +9069,11 @@ export class WebGPUSparseCM12Resident {
           topologyPreparationScheduled: (words[at + 35]! & 1) !== 0,
           topologyPreparationEpoch: words[at + 36]!,
           topologyPage: words[at + 37] === INVALID ? undefined : words[at + 37],
+          refinementPolicyTileScale: Math.max(1, (words[at + 38]! >>> 8) & 0xff),
+          refinementPolicyMinimumResolution: Math.max(1,
+            (words[at + 38]! >>> 16) & 0x1f),
+          refinementPolicyMaximumResolution:
+            ((words[at + 38]! >>> 21) & 0x1f) || 8,
         };
       });
       return {

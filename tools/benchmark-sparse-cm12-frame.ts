@@ -77,6 +77,7 @@ const pressureIterationsOverride = optionalPositiveInteger("pressure-iterations"
 const brickFineResolution = optionalPositiveInteger("brick-fine") ?? 16;
 const presentationPageResolution = optionalPositiveInteger("presentation-page") ?? 16;
 const maximumMacroSpanBricks = optionalPositiveInteger("maximum-macro-span");
+const minimumCellSize = optionalPositiveInteger("minimum-cell-size");
 if (brickFineResolution !== 4 && brickFineResolution !== 8
   && brickFineResolution !== 16) {
   throw new RangeError("brick-fine must be 4, 8, or 16");
@@ -127,7 +128,23 @@ const acceptance = sceneArgument === "mini32" || sceneArgument === "mini64"
   : sceneArgument === "long-dam"
     ? SPARSE_CM12_LONG_DAM_PERFORMANCE_ACCEPTANCE
     : SPARSE_CM12_PERFORMANCE_ACCEPTANCE;
-const scene = buildScene();
+const configuredScene = () => {
+  const configured = buildScene();
+  if (minimumCellSize !== undefined) {
+    configured.fluid.refinementRegions = [{
+      id: `benchmark-minimum-cell-${minimumCellSize}`,
+      rule: "minimum-cell-size",
+      minimumCellSize_cells: minimumCellSize,
+      min_m: { x: -0.5 * configured.container.width_m, y: 0,
+        z: -0.5 * configured.container.depth_m },
+      max_m: { x: 0.5 * configured.container.width_m,
+        y: configured.container.height_m,
+        z: 0.5 * configured.container.depth_m },
+    }];
+  }
+  return configured;
+};
+const scene = configuredScene();
 const dimensions = acceptance.finestDimensions;
 const dt_s = timeStepArgument === "paper"
   ? CM12_PAPER_DT_S : scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
@@ -363,7 +380,7 @@ async function createArm(
   const values = resolveMethodValues(method, "balanced", overrides);
   const solver = await method.createSolverAsync!(
     device,
-    buildScene(),
+    configuredScene(),
     "balanced",
     values,
     undefined,
@@ -620,6 +637,7 @@ try {
       maximumMacroSpanBricks: maximumMacroSpanBricks ?? "auto",
       prepareBricksPerFrame: prepareBricksPerFrame ?? "method-default",
       surfaceFineRings: surfaceFineRings ?? "method-default",
+      minimumCellSize: minimumCellSize ?? "scene-default",
     },
     matchedRepresentation: {
       uniformCells: uniform.solver.info.cellCount,

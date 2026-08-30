@@ -24,6 +24,7 @@ npm run test:dawn:sparse-cm12 -- --list
 | `mini32-correctness` | Finite fields and liquid-volume retention | Four simulated seconds, at least 99.5% retained |
 | `mini32-performance` | Production B8/P8 frame cost | 24.576 ms reference; 40 ms median ceiling |
 | `mini64-performance` | Production B8/P8 frame cost | 33.4889 ms reference; 50 ms median ceiling |
+| `mini64-min8-surface` | Production min8 presentation reconstruction | Seven paper steps; evolved top-sheet neighbour jump at most 12 fine cells |
 | `long-dam-far-wall` | Sparse-world simulation and renderer publication | Material front reaches far-wall page 23 |
 | `tall-cells-hills-far-wall` | Terrain cut-cell capacity and bounded mapping | Front reaches far-wall brick 30 |
 | `live-rigid-body-coupling` | First rigid roster added to running water | Clock retained, finite motion, buoyancy ordering, mass retained |
