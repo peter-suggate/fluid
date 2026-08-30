@@ -163,6 +163,7 @@ export function ToolstripRow({
   hint,
   active,
   disabled,
+  after,
   testId,
   onClick,
   children,
@@ -179,6 +180,15 @@ export function ToolstripRow({
   hint?: string;
   active?: boolean;
   disabled?: boolean;
+  /**
+   * A second control belonging to the key rather than to what the key opens —
+   * a chevron onto the alternatives to the thing it names.
+   *
+   * Kept apart from `children` because it is there whether or not the row is
+   * open, and a row that counted it as open state would be a row that never
+   * shows its own tip: the mark would have no name anywhere, at rest.
+   */
+  after?: ReactNode;
   testId?: string;
   onClick?: () => void;
   children?: ReactNode;
@@ -217,6 +227,7 @@ export function ToolstripRow({
         data-testid={testId}
         onClick={onClick}
       >{body}</button>}
+    {after}
     {children}
   </div>;
 }

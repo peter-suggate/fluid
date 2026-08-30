@@ -1741,6 +1741,29 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    instead of ellipsizing its value away. */
 .toolstrip-key { width: max-content; min-width: 158px; max-width: 216px; }
 .toolstrip-key.is-glyph { width: 24px; min-width: 0; max-width: none; height: 24px; justify-content: center; padding: 0; }
+/* The chevron onto a key's alternatives. Narrower than a glyph and pulled back
+   against it, because it is not a second option in the column — it is the mark
+   saying the one beside it can be swapped. At the row's own 6px gap it read as
+   two unrelated buttons; at 2px it reads as one control with a menu. */
+.toolstrip-key.is-chevron { width: 16px; min-width: 0; max-width: none; height: 24px; margin-left: -4px; justify-content: center; padding: 0; }
+.toolstrip-key.is-chevron > svg { flex: none; }
+/* The chevron's own frame, so what it opens hangs off *it* rather than off the
+   column. The strip's pane is measured out past the whole column's right edge —
+   right for a card of settings, wrong for a list of alternatives to the mark
+   beside it, which ends up floating past the scrub with nothing tying it to
+   what it changes. */
+.toolstrip-anchor { position: relative; display: flex; align-items: center; pointer-events: auto; }
+/* Same material as the strip's tips, because it is the same kind of thing: a
+   small surface that appears over the water for one decision and goes away. It
+   is not the pane's card — no head, no close, no border weight — since the
+   chevron that opened it is right there and closes it. */
+.toolstrip-menu { position: absolute; z-index: 6; left: -5px; top: calc(100% + 4px); width: max-content; min-width: 140px; max-width: 220px; max-height: 46vh; padding: 4px; overflow: hidden auto; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); }
+/* Out of flow, so it has to out-paint the rows under it — which are `relative`
+   themselves and would otherwise draw straight through the list. */
+.toolstrip-row:has(.toolstrip-menu) { z-index: 6; }
+/* The trigger's own name stands down while its list is up, for the reason every
+   open row's does: the tip would be a label opening over the thing it names. */
+.toolstrip-anchor:has(.toolstrip-menu) .toolstrip-tip { display: none; }
 /* A column about one object, rather than about the scene.
 
    Both strips are the same instrument, but they are not the same size of
@@ -1755,7 +1778,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    Excluding the glyph keys, which are 24px squares in either column: without
    that they would inherit the tag width and the "⋯" door would be a 112px
    button holding three dots. */
-.toolstrip.is-narrow .toolstrip-key:not(.is-glyph) { min-width: 112px; max-width: 136px; }
+.toolstrip.is-narrow .toolstrip-key:not(.is-glyph):not(.is-chevron) { min-width: 112px; max-width: 136px; }
 .toolstrip.is-narrow .toolstrip-rule { width: 112px; }
 .toolstrip-key:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }
 /* No frost on the lit row, deliberately: `backdrop-filter` makes an element a
@@ -1845,6 +1868,18 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .toolstrip-choice button:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }
 .toolstrip-choice button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 .toolstrip-choice button:disabled { color: var(--dim); cursor: not-allowed; }
+/* A chooser standing on the bare strip is chrome on the image, not a form field
+   on a panel — so it wears the key's material rather than the pane's. Inside a
+   pane the plate is what lifts a button off the pane's own ground; out here the
+   ground is the water, and `--overlay` is the theme's *page* surface: under the
+   light theme it painted four cream slabs over a scene that is dark whatever the
+   theme is, because the studio's ground is a GPU clear and not a CSS colour.
+   Transparent until hovered, washed only when on, exactly like the rows above
+   it. Direct children only: a choice inside a pane is nested deeper and keeps
+   its plate. */
+.toolstrip-row > .toolstrip-choice button { border-color: transparent; background: transparent; }
+.toolstrip-row > .toolstrip-choice button:hover:not(:disabled) { border-color: var(--accent-line); }
+.toolstrip-row > .toolstrip-choice button.active { border-color: var(--accent-line); background: var(--accent-wash); }
 
 /* The card the strip refuses to be, granted to the one row currently asking for
    it — a dozen field rows, a solve's curve, a method's construction settings.
@@ -1938,6 +1973,10 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .fluid-field-options button:hover { color: var(--accent); border-color: var(--accent-line); }
 .fluid-field-options button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 .fluid-field-options button i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--dim); }
+/* A field view that earned a glyph brings it here too, in place of the dot:
+   the row it is picked from is the same mark, and a list that swapped it for a
+   colour swatch would make the reader match the two by position. */
+.fluid-field-options button > svg { flex: none; }
 .fluid-field-options button span { flex: 1; overflow: hidden; font: var(--text-label); text-overflow: ellipsis; white-space: nowrap; }
 .fluid-field-options button small { flex: none; color: var(--dim); font: var(--text-micro); }
 .fluid-field-settings { display: grid; gap: 6px; }

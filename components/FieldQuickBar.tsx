@@ -1,7 +1,9 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import {
   Boxes,
+  ChevronDown,
   CircleGauge,
   Droplets,
   Eye,
@@ -14,14 +16,18 @@ import {
 } from "lucide-react";
 import { getMethod } from "../lib/core/method-registry";
 import { pickFieldOverlay, type FieldOverlayView } from "../lib/core/field-overlay-pick";
-import { TANK_SELECTION_ID } from "../lib/core/editor-tank";
 import { VISUALIZATION_FIELDS, VISUALIZATION_QUICK_FIELDS } from "../lib/core/visualization-catalog";
 import type { FieldVisualization, FieldVisualizationIcon } from "../lib/core/visualization-registry";
 import { isPressureJournalOverlayMode } from "../lib/core/webgpu-pressure-journal-overlay";
 import { useSession } from "../lib/core/session/session-context";
 import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
-import { Toolstrip, ToolstripMoreRow, ToolstripRow, ToolstripScrub } from "./toolstrip";
+import {
+  ToolstripChoice,
+  ToolstripRow,
+  ToolstripScrub,
+  useToolstripSection,
+} from "./toolstrip";
 
 /**
  * The one place a field becomes a picture. Same split as `EditorActionIcon`:
@@ -41,34 +47,67 @@ const ICONS = {
   tracers: Sparkles,
 } satisfies Record<FieldVisualizationIcon, LucideIcon>;
 
-/** A catalog field narrowed to what earned it a glyph, as the flyout narrows its own list. */
-type QuickField = FieldVisualization & { mode: GridOverlayMode; icon: FieldVisualizationIcon };
+/**
+ * A catalog field narrowed to the mode union the overlay store speaks, and — for
+ * the short list — to what earned it a glyph. Both narrowings are assertions, as
+ * the flyout's own list is: `mode` is declared as a string beside the pass that
+ * publishes it, because core cannot depend on the renderer's union.
+ */
+type Field = FieldVisualization & { mode: GridOverlayMode };
+type QuickField = Field & { icon: FieldVisualizationIcon };
 
+const FIELDS = VISUALIZATION_FIELDS as readonly Field[];
 const QUICK_FIELDS = VISUALIZATION_QUICK_FIELDS as readonly QuickField[];
 
-/** Whether this method publishes anything the glyph rows can offer. */
+/**
+ * A view's mark, drawn. `Eye` is the stand-in for a view this strip has no glyph
+ * for — one chosen from the full catalog, or a pass that never claimed one —
+ * because whatever is drawing has to be shown on the row that turns it off.
+ *
+ * Returns the element rather than the component, so the glyph is resolved where
+ * it is drawn instead of being bound to a name in a render body: a capitalized
+ * local holding a component is a new component identity every frame as far as
+ * React is concerned, and the linter is right to call it out.
+ */
+function glyphOf(view: FieldVisualization, size: number) {
+  const Icon: LucideIcon = view.icon === undefined ? Eye : ICONS[view.icon];
+  return <Icon width={size} height={size} strokeWidth={1.7} aria-hidden />;
+}
+
+/** Whether this method publishes anything the row can offer. */
 export function methodHasQuickFields(methodId: string): boolean {
   const supported = new Set(getMethod(methodId).supportedFieldModes ?? []);
   return QUICK_FIELDS.some((view) => supported.has(view.mode));
 }
 
 /**
- * The glyph rows: one per field view worth turning on without opening anything.
+ * One row: what is drawn on the water, and the two dials that shape it.
  *
- * Which views those are is not decided here. A pass declares an `icon` on the
- * view it thinks is worth the room (see `FieldVisualizationIcon`), and the
- * running method's `supportedFieldModes` narrows that to what this solver can
- * honestly publish — so a method that draws no volume never grows a volume
- * glyph, and a view added beside its pass reaches this strip without this file
- * learning its name.
+ * This was a column — one glyph per field view worth turning on without opening
+ * anything — and the column was the wrong shape for what it holds. Five marks
+ * stacked at the tank's corner is five rows of chrome to say one fact, only one
+ * of which can ever be lit, and it left no room beside the lit one for the
+ * controls that view actually needs. A field overlay is a single-choice setting;
+ * it reads as one row.
  *
- * Glyphs and nothing else. Names alongside them would be a paragraph standing
- * over the water, and the strip lives on the image rather than beside it — so
- * what is drawing is said by the lit glyph, and the name is said on hover.
+ * So: the mark of what is drawing (or what would come back on), a chevron onto
+ * the alternatives, and — once something *is* drawing — its plane and its scrub
+ * beside it, which is the whole of what a reader adjusts while watching the
+ * water. The glyph is the switch, as it was: clicking the lit one puts the view
+ * away without disturbing which view is selected, so turning it back on is one
+ * click on the same mark.
  *
- * Exported as rows rather than as a strip because the tank's own strip grows
- * out of this one: selecting the tank adds sections underneath rather than
- * swapping these for a panel.
+ * Which views the chevron offers is not decided here. A pass declares an `icon`
+ * on the view it thinks is worth the room (see `FieldVisualizationIcon`), and
+ * the running method's `supportedFieldModes` narrows that to what this solver
+ * can honestly publish — so a method that draws no volume never offers a volume
+ * view, and a view added beside its pass reaches this row without this file
+ * learning its name. Everything the short list leaves out is behind the door at
+ * the foot of the column.
+ *
+ * Exported as rows rather than as a strip because the tank's own strip grows out
+ * of this one: selecting the tank adds sections underneath rather than swapping
+ * these for a panel.
  */
 export function FieldViewRows() {
   const session = useSession();
@@ -79,16 +118,51 @@ export function FieldViewRows() {
   const setOverlayMode = session.ui((state) => state.setGridOverlayMode);
   const setOverlayAxis = session.ui((state) => state.setGridOverlayAxis);
   const setOverlaySlice = session.ui((state) => state.setGridOverlaySlice);
+  // Local, not stored: it is the state of one disclosure, and a list that
+  // reopened itself because the camera moved would be the strip remembering the
+  // wrong thing. One row open across the whole column, so opening this list
+  // closes the tank's own cards rather than overlapping them at the same corner.
+  const [picking, setPicking] = useState(false);
+  const { claim } = useToolstripSection("field-quick", () => setPicking(false));
+  const pick = (open: boolean) => {
+    claim(open);
+    setPicking(open);
+  };
+  // Escape closes it, which a dropdown owes the reader and a settings card does
+  // not: this one is up *while* the reader is deciding, and the gesture that
+  // abandons a decision is the same everywhere.
+  useEffect(() => {
+    if (!picking) return;
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPicking(false);
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [picking]);
+
   const method = getMethod(methodId);
   const volumeCapable = method.capabilities?.volumeRendering === true;
   const supported = new Set(method.supportedFieldModes ?? []);
   const views = QUICK_FIELDS.filter((view) => supported.has(view.mode));
   // What is drawing, whether or not this strip could have chosen it: the full
-  // list and a link can both leave a view on that has no glyph here, and a
+  // catalog and a link can both leave a view on that has no glyph here, and a
   // reader who cannot see what is drawn cannot turn it off either.
   const drawing = overlayAxis !== "off"
-    ? VISUALIZATION_FIELDS.find((view) => view.mode === overlayMode)
+    ? FIELDS.find((view) => view.mode === overlayMode)
     : undefined;
+  // With nothing drawing the row still has a subject: the view the store is
+  // holding, which is what the glyph would bring back. Falling through to the
+  // first offered view covers the one case where that view is not on this
+  // method's list — a solver switched under a selection made for another.
+  const shown = drawing
+    ?? views.find((view) => view.mode === overlayMode)
+    ?? views[0];
+  // A view chosen from the full catalog is not on the short list, so it joins
+  // it: a list that omitted the thing that is lit would be a list the reader
+  // cannot use to move off it.
+  const offered = shown !== undefined && !views.some((view) => view.mode === shown.mode)
+    ? [shown, ...views]
+    : views;
 
   const choose = (view: FieldOverlayView) => {
     const change = pickFieldOverlay(
@@ -98,11 +172,32 @@ export function FieldViewRows() {
     if (change.slice !== undefined) setOverlaySlice(change.slice);
   };
 
-  // The scrub belongs with the picking, not behind a selection: choosing a
-  // slice view and then having to find the tank to sweep it is the same trip
-  // this strip exists to remove. It is the plane depth on a sliced view and the
-  // opacity on a volume one — and it is rendered into the row of whatever is
-  // on, so the control is beside the glyph it belongs to.
+  if (shown === undefined) return null;
+
+  // The plane belongs beside the view it cuts, not behind a selection: choosing
+  // a sliced view and then having to find the tank to turn it sideways is the
+  // same trip this row exists to remove. `VOL` stays on the strip when the
+  // method cannot draw it, disabled and saying why — a button that vanishes
+  // teaches the reader nothing about why it is gone. There is no HIDE here
+  // because the lit glyph is it.
+  const planes = drawing !== undefined && !drawing.planeless && <ToolstripChoice
+    ariaLabel="Field view plane"
+    value={overlayAxis}
+    options={[
+      { value: "x", label: "X" },
+      { value: "y", label: "Y" },
+      { value: "z", label: "Z" },
+      {
+        value: "volume",
+        label: "VOL",
+        disabled: !volumeCapable,
+        title: volumeCapable ? undefined : "Volume views need an adaptive octree method",
+      },
+    ]}
+    onChange={(value) => setOverlayAxis(value as typeof overlayAxis)}
+  />;
+
+  // The plane depth on a sliced view, the opacity on a volume or planeless one.
   // A captured solve is the exception: its scrub steps through the iterations
   // that were snapshotted rather than sliding through a plane, and the plot that
   // makes a stop mean anything is in the film pane — so the scrub goes there
@@ -118,76 +213,68 @@ export function FieldViewRows() {
     onChange={setOverlaySlice}
   />;
 
-  return <>
-    {views.map((view) => {
-      const Icon = ICONS[view.icon];
-      const active = drawing?.mode === view.mode;
-      return <ToolstripRow
-        key={view.id}
-        icon={<Icon width={14} height={14} strokeWidth={1.7} aria-hidden />}
-        name={view.label}
-        hint={view.description}
-        active={active}
-        testId={`field-quick-${view.mode}`}
-        onClick={() => choose(view)}
-      >{active ? scrub : undefined}</ToolstripRow>;
-    })}
-    {/* A view this strip has no glyph for is still drawing over the scene, so
-        it takes the one glyph that means "something is on" and says which in
-        its tip. Without this, choosing one in the full list and then
-        deselecting the tank leaves a field on the image with nothing on screen
-        admitting it — and it carries the scrub for the same reason a glyph row
-        does. */}
-    {drawing && drawing.icon === undefined && <ToolstripRow
-      icon={<Eye width={14} height={14} strokeWidth={1.7} aria-hidden />}
-      name={drawing.label}
-      hint="Click to hide this view."
-      active
-      testId="field-quick-other"
-      onClick={() => setOverlayAxis("off")}
-    >{scrub}</ToolstripRow>}
-  </>;
-}
-
-/**
- * Turning a field on, at the corner of the thing it is drawn through.
- *
- * The field picker was reachable only by selecting the tank, which is a fact
- * about this editor nobody can be expected to guess: "show me the grid" is one
- * of the first things a reader wants and it was three unguessable steps away.
- * So the corner that hosts the picker is never empty in EDIT — at rest it
- * carries the handful of views worth turning on without opening anything, and
- * selecting the tank grows the same column into everything else it can say.
- *
- * Nothing here reports EDIT mode. The mode toggle does that, permanently, in
- * the top-right — this strip only has to be *present*, which is the whole
- * discoverability claim it makes.
- */
-export function FieldQuickBar({ leftFraction, topFraction }: {
-  leftFraction: number;
-  topFraction: number;
-}) {
-  const session = useSession();
-  const methodId = session.method((state) => state.methodId);
-  const select = session.ui((state) => state.select);
-  if (!methodHasQuickFields(methodId)) return null;
-
-  return <Toolstrip
-    leftFraction={leftFraction}
-    topFraction={topFraction}
-    ariaLabel="Field overlays"
-    testId="field-quick-bar"
+  // A dropdown under its own chevron rather than the strip's pane, which is
+  // measured out past the whole column's right edge — correct for a card of
+  // settings a row opens, wrong for a list of alternatives to the mark beside
+  // it: it left the list hanging past the scrub with nothing tying it to what
+  // it was changing. It is the same material as the strip's tips, since it is
+  // the same kind of thing: a small surface that appears over the water for one
+  // decision and goes away.
+  const menu = picking && <div
+    className="toolstrip-menu fluid-field-options"
+    role="menu"
+    aria-label="Field view"
   >
-    <FieldViewRows />
-    {/* The way to everything this strip left out — the rest of the catalog, the
-        plane, the solver, the setup, and the tank's own settings. Selecting the
-        tank is what opens those, so this is the existing route made visible
-        rather than a second one to keep agreeing with it. */}
-    <ToolstripMoreRow
-      name="All field views"
-      hint="Every view this solver publishes, its plane, and the solver behind them. Selects the tank."
-      testId="field-quick-more"
-      onClick={() => select({ kind: "tank", id: TANK_SELECTION_ID })}
-    />
-  </Toolstrip>;
+    {offered.map((view) => {
+      const active = drawing?.mode === view.mode;
+      return <button
+        key={view.id}
+        type="button"
+        className={active ? "active" : ""}
+        role="menuitemradio"
+        aria-checked={active}
+        title={view.description}
+        data-testid={`field-quick-pick-${view.mode}`}
+        onClick={() => {
+          choose(view);
+          // Picking is the list's whole job: it stands down and hands the row
+          // back its plane and its scrub, which is what the reader came to this
+          // corner to move.
+          pick(false);
+        }}
+      >
+        {glyphOf(view, 13)}
+        <span>{view.label}</span>
+      </button>;
+    })}
+  </div>;
+
+  const open = planes || scrub ? <>{planes}{scrub}</> : undefined;
+
+  return <ToolstripRow
+    icon={glyphOf(shown, 14)}
+    name={shown.label}
+    hint={drawing === undefined ? shown.description : "Click to hide this view."}
+    active={drawing !== undefined}
+    testId={`field-quick-${shown.mode}`}
+    onClick={() => choose(shown)}
+    after={offered.length > 1 && <span className="toolstrip-anchor">
+      <button
+        type="button"
+        className={`toolstrip-key is-chevron${picking ? " active" : ""}`}
+        aria-label="Choose a field view"
+        aria-haspopup="menu"
+        aria-expanded={picking}
+        data-testid="field-quick-pick"
+        onClick={() => pick(!picking)}
+      >
+        <ChevronDown width={12} height={12} strokeWidth={2} aria-hidden />
+        <span className="toolstrip-tip">
+          <strong>Field view</strong>
+          <small>The views worth turning on while the water runs. The door below has the rest.</small>
+        </span>
+      </button>
+      {menu}
+    </span>}
+  >{open}</ToolstripRow>;
 }

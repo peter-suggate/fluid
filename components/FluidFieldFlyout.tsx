@@ -14,6 +14,7 @@ import {
   type StageLensReceipt,
 } from "../lib/core/stage-lens";
 import { pickFieldOverlay, type FieldOverlayView } from "../lib/core/field-overlay-pick";
+import { methodHasQuickFields } from "./FieldQuickBar";
 import { useSession } from "../lib/core/session/session-context";
 import { resolvedMethodValues } from "../lib/core/stores/method-store";
 import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
@@ -404,9 +405,16 @@ export function FieldControlRows({ lenses: override }: {
       onClick={() => toggle({ kind: "views" })}
     >{viewsPane}</ToolstripRow>}
     {/* Always shown rather than opened, because this is the control a reader
-        works while the water moves — and it is the only way to put away a view
-        the glyph strip has no row for. */}
-    {shown && <ToolstripRow
+        works while the water moves — and it is the only way to put away a lens,
+        which has no row of its own anywhere else.
+
+        Withheld when the quick row above is already carrying the plane. That row
+        grows the same chooser beside whatever field view is drawing, and two
+        copies of one setting forty pixels apart in one column is the reader
+        asking which of them is the real one. A *lens* keeps this row: the quick
+        row is built from the field catalog and a lens is not in it, so nothing
+        above would be offering the plane in its place. */}
+    {shown && !(active !== undefined && methodHasQuickFields(methodId)) && <ToolstripRow
       tag="PLANE"
       name="Overlay plane"
       hint="Which plane the overlay is drawn through, and the way to put it away."
