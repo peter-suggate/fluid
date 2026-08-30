@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createSparseCM12LongDamBreakScene } from "../lib/core/scenes";
+import { sceneDocument } from "../lib/core/scene-definition";
+import {
+  createSparseCM12LongDamBreakScene,
+  getSceneDefinition,
+} from "../lib/core/scenes";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
 import {
   initializeSparseBrickAtlasFromScene,
@@ -39,4 +43,28 @@ test("planar SolidWorld walls and their intersections restrict exactly", () => {
   ), 1, "an aligned tank corner must add no solid-resolution floor");
   assert.ok(corner.resolution < 8,
     `the aligned tank corner was blanket-promoted to ${corner.resolution}^3`);
+});
+
+test("activity bootstrap shifts the exact offset hydrostatic surface from B8 to B4", () => {
+  const scene = sceneDocument(getSceneDefinition("hydrostatic-power-large-offset"));
+  const finestDimensions = sceneLatticeDimensions(scene);
+  const surfaceDistance = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions,
+    brickFineResolution: 8,
+    surfaceFineRings: 1,
+  });
+  const activity = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions,
+    brickFineResolution: 8,
+    surfaceFineRings: 1,
+    initialSurfaceCoarseningBiasRings: 1,
+  });
+  const surfaceRungs = (atlas: typeof activity) => atlas.bricks
+    .filter((brick) => brick.coordinate[1] === 1)
+    .map((brick) => brick.resolution);
+
+  assert.deepEqual(surfaceRungs(surfaceDistance), Array(8).fill(8),
+    "Surface distance must retain its explicitly authored finest ring");
+  assert.deepEqual(surfaceRungs(activity), Array(8).fill(4),
+    "activity mode must present the broad calm reset surface one rung coarse");
 });

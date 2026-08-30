@@ -290,6 +290,11 @@ fn sparseBrickActive(brick:u32)->bool{
   let at=SPARSE_ACTIVITY_HEADER_WORDS+sparseActivityRecordWords()*brick+10u;
   return brick<sparseP.dispatch.w&&at<arrayLength(&sparseActivity)&&sparseActivity[at]!=0u;
 }
+fn sparseBrickOccupied(brick:u32)->bool{
+  let at=SPARSE_ACTIVITY_HEADER_WORDS+sparseActivityRecordWords()*brick+1u;
+  return brick<sparseP.dispatch.w&&at<arrayLength(&sparseActivity)
+    &&(sparseActivity[at]&64u)!=0u;
+}
 fn sparseAcceptedResolution(brick:u32)->u32{
   return sparseActivity[SPARSE_ACTIVITY_HEADER_WORDS
     +sparseActivityRecordWords()*brick+12u];
@@ -946,7 +951,8 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   let local3 = clamp((point - boundsMin) / size, vec3f(0.0), vec3f(0.99999)) * vec3f(dims);
   let localCell=clamp(vec3i(floor(local3)),vec3i(0),dims-vec3i(1));
   let cell=fineOrigin+localCell;let fineMaximum=fineOrigin+dims;
-  if(sparseGridEnabled()&&sparseOwner(cell).x==SPARSE_INVALID){
+  let sparseOwnerAtCell=sparseOwner(cell);
+  if(sparseGridEnabled()&&sparseOwnerAtCell.x==SPARSE_INVALID){
     return GridSample(vec3f(0.0),0.0,false);
   }
   var samplePosition = local3.xy;
@@ -967,6 +973,14 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   let lineFade = smoothstep(2.5, 6.0, pixelsPerCell);
   let dotFade = smoothstep(9.0, 18.0, pixelsPerCell);
   let adaptiveGrid = u.debug.z > 0.5;
+  let fieldMode = i32(round(u.debug.w));
+  // SparseWorld keeps non-occupied B8 pages around a surface as transport and
+  // presentation halo capacity. They are not liquid pressure topology, so the
+  // structure view must not paint their internal fine graph over a coarsened
+  // wet surface. Field/debug modes still show those pages when their contents
+  // are the subject, and optical/rigid boundaries remain visible below.
+  let sparseStructureHalo=sparseGridEnabled()&&fieldMode==0
+    &&!sparseBrickOccupied(sparseOwnerAtCell.y);
   let tallGrid = u.gridInfo.w > 1.5 && u.gridInfo.w < 2.5;
   let octreeGrid = u.gridInfo.w > 2.5;
   var base = 0.0;
@@ -1068,10 +1082,10 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     alpha = 0.08 + 0.10 * stripe;
     line = firstGridLine * 0.35;
   }
+  if(sparseStructureHalo){fill=vec3f(0.0);alpha=0.0;line=0.0;sampleDot=0.0;}
   // Field modes recolor represented cells from the live velocity texture;
   // structural lines, sample dots, the above-band hatch, and rigid-body
   // occupancy all stay so the heatmap keeps its spatial reference frame.
-  let fieldMode = i32(round(u.debug.w));
   if (fieldMode > 0 && (adaptiveGrid || cell.y < bandTop)) {
     let velocity = velocitySample(cell);
     let wet = fluidSample(cell) > 0.5;

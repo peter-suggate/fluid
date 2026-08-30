@@ -63,7 +63,7 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     id: "hydrostatic-adaptivity",
     coverage: "hydrostatic-stability-adaptivity",
     kind: "correctness",
-    description: "two simulated seconds of stable 8/4/2/1 hydrostatic support",
+    description: "exact UI B4 surface, non-liquid halo classification, and stable deep water",
     testFile: "tests/sparse-cm12-deep-bottom-coarsening-dawn.test.ts",
     timeoutMs: 30_000,
   },

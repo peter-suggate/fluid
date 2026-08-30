@@ -395,6 +395,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             brickFineResolution: fineResolution,
             maximumMacroSpanBricks: options.maximumMacroSpanBricks,
             surfaceFineRings: options.surfaceFineRings,
+            // Activity mode promotes from measurements. Starting its authored
+            // interface at B8 made a still reset frame contradict the eventual
+            // B4 proof for nine full paper steps. Bias one construction ring
+            // coarse; Surface-distance mode retains the explicit fine band.
+            initialSurfaceCoarseningBiasRings:
+              options.activityPolicy?.activitySignals ? 1 : 0,
             ...(resolutionForBrick ? { resolutionForBrick } : {}),
           });
           // Generation zero contains only authored fluid. Dry face neighbours

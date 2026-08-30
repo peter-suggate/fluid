@@ -52,7 +52,7 @@ test("activity plus accepted-output proof is the production default", () => {
 
   const values = resolveMethodValues(adaptiveMassMethod, "balanced", {});
   assert.equal(values.selectorMode, "activity");
-  assert.equal(adaptiveMassSolverOptions(values).activityPolicy.activitySignals, true);
+  assert.equal(adaptiveMassSolverOptions(values).activityPolicy?.activitySignals, true);
 });
 
 test("surface receipts are output-space, generation-stamped, and camera independent", () => {
@@ -90,4 +90,9 @@ test("surface receipts are output-space, generation-stamped, and camera independ
     /receiptFresh&&proofEpochs[\s\S]*max\(p\.activityEpochs\.z,SURFACE_PROOF_SETTLE_EPOCHS\)/);
   assert.match(planner, /let interfaceVelocityFloor=select\(1u,velocityFloor/,
     "geometric proof must not override the moving-front transport floor");
+  assert.match(planner,
+    /acceptedB4Lease=current==BRICK_FINE_RESOLUTION\/2u[\s\S]*leasedExteriorSurface/,
+    "an accepted coarse surface must survive seam-owner reclassification");
+  assert.match(planner, /let thinRequiresFinest=thinFluid;/,
+    "thin sheets must retain the ladder maximum");
 });

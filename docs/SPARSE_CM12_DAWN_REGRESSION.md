@@ -20,7 +20,7 @@ npm run test:dawn:sparse-cm12 -- --list
 | Lane | Authority | Baseline |
 | --- | --- | --- |
 | `symmetric-expansion` | D4 field/topology symmetry, corner residency, mass | Existing 20-step Dawn property gate |
-| `hydrostatic-adaptivity` | Stable deep water and live 8/4/2/1 ladder | Two simulated seconds |
+| `hydrostatic-adaptivity` | Exact UI reset has a calm B4 surface; non-liquid halos stay out of structure view; stable deep-water 4/2/1 support | Reset plus two simulated seconds |
 | `mini32-correctness` | Finite fields and liquid-volume retention | Four simulated seconds, at least 99.5% retained |
 | `mini32-performance` | Production B8/P8 frame cost | 24.576 ms reference; 40 ms median ceiling |
 | `mini64-performance` | Production B8/P8 frame cost | 33.4889 ms reference; 50 ms median ceiling |

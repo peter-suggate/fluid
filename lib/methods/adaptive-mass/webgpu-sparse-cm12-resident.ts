@@ -1090,6 +1090,7 @@ export function sparseCM12PressureIterationsFromReceipt(
 }
 const ACTIVITY_HEADER_WORDS = 28;
 const ACTIVITY_RECORD_WORDS = 42;
+const ACTIVITY_SURFACE_B4_LEASE = 0x0400_0000;
 const ACCEPTED_COARSE_ROW_COUNT_WORD = 22;
 const ACCEPTED_MIXED_ROW_COUNT_WORD = 23;
 const PRESSURE_ACTIVE_ROW_COUNT_WORD = 24;
@@ -3743,8 +3744,13 @@ export class WebGPUSparseCM12Resident {
       initialActivity[at + 13] = atlas.bricks[brick]!.resolution;
       initialActivity[at + 37] = INVALID;
       // Low five bits retain the coarsest calm level accepted before this
-      // brick's first promotion; bit 31 is latched by that promotion.
-      initialActivity[at + 38] = atlas.bricks[brick]!.resolution;
+      // brick's first promotion; bit 31 is latched by that promotion. An
+      // initially accepted B4 page also receives the same provisional surface
+      // lease as a B8-to-B4 proof. Its first classification clears the bit for
+      // ordinary bulk, while an exposed page retains it across seam ownership.
+      initialActivity[at + 38] = atlas.bricks[brick]!.resolution
+        | (atlas.bricks[brick]!.resolution === atlas.brickFineResolution / 2
+          ? ACTIVITY_SURFACE_B4_LEASE : 0);
       if (initialActivity[at + 10] !== 0) {
         initialActivity[at + 32] = sparseCM12AuthoredFluidFrontierMask(
           atlas, atlas.bricks[brick]!,

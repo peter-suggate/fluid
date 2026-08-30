@@ -5735,9 +5735,21 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // physical adaptive threshold; a real density crossing remains authoritative.
   let quietPolicyWallSeparation=surface&&!densitySurface
     &&measuredVelocityFloor==1u&&policyTileUniformlyFilled(brick);
-  let policySurface=surface&&!quietPolicyWallSeparation;
-  let surfaceB4Lease=policySurface
+  // Restricting a cell-cut planar surface can move its rho=.5 crossing from
+  // inside the wet B8 page onto the face between the wet B4 page and its dry
+  // presentation-support page. The unique seam-owner rule deliberately gives
+  // that crossing to the dry side, which is not occupied and therefore cannot
+  // publish the ordinary surface bit. Preserve the accepted B4 proof while the
+  // wet page is still occupied and exposed. Enclosure clears a lease that has
+  // become ordinary bulk; retirement clears a drained one. Motion, thinness,
+  // transport demand and authored floors remain independent B8 authorities.
+  let deeplyEnclosed=policyTileDeeplyEnclosed(brick);
+  let acceptedB4Lease=current==BRICK_FINE_RESOLUTION/2u
     &&(recoveryState&ACTIVITY_SURFACE_B4_LEASE)!=0u;
+  let leasedExteriorSurface=acceptedB4Lease&&(reasons&64u)!=0u
+    &&!deeplyEnclosed;
+  let policySurface=(surface||leasedExteriorSurface)&&!quietPolicyWallSeparation;
+  let surfaceB4Lease=policySurface&&acceptedB4Lease;
   if(!policySurface&&(recoveryState&ACTIVITY_SURFACE_B4_LEASE)!=0u){
     atomicAnd(&activity[output+38u],~ACTIVITY_SURFACE_B4_LEASE);
   }
@@ -5748,7 +5760,7 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // below remains free to restore its exact calm coarse level.
   let movingInternalSurface=activitySignals&&policySurface&&velocityFloor>1u;
   let enclosed=activitySignals
-    &&(policyTileDeeplyEnclosed(brick)||quietPolicyWallSeparation)
+    &&(deeplyEnclosed||quietPolicyWallSeparation)
     &&!movingInternalSurface;
   // The first accepted promotion closes the calm-baseline record for this
   // brick. Once its motion is quiet and it is again overwhelmingly liquid, a
@@ -5813,15 +5825,11 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   if(activitySignals&&adaptiveSurface&&validForcedSurfaceRung){
     surfaceFloor=forcedSurfaceRung;
   }
-  // Thinness is a conservative discovery signal, not a second geometric
-  // authority. At B8 a fresh accepted-output proof may demonstrate that the
-  // complete thin surface remains representable at B4. Once at B4, any new
-  // thin evidence still promotes immediately because no B4-retention proof is
-  // yet published.
-  let thinRequiresFinest=thinFluid
-    &&!(activitySignals&&adaptiveSurface
-      &&((current==BRICK_FINE_RESOLUTION&&receiptFresh)
-        ||(current==BRICK_FINE_RESOLUTION/2u&&surfaceB4Lease)));
+  // Thin sheets have no coarse retention authority: unlike a broad planar
+  // surface, losing one composite sample can remove the represented feature.
+  // Keep them at the ladder maximum even when a prior broad-surface proof left
+  // a B4 lease on the page.
+  let thinRequiresFinest=thinFluid;
   let dynamicRequired=max(select(1u,recoveryFloor,recoveryRequired),max(max(
     max(interfaceVelocityFloor,surfaceFloor),
     select(1u,BRICK_FINE_RESOLUTION,

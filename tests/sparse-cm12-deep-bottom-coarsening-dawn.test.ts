@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
+import "../lib/methods";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
+import { resolveMethodValues } from "../lib/core/method-contract";
 import { getScenePreset } from "../lib/core/scenes";
 import { sceneAtContainerExtents } from "../lib/core/scene-scale";
+import { parseQueryState } from "../lib/core/url-state";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
   acquireWebGPUExclusiveLock,
@@ -37,7 +40,7 @@ interface StepSample {
   }[];
 }
 
-dawnTest("Sparse CM12 publishes the full planar-wall ladder without a fine bottom", {
+dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
   timeout: 180_000,
 }, async () => {
   await acquireWebGPUExclusiveLock("dawn-test",
@@ -76,8 +79,9 @@ dawnTest("Sparse CM12 publishes the full planar-wall ladder without a fine botto
       depth_m: sourceScene.container.depth_m,
     });
     // Preserve the production corner-dam shape in a taller tank and union in a
-    // 26-cell-deep pool. Four vertical B8 pages then expose the complete
-    // surface-to-floor 8/4/2/1 ladder without violating strong 2:1 grading.
+    // 26-cell-deep pool. Four vertical brick pages expose the surface-to-floor
+    // ladder; activity mode deliberately biases its broad calm interface one
+    // rung coarse, without violating strong 2:1 grading.
     scene.fluid.initialDamBreakDimensions_m = { x: 0.6, y: 1.8, z: 0.5 };
     scene.fluid.initialLiquidVolumes = [{
       shape: "box",
@@ -149,8 +153,8 @@ dawnTest("Sparse CM12 publishes the full planar-wall ladder without a fine botto
 
     await sample(0);
     assert.deepEqual(samples[0]!.verticalLadder.map((entry) => entry.resolution),
-      [1, 2, 4, 8],
-      "initial planar-wall restriction must publish the full 8/4/2/1 ladder");
+      [1, 1, 2, 4],
+      "initial planar-wall restriction must omit B8 for a broad calm surface");
     // Two simulated seconds cover fifteen topology epochs and the dam impact,
     // long enough for the former B8/B4 ping-pong to complete several cycles.
     for (let step = 1; step <= 60; step += 1) {
@@ -190,6 +194,77 @@ dawnTest("Sparse CM12 publishes the full planar-wall ladder without a fine botto
     assert.deepEqual(failures, [],
       `deep bottom coarsening was not stable:\n${failures.join("\n")}`
         + `\nvertical ladder ${ladderProfile}`);
+
+    solver.destroy();
+    solver = undefined;
+
+    // Enter through the exact studio query and method-resolution path used by
+    // the reported UI scene. This covers both the paused/reset grid frame and
+    // the running policy; a hand-built solver-options approximation previously
+    // missed the product thresholds and did not catch the unchanged reset view.
+    const offsetUI = parseQueryState(
+      "?scene=hydrostatic-power-large-offset&method=adaptive-mass&grid=volume",
+    );
+    assert.equal(offsetUI.methodId, "adaptive-mass");
+    assert.equal(offsetUI.ui.gridOverlayAxis, "volume");
+    assert.equal(offsetUI.ui.gridOverlayMode, "structure");
+    const offsetValues = resolveMethodValues(adaptiveMassMethod,
+      offsetUI.quality, offsetUI.overrides[offsetUI.methodId] ?? {});
+    assert.equal(offsetValues.selectorMode, "activity");
+    assert.equal(offsetValues.resolutionMode, "adaptive");
+    const offsetSolver = await adaptiveMassMethod.createSolverAsync!(
+      device, offsetUI.scene, offsetUI.quality, offsetValues, undefined,
+      () => {},
+    ) as WebGPUAdaptiveMassSolver;
+    try {
+      await offsetSolver.waitForSimulationReady();
+      const resetSnapshot = await offsetSolver.readGPUActivityPolicy();
+      const resetSurface = resetSnapshot.bricks.filter((brick) => brick.active
+        && brick.coordinate[1] === 1);
+      assert.equal(resetSurface.length, 8,
+        "the exact UI reset frame must contain all eight surface pages");
+      assert.ok(resetSurface.every((brick) => brick.acceptedResolution === 4),
+        `the exact UI reset frame must present its calm surface at B4: ${
+          resetSurface.map((brick) => `${brick.coordinate.join(",")}=${
+            brick.acceptedResolution}`).join("; ")}`);
+      assert.ok(resetSurface.every((brick) => (brick.reasons & 64) !== 0),
+        "the exact UI reset surface must publish occupied pressure topology");
+      let settledGeneration: number | undefined;
+      for (let step = 1; step <= 16; step += 1) {
+        assert.equal(offsetSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        await device.queue.onSubmittedWorkDone();
+        const snapshot = await offsetSolver.readGPUActivityPolicy();
+        const surfaceLayer = snapshot.bricks.filter((brick) => brick.active
+          && brick.coordinate[1] === 1);
+        const drySupportLayer = snapshot.bricks.filter((brick) => brick.active
+          && brick.coordinate[1] === 2);
+        assert.equal(surfaceLayer.length, 8,
+          `large-offset surface layer changed membership at step ${step}`);
+        assert.ok(surfaceLayer.every((brick) => brick.acceptedResolution === 4
+          && brick.plannedResolution === 4),
+        `large-offset surface did not retain B4 at step ${step}: ${
+          surfaceLayer.map((brick) => `${brick.coordinate.join(",")}=${
+            brick.acceptedResolution}/${brick.plannedResolution}/p${
+            brick.planReasons}/r${brick.reasons}/s${brick.scoreByte}`).join("; ")}`);
+        assert.equal(drySupportLayer.length, 8,
+          `large-offset dry support layer changed membership at step ${step}`);
+        assert.ok(drySupportLayer.every((brick) => (brick.reasons & 64) === 0),
+          `large-offset support became liquid topology at step ${step}: ${
+            drySupportLayer.map((brick) => `${brick.coordinate.join(",")}=${
+              brick.acceptedResolution}/${brick.plannedResolution}/p${
+              brick.planReasons}/r${brick.reasons}/s${brick.scoreByte}`).join("; ")}`);
+        if (step === 1) {
+          settledGeneration = snapshot.acceptedTopologyGeneration;
+        } else {
+          assert.equal(snapshot.acceptedTopologyGeneration, settledGeneration,
+            `large-offset calm surface churned topology at step ${step}`);
+        }
+        assert.equal(snapshot.commitFailed, false);
+      }
+    } finally {
+      offsetSolver.destroy();
+    }
+    assert.deepEqual(validationErrors, []);
   } finally {
     solver?.destroy();
     device?.destroy();

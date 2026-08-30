@@ -106,6 +106,12 @@ export interface SparseBrickAtlasInitializationOptions {
   readonly emptyEpsilon?: number;
   /** Count of occupied face-distance rings held at the finest rung around the interface. */
   readonly surfaceFineRings?: number;
+  /**
+   * Construction-only shift toward coarser interface rungs. Activity mode uses
+   * one ring so a reset frame starts from its ordinary calm-surface B4 floor;
+   * measured motion and thinness remain runtime promotion authorities.
+   */
+  readonly initialSurfaceCoarseningBiasRings?: number;
   /** Optional fixed-policy override for every nonempty brick, including interfaces. */
   readonly resolutionForBrick?: (input: {
     readonly coordinate: SparseBrickVec3;
@@ -748,12 +754,16 @@ function hierarchicalTankFillBricks(
   // Only a fractional surface sheet is sampled. This is surface-shaped work,
   // independent of the liquid depth.
   if (fullFineY % brickFineResolution !== 0 && fullBrickY < brickDimensions[1]) {
+    const surfaceResolution = (surfaceFineRings > 0
+      ? brickFineResolution
+      : sparseBrickLadder(brickFineResolution).coarseResolution) as
+      SparseBrickResolution;
     for (let z = 0; z < brickDimensions[2]; z += 1)
       for (let x = 0; x < brickDimensions[0]; x += 1)
         bricks.push(initialBrick(
           scene, dimensions, [x, fullBrickY, z], initialResolutionWithRefinementRegionBounds(
             refinementRegionParameters, dimensions, [x, fullBrickY, z], 1,
-            brickFineResolution, brickFineResolution), brickFineResolution,
+            surfaceResolution, brickFineResolution), brickFineResolution,
         ));
   }
 
@@ -916,9 +926,16 @@ export function initializeSparseBrickAtlasFromScene(
     );
   }
   const epsilon = options.emptyEpsilon ?? 1e-12;
-  const surfaceFineRings = typeof options.surfaceFineRings === "number"
+  const authoredSurfaceFineRings = typeof options.surfaceFineRings === "number"
     && Number.isFinite(options.surfaceFineRings)
     ? Math.min(8, Math.max(1, Math.round(options.surfaceFineRings))) : 1;
+  const initialSurfaceCoarseningBiasRings =
+    typeof options.initialSurfaceCoarseningBiasRings === "number"
+      && Number.isFinite(options.initialSurfaceCoarseningBiasRings)
+      ? Math.min(authoredSurfaceFineRings, Math.max(0,
+        Math.round(options.initialSurfaceCoarseningBiasRings))) : 0;
+  const surfaceFineRings = authoredSurfaceFineRings
+    - initialSurfaceCoarseningBiasRings;
   const brickDimensions = options.finestDimensions.map((value) =>
     Math.ceil(value / brickFineResolution)) as [number, number, number];
   const container = scene.container;

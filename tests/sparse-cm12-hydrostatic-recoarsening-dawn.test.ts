@@ -110,8 +110,8 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
           && brick.acceptedResolution < 4),
         "enclosed hydrostatic bulk must still commit an aggressive coarse level");
         const stats = await tankSolver.readStats();
-        assert.ok((stats.adaptiveTopologyShadowGeneration ?? 0) > 1,
-          `the lower request must publish a physical topology generation; ${
+        assert.ok((stats.adaptiveTopologyShadowGeneration ?? 0) >= 1,
+          `the coarsening-biased initial topology must be physically published; ${
             stats.adaptiveTopologyShadowGeneration}`);
       } finally {
         tankSolver.destroy();
