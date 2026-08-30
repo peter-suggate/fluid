@@ -235,6 +235,15 @@ export interface SharpeningTrace {
  * separate transaction, so these controls tune candidate requests/history. */
 export interface SparseCM12ActivityPolicy {
   readonly activitySignals: boolean;
+  /** Maximum rho=.5 edge-crossing displacement accepted by the B8 -> B4
+   * presentation proof, expressed in finest-cell widths. */
+  readonly surfaceDisplacementToleranceCells: number;
+  /** Maximum narrow-band normal error accepted by the presentation proof. */
+  readonly surfaceNormalToleranceDegrees: number;
+  /** Enables publication and consumption of surface representability receipts. */
+  readonly surfaceCoarseningEnabled: boolean;
+  /** QA-only fixed surface rung. Omitted in production and normal UI flows. */
+  readonly forcedSurfaceResolutionForQA?: 4 | 8;
   readonly finestTravelCells: number;
   readonly fourTravelCells: number;
   readonly twoTravelCells: number;
@@ -257,6 +266,9 @@ export interface SparseCM12ActivityPolicy {
 
 export const SPARSE_CM12_ACTIVITY_POLICY = Object.freeze({
   activitySignals: true,
+  surfaceDisplacementToleranceCells: 1,
+  surfaceNormalToleranceDegrees: 30,
+  surfaceCoarseningEnabled: true,
   finestTravelCells: 1,
   fourTravelCells: 0.5,
   twoTravelCells: 0.25,
@@ -298,8 +310,22 @@ export function sparseCM12ActivityPolicy(
     values.twoTravelCells, defaults.twoTravelCells, 0, 8,
   ));
   const promoteScore = finiteClamp(values.promoteScore, defaults.promoteScore, 0, 1);
+  const forcedSurfaceResolutionForQA = values.forcedSurfaceResolutionForQA === 4
+    || values.forcedSurfaceResolutionForQA === 8
+    ? values.forcedSurfaceResolutionForQA : undefined;
   return {
     activitySignals: values.activitySignals === true,
+    surfaceDisplacementToleranceCells: finiteClamp(
+      values.surfaceDisplacementToleranceCells,
+      defaults.surfaceDisplacementToleranceCells, 0, 8,
+    ),
+    surfaceNormalToleranceDegrees: finiteClamp(
+      values.surfaceNormalToleranceDegrees,
+      defaults.surfaceNormalToleranceDegrees, 0, 90,
+    ),
+    surfaceCoarseningEnabled: values.surfaceCoarseningEnabled !== false,
+    ...(forcedSurfaceResolutionForQA === undefined
+      ? {} : { forcedSurfaceResolutionForQA }),
     finestTravelCells,
     fourTravelCells,
     twoTravelCells,
@@ -975,7 +1001,7 @@ export function sparseCM12WGSLForEntryPoints(source: string, roots: readonly str
 const SPARSE_CM12_PHASE1_TRANSPORT_PROFILE_WORDS = 64;
 /** Params in the resident WGSL, including the fixed authored-region tail. */
 const SPARSE_CM12_PARAMETER_BYTES = SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
-  + SPARSE_CM12_REFINEMENT_REGION_BYTES;
+  + SPARSE_CM12_REFINEMENT_REGION_BYTES + 16;
 /** Twenty f32 convergence/diagnostic scalars; see the WGSL initialization. */
 const SPARSE_CM12_PRESSURE_SCALAR_BYTES = 80;
 const SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS =
@@ -1063,7 +1089,7 @@ export function sparseCM12PressureIterationsFromReceipt(
   return hardMaximum;
 }
 const ACTIVITY_HEADER_WORDS = 28;
-const ACTIVITY_RECORD_WORDS = 39;
+const ACTIVITY_RECORD_WORDS = 42;
 const ACCEPTED_COARSE_ROW_COUNT_WORD = 22;
 const ACCEPTED_MIXED_ROW_COUNT_WORD = 23;
 const PRESSURE_ACTIVE_ROW_COUNT_WORD = 24;
@@ -2312,6 +2338,8 @@ export interface SparseCM12GPUActivityRecord {
   readonly thinFluid: boolean;
   readonly hotEpochs: number;
   readonly quietEpochs: number;
+  /** Consecutive fresh accepted-output surface proofs for the current rung. */
+  readonly surfaceProofEpochs: number;
   /** Mean intensive density retained in the brick at the last activity census. */
   readonly meanDensity: number;
   /** Density-weighted local brick moments used by the temporal activity score. */
@@ -2358,6 +2386,11 @@ export interface SparseCM12GPUActivityRecord {
   /** Cached candidate-resolution bounds, expressed as cells per B8 leaf. */
   readonly refinementPolicyMinimumResolution: number;
   readonly refinementPolicyMaximumResolution: number;
+  /** One-rung presentation proof for this accepted topology generation. */
+  readonly representableNextResolution: SparseBrickResolution | undefined;
+  readonly representabilityGeneration: number;
+  /** Zero on success; proof rejection bitmask for QA and policy tuning. */
+  readonly representabilityFailure: number;
 }
 
 export interface SparseCM12GPUActivitySnapshot {
@@ -2422,6 +2455,8 @@ export interface SparseCM12DiagnosticFields {
   readonly velocity: Float32Array;
   /** Pressure equation source assembled from physical face flux and volume correction. */
   readonly pressureRhs: Float32Array;
+  /** Raw fine-grid pressure operator diagonal used by the resident solve. */
+  readonly pressureDiagonal: Float32Array;
   readonly pressure: Float32Array;
   readonly divergence: Float32Array;
 }
@@ -3244,6 +3279,7 @@ export class WebGPUSparseCM12Resident {
       topologyArena: { buffer: this.topologyArena },
       state: { buffer: this.state },
       activity: { buffer: this.activity },
+      activityRecordWords: ACTIVITY_RECORD_WORDS,
       framePlan: sparseCM12FramePlanSource(
         this.framePlanLayout, this.activity, this.framePlanIndirectArguments),
       fineMetadata: { buffer: this.fineMetadata },
@@ -4584,6 +4620,7 @@ export class WebGPUSparseCM12Resident {
         "commitSparseCM12FramePlanPresentationPacket",
         "verifySparseCM12FramePlanCurrentStage",
         "finalizeSparseCM12FramePlanPresentationExecution",
+        "publishSparseCM12SurfaceRepresentabilityReceipts",
         "rejectSparseCM12FramePlanPresentationFaults"] as const;
     const presentationShaderSource = sparseCM12WGSLForEntryPoints(
       shaderSource, presentationShaderRoots,
@@ -4702,6 +4739,7 @@ export class WebGPUSparseCM12Resident {
       "executeSparseCM12FramePlanPresentationPacket",
       "commitSparseCM12FramePlanPresentationPacket",
       "finalizeSparseCM12FramePlanPresentationExecution",
+      "publishSparseCM12SurfaceRepresentabilityReceipts",
       "rejectSparseCM12FramePlanPresentationFaults",
       "beginPersistentPressureCache", "finalizePersistentPressureFineCache",
       ...SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_ENTRY_POINTS,
@@ -4743,6 +4781,7 @@ export class WebGPUSparseCM12Resident {
         "executeSparseCM12FramePlanPresentationPacket",
         "commitSparseCM12FramePlanPresentationPacket",
         "finalizeSparseCM12FramePlanPresentationExecution",
+        "publishSparseCM12SurfaceRepresentabilityReceipts",
         "rejectSparseCM12FramePlanPresentationFaults"]);
     const presentationNames = names.filter((name) => presentationEntryNames.has(name));
     const simulationNames = names.filter((name) => !presentationEntryNames.has(name));
@@ -6098,6 +6137,10 @@ export class WebGPUSparseCM12Resident {
     execute.dispatchWorkgroups(bricks);
     execute.setPipeline(this.pipelines.finalizeSparseCM12FramePlanPresentationExecution!);
     execute.dispatchWorkgroups(1);
+    execute.setPipeline(this.pipelines.publishSparseCM12SurfaceRepresentabilityReceipts!);
+    // Resolution decisions cover the complete accepted brick census. They
+    // must not depend on the renderer's currently visible page subset.
+    execute.dispatchWorkgroups(bricks);
     execute.setPipeline(this.pipelines.rejectSparseCM12FramePlanPresentationFaults!);
     execute.dispatchWorkgroups(bricks);
     execute.end();
@@ -6535,6 +6578,14 @@ export class WebGPUSparseCM12Resident {
       = sparseCM12PhysicalMassFixedScale(finestCellSize_m, this.closedSolidShell);
     u[SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET / 4 + 2]
       = this.refinementPolicyDirty ? 1 : 0;
+    const surfaceProofWord = (SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
+      + SPARSE_CM12_REFINEMENT_REGION_BYTES) / 4;
+    f[surfaceProofWord] = policy.surfaceDisplacementToleranceCells * finestCellSize_m;
+    f[surfaceProofWord + 1] = Math.cos(
+      policy.surfaceNormalToleranceDegrees * Math.PI / 180,
+    );
+    u[surfaceProofWord + 2] = policy.surfaceCoarseningEnabled ? 1 : 0;
+    u[surfaceProofWord + 3] = policy.forcedSurfaceResolutionForQA ?? 0;
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
   }
 
@@ -7123,6 +7174,7 @@ export class WebGPUSparseCM12Resident {
       const solidOpenFraction = new Float32Array(count); solidOpenFraction.fill(1);
       const velocity = new Float32Array(4 * count);
       const pressureRhs = new Float32Array(count);
+      const pressureDiagonal = new Float32Array(count);
       const pressure = new Float32Array(count);
       const divergence = new Float32Array(count);
       const densityOffset = fieldParity !== 0 ? this.layout.densityB : this.layout.densityA;
@@ -7204,6 +7256,7 @@ export class WebGPUSparseCM12Resident {
               velocity[4 * at] = vx; velocity[4 * at + 1] = vy;
               velocity[4 * at + 2] = vz;
               pressureRhs[at] = state[this.layout.rhs + cell]!;
+              pressureDiagonal[at] = state[this.layout.diagonal + cell]!;
               // Publish pressure over the accepted liquid phase. PCM is an
               // iteration-local solve worklist and may differ for one frame
               // across an otherwise identical topology transition; using it
@@ -7257,6 +7310,7 @@ export class WebGPUSparseCM12Resident {
             velocity[4 * at + 1] = state[velocityAt + 1]! * cellWidth_m;
             velocity[4 * at + 2] = state[velocityAt + 2]! * cellWidth_m;
             pressureRhs[at] = state[this.layout.rhs + cell]!;
+            pressureDiagonal[at] = state[this.layout.diagonal + cell]!;
             pressure[at] = rho >= 0.5
               ? state[this.layout.pressure + cell]! * pressureScale : 0;
             divergence[at] = state[this.layout.divergence + cell]!;
@@ -7264,7 +7318,7 @@ export class WebGPUSparseCM12Resident {
         }
       }
       return { density, gamma, sharpeningDelta, sharpeningReceiptMass,
-        solidOpenFraction, velocity, pressureRhs, pressure, divergence };
+        solidOpenFraction, velocity, pressureRhs, pressureDiagonal, pressure, divergence };
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
       readback.destroy();
@@ -9020,6 +9074,7 @@ export class WebGPUSparseCM12Resident {
           thinFluid: (words[at + 1]! & 256) !== 0,
           hotEpochs: words[at + 2]! & 0xff,
           quietEpochs: (words[at + 2]! >>> 8) & 0xff,
+          surfaceProofEpochs: (words[at + 2]! >>> 16) & 0xff,
           meanDensity: new DataView(words.buffer).getFloat32(4 * (at + 4), true),
           densityMoments: [5, 6, 7].map((offset) =>
             new DataView(words.buffer).getFloat32(4 * (at + offset), true)) as
@@ -9074,6 +9129,10 @@ export class WebGPUSparseCM12Resident {
             (words[at + 38]! >>> 16) & 0x1f),
           refinementPolicyMaximumResolution:
             ((words[at + 38]! >>> 21) & 0x1f) || 8,
+          representableNextResolution: words[at + 39] === 0 ? undefined
+            : words[at + 39] as SparseBrickResolution,
+          representabilityGeneration: words[at + 40]!,
+          representabilityFailure: words[at + 41]!,
         };
       });
       return {

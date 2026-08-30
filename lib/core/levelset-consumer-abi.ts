@@ -59,6 +59,9 @@ export interface SparseAdaptiveGridConsumerSource {
   readonly topologyArena: GPUBufferBinding;
   readonly state: GPUBufferBinding;
   readonly activity: GPUBufferBinding;
+  /** Word stride of one live activity/topology record. Renderer-side sparse
+   * ownership must use the producer's stride rather than freezing an ABI copy. */
+  readonly activityRecordWords: number;
   readonly fineMetadata: GPUBufferBinding;
   readonly fineWorklist: GPUBufferBinding;
   readonly fineSamples: GPUBufferBinding;

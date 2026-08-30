@@ -118,14 +118,14 @@ const params: MethodParamSpec[] = [
     kind: "select",
     key: "selectorMode",
     label: "Adaptive criterion",
-    default: "surface",
+    default: "activity",
     tier: "coarse",
     update: "runtime",
     options: [
       { value: "surface", label: "Surface distance" },
-      { value: "activity", label: "Surface + activity" },
+      { value: "activity", label: "Causal activity + surface proof" },
     ],
-    hint: "Surface distance keeps interface/thin bricks at the ladder maximum and sends submerged bricks directly to 1³ before 2:1 closure, ignoring velocity and history. Activity additionally refines moving or complex liquid.",
+    hint: "Surface distance keeps interface/thin bricks at the ladder maximum. Causal activity promotes moving or unresolved liquid and lets accepted presentation output prove a one-rung surface merge.",
   },
   {
     kind: "number", key: "surfaceFineRings", label: "Initial fine surface band",
@@ -326,6 +326,22 @@ const params: MethodParamSpec[] = [
     hint: "Maximum 2x2x2 restriction error allowed before fine detail vetoes demotion.",
   },
   {
+    kind: "number", key: "surfaceDisplacementToleranceCells",
+    label: "Surface displacement tolerance",
+    default: SPARSE_CM12_ACTIVITY_POLICY.surfaceDisplacementToleranceCells,
+    tier: "fine", update: "runtime", unit: "fine cells",
+    min: 0, max: 8, step: 0.05, digits: 2,
+    hint: "Maximum rho=.5 edge-crossing movement accepted by the B8-to-B4 presentation proof.",
+  },
+  {
+    kind: "number", key: "surfaceNormalToleranceDegrees",
+    label: "Surface normal tolerance",
+    default: SPARSE_CM12_ACTIVITY_POLICY.surfaceNormalToleranceDegrees,
+    tier: "fine", update: "runtime", unit: "°",
+    min: 0, max: 90, step: 1, digits: 0,
+    hint: "Maximum narrow-band normal-angle error accepted by the B8-to-B4 presentation proof.",
+  },
+  {
     kind: "number", key: "topologyCadenceSteps", label: "Topology cadence",
     default: SPARSE_CM12_ACTIVITY_POLICY.topologyCadenceSteps, tier: "fine", update: "runtime",
     unit: "steps", min: 1, max: 32, step: 1, digits: 0,
@@ -394,6 +410,7 @@ export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze([
   "surfaceDensityMinimum", "surfaceDensityMaximum", "detailTolerance",
   "topologyCadenceSteps", "prepareBricksPerFrame", "promoteEpochs", "demoteEpochs",
   "promoteScore", "demoteScore", "emergencyScore",
+  "surfaceDisplacementToleranceCells", "surfaceNormalToleranceDegrees",
 ] as const);
 
 const resolutionMode = (value: unknown): AdaptiveMassResolutionMode =>
@@ -419,7 +436,7 @@ const maximumMacroSpanBricks = (value: unknown): number | undefined => {
 };
 
 const selectorMode = (value: unknown): "surface" | "activity" =>
-  value === "activity" ? "activity" : "surface";
+  value === "surface" ? "surface" : "activity";
 
 const activityPolicy = (values: MethodParamValues): SparseCM12ActivityPolicy =>
   sparseCM12ActivityPolicy({
@@ -461,7 +478,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   shortLabel: "Sparse CM12",
   badge: "SPARSE CM12",
   description: "Sparse complete-dyadic world-brick expansion of the uniform CM12 mass-conserving method.",
-  detail: "Sparse CM12 maps any authored scene into a fixed-world-space GPU brick atlas and couples graded neighbours through shared conservative transport and a global composite pressure solve. Runtime surface-distance requests for existing bricks are measured, 2:1-closed and conservatively transferred into GPU-authored physical generations; urgent surface refinement bypasses the budgeted round-robin coarsening lane. Transport, pressure, projection and presentation all consume the accepted worklists.",
+  detail: "Sparse CM12 maps any authored scene into a fixed-world-space GPU brick atlas and couples graded neighbours through shared conservative transport and a global composite pressure solve. Runtime activity requests and accepted-output surface proofs are measured, 2:1-closed and conservatively transferred into GPU-authored physical generations; urgent surface refinement bypasses the budgeted round-robin coarsening lane. Transport, pressure, projection and presentation all consume the accepted worklists.",
   backend: "webgpu",
   resource: {
     id: "fluid.sparse-cm12",
@@ -549,7 +566,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       brickFineResolution: "8",
       presentationPageResolution: "8",
       maximumMacroSpanBricks: "auto",
-      selectorMode: "surface",
+      selectorMode: "activity",
       surfaceFineRings: 1,
       timeStep: "paper",
       gammaDiffusion: "on",

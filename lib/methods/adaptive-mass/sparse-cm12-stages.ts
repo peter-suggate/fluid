@@ -609,9 +609,9 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     timedWork: candidatePlanTimedWork,
     lens: null,
     tip: {
-      summary: "This is a candidate-topology construction interval, not just a policy decision. It scores and grades resolutions, activates and retires pages, schedules the budget, allocates and synthesizes candidate cells, builds shadow row/leaf/structure worklists and publishes four indirect command copies for the following transaction.",
-      reads: "transported density, momentum, policy history",
-      writes: "score/reason history, urgent/ordinary queues, candidate levels, shadow worklists",
+      summary: "This is a candidate-topology construction interval, not just a policy decision. It scores and grades resolutions, consumes generation-stamped surface-output proofs, activates and retires pages, schedules the budget, allocates and synthesizes candidate cells, builds shadow row/leaf/structure worklists and publishes four indirect command copies for the following transaction.",
+      reads: "transported density, momentum, policy history and accepted surface-output proofs",
+      writes: "score/reason/proof history, urgent/ordinary queues, candidate levels, shadow worklists",
       feeds: "candidate transfer",
     },
     controls: [
@@ -624,7 +624,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         kind: "param-choice", param: "selectorMode", label: "Criterion",
         options: [
           { value: "surface", label: "SURFACE", hint: "Surface/thin liquid is fine; submerged liquid requests 1³ and only 2:1 closure grades it." },
-          { value: "activity", label: "ACTIVITY", hint: "Free surfaces stay fine; calm flooded deep bulk merges." },
+          { value: "activity", label: "ACTIVITY + PROOF", hint: "Calm surfaces may reach 4³ only after the accepted presentation output proves the merge; flooded deep bulk keeps the full 8/4/2/1 ladder." },
         ],
       },
       {
@@ -689,7 +689,21 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         kind: "param-range", param: "detailTolerance", label: "Detail tolerance",
         unit: " ρ", min: 0.005, max: 0.5, step: 0.005, digits: 3,
         enabled: activityOnly,
-        hint: "2x2x2 restriction error allowed before enclosed-bulk detail vetoes demotion. Free surfaces retain their independent fine floor.",
+        hint: "2x2x2 restriction error allowed before enclosed-bulk detail vetoes demotion. Surface demotion is governed separately by the accepted-output proof.",
+      },
+      {
+        kind: "param-range", param: "surfaceDisplacementToleranceCells",
+        label: "Surface displacement", unit: " cells",
+        min: 0, max: 8, step: 0.05, digits: 2,
+        enabled: activityOnly,
+        hint: "Maximum rho=.5 edge-crossing movement accepted when proving that a B8 surface can be represented at B4.",
+      },
+      {
+        kind: "param-range", param: "surfaceNormalToleranceDegrees",
+        label: "Surface normal", unit: "°",
+        min: 0, max: 90, step: 1, digits: 0,
+        enabled: activityOnly,
+        hint: "Maximum narrow-band normal-angle change accepted by the B8-to-B4 presentation proof.",
       },
       {
         kind: "param-range", param: "topologyCadenceSteps", label: "Epoch cadence",
@@ -712,7 +726,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         kind: "param-range", param: "demoteEpochs", label: "Demote hold",
         unit: " epochs", min: 1, max: 32, step: 1, digits: 0,
         enabled: activityOnly,
-        hint: "Quiet epochs required for each one-rung merge.",
+        hint: "Quiet epochs required for each one-rung bulk merge; at the surface this is an independent run of fresh accepted-output proofs.",
       },
       {
         kind: "param-range", param: "promoteScore", label: "Promote score",
@@ -734,7 +748,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
     ],
     chip: (context) => `${activityOnly(context)
-      ? `surface + activity · plan every ${fixed(context.values.topologyCadenceSteps, 0)} steps`
+      ? `surface proof + activity · plan every ${fixed(context.values.topologyCadenceSteps, 0)} steps`
       : "surface distance · direct 1³ bulk"} · grade/allocate/shadow · ${
       fixed(context.values.prepareBricksPerFrame, 0)}/frame`,
   },
@@ -805,10 +819,10 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     phase: { id: "adaptive-publication", label: "Encode compact sparse presentation pages" },
     lens: null,
     tip: {
-      summary: "Classifies which bricks the renderer can see, publishes their compact level-set pages in place and commits frame control. Nothing is expanded to a dense field and nothing crosses to the host.",
+      summary: "Classifies which bricks the renderer can see, publishes their compact level-set pages in place, proves whether each accepted B8 surface remains representable at B4, and commits frame control. Nothing is expanded to a dense field and nothing crosses to the host.",
       reads: "committed sparse authority",
-      writes: "compact level-set brick pages and presentation classification",
-      feeds: "renderer level-set and grid consumers",
+      writes: "compact level-set brick pages, presentation classification and generation-stamped surface proofs",
+      feeds: "renderer level-set/grid consumers and the next topology plan",
     },
     chip: (context) => `${context.info?.fluidBrickResidentCount ?? 0} pages · resident`,
   },

@@ -85,7 +85,8 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
         device, tank, "balanced", undefined, options(), () => {},
       );
       try {
-        for (let step = 1; step <= 4; step += 1) {
+        await tankSolver.waitForSimulationReady();
+        for (let step = 1; step <= 20; step += 1) {
           assert.equal(tankSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
         }
         await device.queue.onSubmittedWorkDone();
@@ -93,16 +94,25 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
         const after = await tankSolver.readGPUActivityPolicy();
         const surface = after.bricks.filter((brick) => brick.active
           && (brick.reasons & 1) !== 0);
+        const presentationHeader = await tankSolver.readFramePlanPresentationHeaderQA();
         assert.ok(surface.length > 0, "the tank must retain a measured free surface");
-        assert.ok(surface.every((brick) => brick.acceptedResolution === 8),
-          "every genuine free-surface brick must remain 8 cubed");
+        assert.ok(surface.every((brick) => brick.acceptedResolution === 4),
+          `every calm planar surface must consume its B4 proof: ${surface.map((brick) =>
+            `${brick.coordinate.join(",")}=${brick.acceptedResolution}`
+              + `/reasons${brick.reasons}/score${brick.scoreByte}`
+              + `/epochs${brick.surfaceProofEpochs}`
+              + `/proof${brick.representableNextResolution ?? 0}`
+              + `@${brick.representabilityGeneration}`
+              + `/failure${brick.representabilityFailure}`).join("; ")}; FPP ${
+                JSON.stringify(presentationHeader)}`);
         assert.ok(after.bricks.some((brick) => brick.active
           && (brick.reasons & 64) !== 0 && (brick.reasons & 1) === 0
           && brick.acceptedResolution < 4),
         "enclosed hydrostatic bulk must still commit an aggressive coarse level");
         const stats = await tankSolver.readStats();
         assert.ok((stats.adaptiveTopologyShadowGeneration ?? 0) > 1,
-          "the lower request must publish a physical topology generation");
+          `the lower request must publish a physical topology generation; ${
+            stats.adaptiveTopologyShadowGeneration}`);
       } finally {
         tankSolver.destroy();
       }
@@ -139,6 +149,7 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
         () => {},
       );
       try {
+        await ladderSolver.waitForSimulationReady();
         const accepted: number[] = [];
         for (let step = 0; step <= 3; step += 1) {
           if (step > 0) {
@@ -175,6 +186,7 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
         () => {},
       );
       try {
+        await surfaceOnlySolver.waitForSimulationReady();
         const before = await surfaceOnlySolver.readGPUActivityPolicy();
         assert.ok(before.bricks.filter((brick) => brick.active).every(
           (brick) => brick.acceptedResolution === 8));

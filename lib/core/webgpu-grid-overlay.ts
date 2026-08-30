@@ -155,10 +155,6 @@ fn nearestBodyDistance(ro: vec3f, rd: vec3f) -> f32 {
 
 const SPARSE_INVALID:u32=0xffffffffu;
 const SPARSE_ACTIVITY_HEADER_WORDS:u32=28u;
-// Keep this stride in lockstep with ACTIVITY_RECORD_WORDS in the sparse CM12
-// resident ABI. Reading the former 40-word layout shifts every brick after the
-// first and makes represented cells disappear in disconnected patches.
-const SPARSE_ACTIVITY_RECORD_WORDS:u32=39u;
 const SPARSE_FRAME_PLAN_MAGIC:u32=0x46504c31u;
 const SPARSE_FRAME_PLAN_VERSION:u32=1u;
 const SPARSE_FRAME_PLAN_HEADER_WORDS:u32=64u;
@@ -183,6 +179,7 @@ fn sparseGridEnabled()->bool{
   return sparseP.counts.x>0u&&all(sparseP.dimensions.xyz==vec3u(u.gridInfo.xyz));
 }
 fn sparseBrickFineResolution()->u32{return max(1u,sparseP.dimensions.w>>1u);}
+fn sparseActivityRecordWords()->u32{return sparseOverlayP.worldDirectory.w;}
 fn sparseWorldDirectoryBase()->u32{return sparseOverlayP.worldDirectory.x;}
 fn sparseWorldDirectoryEnabled()->bool{
   if(sparseOverlayP.worldDirectory.y==0u){return false;}
@@ -290,12 +287,12 @@ fn sparseLegacyBrickLookup(key:u32)->u32{
   return SPARSE_INVALID;
 }
 fn sparseBrickActive(brick:u32)->bool{
-  let at=SPARSE_ACTIVITY_HEADER_WORDS+SPARSE_ACTIVITY_RECORD_WORDS*brick+10u;
+  let at=SPARSE_ACTIVITY_HEADER_WORDS+sparseActivityRecordWords()*brick+10u;
   return brick<sparseP.dispatch.w&&at<arrayLength(&sparseActivity)&&sparseActivity[at]!=0u;
 }
 fn sparseAcceptedResolution(brick:u32)->u32{
   return sparseActivity[SPARSE_ACTIVITY_HEADER_WORDS
-    +SPARSE_ACTIVITY_RECORD_WORDS*brick+12u];
+    +sparseActivityRecordWords()*brick+12u];
 }
 fn sparseBrickSpan(brick:u32)->u32{
   if(sparseWorldDirectoryEnabled()){return sparseWorldLeafSpan(brick);}
@@ -1448,11 +1445,14 @@ export class GridOverlayPipeline {
     this.sparseSource = source;
     const base = source?.worldDirectoryBaseWords;
     const initialLeaves = source?.worldDirectoryInitialLeaves;
+    const activityRecordWords = source?.activityRecordWords;
     this.device.queue.writeBuffer(this.sparseOverlayParams, 0,
       new Uint32Array([Number.isSafeInteger(base) && base! >= 0 ? base! : 0,
         Number.isSafeInteger(base) && base! >= 0 ? 1 : 0,
         Number.isSafeInteger(initialLeaves) && initialLeaves! >= 0
-          ? initialLeaves! : 0, 0]));
+          ? initialLeaves! : 0,
+        Number.isSafeInteger(activityRecordWords) && activityRecordWords! > 0
+          ? activityRecordWords! : 0]));
     this.rebuildBindGroup();
   }
 

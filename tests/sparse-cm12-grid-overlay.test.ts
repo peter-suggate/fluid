@@ -25,6 +25,20 @@ test("Sparse CM12 publishes the brick resolution consumed by visual overlays", (
     /fn sparseBrickFineResolution\(\)->u32\{return max\(1u,sparseP\.dimensions\.w>>1u\);\}/);
 });
 
+test("the grid overlay consumes the producer's live activity-record stride", () => {
+  assert.match(resident, /const ACTIVITY_RECORD_WORDS = 42/,
+    "the surface-proof receipt extends the activity record to 42 words");
+  assert.match(resident,
+    /activityRecordWords:\s*ACTIVITY_RECORD_WORDS/,
+    "the sparse consumer source must publish its record ABI");
+  assert.match(gridOverlayShader,
+    /fn sparseActivityRecordWords\(\)->u32\{return sparseOverlayP\.worldDirectory\.w;\}/);
+  assert.match(gridOverlayShader,
+    /SPARSE_ACTIVITY_HEADER_WORDS\+sparseActivityRecordWords\(\)\*brick\+10u/);
+  assert.doesNotMatch(gridOverlayShader, /SPARSE_ACTIVITY_RECORD_WORDS:u32=/,
+    "renderer ownership must not freeze a second copy of the producer stride");
+});
+
 test("the grid overlay follows SparseWorld's signed ownership directory", () => {
   assert.match(resident,
     /worldDirectoryBaseWords:\s*this\.worldDirectoryLayout\.baseWords/,

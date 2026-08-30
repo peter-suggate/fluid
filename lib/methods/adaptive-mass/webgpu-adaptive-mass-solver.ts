@@ -58,6 +58,7 @@ import {
   type CM12SparseWorldStepConfiguration,
 } from "../../sparse-world/internal/cm12-adapter";
 import {
+  SPARSE_CM12_ACTIVITY_POLICY,
   sparseCM12ActivityPolicy,
   sparseCM12PressureIterations,
   sparseCM12PressureIterationsFromReceipt,
@@ -164,6 +165,16 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
   readWorldGrowthReceiptQA() {
     return this.sparseWorldTrace.readWorldGrowthReceiptQA();
+  }
+  /** Test-only runtime seam for exercising an accepted surface rung cutover. */
+  setForcedSurfaceResolutionForQA(resolution: 4 | 8 | undefined): void {
+    const activityPolicy = {
+      ...SPARSE_CM12_ACTIVITY_POLICY,
+      ...this.options.activityPolicy,
+      ...(resolution === undefined ? {} : { forcedSurfaceResolutionForQA: resolution }),
+    };
+    if (resolution === undefined) delete activityPolicy.forcedSurfaceResolutionForQA;
+    this.options = { ...this.options, activityPolicy };
   }
   private atlas: SparseAdaptiveMassAtlas;
   private lastTime_s = 0;
