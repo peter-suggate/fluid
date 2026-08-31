@@ -20,8 +20,9 @@ npm run test:dawn:sparse-cm12 -- --list
 | Lane | Authority | Baseline |
 | --- | --- | --- |
 | `symmetric-expansion` | D4 field/topology symmetry, corner residency, mass | Existing 20-step Dawn property gate |
-| `hydrostatic-adaptivity` | Exact UI reset has a calm B4 surface; non-liquid halos stay out of structure view; stable deep-water 4/2/1 support | Reset plus two simulated seconds |
+| `hydrostatic-adaptivity` | Exact UI reset has a calm B4 surface pinned at its density-derived 15.25-cell waterline through step one; non-liquid halos stay out of structure view; stable deep-water 4/2/1 support | Reset plus two simulated seconds |
 | `mini32-correctness` | Finite fields and liquid-volume retention | Four simulated seconds, at least 99.5% retained |
+| `min8-region-surface` | Partial min8 reconstruction across a B2/B1 boundary | Reset planar top has at least 16 boundary samples, at most 0.05-cell detrended boundary bump, 0.125-cell neighbour step, and 0.02-cell mean curvature |
 | `mini32-performance` | Production B8/P8 frame cost | 24.576 ms reference; 40 ms median ceiling |
 | `mini64-performance` | Production B8/P8 frame cost | 33.4889 ms reference; 50 ms median ceiling |
 | `mini64-min8-surface` | Production min8 presentation reconstruction | Seven paper steps; evolved top-sheet neighbour jump at most 12 fine cells |

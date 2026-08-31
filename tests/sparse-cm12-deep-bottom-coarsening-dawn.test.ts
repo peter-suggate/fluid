@@ -4,6 +4,8 @@ import { pathToFileURL } from "node:url";
 
 import "../lib/methods";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
+import { unpackFineLevelSetPackedFlags,
+  unpackFineLevelSetPackedPhi } from "../lib/core/fine-levelset-packed-sample";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { getScenePreset } from "../lib/core/scenes";
 import { sceneAtContainerExtents } from "../lib/core/scene-scale";
@@ -38,6 +40,66 @@ interface StepSample {
     readonly reasons: number;
     readonly planReasons: number;
   }[];
+}
+
+async function readWords(device: GPUDevice, source: GPUBuffer,
+  words: number): Promise<Uint32Array> {
+  const readback = device.createBuffer({ size: Math.max(4, 4 * words),
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  try {
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(source, 0, readback, 0, 4 * words);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    return new Uint32Array(readback.getMappedRange()).slice();
+  } finally {
+    if (readback.mapState === "mapped") readback.unmap();
+    readback.destroy();
+  }
+}
+
+async function readPublishedTopHeights(device: GPUDevice,
+  solver: WebGPUAdaptiveMassSolver): Promise<Float32Array> {
+  const source = solver.globalFineLevelSetSource;
+  const { plan } = source;
+  const capacity = plan.maximumResidentBricks;
+  const [worklist, metadata, samples] = await Promise.all([
+    readWords(device, source.worklist, 7 + capacity),
+    readWords(device, source.metadata, 4 * capacity),
+    readWords(device, source.samples, plan.payloadCapacityBytes / 4),
+  ]);
+  const [nx, ny, nz] = plan.sampleDimensions;
+  const r = plan.brickResolution;
+  const field = new Float32Array(nx * ny * nz).fill(Number.NaN);
+  for (let work = 0; work < worklist[1]!; work += 1) {
+    const page = worklist[7 + work]!;
+    const key = metadata[4 * page + 1]!;
+    const bx = (key & 0x7ff) - 1024;
+    const by = ((key >>> 11) & 0x3ff) - 512;
+    const bz = ((key >>> 21) & 0x7ff) - 1024;
+    for (let local = 0; local < plan.samplesPerBrick; local += 1) {
+      const x = bx * r + local % r;
+      const y = by * r + Math.floor(local / r) % r;
+      const z = bz * r + Math.floor(local / (r * r));
+      if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) continue;
+      const packed = samples[page * plan.samplesPerBrick + local]!;
+      if ((unpackFineLevelSetPackedFlags(packed) & 1) === 0) continue;
+      field[x + nx * (y + ny * z)] = unpackFineLevelSetPackedPhi(packed);
+    }
+  }
+  const heights = new Float32Array(nx * nz).fill(Number.NaN);
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    for (let y = ny - 2; y >= 0; y -= 1) {
+      const lower = field[x + nx * (y + ny * z)]!;
+      const upper = field[x + nx * (y + 1 + ny * z)]!;
+      if (!Number.isFinite(lower) || !Number.isFinite(upper)
+        || lower >= 0 || upper < 0) continue;
+      heights[x + nx * z] = y + 0.5
+        +Math.max(0,Math.min(1,-lower/(upper-lower)));
+      break;
+    }
+  }
+  return heights;
 }
 
 dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
@@ -229,6 +291,14 @@ dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
             brick.acceptedResolution}`).join("; ")}`);
       assert.ok(resetSurface.every((brick) => (brick.reasons & 64) !== 0),
         "the exact UI reset surface must publish occupied pressure topology");
+      const resetHeights = await readPublishedTopHeights(device, offsetSolver);
+      const resetFinite = [...resetHeights].filter(Number.isFinite);
+      assert.equal(resetFinite.length, 32 * 16,
+        "the exact UI reset must publish every large-offset surface column");
+      const resetMean = resetFinite.reduce((sum, height) => sum + height, 0)
+        /resetFinite.length;
+      assert.ok(Math.abs(resetMean - 15.25) <= 0.01,
+        `large-offset reset waterline was ${resetMean}, expected 15.25 cells`);
       let settledGeneration: number | undefined;
       for (let step = 1; step <= 16; step += 1) {
         assert.equal(offsetSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
@@ -260,6 +330,19 @@ dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
             `large-offset calm surface churned topology at step ${step}`);
         }
         assert.equal(snapshot.commitFailed, false);
+        if (step === 1) {
+          const steppedHeights = await readPublishedTopHeights(device, offsetSolver);
+          let compared = 0, maximumChange = 0;
+          for (let column = 0; column < resetHeights.length; column += 1) {
+            const before = resetHeights[column]!, after = steppedHeights[column]!;
+            if (!Number.isFinite(before) || !Number.isFinite(after)) continue;
+            compared += 1;maximumChange = Math.max(maximumChange,
+              Math.abs(after - before));
+          }
+          assert.equal(compared, resetFinite.length);
+          assert.ok(maximumChange <= 0.02,
+            `large-offset first step moved a surface column by ${maximumChange} cells`);
+        }
       }
     } finally {
       offsetSolver.destroy();

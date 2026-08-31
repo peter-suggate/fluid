@@ -12,6 +12,7 @@ export type SparseCM12DawnCoverage =
   | "symmetric-expansion"
   | "hydrostatic-stability-adaptivity"
   | "mini32-correctness"
+  | "min8-region-surface"
   | "mini32-performance"
   | "mini64-performance"
   | "mini64-min8-surface"
@@ -63,7 +64,7 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     id: "hydrostatic-adaptivity",
     coverage: "hydrostatic-stability-adaptivity",
     kind: "correctness",
-    description: "exact UI B4 surface, non-liquid halo classification, and stable deep water",
+    description: "exact UI B4 waterline pinned through step one, halo classification, and stable deep water",
     testFile: "tests/sparse-cm12-deep-bottom-coarsening-dawn.test.ts",
     timeoutMs: 30_000,
   },
@@ -74,6 +75,22 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     description: "four-second mini32 liquid-volume and finite-field authority",
     testFile: "tests/sparse-cm12-mini32-volume-dawn.test.ts",
     timeoutMs: 25_000,
+  },
+  {
+    id: "min8-region-surface",
+    coverage: "min8-region-surface",
+    kind: "correctness",
+    description: "planar min8 surface stays flat through a partial B2/B1 boundary",
+    testFile: "tools/probe-sparse-cm12-mini64-surface-dawn.ts",
+    environment: {
+      FLUID_MIN8_SURFACE_GRID: "32",
+      FLUID_MIN8_SURFACE_REGION: "central-x",
+      FLUID_MIN8_SURFACE_STEPS: "0",
+      FLUID_MINI64_MIN8_SURFACE_OUT: "/tmp/sparse-cm12-mini32-min8-region-surface.json",
+      FLUID_MINI64_MIN8_SURFACE_PNG: "/tmp/sparse-cm12-mini32-min8-region-surface.png",
+      FLUID_MIN8_SURFACE_SCENARIO: "hydrostatic",
+    },
+    timeoutMs: 20_000,
   },
   {
     id: "mini32-performance",

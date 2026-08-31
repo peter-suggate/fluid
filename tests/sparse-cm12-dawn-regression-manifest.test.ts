@@ -12,6 +12,7 @@ const expectedCoverage: readonly SparseCM12DawnCoverage[] = [
   "symmetric-expansion",
   "hydrostatic-stability-adaptivity",
   "mini32-correctness",
+  "min8-region-surface",
   "mini32-performance",
   "mini64-performance",
   "mini64-min8-surface",
