@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Native-Dawn geometry probe for whole-domain and partial min-8 presentation. */
+/** Native-Dawn geometry probe for min-8 and ordinary adaptive presentation. */
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -13,7 +13,8 @@ import { parseQueryState } from "../lib/core/url-state";
 import { unpackFineLevelSetPackedFlags,
   unpackFineLevelSetPackedPhi } from "../lib/core/fine-levelset-packed-sample";
 import { createMinimalPowerDamBreak32Scene,
-  createMinimalPowerDamBreak64Scene, createSparseCM12LongDamBreakScene,
+  createMinimalPowerDamBreak64Scene, createCornerBrickDropScene,
+  createSparseCM12LongDamBreakScene,
   SPARSE_CM12_LONG_DAM_METHOD_PROFILE } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
@@ -39,9 +40,10 @@ const stringArgument = (name: string, fallback: string): string => {
 };
 const scenario = stringArgument("scenario", process.env.FLUID_MIN8_SURFACE_SCENARIO ?? "dam");
 if (scenario !== "dam" && scenario !== "sphere" && scenario !== "hydrostatic"
-  && scenario !== "large-offset" && scenario !== "long-dam") {
+  && scenario !== "large-offset" && scenario !== "long-dam"
+  && scenario !== "corner-drop") {
   throw new RangeError(
-    "scenario must be dam, sphere, hydrostatic, large-offset, or long-dam");
+    "scenario must be dam, sphere, hydrostatic, large-offset, long-dam, or corner-drop");
 }
 const grid = numericArgument("grid", Number(process.env.FLUID_MIN8_SURFACE_GRID ?? 64));
 if (grid !== 32 && grid !== 64) throw new RangeError("grid must be 32 or 64");
@@ -50,6 +52,7 @@ if (region !== "whole" && region !== "central-x") {
   throw new RangeError("region must be whole or central-x");
 }
 const steps = numericArgument("steps", scenario === "sphere" ? 0
+  : scenario === "corner-drop" ? 12
   : Number(process.env.FLUID_MIN8_SURFACE_STEPS
     ?? process.env.FLUID_MINI64_MIN8_SURFACE_STEPS ?? 7));
 const outputPath = resolve(stringArgument("out",
@@ -400,7 +403,9 @@ try {
     "?scene=hydrostatic-power-large-offset&method=adaptive-mass&grid=volume",
   ) : undefined;
   const longDam = scenario === "long-dam";
-  const scene = largeOffsetUI?.scene ?? (longDam
+  const cornerDrop = scenario === "corner-drop";
+  const scene = largeOffsetUI?.scene ?? (cornerDrop
+    ? createCornerBrickDropScene() : longDam
     ? createSparseCM12LongDamBreakScene() : grid === 32
     ? createMinimalPowerDamBreak32Scene() : createMinimalPowerDamBreak64Scene());
   if (scenario === "sphere") {
@@ -425,7 +430,7 @@ try {
     delete scene.fluid.inflow;
   }
   scene.duration_s = Math.max(scene.duration_s, steps * CM12_PAPER_DT_S);
-  if (!largeOffsetUI) {
+  if (!largeOffsetUI && !cornerDrop) {
     scene.fluid.refinementRegions = [{
       id: `mini${grid}-surface-min8-${region}`,
       rule: "minimum-cell-size",
@@ -445,7 +450,7 @@ try {
       resolutionMode: "adaptive", brickFineResolution: "8",
       presentationPageResolution: "8", timeStep: "paper",
     }));
-  if (largeOffsetUI || longDam) {
+  if (largeOffsetUI || longDam || cornerDrop) {
     const exactSolver = await adaptiveMassMethod.createSolverAsync!(device, scene,
       largeOffsetUI?.quality ?? "balanced", values, undefined, () => {});
     solver = exactSolver as WebGPUAdaptiveMassSolver;
@@ -458,8 +463,10 @@ try {
   const resetField = await readPublishedField(device, solver);
   const resetPositiveY = positiveFacingSurface(resetField, resetDimensions, 1);
   const [resetActivity, resetPresentationHeader, resetDiagnostic] = scenario
-    === "large-offset" ? await Promise.all([solver.readGPUActivityPolicy(),
-      solver.readFramePlanPresentationHeaderQA(), solver.readDiagnosticFields()])
+    === "large-offset" || cornerDrop ? await Promise.all([
+      solver.readGPUActivityPolicy(), solver.readFramePlanPresentationHeaderQA(),
+      solver.readDiagnosticFields(cornerDrop),
+    ])
       : [undefined, undefined, undefined] as const;
   const resetDensityHeight = resetDiagnostic ? densityHeightReceipt(
     resetDiagnostic.density, resetDiagnostic.solidOpenFraction, resetDimensions)
@@ -471,8 +478,8 @@ try {
   await device.queue.onSubmittedWorkDone();
   const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
   const field = await readPublishedField(device, solver);
-  const finalDiagnostic = scenario === "large-offset" || longDam
-    ? await solver.readDiagnosticFields() : undefined;
+  const finalDiagnostic = scenario === "large-offset" || longDam || cornerDrop
+    ? await solver.readDiagnosticFields(cornerDrop) : undefined;
   const finalDensityHeight = finalDiagnostic ? densityHeightReceipt(
     finalDiagnostic.density, finalDiagnostic.solidOpenFraction, dimensions)
     : undefined;
@@ -485,7 +492,7 @@ try {
     positiveZ: surfaceReceipt(positiveZ.values, positiveZ.width, positiveZ.height),
   };
   const heightChange = heightChangeReceipt(resetPositiveY.values, positiveY.values);
-  const filmVisibility = longDam && finalDensityHeight
+  const filmVisibility = (longDam || cornerDrop) && finalDensityHeight
     ? filmVisibilityReceipt(finalDensityHeight.floorBrickHeights, positiveY.values,
       finalDensityHeight.heights, dimensions[0], dimensions[2])
     : undefined;
@@ -502,7 +509,8 @@ try {
     .map((resolution) => ({ resolution,
       count: activeResolutions.filter((value) => value === resolution).length }));
   const receipt = {
-    probe: longDam ? `sparse-cm12-long-dam-min8-${region}-surface`
+    probe: cornerDrop ? "sparse-cm12-corner-drop-adaptive-floor-surface"
+      : longDam ? `sparse-cm12-long-dam-min8-${region}-surface`
       : `sparse-cm12-mini${grid}-min8-${region}-surface`, scenario, steps,
     time_s: steps * CM12_PAPER_DT_S, dimensions,
     field: fieldReceipt(field), surfaces, boundarySurface, heightChange,
@@ -577,6 +585,21 @@ try {
     assert.ok(filmVisibility.maximumShortFilmNeighbourStepCells <= 1.1,
       `the reconstructed short film retained a block step of ${
         filmVisibility.maximumShortFilmNeighbourStepCells} cells`);
+  }
+  if (scenario === "corner-drop" && steps * CM12_PAPER_DT_S >= 0.4) {
+    assert.equal(scene.fluid.refinementRegions, undefined,
+      "the corner-drop general-adaptivity probe must not author a refinement region");
+    assert.ok(filmVisibility);
+    assert.ok(filmVisibility.wetColumns >= 16,
+      "the impacted corner brick did not produce enough floor-connected wet columns");
+    assert.ok(resetDensityHeight?.floorBrickHeights.every((height) => height <= 1e-6),
+      "the elevated reset brick was incorrectly projected onto the floor");
+    assert.equal(filmVisibility.hiddenHeightBuckets.atLeastHalf, 0,
+      `ordinary adaptivity hid ${filmVisibility.hiddenHeightBuckets.atLeastHalf} `
+      + "post-impact floor-sheet columns at least half a fine cell high");
+    assert.ok(filmVisibility.hiddenWetColumns <= 8,
+      `ordinary adaptivity left ${filmVisibility.hiddenWetColumns} valid thin-sheet `
+      + "columns absent after impact");
   }
   if (grid === 64 && region === "whole" && scenario === "dam" && steps === 7) {
     // The former complete-coarse-cell presentation produced a 23.19-cell

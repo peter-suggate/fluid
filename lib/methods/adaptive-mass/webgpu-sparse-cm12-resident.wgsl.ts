@@ -2233,6 +2233,48 @@ fn presentationIntegratedWorldColumnHeight(x:i32,z:i32,
   return vec2f(massHeight,select(0.0,1.0,valid));
 }
 
+// General adaptive form of the same floor-film receipt. Walk the actual
+// accepted owner widths so a column may cross B8/B4/B2/B1 and sparse-air
+// intervals without treating a coarse value as a point sample. A completely
+// dry represented column is a valid zero-height neighbour; an elevated blob,
+// cavity, overhang, cut column, or film taller than one brick rejects itself.
+fn presentationIntegratedAdaptiveFloorHeight(x:i32,z:i32,
+ densityOffset:u32)->vec2f{
+  var y=0;var massHeight=0.0;var previous=1.0;var columnOpen=-1.0;
+  var sawOpen=false;var sawAir=false;
+  while(y<i32(p.dimensions.y)){
+    let q=vec3i(x,y,z);
+    if(cm12SolidVoxelFractionQ8(q)>=255u){
+      return vec2f(0.0,0.0);
+    }
+    let owner=compactOwnerCellAt(q);
+    var fill=0.0;var width=1;
+    if(owner.x==INVALID||!brickActive(owner.y)){
+      let brickWidth=i32(BRICK_FINE_RESOLUTION);
+      width=max(1,min(brickWidth-y%brickWidth,i32(p.dimensions.y)-y));
+    }else{
+      let open=cellOpenFraction(owner.x);
+      if(open<=1e-6){return vec2f(0.0,0.0);}
+      sawOpen=true;
+      if(columnOpen<0.0){columnOpen=open;}
+      if(abs(open-columnOpen)>1e-3){return vec2f(0.0,0.0);}
+      fill=clamp(state[densityOffset+owner.x]/max(open,1e-6),0.0,1.0);
+      let scale=max(1u,BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z);
+      width=max(1,min(i32(scale)-y%i32(scale),i32(p.dimensions.y)-y));
+    }
+    if(fill>previous+0.01){return vec2f(0.0,0.0);}
+    previous=fill;
+    sawAir=sawAir||fill<1.0-1e-3;
+    massHeight+=fill*f32(width);
+    if(massHeight>f32(BRICK_FINE_RESOLUTION)+0.125){
+      return vec2f(0.0,0.0);
+    }
+    y+=width;
+  }
+  if(!sawOpen){return vec2f(0.0,2.0);}
+  return vec2f(massHeight,select(0.0,1.0,sawAir));
+}
+
 fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
  densityOffset:u32,halo:bool){
   let axis=select(PRESENTATION_PAGE_RESOLUTION,
@@ -2241,12 +2283,19 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
   let offset=select(0,1,halo);
   let brickOrigin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
   let range=templateBrickCellRange(brick,acceptedBrickResolution(brick));
+  let activityReasons=atomicLoad(&activity[activityRecord(brick)+1u]);
   let uniformWorldColumn=!halo&&p.refinementRegionControl.x>0u
     &&acceptedBrickResolution(brick)==1u
     &&cachedRefinementPolicyResolutionBounds(brick).y==1u
     &&brickSpan(brick)==1u&&range.y==1u
     &&cellOpenFraction(range.x)>=1.0-1e-3
-    &&(atomicLoad(&activity[activityRecord(brick)+1u])&512u)==0u;
+    &&(activityReasons&512u)==0u;
+  // Ordinary adaptivity needs no authored-region permission. Only floor pages
+  // with accepted surface/thin evidence pay for the mixed-rung column walk;
+  // its monotonic receipt is what decides whether height geometry is valid.
+  let adaptiveFloorColumn=brickOrigin.y==0
+    &&(activityReasons&(1u|256u))!=0u&&(activityReasons&512u)==0u;
+  let worldColumnField=uniformWorldColumn||adaptiveFloorColumn;
   if(uniformWorldColumn){
     if(lane==0u){
       // Cache a 3x3 lattice of neighbouring B1 column averages. Sampling the
@@ -2298,6 +2347,19 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
         }
       }
     }
+  }else if(adaptiveFloorColumn){
+    for(var column=lane;column<count;column+=64u){
+      let localZ=column/axis;let localX=column-localZ*axis;
+      let x=clamp(pageOrigin.x+i32(localX)-offset,0,i32(p.dimensions.x)-1);
+      let z=clamp(pageOrigin.z+i32(localZ)-offset,0,i32(p.dimensions.z)-1);
+      let receipt=presentationIntegratedAdaptiveFloorHeight(x,z,densityOffset);
+      let height=receipt.x;
+      let pageLow=f32(pageOrigin.y)-1.0;
+      let pageHigh=f32(pageOrigin.y+i32(PRESENTATION_PAGE_RESOLUTION))+1.0;
+      let valid=receipt.y>0.5&&height>=pageLow&&height<=pageHigh;
+      presentationDensityCache[column]=select(select(-1.0,-2.0,receipt.y>1.5),
+        height,valid);
+    }
   }else{
     for(var column=lane;column<count;column+=64u){
       let localZ=column/axis;
@@ -2331,11 +2393,11 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
       minimumHeight=min(minimumHeight,height);
       maximumHeight=max(maximumHeight,height);
     }
-    // General pages remain limited to genuinely calm horizontal surfaces. An
-    // explicit min-8 short film has a stronger full-column contract and uses
-    // its continuous neighbouring height reconstruction above.
+    // Local pages remain limited to genuinely calm horizontal surfaces.
+    // Proven world-column fields may vary because each column independently
+    // carries its own floor-connected density receipt.
     presentationHeightFieldValid=select(0u,1u,
-      valid&&represented&&(uniformWorldColumn
+      valid&&represented&&(worldColumnField
         ||maximumHeight-minimumHeight<=0.125));
   }
   workgroupBarrier();
@@ -2359,8 +2421,16 @@ fn presentationColumnHeight(localX:i32,localZ:i32,halo:bool)->f32{
 }
 
 fn presentationHeightPhi(q:vec3i,localX:i32,localZ:i32,halo:bool)->f32{
-  let signedFineCells=f32(q.y)+0.5
-    -presentationColumnHeight(localX,localZ,halo);
+  let height=presentationColumnHeight(localX,localZ,halo);
+  let signedFineCells=f32(q.y)+0.5-height;
+  // There is no sample centre below the floor. Without this boundary sign, a
+  // real sheet shorter than half a fine cell is positive at every published
+  // sample and marching cubes cannot represent it at all. Keep the cached
+  // density height authoritative, but mark the floor sample infinitesimally
+  // inside so the first edge publishes the thinnest representable veneer.
+  if(q.y==0&&height>1e-3&&signedFineCells>0.0){
+    return -1e-3*p.frame.y;
+  }
   return clamp(signedFineCells*p.frame.y,-4.0*p.frame.y,4.0*p.frame.y);
 }
 
