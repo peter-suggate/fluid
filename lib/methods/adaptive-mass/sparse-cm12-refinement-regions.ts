@@ -2,10 +2,10 @@
  * Sparse CM12's uniform-tier representation of authored cell-size bounds.
  *
  * Sparse CM12 chooses one dyadic resolution for a whole resident brick. A
- * region therefore constrains a brick only when the brick is fully contained
- * by the authored box. A brick crossing the box boundary keeps its ordinary
- * evidence-driven resolution, and the refine-only 2:1 closure may still make
- * a contained brick one rung finer to grade that boundary safely.
+ * minimum therefore constrains every brick intersecting the authored box. A
+ * crossing brick is coarsened as a whole because retaining finer cells in the
+ * intersecting part would violate the minimum. The 2:1 closure maps that hard
+ * cap back into surrounding bricks; it never refines through the cap.
  */
 import type { FluidRefinementRegion } from "../../core/model";
 import {
@@ -65,7 +65,7 @@ export function packSparseCM12RefinementRegions(
   return data;
 }
 
-function containingCellSizeBounds(
+function cellSizeBoundsForBrick(
   packed: ArrayBuffer,
   origin: readonly [number, number, number],
   extent: readonly [number, number, number],
@@ -78,10 +78,12 @@ function containingCellSizeBounds(
   let ceiling = 0;
   for (let index = 0; index < count; index += 1) {
     const base = index * SPARSE_CM12_REFINEMENT_REGION_WORDS;
+    const intersects = origin.every((value, axis) => value < boxes[base + 4 + axis]!
+      && value + extent[axis]! > boxes[base + axis]!);
+    if (intersects) floor = Math.max(floor, boxes[base + 3]!);
     const contained = origin.every((value, axis) => value >= boxes[base + axis]!
       && value + extent[axis]! <= boxes[base + 4 + axis]!);
     if (!contained) continue;
-    floor = Math.max(floor, boxes[base + 3]!);
     const authoredCeiling = boxes[base + 7]!;
     if (authoredCeiling > 0) {
       ceiling = ceiling === 0 ? authoredCeiling : Math.min(ceiling, authoredCeiling);
@@ -94,9 +96,8 @@ function containingCellSizeBounds(
  * CPU mirror of the resident shader's per-brick resolution clamp.
  *
  * Overlapping minimum-size bounds choose the coarsest floor. Overlapping
- * maximum-size bounds choose the finest ceiling. If two overlapping boxes
- * conflict, the ceiling wins, matching the refinement gate's conservative
- * preference for additional resolution.
+ * maximum-size bounds choose the finest ceiling. If bounds conflict, the
+ * minimum-size floor wins: it is a hard prohibition on smaller cells.
  */
 export function sparseCM12RefinementRegionResolutionBoundsForBrick(
   packed: ArrayBuffer,
@@ -105,7 +106,7 @@ export function sparseCM12RefinementRegionResolutionBoundsForBrick(
   brickFineResolution: number,
   nominalEdge = Math.max(...extent),
 ): SparseCM12RefinementRegionResolutionBounds {
-  const { floor, ceiling } = containingCellSizeBounds(packed, origin, extent);
+  const { floor, ceiling } = cellSizeBoundsForBrick(packed, origin, extent);
   const maximumResolution = Math.max(1, Math.min(brickFineResolution,
     Math.floor(nominalEdge / floor)));
   const minimumResolution = ceiling === 0 ? 1 : Math.max(1,
@@ -113,11 +114,11 @@ export function sparseCM12RefinementRegionResolutionBoundsForBrick(
   return { maximumResolution, minimumResolution };
 }
 
-/** Apply the bounds with the conservative (finer) ceiling winning conflicts. */
+/** Apply the bounds with the hard minimum-size floor winning conflicts. */
 export function applySparseCM12RefinementRegionResolutionBounds(
   requestedResolution: number,
   bounds: SparseCM12RefinementRegionResolutionBounds,
 ): number {
-  return Math.max(bounds.minimumResolution,
-    Math.min(bounds.maximumResolution, requestedResolution));
+  return Math.min(bounds.maximumResolution,
+    Math.max(bounds.minimumResolution, requestedResolution));
 }

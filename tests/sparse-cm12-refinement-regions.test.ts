@@ -64,15 +64,15 @@ test("a fully contained sparse brick is clamped to the authored cell-size interv
     "8-cell maximum still permits the coarsest brick rung");
 });
 
-test("a sparse brick crossing the box boundary keeps its ordinary resolution", () => {
+test("a sparse brick crossing the box boundary obeys the hard minimum", () => {
   const packed = packSparseCM12RefinementRegions([region("bounded", 4, 8)], lattice);
   const bounds = sparseCM12RefinementRegionResolutionBoundsForBrick(
     packed, [4, 8, 8], [8, 8, 8], 8);
-  assert.deepEqual(bounds, { minimumResolution: 1, maximumResolution: 8 });
-  assert.equal(applySparseCM12RefinementRegionResolutionBounds(8, bounds), 8);
+  assert.deepEqual(bounds, { minimumResolution: 1, maximumResolution: 2 });
+  assert.equal(applySparseCM12RefinementRegionResolutionBounds(8, bounds), 2);
 });
 
-test("overlapping ceilings conservatively win over conflicting minimum-size floors", () => {
+test("a hard minimum-size floor wins over a conflicting maximum-size ceiling", () => {
   const packed = packSparseCM12RefinementRegions([
     region("coarse", 4),
     region("fine", 1, 2),
@@ -80,7 +80,7 @@ test("overlapping ceilings conservatively win over conflicting minimum-size floo
   const bounds = sparseCM12RefinementRegionResolutionBoundsForBrick(
     packed, [8, 8, 8], [8, 8, 8], 8);
   assert.deepEqual(bounds, { minimumResolution: 4, maximumResolution: 2 });
-  assert.equal(applySparseCM12RefinementRegionResolutionBounds(1, bounds), 4);
+  assert.equal(applySparseCM12RefinementRegionResolutionBounds(8, bounds), 2);
 });
 
 test("multiple disjoint regions independently contribute to the cell-size envelope", () => {
@@ -101,7 +101,7 @@ test("multiple disjoint regions independently contribute to the cell-size envelo
   }
 });
 
-test("a nested later region is not swallowed by a macro selected for the first", () => {
+test("a nested finer request cannot override an enclosing hard minimum", () => {
   const base = createDeepPowerHydrostaticScene();
   const bounded = structuredClone(base);
   bounded.fluid.refinementRegions = [{
@@ -134,8 +134,48 @@ test("a nested later region is not swallowed by a macro selected for the first",
   for (const brick of innerBricks) {
     const cellSize = atlas.brickFineResolution * sparseBrickSpan(brick)
       / brick.resolution;
-    assert.equal(cellSize, 1,
-      `nested region brick ${brick.key} ignored the finer envelope`);
+    assert.equal(cellSize, 4,
+      `nested region brick ${brick.key} refined through the enclosing minimum`);
+  }
+});
+
+test("generation-zero 2:1 grading maps outward from a hard regional minimum", () => {
+  const base = createDeepPowerHydrostaticScene();
+  const bounded = structuredClone(base);
+  bounded.fluid.refinementRegions = [{
+    id: "left-half-floor",
+    rule: "minimum-cell-size",
+    minimumCellSize_cells: 4,
+    min_m: { x: -0.5 * base.container.width_m, y: 0,
+      z: -0.5 * base.container.depth_m },
+    max_m: { x: 0, y: base.container.height_m,
+      z: 0.5 * base.container.depth_m },
+  }];
+  const atlas = initializeSparseBrickAtlasFromScene(bounded, {
+    finestDimensions: sceneLatticeDimensions(bounded),
+    resolutionForBrick: () => 8,
+  });
+  const byCoordinate = new Map(atlas.bricks.map((brick) =>
+    [brick.coordinate.join("/"), brick] as const));
+  const cellSize = (brick: (typeof atlas.bricks)[number]) =>
+    atlas.brickFineResolution * sparseBrickSpan(brick) / brick.resolution;
+  for (const brick of atlas.bricks) {
+    const lowX = brick.coordinate[0] * atlas.brickFineResolution;
+    const worldX = -0.5 * base.container.width_m
+      + lowX * base.container.width_m / atlas.dimensions[0];
+    if (worldX < 0) assert.ok(cellSize(brick) >= 4,
+      `regional brick ${brick.key} escaped the four-cell minimum`);
+    for (const [dx, dy, dz] of [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const) {
+      const neighbor = byCoordinate.get([
+        brick.coordinate[0] + dx, brick.coordinate[1] + dy,
+        brick.coordinate[2] + dz,
+      ].join("/"));
+      if (!neighbor) continue;
+      const ratio = Math.max(cellSize(brick), cellSize(neighbor))
+        / Math.min(cellSize(brick), cellSize(neighbor));
+      assert.ok(ratio <= 2,
+        `grading did not map outward at ${brick.key}/${neighbor.key}`);
+    }
   }
 });
 

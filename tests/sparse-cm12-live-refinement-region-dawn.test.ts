@@ -3,7 +3,6 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
-import type { SceneDescription } from "../lib/core/model";
 import { createMinimalPowerDamBreak64Scene } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
@@ -21,7 +20,7 @@ import {
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
 
-dawnTest("Sparse CM12 adds and removes a refinement region without rebuilding",
+dawnTest("Sparse CM12 pre-catalogues a hard minimum-cell-size region",
   { timeout: 240_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-live-refinement-region-dawn.test.ts");
@@ -45,10 +44,20 @@ dawnTest("Sparse CM12 adds and removes a refinement region without rebuilding",
       });
       device.pushErrorScope("validation");
 
-      const original = createMinimalPowerDamBreak64Scene();
-      original.duration_s = 4 * CM12_PAPER_DT_S;
+      const constrained = createMinimalPowerDamBreak64Scene();
+      constrained.duration_s = 3 * CM12_PAPER_DT_S;
+      constrained.fluid.refinementRegions = [{
+        id: "whole-domain-two-cell-floor",
+        rule: "minimum-cell-size",
+        minimumCellSize_cells: 2,
+        min_m: { x: -0.5 * constrained.container.width_m, y: 0,
+          z: -0.5 * constrained.container.depth_m },
+        max_m: { x: 0.5 * constrained.container.width_m,
+          y: constrained.container.height_m,
+          z: 0.5 * constrained.container.depth_m },
+      }];
       const solver = await WebGPUAdaptiveMassSolver.createAsync(
-        device, original, "balanced", undefined, {
+        device, constrained, "balanced", undefined, {
           resolutionMode: "adaptive",
           brickFineResolution: 8,
           surfaceFineRings: 1,
@@ -67,62 +76,16 @@ dawnTest("Sparse CM12 adds and removes a refinement region without rebuilding",
         () => {},
       );
       try {
-        const generationZero = await solver.readGPUActivityPolicy();
-        const initialLeafCount = 1 + Math.max(...generationZero.bricks.map(
-          (brick) => brick.leafId));
-        while (!solver.advanceTo(CM12_PAPER_DT_S, [])) {
+        while (!solver.advanceTo(2 * CM12_PAPER_DT_S, [])) {
           await new Promise(setImmediate);
         }
-        await device.queue.onSubmittedWorkDone();
-        const worldIdentity = solver.sparseWorld;
-        const presentationIdentity = solver.sparseWorld.presentation().fineLevelSet;
-        const before = await solver.readStats();
-        const beforeActivity = await solver.readGPUActivityPolicy();
-        assert.ok(beforeActivity.bricks.some((brick) => brick.active
-          && brick.acceptedResolution === 8),
-        "the control state must contain live fine leaves for the policy to constrain");
-
-        const constrained: SceneDescription = { ...original, fluid: { ...original.fluid,
-          refinementRegions: [{
-            id: "live-whole-domain-two-cell-floor",
-            rule: "minimum-cell-size",
-            minimumCellSize_cells: 2,
-            min_m: { x: -0.5 * original.container.width_m, y: 0,
-              z: -0.5 * original.container.depth_m },
-            max_m: { x: 0.5 * original.container.width_m,
-              y: original.container.height_m,
-              z: 0.5 * original.container.depth_m },
-          }],
-        } };
-        solver.applySceneUniforms(constrained);
-
-        const adopted = await solver.readStats();
-        assert.equal(solver.sparseWorld, worldIdentity,
-          "the edit replaced the SparseWorld object");
-        assert.equal(solver.sparseWorld.presentation().fineLevelSet,
-          presentationIdentity, "the edit replaced the resident presentation source");
-        assert.equal(adopted.submittedTime_s, before.submittedTime_s,
-          "the live edit moved the simulation clock");
-        assert.equal(adopted.volumeCellSum, before.volumeCellSum,
-          "the live edit changed liquid before a simulation step");
-        assert.equal(adopted.allocatedBytes, before.allocatedBytes,
-          "the live edit allocated a replacement resident world");
-
-        assert.equal(solver.advanceTo(2 * CM12_PAPER_DT_S, []), true);
         await device.queue.onSubmittedWorkDone();
         const constrainedActivity = await solver.readGPUActivityPolicy();
         const constrainedActive = constrainedActivity.bricks.filter((brick) => brick.active);
         assert.ok(constrainedActive.length > 0);
-        // GPU-grown frontier pages deliberately own a fixed B8 graph. The
-        // authored generation-zero catalogue is the rerung topology this live
-        // policy constrains; leaf identity, unlike lifecycle reasons, tells
-        // those two ownership classes apart exactly.
-        const constrainedAuthored = constrainedActive.filter((brick) =>
-          brick.leafId < initialLeafCount);
-        assert.ok(constrainedAuthored.length > 0);
-        assert.ok(constrainedAuthored.every((brick) => brick.acceptedResolution <= 4),
-          `the next topology epoch did not adopt the live two-cell floor: ${JSON.stringify(
-            constrainedAuthored.filter((brick) => brick.acceptedResolution > 4).map((brick) => ({
+        assert.ok(constrainedActive.every((brick) => brick.acceptedResolution <= 4),
+          `active topology escaped the hard two-cell floor: ${JSON.stringify(
+            constrainedActive.filter((brick) => brick.acceptedResolution > 4).map((brick) => ({
               coordinate: brick.coordinate,
               accepted: brick.acceptedResolution,
               candidate: brick.candidateResolution,
@@ -130,15 +93,6 @@ dawnTest("Sparse CM12 adds and removes a refinement region without rebuilding",
               reasons: brick.reasons,
               planReasons: brick.planReasons,
             })))}`);
-
-        solver.applySceneUniforms(original);
-        assert.equal(solver.advanceTo(3 * CM12_PAPER_DT_S, []), true);
-        await device.queue.onSubmittedWorkDone();
-        const restoredActivity = await solver.readGPUActivityPolicy();
-        assert.ok(restoredActivity.bricks.some((brick) => brick.active
-          && brick.acceptedResolution === 8
-          && brick.leafId < initialLeafCount),
-        "removing the region did not restore ordinary adaptive resolution");
       } finally {
         solver.destroy();
       }

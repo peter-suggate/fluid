@@ -1556,6 +1556,20 @@ fn refinementPolicyResolutionBits(bounds:vec2u)->u32{
     |((min(31u,bounds.y)<<ACTIVITY_REFINEMENT_POLICY_MAXIMUM_SHIFT)
       &ACTIVITY_REFINEMENT_POLICY_MAXIMUM_MASK);
 }
+fn cachedRefinementGradingCap(brick:u32)->u32{
+  if(p.refinementRegionControl.x==0u||brick>=p.dispatch.w){
+    return BRICK_FINE_RESOLUTION;
+  }
+  return clamp(atomicLoad(&activity[activityRecord(brick)+41u]),
+    1u,BRICK_FINE_RESOLUTION);
+}
+fn setRefinementGradingCap(brick:u32,resolution:u32){
+  // Word 41 is the prior frame's presentation-proof diagnostic. Planning has
+  // already consumed the proof receipt in words 39/40, so this word is free as
+  // a full-rung transient until presentation publishes the next diagnostic.
+  atomicStore(&activity[activityRecord(brick)+41u],
+    clamp(resolution,1u,BRICK_FINE_RESOLUTION));
+}
 fn topologyPreparationScheduledAt(record:u32)->bool{
   return (atomicLoad(&activity[record+35u])
     &ACTIVITY_TOPOLOGY_PREPARATION_SCHEDULED)!=0u;
@@ -1630,9 +1644,10 @@ fn scheduledConstructionActivationWithoutSlot(brick:u32)->bool{
 }
 
 // Authored cell-size bounds operate at Sparse CM12's topology granularity: a
-// whole brick. Full containment prevents a box from changing cells outside its
-// boundary. The downstream refine-only closure may still raise this result by
-// one or more rungs where strict 2:1 grading requires it.
+// whole brick. A minimum-size box constrains every intersecting brick: changing
+// the whole brick may coarsen cells just outside the box, but is the only way
+// this topology can guarantee that no finer cell remains inside it. Optional
+// largest-cell bounds retain full-containment semantics.
 fn sparseCM12RefinementRegionResolutionBounds(brick:u32)->vec2u{
   let edge=BRICK_FINE_RESOLUTION*brickSpan(brick);
   let low=vec3f(cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION));
@@ -1642,8 +1657,10 @@ fn sparseCM12RefinementRegionResolutionBounds(brick:u32)->vec2u{
   let count=min(p.refinementRegionControl.x,8u);
   for(var index=0u;index<count;index+=1u){
     let lo=p.refinementRegions[2u*index];let hi=p.refinementRegions[2u*index+1u];
-    if(all(low>=lo.xyz)&&all(high<=hi.xyz)){
-      floorSize=max(floorSize,u32(lo.w));let authoredCeiling=u32(hi.w);
+    let intersects=all(low<hi.xyz)&&all(high>lo.xyz);
+    let contained=all(low>=lo.xyz)&&all(high<=hi.xyz);
+    if(intersects){floorSize=max(floorSize,u32(lo.w));}
+    if(contained){let authoredCeiling=u32(hi.w);
       if(authoredCeiling>0u){ceilingSize=select(min(ceilingSize,authoredCeiling),
         authoredCeiling,ceilingSize==0u);}
     }
@@ -1656,8 +1673,8 @@ fn sparseCM12RefinementRegionResolutionBounds(brick:u32)->vec2u{
 
 fn applySparseCM12RefinementRegionBounds(brick:u32,requested:u32)->u32{
   let bounds=cachedRefinementPolicyResolutionBounds(brick);
-  // A finer ceiling wins if overlapping authored boxes conflict.
-  return max(bounds.x,min(bounds.y,requested));
+  // The minimum cell size is hard: its maximum resolution wins any conflict.
+  return min(bounds.y,max(bounds.x,requested));
 }
 
 fn templateBrickCellRange(brick:u32,resolution:u32)->vec2u{
@@ -5667,6 +5684,12 @@ fn brickTouchesDemandedMissingWorldPage(brick:u32)->bool{
 fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
   let output=activityRecord(brick);
+  // Every planning epoch starts from the authored hard cap. The ordered
+  // closure dispatches below propagate this cap into surrounding topology.
+  if(p.refinementRegionControl.x>0u){
+    setRefinementGradingCap(brick,
+      cachedRefinementPolicyResolutionBounds(brick).y);
+  }
   // Begin a candidate epoch by mirroring accepted membership. Lifecycle
   // planners below edit only this intent; word 10 remains accepted authority.
   setCandidateBrickActiveAt(output,brickActive(brick));
@@ -5897,11 +5920,10 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
     hotEpochs|(quietEpochs<<8u)|(proofEpochs<<16u));
 }
 
-// Refine-only closure of GPU-authored candidate levels. Each dispatch moves a
-// violation one rung toward a valid 2:1 plan; log2(B) ordered dispatches cover
-// the complete dyadic ladder without ever coarsening a requested surface.
-// The accepted-neighbour floor additionally keeps any bounded subset of the
-// candidate transaction 2:1-valid when the coarsening scheduler publishes it.
+// Hard-cap-aware closure of GPU-authored candidate levels. First map authored
+// minimum-size caps outward by coarsening neighbouring plans, then perform the
+// ordinary refine-only closure within those caps. A regional minimum can thus
+// reshape surrounding 2:1 support but can never itself be refined away.
 @compute @workgroup_size(64)
 fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
@@ -5909,7 +5931,20 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
   let coordinate=cm12WorldLeafCoordinate(brick);
   let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
     vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  var required=atomicLoad(&activity[activityRecord(brick)+8u]);
+  let hardRegionCaps=p.refinementRegionControl.x>0u;
+  var gradingCap=BRICK_FINE_RESOLUTION;
+  if(hardRegionCaps){
+    gradingCap=cachedRefinementGradingCap(brick);
+    for(var side=0u;side<6u;side+=1u){
+      let neighbor=cm12WorldOwnerAt(coordinate+directions[side]);
+      if(neighbor==INVALID||(!brickActive(neighbor)
+        &&!candidateBrickActive(neighbor))){continue;}
+      gradingCap=min(gradingCap,min(BRICK_FINE_RESOLUTION,
+        2u*cachedRefinementGradingCap(neighbor)));
+    }
+    setRefinementGradingCap(brick,gradingCap);
+  }
+  var required=min(atomicLoad(&activity[activityRecord(brick)+8u]),gradingCap);
   for(var side=0u;side<6u;side+=1u){let neighborCoordinate=coordinate+directions[side];
     let neighbor=cm12WorldOwnerAt(neighborCoordinate);if(neighbor==INVALID){continue;}
     let neighborOutput=activityRecord(neighbor);
@@ -5941,7 +5976,11 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
       }
     }}
   }
-  atomicMax(&activity[activityRecord(brick)+8u],required);
+  if(hardRegionCaps){
+    atomicStore(&activity[activityRecord(brick)+8u],min(required,gradingCap));
+  }else{
+    atomicMax(&activity[activityRecord(brick)+8u],required);
+  }
 }
 
 fn validBrickResolution(resolution:u32)->bool{

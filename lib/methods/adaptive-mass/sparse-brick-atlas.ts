@@ -14,6 +14,7 @@ import {
 } from "../../core/initial-fluid";
 import type { SceneDescription } from "../../core/model";
 import {
+  clampRefinementRegionCellSize,
   refinementRegionCellBounds,
   sceneRefinementRegions,
   type RefinementRegionLattice,
@@ -783,6 +784,49 @@ function hierarchicalTankFillBricks(
   return bricks.sort((left, right) => left.key - right.key);
 }
 
+function refinementRegionBrickCoordinates(
+  scene: SceneDescription,
+  dimensions: SparseBrickVec3,
+  brickDimensions: SparseBrickVec3,
+  brickFineResolution: SparseBrickFineResolution,
+): SparseBrickVec3[] {
+  const container = scene.container;
+  const lattice: RefinementRegionLattice = {
+    dimensions,
+    cellSize_m: [container.width_m / dimensions[0],
+      container.height_m / dimensions[1],
+      container.depth_m / dimensions[2]],
+    origin_m: { x: -0.5 * container.width_m, y: 0,
+      z: -0.5 * container.depth_m },
+  };
+  const coordinates = new Map<number, SparseBrickVec3>();
+  for (const region of sceneRefinementRegions(scene)) {
+    const bounds = refinementRegionCellBounds(region, lattice);
+    const floor = clampRefinementRegionCellSize(region.minimumCellSize_cells);
+    const ownMaximum = Math.max(1, Math.min(brickFineResolution,
+      Math.floor(brickFineResolution / floor)));
+    // Only the rungs strictly between the regional cap and ordinary Bmax need
+    // pre-catalogued support. The first unconstrained Bmax brick may remain a
+    // fixed sparse-world page once its ratio to the last mapped rung is 2:1.
+    const gradingHalo = Math.max(0,
+      Math.ceil(Math.log2(brickFineResolution / ownMaximum)) - 1);
+    const lower = bounds.min.map((value) => Math.max(0,
+      Math.floor(value / brickFineResolution) - gradingHalo)) as
+      [number, number, number];
+    const upper = bounds.max.map((value, axis) => Math.min(brickDimensions[axis],
+      Math.ceil(value / brickFineResolution) + gradingHalo)) as
+      [number, number, number];
+    for (let z = lower[2]; z < upper[2]; z += 1)
+      for (let y = lower[1]; y < upper[1]; y += 1)
+        for (let x = lower[0]; x < upper[0]; x += 1) {
+          const coordinate = [x, y, z] as const;
+          coordinates.set(sparseBrickKey(coordinate, brickDimensions), coordinate);
+        }
+  }
+  return [...coordinates.entries()].sort((left, right) => left[0] - right[0])
+    .map((entry) => entry[1]);
+}
+
 function candidateInitialBrickCoordinates(
   scene: SceneDescription,
   dimensions: SparseBrickVec3,
@@ -862,6 +906,13 @@ function candidateInitialBrickCoordinates(
           volume.center_m.z + volume.radius_m] as const;
     addNormalizedBounds(normalized(minimum), normalized(maximum));
   }
+  // An enforcement region is topology capacity, not merely an initial
+  // resolution hint. Catalogue every intersecting base brick now so later
+  // transport inside the box never has to fall back to a fixed-B8 sparse-world
+  // page that cannot obey a coarser hard minimum.
+  for (const coordinate of refinementRegionBrickCoordinates(
+    scene, dimensions, brickDimensions, brickFineResolution,
+  )) addBrick(coordinate);
   return [...candidates.entries()].sort((left, right) => left[0] - right[0])
     .map((entry) => entry[1]);
 }
@@ -965,7 +1016,12 @@ export function initializeSparseBrickAtlasFromScene(
         && bounds.max.every((value, axis) =>
           value >= options.finestDimensions[axis]! - regionBoundsEpsilon);
     });
-    const hierarchical = spatiallyUniformRefinementEnvelope
+    // A hard region must also catalogue its currently dry volume so future
+    // wetting cannot allocate an incompatible fixed-B8 frontier page. The
+    // macro tank shortcut represents only initial liquid/structure and is
+    // therefore valid only when no enforcement envelope is authored.
+    const hierarchical = refinementRegions.length === 0
+      && spatiallyUniformRefinementEnvelope
       ? hierarchicalTankFillBricks(
         scene, options.finestDimensions, brickDimensions, brickFineResolution,
         surfaceFineRings, maximumMacroSpanBricks, refinementRegionParameters,
@@ -981,6 +1037,11 @@ export function initializeSparseBrickAtlasFromScene(
   );
   const structuralKeys = new Set(structuralCoordinates.map((coordinate) =>
     sparseBrickKey(coordinate, brickDimensions)));
+  // Region capacity must survive the empty-brick filter below. These leaves
+  // are structural policy support even before liquid reaches them.
+  for (const coordinate of refinementRegionBrickCoordinates(
+    scene, options.finestDimensions, brickDimensions, brickFineResolution,
+  )) structuralKeys.add(sparseBrickKey(coordinate, brickDimensions));
   const candidates: Array<{
     readonly coordinate: SparseBrickVec3;
     readonly key: number;
@@ -1136,6 +1197,7 @@ export function initializeSparseBrickAtlasFromScene(
   }
 
   const resolutionByKey = new Map<number, SparseBrickResolution>();
+  const gradingMaximumByKey = new Map<number, SparseBrickResolution>();
   for (const candidate of candidates) {
     const { coordinate } = candidate;
     const tileKey = policyTileByBrick.get(candidate.key)!;
@@ -1160,15 +1222,68 @@ export function initializeSparseBrickAtlasFromScene(
     const selected = initialResolutionWithRefinementRegionBounds(
       refinementRegionParameters, options.finestDimensions, coordinate, 1,
       evidenceSelected, brickFineResolution);
+    const origin: SparseBrickVec3 = [
+      coordinate[0] * brickFineResolution,
+      coordinate[1] * brickFineResolution,
+      coordinate[2] * brickFineResolution,
+    ];
+    const extent: SparseBrickVec3 = [
+      Math.max(0, Math.min(brickFineResolution,
+        options.finestDimensions[0] - origin[0])),
+      Math.max(0, Math.min(brickFineResolution,
+        options.finestDimensions[1] - origin[1])),
+      Math.max(0, Math.min(brickFineResolution,
+        options.finestDimensions[2] - origin[2])),
+    ];
+    const regionBounds = sparseCM12RefinementRegionResolutionBoundsForBrick(
+      refinementRegionParameters, origin, extent, brickFineResolution,
+      brickFineResolution);
     if (!isSparseBrickResolution(selected, brickFineResolution)) {
       throw new RangeError(
         `resolutionForBrick must return a rung on ${ladder.resolutions.join("/")}`,
       );
     }
     resolutionByKey.set(candidate.key, selected);
+    gradingMaximumByKey.set(candidate.key,
+      regionBounds.maximumResolution as SparseBrickResolution);
   }
-  // Boundary promotion is a hard floor, then the ordinary strong-grading
-  // closure propagates only as far as necessary into the liquid component.
+  // Propagate authored minimum-size caps outward before closing the requested
+  // topology. This is the reverse of ordinary refine-only grading: a hard
+  // coarse region coarsens its fine neighbours as far as 2:1 requires, rather
+  // than allowing those neighbours to refine back through the region floor.
+  let gradingChanged = true;
+  while (gradingChanged) {
+    gradingChanged = false;
+    for (const candidate of candidates) for (const direction of faceDirections) {
+      const coordinate: SparseBrickVec3 = [
+        candidate.coordinate[0] + direction[0],
+        candidate.coordinate[1] + direction[1],
+        candidate.coordinate[2] + direction[2],
+      ];
+      if (coordinate.some((value, axis) => value < 0
+        || value >= brickDimensions[axis])) continue;
+      const neighborKey = sparseBrickKey(coordinate, brickDimensions);
+      if (!candidateByKey.has(neighborKey)) continue;
+      const ownMaximum = gradingMaximumByKey.get(candidate.key)!;
+      const neighborMaximum = gradingMaximumByKey.get(neighborKey)!;
+      const mappedMaximum = Math.min(ownMaximum,
+        2 * neighborMaximum) as SparseBrickResolution;
+      if (mappedMaximum < ownMaximum) {
+        gradingMaximumByKey.set(candidate.key, mappedMaximum);
+        gradingChanged = true;
+      }
+    }
+  }
+  for (const candidate of candidates) {
+    resolutionByKey.set(candidate.key, Math.min(
+      resolutionByKey.get(candidate.key)!,
+      gradingMaximumByKey.get(candidate.key)!,
+    ) as SparseBrickResolution);
+  }
+
+  // Boundary promotion remains a hard resolution floor, but is now bounded by
+  // the propagated authored cap. The cap construction guarantees that every
+  // required 2:1 support rung is representable without violating a region.
   let changed = true;
   while (changed) {
     changed = false;
@@ -1182,8 +1297,12 @@ export function initializeSparseBrickAtlasFromScene(
       const own = resolutionByKey.get(candidate.key)!;
       const neighbor = resolutionByKey.get(neighborKey)!;
       if (own > 2 * neighbor) {
-        resolutionByKey.set(neighborKey, (own / 2) as SparseBrickResolution);
-        changed = true;
+        const promoted = Math.min(own / 2,
+          gradingMaximumByKey.get(neighborKey)!) as SparseBrickResolution;
+        if (promoted > neighbor) {
+          resolutionByKey.set(neighborKey, promoted);
+          changed = true;
+        }
       }
     }
   }
