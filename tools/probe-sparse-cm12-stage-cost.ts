@@ -28,6 +28,7 @@ import {
   measureFluidPipelineStage,
 } from "../lib/core/fluid-pipeline";
 import { resolveMethodValues } from "../lib/core/method-contract";
+import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import { sceneDamBreakBox } from "../lib/core/initial-fluid";
 import {
   GPUStageTimestampRecorder,
@@ -108,6 +109,8 @@ Options:
   --warmup=N                         Warmup hardware samples (default 8)
   --frames=N                         Measured hardware samples (default 40)
   --capture-gap-ms=N                 Timestamp capture spacing (default 110)
+  --time-step=scene|paper             Scene-authored or CM12 paper cadence
+                                     (default scene)
   --minimum-cell-size=N              Add a minimum-cell-size region in finest
                                      cells (power of two; omitted by default)
   --region-scope=domain|initial-dam  Region bounds (default domain)
@@ -131,6 +134,7 @@ const sampled = Number(argument("frames", "40"));
 const brickFineResolution = Number(argument("brick-fine", "16"));
 const presentationPageResolution = Number(argument("presentation-page", "16"));
 const captureGap_ms = Number(argument("capture-gap-ms", "110"));
+const timeStep = argument("time-step", "scene");
 const minimumCellSize = Number(argument("minimum-cell-size", "0"));
 const regionScope = argument("region-scope", "domain");
 const maximumTarget_ms = Number(argument("max-non-pressure-ms",
@@ -170,6 +174,9 @@ if (!(Number.isSafeInteger(minimumCellSize) && minimumCellSize >= 0
 }
 if (regionScope !== "domain" && regionScope !== "initial-dam") {
   throw new RangeError("region-scope must be domain or initial-dam");
+}
+if (timeStep !== "scene" && timeStep !== "paper") {
+  throw new RangeError("time-step must be scene or paper");
 }
 if (![4, 8, 16].includes(brickFineResolution)
   || ![4, 8, 16].includes(presentationPageResolution)
@@ -216,7 +223,6 @@ const PRESSURE_TAIL_STAGE_IDS = Object.freeze([
   "pressure-rhs",
   "pressure-solve",
   "velocity-projection",
-  "projection-diagnostics",
   "activity-measurement",
   "resolution-planning",
   "candidate-transfer",
@@ -254,6 +260,7 @@ type FinalScalarMaskHeader = {
   readonly flipCellCount: number;
 };
 type StageCostQASolver = {
+  readAcceptedIndirectQA(): Promise<readonly number[]>;
   readPhase1TransportProfileQA?(): Promise<unknown>;
   readSparseWorkShapeQA(): {
     readonly finestDomainCellCount: number;
@@ -443,7 +450,7 @@ try {
     }];
   }
   const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
-    timeStep: "scene",
+    timeStep,
     brickFineResolution: String(brickFineResolution),
     presentationPageResolution: String(presentationPageResolution),
   });
@@ -458,7 +465,9 @@ try {
     "stage-cost measurement requires every stage lens disarmed");
   const qaSolver = solver as typeof solver & StageCostQASolver;
   const workShape = qaSolver.readSparseWorkShapeQA();
-  const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
+  const dt_s = timeStep === "paper"
+    ? CM12_PAPER_DT_S
+    : scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
 
   const stageSamples = new Map<string, number[]>();
   const workChunkSamples = new Map<string, number[]>();
@@ -977,6 +986,7 @@ try {
   const framePlan = finalQAEnabled
     ? await readFramePlanCensus(device, solver)
     : { skipped: true, reason: "--final-qa=0 A/B timing run" };
+  const acceptedIndirect = await qaSolver.readAcceptedIndirectQA();
   const report = {
     probe: "sparse-cm12-stage-cost", scene: sceneName, samples: seen,
     warmupSamples: warmup,
@@ -1005,6 +1015,7 @@ try {
       },
       finestGrid: [solver.info.nx, solver.info.ny, solver.info.nz],
       dt_s,
+      timeStep,
       captureGap_ms,
       finalQAEnabled,
       quiet,
@@ -1012,6 +1023,7 @@ try {
       timestampQuantum_us: 65.536,
     },
     workShape,
+    acceptedIndirect,
     framePlan,
     transportProfile,
     adaptiveRepresentation,

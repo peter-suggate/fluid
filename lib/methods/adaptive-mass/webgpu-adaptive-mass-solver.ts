@@ -14,6 +14,7 @@ import {
   sceneRefinementRegions,
 } from "../../core/refinement-regions";
 import { GPUStageTimestampRecorder } from "../../core/performance-trace";
+import { passBrokerLabelIsolationRequested } from "../../core/webgpu-pass-broker";
 import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
 import { averageInflowStrength, inflowOutletCenter } from "../../core/inflow-boundary";
@@ -67,7 +68,19 @@ import {
   sparseCM12SharpeningStrength,
   sparseCM12SharpeningTraceSteps,
   type SparseCM12GPUActivityRecord,
+  type SparseCM12ResidentStageSeams,
 } from "./webgpu-sparse-cm12-resident";
+
+/**
+ * Diagnostic-only stage boundaries for external Metal/xctrace observation.
+ * The resident already owns the partition and labels; supplying no-op seams
+ * asks it to expose those boundaries without enabling timestamp queries,
+ * readbacks, performance-store sampling, or any additional shader work.
+ */
+const SPARSE_CM12_LABEL_ISOLATION_SEAMS: SparseCM12ResidentStageSeams = Object.freeze({
+  close: () => {},
+  closeSubstage: () => {},
+});
 
 const PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 presentation publisher oracle QA");
@@ -148,7 +161,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
   async waitForSimulationReady(): Promise<void> {
     await this.sparseRuntime.waitForSimulationPipelines();
-    void this.simulationReady;
+    if (!this.simulationReady) {
+      throw new Error(`Sparse CM12 physics pipelines resolved while device status is ${
+        this.sparseWorldDevice.status}`);
+    }
   }
   readonly volumeTexture: GPUTexture;
   readonly surfaceFieldTexture: GPUTexture;
@@ -642,6 +658,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const frameCapture = shouldTracePhysics
       ? new AdaptiveMassFrameCapture(traceSampleId, traceContext)
       : undefined;
+    const diagnosticStageSeams = frameCapture?.residentStageSeams
+      ?? (passBrokerLabelIsolationRequested()
+        ? SPARSE_CM12_LABEL_ISOLATION_SEAMS : undefined);
     const rawEncoder = this.device.createCommandEncoder({
       label: `Sparse CM12 resident frame ${(this.lastTime_s + dt_s).toFixed(6)}`,
     });
@@ -695,7 +714,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         iterations: pressureIterations,
         relativeTolerance: pressureRelativeTolerance,
       },
-      seams: frameCapture?.residentStageSeams,
+      seams: diagnosticStageSeams,
       worldDimensions_m: this.fluidDomain.dimensions.map((value, axis) =>
         value * this.fluidDomain.cellSize_m[axis]) as [number, number, number],
     };

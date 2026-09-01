@@ -493,7 +493,6 @@ export const SPARSE_CM12_RESIDENT_STAGES = Object.freeze([
   "pressure-rhs",
   "pressure-solve",
   "velocity-projection",
-  "projection-diagnostics",
   "activity-measurement",
   "resolution-planning",
   "candidate-transfer",
@@ -556,9 +555,19 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
   "pressure-rhs": [],
   "pressure-solve": [],
   "velocity-projection": [],
-  "projection-diagnostics": [],
-  "activity-measurement": [],
-  "resolution-planning": [],
+  "activity-measurement": [
+    "dirty-brick-mask-publication",
+    "brick-activity-census-and-history",
+    "sparse-world-frontier-allocation",
+  ],
+  "resolution-planning": [
+    "liquid-frontier-classification",
+    "refinement-policy-classification",
+    "initial-resolution-plan",
+    "frontier-activation-and-retirement",
+    "resolution-grading-and-validation",
+    "candidate-page-allocation-and-synthesis",
+  ],
   "candidate-transfer": [
     "candidate-field-transfer",
     "candidate-face-reconstruction",
@@ -1087,7 +1096,10 @@ export function sparseCM12PressureIterationsFromReceipt(
   return hardMaximum;
 }
 const ACTIVITY_HEADER_WORDS = 28;
-const ACTIVITY_RECORD_WORDS = 42;
+// Word 42 caches frontier neighbours whose signed directory/reachability
+// question has already been resolved. It is topology evidence, not physical
+// activity evidence, and is explicitly re-armed by retirement/solid edits.
+const ACTIVITY_RECORD_WORDS = 43;
 const ACTIVITY_SURFACE_B4_LEASE = 0x0400_0000;
 const ACCEPTED_COARSE_ROW_COUNT_WORD = 22;
 const ACCEPTED_MIXED_ROW_COUNT_WORD = 23;
@@ -3303,9 +3315,10 @@ export class WebGPUSparseCM12Resident {
     this.allocatedBytes = [acceptedIndirectArguments, pressureCellIndirectArguments,
       pressureMembershipIndirectArguments,
       pressureExecutionIndirectArguments,
+      persistentPressureCacheIndirectArguments,
       framePlanIndirectArguments, presentationIndirectArguments,
       frameControlIndirectArguments,
-      pressureTemplates, pressureWorklists,
+      pressureTemplates, pressureWorklists, velocityExtensionDepths,
       ...buffers, ...fineBuffers].reduce(
       (sum, buffer) => sum + buffer.size, 0,
     )
@@ -3863,7 +3876,10 @@ export class WebGPUSparseCM12Resident {
     // buffered accepted topology as the cell and shared-row lists. The two
     // slots flip with topology header word 2; this is not a second authority.
     const acceptedLeafManifestBase = pageDescriptors + topologyPagePool.descriptorWords;
-    const acceptedLeafHeaderWords = 20;
+    // Words 20..22 are the accepted-leaf frontier-neighbour dispatch. Keeping
+    // it beside the selector-owned manifest means a topology commit can
+    // publish the compact domain atomically with the leaf list it describes.
+    const acceptedLeafHeaderWords = 23;
     const acceptedLeafList0 = acceptedLeafHeaderWords;
     const acceptedLeafList1 = acceptedLeafList0 + worldLeafCapacity;
     const acceptedLeafDeltaList = acceptedLeafList1 + worldLeafCapacity;
@@ -3929,6 +3945,9 @@ export class WebGPUSparseCM12Resident {
       initialLeafIds.length, 1, 1,
       initialRowIds.length, initialRowIds.length],
     acceptedLeafManifestBase);
+    initialWorklists.set([
+      Math.ceil(26 * initialLeafIds.length / WORKGROUP_SIZE), 1, 1,
+    ], acceptedLeafManifestBase + 20);
     initialWorklists.set(initialLeafIds, acceptedLeafManifestBase + acceptedLeafList0);
     initialWorklists.set(initialLeafIds, acceptedLeafManifestBase + acceptedLeafList1);
     for (const row of initialRowIds) {
@@ -4317,7 +4336,7 @@ export class WebGPUSparseCM12Resident {
     // Candidate TFX1 appends two exact delta-sized publication triplets at
     // words 24 and 27. Baseline construction keeps them zero and never
     // dispatches them.
-    const acceptedAndShadowIndirect = new Uint32Array(30);
+    const acceptedAndShadowIndirect = new Uint32Array(33);
     acceptedAndShadowIndirect.set(initialWorklists.subarray(8, 14), 0);
     acceptedAndShadowIndirect.set(initialWorklists.subarray(20, 26), 6);
     acceptedAndShadowIndirect.set(initialWorklists.subarray(
@@ -4327,6 +4346,8 @@ export class WebGPUSparseCM12Resident {
     acceptedAndShadowIndirect.set([0, 1, 1, 0, 1, 1], 24);
     acceptedAndShadowIndirect.set(initialWorklists.subarray(
       acceptedLeafManifestBase + 15, acceptedLeafManifestBase + 18), 21);
+    acceptedAndShadowIndirect.set(initialWorklists.subarray(
+      acceptedLeafManifestBase + 20, acceptedLeafManifestBase + 23), 30);
     const acceptedIndirectArguments = uploadBuffer(device,
       "Sparse CM12 accepted indirect dispatch snapshot",
       acceptedAndShadowIndirect,
@@ -4608,10 +4629,12 @@ export class WebGPUSparseCM12Resident {
     const presentationShaderRoots = presentationPublisherOracleForQA
       ? ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
+        "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "publishSparseLevelSet"]
       : ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
+        "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "beginSparseCM12FramePlanNext", "initializeSparseCM12FramePlanNext",
         "populateSparseCM12PresentationFramePlan",
@@ -4700,12 +4723,14 @@ export class WebGPUSparseCM12Resident {
       "finalizeIncrementalActivityMasks", "measureBrickActivity",
       "ageIncrementalActivityHistory", "finalizeIncrementalActivityCensus",
       "classifyAcceptedLiquidFrontier", "classifyRefinementPolicyTiles",
-      "planBrickResolution", "activateSweptFrontierPages", "activateInjectionFrontierPages",
+      "planBrickResolution", "activateSweptFrontierPages",
+      "activateInjectionFrontierPages",
       "closeRefinementPolicyTileResolution", "closePlannedResolution",
       "validateCandidateResolution", "scheduleTopologyPreparation",
       "allocateCandidateTopologyPages", "synthesizeCandidateCellPages",
       "allocateSparseWorldFrontier", "allocateSparseWorldInteractionPages",
       "synthesizeSparseWorldFrontierPages",
+      "clearSparseWorldFrontierResolutionCache",
       "connectSparseWorldFrontierPages",
       "publishSparseWorldFrontierAcceptance",
       "compileSparseWorldFrontierExecutionImage",
@@ -4758,7 +4783,6 @@ export class WebGPUSparseCM12Resident {
       "projectSparseCM12InteriorFaceTiles",
       "projectSparseCM12SeamFacePackets",
       "projectSparseCM12SparseAirFacePackets",
-      "measureDivergenceDiagnostics",
       ...sparseCM12PressureTopologyRepairEntryPoints(
         pressureTopologyRepairLayout,
       ),
@@ -4770,10 +4794,12 @@ export class WebGPUSparseCM12Resident {
     const presentationEntryNames = new Set<string>(presentationPublisherOracleForQA
       ? ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
+        "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "publishSparseLevelSet"]
       : ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
+        "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
         "beginSparseCM12FramePlanNext", "initializeSparseCM12FramePlanNext",
         "populateSparseCM12PresentationFramePlan",
@@ -5213,6 +5239,11 @@ export class WebGPUSparseCM12Resident {
       const activePass = openPass();
       activePass.setPipeline(this.pipelines[name]!);
       activePass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 84);
+    };
+    const dispatchAcceptedFrontierNeighbors = (name: string) => {
+      const activePass = openPass();
+      activePass.setPipeline(this.pipelines[name]!);
+      activePass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, 120);
     };
     const dispatchTransportPacket = (name: string) => {
       if (!this.transportPacketIndirectArguments) {
@@ -5685,7 +5716,6 @@ export class WebGPUSparseCM12Resident {
       dispatchAccepted("enforceSparseCM12InflowFaces", "row");
       useBindGroup(this.effectiveVelocityPressureBindGroup);
       dispatchAccepted("collocateAndDiagnose", "cell");
-      dispatchAccepted("measureDivergenceDiagnostics", "cell");
       dispatch("reduceDivergenceDiagnostics", 1);
       // The divergence this stage produced. Four stages downstream
       // `candidate-transfer` zeroes it on every cell whose topology changed,
@@ -5706,8 +5736,7 @@ export class WebGPUSparseCM12Resident {
       useBindGroup(this.bindGroup);
       dispatch("publishSparseCM12FrameFaceOutput", 1);
     });
-    stage("projection-diagnostics", () => {});
-    stage("activity-measurement", () => {
+    stage("activity-measurement", ({ closeSubstage }) => {
       useBindGroup(this.bindGroup);
       dispatch("markIncrementalActivityScalarBricks", leafCapacity);
       if (activityPhaseLimitForQA === "scalar") return;
@@ -5715,6 +5744,7 @@ export class WebGPUSparseCM12Resident {
         Math.ceil(leafCapacity / WORKGROUP_SIZE));
       if (activityPhaseLimitForQA === "topology") return;
       dispatch("finalizeIncrementalActivityMasks", 1);
+      closeSubstage("dirty-brick-mask-publication");
       if (activityPhaseLimitForQA === "masks") return;
       dispatch("measureBrickActivity", this.incrementalActivityLayout.brickCount);
       if (this.horizontalD4Authority) {
@@ -5726,30 +5756,36 @@ export class WebGPUSparseCM12Resident {
         Math.ceil(leafCapacity / WORKGROUP_SIZE));
       if (activityPhaseLimitForQA === "history") return;
       dispatch("finalizeIncrementalActivityCensus", 1);
+      closeSubstage("brick-activity-census-and-history");
       if (activityPhaseLimitForQA === "census") return;
       if (this.solidOccupancyLayout) {
-        dispatch("allocateSparseWorldFrontier",
-          Math.ceil(26 * leafCapacity / WORKGROUP_SIZE));
+        dispatchAcceptedFrontierNeighbors("allocateSparseWorldFrontier");
+        closeSubstage("sparse-world-frontier-allocation");
         if (activityPhaseLimitForQA === "allocation") return;
         dispatch("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
         if (activityPhaseLimitForQA === "synthesis") return;
       }
     });
-    stage("resolution-planning", () => {
+    stage("resolution-planning", ({ closeSubstage }) => {
       dispatch("classifyAcceptedLiquidFrontier", leafCapacity);
+      closeSubstage("liquid-frontier-classification");
       dispatch("classifyRefinementPolicyTiles", leafCapacity);
+      closeSubstage("refinement-policy-classification");
       dispatch("planBrickResolution", bricks);
+      closeSubstage("initial-resolution-plan");
       dispatch("activateSweptFrontierPages", leafCapacity);
       // Lifecycle membership is a topology candidate, not a post-publication
       // mutation.  Retirement marks same-rung delta work consumed by the
       // shadow worklists and the single selector flip below.
       dispatch("retireUnsupportedEmptyBricks", leafCapacity);
+      closeSubstage("frontier-activation-and-retirement");
       for (let gradingPass = 0;
         gradingPass < Math.log2(this.brickFineResolution); gradingPass += 1) {
         dispatch("closeRefinementPolicyTileResolution", leafCapacity);
         dispatch("closePlannedResolution", bricks);
       }
       dispatch("validateCandidateResolution", bricks);
+      closeSubstage("resolution-grading-and-validation");
       dispatch("scheduleTopologyPreparation", 1);
       dispatch("allocateCandidateTopologyPages", bricks);
       // Candidate rerung pages exist only for authored leaves. Dynamic WDR
@@ -5757,6 +5793,7 @@ export class WebGPUSparseCM12Resident {
       // growth slab merely launched hundreds of workgroups that returned at
       // the shader's CM12_WDR_INITIAL_LEAVES guard.
       dispatch("synthesizeCandidateCellPages", this.worldDirectoryLayout.initialLeaves);
+      closeSubstage("candidate-page-allocation-and-synthesis");
       dispatchShadow("clearShadowRowMembership", "row");
       dispatch("beginShadowTopology", 1);
       dispatch("buildShadowLeafWorklist", 1);
@@ -5894,6 +5931,9 @@ export class WebGPUSparseCM12Resident {
     encoder.copyBufferToBuffer(this.topologyArena,
       this.acceptedLeafManifestBaseBytes + 4 * 4,
       this.acceptedIndirectArguments, 48, 12);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      this.acceptedLeafManifestBaseBytes + 4 * 20,
+      this.acceptedIndirectArguments, 120, 12);
     // Promote this frame's captures and queue the header read. A tap in a
     // branch the frame did not take is simply absent from the new set, so its
     // phases paint magenta next frame rather than redrawing the last frame
@@ -6235,6 +6275,9 @@ export class WebGPUSparseCM12Resident {
     pass.dispatchWorkgroups(Math.ceil(this.templateRowCount / WORKGROUP_SIZE));
     pass.setPipeline(this.pipelines.refreshSparseCM12StaticSolidGeometryEvidence!);
     pass.dispatchWorkgroups(this.initialWorldLeafCount);
+    pass.setPipeline(this.pipelines.clearSparseWorldFrontierResolutionCache!);
+    pass.dispatchWorkgroups(Math.ceil(
+      this.worldDirectoryLayout.leafCapacity / WORKGROUP_SIZE));
     pass.end();
   }
 
@@ -6438,6 +6481,9 @@ export class WebGPUSparseCM12Resident {
     encoder.copyBufferToBuffer(this.topologyArena,
       this.acceptedLeafManifestBaseBytes + 4 * 4,
       this.acceptedIndirectArguments, 48, 12);
+    encoder.copyBufferToBuffer(this.topologyArena,
+      this.acceptedLeafManifestBaseBytes + 4 * 20,
+      this.acceptedIndirectArguments, 120, 12);
 
     const injectionPass = encoder.beginComputePass({
       label: "Sparse CM12 resident liquid injection",
@@ -8591,11 +8637,11 @@ export class WebGPUSparseCM12Resident {
     }
   }
 
-  /** The two accepted cell/row dispatch triplets consumed by full-domain
-   * kernels. Kept compact so a runaway packet can be diagnosed directly. */
+  /** Every accepted/shadow dispatch triplet, including the compact accepted-
+   * leaf frontier-neighbour domain at words 30..32. */
   async readAcceptedIndirectQA(): Promise<readonly number[]> {
     this.assertLive();
-    const bytes = 6 * 4;
+    const bytes = 33 * 4;
     const readback = this.device.createBuffer({
       label: "Sparse CM12 accepted-indirect QA readback", size: bytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,

@@ -141,7 +141,7 @@ test("region-equivalent face transport scales the shared cache without taxing de
   assert.doesNotMatch(resident, /dispatch\("cacheSparseCM12RefinementPolicy"/);
 
   const membership = functionSource(wgsl, "policyTileMembershipRequired",
-    "fn brickDeeplyEnclosed");
+    "fn policyTileUniformlyFilled");
   assert.match(membership, /ACTIVITY_REFINEMENT_POLICY_MEMBERSHIP/);
   assert.doesNotMatch(membership, /for\(var [xyz]=0u/,
     "hot membership queries must consume the tile receipt instead of scanning siblings");

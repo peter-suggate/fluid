@@ -102,8 +102,12 @@ test("resident activity consumers use direct brick-domain dispatch", () => {
   assert.match(classify, /ACTIVITY_BRICK_BOUNDARY_LIQUID_FACES\+neighbor/);
   assert.match(classify, /let reciprocalSupportBit=26u-neighborBit;/);
   assert.match(classify, /neighborOutput\+32u/);
+  assert.match(classify, /acceptedLiquidDeeplyEnclosed/);
+  assert.match(classify, /ACTIVITY_REFINEMENT_POLICY_DEEPLY_ENCLOSED/);
   assert.doesNotMatch(classify, /BRICK_FINE_RESOLUTION\*BRICK_FINE_RESOLUTION/,
     "frontier classification must reduce census receipts, not resample brick faces");
+  assert.doesNotMatch(shader, /fn brickDeeplyEnclosed/,
+    "planning must not repeat the classifier's six indirect face-neighbour walk");
 
   const transportDemand = shader.slice(shader.indexOf("fn brickHasTransportDemand"),
     shader.indexOf("fn refinementPolicyTileScale", shader.indexOf(
@@ -165,7 +169,9 @@ test("BFA1 prepares and projects accepted rows without a transient DFRM plane", 
   assert.match(resident, /dispatch\("prepareSparseCM12InteriorFaceTiles"/);
   assert.match(resident, /dispatch\("prepareSparseCM12SeamFacePackets"/);
   assert.doesNotMatch(resident, /DirtyFaceRowMask|compileSparseCM12DirtyFaceRowMasks/);
-  assert.match(resident, /dispatchAccepted\("measureDivergenceDiagnostics", "cell"\)/);
+  assert.doesNotMatch(resident, /dispatchAccepted\("measureDivergenceDiagnostics"/);
+  assert.match(resident, /dispatchAccepted\("collocateAndDiagnose", "cell"\)/);
+  assert.match(resident, /dispatch\("reduceDivergenceDiagnostics", 1\)/);
 });
 
 test("SparseWorld frontier allocation covers all 26 activity-support neighbours", () => {
@@ -174,7 +180,9 @@ test("SparseWorld frontier allocation covers all 26 activity-support neighbours"
     import.meta.url,
   ), "utf8");
   assert.match(resident,
-    /dispatch\("allocateSparseWorldFrontier",\s*Math\.ceil\(26 \* leafCapacity \/ WORKGROUP_SIZE\)\)/);
+    /dispatchAcceptedFrontierNeighbors\("allocateSparseWorldFrontier"\)/);
+  assert.match(resident,
+    /acceptedLeafManifestBaseBytes \+ 4 \* 20[\s\S]*acceptedIndirectArguments, 120, 12/);
 
   const shader = readFileSync(new URL(
     "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
@@ -182,10 +190,19 @@ test("SparseWorld frontier allocation covers all 26 activity-support neighbours"
   ), "utf8");
   const allocation = shader.slice(shader.indexOf("fn allocateSparseWorldFrontier"),
     shader.indexOf("fn synthesizeSparseWorldFrontierPages"));
-  assert.match(allocation, /let brick=gid\.x\/26u;let localNeighbor=gid\.x%26u;/);
+  assert.match(allocation,
+    /let brick=acceptedLeafInvocation\(gid\.x\/26u\);let localNeighbor=gid\.x%26u;/);
   assert.match(allocation,
     /let supportBit=select\(localNeighbor,localNeighbor\+1u,localNeighbor>=13u\);/);
   assert.match(allocation, /cm12FluidNeighborReachable\(sourceCoordinate,offset\)/);
+  assert.match(allocation,
+    /ACTIVITY_FRONTIER_RESOLVED_MASK_WORD[\s\S]*atomicOr\(&activity\[output\+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD\],resolvedBit\)/);
+
+  assert.match(shader,
+    /acceptedActive!=candidateActive[\s\S]*candidateActive[\s\S]*atomicAnd\(&activity\[activityRecord\(neighbor\)[\s\S]*ACTIVITY_FRONTIER_RESOLVED_MASK_WORD\],~\(1u<<\(26u-bit\)\)\)/);
+  assert.match(resident,
+    /setPipeline\(this\.pipelines\.clearSparseWorldFrontierResolutionCache!\)/);
+  assert.match(resident, /const ACTIVITY_RECORD_WORDS = 43;/);
 
   const mapped = Array.from({ length: 26 }, (_, local) => local >= 13 ? local + 1 : local);
   assert.equal(new Set(mapped).size, 26);

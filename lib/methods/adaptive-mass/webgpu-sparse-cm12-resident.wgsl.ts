@@ -1009,7 +1009,8 @@ const CM12_SPARSE_TRANSPORT_FIXED:f32=65536.0;
 // the stable SRR spatial-tile authority without changing receipt identity.
 const EXP_ACTIVITY_SCALAR_BRICKS:bool=true;
 const ACTIVITY_HEADER_WORDS:u32=28u;
-const ACTIVITY_RECORD_WORDS:u32=42u;
+const ACTIVITY_RECORD_WORDS:u32=43u;
+const ACTIVITY_FRONTIER_RESOLVED_MASK_WORD:u32=42u;
 const ACTIVITY_RECOVERY_LOCK:u32=0x80000000u;
 // A B8 presentation proof authorizes not only the B8 -> B4 transaction but
 // retention of that accepted B4 surface while its transport CFL remains
@@ -1219,7 +1220,7 @@ fn topologyDeltaLeafInvocation(invocation:u32)->u32{
   return atomicLoad(&topologyArena[base+offset+invocation]);
 }
 fn acceptedRowMembershipStampBase()->u32{
-  return acceptedLeafManifestBase()+20u+3u*p.dispatch.w;
+  return acceptedLeafManifestBase()+23u+3u*p.dispatch.w;
 }
 fn acceptedRowMember(row:u32)->bool{
   return row<p.counts.y&&(atomicLoad(&topologyArena[
@@ -5138,52 +5139,74 @@ fn projectSparseCM12DynamicFaceRows(@builtin(global_invocation_id)gid:vec3u){
 }
 
 @compute @workgroup_size(64)
-fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u){
-  let id=acceptedTemplateCellInvocation(gid.x);if(id==INVALID){return;}
-  if(!cellTransportActive(id)){
+fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u,
+ @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
+  let id=acceptedTemplateCellInvocation(gid.x);
+  var globalMaximum=0.0;var mixedMaximum=0.0;
+  if(id!=INVALID&&!cellTransportActive(id)){
     let output=destinationCellVelocity()+4u*id;
     if(cellActive(id)&&any(bitcast<vec3u>(vec3f(state[output],state[output+1u],
       state[output+2u]))!=vec3u(0u))){
       incrementalActivityMarkCellClosure(id);
     }
     state[output]=0.0;state[output+1u]=0.0;state[output+2u]=0.0;state[output+3u]=0.0;
-    state[p.stateOffsets4.y+id]=0.0;return;
-  }
-  let previousAt=destinationCellVelocity()+4u*id;
-  let previousVelocity=vec3f(state[previousAt],state[previousAt+1u],state[previousAt+2u]);
-  var velocity=vec3f(0.0);var weight=vec3f(0.0);var equation=0.0;var correction=0.0;
-  for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){let row=incidenceRow(at);
-    if(!rowAccepted(row)){continue;}
-    let term=incidenceTerm(at);let axis=rowAxis(row);
-    let fluxWeight=select(rowDualWeight(row),rowStaticDualWeight(row),
-      hasSolidBoundaries());
-    let w=abs(termCoefficient(term))*fluxWeight;var faceVelocity=state[destinationFaceVelocity()+row];
-    if(hasSolidBoundaries()){
-      if(!rowSeparatingFromClosedWorld(row)){
-        let open=rowOpenFraction(row);
-        faceVelocity=select(rowSolidVelocity(row),
-          (faceVelocity-(1.0-open)*rowSolidVelocity(row))/max(open,1e-6),open>1e-6);
+    state[p.stateOffsets4.y+id]=0.0;
+  }else if(id!=INVALID){
+    let previousAt=destinationCellVelocity()+4u*id;
+    let previousVelocity=vec3f(state[previousAt],state[previousAt+1u],state[previousAt+2u]);
+    var velocity=vec3f(0.0);var weight=vec3f(0.0);var equation=0.0;var correction=0.0;
+    var touchesMixed=false;
+    for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){let row=incidenceRow(at);
+      if(!rowAccepted(row)){continue;}
+      touchesMixed=touchesMixed||rowKind(row)==2u;
+      let term=incidenceTerm(at);let axis=rowAxis(row);
+      let fluxWeight=select(rowDualWeight(row),rowStaticDualWeight(row),
+        hasSolidBoundaries());
+      let w=abs(termCoefficient(term))*fluxWeight;
+      var faceVelocity=state[destinationFaceVelocity()+row];
+      if(hasSolidBoundaries()){
+        if(!rowSeparatingFromClosedWorld(row)){
+          let open=rowOpenFraction(row);
+          faceVelocity=select(rowSolidVelocity(row),
+            (faceVelocity-(1.0-open)*rowSolidVelocity(row))/max(open,1e-6),open>1e-6);
+        }
+      }
+      velocity[axis]+=w*faceVelocity;weight[axis]+=w;
+      if(pcmCellContains(id)){
+        let value=termCoefficient(term)*fluxWeight*state[destinationFaceVelocity()+row];
+        let adjusted=value-correction;let next=equation+adjusted;
+        correction=(next-equation)-adjusted;equation=next;
       }
     }
-    velocity[axis]+=w*faceVelocity;weight[axis]+=w;
-    if(pcmCellContains(id)){let value=termCoefficient(term)*fluxWeight*state[destinationFaceVelocity()+row];
-      let adjusted=value-correction;let next=equation+adjusted;correction=(next-equation)-adjusted;equation=next;}}
-  for(var axis=0u;axis<3u;axis+=1u){if(weight[axis]>0.0){velocity[axis]/=weight[axis];}}
-  let velocityDelta=velocity-previousVelocity;
-  let velocityChanged=length(velocityDelta)>0.0;
-  if(velocityChanged){
-    incrementalActivityMarkCellClosure(id);
+    for(var axis=0u;axis<3u;axis+=1u){if(weight[axis]>0.0){velocity[axis]/=weight[axis];}}
+    let velocityDelta=velocity-previousVelocity;
+    let velocityChanged=length(velocityDelta)>0.0;
+    if(velocityChanged){incrementalActivityMarkCellClosure(id);}
+    state[destinationCellVelocity()+4u*id]=velocity.x;
+    state[destinationCellVelocity()+4u*id+1u]=velocity.y;
+    state[destinationCellVelocity()+4u*id+2u]=velocity.z;
+    state[destinationCellVelocity()+4u*id+3u]=0.0;
+    cm12PublishCollocatedWetEffectiveVelocity(id,velocity,
+      state[destinationDensity()+id]>CM12_LIQUID_ISOVALUE);
+    let rawDensity=rawPressureDensity(id);
+    let targetDivergence=cm12VolumeCorrectionDivergence(rawDensity,
+      p.frame.y*cellMinimumWidth(id),p.frame.x);
+    let controlVolume=cellOpenVolume(id);
+    let divergence=select(0.0,-equation/max(controlVolume,1e-8)
+      -targetDivergence,pcmCellContains(id));
+    state[p.stateOffsets4.y+id]=divergence;
+    globalMaximum=abs(divergence);
+    mixedMaximum=select(0.0,globalMaximum,touchesMixed);
   }
-  state[destinationCellVelocity()+4u*id]=velocity.x;state[destinationCellVelocity()+4u*id+1u]=velocity.y;
-  state[destinationCellVelocity()+4u*id+2u]=velocity.z;state[destinationCellVelocity()+4u*id+3u]=0.0;
-  cm12PublishCollocatedWetEffectiveVelocity(id,velocity,
-    state[destinationDensity()+id]>CM12_LIQUID_ISOVALUE);
-  let rawDensity=rawPressureDensity(id);
-  let targetDivergence=cm12VolumeCorrectionDivergence(rawDensity,
-    p.frame.y*cellMinimumWidth(id),p.frame.x);
-  let controlVolume=cellOpenVolume(id);
-  state[p.stateOffsets4.y+id]=select(0.0,-equation/max(controlVolume,1e-8)
-    -targetDivergence,pcmCellContains(id));
+  // Collocation has already visited every accepted incidence row, including
+  // the static mixed-seam kind. Reduce its just-published divergence here so
+  // diagnostics do not launch a second cell traversal and repeat that graph.
+  reduceA[lid.x]=globalMaximum;reduceB[lid.x]=mixedMaximum;workgroupBarrier();
+  var width=32u;loop{if(lid.x<width){
+    reduceA[lid.x]=max(reduceA[lid.x],reduceA[lid.x+width]);
+    reduceB[lid.x]=max(reduceB[lid.x],reduceB[lid.x+width]);}
+    workgroupBarrier();if(width==1u){break;}width/=2u;}
+  if(lid.x==0u){partials[wid.x]=vec4f(reduceA[0],reduceB[0],0.0,0.0);}
 }
 
 // Collocated velocity is transport state, not the conservative projected face
@@ -5317,26 +5340,6 @@ fn commitActivityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
 }
 
 @compute @workgroup_size(64)
-fn measureDivergenceDiagnostics(@builtin(global_invocation_id)gid:vec3u,
- @builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
-  var globalMaximum=0.0;var mixedMaximum=0.0;
-  let cell=acceptedTemplateCellInvocation(gid.x);
-  if(cell!=INVALID){let value=abs(state[p.stateOffsets4.y+cell]);
-    globalMaximum=value;var touchesMixed=false;
-    for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
-      let row=incidenceRow(at);
-      touchesMixed=touchesMixed||(rowAccepted(row)&&rowKind(row)==2u);
-    }
-    mixedMaximum=select(0.0,value,touchesMixed);
-  }
-  reduceA[lid.x]=globalMaximum;reduceB[lid.x]=mixedMaximum;workgroupBarrier();
-  var width=32u;loop{if(lid.x<width){reduceA[lid.x]=max(reduceA[lid.x],reduceA[lid.x+width]);
-    reduceB[lid.x]=max(reduceB[lid.x],reduceB[lid.x+width]);}
-    workgroupBarrier();if(width==1u){break;}width/=2u;}
-  if(lid.x==0u){partials[wid.x]=vec4f(reduceA[0],reduceB[0],0.0,0.0);}
-}
-
-@compute @workgroup_size(64)
 fn reduceDivergenceDiagnostics(@builtin(local_invocation_id)lid:vec3u){
   var globalMaximum=0.0;var mixedMaximum=0.0;
   for(var at=lid.x;at<acceptedTemplateCellWorkgroups();at+=64u){
@@ -5388,6 +5391,7 @@ fn brickHasPresentationSurfaceSupport(brick:u32)->bool{
 
 var<workgroup> frontierDemanded:atomic<u32>;
 var<workgroup> presentationSurfaceSupportDemanded:atomic<u32>;
+var<workgroup> acceptedLiquidDeeplyEnclosed:atomic<u32>;
 @compute @workgroup_size(64)
 fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
@@ -5395,6 +5399,8 @@ fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
   if(lane==0u){
     atomicStore(&frontierDemanded,0u);
     atomicStore(&presentationSurfaceSupportDemanded,0u);
+    atomicStore(&acceptedLiquidDeeplyEnclosed,
+      select(0u,1u,(atomicLoad(&activity[activityRecord(brick)+1u])&64u)!=0u));
   }
   workgroupBarrier();
   // Reduce the complete 26-neighbour activity and presentation aprons while
@@ -5406,8 +5412,19 @@ fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
     let dx=i32(neighborBit%3u)-1;
     let dy=i32((neighborBit/3u)%3u)-1;
     let dz=i32(neighborBit/9u)-1;
-    let neighbor=cm12WorldOwnerAt(
-      cm12WorldLeafCoordinate(brick)+vec3i(dx,dy,dz));
+    let coordinate=cm12WorldLeafCoordinate(brick);
+    let direction=vec3i(dx,dy,dz);
+    let neighbor=cm12WorldOwnerAt(coordinate+direction);
+    if(abs(dx)+abs(dy)+abs(dz)==1){
+      var enclosed=false;
+      if(neighbor==INVALID){
+        enclosed=!cm12FluidFaceHasEmptyVoxelPair(coordinate,direction);
+      }else{
+        enclosed=brickActive(neighbor)
+          &&activityF32(activityRecord(neighbor)+4u)>=CM12_LIQUID_ISOVALUE;
+      }
+      if(!enclosed){atomicStore(&acceptedLiquidDeeplyEnclosed,0u);}
+    }
     if(neighbor!=INVALID&&neighbor!=brick&&brickActive(neighbor)){
       let neighborOutput=activityRecord(neighbor);
       let neighborReasons=atomicLoad(&activity[neighborOutput+1u]);
@@ -5437,11 +5454,14 @@ fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
     let output=activityRecord(brick);let recovery=atomicLoad(&activity[output+38u]);
     atomicStore(&activity[output+38u],
       (recovery&~(ACTIVITY_TOUCHES_ACCEPTED_LIQUID
-          |ACTIVITY_PRESENTATION_SURFACE_SUPPORT))
+          |ACTIVITY_PRESENTATION_SURFACE_SUPPORT
+          |ACTIVITY_REFINEMENT_POLICY_DEEPLY_ENCLOSED))
       |select(0u,ACTIVITY_TOUCHES_ACCEPTED_LIQUID,
         atomicLoad(&frontierDemanded)!=0u)
       |select(0u,ACTIVITY_PRESENTATION_SURFACE_SUPPORT,
-        atomicLoad(&presentationSurfaceSupportDemanded)!=0u));
+        atomicLoad(&presentationSurfaceSupportDemanded)!=0u)
+      |select(0u,ACTIVITY_REFINEMENT_POLICY_DEEPLY_ENCLOSED,
+        atomicLoad(&acceptedLiquidDeeplyEnclosed)!=0u));
   }
 }
 
@@ -5932,31 +5952,6 @@ fn policyTileMembershipRequired(brick:u32)->bool{
     &ACTIVITY_REFINEMENT_POLICY_MEMBERSHIP)!=0u;
 }
 
-// A filled brick with majority-liquid face neighbours in every non-wall direction is
-// deep bulk even if a low-amplitude density ripple happens to cross rho=.5 in
-// one of its composite rows. Treating that internal crossing as a free surface
-// permanently spread 8^3 resolution down through a tank after an impact. The
-// mean-density test is deliberately much stronger than the residency bit: a
-// trace of liquid in an air receiver must not make the real top surface look
-// enclosed. The lookup remains span-aware beside immutable macro leaves.
-fn brickDeeplyEnclosed(brick:u32)->bool{
-  let output=activityRecord(brick);
-  if((atomicLoad(&activity[output+1u])&64u)==0u){return false;}
-  let coordinate=cm12WorldLeafCoordinate(brick);
-  let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
-    vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  for(var side=0u;side<6u;side+=1u){let neighborCoordinate=coordinate+directions[side];
-    let neighbor=cm12WorldOwnerAt(neighborCoordinate);
-    if(neighbor==INVALID){
-      if(!cm12FluidFaceHasEmptyVoxelPair(coordinate,directions[side])){continue;}
-      return false;
-    }
-    if(!brickActive(neighbor)
-      ||activityF32(activityRecord(neighbor)+4u)<CM12_LIQUID_ISOVALUE){return false;}
-  }
-  return true;
-}
-
 fn policyTileUniformlyFilled(brick:u32)->bool{
   let scale=cachedRefinementPolicyTileScale(brick);
   if(scale<=1u){return false;}
@@ -5969,8 +5964,6 @@ fn policyTileUniformlyFilled(brick:u32)->bool{
 // faces are not liquid-air boundaries, while every exterior face must see
 // either submerged active support or an impermeable SolidWorld wall.
 fn policyTileDeeplyEnclosed(brick:u32)->bool{
-  let scale=cachedRefinementPolicyTileScale(brick);
-  if(scale<=1u){return brickDeeplyEnclosed(brick);}
   return (atomicLoad(&activity[activityRecord(brick)+38u])
     &ACTIVITY_REFINEMENT_POLICY_DEEPLY_ENCLOSED)!=0u;
 }
@@ -5998,7 +5991,8 @@ fn classifyRefinementPolicyTiles(@builtin(workgroup_id)wid:vec3u,
   if(enabled==0u){
     if(lane==0u&&brick<p.dispatch.w&&scale<=1u){
       atomicAnd(&activity[activityRecord(brick)+38u],
-        ~ACTIVITY_REFINEMENT_POLICY_AGGREGATE_MASK);
+        ~(ACTIVITY_REFINEMENT_POLICY_MEMBERSHIP
+          |ACTIVITY_REFINEMENT_POLICY_UNIFORMLY_FILLED));
     }return;
   }
   if(lane==0u){atomicStore(&refinementPolicyAggregate,6u);}workgroupBarrier();
@@ -6620,8 +6614,8 @@ fn allocateSparseWorldInteractionPages(@builtin(global_invocation_id)gid:vec3u){
 
 @compute @workgroup_size(64)
 fn allocateSparseWorldFrontier(@builtin(global_invocation_id)gid:vec3u){
-  let brick=gid.x/26u;let localNeighbor=gid.x%26u;
-  if(brick>=p.dispatch.w||!brickActive(brick)){return;}
+  let brick=acceptedLeafInvocation(gid.x/26u);let localNeighbor=gid.x%26u;
+  if(brick==INVALID||!brickActive(brick)){return;}
   // A page-local B8 graph can join another B8 graph face-for-face. If the
   // resident source is coarser, its candidate planner above first refines it;
   // allocating early would require a second, nonuniform mixed-seam incidence
@@ -6638,20 +6632,36 @@ fn allocateSparseWorldFrontier(@builtin(global_invocation_id)gid:vec3u){
   let immediateSupport=atomicLoad(&activity[output+32u])&0x07ffffffu;
   let supportBit=select(localNeighbor,localNeighbor+1u,localNeighbor>=13u);
   if(((sweptSupport|immediateSupport)&(1u<<supportBit))==0u){return;}
+  let resolvedBit=1u<<supportBit;
+  if((atomicLoad(&activity[output+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD])
+    &resolvedBit)!=0u){return;}
   let offset=vec3i(i32(supportBit%3u)-1,i32((supportBit/3u)%3u)-1,
     i32(supportBit/9u)-1);
   let sourceCoordinate=cm12WorldLeafCoordinate(brick);
-  if(!cm12FluidNeighborReachable(sourceCoordinate,offset)){return;}
+  if(!cm12FluidNeighborReachable(sourceCoordinate,offset)){
+    atomicOr(&activity[output+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD],resolvedBit);
+    return;
+  }
   let targetCoordinate=sourceCoordinate+offset;
-  if(cm12WorldOwnerAt(targetCoordinate)!=CM12_WDR_INVALID){return;}
+  if(cm12WorldOwnerAt(targetCoordinate)!=CM12_WDR_INVALID){
+    atomicOr(&activity[output+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD],resolvedBit);
+    return;
+  }
   let leaf=cm12WorldAllocateExact(targetCoordinate,0u);
-  if(leaf==CM12_WDR_INVALID||leaf<CM12_WDR_INITIAL_LEAVES){return;}
+  if(leaf==CM12_WDR_INVALID){return;}
+  if(leaf<CM12_WDR_INITIAL_LEAVES){
+    atomicOr(&activity[output+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD],resolvedBit);
+    return;
+  }
   let page=leaf-CM12_WDR_INITIAL_LEAVES;
   let base=topologyWorklistBase();
   if(page>=atomicLoad(&topologyArena[base+27u])){return;}
   let pageBase=candidateTopologyPageBase(page);
   let claim=atomicCompareExchangeWeak(&topologyArena[pageBase+2u],0u,0xffffffffu);
-  if(!claim.exchanged){return;}
+  if(!claim.exchanged){
+    atomicOr(&activity[output+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD],resolvedBit);
+    return;
+  }
   atomicStore(&topologyArena[pageBase],leaf);
   atomicStore(&topologyArena[pageBase+1u],BRICK_FINE_RESOLUTION);
   atomicStore(&topologyArena[pageBase+3u],0u);
@@ -6659,6 +6669,17 @@ fn allocateSparseWorldFrontier(@builtin(global_invocation_id)gid:vec3u){
     &topologyArena[CM12_WDR_BASE+10u]));
   atomicStore(&topologyArena[pageBase+2u],BRICK_FINE_RESOLUTION
     *BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION);
+  atomicOr(&activity[output+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD],resolvedBit);
+}
+
+// SolidWorld reachability is mutable through live scene editing. Re-arm only
+// this derived cache when that authority changes; physical activity/history
+// and the accepted topology remain untouched.
+@compute @workgroup_size(64)
+fn clearSparseWorldFrontierResolutionCache(@builtin(global_invocation_id)gid:vec3u){
+  let brick=gid.x;if(brick>=p.dispatch.w){return;}
+  atomicStore(&activity[activityRecord(brick)
+    +ACTIVITY_FRONTIER_RESOLVED_MASK_WORD],0u);
 }
 
 // Publish a complete page-local B8 finite-volume graph. IDs deliberately stay
@@ -7821,7 +7842,22 @@ fn publishCandidateTopologyDeltaWork(lid:vec3u,brick:u32,validBrick:bool){
     if(candidateActive){atomicAdd(&activity[8],1u);atomicAdd(&activity[9],1u);
       atomicAdd(&activity[11],candidateRange.y);atomicStore(&activity[output+34u],0u);
     }else{atomicSub(&activity[8],1u);atomicSub(&activity[11],acceptedRange.y);
-      atomicStore(&activity[output+34u],atomicLoad(&activity[output+16u]));}
+      atomicStore(&activity[output+34u],atomicLoad(&activity[output+16u]));
+      // The directory releases this leaf later in the same accepted frame.
+      // Re-arm each surviving neighbour's reciprocal allocation question now,
+      // after all earlier frontier allocation work has completed.
+      let coordinate=cm12WorldLeafCoordinate(brick);
+      for(var localNeighbor=0u;localNeighbor<26u;localNeighbor+=1u){
+        let bit=select(localNeighbor,localNeighbor+1u,localNeighbor>=13u);
+        let offset=vec3i(i32(bit%3u)-1,i32((bit/3u)%3u)-1,
+          i32(bit/9u)-1);
+        let neighbor=cm12WorldOwnerAt(coordinate+offset);
+        if(neighbor!=INVALID){
+          atomicAnd(&activity[activityRecord(neighbor)
+            +ACTIVITY_FRONTIER_RESOLVED_MASK_WORD],~(1u<<(26u-bit)));
+        }
+      }
+    }
     atomicAdd(&activity[10],1u);
   }else if(candidateActive&&acceptedRange.y!=candidateRange.y){
     if(candidateRange.y>acceptedRange.y){atomicAdd(&activity[11],candidateRange.y-acceptedRange.y);
@@ -8020,6 +8056,10 @@ fn finalizeAuthorizedShadowTopology(){
   // Sole publication point: all membership, fields, faces, cache/journal
   // effects and accepted headers are complete before this final selector flip.
   ${internedBoundaryAcceptedMirrorPublication}
+  let acceptedLeaves=atomicLoad(&topologyArena[leaves+slot]);
+  atomicStore(&topologyArena[leaves+20u],(26u*acceptedLeaves+63u)/64u);
+  atomicStore(&topologyArena[leaves+21u],1u);
+  atomicStore(&topologyArena[leaves+22u],1u);
   atomicStore(&topologyArena[base+2u],slot);
 }
 

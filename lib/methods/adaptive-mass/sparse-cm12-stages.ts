@@ -122,9 +122,14 @@ const activityTimedWork = Object.freeze({
       ]),
     },
     {
-      label: "sparse-world frontier allocation and page synthesis",
+      label: "sparse-world frontier allocation",
       entryPoints: Object.freeze([
         "allocateSparseWorldFrontier",
+      ]),
+    },
+    {
+      label: "sparse-world frontier page synthesis",
+      entryPoints: Object.freeze([
         "synthesizeSparseWorldFrontierPages",
       ]),
     },
@@ -134,12 +139,34 @@ const activityTimedWork = Object.freeze({
 const candidatePlanTimedWork = Object.freeze({
   groups: Object.freeze([
     {
-      label: "resolution requests, retirement and one 2:1 grading pass per rung",
+      label: "accepted-liquid frontier classification",
       entryPoints: Object.freeze([
         "classifyAcceptedLiquidFrontier",
+      ]),
+    },
+    {
+      label: "refinement-policy tile classification",
+      entryPoints: Object.freeze([
+        "classifyRefinementPolicyTiles",
+      ]),
+    },
+    {
+      label: "initial resolution plan",
+      entryPoints: Object.freeze([
         "planBrickResolution",
+      ]),
+    },
+    {
+      label: "frontier activation and retirement",
+      entryPoints: Object.freeze([
         "activateSweptFrontierPages",
         "retireUnsupportedEmptyBricks",
+      ]),
+    },
+    {
+      label: "one 2:1 grading pass per rung and candidate validation",
+      entryPoints: Object.freeze([
+        "closeRefinementPolicyTileResolution",
         "closePlannedResolution",
         "validateCandidateResolution",
       ]),
@@ -570,29 +597,35 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     phase: { id: "velocity-projection", label: "Composite pressure-gradient projection" },
     lens: null,
     tip: {
-      summary: "Advances the incremental-activity clock, then projects the compiled dirty/pressure row masks directly through the same composite rows that built the divergence, conservative 2:1 ports and sparse-air boundaries included. Collocation and diagnosis follow, then the face D4 fold, the rigid-body reaction and the frame face output publication.",
+      summary: "Advances the incremental-activity clock, then projects the compiled dirty/pressure row masks directly through the same composite rows that built the divergence, conservative 2:1 ports and sparse-air boundaries included. Collocation publishes divergence maxima during its existing incidence traversal; the face D4 fold, rigid-body reaction and frame face output follow.",
       reads: "predicted face velocity, pressure, dirty bricks",
-      writes: "projected face and collocated velocity, frame face output",
-      feeds: "projection diagnostics and the next frame's velocity extension",
+      writes: "projected face and collocated velocity, divergence receipts, frame face output",
+      feeds: "activity measurement and the next frame's velocity extension",
     },
     chip: (context) => context.info?.maxDivergenceAfter_s === undefined
       ? "G/D shared rows · touched faces only"
       : `|div|∞ ${context.info.maxDivergenceAfter_s.toExponential(2)} s⁻¹`,
   },
-  "projection-diagnostics": {
-    label: "Projection diagnostics", band: "pressure", side: "left",
-    phase: { id: "other", label: "Projection residual + divergence + energy receipts" },
-    lens: null,
-    tip: {
-      summary: "The collocation traversal now publishes the complete divergence receipt before shared reduction scratch is reused; this boundary retains the explicit diagnostics phase contract without another cell traversal.",
-      reads: "published collocation divergence receipt",
-      writes: "GPUEulerianInfo acceptance telemetry",
-    },
-    chip: () => "divergence · residual · conservation",
-  },
   "activity-measurement": {
     label: "Activity census + frontier", band: "adaptivity", side: "left",
-    phase: { id: "power-topology", label: "Activity masks, census + sparse-world frontier discovery" },
+    phase: {
+      id: "power-topology",
+      label: "Sparse-world frontier page synthesis",
+    },
+    substages: {
+      "dirty-brick-mask-publication": {
+        id: "power-topology",
+        label: "Incremental activity dirty-brick mask publication",
+      },
+      "brick-activity-census-and-history": {
+        id: "power-topology",
+        label: "Brick activity census, D4 fold and history",
+      },
+      "sparse-world-frontier-allocation": {
+        id: "power-topology",
+        label: "Sparse-world frontier allocation",
+      },
+    },
     timedWork: activityTimedWork,
     lens: null,
     tip: {
@@ -605,7 +638,36 @@ export const SPARSE_CM12_STAGES = Object.freeze({
   },
   "resolution-planning": {
     label: "Candidate topology build", band: "adaptivity", side: "right",
-    phase: { id: "power-topology", label: "Resolution grading + candidate pages and shadow worklists" },
+    phase: {
+      id: "power-topology",
+      label: "Shadow row, leaf and structure worklist construction",
+    },
+    substages: {
+      "liquid-frontier-classification": {
+        id: "power-topology",
+        label: "Accepted-liquid frontier classification",
+      },
+      "refinement-policy-classification": {
+        id: "power-topology",
+        label: "Refinement-policy tile classification",
+      },
+      "initial-resolution-plan": {
+        id: "power-topology",
+        label: "Initial resolution plan",
+      },
+      "frontier-activation-and-retirement": {
+        id: "power-topology",
+        label: "Frontier activation and retirement",
+      },
+      "resolution-grading-and-validation": {
+        id: "power-topology",
+        label: "Repeated 2:1 grading and candidate validation",
+      },
+      "candidate-page-allocation-and-synthesis": {
+        id: "power-topology",
+        label: "Candidate-page allocation and cell synthesis",
+      },
+    },
     timedWork: candidatePlanTimedWork,
     lens: null,
     tip: {

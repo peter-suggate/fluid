@@ -100,6 +100,7 @@ import { createInterface } from "node:readline";
 import { arch, platform, release } from "node:os";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import {
   POWER_DAM_LANE_ENVIRONMENT,
   powerDamLaneWithSteps,
@@ -419,7 +420,7 @@ const laneSteps = sizingPlan?.steps ?? steps;
  * The clean measurement regime. Every in-process probe is off: those probes
  * are what distort the frame, and Instruments replaces them from outside.
  */
-const laneEnvironment = uniformMini64 ? {
+const inheritedLaneEnvironment = uniformMini64 ? {
   FLUID_SCENE: "minimal-power-dam-break-64",
   FLUID_LANE: "uniform-one-step",
   FLUID_TARGET_S: String(requestedSteps * 0.004),
@@ -432,6 +433,16 @@ const laneEnvironment = uniformMini64 ? {
   FLUID_UNIFORM_DENSITY_POSTPROCESSING: "0",
 } : laneSteps === undefined
   ? POWER_DAM_LANE_ENVIRONMENT[lane] : powerDamLaneWithSteps(lane, laneSteps);
+const laneEnvironment = methodOverride === "adaptive-mass" ? {
+  ...inheritedLaneEnvironment,
+  // Sparse CM12's shipping preset owns the CM12 paper cadence. The Power/Losasso
+  // lane catalog uses 0.004 s; forwarding that value makes every Sparse CM12
+  // advance correctly reject before xctrace can observe a frame. Preserve the
+  // requested frame count while deriving target time from the method cadence.
+  FLUID_TARGET_S: String(Number(inheritedLaneEnvironment.FLUID_ORACLE_STEPS)
+    * CM12_PAPER_DT_S),
+  FLUID_MAX_DT: String(CM12_PAPER_DT_S),
+} : inheritedLaneEnvironment;
 
 const profileEnvironment: Record<string, string> = {
   WEBGPU_NODE_MODULE: `${root}node_modules/webgpu/index.js`,
@@ -473,11 +484,20 @@ const profileEnvironment: Record<string, string> = {
   // remain mandatory.
   FLUID_POWER_GENERATION_AUDIT: "0",
   FLUID_STABILITY_ENVELOPE: "0",
+  // Scene lanes may author mechanical-energy sampling. That evidence performs
+  // cubic field reconstruction and is deliberately outside a timing-only
+  // xctrace run; in particular, Sparse CM12 publishes presentation pages
+  // rather than either of the smoke harness's dense/octree QA fields.
+  FLUID_ENERGY_EVERY_STEPS: "0",
   FLUID_CHECKPOINT_EVERY_S: "0",
   FLUID_FIELD_STATS: "0",
   FLUID_SPARSE_STATS: "0",
   FLUID_RASTER_CHECKPOINTS: "0",
   FLUID_WEBGPU_SMOKE_TIMEOUT_MS: "240000",
+  // A profiling run that never admits its first advance has no useful steady
+  // state and must fail promptly rather than spin until the xctrace window or
+  // outer task timeout happens to terminate it.
+  FLUID_MAX_CONSECUTIVE_REJECTED_ADVANCES: "8",
   FLUID_TRIPWIRES: tripwires ? "1" : "0",
   FLUID_PROFILE_FIRST_ADVANCE_GATE: profileGate ? "1" : "0",
   ...laneEnvironment,

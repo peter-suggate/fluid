@@ -237,6 +237,15 @@ export interface GPUSolverInstance {
    * is still compiling. Absent means ready for methods with an atomic bundle.
    */
   readonly simulationReady?: boolean;
+  /**
+   * Await the optional post-presentation physics compilation boundary.
+   *
+   * Sparse methods may deliberately return from construction once generation
+   * zero is presentable, then finish simulation pipelines in the background.
+   * Offline harnesses call this before their first advance; interactive
+   * consumers may instead observe `simulationReady` without blocking.
+   */
+  waitForSimulationReady?(): Promise<void>;
   readonly volumeTexture: GPUTexture;
   /** Field the renderer contours; a smooth level set when the solver keeps one separate from volumeTexture. */
   readonly surfaceFieldTexture?: GPUTexture;

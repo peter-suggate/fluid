@@ -580,6 +580,7 @@ export const adaptiveMassMethod: SimulationMethod = {
     };
   },
   diagnosticRows: adaptiveMassDiagnosticRows,
+  harness: async () => (await import("./harness")).adaptiveMassHarnessPlugin,
   createSolverAsync: (
     device,
     scene,

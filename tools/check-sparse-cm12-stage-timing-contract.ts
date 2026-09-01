@@ -46,7 +46,7 @@ assert.doesNotMatch(publication, /VelocityExtensionPlan|VexRoot|VexBlast/,
   "presentation publication must not plan next-frame VEX work");
 assert.match(publication, /this\.encodeFramePlanPresentation/);
 assert.match(resident,
-  /initializeVelocityExtensionPackets[\s\S]*for \(let depth = 1; depth <= 8; depth \+= 1\)[\s\S]*advanceVelocityExtensionPackets\$\{depth\}/,
+  /initializeVelocityExtensionPackets[\s\S]*for \(let depth = 1; depth <= 8; depth \+= 1\)[\s\S]*advanceVelocityExtensionPackets/,
   "VEX2 must be one direct initialization and eight direct sweeps");
 assert.doesNotMatch(resident, /commitVelocityExtensionPackets/,
   "VEX2 sweep 8 must publish directly without a redundant commit dispatch");

@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import type { GPUSolverInstance, SimulationMethod } from "../core/method-contract";
 import { octreeDebugSources } from "../methods/octree-shared/octree-debug-sources";
 import { losassoMethod } from "../methods/losasso/method";
+import { adaptiveMassMethod } from "../methods/adaptive-mass/method";
 import { decodeAdaptiveVelocityGPUFailureDiagnostics }
   from "../methods/losasso/harness-adaptive-audits";
 import { powerLiquidsMethod } from "../methods/power/method";
@@ -498,7 +499,7 @@ fn sentinel() { output[0] = 0x4f435452u; }
   }
 }
 
-const availableMethods = [losassoMethod, powerLiquidsMethod, uniformMethod];
+const availableMethods = [losassoMethod, powerLiquidsMethod, uniformMethod, adaptiveMassMethod];
 const methodFilter = process.env.FLUID_METHOD?.split(",").map((value) => value.trim()).filter(Boolean);
 const methods = availableMethods.filter((method) => !methodFilter || methodFilter.includes(method.id));
 /**
@@ -2271,6 +2272,12 @@ async function runGPU(
   // structural options, but runtime solve/extension/cadence dials are adopted
   // only through this call. Dawn must cross the same initial boundary.
   solver.applyRuntimeValues?.(values);
+  // Some sparse methods intentionally return once generation zero can be
+  // presented while the larger recurring physics family continues compiling.
+  // A smoke/profile loop has no UI idle period in which to poll readiness, so
+  // cross the method-owned boundary explicitly instead of spinning on rejected
+  // advances and mistaking compilation for simulation work.
+  await solver.waitForSimulationReady?.();
   const octreeDebug = octreeDebugSources(solver);
   const cm11aCaptureOwner = solver as GPUSolverInstance & {
     enableCM11aCoarsestCapture?: (invocation?: number) => void;

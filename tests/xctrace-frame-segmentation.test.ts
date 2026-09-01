@@ -166,6 +166,31 @@ test("a legacy uniform authority marker repeated twice per advance remains the f
   assert.ok(report.frames.samples.every((frame) => frame.passes === 5));
 });
 
+test("a Sparse CM12 start stage spanning five encoders remains the frame anchor", async () => {
+  const authority = "Sparse CM12 resident transport-velocity-extension";
+  const report = await buildFrameReport({
+    tables: writeTrace({
+      frames: 12,
+      frameUs: 50_000,
+      tasks: [authority, authority, authority, authority, authority,
+        "Sparse CM12 resident gamma-diffusion",
+        "Sparse CM12 resident body-forces",
+        "Sparse CM12 resident symmetry-authority"],
+    }),
+    lane: "mini",
+    environment: { FLUID_GPU_ISOLATE_PASS_LABELS: "1" },
+    tracedPid: 4242,
+    traced: { steps: 12, simulationWall_ms: 600 },
+    frameLimit: 2,
+  });
+  assert.equal(report.frames.anchor, authority);
+  assert.equal(report.frames.count, 2);
+  assert.ok(report.frames.samples.every((frame) => Math.abs(frame.durationMs - 50) < 0.01),
+    JSON.stringify(report.frames.samples.map((frame) => frame.durationMs)));
+  assert.ok(report.passes.some(
+    (pass) => pass.label === "Sparse CM12 resident gamma-diffusion"));
+});
+
 test("literal first-frame mode selects advance 1 and uses advance 2 as its exact boundary", async () => {
   const report = await build(writeTrace({ frames: 2, frameUs: 50_000,
     tasks: ["Open coupled topology ready-commit gate", "Advect", "Solve pressure"] }), 2,

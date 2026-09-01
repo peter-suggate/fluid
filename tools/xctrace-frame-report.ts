@@ -327,6 +327,11 @@ const findSpan = (spans: readonly { start: number; end: number }[], time: number
  * frame timeline starts at the frame's work rather than merely having the
  * correct period. */
 export const GPU_FRAME_START_LABELS = [
+  // Sparse CM12 exposes its resident stage partition when diagnostic label
+  // isolation is requested. Frame control and velocity extension are the first
+  // recurring stage; unlike presentation labels this occurs exactly once at
+  // the semantic start of every advance.
+  "Sparse CM12 resident transport-velocity-extension",
   // The dense reference clears its step telemetry, then this is its first
   // compute pass. It fires once for the current-velocity extension and the
   // predicted extension uses a distinct "Uniform predicted" prefix.
@@ -412,15 +417,14 @@ export const detectFrames = (
       const candidate = candidates.find((value) => value.label === label);
       if (candidate === undefined) return undefined;
       if (Math.abs(candidate.count - frameCount) <= 1) return candidate;
-      // Older uniform traces used the same authority label for the current and
-      // predicted velocity-extension invocations. It is still the first work
-      // in an advance, but occurs exactly twice per advance. Recover the first
-      // phase of that repeated marker instead of falling back to an arbitrary
-      // (and usually interior) once-per-frame kernel. New captures give the
-      // predicted invocation its own prefix, but retained traces must remain
-      // reducible.
+      // A semantic start stage may own several Metal encoders: older Uniform
+      // traces reuse one authority label twice, while Sparse CM12's first stage
+      // crosses copy/pass seams and currently emits five encoders. It is still
+      // the first work in an advance. Recover the first phase of that repeated
+      // authored marker instead of falling back to an arbitrary (and usually
+      // interior) once-per-frame kernel.
       const repeats = Math.round(candidate.count / frameCount);
-      if (repeats < 2 || repeats > 4
+      if (repeats < 2 || repeats > 16
         || Math.abs(candidate.count - repeats * frameCount) > 1) return undefined;
       return { ...candidate, count: Math.ceil(candidate.count / repeats),
         starts: candidate.starts.filter((_start, index) => index % repeats === 0) };
