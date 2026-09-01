@@ -6371,8 +6371,11 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
     gradingCap=cachedRefinementGradingCap(brick);
     for(var side=0u;side<6u;side+=1u){
       let neighbor=cm12WorldOwnerAt(coordinate+directions[side]);
-      if(neighbor==INVALID||(!brickActive(neighbor)
-        &&!candidateBrickActive(neighbor))){continue;}
+      // Pre-catalogued dry leaves are the future topology of a hard region and
+      // its grading halo. Their caps must constrain the first wet activation;
+      // skipping them lets the frontier request B8 beside an inactive B2 leaf,
+      // which validation correctly rejects and turns into an artificial wall.
+      if(neighbor==INVALID){continue;}
       gradingCap=min(gradingCap,min(BRICK_FINE_RESOLUTION,
         2u*cachedRefinementGradingCap(neighbor)));
     }

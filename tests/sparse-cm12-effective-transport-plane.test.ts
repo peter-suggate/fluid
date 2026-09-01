@@ -160,6 +160,9 @@ test("region-equivalent face transport scales the shared cache without taxing de
   assert.match(closeFaces,
     /if\(hardRegionCaps\)\{[\s\S]*atomicStore\(&activity\[activityRecord\(brick\)\+8u\],min\(required,gradingCap\)\)/,
     "the globally closed hard floor must remain authoritative");
+  assert.match(closeFaces,
+    /neighbor=cm12WorldOwnerAt\(coordinate\+directions\[side\]\);[\s\S]*if\(neighbor==INVALID\)\{continue;\}[\s\S]*2u\*cachedRefinementGradingCap\(neighbor\)/,
+    "inactive pre-catalogued halo leaves must grade the first wet activation");
   const scheduler = functionSource(wgsl, "scheduleTopologyPreparation",
     "fn acquireTopologyPage");
   assert.match(scheduler,

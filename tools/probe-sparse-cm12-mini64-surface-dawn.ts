@@ -55,6 +55,7 @@ const steps = numericArgument("steps", scenario === "sphere" ? 0
   : scenario === "corner-drop" ? 12
   : Number(process.env.FLUID_MIN8_SURFACE_STEPS
     ?? process.env.FLUID_MINI64_MIN8_SURFACE_STEPS ?? 7));
+const frontierTopologyOnly = process.argv.includes("--frontier-topology-only");
 const outputPath = resolve(stringArgument("out",
   process.env.FLUID_MINI64_MIN8_SURFACE_OUT
     ?? `artifacts/sparse-cm12-mini${grid}-min8-${region}-${scenario}-surface.json`));
@@ -568,7 +569,7 @@ try {
     probe: cornerDrop ? "sparse-cm12-corner-drop-adaptive-floor-surface"
       : longDam ? `sparse-cm12-long-dam-min8-${region}-surface`
       : `sparse-cm12-mini${grid}-min8-${region}-surface`, scenario, steps,
-    time_s: steps * CM12_PAPER_DT_S, dimensions,
+    time_s: steps * CM12_PAPER_DT_S, dimensions, frontierTopologyOnly,
     field: fieldReceipt(field), surfaces, boundarySurface, heightChange,
     acceptedFaceGrading, acceptedRefinementFloorViolations,
     ...(resetDensityHeight && finalDensityHeight ? { densityHeight: {
@@ -662,7 +663,7 @@ try {
     [4, 2, 1, 1, 4, 2, 1, 1],
     "the regression must exercise the B4/B2/B1 RHS ladder");
   }
-  if (scenario === "long-dam" && steps > 0) {
+  if (scenario === "long-dam" && steps > 0 && !frontierTopologyOnly) {
     assert.ok(filmVisibility);
     assert.equal(filmVisibility.hiddenHeightBuckets.atLeastHalf, 0,
       `coarse cells hid ${filmVisibility.hiddenHeightBuckets.atLeastHalf} floor-film columns `
@@ -675,6 +676,15 @@ try {
     assert.ok(filmVisibility.maximumShortFilmNeighbourStepCells <= 1.1,
       `the reconstructed short film retained a block step of ${
         filmVisibility.maximumShortFilmNeighbourStepCells} cells`);
+  }
+  if (scenario === "long-dam" && region === "right-x" && steps >= 60) {
+    assert.ok(filmVisibility);
+    const firstRegionBrick = dimensions[0] / 16;
+    assert.ok(Number.isInteger(firstRegionBrick));
+    const regionFront = filmVisibility.xBricks[firstRegionBrick];
+    assert.ok(regionFront && regionFront.meanTotalHeightCells > 0.5
+      && regionFront.visibleColumns > 0,
+    `the front stalled before entering the RHS min8 region: ${JSON.stringify(regionFront)}`);
   }
   if (scenario === "corner-drop" && steps * CM12_PAPER_DT_S >= 0.4) {
     assert.equal(scene.fluid.refinementRegions, undefined,
