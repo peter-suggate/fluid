@@ -2089,8 +2089,13 @@ fn restrictedPresentationDensityAt(lower:vec3i,cellScale:i32,densityOffset:u32)-
   // of repeating the same hash-table lookup for every finest child. Only a
   // genuinely finer owner needs the volume restriction below.
   let owner=compactOwnerCellAt(lower);
-  if(owner.x!=INVALID
-    &&(atomicLoad(&activity[activityRecord(owner.y)+1u])&64u)!=0u){
+  // An accepted active dry owner is authoritative zero density just as an
+  // active wet owner is authoritative nonzero density. Requiring the
+  // presentation-wet bit here expanded every dry B1 cache sample into 8^3
+  // finest-child owner lookups as a front approached it, turning a handful of
+  // legal coarse stencil reads into intermittent hundreds-of-milliseconds
+  // publication stalls.
+  if(owner.x!=INVALID&&brickActive(owner.y)){
     let ownerScale=BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z;
     if(ownerScale>=u32(cellScale)){
       return clamp(state[densityOffset+owner.x]

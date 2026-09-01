@@ -95,6 +95,9 @@ test("a physical waterline gives a rung-independent ghost-fluid boundary", () =>
 
 test("production publication uses guarded column height and keeps its fallback", () => {
   assert.match(shader,
+    /fn restrictedPresentationDensityAt[\s\S]*owner\.x!=INVALID&&brickActive\(owner\.y\)[\s\S]*ownerScale>=u32\(cellScale\)/,
+    "active dry coarse owners must not expand into finest-child presentation lookups");
+  assert.match(shader,
     /fn presentationIntegratedColumnHeight[\s\S]*massHeight\+=fill\*f32\(width\)/);
   assert.match(shader,
     /fn presentationIntegratedWorldColumnHeight[\s\S]*for\(var y=0;y<i32\(p\.dimensions\.y\)[\s\S]*massHeight\+=fill\*f32\(width\)/,
