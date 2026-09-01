@@ -297,6 +297,44 @@ function filmVisibilityReceipt(heights: Float32Array,
     }, xBricks };
 }
 
+function deepTopSurfaceReceipt(visibleSurface: Float32Array,
+  totalHeights: Float32Array, nx: number, nz: number,
+  minimumColumnHeightCells = 8.125, maximumSourceStepCells = 12) {
+  let neighbourPairs = 0;
+  let sourceDiscontinuityPairs = 0;
+  let maximumNeighbourStepCells = 0;
+  let maximumPair: { readonly from: readonly [number, number];
+    readonly to: readonly [number, number]; readonly fromSurface: number;
+    readonly toSurface: number; readonly fromHeight: number;
+    readonly toHeight: number } | undefined;
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const index = x + nx * z;
+    if (!(totalHeights[index]! > minimumColumnHeightCells)
+      || !Number.isFinite(visibleSurface[index]!)) continue;
+    for (const [dx, dz] of [[1, 0], [0, 1]] as const) {
+      if (x + dx >= nx || z + dz >= nz) continue;
+      const other = x + dx + nx * (z + dz);
+      if (!(totalHeights[other]! > minimumColumnHeightCells)
+        || !Number.isFinite(visibleSurface[other]!)) continue;
+      if (Math.abs(totalHeights[other]! - totalHeights[index]!)
+        > maximumSourceStepCells) {
+        sourceDiscontinuityPairs += 1;
+        continue;
+      }
+      neighbourPairs += 1;
+      const step = Math.abs(visibleSurface[other]! - visibleSurface[index]!);
+      if (step > maximumNeighbourStepCells) {
+        maximumNeighbourStepCells = step;
+        maximumPair = { from: [x, z], to: [x + dx, z + dz],
+          fromSurface: visibleSurface[index]!, toSurface: visibleSurface[other]!,
+          fromHeight: totalHeights[index]!, toHeight: totalHeights[other]! };
+      }
+    }
+  }
+  return { minimumColumnHeightCells, maximumSourceStepCells, neighbourPairs,
+    sourceDiscontinuityPairs, maximumNeighbourStepCells, maximumPair };
+}
+
 function surfaceReceipt(heights: Float32Array, nx: number, nz: number) {
   let columns = 0, neighbourPairs = 0, maximumNeighbourStep = 0;
   let laplacianSamples = 0, absoluteLaplacian = 0;
@@ -525,7 +563,8 @@ try {
   await device.queue.onSubmittedWorkDone();
   const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
   const field = await readPublishedField(device, solver);
-  const finalDiagnostic = scenario === "large-offset" || longDam || cornerDrop
+  const finalDiagnostic = scenario === "dam" || scenario === "large-offset"
+    || longDam || cornerDrop
     ? await solver.readDiagnosticFields(cornerDrop) : undefined;
   const finalDensityHeight = finalDiagnostic ? densityHeightReceipt(
     finalDiagnostic.density, finalDiagnostic.solidOpenFraction, dimensions)
@@ -543,6 +582,9 @@ try {
     ? filmVisibilityReceipt(finalDensityHeight.floorBrickHeights, positiveY.values,
       finalDensityHeight.heights, dimensions[0], dimensions[2])
     : undefined;
+  const deepTopSurface = scenario === "dam" && finalDensityHeight
+    ? deepTopSurfaceReceipt(positiveY.values, finalDensityHeight.heights,
+      dimensions[0], dimensions[2]) : undefined;
   const regionBoundaries = region === "central-x"
     ? [dimensions[0] / 4, 3 * dimensions[0] / 4]
     : region === "right-x" ? [dimensions[0] / 2] : [];
@@ -583,6 +625,7 @@ try {
         dimensions[0], dimensions[2]),
     } } : {}),
     ...(filmVisibility ? { filmVisibility } : {}),
+    ...(deepTopSurface ? { deepTopSurface } : {}),
     ...(resetActivity ? { resetSurfaceBricks: resetActivity.bricks.filter((brick) => brick.active
       && brick.coordinate[1] === 1).map((brick) => ({
         coordinate: brick.coordinate,
@@ -702,14 +745,18 @@ try {
       + "columns absent after impact");
   }
   if (grid === 64 && region === "whole" && scenario === "dam" && steps === 7) {
-    // The former complete-coarse-cell presentation produced a 23.19-cell
-    // neighbour jump at this evolved front. The primal patch is about 3-5
-    // cells on current Dawn backends; twelve keeps broad physical/numerical
-    // headroom while remaining a categorical ridge-regression detector rather
-    // than a visual golden image.
-    assert.ok(surfaces.positiveY.maximumNeighbourStepCells <= 12,
+    // The former complete-coarse-cell presentation added a 23.19-cell
+    // neighbour jump where the source columns were continuous. Thin-film
+    // publication now also represents the physical dam silhouette, and a B1
+    // simulation can carry a real source-column discontinuity there. Measure
+    // only pairs whose integrated source heights differ by at most the same
+    // twelve-cell ceiling; the oracle then detects publication-added terraces
+    // without classifying coarse source data as a presentation defect.
+    assert.ok(deepTopSurface && deepTopSurface.neighbourPairs >= dimensions[2] * 4,
+      "the min8 evolved dam did not retain enough adjacent deep top-sheet samples");
+    assert.ok(deepTopSurface.maximumNeighbourStepCells <= 12,
       `the min8 evolved top surface regained a complete-cell ridge: ${
-        surfaces.positiveY.maximumNeighbourStepCells} cells`);
+        deepTopSurface.maximumNeighbourStepCells} cells`);
   }
 } finally {
   solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();

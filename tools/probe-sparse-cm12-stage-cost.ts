@@ -120,6 +120,8 @@ Options:
                                      (default 1)
   --final-qa=0|1                    Run full catalogue/transport/frame-plan QA
                                      after timing (default 1; disable for A/B)
+  --xctrace-pre-advance-gate=0|1    Pause after construction; SIGUSR2 encodes
+                                     metadata warmup, then SIGUSR1 releases
   --quiet=0|1                       Print a compact summary instead of full JSON
   --out=PATH                         Write the JSON receipt
 
@@ -143,6 +145,13 @@ const enforceNonPressureGate = argument("enforce-non-pressure-gate",
   argument("enforce-target-gate", "0")) === "1";
 const enforcePressureReceipts = argument("enforce-pressure-receipts", "1") === "1";
 const finalQAEnabled = argument("final-qa", "1") !== "0";
+const xctracePreAdvanceGate = argument("xctrace-pre-advance-gate", "0") === "1";
+// Install both handlers before Dawn construction. An attach driver can then
+// never race the gate and deliver either signal with Node's default action.
+const xctraceMetadataWarm = xctracePreAdvanceGate
+  ? new Promise<void>((resolve) => process.once("SIGUSR2", resolve)) : undefined;
+const xctraceAdvanceReleased = xctracePreAdvanceGate
+  ? new Promise<void>((resolve) => process.once("SIGUSR1", resolve)) : undefined;
 const quiet = argument("quiet", "0") === "1";
 const outputPath = argument("out", "");
 const pressureTopologyCutoff = argument("pressure-topology-cutoff", "") as
@@ -457,6 +466,29 @@ try {
   const solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
     device, scene, "balanced", undefined, adaptiveMassSolverOptions(values), () => {});
   teardownSolver = solver;
+  if (xctraceMetadataWarm && xctraceAdvanceReleased) {
+    console.log(JSON.stringify({ phase: "xctrace-pre-advance-gate", pid: process.pid,
+      state: "waiting-for-SIGUSR2" }));
+    await xctraceMetadataWarm;
+    // Attached Metal recordings need to observe GPU work before they publish
+    // encoder metadata. Keep that disposable work outside the measured frames.
+    const metadataWarmEncoder = device.createCommandEncoder({
+      label: "Sparse CM12 stage profile encoder metadata warmup",
+    });
+    const metadataWarmPass = metadataWarmEncoder.beginComputePass({
+      label: "Sparse CM12 stage profile encoder metadata warmup",
+    });
+    metadataWarmPass.end();
+    device.queue.submit([metadataWarmEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    console.log(JSON.stringify({ phase: "xctrace-pre-advance-gate", pid: process.pid,
+      state: "metadata-warm" }));
+    console.log(JSON.stringify({ phase: "xctrace-pre-advance-gate", pid: process.pid,
+      state: "waiting-for-SIGUSR1" }));
+    await xctraceAdvanceReleased;
+    console.log(JSON.stringify({ phase: "xctrace-pre-advance-gate", pid: process.pid,
+      state: "released" }));
+  }
   // An armed lens changes how the advance is encoded — taps close passes and
   // copy publications aside — so a measurement taken with one armed would be a
   // measurement of the lens. Nothing here arms one; this is the guard that says
