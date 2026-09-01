@@ -78,6 +78,13 @@ const brickFineResolution = optionalPositiveInteger("brick-fine") ?? 16;
 const presentationPageResolution = optionalPositiveInteger("presentation-page") ?? 16;
 const maximumMacroSpanBricks = optionalPositiveInteger("maximum-macro-span");
 const minimumCellSize = optionalPositiveInteger("minimum-cell-size");
+const refinementRegionScope = process.argv.slice(2)
+  .find((value) => value.startsWith("--region-scope="))
+  ?.slice("--region-scope=".length) ?? "full";
+if (refinementRegionScope !== "full" && refinementRegionScope !== "right-half"
+  && refinementRegionScope !== "right-two-thirds") {
+  throw new RangeError("region-scope must be full, right-half, or right-two-thirds");
+}
 if (brickFineResolution !== 4 && brickFineResolution !== 8
   && brickFineResolution !== 16) {
   throw new RangeError("brick-fine must be 4, 8, or 16");
@@ -135,7 +142,10 @@ const configuredScene = () => {
       id: `benchmark-minimum-cell-${minimumCellSize}`,
       rule: "minimum-cell-size",
       minimumCellSize_cells: minimumCellSize,
-      min_m: { x: -0.5 * configured.container.width_m, y: 0,
+      min_m: { x: refinementRegionScope === "right-half"
+        ? 0 : refinementRegionScope === "right-two-thirds"
+          ? -configured.container.width_m / 6
+          : -0.5 * configured.container.width_m, y: 0,
         z: -0.5 * configured.container.depth_m },
       max_m: { x: 0.5 * configured.container.width_m,
         y: configured.container.height_m,
@@ -638,6 +648,7 @@ try {
       prepareBricksPerFrame: prepareBricksPerFrame ?? "method-default",
       surfaceFineRings: surfaceFineRings ?? "method-default",
       minimumCellSize: minimumCellSize ?? "scene-default",
+      refinementRegionScope,
     },
     matchedRepresentation: {
       uniformCells: uniform.solver.info.cellCount,

@@ -1030,10 +1030,17 @@ const ACTIVITY_REFINEMENT_POLICY_MINIMUM_SHIFT:u32=16u;
 const ACTIVITY_REFINEMENT_POLICY_MINIMUM_MASK:u32=0x001f0000u;
 const ACTIVITY_REFINEMENT_POLICY_MAXIMUM_SHIFT:u32=21u;
 const ACTIVITY_REFINEMENT_POLICY_MAXIMUM_MASK:u32=0x03e00000u;
+const ACTIVITY_REFINEMENT_POLICY_MEMBERSHIP:u32=0x00000020u;
+const ACTIVITY_REFINEMENT_POLICY_UNIFORMLY_FILLED:u32=0x00000040u;
+const ACTIVITY_REFINEMENT_POLICY_DEEPLY_ENCLOSED:u32=0x00000080u;
+const ACTIVITY_REFINEMENT_POLICY_AGGREGATE_MASK:u32=0x000000e0u;
+const ACTIVITY_REFINEMENT_POLICY_LEADER:u32=0x08000000u;
 const ACTIVITY_REFINEMENT_POLICY_MASK:u32=
   ACTIVITY_REFINEMENT_POLICY_SCALE_MASK
   |ACTIVITY_REFINEMENT_POLICY_MINIMUM_MASK
-  |ACTIVITY_REFINEMENT_POLICY_MAXIMUM_MASK;
+  |ACTIVITY_REFINEMENT_POLICY_MAXIMUM_MASK
+  |ACTIVITY_REFINEMENT_POLICY_AGGREGATE_MASK
+  |ACTIVITY_REFINEMENT_POLICY_LEADER;
 // Word 38 otherwise uses the low five bits for the recovery rung and the high
 // bit for its lock. Cache this frame's activity-support and presentation
 // frontier reductions in the remaining high bits so lifecycle consumers reuse
@@ -5875,6 +5882,24 @@ fn refinementPolicyTileScale(brick:u32)->u32{
   return max(1u,BRICK_FINE_RESOLUTION/max(1u,bounds.y));
 }
 
+fn refinementPolicyTileLeader(brick:u32,scale:u32)->bool{
+  if(scale<=1u){return false;}
+  let coordinate=cm12WorldLeafCoordinate(brick);
+  let groupOrigin=(coordinate/i32(scale))*i32(scale);
+  let local=vec3u(coordinate-groupOrigin);
+  let ownLinear=local.x+scale*(local.y+scale*local.z);
+  // This scan runs only when authored policy metadata changes. It elects the
+  // first resident sibling with the same physical policy scale; hot frame
+  // paths consume the resulting single-bit receipt without repeating it.
+  for(var linear=0u;linear<ownLinear;linear+=1u){
+    let z=linear/(scale*scale);let remainder=linear-z*scale*scale;
+    let y=remainder/scale;let x=remainder-y*scale;
+    let sibling=cm12WorldOwnerAt(groupOrigin+vec3i(i32(x),i32(y),i32(z)));
+    if(sibling!=INVALID&&refinementPolicyTileScale(sibling)==scale){return false;}
+  }
+  return true;
+}
+
 // Region membership changes only when the authored policy changes. The
 // existing per-brick face-publication workgroup calls this once from lane zero
 // after an edit, before its inactive-leaf early return. Hot physics paths then
@@ -5886,7 +5911,9 @@ fn refreshSparseCM12RefinementPolicyCache(brick:u32){
   atomicStore(&activity[output+38u],
     (recovery&~ACTIVITY_REFINEMENT_POLICY_MASK)
       |refinementPolicyTileScaleBits(scale)
-      |refinementPolicyResolutionBits(bounds));
+      |refinementPolicyResolutionBits(bounds)
+      |select(0u,ACTIVITY_REFINEMENT_POLICY_LEADER,
+        refinementPolicyTileLeader(brick,scale)));
 }
 
 // A minimum-cell-size region makes several authored bricks one physical
@@ -5896,23 +5923,8 @@ fn refreshSparseCM12RefinementPolicyCache(brick:u32){
 fn policyTileMembershipRequired(brick:u32)->bool{
   let scale=cachedRefinementPolicyTileScale(brick);
   if(scale<=1u){return false;}
-  let coordinate=cm12WorldLeafCoordinate(brick);
-  let groupOrigin=(coordinate/i32(scale))*i32(scale);
-  for(var z=0u;z<scale;z+=1u){for(var y=0u;y<scale;y+=1u){
-    for(var x=0u;x<scale;x+=1u){
-      let sibling=cm12WorldOwnerAt(
-        groupOrigin+vec3i(i32(x),i32(y),i32(z)));
-      if(sibling==INVALID){continue;}
-      let output=activityRecord(sibling);
-      let occupied=brickActive(sibling)
-        &&(atomicLoad(&activity[output+1u])&64u)!=0u;
-      let swept=brickActive(sibling)
-        &&atomicLoad(&activity[output+32u])!=0u;
-      if(occupied||swept||brickTouchesAcceptedLiquid(sibling)
-        ||injectionReachesBrick(sibling)){return true;}
-    }
-  }}
-  return false;
+  return (atomicLoad(&activity[activityRecord(brick)+38u])
+    &ACTIVITY_REFINEMENT_POLICY_MEMBERSHIP)!=0u;
 }
 
 // A filled brick with majority-liquid face neighbours in every non-wall direction is
@@ -5943,20 +5955,8 @@ fn brickDeeplyEnclosed(brick:u32)->bool{
 fn policyTileUniformlyFilled(brick:u32)->bool{
   let scale=cachedRefinementPolicyTileScale(brick);
   if(scale<=1u){return false;}
-  let coordinate=cm12WorldLeafCoordinate(brick);
-  let groupOrigin=(coordinate/i32(scale))*i32(scale);
-  for(var z=0u;z<scale;z+=1u){for(var y=0u;y<scale;y+=1u){
-    for(var x=0u;x<scale;x+=1u){
-      let sibling=cm12WorldOwnerAt(
-        groupOrigin+vec3i(i32(x),i32(y),i32(z)));
-      if(sibling==INVALID||!brickActive(sibling)
-        ||(atomicLoad(&activity[activityRecord(sibling)+1u])&64u)==0u
-        ||activityF32(activityRecord(sibling)+4u)<CM12_LIQUID_ISOVALUE){
-        return false;
-      }
-    }
-  }}
-  return true;
+  return (atomicLoad(&activity[activityRecord(brick)+38u])
+    &ACTIVITY_REFINEMENT_POLICY_UNIFORMLY_FILLED)!=0u;
 }
 
 // A region policy tile is one physical coarse brick split into authored
@@ -5966,37 +5966,129 @@ fn policyTileUniformlyFilled(brick:u32)->bool{
 fn policyTileDeeplyEnclosed(brick:u32)->bool{
   let scale=cachedRefinementPolicyTileScale(brick);
   if(scale<=1u){return brickDeeplyEnclosed(brick);}
+  return (atomicLoad(&activity[activityRecord(brick)+38u])
+    &ACTIVITY_REFINEMENT_POLICY_DEEPLY_ENCLOSED)!=0u;
+}
+
+var<workgroup> refinementPolicyAggregate:atomic<u32>;
+var<workgroup> refinementPolicyWorkgroupScale:u32;
+var<workgroup> refinementPolicyWorkgroupEnabled:u32;
+
+// One elected sibling reduces a complete physical policy tile cooperatively.
+// Min-8 therefore costs one 8^3 scan per tile, not one serial 8^3 scan from
+// every authored leaf and every lifecycle/planning consumer.
+@compute @workgroup_size(64)
+fn classifyRefinementPolicyTiles(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let brick=wid.x;
+  if(lane==0u){
+    let scale=select(1u,cachedRefinementPolicyTileScale(brick),brick<p.dispatch.w);
+    refinementPolicyWorkgroupScale=scale;
+    refinementPolicyWorkgroupEnabled=select(0u,1u,brick<p.dispatch.w&&scale>1u
+      &&(atomicLoad(&activity[activityRecord(brick)+38u])
+        &ACTIVITY_REFINEMENT_POLICY_LEADER)!=0u);
+  }
+  let scale=workgroupUniformLoad(&refinementPolicyWorkgroupScale);
+  let enabled=workgroupUniformLoad(&refinementPolicyWorkgroupEnabled);
+  if(enabled==0u){
+    if(lane==0u&&brick<p.dispatch.w&&scale<=1u){
+      atomicAnd(&activity[activityRecord(brick)+38u],
+        ~ACTIVITY_REFINEMENT_POLICY_AGGREGATE_MASK);
+    }return;
+  }
+  if(lane==0u){atomicStore(&refinementPolicyAggregate,6u);}workgroupBarrier();
   let coordinate=cm12WorldLeafCoordinate(brick);
   let groupOrigin=(coordinate/i32(scale))*i32(scale);
   let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
     vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  for(var z=0u;z<scale;z+=1u){for(var y=0u;y<scale;y+=1u){
-    for(var x=0u;x<scale;x+=1u){
-      let local=vec3u(x,y,z);let siblingCoordinate=groupOrigin+vec3i(local);
-      let sibling=cm12WorldOwnerAt(siblingCoordinate);
-      if(sibling==INVALID||!brickActive(sibling)
-        ||(atomicLoad(&activity[activityRecord(sibling)+1u])&64u)==0u
-        ||activityF32(activityRecord(sibling)+4u)<CM12_LIQUID_ISOVALUE){
-        return false;
-      }
-      for(var side=0u;side<6u;side+=1u){
-        let axis=side/2u;let positive=(side&1u)!=0u;
-        let exterior=select(local[axis]==0u,local[axis]+1u==scale,positive);
-        if(!exterior){continue;}
-        let neighbor=cm12WorldOwnerAt(siblingCoordinate+directions[side]);
-        if(neighbor==INVALID){
-          if(!cm12FluidFaceHasEmptyVoxelPair(
-            siblingCoordinate,directions[side])){continue;}
-          return false;
-        }
-        if(!brickActive(neighbor)
-          ||activityF32(activityRecord(neighbor)+4u)<CM12_LIQUID_ISOVALUE){
-          return false;
-        }
-      }
+  let count=scale*scale*scale;
+  for(var linear=lane;linear<count;linear+=64u){
+    let z=linear/(scale*scale);let remainder=linear-z*scale*scale;
+    let y=remainder/scale;let x=remainder-y*scale;let local=vec3u(x,y,z);
+    let siblingCoordinate=groupOrigin+vec3i(local);
+    let sibling=cm12WorldOwnerAt(siblingCoordinate);
+    var filled=sibling!=INVALID&&brickActive(sibling);
+    var demanded=false;var enclosed=filled;
+    if(sibling!=INVALID){
+      let output=activityRecord(sibling);
+      let occupied=brickActive(sibling)
+        &&(atomicLoad(&activity[output+1u])&64u)!=0u;
+      let swept=brickActive(sibling)&&atomicLoad(&activity[output+32u])!=0u;
+      demanded=occupied||swept||brickTouchesAcceptedLiquid(sibling)
+        ||injectionReachesBrick(sibling);
+      filled=filled&&occupied
+        &&activityF32(output+4u)>=CM12_LIQUID_ISOVALUE;
+      enclosed=filled;
     }
-  }}
-  return true;
+    if(demanded){atomicOr(&refinementPolicyAggregate,1u);}
+    if(!filled){atomicAnd(&refinementPolicyAggregate,~6u);continue;}
+    for(var side=0u;side<6u&&enclosed;side+=1u){
+      let axis=side/2u;let positive=(side&1u)!=0u;
+      let exterior=select(local[axis]==0u,local[axis]+1u==scale,positive);
+      if(!exterior){continue;}
+      let neighbor=cm12WorldOwnerAt(siblingCoordinate+directions[side]);
+      if(neighbor==INVALID){
+        enclosed=!cm12FluidFaceHasEmptyVoxelPair(siblingCoordinate,directions[side]);
+      }else{enclosed=brickActive(neighbor)
+        &&activityF32(activityRecord(neighbor)+4u)>=CM12_LIQUID_ISOVALUE;}
+    }
+    if(!enclosed){atomicAnd(&refinementPolicyAggregate,~4u);}
+  }
+  workgroupBarrier();
+  let aggregate=atomicLoad(&refinementPolicyAggregate);
+  let cached=select(0u,ACTIVITY_REFINEMENT_POLICY_MEMBERSHIP,(aggregate&1u)!=0u)
+    |select(0u,ACTIVITY_REFINEMENT_POLICY_UNIFORMLY_FILLED,(aggregate&2u)!=0u)
+    |select(0u,ACTIVITY_REFINEMENT_POLICY_DEEPLY_ENCLOSED,(aggregate&4u)!=0u);
+  for(var linear=lane;linear<count;linear+=64u){
+    let z=linear/(scale*scale);let remainder=linear-z*scale*scale;
+    let y=remainder/scale;let x=remainder-y*scale;
+    let sibling=cm12WorldOwnerAt(groupOrigin+vec3i(i32(x),i32(y),i32(z)));
+    if(sibling==INVALID||cachedRefinementPolicyTileScale(sibling)!=scale){continue;}
+    let output=activityRecord(sibling)+38u;
+    atomicAnd(&activity[output],~ACTIVITY_REFINEMENT_POLICY_AGGREGATE_MASK);
+    atomicOr(&activity[output],cached);
+  }
+}
+
+var<workgroup> refinementPolicyRequiredResolution:atomic<u32>;
+
+@compute @workgroup_size(64)
+fn closeRefinementPolicyTileResolution(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  let brick=wid.x;
+  if(lane==0u){
+    let scale=select(1u,cachedRefinementPolicyTileScale(brick),brick<p.dispatch.w);
+    refinementPolicyWorkgroupScale=scale;
+    refinementPolicyWorkgroupEnabled=select(0u,1u,brick<p.dispatch.w&&scale>1u
+      &&(atomicLoad(&activity[activityRecord(brick)+38u])
+        &ACTIVITY_REFINEMENT_POLICY_LEADER)!=0u);
+  }
+  let scale=workgroupUniformLoad(&refinementPolicyWorkgroupScale);
+  let enabled=workgroupUniformLoad(&refinementPolicyWorkgroupEnabled);
+  if(enabled==0u){return;}
+  if(lane==0u){atomicStore(&refinementPolicyRequiredResolution,1u);}workgroupBarrier();
+  let coordinate=cm12WorldLeafCoordinate(brick);
+  let groupOrigin=(coordinate/i32(scale))*i32(scale);let count=scale*scale*scale;
+  for(var linear=lane;linear<count;linear+=64u){
+    let z=linear/(scale*scale);let remainder=linear-z*scale*scale;
+    let y=remainder/scale;let x=remainder-y*scale;
+    let sibling=cm12WorldOwnerAt(groupOrigin+vec3i(i32(x),i32(y),i32(z)));
+    if(sibling!=INVALID&&brickActive(sibling)
+      &&cachedRefinementPolicyTileScale(sibling)==scale){
+      atomicMax(&refinementPolicyRequiredResolution,
+        atomicLoad(&activity[activityRecord(sibling)+8u]));
+    }
+  }
+  workgroupBarrier();let required=atomicLoad(&refinementPolicyRequiredResolution);
+  for(var linear=lane;linear<count;linear+=64u){
+    let z=linear/(scale*scale);let remainder=linear-z*scale*scale;
+    let y=remainder/scale;let x=remainder-y*scale;
+    let sibling=cm12WorldOwnerAt(groupOrigin+vec3i(i32(x),i32(y),i32(z)));
+    if(sibling!=INVALID&&brickActive(sibling)
+      &&cachedRefinementPolicyTileScale(sibling)==scale){
+      atomicMax(&activity[activityRecord(sibling)+8u],required);
+    }
+  }
 }
 
 fn brickTouchesDemandedMissingWorldPage(brick:u32)->bool{
@@ -6294,30 +6386,8 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
     let neighborAccepted=atomicLoad(&activity[neighborOutput+12u]);
     required=max(required,max(neighborResolution,neighborAccepted)/2u);
   }
-  // A refinement floor defines the physical policy-tile scale as well as a
-  // resolution cap. Keep every authored sub-brick in that tile at one rung,
-  // just as the physically identical coarser scene must. Otherwise an interior
-  // sub-brick can demote below its siblings merely because the finer authoring
-  // lattice exposed an extra brick boundary.
-  let policyScale=cachedRefinementPolicyTileScale(brick);
-  if(policyScale>1u){
-    let groupOrigin=(coordinate/i32(policyScale))*i32(policyScale);
-    for(var z=0u;z<policyScale;z+=1u){for(var y=0u;y<policyScale;y+=1u){
-      for(var x=0u;x<policyScale;x+=1u){
-        let sibling=cm12WorldOwnerAt(
-          groupOrigin+vec3i(i32(x),i32(y),i32(z)));
-        if(sibling==INVALID||!brickActive(sibling)){continue;}
-        let siblingOutput=activityRecord(sibling);
-        // The tile is one physical brick, so all sibling requests close to
-        // their maximum candidate. Including every sibling's accepted rung
-        // here prevents a collective coarsening forever: each old rung pins
-        // every other sibling before the transaction can publish the new one.
-        // The ordinary face-neighbour loop above still supplies the accepted
-        // 2:1 floor required for a budgeted subset of the transaction.
-        required=max(required,atomicLoad(&activity[siblingOutput+8u]));
-      }
-    }}
-  }
+  // Policy-tile sibling requests were cooperatively closed by
+  // closeRefinementPolicyTileResolution immediately before this face pass.
   if(hardRegionCaps){
     atomicStore(&activity[activityRecord(brick)+8u],min(required,gradingCap));
   }else{
@@ -6730,7 +6800,9 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
     let policyScale=max(1u,BRICK_FINE_RESOLUTION/max(1u,bounds.y));
     atomicStore(&activity[output+38u],resolution
       |refinementPolicyTileScaleBits(policyScale)
-      |refinementPolicyResolutionBits(bounds));
+      |refinementPolicyResolutionBits(bounds)
+      |select(0u,ACTIVITY_REFINEMENT_POLICY_LEADER,
+        refinementPolicyTileLeader(leaf,policyScale)));
   }
 }
 

@@ -139,6 +139,36 @@ test("region-equivalent face transport scales the shared cache without taxing de
     /lane==0u&&p\.refinementRegionControl\.z!=0u[\s\S]*refreshSparseCM12RefinementPolicyCache\(brick\)/,
     "policy edits must reuse face publication instead of adding a pipeline");
   assert.doesNotMatch(resident, /dispatch\("cacheSparseCM12RefinementPolicy"/);
+
+  const membership = functionSource(wgsl, "policyTileMembershipRequired",
+    "fn brickDeeplyEnclosed");
+  assert.match(membership, /ACTIVITY_REFINEMENT_POLICY_MEMBERSHIP/);
+  assert.doesNotMatch(membership, /for\(var [xyz]=0u/,
+    "hot membership queries must consume the tile receipt instead of scanning siblings");
+  const classifyTiles = functionSource(wgsl, "classifyRefinementPolicyTiles",
+    "var<workgroup> refinementPolicyRequiredResolution");
+  assert.match(classifyTiles, /@builtin\(local_invocation_index\)lane:u32/);
+  assert.match(classifyTiles, /linear=lane;linear<count;linear\+=64u/,
+    "one leader workgroup must reduce a policy tile cooperatively");
+  const closeTiles = functionSource(wgsl, "closeRefinementPolicyTileResolution",
+    "fn brickTouchesDemandedMissingWorldPage");
+  assert.match(closeTiles, /atomicMax\(&refinementPolicyRequiredResolution/);
+  const closeFaces = functionSource(wgsl, "closePlannedResolution",
+    "fn validateCandidateResolution");
+  assert.doesNotMatch(closeFaces, /for\(var [xyz]=0u;[xyz]<policyScale/,
+    "ordinary grading workgroups must not serially rescan a min-8 tile");
+
+  const planning = resident.slice(resident.indexOf('stage("resolution-planning"'),
+    resident.indexOf('stage("presentation-publication"'));
+  assert.match(planning,
+    /classifyRefinementPolicyTiles[\s\S]*planBrickResolution/);
+  assert.match(planning,
+    /closeRefinementPolicyTileResolution[\s\S]*closePlannedResolution/);
+  const frontierSynthesis = functionSource(wgsl,
+    "synthesizeSparseWorldFrontierPages", "fn restoreHostExteriorIncidence");
+  assert.match(frontierSynthesis,
+    /refinementPolicyTileLeader\(leaf,policyScale\)/,
+    "a dynamically activated region tile must publish a cooperative leader");
 });
 
 test("dry transport retains cumulative gamma instead of injecting a new value", () => {

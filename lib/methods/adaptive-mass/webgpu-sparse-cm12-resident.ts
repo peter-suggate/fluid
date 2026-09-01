@@ -4699,9 +4699,9 @@ export class WebGPUSparseCM12Resident {
       "markIncrementalActivityPostTopology",
       "finalizeIncrementalActivityMasks", "measureBrickActivity",
       "ageIncrementalActivityHistory", "finalizeIncrementalActivityCensus",
-      "classifyAcceptedLiquidFrontier",
+      "classifyAcceptedLiquidFrontier", "classifyRefinementPolicyTiles",
       "planBrickResolution", "activateSweptFrontierPages", "activateInjectionFrontierPages",
-      "closePlannedResolution",
+      "closeRefinementPolicyTileResolution", "closePlannedResolution",
       "validateCandidateResolution", "scheduleTopologyPreparation",
       "allocateCandidateTopologyPages", "synthesizeCandidateCellPages",
       "allocateSparseWorldFrontier", "allocateSparseWorldInteractionPages",
@@ -5737,6 +5737,7 @@ export class WebGPUSparseCM12Resident {
     });
     stage("resolution-planning", () => {
       dispatch("classifyAcceptedLiquidFrontier", leafCapacity);
+      dispatch("classifyRefinementPolicyTiles", leafCapacity);
       dispatch("planBrickResolution", bricks);
       dispatch("activateSweptFrontierPages", leafCapacity);
       // Lifecycle membership is a topology candidate, not a post-publication
@@ -5745,6 +5746,7 @@ export class WebGPUSparseCM12Resident {
       dispatch("retireUnsupportedEmptyBricks", leafCapacity);
       for (let gradingPass = 0;
         gradingPass < Math.log2(this.brickFineResolution); gradingPass += 1) {
+        dispatch("closeRefinementPolicyTileResolution", leafCapacity);
         dispatch("closePlannedResolution", bricks);
       }
       dispatch("validateCandidateResolution", bricks);
@@ -6358,10 +6360,12 @@ export class WebGPUSparseCM12Resident {
     // Promote every intersected brick before writing any density. The planner
     // treats the enabled injection as refine-only: untouched accepted bricks
     // are preserved, while closure may still grow the required 2:1 support.
+    dispatchTopology("classifyRefinementPolicyTiles", leafCapacity);
     dispatchTopology("planBrickResolution", bricks);
     dispatchTopology("activateInjectionFrontierPages", bricks);
     for (let gradingPass = 0;
       gradingPass < Math.log2(this.brickFineResolution); gradingPass += 1) {
+      dispatchTopology("closeRefinementPolicyTileResolution", leafCapacity);
       dispatchTopology("closePlannedResolution", bricks);
     }
     dispatchTopology("validateCandidateResolution", bricks);
