@@ -1,9 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { CM12_SHARPENING_DISTANCE_CELLS } from "../lib/core/cm12-numerics";
+import {
+  resolveMethodValues,
+  type SimulationMethod,
+} from "../lib/core/method-contract";
 import { SCENE_CATALOG } from "../lib/core/scenes";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
 import { uniformMethod } from "../lib/methods/uniform/method";
-import type { SimulationMethod } from "../lib/core/method-contract";
 
 /**
  * Every CM12 lane runs at the paper's 1/30 s unless something opts out on
@@ -31,6 +35,21 @@ test("both CM12 methods declare the paper step as their default", () => {
     assert.equal(spec.default, "paper", `${id} does not default to the paper step`);
     assert.equal(method.presetFor?.("balanced")?.timeStep ?? "paper", "paper",
       `${id}'s balanced preset leaves the paper step`);
+  }
+});
+
+test("both CM12 methods use the shared sharpening return distance", () => {
+  for (const [id, method] of CM12_METHODS) {
+    const spec = method.params.find((candidate) =>
+      candidate.key === "sharpeningDistance");
+    assert.ok(spec, `${id} has no sharpeningDistance parameter`);
+    assert.equal(spec.default, CM12_SHARPENING_DISTANCE_CELLS,
+      `${id} does not expose the shared sharpening default`);
+    assert.equal(
+      resolveMethodValues(method, "balanced", {}).sharpeningDistance,
+      CM12_SHARPENING_DISTANCE_CELLS,
+      `${id}'s balanced preset overrides the shared sharpening default`,
+    );
   }
 });
 

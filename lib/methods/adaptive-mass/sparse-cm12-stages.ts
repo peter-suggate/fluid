@@ -421,7 +421,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         label: "Trace distance",
         unit: "cells",
         min: 0.1, max: 3.1, step: 0.1, digits: 1,
-        hint: "Algorithm 2's D. The paper explores 1.1-3.1 cells and reads increasing it as surface tension; the sparse lane sits at the top of that range because a shorter trace strands removed mass on the tall side walls.",
+        hint: "Algorithm 2's D. Both CM12 lanes default to the 2.1-cell reference value; the paper explores 1.1-3.1 cells and reads increasing it as surface tension.",
         enabled: (context) => context.values.surfaceSharpening !== "off",
       },
       {

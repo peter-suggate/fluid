@@ -119,10 +119,11 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
         (coordinate[0] === 0 || coordinate[0] === brickDimensions[0] - 1)
         && (coordinate[2] === 0 || coordinate[2] === brickDimensions[2] - 1);
       const initial = await solver.readGPUActivityPolicy();
-      assert.equal(initial.bricks.filter((brick) => brick.active).length, 4);
+      assert.equal(initial.bricks.filter((brick) => brick.active).length, 16,
+        "generation zero must include the face-normal air support band");
       assert.equal(initial.bricks.filter((brick) =>
         brick.active && horizontalCorner(brick.coordinate)).length, 0,
-      "corner tiles must begin absent rather than hiding a preallocated apron");
+      "diagonal corners must remain absent beyond the authored face-normal band");
 
       for (let step = 1; step <= SYMMETRY_STEPS; step += 1) {
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
@@ -133,7 +134,7 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
           brick.active && horizontalCorner(brick.coordinate));
         if (step === 1) {
           assert.equal(activity.bricks.filter((brick) => brick.active).length, 16,
-            "the first demand wave must publish the symmetric face-neighbour ring");
+            "the first step must preserve the symmetric face-normal support band");
           assert.equal(corners.length, 0,
             "diagonal corners must not bypass demand-led frontier propagation");
         } else {

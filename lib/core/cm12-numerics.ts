@@ -22,7 +22,8 @@ export const CM12_SHARPENING_TAU = 0.4;
  * Algorithm 2's D, in cells: how far TraceAlongField may carry removed mass
  * toward the 0.5 iso-contour. Sec. 3.5 uses 1.1 to 3.1 across the paper's
  * examples and 2.1 for the Fig. 5 ball drop, which remains the shared
- * reference value. Sparse CM12 declares its 3.1 default with its GPU trace.
+ * reference and default value for both CM12 implementations. The rest of the
+ * published range remains available as an explicit runtime setting.
  */
 export const CM12_SHARPENING_DISTANCE_CELLS = 2.1;
 /**

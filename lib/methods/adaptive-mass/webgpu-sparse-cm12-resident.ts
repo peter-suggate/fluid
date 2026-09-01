@@ -15,7 +15,10 @@ import {
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
 } from "./sparse-brick-atlas";
-import { CM12_SHARPENING_TRACE_STEPS } from "../../core/cm12-numerics";
+import {
+  CM12_SHARPENING_DISTANCE_CELLS,
+  CM12_SHARPENING_TRACE_STEPS,
+} from "../../core/cm12-numerics";
 import type { SolidWorld } from "../../core/solid-world";
 import {
   createSparseCM12SolidOccupancyLayout,
@@ -371,14 +374,9 @@ export function sparseCM12ActivityPolicy(
   };
 }
 
-/**
- * The sparse lane's D, at the top of the paper's 1.1-to-3.1 range rather than
- * at Uniform CM12's Fig. 5 value of 2.1. A shorter trace leaves the abandoned
- * splash's removed mass on the tall side walls, where the residue regression
- * finds it; matched A/B lanes against the uniform reference therefore have to
- * move one slider or the other.
- */
-export const SPARSE_CM12_SHARPENING_DISTANCE_CELLS = 3.1;
+/** Shared CM12 Algorithm 2 return distance; longer traces remain an explicit setting. */
+export const SPARSE_CM12_SHARPENING_DISTANCE_CELLS =
+  CM12_SHARPENING_DISTANCE_CELLS;
 export const SPARSE_CM12_SHARPENING_TRACE_STEPS = CM12_SHARPENING_TRACE_STEPS;
 export const SPARSE_CM12_SHARPENING_STRENGTH = 1;
 const SPARSE_CM12_TRANSPORT_FIXED_SCALE = 65_536;

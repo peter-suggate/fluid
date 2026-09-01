@@ -44,7 +44,7 @@ export interface AdaptiveMassSolverOptions {
   readonly activityPolicy?: SparseCM12ActivityPolicy;
   /** Omitted only by direct diagnostic constructors, which retain scene-step behavior. */
   readonly timeStep?: "paper" | "scene";
-  /** CM12 Algorithm 2's D, in finest cells. Omitted constructors use the 3.1 upper paper bound. */
+  /** CM12 Algorithm 2's D, in finest cells. Omitted constructors use the shared 2.1 default. */
   readonly sharpeningDistance?: number;
   /** Forward-Euler substeps TraceAlongField may spend reaching D. */
   readonly sharpeningTraceSteps?: number;

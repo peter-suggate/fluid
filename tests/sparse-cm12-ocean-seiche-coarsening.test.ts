@@ -5,8 +5,11 @@ import {
   createDeepPowerHydrostaticScene,
   createOceanSeicheScene,
   getSceneDefinition,
+  getScenePreset,
 } from "../lib/core/scenes";
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
+import { refinementRegionCellBounds, refinementRegionLattice } from
+  "../lib/core/refinement-regions";
 import { sceneCardForDefinition } from "../lib/core/scene-definition";
 import { buildEnvironmentProxyCatalog } from "../lib/core/voxel-environments";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
@@ -14,9 +17,11 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
 import {
   initializeSparseBrickAtlasFromScene,
+  sparseBrickFaceNeighbors,
   sparseBrickContainingCoordinate,
   sparseBrickAtlasStats,
   sparseBrickSpan,
+  sparseCM12InitialActiveBrickKeys,
 } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import {
   adaptiveMassPresentationDimensionsForScene,
@@ -24,6 +29,8 @@ import {
 } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
+import { SPARSE_CM12_VELOCITY_EXTENSION_DEPTH } from
+  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
 import {
   decodeSparseCM12FinePresentationSource,
   sparseCM12FinePresentationPlan,
@@ -48,10 +55,15 @@ test("ocean seiche collapses deep water into graded macro-bricks", () => {
   const stats = sparseBrickAtlasStats(atlas);
 
   assert.ok(atlas.maximumSpanBricks >= 4, "deep water never formed a macro-brick");
-  assert.ok(stats.residentBrickCount < stats.logicalBrickCount / 3,
-    "resident brick storage regressed toward the wet fixed-brick volume");
-  assert.ok(stats.leafCompressionRatio > 9.5,
-    `deep-water compression regressed to ${stats.leafCompressionRatio}`);
+  const wet = atlas.bricks.filter((brick) =>
+    brick.density.some((density) => density > 0));
+  assert.ok(wet.length < stats.logicalBrickCount / 3,
+    "liquid storage regressed toward the wet fixed-brick volume");
+  const wetLeafCount = wet.reduce((sum, brick) =>
+    sum + brick.resolution ** 3, 0);
+  const wetCompressionRatio = stats.equivalentFinestCellCount / wetLeafCount;
+  assert.ok(wetCompressionRatio > 9.5,
+    `deep-water compression regressed to ${wetCompressionRatio}`);
   assert.equal(stats.integratedMassFineCells, 1_853_440,
     "coarsening must preserve the authored pool and raised-slab mass exactly");
 
@@ -73,6 +85,107 @@ test("ocean seiche collapses deep water into graded macro-bricks", () => {
       const neighborWidth = 8 * sparseBrickSpan(neighbor) / neighbor.resolution;
       assert.ok(Math.max(ownWidth, neighborWidth) <= 2 * Math.min(ownWidth, neighborWidth),
       `brick ${brick.key}/${neighbor.key} exceeds 2:1 grading`);
+    }
+  }
+});
+
+test("generation zero retains the authored dry velocity-extension band", () => {
+  const scene = createOceanSeicheScene();
+  const atlas = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
+    initialSurfaceCoarseningBiasRings: 1,
+  });
+  const active = sparseCM12InitialActiveBrickKeys(scene, atlas);
+  const wet = atlas.bricks.filter((brick) =>
+    brick.density.some((density) => density > 0));
+  const drySupport = atlas.bricks.filter((brick) => active.has(brick.key)
+    && brick.density.every((density) => density <= 0));
+
+  assert.ok(drySupport.length > 0,
+    "the active topology must include air cells, not only liquid cells");
+  for (const brick of wet) for (const neighbor of sparseBrickFaceNeighbors(atlas, brick)) {
+    if (neighbor.density.every((density) => density <= 0)) {
+      assert.ok(active.has(neighbor.key),
+        `dry face neighbor ${neighbor.key} of wet brick ${brick.key} is inactive`);
+    }
+  }
+  assert.ok(drySupport.some((brick) => sparseBrickFaceNeighbors(atlas, brick)
+    .every((neighbor) => neighbor.density.every((density) => density <= 0))),
+  "the band must extend beyond the immediate liquid face receiver");
+
+  let matchedCoarseColumnCount = 0;
+  for (let z = 0; z < atlas.brickDimensions[2]; z += 1) {
+    for (let x = 0; x < atlas.brickDimensions[0]; x += 1) {
+      let surfaceY = -1;
+      let surface: (typeof atlas.bricks)[number] | undefined;
+      for (let y = 0; y < atlas.brickDimensions[1]; y += 1) {
+        const brick = sparseBrickContainingCoordinate(atlas, [x, y, z]);
+        if (brick?.density.some((density) => density > 0)) {
+          surfaceY = y;
+          surface = brick;
+        }
+      }
+      if (!surface) continue;
+      const surfaceWidth = 8 * sparseBrickSpan(surface) / surface.resolution;
+      const airWidths: number[] = [];
+      for (let y = surfaceY + 1; y < atlas.brickDimensions[1]; y += 1) {
+        const air = sparseBrickContainingCoordinate(atlas, [x, y, z]);
+        if (!air || air.density.some((density) => density > 0)) break;
+        airWidths.push(8 * sparseBrickSpan(air) / air.resolution);
+      }
+      assert.ok(airWidths.reduce((cells, width) => cells + 8 / width, 0)
+        >= SPARSE_CM12_VELOCITY_EXTENSION_DEPTH + 1,
+      `air column ${x},${z} does not cover the extension receiver`);
+      assert.ok(airWidths.every((width) => width <= surfaceWidth),
+        `air column ${x},${z} is coarser than its surface`);
+      if (surfaceWidth === 2 && airWidths.every((width) => width === 2)) {
+        matchedCoarseColumnCount += 1;
+      }
+    }
+  }
+  assert.ok(matchedCoarseColumnCount > 0,
+    "coarse surface columns must retain coarse matched-rung air support");
+});
+
+test("a far-side min-8 region retains ocean macro topology and its hard floor", () => {
+  const scene = createOceanSeicheScene();
+  scene.fluid.refinementRegions = [{
+    id: "far-side-min-8",
+    rule: "minimum-cell-size",
+    minimumCellSize_cells: 8,
+    min_m: { x: 1.2, y: 0, z: -1 },
+    max_m: { x: 4, y: 2.4, z: 1 },
+  }];
+  const atlas = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
+  });
+  const bounds = refinementRegionCellBounds(
+    scene.fluid.refinementRegions[0]!, refinementRegionLattice(scene));
+  const cellWidth = (brick: (typeof atlas.bricks)[number]) =>
+    atlas.brickFineResolution * sparseBrickSpan(brick) / brick.resolution;
+  const intersectsRegion = (brick: (typeof atlas.bricks)[number]) => {
+    const lower = brick.coordinate.map((value) =>
+      value * atlas.brickFineResolution);
+    const upper = lower.map((value) =>
+      value + sparseBrickSpan(brick) * atlas.brickFineResolution);
+    return lower.every((value, axis) => value < bounds.max[axis]!
+      && upper[axis]! > bounds.min[axis]!);
+  };
+
+  assert.ok(atlas.maximumSpanBricks > 1,
+    "a partial hard floor must not disable safe macro-brick construction");
+  assert.ok(atlas.bricks.length < atlas.brickDimensions.reduce(
+    (product, value) => product * value, 1),
+  "the partial region must not catalogue the complete logical brick volume");
+  const intersecting = atlas.bricks.filter(intersectsRegion);
+  assert.ok(intersecting.length > 0);
+  assert.ok(intersecting.every((brick) => cellWidth(brick) >= 8),
+    "every leaf intersecting the authored region must respect its min-8 floor");
+  for (const brick of atlas.bricks) {
+    for (const neighbor of sparseBrickFaceNeighbors(atlas, brick)) {
+      assert.ok(Math.max(cellWidth(brick), cellWidth(neighbor))
+        <= 2 * Math.min(cellWidth(brick), cellWidth(neighbor)),
+      `regional face ${brick.key}/${neighbor.key} exceeds strong 2:1 grading`);
     }
   }
 });
@@ -101,7 +214,9 @@ test("ocean seiche opens without pressure-hull ribs behind the water", () => {
     opening.scene,
     opening.scene.environment ?? "default",
   );
-  assert.equal(opening.scene.environment, "default");
+  assert.equal(opening.scene.environment, "stage");
+  assert.equal(opening.methodProfile, undefined,
+    "the ocean must use ordinary method defaults rather than a scene override");
   assert.ok(environment.primitives.every((primitive) =>
     !primitive.key.includes("hull/rib-")),
   "a station rib behind the transparent tank can look like missing deep water");
@@ -384,10 +499,11 @@ dawnTest("production ocean keeps pressure and represented volume across frames",
       device = await adapter.requestDevice({
         requiredLimits: requiredFluidDeviceLimits(adapter.limits),
       });
-      const scene = createOceanSeicheScene();
+      const scene = getScenePreset("ocean-seiche").create();
       solver = await WebGPUAdaptiveMassSolver.createAsync(
         device, scene, "balanced", undefined, adaptiveMassSolverOptions({}), () => {},
       );
+      await solver.waitForSimulationReady();
       const initialDensity = (await solver.readDiagnosticFields()).density;
       const initialMass = initialDensity.reduce((sum, rho) => sum + Math.max(0, rho), 0);
       const initialWet = initialDensity.reduce((sum, rho) => sum + Number(rho > 0.005), 0);
@@ -410,6 +526,11 @@ dawnTest("production ocean keeps pressure and represented volume across frames",
         assert.equal(pcm.row.fault, 0,
           `ocean frame ${step} PCM row authority faulted at ${pcm.row.firstFault}`);
       }
+      for (let step = 4; step <= 20; step += 1) {
+        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+      }
+      await device.queue.onSubmittedWorkDone();
+      density = (await solver.readDiagnosticFields()).density;
       const [nx, ny, nz] = [solver.info.nx, solver.info.ny, solver.info.nz];
       let deepMinimum = Number.POSITIVE_INFINITY;
       let missingDeepCells = 0;
