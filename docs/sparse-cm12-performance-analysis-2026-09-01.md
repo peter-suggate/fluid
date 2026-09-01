@@ -642,3 +642,32 @@ all passed; the canonical mini64 timing lane passed at 38.7318 ms in isolation a
 lanes, then reproduced the pre-change 17.168268-cell mini64 surface ridge, the
 long-dam 276-versus-80 generation-zero assertion, and the tall-cells timeout before
 exhausting its 180 s budget. No ceiling or correctness assertion was changed.
+
+### Post-candidate face-preparation experiments
+
+Re-ranking the post-change long-dam receipt put dirty oriented face-row preparation
+at 6.488 ms median. Two plausible cleanups were measured and removed:
+
+1. **Fusing physical-seam and sparse-air seam consumers regressed.** The two kernels
+   walk the same packed address list and select disjoint family halves, so one fused
+   traversal appeared to remove repeated indirect loads. Instead, dirty-face median
+   rose from 6.488 to 7.275 ms and p95 from 8.651 to 13.566 ms. The mixed address
+   branch and both inlined row resolvers increase register pressure/divergence across
+   the much heavier RK2 trace. Projection saved only one timestamp quantum. The
+   specialized kernels were restored.
+2. **Caching `rowCenter` in a live `vec3` regressed.** This removed six repeated
+   atomic row-word loads, but kept the vector live across the complete RK2 trace.
+   Dirty-face median rose to 8.520 ms and p95 to 11.600 ms. The source was restored
+   to short-lived row metadata reads.
+
+The updated model is that face preparation is register/live-range constrained once a
+row enters the characteristic trace. Its next useful optimization must remove whole
+row traces—using a generation-stamped compact extended-face domain or a conservative
+temporal characteristic receipt—without widening the specialized hot shader. Any
+compact domain must include dynamic and sparse-air lifecycle rows and prove equality
+against the accepted BFA1 row set; an accepted-row list alone is not sufficient.
+
+Rejected-experiment receipts:
+
+- `artifacts/sparse-cm12-long-dam-fused-seam-face-stage-cost-2026-09-01.json`
+- `artifacts/sparse-cm12-long-dam-face-center-cache-2026-09-01.json`
