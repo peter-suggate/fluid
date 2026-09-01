@@ -64,6 +64,9 @@ test("surface receipts are output-space, generation-stamped, and camera independ
     /finalizeSparseCM12FramePlanPresentationExecution![\s\S]*publishSparseCM12SurfaceRepresentabilityReceipts![\s\S]*rejectSparseCM12FramePlanPresentationFaults!/);
   assert.match(presentation,
     /publishSparseCM12SurfaceRepresentabilityReceipts![\s\S]*dispatchWorkgroups\(bricks\)/);
+  assert.match(presentation,
+    /SPARSE_CM12_PRESENTATION_COMPONENT_ISOLATION[\s\S]*FPP1 \$\{component\}/,
+    "xctrace isolation must expose proof cost without changing the production pass");
 
   const proof = shader.slice(
     shader.indexOf("fn publishSparseCM12SurfaceRepresentabilityReceipts("),

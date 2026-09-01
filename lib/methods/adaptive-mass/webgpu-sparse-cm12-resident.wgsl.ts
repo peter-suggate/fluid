@@ -4649,6 +4649,11 @@ var<workgroup>transferMomentumZDelta:array<f32,64>;
 var<workgroup>transferMomentumXScale:array<f32,64>;
 var<workgroup>transferMomentumYScale:array<f32,64>;
 var<workgroup>transferMomentumZScale:array<f32,64>;
+// A fine-rung promotion has exactly one conservative open-volume correction
+// per parent cell.  Cache that parent result once instead of rebuilding the
+// same eight-child mass census independently for every child.
+var<workgroup>candidateRefinementDensityCorrection:
+  array<f32,CANDIDATE_CELLS_PER_BRICK/8u>;
 var<workgroup>candidateCellScheduled:u32;
 var<workgroup>candidateCellConstructionActivation:u32;
 var<workgroup>candidateFaceScheduled:u32;
@@ -7499,6 +7504,37 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
   let candidateRange=templateBrickCellRange(brick,candidate);
   let sourceCount=select(0u,acceptedRange.y,acceptedActive);
   let candidateCount=select(0u,candidateRange.y,candidateActive);
+  let reconstructingFineRung=accepted==BRICK_FINE_RESOLUTION/2u
+    &&candidate==BRICK_FINE_RESOLUTION;
+  if(reconstructingFineRung){
+    for(var parentLocal=lane;parentLocal<sourceCount;parentLocal+=64u){
+      let pz=parentLocal/(accepted*accepted);
+      let pyz=parentLocal-pz*accepted*accepted;
+      let py=pyz/accepted;let px=pyz-py*accepted;
+      let parentBase=2u*vec3u(px,py,pz);
+      var reconstructedMass=0.0;var openVolume=0.0;
+      for(var child=0u;child<8u;child+=1u){
+        let childCoordinate=parentBase
+          +vec3u(child&1u,(child>>1u)&1u,child>>2u);
+        let childLocal=childCoordinate.x+candidate*(childCoordinate.y
+          +candidate*childCoordinate.z);
+        let childCell=candidateRange.x+childLocal;
+        let childQ=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION)
+          +vec3i(childCoordinate);
+        let childOpen=cellOpenFraction(childCell);
+        let childVolume=candidateCellVolume(brick,candidate,childLocal);
+        reconstructedMass+=directSmoothedPresentationDensityAt(
+          childQ,2u,destinationDensity())*childOpen*childVolume;
+        openVolume+=childOpen*childVolume;
+      }
+      let parentCell=first+parentLocal;
+      let targetMass=state[destinationDensity()+parentCell]
+        *cellVolume(parentCell);
+      candidateRefinementDensityCorrection[parentLocal]=select(0.0,
+        (targetMass-reconstructedMass)/openVolume,openVolume>1e-12);
+    }
+  }
+  workgroupBarrier();
   var beforeMass=0.0;var beforeGamma=0.0;var beforeMomentum=vec3f(0.0);
   var beforeGammaScale=0.0;var beforeMomentumScale=vec3f(0.0);
   for(var local=lane;local<sourceCount;local+=64u){let cell=first+local;
@@ -7552,24 +7588,7 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
       // The limited field is conservative in geometric volume; apply one
       // parent-local effective-density offset so it is also conservative in
       // open volume. Fully open parents receive a zero offset.
-      let parentBase=2u*vec3u(cx/2u,cy/2u,cz/2u);
-      var reconstructedMass=0.0;var openVolume=0.0;
-      for(var child=0u;child<8u;child+=1u){
-        let childCoordinate=parentBase+vec3u(child&1u,(child>>1u)&1u,child>>2u);
-        let childLocal=childCoordinate.x+candidate*(childCoordinate.y
-          +candidate*childCoordinate.z);
-        let childCell=candidateRange.x+childLocal;
-        let childQ=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION)
-          +vec3i(childCoordinate);
-        let childOpen=cellOpenFraction(childCell);
-        let childVolume=candidateCellVolume(brick,candidate,childLocal);
-        reconstructedMass+=directSmoothedPresentationDensityAt(
-          childQ,2u,destinationDensity())*childOpen*childVolume;
-        openVolume+=childOpen*childVolume;
-      }
-      let targetMass=state[destinationDensity()+cell]*cellVolume(cell);
-      let correction=select(0.0,(targetMass-reconstructedMass)/openVolume,
-        openVolume>1e-12);
+      let correction=candidateRefinementDensityCorrection[sourceLocal];
       rho=(reconstructed+correction)*cellOpenFraction(candidateCell);
       gamma=state[destinationGamma()+cell];pressure=state[p.stateOffsets2.x+cell];
       let velocityAt=destinationCellVelocity()+4u*cell;

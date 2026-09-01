@@ -69,6 +69,25 @@ test("GPU-grown page-local leaves may validate same-rung retirement", () => {
     "page-local dynamic leaves must bypass only the template-slot early return");
 });
 
+test("fine-rung candidate transfer computes each parent mass correction once", () => {
+  const transfer = functionSource(wgsl, "transferCandidateCellsWork",
+    "@compute @workgroup_size(64)\nfn transferCandidateCells(");
+  const correction = transfer.indexOf(
+    "candidateRefinementDensityCorrection[parentLocal]");
+  const childTransfer = transfer.indexOf(
+    "for(var local=lane;local<candidateCount;local+=64u)");
+  assert.ok(correction >= 0 && childTransfer > correction,
+    "the parent correction cache must be complete before child reconstruction");
+  assert.equal(count(transfer, /for\(var child=0u;child<8u;child\+=1u\)/g), 1,
+    "the eight-child mass census must not return to the per-child transfer loop");
+  assert.match(transfer,
+    /let correction=candidateRefinementDensityCorrection\[sourceLocal\]/,
+    "each child must consume its workgroup's generation-local parent correction");
+  assert.match(wgsl,
+    /array<f32,CANDIDATE_CELLS_PER_BRICK\/8u>/,
+    "the cache must scale with the B4/B8/B16 parent rung, not a fixed data size");
+});
+
 test("liquid injection opens and composes its tile-population journal", () => {
   const begin = host.indexOf("Sparse CM12 resident liquid injection topology");
   const end = host.indexOf("Sparse CM12 resident liquid injection\"", begin + 1);

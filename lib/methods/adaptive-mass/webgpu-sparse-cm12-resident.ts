@@ -31,6 +31,7 @@ import {
 } from "./sparse-cm12-solid-occupancy";
 import type { GPUFluidFaceVelocitySource } from "../../core/webgpu-face-velocity-overlay";
 import type { GPUFluidTracerSource } from "../../core/webgpu-tracer-overlay";
+import { passBrokerLabelIsolationRequested } from "../../core/webgpu-pass-broker";
 import type { GPUPressureJournalSource } from "../../core/webgpu-pressure-journal-overlay";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import type { GPURigidSolidWorldCollisionSource } from
@@ -623,6 +624,11 @@ export interface SparseCM12StageEncodeContext<Stage extends SparseCM12ResidentSt
 }
 
 const WORKGROUP_SIZE = 64;
+// Diagnostic captures may split the presentation executor by data domain so
+// xctrace can attribute its compact-page, capacity-verification and proof work.
+// Production leaves this false and retains the original single compute pass.
+const SPARSE_CM12_PRESENTATION_COMPONENT_ISOLATION =
+  passBrokerLabelIsolationRequested();
 /** Small predefined call-graph families amortize shared helper compilation.
  * Chunks are submitted and released serially below. Four roots keep each Metal
  * compiler unit modest without returning to hundreds of one-use modules. */
@@ -6173,20 +6179,32 @@ export class WebGPUSparseCM12Resident {
     encoder.copyBufferToBuffer(this.activity,
       this.framePlanPresentationLayout.indirectBinding.offset,
       this.presentationIndirectArguments, 0, 12);
-    const execute = encoder.beginComputePass({ label: `${label} FPP1 execute` });
+    let execute = encoder.beginComputePass({
+      label: `${label} FPP1 ${SPARSE_CM12_PRESENTATION_COMPONENT_ISOLATION
+        ? "packet publication" : "execute"}`,
+    });
     execute.setBindGroup(0, this.bindGroup);
+    const nextPresentationComponent = (component: string) => {
+      if (!SPARSE_CM12_PRESENTATION_COMPONENT_ISOLATION) return;
+      execute.end();
+      execute = encoder.beginComputePass({ label: `${label} FPP1 ${component}` });
+      execute.setBindGroup(0, this.bindGroup);
+    };
     execute.setPipeline(this.pipelines.executeSparseCM12FramePlanPresentationPacket!);
     execute.dispatchWorkgroupsIndirect(this.presentationIndirectArguments, 0);
     execute.setPipeline(this.pipelines.commitSparseCM12FramePlanPresentationPacket!);
     execute.dispatchWorkgroupsIndirect(this.presentationIndirectArguments, 0);
+    nextPresentationComponent("verification");
     execute.setPipeline(this.pipelines.verifySparseCM12FramePlanPresentation!);
     execute.dispatchWorkgroups(bricks);
     execute.setPipeline(this.pipelines.finalizeSparseCM12FramePlanPresentationExecution!);
     execute.dispatchWorkgroups(1);
+    nextPresentationComponent("surface proof");
     execute.setPipeline(this.pipelines.publishSparseCM12SurfaceRepresentabilityReceipts!);
     // Resolution decisions cover the complete accepted brick census. They
     // must not depend on the renderer's currently visible page subset.
     execute.dispatchWorkgroups(bricks);
+    nextPresentationComponent("fault rejection");
     execute.setPipeline(this.pipelines.rejectSparseCM12FramePlanPresentationFaults!);
     execute.dispatchWorkgroups(bricks);
     execute.end();

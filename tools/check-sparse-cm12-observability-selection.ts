@@ -48,12 +48,15 @@ const framePlanBody = resident.slice(resident.indexOf("private encodeFramePlanPr
 assert.equal((framePlanBody.match(/dispatch\("/g) ?? []).length, 10, "FPL plan dispatch count");
 assert.equal((framePlanBody.match(/plan\.dispatchWorkgroupsIndirect/g) ?? []).length, 0,
   "FPL plan must not import a VEX catalogue");
-assert.equal((framePlanBody.match(/execute\.dispatchWorkgroups/g) ?? []).length, 5,
+assert.equal((framePlanBody.match(/execute\.dispatchWorkgroups/g) ?? []).length, 6,
   "FPP execute dispatch count");
 assert.equal((framePlanBody.match(/encoder\.copyBufferToBuffer/g) ?? []).length, 2,
   "FPL/FPP copy count");
-assert.equal((framePlanBody.match(/const (?:plan|execute) = encoder\.beginComputePass/g) ?? []).length,
-  2, "production FPL/FPP pass count");
+assert.match(framePlanBody,
+  /if \(!SPARSE_CM12_PRESENTATION_COMPONENT_ISOLATION\) return;/,
+  "presentation component boundaries must remain diagnostic-only");
+assert.equal((framePlanBody.match(/encoder\.beginComputePass/g) ?? []).length, 4,
+  "FPL/FPP owns one QA pass, two production passes, and one gated diagnostic split site");
 assert.doesNotMatch(resident, /encodeVelocityExtensionPlan/,
   "retired VEX root/frontier planner returned");
 

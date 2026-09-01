@@ -568,3 +568,77 @@ TypeScript's repository-wide check is not green on the shared tree because of
 unrelated existing errors in the Losasso harness, a ceiling-slab test and older
 activity-policy tool literals. Those errors were not edited or masked during this
 round.
+
+## Large-scene re-review and second cleanup round
+
+The mini16 FPP1 aggregate was split under the existing diagnostic-only pass-isolation
+switch without changing the production command graph. On mini16, the 1.160 ms
+aggregate resolved to 0.900 ms of accepted-output surface proof and 0.258 ms of
+packet publication. That made the proof look like the next target, but the required
+larger-scene capture changed the priority:
+
+| large power-dam B8/P8 stage | ms/advance | share of attributed GPU time |
+|---|---:|---:|
+| candidate transfer | 7.753 | 41.6% |
+| surface sharpening | 1.556 | 8.4% |
+| conservative transport | 1.024 | 5.5% |
+| transport velocity extension | 1.013 | 5.4% |
+| resolution planning | 0.973 | 5.2% |
+| activity measurement | 0.844 | 4.5% |
+| FPP1 surface proof | 0.744 | 4.0% |
+| FPP1 packet publication | 0.195 | 1.0% |
+
+The scene carried 30,080 active samples at a 0.367 active compression ratio. Its
+18.81 ms of GPU-busy time had only 5.4% mean compute occupancy. Surface proof did
+not scale with the larger topology, while candidate transfer became 42% of the
+frame. This is why the proof was left intact: weakening or approximating it would
+sacrifice aggressive coarse-surface safety to optimize the wrong workload.
+
+Timestamp receipts on a moving long-dam front localized the candidate spike to
+coarse-to-fine scalar/momentum transfer. Each of the eight B8 children of a B4
+parent independently repeated the same eight-child open-volume mass census. One
+refined brick therefore performed 4,096 redundant limited-linear density
+reconstructions. The retained cleanup computes that parent-invariant correction
+once per B4 parent into workgroup memory, barriers once, and lets each child consume
+the exact cached value. The conservative reduction order, generation-local
+transaction, topology decisions and B4-to-B8 output field are unchanged.
+
+Matched B8/P8 long-dam receipts show the result on refinement frames:
+
+| metric | before | parent cache | change |
+|---|---:|---:|---:|
+| candidate field transfer, advance 3 | 4.391 ms | 1.180 ms | -73.1% |
+| candidate field transfer, advance 7 | 4.915 ms | 1.376 ms | -72.0% |
+| whole candidate transfer, advance 3 | 5.898 ms | 2.753 ms | -53.3% |
+| whole candidate transfer, advance 7 | 6.357 ms | 2.884 ms | -54.6% |
+
+Non-refinement frames remained at the same timestamp floor. In the production
+shipping pass layout, the identical 536-step large power-dam run improved from
+17.87 to 14.47 ms/advance (-19.0%). Both runs ended with 30,080 active samples,
+0.258 total compression and 0.367 active compression; the optimized run reported
+zero represented-volume drift, no rejected advances and no validation errors.
+
+Two failed measurements updated the profiling model rather than being discarded:
+
+1. A 174-step xctrace run ended before Instruments' attach latency and counter
+   window. Large-scene captures must size the *stepping phase* independently of
+   variable shader construction time; 536 advances supplied a valid steady window.
+2. A timestamp probe requested samples faster than the instrumentation cadence and
+   captured only 3/8 hydrostatic frames. The corrected 120 ms cadence captured 8/8,
+   and moving-front topology was required because hydrostatic candidate transfer
+   only exposed its 0.33--0.59 ms fixed floor.
+
+Receipts:
+
+- `artifacts/xctrace-sparse-cm12-large-components-2026-09-01/report.html`
+- `artifacts/sparse-cm12-long-dam-candidate-stage-cost-2026-09-01.json`
+- `artifacts/sparse-cm12-long-dam-candidate-parent-cache-2026-09-01.json`
+- `artifacts/sparse-cm12-large-parent-cache-wall-2026-09-01.log`
+
+Post-change validation kept the coarse and dynamic guards green: focused
+hydrostatic adaptivity, live liquid insertion and outside-tank symmetric collapse
+all passed; the canonical mini64 timing lane passed at 38.7318 ms in isolation and
+35.7171 ms in the full matrix. The full canonical matrix again passed its first six
+lanes, then reproduced the pre-change 17.168268-cell mini64 surface ridge, the
+long-dam 276-versus-80 generation-zero assertion, and the tall-cells timeout before
+exhausting its 180 s budget. No ceiling or correctness assertion was changed.

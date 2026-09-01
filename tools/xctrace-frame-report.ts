@@ -412,11 +412,17 @@ export const detectFrames = (
   // not reject the authored frame boundary merely because its count differs
   // from the statistical mode by one; clipping the first/last boundaries
   // below is explicitly designed for that edge condition.
+  // Attached Metal metadata commonly clips several complete edge advances.
+  // For a semantic stage spanning N encoders this appears as N missing label
+  // occurrences, even though each retained phase is still a clean frame start.
+  // Express the tolerance per phase rather than requiring the raw repeated
+  // count to differ from N*mode by only one encoder.
+  const edgePhaseTolerance = Math.max(1, Math.ceil(frameCount * 0.02));
   const anchor = preferredLabels
     .map((label) => {
       const candidate = candidates.find((value) => value.label === label);
       if (candidate === undefined) return undefined;
-      if (Math.abs(candidate.count - frameCount) <= 1) return candidate;
+      if (Math.abs(candidate.count - frameCount) <= edgePhaseTolerance) return candidate;
       // A semantic start stage may own several Metal encoders: older Uniform
       // traces reuse one authority label twice, while Sparse CM12's first stage
       // crosses copy/pass seams and currently emits five encoders. It is still
@@ -425,7 +431,8 @@ export const detectFrames = (
       // interior) once-per-frame kernel.
       const repeats = Math.round(candidate.count / frameCount);
       if (repeats < 2 || repeats > 16
-        || Math.abs(candidate.count - repeats * frameCount) > 1) return undefined;
+        || Math.abs(candidate.count - repeats * frameCount)
+          > repeats * edgePhaseTolerance) return undefined;
       return { ...candidate, count: Math.ceil(candidate.count / repeats),
         starts: candidate.starts.filter((_start, index) => index % repeats === 0) };
     })

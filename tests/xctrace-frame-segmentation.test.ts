@@ -28,14 +28,15 @@ const TASKS = ["Advect", "Solve pressure", "Publish"];
 const writeTrace = (options: {
   frames: number; frameUs: number; extraOn?: readonly number[];
   spacingUs?: number; intervalUs?: number; tasks?: readonly string[];
+  tasksForFrame?: (frame: number) => readonly string[];
   slicesPerEncoder?: number;
 }): Record<string, string> => {
   const directory = mkdtempSync(join(tmpdir(), "xctrace-seg-"));
   const intervals: string[] = [];
   const encoders: string[] = [];
-  const base = options.tasks ?? TASKS;
   let id = 0;
   for (let frame = 0; frame < options.frames; frame += 1) {
+    const base = options.tasksForFrame?.(frame) ?? options.tasks ?? TASKS;
     const labels = options.extraOn?.includes(frame) ? [...base, "Rebuild topology"] : base;
     labels.forEach((label, slot) => {
       id += 1;
@@ -189,6 +190,28 @@ test("a Sparse CM12 start stage spanning five encoders remains the frame anchor"
     JSON.stringify(report.frames.samples.map((frame) => frame.durationMs)));
   assert.ok(report.passes.some(
     (pass) => pass.label === "Sparse CM12 resident gamma-diffusion"));
+});
+
+test("a clipped multi-encoder Sparse start outranks new periodic presentation labels", async () => {
+  const authority = "Sparse CM12 resident transport-velocity-extension";
+  const presentation = "Sparse CM12 frame presentation FPP1 packet publication";
+  const report = await buildFrameReport({
+    tables: writeTrace({
+      frames: 12,
+      frameUs: 50_000,
+      tasksForFrame: (frame) => frame === 0
+        ? [presentation, "Sparse CM12 frame presentation FPP1 surface proof"]
+        : [authority, authority, authority, authority, authority,
+          presentation, "Sparse CM12 frame presentation FPP1 surface proof"],
+    }),
+    lane: "mini",
+    environment: { FLUID_GPU_ISOLATE_PASS_LABELS: "1" },
+    tracedPid: 4242,
+    traced: { steps: 12, simulationWall_ms: 600 },
+    frameLimit: 2,
+  });
+  assert.equal(report.frames.anchor, authority);
+  assert.equal(report.frames.count, 2);
 });
 
 test("literal first-frame mode selects advance 1 and uses advance 2 as its exact boundary", async () => {
