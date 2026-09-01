@@ -1035,8 +1035,9 @@ const ACTIVITY_REFINEMENT_POLICY_MASK:u32=
   |ACTIVITY_REFINEMENT_POLICY_MINIMUM_MASK
   |ACTIVITY_REFINEMENT_POLICY_MAXIMUM_MASK;
 // Word 38 otherwise uses the low five bits for the recovery rung and the high
-// bit for its lock. Cache this frame's exact geometric frontier predicates in
-// the remaining high bits so consumers reuse one cooperative classification.
+// bit for its lock. Cache this frame's activity-support and presentation
+// frontier reductions in the remaining high bits so lifecycle consumers reuse
+// one cooperative classification.
 const ACTIVITY_PRESENTATION_SURFACE_SUPPORT:u32=0x20000000u;
 const ACTIVITY_TOUCHES_ACCEPTED_LIQUID:u32=0x40000000u;
 // Word 9 otherwise contains small planning-reason enums.  The high bit is a
@@ -4525,6 +4526,7 @@ var<workgroup>reduceC:array<f32,64>;
 var<workgroup>activityMoments:array<vec4i,64>;
 var<workgroup>activityMetrics:array<vec4f,64>;
 var<workgroup>activityMasks:array<vec2u,64>;
+var<workgroup>activityBoundaryLiquidFaces:array<u32,64>;
 var<workgroup>activitySolidGeometry:array<vec4f,64>;
 var<workgroup>transferMassBefore:array<f32,64>;
 var<workgroup>transferMassAfter:array<f32,64>;
@@ -5260,38 +5262,9 @@ fn advanceActivityClock(){
 
 fn activityF32(index:u32)->f32{return bitcast<f32>(atomicLoad(&activity[index]));}
 
-struct ActivityPhaseSample {
-  fill:f32,
-  open:bool,
-  brick:u32,
-}
-
-// Phase geometry is a property of the accepted scalar field and SolidWorld,
-// not of the pressure-row catalogue.  Resolve it on the finest voxel lattice
-// so the same liquid/air face is observed beside an active receiver, a retired
-// sparse page, and across a mixed-resolution seam.  A fully solid voxel is not
-// air; it closes the sample pair exactly as it closes the finite-volume row.
-fn activityPhaseSampleAt(q:vec3i)->ActivityPhaseSample{
-  if(cm12SolidVoxelFractionQ8(q)>=255u){
-    return ActivityPhaseSample(0.0,false,INVALID);
-  }
-  let owner=compactOwnerCellAt(q);
-  if(owner.x==INVALID||!brickActive(owner.y)){
-    return ActivityPhaseSample(0.0,true,INVALID);
-  }
-  let openFraction=cellOpenFraction(owner.x);
-  if(openFraction<=1e-8){return ActivityPhaseSample(0.0,false,owner.y);}
-  return ActivityPhaseSample(clamp(
-    state[destinationDensity()+owner.x]/max(openFraction,1e-6),0.0,1.0),
-    true,owner.y);
-}
-
-// A sparse air page is part of the scalar/transport closure whenever one of
-// its open boundary voxels is face-adjacent to represented liquid.  Derive
-// that fact directly from phase plus SolidWorld so activation and retirement
-// agree even when the source brick is coarse and its row incidence no longer
-// reaches the receiver.  This is the page-level form of a finite-volume air
-// ghost layer, not a scene boundary rule.
+// The activity census publishes a 3^3 interface-support mask and a six-face
+// feature-floor receipt. Candidate planning reduces those immutable receipts
+// once per leaf below and caches this bit for all later lifecycle consumers.
 fn brickTouchesAcceptedLiquid(brick:u32)->bool{
   return brick<p.dispatch.w&&cm12WorldLeafAllocated(brick)
     &&(atomicLoad(&activity[activityRecord(brick)+38u])
@@ -5301,39 +5274,6 @@ fn brickHasPresentationSurfaceSupport(brick:u32)->bool{
   return brick<p.dispatch.w&&cm12WorldLeafAllocated(brick)
     &&(atomicLoad(&activity[activityRecord(brick)+38u])
       &ACTIVITY_PRESENTATION_SURFACE_SUPPORT)!=0u;
-}
-
-// Workgroup form of the same exact boundary predicate. Candidate lifecycle
-// kernels own one workgroup per leaf, so spread the six B^2 face samples over
-// its lanes instead of making one lane serially perform all 384 B8 probes.
-fn brickTouchesAcceptedLiquidLane(brick:u32,lane:u32)->bool{
-  if(brick>=p.dispatch.w||!cm12WorldLeafAllocated(brick)){return false;}
-  let origin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
-  let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
-    vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  let faceSamples=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
-  for(var sample=lane;sample<6u*faceSamples;sample+=WORKGROUP){
-    let side=sample/faceSamples;let within=sample-side*faceSamples;
-    let u=i32(within%BRICK_FINE_RESOLUTION);
-    let v=i32(within/BRICK_FINE_RESOLUTION);
-    let direction=directions[side];let axis=side/2u;
-    let uAxis=(axis+1u)%3u;let vAxis=(axis+2u)%3u;
-    var receiver=origin;
-    receiver[axis]+=select(0,i32(BRICK_FINE_RESOLUTION)-1,(side&1u)!=0u);
-    receiver[uAxis]+=u;receiver[vAxis]+=v;
-    let source=receiver+direction;
-    if(cm12SolidVoxelFractionQ8(receiver)>=255u
-      ||cm12SolidVoxelFractionQ8(source)>=255u){continue;}
-    let sourcePhase=activityPhaseSampleAt(source);
-    // Residency is transport lookahead, not rendered-surface classification.
-    // Waiting for the exact rho=.5 isovalue makes an inactive page appear one
-    // frame earlier in whichever equivalent decomposition first straddles that
-    // binary threshold. The configured feature floor activates support while
-    // the front is still dilute, without letting arithmetic residency mist
-    // retain the sparse halo.
-    if(sourcePhase.open&&sourcePhase.fill>p.activityDensity.y){return true;}
-  }
-  return false;
 }
 
 var<workgroup> frontierDemanded:atomic<u32>;
@@ -5347,12 +5287,10 @@ fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
     atomicStore(&presentationSurfaceSupportDemanded,0u);
   }
   workgroupBarrier();
-  if(brickTouchesAcceptedLiquidLane(brick,lane)){
-    atomicStore(&frontierDemanded,1u);
-  }
-  // Compile the complete 26-neighbour presentation apron while this existing
-  // workgroup already owns the leaf. Each direction is visited by one lane;
-  // page publication later consumes a single immutable receipt.
+  // Reduce the complete 26-neighbour activity and presentation aprons while
+  // this workgroup owns the leaf. Each direction is visited by one lane; all
+  // later planning, activation, and retirement kernels consume compact bits
+  // instead of repeating directory and activity-record walks.
   if(lane<26u){
     let neighborBit=select(lane,lane+1u,lane>=13u);
     let dx=i32(neighborBit%3u)-1;
@@ -5360,10 +5298,28 @@ fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
     let dz=i32(neighborBit/9u)-1;
     let neighbor=cm12WorldOwnerAt(
       cm12WorldLeafCoordinate(brick)+vec3i(dx,dy,dz));
-    if(neighbor!=INVALID&&neighbor!=brick&&brickActive(neighbor)
-      &&(atomicLoad(&activity[activityRecord(neighbor)+1u])
-        &(1u|256u|512u))!=0u){
-      atomicStore(&presentationSurfaceSupportDemanded,1u);
+    if(neighbor!=INVALID&&neighbor!=brick&&brickActive(neighbor)){
+      let neighborOutput=activityRecord(neighbor);
+      let neighborReasons=atomicLoad(&activity[neighborOutput+1u]);
+      let reciprocalSupportBit=26u-neighborBit;
+      if((atomicLoad(&activity[neighborOutput+32u])
+          &(1u<<reciprocalSupportBit))!=0u){
+        atomicStore(&frontierDemanded,1u);
+      }
+      if(abs(dx)+abs(dy)+abs(dz)==1){
+        let axis=select(select(2u,1u,dy!=0),0u,dx!=0);
+        let component=vec3i(dx,dy,dz)[axis];
+        // The source face points back toward this target leaf.
+        let sourceSide=select(0u,1u,component<0);
+        let sourceFace=2u*axis+sourceSide;
+        if((atomicLoad(&activity[ACTIVITY_BRICK_BOUNDARY_LIQUID_FACES+neighbor])
+            &(1u<<sourceFace))!=0u){
+          atomicStore(&frontierDemanded,1u);
+        }
+      }
+      if((neighborReasons&(1u|256u|512u))!=0u){
+        atomicStore(&presentationSurfaceSupportDemanded,1u);
+      }
     }
   }
   workgroupBarrier();
@@ -5430,6 +5386,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   var thinFluidCell=false;
   var cutBoundaryCell=false;
   var supportMask=0u;var sweptSupportMask=0u;
+  var boundaryLiquidFaces=0u;
   let measuredCount=select(0u,count,resident);
   // Test the local offset against the count before adding the potentially
   // sparse global base. This makes an empty range structurally incapable of
@@ -5486,13 +5443,13 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       if(!rowAccepted(row)){continue;}
       let own=termCoefficient(incidenceEntry.y);
       let packedMetadata=rowPackedMetadata(row);let axis=packedMetadata>>30u;
+      let distance=rowDistance(row);
       // Separation against the world can create a free surface without an
       // in-domain density crossing. Keep that moving contact at B8 until the
       // ordinary phase-crossing activity signal takes over.
       if(rowSeparatingFromClosedWorld(row)
         &&own*(state[destinationFaceVelocity()+row]-rowSolidVelocity(row))>1e-7){
         interfaceCell=true;surfaceAxes|=1u<<axis;
-        let distance=rowDistance(row);
         predictedMotion=max(predictedMotion,p.frame.x
           *abs(state[destinationFaceVelocity()+row])/max(0.25*distance,1e-12));
       }
@@ -5501,10 +5458,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       // A sparse-air row carries the same free-surface evidence as any other
       // omitted neighbour. Static closure comes only from SolidWorld.
       let airPort=((packedMetadata>>28u)&3u)==3u;
-      var crosses=false;var sideHasFluid=false;var hasOpenOpposingTerm=false;
+      var sideHasFluid=false;var hasOpenOpposingTerm=false;
       let packedTerms=rowPackedTerms(row);let begin=packedTerms&0x007fffffu;
       let end=begin+(packedTerms>>23u);
-      let distance=rowDistance(row);
       let inverseDeformationDistance=1.0/max(0.15*distance,1e-12);
       for(var term=begin;term<end;term+=1u){
         let termEntry=termRecord(term);let coefficient=bitcast<f32>(termEntry.y);
@@ -5516,6 +5472,15 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         let neighborDensity=state[destinationDensity()+neighbor]
           /max(cellOpenFraction(neighbor),1e-6);
         sideHasFluid=sideHasFluid||neighborDensity>featureDensity;
+        // Residency looks ahead at the configured feature floor, before the
+        // rendered rho=.5 surface arrives. Publish a face receipt from the
+        // high-fill endpoint without adding to the 27-neighbour allocation
+        // mask, whose broader semantics must remain unchanged.
+        if(cellBrick(neighbor)!=brick&&fill>p.activityDensity.y
+          &&neighborDensity<=p.activityDensity.y){
+          let side=select(0u,1u,rowPosition[axis]>center[axis]);
+          boundaryLiquidFaces|=1u<<(2u*axis+side);
+        }
         let crossesIsovalue=(neighborDensity>=CM12_LIQUID_ISOVALUE)!=ownWet;
         let neighborVelocityAt=destinationCellVelocity()+4u*neighbor;
         let neighborVelocity=vec3f(state[neighborVelocityAt],
@@ -5528,7 +5493,9 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         // accepted isovalue crossing here. Activity mode's brickDeeplyEnclosed
         // predicate independently rejects surrounded bulk ripples at planning
         // time; Surface-distance mode deliberately follows the rendered field.
-        crosses=crosses||crossesIsovalue;
+        if(crossesIsovalue&&(!ownWet||cellBrick(neighbor)==brick)){
+          interfaceCell=true;densityInterfaceCell=true;surfaceAxes|=1u<<axis;
+        }
         if(crossesIsovalue){
           // The extrapolated air endpoint is a transport stencil value, not
           // represented surface motion. Score the liquid endpoint on both
@@ -5551,7 +5518,12 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       // sparse-air kind after IBO links an opposing accepted cell. Treat it as
       // physical air only when the accepted row is genuinely one-sided.
       let openAirPort=airPort&&!hasOpenOpposingTerm&&ownWet;
-      crosses=crosses||openAirPort;
+      let openTransportPort=airPort&&!hasOpenOpposingTerm
+        &&fill>p.activityDensity.y;
+      if(openTransportPort){
+        let side=select(0u,1u,rowPosition[axis]>center[axis]);
+        boundaryLiquidFaces|=1u<<(2u*axis+side);
+      }
       if(openAirPort){
         predictedMotion=max(predictedMotion,p.frame.x
           *abs(ownVelocity[axis])/max(0.25*distance,1e-12));
@@ -5559,42 +5531,6 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       if(rho>featureDensity&&!sideHasFluid){
         let side=select(0u,1u,rowPosition[axis]>center[axis]);
         exposedSides|=1u<<(2u*axis+side);
-      }
-    }
-    // Reconstruct represented phase crossings independently from pressure-row
-    // incidence.  The row graph legitimately changes when a page retires or a
-    // brick rerungs; letting that graph define air made the identical flooded
-    // boundary alternate between B4/no-support and B8/support every frame.
-    // Sampling every finest voxel pair on each composite face is conservative
-    // with respect to mixed rungs and exact for planar voxel walls.
-    let cellLower=vec3i(round(center-0.5*cellWidths(cell)));
-    let cellUpper=vec3i(round(center+0.5*cellWidths(cell)));
-    for(var axis=0u;axis<3u;axis+=1u){
-      let uAxis=(axis+1u)%3u;let vAxis=(axis+2u)%3u;
-      for(var side=0u;side<2u;side+=1u){
-        let plane=select(cellLower[axis],cellUpper[axis],side==1u);
-        for(var v=cellLower[vAxis];v<cellUpper[vAxis];v+=1){
-          for(var u=cellLower[uAxis];u<cellUpper[uAxis];u+=1){
-            var positive=vec3i(0);positive[axis]=plane;
-            positive[uAxis]=u;positive[vAxis]=v;
-            var negative=positive;negative[axis]-=1;
-            let negativePhase=activityPhaseSampleAt(negative);
-            let positivePhase=activityPhaseSampleAt(positive);
-            if(negativePhase.open&&positivePhase.open
-              &&(negativePhase.fill>=CM12_LIQUID_ISOVALUE)
-                !=(positivePhase.fill>=CM12_LIQUID_ISOVALUE)
-              &&(!ownWet||(negativePhase.brick==brick
-                &&positivePhase.brick==brick))){
-              // A crossing has one geometric owner: its lower-fill endpoint.
-              // When the two endpoints straddle a brick seam this prevents
-              // the same surface from pinning both the B8 interface page and
-              // its B4 liquid-side support page.  Both endpoints of an
-              // interior crossing still mark their shared brick, so no local
-              // surface support is discarded.
-              interfaceCell=true;densityInterfaceCell=true;surfaceAxes|=1u<<axis;
-            }
-          }
-        }
       }
     }
     // A surface test alone misses dilute sheets whose density never reaches
@@ -5677,6 +5613,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   }
   activityMoments[lane]=vec4i(densitySum,momentX,momentY,momentZ);
   activityMetrics[lane]=vec4f(deformation,predictedMotion,detailError,velocityTravel);
+  activityBoundaryLiquidFaces[lane]=boundaryLiquidFaces;
   let activityFlags=surfaceAxes|select(0u,8u,substantialDensityCell)
     |select(0u,16u,occupiedCell)
     |select(0u,32u,thinFluidCell)|select(0u,64u,cutBoundaryCell)
@@ -5691,6 +5628,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       activityMoments[lane]+=activityMoments[lane+width];
       activityMetrics[lane]=max(activityMetrics[lane],activityMetrics[lane+width]);
       activityMasks[lane]|=activityMasks[lane+width];
+      activityBoundaryLiquidFaces[lane]|=activityBoundaryLiquidFaces[lane+width];
     }
     workgroupBarrier();if(width==1u){break;}width/=2u;
   }
@@ -5702,6 +5640,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     atomicStore(&activity[output],0u);
     atomicStore(&activity[output+1u],staticGeometryReason);
     atomicStore(&activity[output+32u],0u);atomicStore(&activity[output+3u],0u);
+    atomicStore(&activity[ACTIVITY_BRICK_BOUNDARY_LIQUID_FACES+brick],0u);
     incrementalActivityAcceptMeasuredTopology(brick);
     return;
   }
@@ -5814,6 +5753,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   atomicStore(&activity[output+3u],select(0u,reducedSweptSupportMask,occupied));
   atomicStore(&activity[output+33u],bitcast<u32>(velocityActivity));
   atomicStore(&activity[output+34u],0u);
+  atomicStore(&activity[ACTIVITY_BRICK_BOUNDARY_LIQUID_FACES+brick],
+    activityBoundaryLiquidFaces[0]&63u);
   incrementalActivityAddCensus(brick,score,reasons);
   incrementalActivityAcceptMeasuredTopology(brick);
 }
@@ -5825,25 +5766,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
 // promotes after the front has crossed, which is both a resolution ping-pong
 // and an under-resolved transport step.
 fn brickHasTransportDemand(brick:u32)->bool{
-  if(!cm12WorldLeafAllocated(brick)){return false;}
-  let coordinate=cm12WorldLeafCoordinate(brick);
-  var requested=injectionReachesBrick(brick)||brickTouchesAcceptedLiquid(brick);
-  for(var dz=-1;dz<=1;dz+=1){for(var dy=-1;dy<=1;dy+=1){
-    for(var dx=-1;dx<=1;dx+=1){if(dx==0&&dy==0&&dz==0){continue;}
-      let neighborCoordinate=coordinate+vec3i(dx,dy,dz);
-      let neighbor=cm12WorldOwnerAt(neighborCoordinate);
-      // A macro leaf can own more than one queried brick coordinate. Such a
-      // query resolves back to this same leaf and is not neighbour support.
-      if(neighbor==INVALID||neighbor==brick||!brickActive(neighbor)){continue;}
-      let bit=u32(1-dx)+3u*u32(1-dy)+9u*u32(1-dz);
-      let neighborOutput=activityRecord(neighbor);
-      // Empty immediate support participates in the next transport stencil,
-      // even at zero velocity. The planner drops this floor after it becomes
-      // flooded unless its own surface/velocity receipts still require it.
-      let demandMask=atomicLoad(&activity[neighborOutput+32u]);
-      requested=requested||(demandMask&(1u<<bit))!=0u;
-  }}}
-  return requested;
+  return cm12WorldLeafAllocated(brick)
+    &&(injectionReachesBrick(brick)||brickTouchesAcceptedLiquid(brick));
 }
 
 fn refinementPolicyTileScale(brick:u32)->u32{

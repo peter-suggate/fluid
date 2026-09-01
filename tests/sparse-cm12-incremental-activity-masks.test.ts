@@ -19,7 +19,8 @@ test("ACT1 uses stamp masks without allocating a brick list", () => {
   assert.equal(layout.brickTopologyStateBaseWords, 160);
   assert.equal(layout.brickCensusStateBaseWords, 168);
   assert.equal(layout.scoreHistogramBaseWords, 176);
-  assert.equal(layout.totalWords, 432);
+  assert.equal(layout.brickBoundaryLiquidFaceBaseWords, 432);
+  assert.equal(layout.totalWords, 440);
   assert.equal("brickListBaseWords" in layout, false);
 
   const words = createSparseCM12IncrementalActivityInitialWords(layout);
@@ -80,6 +81,12 @@ test("resident activity consumers use direct brick-domain dispatch", () => {
     /let incidenceEntry=incidenceRecord\(incidence\);let row=incidenceEntry\.x;/);
   assert.match(measure,
     /let termEntry=termRecord\(term\);let coefficient=bitcast<f32>\(termEntry\.y\);/);
+  assert.match(measure, /boundaryLiquidFaces\|=1u<<\(2u\*axis\+side\);/);
+  assert.match(measure,
+    /activityBoundaryLiquidFaces\[lane\]\|=activityBoundaryLiquidFaces\[lane\+width\];/);
+  assert.match(measure, /ACTIVITY_BRICK_BOUNDARY_LIQUID_FACES\+brick/);
+  assert.doesNotMatch(measure, /activityPhaseSampleAt|cellLower|cellUpper/,
+    "activity must consume compiled row terms, not expand cells to the finest lattice");
   assert.equal((measure.match(/rowDistance\(row\)/g) ?? []).length, 1,
     "row distance must be decoded once outside the indirect term loop");
   assert.match(shader,
@@ -87,6 +94,23 @@ test("resident activity consumers use direct brick-domain dispatch", () => {
   assert.match(shader, /var childFixed:array<i32,8>;/);
   assert.doesNotMatch(shader, /let group=2u\*\(vec3u\(x,y,z\)\/2u\)/,
     "all eight children must not repeat the same sibling-octet gather");
+
+  const classify = shader.slice(shader.indexOf("fn classifyAcceptedLiquidFrontier"),
+    shader.indexOf("fn activitySignalsEnabled", shader.indexOf(
+      "fn classifyAcceptedLiquidFrontier")));
+  assert.match(classify, /let sourceFace=2u\*axis\+sourceSide;/);
+  assert.match(classify, /ACTIVITY_BRICK_BOUNDARY_LIQUID_FACES\+neighbor/);
+  assert.match(classify, /let reciprocalSupportBit=26u-neighborBit;/);
+  assert.match(classify, /neighborOutput\+32u/);
+  assert.doesNotMatch(classify, /BRICK_FINE_RESOLUTION\*BRICK_FINE_RESOLUTION/,
+    "frontier classification must reduce census receipts, not resample brick faces");
+
+  const transportDemand = shader.slice(shader.indexOf("fn brickHasTransportDemand"),
+    shader.indexOf("fn refinementPolicyTileScale", shader.indexOf(
+      "fn brickHasTransportDemand")));
+  assert.match(transportDemand, /brickTouchesAcceptedLiquid\(brick\)/);
+  assert.doesNotMatch(transportDemand, /cm12WorldOwnerAt|neighborOutput\+32u/,
+    "planning must consume the shared frontier receipt without another neighbour walk");
 });
 
 test("one sibling-octet owner preserves the exhaustive detail maximum", () => {

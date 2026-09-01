@@ -6,6 +6,7 @@ export interface SparseCM12IncrementalActivityLayout {
   readonly brickTopologyStateBaseWords: number;
   readonly brickCensusStateBaseWords: number;
   readonly scoreHistogramBaseWords: number;
+  readonly brickBoundaryLiquidFaceBaseWords: number;
   readonly brickCount: number;
   readonly totalWords: number;
 }
@@ -56,6 +57,7 @@ export function createSparseCM12IncrementalActivityLayout(options: {
   const brickTopologyStateBaseWords = brickVelocityStampBaseWords + brickCount;
   const brickCensusStateBaseWords = brickTopologyStateBaseWords + brickCount;
   const scoreHistogramBaseWords = brickCensusStateBaseWords + brickCount;
+  const brickBoundaryLiquidFaceBaseWords = scoreHistogramBaseWords + 256;
   return Object.freeze({
     headerBaseWords,
     brickStampBaseWords,
@@ -63,8 +65,9 @@ export function createSparseCM12IncrementalActivityLayout(options: {
     brickTopologyStateBaseWords,
     brickCensusStateBaseWords,
     scoreHistogramBaseWords,
+    brickBoundaryLiquidFaceBaseWords,
     brickCount,
-    totalWords: scoreHistogramBaseWords + 256,
+    totalWords: brickBoundaryLiquidFaceBaseWords + brickCount,
   });
 }
 

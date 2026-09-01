@@ -30,6 +30,7 @@ const ACTIVITY_BRICK_VELOCITY_STAMP:u32=${layout.brickVelocityStampBaseWords}u;
 const ACTIVITY_BRICK_TOPOLOGY:u32=${layout.brickTopologyStateBaseWords}u;
 const ACTIVITY_BRICK_CENSUS:u32=${layout.brickCensusStateBaseWords}u;
 const ACTIVITY_SCORE_HISTOGRAM:u32=${layout.scoreHistogramBaseWords}u;
+const ACTIVITY_BRICK_BOUNDARY_LIQUID_FACES:u32=${layout.brickBoundaryLiquidFaceBaseWords}u;
 const ACTIVITY_BRICK_COUNT:u32=${layout.brickCount}u;
 const ACTIVITY_TILES_PER_AXIS:u32=${tilesPerAxis}u;
 const ACTIVITY_TILES_PER_BRICK:u32=${tilesPerBrick}u;
