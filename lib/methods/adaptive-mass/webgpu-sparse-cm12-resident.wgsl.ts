@@ -6442,8 +6442,12 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
 }
 
 // All refinement is urgent because the refine-only 2:1 closure may have
-// introduced support rungs around a surface brick. Coarsening is bounded by a
-// rotating brick-ID window, so no atomic ticket race can starve a quiet brick.
+// introduced support rungs around a surface brick. A hard minimum-size region
+// and every outward grading-cap rung are urgent too: their globally closed
+// candidate field is one atomic invariant-preserving transaction. Applying
+// only a budgeted subset could leave accepted B8:B1 faces even though candidate
+// validation passed. Other coarsening is bounded by a rotating brick-ID window,
+// so no atomic ticket race can starve a quiet brick.
 // Both walks are 64 lanes striding the same ranges the single lane used to.
 // Classification is a pure per-brick predicate, so it parallelizes exactly. The
 // coarsening window is order-dependent — it takes the first
@@ -6468,7 +6472,11 @@ fn scheduleTopologyPreparation(@builtin(local_invocation_id)lid:vec3u){
     let candidate=atomicLoad(&activity[output+13u]);
     let lifecycle=candidateBrickActive(brick)!=brickActive(brick)
       ||injectionReachesBrick(brick);
-    if(candidate>accepted||lifecycle){setTopologyPreparationScheduled(output,true);
+    let hardRegionSupport=candidate<accepted
+      &&p.refinementRegionControl.x>0u
+      &&cachedRefinementGradingCap(brick)<BRICK_FINE_RESOLUTION;
+    if(candidate>accepted||lifecycle||hardRegionSupport){
+      setTopologyPreparationScheduled(output,true);
       atomicStore(&activity[output+36u],generation);urgent+=1u;
     }else{ordinary+=1u;}
   }

@@ -118,6 +118,41 @@ async function readPublishedField(device: GPUDevice,
   return field;
 }
 
+function acceptedFaceGradingReceipt(activity: Awaited<ReturnType<
+  WebGPUAdaptiveMassSolver["readGPUActivityPolicy"]>>) {
+  const active = activity.bricks.filter((brick) => brick.active);
+  const violations: Array<{ readonly left: readonly number[];
+    readonly right: readonly number[]; readonly leftWidth: number;
+    readonly rightWidth: number; readonly ratio: number }> = [];
+  let maximumRatio = 1;
+  for (let leftIndex = 0; leftIndex < active.length; leftIndex += 1) {
+    const left = active[leftIndex]!;
+    for (let rightIndex = leftIndex + 1; rightIndex < active.length; rightIndex += 1) {
+      const right = active[rightIndex]!;
+      let faceAxis = -1;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const leftEnd = left.coordinate[axis]! + left.spanBricks;
+        const rightEnd = right.coordinate[axis]! + right.spanBricks;
+        if (leftEnd === right.coordinate[axis] || rightEnd === left.coordinate[axis]) {
+          faceAxis = axis;
+          break;
+        }
+      }
+      if (faceAxis < 0 || [0, 1, 2].some((axis) => axis !== faceAxis
+        && Math.min(left.coordinate[axis]! + left.spanBricks,
+          right.coordinate[axis]! + right.spanBricks)
+          <= Math.max(left.coordinate[axis]!, right.coordinate[axis]!))) continue;
+      const leftWidth = 8 * left.spanBricks / left.acceptedResolution;
+      const rightWidth = 8 * right.spanBricks / right.acceptedResolution;
+      const ratio = Math.max(leftWidth, rightWidth) / Math.min(leftWidth, rightWidth);
+      maximumRatio = Math.max(maximumRatio, ratio);
+      if (ratio > 2) violations.push({ left: left.coordinate, right: right.coordinate,
+        leftWidth, rightWidth, ratio });
+    }
+  }
+  return { maximumRatio, violations };
+}
+
 function positiveFacingSurface(field: Float32Array,
   dimensions: readonly [number, number, number], axis: 0 | 1 | 2): {
     readonly values: Float32Array;readonly width: number;readonly height: number;
@@ -517,6 +552,15 @@ try {
   ]);
   const activeResolutions = activity.bricks.filter((brick) => brick.active)
     .map((brick) => brick.acceptedResolution);
+  const acceptedFaceGrading = acceptedFaceGradingReceipt(activity);
+  // Keep the hard-floor receipt separate from face grading so a future change
+  // cannot satisfy one contract by weakening the other.
+  const acceptedRefinementFloorViolations = activity.bricks.filter((brick) =>
+    brick.active
+      && brick.acceptedResolution > brick.refinementPolicyMaximumResolution)
+    .map((brick) => ({ coordinate: brick.coordinate,
+      acceptedResolution: brick.acceptedResolution,
+      maximumResolution: brick.refinementPolicyMaximumResolution }));
   const resolutionHistogram = [...new Set(activeResolutions)].sort((a, b) => a - b)
     .map((resolution) => ({ resolution,
       count: activeResolutions.filter((value) => value === resolution).length }));
@@ -526,6 +570,7 @@ try {
       : `sparse-cm12-mini${grid}-min8-${region}-surface`, scenario, steps,
     time_s: steps * CM12_PAPER_DT_S, dimensions,
     field: fieldReceipt(field), surfaces, boundarySurface, heightChange,
+    acceptedFaceGrading, acceptedRefinementFloorViolations,
     ...(resetDensityHeight && finalDensityHeight ? { densityHeight: {
       beforeMeanCells: resetDensityHeight.meanCells,
       afterMeanCells: finalDensityHeight.meanCells,
@@ -557,6 +602,11 @@ try {
   await writeFile(outputPath, `${JSON.stringify(receipt, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
   assert.deepEqual(validationErrors, []);
+  assert.deepEqual(acceptedFaceGrading.violations, [],
+    `accepted topology broke 2:1: ${JSON.stringify(acceptedFaceGrading.violations)}`);
+  assert.deepEqual(acceptedRefinementFloorViolations, [],
+    `accepted topology violated the region floor: ${JSON.stringify(
+      acceptedRefinementFloorViolations)}`);
   assert.ok(surfaces.positiveY.columns > 0,
     "the evolved dam did not contain a represented top surface");
   assert.equal(presentation.faultCode, 0,

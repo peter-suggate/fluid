@@ -157,6 +157,16 @@ test("region-equivalent face transport scales the shared cache without taxing de
     "fn validateCandidateResolution");
   assert.doesNotMatch(closeFaces, /for\(var [xyz]=0u;[xyz]<policyScale/,
     "ordinary grading workgroups must not serially rescan a min-8 tile");
+  assert.match(closeFaces,
+    /if\(hardRegionCaps\)\{[\s\S]*atomicStore\(&activity\[activityRecord\(brick\)\+8u\],min\(required,gradingCap\)\)/,
+    "the globally closed hard floor must remain authoritative");
+  const scheduler = functionSource(wgsl, "scheduleTopologyPreparation",
+    "fn acquireTopologyPage");
+  assert.match(scheduler,
+    /hardRegionSupport=candidate<accepted[\s\S]*cachedRefinementGradingCap\(brick\)<BRICK_FINE_RESOLUTION/,
+    "hard-floor and grading-halo demotions must be classified together");
+  assert.match(scheduler, /candidate>accepted\|\|lifecycle\|\|hardRegionSupport/,
+    "the scheduler must commit the closed hard-region set as urgent work");
 
   const planning = resident.slice(resident.indexOf('stage("resolution-planning"'),
     resident.indexOf('stage("presentation-publication"'));
