@@ -15,6 +15,7 @@ const output = resolve(value("out") ?? "artifacts/xctrace-sparse-cm12-stage-repo
 const tracedPid = Number(value("pid"));
 const frameLimit = Number(value("frames") ?? "1");
 const counterReduction = Number(value("counter-reduction") ?? "100");
+const includeCounters = value("counters") !== "0";
 if (!trace || !Number.isSafeInteger(tracedPid) || tracedPid <= 0) {
   throw new Error("--trace and a positive --pid are required");
 }
@@ -23,7 +24,7 @@ if (!Number.isSafeInteger(frameLimit) || frameLimit <= 0) {
 }
 await mkdir(output, { recursive: true });
 
-const specifications = [
+const specifications = ([
   ["metal-gpu-intervals", "gpu-intervals",
     ["start", "duration", "channel-name", "event-label", "process", "encoder-id"]],
   ["metal-application-encoders-list", "encoders",
@@ -38,7 +39,7 @@ const specifications = [
     ["timestamp", "counter-id", "value", "ring-buffer-index"]],
   ["metal-shader-profiler-intervals", "shader-profile",
     ["start", "label", "pso-label"]],
-] as const;
+] as const).filter(([schema]) => includeCounters || !schema.startsWith("gpu-counter-"));
 
 const tables: Record<string, string> = {};
 let counterPolicy: CounterExtractionPolicy | undefined;
@@ -85,7 +86,9 @@ const report = await buildFrameReport({
   lane: "sparse-cm12-stage-cost",
   environment: {
     FLUID_GPU_ISOLATE_PASS_LABELS: "1",
-    FLUID_GPU_ISOLATE_PASS_ENCODERS: "1",
+    // This standalone probe owns semantic PassBroker splitting, but unlike the
+    // smoke harness it does not install timestamp-audit encoder scratch.
+    FLUID_GPU_ISOLATE_PASS_ENCODERS: "0",
   },
   tracedPid,
   frameLimit,
