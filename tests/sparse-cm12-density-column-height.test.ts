@@ -76,6 +76,23 @@ test("cell-centred coarse heights interpolate continuously across their face", (
   assert.equal(sample(8) - sample(7), (right - left) / width);
 });
 
+test("a physical waterline gives a rung-independent ghost-fluid boundary", () => {
+  const waterline = 15.25;
+  for (const width of [1, 2, 4, 8]) {
+    const cutLower = Math.floor(waterline / width) * width;
+    const cutFill = (waterline - cutLower) / width;
+    const liquidCenter = cutFill >= 0.5
+      ? cutLower + width / 2
+      : cutLower - width / 2;
+    const airCenter = liquidCenter + width;
+    const theta = (waterline - liquidCenter) / (airCenter - liquidCenter);
+    assert.ok(theta > 0 && theta < 1, `width ${width}: theta=${theta}`);
+    assert.ok(Math.abs(
+      liquidCenter + theta * (airCenter - liquidCenter) - waterline,
+    ) < 1e-12, `width ${width}: reconstructed waterline`);
+  }
+});
+
 test("production publication uses guarded column height and keeps its fallback", () => {
   assert.match(shader,
     /fn presentationIntegratedColumnHeight[\s\S]*massHeight\+=fill\*f32\(width\)/);
@@ -112,4 +129,21 @@ test("production publication uses guarded column height and keeps its fallback",
   assert.match(shader,
     /publishSparseCM12SurfaceRepresentabilityReceipts[\s\S]*preparePresentationColumnHeights[\s\S]*presentationHeightPhi/,
     "the one-rung proof must evaluate the same accepted height geometry");
+});
+
+test("pressure theta uses guarded physical column height for vertical planar rows", () => {
+  assert.match(shader,
+    /fn pressureIntegratedColumnHeight[\s\S]*massHeight\+=fill\*f32\(width\)/);
+  assert.match(shader,
+    /fn pressurePlanarColumnHeight[\s\S]*maximumHeight-minimumHeight<=0\.01/,
+    "the pressure correction must require a locally flat five-column patch");
+  assert.match(shader,
+    /fn pressureHasPartialRefinementRegion[\s\S]*minimumCellSize>1\.0&&!coversDomain[\s\S]*pressureHasPartialRefinementRegion\(\)/,
+    "whole-domain min-8 dams must retain their established pressure path");
+  assert.match(shader,
+    /var theta=select\(1\.0,cm12GhostFluidTheta[\s\S]*if\(cut&&rowAxis\(row\)==1u[\s\S]*theta=clamp\(\(height-liquidCenterY\)\/\(airCenterY-liquidCenterY\)/,
+    "eligible vertical rows must replace density interpolation with physical distance");
+  assert.match(shader,
+    /var theta=select\(1\.0,cm12GhostFluidTheta/,
+    "general interfaces must retain the existing CM12 fallback");
 });

@@ -3918,6 +3918,81 @@ fn pressureDensity(cell:u32)->f32{
   return rawPressureDensity(cell);
 }
 
+// This experiment addresses refinement seams introduced by a local authored
+// minimum-cell-size region. A whole-domain min-8 dam has no cross-rung surface
+// to reconcile and must retain its established moving-interface behaviour.
+fn pressureHasPartialRefinementRegion()->bool{
+  let count=min(p.refinementRegionControl.x,8u);
+  for(var index=0u;index<count;index+=1u){
+    let lo=p.refinementRegions[2u*index];let hi=p.refinementRegions[2u*index+1u];
+    let minimumCellSize=lo.w;
+    let coversDomain=all(lo.xyz<=vec3f(0.01))
+      &&all(hi.xyz>=vec3f(p.dimensions.xyz)-vec3f(0.01));
+    if(minimumCellSize>1.0&&!coversDomain){return true;}
+  }
+  return false;
+}
+
+// A volume fraction is not a signed distance: rho=.90625 in an eight-cell
+// pressure cell and rho=.625 in a two-cell pressure cell can describe the
+// same planar waterline, but 0.5-rho gives them different ghost distances.
+// Recover the one-dimensional geometric invariant directly from accepted
+// finite-volume mass when the column proves that it is a floor-connected,
+// monotone height field. The general CM12 density-derived theta remains the
+// fallback for overturning, cut, disconnected, or non-planar interfaces.
+fn pressureIntegratedColumnHeight(x:i32,z:i32)->vec2f{
+  var y=0;var massHeight=0.0;var previous=1.0;var columnOpen=-1.0;
+  var sawOpen=false;var sawLiquid=false;var sawAir=false;
+  while(y<i32(p.dimensions.y)){
+    let q=vec3i(x,y,z);
+    if(cm12SolidVoxelFractionQ8(q)>=255u){return vec2f(0.0);}
+    let owner=compactOwnerCellAt(q);var fill=0.0;var width=1;
+    if(owner.x==INVALID||!brickActive(owner.y)){
+      let brickWidth=i32(BRICK_FINE_RESOLUTION);
+      width=max(1,min(brickWidth-y%brickWidth,i32(p.dimensions.y)-y));
+    }else{
+      let open=cellOpenFraction(owner.x);
+      if(open<=1e-6){return vec2f(0.0);}
+      sawOpen=true;
+      if(columnOpen<0.0){columnOpen=open;}
+      if(abs(open-columnOpen)>1e-3){return vec2f(0.0);}
+      fill=clamp(pressureDensity(owner.x),0.0,1.0);
+      let scale=max(1u,BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z);
+      width=max(1,min(i32(scale)-y%i32(scale),i32(p.dimensions.y)-y));
+    }
+    if(fill>previous+0.01){return vec2f(0.0);}
+    previous=fill;sawLiquid=sawLiquid||fill>1e-3;sawAir=sawAir||fill<1.0-1e-3;
+    massHeight+=fill*f32(width);y+=width;
+  }
+  let valid=sawOpen&&sawLiquid&&sawAir;
+  return vec2f(massHeight,select(0.0,1.0,valid));
+}
+
+// Five neighbouring columns are a cheap local planar proof. It keeps this
+// hydrostatic correction out of waves and sloped/curved interfaces while
+// admitting a flat surface across a B4/B2/B1 seam. Sampling a shared physical
+// height makes the ensuing row fraction independent of its pressure-cell rung.
+fn pressurePlanarColumnHeight(row:u32)->vec2f{
+  let center=rowCenter(row);
+  let x=clamp(i32(floor(center.x)),0,i32(p.dimensions.x)-1);
+  let z=clamp(i32(floor(center.z)),0,i32(p.dimensions.z)-1);
+  let offsets=array<vec2i,5>(vec2i(0,0),vec2i(-1,0),vec2i(1,0),
+    vec2i(0,-1),vec2i(0,1));
+  var centreHeight=0.0;var minimumHeight=1e30;var maximumHeight=-1e30;
+  var valid=true;
+  for(var sample=0u;sample<5u;sample+=1u){
+    let sx=clamp(x+offsets[sample].x,0,i32(p.dimensions.x)-1);
+    let sz=clamp(z+offsets[sample].y,0,i32(p.dimensions.z)-1);
+    let receipt=pressureIntegratedColumnHeight(sx,sz);
+    if(sample==0u){centreHeight=receipt.x;}
+    valid=valid&&receipt.y>0.5;
+    minimumHeight=min(minimumHeight,receipt.x);
+    maximumHeight=max(maximumHeight,receipt.x);
+  }
+  valid=valid&&maximumHeight-minimumHeight<=0.01;
+  return vec2f(centreHeight,select(0.0,1.0,valid));
+}
+
 // A cell beneath the surface cannot be air. With V==1 everywhere, the paper's
 // Sec. 3.7 guard against false-air classification (rho' = rho/V, Eq. 20,
 // "a cell with V < 0.5 will likely have rho < 0.5 causing the solver to treat
@@ -4365,16 +4440,39 @@ fn classifyPressureRow(row:u32)->bool{
   let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
   var liquidCount=0u;var airCount=0u;var liquidPhiSum=0.0;var liquidWeight=0.0;
   var airPhiSum=0.0;var airWeight=0.0;
+  var liquidCenterYSum=0.0;var airCenterYSum=0.0;
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);let w=abs(termCoefficient(at));
     let phi=CM12_LIQUID_ISOVALUE-pressureDensity(cell);
     let liquid=pcmCellContains(cell);
-    if(liquid){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;}
-    else{airCount+=1u;airPhiSum+=w*phi;airWeight+=w;}}
+    if(liquid){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;
+      liquidCenterYSum+=w*cellCenter(cell).y;
+    }else{airCount+=1u;airPhiSum+=w*phi;airWeight+=w;
+      airCenterYSum+=w*cellCenter(cell).y;}}
   if(liquidCount==0u){state[p.stateOffsets3.x+row]=0.0;return false;}
-  if(rowKind(row)==3u){let w=liquidWeight;airPhiSum+=w*rowExteriorPhi(row);airWeight+=w;}
+  if(rowKind(row)==3u){let w=liquidWeight;airPhiSum+=w*rowExteriorPhi(row);
+    let liquidCenterY=liquidCenterYSum/max(liquidWeight,1e-9);
+    let direction=select(-1.0,1.0,rowCenter(row).y>=liquidCenterY);
+    airCenterYSum+=w*(liquidCenterY+direction*rowDistance(row));airWeight+=w;}
   let cut=airCount>0u||rowKind(row)==3u;
-  let theta=select(1.0,cm12GhostFluidTheta(liquidPhiSum/max(liquidWeight,1e-9),
+  var theta=select(1.0,cm12GhostFluidTheta(liquidPhiSum/max(liquidWeight,1e-9),
     airPhiSum/max(airWeight,1e-9),1e-12),cut);
+  // Hydrostatic pressure is an affine field along gravity. On a locally flat,
+  // floor-connected surface, place its p=0 boundary at the density-integrated
+  // physical waterline rather than at a rung-dependent interpolation of rho.
+  let gravityLength=length(p.acceleration.xyz);
+  if(cut&&rowAxis(row)==1u&&gravityLength>1e-6
+    &&pressureHasPartialRefinementRegion()
+    &&p.acceleration.y<=-0.5*gravityLength){
+    let heightReceipt=pressurePlanarColumnHeight(row);
+    let liquidCenterY=liquidCenterYSum/max(liquidWeight,1e-9);
+    let airCenterY=airCenterYSum/max(airWeight,1e-9);
+    let height=heightReceipt.x;
+    if(heightReceipt.y>0.5&&airCenterY>liquidCenterY+1e-6
+      &&height>liquidCenterY&&height<airCenterY){
+      theta=clamp((height-liquidCenterY)/(airCenterY-liquidCenterY),
+        CM12_GHOST_FLUID_THETA_MIN,1.0);
+    }
+  }
   state[p.stateOffsets3.x+row]=theta;
   atomicAdd(&activity[PRESSURE_ACTIVE_ROW_COUNT],1u);
   return true;

@@ -48,8 +48,8 @@ if (scenario !== "dam" && scenario !== "sphere" && scenario !== "hydrostatic"
 const grid = numericArgument("grid", Number(process.env.FLUID_MIN8_SURFACE_GRID ?? 64));
 if (grid !== 32 && grid !== 64) throw new RangeError("grid must be 32 or 64");
 const region = stringArgument("region", process.env.FLUID_MIN8_SURFACE_REGION ?? "whole");
-if (region !== "whole" && region !== "central-x") {
-  throw new RangeError("region must be whole or central-x");
+if (region !== "whole" && region !== "central-x" && region !== "right-x") {
+  throw new RangeError("region must be whole, central-x, or right-x");
 }
 const steps = numericArgument("steps", scenario === "sphere" ? 0
   : scenario === "corner-drop" ? 12
@@ -190,6 +190,16 @@ function densityHeightReceipt(density: Float32Array, open: Float32Array,
     heights[x + nx * z] = height;sum += height;
   }
   return { heights, floorBrickHeights, meanCells: sum / heights.length };
+}
+
+function splitHeightReceipt(heights: Float32Array, nx: number, nz: number) {
+  let left = 0, right = 0;
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    if (x < nx / 2) left += heights[x + nx * z]!;
+    else right += heights[x + nx * z]!;
+  }
+  const columns = nx * nz / 2;
+  return { leftMeanCells: left / columns, rightMeanCells: right / columns };
 }
 
 function filmVisibilityReceipt(heights: Float32Array,
@@ -430,12 +440,13 @@ try {
     delete scene.fluid.inflow;
   }
   scene.duration_s = Math.max(scene.duration_s, steps * CM12_PAPER_DT_S);
-  if (!largeOffsetUI && !cornerDrop) {
+  if ((!largeOffsetUI && !cornerDrop) || region !== "whole") {
     scene.fluid.refinementRegions = [{
       id: `mini${grid}-surface-min8-${region}`,
       rule: "minimum-cell-size",
       minimumCellSize_cells: 8,
       min_m: { x: region === "central-x" ? -0.25 * scene.container.width_m
+        : region === "right-x" ? 0
         : -0.5 * scene.container.width_m, y: 0,
         z: -0.5 * scene.container.depth_m },
       max_m: { x: region === "central-x" ? 0.25 * scene.container.width_m
@@ -497,7 +508,8 @@ try {
       finalDensityHeight.heights, dimensions[0], dimensions[2])
     : undefined;
   const regionBoundaries = region === "central-x"
-    ? [dimensions[0] / 4, 3 * dimensions[0] / 4] : [];
+    ? [dimensions[0] / 4, 3 * dimensions[0] / 4]
+    : region === "right-x" ? [dimensions[0] / 2] : [];
   const boundarySurface = regionBoundaryReceipt(
     positiveY.values, positiveY.width, positiveY.height, regionBoundaries);
   const [presentation, activity] = await Promise.all([
@@ -519,6 +531,10 @@ try {
       afterMeanCells: finalDensityHeight.meanCells,
       maximumChangeCells: Math.max(...resetDensityHeight.heights.map((height, index) =>
         Math.abs(finalDensityHeight.heights[index]! - height))),
+      beforeSplit: splitHeightReceipt(resetDensityHeight.heights,
+        dimensions[0], dimensions[2]),
+      afterSplit: splitHeightReceipt(finalDensityHeight.heights,
+        dimensions[0], dimensions[2]),
     } } : {}),
     ...(filmVisibility ? { filmVisibility } : {}),
     ...(resetActivity ? { resetSurfaceBricks: resetActivity.bricks.filter((brick) => brick.active
@@ -571,6 +587,30 @@ try {
       `the first step moved the mean waterline by ${heightChange.meanChangeCells} cells`);
     assert.ok(heightChange.maximumChangeCells <= 0.02,
       `the first step moved a waterline column by ${heightChange.maximumChangeCells} cells`);
+  }
+  if (scenario === "large-offset" && region === "right-x" && steps === 48) {
+    assert.ok(resetDensityHeight && finalDensityHeight);
+    const before = splitHeightReceipt(resetDensityHeight.heights,
+      dimensions[0], dimensions[2]);
+    const after = splitHeightReceipt(finalDensityHeight.heights,
+      dimensions[0], dimensions[2]);
+    assert.ok(Math.abs(before.leftMeanCells - 15.25) <= 1e-6
+      && Math.abs(before.rightMeanCells - 15.25) <= 1e-6,
+    `the reset density waterline was not level: ${JSON.stringify(before)}`);
+    assert.ok(Math.abs(after.leftMeanCells - after.rightMeanCells) <= 0.01,
+      `gravity split the mixed-rung waterline after 1.6 s: ${JSON.stringify(after)}`);
+    assert.ok(Math.abs(finalDensityHeight.meanCells - resetDensityHeight.meanCells) <= 0.001,
+      `the mixed-rung pool changed mean height by ${
+        finalDensityHeight.meanCells - resetDensityHeight.meanCells} cells`);
+    assert.ok(heightChange.maximumChangeCells <= 0.02,
+      `the published waterline moved by ${heightChange.maximumChangeCells} cells`);
+    assert.ok(boundarySurface.maximumDetrendedBumpCells <= 0.01,
+      `the RHS min-8 boundary retained a ${
+        boundarySurface.maximumDetrendedBumpCells}-cell ridge`);
+    assert.deepEqual(resetActivity?.bricks.filter((brick) => brick.active
+      && brick.coordinate[1] === 1).map((brick) => brick.acceptedResolution),
+    [4, 2, 1, 1, 4, 2, 1, 1],
+    "the regression must exercise the B4/B2/B1 RHS ladder");
   }
   if (scenario === "long-dam" && steps > 0) {
     assert.ok(filmVisibility);
