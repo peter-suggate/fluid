@@ -52,6 +52,8 @@ import { createSparseCM12PressureExecutionImageWGSL } from
   "./sparse-cm12-pressure-execution-image.wgsl";
 import type { SparseCM12LogicalOwnerDirectoryLayout } from
   "./sparse-cm12-logical-owner-directory";
+import { createSparseCM12LogicalOwnerDirectoryWGSL } from
+  "./sparse-cm12-logical-owner-directory.wgsl";
 import type { SparseCM12TransportExecutionImageLayout } from
   "./sparse-cm12-transport-execution-image";
 import { createSparseCM12TransportExecutionImageWGSL } from
@@ -342,6 +344,10 @@ export function createWebgpuSparseCM12ResidentWGSL(
     gateBaseWords: number;
     gateCount: 6;
   }>,
+  implicitTransportOwnerArithmeticForQA = false,
+  implicitSharpeningOwnerArithmeticForQA = false,
+  alternatingCapacityRepairReceiptsForQA = false,
+  gatherCapacityRepairForQA = false,
 ): string {
   if (presentationPageResolution > brickFineResolution
     || brickFineResolution % presentationPageResolution !== 0) {
@@ -576,6 +582,15 @@ fn authorizeEmptySparseCM12CandidateEffectsNoFail(acceptedGeneration:u32)->bool{
     ;
   const worldDirectoryEntries = worldDirectoryLayout
     ? createSparseCM12WorldDirectoryWGSL(worldDirectoryLayout) : "";
+  const logicalOwnerEntries = (implicitTransportOwnerArithmeticForQA
+    || implicitSharpeningOwnerArithmeticForQA) && logicalOwnerDirectory
+    ? createSparseCM12LogicalOwnerDirectoryWGSL({
+      layout: logicalOwnerDirectory.layout,
+      directoryName: "topology",
+      baseWords: logicalOwnerDirectory.baseWords,
+      trustedHeader: true,
+    })
+    : "";
   const solidOccupancyEntries = sparseCM12SolidOccupancyWGSL(solidOccupancyLayout);
   const transportExecutionImageEntries = createSparseCM12TransportExecutionImageWGSL({
     layout: transportExecutionImageLayout,
@@ -1836,6 +1851,7 @@ fn clipBoundarySegment(startInput:vec3f,candidate:vec3f)->vec3f{
 }
 
 ${worldDirectoryEntries}
+${logicalOwnerEntries}
 ${solidOccupancyEntries}
 ${transportExecutionImageEntries}
 ${transportPacketAuthorityEntries}
@@ -2568,9 +2584,19 @@ fn directSmoothedPresentationDensityAt(q:vec3i,cellScale:u32,
 
 // Shared compiled-topology sampler for transport, sharpening, and tracers. The
 // expression and dz/dy/dx corner order retain the canonical interpolation.
+${implicitTransportOwnerArithmeticForQA || implicitSharpeningOwnerArithmeticForQA ? `
+fn cm12ImplicitAuthoredOwnerAtFine(q:vec3i)->u32{
+  let authored=cm12LogicalOwnerCellAtFine(q,p.dimensions.xyz);
+  if(authored.x==INVALID){return ownerCellAt(q);}
+  let available=brickActive(authored.y)&&cellResolution(authored.x)==authored.z
+    &&cellOpenVolume(authored.x)>1e-8;
+  return select(INVALID,authored.x,available);
+}
+` : ""}
 fn cm12TransportOwnerAtFine(q:vec3i,direct:bool)->CM12TransportOwner{
   if(direct){
-    let cell=ownerCellAt(q);
+    let cell=${implicitTransportOwnerArithmeticForQA
+      ? "cm12ImplicitAuthoredOwnerAtFine(q)" : "ownerCellAt(q)"};
     if(cell==INVALID){return CM12TransportOwner(INVALID,vec3u(0u),0u);}
     let widths=vec3u(cellWidths(cell));
     return CM12TransportOwner(cell,widths,widths.x*widths.y*widths.z);
@@ -2713,6 +2739,29 @@ fn effectiveTransportStencilAtSpansDirect(
  position:vec3f,inputSpans:vec3f)->TransportStencil{
   return effectiveTransportStencilAtSpansMode(position,inputSpans,true);
 }
+${implicitSharpeningOwnerArithmeticForQA ? /* wgsl */ `
+fn effectiveImplicitSharpeningStencilAtSpans(
+ position:vec3f,inputSpans:vec3f)->TransportStencil{
+  let spans=max(vec3f(1.0),inputSpans);
+  let clamped=cm12ClampToResidentWorld(position,0.5*spans);
+  let shifted=clamped/spans-vec3f(0.5);let lower=vec3i(floor(shifted));
+  let fraction=fract(shifted);var result:TransportStencil;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let lattice=vec3i(floor(cm12ClampToResidentWorld(
+      spans*(vec3f(lower+offset)+vec3f(0.5)),vec3f(1e-4))));
+    let candidate=cm12ImplicitAuthoredOwnerAtFine(lattice);
+    let cell=select(INVALID,candidate,
+      candidate!=INVALID&&cellTransportActive(candidate));
+    let weight=select(1.0-fraction.x,fraction.x,offset.x==1)
+      *select(1.0-fraction.y,fraction.y,offset.y==1)
+      *select(1.0-fraction.z,fraction.z,offset.z==1);
+    result.cells[corner]=cell;
+    result.weights[corner]=select(0.0,weight,cell!=INVALID);
+  }
+  return result;
+}
+` : ""}
 
 ${topologyEffectsEntries}
 
@@ -3844,7 +3893,10 @@ fn sampleSharpeningDensity(position:vec3f)->f32{
   for(var corner=0u;corner<8u;corner+=1u){
     let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
     let lattice=vec3i(floor(spans*(vec3f(lower+offset)+vec3f(0.5))));
-    let cell=cm12TeiOwnerAtFine(lattice).cell;if(cell==INVALID){continue;}
+    let cell=${implicitSharpeningOwnerArithmeticForQA
+      ? "cm12ImplicitAuthoredOwnerAtFine(lattice)"
+      : "cm12TeiOwnerAtFine(lattice).cell"};
+    if(cell==INVALID){continue;}
     let wx=select(1.0-fraction.x,fraction.x,offset.x==1);
     let wy=select(1.0-fraction.y,fraction.y,offset.y==1);
     let wz=select(1.0-fraction.z,fraction.z,offset.z==1);
@@ -3859,7 +3911,9 @@ fn sampleSharpeningField(position:vec3f)->vec4f{
   // construction oracle uses this centred difference over the local half-cell
   // reach, giving a unique orientation-independent derivative at every knot.
   let bounded=cm12ClampToResidentWorld(position,vec3f(1e-4));
-  let owner=cm12TeiOwnerAtFine(vec3i(floor(bounded))).cell;
+  let owner=${implicitSharpeningOwnerArithmeticForQA
+    ? "cm12ImplicitAuthoredOwnerAtFine(vec3i(floor(bounded)))"
+    : "cm12TeiOwnerAtFine(vec3i(floor(bounded))).cell"};
   let halfDistance=select(0.5,0.5*cellMinimumWidth(owner),owner!=INVALID);
   let dx=vec3f(halfDistance,0.0,0.0);
   let dy=vec3f(0.0,halfDistance,0.0);
@@ -3886,13 +3940,18 @@ fn traceSharpeningMass(source:u32)->vec3f{
     if(step>=u32(p.sharpening.y)){break;}
     let field=sampleSharpeningField(position);
     if(field.x>=CM12_LIQUID_ISOVALUE||travelled>=maximumDistance){break;}
-    let owner=cm12TeiOwnerAtFine(vec3i(floor(position))).cell;
+    let owner=${implicitSharpeningOwnerArithmeticForQA
+      ? "cm12ImplicitAuthoredOwnerAtFine(vec3i(floor(position)))"
+      : "cm12TeiOwnerAtFine(vec3i(floor(position))).cell"};
     if(owner==INVALID){break;}
     let gradient=field.yzw;let magnitude=length(gradient);
     if(magnitude<1e-6){break;}
     let distance=min(0.5*cellMinimumWidth(owner),maximumDistance-travelled);
     let candidate=position+gradient/magnitude*distance;
-    if(cm12TeiOwnerAtFine(vec3i(floor(candidate))).cell==INVALID){break;}
+    let candidateOwner=${implicitSharpeningOwnerArithmeticForQA
+      ? "cm12ImplicitAuthoredOwnerAtFine(vec3i(floor(candidate)))"
+      : "cm12TeiOwnerAtFine(vec3i(floor(candidate))).cell"};
+    if(candidateOwner==INVALID){break;}
     position=candidate;travelled+=distance;
   }
   return position;
@@ -3915,7 +3974,9 @@ fn scatterSharpeningCell(cell:u32){
   let removed=-delta*cellVolume(cell);let removedFixed=i32(round(
     removed*cm12PhysicalMassFixedScale()));
   let position=traceSharpeningMass(cell);
-  let stencil=effectiveTransportStencilAtSpans(position,cellWidths(cell));
+  let stencil=${implicitSharpeningOwnerArithmeticForQA
+    ? "effectiveImplicitSharpeningStencilAtSpans(position,cellWidths(cell))"
+    : "effectiveTransportStencilAtSpans(position,cellWidths(cell))"};
   cm12Phase1QACaptureSharpening(cell,position,stencil,rho,delta,removedFixed);
   var total=0.0;
   for(var corner=0u;corner<8u;corner+=1u){let targetCell=stencil.cells[corner];
@@ -3946,10 +4007,11 @@ fn prepareSharpeningField(@builtin(workgroup_id)wid:vec3u,
 @compute @workgroup_size(64)
 fn scatterSharpeningMass(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
+  ${implicitSharpeningOwnerArithmeticForQA ? "" : `
   let packet=cm12SharpeningPacketId(wid.x);
   let candidate=cm12TeiPacketFineOrigin(packet,acceptedTopologySlot());
   let origin=select(vec3i(0),candidate,candidate.x!=CM12_TEI_INVALID_FINE);
-  cm12TeiStageDirectory(origin,lane,acceptedTopologySlot());
+  cm12TeiStageDirectory(origin,lane,acceptedTopologySlot());`}
   let cell=sharpeningSourceCell(wid.x,lane);
   if(sharpeningSourceCellCurrent(cell)){scatterSharpeningCell(cell);}
 }
@@ -3994,9 +4056,12 @@ fn beginDensityCapacityRepairEarlyExit(){
     atomicStore(&activity[DENSITY_CAPACITY_GATE_BASE+gate],0u);
   }
 }
-fn initializeDensityCapacityRepairCell(cell:u32){
+fn initializeDensityCapacityRepairCellAtPlane(cell:u32,plane:u32){
   if(cell==INVALID){return;}
-  atomicStore(&conditioning[6u*p.counts.x+cell],0);
+  atomicStore(&conditioning[plane*p.counts.x+cell],0);
+}
+fn initializeDensityCapacityRepairCell(cell:u32){
+  initializeDensityCapacityRepairCellAtPlane(cell,6u);
 }
 @compute @workgroup_size(64)
 fn initializeDensityCapacityRepair(@builtin(global_invocation_id)gid:vec3u){
@@ -4008,7 +4073,7 @@ fn initializeDensityCapacityRepair(@builtin(global_invocation_id)gid:vec3u){
 // receive excess in one pass and relay it in the next until an air-side spare
 // cell absorbs it. Paired fixed-point receipts conserve every relay exactly;
 // SolidWorld and moving-rigid boundaries enter only through row openness.
-fn scatterDensityCapacityRepairCell(cell:u32){
+fn scatterDensityCapacityRepairCellAtPlane(cell:u32,plane:u32){
   if(cell==INVALID||!cellTransportActive(cell)){return;}
   let rho=state[destinationDensity()+cell];let excessDensity=max(0.0,rho-cellOpenFraction(cell));
   let excessMass=excessDensity*cellVolume(cell);if(excessMass<=1e-9){return;}
@@ -4031,38 +4096,141 @@ fn scatterDensityCapacityRepairCell(cell:u32){
   // conservative; a later relay pass can move the retained residue if it
   // becomes resolvable.
   let share=moved/neighborCount;let distributed=share*neighborCount;
-  atomicAdd(&conditioning[6u*p.counts.x+cell],-distributed);
+  atomicAdd(&conditioning[plane*p.counts.x+cell],-distributed);
   for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){let row=incidenceRow(at);
     if(!rowAccepted(row)||rowArea(row)<=1e-8){continue;}
       let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
     for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
       if(neighbor==cell||!cellTransportActive(neighbor)){continue;}
-      atomicAdd(&conditioning[6u*p.counts.x+neighbor],share);
+      atomicAdd(&conditioning[plane*p.counts.x+neighbor],share);
     }
   }
 }
 @compute @workgroup_size(64)
 fn scatterDensityCapacityRepair(@builtin(global_invocation_id)gid:vec3u){
-  scatterDensityCapacityRepairCell(acceptedTemplateCellInvocation(gid.x));
+  scatterDensityCapacityRepairCellAtPlane(acceptedTemplateCellInvocation(gid.x),6u);
 }
 
-fn finalizeDensityCapacityRepairCell(cell:u32)->bool{
+fn finalizeDensityCapacityRepairCellAtPlane(cell:u32,plane:u32,clear:bool)->bool{
   if(cell==INVALID){return false;}
   let before=state[destinationDensity()+cell];
+  // Load through the production operation before clearing so alternating
+  // storage cannot perturb the numerical instruction path. Scatter is a
+  // completed dispatch and each accepted cell owns exactly one finalizer, so
+  // the following store cannot race a producer or another consumer.
+  let receipt=atomicLoad(&conditioning[plane*p.counts.x+cell]);
+  if(clear){atomicStore(&conditioning[plane*p.counts.x+cell],0);}
   if(!cellTransportActive(cell)){
     if(!dynamicallyCoveredCell(cell)){state[destinationDensity()+cell]=0.0;}
     return bitcast<u32>(state[destinationDensity()+cell])!=bitcast<u32>(before);
   }
-  let incoming=f32(atomicLoad(&conditioning[6u*p.counts.x+cell]))
-    /cm12PhysicalMassFixedScale();
+  let incoming=f32(receipt)/cm12PhysicalMassFixedScale();
   state[destinationDensity()+cell]=max(0.0,
     state[destinationDensity()+cell]+incoming/cellVolume(cell));
   return bitcast<u32>(state[destinationDensity()+cell])!=bitcast<u32>(before);
+}
+fn finalizeDensityCapacityRepairCell(cell:u32)->bool{
+  return finalizeDensityCapacityRepairCellAtPlane(cell,6u,false);
 }
 @compute @workgroup_size(64)
 fn finalizeDensityCapacityRepair(@builtin(global_invocation_id)gid:vec3u){
   _=finalizeDensityCapacityRepairCell(acceptedTemplateCellInvocation(gid.x));
 }
+${alternatingCapacityRepairReceiptsForQA ? /* wgsl */ `
+@compute @workgroup_size(64)
+fn initializeDensityCapacityRepairAlternate(
+ @builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);
+  initializeDensityCapacityRepairCellAtPlane(cell,5u);
+  initializeDensityCapacityRepairCellAtPlane(cell,6u);
+}
+@compute @workgroup_size(64)
+fn scatterDensityCapacityRepairAlternate5(
+ @builtin(global_invocation_id)gid:vec3u){
+  scatterDensityCapacityRepairCellAtPlane(acceptedTemplateCellInvocation(gid.x),5u);
+}
+@compute @workgroup_size(64)
+fn scatterDensityCapacityRepairAlternate6(
+ @builtin(global_invocation_id)gid:vec3u){
+  scatterDensityCapacityRepairCellAtPlane(acceptedTemplateCellInvocation(gid.x),6u);
+}
+@compute @workgroup_size(64)
+fn finalizeDensityCapacityRepairAlternate5(
+ @builtin(global_invocation_id)gid:vec3u){
+  _=finalizeDensityCapacityRepairCellAtPlane(
+    acceptedTemplateCellInvocation(gid.x),5u,true);
+}
+@compute @workgroup_size(64)
+fn finalizeDensityCapacityRepairAlternate6(
+ @builtin(global_invocation_id)gid:vec3u){
+  _=finalizeDensityCapacityRepairCellAtPlane(
+    acceptedTemplateCellInvocation(gid.x),6u,true);
+}
+` : ""}
+${gatherCapacityRepairForQA ? /* wgsl */ `
+fn densityCapacityRepairNeighborCount(cell:u32)->i32{
+  if(cell==INVALID||!cellTransportActive(cell)){return 0;}
+  var neighborCount=0i;
+  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){let row=incidenceRow(at);
+    if(!rowAccepted(row)||rowArea(row)<=1e-8){continue;}
+    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
+      if(neighbor!=cell&&cellTransportActive(neighbor)){neighborCount+=1;}
+    }
+  }
+  return neighborCount;
+}
+fn densityCapacityRepairShareForCount(cell:u32,neighborCount:i32)->i32{
+  if(cell==INVALID||!cellTransportActive(cell)||neighborCount==0){return 0;}
+  let rho=state[destinationDensity()+cell];
+  let excessDensity=max(0.0,rho-cellOpenFraction(cell));
+  let excessMass=excessDensity*cellVolume(cell);if(excessMass<=1e-9){return 0;}
+  let moved=i32(min(1073741823.0,round(
+    excessMass*cm12PhysicalMassFixedScale())));
+  if(moved<=0){return 0;}
+  return moved/neighborCount;
+}
+@compute @workgroup_size(64)
+fn prepareDensityCapacityRepairGather(
+ @builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let neighborCount=densityCapacityRepairNeighborCount(cell);
+  atomicStore(&conditioning[5u*p.counts.x+cell],neighborCount);
+  atomicStore(&conditioning[6u*p.counts.x+cell],
+    densityCapacityRepairShareForCount(cell,neighborCount));
+}
+@compute @workgroup_size(64)
+fn publishDensityCapacityRepairShare(
+ @builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let neighborCount=atomicLoad(&conditioning[5u*p.counts.x+cell]);
+  atomicStore(&conditioning[6u*p.counts.x+cell],
+    densityCapacityRepairShareForCount(cell,neighborCount));
+}
+@compute @workgroup_size(64)
+fn gatherDensityCapacityRepair(
+ @builtin(global_invocation_id)gid:vec3u){
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let before=state[destinationDensity()+cell];
+  if(!cellTransportActive(cell)){
+    if(!dynamicallyCoveredCell(cell)){state[destinationDensity()+cell]=0.0;}
+    return;
+  }
+  let ownShare=atomicLoad(&conditioning[6u*p.counts.x+cell]);
+  var receipt=0i;
+  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){let row=incidenceRow(at);
+    if(!rowAccepted(row)||rowArea(row)<=1e-8){continue;}
+    let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+    for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
+      if(neighbor==cell||!cellTransportActive(neighbor)){continue;}
+      receipt-=ownShare;
+      receipt+=atomicLoad(&conditioning[6u*p.counts.x+neighbor]);
+    }
+  }
+  let incoming=f32(receipt)/cm12PhysicalMassFixedScale();
+  state[destinationDensity()+cell]=max(0.0,before+incoming/cellVolume(cell));
+}
+` : ""}
 
 // Retained rejected QA fixed-point experiment. Rounds one and two use the
 // ordinary kernels; production never composes these entry points.

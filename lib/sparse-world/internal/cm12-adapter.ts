@@ -90,7 +90,13 @@ export type CM12SparseWorldResidentFactoryMode =
   | "refinement-policy-leader-compaction-qa"
   | "refinement-policy-full-leaf-qa"
   | "phase1-coarse-transport-cell-packing-qa"
-  | "density-capacity-early-exit-qa";
+  | "density-capacity-early-exit-qa"
+  | "implicit-transport-owner-arithmetic-qa"
+  | "phase1-implicit-transport-owner-arithmetic-qa"
+  | "implicit-sharpening-owner-arithmetic-qa"
+  | "phase1-implicit-sharpening-owner-arithmetic-qa"
+  | "alternating-capacity-repair-receipts-qa"
+  | "gather-capacity-repair-qa";
 
 /** Construction input while atlas compilation remains solver-owned. */
 export interface CM12SparseWorldFactoryConfig {
@@ -179,6 +185,8 @@ export interface CM12SparseWorldDeveloperTrace {
   readPhase1TransportReceiptQA(allowStageLimitedCandidate?: boolean,
     probeCells?: readonly number[]): ReturnType<
     WebGPUSparseCM12Resident["readPhase1TransportReceiptQA"]>;
+  readPhase1TransportHashesQA(): ReturnType<
+    WebGPUSparseCM12Resident["readPhase1TransportHashesQA"]>;
   readPhase1TransportProfileQA(): ReturnType<
     WebGPUSparseCM12Resident["readPhase1TransportProfileQA"]>;
   readCandidateEffectsTransactionQA(): ReturnType<
@@ -565,6 +573,7 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
       allowStageLimitedCandidate, probeCells,
     );
   }
+  readPhase1TransportHashesQA() { return this.resident.readPhase1TransportHashesQA(); }
   readPhase1TransportProfileQA() { return this.resident.readPhase1TransportProfileQA(); }
   readCandidateEffectsTransactionQA() {
     return this.resident.readCandidateEffectsTransactionQA();
@@ -690,6 +699,24 @@ export async function createCM12SparseWorld(
             : mode === "density-capacity-early-exit-qa"
               ? await WebGPUSparseCM12Resident
                 .createDensityCapacityEarlyExitOracleForQA(...args)
+            : mode === "implicit-transport-owner-arithmetic-qa"
+              ? await WebGPUSparseCM12Resident
+                .createImplicitTransportOwnerArithmeticOracleForQA(...args)
+            : mode === "phase1-implicit-transport-owner-arithmetic-qa"
+              ? await WebGPUSparseCM12Resident
+                .createPhase1ImplicitTransportOwnerArithmeticOracleForQA(...args)
+            : mode === "implicit-sharpening-owner-arithmetic-qa"
+              ? await WebGPUSparseCM12Resident
+                .createImplicitSharpeningOwnerArithmeticOracleForQA(...args)
+            : mode === "phase1-implicit-sharpening-owner-arithmetic-qa"
+              ? await WebGPUSparseCM12Resident
+                .createPhase1ImplicitSharpeningOwnerArithmeticOracleForQA(...args)
+            : mode === "alternating-capacity-repair-receipts-qa"
+              ? await WebGPUSparseCM12Resident
+                .createAlternatingCapacityRepairReceiptsOracleForQA(...args)
+            : mode === "gather-capacity-repair-qa"
+              ? await WebGPUSparseCM12Resident
+                .createGatherCapacityRepairOracleForQA(...args)
             : await WebGPUSparseCM12Resident.create(...args);
     resident.setRefinementRegionParameters(config.refinementRegionParameters);
   } catch (error) {

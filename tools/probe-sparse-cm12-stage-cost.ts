@@ -121,7 +121,15 @@ Options:
   --policy-leader-compaction=0|1     QA compact policy-tile planning A/B
   --policy-full-leaf-control=0|1     QA retained pre-compaction planning control
   --capacity-early-exit=0|1          Rejected QA density-bit repair-suffix gate
+  --implicit-transport-arithmetic=0|1
+                                     QA immutable authored-owner arithmetic in transport
+  --implicit-sharpening-arithmetic=0|1
+                                     QA immutable authored-owner arithmetic in sharpening
+  --alternating-capacity-receipts=0|1
+  --gather-capacity-repair=0|1       Two-pass conservative capacity relay
+                                     QA two-plane sharpening repair receipts
   --phase1-receipt=0|1               Capture raw Phase-1 transport hashes
+  --final-scalar-hash=0|1            Hash accepted density/gamma after the run
   --max-non-pressure-ms=N            Eligible gate threshold (default 10)
   --enforce-non-pressure-gate=0|1    Exit nonzero when the eligible gate fails
   --enforce-pressure-receipts=0|1    Require fault-free PTR/PCA receipts
@@ -156,9 +164,15 @@ const coarseTransportPacking = argument("coarse-transport-packing", "0") === "1"
 const policyLeaderCompaction = argument("policy-leader-compaction", "0") === "1";
 const policyFullLeafControl = argument("policy-full-leaf-control", "0") === "1";
 const capacityEarlyExit = argument("capacity-early-exit", "0") === "1";
+const implicitTransportArithmetic = argument("implicit-transport-arithmetic", "0") === "1";
+const implicitSharpeningArithmetic = argument("implicit-sharpening-arithmetic", "0") === "1";
+const alternatingCapacityReceipts = argument("alternating-capacity-receipts", "0") === "1";
+const gatherCapacityRepair = argument("gather-capacity-repair", "0") === "1";
 const phase1Receipt = argument("phase1-receipt", "0") === "1";
+const finalScalarHashEnabled = argument("final-scalar-hash", "0") === "1";
 if ([vexPacketCompaction, coarseTransportPacking, policyLeaderCompaction,
-  policyFullLeafControl, capacityEarlyExit]
+  policyFullLeafControl, capacityEarlyExit, implicitTransportArithmetic,
+  implicitSharpeningArithmetic, alternatingCapacityReceipts, gatherCapacityRepair]
   .filter(Boolean).length > 1) {
   throw new RangeError("select only one accepted-work execution experiment");
 }
@@ -311,6 +325,11 @@ type StageCostQASolver = {
   readAcceptedIndirectQA(): Promise<readonly number[]>;
   readPhase1TransportReceiptQA?(): Promise<unknown>;
   readPhase1TransportProfileQA?(): Promise<unknown>;
+  readDiagnosticFields(includeWorldLeaves?: boolean,
+    frameBank?: "accepted" | "candidate"): Promise<{
+      readonly density: Float32Array;
+      readonly gamma: Float32Array;
+    }>;
   readSparseWorkShapeQA(): {
     readonly finestDomainCellCount: number;
     readonly logicalBrickDimensions: readonly number[];
@@ -519,21 +538,35 @@ try {
   });
   const productionAdaptiveOptimizations = !vexPacketCompaction
     && !coarseTransportPacking && !phase1Receipt
-    && !policyLeaderCompaction && !policyFullLeafControl && !capacityEarlyExit;
+    && !policyLeaderCompaction && !policyFullLeafControl && !capacityEarlyExit
+    && !implicitTransportArithmetic && !implicitSharpeningArithmetic
+    && !alternatingCapacityReceipts && !gatherCapacityRepair;
   const createSolver = vexPacketCompaction
     ? WebGPUAdaptiveMassSolver.createVelocityExtensionPacketCompactionOracleForQA
     : coarseTransportPacking
       ? phase1Receipt
         ? WebGPUAdaptiveMassSolver.createPhase1CoarseTransportCellPackingOracleForQA
         : WebGPUAdaptiveMassSolver.createCoarseTransportCellPackingOracleForQA
-      : phase1Receipt
-        ? WebGPUAdaptiveMassSolver.createPhase1TransportReceiptOracleForQA
-        : policyLeaderCompaction
+      : policyLeaderCompaction
           ? WebGPUAdaptiveMassSolver.createRefinementPolicyLeaderCompactionOracleForQA
           : policyFullLeafControl
             ? WebGPUAdaptiveMassSolver.createRefinementPolicyFullLeafOracleForQA
           : capacityEarlyExit
             ? WebGPUAdaptiveMassSolver.createDensityCapacityEarlyExitOracleForQA
+          : implicitTransportArithmetic
+            ? phase1Receipt
+              ? WebGPUAdaptiveMassSolver.createPhase1ImplicitTransportOwnerArithmeticOracleForQA
+              : WebGPUAdaptiveMassSolver.createImplicitTransportOwnerArithmeticOracleForQA
+          : implicitSharpeningArithmetic
+            ? phase1Receipt
+              ? WebGPUAdaptiveMassSolver.createPhase1ImplicitSharpeningOwnerArithmeticOracleForQA
+              : WebGPUAdaptiveMassSolver.createImplicitSharpeningOwnerArithmeticOracleForQA
+          : alternatingCapacityReceipts
+            ? WebGPUAdaptiveMassSolver.createAlternatingCapacityRepairReceiptsOracleForQA
+          : gatherCapacityRepair
+            ? WebGPUAdaptiveMassSolver.createGatherCapacityRepairOracleForQA
+          : phase1Receipt
+            ? WebGPUAdaptiveMassSolver.createPhase1TransportReceiptOracleForQA
           : WebGPUAdaptiveMassSolver.createCompiledTopologyTransport;
   const solver = await createSolver.call(WebGPUAdaptiveMassSolver,
     device, scene, "balanced", undefined, adaptiveMassSolverOptions(values), () => {});
@@ -1095,6 +1128,39 @@ try {
   const transportProfile = finalQAEnabled
     ? await qaSolver.readPhase1TransportProfileQA?.()
     : { skipped: true, reason: "--final-qa=0 A/B timing run" };
+  const phase1Hashes = phase1Receipt
+    ? await qaSolver.readPhase1TransportHashesQA()
+    : { skipped: true, reason: "--phase1-receipt=0" };
+  const finalScalarHashes = finalScalarHashEnabled
+    ? await qaSolver.readDiagnosticFields().then((fields) => {
+      const summarize = (values: Float32Array) => {
+        let sum = 0; let correction = 0; let nonzero = 0;
+        let minimum = Number.POSITIVE_INFINITY;
+        let maximum = Number.NEGATIVE_INFINITY;
+        for (const value of values) {
+          const adjusted = value - correction;
+          const next = sum + adjusted;
+          correction = (next - sum) - adjusted;
+          sum = next;
+          if (value !== 0) nonzero += 1;
+          minimum = Math.min(minimum, value);
+          maximum = Math.max(maximum, value);
+        }
+        return { sum, nonzero, minimum, maximum };
+      };
+      return {
+        densitySha256: createHash("sha256").update(new Uint8Array(
+          fields.density.buffer, fields.density.byteOffset, fields.density.byteLength,
+        )).digest("hex"),
+        gammaSha256: createHash("sha256").update(new Uint8Array(
+          fields.gamma.buffer, fields.gamma.byteOffset, fields.gamma.byteLength,
+        )).digest("hex"),
+        density: summarize(fields.density),
+        gamma: summarize(fields.gamma),
+        finestCellCount: fields.density.length,
+      };
+    })
+    : { skipped: true, reason: "--final-scalar-hash=0" };
   const framePlan = finalQAEnabled
     ? await readFramePlanCensus(device, solver)
     : { skipped: true, reason: "--final-qa=0 A/B timing run" };
@@ -1139,7 +1205,13 @@ try {
         || productionAdaptiveOptimizations || capacityEarlyExit,
       policyFullLeafControl,
       capacityEarlyExit,
+      implicitTransportArithmetic: implicitTransportArithmetic
+        || productionAdaptiveOptimizations,
+      implicitSharpeningArithmetic,
+      alternatingCapacityReceipts,
+      gatherCapacityRepair,
       phase1Receipt,
+      finalScalarHashEnabled,
       refinementRegion: minimumCellSize === 0 ? undefined : {
         scope: regionScope,
         minimumCellSize_cells: minimumCellSize,
@@ -1165,7 +1237,7 @@ try {
     velocityExtension,
     phase1TransportReceipt,
     framePlan,
-    transportProfile,
+    transportProfile, phase1Hashes, finalScalarHashes,
     adaptiveRepresentation,
     provenance: {
       gitCommit,

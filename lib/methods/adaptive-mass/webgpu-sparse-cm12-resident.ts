@@ -3245,6 +3245,8 @@ export class WebGPUSparseCM12Resident {
       SparseCM12RefinementPolicyLeaderLayout | undefined,
     private readonly densityCapacityEarlyExitLayout:
       SparseCM12DensityCapacityEarlyExitLayout | undefined,
+    private readonly alternatingCapacityRepairReceiptsForQA: boolean,
+    private readonly gatherCapacityRepairForQA: boolean,
     private readonly pressureTopologyRepairLayout:
       SparseCM12PressureTopologyRepairLayout,
     private readonly persistentPressureCacheLayout:
@@ -3432,7 +3434,7 @@ export class WebGPUSparseCM12Resident {
   ): Promise<WebGPUSparseCM12Resident> {
     return this.createConfigured(device, atlas, grid, finestCellSize_m,
       solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
-      false, false, false, true, true, report);
+      false, false, false, true, true, report, false, true);
   }
 
   /** Retained rejected QA experiment: density-capacity relay with an exact
@@ -3564,6 +3566,131 @@ export class WebGPUSparseCM12Resident {
       false, true, false, true, false, report);
   }
 
+  /** Construction-only A/B for resolving authored-domain transport ownership
+   * through the immutable LOD1 arithmetic directory. Signed SparseWorld pages
+   * retain WDR1 as the exception path. */
+  static createImplicitTransportOwnerArithmeticOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    solidWorld: SolidWorld,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = atlas.brickFineResolution,
+    report?: SparseCM12ResidentInitializationReporter,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, false, true, true, report, false, true, false);
+  }
+
+  /** Receipt-enabled form of the implicit transport-owner A/B. */
+  static createPhase1ImplicitTransportOwnerArithmeticOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    solidWorld: SolidWorld,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = atlas.brickFineResolution,
+    report?: SparseCM12ResidentInitializationReporter,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, true, false, true, true, report, false, true, false);
+  }
+
+  /** Construction-only A/B for using the same immutable authored-domain
+   * arithmetic directory in sharpening traces and scatter stencils. */
+  static createImplicitSharpeningOwnerArithmeticOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    solidWorld: SolidWorld,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = atlas.brickFineResolution,
+    report?: SparseCM12ResidentInitializationReporter,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, false, true, true, report, false, false, true);
+  }
+
+  /** Receipt-enabled form of the implicit sharpening-owner A/B. */
+  static createPhase1ImplicitSharpeningOwnerArithmeticOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    solidWorld: SolidWorld,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = atlas.brickFineResolution,
+    report?: SparseCM12ResidentInitializationReporter,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, true, false, true, true, report, false, false, true);
+  }
+
+  /** Construction-only A/B which alternates two dead conditioning planes
+   * across the eight conservative repair rounds, clearing on consumption. */
+  static createAlternatingCapacityRepairReceiptsOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    solidWorld: SolidWorld,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = atlas.brickFineResolution,
+    report?: SparseCM12ResidentInitializationReporter,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, false, true, true, report, false, false, false, true);
+  }
+
+  /** Construction-only A/B which publishes one fixed-point outgoing share per
+   * cell and gathers the conservative neighbour receipts deterministically. */
+  static createGatherCapacityRepairOracleForQA(
+    device: GPUDevice,
+    atlas: SparseAdaptiveMassAtlas,
+    grid: SparseAtlasCompositeGrid,
+    finestCellSize_m: number,
+    solidWorld: SolidWorld,
+    initiallyActiveBrickKeys: ReadonlySet<number> = new Set(atlas.bricks.map(
+      (brick) => brick.key,
+    )),
+    rigid?: SparseCM12RigidResources,
+    journal?: SparseCM12PressureJournalCapacityRequest,
+    presentationPageResolution: SparseCM12PresentationPageResolution = atlas.brickFineResolution,
+    report?: SparseCM12ResidentInitializationReporter,
+  ): Promise<WebGPUSparseCM12Resident> {
+    return this.createConfigured(device, atlas, grid, finestCellSize_m,
+      solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
+      false, false, false, true, true, report, false, false, false, false, true);
+  }
+
   /** QA-only A/B for compiling authored refinement-policy tile leaders once
    * per frame and dispatching tile classification/grading over that compact
    * domain. The policy and numerical work performed by each leader are
@@ -3627,6 +3754,10 @@ export class WebGPUSparseCM12Resident {
     refinementPolicyLeaderCompactionForQA = false,
     report: SparseCM12ResidentInitializationReporter = () => {},
     densityCapacityEarlyExitForQA = false,
+    implicitTransportOwnerArithmeticForQA = false,
+    implicitSharpeningOwnerArithmeticForQA = false,
+    alternatingCapacityRepairReceiptsForQA = false,
+    gatherCapacityRepairForQA = false,
   ): Promise<WebGPUSparseCM12Resident> {
     if (atlas.brickFineResolution !== 8 || presentationPageResolution !== 8) {
       throw new Error("Sparse CM12 PEI1 production is an aggressive B8/P8 cutover");
@@ -3691,11 +3822,22 @@ export class WebGPUSparseCM12Resident {
             + (extent[1]! - 1) * span + extent[0]!;
         })),
       });
-    // Runtime ownership is now the signed-coordinate WDR1 hash in the mutable
-    // arena. LOD1 remains a construction oracle for initial TEI compilation,
-    // but its world-volume-sized direct plane is no longer uploaded.
-    const logicalOwnerBaseWords = 0;
+    // Production ownership remains the signed-coordinate WDR1 hash. The two
+    // implicit-arithmetic experiments upload the already-built immutable LOD1
+    // records after the ordinary topology image and retain WDR1 for coordinates
+    // without an authored owner.
+    const uploadLogicalOwnerDirectory = implicitTransportOwnerArithmeticForQA
+      || implicitSharpeningOwnerArithmeticForQA;
+    const logicalOwnerBaseWords = uploadLogicalOwnerDirectory ? packed.words.length : 0;
     const logicalOwnerPacked16BaseWords = 0;
+    const residentTopologyWords = uploadLogicalOwnerDirectory
+      ? (() => {
+        const words = new Uint32Array(packed.words.length + logicalOwnerDirectory.words.length);
+        words.set(packed.words);
+        words.set(logicalOwnerDirectory.words, logicalOwnerBaseWords);
+        return words;
+      })()
+      : packed.words;
     report(hostTemplateVariants
       ? "Build four-rung and 2:1 seam topology templates"
       : "Pack accepted topology templates");
@@ -3761,7 +3903,8 @@ export class WebGPUSparseCM12Resident {
     const parameters = device.createBuffer({ label: "Sparse CM12 resident parameters",
       size: SPARSE_CM12_PARAMETER_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const topology = uploadBuffer(device, "Sparse CM12 resident topology", packed.words, storage);
+    const topology = uploadBuffer(device, "Sparse CM12 resident topology",
+      residentTopologyWords, storage);
     // WebGPU buffers start zeroed. Upload only the nonzero ranges instead of
     // materializing the complete (mostly-zero) resident state on the host.
     const state = device.createBuffer({ label: "Sparse CM12 resident state",
@@ -4854,6 +4997,10 @@ export class WebGPUSparseCM12Resident {
         coarseTransportCellPacking,
         refinementPolicyLeaderLayout,
         densityCapacityEarlyExitLayout,
+        implicitTransportOwnerArithmeticForQA,
+        implicitSharpeningOwnerArithmeticForQA,
+        alternatingCapacityRepairReceiptsForQA,
+        gatherCapacityRepairForQA,
       );
     const shaderSource = createResidentShaderSource();
     const sourceByShaderModule = new WeakMap<GPUShaderModule, string>();
@@ -4944,6 +5091,18 @@ export class WebGPUSparseCM12Resident {
       "prepareSharpeningField", "scatterSharpeningMass", "finalizeSharpening",
       "initializeDensityCapacityRepair", "scatterDensityCapacityRepair",
       "finalizeDensityCapacityRepair", "preserveHorizontalD4",
+      ...(alternatingCapacityRepairReceiptsForQA ? [
+        "initializeDensityCapacityRepairAlternate",
+        "scatterDensityCapacityRepairAlternate5",
+        "scatterDensityCapacityRepairAlternate6",
+        "finalizeDensityCapacityRepairAlternate5",
+        "finalizeDensityCapacityRepairAlternate6",
+      ] as const : []),
+      ...(gatherCapacityRepairForQA ? [
+        "prepareDensityCapacityRepairGather",
+        "publishDensityCapacityRepairShare",
+        "gatherDensityCapacityRepair",
+      ] as const : []),
       ...(densityCapacityEarlyExitLayout ? [
         "beginDensityCapacityRepairEarlyExit",
         "finalizeDensityCapacityRepairSeedGate",
@@ -5313,6 +5472,8 @@ export class WebGPUSparseCM12Resident {
       refinementPolicyLeaderCompactionForQA,
       refinementPolicyLeaderLayout,
       densityCapacityEarlyExitLayout,
+      alternatingCapacityRepairReceiptsForQA,
+      gatherCapacityRepairForQA,
       pressureTopologyRepairLayout,
       persistentPressureCacheLayout,
       presentationPublisherOracleForQA,
@@ -5868,7 +6029,27 @@ export class WebGPUSparseCM12Resident {
         ?.match(/^capacity-([1-8])$/)?.[1];
       const capacityPassCount = capacityPassLimitForQA === undefined
         ? 8 : Number(capacityPassLimitForQA);
-      if (this.densityCapacityEarlyExitLayout
+      if (this.gatherCapacityRepairForQA
+        && capacityPassLimitForQA === undefined) {
+        for (let capacityPass = 0; capacityPass < 8; capacityPass += 1) {
+          dispatchAccepted(capacityPass === 0
+            ? "prepareDensityCapacityRepairGather"
+            : "publishDensityCapacityRepairShare", "cell");
+          dispatchAccepted("gatherDensityCapacityRepair", "cell");
+        }
+      } else if (this.alternatingCapacityRepairReceiptsForQA
+        && capacityPassLimitForQA === undefined) {
+        // Plane six contains sharpening receipts and plane five still contains
+        // transport momentum receipts, so clear both in one pass. Every round
+        // thereafter consumes and clears its own destination plane before that
+        // plane is reused two rounds later.
+        dispatchAccepted("initializeDensityCapacityRepairAlternate", "cell");
+        for (let capacityPass = 0; capacityPass < 8; capacityPass += 1) {
+          const plane = capacityPass % 2 === 0 ? 5 : 6;
+          dispatchAccepted(`scatterDensityCapacityRepairAlternate${plane}`, "cell");
+          dispatchAccepted(`finalizeDensityCapacityRepairAlternate${plane}`, "cell");
+        }
+      } else if (this.densityCapacityEarlyExitLayout
         && capacityPassLimitForQA === undefined) {
         dispatch("beginDensityCapacityRepairEarlyExit", 1);
         // The second ordinary round proves whether the first round reached a
@@ -7775,6 +7956,80 @@ export class WebGPUSparseCM12Resident {
    * stable accepted cell id. Production and timed experiment constructions do
    * not reserve this arena and reject the read.
    */
+  async readPhase1TransportHashesQA() {
+    this.assertLive();
+    const layout = this.phase1TransportQALayout;
+    if (!layout) throw new Error(
+      "Phase-1 transport hashes requested from a non-QA resident",
+    );
+    const receiptWords = layout.totalWords - layout.baseWords;
+    const readback = this.device.createBuffer({
+      label: "Sparse CM12 Phase-1 hash-only QA readback",
+      size: 4 * receiptWords,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    let raw: Uint32Array;
+    try {
+      const encoder = this.device.createCommandEncoder({
+        label: "Sparse CM12 Phase-1 hash-only QA copy",
+      });
+      encoder.copyBufferToBuffer(this.activity, 4 * layout.baseWords,
+        readback, 0, 4 * receiptWords);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      raw = new Uint32Array(readback.getMappedRange()).slice();
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+    const h = SPARSE_CM12_PHASE1_TRANSPORT_QA_HEADER;
+    if (raw[h.magic] !== SPARSE_CM12_PHASE1_TRANSPORT_QA_MAGIC
+      || raw[h.version] !== SPARSE_CM12_PHASE1_TRANSPORT_QA_VERSION
+      || raw[h.cellCapacity] !== layout.cellCapacity) {
+      throw new Error("Sparse CM12 Phase-1 hash-only QA header is incompatible");
+    }
+    const relative = (absolute: number) => absolute - layout.baseWords;
+    const plane = (base: number, count: number) => raw.slice(relative(base),
+      relative(base) + count);
+    const capacity = layout.cellCapacity;
+    const fields = {
+      departureBitsSha256: [layout.departureBaseWords, 3 * capacity],
+      stencilCellsSha256: [layout.stencilCellBaseWords, 8 * capacity],
+      stencilWeightBitsSha256: [layout.stencilWeightBaseWords, 8 * capacity],
+      betaFixedSha256: [layout.betaBaseWords, capacity],
+      deficitDensityFixedSha256: [layout.deficitDensityBaseWords, capacity],
+      deficitGammaFixedSha256: [layout.deficitGammaBaseWords, capacity],
+      massDensityBitsSha256: [layout.massDensityBaseWords, capacity],
+      massGammaBitsSha256: [layout.massGammaBaseWords, capacity],
+      packetIdSha256: [layout.packetIdBaseWords, capacity],
+      packetLaneSha256: [layout.packetLaneBaseWords, capacity],
+      sharpeningDepartureBitsSha256: [layout.sharpeningDepartureBaseWords,
+        3 * capacity],
+      sharpeningStencilCellsSha256: [layout.sharpeningStencilCellBaseWords,
+        8 * capacity],
+      sharpeningStencilWeightBitsSha256: [layout.sharpeningStencilWeightBaseWords,
+        8 * capacity],
+      sharpeningDeltaBitsSha256: [layout.sharpeningDeltaBaseWords, capacity],
+      sharpeningDensityBitsSha256: [layout.sharpeningDensityBaseWords, capacity],
+      sharpeningRemovedFixedSha256: [layout.sharpeningRemovedFixedBaseWords, capacity],
+      gammaSnapshotDensityBitsSha256: [layout.gammaSnapshotDensityBaseWords, capacity],
+      gammaSnapshotGammaBitsSha256: [layout.gammaSnapshotGammaBaseWords, capacity],
+    } as const;
+    const hashes = await Promise.all(Object.entries(fields).map(
+      async ([name, [base, count]]) => [name,
+        await sparseCM12Phase1Sha256(plane(base, count))] as const,
+    ));
+    return Object.freeze({
+      frameGeneration: raw[h.frameGeneration]!,
+      topologyGeneration: raw[h.topologyGeneration]!,
+      effectiveVelocityFrameGeneration: raw[h.effectiveVelocityFrameGeneration]!,
+      effectiveVelocityTopologyGeneration: raw[h.effectiveVelocityTopologyGeneration]!,
+      packetCellCount: raw[h.packetCellCount]!,
+      packetFault: raw[h.packetFault]!,
+      ...Object.fromEntries(hashes),
+    });
+  }
+
   async readPhase1TransportReceiptQA(
     allowStageLimitedCandidate = false,
     probeCells: readonly number[] = [],

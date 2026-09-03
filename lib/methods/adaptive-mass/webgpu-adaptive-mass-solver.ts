@@ -98,6 +98,18 @@ const PHASE1_COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 Phase-1 coarse transport cell packing QA");
 const DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 density-capacity early exit QA");
+const IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 implicit transport owner arithmetic QA");
+const PHASE1_IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 Phase-1 implicit transport owner arithmetic QA");
+const IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 implicit sharpening owner arithmetic QA");
+const PHASE1_IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 Phase-1 implicit sharpening owner arithmetic QA");
+const ALTERNATING_CAPACITY_REPAIR_RECEIPTS_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 alternating capacity repair receipts QA");
+const GATHER_CAPACITY_REPAIR_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 gather capacity repair QA");
 
 export interface AdaptiveMassFluidDomain {
   readonly dimensions: SparseBrickVec3;
@@ -418,6 +430,72 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       onProgress, signal, DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN);
   }
 
+  /** QA-only immutable authored-owner arithmetic in conservative transport. */
+  static createImplicitTransportOwnerArithmeticOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN);
+  }
+
+  /** Receipt-enabled immutable authored-owner arithmetic in transport. */
+  static createPhase1ImplicitTransportOwnerArithmeticOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, PHASE1_IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN);
+  }
+
+  /** QA-only immutable authored-owner arithmetic in surface sharpening. */
+  static createImplicitSharpeningOwnerArithmeticOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN);
+  }
+
+  /** Receipt-enabled immutable authored-owner arithmetic in sharpening. */
+  static createPhase1ImplicitSharpeningOwnerArithmeticOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, PHASE1_IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN);
+  }
+
+  /** QA-only alternating scratch ownership for sharpening capacity repair. */
+  static createAlternatingCapacityRepairReceiptsOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, ALTERNATING_CAPACITY_REPAIR_RECEIPTS_QA_TOKEN);
+  }
+
+  /** QA-only deterministic gather form of sharpening capacity repair. */
+  static createGatherCapacityRepairOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, GATHER_CAPACITY_REPAIR_QA_TOKEN);
+  }
+
   static async createAsync(
     device: GPUDevice,
     scene: SceneDescription,
@@ -433,7 +511,13 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       | typeof REFINEMENT_POLICY_LEADER_COMPACTION_QA_TOKEN
       | typeof REFINEMENT_POLICY_FULL_LEAF_QA_TOKEN
       | typeof PHASE1_COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN
-      | typeof DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN,
+      | typeof DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN
+      | typeof IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN
+      | typeof PHASE1_IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN
+      | typeof IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN
+      | typeof PHASE1_IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN
+      | typeof ALTERNATING_CAPACITY_REPAIR_RECEIPTS_QA_TOKEN
+      | typeof GATHER_CAPACITY_REPAIR_QA_TOKEN,
   ): Promise<WebGPUAdaptiveMassSolver> {
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
     const fluidDomainPlan = adaptiveMassFluidDomainForScene(scene);
@@ -581,6 +665,18 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
                       ? "phase1-coarse-transport-cell-packing-qa"
                     : qaToken === DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN
                       ? "density-capacity-early-exit-qa"
+                    : qaToken === IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN
+                      ? "implicit-transport-owner-arithmetic-qa"
+                    : qaToken === PHASE1_IMPLICIT_TRANSPORT_OWNER_ARITHMETIC_QA_TOKEN
+                      ? "phase1-implicit-transport-owner-arithmetic-qa"
+                    : qaToken === IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN
+                      ? "implicit-sharpening-owner-arithmetic-qa"
+                    : qaToken === PHASE1_IMPLICIT_SHARPENING_OWNER_ARITHMETIC_QA_TOKEN
+                      ? "phase1-implicit-sharpening-owner-arithmetic-qa"
+                    : qaToken === ALTERNATING_CAPACITY_REPAIR_RECEIPTS_QA_TOKEN
+                      ? "alternating-capacity-repair-receipts-qa"
+                    : qaToken === GATHER_CAPACITY_REPAIR_QA_TOKEN
+                      ? "gather-capacity-repair-qa"
                     : "production",
           });
           if (rigidSystem) {
@@ -1048,6 +1144,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     return this.sparseWorldTrace.readPhase1TransportReceiptQA(
       allowStageLimitedCandidate, probeCells,
     );
+  }
+  readPhase1TransportHashesQA() {
+    return this.sparseWorldTrace.readPhase1TransportHashesQA();
   }
   readPhase1TransportProfileQA() {
     return this.sparseWorldTrace.readPhase1TransportProfileQA();
