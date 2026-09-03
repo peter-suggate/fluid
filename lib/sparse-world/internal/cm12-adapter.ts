@@ -84,7 +84,13 @@ interface AdoptCM12SparseWorldOptions {
 export type CM12SparseWorldResidentFactoryMode =
   | "production"
   | "presentation-publisher-qa"
-  | "phase1-transport-receipt-qa";
+  | "phase1-transport-receipt-qa"
+  | "velocity-extension-packet-compaction-qa"
+  | "coarse-transport-cell-packing-qa"
+  | "refinement-policy-leader-compaction-qa"
+  | "refinement-policy-full-leaf-qa"
+  | "phase1-coarse-transport-cell-packing-qa"
+  | "density-capacity-early-exit-qa";
 
 /** Construction input while atlas compilation remains solver-owned. */
 export interface CM12SparseWorldFactoryConfig {
@@ -184,6 +190,8 @@ export interface CM12SparseWorldDeveloperTrace {
   readFrameControlQA(): ReturnType<WebGPUSparseCM12Resident["readFrameControlQA"]>;
   readTransportPacketIndirectQA(): ReturnType<
     WebGPUSparseCM12Resident["readTransportPacketIndirectQA"]>;
+  readCoarseTransportScheduleQA(): ReturnType<
+    WebGPUSparseCM12Resident["readCoarseTransportScheduleQA"]>;
   readDynamicTransportPacketsQA(): ReturnType<
     WebGPUSparseCM12Resident["readDynamicTransportPacketsQA"]>;
   readFinalScalarMaskHeaderQA(): ReturnType<
@@ -569,6 +577,7 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   }
   readFrameControlQA() { return this.resident.readFrameControlQA(); }
   readTransportPacketIndirectQA() { return this.resident.readTransportPacketIndirectQA(); }
+  readCoarseTransportScheduleQA() { return this.resident.readCoarseTransportScheduleQA(); }
   readDynamicTransportPacketsQA() { return this.resident.readDynamicTransportPacketsQA(); }
   readFinalScalarMaskHeaderQA() { return this.resident.readFinalScalarMaskHeaderQA(); }
   readWorkShapeQA() { return this.resident.readWorkShapeQA(); }
@@ -663,7 +672,25 @@ export async function createCM12SparseWorld(
       ? await WebGPUSparseCM12Resident.createPresentationPublisherOracleForQA(...args)
       : mode === "phase1-transport-receipt-qa"
         ? await WebGPUSparseCM12Resident.createPhase1TransportReceiptOracleForQA(...args)
-        : await WebGPUSparseCM12Resident.create(...args);
+        : mode === "velocity-extension-packet-compaction-qa"
+          ? await WebGPUSparseCM12Resident
+            .createVelocityExtensionPacketCompactionOracleForQA(...args)
+          : mode === "coarse-transport-cell-packing-qa"
+            ? await WebGPUSparseCM12Resident
+              .createCoarseTransportCellPackingOracleForQA(...args)
+            : mode === "refinement-policy-leader-compaction-qa"
+              ? await WebGPUSparseCM12Resident
+                .createRefinementPolicyLeaderCompactionOracleForQA(...args)
+            : mode === "refinement-policy-full-leaf-qa"
+              ? await WebGPUSparseCM12Resident
+                .createRefinementPolicyFullLeafOracleForQA(...args)
+            : mode === "phase1-coarse-transport-cell-packing-qa"
+              ? await WebGPUSparseCM12Resident
+                .createPhase1CoarseTransportCellPackingOracleForQA(...args)
+            : mode === "density-capacity-early-exit-qa"
+              ? await WebGPUSparseCM12Resident
+                .createDensityCapacityEarlyExitOracleForQA(...args)
+            : await WebGPUSparseCM12Resident.create(...args);
     resident.setRefinementRegionParameters(config.refinementRegionParameters);
   } catch (error) {
     sparseDevice.publishLibraryFault(error);

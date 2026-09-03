@@ -12,6 +12,8 @@ export interface SparseCM12VelocityExtensionWGSLOptions {
   readonly topologyGenerationExpression?: string;
   readonly sourceFrameGenerationExpression?: string;
   readonly effectiveVelocityHookPrefix?: string;
+  /** QA-only A/B: consume the packet authority's accepted-packet list. */
+  readonly compactAcceptedPacketsForQA?: boolean;
   /** Bake one recurrence depth into a bounded pipeline slice when requested. */
   readonly fixedRecurrenceDepth?: number;
 }
@@ -43,6 +45,17 @@ export function createSparseCM12VelocityExtensionWGSL(
   const publish = effectiveHook
     ? `${effectiveHook}PublishVexAcceptedEffectiveVelocity(cell,value);` : "";
   const fixedRecurrenceDepth = options.fixedRecurrenceDepth;
+  const dispatchPacket = options.compactAcceptedPacketsForQA
+    ? /* wgsl */ `let dispatchOrdinal=wid.x;
+  if(lane==0u){
+    let compactOrdinal=cm12TransportPacketOrdinal(dispatchOrdinal);
+    cm12ExtensionDispatchPacket=select(cm12ExtensionInvalid,
+      cm12TransportDirectStablePacket(compactOrdinal),
+      compactOrdinal<CM12_TPA_DIRECT_PACKET_COUNT);
+  }
+  let packet=workgroupUniformLoad(&cm12ExtensionDispatchPacket);`
+    : /* wgsl */ `let dispatchOrdinal=wid.x+cm12ExtensionDispatchWidth*wid.y;
+  let packet=cm12ExtensionStablePacket(dispatchOrdinal);`;
   if (fixedRecurrenceDepth !== undefined
     && (!Number.isInteger(fixedRecurrenceDepth) || fixedRecurrenceDepth < 1
       || fixedRecurrenceDepth > SPARSE_CM12_VELOCITY_EXTENSION_DEPTH)) {
@@ -81,6 +94,7 @@ var<workgroup> cm12ExtensionLeafScale:u32;
 var<workgroup> cm12ExtensionInputMaskLow:u32;
 var<workgroup> cm12ExtensionInputMaskHigh:u32;
 var<workgroup> cm12ExtensionPacketComplete:u32;
+var<workgroup> cm12ExtensionDispatchPacket:u32;
 
 fn cm12ExtensionLoad(at:u32)->u32{return atomicLoad(&${arena}[at]);}
 fn cm12ExtensionStore(at:u32,value:u32){atomicStore(&${arena}[at],value);}
@@ -169,8 +183,8 @@ fn cm12ExtensionClearPacketMask(base:u32,packet:u32,lane:u32){
   if(lane==0u&&packet<cm12ExtensionPacketCapacity){
     cm12ExtensionStore(base+2u*packet,0u);
     cm12ExtensionStore(base+2u*packet+1u,0u);}}
-fn cm12ExtensionPublishFrameReceipt(packet:u32,lane:u32){
-  if(packet==0u&&lane==0u){
+fn cm12ExtensionPublishFrameReceipt(dispatchOrdinal:u32,lane:u32){
+  if(dispatchOrdinal==0u&&lane==0u){
     cm12ExtensionStore(${h(SPARSE_CM12_VELOCITY_EXTENSION_HEADER.sourceFrameGeneration)},
       ${frameGeneration});
     cm12ExtensionStore(${h(SPARSE_CM12_VELOCITY_EXTENSION_HEADER.topologyGeneration)},
@@ -196,8 +210,8 @@ fn cm12ExtendedCellSelected(cell:u32)->bool{
 @compute @workgroup_size(64)
 fn initializeVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
-  let ordinal=wid.x+cm12ExtensionDispatchWidth*wid.y;
-  let packet=cm12ExtensionStablePacket(ordinal);if(packet==cm12ExtensionInvalid){return;}
+  ${dispatchPacket}
+  if(packet==cm12ExtensionInvalid){return;}
   // Initialization is embarrassingly packet-local. Reading the four-word TEI
   // descriptor per lane costs a few startup loads, but removes the shared
   // Jacobi topology and its workgroup state from this pipeline altogether.
@@ -229,19 +243,19 @@ fn initializeVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
 @compute @workgroup_size(64)
 fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
-  let ordinal=wid.x+cm12ExtensionDispatchWidth*wid.y;
-  let packet=cm12ExtensionStablePacket(ordinal);if(packet==cm12ExtensionInvalid){return;}
+  ${dispatchPacket}
+  if(packet==cm12ExtensionInvalid){return;}
   let packetFirst=cm12ExtensionBeginPacket(packet,lane);
   if(packetFirst==cm12ExtensionInvalid){
     cm12ExtensionClearPacketMask(cm12ExtensionOutputMask(
       cm12ExtensionDepth()),packet,lane);
-    cm12ExtensionPublishFrameReceipt(packet,lane);return;}
+    cm12ExtensionPublishFrameReceipt(dispatchOrdinal,lane);return;}
   let packetComplete=workgroupUniformLoad(&cm12ExtensionPacketComplete);
   if(packetComplete!=0u){
     if(lane==0u){let output=cm12ExtensionOutputMask(cm12ExtensionDepth());
       cm12ExtensionStore(output+2u*packet,cm12ExtensionInputMaskLow);
       cm12ExtensionStore(output+2u*packet+1u,cm12ExtensionInputMaskHigh);}
-    cm12ExtensionPublishFrameReceipt(packet,lane);return;
+    cm12ExtensionPublishFrameReceipt(dispatchOrdinal,lane);return;
   }
   let cell=cm12ExtensionPacketCell(lane);
   let selected=cell!=cm12ExtensionInvalid&&cell<cm12ExtensionCapacity;
@@ -298,7 +312,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
   }
   cm12ExtensionPublishBallot(cm12ExtensionOutputMask(
     cm12ExtensionDepth()),packet,lane,valid);
-  cm12ExtensionPublishFrameReceipt(packet,lane);
+  cm12ExtensionPublishFrameReceipt(dispatchOrdinal,lane);
 }
 `;
 }

@@ -343,28 +343,40 @@ fn executeSparseCM12FramePlanPresentationPacket(
       atomicMin(&${p}Fault,prepareStatus);
       atomicMin(&${p}FaultTile,${p}Invalid);}
   workgroupBarrier();
-  if(resident&&lane<${p}Tiles){
+  // A tile always contains 4^3 samples, but P4/P8 pages expose only one/eight
+  // tiles. Mapping one invocation to one tile therefore left 63/56 lanes idle
+  // while each live lane evaluated 64 samples serially. Flatten the page-local
+  // sample domain over the complete workgroup. P16 retains the same 4,096
+  // samples and P4/P8 gain occupancy without changing tile masks, sample
+  // addresses or the page-transaction boundary.
+  for(var linear=lane;linear<${p}Tiles
+      *${SPARSE_CM12_FRAME_PLAN_PRESENTATION_SAMPLES_PER_TILE}u;linear+=64u){
+    let tile=linear/${SPARSE_CM12_FRAME_PLAN_PRESENTATION_SAMPLES_PER_TILE}u;
+    let sample=linear-tile*${SPARSE_CM12_FRAME_PLAN_PRESENTATION_SAMPLES_PER_TILE}u;
     let dirtyLow=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.dirtyMaskLow}u);
     let dirtyHigh=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.dirtyMaskHigh}u);
-    if(${p}MaskContains(dirtyLow,dirtyHigh,lane)&&atomicLoad(&${p}Fault)==${p}Invalid){
-      var tileValid=true;
-      for(var sample=0u;sample<${SPARSE_CM12_FRAME_PLAN_PRESENTATION_SAMPLES_PER_TILE}u;
-          sample+=1u){
-        let exact=${hook}ExactSample(brick,page,lane,sample,
-          ${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.generation}u),
-          ${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.causeMask}u));
-        if(exact.y!=0u){tileValid=false;atomicMin(&${p}Fault,exact.y);
-          atomicMin(&${p}FaultTile,lane);}
-        if(tileValid){${hook}StoreCandidate(page,${p}LocalIndex(lane,sample),
-          ${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.generation}u),exact.x);}
-      }
-      if(tileValid){
-        if(lane<32u){atomicOr(&${p}ExecutedLow,1u<<lane);}
-        else{atomicOr(&${p}ExecutedHigh,1u<<(lane-32u));}
-      }
+    if(resident&&${p}MaskContains(dirtyLow,dirtyHigh,tile)
+      &&atomicLoad(&${p}Fault)==${p}Invalid){
+      let exact=${hook}ExactSample(brick,page,tile,sample,
+        ${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.generation}u),
+        ${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.causeMask}u));
+      if(exact.y!=0u){atomicMin(&${p}Fault,exact.y);atomicMin(&${p}FaultTile,tile);}
+      else{${hook}StoreCandidate(page,${p}LocalIndex(tile,sample),
+        ${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.generation}u),exact.x);}
     }
   }
   storageBarrier();workgroupBarrier();
+  // A sample fault rejects the complete page, so successful pages may publish
+  // their original tile mask cooperatively after every sample has completed.
+  if(resident&&lane<${p}Tiles&&atomicLoad(&${p}Fault)==${p}Invalid){
+    let dirtyLow=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.dirtyMaskLow}u);
+    let dirtyHigh=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.dirtyMaskHigh}u);
+    if(${p}MaskContains(dirtyLow,dirtyHigh,lane)){
+      if(lane<32u){atomicOr(&${p}ExecutedLow,1u<<lane);}
+      else{atomicOr(&${p}ExecutedHigh,1u<<(lane-32u));}
+    }
+  }
+  workgroupBarrier();
   if(lane==0u&&resident){
     let dirtyLow=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.dirtyMaskLow}u);
     let dirtyHigh=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.dirtyMaskHigh}u);
@@ -413,17 +425,17 @@ fn commitSparseCM12FramePlanPresentationPacket(
       &&${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.generation}u)
         ==${p}Load(${h(SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER.acceptedGeneration)});
   }
-  if(resident&&lane<${p}Tiles){
+  for(var linear=lane;linear<${p}Tiles
+      *${SPARSE_CM12_FRAME_PLAN_PRESENTATION_SAMPLES_PER_TILE}u;linear+=64u){
+    let tile=linear/${SPARSE_CM12_FRAME_PLAN_PRESENTATION_SAMPLES_PER_TILE}u;
+    let sample=linear-tile*${SPARSE_CM12_FRAME_PLAN_PRESENTATION_SAMPLES_PER_TILE}u;
     let executedLow=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.executedMaskLow}u);
     let executedHigh=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.executedMaskHigh}u);
-    if(${p}MaskContains(executedLow,executedHigh,lane)){
+    if(resident&&${p}MaskContains(executedLow,executedHigh,tile)){
       let generation=${p}Load(record+${SPARSE_CM12_FRAME_PLAN_PRESENTATION_PAGE.generation}u);
-      for(var sample=0u;sample<${SPARSE_CM12_FRAME_PLAN_PRESENTATION_SAMPLES_PER_TILE}u;
-          sample+=1u){
-        let localIndex=${p}LocalIndex(lane,sample);
-        ${hook}StoreAccepted(page,localIndex,
-          ${hook}LoadCandidate(page,localIndex,generation));
-      }
+      let localIndex=${p}LocalIndex(tile,sample);
+      ${hook}StoreAccepted(page,localIndex,
+        ${hook}LoadCandidate(page,localIndex,generation));
     }
   }
   storageBarrier();workgroupBarrier();

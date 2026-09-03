@@ -132,7 +132,8 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
       );
       await solver.waitForSimulationReady();
       const tallCells = process.env.FLUID_SCENE === "tall-cells-hillside-dam-break";
-      const initialTallMetrics = tallCells
+      const traceTallCells = tallCells && process.env.FLUID_TERRAIN_TRACE === "1";
+      const initialTallMetrics = traceTallCells
         ? tallCellsMetrics(await solver.readDiagnosticFields()) : undefined;
       // The exact Tall Cells rung must survive long enough for the released
       // front to leave its authored reservoir and exercise dynamic world pages
@@ -147,7 +148,7 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
       for (let step = 1; step <= steps; step += 1) {
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
         if (step % 2 === 0) await device.queue.onSubmittedWorkDone();
-        if (tallCells && process.env.FLUID_TERRAIN_TRACE === "1"
+        if (traceTallCells
           && (step <= 4 || step % 30 === 0 || step === steps)) {
           await device.queue.onSubmittedWorkDone();
           const metrics = tallCellsMetrics(await solver.readDiagnosticFields());

@@ -4,6 +4,7 @@ import type { SparseCM12TransportPacketAuthorityLayout } from
 export function createSparseCM12TransportPacketAuthorityWGSL(options: {
   readonly layout: SparseCM12TransportPacketAuthorityLayout;
   readonly arenaName?: string;
+  readonly packCoarseTransportCells?: boolean;
 }): string {
   const arena = options.arenaName ?? "activity";
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(arena)) throw new TypeError("arenaName");
@@ -15,11 +16,18 @@ const CM12_TPA_DIRECT_PACKET_COUNT:u32=${l.dispatchPacketCount}u;
 const CM12_TPA_DIRECT_WIDTH:u32=${l.dispatchWidth}u;
 const CM12_TPA_COMPILER_WIDTH:u32=${l.compilerDispatchWidth}u;
 const CM12_TPA_INDIRECT:u32=${l.indirectBaseWords}u;
+const CM12_TPA_SHARPENING_INDIRECT:u32=${l.sharpeningIndirectBaseWords}u;
+const CM12_TPA_COARSE_DIRTY_PACKET_COUNT:u32=${l.coarseDirtyPacketCountWords}u;
+const CM12_TPA_COARSE_PACKING_MODE:u32=${l.coarsePackingModeWords}u;
+const CM12_TPA_COARSE_INDIRECT:u32=${l.coarseIndirectBaseWords}u;
 const CM12_TPA_TRANSPORT_LOW:u32=${l.transportMaskLowBaseWords}u;
 const CM12_TPA_TRANSPORT_HIGH:u32=${l.transportMaskHighBaseWords}u;
 const CM12_TPA_SHARPENING_LOW:u32=${l.sharpeningMaskLowBaseWords}u;
 const CM12_TPA_SHARPENING_HIGH:u32=${l.sharpeningMaskHighBaseWords}u;
 const CM12_TPA_PACKET_LIST:u32=${l.packetListBaseWords}u;
+const CM12_TPA_SHARPENING_PACKET_LIST:u32=${l.sharpeningPacketListBaseWords}u;
+const CM12_TPA_PACK_COARSE_CAPABLE:bool=${options.packCoarseTransportCells
+    ? "true" : "false"};
 
 fn cm12TransportPacketLaneSelected(mask:vec2u,lane:u32)->bool{
   return lane<64u&&((mask[lane>>5u]>>(lane&31u))&1u)!=0u;
@@ -47,6 +55,69 @@ fn cm12TransportPacketId(rank:u32)->u32{
   let ordinal=cm12TransportPacketOrdinal(rank);
   return select(0xffffffffu,cm12TransportDirectStablePacket(ordinal),
     ordinal<CM12_TPA_DIRECT_PACKET_COUNT);
+}
+fn cm12SharpeningPacketCount()->u32{return min(
+  atomicLoad(&${arena}[CM12_TPA_SHARPENING_INDIRECT]),CM12_TPA_DIRECT_PACKET_COUNT);}
+fn cm12SharpeningPacketOrdinal(rank:u32)->u32{
+  return select(0xffffffffu,
+    atomicLoad(&${arena}[CM12_TPA_SHARPENING_PACKET_LIST+rank]),
+    rank<cm12SharpeningPacketCount());
+}
+fn cm12SharpeningPacketId(rank:u32)->u32{
+  let ordinal=cm12SharpeningPacketOrdinal(rank);
+  return select(0xffffffffu,cm12TransportDirectStablePacket(ordinal),
+    ordinal<CM12_TPA_DIRECT_PACKET_COUNT);
+}
+fn cm12CoarseTransportPackingEnabled()->bool{return CM12_TPA_PACK_COARSE_CAPABLE
+  &&atomicLoad(&${arena}[CM12_TPA_COARSE_PACKING_MODE])!=0u;}
+// Compile the accepted TEI packet set from the accepted-leaf
+// manifest. This visits one invocation per accepted leaf and emits exactly the
+// packet count implied by that leaf's rung; it does not scan resident capacity.
+@compute @workgroup_size(64)
+fn compileSparseCM12AcceptedVelocityExtensionPackets(
+ @builtin(global_invocation_id)gid:vec3u){
+  let leaf=acceptedLeafInvocation(gid.x);if(leaf==0xffffffffu){return;}
+  let slot=acceptedTopologySlot();let descriptor=cm12TeiLoadLeaf(slot,leaf);
+  if((descriptor.flags&0x80000000u)==0u){return;}
+  let resolution=descriptor.flags&31u;
+  let packetAxis=max(1u,(resolution+3u)/4u);
+  let packetCount=min(CM12_TPA_DIRECT_PACKETS_PER_LEAF,
+    packetAxis*packetAxis*packetAxis);
+  for(var local=0u;local<packetCount;local+=1u){
+    let packet=64u*leaf+local;
+    if(cm12TeiPacket(packet,slot).first==0xffffffffu){continue;}
+    let ordinal=leaf*CM12_TPA_DIRECT_PACKETS_PER_LEAF+local;
+    let at=atomicAdd(&${arena}[CM12_TPA_INDIRECT],1u);
+    if(at<CM12_TPA_DIRECT_PACKET_COUNT){
+      atomicStore(&${arena}[CM12_TPA_PACKET_LIST+at],ordinal);
+    }
+  }
+}
+// Hybrid companion: extend the sharpening list from the masks
+// published by packed coarse cells. Conservative transport consumes only B8
+// packets, but sharpening remains an independent physical consumer of the
+// coarse packet address space.
+@compute @workgroup_size(64)
+fn compileSparseCM12AcceptedSharpeningPackets(
+ @builtin(global_invocation_id)gid:vec3u){
+  if(!cm12CoarseTransportPackingEnabled()){return;}
+  let leaf=acceptedLeafInvocation(gid.x);if(leaf==0xffffffffu){return;}
+  let slot=acceptedTopologySlot();let descriptor=cm12TeiLoadLeaf(slot,leaf);
+  if((descriptor.flags&0x80000000u)==0u){return;}
+  let resolution=descriptor.flags&31u;
+  if(resolution>4u){return;}
+  let packetAxis=max(1u,(resolution+3u)/4u);
+  let packetCount=min(CM12_TPA_DIRECT_PACKETS_PER_LEAF,
+    packetAxis*packetAxis*packetAxis);
+  for(var local=0u;local<packetCount;local+=1u){
+    let ordinal=leaf*CM12_TPA_DIRECT_PACKETS_PER_LEAF+local;
+    let mask=cm12TransportSharpeningMaskAt(ordinal);
+    if((mask.x|mask.y)==0u){continue;}
+    let at=atomicAdd(&${arena}[CM12_TPA_SHARPENING_INDIRECT],1u);
+    if(at<CM12_TPA_DIRECT_PACKET_COUNT){
+      atomicStore(&${arena}[CM12_TPA_SHARPENING_PACKET_LIST+at],ordinal);
+    }
+  }
 }
 fn cm12TransportPacketMaskAt(ordinal:u32)->vec2u{
   if(ordinal>=CM12_TPA_DIRECT_PACKET_COUNT){return vec2u(0u);}
@@ -173,9 +244,48 @@ fn compileSparseCM12TransportPacketsFromFinalScalarMasks(
   if(!dirty){return;}
   atomicStore(&${arena}[CM12_TPA_TRANSPORT_LOW+ordinal],packetMask.x);
   atomicStore(&${arena}[CM12_TPA_TRANSPORT_HIGH+ordinal],packetMask.y);
-  let at=atomicAdd(&${arena}[CM12_TPA_INDIRECT],1u);
-  if(at<CM12_TPA_DIRECT_PACKET_COUNT){
-    atomicStore(&${arena}[CM12_TPA_PACKET_LIST+at],ordinal);}
+  if(CM12_TPA_PACK_COARSE_CAPABLE&&(leafDescriptor.flags&31u)<=4u){
+    atomicAdd(&${arena}[CM12_TPA_COARSE_DIRTY_PACKET_COUNT],1u);
+  }
+}
+
+// Decide from this frame's actual dirty work rather than scene identity. The
+// packed path scans the accepted-cell stream; select it only when the coarse
+// packet lane domain is at least four times larger than that scan. Four dirty
+// packets is the minimum useful dispatch after fixed scheduling overhead.
+@compute @workgroup_size(1)
+fn finalizeSparseCM12CoarseTransportSchedule(){
+  let dirtyCoarse=atomicLoad(&${arena}[CM12_TPA_COARSE_DIRTY_PACKET_COUNT]);
+  let scanCells=acceptedTemplateCellCount();
+  let minimumPackets=max(4u,(scanCells+15u)/16u);
+  let enabled=CM12_TPA_PACK_COARSE_CAPABLE&&dirtyCoarse>=minimumPackets;
+  atomicStore(&${arena}[CM12_TPA_COARSE_PACKING_MODE],select(0u,1u,enabled));
+  atomicStore(&${arena}[CM12_TPA_COARSE_INDIRECT],select(
+    0u,acceptedTemplateCellWorkgroups(),enabled));
+}
+
+// The analysis pass above publishes masks before the global selector exists.
+// This lightweight second pass compiles both consumer lists from those masks.
+// Fine/fallback packets seed the sharpening list immediately; packed coarse
+// sources append their packet addresses after transport publishes its masks.
+@compute @workgroup_size(64)
+fn compileSparseCM12TransportPacketLists(
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
+  let group=wid.x+CM12_TPA_COMPILER_WIDTH*wid.y;
+  let ordinal=64u*group+lane;
+  if(ordinal>=CM12_TPA_DIRECT_PACKET_COUNT){return;}
+  let mask=cm12TransportPacketMaskAt(ordinal);if((mask.x|mask.y)==0u){return;}
+  let packet=cm12TransportDirectStablePacket(ordinal);
+  let descriptor=cm12TeiLoadLeaf(acceptedTopologySlot(),packet/64u);
+  if(cm12CoarseTransportPackingEnabled()&&(descriptor.flags&31u)<=4u){return;}
+  let transportAt=atomicAdd(&${arena}[CM12_TPA_INDIRECT],1u);
+  if(transportAt<CM12_TPA_DIRECT_PACKET_COUNT){
+    atomicStore(&${arena}[CM12_TPA_PACKET_LIST+transportAt],ordinal);
+  }
+  let sharpeningAt=atomicAdd(&${arena}[CM12_TPA_SHARPENING_INDIRECT],1u);
+  if(sharpeningAt<CM12_TPA_DIRECT_PACKET_COUNT){
+    atomicStore(&${arena}[CM12_TPA_SHARPENING_PACKET_LIST+sharpeningAt],ordinal);
+  }
 }
 fn cm12TransportExecutionCell(packetRank:u32,lane:u32)->u32{
   let ordinal=cm12TransportPacketOrdinal(packetRank);

@@ -46,11 +46,16 @@ export interface SparseCM12TransportPacketAuthorityLayout {
   readonly compilerDispatchWidth: number;
   readonly compilerDispatchRows: number;
   readonly indirectBaseWords: number;
+  readonly sharpeningIndirectBaseWords: number;
+  readonly coarseDirtyPacketCountWords: number;
+  readonly coarsePackingModeWords: number;
+  readonly coarseIndirectBaseWords: number;
   readonly transportMaskLowBaseWords: number;
   readonly transportMaskHighBaseWords: number;
   readonly sharpeningMaskLowBaseWords: number;
   readonly sharpeningMaskHighBaseWords: number;
   readonly packetListBaseWords: number;
+  readonly sharpeningPacketListBaseWords: number;
   readonly totalWords: number;
 }
 
@@ -91,7 +96,17 @@ export function createSparseCM12TransportPacketAuthorityLayout(options: {
   const compilerDispatchWidth = Math.min(65_535, compilerWorkgroupCount);
   const compilerDispatchRows = Math.ceil(compilerWorkgroupCount / compilerDispatchWidth);
   const indirectBaseWords = baseWords;
-  const transportMaskLowBaseWords = checked(indirectBaseWords
+  const sharpeningIndirectBaseWords = checked(indirectBaseWords
+    + SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_INDIRECT_WORDS,
+  "sharpeningIndirectBaseWords");
+  const coarseDirtyPacketCountWords = checked(sharpeningIndirectBaseWords
+    + SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_INDIRECT_WORDS,
+  "coarseDirtyPacketCountWords");
+  const coarsePackingModeWords = checked(coarseDirtyPacketCountWords + 1,
+    "coarsePackingModeWords");
+  const coarseIndirectBaseWords = checked(coarsePackingModeWords + 1,
+    "coarseIndirectBaseWords");
+  const transportMaskLowBaseWords = checked(coarseIndirectBaseWords
     + SPARSE_CM12_TRANSPORT_PACKET_AUTHORITY_INDIRECT_WORDS,
   "transportMaskLowBaseWords");
   const transportMaskHighBaseWords = checked(transportMaskLowBaseWords
@@ -102,12 +117,17 @@ export function createSparseCM12TransportPacketAuthorityLayout(options: {
     + dispatchPacketCount, "sharpeningMaskHighBaseWords");
   const packetListBaseWords = checked(sharpeningMaskHighBaseWords
     + dispatchPacketCount, "packetListBaseWords");
-  const totalWords = checked(packetListBaseWords + dispatchPacketCount, "totalWords");
+  const sharpeningPacketListBaseWords = checked(packetListBaseWords
+    + dispatchPacketCount, "sharpeningPacketListBaseWords");
+  const totalWords = checked(sharpeningPacketListBaseWords + dispatchPacketCount,
+    "totalWords");
   return Object.freeze({ baseWords, packetCapacity, dispatchPacketsPerLeaf,
     dispatchPacketCount, dispatchWidth, dispatchRows,
     compilerWorkgroupCount, compilerDispatchWidth, compilerDispatchRows,
-    indirectBaseWords,
+    indirectBaseWords, sharpeningIndirectBaseWords,
+    coarseDirtyPacketCountWords, coarsePackingModeWords, coarseIndirectBaseWords,
     transportMaskLowBaseWords, transportMaskHighBaseWords,
     sharpeningMaskLowBaseWords, sharpeningMaskHighBaseWords, packetListBaseWords,
+    sharpeningPacketListBaseWords,
     totalWords });
 }

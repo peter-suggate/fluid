@@ -8,6 +8,10 @@ import {
 } from "../lib/methods/adaptive-mass/sparse-cm12-transport-packet-authority";
 import { createSparseCM12TransportPacketAuthorityWGSL } from
   "../lib/methods/adaptive-mass/sparse-cm12-transport-packet-authority.wgsl";
+import { createSparseCM12VelocityExtensionLayout } from
+  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
+import { createSparseCM12VelocityExtensionWGSL } from
+  "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension.wgsl";
 
 const wgsl = createSparseCM12TransportPacketAuthorityWGSL({
   layout: createSparseCM12TransportPacketAuthorityLayout({
@@ -16,6 +20,15 @@ const wgsl = createSparseCM12TransportPacketAuthorityWGSL({
     dispatchPacketsPerLeaf: 8,
     dispatchPacketCount: 64,
   }),
+});
+const packedWGSL = createSparseCM12TransportPacketAuthorityWGSL({
+  layout: createSparseCM12TransportPacketAuthorityLayout({
+    baseWords: 256,
+    packetCapacity: 512,
+    dispatchPacketsPerLeaf: 8,
+    dispatchPacketCount: 64,
+  }),
+  packCoarseTransportCells: true,
 });
 
 test("TPA1 stages one sealed descriptor for packet-lane execution", () => {
@@ -67,6 +80,74 @@ test("accepted conservative passes consume the staged packet prologue", () => {
   assert.doesNotMatch(gather, /cm12TransportPublish.*Mask/,
     "gather must not publish a second topology representation");
   assert.doesNotMatch(gather, /cm12TransportPacketId\(/);
+});
+
+test("accepted VEX packet compilation scales with accepted leaves and their rungs", () => {
+  const begin = wgsl.indexOf("fn compileSparseCM12AcceptedVelocityExtensionPackets");
+  const end = wgsl.indexOf("fn cm12TransportPacketMaskAt", begin);
+  assert.ok(begin >= 0 && end > begin);
+  const compile = wgsl.slice(begin, end);
+  assert.match(compile, /acceptedLeafInvocation\(gid\.x\)/);
+  assert.match(compile, /resolution=descriptor\.flags&31u/);
+  assert.match(compile, /packetAxis\*packetAxis\*packetAxis/);
+  assert.match(compile, /atomicAdd\(&activity\[CM12_TPA_INDIRECT\],1u\)/);
+  assert.doesNotMatch(compile, /CM12_TPA_DIRECT_PACKET_COUNT\)\{return;/,
+    "accepted packet compilation must not enumerate direct packet capacity");
+
+  const vex = createSparseCM12VelocityExtensionWGSL({
+    layout: createSparseCM12VelocityExtensionLayout({
+      cellCapacity: 4096, packetCapacity: 512, brickFineResolution: 8,
+    }),
+    compactAcceptedPacketsForQA: true,
+  });
+  assert.match(vex, /cm12TransportPacketOrdinal\(dispatchOrdinal\)/);
+  assert.match(vex, /workgroupUniformLoad\(&cm12ExtensionDispatchPacket\)/);
+  assert.match(vex, /cm12ExtensionPublishFrameReceipt\(dispatchOrdinal,lane\)/);
+});
+
+test("coarse transport selection is GPU-authored from dirty packet work", () => {
+  assert.match(packedWGSL, /CM12_TPA_PACK_COARSE_CAPABLE:bool=true/);
+  assert.match(packedWGSL, /fn finalizeSparseCM12CoarseTransportSchedule\(\)/);
+  assert.match(packedWGSL, /dirtyCoarse>=minimumPackets/);
+  assert.match(packedWGSL, /acceptedTemplateCellWorkgroups\(\),enabled/);
+  assert.match(packedWGSL, /fn compileSparseCM12TransportPacketLists/);
+  assert.match(packedWGSL, /CM12_TPA_SHARPENING_PACKET_LIST/);
+
+  const lists = packedWGSL.slice(
+    packedWGSL.indexOf("fn compileSparseCM12TransportPacketLists"),
+    packedWGSL.indexOf("fn cm12TransportExecutionCell"),
+  );
+  assert.match(lists,
+    /cm12CoarseTransportPackingEnabled\(\)&&\(descriptor\.flags&31u\)<=4u\)\{return;\}/,
+    "packing may remove only B1/B2/B4 packets from conservative transport");
+  assert.match(lists,
+    /atomicStore\(&activity\[CM12_TPA_PACKET_LIST\+transportAt\],ordinal\)/,
+    "B8 and fallback packets must retain their staged TEI execution list");
+});
+
+test("packed coarse transport preserves stable accepted-cell order and B8 locality", () => {
+  const source = readFileSync(new URL(
+    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+    import.meta.url,
+  ), "utf8");
+  const begin = source.indexOf("fn cm12PackedCoarseCell");
+  const end = source.indexOf("fn cm12PublishPackedCoarseSharpening", begin);
+  assert.ok(begin >= 0 && end > begin);
+  const resolve = source.slice(begin, end);
+  assert.match(resolve, /acceptedTemplateCellInvocation\(invocation\)/,
+    "packed lanes must be a deterministic projection of accepted-cell order");
+  assert.match(resolve, /if\(resolution>4u\)/,
+    "B8 cells must not enter the cross-leaf execution path");
+  assert.match(resolve, /cm12TransportPacketLaneSelected/,
+    "coarse cells must still consume the sealed packet dirty mask");
+
+  for (const entryPoint of [
+    "traceGammaAndBetaPackedCoarse",
+    "scatterDensityDeficitPackedCoarse",
+    "gatherConservativeDensityPackedCoarse",
+  ]) {
+    assert.match(source, new RegExp(`@compute @workgroup_size\\(64\\)\\nfn ${entryPoint}`));
+  }
 });
 
 test("staged packet arithmetic is equivalent to direct packet decode", () => {

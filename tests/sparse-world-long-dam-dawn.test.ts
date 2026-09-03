@@ -29,7 +29,10 @@ import type { SparseWorld, SparseWorldPresentation } from "../lib/sparse-world";
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
 
-const INITIAL_LONG_DAM_TILE_COUNT = 80;
+const INITIAL_LONG_DAM_WET_TILE_COUNT = 80;
+const INITIAL_LONG_DAM_DRY_SUPPORT_TILE_COUNT = 196;
+const INITIAL_LONG_DAM_TILE_COUNT = INITIAL_LONG_DAM_WET_TILE_COUNT
+  + INITIAL_LONG_DAM_DRY_SUPPORT_TILE_COUNT;
 const LONG_DAM_FAR_WALL_PAGE_X = 23;
 // The Sparse CM12 profile advances at the paper's 1/30 s, so the authored
 // four-second scene is 120 steps. The previous 1,200 retained the old 4 ms
@@ -278,16 +281,19 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
       const initialPresentation = world.presentation();
       assert.equal(initialStatus.state, "ready");
       assert.equal(initialStatus.residentTiles, INITIAL_LONG_DAM_TILE_COUNT,
-        "generation zero must contain exactly the 80 authored-fluid tiles");
+        "generation zero must contain exactly 80 wet tiles and their 196-tile "
+          + "conservative velocity-extension support band");
       assert.equal(initialStatus.acceptedGeneration,
         initialPresentation.acceptedGeneration,
         "status and presentation must share one accepted-generation boundary");
-      assert.ok(initialStatus.capacityTiles < 24 * 12 * 4,
-        "physical capacity must remain below the Long Dam logical-domain volume");
+      assert.ok(initialStatus.residentTiles < 24 * 12 * 4,
+        "generation-zero physical residency must remain below the logical-domain volume");
+      assert.ok(initialStatus.capacityTiles < 2 * 24 * 12 * 4,
+        "the signed-world growth reserve must remain bounded near the logical domain");
       assert.equal(initialStatus.fault, undefined);
       const initialFront = await publishedNegativeFront(device, initialPresentation);
       assert.equal(initialFront.residentPages, INITIAL_LONG_DAM_TILE_COUNT,
-        "generation-zero rendering must consume the same 80 resident tiles");
+        "generation-zero rendering must consume the complete wet/support topology");
       assert.equal(initialFront.pageX, 3,
         "the authored Long Dam reservoir must end at brick column three");
       assert.equal(initialFront.materialPageX, 3,
@@ -343,8 +349,14 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
       assert.equal(finalFront.materialPageX, LONG_DAM_FAR_WALL_PAGE_X,
         `material Long Dam front stopped before far-wall brick column ${
           LONG_DAM_FAR_WALL_PAGE_X}: ${JSON.stringify(frontTrajectory)}`);
-      assert.ok(finalResidentPages > INITIAL_LONG_DAM_TILE_COUNT,
-        "front motion must clone complete tiles through the public world boundary");
+      // Generation zero now carries the conservative dry support band. The
+      // moving front reuses and retires those pages, so monotonic page-count
+      // growth is no longer evidence of traversal. Require the far-wall
+      // cross-section itself to be represented by several complete pages.
+      assert.ok(finalFront.negativePagesByPageX[LONG_DAM_FAR_WALL_PAGE_X]! >= 4,
+        "front motion must publish a complete far-wall cross-section");
+      assert.ok(finalResidentPages > INITIAL_LONG_DAM_WET_TILE_COUNT,
+        "the moving front must retain wet pages plus sparse transport support");
       assert.ok(finalStatus.residentTiles <= finalStatus.capacityTiles);
       assert.equal(finalStatus.acceptedGeneration,
         finalPresentation.acceptedGeneration);

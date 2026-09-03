@@ -85,8 +85,9 @@ async function capture(device: GPUDevice, oracle: boolean): Promise<Capture> {
     device, scene, "balanced", undefined, options, () => {});
   try {
     for (let step = 1; step <= steps; step += 1) {
-      assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true,
-        `${oracle ? "oracle" : "FPP1"} step ${step} did not encode`);
+      while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) {
+        await new Promise(setImmediate);
+      }
     }
     await device.queue.onSubmittedWorkDone();
     const source = solver.globalFineLevelSetSource;

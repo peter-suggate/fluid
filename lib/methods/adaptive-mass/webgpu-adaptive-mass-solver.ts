@@ -86,6 +86,18 @@ const PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 presentation publisher oracle QA");
 const PHASE1_TRANSPORT_RECEIPT_QA_TOKEN: unique symbol =
   Symbol("Sparse CM12 Phase-1 transport receipt QA");
+const VELOCITY_EXTENSION_PACKET_COMPACTION_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 velocity-extension packet compaction QA");
+const COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 coarse transport cell packing QA");
+const REFINEMENT_POLICY_LEADER_COMPACTION_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 refinement-policy leader compaction QA");
+const REFINEMENT_POLICY_FULL_LEAF_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 refinement-policy full-leaf control QA");
+const PHASE1_COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 Phase-1 coarse transport cell packing QA");
+const DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN: unique symbol =
+  Symbol("Sparse CM12 density-capacity early exit QA");
 
 export interface AdaptiveMassFluidDomain {
   readonly dimensions: SparseBrickVec3;
@@ -340,6 +352,72 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       onProgress, signal);
   }
 
+  /** QA-only accepted-packet velocity-extension dispatch experiment. */
+  static createVelocityExtensionPacketCompactionOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, VELOCITY_EXTENSION_PACKET_COMPACTION_QA_TOKEN);
+  }
+
+  /** QA-only hybrid coarse-cell/fine-packet conservative transport. */
+  static createCoarseTransportCellPackingOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN);
+  }
+
+  /** QA-only compact dispatch for authored refinement-policy tile leaders. */
+  static createRefinementPolicyLeaderCompactionOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, REFINEMENT_POLICY_LEADER_COMPACTION_QA_TOKEN);
+  }
+
+  /** QA-only full-leaf control for the compact policy-planning path. */
+  static createRefinementPolicyFullLeafOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, REFINEMENT_POLICY_FULL_LEAF_QA_TOKEN);
+  }
+
+  /** QA-only packed coarse transport with raw Phase-1 receipts enabled. */
+  static createPhase1CoarseTransportCellPackingOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, PHASE1_COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN);
+  }
+
+  /** QA-only destination-bit fixed-point gate for capacity-repair suffixes. */
+  static createDensityCapacityEarlyExitOracleForQA(
+    device: GPUDevice, scene: SceneDescription, quality: GPUQuality,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    options: AdaptiveMassSolverOptions, onProgress: GPUInitializationReporter,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WebGPUAdaptiveMassSolver> {
+    return this.createAsync(device, scene, quality, onRigidLoads, options,
+      onProgress, signal, DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN);
+  }
+
   static async createAsync(
     device: GPUDevice,
     scene: SceneDescription,
@@ -349,7 +427,13 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     onProgress: GPUInitializationReporter,
     signal: AbortSignal = new AbortController().signal,
     qaToken?: typeof PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN
-      | typeof PHASE1_TRANSPORT_RECEIPT_QA_TOKEN,
+      | typeof PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
+      | typeof VELOCITY_EXTENSION_PACKET_COMPACTION_QA_TOKEN
+      | typeof COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN
+      | typeof REFINEMENT_POLICY_LEADER_COMPACTION_QA_TOKEN
+      | typeof REFINEMENT_POLICY_FULL_LEAF_QA_TOKEN
+      | typeof PHASE1_COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN
+      | typeof DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN,
   ): Promise<WebGPUAdaptiveMassSolver> {
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
     const fluidDomainPlan = adaptiveMassFluidDomainForScene(scene);
@@ -485,7 +569,19 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               ? "presentation-publisher-qa"
               : qaToken === PHASE1_TRANSPORT_RECEIPT_QA_TOKEN
                 ? "phase1-transport-receipt-qa"
-                : "production",
+                : qaToken === VELOCITY_EXTENSION_PACKET_COMPACTION_QA_TOKEN
+                  ? "velocity-extension-packet-compaction-qa"
+                  : qaToken === COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN
+                    ? "coarse-transport-cell-packing-qa"
+                    : qaToken === REFINEMENT_POLICY_LEADER_COMPACTION_QA_TOKEN
+                      ? "refinement-policy-leader-compaction-qa"
+                    : qaToken === REFINEMENT_POLICY_FULL_LEAF_QA_TOKEN
+                      ? "refinement-policy-full-leaf-qa"
+                    : qaToken === PHASE1_COARSE_TRANSPORT_CELL_PACKING_QA_TOKEN
+                      ? "phase1-coarse-transport-cell-packing-qa"
+                    : qaToken === DENSITY_CAPACITY_EARLY_EXIT_QA_TOKEN
+                      ? "density-capacity-early-exit-qa"
+                    : "production",
           });
           if (rigidSystem) {
             const occupancy = sparseRuntime.runtime.solidWorldCollisionSource;
@@ -647,6 +743,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       };
     })() : undefined;
     const activeBodies = bodies.slice(0, 12);
+    this.rigidSystem?.syncBodies(activeBodies);
     const gravity = this.scene.fluid.gravity_m_s2;
     const instrumentation = usePerformanceInstrumentationStore.getState();
     const traceRequestedAt_ms = instrumentation.enabled ? performance.now() : 0;
@@ -718,6 +815,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       worldDimensions_m: this.fluidDomain.dimensions.map((value, axis) =>
         value * this.fluidDomain.cellSize_m[axis]) as [number, number, number],
     };
+    if (this.rigidExchange) encoder.clearBuffer(this.rigidExchange);
     this.sparseWorld.encodeStep(encoder, {
       time: this.lastTime_s + dt_s,
       dt: dt_s,
@@ -725,6 +823,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       rigidBodies: activeBodies,
       liquidInflow,
     });
+    if (this.rigidSystem && activeBodies.length > 0) {
+      this.rigidSystem.encode(encoder, dt_s, cellSize_m ** 3, 1, cellSize_m);
+    }
     if (pressureIterationReadback) {
       this.sparseRuntime.encodePressureIterationReceipt(
         encoder, pressureIterationReadback);
@@ -964,6 +1065,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readFrameControlQA() { return this.sparseWorldTrace.readFrameControlQA(); }
   readTransportPacketIndirectQA() {
     return this.sparseWorldTrace.readTransportPacketIndirectQA();
+  }
+  readCoarseTransportScheduleQA() {
+    return this.sparseWorldTrace.readCoarseTransportScheduleQA();
   }
   readDynamicTransportPacketsQA() {
     return this.sparseWorldTrace.readDynamicTransportPacketsQA();

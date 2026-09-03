@@ -579,3 +579,227 @@ The later physical-graph cut should satisfy:
 - pressure aggregate/hierarchy work is proportional to live aggregate nodes;
 - pressure topology and presentation each retain less than 25% of ordinary
   cost when pressure cells/rows retain 0.4%.
+
+## 2026-09-02 ocean-seiche B8/P8 full-domain min-8 follow-up
+
+The large ocean case makes the remaining execution-shape defect more explicit
+than mini64. Its accepted topology contains 4,800 cells and 15,400 rows across
+2,560 accepted leaves: 2,400 B1 leaves, 140 B2 leaves, and 20 B4 leaves. The
+transport authority emits 2,560 live 4-cubed packets. Those packets launch
+163,840 lanes for 4,800 accepted cells, so only 2.93% of conservative-transport
+lanes carry accepted work. The packet list has removed absent packets, but its
+lane layout has not adapted to coarse rungs.
+
+Velocity extension has a separate defect. B8 resident capacity exposes 24,576
+direct packet ordinals and dispatches that domain for initialization plus eight
+Jacobi sweeps. A construction-isolated QA arm now compiles accepted packets by
+traversing the accepted-leaf manifest and expanding only the packet count
+implied by each rung. It preserves the stable TEI packet address and runs the
+same numerical kernels through an indirect dispatch.
+
+Matched 16-frame ocean samples measured:
+
+| arm | VEX median | VEX p95 | frame median | non-pressure median |
+|---|---:|---:|---:|---:|
+| direct capacity | 2.2938 ms | 4.0632 ms | 37.3555 ms | 31.9816 ms |
+| accepted packets | 1.5073 ms | 1.8350 ms | 36.8968 ms | 31.2607 ms |
+
+The VEX arm is a useful 34% stage win but only a 0.46 ms frame win. On a
+fine-biased mini64 sample it was neutral within run variance (3.1457 versus
+3.2768 ms VEX median). The production path therefore remains unchanged. The
+right production form is a topology-generation-cached accepted packet image,
+with a density/occupancy policy that keeps direct brick-major dispatch for
+dense fine rungs.
+
+The larger opportunity is conservative transport: pack B1/B2/B4 accepted cells
+from multiple leaves into full warps while retaining packet-local TEI staging
+for B8. That execution image must be deterministic and spatially ordered; a
+per-frame atomic append would trade lane waste for unstable locality. Ocean is
+only the stress instrument for this work—the selection rule must depend on rung
+and accepted work, never scene identity or refinement-region identity.
+
+### Hybrid coarse-cell transport experiment
+
+A second construction-isolated QA arm implements that split directly. Accepted
+B1/B2/B4 cells are replayed in stable accepted-cell order, 64 cells per
+workgroup. B8 packets remain on the ordinary staged packet kernel. Both arms
+consume the same TPA dirty masks; the compiler retains coarse masks for cell
+selection but omits coarse packets from the fine-packet indirect list.
+
+On ocean min8 every accepted leaf is B1/B2/B4, so conservative transport's
+packet indirect count falls from 2,560 to zero and the coarse stream executes
+75 workgroups. The first timing arm incorrectly reused that same empty indirect
+list for sharpening, however, so its 27.4596 ms result omitted physical work
+and is not a valid optimization result.
+
+Raw Phase-1 instrumentation localized the error. The two arms were bit-exact
+through four complete steps; the first field difference appeared only after
+surface sharpening on step five. Conservative departure, stencil cells,
+stencil weights, beta, deficit, and gathered mass were still identical. The
+fix is a separate sharpening packet schedule rebuilt from the masks published
+by packed coarse transport. This preserves packet-local directory staging for
+sharpening while allowing conservative transport to use cross-leaf cells.
+
+With sharpening restored, ten consecutive ocean steps are raw-bit identical
+for every diagnostic field and Phase-1 receipt. The 24-advance terminal work is
+also identical: 2,670 pressure cells, 8,797 rows, and relative residual
+2.527815047e-4 in both arms.
+
+| arm | conservative transport | frame median | non-pressure median |
+|---|---:|---:|---:|
+| staged packets | 10.4202 ms | 37.3555 ms | 31.9816 ms |
+| packed coarse + restored sharpening | 2.8836 ms | 28.5082 ms | 23.4619 ms |
+
+This established the opportunity, but not yet a safe default. The extra packed
+dispatch can make conservative transport itself slower when most accepted work
+is already B8, so the production form now makes the decision on the GPU from
+the current frame's actual work. It counts dirty B1/B2/B4 packets and selects
+accepted-cell packing only when their 64-lane packet domain is at least four
+times the complete accepted-cell scan, with a four-packet minimum. Otherwise
+it retains the complete packet schedule and emits zero packed workgroups. This
+predicate uses only accepted topology and dirty transport masks; it has no
+scene, refinement-region, or rung-name special case.
+
+The selector authors separate indirect schedules for conservative transport
+and sharpening. When packing is selected, B1/B2/B4 packets leave only the
+transport list and are restored to sharpening's packet-local list from the
+masks emitted by packed transport. B8 always stays packet-local. When packing
+is rejected, both consumers use the original complete packet stream.
+
+A second experiment packed sharpening sources too. It regressed the ocean
+sharpening stage from 3.5389 to 4.7186 ms and introduced small field drift: its
+iterative gradient trace repeatedly needs neighboring owner lookups, and the
+cache-free cross-leaf form loses more locality than it gains in occupancy. Keep
+sharpening packet-local until a locality-preserving source clustering scheme
+exists.
+
+With compact candidate planning held constant, matched 24-frame production
+samples measured:
+
+| arm | dirty coarse packets | packed workgroups | conservative transport | frame median | non-pressure median |
+|---|---:|---:|---:|---:|---:|
+| complete packet control | 0 (capability off) | 0 | 8.9784 ms | 36.3725 ms | 30.5398 ms |
+| dynamic production selector | 2,560 | 75 | 3.8666 ms | 30.8019 ms | 25.1003 ms |
+
+The production selector cuts conservative transport by 56.9%, the full frame
+by 15.3%, and non-pressure work by 17.8% in the paired ocean measurement. Both
+arms finish with exactly 4,800 cells, 15,400 rows, 2,400 pressure cells, 7,900
+pressure rows, and residual 1.3529102959654814e-4. Ten consecutive steps are
+raw-bit identical for every diagnostic field, transport receipt, and work
+count.
+
+On the fine-biased mini64 case, the selector sees 184 dirty coarse packets,
+rejects packing, emits zero packed workgroups, and preserves all 1,016 ordinary
+transport/sharpening packets. Its transport median is effectively neutral
+(2.2282 ms production versus 2.1627 ms paired packet control), while the frame
+median improved within run variance (35.9137 versus 37.4211 ms). This dynamic
+hybrid is now the ordinary construction path.
+
+The focused WGSL and topology tests pass, as do Dawn's symmetric expansion,
+hydrostatic adaptivity, mini32 correctness, both min8 surface gates, mini32 and
+mini64 performance, live liquid insertion, and outside-tank symmetric collapse.
+No regression lane or timing ceiling was weakened.
+
+### Candidate-topology / resolution-planning experiment
+
+The UI's **Candidate topology build** label is the resident
+`resolution-planning` stage. On ocean min8 its two dominant chunks were
+refinement-policy classification (0.6554 ms) and resolution grading/validation
+(0.8520 ms). The latter ran three policy-tile closures and three face-grading
+closures even though every leaf in the fully covering min8 region had a hard
+B1 cap. At that cap, `planBrickResolution` has already clamped every candidate
+to B1; both closures are mathematical no-ops.
+
+The initial hypothesis—that thousands of non-leader workgroups were the main
+cost—was incomplete. A compact GPU leader list reduced 3,072 candidate launches
+to 180 policy-tile leaders, but the leaders still cooperatively visited almost
+the entire 2,560-leaf volume and planning remained about 2.03 ms. The useful
+general changes were instead:
+
+- compile policy-tile leaders on the GPU and dispatch only that stable-ID list;
+- reuse the immediately preceding per-leaf six-face enclosure receipts when
+  reducing tile enclosure, rather than repeating directory and SolidWorld
+  queries for every sibling face; and
+- elide policy-tile and face-grading closure for a leaf whose authored hard cap
+  is B1, because no neighbor request can raise it above that cap.
+
+These predicates depend only on authored policy metadata and the coarse rung,
+not on the ocean scene or a region identifier. Ten consecutive ocean steps are
+bit-identical to the control for every diagnostic field, the complete activity
+and topology snapshot, all work counts, and the pressure residual.
+
+Matched 24-frame samples measured:
+
+| arm | policy classification | grading/validation | planning stage | frame median |
+|---|---:|---:|---:|---:|
+| full leaf/tile closure | 0.6554 ms | 0.8520 ms | 1.9661 ms | 36.4380 ms |
+| receipt reuse + B1 closure elision | 0.3277 ms | 0.1311 ms | 1.0486 ms | 35.7171 ms |
+
+The stage falls 46.7%, saving 0.9175 ms; the paired frame median falls 0.7209 ms
+despite larger whole-frame variance. Candidate-default Dawn lanes pass
+hydrostatic adaptivity, symmetric expansion, mini32 correctness, both min8
+surface tests, and the mini32/mini64 performance ceilings. The compact planning
+path is now the ordinary construction path. The canonical aggregate Dawn run
+again reached the pre-existing long-dam generation-zero assertion (276 pages
+versus the test's expected 80), then exhausted its 180-second budget in the
+tall-cells lane. Individually, live liquid insertion and outside-tank symmetric
+collapse also pass; no lane or timing ceiling was weakened.
+
+Holistically, very little *resolution choice* remains for this stage to improve
+in a fully covering min8 region: the authored B1 cap has already decided the
+answer. The physically necessary work is tile membership/lifecycle closure,
+which prevents partially retiring the B8 siblings that jointly represent one
+coarse physical tile, plus transition grading when a hard-cap boundary exists.
+The fact that a full-domain B1 policy still owns 2,560 resident B8 leaves for
+only 180 elected physical policy tiles is the deeper representation problem.
+Making those coarse tiles first-class resident topology—not groups of fine leaf
+pages—would make candidate topology, lifecycle, presentation, and other
+leaf-domain stages scale with coarse-cell proportion instead of authored B8
+page count.
+
+### Presentation, sharpening, and face-preparation follow-up
+
+After coarse transport and planning, ocean's largest non-pressure stage was
+presentation publication at 6.0948 ms. The fixed P8 representation publishes
+2,560 pages, 20,480 4-cubed tiles, and 1,310,720 exact samples every frame from
+only 4,800 accepted physics cells: 273.1 presentation samples per physical
+cell. The existing P8 executor also used only eight lanes per workgroup, with
+each live lane evaluating 64 samples serially.
+
+The retained general change flattens each page's sample domain over all 64
+lanes in both execute and commit. It changes no page format, reconstruction,
+fault rule, or scene predicate. A source-toggle A/B produced identical hashes
+for the complete 6,291,456-byte accepted/candidate sample buffer and 49,152-byte
+metadata buffer. The complete FPP header, allocator, page/tile/sample receipts,
+accepted work, and topology also match exactly, with no faults or omissions.
+
+| median | serial page lanes | flattened page samples | change |
+|---|---:|---:|---:|
+| presentation publication | 6.0948 ms | 5.0463 ms | -17.2% |
+| current full frame | — | 29.8844 ms | — |
+| current non-pressure total | — | 24.6415 ms | — |
+
+This fixes the immediate execution-shape defect but not the 273x representation
+amplification. Scaling presentation with coarse-cell proportion ultimately
+requires variable-resolution or procedural macro pages rather than materialized
+P8 samples for every resident B8 leaf.
+
+Two additional general experiments were implemented and measured but rejected:
+
+- Splitting physical and sparse-air face addresses halved seam workgroups from
+  340 to 170, yet face preparation regressed 3.7356 to 3.9977 ms. The hot path
+  is trace/latency constrained, not rejected-lane constrained. See
+  [the face-preparation experiment](sparse-cm12-face-preparation-seam-family-experiment-2026-09-02.md).
+- A destination-bit fixed-point gate proved that ocean's density-capacity
+  repair is physically inert after the first round, but branch-only suffix
+  dispatches regressed capacity repair from 1.3107 to 1.3763 ms. The rejected
+  specialization remains production-unreachable for QA. See
+  [the sharpening experiment](sparse-cm12-ocean-min8-sharpening-capacity-early-exit-experiment.md).
+
+The combined focused suite passes 42 tests and all 226 compiled WGSL entry
+points. Dawn passes symmetric expansion, hydrostatic adaptivity, mini32
+correctness, both min8 surface lanes, live liquid insertion, outside-tank
+collapse, and the mini32/mini64 performance ceilings. The canonical aggregate
+run again reproduces the pre-existing long-dam generation-zero assertion (276
+pages versus 80) and then exhausts its 180-second budget in tall-cells; no lane
+or ceiling was weakened.

@@ -100,3 +100,16 @@ test("the SIM pipeline exposes both transforms as live stage switches", () => {
     assert.match(stage.chip(context), /disabled/i);
   }
 });
+
+test("capacity early exit is an isolated destination-bit fixed-point gate", () => {
+  assert.match(resident, /createDensityCapacityEarlyExitOracleForQA/);
+  assert.match(resident,
+    /for \(let capacityPass = 0; capacityPass < 2; capacityPass \+= 1\)/);
+  assert.match(resident,
+    /for \(let gate = 0; gate < 6; gate \+= 1\)/);
+  assert.match(wgsl,
+    /bitcast<u32>\(state\[destinationDensity\(\)\+cell\]\)!=bitcast<u32>\(before\)/);
+  assert.match(wgsl,
+    /fn densityCapacityRepairGateOpen[\s\S]*atomicLoad\([\s\S]*DENSITY_CAPACITY_GATE_BASE/);
+  assert.match(wgsl, /fn finalizeDensityCapacityRepairSeedGate/);
+});

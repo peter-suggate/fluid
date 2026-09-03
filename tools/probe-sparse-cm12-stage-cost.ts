@@ -114,6 +114,14 @@ Options:
   --minimum-cell-size=N              Add a minimum-cell-size region in finest
                                      cells (power of two; omitted by default)
   --region-scope=domain|initial-dam  Region bounds (default domain)
+  --gamma-diffusion=on|off           Conditioning A/B (default on)
+  --surface-sharpening=on|off        Conditioning A/B (default on)
+  --vex-packet-compaction=0|1        QA accepted-packet VEX dispatch A/B
+  --coarse-transport-packing=0|1     QA cross-leaf B1/B2/B4 transport A/B
+  --policy-leader-compaction=0|1     QA compact policy-tile planning A/B
+  --policy-full-leaf-control=0|1     QA retained pre-compaction planning control
+  --capacity-early-exit=0|1          Rejected QA density-bit repair-suffix gate
+  --phase1-receipt=0|1               Capture raw Phase-1 transport hashes
   --max-non-pressure-ms=N            Eligible gate threshold (default 10)
   --enforce-non-pressure-gate=0|1    Exit nonzero when the eligible gate fails
   --enforce-pressure-receipts=0|1    Require fault-free PTR/PCA receipts
@@ -141,6 +149,19 @@ const captureGap_ms = Number(argument("capture-gap-ms", "110"));
 const timeStep = argument("time-step", "scene");
 const minimumCellSize = Number(argument("minimum-cell-size", "0"));
 const regionScope = argument("region-scope", "domain");
+const gammaDiffusion = argument("gamma-diffusion", "on");
+const surfaceSharpening = argument("surface-sharpening", "on");
+const vexPacketCompaction = argument("vex-packet-compaction", "0") === "1";
+const coarseTransportPacking = argument("coarse-transport-packing", "0") === "1";
+const policyLeaderCompaction = argument("policy-leader-compaction", "0") === "1";
+const policyFullLeafControl = argument("policy-full-leaf-control", "0") === "1";
+const capacityEarlyExit = argument("capacity-early-exit", "0") === "1";
+const phase1Receipt = argument("phase1-receipt", "0") === "1";
+if ([vexPacketCompaction, coarseTransportPacking, policyLeaderCompaction,
+  policyFullLeafControl, capacityEarlyExit]
+  .filter(Boolean).length > 1) {
+  throw new RangeError("select only one accepted-work execution experiment");
+}
 const maximumTarget_ms = Number(argument("max-non-pressure-ms",
   argument("max-target-ms", "10")));
 const enforceNonPressureGate = argument("enforce-non-pressure-gate",
@@ -195,6 +216,12 @@ if (!(Number.isSafeInteger(minimumCellSize) && minimumCellSize >= 0
 }
 if (regionScope !== "domain" && regionScope !== "initial-dam") {
   throw new RangeError("region-scope must be domain or initial-dam");
+}
+if (!(["on", "off"] as const).includes(gammaDiffusion as "on" | "off")) {
+  throw new RangeError("gamma-diffusion must be on or off");
+}
+if (!(["on", "off"] as const).includes(surfaceSharpening as "on" | "off")) {
+  throw new RangeError("surface-sharpening must be on or off");
 }
 if (timeStep !== "scene" && timeStep !== "paper") {
   throw new RangeError("time-step must be scene or paper");
@@ -282,6 +309,7 @@ type FinalScalarMaskHeader = {
 };
 type StageCostQASolver = {
   readAcceptedIndirectQA(): Promise<readonly number[]>;
+  readPhase1TransportReceiptQA?(): Promise<unknown>;
   readPhase1TransportProfileQA?(): Promise<unknown>;
   readSparseWorkShapeQA(): {
     readonly finestDomainCellCount: number;
@@ -299,6 +327,9 @@ type StageCostQASolver = {
     readonly pressureFineEdgeCount: number;
     readonly pressureCoarseEdgeCount: number;
     readonly transportSpatialTileCapacity: number;
+    readonly transportPacketCapacity: number;
+    readonly transportDirectPacketCount: number;
+    readonly transportPacketCompilerWorkgroups: number;
     readonly facePreparationLeafCount: number;
     readonly presentationPageCount: number;
     readonly allocatedBytes: number;
@@ -326,6 +357,7 @@ type StageCostQASolver = {
     readonly validityA: Uint32Array; readonly validityB: Uint32Array;
     readonly acceptedDepth: Uint32Array; readonly velocityBits: Uint32Array;
   }>;
+  readTransportPacketIndirectQA(): Promise<readonly number[]>;
 };
 
 async function readFramePlanCensus(
@@ -482,8 +514,28 @@ try {
     timeStep,
     brickFineResolution: String(brickFineResolution),
     presentationPageResolution: String(presentationPageResolution),
+    gammaDiffusion,
+    surfaceSharpening,
   });
-  const solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
+  const productionAdaptiveOptimizations = !vexPacketCompaction
+    && !coarseTransportPacking && !phase1Receipt
+    && !policyLeaderCompaction && !policyFullLeafControl && !capacityEarlyExit;
+  const createSolver = vexPacketCompaction
+    ? WebGPUAdaptiveMassSolver.createVelocityExtensionPacketCompactionOracleForQA
+    : coarseTransportPacking
+      ? phase1Receipt
+        ? WebGPUAdaptiveMassSolver.createPhase1CoarseTransportCellPackingOracleForQA
+        : WebGPUAdaptiveMassSolver.createCoarseTransportCellPackingOracleForQA
+      : phase1Receipt
+        ? WebGPUAdaptiveMassSolver.createPhase1TransportReceiptOracleForQA
+        : policyLeaderCompaction
+          ? WebGPUAdaptiveMassSolver.createRefinementPolicyLeaderCompactionOracleForQA
+          : policyFullLeafControl
+            ? WebGPUAdaptiveMassSolver.createRefinementPolicyFullLeafOracleForQA
+          : capacityEarlyExit
+            ? WebGPUAdaptiveMassSolver.createDensityCapacityEarlyExitOracleForQA
+          : WebGPUAdaptiveMassSolver.createCompiledTopologyTransport;
+  const solver = await createSolver.call(WebGPUAdaptiveMassSolver,
     device, scene, "balanced", undefined, adaptiveMassSolverOptions(values), () => {});
   teardownSolver = solver;
   const releaseXctraceGate = async (position: "construction" | "after-warmup") => {
@@ -1047,6 +1099,21 @@ try {
     ? await readFramePlanCensus(device, solver)
     : { skipped: true, reason: "--final-qa=0 A/B timing run" };
   const acceptedIndirect = await qaSolver.readAcceptedIndirectQA();
+  const transportPacketIndirect = await qaSolver.readTransportPacketIndirectQA();
+  const coarseTransportSchedule = await qaSolver.readCoarseTransportScheduleQA();
+  const velocityExtension = await qaSolver.readVelocityExtensionHeaderQA();
+  const policyActivity = await solver.sparseWorldTrace.readActivitySnapshot(true);
+  const refinementPolicyTiles = {
+    leaders: policyActivity.records.filter((record) =>
+      record.refinementPolicyTileLeader).length,
+    scaleHistogram: Object.fromEntries(Array.from(new Set(policyActivity.records.map(
+      (record) => record.refinementPolicyTileScale))).sort((a, b) => a - b).map(
+      (scale) => [String(scale), policyActivity.records.filter((record) =>
+        record.refinementPolicyTileScale === scale).length])),
+  };
+  const phase1TransportReceipt = phase1Receipt
+    ? await qaSolver.readPhase1TransportReceiptQA?.()
+    : undefined;
   const report = {
     probe: "sparse-cm12-stage-cost", scene: sceneName, samples: seen,
     warmupSamples: warmup,
@@ -1065,6 +1132,14 @@ try {
       brickFineResolution,
       presentationPageResolution,
       transport: "compiled-topology",
+      vexPacketCompaction,
+      coarseTransportPacking: coarseTransportPacking
+        || productionAdaptiveOptimizations || capacityEarlyExit,
+      policyLeaderCompaction: policyLeaderCompaction
+        || productionAdaptiveOptimizations || capacityEarlyExit,
+      policyFullLeafControl,
+      capacityEarlyExit,
+      phase1Receipt,
       refinementRegion: minimumCellSize === 0 ? undefined : {
         scope: regionScope,
         minimumCellSize_cells: minimumCellSize,
@@ -1083,7 +1158,12 @@ try {
       timestampQuantum_us: 65.536,
     },
     workShape,
+    refinementPolicyTiles,
     acceptedIndirect,
+    transportPacketIndirect,
+    coarseTransportSchedule,
+    velocityExtension,
+    phase1TransportReceipt,
     framePlan,
     transportProfile,
     adaptiveRepresentation,

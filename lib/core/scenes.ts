@@ -1987,6 +1987,10 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: () => {
       const scene = sceneBody();
       scene.sceneId = "interactive-water-box-settled";
+      // This is the interactive drop tank: bodies authored above the rim must
+      // be able to enter it. A closed SolidWorld roof correctly repels them
+      // before they ever reach the water.
+      scene.container.top = "open";
       scene.fluid.initialCondition = "tank-fill";
       return scene;
     },

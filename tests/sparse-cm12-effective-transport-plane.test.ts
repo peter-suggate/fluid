@@ -60,7 +60,7 @@ test("transport holds a scale-invariant source lattice while sharpening stays co
   const characteristic = functionSource(wgsl, "traceEffectiveTransportCharacteristic",
     "fn traceEffectiveTransportDeparture");
   assert.match(characteristic,
-    /sampleEffectiveTransportVelocityAtSpans\(midpoint,spans\)/);
+    /sampleEffectiveTransportVelocityAtSpansMode\(midpoint,spans,direct\)/);
 
   const sharpeningDensity = functionSource(wgsl, "sampleSharpeningDensity",
     "fn sampleSharpeningField");
@@ -245,10 +245,10 @@ test("raw Phase-1 receipts are reachable only through a construction specializat
     resident.indexOf("static createPhase1TransportReceiptOracleForQA("),
     resident.indexOf("private static async createConfigured("));
   assert.match(factory,
-    /false, true, report\)/);
+    /false, true, false, false, false, report\)/);
   const productionFactory = resident.slice(resident.indexOf("static create("),
     resident.indexOf("static createPresentationPublisherOracleForQA("));
-  assert.doesNotMatch(productionFactory, /false, true, report/);
+  assert.match(productionFactory, /false, false, false, true, true, report/);
   assert.match(solver, /static createPhase1TransportReceiptOracleForQA\(/);
   assert.match(solver,
     /PHASE1_TRANSPORT_RECEIPT_QA_TOKEN[\s\S]*createPhase1TransportReceiptOracleForQA/);

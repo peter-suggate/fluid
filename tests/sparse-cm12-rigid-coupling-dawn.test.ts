@@ -53,6 +53,7 @@ dawnTest("Sparse CM12 couples the settled-tank rigid bodies without losing water
         () => {},
       );
       try {
+        await solver.waitForSimulationReady();
         const initialMass = solver.info.volumeCellSum!;
         for (let step = 1; step <= 30; step += 1) {
           assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, bodies), true);
@@ -66,7 +67,8 @@ dawnTest("Sparse CM12 couples the settled-tank rigid bodies without losing water
           assert.ok(Number.isFinite(pose.position_m.y));
           assert.ok(Number.isFinite(pose.position_m.z));
           assert.ok(pose.position_m.y < authoredY[index]! - 0.25,
-            `body ${index} did not enter the sparse fluid domain`);
+            `body ${index} did not enter the sparse fluid domain: authored y=${
+              authoredY[index]}, published y=${pose.position_m.y}`);
         });
         assert.ok(poses![0]!.position_m.y > poses![1]!.position_m.y + 0.05,
           "the cork should remain above the dense box after entering the water");
