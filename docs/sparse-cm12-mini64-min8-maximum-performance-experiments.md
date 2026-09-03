@@ -42,9 +42,48 @@ There are two separate targets:
 Stage medians do not add exactly because each stage is median-reduced
 independently. One Metal timestamp quantum in these captures is 65.536 us.
 
-## E0: paired baseline
+There are also two different clocks in this ledger. **Production frame time**
+means uninstrumented queue-complete throughput at the browser's production
+queue depth of two. The hardware boundary-chain probe exists to attribute cost
+to stages; its `medianAdvance_ms` is an instrumented chain total and is not a
+production frame time. Never compare one clock against the other.
 
-Status: **recorded; provisional until repeated three times**
+## E0p: corrected production-frame baseline
+
+Status: **recorded; three same-source repeats**
+
+The earlier comparison incorrectly called the stage probe's instrumented
+boundary-chain total a whole-frame time. A new production benchmark now runs
+the shipping solver with performance instrumentation off, excludes construction
+and terminal diagnostics, and amortizes queue completion across the browser's
+actual `BROWSER_GPU_THROUGHPUT_DEPTH = 2`. This reproduces the observed mini16
+average of about 15 ms.
+
+Both arms used source fingerprint
+`0fa391b40a1957811db8e1cf22137be91e6a574a4fe175e48e126660cedb899d`,
+Metal, B8/P8, scene cadence (`dt = 0.004 s`), 8 warmup advances, and 10
+measured advances arranged as five complete depth-two batches. Each result
+below aggregates three fresh-process runs (30 advances / 15 batches per arm).
+
+| Production measurement | mini16 stable epoch | mini64 + full-domain min8 | ratio / delta |
+|---|---:|---:|---:|
+| Mean frame time | **14.7979 ms** | **17.0286 ms** | **1.1507x / +2.2306 ms** |
+| Median depth-two batch, per frame | 14.7345 ms | 17.0895 ms | 1.1598x / +2.3550 ms |
+| Fresh-process run means | 14.9887 / 14.7319 / 14.6732 ms | 17.0642 / 17.0885 / 16.9330 ms | — |
+| Accepted cells | 456 | 512 | 1.12x |
+| Accepted rows | 1,524 | 1,728 | 1.13x |
+| Pressure cells / rows | 119 / 357 | 175 / 525 | 1.47x |
+| Terminal topology commits | 0 | 0 | matched stable epoch |
+
+All six runs had zero WebGPU validation errors. The corrected conclusion is
+that mini64/min8 has a real production-frame penalty of about **2.23 ms**, even
+though represented cell and row counts are nearly matched. Stage receipts below
+remain useful for locating that penalty, but their absolute totals are not the
+production frame clock.
+
+## E0: paired stage-attribution baseline
+
+Status: **recorded; attribution only**
 
 Both arms used the same dirty-tree source fingerprint
 `a19616c5b9310ada6bb2e4a982ecbc05289558052049d4915a58d654f951e064`
@@ -65,13 +104,14 @@ diagnostic closure.
 | Accepted rows | 1,524 | 1,728 | 1.13x |
 | Pressure cells | 119 | 175 | 1.47x |
 | Pressure rows | 357 | 525 | 1.47x |
-| Non-pressure GPU median | 15.4010 ms | 16.6461 ms | 1.08x |
-| Whole advance median | 22.9376 ms | 23.0031 ms | 1.00x |
+| Instrumented non-pressure chain median | 15.4010 ms | 16.6461 ms | 1.08x |
+| Instrumented full boundary-chain median | 22.9376 ms | 23.0031 ms | 1.00x |
 | Pressure solve median (frozen) | 7.0779 ms | 6.3570 ms | 0.90x |
 
-The whole-frame coincidence is accidental: mini64/min8 has an extra 1.2451 ms
-of non-pressure work while its frozen pressure solve and sharpening medians are
-lower. The stage breakdown, not whole-frame time, is the useful signal.
+The boundary-chain coincidence is not a production-frame result: mini64/min8
+has an extra 1.2451 ms of attributed non-pressure work while its frozen pressure
+solve and sharpening medians are lower. Only the stage breakdown is used from
+this instrumented capture.
 
 ### Stage comparison
 
@@ -164,7 +204,8 @@ Never delete a rejected result; retain its artifacts and the reason it failed.
 
 | ID | Status | Experiment | Primary metric | Promotion condition |
 |---|---|---|---|---|
-| E0 | recorded | Same-source stable-epoch baseline | paired stage medians | three paired replays agree |
+| E0p | recorded | Uninstrumented production-frame baseline | depth-two queue throughput | three paired replays agree |
+| E0 | recorded | Same-source stable-epoch stage attribution | paired stage medians | attribution only; never frame time |
 | E1 | accepted | Implicit authored-owner arithmetic in transport | trace + scatter, non-pressure | exact fields/receipts; stable win |
 | E2 | planned | Shared current-generation tile directory | allocation + consumers | exact generation/state; multi-stage win |
 | E3a | rejected | Implicit authored-owner arithmetic in sharpening | sharpening transform | exact conservative result; stable win |
