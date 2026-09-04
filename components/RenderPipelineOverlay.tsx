@@ -35,20 +35,15 @@ import { resolveSvoPrimaryTraversal } from "../lib/svo/svo-render-options";
 import {
   SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
-  SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
   SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT,
   SVO_RENDER_QUALITY_PRESETS,
   SVO_RENDER_TUNING_PRESETS,
   svoRenderTuningKey,
-  svoSceneryRefinementDepth,
   type SvoConeRadianceReconstruction,
   type SvoRenderQualityPreset,
   type SvoRenderTuning,
 } from "../lib/svo/svo-render-tuning";
-import { findSceneDefinition } from "../lib/core/scenes";
-import { sceneDefinitionTakesLattice } from "../lib/core/scene-definition";
 import { sceneUsesFlatVoxelNormals } from "../lib/core/model";
-import { simulation } from "../lib/core/simulation/controller";
 import { PipeChoice, PipeRange, PipeToggle } from "./PipeControls";
 
 /** Frames the live readout averages over. */
@@ -164,23 +159,11 @@ export function RenderPipelineOverlay() {
   // and has to say so rather than move.
   const finestCellSize_m = session.scene((state) => state.scene.voxelDomain.finestCellSize_m);
   const sceneIsDry = session.scene((state) => state.scene.systems?.fluid === false);
-  const voxelDomain = session.scene((state) => state.scene.voxelDomain);
   const surfaceStyle = session.scene((state) => state.scene.surfaceStyle);
   const patchScene = session.scene((state) => state.patchScene);
-  const presetId = session.scene((state) => state.presetId);
   const smoothSurfaceEnabled = !sceneUsesFlatVoxelNormals({ surfaceStyle });
-  const authoredRefinementDepth = svoSceneryRefinementDepth(voxelDomain, { fluid: !sceneIsDry });
-  // Read off the document rather than recomputed: the ladder is signed now, and
-  // a negative rung enlarges the dry lattice itself, so the leaf is a published
-  // fact and not a function of the finest cell.
-  const leafVoxel_mm = (voxelDomain.detailCellSize_m ?? finestCellSize_m) * 1000;
-  const zeroRungCellSize_m = voxelDomain.environmentRefinementBaseCellSize_m ?? finestCellSize_m;
-  // Water is the only thing that can refuse a depth outright. Whether the
-  // scene's *factory* takes a lattice decides only how far the change
-  // propagates: with one the document is re-authored and even the terrain pitch
-  // follows; without, it is a patch.
-  const latticeDefinition = findSceneDefinition(presetId);
-  const reauthorsDocument = latticeDefinition !== undefined && sceneDefinitionTakesLattice(latticeDefinition);
+  const renderRefinementDepth = sceneIsDry ? tuning.environmentRefinementDepth : 0;
+  const leafVoxel_mm = finestCellSize_m * 1000 / 2 ** renderRefinementDepth;
 
   const [liveTiming, setLiveTiming] = useState(true);
 
@@ -263,7 +246,7 @@ export function RenderPipelineOverlay() {
     globalIlluminationEnabled: svoGlobalIlluminationEnabled,
     tuning,
     sceneHasFluid: !sceneIsDry,
-    refinementDepth: authoredRefinementDepth,
+    refinementDepth: renderRefinementDepth,
     leafVoxel_mm,
     rendererActive: effectiveRendererStatus.state === "active",
     stageView: svoStageView,
@@ -304,20 +287,14 @@ export function RenderPipelineOverlay() {
     "sparse-world-build": <details className="rp-tune"><summary>Refinement</summary>
       <div className="pipe-fields">
       <PipeRange
-        label={`Environment refinement depth · ${reauthorsDocument ? "RE-AUTHORS" : "REBUILD"}`}
-        unit="levels" value={authoredRefinementDepth}
-        min={SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM} max={SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM}
+        label="Environment refinement depth · REBUILD"
+        unit="levels" value={renderRefinementDepth}
+        min={0} max={SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM}
         step={1} digits={0} disabled={!sceneIsDry}
-        onChange={(value) => { simulation.setEnvironmentRefinementDepth(value, session.id); }}
+        onChange={(value) => updateTuning("environmentRefinementDepth", value)}
+        modified={modified("environmentRefinementDepth")} onReset={resetTuning("environmentRefinementDepth")}
         hint={sceneIsDry
-          ? `Leaf voxel ${trimmed(leafVoxel_mm)} mm, and the set is drawn at that size — ${authoredRefinementDepth < 0
-            ? `${-authoredRefinementDepth} coarser level${authoredRefinementDepth === -1 ? "" : "s"} above`
-            : `${authoredRefinementDepth} level${authoredRefinementDepth === 1 ? "" : "s"} below`} the ${trimmed(zeroRungCellSize_m * 1000)} mm zero rung.\n\n`
-            + "Signed octree levels relative to the scene's authored lattice. Positive descends into finer leaves; negative enlarges the dry-scene lattice by 2× per level. It writes the document's own cells, which are the single numbers the tree and the scenery both read.\n\n"
-            + (reauthorsDocument
-              ? "Moving it re-authors the document through this scene's own factory, so the terrain pitch follows; that reloads the preset, and scenery edits since it was opened do not survive it."
-              : "This scene's factory takes no lattice, so moving it patches the document: every generator re-resolves its legibility floors at the new leaf, but anything the factory baked keeps its authored value.")
-            + "\n\nEach level also adds one to the cone hierarchy; past the runtime's twelve, derived lighting withdraws and the cone node reads EXACT FALLBACK."
+          ? `Render leaf ${trimmed(leafVoxel_mm)} mm · ${renderRefinementDepth} level${renderRefinementDepth === 1 ? "" : "s"} below the ${trimmed(finestCellSize_m * 1000)} mm simulation lattice.\n\nThis rebuilds only the renderer-owned SVO derivative. The scene lattice, SolidWorld, and simulation state do not change. Scenery and terrain are sampled at the render leaf.\n\nEach level also adds one to the cone hierarchy; past the runtime's twelve, derived lighting withdraws and the cone node reads EXACT FALLBACK.`
           : `Zero on this scene whatever the slider says: the fluid solver claims every brick of the container and a solver brick pins its node, so the leaf stays the ${trimmed(finestCellSize_m * 1000)} mm lattice. Turn water off under the tank's Water setting to move on this environment-only ladder.`} />
       <PipeRange label="Environment brick refinement" unit="levels" value={tuning.environmentBrickRefinementLevels}
         min={0} max={SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM} step={1} digits={0}

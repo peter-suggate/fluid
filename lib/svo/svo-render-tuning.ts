@@ -237,6 +237,8 @@ export const SVO_SURFACE_TERRAIN_GRADIENT_CELLS = 1;
 export interface SvoRenderTuning {
   readonly resolutionScale: number;
   readonly environmentBrickRefinementLevels: number;
+  /** Renderer-owned levels below the immutable simulation/SolidWorld lattice. */
+  readonly environmentRefinementDepth: number;
   /**
    * Whether the environment refinement rule may stop at a node its surface
    * crosses flatly, instead of spending every level the depth above allows.
@@ -341,6 +343,7 @@ const bandOverride = (name: string, fallback: number): number => {
 const balancedTuning: SvoRenderTuning = Object.freeze({
   resolutionScale: 0.72,
   environmentBrickRefinementLevels: 1,
+  environmentRefinementDepth: SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
   // Off: the levels it declines to spend are the low-curvature ones, and a
   // coarse leaf there is a flat axis-aligned facet on exactly the smooth
   // surfaces — a mound cap, a pond basin — where one is most visible.
@@ -539,6 +542,11 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
       value.environmentBrickRefinementLevels,
       0,
       SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,
+    ),
+    environmentRefinementDepth: integer(
+      value.environmentRefinementDepth ?? DEFAULT_SVO_RENDER_TUNING.environmentRefinementDepth,
+      0,
+      SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
     ),
     environmentPlanarRefinementExemption: Boolean(value.environmentPlanarRefinementExemption),
     coneLightingScale,

@@ -28,6 +28,7 @@ import { sceneTerrainSurfaceModel, type SvoTerrainSurfaceModel } from "./svo-ter
 import { sceneCellSizes_m } from "../core/scene-lattice";
 import {
   SOLID_WORLD_BRICK_CELLS,
+  SOLID_WORLD_TERRAIN_MATERIAL_ID,
   solidWorldVoxelPatchBounds_m,
   solidWorldContentStamp,
   solidWorldForScene,
@@ -60,7 +61,12 @@ import {
   solidWorldTerrainSurfaceCoarseningRegions,
   svoEnvironmentCoarseningPower,
 } from "./svo-environment-coarsening";
-import type { SvoPrimitiveDescriptor } from "./svo-primitive-abi";
+import { svoPrimitiveForRigidBody, type SvoPrimitiveDescriptor } from "./svo-primitive-abi";
+import {
+  buildSvoRenderTerrainFieldSteps,
+  createSvoRenderPatchRefinement,
+  createSvoRenderTerrainRefinement,
+} from "./svo-render-solid-field";
 import { planSvoWideFanoutSteps } from "./svo-wide-fanout";
 import { WebGPUSvoWideFanout } from "./webgpu-svo-wide-fanout";
 import { packSvoCompactHierarchy } from "./svo-compact-hierarchy";
@@ -1213,6 +1219,7 @@ export class OctreeSparseBrickWorld {
   private surfaceModel!: SvoTerrainSurfaceModel;
   private solidWorld!: SolidWorld;
   private solidWorldStamp = "";
+  private renderDetailCellSize_m = 0;
   /** Non-empty only when immutable planar terminals make geometry structural. */
   private planarTopologyStamp = "";
   private liveScenePrimitiveStates = new Map<string, LiveScenePrimitiveState>();
@@ -1353,7 +1360,15 @@ export class OctreeSparseBrickWorld {
     const brickSize = options.brickSize ?? 8;
     this.brickSize = brickSize;
     this.surfaceModel = sceneTerrainSurfaceModel(scene);
-    const environmentCatalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default");
+    const dryWorld = scene.systems?.fluid === false;
+    const refinementDepth = dryWorld
+      ? Math.max(0, Math.trunc(options.environmentRefinementDepth ?? 0))
+      : 0;
+    const refineScale = 2 ** refinementDepth;
+    this.renderDetailCellSize_m = scene.voxelDomain.finestCellSize_m / refineScale;
+    const environmentCatalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default", {
+      detailCellSize_m: this.renderDetailCellSize_m,
+    });
     const environmentPrimitives = environmentProxyPrimitives(environmentCatalog, true);
     const initialSolidWorld = solidWorldForScene(scene);
     this.solidWorld = initialSolidWorld;
@@ -1364,7 +1379,6 @@ export class OctreeSparseBrickWorld {
     // geometry claims only the exact voxel boxes compiled from SolidWorld.
     // Claiming the whole logical container here was the render-side OOM path
     // for long, mostly dry tanks.
-    const dryWorld = scene.systems?.fluid === false;
     const claimsContainer = false;
     const sceneDomain = planSparseSceneDomain(
       scene, dimensions, brickSize,
@@ -1397,13 +1411,10 @@ export class OctreeSparseBrickWorld {
      * whole domain. On a dry scene there is no such claim, and the render tree
      * is free to spend depth where the geometry actually is.
      */
-    const refinementDepth = dryWorld
-      ? Math.max(0, Math.trunc(options.environmentRefinementDepth ?? 0))
-      : 0;
-    const refineScale = 2 ** refinementDepth;
     const maximumDepth = solverLevel + refinementDepth;
     const refinedBrickDimensions = sceneDomain.brickDimensions.map((value) => value * refineScale) as [number, number, number];
     const renderCellSize = sceneDomain.cellSize_m.map((value) => value / refineScale) as [number, number, number];
+    this.renderDetailCellSize_m = Math.min(...renderCellSize);
     const refinedBrickEdge = renderCellSize.map((value) => value * brickSize) as [number, number, number];
     const worldOrigin = [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z] as const;
     /**
@@ -1429,6 +1440,29 @@ export class OctreeSparseBrickWorld {
       const scale = 2 ** (maximumDepth - level);
       nodeEdge_m.push(refinedBrickEdge.map((value) => value * scale));
     }
+    const renderTerrain = dryWorld && refinementDepth > 0
+      ? yield* buildSvoRenderTerrainFieldSteps(scene, renderCellSize,
+        SOLID_WORLD_TERRAIN_MATERIAL_ID)
+      : undefined;
+    const terrainRefinement = renderTerrain
+      ? createSvoRenderTerrainRefinement({
+        field: renderTerrain,
+        worldOrigin_m: worldOrigin,
+        renderCellSize_m: renderCellSize,
+        refinedBrickDimensions,
+        nodeEdge_m,
+        brickSize,
+        maximumDepth,
+      })
+      : undefined;
+    const solidPatchRefinement = renderTerrain && renderTerrain.patches.length > 0
+      ? createSvoRenderPatchRefinement({
+        patches: renderTerrain.patches,
+        worldOrigin_m: worldOrigin,
+        nodeEdge_m,
+        maximumDepth,
+      })
+      : undefined;
     const planarCatalog = buildSvoPlanarBoundaryCatalog(environmentPrimitives, (primitive) => ({
         materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
         ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
@@ -1511,6 +1545,18 @@ export class OctreeSparseBrickWorld {
       && svoEnvironmentRefinementMode() === "surface"
       ? createSvoEnvironmentRefinement({
         primitives: environmentPrimitives, descriptorFor: environmentDescriptorFor,
+        additionalSurfaces: scene.rigidBodies.flatMap((body, ownerId) => {
+          if (body.motion !== "static") return [];
+          const bounds = sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId));
+          return [{
+            aabb_m: {
+              min: { x: bounds.minimum[0], y: bounds.minimum[1], z: bounds.minimum[2] },
+              max: { x: bounds.maximum[0], y: bounds.maximum[1], z: bounds.maximum[2] },
+            },
+            descriptor: svoPrimitiveForRigidBody(body,
+              environmentPrimitives.length + ownerId, ownerId),
+          }];
+        }),
         worldOrigin_m: worldOrigin as readonly [number, number, number],
         nodeEdge_m, brickSize, maximumDepth,
         crowdingTarget: OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
@@ -1641,7 +1687,9 @@ export class OctreeSparseBrickWorld {
       // SolidWorld boxes already claim their exact voxel bricks and therefore
       // need no heightfield-shaped refinement arm.
       refineEnvironmentLeaf: (level, coordinate) =>
-        planarLeafClassifier.requiresFineVoxelResidual(level, coordinate)
+        terrainRefinement?.refineEnvironmentLeaf(level, coordinate)
+        || solidPatchRefinement?.refineEnvironmentLeaf(level, coordinate)
+        || planarLeafClassifier.requiresFineVoxelResidual(level, coordinate)
         || (surfaceRefinement
           ? surfaceRefinement.refineEnvironmentLeaf(level, coordinate)
           : refinementDepth > 0
@@ -1866,6 +1914,7 @@ export class OctreeSparseBrickWorld {
           -0.5 * scene.container.depth_m],
         cellSize_m: sceneCellSizes_m(scene),
       },
+      renderTerrain,
       // The coarse record index and the per-frame budget. Both are what turn
       // maintenance from "cheap because the scene is small" into something that
       // survives ten times the records: binning stops reading every record, and
@@ -2141,7 +2190,7 @@ export class OctreeSparseBrickWorld {
       planarBoundary: plan.leaves.filter((leaf) =>
         leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary).length,
     };
-    if (planarSources.length > 0) {
+    if (planarSources.length > 0 || renderTerrain) {
       this.planarTopologyStamp = planarBoundaryTopologyStamp(scene, environmentPrimitives);
     }
     const structural: SparseVoxelStructuralRenderSource = {
@@ -2414,7 +2463,9 @@ export class OctreeSparseBrickWorld {
       : solidWorldPageBounds(scene, previousSolidWorld);
     const nextSolidBounds = solidWorldChanged
       ? solidWorldPageBounds(scene, nextSolidWorld) : [];
-    const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default");
+    const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default", {
+      detailCellSize_m: this.renderDetailCellSize_m || undefined,
+    });
     const authored = environmentProxyPrimitives(catalog, true);
     const planarCatalog = buildSvoPlanarBoundaryCatalog(authored, (primitive) => ({
       materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,

@@ -1510,14 +1510,14 @@ class SimulationController {
    * the status line names the edit that is costing the pause instead of
    * reporting an anonymous rebuild.
    */
-  commitDraft(options: { announceRebuild?: string } = {}, paneId: PaneId = PRIMARY_PANE_ID) {
+  commitDraft(options: { announceRebuild?: string; reseed?: boolean } = {}, paneId: PaneId = PRIMARY_PANE_ID) {
     const draftStore = this.session(paneId).sceneDraft.getState();
     const draft = draftStore.draft;
     draftStore.clearDraft();
     if (!draft) { this.cancelEdit(paneId); return false; }
     if (options.announceRebuild) this.announceGPURebuild(options.announceRebuild, paneId);
     this.session(paneId).scene.getState().patchScene(draft.patch);
-    return this.commitEdit(undefined, { reseed: true }, paneId);
+    return this.commitEdit(undefined, { reseed: options.reseed ?? true }, paneId);
   }
 
   /** Abandon the open gesture, leaving the committed scene untouched. */

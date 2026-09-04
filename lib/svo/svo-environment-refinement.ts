@@ -208,6 +208,11 @@ export interface SvoEnvironmentRefinementStatistics {
 
 export interface SvoEnvironmentRefinementOptions {
   readonly primitives: readonly EnvironmentProxyPrimitive[];
+  /** Non-scenery render surfaces, such as static rigid bodies. */
+  readonly additionalSurfaces?: readonly {
+    readonly aabb_m: EnvironmentProxyPrimitive["aabb_m"];
+    readonly descriptor: SvoPrimitiveDescriptor;
+  }[];
   /**
    * The SVO record a proxy publishes — in practice
    * `svoDescriptorForEnvironmentProxy` bound to the scene.
@@ -384,17 +389,27 @@ export function createSvoEnvironmentRefinement(
     brickSize, maximumDepth, crowdingTarget,
     planarExemption = false,
   } = options;
+  const surfaces = [
+    ...primitives.map((primitive) => ({
+      aabb_m: primitive.aabb_m,
+      descriptor: canonicalSvoPrimitive(descriptorFor(primitive)),
+    })),
+    ...(options.additionalSurfaces ?? []).map((surface) => ({
+      aabb_m: surface.aabb_m,
+      descriptor: canonicalSvoPrimitive(surface.descriptor),
+    })),
+  ];
   const statistics: SvoEnvironmentRefinementStatistics = {
     nodes: 0, fullScans: 0, narrowedScans: 0, candidateVisits: 0,
     straddleSamples: 0, planaritySamples: 0,
     primitiveSplits: 0, crowdingSplits: 0,
   };
-  const count = primitives.length;
+  const count = surfaces.length;
   // Flat bounds, so narrowing is six typed-array reads rather than two object
   // dereferences and six property loads per candidate per node.
   const bounds = new Float64Array(count * 6);
   for (let index = 0; index < count; index += 1) {
-    const { min, max } = primitives[index].aabb_m;
+    const { min, max } = surfaces[index]!.aabb_m;
     bounds[index * 6] = min.x; bounds[index * 6 + 1] = min.y; bounds[index * 6 + 2] = min.z;
     bounds[index * 6 + 3] = max.x; bounds[index * 6 + 4] = max.y; bounds[index * 6 + 5] = max.z;
   }
@@ -403,8 +418,7 @@ export function createSvoEnvironmentRefinement(
    * call, which is idempotent but allocates; handing it a descriptor that is
    * already canonical leaves only the copy.
    */
-  const descriptors: SvoPrimitiveDescriptor[] = primitives.map(
-    (primitive) => canonicalSvoPrimitive(descriptorFor(primitive)));
+  const descriptors: SvoPrimitiveDescriptor[] = surfaces.map(({ descriptor }) => descriptor);
   const everything: number[] = [];
   for (let index = 0; index < count; index += 1) everything.push(index);
 

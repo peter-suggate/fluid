@@ -97,7 +97,7 @@ import {
   type SvoRenderDiagnostics,
 } from "../svo/svo-render-diagnostics";
 import { SparseVoxelRenderStageOverlay } from "../svo/webgpu-svo-stage-overlay";
-import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoEnvironmentTreeRefinementDepth, svoRenderTuningKey, type SvoRenderTuning } from "../svo/svo-render-tuning";
+import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, type SvoRenderTuning } from "../svo/svo-render-tuning";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../svo/svo-screen-space-termination";
 import { isGPUInitializationAbort } from "./gpu-initialization";
 import {
@@ -566,6 +566,11 @@ export function gpuSceneSeedKey(scene: SceneDescription): string {
  * body dropped into a running uniform scene warm as well.
  */
 function rigidAllocationKey(scene: SceneDescription, methodId: string): string {
+  // A renderer-only world owns a fixed-capacity analytic rigid arena and has
+  // no fluid solve tail or immersed-boundary allocation to resize. Adding the
+  // first moving body is therefore a live roster update, not a reason to throw
+  // away and rebuild the refined environment SVO.
+  if (!planSceneRuntime(scene).fluidSolver) return "renderer-live";
   if (getMethod(methodId).capabilities?.adoptsRigidRosterShape) return "live";
   const bodies = scene.rigidBodies;
   // Terrain already forces the sparse world, so on a terrain scene the presence
@@ -2882,14 +2887,11 @@ export class FluidLabRenderer {
     }
     const sceneRuntime = planSceneRuntime(scene);
     const sparsePresentationRequired = presentationMode === "full-scene";
-    // Read off the document, never off the tuning. The set this tree voxelizes
-    // was expanded against `voxelDomain.detailCellSize_m`, so that is the only
-    // number entitled to say how many levels the tree may spend under it — see
-    // `svoSceneryRefinementDepth`. Hoisted because the primary-traversal
-    // decision needs it too, for the frames before the brick count exists.
-    const environmentRefinementDepth = svoEnvironmentTreeRefinementDepth(scene.voxelDomain, {
-      fluid: sceneRuntime.fluidSolver,
-    });
+    // Presentation depth is renderer-owned. The simulation document and its
+    // SolidWorld lattice remain unchanged; the live SVO build receives this as
+    // the resolution of its disposable derivative only.
+    const environmentRefinementDepth = sceneRuntime.fluidSolver
+      ? 0 : activeSvoTuning.environmentRefinementDepth;
     const sceneConfig: SimulationRunConfig = sparsePresentationRequired ? {
       ...config,
       values: {

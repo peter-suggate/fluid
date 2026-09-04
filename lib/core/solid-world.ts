@@ -42,7 +42,7 @@ export interface SolidWorldVoxelPatchBounds {
 
 /** Exact metre-space bounds of one signed-lattice voxel edit box. */
 export function solidWorldVoxelPatchBounds_m(
-  scene: SceneDescription,
+  scene: Pick<SceneDescription, "container" | "voxelDomain">,
   patch: SolidWorldVoxelPatch,
 ): SolidWorldVoxelPatchBounds {
   const cell = sceneCellSizes_m(scene);

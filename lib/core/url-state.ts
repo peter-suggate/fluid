@@ -27,6 +27,7 @@ import { DEFAULT_SVO_LIGHTING_OPTIONS, type SvoConeTracingMode, type SvoPrimaryT
 import {
   DEFAULT_SVO_RENDER_TUNING,
   normalizeSvoRenderTuning,
+  SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
   SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
   type SvoRenderTuning,
 } from "../svo/svo-render-tuning";
@@ -703,11 +704,9 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
     // of reaching the octree as an unbounded depth request.
     svoRenderTuning: normalizeSvoRenderTuning({
       ...DEFAULT_SVO_RENDER_TUNING,
-      // The refinement depth is deliberately absent. It is not a tuning value
-      // any more — it is `scene.voxelDomain.detailCellSize_m`, which
-      // `sceneQueryPaths` already round-trips as `scene.voxelDomain`. A second
-      // copy in the query is a second thing that can disagree, which is the
-      // failure this collapse removes.
+      environmentRefinementDepth: numberParam(query, "svoRefinementDepth",
+        DEFAULT_SVO_RENDER_TUNING.environmentRefinementDepth, 0,
+        SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM),
       environmentPlanarRefinementExemption: query.get("svoFlatExempt") === "1",
     lodScreenSpacePixels: numberParam(query, "svoLodPixels",
       initialUI.svoRenderTuning.lodScreenSpacePixels, 0, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM),
@@ -729,7 +728,7 @@ function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth" || key === OVERLAY_QUERY_KEY
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode" || key === "lensPhase"
     || isCompareQueryKey(key)
-    || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === SEEDS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === SEEDS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoRefinementDepth" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
@@ -770,11 +769,10 @@ export function serializeQueryState(
   if (uiState.svoStageView !== DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView) {
     query.set("svoStage", uiState.svoStageView);
   }
-  // A fine-leaf experiment is two values, and a link that carries only one of
-  // them reproduces the wrong frame: at the shipped threshold a 0.78 mm leaf is
-  // never descended into, so the depth alone would read as having done nothing.
-  // The depth itself rides on `scene.voxelDomain`; only the threshold and the
-  // exemption are tuning.
+  if (uiState.svoRenderTuning.environmentRefinementDepth
+    !== DEFAULT_SVO_RENDER_TUNING.environmentRefinementDepth) {
+    query.set("svoRefinementDepth", String(uiState.svoRenderTuning.environmentRefinementDepth));
+  }
   if (uiState.svoRenderTuning.environmentPlanarRefinementExemption
     !== DEFAULT_SVO_RENDER_TUNING.environmentPlanarRefinementExemption) {
     query.set("svoFlatExempt", uiState.svoRenderTuning.environmentPlanarRefinementExemption ? "1" : "0");

@@ -175,19 +175,15 @@ function BodyRow() {
 /**
  * The making rows, in the order they are reached for.
  *
- * Region first because it is about the solve rather than about the scene — it is
- * the one of the three that adds nothing you can see — then the two that add
- * something: water, then a solid.
- *
- * The first two follow the water switch. A dry document has no solve to refine
- * and no body of water to add a ball to, so both would be strokes that cannot
- * land; a solid still drops into a dry room, which is most of what a dry room is
- * for.
+ * Region first because it is about an existing solve rather than about the
+ * scene. Water is always available: in a dry document the first drop is the
+ * explicit operation that creates fluid authority, while later drops enter the
+ * live field. A solid likewise remains available in every scene.
  */
 export function MakeRows({ fluid }: { fluid: boolean }) {
   return <>
     {fluid && <RegionRow />}
-    {fluid && <WaterRow />}
+    <WaterRow />
     <BodyRow />
   </>;
 }

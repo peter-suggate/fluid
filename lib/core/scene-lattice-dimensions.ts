@@ -17,7 +17,7 @@ export function latticeAxisDimension(
 
 /** Finest-lattice cell counts occupied by the physical tank interior. */
 export function sceneLatticeDimensions(
-  scene: SceneDescription,
+  scene: Pick<SceneDescription, "container" | "voxelDomain">,
   maximumDimension = DEFAULT_MAXIMUM_LATTICE_DIMENSION,
 ): readonly [number, number, number] {
   const cellSize_m = scene.voxelDomain.finestCellSize_m;
@@ -31,7 +31,7 @@ export function sceneLatticeDimensions(
 
 /** Finest cell size actually realized on each axis after lattice rounding. */
 export function sceneCellSizes_m(
-  scene: SceneDescription,
+  scene: Pick<SceneDescription, "container" | "voxelDomain">,
   maximumDimension = DEFAULT_MAXIMUM_LATTICE_DIMENSION,
 ): readonly [number, number, number] {
   const [nx, ny, nz] = sceneLatticeDimensions(scene, maximumDimension);
@@ -40,7 +40,7 @@ export function sceneCellSizes_m(
 }
 
 export function sceneLatticeCellCount(
-  scene: SceneDescription,
+  scene: Pick<SceneDescription, "container" | "voxelDomain">,
   maximumDimension = DEFAULT_MAXIMUM_LATTICE_DIMENSION,
 ): number {
   const [nx, ny, nz] = sceneLatticeDimensions(scene, maximumDimension);

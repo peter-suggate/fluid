@@ -47,6 +47,7 @@ import {
   addFluidBall,
   defaultFluidBallRadius_m,
   fluidInteractionDropVolume,
+  fluidBallRequiresInitialCondition,
 } from "../lib/core/editor-fluid-volume";
 import {
   fillFractionForHeight,
@@ -2096,10 +2097,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // Authored t=0 volumes remain tank contents. Outside it, the draft is only
     // the cursor shape; release sends the ball to the live SparseWorld instead
     // of writing an initial condition that bounded solvers cannot represent.
-    const fluid = containerContains(committed, centre)
-      ? addFluidBall(committed, centre, radius_m).fluid
-      : committed.fluid;
-    session.sceneDraft.getState().updateDraft({ fluid });
+    const addition = containerContains(committed, centre)
+      ? addFluidBall(committed, centre, radius_m)
+      : { fluid: committed.fluid };
+    session.sceneDraft.getState().updateDraft({
+      fluid: addition.fluid,
+      ...("systems" in addition ? { systems: addition.systems } : {}),
+    });
     setCursorDrop({ centre_m: centre, radius_m, tone: "fluid" });
   };
 
@@ -2195,11 +2199,24 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   }) => {
     const committed = session.scene.getState().scene;
     const authored = () => {
-      simulation.commitDraft(undefined, paneId);
+      // There is no fluid timeline to discard when this gesture is the act
+      // that enables fluid. Let the renderer warm the new solver while keeping
+      // the refined dry SVO visible; a hard simulation reset drains that SVO
+      // first and presents an empty viewport for the whole build.
+      simulation.commitDraft({ reseed: committed.systems?.fluid !== false }, paneId);
       session.ui.getState().select({ kind: "fluid-body", id: active.selectionId });
     };
     const centre = fluidBallCentre(active.ray, active.hover, active.radius_m) ?? active.anchor;
-    if (simulation.time() <= 0 && containerContains(committed, centre)) { authored(); return; }
+    // Once fluid authority exists, a drop is a live field edit even at t = 0.
+    // Treating the zero timestamp as an unconditional document edit changed the
+    // seed key and rebuilt the entire Sparse CM12 world for every drop. A dry
+    // scene still needs the authored path because the first liquid creates its
+    // solver; an enabled, ready solver can take the volume directly.
+    if (fluidBallRequiresInitialCondition(committed, simulation.time(),
+      containerContains(committed, centre))) {
+      authored();
+      return;
+    }
     // The same shape the draft authored, so a drop into a running 2D case is
     // the disk that scene's water is and not a ball floating inside its slab.
     const drop = fluidInteractionDropVolume(committed, centre, active.radius_m);

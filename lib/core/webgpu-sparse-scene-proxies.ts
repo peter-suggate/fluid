@@ -483,6 +483,23 @@ export interface SparseSceneProxyVoxelizerOptions {
     origin_m: SparseSceneVector3;
     cellSize_m: SparseSceneVector3;
   }>;
+  /**
+   * Renderer-owned height samples at the SVO lattice. They refine presentation
+   * without changing the canonical SolidWorld consumed by physics.
+   */
+  renderTerrain?: Readonly<{
+    origin_m: readonly [number, number];
+    cellSize_m: readonly [number, number];
+    dimensions: readonly [number, number];
+    heights_m: Float32Array<ArrayBuffer>;
+    materialId: number;
+    patches: readonly {
+      operation: "fill" | "clear";
+      minimum_m: readonly [number, number, number];
+      maximum_m: readonly [number, number, number];
+      materialId: number;
+    }[];
+  }>;
   /** Maximum topology level. */
   finestLevel?: number;
   /** Fixed live primitive arena capacity. */
@@ -1435,10 +1452,77 @@ export function sampleSparseScenePrimitiveCell(
  * in one, so the store becomes bit-disjoint atomics and the payload binding becomes
  * atomic with it — keyed on the payload mode, not the geometry format.
  */
-function solidWorldProxyWGSL(layout?: WebgpuSolidWorldPageLayout): string {
+interface RenderTerrainShaderLayout {
+  readonly baseWords: number;
+  readonly heightsBaseWords: number;
+  readonly width: number;
+  readonly depth: number;
+  readonly patchBaseWords: number;
+  readonly patchCount: number;
+}
+
+function renderTerrainProxyWGSL(layout?: RenderTerrainShaderLayout): string {
+  if (!layout) return /* wgsl */ `
+fn sampleRenderTerrain(_world:vec3f,_cellExtent:vec3f)->SolidWorldSample{
+  return SolidWorldSample(0.0,1e20,0u,vec3f(0.0));}`;
+  return /* wgsl */ `
+const RT_BASE:u32=${layout.baseWords}u;
+const RT_HEIGHTS:u32=${layout.heightsBaseWords}u;
+const RT_WIDTH:i32=${layout.width};
+const RT_DEPTH:i32=${layout.depth};
+const RT_PATCH_BASE:u32=${layout.patchBaseWords}u;
+const RT_PATCH_COUNT:u32=${layout.patchCount}u;
+fn rtFloat(word:u32)->f32{return bitcast<f32>(atomicLoad(&maintenance[word]));}
+fn rtHeight(q:vec2i)->f32{
+  let at=clamp(q,vec2i(0),vec2i(RT_WIDTH-1,RT_DEPTH-1));
+  return rtFloat(RT_HEIGHTS+u32(at.x+RT_WIDTH*at.y));
+}
+fn sampleRenderTerrain(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
+  let origin=vec2f(rtFloat(RT_BASE),rtFloat(RT_BASE+1u));
+  let cell=max(vec2f(rtFloat(RT_BASE+2u),rtFloat(RT_BASE+3u)),vec2f(1e-8));
+  let point=(world.xz-origin)/cell;
+  let q=vec2i(floor(point));
+  if(any(q<vec2i(0))||q.x>=RT_WIDTH||q.y>=RT_DEPTH){
+    return SolidWorldSample(0.0,1e20,0u,vec3f(0.0));
+  }
+  let height=rtHeight(q);var distance=world.y-height;
+  let gradient=vec2f((rtHeight(q+vec2i(1,0))-rtHeight(q-vec2i(1,0)))/(2.0*cell.x),
+    (rtHeight(q+vec2i(0,1))-rtHeight(q-vec2i(0,1)))/(2.0*cell.y));
+  var normal=normalize(vec3f(-gradient.x,1.0,-gradient.y));
+  var fraction=clamp(0.5-distance/max(cellExtent.y,1e-8),0.0,1.0);
+  var material=atomicLoad(&maintenance[RT_BASE+6u]);
+  for(var index=0u;index<RT_PATCH_COUNT;index+=1u){
+    let base=RT_PATCH_BASE+index*8u;
+    let minimum=vec3f(rtFloat(base),rtFloat(base+1u),rtFloat(base+2u));
+    let maximum=vec3f(rtFloat(base+4u),rtFloat(base+5u),rtFloat(base+6u));
+    if(all(world>=minimum)&&all(world<maximum)){
+      if(atomicLoad(&maintenance[base+3u])==0u){
+        fraction=0.0;distance=1e20;material=0u;normal=vec3f(0.0);
+      }else{
+        let face=min(world-minimum,maximum-world);var axis=0u;
+        if(face.y<face.x){axis=1u;}if(face.z<face[axis]){axis=2u;}
+        normal=vec3f(0.0);normal[axis]=select(-1.0,1.0,
+          world[axis]>=0.5*(minimum[axis]+maximum[axis]));
+        fraction=1.0;distance=-face[axis];material=atomicLoad(&maintenance[base+7u]);
+      }
+    }
+  }
+  return SolidWorldSample(fraction,distance,material,normal);
+}`;
+}
+
+function solidWorldProxyWGSL(
+  layout?: WebgpuSolidWorldPageLayout,
+  renderTerrainLayout?: RenderTerrainShaderLayout,
+): string {
+  if (renderTerrainLayout) return /* wgsl */ `
+struct SolidWorldSample{fraction:f32,distance:f32,material:u32,normal:vec3f}
+${renderTerrainProxyWGSL(renderTerrainLayout)}
+fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
+  return sampleRenderTerrain(world,cellExtent);}`;
   if (!layout) return /* wgsl */ `
 struct SolidWorldSample{fraction:f32,distance:f32,material:u32,normal:vec3f}
-fn sampleSolidWorld(_world:vec3f)->SolidWorldSample{
+fn sampleSolidWorld(_world:vec3f,_cellExtent:vec3f)->SolidWorldSample{
   return SolidWorldSample(0.0,1e20,0u,vec3f(0.0));}`;
   return /* wgsl */ `
 const SW_BASE:u32=${layout.baseWords}u;
@@ -1480,7 +1564,7 @@ fn swOrigin()->vec3f{return vec3f(bitcast<f32>(atomicLoad(&maintenance[SW_BASE+1
 fn swCell()->vec3f{return vec3f(bitcast<f32>(atomicLoad(&maintenance[SW_BASE+20u])),
   bitcast<f32>(atomicLoad(&maintenance[SW_BASE+21u])),bitcast<f32>(atomicLoad(&maintenance[SW_BASE+22u])));}
 struct SolidWorldSample{fraction:f32,distance:f32,material:u32,normal:vec3f}
-fn sampleSolidWorld(world:vec3f)->SolidWorldSample{let cell=max(swCell(),vec3f(1e-8));
+fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{let cell=max(swCell(),vec3f(1e-8));
   let latticePoint=(world-swOrigin())/cell;let q=vec3i(floor(latticePoint));
   let fractionQ8=swFractionQ8(q);let fraction=f32(fractionQ8)/255.0;
   let sdfDistance=f32(swSdfQ8(q))*min(cell.x,min(cell.y,cell.z))/256.0;
@@ -1509,6 +1593,7 @@ export function sparseSceneProxyVoxelizationShaderFor(
   sceneGeometryFormat: SparseBrickSceneGeometryFormat = "f32x2",
   leafPayloadMode: SparseBrickLeafPayloadMode = "dense",
   solidWorldLayout?: WebgpuSolidWorldPageLayout,
+  renderTerrainLayout?: RenderTerrainShaderLayout,
 ): string {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
@@ -1609,7 +1694,7 @@ ${SVO_GBUFFER_NORMAL_OCT8_WGSL}
 ${sparseBrickSceneIdentityWordCodecWGSL()}
 ${bandedCodec}
 ${bandedEncoder}
-${solidWorldProxyWGSL(solidWorldLayout)}
+${solidWorldProxyWGSL(solidWorldLayout, renderTerrainLayout)}
 
 const BRICK_ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;
 const BRICK_DIRTY:u32=${SVO_BRICK_LIFECYCLE.dirtyBit}u;
@@ -2264,7 +2349,7 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   // marched kind's normal is the most expensive thing in this loop.
   var bestPrimitive = INVALID_INDEX;
   var bestNormal = vec3f(0.0);
-  let staticSolid=sampleSolidWorld(world);
+  let staticSolid=sampleSolidWorld(world,cellExtent);
   if(staticSolid.fraction>0.0){
     bestDistance=staticSolid.distance;
     bestCoverage=cellRadius*(1.0-2.0*staticSolid.fraction);
@@ -2761,6 +2846,15 @@ export class SparseSceneProxyVoxelizer {
   private readonly clusterCapacity: number;
   private readonly fieldProgramCapacity: number;
   private readonly solidWorldLayout?: WebgpuSolidWorldPageLayout;
+  private readonly renderTerrainLayout?: Readonly<{
+    baseWords: number;
+    heightsBaseWords: number;
+    totalWords: number;
+    width: number;
+    depth: number;
+    patchBaseWords: number;
+    patchCount: number;
+  }>;
   private readonly maintenanceArena: GPUBuffer;
   private readonly maintenanceDispatch: GPUBuffer;
   private readonly paramsBuffer: GPUBuffer;
@@ -2885,8 +2979,21 @@ export class SparseSceneProxyVoxelizer {
       authoredPageCount: options.solidWorld.pages.length,
       includesMaterial: true,
     }) : undefined;
+    const renderTerrainBaseWords = this.solidWorldLayout?.totalWords ?? solidWorldBaseWords;
+    this.renderTerrainLayout = options.renderTerrain ? Object.freeze({
+      baseWords: renderTerrainBaseWords,
+      heightsBaseWords: renderTerrainBaseWords + 8,
+      patchBaseWords: renderTerrainBaseWords + 8 + options.renderTerrain.heights_m.length,
+      patchCount: options.renderTerrain.patches.length,
+      totalWords: checkedArenaWords(renderTerrainBaseWords + 8
+        + options.renderTerrain.heights_m.length
+        + options.renderTerrain.patches.length * 8, "Render terrain field"),
+      width: options.renderTerrain.dimensions[0],
+      depth: options.renderTerrain.dimensions[1],
+    }) : undefined;
     const arenaWords = checkedArenaWords(
-      this.solidWorldLayout?.totalWords ?? solidWorldBaseWords,
+      this.renderTerrainLayout?.totalWords
+        ?? this.solidWorldLayout?.totalWords ?? solidWorldBaseWords,
       "Scene maintenance arena");
     this.brickBudget = nonNegativeInteger(options.bricksPerFrameBudget ?? 0, "Bricks per frame budget");
     const maintenanceDispatchBytes = 4 * 3 * 4;
@@ -2906,6 +3013,32 @@ export class SparseSceneProxyVoxelizer {
     if (this.solidWorldLayout && options.solidWorld && options.solidWorldLattice) {
       writeWebgpuSolidWorldPages(device.queue, this.maintenanceArena,
         this.solidWorldLayout, options.solidWorld, [0, 0, 0], options.solidWorldLattice);
+    }
+    if (this.renderTerrainLayout && options.renderTerrain) {
+      const header = new ArrayBuffer(8 * Uint32Array.BYTES_PER_ELEMENT);
+      const words = new Uint32Array(header), floats = new Float32Array(header);
+      floats.set([options.renderTerrain.origin_m[0], options.renderTerrain.origin_m[1],
+        options.renderTerrain.cellSize_m[0], options.renderTerrain.cellSize_m[1]], 0);
+      words.set([options.renderTerrain.dimensions[0], options.renderTerrain.dimensions[1],
+        options.renderTerrain.materialId, 0], 4);
+      device.queue.writeBuffer(this.maintenanceArena,
+        this.renderTerrainLayout.baseWords * 4, header);
+      device.queue.writeBuffer(this.maintenanceArena,
+        this.renderTerrainLayout.heightsBaseWords * 4,
+        options.renderTerrain.heights_m);
+      if (options.renderTerrain.patches.length > 0) {
+        const patchData = new ArrayBuffer(options.renderTerrain.patches.length * 8 * 4);
+        const patchWords = new Uint32Array(patchData), patchFloats = new Float32Array(patchData);
+        options.renderTerrain.patches.forEach((patch, index) => {
+          const base = index * 8;
+          patchFloats.set(patch.minimum_m, base);
+          patchWords[base + 3] = patch.operation === "fill" ? 1 : 0;
+          patchFloats.set(patch.maximum_m, base + 4);
+          patchWords[base + 7] = patch.materialId;
+        });
+        device.queue.writeBuffer(this.maintenanceArena,
+          this.renderTerrainLayout.patchBaseWords * 4, patchData);
+      }
     }
     this.maintenanceDispatch = device.createBuffer({
       label: `${label} maintenance dispatch arguments`, size: maintenanceDispatchBytes,
@@ -2950,7 +3083,8 @@ export class SparseSceneProxyVoxelizer {
       label: `${this.label} live maintenance shader`,
       code: sparseSceneProxyVoxelizationShaderFor(
         this.tree.payloadProfile, this.tree.sceneGeometryFormat,
-        this.tree.leafPayloadMode, this.solidWorldLayout),
+        this.tree.leafPayloadMode, this.solidWorldLayout,
+        this.renderTerrainLayout),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import "../lib/methods";
-import { createMinimalPowerDamBreak64Scene } from "../lib/core/scenes";
+import { createMinimalPowerDamBreak64Scene, getSceneDefinition } from "../lib/core/scenes";
+import { sceneDocument } from "../lib/core/scene-definition";
 import {
   FluidLabRenderer,
   gpuSceneSolverKey,
@@ -35,6 +36,31 @@ test("Sparse CM12 refinement regions are a live policy edit", () => {
     "a region edit must retain the attached Sparse CM12 solver");
   assert.notEqual(gpuSceneUniformKey(before), gpuSceneUniformKey(after),
     "the retained solver must still observe and upload the new policy");
+});
+
+test("dropping the first moving body keeps a refined renderer-only world attached", () => {
+  const before = sceneDocument(getSceneDefinition("garden-svo-lighting"));
+  const after = structuredClone(before);
+  const template = after.rigidBodies[0];
+  assert.ok(template);
+  after.rigidBodies.push({
+    ...template,
+    id: "live-drop",
+    name: "Live drop",
+    motion: "dynamic",
+    position_m: { x: 0, y: before.container.height_m + 0.2, z: 0 },
+  });
+  const config: SimulationRunConfig = {
+    methodId: "adaptive-mass",
+    quality: "balanced",
+    values: { svoEnvironmentRefinementDepth: 3 },
+  };
+
+  assert.equal(sceneEditRequiresReset(before, after, config.methodId), false);
+  assert.equal(gpuSceneSolverKey(before, config), gpuSceneSolverKey(after, config),
+    "the live rigid arena can adopt a dropped ball without rebuilding the environment");
+  assert.notEqual(gpuSceneUniformKey(before), gpuSceneUniformKey(after),
+    "the retained renderer must still upload the new rigid roster");
 });
 
 test("a live liquid edit retires the retained water mesh", () => {

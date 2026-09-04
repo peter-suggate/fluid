@@ -324,18 +324,36 @@ export function fluidInteractionDropVolume(
   return describedFluidDrop(scene, centre_m, radius_m);
 }
 
+/** Whether a drop must create fluid authority instead of entering it live. */
+export function fluidBallRequiresInitialCondition(
+  scene: Pick<SceneDescription, "systems">,
+  simulationTime_s: number,
+  insideContainer: boolean,
+): boolean {
+  return scene.systems?.fluid === false && simulationTime_s <= 0 && insideContainer;
+}
+
 /** Drop a new ball into the document, and say what to select. */
 export function addFluidBall(
   scene: SceneDescription,
   centre_m: Vec3,
   radius_m: number,
-): { readonly fluid: SceneDescription["fluid"]; readonly id: string } {
+): { readonly fluid: SceneDescription["fluid"];
+  readonly systems?: SceneDescription["systems"]; readonly id: string } {
   const existing = scene.fluid.initialLiquidVolumes ?? [];
+  const fluid = {
+    ...scene.fluid,
+    initialLiquidVolumes: [...existing, fluidDropVolume(scene, centre_m, radius_m)],
+  };
   return {
-    fluid: {
-      ...scene.fluid,
-      initialLiquidVolumes: [...existing, fluidDropVolume(scene, centre_m, radius_m)],
-    },
+    fluid,
+    // A liquid drop is an explicit request for fluid authority. Dry showcase
+    // scenes otherwise accept the seed into their document while continuing to
+    // run the renderer-only SVO, so the environment rebuilds and no liquid can
+    // ever appear. Match the paint tool's first-wet-cell transition.
+    ...(scene.systems?.fluid === false
+      ? { systems: { ...scene.systems, fluid: true } }
+      : {}),
     id: `${FLUID_VOLUME_PREFIX}${existing.length}`,
   };
 }
