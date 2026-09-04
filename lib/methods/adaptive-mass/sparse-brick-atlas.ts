@@ -102,6 +102,8 @@ export interface SparseAdaptiveMassAtlas {
 export interface SparseBrickAtlasInitializationOptions {
   readonly finestDimensions: SparseBrickVec3;
   readonly brickFineResolution?: SparseBrickFineResolution;
+  /** Reuse the caller's canonical fluid-collider world when it is already built. */
+  readonly solidWorld?: SolidWorld;
   /** Optional caller-owned construction guard; Sparse CM12 itself has no cell-count cap. */
   readonly maximumFinestCells?: number;
   /** Largest dyadic macro edge, in ordinary bricks. One disables macro leaves. */
@@ -547,21 +549,23 @@ function uniformInitialBrick(
 }
 
 /**
- * Structural span-one leaves whose topology may become fluid-active later.
+ * Structural span-one leaves explicitly authored as future liquid capacity.
  *
- * Besides authored liquid seeds, retain the mixed (solid/open) pages of the
- * canonical SolidWorld.  GPU-grown pages deliberately own only a fixed-B8
- * graph; if a dry wall page is omitted here, later wetting can never publish
- * the ordinary 8/4/2/1 ladder.  Mixed pages are surface-shaped geometry, so
- * this does not turn the sparse world into a domain-volume catalogue.
+ * A small wall catalogue is useful: it closes the dyadic grading graph for a
+ * compact vessel. It must not, however, make a local reservoir inherit every
+ * mixed terrain page in a large world. `maximumMixedSolidPages` is supplied
+ * from the already bounded fluid/policy claim and rejects the solid catalogue
+ * as a whole if it would dominate that working set.
  */
+const SPARSE_CM12_STRUCTURAL_TO_FLUID_PAGE_RATIO = 3;
+
 function structuralSeedBrickCoordinates(
   scene: SceneDescription,
   dimensions: SparseBrickVec3,
   brickDimensions: SparseBrickVec3,
   brickFineResolution: SparseBrickFineResolution,
+  maximumMixedSolidPages = 0,
 ): SparseBrickVec3[] {
-  const maximumMixedSolidPages = 2048;
   const authoredWidth = scene.voxelDomain.brickSize_cells;
   const result = new Map<number, SparseBrickVec3>();
   for (const authored of initialFluidSeedBrickCoordinates(scene, dimensions, authoredWidth)) {
@@ -578,11 +582,16 @@ function structuralSeedBrickCoordinates(
           result.set(sparseBrickKey(coordinate, brickDimensions), coordinate);
         }
   }
+  if (maximumMixedSolidPages <= 0) return [...result.values()];
   let world = initialSolidWorldCache.get(scene);
   if (!world) {
     world = solidWorldForScene(scene);
     initialSolidWorldCache.set(scene, world);
   }
+  // One SolidWorld page can fan out to several neighboring fluid pages. If
+  // the source catalogue already exceeds the fluid-derived budget, do not pay
+  // an O(world complexity) scan merely to discover that the result is too big.
+  if (world.pages.length > maximumMixedSolidPages) return [...result.values()];
   const mixedSolidCoordinates = new Map<number, SparseBrickVec3>();
   let mixedSolidCatalogueFits = true;
   for (const page of world.pages) {
@@ -614,10 +623,6 @@ function structuralSeedBrickCoordinates(
               sparseBrickKey(coordinate, brickDimensions), coordinate,
             );
             if (mixedSolidCoordinates.size > maximumMixedSolidPages) {
-              // The resident all-rung template ABI has the same 2,048-leaf
-              // ceiling.  Beyond it, adding dry structural leaves would disable
-              // every host candidate slot while making initialization scale with
-              // the remote boundary. Keep the ordinary SparseWorld growth path.
               mixedSolidCatalogueFits = false;
               break;
             }
@@ -1126,6 +1131,7 @@ function hierarchicalTankFillBricks(
   );
   for (const coordinate of structuralSeedBrickCoordinates(
     scene, dimensions, brickDimensions, brickFineResolution,
+    SPARSE_CM12_STRUCTURAL_TO_FLUID_PAGE_RATIO * gradedBricks.length,
   )) {
     if (sparseBrickContainingCoordinate(provisional, coordinate)) continue;
     gradedBricks.push(initialBrick(
@@ -1269,6 +1275,10 @@ function candidateInitialBrickCoordinates(
   for (const coordinate of refinementRegionBrickCoordinates(
     scene, dimensions, brickDimensions, brickFineResolution,
   )) addBrick(coordinate);
+  for (const coordinate of structuralSeedBrickCoordinates(
+    scene, dimensions, brickDimensions, brickFineResolution,
+    SPARSE_CM12_STRUCTURAL_TO_FLUID_PAGE_RATIO * candidates.size,
+  )) addBrick(coordinate);
   return [...candidates.entries()].sort((left, right) => left[0] - right[0])
     .map((entry) => entry[1]);
 }
@@ -1314,6 +1324,10 @@ export function initializeSparseBrickAtlasFromScene(
   options: SparseBrickAtlasInitializationOptions,
 ): SparseAdaptiveMassAtlas {
   positiveDimensions(options.finestDimensions);
+  // The adaptive solver has already constructed the canonical SolidWorld for
+  // resident upload. Reusing it avoids a second terrain bake and also ensures
+  // fluid-collider regions participate in atlas sampling.
+  if (options.solidWorld) initialSolidWorldCache.set(scene, options.solidWorld);
   const brickFineResolution = options.brickFineResolution
     ?? DEFAULT_BRICK_FINE_RESOLUTION;
   const ladder = sparseBrickLadder(brickFineResolution);
@@ -1389,8 +1403,12 @@ export function initializeSparseBrickAtlasFromScene(
       );
     }
   }
+  const candidateCoordinates = [...candidateInitialBrickCoordinates(
+    scene, options.finestDimensions, brickDimensions, brickFineResolution,
+  )];
   const structuralCoordinates = structuralSeedBrickCoordinates(
     scene, options.finestDimensions, brickDimensions, brickFineResolution,
+    SPARSE_CM12_STRUCTURAL_TO_FLUID_PAGE_RATIO * candidateCoordinates.length,
   );
   const structuralKeys = new Set(structuralCoordinates.map((coordinate) =>
     sparseBrickKey(coordinate, brickDimensions)));
@@ -1404,9 +1422,7 @@ export function initializeSparseBrickAtlasFromScene(
     readonly key: number;
     readonly interfaceBrick: boolean;
   }> = [];
-  for (const coordinate of candidateInitialBrickCoordinates(
-    scene, options.finestDimensions, brickDimensions, brickFineResolution,
-  )) {
+  for (const coordinate of candidateCoordinates) {
     let nonempty = false;
     for (let z = 0; z < brickFineResolution && !nonempty; z += 1)
       for (let y = 0; y < brickFineResolution && !nonempty; y += 1)

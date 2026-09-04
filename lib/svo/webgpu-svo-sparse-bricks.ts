@@ -43,6 +43,7 @@ import {
   octreeLiveSceneLeafPayloadMode,
   octreeLiveSceneSceneGeometryFormat,
   packSparseBrickPlan,
+  sparseBrickPayloadProfileForOwnership,
   type SparseBrickCoordinate,
   type SparseBrickPlan,
   type SparseBrickPayloadProfileName,
@@ -151,6 +152,11 @@ import {
 
 export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
+  /**
+   * This world publishes authored scene geometry only; no fluid solver writes
+   * its payload lanes. Used by the renderer sidecar for fluid-enabled scenes.
+   */
+  rendererOnly?: boolean;
   /** Additional authored-environment subdivision beyond the legacy 2x brick ceiling. */
   environmentBrickRefinementLevels?: number;
   /**
@@ -174,8 +180,9 @@ export interface OctreeSparseBrickWorldOptions {
    * (`liveSceneReachableBrickCoordinates`). Absent, the claim is the AABB, which
    * is what shipped.
    *
-   * Honoured only when `systems.fluid` is false. A solver writes cells the scene
-   * geometry says nothing about, so its claim is not a geometric one.
+   * Honoured for solverless and renderer-only worlds. A solver-owned world
+   * writes cells the scene geometry says nothing about, so its claim is not a
+   * geometric one.
    */
   sceneSolids?: readonly SparseSceneSolidReach[];
   /**
@@ -522,8 +529,8 @@ export function octreeLiveSceneBrickBudget(
  * 155 MB to 116 MB and the frame from 32.6 ms to 14.1 ms. The env var stays as
  * the A/B, and `FLUID_SVO_DRY_PAYLOAD_PROFILE=full` is the one-word rollback.
  *
- * Authoring water flips `systems.fluid` and restores the full lane set
- * regardless of this setting.
+ * A solver-owned world restores the full lane set regardless of this setting;
+ * a renderer-only sidecar remains compact even when water is authored.
  */
 export function octreeLiveSceneDryPayloadProfile(
   environment: Record<string, string | undefined> | undefined
@@ -533,6 +540,17 @@ export function octreeLiveSceneDryPayloadProfile(
   if (raw === undefined || raw === "") return "dry";
   if (raw !== "full" && raw !== "dry") throw new RangeError("FLUID_SVO_DRY_PAYLOAD_PROFILE must be \"full\" or \"dry\"");
   return raw;
+}
+
+/** Resolve payload ownership independently of whether the document has water. */
+export function octreeLiveScenePayloadProfile(
+  fluidEnabled: boolean,
+  rendererOnly = false,
+  environment?: Record<string, string | undefined>,
+): SparseBrickPayloadProfileName {
+  return sparseBrickPayloadProfileForOwnership(
+    fluidEnabled, rendererOnly, octreeLiveSceneDryPayloadProfile(environment),
+  );
 }
 
 /**
@@ -1361,6 +1379,7 @@ export class OctreeSparseBrickWorld {
     this.brickSize = brickSize;
     this.surfaceModel = sceneTerrainSurfaceModel(scene);
     const dryWorld = scene.systems?.fluid === false;
+    const rendererOnly = options.rendererOnly === true;
     const refinementDepth = dryWorld
       ? Math.max(0, Math.trunc(options.environmentRefinementDepth ?? 0))
       : 0;
@@ -1590,7 +1609,8 @@ export class OctreeSparseBrickWorld {
     if (refinementDepth === 0) {
       for (const coordinate of sceneDomain.solverBrickCoordinates) pinnedBricks.add(brickCoordinateKey(coordinate));
     }
-    const sceneSolids = dryWorld && octreeLiveSceneBrickClaim() === "reachable"
+    const sceneSolids = (dryWorld || rendererOnly)
+      && octreeLiveSceneBrickClaim() === "reachable"
       ? options.sceneSolids ?? [] : [];
     reportStage("Select the bricks the scene reaches");
     yield;
@@ -1725,13 +1745,12 @@ export class OctreeSparseBrickWorld {
     // *could* grow past the mask is already broken, and finding that out at the
     // publication that crosses it is finding out from a scene with holes in it.
     assertSvoBrickRasterNodeAddressable(nodeCapacity, "the live sparse-brick world");
-    // `systems.fluid === false` is already the world's dry/wet discriminator
-    // (see `refinementDepth` above and the inspection note at :693). Only a dry
-    // world may narrow its lanes: a solver writes all five, so the profile is
-    // forced back to `full` the moment water is authored, whatever the lever
-    // says. That is the whole reversibility contract.
-    const payloadProfile: SparseBrickPayloadProfileName =
-      scene.systems?.fluid === false ? octreeLiveSceneDryPayloadProfile() : "full";
+    // A renderer-only sidecar never receives solver writes even when the scene
+    // document contains water. It can therefore use the same compact lanes as
+    // a solverless world. The actual solver-owned octree still forces `full`.
+    const payloadProfile = octreeLiveScenePayloadProfile(
+      !dryWorld, rendererOnly,
+    );
     const sceneGeometryFormat: SparseBrickSceneGeometryFormat =
       payloadProfile === "dry" ? octreeLiveSceneSceneGeometryFormat() : "f32x2";
     const leafPayloadMode: SparseBrickLeafPayloadMode =

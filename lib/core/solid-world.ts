@@ -405,12 +405,24 @@ function terrainSolidWorldForScene(scene: SceneDescription): SolidWorld {
   return { pages: ordered, directory, patches: [] };
 }
 
+const sceneSolidWorldCache = new WeakMap<SceneDescription, {
+  readonly stamp: string;
+  readonly world: SolidWorld;
+}>();
+
 export function solidWorldForScene(scene: SceneDescription): SolidWorld {
+  const stamp = solidWorldContentStamp(scene);
+  const cached = sceneSolidWorldCache.get(scene);
+  if (cached?.stamp === stamp) return cached.world;
   // The terrain bake is already page-native. Apply generic scene edits in
   // place before publishing the new world so construction never holds a second
   // terrain-sized page image or expands the columns into voxel-box descriptors.
-  return applySolidWorldPatches(terrainSolidWorldForScene(scene),
+  // The returned snapshot is canonical for this scene content stamp: fluid
+  // initialization and its renderer sidecar must not rebake the same terrain.
+  const world = applySolidWorldPatches(terrainSolidWorldForScene(scene),
     scene.solidVoxels, false);
+  sceneSolidWorldCache.set(scene, { stamp, world });
+  return world;
 }
 
 /**

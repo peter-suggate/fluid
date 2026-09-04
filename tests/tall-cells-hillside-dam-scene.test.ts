@@ -180,10 +180,14 @@ test("the scene requires a unified sparse voxel solid and starts fluid-local", (
     brickFineResolution: 8,
     surfaceFineRings: 1,
   });
-  assert.equal(atlas.bricks.length, 3 * 2 * 6,
-    "generation zero must contain only the aligned 3 x 2 x 6 reservoir tiles");
-  assert.ok(atlas.bricks.length < (NX / 8) * (NY / 8) * (NZ / 8) / 40,
-    "initial fluid residency must stay independent of the vast dry extent");
+  const wet = atlas.bricks.filter((brick) =>
+    brick.density.some((density) => density > 0));
+  assert.equal(wet.length, 3 * 2 * 6,
+    "generation zero must contain the aligned 3 x 2 x 6 reservoir tiles");
+  assert.ok(atlas.bricks.length <= 3 * wet.length,
+    "only the bounded transport/velocity air stencil may accompany the reservoir");
+  assert.ok(Math.max(...atlas.bricks.map((brick) => brick.coordinate[0])) <= 4,
+    "remote downhill terrain must not become generation-zero fluid topology");
 });
 
 test("a sun-lit hillside publishes no fixture primitive at all", () => {

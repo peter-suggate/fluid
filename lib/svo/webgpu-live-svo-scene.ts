@@ -83,13 +83,12 @@ export function liveSvoRenderBrickSize(
 /**
  * The scene's exact solids for brick selection, or nothing.
  *
- * Only a dry world may narrow its claim this way: a solver writes cells no
- * authored solid touches, so the geometric answer is not the whole one there.
- * A build that fails is not an error here — the claim simply stays the AABB it
- * has always been, which is what shipped.
+ * This class is renderer-only even when its scene document contains fluid, so
+ * authored geometry is the complete claim. A build that fails is not an error
+ * here — the claim simply stays the AABB it has always been, which is what
+ * shipped.
  */
 function liveSvoSceneSolidReach(scene: SceneDescription): readonly SparseSceneSolidReach[] | undefined {
-  if (scene.systems?.fluid !== false) return undefined;
   try {
     return svoScenePrimitiveSolidReach(buildSvoScenePrimitives(scene));
   } catch {
@@ -183,6 +182,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
     const sceneSolids = liveSvoSceneSolidReach(scene);
     const world = await OctreeSparseBrickWorld.create(device, scene, dimensions, {
       brickSize: liveSvoRenderBrickSize(scene, options),
+      rendererOnly: true,
       environmentBrickRefinementLevels: options.environmentBrickRefinementLevels,
       environmentRefinementDepth: options.environmentRefinementDepth,
       environmentPlanarRefinementExemption: options.environmentPlanarRefinementExemption,

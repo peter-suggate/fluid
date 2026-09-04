@@ -1179,22 +1179,42 @@ export function sparseCM12OwnershipTablePlan(
     allocatedWords: hashWords + brickRecordWords + 2 };
 }
 
-// CPU-only sizing oracle retained by topology reports; production uses only
-// accepted topology plus GPU-published frontier pages.
+// Bound host-authored rerung work by the historical B8/2,048-leaf envelope.
+// A leaf-count check alone hides the 1 + 8 + 64 + 512 cell expansion.
 export const SPARSE_CM12_HOST_TEMPLATE_MUTABLE_BRICK_MAXIMUM = 2048;
+export const SPARSE_CM12_HOST_TEMPLATE_CELL_MAXIMUM =
+  SPARSE_CM12_HOST_TEMPLATE_MUTABLE_BRICK_MAXIMUM * (1 + 8 + 64 + 512);
+export const SPARSE_CM12_HOST_TEMPLATE_ROW_MAXIMUM =
+  SPARSE_CM12_HOST_TEMPLATE_MUTABLE_BRICK_MAXIMUM * (6 + 36 + 240 + 1728);
 
-/** CPU-only sizing oracle for historical all-rung topology reports. */
+/** Size the actual all-rung catalogue, including the already accepted rung. */
 export function sparseCM12HostTemplateVariantsEnabled(
   acceptedCellCount: number,
   acceptedRowCount: number,
   mutableBrickCount: number,
   brickFineResolution = 8,
 ): boolean {
+  if (!Number.isSafeInteger(brickFineResolution) || brickFineResolution < 1
+    || !Number.isInteger(Math.log2(brickFineResolution))) return false;
   const mutableBrickMaximum = SPARSE_CM12_HOST_TEMPLATE_MUTABLE_BRICK_MAXIMUM
     * (8 / brickFineResolution) ** 3;
+  let cellsPerBrick = 0;
+  let rowsPerBrick = 0;
+  for (let resolution = 1; resolution <= brickFineResolution; resolution *= 2) {
+    cellsPerBrick += resolution ** 3;
+    rowsPerBrick += 3 * (resolution + 1) * resolution ** 2;
+  }
+  // Each mutable brick already contributes at least its B1 cells/rows to the
+  // accepted counts. Add only the remaining worst-case catalogue here.
+  const projectedCellCount = acceptedCellCount
+    + mutableBrickCount * (cellsPerBrick - 1);
+  const projectedRowCount = acceptedRowCount
+    + mutableBrickCount * (rowsPerBrick - 6);
   return acceptedCellCount <= 250_000
     && acceptedRowCount <= 750_000
-    && mutableBrickCount <= mutableBrickMaximum;
+    && mutableBrickCount <= mutableBrickMaximum
+    && projectedCellCount <= SPARSE_CM12_HOST_TEMPLATE_CELL_MAXIMUM
+    && projectedRowCount <= SPARSE_CM12_HOST_TEMPLATE_ROW_MAXIMUM;
 }
 
 /** Bounded by the mutable frontier, never by logical-domain brick count. */

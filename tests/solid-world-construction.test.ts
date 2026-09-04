@@ -73,11 +73,16 @@ test("thin authored tank voxels compile to exact planar slabs", () => {
 test("SolidWorld content stamp ignores unrelated scene edits", () => {
   const scene = getScenePreset("bounded-pool-transfer").create();
   const original = solidWorldContentStamp(scene);
+  const originalWorld = solidWorldForScene(scene);
   scene.fluid.gravity_m_s2.y *= 0.5;
   assert.equal(solidWorldContentStamp(scene), original);
+  assert.equal(solidWorldForScene(scene), originalWorld,
+    "unrelated edits should reuse the canonical terrain bake");
   scene.solidVoxels.push({ operation: "clear", minimum: [0, 0, 0],
     maximumExclusive: [1, 1, 1] });
   assert.notEqual(solidWorldContentStamp(scene), original);
+  assert.notEqual(solidWorldForScene(scene), originalWorld,
+    "solid edits must invalidate the cached terrain bake");
 });
 
 test("SolidWorld uses exact signed pages and a floor-reaching voxel cut", () => {

@@ -229,6 +229,15 @@ export function sparseBrickLaneVoxelsPerWord(strideBytes: number): number {
  */
 export type SparseBrickPayloadProfileName = "full" | "dry";
 
+/** Select payload lanes from ownership, independently of scene content. */
+export function sparseBrickPayloadProfileForOwnership(
+  fluidEnabled: boolean,
+  rendererOnly: boolean,
+  compactProfile: SparseBrickPayloadProfileName,
+): SparseBrickPayloadProfileName {
+  return !fluidEnabled || rendererOnly ? compactProfile : "full";
+}
+
 const GEOMETRY_CHANNELS_FULL = ["fluidSignedDistance", "solidSignedDistance", "solidFraction", "pressure"] as const;
 /** Storage order is preserved from the full lane so channel *meaning* is stable. */
 const GEOMETRY_CHANNELS_SCENE = ["solidSignedDistance", "solidFraction"] as const;

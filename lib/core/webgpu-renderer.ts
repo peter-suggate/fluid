@@ -1787,7 +1787,10 @@ export class FluidLabRenderer {
     const waterPipeline = new RasterWaterPipeline(device, this.format, this.uniformBuffer, this.bodyBuffer);
     try {
       progress("Compiling raster water pipelines",3);
-      await waterPipeline.initialize((label,completed,total)=>progress(label,completed,total,"water-renderer"));
+      await waterPipeline.initialize(
+        (label,completed,total)=>progress(label,completed,total,"water-renderer"),
+        { deferSceneClassifiers: true },
+      );
     } catch (error) {
       waterPipeline.destroy();
       throw error;

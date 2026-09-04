@@ -577,6 +577,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
             brickFineResolution: fineResolution,
+            solidWorld: initialSolidWorld,
             maximumMacroSpanBricks: options.maximumMacroSpanBricks,
             surfaceFineRings: options.surfaceFineRings,
             // Activity mode promotes from measurements. Starting its authored
