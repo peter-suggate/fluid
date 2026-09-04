@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { planSparseCM12LinearDispatch } from
+  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 const resident = readFileSync(new URL(
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
@@ -56,12 +58,27 @@ test("SolidWorld initializes every immutable topology rung", () => {
     shader.indexOf("fn candidateFaceBoundaryRowRange"));
   assert.match(cells, /let cell=gid\.x;if\(cell>=ta\(2u\)\)\{return;\}/);
   assert.doesNotMatch(cells, /acceptedTemplateCellInvocation/);
-  assert.match(rows, /let row=gid\.x;if\(row>=ta\(3u\)\)\{return;\}/);
+  assert.match(rows, /let group=wid\.x\+nwg\.x\*wid\.y;/);
+  assert.match(rows, /let row=64u\*group\+lane;/);
   assert.doesNotMatch(rows, /acceptedTemplateRowInvocation/);
   assert.match(resident,
     /refreshSparseCM12SolidWorldCells!\);\s*pass\.dispatchWorkgroups\(Math\.ceil\(this\.templateCellCount/);
   assert.match(resident,
-    /refreshSparseCM12SolidWorldRows!\);\s*pass\.dispatchWorkgroups\(Math\.ceil\(this\.templateRowCount/);
+    /refreshSparseCM12SolidWorldRows!\);\s*pass\.dispatchWorkgroups\(\.\.\.planSparseCM12LinearDispatch\(\s*Math\.ceil\(this\.templateRowCount/);
+});
+
+test("large row domains tile across the portable WebGPU dispatch limit", () => {
+  assert.deepEqual(planSparseCM12LinearDispatch(65_535, 65_535), [65_535, 1, 1]);
+  assert.deepEqual(planSparseCM12LinearDispatch(72_989, 65_535), [65_535, 2, 1]);
+  assert.throws(() => planSparseCM12LinearDispatch(17, 4), /exceeds 2D/);
+
+  const pressureRows = shader.slice(shader.indexOf("fn compileCanonicalPressureRows"),
+    shader.indexOf("fn finalizeCanonicalPressureRows"));
+  assert.match(pressureRows, /let group=wid\.x\+nwg\.x\*wid\.y;/);
+  assert.match(pressureRows, /let row=64u\*group\+lane/);
+  assert.match(pressureRows, /let word=2u\*group\+lane/);
+  assert.match(resident,
+    /compileCanonicalPressureRows", \.\.\.planSparseCM12LinearDispatch\(/);
 });
 
 test("static SolidWorld detail is measured only by the cold refresh", () => {

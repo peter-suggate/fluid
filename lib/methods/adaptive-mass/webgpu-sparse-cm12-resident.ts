@@ -624,6 +624,30 @@ export interface SparseCM12StageEncodeContext<Stage extends SparseCM12ResidentSt
 }
 
 const WORKGROUP_SIZE = 64;
+
+/** Tile a logically one-dimensional dispatch across the portable WebGPU
+ * per-dimension limit. The paired WGSL kernels flatten x/y workgroup IDs. */
+export const planSparseCM12LinearDispatch = (
+  workgroups: number,
+  maxPerDimension: number,
+): readonly [number, number, number] => {
+  if (!Number.isSafeInteger(workgroups) || workgroups < 0) {
+    throw new RangeError(`Invalid Sparse CM12 workgroup count: ${workgroups}`);
+  }
+  if (!Number.isSafeInteger(maxPerDimension) || maxPerDimension < 1) {
+    throw new RangeError(`Invalid WebGPU workgroup dimension limit: ${maxPerDimension}`);
+  }
+  if (workgroups === 0) return [0, 0, 1];
+  const x = Math.min(workgroups, maxPerDimension);
+  const y = Math.ceil(workgroups / x);
+  if (y > maxPerDimension) {
+    throw new RangeError(
+      `Sparse CM12 dispatch ${workgroups} exceeds 2D WebGPU capacity ${
+        maxPerDimension * maxPerDimension}`,
+    );
+  }
+  return [x, y, 1];
+};
 // Diagnostic captures may split the presentation executor by data domain so
 // xctrace can attribute its compact-page, capacity-verification and proof work.
 // Production leaves this false and retains the original single compute pass.
@@ -6138,8 +6162,10 @@ export class WebGPUSparseCM12Resident {
       closePass();
       closeSubstage("pcm-cell-publication");
       if (pressureTopologyPhaseLimitForQA === "cells") return;
-      dispatch("compileCanonicalPressureRows",
-        this.canonicalMembershipLayout.row.dispatchWorkgroupCount);
+      dispatch("compileCanonicalPressureRows", ...planSparseCM12LinearDispatch(
+        this.canonicalMembershipLayout.row.dispatchWorkgroupCount,
+        this.device.limits.maxComputeWorkgroupsPerDimension,
+      ));
       dispatch("finalizeCanonicalPressureRows", 1);
       closePass();
       closeSubstage("pcm-row-publication");
@@ -6843,7 +6869,10 @@ export class WebGPUSparseCM12Resident {
     pass.setPipeline(this.pipelines.refreshSparseCM12SolidWorldCells!);
     pass.dispatchWorkgroups(Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
     pass.setPipeline(this.pipelines.refreshSparseCM12SolidWorldRows!);
-    pass.dispatchWorkgroups(Math.ceil(this.templateRowCount / WORKGROUP_SIZE));
+    pass.dispatchWorkgroups(...planSparseCM12LinearDispatch(
+      Math.ceil(this.templateRowCount / WORKGROUP_SIZE),
+      this.device.limits.maxComputeWorkgroupsPerDimension,
+    ));
     pass.setPipeline(this.pipelines.refreshSparseCM12StaticSolidGeometryEvidence!);
     pass.dispatchWorkgroups(this.initialWorldLeafCount);
     pass.setPipeline(this.pipelines.clearSparseWorldFrontierResolutionCache!);

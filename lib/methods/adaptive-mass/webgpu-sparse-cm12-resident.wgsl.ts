@@ -1562,12 +1562,15 @@ fn refreshSparseCM12SolidWorldRow(row:u32){
     f32(openQ8)/(255.0*f32(area)),area>0u);
 }
 @compute @workgroup_size(64)
-fn refreshSparseCM12SolidWorldRows(@builtin(global_invocation_id)gid:vec3u){
+fn refreshSparseCM12SolidWorldRows(@builtin(workgroup_id)wid:vec3u,
+ @builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lane:u32){
   if(!hasStaticSolidVoxels()){return;}
   // As with cells, every authored row/rung needs canonical SolidWorld data.
   // Restricting this pass to the current worklist leaves the next accepted
   // rung with zero/uninitialized apertures after a coarsen or refinement.
-  let row=gid.x;if(row>=ta(3u)){return;}refreshSparseCM12SolidWorldRow(row);
+  let group=wid.x+nwg.x*wid.y;
+  let row=64u*group+lane;
+  if(row>=ta(3u)){return;}refreshSparseCM12SolidWorldRow(row);
 }
 fn candidateFaceBoundaryRowRange(brick:u32,accepted:u32,
  side:u32,boundary:u32)->vec2u{
@@ -4939,8 +4942,9 @@ var<workgroup>pcmRowBallot:array<u32,64>;
 
 @compute @workgroup_size(64)
 fn compileCanonicalPressureRows(@builtin(workgroup_id)wid:vec3u,
- @builtin(local_invocation_index)lane:u32){
-  let row=64u*wid.x+lane;let valid=row<p.counts.y;
+ @builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lane:u32){
+  let group=wid.x+nwg.x*wid.y;
+  let row=64u*group+lane;let valid=row<p.counts.y;
   let publicationOpen=pcmRowPublicationOpen();
   var enabled=false;
   if(valid&&publicationOpen){
@@ -4961,7 +4965,7 @@ fn compileCanonicalPressureRows(@builtin(workgroup_id)wid:vec3u,
   }
   pcmRowBallot[lane]=select(0u,1u,enabled);workgroupBarrier();
   if(lane<2u){
-    let word=2u*wid.x+lane;
+    let word=2u*group+lane;
     if(word*32u<p.counts.y){
       var bits=0u;for(var bit=0u;bit<32u;bit+=1u){
         bits|=pcmRowBallot[32u*lane+bit]<<bit;
