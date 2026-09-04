@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   RENDER_FRAME_STAGES,
-  RENDER_FRAME_STAGE_TRACE,
+  RENDER_FRAME_STAGE_PLUGINS,
   RenderFrameSeamRecorder,
   mergeRenderFrameManifests,
   type RenderFrameStageId,
@@ -13,10 +13,10 @@ import {
   RENDER_PIPELINE_NODES,
   measureRenderPipelineBand,
   measureRenderPipelineNode,
-  renderPipelineEncodings,
   renderPipelineStageDurations,
   renderPipelineUnownedPhases,
 } from "../lib/core/render-pipeline-graph";
+import { CPUPerformanceTrace, GPUPassTimestampRecorder } from "../lib/core/performance-trace";
 
 /**
  * The RENDER panel puts a figure on a row only when the stages that row owns
@@ -38,7 +38,7 @@ const OWNER_SOURCE: Record<RenderFrameStageOwner, string> = {
 /** Stage ids closed in one encoder, in the order the source closes them. */
 const seamsClosedIn = (path: string): readonly string[] => {
   const source = readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
-  return [...source.matchAll(/(?:closeStage|seam\?\.|tracePhase\?\.)\("([a-z0-9-]+)"\)/g)]
+  return [...source.matchAll(/(?:closeStage|seam\?\.|tracePhase\?\.)\("([a-z0-9-]+)"/g)]
     .map((match) => match[1]);
 };
 
@@ -58,7 +58,7 @@ const isSubsequence = (candidate: readonly string[], of: readonly string[]): boo
 test("every seam an encoder closes is a declared stage of that encoder's own", () => {
   for (const [owner, path] of Object.entries(OWNER_SOURCE) as [RenderFrameStageOwner, string][]) {
     for (const stage of seamsClosedIn(path)) {
-      const declared = RENDER_FRAME_STAGE_TRACE[stage as RenderFrameStageId];
+      const declared = RENDER_FRAME_STAGE_PLUGINS[stage as RenderFrameStageId];
       assert.ok(declared, `${path} closes "${stage}", which is not in the stage ABI`);
       assert.equal(declared.owner, owner,
         `${path} closes "${stage}", which belongs to ${declared.owner}`);
@@ -82,8 +82,59 @@ test("each encoder closes its seams in ABI order", () => {
 });
 
 test("stage trace labels are unique, so a captured phase names one stage", () => {
-  const labels = RENDER_FRAME_STAGES.map((stage) => RENDER_FRAME_STAGE_TRACE[stage].phase.label);
+  const labels = RENDER_FRAME_STAGES.map((stage) => RENDER_FRAME_STAGE_PLUGINS[stage].phase.label);
   assert.equal(new Set(labels).size, labels.length, "two stages share a trace label");
+});
+
+test("stage-plugin phases form an exact exclusive boundary partition", () => {
+  const clock = [10, 11.25, 13.5];
+  const trace = new CPUPerformanceTrace(
+    7,
+    "frame-context",
+    RENDER_FRAME_STAGE_PLUGINS["rigid-pose-mirror"].phase,
+    () => clock.shift() ?? 13.5,
+  );
+  trace.completePhase(RENDER_FRAME_STAGE_PLUGINS["rigid-pose-mirror"].phase);
+  trace.completePhase(RENDER_FRAME_STAGE_PLUGINS.present.phase);
+  const completed = trace.finishCompletedPhases();
+  assert.equal(completed.total_ms, 3.5);
+  assert.deepEqual(completed.phases.map(({ label, duration_ms }) => ({ label, duration_ms })), [
+    { label: RENDER_FRAME_STAGE_PLUGINS["rigid-pose-mirror"].phase.label, duration_ms: 1.25 },
+    { label: RENDER_FRAME_STAGE_PLUGINS.present.phase.label, duration_ms: 2.25 },
+  ]);
+});
+
+test("GPU completion frontiers charge overlapping pass windows exactly once", async () => {
+  const recorder = Object.assign(Object.create(GPUPassTimestampRecorder.prototype), {
+    semanticPhases: [
+      { phase: { id: "svo-primary", label: "Entry" }, firstPass: 0, endPass: 1 },
+      { phase: { id: "svo-primary", label: "Traversal" }, firstPass: 1, endPass: 2 },
+      { phase: { id: "dry-scene", label: "Overlapped shade" }, firstPass: 2, endPass: 3 },
+    ],
+    read: async () => ({
+      passes: [
+        { label: "entry", kind: "render", begin_ms: 0, end_ms: 5, duration_ms: 5, sampled: true, trusted: false },
+        { label: "traverse", kind: "render", begin_ms: 1, end_ms: 25, duration_ms: 24, sampled: true, trusted: false },
+        { label: "shade", kind: "render", begin_ms: 3, end_ms: 20, duration_ms: 17, sampled: true, trusted: false },
+      ],
+      span_ms: 25,
+      sum_ms: 46,
+      trustedSum_ms: 0,
+      overlap: 46 / 25,
+      sampledPassCount: 3,
+      untrustedPassCount: 3,
+    }),
+  }) as GPUPassTimestampRecorder;
+
+  const trace = await recorder.readSemanticFrontierTrace({
+    sampleId: 9, lane: "presentation", context: "frame",
+  });
+  assert.equal(trace?.total_ms, 25);
+  assert.deepEqual(trace?.phases.map(({ label, duration_ms }) => [label, duration_ms]), [
+    ["Entry", 5],
+    ["Traversal", 20],
+    ["Overlapped shade", 0],
+  ]);
 });
 
 test("the pipeline rows partition the stage ABI", () => {
@@ -148,42 +199,26 @@ test("merging frames keeps the maximum, so an intermittent stage stays live", ()
     [{ stage: "world-proxy-voxelize", computePasses: 7, renderPasses: 0 }]);
 });
 
-test("a stage that encoded nothing reports a true zero, not a band's wall", () => {
-  // The regression this ABI exists for: a settled world encodes no maintenance
-  // pass, the source band's fence wall is tens of milliseconds of queue and
-  // callback latency, and the panel used to hand all of it to the one row it
-  // could not price.
-  const worldBuild = node("sparse-world-build");
-  const encodings = renderPipelineEncodings({
-    stages: RENDER_FRAME_STAGES.map((stage) => ({ stage, computePasses: 0, renderPasses: 0 })),
-    unclaimed: 0,
-  });
-  const cost = measureRenderPipelineNode(worldBuild, new Map(), 40, "on", encodings);
-  assert.equal(cost.kind, "withheld");
-  assert.equal(cost.duration_ms, 0);
-});
-
-test("without a manifest the same row is unmeasured, which is what a wall may claim", () => {
+test("without an exact partition a row remains unmeasured", () => {
   const cost = measureRenderPipelineNode(node("sparse-world-build"), new Map(), 40, "on");
   assert.equal(cost.kind, "unmeasured");
 });
 
-test("a row whose passes are render passes is unpriced, and can carry the band wall", () => {
-  const encodings = renderPipelineEncodings({
-    stages: [{ stage: "primary-traversal", computePasses: 0, renderPasses: 1 }],
-    unclaimed: 0,
-  });
-  const cost = measureRenderPipelineNode(node("primary-traversal"), new Map(), 40, "on", encodings);
-  assert.equal(cost.kind, "unpriced");
-  assert.equal(cost.unpricedRenderPasses, 1);
+test("a stage absent from an exact partition reports idle zero", () => {
+  const costs = new Map<RenderFrameStageId, { expected_ms: number; encodedFraction: number }>([
+    ["primary-traversal", { expected_ms: 3, encodedFraction: 1 }],
+  ]);
+  const cost = measureRenderPipelineNode(node("sparse-world-build"), costs, 40, "on");
+  assert.equal(cost.kind, "idle");
+  assert.equal(cost.duration_ms, 0);
 });
 
 test("a band sums its rows' own stages and nothing else", () => {
-  const durations = new Map<RenderFrameStageId, number>([
-    ["world-topology-publish", 1.5],
-    ["world-proxy-voxelize", 2.5],
-    ["world-derived-lighting", 3],
-    ["fluid-coverage", 0.07],
+  const durations = new Map<RenderFrameStageId, { expected_ms: number; encodedFraction: number }>([
+    ["world-topology-publish", { expected_ms: 1.5, encodedFraction: 1 }],
+    ["world-proxy-voxelize", { expected_ms: 2.5, encodedFraction: 1 }],
+    ["world-derived-lighting", { expected_ms: 3, encodedFraction: 1 }],
+    ["fluid-coverage", { expected_ms: 0.07, encodedFraction: 1 }],
   ]);
   const band = measureRenderPipelineBand("source", durations, 40);
   assert.equal(band.kind, "measured");
@@ -199,12 +234,12 @@ test("stage durations come from the trace by label, and unowned labels are repor
     capturedAt_ms: 0,
     total_ms: 3,
     phases: [
-      { id: "svo-primary", label: RENDER_FRAME_STAGE_TRACE["primary-traversal"].phase.label, duration_ms: 2 },
-      { id: "svo-primary", label: RENDER_FRAME_STAGE_TRACE["primary-traversal"].phase.label, duration_ms: 1 },
+      { id: "svo-primary", label: RENDER_FRAME_STAGE_PLUGINS["primary-traversal"].phase.label, duration_ms: 2 },
+      { id: "svo-primary", label: RENDER_FRAME_STAGE_PLUGINS["primary-traversal"].phase.label, duration_ms: 1 },
       { id: "svo-primary", label: "A pass nobody declared", duration_ms: 5 },
     ],
   });
-  assert.equal(durations.get("primary-traversal"), 3);
+  assert.deepEqual(durations.get("primary-traversal"), { expected_ms: 3, encodedFraction: 1 });
   assert.deepEqual(renderPipelineUnownedPhases({
     sampleId: 1,
     domain: "gpu",
@@ -214,6 +249,27 @@ test("stage durations come from the trace by label, and unowned labels are repor
     total_ms: 5,
     phases: [{ id: "svo-primary", label: "A pass nobody declared", duration_ms: 5 }],
   }), ["A pass nobody declared"]);
+});
+
+test("intermittent stage timing is expected cost per frame, matching SIM", () => {
+  const durations = renderPipelineStageDurations({
+    sampleId: 2,
+    domain: "gpu",
+    lane: "presentation",
+    context: "test",
+    capturedAt_ms: 0,
+    total_ms: 5,
+    phases: [{
+      id: "scene-upload",
+      label: RENDER_FRAME_STAGE_PLUGINS["world-topology-publish"].phase.label,
+      duration_ms: 4,
+      encodedFraction: 0.25,
+    }],
+  });
+  assert.deepEqual(durations.get("world-topology-publish"), {
+    expected_ms: 1,
+    encodedFraction: 0.25,
+  });
 });
 
 const node = (id: string) => {

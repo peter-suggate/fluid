@@ -1453,26 +1453,19 @@ class SimulationController {
       rendererCPU,
       context,
     });
+    const presentation = metrics.presentation && metrics.presentation.capturedAt_ms >= instrumentation.enabledAt_ms
+      && performanceTraceMatchesLane(metrics.presentation, "gpu", "presentation") ? metrics.presentation : undefined;
     const report = {
       methodId,
       context,
       capturedAt_ms,
       cpu,
       physics,
-      presentation: metrics.presentation && metrics.presentation.capturedAt_ms >= instrumentation.enabledAt_ms
-        && performanceTraceMatchesLane(metrics.presentation, "gpu", "presentation") ? metrics.presentation : undefined,
+      presentation,
       presentationStages: metrics.presentationStages
         && metrics.presentationStages.capturedAt_ms >= instrumentation.enabledAt_ms
         && performanceTraceMatchesLane(metrics.presentationStages, "gpu", "presentation")
         ? metrics.presentationStages : undefined,
-      presentationBands: metrics.presentationBands
-        && metrics.presentationBands.capturedAt_ms >= instrumentation.enabledAt_ms
-        && performanceTraceMatchesLane(metrics.presentationBands, "gpu", "presentation")
-        ? metrics.presentationBands : undefined,
-      // No lane or timestamp guard: the manifest is a statement about the
-      // encode, not a measurement of it, and it is republished every recorded
-      // frame. Instrumentation being off is the only reason it can be absent.
-      presentationStageManifest: metrics.presentationStageManifest,
     };
     diagnostics.pushPerformanceReport(report);
     const activityStore = usePerformanceActivityStore.getState();

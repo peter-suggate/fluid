@@ -1403,6 +1403,59 @@ export class GPUPassTimestampRecorder {
     });
   }
 
+  /**
+   * Turn pass completion timestamps into one exclusive semantic frame ledger.
+   *
+   * A render pass's begin/end pair is not its cost on a tile GPU: tiling can
+   * begin early while fragments retire much later. Its completion timestamp is
+   * still a real point on the GPU timeline. Walking semantic groups in encode
+   * order and charging only the amount by which each group advances the latest
+   * observed completion gives an additive critical-path partition. Concurrent
+   * work already hidden behind an earlier completion is zero instead of being
+   * double-counted under every overlapping stage.
+   */
+  async readSemanticFrontierTrace(input: {
+    sampleId: number;
+    lane: "physics" | "presentation";
+    context: string;
+    capturedAt_ms?: number;
+  }): Promise<PerformanceTrace | undefined> {
+    const groups = this.semanticPhases.map((group) => ({ ...group }));
+    const reading = await this.read();
+    if (!reading) return undefined;
+    let frontier_ms = 0;
+    const phases: PerformancePhaseSample[] = groups.map((group) => {
+      const sampled = reading.passes
+        .slice(group.firstPass, group.endPass)
+        .filter((pass) => pass.sampled);
+      if (sampled.length === 0) return { ...group.phase, duration_ms: 0 };
+      const completed_ms = Math.max(...sampled.map((pass) => pass.end_ms));
+      const duration_ms = Math.max(0, completed_ms - frontier_ms);
+      frontier_ms = Math.max(frontier_ms, completed_ms);
+      return { ...group.phase, duration_ms };
+    });
+    if (!(reading.span_ms > 0) || !Number.isFinite(frontier_ms)) return undefined;
+    // The reading origin is the earliest sampled pass beginning, so the final
+    // completion frontier and the observed frame span are the same interval.
+    // Retain the hardware span to absorb floating-point rounding exactly.
+    const accounted_ms = phases.reduce((sum, phase) => sum + phase.duration_ms, 0);
+    const rounding_ms = reading.span_ms - accounted_ms;
+    if (rounding_ms !== 0) {
+      const phase = phases.find((entry) => entry.duration_ms > 0) ?? phases[0];
+      if (phase && phase.duration_ms + rounding_ms >= 0) phase.duration_ms += rounding_ms;
+    }
+    return {
+      sampleId: input.sampleId,
+      domain: "gpu",
+      lane: input.lane,
+      context: input.context,
+      capturedAt_ms: input.capturedAt_ms ?? performance.now(),
+      measurementSource: "gpu-pass-timestamp",
+      total_ms: reading.span_ms,
+      phases,
+    };
+  }
+
   destroy(): void {
     if (this.disposed) return;
     this.disposed = true;

@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSession } from "../lib/core/session/session-context";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
-import { averagePerformanceTraces, type PerformanceTrace } from "../lib/core/performance-trace";
-import { mergeRenderFrameManifests, type RenderFrameManifest } from "../lib/core/render-frame-stages";
+import {
+  averagePerformanceTraces,
+  type PerformanceTrace,
+} from "../lib/core/performance-trace";
 import {
   measureRenderPipelineBand,
   measureRenderPipelineNode,
-  renderPipelineEncodings,
   renderPipelineStageDurations,
   renderPipelineTipText,
   renderPipelineUnownedPhases,
@@ -53,110 +54,6 @@ import { PipeChoice, PipeRange, PipeToggle } from "./PipeControls";
 /** Frames the live readout averages over. */
 const TRACE_WINDOW = 12;
 
-/**
- * Frame totals observed under each setting of each node, so a switch can report
- * what it was worth.
- *
- * This is the only figure that can price a node whose work is a *term* inside
- * another pass — GI composition is a branch in the deferred shader and has no
- * dispatch to time — and it is the figure the question "what do I gain by
- * turning this off" literally asks for. It is a difference of two medians of
- * averaged totals, so it also catches whatever downstream got cheaper
- * alongside, which the node's own phase sum cannot.
- */
-type AblationSample = { on_ms: number[]; off_ms: number[] };
-
-/** Settled totals retained per side. The median of these prices the setting. */
-const ABLATION_SAMPLE_CAP = 5;
-
-const median = (values: readonly number[]): number => {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = sorted.length >> 1;
-  return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
-};
-
-/**
- * How long a setting must hold before its total is believed.
- *
- * A switch invalidates cached frames, clears the world-GI cache and restarts
- * the trace context, so the first traces after one are measuring the recovery
- * and not the pipeline. Two full windows of settled frames is the cheapest
- * thing that reliably excludes them.
- */
-const ABLATION_SETTLE_MS = 900;
-
-const parseNodeStates = (signature: string): [string, boolean][] => signature.split(",")
-  .filter(Boolean)
-  .map((entry) => {
-    const [id, on] = entry.split("=");
-    return [id ?? "", on === "1"] as [string, boolean];
-  });
-
-/**
- * Milliseconds each node's current setting is saving, where both settings have
- * been seen against the same rest-of-pipeline.
- *
- * Positive means the current setting is the cheaper one. The comparison is only
- * meaningful while nothing else moved, so when the signature changes every
- * node's pair is discarded except the one node that actually flipped — a delta
- * measured across two different pipelines is not that node's cost, and keeping
- * it would be worse than showing nothing.
- */
-function useStageAblation(
-  signature: string,
-  contextKey: string,
-  total_ms: number,
-  measured: boolean,
-): ReadonlyMap<string, number> {
-  const samples = useRef(new Map<string, AblationSample>());
-  const previous = useRef<{ signature: string; contextKey: string; at_ms: number } | undefined>(undefined);
-  const [deltas, setDeltas] = useState<ReadonlyMap<string, number>>(() => new Map());
-
-  useEffect(() => {
-    const now_ms = performance.now();
-    const last = previous.current;
-    if (!last || last.signature !== signature || last.contextKey !== contextKey) {
-      if (last && last.contextKey === contextKey) {
-        const before = new Map(parseNodeStates(last.signature));
-        const moved = parseNodeStates(signature).filter(([id, on]) => before.get(id) !== on);
-        const survivor = moved.length === 1 ? moved[0]?.[0] : undefined;
-        const kept = survivor ? samples.current.get(survivor) : undefined;
-        samples.current = new Map(survivor && kept ? [[survivor, kept]] : []);
-      } else if (last) {
-        // Tuning, run state or the stage view moved: every stored total was
-        // measured under a different pipeline, and a delta differenced across
-        // that would be the change's cost wearing a node's name.
-        samples.current = new Map();
-      }
-      previous.current = { signature, contextKey, at_ms: now_ms };
-      setDeltas(new Map());
-      return;
-    }
-    // Everything before the settle is measuring the recovery: a switch clears
-    // cached frames and the world-GI cache, and restarts the trace context.
-    if (!measured || total_ms <= 0 || now_ms - last.at_ms < ABLATION_SETTLE_MS) return;
-    const next = new Map<string, number>();
-    for (const [id, on] of parseNodeStates(signature)) {
-      const sample = samples.current.get(id) ?? { on_ms: [], off_ms: [] };
-      // Medians of a bounded window, not one total against one total: this
-      // lane's run-to-run drift has reached 30%, and a single-sample pair has
-      // measured nothing but the noise.
-      const side = on ? sample.on_ms : sample.off_ms;
-      side.push(total_ms);
-      if (side.length > ABLATION_SAMPLE_CAP) side.shift();
-      samples.current.set(id, sample);
-      if (sample.on_ms.length === 0 || sample.off_ms.length === 0) continue;
-      next.set(id, on
-        ? median(sample.off_ms) - median(sample.on_ms)
-        : median(sample.on_ms) - median(sample.off_ms));
-    }
-    setDeltas((current) => (current.size === next.size
-      && [...next].every(([id, value]) => current.get(id) === value) ? current : next));
-  }, [signature, contextKey, total_ms, measured]);
-
-  return deltas;
-}
-
 const rendererFailureLabels = {
   "missing-source": "waiting for structural SVO data",
   "unsupported-terrain": "terrain source could not be represented",
@@ -175,129 +72,55 @@ const rendererFailureLabels = {
  */
 const trimmed = (value: number) => value.toFixed(5).replace(/\.?0+$/, "");
 
-/**
- * Fence-measured band phases → the graph band whose collar carries the figure.
- * The costs read where each band connects to the pipeline, never as a separate
- * readout: the collar is the junction, so its figure sits beside the work it
- * prices. Two encode segments (extraction+caustics, interfaces+composite) both
- * belong to the OUTPUT collar and are summed there.
- */
-const BAND_WALL_COLLARS: Partial<Record<string, string>> = {
-  "scene-upload": "source",
-  "surface-extraction": "output",
-  "svo-primary": "primary",
-  "svo-cone-lighting": "lighting",
-  "dry-scene": "shading",
-  "optical-composite": "output",
-};
-
-/**
- * What is left of a band's wall once its rows are accounted for, said plainly.
- *
- * A band wall is a queue fence difference, so it contains the band's GPU work
- * *and* whatever the instrument costs — submit turnaround, and the latency of
- * the completion callback the timestamp is taken in. When every row in the
- * band is priced or is a measured zero, the residual is not hidden work in one
- * of them; it belongs to the measurement, and the panel says so rather than
- * naming a row for it. That naming is what put 27.9 ms on a world build whose
- * stages encoded nothing.
- */
-function bandResidualNote(
-  wall_ms: number,
-  entries: readonly { cost: RenderPipelineMeasurement }[],
-  manifested: boolean,
-): string {
-  const compute_ms = entries.reduce((sum, entry) =>
-    sum + (entry.cost.kind === "measured" ? entry.cost.duration_ms ?? 0 : 0), 0);
-  const silent = entries.filter((entry) => entry.cost.kind === "withheld").length;
-  const residual_ms = Math.max(0, wall_ms - compute_ms);
-  if (!manifested) {
-    return `${formatPipelineDuration(compute_ms)} of it is measured compute; the rest is unattributed until a stage manifest arrives.`;
-  }
-  return `${formatPipelineDuration(compute_ms)} of it is measured compute and ${formatPipelineDuration(residual_ms)} is unattributed`
-    + (silent > 0
-      ? `. ${silent} row${silent === 1 ? "" : "s"} in this band encoded no pass at all this frame, so the residual is not theirs — it is submit turnaround and fence-callback latency, which a queue-wall measurement cannot separate from the work.`
-      : ", spread across this band's render passes and the instrument's own submit turnaround.");
-}
-
 /** Why the figure on the pipe is the kind of number it is, in frame terms. */
 function costExplanation(cost: RenderPipelineMeasurement): string {
-  const measuredSuffix = "GPU execution time, summed over the passes this node owns and averaged across the trace window.";
-  const unpriced = cost.unpricedRenderPasses
-    ? `\n\n${cost.unpricedRenderPasses} render pass${cost.unpricedRenderPasses === 1 ? "" : "es"} in this row cannot be priced: a Metal render pass's timestamp pair brackets a tiler window, not the pass. Only the band's fence-partitioned wall can measure them.`
-    : "";
   switch (cost.kind) {
     case "withheld":
-      return "0 ms — this stage encoded no pass in the recorded frame. The frame's own stage manifest says so, which is why this is a measured zero rather than a missing measurement.";
+      return "0 ms — this stage encoded no work in the sampled frame.";
+    case "idle":
+      return "0 ms — the frame partition arrived, and this stage encoded no GPU work in the sampled frames.";
     case "shared":
-      return `Not a dispatch of its own: this work runs inside ${cost.insideNode?.replace(/-/g, " ").toUpperCase()}, and ⊂ marks the figure as that pass's.`;
-    case "unpriced":
-      return `This stage encoded ${cost.unpricedRenderPasses} render pass${cost.unpricedRenderPasses === 1 ? "" : "es"} and no compute, and a Metal render pass's timestamp pair is a tiler window rather than a cost. The band's fence-partitioned wall is the only honest figure for it; it reads here when this is the band's only such row.`;
+      return `Not a stage of its own: this work runs inside ${cost.insideNode?.replace(/-/g, " ").toUpperCase()}, and ⊂ marks the figure as that stage's.`;
     case "structural":
       return "A gate, not a pass. It spends no frame time either way — its worth shows up as the row it lets the frame skip going to zero.";
-    case "wall":
-      return `${formatPipelineDuration(cost.duration_ms ?? 0)} wall-clock, derived: this is the band's only row whose passes no timestamp can price, so the band's fence-partitioned wall minus its measured compute lands here. Render passes included; a different basis than the compute figures around it.`;
     case "unmeasured":
-      return "No measurement has arrived for this row yet: no trace, or no stage manifest for the frame it would describe.";
+      return "No stage sample has arrived yet.";
     default:
-      return `${formatPipelineDuration(cost.duration_ms ?? 0)} ${measuredSuffix}${unpriced}`;
+      return `${formatPipelineDuration(cost.duration_ms ?? 0)} for this stage on the frame's exclusive GPU completion timeline.${cost.encodedFraction !== undefined
+        ? `\n\nEncoded in ${Math.round(cost.encodedFraction * 100)}% of sampled frames; the figure is the expected cost per frame, not the per-encode mean.`
+        : ""}`;
   }
 }
 
 /**
- * The averaged frame total and the finest honest stage partition available.
- *
- * The header is the GPU queue-wall frame total. Trunk values are kept separate:
- * they contain only trustworthy hardware pass timestamps and are never filled
- * with CPU command-encoding time or another proxy.
+ * The frame's exclusive GPU completion partition, grouped at the same
+ * colocated plug-in seams that own the renderer stages.
  */
 function usePresentationTiming(): {
-  readonly frame?: PerformanceTrace;
+  readonly total?: PerformanceTrace;
   readonly stages?: PerformanceTrace;
-  readonly stageSource?: "gpu";
-  /** Fence-partitioned band walls: real queue-wall cost per encode band, from 1-in-16 sampling frames. */
-  readonly bands?: PerformanceTrace;
-  /** Which stages the recorded frames encoded, and with how many passes of each kind. */
-  readonly manifest?: RenderFrameManifest;
 } {
   const session = useSession();
   const reports = session.diagnostics((state) => state.performanceReports);
   return useMemo(() => {
-    const newest = reports.findLast((report) => report.presentation || report.presentationStages);
+    const newest = reports.findLast((report) => report.presentation);
     if (!newest) return {};
     const recent = reports
       .filter((report) => report.context === newest.context)
       .slice(-TRACE_WINDOW);
-    const gpu = recent
+    const presentation = recent
       .map((report) => report.presentation)
       .filter((trace): trace is PerformanceTrace => trace !== undefined);
-    const hardware = recent
-      .map((report) => report.presentationStages)
-      .filter((trace): trace is PerformanceTrace => trace !== undefined);
-    // Band samples are sparse (one frame in sixteen), so the same report can
-    // repeat one for many frames; the dedup inside the averager keeps each
-    // observation counted once.
-    const bands = recent
-      .map((report) => report.presentationBands)
-      .filter((trace): trace is PerformanceTrace => trace !== undefined);
-    const latestGpu = gpu.at(-1);
-    const frameSamples = latestGpu
-      ? gpu.filter((trace) => trace.measurementSource === latestGpu.measurementSource)
+    const latest = presentation.at(-1);
+    const matching = latest
+      ? presentation.filter((trace) => trace.measurementSource === latest.measurementSource)
       : [];
-    const hardwareMean = averagePerformanceTraces(hardware);
-    return {
-      frame: averagePerformanceTraces(frameSamples),
-      stages: hardwareMean,
-      stageSource: hardwareMean ? "gpu" : undefined,
-      bands: averagePerformanceTraces(bands),
-      // Merged across the window rather than taken from the newest frame: an
-      // intermittent stage — caustics on mesh-move frames, world maintenance
-      // on edit frames — encodes on some frames and not others, and a row that
-      // ever encodes must not be treated as a silent one.
-      manifest: mergeRenderFrameManifests(recent
-        .map((report) => report.presentationStageManifest)
-        .filter((entry): entry is RenderFrameManifest => entry !== undefined)),
-    };
+    const mean = averagePerformanceTraces(matching);
+    const stageSamples = recent
+      .map((report) => report.presentationStages)
+      .filter((trace): trace is PerformanceTrace => trace !== undefined
+        && trace.measurementSource === "gpu-pass-timestamp");
+    return { total: mean, stages: averagePerformanceTraces(stageSamples) };
   }, [reports]);
 }
 
@@ -381,14 +204,10 @@ export function RenderPipelineOverlay() {
   }, [liveTiming]);
 
   const timing = usePresentationTiming();
-  const trace = timing.frame;
+  const trace = liveTiming ? timing.total : undefined;
   const stageTrace = timing.stages;
   const durations = useMemo(
     () => renderPipelineStageDurations(liveTiming ? stageTrace : undefined), [stageTrace, liveTiming]);
-  // What the frame encoded, which is a different question from what it cost and
-  // the one that decides whether a silent row is a zero or an unpriced pass.
-  const encodings = useMemo(
-    () => renderPipelineEncodings(liveTiming ? timing.manifest : undefined), [timing.manifest, liveTiming]);
   // A trace label that names no stage of the ABI is a measurement bug — a seam
   // publishing a label the registry does not own — and it is louder as a
   // console warning than as a row that quietly reads zero.
@@ -398,23 +217,6 @@ export function RenderPipelineOverlay() {
   }, [unowned]);
   const measured = liveTiming && trace !== undefined;
   const total_ms = trace?.total_ms ?? 0;
-  const stageTotal_ms = stageTrace?.total_ms ?? 0;
-  // The honest denominator for a share of the frame: earliest pass begin to
-  // latest pass end. The pass *sum* double-counts overlapped passes (measured
-  // at up to 1.9x on this path), so it is shown as itself and divides nothing.
-  const stageSpan_ms = stageTrace?.span_ms ?? 0;
-  // Fence-partitioned band walls, folded onto the graph's band collars. These
-  // are the only wall-clock figures for the render passes Metal timestamps
-  // cannot price, and they read at the junction they measure.
-  const bandWalls = useMemo(() => {
-    if (!timing.bands) return undefined;
-    const walls = new Map<string, number>();
-    for (const phase of timing.bands.phases) {
-      const collar = BAND_WALL_COLLARS[phase.id];
-      if (collar !== undefined) walls.set(collar, (walls.get(collar) ?? 0) + phase.duration_ms);
-    }
-    return walls;
-  }, [timing.bands]);
 
   const updateTuning = <K extends keyof SvoRenderTuning>(key: K, value: SvoRenderTuning[K]) =>
     setTuning((current) => ({ ...current, [key]: value }));
@@ -437,34 +239,17 @@ export function RenderPipelineOverlay() {
   };
   const lightingVisibilityStatus = effectiveRendererStatus.lightingVisibility ?? { state: svoConeTracingMode };
 
-  // What the live readout can actually answer, and why. A per-pass split needs
-  // hardware timestamp queries *and* the SVO path — the fallback partition names
-  // stages by position, so a queue-walled frame has a total and nothing under
-  // it. Saying which of those is missing costs one line; leaving a column of
-  // dashes unexplained costs a bug report.
-  const perPassSplit = liveTiming && stageTrace !== undefined;
-  const hardwarePerPassSplit = perPassSplit && timing.stageSource === "gpu";
-  // Three different numbers, each labelled as itself: the queue wall includes
-  // any solver advance still in flight, the span is how long the GPU was busy
-  // with the presentation's passes, and the compute sum is what the trunk's
-  // per-node figures add up to. Showing one of them unlabelled invited reading
-  // the pass sum as the frame, which it is not.
+  const partitioned = liveTiming && stageTrace !== undefined;
   const timingLabel = !liveTiming ? "timing off"
     : !measured ? "awaiting trace"
-    : hardwarePerPassSplit && stageSpan_ms > 0
-      // Non-breaking spaces inside each figure and before each separator: the
-      // three of them do not fit one line over a scene, so this wraps — and a
-      // figure parted from its label, or a dot orphaned onto the next line, is
-      // the one way three labelled numbers become unreadable.
-      ? `${total_ms.toFixed(2)} wall · ${stageSpan_ms.toFixed(2)} busy · ${stageTotal_ms.toFixed(2)} Σcompute ms`
-      : `${total_ms.toFixed(2)} ms / frame · total only`;
+    : `${total_ms.toFixed(2)} ms/frame`;
   const timingHint = !liveTiming
-    ? "Live per-pass timing is off. Turn it on to price each node from the frame's own GPU timestamp partition."
+    ? "Live frame timing is off. Turn it on to sample the presentation boundary chain."
     : !measured
-      ? "No presentation trace has arrived yet. The next frame is captured as soon as the current timestamp readback completes."
-      : hardwarePerPassSplit
-        ? `Hardware GPU timestamps, ${TRACE_WINDOW}-frame mean.\n\nWALL is submit to queue-drain and includes any solver advance still in flight. BUSY is the presentation's own GPU span — earliest pass begin to latest pass end — and is the denominator for every share. ΣCOMPUTE is the sum of trustworthy compute passes, which the trunk figures add up to; Metal render-pass tiler windows are excluded from it.`
-        : "This device or scene produced only a queue-wall observation and no trustworthy stage partition yet.";
+      ? "No presentation trace has arrived yet."
+      : partitioned
+        ? `One exclusive timing per stage, cut at the same plug-in seam that owns it in code. Overlapped work is charged once, to the stage that advances GPU completion. ${TRACE_WINDOW}-sample mean.`
+        : "The frame total is ready; this device has not supplied a detailed stage sample.";
 
   const disabledStages = useMemo(
     () => disabledRenderStagesFrom(disabledRenderStages), [disabledRenderStages]);
@@ -506,19 +291,6 @@ export function RenderPipelineOverlay() {
     else if (id === "cone-visibility") setSvoConeTracingMode(svoConeTracingMode === "off" ? "cones" : "off");
     else if (id === "gi-composition") setSvoGlobalIlluminationEnabled(!svoGlobalIlluminationEnabled);
   };
-
-  // One string for the whole pipeline's on/off shape. It is both the dependency
-  // the ablation memory keys on and the thing that tells it which single node
-  // moved, so it has to be derived from the same `state` the diagram draws.
-  const pipelineSignature = RENDER_PIPELINE_NODES
-    .map((node) => `${node.id}=${node.state(context) === "off" ? "0" : "1"}`).join(",");
-  // Everything that changes the frame without moving a lamp. A stored total
-  // from a different tuning, run state or stage view priced a different
-  // pipeline; the signature alone could not see that, so an off-sample taken
-  // under one tuning was differenced against an on-sample taken under another.
-  const runState = session.runtime((state) => state.runState);
-  const ablationContextKey = `${tuningKey}|${svoConeTracingMode}|${runState}|view=${svoStageView !== "off" ? "1" : "0"}`;
-  const deltas = useStageAblation(pipelineSignature, ablationContextKey, total_ms, measured);
 
   // Named drawers, shut by default.
   //
@@ -707,42 +479,21 @@ export function RenderPipelineOverlay() {
     </div>,
   };
 
-  const graphTotal_ms = stageSpan_ms > 0 ? stageSpan_ms : stageTotal_ms;
-  const walls = liveTiming ? bandWalls : undefined;
+  // Stage-span traces keep an additive phase sum in total_ms for trace
+  // accounting, but the graph's denominator is the actual GPU frame span.
+  const graphTotal_ms = stageTrace?.total_ms ?? 0;
 
   const bands: readonly PipelineBand[] = RENDER_PIPELINE_BANDS.map((band): PipelineBand => {
-    const bandCost = measureRenderPipelineBand(band.id, durations, graphTotal_ms, encodings);
-    const bandWall_ms = walls?.get(band.id);
+    const bandCost = measureRenderPipelineBand(band.id, durations, graphTotal_ms);
     const nodes = RENDER_PIPELINE_NODES.filter((node) => node.band === band.id);
     const entries = nodes.map((node) => {
       const state = node.state(context);
-      const cost: RenderPipelineMeasurement = perPassSplit || encodings
-        ? measureRenderPipelineNode(node, durations, graphTotal_ms, state, encodings)
+      const cost: RenderPipelineMeasurement = partitioned
+        ? measureRenderPipelineNode(node, durations, graphTotal_ms, state)
         : { kind: "unmeasured", share: 0 };
       return { node, state, cost };
     });
-    // The wall reads at a row's junction, not on the collar, whenever it can be
-    // attributed — but only a row whose passes exist and cannot be timed is a
-    // candidate. A row that encoded nothing is not "unmeasured", it is zero,
-    // and handing it the band's residual is how a settled world came to report
-    // 27.9 ms of maintenance. When more than one row is unpriceable, or none
-    // is, the split is unknowable and the figure stays on the collar where it
-    // reads as the band's own.
-    const unpricedRows = entries.filter((entry) =>
-      entry.state !== "unavailable"
-      && (entry.cost.kind === "unpriced" || (entry.cost.kind === "unmeasured" && !encodings)));
-    const wallRow = bandWall_ms !== undefined && unpricedRows.length === 1 ? unpricedRows[0] : undefined;
-    if (wallRow && bandWall_ms !== undefined) {
-      const compute_ms = entries.reduce((sum, entry) =>
-        sum + (entry.cost.kind === "measured" ? entry.cost.duration_ms ?? 0 : 0), 0);
-      wallRow.cost = {
-        kind: "wall",
-        duration_ms: Math.max(0, bandWall_ms - compute_ms),
-        share: 0,
-        unpricedRenderPasses: wallRow.cost.unpricedRenderPasses,
-      };
-    }
-    const priced = perPassSplit && bandCost.duration_ms !== undefined;
+    const priced = partitioned && bandCost.duration_ms !== undefined;
     const rows: PipelineRow[] = [];
     for (const { node, state, cost } of entries) {
       // A run of rows on an unreachable arm reads as one collapsed row:
@@ -770,7 +521,6 @@ export function RenderPipelineOverlay() {
       const unavailable = state === "unavailable";
       const activeTap = node.taps.find((view) => view === svoStageView);
       const primaryTap = node.taps[0];
-      const delta_ms = perPassSplit ? deltas.get(node.id) : undefined;
       rows.push({
         id: node.id,
         label: node.label,
@@ -780,6 +530,7 @@ export function RenderPipelineOverlay() {
         cost: {
           kind: cost.kind,
           duration_ms: cost.duration_ms,
+          encodedFraction: cost.encodedFraction,
           explanation: `${node.label}\n\n${costExplanation(cost)}`,
         },
         lamp: {
@@ -789,15 +540,6 @@ export function RenderPipelineOverlay() {
           ariaLabel: node.label,
           title: tip,
           onToggle: () => toggleNode(node.id),
-        },
-        delta: delta_ms === undefined ? undefined : {
-          ms: delta_ms,
-          // The whole point of a switch: what the frame did when this last
-          // moved. Measured across the toggle rather than derived from the
-          // node's own phases, so it is the only figure that can price a node
-          // whose work is a term inside somebody else's pass.
-          title: `Switching this ${state === "off" ? "off" : "on"} moved the frame total by ${Math.abs(delta_ms).toFixed(2)} ms.\n\n`
-            + "Measured: the averaged frame total under each setting, differenced. It includes anything downstream that got cheaper or dearer with it, which is why it can differ from the row's own cost.",
         },
         tap: primaryTap && !unavailable ? {
           label: "◨",
@@ -822,12 +564,6 @@ export function RenderPipelineOverlay() {
       label: band.label,
       cost_ms: priced ? bandCost.duration_ms : undefined,
       share: priced && graphTotal_ms > 0 ? bandCost.share : undefined,
-      wall: bandWall_ms !== undefined && !wallRow ? {
-        ms: bandWall_ms,
-        title: `${formatPipelineDuration(bandWall_ms)} wall-clock for this band's whole encode segment, render passes included.\n\n`
-          + `Measured by splitting one frame in sixteen at band boundaries into separate submits and timing each queue fence. Sampling frames are excluded from the frame mean.\n\n`
-          + bandResidualNote(bandWall_ms, entries, encodings !== undefined),
-      } : undefined,
       rows,
     };
   });
@@ -844,9 +580,7 @@ export function RenderPipelineOverlay() {
         : effectiveRendererStatus.state === "not-required" ? "SVO not required"
         : effectiveRendererStatus.state === "pending" ? "SVO pending" : "SVO failed closed"}</strong>
       <PipeToggle label="Live" checked={liveTiming} onChange={setLiveTiming}
-        hint={`Continuously records GPU pass timestamps with one readback in flight, then reads each trustworthy node cost from them. Measurement is real work, so it stops when this is off and when the overlay closes.\n\n${measured
-          ? `Frame source: ${trace?.measurementSource === "gpu-hardware-timestamp" ? "hardware timestamps" : "GPU queue wall"}. Stage source: ${hardwarePerPassSplit ? "hardware timestamps" : "unavailable"}. ${TRACE_WINDOW}-frame mean.`
-          : "No trace yet."}`} />
+        hint={`Samples the renderer while this panel is open. Measurement stops when this is off or the panel closes.\n\n${timingHint}`} />
       <code data-testid="render-frame-cost" title={timingHint}>{timingLabel}</code>
       {effectiveRendererStatus.terminalCounts && <code data-testid="svo-terminal-counts"
         title="Accepted unified SVO leaf terminals. Planar terminals keep exact thin slab geometry without voxel payload traversal.">

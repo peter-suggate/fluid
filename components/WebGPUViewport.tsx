@@ -225,6 +225,8 @@ const GPU_VIEWPORT_RUNTIME_ABI = "scene-v3-solid-world-render-stages-v1";
 const PIXEL_TRACE_REVEAL_MS = 1100;
 /** The HUD's readout cadence; the 3D overlay itself stays per-frame. */
 const PIXEL_TRACE_HUD_INTERVAL_MS = 110;
+/** Do not replay a long ray while the pointer is still sweeping across pixels. */
+const PIXEL_TRACE_POINTER_SETTLE_MS = 100;
 
 /**
  * Which open gestures the renderer is allowed to draw.
@@ -397,7 +399,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   }>({ trace: undefined, status: "path-inactive", pointerSeen: false, stale: false });
   const pixelTrace = pixelTraceState.trace;
   /** Latest pointer position in viewport fractions; read by the render loop. */
-  const tracePointerRef = useRef<{ normalizedX: number; normalizedY: number } | null>(null);
+  const tracePointerRef = useRef<{
+    normalizedX: number;
+    normalizedY: number;
+    movedAt_ms?: number;
+  } | null>(null);
   /** Pointer the cell trace is frozen on, and a pending pin awaiting its aim. */
   const cellTracePinnedRef = useRef<{ normalizedX: number; normalizedY: number } | null>(null);
   const cellTracePinRequestRef = useRef<{ normalizedX: number; normalizedY: number } | null>(null);
@@ -489,8 +495,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   const tracePinRequestRef = useRef<SvoPixelTracePinRequest | null>(null);
   /**
    * Where the pinned ray was aimed, and from which view. The position is what the
-   * probe must re-trace when the scene changes under a pinned ray; the camera key
-   * is what says whether re-tracing it would still be the same ray.
+   * frozen answer names; the camera key records the view that ray belonged to.
    */
   const tracePinnedRef = useRef<{ normalizedX: number; normalizedY: number; cameraKey: string } | null>(null);
   /** Press origin of a gesture that could still turn out to be a pinning click. */
@@ -623,25 +628,25 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (ui.pixelTracePinned !== traceRevealRef.current.pinned) {
       traceRevealRef.current = { pinned: ui.pixelTracePinned, startedAt_ms: now_ms };
     }
-    const { refresh } = resolveSvoPixelTracePinnedFrame({
-      pinned: ui.pixelTracePinned,
-      sceneChanged: renderer.pixelTraceStale,
-      aimCameraKey: pinnedAt?.cameraKey,
-      cameraKey: pixelTraceCameraKey(ui.camera),
-    });
     return {
       normalizedX: pointer.normalizedX,
       normalizedY: pointer.normalizedY,
       layers: ui.pixelTraceLayers,
       // Live hover changes the ray every frame, so an animated sweep would only
       // strobe. Pinning is the moment worth animating: the frozen ray then draws
-      // its own work in the order the shader did it. A refresh deliberately does
-      // not replay it — the ray did not change, only the work it found.
+      // its own work in the order the shader did it.
       reveal: ui.pixelTracePinned
         ? Math.min(1, (now_ms - traceRevealRef.current.startedAt_ms) / PIXEL_TRACE_REVEAL_MS)
         : 1,
       pinned: ui.pixelTracePinned,
-      refresh,
+      // A click-to-pin is an explicit query. It bypasses the lower-frequency
+      // hover cadence so the frozen answer still feels immediate.
+      urgent: tracePinRequestRef.current !== null,
+      settled: pinnedAt !== null
+        || tracePinRequestRef.current !== null
+        || now_ms - ("movedAt_ms" in pointer
+          ? pointer.movedAt_ms ?? Number.NEGATIVE_INFINITY
+          : Number.NEGATIVE_INFINITY) >= PIXEL_TRACE_POINTER_SETTLE_MS,
     };
   };
 
@@ -709,8 +714,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       if (resolution !== "wait") {
         tracePinRequestRef.current = null;
         if (resolution === "pin") {
-          // Keep the aim: a pinned ray has to be able to re-trace its own pixel
-          // when the scene changes, and to know which view that pixel meant.
+          // Keep the aim so the frozen ray retains its recorded view.
           tracePinnedRef.current = {
             normalizedX: pinRequest.normalizedX,
             normalizedY: pinRequest.normalizedY,
@@ -732,8 +736,6 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const { stale } = resolveSvoPixelTracePinnedFrame({
       pinned: pinnedNow,
       sceneChanged: renderer.pixelTraceStale,
-      aimCameraKey: tracePinnedRef.current?.cameraKey,
-      cameraKey: pixelTraceCameraKey(session.ui.getState().camera),
     });
     const published = tracePublishRef.current;
     // Why nothing is showing matters as much as what is showing, and a frozen
@@ -2496,6 +2498,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     tracePointerRef.current = {
       normalizedX: (event.clientX - rect.left) / Math.max(rect.width, 1),
       normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
+      movedAt_ms: event.timeStamp,
     };
     if (!active) {
       // Nothing under the cursor is named in LOOK, so nothing is asked. The

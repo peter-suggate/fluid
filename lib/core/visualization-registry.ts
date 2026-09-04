@@ -258,6 +258,46 @@ export interface AssembledDecorations {
   readonly key: string;
 }
 
+/**
+ * Resolve the stable identity of a decoration assembly without building any
+ * geometry.
+ *
+ * The renderer asks this first because a pinned inspection subject can remain
+ * unchanged for thousands of presentation frames.  Previously it had to run
+ * every plug-in's builder, allocate the complete segment array, and only then
+ * discovered from the returned key that the GPU already held those segments.
+ * Keeping the key phase separate makes the plug-in contract the cache boundary
+ * instead of requiring the renderer to know how any visualization is built.
+ */
+export function decorationAssemblyKey(
+  options: AssembleDecorationsOptions,
+): string {
+  const context: DecorationContext = {
+    space: options.space,
+    emphasis: options.emphasis ?? "selected",
+    widthScale: Number.isFinite(options.widthScale)
+      ? Math.max(0.1, Math.min(4, options.widthScale!)) : 1,
+  };
+  if (!decorationSpaceValid(options.space)) return "invalid-space";
+  const keyParts: string[] = [context.emphasis, String(context.widthScale),
+    options.space.dimensions.join(","), options.space.extent_m.join(","),
+    options.space.origin_m.join(",")];
+  for (const definition of options.definitions) {
+    if (!isDecorationVisualization(definition)) continue;
+    if (options.enabled ? !options.enabled(definition) : definition.defaultEnabled === false) continue;
+    for (const subject of options.subjects) {
+      if (!definition.accepts(subject)) continue;
+      try {
+        keyParts.push(`${definition.id}:${definition.key(subject as never, context)}`);
+      } catch {
+        // A plug-in whose identity cannot be resolved cannot contribute stable
+        // geometry either; assembleDecorations applies the same failure rule.
+      }
+    }
+  }
+  return keyParts.join("|");
+}
+
 const EMPTY_GEOMETRY: DecorationGeometry = Object.freeze({
   segments: new Float32Array(0), segmentCount: 0,
 });

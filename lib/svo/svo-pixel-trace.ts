@@ -700,13 +700,13 @@ function linearFromHex(hex: string): readonly [number, number, number] {
 
 const LAYER_SOURCE: readonly { layer: SvoPixelTraceLayer; label: string; description: string; swatch: `#${string}`; width_px: number }[] = [
   { layer: "primary-ray", label: "Primary ray", description: "The camera ray, solid to the surface that won this pixel and faint beyond it.", swatch: "#f2ab4e", width_px: 2.4 },
-  { layer: "hierarchy", label: "Nodes opened", description: "Octree boxes the ray entered and expanded, brightest at the deepest level.", swatch: "#7fd4ff", width_px: 1.3 },
-  { layer: "rejected", label: "Boxes rejected", description: "Children tested by the same slab arithmetic and thrown away.", swatch: "#e2687f", width_px: 1.0 },
+  { layer: "hierarchy", label: "Nodes opened", description: "Octree boxes the ray entered and expanded, brightest at the deepest level. Dense traces draw an even sample; the count remains exact.", swatch: "#7fd4ff", width_px: 1.3 },
+  { layer: "rejected", label: "Boxes rejected", description: "Children tested by the same slab arithmetic and thrown away. Dense traces draw an even sample; the count remains exact.", swatch: "#e2687f", width_px: 1.0 },
   { layer: "bricks", label: "Leaf bricks", description: "Terminal leaves reached; each holds one brick of cells.", swatch: "#ffe066", width_px: 2.0 },
   { layer: "proxies", label: "Proxies drawn", description: "Every brick proxy whose box covers this pixel — one fragment each, shaded whatever the depth test later decided. Coloured by draw order, cool first to warm last.", swatch: "#7fd4ff", width_px: 1.3 },
   { layer: "proxy-losers", label: "Proxies beaten", description: "Covering proxies that lost: dashed where the brick held no surface and the fragment discarded, dimmed where it found one behind the winner.", swatch: "#e2687f", width_px: 1.0 },
   { layer: "winner", label: "Winning brick", description: "The proxy whose fragment won the depth test, with its full leaf box as a hairline — the gap between them is the published occupancy tightening the draw.", swatch: "#ffe066", width_px: 2.0 },
-  { layer: "cells", label: "Brick cells", description: "Fine cells the in-brick DDA stepped through.", swatch: "#9fb4c0", width_px: 1.0 },
+  { layer: "cells", label: "Brick cells", description: "Fine cells the in-brick DDA stepped through. Dense traces draw an even sample; the count remains exact.", swatch: "#9fb4c0", width_px: 1.0 },
   { layer: "exact", label: "Exact tests", description: "Analytic surface intersections issued from tagged cells.", swatch: "#45c6bc", width_px: 1.8 },
   { layer: "terrain", label: "Terrain march", description: "Heightfield bracket and refinement probes from the background pass every pixel pays.", swatch: "#8fbf6a", width_px: 1.4 },
   { layer: "rigid", label: "Rigid impostors", description: "Analytic body proxies covering this pixel and the intersections they issued.", swatch: "#d98b5f", width_px: 1.6 },
@@ -898,6 +898,63 @@ export interface SvoPixelTraceGeometryOptions {
   readonly coneRingFacets?: number;
   /** Uniform width multiplier, so the HUD can thin the overlay on dense rays. */
   readonly widthScale?: number;
+  /** Per dense box layer; absent preserves every recorded box. */
+  readonly maximumDenseBoxesPerLayer?: number;
+}
+
+/**
+ * The forensic overlay is explanatory, not the source of its counters. Drawing
+ * hundreds of overlapping boxes can cost more than the one-pixel probe itself,
+ * so the live visualization samples each dense layer while the HUD continues
+ * to report every record written by the shader.
+ */
+export const SVO_PIXEL_TRACE_VISUALIZATION_MAXIMUM_DENSE_BOXES = 32;
+
+const DENSE_BOX_LAYERS: ReadonlySet<SvoPixelTraceLayer> = new Set([
+  "hierarchy", "rejected", "cells",
+]);
+
+function sampledDenseBoxOrders(
+  trace: SvoPixelTrace,
+  enabled: ReadonlySet<SvoPixelTraceLayer>,
+  maximumPerLayer: number | undefined,
+): ReadonlyMap<SvoPixelTraceLayer, ReadonlySet<number>> {
+  if (maximumPerLayer === undefined) return new Map();
+  const maximum = Math.max(2, Math.floor(maximumPerLayer));
+  const byLayer = new Map<SvoPixelTraceLayer, SvoPixelTraceRecord[]>();
+  for (const record of trace.records) {
+    const layer = svoPixelTraceLayerForRecord(record);
+    if (!enabled.has(layer) || !DENSE_BOX_LAYERS.has(layer)) continue;
+    const records = byLayer.get(layer);
+    if (records) records.push(record); else byLayer.set(layer, [record]);
+  }
+  const sampled = new Map<SvoPixelTraceLayer, ReadonlySet<number>>();
+  for (const [layer, records] of byLayer) {
+    if (records.length <= maximum) continue;
+    const orders = new Set<number>();
+    // Preserve endpoints and any record whose flags identify a positive result.
+    orders.add(records[0].order);
+    orders.add(records[records.length - 1].order);
+    const important = records.filter((record) =>
+      (record.flags & (SVO_PIXEL_TRACE_FLAGS.hit | SVO_PIXEL_TRACE_FLAGS.tagged)) !== 0);
+    const importantSlots = Math.max(0, maximum - orders.size);
+    for (let slot = 0; slot < importantSlots && important.length > 0; slot += 1) {
+      orders.add(important[Math.round((slot / Math.max(1, importantSlots - 1)) * (important.length - 1))].order);
+    }
+    // Even coverage keeps the nested hierarchy and the DDA path legible without
+    // biasing the picture toward whichever records happened to be written first.
+    for (let slot = 0; slot < maximum && orders.size < maximum; slot += 1) {
+      orders.add(records[Math.round((slot / Math.max(1, maximum - 1)) * (records.length - 1))].order);
+    }
+    if (orders.size < maximum) {
+      for (const record of records) {
+        orders.add(record.order);
+        if (orders.size >= maximum) break;
+      }
+    }
+    sampled.set(layer, orders);
+  }
+  return sampled;
 }
 
 export interface SvoPixelTraceGeometry {
@@ -1009,6 +1066,9 @@ export function buildSvoPixelTraceGeometry(
   const values: number[] = [];
   const countsByLayer = Object.fromEntries(SVO_PIXEL_TRACE_LAYERS.map((layer) => [layer, 0])) as Record<SvoPixelTraceLayer, number>;
   const orderCount = Math.max(1, trace.records.length);
+  const visibleDenseBoxOrders = sampledDenseBoxOrders(
+    trace, enabled, options.maximumDenseBoxesPerLayer,
+  );
 
   const push = (start: SvoTraceVec3, end: SvoTraceVec3, style: SegmentStyle) => {
     const definition = SVO_PIXEL_TRACE_LAYER_DEFINITIONS[style.layer];
@@ -1244,6 +1304,8 @@ export function buildSvoPixelTraceGeometry(
   for (const record of trace.records) {
     const layer = svoPixelTraceLayerForRecord(record);
     if (!enabled.has(layer)) continue;
+    const visibleOrders = visibleDenseBoxOrders.get(layer);
+    if (visibleOrders && !visibleOrders.has(record.order)) continue;
     switch (record.kind) {
       case SVO_PIXEL_TRACE_KINDS.hierarchyNode:
         // Deeper boxes are the interesting ones; fade the shallow ancestors.
@@ -1530,8 +1592,11 @@ export function svoPixelTraceNarrative(trace: SvoPixelTrace): readonly SvoPixelT
         value: `${counters.leafVisits} bricks`,
       },
       {
-        id: "cells", label: "Walk the brick", layer: "cells",
-        detail: `${cells} cells stepped; a tagged cell is a maybe, never a yes`,
+        id: "cells", label: "Walk leaf bricks", layer: "cells",
+        detail: `${cells} recorded cells across ${counters.leafVisits} reached brick${counters.leafVisits === 1 ? "" : "s"}`
+          + (counters.leafVisits > 0
+            ? ` (${(counters.voxelWork / counters.leafVisits).toFixed(1)} steps per brick on average); a tagged cell is a maybe, never a yes`
+            : "; a tagged cell is a maybe, never a yes"),
         value: `${counters.voxelWork} cells`,
       },
       {
@@ -1742,24 +1807,15 @@ export function resolveSvoPixelTracePin(
  * another light, a republished topology, a new traversal budget, or simply the
  * simulation advancing a step.
  *
- * A pinned ray has stopped probing, so its counters go on describing a frame that
- * no longer exists until something intervenes. Which intervention is honest turns
- * entirely on the camera: the pinned pixel names the pinned ray only from the view
- * the pin was aimed from. From that view, re-tracing the pixel answers the same
- * ray against the new scene, which is the whole point of pinning one and then
- * changing something. From any other view it would answer a different ray, so the
- * only honest move left is to say the numbers are old.
+ * A pin freezes one recorded ray. Scene motion marks that answer stale, but it
+ * never turns the pin into an implicit stream of new probes; the user can unpin
+ * and sample again when a new frame is wanted.
  */
 export function resolveSvoPixelTracePinnedFrame(state: {
   readonly pinned: boolean;
   readonly sceneChanged: boolean;
-  /** Camera the pin was aimed from; absent when no aim was ever recorded. */
-  readonly aimCameraKey: string | undefined;
-  readonly cameraKey: string;
-}): { readonly refresh: boolean; readonly stale: boolean } {
-  if (!state.pinned || !state.sceneChanged) return { refresh: false, stale: false };
-  const sameView = state.aimCameraKey !== undefined && state.aimCameraKey === state.cameraKey;
-  return { refresh: sameView, stale: !sameView };
+}): { readonly stale: boolean } {
+  return { stale: state.pinned && state.sceneChanged };
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1826,6 +1882,7 @@ export const svoPixelTraceVisualizations: readonly Visualization[] = Object.free
       build(trace, context, into) {
         const geometry = buildSvoPixelTraceGeometry(trace, {
           layers: [layer], widthScale: context.widthScale,
+          maximumDenseBoxesPerLayer: SVO_PIXEL_TRACE_VISUALIZATION_MAXIMUM_DENSE_BOXES,
         });
         // World metres already, so the builder's lattice transform is bypassed.
         into.append(geometry.segments, geometry.segmentCount);

@@ -12,11 +12,11 @@ import type { ReactNode } from "react";
  * drifted apart between them.
  *
  * So the drawing lives here and the *domains* stay where they belong. This
- * module knows nothing about solvers, passes, ablation or method parameters: a
+ * module knows nothing about solvers, passes or method parameters: a
  * caller resolves its own graph, its own measurements and its own prose into the
  * view model below, and this draws it. That is what keeps the merge honest — the
  * differences between the two pipelines are real (a solver stage is not optional
- * and takes no click; a render pass has an ablation delta and publishes planes),
+ * and takes no click; a render stage publishes planes),
  * and they survive as *fields a caller may or may not set* rather than as a
  * second copy of the diagram.
  *
@@ -51,21 +51,13 @@ export type PipelineRowState = "on" | "off" | "armed" | "unavailable";
 /**
  * Why the figure on the pipe is the kind of number it is.
  *
- * Shared because the diagram draws each kind differently — `wall` carries a
- * basis tag, `shared` carries the ⊂ mark, the rest are dimmed — while the
+ * Shared because the diagram draws each kind differently — `shared` carries
+ * the ⊂ mark and missing measurements are dimmed — while the
  * *sentence* explaining it is the caller's, since only the caller knows whether
  * "not encoded" means a closed method gate or a withheld render pass.
  */
 export type PipelineCostKind =
-  | "measured" | "withheld" | "shared" | "idle" | "structural" | "unmeasured" | "wall"
-  /**
-   * The row's passes exist and no timestamp can price them — a render pass on
-   * a tile-based GPU, whose counter pair brackets a tiler window rather than
-   * the pass. Distinct from `unmeasured`, which is an absence of evidence, and
-   * from `withheld`, which is a measured zero: only an `unpriced` row is
-   * entitled to a band's fence-partitioned wall residual.
-   */
-  | "unpriced";
+  | "measured" | "withheld" | "shared" | "idle" | "structural" | "unmeasured";
 
 export interface PipelineCost {
   readonly kind: PipelineCostKind;
@@ -116,11 +108,6 @@ export interface PipelineRow {
   readonly chip?: string;
   readonly cost?: PipelineCost;
   readonly lamp: PipelineLamp;
-  /**
-   * Milliseconds the total moved when this row's switch last flipped — the only
-   * figure that can price work which is a *term* inside somebody else's pass.
-   */
-  readonly delta?: { readonly ms: number; readonly title: string };
   /** The ◨ affordance beside the name: present this row's primary plane. */
   readonly tap?: PipelineTap;
   /** Its other planes, as a strip under the head. */
@@ -144,11 +131,6 @@ export interface PipelineBand {
   readonly cost_ms?: number;
   /** Share of the whole, when there is an honest denominator for one. */
   readonly share?: number;
-  /**
-   * A wall-clock figure for the band, on a different basis than the row sum.
-   * Labelled apart because the two never share a denominator.
-   */
-  readonly wall?: { readonly ms: number; readonly title: string };
   readonly rows: readonly PipelineRow[];
 }
 
@@ -222,11 +204,6 @@ function Trunk({ tapped, state, cap, cost }: {
         className={`rp-trunk-cost is-${cost.kind}`}
         x={COST_X} y={ANCHOR_Y} textAnchor="end" dominantBaseline="central">
         {cost.explanation && <title>{cost.explanation}</title>}
-        {/* A wall figure is on a different basis than the compute column around
-            it, and says so in warm ink rather than in a `wall` tag: the tag was
-            wider than the figure it qualified, and a column only reads as a
-            column while every entry ends on the same edge. The hover sentence
-            is where the basis is actually stated. */}
         {trunkCostText(cost)}
       </text>}
     </svg>
@@ -255,7 +232,7 @@ function RowControls({ row }: { row: PipelineRow }) {
 /**
  * One card.
  *
- * Nothing folds. The head is one line — lamp, name, delta, tap — and every
+ * Nothing folds. The head is one line — lamp, name, tap — and every
  * control the row owns sits under it at all times. The cost is deliberately not
  * here: it reads on the trunk at this row's junction.
  */
@@ -275,9 +252,6 @@ function RowCard({ row }: { row: PipelineRow }) {
         onClick={toggleable ? lamp.onToggle : undefined}
       />
       <strong title={row.tip}>{row.label}</strong>
-      {row.delta && <output className="rp-node-delta" title={row.delta.title}>
-        {row.delta.ms >= 0 ? "−" : "+"}{Math.abs(row.delta.ms).toFixed(2)}
-      </output>}
       {row.tap && <TapButton tap={row.tap} variant="head" />}
     </div>
     {row.chip && <small className="rp-node-chip" title={row.tip}>{row.chip}</small>}
@@ -305,13 +279,6 @@ export function PipelineGraph({ bands, testId }: {
         <div className="rp-collar">
           <h3>{band.label}</h3>
           <i aria-hidden="true" />
-          {/* Two figures, two bases, one junction. A wall is the band's real
-              cost including work no per-pass timestamp can price; the Σ figure
-              is what the rows below add up to. Labelled apart, never divided
-              into one another. */}
-          {band.wall && <output className="rp-collar-wall" title={band.wall.title}>
-            {formatPipelineDuration(band.wall.ms)}<small>wall</small>
-          </output>}
           <output>{band.cost_ms !== undefined ? formatPipelineDuration(band.cost_ms) : "—"}</output>
           {band.share !== undefined && <small>{(band.share * 100).toFixed(1)}%</small>}
         </div>

@@ -21,6 +21,7 @@ import {
 } from "./sparse-brick-octree";
 import { cameraApertureShaderLibrary } from "../core/webgpu-camera";
 import { SVO_BRICK_RASTER_CONTRACT, svoBrickRasterSharedWGSL } from "./webgpu-svo-brick-raster";
+import { svoProceduralNoiseWGSL } from "./svo-procedural-material";
 
 /**
  * The raster primary's answer to "what produced this pixel".
@@ -61,6 +62,9 @@ export const SVO_BRICK_RASTER_PROBE_CONTRACT = Object.freeze({
     scenePayload: 4,
     scene: 5,
     rasterPublication: 6,
+    /** Candidate lists already emitted by the shipping coverage pass. */
+    coverageCounts: 7,
+    coverageCandidates: 8,
     records: 10,
   }),
 });
@@ -90,6 +94,8 @@ export function svoBrickRasterProbeBindGroupLayoutEntries(): GPUBindGroupLayoutE
     { binding: bindings.scenePayload, visibility, buffer: { type: "read-only-storage" } },
     { binding: bindings.scene, visibility, buffer: { type: "read-only-storage" } },
     { binding: bindings.rasterPublication, visibility, buffer: { type: "read-only-storage" } },
+    { binding: bindings.coverageCounts, visibility, buffer: { type: "read-only-storage" } },
+    { binding: bindings.coverageCandidates, visibility, buffer: { type: "read-only-storage" } },
     { binding: bindings.records, visibility, storageTexture: { access: "write-only", format: "r32uint" } },
   ];
 }
@@ -125,6 +131,12 @@ export interface SvoBrickRasterProbeOptions {
   readonly payloadLaneWordOffset: number;
   /** How this world stores scene identity; decides which decode is compiled. */
   readonly scenePayload?: SparseBrickScenePayloadLanes;
+  /**
+   * Consume the ordinary primary's bounded per-pixel coverage list. Direct and
+   * screen-space-LOD experiments do not publish the same exact list and retain
+   * the whole-instance fallback.
+   */
+  readonly coverageAccelerated?: boolean;
 }
 
 /**
@@ -198,6 +210,7 @@ ${occupancyWGSL}
 // a field-program record here reports itself invalid, exactly as an aggregate
 // whose block never arrived does, rather than drawing its conservative box.
 ${svoFieldProgramAbsentWGSL}
+${svoProceduralNoiseWGSL}
 ${svoPrimitiveWGSL}
 
 @group(0) @binding(${bindings.uniforms}) var<uniform> uniforms:Uniforms;
@@ -209,6 +222,8 @@ ${cameraApertureShaderLibrary()}
 @group(0) @binding(${bindings.scenePayload}) var<storage,read> scenePayload:array<u32>;
 @group(0) @binding(${bindings.scene}) var<storage,read> svoProbeScene:array<u32>;
 @group(0) @binding(${bindings.rasterPublication}) var<storage,read> svoProbeRaster:array<u32>;
+@group(0) @binding(${bindings.coverageCounts}) var<storage,read> svoProbeCoverageCounts:array<u32>;
+@group(0) @binding(${bindings.coverageCandidates}) var<storage,read> svoProbeCoverageCandidates:array<u32>;
 @group(0) @binding(${bindings.records}) var probeRecords:texture_storage_2d<r32uint,write>;
 ${sceneIdentityWGSL}
 
@@ -426,11 +441,27 @@ fn ${entryPoint}(@builtin(local_invocation_id) localId:vec3u){
   let rd=svoProbeRay();
   let inverseDirection=1.0/rd;
   let armed=probeRequest.w!=0u;
-  // The draw count is the frame's own published indirect instance count, so the
-  // set scanned here is exactly the set the rasterizer consumed.
+  // The draw count is the frame's own published indirect instance count, so
+  // every candidate index below addresses exactly the set the frame consumed.
   let drawn=min(svoProbeSortInstanceCount(),svoProbeInstanceCapacity());
+  ${options.coverageAccelerated ? `// The ordinary primary just rasterized every proxy into a bounded list for
+  // this exact pixel. Reuse that existing acceleration instead of making the
+  // diagnostic's 64 lanes rescan the whole scene. On the rare overflow pixel,
+  // fall back to the old scan just as the frame falls back to its direct draw.
+  let probePixel=probeRequest.y*max(u32(uniforms.viewport.x),1u)+probeRequest.x;
+  let coverageCapacity=${SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel}u;
+  let publishedCount=select(0u,svoProbeCoverageCounts[probePixel],probePixel<arrayLength(&svoProbeCoverageCounts));
+  let useCoverage=publishedCount<=coverageCapacity
+    && probePixel*coverageCapacity+publishedCount<=arrayLength(&svoProbeCoverageCandidates);
+  let candidates=select(drawn,publishedCount,useCoverage);` : `let probePixel=0u;
+  let coverageCapacity=0u;
+  let useCoverage=false;
+  let candidates=drawn;`}
   if(armed){
-    for(var index=lane;index<drawn;index+=${workgroupSize}u){
+    for(var candidate=lane;candidate<candidates;candidate+=${workgroupSize}u){
+      var index=candidate;
+      if(useCoverage){index=svoProbeCoverageCandidates[probePixel*coverageCapacity+candidate];}
+      if(index>=drawn){continue;}
       let record=svoProbeInstance(index);
       let proxy=mat2x3f(record.proxyMinimum,record.proxyMaximum);
       let interval=svoProbeRayAabb(ro,inverseDirection,proxy);

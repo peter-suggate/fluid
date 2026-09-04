@@ -1998,9 +1998,12 @@ export const SVO_DRY_SCENE_PIXEL_PROBE_GROUP = 1;
  */
 export function svoDryScenePixelProbeOptions(
   primaryMode: SvoPixelTracePrimaryMode = "traced",
+  brick: Pick<SvoPixelTraceProbeOptions,
+    "brickOccupancyMode" | "brickContour" | "brickContourEntryClamp" | "brickContourExitScope"> = {},
 ): SvoPixelTraceProbeOptions {
   return {
     primaryMode,
+    ...brick,
     group: SVO_DRY_SCENE_PIXEL_PROBE_GROUP,
     coneLodBlendBandWidth: SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH,
     maximumShadedLights: SVO_DRY_SCENE_MAX_SHADED_LIGHTS,
@@ -6051,7 +6054,15 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
   }
   return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
 }
-${splitEntryWGSL}${rasterPrimaryEntryWGSL}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(traversalMode === "raster-primary" ? "raster" : "traced")) : ""}`;
+${splitEntryWGSL}${rasterPrimaryEntryWGSL}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
+    traversalMode === "raster-primary" ? "raster" : "traced",
+    {
+      brickOccupancyMode,
+      brickContour: brickContourPrimary && !brickContourInertProbe,
+      brickContourEntryClamp,
+      brickContourExitScope,
+    },
+  )) : ""}`;
   if (experiments.dropGiPageCache) {
     shader = shader.replace("var<private> dryGiPageCache:DryNodeMipPageCache;", "");
     const loadStart = shader.indexOf("fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceConeSourceSample{");
@@ -7288,6 +7299,11 @@ export class SparseVoxelDrySceneRenderer {
             instanceWordOffset: this.brickInstanceOffsetBytes / 4,
             paramsWordCount: SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes / 4,
             payloadLaneWordOffset: SVO_DRY_SCENE_PARAMS_LAYOUT.payloadLaneWordOffset,
+            // The ordinary coverage primary has already published the exact
+            // candidate list for every pixel. Direct and screen-space LOD arms
+            // do not, so they keep the diagnostic's whole-list fallback.
+            coverageAccelerated: !this.rasterPrimaryDirect
+              && this.screenSpaceTerminationPixels === 0,
             // The world's own block, not this renderer's opinion of it. The probe
             // reads the lane *addresses* from the uniform for staleness, but which
             // decode to compile is a property of the layout and cannot change
@@ -7596,6 +7612,8 @@ export class SparseVoxelDrySceneRenderer {
           { binding: probe.scenePayload, resource: structural.scenePayload },
           { binding: probe.scene, resource: { buffer: this.sceneArenaBuffer } },
           { binding: probe.rasterPublication, resource: { buffer: this.brickRasterPublicationBuffer! } },
+          { binding: probe.coverageCounts, resource: { buffer: this.brickCoverageCountBuffer! } },
+          { binding: probe.coverageCandidates, resource: { buffer: this.brickCoverageCandidateBuffer! } },
           { binding: probe.records, resource: this.brickProbeBuffers.recordsView },
         ],
       });
@@ -8151,6 +8169,10 @@ export class SparseVoxelDrySceneRenderer {
       overflow.setBindGroup(splitGroup, this.brickCoverageBindGroup!);
       overflow.drawIndirect(this.coverageOverflowIndirectBuffer!, 0);
       overflow.end();
+      // Consume the selected pixel's candidate list before the authored-scene
+      // coverage pass reuses this arena. This turns the common diagnostic path
+      // from O(all visible bricks) into O(overlap at one pixel), bounded by 24.
+      this.encodeBrickRasterProbe(encoder);
       return;
     }
     // Terrain and bricks stay in separate render passes even though they share
@@ -8186,6 +8208,9 @@ export class SparseVoxelDrySceneRenderer {
     bricks.setBindGroup(splitGroup, this.brickDrawBindGroup!);
     bricks.drawIndirect(this.brickSortStateBuffer!, this.brickSortStateOffsetBytes);
     bricks.end();
+    // The direct experiment has no candidate arena to reuse; its probe retains
+    // the global scan, but still runs beside the primary whose list it reads.
+    this.encodeBrickRasterProbe(encoder);
     // The caller closes "svo-primary" straight after this returns, so the brick
     // raster lands under the same phase id the traced primary reports.
   }
@@ -10391,23 +10416,25 @@ export class SparseVoxelDrySceneRenderer {
     pass.draw(3);
     pass.end();
     if (!this.probeBuffers.encodeReadback(encoder)) return false;
-    // The raster-primary half runs against the instance list this frame's cull
-    // already published, which is why it is encoded here rather than beside the
-    // cull: by now the buffer holds the very set the draw consumed.
-    this.encodeBrickRasterProbe(encoder);
     this.probeEncodedToken = request.token;
     this.probeReadPending = true;
     return true;
   }
 
   private encodeBrickRasterProbe(encoder: GPUCommandEncoder): void {
-    if (!this.rasterPrimary || !this.brickProbePipeline || !this.brickProbeBindGroup
-      || !this.brickProbeBuffers || this.brickProbeReadPending) return;
+    const request = this.probeRequest;
+    if (!request || !this.rasterPrimary || !this.brickProbePipeline || !this.brickProbeBindGroup
+      || !this.brickProbeBuffers || !this.probeBuffers || this.brickProbeReadPending) return;
+    // This pass is deliberately encoded next to the raster primary, before the
+    // candidate arena is reused. The queue write still precedes the eventual
+    // command-buffer submit, and both probe halves therefore read one request.
+    this.probeBuffers.writeRequest(request);
     const pass = encoder.beginComputePass({ label: "Sparse voxel raster-primary probe" });
     pass.setPipeline(this.brickProbePipeline);
     pass.setBindGroup(0, this.brickProbeBindGroup);
-    // One workgroup: the lanes stride the instance list between them, and the
-    // ordering and election that follow are a single-lane epilogue.
+    // One workgroup: ordinary frames consume at most the 24 candidates already
+    // published for this pixel; overflow/direct experiments retain the strided
+    // instance-list fallback. Ordering and election remain a lane-zero epilogue.
     pass.dispatchWorkgroups(1);
     pass.end();
     this.brickProbeReadPending = this.brickProbeBuffers.encodeReadback(encoder);
@@ -10420,19 +10447,22 @@ export class SparseVoxelDrySceneRenderer {
    */
   async readPixelTrace(): Promise<SvoPixelTrace | undefined> {
     if (!this.probeBuffers || !this.probeReadPending) return undefined;
-    // A newer pointer position does not invalidate this trace: it answers the
-    // pixel it was asked about and the next frame supersedes it. Only a resource
-    // or source epoch change makes the recorded world-space boxes meaningless.
-    const generation = this.pickingFrameToken;
-    const current = () => this.pickingFrameToken === generation;
+    // Queue order makes this a valid snapshot of the scene that was encoded.
+    // In-place animation may advance the scene epoch before mapAsync resolves;
+    // that makes the answer stale, not invalid. Only replacement of the actual
+    // staging buffers invalidates the pending decode.
+    const probeBuffers = this.probeBuffers;
+    const brickProbeBuffers = this.brickProbeBuffers;
+    const current = () => this.probeBuffers === probeBuffers
+      && this.brickProbeBuffers === brickProbeBuffers;
     try {
       // Both halves are mapped together and folded into one account of the
       // pixel. The raster half is optional throughout: in traced mode it never
       // runs, and if its pipeline failed the lighting half still stands alone.
       const [lighting, primary] = await Promise.all([
-        this.probeBuffers.read(current),
-        this.brickProbeReadPending && this.brickProbeBuffers
-          ? this.brickProbeBuffers.read(current)
+        probeBuffers.read(current),
+        this.brickProbeReadPending && brickProbeBuffers
+          ? brickProbeBuffers.read(current)
           : Promise.resolve(undefined),
       ]);
       // The prepass flag is the host's to add: the probe is composed inline at

@@ -7,7 +7,6 @@ import {
   SVO_PIXEL_TRACE_KINDS,
   SVO_PIXEL_TRACE_MAGIC,
   SVO_PIXEL_TRACE_MAXIMUM_RECORD_CAPACITY,
-  SVO_PIXEL_TRACE_PREPASS_STATE,
   SVO_PIXEL_TRACE_PRIMARY_MODE,
   SVO_PIXEL_TRACE_RECORD_WORDS,
   SVO_PIXEL_TRACE_STAGES,
@@ -79,6 +78,12 @@ export interface SvoPixelTraceProbeOptions {
    * and this entry point keeps what is still true of it: the lighting.
    */
   readonly primaryMode: SvoPixelTracePrimaryMode;
+  /** Mirrors the production leaf payload's occupancy acceleration. */
+  readonly brickOccupancyMode?: "off" | "bounds" | "macro" | "macro-hdda";
+  /** Mirrors the production primary's conservative contour interval clamp. */
+  readonly brickContour?: boolean;
+  readonly brickContourEntryClamp?: boolean;
+  readonly brickContourExitScope?: "both" | "escape" | "cell-exit" | "cell-exit-inert";
 }
 
 export function svoPixelTraceProbeRecordCapacity(options: Pick<SvoPixelTraceProbeOptions, "recordCapacity">): number {
@@ -102,6 +107,49 @@ export function createSvoPixelTraceProbeWGSL(options: SvoPixelTraceProbeOptions)
   const bandStart = (1 - options.coneLodBlendBandWidth).toFixed(8);
   const bandScale = (1 / options.coneLodBlendBandWidth).toFixed(8);
   const raster = options.primaryMode === "raster";
+  const brickOccupancyMode = options.brickOccupancyMode ?? "bounds";
+  const brickContour = options.brickContour ?? true;
+  const brickContourEntryClamp = options.brickContourEntryClamp ?? true;
+  const brickContourExitScope = options.brickContourExitScope ?? "both";
+  // The shipping macro-H DDA is a different two-level walk. Do not silently
+  // call this flat-cell recorder its mirror if an experiment selects that arm.
+  const probeSupportsBrickWalk = brickOccupancyMode !== "macro-hdda";
+  const cellSpan = brickOccupancyMode === "bounds"
+    ? "var cellLower=vec3i(0);var cellUpper=vec3i(i32(dry.mapping.brickSize-1u));"
+    : "let cellLower=vec3i(0);let cellUpper=vec3i(i32(dry.mapping.brickSize-1u));";
+  const occupiedClamp = brickOccupancyMode === "off" ? "" : /* wgsl */ `
+  let brickSummary=svoBrickOccupancyDecode(leafNode.links.w);
+  if(brickSummary.ready!=0u){
+    if(brickSummary.occupied==0u){return missHit();}
+    let occupiedInterval=svoRayAabbWithInverse(SvoRay(ro,entry,rd,brickExit),1.0/rd,
+      svoBrickOccupiedBounds(brickSummary,bounds[0],extent));
+    if(occupiedInterval.x==0.0){return missHit();}
+    entry=max(entry,occupiedInterval.y);brickExit=min(brickExit,occupiedInterval.z);
+    ${brickOccupancyMode === "bounds"
+      ? "cellLower=vec3i(brickSummary.minInclusive);cellUpper=vec3i(brickSummary.maxInclusive);"
+      : ""}
+  }`;
+  const contourClamp = brickContour ? /* wgsl */ `
+  {let contour=svoBrickContourDecode(leafNode.address.w);
+  if(contour.valid!=0u){
+    let contourSpan=svoBrickContourClamp(contour,(ro-bounds[0])/extent,rd/extent,entry,brickExit);
+    if(contourSpan.x==0.0){return missHit();}
+    ${brickContourEntryClamp ? "entry=contourSpan.y;" : ""}
+    ${brickContourExitScope === "cell-exit" || brickContourExitScope === "cell-exit-inert"
+      ? "brickCellExit=contourSpan.z;" : "brickExit=contourSpan.z;"}
+  }}` : "";
+  const macroSkip = brickOccupancyMode === "macro" ? /* wgsl */ `
+    let macroSkip=dryBrickMacroSkip(brickSummary,vec3u(cell),bounds,extent,ro,rd,entry);
+    if(macroSkip.x!=0.0){
+      if(macroSkip.y>=brickExit||macroSkip.y>=DRY_MISS){break;}
+      entry=macroSkip.y;
+      let skipPoint=ro+rd*(entry+max(1e-5,length(extent)*1e-4));
+      cell=vec3i(clamp(floor((skipPoint-bounds[0])/extent),vec3f(0.0),
+        vec3f(f32(dry.mapping.brickSize-1u))));
+      let skipBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
+      nextT=select(vec3f(DRY_MISS),(skipBoundary-ro)/rd,abs(rd)>vec3f(1e-9));
+      continue;
+    }` : "";
   // Stages this entry point can speak for. The primary is absent under raster
   // because the compute probe owns it there; claiming it here would let a
   // missing companion look like a frame that drew no bricks. `terrain` is absent
@@ -177,13 +225,20 @@ fn probeRecordBox(kind:u32,level:u32,detail:u32,recordFlags:u32,bounds:mat2x3f,t
   probeRecord(kind,level,detail,recordFlags,bounds[0],bounds[1],tEnter,tExit);
 }
 
-// Mirror of traceLeafPayload: the same 32-step DDA over the same brick lattice,
-// with a record for every cell entered and every analytic test issued.
+// Mirror of traceLeafVoxelPayload: the same occupancy and contour clamps, then
+// the same bounded DDA, with a record for every cell the shipping walk enters.
 fn probeTraceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat2x3f)->DryHit{
+  ${probeSupportsBrickWalk ? "" : "probeFailure=max(probeFailure,1u);return missHit();"}
+  let leafNode=svoNodeLoad(hit.nodeIndex);
   let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);
   var entry=max(hit.tEnter,0.0);
+  var brickExit=hit.tExit;
+  var brickCellExit=hit.tExit;
+  ${cellSpan}
+  ${occupiedClamp}
+  ${contourClamp}
   let point=ro+rd*(entry+1e-5);
-  var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));
+  var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(cellLower),vec3f(cellUpper)));
   let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0));
   let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
   var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9));
@@ -193,10 +248,11 @@ fn probeTraceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat2x3f)->
   // identity a different way would be describing a walk the frame did not take.
   let identitySource=sceneIdentitySourceAt(hit.voxelOffset);
   for(var iteration=0u;iteration<32u;iteration+=1u){
-    if(any(cell<vec3i(0))||any(cell>=vec3i(i32(dry.mapping.brickSize)))||entry>hit.tExit){break;}
+    if(any(cell<cellLower)||any(cell>cellUpper)||entry>brickExit){break;}
+    ${macroSkip}
     probeVoxelWork+=1u;
     let cellMinimum=bounds[0]+vec3f(cell)*extent;
-    let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,hit.tExit));
+    let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,${brickContourExitScope === "cell-exit" || brickContourExitScope === "cell-exit-inert" ? "brickCellExit" : "brickExit"}));
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     var cellFlags=0u;
     var candidate=missHit();
