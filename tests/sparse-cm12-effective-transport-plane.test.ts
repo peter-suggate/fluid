@@ -239,6 +239,19 @@ test("the topology tail compiles shadow TEI, flips once, then replays only the r
   assert.doesNotMatch(deltaCompiler, /cm12TeiWriteLeaf\(0u|cm12TeiWriteLeaf\(1u/);
 });
 
+test("frontier TEI publication mirrors both banks and clears retired leaves", () => {
+  const frontier = functionSource(wgsl,
+    "compileSparseWorldFrontierExecutionImage",
+    "fn stageDemandedFrontierPage");
+  assert.match(frontier, /for\(var slot=0u;slot<2u;slot\+=1u\)/,
+    "dynamic pages must remain coherent across later selector flips");
+  assert.match(frontier, /cm12TeiWriteLeaf\(slot,brick,generation,false\)/);
+  assert.match(frontier, /cm12TeiWritePacket\(slot,/);
+  assert.match(frontier, /cm12TeiWriteSpatialTile\(slot,/);
+  assert.doesNotMatch(frontier, /if\(!brickActive\(brick\)\)\{return;\}/,
+    "retirement must publish inactive records before a leaf ID is recycled");
+});
+
 test("raw Phase-1 receipts are reachable only through a construction specialization", () => {
   assert.match(resident, /static createPhase1TransportReceiptOracleForQA\(/);
   const factory = resident.slice(

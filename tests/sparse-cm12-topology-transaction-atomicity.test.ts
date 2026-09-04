@@ -340,8 +340,11 @@ test("the literal selector store is the final executable instruction", () => {
 test("topology growth cannot publish unbounded loops or indirect work", () => {
   const reserve = functionSource(wgsl, "reserveShadowWorklistRange",
     "fn sparseWorldDynamicRowOwner");
-  assert.match(reserve, /attempt<256u/,
-    "contended shadow reservations must have a finite retry budget");
+  assert.match(reserve,
+    /let current=atomicAdd\(&topologyArena\[base\+counterWord\],count\)/,
+    "contended shadow reservations must use one non-failing monotonic ticket");
+  assert.doesNotMatch(reserve, /atomicCompareExchangeWeak|attempt</,
+    "valid in-capacity reservations must not fail from a bounded weak-CAS retry loop");
   assert.match(reserve, /current>capacity\|\|count>capacity-current/,
     "shadow reservations must reject before writing beyond their slab");
   const finalize = functionSource(wgsl, "finalizeShadowWorklists",
@@ -365,6 +368,18 @@ test("topology growth cannot publish unbounded loops or indirect work", () => {
     "let page=reserveSparseCM12PresentationPage()");
   assert.ok(coordinateValidation >= 0 && pageReservation > coordinateValidation,
     "invalid signed coordinates must be rejected before consuming a page");
+});
+
+test("a failed shadow build cannot authorize partial worklists", () => {
+  const validate = functionSource(wgsl, "validateAndAuthorizeShadowTopology",
+    "fn finalizeAuthorizedShadowTopology");
+  const phaseGuard = validate.indexOf(
+    "if(atomicLoad(&topologyArena[base+3u])!=1u){return;}");
+  const emptyCandidate = validate.indexOf("if(prepared==0u)");
+  const authorization = validate.indexOf("atomicStore(&topologyArena[base+3u],2u)");
+  assert.ok(phaseGuard >= 0 && phaseGuard < emptyCandidate
+    && emptyCandidate < authorization,
+  "both empty and populated authorization paths must require the buildable phase");
 });
 
 test("injection success publishes before flip while rejection leaves authority unopened", () => {

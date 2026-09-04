@@ -439,10 +439,9 @@ export interface SparseCM12InternedBoundaryMemoryPlan {
 
 /**
  * Construction budgets for the resident compiled-boundary image. B8/P8 is the
- * shipping lane and has 4.27x as many resident leaves as ocean B16/P16; using
- * the B16 census ceilings for it rejected a 2.1 MiB exact image before device
- * allocation. These remain hard representation gates, now sized for the lane
- * they govern rather than for one larger-brick census.
+ * shipping lane and can pre-catalogue all 4096 leaves of a 128^3 full-domain
+ * min8 enforcement region. These remain hard representation gates, sized for
+ * the largest supported authored B8 topology rather than one wet-leaf census.
  */
 export function sparseCM12InternedBoundaryMemoryPlan(
   brickFineResolution: SparseBrickResolution,
@@ -454,9 +453,9 @@ export function sparseCM12InternedBoundaryMemoryPlan(
       semanticAuthorityMaximumBytes: 16_864,
     })
     : Object.freeze({
-      immutableMaximumBytes: 1024 * 1024,
-      slotMaximumBytes: 640 * 1024,
-      semanticAuthorityMaximumBytes: 32 * 1024,
+      immutableMaximumBytes: 1536 * 1024,
+      slotMaximumBytes: 1024 * 1024,
+      semanticAuthorityMaximumBytes: 40 * 1024,
     });
 }
 

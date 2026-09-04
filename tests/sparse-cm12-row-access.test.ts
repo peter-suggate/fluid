@@ -40,6 +40,20 @@ test("dynamic row centers decode their page address once", () => {
     /vec3f\(taf\(base\+4u\*rows\),taf\(base\+5u\*rows\),taf\(base\+6u\*rows\)\)/);
 });
 
+test("dynamic row semantic planes map to their compact stored order", () => {
+  const wgsl = createSparseCM12RowAccessWGSL(
+    SPARSE_CM12_ATOMIC_ARENA_READERS, true);
+  const rowWord = wgsl.slice(wgsl.indexOf("fn rowWord"),
+    wgsl.indexOf("fn boundedIncidenceEnd"));
+  assert.match(rowWord, /if\(plane==2u\)\{storedPlane=3u;\}/,
+    "semantic dual weight must read compact plane 3");
+  assert.match(rowWord, /if\(plane==4u\)\{storedPlane=2u;\}/,
+    "semantic distance must read compact plane 2");
+  assert.match(rowWord, /if\(plane>=6u\)\{storedPlane=plane-2u;\}/,
+    "semantic centers must read compact planes 4 through 6");
+  assert.doesNotMatch(rowWord, /storedPlane-=1u/);
+});
+
 test("static row centers retain direct plane addressing", () => {
   const wgsl = createSparseCM12RowAccessWGSL(
     SPARSE_CM12_ATOMIC_ARENA_READERS, false);

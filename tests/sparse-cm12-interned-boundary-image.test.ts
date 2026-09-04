@@ -23,11 +23,11 @@ import { packSparseCM12AcceptedTopologyTemplatesForQA,
   sparseCM12InternedBoundaryMemoryPlan } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
-test("IBO1 construction budgets cover the B8/P8 shipping lane", () => {
+test("IBO1 construction budgets cover B8/P8 and full-domain min8", () => {
   assert.deepEqual(sparseCM12InternedBoundaryMemoryPlan(8), {
-    immutableMaximumBytes: 1024 * 1024,
-    slotMaximumBytes: 640 * 1024,
-    semanticAuthorityMaximumBytes: 32 * 1024,
+    immutableMaximumBytes: 1536 * 1024,
+    slotMaximumBytes: 1024 * 1024,
+    semanticAuthorityMaximumBytes: 40 * 1024,
   });
   assert.deepEqual(sparseCM12InternedBoundaryMemoryPlan(16), {
     immutableMaximumBytes: 512 * 1024,

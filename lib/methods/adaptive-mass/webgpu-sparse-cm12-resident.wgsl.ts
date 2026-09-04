@@ -7725,22 +7725,18 @@ fn reserveShadowWorklistRange(counterWord:u32,count:u32,capacity:u32)->u32{
   // Capacity is an authorization boundary, not a diagnostic checked after an
   // indirect launch. A malformed reservation must produce no writes and no
   // work rather than wrapping a u32 counter into a watchdog-sized dispatch.
-  for(var attempt=0u;attempt<256u;attempt+=1u){
-    if(atomicLoad(&topologyArena[base+3u])!=1u){return INVALID;}
-    let current=atomicLoad(&topologyArena[base+counterWord]);
-    if(current>capacity||count>capacity-current){
-      atomicStore(&activity[21],1u);
-      atomicStore(&topologyArena[base+3u],3u);
-      return INVALID;
-    }
-    if(count==0u){return current;}
-    let claim=atomicCompareExchangeWeak(&topologyArena[base+counterWord],
-      current,current+count);
-    if(claim.exchanged){return current;}
+  if(atomicLoad(&topologyArena[base+3u])!=1u){return INVALID;}
+  if(count==0u){return atomicLoad(&topologyArena[base+counterWord]);}
+  // One monotonic ticket cannot fail merely because many leaves reserve in
+  // parallel. An over-capacity ticket publishes no list data and invalidates
+  // the whole shadow transaction before authorization.
+  let current=atomicAdd(&topologyArena[base+counterWord],count);
+  if(current>capacity||count>capacity-current){
+    atomicStore(&activity[21],1u);
+    atomicStore(&topologyArena[base+3u],3u);
+    return INVALID;
   }
-  atomicStore(&activity[21],1u);
-  atomicStore(&topologyArena[base+3u],3u);
-  return INVALID;
+  return current;
 }
 fn sparseWorldDynamicRowOwner(row:u32)->u32{
   let rows=3u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
@@ -8496,6 +8492,9 @@ fn publishCandidateShadowFaces(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(1)
 fn validateAndAuthorizeShadowTopology(){
   let prepared=atomicLoad(&activity[16]);let base=topologyWorklistBase();
+  // A failed producer may leave internally plausible partial counts. Only the
+  // buildable phase can enter either authorization path.
+  if(atomicLoad(&topologyArena[base+3u])!=1u){return;}
   if(prepared==0u){
     // A genuinely empty candidate still closes the effects transaction. This
     // is O(1): every fallible producer receipt must prove an exact empty set
@@ -8654,10 +8653,9 @@ fn publishSparseWorldFrontierAcceptance(@builtin(workgroup_id)wid:vec3u,
   atomicStore(&topologyArena[pageBase+3u],0x8000003fu);
 }
 
-// Frontier leaves bypass the host-template topology delta, but their TEI2
-// records are still ordinary accepted execution-image records. Compile the
-// leaf, its bounded packet slab, and its spatial tiles immediately after the
-// accepted selector flip so the next frame can trace through the page.
+// Frontier leaves bypass the host topology-delta replay, so keep both TEI2
+// banks coherent. This also writes inactive records after retirement before a
+// recycled leaf ID can expose the old coordinate through the other bank.
 @compute @workgroup_size(64)
 fn compileSparseWorldFrontierExecutionImage(
  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
@@ -8666,15 +8664,17 @@ fn compileSparseWorldFrontierExecutionImage(
   let pageBase=candidateTopologyPageBase(page);
   if(atomicLoad(&topologyArena[pageBase+3u])!=0x8000003fu){return;}
   let brick=atomicLoad(&topologyArena[pageBase]);
-  if(!brickActive(brick)){return;}
-  let slot=acceptedTopologySlot();let generation=atomicLoad(&topologyArena[base]);
-  if(lane==0u){cm12TeiWriteSlotHeader(slot,generation);
-    cm12TeiWriteLeaf(slot,brick,generation,false);}
-  cm12TeiWritePacket(slot,brick*CM12_TEI_PACKETS_PER_LEAF+lane,generation,false);
-  let tileCount=CM12_TEI_SPATIAL_TILES_PER_LEAF;
-  for(var within=lane;within<tileCount;within+=64u){
-    cm12TeiWriteSpatialTile(slot,
-      brick*CM12_TEI_SPATIAL_TILES_PER_LEAF+within,generation,false);
+  let generation=atomicLoad(&topologyArena[base]);
+  for(var slot=0u;slot<2u;slot+=1u){
+    if(lane==0u){cm12TeiWriteSlotHeader(slot,generation);
+      cm12TeiWriteLeaf(slot,brick,generation,false);}
+    cm12TeiWritePacket(slot,
+      brick*CM12_TEI_PACKETS_PER_LEAF+lane,generation,false);
+    let tileCount=CM12_TEI_SPATIAL_TILES_PER_LEAF;
+    for(var within=lane;within<tileCount;within+=64u){
+      cm12TeiWriteSpatialTile(slot,
+        brick*CM12_TEI_SPATIAL_TILES_PER_LEAF+within,generation,false);
+    }
   }
 }
 

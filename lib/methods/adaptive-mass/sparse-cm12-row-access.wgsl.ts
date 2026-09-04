@@ -163,8 +163,13 @@ export function createSparseCM12RowAccessWGSL(
   let rows=3u*(BRICK_FINE_RESOLUTION+1u)*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
   let local=id-host;let page=local/rows;let within=local%rows;
   let base=candidateTopologyPageBase(page);
-  var storedPlane=plane;if(plane>=4u){storedPlane-=1u;}
-  if(plane>=6u){storedPlane-=1u;}
+  // Dynamic pages store packed, metadata, distance, dual, then xyz center.
+  // Map from the authored nine-plane semantic ABI explicitly; area and
+  // exterior phi are derived by their dedicated accessors below.
+  var storedPlane=plane;
+  if(plane==2u){storedPlane=3u;}
+  if(plane==4u){storedPlane=2u;}
+  if(plane>=6u){storedPlane=plane-2u;}
   return base+${w("base+7u")}+storedPlane*rows+within;
 }`
     : `fn rowWord(id:u32,plane:u32)->u32{return ${w("7u")}+plane*${w("3u")}+id;}`;
