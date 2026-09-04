@@ -130,6 +130,7 @@ import { getScenePreset } from "../lib/core/scenes";
 import {
   DEFAULT_SVO_RENDER_DIAGNOSTICS,
   SVO_RENDER_STAGE_DEFINITIONS,
+  svoRenderStageUsesPrimaryWorkMap,
   svoRenderStageUsesLightSlot,
 } from "../lib/svo/svo-render-diagnostics";
 import { projectViewportFailure, viewportFailureIndicator } from "../lib/core/viewport-failure-diagnostics";
@@ -3086,12 +3087,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     </div>}
     {svoStageView !== "off" && !stageViewIsDefaultPresentation && <div className="svo-cost-legend" data-testid="svo-stage-legend">
       <header>
-        <span>STAGE · {svoStageDefinition.label}</span>
+        <span>{svoRenderStageUsesPrimaryWorkMap(svoStageView) ? "RAY WORK" : "STAGE"} · {svoStageDefinition.label}</span>
         <span>{svoRenderStageUsesLightSlot(svoStageView) ? `slot ${svoStageLightSlot} · ` : ""}{svoStageDefinition.plane}</span>
       </header>
       <div className="svo-cost-ramp" style={{ background: svoStageRamp }} />
       <footer><span>{svoStageDefinition.legend[0].label}</span><span>{svoStageDefinition.legend.at(-1)?.label}</span></footer>
-      <small>{svoStageDefinition.description} Pick another stage in Render.</small>
+      <small>{svoStageDefinition.description} {svoRenderStageUsesPrimaryWorkMap(svoStageView)
+        ? "Pick another ray-work view from its scene-toolstrip chevron."
+        : "Pick another stage in Render."}</small>
     </div>}
   </>;
 }

@@ -14,6 +14,7 @@ import { EntityDeleteRow, EntityMoreRow, EntityOptionRows } from "./EntityOption
 import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
 import { FieldControlRows, methodSetupTabs } from "./FluidFieldFlyout";
 import { MakeRows } from "./MakeRows";
+import { PrimaryTraversalRow } from "./PrimaryTraversalRows";
 import { StoneDialRows } from "./StoneLookFlyout";
 import { CanopyDialRows } from "./TreeCanopyFlyout";
 import { RimDialRows } from "./VesselRimFlyout";
@@ -91,9 +92,8 @@ function TankRow() {
  * The solver behind the water, and the way to swap it.
  *
  * On this strip because switching methods is part of the same watch-the-water
- * loop as choosing a view — and third in the column, under the field view and
- * the tank, because that is the order the three answer in: what is drawn, what
- * it is drawn in, and what is moving it.
+ * loop as choosing a view — and under the field, ray-work and tank rows because
+ * it answers the last question in that reading: what is moving it.
  *
  * A mark and a chevron rather than a SOLVER tag and a segmented strip of every
  * installed method. The strip of names was as wide as the column and grew with
@@ -148,16 +148,15 @@ function entityHasOptions(entity: EditorEntity): boolean {
 }
 
 /**
- * The strip at the container's corner: three fixed rows, and — when the tank is
- * what is selected — everything else about the thing being solved.
+ * The strip at the container's corner: the scene's fixed readings, and — when
+ * the tank is selected — everything else about the thing being solved.
  *
- * The three are what a reader asks of a running scene, in the order they answer:
- * **what is drawn** over the water, **what it is drawn in**, and **what is
- * moving it**. Each is one mark and its own controls on one line — a glyph with
- * the overlay's plane and depth beside it, the tank's mark with its three
- * extents, the solver's with its name — so the column is read rather than
- * explored, and it says the same three things whether or not anything is
- * selected.
+ * They are what a reader asks of a running scene, in the order they answer:
+ * **what is drawn** over the water, **what the primary rays did**, **what it is
+ * drawn in**, and **what is moving it**. Each is one mark and its own controls
+ * on one line — view and ray-work glyphs with chevrons, the tank's mark with its
+ * three extents, the solver's with its name — so the column is read rather than
+ * explored.
  *
  * It was a stack of a dozen: five glyph rows that could only ever light one of
  * them, a FIELD row naming what those glyphs already showed, a PLANE row, a
@@ -169,7 +168,7 @@ function entityHasOptions(entity: EditorEntity): boolean {
  *
  * Selecting the tank still *grows* this column rather than swapping it for a
  * panel: the lens and film rows, whatever the tank still has to say, and the
- * door, added underneath the three so nothing a reader was looking at moves.
+ * door, added underneath the fixed rows so nothing a reader was looking at moves.
  *
  * The water is not one of them. A body of water is an object with its own box
  * and its own extents, so it hangs its own strip off its own corner like every
@@ -200,7 +199,7 @@ export function ContainerToolstrip({
   const methodId = session.method((state) => state.methodId);
   const select = session.ui((state) => state.select);
   const hasFields = methodHasQuickFields(methodId);
-  // A dry document has no solve to choose, so the third row follows the water
+  // A dry document has no solve to choose, so the solver row follows the water
   // switch — the same flag the tank declares as `offersFluidMethod`.
   const hasSolver = scene.systems?.fluid !== false;
 
@@ -211,16 +210,16 @@ export function ContainerToolstrip({
     testId="field-quick-bar"
   >
     {hasFields && <FieldViewRows />}
+    <PrimaryTraversalRow />
     <TankRow />
     {hasSolver && <SolverRow />}
-    {/* The seam between the two halves of the column: three rows that say what
-        the scene *is*, and three that say what a stroke would *add* to it. Drawn
-        rather than inferred from the marks, because both halves are glyph rows
-        and a reader who cannot see the seam reads six unrelated buttons. */}
+    {/* The seam between the two halves of the column: readings that say what
+        the scene *is*, and verbs that say what a stroke would *add* to it.
+        Drawn rather than inferred because both halves are glyph rows. */}
     <ToolstripRule />
     <MakeRows fluid={hasSolver} />
     {entity === undefined
-      // The way to what the three rows left out: the solver's construction, this
+      // The way to what the fixed rows left out: the solver's construction, this
       // scene's own switches, and the water's settings while there is no body to
       // hang them off. Selecting the tank is what opens those, so this is the
       // existing route made visible rather than a second one to keep agreeing

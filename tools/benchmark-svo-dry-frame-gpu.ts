@@ -195,6 +195,7 @@ const outPath = process.env.FLUID_SVO_DRY_FRAME_OUT ?? "/tmp/svo-bench/baseline.
 const rawOutPath = process.env.FLUID_SVO_DRY_FRAME_RAW_OUT;
 const configuredRawOutPath = process.env.FLUID_SVO_DRY_FRAME_CONFIGURED_RAW_OUT;
 const gBufferRawPrefix = process.env.FLUID_SVO_DRY_FRAME_GBUFFER_RAW_PREFIX;
+const primaryWorkMapOutPath = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_WORK_MAP_OUT;
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
 const radianceReconstructionRaw = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION ?? "full-res-relight";
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
@@ -320,6 +321,7 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   traversalVectorRecords: process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL_VECTOR_RECORDS === "1",
   /** The parametric expansion's repeated arithmetic. Measured null; same note. */
   traversalLeanExpansion: process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL_LEAN_EXPANSION === "1",
+  primaryWorkMap: process.env.FLUID_SVO_DRY_FRAME_PRIMARY_WORK_MAP === "1",
 };
 const voxelLightCacheEnabled = optimizationExperiments.voxelLightCache !== false;
 const screenSpaceTerminationPixels = Number(process.env.FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS ?? 0);
@@ -1624,6 +1626,66 @@ const [packedSurfaceBytes, identityMediaBytes, hardwareDepthBytes] = await Promi
   captureTextureBytes(referenceGBuffer.identityMedia, 8, "Bench identity-media fingerprint"),
   captureTextureBytes(referenceGBuffer.hardwareDepth, 4, "Bench hardware-depth fingerprint", "depth-only"),
 ]);
+let primaryWorkMap: {
+  rawPath: string;
+  encoding: string;
+  metrics: Record<string, { total: number; mean: number; p50: number; p90: number; p95: number; p99: number; maximum: number }>;
+  seedStates: Record<string, number>;
+  terminals: Record<string, number>;
+  fieldSources: Record<string, number>;
+  worstPixels: { x: number; y: number; nodeVisits: number; leafVisits: number; voxelCells: number;
+    planarTests: number; candidateNodes: number; primitiveTests: number; score: number }[];
+} | undefined;
+if (optimizationExperiments.primaryWorkMap) {
+  const workTexture = renderer.primaryWorkMapTexture;
+  assert.ok(workTexture, "primary work-map experiment did not allocate its output texture");
+  const bytes = await captureTextureBytes(workTexture, 16, "Bench exact primary work-map readback");
+  const rawPath = primaryWorkMapOutPath ?? `${outPath.replace(/\.json$/i, "")}-primary-work-map.rgba32uint.bin`;
+  mkdirSync(path.dirname(rawPath), { recursive: true });
+  writeFileSync(rawPath, bytes);
+  const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  const series: Record<string, number[]> = {
+    nodeVisits: [], leafVisits: [], voxelCells: [], planarTests: [], candidateNodes: [], primitiveTests: [],
+  };
+  const seedStates: Record<string, number> = { unseeded: 0, empty: 0, leaf: 0, reserved: 0 };
+  const terminals: Record<string, number> = { hit: 0, miss: 0, other: 0 };
+  const fieldSources: Record<string, number> = {};
+  const worstPixels: NonNullable<typeof primaryWorkMap>["worstPixels"] = [];
+  for (let pixel = 0; pixel < width * height; pixel += 1) {
+    const base = pixel * 4;
+    const nodeVisits = words[base] & 0xffff;
+    const seedState = (words[base] >>> 16) & 3;
+    const leafVisits = words[base + 1] & 0xffff;
+    const terminal = (words[base + 1] >>> 16) & 15;
+    const fieldSource = (words[base + 1] >>> 20) & 15;
+    const voxelCells = words[base + 2];
+    const planarTests = words[base + 3] & 0xff;
+    const candidateNodes = (words[base + 3] >>> 8) & 0xfff;
+    const primitiveTests = (words[base + 3] >>> 20) & 0xfff;
+    series.nodeVisits.push(nodeVisits); series.leafVisits.push(leafVisits); series.voxelCells.push(voxelCells);
+    series.planarTests.push(planarTests); series.candidateNodes.push(candidateNodes); series.primitiveTests.push(primitiveTests);
+    seedStates[["unseeded", "empty", "leaf", "reserved"][seedState]] += 1;
+    terminals[terminal === 1 ? "hit" : terminal === 2 ? "miss" : "other"] += 1;
+    fieldSources[String(fieldSource)] = (fieldSources[String(fieldSource)] ?? 0) + 1;
+    const score = nodeVisits + voxelCells + candidateNodes + primitiveTests * 4 + planarTests;
+    worstPixels.push({ x: pixel % width, y: Math.floor(pixel / width), nodeVisits, leafVisits, voxelCells,
+      planarTests, candidateNodes, primitiveTests, score });
+  }
+  const metric = (values: number[]) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    const quantile = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1)))];
+    const total = values.reduce((sum, value) => sum + value, 0);
+    return { total, mean: total / values.length, p50: quantile(0.5), p90: quantile(0.9), p95: quantile(0.95),
+      p99: quantile(0.99), maximum: sorted[sorted.length - 1] };
+  };
+  primaryWorkMap = {
+    rawPath,
+    encoding: "rgba32uint: R=nodeVisits|seedState<<16; G=leafVisits|terminal<<16|fieldSource<<20; B=voxelCells; A=planarTests(8)|candidateNodes(12)<<8|primitiveTests(12)<<20",
+    metrics: Object.fromEntries(Object.entries(series).map(([name, values]) => [name, metric(values)])),
+    seedStates, terminals, fieldSources,
+    worstPixels: worstPixels.sort((a, b) => b.score - a.score).slice(0, 32),
+  };
+}
 if (gBufferRawPrefix) {
   mkdirSync(path.dirname(gBufferRawPrefix), { recursive: true });
   writeFileSync(`${gBufferRawPrefix}-packed-surface.bin`, packedSurfaceBytes);
@@ -2049,6 +2111,7 @@ const result = {
   },
   configuredPhaseTrace,
   configuredPassTiming,
+  primaryWorkMap,
   coneLighting: {
     scale: coneScale,
     radianceReconstruction,

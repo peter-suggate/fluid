@@ -5,6 +5,7 @@ import {
 } from "./svo-gbuffer";
 import {
   SVO_RENDER_STAGE_CLAIMANT_LEGEND,
+  SVO_PRIMARY_WORK_REFERENCE,
   SVO_RENDER_STAGE_SEQUENTIAL_LEGEND,
   svoRenderStageCode,
   type SvoRenderStageLegendStop,
@@ -16,12 +17,11 @@ import { unifiedDisplayTransferShaderLibrary } from "../core/webgpu-lighting";
  * Render-stage overlay.
  *
  * One full-screen pass encoded after the optical composite that replaces the
- * presented image with a decode of a plane some earlier pass wrote. Every
- * binding is read-only and every plane is one the production frame already
- * produces, so selecting a view changes what is displayed and nothing about
- * what is rendered. That is the property the pass exists to hold: a diagnostic
- * that switched the renderer to a diagnostic path — as the cost heatmaps this
- * replaces did — describes a frame nobody ships.
+ * presented image with a decode of a plane some earlier pass wrote. Its own
+ * bindings stay read-only. Ordinary stage views consume production planes;
+ * the explicitly labelled primary-work family requests a counter publication
+ * from traced visibility and therefore describes that diagnostic arm, including
+ * its write overhead, rather than claiming to be a free view of shipping work.
  *
  * Planes that a given configuration never allocates (no glass discovery, no
  * rigid bodies, cone lighting at full rate) bind 1x1 fallbacks of the matching
@@ -46,6 +46,7 @@ export const SVO_RENDER_STAGE_OVERLAY_CONTRACT = Object.freeze({
     conePrepassIdentity: 10,
     conePrepassRadiance: 11,
     sceneRadiance: 12,
+    primaryWork: 13,
   }),
   formats: Object.freeze({
     packedSurface: "rgba32uint" as GPUTextureFormat,
@@ -60,6 +61,7 @@ export const SVO_RENDER_STAGE_OVERLAY_CONTRACT = Object.freeze({
     conePrepassIdentity: "r32uint" as GPUTextureFormat,
     conePrepassRadiance: "rgba16float" as GPUTextureFormat,
     sceneRadiance: "rgba16float" as GPUTextureFormat,
+    primaryWork: "rgba32uint" as GPUTextureFormat,
   }),
 });
 
@@ -77,6 +79,8 @@ export interface SvoRenderStagePlanes {
   readonly conePrepassIdentity?: GPUTextureView;
   readonly conePrepassRadiance?: GPUTextureView;
   readonly sceneRadiance?: GPUTextureView;
+  /** Exact invocation-private primary traversal counters, when explicitly requested. */
+  readonly primaryWork?: GPUTextureView;
   /** Cone planes are allocated at a reduced rate and drawn at it, not upsampled. */
   readonly conePrepassWidth?: number;
   readonly conePrepassHeight?: number;
@@ -101,6 +105,7 @@ export function svoRenderStageOverlayBindGroupLayoutEntries(): GPUBindGroupLayou
     { binding: bindings.conePrepassIdentity, visibility, texture: uint },
     { binding: bindings.conePrepassRadiance, visibility, texture: float },
     { binding: bindings.sceneRadiance, visibility, texture: float },
+    { binding: bindings.primaryWork, visibility, texture: uint },
   ];
 }
 
@@ -157,6 +162,7 @@ struct SvoStageParams{
 @group(0) @binding(${bindings.conePrepassIdentity}) var stageConeIdentity:texture_2d<u32>;
 @group(0) @binding(${bindings.conePrepassRadiance}) var stageConeRadiance:texture_2d<f32>;
 @group(0) @binding(${bindings.sceneRadiance}) var stageSceneRadiance:texture_2d<f32>;
+@group(0) @binding(${bindings.primaryWork}) var stagePrimaryWork:texture_2d<u32>;
 
 ${unifiedDisplayTransferShaderLibrary}
 ${rampWGSL()}
@@ -245,6 +251,24 @@ fn svoStageDistanceRamp(distance_m:f32)->vec3f{
   return svoStageRamp(clamp(distance_m/max(stage.extent.z,1e-3),0.0,1.0));
 }
 
+fn svoStagePrimaryWorkRecord(coordinate:vec2i)->vec4u{
+  return textureLoad(stagePrimaryWork,coordinate,0);
+}
+fn svoStagePrimaryNodeVisits(record:vec4u)->u32{return record.x&0xffffu;}
+fn svoStagePrimaryLeafVisits(record:vec4u)->u32{return record.y&0xffffu;}
+fn svoStagePrimaryVoxelCells(record:vec4u)->u32{return record.z;}
+fn svoStagePrimaryWorkColor(value:u32,referenceP99:u32)->vec3f{
+  return svoStageRamp(f32(value)/max(1.0,f32(referenceP99)));
+}
+fn svoStagePrimaryEntryTailColor(record:vec4u)->vec3f{
+  let work=svoStagePrimaryNodeVisits(record)+svoStagePrimaryVoxelCells(record);
+  if(work>=${SVO_PRIMARY_WORK_REFERENCE.total}u){return vec3f(1.0);}
+  let seed=(record.x>>16u)&3u;
+  if(seed==1u){return vec3f(.0784,.1647,.2902);}
+  if(seed==2u){return vec3f(0.0,.7373,.8314);}
+  return vec3f(.3608,.2824,.5098);
+}
+
 fn svoStagePrimaryClaimant(coordinate:vec2i)->vec3f{
   let metadata=svoStageMetadata(coordinate);
   let flags=metadata.y;
@@ -299,7 +323,18 @@ fn svoStageMedia(coordinate:vec2i)->vec3f{
   let coordinate=vec2i(i32(input.position.x),i32(input.position.y));
   let mode=stage.control.x;
   var color=SVO_STAGE_ABSENT;
-  if(mode==${view("pass-claimant")}){
+  if(mode==${view("primary-work")}){
+    let record=svoStagePrimaryWorkRecord(coordinate);
+    color=svoStagePrimaryWorkColor(svoStagePrimaryNodeVisits(record)+svoStagePrimaryVoxelCells(record),${SVO_PRIMARY_WORK_REFERENCE.total}u);
+  }else if(mode==${view("primary-voxel-cells")}){
+    color=svoStagePrimaryWorkColor(svoStagePrimaryVoxelCells(svoStagePrimaryWorkRecord(coordinate)),${SVO_PRIMARY_WORK_REFERENCE.voxelCells}u);
+  }else if(mode==${view("primary-node-visits")}){
+    color=svoStagePrimaryWorkColor(svoStagePrimaryNodeVisits(svoStagePrimaryWorkRecord(coordinate)),${SVO_PRIMARY_WORK_REFERENCE.nodeVisits}u);
+  }else if(mode==${view("primary-leaf-visits")}){
+    color=svoStagePrimaryWorkColor(svoStagePrimaryLeafVisits(svoStagePrimaryWorkRecord(coordinate)),${SVO_PRIMARY_WORK_REFERENCE.leafVisits}u);
+  }else if(mode==${view("primary-entry-tail")}){
+    color=svoStagePrimaryEntryTailColor(svoStagePrimaryWorkRecord(coordinate));
+  }else if(mode==${view("pass-claimant")}){
     color=svoStagePrimaryClaimant(coordinate);
   }else if(mode==${view("primary-depth")}){
     color=svoStageDistanceRamp(textureLoad(stageSplitGeometry,coordinate,0).w);
@@ -506,6 +541,7 @@ export class SparseVoxelRenderStageOverlay {
       [bindings.conePrepassIdentity, planes.conePrepassIdentity ?? this.fallback(formats.conePrepassIdentity)],
       [bindings.conePrepassRadiance, planes.conePrepassRadiance ?? this.fallback(formats.conePrepassRadiance)],
       [bindings.sceneRadiance, planes.sceneRadiance ?? this.fallback(formats.sceneRadiance)],
+      [bindings.primaryWork, planes.primaryWork ?? this.fallback(formats.primaryWork)],
     ];
     // Views are stable per allocation, so identity is a sufficient cache key and
     // a resize or a republished plane rebuilds the group exactly once.

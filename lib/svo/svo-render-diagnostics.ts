@@ -1,21 +1,20 @@
 /**
  * Render-stage views.
  *
- * Each view decodes a plane the production frame already wrote and presents it
- * instead of the composited image. Nothing here re-derives a measurement and
- * nothing here changes the frame being looked at: the stage overlay is a
- * read-only consumer encoded after the optical composite, so the picture it
- * explains is bit-identical to the one it replaces.
- *
- * That is the correction to what this section used to be. The previous
- * per-pixel cost heatmaps read invocation-private counters out of the traversal
- * megakernel, and the shipping path — raster primary visibility with split
- * deferred shading — resolves primary visibility in a pass whose counters die
- * before the pass that drew the overlay ever runs.
+ * Ordinary views decode planes the production frame already wrote and present
+ * them instead of the composited image. The primary-work family is the explicit
+ * exception: it requests a retained counter plane from traced visibility. Its
+ * UI labels that overhead, and the renderer gives it a separate timing context,
+ * so a diagnostic frame can never masquerade as the shipping frame it studies.
  */
 
 export const SVO_RENDER_STAGE_VIEWS = [
   "off",
+  "primary-work",
+  "primary-voxel-cells",
+  "primary-node-visits",
+  "primary-leaf-visits",
+  "primary-entry-tail",
   "pass-claimant",
   "primary-depth",
   "surface-normal",
@@ -37,6 +36,19 @@ export const SVO_RENDER_STAGE_VIEWS = [
 ] as const;
 
 export type SvoRenderStageView = typeof SVO_RENDER_STAGE_VIEWS[number];
+
+/** Views that ask the traced primary pass to publish invocation-private work. */
+export const SVO_PRIMARY_WORK_STAGE_VIEWS = Object.freeze([
+  "primary-work",
+  "primary-voxel-cells",
+  "primary-node-visits",
+  "primary-leaf-visits",
+  "primary-entry-tail",
+] as const satisfies readonly SvoRenderStageView[]);
+
+export function svoRenderStageUsesPrimaryWorkMap(view: SvoRenderStageView): boolean {
+  return (SVO_PRIMARY_WORK_STAGE_VIEWS as readonly SvoRenderStageView[]).includes(view);
+}
 
 /** Cone visibility caches one slot per user-shadable light. */
 export const SVO_RENDER_STAGE_MAXIMUM_LIGHT_SLOT = 7;
@@ -63,6 +75,7 @@ export type SvoRenderStagePalette = "sequential" | "categorical" | "identity" | 
 /** Which pass in the frame graph the view reads, in encode order. */
 export type SvoRenderStageGroup =
   | "Presentation"
+  | "Primary work"
   | "Primary raster"
   | "Identity"
   | "Discovery"
@@ -129,6 +142,20 @@ export const SVO_RENDER_STAGE_CLAIMANT_LEGEND = Object.freeze([
 
 const sequential = SVO_RENDER_STAGE_SEQUENTIAL_LEGEND;
 
+/** Measured p99 thresholds for the depth-3 hero-garden-hose reference view. */
+export const SVO_PRIMARY_WORK_REFERENCE = Object.freeze({
+  total: 174,
+  voxelCells: 125,
+  nodeVisits: 53,
+  leafVisits: 20,
+});
+
+const entryTail = Object.freeze([
+  { at: 0, color: "#142a4a", label: "Empty seed" },
+  { at: 0.5, color: "#00bcd4", label: "Leaf seed" },
+  { at: 1, color: "#ffffff", label: `≥${SVO_PRIMARY_WORK_REFERENCE.total} work` },
+] as const satisfies readonly SvoRenderStageLegendStop[]);
+
 const depth = Object.freeze([
   { at: 0, color: "#0a0f2a", label: "Camera" },
   { at: 0.35, color: "#00d9ff", label: "Near" },
@@ -186,6 +213,31 @@ const definitions = [
     view: "off", label: "Off", group: "Presentation", plane: "canvas",
     description: "Show the composited frame exactly as it presents.",
     palette: "sequential", legend: sequential,
+  },
+  {
+    view: "primary-work", label: "Node + voxel work", group: "Primary work", plane: "primaryWorkMap R+B",
+    description: `Exact hierarchy-node visits plus fine voxel-cell iterations. The ramp reaches white at the measured hero-garden-hose p99 (${SVO_PRIMARY_WORK_REFERENCE.total}); selecting this diagnostic forces traced primary visibility and adds one counter-plane write per pixel.`,
+    palette: "sequential", legend: sequential,
+  },
+  {
+    view: "primary-voxel-cells", label: "Voxel DDA cells", group: "Primary work", plane: "primaryWorkMap B",
+    description: `Exact iterations of the fine-cell DDA inside traceLeafVoxelPayload. White begins at the measured hero-garden-hose p99 (${SVO_PRIMARY_WORK_REFERENCE.voxelCells} cells).`,
+    palette: "sequential", legend: sequential,
+  },
+  {
+    view: "primary-node-visits", label: "SVO node visits", group: "Primary work", plane: "primaryWorkMap R",
+    description: `Exact hierarchy nodes visited by canonical parametric primary traversal. White begins at the measured hero-garden-hose p99 (${SVO_PRIMARY_WORK_REFERENCE.nodeVisits} nodes).`,
+    palette: "sequential", legend: sequential,
+  },
+  {
+    view: "primary-leaf-visits", label: "Leaf visits", group: "Primary work", plane: "primaryWorkMap G",
+    description: `Exact terminal leaves entered by each primary ray. White begins at the measured hero-garden-hose p99 (${SVO_PRIMARY_WORK_REFERENCE.leafVisits} leaves).`,
+    palette: "sequential", legend: sequential,
+  },
+  {
+    view: "primary-entry-tail", label: "Entry seed + slow tail", group: "Primary work", plane: "primaryWorkMap R:G:B",
+    description: `Entry-prepass result with pixels at or above the measured hero-garden-hose p99 (${SVO_PRIMARY_WORK_REFERENCE.total} node-plus-cell iterations) painted white. These pixels cluster into coherent bands; clipping all work above p99 models only 0.65–0.78% more primary-ray throughput.`,
+    palette: "categorical", legend: entryTail,
   },
   {
     view: "pass-claimant", label: "Pass claimant", group: "Primary raster", plane: "packedSurface metadata",
@@ -289,7 +341,7 @@ export const SVO_RENDER_STAGE_LABELS: Readonly<Record<SvoRenderStageView, string
 
 /** Frame-graph order, which is also the order the section presents them. */
 export const SVO_RENDER_STAGE_GROUPS: readonly SvoRenderStageGroup[] = Object.freeze([
-  "Presentation", "Primary raster", "Identity", "Discovery", "Cone prepass", "Lighting",
+  "Presentation", "Primary work", "Primary raster", "Identity", "Discovery", "Cone prepass", "Lighting",
 ]);
 
 export function svoRenderStageCode(view: SvoRenderStageView): number {

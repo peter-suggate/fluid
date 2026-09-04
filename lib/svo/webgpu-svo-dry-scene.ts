@@ -1743,6 +1743,12 @@ export interface SvoDryOptimizationExperiments {
    */
   readonly primaryLeafVisitHistogram?: boolean;
   /**
+   * Publish exact per-pixel primary work counters into an rgba32uint texture.
+   * Benchmark diagnostic only: the extra storage writes perturb the pass and
+   * must never be used as the timed production arm.
+   */
+  readonly primaryWorkMap?: boolean;
+  /**
    * Seed the primary megakernel with a rasterized conservative entry depth
    * instead of starting every ray at the root AABB the camera sits inside.
    *
@@ -2091,6 +2097,9 @@ export function createSvoDrySceneFragmentWGSL(
   const reduced = coneLightingScale !== 1;
   const split = shadingPath === "split";
   const splitGroup = reduced ? 2 : 1;
+  // One renderer also compiles inline cone-prepass modules from this builder;
+  // the diagnostic belongs only to its traced split visibility module.
+  const primaryWorkMap = experiments.primaryWorkMap === true && split && !rasterPrimary;
   // Compile-time because the codec is: producer and consumer must agree about a
   // shift, and the selector is the same pure function of the environment that
   // the voxeliser resolves its own arm from. A mismatch would render a wrong
@@ -3285,6 +3294,32 @@ fn drySplitIdentityAt(coordinate:vec2i)->vec4u{return textureLoad(drySplitOpaque
   const primaryEntrySeedDeclarationWGSL = primaryEntrySeed ? /* wgsl */ `
 @group(${splitGroup}) @binding(${SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.seedBinding}) var dryPrimaryEntrySeedRead:texture_2d<u32>;
 ` : "";
+  const primaryWorkMapWGSL = primaryWorkMap ? /* wgsl */ `
+@group(${splitGroup}) @binding(7) var dryPrimaryWorkMapWrite:texture_storage_2d<rgba32uint,write>;
+var<private> dryPrimaryWorkNodeVisits:u32;
+var<private> dryPrimaryWorkLeafVisits:u32;
+var<private> dryPrimaryWorkVoxelCells:u32;
+var<private> dryPrimaryWorkPlanarTests:u32;
+var<private> dryPrimaryWorkCandidateNodes:u32;
+var<private> dryPrimaryWorkPrimitiveTests:u32;
+var<private> dryPrimaryWorkEntryState:u32;
+fn dryPrimaryWorkReset(){
+  dryPrimaryWorkNodeVisits=0u;dryPrimaryWorkLeafVisits=0u;dryPrimaryWorkVoxelCells=0u;
+  dryPrimaryWorkPlanarTests=0u;dryPrimaryWorkCandidateNodes=0u;dryPrimaryWorkPrimitiveTests=0u;
+  dryPrimaryWorkEntryState=0u;
+}
+fn dryPrimaryWorkPublish(coordinate:vec2i,hit:DryHit){
+  let terminal=select(2u,1u,hit.t<DRY_MISS);
+  let field=select(15u,hit.fieldSource&15u,hit.t<DRY_MISS);
+  let nodeAndSeed=min(dryPrimaryWorkNodeVisits,65535u)|(min(dryPrimaryWorkEntryState,3u)<<16u);
+  let leafAndResult=min(dryPrimaryWorkLeafVisits,65535u)|(terminal<<16u)|(field<<20u);
+  let analytic=min(dryPrimaryWorkPlanarTests,255u)
+    |(min(dryPrimaryWorkCandidateNodes,4095u)<<8u)
+    |(min(dryPrimaryWorkPrimitiveTests,4095u)<<20u);
+  textureStore(dryPrimaryWorkMapWrite,coordinate,
+    vec4u(nodeAndSeed,leafAndResult,dryPrimaryWorkVoxelCells,analytic));
+}
+` : "";
   // The seed is a *per-ray* fact, not a per-pixel one. The primary fragment
   // loads it for the one ray it owns and `traceStaticFrom` takes it, which
   // clears it: every later ray from the same invocation — the walk behind a
@@ -3323,7 +3358,7 @@ fn dryPrimaryEntrySeedTake(initialMinimum:f32)->DryPrimaryEntrySeed{
 }
 ` : "";
   const primaryEntrySeedTakeWGSL = primaryEntrySeed
-    ? "let entrySeed=dryPrimaryEntrySeedTake(initialMinimum);" : "";
+    ? `let entrySeed=dryPrimaryEntrySeedTake(initialMinimum);${primaryWorkMap ? "dryPrimaryWorkEntryState=entrySeed.state;" : ""}` : "";
   // The one writer. Every other entry point in this module leaves the private
   // state at its zero-initialized `UNSEEDED`, which is why the seed plane is
   // reachable from the primary fragment and from nowhere else.
@@ -3356,7 +3391,7 @@ fn dryPrimaryEntrySeedTake(initialMinimum:f32)->DryPrimaryEntrySeed{
 @group(${splitGroup}) @binding(1) var drySplitGeometryRead:texture_2d<f32>;
 @group(${splitGroup}) @binding(4) var drySplitOpaqueIdentityWrite:texture_storage_2d<rg32uint,write>;
 @group(${splitGroup}) @binding(5) var drySplitOpaqueIdentityRead:texture_2d<u32>;
-${splitGlassKeyDeclarationWGSL}${primaryEntrySeedDeclarationWGSL}
+${splitGlassKeyDeclarationWGSL}${primaryEntrySeedDeclarationWGSL}${primaryWorkMapWGSL}
 ${splitRigidReadWGSL}
 ` : "";
   const voxelLightCacheGroup = splitGroup + 1;
@@ -4378,9 +4413,9 @@ fn dryPrimarySeamHit(sample:DryPrimarySeamSample)->DryHit{
   return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));
 }
 @fragment fn dryVisibilityMain(input:VertexOut)->DryVisibilityOut{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;${primaryWorkMap ? "dryPrimaryWorkReset();" : ""}
   ${primaryEntrySeedLoadWGSL}
-  let opaque=${splitPrimaryTraceWGSL};${splitVisibilityGlassDiscoveryWGSL}
+  let opaque=${splitPrimaryTraceWGSL};${primaryWorkMap ? "dryPrimaryWorkPublish(vec2i(input.position.xy),opaque);" : ""}${splitVisibilityGlassDiscoveryWGSL}
   ${splitVisibilityGlassReturnWGSL}
   if(opaque.t<DRY_MISS){let voxelGlass=dryHitThinDielectric(opaque);let media=dryMediumPair(rd,opaque.normal,select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_GLASS,voxelGlass));let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let producer=select(SVO_GBUFFER_PRODUCER_TRACED,SVO_GBUFFER_PRODUCER_GLASS,voxelGlass);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(producer);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
   return drySplitVisibilityOut(svoGBufferMiss(vec3f(0.0),0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
@@ -5209,6 +5244,7 @@ fn dryPlanarCatalogHit(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
     ||dry.planarBoundaries.z!=${PLANAR_BOUNDARY_PATCH_BYTES}u){return best;}
   let count=min(dry.planarBoundaries.x,arrayLength(&dryPlanarBoundaries));
   for(var boundaryIndex=0u;boundaryIndex<count;boundaryIndex+=1u){
+    ${primaryWorkMap ? "dryPrimaryWorkPlanarTests+=1u;" : ""}
     let boundary=dryPlanarBoundaries[boundaryIndex];
     let exact=intersectPlanarBoundary(boundary,ro,rd,max(tMin,1e-4),best.t);
     if(exact.valid==0u){continue;}
@@ -5232,6 +5268,7 @@ fn traceScenePrimitives(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,ignoredOwner:u32)->D
   for(var visit=0u;visit<${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES}u&&stackSize>0u;visit+=1u){
     stackSize-=1u;let nodeIndex=stack[stackSize];
     if(nodeIndex>=dry.primitiveCandidates.y){continue;}
+    ${primaryWorkMap ? "dryPrimaryWorkCandidateNodes+=1u;" : ""}
     let node=dryPrimitive(dry.primitiveCandidates.x+nodeIndex);
     let interval=dryBoundsInterval(bitcast<vec3f>(node.centerKind.xyz),bitcast<vec3f>(node.dimensionsIdentity.xyz),ro,rd,tMin,best.t);
     if(interval.valid==0u){continue;}
@@ -5239,6 +5276,7 @@ fn traceScenePrimitives(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,ignoredOwner:u32)->D
     if(right==0xffffffffu){
       if(leftOrPrimitive>=dry.metadata.x){continue;}let record=dryPrimitive(leftOrPrimitive);let owner=svoPrimitiveOwnerId(record);
       if(owner==ignoredOwner||dryOpaqueOwnerSuppressed(owner)){continue;}
+      ${primaryWorkMap ? "dryPrimaryWorkPrimitiveTests+=1u;" : ""}
       let candidate=primitiveHit(record,ro,rd,tMin,best.t);if(candidate.t<best.t){best=candidate;}
     }else if(stackSize+2u<=${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK}u){
       stack[stackSize]=right;stack[stackSize+1u]=leftOrPrimitive;stackSize+=2u;
@@ -5296,6 +5334,7 @@ fn traceLeafVoxelPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit${visitNodeParamet
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<cellMinimum)||any(cell>cellMaximum)||entry>${primaryBrickExitWGSL}){break;}
     ${primaryMacroSkipWGSL}
+    ${primaryWorkMap ? "dryPrimaryWorkVoxelCells+=1u;" : ""}
     var cellIdentity=0u;var cellSolid=false;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex<dryVoxelCapacity()){
@@ -5411,6 +5450,7 @@ fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
   for(var leafVisit=0u;leafVisit<${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u&&leafVisit<leafBudget;leafVisit+=1u){
     let ray=SvoRay(ro,minimum,rd,traversalMaximum);
     let leaf=dryTraversalCursorNextPrimary(ray,mapping,&continuation);
+    ${primaryWorkMap ? "dryPrimaryWorkNodeVisits+=leaf.visits;" : ""}
 
     ${screenSpaceProxyTraceWGSL}
     if(leaf.status!=SVO_STATUS_HIT){
@@ -5419,6 +5459,7 @@ fn traceStaticFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
       else if(leaf.status!=SVO_STATUS_MISS){}
       break;
     }
+    ${primaryWorkMap ? "dryPrimaryWorkLeafVisits+=1u;" : ""}
     ${primaryVisitRecordTakeWGSL}
     let resolved=${primaryLeafResolveCallWGSL};
     if(resolved.kind==DRY_LEAF_SKIP){minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);continue;}
@@ -6409,6 +6450,8 @@ export class SparseVoxelDrySceneRenderer {
   private splitGeometryView?: GPUTextureView;
   private splitOpaqueIdentity?: GPUTexture;
   private splitOpaqueIdentityView?: GPUTextureView;
+  private primaryWorkMap?: GPUTexture;
+  private primaryWorkMapView?: GPUTextureView;
   private splitGlassKey?: GPUTexture;
   private splitGlassKeyView?: GPUTextureView;
   private splitGlassDepth?: GPUTexture;
@@ -8276,6 +8319,10 @@ export class SparseVoxelDrySceneRenderer {
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: "write-only", format: SVO_DRY_SPLIT_GEOMETRY_FORMAT } },
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: "write-only", format: SVO_DRY_SPLIT_IDENTITY_FORMAT } },
+        ...(this.experiments.primaryWorkMap
+          ? [{ binding: 7, visibility: GPUShaderStage.FRAGMENT,
+            storageTexture: { access: "write-only" as const, format: "rgba32uint" as const } }]
+          : []),
         // The entry-depth seed rides the visibility group because only the
         // visibility entry point reaches it: no lighting or compute-resolve
         // pipeline carries this layout, so no secondary ray can consult it.
@@ -8734,13 +8781,15 @@ export class SparseVoxelDrySceneRenderer {
     if (this.shadingPath === "inline" || !this.targetWidth || !this.targetHeight
       || !this.splitVisibilityLayout || !this.splitLightingLayout) return;
     this.ensureBrickCoverageBuffers();
-    if (!this.splitGeometry || !this.splitOpaqueIdentity || (this.rasterGlassDiscovery && (!this.splitGlassKey || !this.splitGlassDepth))
+    if (!this.splitGeometry || !this.splitOpaqueIdentity || (this.experiments.primaryWorkMap && !this.primaryWorkMap)
+      || (this.rasterGlassDiscovery && (!this.splitGlassKey || !this.splitGlassDepth))
       || (this.screenSpaceTerminationPixels > 0 && !this.scenePrimitiveComputeDepth)
       || (this.rasterRigidDiscovery && !this.rasterRigidPrimaryGeometry)
       || (this.primaryEntryPrepassEnabled && (!this.primaryEntrySeed || !this.primaryEntryDepth))
       || this.splitWidth !== this.targetWidth || this.splitHeight !== this.targetHeight) {
       this.splitGeometry?.destroy();
       this.splitOpaqueIdentity?.destroy();
+      this.primaryWorkMap?.destroy();
       this.splitGlassKey?.destroy();
       this.splitGlassDepth?.destroy();
       this.rasterRigidPrimaryGeometry?.destroy();
@@ -8763,6 +8812,15 @@ export class SparseVoxelDrySceneRenderer {
           | (this.rasterRigidDiscovery || this.rasterPrimary ? GPUTextureUsage.RENDER_ATTACHMENT : 0),
       });
       this.splitOpaqueIdentityView = this.splitOpaqueIdentity.createView();
+      if (this.experiments.primaryWorkMap) {
+        this.primaryWorkMap = this.device.createTexture({
+          label: "Sparse voxel exact primary work map",
+          size: [this.targetWidth, this.targetHeight],
+          format: "rgba32uint",
+          usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+        });
+        this.primaryWorkMapView = this.primaryWorkMap.createView();
+      }
       if (this.screenSpaceTerminationPixels > 0) {
         this.scenePrimitiveComputeDepth = this.device.createTexture({
           label: "Sparse voxel tiered scene-primitive compute depth",
@@ -8827,6 +8885,9 @@ export class SparseVoxelDrySceneRenderer {
       entries: [
         { binding: 0, resource: this.splitGeometryView! },
         { binding: 4, resource: this.splitOpaqueIdentityView! },
+        ...(this.experiments.primaryWorkMap
+          ? [{ binding: 7, resource: this.primaryWorkMapView! }]
+          : []),
         ...(this.primaryEntryPrepassEnabled
           ? [{ binding: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.seedBinding, resource: this.primaryEntrySeedView! }]
           : []),
@@ -10221,6 +10282,9 @@ export class SparseVoxelDrySceneRenderer {
     return this.gBufferTargets.textures;
   }
 
+  /** Exact per-pixel work counters; present only for the benchmark diagnostic arm. */
+  get primaryWorkMapTexture(): GPUTexture | undefined { return this.primaryWorkMap; }
+
   /**
    * Read-only views of every plane this pipeline published for the frame just
    * encoded. Absent entries are configurations that allocate no such plane —
@@ -10235,6 +10299,7 @@ export class SparseVoxelDrySceneRenderer {
       hardwareDepth: gBuffer?.hardwareDepth,
       splitGeometry: this.splitGeometryView,
       splitOpaqueIdentity: this.splitOpaqueIdentityView,
+      primaryWork: this.primaryWorkMapView,
       splitGlassKey: this.splitGlassKeyView,
       rigidPrimaryGeometry: this.rasterRigidPrimaryGeometryView,
       conePrepassVisibility: this.conePrepassVisibilityView,
@@ -11050,6 +11115,7 @@ export class SparseVoxelDrySceneRenderer {
     this.primaryEntryLeafCapacity = 0;
     this.splitGeometry?.destroy();
     this.splitOpaqueIdentity?.destroy();
+    this.primaryWorkMap?.destroy();
     this.splitGlassKey?.destroy();
     this.splitGlassDepth?.destroy();
     this.rasterRigidPrimaryGeometry?.destroy();
@@ -11057,6 +11123,8 @@ export class SparseVoxelDrySceneRenderer {
     this.splitGeometryView = undefined;
     this.splitOpaqueIdentity = undefined;
     this.splitOpaqueIdentityView = undefined;
+    this.primaryWorkMap = undefined;
+    this.primaryWorkMapView = undefined;
     this.scenePrimitiveComputeDepth?.destroy();
     this.scenePrimitiveComputeQueue?.destroy();
     this.scenePrimitiveComputeIndirect?.destroy();

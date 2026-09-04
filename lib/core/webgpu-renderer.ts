@@ -90,7 +90,12 @@ import {
 } from "../svo/svo-render-options";
 import { webGPUPlatformResourcePlugin } from "./webgpu-platform-resource";
 import { disabledRenderStagesFrom, disabledRenderStagesKey } from "./render-stage-switches";
-import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoRenderDiagnostics } from "../svo/svo-render-diagnostics";
+import {
+  DEFAULT_SVO_RENDER_DIAGNOSTICS,
+  normalizeSvoRenderDiagnostics,
+  svoRenderStageUsesPrimaryWorkMap,
+  type SvoRenderDiagnostics,
+} from "../svo/svo-render-diagnostics";
 import { SparseVoxelRenderStageOverlay } from "../svo/webgpu-svo-stage-overlay";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoEnvironmentTreeRefinementDepth, svoRenderTuningKey, type SvoRenderTuning } from "../svo/svo-render-tuning";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../svo/svo-screen-space-termination";
@@ -777,6 +782,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
   uniformBuffer: GPUBuffer,
   bodyBuffer: GPUBuffer,
   primaryTraversal: SvoPrimaryTraversalMode,
+  primaryWorkMap = false,
 ): SparseVoxelDrySceneRenderer {
   if (primaryTraversal === "raster"
     && device.limits.maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE) {
@@ -799,6 +805,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
     rasterArms,
     rasterArms,
     true,
+    { primaryWorkMap },
   );
 }
 
@@ -887,6 +894,8 @@ export class FluidLabRenderer {
    */
   private requestedPrimaryTraversal: SvoPrimaryTraversalMode =
     DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "raster";
+  /** Whether the rebuilt traced-primary shader publishes its per-pixel counter plane. */
+  private requestedPrimaryWorkMap = false;
   private presentationTexture?: GPUTexture;
   private presentationTextureKey = "";
   private activeRenderScale = 1;
@@ -1045,10 +1054,16 @@ export class FluidLabRenderer {
   private applyPrimaryTraversalRequest(
     requested: SvoPrimaryTraversalMode,
     scale: SvoPrimaryTraversalScale,
+    primaryWorkMap = false,
   ): void {
-    const resolved = resolveSvoPrimaryTraversal(requested, scale);
-    if (resolved === this.requestedPrimaryTraversal) return;
+    // A primary-work view describes ray traversal, so it cannot silently show
+    // an all-zero plane from the proxy-raster primary. The view is an explicit
+    // request for the traced diagnostic arm regardless of the normal adaptive
+    // traversal choice.
+    const resolved = primaryWorkMap ? "traced" : resolveSvoPrimaryTraversal(requested, scale);
+    if (resolved === this.requestedPrimaryTraversal && primaryWorkMap === this.requestedPrimaryWorkMap) return;
     this.requestedPrimaryTraversal = resolved;
+    this.requestedPrimaryWorkMap = primaryWorkMap;
     this.failedOptionalPipelines.delete("svo-dry-scene");
     this.optionalPipelineFailures.delete("svo-dry-scene");
     const retired = this.svoDryScenePipeline;
@@ -1247,6 +1262,7 @@ export class FluidLabRenderer {
       // emits more proxies than the target has pixels.
       (device) => createProductionSparseVoxelDrySceneRenderer(
         device, this.uniformBuffer!, this.bodyBuffer!, this.requestedPrimaryTraversal,
+        this.requestedPrimaryWorkMap,
       ),
       (pipeline) => pipeline.initialize((label, completed, total) => this.reportSvoPipelineProgress(label, completed, total)),
       (pipeline) => {
@@ -2834,10 +2850,11 @@ export class FluidLabRenderer {
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     const requestedSvoDiagnostics = normalizeSvoRenderDiagnostics(svoDiagnostics);
     const activeSvoDiagnostics = requestedSvoDiagnostics;
+    const primaryWorkMapRequested = svoRenderStageUsesPrimaryWorkMap(activeSvoDiagnostics.stageView);
     const tuningKey = svoRenderTuningKey(activeSvoTuning);
-    // The stage view is a presentation choice, not a render choice: it changes
-    // which plane is displayed and nothing that produced one. It still keys the
-    // trace so a captured partition is never labelled with the wrong view.
+    // Most stage views are read-only presentation choices. Primary-work views
+    // are the named exception: they compile one counter-plane write into traced
+    // visibility, so the trace key and frame context both separate their cost.
     const diagnosticsKey = `${activeSvoDiagnostics.stageView}:${activeSvoDiagnostics.lightSlot}:${activeSvoDiagnostics.maximumTraversalDepth}:${activeSvoDiagnostics.maximumNodeVisits}:${tuningKey}`;
     if (diagnosticsKey !== this.svoRenderDiagnosticsKey) {
       this.svoRenderDiagnosticsKey = diagnosticsKey;
@@ -2848,7 +2865,7 @@ export class FluidLabRenderer {
     // withheld would pool into one mean and the panel would report the cost of
     // neither pipeline.
     const disabledStages = disabledRenderStagesFrom(svoLightingOptions.disabledStages);
-    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:primary-${svoLightingOptions.primaryTraversal ?? "raster"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
+    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:primary-${svoLightingOptions.primaryTraversal ?? "raster"}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
     if (presentationContext !== this.presentationContext) {
       this.presentationContext = presentationContext;
       this.resetPresentationTrace();
@@ -2917,7 +2934,7 @@ export class FluidLabRenderer {
         leafBricks: this.svoDrySceneSource?.structural?.capacities.leaves,
         targetPixels: this.presentationTexture.width * this.presentationTexture.height,
         environmentRefinementDepth,
-      });
+      }, primaryWorkMapRequested);
     }
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
       gridOverlay, this.simulationRunning,
