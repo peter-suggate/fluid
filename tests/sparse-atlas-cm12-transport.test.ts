@@ -237,6 +237,35 @@ test("CM12 face extension uses the rho > 0.5 MAC source band", () => {
     "faces outside the narrow band should retain the sparse far-field fill");
 });
 
+for (const fixture of [
+  { name: "B1", dimensions: [16, 8, 8] as const, spanBricks: 1 },
+  { name: "macro B1", dimensions: [32, 16, 16] as const, spanBricks: 2 },
+] as const) test(`${fixture.name} velocity extension reaches the next parallel face`, () => {
+  const source = (x: number, density: number): SparseAdaptiveMassBrick => ({
+    key: x,
+    coordinate: [x, 0, 0],
+    ...(fixture.spanBricks === 1 ? {} : { spanBricks: fixture.spanBricks }),
+    resolution: 1,
+    density: new Float64Array([density]),
+    gamma: new Float64Array([1]),
+  });
+  const atlas = createSparseAdaptiveMassAtlas(fixture.dimensions, [
+    source(0, 1), source(fixture.spanBricks, 0),
+  ]);
+  const grid = buildSparseAtlasCompositeGrid(atlas);
+  const density = Float64Array.from(grid.cells, (cell) => cell.density);
+  const input = Float64Array.from(grid.gradientRows, (row) => row.axis === 0 ? 3 : 0);
+  const fallback = new Float64Array(grid.gradientRows.length).fill(9);
+  const extended = extrapolateSparseAtlasFaceVelocity(
+    grid, density, input, fallback, atlas.brickFineResolution * fixture.spanBricks,
+  );
+  const farFace = grid.gradientRows.find((row) => row.axis === 0
+    && row.centerFine[0] === fixture.dimensions[0]);
+  assert.ok(farFace, "fixture must expose the dry brick's positive x face");
+  assert.equal(extended[farFace.id], 3,
+    "the FIM graph must not lose its normal axis beyond a B2-width search");
+});
+
 test("large-CFL transport allocates reachable tiles without scanning the domain", () => {
   const atlas = createSparseAdaptiveMassAtlas([64, 8, 8], [
     brick(1, [1, 0, 0], 8),

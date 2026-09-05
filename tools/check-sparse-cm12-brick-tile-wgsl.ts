@@ -2,6 +2,7 @@
 /** Compile and execute the BTI1 service ABI against its CPU mirrors. */
 
 import assert from "node:assert/strict";
+import { writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { buildSparseAtlasCompositeGrid } from
   "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
@@ -14,24 +15,47 @@ import {
 import { createSparseCM12BrickTileImageWGSL } from
   "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-image.wgsl";
 import {
-  createSparseAdaptiveMassAtlas,
+  compileSparseCM12BrickTileFaceProgram,
+  validateSparseCM12BrickTileFaceProgram,
+} from "../lib/methods/adaptive-mass/sparse-cm12-brick-tile-face-program";
+import {
   sparseBrickKey,
+  sparseBrickLadder,
+  type SparseAdaptiveMassAtlas,
   type SparseAdaptiveMassBrick,
   type SparseBrickResolution,
 } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
+import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock,
+  releaseWebGPUExclusiveLockSync } from
   "../lib/harness/webgpu-smoke-isolation";
 
-const lattice = [2, 1, 1] as const;
+// Keep >2:1 grading bypass local to this topology-service adversary. The tail
+// is the ordinary four-rung row; the prefix adds both unsupported-jump probes.
+const resolutions = [8, 2, 8, 1, 8, 4, 2, 1] as const;
+const lattice = [resolutions.length, 1, 1] as const;
 const brick = (x: number, resolution: SparseBrickResolution): SparseAdaptiveMassBrick => ({
   key: sparseBrickKey([x, 0, 0], lattice), coordinate: [x, 0, 0], resolution,
   density: new Float64Array(resolution ** 3),
   gamma: new Float64Array(resolution ** 3).fill(1),
 });
-const atlas = createSparseAdaptiveMassAtlas([16, 8, 8], [brick(0, 8), brick(1, 4)],
-  1, 8);
+const bricks = resolutions.map((resolution, x) => brick(x, resolution));
+const directory = new Map(bricks.map((candidate) => [candidate.key, candidate] as const));
+const atlas: SparseAdaptiveMassAtlas = {
+  dimensions: [8 * resolutions.length, 8, 8],
+  brickFineResolution: 8,
+  brickCellCapacity: 8 ** 3,
+  ladder: sparseBrickLadder(8),
+  brickDimensions: lattice,
+  bricks,
+  directory,
+  directoriesBySpan: new Map([[1, directory]]),
+  maximumSpanBricks: 1,
+  generation: 1,
+};
 const grid = buildSparseAtlasCompositeGrid(atlas);
 const image = compileSparseCM12BrickTileImage(grid);
+const faceProgram = compileSparseCM12BrickTileFaceProgram(image, grid);
+validateSparseCM12BrickTileFaceProgram(faceProgram, image, grid);
 const outputWords = Math.max(image.layout.tileCapacity * 64,
   atlas.dimensions[0] * atlas.dimensions[1] * atlas.dimensions[2],
   image.layout.tileCapacity * 6 * 64 * 2);
@@ -61,6 +85,7 @@ fn checkFaces(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)la
 }
 `;
 
+let lockReleased = false;
 await acquireWebGPUExclusiveLock("dawn-check", "tools/check-sparse-cm12-brick-tile-wgsl.ts");
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -83,15 +108,15 @@ try {
   try {
     device.queue.writeBuffer(topology, 0, image.words.buffer as ArrayBuffer,
       image.words.byteOffset, image.words.byteLength);
-    const module = device.createShaderModule({ label: "BTI1 service check", code: shader });
-    const info = await module.getCompilationInfo();
+    const shaderModule = device.createShaderModule({ label: "BTI1 service check", code: shader });
+    const info = await shaderModule.getCompilationInfo();
     const errors = info.messages.filter((message) => message.type === "error");
     if (errors.length > 0) throw new Error(errors.map((message) =>
       `${message.lineNum}:${message.linePos} ${message.message}`).join("\n"));
-    const pipelines = await Promise.all(["checkCells", "checkPoints", "checkFaces"].map(
-      (entryPoint) => device.createComputePipelineAsync({ label: `BTI1 ${entryPoint}`,
-        layout: "auto", compute: { module, entryPoint } }),
-    ));
+    const entryPoints = ["checkCells", "checkPoints", "checkFaces"] as const;
+    const pipelines = await Promise.all(entryPoints.map((entryPoint) =>
+      device.createComputePipelineAsync({ label: `BTI1 ${entryPoint}`,
+        layout: "auto", compute: { module: shaderModule, entryPoint } })));
     for (let check = 0; check < pipelines.length; check += 1) {
       device.queue.writeBuffer(output, 0, new Uint32Array(outputWords));
       const pipeline = pipelines[check]!;
@@ -126,12 +151,23 @@ try {
             assert.equal(actual[at + 1], rows.reduce((sum, row) => (sum + row) >>> 0, 0));
           }
     }
-    process.stdout.write(`${JSON.stringify({ passed: true, backend,
+    const receipt = `${JSON.stringify({ passed: true, backend,
+      resolutions,
       cells: grid.cells.length, rows: grid.gradientRows.length,
-      shaderBytes: shader.length })}\n`);
+      mixedSeamRows: grid.mixedSeamRowCount,
+      seamPorts: faceProgram.layout.seamPortCount, shaderBytes: shader.length })}\n`;
+    // Dawn's Node wrapper faults while finalizing an intentionally ungraded
+    // B1 image on Metal. This gate is process-isolated, so after all readbacks
+    // pass, return the repository lease synchronously and let the OS retire
+    // the child process's native resources without running wrapper finalizers.
+    releaseWebGPUExclusiveLockSync();
+    lockReleased = true;
+    writeSync(1, receipt);
+    process.exit(0);
   } finally {
-    topology.destroy();output.destroy();readback.destroy();device.destroy();
+    // The standalone process owns these buffers; Dawn releases them with the
+    // device after the repository lease is returned below.
   }
 } finally {
-  await releaseWebGPUExclusiveLock();
+  if (!lockReleased) await releaseWebGPUExclusiveLock();
 }

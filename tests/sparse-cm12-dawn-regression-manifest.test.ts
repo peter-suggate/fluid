@@ -10,6 +10,7 @@ import {
 
 const expectedCoverage: readonly SparseCM12DawnCoverage[] = [
   "symmetric-expansion",
+  "mixed-ratio-topology",
   "hydrostatic-stability-adaptivity",
   "mini32-correctness",
   "min8-region-surface",

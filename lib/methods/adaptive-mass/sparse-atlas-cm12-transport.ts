@@ -481,27 +481,32 @@ function faceTopology(
     const row = grid.gradientRows[rowIndex];
     for (let axisIndex = 0; axisIndex < 3; axisIndex += 1) {
       const axis = axisIndex as 0 | 1 | 2;
+      let maximumOffset = 1;
+      for (const term of row.terms) maximumOffset = Math.max(maximumOffset,
+        Math.ceil(grid.cells[term.cellId].widthsFine[axis]));
       for (let signIndex = 0; signIndex < 2; signIndex += 1) {
         const sign = signIndex === 0 ? -1 : 1;
-      const slot = 2 * axis + (sign > 0 ? 1 : 0);
-      // A compact coarse face occupies multiple finest-lattice bins. Walk
-      // through those aliases until the first distinct face is reached.
-      for (let offset = 1; offset <= 4; offset += 1) {
-        const coordinate0 = row.centerFine[0] + (axis === 0 ? sign * offset : 0);
-        const coordinate1 = row.centerFine[1] + (axis === 1 ? sign * offset : 0);
-        const coordinate2 = row.centerFine[2] + (axis === 2 ? sign * offset : 0);
-        const candidate = faceBinAtValues(
-          grid, bins, row.axis, coordinate0, coordinate1, coordinate2,
-        );
-        if (candidate === undefined || candidate === row.id) continue;
-        neighbors[slot][row.id] = candidate;
-        spacing[slot][row.id] = Math.abs(
-          grid.gradientRows[candidate].centerFine[axis] - row.centerFine[axis],
-        );
-        break;
+        const slot = 2 * axis + (sign > 0 ? 1 : 0);
+        // A compact coarse face occupies multiple finest-lattice bins. Walk
+        // through those aliases until the first distinct face is reached. The
+        // incident cells supply the exact local reach: a B1 or macro face can
+        // be farther away than the former B2-width constant of four cells.
+        for (let offset = 1; offset <= maximumOffset; offset += 1) {
+          const coordinate0 = row.centerFine[0] + (axis === 0 ? sign * offset : 0);
+          const coordinate1 = row.centerFine[1] + (axis === 1 ? sign * offset : 0);
+          const coordinate2 = row.centerFine[2] + (axis === 2 ? sign * offset : 0);
+          const candidate = faceBinAtValues(
+            grid, bins, row.axis, coordinate0, coordinate1, coordinate2,
+          );
+          if (candidate === undefined || candidate === row.id) continue;
+          neighbors[slot][row.id] = candidate;
+          spacing[slot][row.id] = Math.abs(
+            grid.gradientRows[candidate].centerFine[axis] - row.centerFine[axis],
+          );
+          break;
+        }
       }
     }
-  }
   }
   topology.bins = bins;
   topology.neighbors = neighbors;

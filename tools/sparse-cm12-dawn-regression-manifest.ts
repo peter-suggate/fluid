@@ -10,6 +10,7 @@ export const SPARSE_CM12_DAWN_SUITE_BUDGET_MS = 180_000;
 
 export type SparseCM12DawnCoverage =
   | "symmetric-expansion"
+  | "mixed-ratio-topology"
   | "hydrostatic-stability-adaptivity"
   | "mini32-correctness"
   | "min8-region-surface"
@@ -59,6 +60,14 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     description: "D4 field/topology symmetry, sparse expansion, and mass conservation",
     testFile: "tests/sparse-cm12-symmetric-corner-expansion-dawn.test.ts",
     timeoutMs: 20_000,
+  },
+  {
+    id: "mixed-ratio-topology",
+    coverage: "mixed-ratio-topology",
+    kind: "correctness",
+    description: "BTI1 GPU services and BFP1 partitions preserve 8|2, 8|1, and four-rung topology",
+    testFile: "tools/check-sparse-cm12-brick-tile-wgsl.ts",
+    timeoutMs: 10_000,
   },
   {
     id: "hydrostatic-adaptivity",
