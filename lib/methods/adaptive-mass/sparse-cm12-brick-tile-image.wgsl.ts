@@ -5,6 +5,7 @@ import {
   SPARSE_CM12_BRICK_TILE_IMAGE_FLAG,
   SPARSE_CM12_BRICK_TILE_IMAGE_HEADER,
   SPARSE_CM12_BRICK_TILE_IMAGE_INVALID,
+  SPARSE_CM12_BRICK_TILE_IMAGE_OWNER_WORDS,
   SPARSE_CM12_BRICK_TILE_IMAGE_TILE,
   SPARSE_CM12_BRICK_TILE_IMAGE_TILE_WORDS,
   SPARSE_CM12_BRICK_TILE_IMAGE_TILES_PER_LEAF,
@@ -37,15 +38,16 @@ const BTI1_INVALID:u32=0x${SPARSE_CM12_BRICK_TILE_IMAGE_INVALID.toString(16)}u;
 const BTI1_ACTIVE:u32=0x${SPARSE_CM12_BRICK_TILE_IMAGE_FLAG.active.toString(16)}u;
 const BTI1_LEAF_COUNT:u32=${l.leafCount}u;
 const BTI1_TILE_CAPACITY:u32=${l.tileCapacity}u;
+const BTI1_OWNER_CAPACITY:u32=${l.spatialTileCapacity}u;
+const BTI1_MAX_SPAN_LOG:u32=${l.maximumSpanLog}u;
+const BTI1_HEADER_BASE:u32=${base}u;
 const BTI1_BRICK_BASE:u32=${base + l.brickBaseWords}u;
 const BTI1_TILE_BASE:u32=${base + l.tileBaseWords}u;
 const BTI1_FACE_MASK_BASE:u32=${base + l.faceMaskBaseWords}u;
 const BTI1_EXCEPTION_BASE:u32=${base + l.exceptionBaseWords}u;
 const BTI1_SPATIAL_OWNER_BASE:u32=${base + l.spatialOwnerBaseWords}u;
-const BTI1_SPATIAL_DIMS:vec3u=vec3u(${l.spatialTileDimensions[0]}u,
+const BTI1_LOGICAL_DIMS:vec3u=vec3u(${l.spatialTileDimensions[0]}u,
   ${l.spatialTileDimensions[1]}u,${l.spatialTileDimensions[2]}u);
-const BTI1_FINEST_DIMS:vec3u=vec3u(${l.finestDimensions[0]}u,
-  ${l.finestDimensions[1]}u,${l.finestDimensions[2]}u);
 fn bti1Load(at:u32)->u32{return ${arena}[at];}
 fn bti1TileAt(tile:u32)->u32{return BTI1_TILE_BASE
   +${SPARSE_CM12_BRICK_TILE_IMAGE_TILE_WORDS}u*tile;}
@@ -69,11 +71,36 @@ fn bti1Cell(tile:u32,lane:u32)->u32{
   return first+local.x+(strides&0xffffu)*local.y
     +(strides>>16u)*local.z;
 }
+fn bti1OwnerHash(key:u32,spanLog:u32)->u32{
+  return ((key^((spanLog+1u)*0x9e3779b9u))*0x85ebca6bu)
+    &(BTI1_OWNER_CAPACITY-1u);
+}
+fn bti1OwnerLeaf(key:u32,spanLog:u32)->u32{
+  var slot=bti1OwnerHash(key,spanLog);
+  for(var probe=0u;probe<BTI1_OWNER_CAPACITY;probe+=1u){
+    let at=BTI1_SPATIAL_OWNER_BASE
+      +${SPARSE_CM12_BRICK_TILE_IMAGE_OWNER_WORDS}u*slot;
+    let candidate=bti1Load(at);if(candidate==BTI1_INVALID){return BTI1_INVALID;}
+    let packed=bti1Load(at+1u);
+    if(candidate==key&&(packed&31u)==spanLog){return packed>>5u;}
+    slot=(slot+1u)&(BTI1_OWNER_CAPACITY-1u);
+  }
+  return BTI1_INVALID;
+}
 fn bti1PointOwner(position:vec3u)->u32{
-  if(any(position>=BTI1_FINEST_DIMS)){return BTI1_INVALID;}
-  let q=position>>vec3u(2u);let ownerAt=BTI1_SPATIAL_OWNER_BASE+q.x
-    +BTI1_SPATIAL_DIMS.x*(q.y+BTI1_SPATIAL_DIMS.y*q.z);
-  let leaf=bti1Load(ownerAt);if(leaf>=BTI1_LEAF_COUNT){return BTI1_INVALID;}
+  let finest=vec3u(bti1Load(BTI1_HEADER_BASE
+      +${SPARSE_CM12_BRICK_TILE_IMAGE_HEADER.finestX}u),
+    bti1Load(BTI1_HEADER_BASE+${SPARSE_CM12_BRICK_TILE_IMAGE_HEADER.finestY}u),
+    bti1Load(BTI1_HEADER_BASE+${SPARSE_CM12_BRICK_TILE_IMAGE_HEADER.finestZ}u));
+  if(any(position>=finest)){return BTI1_INVALID;}
+  let logical=position>>vec3u(3u);var leaf=BTI1_INVALID;
+  for(var spanLog=0u;spanLog<=BTI1_MAX_SPAN_LOG;spanLog+=1u){
+    let span=1u<<spanLog;let origin=(logical/vec3u(span))*vec3u(span);
+    let key=origin.x+BTI1_LOGICAL_DIMS.x
+      *(origin.y+BTI1_LOGICAL_DIMS.y*origin.z);
+    leaf=bti1OwnerLeaf(key,spanLog);if(leaf!=BTI1_INVALID){break;}
+  }
+  if(leaf>=BTI1_LEAF_COUNT){return BTI1_INVALID;}
   let at=bti1BrickAt(leaf);let origin=vec3u(bti1Load(at+${b.originX}u),
     bti1Load(at+${b.originY}u),bti1Load(at+${b.originZ}u));
   let scale=bti1Load(at+${b.scale}u);let local=(position-origin)/vec3u(scale);

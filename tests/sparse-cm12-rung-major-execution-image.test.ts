@@ -51,6 +51,7 @@ function fixture(options: {
   spanBricks?: number;
   active?: boolean;
   leafCapacity?: number;
+  withoutDirectory?: boolean;
 }) {
   const dimensions = options.dimensions ?? [16, 16, 16];
   const brickFineResolution = 16 as const;
@@ -80,13 +81,34 @@ function fixture(options: {
       maximumSpanBricks: atlas.maximumSpanBricks,
       logicalSlotsPerLeaf,
     });
-  const image = createSparseCM12TransportExecutionImage(atlas, directory, {
+  const image = createSparseCM12TransportExecutionImage(atlas,
+    options.withoutDirectory ? undefined : directory, {
     brickActive: () => options.active ?? true,
     acceptedBrickResolution: () => options.resolution,
     templateBrickCellRange: () => [1000, liveCount],
   }, { generation: 19, layout });
   return { image, valid, liveCount, scale };
 }
+
+test("TEI2 construction does not require the dense authored-owner directory", () => {
+  const withDirectory = fixture({ resolution: 4 }).image;
+  const withoutDirectory = fixture({ resolution: 4, withoutDirectory: true }).image;
+  assert.deepEqual(withoutDirectory.layout, withDirectory.layout);
+  assert.deepEqual(withoutDirectory.words, withDirectory.words);
+  assert.match(residentHostSource,
+    /const logicalOwnerDirectory = uploadLogicalOwnerDirectory\s*\?/);
+});
+
+test("production face support is bounded by resident cell capacity", () => {
+  assert.match(residentHostSource,
+    /faceVelocitySupport:[\s\S]*align4\(4 \* cellCount\)/);
+  assert.doesNotMatch(residentHostSource,
+    /faceVelocitySupport:[\s\S]{0,160}denseCellCount/);
+  assert.match(residentWGSLSource,
+    /fn faceVelocitySupportAt[\s\S]*compactOwnerCellAt\(q\)[\s\S]*4u\*owner\.x/);
+  assert.match(residentWGSLSource,
+    /fn publishSparseCM12FaceVelocitySupport[\s\S]*local<leaf\.count[\s\S]*4u\*cell/);
+});
 
 test("TEI2 reserves the resident growth capacity without inventing host leaves", () => {
   const { image } = fixture({ resolution: 16, leafCapacity: 5 });

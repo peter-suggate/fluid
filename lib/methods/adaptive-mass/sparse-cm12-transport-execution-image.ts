@@ -1,7 +1,6 @@
-import {
-  sparseCM12LogicalOwnerAtKey,
-  type SparseCM12LogicalOwnerDirectory,
-  type SparseCM12LogicalOwnerRuntime,
+import type {
+  SparseCM12LogicalOwnerDirectory,
+  SparseCM12LogicalOwnerRuntime,
 } from "./sparse-cm12-logical-owner-directory";
 import { sparseBrickSpan, type SparseAdaptiveMassAtlas } from "./sparse-brick-atlas";
 
@@ -207,7 +206,6 @@ function writeSlot(
   layout: SparseCM12TransportExecutionImageLayout,
   slot: 0 | 1,
   atlas: SparseAdaptiveMassAtlas,
-  directory: SparseCM12LogicalOwnerDirectory,
   runtime: SparseCM12LogicalOwnerRuntime,
   generation: number,
 ): void {
@@ -359,7 +357,7 @@ function writeSlot(
 
 export function createSparseCM12TransportExecutionImage(
   atlas: SparseAdaptiveMassAtlas,
-  directory: SparseCM12LogicalOwnerDirectory,
+  directory: SparseCM12LogicalOwnerDirectory | undefined,
   runtime: SparseCM12LogicalOwnerRuntime,
   options: {
     readonly generation?: number;
@@ -373,7 +371,8 @@ export function createSparseCM12TransportExecutionImage(
 ): SparseCM12TransportExecutionImage {
   const requiredLayout = createSparseCM12TransportExecutionImageLayout({
     brickFineResolution: atlas.brickFineResolution,
-    logicalBrickDimensions: directory.layout.logicalBrickDimensions,
+    logicalBrickDimensions: directory?.layout.logicalBrickDimensions
+      ?? atlas.brickDimensions,
     leafCapacity: atlas.bricks.length,
     maximumSpanBricks: atlas.maximumSpanBricks,
     logicalSlotsPerLeaf: Math.max(1, ...atlas.bricks.map((brick) => {
@@ -419,7 +418,7 @@ export function createSparseCM12TransportExecutionImage(
     layout.slotLeafBaseOffsets[0], layout.slotPacketBaseOffsets[0],
     layout.slotSpatialTileBaseOffsets[0], layout.totalWords, 0,
   ]);
-  writeSlot(words, layout, 0, atlas, directory, runtime, generation);
-  writeSlot(words, layout, 1, atlas, directory, runtime, generation);
+  writeSlot(words, layout, 0, atlas, runtime, generation);
+  writeSlot(words, layout, 1, atlas, runtime, generation);
   return Object.freeze({ layout, words });
 }

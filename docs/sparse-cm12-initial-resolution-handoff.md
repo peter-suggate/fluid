@@ -1,7 +1,15 @@
 # Sparse CM12 initial resolution — anchor the ladder at the top, not the bottom
 
-Status: exploration, 2026-09-05. No code changed. Every claim below is read from
-HEAD or measured this session; inferences are marked as such.
+Original status: exploration, 2026-09-05. At the time no code had changed; every
+claim below was read from HEAD or measured in that session, and inferences are marked.
+
+Implementation update, 2026-09-05: WP0 and WP1 are complete. WP2 is also complete
+on the production Sparse CM12 path: face-velocity support is keyed by bounded
+resident cell capacity, production construction no longer builds LOD1, and BTI1's
+persistent point-owner plane is a leaf-count-bounded dyadic origin hash. LOD1 remains
+available only to its two explicit comparison oracles, and the exhaustive dense BTI1
+point oracle remains test-only. The application and every scene still default to the
+production B8/P8 Sparse CM12 solver; no opt-in UI flag is required.
 
 The proposal: stop defining a tank by its **maximum** resolution (a 128³ lattice that
 caps every cell) and define it by an **initial** resolution, letting cells refine

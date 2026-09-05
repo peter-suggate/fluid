@@ -3,8 +3,9 @@
  *
  * The hot domain is one stable 4^3 cell tile (`leaf * 8 + localTile`). Uniform
  * brick interiors are arithmetic. Cross-brick, mixed-rung, and sparse-air
- * faces live in a compact per-tile exception stream. A finest-lattice 4^3
- * directory provides one-load point ownership before brick-local arithmetic.
+ * faces live in a compact per-tile exception stream. Point ownership uses a
+ * WDR-shaped open-addressed origin hash and dyadic span search before
+ * brick-local arithmetic; its allocation is bounded by leaf count.
  *
  * BTI1 is deliberately a single accepted-slot proof. Production adoption must
  * add the existing shadow/validate/flip transaction; it must not weaken this
@@ -33,6 +34,8 @@ export const SPARSE_CM12_BRICK_TILE_IMAGE_TILES_PER_LEAF = 8;
 export const SPARSE_CM12_BRICK_TILE_IMAGE_FACE_FAMILIES = 6;
 export const SPARSE_CM12_BRICK_TILE_IMAGE_FACE_MASK_WORDS = 12;
 export const SPARSE_CM12_BRICK_TILE_IMAGE_EXCEPTION_WORDS = 2;
+export const SPARSE_CM12_BRICK_TILE_IMAGE_OWNER_WORDS = 2;
+export const SPARSE_CM12_BRICK_TILE_IMAGE_OWNER_LEAF_LIMIT = 2 ** 27;
 
 export const SPARSE_CM12_BRICK_TILE_IMAGE_FLAG = Object.freeze({
   complete: 1 << 0,
@@ -66,8 +69,11 @@ export interface SparseCM12BrickTileImageLayout {
   readonly leafCount: number;
   readonly tileCapacity: number;
   readonly finestDimensions: SparseBrickVec3;
+  /** Logical brick dimensions used to encode owner-origin keys. */
   readonly spatialTileDimensions: SparseBrickVec3;
+  /** Power-of-two owner hash capacity, at no more than 50% load. */
   readonly spatialTileCapacity: number;
+  readonly maximumSpanLog: number;
   readonly exceptionCount: number;
   readonly brickBaseWords: number;
   readonly tileBaseWords: number;
@@ -140,6 +146,10 @@ const setBit = (pair: [number, number], lane: number): void => {
   else pair[1] = (pair[1] | (1 << (lane - 32))) >>> 0;
 };
 const product = (value: readonly number[]) => value.reduce((a, b) => a * b, 1);
+const nextPowerOfTwo = (value: number) => 2 ** Math.ceil(Math.log2(Math.max(1, value)));
+const ownerHash = (key: number, spanLog: number, capacity: number) =>
+  (Math.imul((key ^ Math.imul(spanLog + 1, 0x9e37_79b9)) >>> 0,
+    0x85eb_ca6b) >>> 0) & (capacity - 1);
 
 function cellAddress(
   cell: SparseAtlasCompositeCell,
@@ -198,13 +208,19 @@ function createLayout(
   exceptionCount: number,
 ): SparseCM12BrickTileImageLayout {
   const leafCount = atlas.bricks.length;
+  if (leafCount >= SPARSE_CM12_BRICK_TILE_IMAGE_OWNER_LEAF_LIMIT) {
+    throw new RangeError("BTI1 leaf count exhausts the packed owner record");
+  }
   const tileCapacity = checkedU32(leafCount
     * SPARSE_CM12_BRICK_TILE_IMAGE_TILES_PER_LEAF, "BTI1 tile capacity");
-  const spatialTileDimensions = atlas.dimensions.map((value) =>
-    Math.ceil(value / SPARSE_CM12_BRICK_TILE_IMAGE_TILE_EDGE)) as
+  const spatialTileDimensions = [...atlas.brickDimensions] as
     [number, number, number];
-  const spatialTileCapacity = checkedU32(product(spatialTileDimensions),
-    "BTI1 spatial tile capacity");
+  const spatialTileCapacity = checkedU32(nextPowerOfTwo(Math.max(2,
+    2 * leafCount)), "BTI1 spatial-owner hash capacity");
+  const maximumSpanLog = Math.log2(atlas.maximumSpanBricks);
+  if (!Number.isInteger(maximumSpanLog) || maximumSpanLog < 0 || maximumSpanLog > 30) {
+    throw new RangeError("BTI1 maximum span is not representable");
+  }
   const brickBaseWords = align64(SPARSE_CM12_BRICK_TILE_IMAGE_HEADER_WORDS);
   const tileBaseWords = align64(brickBaseWords
     + leafCount * SPARSE_CM12_BRICK_TILE_IMAGE_BRICK_WORDS);
@@ -214,11 +230,12 @@ function createLayout(
     + tileCapacity * SPARSE_CM12_BRICK_TILE_IMAGE_FACE_MASK_WORDS);
   const spatialOwnerBaseWords = align64(exceptionBaseWords
     + exceptionCount * SPARSE_CM12_BRICK_TILE_IMAGE_EXCEPTION_WORDS);
-  const totalWords = align64(spatialOwnerBaseWords + spatialTileCapacity);
+  const totalWords = align64(spatialOwnerBaseWords
+    + SPARSE_CM12_BRICK_TILE_IMAGE_OWNER_WORDS * spatialTileCapacity);
   checkedU32(totalWords, "BTI1 total words");
   return Object.freeze({ leafCount, tileCapacity,
     finestDimensions: [...atlas.dimensions] as [number, number, number],
-    spatialTileDimensions, spatialTileCapacity, exceptionCount,
+    spatialTileDimensions, spatialTileCapacity, maximumSpanLog, exceptionCount,
     brickBaseWords, tileBaseWords, faceMaskBaseWords, exceptionBaseWords,
     spatialOwnerBaseWords, totalWords, totalBytes: 4 * totalWords });
 }
@@ -325,7 +342,8 @@ export function compileSparseCM12BrickTileImage(
   const layout = createLayout(atlas, exceptions.length);
   const words = new Uint32Array(layout.totalWords);
   words.fill(SPARSE_CM12_BRICK_TILE_IMAGE_INVALID, layout.spatialOwnerBaseWords,
-    layout.spatialOwnerBaseWords + layout.spatialTileCapacity);
+    layout.spatialOwnerBaseWords
+      + SPARSE_CM12_BRICK_TILE_IMAGE_OWNER_WORDS * layout.spatialTileCapacity);
   words.set([
     SPARSE_CM12_BRICK_TILE_IMAGE_MAGIC, SPARSE_CM12_BRICK_TILE_IMAGE_VERSION,
     SPARSE_CM12_BRICK_TILE_IMAGE_HEADER_WORDS,
@@ -375,21 +393,28 @@ export function compileSparseCM12BrickTileImage(
     }
   }
 
-  const [sx, sy] = layout.spatialTileDimensions;
   for (let leaf = 0; leaf < atlas.bricks.length; leaf += 1) {
     const brick = atlas.bricks[leaf]!;
-    const origin = brick.coordinate.map((value) => value * 8) as [number, number, number];
-    const upper = origin.map((value, axis) => Math.min(atlas.dimensions[axis]!,
-      value + 8 * sparseBrickSpan(brick))) as [number, number, number];
-    for (let z = Math.floor(origin[2] / 4); z < Math.ceil(upper[2] / 4); z += 1)
-      for (let y = Math.floor(origin[1] / 4); y < Math.ceil(upper[1] / 4); y += 1)
-        for (let x = Math.floor(origin[0] / 4); x < Math.ceil(upper[0] / 4); x += 1) {
-          const at = layout.spatialOwnerBaseWords + x + sx * (y + sy * z);
-          if (words[at] !== SPARSE_CM12_BRICK_TILE_IMAGE_INVALID) {
-            throw new Error(`BTI1 spatial tile ${x}/${y}/${z} has overlapping leaves`);
-          }
-          words[at] = leaf;
-        }
+    const spanLog = Math.log2(sparseBrickSpan(brick));
+    let slot = ownerHash(brick.key, spanLog, layout.spatialTileCapacity);
+    for (let probe = 0; probe < layout.spatialTileCapacity; probe += 1) {
+      const at = layout.spatialOwnerBaseWords
+        + SPARSE_CM12_BRICK_TILE_IMAGE_OWNER_WORDS * slot;
+      if (words[at] === SPARSE_CM12_BRICK_TILE_IMAGE_INVALID) {
+        words[at] = brick.key;
+        words[at + 1] = ((leaf << 5) | spanLog) >>> 0;
+        slot = SPARSE_CM12_BRICK_TILE_IMAGE_INVALID;
+        break;
+      }
+      const packed = words[at + 1]!;
+      if (words[at] === brick.key && (packed & 31) === spanLog) {
+        throw new Error(`BTI1 duplicate owner origin ${brick.key}/${spanLog}`);
+      }
+      slot = (slot + 1) & (layout.spatialTileCapacity - 1);
+    }
+    if (slot !== SPARSE_CM12_BRICK_TILE_IMAGE_INVALID) {
+      throw new Error("BTI1 spatial-owner hash is full");
+    }
   }
   words[SPARSE_CM12_BRICK_TILE_IMAGE_HEADER.flags] =
     SPARSE_CM12_BRICK_TILE_IMAGE_FLAG.complete;
@@ -421,12 +446,12 @@ export function sparseCM12BrickTileCell(
     + local[0] + (strides & 0xffff) * local[1] + (strides >>> 16) * local[2];
 }
 
-/** Resolve an integer finest-lattice point through one 4^3 owner load. */
+/** Resolve an integer finest-lattice point through the sparse dyadic owner hash. */
 export function sparseCM12BrickTileCellAtFine(
   image: SparseCM12BrickTileImage,
   position: SparseBrickVec3,
 ): number | undefined {
-  const [sx, sy] = image.layout.spatialTileDimensions;
+  const logicalDimensions = image.layout.spatialTileDimensions;
   const finest = [
     image.words[SPARSE_CM12_BRICK_TILE_IMAGE_HEADER.finestX]!,
     image.words[SPARSE_CM12_BRICK_TILE_IMAGE_HEADER.finestY]!,
@@ -436,12 +461,30 @@ export function sparseCM12BrickTileCellAtFine(
     || position.some((value, axis) => value >= finest[axis]!)) {
     return undefined;
   }
-  const tileCoordinate = position.map((value) => Math.floor(value / 4)) as
+  const logical = position.map((value) => Math.floor(value / 8)) as
     [number, number, number];
-  const ownerAt = image.layout.spatialOwnerBaseWords + tileCoordinate[0]
-    + sx * (tileCoordinate[1] + sy * tileCoordinate[2]);
-  const leaf = image.words[ownerAt]!;
-  if (leaf === SPARSE_CM12_BRICK_TILE_IMAGE_INVALID || leaf >= image.layout.leafCount) {
+  let leaf = SPARSE_CM12_BRICK_TILE_IMAGE_INVALID;
+  for (let spanLog = 0; spanLog <= image.layout.maximumSpanLog; spanLog += 1) {
+    const span = 2 ** spanLog;
+    const origin = logical.map((value) => Math.floor(value / span) * span);
+    const key = origin[0]! + logicalDimensions[0]!
+      * (origin[1]! + logicalDimensions[1]! * origin[2]!);
+    let slot = ownerHash(key, spanLog, image.layout.spatialTileCapacity);
+    for (let probe = 0; probe < image.layout.spatialTileCapacity; probe += 1) {
+      const ownerAt = image.layout.spatialOwnerBaseWords
+        + SPARSE_CM12_BRICK_TILE_IMAGE_OWNER_WORDS * slot;
+      const candidateKey = image.words[ownerAt]!;
+      if (candidateKey === SPARSE_CM12_BRICK_TILE_IMAGE_INVALID) break;
+      const packed = image.words[ownerAt + 1]!;
+      if (candidateKey === key && (packed & 31) === spanLog) {
+        leaf = packed >>> 5;
+        break;
+      }
+      slot = (slot + 1) & (image.layout.spatialTileCapacity - 1);
+    }
+    if (leaf !== SPARSE_CM12_BRICK_TILE_IMAGE_INVALID) break;
+  }
+  if (leaf >= image.layout.leafCount) {
     return undefined;
   }
   const at = image.layout.brickBaseWords
@@ -522,7 +565,8 @@ export function sparseCM12BrickTileMemoryReport(
     tileBytes: 4 * l.tileCapacity * SPARSE_CM12_BRICK_TILE_IMAGE_TILE_WORDS,
     faceMaskBytes: 4 * l.tileCapacity * SPARSE_CM12_BRICK_TILE_IMAGE_FACE_MASK_WORDS,
     explicitFaceBytes: 4 * l.exceptionCount * SPARSE_CM12_BRICK_TILE_IMAGE_EXCEPTION_WORDS,
-    spatialOwnerBytes: 4 * l.spatialTileCapacity,
+    spatialOwnerBytes: 4 * SPARSE_CM12_BRICK_TILE_IMAGE_OWNER_WORDS
+      * l.spatialTileCapacity,
     totalBytes: l.totalBytes,
     bytesPerCell: cellCount > 0 ? l.totalBytes / cellCount : 0,
   };

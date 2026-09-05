@@ -2114,7 +2114,7 @@ interface ResidentStateLayout {
   readonly journalLayout: SparseCM12PressureJournalLayout;
   /** Persistent swept-characteristic support consumed by FSM1 packet scheduling. */
   readonly transportCharacteristicSupport: number;
-  /** Dense read cache derived from TEI/effective velocity for face tracing. */
+  /** Active-cell-bounded cache derived from TEI/effective velocity for face tracing. */
   readonly faceVelocitySupport: number;
 }
 
@@ -2664,7 +2664,6 @@ export function sparseCM12TracerLattice(
 function residentStateLayout(
   cellCount: number,
   rowCount: number,
-  denseCellCount: number,
   cutCellState: boolean,
   staticSolidVoxels: boolean,
   tracerCount: number,
@@ -2702,7 +2701,7 @@ function residentStateLayout(
       return { journal: base, journalLayout };
     })(),
     faceVelocitySupport: (() => {
-      const result = at; at += align4(4 * denseCellCount); return result;
+      const result = at; at += align4(4 * cellCount); return result;
     })(),
     transportCharacteristicSupport: cells(),
     floatCount: at,
@@ -3853,14 +3852,20 @@ export class WebGPUSparseCM12Resident {
       topologyPageCapacityMaximum,
     );
     const worldLeafCapacity = packed.brickCount + topologyPagePool.pageCapacity;
-    report("Build logical owner directory");
-    const logicalOwnerDirectory = createSparseCM12LogicalOwnerDirectory(atlas, {
-      brickFineResolution: atlas.brickFineResolution,
-      presentationPageResolution,
-    });
+    // Production ownership is WDR1. Build the legacy dense authored-owner
+    // directory only for the two explicit arithmetic comparison oracles.
+    const uploadLogicalOwnerDirectory = implicitTransportOwnerArithmeticForQA
+      || implicitSharpeningOwnerArithmeticForQA;
+    if (uploadLogicalOwnerDirectory) report("Build QA logical owner directory");
+    const logicalOwnerDirectory = uploadLogicalOwnerDirectory
+      ? createSparseCM12LogicalOwnerDirectory(atlas, {
+        brickFineResolution: atlas.brickFineResolution,
+        presentationPageResolution,
+      })
+      : undefined;
     const transportExecutionImageLayout = createSparseCM12TransportExecutionImageLayout({
         brickFineResolution: atlas.brickFineResolution as 8 | 16,
-        logicalBrickDimensions: logicalOwnerDirectory.layout.logicalBrickDimensions,
+        logicalBrickDimensions: atlas.brickDimensions,
         leafCapacity: worldLeafCapacity,
         maximumSpanBricks: atlas.maximumSpanBricks,
         logicalSlotsPerLeaf: Math.max(1, ...atlas.bricks.map((brick) => {
@@ -3875,15 +3880,13 @@ export class WebGPUSparseCM12Resident {
     // implicit-arithmetic experiments upload the already-built immutable LOD1
     // records after the ordinary topology image and retain WDR1 for coordinates
     // without an authored owner.
-    const uploadLogicalOwnerDirectory = implicitTransportOwnerArithmeticForQA
-      || implicitSharpeningOwnerArithmeticForQA;
     const logicalOwnerBaseWords = uploadLogicalOwnerDirectory ? packed.words.length : 0;
     const logicalOwnerPacked16BaseWords = 0;
     const residentTopologyWords = uploadLogicalOwnerDirectory
       ? (() => {
-        const words = new Uint32Array(packed.words.length + logicalOwnerDirectory.words.length);
+        const words = new Uint32Array(packed.words.length + logicalOwnerDirectory!.words.length);
         words.set(packed.words);
-        words.set(logicalOwnerDirectory.words, logicalOwnerBaseWords);
+        words.set(logicalOwnerDirectory!.words, logicalOwnerBaseWords);
         return words;
       })()
       : packed.words;
@@ -3928,7 +3931,6 @@ export class WebGPUSparseCM12Resident {
     const tracerLattice = sparseCM12TracerLattice(atlas.dimensions);
     const layout = residentStateLayout(
       physicsCellCapacity, physicsRowCapacity,
-      atlas.dimensions[0]! * atlas.dimensions[1]! * atlas.dimensions[2]!,
       Boolean(rigid) || Boolean(initialSolidWorld),
       Boolean(initialSolidWorld),
       tracerLattice.count,
@@ -5003,8 +5005,10 @@ export class WebGPUSparseCM12Resident {
         persistentPressureCacheLayout,
         velocityExtensionLayouts,
         pressureExecutionImageLayout,
-        { layout: logicalOwnerDirectory.layout, baseWords: logicalOwnerBaseWords,
-          packedOwner16BaseWords: logicalOwnerPacked16BaseWords },
+        logicalOwnerDirectory
+          ? { layout: logicalOwnerDirectory.layout, baseWords: logicalOwnerBaseWords,
+            packedOwner16BaseWords: logicalOwnerPacked16BaseWords }
+          : undefined,
         layout.faceVelocitySupport,
         effectiveTransportVelocityLayout,
         transportExecutionImage?.layout,

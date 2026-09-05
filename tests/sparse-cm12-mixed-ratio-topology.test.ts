@@ -136,5 +136,5 @@ test("symmetric 8|1|8 expansion has a raw-bit topology digest", () => {
     .update(new Uint8Array(compiled.programWords.buffer, compiled.programWords.byteOffset,
       compiled.programWords.byteLength))
     .digest("hex");
-  assert.equal(digest, "54fe197d68a9bd0cb1280d22a3c25abfa1120df3fef8347c660ea0823c088d32");
+  assert.equal(digest, "a690ae5799d79a325462d3cc959b2c8533ebdb8a23a5fdee033e4ed238b9e8a3");
 });

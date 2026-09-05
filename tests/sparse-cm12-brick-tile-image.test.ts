@@ -5,7 +5,6 @@ import { buildSparseAtlasCompositeGrid } from
 import {
   SPARSE_CM12_BRICK_TILE_IMAGE_FLAG,
   SPARSE_CM12_BRICK_TILE_IMAGE_HEADER,
-  SPARSE_CM12_BRICK_TILE_IMAGE_INVALID,
   compileSparseCM12BrickTileImage,
   sparseCM12BrickTileCell,
   sparseCM12BrickTileCellAtFine,
@@ -97,7 +96,8 @@ test("BTI1 point directory covers a macro leaf without expanding cell topology",
 
   assert.equal(receipt.cellCount, 512);
   assert.equal(receipt.activeTileCount, 8);
-  assert.equal(image.layout.spatialTileCapacity, 64);
+  assert.equal(image.layout.spatialTileCapacity, 2);
+  assert.equal(receipt.memory.spatialOwnerBytes, 16);
   assert.equal(sparseCM12BrickTileCellAtFine(image, [15, 15, 15]), 511);
 });
 
@@ -130,8 +130,7 @@ test("BTI1 sparse-air face families cover omitted in-domain bricks exactly", () 
   assert.equal(receipt.explicitFaceRowCount, grid.sparseAirRowCount);
   assert.ok(grid.sparseAirRowCount > 0);
   assert.equal(sparseCM12BrickTileCellAtFine(image, [12, 4, 4]), undefined);
-  const middleTile = image.layout.spatialOwnerBaseWords + 3;
-  assert.equal(image.words[middleTile], SPARSE_CM12_BRICK_TILE_IMAGE_INVALID);
+  assert.equal(image.layout.spatialTileCapacity, 4);
 });
 
 test("BTI1 publishes one composable WGSL service ABI", () => {

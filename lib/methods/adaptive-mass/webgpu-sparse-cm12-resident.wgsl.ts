@@ -1974,8 +1974,11 @@ struct FaceVelocitySupport {
 fn faceVelocitySupportAt(q:vec3i)->FaceVelocitySupport{
   if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))){
     return FaceVelocitySupport(vec3f(0.0),vec3f(1.0),false,false,false);}
-  let uq=vec3u(q);let index=uq.x+p.dimensions.x*(uq.y+p.dimensions.y*uq.z);
-  let at=FACE_VELOCITY_SUPPORT+4u*index;
+  let owner=compactOwnerCellAt(q);
+  if(owner.x==INVALID||!brickActive(owner.y)
+    ||cellResolution(owner.x)!=owner.z){
+    return FaceVelocitySupport(vec3f(0.0),vec3f(1.0),false,false,false);}
+  let at=FACE_VELOCITY_SUPPORT+4u*owner.x;
   let packed=state[at+3u];
   let flags=u32(round(8.0*fract(packed)));let span=max(1.0,floor(packed));
   return FaceVelocitySupport(vec3f(state[at],state[at+1u],state[at+2u]),
@@ -1983,10 +1986,10 @@ fn faceVelocitySupportAt(q:vec3i)->FaceVelocitySupport{
     (flags&1u)!=0u,(flags&2u)!=0u,(flags&4u)!=0u);
 }
 
-// Face tracing deliberately retains a dense read cache: B8/P8 Dawn A/B showed
-// that resolving a TEI owner at every RK2 corner costs 2.4-5.4x more than the
-// cache's publish plus all traces. The cache is only a derived representation;
-// its producer consumes the accepted TEI leaf and effective-velocity plane.
+// Face tracing retains a derived read cache, but keys it by accepted physical
+// cell instead of replicating every coarse value over the complete finest
+// lattice. Ownership is resolved through production WDR1, so the allocation is
+// bounded by resident cell capacity rather than by the authored world extent.
 @compute @workgroup_size(256)
 fn publishSparseCM12FaceVelocitySupport(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
@@ -1997,17 +2000,11 @@ fn publishSparseCM12FaceVelocitySupport(@builtin(workgroup_id)wid:vec3u,
   let leaf=cm12TeiLoadLeaf(acceptedTopologySlot(),brick);
   if((leaf.flags&0x80000000u)==0u||leaf.scale==0u){return;}
   let origin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
-  let lower=max(origin,vec3i(0));
-  let upper=min(origin+vec3i(leaf.scale*leaf.valid),vec3i(p.dimensions.xyz));
-  if(any(upper<=lower)){return;}
-  let extent=vec3u(upper-lower);
-  let count=extent.x*extent.y*extent.z;
-  for(var local=lane;local<count;local+=256u){let z=local/(extent.x*extent.y);
-    let localRemainder=local-z*extent.x*extent.y;let y=localRemainder/extent.x;
-    let x=localRemainder-y*extent.x;let q=lower+vec3i(vec3u(x,y,z));
-    let cellCoordinate=vec3u(q-origin)/leaf.scale;
-    let cell=leaf.first+cellCoordinate.x+leaf.valid.x
-      *(cellCoordinate.y+leaf.valid.y*cellCoordinate.z);
+  for(var local=lane;local<leaf.count;local+=256u){
+    let z=local/(leaf.valid.x*leaf.valid.y);
+    let localRemainder=local-z*leaf.valid.x*leaf.valid.y;
+    let y=localRemainder/leaf.valid.x;let x=localRemainder-y*leaf.valid.x;
+    let cellCoordinate=vec3u(x,y,z);let cell=leaf.first+local;
     let value=cm12EffectiveTransportVelocity(cell);
     let wet=state[sourceDensity()+cell]>CM12_LIQUID_ISOVALUE;
     let cellLower=origin+vec3i(leaf.scale*cellCoordinate);
@@ -2015,8 +2012,7 @@ fn publishSparseCM12FaceVelocitySupport(@builtin(workgroup_id)wid:vec3u,
     let span=f32(max(1u,min(widths.x,min(widths.y,widths.z))));
     let flags=1u|select(0u,2u,cm12ExtendedCellSelected(cell))
       |select(0u,4u,wet);
-    let uq=vec3u(q);let index=uq.x+p.dimensions.x*(uq.y+p.dimensions.y*uq.z);
-    let at=FACE_VELOCITY_SUPPORT+4u*index;
+    let at=FACE_VELOCITY_SUPPORT+4u*cell;
     state[at]=value.x;state[at+1u]=value.y;state[at+2u]=value.z;
     state[at+3u]=span+f32(flags)/8.0;
   }
@@ -2027,24 +2023,16 @@ fn clearSparseCM12RetiredFaceVelocitySupport(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   let brick=incrementalActivityBrickInvocation(wid.x);
   if(brick==INVALID||brickActive(brick)){return;}
-  let origin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
-  let width=i32(BRICK_FINE_RESOLUTION*brickSpan(brick));
-  let lower=max(origin,vec3i(0));let upper=min(origin+vec3i(width),vec3i(p.dimensions.xyz));
-  if(any(upper<=lower)){return;}
-  let extent=vec3u(upper-lower);
-  let count=extent.x*extent.y*extent.z;
-  for(var local=lane;local<count;local+=256u){let z=local/(extent.x*extent.y);
-    let localRemainder=local-z*extent.x*extent.y;let y=localRemainder/extent.x;
-    let x=localRemainder-y*extent.x;let q=vec3u(lower+vec3i(vec3u(x,y,z)));
-    let index=q.x+p.dimensions.x*(q.y+p.dimensions.y*q.z);
-    let at=FACE_VELOCITY_SUPPORT+4u*index;
+  let leaf=cm12TeiLoadLeaf(acceptedTopologySlot(),brick);
+  for(var local=lane;local<leaf.count;local+=256u){
+    let at=FACE_VELOCITY_SUPPORT+4u*(leaf.first+local);
     state[at]=0.0;state[at+1u]=0.0;state[at+2u]=0.0;state[at+3u]=0.0;
   }
 }
 
 fn sampleFaceVelocitySupport(position:vec3f)->vec3f{
-  // FACE_VELOCITY_SUPPORT is already a dense finest-lattice cache. Choosing
-  // interpolation spacing from the point owner makes the sampled field jump
+  // FACE_VELOCITY_SUPPORT represents the finest lattice through cell owners.
+  // Choosing interpolation spacing from the point owner makes the field jump
   // when an RK2 departure crosses a 2:1 seam: an infinitesimal move changes
   // the complete stencil from scale one to scale two. Use the cache's actual
   // unit lattice, matching sampleEffectiveTransportVelocity below.
