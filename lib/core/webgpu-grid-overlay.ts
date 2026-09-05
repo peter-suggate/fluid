@@ -927,7 +927,19 @@ fn gridBodySample(cellBounds: RepresentedCell) -> GridBodySample {
 struct GridSample {
   color: vec3f,
   alpha: f32,
+  // The part of alpha the structural lattice contributes: the grid lines of
+  // the structure view, and boundary accents. It travels separately because
+  // the slice path thins the fill and must not thin this.
+  lattice: f32,
   solid: bool,
+}
+
+// A grid line painted from the distance to the cell edge, in pixels. The
+// feather is fixed at half a pixel either side of the nominal width so the
+// line keeps a solid core rather than being entirely antialiasing, which is
+// what a hairline becomes as soon as the camera pulls back.
+fn gridLinePaint(distancePixels: f32, halfWidth: f32) -> f32 {
+  return 1.0 - smoothstep(halfWidth - 0.5, halfWidth + 0.5, distancePixels);
 }
 
 // displayColor tonemaps by c/(c+1) before gamma-encoding, so a gradient
@@ -953,7 +965,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   let cell=fineOrigin+localCell;let fineMaximum=fineOrigin+dims;
   let sparseOwnerAtCell=sparseOwner(cell);
   if(sparseGridEnabled()&&sparseOwnerAtCell.x==SPARSE_INVALID){
-    return GridSample(vec3f(0.0),0.0,false);
+    return GridSample(vec3f(0.0),0.0,0.0,false);
   }
   var samplePosition = local3.xy;
   var cellPerPixel = vec2f(footprint * f32(dims.x) / size.x, footprint * f32(dims.y) / size.y);
@@ -970,10 +982,21 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   }
   let derivative = max(cellPerPixel, vec2f(1e-5));
   let pixelsPerCell = 1.0 / max(derivative.x, derivative.y);
-  let lineFade = smoothstep(2.5, 6.0, pixelsPerCell);
   let dotFade = smoothstep(9.0, 18.0, pixelsPerCell);
   let adaptiveGrid = u.debug.z > 0.5;
   let fieldMode = i32(round(u.debug.w));
+  // Structure is the one view whose subject is the lattice, so it holds its
+  // lines further into the distance than the field views, where the grid is
+  // only a reference frame and a bolder one would eat the content.
+  let structureView = fieldMode == 0;
+  let lineFade = select(smoothstep(2.5, 6.0, pixelsPerCell),
+    smoothstep(1.8, 4.2, pixelsPerCell), structureView);
+  // Half-width of a grid line in pixels, clamped so a line never takes more
+  // than about two fifths of the cell it bounds. A fixed pixel width is what
+  // carries the lattice to a distant camera; the clamp is what stops it
+  // closing into a flat wash once the cells are themselves a few pixels wide.
+  let lineHalfWidth = min(select(0.8, 1.5, structureView),
+    max(pixelsPerCell * 0.2, 0.32));
   // SparseWorld keeps non-occupied B8 pages around a surface as transport and
   // presentation halo capacity. They are not liquid pressure topology, so the
   // structure view must not paint their internal fine graph over a coarsened
@@ -988,8 +1011,8 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   let stored = vec3i(textureDimensions(fluidField));
   let bandLayers = select(dims.y, stored.y - 2, tallGrid);
   let bandTop = min(i32(base) + bandLayers, dims.y);
-  let firstGridLine = 1.0 - smoothstep(0.4, 1.2, (0.5 - abs(fract(samplePosition.x) - 0.5)) / derivative.x);
-  let secondGridLine = 1.0 - smoothstep(0.4, 1.2, (0.5 - abs(fract(samplePosition.y) - 0.5)) / derivative.y);
+  let firstGridLine = gridLinePaint((0.5 - abs(fract(samplePosition.x) - 0.5)) / derivative.x, lineHalfWidth);
+  let secondGridLine = gridLinePaint((0.5 - abs(fract(samplePosition.y) - 0.5)) / derivative.y, lineHalfWidth);
   var fill = vec3f(0.0);
   var alpha = 0.0;
   var line = 0.0;
@@ -1025,7 +1048,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     let secondFraction = fract(samplePosition.y);
     let firstDistance = min(select(1e6, firstFraction / derivative.x, lowerFirstEdge), select(1e6, (1.0 - firstFraction) / derivative.x, upperFirstEdge));
     let secondDistance = min(select(1e6, secondFraction / derivative.y, lowerSecondEdge), select(1e6, (1.0 - secondFraction) / derivative.y, upperSecondEdge));
-    line = 1.0 - smoothstep(0.4, 1.2, min(firstDistance, secondDistance));
+    line = gridLinePaint(min(firstDistance, secondDistance), lineHalfWidth);
     var below = cell;
     var above = cell;
     below.y -= 1;
@@ -1041,30 +1064,30 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     // those cells makes the valid air-side refinement band read as a milky
     // slab. Keep all octree air outline-only while preserving filled liquid
     // leaves and the existing quadtree/tall-cell presentation.
-    let dryAlpha = select(select(0.08, 0.03, isTall), 0.0, octreeGrid);
-    let wetAlpha = select(0.55, 0.78, isTall);
+    let dryAlpha = select(select(0.05, 0.02, isTall), 0.0, octreeGrid);
+    let wetAlpha = select(0.34, 0.50, isTall);
     alpha = select(dryAlpha, wetAlpha, wet);
   } else if (axis == 3) {
     let wet = fluidSample(cell) > 0.5;
     if (cell.y < i32(base)) {
       fill = select(vec3f(0.10, 0.23, 0.22), vec3f(0.03, 0.52, 0.47), wet);
-      alpha = select(0.40, 0.78, wet);
+      alpha = select(0.24, 0.50, wet);
     } else if (cell.y < bandTop) {
       fill = select(vec3f(0.85, 0.91, 0.89), vec3f(0.20, 0.50, 0.74), wet);
-      alpha = select(0.18, 0.55, wet);
+      alpha = select(0.11, 0.34, wet);
       let distance = length(fract(samplePosition) - vec2f(0.5));
       sampleDot = (1.0 - smoothstep(0.17, 0.17 + max(derivative.x, derivative.y) * 1.6, distance)) * dotFade;
     } else {
       let stripe = smoothstep(0.38, 0.5, abs(fract((samplePosition.x + samplePosition.y) * 0.25) - 0.5));
       fill = vec3f(0.62, 0.24, 0.22);
-      alpha = 0.08 + 0.10 * stripe;
+      alpha = 0.05 + 0.07 * stripe;
     }
     line = max(firstGridLine, secondGridLine);
   } else if (cell.y < i32(base)) {
     let wet = fluidSample(cell) > 0.5;
     fill = select(vec3f(0.10, 0.23, 0.22), vec3f(0.03, 0.52, 0.47), wet);
-    alpha = select(0.40, 0.78, wet);
-    let baseEdge = 1.0 - smoothstep(0.4, 1.4, min(samplePosition.y, abs(base - samplePosition.y)) / derivative.y);
+    alpha = select(0.24, 0.50, wet);
+    let baseEdge = gridLinePaint(min(samplePosition.y, abs(base - samplePosition.y)) / derivative.y, lineHalfWidth);
     line = max(firstGridLine * lineFade * 0.45, baseEdge);
     let dy = min(abs(samplePosition.y - 0.5), abs(samplePosition.y - (base - 0.5)));
     let distance = length(vec2f(fract(samplePosition.x) - 0.5, dy));
@@ -1072,14 +1095,14 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   } else if (cell.y < bandTop) {
     let wet = fluidSample(cell) > 0.5;
     fill = select(vec3f(0.85, 0.91, 0.89), vec3f(0.20, 0.50, 0.74), wet);
-    alpha = select(0.18, 0.55, wet);
+    alpha = select(0.11, 0.34, wet);
     line = max(firstGridLine, secondGridLine);
     let distance = length(fract(samplePosition.xy) - vec2f(0.5));
     sampleDot = (1.0 - smoothstep(0.17, 0.17 + max(derivative.x, derivative.y) * 1.6, distance)) * dotFade;
   } else {
     let stripe = smoothstep(0.38, 0.5, abs(fract((samplePosition.x + samplePosition.y) * 0.25) - 0.5));
     fill = vec3f(0.62, 0.24, 0.22);
-    alpha = 0.08 + 0.10 * stripe;
+    alpha = 0.05 + 0.07 * stripe;
     line = firstGridLine * 0.35;
   }
   if(sparseStructureHalo){fill=vec3f(0.0);alpha=0.0;line=0.0;sampleDot=0.0;}
@@ -1238,11 +1261,24 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   // Structure remains pressure-topology first.
   var gridLineColor = vec3f(0.03, 0.08, 0.09);
   var color = mix(fill, gridLineColor, line);
+  // The structural lattice is cased: a light core inside the dark line. The
+  // overlay composites over whatever the scene leaves behind it — pale studio
+  // ground in one shot, dark water in the next — and a single dark tone reads
+  // over only one of them, which is precisely the fill it no longer leans on.
+  // Field views keep the plain dark hairline; there the grid is the frame.
+  let lineCore = select(0.0, smoothstep(0.45, 0.95, line), structureView);
+  color = mix(color, vec3f(2.2, 2.6, 2.5), lineCore);
   color = mix(color, vec3f(0.02, 0.05, 0.06), sampleDot);
   let opticalBoundaryColor = select(vec3f(0.93, 0.93, 0.98), vec3f(1.0, 0.08, 0.55), u.environment.w > 1.5);
   color = mix(color, opticalBoundaryColor, opticalBoundary);
-  alpha = max(alpha, max(opticalBoundary, max(line * 0.85, sampleDot * 0.92)));
-  return GridSample(color, alpha, gridBody.occupied);
+  alpha = max(alpha, max(opticalBoundary, max(line, sampleDot * 0.92)));
+  // What the slice path refuses to thin. Only the structure view claims its
+  // lines: there the lattice is the subject, and thinning it with the fill is
+  // what dissolved the view at a distance. A field view's grid stays a thinned
+  // reference frame beneath its own content, and sample dots stay with the
+  // fill in either — they are read close up, where nothing is thin.
+  let lattice = max(select(0.0, line, structureView), opticalBoundary);
+  return GridSample(color, alpha, lattice, gridBody.occupied);
 }
 
 fn displayColor(linear: vec3f) -> vec3f {
@@ -1364,10 +1400,13 @@ fn volumeField(uv:vec2f)->vec4f {
   let grip = select(clamp(1.0 - (boundsMax.y - point.y) / (0.03 * size.y), 0.0, 1.0), clamp(1.0 - horizontalEdgeDistance / (0.035 * min(size.x, size.z)), 0.0, 1.0), axis == 3) * 0.8;
   overlay.color = mix(overlay.color, vec3f(0.51, 0.95, 0.82), grip);
   overlay.alpha = max(overlay.alpha, grip);
-  // Slice planes sit between the camera and the water they describe, so they
-  // are uniformly thinned; the volume path keeps full authored alpha because
-  // its opacity is already the user's slider.
-  return vec4f(displayColor(overlay.color), overlay.alpha * SLICE_OPACITY);
+  // Slice planes sit between the camera and the water they describe, so the
+  // fill is uniformly thinned. The lattice is not: it is what the plane is
+  // there to show, and thinning the two together is what dissolved the
+  // structure view at a distance. The volume path keeps full authored alpha
+  // because its opacity is already the user's slider.
+  return vec4f(displayColor(overlay.color),
+    max(overlay.alpha * SLICE_OPACITY, overlay.lattice * 0.92));
 }
 `;
 
