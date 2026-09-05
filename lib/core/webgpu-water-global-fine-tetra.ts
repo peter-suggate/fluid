@@ -1,5 +1,6 @@
 import { makeOctreePowerCoarseLevelSetSampleWGSL } from "./octree-power-coarse-levelset-sample-abi";
 import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
+import { GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE } from "./webgpu-water-global-fine-classify";
 
 export const FLUID_FINE_FILTERED_NORMALS_ENV = "FLUID_FINE_FILTERED_NORMALS";
 
@@ -31,63 +32,82 @@ const TETS = [
  * exact tie treats the face centre as air, a scalar convention which is
  * unchanged by every D4 transform.
  */
+export const GLOBAL_FINE_SURFACE_EMIT_LANES = 6;
+const GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE = 6;
 export const globalFineCubeContourWGSL = /* wgsl */ `
 const CONTOUR_INVALID:u32=0xffffffffu;
 const CONTOUR_QUANTIZER:f32=65536.;
+const CONTOUR_NODE_COUNT:u32=36u;
 const CONTOUR_EDGE_A=array<u32,12>(0u,1u,3u,0u,4u,5u,7u,4u,0u,1u,2u,3u);
 const CONTOUR_EDGE_B=array<u32,12>(1u,2u,2u,3u,5u,6u,6u,7u,4u,5u,6u,7u);
 const CONTOUR_CORNERS=array<vec3f,8>(vec3f(0,0,0),vec3f(1,0,0),vec3f(1,1,0),vec3f(0,1,0),vec3f(0,0,1),vec3f(1,0,1),vec3f(1,1,1),vec3f(0,1,1));
+fn contourFaceCorners(face:u32)->vec4u{if(face==0u){return vec4u(0,1,2,3);}if(face==1u){return vec4u(4,5,6,7);}if(face==2u){return vec4u(0,1,5,4);}if(face==3u){return vec4u(3,2,6,7);}if(face==4u){return vec4u(0,4,7,3);}return vec4u(1,2,6,5);}
+fn contourFaceEdges(face:u32)->vec4u{if(face==0u){return vec4u(0,1,2,3);}if(face==1u){return vec4u(4,5,6,7);}if(face==2u){return vec4u(0,9,4,8);}if(face==3u){return vec4u(2,10,6,11);}if(face==4u){return vec4u(8,7,11,3);}return vec4u(1,10,5,9);}
 fn contourInside(v:f32)->bool{return v>=.5;}
-fn contourCrosses(values:array<f32,8>,edgeId:u32)->bool{return contourInside(values[CONTOUR_EDGE_A[edgeId]])!=contourInside(values[CONTOUR_EDGE_B[edgeId]]);}
-fn contourAddOne(a:ptr<function,array<u32,12>>,b:ptr<function,array<u32,12>>,x:u32,y:u32)->bool{if((*a)[x]==CONTOUR_INVALID){(*a)[x]=y;return true;}if((*a)[x]==y){return false;}if((*b)[x]==CONTOUR_INVALID){(*b)[x]=y;return true;}return false;}
-fn contourLink(a:ptr<function,array<u32,12>>,b:ptr<function,array<u32,12>>,x:u32,y:u32)->bool{return x!=y&&contourAddOne(a,b,x,y)&&contourAddOne(a,b,y,x);}
-fn contourFace(values:array<f32,8>,corners:vec4u,edges:vec4u,a:ptr<function,array<u32,12>>,b:ptr<function,array<u32,12>>)->bool{
+fn contourSnap(v:f32)->f32{return round(v*CONTOUR_QUANTIZER)/CONTOUR_QUANTIZER;}
+fn contourInterpolatedPoint(pa:vec3f,pb:vec3f,a:f32,b:f32)->vec3f{let sa=a-.5;let sb=b-.5;let denominator=abs(sa)+abs(sb);if(denominator<=0.){return .5*(pa+pb);}let centred=contourSnap(.5*(abs(sa)-abs(sb))/denominator);return pa+(pb-pa)*(.5+centred);}
+fn contourPoint(node:u32,values:array<f32,8>)->vec3f{
+  if(node<12u){let ia=CONTOUR_EDGE_A[node];let ib=CONTOUR_EDGE_B[node];return contourInterpolatedPoint(CONTOUR_CORNERS[ia],CONTOUR_CORNERS[ib],values[ia],values[ib]);}
+  let local=node-12u;let face=local/4u;let edge=local&3u;let corners=contourFaceCorners(face);let next=(edge+1u)&3u;
+  let midpoint=.5*(CONTOUR_CORNERS[corners[edge]]+CONTOUR_CORNERS[corners[next]]);
+  let centre=.25*(CONTOUR_CORNERS[corners.x]+CONTOUR_CORNERS[corners.y]+CONTOUR_CORNERS[corners.z]+CONTOUR_CORNERS[corners.w]);
+  let midpointValue=.5*(values[corners[edge]]+values[corners[next]]);
+  let centreValue=.25*(values[corners.x]+values[corners.y]+values[corners.z]+values[corners.w]);
+  return contourInterpolatedPoint(midpoint,centre,midpointValue,centreValue);
+}
+fn contourAddOne(a:ptr<function,array<u32,36>>,b:ptr<function,array<u32,36>>,x:u32,y:u32)->bool{if((*a)[x]==CONTOUR_INVALID){(*a)[x]=y;return true;}if((*a)[x]==y){return true;}if((*b)[x]==CONTOUR_INVALID){(*b)[x]=y;return true;}return (*b)[x]==y;}
+fn contourLink(a:ptr<function,array<u32,36>>,b:ptr<function,array<u32,36>>,x:u32,y:u32)->bool{return x!=y&&contourAddOne(a,b,x,y)&&contourAddOne(a,b,y,x);}
+fn contourPatch(faceValues:vec4f,nodes:vec4u,a:ptr<function,array<u32,36>>,b:ptr<function,array<u32,36>>)->bool{
   var crossing=array<u32,4>();var count=0u;
-  for(var i=0u;i<4u;i+=1u){if(contourCrosses(values,edges[i])){crossing[count]=edges[i];count+=1u;}}
+  for(var i=0u;i<4u;i+=1u){let next=(i+1u)&3u;if(contourInside(faceValues[i])!=contourInside(faceValues[next])){crossing[count]=nodes[i];count+=1u;}}
   if(count==0u){return true;}if(count==2u){return contourLink(a,b,crossing[0],crossing[1]);}if(count!=4u){return false;}
-  let s0=values[corners.x]-.5;let s1=values[corners.y]-.5;let s2=values[corners.z]-.5;let s3=values[corners.w]-.5;
-  let determinant=s0*s2-s1*s3;var centreInside=true;
-  if(determinant>0.){centreInside=contourInside(values[corners.x]);}else if(determinant<0.){centreInside=contourInside(values[corners.y]);}
-  var linked=0u;
-  for(var i=0u;i<4u;i+=1u){if(contourInside(values[corners[i]])!=centreInside){if(!contourLink(a,b,edges[(i+3u)&3u],edges[i])){return false;}linked+=1u;}}
+  let determinant=(faceValues.x-.5)*(faceValues.z-.5)-(faceValues.y-.5)*(faceValues.w-.5);var centreInside=true;
+  if(determinant>0.){centreInside=contourInside(faceValues.x);}else if(determinant<0.){centreInside=contourInside(faceValues.y);}
+  var linked=0u;for(var i=0u;i<4u;i+=1u){if(contourInside(faceValues[i])!=centreInside){if(!contourLink(a,b,nodes[(i+3u)&3u],nodes[i])){return false;}linked+=1u;}}
   return linked==2u;
 }
-fn buildContour(values:array<f32,8>,a:ptr<function,array<u32,12>>,b:ptr<function,array<u32,12>>)->u32{
-  for(var i=0u;i<12u;i+=1u){(*a)[i]=CONTOUR_INVALID;(*b)[i]=CONTOUR_INVALID;}
-  var mask=0u;for(var edgeId=0u;edgeId<12u;edgeId+=1u){if(contourCrosses(values,edgeId)){mask|=1u<<edgeId;}}
-  if(mask==0u){return 0u;}
-  var valid=true;
-  valid=valid&&contourFace(values,vec4u(0,1,2,3),vec4u(0,1,2,3),a,b);
-  valid=valid&&contourFace(values,vec4u(4,5,6,7),vec4u(4,5,6,7),a,b);
-  valid=valid&&contourFace(values,vec4u(0,1,5,4),vec4u(0,9,4,8),a,b);
-  valid=valid&&contourFace(values,vec4u(3,2,6,7),vec4u(2,10,6,11),a,b);
-  valid=valid&&contourFace(values,vec4u(0,4,7,3),vec4u(8,7,11,3),a,b);
-  valid=valid&&contourFace(values,vec4u(1,2,6,5),vec4u(1,10,5,9),a,b);
-  if(!valid){return CONTOUR_INVALID;}return mask;
+fn contourFace(values:array<f32,8>,face:u32,refined:bool,a:ptr<function,array<u32,36>>,b:ptr<function,array<u32,36>>)->bool{
+  let corners=contourFaceCorners(face);let edges=contourFaceEdges(face);
+  if(!refined){return contourPatch(vec4f(values[corners.x],values[corners.y],values[corners.z],values[corners.w]),edges,a,b);}
+  let centre=.25*(values[corners.x]+values[corners.y]+values[corners.z]+values[corners.w]);
+  for(var corner=0u;corner<4u;corner+=1u){let next=(corner+1u)&3u;let previous=(corner+3u)&3u;
+    let faceValues=vec4f(values[corners[corner]],.5*(values[corners[corner]]+values[corners[next]]),centre,.5*(values[corners[previous]]+values[corners[corner]]));
+    let nodes=vec4u(edges[corner],12u+4u*face+corner,12u+4u*face+previous,edges[previous]);
+    if(!contourPatch(faceValues,nodes,a,b)){return false;}
+  }return true;
 }
-fn contourTriangleCount(values:array<f32,8>)->u32{
-  var a:array<u32,12>;var b:array<u32,12>;let mask=buildContour(values,&a,&b);if(mask==0u||mask==CONTOUR_INVALID){return 0u;}
-  var visited=0u;var total=0u;
-  for(var start=0u;start<12u;start+=1u){let bit=1u<<start;if((mask&bit)==0u||(visited&bit)!=0u){continue;}var current=start;var previous=CONTOUR_INVALID;var closed=false;var rawEdges:array<u32,12>;var rawCount=0u;
-    for(var step=0u;step<12u;step+=1u){let currentBit=1u<<current;if((visited&currentBit)!=0u){break;}visited|=currentBit;rawEdges[rawCount]=current;rawCount+=1u;let next=select(a[current],b[current],a[current]==previous);if(next==CONTOUR_INVALID){break;}previous=current;current=next;if(current==start){closed=true;break;}}
+fn buildContour(values:array<f32,8>,refinedFaces:u32,a:ptr<function,array<u32,36>>,b:ptr<function,array<u32,36>>)->bool{
+  for(var i=0u;i<CONTOUR_NODE_COUNT;i+=1u){(*a)[i]=CONTOUR_INVALID;(*b)[i]=CONTOUR_INVALID;}
+  for(var face=0u;face<6u;face+=1u){if(!contourFace(values,face,(refinedFaces&(1u<<face))!=0u,a,b)){return false;}}
+  return true;
+}
+fn contourTriangleCount(values:array<f32,8>,refinedFaces:u32)->u32{
+  var a:array<u32,36>;var b:array<u32,36>;if(!buildContour(values,refinedFaces,&a,&b)){return 0u;}
+  var visited:array<bool,36>;var total=0u;
+  for(var start=0u;start<CONTOUR_NODE_COUNT;start+=1u){if(a[start]==CONTOUR_INVALID||visited[start]){continue;}var current=start;var previous=CONTOUR_INVALID;var closed=false;var rawNodes:array<u32,36>;var rawCount=0u;
+    for(var step=0u;step<CONTOUR_NODE_COUNT;step+=1u){if(visited[current]){break;}visited[current]=true;rawNodes[rawCount]=current;rawCount+=1u;let next=select(a[current],b[current],a[current]==previous);if(next==CONTOUR_INVALID){break;}previous=current;current=next;if(current==start){closed=true;break;}}
     if(!closed){return 0u;}var uniqueCount=0u;var firstPoint=vec3f(0);var previousPoint=vec3f(0);
-    for(var local=0u;local<rawCount;local+=1u){let q=contourPoint(rawEdges[local],values);if(uniqueCount==0u||any(q!=previousPoint)){if(uniqueCount==0u){firstPoint=q;}previousPoint=q;uniqueCount+=1u;}}
-    if(uniqueCount>1u&&all(previousPoint==firstPoint)){uniqueCount-=1u;}if(uniqueCount<3u){continue;}total+=uniqueCount;
-  }
-  return select(0u,total,visited==mask);
+    for(var local=0u;local<rawCount;local+=1u){let q=contourPoint(rawNodes[local],values);if(uniqueCount==0u||any(q!=previousPoint)){if(uniqueCount==0u){firstPoint=q;}previousPoint=q;uniqueCount+=1u;}}
+    if(uniqueCount>1u&&all(previousPoint==firstPoint)){uniqueCount-=1u;}if(uniqueCount>=3u){total+=uniqueCount;}
+  }return total;
 }
-fn contourSnap(v:f32)->f32{return round(v*CONTOUR_QUANTIZER)/CONTOUR_QUANTIZER;}
-fn contourPoint(edgeId:u32,values:array<f32,8>)->vec3f{let ia=CONTOUR_EDGE_A[edgeId];let ib=CONTOUR_EDGE_B[edgeId];let sa=values[ia]-.5;let sb=values[ib]-.5;let denominator=abs(sa)+abs(sb);if(denominator<=0.){return .5*(CONTOUR_CORNERS[ia]+CONTOUR_CORNERS[ib]);}let centred=contourSnap(.5*(abs(sa)-abs(sb))/denominator);return CONTOUR_CORNERS[ia]+(CONTOUR_CORNERS[ib]-CONTOUR_CORNERS[ia])*(.5+centred);}
 fn wallFaceCorners(axis:u32,side:u32)->vec4u{if(axis==0u){return select(vec4u(0,3,7,4),vec4u(1,2,6,5),side!=0u);}if(axis==1u){return vec4u(0,1,5,4);}return select(vec4u(0,1,2,3),vec4u(4,5,6,7),side!=0u);}
-fn wallFaceValues(values:array<f32,8>,descriptor:u32)->vec4f{let c=wallFaceCorners((descriptor>>14u)&3u,(descriptor&255u)-252u);return vec4f(values[c.x],values[c.y],values[c.z],values[c.w]);}
+fn wallCode(descriptor:u32)->u32{return descriptor&255u;}
+fn wallSide(descriptor:u32)->u32{return (wallCode(descriptor)-224u)&1u;}
+fn wallTransitionEdges(descriptor:u32)->u32{return (wallCode(descriptor)-224u)>>1u;}
+fn wallFaceValues(values:array<f32,8>,descriptor:u32)->vec4f{let c=wallFaceCorners((descriptor>>14u)&3u,wallSide(descriptor));return vec4f(values[c.x],values[c.y],values[c.z],values[c.w]);}
 fn wallMask(face:vec4f)->u32{return select(0u,1u,face.x>=.5)|select(0u,2u,face.y>=.5)|select(0u,4u,face.z>=.5)|select(0u,8u,face.w>=.5);}
 fn wallCorner(index:u32)->vec2f{return array<vec2f,4>(vec2f(0,0),vec2f(1,0),vec2f(1,1),vec2f(0,1))[index&3u];}
 fn wallValue(face:vec4f,index:u32)->f32{return face[index&3u];}
-fn wallEdgePoint(face:vec4f,index:u32)->vec2f{let next=(index+1u)&3u;let a=wallValue(face,index)-.5;let b=wallValue(face,next)-.5;let denominator=abs(a)+abs(b);let t=select(.5,contourSnap(abs(a)/denominator),denominator>0.);return mix(wallCorner(index),wallCorner(next),t);}
-fn wallBoundaryCount(face:vec4f)->u32{var count=0u;for(var i=0u;i<4u;i+=1u){let next=(i+1u)&3u;let inside=wallValue(face,i)>=.5;let nextInside=wallValue(face,next)>=.5;count+=select(0u,1u,inside)+select(0u,1u,inside!=nextInside);}return count;}
-fn wallBoundaryPoint(face:vec4f,wanted:u32)->vec2f{var cursor=0u;for(var i=0u;i<4u;i+=1u){let next=(i+1u)&3u;let inside=wallValue(face,i)>=.5;let nextInside=wallValue(face,next)>=.5;if(inside){if(cursor==wanted){return wallCorner(i);}cursor+=1u;}if(inside!=nextInside){if(cursor==wanted){return wallEdgePoint(face,i);}cursor+=1u;}}return vec2f(0);}
+fn wallSegmentPoint(pa:vec2f,pb:vec2f,a:f32,b:f32)->vec2f{let sa=a-.5;let sb=b-.5;let denominator=abs(sa)+abs(sb);let t=select(.5,contourSnap(abs(sa)/denominator),denominator>0.);return mix(pa,pb,t);}
+fn wallEdgePoint(face:vec4f,index:u32)->vec2f{let next=(index+1u)&3u;return wallSegmentPoint(wallCorner(index),wallCorner(next),wallValue(face,index),wallValue(face,next));}
+fn wallStrictCrossing(a:f32,b:f32)->bool{return (a<.5&&b>.5)||(a>.5&&b<.5);}
+fn wallBoundaryCount(face:vec4f,edgeMask:u32)->u32{var count=0u;for(var i=0u;i<4u;i+=1u){let next=(i+1u)&3u;let a=wallValue(face,i);let b=wallValue(face,next);count+=select(0u,1u,a>=.5);if((edgeMask&(1u<<i))==0u){count+=select(0u,1u,wallStrictCrossing(a,b));}else{let midpoint=.5*(a+b);count+=select(0u,1u,wallStrictCrossing(a,midpoint))+select(0u,1u,midpoint>=.5)+select(0u,1u,wallStrictCrossing(midpoint,b));}}return count;}
+fn wallBoundaryPoint(face:vec4f,edgeMask:u32,wanted:u32)->vec2f{var cursor=0u;for(var i=0u;i<4u;i+=1u){let next=(i+1u)&3u;let pa=wallCorner(i);let pb=wallCorner(next);let a=wallValue(face,i);let b=wallValue(face,next);if(a>=.5){if(cursor==wanted){return pa;}cursor+=1u;}if((edgeMask&(1u<<i))==0u){if(wallStrictCrossing(a,b)){if(cursor==wanted){return wallSegmentPoint(pa,pb,a,b);}cursor+=1u;}}else{let pm=.5*(pa+pb);let midpoint=.5*(a+b);if(wallStrictCrossing(a,midpoint)){if(cursor==wanted){return wallSegmentPoint(pa,pm,a,midpoint);}cursor+=1u;}if(midpoint>=.5){if(cursor==wanted){return pm;}cursor+=1u;}if(wallStrictCrossing(midpoint,b)){if(cursor==wanted){return wallSegmentPoint(pm,pb,midpoint,b);}cursor+=1u;}}}return vec2f(0);}
 fn wallAmbiguousConnected(face:vec4f)->bool{let determinant=(face.x-.5)*(face.z-.5)-(face.y-.5)*(face.w-.5);if(determinant>0.){return face.x>=.5;}if(determinant<0.){return face.y>=.5;}return true;}
-fn wallTriangleCount(values:array<f32,8>,descriptor:u32)->u32{let face=wallFaceValues(values,descriptor);let mask=wallMask(face);if(mask==0u){return 0u;}let ambiguous=mask==5u||mask==10u;if(ambiguous&&!wallAmbiguousConnected(face)){return 2u;}let count=wallBoundaryCount(face);if(ambiguous){return count;}return select(0u,count-2u,count>=3u);}
+fn wallTriangleCount(values:array<f32,8>,descriptor:u32)->u32{let face=wallFaceValues(values,descriptor);let mask=wallMask(face);if(mask==0u){return 0u;}let ambiguous=mask==5u||mask==10u;if(ambiguous&&!wallAmbiguousConnected(face)){return 2u;}let count=wallBoundaryCount(face,wallTransitionEdges(descriptor));if(ambiguous){return count;}return select(0u,count-2u,count>=3u);}
+fn heightFieldEdgeSplitCount(a:f32,b:f32)->u32{let lo=min(a,b);let hi=max(a,b);let first=i32(floor(lo+.5));let end=i32(ceil(hi-.5));return u32(max(0,end-first));}
+fn heightFieldTriangleCount(heights:vec4f)->u32{return 4u+heightFieldEdgeSplitCount(heights.x,heights.y)+heightFieldEdgeSplitCount(heights.y,heights.z)+heightFieldEdgeSplitCount(heights.z,heights.w)+heightFieldEdgeSplitCount(heights.w,heights.x);}
 `;
 
 const CONTOUR_EDGE_A = [0, 1, 3, 0, 4, 5, 7, 4, 0, 1, 2, 3] as const;
@@ -210,14 +230,14 @@ ${globalFineCubeContourWGSL}
 var<workgroup>laneOffsets:array<u32,256>;
 @compute @workgroup_size(256)fn scanGlobalFineTriangles(@builtin(local_invocation_index)lid:u32){
   let published=atomicLoad(&args.vertexAllocator)!=0xffffffffu;
-  let count=select(0u,min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),min(arrayLength(&offsets)/6u,arrayLength(&values)/2u))),published);
+  let count=select(0u,min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),min(arrayLength(&offsets)/${GLOBAL_FINE_SURFACE_EMIT_LANES}u,arrayLength(&values)/2u))),published);
   let base=count/256u;let extra=count%256u;let begin=lid*base+min(lid,extra);
   let end=begin+base+select(0u,1u,lid<extra);var localTotal=0u;
-  for(var i=begin;i<end;i+=1u){let descriptor=cubes[i].y>>16u;let code=descriptor&255u;let wallFace=code==252u||code==253u;let clipMask=(descriptor>>8u)&7u;let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);if(wallFace){localTotal+=3u*wallTriangleCount(samples,descriptor);}else if(clipMask!=0u){localTotal+=6u;}else{localTotal+=3u*contourTriangleCount(samples);}}
+  for(var i=begin;i<end;i+=1u){let descriptor=cubes[i].y>>16u;let rawCode=descriptor&255u;let heightField=rawCode==${GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE}u;let wallFace=rawCode>=224u;let transition=!heightField&&!wallFace&&(rawCode&128u)!=0u;let code=select(rawCode,rawCode&127u,transition);let clipMask=select((descriptor>>8u)&7u,0u,transition||heightField);let refinedFaces=select(0u,(descriptor>>8u)&63u,transition);let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);if(heightField){localTotal+=3u*heightFieldTriangleCount(lo);}else if(wallFace){localTotal+=3u*wallTriangleCount(samples,descriptor);}else if(clipMask!=0u){localTotal+=6u;}else{localTotal+=3u*contourTriangleCount(samples,refinedFaces);}}
   laneOffsets[lid]=localTotal;workgroupBarrier();
   if(lid==0u){var total=0u;for(var lane=0u;lane<256u;lane+=1u){let subtotal=laneOffsets[lane];laneOffsets[lane]=total;total+=subtotal;}if(published){let capacity=arrayLength(&out)-arrayLength(&out)%3u;atomicStore(&args.vertexCount,min(total,capacity));atomicStore(&args.vertexAllocator,total);if(p.table.y!=6u){atomicStore(&args.meshPublicationGeneration,p.table.w);}}}
   workgroupBarrier();var cursor=laneOffsets[lid];
-  for(var i=begin;i<end;i+=1u){let descriptor=cubes[i].y>>16u;let code=descriptor&255u;let wallFace=code==252u||code==253u;let clipMask=(descriptor>>8u)&7u;let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);var triangleCount=select(contourTriangleCount(samples),2u,clipMask!=0u);if(wallFace){triangleCount=wallTriangleCount(samples,descriptor);}for(var lane=0u;lane<6u;lane+=1u){offsets[i*6u+lane]=cursor;if(wallFace){cursor+=select(0u,3u,lane<triangleCount);}else{cursor+=3u*min(2u,triangleCount-min(triangleCount,2u*lane));}}}
+  for(var i=begin;i<end;i+=1u){let descriptor=cubes[i].y>>16u;let rawCode=descriptor&255u;let heightField=rawCode==${GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE}u;let wallFace=rawCode>=224u;let transition=!heightField&&!wallFace&&(rawCode&128u)!=0u;let code=select(rawCode,rawCode&127u,transition);let clipMask=select((descriptor>>8u)&7u,0u,transition||heightField);let refinedFaces=select(0u,(descriptor>>8u)&63u,transition);let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);var triangleCount=select(contourTriangleCount(samples,refinedFaces),2u,clipMask!=0u);if(heightField){triangleCount=heightFieldTriangleCount(lo);}else if(wallFace){triangleCount=wallTriangleCount(samples,descriptor);}for(var lane=0u;lane<${GLOBAL_FINE_SURFACE_EMIT_LANES}u;lane+=1u){offsets[i*${GLOBAL_FINE_SURFACE_EMIT_LANES}u+lane]=cursor;cursor+=3u*min(${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u,triangleCount-min(triangleCount,${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u*lane));}}
 }
 `;
 
@@ -229,7 +249,7 @@ export const globalFineClassifiedIndirectScanShader = globalFineClassifiedScanSh
   )
   .replace(
     "if(published){let capacity=arrayLength(&out)-arrayLength(&out)%3u;",
-    "emitDispatch[0]=(count+63u)/64u;emitDispatch[1]=6u;emitDispatch[2]=1u;if(published){let capacity=arrayLength(&out)-arrayLength(&out)%3u;",
+    `emitDispatch[0]=(count+63u)/64u;emitDispatch[1]=${GLOBAL_FINE_SURFACE_EMIT_LANES}u;emitDispatch[2]=1u;if(published){let capacity=arrayLength(&out)-arrayLength(&out)%3u;`,
   );
 
 const cornerPosition = [
@@ -340,6 +360,15 @@ fn signedPhi(qi:vec3i)->f32{
     let q=clamp(qi,vec3i(0),dims);
     return sampleAdaptiveCoarseOctreePhiAtGrid(vec3f(q));
   }
+  // The classifier extends proved floor-connected columns through q.y=-1.
+  // Normal reconstruction must sample the same scalar or its 3x3x3 kernel
+  // sees a four-cell air spike immediately below a perfectly smooth sheet.
+  if(signedSparseAddressing()&&qi.y==-1){
+    let above=vec3i(qi.x,0,qi.z);let aboveAddress=compactSampleAddress(above);
+    if(aboveAddress.x!=INVALID){let aboveIndex=aboveAddress.x*p.bricks.w+aboveAddress.y;
+      if(aboveIndex<arrayLength(&fineSamples)){let flags=finePackedFlags(aboveIndex);let value=finePackedPhi(aboveIndex);
+        if((flags&3u)==3u&&finitePhi(value)){let size=max(vec3f(p.sample.xyz),vec3f(1.0));let cell=select(u.container.xyz/size,p.sizing.xyz,all(p.sizing.xyz>vec3f(0.0)));return value-cell.y;}}}
+  }
   // Only the dense publication has an in-domain sample worth repeating. A
   // signed sparse page legitimately sits outside [0,dims), so clamping there
   // would fold a frontier vertex onto an unrelated page instead of extending
@@ -394,12 +423,13 @@ export const globalFineDirectSharpPatchWGSL = /* wgsl */ `
 fn directPatch(cursor:ptr<function,u32>,base:vec3f,scale:f32,descriptor:u32,n:vec3f){let mask=(descriptor>>8u)&7u;let axis=(descriptor>>14u)&3u;let code=descriptor&255u;let nativeFace=code==2u||code==3u;let plane=select(.5,select(0.,1.,code==3u),nativeFace);var lx=0.0;var ly=0.0;var lz=0.0;var hx=1.0;var hy=1.0;var hz=1.0;if((mask&1u)!=0u&&!nativeFace){let high=((descriptor>>11u)&1u)!=0u;lx=select(0.0,0.5,high);hx=select(0.5,1.0,high);}if((mask&2u)!=0u&&!nativeFace){let high=((descriptor>>12u)&1u)!=0u;ly=select(0.0,0.5,high);hy=select(0.5,1.0,high);}if((mask&4u)!=0u&&!nativeFace){let high=((descriptor>>13u)&1u)!=0u;lz=select(0.0,0.5,high);hz=select(0.5,1.0,high);}var a=vec3f(0);var b=vec3f(0);var c=vec3f(0);var d=vec3f(0);if(axis==0u){a=vec3f(plane,ly,lz);b=vec3f(plane,hy,lz);c=vec3f(plane,hy,hz);d=vec3f(plane,ly,hz);}else if(axis==1u){a=vec3f(lx,plane,lz);b=vec3f(lx,plane,hz);c=vec3f(hx,plane,hz);d=vec3f(hx,plane,lz);}else{a=vec3f(lx,ly,plane);b=vec3f(hx,ly,plane);c=vec3f(hx,hy,plane);d=vec3f(lx,hy,plane);}let shift=select(vec3f(0),vec3f(.5),nativeFace);a=base+scale*a+shift;b=base+scale*b+shift;c=base+scale*c+shift;d=base+scale*d+shift;tri(cursor,a,b,c,n,false);tri(cursor,a,c,d,n,false);}
 fn wallPoint3(q:vec2f,axis:u32,plane:f32)->vec3f{if(axis==0u){return vec3f(plane,q.x,q.y);}if(axis==1u){return vec3f(q.x,plane,q.y);}return vec3f(q.x,q.y,plane);}
 fn emitWallLane(cursor:ptr<function,u32>,base:vec3f,descriptor:u32,values:array<f32,8>,lane:u32){
-  let face=wallFaceValues(values,descriptor);let mask=wallMask(face);let axis=(descriptor>>14u)&3u;let side=(descriptor&255u)-252u;let plane=f32(side);let scaleCode=max(1u,(descriptor>>8u)&63u);let wallScale=f32(1u<<(scaleCode-1u));let ambiguous=mask==5u||mask==10u;let connected=wallAmbiguousConnected(face);let count=wallBoundaryCount(face);let triangles=wallTriangleCount(values,descriptor);if(lane>=triangles){return;}
-  var a=vec2f(0);var b=vec2f(0);var c=vec2f(0);
-  if(ambiguous&&!connected){let corner=select(select(0u,2u,lane!=0u),select(1u,3u,lane!=0u),mask==10u);a=wallCorner(corner);b=wallEdgePoint(face,corner);c=wallEdgePoint(face,(corner+3u)&3u);}
-  else if(ambiguous){var centre=vec2f(0);for(var i=0u;i<count;i+=1u){centre+=wallBoundaryPoint(face,i);}centre=vec2f(contourSnap(centre.x/f32(count)),contourSnap(centre.y/f32(count)));a=centre;b=wallBoundaryPoint(face,lane);c=wallBoundaryPoint(face,(lane+1u)%count);}
-  else{a=wallBoundaryPoint(face,0u);b=wallBoundaryPoint(face,lane+1u);c=wallBoundaryPoint(face,lane+2u);}
-  var normal=vec3f(0);normal[axis]=select(-1.,1.,side!=0u);let shift=vec3f(.5);tri(cursor,base+wallPoint3(wallScale*a,axis,plane)+shift,base+wallPoint3(wallScale*b,axis,plane)+shift,base+wallPoint3(wallScale*c,axis,plane)+shift,normal,false);
+  let face=wallFaceValues(values,descriptor);let mask=wallMask(face);let axis=(descriptor>>14u)&3u;let side=wallSide(descriptor);let edgeMask=wallTransitionEdges(descriptor);let plane=f32(side);let scaleCode=max(1u,(descriptor>>8u)&63u);let wallScale=f32(1u<<(scaleCode-1u));let ambiguous=mask==5u||mask==10u;let connected=wallAmbiguousConnected(face);let count=wallBoundaryCount(face,edgeMask);let triangles=wallTriangleCount(values,descriptor);if(${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u*lane>=triangles){return;}
+  for(var local=0u;local<${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u;local+=1u){let triangle=${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u*lane+local;if(triangle>=triangles){return;}var a=vec2f(0);var b=vec2f(0);var c=vec2f(0);
+    if(ambiguous&&!connected){let corner=select(select(0u,2u,triangle!=0u),select(1u,3u,triangle!=0u),mask==10u);a=wallCorner(corner);b=wallEdgePoint(face,corner);c=wallEdgePoint(face,(corner+3u)&3u);}
+    else if(ambiguous){var centre=vec2f(0);for(var i=0u;i<count;i+=1u){centre+=wallBoundaryPoint(face,edgeMask,i);}centre=vec2f(contourSnap(centre.x/f32(count)),contourSnap(centre.y/f32(count)));a=centre;b=wallBoundaryPoint(face,edgeMask,triangle);c=wallBoundaryPoint(face,edgeMask,(triangle+1u)%count);}
+    else{a=wallBoundaryPoint(face,edgeMask,0u);b=wallBoundaryPoint(face,edgeMask,triangle+1u);c=wallBoundaryPoint(face,edgeMask,triangle+2u);}
+    var normal=vec3f(0);normal[axis]=select(-1.,1.,side!=0u);let wallShift=vec3f(.5);tri(cursor,base+wallPoint3(wallScale*a,axis,plane)+wallShift,base+wallPoint3(wallScale*b,axis,plane)+wallShift,base+wallPoint3(wallScale*c,axis,plane)+wallShift,normal,false);
+  }
 }
 `;
 
@@ -407,16 +437,110 @@ const globalFineContourEmitWGSL = /* wgsl */ `
 fn contourOrdered4(a:f32,b:f32,c:f32,d:f32)->f32{var terms=array<f32,4>(a,b,c,d);for(var i=1u;i<4u;i+=1u){let term=terms[i];var j=i;loop{if(j==0u||terms[j-1u]<=term){break;}terms[j]=terms[j-1u];j-=1u;}terms[j]=term;}return(terms[0]+terms[1])+(terms[2]+terms[3]);}
 fn contourOrdered3(a:f32,b:f32,c:f32)->f32{var terms=array<f32,3>(a,b,c);if(terms[1]<terms[0]){let swap=terms[0];terms[0]=terms[1];terms[1]=swap;}if(terms[2]<terms[1]){let swap=terms[1];terms[1]=terms[2];terms[2]=swap;}if(terms[1]<terms[0]){let swap=terms[0];terms[0]=terms[1];terms[1]=swap;}return(terms[0]+terms[1])+terms[2];}
 fn contourNormal(values:array<f32,8>,size:vec3f,container:vec3f)->vec3f{let gx=.25*(contourOrdered4(values[1],values[2],values[5],values[6])-contourOrdered4(values[0],values[3],values[4],values[7]));let gy=.25*(contourOrdered4(values[2],values[3],values[6],values[7])-contourOrdered4(values[0],values[1],values[4],values[5]));let gz=.25*(contourOrdered4(values[4],values[5],values[6],values[7])-contourOrdered4(values[0],values[1],values[2],values[3]));let gradient=vec3f(gx*size.x/container.x,gy*size.y/container.y,gz*size.z/container.z);let magnitude=sqrt(contourOrdered3(gradient.x*gradient.x,gradient.y*gradient.y,gradient.z*gradient.z));if(!(magnitude>1e-5)){return vec3f(0,1,0);}let raw=-gradient/magnitude;return vec3f(select(0.,contourSnap(raw.x),gradient.x!=0.),select(0.,contourSnap(raw.y),gradient.y!=0.),select(0.,contourSnap(raw.z),gradient.z!=0.));}
-fn emitContourLane(cursor:ptr<function,u32>,base:vec3f,scale:f32,descriptor:u32,values:array<f32,8>,n:vec3f,filterEnabled:bool,lane:u32){
-  var adjacentA:array<u32,12>;var adjacentB:array<u32,12>;let mask=buildContour(values,&adjacentA,&adjacentB);if(mask==0u||mask==CONTOUR_INVALID){return;}
-  let firstTriangle=2u*lane;let lastTriangle=firstTriangle+2u;var triangleIndex=0u;var visited=0u;
-  for(var start=0u;start<12u;start+=1u){let startBit=1u<<start;if((mask&startBit)==0u||(visited&startBit)!=0u){continue;}
-    var rawEdges:array<u32,12>;var rawCount=0u;var current=start;var previous=CONTOUR_INVALID;
-    for(var step=0u;step<12u;step+=1u){let bit=1u<<current;if((visited&bit)!=0u){break;}visited|=bit;rawEdges[rawCount]=current;rawCount+=1u;let next=select(adjacentA[current],adjacentB[current],adjacentA[current]==previous);previous=current;current=next;if(current==start){break;}}
-    var loopEdges:array<u32,12>;var loopCount=0u;var centredSum=vec3f(0);var firstPoint=vec3f(0);var previousPoint=vec3f(0);
-    for(var raw=0u;raw<rawCount;raw+=1u){let q=contourPoint(rawEdges[raw],values);if(loopCount==0u||any(q!=previousPoint)){if(loopCount==0u){firstPoint=q;}loopEdges[loopCount]=rawEdges[raw];loopCount+=1u;previousPoint=q;centredSum+=q-vec3f(.5);}}
+fn emitContourLane(cursor:ptr<function,u32>,base:vec3f,scale:f32,descriptor:u32,values:array<f32,8>,refinedFaces:u32,n:vec3f,filterEnabled:bool,lane:u32){
+  var adjacentA:array<u32,36>;var adjacentB:array<u32,36>;if(!buildContour(values,refinedFaces,&adjacentA,&adjacentB)){return;}
+  let firstTriangle=${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u*lane;let lastTriangle=firstTriangle+${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u;var triangleIndex=0u;
+  var seen:array<bool,36>;
+  for(var start=0u;start<CONTOUR_NODE_COUNT;start+=1u){if(adjacentA[start]==CONTOUR_INVALID||seen[start]){continue;}
+    var rawNodes:array<u32,36>;var rawCount=0u;var current=start;var previous=CONTOUR_INVALID;
+    for(var step=0u;step<CONTOUR_NODE_COUNT;step+=1u){if(seen[current]){break;}seen[current]=true;rawNodes[rawCount]=current;rawCount+=1u;let next=select(adjacentA[current],adjacentB[current],adjacentA[current]==previous);previous=current;current=next;if(current==start){break;}}
+    var loopNodes:array<u32,36>;var loopCount=0u;var centredSum=vec3f(0);var firstPoint=vec3f(0);var previousPoint=vec3f(0);
+    for(var raw=0u;raw<rawCount;raw+=1u){let q=contourPoint(rawNodes[raw],values);if(loopCount==0u||any(q!=previousPoint)){if(loopCount==0u){firstPoint=q;}loopNodes[loopCount]=rawNodes[raw];loopCount+=1u;previousPoint=q;centredSum+=q-vec3f(.5);}}
     if(loopCount>1u&&all(previousPoint==firstPoint)){loopCount-=1u;centredSum-=previousPoint-vec3f(.5);}if(loopCount<3u){continue;}let centre=vec3f(.5)+vec3f(contourSnap(centredSum.x/f32(loopCount)),contourSnap(centredSum.y/f32(loopCount)),contourSnap(centredSum.z/f32(loopCount)));
-    for(var local=0u;local<loopCount;local+=1u){if(triangleIndex>=firstTriangle&&triangleIndex<lastTriangle){let qa=contourPoint(loopEdges[local],values);let qb=contourPoint(loopEdges[(local+1u)%loopCount],values);tri(cursor,clipped(base,scale,qa,descriptor),clipped(base,scale,qb,descriptor),clipped(base,scale,centre,descriptor),n,filterEnabled);}triangleIndex+=1u;}
+    for(var local=0u;local<loopCount;local+=1u){if(triangleIndex>=firstTriangle&&triangleIndex<lastTriangle){let qa=contourPoint(loopNodes[local],values);let qb=contourPoint(loopNodes[(local+1u)%loopCount],values);tri(cursor,clipped(base,scale,qa,descriptor),clipped(base,scale,qb,descriptor),clipped(base,scale,centre,descriptor),n,filterEnabled);}triangleIndex+=1u;}
+  }
+}
+`;
+
+const globalFineHeightFieldEmitWGSL = /* wgsl */ `
+fn heightFieldMarkedHeight(q:vec2i,fallback:f32)->f32{
+  let address=compactSampleAddress(vec3i(q.x,0,q.y));
+  if(address.x==INVALID){return fallback;}
+  let index=address.x*p.bricks.w+address.y;
+  if(index>=arrayLength(&fineSamples)){return fallback;}
+  let flags=finePackedFlags(index);let value=finePackedPhi(index);let cell=domainCell();
+  if((flags&3u)!=3u||!finitePhi(value)){return fallback;}
+  return max(0.0,0.5-value/max(cell.y,1e-9));
+}
+fn heightFieldNormalFromSlope(dx:f32,dz:f32)->vec3f{
+  let cell=domainCell();
+  return normalize(vec3f(-dx*cell.y/max(cell.x,1e-9),1.0,
+    -dz*cell.y/max(cell.z,1e-9)));
+}
+fn heightFieldCornerNormal(q:vec2i,height:f32)->vec3f{
+  let left=heightFieldMarkedHeight(q-vec2i(1,0),height);
+  let right=heightFieldMarkedHeight(q+vec2i(1,0),height);
+  let back=heightFieldMarkedHeight(q-vec2i(0,1),height);
+  let forward=heightFieldMarkedHeight(q+vec2i(0,1),height);
+  return heightFieldNormalFromSlope(0.5*(right-left),0.5*(forward-back));
+}
+fn heightFieldPublishedPhi(q:vec3i,fallback:f32)->f32{
+  let address=compactSampleAddress(q);if(address.x==INVALID){return fallback;}
+  let index=address.x*p.bricks.w+address.y;
+  if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u){return fallback;}
+  let value=finePackedPhi(index);return select(fallback,value,finitePhi(value));
+}
+fn heightFieldBoundaryVertex(base:vec3f,heights:vec4f,
+ q:array<vec2i,4>,normals:array<vec3f,4>,wanted:u32,
+ point:ptr<function,vec3f>,normal:ptr<function,vec3f>){
+  let corners=array<vec2f,4>(vec2f(0,0),vec2f(1,0),vec2f(1,1),vec2f(0,1));
+  var cursor=0u;
+  for(var edgeIndex=0u;edgeIndex<4u;edgeIndex+=1u){
+    let next=(edgeIndex+1u)&3u;let ha=heights[edgeIndex];let hb=heights[next];
+    if(cursor==wanted){let xz=corners[edgeIndex];
+      *point=base+vec3f(xz.x,ha+.5,xz.y);*normal=normals[edgeIndex];return;}
+    cursor+=1u;
+    let splits=heightFieldEdgeSplitCount(ha,hb);let lo=min(ha,hb);let hi=max(ha,hb);
+    let first=i32(floor(lo+.5));let last=i32(ceil(hi-.5))-1;
+    for(var split=0u;split<splits;split+=1u){
+      if(cursor==wanted){let layer=select(last-i32(split),first+i32(split),hb>ha);
+        let plane=f32(layer)+.5;let fallback=clamp((plane-ha)/(hb-ha),0.0,1.0);
+        let pa=heightFieldPublishedPhi(vec3i(q[edgeIndex].x,layer,q[edgeIndex].y),0.0);
+        let pb=heightFieldPublishedPhi(vec3i(q[next].x,layer,q[next].y),0.0);
+        let band=4.0*domainCell().y;let va=clamp(.5-pa/max(band,1e-9),0.0,1.0);
+        let vb=clamp(.5-pb/max(band,1e-9),0.0,1.0);
+        var t=contourInterpolatedPoint(vec3f(0),vec3f(1,0,0),va,vb).x;
+        if(!finitePhi(pa)||!finitePhi(pb)||(va>=.5)==(vb>=.5)){t=fallback;}
+        let xz=mix(corners[edgeIndex],corners[next],t);
+        *point=base+vec3f(xz.x,plane+.5,xz.y);
+        *normal=normalize(mix(normals[edgeIndex],normals[next],t));return;
+      }
+      cursor+=1u;
+    }
+  }
+}
+fn heightFieldTri(cursor:ptr<function,u32>,a:vec3f,b:vec3f,c:vec3f,
+ na:vec3f,nb:vec3f,nc:vec3f){
+  let first=*cursor;*cursor=first+3u;let limit=min(atomicLoad(&args.vertexCount),arrayLength(&out));
+  if(first+3u>limit){return;}
+  let x=V(vec4f(world(a),1),vec4f(na,0));let y=V(vec4f(world(b),1),vec4f(nb,0));
+  let z=V(vec4f(world(c),1),vec4f(nc,0));out[first]=x;
+  if(dot(cross(y.position.xyz-x.position.xyz,z.position.xyz-x.position.xyz),na+nb+nc)>=0.){
+    out[first+1u]=y;out[first+2u]=z;
+  }else{out[first+1u]=z;out[first+2u]=y;}
+}
+fn emitHeightFieldLane(cursor:ptr<function,u32>,base:vec3f,heights:vec4f,lane:u32){
+  let q0=vec2i(i32(round(base.x))-1,i32(round(base.z))-1);
+  let q=array<vec2i,4>(q0,q0+vec2i(1,0),q0+vec2i(1,1),q0+vec2i(0,1));
+  let points=array<vec3f,4>(vec3f(base.x,heights.x+0.5,base.z),
+    vec3f(base.x+1.0,heights.y+0.5,base.z),
+    vec3f(base.x+1.0,heights.z+0.5,base.z+1.0),
+    vec3f(base.x,heights.w+0.5,base.z+1.0));
+  let normals=array<vec3f,4>(heightFieldCornerNormal(q[0],heights.x),
+    heightFieldCornerNormal(q[1],heights.y),heightFieldCornerNormal(q[2],heights.z),
+    heightFieldCornerNormal(q[3],heights.w));
+  let centre=0.25*(points[0]+points[1]+points[2]+points[3]);
+  let centreNormal=heightFieldNormalFromSlope(
+    0.5*((heights.y-heights.x)+(heights.z-heights.w)),
+    0.5*((heights.w-heights.x)+(heights.z-heights.y)));
+  let triangles=heightFieldTriangleCount(heights);
+  for(var local=0u;local<${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u;local+=1u){
+    let triangle=${GLOBAL_FINE_SURFACE_TRIANGLES_PER_LANE}u*lane+local;
+    if(triangle>=triangles){return;}
+    var a=vec3f(0);var b=vec3f(0);var na=vec3f(0,1,0);var nb=vec3f(0,1,0);
+    heightFieldBoundaryVertex(base,heights,q,normals,triangle,&a,&na);
+    heightFieldBoundaryVertex(base,heights,q,normals,(triangle+1u)%triangles,&b,&nb);
+    heightFieldTri(cursor,centre,b,a,centreNormal,nb,na);
   }
 }
 `;
@@ -428,20 +552,21 @@ struct U{viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,
 @group(0)@binding(0)var<uniform>u:U;@group(0)@binding(3)var<storage,read_write>out:array<V>;@group(0)@binding(4)var<storage,read_write>args:A;@group(0)@binding(5)var<storage,read>cubes:array<vec2u>;@group(0)@binding(6)var<storage,read>values:array<vec4f>;@group(0)@binding(7)var<storage,read_write>offsets:array<u32>;@group(0)@binding(10)var<uniform>p:P;
 ${factorOneFilteredNormalShader}
 ${globalFineCubeContourWGSL}
-fn unpackSigned16(word:u32)->i32{return bitcast<i32>((word&0xffffu)<<16u)>>16;}fn domainCell()->vec3f{let dims=max(vec3f(p.sample.xyz),vec3f(1));return select(u.container.xyz/dims,p.sizing.xyz,all(p.sizing.xyz>vec3f(0)));}fn domainOrigin()->vec3f{return select(vec3f(-.5*u.container.x,0.,-.5*u.container.z),p.physical.xyz,all(p.sizing.xyz>vec3f(0)));}fn world(q:vec3f)->vec3f{let dims=vec3f(p.sample.xyz);let bounded=select(clamp(q,vec3f(.5),dims+vec3f(.5)),q,signedSparseAddressing());return domainOrigin()+(bounded-vec3f(.5))*domainCell();}fn edge(x:vec3f,y:vec3f,a:f32,b:f32)->vec3f{return mix(x,y,clamp((.5-a)/(b-a),0.,1.));}fn countTet(a:f32,b:f32,c:f32,d:f32)->u32{let n=select(0u,1u,a>=.5)+select(0u,1u,b>=.5)+select(0u,1u,c>=.5)+select(0u,1u,d>=.5);if(n==0u||n==4u){return 0u;}return select(3u,6u,n==2u);}
+fn unpackSigned16(word:u32)->i32{return bitcast<i32>((word&0xffffu)<<16u)>>16;}fn domainCell()->vec3f{let dims=max(vec3f(p.sample.xyz),vec3f(1));return select(u.container.xyz/dims,p.sizing.xyz,all(p.sizing.xyz>vec3f(0)));}fn domainOrigin()->vec3f{return select(vec3f(-.5*u.container.x,0.,-.5*u.container.z),p.physical.xyz,all(p.sizing.xyz>vec3f(0)));}fn world(q:vec3f)->vec3f{let canonical=vec3f(contourSnap(q.x),contourSnap(q.y),contourSnap(q.z));let dims=vec3f(p.sample.xyz);let bounded=clamp(canonical,vec3f(.5),dims+vec3f(.5));return domainOrigin()+(bounded-vec3f(.5))*domainCell();}fn edge(x:vec3f,y:vec3f,a:f32,b:f32)->vec3f{return mix(x,y,clamp((.5-a)/(b-a),0.,1.));}fn countTet(a:f32,b:f32,c:f32,d:f32)->u32{let n=select(0u,1u,a>=.5)+select(0u,1u,b>=.5)+select(0u,1u,c>=.5)+select(0u,1u,d>=.5);if(n==0u||n==4u){return 0u;}return select(3u,6u,n==2u);}
 fn tri(cursor:ptr<function,u32>,a:vec3f,b:vec3f,c:vec3f,n:vec3f,filterEnabled:bool){let first=*cursor;*cursor=first+3u;let limit=min(atomicLoad(&args.vertexCount),arrayLength(&out));if(first+3u>limit){return;}let x=V(vec4f(world(a),1),vec4f(filteredNormalAt(a,n,filterEnabled),0));let y=V(vec4f(world(b),1),vec4f(filteredNormalAt(b,n,filterEnabled),0));let z=V(vec4f(world(c),1),vec4f(filteredNormalAt(c,n,filterEnabled),0));out[first]=x;if(dot(cross(y.position.xyz-x.position.xyz,z.position.xyz-x.position.xyz),n)>=0.){out[first+1u]=y;out[first+2u]=z;}else{out[first+1u]=z;out[first+2u]=y;}}
+${globalFineHeightFieldEmitWGSL}
 fn tet(cursor:ptr<function,u32>,pa:vec3f,pb:vec3f,pc:vec3f,pd:vec3f,va:f32,vb:f32,vc:f32,vd:f32,n:vec3f,filterEnabled:bool){let m=select(0u,1u,va>=.5)|select(0u,2u,vb>=.5)|select(0u,4u,vc>=.5)|select(0u,8u,vd>=.5);if(m==1u||m==14u){tri(cursor,edge(pa,pb,va,vb),edge(pa,pc,va,vc),edge(pa,pd,va,vd),n,filterEnabled);}else if(m==2u||m==13u){tri(cursor,edge(pb,pa,vb,va),edge(pb,pd,vb,vd),edge(pb,pc,vb,vc),n,filterEnabled);}else if(m==4u||m==11u){tri(cursor,edge(pc,pa,vc,va),edge(pc,pb,vc,vb),edge(pc,pd,vc,vd),n,filterEnabled);}else if(m==8u||m==7u){tri(cursor,edge(pd,pa,vd,va),edge(pd,pc,vd,vc),edge(pd,pb,vd,vb),n,filterEnabled);}else if(m==3u||m==12u){let ac=edge(pa,pc,va,vc);let ad=edge(pa,pd,va,vd);let bc=edge(pb,pc,vb,vc);let bd=edge(pb,pd,vb,vd);tri(cursor,ac,bc,bd,n,filterEnabled);tri(cursor,ac,bd,ad,n,filterEnabled);}else if(m==5u||m==10u){let ab=edge(pa,pb,va,vb);let ad=edge(pa,pd,va,vd);let cb=edge(pc,pb,vc,vb);let cd=edge(pc,pd,vc,vd);tri(cursor,ab,cb,cd,n,filterEnabled);tri(cursor,ab,cd,ad,n,filterEnabled);}else if(m==6u||m==9u){let ba=edge(pb,pa,vb,va);let bd=edge(pb,pd,vb,vd);let ca=edge(pc,pa,vc,va);let cd=edge(pc,pd,vc,vd);tri(cursor,ba,ca,cd,n,filterEnabled);tri(cursor,ba,cd,bd,n,filterEnabled);}}
-fn clipped(base:vec3f,scale:f32,q:vec3f,descriptor:u32)->vec3f{let nodal=(descriptor&255u)==0u;var r=base+scale*q+select(vec3f(0),vec3f(.5),nodal);let mask=(descriptor>>8u)&7u;for(var axis=0u;axis<3u;axis+=1u){if((mask&(1u<<axis))!=0u){let high=((descriptor>>(11u+axis))&1u)!=0u;r[axis]=base[axis]+scale*select(.5*q[axis],.5+.5*q[axis],high)+select(0.,.5,nodal);}}return r;}
+fn clipped(base:vec3f,scale:f32,q:vec3f,descriptor:u32)->vec3f{let rawCode=descriptor&255u;let transition=(rawCode&128u)!=0u;let code=select(rawCode,rawCode&127u,transition);let nodal=code==0u;var r=base+scale*q+select(vec3f(0),vec3f(.5),nodal);let mask=select((descriptor>>8u)&7u,0u,transition);for(var axis=0u;axis<3u;axis+=1u){if((mask&(1u<<axis))!=0u){let high=((descriptor>>(11u+axis))&1u)!=0u;r[axis]=base[axis]+scale*select(.5*q[axis],.5+.5*q[axis],high)+select(0.,.5,nodal);}}return r;}
 ${globalFineDirectSharpPatchWGSL}
 ${globalFineContourEmitWGSL}
-@compute @workgroup_size(64)fn emitGlobalFineTetra${tetraIndex}(@builtin(global_invocation_id)g:vec3u){let i=g.x;let count=min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),arrayLength(&offsets)/6u));if(i>=count||i*2u+1u>=arrayLength(&values)){return;}let packed=cubes[i];let descriptor=packed.y>>16u;let code=descriptor&255u;let wallFace=code==252u||code==253u;let nativeFace=(code==2u||code==3u)&&((descriptor>>8u)&7u)!=0u;let scale=select(f32(max(1u,code)),1.,nativeFace||wallFace);let base=vec3f(f32(unpackSigned16(packed.x)),f32(packed.y&0xffffu),f32(unpackSigned16(packed.x>>16u)));let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);let domainExtent=domainCell()*vec3f(p.sample.xyz);let n=contourNormal(samples,vec3f(p.sample.xyz),domainExtent);let clipMask=(descriptor>>8u)&7u;let denseInterior=base.x>0.0&&base.y>0.0&&base.z>0.0&&base.x<f32(p.sample.x)&&base.y<f32(p.sample.y)&&base.z<f32(p.sample.z);let filterEnabled=!nativeFace&&!wallFace&&clipMask==0u&&(signedSparseAddressing()||denseInterior);var cursor=offsets[i*6u+${tetraIndex}u];if(wallFace){emitWallLane(&cursor,base,descriptor,samples,${tetraIndex}u);return;}if(clipMask!=0u){if(${tetraIndex}u==0u){directPatch(&cursor,base,scale,descriptor,n);}return;}emitContourLane(&cursor,base,scale,descriptor,samples,n,filterEnabled,${tetraIndex}u);}
+@compute @workgroup_size(64)fn emitGlobalFineTetra${tetraIndex}(@builtin(global_invocation_id)g:vec3u){let i=g.x;let count=min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),arrayLength(&offsets)/${GLOBAL_FINE_SURFACE_EMIT_LANES}u));if(i>=count||i*2u+1u>=arrayLength(&values)){return;}let packed=cubes[i];let descriptor=packed.y>>16u;let rawCode=descriptor&255u;let heightField=rawCode==${GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE}u;let wallFace=rawCode>=224u;let transition=!heightField&&!wallFace&&(rawCode&128u)!=0u;let code=select(rawCode,rawCode&127u,transition);let nativeFace=(code==2u||code==3u)&&((descriptor>>8u)&7u)!=0u;let scale=select(f32(max(1u,code)),1.,nativeFace||wallFace||heightField);let base=vec3f(f32(unpackSigned16(packed.x)),f32(packed.y&0xffffu),f32(unpackSigned16(packed.x>>16u)));let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);let domainExtent=domainCell()*vec3f(p.sample.xyz);let n=contourNormal(samples,vec3f(p.sample.xyz),domainExtent);let clipMask=select((descriptor>>8u)&7u,0u,transition||heightField);let refinedFaces=select(0u,(descriptor>>8u)&63u,transition);let denseInterior=base.x>0.0&&base.y>0.0&&base.z>0.0&&base.x<f32(p.sample.x)&&base.y<f32(p.sample.y)&&base.z<f32(p.sample.z);let filterEnabled=!nativeFace&&!wallFace&&!heightField&&clipMask==0u&&(signedSparseAddressing()||denseInterior);var cursor=offsets[i*${GLOBAL_FINE_SURFACE_EMIT_LANES}u+${tetraIndex}u];if(heightField){emitHeightFieldLane(&cursor,base,lo,${tetraIndex}u);return;}if(wallFace){emitWallLane(&cursor,base,descriptor,samples,${tetraIndex}u);return;}if(clipMask!=0u){if(${tetraIndex}u==0u){directPatch(&cursor,base,scale,descriptor,n);}return;}emitContourLane(&cursor,base,scale,descriptor,samples,refinedFaces,n,filterEnabled,${tetraIndex}u);}
 `;
 }
 
 export const globalFineClassifiedEmitShaders = TETS.map((_, index) => emitShader(index));
 
-/** One bounded 2-D dispatch: x selects a classified cube, y one of six exact tetrahedra. */
+/** One bounded 2-D dispatch: x selects a classified cube, y an adaptive contour lane. */
 export const globalFineClassifiedEmitShader = emitShader(0).replace(
   /@compute @workgroup_size\(64\)fn emitGlobalFineTetra0[\s\S]*$/,
-  `@compute @workgroup_size(64)fn emitGlobalFineTetrahedra(@builtin(global_invocation_id)g:vec3u){let i=g.x;let lane=g.y;if(lane>=6u){return;}let count=min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),arrayLength(&offsets)/6u));if(i>=count||i*2u+1u>=arrayLength(&values)){return;}let packed=cubes[i];let descriptor=packed.y>>16u;let code=descriptor&255u;let wallFace=code==252u||code==253u;let nativeFace=(code==2u||code==3u)&&((descriptor>>8u)&7u)!=0u;let scale=select(f32(max(1u,code)),1.,nativeFace||wallFace);let base=vec3f(f32(unpackSigned16(packed.x)),f32(packed.y&0xffffu),f32(unpackSigned16(packed.x>>16u)));let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);let domainExtent=domainCell()*vec3f(p.sample.xyz);let n=contourNormal(samples,vec3f(p.sample.xyz),domainExtent);let clipMask=(descriptor>>8u)&7u;let denseInterior=base.x>0.0&&base.y>0.0&&base.z>0.0&&base.x<f32(p.sample.x)&&base.y<f32(p.sample.y)&&base.z<f32(p.sample.z);let filterEnabled=!nativeFace&&!wallFace&&clipMask==0u&&(signedSparseAddressing()||denseInterior);var cursor=offsets[i*6u+lane];if(wallFace){emitWallLane(&cursor,base,descriptor,samples,lane);return;}if(clipMask!=0u){if(lane==0u){directPatch(&cursor,base,scale,descriptor,n);}return;}emitContourLane(&cursor,base,scale,descriptor,samples,n,filterEnabled,lane);}`,
+  `@compute @workgroup_size(64)fn emitGlobalFineTetrahedra(@builtin(global_invocation_id)g:vec3u){let i=g.x;let lane=g.y;if(lane>=${GLOBAL_FINE_SURFACE_EMIT_LANES}u){return;}let count=min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),arrayLength(&offsets)/${GLOBAL_FINE_SURFACE_EMIT_LANES}u));if(i>=count||i*2u+1u>=arrayLength(&values)){return;}let packed=cubes[i];let descriptor=packed.y>>16u;let rawCode=descriptor&255u;let heightField=rawCode==${GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE}u;let wallFace=rawCode>=224u;let transition=!heightField&&!wallFace&&(rawCode&128u)!=0u;let code=select(rawCode,rawCode&127u,transition);let nativeFace=(code==2u||code==3u)&&((descriptor>>8u)&7u)!=0u;let scale=select(f32(max(1u,code)),1.,nativeFace||wallFace||heightField);let base=vec3f(f32(unpackSigned16(packed.x)),f32(packed.y&0xffffu),f32(unpackSigned16(packed.x>>16u)));let lo=values[i*2u];let hi=values[i*2u+1u];let samples=array<f32,8>(lo.x,lo.y,lo.z,lo.w,hi.x,hi.y,hi.z,hi.w);let domainExtent=domainCell()*vec3f(p.sample.xyz);let n=contourNormal(samples,vec3f(p.sample.xyz),domainExtent);let clipMask=select((descriptor>>8u)&7u,0u,transition||heightField);let refinedFaces=select(0u,(descriptor>>8u)&63u,transition);let denseInterior=base.x>0.0&&base.y>0.0&&base.z>0.0&&base.x<f32(p.sample.x)&&base.y<f32(p.sample.y)&&base.z<f32(p.sample.z);let filterEnabled=!nativeFace&&!wallFace&&!heightField&&clipMask==0u&&(signedSparseAddressing()||denseInterior);var cursor=offsets[i*${GLOBAL_FINE_SURFACE_EMIT_LANES}u+lane];if(heightField){emitHeightFieldLane(&cursor,base,lo,lane);return;}if(wallFace){emitWallLane(&cursor,base,descriptor,samples,lane);return;}if(clipMask!=0u){if(lane==0u){directPatch(&cursor,base,scale,descriptor,n);}return;}emitContourLane(&cursor,base,scale,descriptor,samples,refinedFaces,n,filterEnabled,lane);}`,
 );

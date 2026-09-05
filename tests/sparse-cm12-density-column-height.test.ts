@@ -6,6 +6,14 @@ const shader = readFileSync(new URL(
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
   import.meta.url,
 ), "utf8");
+const classifier = readFileSync(new URL(
+  "../lib/core/webgpu-water-global-fine-classify.ts",
+  import.meta.url,
+), "utf8");
+const tetraEmitter = readFileSync(new URL(
+  "../lib/core/webgpu-water-global-fine-tetra.ts",
+  import.meta.url,
+), "utf8");
 
 function columnHeight(fills: readonly number[], base = 0): number {
   return base + fills.reduce((sum, fill) => sum + Math.max(0, Math.min(1, fill)), 0);
@@ -58,6 +66,25 @@ test("height integrates a monotone sheet split across coarse vertical bricks", (
     "the regression must remain invisible to per-coarse-cell rho=.5 classification");
 });
 
+test("floor ghost continuation reconstructs a true sub-half-cell waterline", () => {
+  for (const height of [0.0011, 0.01, 0.125, 0.25, 0.499]) {
+    const firstCentrePhi = 0.5 - height;
+    const ghostCentrePhi = firstCentrePhi - 1;
+    const crossing = -ghostCentrePhi / (firstCentrePhi - ghostCentrePhi);
+    const reconstructedHeight = crossing - 0.5;
+    assert.ok(Math.abs(reconstructedHeight - height) < 1e-12,
+      `${height}: ${reconstructedHeight}`);
+  }
+});
+
+test("one affine row-zero receipt spans thin, regular, and tall floor sheets", () => {
+  for (const height of [0.0011, 0.499, 0.501, 4.49, 4.51, 8.125]) {
+    const rowZeroPhi = 0.5 - height;
+    assert.ok(Math.abs(0.5 - rowZeroPhi - height) < 1e-12,
+      `${height}: row-zero receipt changed representation`);
+  }
+});
+
 test("general adaptive receipt admits floor sheets but rejects elevated liquid", () => {
   assert.equal(adaptiveFloorReceipt([0.4, 0.1, 0]), true);
   assert.equal(adaptiveFloorReceipt([0, 1, 0]), false,
@@ -93,7 +120,7 @@ test("a physical waterline gives a rung-independent ghost-fluid boundary", () =>
   }
 });
 
-test("production publication uses guarded column height and keeps its fallback", () => {
+test("production publication uses guarded column height and floor continuation", () => {
   assert.match(shader,
     /fn restrictedPresentationDensityAt[\s\S]*owner\.x!=INVALID&&brickActive\(owner\.y\)[\s\S]*ownerScale>=u32\(cellScale\)/,
     "active dry coarse owners must not expand into finest-child presentation lookups");
@@ -124,11 +151,47 @@ test("production publication uses guarded column height and keeps its fallback",
     /owner\.x==INVALID\|\|!brickActive\(owner\.y\)[\s\S]*anchoredAbove=cm12SolidVoxelFractionQ8/,
     "unrepresented open air must anchor generation zero before support activates");
   assert.match(shader,
-    /fn presentationHeightPhi[\s\S]*height=presentationColumnHeight[\s\S]*q\.y==0&&height>1e-3[\s\S]*return -1e-3\*p\.frame\.y/,
-    "a nonzero sub-half-cell floor sheet must retain a representable inside sample");
+    /fn presentationHeightPhi[\s\S]*signedFineCells=f32\(q\.y\)\+0\.5-height[\s\S]*return signedFineCells\*p\.frame\.y/,
+    "floor height publication must preserve its complete affine signed distance");
+  assert.doesNotMatch(shader,
+    /fn presentationHeightPhi[\s\S]{0,500}return clamp/,
+    "regular-height geometry must not fall back when row-zero phi exceeds the narrow band");
   assert.match(shader,
-    /presentationHeightFieldValid!=0u[\s\S]*presentationHeightPhi[\s\S]*smoothedPresentationDensityAt/,
-    "a rejected height field must retain the limited-linear presentation path");
+    /fn presentationFloorContinuationFlag[\s\S]*q\.y==0[\s\S]*presentationColumnHeight[\s\S]*>1e-3/,
+    "nonzero floor height fields must mark their boundary continuation sample");
+  assert.match(classifier,
+    /fn sparseFloorGhostPhi[\s\S]*flags&3u[\s\S]*value-physicalCellSize\(\)\.y/,
+    "the marked floor sample must continue affinely into the ghost cube");
+  assert.match(classifier,
+    /compactSignedSparseAddressing\(\)&&q\.y<0[\s\S]*sparseFloorGhostPhi/,
+    "wall-adjacent floor films must use the same ghost continuation");
+  assert.match(classifier,
+    /fn markedFloorHeight[\s\S]*floorFlags&3u[\s\S]*fn heightFieldPatch[\s\S]*if\(heightFieldPatch\(base,scale,&heights\)\)[\s\S]*if\(base\.y==0\)\{emitHeightFieldPatch\(base,heights\);\}return/,
+    "every proved unit heightfield column must replace all of its vertical cube owners");
+  assert.match(classifier,
+    /fn publishedColumnCrossing[\s\S]*round\(\(\.5\*\(abs\(sa\)-abs\(sb\)\)\/denominator\)\*65536\.0\)\/65536\.0[\s\S]*fn markedFloorHeight[\s\S]*publishedColumnCrossing/,
+    "height patches must use the volumetric contour's packed-edge interpolation");
+  assert.match(classifier,
+    /emitHeightFieldPatch[\s\S]*HEIGHTFIELD_DESCRIPTOR_CODE[\s\S]*vec4f\(heights\[0\],heights\[1\],heights\[2\],heights\[3\]\)/,
+    "thin and regular floor-connected surfaces must publish the same four-height patch");
+  assert.match(classifier,
+    /fineOwnsCube[\s\S]*compactSignedSparseAddressing\(\)&&base\.y==0[\s\S]*q\.y=0/,
+    "the fine height patch must remain the sole owner of its below-floor cube");
+  assert.match(tetraEmitter,
+    /if\(heightField\)\{triangleCount=heightFieldTriangleCount\(lo\);\}[\s\S]*fn heightFieldBoundaryVertex[\s\S]*heightFieldPublishedPhi[\s\S]*fn emitHeightFieldLane[\s\S]*heightFieldBoundaryVertex[\s\S]*heightFieldTri/,
+    "one descriptor must emit a continuous, vertically conforming fan with shared height normals");
+  assert.match(tetraEmitter,
+    /if\(heightField\)\{emitHeightFieldLane\(&cursor,base,lo,lane\);return;\}/,
+    "the consolidated production emitter must route both thin and regular heights through the same path");
+  assert.match(shader,
+    /presentationHeightCache\[column\][\s\S]*fn presentationColumnHeightValid[\s\S]*presentationHeightPhi/,
+    "height validity must remain column-local instead of rejecting an entire page");
+  assert.match(shader,
+    /let stencilCandidate=\(presentationCandidates&1u\)!=0u&&!heightReady/,
+    "a mixed-validity page must retain the limited-linear fallback cache");
+  assert.match(shader,
+    /presentationColumnHeightValid\(i32\(localX\),i32\(localZ\),false\)[\s\S]*presentationHeightPhi/,
+    "each valid column must publish its own height while rejected neighbours fall back locally");
   assert.match(shader,
     /publishSparseCM12SurfaceRepresentabilityReceipts[\s\S]*preparePresentationColumnHeights[\s\S]*presentationHeightPhi/,
     "the one-rung proof must evaluate the same accepted height geometry");

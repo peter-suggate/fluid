@@ -2,8 +2,12 @@ import { makeOctreePowerCoarseLevelSetSampleWGSL } from "./octree-power-coarse-l
 import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 import {
   compactFineLevelSetPageLookupWGSL,
+  compactFineLevelSetSpanScaleWGSL,
   makeCompactFineLevelSetPhiWGSL,
 } from "./compact-fine-levelset-phi";
+
+/** Reserved low-byte descriptor for one floor-connected X/Z height patch. */
+export const GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE = 192;
 
 // The tagged sharp-corner polygonizer clips its two cap owners at exactly half
 // a cube. Admit only scalar data whose four corresponding zero crossings agree
@@ -78,12 +82,101 @@ fn coarsePhi(q:vec3i)->f32{
 fn adaptiveNodalPublication()->bool{let count=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));return count>0u&&(powerCoarseSamples.entries[0].flags&0x18000000u)==0x10000000u;}
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 ${makeCompactFineLevelSetPhiWGSL("coarsePhi")}
+${compactFineLevelSetSpanScaleWGSL}
 fn fineOwnsCube(base:vec3i)->bool{
-  let q=select(max(base-vec3i(1),vec3i(0)),base-vec3i(1),
-    compactSignedSparseAddressing());return fineValidAt(q);
+  var q=select(max(base-vec3i(1),vec3i(0)),base-vec3i(1),
+    compactSignedSparseAddressing());
+  // The first fine row also owns its below-floor ghost cube. Otherwise the
+  // compact-coarse complement classifies that same cube a second time because
+  // its nominal lower anchor, q.y=-1, has no physical fine sample.
+  if(compactSignedSparseAddressing()&&base.y==0){q.y=0;}
+  return fineValidAt(q);
 }
 fn physicalCellSize()->vec3f{return select(u.container.xyz/max(vec3f(params.sampleDimensions),vec3f(1.0)),params.sizing.xyz,all(params.sizing.xyz>vec3f(0.0)));}
+// Sparse CM12 height pages mark their first in-domain sample with INTERFACE.
+// Continue that affine signed distance to the missing centre below the floor:
+// phi(-1) = phi(0) - delta-y. This gives a sub-half-cell film a real crossing in the
+// floor ghost cube, while a dry unmarked column remains authoritative air.
+fn sparseFloorGhostPhi(q:vec3i)->f32{
+  if((fineWorklist[3]&0x80000000u)==0u||q.y!=-1){return phi(q);}
+  let above=vec3i(q.x,0,q.z);let address=compactSampleAddress(above);
+  if(address.x==INVALID){return phi(q);}
+  let index=address.x*params.samplesPerBrick+address.y;
+  if(index>=arrayLength(&fineSamples)){return phi(q);}
+  let flags=finePackedFlags(index);let value=finePackedPhi(index);
+  if((flags&3u)!=3u||!finite(value)){return phi(q);}
+  return value-physicalCellSize().y;
+}
 fn occupancy(value:f32)->f32{let band=4.0*physicalCellSize().y;return clamp(0.5-value/band,0.0,1.0);}
+const HEIGHTFIELD_DESCRIPTOR_CODE:u32=${GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE}u;
+// A marked row-zero sample is not a thin-fluid special case: it is the receipt
+// that the complete column was proved floor-connected and single-valued. Four
+// such unit samples therefore own one X/Z height patch at every positive
+// height. The renderer no longer changes 3-D cube owner when that patch crosses
+// y=.5, 1.5, ... sample planes.
+fn publishedColumnPhi(q:vec3i)->vec2f{
+  let address=compactSampleAddress(q);
+  if(address.x==INVALID||compactSampleSpanScale(address.x)!=1u){return vec2f(0.0);}
+  let index=address.x*params.samplesPerBrick+address.y;
+  if(index>=arrayLength(&fineSamples)){return vec2f(0.0);}
+  let flags=finePackedFlags(index);let value=finePackedPhi(index);
+  return vec2f(value,select(0.0,1.0,(flags&1u)!=0u&&finite(value)));
+}
+// Use the exact packed-edge interpolation consumed by the ordinary contour.
+// Reconstructing H from only phi(y=0) is algebraically equivalent before the
+// samples are packed to f16, but not afterwards; the small discrepancy leaves
+// an unmatched edge wherever height geometry meets volumetric geometry.
+fn publishedColumnCrossing(lowerPhi:f32,upperPhi:f32)->f32{
+  let a=occupancy(lowerPhi);let b=occupancy(upperPhi);
+  let sa=a-.5;let sb=b-.5;let denominator=abs(sa)+abs(sb);
+  if(denominator<=0.0){return .5;}
+  let centred=round((.5*(abs(sa)-abs(sb))/denominator)*65536.0)/65536.0;
+  return .5+centred;
+}
+fn markedFloorHeight(q:vec2i)->vec2f{
+  let floorAddress=compactSampleAddress(vec3i(q.x,0,q.y));
+  if(floorAddress.x==INVALID||compactSampleSpanScale(floorAddress.x)!=1u){
+    return vec2f(0.0);
+  }
+  let floorIndex=floorAddress.x*params.samplesPerBrick+floorAddress.y;
+  if(floorIndex>=arrayLength(&fineSamples)){return vec2f(0.0);}
+  let floorFlags=finePackedFlags(floorIndex);let floorPhi=finePackedPhi(floorIndex);
+  if((floorFlags&3u)!=3u||!finite(floorPhi)){return vec2f(0.0);}
+  let cellY=max(physicalCellSize().y,1e-9);
+  if(floorPhi>0.0){
+    let crossing=publishedColumnCrossing(floorPhi-cellY,floorPhi);
+    let height=crossing-.5;
+    return vec2f(height,select(0.0,1.0,height>1e-3));
+  }
+  let dims=vec3i(params.sampleDimensions);
+  let estimate=clamp(i32(floor(-floorPhi/cellY)),0,dims.y-2);
+  // The row-zero affine receipt locates the bracket directly. Probe one
+  // neighbour on either side only to absorb f16 rounding at an exact sample
+  // plane; valid height columns contain exactly one crossing.
+  for(var delta=-1;delta<=1;delta+=1){
+    let y=clamp(estimate+delta,0,dims.y-2);
+    let lower=publishedColumnPhi(vec3i(q.x,y,q.y));
+    let upper=publishedColumnPhi(vec3i(q.x,y+1,q.y));
+    if(lower.y>.5&&upper.y>.5&&lower.x<=0.0&&upper.x>0.0){
+      let height=f32(y)+.5+publishedColumnCrossing(lower.x,upper.x);
+      return vec2f(height,select(0.0,1.0,height>1e-3));
+    }
+  }
+  return vec2f(0.0);
+}
+fn heightFieldPatch(base:vec3i,scale:i32,heights:ptr<function,array<f32,4>>)->bool{
+  let dims=vec3i(params.sampleDimensions);
+  if(scale!=1||base.x<=0||base.z<=0||base.x>=dims.x||base.z>=dims.z){return false;}
+  let q=array<vec2i,4>(vec2i(base.x-1,base.z-1),vec2i(base.x,base.z-1),
+    vec2i(base.x,base.z),vec2i(base.x-1,base.z));
+  for(var corner=0u;corner<4u;corner+=1u){let sample=markedFloorHeight(q[corner]);
+    if(sample.y<0.5){return false;}(*heights)[corner]=sample.x;}
+  return true;
+}
+fn emitHeightFieldPatch(base:vec3i,heights:array<f32,4>){
+  emitClassifiedCubeTagged(vec3i(base.x,0,base.z),i32(HEIGHTFIELD_DESCRIPTOR_CODE),
+    0.0,1.0,vec4f(heights[0],heights[1],heights[2],heights[3]),vec4f(0.0),0u);
+}
 // Adaptive nodal phi is a signed-distance scalar, not optical occupancy.
 // Preserve its affine map through edge interpolation: clamping the two edge
 // endpoints before solving the 0.5 crossing moves the zero set by an amount
@@ -106,7 +199,9 @@ fn latticeForWall(p:vec3i,wallMode:u32)->f32{
   if(p.z<=0||p.z>=dims.z+1){
     if((wallMode&1u)==0u){return 0.0;}z=clamp(z,0,dims.z-1);
   }
-  return occupancy(phi(vec3i(x,max(p.y-1,0),z)));
+  let q=vec3i(x,p.y-1,z);
+  if(compactSignedSparseAddressing()&&q.y<0){return occupancy(sparseFloorGhostPhi(q));}
+  return occupancy(phi(vec3i(q.x,max(q.y,0),q.z)));
 }
 fn emitClassifiedCubeTagged(base:vec3i,scale:i32,lo:f32,hi:f32,a:vec4f,b:vec4f,tag:u32){
   if(lo>=0.5||hi<0.5){return;}atomicStore(&drawArgs.globalFineAuthorityLatch,1u);atomicMin(&drawArgs.vertexAllocator,0u);let slot=atomicAdd(&drawArgs.activeCubeCount,1u);
@@ -119,8 +214,9 @@ fn emitClassifiedCube(base:vec3i,scale:i32,lo:f32,hi:f32,a:vec4f,b:vec4f){
   emitClassifiedCubeTagged(base,scale,lo,hi,a,b,0u);
 }
 // Native adaptive cubes do not scan the optical ghost halo. Close the tank
-// with explicit scalar-owned face records instead: reserved codes 252/253 select the low
-// or high wall plane, while bits 14..15 select its normal axis. The four live
+// with explicit scalar-owned face records instead. Low-byte codes 224..255
+// carry the wall side and four tangential transition-edge bits, while bits
+// 14..15 select its normal axis. The four live
 // face samples remain in the ordinary cube payload so emission can clip a
 // fractional marching-squares contact polygon rather than invent a wet quad.
 fn emitAdaptiveWallFace(base:vec3i,values:array<f32,8>,axis:u32,side:u32){
@@ -135,7 +231,7 @@ fn emitAdaptiveWallFace(base:vec3i,values:array<f32,8>,axis:u32,side:u32){
   // Bits 8..13 carry log2(tangential scale)+1 for every wall-face record.
   // Adaptive nodal faces are unit scale.
   let tag=(1u<<8u)|(axis<<14u);
-  emitClassifiedCubeTagged(base,i32(252u+side),0.,1.,vec4f(values[0],values[1],values[2],values[3]),vec4f(values[4],values[5],values[6],values[7]),tag);
+  emitClassifiedCubeTagged(base,i32(224u+side),0.,1.,vec4f(values[0],values[1],values[2],values[3]),vec4f(values[4],values[5],values[6],values[7]),tag);
 }
 // Native Sparse CM12 macro pages are sampled every 2*span finest cells. Do
 // not reconstruct a closed tank wall by interpolating from the adjacent wet
@@ -143,7 +239,15 @@ fn emitAdaptiveWallFace(base:vec3i,values:array<f32,8>,axis:u32,side:u32){
 // visible wall inward by scale/2 and makes a uniform pool look terraced. Emit
 // the exact wall plane and use the interior boundary scalar only to clip its
 // tangential extent at a real liquid-air interface.
-fn emitScaledBoundaryWallFace(base:vec3i,scale:i32,axis:u32,side:u32){
+fn wallTransitionEdgeMask(refinedFaces:u32,axis:u32)->u32{
+  // Wall corners use cyclic tangential order. Translate the six volume-face
+  // bits (-z,+z,-y,+y,-x,+x) to the wall's four boundary edges.
+  if(axis==0u){return ((refinedFaces>>0u)&1u)|(((refinedFaces>>3u)&1u)<<1u)
+    |(((refinedFaces>>1u)&1u)<<2u)|(((refinedFaces>>2u)&1u)<<3u);}
+  return ((refinedFaces>>2u)&1u)|(((refinedFaces>>5u)&1u)<<1u)
+    |(((refinedFaces>>3u)&1u)<<2u)|(((refinedFaces>>4u)&1u)<<3u);
+}
+fn emitScaledBoundaryWallFace(base:vec3i,scale:i32,axis:u32,side:u32,edgeMask:u32){
   let dims=vec3i(params.sampleDimensions);
   let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
   var values=array<f32,8>();var ownsLiquid=false;
@@ -156,7 +260,8 @@ fn emitScaledBoundaryWallFace(base:vec3i,scale:i32,axis:u32,side:u32){
   var wallBase=base;wallBase[axis]=select(0,dims[axis]-1,side!=0u);
   let scaleCode=1u+(31u-countLeadingZeros(u32(scale)));
   let tag=(scaleCode<<8u)|(axis<<14u);
-  emitClassifiedCubeTagged(wallBase,i32(252u+side),0.,1.,vec4f(values[0],values[1],values[2],values[3]),vec4f(values[4],values[5],values[6],values[7]),tag);
+  let wallCode=224u+((edgeMask&15u)<<1u)+side;
+  emitClassifiedCubeTagged(wallBase,i32(wallCode),0.,1.,vec4f(values[0],values[1],values[2],values[3]),vec4f(values[4],values[5],values[6],values[7]),tag);
 }
 fn classifyAdaptiveNodal(base:vec3i){
   if(any(base<vec3i(0))||any(base>=vec3i(params.sampleDimensions))){return;}
@@ -182,11 +287,11 @@ fn classifyAdaptiveNodal(base:vec3i){
   // the legacy optical ghost lattice. Emission still uses a unit span.
   emitClassifiedCubeTagged(base,0,lo,hi,vec4f(v[0],v[1],v[2],v[3]),vec4f(v[4],v[5],v[6],v[7]),0u);
 }
-fn classifyScaledForWall(base:vec3i,scale:i32,wallMode:u32){
+fn classifyScaledForWall(base:vec3i,scale:i32,wallMode:u32,tag:u32){
   if(any(base<vec3i(0))||any(base>=vec3i(params.sampleDimensions+vec3u(1u)))){return;}
   let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
   var v=array<f32,8>();var lo=1.0;var hi=0.0;for(var i=0;i<8;i+=1){v[i]=latticeForWall(base+o[i]*scale,wallMode);lo=min(lo,v[i]);hi=max(hi,v[i]);}
-  emitClassifiedCube(base,scale,lo,hi,vec4f(v[0],v[1],v[2],v[3]),vec4f(v[4],v[5],v[6],v[7]));
+  emitClassifiedCubeTagged(base,scale,lo,hi,vec4f(v[0],v[1],v[2],v[3]),vec4f(v[4],v[5],v[6],v[7]),tag);
 }
 fn cubeCornerIndex(x:u32,y:u32,z:u32)->u32{
   if(z==0u){return select(x,3u-x,y==1u);}return select(4u+x,7u-x,y==1u);
@@ -226,27 +331,62 @@ fn classifySharpInteriorBoxFeature(base:vec3i,scale:i32)->bool{
 }
 fn classifyScaled(base:vec3i,scale:i32){
   if(compactSignedSparseAddressing()){
+    var heights:array<f32,4>;
+    if(heightFieldPatch(base,scale,&heights)){
+      if(base.y==0){emitHeightFieldPatch(base,heights);}return;
+    }
     let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
     var v=array<f32,8>();var lo=1.0;var hi=0.0;
-    for(var i=0;i<8;i+=1){v[i]=occupancy(phi(base+o[i]*scale-vec3i(1)));
+    for(var i=0;i<8;i+=1){let q=base+o[i]*scale-vec3i(1);
+      v[i]=occupancy(sparseFloorGhostPhi(q));
       lo=min(lo,v[i]);hi=max(hi,v[i]);}
-    emitClassifiedCube(base,scale,lo,hi,vec4f(v[0],v[1],v[2],v[3]),
-      vec4f(v[4],v[5],v[6],v[7]));return;
+    var refinedFaces=0u;
+    if(scale>1){
+      // Bits follow the contour face order: -z,+z,-y,+y,-x,+x. A coarse
+      // surface cell refines only the shared face owned by a finer accepted
+      // neighbour. The volume cell and the simulation contact band stay coarse.
+      for(var face=0u;face<6u;face+=1u){let axis=select(select(2u,1u,face>=2u),0u,face>=4u);
+        let high=(face&1u)!=0u;let tangentA=(axis+1u)%3u;let tangentB=(axis+2u)%3u;
+        for(var corner=0u;corner<4u;corner+=1u){var q=base-vec3i(1);
+          q[axis]=select(base[axis]-2,base[axis]+scale,high);
+          q[tangentA]+=select(0,scale-1,(corner&1u)!=0u);
+          q[tangentB]+=select(0,scale-1,(corner&2u)!=0u);
+          let address=compactSampleAddress(q);
+          if(address.x!=INVALID&&fineValidAt(q)
+            &&compactSampleSpanScale(address.x)<u32(scale)){refinedFaces|=1u<<face;}
+        }
+      }
+    }
+    // Bit 7 marks an ordinary-cell descriptor as transition topology; bits
+    // 8..13 name its six refined faces. Wall records use the reserved 224..255
+    // range and are decoded before this marker is considered.
+    let transitionTag=select(0u,0x80u|(refinedFaces<<8u),refinedFaces!=0u);
+    let dims=vec3i(params.sampleDimensions);
+    let lowX=base.x==0;let highX=base.x+scale-1==dims.x;
+    let lowZ=base.z==0;let highZ=base.z+scale-1==dims.z;
+    let xWall=lowX||highX;let zWall=lowZ||highZ;
+    if(lowX){emitScaledBoundaryWallFace(base,scale,0u,0u,wallTransitionEdgeMask(refinedFaces,0u));}
+    if(highX){emitScaledBoundaryWallFace(base,scale,0u,1u,wallTransitionEdgeMask(refinedFaces,0u));}
+    if(lowZ){emitScaledBoundaryWallFace(base,scale,2u,0u,wallTransitionEdgeMask(refinedFaces,2u));}
+    if(highZ){emitScaledBoundaryWallFace(base,scale,2u,1u,wallTransitionEdgeMask(refinedFaces,2u));}
+    if(xWall||zWall){classifyScaledForWall(base,scale,3u,transitionTag);return;}
+    emitClassifiedCubeTagged(base,scale,lo,hi,
+      vec4f(v[0],v[1],v[2],v[3]),vec4f(v[4],v[5],v[6],v[7]),transitionTag);return;
   }
   let dims=vec3i(params.sampleDimensions);
   let lowX=base.x==0;let highX=base.x+scale-1==dims.x;
   let lowZ=base.z==0;let highZ=base.z+scale-1==dims.z;
   let xWall=lowX||highX;let zWall=lowZ||highZ;
-  if(lowX){emitScaledBoundaryWallFace(base,scale,0u,0u);}
-  if(highX){emitScaledBoundaryWallFace(base,scale,0u,1u);}
-  if(lowZ){emitScaledBoundaryWallFace(base,scale,2u,0u);}
-  if(highZ){emitScaledBoundaryWallFace(base,scale,2u,1u);}
+  if(lowX){emitScaledBoundaryWallFace(base,scale,0u,0u,0u);}
+  if(highX){emitScaledBoundaryWallFace(base,scale,0u,1u,0u);}
+  if(lowZ){emitScaledBoundaryWallFace(base,scale,2u,0u,0u);}
+  if(highZ){emitScaledBoundaryWallFace(base,scale,2u,1u,0u);}
   // Mirror both horizontal wall axes after their exact plane owners have
   // been emitted. This preserves a free-surface cap in a wall cube without
   // also emitting the old scale-dependent ghost-air wall contour.
-  if(xWall||zWall){classifyScaledForWall(base,scale,3u);return;}
+  if(xWall||zWall){classifyScaledForWall(base,scale,3u,0u);return;}
   if(!xWall&&!zWall&&classifySharpInteriorBoxFeature(base,scale)){return;}
-  classifyScaledForWall(base,scale,0u);
+  classifyScaledForWall(base,scale,0u,0u);
 }
 @compute @workgroup_size(256)
 fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
