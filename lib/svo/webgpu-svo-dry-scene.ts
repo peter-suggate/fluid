@@ -9653,8 +9653,7 @@ export class SparseVoxelDrySceneRenderer {
     // everything except an explicit clear. Withholding the pass that fills it,
     // or the primary that decides which keys get queried, leaves entries that
     // describe a frame this pipeline is no longer drawing.
-    const staleWorldGi = this.disabledStages.has("world-gi-cache") !== disabled.has("world-gi-cache")
-      || this.disabledStages.has("primary-traversal") !== disabled.has("primary-traversal");
+    const staleWorldGi = this.disabledStages.has("primary-traversal") !== disabled.has("primary-traversal");
     const entrySeedMoved = this.disabledStages.has("primary-entry-prepass") !== disabled.has("primary-entry-prepass");
     this.disabledStages = new Set(disabled);
     if (staleWorldGi) this.worldGiCacheDirty = true;
@@ -9674,19 +9673,27 @@ export class SparseVoxelDrySceneRenderer {
     const coneLightingScale = coneTracingMode === "cones" ? (options.coneLightingScale ?? 1) : 1;
     const silhouetteRefinementEnabled = options.silhouetteRefinementEnabled === true;
     const globalIlluminationEnabled = options.globalIlluminationEnabled !== false;
+    // Opt-in, unlike every other lighting flag here: the cache is off unless
+    // this frame asked for it by name.
+    const worldGiCacheEnabled = options.worldGiCacheEnabled === true;
     const previousConeTracingMode = this.lightingOptions.coneTracingMode ?? "cones";
     const previousGlobalIllumination = this.lightingOptions.globalIlluminationEnabled !== false;
+    const previousWorldGiCache = this.lightingOptions.worldGiCacheEnabled === true;
     if (options.shadowsEnabled === this.lightingOptions.shadowsEnabled
       && options.ambientOcclusionEnabled === this.lightingOptions.ambientOcclusionEnabled
       && silhouetteRefinementEnabled === this.silhouetteRefinementEnabled
       && coneTracingMode === previousConeTracingMode
       && globalIlluminationEnabled === previousGlobalIllumination
+      && worldGiCacheEnabled === previousWorldGiCache
       && coneLightingScale === this.coneScale) return;
+    // Turning the cache back on must not resume against entries gathered under
+    // the lighting of whichever frame last filled it.
     const invalidateWorldGi = options.ambientOcclusionEnabled !== this.lightingOptions.ambientOcclusionEnabled
       || coneTracingMode !== previousConeTracingMode
-      || globalIlluminationEnabled !== previousGlobalIllumination;
+      || globalIlluminationEnabled !== previousGlobalIllumination
+      || worldGiCacheEnabled !== previousWorldGiCache;
     this.lightingOptions = { shadowsEnabled: options.shadowsEnabled, ambientOcclusionEnabled: options.ambientOcclusionEnabled,
-      silhouetteRefinementEnabled, coneTracingMode, globalIlluminationEnabled };
+      silhouetteRefinementEnabled, coneTracingMode, globalIlluminationEnabled, worldGiCacheEnabled };
     this.silhouetteRefinementEnabled = silhouetteRefinementEnabled;
     this.coneScale = coneLightingScale;
     this.requestedBundleFailure = undefined;
@@ -10889,7 +10896,7 @@ export class SparseVoxelDrySceneRenderer {
         }
 
         if (!reconstructReducedRadiance && this.lightingOptions.globalIlluminationEnabled !== false
-          && !this.disabledStages.has("world-gi-cache")) {
+          && this.lightingOptions.worldGiCacheEnabled === true) {
           // The cache is world-space and source-owned: camera motion changes
           // which keys are queried but never invalidates entries. Only source,
           // authored-scene, or lighting-contract changes clear it. Its output is

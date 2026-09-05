@@ -11,7 +11,8 @@
  * in the encoder are the same name. Only stages whose removal is *structural*
  * live here; four nodes are switched by contracts that already existed and that
  * the shaders compile against — cone visibility (`coneTracingMode`), GI
- * composition (`globalIlluminationEnabled`) and primary seam closure
+ * composition (`globalIlluminationEnabled`), the world-space GI cache
+ * (`worldGiCacheEnabled`) and primary seam closure
  * (`silhouetteRefinementEnabled`) — and adding a second way to turn those off
  * would be two sources of truth for one bit.
  *
@@ -30,7 +31,6 @@ export type RenderStageSwitchId =
   | "scene-primitive"
   | "rigid-impostor"
   | "voxel-light-cache"
-  | "world-gi-cache"
   | "reduced-shade"
   | "sky-lighting"
   | "deferred-lighting"
@@ -50,7 +50,6 @@ export const RENDER_STAGE_SWITCH_IDS: readonly RenderStageSwitchId[] = Object.fr
   "scene-primitive",
   "rigid-impostor",
   "voxel-light-cache",
-  "world-gi-cache",
   "reduced-shade",
   "sky-lighting",
   "deferred-lighting",

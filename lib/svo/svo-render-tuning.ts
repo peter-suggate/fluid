@@ -396,9 +396,14 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   aoStrength: 1,
   aoConeAperture: 0.62,
   shadowConeAperture: 0.065,
-  // GI is deliberately image-forward by default: the exact key light remains
-  // crisp, while bounce and broad cone visibility visibly shape the scene.
-  giBounceStrength: 1.8,
+  // Off by default.
+  //
+  // Unlike the gather it scales, this is pure exposure: the cones are marched
+  // and the closure is composed at any value, so zero costs exactly what 1.8
+  // cost and gives back only the image. The default frame is the exact key
+  // light with broad cone visibility and sky fill shaping it; bounced colour is
+  // opt-in from the panel's Bounce tuning drawer.
+  giBounceStrength: 0,
   // Multi-bounce compensation already restores much of the energy hidden by
   // broad cone occlusion. Retaining the old .82 contrast double-darkened room
   // corners and amplified 8-bit opacity contours into visible bands.
@@ -449,7 +454,6 @@ const performanceTuning: SvoRenderTuning = Object.freeze({
   primaryLeafVisits: 24,
   coneStepBudget: 20,
   giConeCount: 3,
-  giBounceStrength: 1.35,
   giOcclusionStrength: 0.6,
   maximumShadedLights: 3,
   stableAreaLightSamples: 1,

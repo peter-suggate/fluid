@@ -76,6 +76,7 @@ export interface RenderPipelineContext {
   readonly ambientOcclusionEnabled: boolean;
   readonly seamClosureEnabled: boolean;
   readonly globalIlluminationEnabled: boolean;
+  readonly worldGiCacheEnabled: boolean;
   readonly tuning: SvoRenderTuning;
   readonly sceneHasFluid: boolean;
   readonly refinementDepth: number;
@@ -126,10 +127,11 @@ export interface RenderPipelineNodeDefinition {
   /**
    * The ablation switch this node's lamp throws.
    *
-   * Absent on the three nodes switched by a contract the shaders already compile
-   * against — cone visibility, GI composition, and seam closure. Those keep
-   * their own flag; a second way to turn one off would be two
-   * sources of truth for one bit. {@link switchedBy} names the flag instead.
+   * Absent on the four nodes switched by a contract the shaders already compile
+   * against — cone visibility, GI composition, the world-space GI cache, and
+   * seam closure. Those keep their own flag; a second way to turn one off would
+   * be two sources of truth for one bit. {@link switchedBy} names the flag
+   * instead.
    */
   readonly stage?: RenderStageSwitchId;
   /** For a node with no `stage`: the store flag its lamp moves. */
@@ -459,18 +461,19 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     band: "lighting",
     side: "right",
     label: "World-space GI cache",
-    stage: "world-gi-cache",
+    switchedBy: "svoWorldGiCacheEnabled",
     taps: ["cone-radiance"],
     toggleable: true,
     tip: {
-      summary: "A world-keyed cache of gathered indirect radiance and visibility. Camera motion changes which keys are queried but never invalidates an entry; only a source, scene or lighting change clears it. Off withholds the fill; the deferred pass keeps querying it and reads a cleared cache, so indirect light goes flat rather than stale.",
+      summary: "A world-keyed cache of gathered indirect radiance and visibility. Camera motion changes which keys are queried but never invalidates an entry; only a source, scene or lighting change clears it. Off by default: the pass bets that the closure amortises across frames and bills every frame for the bet. Off withholds the fill; the deferred pass keeps querying it and reads a cleared cache, so indirect light goes flat rather than stale.",
       writes: "262 144-entry GI closure cache",
       feeds: "deferred lighting",
-      gate: "a relight reconstruction, at a reduced cone rate, with cones active",
+      gate: "the GI gather, a relight reconstruction, at a reduced cone rate, with cones active",
     },
-    state: (context) => (context.disabledStages.has("world-gi-cache") ? "off"
+    state: (context) => (!context.worldGiCacheEnabled || !context.globalIlluminationEnabled ? "off"
       : reduced(context) && isRelightReconstruction(context.tuning.coneRadianceReconstruction) ? "on" : "off"),
-    chip: (context) => (context.disabledStages.has("world-gi-cache") ? "withheld · fill stopped"
+    chip: (context) => (!context.worldGiCacheEnabled ? "off · fill not encoded"
+      : !context.globalIlluminationEnabled ? "needs the GI gather"
       : isRelightReconstruction(context.tuning.coneRadianceReconstruction)
         ? "relight · 262 144 entries" : "upsample · cache idle"),
   },

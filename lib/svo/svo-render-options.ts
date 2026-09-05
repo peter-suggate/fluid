@@ -188,6 +188,17 @@ export type SvoLightingOptions = Readonly<{
    * separate from the CONES/EXACT/OFF switch.
    */
   globalIlluminationEnabled?: boolean;
+  /**
+   * Whether the persistent world-space GI cache pass is encoded. Omitted means
+   * no.
+   *
+   * Off by default, and a render choice rather than an ablation: the pass is a
+   * bet that a world-keyed closure amortises across frames, and the frame it
+   * bills for that bet is every frame. The deferred pass keeps its binding and
+   * reads a cleared cache, so indirect light goes flat rather than stale, and
+   * the machinery stays compiled so turning it on costs a frame, not a rebuild.
+   */
+  worldGiCacheEnabled?: boolean;
   /** Omitted means `raster`. Switching it rebuilds the dry-scene pipeline. */
   primaryTraversal?: SvoPrimaryTraversalMode;
   /**
@@ -210,5 +221,6 @@ export const DEFAULT_SVO_LIGHTING_OPTIONS = Object.freeze({
   silhouetteRefinementEnabled: false,
   coneTracingMode: "cones",
   globalIlluminationEnabled: true,
+  worldGiCacheEnabled: false,
   primaryTraversal: "traced",
 } satisfies SvoLightingOptions);

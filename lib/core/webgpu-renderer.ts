@@ -2873,7 +2873,7 @@ export class FluidLabRenderer {
     // withheld would pool into one mean and the panel would report the cost of
     // neither pipeline.
     const disabledStages = disabledRenderStagesFrom(svoLightingOptions.disabledStages);
-    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:fluid-${fluidSurfaceRenderMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:primary-${svoLightingOptions.primaryTraversal ?? "raster"}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
+    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:fluid-${fluidSurfaceRenderMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:gicache-${svoLightingOptions.worldGiCacheEnabled === true ? "on" : "off"}:primary-${svoLightingOptions.primaryTraversal ?? "raster"}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
     if (presentationContext !== this.presentationContext) {
       this.presentationContext = presentationContext;
       this.resetPresentationTrace();

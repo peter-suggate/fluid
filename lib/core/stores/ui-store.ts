@@ -233,6 +233,8 @@ interface UIStore {
   svoConeTracingMode: SvoConeTracingMode;
   /** Whether the indirect gather runs at all. Off withholds the work, not just its exposure. */
   svoGlobalIlluminationEnabled: boolean;
+  /** Whether the persistent world-space GI cache pass is encoded. Off by default. */
+  svoWorldGiCacheEnabled: boolean;
   /** How primary visibility is resolved: rasterized brick proxies, or the traversal megakernel. */
   svoPrimaryTraversal: SvoPrimaryTraversalMode;
   /**
@@ -324,6 +326,7 @@ interface UIStore {
   setSilhouetteRefinementEnabled: (enabled: boolean) => void;
   setSvoConeTracingMode: (mode: SvoConeTracingMode) => void;
   setSvoGlobalIlluminationEnabled: (enabled: boolean) => void;
+  setSvoWorldGiCacheEnabled: (enabled: boolean) => void;
   setRenderStageDisabled: (stage: RenderStageSwitchId, disabled: boolean) => void;
   setSvoPrimaryTraversal: (mode: SvoPrimaryTraversalMode) => void;
   setSvoStageView: (view: SvoRenderStageView) => void;
@@ -395,6 +398,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   silhouetteRefinementEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled ?? false,
   svoConeTracingMode: DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode ?? "cones",
   svoGlobalIlluminationEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.globalIlluminationEnabled ?? true,
+  svoWorldGiCacheEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.worldGiCacheEnabled ?? false,
   svoPrimaryTraversal: DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "raster",
   disabledRenderStages: [],
   svoStageView: DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView,
@@ -506,6 +510,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),
   setSvoConeTracingMode: (svoConeTracingMode) => set({ svoConeTracingMode }),
   setSvoGlobalIlluminationEnabled: (svoGlobalIlluminationEnabled) => set({ svoGlobalIlluminationEnabled }),
+  setSvoWorldGiCacheEnabled: (svoWorldGiCacheEnabled) => set({ svoWorldGiCacheEnabled }),
   // Kept in the canonical stage order rather than click order, so the set has
   // one spelling: it is the identity the renderer keys frame reuse and the
   // trace context by, and two orders would be two pipelines to the averager.

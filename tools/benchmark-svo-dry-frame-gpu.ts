@@ -201,6 +201,10 @@ const radianceReconstructionRaw = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_RECON
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
 const globalIlluminationEnabled = process.env.FLUID_SVO_DRY_FRAME_GI !== "0";
+// Opt-in, because the product default is off. Without this the lane cannot
+// encode the pass at all, and "what does the world-GI cache cost" stops being
+// a question this benchmark can answer.
+const worldGiCacheEnabled = process.env.FLUID_SVO_DRY_FRAME_WORLD_GI_CACHE === "1";
 const radianceFeedbackEnabled = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_FEEDBACK === "1";
 const silhouetteRefinementRaw = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_SEAM_CLOSURE ?? "0";
 const silhouetteRefinementEnabled = silhouetteRefinementRaw === "1";
@@ -1040,6 +1044,7 @@ function applyLighting(
     silhouetteRefinementEnabled: silhouetteRefinement,
     coneLightingScale: scale,
     coneTracingMode,
+    worldGiCacheEnabled,
   });
 }
 applyLighting(coneScale);

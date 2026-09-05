@@ -140,6 +140,8 @@ export function RenderPipelineOverlay() {
   const setSvoConeTracingMode = session.ui((state) => state.setSvoConeTracingMode);
   const svoGlobalIlluminationEnabled = session.ui((state) => state.svoGlobalIlluminationEnabled);
   const setSvoGlobalIlluminationEnabled = session.ui((state) => state.setSvoGlobalIlluminationEnabled);
+  const svoWorldGiCacheEnabled = session.ui((state) => state.svoWorldGiCacheEnabled);
+  const setSvoWorldGiCacheEnabled = session.ui((state) => state.setSvoWorldGiCacheEnabled);
   const disabledRenderStages = session.ui((state) => state.disabledRenderStages);
   const setRenderStageDisabled = session.ui((state) => state.setRenderStageDisabled);
   const svoStageView = session.ui((state) => state.svoStageView);
@@ -244,6 +246,7 @@ export function RenderPipelineOverlay() {
     ambientOcclusionEnabled: svoAmbientOcclusionEnabled,
     seamClosureEnabled: silhouetteRefinementEnabled,
     globalIlluminationEnabled: svoGlobalIlluminationEnabled,
+    worldGiCacheEnabled: svoWorldGiCacheEnabled,
     tuning,
     sceneHasFluid: !sceneIsDry,
     refinementDepth: renderRefinementDepth,
@@ -261,9 +264,9 @@ export function RenderPipelineOverlay() {
   // The lamp is the node's own switch, and every node has one.
   //
   // Most route through the encode-time ablation set, which withholds the pass
-  // outright. Cone visibility, GI composition and seam closure are switched by
-  // contracts the shaders already compile against. The graph says which is
-  // which.
+  // outright. Cone visibility, GI composition, the world-space GI cache and
+  // seam closure are switched by contracts the shaders already compile
+  // against. The graph says which is which.
   const toggleNode = (id: string) => {
     const node = RENDER_PIPELINE_NODES.find((candidate) => candidate.id === id);
     if (node?.stage) {
@@ -273,6 +276,7 @@ export function RenderPipelineOverlay() {
     if (id === "seam-closure") setSilhouetteRefinementEnabled(!silhouetteRefinementEnabled);
     else if (id === "cone-visibility") setSvoConeTracingMode(svoConeTracingMode === "off" ? "cones" : "off");
     else if (id === "gi-composition") setSvoGlobalIlluminationEnabled(!svoGlobalIlluminationEnabled);
+    else if (id === "world-gi-cache") setSvoWorldGiCacheEnabled(!svoWorldGiCacheEnabled);
   };
 
   // Named drawers, shut by default.

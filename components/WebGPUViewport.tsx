@@ -1347,6 +1347,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
               silhouetteRefinementEnabled: ui.silhouetteRefinementEnabled,
               coneTracingMode: ui.svoConeTracingMode,
               globalIlluminationEnabled: ui.svoGlobalIlluminationEnabled,
+              worldGiCacheEnabled: ui.svoWorldGiCacheEnabled,
               primaryTraversal: ui.svoPrimaryTraversal,
               disabledStages: ui.disabledRenderStages,
             },
