@@ -6420,7 +6420,8 @@ fn refinementPolicyTileScale(brick:u32)->u32{
 fn refinementPolicyTileLeader(brick:u32,scale:u32)->bool{
   if(scale<=1u){return false;}
   let coordinate=cm12WorldLeafCoordinate(brick);
-  let groupOrigin=(coordinate/i32(scale))*i32(scale);
+  // Dyadic alignment must round toward negative infinity in the signed world.
+  let groupOrigin=coordinate&vec3i(~(i32(scale)-1));
   let local=vec3u(coordinate-groupOrigin);
   let ownLinear=local.x+scale*(local.y+scale*local.z);
   // This scan runs only when authored policy metadata changes. It elects the
@@ -6441,7 +6442,10 @@ fn refinementPolicyTileLeader(brick:u32,scale:u32)->bool{
 // consume the compact receipt without another pipeline or dispatch.
 fn refreshSparseCM12RefinementPolicyCache(brick:u32){
   let bounds=sparseCM12RefinementRegionResolutionBounds(brick);
-  let scale=max(1u,BRICK_FINE_RESOLUTION/max(1u,bounds.y));
+  // These membership tiles group unit bricks only. A macro already owns its
+  // full physical support; its local rung is not a unit-brick policy scale.
+  let scale=select(1u,max(1u,BRICK_FINE_RESOLUTION/max(1u,bounds.y)),
+    brickSpan(brick)==1u);
   let output=activityRecord(brick);let recovery=atomicLoad(&activity[output+38u]);
   atomicStore(&activity[output+38u],
     (recovery&~ACTIVITY_REFINEMENT_POLICY_MASK)
@@ -7387,7 +7391,8 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
     atomicStore(&activity[output+35u],ACTIVITY_CANDIDATE_ACTIVE);
     atomicStore(&activity[output+37u],page);
     let bounds=sparseCM12RefinementRegionResolutionBounds(leaf);
-    let policyScale=max(1u,BRICK_FINE_RESOLUTION/max(1u,bounds.y));
+    let policyScale=select(1u,max(1u,BRICK_FINE_RESOLUTION/max(1u,bounds.y)),
+      brickSpan(leaf)==1u);
     atomicStore(&activity[output+38u],resolution
       |refinementPolicyTileScaleBits(policyScale)
       |refinementPolicyResolutionBits(bounds)

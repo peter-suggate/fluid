@@ -361,7 +361,10 @@ fn cm12WorldAllocateExact(q:vec3i,spanLog:u32)->u32{
         atomicStore(&${arenaName}[leafAt+${l.spanLog}u],spanLog);
         atomicStore(&${arenaName}[leafAt+${l.generation}u],
           atomicLoad(&${arenaName}[CM12_WDR_BASE+${h.generation}u]));
-        atomicStore(&${arenaName}[at+${e.state}u],2u);
+        // Leave this entry reserved until a later dispatch. Publishing state 2
+        // here does not publish the other atomic words with release semantics:
+        // a contender could observe state 2 with stale coordinate/hash words,
+        // miss the match, and allocate a duplicate farther down the probe chain.
         atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.liveCount}u],1u);
         cm12WorldUpdateBounds(q,spanLog);return leaf;
       }
@@ -376,6 +379,17 @@ fn cm12WorldAllocateExact(q:vec3i,spanLog:u32)->u32{
   }
   atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.insertionFaults}u],1u);
   return CM12_WDR_INVALID;
+}
+// A dispatch boundary makes the complete reservation payload visible before
+// lookup can treat it as a committed directory entry. Allocation never probes
+// past a reservation, so repeated coordinate demand safely retries next epoch.
+@compute @workgroup_size(64)
+fn finalizeSparseWorldDirectoryAllocations(@builtin(global_invocation_id)gid:vec3u){
+  if(gid.x>=CM12_WDR_CAPACITY){return;}
+  let at=cm12WorldEntry(gid.x);
+  if(atomicLoad(&${arenaName}[at+${e.state}u])==1u){
+    atomicStore(&${arenaName}[at+${e.state}u],2u);
+  }
 }
 fn cm12WorldReleaseLeaf(leaf:u32)->bool{
   if(leaf<CM12_WDR_INITIAL_LEAVES||!cm12WorldLeafAllocated(leaf)){return false;}

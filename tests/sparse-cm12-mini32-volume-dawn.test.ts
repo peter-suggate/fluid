@@ -21,6 +21,9 @@ import { SPARSE_CM12_ACTIVITY_POLICY } from
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
+// Dawn's instance owns ProcessEvents. Keep it rooted through async readbacks;
+// retaining only the device permits GC to destroy the native instance early.
+const retainedDawnInstances = new Set<GPU>();
 
 function densityMass(density: Float32Array): number {
   let mass = 0;
@@ -85,6 +88,7 @@ dawnTest("mini32 conserves liquid volume through four seconds",
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-mini32-volume-dawn.test.ts");
     let device: GPUDevice | undefined;
+    let gpu: GPU | undefined;
     let solver: WebGPUAdaptiveMassSolver | undefined;
     try {
       const dawn = await import(pathToFileURL(dawnModule!).href) as {
@@ -92,7 +96,8 @@ dawnTest("mini32 conserves liquid volume through four seconds",
         globals: Record<string, unknown>;
       };
       Object.assign(globalThis, dawn.globals);
-      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      retainedDawnInstances.add(gpu);
       const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
       assert.ok(adapter);
       device = await adapter.requestDevice({
@@ -268,5 +273,6 @@ dawnTest("mini32 conserves liquid volume through four seconds",
       assert.deepEqual(validationErrors, []);
     } finally {
       solver?.destroy();device?.destroy();await releaseWebGPUExclusiveLock();
+      if (gpu) retainedDawnInstances.delete(gpu);
     }
   });

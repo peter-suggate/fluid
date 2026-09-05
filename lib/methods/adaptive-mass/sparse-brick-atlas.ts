@@ -519,8 +519,9 @@ function initialBrick(
   coordinate: SparseBrickVec3,
   resolution: SparseBrickResolution,
   brickFineResolution: SparseBrickFineResolution,
+  spanBricks = 1,
 ): SparseAdaptiveMassBrick {
-  const factor = brickFineResolution / resolution;
+  const factor = brickFineResolution * spanBricks / resolution;
   const density = new Float64Array(resolution ** 3);
   const gamma = new Float64Array(resolution ** 3).fill(1);
   for (let z = 0; z < resolution; z += 1)
@@ -547,6 +548,7 @@ function initialBrick(
   return {
     key: sparseBrickKey(coordinate, brickDimensions),
     coordinate,
+    ...(spanBricks > 1 ? { spanBricks } : {}),
     resolution,
     density,
     gamma,
@@ -1001,7 +1003,86 @@ function atlasWithInitialAirSupport(
       );
     }
   }
-  return atlas;
+  return enforceInitialPhysicalRegionFloors(scene, atlas);
+}
+
+/** An authored physical floor may require changing leaf span, not just rung. */
+function enforceInitialPhysicalRegionFloors(
+  scene: SceneDescription, initial: SparseAdaptiveMassAtlas,
+): SparseAdaptiveMassAtlas {
+  const regions = sceneRefinementRegions(scene);
+  if (!regions.some(region => region.minimumCellSize_cells > initial.brickFineResolution)) {
+    return initial;
+  }
+  const fine = initial.brickFineResolution;
+  const lattice: RefinementRegionLattice = {
+    dimensions: initial.dimensions,
+    cellSize_m: [scene.container.width_m / initial.dimensions[0],
+      scene.container.height_m / initial.dimensions[1],
+      scene.container.depth_m / initial.dimensions[2]],
+    origin_m: { x: -scene.container.width_m / 2, y: 0,
+      z: -scene.container.depth_m / 2 },
+  };
+  const bounds = regions.map(region => ({
+    ...refinementRegionCellBounds(region, lattice),
+    floor: clampRefinementRegionCellSize(region.minimumCellSize_cells),
+  }));
+  const physicalWidth = (brick: SparseAdaptiveMassBrick) =>
+    fine * sparseBrickSpan(brick) / brick.resolution;
+  const floorFor = (brick: SparseAdaptiveMassBrick) => Math.max(1,
+    ...bounds.filter(region => brick.coordinate.every((q, axis) =>
+      q * fine < region.max[axis]! && Math.min(initial.dimensions[axis]!,
+        (q + sparseBrickSpan(brick)) * fine) > region.min[axis]!))
+      .map(region => region.floor));
+  let bricks = [...initial.bricks];
+  let samples = 0, groups = 0;
+  const sample = (coordinate: SparseBrickVec3, span: number,
+    resolution: SparseBrickResolution) => {
+    // initialBrick visits the nominal cube even where its boundary is clipped.
+    samples += (span * fine) ** 3;
+    // These are construction limits, not permission to violate the floor.
+    // Vast sparse scenes need an analytic reducer before exceeding this work.
+    if (samples > 16_777_216 || ++groups > 65_536) {
+      throw new Error("Sparse CM12 initial minimum-cell-size constraint exceeds"
+        + " bounded physical grouping capacity; reduce the region extent");
+    }
+    return initialBrick(scene, initial.dimensions, coordinate, resolution, fine, span);
+  };
+  const coarsen = (brick: SparseAdaptiveMassBrick, width: number) => {
+    const span = Math.max(sparseBrickSpan(brick), width / fine);
+    const coordinate = brick.coordinate.map(q => Math.floor(q / span) * span) as
+      [number, number, number];
+    const resolution = Math.max(1, fine * span / width) as SparseBrickResolution;
+    const parent = sample(coordinate, span, resolution);
+    bricks = bricks.filter(candidate => !candidate.coordinate.every((q, axis) =>
+      q >= coordinate[axis]! && q + sparseBrickSpan(candidate) <= coordinate[axis]! + span));
+    bricks.push(parent);
+  };
+  // Dyadic parents either contain or are disjoint from existing leaves. Any
+  // newly covered dry/mixed support is sampled from the same initial authority.
+  for (;;) {
+    const violation = bricks.find(brick => physicalWidth(brick) < floorFor(brick));
+    if (!violation) break;
+    coarsen(violation, floorFor(violation));
+  }
+  let atlas = createSparseAdaptiveMassAtlas(initial.dimensions, bricks,
+    initial.generation, fine, false, false);
+  for (;;) {
+    let changed = false;
+    for (const brick of atlas.bricks) {
+      for (const neighbor of sparseBrickFaceNeighbors(atlas, brick)) {
+        if (physicalWidth(brick) * 2 >= physicalWidth(neighbor)) continue;
+        coarsen(brick, physicalWidth(neighbor) / 2);
+        changed = true;
+        break;
+      }
+      if (changed) break;
+    }
+    if (!changed) return createSparseAdaptiveMassAtlas(initial.dimensions, bricks,
+      initial.generation, fine);
+    atlas = createSparseAdaptiveMassAtlas(initial.dimensions, bricks,
+      initial.generation, fine, false, false);
+  }
 }
 
 /**

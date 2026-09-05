@@ -54,6 +54,43 @@ split/merge and require continued accepted-step progress while preparation runs.
 Report maximum preparation slices and publication latency as well as average frame
 cost. A UI spinner, an async function, or eventual completion is not realtime evidence.
 
+### Authored region enforcement — 2026-09-06
+
+Authored minimums constrain physical cell width (`B × span / resolution`),
+including macro leaves, support coverage and topology closure. Intersecting leaves
+inherit the minimum; maximum-size requests apply to contained leaves. Minimums win
+when overlapping requests conflict. A live region edit schedules preparation on the
+next advance; already satisfied maximums no longer starve unsatisfied requests in
+the bounded admission queue or get undone by quiet merges.
+
+The ordinary ocean GPU regression applies a global min8 after simulation starts,
+then adds max8 to the same region. Through 129 steps and four publications, no
+active cell inside the box falls below 8h, and the region converges to exactly 8h.
+Cells outside the authored box remain unconstrained. Initial global min16 and
+min32 also pass CPU mass/coverage checks and four-step GPU evolution checks;
+ordinary initial liquid volume remains 1,853,440 finest-cell-volume units.
+
+Initial coarse floors merge clipped coverage and grade its surrounding halo.
+Live plans that cannot represent a requested floor with available complete coverage
+and capacity defer publication; arbitrary partial live min32 edits are not yet an
+acceptance claim. Enforcement evidence does not establish realtime latency: the
+background compilation and maximum-slice problems below remain open.
+
+The long ocean test also exposed duplicate dynamic directory allocations. New
+directory entries now become visible in a separate publication dispatch, after
+reservation payload writes. A GPU collision/retirement/reuse stress test checks
+uniqueness, and the previously failing 129-step ocean run passes.
+
+Validation receipt: 20 CPU planner/initialization tests pass (three Dawn-only
+tests skipped in that CPU run); all three focused ocean GPU tests pass; the
+production build passes. The final canonical Dawn run passes 15/16 lanes, with
+all correctness lanes green. Mini32's native `ProcessEvents` crash was resolved
+by retaining the Dawn GPU instance through the test's asynchronous work. Mini32
+performance is 31.654 ms against 40 ms; mini64 is 55.116 ms against 50 ms and
+remains a failing gate. A preceding run measured mini64 at 42.402 ms, so timing
+variability remains material; no ceiling was changed. Repository typechecking
+still reports existing errors outside the touched files.
+
 ### Production integration status — 2026-09-05
 
 The ordinary solver now prepares bounded resident-generation replacements in the

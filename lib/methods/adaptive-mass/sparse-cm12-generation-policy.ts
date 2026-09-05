@@ -8,6 +8,8 @@ export interface SparseCM12GenerationIntent {
   readonly mergeable: boolean;
   /** Physical demand can outgrow the local rung ladder and split macro coverage. */
   readonly maximumCellWidth?: number;
+  /** Hard physical floor; grading must coarsen neighbors rather than cross it. */
+  readonly minimumCellWidth?: number;
 }
 
 /** Build one bounded dyadic change and close physical 2:1 grading. No dense
@@ -18,13 +20,24 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
 ): { status: "ready"; atlas: SparseAdaptiveMassAtlas; active: ReadonlySet<number> }
   | { status: "deferred"; leaves: number; cells: number } | undefined {
   const B = atlas.brickFineResolution;
-  const seed = (brick: SparseAdaptiveMassBrick, resolution: SparseBrickResolution) => ({
-    ...brick, resolution, density: new Float64Array(resolution ** 3).fill(brick.density[0] ?? 0),
-    gamma: new Float64Array(resolution ** 3).fill(1),
-  });
-  // Inactive leaves own no accepted field work. Reclaim their static backing;
-  // the ordinary signed frontier allocator can admit them again on demand.
-  let bricks: SparseAdaptiveMassBrick[] = atlas.bricks.filter(brick => active.has(brick.key)).map(brick => seed(brick, intents.get(brick.key)?.resolution ?? brick.resolution));
+  const minimumWidths = new Map<number, number>();
+  for (const [key, intent] of intents) if (intent.minimumCellWidth !== undefined) {
+    if (!Number.isFinite(intent.minimumCellWidth) || intent.minimumCellWidth < 1)
+      throw new Error("CM12 minimum cell width must be finite and at least one");
+    minimumWidths.set(key, intent.minimumCellWidth);
+  }
+  const seed = (brick: SparseAdaptiveMassBrick, resolution: SparseBrickResolution) => {
+    const floor = minimumWidths.get(brick.key) ?? 1;
+    while (resolution > 1 && B * sparseBrickSpan(brick) / resolution < floor)
+      resolution = (resolution / 2) as SparseBrickResolution;
+    return {
+      ...brick, resolution, density: new Float64Array(resolution ** 3).fill(brick.density[0] ?? 0),
+      gamma: new Float64Array(resolution ** 3).fill(1),
+    };
+  };
+  // Reclaim inactive backing unless a hard floor requires its coarse coverage:
+  // the ordinary signed frontier allocator would otherwise recreate a fine page.
+  let bricks: SparseAdaptiveMassBrick[] = atlas.bricks.filter(brick => active.has(brick.key) || (minimumWidths.get(brick.key) ?? 1) > 1).map(brick => seed(brick, intents.get(brick.key)?.resolution ?? brick.resolution));
   const nextActive = new Set(active);
   const demandedWidths = new Map<number, number>();
   for (const [key, intent] of intents) if (intent.maximumCellWidth !== undefined) {
@@ -32,40 +45,56 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
       throw new Error("CM12 maximum cell width must be finite and at least one");
     demandedWidths.set(key, intent.maximumCellWidth);
   }
-  const groups = new Map<string, SparseAdaptiveMassBrick[]>();
-  for (const brick of bricks) {
-    const span = sparseBrickSpan(brick);
-    if (demandedWidths.has(brick.key) || brick.unclipped || brick.resolution !== 1 || !active.has(brick.key) || !intents.get(brick.key)?.mergeable
-      || span * 2 > limits.maximumSpanBricks) continue;
-    const origin = brick.coordinate.map(q => Math.floor(q / (2 * span)) * 2 * span);
-    const key = `${span}/${origin.join("/")}`;
-    let group = groups.get(key); if (!group) groups.set(key, group = []);
-    group.push(brick);
-  }
-  const removed = new Set<number>(), parents: SparseAdaptiveMassBrick[] = [];
-  for (const group of groups.values()) {
-    if (group.length !== 8) continue;
-    const span = 2 * sparseBrickSpan(group[0]!);
-    const origin = group[0]!.coordinate.map(q => Math.floor(q / span) * span) as [number, number, number];
-    // Partial-domain siblings retain their explicit boundary cells.
-    if (origin.some((q, axis) => (q + span) * B > atlas.dimensions[axis]!)) continue;
-    for (const brick of group) { removed.add(brick.key); nextActive.delete(brick.key); }
-    const key = sparseAtlasBrickKey(origin, atlas);
-    parents.push({ key, coordinate: origin, spanBricks: span, resolution: 1,
-      density: new Float64Array([1]), gamma: new Float64Array([1]) });
-    nextActive.add(key);
-  }
-  bricks = [...bricks.filter(b => !removed.has(b.key)), ...parents];
+  const mergeCoverage = (forcedOnly: boolean): boolean => {
+    const groups = new Map<string, SparseAdaptiveMassBrick[]>();
+    for (const brick of bricks) {
+      const span = sparseBrickSpan(brick);
+      if (brick.unclipped || brick.resolution !== 1 || span * 2 > limits.maximumSpanBricks) continue;
+      const origin = brick.coordinate.map(q => Math.floor(q / (2 * span)) * 2 * span);
+      const key = `${span}/${origin.join("/")}`;
+      let group = groups.get(key); if (!group) groups.set(key, group = []);
+      group.push(brick);
+    }
+    const removed = new Set<number>(), parents: SparseAdaptiveMassBrick[] = [];
+    for (const group of groups.values()) {
+      const forced = group.some(brick => (minimumWidths.get(brick.key) ?? 1) > B * sparseBrickSpan(brick));
+      if (!forced && (forcedOnly || group.some(brick => demandedWidths.has(brick.key)
+        || !active.has(brick.key) || !intents.get(brick.key)?.mergeable))) continue;
+      const span = 2 * sparseBrickSpan(group[0]!);
+      const origin = group[0]!.coordinate.map(q => Math.floor(q / span) * span) as [number, number, number];
+      const volume = (coordinate: readonly number[], extent: number) => coordinate.reduce((v,q,axis) =>
+        v * Math.max(0, Math.min(extent * B, atlas.dimensions[axis]! - q * B)), 1);
+      // Forced region coarsening may include a clipped parent, but only when
+      // represented children cover its entire in-domain volume. Never fill holes.
+      if (forced ? group.reduce((v,brick) => v + volume(brick.coordinate, sparseBrickSpan(brick)),0) !== volume(origin,span)
+        : group.length !== 8 || origin.some((q,axis) => (q+span)*B > atlas.dimensions[axis]!)) continue;
+      const wasActive = group.some(brick => nextActive.has(brick.key));
+      const floor = Math.max(...group.map(brick => minimumWidths.get(brick.key) ?? 1));
+      const ceiling = Math.min(...group.map(brick => demandedWidths.get(brick.key) ?? Infinity));
+      for (const brick of group) { removed.add(brick.key); nextActive.delete(brick.key); demandedWidths.delete(brick.key); }
+      const key = sparseAtlasBrickKey(origin, atlas);
+      minimumWidths.set(key, floor);
+      if (Number.isFinite(ceiling)) demandedWidths.set(key, Math.max(floor, ceiling));
+      parents.push({ key, coordinate: origin, spanBricks: span, resolution: 1,
+        density: new Float64Array([1]), gamma: new Float64Array([1]) });
+      if (wasActive) nextActive.add(key);
+    }
+    bricks = [...bricks.filter(brick => !removed.has(brick.key)), ...parents];
+    return parents.length > 0;
+  };
+  mergeCoverage(false);
   const split = (brick: SparseAdaptiveMassBrick): SparseAdaptiveMassBrick[] => {
     const half = sparseBrickSpan(brick) / 2;
     const children: SparseAdaptiveMassBrick[] = [];
     const wasActive = nextActive.delete(brick.key);
     const demand = demandedWidths.get(brick.key);
+    const minimum = minimumWidths.get(brick.key);
     demandedWidths.delete(brick.key);
     for (let child=0; child<8; child++) {
       const coordinate = brick.coordinate.map((q, axis) => q + ((child >>> axis) & 1) * half) as [number, number, number];
       if (!brick.unclipped && coordinate.some((q, axis) => q * B >= atlas.dimensions[axis]!)) continue;
       const key = sparseAtlasBrickKey(coordinate, atlas);
+      if (minimum !== undefined) minimumWidths.set(key, minimum);
       children.push(seed({ ...brick, key, coordinate, spanBricks: half }, Math.max(1, brick.resolution / 2) as SparseBrickResolution));
       if (wasActive) nextActive.add(key);
       if (demand !== undefined) demandedWidths.set(key, demand);
@@ -77,9 +106,15 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
     if (bricks.length > limits.maximumLeaves || cells > limits.maximumCells) {
       return { status: "deferred", leaves: bricks.length, cells };
     }
+    if (bricks.some(brick => B * sparseBrickSpan(brick) / brick.resolution
+      < (minimumWidths.get(brick.key) ?? 1))) {
+      if (mergeCoverage(true)) continue;
+      return { status: "deferred", leaves: bricks.length, cells };
+    }
     let demanded = false;
     bricks = bricks.flatMap(brick => {
-      const width = demandedWidths.get(brick.key);
+      const requestedWidth = demandedWidths.get(brick.key);
+      const width = requestedWidth === undefined ? undefined : Math.max(requestedWidth, minimumWidths.get(brick.key) ?? 1);
       if (width === undefined || B * sparseBrickSpan(brick) / brick.resolution <= width) return [brick];
       demanded = true;
       return brick.resolution < B ? [seed(brick, (2 * brick.resolution) as SparseBrickResolution)] : split(brick);
@@ -96,11 +131,22 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
       // The boundary image has four dyadic patches per face. Split coverage
       // as well as grading cell widths so that each shared face fits that ABI.
       if (Math.max(aSpan, bSpan) > 2 * Math.min(aSpan, bSpan)) {
+        const larger = aSpan > bSpan ? a : b;
+        if (B * sparseBrickSpan(larger) / 2 < (minimumWidths.get(larger.key) ?? 1))
+          return { status: "deferred", leaves: bricks.length, cells };
         toSplit.add(aSpan > bSpan ? leaf : other); changed = true;
       }
       const aw = B * sparseBrickSpan(a) / a.resolution, bw = B * sparseBrickSpan(b) / b.resolution;
       if (Math.max(aw,bw) <= 2 * Math.min(aw,bw)) continue;
       const coarser = aw > bw ? leaf : other, brick = bricks[coarser]!;
+      if (Math.max(aw, bw) / 2 < (minimumWidths.get(brick.key) ?? 1)) {
+        const finer = coarser === leaf ? other : leaf;
+        const fine = bricks[finer]!;
+        minimumWidths.set(fine.key, Math.max(minimumWidths.get(fine.key) ?? 1, Math.max(aw, bw) / 2));
+        bricks[finer] = seed(fine, fine.resolution);
+        changed = true;
+        continue;
+      }
       if (brick.resolution < B) bricks[coarser] = seed(brick, (2 * brick.resolution) as SparseBrickResolution);
       else if (sparseBrickSpan(brick) > 1) toSplit.add(coarser);
       else throw new Error("CM12 physical grading has no dyadic refinement");

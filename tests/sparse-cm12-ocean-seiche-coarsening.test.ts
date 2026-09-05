@@ -22,6 +22,7 @@ import {
   sparseBrickAtlasStats,
   sparseBrickSpan,
   sparseCM12InitialActiveBrickKeys,
+  sparseAtlasLeaves,
 } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import {
   adaptiveMassPresentationDimensionsForScene,
@@ -149,6 +150,85 @@ test("generation zero retains the authored dry velocity-extension band", () => {
   }
   assert.ok(matchedCoarseColumnCount > 0,
     "coarse surface columns must retain coarse matched-rung air support");
+});
+
+test("a global min8 ocean starts with physical widths at least eight", () => {
+  const scene = createOceanSeicheScene();
+  scene.fluid.refinementRegions = [{
+    id: "global-min8", rule: "minimum-cell-size", minimumCellSize_cells: 8,
+    min_m: { x: -scene.container.width_m / 2, y: 0, z: -scene.container.depth_m / 2 },
+    max_m: { x: scene.container.width_m / 2, y: scene.container.height_m,
+      z: scene.container.depth_m / 2 },
+  }];
+  const atlas = initializeSparseBrickAtlasFromScene(scene, {
+    finestDimensions: adaptiveMassPresentationDimensionsForScene(scene),
+  });
+  assert.ok(atlas.bricks.length > 0);
+  assert.ok(atlas.bricks.some(brick => sparseBrickSpan(brick) > 1));
+  for (const brick of atlas.bricks) {
+    const width = atlas.brickFineResolution * sparseBrickSpan(brick) / brick.resolution;
+    assert.ok(width >= 8, `${brick.coordinate}: physical width ${width}h violates min8`);
+    for (const neighbor of sparseBrickFaceNeighbors(atlas, brick)) {
+      const neighborWidth = atlas.brickFineResolution * sparseBrickSpan(neighbor) / neighbor.resolution;
+      assert.ok(Math.max(width, neighborWidth) <= 2 * Math.min(width, neighborWidth));
+    }
+  }
+});
+
+for (const floor of [16, 32]) for (const clipped of [false, true]) {
+  test(`initial min${floor} groups ${clipped ? "clipped" : "ordinary"} ocean without losing liquid`, () => {
+    const scene = createOceanSeicheScene();
+    const finestDimensions = clipped ? [35, 27, 19] as const
+      : adaptiveMassPresentationDimensionsForScene(scene);
+    const reference = initializeSparseBrickAtlasFromScene(scene, {
+      finestDimensions, ...(clipped ? { resolutionForBrick: () => 8 as const } : {}),
+    });
+    scene.fluid.refinementRegions = [{
+      id: "global-floor", rule: "minimum-cell-size", minimumCellSize_cells: floor,
+      min_m: { x: -scene.container.width_m / 2, y: 0, z: -scene.container.depth_m / 2 },
+      max_m: { x: scene.container.width_m / 2, y: scene.container.height_m,
+        z: scene.container.depth_m / 2 },
+    }];
+    const atlas = initializeSparseBrickAtlasFromScene(scene, { finestDimensions });
+    const mass = (value: typeof atlas) => sparseAtlasLeaves(value).reduce((sum, cell) =>
+      sum + cell.density * cell.volumeFineCells, 0);
+    assert.ok(Math.abs(mass(reference) - mass(atlas)) < 1e-8,
+      `initial liquid changed: ${mass(reference)} -> ${mass(atlas)}`);
+    assert.ok(atlas.bricks.length > 0);
+    const width = (brick: typeof atlas.bricks[number]) =>
+      atlas.brickFineResolution * sparseBrickSpan(brick) / brick.resolution;
+    for (const brick of atlas.bricks) {
+      assert.ok(width(brick) >= floor);
+      assert.ok(brick.gamma.every(value => value === 1));
+      for (const neighbor of sparseBrickFaceNeighbors(atlas, brick)) {
+        assert.ok(Math.max(width(brick), width(neighbor)) <= 2 * Math.min(width(brick), width(neighbor)));
+      }
+    }
+  });
+}
+
+test("a partial min32 ocean groups its physical grading halo conservatively", () => {
+  const scene = createOceanSeicheScene();
+  const finestDimensions = adaptiveMassPresentationDimensionsForScene(scene);
+  const reference = initializeSparseBrickAtlasFromScene(scene, { finestDimensions });
+  scene.fluid.refinementRegions = [{
+    id: "far-side-min32", rule: "minimum-cell-size", minimumCellSize_cells: 32,
+    min_m: { x: 1.2, y: 0, z: -1 }, max_m: { x: 4, y: 2.4, z: 1 },
+  }];
+  const atlas = initializeSparseBrickAtlasFromScene(scene, { finestDimensions });
+  const bounds = refinementRegionCellBounds(scene.fluid.refinementRegions[0]!,
+    refinementRegionLattice(scene));
+  const width = (brick: typeof atlas.bricks[number]) => 8 * sparseBrickSpan(brick) / brick.resolution;
+  for (const brick of atlas.bricks) {
+    if (brick.coordinate.every((q, axis) => q * 8 < bounds.max[axis]!
+      && (q + sparseBrickSpan(brick)) * 8 > bounds.min[axis]!)) assert.ok(width(brick) >= 32);
+    for (const neighbor of sparseBrickFaceNeighbors(atlas, brick)) {
+      assert.ok(Math.max(width(brick), width(neighbor)) <= 2 * Math.min(width(brick), width(neighbor)));
+    }
+  }
+  const mass = (value: typeof atlas) => sparseAtlasLeaves(value).reduce((sum, cell) =>
+    sum + cell.density * cell.volumeFineCells, 0);
+  assert.ok(Math.abs(mass(reference) - mass(atlas)) < 1e-8);
 });
 
 test("a far-side min-8 region retains ocean macro topology and its hard floor", () => {

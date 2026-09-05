@@ -223,6 +223,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   private atlas: SparseAdaptiveMassAtlas;
   private lastTime_s = 0;
   private topologyGenerationWork?: Promise<void>;
+  private topologyGenerationPolicyDirty = false;
+  private topologyRegionStamp?: string;
   private lastFluidRevision = "";
   private readonly topologyGenerationLimits: {
     maximumLeaves: number; maximumCells: number; maximumSpanBricks: number;
@@ -267,6 +269,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     atlas: SparseAdaptiveMassAtlas,
     quality: GPUQuality,
   ) {
+    this.topologyRegionStamp = JSON.stringify(sceneRefinementRegions(scene));
     this.sparseWorldDevice = sparseWorldDevice;
     this.sparseWorld = sparseWorld;
     this.sparseWorldUI = sparseWorldUI;
@@ -771,11 +774,16 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    * and discard the timeline.
    */
   applySceneUniforms(scene: SceneDescription): void {
+    const regionStamp = JSON.stringify(sceneRefinementRegions(scene));
+    const regionsChanged = regionStamp
+      !== (this.topologyRegionStamp ?? JSON.stringify(sceneRefinementRegions(this.scene)));
     const receipt = this.sparseWorld.edit({ kind: "set-scene", scene });
     if (receipt.disposition !== "applied") {
       throw new Error(receipt.reason ?? "Sparse world requires a rebuild for this scene edit");
     }
     this.scene = scene;
+    this.topologyRegionStamp = regionStamp;
+    this.topologyGenerationPolicyDirty ||= regionsChanged;
     this.resetPressureIterationFeedback();
   }
 
@@ -848,7 +856,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     if (this.topologyGenerationWork || this.disposed) return;
     const preparationStarted = performance.now();
     const cadence = Math.max(64, this.options.activityPolicy?.topologyCadenceSteps ?? 64);
-    if ((this.info.encodedSteps ?? 0) % cadence !== 0) return;
+    if (!this.topologyGenerationPolicyDirty && (this.info.encodedSteps ?? 0) % cadence !== 0) return;
+    this.topologyGenerationPolicyDirty = false;
     const mergeable = (record: SparseCM12GPUActivityRecord) => record.active && record.acceptedResolution === 1
       && record.quietEpochs >= Math.max(64, this.options.activityPolicy?.demoteEpochs ?? 64)
       && record.meanDensity >= 0.9999 && (record.reasons & (1 | 16 | 256 | 512)) === 0
@@ -856,7 +865,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const prepare = async () => {
       // Fully backed small scenes retain the in-place path. Probe quietly for
       // sibling merges; the frozen capture below rechecks fresh evidence.
-      if (!this.sparseRuntime.generationPlanningRequired) {
+      const requiresMacroFloor = sceneRefinementRegions(this.scene).some(region =>
+        region.minimumCellSize_cells > this.sparseRuntime.acceptedAtlas.brickFineResolution);
+      if (!this.sparseRuntime.generationPlanningRequired && !requiresMacroFloor) {
         if (this.topologyGenerationLimits.maximumSpanBricks <= 1) return;
         const atlas = this.sparseRuntime.acceptedAtlas;
         const snapshot = await this.sparseWorldTrace.readActivitySnapshot();
@@ -879,10 +890,15 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       this.publishPhysicalWidthCensus(source.atlas, source.recordsByKey, source.activity.acceptedSteps);
       const requestBudget = this.options.activityPolicy?.prepareBricksPerFrame ?? 64;
       const physicalDemands = new Map<number, number>();
+      const physicalFloors = new Map<number, number>();
       const regionBounds = sceneRefinementRegions(this.scene).map(region => ({ region,
         ...refinementRegionCellBounds(region, refinementRegionLattice(this.scene)) }));
       for (const brick of source.atlas.bricks) {
         const record = source.recordsByKey.get(brick.key)!;
+        const intersecting = regionBounds.filter(bounds => brick.coordinate.every((q, axis) =>
+          q * source.atlas.brickFineResolution < bounds.max[axis]!
+          && sparseBrickMaximumFine(source.atlas, brick, axis) > bounds.min[axis]!));
+        physicalFloors.set(brick.key, Math.max(1, ...intersecting.map(({region}) => region.minimumCellSize_cells)));
         if (!record.active) continue;
         const containedRegions = regionBounds.filter(bounds => brick.coordinate.every((q, axis) =>
           q * source.atlas.brickFineResolution >= bounds.min[axis]! - 1e-6
@@ -897,7 +913,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           physicalDemands.set(brick.key, Math.min(physicalDemands.get(brick.key) ?? Infinity, minimum));
         }
       }
-      const requested = new Set([...source.planned.keys(), ...physicalDemands.keys()]);
+      const requested = new Set([...source.planned.keys(), ...physicalDemands.keys()].filter(key => {
+        const brick = source.atlas.directory.get(key)!;
+        const edge = source.atlas.brickFineResolution * (brick.spanBricks ?? 1);
+        const floor = physicalFloors.get(key) ?? 1;
+        const targetWidth = Math.max(floor, edge / (source.planned.get(key) ?? brick.resolution));
+        return targetWidth !== edge / brick.resolution
+          || edge / brick.resolution > Math.max(floor, physicalDemands.get(key) ?? Infinity);
+      }));
       const admitted = new Set([...requested].sort((left, right) => {
         const a = source.recordsByKey.get(left)!, b = source.recordsByKey.get(right)!;
         const priority = (record: typeof a) => Number((record.planReasons & 2) !== 0) * 2048 + Number(record.thinFluid) * 1024
@@ -907,8 +930,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       const intents = new Map(source.atlas.bricks.map(brick => {
         const record = source.recordsByKey.get(brick.key)!;
         return [brick.key, { resolution: admitted.has(brick.key) ? source.planned.get(brick.key) ?? brick.resolution : brick.resolution,
+          minimumCellWidth: physicalFloors.get(brick.key),
           maximumCellWidth: admitted.has(brick.key) ? physicalDemands.get(brick.key) : undefined,
-          mergeable: mergeable(record) }];
+          // A satisfied ceiling is still a constraint, even though it no longer
+          // consumes an admission slot. Do not undo it with a quiet merge.
+          mergeable: mergeable(record) && !physicalDemands.has(brick.key) }];
       }));
       const plan = planSparseCM12ResidentGeneration(source.atlas, source.active, intents,
         this.topologyGenerationLimits);

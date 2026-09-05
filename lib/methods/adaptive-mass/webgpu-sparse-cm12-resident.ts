@@ -5550,6 +5550,7 @@ export class WebGPUSparseCM12Resident {
       "closeRefinementPolicyTileResolution", "closePlannedResolution",
       "validateCandidateResolution", "scheduleTopologyPreparation",
       "allocateSparseWorldFrontier", "allocateSparseWorldInteractionPages",
+      "finalizeSparseWorldDirectoryAllocations",
       "synthesizeSparseWorldFrontierPages",
       "clearSparseWorldFrontierResolutionCache",
       "connectSparseWorldFrontierPages",
@@ -6749,6 +6750,8 @@ export class WebGPUSparseCM12Resident {
       if (activityPhaseLimitForQA === "census") return;
       if (this.solidOccupancyLayout) {
         dispatchAcceptedFrontierNeighbors("allocateSparseWorldFrontier");
+        dispatch("finalizeSparseWorldDirectoryAllocations",
+          Math.ceil(this.worldDirectoryLayout.capacity / WORKGROUP_SIZE));
         closeSubstage("sparse-world-frontier-allocation");
         if (activityPhaseLimitForQA === "allocation") return;
         dispatch("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
@@ -7411,6 +7414,8 @@ export class WebGPUSparseCM12Resident {
       Math.ceil(interactionPageCount[0] / 4),
       Math.ceil(interactionPageCount[1] / 4),
       Math.ceil(interactionPageCount[2] / 4));
+    dispatchTopology("finalizeSparseWorldDirectoryAllocations",
+      Math.ceil(this.worldDirectoryLayout.capacity / WORKGROUP_SIZE));
     dispatchTopology("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
     // Promote every intersected brick before writing any density. The planner
     // treats the enabled injection as refine-only: untouched accepted bricks
