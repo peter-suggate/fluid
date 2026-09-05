@@ -26,7 +26,7 @@ test("Sparse CM12 publishes the brick resolution consumed by visual overlays", (
 });
 
 test("the grid overlay consumes the producer's live activity-record stride", () => {
-  assert.match(resident, /const ACTIVITY_RECORD_WORDS = 47/,
+  assert.match(resident, /const ACTIVITY_RECORD_WORDS = 48/,
     "level-indexed surface receipts extend the activity record to 47 words");
   assert.match(resident,
     /activityRecordWords:\s*ACTIVITY_RECORD_WORDS/,

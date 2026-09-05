@@ -32,6 +32,21 @@ export interface GPUEulerianInfo {
   simulationPipelinesReady?: boolean;
   /** Background compilation failure, if a presentation-only solver could not become runnable. */
   simulationPipelineError?: string;
+  /** Shared CM12 topology-generation preparation and bounded deferral receipt. */
+  /** Latest compact activity census, weighted by represented liquid volume. */
+  adaptivePhysicalWidthCensus?: readonly { width: number; leaves: number; liquidVolumeFineCells: number }[];
+  adaptivePhysicalWidthCensusStep?: number;
+  topologyGenerationPending?: boolean;
+  topologyPreparationMaximumSliceMs?: number;
+  topologyPreparationMaximumSliceOperation?: string;
+  topologyPublicationMaximumDurationMs?: number;
+  topologyGenerationStaleCount?: number;
+  topologyPreparationDurationMs?: number;
+  topologyGenerationError?: string;
+  topologyGenerationMaximumBytes?: number;
+  topologyGenerationCount?: number;
+  topologyGenerationRequestedLeaves?: number;
+  topologyGenerationDeferred?: { leaves: number; cells: number; requestedBytes?: number; availableBytes?: number };
   /** Public sparse device readiness projected across the renderer worker seam. */
   sparseWorldDeviceStatus?: SparseWorldDevice["status"];
   sparseWorldDeviceFault?: SparseWorldFault;
@@ -76,6 +91,11 @@ export interface GPUEulerianInfo {
   adaptiveTopologyPreparedBrickCount?: number;
   adaptiveTopologyCommittedBrickCount?: number;
   adaptiveTopologyDeferredBrickCount?: number;
+  adaptiveTopologyPageAllocator?: {
+    freePages: number;
+    capacity: number;
+    allocationCancellations: number;
+  };
   adaptiveTopologyShadowGeneration?: number;
   adaptiveTopologyShadowFineBrickCount?: number;
   adaptiveTopologyShadowCoarseBrickCount?: number;

@@ -1,3 +1,5 @@
+import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
+import { planSparseCM12ResidentGeneration } from "./sparse-cm12-generation-policy";
 import { GPUInitializationTaskRunner } from "../../core/gpu-initialization";
 import type { GPUQuality } from "../../core/gpu-quality";
 import type {
@@ -11,6 +13,7 @@ import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-bod
 import { sceneCellSizes_m, sceneLatticeDimensions } from "../../core/scene-lattice";
 import {
   refinementRegionLattice,
+  refinementRegionCellBounds,
   sceneRefinementRegions,
 } from "../../core/refinement-regions";
 import { GPUStageTimestampRecorder } from "../../core/performance-trace";
@@ -37,6 +40,7 @@ import {
   sparseCM12InitialActiveBrickKeys,
   sparseBrickFromDense,
   sparseBrickAtlasStats,
+  sparseBrickMaximumFine,
   type SparseAdaptiveMassAtlas,
   type SparseBrickResolution,
   type SparseBrickVec3,
@@ -218,6 +222,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
   private atlas: SparseAdaptiveMassAtlas;
   private lastTime_s = 0;
+  private topologyGenerationWork?: Promise<void>;
+  private lastFluidRevision = "";
+  private readonly topologyGenerationLimits: {
+    maximumLeaves: number; maximumCells: number; maximumSpanBricks: number;
+  };
+  private readonly topologyGenerationMaximumBytes: number;
   private disposed = false;
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
@@ -261,6 +271,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.sparseWorld = sparseWorld;
     this.sparseWorldUI = sparseWorldUI;
     this.atlas = atlas;
+    this.topologyGenerationLimits = {
+      maximumLeaves: Math.max(4096, atlas.bricks.length * 2),
+      maximumCells: Math.max(262144, sparseRuntime.cellCount * 2),
+      maximumSpanBricks: options.maximumMacroSpanBricks ?? Number.POSITIVE_INFINITY,
+    };
+    this.topologyGenerationMaximumBytes = sparseRuntime.allocatedBytes * 3;
     const tankCellSize_m = sceneCellSizes_m(scene);
     this.fluidDomain = {
       origin_m: [-0.5 * atlas.dimensions[0] * tankCellSize_m[0], 0,
@@ -325,6 +341,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       hostSimulationSizedWorkItems: 0,
       hostSchedulingUsesReadback: false,
     };
+    this.publishPhysicalWidthCensus(atlas);
   }
 
   /** QA-only immutable HEAD presentation publisher construction. */
@@ -649,7 +666,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               total: 6,
             }),
             topologyPageCapacityMaximum:
-              curvedInitialLiquidNeedsFineFrontier ? 1024 : undefined,
+              options.topologyPageBudget
+                ?? (curvedInitialLiquidNeedsFineFrontier ? 1024 : undefined),
             solidWorld: initialSolidWorld,
             refinementRegionParameters: packSparseCM12RefinementRegions(
               sceneRefinementRegions(scene), refinementRegionLattice(scene)),
@@ -801,8 +819,148 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     delete this.info.pressureIterationsEncoded;
   }
 
+  /** Await an already requested topology boundary; useful to deterministic
+   * drivers as well as the UI's asynchronous frame loop. */
+  async waitForTopologyReady(): Promise<void> { await this.topologyGenerationWork; }
+
+  private publishPhysicalWidthCensus(atlas: SparseAdaptiveMassAtlas,
+    records?: ReadonlyMap<number, SparseCM12GPUActivityRecord>, step = 0): void {
+    const bins = new Map<number, { width: number; leaves: number; liquidVolumeFineCells: number }>();
+    for (const brick of atlas.bricks) {
+      const record = records?.get(brick.key);
+      if (records && !record?.active) continue;
+      const resolution = record?.acceptedResolution ?? brick.resolution;
+      const width = atlas.brickFineResolution * (brick.spanBricks ?? 1) / resolution;
+      let volume = 1;
+      for (let axis = 0; axis < 3; axis++) volume *= sparseBrickMaximumFine(atlas, brick, axis)
+        - brick.coordinate[axis]! * atlas.brickFineResolution;
+      const density = record?.meanDensity ?? brick.density.reduce((sum, rho) => sum + rho, 0) / brick.density.length;
+      const bin = bins.get(width) ?? { width, leaves: 0, liquidVolumeFineCells: 0 };
+      bin.leaves++;
+      bin.liquidVolumeFineCells += Math.max(0, density) * volume;
+      bins.set(width, bin);
+    }
+    this.info.adaptivePhysicalWidthCensus = [...bins.values()].sort((a, b) => a.width - b.width);
+    this.info.adaptivePhysicalWidthCensusStep = step;
+  }
+
+  private scheduleTopologyGeneration(): void {
+    if (this.topologyGenerationWork || this.disposed) return;
+    const preparationStarted = performance.now();
+    const cadence = Math.max(64, this.options.activityPolicy?.topologyCadenceSteps ?? 64);
+    if ((this.info.encodedSteps ?? 0) % cadence !== 0) return;
+    const mergeable = (record: SparseCM12GPUActivityRecord) => record.active && record.acceptedResolution === 1
+      && record.quietEpochs >= Math.max(64, this.options.activityPolicy?.demoteEpochs ?? 64)
+      && record.meanDensity >= 0.9999 && (record.reasons & (1 | 16 | 256 | 512)) === 0
+      && record.maximumVelocityTravelFineCells < 0.125;
+    const prepare = async () => {
+      // Fully backed small scenes retain the in-place path. Probe quietly for
+      // sibling merges; the frozen capture below rechecks fresh evidence.
+      if (!this.sparseRuntime.generationPlanningRequired) {
+        if (this.topologyGenerationLimits.maximumSpanBricks <= 1) return;
+        const atlas = this.sparseRuntime.acceptedAtlas;
+        const snapshot = await this.sparseWorldTrace.readActivitySnapshot();
+        const siblings = new Map<string, number>();
+        for (const record of snapshot.records) {
+          const brick = atlas.bricks[record.leafId];
+          if (!brick || !mergeable(record)) continue;
+          const origin = brick.coordinate.map(q => Math.floor(q / 2) * 2);
+          if (origin.some((q, axis) => (q + 2) * atlas.brickFineResolution > atlas.dimensions[axis]!)) continue;
+          const key = origin.join("/");
+          siblings.set(key, (siblings.get(key) ?? 0) + 1);
+        }
+        if (![...siblings.values()].some(count => count === 8)) return;
+      }
+      if (this.disposed) return;
+      this.info.topologyGenerationPending = true;
+      this.info.topologyGenerationMaximumBytes = this.topologyGenerationMaximumBytes;
+      return this.sparseRuntime.prepareResidentGeneration(async (accepted, signal) => {
+      const source = await accepted.captureGenerationTransferSource();
+      this.publishPhysicalWidthCensus(source.atlas, source.recordsByKey, source.activity.acceptedSteps);
+      const requestBudget = this.options.activityPolicy?.prepareBricksPerFrame ?? 64;
+      const physicalDemands = new Map<number, number>();
+      const regionBounds = sceneRefinementRegions(this.scene).map(region => ({ region,
+        ...refinementRegionCellBounds(region, refinementRegionLattice(this.scene)) }));
+      for (const brick of source.atlas.bricks) {
+        const record = source.recordsByKey.get(brick.key)!;
+        if (!record.active) continue;
+        const containedRegions = regionBounds.filter(bounds => brick.coordinate.every((q, axis) =>
+          q * source.atlas.brickFineResolution >= bounds.min[axis]! - 1e-6
+          && sparseBrickMaximumFine(source.atlas, brick, axis) <= bounds.max[axis]! + 1e-6));
+        for (const {region} of containedRegions) if (region.maximumCellSize_cells !== undefined) {
+          physicalDemands.set(brick.key, Math.min(physicalDemands.get(brick.key) ?? Infinity,
+            region.maximumCellSize_cells));
+        }
+        if ((brick.spanBricks ?? 1) > 1 && (record.thinFluid
+          || record.maximumVelocityTravelFineCells >= (this.options.activityPolicy?.finestTravelCells ?? 1))) {
+          const minimum = Math.max(1, ...containedRegions.map(({region}) => region.minimumCellSize_cells));
+          physicalDemands.set(brick.key, Math.min(physicalDemands.get(brick.key) ?? Infinity, minimum));
+        }
+      }
+      const requested = new Set([...source.planned.keys(), ...physicalDemands.keys()]);
+      const admitted = new Set([...requested].sort((left, right) => {
+        const a = source.recordsByKey.get(left)!, b = source.recordsByKey.get(right)!;
+        const priority = (record: typeof a) => Number((record.planReasons & 2) !== 0) * 2048 + Number(record.thinFluid) * 1024
+          + Number((record.reasons & 1) !== 0) * 512 + record.scoreByte;
+        return priority(b) - priority(a) || left - right;
+      }).slice(0, requestBudget));
+      const intents = new Map(source.atlas.bricks.map(brick => {
+        const record = source.recordsByKey.get(brick.key)!;
+        return [brick.key, { resolution: admitted.has(brick.key) ? source.planned.get(brick.key) ?? brick.resolution : brick.resolution,
+          maximumCellWidth: admitted.has(brick.key) ? physicalDemands.get(brick.key) : undefined,
+          mergeable: mergeable(record) }];
+      }));
+      const plan = planSparseCM12ResidentGeneration(source.atlas, source.active, intents,
+        this.topologyGenerationLimits);
+      this.info.topologyGenerationRequestedLeaves = requested.size;
+      this.info.topologyGenerationDeferred = plan?.status === "deferred"
+        ? { leaves: plan.leaves, cells: plan.cells } : undefined;
+      if (!plan || plan.status === "deferred") return undefined;
+      return accepted.prepareGenerationReplacement(source, plan.atlas, plan.active,
+        finestCellSize(this.scene, plan.atlas),
+        this.topologyGenerationMaximumBytes - this.sparseRuntime.allocatedBytes, signal);
+      });
+    };
+    this.topologyGenerationWork = prepare().then(() => {
+      if (this.atlas !== this.sparseRuntime.acceptedAtlas) {
+        this.info.topologyGenerationCount = (this.info.topologyGenerationCount ?? 0) + 1;
+      }
+      this.atlas = this.sparseRuntime.acceptedAtlas;
+      if (this.rigidSystem && this.sparseRuntime.solidWorldCollisionSource) {
+        this.rigidSystem.setSolidWorldCollisionSource({ ...this.sparseRuntime.solidWorldCollisionSource,
+          origin_m: this.fluidDomain.origin_m, cellSize_m: this.fluidDomain.cellSize_m });
+      }
+      this.info.allocatedBytes = this.presentation.allocatedBytes + this.sparseRuntime.allocatedBytes;
+      this.resetPressureIterationFeedback();
+      this.info.topologyGenerationError = undefined;
+    }).catch(error => {
+      if (error instanceof Error && error.name === "AbortError") return;
+      if (error instanceof SparseCM12GenerationStale) {
+        this.info.topologyGenerationStaleCount = (this.info.topologyGenerationStaleCount ?? 0) + 1;
+        return;
+      }
+      if (error instanceof SparseCM12GenerationBudgetDeferred) {
+        this.info.topologyGenerationDeferred = { leaves: this.atlas.bricks.length,
+          cells: this.sparseRuntime.cellCount, requestedBytes: error.requestedBytes,
+          availableBytes: error.availableBytes };
+        this.info.topologyGenerationError = undefined;
+        return;
+      }
+      this.info.topologyGenerationError = error instanceof Error ? error.message : String(error);
+      console.error("CM12 topology generation retained its accepted state:", error);
+    }).finally(() => {
+      this.info.topologyPreparationDurationMs = performance.now() - preparationStarted;
+      this.info.topologyGenerationPending = false;
+      this.topologyGenerationWork = undefined;
+    });
+  }
+
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean {
-    if (this.disposed || this.sparseWorldDevice.status !== "ready" || !Number.isFinite(time_s)
+    this.info.topologyPreparationMaximumSliceMs = this.sparseRuntime.generationPreparationMaximumSliceMs;
+    this.info.topologyPreparationMaximumSliceOperation = this.sparseRuntime.generationPreparationMaximumSliceOperation;
+    this.info.topologyPublicationMaximumDurationMs = this.sparseRuntime.generationPublicationMaximumMs;
+    if (this.disposed || this.sparseRuntime.topologyPreparationPending
+      || this.sparseWorldDevice.status !== "ready" || !Number.isFinite(time_s)
       || time_s <= this.lastTime_s + 1e-9) return false;
     const paperTimeStep = this.options.timeStep === "paper";
     if (paperTimeStep
@@ -963,6 +1121,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.hostSimulationSizedWorkItems = 0;
     const captured = frameCapture?.finish(this.device.queue);
     this.finishFrameCapture(captured, traceRequestedAt_ms);
+    this.scheduleTopologyGeneration();
     return true;
   }
 
@@ -1040,7 +1199,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
 
   async readStats(): Promise<GPUEulerianInfo> {
     await this.device.queue.onSubmittedWorkDone();
+    const generation = this.sparseRuntime.acceptedAtlas;
     const diagnostics = await this.sparseWorldTrace.readDiagnostics();
+    if (generation !== this.sparseRuntime.acceptedAtlas) return this.info;
+    this.info.allocatedBytes = this.presentation.allocatedBytes + this.sparseRuntime.allocatedBytes;
     // This full diagnostics readback remains downstream of simulation and only
     // updates panels. Adaptive encoding consumes the separate four-byte
     // completed-frame receipt, never this topology/physics diagnostics packet.
@@ -1098,10 +1260,13 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       / Math.max(1, this.info.equivalentUniformCells ?? diagnostics.acceptedCellCount);
     this.info.fluidBrickResidentCount = diagnostics.activeBrickCount;
     this.info.fluidBrickCoreCount = diagnostics.activeBrickCount;
-    // Residency and accepted split/merge publication are independent GPU
-    // generations. Their sum is a monotonic renderer-facing revision.
-    this.info.fluidBrickGeneration = this.atlas.generation
-      + diagnostics.residencyGeneration + (topology.acceptedTopologyGeneration ?? 0);
+    // Local GPU counters restart with a resident replacement. Publish a
+    // monotonic revision across both local commits and whole generations.
+    const fluidRevision = `${this.info.topologyGenerationCount ?? 0}/${this.atlas.generation}/${diagnostics.residencyGeneration}/${topology.acceptedTopologyGeneration ?? 0}`;
+    if (fluidRevision !== this.lastFluidRevision) {
+      this.info.fluidBrickGeneration = (this.info.fluidBrickGeneration ?? 0) + 1;
+      this.lastFluidRevision = fluidRevision;
+    }
     this.info.adaptiveTopologyShadowGeneration =
       topology.acceptedTopologyGeneration ?? 0;
     this.info.adaptiveTopologyUrgentQueuedBrickCount =
@@ -1111,6 +1276,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.adaptiveTopologyPreparedBrickCount = topology.topologyPreparedBrickCount ?? 0;
     this.info.adaptiveTopologyCommittedBrickCount = topology.topologyCommittedBrickCount ?? 0;
     this.info.adaptiveTopologyDeferredBrickCount = topology.topologyDeferredBrickCount ?? 0;
+    this.info.adaptiveTopologyPageAllocator = diagnostics.topologyPageAllocator;
     this.info.adaptiveTopologyShadowFineBrickCount = topology.acceptedFineBrickCount;
     this.info.adaptiveTopologyShadowCoarseBrickCount = topology.acceptedCoarseBrickCount;
     this.info.adaptiveAcceptedCellCount = diagnostics.acceptedCellCount;
@@ -1214,8 +1380,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     readonly preparedBrickCount: number;
     readonly committedBrickCount: number;
     readonly commitFailed: boolean;
+    readonly topologyPageAllocator: {
+      readonly freePages: number;
+      readonly capacity: number;
+      readonly allocationCancellations: number;
+    };
     readonly bricks: readonly AdaptiveMassGPUActivityBrick[];
   }> {
+    const atlas = this.sparseRuntime.acceptedAtlas;
     const snapshot = await this.sparseWorldTrace.readActivitySnapshot(true);
     return {
       acceptedSteps: snapshot.acceptedSteps,
@@ -1226,8 +1398,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       preparedBrickCount: snapshot.preparedBrickCount,
       committedBrickCount: snapshot.committedBrickCount,
       commitFailed: snapshot.commitFailed,
+      topologyPageAllocator: snapshot.topologyPageAllocator,
       bricks: snapshot.records.map((record) => {
-        const brick = this.atlas.bricks[record.leafId];
+        const brick = atlas.bricks[record.leafId];
         if (brick) return { ...record, key: brick.key, coordinate: brick.coordinate,
           spanBricks: brick.spanBricks ?? 1, resolution: brick.resolution };
         if (!record.coordinate) {

@@ -99,7 +99,7 @@ test("fixed-point remainders remain at their source, independent of traversal or
     /excessMass\*cm12PhysicalMassFixedScale\(\)/);
   assert.match(capacityScatter, /let distributed=share\*neighborCount/);
   assert.match(capacityScatter,
-    /atomicAdd\(&conditioning\[6u\*p\.counts\.x\+cell\],-distributed\)/);
+    /atomicAdd\(&conditioning\[plane\*p\.counts\.x\+cell\],-distributed\)/);
   assert.doesNotMatch(capacityScatter, /lastNeighbor/);
 });
 
@@ -164,7 +164,7 @@ test("region-equivalent face transport scales the shared cache without taxing de
     /neighbor=cm12WorldOwnerAt\(coordinate\+directions\[side\]\);[\s\S]*if\(neighbor==INVALID\)\{continue;\}[\s\S]*2u\*cachedRefinementGradingCap\(neighbor\)/,
     "inactive pre-catalogued halo leaves must grade the first wet activation");
   const scheduler = functionSource(wgsl, "scheduleTopologyPreparation",
-    "fn acquireTopologyPage");
+    "fn candidateTopologyPageBase");
   assert.match(scheduler,
     /hardRegionSupport=candidate<accepted[\s\S]*cachedRefinementGradingCap\(brick\)<BRICK_FINE_RESOLUTION/,
     "hard-floor and grading-halo demotions must be classified together");

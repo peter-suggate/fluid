@@ -14,6 +14,8 @@ export interface SparseCM12VelocityExtensionWGSLOptions {
   readonly effectiveVelocityHookPrefix?: string;
   /** QA-only A/B: consume the packet authority's accepted-packet list. */
   readonly compactAcceptedPacketsForQA?: boolean;
+  /** Production topology-cached schedule; QA flag forces its compact mode. */
+  readonly cacheAcceptedPackets?: boolean;
   /** Bake one recurrence depth into a bounded pipeline slice when requested. */
   readonly fixedRecurrenceDepth?: number;
 }
@@ -26,9 +28,10 @@ const identifier = (value: string, label: string): string => {
 };
 
 /**
- * VEX2 is one direct packet initialization and eight direct Jacobi transforms.
+ * VEX2 is one packet initialization and eight Jacobi transforms.
  * Successful sweep publication is the commit. Masks are packet-owned and
- * completely overwritten; command order is their lifecycle.
+ * overwritten on every accepted packet; topology rebuilds overwrite the full
+ * direct domain so retired masks cannot survive a cached-schedule transition.
  */
 export function createSparseCM12VelocityExtensionWGSL(
   options: SparseCM12VelocityExtensionWGSLOptions,
@@ -45,7 +48,20 @@ export function createSparseCM12VelocityExtensionWGSL(
   const publish = effectiveHook
     ? `${effectiveHook}PublishVexAcceptedEffectiveVelocity(cell,value);` : "";
   const fixedRecurrenceDepth = options.fixedRecurrenceDepth;
-  const dispatchPacket = options.compactAcceptedPacketsForQA
+  const dispatchPacket = options.cacheAcceptedPackets
+    ? /* wgsl */ `let dispatchOrdinal=wid.x+cm12ExtensionDispatchWidth*wid.y;
+  if(lane==0u){
+    var selected=cm12ExtensionStablePacket(dispatchOrdinal);
+    if(cm12ExtensionLoad(CM12_VEX_SCHEDULE+3u)!=0u){
+      selected=cm12ExtensionInvalid;
+      if(dispatchOrdinal<cm12ExtensionLoad(CM12_VEX_SCHEDULE+2u)){
+        selected=cm12ExtensionLoad(CM12_VEX_PACKET_LIST+dispatchOrdinal);
+      }
+    }
+    cm12ExtensionDispatchPacket=selected;
+  }
+  let packet=workgroupUniformLoad(&cm12ExtensionDispatchPacket);`
+    : options.compactAcceptedPacketsForQA
     ? /* wgsl */ `let dispatchOrdinal=wid.x;
   if(lane==0u){
     let compactOrdinal=cm12TransportPacketOrdinal(dispatchOrdinal);
@@ -105,6 +121,47 @@ fn cm12ExtensionStablePacket(dispatchOrdinal:u32)->u32{
   let packet=64u*leaf+local;
   return select(packet,cm12ExtensionInvalid,packet>=cm12ExtensionPacketCapacity);
 }
+${options.cacheAcceptedPackets ? /* wgsl */ `
+const CM12_VEX_SCHEDULE:u32=${layout.scheduleBaseWords}u;
+const CM12_VEX_PACKET_LIST:u32=${layout.packetListBaseWords}u;
+@compute @workgroup_size(1)
+fn beginSparseCM12VelocityExtensionSchedule(){
+  let changed=cm12ExtensionLoad(CM12_VEX_SCHEDULE)!=${topologyGeneration}
+    ||cm12ExtensionLoad(CM12_VEX_SCHEDULE+7u)!=acceptedTopologySlot();
+  cm12ExtensionStore(CM12_VEX_SCHEDULE+1u,select(0u,1u,changed));
+  if(changed){cm12ExtensionStore(CM12_VEX_SCHEDULE+2u,0u);}
+}
+@compute @workgroup_size(64)
+fn compileSparseCM12VelocityExtensionSchedule(@builtin(global_invocation_id)gid:vec3u){
+  if(cm12ExtensionLoad(CM12_VEX_SCHEDULE+1u)==0u){return;}
+  let leaf=acceptedLeafInvocation(gid.x);if(leaf==cm12ExtensionInvalid){return;}
+  let slot=acceptedTopologySlot();let descriptor=cm12TeiLoadLeaf(slot,leaf);
+  if((descriptor.flags&0x80000000u)==0u){return;}
+  let axis=max(1u,((descriptor.flags&31u)+3u)/4u);
+  let count=min(cm12ExtensionDispatchPacketsPerLeaf,axis*axis*axis);
+  for(var local=0u;local<count;local+=1u){
+    let packet=64u*leaf+local;
+    if(cm12TeiPacket(packet,slot).first==cm12ExtensionInvalid){continue;}
+    let at=atomicAdd(&${arena}[CM12_VEX_SCHEDULE+2u],1u);
+    if(at<cm12ExtensionDispatchPacketCount){cm12ExtensionStore(CM12_VEX_PACKET_LIST+at,packet);}
+  }
+}
+@compute @workgroup_size(1)
+fn sealSparseCM12VelocityExtensionSchedule(){
+  let count=min(cm12ExtensionLoad(CM12_VEX_SCHEDULE+2u),cm12ExtensionDispatchPacketCount);
+  // Rebuild frames retain the full direct mask overwrite, including retired
+  // packets. Dense accepted images keep the cheaper direct packet decoder.
+  let compact=cm12ExtensionLoad(CM12_VEX_SCHEDULE+1u)==0u
+    &&(${options.compactAcceptedPacketsForQA ? 'true' : 'count<cm12ExtensionDispatchPacketCount-cm12ExtensionDispatchPacketCount/4u'});
+  cm12ExtensionStore(CM12_VEX_SCHEDULE+3u,select(0u,1u,compact));
+  let groups=max(1u,select(cm12ExtensionDispatchPacketCount,count,compact));
+  cm12ExtensionStore(CM12_VEX_SCHEDULE+4u,min(cm12ExtensionDispatchWidth,groups));
+  cm12ExtensionStore(CM12_VEX_SCHEDULE+5u,(groups+cm12ExtensionDispatchWidth-1u)/cm12ExtensionDispatchWidth);
+  cm12ExtensionStore(CM12_VEX_SCHEDULE+6u,1u);
+  cm12ExtensionStore(CM12_VEX_SCHEDULE,${topologyGeneration});
+  cm12ExtensionStore(CM12_VEX_SCHEDULE+7u,acceptedTopologySlot());
+}
+` : ""}
 fn cm12ExtensionExpectedMask(counts:vec3u)->vec2u{
   var result=vec2u(0u);let rowMask=(1u<<counts.x)-1u;
   for(var z=0u;z<counts.z;z+=1u){for(var y=0u;y<counts.y;y+=1u){
@@ -244,7 +301,8 @@ fn initializeVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
 fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
   ${dispatchPacket}
-  if(packet==cm12ExtensionInvalid){return;}
+  if(packet==cm12ExtensionInvalid){
+    cm12ExtensionPublishFrameReceipt(dispatchOrdinal,lane);return;}
   let packetFirst=cm12ExtensionBeginPacket(packet,lane);
   if(packetFirst==cm12ExtensionInvalid){
     cm12ExtensionClearPacketMask(cm12ExtensionOutputMask(

@@ -1,3 +1,4 @@
+import { sparseBrickMaximumFine } from "./sparse-brick-atlas";
 /**
  * Finite-volume pressure/projection algebra for an arbitrary sparse 4^3/8^3
  * brick atlas.
@@ -393,9 +394,9 @@ export function buildSparseAtlasCompositeGrid(
           const minimum0 = brick.coordinate[0] * brickFineWidth + x * scale;
           const minimum1 = brick.coordinate[1] * brickFineWidth + y * scale;
           const minimum2 = brick.coordinate[2] * brickFineWidth + z * scale;
-          const maximum0 = Math.min(minimum0 + scale, atlas.dimensions[0]);
-          const maximum1 = Math.min(minimum1 + scale, atlas.dimensions[1]);
-          const maximum2 = Math.min(minimum2 + scale, atlas.dimensions[2]);
+          const maximum0 = Math.min(minimum0 + scale, sparseBrickMaximumFine(atlas, brick, 0));
+          const maximum1 = Math.min(minimum1 + scale, sparseBrickMaximumFine(atlas, brick, 1));
+          const maximum2 = Math.min(minimum2 + scale, sparseBrickMaximumFine(atlas, brick, 2));
           const width0 = maximum0 - minimum0;
           const width1 = maximum1 - minimum1;
           const width2 = maximum2 - minimum2;
@@ -525,13 +526,13 @@ export function buildSparseAtlasCompositeGrid(
     const cellBase = cellBaseByBrick.get(brick.key)!;
     const scale = brickFineWidth * sparseBrickSpan(brick) / brick.resolution;
     const validX = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[0] - brick.coordinate[0] * brickFineWidth) / scale,
+      (sparseBrickMaximumFine(atlas, brick, 0) - brick.coordinate[0] * brickFineWidth) / scale,
     )));
     const validY = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[1] - brick.coordinate[1] * brickFineWidth) / scale,
+      (sparseBrickMaximumFine(atlas, brick, 1) - brick.coordinate[1] * brickFineWidth) / scale,
     )));
     const validZ = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[2] - brick.coordinate[2] * brickFineWidth) / scale,
+      (sparseBrickMaximumFine(atlas, brick, 2) - brick.coordinate[2] * brickFineWidth) / scale,
     )));
     for (const axis of [0, 1, 2] as const) {
       const tangents = tangentialAxes(axis);
@@ -591,18 +592,18 @@ export function buildSparseAtlasCompositeGrid(
     result: SparseAtlasCompositeCell[],
   ): SparseAtlasCompositeCell[] => {
     result.length = 0;
-    const coordinate = side < 0 ? 0 : brick.resolution - 1;
     const cellBase = cellBaseByBrick.get(brick.key)!;
     const scale = brickFineWidth * sparseBrickSpan(brick) / brick.resolution;
     const validX = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[0] - brick.coordinate[0] * brickFineWidth) / scale,
+      (sparseBrickMaximumFine(atlas, brick, 0) - brick.coordinate[0] * brickFineWidth) / scale,
     )));
     const validY = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[1] - brick.coordinate[1] * brickFineWidth) / scale,
+      (sparseBrickMaximumFine(atlas, brick, 1) - brick.coordinate[1] * brickFineWidth) / scale,
     )));
     const validZ = Math.max(0, Math.min(brick.resolution, Math.ceil(
-      (atlas.dimensions[2] - brick.coordinate[2] * brickFineWidth) / scale,
+      (sparseBrickMaximumFine(atlas, brick, 2) - brick.coordinate[2] * brickFineWidth) / scale,
     )));
+    const coordinate = side < 0 ? 0 : [validX, validY, validZ][axis] - 1;
     for (let z = 0; z < brick.resolution; z += 1) {
       for (let y = 0; y < brick.resolution; y += 1) {
         for (let x = 0; x < brick.resolution; x += 1) {
@@ -641,9 +642,11 @@ export function buildSparseAtlasCompositeGrid(
         negative.coordinate[tangent], positive.coordinate[tangent],
       ) * brickFineWidth;
       overlapMaximum[tangent] = Math.min(
-        negative.coordinate[tangent] + sparseBrickSpan(negative),
-        positive.coordinate[tangent] + sparseBrickSpan(positive),
-      ) * brickFineWidth;
+        (negative.coordinate[tangent] + sparseBrickSpan(negative)) * brickFineWidth,
+        (positive.coordinate[tangent] + sparseBrickSpan(positive)) * brickFineWidth,
+        sparseBrickMaximumFine(atlas, negative, tangent),
+        sparseBrickMaximumFine(atlas, positive, tangent),
+      );
     }
     for (let portV = overlapMinimum[tangents[1]];
       portV < overlapMaximum[tangents[1]]; portV += portWidth) {
@@ -753,30 +756,42 @@ export function buildSparseAtlasCompositeGrid(
     brick: SparseAdaptiveMassBrick,
     axis: SparseAtlasAxis,
     side: -1 | 1,
+    neighbors: readonly SparseAdaptiveMassBrick[] = [],
   ): void => {
     const tangents = tangentialAxes(axis);
     const cellsOnFace = faceCells(brick, axis, side, negativeFaceCells);
-    for (let index = 0; index < cellsOnFace.length; index += 1) {
-      const cell = cellsOnFace[index];
+    const nominal = brickFineWidth * sparseBrickSpan(brick) / brick.resolution;
+    for (const cell of cellsOnFace) {
       const distance = cell.widthsFine[axis];
-      const area = cell.widthsFine[tangents[0]] * cell.widthsFine[tangents[1]];
-      const faceCoordinate = side < 0 ? cell.minimumFine[axis] : cell.maximumFine[axis];
-      let center0 = cell.centerFine[0];
-      let center1 = cell.centerFine[1];
-      let center2 = cell.centerFine[2];
-      const faceCenter = faceCoordinate;
-      if (axis === 0) center0 = faceCenter;
-      else if (axis === 1) center1 = faceCenter;
-      else center2 = faceCenter;
-      termCellScratch[0] = cell.id;
-      termCoefficientScratch[0] = side < 0 ? 1 / distance : -1 / distance;
-      appendRow(
-        "sparse-air", axis, center0, center1, center2, area, distance,
-        cell.widthsFine[tangents[0]], cell.widthsFine[tangents[1]], 1,
-        side > 0 ? brick.key : undefined,
-        side < 0 ? brick.key : undefined,
-        sparseAirPhi,
-      );
+      const upper = tangents.map(tangent => cell.maximumFine[tangent]);
+      const emitUncovered = (u: number, v: number, span: number): void => {
+        const hiU = Math.min(u + span, upper[0]!), hiV = Math.min(v + span, upper[1]!);
+        if (hiU <= u || hiV <= v) return;
+        let intersects = false;
+        for (const neighbor of neighbors) {
+          const loU = neighbor.coordinate[tangents[0]] * brickFineWidth;
+          const loV = neighbor.coordinate[tangents[1]] * brickFineWidth;
+          const endU = sparseBrickMaximumFine(atlas, neighbor, tangents[0]);
+          const endV = sparseBrickMaximumFine(atlas, neighbor, tangents[1]);
+          if (loU <= u && loV <= v && endU >= hiU && endV >= hiV) return;
+          intersects ||= loU < hiU && endU > u && loV < hiV && endV > v;
+        }
+        if (intersects && span > 1) {
+          const half = span / 2;
+          for (let child = 0; child < 4; child++) emitUncovered(
+            u + (child & 1) * half, v + (child >>> 1) * half, half);
+          return;
+        }
+        const center = [...cell.centerFine];
+        center[axis] = side < 0 ? cell.minimumFine[axis] : cell.maximumFine[axis];
+        center[tangents[0]] = (u + hiU) / 2; center[tangents[1]] = (v + hiV) / 2;
+        termCellScratch[0] = cell.id;
+        termCoefficientScratch[0] = side < 0 ? 1 / distance : -1 / distance;
+        appendRow("sparse-air", axis, center[0]!, center[1]!, center[2]!,
+          (hiU - u) * (hiV - v), distance, hiU - u, hiV - v, 1,
+          side > 0 ? brick.key : undefined, side < 0 ? brick.key : undefined, sparseAirPhi);
+      };
+      emitUncovered(cell.minimumFine[tangents[0]], cell.minimumFine[tangents[1]], nominal);
     }
   };
 
@@ -811,10 +826,11 @@ export function buildSparseAtlasCompositeGrid(
       .filter((candidate) => tangentOverlap(brick, candidate, axis));
     if (positiveNeighbors.length > 0) {
       for (const neighbor of positiveNeighbors) appendBrickInterface(brick, neighbor, axis);
-    } else appendSparseAirFace(brick, axis, 1);
-    const hasNegativeNeighbor = (positiveFaces[axis].get(brick.coordinate[axis]) ?? [])
-      .some((candidate) => tangentOverlap(candidate, brick, axis));
-    if (!hasNegativeNeighbor) appendSparseAirFace(brick, axis, -1);
+    }
+    appendSparseAirFace(brick, axis, 1, positiveNeighbors);
+    const negativeNeighbors = (positiveFaces[axis].get(brick.coordinate[axis]) ?? [])
+      .filter((candidate) => tangentOverlap(candidate, brick, axis));
+    appendSparseAirFace(brick, axis, -1, negativeNeighbors);
   }
 
   // A reused workspace may previously have held a larger atlas variant. Keep

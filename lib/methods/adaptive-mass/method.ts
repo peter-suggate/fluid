@@ -44,6 +44,9 @@ export interface AdaptiveMassSolverOptions {
   readonly presentationPageResolution?: SparseBrickFineResolution;
   /** Optional positive-power-of-two cap on hierarchical macro-leaf span. */
   readonly maximumMacroSpanBricks?: number;
+  /** Physical world-growth page budget. Authored re-rung already owns complete
+   * template topology and does not consume these page identities. */
+  readonly topologyPageBudget?: number;
   readonly surfaceFineRings?: number;
   readonly activityPolicy?: SparseCM12ActivityPolicy;
   /** Omitted only by direct diagnostic constructors, which retain scene-step behavior. */
@@ -103,7 +106,7 @@ const params: MethodParamSpec[] = [
       { value: "32", label: "32 bricks" },
       { value: "64", label: "64 bricks" },
     ],
-    hint: "Caps the edge span of immutable hierarchical leaves. Auto retains the largest aligned dyadic cover supported by the scene.",
+    hint: "Caps macro coverage during initialization and live split/merge. Auto permits progressively larger aligned coverage as quiet siblings merge.",
   },
   {
     kind: "select",

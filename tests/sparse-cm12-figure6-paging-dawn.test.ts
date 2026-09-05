@@ -119,17 +119,19 @@ dawnTest("Figure 6 crosses its authored SparseWorld boundary",
       ]);
       const maximumY = Math.max(...rows);
       const receipt = { initialMaximumY, maximumY,
+        allocatedTopologyPageHighWaterMark: growth.allocatedTopologyPageHighWaterMark,
         publishedTopologyPages: growth.publishedTopologyPages,
         insertionFaults: growth.insertionFaults,
         capacityFaults: growth.capacityFaults,
         topologyFailed: activity.commitFailed,
+        topologyPageAllocator: activity.topologyPageAllocator,
         cellWorkgroups: indirect[0], rowWorkgroups: indirect[3],
         crossedRows: Array.from({ length: 16 }, (_, index) => index + 8)
           .filter((row) => rows.has(row)) };
       if (process.env.FLUID_FIGURE6_TRACE === "1") {
         process.stderr.write(`[cm12-figure6] ${JSON.stringify(receipt)}\n`);
       }
-      assert.ok(growth.publishedTopologyPages > 512,
+      assert.ok(growth.allocatedTopologyPageHighWaterMark > 512,
         `the drop must cross the former undersized page-pool ceiling: ${JSON.stringify(receipt)}`);
       assert.ok(indirect[0]! > 0 && indirect[3]! > 0, JSON.stringify(receipt));
       assert.ok(maximumY < initialMaximumY - 20, JSON.stringify(receipt));
@@ -138,6 +140,12 @@ dawnTest("Figure 6 crosses its authored SparseWorld boundary",
       assert.equal(growth.insertionFaults, 0, JSON.stringify(receipt));
       assert.equal(growth.capacityFaults, 0, JSON.stringify(receipt));
       assert.equal(activity.commitFailed, false, JSON.stringify(receipt));
+      assert.ok(activity.topologyPageAllocator.capacity > 512, JSON.stringify(receipt));
+      assert.ok(activity.topologyPageAllocator.freePages >= 0
+        && activity.topologyPageAllocator.freePages < activity.topologyPageAllocator.capacity,
+      `allocator diagnostics must observe the live WDR pages: ${JSON.stringify(receipt)}`);
+      assert.equal(activity.topologyPageAllocator.allocationCancellations, 0,
+        JSON.stringify(receipt));
       const validation = await device.popErrorScope();
       assert.equal(validation, null, validation?.message);
       assert.deepEqual(uncaptured, []);

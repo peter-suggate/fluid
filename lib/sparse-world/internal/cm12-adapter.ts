@@ -131,6 +131,14 @@ export interface CM12SparseWorldFactoryConfig {
  * pipeline map and no way to dispatch a named internal stage.
  */
 export interface CM12SparseWorldRuntime {
+  readonly topologyPreparationPending: boolean;
+  readonly generationPlanningRequired: boolean;
+  readonly generationPreparationMaximumSliceMs: number;
+  readonly generationPreparationMaximumSliceOperation?: string;
+  readonly generationPublicationMaximumMs: number;
+  readonly acceptedAtlas: SparseAdaptiveMassAtlas;
+  /** Internal frame-boundary publication of a completely transferred resident. */
+  prepareResidentGeneration(build: (accepted: WebGPUSparseCM12Resident, signal: AbortSignal) => Promise<Awaited<ReturnType<WebGPUSparseCM12Resident["prepareGenerationReplacement"]>> | undefined>): Promise<void>;
   /** Deterministic harness seam; application readiness lives on `device`. */
   waitForSimulationPipelines(): Promise<void>;
 
@@ -236,7 +244,101 @@ const fault = (code: SparseWorldFault["code"], error: unknown): SparseWorldFault
   cause: error,
 });
 
+/** One publication reference shared by physics, presentation and diagnostics.
+ * Replacements are built while physics advances. Source capture holds only a
+ * short revocable topology lease; final publication suspends frame encoding. Readers retain the
+ * generation on which they started until all of their asynchronous work finishes. */
+export class CM12ResidentGeneration {
+  private reads = new Map<WebGPUSparseCM12Resident, Set<Promise<unknown>>>();
+  private disposed = false;
+  private revision = 0;
+  publications = 0;
+  maximumPublicationMs = 0;
+  private preparation?: Promise<void>;
+  private committing = false;
+  private preparationController?: AbortController;
+  private retired = new Set<WebGPUSparseCM12Resident>();
+
+  constructor(private readonly device: GPUDevice, public current: WebGPUSparseCM12Resident) {}
+  get pending() { return this.committing; }
+  get allocatedBytes() {
+    return this.current.allocatedBytes + [...this.retired]
+      .reduce((sum, resident) => sum + resident.allocatedBytes, 0);
+  }
+  changed() { this.revision++; this.preparationController?.abort(); }
+  read<T>(reader: (resident: WebGPUSparseCM12Resident) => Promise<T>): Promise<T> {
+    const resident = this.current;
+    const result = reader(resident);
+    let pending = this.reads.get(resident);
+    if (!pending) this.reads.set(resident, pending = new Set());
+    pending.add(result);
+    return result.finally(() => {
+      pending!.delete(result);
+      if (pending!.size === 0) this.reads.delete(resident);
+    });
+  }
+  prepare(build: (accepted: WebGPUSparseCM12Resident, signal: AbortSignal) => Promise<Awaited<ReturnType<WebGPUSparseCM12Resident["prepareGenerationReplacement"]>> | undefined>): Promise<void> {
+    if (this.disposed || this.preparation) throw new Error("CM12 resident replacement is unavailable");
+    const revision = this.revision, accepted = this.current;
+    const controller = new AbortController();
+    this.preparationController = controller;
+    const work = async () => {
+      let candidate: Awaited<ReturnType<WebGPUSparseCM12Resident["prepareGenerationReplacement"]>> | undefined;
+      try {
+        candidate = await build(accepted, controller.signal);
+        if (!candidate) return;
+        if (candidate.resident === accepted) throw new Error("CM12 replacement must own isolated storage");
+        await candidate.resident.waitForSimulationPipelines();
+        if (this.disposed || this.revision !== revision) {
+          throw new Error("CM12 scene changed while its resident generation was being prepared");
+        }
+        this.committing = true;
+        const publicationStarted = performance.now();
+        try { await candidate.commit(); }
+        finally { this.maximumPublicationMs = Math.max(this.maximumPublicationMs, performance.now() - publicationStarted); }
+        if (this.disposed || this.revision !== revision)
+          throw new Error("CM12 scene changed during resident publication");
+        this.current = candidate.resident;
+        candidate.disposePreparation();
+        this.publications += 1;
+        candidate = undefined;
+        this.changed();
+        this.retired.add(accepted);
+        void this.retire(accepted).catch(() => {});
+      } finally {
+        this.committing = false;
+        if (candidate && candidate.resident !== accepted) {
+          candidate.disposePreparation(); candidate.resident.destroy();
+        }
+      }
+    };
+    this.preparation = work().finally(() => { this.preparation = undefined; this.preparationController = undefined; });
+    return this.preparation;
+  }
+  private async retire(resident: WebGPUSparseCM12Resident) {
+    try {
+      await Promise.allSettled([...(this.reads.get(resident) ?? [])]);
+      await this.device.queue.onSubmittedWorkDone();
+    } finally {
+      resident.destroy();
+      this.retired.delete(resident);
+    }
+  }
+  destroy() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.preparationController?.abort();
+    const resident = this.current;
+    if (this.preparation) {
+      void this.preparation.catch(() => {}).then(() => this.retire(resident)).catch(() => {});
+    } else {
+      void this.retire(resident).catch(() => {});
+    }
+  }
+}
+
 class AdoptedCM12SparseWorld implements SparseWorld {
+  private get resident() { return this.generationState.current; }
   private generation: number;
   private lastAcceptedTime = 0;
   private state: SparseWorldStatus["state"] = "ready";
@@ -248,11 +350,11 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   private rigidBodies: SceneDescription["rigidBodies"];
 
   constructor(
-    private readonly resident: WebGPUSparseCM12Resident,
+    private readonly generationState: CM12ResidentGeneration,
     private readonly options: AdoptCM12SparseWorldOptions,
     private readonly device: SparseWorldDevice,
   ) {
-    this.generation = resident.globalFineLevelSetSource.generation;
+    this.generation = this.resident.globalFineLevelSetSource.generation;
     this.solidWorldStamp = solidWorldContentStamp(options.initialScene);
     this.solidEnvironment = options.initialScene.environment;
     this.solidScenery = options.initialScene.scenery;
@@ -265,6 +367,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   }
 
   edit(edit: SparseWorldEdit): SparseWorldEditReceipt {
+    this.generationState.changed();
     if (this.destroyed) {
       const error = new Error("Sparse world has been destroyed");
       this.publishFault("world-destroyed", error);
@@ -274,7 +377,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
       if (edit.scene.rigidBodies.length > 0 && !this.options.rigidSystem) {
         return Object.freeze({
           disposition: "rebuild-required",
-          acceptedGeneration: this.generation,
+          acceptedGeneration: this.generation + this.generationState.publications,
           reason: "this world was created without rigid-body coupling storage",
         });
       }
@@ -302,7 +405,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
         this.state = "running";
         return Object.freeze({
           disposition: "applied",
-          acceptedGeneration: this.generation,
+          acceptedGeneration: this.generation + this.generationState.publications,
         });
       } catch (error) {
         this.publishFault("internal", error);
@@ -348,7 +451,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
       this.state = "running";
       return Object.freeze({
         disposition: "applied",
-        acceptedGeneration: this.generation,
+        acceptedGeneration: this.generation + this.generationState.publications,
       });
     } catch (error) {
       this.publishFault("invalid-interaction", error);
@@ -357,6 +460,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   }
 
   encodeStep(encoder: GPUCommandEncoder, input: SparseWorldStepInput): SparseWorldStep {
+    if (this.generationState.pending) throw new Error("CM12 publication boundary suspends frame encoding");
     if (this.destroyed) {
       const error = new Error("Sparse world has been destroyed");
       this.publishFault("world-destroyed", error);
@@ -427,7 +531,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
 
   presentation(): SparseWorldPresentation {
     return Object.freeze({
-      acceptedGeneration: this.generation,
+      acceptedGeneration: this.generation + this.generationState.publications,
       fineLevelSet: this.resident.globalFineLevelSetSource,
       adaptiveGrid: this.resident.sparseAdaptiveGridSource,
     });
@@ -440,9 +544,9 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     }
     return Object.freeze({
       state: this.state,
-      acceptedGeneration: this.generation,
-      residentTiles: this.options.residentTiles,
-      capacityTiles: this.options.capacityTiles,
+      acceptedGeneration: this.generation + this.generationState.publications,
+      residentTiles: this.resident.acceptedAtlas.bricks.length,
+      capacityTiles: this.resident.leafCapacity,
       lastAcceptedTime: this.lastAcceptedTime,
       ...(this.currentFault ? { fault: this.currentFault } : {}),
     });
@@ -451,7 +555,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.resident.destroy();
+    this.generationState.destroy();
   }
 
   private publishFault(code: SparseWorldFault["code"], error: unknown): void {
@@ -503,13 +607,23 @@ class AdoptedCM12SparseWorld implements SparseWorld {
 }
 
 class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
+  private get resident() { return this.generationState.current; }
+  get acceptedAtlas() { return this.resident.acceptedAtlas; }
+  get generationPlanningRequired() { return this.resident.needsGenerationPlanning; }
+  get generationPreparationMaximumSliceMs() { return this.resident.generationPreparationMaximumSliceMs; }
+  get generationPreparationMaximumSliceOperation() { return this.resident.generationPreparationMaximumSliceOperation; }
+  get generationPublicationMaximumMs() { return this.generationState.maximumPublicationMs; }
+  get topologyPreparationPending() { return this.generationState.pending; }
+  prepareResidentGeneration(build: (accepted: WebGPUSparseCM12Resident, signal: AbortSignal) => Promise<Awaited<ReturnType<WebGPUSparseCM12Resident["prepareGenerationReplacement"]>> | undefined>) {
+    return this.generationState.prepare(build);
+  }
   constructor(
-    private readonly resident: WebGPUSparseCM12Resident,
+    private readonly generationState: CM12ResidentGeneration,
     private readonly readiness: CM12ResidentLibraryReadiness,
   ) {}
 
   waitForSimulationPipelines() { return this.readiness.ready; }
-  get allocatedBytes() { return this.resident.allocatedBytes; }
+  get allocatedBytes() { return this.generationState.allocatedBytes; }
   get cellCount() { return this.resident.cellCount; }
   get rowCount() { return this.resident.rowCount; }
   get tracerSource() { return this.resident.tracerSource; }
@@ -521,9 +635,9 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   get solidWorldCollisionSource() { return this.resident.solidWorldCollisionSource; }
   setTracersEnabled(enabled: boolean) { this.resident.setTracersEnabled(enabled); }
   reseedTracers() { this.resident.reseedTracers(); }
-  readTracers() { return this.resident.readTracers(); }
+  readTracers() { return this.generationState.read((resident) => resident.readTracers()); }
   armPressureJournal(armed: boolean) { return this.resident.armPressureJournal(armed); }
-  readPressureJournal() { return this.resident.readPressureJournal(); }
+  readPressureJournal() { return this.generationState.read((resident) => resident.readPressureJournal()); }
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number) {
     this.resident.encodeInitialPresentation(encoder, finestCellSize_m);
   }
@@ -533,7 +647,8 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
 }
 
 class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTrace {
-  constructor(private readonly resident: WebGPUSparseCM12Resident) {}
+  constructor(private readonly generationState: CM12ResidentGeneration) {}
+  private get resident() { return this.generationState.current; }
 
   setStageLimitForQA(stage: Parameters<
     WebGPUSparseCM12Resident["setStageLimitForQA"]>[0]) {
@@ -555,53 +670,53 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
     WebGPUSparseCM12Resident["setPressureTopologyPhaseLimitForQA"]>[0]) {
     this.resident.setPressureTopologyPhaseLimitForQA(phase);
   }
-  readDiagnostics() { return this.resident.readDiagnostics(); }
+  readDiagnostics() { return this.generationState.read((resident) => resident.readDiagnostics()); }
   readDiagnosticFields(includeWorldLeaves = false,
     frameBank: "accepted" | "candidate" = "accepted") {
-    return this.resident.readDiagnosticFields(includeWorldLeaves, frameBank);
+    return this.generationState.read((resident) => resident.readDiagnosticFields(includeWorldLeaves, frameBank));
   }
   readActivitySnapshot(includeWorldLeaves = false) {
-    return this.resident.readActivitySnapshot(includeWorldLeaves);
+    return this.generationState.read((resident) => resident.readActivitySnapshot(includeWorldLeaves));
   }
   readPresentationPageAllocatorReceiptQA() {
-    return this.resident.readPresentationPageAllocatorReceiptQA();
+    return this.generationState.read((resident) => resident.readPresentationPageAllocatorReceiptQA());
   }
   readWorldGrowthReceiptQA() {
-    return this.resident.readWorldGrowthReceiptQA();
+    return this.generationState.read((resident) => resident.readWorldGrowthReceiptQA());
   }
   readPhase1TransportReceiptQA(allowStageLimitedCandidate = false,
     probeCells: readonly number[] = []) {
-    return this.resident.readPhase1TransportReceiptQA(
+    return this.generationState.read((resident) => resident.readPhase1TransportReceiptQA(
       allowStageLimitedCandidate, probeCells,
-    );
+    ));
   }
-  readPhase1TransportHashesQA() { return this.resident.readPhase1TransportHashesQA(); }
-  readPhase1TransportProfileQA() { return this.resident.readPhase1TransportProfileQA(); }
+  readPhase1TransportHashesQA() { return this.generationState.read((resident) => resident.readPhase1TransportHashesQA()); }
+  readPhase1TransportProfileQA() { return this.generationState.read((resident) => resident.readPhase1TransportProfileQA()); }
   readCandidateEffectsTransactionQA() {
-    return this.resident.readCandidateEffectsTransactionQA();
+    return this.generationState.read((resident) => resident.readCandidateEffectsTransactionQA());
   }
   readFramePlanPresentationHeaderQA() {
-    return this.resident.readFramePlanPresentationHeaderQA();
+    return this.generationState.read((resident) => resident.readFramePlanPresentationHeaderQA());
   }
   readFramePlanPresentationFaultRecordQA() {
-    return this.resident.readFramePlanPresentationFaultRecordQA();
+    return this.generationState.read((resident) => resident.readFramePlanPresentationFaultRecordQA());
   }
-  readFrameControlQA() { return this.resident.readFrameControlQA(); }
-  readTransportPacketIndirectQA() { return this.resident.readTransportPacketIndirectQA(); }
-  readCoarseTransportScheduleQA() { return this.resident.readCoarseTransportScheduleQA(); }
-  readDynamicTransportPacketsQA() { return this.resident.readDynamicTransportPacketsQA(); }
-  readFinalScalarMaskHeaderQA() { return this.resident.readFinalScalarMaskHeaderQA(); }
+  readFrameControlQA() { return this.generationState.read((resident) => resident.readFrameControlQA()); }
+  readTransportPacketIndirectQA() { return this.generationState.read((resident) => resident.readTransportPacketIndirectQA()); }
+  readCoarseTransportScheduleQA() { return this.generationState.read((resident) => resident.readCoarseTransportScheduleQA()); }
+  readDynamicTransportPacketsQA() { return this.generationState.read((resident) => resident.readDynamicTransportPacketsQA()); }
+  readFinalScalarMaskHeaderQA() { return this.generationState.read((resident) => resident.readFinalScalarMaskHeaderQA()); }
   readWorkShapeQA() { return this.resident.readWorkShapeQA(); }
-  readAdaptiveRepresentationQA() { return this.resident.readAdaptiveRepresentationQA(); }
-  readAcceptedIndirectQA() { return this.resident.readAcceptedIndirectQA(); }
-  readFrameControlIndirectQA() { return this.resident.readFrameControlIndirectQA(); }
+  readAdaptiveRepresentationQA() { return this.generationState.read((resident) => resident.readAdaptiveRepresentationQA()); }
+  readAcceptedIndirectQA() { return this.generationState.read((resident) => resident.readAcceptedIndirectQA()); }
+  readFrameControlIndirectQA() { return this.generationState.read((resident) => resident.readFrameControlIndirectQA()); }
   readPersistentPressureCacheIndirectQA() {
-    return this.resident.readPersistentPressureCacheIndirectQA();
+    return this.generationState.read((resident) => resident.readPersistentPressureCacheIndirectQA());
   }
-  readVelocityExtensionHeaderQA() { return this.resident.readVelocityExtensionHeaderQA(); }
-  readVelocityExtensionQA() { return this.resident.readVelocityExtensionQA(); }
+  readVelocityExtensionHeaderQA() { return this.generationState.read((resident) => resident.readVelocityExtensionHeaderQA()); }
+  readVelocityExtensionQA() { return this.generationState.read((resident) => resident.readVelocityExtensionQA()); }
   readPressureCanonicalMembershipQA() {
-    return this.resident.readPressureCanonicalMembershipQA();
+    return this.generationState.read((resident) => resident.readPressureCanonicalMembershipQA());
   }
 }
 
@@ -737,7 +852,8 @@ export async function createCM12SparseWorld(
     rigid: config.rigid !== undefined,
     journal: config.journal !== undefined,
   });
-  const world = new AdoptedCM12SparseWorld(resident, {
+  const generationState = new CM12ResidentGeneration(config.device, resident);
+  const world = new AdoptedCM12SparseWorld(generationState, {
     gpuDevice: config.device,
     numerics: config.numerics,
     residentTiles: config.residentTiles ?? active.size,
@@ -748,13 +864,13 @@ export async function createCM12SparseWorld(
     rigidExchange: config.rigid?.exchange,
     initialScene: config.scene,
   }, sparseDevice);
-  const runtime = new AdoptedCM12SparseWorldRuntime(resident, readiness);
+  const runtime = new AdoptedCM12SparseWorldRuntime(generationState, readiness);
   return Object.freeze({
     device: sparseDevice,
     world,
     ui: createCM12SparseWorldUI(world, runtime),
     runtime,
-    developerTrace: new AdoptedCM12SparseWorldDeveloperTrace(resident),
+    developerTrace: new AdoptedCM12SparseWorldDeveloperTrace(generationState),
   });
 }
 

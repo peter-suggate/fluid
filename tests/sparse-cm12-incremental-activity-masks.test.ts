@@ -195,6 +195,9 @@ test("SparseWorld frontier allocation covers all 26 activity-support neighbours"
   assert.match(allocation,
     /let supportBit=select\(localNeighbor,localNeighbor\+1u,localNeighbor>=13u\);/);
   assert.match(allocation, /cm12FluidNeighborReachable\(sourceCoordinate,offset\)/);
+  assert.doesNotMatch(allocation,
+    /acceptedBrickResolution\(brick\)!=BRICK_FINE_RESOLUTION/,
+    "a coarse accepted frontier must be allowed to allocate its demanded page");
   assert.match(allocation,
     /ACTIVITY_FRONTIER_RESOLVED_MASK_WORD[\s\S]*atomicOr\(&activity\[output\+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD\],resolvedBit\)/);
 
@@ -202,11 +205,17 @@ test("SparseWorld frontier allocation covers all 26 activity-support neighbours"
     /acceptedActive!=candidateActive[\s\S]*candidateActive[\s\S]*atomicAnd\(&activity\[activityRecord\(neighbor\)[\s\S]*ACTIVITY_FRONTIER_RESOLVED_MASK_WORD\],~\(1u<<\(26u-bit\)\)\)/);
   assert.match(resident,
     /setPipeline\(this\.pipelines\.clearSparseWorldFrontierResolutionCache!\)/);
-  assert.match(resident, /const ACTIVITY_RECORD_WORDS = 47;/);
+  assert.match(resident, /const ACTIVITY_RECORD_WORDS = 48;/);
 
   const mapped = Array.from({ length: 26 }, (_, local) => local >= 13 ? local + 1 : local);
   assert.equal(new Set(mapped).size, 26);
   assert.ok(!mapped.includes(13), "the center bit must not allocate the source page");
   assert.deepEqual(mapped, Array.from({ length: 27 }, (_, bit) => bit)
     .filter((bit) => bit !== 13));
+
+  const planner = shader.slice(shader.indexOf("fn brickTouchesDemandedMissingWorldPage"),
+    shader.indexOf("fn planBrickResolution"));
+  assert.match(planner,
+    /neighbor!=INVALID&&neighbor>=CM12_WDR_INITIAL_LEAVES\s*&&!brickActive\(neighbor\)/,
+    "the allocated inactive page must retain the source's B8 seam floor through planning");
 });

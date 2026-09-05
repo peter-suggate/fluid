@@ -18,7 +18,32 @@ export function adaptiveMassDiagnosticRows(
   const divergence = info?.maxDivergenceAfter_s;
   const relativeResidual = info?.pressureRelativeResidual;
 
+  const widths = info?.adaptivePhysicalWidthCensus;
+  const liquidVolume = widths?.reduce((sum, bin) => sum + bin.liquidVolumeFineCells, 0) ?? 0;
   return [
+    {
+      id: "physical-widths",
+      label: "Physical cell widths",
+      value: widths?.map(bin => `${bin.width}h`).join(" · ") ?? "awaiting census",
+      unit: widths && liquidVolume > 0
+        ? `${widths.map(bin => `${bin.width}h: ${(100 * bin.liquidVolumeFineCells / liquidVolume).toFixed(1)}%`).join(" · ")} of liquid · step ${info?.adaptivePhysicalWidthCensusStep ?? 0}`
+        : "h = finest cell size; latest activity census",
+      tone: "neutral",
+    },
+    {
+      id: "resident-generations",
+      label: "Live topology replacement",
+      value: `${info?.topologyGenerationCount ?? 0} published${info?.topologyGenerationPending ? " · preparing" : ""}`,
+      unit: `${((info?.allocatedBytes ?? 0) / 1048576).toFixed(1)} MiB · ${info?.adaptiveAcceptedCellCount?.toLocaleString() ?? "—"} cells · ${info?.topologyGenerationRequestedLeaves ?? 0} requests${info?.topologyGenerationDeferred ? " · budget deferred" : ""}`,
+      tone: info?.topologyGenerationDeferred || info?.topologyGenerationError ? "warn" : "neutral",
+    },
+    {
+      id: "resident-preparation",
+      label: "Detail preparation",
+      value: info?.topologyGenerationError ?? `${(info?.topologyPreparationMaximumSliceMs ?? 0).toFixed(1)} ms maximum CPU slice`,
+      unit: `${info?.topologyGenerationStaleCount ?? 0} stale candidates · ${((info?.topologyPreparationDurationMs ?? 0) / 1000).toFixed(1)} s last preparation · ${(info?.topologyPublicationMaximumDurationMs ?? 0).toFixed(1)} ms maximum handover${info?.topologyPreparationMaximumSliceOperation ? ` · ${info.topologyPreparationMaximumSliceOperation}` : ""}`,
+      tone: info?.topologyGenerationError ? "warn" : "neutral",
+    },
     {
       id: "resolution-split",
       label: "Adaptive resolution",

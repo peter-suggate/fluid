@@ -222,6 +222,15 @@ export function TransportBar() {
     title: transportLockReason,
     label: "Sparse world fault",
     detail: sparseWorldFaultCode,
+  } : gpuInfo?.topologyGenerationPending ? {
+    title: "Preparing the next sparse resolution in the background",
+    label: "Preparing detail",
+  } : gpuInfo?.topologyGenerationError ? {
+    title: gpuInfo.topologyGenerationError,
+    label: "Resolution update deferred",
+  } : gpuInfo?.topologyGenerationDeferred ? {
+    title: "The requested resolution exceeds the current topology budget",
+    label: "Resolution budget reached",
   } : sparseWorldStatus?.state === "saturated" ? {
     title: "Sparse world capacity reached",
     label: "Sparse world capacity reached",

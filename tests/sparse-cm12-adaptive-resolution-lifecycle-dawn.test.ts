@@ -23,7 +23,7 @@ test("Sparse CM12 advance does not make topology decisions from host readback", 
     import.meta.url,
   ), "utf8");
   const start = source.indexOf("  advanceTo(time_s:");
-  const end = source.indexOf("\n  private finishFrameCapture(", start);
+  const end = source.indexOf("\n  /** Publish the receipt", start);
   assert.ok(start >= 0 && end > start, "advanceTo source range must remain identifiable");
   const advance = source.slice(start, end);
   assert.doesNotMatch(advance,

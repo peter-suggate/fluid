@@ -9,6 +9,9 @@ export interface SparseCM12VelocityExtensionLayout {
   /** Compact direct-domain packets per leaf; masks retain the 64-slot TEI stride. */
   readonly dispatchPacketsPerLeaf: 1 | 8 | 64;
   readonly dispatchPacketCount: number;
+  /** Dedicated accepted-packet cache; never aliases the transport packet list. */
+  readonly scheduleBaseWords: number;
+  readonly packetListBaseWords: number;
   readonly totalWords: number;
 }
 
@@ -23,6 +26,15 @@ export const SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS = 16;
 export const SPARSE_CM12_VELOCITY_EXTENSION_DEPTH = 8;
 /** WebGPU's guaranteed per-dimension workgroup-dispatch limit. */
 export const SPARSE_CM12_VELOCITY_EXTENSION_DISPATCH_WIDTH = 65_535;
+
+/** A single sentinel group completes empty-frame receipts. */
+export function sparseCM12VelocityExtensionDispatchShape(packetCount: number): readonly [number, number, number] {
+  const count = integer(packetCount, "packetCount");
+  const width = SPARSE_CM12_VELOCITY_EXTENSION_DISPATCH_WIDTH;
+  if (count > width * width) throw new RangeError("VEX dispatch exceeds two-dimensional device limits");
+  const groups = Math.max(1, count);
+  return [Math.min(width, groups), Math.ceil(groups / width), 1];
+}
 
 export function sparseCM12VelocityExtensionDispatchPacketsPerLeaf(
   brickFineResolution: 4 | 8 | 16,
@@ -162,10 +174,12 @@ export function createSparseCM12VelocityExtensionLayout(options: {
   const validityABaseWords = headerBaseWords + SPARSE_CM12_VELOCITY_EXTENSION_HEADER_WORDS;
   const validityBBaseWords = validityABaseWords + 2 * packetCapacity;
   const acceptedDepthBaseWords = validityBBaseWords + 2 * packetCapacity;
+  const scheduleBaseWords = acceptedDepthBaseWords + cellCapacity;
+  const packetListBaseWords = scheduleBaseWords + 8;
   return Object.freeze({ headerBaseWords, validityABaseWords, validityBBaseWords,
-    acceptedDepthBaseWords,
+    acceptedDepthBaseWords, scheduleBaseWords, packetListBaseWords,
     cellCapacity, packetCapacity, dispatchPacketsPerLeaf, dispatchPacketCount,
-    totalWords: acceptedDepthBaseWords + cellCapacity });
+    totalWords: packetListBaseWords + dispatchPacketCount });
 }
 
 export function createSparseCM12VelocityExtensionInitialWords(
@@ -180,7 +194,13 @@ export function createSparseCM12VelocityExtensionInitialWords(
   result[h.packetCapacity] = layout.packetCapacity;
   result[h.firstFaultCell] = 0xffff_ffff;
   result[h.firstFaultDepth] = 0xffff_ffff;
-  result.fill(0xffff_ffff, layout.acceptedDepthBaseWords - layout.headerBaseWords);
+  result.fill(0xffff_ffff, layout.acceptedDepthBaseWords - layout.headerBaseWords,
+    layout.scheduleBaseWords - layout.headerBaseWords);
+  // schedule: cached generation, rebuild, count, compact, dispatch x/y/z, slot.
+  result[layout.scheduleBaseWords - layout.headerBaseWords] = 0xffff_ffff;
+  result[layout.scheduleBaseWords - layout.headerBaseWords + 7] = 0xffff_ffff;
+  result.set(sparseCM12VelocityExtensionDispatchShape(layout.dispatchPacketCount),
+    layout.scheduleBaseWords - layout.headerBaseWords + 4);
   return result;
 }
 

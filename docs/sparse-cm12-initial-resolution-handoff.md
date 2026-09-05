@@ -1,4 +1,129 @@
-# Sparse CM12 initial resolution — anchor the ladder at the top, not the bottom
+# Sparse CM12 initial resolution — coarse-based vast spaces
+
+## Current target and acceptance scene — updated 2026-09-05
+
+**Ocean-seiche is the acceptance scene for a coarse spatial foundation with local,
+reversible refinement.** Quiet water must be representable by cells spanning 16, 32,
+64 and progressively larger numbers of finest cells per axis. Coarsening must not
+stop at an 8³ or 16³ block of finest cells. Larger basins should primarily add coarse
+coverage; they must not require a catalogue of finest-scale bricks across the basin.
+
+**This is general adoption across all Sparse CM12 scenes.** Topology preparation,
+conservative transfer, capacity handling and publication must share the ordinary
+solver path. Ocean-seiche supplies acceptance evidence; no scene-name branch or
+ocean-only simulation mode may substitute for the general capability. Clipped domain
+boundaries, live scene edits, solid coupling and existing small scenes remain part
+of the adoption contract.
+
+Here `B8` means eight sample cells per brick axis, whereas a cell of width `32h`
+covers a `32³` block of finest cells, with `h = finestCellSize_m`. The existing
+formula `cellWidth / h = B × spanBricks / resolution` permits large physical cells
+without raising B8/P8. A large macro brick alone is not evidence of coarse cells:
+acceptance must report physical cell widths and the liquid volume they represent.
+
+The required lifecycle is: initialize coarse macro coverage; refine locally as the
+wave or another feature demands it; split macro leaves when their internal rungs
+cannot provide local detail; merge compatible siblings when that detail is no
+longer needed; reclaim the retired topology and presentation storage. Runtime
+macro splitting and merging are **required scope**, even within the existing
+integer lattice. Extending the address representation below the declared finest
+cell remains outside this programme.
+
+The first milestone is a testable ocean in the ordinary UI at the existing finest
+cell size. Deeper finest lattices come later. A global minimum-cell-size region is
+a useful comparison arm, but its hard refinement limit does not satisfy this target.
+
+### Realtime requirement — supersedes the paused replacement milestone
+
+The user rejected multi-second “Updating resolution” pauses. Whole-resident
+replacement with simulation suspended during CPU packing, allocation or pipeline
+compilation is **not an acceptable production solution**, even if its conservation
+and publication tests pass. The implementation described below is a correctness
+prototype until this requirement is met.
+
+Preparation must run without stopping accepted physics or rendering. Expensive CPU
+geometry/packing must run outside the advancing worker; GPU uploads and background
+compilation must be bounded so they cannot monopolize the frame schedule. Publication
+must consume the latest accepted fields, validate that its captured ownership still
+matches, and switch all consumers at a bounded frame boundary. A stale candidate is
+cancelled while accepted simulation continues. Simply removing the pause guard or
+publishing fields captured seconds earlier is not correct.
+
+Realtime acceptance must measure the actual worker/frame stalls during repeated
+split/merge and require continued accepted-step progress while preparation runs.
+Report maximum preparation slices and publication latency as well as average frame
+cost. A UI spinner, an async function, or eventual completion is not realtime evidence.
+
+### Production integration status — 2026-09-05
+
+The ordinary solver now prepares bounded resident-generation replacements in the
+background. This supersedes the historical “GPU adoption unimplemented” notes below.
+Unbacked authored rungs and macro leaves use this path; fully backed small scenes
+retain in-place rung changes and also check quiet sibling groups for macro merging.
+No scene-name switch or ocean-only mode selects the implementation.
+
+- Accepted fields remain on the GPU. Sparse clipped overlap maps transfer liquid
+  mass, gamma, cell momentum, pressure and coplanar face flux into isolated storage.
+  New internal faces derive velocity from the transferred cells.
+- A shared owner publishes physics, pressure/transport connectivity, presentation,
+  collision bindings and diagnostic sources together. CPU packing runs in a second
+  worker; the simulation worker realizes resource commands with cooperative uploads
+  and asynchronous pipeline compilation. Physics continues during preparation; only
+  final validation/transfer/publication holds advances. Scene edits
+  invalidate stale preparation; asynchronous readers and submitted work delay reclaim.
+- Local rung demand, physical 2:1 closure and macro coverage closure can split leaves.
+  A macro's own motion/thin-fluid demand can split beyond its finest internal rung.
+  Complete quiet full-liquid sibling groups may merge into progressively larger cells.
+  Clipped or open-world sibling merges remain conservative exclusions.
+- Lifetime leaf, cell and GPU-buffer budgets are fixed from construction. Absorbed
+  open-world pages continue to count against the original growth budget. A budget
+  deferral retains the accepted generation and is visible in the transport status.
+- Ordinary ocean construction now includes wet 32h cells. A 129-step normal-policy
+  Dawn run (4.3 simulated seconds) published two generations with no activity or
+  presentation faults. This is integration evidence; reference wave phase/amplitude
+  comparison is still required for the numerical acceptance below.
+- CPU gates cover local splitting, quiet 64h merging, physical grading, clipped and
+  signed overlap geometry, and budget deferral. Device transfer gates check mass,
+  gamma, momentum and exterior flux conservation.
+
+The implementation replaces the whole bounded resident, rather than wiring the
+standalone SCMT storage prototype directly into every resident buffer. That prototype
+remains an independently tested storage component. Whole-resident construction is
+still too expensive to satisfy the realtime requirement, despite background progress.
+A separate quiet, non-ocean fixture publishes two generations from 512 span-one
+leaves to 197 leaves spanning 1, 2 and 4 bricks. The coarsest rung now accumulates
+quiet history so spatial merging is reachable under the ordinary policy.
+
+Production-build browser observation (2026-09-05): ordinary ocean advanced to
+38.7667 simulated seconds and published three replacements, with zero reported stale
+candidates. The first preparation took 96.3 seconds; a later one took 54.2 seconds.
+The largest measured realization CPU slice was 402.7 ms against a 2 ms scheduling
+target. The paused pressure receipt was 4.09e-4 relative residual with 423,988 accepted
+cells. These receipts prove live adoption, **not realtime acceptance**. An individual
+synchronous resource operation can overrun the cooperative slice. Operation attribution
+and maximum handover timing are now exposed for the next measurement. Temporary
+shader handles are released at their last construction use instead of all being
+retained until the complete replacement finishes.
+
+The CPU construction profile records 189 pipeline requests per replacement. A
+representative 64-leaf refinement with closure reuses only two exact pipeline
+descriptors: generation-specific offsets/counts change the other shader sources.
+Prioritize a stable shader interface and reusable storage for the realtime cutover;
+an exact compilation cache alone does not remove the recurring cost. See
+`docs/sparse-cm12-ocean-transport-cost-investigation-2026-09-05.md` for the measured
+construction/reuse receipts. Current focused CPU checks pass (24 tests and the stage
+timing contract); the latest GPU regression and instrumented browser run are pending.
+
+Final realtime UI validation, the full post-integration regression receipt, reference wave
+accuracy and vast-space scaling measurements are still being collected.
+
+The work order is **WP4 → WP6a → first UI ocean milestone → WP6b → WP7**.
+WP5 is conditional on measured pressure convergence. WP identifiers are retained
+for continuity; their numeric order is not the dependency order.
+
+The original investigation follows. Historical line references and measurements
+describe the original snapshot unless explicitly updated; completed WP0–WP3 work
+supersedes the original blockers in §§3–4. Sections 7 and 9 define current acceptance.
 
 Original status: exploration, 2026-09-05. At the time no code had changed; every
 claim below was read from HEAD or measured in that session, and inferences are marked.
@@ -31,10 +156,10 @@ The proposal: stop defining a tank by its **maximum** resolution (a 128³ lattic
 caps every cell) and define it by an **initial** resolution, letting cells refine
 downward as far as the scene needs.
 
-The finding: the sparse CM12 ladder is already about nine levels deep. It is anchored
-at the bottom and grows upward. The work is not to build a deeper hierarchy — it is to
-move the anchor, and to delete the three dense structures that are sized from the
-finest lattice regardless of sparsity.
+The finding: the sparse CM12 ladder already represents a wide range of cell widths.
+Moving its anchor also requires making that spatial hierarchy mutable at runtime
+and making allocations follow the resident working set. Removing dense finest-lattice
+structures is necessary but does not by itself deliver coarse-based vast spaces.
 
 ---
 
@@ -71,8 +196,9 @@ Every geometric field in the solver is an integer count of finest cells —
 is exactly `B³` (`:375-376`). Refinement regions say it in the header:
 *"it never refines through the cap"* (`sparse-cm12-refinement-regions.ts:1-9`).
 
-**Adaptivity in CM12 today is coarsening-only.** There is no rung below
-`finestCellSize_m` and no address for one.
+**The declared finest lattice remains the refinement floor.** Runtime re-rung can
+refine and coarsen within the supported catalogue, but there is no rung below
+`finestCellSize_m`. That floor is compatible with the current vast-space target.
 
 ---
 
@@ -81,8 +207,8 @@ is exactly `B³` (`:375-376`). Refinement regions say it in the header:
 | Reading | Verdict |
 |---|---|
 | **A. Truly unbounded depth, no declared floor** | Not recommended. Nobody ships it; the cost is the swept-support coupling in §6, and it buys nothing any paper can validate. |
-| **B. Re-anchor — declare the floor deep, start coarse, materialize on demand** | **Achievable, and mostly a sizing problem.** This is the recommended target. |
-| **C. Depth beyond `log2(B) + spanLog` by splitting bricks spatially** | Structurally hard. Separate programme; see §5. |
+| **B. Re-anchor — retain a declared floor, start coarse, materialize on demand** | **Required target.** Includes bounded residency and runtime macro split/merge within the existing lattice; it is more than a sizing change. |
+| **C. Refine below the declared finest lattice or expand the address representation** | Separate programme. Not required to prove coarse-based ocean-seiche. |
 
 Reading B is DCGrid's model (`docs/papers/raateland-2022-dcgrid.txt`): per-level sparse
 grids, coarsest level dense, refine at the fine end, and **cap blocks rather than
@@ -139,7 +265,7 @@ enforced is the *compiled artifact*: the GPU never builds seam geometry, it read
 2-bit `rowKind` and selects a host-prepacked row, and the prebuilt library contains
 adjacent-rung pairs only (`webgpu-sparse-cm12-resident.ts:1918-1937`).
 
-### Coverage caveat
+### Original coverage caveat — addressed by WP0
 
 Ratio-genericity is a property of the code, **not something the suite would catch a
 regression in**. Every fixture and gate exercises only the 8/4 pair
@@ -152,7 +278,7 @@ exactly one CPU test. **Any work here needs a mixed-ratio fixture first.**
 
 ## 4. What blocks re-anchoring (reading B)
 
-### 4.1 Three dense structures sized from the finest lattice
+### 4.1 Original dense finest-lattice structures — addressed by WP2
 
 This is the wall. Nothing else matters until it is gone.
 
@@ -172,7 +298,7 @@ WDR1 (`sparse-cm12-world-directory.ts`) is the right replacement shape for LOD1:
 i32 coordinates plus `spanLog`, open-addressed at ≤50% load, free list, genuine
 recycling. It is already production for ownership.
 
-### 4.2 The coarsening policy can only walk one rung
+### 4.2 Original rung-policy limitations — addressed by WP3
 
 Construction can already place every rung — `sparse-brick-atlas.ts:1578-1690` computes
 `distanceRung = log2(policyFine) − (distance − rings + 1)` and is ladder-generic. The
@@ -199,7 +325,7 @@ Construction can already place every rung — `sparse-brick-atlas.ts:1578-1690` 
 A deep anchor makes most of the domain want to be very coarse. Today it can only get
 there one rung per epoch from an already-fine start, with the surface pinned at `fine/2`.
 
-### 4.3 Capacity is fixed at construction and never grows
+### 4.3 Original capacity blockers — WP4 remains in progress
 
 Real demand-driven *residency* exists — WDR1 hash + free lists, a topology page LIFO,
 a presentation page LIFO, and genuine retirement
@@ -238,10 +364,12 @@ design that wants per-page world-unit scales does not fit the ABI.
 
 ---
 
-## 5. What blocks brick splitting (reading C)
+## 5. What blocks the required runtime macro lifecycle
 
-Depth beyond `log2(B) + spanLog` requires splitting a brick into children, because the
-candidate arena is exactly `B³`. Three walls, in the order they are hit:
+Local refinement inside a large macro leaf eventually requires replacing it with
+children, because its candidate arena is exactly `B³`. This is required for reading B
+even without changing the finest lattice. The reverse operation must merge compatible
+sibling leaves and reclaim their resources. Three constraints need explicit handling:
 
 1. **`SPARSE_CM12_FACTORED_AEI_PATCHES_PER_FACE = 4`**
    (`sparse-cm12-factored-aei-topology.ts:17`), throwing at `:691-693`. Mirrored through
@@ -254,14 +382,19 @@ candidate arena is exactly `B³`. Three walls, in the order they are hit:
    neighbour bricks per face, not rows** — which is exactly why 4:1 *resolution* seams
    pass and why splitting does not. The enumerator feeding it has no cap
    (`compileSparseCM12StableLeafFaceNeighbors:146-158`). **Neither throw is exercised by
-   any test, tool, or doc.**
+   any test, tool, or doc in the original snapshot.** First test whether combined
+   leaf-span and physical-cell grading can preserve the four-neighbour bound during
+   split/merge closure. Extend the ABI only if the required layouts exceed it; physical
+   cell-width grading alone must not be assumed to bound neighbouring leaf counts.
 2. **Macro leaves are immutable at runtime.** *"A macro leaf may be rerung, but it
    cannot be spatially split after it is packed into the resident catalogue"*
    (`sparse-brick-atlas.ts:1374-1381`, `:1050-1056`); mutable bricks are span-1 only
    (`webgpu-sparse-cm12-resident.ts:3818-3820`).
 3. **Cell identity is `brickKey × brickFineResolution³ + local`**
-   (`sparse-atlas-composite-projection.ts:404`). Refining past B overflows the per-brick
-   id stride.
+   (`sparse-atlas-composite-projection.ts:404`). Children need distinct identities and
+   generation-safe recycling; they cannot reuse an expanded local index inside the
+   parent. Keeping B8 per child avoids widening the local stride, but every ownership,
+   row, pressure, transport and presentation reference must transition atomically.
 
 Also standing in the way of raising B instead: the B8/P8 production pin throws in three
 places (`webgpu-sparse-cm12-resident.ts:3809-3811`, `.wgsl.ts:371-373`,
@@ -338,9 +471,13 @@ would finally justify.** The aggregate hierarchy planes exist and are allocated;
 
 ## 7. Staged work programme
 
-Each stage carries its own gate. Do not start a stage before its predecessor's gate is
-green. Per the benchmark discipline: one Dawn run per arm per scene, two scenes, CPU
-checks first; never variant compiles on Dawn.
+Each stage carries its own gate. Follow the dependency order in the current-target
+section; implementation may proceed once its prerequisites pass. Use CPU checks
+first, then isolated Dawn validation, then the UI. Never run Dawn concurrently with
+the browser or another Dawn process. After substantial simulation, topology or
+publication changes run `npm run test:dawn:sparse-cm12`; do not weaken lanes or raise
+timing ceilings. Use paired ocean-seiche and a canonical control scene for performance
+changes, retaining source fingerprints, configuration and hardware with each receipt.
 
 ### WP0 — Mixed-ratio fixture (prerequisite, cheap)
 
@@ -389,20 +526,134 @@ which is backwards for a coarse-start design.
 **Gate:** ocean-seiche reaches a target coarse census from a fine start within a bounded
 number of epochs, with mass and momentum receipts intact.
 
+**Scope of the completed gate:** the compact, zero-gravity transition fixture described
+above. Full-size gravity-driven ocean and spatial macro adaptation are WP6 gates.
+
 ### WP4 — Demand-driven capacity
 
-Raise the page pool from a construction constant to a budget with a **stated policy on
-exhaustion**. DCGrid's answer is the right one: cancel the refinement request, do not
-fail. Read back the topology fault word (currently never read). Lift the B8-only growth
-root so a coarse frontier can page in world
-(`webgpu-sparse-cm12-resident.wgsl.ts:7141`). Reconsider the host template catalogue —
-at ~8× per rung it is already auto-disabled above 250k cells, which means the largest
-scenes have **no runtime adaptivity at all** today.
+**In progress; not accepted.** Make topology capacity an explicit bounded budget with
+observable exhaustion. Cancel or defer a refinement transaction that cannot fit,
+preserving accepted topology and the validity of its dependent grading closure.
+Cancellation must not permit unsupported transport; see WP6a's support gate. Separate
+ordinary capacity cancellation from allocator corruption and read both back.
 
-**Gate:** Figure 6 paging passes above 512 pages; a scene above the template budget
-still re-rungs.
+Implementation finding (2026-09-05): admitted authored re-rung already owns complete
+template cells, rows and incidence. The old `allocateCandidateTopologyPages` dispatch
+returned immediately for these leaves, and its geometry-only fallback could not make
+an unbacked leaf publishable. Both that dormant allocator and its synthesis dispatch
+have been removed. Do not reintroduce a second page identity for already-backed
+topology, or gate those transfers on spare world-growth capacity. Future demand-built
+candidate topology still needs complete-transaction reservation before publication.
 
-### WP5 — The coarse-grid correction (optional, high value)
+The physical growth budget is now `AdaptiveMassSolverOptions.topologyPageBudget`
+(default 512, retaining the existing curved-volume 1024 default). Diagnostics expose
+WDR's actual available pages, capacity and unfulfilled allocation count through
+`adaptiveTopologyPageAllocator`; they no longer mistake the legacy, separate scratch
+free-list header for world residency. The canonical `topology-page-budget` lane
+checks conservative authored re-rung with zero, one and 32 growth pages, no borrowed
+dynamic identities, and matching ordinary/QA allocator receipts. This is a regression
+gate for allocator separation, not proof of bounded on-demand template preparation.
+
+Validation of this slice: 51 focused CPU/source tests and the stage-timing contract
+pass. Figure 6 passes its traversal gate beyond 512 issued page identities. The full
+14-lane canonical Dawn suite passes in 117.4 s against its unchanged 180 s budget;
+mini32/mini64 medians are 30.41/42.27 ms against unchanged 40/50 ms ceilings. These
+are regression receipts, not a paired performance claim. Repository-wide type
+checking still reports existing harness/probe errors, and managed-pipeline compliance
+still reports three direct pipeline creation calls in `lib/svo/sparse-brick-octree.ts`.
+
+Second implementation slice (2026-09-05): `prepareSparseCM12TopologyWorkingSet`
+uses the shared SCMT serializer to retain accepted cells and add only requested
+candidate rungs and their affected rows. It requires physical 2:1 closure, discovers
+complete macro-face halos, and emits both generations' cell/row worklists, incidence,
+candidate-face tables and pressure edges. Cell/row/serialized-byte budgets return
+`deferred` without mutating the accepted grid; these bounds do not yet measure peak
+transient host memory. Clipped-cell restriction uses physical-volume weights.
+Tests compare accepted and candidate graphs with independent full builds, exercise
+budget retry, and prepare macro cells at 64h/128h without changing leaf coverage.
+
+The production-surface-bias ocean fixture has 139,760 accepted cells and 2,400
+mutable leaves. Preparing its 70 B8→B4 changes produces 144,240 cells, 437,798 rows
+and a 56,574,488-byte SCMT packet. The 4,480 added cells are exactly the requested
+candidate cells. This is a CPU preparation receipt, not a runtime/performance claim.
+Stable AEI face-neighbor discovery now indexes dyadic origins and occupied ancestors
+instead of expanding macro volumes and faces. A randomized box-overlap oracle and
+million-brick-edge leaves cover holes, signed coordinates and mixed spans.
+
+Validation of the second slice: 25 focused CPU tests pass, including complete graph
+and pressure-edge comparisons across multiple construction chunks. The stage-timing
+contract passes. All 14 canonical Dawn lanes pass in 92.9 s; mini32/mini64 medians
+are 31.85/42.27 ms against unchanged 40/50 ms ceilings. Repository-wide type checking
+continues to report the existing harness/probe errors, with none in this slice's
+changed files. These receipts do not exercise live adoption of the new CPU packet.
+
+The next unimplemented prerequisite is resident adoption of this bounded packet:
+reserve all dependent stores, remap live fields and face momentum, validate the
+candidate generation, atomically publish, then reclaim the replaced storage. The
+current GPU catalogue still uses its existing admission policy. Runtime macro
+split/merge, initial coarse-size UI controls and the ocean/vast-space acceptance
+milestones remain open.
+
+GPU storage component (2026-09-05): `SparseCM12TopologyGenerationStore` owns bounded
+SCMT/membership buffer generations. Accepted, staged, allocation-in-progress and
+leased retired bytes share one explicit limit; receipts expose current/peak reserved
+bytes, deferred requests and allocation failures. Preparation validates membership
+and generation continuity, reserves both buffers together, and rolls back partial
+allocation. Cancellation and destruction preserve leased buffers until their submitted
+consumers finish. An old consumer may be encoded before storage publication and
+submitted afterwards while its lease remains live. Reclamation permits a previously
+deferred generation to proceed.
+
+The `topology-generation-storage` Dawn lane tests those transitions, GPU byte
+readback, an injected second-allocation failure, malformed membership, stale requests,
+and destruction during preparation. **This component is not wired into the resident
+yet.** Its storage commit must accompany the resident's validated field, pressure,
+transport and presentation binding replacement; calling it alone does not constitute
+simulation adoption. It introduces no ocean-only path and no new UI mode.
+
+Validation: all 16 canonical Dawn lanes pass in 98.1 s; mini32/mini64 medians are
+31.13/43.84 ms against unchanged 40/50 ms ceilings. The final storage receipt tests
+pass after adding peak/reservation accounting. The 16 focused CPU tests and
+stage-timing contract pass; type checking has no errors in this slice's new files
+and continues to report the existing unrelated harness/probe errors.
+
+General transfer prerequisite (2026-09-05): the production candidate transfer now
+decodes compact cell IDs using each leaf's clipped live dimensions. Restriction
+skips absent children; prolongation and B4→B8 presentation reconstruction use the
+same compact addressing. Candidate mass receipts use packed physical cell volumes,
+and exterior face patch widths include the macro span. This removes span-one/full
+brick assumptions from this portion of field transfer; it does not grant macro
+candidate admission or publish the bounded preparation packet.
+
+The new canonical `clipped-topology-transfer` lane uses a 13×10×9 domain, ordinary
+demotion, then live whole-domain B1 and B8 edits. Every leaf completes the round trip;
+mass, gamma and momentum transfer receipts pass. Total mass changes by
+0.0000322 finest-cell volume units out of 1,170, under the 0.0001 test limit. Running
+the same clipped fixture against the previous transfer code produces transfer fault
+bit 2. All existing scene gates retain their original thresholds.
+
+Validation: all 15 canonical Dawn lanes pass in 104.8 s; mini32/mini64 medians are
+31.06/43.32 ms against unchanged 40/50 ms ceilings. The 21 transaction/manifest CPU
+tests and stage-timing contract pass. Type checking still reports existing unrelated
+harness/probe errors, with no errors in the files changed for this transfer fix.
+
+Allow coarse frontiers to acquire demanded world coverage with a valid seam on both
+sides. The current working-tree route promotes the source to B8 to meet newly grown
+B8 pages; this may unblock paging, but is not the final coarse macro growth policy.
+
+Replace the all-or-nothing host catalogue admission with bounded preparation for
+the actual changing region. The production ocean's 2,400 mutable leaves must remain
+adaptive despite the existing 2,048-leaf ceiling. Do not solve this by prebuilding all
+rungs throughout a larger domain or merely raising the ceiling. Record host peak
+memory, GPU reserved/used capacity and deferred requests.
+
+**Gate:** Figure 6 traverses its required course and exercises allocation beyond 512
+page identities; report live, peak and cumulative allocations separately. The actual
+full-size ocean re-rungs under normal policy. A deliberately small budget cancels a
+closure safely, preserves accepted mass/topology, and subsequently makes progress
+after reclamation. A helper admission test alone does not satisfy this gate.
+
+### WP5 — The coarse-grid correction (conditional on convergence)
 
 The aggregate hierarchy planes are allocated and unread. A deeper ladder is exactly the
 condition under which diagonal-preconditioned CG on a fixed budget stops being adequate.
@@ -411,13 +662,104 @@ operator symmetric — *"nonsymmetric formulations … easily lead to an order o
 slowdown, or in the worst case scenario problems with robustly finding a solution at
 all."*
 
-**Gate:** iteration count at fixed residual, measured across ladder depth.
+**Gate:** iteration count at fixed residual, measured across ladder depth. Defer this
+work while the ocean passes its pressure residual and wave-accuracy gates. If those
+fail from conditioning, WP5 becomes a prerequisite to accepting the affected scale;
+do not hide a failed solve behind a fixed iteration budget.
 
-### WP6 — Brick splitting (separate programme, only if needed)
+### WP6a — Coarse macro foundation and local refinement (required)
 
-Reading C. The AEI/IBO 4-patches-per-face cap first, then macro splitting, then the cell
-id stride. Do not start this until WP2–WP4 show that `log2(B) + spanLog` is genuinely
-insufficient.
+**Depends on WP4.** Construct large aligned macro coverage directly from authored
+fluid and solid boundaries without enumerating finest bricks throughout the volume.
+Select initial cell widths by physical representability and policy. Preserve the
+raised slab and surface detail rather than forcing every region onto a coarse rung.
+
+Enable macro re-rung and spatial parent-to-child replacement when local refinement
+requires it. Keep B8/P8; define split eligibility, child identities, conservative mass
+and momentum prolongation, surface proof, neighbour closure and capacity reservation.
+Publish ownership, pressure/transport connectivity and presentation as one accepted
+generation. No overlapping parent/child authority, gaps or stale identities may
+become visible. Resolve the face-patch constraints in §5 with CPU fixtures first.
+
+**Swept support is part of this stage.** Size the GPU support horizon from measured
+displacement, dt and physical receiver span across macro boundaries, following the
+CPU oracle's approach in §6. Account for the RK2 trace limit and velocity extension.
+Detect incomplete support and defer or otherwise safely handle the affected advance;
+mass conservation alone cannot validate a trace silently renormalized onto the wrong
+receivers. Budget pressure must never silently become fluid loss or teleportation.
+
+**Gate:** CPU and Dawn split fixtures cover physical widths 16h, 32h and 64h,
+including boundary contacts, coarse/fine faces and rollback on insufficient capacity.
+On ocean, a moving feature enters an initially coarse macro region, causes localized
+refinement, and crosses it with conservative transfer and valid pressure/presentation.
+Report spatial leaf span separately from physical cell width.
+
+**First UI milestone:** after these gates and the canonical regression suite pass,
+open the ordinary ocean scene with coarse initialization and normal activity policy.
+Make initial physical cell size/coarse coverage and the finest permitted cell size
+distinct in scene settings; an initial coarse size must allow later finer detail.
+Expose the physical-width distribution, accepted cell/leaf counts, split/merge counts,
+GPU memory, frame time and deferred requests in the existing diagnostics. This is a
+testable intermediate delivery; automatic recovery of coarse coverage follows in WP6b.
+
+### WP6b — Merge, reclaim and validate ocean-seiche in the UI (required)
+
+**Depends on WP6a.** Merge complete compatible sibling sets when activity, surface
+representability, solid geometry and grading allow it. Restrict mass and momentum
+conservatively; publish the parent atomically; reclaim child topology, candidate,
+pressure and presentation allocations only after their last consumers finish.
+Use hysteresis to prevent repeated split/merge oscillation without permanently
+retaining fine regions after a wave has passed. Partial child sets cannot merge.
+
+**Gate:** repeat split→merge→split through several generations, including allocator
+reuse, budget cancellation and macro boundaries. There must be no stale references,
+monotonic capacity leak or loss of represented liquid. A quiet recovery fixture must
+return to a bounded coarse census; the dynamic ocean need only merge where its
+measured activity and representability permit it.
+
+**Ocean acceptance:** use the authored 2.5 cm finest lattice, raised slab, gravity and
+ordinary production policy. Run at least an outward crossing and return reflection
+(approximately four simulated seconds for the original 8 m basin). Compare wave
+phase, amplitude and seam reflection with a validated finer reference. Record mass
+drift, transfer momentum errors, pressure residuals, solver iterations and support
+faults. Agree and record numeric error tolerances from the reference before judging
+the candidate; preserve existing stricter regression tolerances.
+
+At initialization and after motion, report liquid-volume-weighted fractions in
+physical-width bins 1h, 2h, 4h, 8h, 16h, 32h, 64h and larger, plus cell and leaf counts.
+Target a majority of represented liquid volume at widths ≥16h where geometry and
+wave accuracy permit; a thin fine surface should not disqualify coarse bulk coverage.
+Demonstrate 32h and 64h wet cells in appropriately enlarged/deepened ocean variants
+when the original basin's boundaries do not permit them. Do not count dry or unused
+macro coverage as satisfying the coarse-liquid target.
+
+Verify the same case in the UI: no cracks or disappearing deep water, refinement
+follows the feature, eligible regions merge, and reset restores the coarse start.
+Full-domain minimum-cell-size clamps, zero gravity and a compact replacement lattice
+remain diagnostic comparisons, not substitutes for acceptance.
+
+### WP7 — Vast-space scaling and optional deeper anchoring (required scaling gate)
+
+**Depends on WP6b and on WP5 if convergence requires it.** Grow ocean basin extent
+at fixed finest cell size and fixed local feature scale. Include larger/deeper variants
+that admit 32h, 64h and progressively coarser wet cells. Preserve the authored wave's
+world-space geometry when resizing; do not accidentally rescale brick-seeded liquid.
+Run long enough for the wave to enter initially coarse coverage at each scale.
+
+Record logical finest volume, coarse wet volume, resident leaves, active cells,
+topology/template/presentation bytes, host initialization peak and time, simulation
+GPU stage times and rendered frame p50/p95. Additional calm space should cost coarse
+coverage and necessary boundary detail, with no full-domain fine catalogue or hidden
+disabled adaptivity. Fix any dense initialization/presentation path exposed here.
+
+Respect the signed coordinate and presentation address ceilings in §4.4. Declare the
+supported physical extent at each finest cell size and reject unsupported extents
+explicitly. Coarse cells do not remove address limits. Extend the address ABI only
+when a required measured ocean scale reaches it; do not claim unbounded space.
+
+Only after this gate, deepen the finest lattice if local feature requirements warrant
+it, repeating swept-support, pressure and allocation gates. Larger quiet spaces do
+not by themselves require a smaller finest cell.
 
 ---
 
@@ -466,27 +808,41 @@ library, reduce pressure hierarchy capacity, or reduce the one-fine-page-per-bri
 presentation allocation"* — **a 113× reduction in accepted cells bought only 1.69× frame
 time.**
 
-A deeper anchor that starts coarse will reproduce this exactly unless WP2 and WP4 land
-first. Coarsening the physics does not coarsen the allocations, and the allocations are
-what the finest lattice sizes.
+A coarse start will reproduce this unless storage follows macro coverage and the
+changing region. WP2 and WP4 are prerequisites; WP6's merge/reclamation and WP7's
+scaling measurements establish the missing spatial proportionality.
 
-**Acceptance for the whole programme should therefore be a proportionality oracle, not a
-depth demonstration:** halving the accepted cell count must roughly halve the frame.
+**Acceptance combines physical accuracy, interactive performance and sparse scaling.**
+Before the UI acceptance run, record a numeric frame-time and memory budget on the
+target hardware using the current ocean baseline. Keep simulation GPU time separate
+from rendering and initialization. Fixed work means halving accepted cells need not
+halve the entire rendered frame; report that fixed cost rather than hiding it in a
+cell-count ratio. Budget values are still to be established, not passed by this plan.
+
+For the extent sweep, plot measured allocations and stage times against resident
+coarse coverage and local refined work, alongside logical finest volume. Acceptance
+requires continued adaptivity, reclaimed resources and absence of finest-volume-sized
+work in production. Increasing maximum span, reducing cell counts under a hard clamp,
+or showing one large leaf is insufficient. Retain before/after receipts for both the
+ordinary ocean and the larger variants so that a vast-space win cannot conceal an
+unusable ordinary UI scene.
 
 ---
 
 ## 10. Open questions
 
-1. What floor do you actually want? Six levels below today's initial resolution covers
-   every scene in the library. Ten starts testing the presentation Y axis (8192 finest
-   cells).
-2. Is the `faceVelocitySupport` cache worth keeping in bounded form? The 2.4–5.4×
-   per-RK2-corner resolve cost is documented but was measured against a dense cache, not
-   against a hashed one sized to the active set.
-3. Should the coarse-grid correction land before or after the anchor moves? Before is
-   safer (the ladder is shallow, so the regression surface is small); after is cheaper
-   (the deeper ladder gives the hierarchy something to do).
-4. Does the surface band stay one brick thick? The B16 post-mortem found a larger B
-   doubles the band's cell count for free. That mechanism **inverts in your favour** if
-   depth is added downward from a smaller initial brick rather than upward from a bigger
-   one — worth confirming before committing to a brick size.
+1. What coarse initial physical width best preserves the ocean wave while keeping most
+   liquid volume at ≥16h? Measure 16h/32h/64h coverage where basin geometry permits it;
+   retain 2.5 cm as the first milestone's finest cell size.
+2. Can leaf-span grading preserve the four-patches-per-face ABI through every required
+   split/merge closure, or must the boundary representation change? Resolve with CPU
+   fixtures before changing GPU packing.
+3. What frame-time and memory budgets define a useful UI run on the target hardware,
+   and what phase/amplitude tolerances does the validated reference support? Record
+   these before candidate acceptance; do not move ceilings to accommodate regressions.
+4. Which basin sizes first expose presentation coordinate ceilings, dense boundary
+   initialization or pressure conditioning? Use the WP7 sweep to determine the next
+   bottleneck rather than adding finer depth speculatively.
+5. How much surface and support detail is physically necessary as macro span grows?
+   Measure it in world units and physical cell widths; a fixed finest-brick band is
+   not an adequate vast-space policy.

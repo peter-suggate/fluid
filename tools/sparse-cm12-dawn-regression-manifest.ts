@@ -11,6 +11,9 @@ export const SPARSE_CM12_DAWN_SUITE_BUDGET_MS = 180_000;
 export type SparseCM12DawnCoverage =
   | "symmetric-expansion"
   | "mixed-ratio-topology"
+  | "topology-page-budget"
+  | "clipped-topology-transfer"
+  | "topology-generation-storage"
   | "hydrostatic-stability-adaptivity"
   | "mini32-correctness"
   | "min8-region-surface"
@@ -67,6 +70,30 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     kind: "correctness",
     description: "BTI1 GPU services and BFP1 partitions preserve 8|2, 8|1, and four-rung topology",
     testFile: "tools/check-sparse-cm12-brick-tile-wgsl.ts",
+    timeoutMs: 10_000,
+  },
+  {
+    id: "topology-page-budget",
+    coverage: "topology-page-budget",
+    kind: "correctness",
+    description: "backed authored re-rung preserves world pages under zero, one and ordinary growth budgets",
+    testFile: "tests/sparse-cm12-topology-budget-dawn.test.ts",
+    timeoutMs: 30_000,
+  },
+  {
+    id: "clipped-topology-transfer",
+    coverage: "clipped-topology-transfer",
+    kind: "correctness",
+    description: "clipped domain leaves conservatively coarsen and refine through live scene edits",
+    testFile: "tests/sparse-cm12-clipped-transfer-dawn.test.ts",
+    timeoutMs: 20_000,
+  },
+  {
+    id: "topology-generation-storage",
+    coverage: "topology-generation-storage",
+    kind: "correctness",
+    description: "bounded GPU topology generations retain leased consumers, cancel atomically, and reclaim for retry",
+    testFile: "tests/sparse-cm12-topology-generation-store-dawn.test.ts",
     timeoutMs: 10_000,
   },
   {

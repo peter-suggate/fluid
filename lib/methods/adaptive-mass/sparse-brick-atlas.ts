@@ -1,3 +1,4 @@
+import { compileSparseCM12StableLeafFaceNeighbors } from "./sparse-cm12-factored-aei-topology";
 /**
  * CPU reference storage for an arbitrary sparse atlas of equal-world dyadic
  * bricks. This is a topology/numerics oracle, not the eventual GPU page pool.
@@ -78,6 +79,8 @@ export interface SparseAdaptiveMassBrick {
   readonly coordinate: SparseBrickVec3;
   /** Dyadic edge length in fixed bricks. Omitted means one legacy brick. */
   readonly spanBricks?: number;
+  /** GPU-grown coverage keeps its full cell extent beyond authored bounds. */
+  readonly unclipped?: boolean;
   readonly resolution: SparseBrickResolution;
   /** Intensive CM12 surface density, x-major within the brick. */
   readonly density: Float64Array;
@@ -85,6 +88,7 @@ export interface SparseAdaptiveMassBrick {
 }
 
 export interface SparseAdaptiveMassAtlas {
+  readonly signedCoordinates?: boolean;
   readonly dimensions: SparseBrickVec3;
   readonly brickFineResolution: SparseBrickFineResolution;
   /** Stable per-brick cell-id stride; equal to brickFineResolution^3. */
@@ -171,6 +175,24 @@ export function sparseBrickKey(
     * (coordinate[1] + brickDimensions[1] * coordinate[2]);
 }
 
+/** Signed leaf identity uses the same finite key envelope as presentation. */
+export function sparseAtlasBrickKey(coordinate: SparseBrickVec3,
+  atlas: Pick<SparseAdaptiveMassAtlas, "brickDimensions" | "signedCoordinates">): number {
+  if (!atlas.signedCoordinates) return sparseBrickKey(coordinate, atlas.brickDimensions);
+  const [x,y,z] = coordinate;
+  if (![x,y,z].every(Number.isSafeInteger) || x < -1024 || x > 1023
+    || y < -512 || y > 511 || z < -1024 || z > 1022) {
+    throw new RangeError("Sparse signed leaf coordinate exceeds the presentation key envelope");
+  }
+  return ((x+1024) | ((y+512)<<11) | ((z+1024)<<21)) >>> 0;
+}
+
+export function sparseBrickMaximumFine(atlas: SparseAdaptiveMassAtlas,
+  brick: SparseAdaptiveMassBrick, axis: number): number {
+  const end = (brick.coordinate[axis]! + sparseBrickSpan(brick)) * atlas.brickFineResolution;
+  return brick.unclipped ? end : Math.min(end, atlas.dimensions[axis]!);
+}
+
 export function sparseBrickCoordinate(
   key: number,
   brickDimensions: SparseBrickVec3,
@@ -187,6 +209,8 @@ export function createSparseAdaptiveMassAtlas(
   bricks: readonly SparseAdaptiveMassBrick[],
   generation = 1,
   brickFineResolution: SparseBrickFineResolution = DEFAULT_BRICK_FINE_RESOLUTION,
+  signedCoordinates = false,
+  validateGrading = true,
 ): SparseAdaptiveMassAtlas {
   positiveDimensions(dimensions);
   const ladder = sparseBrickLadder(brickFineResolution);
@@ -210,7 +234,7 @@ export function createSparseAdaptiveMassAtlas(
     if (brick.density.length !== count || brick.gamma.length !== count) {
       throw new RangeError(`brick ${brick.key} payload does not match ${brick.resolution}^3`);
     }
-    if (brick.key !== sparseBrickKey(brick.coordinate, brickDimensions)) {
+    if (brick.key !== sparseAtlasBrickKey(brick.coordinate, { brickDimensions, signedCoordinates })) {
       throw new Error(`brick ${brick.key} coordinate/key mismatch`);
     }
     if (directory.has(brick.key)) throw new Error(`duplicate sparse brick ${brick.key}`);
@@ -226,14 +250,14 @@ export function createSparseAdaptiveMassAtlas(
     const coordinate = [...brick.coordinate] as [number, number, number];
     coordinate[axis] += 1;
     if (coordinate[axis] >= brickDimensions[axis]) continue;
-    const neighbor = directory.get(sparseBrickKey(coordinate, brickDimensions));
-    if (neighbor && Math.max(brick.resolution, neighbor.resolution)
+    const neighbor = directory.get(sparseAtlasBrickKey(coordinate, { brickDimensions, signedCoordinates }));
+    if (validateGrading && neighbor && sparseBrickSpan(neighbor) === sparseBrickSpan(brick) && Math.max(brick.resolution, neighbor.resolution)
       / Math.min(brick.resolution, neighbor.resolution) > 2) {
       throw new Error(`brick face ${brick.key}/${neighbor.key} exceeds 2:1 grading`);
     }
   }
   return {
-    dimensions, brickFineResolution, brickCellCapacity: ladder.cellCapacity,
+    signedCoordinates, dimensions, brickFineResolution, brickCellCapacity: ladder.cellCapacity,
     ladder, brickDimensions, bricks: [...bricks], directory,
     directoriesBySpan, maximumSpanBricks, generation,
   };
@@ -244,39 +268,36 @@ export function sparseBrickContainingCoordinate(
   atlas: SparseAdaptiveMassAtlas,
   coordinate: SparseBrickVec3,
 ): SparseAdaptiveMassBrick | undefined {
-  if (coordinate.some((value, axis) => value < 0 || value >= atlas.brickDimensions[axis])) {
+  if (!atlas.signedCoordinates && coordinate.some((value, axis) => value < 0 || value >= atlas.brickDimensions[axis])) {
     return undefined;
   }
   for (let span = 1; span <= atlas.maximumSpanBricks; span *= 2) {
     const origin = coordinate.map((value) => Math.floor(value / span) * span) as
       [number, number, number];
     const brick = atlas.directoriesBySpan.get(span)?.get(
-      sparseBrickKey(origin, atlas.brickDimensions),
+      sparseAtlasBrickKey(origin, atlas),
     );
     if (brick) return brick;
   }
   return undefined;
 }
 
-/** Exact resident leaves sharing a complete or partial face with one leaf. */
-export function sparseBrickFaceNeighbors(
-  atlas: SparseAdaptiveMassAtlas,
-  brick: SparseAdaptiveMassBrick,
-): readonly SparseAdaptiveMassBrick[] {
-  const neighbors = new Map<number, SparseAdaptiveMassBrick>();
-  const span = sparseBrickSpan(brick);
-  for (let axis = 0; axis < 3; axis += 1) for (const sign of [-1, 1]) {
-    const tangents = [0, 1, 2].filter((candidate) => candidate !== axis);
-    for (let v = 0; v < span; v += 1) for (let u = 0; u < span; u += 1) {
-      const coordinate = [...brick.coordinate] as [number, number, number];
-      coordinate[axis] += sign < 0 ? -1 : span;
-      coordinate[tangents[0]!] += u;
-      coordinate[tangents[1]!] += v;
-      const neighbor = sparseBrickContainingCoordinate(atlas, coordinate);
-      if (neighbor && neighbor.key !== brick.key) neighbors.set(neighbor.key, neighbor);
-    }
+const sparseFaceNeighborCache = new WeakMap<SparseAdaptiveMassAtlas,
+  ReadonlyMap<number, readonly SparseAdaptiveMassBrick[]>>();
+
+/** Exact face neighbors, indexed by occupied dyadic nodes rather than face area. */
+export function sparseBrickFaceNeighbors(atlas: SparseAdaptiveMassAtlas,
+  brick: SparseAdaptiveMassBrick): readonly SparseAdaptiveMassBrick[] {
+  let neighbors = sparseFaceNeighborCache.get(atlas);
+  if (!neighbors) {
+    const indexed = compileSparseCM12StableLeafFaceNeighbors({
+      coordinates: atlas.bricks.map(b => b.coordinate), spans: atlas.bricks.map(sparseBrickSpan),
+    });
+    neighbors = new Map(atlas.bricks.map((b, id) => [b.key,
+      indexed[id]!.map(leaf => atlas.bricks[leaf]!).sort((left,right)=>left.key-right.key)]));
+    sparseFaceNeighborCache.set(atlas, neighbors);
   }
-  return [...neighbors.values()].sort((left, right) => left.key - right.key);
+  return neighbors.get(brick.key) ?? [];
 }
 
 function initialDensityAt(
@@ -1047,28 +1068,26 @@ function hierarchicalTankFillBricks(
         ? Math.max(0, wetMaximum[1] - origin[1] - span
           - (surfaceFineRings - 1) + fractionalSurfaceRing)
         : Number.POSITIVE_INFINITY;
-      // Strong 2:1 grading doubles the admissible cell width once per complete
-      // brick ring below the fine surface band: 1, 2, 4, and so on to B. The old
-      // linear `clearanceFine / 4` approximation plateaued at 4 for both the
-      // second and third submerged rings. On a 40-cell-deep tank that authored
-      // the bottom span-two macro at width 4; macro leaves are intentionally
-      // immutable at runtime, so selecting Surface distance could never reach
-      // the valid bottom rung visible in the UI.
+      // Beyond one ordinary brick, successive width bands occupy increasing
+      // depth. Calm bulk can therefore retain 16h, 32h, 64h and larger cells
+      // while the near-surface 1h/2h/4h bands keep their existing spacing.
       const allowedCellWidth = hasFreeSurface
-        ? Math.min(brickFineResolution, edgeFine, 2 ** clearanceRings)
+        ? Math.min(edgeFine, clearanceRings < Math.log2(brickFineResolution) ? 2 ** clearanceRings
+          : 2 ** Math.floor(Math.log2(brickFineResolution * (clearanceRings - Math.log2(brickFineResolution) + 1))))
         : edgeFine;
       // A cubic macro cannot express two vertical distance rungs. Split it
       // while its closest and deepest logical-brick layers require different
-      // cell widths; once both saturate at B it is safe and useful to retain
-      // the macro across arbitrarily deep bulk.
+      // cell widths; once both admit the complete macro edge it can remain
+      // one cell across arbitrarily deep bulk.
       const deepestClearanceRings = hasFreeSurface
         ? Math.max(0, wetMaximum[1] - origin[1] - 1
           - (surfaceFineRings - 1) + fractionalSurfaceRing)
         : Number.POSITIVE_INFINITY;
       const deepestAllowedCellWidth = hasFreeSurface
-        ? Math.min(brickFineResolution, edgeFine, 2 ** deepestClearanceRings)
+        ? Math.min(edgeFine, deepestClearanceRings < Math.log2(brickFineResolution) ? 2 ** deepestClearanceRings
+          : 2 ** Math.floor(Math.log2(brickFineResolution * (deepestClearanceRings - Math.log2(brickFineResolution) + 1))))
         : edgeFine;
-      const crossesResolutionBands = span > 1
+      const crossesResolutionBands = span > 1 && allowedCellWidth < brickFineResolution
         && deepestAllowedCellWidth !== allowedCellWidth;
       const requiredResolution = initialResolutionWithRefinementRegionBounds(
         refinementRegionParameters, dimensions, origin, span,

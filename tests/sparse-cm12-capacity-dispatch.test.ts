@@ -13,13 +13,9 @@ const shader = readFileSync(new URL(
   import.meta.url,
 ), "utf8");
 
-test("candidate rerung synthesis excludes reserved dynamic capacity", () => {
-  assert.match(resident,
-    /dispatch\("synthesizeCandidateCellPages", this\.worldDirectoryLayout\.initialLeaves\)/);
-  assert.doesNotMatch(resident,
-    /dispatch\("synthesizeCandidateCellPages", leafCapacity\)/);
-  assert.doesNotMatch(resident,
-    /dispatchTopology\("synthesizeCandidateCellPages", leafCapacity\)/);
+test("authored rerung uses its backed catalogue without allocating duplicate pages", () => {
+  assert.doesNotMatch(resident, /["'](?:allocateCandidateTopologyPages|synthesizeCandidateCellPages)["']/);
+  assert.doesNotMatch(shader, /fn (?:allocateCandidateTopologyPages|synthesizeCandidateCellPages)\(/);
 });
 
 test("SparseWorld pages store only mutable or hot topology records", () => {

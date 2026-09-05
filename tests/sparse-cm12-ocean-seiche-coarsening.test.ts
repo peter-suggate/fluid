@@ -75,7 +75,7 @@ test("ocean seiche collapses deep water into graded macro-bricks", () => {
     const brick = sparseBrickContainingCoordinate(atlas, [x, y, z]);
     return brick && 8 * sparseBrickSpan(brick) / brick.resolution;
   });
-  assert.deepEqual(verticalRungs(20, 5), [8, 8, 8, 8, 8, 8, 4, 2, 1],
+  assert.deepEqual(verticalRungs(20, 5), [16, 16, 16, 16, 8, 8, 4, 2, 1],
     "calm water must become progressively coarser below the free surface");
 
   for (const brick of atlas.bricks) {

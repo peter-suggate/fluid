@@ -178,7 +178,7 @@ test("validation authorizes only; a distinct singleton flips after every stable 
   "candidate authorization must precede every stable effect/field publication and the sole flip must follow them");
 
   const connect = functionSource(wgsl, "connectSparseWorldFrontierPages",
-    "fn synthesizeCandidateCellPages");
+    "fn beginShadowTopology");
   assert.match(connect, /topologyArena\[base\+3u\]\)!=2u/,
     "canonical seam publication must no-op unless the candidate is authorized");
   assert.doesNotMatch(connect,
@@ -220,7 +220,7 @@ test("same-active rerung uses the same staged transaction without lifecycle fiel
   assert.match(membership,
     /fn scheduledBrickActive\(brick:u32\)->bool\{return candidateBrickActive\(brick\);\}/);
   const schedule = functionSource(wgsl, "scheduleTopologyPreparation",
-    "fn acquireTopologyPage");
+    "fn candidateTopologyPageBase");
   assert.match(schedule, /candidateBrickActive\(brick\)!=brickActive\(brick\)/,
     "membership changes and same-active rerungs must share one scheduled delta");
   assert.doesNotMatch(schedule, /state\[[^\]]+\]\s*=/,
@@ -368,6 +368,14 @@ test("topology growth cannot publish unbounded loops or indirect work", () => {
     "let page=reserveSparseCM12PresentationPage()");
   assert.ok(coordinateValidation >= 0 && pageReservation > coordinateValidation,
     "invalid signed coordinates must be rejected before consuming a page");
+});
+
+test("authored rerung never borrows a WDR physical page identity", () => {
+  assert.doesNotMatch(wgsl, /fn (?:acquireTopologyPage|releaseTopologyPage|allocateCandidateTopologyPages|synthesizeCandidateCellPages)\(/);
+  assert.doesNotMatch(host, /dispatch(?:Topology)?\("(?:allocateCandidateTopologyPages|synthesizeCandidateCellPages)"/);
+  const transfer = functionSource(wgsl, "transferCandidateCellsWork",
+    "@compute @workgroup_size(64)\nfn transferCandidateCells(");
+  assert.match(transfer, /templateBrickCellRange/);
 });
 
 test("a failed shadow build cannot authorize partial worklists", () => {

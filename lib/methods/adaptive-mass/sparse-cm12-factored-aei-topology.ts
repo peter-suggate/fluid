@@ -117,8 +117,8 @@ export interface SparseCM12FactoredAEICatalog {
 
 /**
  * Stable-leaf face adjacency compiled independently of SCMT/operator rows.
- * Logical-brick occupancy is expanded only at construction; runtime consumes
- * the bounded per-leaf lists and remains O(changed-surface).
+ * Construction indexes sparse dyadic ancestors without expanding leaf volume
+ * or face area; runtime consumes the bounded per-leaf lists.
  */
 export function compileSparseCM12StableLeafFaceNeighbors(options: Readonly<{
   coordinates: readonly (readonly [number, number, number])[];
@@ -127,20 +127,48 @@ export function compileSparseCM12StableLeafFaceNeighbors(options: Readonly<{
   if (options.coordinates.length !== options.spans.length) {
     throw new Error("AEI stable geometry coordinate/span capacities differ");
   }
-  const owner = new Map<string, number>();
-  const key = (x: number, y: number, z: number) => `${x}/${y}/${z}`;
+  // Index dyadic origins and occupied ancestors, never the logical voxels
+  // covered by a macro leaf. A face descends only through occupied quadrants.
+  // Storage is O(leaves * ladder depth), including widely separated roots.
+  const key = (q: readonly number[]) => q.join("/");
+  const owners = new Map<number, Map<string, number>>();
+  const occupied = new Map<number, Set<string>>();
+  let maximumSpan = 1;
   for (let leaf = 0; leaf < options.coordinates.length; leaf += 1) {
-    const origin = options.coordinates[leaf]!, span = options.spans[leaf]!;
-    if (!Number.isSafeInteger(span) || span < 1
-      || origin.some((value) => !Number.isSafeInteger(value))) {
-      throw new Error(`AEI stable geometry leaf ${leaf} is invalid`);
+    const q = options.coordinates[leaf]!, span = options.spans[leaf]!;
+    if (!Number.isSafeInteger(span) || span < 1 || span > 2 ** 30
+      || !Number.isInteger(Math.log2(span)) || q.length !== 3
+      || q.some((value) => !Number.isSafeInteger(value) || value % span !== 0
+        || !Number.isSafeInteger(value + span))) {
+      throw new Error(`AEI stable geometry leaf ${leaf} must be an aligned dyadic cube`);
     }
-    for (let z = 0; z < span; z += 1) for (let y = 0; y < span; y += 1) {
-      for (let x = 0; x < span; x += 1) {
-        const address = key(origin[0] + x, origin[1] + y, origin[2] + z);
-        if (owner.has(address)) throw new Error("AEI stable geometry leaves overlap");
-        owner.set(address, leaf);
-      }
+    maximumSpan = Math.max(maximumSpan, span);
+  }
+  const ancestor = (q: readonly number[], span: number) =>
+    q.map((value) => Math.floor(value / span) * span);
+  const findOwner = (q: readonly number[], minimumSpan = 1): number | undefined => {
+    for (let span = minimumSpan; span <= maximumSpan; span *= 2) {
+      const leaf = owners.get(span)?.get(key(ancestor(q, span)));
+      if (leaf !== undefined) return leaf;
+    }
+    return undefined;
+  };
+  // Largest-first insertion makes every possible overlap an ancestor lookup;
+  // aligned dyadic cubes cannot partially overlap without containment.
+  const order = options.spans.map((_, leaf) => leaf).sort((a, b) =>
+    options.spans[b]! - options.spans[a]! || a - b);
+  for (const leaf of order) {
+    const origin = options.coordinates[leaf]!, span = options.spans[leaf]!;
+    if (findOwner(origin, span) !== undefined) {
+      throw new Error("AEI stable geometry leaves overlap");
+    }
+    let atSpan = owners.get(span);
+    if (!atSpan) owners.set(span, atSpan = new Map());
+    atSpan.set(key(origin), leaf);
+    for (let size = span; size <= maximumSpan; size *= 2) {
+      let nodes = occupied.get(size);
+      if (!nodes) occupied.set(size, nodes = new Set());
+      nodes.add(key(ancestor(origin, size)));
     }
   }
   const result = options.coordinates.map(() => new Set<number>());
@@ -148,13 +176,21 @@ export function compileSparseCM12StableLeafFaceNeighbors(options: Readonly<{
     const origin = options.coordinates[leaf]!, span = options.spans[leaf]!;
     for (let axis = 0; axis < 3; axis += 1) for (const sign of [-1, 1]) {
       const tangents = [0, 1, 2].filter((value) => value !== axis);
-      for (let v = 0; v < span; v += 1) for (let u = 0; u < span; u += 1) {
-        const coordinate = [...origin] as [number, number, number];
-        coordinate[axis] += sign < 0 ? -1 : span;
-        coordinate[tangents[0]!] += u; coordinate[tangents[1]!] += v;
-        const neighbor = owner.get(key(coordinate[0], coordinate[1], coordinate[2]));
-        if (neighbor !== undefined && neighbor !== leaf) result[leaf]!.add(neighbor);
-      }
+      const normal = origin[axis]! + (sign < 0 ? -1 : span);
+      const visit = (u: number, v: number, size: number): void => {
+        const q = [...origin];
+        q[axis] = normal; q[tangents[0]!] = u; q[tangents[1]!] = v;
+        const neighbor = findOwner(q, size);
+        if (neighbor !== undefined) {
+          if (neighbor !== leaf) result[leaf]!.add(neighbor);
+          return;
+        }
+        if (size === 1 || !occupied.get(size)?.has(key(ancestor(q, size)))) return;
+        const half = size / 2;
+        visit(u, v, half); visit(u + half, v, half);
+        visit(u, v + half, half); visit(u + half, v + half, half);
+      };
+      visit(origin[tangents[0]!]!, origin[tangents[1]!]!, span);
     }
   }
   return Object.freeze(result.map((neighbors) =>

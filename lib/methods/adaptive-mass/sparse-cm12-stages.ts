@@ -147,6 +147,7 @@ const candidatePlanTimedWork = Object.freeze({
     {
       label: "refinement-policy tile classification",
       entryPoints: Object.freeze([
+        "compileSparseCM12RefinementPolicyTileLeaders",
         "classifyRefinementPolicyTiles",
       ]),
     },
@@ -172,11 +173,9 @@ const candidatePlanTimedWork = Object.freeze({
       ]),
     },
     {
-      label: "budget scheduling, candidate-page allocation and cell synthesis",
+      label: "budget scheduling of backed candidate topology",
       entryPoints: Object.freeze([
         "scheduleTopologyPreparation",
-        "allocateCandidateTopologyPages",
-        "synthesizeCandidateCellPages",
       ]),
     },
     {
@@ -190,7 +189,7 @@ const candidatePlanTimedWork = Object.freeze({
       ]),
     },
   ]),
-  commandCopies: 4,
+  commandCopies: 5,
 } satisfies SparseCM12TimedWorkManifest);
 
 /**
@@ -305,11 +304,11 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
       "velocity-extension-mask-initialization": {
         id: "velocity-extrapolation",
-        label: "VEX2 packet-mask initialization",
+        label: "VEX2 cached schedule + packet-mask initialization",
       },
       "velocity-extension-sweeps": {
         id: "velocity-extrapolation",
-        label: "VEX2 eight direct packet sweeps + fused commit",
+        label: "VEX2 eight scheduled packet sweeps + fused commit",
       },
       "transport-packet-authority": {
         id: "velocity-extrapolation",
@@ -318,12 +317,12 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     },
     lens: null,
     tip: {
-      summary: "FCA1 seals the frame's body and boundary authority. VEX2 then initializes packet validity and runs eight direct packet sweeps over the accepted topology image; sweep 8 publishes the effective transport velocity. Last, the AEI transport packet authority is compiled from the prior frame's final-scalar masks.",
+      summary: "FCA1 seals the frame's body and boundary authority. VEX2 caches accepted packet addresses by topology generation, selects compact or direct execution from occupancy, initializes packet validity and runs eight packet sweeps over the accepted topology image; sweep 8 publishes the effective transport velocity. Last, the AEI transport packet authority is compiled from the prior frame's final-scalar masks.",
       reads: "projected face velocity, accepted topology image, prior final-scalar packet masks",
       writes: "sealed frame control, extended transport velocity cache, transport packet families",
       feeds: "face preparation and conservative transport",
     },
-    chip: () => "FCA1 · VEX2 8 direct sweeps · AEI packets",
+    chip: () => "FCA1 · VEX2 8 cached-packet sweeps · AEI packets",
   },
   "face-preparation": {
     label: "Face preparation", band: "transport", side: "right",
@@ -331,23 +330,23 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     substages: {
       "face-support-publication": {
         id: "power-topology",
-        label: "Dense face-velocity support clear + publication",
+        label: "Resident face-velocity support clear + publication",
       },
       "dirty-face-row-preparation": {
         id: "power-topology",
-        label: "Dirty oriented face-row preparation",
+        label: "Supported oriented face-row preparation",
       },
     },
     lens: null,
     tip: {
-      summary: "Clears face-velocity support on retired bricks, republishes per-brick face-velocity support, and prepares the oriented regular and 2:1 face-port transport rows — for dirty bricks only, so a stable submerged brick costs nothing here.",
-      reads: "extended transport velocity, incremental-activity dirty bricks, composite row topology",
+      summary: "Clears retired face-velocity support, republishes accepted-cell support, and traces accepted regular and 2:1 face-port rows where extended velocity is available.",
+      reads: "extended transport velocity, accepted cells and composite row topology",
       writes: "oriented face transport rows",
       feeds: "coupled conservative transport",
     },
     chip: (context) => context.info
-      ? `${context.info.fluidBrickResidentCount ?? 0} resident bricks · dirty rows only`
-      : "dirty rows only",
+      ? `${context.info.fluidBrickResidentCount ?? 0} resident bricks · supported rows`
+      : "supported rows",
   },
   "conservative-transport": {
     label: "Mass + gamma + momentum transport", band: "transport", side: "left",
@@ -665,13 +664,13 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       },
       "candidate-page-allocation-and-synthesis": {
         id: "power-topology",
-        label: "Candidate-page allocation and cell synthesis",
+        label: "Schedule backed candidate topology",
       },
     },
     timedWork: candidatePlanTimedWork,
     lens: null,
     tip: {
-      summary: "This is a candidate-topology construction interval, not just a policy decision. It scores and grades resolutions, consumes generation-stamped surface-output proofs, activates and retires pages, schedules the budget, allocates and synthesizes candidate cells, builds shadow row/leaf/structure worklists and publishes four indirect command copies for the following transaction.",
+      summary: "This is a candidate-topology construction interval, not just a policy decision. It scores and grades resolutions, consumes generation-stamped surface-output proofs, activates and retires pages, schedules the budget, allocates and synthesizes candidate cells, builds shadow row/leaf/structure worklists and publishes five indirect command copies for the following transaction.",
       reads: "transported density, momentum, policy history and accepted surface-output proofs",
       writes: "score/reason/proof history, urgent/ordinary queues, candidate levels, shadow worklists",
       feeds: "candidate transfer",
@@ -680,7 +679,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       {
         kind: "readout", label: "Live topology",
         value: (context) => `GPU TOPOLOGY GEN ${context.info?.adaptiveTopologyShadowGeneration ?? 0}`,
-        hint: "Accepted GPU-owned cell, pressure-row and field generation. advanceTo never reads scheduling state back or rebuilds topology on the host.",
+        hint: "Accepted GPU-owned cell, pressure-row and field generation. Frame submission stays synchronous. Larger topology changes are prepared between accepted frames.",
       },
       {
         kind: "param-choice", param: "selectorMode", label: "Criterion",
