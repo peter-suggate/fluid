@@ -9316,7 +9316,10 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
     floorContinuation=presentationFloorContinuationFlag(
       q,i32(localX),i32(localZ),false);
   }
-  let flags=1u|floorContinuation|select(0u,16u,phi<0.0);
+  // Compact CM12 has no cached closest-point payload. Bits 24..27 of
+  // the packed word carry log2(accepted cell width), atomically with phi.
+  let flags=1u|floorContinuation|select(0u,16u,phi<0.0)
+    |((31u-countLeadingZeros(max(1u,cm12PresentationScale)))<<8u);
   return vec2u((pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u),0u);
 }
 fn cm12PresentationCandidateBase()->u32{
@@ -9757,7 +9760,8 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
       floorContinuation=presentationFloorContinuationFlag(
         q,i32(localX),i32(localZ),false);
     }
-    let flags=1u|floorContinuation|select(0u,16u,phi<0.0);
+    let flags=1u|floorContinuation|select(0u,16u,phi<0.0)
+      |((31u-countLeadingZeros(max(1u,scale)))<<8u);
     fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+localIndex]
       =(pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u);
   }

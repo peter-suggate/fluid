@@ -2096,7 +2096,14 @@ export class FluidLabRenderer {
   private sparseWorldPresentation(
     solver: GPUSolverInstance | undefined,
   ): SparseWorldPresentation | undefined {
-    return this.sparseWorldSnapshot(solver)?.presentation;
+    const presentation = this.sparseWorldSnapshot(solver)?.presentation;
+    if (!presentation) return undefined;
+    // Mesh quality is a renderer preference; the snapshot remains the sole
+    // authority for buffers and accepted generation.
+    const surfaceMeshRefinement = solver?.globalFineLevelSetSource?.surfaceMeshRefinement;
+    return { ...presentation, fineLevelSet: {
+      ...presentation.fineLevelSet, surfaceMeshRefinement,
+    } };
   }
 
   private sparseAuthorityReady(solver: GPUSolverInstance | undefined): boolean {

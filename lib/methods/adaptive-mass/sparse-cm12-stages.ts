@@ -909,6 +909,13 @@ export const SPARSE_CM12_STAGES = Object.freeze({
   },
   "presentation-publication": {
     label: "Presentation pages", band: "output", side: "left",
+    controls: [{
+      kind: "param-choice", param: "surfaceMeshRefinement", label: "Mesh refinement",
+      options: [
+        { value: "2", label: "×2", hint: "Two target subdivisions per accepted surface-cell edge." },
+        { value: "4", label: "×4", hint: "Four target subdivisions per accepted surface-cell edge." },
+      ],
+    }],
     phase: { id: "adaptive-publication", label: "Encode compact sparse presentation pages" },
     lens: null,
     tip: {

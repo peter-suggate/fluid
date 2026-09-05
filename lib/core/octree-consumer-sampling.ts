@@ -102,6 +102,7 @@ export function sampleOctreeFaceVelocity(
 }
 
 export interface GlobalFineLevelSetConsumerSource {
+  readonly surfaceMeshRefinement?: 2 | 4;
   readonly kind: "global-fine-levelset-sampling";
   readonly metadata: GPUBufferBinding;
   readonly worklist: GPUBufferBinding;
@@ -163,6 +164,10 @@ export function globalFineCoarseGenerationPairIsValid(
 /** Validates the indexable Section-5 fine-SPGrid ABI without reading GPU data. */
 export function validateGlobalFineLevelSetConsumerSource(source: GlobalFineLevelSetConsumerSource): void {
   if (source.kind !== "global-fine-levelset-sampling") throw new RangeError("Global fine source kind is invalid");
+  if (source.surfaceMeshRefinement !== undefined
+    && source.surfaceMeshRefinement !== 2 && source.surfaceMeshRefinement !== 4) {
+    throw new RangeError("Surface mesh refinement must be 2 or 4");
+  }
   const positiveInteger = (value: number, label: string) => {
     if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} must be a positive integer`);
   };
@@ -217,6 +222,7 @@ export function validateGlobalFineLevelSetConsumerSource(source: GlobalFineLevel
 export function createGlobalFineLevelSetConsumerSource(source: WebGPUFineLevelSetBrickSource): GlobalFineLevelSetConsumerSource {
   const plan = source.plan;
   const consumer: GlobalFineLevelSetConsumerSource = { kind: "global-fine-levelset-sampling", metadata: { buffer: source.metadata },
+    surfaceMeshRefinement: source.surfaceMeshRefinement,
     worklist: { buffer: source.worklist }, samples: { buffer: source.samples },
     ...(source.coarsePhiDirectory ? { coarsePhiDirectory: { buffer: source.coarsePhiDirectory } } : {}),
     ...(source.coarsePhiRowCapacity ? { coarsePhiRowCapacity: source.coarsePhiRowCapacity } : {}),

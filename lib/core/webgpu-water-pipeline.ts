@@ -1907,7 +1907,8 @@ export class RasterWaterPipeline {
       && previous.coarsePhiDirectory?.buffer === source.coarsePhiDirectory?.buffer
       && previous.coarsePhiRowCapacity === source.coarsePhiRowCapacity
       && previous.topologyControl?.buffer === source.topologyControl?.buffer;
-    if (sameBindings && previous.generation === source.generation) return;
+    if (sameBindings && previous.generation === source.generation
+      && previous.surfaceMeshRefinement === source.surfaceMeshRefinement) return;
     this.globalFineLevelSet = source;
     this.writeCompactRenderParams();
     this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false;
@@ -1952,6 +1953,7 @@ export class RasterWaterPipeline {
       u32.set([...fine.brickDimensions, fine.samplesPerBrick], 4);
       u32.set([fine.pageCapacity, 7, fine.pageCapacity, fine.generation], 8);
       f32.set([...fine.domainOrigin, fine.fineCellWidth], 12); f32[16] = fine.fineFactor;
+      f32[27] = fine.surfaceMeshRefinement ?? 0;
     } else {
       const dimensions = coarse!.sampleDimensions;
       u32.set([...dimensions, 4], 0);

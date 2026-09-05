@@ -203,7 +203,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readonly initialSparseAuthorityReady = true;
   /** Compatibility getters backed exclusively by the public world view. */
   get sparseAdaptiveGridSource() { return this.sparseWorld.presentation().adaptiveGrid; }
-  get globalFineLevelSetSource() { return this.sparseWorld.presentation().fineLevelSet; }
+  get globalFineLevelSetSource() {
+    return { ...this.sparseWorld.presentation().fineLevelSet,
+      surfaceMeshRefinement: this.options.surfaceMeshRefinement ?? 2 };
+  }
   readPresentationPageAllocatorReceiptQA() {
     return this.sparseWorldTrace.readPresentationPageAllocatorReceiptQA();
   }
@@ -820,6 +823,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       coarseFirst: values.selectorMode !== "surface" && values.selectorMode !== "activity",
     });
     this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps,
+      surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
       sharpeningStrength,
       gammaDiffusionEnabled, surfaceSharpeningEnabled,
       pressureIterations, pressureRelativeTolerance, activityPolicy };

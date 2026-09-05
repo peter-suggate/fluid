@@ -42,6 +42,7 @@ export interface AdaptiveMassSolverOptions {
   readonly brickFineResolution?: SparseBrickFineResolution;
   /** Renderer-facing samples per presentation-page edge. Defaults to the brick maximum. */
   readonly presentationPageResolution?: SparseBrickFineResolution;
+  readonly surfaceMeshRefinement?: 2 | 4;
   /** Optional positive-power-of-two cap on hierarchical macro-leaf span. */
   readonly maximumMacroSpanBricks?: number;
   /** Physical world-growth page budget. Authored re-rung already owns complete
@@ -103,6 +104,17 @@ const params: MethodParamSpec[] = [
     hint: "Consecutive valid surface proofs before a coarse-first merge. Refinement is immediate.",
   },
 
+  {
+    kind: "select",
+    key: "surfaceMeshRefinement",
+    label: "Surface mesh refinement",
+    default: "2",
+    tier: "coarse",
+    update: "runtime",
+    options: [{ value: "2", label: "×2 per surface cell" },
+      { value: "4", label: "×4 per surface cell" }],
+    hint: "Target mesh spacing is the accepted cell width divided by this ratio. Shared boundaries retain their contour; unresolved geometry keeps finer triangles.",
+  },
   {
     kind: "select",
     key: "brickFineResolution",
@@ -416,6 +428,7 @@ const params: MethodParamSpec[] = [
  * fixed/indirect dispatch sequence without reading queue state back.
  */
 export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze([
+  "surfaceMeshRefinement",
   "selectorMode",
   "energyThreshold", "curvatureTolerance", "anticipationSeconds",
   "anticipationRadiusBricks", "surfaceQuietEpochs",
@@ -471,6 +484,7 @@ export function adaptiveMassSolverOptions(
   const fineResolution = brickFineResolution(values.brickFineResolution);
   return {
     brickFineResolution: fineResolution,
+    surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
     presentationPageResolution:
       presentationPageResolution(values.presentationPageResolution, fineResolution),
     maximumMacroSpanBricks: maximumMacroSpanBricks(values.maximumMacroSpanBricks),

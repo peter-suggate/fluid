@@ -15,6 +15,8 @@ import type { SparseCM12FramePlanSource } from "./sparse-cm12-frame-plan";
 
 /** GPU-resident authority for one domain-global fine level-set generation. */
 export interface WebGPUFineLevelSetBrickSource {
+  /** Target presentation subdivisions per accepted surface-cell edge. */
+  surfaceMeshRefinement?: 2 | 4;
   plan: FineLevelSetBrickPlan;
   generation: number;
   generationSlot: 0 | 1;

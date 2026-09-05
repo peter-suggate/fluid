@@ -1,3 +1,4 @@
+import { adaptiveSurfaceMeshWGSL } from "./webgpu-water-adaptive-mesh";
 import { makeOctreePowerCoarseLevelSetSampleWGSL } from "./octree-power-coarse-levelset-sample-abi";
 import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 import {
@@ -169,9 +170,19 @@ fn heightFieldPatch(base:vec3i,scale:i32,heights:ptr<function,array<f32,4>>)->bo
   if(scale!=1||base.x<=0||base.z<=0||base.x>=dims.x||base.z>=dims.z){return false;}
   let q=array<vec2i,4>(vec2i(base.x-1,base.z-1),vec2i(base.x,base.z-1),
     vec2i(base.x,base.z),vec2i(base.x-1,base.z));
+  // As in adaptive group proofs, return after the loops: affected Chrome/Metal
+  // compilers otherwise admit this height owner for unmarked fallback columns.
+  var valid=true;
   for(var corner=0u;corner<4u;corner+=1u){let sample=markedFloorHeight(q[corner]);
-    if(sample.y<0.5){return false;}(*heights)[corner]=sample.x;}
-  return true;
+    if(sample.y<0.5){valid=false;}(*heights)[corner]=sample.x;}
+  if(!valid){return false;}
+  // Adaptive volume groups own ordinary-height surfaces. Keep only the
+  // sub-half-cell film receipt here, otherwise row zero would duplicate the
+  // adaptive triangles emitted by the group containing the actual waterline.
+  if(params.physical.w>=2.){
+    for(var corner=0u;corner<4u;corner+=1u){if((*heights)[corner]>.5){valid=false;}}
+  }
+  return valid;
 }
 fn emitHeightFieldPatch(base:vec3i,heights:array<f32,4>){
   emitClassifiedCubeTagged(vec3i(base.x,0,base.z),i32(HEIGHTFIELD_DESCRIPTOR_CODE),
@@ -388,6 +399,16 @@ fn classifyScaled(base:vec3i,scale:i32){
   if(!xWall&&!zWall&&classifySharpInteriorBoxFeature(base,scale)){return;}
   classifyScaledForWall(base,scale,0u,0u);
 }
+${adaptiveSurfaceMeshWGSL}
+fn classifyFineAnchor(q:vec3i,sampleScale:u32,local:vec3u){
+  let signedAddress=compactSignedSparseAddressing();
+  let lowX=select(q.x==0,local.x==0u&&!fineValidAt(q-vec3i(1,0,0)),signedAddress);
+  let lowY=select(q.y==0,local.y==0u&&!fineValidAt(q-vec3i(0,1,0)),signedAddress);
+  let lowZ=select(q.z==0,local.z==0u&&!fineValidAt(q-vec3i(0,0,1)),signedAddress);
+  let xb=array<i32,2>(q.x+1,q.x);let yb=array<i32,2>(q.y+1,q.y);let zb=array<i32,2>(q.z+1,q.z);
+  let xn=select(1u,2u,lowX);let yn=select(1u,2u,lowY);let zn=select(1u,2u,lowZ);
+  for(var zi=0u;zi<zn;zi+=1u){for(var yi=0u;yi<yn;yi+=1u){for(var xi=0u;xi<xn;xi+=1u){classifyScaled(vec3i(xb[xi],yb[yi],zb[zi]),i32(sampleScale));}}}
+}
 @compute @workgroup_size(256)
 fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   if(!validCurrentPublication()){return;}
@@ -409,14 +430,24 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   if(!compactSignedSparseAddressing()
     &&(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions)))){return;}
   let index=id*samples+localIndex;if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return;}
-  let signedAddress=compactSignedSparseAddressing();
-  let lowX=select(q.x==0,local.x==0u&&!fineValidAt(q-vec3i(1,0,0)),signedAddress);
-  let lowY=select(q.y==0,local.y==0u&&!fineValidAt(q-vec3i(0,1,0)),signedAddress);
-  let lowZ=select(q.z==0,local.z==0u&&!fineValidAt(q-vec3i(0,0,1)),signedAddress);
-  let xb=array<i32,2>(q.x+1,q.x);let yb=array<i32,2>(q.y+1,q.y);
-  let zb=array<i32,2>(q.z+1,q.z);
-  let xn=select(1u,2u,lowX);let yn=select(1u,2u,lowY);let zn=select(1u,2u,lowZ);
-  for(var zi=0u;zi<zn;zi+=1u){for(var yi=0u;yi<yn;yi+=1u){for(var xi=0u;xi<xn;xi+=1u){classifyScaled(vec3i(xb[xi],yb[yi],zb[zi]),i32(sampleScale));}}}
+  if(compactSignedSparseAddressing()&&sampleScale==1u&&params.physical.w>=2.){
+    let cellWidth=1u<<((fineSamples[index]>>24u)&15u);
+    let size=i32(min(8u,max(1u,cellWidth/u32(params.physical.w))));
+    if(size>1){
+      // The accepted width is constant within its dyadic solver brick. Groups
+      // align to that same integer lattice, even across presentation subpages.
+      let origin=compactFloorDiv(q,size)*size;
+      if(any(q!=origin)){return;}
+      if(classifyAdaptiveGroup(q+vec3i(1),size)){return;}
+      for(var z=0;z<size;z+=1){for(var y=0;y<size;y+=1){for(var x=0;x<size;x+=1){
+        let child=q+vec3i(x,y,z);if(!fineValidAt(child)){continue;}
+        let childLocal=vec3u(child-compactFloorDiv(child,i32(r))*i32(r));
+        classifyFineAnchor(child,1u,childLocal);
+      }}}
+      return;
+    }
+  }
+  classifyFineAnchor(q,sampleScale,local);
 }
 @compute @workgroup_size(256)
 fn extractGlobalCoarseMain(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)local:u32){if(!validCurrentPublication()){return;}
