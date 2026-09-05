@@ -136,7 +136,7 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
       const ladderSolver = await WebGPUAdaptiveMassSolver.createAsync(
         device, calm, "balanced", undefined,
         options({
-          resolutionMode: "all-fine",
+          initialResolutionForQA: 8,
           activityPolicy: {
             ...SPARSE_CM12_ACTIVITY_POLICY,
             activitySignals: true,
@@ -173,7 +173,7 @@ dawnTest("Sparse CM12 commits hydrostatic re-coarsening and walks 4 to 2 to 1",
       const surfaceOnlySolver = await WebGPUAdaptiveMassSolver.createAsync(
         device, calm, "balanced", undefined,
         options({
-          resolutionMode: "all-fine",
+          initialResolutionForQA: 8,
           activityPolicy: {
             ...SPARSE_CM12_ACTIVITY_POLICY,
             activitySignals: false,

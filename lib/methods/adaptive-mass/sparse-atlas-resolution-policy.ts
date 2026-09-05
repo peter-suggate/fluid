@@ -5,6 +5,10 @@ import type {
   SparseAdaptiveMassAtlas,
   SparseBrickResolution,
 } from "./sparse-brick-atlas";
+import {
+  sparseBrickFaceNeighbors,
+  sparseBrickSpan,
+} from "./sparse-brick-atlas";
 
 export const SPARSE_ATLAS_TOPOLOGY_CADENCE_STEPS = 4;
 export const SPARSE_ATLAS_PROMOTE_SCORE = 160;
@@ -13,7 +17,8 @@ export const SPARSE_ATLAS_DEMOTE_SCORE = 96;
 export const SPARSE_ATLAS_PROMOTE_EPOCHS = 2;
 export const SPARSE_ATLAS_DEMOTE_EPOCHS = 8;
 export const SPARSE_ATLAS_DETAIL_VETO = 0.08;
-export const SPARSE_ATLAS_MIN_FINE_RESIDENCE_STEPS = 64;
+/** Ordinary refinement is deliberately slower than quiet coarsening. */
+export const SPARSE_ATLAS_MAX_PROMOTIONS_PER_EPOCH = 64;
 
 export const enum SparseAtlasActivityReason {
   Surface = 1 << 0,
@@ -62,13 +67,6 @@ export interface SparseAtlasResolutionDecision {
   readonly receipt: SparseAtlasResolutionPolicyReceipt;
 }
 
-interface FixedResolutionDecisions {
-  fine?: SparseAtlasResolutionDecision;
-  coarse?: SparseAtlasResolutionDecision;
-}
-
-const fixedResolutionDecisionCache = new WeakMap<object, FixedResolutionDecisions>();
-
 export function initializeSparseAtlasResolutionPolicy(
   atlas: SparseAdaptiveMassAtlas,
 ): SparseAtlasResolutionPolicyState {
@@ -89,10 +87,10 @@ export function initializeSparseAtlasResolutionPolicy(
 }
 
 /**
- * Close requested levels to a face-neighbour 2:1 fixpoint. The current 4/8
- * ladder normally converges without edits; keeping this at the transaction
- * boundary makes adding coarser rungs fail toward refinement, never toward an
- * invalid accepted atlas.
+ * Close requested levels to a physical face-neighbour 2:1 fixpoint. Runtime
+ * policy now has the same coarse-first polarity as construction: an offending
+ * fine side is restricted before a coarse side is refined. Macro spans are
+ * part of cell width, so resolution alone is never used as a proxy for scale.
  */
 function enforceTwoToOneTargets(
   grid: SparseAtlasCompositeGrid,
@@ -102,20 +100,24 @@ function enforceTwoToOneTargets(
   while (changed) {
     changed = false;
     for (const brick of grid.atlas.bricks) {
-      for (let axis = 0; axis < 3; axis += 1) for (const direction of [-1, 1]) {
-        const coordinate = [...brick.coordinate] as [number, number, number];
-        coordinate[axis] += direction;
-        if (coordinate[axis] < 0
-          || coordinate[axis] >= grid.atlas.brickDimensions[axis]) continue;
-        const key = coordinate[0] + grid.atlas.brickDimensions[0]
-          * (coordinate[1] + grid.atlas.brickDimensions[1] * coordinate[2]);
-        const neighbor = grid.atlas.directory.get(key);
-        if (!neighbor) continue;
+      for (const neighbor of sparseBrickFaceNeighbors(grid.atlas, brick)) {
+        if (neighbor.key < brick.key) continue;
         const own = targets.get(brick.key) ?? brick.resolution;
         const other = targets.get(neighbor.key) ?? neighbor.resolution;
-        if (Math.max(own, other) / Math.min(own, other) <= 2) continue;
-        const coarseKey = own < other ? brick.key : neighbor.key;
-        targets.set(coarseKey, (Math.max(own, other) / 2) as SparseBrickResolution);
+        const ownWidth = grid.atlas.brickFineResolution * sparseBrickSpan(brick) / own;
+        const otherWidth = grid.atlas.brickFineResolution * sparseBrickSpan(neighbor) / other;
+        if (Math.max(ownWidth, otherWidth) <= 2 * Math.min(ownWidth, otherWidth)) continue;
+        const finer = ownWidth < otherWidth ? brick : neighbor;
+        const finerResolution = finer.key === brick.key ? own : other;
+        if (finerResolution > 1) {
+          targets.set(finer.key, (finerResolution / 2) as SparseBrickResolution);
+        } else {
+          // A span discontinuity can leave the fine side at B1. Preserve a
+          // valid atlas by refining the wider side only in that terminal case.
+          const coarser = finer.key === brick.key ? neighbor : brick;
+          const coarserResolution = coarser.key === brick.key ? own : other;
+          targets.set(coarser.key, (2 * coarserResolution) as SparseBrickResolution);
+        }
         changed = true;
       }
     }
@@ -200,55 +202,11 @@ export function planSparseAtlasResolution(
   velocity: ArrayLike<number>,
   previous: SparseAtlasResolutionPolicyState,
   dt_s: number,
-  mode: "adaptive" | "all-fine" | "all-coarse" = "adaptive",
 ): SparseAtlasResolutionDecision {
   if (density.length !== grid.cells.length || velocity.length !== 3 * grid.cells.length) {
     throw new RangeError("resolution policy fields do not match the composite grid");
   }
   const acceptedSteps = previous.acceptedSteps + 1;
-  if (mode !== "adaptive") {
-    const fixedResolution: SparseBrickResolution = mode === "all-fine"
-      ? grid.atlas.brickFineResolution : grid.atlas.ladder.coarseResolution;
-    const topologyKey = (grid.topologyKey ?? grid.gradientRows) as object;
-    let variants = fixedResolutionDecisionCache.get(topologyKey);
-    if (!variants) {
-      variants = {};
-      fixedResolutionDecisionCache.set(topologyKey, variants);
-    }
-    const variant = mode === "all-fine" ? variants.fine : variants.coarse;
-    (previous as { acceptedSteps: number }).acceptedSteps = acceptedSteps;
-    if (variant) {
-      (variant as { state: SparseAtlasResolutionPolicyState }).state = previous;
-      return variant;
-    }
-    const targets = new Map<number, SparseBrickResolution>();
-    let promotedBrickCount = 0, demotedBrickCount = 0;
-    for (const brick of grid.atlas.bricks) {
-      targets.set(brick.key, fixedResolution);
-      if (brick.resolution < fixedResolution) promotedBrickCount += 1;
-      if (brick.resolution > fixedResolution) demotedBrickCount += 1;
-    }
-    const decision: SparseAtlasResolutionDecision = {
-      state: previous,
-      targetResolutionByBrick: targets,
-      receipt: {
-        topologyEpoch: promotedBrickCount > 0 || demotedBrickCount > 0,
-        measuredBrickCount: grid.atlas.bricks.length,
-        surfaceBrickCount: 0,
-        hotBrickCount: 0,
-        quietBrickCount: 0,
-        promotedBrickCount,
-        demotedBrickCount,
-        deferredPromotionCount: 0,
-        targetFineBrickCount: mode === "all-fine" ? grid.atlas.bricks.length : 0,
-        targetCoarseBrickCount: mode === "all-coarse" ? grid.atlas.bricks.length : 0,
-        maximumScoreByte: 0,
-      },
-    };
-    if (mode === "all-fine") variants.fine = decision;
-    else variants.coarse = decision;
-    return decision;
-  }
   const topologyEpoch = acceptedSteps % SPARSE_ATLAS_TOPOLOGY_CADENCE_STEPS === 0;
   const surface = new Set<number>();
   const surfaceAxes = new Map<number, number>();
@@ -405,9 +363,7 @@ export function planSparseAtlasResolution(
       ordinaryPromotionBuckets.set(scoreByte, bucket);
     } else if (brick.resolution > 1 && topologyEpoch
       && quietEpochs >= SPARSE_ATLAS_DEMOTE_EPOCHS
-      && !previous.pinnedFineBrickKeys.has(brick.key)
-      && acceptedSteps - (old?.lastTransitionStep ?? 0)
-        >= SPARSE_ATLAS_MIN_FINE_RESIDENCE_STEPS) {
+      && !previous.pinnedFineBrickKeys.has(brick.key)) {
       target = (brick.resolution / 2) as SparseBrickResolution;
     }
     targets.set(brick.key, target);
@@ -422,14 +378,20 @@ export function planSparseAtlasResolution(
     });
   }
 
-  const deferredPromotionCount = 0;
+  let remainingPromotions = SPARSE_ATLAS_MAX_PROMOTIONS_PER_EPOCH;
+  let deferredPromotionCount = 0;
   for (const score of [...ordinaryPromotionBuckets.keys()].sort((a, b) => b - a)) {
     const keys = ordinaryPromotionBuckets.get(score)!.sort((a, b) => a - b);
     for (const key of keys) {
+      if (remainingPromotions === 0) {
+        deferredPromotionCount += 1;
+        continue;
+      }
       const current = grid.atlas.directory.get(key)!.resolution;
       targets.set(key, Math.min(
         grid.atlas.brickFineResolution, 2 * current,
       ) as SparseBrickResolution);
+      remainingPromotions -= 1;
     }
   }
   enforceTwoToOneTargets(grid, targets);

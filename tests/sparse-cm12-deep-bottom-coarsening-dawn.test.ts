@@ -273,7 +273,7 @@ dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
     const offsetValues = resolveMethodValues(adaptiveMassMethod,
       offsetUI.quality, offsetUI.overrides[offsetUI.methodId] ?? {});
     assert.equal(offsetValues.selectorMode, "activity");
-    assert.equal(offsetValues.resolutionMode, "adaptive");
+    assert.equal("resolutionMode" in offsetValues, false);
     const offsetSolver = await adaptiveMassMethod.createSolverAsync!(
       device, offsetUI.scene, offsetUI.quality, offsetValues, undefined,
       () => {},

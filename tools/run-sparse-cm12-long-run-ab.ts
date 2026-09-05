@@ -33,17 +33,12 @@ import {
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
-import type { AdaptiveMassResolutionMode } from
-  "../lib/methods/adaptive-mass/method";
 import type { AdaptiveMassStepTelemetry } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 import { uniformMethod } from "../lib/methods/uniform/method";
 
 type Dimensions = readonly [number, number, number];
-type FixedSparseResolutionMode = Extract<
-  AdaptiveMassResolutionMode,
-  "all-fine" | "all-coarse"
->;
+type FixedSparseResolutionMode = "all-fine" | "all-coarse";
 
 function fieldHash(values: Float32Array): string {
   return createHash("sha256").update(new Uint8Array(

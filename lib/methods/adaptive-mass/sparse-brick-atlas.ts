@@ -1876,10 +1876,6 @@ export function coarsenLargeQuiescentComponents(
   }
   const visited = new Set<number>();
   const components: SparseAdaptiveMassBrick[][] = [];
-  const directions = [
-    [-1, 0, 0], [1, 0, 0], [0, -1, 0],
-    [0, 1, 0], [0, 0, -1], [0, 0, 1],
-  ] as const;
   for (const seed of [...atlas.bricks].sort((left, right) => left.key - right.key)) {
     if (visited.has(seed.key)) continue;
     const component: SparseAdaptiveMassBrick[] = [];
@@ -1888,42 +1884,37 @@ export function coarsenLargeQuiescentComponents(
     for (let cursor = 0; cursor < queue.length; cursor += 1) {
       const brick = queue[cursor]!;
       component.push(brick);
-      for (const direction of directions) {
-        const coordinate = brick.coordinate.map((value, axis) =>
-          value + direction[axis]) as [number, number, number];
-        if (coordinate.some((value, axis) =>
-          value < 0 || value >= atlas.brickDimensions[axis])) continue;
-        const key = sparseBrickKey(coordinate, atlas.brickDimensions);
-        const neighbor = atlas.directory.get(key);
-        if (!neighbor || visited.has(key)) continue;
-        visited.add(key);
+      for (const neighbor of sparseBrickFaceNeighbors(atlas, brick)) {
+        if (visited.has(neighbor.key)) continue;
+        visited.add(neighbor.key);
         queue.push(neighbor);
       }
     }
     components.push(component);
   }
-  if (components.every((component) => component.length <= maximumFineComponentBricks)) {
+  if (components.every((component) => component.reduce((sum, brick) =>
+    sum + sparseBrickSpan(brick) ** 3, 0) <= maximumFineComponentBricks)) {
     return atlas;
   }
-  const denseDensity = materializeSparseBrickAtlasDensity(atlas);
   const bricks = components.flatMap((component) => {
-    if (component.length <= maximumFineComponentBricks) return component;
-    return component.map((brick) =>
-      sparseBrickSpan(brick) > 1 || brick.resolution === atlas.ladder.coarseResolution
-        ? brick
-        : sparseBrickFromDense(
-          brick.key,
-          brick.coordinate,
-          atlas.ladder.coarseResolution,
-          denseDensity,
-          atlas.dimensions,
-          undefined,
-          atlas.brickFineResolution,
-        ));
+    const representedBrickCount = component.reduce((sum, brick) =>
+      sum + sparseBrickSpan(brick) ** 3, 0);
+    let target = atlas.brickFineResolution as SparseBrickResolution;
+    let rungCapacity = maximumFineComponentBricks;
+    while (target > 1 && representedBrickCount > rungCapacity) {
+      target = (target / 2) as SparseBrickResolution;
+      rungCapacity *= 8;
+    }
+    return component.map((brick) => restrictSparseBrick(
+      brick, Math.min(brick.resolution, target) as SparseBrickResolution,
+    ));
   });
+  const graded = stronglyGradeSparseBricksByCoarsening(
+    atlas.dimensions, bricks, atlas.brickFineResolution,
+  );
   return createSparseAdaptiveMassAtlas(
     atlas.dimensions,
-    bricks.sort((left, right) => left.key - right.key),
+    graded.sort((left, right) => left.key - right.key),
     atlas.generation,
     atlas.brickFineResolution,
   );

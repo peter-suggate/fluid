@@ -152,7 +152,7 @@ dawnTest("surface presentation stays fixed across forced B8-B4-B8 cutovers", {
     scene.fluid.gravity_m_s2 = { x: 0, y: 0, z: 0 };
     solver = await WebGPUAdaptiveMassSolver.createAsync(
       device, scene, "balanced", undefined, {
-        resolutionMode: "all-fine",
+        initialResolutionForQA: 8,
         brickFineResolution: 8,
         presentationPageResolution: 8,
         surfaceFineRings: 1,

@@ -207,7 +207,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     return this.sparseWorldTrace.readWorldGrowthReceiptQA();
   }
   /** Test-only runtime seam for exercising an accepted surface rung cutover. */
-  setForcedSurfaceResolutionForQA(resolution: 4 | 8 | undefined): void {
+  setForcedSurfaceResolutionForQA(resolution: SparseBrickResolution | undefined): void {
     const activityPolicy = {
       ...SPARSE_CM12_ACTIVITY_POLICY,
       ...this.options.activityPolicy,
@@ -571,12 +571,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         dependencies: ["adaptive-mass.plan"],
         run: () => {
           const fineResolution = options.brickFineResolution ?? 8;
-          const coarseResolution = (fineResolution / 2) as SparseBrickResolution;
-          const resolutionForBrick = options.resolutionMode === "all-fine"
-            ? () => fineResolution
-            : options.resolutionMode === "all-coarse"
-              ? () => coarseResolution
-              : undefined;
+          const resolutionForBrick = options.initialResolutionForQA === undefined
+            ? undefined : () => options.initialResolutionForQA!;
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
             brickFineResolution: fineResolution,

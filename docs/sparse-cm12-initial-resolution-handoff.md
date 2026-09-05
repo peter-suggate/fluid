@@ -11,6 +11,22 @@ available only to its two explicit comparison oracles, and the exhaustive dense 
 point oracle remains test-only. The application and every scene still default to the
 production B8/P8 Sparse CM12 solver; no opt-in UI flag is required.
 
+WP3 is complete as well. Surface proof now walks every dyadic rung with a
+level-indexed generation receipt and lease bitfield; its conservative restriction
+stencil is factor-parameterized. Velocity thresholds are published as a complete
+B1-through-B16 level array, quiescent component bootstrapping can select any rung,
+and both CPU grading closures use physical span-aware widths with coarse-first
+polarity. Ordinary CPU promotions are capped per epoch while quiet demotion no
+longer pays a second 64-step residence gate. The production default consumes this
+path directly. Its new gates cover all component rungs, macro faces, throttling, and
+a bounded fine-start ocean-seiche census with mass/momentum transfer receipts. The
+fixed all-fine/all-coarse selector and its runtime policy branches have been removed;
+legacy UI values are discarded at normalization. A private initial-resolution seam
+remains only for transition tests that must manufacture a chosen starting census.
+The generalized proof fills only the candidate rung's `(B + 4)^3` stencil and
+aggregates contiguous accepted-owner runs, avoiding the redundant finest-child
+lookups that initially pushed the mini64 performance lane over its ceiling.
+
 The proposal: stop defining a tank by its **maximum** resolution (a 128³ lattice that
 caps every cell) and define it by an **initial** resolution, letting cells refine
 downward as far as the scene needs.
@@ -352,6 +368,11 @@ long-dam, plus a paired frame-time capture. Expect a regression on the
 deliberately whether to pay it or to keep a *bounded* cache keyed on the active set.
 
 ### WP3 — Invert the policy anchor
+
+**Complete (2026-09-05).** The implementation uses one bounded fine/candidate
+workgroup pair per brick and stores the durable result per level; this avoids
+growing workgroup memory with ladder depth while providing the requested per-rung
+receipt semantics.
 
 Generalize the surface representability proof from B8→B4 to per-rung: `vec2f` → a
 per-level receipt, one lease bit → a bitfield, proof word 39 → level-indexed, and the

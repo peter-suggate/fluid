@@ -826,7 +826,8 @@ async function runDamFrontLane(): Promise<void> {
     device.pushErrorScope("validation");
     const scene = createMinimalPowerDamBreak64Scene();
     const solverOptions = (resolutionMode: "adaptive" | "all-fine") => ({
-        resolutionMode,
+        initialResolutionForQA: resolutionMode === "all-fine"
+          ? TARGET_BRICK_FINE_RESOLUTION : undefined,
         brickFineResolution: TARGET_BRICK_FINE_RESOLUTION,
         presentationPageResolution: TARGET_PRESENTATION_PAGE_RESOLUTION,
         surfaceFineRings: resolutionMode === "adaptive" ? 8 : 1,

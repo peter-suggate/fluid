@@ -281,7 +281,6 @@ test("large-CFL transport allocates reachable tiles without scanning the domain"
     faceNormalVelocity,
   }, {
     dt_s: 1 / 30,
-    resolutionMode: "all-fine",
     project: false,
   });
   // 800 * dt = 26.7 finest cells: one brick cannot contain the trace. The
@@ -310,7 +309,6 @@ test("all-coarse dynamics keeps resident and newly reached tiles at 4 cubed", ()
     faceNormalVelocity,
   }, {
     dt_s: 1 / 30,
-    resolutionMode: "all-coarse",
     project: false,
   });
   assert.equal(result.workGrid.atlas.bricks.every((candidate) =>

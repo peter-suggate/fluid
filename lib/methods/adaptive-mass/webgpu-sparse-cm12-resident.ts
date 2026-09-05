@@ -239,7 +239,7 @@ export interface SharpeningTrace {
  * separate transaction, so these controls tune candidate requests/history. */
 export interface SparseCM12ActivityPolicy {
   readonly activitySignals: boolean;
-  /** Maximum rho=.5 edge-crossing displacement accepted by the B8 -> B4
+  /** Maximum rho=.5 edge-crossing displacement accepted by each one-rung
    * presentation proof, expressed in finest-cell widths. */
   readonly surfaceDisplacementToleranceCells: number;
   /** Maximum narrow-band normal error accepted by the presentation proof. */
@@ -247,7 +247,7 @@ export interface SparseCM12ActivityPolicy {
   /** Enables publication and consumption of surface representability receipts. */
   readonly surfaceCoarseningEnabled: boolean;
   /** QA-only fixed surface rung. Omitted in production and normal UI flows. */
-  readonly forcedSurfaceResolutionForQA?: 4 | 8;
+  readonly forcedSurfaceResolutionForQA?: SparseBrickResolution;
   readonly finestTravelCells: number;
   readonly fourTravelCells: number;
   readonly twoTravelCells: number;
@@ -314,8 +314,11 @@ export function sparseCM12ActivityPolicy(
     values.twoTravelCells, defaults.twoTravelCells, 0, 8,
   ));
   const promoteScore = finiteClamp(values.promoteScore, defaults.promoteScore, 0, 1);
-  const forcedSurfaceResolutionForQA = values.forcedSurfaceResolutionForQA === 4
+  const forcedSurfaceResolutionForQA = values.forcedSurfaceResolutionForQA === 1
+    || values.forcedSurfaceResolutionForQA === 2
+    || values.forcedSurfaceResolutionForQA === 4
     || values.forcedSurfaceResolutionForQA === 8
+    || values.forcedSurfaceResolutionForQA === 16
     ? values.forcedSurfaceResolutionForQA : undefined;
   return {
     activitySignals: values.activitySignals === true,
@@ -1037,7 +1040,7 @@ export function sparseCM12WGSLForEntryPoints(source: string, roots: readonly str
 const SPARSE_CM12_PHASE1_TRANSPORT_PROFILE_WORDS = 64;
 /** Params in the resident WGSL, including the fixed authored-region tail. */
 const SPARSE_CM12_PARAMETER_BYTES = SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
-  + SPARSE_CM12_REFINEMENT_REGION_BYTES + 16;
+  + SPARSE_CM12_REFINEMENT_REGION_BYTES + 48;
 /** Twenty f32 convergence/diagnostic scalars; see the WGSL initialization. */
 const SPARSE_CM12_PRESSURE_SCALAR_BYTES = 80;
 const SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS =
@@ -1125,11 +1128,11 @@ export function sparseCM12PressureIterationsFromReceipt(
   return hardMaximum;
 }
 const ACTIVITY_HEADER_WORDS = 28;
-// Word 42 caches frontier neighbours whose signed directory/reachability
+// Word 45 caches frontier neighbours whose signed directory/reachability
 // question has already been resolved. It is topology evidence, not physical
 // activity evidence, and is explicitly re-armed by retirement/solid edits.
-const ACTIVITY_RECORD_WORDS = 43;
-const ACTIVITY_SURFACE_B4_LEASE = 0x0400_0000;
+const ACTIVITY_RECORD_WORDS = 47;
+const ACTIVITY_SURFACE_LEASE_MASK_WORD = 46;
 const ACCEPTED_COARSE_ROW_COUNT_WORD = 22;
 const ACCEPTED_MIXED_ROW_COUNT_WORD = 23;
 const PRESSURE_ACTIVE_ROW_COUNT_WORD = 24;
@@ -2467,6 +2470,10 @@ export interface SparseCM12GPUActivityRecord {
   /** One-rung presentation proof for this accepted topology generation. */
   readonly representableNextResolution: SparseBrickResolution | undefined;
   readonly representabilityGeneration: number;
+  /** Generation receipts indexed by log2(resolution), B1 through B16. */
+  readonly representabilityGenerations: readonly [number, number, number, number, number];
+  /** Durable accepted-surface leases indexed by the same dyadic level bits. */
+  readonly surfaceLeaseMask: number;
   /** Zero on success; proof rejection bitmask for QA and policy tuning. */
   readonly representabilityFailure: number;
 }
@@ -4170,12 +4177,14 @@ export class WebGPUSparseCM12Resident {
       initialActivity[at + 37] = INVALID;
       // Low five bits retain the coarsest calm level accepted before this
       // brick's first promotion; bit 31 is latched by that promotion. An
-      // initially accepted B4 page also receives the same provisional surface
-      // lease as a B8-to-B4 proof. Its first classification clears the bit for
-      // ordinary bulk, while an exposed page retains it across seam ownership.
-      initialActivity[at + 38] = atlas.bricks[brick]!.resolution
-        | (atlas.bricks[brick]!.resolution === atlas.brickFineResolution / 2
-          ? ACTIVITY_SURFACE_B4_LEASE : 0);
+      // Every initially coarse page receives a provisional lease for its own
+      // rung. Its first classification clears ordinary bulk, while an exposed
+      // page retains the level bit across seam ownership.
+      initialActivity[at + 38] = atlas.bricks[brick]!.resolution;
+      if (atlas.bricks[brick]!.resolution < atlas.brickFineResolution) {
+        initialActivity[at + ACTIVITY_SURFACE_LEASE_MASK_WORD]
+          = 1 << Math.log2(atlas.bricks[brick]!.resolution);
+      }
       if (initialActivity[at + 10] !== 0) {
         initialActivity[at + 32] = sparseCM12AuthoredFluidFrontierMask(
           atlas, atlas.bricks[brick]!,
@@ -7219,8 +7228,7 @@ export class WebGPUSparseCM12Resident {
       sparseCM12SharpeningTraceSteps(sharpening?.traceSteps),
       policy.residencyDensity, policy.residencyMassFineCells,
     ], 60);
-    f.set([policy.finestTravelCells, policy.fourTravelCells,
-      policy.twoTravelCells, policy.thinFeatureCells], 64);
+    f.set([policy.finestTravelCells, 0, 0, policy.thinFeatureCells], 64);
     f.set([policy.thinFeatureDensity, policy.surfaceDensityMinimum,
       policy.surfaceDensityMaximum, policy.detailTolerance], 68);
     f.set([policy.frontLookaheadSteps, policy.promoteScore,
@@ -7269,6 +7277,15 @@ export class WebGPUSparseCM12Resident {
     );
     u[surfaceProofWord + 2] = policy.surfaceCoarseningEnabled ? 1 : 0;
     u[surfaceProofWord + 3] = policy.forcedSurfaceResolutionForQA ?? 0;
+    const velocityThresholds = new Float32Array(8);
+    const finestLevel = Math.log2(this.brickFineResolution);
+    velocityThresholds[finestLevel] = policy.finestTravelCells;
+    if (finestLevel > 0) velocityThresholds[finestLevel - 1] = policy.fourTravelCells;
+    if (finestLevel > 1) velocityThresholds[finestLevel - 2] = policy.twoTravelCells;
+    for (let level = finestLevel - 3; level > 0; level -= 1) {
+      velocityThresholds[level] = 0.5 * velocityThresholds[level + 1]!;
+    }
+    f.set(velocityThresholds, surfaceProofWord + 4);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
   }
 
@@ -9924,10 +9941,15 @@ export class WebGPUSparseCM12Resident {
             (words[at + 38]! >>> 16) & 0x1f),
           refinementPolicyMaximumResolution:
             ((words[at + 38]! >>> 21) & 0x1f) || 8,
-          representableNextResolution: words[at + 39] === 0 ? undefined
-            : words[at + 39] as SparseBrickResolution,
-          representabilityGeneration: words[at + 40]!,
-          representabilityFailure: words[at + 41]!,
+          representableNextResolution: words[at + 12] > 1
+            && words[at + 39 + Math.log2(words[at + 12]! / 2)] !== 0
+            ? words[at + 12]! / 2 as SparseBrickResolution : undefined,
+          representabilityGeneration: words[at + 12] > 1
+            ? words[at + 39 + Math.log2(words[at + 12]! / 2)]! : 0,
+          representabilityGenerations: [39, 40, 41, 42, 43].map((offset) =>
+            words[at + offset]!) as [number, number, number, number, number],
+          surfaceLeaseMask: words[at + ACTIVITY_SURFACE_LEASE_MASK_WORD]!,
+          representabilityFailure: words[at + 44]!,
         };
       });
       return {

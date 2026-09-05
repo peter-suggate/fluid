@@ -676,7 +676,8 @@ try {
   try {
     const constructionStarted_ms = performance.now();
     const solverOptions = {
-        resolutionMode,
+        initialResolutionForQA: resolutionMode === "all-fine"
+          ? brickFineResolution : undefined,
         brickFineResolution,
         presentationPageResolution,
         timeStep: "paper",

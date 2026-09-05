@@ -170,7 +170,7 @@ async function main() {
     const injection = { centre_m: { x: 0.22, y: 0.60, z: 0 }, radius_m: 0.09 };
     solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
       device, scene, "balanced", undefined,
-      { resolutionMode: "all-fine", brickFineResolution: 8,
+      { initialResolutionForQA: 8, brickFineResolution: 8,
         presentationPageResolution: 8, timeStep: "scene" }, () => {});
     const resident = (solver as unknown as { resident: ResidentAddressSource }).resident;
     const initialFields = await solver.readDiagnosticFields();

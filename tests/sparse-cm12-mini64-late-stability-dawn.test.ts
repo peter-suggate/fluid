@@ -62,8 +62,8 @@ dawnTest("Sparse CM12 mini64 remains bounded through the late wall-impact window
       const paperTimeStep = process.env.FLUID_MINI64_LATE_PAPER_DT === "1";
       solver = await WebGPUAdaptiveMassSolver.createAsync(
         device, scene, "balanced", undefined, {
-          resolutionMode: process.env.FLUID_MINI64_LATE_ALL_FINE === "1"
-            ? "all-fine" : "adaptive",
+          initialResolutionForQA: process.env.FLUID_MINI64_LATE_ALL_FINE === "1"
+            ? 8 : undefined,
           brickFineResolution: 8,
           timeStep: paperTimeStep ? "paper" : "scene",
           gammaDiffusionEnabled:

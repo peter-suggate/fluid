@@ -385,6 +385,8 @@ export function createWebgpuSparseCM12ResidentWGSL(
   const presentationHeightCacheCapacity = presentationHeightColumnAxis ** 2;
   const surfaceProofLatticeAxis = presentationPageResolution + 2;
   const surfaceProofLatticeCapacity = surfaceProofLatticeAxis ** 3;
+  const surfaceProofDensityAxis = presentationPageResolution / 2 + 4;
+  const surfaceProofDensityCapacity = surfaceProofDensityAxis ** 3;
   const incrementalActivityEntries = incrementalActivityLayout
     ? createSparseCM12IncrementalActivityWGSL(incrementalActivityLayout,
       brickFineResolution / 4)
@@ -1038,15 +1040,15 @@ const CM12_SPARSE_TRANSPORT_FIXED:f32=65536.0;
 // the stable SRR spatial-tile authority without changing receipt identity.
 const EXP_ACTIVITY_SCALAR_BRICKS:bool=true;
 const ACTIVITY_HEADER_WORDS:u32=28u;
-const ACTIVITY_RECORD_WORDS:u32=43u;
-const ACTIVITY_FRONTIER_RESOLVED_MASK_WORD:u32=42u;
+const ACTIVITY_RECORD_WORDS:u32=47u;
+const ACTIVITY_SURFACE_PROOF_GENERATION_BASE:u32=39u;
+const ACTIVITY_SURFACE_PROOF_FAILURE_WORD:u32=44u;
+const ACTIVITY_FRONTIER_RESOLVED_MASK_WORD:u32=45u;
+const ACTIVITY_SURFACE_LEASE_MASK_WORD:u32=46u;
 const ACTIVITY_RECOVERY_LOCK:u32=0x80000000u;
-// A B8 presentation proof authorizes not only the B8 -> B4 transaction but
-// retention of that accepted B4 surface while its transport CFL remains
-// inside the B4 envelope. Without this durable bit, persistent thin evidence
-// demoted B8 and then demanded B8 again on the very next frame because the
-// one-generation proof receipt is intentionally cleared at commit.
-const ACTIVITY_SURFACE_B4_LEASE:u32=0x04000000u;
+// One bit per dyadic rung authorizes retention of an accepted coarse surface
+// while its transport CFL remains inside that rung's envelope. Proof
+// generations are separate words because topology generations use all 32 bits.
 // A dam is momentarily motionless before gravity has accumulated a transport
 // velocity. Require a short run of consecutive clean accepted outputs so that
 // this launch transient cannot masquerade as a settled surface.
@@ -1111,6 +1113,8 @@ const PRESENTATION_CACHE_CAPACITY:u32=${presentationCacheCapacity}u;
 const PRESENTATION_HEIGHT_COLUMN_AXIS:u32=${presentationHeightColumnAxis}u;
 const SURFACE_PROOF_LATTICE_AXIS:u32=${surfaceProofLatticeAxis}u;
 const SURFACE_PROOF_LATTICE_CAPACITY:u32=${surfaceProofLatticeCapacity}u;
+const SURFACE_PROOF_DENSITY_AXIS:u32=${surfaceProofDensityAxis}u;
+const SURFACE_PROOF_DENSITY_CAPACITY:u32=${surfaceProofDensityCapacity}u;
 const TEMPLATE_CELL_RESOLUTION_BITS:u32=5u;
 const TEMPLATE_CELL_RESOLUTION_MASK:u32=31u;
 const ACTIVITY_FIXED:f32=65536.0;
@@ -1141,7 +1145,7 @@ struct Params {
   injectionCenter:vec4f,
   injectionRadius:vec4f,
   sharpening:vec4f,         // Algorithm 2 distance/substeps, residency density/mass
-  activityThresholds:vec4f, // 8/4/2 travel floors, thin-feature width
+  activityThresholds:vec4f, // finest travel normalization, reserved, thin width
   activityDensity:vec4f,    // thin floor, surface low/high, detail tolerance
   activityTiming:vec4f,     // front lookahead, promote/emergency/demote scores
   activityEpochs:vec4u,     // cadence, promotion epochs, demotion epochs, activity signals enabled
@@ -1156,6 +1160,7 @@ struct Params {
   refinementRegionControl:vec4u,
   refinementRegions:array<vec4f,16>, // min.xyz/floor, max.xyz/optional ceiling
   surfaceProof:vec4u,       // displacement/normal float bits, enabled, QA rung
+  velocityThresholds:array<vec4f,2>, // indexed by log2(resolution), B1..B16
 }
 
 @group(0)@binding(0)var<uniform>p:Params;
@@ -1615,14 +1620,14 @@ fn cachedRefinementGradingCap(brick:u32)->u32{
   if(p.refinementRegionControl.x==0u||brick>=p.dispatch.w){
     return BRICK_FINE_RESOLUTION;
   }
-  return clamp(atomicLoad(&activity[activityRecord(brick)+41u]),
+  return clamp(atomicLoad(&activity[activityRecord(brick)
+    +ACTIVITY_SURFACE_PROOF_FAILURE_WORD]),
     1u,BRICK_FINE_RESOLUTION);
 }
 fn setRefinementGradingCap(brick:u32,resolution:u32){
-  // Word 41 is the prior frame's presentation-proof diagnostic. Planning has
-  // already consumed the proof receipt in words 39/40, so this word is free as
-  // a full-rung transient until presentation publishes the next diagnostic.
-  atomicStore(&activity[activityRecord(brick)+41u],
+  // The prior frame's presentation-proof diagnostic is free as a full-rung
+  // transient after planning has consumed its level-indexed receipt.
+  atomicStore(&activity[activityRecord(brick)+ACTIVITY_SURFACE_PROOF_FAILURE_WORD],
     clamp(resolution,1u,BRICK_FINE_RESOLUTION));
 }
 fn topologyPreparationScheduledAt(record:u32)->bool{
@@ -1648,6 +1653,12 @@ fn templateLevelIndex(resolution:u32)->u32{
   var level=0u;var rung=resolution;
   while(rung>1u){rung/=2u;level+=1u;}
   return level;
+}
+fn surfaceProofGenerationWord(resolution:u32)->u32{
+  return ACTIVITY_SURFACE_PROOF_GENERATION_BASE+templateLevelIndex(resolution);
+}
+fn surfaceLeaseBit(resolution:u32)->u32{
+  return 1u<<templateLevelIndex(resolution);
 }
 fn acceptedBrickResolution(brick:u32)->u32{
   return atomicLoad(&activity[activityRecord(brick)+12u]);
@@ -2136,12 +2147,34 @@ fn restrictedPresentationDensityAt(lower:vec3i,cellScale:i32,densityOffset:u32)-
         /max(cellOpenFraction(owner.x),1e-6),0.0,1.0);
     }
   }
+  // Walk one finest row at a time, but consume a contiguous run when the
+  // accepted owner spans several finest samples. This is bit-equivalent to
+  // summing every child because an accepted composite cell is constant across
+  // its represented volume. It is especially important for a B2 -> B1 proof:
+  // the naive loop resolved the same B2 owner four times on every x row.
   var rho=0.0;
-  for(var dz=0;dz<cellScale;dz+=1){for(var dy=0;dy<cellScale;dy+=1){for(var dx=0;dx<cellScale;dx+=1){
-    let cell=presentationOwnerCellAt(lower+vec3i(dx,dy,dz));
-    if(cell!=INVALID){rho+=clamp(state[densityOffset+cell]
-      /max(cellOpenFraction(cell),1e-6),0.0,1.0);}
-  }}}
+  for(var dz=0;dz<cellScale;dz+=1){for(var dy=0;dy<cellScale;dy+=1){
+    var dx=0;
+    loop{
+      if(dx>=cellScale){break;}
+      let q=lower+vec3i(dx,dy,dz);
+      let childOwner=compactOwnerCellAt(q);
+      var run=1;
+      if(childOwner.x!=INVALID){
+        let ownerScale=i32(BRICK_FINE_RESOLUTION*brickSpan(childOwner.y)/childOwner.z);
+        let ownerOrigin=cm12WorldLeafCoordinate(childOwner.y)*i32(BRICK_FINE_RESOLUTION);
+        let ownerCellLowerX=ownerOrigin.x
+          +((q.x-ownerOrigin.x)/ownerScale)*ownerScale;
+        run=max(1,min(cellScale-dx,ownerCellLowerX+ownerScale-q.x));
+        let reasons=atomicLoad(&activity[activityRecord(childOwner.y)+1u]);
+        if((reasons&64u)!=0u){
+          rho+=f32(run)*clamp(state[densityOffset+childOwner.x]
+            /max(cellOpenFraction(childOwner.x),1e-6),0.0,1.0);
+        }
+      }
+      dx+=run;
+    }
+  }}
   return rho/f32(cellScale*cellScale*cellScale);
 }
 fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
@@ -3821,7 +3854,7 @@ fn sharpeningDelta(cell:u32,stats:SharpeningStats)->f32{
   // update is 3 dt |grad rho|, so distances stored in finest-cell units must
   // be converted back to metres. Multiplying by the local cell width here
   // made the old expression dimensionless and weakened sharpening by 1/h:
-  // 10x on the all-coarse symmetric-expansion control and 20x when all fine.
+  // 10x on the coarse symmetric-expansion control and 20x at uniform B8.
   let pseudoTimeFineCells=3.0*p.frame.x/p.frame.y;
   var plusSquared=0.0;var minusSquared=0.0;
   for(var axis=0u;axis<3u;axis+=1u){
@@ -4261,7 +4294,7 @@ fn initializeDensityCapacityRepairGate${gate}(
 fn scatterDensityCapacityRepairGate${gate}(
  @builtin(global_invocation_id)gid:vec3u){
   if(!densityCapacityRepairGateOpen(${gate}u)){return;}
-  scatterDensityCapacityRepairCell(acceptedTemplateCellInvocation(gid.x));
+  scatterDensityCapacityRepairCellAtPlane(acceptedTemplateCellInvocation(gid.x),6u);
 }
 @compute @workgroup_size(64)
 fn finalizeDensityCapacityRepairGate${gate}(
@@ -5201,9 +5234,11 @@ var<workgroup>presentationHeightFieldValid:u32;
 // Fine accepted output and the virtual next-coarser output on the page plus a
 // one-sample halo. The standalone proof kernel owns this cache.
 var<workgroup>surfaceProofPhi:array<vec2f,${surfaceProofLatticeCapacity}>;
-var<workgroup>surfaceProofDensity:array<f32,512>;
+var<workgroup>surfaceProofDensity:array<f32,${surfaceProofDensityCapacity}>;
 var<workgroup>surfaceProofValid:atomic<u32>;
 var<workgroup>surfaceProofFailure:atomic<u32>;
+var<workgroup>surfaceProofTarget:u32;
+var<workgroup>surfaceProofRestrictionFactor:u32;
 fn reducePair(lane:u32,group:u32,a:f32,b:f32){
   reduceA[lane]=a;reduceB[lane]=b;workgroupBarrier();
   var width=32u;loop{if(lane<width){reduceA[lane]+=reduceA[lane+width];reduceB[lane]+=reduceB[lane+width];}
@@ -5920,9 +5955,8 @@ fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
 }
 
 // Finest-cell displacement in one accepted step is the resolution signal the
-// user can reason about directly. The live policy uniform supplies the three
-// descending 8^3/4^3/2^3 thresholds; slower bulk may use 1^3. Surface evidence
-// independently overrides this floor to 8^3 below.
+// user can reason about directly. Thresholds are indexed by the complete
+// dyadic ladder rather than naming three B8-specific rungs.
 fn activitySignalsEnabled()->bool{return p.activityEpochs.w!=0u;}
 fn surfaceCoarseningEnabled()->bool{return p.surfaceProof.z!=0u;}
 fn forcedSurfaceResolutionForQA()->u32{return p.surfaceProof.w;}
@@ -5932,12 +5966,19 @@ fn surfaceDisplacementToleranceMetres()->f32{
 fn surfaceNormalMinimumDot()->f32{
   return clamp(bitcast<f32>(p.surfaceProof.y),-1.0,1.0);
 }
+fn velocityTravelThreshold(resolution:u32)->f32{
+  let level=templateLevelIndex(resolution);
+  return p.velocityThresholds[level/4u][level%4u];
+}
 
 fn velocityResolutionFloor(travelFineCells:f32)->u32{
   if(!activitySignalsEnabled()){return 1u;}
-  if(travelFineCells>=p.activityThresholds.x){return BRICK_FINE_RESOLUTION;}
-  if(travelFineCells>=p.activityThresholds.y){return max(1u,BRICK_FINE_RESOLUTION/2u);}
-  if(travelFineCells>=p.activityThresholds.z){return max(1u,BRICK_FINE_RESOLUTION/4u);}
+  var resolution=BRICK_FINE_RESOLUTION;
+  loop{
+    if(travelFineCells>=velocityTravelThreshold(resolution)){return resolution;}
+    if(resolution==1u){break;}
+    resolution/=2u;
+  }
   return 1u;
 }
 
@@ -6280,7 +6321,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   // cell of calm travel still saturated the emergency score and promoted one
   // rung every frame. A score of one now means the configured 8^3 threshold.
   let normalizedVelocityActivity=velocityActivity
-    /max(p.activityThresholds.x,1e-6);
+    /max(velocityTravelThreshold(BRICK_FINE_RESOLUTION),1e-6);
   // Uniform translation of a fully flooded brick carries no missing spatial
   // detail. Score travel only where a liquid-air interface/thin feature needs
   // characteristic lookahead; bulk refinement is driven by deformation,
@@ -6691,22 +6732,22 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let quietPolicyWallSeparation=surface&&!densitySurface
     &&measuredVelocityFloor==1u&&policyTileUniformlyFilled(brick);
   // Restricting a cell-cut planar surface can move its rho=.5 crossing from
-  // inside the wet B8 page onto the face between the wet B4 page and its dry
+  // inside a wet page onto the face between it and its dry
   // presentation-support page. The unique seam-owner rule deliberately gives
   // that crossing to the dry side, which is not occupied and therefore cannot
-  // publish the ordinary surface bit. Preserve the accepted B4 proof while the
+  // publish the ordinary surface bit. Preserve the accepted rung proof while the
   // wet page is still occupied and exposed. Enclosure clears a lease that has
   // become ordinary bulk; retirement clears a drained one. Motion, thinness,
   // transport demand and authored floors remain independent B8 authorities.
   let deeplyEnclosed=policyTileDeeplyEnclosed(brick);
-  let acceptedB4Lease=current==BRICK_FINE_RESOLUTION/2u
-    &&(recoveryState&ACTIVITY_SURFACE_B4_LEASE)!=0u;
-  let leasedExteriorSurface=acceptedB4Lease&&(reasons&64u)!=0u
+  let surfaceLeaseMask=atomicLoad(&activity[output+ACTIVITY_SURFACE_LEASE_MASK_WORD]);
+  let acceptedSurfaceLease=current<BRICK_FINE_RESOLUTION
+    &&(surfaceLeaseMask&surfaceLeaseBit(current))!=0u;
+  let leasedExteriorSurface=acceptedSurfaceLease&&(reasons&64u)!=0u
     &&!deeplyEnclosed;
   let policySurface=(surface||leasedExteriorSurface)&&!quietPolicyWallSeparation;
-  let surfaceB4Lease=policySurface&&acceptedB4Lease;
-  if(!policySurface&&(recoveryState&ACTIVITY_SURFACE_B4_LEASE)!=0u){
-    atomicAnd(&activity[output+38u],~ACTIVITY_SURFACE_B4_LEASE);
+  if(!policySurface&&surfaceLeaseMask!=0u){
+    atomicStore(&activity[output+ACTIVITY_SURFACE_LEASE_MASK_WORD],0u);
   }
   // Neighbour means can all exceed rho=.5 while a fast dam front still cuts
   // this brick internally. That is a moving interface, not settled submerged
@@ -6745,10 +6786,10 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // accepted-output proof below. Reapplying any velocityFloor>1 here promoted
   // every settled moving surface to B8 and made clean B4 receipts impossible
   // to consume.
-  let receiptFresh=surfaceCoarseningEnabled()
-    &&current==BRICK_FINE_RESOLUTION
-    &&atomicLoad(&activity[output+39u])==BRICK_FINE_RESOLUTION/2u
-    &&atomicLoad(&activity[output+40u])==atomicLoad(&activity[12]);
+  let nextSurfaceRung=max(1u,current/2u);
+  let receiptFresh=surfaceCoarseningEnabled()&&current>1u
+    &&atomicLoad(&activity[output+surfaceProofGenerationWord(nextSurfaceRung)])
+      ==atomicLoad(&activity[12]);
   let pageDemand=injectionDemand
     ||(transportDemanded&&((reasons&64u)==0u||diluteReceiver));
   // Output representability is geometric evidence, not permission to weaken
@@ -6766,14 +6807,12 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let boundaryFloor=max(staticBoundaryFloor,select(1u,
     max(1u,BRICK_FINE_RESOLUTION/2u),movingBoundaryRequired));
   let forcedSurfaceRung=forcedSurfaceResolutionForQA();
-  let validForcedSurfaceRung=forcedSurfaceRung==BRICK_FINE_RESOLUTION
-    ||forcedSurfaceRung==BRICK_FINE_RESOLUTION/2u;
-  // Surface distance retains its B8 interface floor. Activity mode treats
-  // surface membership as evidence for a one-rung proof: a B8 surface stays
-  // B8 until its accepted output proves B4, and an accepted B4 surface cannot
-  // descend further without a future proof implementation for that rung.
-  let activitySurfaceFloor=select(1u,BRICK_FINE_RESOLUTION/2u,
-    adaptiveSurface&&current<=BRICK_FINE_RESOLUTION/2u);
+  let validForcedSurfaceRung=forcedSurfaceRung>0u
+    &&forcedSurfaceRung<=BRICK_FINE_RESOLUTION
+    &&BRICK_FINE_RESOLUTION%forcedSurfaceRung==0u;
+  // Activity mode permits exactly the next rung to be considered. The
+  // accepted-output receipt below is still required before it can commit.
+  let activitySurfaceFloor=select(1u,nextSurfaceRung,adaptiveSurface);
   var surfaceFloor=select(
     select(1u,BRICK_FINE_RESOLUTION,policySurface&&!settledRecoveredBulk),
     activitySurfaceFloor,activitySignals);
@@ -6796,15 +6835,16 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   let required=select(dynamicRequired,
     select(1u,boundaryFloor,boundaryRequired),enclosed);
   // Use different physical thresholds on the two sides of a rung change.
-  // B4 promotes at the configured B8 CFL (one fine cell/step by default),
-  // while B8 demotes below the midpoint between the B4 and B8 transport
+  // A coarse rung promotes at the next-finer CFL, while a fine rung demotes
+  // below the midpoint between its own and the next-coarser transport
   // thresholds. Eight consecutive accepted proofs then establish a genuine
   // amplitude deadband without requiring an inviscid free-slip tank to come
   // to an unphysical complete rest.
-  let surfaceDemotionTravel=0.5*(p.activityThresholds.x+p.activityThresholds.y);
-  let proofCanDemote=required<=BRICK_FINE_RESOLUTION/2u
+  let surfaceDemotionTravel=0.5*(velocityTravelThreshold(current)
+    +velocityTravelThreshold(nextSurfaceRung));
+  let proofCanDemote=current>1u&&required<=nextSurfaceRung
     &&activityF32(output+33u)<surfaceDemotionTravel;
-  if(activitySignals&&adaptiveSurface&&current==BRICK_FINE_RESOLUTION){
+  if(activitySignals&&adaptiveSurface&&current>1u){
     proofEpochs=select(0u,min(255u,proofEpochs+1u),
       receiptFresh&&proofCanDemote);
   }else{proofEpochs=0u;}
@@ -6824,13 +6864,12 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   }else if(!activitySignals||atomicLoad(&activity[5])!=0u){
     requested=current;planReasons=32u;
     if(activitySignals&&adaptiveSurface){
-      let forcedB4=validForcedSurfaceRung
-        &&forcedSurfaceRung==BRICK_FINE_RESOLUTION/2u;
-      if(current==BRICK_FINE_RESOLUTION&&proofCanDemote
-        &&(forcedB4||(receiptFresh&&proofEpochs
+      let forcedNext=validForcedSurfaceRung&&forcedSurfaceRung==nextSurfaceRung;
+      if(current>1u&&proofCanDemote
+        &&(forcedNext||(receiptFresh&&proofEpochs
           >=max(p.activityEpochs.z,SURFACE_PROOF_SETTLE_EPOCHS)))){
-        requested=BRICK_FINE_RESOLUTION/2u;
-        planReasons=select(16u,4096u,forcedB4);
+        requested=nextSurfaceRung;
+        planReasons=select(16u,4096u,forcedNext);
       }
     }else if(activitySignals&&!enclosed&&!slowSurface&&hotEpochs>=p.activityEpochs.y){
       requested=min(BRICK_FINE_RESOLUTION,2u*current);planReasons=8u;
@@ -8348,11 +8387,12 @@ fn publishCandidateTopologyDeltaWork(lid:vec3u,brick:u32,validBrick:bool){
   workgroupBarrier();if(lane!=0u){return;}
   atomicStore(&activity[output+10u],select(0u,1u,candidateActive));
   atomicStore(&activity[output+12u],candidate);
-  // A receipt describes exactly one accepted generation. The presentation
-  // stage may publish a replacement only after the new output commits.
-  atomicStore(&activity[output+39u],0u);
-  atomicStore(&activity[output+40u],0u);
-  atomicStore(&activity[output+41u],0u);
+  // Receipts describe exactly one accepted topology generation. Presentation
+  // may publish replacements only after the new output commits.
+  for(var level=0u;level<5u;level+=1u){
+    atomicStore(&activity[output+ACTIVITY_SURFACE_PROOF_GENERATION_BASE+level],0u);
+  }
+  atomicStore(&activity[output+ACTIVITY_SURFACE_PROOF_FAILURE_WORD],0u);
   if(acceptedActive!=candidateActive){
     if(candidateActive){atomicAdd(&activity[8],1u);atomicAdd(&activity[9],1u);
       atomicAdd(&activity[11],candidateRange.y);atomicStore(&activity[output+34u],0u);
@@ -8392,13 +8432,13 @@ fn publishCandidateTopologyDeltaWork(lid:vec3u,brick:u32,validBrick:bool){
     atomicStore(&activity[output+38u],(recoveryState&~31u)|candidate);}
   let planReason=atomicLoad(&activity[output+9u]);
   let acceptedSurface=(atomicLoad(&activity[output+1u])&1u)!=0u;
-  let acceptedProofLease=candidate==BRICK_FINE_RESOLUTION/2u
-    &&accepted==BRICK_FINE_RESOLUTION&&acceptedSurface
+  let acceptedProofLease=candidate<accepted&&acceptedSurface
     &&(planReason==16u||planReason==4096u);
   if(acceptedProofLease){
-    atomicOr(&activity[output+38u],ACTIVITY_SURFACE_B4_LEASE);
-  }else if(candidate!=BRICK_FINE_RESOLUTION/2u||!acceptedSurface){
-    atomicAnd(&activity[output+38u],~ACTIVITY_SURFACE_B4_LEASE);
+    atomicOr(&activity[output+ACTIVITY_SURFACE_LEASE_MASK_WORD],
+      surfaceLeaseBit(candidate));
+  }else if(!acceptedSurface){
+    atomicStore(&activity[output+ACTIVITY_SURFACE_LEASE_MASK_WORD],0u);
   }
   atomicStore(&activity[output+2u],0u);atomicStore(&activity[output+11u],
     atomicLoad(&activity[0]));atomicAdd(&activity[17],1u);
@@ -9157,12 +9197,13 @@ fn cm12PresentationRejectAccepted(page:u32){
 ` : ""}
 
 ${framePlanLayout && framePlanPresentationLayout ? /* wgsl */ `
-fn surfaceProofDensityAt(coarseLocal:vec3i)->f32{
-  let index=vec3u(coarseLocal+vec3i(2));
-  return surfaceProofDensity[index.x+8u*(index.y+8u*index.z)];
+fn surfaceProofDensityAt(restrictedLocal:vec3i)->f32{
+  let index=vec3u(restrictedLocal+vec3i(2));
+  return surfaceProofDensity[index.x+SURFACE_PROOF_DENSITY_AXIS
+    *(index.y+SURFACE_PROOF_DENSITY_AXIS*index.z)];
 }
-fn surfaceProofVirtualB4Density(local:vec3i)->f32{
-  let shifted=(vec3f(local)+vec3f(0.5))/2.0;
+fn surfaceProofVirtualRestrictedDensity(local:vec3i,factor:u32)->f32{
+  let shifted=(vec3f(local)+vec3f(0.5))/f32(factor);
   let lower=vec3i(floor(shifted));let t=fract(shifted);
   let center=surfaceProofDensityAt(lower);var slope=vec3f(0.0);
   for(var axis=0u;axis<3u;axis+=1u){
@@ -9202,22 +9243,23 @@ fn surfaceProofGradient(local:vec3i,coarse:bool)->vec3f{
   }
   return gradient;
 }
-fn surfaceB4ProofConstraintFailure(brick:u32)->u32{
+fn surfaceProofConstraintFailure(brick:u32,candidateResolution:u32)->u32{
   if(!surfaceCoarseningEnabled()||!activitySignalsEnabled()){return 1u;}
   if(brick>=p.dispatch.w||!brickActive(brick)||brickSpan(brick)!=1u
     ||!brickCandidatePlanningEnabled(brick)
-    ||acceptedBrickResolution(brick)!=BRICK_FINE_RESOLUTION){return 2u;}
+    ||acceptedBrickResolution(brick)<=1u
+    ||candidateResolution!=acceptedBrickResolution(brick)/2u){return 2u;}
   let output=activityRecord(brick);let reasons=atomicLoad(&activity[output+1u]);
   if((reasons&1u)==0u||(reasons&1024u)!=0u){return 4u;}
   if(injectionReachesBrick(brick)){return 8u;}
   if(velocityResolutionFloor(activityF32(output+33u))
-      >BRICK_FINE_RESOLUTION/2u){return 16u;}
+      >candidateResolution){return 16u;}
   if(brickTouchesDemandedMissingWorldPage(brick)){return 32u;}
-  if(applySparseCM12RefinementRegionBounds(brick,BRICK_FINE_RESOLUTION/2u)
-      !=BRICK_FINE_RESOLUTION/2u){return 64u;}
+  if(applySparseCM12RefinementRegionBounds(brick,candidateResolution)
+      !=candidateResolution){return 64u;}
   return 0u;
 }
-fn surfaceB4OutputSampleFailure(local:vec3i)->u32{
+fn surfaceProofOutputSampleFailure(local:vec3i)->u32{
   let world=cm12PresentationBrickOrigin+local;
   if(cm12SolidVoxelFractionQ8(world)>=255u){return 0u;}
   let fine=surfaceProofPhiAt(local,false);
@@ -9280,18 +9322,22 @@ fn surfaceB4OutputSampleFailure(local:vec3i)->u32{
   return 0u;
 }
 
-// Publish a camera-independent, generation-stamped B8 -> B4 surface receipt.
-// The virtual B4 field uses the exact conservative reconstruction consumed by
-// coarse presentation pages, so the decision and the visible result cannot
-// silently drift into different reconstruction policies.
+// Publish a camera-independent, generation-stamped receipt for the next
+// dyadic surface rung. The virtual restricted field uses the exact
+// conservative reconstruction consumed by coarse presentation pages, so the
+// decision and visible result cannot drift into different policies.
 @compute @workgroup_size(64)
 fn publishSparseCM12SurfaceRepresentabilityReceipts(
  @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
   let brick=wid.x;if(brick>=p.dispatch.w){return;}
   let output=activityRecord(brick);
   if(lane==0u){
-    atomicStore(&activity[output+39u],0u);atomicStore(&activity[output+40u],0u);
-    atomicStore(&activity[output+41u],0u);atomicStore(&surfaceProofFailure,0u);
+    let acceptedResolution=acceptedBrickResolution(brick);
+    surfaceProofTarget=max(1u,acceptedResolution/2u);
+    surfaceProofRestrictionFactor=BRICK_FINE_RESOLUTION/surfaceProofTarget;
+    atomicStore(&activity[output+surfaceProofGenerationWord(surfaceProofTarget)],0u);
+    atomicStore(&activity[output+ACTIVITY_SURFACE_PROOF_FAILURE_WORD],0u);
+    atomicStore(&surfaceProofFailure,0u);
     let flags=cm12FppLoad(${framePlanPresentationLayout.baseWords
       + SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER.flags}u);
     let acceptedGeneration=cm12FppLoad(${framePlanPresentationLayout.baseWords
@@ -9304,7 +9350,7 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
       &&cm12FppLoad(${framePlanPresentationLayout.baseWords
         + SPARSE_CM12_FRAME_PLAN_PRESENTATION_HEADER.topologyGeneration}u)
         ==atomicLoad(&activity[12]);
-    let constraintFailure=surfaceB4ProofConstraintFailure(brick);
+    let constraintFailure=surfaceProofConstraintFailure(brick,surfaceProofTarget);
     let eligible=accepted&&forcedSurfaceResolutionForQA()==0u
       &&constraintFailure==0u;
     cm12PresentationBrick=brick;
@@ -9323,19 +9369,28 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
   workgroupBarrier();
   let proofMode=workgroupUniformLoad(&surfaceProofValid);
   if(proofMode==0u){
-    if(lane==0u){atomicStore(&activity[output+41u],
+    if(lane==0u){atomicStore(&activity[output+ACTIVITY_SURFACE_PROOF_FAILURE_WORD],
       atomicLoad(&surfaceProofFailure));}
     return;
   }
   if((proofMode&2u)!=0u){preparePresentationColumnHeights(lane,
     brick,cm12PresentationBrickOrigin,cm12PresentationDensityOffset,true);}
-  let coarseBase=cm12PresentationBrickOrigin/2;
-  for(var index=lane;index<512u;index+=64u){
-    let z=index/64u;let remainder=index-z*64u;
-    let y=remainder/8u;let x=remainder-y*8u;
-    let coarseLocal=vec3i(i32(x)-2,i32(y)-2,i32(z)-2);
-    surfaceProofDensity[index]=restrictedPresentationDensityAt(
-      2*(coarseBase+coarseLocal),2,cm12PresentationDensityOffset);
+  let targetResolution=surfaceProofTarget;
+  let restrictionFactor=surfaceProofRestrictionFactor;
+  let restrictedBase=cm12PresentationBrickOrigin/i32(restrictionFactor);
+  let restrictedAxis=targetResolution+4u;
+  let restrictedCapacity=restrictedAxis*restrictedAxis*restrictedAxis;
+  for(var logicalIndex=lane;logicalIndex<restrictedCapacity;logicalIndex+=64u){
+    let z=logicalIndex/(restrictedAxis*restrictedAxis);
+    let remainder=logicalIndex-z*restrictedAxis*restrictedAxis;
+    let y=remainder/restrictedAxis;
+    let x=remainder-y*restrictedAxis;
+    let restrictedLocal=vec3i(i32(x)-2,i32(y)-2,i32(z)-2);
+    let cacheIndex=x+SURFACE_PROOF_DENSITY_AXIS
+      *(y+SURFACE_PROOF_DENSITY_AXIS*z);
+    surfaceProofDensity[cacheIndex]=restrictedPresentationDensityAt(
+      i32(restrictionFactor)*(restrictedBase+restrictedLocal),i32(restrictionFactor),
+      cm12PresentationDensityOffset);
   }
   workgroupBarrier();
   for(var index=lane;index<SURFACE_PROOF_LATTICE_CAPACITY;index+=64u){
@@ -9346,7 +9401,8 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     let local=vec3i(i32(x)-1,i32(y)-1,i32(z)-1);
     let fine=surfaceProofAcceptedPhi(local,cm12PresentationDensityOffset);
     let world=cm12PresentationBrickOrigin+local;
-    var coarse=(CM12_LIQUID_ISOVALUE-surfaceProofVirtualB4Density(local))
+    var coarse=(CM12_LIQUID_ISOVALUE
+      -surfaceProofVirtualRestrictedDensity(local,restrictionFactor))
       *4.0*p.frame.y;
     if(cm12SolidVoxelFractionQ8(world)>=255u){coarse=4.0*p.frame.y;
     }else if((proofMode&2u)!=0u
@@ -9360,7 +9416,7 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
   for(var index=lane;index<PRESENTATION_SAMPLES_PER_PAGE;index+=64u){
     let z=index/64u;let remainder=index-z*64u;
     let y=remainder/8u;let x=remainder-y*8u;
-    let failure=surfaceB4OutputSampleFailure(vec3i(i32(x),i32(y),i32(z)));
+    let failure=surfaceProofOutputSampleFailure(vec3i(i32(x),i32(y),i32(z)));
     if(failure!=0u){
       atomicOr(&surfaceProofFailure,failure);atomicStore(&surfaceProofValid,0u);
     }
@@ -9368,9 +9424,10 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
   workgroupBarrier();
   if(lane==0u){
     let valid=atomicLoad(&surfaceProofValid)!=0u;
-    atomicStore(&activity[output+39u],select(0u,BRICK_FINE_RESOLUTION/2u,valid));
-    atomicStore(&activity[output+40u],select(0u,atomicLoad(&activity[12]),valid));
-    atomicStore(&activity[output+41u],atomicLoad(&surfaceProofFailure));
+    atomicStore(&activity[output+surfaceProofGenerationWord(surfaceProofTarget)],
+      select(0u,atomicLoad(&activity[12]),valid));
+    atomicStore(&activity[output+ACTIVITY_SURFACE_PROOF_FAILURE_WORD],
+      atomicLoad(&surfaceProofFailure));
     if(!valid){atomicAnd(&activity[output+2u],0x0000ffffu);}
   }
 }

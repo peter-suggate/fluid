@@ -122,7 +122,9 @@ dawnTest("mini32 conserves liquid volume through four seconds",
       solver = process.env.FLUID_MINI32_PHASE1_QA === "1"
         ? await WebGPUAdaptiveMassSolver.createPhase1TransportReceiptOracleForQA(
           device, scene, "balanced", undefined, {
-            resolutionMode, brickFineResolution: 8,
+            initialResolutionForQA: resolutionMode === "all-fine" ? 8
+              : resolutionMode === "all-coarse" ? 4 : undefined,
+            brickFineResolution: 8,
             surfaceFineRings: Number(process.env.FLUID_MINI32_SURFACE_RINGS ?? 1),
             activityPolicy: {
               ...SPARSE_CM12_ACTIVITY_POLICY,

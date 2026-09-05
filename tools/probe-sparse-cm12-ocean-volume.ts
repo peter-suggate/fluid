@@ -73,7 +73,9 @@ try {
   device.pushErrorScope("validation");
   const scene = createOceanSeicheScene();
   const options = {
-    resolutionMode,
+    initialResolutionForQA: resolutionMode === "all-fine" ? brickFineResolution
+      : resolutionMode === "all-coarse" ? brickFineResolution / 2 as 2 | 4 | 8
+        : undefined,
     brickFineResolution,
     presentationPageResolution: brickFineResolution,
     timeStep: "scene" as const,

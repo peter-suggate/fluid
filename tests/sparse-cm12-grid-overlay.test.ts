@@ -26,8 +26,8 @@ test("Sparse CM12 publishes the brick resolution consumed by visual overlays", (
 });
 
 test("the grid overlay consumes the producer's live activity-record stride", () => {
-  assert.match(resident, /const ACTIVITY_RECORD_WORDS = 42/,
-    "the surface-proof receipt extends the activity record to 42 words");
+  assert.match(resident, /const ACTIVITY_RECORD_WORDS = 47/,
+    "level-indexed surface receipts extend the activity record to 47 words");
   assert.match(resident,
     /activityRecordWords:\s*ACTIVITY_RECORD_WORDS/,
     "the sparse consumer source must publish its record ABI");

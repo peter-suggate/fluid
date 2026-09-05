@@ -217,8 +217,6 @@ export interface SparseAtlasDynamicsStepOptions {
   readonly dt_s: number;
   /** Physical finest-cell size used by CM12's calibrated volume correction. */
   readonly finestCellSize_m?: number;
-  /** Fixed parity modes keep every resident and receiver brick on one rung. */
-  readonly resolutionMode?: "adaptive" | "all-fine" | "all-coarse";
   /** Finest-cell units / second squared. Defaults to zero. */
   readonly accelerationFinePerSecond2?: SparseBrickVec3;
   /** CM12 Sec. 3.5 dry-cell threshold; defaults to the paper's 1e-5. */
@@ -1224,9 +1222,7 @@ export function stepSparseAtlasDynamics(
     throw new RangeError("emptyEpsilon must be nonnegative");
   }
 
-  const receiverResolution: SparseBrickResolution =
-    options.resolutionMode === "all-fine"
-      ? source.atlas.brickFineResolution : source.atlas.ladder.coarseResolution;
+  const receiverResolution: SparseBrickResolution = source.atlas.ladder.coarseResolution;
   const receiverCellSpanFine = source.atlas.brickFineResolution / receiverResolution;
   const maximumFaceComponent = workspace.maximumFaceComponent;
   maximumFaceComponent[0] = 0;
@@ -1366,7 +1362,6 @@ export function stepSparseAtlasDynamics(
     fields.velocity,
     source.resolutionPolicy,
     dt_s,
-    options.resolutionMode,
   );
   options.onStageComplete?.("activity-resolution");
   const atlas = retainedAtlas(
@@ -1471,9 +1466,9 @@ export function stepSparseAtlasDynamics(
   if (projection) options.onStageComplete?.("projection");
   const cellVelocity = projection?.leafCollocatedVelocity ?? forcedCells;
   const faceNormalVelocity = projection?.projectedFaceVelocity ?? forcedFaces;
-  const nextResolutionPolicy = options.resolutionMode === "adaptive"
-    ? retainSparseAtlasResolutionPolicy(resolutionDecision.state, atlas)
-    : resolutionDecision.state;
+  const nextResolutionPolicy = retainSparseAtlasResolutionPolicy(
+    resolutionDecision.state, atlas,
+  );
   const state = workspace.state ?? source;
   workspace.state = state;
   const mutableState = state as {

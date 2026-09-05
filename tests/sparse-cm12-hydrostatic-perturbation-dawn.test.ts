@@ -148,7 +148,7 @@ dawnTest("Sparse CM12 hydrostatic equilibrium damps a microscopic gravity pertur
       }];
     }
     const options: AdaptiveMassSolverOptions = {
-      resolutionMode: arm === "adaptive" ? "adaptive" : "all-fine",
+      initialResolutionForQA: arm === "adaptive" ? undefined : 8,
       brickFineResolution: 8,
       surfaceFineRings: 1,
       timeStep: arm === "fine-scene-step" ? "scene" : "paper",

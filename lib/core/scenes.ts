@@ -95,7 +95,6 @@ export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze(
   methodId: "adaptive-mass",
   quality: "balanced",
   overrides: Object.freeze({
-    resolutionMode: "adaptive",
     // These thresholds remain the long-dam activity tuning when that optional
     // criterion is selected; the product default stays Surface distance.
     finestTravelCells: 4,
@@ -111,7 +110,6 @@ export const SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE: MethodProfile = Objec
   quality: "balanced",
   overrides: Object.freeze({
     brickFineResolution: "8",
-    resolutionMode: "adaptive",
     maximumMacroSpanBricks: "auto",
     selectorMode: "surface",
     surfaceFineRings: 1,
@@ -125,7 +123,6 @@ export const BOUNDED_POOL_TRANSFER_METHOD_PROFILE: MethodProfile = Object.freeze
   quality: "balanced",
   overrides: Object.freeze({
     brickFineResolution: "8",
-    resolutionMode: "adaptive",
     maximumMacroSpanBricks: "auto",
     selectorMode: "surface",
     surfaceFineRings: 1,
@@ -254,7 +251,6 @@ MethodProfile = Object.freeze({
   methodId: "adaptive-mass",
   quality: "balanced",
   overrides: Object.freeze({
-    resolutionMode: "adaptive",
     brickFineResolution: "8",
     presentationPageResolution: "8",
     selectorMode: "surface",

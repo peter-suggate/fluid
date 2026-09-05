@@ -250,7 +250,8 @@ test("ocean seiche presentation retains deep macro leaves at native scale", () =
   }
 
   for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
-    const expected = sparseBrickSpan(atlas.bricks[brick]!) === 1 ? 8 : 1;
+    const expected = sparseBrickSpan(atlas.bricks[brick]!) === 1
+      ? (atlas.brickFineResolution / publication.plan.brickResolution) ** 3 : 1;
     assert.equal(pagesByBrick[brick], expected,
       `atlas leaf ${brick} disappeared from the global presentation`);
   }
@@ -263,9 +264,11 @@ test("ocean seiche presentation retains deep macro leaves at native scale", () =
   assert.ok(publication.plan.maximumResidentBricks < 8 * atlas.bricks.length,
     "macro publication regressed to fixed-brick page expansion");
 
-  assert.ok(atlas.bricks.every((brick) =>
-    Array.from(brick.density).every((density) => density === 1)),
-  "the authored pool must remain an intensive, uniform liquid volume");
+  assert.ok(atlas.bricks.every((brick) => {
+    const values = Array.from(brick.density);
+    return values.every((density) => density === 0)
+      || values.every((density) => density === 1);
+  }), "authored liquid and dry support pages must remain uniform intensive fields");
   assert.match(globalFineSurfaceClassificationShader,
     /base\.x\+scale-1==dims\.x/,
     "scaled pages must detect the real high wall instead of a unit-scale anchor");
@@ -615,6 +618,89 @@ dawnTest("production ocean keeps pressure and represented volume across frames",
         `ocean mass drifted by ${(mass - initialMass) / initialMass}`);
       assert.ok(wet >= 0.98 * initialWet,
         `ocean represented volume fell from ${initialWet} to ${wet} cells`);
+    } finally {
+      solver?.destroy(); device?.destroy();
+      await releaseWebGPUExclusiveLock();
+    }
+  });
+
+dawnTest("fine-start ocean reaches a coarse census with conservative transfer receipts",
+  { timeout: 240_000 }, async () => {
+    await acquireWebGPUExclusiveLock("dawn-test",
+      "tests/sparse-cm12-ocean-seiche-coarsening.test.ts");
+    let device: GPUDevice | undefined;
+    let solver: WebGPUAdaptiveMassSolver | undefined;
+    try {
+      const dawn = await import(pathToFileURL(dawnModule!).href) as {
+        create(options: string[]): GPU;
+        globals: Record<string, unknown>;
+      };
+      Object.assign(globalThis, dawn.globals);
+      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+      assert.ok(adapter);
+      device = await adapter.requestDevice({
+        requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+      });
+      const scene = getScenePreset("ocean-seiche").create();
+      // Preserve the authored tank and raised-slab seiche, but use the compact
+      // 80x24x20 lattice so an intentionally all-B8 starting census remains a
+      // bounded CI allocation rather than the production ocean's multi-GB
+      // adversarial construction case.
+      scene.voxelDomain.finestCellSize_m = 0.1;
+      scene.fluid.gravity_m_s2 = { x: 0, y: 0, z: 0 };
+      const defaults = adaptiveMassSolverOptions({});
+      solver = await WebGPUAdaptiveMassSolver.createAsync(
+        device, scene, "balanced", undefined, {
+          ...defaults,
+          resolutionMode: "adaptive",
+          initialResolutionForQA: 8,
+          maximumMacroSpanBricks: 1,
+          activityPolicy: {
+            ...defaults.activityPolicy!,
+            topologyCadenceSteps: 1,
+            demoteEpochs: 1,
+            prepareBricksPerFrame: 512,
+          },
+        }, () => {},
+      );
+      await solver.waitForSimulationReady();
+      const before = await solver.readGPUActivityPolicy();
+      const initiallyActive = before.bricks.filter((brick) => brick.active);
+      assert.ok(initiallyActive.length > 0);
+      assert.ok(initiallyActive.every((brick) => brick.acceptedResolution === 8),
+        "the gate must begin from a genuinely fine accepted census");
+      const initialDensity = (await solver.readDiagnosticFields()).density;
+      const initialMass = initialDensity.reduce((sum, rho) => sum + Math.max(0, rho), 0);
+
+      for (let step = 1; step <= 12; step += 1) {
+        assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+      }
+      await device.queue.onSubmittedWorkDone();
+      const [after, fields] = await Promise.all([
+        solver.readGPUActivityPolicy(), solver.readDiagnosticFields(),
+      ]);
+      const active = after.bricks.filter((brick) => brick.active);
+      const coarse = active.filter((brick) => brick.acceptedResolution < 8);
+      assert.ok(coarse.length >= 0.5 * active.length,
+        `fine-start ocean retained ${active.length - coarse.length}/${active.length} B8 leaves; `
+          + `plans=${JSON.stringify(Object.fromEntries([...new Set(active.map((brick) =>
+            brick.plannedResolution))].map((resolution) => [resolution,
+            active.filter((brick) => brick.plannedResolution === resolution).length])))}; `
+          + `reasons=${JSON.stringify(Object.fromEntries([...new Set(active.map((brick) =>
+            brick.planReasons))].map((reason) => [reason,
+            active.filter((brick) => brick.planReasons === reason).length])))}`);
+      const transferred = active.filter((brick) => brick.transferStatus === 1);
+      assert.ok(transferred.length > 0, "the bounded run must consume topology transfers");
+      assert.ok(transferred.every((brick) =>
+        Math.abs(brick.transferMassErrorFineCells) <= 1e-4
+        && brick.transferMomentumErrorFineCells.every((error) => Math.abs(error) <= 1e-3)),
+      "mass and momentum transfer receipts must remain conservative");
+      const finalMass = fields.density.reduce((sum, rho) => sum + Math.max(0, rho), 0);
+      assert.ok(Math.abs(finalMass - initialMass) / initialMass <= 5e-4,
+        `fine-start ocean mass drifted by ${(finalMass - initialMass) / initialMass}`);
+      assert.equal(after.faultFlags, 0);
+      assert.equal(after.commitFailed, false);
     } finally {
       solver?.destroy(); device?.destroy();
       await releaseWebGPUExclusiveLock();

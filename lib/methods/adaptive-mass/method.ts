@@ -26,14 +26,18 @@ import {
 } from "./webgpu-sparse-cm12-resident";
 import { WebGPUAdaptiveMassSolver } from "./webgpu-adaptive-mass-solver";
 import type {
+  SparseBrickResolution,
   SparseBrickFineResolution,
 } from "./sparse-brick-atlas";
 
-export type AdaptiveMassResolutionMode = "adaptive" | "all-fine" | "all-coarse";
+/** Sparse-resolution controls consumed by the interactive solver factory. */
+export type AdaptiveMassResolutionMode = "adaptive";
 
-/** Initial sparse-resolution split consumed by the interactive solver factory. */
 export interface AdaptiveMassSolverOptions {
-  readonly resolutionMode: AdaptiveMassResolutionMode;
+  /** Optional compatibility spelling; adaptive is the only production policy. */
+  readonly resolutionMode?: AdaptiveMassResolutionMode;
+  /** Test-only construction seam for manufacturing a fine-start transition. */
+  readonly initialResolutionForQA?: SparseBrickResolution;
   /** Construction-time complete dyadic ladder maximum. Defaults to 8. */
   readonly brickFineResolution?: SparseBrickFineResolution;
   /** Renderer-facing samples per presentation-page edge. Defaults to the brick maximum. */
@@ -82,19 +86,6 @@ const params: MethodParamSpec[] = [
       { value: "16", label: "1³ / 2³ / 4³ / 8³ / 16³" },
     ],
     hint: "Selects both the adaptive ladder maximum and the matching presentation-page resolution. B8 is the production default; B4 remains experimental and B16 remains available.",
-  },
-  {
-    kind: "select",
-    key: "resolutionMode",
-    label: "Resolution policy",
-    default: "adaptive",
-    tier: "coarse",
-    options: [
-      { value: "adaptive", label: "Adaptive · complete dyadic ladder" },
-      { value: "all-fine", label: "All fine · ladder maximum" },
-      { value: "all-coarse", label: "All coarse · one rung below maximum" },
-    ],
-    hint: "Fixed modes keep every resident and newly activated world tile at one rung. They provide matched-resolution parity lanes against fine or reduced Uniform CM12.",
   },
   {
     kind: "select",
@@ -413,9 +404,6 @@ export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze([
   "surfaceDisplacementToleranceCells", "surfaceNormalToleranceDegrees",
 ] as const);
 
-const resolutionMode = (value: unknown): AdaptiveMassResolutionMode =>
-  value === "all-fine" || value === "all-coarse" ? value : "adaptive";
-
 const boundedInteger = (value: unknown, fallback: number, minimum: number, maximum: number) =>
   typeof value === "number" && Number.isFinite(value)
     ? Math.min(maximum, Math.max(minimum, Math.round(value))) : fallback;
@@ -449,7 +437,6 @@ export function adaptiveMassSolverOptions(
 ): AdaptiveMassSolverOptions {
   const fineResolution = brickFineResolution(values.brickFineResolution);
   return {
-    resolutionMode: resolutionMode(values.resolutionMode),
     brickFineResolution: fineResolution,
     presentationPageResolution:
       presentationPageResolution(values.presentationPageResolution, fineResolution),
@@ -541,7 +528,6 @@ export const adaptiveMassMethod: SimulationMethod = {
       presentationPageResolution: String(fineResolution),
       maximumMacroSpanBricks:
         String(maximumMacroSpanBricks(values.maximumMacroSpanBricks) ?? "auto"),
-      resolutionMode: resolutionMode(values.resolutionMode),
       selectorMode: selectorMode(values.selectorMode),
       surfaceFineRings: boundedInteger(values.surfaceFineRings, 1, 1, 8),
       timeStep: values.timeStep === "scene" ? "scene" : "paper",
@@ -562,7 +548,6 @@ export const adaptiveMassMethod: SimulationMethod = {
     const { activitySignals: _activitySignals, ...activityDefaults } =
       SPARSE_CM12_ACTIVITY_POLICY;
     return {
-      resolutionMode: "adaptive",
       brickFineResolution: "8",
       presentationPageResolution: "8",
       maximumMacroSpanBricks: "auto",

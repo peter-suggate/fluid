@@ -13,8 +13,6 @@ export function adaptiveMassDiagnosticRows(
   info: GPUEulerianInfo | undefined,
   values: MethodParamValues,
 ): readonly DiagnosticRow[] {
-  const allFine = values.resolutionMode === "all-fine";
-  const allCoarse = values.resolutionMode === "all-coarse";
   const resident = info?.fluidBrickResidentCount;
   const capacity = info?.fluidBrickCapacity;
   const divergence = info?.maxDivergenceAfter_s;
@@ -26,13 +24,11 @@ export function adaptiveMassDiagnosticRows(
       label: "Adaptive resolution",
       value: info?.adaptiveFineBrickCount !== undefined
         ? `${info.adaptiveFineBrickCount} fine · ${info.adaptiveCoarseBrickCount ?? 0} coarse`
-        : allFine ? "all resident tiles 8³"
-          : allCoarse ? "all resident tiles 4³" : "interface tiles 8³ · interiors 4³",
+        : "coarse-start adaptive ladder",
       unit: info?.adaptiveResolutionTopologyEpoch
         ? `${info.adaptiveResolutionPromotedBrickCount ?? 0} promoted · ${info.adaptiveResolutionDemotedBrickCount ?? 0} demoted this epoch`
         : `${info?.adaptiveActivitySurfaceBrickCount ?? 0} surface · score ${info?.adaptiveActivityMaximumScore ?? 0}/255`,
-      tone: (allFine && (info?.adaptiveCoarseBrickCount ?? 0) > 0)
-        || (allCoarse && (info?.adaptiveFineBrickCount ?? 0) > 0) ? "warn" : "good",
+      tone: "good",
     },
     {
       id: "resolution-activity",

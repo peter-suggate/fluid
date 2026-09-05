@@ -40,10 +40,18 @@ test("surface coarsening policy is enabled, bounded, and keeps QA forcing privat
   assert.equal(sanitized.forcedSurfaceResolutionForQA, 4);
   assert.equal(sparseCM12ActivityPolicy({
     forcedSurfaceResolutionForQA: 2,
+  }).forcedSurfaceResolutionForQA, 2);
+  assert.equal(sparseCM12ActivityPolicy({
+    forcedSurfaceResolutionForQA: 3,
   }).forcedSurfaceResolutionForQA, undefined);
 });
 
 test("activity plus accepted-output proof is the production default", () => {
+  assert.equal(adaptiveMassMethod.params.some((param) =>
+    param.key === "resolutionMode"), false,
+  "fixed all-fine/all-coarse modes must not remain in the production UI");
+  assert.equal("resolutionMode" in adaptiveMassSolverOptions({ resolutionMode: "all-fine" }),
+    false, "stale fixed-mode state must be discarded at the production boundary");
   const selector = adaptiveMassMethod.params.find((param) =>
     param.key === "selectorMode");
   assert.equal(selector?.kind, "select");
@@ -75,9 +83,10 @@ test("surface receipts are output-space, generation-stamped, and camera independ
   assert.match(proof, /generationReceipt[\s\S]*==acceptedGeneration/);
   assert.match(proof, /topologyGeneration[\s\S]*==atomicLoad\(&activity\[12\]\)/);
   assert.match(proof, /surfaceProofAcceptedPhi/);
-  assert.match(proof, /surfaceProofVirtualB4Density/);
-  assert.match(proof, /activity\[output\+39u\].*BRICK_FINE_RESOLUTION\/2u/);
-  assert.match(proof, /activity\[output\+40u\].*activity\[12\]/);
+  assert.match(proof, /surfaceProofVirtualRestrictedDensity/);
+  assert.match(proof, /surfaceProofRestrictionFactor/);
+  assert.match(proof,
+    /surfaceProofGenerationWord\(surfaceProofTarget\)[\s\S]*activity\[12\]/);
 
   assert.match(shader, /fn presentationLimitedSlope/);
   assert.match(shader,
@@ -88,14 +97,19 @@ test("surface receipts are output-space, generation-stamped, and camera independ
     shader.indexOf("fn planBrickResolution("),
     shader.indexOf("fn closePlannedResolution("),
   );
-  assert.match(planner, /receiptFresh[\s\S]*activity\[output\+40u\].*activity\[12\]/);
+  assert.match(planner,
+    /receiptFresh[\s\S]*surfaceProofGenerationWord\(nextSurfaceRung\)[\s\S]*activity\[12\]/);
   assert.match(planner,
     /receiptFresh&&proofEpochs[\s\S]*max\(p\.activityEpochs\.z,SURFACE_PROOF_SETTLE_EPOCHS\)/);
   assert.match(planner, /let interfaceVelocityFloor=select\(1u,velocityFloor/,
     "geometric proof must not override the moving-front transport floor");
   assert.match(planner,
-    /acceptedB4Lease=current==BRICK_FINE_RESOLUTION\/2u[\s\S]*leasedExteriorSurface/,
-    "an accepted coarse surface must survive seam-owner reclassification");
+    /acceptedSurfaceLease=current<BRICK_FINE_RESOLUTION[\s\S]*leasedExteriorSurface/,
+    "every accepted coarse surface rung must survive seam-owner reclassification");
+  assert.match(shader, /velocityThresholds:array<vec4f,2>/,
+    "velocity floors must cover the complete B1-through-B16 ladder");
+  assert.match(shader, /ACTIVITY_SURFACE_LEASE_MASK_WORD/,
+    "surface retention must use a per-rung lease bitfield");
   assert.match(planner, /let thinRequiresFinest=thinFluid;/,
     "thin sheets must retain the ladder maximum");
 });

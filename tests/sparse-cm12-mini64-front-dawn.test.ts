@@ -163,7 +163,7 @@ dawnTest("Sparse CM12 expands the 64-cubed mini-dam into demand-led frontier pag
       scene.duration_s = 5 * CM12_PAPER_DT_S;
       const createSolver = (resolutionMode: "adaptive" | "all-fine") => {
         const args = [device!, scene, "balanced", undefined, {
-          resolutionMode,
+          initialResolutionForQA: resolutionMode === "all-fine" ? 8 : undefined,
           brickFineResolution: 8,
           // Begin the experimental arm deliberately over-refined so this
           // short front regression exercises live submerged coarsening rather

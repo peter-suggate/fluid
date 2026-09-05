@@ -202,7 +202,7 @@ test("SparseWorld frontier allocation covers all 26 activity-support neighbours"
     /acceptedActive!=candidateActive[\s\S]*candidateActive[\s\S]*atomicAnd\(&activity\[activityRecord\(neighbor\)[\s\S]*ACTIVITY_FRONTIER_RESOLVED_MASK_WORD\],~\(1u<<\(26u-bit\)\)\)/);
   assert.match(resident,
     /setPipeline\(this\.pipelines\.clearSparseWorldFrontierResolutionCache!\)/);
-  assert.match(resident, /const ACTIVITY_RECORD_WORDS = 43;/);
+  assert.match(resident, /const ACTIVITY_RECORD_WORDS = 47;/);
 
   const mapped = Array.from({ length: 26 }, (_, local) => local >= 13 ? local + 1 : local);
   assert.equal(new Set(mapped).size, 26);
