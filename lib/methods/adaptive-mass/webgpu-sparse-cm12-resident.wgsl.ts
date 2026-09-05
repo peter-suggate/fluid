@@ -382,6 +382,7 @@ export function createWebgpuSparseCM12ResidentWGSL(
   const presentationCacheCapacity = (presentationPageResolution / 2 + 2) ** 3;
   const presentationPatchCapacity = (presentationPageResolution / 2) ** 3;
   const presentationHeightColumnAxis = presentationPageResolution + 2;
+  const presentationHeightCacheCapacity = presentationHeightColumnAxis ** 2;
   const surfaceProofLatticeAxis = presentationPageResolution + 2;
   const surfaceProofLatticeCapacity = surfaceProofLatticeAxis ** 3;
   const incrementalActivityEntries = incrementalActivityLayout
@@ -2390,7 +2391,7 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
           let height=mix(lower,upper,tz);
           let pageLow=f32(pageOrigin.y)-1.0;
           let pageHigh=f32(pageOrigin.y+i32(PRESENTATION_PAGE_RESOLUTION))+1.0;
-          presentationDensityCache[column]=select(-1.0,height,
+          presentationHeightCache[column]=select(-1.0,height,
             height>=pageLow&&height<=pageHigh);
         }
       }else{
@@ -2401,7 +2402,7 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
         let valid=receipt.y>0.5&&receipt.x>=pageLow&&receipt.x<=pageHigh;
         let encoded=select(select(-1.0,-2.0,receipt.y>1.5),receipt.x,valid);
         for(var column=0u;column<count;column+=1u){
-          presentationDensityCache[column]=encoded;
+          presentationHeightCache[column]=encoded;
         }
       }
     }
@@ -2415,7 +2416,7 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
       let pageLow=f32(pageOrigin.y)-1.0;
       let pageHigh=f32(pageOrigin.y+i32(PRESENTATION_PAGE_RESOLUTION))+1.0;
       let valid=receipt.y>0.5&&height>=pageLow&&height<=pageHigh;
-      presentationDensityCache[column]=select(select(-1.0,-2.0,receipt.y>1.5),
+      presentationHeightCache[column]=select(select(-1.0,-2.0,receipt.y>1.5),
         height,valid);
     }
   }else{
@@ -2435,7 +2436,7 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
       let pageLow=f32(pageOrigin.y)-1.0;
       let pageHigh=f32(pageOrigin.y+i32(PRESENTATION_PAGE_RESOLUTION))+1.0;
       valid=valid&&height>=pageLow&&height<=pageHigh;
-      presentationDensityCache[column]=select(select(-1.0,-2.0,receipt.y>1.5),
+      presentationHeightCache[column]=select(select(-1.0,-2.0,receipt.y>1.5),
         height,valid);
     }
   }
@@ -2444,7 +2445,7 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
     var minimumHeight=1e30;var maximumHeight=-1e30;
     var valid=true;var represented=false;
     for(var column=0u;column<count;column+=1u){
-      let height=presentationDensityCache[column];
+      let height=presentationHeightCache[column];
       if(height< -1.5){continue;}
       valid=valid&&height>=0.0;
       represented=represented||height>=0.0;
@@ -2475,21 +2476,29 @@ fn presentationColumnHeight(localX:i32,localZ:i32,halo:bool)->f32{
   let offset=select(0,1,halo);
   let x=u32(clamp(localX+offset,0,i32(axis)-1));
   let z=u32(clamp(localZ+offset,0,i32(axis)-1));
-  return presentationDensityCache[x+axis*z];
+  return presentationHeightCache[x+axis*z];
+}
+
+fn presentationColumnHeightValid(localX:i32,localZ:i32,halo:bool)->bool{
+  return presentationColumnHeight(localX,localZ,halo)>=0.0;
 }
 
 fn presentationHeightPhi(q:vec3i,localX:i32,localZ:i32,halo:bool)->f32{
   let height=presentationColumnHeight(localX,localZ,halo);
   let signedFineCells=f32(q.y)+0.5-height;
-  // There is no sample centre below the floor. Without this boundary sign, a
-  // real sheet shorter than half a fine cell is positive at every published
-  // sample and marching cubes cannot represent it at all. Keep the cached
-  // density height authoritative, but mark the floor sample infinitesimally
-  // inside so the first edge publishes the thinnest representable veneer.
-  if(q.y==0&&height>1e-3&&signedFineCells>0.0){
-    return -1e-3*p.frame.y;
-  }
-  return clamp(signedFineCells*p.frame.y,-4.0*p.frame.y,4.0*p.frame.y);
+  // This value is also the heightfield geometry receipt. Keep the complete
+  // affine distance: clamping its row-zero sample to the ordinary four-cell
+  // narrow band destroys the recoverable height above 4.5 cells and makes the
+  // renderer switch representation in rectangular page-sized patches. Binary16
+  // comfortably spans the authored domain; downstream narrow-band consumers
+  // already clamp occupancy where a bounded value is actually required.
+  return signedFineCells*p.frame.y;
+}
+
+fn presentationFloorContinuationFlag(q:vec3i,localX:i32,localZ:i32,
+ halo:bool)->u32{
+  return select(0u,2u,q.y==0
+    &&presentationColumnHeight(localX,localZ,halo)>1e-3);
 }
 
 fn presentationLimitedSlope(back:f32,center:f32,forward:f32)->f32{
@@ -5193,6 +5202,10 @@ var<workgroup>candidatePublicationActive:u32;
 // Coarse values are restricted once per page workgroup and reused by all 512
 // fine presentation samples.
 var<workgroup>presentationDensityCache:array<f32,${presentationCacheCapacity}>;
+// Height proof validity is column-local. Keeping it separate from the 3-D
+// interpolation cache lets a page mix proved floor columns with ordinary
+// contour columns without one invalid overhang discarding 63 valid heights.
+var<workgroup>presentationHeightCache:array<f32,${presentationHeightCacheCapacity}>;
 var<workgroup>presentationPhaseMask:atomic<u32>;
 var<workgroup>presentationInterpolationCoefficients:
   array<vec4f,${2 * presentationPatchCapacity}>;
@@ -9079,7 +9092,12 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
   if(!dynamicPage&&(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz)))){
     phi=4.0*p.frame.y;
   }
-  else if(cm12PresentationSampleScale==1u&&presentationHeightFieldValid!=0u
+  // The cache is meaningful only when PreparePage selected and filled the
+  // height candidate. Otherwise a zeroed workgroup lane looks like a valid
+  // height and turns a fully wet bulk page into phi=+y.
+  else if(cm12PresentationSampleScale==1u
+    &&(cm12PresentationStencilCandidate&2u)!=0u
+    &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
     &&cm12SolidVoxelFractionQ8(q)==0u){
     phi=presentationHeightPhi(q,i32(localX),i32(localZ),false);
   }
@@ -9117,7 +9135,15 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
       phi=(CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
     }
   }
-  let flags=1u|select(0u,16u,phi<0.0);
+  var floorContinuation=0u;
+  if(q.y==0&&cm12PresentationSampleScale==1u
+    &&(cm12PresentationStencilCandidate&2u)!=0u
+    &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
+    &&cm12SolidVoxelFractionQ8(q)==0u){
+    floorContinuation=presentationFloorContinuationFlag(
+      q,i32(localX),i32(localZ),false);
+  }
+  let flags=1u|floorContinuation|select(0u,16u,phi<0.0);
   return vec2u((pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u),0u);
 }
 fn cm12PresentationCandidateBase()->u32{
@@ -9161,7 +9187,9 @@ fn surfaceProofVirtualB4Density(local:vec3i)->f32{
 fn surfaceProofAcceptedPhi(local:vec3i,densityOffset:u32)->f32{
   let q=cm12PresentationBrickOrigin+local;
   if(cm12SolidVoxelFractionQ8(q)>=255u){return 4.0*p.frame.y;}
-  if(presentationHeightFieldValid!=0u&&cm12SolidVoxelFractionQ8(q)==0u){
+  if((atomicLoad(&surfaceProofValid)&2u)!=0u
+    &&presentationColumnHeightValid(local.x,local.z,true)
+    &&cm12SolidVoxelFractionQ8(q)==0u){
     return presentationHeightPhi(q,local.x,local.z,true);
   }
   let owner=compactOwnerCellAt(q);
@@ -9333,7 +9361,8 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     var coarse=(CM12_LIQUID_ISOVALUE-surfaceProofVirtualB4Density(local))
       *4.0*p.frame.y;
     if(cm12SolidVoxelFractionQ8(world)>=255u){coarse=4.0*p.frame.y;
-    }else if(presentationHeightFieldValid!=0u
+    }else if((proofMode&2u)!=0u
+      &&presentationColumnHeightValid(local.x,local.z,true)
       &&cm12SolidVoxelFractionQ8(world)==0u){
       coarse=presentationHeightPhi(world,local.x,local.z,true);
     }
@@ -9498,7 +9527,8 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
     let coarseUniformLiquid=scale>1u&&sampleScale==1u&&cacheFits
       &&stencilCandidate&&coarsePhase==2u;
     if(dynamicPage||(all(q>=vec3i(0))&&all(q<vec3i(p.dimensions.xyz)))){
-      if(sampleScale==1u&&presentationHeightFieldValid!=0u
+      if(sampleScale==1u&&heightCandidate
+        &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
         &&cm12SolidVoxelFractionQ8(q)==0u){
         phi=presentationHeightPhi(q,i32(localX),i32(localZ),false);
       }else if(scale==1u){
@@ -9530,7 +9560,14 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
         }
       }
     }
-    let flags=1u|select(0u,16u,phi<0.0);
+    var floorContinuation=0u;
+    if(q.y==0&&sampleScale==1u&&heightCandidate
+      &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
+      &&cm12SolidVoxelFractionQ8(q)==0u){
+      floorContinuation=presentationFloorContinuationFlag(
+        q,i32(localX),i32(localZ),false);
+    }
+    let flags=1u|floorContinuation|select(0u,16u,phi<0.0);
     fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+localIndex]
       =(pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u);
   }

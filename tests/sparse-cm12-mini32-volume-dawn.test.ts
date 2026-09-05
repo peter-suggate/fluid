@@ -3,6 +3,8 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
+import { unpackFineLevelSetPackedPhi } from
+  "../lib/core/fine-levelset-packed-sample";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
@@ -24,6 +26,58 @@ function densityMass(density: Float32Array): number {
   let mass = 0;
   for (const value of density) mass += Math.max(0, value);
   return mass;
+}
+
+async function readGPUWords(device: GPUDevice,
+  source: GPUBuffer | GPUBufferBinding, count: number): Promise<Uint32Array> {
+  const binding = "buffer" in source ? source : { buffer: source };
+  const readback = device.createBuffer({ size: Math.max(4, 4 * count),
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  try {
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(binding.buffer, binding.offset ?? 0,
+      readback, 0, 4 * count);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    return new Uint32Array(readback.getMappedRange()).slice();
+  } finally {
+    if (readback.mapState === "mapped") readback.unmap();
+    readback.destroy();
+  }
+}
+
+const signedPageCoordinate = (key: number): readonly [number, number, number] => [
+  (key & 0x7ff) - 1024,
+  ((key >>> 11) & 0x3ff) - 512,
+  (key >>> 21) - 1024,
+];
+
+async function negativePresentationSamplesByCoordinate(device: GPUDevice,
+  solver: WebGPUAdaptiveMassSolver): Promise<Map<string, number>> {
+  const source = solver.globalFineLevelSetSource;
+  const capacity = source.plan.maximumResidentBricks;
+  const samplesPerPage = source.plan.samplesPerBrick;
+  const [worklist, metadata, samples] = await Promise.all([
+    readGPUWords(device, source.worklist, source.worklist.size / 4),
+    readGPUWords(device, source.metadata, 4 * capacity),
+    readGPUWords(device, source.samples, capacity * samplesPerPage),
+  ]);
+  const result = new Map<string, number>();
+  const generation = worklist[0]!;
+  const count = Math.min(worklist[1]!, capacity);
+  for (let rank = 0; rank < count; rank += 1) {
+    const page = worklist[7 + rank]!;
+    const at = 4 * page;
+    if (metadata[at] !== page || metadata[at + 2] !== generation) continue;
+    let negative = 0;
+    for (let local = 0; local < samplesPerPage; local += 1) {
+      negative += Number(unpackFineLevelSetPackedPhi(
+        samples[page * samplesPerPage + local]!,
+      ) < 0);
+    }
+    result.set(signedPageCoordinate(metadata[at + 1]!).join(","), negative);
+  }
+  return result;
 }
 
 dawnTest("mini32 conserves liquid volume through four seconds",
@@ -102,6 +156,29 @@ dawnTest("mini32 conserves liquid volume through four seconds",
         WebGPUAdaptiveMassSolver["readGPUActivityPolicy"]>>["bricks"][number]>();
       for (let step = 1; step <= steps; step += 1) {
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        if (step === 1) {
+          await device.queue.onSubmittedWorkDone();
+          const [stepOneFields, negativeByPage]: [
+            Awaited<ReturnType<WebGPUAdaptiveMassSolver["readDiagnosticFields"]>>,
+            Map<string, number>,
+          ] = await Promise.all([
+            solver.readDiagnosticFields(),
+            negativePresentationSamplesByCoordinate(device, solver),
+          ]);
+          let wetCornerSamples = 0;
+          for (let z = 0; z < 8; z += 1) for (let y = 0; y < 16; y += 1) {
+            for (let x = 0; x < 8; x += 1) {
+              wetCornerSamples += Number(stepOneFields.density[
+                x + 32 * (y + 32 * z)]! >= 0.5);
+            }
+          }
+          assert.equal(wetCornerSamples, 2 * 8 ** 3,
+            "the step-one corner fixture must keep both stacked wet bricks");
+          for (const coordinate of ["0,0,0", "0,1,0"]) {
+            assert.equal(negativeByPage.get(coordinate), 8 ** 3,
+              `step one carved wet presentation brick ${coordinate}`);
+          }
+        }
         if (step % 2 === 0) await device.queue.onSubmittedWorkDone();
         if ((step < sampleFrom || step % sampleEvery !== 0) && step !== steps) continue;
         await device.queue.onSubmittedWorkDone();
