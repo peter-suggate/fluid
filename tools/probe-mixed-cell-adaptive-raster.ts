@@ -19,8 +19,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { globalFineSurfaceClassificationShader } from
   "../lib/core/webgpu-water-global-fine-classify";
-import { globalFineClassifiedEmitShader, globalFineClassifiedIndirectScanShader } from
-  "../lib/core/webgpu-water-global-fine-tetra";
+import {
+  GLOBAL_FINE_SURFACE_EMIT_LANES,
+  globalFineClassifiedEmitShader,
+  globalFineClassifiedIndirectScanShader,
+} from "../lib/core/webgpu-water-global-fine-tetra";
 import { rasterMeshSymmetryMetrics } from "../lib/harness/raster-mesh-symmetry";
 
 type Point = readonly [number, number, number];
@@ -253,7 +256,8 @@ async function runField(device: GPUDevice, name: string, leaves: readonly Leaf[]
   const cubes = buffer(device, `${name} cubes`, cubeCapacity * 8,
     GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
   const values = buffer(device, `${name} values`, cubeCapacity * 32, GPUBufferUsage.STORAGE);
-  const offsets = buffer(device, `${name} offsets`, cubeCapacity * 24, GPUBufferUsage.STORAGE);
+  const offsets = buffer(device, `${name} offsets`,
+    cubeCapacity * GLOBAL_FINE_SURFACE_EMIT_LANES * 4, GPUBufferUsage.STORAGE);
   const vertices = buffer(device, `${name} vertices`, vertexCapacity * 32,
     GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
   const empty = buffer(device, `${name} empty`, 256,
@@ -297,7 +301,7 @@ async function runField(device: GPUDevice, name: string, leaves: readonly Leaf[]
   pass.dispatchWorkgroups(Math.ceil(cubeCapacity / 256));
   pass.setPipeline(scan); pass.setBindGroup(0, scanGroup); pass.dispatchWorkgroups(1);
   pass.setPipeline(emit); pass.setBindGroup(0, emitGroup);
-  pass.dispatchWorkgroups(Math.ceil(cubeCapacity / 64), 6, 1);
+  pass.dispatchWorkgroups(Math.ceil(cubeCapacity / 64), GLOBAL_FINE_SURFACE_EMIT_LANES, 1);
   pass.end(); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
 
   const argsOut = new Uint32Array(await read(device, args, argsInitial.byteLength));
@@ -317,7 +321,8 @@ async function runField(device: GPUDevice, name: string, leaves: readonly Leaf[]
     duplicateClassifiedCubeCount: argsOut[4]! - cubeIdentities.size,
     vertexCount, mesh: metrics, geometry: meshGeometryMetrics(mesh, vertexCount, analytic),
     positionSet: meshPositionSet(mesh, vertexCount) };
-  for (const resource of [uniforms, params, args, cubes, values, offsets, vertices, empty, directory]) {
+  for (const resource of [uniforms, params, args, cubes, values, offsets, vertices,
+    empty, directory]) {
     resource.destroy();
   }
   return result;

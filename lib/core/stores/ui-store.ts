@@ -40,6 +40,7 @@ import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../../svo/svo-p
 import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
 import { isStageLensOverlayMode } from "../stage-lens";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
+import type { FluidSurfaceRenderMode } from "../webgpu-water-pipeline";
 
 /**
  * The object currently in the user's hand.
@@ -222,6 +223,8 @@ interface UIStore {
   gridOverlayMode: GridOverlayMode;
   /** Scrubber position along a stage lens's phases. Ignored by every other mode. */
   gridOverlayLensPhase: number;
+  /** Selected tank's liquid presentation; never changes simulation state. */
+  fluidSurfaceRenderMode: FluidSurfaceRenderMode;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
   /** Full-rate visibility refinement at reduced-cone geometry silhouettes. */
@@ -315,6 +318,7 @@ interface UIStore {
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setGridOverlayLensPhase: (phase: number) => void;
+  setFluidSurfaceRenderMode: (mode: FluidSurfaceRenderMode) => void;
   setSvoShadowsEnabled: (enabled: boolean) => void;
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSilhouetteRefinementEnabled: (enabled: boolean) => void;
@@ -385,6 +389,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
   gridOverlayLensPhase: 0,
+  fluidSurfaceRenderMode: "shaded",
   svoShadowsEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled,
   svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
   silhouetteRefinementEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled ?? false,
@@ -495,6 +500,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
       ? 0 : state.gridOverlayLensPhase,
   })),
   setGridOverlayLensPhase: (phase) => set({ gridOverlayLensPhase: Math.max(0, Math.floor(phase)) }),
+  setFluidSurfaceRenderMode: (fluidSurfaceRenderMode) => set({ fluidSurfaceRenderMode }),
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),

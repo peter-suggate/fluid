@@ -4,7 +4,7 @@ import {
   SVO_CLUSTER_LOBE_MAXIMUM_ANISOTROPY,
   SVO_CLUSTER_LOBE_MAXIMUM_COUNT,
   SVO_CLUSTER_LOBE_MINIMUM_COUNT,
-} from "../../svo/svo-primitive-abi";
+} from "../../svo/svo-cluster-limits";
 import { bonsaiCanopyField, bonsaiCanopyPadProgram } from "./bonsai-canopy-field";
 import { bonsaiCanopyPads } from "./bonsai-canopy-pads";
 import { alongAxis, V } from "./builder";
@@ -992,8 +992,6 @@ export function bonsaiCanopyLadder(form: BonsaiForm, leafSize_m = BONSAI_DEFAULT
  * now overlap each other far more than twenty-four of them did.
  */
 const CANOPY_BED_HEADS_PER_RECORD = 4;
-/** How far a bed lobe travels from its record's centre. Low: see the emission. */
-const CANOPY_BED_DISPLACEMENT = 0.85;
 const CANOPY_BED_INSET_SHARE = 0.55;
 const CANOPY_BED_FILL = 1.55;
 

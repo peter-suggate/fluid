@@ -113,6 +113,8 @@ export interface CM12SparseWorldFactoryConfig {
   readonly journal?: SparseCM12PressureJournalCapacityRequest;
   readonly presentationPageResolution?: SparseCM12PresentationPageResolution;
   readonly report?: SparseCM12ResidentInitializationReporter;
+  /** Optional bounded physical page headroom for an unusually long wet course. */
+  readonly topologyPageCapacityMaximum?: number;
   /** Canonical static solid authority for construction and later live edits. */
   readonly solidWorld: SolidWorld;
   /** Packed initial refinement policy, installed without publishing a live edit. */
@@ -717,7 +719,9 @@ export async function createCM12SparseWorld(
             : mode === "gather-capacity-repair-qa"
               ? await WebGPUSparseCM12Resident
                 .createGatherCapacityRepairOracleForQA(...args)
-            : await WebGPUSparseCM12Resident.create(...args);
+            : await WebGPUSparseCM12Resident.create(
+              ...args, config.topologyPageCapacityMaximum,
+            );
     resident.setRefinementRegionParameters(config.refinementRegionParameters);
   } catch (error) {
     sparseDevice.publishLibraryFault(error);

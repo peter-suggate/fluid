@@ -22,24 +22,37 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import { environmentIndex } from "../lib/core/environments";
+import { float16BitsToFloat32 } from "../lib/core/fine-levelset-packed-sample";
 import { resolveMethodValues, type GPUSolverInstance } from
   "../lib/core/method-contract";
 import { createGlobalFineLevelSetConsumerSource } from
   "../lib/core/octree-consumer-sampling";
 import { encodeRgbPng } from "../lib/core/png-codec";
-import { createMinimalPowerDamBreak64Scene } from "../lib/core/scenes";
+import { createCornerBrickDropScene, createMinimalPowerDamBreak64Scene,
+  createSparseCM12LongDamBreakScene } from "../lib/core/scenes";
+import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { RasterWaterPipeline } from "../lib/core/webgpu-water-pipeline";
+import { GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE } from
+  "../lib/core/webgpu-water-global-fine-classify";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
+import { rasterMeshSymmetryMetrics } from
+  "../lib/harness/raster-mesh-symmetry";
 import { adaptiveMassMethod, adaptiveMassSolverOptions } from
   "../lib/methods/adaptive-mass/method";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 
-const STEPS = 7;
+const CAPTURE_SCENARIO = process.env.FLUID_PRESENTATION_CAPTURE_SCENARIO ?? "dam";
+const LONG_DAM = CAPTURE_SCENARIO === "long-dam";
+const CORNER_DROP = CAPTURE_SCENARIO === "corner-drop";
+const GEOMETRY_AUDIT = CORNER_DROP
+  || process.env.FLUID_PRESENTATION_CAPTURE_GEOMETRY_AUDIT === "1";
+const STEPS = Number(process.env.FLUID_PRESENTATION_CAPTURE_STEPS ?? 7);
+const MAXIMUM_CELL_SIZE = Number(process.env.FLUID_MAXIMUM_CELL_SIZE ?? 0);
 const WIDTH = 640;
 const HEIGHT = 360;
 
@@ -100,6 +113,13 @@ let bodyBuffer: GPUBuffer | undefined;
 let output: GPUTexture | undefined;
 let columnFallback: GPUTexture | undefined;
 let frameReadback: GPUBuffer | undefined;
+let classifiedCubeReadback: GPUBuffer | undefined;
+let classifiedOffsetReadback: GPUBuffer | undefined;
+let surfaceVertexReadback: GPUBuffer | undefined;
+let interfacePositionReadback: GPUBuffer | undefined;
+let backInterfacePositionReadback: GPUBuffer | undefined;
+let interfaceNormalReadback: GPUBuffer | undefined;
+let backInterfaceNormalReadback: GPUBuffer | undefined;
 try {
   const dawn = await import(pathToFileURL(dawnModule).href) as {
     create(options: string[]): GPU;
@@ -119,12 +139,20 @@ try {
   });
   device.pushErrorScope("validation");
 
-  const scene = createMinimalPowerDamBreak64Scene();
+  const scene = LONG_DAM ? createSparseCM12LongDamBreakScene()
+    : CORNER_DROP ? createCornerBrickDropScene()
+    : createMinimalPowerDamBreak64Scene();
+  if (CORNER_DROP) {
+    scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
+  }
   scene.duration_s = Math.max(scene.duration_s, STEPS * CM12_PAPER_DT_S);
-  scene.fluid.refinementRegions = [{
-    id: "mini64-production-render-whole-domain-min8",
+  if (!CORNER_DROP) scene.fluid.refinementRegions = [{
+    id: MAXIMUM_CELL_SIZE > 0 ? "production-render-whole-domain-max1"
+      : "mini64-production-render-whole-domain-min8",
     rule: "minimum-cell-size",
-    minimumCellSize_cells: 8,
+    minimumCellSize_cells: MAXIMUM_CELL_SIZE > 0 ? 1 : 8,
+    ...(MAXIMUM_CELL_SIZE > 0
+      ? { maximumCellSize_cells: MAXIMUM_CELL_SIZE } : {}),
     min_m: {
       x: -0.5 * scene.container.width_m,
       y: 0,
@@ -140,14 +168,16 @@ try {
     resolutionMode: "adaptive",
     brickFineResolution: "8",
     presentationPageResolution: "8",
-    surfaceFineRings: 1,
+    ...(LONG_DAM ? { finestTravelCells: 4, fourTravelCells: 2,
+      twoTravelCells: 1 } : { surfaceFineRings: 1 }),
     timeStep: "paper",
   });
   solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
     device, scene, "balanced", undefined, adaptiveMassSolverOptions(values), () => {},
   );
   await solver.waitForSimulationReady();
-  assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], [64, 64, 64]);
+  assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz],
+    LONG_DAM ? [192, 96, 32] : CORNER_DROP ? [24, 16, 24] : [64, 64, 64]);
   for (let step = 1; step <= STEPS; step += 1) {
     while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) {
       await new Promise<void>((done) => setImmediate(done));
@@ -159,8 +189,13 @@ try {
   const activeBricks = activity.bricks.filter((brick) => brick.active);
   const surfaceBricks = activeBricks.filter((brick) => (brick.reasons & 1) !== 0);
   assert.ok(surfaceBricks.length > 0, "the evolved dam must retain surface bricks");
-  assert.ok(surfaceBricks.every((brick) => brick.acceptedResolution === 1),
-    "every rendered surface brick must exercise the B8 scale-8 presentation branch");
+  if (!CORNER_DROP) {
+    assert.ok(surfaceBricks.every((brick) => brick.acceptedResolution
+        === (MAXIMUM_CELL_SIZE === 1 ? 8 : 1)),
+      MAXIMUM_CELL_SIZE === 1
+        ? "every rendered surface brick must remain fully fine"
+        : "every rendered surface brick must exercise the B8 scale-8 presentation branch");
+  }
 
   uniformBuffer = device.createBuffer({
     label: "Mini64 min8 capture uniforms",
@@ -211,8 +246,11 @@ try {
     scene.container.depth_m);
   const packed = new Float32Array(100);
   packed.set([WIDTH, HEIGHT, solver.info.submittedTime_s ?? 0, 0], 0);
-  packed.set([1.55 * span, 1.12 * span, 1.72 * span, 0], 4);
-  packed.set([0, 0.38 * scene.container.height_m, 0,
+  packed.set(LONG_DAM
+    ? [0.52 * span, 0.37 * span, 0.57 * span, 0]
+    : CORNER_DROP ? [0.82 * span, 0.58 * span, 0.9 * span, 0]
+    : [1.55 * span, 1.12 * span, 1.72 * span, 0], 4);
+  packed.set([0, (CORNER_DROP ? 0.14 : 0.38) * scene.container.height_m, 0,
     scene.container.top === "closed" ? 1 : 0], 8);
   packed.set([scene.container.width_m, scene.container.height_m,
     scene.container.depth_m, scene.container.height_m * scene.container.fillFraction], 12);
@@ -244,6 +282,76 @@ try {
     "the capture must extract a fresh surface, not draw retained geometry");
   assert.equal(encoded.surfaceDiagnosticsCaptured, true,
     "the capture must fence a source-matched renderer receipt");
+  const meshSource = GEOMETRY_AUDIT
+    ? pipeline.diagnosticSurfaceVertexSource() : undefined;
+  if (GEOMETRY_AUDIT) {
+    assert.ok(meshSource, "production renderer did not expose its surface mesh");
+    classifiedCubeReadback = device.createBuffer({
+      label: "Mini64 classified-cube readback",
+      size: meshSource.classifiedCubes.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    classifiedOffsetReadback = device.createBuffer({
+      label: "Mini64 classified-offset readback",
+      size: meshSource.classifiedOffsets.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    surfaceVertexReadback = device.createBuffer({
+      label: "Mini64 surface-vertex readback",
+      size: meshSource.buffer.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    encoder.copyBufferToBuffer(meshSource.classifiedCubes, 0,
+      classifiedCubeReadback, 0, meshSource.classifiedCubes.size);
+    encoder.copyBufferToBuffer(meshSource.classifiedOffsets, 0,
+      classifiedOffsetReadback, 0, meshSource.classifiedOffsets.size);
+    encoder.copyBufferToBuffer(meshSource.buffer, 0,
+      surfaceVertexReadback, 0, meshSource.buffer.size);
+    const interfaceSource = pipeline.diagnosticCaptureTexture("interface-positions");
+    assert.ok(interfaceSource, "production renderer did not expose front positions");
+    const interfaceBytesPerRow = Math.ceil(WIDTH * 16 / 256) * 256;
+    interfacePositionReadback = device.createBuffer({
+      label: "Mini64 front-interface readback",
+      size: interfaceBytesPerRow * HEIGHT,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    encoder.copyTextureToBuffer({ texture: interfaceSource.texture },
+      { buffer: interfacePositionReadback, bytesPerRow: interfaceBytesPerRow,
+        rowsPerImage: HEIGHT }, [WIDTH, HEIGHT]);
+    const backInterfaceSource = pipeline.diagnosticCaptureTexture(
+      "back-interface-positions");
+    assert.ok(backInterfaceSource, "production renderer did not expose back positions");
+    backInterfacePositionReadback = device.createBuffer({
+      label: "Mini64 back-interface readback",
+      size: interfaceBytesPerRow * HEIGHT,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    encoder.copyTextureToBuffer({ texture: backInterfaceSource.texture },
+      { buffer: backInterfacePositionReadback, bytesPerRow: interfaceBytesPerRow,
+        rowsPerImage: HEIGHT }, [WIDTH, HEIGHT]);
+    const interfaceNormalSource = pipeline.diagnosticCaptureTexture("interfaces");
+    assert.ok(interfaceNormalSource, "production renderer did not expose front normals");
+    const normalBytesPerRow = Math.ceil(WIDTH * 8 / 256) * 256;
+    interfaceNormalReadback = device.createBuffer({
+      label: "Mini64 front-interface normal readback",
+      size: normalBytesPerRow * HEIGHT,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    encoder.copyTextureToBuffer({ texture: interfaceNormalSource.texture },
+      { buffer: interfaceNormalReadback, bytesPerRow: normalBytesPerRow,
+        rowsPerImage: HEIGHT }, [WIDTH, HEIGHT]);
+    const backInterfaceNormalSource = pipeline.diagnosticCaptureTexture(
+      "back-interfaces");
+    assert.ok(backInterfaceNormalSource, "production renderer did not expose back normals");
+    backInterfaceNormalReadback = device.createBuffer({
+      label: "Mini64 back-interface normal readback",
+      size: normalBytesPerRow * HEIGHT,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    encoder.copyTextureToBuffer({ texture: backInterfaceNormalSource.texture },
+      { buffer: backInterfaceNormalReadback, bytesPerRow: normalBytesPerRow,
+        rowsPerImage: HEIGHT }, [WIDTH, HEIGHT]);
+  }
   encoder.copyTextureToBuffer(
     { texture: output },
     { buffer: frameReadback, bytesPerRow, rowsPerImage: HEIGHT },
@@ -283,6 +391,196 @@ try {
   assert.equal(presentation.faultCode, 0);
   assert.deepEqual(validationErrors, []);
 
+  let geometry: Record<string, unknown> | undefined;
+  let tallestCubeReceipt: readonly unknown[] | undefined;
+  let meshAudit: Record<string, unknown> | undefined;
+  let tolerantMeshAudit: Record<string, unknown> | undefined;
+  let interfacePixels: Record<string, number> | undefined;
+  let interfaceNormals: Record<string, unknown> | undefined;
+  if (meshSource && classifiedCubeReadback && classifiedOffsetReadback
+    && surfaceVertexReadback) {
+    await Promise.all([
+    classifiedCubeReadback.mapAsync(GPUMapMode.READ),
+    classifiedOffsetReadback.mapAsync(GPUMapMode.READ),
+    surfaceVertexReadback.mapAsync(GPUMapMode.READ),
+    ]);
+  const classifiedCubes = new Uint32Array(classifiedCubeReadback.getMappedRange());
+  const classifiedOffsets = new Uint32Array(classifiedOffsetReadback.getMappedRange());
+  const surfaceVertices = new Float32Array(surfaceVertexReadback.getMappedRange());
+  const descriptorGroups = new Map<string, {
+    cubes: number; vertices: number; degenerateTriangles: number;
+    minimum: number[]; maximum: number[];
+  }>();
+  const tallestCubes: Array<{
+    kind: string; base: number[]; descriptor: number; vertices: number;
+    minimumY: number; maximumY: number;
+  }> = [];
+  const signed16 = (word: number) => (word << 16) >> 16;
+  for (let cube = 0; cube < diagnostics.activeCubeCount; cube += 1) {
+    const descriptor = classifiedCubes[2 * cube + 1]! >>> 16;
+    const rawCode = descriptor & 255;
+    const kind = rawCode === GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE ? "height-field"
+      : rawCode >= 224 ? `wall-axis-${descriptor >>> 14 & 3}`
+      : rawCode & 128 ? "transition-volume" : "regular-volume";
+    const group = descriptorGroups.get(kind) ?? {
+      cubes: 0, vertices: 0, degenerateTriangles: 0,
+      minimum: [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
+      maximum: [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
+    };
+    group.cubes += 1;
+    const first = classifiedOffsets[6 * cube]!;
+    const end = cube + 1 < diagnostics.activeCubeCount
+      ? classifiedOffsets[6 * (cube + 1)]! : diagnostics.vertexCount;
+    group.vertices += end - first;
+    let minimumY = Number.POSITIVE_INFINITY;
+    let maximumY = Number.NEGATIVE_INFINITY;
+    for (let vertex = first; vertex < end; vertex += 1) {
+      const offset = vertex * meshSource.strideBytes / 4;
+      for (let axis = 0; axis < 3; axis += 1) {
+        group.minimum[axis] = Math.min(group.minimum[axis]!, surfaceVertices[offset + axis]!);
+        group.maximum[axis] = Math.max(group.maximum[axis]!, surfaceVertices[offset + axis]!);
+      }
+      minimumY = Math.min(minimumY, surfaceVertices[offset + 1]!);
+      maximumY = Math.max(maximumY, surfaceVertices[offset + 1]!);
+    }
+    for (let vertex = first; vertex + 2 < end; vertex += 3) {
+      const stride = meshSource.strideBytes / 4;
+      const a = vertex * stride, b = (vertex + 1) * stride, c = (vertex + 2) * stride;
+      const ab = [surfaceVertices[b]! - surfaceVertices[a]!,
+        surfaceVertices[b + 1]! - surfaceVertices[a + 1]!,
+        surfaceVertices[b + 2]! - surfaceVertices[a + 2]!];
+      const ac = [surfaceVertices[c]! - surfaceVertices[a]!,
+        surfaceVertices[c + 1]! - surfaceVertices[a + 1]!,
+        surfaceVertices[c + 2]! - surfaceVertices[a + 2]!];
+      const cross = [ab[1]! * ac[2]! - ab[2]! * ac[1]!,
+        ab[2]! * ac[0]! - ab[0]! * ac[2]!,
+        ab[0]! * ac[1]! - ab[1]! * ac[0]!];
+      const areaSquared = cross.reduce((sum, value) => sum + value * value, 0);
+      group.degenerateTriangles += Number(!(areaSquared > 0)
+        || !Number.isFinite(areaSquared));
+    }
+    if (end > first) tallestCubes.push({ kind,
+      base: [signed16(classifiedCubes[2 * cube]!),
+        classifiedCubes[2 * cube + 1]! & 0xffff,
+        signed16(classifiedCubes[2 * cube]! >>> 16)],
+      descriptor, vertices: end - first, minimumY, maximumY });
+    descriptorGroups.set(kind, group);
+  }
+  if (interfacePositionReadback && backInterfacePositionReadback) {
+    await Promise.all([interfacePositionReadback.mapAsync(GPUMapMode.READ),
+      backInterfacePositionReadback.mapAsync(GPUMapMode.READ)]);
+    const interfaceBytesPerRow = Math.ceil(WIDTH * 16 / 256) * 256;
+    const frontPositions = new Float32Array(interfacePositionReadback.getMappedRange());
+    const backPositions = new Float32Array(backInterfacePositionReadback.getMappedRange());
+    let front = 0, back = 0;
+    for (let y = 0; y < HEIGHT; y += 1) for (let x = 0; x < WIDTH; x += 1) {
+      const alpha = (y * interfaceBytesPerRow >> 2) + 4 * x + 3;
+      front += Number(frontPositions[alpha]! !== 0);
+      back += Number(backPositions[alpha]! !== 0);
+    }
+    interfacePixels = { front, back, total: WIDTH * HEIGHT };
+    interfacePositionReadback.unmap();
+    backInterfacePositionReadback.unmap();
+  }
+  if (interfaceNormalReadback && backInterfaceNormalReadback) {
+    await Promise.all([interfaceNormalReadback.mapAsync(GPUMapMode.READ),
+      backInterfaceNormalReadback.mapAsync(GPUMapMode.READ)]);
+    const normalBytesPerRow = Math.ceil(WIDTH * 8 / 256) * 256;
+    const summarizeNormals = (mappedRange: ArrayBuffer) => {
+      const words = new Uint16Array(mappedRange);
+      let occupied = 0, zeroLength = 0, nonFinite = 0;
+      let positiveY = 0, negativeY = 0;
+      let sumX = 0, sumY = 0, sumZ = 0, sumLength = 0;
+      let minimumLength = Number.POSITIVE_INFINITY;
+      let maximumLength = 0;
+      let rawHash = 0x811c_9dc5;
+      for (let y = 0; y < HEIGHT; y += 1) for (let x = 0; x < WIDTH; x += 1) {
+        const base = (y * normalBytesPerRow >> 1) + 4 * x;
+        const alpha = float16BitsToFloat32(words[base + 3]!);
+        if (alpha === 0) continue;
+        occupied += 1;
+        const nx = float16BitsToFloat32(words[base]!);
+        const ny = float16BitsToFloat32(words[base + 1]!);
+        const nz = float16BitsToFloat32(words[base + 2]!);
+        const length = Math.hypot(nx, ny, nz);
+        if (!Number.isFinite(nx + ny + nz + length + alpha)) nonFinite += 1;
+        else {
+          zeroLength += Number(length < 1e-6);
+          positiveY += Number(ny > 0);
+          negativeY += Number(ny < 0);
+          sumX += nx; sumY += ny; sumZ += nz; sumLength += length;
+          minimumLength = Math.min(minimumLength, length);
+          maximumLength = Math.max(maximumLength, length);
+        }
+        for (let channel = 0; channel < 4; channel += 1) {
+          const word = words[base + channel]!;
+          rawHash = Math.imul(rawHash ^ (word & 255), 0x0100_0193) >>> 0;
+          rawHash = Math.imul(rawHash ^ (word >>> 8), 0x0100_0193) >>> 0;
+        }
+      }
+      const divisor = Math.max(1, occupied - nonFinite);
+      return { occupied, zeroLength, nonFinite, positiveY, negativeY,
+        mean: [sumX / divisor, sumY / divisor, sumZ / divisor],
+        meanLength: sumLength / divisor,
+        minimumLength: Number.isFinite(minimumLength) ? minimumLength : 0,
+        maximumLength,
+        rawFnv1a: rawHash.toString(16).padStart(8, "0") };
+    };
+    interfaceNormals = {
+      front: summarizeNormals(interfaceNormalReadback.getMappedRange()),
+      back: summarizeNormals(backInterfaceNormalReadback.getMappedRange()),
+    };
+    interfaceNormalReadback.unmap();
+    backInterfaceNormalReadback.unmap();
+  }
+  geometry = Object.fromEntries([...descriptorGroups].map(([kind, group]) =>
+    [kind, { ...group, minimum: group.minimum.map(value => Number(value.toFixed(6))),
+      maximum: group.maximum.map(value => Number(value.toFixed(6))) }]));
+  tallestCubes.sort((a, b) => b.maximumY - a.maximumY);
+  const fullMeshAudit = rasterMeshSymmetryMetrics(surfaceVertices,
+    diagnostics.vertexCount, {
+      minimum: [-0.5 * scene.container.width_m, 0,
+        -0.5 * scene.container.depth_m],
+      maximum: [0.5 * scene.container.width_m, scene.container.height_m,
+        0.5 * scene.container.depth_m],
+      tolerance: 1e-6,
+    }, { cubes: classifiedCubes, offsets: classifiedOffsets,
+      cubeCount: diagnostics.activeCubeCount });
+  assert.equal(fullMeshAudit.interiorOpenEdgeCount, 0,
+    "height/volume handoff left an unmatched interior mesh edge");
+  assert.equal(fullMeshAudit.nonManifoldEdgeCount, 0,
+    "surface extraction emitted a non-manifold mesh edge");
+  meshAudit = { ...fullMeshAudit,
+    interiorOpenEdges: fullMeshAudit.interiorOpenEdges?.slice(0, 24) };
+  tolerantMeshAudit = Object.fromEntries([1e-7, 1e-6, 1e-5, 1e-4].map(
+    (tolerance) => {
+      const rounded = surfaceVertices.slice(0,
+        diagnostics.vertexCount * meshSource.strideBytes / 4);
+      for (let vertex = 0; vertex < diagnostics.vertexCount; vertex += 1) {
+        for (let axis = 0; axis < 3; axis += 1) {
+          const at = vertex * meshSource.strideBytes / 4 + axis;
+          rounded[at] = Math.round(rounded[at]! / tolerance) * tolerance;
+        }
+      }
+      const audit = rasterMeshSymmetryMetrics(rounded, diagnostics.vertexCount, {
+        minimum: [-0.5 * scene.container.width_m, 0,
+          -0.5 * scene.container.depth_m],
+        maximum: [0.5 * scene.container.width_m, scene.container.height_m,
+          0.5 * scene.container.depth_m],
+        tolerance: 1.5 * tolerance,
+      });
+      return [String(tolerance), { openEdgeCount: audit.openEdgeCount,
+        boundaryOpenEdgeCount: audit.boundaryOpenEdgeCount,
+        interiorOpenEdgeCount: audit.interiorOpenEdgeCount,
+        degenerateTriangleCount: audit.degenerateTriangleCount,
+        nonManifoldEdgeCount: audit.nonManifoldEdgeCount }];
+    }));
+  tallestCubeReceipt = tallestCubes.slice(0, 24);
+  classifiedCubeReadback.unmap();
+  classifiedOffsetReadback.unmap();
+  surfaceVertexReadback.unmap();
+  }
+
   const receipt = {
     probe: "sparse-cm12-mini64-production-render",
     configuration: {
@@ -290,23 +588,33 @@ try {
       grid: [solver.info.nx, solver.info.ny, solver.info.nz],
       brickFineResolution: 8,
       presentationPageResolution: 8,
-      minimumCellSize_cells: 8,
-      refinementRegion: "whole-domain",
+      minimumCellSize_cells: MAXIMUM_CELL_SIZE > 0 ? 1 : 8,
+      maximumCellSize_cells: MAXIMUM_CELL_SIZE || undefined,
+      refinementRegion: CORNER_DROP ? "none" : "whole-domain",
       timeStep: "paper",
       steps: STEPS,
       time_s: STEPS * CM12_PAPER_DT_S,
     },
     branchProof: {
-      interpretation: "acceptedResolution 1 in B8 means cell scale 8",
+      interpretation: MAXIMUM_CELL_SIZE === 1
+        ? "acceptedResolution 8 in B8 means cell scale 1"
+        : "acceptedResolution 1 in B8 means cell scale 8",
       activeBricks: activeBricks.length,
       activeResolutionHistogram: resolutionHistogram(activeBricks),
       surfaceBricks: surfaceBricks.length,
       surfaceResolutionHistogram: resolutionHistogram(surfaceBricks),
-      everySurfaceBrickUsesScale8: surfaceBricks.every(
-        (brick) => brick.acceptedResolution === 1),
+      everySurfaceBrickUsesExpectedScale: CORNER_DROP ? undefined
+        : surfaceBricks.every(
+          (brick) => brick.acceptedResolution === (MAXIMUM_CELL_SIZE === 1 ? 8 : 1)),
     },
     presentation,
     renderer: diagnostics,
+    ...(geometry ? { geometry } : {}),
+    ...(tallestCubeReceipt ? { tallestCubes: tallestCubeReceipt } : {}),
+    ...(meshAudit ? { meshAudit } : {}),
+    ...(tolerantMeshAudit ? { tolerantMeshAudit } : {}),
+    ...(interfacePixels ? { interfacePixels } : {}),
+    ...(interfaceNormals ? { interfaceNormals } : {}),
     image: { path: pngPath, ...imageReceipt(rgb) },
     validationErrors,
   };
@@ -324,6 +632,13 @@ try {
   try {
     if (frameReadback?.mapState === "mapped") frameReadback.unmap();
     frameReadback?.destroy();
+    classifiedCubeReadback?.destroy();
+    classifiedOffsetReadback?.destroy();
+    surfaceVertexReadback?.destroy();
+    interfacePositionReadback?.destroy();
+    backInterfacePositionReadback?.destroy();
+    interfaceNormalReadback?.destroy();
+    backInterfaceNormalReadback?.destroy();
     pipeline?.destroy();
     output?.destroy();
     columnFallback?.destroy();

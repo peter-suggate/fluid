@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Cuboid, Sigma } from "lucide-react";
+import { Cuboid, Sigma, Waves } from "lucide-react";
 import type { EditorEntity, EditorField } from "../lib/core/editor-entity";
 import { sceneryIdFromSelection } from "../lib/core/editor-scenery";
 import { TANK_SELECTION_ID, tankExtentFields } from "../lib/core/editor-tank";
@@ -20,6 +20,7 @@ import { CanopyDialRows } from "./TreeCanopyFlyout";
 import { RimDialRows } from "./VesselRimFlyout";
 import {
   Toolstrip,
+  ToolstripChoice,
   ToolstripMenuButton,
   ToolstripMenuItem,
   ToolstripMoreRow,
@@ -140,6 +141,26 @@ function SolverRow() {
   />;
 }
 
+/** Presentation-only switch for reading the selected tank's extracted mesh. */
+function FluidSurfaceRenderRow() {
+  const session = useSession();
+  const mode = session.ui((state) => state.fluidSurfaceRenderMode);
+  const setMode = session.ui((state) => state.setFluidSurfaceRenderMode);
+  return <ToolstripRow
+    icon={<Waves width={14} height={14} strokeWidth={1.7} aria-hidden />}
+    name="Fluid surface"
+    hint="Shade the liquid normally, or show the extracted triangle edges for topology diagnosis."
+    testId="fluid-surface-render-row"
+  >
+    <ToolstripChoice
+      ariaLabel="Fluid surface render mode"
+      value={mode}
+      options={[{ value: "shaded", label: "Shade" }, { value: "wireframe", label: "Wire" }]}
+      onChange={(value) => setMode(value as typeof mode)}
+    />
+  </ToolstripRow>;
+}
+
 /** Whether an entity declares anything for `EntityOptionRows` to draw. */
 function entityHasOptions(entity: EditorEntity): boolean {
   return (entity.choices?.length ?? 0)
@@ -233,6 +254,7 @@ export function ContainerToolstrip({
       : <>
         <ToolstripRule />
         <FieldControlRows />
+        {hasSolver && <FluidSurfaceRenderRow />}
         {/* Only over rows that exist. The tank's own list is down to the water's
             settings, and those are only its while the scene has no body to hang
             them off — so on a filled scene this section is empty, and a heading

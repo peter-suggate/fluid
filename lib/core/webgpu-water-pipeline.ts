@@ -31,7 +31,11 @@ import {
   type GlobalFineLevelSetConsumerSource,
 } from "./octree-consumer-sampling";
 import type { CoarseLevelSetConsumerSource } from "./levelset-consumer-abi";
-import { globalFineClassifiedEmitShader, globalFineClassifiedIndirectScanShader } from "./webgpu-water-global-fine-tetra";
+import {
+  GLOBAL_FINE_SURFACE_EMIT_LANES,
+  globalFineClassifiedEmitShader,
+  globalFineClassifiedIndirectScanShader,
+} from "./webgpu-water-global-fine-tetra";
 import { globalFineSurfaceClassificationShader } from "./webgpu-water-global-fine-classify";
 import { marchingCubesLookupWGSL } from "./marching-cubes-lookup.wgsl";
 import type { RenderFrameSeam } from "./render-frame-stages";
@@ -230,6 +234,9 @@ export type DrySceneReplacementEncoder = (
 
 /** What to put behind raster water when no dry-scene encoder is requested. */
 export type RasterWaterBackgroundMode = "require-dry-scene" | "clear";
+
+/** How the extracted liquid surface is presented in the viewport. */
+export type FluidSurfaceRenderMode = "shaded" | "wireframe";
 
 /**
  * Restricted tall cells cannot contain a free surface below their cubic band.
@@ -850,6 +857,62 @@ struct SurfaceOut { @location(0) position:vec4f, @location(1) normal:vec4f }
 `;
 
 /**
+ * Direct view of the extracted triangle topology.
+ *
+ * WebGPU has no polygon line mode, so each non-indexed triangle carries an
+ * analytic barycentric coordinate and the fragment stage keeps a one-pixel
+ * neighbourhood of its edges. The dry-scene linear depth remains authoritative
+ * for occlusion, which keeps back-wall and buried liquid triangles from showing
+ * through the tank while leaving genuine holes unmistakable.
+ */
+export const surfaceWireframeShader = /* wgsl */ `
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f }
+struct SurfaceVertex { position:vec4f, normal:vec4f }
+@group(0) @binding(0) var<uniform> u:Uniforms;
+@group(0) @binding(1) var<storage,read> vertices:array<SurfaceVertex>;
+@group(1) @binding(0) var dryScene:texture_2d<f32>;
+${cameraApertureShaderLibrary("u")}
+struct Out {
+  @builtin(position) clip:vec4f,
+  @location(0) world:vec3f,
+  @location(1) barycentric:vec3f,
+}
+fn project(world:vec3f)->vec4f {
+  let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);
+  let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));
+  let up=normalize(cross(right,forward));
+  let relative=world-u.cameraPosition.xyz;
+  let depth=max(dot(relative,forward),0.001);
+  let aspect=u.viewport.x/max(u.viewport.y,1.0);
+  let aperture=cameraTanHalfFov();
+  let ndc=vec2f(dot(relative,right)/(depth*aspect*aperture),dot(relative,up)/(depth*aperture));
+  return vec4f(ndc*depth,clamp(depth/50.0,0.0,1.0)*depth,depth);
+}
+@vertex fn wireVertex(@builtin(vertex_index) index:u32)->Out {
+  let v=vertices[index];
+  let corner=index%3u;
+  var o:Out;
+  o.clip=project(v.position.xyz);
+  o.world=v.position.xyz;
+  o.barycentric=select(select(vec3f(0.0,0.0,1.0),vec3f(0.0,1.0,0.0),corner==1u),vec3f(1.0,0.0,0.0),corner==0u);
+  return o;
+}
+@fragment fn wireFragment(input:Out)->@location(0) vec4f {
+  let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);
+  let surfaceDepth=dot(input.world-u.cameraPosition.xyz,forward);
+  let encodedDryDepth=textureLoad(dryScene,vec2i(input.clip.xy),0).a;
+  let dryDepth=select(65504.0,encodedDryDepth,encodedDryDepth>0.0);
+  let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));
+  if(dryDepth+max(.0015,.18*cellSize)<surfaceDepth){discard;}
+  let edge=min(input.barycentric.x,min(input.barycentric.y,input.barycentric.z));
+  let width=max(fwidth(edge),1e-5);
+  let coverage=1.0-smoothstep(.05*width,.55*width,edge);
+  if(coverage<=.01){discard;}
+  return vec4f(vec3f(.06,.86,.68),.82*coverage);
+}
+`;
+
+/**
  * Edge of the square caustic map, which is also the receiver lattice's.
  *
  * The map is an orthographic plan projection of the whole container, so one
@@ -1016,6 +1079,7 @@ fn causticLanding(origin:vec3f,direction:vec3f)->vec2f{
 `;
 
 export const compositeShader = /* wgsl */ `
+override wireframeOnly:f32=0.0;
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
@@ -1191,7 +1255,7 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
   // performs the same conversion for the final target; all raster-path
   // intermediate reads and world projections must do it here as well.
   let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);
-  let scene=safeSample(sceneTexture,textureUV);var front=safePositionSample(frontPosition,textureUV);if(front.a<.5){return finish(scene.rgb,ndc);}var frontDepth=dot(front.xyz-ro,rd);
+  let scene=safeSample(sceneTexture,textureUV);if(wireframeOnly>.5){return finish(scene.rgb,ndc);}var front=safePositionSample(frontPosition,textureUV);if(front.a<.5){return finish(scene.rgb,ndc);}var frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
   let frontNormalSample=safeInterfaceSample(frontNormal,textureUV);let filmDensity=recoveredWallFilm(front,frontNormalSample);var n=normalize(frontNormalSample.xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
   if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(scene.rgb,ndc);}}
@@ -1294,8 +1358,10 @@ export class RasterWaterPipeline {
   private surfaceBackPipeline?: GPURenderPipeline;
   private surfaceRearFrontPipeline?: GPURenderPipeline;
   private surfaceRearBackPipeline?: GPURenderPipeline;
+  private surfaceWireframePipeline?: GPURenderPipeline;
   private causticPipeline?: GPURenderPipeline;
   private compositePipeline?: GPURenderPipeline;
+  private wireframeCompositePipeline?: GPURenderPipeline;
   private extractLayout?: GPUBindGroupLayout;
   private globalExtractLayout?: GPUBindGroupLayout;
   private globalPolygoniseLayout?: GPUBindGroupLayout;
@@ -1336,6 +1402,7 @@ export class RasterWaterPipeline {
   private surfacePeelBindGroup?: GPUBindGroup;
   private compositeBindGroup?: GPUBindGroup;
   private compositeBindGroups = new WeakMap<GPUTextureView, GPUBindGroup>();
+  private wireframeSceneBindGroups = new WeakMap<GPUTextureView, GPUBindGroup>();
   private rigidSceneLayout?: GPUBindGroupLayout;
   private rigidScenePipeline?: GPURenderPipeline;
   private rigidSceneBindGroup?: GPUBindGroup;
@@ -1519,13 +1586,14 @@ export class RasterWaterPipeline {
     onProgress:(label:string,completed:number,total:number)=>void=()=>{},
     options: { readonly deferSceneClassifiers?: boolean } = {},
   ) {
-    const [extract, globalClassify, globalScan, globalEmitAll, prepare, surface, caustic, composite, rigidScene] = await Promise.all([
+    const [extract, globalClassify, globalScan, globalEmitAll, prepare, surface, wireframe, caustic, composite, rigidScene] = await Promise.all([
       checkedModule(this.device, "Water isosurface extraction", surfaceExtractionShader),
       checkedModule(this.device, "Global fine water classification", globalFineSurfaceClassificationShader),
       checkedModule(this.device, "Classified global fine scan", globalFineClassifiedIndirectScanShader),
-      checkedModule(this.device, "Classified global fine tetrahedra", globalFineClassifiedEmitShader),
+      checkedModule(this.device, "Classified global fine adaptive contour", globalFineClassifiedEmitShader),
       checkedModule(this.device, "Water extraction dispatch prepare", extractionPrepareShader),
       checkedModule(this.device, "Water interface raster", surfaceRasterShader),
+      checkedModule(this.device, "Water surface wireframe", surfaceWireframeShader),
       checkedModule(this.device, "Water caustic projection", causticShader),
       checkedModule(this.device, "Water optical composite", compositeShader),
       checkedModule(this.device, "Fluid-only rigid bodies", fluidOnlyRigidSceneShader)
@@ -1700,12 +1768,23 @@ export class RasterWaterPipeline {
     render("Rendering back water interfaces",surfaceDescriptor("Raster water back interfaces", WATER_INTERFACE_CULL_MODES.back),pipeline=>{this.surfaceBackPipeline=pipeline;});
     render("Peeling rear front water interfaces",surfaceDescriptor("Raster water rear front interfaces", WATER_INTERFACE_CULL_MODES.front,0,true),pipeline=>{this.surfaceRearFrontPipeline=pipeline;});
     render("Peeling rear back water interfaces",surfaceDescriptor("Raster water rear back interfaces", WATER_INTERFACE_CULL_MODES.back,0,true),pipeline=>{this.surfaceRearBackPipeline=pipeline;});
+    render("Rendering water surface wireframe",{
+      label:"Raster water surface wireframe",layout:surfacePipelineLayout,
+      vertex:{module:wireframe,entryPoint:"wireVertex"},
+      fragment:{module:wireframe,entryPoint:"wireFragment",targets:[{format:this.targetFormat,blend:{color:{srcFactor:"src-alpha",dstFactor:"one-minus-src-alpha"},alpha:{srcFactor:"one",dstFactor:"one-minus-src-alpha"}}}]},
+      primitive:{topology:"triangle-list",frontFace:"ccw",cullMode:"back"},
+      depthStencil:{format:"depth24plus",depthWriteEnabled:false,depthCompare:"equal"},
+    },pipeline=>{this.surfaceWireframePipeline=pipeline;});
     render("Projecting water caustics",{
       label: "Project refracted caustics", layout: causticPipelineLayout, vertex: { module: caustic, entryPoint: "causticVertex" },
       fragment: { module: caustic, entryPoint: "causticFragment", targets: [{ format: "rgba16float", blend: { color: { srcFactor: "one", dstFactor: "one" }, alpha: { srcFactor: "one", dstFactor: "one" } } }] },
       primitive: { topology: "triangle-list", cullMode: "none" }
     },pipeline=>{this.causticPipeline=pipeline;});
     render("Compositing water optics",compositeDescriptor,pipeline=>{this.compositePipeline=pipeline;});
+    render("Compositing wireframe background",{
+      ...compositeDescriptor,label:"Composite water wireframe background",
+      fragment:{module:composite,entryPoint:"fragmentMain",constants:{wireframeOnly:1},targets:[{format:this.targetFormat}]},
+    },pipeline=>{this.wireframeCompositePipeline=pipeline;});
     render("Drawing rigid bodies",{
       label: "Fluid-only rigid bodies", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.rigidSceneLayout] }),
       vertex: { module: rigidScene, entryPoint: "vertexMain" },
@@ -1900,6 +1979,11 @@ export class RasterWaterPipeline {
     const texture = stageKey === "interfaces" ? this.frontNormal
       : stageKey === "interface-positions" ? this.frontPosition
         : stageKey === "back-interface-positions" ? this.backPosition
+          : stageKey === "back-interfaces" ? this.backNormal
+            : stageKey === "rear-interface-positions" ? this.rearFrontPosition
+              : stageKey === "rear-interfaces" ? this.rearFrontNormal
+                : stageKey === "rear-back-interface-positions" ? this.rearBackPosition
+                  : stageKey === "rear-back-interfaces" ? this.rearBackNormal
       : this.sceneTexture;
     return texture ? { texture, dimensions: [texture.width, texture.height, 1] as [number, number, number] } : undefined;
   }
@@ -2035,7 +2119,7 @@ export class RasterWaterPipeline {
     this.indirectResetTemplate = this.createIndirectResetTemplate();
     this.activeCubeBuffer = this.device.createBuffer({ label: "Water surface cube worklist", size: activeCubeCapacity(maxVertices) * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     this.globalCubeValues = this.device.createBuffer({ label: "Global fine classified cube values", size: activeCubeCapacity(maxVertices) * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.globalCubeOffsets = this.device.createBuffer({ label: "Global fine tetrahedron offsets", size: activeCubeCapacity(maxVertices) * 6 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    this.globalCubeOffsets = this.device.createBuffer({ label: "Global fine contour offsets", size: activeCubeCapacity(maxVertices) * GLOBAL_FINE_SURFACE_EMIT_LANES * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     this.geometryKey = key; this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
   }
 
@@ -2099,6 +2183,7 @@ export class RasterWaterPipeline {
 
   private rebuildBindGroups() {
     this.compositeBindGroups = new WeakMap();
+    this.wireframeSceneBindGroups = new WeakMap();
     const globalFine = this.globalFineLevelSet;
     const coarse = this.coarseLevelSet;
     const coarseDirectory = globalFine?.coarsePhiDirectory ?? coarse?.directory;
@@ -2171,7 +2256,20 @@ export class RasterWaterPipeline {
     return bindGroup;
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, tracePhase?: RenderPathTraceStage, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene", allowSurfaceDiagnostics = true, bandPartitioner?: FrameBandPartitioner, revisionCadenceBypass = false): RasterWaterEncodeResult | false {
+  private wireframeSceneBindGroupFor(sceneView: GPUTextureView): GPUBindGroup | undefined {
+    const cached = this.wireframeSceneBindGroups.get(sceneView);
+    if (cached) return cached;
+    if (!this.surfacePeelLayout) return undefined;
+    const bindGroup = this.device.createBindGroup({
+      label: "Water wireframe dry-scene depth",
+      layout: this.surfacePeelLayout,
+      entries: [{ binding: 0, resource: sceneView }],
+    });
+    this.wireframeSceneBindGroups.set(sceneView, bindGroup);
+    return bindGroup;
+  }
+
+  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, tracePhase?: RenderPathTraceStage, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene", allowSurfaceDiagnostics = true, bandPartitioner?: FrameBandPartitioner, revisionCadenceBypass = false, surfaceRenderMode: FluidSurfaceRenderMode = "shaded"): RasterWaterEncodeResult | false {
     // Count only frames whose source has a completed GPU receipt. The
     // diagnostics/visual panels request full-rate receipts, making this an
     // exact source-mode counter while it is being used to judge fidelity.
@@ -2188,7 +2286,7 @@ export class RasterWaterPipeline {
       geometryDimensions[2], sparseGeometryCapacity);
     const globalFinePipeline = this.extractGlobalFinePipeline;
     const globalCoarsePipeline = this.extractGlobalCoarsePipeline;
-    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||(Boolean(this.globalFineLevelSet)&&!globalFinePipeline)||(this.needsGlobalCoarsePipeline()&&!globalCoarsePipeline)||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.causticPipeline||!this.compositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.globalPolygoniseEmitBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.causticBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture||!this.causticReceiver) return false;
+    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||(Boolean(this.globalFineLevelSet)&&!globalFinePipeline)||(this.needsGlobalCoarsePipeline()&&!globalCoarsePipeline)||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.surfaceWireframePipeline||!this.causticPipeline||!this.compositePipeline||!this.wireframeCompositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.globalPolygoniseEmitBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.causticBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture||!this.causticReceiver) return false;
     const now_ms = performance.now();
     // A paused t=0 handoff cannot wait for a new solver revision: reset has
     // already made the current revision the only one that will be presented.
@@ -2379,9 +2477,21 @@ export class RasterWaterPipeline {
     // the clear so the presentation target is the background colour rather than
     // a stale composite that would look like the pass still ran.
     if (!this.disabledStages.has("optical-composite")) {
-      composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
+      composite.setPipeline(surfaceRenderMode === "wireframe" ? this.wireframeCompositePipeline : this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
     }
-    composite.end();tracePhase?.("optical-composite");return { surfaceUpdated: updateSurface, surfaceDiagnosticsCaptured };
+    composite.end();
+    if (surfaceRenderMode === "wireframe" && !this.disabledStages.has("optical-composite")) {
+      const sceneView = sparseSceneResult ? sparseSceneResult.sampledTargetView : this.sceneTextureView!;
+      const wireframeSceneBindGroup = this.wireframeSceneBindGroupFor(sceneView);
+      if (!wireframeSceneBindGroup) return false;
+      const wireframePass=encoder.beginRenderPass({label:"Water surface wireframe overlay",colorAttachments:[{view:outputView,loadOp:"load",storeOp:"store"}],depthStencilAttachment:{view:this.frontDepth.createView(),depthLoadOp:"load",depthStoreOp:"store"}});
+      wireframePass.setPipeline(this.surfaceWireframePipeline);
+      wireframePass.setBindGroup(0,this.surfaceBindGroup);
+      wireframePass.setBindGroup(1,wireframeSceneBindGroup);
+      wireframePass.drawIndirect(this.indirectBuffer,0);
+      wireframePass.end();
+    }
+    tracePhase?.("optical-composite");return { surfaceUpdated: updateSurface, surfaceDiagnosticsCaptured };
   }
 
   destroy() {

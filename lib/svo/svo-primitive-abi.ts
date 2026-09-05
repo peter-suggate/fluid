@@ -20,6 +20,16 @@ import {
   cupWallThickness_m,
 } from "../core/scene-shape";
 import { materialIdForRigidShape } from "../core/voxel-scene";
+import {
+  SVO_CLUSTER_LOBE_MAXIMUM_ANISOTROPY,
+  SVO_CLUSTER_LOBE_MAXIMUM_COUNT,
+  SVO_CLUSTER_LOBE_MINIMUM_COUNT,
+} from "./svo-cluster-limits";
+export {
+  SVO_CLUSTER_LOBE_MAXIMUM_ANISOTROPY,
+  SVO_CLUSTER_LOBE_MAXIMUM_COUNT,
+  SVO_CLUSTER_LOBE_MINIMUM_COUNT,
+} from "./svo-cluster-limits";
 
 /** Four 16-byte lanes, directly usable as a WebGPU storage-buffer array. */
 export const SVO_PRIMITIVE_RECORD_STRIDE_BYTES = 64;
@@ -245,19 +255,8 @@ export const SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES = 5;
  * alternative to. The ceiling is a cost bound, twelve rotations and twelve
  * scaled lengths per distance evaluation and four of those per normal.
  */
-export const SVO_CLUSTER_LOBE_MINIMUM_COUNT = 4;
-export const SVO_CLUSTER_LOBE_MAXIMUM_COUNT = 12;
-
-/**
- * Largest ratio between a lobe's longest and shortest half-axis.
- *
- * A soundness ceiling wearing a cost hat. The lobe's distance is scaled by a
- * lower bound on its smallest singular value, so a lobe of ratio `a` understeps
- * by up to `a` near its long axis — and with
- * {@link SVO_PRIMITIVE_MARCH_ITERATIONS} fixed at 48, a grazing ray on a flat
- * enough lobe runs out of iterations before it arrives and reports a miss.
- */
-export const SVO_CLUSTER_LOBE_MAXIMUM_ANISOTROPY = 4;
+// Seeded-lobe limits are imported from the dependency leaf above and re-exported
+// here so the public primitive ABI retains its existing surface.
 
 /**
  * Defaults for the seeded-lobes placement parameters.

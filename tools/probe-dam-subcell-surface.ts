@@ -24,8 +24,11 @@ import { getScenePreset } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { globalFineSurfaceClassificationShader } from
   "../lib/core/webgpu-water-global-fine-classify";
-import { globalFineClassifiedEmitShader, globalFineClassifiedIndirectScanShader } from
-  "../lib/core/webgpu-water-global-fine-tetra";
+import {
+  GLOBAL_FINE_SURFACE_EMIT_LANES,
+  globalFineClassifiedEmitShader,
+  globalFineClassifiedIndirectScanShader,
+} from "../lib/core/webgpu-water-global-fine-tetra";
 
 type Point = readonly [number, number, number];
 interface Snapshot {
@@ -491,7 +494,8 @@ async function emittedMesh(device: GPUDevice, snapshot: Snapshot,
     GPUBufferUsage.STORAGE);
   const values = makeBuffer(device, "dam subcell values", cubeCapacity * 32,
     GPUBufferUsage.STORAGE);
-  const offsets = makeBuffer(device, "dam subcell offsets", cubeCapacity * 24,
+  const offsets = makeBuffer(device, "dam subcell offsets",
+    cubeCapacity * GLOBAL_FINE_SURFACE_EMIT_LANES * 4,
     GPUBufferUsage.STORAGE);
   const empty = makeBuffer(device, "dam subcell empty", 256,
     GPUBufferUsage.STORAGE, new Uint32Array(64));
@@ -541,7 +545,7 @@ async function emittedMesh(device: GPUDevice, snapshot: Snapshot,
   encoder = device.createCommandEncoder(); pass = encoder.beginComputePass();
   pass.setPipeline(scan); pass.setBindGroup(0, scanGroup(vertices)); pass.dispatchWorkgroups(1);
   pass.setPipeline(emit); pass.setBindGroup(0, emitGroup);
-  pass.dispatchWorkgroups(Math.ceil(countArgs[4]! / 64), 6, 1);
+  pass.dispatchWorkgroups(Math.ceil(countArgs[4]! / 64), GLOBAL_FINE_SURFACE_EMIT_LANES, 1);
   pass.end(); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
   const finalArgs = new Uint32Array(await readBuffer(device, args, 32));
   assert.equal(finalArgs[0], vertexCount); assert.equal(finalArgs[5], vertexCount);
@@ -557,7 +561,8 @@ async function emittedMesh(device: GPUDevice, snapshot: Snapshot,
     ]);
     normals.push([mesh[8 * vertex + 4]!, mesh[8 * vertex + 5]!, mesh[8 * vertex + 6]!]);
   }
-  for (const resource of [uniforms, params, args, cubes, values, offsets, empty, directory, vertices]) {
+  for (const resource of [uniforms, params, args, cubes, values, offsets, empty,
+    directory, vertices]) {
     resource.destroy();
   }
   const unique = new Map(points.map(point => [quantizedPointKey(point), point]));

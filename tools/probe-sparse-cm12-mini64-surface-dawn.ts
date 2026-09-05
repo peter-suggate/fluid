@@ -16,6 +16,7 @@ import { createMinimalPowerDamBreak32Scene,
   createMinimalPowerDamBreak64Scene, createCornerBrickDropScene,
   createSparseCM12LongDamBreakScene,
   SPARSE_CM12_LONG_DAM_METHOD_PROFILE } from "../lib/core/scenes";
+import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
@@ -52,10 +53,12 @@ if (region !== "whole" && region !== "central-x" && region !== "right-x") {
   throw new RangeError("region must be whole, central-x, or right-x");
 }
 const steps = numericArgument("steps", scenario === "sphere" ? 0
-  : scenario === "corner-drop" ? 12
+  : scenario === "corner-drop" ? 15
   : Number(process.env.FLUID_MIN8_SURFACE_STEPS
     ?? process.env.FLUID_MINI64_MIN8_SURFACE_STEPS ?? 7));
 const frontierTopologyOnly = process.argv.includes("--frontier-topology-only");
+const maximumCellSize = numericArgument("maximum-cell-size",
+  Number(process.env.FLUID_MAXIMUM_CELL_SIZE ?? 0));
 const outputPath = resolve(stringArgument("out",
   process.env.FLUID_MINI64_MIN8_SURFACE_OUT
     ?? `artifacts/sparse-cm12-mini${grid}-min8-${region}-${scenario}-surface.json`));
@@ -82,7 +85,9 @@ async function readWords(device: GPUDevice, source: GPUBuffer,
 }
 
 async function readPublishedField(device: GPUDevice,
-  solver: WebGPUAdaptiveMassSolver): Promise<Float32Array> {
+  solver: WebGPUAdaptiveMassSolver): Promise<{
+    readonly values: Float32Array;readonly floorContinuation: Uint8Array;
+  }> {
   const source = solver.globalFineLevelSetSource;
   const { plan } = source;
   assert.equal(plan.fineFactor, 1);
@@ -97,6 +102,7 @@ async function readPublishedField(device: GPUDevice,
   const [nx, ny, nz] = plan.sampleDimensions;
   const r = plan.brickResolution;
   const field = new Float32Array(nx * ny * nz).fill(Number.NaN);
+  const floorContinuation = new Uint8Array(nx * nz);
   for (let work = 0; work < worklist[1]!; work += 1) {
     const page = worklist[7 + work]!;
     assert.ok(page < capacity);
@@ -112,11 +118,13 @@ async function readPublishedField(device: GPUDevice,
       const qz = bz * r + Math.floor(local / (r * r));
       if (qx < 0 || qy < 0 || qz < 0 || qx >= nx || qy >= ny || qz >= nz) continue;
       const packed = samples[page * plan.samplesPerBrick + local]!;
-      if ((unpackFineLevelSetPackedFlags(packed) & 1) === 0) continue;
+      const flags = unpackFineLevelSetPackedFlags(packed);
+      if ((flags & 1) === 0) continue;
       field[qx + nx * (qy + ny * qz)] = unpackFineLevelSetPackedPhi(packed);
+      if (qy === 0 && (flags & 2) !== 0) floorContinuation[qx + nx * qz] = 1;
     }
   }
-  return field;
+  return { values: field, floorContinuation };
 }
 
 function acceptedFaceGradingReceipt(activity: Awaited<ReturnType<
@@ -155,7 +163,8 @@ function acceptedFaceGradingReceipt(activity: Awaited<ReturnType<
 }
 
 function positiveFacingSurface(field: Float32Array,
-  dimensions: readonly [number, number, number], axis: 0 | 1 | 2): {
+  dimensions: readonly [number, number, number], axis: 0 | 1 | 2,
+  floorContinuation?: Uint8Array, cellSize = 1): {
     readonly values: Float32Array;readonly width: number;readonly height: number;
   } {
   const [nx, ny] = dimensions;
@@ -178,6 +187,13 @@ function positiveFacingSurface(field: Float32Array,
       const fraction = Math.max(0, Math.min(1, -lower / (upper - lower)));
       result[u + width * v] = q + 0.5 + fraction;
       break;
+    }
+    if (axis === 1 && !Number.isFinite(result[u + width * v]!)
+      && floorContinuation?.[u + width * v]) {
+      const first = at([u, 0, v]);
+      if (Number.isFinite(first)) {
+        result[u + width * v] = Math.max(0, Math.min(0.5, 0.5 - first / cellSize));
+      }
     }
   }
   return { values: result, width, height };
@@ -228,6 +244,80 @@ function densityHeightReceipt(density: Float32Array, open: Float32Array,
   return { heights, floorBrickHeights, meanCells: sum / heights.length };
 }
 
+function densityCapacityReceipt(density: Float32Array, open: Float32Array) {
+  let maximumFill = 0, aboveCapacity = 0, aboveDoubleCapacity = 0;
+  for (let index = 0; index < density.length; index += 1) {
+    const fill = density[index]! / Math.max(open[index]!, 1e-6);
+    maximumFill = Math.max(maximumFill, fill);
+    if (fill > 1 + 1e-5) aboveCapacity += 1;
+    if (fill > 2 + 1e-5) aboveDoubleCapacity += 1;
+  }
+  return { maximumFill, aboveCapacity, aboveDoubleCapacity };
+}
+
+function cornerColumnProfiles(density: Float32Array, open: Float32Array,
+  published: Float32Array, dimensions: readonly [number, number, number]) {
+  const [nx, ny, nz] = dimensions;
+  const coordinates = [[0, 0], [1, 0], [0, 1], [1, 1],
+    [nx - 2, 0], [nx - 1, 0], [nx - 2, 1], [nx - 1, 1],
+    [0, nz - 2], [0, nz - 1], [1, nz - 2], [1, nz - 1],
+    [nx - 2, nz - 2], [nx - 1, nz - 2],
+    [nx - 2, nz - 1], [nx - 1, nz - 1]] as const;
+  return coordinates.map(([x, z]) => ({ x, z,
+    densityFill: Array.from({ length: ny }, (_, y) => {
+      const at = x + nx * (y + ny * z);
+      return Number((density[at]! / Math.max(open[at]!, 1e-6)).toFixed(6));
+    }),
+    publishedPhi: Array.from({ length: ny }, (_, y) => {
+      const value = published[x + nx * (y + ny * z)]!;
+      return Number.isFinite(value) ? Number(value.toFixed(6)) : null;
+    }),
+  }));
+}
+
+function heightAgreementReceipt(published: Float32Array, density: Float32Array,
+  nx: number, nz: number) {
+  let samples = 0, absolute = 0, maximumAbsolute = 0;
+  let subHalfSamples = 0, subHalfAbsolute = 0, subHalfMaximumAbsolute = 0;
+  const pages: Array<{ brickX: number; brickZ: number; samples: number;
+    meanPublishedCells: number; meanDensityCells: number;
+    meanAbsoluteCells: number; maximumAbsoluteCells: number }> = [];
+  for (let bz = 0; bz < Math.ceil(nz / 8); bz += 1) {
+    for (let bx = 0; bx < Math.ceil(nx / 8); bx += 1) {
+      let count = 0, sum = 0, publishedSum = 0, densitySum = 0, maximum = 0;
+      for (let z = 8 * bz; z < Math.min(nz, 8 * (bz + 1)); z += 1) {
+        for (let x = 8 * bx; x < Math.min(nx, 8 * (bx + 1)); x += 1) {
+          const index = x + nx * z;
+          const publishedHeight = Number.isFinite(published[index]!)
+            ? Math.max(0, published[index]!) : 0;
+          const densityHeight = Number.isFinite(density[index]!)
+            ? Math.max(0, density[index]!) : 0;
+          if (!(publishedHeight > 0) && !(densityHeight > 0)) continue;
+          const difference = Math.abs(publishedHeight - densityHeight);
+          count += 1;sum += difference;maximum = Math.max(maximum, difference);
+          publishedSum += publishedHeight;densitySum += densityHeight;
+          samples += 1;absolute += difference;
+          maximumAbsolute = Math.max(maximumAbsolute, difference);
+          if (densityHeight > 1e-3 && densityHeight < 0.5) {
+            subHalfSamples += 1;subHalfAbsolute += difference;
+            subHalfMaximumAbsolute = Math.max(subHalfMaximumAbsolute, difference);
+          }
+        }
+      }
+      if (count > 0) pages.push({ brickX: bx, brickZ: bz, samples: count,
+        meanPublishedCells: publishedSum / count,
+        meanDensityCells: densitySum / count,
+        meanAbsoluteCells: sum / count, maximumAbsoluteCells: maximum });
+    }
+  }
+  pages.sort((left, right) => right.meanAbsoluteCells - left.meanAbsoluteCells);
+  return { samples, meanAbsoluteCells: absolute / Math.max(1, samples),
+    maximumAbsoluteCells: maximumAbsolute, subHalfSamples,
+    subHalfMeanAbsoluteCells: subHalfAbsolute / Math.max(1, subHalfSamples),
+    subHalfMaximumAbsoluteCells: subHalfMaximumAbsolute,
+    worstPages: pages.slice(0, 24) };
+}
+
 function splitHeightReceipt(heights: Float32Array, nx: number, nz: number) {
   let left = 0, right = 0;
   for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
@@ -243,6 +333,7 @@ function filmVisibilityReceipt(heights: Float32Array,
   nx: number, nz: number) {
   let wetColumns = 0, visibleWetColumns = 0, hiddenWetColumns = 0;
   let hiddenBelowFirstSample = 0, maximumHiddenHeightCells = 0;
+  const hiddenColumns: Array<{ x: number; z: number; height: number }> = [];
   let shortFilmNeighbourPairs = 0, maximumShortFilmNeighbourStepCells = 0;
   const hiddenHeightBuckets = [0, 0, 0, 0];
   for (let index = 0; index < heights.length; index += 1) {
@@ -253,6 +344,9 @@ function filmVisibilityReceipt(heights: Float32Array,
       visibleWetColumns += 1;continue;
     }
     hiddenWetColumns += 1;
+    if (hiddenColumns.length < 64) hiddenColumns.push({
+      x: index % nx, z: Math.floor(index / nx), height,
+    });
     maximumHiddenHeightCells = Math.max(maximumHiddenHeightCells, height);
     if (height <= 0.5 + 1e-4) hiddenBelowFirstSample += 1;
     const bucket = height < 0.125 ? 0 : height < 0.25 ? 1 : height < 0.5 ? 2 : 3;
@@ -294,7 +388,7 @@ function filmVisibilityReceipt(heights: Float32Array,
       oneEighthToQuarter: hiddenHeightBuckets[1],
       quarterToHalf: hiddenHeightBuckets[2],
       atLeastHalf: hiddenHeightBuckets[3],
-    }, xBricks };
+    }, hiddenColumns, xBricks };
 }
 
 function deepTopSurfaceReceipt(visibleSurface: Float32Array,
@@ -450,7 +544,7 @@ function regionBoundaryReceipt(heights: Float32Array, nx: number, nz: number,
 }
 
 async function writeHeightImage(heights: Float32Array, nx: number, ny: number,
-  nz: number): Promise<void> {
+  nz: number, destination = imagePath): Promise<void> {
   const pixels = Buffer.alloc(nx * nz * 3);
   for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
     const height = heights[x + nx * z]!;
@@ -459,9 +553,9 @@ async function writeHeightImage(heights: Float32Array, nx: number, ny: number,
     const at = 3 * (x + nx * (nz - 1 - z));
     pixels[at] = value;pixels[at + 1] = value;pixels[at + 2] = value;
   }
-  await mkdir(dirname(imagePath), { recursive: true });
+  await mkdir(dirname(destination), { recursive: true });
   await sharp(pixels, { raw: { width: nx, height: nz, channels: 3 } })
-    .resize(nx * 8, nz * 8, { kernel: "nearest" }).png().toFile(imagePath);
+    .resize(nx * 8, nz * 8, { kernel: "nearest" }).png().toFile(destination);
 }
 
 await acquireWebGPUExclusiveLock("dawn-probe",
@@ -492,6 +586,9 @@ try {
     ? createCornerBrickDropScene() : longDam
     ? createSparseCM12LongDamBreakScene() : grid === 32
     ? createMinimalPowerDamBreak32Scene() : createMinimalPowerDamBreak64Scene());
+  if (cornerDrop) {
+    scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
+  }
   if (scenario === "sphere") {
     scene.container.fillFraction = 0;
     scene.fluid.initialCondition = "tank-fill";
@@ -516,9 +613,12 @@ try {
   scene.duration_s = Math.max(scene.duration_s, steps * CM12_PAPER_DT_S);
   if ((!largeOffsetUI && !cornerDrop) || region !== "whole") {
     scene.fluid.refinementRegions = [{
-      id: `mini${grid}-surface-min8-${region}`,
+      id: maximumCellSize > 0
+        ? `mini${grid}-surface-max${maximumCellSize}-${region}`
+        : `mini${grid}-surface-min8-${region}`,
       rule: "minimum-cell-size",
-      minimumCellSize_cells: 8,
+      minimumCellSize_cells: maximumCellSize > 0 ? 1 : 8,
+      ...(maximumCellSize > 0 ? { maximumCellSize_cells: maximumCellSize } : {}),
       min_m: { x: region === "central-x" ? -0.25 * scene.container.width_m
         : region === "right-x" ? 0
         : -0.5 * scene.container.width_m, y: 0,
@@ -531,7 +631,9 @@ try {
   const values = resolveMethodValues(adaptiveMassMethod,
     largeOffsetUI?.quality ?? "balanced",
     largeOffsetUI?.overrides[largeOffsetUI.methodId]
-      ?? (longDam ? SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides : {
+      ?? (longDam ? { ...SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides,
+        ...(process.env.FLUID_SURFACE_SHARPENING
+          ? { surfaceSharpening: process.env.FLUID_SURFACE_SHARPENING } : {}) } : {
       resolutionMode: "adaptive", brickFineResolution: "8",
       presentationPageResolution: "8", timeStep: "paper",
     }));
@@ -545,8 +647,9 @@ try {
   }
   await solver.waitForSimulationReady();
   const resetDimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
-  const resetField = await readPublishedField(device, solver);
-  const resetPositiveY = positiveFacingSurface(resetField, resetDimensions, 1);
+  const resetPublication = await readPublishedField(device, solver);
+  const resetPositiveY = positiveFacingSurface(resetPublication.values, resetDimensions, 1,
+    resetPublication.floorContinuation, solver.info.cellSize_m);
   const [resetActivity, resetPresentationHeader, resetDiagnostic] = scenario
     === "large-offset" || cornerDrop ? await Promise.all([
       solver.readGPUActivityPolicy(), solver.readFramePlanPresentationHeaderQA(),
@@ -562,7 +665,8 @@ try {
   }
   await device.queue.onSubmittedWorkDone();
   const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
-  const field = await readPublishedField(device, solver);
+  const publication = await readPublishedField(device, solver);
+  const field = publication.values;
   const finalDiagnostic = scenario === "dam" || scenario === "large-offset"
     || longDam || cornerDrop
     ? await solver.readDiagnosticFields(cornerDrop) : undefined;
@@ -570,7 +674,8 @@ try {
     finalDiagnostic.density, finalDiagnostic.solidOpenFraction, dimensions)
     : undefined;
   const positiveX = positiveFacingSurface(field, dimensions, 0);
-  const positiveY = positiveFacingSurface(field, dimensions, 1);
+  const positiveY = positiveFacingSurface(field, dimensions, 1,
+    publication.floorContinuation, solver.info.cellSize_m);
   const positiveZ = positiveFacingSurface(field, dimensions, 2);
   const surfaces = {
     positiveX: surfaceReceipt(positiveX.values, positiveX.width, positiveX.height),
@@ -581,6 +686,9 @@ try {
   const filmVisibility = (longDam || cornerDrop) && finalDensityHeight
     ? filmVisibilityReceipt(finalDensityHeight.floorBrickHeights, positiveY.values,
       finalDensityHeight.heights, dimensions[0], dimensions[2])
+    : undefined;
+  const densityHeightAgreement = finalDensityHeight ? heightAgreementReceipt(
+    positiveY.values, finalDensityHeight.heights, dimensions[0], dimensions[2])
     : undefined;
   const deepTopSurface = scenario === "dam" && finalDensityHeight
     ? deepTopSurfaceReceipt(positiveY.values, finalDensityHeight.heights,
@@ -593,6 +701,7 @@ try {
   const [presentation, activity] = await Promise.all([
     solver.readPresentationPageAllocatorReceiptQA(), solver.readGPUActivityPolicy(),
   ]);
+  const diagnostics = await solver.readStats();
   const activeResolutions = activity.bricks.filter((brick) => brick.active)
     .map((brick) => brick.acceptedResolution);
   const acceptedFaceGrading = acceptedFaceGradingReceipt(activity);
@@ -609,6 +718,8 @@ try {
       count: activeResolutions.filter((value) => value === resolution).length }));
   const receipt = {
     probe: cornerDrop ? "sparse-cm12-corner-drop-adaptive-floor-surface"
+      : longDam && maximumCellSize > 0
+        ? `sparse-cm12-long-dam-max${maximumCellSize}-${region}-surface`
       : longDam ? `sparse-cm12-long-dam-min8-${region}-surface`
       : `sparse-cm12-mini${grid}-min8-${region}-surface`, scenario, steps,
     time_s: steps * CM12_PAPER_DT_S, dimensions, frontierTopologyOnly,
@@ -625,6 +736,13 @@ try {
         dimensions[0], dimensions[2]),
     } } : {}),
     ...(filmVisibility ? { filmVisibility } : {}),
+    ...(finalDiagnostic ? { densityCapacity: densityCapacityReceipt(
+      finalDiagnostic.density, finalDiagnostic.solidOpenFraction) } : {}),
+    ...(cornerDrop && finalDiagnostic ? { cornerColumnProfiles: cornerColumnProfiles(
+      finalDiagnostic.density, finalDiagnostic.solidOpenFraction, field, dimensions) } : {}),
+    ...(finalDensityHeight ? { densityHeightAgreement,
+      densityHeightSurface: surfaceReceipt(finalDensityHeight.heights,
+        dimensions[0], dimensions[2]) } : {}),
     ...(deepTopSurface ? { deepTopSurface } : {}),
     ...(resetActivity ? { resetSurfaceBricks: resetActivity.bricks.filter((brick) => brick.active
       && brick.coordinate[1] === 1).map((brick) => ({
@@ -634,7 +752,7 @@ try {
         meanDensity: brick.meanDensity,
       })) } : {}),
     ...(resetPresentationHeader ? { resetPresentationHeader } : {}),
-    resolutionHistogram,
+    resolutionHistogram, diagnostics,
     presentation: {
       generation: solver.globalFineLevelSetSource.generation,
       ...presentation,
@@ -642,6 +760,10 @@ try {
     validationErrors, imagePath, outputPath,
   };
   await writeHeightImage(positiveY.values, ...dimensions);
+  if (finalDensityHeight) {
+    await writeHeightImage(finalDensityHeight.heights, ...dimensions,
+      imagePath.replace(/\.png$/i, "-density.png"));
+  }
   await mkdir(dirname(outputPath), { recursive: true });
   await writeFile(outputPath, `${JSON.stringify(receipt, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
@@ -709,7 +831,8 @@ try {
   if (scenario === "long-dam" && steps > 0 && !frontierTopologyOnly) {
     assert.ok(filmVisibility);
     assert.equal(filmVisibility.hiddenHeightBuckets.atLeastHalf, 0,
-      `coarse cells hid ${filmVisibility.hiddenHeightBuckets.atLeastHalf} floor-film columns `
+      `${maximumCellSize === 1 ? "fully fine pages" : "coarse cells"} hid ${
+        filmVisibility.hiddenHeightBuckets.atLeastHalf} floor-film columns `
       + "at least half a fine cell high");
     assert.ok(filmVisibility.xBricks.slice(1).every((brick) =>
       brick.meanTotalHeightCells <= 0.5 || brick.visibleColumns > 0),
@@ -743,6 +866,11 @@ try {
     assert.ok(filmVisibility.hiddenWetColumns <= 8,
       `ordinary adaptivity left ${filmVisibility.hiddenWetColumns} valid thin-sheet `
       + "columns absent after impact");
+    assert.ok(densityHeightAgreement && densityHeightAgreement.subHalfSamples >= 16,
+      "the corner-drop probe did not retain enough sub-half-cell surface samples");
+    assert.ok(densityHeightAgreement.subHalfMaximumAbsoluteCells <= 0.002,
+      `sub-half-cell floor films moved by ${
+        densityHeightAgreement.subHalfMaximumAbsoluteCells} cells during publication`);
   }
   if (grid === 64 && region === "whole" && scenario === "dam" && steps === 7) {
     // The former complete-coarse-cell presentation added a 23.19-cell

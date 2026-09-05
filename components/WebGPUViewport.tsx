@@ -1340,6 +1340,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
             { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode, lensPhase: ui.gridOverlayLensPhase },
             scenePreset.background,
             scenePreset.id === sceneState.presetId ? scenePreset.presentationMode : "full-scene",
+            ui.fluidSurfaceRenderMode,
             {
               shadowsEnabled: ui.svoShadowsEnabled,
               ambientOcclusionEnabled: ui.svoAmbientOcclusionEnabled,

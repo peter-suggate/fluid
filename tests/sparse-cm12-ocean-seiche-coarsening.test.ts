@@ -32,17 +32,21 @@ import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
 import { SPARSE_CM12_VELOCITY_EXTENSION_DEPTH } from
   "../lib/methods/adaptive-mass/sparse-cm12-velocity-extension";
 import {
+  decodeSparseCM12SignedPresentationKey,
   decodeSparseCM12FinePresentationSource,
   sparseCM12FinePresentationPlan,
   sparseCM12OwnershipTablePlan,
 } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
-import { globalFineSurfaceClassificationShader } from
+import { packFineLevelSetSample } from "../lib/core/fine-levelset-packed-sample";
+import { FINE_LEVELSET_SAMPLE_FLAGS } from "../lib/core/fine-levelset-brick-abi";
+import {
+  GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE,
+  globalFineSurfaceClassificationShader,
+} from
   "../lib/core/webgpu-water-global-fine-classify";
 import { globalFineDirectSharpPatchWGSL } from
   "../lib/core/webgpu-water-global-fine-tetra";
 import { RasterWaterPipeline } from "../lib/core/webgpu-water-pipeline";
-import { createGlobalFineLevelSetConsumerSource } from
-  "../lib/core/octree-consumer-sampling";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
@@ -323,12 +327,11 @@ test("closed vast-depth fills do no finest-domain-shaped planning or allocation"
     "GPU ownership must not recreate a logical-domain brick directory");
 });
 
-dawnTest("native 8-cubed ocean pages close every B16 depth rung on one uniform tank wall",
+dawnTest("native ocean pages close interior adaptive seams on the exact tank wall",
   { timeout: 60_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-ocean-seiche-coarsening.test.ts");
     let device: GPUDevice | undefined;
-    let solver: WebGPUAdaptiveMassSolver | undefined;
     let water: RasterWaterPipeline | undefined;
     const owned: Array<{ destroy(): void }> = [];
     try {
@@ -349,28 +352,60 @@ dawnTest("native 8-cubed ocean pages close every B16 depth rung on one uniform t
         validationErrors.push(event.error.message);
       });
 
-      // The reduced tank retains span-2 deep leaves while keeping the complete
-      // surface-pipeline regression small enough for a normal Dawn test.
+      // Publish the authored Ocean atlas directly. This is intentionally not a
+      // tiny solver scene: a 32-cell tank collapses to all-unit pages and cannot
+      // reproduce the span-4/span-2/span-1 wall transitions seen in the viewport.
       const scene = createOceanSeicheScene();
-      scene.container = { ...scene.container,
-        width_m: 0.8, height_m: 0.8, depth_m: 0.8, fillFraction: 0.75 };
-      scene.voxelDomain = { finestCellSize_m: 0.025, brickSize_cells: 8 };
-      delete scene.fluid.initialBrickSeeds_m;
-      delete scene.fluid.initialBrickSeedsAdditive;
-      solver = await WebGPUAdaptiveMassSolver.createAsync(
-        device, scene, "balanced", undefined, adaptiveMassSolverOptions({
-          brickFineResolution: "16",
-          presentationPageResolution: "8",
-        }), () => {},
-      );
+      const dimensions = adaptiveMassPresentationDimensionsForScene(scene);
+      const atlas = initializeSparseBrickAtlasFromScene(scene, { finestDimensions: dimensions });
+      // Four by four brick columns retain complete tangential neighbours at
+      // both rung changes without allocating the other 96% of the flat tank.
+      const residentBrickKeys = new Set(atlas.bricks.filter((brick) =>
+        brick.coordinate[0] < 4 && brick.coordinate[2] < 4).map((brick) => brick.key));
+      const publication = sparseCM12FinePresentationPlan(atlas, 8, {
+        signedSparseAddressing: true,
+        residentBrickKeys,
+      });
+      const packedSamples = new Uint32Array(publication.plan.maximumResidentBricks
+        * publication.plan.samplesPerBrick);
+      const pageResolution = publication.plan.brickResolution;
+      for (let page = 0; page < publication.plan.maximumResidentBricks; page += 1) {
+        const key = publication.metadata[4 * page + 1]!;
+        const pageCoordinate = decodeSparseCM12SignedPresentationKey(key);
+        const source = decodeSparseCM12FinePresentationSource(
+          publication.metadata[4 * page + 3]!, atlas.brickFineResolution, pageResolution,
+        );
+        const scale = source.spanBricks > 1 ? source.spanBricks : 1;
+        for (let local = 0; local < publication.plan.samplesPerBrick; local += 1) {
+          const y = Math.floor(local / pageResolution) % pageResolution;
+          const qy = pageCoordinate[1] * pageResolution + y * scale;
+          const phi = (qy - 71.5) * scene.voxelDomain.finestCellSize_m;
+          packedSamples[page * publication.plan.samplesPerBrick + local] =
+            packFineLevelSetSample(phi, FINE_LEVELSET_SAMPLE_FLAGS.valid
+              | (phi < 0 ? FINE_LEVELSET_SAMPLE_FLAGS.negative : 0));
+        }
+      }
+      const fineMetadata = device.createBuffer({ size: publication.metadata.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      const fineWorklist = device.createBuffer({ size: publication.worklist.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      const fineSamples = device.createBuffer({ size: packedSamples.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      device.queue.writeBuffer(fineMetadata, 0, publication.metadata.buffer as ArrayBuffer,
+        publication.metadata.byteOffset, publication.metadata.byteLength);
+      device.queue.writeBuffer(fineWorklist, 0, publication.worklist.buffer as ArrayBuffer,
+        publication.worklist.byteOffset, publication.worklist.byteLength);
+      device.queue.writeBuffer(fineSamples, 0, packedSamples);
+      owned.push(fineMetadata, fineWorklist, fineSamples);
 
       const uniform = device.createBuffer({ size: 416,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const bodies = device.createBuffer({ size: 768,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-      const volume = device.createTexture({ size: [32, 32, 32], dimension: "3d",
+      const volume = device.createTexture({ size: dimensions, dimension: "3d",
         format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING });
-      const columns = device.createTexture({ size: [32, 32], format: "r32float",
+      const columns = device.createTexture({ size: [dimensions[0], dimensions[2]],
+        format: "r32float",
         usage: GPUTextureUsage.TEXTURE_BINDING });
       const output = device.createTexture({ size: [64, 64], format: "rgba16float",
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
@@ -378,22 +413,35 @@ dawnTest("native 8-cubed ocean pages close every B16 depth rung on one uniform t
       const view = new Float32Array(104);
       view.set([64, 64, 0, -1], 0);
       view.set([0, 0, 2, 1], 4);
-      view.set([0, 0.4, 0, 1], 8);
-      view.set([0.8, 0.8, 0.8, 0.6], 12);
+      view.set([0, 1.2, 0, 1], 8);
+      view.set([scene.container.width_m, scene.container.height_m,
+        scene.container.depth_m, 1.8], 12);
       view.set([0, 0.025, 0, 8], 16);
-      view.set([32, 32, 32, 1], 20);
+      view.set([...dimensions, 1], 20);
       device.queue.writeBuffer(uniform, 0, view);
 
       water = new RasterWaterPipeline(device, "rgba16float", uniform, bodies);
       await water.initialize();
       water.ensureSize(64, 64);
       water.setVolume(volume, columns);
-      water.setGlobalFineLevelSet(createGlobalFineLevelSetConsumerSource(
-        solver.globalFineLevelSetSource,
-      ));
+      water.setGlobalFineLevelSet({
+        kind: "global-fine-levelset-sampling",
+        metadata: { buffer: fineMetadata },
+        worklist: { buffer: fineWorklist },
+        samples: { buffer: fineSamples },
+        sampleDimensions: dimensions,
+        brickDimensions: publication.plan.brickDimensions,
+        brickResolution: publication.plan.brickResolution,
+        samplesPerBrick: publication.plan.samplesPerBrick,
+        pageCapacity: publication.plan.maximumResidentBricks,
+        fineFactor: 1,
+        fineCellWidth: scene.voxelDomain.finestCellSize_m,
+        domainOrigin: [0, 0, 0],
+        generation: 1,
+      });
       water.setSceneOptics({ container: scene.container });
       const encoder = device.createCommandEncoder();
-      assert.ok(water.encode(encoder, output, 32, 32, 32, false, 1, 1,
+      assert.ok(water.encode(encoder, output, ...dimensions, false, 1, 1,
         undefined, undefined, true));
       device.queue.submit([encoder.finish()]);
       const diagnostics = await water.completeSurfaceDiagnostics();
@@ -402,81 +450,98 @@ dawnTest("native 8-cubed ocean pages close every B16 depth rung on one uniform t
       assert.ok(source);
       const readback = device.createBuffer({ size: diagnostics.vertexCount * source.strideBytes,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-      owned.push(readback);
+      const cubeReadback = device.createBuffer({ size: diagnostics.activeCubeCount * 8,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      owned.push(readback, cubeReadback);
       const copy = device.createCommandEncoder();
       copy.copyBufferToBuffer(source.buffer, 0, readback, 0, readback.size);
+      copy.copyBufferToBuffer(source.classifiedCubes, 0, cubeReadback, 0, cubeReadback.size);
       device.queue.submit([copy.finish()]);
-      await readback.mapAsync(GPUMapMode.READ);
+      await Promise.all([
+        readback.mapAsync(GPUMapMode.READ),
+        cubeReadback.mapAsync(GPUMapMode.READ),
+      ]);
       const vertices = new Float32Array(readback.getMappedRange());
-      const xWalls = new Set<string>(), zWalls = new Set<string>();
-      const projectedAreas = { xLow: 0, xHigh: 0, zLow: 0, zHigh: 0, top: 0 };
-      const normalTriangles = { x: 0, yUp: 0, yDown: 0, z: 0, slanted: 0 };
-      const yBounds = { minimum: Number.POSITIVE_INFINITY,
-        maximum: Number.NEGATIVE_INFINITY };
-      for (let vertex = 0; vertex < diagnostics.vertexCount; vertex += 1) {
-        const at = vertex * source.strideBytes / 4;
-        if (Math.abs(vertices[at + 4]!) > 0.9) xWalls.add(vertices[at]!.toFixed(6));
-        if (Math.abs(vertices[at + 6]!) > 0.9) zWalls.add(vertices[at + 2]!.toFixed(6));
-        yBounds.minimum = Math.min(yBounds.minimum, vertices[at + 1]!);
-        yBounds.maximum = Math.max(yBounds.maximum, vertices[at + 1]!);
+      const cubeWords = new Uint32Array(cubeReadback.getMappedRange());
+      let transitionCubeCount = 0;
+      let transitionFaceCount = 0;
+      const descriptorScaleCounts = new Map<number, number>();
+      for (let cube = 0; cube < diagnostics.activeCubeCount; cube += 1) {
+        const descriptor = cubeWords[2 * cube + 1]! >>> 16;
+        const rawCode = descriptor & 0xff;
+        if (rawCode >= 224) continue;
+        const heightField = rawCode === GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE;
+        const transition = !heightField && (rawCode & 0x80) !== 0;
+        const scale = heightField ? 1 : transition ? rawCode & 0x7f : rawCode;
+        descriptorScaleCounts.set(scale, (descriptorScaleCounts.get(scale) ?? 0) + 1);
+        if (!transition) continue;
+        transitionCubeCount += 1;
+        const faceMask = (descriptor >>> 8) & 0x3f;
+        transitionFaceCount += faceMask.toString(2)
+          .split("").filter((bit) => bit === "1").length;
       }
+      const seamEdges = new Map<string, { count: number;
+        a: readonly [number, number, number]; b: readonly [number, number, number] }>();
+      const lowWallCoordinates = [-scene.container.width_m / 2,
+        -scene.container.depth_m / 2] as const;
+      const adaptiveSeamPlanes = [33, 49].map((cell) =>
+        cell * scene.voxelDomain.finestCellSize_m);
       for (let vertex = 0; vertex + 2 < diagnostics.vertexCount; vertex += 3) {
         const a = vertex * source.strideBytes / 4;
         const b = (vertex + 1) * source.strideBytes / 4;
         const c = (vertex + 2) * source.strideBytes / 4;
-        const ab = [vertices[b]! - vertices[a]!, vertices[b + 1]! - vertices[a + 1]!,
-          vertices[b + 2]! - vertices[a + 2]!] as const;
-        const ac = [vertices[c]! - vertices[a]!, vertices[c + 1]! - vertices[a + 1]!,
-          vertices[c + 2]! - vertices[a + 2]!] as const;
-        const nx = vertices[a + 4]!, ny = vertices[a + 5]!, nz = vertices[a + 6]!;
-        if (Math.abs(nx) > 0.9) {
-          normalTriangles.x += 1;
-          projectedAreas[nx < 0 ? "xLow" : "xHigh"] +=
-            0.5 * Math.abs(ab[1] * ac[2] - ab[2] * ac[1]);
-        }
-        if (Math.abs(nz) > 0.9) {
-          normalTriangles.z += 1;
-          projectedAreas[nz < 0 ? "zLow" : "zHigh"] +=
-            0.5 * Math.abs(ab[0] * ac[1] - ab[1] * ac[0]);
-        }
-        if (ny > 0.9) {
-          normalTriangles.yUp += 1;
-          projectedAreas.top +=
-            0.5 * Math.abs(ab[0] * ac[2] - ab[2] * ac[0]);
-        } else if (ny < -0.9) normalTriangles.yDown += 1;
-        if (Math.max(Math.abs(nx), Math.abs(ny), Math.abs(nz)) <= 0.9) {
-          normalTriangles.slanted += 1;
+        const points = [
+          [vertices[a]!, vertices[a + 1]!, vertices[a + 2]!],
+          [vertices[b]!, vertices[b + 1]!, vertices[b + 2]!],
+          [vertices[c]!, vertices[c + 1]!, vertices[c + 2]!],
+        ] as const;
+        const pointKey = (point: readonly number[]) => point.map((value) =>
+          new Uint32Array(new Float32Array([value]).buffer)[0]!.toString(16)).join(":");
+        for (const [from, to] of [[0, 1], [1, 2], [2, 0]] as const) {
+          if (!adaptiveSeamPlanes.some((plane) =>
+            Math.abs(points[from][1] - plane) <= 1e-6
+            && Math.abs(points[to][1] - plane) <= 1e-6)) continue;
+          const liesOnPhysicalWall = [0, 1].some((wall) => {
+            const axis = wall === 0 ? 0 : 2;
+            return Math.abs(points[from][axis] - lowWallCoordinates[wall]!) <= 1e-6
+              && Math.abs(points[to][axis] - lowWallCoordinates[wall]!) <= 1e-6;
+          });
+          if (!liesOnPhysicalWall) continue;
+          const first = pointKey(points[from]), second = pointKey(points[to]);
+          const key = first < second ? `${first}|${second}` : `${second}|${first}`;
+          const previous = seamEdges.get(key);
+          seamEdges.set(key, { count: (previous?.count ?? 0) + 1,
+            a: points[from], b: points[to] });
         }
       }
       readback.unmap();
-      assert.deepEqual([...xWalls].sort(), ["-0.400000", "0.400000"]);
-      assert.deepEqual([...zWalls].sort(), ["-0.400000", "0.400000"]);
-      const height = yBounds.maximum - yBounds.minimum;
-      const expected = {
-        x: scene.container.depth_m * height,
-        z: scene.container.width_m * height,
-        top: scene.container.width_m * scene.container.depth_m,
-      };
-      for (const side of ["xLow", "xHigh"] as const) {
-        assert.ok(Math.abs(projectedAreas[side] - expected.x) <= 1e-5,
-          `${side} wall coverage ${projectedAreas[side]} does not close ${expected.x}`);
-      }
-      for (const side of ["zLow", "zHigh"] as const) {
-        assert.ok(Math.abs(projectedAreas[side] - expected.z) <= 1e-5,
-          `${side} wall coverage ${projectedAreas[side]} does not close ${expected.z}`);
-      }
-      assert.ok(Math.abs(projectedAreas.top - expected.top) <= 1e-5,
-        `top coverage ${projectedAreas.top} does not close ${expected.top}`);
-      assert.equal(normalTriangles.yDown, 0,
-        "uniform ocean publication emitted an internal downward-facing sheet");
-      assert.equal(normalTriangles.slanted, 0,
-        "uniform ocean publication emitted an internal slanted sheet");
+      cubeReadback.unmap();
+      assert.ok(transitionCubeCount > 0 && transitionFaceCount > 0,
+        "the adaptive ocean must publish explicit coarse/fine transition topology"
+          + ` (descriptors ${JSON.stringify(Object.fromEntries(descriptorScaleCounts))})`);
+      const unmatchedInteriorWallEdges = [...seamEdges.values()].filter((edge) => {
+        if (edge.count !== 1) return false;
+        return [0, 1].some((wall) => {
+          const axis = wall === 0 ? 0 : 2;
+          const tangent = axis === 0 ? 2 : 0;
+          const interiorLow = lowWallCoordinates[wall]! + 0.15;
+          const interiorHigh = lowWallCoordinates[wall]! + 0.65;
+          return Math.abs(edge.a[axis] - lowWallCoordinates[wall]!) <= 1e-6
+            && Math.abs(edge.b[axis] - lowWallCoordinates[wall]!) <= 1e-6
+            && edge.a[tangent] >= interiorLow && edge.a[tangent] <= interiorHigh
+            && edge.b[tangent] >= interiorLow && edge.b[tangent] <= interiorHigh;
+        });
+      });
+      assert.ok(seamEdges.size > 0,
+        "the adaptive seam audit must reach an exact physical tank wall");
+      assert.equal(unmatchedInteriorWallEdges.length, 0,
+        `adaptive wall mesh has ${unmatchedInteriorWallEdges.length} unmatched seam half-edges: `
+          + JSON.stringify(unmatchedInteriorWallEdges.slice(0, 8)));
       assert.deepEqual(validationErrors, []);
     } finally {
+      if (device) await device.queue.onSubmittedWorkDone();
       water?.destroy();
-      solver?.destroy();
       for (const resource of owned) resource.destroy();
-      device?.destroy();
       await releaseWebGPUExclusiveLock();
     }
   });

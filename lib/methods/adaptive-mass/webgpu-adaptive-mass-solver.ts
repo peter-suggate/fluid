@@ -554,6 +554,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       (task) => ({ ...task, dependencies: [...(task.dependencies ?? []),
         "adaptive-mass.resident"] }),
     );
+    const curvedInitialLiquidNeedsFineFrontier =
+      scene.fluid.initialLiquidVolumes?.some((volume) =>
+        volume.shape !== "box") ?? false;
     let initiallyActiveBrickKeys: ReadonlySet<number> | undefined;
     try {
       await runner.run([{
@@ -580,12 +583,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             solidWorld: initialSolidWorld,
             maximumMacroSpanBricks: options.maximumMacroSpanBricks,
             surfaceFineRings: options.surfaceFineRings,
-            // Activity mode promotes from measurements. Starting its authored
-            // interface at B8 made a still reset frame contradict the eventual
-            // B4 proof for nine full paper steps. Bias one construction ring
-            // coarse; Surface-distance mode retains the explicit fine band.
+            // A broad planar reset surface can start from its ordinary B4
+            // proof and let activity promote it. A compact curved volume must
+            // retain a B8 frontier root: once its B4 support reaches the edge
+            // of the generation-zero catalogue, no finer accepted leaf exists
+            // from which SparseWorld can discover the next dry page.
             initialSurfaceCoarseningBiasRings:
-              options.activityPolicy?.activitySignals ? 1 : 0,
+              options.activityPolicy?.activitySignals
+                && !curvedInitialLiquidNeedsFineFrontier ? 1 : 0,
             ...(resolutionForBrick ? { resolutionForBrick } : {}),
           });
           // Generation zero contains only authored fluid. Dry face neighbours
@@ -647,6 +652,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               completed: 3,
               total: 6,
             }),
+            topologyPageCapacityMaximum:
+              curvedInitialLiquidNeedsFineFrontier ? 1024 : undefined,
             solidWorld: initialSolidWorld,
             refinementRegionParameters: packSparseCM12RefinementRegions(
               sceneRefinementRegions(scene), refinementRegionLattice(scene)),

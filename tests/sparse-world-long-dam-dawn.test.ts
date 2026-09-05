@@ -38,8 +38,13 @@ const LONG_DAM_FAR_WALL_PAGE_X = 23;
 // four-second scene is 120 steps. The previous 1,200 retained the old 4 ms
 // scene-step count after this lane moved to the paper timestep and simulated
 // forty seconds instead of four.
-const LONG_DAM_GATE_STEPS = 120;
+const LONG_DAM_GATE_STEPS = Number(process.env.FLUID_LONG_DAM_GATE_STEPS ?? 120);
 const LONG_DAM_CHECKPOINT_INTERVAL = 50;
+
+const pageRangeSamples = (receipt: Awaited<ReturnType<
+  typeof publishedNegativeFront>>, begin: number, end: number): number =>
+  receipt.negativeSamplesByPageX.slice(begin, end)
+    .reduce((sum, count) => sum + count, 0);
 
 async function readGPUWords(device: GPUDevice, source: GPUBuffer,
   wordCount: number, sourceOffset = 0): Promise<Uint32Array> {
@@ -339,6 +344,18 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
       const finalStatus = world.status();
       const finalPresentation = world.presentation();
       const finalFront = frontTrajectory.at(-1)!;
+      if (LONG_DAM_GATE_STEPS >= 180) {
+        const reflectedNearSide = frontTrajectory.find(({ step }) => step === 150);
+        assert.ok(reflectedNearSide,
+          "the extended long-dam gate must sample the reflected crest at step 150");
+        assert.ok(pageRangeSamples(reflectedNearSide, 0, 10)
+            > 1.5 * pageRangeSamples(reflectedNearSide, 16, 24),
+          "after far-wall impact the reflected crest must return to the near half");
+        const finalFarInteriorMean = pageRangeSamples(finalFront, 16, 23) / 7;
+        assert.ok(finalFront.negativeSamplesByPageX[LONG_DAM_FAR_WALL_PAGE_X]!
+            > 1.15 * finalFarInteriorMean,
+          "well after reflection the returning wave must retain its far-wall run-up");
+      }
       if (process.env.FLUID_SPARSE_WORLD_GATE_TRACE === "1") {
         process.stderr.write(`[sparse-world-long-dam] ${JSON.stringify({
           frontTrajectory,

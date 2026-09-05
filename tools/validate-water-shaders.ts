@@ -7,7 +7,8 @@ import {
   compositeShader,
   extractionPrepareShader,
   surfaceExtractionShader,
-  surfaceRasterShader
+  surfaceRasterShader,
+  surfaceWireframeShader,
 } from "../lib/core/webgpu-water-pipeline";
 import { gridOverlayShader } from "../lib/core/webgpu-grid-overlay";
 import {
@@ -112,6 +113,7 @@ const shaders = {
 fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0u];}`),
   "extraction-prepare": extractionPrepareShader,
   "surface-raster": surfaceRasterShader,
+  "surface-wireframe": surfaceWireframeShader,
   caustics: causticShader,
   composite: compositeShader,
   "grid-overlay": gridOverlayShader,

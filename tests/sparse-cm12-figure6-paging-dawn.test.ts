@@ -100,8 +100,12 @@ dawnTest("Figure 6 crosses its authored SparseWorld boundary",
       solver = await adaptiveMassMethod.createSolverAsync!(device, scene, "balanced",
         values, undefined, () => {}) as WebGPUAdaptiveMassSolver;
       await solver.waitForSimulationReady();
-      const initialRows = await readNegativeRows(device, solver);
+      const [initialRows, initialStats] = await Promise.all([
+        readNegativeRows(device, solver), solver.readStats(),
+      ]);
       const initialMaximumY = Math.max(...initialRows);
+      assert.ok((initialStats.adaptiveFineBrickCount ?? 0) > 0,
+        "the curved drop must retain B8 roots for SparseWorld frontier growth");
 
       for (let step = 1; step <= 30; step += 1) {
         while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) {
@@ -125,7 +129,8 @@ dawnTest("Figure 6 crosses its authored SparseWorld boundary",
       if (process.env.FLUID_FIGURE6_TRACE === "1") {
         process.stderr.write(`[cm12-figure6] ${JSON.stringify(receipt)}\n`);
       }
-      assert.ok(growth.publishedTopologyPages > 0, JSON.stringify(receipt));
+      assert.ok(growth.publishedTopologyPages > 512,
+        `the drop must cross the former undersized page-pool ceiling: ${JSON.stringify(receipt)}`);
       assert.ok(indirect[0]! > 0 && indirect[3]! > 0, JSON.stringify(receipt));
       assert.ok(maximumY < initialMaximumY - 20, JSON.stringify(receipt));
       assert.deepEqual(receipt.crossedRows,

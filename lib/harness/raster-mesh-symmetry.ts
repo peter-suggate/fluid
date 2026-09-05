@@ -1,3 +1,6 @@
+import { GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE } from
+  "../core/webgpu-water-global-fine-classify";
+
 export type HorizontalMeshSymmetryTransform = "reflect-x" | "reflect-z" | "swap-xz";
 
 export interface RasterMeshSymmetryMetrics {
@@ -197,9 +200,10 @@ export function rasterMeshSymmetryMetrics(vertices: Float32Array, vertexCount: n
           if (cube !== undefined && ownership) {
             const packed = ownership.cubes[2 * cube]!, word = ownership.cubes[2 * cube + 1]!;
             const descriptor = word >>> 16, code = descriptor & 0xff;
+            const directHeightField = code === GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE;
             record.cube = cube; record.descriptor = descriptor;
             record.cubeOriginSpan = [packed & 0xffff, word & 0xffff, packed >>> 16,
-              code === 0 || code === 2 || code === 3 ? 1 : code];
+              code === 0 || code === 2 || code === 3 || directHeightField ? 1 : code];
             record.offset = ownership.offsets[6 * cube];
             for (let lane = 0; lane < 6; lane += 1) {
               const start = ownership.offsets[6 * cube + lane] ?? vertexCount;
@@ -275,11 +279,13 @@ export function rasterCubeSymmetryMetrics(cubes: Uint32Array, cubeCount: number,
     const packed = cubes[2 * cube]!, descriptor = cubes[2 * cube + 1]!;
     const packedDescriptor = descriptor >>> 16;
     const encodedSpan = packedDescriptor & 0xff;
+    const directHeightField = encodedSpan === GLOBAL_FINE_HEIGHTFIELD_DESCRIPTOR_CODE;
     const nativeFace = (encodedSpan === 2 || encodedSpan === 3)
       && ((packedDescriptor >>> 8) & 7) !== 0;
     const record: [number, number, number, number, number] = [
       packed & 0xffff, descriptor & 0xffff, packed >>> 16,
-      nativeFace ? 1 : Math.max(1, encodedSpan), Number(encodedSpan === 0 || nativeFace),
+      nativeFace || directHeightField ? 1 : Math.max(1, encodedSpan),
+      Number(encodedSpan === 0 || nativeFace),
     ];
     records.push(record); reference.add(identity(...record));
   }

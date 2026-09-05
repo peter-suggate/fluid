@@ -21,7 +21,7 @@ import { getMethod } from "./method-registry";
 import type { GPUSolverInstance, InjectedLiquidBall, MethodParamValues, OverlayPipeline } from "./method-contract";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE, requiredFluidDeviceLimits } from "./webgpu-device-limits";
-import { RasterWaterPipeline, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
+import { RasterWaterPipeline, type FluidSurfaceRenderMode, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import type { ScenePresentationMode } from "./scene-definition";
 import { sceneHasTerrain } from "./terrain";
@@ -2843,7 +2843,7 @@ export class FluidLabRenderer {
     this.hoverHighlight = range && range.last >= range.first ? range : undefined;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, presentationMode: ScenePresentationMode = "full-scene", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig, fluidCellTrace?: FluidCellTraceConfig): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, presentationMode: ScenePresentationMode = "full-scene", fluidSurfaceRenderMode: FluidSurfaceRenderMode = "shaded", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig, fluidCellTrace?: FluidCellTraceConfig): RendererFrameMetrics {
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
     const cpuTrace = measurementInstrumentationEnabled
       ? new CPUPerformanceTrace(
@@ -2873,7 +2873,7 @@ export class FluidLabRenderer {
     // withheld would pool into one mean and the panel would report the cost of
     // neither pipeline.
     const disabledStages = disabledRenderStagesFrom(svoLightingOptions.disabledStages);
-    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:primary-${svoLightingOptions.primaryTraversal ?? "raster"}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
+    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:fluid-${fluidSurfaceRenderMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:primary-${svoLightingOptions.primaryTraversal ?? "raster"}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
     if (presentationContext !== this.presentationContext) {
       this.presentationContext = presentationContext;
       this.resetPresentationTrace();
@@ -3073,19 +3073,6 @@ export class FluidLabRenderer {
     ].join("|");
     const cameraChanging = cameraStabilityKey !== this.svoCameraStabilityKey;
     this.svoCameraStabilityKey = cameraStabilityKey;
-    const presentationCoherenceKey = [
-      this.gpuFluidGeneration, scene.sceneId, scene.randomSeed, environmentId, diagnosticsKey, selectedBodyId ?? "",
-      // The rim is part of what a presented frame looks like, so moving the
-      // cursor onto an object has to invalidate a reused one.
-      this.hoverHighlight ? `${this.hoverHighlight.first}:${this.hoverHighlight.last}` : "",
-      cameraStabilityKey,
-      ...bodies.flatMap((body) => [
-        body.description.id, body.description.shape,
-        body.description.dimensions_m.x, body.description.dimensions_m.y, body.description.dimensions_m.z,
-        body.position_m.x, body.position_m.y, body.position_m.z,
-        body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z,
-      ]),
-    ].join("|");
     const techniqueModeCode = gridOverlay?.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode)
       ? OCTREE_TECHNIQUE_OVERLAY_CODES[gridOverlay.mode]
       : 0;
@@ -3354,6 +3341,7 @@ export class FluidLabRenderer {
       // must therefore displace the retained mesh even if that repaint lands
       // inside the ordinary 60 Hz extraction cadence window.
       !this.simulationRunning,
+      fluidSurfaceRenderMode,
     );
     if (!rasterResult) throw new Error("Water optics pipeline is not ready");
     const initialRasterSubmission = pendingInitialRaster

@@ -1222,13 +1222,14 @@ export function sparseCM12TopologyPagePoolPlan(
   mutableFrontierBricks: number,
   enabled = true,
   brickFineResolution = 8,
+  maximumPageCapacity = GPU_TOPOLOGY_PAGE_POOL_MAXIMUM,
 ): SparseCM12TopologyPagePoolPlan {
   const pageWords = gpuTopologyCellPageWords(brickFineResolution);
   if (!enabled || mutableFrontierBricks <= 0) return {
     pageCapacity: 0, freeListWords: 0,
     pageWords, descriptorWords: 0,
   };
-  const pageCapacity = Math.min(GPU_TOPOLOGY_PAGE_POOL_MAXIMUM,
+  const pageCapacity = Math.min(maximumPageCapacity,
     Math.max(GPU_TOPOLOGY_PAGE_POOL_MINIMUM, Math.ceil(mutableFrontierBricks)));
   return {
     pageCapacity, freeListWords: pageCapacity,
@@ -3474,10 +3475,12 @@ export class WebGPUSparseCM12Resident {
     journal?: SparseCM12PressureJournalCapacityRequest,
     presentationPageResolution: SparseCM12PresentationPageResolution = atlas.brickFineResolution,
     report?: SparseCM12ResidentInitializationReporter,
+    topologyPageCapacityMaximum?: number,
   ): Promise<WebGPUSparseCM12Resident> {
     return this.createConfigured(device, atlas, grid, finestCellSize_m,
       solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
-      false, false, false, true, true, report, false, true);
+      false, false, false, true, true, report, false, true, false, false, false,
+      topologyPageCapacityMaximum);
   }
 
   /** Retained rejected QA experiment: density-capacity relay with an exact
@@ -3801,6 +3804,7 @@ export class WebGPUSparseCM12Resident {
     implicitSharpeningOwnerArithmeticForQA = false,
     alternatingCapacityRepairReceiptsForQA = false,
     gatherCapacityRepairForQA = false,
+    topologyPageCapacityMaximum = GPU_TOPOLOGY_PAGE_POOL_MAXIMUM,
   ): Promise<WebGPUSparseCM12Resident> {
     if (atlas.brickFineResolution !== 8 || presentationPageResolution !== 8) {
       throw new Error("Sparse CM12 PEI1 production is an aggressive B8/P8 cutover");
@@ -3840,11 +3844,13 @@ export class WebGPUSparseCM12Resident {
       // leaves are usable dry course pages, so count them before reserving new
       // GPU-grown pages; otherwise a terrain or shell-pregrown atlas silently
       // turns sparse physical capacity into the complete logical volume. The
-      // fixed 512-page ceiling still bounds large scenes and page recycling
-      // remains authoritative.
+      // The caller may reserve a larger bounded course for compact curved
+      // volumes, whose required B8 frontier starts farther from the pool.
+      // Ordinary scenes retain the established 512-page ceiling.
       Math.max(1, 12 * initiallyActiveBrickKeys.size - residentInactiveBrickCount),
       true,
       atlas.brickFineResolution,
+      topologyPageCapacityMaximum,
     );
     const worldLeafCapacity = packed.brickCount + topologyPagePool.pageCapacity;
     report("Build logical owner directory");
