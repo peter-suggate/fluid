@@ -43,7 +43,8 @@ dawnTest("authored re-rung does not consume or overwrite world-growth pages",
         scene.fluid.initialCondition = "dam-break";
         scene.fluid.initialDamBreakDimensions_m = { x: 0.8, y: 0.8, z: 0.8 };
         scene.fluid.gravity_m_s2 = { x: 0, y: 0, z: 0 };
-        const defaults = adaptiveMassSolverOptions({});
+        // This transfer oracle pins the legacy one-epoch coarsening policy.
+        const defaults = adaptiveMassSolverOptions({ selectorMode: "activity" });
         solver = await WebGPUAdaptiveMassSolver.createAsync(
           device, scene, "balanced", undefined, {
             ...defaults, topologyPageBudget, initialResolutionForQA: 8,

@@ -121,6 +121,8 @@ export interface SparseBrickAtlasInitializationOptions {
    * measured motion and thinness remain runtime promotion authorities.
    */
   readonly initialSurfaceCoarseningBiasRings?: number;
+  /** Coarse-first initialization: normal-cone error, independent of volume type. */
+  readonly coarseFirstCurvatureTolerance?: number;
   /** Optional fixed-policy override for every nonempty brick, including interfaces. */
   readonly resolutionForBrick?: (input: {
     readonly coordinate: SparseBrickVec3;
@@ -513,6 +515,41 @@ function brickHasInterface(
   return false;
 }
 
+/** Estimate normal variation from authored density before discarding fine data.
+ * Mirrored domain samples keep a tank wall from inventing a liquid interface;
+ * canonical SolidWorld restriction supplies the independent solid floor. */
+function initialCurvatureResolution(
+  scene: SceneDescription, dimensions: SparseBrickVec3, coordinate: SparseBrickVec3,
+  maximum: SparseBrickFineResolution, tolerance: number,
+): SparseBrickResolution {
+  const lo = [1, 1, 1], hi = [-1, -1, -1];
+  let normals = 0;
+  const sample = (q: number[]) => initialDensityAt(scene, dimensions,
+    ...q.map((v, a) => Math.max(0, Math.min(dimensions[a]! - 1, v))) as [number, number, number]);
+  for (let z = -1; z <= maximum; z++) for (let y = -1; y <= maximum; y++)
+    for (let x = -1; x <= maximum; x++) {
+      const q = [x, y, z].map((v, a) => v + coordinate[a]! * maximum);
+      const gradient = [0, 1, 2].map((a) => {
+        const back = [...q], front = [...q]; back[a]! -= 1; front[a]! += 1;
+        return (sample(front) - sample(back)) / 2;
+      });
+      const length = Math.hypot(...gradient);
+      if (length < 1e-6) continue;
+      normals++;
+      for (let a = 0; a < 3; a++) {
+        lo[a] = Math.min(lo[a]!, gradient[a]! / length);
+        hi[a] = Math.max(hi[a]!, gradient[a]! / length);
+      }
+    }
+  if (!normals) return 1;
+  const variation = Math.hypot(...hi.map((v, a) => v - lo[a]!));
+  // Normal-cone diameter over the brick estimates κ B. Opposite normals also
+  // protect disconnected blobs and sheets, even at zero kinetic energy.
+  let resolution = 1;
+  while (resolution < maximum && variation / resolution > tolerance) resolution *= 2;
+  return resolution as SparseBrickResolution;
+}
+
 function initialBrick(
   scene: SceneDescription,
   dimensions: SparseBrickVec3,
@@ -870,6 +907,7 @@ function atlasWithInitialAirSupport(
   bricks: readonly SparseAdaptiveMassBrick[],
   brickFineResolution: SparseBrickFineResolution,
   refinementRegionParameters: ArrayBuffer,
+  minimumAirResolution: SparseBrickResolution = 1,
 ): SparseAdaptiveMassAtlas {
   let atlas = createSparseAdaptiveMassAtlas(
     dimensions, bricks, 1, brickFineResolution,
@@ -892,16 +930,22 @@ function atlasWithInitialAirSupport(
   };
   const liquid = atlas.bricks.filter((brick) =>
     brick.density.some((density) => density > 0));
+  // A B2 air column beside B1 liquid keeps 2:1 grading and represents the
+  // same nine-cell extension stencil with half as many support bricks.
+  const supportResolution = (brick: SparseAdaptiveMassBrick) => Math.max(minimumAirResolution,
+    matchedAirSupportResolution(brick, brickFineResolution)) as SparseBrickResolution;
+  const supportLayers = (brick: SparseAdaptiveMassBrick) => Math.ceil(
+    (SPARSE_CM12_VELOCITY_EXTENSION_DEPTH + 1) / supportResolution(brick));
   const maximumLayerCount = liquid.reduce((maximum, brick) => Math.max(maximum,
-    matchedAirSupportLayerCount(brick, brickFineResolution)), 0);
+    supportLayers(brick)), 0);
   for (let layer = 0; layer < maximumLayerCount; layer += 1) {
     const supportCoordinates = new Map<number, {
       readonly coordinate: SparseBrickVec3;
       readonly resolution: SparseBrickResolution;
     }>();
     for (const brick of liquid) {
-      const resolution = matchedAirSupportResolution(brick, brickFineResolution);
-      if (layer >= matchedAirSupportLayerCount(brick, brickFineResolution)) continue;
+      const resolution = supportResolution(brick);
+      if (layer >= supportLayers(brick)) continue;
       const span = sparseBrickSpan(brick);
       for (let axis = 0; axis < 3; axis += 1) for (const sign of [-1, 1]) {
         const tangents = [0, 1, 2].filter((candidate) => candidate !== axis);
@@ -966,6 +1010,7 @@ function atlasWithInitialAirSupport(
         };
         for (let cursor = 0; cursor < queue.length; cursor += 1) {
           const brick = combined.get(queue[cursor]!)!;
+          queued.delete(brick.key);
           for (const neighbor of neighbors(brick)) {
             const own = resolutionByKey.get(brick.key)!;
             const other = resolutionByKey.get(neighbor.key)!;
@@ -1083,6 +1128,52 @@ function enforceInitialPhysicalRegionFloors(
     atlas = createSparseAdaptiveMassAtlas(initial.dimensions, bricks,
       initial.generation, fine, false, false);
   }
+}
+
+/** Coalesce represented, uniform bulk only; retain a base-brick surface band. */
+function coarseFirstBulkCover(initial: SparseAdaptiveMassAtlas,
+  maximumSpan: number): SparseAdaptiveMassAtlas {
+  let atlas = initial;
+  const full = (brick: SparseAdaptiveMassBrick) => brick.resolution === 1
+    && brick.density.every(rho => rho === 1) && brick.gamma.every(gamma => gamma === 1);
+  for (let span = 2; span <= maximumSpan; span *= 2) {
+    const groups = new Map<string, SparseAdaptiveMassBrick[]>();
+    for (const brick of atlas.bricks) {
+      if (sparseBrickSpan(brick) !== span / 2 || !full(brick)) continue;
+      const origin = brick.coordinate.map(q => Math.floor(q / span) * span);
+      const key = origin.join("/");
+      const group = groups.get(key) ?? []; group.push(brick); groups.set(key, group);
+    }
+    const removed = new Set<number>(), parents: SparseAdaptiveMassBrick[] = [];
+    for (const group of groups.values()) {
+      if (group.length !== 8) continue;
+      const origin = group[0]!.coordinate.map(q => Math.floor(q / span) * span) as [number, number, number];
+      if (origin.some((q, axis) => (q + span) * atlas.brickFineResolution > atlas.dimensions[axis]!)) continue;
+      let eligible = true;
+      for (let axis = 0; axis < 3 && eligible; axis++) for (const sign of [-1, 1]) {
+        const tangents = [0, 1, 2].filter(a => a !== axis);
+        for (let u = 0; u < span && eligible; u++) for (let v = 0; v < span; v++) {
+          const q = [...origin] as [number, number, number];
+          q[axis] += sign < 0 ? -1 : span;
+          q[tangents[0]!] += u; q[tangents[1]!] += v;
+          if (q.some((value, a) => value < 0 || value >= atlas.brickDimensions[a]!)) continue;
+          const neighbor = sparseBrickContainingCoordinate(atlas, q);
+          // No surface merge or unseen feature loss; preserve physical 2:1.
+          if (!neighbor || !full(neighbor) || sparseBrickSpan(neighbor) < span / 2) {
+            eligible = false; break;
+          }
+        }
+      }
+      if (!eligible) continue;
+      group.forEach(brick => removed.add(brick.key));
+      parents.push(uniformInitialBrick(origin, span, 1, atlas.brickDimensions));
+    }
+    if (!parents.length) break;
+    atlas = createSparseAdaptiveMassAtlas(atlas.dimensions,
+      [...atlas.bricks.filter(brick => !removed.has(brick.key)), ...parents],
+      atlas.generation, atlas.brickFineResolution);
+  }
+  return atlas;
 }
 
 /**
@@ -1354,6 +1445,10 @@ function candidateInitialBrickCoordinates(
   for (const volume of sceneInitialLiquidVolumes(scene)) {
     const minimum = volume.shape === "box"
       ? [volume.min_m.x, volume.min_m.y, volume.min_m.z] as const
+      : volume.shape === "torus"
+        ? [volume.center_m.x - volume.radius_m - volume.tubeRadius_m,
+          volume.center_m.y - volume.tubeRadius_m,
+          volume.center_m.z - volume.radius_m - volume.tubeRadius_m] as const
       : volume.shape === "cylinder"
         ? [volume.center_m.x - volume.radius_m, volume.center_m.y - volume.radius_m,
           volume.center_m.z - volume.halfHeight_m] as const
@@ -1361,6 +1456,10 @@ function candidateInitialBrickCoordinates(
           volume.center_m.z - volume.radius_m] as const;
     const maximum = volume.shape === "box"
       ? [volume.max_m.x, volume.max_m.y, volume.max_m.z] as const
+      : volume.shape === "torus"
+        ? [volume.center_m.x + volume.radius_m + volume.tubeRadius_m,
+          volume.center_m.y + volume.tubeRadius_m,
+          volume.center_m.z + volume.radius_m + volume.tubeRadius_m] as const
       : volume.shape === "cylinder"
         ? [volume.center_m.x + volume.radius_m, volume.center_m.y + volume.radius_m,
           volume.center_m.z + volume.halfHeight_m] as const
@@ -1470,7 +1569,7 @@ export function initializeSparseBrickAtlasFromScene(
   };
   const refinementRegionParameters = packSparseCM12RefinementRegions(
     refinementRegions, refinementLattice);
-  if (!options.resolutionForBrick) {
+  if (!options.resolutionForBrick && options.coarseFirstCurvatureTolerance === undefined) {
     // A macro leaf may be rerung, but it cannot be spatially split after it is
     // packed into the resident catalogue. A partial minimum-cell-size box is
     // nevertheless safe: an intersecting macro is conservatively coarsened as
@@ -1689,7 +1788,9 @@ export function initializeSparseBrickAtlasFromScene(
     );
     const policySelected = options.resolutionForBrick?.({
       coordinate, brickDimensions,
-    }) ?? adaptiveResolution;
+    }) ?? (options.coarseFirstCurvatureTolerance === undefined ? adaptiveResolution
+      : !candidate.interfaceBrick ? 1 : initialCurvatureResolution(scene, options.finestDimensions, coordinate,
+        brickFineResolution, options.coarseFirstCurvatureTolerance));
     const evidenceSelected = Math.max(policySelected,
       staticSolidResolutionFloor) as SparseBrickResolution;
     const selected = initialResolutionWithRefinementRegionBounds(
@@ -1783,10 +1884,13 @@ export function initializeSparseBrickAtlasFromScene(
     scene, options.finestDimensions, candidate.coordinate,
     resolutionByKey.get(candidate.key)!, brickFineResolution,
   ));
-  return atlasWithInitialAirSupport(
+  const supported = atlasWithInitialAirSupport(
     scene, options.finestDimensions, bricks, brickFineResolution,
-    refinementRegionParameters,
+    refinementRegionParameters, options.coarseFirstCurvatureTolerance !== undefined
+      && refinementRegions.length === 0 ? 2 : 1,
   );
+  return options.coarseFirstCurvatureTolerance !== undefined && refinementRegions.length === 0
+    ? coarseFirstBulkCover(supported, maximumMacroSpanBricks) : supported;
 }
 
 /**
@@ -1810,15 +1914,18 @@ export function initializeSparseBrickAtlasFromScene(
 export function sparseCM12InitialActiveBrickKeys(
   scene: SceneDescription,
   atlas: SparseAdaptiveMassAtlas,
+  minimumAirResolution: SparseBrickResolution = 1,
 ): ReadonlySet<number> {
+  const layerCount = (brick: SparseAdaptiveMassBrick) => Math.ceil(
+    (SPARSE_CM12_VELOCITY_EXTENSION_DEPTH + 1) / Math.max(minimumAirResolution,
+      matchedAirSupportResolution(brick, atlas.brickFineResolution)));
   const active = new Set(atlas.bricks.filter((brick) =>
     brick.density.some((density) => density > 0)).map((brick) => brick.key));
   const addDrySupportLayer = (layer: number, sourceKeys: readonly number[]) => {
     for (const key of sourceKeys) {
       const brick = atlas.directory.get(key);
       if (!brick) continue;
-      if (layer >= matchedAirSupportLayerCount(brick,
-        atlas.brickFineResolution)) continue;
+      if (layer >= layerCount(brick)) continue;
       const span = sparseBrickSpan(brick);
       for (let axis = 0; axis < 3; axis += 1) for (const sign of [-1, 1]) {
         const tangents = [0, 1, 2].filter((candidate) => candidate !== axis);
@@ -1838,8 +1945,7 @@ export function sparseCM12InitialActiveBrickKeys(
   const supportLayerCountFor = (keys: readonly number[]) => keys.reduce(
     (maximum, key) => {
       const brick = atlas.directory.get(key);
-      return brick ? Math.max(maximum, matchedAirSupportLayerCount(brick,
-        atlas.brickFineResolution)) : maximum;
+      return brick ? Math.max(maximum, layerCount(brick)) : maximum;
     }, 0);
   if (sceneRefinementRegions(scene).length === 0) {
     const liquid = [...active];

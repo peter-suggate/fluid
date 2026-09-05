@@ -96,7 +96,7 @@ export const SPARSE_CM12_LONG_DAM_METHOD_PROFILE: MethodProfile = Object.freeze(
   quality: "balanced",
   overrides: Object.freeze({
     // These thresholds remain the long-dam activity tuning when that optional
-    // criterion is selected; the product default stays Surface distance.
+    // criterion is selected; the product default is coarse-first.
     finestTravelCells: 4,
     fourTravelCells: 2,
     twoTravelCells: 1,
@@ -111,7 +111,7 @@ export const SPARSE_CM12_COMPLEXITY_LADDER_METHOD_PROFILE: MethodProfile = Objec
   overrides: Object.freeze({
     brickFineResolution: "8",
     maximumMacroSpanBricks: "auto",
-    selectorMode: "surface",
+    selectorMode: "coarse-first",
     surfaceFineRings: 1,
     timeStep: "paper",
   }),
@@ -124,7 +124,7 @@ export const BOUNDED_POOL_TRANSFER_METHOD_PROFILE: MethodProfile = Object.freeze
   overrides: Object.freeze({
     brickFineResolution: "8",
     maximumMacroSpanBricks: "auto",
-    selectorMode: "surface",
+    selectorMode: "coarse-first",
     surfaceFineRings: 1,
     timeStep: "paper",
   }),
@@ -253,7 +253,7 @@ MethodProfile = Object.freeze({
   overrides: Object.freeze({
     brickFineResolution: "8",
     presentationPageResolution: "8",
-    selectorMode: "surface",
+    selectorMode: "coarse-first",
     timeStep: "paper",
     pressureIterations: 64,
   }),
@@ -746,6 +746,27 @@ export const BRICK_QUAD_DAM_SEED_M = { x: -0.2, y: 0.2, z: -0.2 };
  * pressure cells away from the closed walls and planar free surface. The
  * 0.05 m lattice resolves the 0.8 m cube as exactly 16 cells per axis.
  */
+export function createCoarseFirstPoolImpactScene(): SceneDescription {
+  const scene = sceneBody();
+  scene.sceneId = "coarse-first-pool-impact";
+  scene.duration_s = 4;
+  scene.rigidBodies = [];
+  scene.container = { ...scene.container, width_m: 6.4, height_m: 4.8,
+    depth_m: 6.4, fillFraction: 1 / 3, top: "open", fluidWallMode: "free-slip" };
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "tank-fill";
+  scene.fluid.initialLiquidVolumes = [
+    { shape: "sphere", center_m: { x: 0, y: 3.65, z: 0 }, radius_m: 0.25 },
+  ];
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  scene.fluid.surfaceTension_N_m = 0;
+  scene.fluid.dynamicViscosity_Pa_s = 0;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 60;
+  return scene;
+}
+
 export function createTinyHydrostaticScene(): SceneDescription {
   const scene = sceneBody();
   scene.sceneId = "tiny-hydrostatic-two-level";
@@ -2483,6 +2504,17 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
     build: createMinimalPowerDamBreak32Scene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
+  }),
+  defineScene({
+    id: "coarse-first-pool-impact",
+    name: "Coarse-first · ball into still pool",
+    blurb: "A fine liquid ball falls into a broad hydrostatic pool. Coarse-first adaptation refines from curvature, energy and approaching liquid without authored refinement regions.",
+    audience: "validation", shelf: "Dam-break ladder", environment: "stage",
+    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+      selectorMode: "coarse-first", timeStep: "scene", brickFineResolution: "8",
+    } },
+    build: createCoarseFirstPoolImpactScene,
+    camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
   }),
   defineScene({
     id: "minimal-power-dam-break-64",

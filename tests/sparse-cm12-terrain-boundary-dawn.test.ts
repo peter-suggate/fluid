@@ -185,7 +185,8 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
         const density = fields.density[cell]!;
         assert.ok(Number.isFinite(open) && open >= -1e-6 && open <= 1 + 1e-6,
           `cell ${cell} published invalid solid-open fraction ${open}`);
-        assert.ok(Number.isFinite(density) && density >= 0);
+        assert.ok(Number.isFinite(density) && density >= 0,
+          `cell ${cell} published invalid density ${density}`);
         if (open > 1e-6 && open < 1 - 1e-6) partialCells += 1;
         if (open <= 1e-6) {
           closedCells += 1;

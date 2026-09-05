@@ -270,7 +270,8 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
 
       const scene = createSparseCM12LongDamBreakScene();
       const values = resolveMethodValues(adaptiveMassMethod, "balanced",
-        SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides ?? {});
+        // Preserve the exact legacy generation-zero support-band oracle.
+        { ...SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides, selectorMode: "activity" });
       solver = await adaptiveMassMethod.createSolverAsync!(
         device, scene, "balanced", values, undefined, () => {},
       );

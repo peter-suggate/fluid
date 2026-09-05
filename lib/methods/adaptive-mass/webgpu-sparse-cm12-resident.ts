@@ -15,6 +15,7 @@ import { sparseAtlasScalarsHaveHorizontalD4Symmetry } from
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickContainingCoordinate,
+  sparseBrickFaceNeighbors,
   sparseBrickSpan,
   sparseBrickKey,
   isSparseBrickResolution,
@@ -246,6 +247,14 @@ export interface SharpeningTrace {
  * separate transaction, so these controls tune candidate requests/history. */
 export interface SparseCM12ActivityPolicy {
   readonly activitySignals: boolean;
+  readonly coarseFirst: boolean;
+  /** Specific kinetic energy (m²/s²) requesting the finest rung. */
+  readonly energyThreshold: number;
+  /** Maximum normal variation per cell, approximately |curvature| h. */
+  readonly curvatureTolerance: number;
+  readonly anticipationSeconds: number;
+  readonly anticipationRadiusBricks: number;
+  readonly surfaceQuietEpochs: number;
   /** Maximum rho=.5 edge-crossing displacement accepted by each one-rung
    * presentation proof, expressed in finest-cell widths. */
   readonly surfaceDisplacementToleranceCells: number;
@@ -277,6 +286,12 @@ export interface SparseCM12ActivityPolicy {
 
 export const SPARSE_CM12_ACTIVITY_POLICY = Object.freeze({
   activitySignals: true,
+  coarseFirst: true,
+  energyThreshold: 8,
+  curvatureTolerance: 0.25,
+  anticipationSeconds: 0.5,
+  anticipationRadiusBricks: 3,
+  surfaceQuietEpochs: 2,
   surfaceDisplacementToleranceCells: 1,
   surfaceNormalToleranceDegrees: 30,
   surfaceCoarseningEnabled: true,
@@ -328,7 +343,13 @@ export function sparseCM12ActivityPolicy(
     || values.forcedSurfaceResolutionForQA === 16
     ? values.forcedSurfaceResolutionForQA : undefined;
   return {
-    activitySignals: values.activitySignals === true,
+    activitySignals: values.activitySignals !== false,
+    coarseFirst: values.activitySignals !== false && values.coarseFirst !== false,
+    energyThreshold: finiteClamp(values.energyThreshold, defaults.energyThreshold, 0.01, 100),
+    curvatureTolerance: finiteClamp(values.curvatureTolerance, defaults.curvatureTolerance, 0.02, 2),
+    anticipationSeconds: finiteClamp(values.anticipationSeconds, defaults.anticipationSeconds, 0, 2),
+    anticipationRadiusBricks: integerClamp(values.anticipationRadiusBricks, defaults.anticipationRadiusBricks, 1, 6),
+    surfaceQuietEpochs: integerClamp(values.surfaceQuietEpochs, defaults.surfaceQuietEpochs, 1, 32),
     surfaceDisplacementToleranceCells: finiteClamp(
       values.surfaceDisplacementToleranceCells,
       defaults.surfaceDisplacementToleranceCells, 0, 8,
@@ -886,6 +907,7 @@ const sparseCM12CompilationCacheByDevice =
 /** Immutable CM12 binding ABI and compiled programs belong to the device, not a scene. */
 function sparseCM12DeviceCompilationCache(device: GPUDevice):
 SparseCM12DeviceCompilationCache {
+  device = generationDeviceRoots.get(device) ?? device;
   const existing = sparseCM12CompilationCacheByDevice.get(device);
   if (existing) return existing;
   const bindGroupLayout = device.createBindGroupLayout({
@@ -1047,7 +1069,7 @@ export function sparseCM12WGSLForEntryPoints(source: string, roots: readonly str
 const SPARSE_CM12_PHASE1_TRANSPORT_PROFILE_WORDS = 64;
 /** Params in the resident WGSL, including the fixed authored-region tail. */
 const SPARSE_CM12_PARAMETER_BYTES = SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
-  + SPARSE_CM12_REFINEMENT_REGION_BYTES + 48;
+  + SPARSE_CM12_REFINEMENT_REGION_BYTES + 80;
 /** Twenty f32 convergence/diagnostic scalars; see the WGSL initialization. */
 const SPARSE_CM12_PRESSURE_SCALAR_BYTES = 80;
 const SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS =
@@ -1236,6 +1258,7 @@ export function sparseCM12HostTemplateVariantsEnabled(
   acceptedRowCount: number,
   mutableBrickCount: number,
   brickFineResolution = 8,
+  acceptedMutableWork?: Readonly<{ cells: number; rows: number }>,
 ): boolean {
   if (!Number.isSafeInteger(brickFineResolution) || brickFineResolution < 1
     || !Number.isInteger(Math.log2(brickFineResolution))) return false;
@@ -1247,12 +1270,19 @@ export function sparseCM12HostTemplateVariantsEnabled(
     cellsPerBrick += resolution ** 3;
     rowsPerBrick += 3 * (resolution + 1) * resolution ** 2;
   }
-  // Each mutable brick already contributes at least its B1 cells/rows to the
-  // accepted counts. Add only the remaining worst-case catalogue here.
+  // Subtract accepted mutable work already represented by the all-rung
+  // estimate. Counting a currently fine ball twice unnecessarily disabled
+  // the catalogue for a wide coarse pool close to the unchanged budget.
+  if (acceptedMutableWork && (!Number.isSafeInteger(acceptedMutableWork.cells)
+    || !Number.isSafeInteger(acceptedMutableWork.rows)
+    || acceptedMutableWork.cells < 0 || acceptedMutableWork.cells > acceptedCellCount
+    || acceptedMutableWork.rows < 0 || acceptedMutableWork.rows > acceptedRowCount)) return false;
+  const includedCells = acceptedMutableWork?.cells ?? mutableBrickCount;
+  const includedRows = acceptedMutableWork?.rows ?? 6 * mutableBrickCount;
   const projectedCellCount = acceptedCellCount
-    + mutableBrickCount * (cellsPerBrick - 1);
+    + mutableBrickCount * cellsPerBrick - includedCells;
   const projectedRowCount = acceptedRowCount
-    + mutableBrickCount * (rowsPerBrick - 6);
+    + mutableBrickCount * rowsPerBrick - includedRows;
   return mutableBrickCount <= mutableBrickMaximum
     && projectedCellCount <= SPARSE_CM12_HOST_TEMPLATE_CELL_MAXIMUM
     && projectedRowCount <= SPARSE_CM12_HOST_TEMPLATE_ROW_MAXIMUM;
@@ -1610,6 +1640,7 @@ function sparseCM12ContiguousRowOwnership(
   templateLevels: readonly SparseBrickResolution[],
   rows: readonly SparseAtlasGradientRow[],
   rowRequirements: readonly (readonly number[])[],
+  takeOwnership = false,
 ): SparseCM12ContiguousRowOwnership {
   if (rows.length !== rowRequirements.length) {
     throw new Error("Sparse CM12 row ownership input lengths differ");
@@ -1645,9 +1676,10 @@ function sparseCM12ContiguousRowOwnership(
       offsets[bucket + 1]! - offsets[bucket]!);
     for (const source of buckets[bucket]!) {
       const id = orderedRows.length;
-      oldToNew[source.id] = id;
-      orderedRows.push({ ...source, id });
-      orderedRequirements.push(rowRequirements[source.id]!);
+      const oldId = source.id;
+      oldToNew[oldId] = id;
+      orderedRows.push(takeOwnership ? Object.assign(source, { id }) : { ...source, id });
+      orderedRequirements.push(rowRequirements[oldId]!);
     }
   }
   if (orderedRows.length !== rowRequirements.length) {
@@ -1832,8 +1864,10 @@ function packAcceptedTopologyTemplates(
   };
 }
 
+// Exact integer key for the supported B8/B16 catalogue; below 2^53 even
+// for signed-world u32 brick keys. Avoid a string per template cell.
 const templateCellKey = (brickKey: number, resolution: number, local: number) =>
-  `${brickKey}/${resolution}/${local}`;
+  brickKey * 0x100000 + resolution * 0x1000 + local;
 
 // The composite-grid workspace recycles cell/row objects and their tuple
 // storage on every build. Template variants outlive those builds, so retain a
@@ -1912,10 +1946,12 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     neighbors: readonly (readonly number[])[];
     budget: SparseCM12TopologyPreparationBudget;
   }>,
+  mutableKeys?: ReadonlySet<number>,
 ): PackedResidentTopologyTemplates {
   const templateLevels = sparseCM12TemplateLevels(atlas.brickFineResolution);
   const mutableBrickKeys = new Set(atlas.bricks.filter((brick) => preparation
-    ? preparation.requested.has(brick.key) : sparseBrickSpan(brick) === 1)
+    ? preparation.requested.has(brick.key) : mutableKeys
+      ? mutableKeys.has(brick.key) : sparseBrickSpan(brick) === 1)
     .map((brick) => brick.key));
   const leafByKey = new Map(atlas.bricks.map((brick, leaf) => [brick.key, leaf]));
   // Even a bounded initial frontier is large enough that building one
@@ -1942,12 +1978,7 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
         }
         continue;
       }
-      for (let axis = 0; axis < 3; axis += 1) for (const direction of [-1, 1]) {
-        const coordinate = [...brick.coordinate] as [number, number, number];
-        coordinate[axis] += direction;
-        const neighbor = sparseBrickContainingCoordinate(atlas, coordinate);
-        if (neighbor) keys.add(neighbor.key);
-      }
+      for (const neighbor of sparseBrickFaceNeighbors(atlas, brick)) keys.add(neighbor.key);
     }
     return atlas.bricks.filter((brick) => keys.has(brick.key));
   };
@@ -1975,13 +2006,15 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     sourceBricks: readonly SparseAdaptiveMassBrick[],
   ) => createSparseAdaptiveMassAtlas(atlas.dimensions, sourceBricks.map((brick) =>
     cachedResampledBrick(brick, choose(brick))), atlas.generation,
-    atlas.brickFineResolution);
+    atlas.brickFineResolution, atlas.signedCoordinates, Boolean(preparation));
+  // The catalogue contains all rung combinations at immutable guard faces;
+  // only the closed, validated candidate may become an accepted atlas.
   // One reusable full-grid scratch bounds host construction at accepted plus
   // one transient variant. Only cells/rows touching the mutable frontier are
   // copied into the persistent template library.
   const variantWorkspace = createSparseAtlasCompositeGridBuildWorkspace();
   const cells: SparseAtlasCompositeCell[] = [];
-  const cellId = new Map<string, number>();
+  const cellId = new Map<number, number>();
   const cellRanges = new Uint32Array(atlas.bricks.length * templateLevels.length * 2);
   const brickIndex = new Map(atlas.bricks.map((brick, index) => [brick.key, index]));
   const compactBrickCellRange = (grid: SparseAtlasCompositeGrid,
@@ -2027,8 +2060,9 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   }
 
   let rows: SparseAtlasGradientRow[] = [];
-  let rowRequirements: number[][] = [];
+  let rowRequirements: (readonly number[])[] = [];
   const rowKeys = new Set<string>();
+  const interiorRowKeys = new Set<number>();
   const appendRows = (grid: SparseAtlasCompositeGrid,
     accept: (row: SparseAtlasGradientRow) => boolean): void => {
     for (const source of grid.gradientRows) {
@@ -2046,14 +2080,19 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
         if (id === undefined) throw new Error("Sparse CM12 template cell remap failed");
         return { cellId: id, coefficient: term.coefficient };
       });
-      const rowKey = `${source.axis}/${source.centerFine.join("/")}/${terms.map((term) =>
-        `${term.cellId}:${term.coefficient}`).join(",")}`;
-      if (rowKeys.has(rowKey)) continue;
+      // An intra-brick face is uniquely identified by its lower cell and
+      // axis. Boundary/mixed rows retain the full geometric identity.
+      const interiorKey = source.kind === "intra-brick" && terms.length === 2
+        ? 3 * Math.min(terms[0]!.cellId, terms[1]!.cellId) + source.axis : undefined;
+      const rowKey = interiorKey === undefined
+        ? `${source.axis}/${source.centerFine.join("/")}/${terms.map((term) =>
+          `${term.cellId}:${term.coefficient}`).join(",")}` : undefined;
+      if (interiorKey !== undefined ? interiorRowKeys.has(interiorKey) : rowKeys.has(rowKey!)) continue;
       if (preparation && rows.length >= preparation.budget.maximumRows) {
         throw new SparseCM12TopologyPreparationCapacity("rows", rows.length + 1,
           preparation.budget.maximumRows);
       }
-      rowKeys.add(rowKey);
+      if (interiorKey !== undefined) interiorRowKeys.add(interiorKey); else rowKeys.add(rowKey!);
       rows.push({ ...source, id: rows.length, centerFine: [...source.centerFine], terms });
       rowRequirements.push([...requirements].map(([key, level]) =>
         packedTemplateCellMetadata(brickIndex.get(key)!, level)));
@@ -2145,18 +2184,26 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     }
   }
 
+  // Deduplication and resampling are finished. Release their large string
+  // maps before row reordering and final packing peak together.
+  rowKeys.clear(); interiorRowKeys.clear(); cellId.clear(); resampledBricks.clear();
   const ownership = sparseCM12ContiguousRowOwnership(atlas.bricks.length,
-    templateLevels, rows, rowRequirements);
+    templateLevels, rows, rowRequirements, true);
   rows = Array.from(ownership.rows);
-  rowRequirements = ownership.requirements.map((requirements) => [...requirements]);
+  rowRequirements = Array.from(ownership.requirements);
 
-  const incidences: { row: number; term: number }[][] = Array.from(
-    { length: cells.length }, () => []);
+  // Pack cell incidence as CSR directly, preserving the original row/term
+  // order without millions of temporary JS objects in tall coarse worlds.
+  const incidenceCounts = new Uint32Array(cells.length);
   let termCount = 0;
-  for (const row of rows) for (let term = 0; term < row.terms.length; term += 1) {
-    incidences[row.terms[term]!.cellId]!.push({ row: row.id, term: termCount++ });
+  for (const row of rows) for (const term of row.terms) {
+    incidenceCounts[term.cellId]++; termCount++;
   }
-  const incidenceCount = incidences.reduce((sum, list) => sum + list.length, 0);
+  const incidenceStarts = new Uint32Array(cells.length + 1);
+  for (let cell = 0; cell < cells.length; cell++) {
+    incidenceStarts[cell + 1] = incidenceStarts[cell]! + incidenceCounts[cell]!;
+  }
+  const incidenceCount = termCount;
   const pressureEdgeCounts = new Uint32Array(cells.length);
   for (const row of rows) for (const own of row.terms) {
     pressureEdgeCounts[own.cellId] += row.terms.length - 1;
@@ -2229,16 +2276,13 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
       setF32(words, termOffset + 2 * nextTerm + 1, term.coefficient); nextTerm += 1;
     }
   }
-  let nextIncidence = 0;
-  for (let cell = 0; cell < incidences.length; cell += 1) {
-    words[incidenceOffset + cell] = nextIncidence;
-    for (const incidence of incidences[cell]!) {
-      words[incidenceRecordOffset + 2 * nextIncidence] = incidence.row;
-      words[incidenceRecordOffset + 2 * nextIncidence + 1] = incidence.term;
-      nextIncidence += 1;
-    }
+  words.set(incidenceStarts, incidenceOffset);
+  const incidenceCursor = incidenceStarts.slice(0, cells.length);
+  let incidenceTerm = 0;
+  for (const row of rows) for (const term of row.terms) {
+    const at = incidenceRecordOffset + 2 * incidenceCursor[term.cellId]++;
+    words[at] = row.id; words[at + 1] = incidenceTerm++;
   }
-  words[incidenceOffset + cells.length] = nextIncidence;
   words.set(cellRanges, cellRangeOffset);
   let requirementAt = rowRequirementOffset;
   for (const requirements of rowRequirements) {
@@ -2639,7 +2683,7 @@ export interface SparseCM12GPUActivityRecord {
   readonly surfaceProofEpochs: number;
   /** Mean intensive density retained in the brick at the last activity census. */
   readonly meanDensity: number;
-  /** Density-weighted local brick moments used by the temporal activity score. */
+  /** Legacy: density moments. Coarse-first: mean wet-cell velocity in fine cells/s. */
   readonly densityMoments: readonly [number, number, number];
   /** GPU-authored request for the next candidate topology epoch. */
   readonly plannedResolution: SparseBrickResolution;
@@ -2986,13 +3030,13 @@ function packResidentTopology(
   // cleared this catalogue for every authored leaf, which made
   // brickCandidatePlanningEnabled false and silently discarded both rerung
   // and active-to-inactive lifecycle requests. Dynamic leaves still use their
-  // page-local same-rung path; only span-one authored leaves with prepacked
-  // all-rung templates receive a slot here.
+  // page-local same-rung path; authored leaves (including bulk macros) with
+  // prepacked all-rung templates receive a slot here.
   const candidateSlotByBrick = new Uint32Array(atlas.bricks.length).fill(INVALID);
   let candidateBrickCount = 0;
   for (let brick = 0; brick < atlas.bricks.length; brick += 1) {
     const source = atlas.bricks[brick]!;
-    if (sparseBrickSpan(source) === 1 && mutableBrickKeys.has(source.key)) {
+    if (mutableBrickKeys.has(source.key)) {
       candidateSlotByBrick[brick] = candidateBrickCount++;
     }
   }
@@ -3434,6 +3478,7 @@ export class WebGPUSparseCM12Resident {
   private simulationPipelineCompilation?: Promise<void>;
   private startSimulationPipelineCompilation?: () =>
     Promise<Readonly<Record<string, GPUComputePipeline>>>;
+  private coarseFirstPolicySignature: string | undefined;
   private readonly parameterWords = new ArrayBuffer(SPARSE_CM12_PARAMETER_BYTES);
   private readonly parameterU32 = new Uint32Array(this.parameterWords);
   private readonly parameterF32 = new Float32Array(this.parameterWords);
@@ -3503,7 +3548,7 @@ export class WebGPUSparseCM12Resident {
             });
           } finally { worker.terminate(); }
           const realized = await realizeCM12ResourceRecipe(allocation.device, recipe,
-            [...(rigid ? [rigid.bodies, rigid.exchange] : []), ...(source ? [this.state, this.topologyArena] : [])], {signal,
+            [...(rigid ? [rigid.bodies, rigid.exchange] : []), ...(source ? [this.state, this.topologyArena] : [])], {signal, compilationDevice: device,
               onSlice: (milliseconds, operation) => {
                 if (milliseconds > this.generationPreparationMaximumSliceMs) {
                   this.generationPreparationMaximumSliceMs = milliseconds;
@@ -4151,15 +4196,21 @@ export class WebGPUSparseCM12Resident {
     const initialSolidWorld = solidWorld;
     const dynamicWorldGrowth = true;
     const signedWorldGrowth = true;
-    // GPU-grown SparseWorld pages own a complete fixed-B8 graph, but authored
-    // span-one leaves still need the prepacked dyadic catalogue for physical
-    // 1/2/4/8 refinement and coarsening. Keep the catalogue bounded by the
-    // established resident-work threshold; macro leaves remain immutable.
+    // Back the active working set, including two-brick bulk leaves, with
+    // local dyadic rerungs. Inactive structural guards and larger coverage
+    // changes use generation preparation when demanded. Keep the established
+    // cell/row budgets; do not prepack distant inactive wall guards.
     const mutableBrickKeysForBudget = atlas.bricks.filter((brick) =>
-      sparseBrickSpan(brick) === 1).map((brick) => brick.key);
+      initiallyActiveBrickKeys.has(brick.key) && sparseBrickSpan(brick) <= 2).map((brick) => brick.key);
+    const candidateKeys = new Set(mutableBrickKeysForBudget);
     const hostTemplateVariants = !acceptedOnly && sparseCM12HostTemplateVariantsEnabled(
       grid.cells.length, grid.gradientRows.length, mutableBrickKeysForBudget.length,
-      atlas.brickFineResolution,
+      atlas.brickFineResolution, {
+        cells: grid.cells.reduce((n, cell) => n + Number(
+          candidateKeys.has(cell.brickKey)), 0),
+        rows: grid.gradientRows.reduce((n, row) => n + Number(row.terms.every(term =>
+          candidateKeys.has(grid.cells[term.cellId]!.brickKey))), 0),
+      },
     );
     const mutableBrickKeys: ReadonlySet<number> = hostTemplateVariants
       ? new Set(mutableBrickKeysForBudget) : new Set<number>();
@@ -4234,7 +4285,7 @@ export class WebGPUSparseCM12Resident {
       ? "Build four-rung and 2:1 seam topology templates"
       : "Pack accepted topology templates");
     const templates = hostTemplateVariants
-      ? packResidentTopologyTemplates(atlas, grid)
+      ? packResidentTopologyTemplates(atlas, grid, undefined, mutableBrickKeys)
       : packAcceptedTopologyTemplates(atlas, grid);
     const dynamicCellsPerPage = atlas.brickFineResolution ** 3;
     const dynamicRowsPerPage = 3 * (atlas.brickFineResolution + 1)
@@ -5337,7 +5388,7 @@ export class WebGPUSparseCM12Resident {
         ],
       }) : pressureBindGroup;
     report("Generate presentation shader");
-    const compiler = gpuCompilationManagerFor(device);
+    const compiler = gpuCompilationManagerFor(generationDeviceRoots.get(device) ?? device);
     const createResidentShaderSource = (velocityExtensionFixedRecurrenceDepth?: number) =>
       createWebgpuSparseCM12ResidentWGSL(
         atlas.brickFineResolution, presentationPageResolution,
@@ -7661,7 +7712,24 @@ export class WebGPUSparseCM12Resident {
     for (let level = finestLevel - 3; level > 0; level -= 1) {
       velocityThresholds[level] = 0.5 * velocityThresholds[level + 1]!;
     }
+    if (policy.coarseFirst) {
+      const finestTravel = Math.sqrt(2 * policy.energyThreshold) * dt_s / finestCellSize_m;
+      for (let level = 0; level <= finestLevel; level++) {
+        velocityThresholds[level] = finestTravel * 2 ** (level - finestLevel);
+      }
+    }
     f.set(velocityThresholds, surfaceProofWord + 4);
+    f.set([policy.coarseFirst ? 1 : 0, policy.energyThreshold,
+      policy.curvatureTolerance, policy.anticipationSeconds], surfaceProofWord + 12);
+    const policySignature = JSON.stringify([policy.coarseFirst, policy.energyThreshold,
+      policy.curvatureTolerance, policy.anticipationSeconds, policy.anticipationRadiusBricks,
+      policy.surfaceDisplacementToleranceCells, policy.surfaceNormalToleranceDegrees,
+      policy.surfaceQuietEpochs]);
+    const changed = this.coarseFirstPolicySignature !== undefined
+      && this.coarseFirstPolicySignature !== policySignature;
+    this.coarseFirstPolicySignature = policySignature;
+    f.set([policy.anticipationRadiusBricks, policy.surfaceQuietEpochs, changed ? 1 : 0, 0],
+      surfaceProofWord + 16);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
   }
 
@@ -8327,7 +8395,14 @@ export class WebGPUSparseCM12Resident {
       if (!authored) dynamicKeys.add(key);
       const resolution = record.acceptedResolution;
       if (record.active) active.add(key);
-      if (record.active && record.generationRequestedResolution !== resolution) planned.set(key, record.generationRequestedResolution);
+      // Backed rerungs belong to the in-place GPU queue. Rebuilding an entire
+      // generation for those pending requests discarded the fast catalogue
+      // whenever the same scene also contained an immutable bulk macro.
+      const packedOwner = authored && this.lastPacked
+        ? this.lastPacked.words[this.lastPacked.brickOffset + 2 * record.leafId]! : 0;
+      const hasCandidateSlot = ((packedOwner & 0x7fff_ffff) >>> 5) !== 0;
+      if (record.active && !hasCandidateSlot && record.generationRequestedResolution !== resolution)
+        planned.set(key, record.generationRequestedResolution);
       bricks.push({ key, coordinate, resolution, spanBricks: authored ? sparseBrickSpan(authored) : 1,
         unclipped: authored ? authored.unclipped : true,
         density: new Float64Array(resolution ** 3).fill(record.active ? record.meanDensity : 0),

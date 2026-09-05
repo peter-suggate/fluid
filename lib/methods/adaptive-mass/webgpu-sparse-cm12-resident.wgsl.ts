@@ -1162,6 +1162,8 @@ struct Params {
   refinementRegions:array<vec4f,16>, // min.xyz/floor, max.xyz/optional ceiling
   surfaceProof:vec4u,       // displacement/normal float bits, enabled, QA rung
   velocityThresholds:array<vec4f,2>, // indexed by log2(resolution), B1..B16
+  coarseFirst:vec4f, // enabled, finest specific kinetic energy, κh, prediction seconds
+  coarseFirstHistory:vec4f, // search radius, surface proof epochs, reserved
 }
 
 @group(0)@binding(0)var<uniform>p:Params;
@@ -5128,6 +5130,9 @@ var<workgroup>reduceC:array<f32,64>;
 // planes.
 var<workgroup>activityMoments:array<vec4i,64>;
 var<workgroup>activityMetrics:array<vec4f,64>;
+var<workgroup>activityNormalMinimum:array<vec3f,64>;
+var<workgroup>activityNormalMaximum:array<vec3f,64>;
+var<workgroup>activityMomentum:array<vec4f,64>;
 var<workgroup>activityMasks:array<vec2u,64>;
 var<workgroup>activityBoundaryLiquidFaces:array<u32,64>;
 var<workgroup>activitySolidGeometry:array<vec4f,64>;
@@ -5145,7 +5150,7 @@ var<workgroup>transferMomentumZScale:array<f32,64>;
 // per parent cell.  Cache that parent result once instead of rebuilding the
 // same eight-child mass census independently for every child.
 var<workgroup>candidateRefinementDensityCorrection:
-  array<f32,CANDIDATE_CELLS_PER_BRICK/8u>;
+  array<vec4f,CANDIDATE_CELLS_PER_BRICK/8u>;
 var<workgroup>candidateCellScheduled:u32;
 var<workgroup>candidateCellConstructionActivation:u32;
 var<workgroup>candidateFaceScheduled:u32;
@@ -5996,6 +6001,59 @@ fn velocityResolutionFloor(travelFineCells:f32)->u32{
   return 1u;
 }
 
+fn coarseFirstEnabled()->bool{return p.coarseFirst.x!=0.0;}
+fn coarseFirstDensity(position:vec3f)->f32{
+  let cell=tracerCellAt(mirrorSharpeningSampleToWorld(position));
+  if(cell==INVALID){return 0.0;}
+  return state[destinationDensity()+cell]/max(cellOpenFraction(cell),1e-6);
+}
+fn coarseFirstNormal(position:vec3f,h:f32)->vec3f{
+  var gradient=vec3f(0.0);
+  for(var axis=0u;axis<3u;axis++){
+    var offset=vec3f(0.0);offset[axis]=h;
+    gradient[axis]=coarseFirstDensity(position+offset)-coarseFirstDensity(position-offset);
+  }
+  let magnitude=length(gradient);
+  return select(vec3f(0.0),gradient/max(magnitude,1e-8),magnitude>0.05);
+}
+// Receiver-side, immutable accepted-state query. No scatter race, authored
+// volume identity, or scene name enters the causal neighbourhood. Swept boxes
+// conservatively include the space between samples. A bounded radius makes
+// the performance/maximum anticipation reach explicit in the UI.
+fn coarseFirstIncomingFloor(brick:u32)->u32{
+  let horizon=p.coarseFirst.w;if(horizon<=0.0){return 1u;}
+  let coordinate=cm12WorldLeafCoordinate(brick);
+  let b=f32(BRICK_FINE_RESOLUTION);
+  let center=(vec3f(coordinate)+vec3f(0.5*f32(brickSpan(brick))))*b;
+  let radius=i32(p.coarseFirstHistory.x);var required=1u;
+  for(var z=-radius;z<=radius;z++){for(var y=-radius;y<=radius;y++){
+    for(var x=-radius;x<=radius;x++){
+      if(x==0&&y==0&&z==0){continue;}
+      let source=cm12WorldOwnerAt(coordinate+vec3i(x,y,z));
+      if(source==INVALID||source==brick||!brickActive(source)){continue;}
+      let record=activityRecord(source);let reasons=atomicLoad(&activity[record+1u]);
+      if((reasons&64u)==0u||(reasons&(1u|256u))==0u){continue;}
+      let velocity=vec3f(activityF32(record+5u),activityF32(record+6u),activityF32(record+7u));
+      let speed=length(velocity);
+      // Even a touching receiver cannot request more than H*speed.
+      if(horizon*speed<=1.0){continue;}
+      let origin=(vec3f(cm12WorldLeafCoordinate(source))+vec3f(0.5*f32(brickSpan(source))))*b;
+      let delta=center-origin;let sweep=horizon*velocity;
+      if(dot(delta,sweep)<=0.0){continue;}
+      let t=clamp(dot(delta,sweep)/max(dot(sweep,sweep),1e-8),0.0,1.0);
+      let separation=abs(delta-t*sweep);
+      let extent=0.5*b*f32(brickSpan(brick)+brickSpan(source));
+      if(any(separation>vec3f(extent))){continue;}
+      let gap=length(max(abs(delta)-vec3f(extent),vec3f(0.0)));
+      let demand=f32(BRICK_FINE_RESOLUTION)*min(1.0,horizon*speed/max(b,gap+b));
+      var rung=1u;loop{if(rung>=BRICK_FINE_RESOLUTION||f32(rung)>=demand){break;}rung*=2u;}
+      required=max(required,rung);
+      if(required==BRICK_FINE_RESOLUTION){return required;}
+    }
+  }}
+  return required;
+}
+
 // One workgroup owns one brick. Fixed-point density moments make the compact
 // history exactly invariant to x/z lane permutations for a D4-symmetric field;
 // only maxima are used for floating activity channels.
@@ -6020,6 +6078,8 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   var densitySum=0;var momentX=0;var momentY=0;var momentZ=0;
   var deformation=0.0;var predictedMotion=0.0;var detailError=0.0;
   var velocityTravel=0.0;
+  var normalMinimum=vec3f(1.0);var normalMaximum=vec3f(-1.0);
+  var liquidMomentum=vec4f(0.0);
   var surfaceAxes=0u;var densityInterfaceCell=false;
   var occupiedCell=false;var substantialDensityCell=false;
   var thinFluidCell=false;
@@ -6072,6 +6132,10 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     let ownVelocity=vec3f(state[ownVelocityAt],state[ownVelocityAt+1u],
       state[ownVelocityAt+2u]);
     let ownWet=fill>=CM12_LIQUID_ISOVALUE;
+    if(coarseFirstEnabled()&&ownWet){
+      liquidMomentum+=vec4f(ownVelocity*rho,rho);
+      velocityTravel=max(velocityTravel,p.frame.x*length(ownVelocity));
+    }
     let featureDensity=max(residencyDensity,p.activityDensity.x);
     let center=cellCenter(cell);
     var exposedSides=0u;
@@ -6132,7 +6196,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         // accepted isovalue crossing here. Activity mode's brickDeeplyEnclosed
         // predicate independently rejects surrounded bulk ripples at planning
         // time; Surface-distance mode deliberately follows the rendered field.
-        if(crossesIsovalue&&(!ownWet||cellBrick(neighbor)==brick)){
+        if(crossesIsovalue&&(!ownWet||cellBrick(neighbor)==brick||coarseFirstEnabled())){
           interfaceCell=true;densityInterfaceCell=true;surfaceAxes|=1u<<axis;
         }
         if(crossesIsovalue){
@@ -6185,6 +6249,22 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
         &&(exposedSides&oppositeSides)==oppositeSides);
     }
     thinFluidCell=thinFluidCell||cellIsThinFluid;
+    // Weak wall-separation velocity is not liquid curvature. Static and
+    // moving solids already have independent geometric/coupling floors.
+    if(coarseFirstEnabled()&&(densityInterfaceCell||cellIsThinFluid)){
+      let h=cellMinimumWidth(cell);
+      // A B1 leaf needs halo normals; finer leaves already span the feature
+      // with their own interface samples and central-difference neighbours.
+      let samples=select(1u,7u,resolution==1u);
+      for(var sample=0u;sample<samples;sample++){
+        var q=center;
+        if(sample>0u){q[(sample-1u)/2u]+=select(-h,h,(sample&1u)==0u);}
+        let normal=coarseFirstNormal(q,h);
+        if(dot(normal,normal)>0.5){
+          normalMinimum=min(normalMinimum,normal);normalMaximum=max(normalMaximum,normal);
+        }
+      }
+    }
     // Resolution follows motion of the represented feature, not the fastest
     // submerged parcel that happens to share its brick. The old whole-brick
     // maximum let a tangential/recirculating interior jet repeatedly refine a
@@ -6250,6 +6330,10 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
       }
     }
   }
+  if(coarseFirstEnabled()){
+    activityNormalMinimum[lane]=normalMinimum;activityNormalMaximum[lane]=normalMaximum;
+    activityMomentum[lane]=liquidMomentum;
+  }
   activityMoments[lane]=vec4i(densitySum,momentX,momentY,momentZ);
   activityMetrics[lane]=vec4f(deformation,predictedMotion,detailError,velocityTravel);
   activityBoundaryLiquidFaces[lane]=boundaryLiquidFaces;
@@ -6264,6 +6348,11 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   workgroupBarrier();
   var width=32u;loop{
     if(lane<width){
+      if(coarseFirstEnabled()){
+        activityNormalMinimum[lane]=min(activityNormalMinimum[lane],activityNormalMinimum[lane+width]);
+        activityNormalMaximum[lane]=max(activityNormalMaximum[lane],activityNormalMaximum[lane+width]);
+        activityMomentum[lane]+=activityMomentum[lane+width];
+      }
       activityMoments[lane]+=activityMoments[lane+width];
       activityMetrics[lane]=max(activityMetrics[lane],activityMetrics[lane+width]);
       activityMasks[lane]|=activityMasks[lane+width];
@@ -6291,7 +6380,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   let meanDensity=f32(reducedMoments.x)/(f32(count)*ACTIVITY_FIXED);
   let moments=vec3f(reducedMoments.yzw)/(f32(count)*ACTIVITY_FIXED);
   var temporal=0.0;
-  if(step>1u){
+  if(step>1u&&!coarseFirstEnabled()&&p.coarseFirstHistory.z==0.0){
     temporal=max(abs(meanDensity-activityF32(output+4u))/0.05,
       max(abs(moments.x-activityF32(output+5u))/0.02,
       max(abs(moments.y-activityF32(output+6u))/0.02,
@@ -6341,7 +6430,17 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   // characteristic lookahead; bulk refinement is driven by deformation,
   // temporal change and restriction error instead.
   let scoredVelocityActivity=select(0.0,normalizedVelocityActivity,surface||thinFluid);
-  let scoreValue=clamp(max(scoredVelocityActivity,featureActivity),0.0,1.0);
+  let normalDiameter=length(max(vec3f(0.0),activityNormalMaximum[0]-activityNormalMinimum[0]));
+  var curvatureFloor=1u;
+  loop{
+    if(curvatureFloor>=BRICK_FINE_RESOLUTION
+      ||normalDiameter/f32(curvatureFloor)<=p.coarseFirst.z){break;}
+    curvatureFloor*=2u;
+  }
+  let coarseScore=max(normalDiameter/(f32(resolution)*max(p.coarseFirst.z,0.02)),
+    normalizedVelocityActivity);
+  let scoreValue=clamp(select(max(scoredVelocityActivity,featureActivity),coarseScore,
+    coarseFirstEnabled()),0.0,1.0);
   let score=u32(round(255.0*scoreValue));
   // Static geometry evidence is maintained by the SolidWorld refresh and must
   // survive each dynamic activity census.
@@ -6351,6 +6450,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   // but cannot permanently veto an otherwise valid output-space proof.
   let immediateDeformation=reducedMetrics.x>=p.activityTiming.z;
   let immediatePredictedMotion=reducedMetrics.y>=p.activityTiming.z;
+  if(coarseFirstEnabled()){reasons|=curvatureFloor<<16u;}
   if(surface){reasons|=1u;}if(immediateDeformation){reasons|=2u;}
   if(temporal>0.0){reasons|=4u;}
   if(reducedMetrics.z>p.activityDensity.w){reasons|=8u;}
@@ -6386,9 +6486,11 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   atomicStore(&activity[output+2u],
     hotEpochs|(quietEpochs<<8u)|(proofEpochs<<16u));
   atomicStore(&activity[output+4u],bitcast<u32>(meanDensity));
-  atomicStore(&activity[output+5u],bitcast<u32>(moments.x));
-  atomicStore(&activity[output+6u],bitcast<u32>(moments.y));
-  atomicStore(&activity[output+7u],bitcast<u32>(moments.z));
+  let meanVelocity=activityMomentum[0].xyz/max(activityMomentum[0].w,1e-8);
+  let historyVector=select(moments,meanVelocity,coarseFirstEnabled());
+  atomicStore(&activity[output+5u],bitcast<u32>(historyVector.x));
+  atomicStore(&activity[output+6u],bitcast<u32>(historyVector.y));
+  atomicStore(&activity[output+7u],bitcast<u32>(historyVector.z));
   atomicStore(&activity[output+32u],select(0u,reducedSupportMask,occupied));
   atomicStore(&activity[output+3u],select(0u,reducedSweptSupportMask,occupied));
   atomicStore(&activity[output+33u],bitcast<u32>(velocityActivity));
@@ -6910,6 +7012,43 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
       planReasons=select(16u,2048u,directBulk);
     }
   }
+  // Forced-rung QA uses the existing explicit transition/proof protocol.
+  if(coarseFirstEnabled()&&!validForcedSurfaceRung){
+    let curvatureFloor=max(1u,(reasons>>16u)&31u);
+    let geometryFloor=max(curvatureFloor,boundaryFloor);
+    var incomingFloor=1u;
+    if(max(geometryFloor,measuredVelocityFloor)<BRICK_FINE_RESOLUTION
+      &&!thinFluid&&!injectionDemand&&(policySurface||transportDemanded)){
+      incomingFloor=coarseFirstIncomingFloor(brick);
+    }
+    let demandFloor=max(max(geometryFloor,measuredVelocityFloor),incomingFloor);
+    // Still-water air support is not motion. The legacy unconditional receiver
+    // floor made every dry support page B8 and forced the entire pool to B4.
+    // Predicted incoming motion supplies the receiver floor in this variant.
+    let movingFrontier=(frontierBoundary||pageDemand)&&measuredVelocityFloor>1u;
+    // Nine B2 air stencil cells need fewer physical pages than nine B1
+    // cells, while preserving the B1 liquid surface and 2:1 interface.
+    let airFloor=select(1u,2u,(reasons&64u)==0u);
+    let safetyFloor=select(airFloor,BRICK_FINE_RESOLUTION,thinFluid||injectionDemand||movingFrontier);
+    let coarseRequired=max(demandFloor,safetyFloor);
+    requested=current;planReasons=32u;
+    if(coarseRequired>current){
+      requested=coarseRequired;
+      planReasons=4u|select(0u,8192u,incomingFloor>current);
+      proofEpochs=0u;
+    }
+    else if(coarseRequired<current){
+      let geometricProof=(!policySurface||receiptFresh)&&p.coarseFirstHistory.z==0.0;
+      proofEpochs=(history>>16u)&255u;
+      if(!geometricProof){proofEpochs=0u;}
+      else if(atomicLoad(&activity[5])!=0u){
+        proofEpochs=min(255u,proofEpochs+1u);
+        if(proofEpochs>=u32(p.coarseFirstHistory.y)){
+          requested=max(coarseRequired,current/2u);planReasons=16u;
+        }
+      }
+    }else{proofEpochs=0u;}
+  }
   requested=applySparseCM12RefinementRegionBounds(brick,requested);
   // Keep every executable promotion available, including thin features and
   // CFL/emergency floors. Unbacked requests require the background generation
@@ -6922,6 +7061,16 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   atomicStore(&activity[output+9u],planReasons);
   atomicStore(&activity[output+2u],
     hotEpochs|(quietEpochs<<8u)|(proofEpochs<<16u));
+}
+
+// Enumerate every logical patch of a leaf face, including 2-brick bulk leaves.
+fn candidateFaceNeighborCoordinate(brick:u32,facePatch:u32)->vec3i{
+  let span=brickSpan(brick);let patches=span*span;
+  let side=facePatch/patches;let patchIndex=facePatch%patches;let axis=side/2u;
+  var q=cm12WorldLeafCoordinate(brick);
+  q[axis]+=select(-1,i32(span),(side&1u)!=0u);
+  q[(axis+1u)%3u]+=i32(patchIndex%span);q[(axis+2u)%3u]+=i32(patchIndex/span);
+  return q;
 }
 
 // Hard-cap-aware closure of GPU-authored candidate levels. First map authored
@@ -6945,8 +7094,8 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
   var gradingCap=BRICK_FINE_RESOLUTION;
   if(hardRegionCaps){
     gradingCap=cachedRefinementGradingCap(brick);
-    for(var side=0u;side<6u;side+=1u){
-      let neighbor=cm12WorldOwnerAt(coordinate+directions[side]);
+    for(var side=0u;side<6u*brickSpan(brick)*brickSpan(brick);side+=1u){
+      let neighbor=cm12WorldOwnerAt(candidateFaceNeighborCoordinate(brick,side));
       // Pre-catalogued dry leaves are the future topology of a hard region and
       // its grading halo. Their caps must constrain the first wet activation;
       // skipping them lets the frontier request B8 beside an inactive B2 leaf,
@@ -6958,7 +7107,7 @@ fn closePlannedResolution(@builtin(global_invocation_id)gid:vec3u){
     setRefinementGradingCap(brick,gradingCap);
   }
   var required=min(atomicLoad(&activity[activityRecord(brick)+8u]),gradingCap);
-  for(var side=0u;side<6u;side+=1u){let neighborCoordinate=coordinate+directions[side];
+  for(var side=0u;side<6u*brickSpan(brick)*brickSpan(brick);side+=1u){let neighborCoordinate=candidateFaceNeighborCoordinate(brick,side);
     let neighbor=cm12WorldOwnerAt(neighborCoordinate);if(neighbor==INVALID){continue;}
     let neighborOutput=activityRecord(neighbor);
     let neighborResolution=atomicLoad(&activity[neighborOutput+8u]);
@@ -7007,7 +7156,7 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
   let coordinate=cm12WorldLeafCoordinate(brick);
   let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),
     vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  for(var side=0u;side<6u;side+=1u){let neighborCoordinate=coordinate+directions[side];
+  for(var side=0u;side<6u*brickSpan(brick)*brickSpan(brick);side+=1u){let neighborCoordinate=candidateFaceNeighborCoordinate(brick,side);
     let neighbor=cm12WorldOwnerAt(neighborCoordinate);if(neighbor==INVALID){continue;}
     if(!candidateBrickActive(neighbor)){continue;}
     let neighborOutput=activityRecord(neighbor);
@@ -8029,7 +8178,7 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
   if(reconstructingFineRung){
     for(var parentLocal=lane;parentLocal<sourceCount;parentLocal+=64u){
       let parentBase=2u*transferLocalCoordinate(parentLocal,sourceDimensions);
-      var reconstructedMass=0.0;var openVolume=0.0;
+      var reconstructedMass=0.0;var openVolume=0.0;var minimumReconstruction=1e30;
       for(var child=0u;child<8u;child+=1u){
         let childCoordinate=parentBase
           +vec3u(child&1u,(child>>1u)&1u,child>>2u);
@@ -8040,15 +8189,21 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
           +vec3i(childCoordinate);
         let childOpen=cellOpenFraction(childCell);
         let childVolume=candidateCellVolume(brick,candidate,childLocal);
-        reconstructedMass+=directSmoothedPresentationDensityAt(
-          childQ,2u,destinationDensity())*childOpen*childVolume;
+        let reconstructed=directSmoothedPresentationDensityAt(childQ,2u,destinationDensity());
+        reconstructedMass+=reconstructed*childOpen*childVolume;
+        if(childOpen>0.0){minimumReconstruction=min(minimumReconstruction,reconstructed);}
         openVolume+=childOpen*childVolume;
       }
       let parentCell=first+parentLocal;
       let targetMass=state[destinationDensity()+parentCell]
         *cellVolume(parentCell);
-      candidateRefinementDensityCorrection[parentLocal]=select(0.0,
-        (targetMass-reconstructedMass)/openVolume,openVolume>1e-12);
+      let mean=targetMass/max(openVolume,1e-12);
+      let correction=select(0.0,(targetMass-reconstructedMass)/max(openVolume,1e-12),openVolume>1e-12);
+      let minimum=minimumReconstruction+correction;
+      // Contract the zero-mean reconstruction about its open-volume mean.
+      // Unlike clamping children, this preserves parent mass at cut solids.
+      let positiveScale=select(1.0,clamp(mean/max(mean-minimum,1e-12),0.0,1.0),minimum<0.0);
+      candidateRefinementDensityCorrection[parentLocal]=vec4f(correction,positiveScale,mean,0.0);
     }
   }
   workgroupBarrier();
@@ -8108,7 +8263,11 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
       // parent-local effective-density offset so it is also conservative in
       // open volume. Fully open parents receive a zero offset.
       let correction=candidateRefinementDensityCorrection[sourceLocal];
-      rho=(reconstructed+correction)*cellOpenFraction(candidateCell);
+      let corrected=reconstructed+correction.x;
+      // The scaled result is mathematically nonnegative; max removes only
+      // cancellation roundoff at the zero endpoint.
+      rho=max(0.0,select(corrected,correction.z+correction.y*(corrected-correction.z),
+        correction.y<1.0))*cellOpenFraction(candidateCell);
       gamma=state[destinationGamma()+cell];pressure=state[p.stateOffsets2.x+cell];
       let velocityAt=destinationCellVelocity()+4u*cell;
       velocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u]);

@@ -77,6 +77,32 @@ export interface AdaptiveMassSolverOptions {
 }
 
 const params: MethodParamSpec[] = [
+  { kind: "number", key: "energyThreshold", label: "Finest kinetic energy",
+    default: 8, tier: "fine", update: "runtime", unit: "m²/s²",
+    min: 0.01, max: 100, step: 0.1, digits: 2,
+    hint: "Specific kinetic energy ½|u|² requesting the finest rung. Lower rungs use dyadic speed thresholds.",
+  },
+  { kind: "number", key: "curvatureTolerance", label: "Curvature tolerance",
+    default: 0.25, tier: "fine", update: "runtime", unit: "κh",
+    min: 0.02, max: 2, step: 0.01, digits: 2,
+    hint: "Maximum surface normal variation per cell. Smaller values preserve finer curved liquid geometry. Static solid restriction floors remain active.",
+  },
+  { kind: "number", key: "anticipationSeconds", label: "Impact lookahead",
+    default: 0.5, tier: "fine", update: "runtime", unit: "s",
+    min: 0, max: 2, step: 0.05, digits: 2,
+    hint: "Predict approaching liquid from its accepted velocity over this horizon, refining receivers before contact.",
+  },
+  { kind: "number", key: "anticipationRadiusBricks", label: "Impact search radius",
+    default: 3, tier: "fine", update: "runtime", unit: "bricks",
+    min: 1, max: 6, step: 1, digits: 0,
+    hint: "Bounded spatial search around a surface receiver. Increase for fast objects or longer prediction horizons; cost grows with radius cubed.",
+  },
+  { kind: "number", key: "surfaceQuietEpochs", label: "Surface proof persistence",
+    default: 2, tier: "fine", update: "runtime", unit: "epochs",
+    min: 1, max: 32, step: 1, digits: 0,
+    hint: "Consecutive valid surface proofs before a coarse-first merge. Refinement is immediate.",
+  },
+
   {
     kind: "select",
     key: "brickFineResolution",
@@ -112,14 +138,15 @@ const params: MethodParamSpec[] = [
     kind: "select",
     key: "selectorMode",
     label: "Adaptive criterion",
-    default: "activity",
+    default: "coarse-first",
     tier: "coarse",
     update: "runtime",
     options: [
       { value: "surface", label: "Surface distance" },
       { value: "activity", label: "Causal activity + surface proof" },
+      { value: "coarse-first", label: "Coarse-first · energy + curvature" },
     ],
-    hint: "Surface distance keeps interface/thin bricks at the ladder maximum. Causal activity promotes moving or unresolved liquid and lets accepted presentation output prove a one-rung surface merge.",
+    hint: "Surface distance keeps interface/thin bricks at the ladder maximum. Causal activity promotes moving or unresolved liquid and lets accepted presentation output prove a one-rung surface merge. Coarse-first starts planar surfaces at B1 and refines for energy, curvature and approaching liquid.",
   },
   {
     kind: "number", key: "surfaceFineRings", label: "Initial fine surface band",
@@ -325,7 +352,7 @@ const params: MethodParamSpec[] = [
     default: SPARSE_CM12_ACTIVITY_POLICY.surfaceDisplacementToleranceCells,
     tier: "fine", update: "runtime", unit: "fine cells",
     min: 0, max: 8, step: 0.05, digits: 2,
-    hint: "Maximum rho=.5 edge-crossing movement accepted by the B8-to-B4 presentation proof.",
+    hint: "Maximum rho=.5 edge-crossing movement accepted by each dyadic presentation proof.",
   },
   {
     kind: "number", key: "surfaceNormalToleranceDegrees",
@@ -333,7 +360,7 @@ const params: MethodParamSpec[] = [
     default: SPARSE_CM12_ACTIVITY_POLICY.surfaceNormalToleranceDegrees,
     tier: "fine", update: "runtime", unit: "°",
     min: 0, max: 90, step: 1, digits: 0,
-    hint: "Maximum narrow-band normal-angle error accepted by the B8-to-B4 presentation proof.",
+    hint: "Maximum narrow-band normal-angle error accepted by each dyadic presentation proof.",
   },
   {
     kind: "number", key: "topologyCadenceSteps", label: "Topology cadence",
@@ -390,6 +417,8 @@ const params: MethodParamSpec[] = [
  */
 export const ADAPTIVE_MASS_RUNTIME_PARAM_KEYS = Object.freeze([
   "selectorMode",
+  "energyThreshold", "curvatureTolerance", "anticipationSeconds",
+  "anticipationRadiusBricks", "surfaceQuietEpochs",
   "timeStep",
   "gammaDiffusion",
   "surfaceSharpening",
@@ -426,13 +455,14 @@ const maximumMacroSpanBricks = (value: unknown): number | undefined => {
     && Number.isInteger(Math.log2(parsed)) ? parsed : undefined;
 };
 
-const selectorMode = (value: unknown): "surface" | "activity" =>
-  value === "surface" ? "surface" : "activity";
+const selectorMode = (value: unknown): "surface" | "activity" | "coarse-first" =>
+  value === "surface" ? "surface" : value === "activity" ? "activity" : "coarse-first";
 
 const activityPolicy = (values: MethodParamValues): SparseCM12ActivityPolicy =>
   sparseCM12ActivityPolicy({
     ...values,
-    activitySignals: selectorMode(values.selectorMode) === "activity",
+    activitySignals: selectorMode(values.selectorMode) !== "surface",
+    coarseFirst: selectorMode(values.selectorMode) === "coarse-first",
   });
 
 export function adaptiveMassSolverOptions(
@@ -554,7 +584,7 @@ export const adaptiveMassMethod: SimulationMethod = {
       brickFineResolution: "8",
       presentationPageResolution: "8",
       maximumMacroSpanBricks: "auto",
-      selectorMode: "activity",
+      selectorMode: "coarse-first",
       surfaceFineRings: 1,
       timeStep: "paper",
       gammaDiffusion: "on",

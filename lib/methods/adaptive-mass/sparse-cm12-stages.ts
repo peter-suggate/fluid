@@ -286,8 +286,11 @@ export function adaptiveMassPressureTopologyChip(
   return `${input}\n${work}\n${pcm}\n${authorities}\n${structure}\n${next}`;
 }
 
-const activityOnly = (context: FluidPipelineContext) =>
+const legacyActivityOnly = (context: FluidPipelineContext) =>
   context.values.selectorMode === "activity";
+
+const activityOnly = (context: FluidPipelineContext) =>
+  context.values.selectorMode === "activity" || context.values.selectorMode === "coarse-first";
 
 /**
  * The registry. Keys are the resident's stage ids, in encode order, and the
@@ -684,31 +687,58 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       {
         kind: "param-choice", param: "selectorMode", label: "Criterion",
         options: [
+          { value: "coarse-first", label: "COARSE FIRST", hint: "Coarsest representable surface, with energy, curvature and approaching-liquid refinement." },
           { value: "surface", label: "SURFACE", hint: "Surface/thin liquid is fine; submerged liquid requests 1³ and only 2:1 closure grades it." },
           { value: "activity", label: "ACTIVITY + PROOF", hint: "Calm surfaces may reach 4³ only after the accepted presentation output proves the merge; flooded deep bulk keeps the full 8/4/2/1 ladder." },
         ],
       },
+      { kind: "param-range", param: "energyThreshold", label: "Finest kinetic energy",
+        unit: " m²/s²", min: 0.01, max: 100, step: 0.1, digits: 2,
+        enabled: (context) => context.values.selectorMode === "coarse-first",
+        hint: "Specific kinetic energy ½|u|² requesting the finest rung. Lower rungs use dyadic speed thresholds.",
+      },
+      { kind: "param-range", param: "curvatureTolerance", label: "Curvature tolerance",
+        unit: " κh", min: 0.02, max: 2, step: 0.01, digits: 2,
+        enabled: (context) => context.values.selectorMode === "coarse-first",
+        hint: "Maximum surface normal variation per cell. Smaller values preserve finer curved liquid geometry. Static solid restriction floors remain active.",
+      },
+      { kind: "param-range", param: "anticipationSeconds", label: "Impact lookahead",
+        unit: " s", min: 0, max: 2, step: 0.05, digits: 2,
+        enabled: (context) => context.values.selectorMode === "coarse-first",
+        hint: "Predict approaching liquid from its accepted velocity over this horizon, refining receivers before contact.",
+      },
+      { kind: "param-range", param: "anticipationRadiusBricks", label: "Impact search radius",
+        unit: " bricks", min: 1, max: 6, step: 1, digits: 0,
+        enabled: (context) => context.values.selectorMode === "coarse-first",
+        hint: "Bounded spatial search around a surface receiver. Increase for fast objects or longer prediction horizons; cost grows with radius cubed.",
+      },
+      { kind: "param-range", param: "surfaceQuietEpochs", label: "Surface proof persistence",
+        unit: " epochs", min: 1, max: 32, step: 1, digits: 0,
+        enabled: (context) => context.values.selectorMode === "coarse-first",
+        hint: "Consecutive valid surface proofs before a coarse-first merge. Refinement is immediate.",
+      },
       {
         kind: "param-range", param: "surfaceFineRings", label: "Initial fine band",
+        enabled: (context) => context.values.selectorMode !== "coarse-first",
         unit: " bricks", min: 1, max: 8, step: 1, digits: 0,
         hint: "Structural/rebuild control: occupied face-distance rings initialized at the ladder maximum around the authored surface.",
       },
       {
         kind: "param-range", param: "finestTravelCells", label: "Finest travel",
         unit: " cells/step", min: 0.05, max: 4, step: 0.05, digits: 2,
-        enabled: activityOnly,
+        enabled: legacyActivityOnly,
         hint: "Maximum occupied-cell displacement needed to target the ladder maximum.",
       },
       {
         kind: "param-range", param: "fourTravelCells", label: "4³ travel",
         unit: " cells/step", min: 0, max: 2, step: 0.05, digits: 2,
-        enabled: activityOnly,
+        enabled: legacyActivityOnly,
         hint: "Displacement needed to retain at least 4³.",
       },
       {
         kind: "param-range", param: "twoTravelCells", label: "2³ travel",
         unit: " cells/step", min: 0, max: 1, step: 0.025, digits: 3,
-        enabled: activityOnly,
+        enabled: legacyActivityOnly,
         hint: "Displacement needed to retain at least 2³; slower calm bulk may target 1³.",
       },
       {
@@ -749,7 +779,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       {
         kind: "param-range", param: "detailTolerance", label: "Detail tolerance",
         unit: " ρ", min: 0.005, max: 0.5, step: 0.005, digits: 3,
-        enabled: activityOnly,
+        enabled: legacyActivityOnly,
         hint: "2x2x2 restriction error allowed before enclosed-bulk detail vetoes demotion. Surface demotion is governed separately by the accepted-output proof.",
       },
       {
@@ -757,14 +787,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         label: "Surface displacement", unit: " cells",
         min: 0, max: 8, step: 0.05, digits: 2,
         enabled: activityOnly,
-        hint: "Maximum rho=.5 edge-crossing movement accepted when proving that a B8 surface can be represented at B4.",
+        hint: "Maximum rho=.5 edge-crossing movement accepted when proving that a surface can be represented one rung coarser.",
       },
       {
         kind: "param-range", param: "surfaceNormalToleranceDegrees",
         label: "Surface normal", unit: "°",
         min: 0, max: 90, step: 1, digits: 0,
         enabled: activityOnly,
-        hint: "Maximum narrow-band normal-angle change accepted by the B8-to-B4 presentation proof.",
+        hint: "Maximum narrow-band normal-angle change accepted by each dyadic presentation proof.",
       },
       {
         kind: "param-range", param: "topologyCadenceSteps", label: "Epoch cadence",
@@ -780,35 +810,37 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       {
         kind: "param-range", param: "promoteEpochs", label: "Promote hold",
         unit: " epochs", min: 1, max: 16, step: 1, digits: 0,
-        enabled: activityOnly,
+        enabled: legacyActivityOnly,
         hint: "Hot epochs required for non-emergency activity promotion.",
       },
       {
         kind: "param-range", param: "demoteEpochs", label: "Demote hold",
         unit: " epochs", min: 1, max: 32, step: 1, digits: 0,
-        enabled: activityOnly,
+        enabled: legacyActivityOnly,
         hint: "Quiet epochs required for each one-rung bulk merge; at the surface this is an independent run of fresh accepted-output proofs.",
       },
       {
         kind: "param-range", param: "promoteScore", label: "Promote score",
         min: 0, max: 1, step: 0.025, digits: 3,
-        enabled: activityOnly,
+        enabled: legacyActivityOnly,
         hint: "Normalized activity needed for a hot epoch.",
       },
       {
         kind: "param-range", param: "demoteScore", label: "Demote score",
         min: 0, max: 1, step: 0.025, digits: 3,
-        enabled: activityOnly,
+        enabled: legacyActivityOnly,
         hint: "Maximum normalized activity allowed for a quiet epoch.",
       },
       {
         kind: "param-range", param: "emergencyScore", label: "Emergency score",
         min: 0, max: 1, step: 0.025, digits: 3,
-        enabled: activityOnly,
+        enabled: legacyActivityOnly,
         hint: "Normalized activity that bypasses promotion persistence.",
       },
     ],
-    chip: (context) => `${activityOnly(context)
+    chip: (context) => `${context.values.selectorMode === "coarse-first"
+      ? "coarse first · energy + curvature + prediction"
+      : activityOnly(context)
       ? `surface proof + activity · plan every ${fixed(context.values.topologyCadenceSteps, 0)} steps`
       : "surface distance · direct 1³ bulk"} · grade/allocate/shadow · ${
       fixed(context.values.prepareBricksPerFrame, 0)}/frame`,

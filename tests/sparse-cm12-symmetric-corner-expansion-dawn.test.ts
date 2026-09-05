@@ -1,3 +1,4 @@
+import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -106,6 +107,8 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
 
       solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
         device, scene, "balanced", undefined, {
+          // Preserve the original support-band topology oracle.
+          ...adaptiveMassSolverOptions({ selectorMode: "activity" }),
           resolutionMode: "adaptive",
           brickFineResolution: 8,
           presentationPageResolution: 8,

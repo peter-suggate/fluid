@@ -149,7 +149,7 @@ fn incrementalActivityMarkTopologyBrick(brick:u32){
   let isActive=brickActive(brick);let span=brickSpan(brick);
   let next=incrementalActivityTopologyState(brick);
   let previous=atomicLoad(&activity[ACTIVITY_BRICK_TOPOLOGY+brick]);
-  if(previous==next){return;}
+  if(previous==next&&p.coarseFirstHistory.z==0.0){return;}
   incrementalActivityPublishFaceBrickClosure(brick);
   _=isActive;_=span;
 }

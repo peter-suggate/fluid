@@ -46,7 +46,7 @@ test("surface coarsening policy is enabled, bounded, and keeps QA forcing privat
   }).forcedSurfaceResolutionForQA, undefined);
 });
 
-test("activity plus accepted-output proof is the production default", () => {
+test("coarse-first is the production default", () => {
   assert.equal(adaptiveMassMethod.params.some((param) =>
     param.key === "resolutionMode"), false,
   "fixed all-fine/all-coarse modes must not remain in the production UI");
@@ -55,11 +55,11 @@ test("activity plus accepted-output proof is the production default", () => {
   const selector = adaptiveMassMethod.params.find((param) =>
     param.key === "selectorMode");
   assert.equal(selector?.kind, "select");
-  if (selector?.kind === "select") assert.equal(selector.default, "activity");
-  assert.equal(adaptiveMassMethod.presetFor("balanced").selectorMode, "activity");
+  if (selector?.kind === "select") assert.equal(selector.default, "coarse-first");
+  assert.equal(adaptiveMassMethod.presetFor("balanced").selectorMode, "coarse-first");
 
   const values = resolveMethodValues(adaptiveMassMethod, "balanced", {});
-  assert.equal(values.selectorMode, "activity");
+  assert.equal(values.selectorMode, "coarse-first");
   assert.equal(adaptiveMassSolverOptions(values).activityPolicy?.activitySignals, true);
 });
 

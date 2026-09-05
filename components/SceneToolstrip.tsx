@@ -13,6 +13,7 @@ import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
 import { EntityDeleteRow, EntityMoreRow, EntityOptionRows } from "./EntityOptions";
 import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
 import { FieldControlRows, methodSetupTabs } from "./FluidFieldFlyout";
+import { AdaptiveMassToolstripRow } from "./AdaptiveMassToolstripRow";
 import { MakeRows } from "./MakeRows";
 import { PrimaryTraversalRow } from "./PrimaryTraversalRows";
 import { StoneDialRows } from "./StoneLookFlyout";
@@ -234,6 +235,7 @@ export function ContainerToolstrip({
     <PrimaryTraversalRow />
     <TankRow />
     {hasSolver && <SolverRow />}
+    {hasSolver && <AdaptiveMassToolstripRow />}
     {/* The seam between the two halves of the column: readings that say what
         the scene *is*, and verbs that say what a stroke would *add* to it.
         Drawn rather than inferred because both halves are glyph rows. */}

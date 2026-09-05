@@ -35,7 +35,7 @@ const f32 = (bits: number) => {
 
 /** Exact template-local source incidence and positive-owner lookup. */
 export function createSparseCM12IboTRASupplement(options: Readonly<{
-  ibo: SparseCM12InternedBoundaryCompilation;
+  ibo: Pick<SparseCM12InternedBoundaryCompilation, "templates">;
   baseWords?: number;
 }>): Readonly<{ layout: SparseCM12IboTRASupplementLayout; words: Uint32Array }> {
   const baseWords = align64(options.baseWords ?? 0), templates = options.ibo.templates;
@@ -112,14 +112,18 @@ export function createSparseCM12IboTRASupplement(options: Readonly<{
       for (const row of rows) {
         const rowAt = 8 + 7 * row, packed = template.words[rowAt + 1]!;
         const first = packed & 0x007f_ffff, count = packed >>> 23;
-        let ownerTerm = 0xf;
+        let ownerTerm = 0x1ff;
         for (let term = 0; term < count; term += 1) {
           if (f32(template.words[termBase + 2 * (first + term) + 1]!) > 0) {
             ownerTerm = term;break;
           }
         }
-        if (row >= 0x1000 || ownerTerm >= 0x10) throw new Error("ITR1 packed entry overflow");
-        entries.push(row | (ownerTerm << 12));
+        // Use the full word: macro interfaces can exceed sixteen terms.
+        // Nine term bits match the IBO row ABI; 511 denotes no positive owner.
+        if (row >= 0x800000 || ownerTerm >= 0x200) {
+          throw new Error(`ITR1 template ${template.id} packed entry overflow: row ${row}, owner ${ownerTerm}`);
+        }
+        entries.push((row | (ownerTerm << 23)) >>> 0);
       }
       offsets.push(entries.length);
     }
@@ -133,7 +137,7 @@ export function createSparseCM12IboTRASupplement(options: Readonly<{
   const totalWords = align64(at), words = new Uint32Array(totalWords - baseWords);
   const put = (absolute: number, values: readonly number[]) =>
     words.set(values, absolute - baseWords);
-  put(baseWords, [SPARSE_CM12_IBO_TRA_MAGIC, 2, templates.length,
+  put(baseWords, [SPARSE_CM12_IBO_TRA_MAGIC, 3, templates.length,
     directoryBaseWords, totalWords, 0, 0, 0]);
   records.forEach((record, template) => {
     put(directoryBaseWords + SPARSE_CM12_IBO_TRA_DIRECTORY_WORDS * template,

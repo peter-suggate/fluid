@@ -539,6 +539,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       | typeof ALTERNATING_CAPACITY_REPAIR_RECEIPTS_QA_TOKEN
       | typeof GATHER_CAPACITY_REPAIR_QA_TOKEN,
   ): Promise<WebGPUAdaptiveMassSolver> {
+    options = { ...options, activityPolicy: sparseCM12ActivityPolicy(options.activityPolicy ?? {}) };
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
     const fluidDomainPlan = adaptiveMassFluidDomainForScene(scene);
     const initialSolidWorld = fluidSolidWorldForScene(scene);
@@ -599,6 +600,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             solidWorld: initialSolidWorld,
             maximumMacroSpanBricks: options.maximumMacroSpanBricks,
             surfaceFineRings: options.surfaceFineRings,
+            coarseFirstCurvatureTolerance: options.activityPolicy?.coarseFirst
+              ? options.activityPolicy.curvatureTolerance : undefined,
             // A broad planar reset surface can start from its ordinary B4
             // proof and let activity promote it. A compact curved volume must
             // retain a B8 frontier root: once its B4 support reaches the edge
@@ -612,7 +615,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           // Generation zero contains only authored fluid. Dry face neighbours
           // are admitted by the GPU frontier if and when a swept fluid course
           // demands them; logical extent never becomes a topology allocation.
-          initiallyActiveBrickKeys = sparseCM12InitialActiveBrickKeys(scene, atlas);
+          initiallyActiveBrickKeys = sparseCM12InitialActiveBrickKeys(scene, atlas,
+            options.activityPolicy?.coarseFirst && sceneRefinementRegions(scene).length === 0 ? 2 : 1);
           // The runtime is GPU-resident from generation zero. Construct only
           // the topology oracle needed by the packer; the CPU dynamics state
           // used to allocate duplicate velocity, pressure, policy and
@@ -812,7 +816,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     }
     const activityPolicy = sparseCM12ActivityPolicy({
       ...values,
-      activitySignals: values.selectorMode === "activity",
+      activitySignals: values.selectorMode !== "surface",
+      coarseFirst: values.selectorMode !== "surface" && values.selectorMode !== "activity",
     });
     this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps,
       sharpeningStrength,
@@ -855,7 +860,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   private scheduleTopologyGeneration(): void {
     if (this.topologyGenerationWork || this.disposed) return;
     const preparationStarted = performance.now();
-    const cadence = Math.max(64, this.options.activityPolicy?.topologyCadenceSteps ?? 64);
+    const cadence = this.options.activityPolicy?.coarseFirst && this.sparseRuntime.generationPlanningRequired
+      ? Math.max(1, this.options.activityPolicy.topologyCadenceSteps)
+      : Math.max(64, this.options.activityPolicy?.topologyCadenceSteps ?? 64);
     if (!this.topologyGenerationPolicyDirty && (this.info.encodedSteps ?? 0) % cadence !== 0) return;
     this.topologyGenerationPolicyDirty = false;
     const mergeable = (record: SparseCM12GPUActivityRecord) => record.active && record.acceptedResolution === 1
@@ -921,6 +928,21 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         return targetWidth !== edge / brick.resolution
           || edge / brick.resolution > Math.max(floor, physicalDemands.get(key) ?? Infinity);
       }));
+      if (requested.size === 0) {
+        const groups = new Map<string, number>();
+        for (const brick of source.atlas.bricks) {
+          const span = brick.spanBricks ?? 1;
+          if (!mergeable(source.recordsByKey.get(brick.key)!) || brick.unclipped
+            || span * 2 > this.topologyGenerationLimits.maximumSpanBricks) continue;
+          const origin = brick.coordinate.map(q => Math.floor(q / (2 * span)) * 2 * span);
+          if (origin.some((q, axis) => (q + 2 * span) * source.atlas.brickFineResolution > source.atlas.dimensions[axis]!)) continue;
+          const key = `${span}/${origin.join("/")}`;
+          groups.set(key, (groups.get(key) ?? 0) + 1);
+        }
+        // Retired backing alone is not a reason to discard the in-place
+        // catalogue. Reclaim it when an actual refinement or merge is needed.
+        if (![...groups.values()].some(count => count === 8)) return undefined;
+      }
       const admitted = new Set([...requested].sort((left, right) => {
         const a = source.recordsByKey.get(left)!, b = source.recordsByKey.get(right)!;
         const priority = (record: typeof a) => Number((record.planReasons & 2) !== 0) * 2048 + Number(record.thinFluid) * 1024

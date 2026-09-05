@@ -271,7 +271,8 @@ dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
     assert.equal(offsetUI.ui.gridOverlayAxis, "volume");
     assert.equal(offsetUI.ui.gridOverlayMode, "structure");
     const offsetValues = resolveMethodValues(adaptiveMassMethod,
-      offsetUI.quality, offsetUI.overrides[offsetUI.methodId] ?? {});
+      offsetUI.quality, { ...offsetUI.overrides[offsetUI.methodId], selectorMode: "activity" });
+    // Preserve the legacy B4 reset-waterline oracle; coarse-first has a separate B1 gate.
     assert.equal(offsetValues.selectorMode, "activity");
     assert.equal("resolutionMode" in offsetValues, false);
     const offsetSolver = await adaptiveMassMethod.createSolverAsync!(

@@ -634,7 +634,8 @@ try {
       ?? (longDam ? { ...SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides,
         ...(process.env.FLUID_SURFACE_SHARPENING
           ? { surfaceSharpening: process.env.FLUID_SURFACE_SHARPENING } : {}) } : {
-      resolutionMode: "adaptive", brickFineResolution: "8",
+      // This min-size-region oracle requires the legacy B4/B2/B1 ladder.
+      selectorMode: "activity", resolutionMode: "adaptive", brickFineResolution: "8",
       presentationPageResolution: "8", timeStep: "paper",
     }));
   if (largeOffsetUI || longDam || cornerDrop) {

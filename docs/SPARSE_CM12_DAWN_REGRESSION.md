@@ -24,7 +24,7 @@ npm run test:dawn:sparse-cm12 -- --list
 | `topology-page-budget` | Authored re-rung and WDR page ownership remain independent | Zero, one and 32 growth pages; conservative rung transfers, no borrowed dynamic identities, matching UI/QA allocator receipts |
 | `clipped-topology-transfer` | Compact clipped cells survive live coarsening and refinement | 13×10×9 domain, ordinary demotion then live B1/B8 edits; mass, gamma, momentum and transaction receipts |
 | `topology-generation-storage` | GPU topology generation storage remains bounded and lease-safe | Stage/cancel/commit, retained old consumers, allocation rollback, stale requests, deferred retry after reclamation; storage component only, not resident adoption |
-| `hydrostatic-adaptivity` | Exact UI reset has a calm B4 surface pinned at its density-derived 15.25-cell waterline through step one; non-liquid halos stay out of structure view; stable deep-water 4/2/1 support | Reset plus two simulated seconds |
+| `hydrostatic-adaptivity` | Legacy activity criterion through the UI path has a calm B4 surface pinned at its density-derived 15.25-cell waterline through step one; non-liquid halos stay out of structure view; stable deep-water 4/2/1 support | Reset plus two simulated seconds |
 | `mini32-correctness` | Finite fields and liquid-volume retention | Four simulated seconds, at least 99.5% retained |
 | `min8-region-surface` | Partial min8 reconstruction across a B2/B1 boundary | Reset planar top has at least 16 boundary samples, at most 0.05-cell detrended boundary bump, 0.125-cell neighbour step, and 0.02-cell mean curvature |
 | `mini32-performance` | Production B8/P8 frame cost | 24.576 ms reference; 40 ms median ceiling |
@@ -55,3 +55,9 @@ npm run test:dawn:sparse-cm12 -- --kind=correctness
 
 These selections are diagnostic conveniences. A large Sparse CM12 change is
 accepted only by the unfiltered full command.
+
+Coarse-first is now the production default. Lanes with exact legacy B4/B2/B1
+or generation-zero support-count oracles select the legacy criterion explicitly;
+their physical assertions and timing ceilings are unchanged. Run
+`npm run test:dawn:sparse-cm12:coarse-first` for the default-policy still pool,
+elevated-ball impact and moving-surface coarsening checks.

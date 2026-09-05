@@ -39,3 +39,12 @@ test("topology budgets reject non-finite or fractional allocation sizes", () => 
   }
   assert.equal(sparseCM12TopologyPagePoolPlan(700, true, 8, 0).pageCapacity, 0);
 });
+
+test("exact accepted mutable census avoids counting fine cells twice without raising budgets", () => {
+  assert.equal(sparseCM12HostTemplateVariantsEnabled(40_032, 150_000, 2_000, 8,
+    { cells: 39_968, rows: 149_000 }), true);
+  assert.equal(sparseCM12HostTemplateVariantsEnabled(140_032, 150_000, 2_000, 8,
+    { cells: 39_968, rows: 149_000 }), false, "immutable work still counts against the same ceiling");
+  assert.equal(sparseCM12HostTemplateVariantsEnabled(40_032, 150_000, 2_000, 8,
+    { cells: 50_000, rows: 149_000 }), false, "invalid census cannot bypass admission");
+});

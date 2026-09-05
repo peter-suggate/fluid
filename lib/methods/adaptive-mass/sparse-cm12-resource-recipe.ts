@@ -134,12 +134,12 @@ export function createCM12ResourceRecorder(limits: GPUSupportedLimits,
 /** Realize a recipe with bounded upload chunks and cooperative CPU slices.
  * Driver pipeline compilation remains asynchronous and manager-owned. */
 export async function realizeCM12ResourceRecipe(device: GPUDevice, recipe: CM12ResourceRecipe,
-  external: readonly object[] = [], options: { maximumSliceMs?: number; uploadChunkBytes?: number;
+  external: readonly object[] = [], options: { compilationDevice?: GPUDevice; maximumSliceMs?: number; uploadChunkBytes?: number;
     signal?: AbortSignal; onSlice?: (milliseconds: number, operation?: string) => void } = {}): Promise<{
       state: unknown; destroy(): void;
     }> {
   const { gpuCompilationManagerFor } = await import("../../core/gpu-compilation-manager");
-  const compiler = gpuCompilationManagerFor(device);
+  const compiler = gpuCompilationManagerFor(options.compilationDevice ?? device);
   const resources = new Map<number, unknown>(external.map((resource, id) => [id, resource]));
   const buffers: GPUBuffer[] = [];
   const decode = (value: unknown, seen = new Map<object, unknown>()): unknown => {
