@@ -290,6 +290,8 @@ const coneFanout = process.env.FLUID_SVO_DRY_FRAME_CONE_FANOUT === "1";
 const maximumShadedLights = Number(process.env.FLUID_SVO_DRY_FRAME_MAX_LIGHTS ?? DEFAULT_SVO_RENDER_TUNING.maximumShadedLights);
 const readVoxelLightCounters = process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_COUNTERS === "1";
 const optimizationExperiments: SvoDryOptimizationExperiments = {
+  surfaceMesh: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH === "1",
+  surfaceMeshMaxBytes: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES ? Number(process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES) : undefined,
   voxelLightCache: process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_CACHE !== "0",
   edgeReceiverRecovery: process.env.FLUID_SVO_DRY_FRAME_EDGE_RECEIVER_RECOVERY !== "0",
   inlineConeBoundaries: process.env.FLUID_SVO_DRY_FRAME_INLINE_CONE_BOUNDARIES === "1",
@@ -912,6 +914,8 @@ const catalogScene = (): SceneDescription => {
   }).scene;
 };
 const scene = sceneModule?.createScene ? sceneModule.createScene() : catalogScene();
+if (process.env.FLUID_SVO_DRY_FRAME_SURFACE_STYLE === "voxel-flat") scene.surfaceStyle = "voxel-flat";
+if (process.env.FLUID_SVO_DRY_FRAME_SURFACE_STYLE === "smooth") scene.surfaceStyle = "smooth";
 /**
  * Read off the document, never off the request — `webgpu-renderer.ts:2440`.
  * A factory that answered a depth request with a coarser set has said so in
@@ -1624,6 +1628,20 @@ writeViewUniforms(false);
 renderer.setVoxelLightCacheEnabled(false);
 applyLighting(1);
 const referenceRows = await captureFrame("Bench fingerprint frame");
+let surfaceMeshDiagnostics: Record<string, number> | undefined;
+if (optimizationExperiments.surfaceMesh) {
+  const readback = device.createBuffer({ label: "Mesh publication receipt", size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder();
+  if (renderer.copySurfaceMeshDiagnostics(encoder, readback)) {
+    device.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ);
+    const words = new Uint32Array(readback.getMappedRange());
+    surfaceMeshDiagnostics = { drawnQuads: words[1]!, requiredQuads: words[4]!, overflow: words[5]!, topologyRevision: words[6]!,
+      sceneRevision: words[7]!, builds: words[12]!, ready: words[13]!, fallbackReason: words[15]! };
+    readback.unmap();
+    log(`  [surface mesh] ${JSON.stringify(surfaceMeshDiagnostics)}`);
+  }
+  readback.destroy();
+}
 const referenceGBuffer = renderer.gBufferTextures;
 assert.ok(referenceGBuffer, "dry renderer did not retain its G-buffer after the reference frame");
 const [packedSurfaceBytes, identityMediaBytes, hardwareDepthBytes] = await Promise.all([
@@ -2173,6 +2191,7 @@ const result = {
     sceneId: scene.sceneId,
     environment: environmentId,
     quality: "balanced",
+    surfaceMeshDiagnostics,
     rasterGlassDiscovery,
     rasterRigidDiscovery,
     rasterRigidForced,

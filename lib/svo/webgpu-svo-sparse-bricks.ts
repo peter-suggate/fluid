@@ -1237,7 +1237,8 @@ export class OctreeSparseBrickWorld {
   private surfaceModel!: SvoTerrainSurfaceModel;
   private solidWorld!: SolidWorld;
   private solidWorldStamp = "";
-  private renderDetailCellSize_m = 0;
+  /** Catalog expansion input, retained exactly for subsequent live publications. */
+  private environmentDetailCellSize_m = 0;
   /** Non-empty only when immutable planar terminals make geometry structural. */
   private planarTopologyStamp = "";
   private liveScenePrimitiveStates = new Map<string, LiveScenePrimitiveState>();
@@ -1384,9 +1385,9 @@ export class OctreeSparseBrickWorld {
       ? Math.max(0, Math.trunc(options.environmentRefinementDepth ?? 0))
       : 0;
     const refineScale = 2 ** refinementDepth;
-    this.renderDetailCellSize_m = scene.voxelDomain.finestCellSize_m / refineScale;
+    this.environmentDetailCellSize_m = scene.voxelDomain.finestCellSize_m / refineScale;
     const environmentCatalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default", {
-      detailCellSize_m: this.renderDetailCellSize_m,
+      detailCellSize_m: this.environmentDetailCellSize_m,
     });
     const environmentPrimitives = environmentProxyPrimitives(environmentCatalog, true);
     const initialSolidWorld = solidWorldForScene(scene);
@@ -1433,7 +1434,10 @@ export class OctreeSparseBrickWorld {
     const maximumDepth = solverLevel + refinementDepth;
     const refinedBrickDimensions = sceneDomain.brickDimensions.map((value) => value * refineScale) as [number, number, number];
     const renderCellSize = sceneDomain.cellSize_m.map((value) => value / refineScale) as [number, number, number];
-    this.renderDetailCellSize_m = Math.min(...renderCellSize);
+    // The physical lattice can round the requested cell size. Do not feed that
+    // rounded value back into catalog expansion: even a one-ULP change can
+    // alter procedural geometry and make the same scene fail its immutable
+    // planar-topology stamp when it is next published.
     const refinedBrickEdge = renderCellSize.map((value) => value * brickSize) as [number, number, number];
     const worldOrigin = [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z] as const;
     /**
@@ -2483,7 +2487,7 @@ export class OctreeSparseBrickWorld {
     const nextSolidBounds = solidWorldChanged
       ? solidWorldPageBounds(scene, nextSolidWorld) : [];
     const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default", {
-      detailCellSize_m: this.renderDetailCellSize_m || undefined,
+      detailCellSize_m: this.environmentDetailCellSize_m || undefined,
     });
     const authored = environmentProxyPrimitives(catalog, true);
     const planarCatalog = buildSvoPlanarBoundaryCatalog(authored, (primitive) => ({

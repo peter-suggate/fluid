@@ -16,6 +16,8 @@ export type SvoConeTracingMode = "cones" | "exact" | "off";
 /**
  * How *primary* visibility is resolved, as distinct from the lighting visibility
  * `SvoConeTracingMode` selects.
+ * - `mesh`: cached opaque voxel boundary triangles; analytic planes, rigid bodies
+ *   and glass retain their existing paths. Smooth reconstruction uses exact rays.
  * - `raster`: hardware-rasterize the resident bricks as depth-tested proxies.
  *   Octree leaves partition space, so the depth test alone is an exact
  *   visibility oracle and the image matches `traced` pixel for pixel.
@@ -24,7 +26,7 @@ export type SvoConeTracingMode = "cones" | "exact" | "off";
  *   measured against, and because a device too narrow for four depth-tested
  *   colour planes has to fall back to it.
  */
-export type SvoPrimaryTraversalMode = "raster" | "traced";
+export type SvoPrimaryTraversalMode = "raster" | "traced" | "mesh";
 
 /**
  * Proxies per pixel above which the raster primary stops paying for itself.
@@ -107,8 +109,8 @@ export const SVO_PRIMARY_RASTER_PROXIES_PER_PIXEL_CEILING = 1;
  */
 const traversalEnvironment = typeof process !== "undefined" ? process.env : undefined;
 const traversalOverrideRaw = traversalEnvironment?.["FLUID_SVO_PRIMARY_TRAVERSAL"] ?? "";
-if (traversalOverrideRaw !== "" && traversalOverrideRaw !== "raster" && traversalOverrideRaw !== "traced") {
-  throw new RangeError(`FLUID_SVO_PRIMARY_TRAVERSAL must be raster or traced, got ${traversalOverrideRaw}`);
+if (traversalOverrideRaw !== "" && traversalOverrideRaw !== "raster" && traversalOverrideRaw !== "traced" && traversalOverrideRaw !== "mesh") {
+  throw new RangeError(`FLUID_SVO_PRIMARY_TRAVERSAL must be mesh, raster or traced, got ${traversalOverrideRaw}`);
 }
 export const SVO_PRIMARY_TRAVERSAL_OVERRIDE: SvoPrimaryTraversalMode | undefined =
   traversalOverrideRaw === "" ? undefined : traversalOverrideRaw;
@@ -124,7 +126,8 @@ export interface SvoPrimaryTraversalScale {
 }
 
 /**
- * The primary traversal a frame should actually run: `traced`, now, always.
+ * Honour the surface-mesh selection. Legacy proxy requests still resolve to
+ * tracing because the proxy path lost the measured comparison.
  *
  * The megakernel is the primary. See
  * {@link SVO_PRIMARY_RASTER_PROXIES_PER_PIXEL_CEILING} for the paired-worktree
@@ -146,8 +149,7 @@ export function resolveSvoPrimaryTraversal(
 ): SvoPrimaryTraversalMode {
   void scale;
   if (SVO_PRIMARY_TRAVERSAL_OVERRIDE) return SVO_PRIMARY_TRAVERSAL_OVERRIDE;
-  if (requested !== "raster") return requested;
-  return "traced";
+  return requested === "raster" ? "traced" : requested;
 }
 
 /** Observable lifecycle of the requested primary seam-closure pass. */

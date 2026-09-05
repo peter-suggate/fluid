@@ -1,3 +1,4 @@
+import type { SvoSurfaceMeshStatus } from "../svo/svo-surface-mesh";
 import type {
   SvoLightingVisibilityStatus,
   SvoSilhouetteRefinementStatus,
@@ -23,6 +24,7 @@ export interface EffectiveRendererStatus {
   /** Requested versus effective shadows/AO/GI path. */
   lightingVisibility?: SvoLightingVisibilityStatus;
   /** Accepted structural leaf census from the live unified SVO publication. */
+  surfaceMesh?: SvoSurfaceMeshStatus;
   terminalCounts?: Readonly<{ voxel: number; planarBoundary: number }>;
 }
 
@@ -45,6 +47,7 @@ export interface EffectiveRendererConditions {
   contractFailure?: string;
   silhouetteRefinement?: SvoSilhouetteRefinementStatus;
   lightingVisibility?: SvoLightingVisibilityStatus;
+  surfaceMesh?: SvoSurfaceMeshStatus;
   terminalCounts?: Readonly<{ voxel: number; planarBoundary: number }>;
 }
 
@@ -56,6 +59,7 @@ export function resolveEffectiveRendererStatus(
     ...renderer,
     ...(conditions.silhouetteRefinement ? { silhouetteRefinement: conditions.silhouetteRefinement } : {}),
     ...(conditions.lightingVisibility ? { lightingVisibility: conditions.lightingVisibility } : {}),
+    ...(conditions.surfaceMesh ? { surfaceMesh: conditions.surfaceMesh } : {}),
     ...(conditions.terminalCounts ? { terminalCounts: conditions.terminalCounts } : {}),
   });
   if (conditions.required === false) return status({ state: "not-required" });

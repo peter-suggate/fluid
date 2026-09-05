@@ -235,7 +235,7 @@ interface UIStore {
   svoGlobalIlluminationEnabled: boolean;
   /** Whether the persistent world-space GI cache pass is encoded. Off by default. */
   svoWorldGiCacheEnabled: boolean;
-  /** How primary visibility is resolved: rasterized brick proxies, or the traversal megakernel. */
+  /** Primary visibility: cached voxel surfaces, SVO rays, or the diagnostic proxy path. */
   svoPrimaryTraversal: SvoPrimaryTraversalMode;
   /**
    * Frame-graph stages withheld from the encode, so the frame total moves by

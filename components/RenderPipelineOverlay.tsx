@@ -30,6 +30,7 @@ import {
   SVO_RENDER_STAGE_DEFINITIONS,
   SVO_RENDER_STAGE_MAXIMUM_LIGHT_SLOT,
   svoRenderStageUsesLightSlot,
+  svoRenderStageUsesPrimaryWorkMap,
 } from "../lib/svo/svo-render-diagnostics";
 import { resolveSvoPrimaryTraversal } from "../lib/svo/svo-render-options";
 import {
@@ -136,6 +137,8 @@ export function RenderPipelineOverlay() {
   const setSvoAmbientOcclusionEnabled = session.ui((state) => state.setSvoAmbientOcclusionEnabled);
   const silhouetteRefinementEnabled = session.ui((state) => state.silhouetteRefinementEnabled);
   const setSilhouetteRefinementEnabled = session.ui((state) => state.setSilhouetteRefinementEnabled);
+  const svoPrimaryTraversal = session.ui((state) => state.svoPrimaryTraversal);
+  const setSvoPrimaryTraversal = session.ui((state) => state.setSvoPrimaryTraversal);
   const svoConeTracingMode = session.ui((state) => state.svoConeTracingMode);
   const setSvoConeTracingMode = session.ui((state) => state.setSvoConeTracingMode);
   const svoGlobalIlluminationEnabled = session.ui((state) => state.svoGlobalIlluminationEnabled);
@@ -145,6 +148,7 @@ export function RenderPipelineOverlay() {
   const disabledRenderStages = session.ui((state) => state.disabledRenderStages);
   const setRenderStageDisabled = session.ui((state) => state.setRenderStageDisabled);
   const svoStageView = session.ui((state) => state.svoStageView);
+  const resolvedPrimary = svoRenderStageUsesPrimaryWorkMap(svoStageView) ? "traced" : resolveSvoPrimaryTraversal(svoPrimaryTraversal);
   const setSvoStageView = session.ui((state) => state.setSvoStageView);
   const svoStageLightSlot = session.ui((state) => state.svoStageLightSlot);
   const setSvoStageLightSlot = session.ui((state) => state.setSvoStageLightSlot);
@@ -258,7 +262,9 @@ export function RenderPipelineOverlay() {
     // unavailable — but under FLUID_SVO_PRIMARY_TRAVERSAL=raster they are live
     // passes with live switches, and the panel should say which frame it is
     // looking at rather than hard-coding one.
-    rasterPrimaryActive: resolveSvoPrimaryTraversal("raster") === "raster",
+    rasterPrimaryActive: resolvedPrimary !== "traced",
+    surfaceMeshSelected: resolvedPrimary === "mesh",
+    surfaceMeshActive: resolvedPrimary === "mesh" && !smoothSurfaceEnabled,
   };
 
   // The lamp is the node's own switch, and every node has one.
@@ -595,11 +601,23 @@ export function RenderPipelineOverlay() {
     </div>
 
     <div className="render-frame-options" role="group" aria-label="Frame surface options">
+      <PipeChoice label="Primary visibility" value={svoPrimaryTraversal === "mesh" ? "mesh" : "traced"}
+        onChange={setSvoPrimaryTraversal} options={[
+          { value: "traced", label: "Ray traced", hint: "Trace the accepted voxel scene for each camera pixel." },
+          { value: "mesh", label: "Rasterized", hint: "Draw cached exposed voxel faces. Smooth surfaces use the ray path; turn Smooth surface off for mesh rasterization. Lighting is unchanged." },
+        ]} />
       <span>Surface</span>
       <PipeToggle label="Smooth surface" checked={smoothSurfaceEnabled}
         onChange={(enabled) => patchScene({ surfaceStyle: enabled ? "smooth" : "voxel-flat" })}
         hint="Reconstruct a sub-voxel tangent surface from each cell's coverage and baked normal, changing both surface depth and orientation. Off draws the entered axis-aligned voxel face." />
     </div>
+
+    {svoPrimaryTraversal === "mesh" && smoothSurfaceEnabled && <p className="render-inline-status">
+      Rasterized visibility uses voxel faces. Turn off Smooth surface to use the mesh; smooth reconstruction currently uses ray tracing.
+    </p>}
+
+    {svoPrimaryTraversal === "mesh" && !smoothSurfaceEnabled && effectiveRendererStatus.surfaceMesh?.state === "fallback"
+      && <p className="render-inline-status">{effectiveRendererStatus.surfaceMesh.detail}</p>}
 
     {effectiveRendererStatus.failureReason && <p className="render-inline-warning">SVO unavailable: {effectiveRendererStatus.detail
       ?? rendererFailureLabels[effectiveRendererStatus.failureReason]}.</p>}

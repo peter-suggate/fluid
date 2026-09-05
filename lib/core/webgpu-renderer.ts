@@ -789,13 +789,13 @@ export function createProductionSparseVoxelDrySceneRenderer(
   primaryTraversal: SvoPrimaryTraversalMode,
   primaryWorkMap = false,
 ): SparseVoxelDrySceneRenderer {
-  if (primaryTraversal === "raster"
+  if ((primaryTraversal === "raster" || primaryTraversal === "mesh")
     && device.limits.maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE) {
     throw new RangeError(
       `Requested SVO raster primary needs maxColorAttachmentBytesPerSample >= ${FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE}; device exposes ${device.limits.maxColorAttachmentBytesPerSample}`,
     );
   }
-  const traversal = primaryTraversal === "raster"
+  const traversal = primaryTraversal === "raster" || primaryTraversal === "mesh"
     ? "raster-primary" as const : "canonical-parametric" as const;
   const rasterArms = traversal === "raster-primary";
   return new SparseVoxelDrySceneRenderer(
@@ -806,11 +806,11 @@ export function createProductionSparseVoxelDrySceneRenderer(
     traversal,
     "off",
     "split",
-    rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
+    rasterArms && primaryTraversal !== "mesh" ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
     rasterArms,
     rasterArms,
     true,
-    { primaryWorkMap },
+    { primaryWorkMap, surfaceMesh: primaryTraversal === "mesh" },
   );
 }
 
@@ -1038,6 +1038,9 @@ export class FluidLabRenderer {
       && previous.lightingVisibility?.state === status.lightingVisibility?.state
       && previous.lightingVisibility?.fallback === status.lightingVisibility?.fallback
       && previous.lightingVisibility?.detail === status.lightingVisibility?.detail
+      && previous.surfaceMesh?.state === status.surfaceMesh?.state
+      && previous.surfaceMesh?.detail === status.surfaceMesh?.detail
+      && previous.surfaceMesh?.quads === status.surfaceMesh?.quads
       && previous.terminalCounts?.voxel === status.terminalCounts?.voxel
       && previous.terminalCounts?.planarBoundary === status.terminalCounts?.planarBoundary) return;
     this.lastEffectiveRendererStatus = status;
@@ -3392,6 +3395,7 @@ export class FluidLabRenderer {
       contractFailure: this.svoPublicationFailure,
       silhouetteRefinement: silhouetteRefinementStatus,
       lightingVisibility: lightingVisibilityStatus,
+      surfaceMesh: this.svoDryScenePipeline?.surfaceMeshStatus,
       terminalCounts: this.svoDrySceneSource?.structural?.terminalCounts,
     }));
     // Render stage views replace the composited image with a decode of a plane

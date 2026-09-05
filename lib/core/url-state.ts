@@ -692,7 +692,7 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
     svoConeTracingMode: query.get("svoCones") === "exact" || query.get("svoCones") === "off"
       ? query.get("svoCones") as SvoConeTracingMode
       : DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
-    svoPrimaryTraversal: query.get("svoPrimary") === "traced" || query.get("svoPrimary") === "raster"
+    svoPrimaryTraversal: query.get("svoPrimary") === "mesh" || query.get("svoPrimary") === "traced" || query.get("svoPrimary") === "raster"
       ? query.get("svoPrimary") as SvoPrimaryTraversalMode
       : DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal,
     svoStageView: SVO_RENDER_STAGE_VIEWS.includes(query.get("svoStage") as SvoRenderStageView)

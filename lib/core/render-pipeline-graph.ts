@@ -98,6 +98,8 @@ export interface RenderPipelineContext {
    * make on the arm that is running.
    */
   readonly rasterPrimaryActive: boolean;
+  readonly surfaceMeshActive?: boolean;
+  readonly surfaceMeshSelected?: boolean;
 }
 
 export interface RenderPipelineTip {
@@ -340,13 +342,13 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     ],
     toggleable: true,
     tip: {
-      summary: "The full-screen traversal megakernel: one ray per pixel, marching the octree for itself. This is the primary — the rasterized brick-proxy arm remains compiled but is reachable only through FLUID_SVO_PRIMARY_TRAVERSAL, because it measures 2.1–4.4× slower across the refinement ladder. Off keeps the G-buffer clears and drops the march, so every pixel misses and the frame resolves to sky: the delta is the whole cost of primary visibility.",
+      summary: "Primary visibility fills the surface buffer using the selected backend: per-pixel SVO rays or cached exposed voxel triangles. Mesh rasterization retains exact planes, rigid bodies and glass; smooth reconstruction and mesh overflow use current-frame rays. Off clears the surface buffer to sky.",
       writes: "packedSurface · identityMedia · hardwareDepth · splitGeometry",
       feeds: "every lighting and shading pass",
     },
     state: (context) => (context.disabledStages.has("primary-traversal") ? "off" : "on"),
     chip: (context) => (context.disabledStages.has("primary-traversal")
-      ? "withheld · clears only" : "megakernel · canonical-parametric"),
+      ? "withheld · clears only" : context.surfaceMeshActive ? "cached voxel triangles" : "megakernel · canonical-parametric"),
   },
   {
     id: "thin-glass",
@@ -378,8 +380,8 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
       summary: "Draws authored analytic records as their own visibility tier, ahead of the voxels. The megakernel returns at the first voxel instead, which is the whole of the bounded 0.087%-of-pixels difference between the two primary arms.",
       gate: "raster primary only",
     },
-    state: (context) => rasterTierState(context, "scene-primitive"),
-    chip: (context) => rasterTierChip(context, "raster arm only"),
+    state: (context) => context.surfaceMeshSelected ? "unavailable" : rasterTierState(context, "scene-primitive"),
+    chip: (context) => context.surfaceMeshSelected ? "voxel surface mesh" : rasterTierChip(context, "raster arm only"),
   },
   {
     id: "rigid-impostor",
