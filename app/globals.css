@@ -2680,3 +2680,10 @@ button:hover .iso-water-side { fill-opacity: .26; }
   .work-progress-meter[data-indeterminate] { background: repeating-linear-gradient(90deg, var(--accent) 0 6px, transparent 6px 10px); opacity: .45; }
   .work-progress-meter[data-indeterminate] progress { opacity: 0; }
 }
+
+.simulation-stop-panel { position: absolute; z-index: 40; bottom: 76px; left: 50%; transform: translateX(-50%); width: min(640px, 90%); max-height: calc(100% - 120px); overflow: auto; padding: 16px 20px; border: 1px solid var(--amber-line); border-radius: 12px; background: var(--overlay); color: var(--ink); }
+.simulation-stop-panel strong { color: var(--amber); }
+.simulation-stop-panel p { margin: 8px 0; }
+.simulation-stop-panel small { color: var(--muted); }
+.simulation-stop-panel details { margin-top: 8px; }
+.simulation-stop-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }

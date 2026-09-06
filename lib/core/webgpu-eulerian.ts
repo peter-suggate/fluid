@@ -1,3 +1,4 @@
+import type { SimulationFailure } from "./simulation-failure";
 import type { PerformanceTrace } from "./performance-trace";
 import type { TallCellLayout } from "./tall-cell-grid";
 import type { GPUQuality } from "./gpu-quality";
@@ -32,6 +33,7 @@ export interface GPUEulerianInfo {
   simulationPipelinesReady?: boolean;
   /** Background compilation failure, if a presentation-only solver could not become runnable. */
   simulationPipelineError?: string;
+  simulationFailure?: SimulationFailure;
   /** Shared CM12 topology-generation preparation and bounded deferral receipt. */
   /** Latest compact activity census, weighted by represented liquid volume. */
   adaptivePhysicalWidthCensus?: readonly { width: number; leaves: number; liquidVolumeFineCells: number }[];

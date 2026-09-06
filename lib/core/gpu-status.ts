@@ -1,3 +1,4 @@
+import type { SimulationFailure } from "./simulation-failure";
 import type { ResourcePluginDefinition } from "./resource-plugin";
 
 /**
@@ -54,5 +55,5 @@ export type GPUStatus =
   | { state: "blocked"; label: string; resource: ResourcePluginDefinition }
   | { state: "manual"; label: string; resource: ResourcePluginDefinition }
   | { state: "stopping"; label: string; resource: ResourcePluginDefinition }
-  | { state: "unavailable"; label: string; reproduction?: GPUFailureReproduction; resource: ResourcePluginDefinition }
+  | { state: "unavailable"; label: string; reproduction?: GPUFailureReproduction; failure?: SimulationFailure; resource: ResourcePluginDefinition }
   | { state: "lost"; label: string; resource: ResourcePluginDefinition };

@@ -9,6 +9,7 @@
 export const SPARSE_CM12_DAWN_SUITE_BUDGET_MS = 180_000;
 
 export type SparseCM12DawnCoverage =
+  | "simulation-failure-halt"
   | "symmetric-expansion"
   | "mixed-ratio-topology"
   | "topology-page-budget"
@@ -56,6 +57,14 @@ export type SparseCM12DawnLane = SparseCM12DawnTestLane
   | SparseCM12DawnPerformanceLane;
 
 export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
+  {
+    id: "simulation-failure-halt",
+    coverage: "simulation-failure-halt",
+    kind: "correctness",
+    description: "corrupt incidence retains first-fault provenance and blocks later GPU stages and frames",
+    testFile: "tests/sparse-cm12-simulation-failure-dawn.test.ts",
+    timeoutMs: 10_000,
+  },
   {
     id: "symmetric-expansion",
     coverage: "symmetric-expansion",

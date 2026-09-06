@@ -246,6 +246,8 @@ export interface GPUSolverInstance {
    * consumers may instead observe `simulationReady` without blocking.
    */
   waitForSimulationReady?(): Promise<void>;
+  /** Mandatory completed-frame invariant receipt; rejects on a latched failure. */
+  assertSimulationHealthy?(): Promise<void>;
   readonly volumeTexture: GPUTexture;
   /** Field the renderer contours; a smooth level set when the solver keeps one separate from volumeTexture. */
   readonly surfaceFieldTexture?: GPUTexture;

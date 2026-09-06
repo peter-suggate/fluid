@@ -9,6 +9,7 @@ import {
 } from "../tools/sparse-cm12-dawn-regression-manifest";
 
 const expectedCoverage: readonly SparseCM12DawnCoverage[] = [
+  "simulation-failure-halt",
   "symmetric-expansion",
   "mixed-ratio-topology",
   "topology-page-budget",

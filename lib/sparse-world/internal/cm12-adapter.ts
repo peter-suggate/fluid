@@ -165,6 +165,8 @@ export interface CM12SparseWorldRuntime {
   armPressureJournal(armed: boolean): boolean;
   readPressureJournal(): ReturnType<WebGPUSparseCM12Resident["readPressureJournal"]>;
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number): void;
+  assertSimulationHealthy(): Promise<void>;
+  captureSimulationFailure(encoder: GPUCommandEncoder): ReturnType<WebGPUSparseCM12Resident["captureSimulationFailure"]>;
   encodePressureIterationReceipt(
     encoder: GPUCommandEncoder,
     destination: GPUBuffer,
@@ -650,6 +652,13 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   readPressureJournal() { return this.generationState.read((resident) => resident.readPressureJournal()); }
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number) {
     this.resident.encodeInitialPresentation(encoder, finestCellSize_m);
+  }
+  assertSimulationHealthy(): Promise<void> {
+    return this.resident.assertSimulationHealthy();
+  }
+
+  captureSimulationFailure(encoder: GPUCommandEncoder) {
+    return this.resident.captureSimulationFailure(encoder);
   }
   encodePressureIterationReceipt(encoder: GPUCommandEncoder, destination: GPUBuffer) {
     this.resident.encodePressureIterationReceipt(encoder, destination);

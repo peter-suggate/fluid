@@ -1,3 +1,4 @@
+import { SimulationFailureError } from "../../core/simulation-failure";
 import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
 import { planSparseCM12ResidentGeneration } from "./sparse-cm12-generation-policy";
 import { GPUInitializationTaskRunner } from "../../core/gpu-initialization";
@@ -254,6 +255,49 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   };
   private readonly topologyGenerationMaximumBytes: number;
   private disposed = false;
+  private simulationFailureError?: Error;
+  private readonly failureReceipts = new Set<Promise<void>>();
+
+  async assertSimulationHealthy(): Promise<void> {
+    if (this.disposed) return;
+    await Promise.all([...this.failureReceipts]);
+    // Presentation completion can outlive a solver rebuild or GPU shutdown.
+    // Disposal retires its receipts; it must not submit a new checkpoint.
+    if (this.disposed) return;
+    if (this.simulationFailureError) throw this.simulationFailureError;
+    // Live edits may submit independently of advanceTo, including while paused.
+    try {
+      await this.sparseRuntime.assertSimulationHealthy();
+    } catch (error) {
+      if (!this.simulationFailureError) {
+        if (error instanceof SimulationFailureError) {
+          const contextual = { ...error.failure, scene: this.scene.sceneId, time_s: this.lastTime_s };
+          this.info.simulationFailure = contextual;
+          this.simulationFailureError = new SimulationFailureError(contextual);
+        } else {
+          this.simulationFailureError = new Error(`Simulation HALTED: mandatory failure receipt unavailable: ${String(error)}`);
+        }
+        this.sparseRuntime.cancelTopologyPreparation();
+      }
+      throw this.simulationFailureError;
+    }
+  }
+
+  private observeSimulationFailure(read: ReturnType<CM12SparseWorldRuntime["captureSimulationFailure"]>, time_s: number): void {
+    const receipt = read().then((failure) => {
+      if (!failure || this.disposed || this.simulationFailureError) return;
+      const contextual = { ...failure, scene: this.scene.sceneId, time_s };
+      this.info.simulationFailure = contextual;
+      this.simulationFailureError = new SimulationFailureError(contextual);
+      this.sparseRuntime.cancelTopologyPreparation();
+    }).catch((error: unknown) => {
+      if (!this.disposed && !this.simulationFailureError) {
+        this.simulationFailureError = new Error(`Simulation HALTED: mandatory failure receipt unavailable: ${String(error)}`);
+      }
+    }).finally(() => { this.failureReceipts.delete(receipt); });
+    this.failureReceipts.add(receipt);
+  }
+
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
   private lastPhysicsTraceAt_ms = -Infinity;
@@ -761,7 +805,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         phase: "warmup",
         label: "Fence adaptive presentation generation zero",
         dependencies: ["adaptive-mass.upload"],
-        run: () => device.queue.onSubmittedWorkDone(),
+        run: async () => {
+          await device.queue.onSubmittedWorkDone();
+          await sparseRuntime!.runtime.assertSimulationHealthy();
+        },
       }]);
       return new WebGPUAdaptiveMassSolver(
         device, scene, options, presentation!, sparseRuntime!.device, sparseRuntime!.world,
@@ -886,6 +933,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   private scheduleTopologyGeneration(): void {
+    if (this.simulationFailureError) return;
     if (this.topologyGenerationWork || this.disposed || this.options.activityPolicy?.freezeTopology) return;
     const preparationStarted = performance.now();
     const cadence = this.options.activityPolicy?.coarseFirst && this.sparseRuntime.generationPlanningRequired
@@ -899,6 +947,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       && record.meanDensity >= 0.9999 && (record.reasons & (1 | 16 | 256 | 512)) === 0
       && record.maximumVelocityTravelFineCells < 0.125;
     const prepare = async () => {
+      await this.assertSimulationHealthy();
       // Live region edits and explicit spatial bounds take the detailed path.
       // Otherwise an eight-byte conservative GPU receipt rules out ordinary
       // rerungs, macro motion demands and quiet sibling merges before mapping
@@ -1004,6 +1053,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       this.info.topologyGenerationDeferred = plan?.status === "deferred"
         ? { leaves: plan.leaves, cells: plan.cells } : undefined;
       if (!plan || plan.status === "deferred") return undefined;
+      await this.assertSimulationHealthy();
       const transfer = await accepted.captureGenerationTransferSource(source);
       return accepted.prepareGenerationReplacement(transfer, plan.atlas, plan.active,
         finestCellSize(this.scene, plan.atlas),
@@ -1036,7 +1086,17 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         return;
       }
       this.info.topologyGenerationError = error instanceof Error ? error.message : String(error);
-      console.error("CM12 topology generation retained its accepted state:", error);
+      if (!this.simulationFailureError) {
+        const failure = error instanceof SimulationFailureError ? error.failure : {
+          method: "adaptive-mass", code: "TOPOLOGY_GENERATION_FAILURE",
+          message: this.info.topologyGenerationError, kernel: "host:prepareTopologyGeneration",
+          frame: this.info.encodedSteps ?? -1, generation: -1, ownerId: -1,
+          operands: [], rawWords: [], scene: this.scene.sceneId, time_s: this.lastTime_s,
+        };
+        this.info.simulationFailure = failure;
+        this.simulationFailureError = new SimulationFailureError(failure);
+        this.sparseRuntime.cancelTopologyPreparation();
+      }
     }).finally(() => {
       this.info.topologyPreparationDurationMs = performance.now() - preparationStarted;
       this.info.topologyGenerationPending = false;
@@ -1047,6 +1107,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean {
     this.info.topologyPreparationMaximumSliceMs = this.sparseRuntime.generationPreparationMaximumSliceMs;
     this.info.topologyPreparationMaximumSliceOperation = this.sparseRuntime.generationPreparationMaximumSliceOperation;
+    if (this.simulationFailureError) throw this.simulationFailureError;
     this.info.topologyPublicationMaximumDurationMs = this.sparseRuntime.generationPublicationMaximumMs;
     if (this.disposed || this.sparseRuntime.topologyPreparationPending
       || this.sparseWorldDevice.status !== "ready" || !Number.isFinite(time_s)
@@ -1182,8 +1243,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       this.sparseRuntime.encodePressureIterationReceipt(
         encoder, pressureIterationReadback);
     }
+    const failureReceipt = this.sparseRuntime.captureSimulationFailure(encoder);
     frameCapture?.closeCommands();
     this.device.queue.submit([encoder.finish()]);
+    this.observeSimulationFailure(failureReceipt, this.lastTime_s + dt_s);
     if (liquidInflow) {
       this.sparseWorld.edit({
         kind: "liquid-jet",
@@ -1292,6 +1355,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   async readStats(): Promise<GPUEulerianInfo> {
+    await this.assertSimulationHealthy();
     await this.device.queue.onSubmittedWorkDone();
     const generation = this.sparseRuntime.acceptedAtlas;
     const diagnostics = await this.sparseWorldTrace.readDiagnostics();

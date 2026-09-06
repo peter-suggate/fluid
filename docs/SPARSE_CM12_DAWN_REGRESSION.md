@@ -19,6 +19,7 @@ npm run test:dawn:sparse-cm12 -- --list
 
 | Lane | Authority | Baseline |
 | --- | --- | --- |
+| `simulation-failure-halt` | Production incidence validator and entry guard | Healthy work executes; corrupt input latches first provenance and blocks later stages and frames |
 | `symmetric-expansion` | D4 field/topology symmetry, corner residency, mass | Existing 20-step Dawn property gate |
 | `mixed-ratio-topology` | BTI1 GPU cell, point-owner, and row services plus the BFP1 CPU partition at 8\|2, 8\|1, and 8/4/2/1 | GPU results match the exhaustive CPU mirrors; BFP1 covers every row exactly once |
 | `topology-page-budget` | Authored re-rung and WDR page ownership remain independent | Zero, one and 32 growth pages; conservative rung transfers, no borrowed dynamic identities, matching UI/QA allocator receipts |

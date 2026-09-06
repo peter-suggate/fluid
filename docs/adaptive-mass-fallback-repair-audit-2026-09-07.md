@@ -88,3 +88,58 @@ The separate LoSasso adaptive-mass shader is not the Sparse CM12 resident implem
 5. Fix the producer, add a focused regression for that failure, then run `npm run test:dawn:sparse-cm12` for substantive simulation/topology/publication/boundary/editing changes. Do not run Dawn concurrently with the browser or another Dawn process. Do not increase tolerances, timing limits, relay rounds or hidden refinement floors to make the failure disappear.
 
 Suggested initial order: incidence corruption → missing required transport support → raw negative/nonfinite/fixed-point failures → D4 pre-repair differences → capacity excess provenance → pressure drift/curvature. This exposes structural defects before investigating floating-point behavior.
+
+
+## Failure handling implemented after this audit
+
+D4 repair removal is committed as `471016cb`. The next implementation adds a
+sticky 16-word first-failure record at the tail of the resident topology arena.
+Each stage copies its fault count into GPU-owned uniform parameters; uniform
+entry guards then suppress later stages, publication, and already-queued later
+frames. Host parameter updates cannot clear that flag. A failing stage can have
+partial writes: this is a halt with evidence, not rollback. A fresh simulation
+must be created to restart. Generation replacement checks the old arena before
+transfer and the new arena before adoption, so replacement cannot erase a fault.
+
+Mandatory readback checks run on frame completion, initial publication,
+diagnostic reads, and paused/live edits. A failed readback itself halts. The
+renderer retains the first failure and closes admission; the UI releases its
+GPU, displays **SIMULATION HALTED**, and offers copy/download JSON containing
+kernel, frame, generation, owner, named operands, exact raw words, scene inputs,
+and method configuration. Nonfinite float operands may become JSON null; their
+exact bits remain in `rawWords`. Unknown host-side owner/generation fields are
+`-1`, never an invented GPU identity.
+
+The first converted sites are:
+
+- Invalid resident incidence ranges: record `INCIDENCE_RANGE` before returning
+  a safe empty range for the remainder of the failing stage.
+- Empty forward-deficit support: record `EMPTY_DEFICIT_STENCIL`; donor
+  self-return is removed in both packet and direct implementations.
+- Empty sharpening support: record `EMPTY_SHARPENING_STENCIL`; donor
+  self-return is removed.
+- Negative/nonfinite transported density or gamma: record
+  `INVALID_CONSERVED_VALUE`; the subsequent nonnegative clamps are removed.
+- Unexpected host generation exceptions: record `TOPOLOGY_GENERATION_FAILURE`
+  and halt instead of logging and retaining accepted state. Explicit budget
+  deferral, stale plans, and cancellation remain normal control flow.
+
+The GPU regression lane `simulation-failure-halt` injects corrupt incidence into
+the production validator, verifies healthy work first, and proves later stages
+and frames cannot publish or overwrite the original evidence. Decoder/UI tests
+cover raw-bit retention, report content, and refusal to restart after failure.
+
+Validation on this working tree: the new Dawn halt lane and live-liquid-injection
+lane pass, as do seven focused CPU/UI/manifest tests. The full canonical gate
+remains failing: physical D4 symmetry, topology/hydrostatic/mini64 timeouts, and
+mini32 at 41.6154 ms against the unchanged 40 ms ceiling. The suite exhausted its
+180-second budget before all lanes. An isolated checkout of `471016cb` measured
+42.5329 ms in that same mini32 lane, so that performance failure also exists
+without this failure-handling implementation. This is not a clean regression
+gate or a new performance baseline. Type checking still reports unrelated
+existing errors.
+
+Next work remains the density-capacity redistribution passes, pressure restart
+and residual repair, and connecting the existing device fault protocols to this
+mandatory report. The inventory above is not marked resolved by adding a report
+mechanism; violated numerical contracts still need their root causes fixed.

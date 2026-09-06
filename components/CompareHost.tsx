@@ -13,6 +13,7 @@ import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
 import { SceneOverlay } from "./SceneOverlay";
 import { ScenePane } from "./ScenePane";
 import { TransportBar } from "./TransportBar";
+import { SimulationStopPanel } from "./SimulationStopPanel";
 
 /**
  * The shell, with one pane or two.
@@ -166,6 +167,7 @@ export function CompareHost() {
           <SceneOverlay />
         </div>
       </div>
+      <SimulationStopPanel sessions={active ? [sessionA, sessionB] : [sessionA]} />
       <TransportBar />
       <RecordingPlaybackModal />
     </main>

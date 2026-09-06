@@ -1,3 +1,5 @@
+import { CM12_FAILURE_BYTES, CM12_FAILURE_WORDS, decodeCM12SimulationFailure } from "./sparse-cm12-simulation-failure";
+import { SimulationFailureError } from "../../core/simulation-failure";
 import { SPARSE_CM12_COMMON_HEIGHT_ENABLED, SPARSE_CM12_HEIGHT_ENTRY_POINTS, SPARSE_CM12_HEIGHT_FIELDS,
   SPARSE_CM12_HEIGHT_HEADER_FLOATS, SPARSE_CM12_HEIGHT_ITERATIONS } from
   "./sparse-cm12-height-reconstruction.wgsl";
@@ -1077,8 +1079,9 @@ export function sparseCM12WGSLForEntryPoints(source: string, roots: readonly str
 }
 const SPARSE_CM12_PHASE1_TRANSPORT_PROFILE_WORDS = 64;
 /** Params in the resident WGSL, including the fixed authored-region tail. */
-const SPARSE_CM12_PARAMETER_BYTES = SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
+const SPARSE_CM12_FAILURE_PARAMETER_OFFSET = SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
   + SPARSE_CM12_REFINEMENT_REGION_BYTES + 80;
+const SPARSE_CM12_PARAMETER_BYTES = SPARSE_CM12_FAILURE_PARAMETER_OFFSET + 16;
 /** Twenty f32 convergence/diagnostic scalars; see the WGSL initialization. */
 const SPARSE_CM12_PRESSURE_SCALAR_BYTES = 80;
 const SPARSE_CM12_PCM_DIAGNOSTIC_DOMAIN_WORDS =
@@ -5110,7 +5113,7 @@ export class WebGPUSparseCM12Resident {
     const immutableHostIncidenceWords = templates.words.subarray(
       templates.words[10]!, templates.words[10]! + 2 * hostIncidenceCount);
     const topologyArenaWords = immutableHostIncidenceBaseWords
-      + immutableHostIncidenceWords.length;
+      + immutableHostIncidenceWords.length + CM12_FAILURE_WORDS;
     const topologyArena = device.createBuffer({
       label: "Sparse CM12 physical topology templates and worklists",
       size: Math.max(4, 4 * topologyArenaWords),
@@ -6321,11 +6324,8 @@ export class WebGPUSparseCM12Resident {
       activeBindGroup = bindGroup;
       pass?.setBindGroup(0, bindGroup);
     };
-    // Without seams this is the single frame pass it has always been. With
-    // them, each stage becomes its own pass so a boundary chain can land a
-    // hardware timestamp on the pass that opens the next stage. Dispatch order
-    // and the implicit barriers between dispatches are identical either way,
-    // so a traced advance computes exactly what an untraced one computes.
+    // Every stage starts after a GPU fault checkpoint. Optional timing seams
+    // add timestamps at those same boundaries; they do not control halting.
     const stageLimitForQA = this.stageLimitForQA;
     this.stageLimitForQA = undefined;
     const activityPhaseLimitForQA = this.activityPhaseLimitForQA;
@@ -6342,6 +6342,8 @@ export class WebGPUSparseCM12Resident {
       encodeStage: (own: SparseCM12StageEncodeContext<Id>) => void,
     ) => {
       if (stageLimitReached) return;
+      closePass();
+      this.encodeFailureGate(encoder);
       if (seams) {
         passLabel = `Sparse CM12 resident ${id}`;
       }
@@ -7258,10 +7260,16 @@ export class WebGPUSparseCM12Resident {
     pass.end();
   }
 
+  private encodeFailureGate(encoder: GPUCommandEncoder): void {
+    encoder.copyBufferToBuffer(this.topologyArena, this.topologyArena.size - CM12_FAILURE_BYTES,
+      this.parameters, SPARSE_CM12_FAILURE_PARAMETER_OFFSET, 4);
+  }
+
   private encodeFramePlanPresentation(
     encoder: GPUCommandEncoder,
     label: string,
   ): void {
+    this.encodeFailureGate(encoder);
     this.encodeCommonHeightReconstruction(encoder, label);
     if (this.presentationPublisherOracleForQA) {
       const oracle = encoder.beginComputePass({ label: `${label} QA publisher oracle` });
@@ -7423,6 +7431,7 @@ export class WebGPUSparseCM12Resident {
   encodeInitialPresentation(encoder: GPUCommandEncoder, finestCellSize_m: number): void {
     this.assertLive();
     this.writeParameters(this.lastPacked!, 0.004, finestCellSize_m, 1, [0, 0, 0]);
+    this.encodeFailureGate(encoder);
     const pass = encoder.beginComputePass({ label: "Sparse CM12 resident initial presentation" });
     pass.setBindGroup(0, this.bindGroup);
     const brickWorkgroups = Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE);
@@ -7482,7 +7491,8 @@ export class WebGPUSparseCM12Resident {
     // ellipsoid from a swept hose plug at no cost to a quiescent frame.
     this.parameterF32.set([...centerFine, mode], 52);
     this.parameterF32.set([...radiusFine, jetRadiusFine], 56);
-    this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
+    this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords, 0, SPARSE_CM12_FAILURE_PARAMETER_OFFSET);
+    this.encodeFailureGate(encoder);
     const packed = this.lastPacked!;
     const leafCapacity = this.worldDirectoryLayout.leafCapacity;
     const bricks = Math.ceil(leafCapacity / WORKGROUP_SIZE);
@@ -7803,7 +7813,32 @@ export class WebGPUSparseCM12Resident {
     this.coarseFirstPolicySignature = policySignature;
     f.set([policy.anticipationRadiusBricks, policy.surfaceQuietEpochs, changed ? 1 : 0, 0],
       surfaceProofWord + 16);
-    this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords);
+    this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords, 0, SPARSE_CM12_FAILURE_PARAMETER_OFFSET);
+  }
+
+  /** The copy is ordered after the submitted frame and survives later dispatches. */
+  captureSimulationFailure(encoder: GPUCommandEncoder) {
+    const readback = this.device.createBuffer({ label: "CM12 mandatory failure receipt",
+      size: CM12_FAILURE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    encoder.copyBufferToBuffer(this.topologyArena, this.topologyArena.size - CM12_FAILURE_BYTES,
+      readback, 0, CM12_FAILURE_BYTES);
+    return async () => {
+      try {
+        await readback.mapAsync(GPUMapMode.READ);
+        return decodeCM12SimulationFailure(new Uint32Array(readback.getMappedRange()).slice(), Object.keys(this.pipelines));
+      } finally {
+        if (readback.mapState === "mapped") readback.unmap();
+        readback.destroy();
+      }
+    };
+  }
+
+  async assertSimulationHealthy(): Promise<void> {
+    const encoder = this.device.createCommandEncoder({ label: "CM12 failure checkpoint" });
+    const read = this.captureSimulationFailure(encoder);
+    this.device.queue.submit([encoder.finish()]);
+    const failure = await read();
+    if (failure) throw new SimulationFailureError(failure);
   }
 
   async readDiagnostics(): Promise<{
@@ -7876,6 +7911,7 @@ export class WebGPUSparseCM12Resident {
       GPUEulerianInfo["adaptivePressureTopologyAttribution"]>["authorities"]>;
   }> {
     this.assertLive();
+    await this.assertSimulationHealthy();
     const encoder = this.device.createCommandEncoder({
       label: "Sparse CM12 diagnostic scalar readback",
     });
@@ -8413,6 +8449,8 @@ export class WebGPUSparseCM12Resident {
       return { resident: next, disposePreparation: () => transfer.destroy(), commit: async () => {
         // Only this short publication boundary suspends advances. The candidate
         // owns every buffer and pipeline before it enters this method.
+        // Never replace a failed arena with a fresh, apparently healthy one.
+        await this.assertSimulationHealthy();
         const latest = await this.readActivitySnapshot(true);
         if (latest.sourceTopologyLeaseRevoked
           || latest.acceptedTopologyGeneration !== source.activity.acceptedTopologyGeneration
@@ -8433,6 +8471,7 @@ export class WebGPUSparseCM12Resident {
         next.encodeInitialPresentation(encoder, finestCellSize_m);
         this.device.queue.submit([encoder.finish()]);
         await transfer.validate();
+        await next.assertSimulationHealthy();
       } };
     } catch (error) { next.destroy(); throw error; }
   }
@@ -8576,6 +8615,7 @@ export class WebGPUSparseCM12Resident {
     frameBank: "accepted" | "candidate" = "accepted",
   ): Promise<SparseCM12DiagnosticFields> {
     this.assertLive();
+    await this.assertSimulationHealthy();
     const activitySnapshot = await this.readActivitySnapshot(includeWorldLeaves);
     const readbackBytes = this.state.size + this.conditioning.size + 4;
     const readback = this.device.createBuffer({

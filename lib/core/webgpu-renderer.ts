@@ -1,3 +1,4 @@
+import { SimulationFailureError } from "./simulation-failure";
 import { planSvoFluidCoverageRatio, type SvoFluidCoverageTriple } from "../svo/svo-fluid-coverage";
 import {
   WebGpuSvoFluidCoverage,
@@ -1021,6 +1022,17 @@ export class FluidLabRenderer {
    * OffscreenCanvas. HTML canvases continue to derive it locally. */
   private workerViewport?: { width: number; height: number; devicePixelRatio: number };
 
+  private simulationFault?: SimulationFailureError;
+
+  stopAfterSimulationFailure(error: SimulationFailureError): void {
+    if (this.simulationFault) return;
+    this.simulationFault = error;
+    this.simulationRunning = false;
+    this.gpuFluidInitializationAbort?.abort();
+    this.onStatus({ state: "unavailable", label: error.message, failure: error.failure,
+      resource: webGPUPlatformResourcePlugin });
+  }
+
   get presentationRevision(): number { return this.pausedPresentationRevision; }
 
   constructor(private readonly canvas: HTMLCanvasElement | OffscreenCanvas, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void, onGPUPressureJournal?: (journal: PressureJournal | undefined) => void, onGPUStageLens?: (receipt: StageLensReceipt | undefined, layers: readonly StageLensLayerReport[]) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuPressureJournalCallback = onGPUPressureJournal; this.gpuStageLensCallback = onGPUStageLens; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; }
@@ -1698,6 +1710,7 @@ export class FluidLabRenderer {
   }
 
   initialize(): Promise<void> {
+    if (this.simulationFault) return Promise.reject(this.simulationFault);
     if (this.disposed) return Promise.resolve();
     if (this.initializationPromise) return this.initializationPromise;
     const task = this.initializeInternal();
@@ -2164,6 +2177,7 @@ export class FluidLabRenderer {
 
   /** Change simulation admission while preserving already-submitted queue work. */
   setSimulationRunning(running: boolean): number | undefined {
+    if (this.simulationFault) return this.gpuFluid?.info.submittedTime_s;
     const changed = running !== this.simulationRunning;
     if (changed) this.resetPresentationTrace();
     this.simulationRunning = running;
@@ -2414,7 +2428,7 @@ export class FluidLabRenderer {
       else if(!rendererOnlyScene&&solver.sparseWorld)this.onStatus({state:"ready",label:sparseWorldState?.status.state==="saturated"?"Sparse world capacity reached":"Sparse world ready",adapter:this.adapterName,resource:method.resource});
       else if(!rendererOnlyScene&&fencedInitialRaster)this.onStatus({state:"initializing",label:"Warmed solver attached; publishing fenced t=0 raster surface",phase:"presentation",completed:reportedCompleted,total:reportedTotal+1,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false,resource:method.resource});
       else if(!rendererOnlyScene)this.onStatus({state:"ready",label:"WebGPU direct-field solver ready",adapter:this.adapterName,resource:method.resource});
-    }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.pendingInitialRasterPresentation=undefined;this.pendingLiveSvoPresentation=undefined;if(isGPUInitializationAbort(error))return;if(sparseWorldMethod){const label="Sparse world fault · initialization";if(previous)this.onStatus({state:"ready",label:`${label}; previous world retained`,adapter:this.adapterName,resource:initializationResource});else this.onStatus({state:"unavailable",label,resource:initializationResource});}else if(previous)this.onStatus({state:"ready",label:error instanceof Error?`Solver rebuild failed; previous solver retained: ${error.message}`:"Solver rebuild failed; previous solver retained",adapter:this.adapterName,resource:initializationResource});else this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed",resource:initializationResource});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration){this.gpuFluidPending=undefined;if(this.gpuFluidInitializationAbort===abort)this.gpuFluidInitializationAbort=undefined;}});
+    }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.pendingInitialRasterPresentation=undefined;this.pendingLiveSvoPresentation=undefined;if(isGPUInitializationAbort(error))return;if(error instanceof SimulationFailureError){this.stopAfterSimulationFailure(error);return;}if(sparseWorldMethod){const label="Sparse world fault · initialization";if(previous)this.onStatus({state:"ready",label:`${label}; previous world retained`,adapter:this.adapterName,resource:initializationResource});else this.onStatus({state:"unavailable",label,resource:initializationResource});}else if(previous)this.onStatus({state:"ready",label:error instanceof Error?`Solver rebuild failed; previous solver retained: ${error.message}`:"Solver rebuild failed; previous solver retained",adapter:this.adapterName,resource:initializationResource});else this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed",resource:initializationResource});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration){this.gpuFluidPending=undefined;if(this.gpuFluidInitializationAbort===abort)this.gpuFluidInitializationAbort=undefined;}});
   }
 
   /**
@@ -2668,7 +2682,7 @@ export class FluidLabRenderer {
   }
 
   private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig, presentationMode: ScenePresentationMode) {
-    if (!this.device || this.disposed || this.deviceLost) return undefined;
+    if (!this.device || this.disposed || this.simulationFault || this.deviceLost) return undefined;
     if (!canInitializeGPUSceneSource(scene, config.methodId)) return undefined;
     const key=this.solverKey(scene,config,presentationMode);
     if(!this.gpuFluid||key!==this.gpuFluidKey){
@@ -2782,6 +2796,10 @@ export class FluidLabRenderer {
     const sparseWorldState = this.refreshSparseWorldState(fluid, true);
     if (sparseWorldState?.status.state === "fault"
       || sparseWorldState?.deviceStatus === "fault") return fluid.info;
+    if (fluid.info.simulationFailure) {
+      this.stopAfterSimulationFailure(new SimulationFailureError(fluid.info.simulationFailure));
+      return fluid.info;
+    }
     const sparseWorldLoading = Boolean(fluid.sparseWorld
       && sparseWorldState?.deviceStatus !== "ready");
     if (sparseWorldLoading || (!fluid.sparseWorld && fluid.simulationReady === false)) {
@@ -2877,7 +2895,7 @@ export class FluidLabRenderer {
         { id: "frame-control", label: "Frame control + physics submission" },
       )
       : undefined;
-    if (!this.device || this.disposed || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
+    if (!this.device || this.disposed || this.simulationFault || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     const activeSvoTuning = normalizeSvoRenderTuning(svoTuning);
     this.resize(activeSvoTuning.resolutionScale);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
@@ -3630,13 +3648,26 @@ export class FluidLabRenderer {
       this.presentationsInFlight=Math.max(0,this.presentationsInFlight-1);
     };
     const presentationCompletion = completedPresentationDevice.queue.onSubmittedWorkDone();
-    void presentationCompletion.then(()=>{
+    const validatedFluid = this.gpuFluid;
+    void presentationCompletion.then(async ()=>{
+      if(this.disposed||this.simulationFault||this.deviceLost
+        ||this.device!==completedPresentationDevice||this.gpuFluid!==validatedFluid){
+        retirePresentation();
+        return;
+      }
+      await validatedFluid?.assertSimulationHealthy?.();
       retirePresentation();
-      if(!this.disposed&&!this.deviceLost&&this.device===completedPresentationDevice){
+      if(!this.disposed&&!this.deviceLost&&this.device===completedPresentationDevice&&this.gpuFluid===validatedFluid){
         this.completedPresentations+=1;
         this.retireGPUAdvances(completedGPUAdvances);
       }
-    }).catch(retirePresentation);
+    }).catch((error: unknown) => {
+      retirePresentation();
+      if (!this.disposed && this.device === completedPresentationDevice) {
+        if (error instanceof SimulationFailureError) { this.stopAfterSimulationFailure(error); return; }
+        this.onStatus({ state: "unavailable", label: `GPU submission failed: ${error instanceof Error ? error.message : String(error)}`, failure: error instanceof SimulationFailureError ? error.failure : undefined, resource: webGPUPlatformResourcePlugin });
+      }
+    });
     if (poseStaging) this.publishRigidBodyPoses(poseStaging, bodies.slice(0, 12).map((body) => body.description.id));
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
     if (fluidCellTrace) this.pumpFluidCellTraceReadback();

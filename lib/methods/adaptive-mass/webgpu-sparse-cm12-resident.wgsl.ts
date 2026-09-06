@@ -1,3 +1,4 @@
+import { cm12SimulationFailureWGSL, guardCM12SimulationDispatches } from "./sparse-cm12-simulation-failure.wgsl";
 import { SPARSE_CM12_COMMON_HEIGHT_ENABLED, sparseCM12HeightReconstructionWGSL } from "./sparse-cm12-height-reconstruction.wgsl";
 import { sparseCM12CoarseFirstPredictionWGSL } from "./sparse-cm12-coarse-first-prediction.wgsl";
 import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
@@ -1034,8 +1035,9 @@ ${createSparseCM12IboTRASupplementWGSL({
   cm12IBOStore(IBO1_BASE+2u,slot);
   cm12IBOStore(IBO1_BASE+3u,atomicLoad(&topologyArena[base+1u]));
 ` : "";
-  return /* wgsl */ `
+  return guardCM12SimulationDispatches(/* wgsl */ `
 ${createCm12NumericsWGSL()}
+${cm12SimulationFailureWGSL}
 
 const INVALID:u32=0xffffffffu;
 const WORKGROUP:u32=64u;
@@ -1178,6 +1180,7 @@ struct Params {
   velocityThresholds:array<vec4f,2>, // indexed by log2(resolution), B1..B16
   coarseFirst:vec4f, // enabled, finest specific kinetic energy, κh, prediction seconds
   coarseFirstHistory:vec4f, // search radius, surface proof epochs, reserved
+  failure:vec4u, // GPU-owned sticky stage halt
 }
 
 @group(0)@binding(0)var<uniform>p:Params;
@@ -1460,7 +1463,7 @@ fn journalSnapshotField(slot:u32,field:u32)->u32{
 }
 
 ${createSparseCM12CellAccessWGSL(SPARSE_CM12_ATOMIC_ARENA_READERS, true)}
-${createSparseCM12RowAccessWGSL(SPARSE_CM12_ATOMIC_ARENA_READERS, true)}
+${createSparseCM12RowAccessWGSL(SPARSE_CM12_ATOMIC_ARENA_READERS, true, "cm12RecordFailure(1u,cell,vec4u(begin,end,maximum,0u));")}
 fn cellOpenFraction(id:u32)->f32{
   if(!hasSolidBoundaries()){return 1.0;}
   return state[p.solidOffsets.x+id]*solidVoxelCellOpenFraction(id);
@@ -3850,11 +3853,7 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
       let velocityAt=sourceCellVelocity()+4u*donor;
       let donorVelocity=vec3f(state[velocityAt],state[velocityAt+1u],
         state[velocityAt+2u]);
-      if(visible<=1e-9){let densityTransfer=donorDensity*deficit;
-        accumulateTransportDeficit(wid.x,donor,
-          i32(round(densityTransfer*CM12_SPARSE_TRANSPORT_FIXED)),i32(round(
-          state[sourceGamma()+donor]*deficit*CM12_SPARSE_TRANSPORT_FIXED)),vec3i(round(
-          densityTransfer*donorVelocity*CM12_SPARSE_TRANSPORT_FIXED)));
+      if(visible<=1e-9){cm12RecordFailure(2u,donor,vec4u(bitcast<u32>(visible),bitcast<u32>(deficit),0u,0u));
       }else{for(var corner=0u;corner<8u;corner+=1u){
         var cell=INVALID;var weight=0.0;
         cell=arrivalStencil.cells[corner];weight=arrivalStencil.weights[corner];
@@ -3913,9 +3912,11 @@ fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
   // to one made an arbitrarily small rho threshold crossing create an O(1)
   // gamma jump which the following diffusion stage converted back into mass.
   if(rhoNext<CM12_DRY_CELL_THRESHOLD){gammaNext=state[sourceGamma()+id];}
-  let nextDensity=max(0.0,rhoNext);
+  if(!cm12ConservedValueValid(rhoNext)||!cm12ConservedValueValid(gammaNext)){
+    cm12RecordFailure(4u,id,vec4u(bitcast<u32>(rhoNext),bitcast<u32>(gammaNext),0u,0u));}
+  let nextDensity=rhoNext;
   state[destinationDensity()+id]=nextDensity;
-  state[destinationGamma()+id]=max(0.0,gammaNext);
+  state[destinationGamma()+id]=gammaNext;
   let velocity=select(vec3f(0.0),momentumNext/nextDensity,
     nextDensity>=CM12_DRY_CELL_THRESHOLD);
   let velocityAt=destinationCellVelocity()+4u*id;
@@ -4020,11 +4021,7 @@ fn scatterDensityDeficitPackedCoarse(@builtin(global_invocation_id)gid:vec3u){
       let velocityAt=sourceCellVelocity()+4u*donor;
       let donorVelocity=vec3f(state[velocityAt],state[velocityAt+1u],
         state[velocityAt+2u]);
-      if(visible<=1e-9){let densityTransfer=donorDensity*deficit;
-        accumulateTransportDeficit(gid.x,donor,
-          i32(round(densityTransfer*CM12_SPARSE_TRANSPORT_FIXED)),i32(round(
-          state[sourceGamma()+donor]*deficit*CM12_SPARSE_TRANSPORT_FIXED)),vec3i(round(
-          densityTransfer*donorVelocity*CM12_SPARSE_TRANSPORT_FIXED)));
+      if(visible<=1e-9){cm12RecordFailure(2u,donor,vec4u(bitcast<u32>(visible),bitcast<u32>(deficit),0u,0u));
       }else{for(var corner=0u;corner<8u;corner+=1u){
         let cell=stencil.cells[corner];let weight=stencil.weights[corner];
         if(cell==INVALID||weight<=0.0){continue;}let normalized=weight/visible;
@@ -4076,9 +4073,11 @@ fn gatherConservativeDensityPackedCoarse(@builtin(global_invocation_id)gid:vec3u
       f32(atomicLoad(&conditioning[4u*p.counts.x+id])),
       f32(atomicLoad(&conditioning[5u*p.counts.x+id])))/CM12_SPARSE_TRANSPORT_FIXED;
     if(rhoNext<CM12_DRY_CELL_THRESHOLD){gammaNext=state[sourceGamma()+id];}
-    let nextDensity=max(0.0,rhoNext);
+    if(!cm12ConservedValueValid(rhoNext)||!cm12ConservedValueValid(gammaNext)){
+    cm12RecordFailure(4u,id,vec4u(bitcast<u32>(rhoNext),bitcast<u32>(gammaNext),0u,0u));}
+  let nextDensity=rhoNext;
     state[destinationDensity()+id]=nextDensity;
-    state[destinationGamma()+id]=max(0.0,gammaNext);
+    state[destinationGamma()+id]=gammaNext;
     let velocity=select(vec3f(0.0),momentumNext/nextDensity,
       nextDensity>=CM12_DRY_CELL_THRESHOLD);
     let velocityAt=destinationCellVelocity()+4u*id;
@@ -4480,7 +4479,7 @@ fn scatterSharpeningCell(cell:u32){
     let weight=stencil.weights[corner];
     if(targetCell!=INVALID&&weight>0.0){total+=weight;}}
   if(total<=1e-8){
-    addSharpeningReceipt(cell,removedFixed);return;
+    cm12RecordFailure(3u,cell,vec4u(bitcast<u32>(total),bitcast<u32>(removedFixed),0u,0u));return;
   }
   var distributedFixed=0;
   for(var corner=0u;corner<8u;corner+=1u){let targetCell=stencil.cells[corner];
@@ -10291,5 +10290,5 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   }
 }
 
-`;
+`);
 }

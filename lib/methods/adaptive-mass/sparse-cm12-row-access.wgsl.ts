@@ -155,6 +155,7 @@ fn cellMinimum(id:u32)->vec3i{let host=${w("2u")};if(id>=host){
 export function createSparseCM12RowAccessWGSL(
   readers: SparseCM12ArenaReaders,
   dynamicPages = false,
+  incidenceFailure = "",
 ): string {
   const { word: w, float: f } = readers;
   const rowWord = dynamicPages
@@ -212,7 +213,7 @@ fn termCoefficient(index:u32)->f32{return ${f(`${w("8u")}+2u*index+1u`)};}`;
 fn incidenceRange(cell:u32)->vec2u{
   let host=${w("2u")};if(cell<host){let at=${w("9u")}+cell;
     let begin=${w("at")};let end=${w("at+1u")};
-    return vec2u(begin,boundedIncidenceEnd(begin,end));}
+    return vec2u(begin,boundedIncidenceEnd(cell,begin,end));}
   let cells=BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
   let local=cell-host;let page=local/cells;let within=local%cells;
   let begin=${w("5u")}+page*(6u*cells)+6u*within;
@@ -244,11 +245,11 @@ fn incidenceRow(index:u32)->u32{return incidenceRecord(index).x;}
 fn incidenceTerm(index:u32)->u32{return incidenceRecord(index).y;}`
     : `fn incidenceRange(cell:u32)->vec2u{let at=${w("9u")}+cell;
   let begin=${w("at")};let end=${w("at+1u")};
-  return vec2u(begin,boundedIncidenceEnd(begin,end));}
+  return vec2u(begin,boundedIncidenceEnd(cell,begin,end));}
 fn incidenceBegin(cell:u32)->u32{return ${w(`${w("9u")}+cell`)};}
 fn incidenceEnd(cell:u32)->u32{
   let begin=incidenceBegin(cell);let end=${w(`${w("9u")}+cell+1u`)};
-  return boundedIncidenceEnd(begin,end);
+  return boundedIncidenceEnd(cell,begin,end);
 }
 fn incidenceRecord(index:u32)->vec2u{let at=${w("10u")}+2u*index;
   return vec2u(${w("at")},${w("at+1u")});}
@@ -280,12 +281,13 @@ fn rowExteriorPhi(id:u32)->f32{let host=${w("3u")};if(id<host){
     : `fn rowStaticArea(id:u32)->f32{return ${f("rowWord(id,3u)")};}
 fn rowExteriorPhi(id:u32)->f32{return ${f("rowWord(id,5u)")};}`;
   return `${rowWord}
-fn boundedIncidenceEnd(begin:u32,end:u32)->u32{
+fn boundedIncidenceEnd(cell:u32,begin:u32,end:u32)->u32{
   // One adaptive hexahedral cell can touch at most B^2 rows on each of its
   // six faces. Treat a reversed or larger arena range as invalid instead of
   // allowing unsigned corruption to become a multi-billion-iteration loop.
   let maximum=6u*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION;
-  return select(begin,end,end>=begin&&end-begin<=maximum);
+  if(end<begin||end-begin>maximum){${incidenceFailure}return begin;}
+  return end;
 }
 fn rowPackedTerms(id:u32)->u32{return ${w("rowWord(id,0u)")};}
 fn rowPackedMetadata(id:u32)->u32{return ${w("rowWord(id,1u)")};}

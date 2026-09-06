@@ -76,7 +76,8 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
   const gpuInfo = session.diagnostics((state) => state.gpuInfo);
   const resourceReadiness = session.diagnostics((state) => state.resourceReadiness);
   const methodId = session.method((state) => state.methodId);
-  const activities = resourceActivities(resourceReadiness);
+  const stopped = ["unavailable", "lost", "stopping", "blocked"].includes(gpuStatus.state);
+  const activities = stopped ? [] : resourceActivities(resourceReadiness);
   const trayCards = resourceActivitiesFor(resourceReadiness, "card");
   // Transport-blocking work reports here too: the transport bar only disables
   // its controls (with the reason on each control) and never grows a progress
@@ -128,7 +129,7 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
         onClick={() => setSelectorOpen(!selectorOpen)}
       >{paneId.toUpperCase()}</button>}
       {selectorOpen && <SceneSelector />}
-      {(trayCards.length > 0 || trayPills.length > 0 || transportWork) && <div className="resource-activity-tray" aria-label="Resource tasks">
+      {!stopped && (trayCards.length > 0 || trayPills.length > 0 || transportWork) && <div className="resource-activity-tray" aria-label="Resource tasks">
         {trayCards.map((activity) => <GPUInitializationPanel
           key={activity.id}
           activity={activity}
@@ -149,13 +150,6 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
         <small>{safeBringup
           ? "This browser can exclude other Fluid Lab tabs, but cannot observe Dawn's local filesystem lease."
           : <>Use <code>gpu=off</code> for UI-only inspection or <code>gpu=on</code> to restore automatic startup.</>}</small>
-      </div>}
-      {gpuStatus.state === "unavailable" && <div className="gpu-fallback"><strong>3D renderer unavailable</strong><p>{gpuStatus.label}</p>
-        {gpuStatus.reproduction && <div data-testid="gpu-failure-reproduction">
-          <small>Dawn case <strong>{gpuStatus.reproduction.caseId}</strong> · validated · serialized</small>
-          <code>{gpuStatus.reproduction.command}</code>
-        </div>}
-        <small>The scene editor, serialization, and CPU validation remain available.</small>
       </div>}
     </section>
   );

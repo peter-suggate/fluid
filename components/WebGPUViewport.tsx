@@ -1151,6 +1151,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const renderer = new WebGPURenderWorkerClient(canvas, {
       onStatus: (status) => {
         if (status.state === "lost" || status.state === "unavailable") {
+          if (status.state === "unavailable" && status.failure) diagnostics.set({ gpuStatus: status });
           running = false;
           queueMicrotask(() => { if (initializationStarted && !stopping && !stopped) void stopGPU(status.label); });
           return;
@@ -1234,6 +1235,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     };
     function stopGPU(label = "WebGPU stopped; device released — safe to close this tab", publishStatus = true): Promise<void> {
       if (stopPromise) return stopPromise;
+      const priorStatus = session.diagnostics.getState().gpuStatus;
+      const failure = priorStatus.state === "unavailable" ? priorStatus.failure
+        : session.diagnostics.getState().gpuInfo?.simulationFailure;
       stopping = true;
       running = false;
       session.runtime.getState().setRunState("paused");
@@ -1263,7 +1267,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         releaseGPULease = undefined;
         stopping = false;
         stopped = true;
-        if (publishStatus) diagnostics.set({ gpuStatus: { state: "unavailable", label: releasedLabel, reproduction, resource: webGPUPlatformResourcePlugin } });
+        if (publishStatus) diagnostics.set({ gpuStatus: { state: "unavailable", label: releasedLabel, reproduction, failure, resource: webGPUPlatformResourcePlugin } });
       })();
       return stopPromise;
     }
