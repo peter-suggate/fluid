@@ -132,7 +132,11 @@ export interface CM12SparseWorldFactoryConfig {
  */
 export interface CM12SparseWorldRuntime {
   readonly topologyPreparationPending: boolean;
+  /** Cancel an in-flight replacement when holding the current topology. */
+  cancelTopologyPreparation(): void;
   readonly generationPlanningRequired: boolean;
+  needsDetailedGenerationPlanning(maximumSpan: number, demoteEpochs: number,
+    finestTravel: number): Promise<boolean>;
   readonly generationPreparationMaximumSliceMs: number;
   readonly generationPreparationMaximumSliceOperation?: string;
   readonly generationPublicationMaximumMs: number;
@@ -147,6 +151,7 @@ export interface CM12SparseWorldRuntime {
   readonly rowCount: number;
   readonly tracerSource: WebGPUSparseCM12Resident["tracerSource"];
   readonly faceVelocitySource: WebGPUSparseCM12Resident["faceVelocitySource"];
+  readonly fieldSnapshotSourceForQA: WebGPUSparseCM12Resident["fieldSnapshotSourceForQA"];
   readonly pressureJournalSource: WebGPUSparseCM12Resident["pressureJournalSource"];
   readonly pressureJournalLayout: WebGPUSparseCM12Resident["pressureJournalLayout"];
   readonly pressureJournalArmed: boolean;
@@ -610,10 +615,14 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   private get resident() { return this.generationState.current; }
   get acceptedAtlas() { return this.resident.acceptedAtlas; }
   get generationPlanningRequired() { return this.resident.needsGenerationPlanning; }
+  needsDetailedGenerationPlanning(maximumSpan: number, demoteEpochs: number, finestTravel: number) {
+    return this.resident.needsDetailedGenerationPlanning(maximumSpan, demoteEpochs, finestTravel);
+  }
   get generationPreparationMaximumSliceMs() { return this.resident.generationPreparationMaximumSliceMs; }
   get generationPreparationMaximumSliceOperation() { return this.resident.generationPreparationMaximumSliceOperation; }
   get generationPublicationMaximumMs() { return this.generationState.maximumPublicationMs; }
   get topologyPreparationPending() { return this.generationState.pending; }
+  cancelTopologyPreparation() { this.generationState.changed(); }
   prepareResidentGeneration(build: (accepted: WebGPUSparseCM12Resident, signal: AbortSignal) => Promise<Awaited<ReturnType<WebGPUSparseCM12Resident["prepareGenerationReplacement"]>> | undefined>) {
     return this.generationState.prepare(build);
   }
@@ -628,6 +637,7 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   get rowCount() { return this.resident.rowCount; }
   get tracerSource() { return this.resident.tracerSource; }
   get faceVelocitySource() { return this.resident.faceVelocitySource; }
+  get fieldSnapshotSourceForQA() { return this.resident.fieldSnapshotSourceForQA; }
   get pressureJournalSource() { return this.resident.pressureJournalSource; }
   get pressureJournalLayout() { return this.resident.pressureJournalLayout; }
   get pressureJournalArmed() { return this.resident.pressureJournalArmed; }

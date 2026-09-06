@@ -223,6 +223,26 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     if (resolution === undefined) delete activityPolicy.forcedSurfaceResolutionForQA;
     this.options = { ...this.options, activityPolicy };
   }
+  /** Freeze membership and resolution; pressure, transport and publication stay live. */
+  setTopologyFrozen(frozen: boolean): void {
+    if ((this.options.activityPolicy?.freezeTopology === true) === frozen) return;
+    if (frozen) this.sparseRuntime.cancelTopologyPreparation();
+    this.options = { ...this.options, activityPolicy: {
+      ...SPARSE_CM12_ACTIVITY_POLICY, ...this.options.activityPolicy,
+      freezeTopology: frozen,
+    } };
+  }
+  setLegacyFaceTransportForQA(legacy: boolean): void {
+    this.options = { ...this.options, activityPolicy: {
+      ...SPARSE_CM12_ACTIVITY_POLICY, ...this.options.activityPolicy,
+      legacyFaceTransportForQA: legacy,
+    } };
+  }
+  private stageCaptureForQA?: SparseCM12ResidentStageSeams["close"];
+  setStageCaptureForQA(capture: SparseCM12ResidentStageSeams["close"] | undefined): void {
+    this.stageCaptureForQA = capture;
+  }
+  get fieldSnapshotSourceForQA() { return this.sparseRuntime.fieldSnapshotSourceForQA; }
   private atlas: SparseAdaptiveMassAtlas;
   private lastTime_s = 0;
   private topologyGenerationWork?: Promise<void>;
@@ -821,6 +841,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       ...values,
       activitySignals: values.selectorMode !== "surface",
       coarseFirst: values.selectorMode !== "surface" && values.selectorMode !== "activity",
+      // These controls belong to the running solver, not the method panel.
+      freezeTopology: this.options.activityPolicy?.freezeTopology,
+      legacyFaceTransportForQA: this.options.activityPolicy?.legacyFaceTransportForQA,
     });
     this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps,
       surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 1 ? 1
@@ -863,18 +886,29 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 
   private scheduleTopologyGeneration(): void {
-    if (this.topologyGenerationWork || this.disposed) return;
+    if (this.topologyGenerationWork || this.disposed || this.options.activityPolicy?.freezeTopology) return;
     const preparationStarted = performance.now();
     const cadence = this.options.activityPolicy?.coarseFirst && this.sparseRuntime.generationPlanningRequired
       ? Math.max(1, this.options.activityPolicy.topologyCadenceSteps)
       : Math.max(64, this.options.activityPolicy?.topologyCadenceSteps ?? 64);
     if (!this.topologyGenerationPolicyDirty && (this.info.encodedSteps ?? 0) % cadence !== 0) return;
+    const policyDirty = this.topologyGenerationPolicyDirty;
     this.topologyGenerationPolicyDirty = false;
     const mergeable = (record: SparseCM12GPUActivityRecord) => record.active && record.acceptedResolution === 1
       && record.quietEpochs >= Math.max(64, this.options.activityPolicy?.demoteEpochs ?? 64)
       && record.meanDensity >= 0.9999 && (record.reasons & (1 | 16 | 256 | 512)) === 0
       && record.maximumVelocityTravelFineCells < 0.125;
     const prepare = async () => {
+      // Live region edits and explicit spatial bounds take the detailed path.
+      // Otherwise an eight-byte conservative GPU receipt rules out ordinary
+      // rerungs, macro motion demands and quiet sibling merges before mapping
+      // capacity-sized activity or constructing CPU transfer geometry.
+      if (!policyDirty && sceneRefinementRegions(this.scene).length === 0
+        && !await this.sparseRuntime.needsDetailedGenerationPlanning(
+          this.topologyGenerationLimits.maximumSpanBricks,
+          this.options.activityPolicy?.demoteEpochs ?? 64,
+          this.options.activityPolicy?.finestTravelCells ?? 1)) return;
+      if (this.disposed || this.options.activityPolicy?.freezeTopology) return;
       // Fully backed small scenes retain the in-place path. Probe quietly for
       // sibling merges; the frozen capture below rechecks fresh evidence.
       const requiresMacroFloor = sceneRefinementRegions(this.scene).some(region =>
@@ -894,11 +928,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         }
         if (![...siblings.values()].some(count => count === 8)) return;
       }
-      if (this.disposed) return;
+      if (this.disposed || this.options.activityPolicy?.freezeTopology) return;
       this.info.topologyGenerationPending = true;
       this.info.topologyGenerationMaximumBytes = this.topologyGenerationMaximumBytes;
       return this.sparseRuntime.prepareResidentGeneration(async (accepted, signal) => {
-      const source = await accepted.captureGenerationTransferSource();
+      const source = await accepted.captureGenerationPlanningSource();
+      if (this.options.activityPolicy?.freezeTopology || signal.aborted) return undefined;
       this.publishPhysicalWidthCensus(source.atlas, source.recordsByKey, source.activity.acceptedSteps);
       const requestBudget = this.options.activityPolicy?.prepareBricksPerFrame ?? 64;
       const physicalDemands = new Map<number, number>();
@@ -969,7 +1004,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       this.info.topologyGenerationDeferred = plan?.status === "deferred"
         ? { leaves: plan.leaves, cells: plan.cells } : undefined;
       if (!plan || plan.status === "deferred") return undefined;
-      return accepted.prepareGenerationReplacement(source, plan.atlas, plan.active,
+      const transfer = await accepted.captureGenerationTransferSource(source);
+      return accepted.prepareGenerationReplacement(transfer, plan.atlas, plan.active,
         finestCellSize(this.scene, plan.atlas),
         this.topologyGenerationMaximumBytes - this.sparseRuntime.allocatedBytes, signal);
       });
@@ -977,6 +1013,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.topologyGenerationWork = prepare().then(() => {
       if (this.atlas !== this.sparseRuntime.acceptedAtlas) {
         this.info.topologyGenerationCount = (this.info.topologyGenerationCount ?? 0) + 1;
+        this.resetPressureIterationFeedback();
       }
       this.atlas = this.sparseRuntime.acceptedAtlas;
       if (this.rigidSystem && this.sparseRuntime.solidWorldCollisionSource) {
@@ -984,7 +1021,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           origin_m: this.fluidDomain.origin_m, cellSize_m: this.fluidDomain.cellSize_m });
       }
       this.info.allocatedBytes = this.presentation.allocatedBytes + this.sparseRuntime.allocatedBytes;
-      this.resetPressureIterationFeedback();
       this.info.topologyGenerationError = undefined;
     }).catch(error => {
       if (error instanceof Error && error.name === "AbortError") return;
@@ -1066,9 +1102,14 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     const frameCapture = shouldTracePhysics
       ? new AdaptiveMassFrameCapture(traceSampleId, traceContext)
       : undefined;
-    const diagnosticStageSeams = frameCapture?.residentStageSeams
+    const baseStageSeams = frameCapture?.residentStageSeams
       ?? (passBrokerLabelIsolationRequested()
         ? SPARSE_CM12_LABEL_ISOLATION_SEAMS : undefined);
+    const captureStage = this.stageCaptureForQA;
+    const diagnosticStageSeams: SparseCM12ResidentStageSeams | undefined = captureStage
+      ? { ...baseStageSeams, close: (stage, encoder) => {
+        baseStageSeams?.close(stage, encoder); captureStage(stage, encoder);
+      } } : baseStageSeams;
     const rawEncoder = this.device.createCommandEncoder({
       label: `Sparse CM12 resident frame ${(this.lastTime_s + dt_s).toFixed(6)}`,
     });

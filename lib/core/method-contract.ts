@@ -268,6 +268,8 @@ export interface GPUSolverInstance {
    * every frame for a picture nobody asked for.
    */
   setTracersEnabled?(enabled: boolean): void;
+  /** Hold accepted sparse membership and cell widths; physics continues normally. */
+  setTopologyFrozen?(frozen: boolean): void;
   /**
    * Optional MAC face velocities, for the face-arrow view.
    *

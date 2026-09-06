@@ -8,6 +8,11 @@ are in **SIM → Activity + resolution → Criterion**. Open
 **Coarse-first · ball into still pool** in the validation scene catalog.
 Changing the criterion is live; reset to compare construction-time topology.
 
+The [symmetric expansion A/B](symmetric-expansion-coarse-first-physics-2026-09-06.md)
+documents the accepted-owner curvature correction, equal-volume stencils, and
+the latest regression results. The measurements below record the original
+coarse-first rollout.
+
 ## Research and design
 
 [Ando and Batty, 2020, sections 6.1–6.6](https://cs.uwaterloo.ca/~c2batty/papers/Ando2020/Ando2020.pdf)
@@ -40,9 +45,13 @@ excluded: a deep hydrostatic pool should not refine because it is deep.
   static-solid restriction floor and authored cell-size regions also apply.
   Construct density by exact volume restriction and grade the complete wet/air
   atlas. No volume identity, scene name, or distance to the test ball is used.
-- **Accepted-state geometry:** measure normal bounds over interface cells and
-  a one-cell halo for B1 leaves. Finer leaves already supply multiple normals
-  across their represented interface. Store the resulting curvature floor in activity reason bits 16–20.
+- **Accepted-state geometry:** resolve the accepted owner directly, then measure
+  normal bounds over interface cells and a one-cell halo for B1 leaves. Each
+  gradient uses equal-width, aligned virtual control volumes, restricting finer
+  donors before differencing. This keeps a flat surface flat across 2:1 seams.
+  Stencils intersecting solid cut cells defer to the independent solid/coupling
+  floor. Finer leaves already supply multiple normals across their represented
+  interface. Store the resulting curvature floor in activity reason bits 16–20.
   This is a conservative normal-variation estimator, not a signed differential
   curvature suitable for a surface-tension force.
 - **Energy:** maximum wet-cell `E = 0.5 * |u_metres_per_second|²`. The finest

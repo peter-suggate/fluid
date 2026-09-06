@@ -741,11 +741,7 @@ export const LARGE_HYDROSTATIC_POWER_METHOD_PROFILE: MethodProfile = Object.free
 /** World-space centre of the single seeded 8-cubed fluid brick (the -x/-z quadrant). */
 export const BRICK_QUAD_DAM_SEED_M = { x: -0.2, y: 0.2, z: -0.2 };
 
-/**
- * Smallest authored hydrostatic oracle that still leaves room for adaptive
- * pressure cells away from the closed walls and planar free surface. The
- * 0.05 m lattice resolves the 0.8 m cube as exactly 16 cells per axis.
- */
+/** A suspended liquid sphere impacts a broad pool on a 128×96×128 lattice. */
 export function createCoarseFirstPoolImpactScene(): SceneDescription {
   const scene = sceneBody();
   scene.sceneId = "coarse-first-pool-impact";
@@ -756,7 +752,7 @@ export function createCoarseFirstPoolImpactScene(): SceneDescription {
   scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
   scene.fluid.initialCondition = "tank-fill";
   scene.fluid.initialLiquidVolumes = [
-    { shape: "sphere", center_m: { x: 0, y: 3.65, z: 0 }, radius_m: 0.25 },
+    { shape: "sphere", center_m: { x: 0, y: 3.65, z: 0 }, radius_m: 0.5 },
   ];
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
@@ -764,6 +760,17 @@ export function createCoarseFirstPoolImpactScene(): SceneDescription {
   scene.fluid.surfaceTension_N_m = 0;
   scene.fluid.dynamicViscosity_Pa_s = 0;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 60;
+  return scene;
+}
+
+/** Half the physical extent on each axis, retaining the 0.05 m finest cells. */
+export function createCoarseFirstPoolImpactHalfScene(): SceneDescription {
+  const scene = createCoarseFirstPoolImpactScene();
+  scene.sceneId = "coarse-first-pool-impact-half";
+  scene.container = { ...scene.container, width_m: 3.2, height_m: 2.4, depth_m: 3.2 };
+  scene.fluid.initialLiquidVolumes = [
+    { shape: "sphere", center_m: { x: 0, y: 1.825, z: 0 }, radius_m: 0.25 },
+  ];
   return scene;
 }
 
@@ -2538,6 +2545,17 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     } },
     build: createCoarseFirstPoolImpactScene,
     camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
+  }),
+  defineScene({
+    id: "coarse-first-pool-impact-half",
+    name: "Coarse-first · ball into still pool (half size)",
+    blurb: "The same pool impact at half the physical dimensions: a 64×48×64 lattice with a proportionally smaller falling ball. Keeps 0.05 m finest cells, with one eighth of the original lattice volume.",
+    audience: "validation", shelf: "Dam-break ladder", environment: "stage",
+    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+      selectorMode: "coarse-first", timeStep: "scene", brickFineResolution: "8",
+    } },
+    build: createCoarseFirstPoolImpactHalfScene,
+    camera: { distance_m: 5.5, target_m: { x: 0, y: 0.9, z: 0 } },
   }),
   defineScene({
     id: "minimal-power-dam-break-64",

@@ -378,16 +378,17 @@ export function createWebgpuSparseCM12ResidentWGSL(
   const candidateFaceSampleCount = brickFineResolution ** 2;
   const presentationPagesPerAxis = brickFineResolution / presentationPageResolution;
   const transportCellCapacity = velocityExtensionLayouts?.activity.cellCapacity ?? 1;
-  // A primal presentation patch needs one coarse-cell apron on every side in
-  // order to average its shared corner values. Scale two is the largest cached
-  // page stencil: P/2 patch cells plus the two-cell apron.
-  const presentationCacheCapacity = (presentationPageResolution / 2 + 2) ** 3;
+  // Interpolated native volume nodes need one horizontal cell of apron and
+  // three vertical cells (one interpolation neighbor plus its ±2 integral).
+  // Scale two is the largest ordinary cached page stencil.
+  const presentationCacheCapacity = (presentationPageResolution / 2 + 2) ** 2
+    * (presentationPageResolution / 2 + 6);
   const presentationPatchCapacity = (presentationPageResolution / 2) ** 3;
   const presentationHeightColumnAxis = presentationPageResolution + 2;
   const presentationHeightCacheCapacity = presentationHeightColumnAxis ** 2;
   const surfaceProofLatticeAxis = presentationPageResolution + 2;
   const surfaceProofLatticeCapacity = surfaceProofLatticeAxis ** 3;
-  const surfaceProofDensityAxis = presentationPageResolution / 2 + 4;
+  const surfaceProofDensityAxis = presentationPageResolution / 2 + 6;
   const surfaceProofDensityCapacity = surfaceProofDensityAxis ** 3;
   const incrementalActivityEntries = incrementalActivityLayout
     ? createSparseCM12IncrementalActivityWGSL(incrementalActivityLayout,
@@ -409,6 +410,17 @@ fn incrementalActivityAddCensus(brick:u32,score:u32,reasons:u32){
   if(value>=p.activityTiming.y){atomicAdd(&activity[3],1u);}
   if(value<=p.activityTiming.w){atomicAdd(&activity[4],1u);}
   atomicAdd(&activity[6],1u);
+}
+fn incrementalActivityReplaceCensus(brick:u32,score:u32,reasons:u32){
+  if(!brickActive(brick)){return;}
+  let output=activityRecord(brick);let oldScore=atomicLoad(&activity[output]);
+  let oldReasons=atomicLoad(&activity[output+1u]);
+  if((oldReasons&1u)!=0u){atomicSub(&activity[2],1u);}
+  if(f32(oldScore)/255.0>=p.activityTiming.y){atomicSub(&activity[3],1u);}
+  if(f32(oldScore)/255.0<=p.activityTiming.w){atomicSub(&activity[4],1u);}
+  if((reasons&1u)!=0u){atomicAdd(&activity[2],1u);}
+  if(f32(score)/255.0>=p.activityTiming.y){atomicAdd(&activity[3],1u);}
+  if(f32(score)/255.0<=p.activityTiming.w){atomicAdd(&activity[4],1u);}
 }
 `;
   const framePlanEntries = framePlanLayout
@@ -2131,6 +2143,33 @@ fn traceFaceDepartureAtSpans(position:vec3f,spans:vec3f)->vec3f{
   return traced;
 }
 
+// A compact vertical volume integral shares the density scalar's units:
+// a four-cell trapezoidal stencil is exact for affine density and places
+// a sharp (possibly prolonged) waterline at its integrated cell volume.
+// Endpoint support continuously returns to the ordinary density scalar for
+// detached sheets and diffuse profiles. There is no column-validity switch.
+fn presentationResolvedColumnPhi(rho:array<f32,5>)->f32{
+  let integral=0.5*(rho[0]+rho[4])+rho[1]+rho[2]+rho[3];
+  let support=rho[0]*(1.0-rho[4]);
+  return p.frame.y*mix(4.0*(CM12_LIQUID_ISOVALUE-rho[2]),
+    2.0-integral,support);
+}
+
+// Conservative refinement can spread an interface over two fine cells. The
+// outer correction completes that volume bracket without changing the affine
+// four-cell scalar: these weights sum to four and have zero first moment.
+fn presentationResolvedFineColumnPhi(rho:array<f32,7>)->f32{
+  // An outer endpoint beyond an air gap can belong to another liquid body.
+  // Keep only the connected bracket; the ratios are one on monotone profiles
+  // and vanish continuously for an unbacked sheet, without a mode threshold.
+  let low=max(rho[0],rho[1]);let high=min(rho[6],rho[5]);
+  let lowerConnection=min(1.0,rho[1]/max(rho[3],1e-6));
+  let upperConnection=min(1.0,(1.0-rho[5])/max(1.0-rho[3],1e-6));
+  let integral=rho[1]+rho[2]+rho[3]+rho[4]+rho[5]-0.5*(low+high);
+  let support=low*(1.0-high)*lowerConnection*upperConnection;
+  return p.frame.y*mix(4.0*(CM12_LIQUID_ISOVALUE-rho[3]),2.0-integral,support);
+}
+
 fn presentationPhiAt(cell:u32,densityOffset:u32)->f32{
   // Conservative transport may carry a small rho/V overshoot while pressure
   // removes compression. It is mass, not an instruction to move the rendered
@@ -2139,7 +2178,22 @@ fn presentationPhiAt(cell:u32,densityOffset:u32)->f32{
   let effective=clamp(state[densityOffset+cell]
     /max(cellOpenFraction(cell),1e-6),0.0,1.0);
   let liquidPhi=(CM12_LIQUID_ISOVALUE-effective)*4.0*p.frame.y;
-  return liquidPhi;
+  if(cellMinimumWidth(cell)!=1.0){return liquidPhi;}
+  let q=vec3i(floor(cellCenter(cell)));
+  var rho=array<f32,7>(0.0,0.0,0.0,effective,0.0,0.0,0.0);
+  for(var at=0u;at<7u;at+=1u){
+    if(at==3u){continue;}
+    let probe=q+vec3i(0,i32(at)-3,0);
+    if(probe.y<0||probe.y>=i32(p.dimensions.y)
+      ||cm12SolidVoxelFractionQ8(probe)>0u){return liquidPhi;}
+    let owner=compactOwnerCellAt(probe);
+    if(owner.x!=INVALID&&brickActive(owner.y)){
+      let open=cellOpenFraction(owner.x);
+      if(open<1.0-1e-6){return liquidPhi;}
+      rho[at]=clamp(state[densityOffset+owner.x]/max(open,1e-6),0.0,1.0);
+    }
+  }
+  return presentationResolvedFineColumnPhi(rho);
 }
 fn presentationPhi(cell:u32)->f32{return presentationPhiAt(cell,destinationDensity());}
 
@@ -2228,8 +2282,158 @@ fn restrictedPresentationDensityAt(lower:vec3i,cellScale:i32,densityOffset:u32)-
   }}
   return rho/f32(cellScale*cellScale*cellScale);
 }
+// Presentation consumes the same accepted TEI leaf descriptors as transport:
+// first cell, native scale and valid strides are compiled at topology commit.
+// Page/proof workgroups stage the nearby directory once. Queries outside that
+// window still load a compiled leaf, never reconstruct its template address.
+var<workgroup>presentationTopologyStaged:u32;
+// Binding 14 remains renderer metadata during publication. Binding 3 carries
+// the existing TEI buffer in the presentation bind group (no copy or rebuild).
+fn presentationTeiWord(index:u32)->u32{
+  return bitcast<vec4u>(partials[index/4u])[index%4u];
+}
+fn presentationLoadLeaf(slot:u32,brick:u32)->CM12TransportLeaf{
+  if(brick>=CM12_TEI_LEAF_CAPACITY){return CM12TransportLeaf(
+    0u,0u,INVALID,0u,INVALID,vec3u(0u),0u,0u);}
+  let at=cm12TeiLeafBase(slot)+CM12_TEI_LEAF_WORDS*brick;
+  let generation=presentationTeiWord(at);
+  if(generation==0u){return CM12TransportLeaf(
+    0u,0u,INVALID,0u,INVALID,vec3u(0u),0u,0u);}
+  let packed=presentationTeiWord(at+5u);let scale=presentationTeiWord(at+6u);
+  return CM12TransportLeaf(generation,presentationTeiWord(at+1u),
+    presentationTeiWord(at+2u),presentationTeiWord(at+3u),brick,
+    vec3u(packed&31u,(packed>>5u)&31u,(packed>>10u)&31u),scale,
+    cm12TeiScaleLog2(scale,presentationTeiWord(at+7u)));
+}
+fn presentationStageTopology(brick:u32,lane:u32){
+  let center=cm12WorldLeafCoordinate(brick);let slot=acceptedTopologySlot();
+  if(lane==0u){cm12TeiCacheCenter=center;cm12TeiCacheSlot=slot;}
+  if(lane<27u){
+    let coordinate=center+vec3i(i32(lane%3u)-1,i32((lane/3u)%3u)-1,i32(lane/9u)-1);
+    let leaf=presentationLoadLeaf(slot,cm12WorldOwnerAt(coordinate));
+    cm12TeiCache0[lane]=vec4u(leaf.generation,leaf.flags,leaf.first,leaf.count);
+    cm12TeiCache1[lane]=vec4u(leaf.owner,
+      leaf.valid.x|(leaf.valid.y<<5u)|(leaf.valid.z<<10u),leaf.scale,leaf.scaleLog2);
+  }
+  if(lane==0u){presentationTopologyStaged=1u;}workgroupBarrier();
+}
+fn presentationLeafAt(lower:vec3i)->CM12TransportLeaf{
+  let edge=i32(BRICK_FINE_RESOLUTION);
+  let tile=vec3i(cm12WorldFloorToSpan(lower.x,edge),
+    cm12WorldFloorToSpan(lower.y,edge),cm12WorldFloorToSpan(lower.z,edge))/edge;
+  let delta=tile-cm12TeiCacheCenter;
+  if(presentationTopologyStaged!=0u&&all(delta>=vec3i(-1))&&all(delta<=vec3i(1))){
+    let index=u32(delta.x+1)+3u*u32(delta.y+1)+9u*u32(delta.z+1);
+    let a=cm12TeiCache0[index];let b=cm12TeiCache1[index];
+    return CM12TransportLeaf(a.x,a.y,a.z,a.w,b.x,
+      vec3u(b.y&31u,(b.y>>5u)&31u,(b.y>>10u)&31u),b.z,b.w);
+  }
+  return presentationLoadLeaf(acceptedTopologySlot(),cm12WorldOwnerAt(tile));
+}
+fn presentationCompiledOwnerCellAt(q:vec3i)->vec3u{
+  let leaf=presentationLeafAt(q);
+  if((leaf.flags&0x80000000u)==0u||leaf.scale==0u){return vec3u(INVALID);}
+  let relative=q-cm12WorldLeafCoordinate(leaf.owner)*i32(BRICK_FINE_RESOLUTION);
+  if(any(relative<vec3i(0))){return vec3u(INVALID);}
+  let local=vec3u(relative)>>vec3u(leaf.scaleLog2);
+  if(any(local>=leaf.valid)){return vec3u(INVALID);}
+  let offset=local.x+leaf.valid.x*(local.y+leaf.valid.y*local.z);
+  if(offset>=leaf.count){return vec3u(INVALID);}
+  return vec3u(leaf.first+offset,leaf.owner,leaf.flags&31u);
+}
+// Integrate each native donor once, weighted by its exact overlap volume.
+// A logical tile has one accepted leaf even at mixed-rung and macro seams.
+fn presentationLeafMass(leaf:CM12TransportLeaf,lower:vec3i,extent:vec3i,
+ densityOffset:u32)->f32{
+  if((leaf.flags&0x80000000u)==0u||leaf.scale==0u){return 0.0;}
+  if((atomicLoad(&activity[activityRecord(leaf.owner)+1u])&64u)==0u){return 0.0;}
+  let origin=cm12WorldLeafCoordinate(leaf.owner)*i32(BRICK_FINE_RESOLUTION);
+  let relative=lower-origin;let scale=i32(leaf.scale);
+  var mass=0.0;var z=0;
+  loop{if(z>=extent.z){break;}
+    let dz=min(extent.z-z,scale-(relative.z+z)%scale);var y=0;
+    loop{if(y>=extent.y){break;}
+      let dy=min(extent.y-y,scale-(relative.y+y)%scale);var x=0;
+      loop{if(x>=extent.x){break;}
+        let dx=min(extent.x-x,scale-(relative.x+x)%scale);
+        let local=vec3u((relative+vec3i(x,y,z))/scale);
+        let offset=local.x+leaf.valid.x*(local.y+leaf.valid.y*local.z);
+        if(all(local<leaf.valid)&&offset<leaf.count){
+          let cell=leaf.first+offset;
+          mass+=f32(dx*dy*dz)*clamp(state[densityOffset+cell]
+            /max(cellOpenFraction(cell),1e-6),0.0,1.0);
+        }
+        x+=dx;
+      }y+=dy;
+    }z+=dz;
+  }
+  return mass;
+}
+fn presentationCompiledDensityAt(lower:vec3i,cellScale:i32,densityOffset:u32)->f32{
+  let leaf=presentationLeafAt(lower);let edge=i32(BRICK_FINE_RESOLUTION);
+  if((leaf.flags&0x80000000u)!=0u&&leaf.scale!=0u){
+    let origin=cm12WorldLeafCoordinate(leaf.owner)*edge;
+    let local=vec3u(lower-origin)>>vec3u(leaf.scaleLog2);
+    let offset=local.x+leaf.valid.x*(local.y+leaf.valid.y*local.z);
+    if(all(local<leaf.valid)&&offset<leaf.count&&leaf.scale>=u32(cellScale)){
+      return clamp(state[densityOffset+leaf.first+offset]
+        /max(cellOpenFraction(leaf.first+offset),1e-6),0.0,1.0);
+    }
+    var upper=origin+vec3i(leaf.valid*leaf.scale);
+    if(!brickHasUnclippedWorldGeometry(leaf.owner)){upper=min(upper,vec3i(p.dimensions.xyz));}
+    if(all(lower>=origin)&&all(lower+vec3i(cellScale)<=upper)){
+      return presentationLeafMass(leaf,lower,vec3i(cellScale),densityOffset)
+        /f32(cellScale*cellScale*cellScale);
+    }
+  }
+  var mass=0.0;var z=0;
+  loop{if(z>=cellScale){break;}
+    let dz=min(cellScale-z,edge-((lower.z+z)%edge+edge)%edge);var y=0;
+    loop{if(y>=cellScale){break;}
+      let dy=min(cellScale-y,edge-((lower.y+y)%edge+edge)%edge);var x=0;
+      loop{if(x>=cellScale){break;}
+        let dx=min(cellScale-x,edge-((lower.x+x)%edge+edge)%edge);
+        let q=lower+vec3i(x,y,z);
+        mass+=presentationLeafMass(presentationLeafAt(q),q,vec3i(dx,dy,dz),densityOffset);
+        x+=dx;
+      }y+=dy;
+    }z+=dz;
+  }
+  return mass/f32(cellScale*cellScale*cellScale);
+}
+// A finer display stencil must integrate a coarse interface, not repeat its
+// volume fraction as a diffuse slab. Preserve raw restriction for topology
+// transfer; this reconstruction changes presentation samples only.
+fn reconstructedPresentationDensityAt(lower:vec3i,cellScale:i32,densityOffset:u32)->f32{
+  let owner=presentationCompiledOwnerCellAt(lower);
+  if(owner.x!=INVALID&&brickActive(owner.y)){
+    let ownerScale=i32(BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z);
+    let density=clamp(state[densityOffset+owner.x]
+      /max(cellOpenFraction(owner.x),1e-6),0.0,1.0);
+    if(ownerScale>cellScale&&density>0.0&&density<1.0){
+      let origin=vec3i(floor(cellCenter(owner.x)-vec3f(f32(ownerScale)*0.5)));
+      var rho:array<f32,5>;
+      for(var at=0u;at<5u;at+=1u){
+        let probe=origin+vec3i(0,(i32(at)-2)*ownerScale,0);
+        if(probe.y<0){rho[at]=1.0;}
+        else if(probe.y>=i32(p.dimensions.y)){rho[at]=0.0;}
+        else{rho[at]=presentationCompiledDensityAt(probe,ownerScale,densityOffset);}
+      }
+      // Only an enclosed monotone top-interface bracket provides a unique
+      // subcell fill; detached or overturned interfaces retain their means.
+      if(rho[0]>=1.0-1e-6&&rho[4]<=1e-6
+        &&rho[0]>=rho[1]&&rho[1]>=rho[2]&&rho[2]>=rho[3]&&rho[3]>=rho[4]){
+        let distance=f32(ownerScale)*presentationResolvedColumnPhi(rho)/p.frame.y
+          +f32(lower.y-origin.y)+0.5*f32(cellScale-ownerScale);
+        return clamp(0.5-distance/f32(cellScale),0.0,1.0);
+      }
+    }
+  }
+  return presentationCompiledDensityAt(lower,cellScale,densityOffset);
+}
+
 fn restrictedPresentationDensity(lower:vec3i,cellScale:i32)->f32{
-  return restrictedPresentationDensityAt(lower,cellScale,destinationDensity());
+  return reconstructedPresentationDensityAt(lower,cellScale,destinationDensity());
 }
 
 // Read one virtual coarse-cell density from the page-local restriction cache.
@@ -2244,7 +2448,7 @@ fn presentationStencilDensityAt(coarse:vec3i,cellScale:u32,
       *(cache.y+cacheDimensions.y*cache.z);
     return presentationDensityCache[cacheIndex];
   }
-  return restrictedPresentationDensityAt(canonical*i32(cellScale),
+  return reconstructedPresentationDensityAt(canonical*i32(cellScale),
     i32(cellScale),densityOffset);
 }
 
@@ -2472,6 +2676,40 @@ fn heightRawReceipt(q:vec2u)->vec2f{
 }
 ${sparseCM12HeightReconstructionWGSL(brickFineResolution)}
 
+// A coarse column is a volume average over its X/Z footprint. Repeating its
+// height at every fine sample creates one flat terrace per authority cell.
+// Interpolate neighboring column receipts at their native centers instead;
+// all vertical pages evaluate the same horizontal field. This changes only
+// presentation and preserves constant/off-grid waterline receipts exactly.
+fn presentationContinuousColumnHeight(brick:u32,x:i32,z:i32,
+ densityOffset:u32,floorColumn:bool)->vec2f{
+  if(brick>=p.dispatch.w||!brickActive(brick)){return vec2f(0.0);}
+  let scale=BRICK_FINE_RESOLUTION*brickSpan(brick)/acceptedBrickResolution(brick);
+  if(scale==1u){
+    if(floorColumn){return presentationIntegratedAdaptiveFloorHeight(x,z,densityOffset);}
+    return presentationIntegratedColumnHeight(brick,x,z,densityOffset);
+  }
+  let position=(vec2f(f32(x),f32(z))+vec2f(0.5))/f32(scale)-vec2f(0.5);
+  let lower=vec2i(floor(position));let t=fract(position);var height=0.0;
+  for(var dz=0;dz<2;dz+=1){for(var dx=0;dx<2;dx+=1){
+    let sample=clamp(vec2i((vec2f(lower+vec2i(dx,dz))+vec2f(0.5))*f32(scale)),
+      vec2i(0),vec2i(p.dimensions.xz)-vec2i(1));
+    var receipt=vec2f(0.0);
+    if(floorColumn){
+      receipt=presentationIntegratedAdaptiveFloorHeight(sample.x,sample.y,densityOffset);
+    }else{
+      let y=cm12WorldLeafCoordinate(brick).y*i32(BRICK_FINE_RESOLUTION);
+      let owner=compactOwnerCellAt(vec3i(sample.x,y,sample.y));
+      if(owner.x==INVALID){return vec2f(0.0);}
+      receipt=presentationIntegratedColumnHeight(owner.y,sample.x,sample.y,densityOffset);
+    }
+    if(receipt.y!=1.0){return vec2f(0.0);}
+    let weight=select(1.0-t.x,t.x,dx==1)*select(1.0-t.y,t.y,dz==1);
+    height+=weight*receipt.x;
+  }}
+  return vec2f(height,1.0);
+}
+
 fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
  densityOffset:u32,halo:bool){
   let axis=select(PRESENTATION_PAGE_RESOLUTION,
@@ -2549,7 +2787,7 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
       let localZ=column/axis;let localX=column-localZ*axis;
       let x=clamp(pageOrigin.x+i32(localX)-offset,0,i32(p.dimensions.x)-1);
       let z=clamp(pageOrigin.z+i32(localZ)-offset,0,i32(p.dimensions.z)-1);
-      let receipt=presentationIntegratedAdaptiveFloorHeight(x,z,densityOffset);
+      let receipt=presentationContinuousColumnHeight(brick,x,z,densityOffset,true);
       let height=receipt.x;
       let pageLow=f32(pageOrigin.y)-1.0;
       let pageHigh=f32(pageOrigin.y+i32(PRESENTATION_PAGE_RESOLUTION))+1.0;
@@ -2569,7 +2807,7 @@ fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
         let owner=compactOwnerCellAt(vec3i(x,pageOrigin.y,z));
         columnBrick=select(INVALID,owner.y,owner.x!=INVALID);
       }
-      let receipt=presentationIntegratedColumnHeight(columnBrick,x,z,densityOffset);
+      let receipt=presentationContinuousColumnHeight(columnBrick,x,z,densityOffset,false);
       let height=receipt.x;var valid=receipt.y>0.5;
       let pageLow=f32(pageOrigin.y)-1.0;
       let pageHigh=f32(pageOrigin.y+i32(PRESENTATION_PAGE_RESOLUTION))+1.0;
@@ -2605,7 +2843,11 @@ fn presentationHeightPolicyEnabled(brick:u32)->bool{
   // creates the very waterline jump this reconstruction exists to prevent.
   // The column proof below is the authority; injection alone remains excluded
   // because it intentionally changes mass while presentation is publishing.
-  return brick<p.dispatch.w&&p.injectionCenter.w<=0.5;
+  if(brick>=p.dispatch.w||p.injectionCenter.w>0.5){return false;}
+  // Every deep interface now uses a continuous local volume scalar. Keep
+  // column receipts only for the floor continuation contract; coarse pages
+  // use that receipt as a continuation flag, not a different zero surface.
+  return cm12WorldLeafCoordinate(brick).y==0;
 }
 
 fn presentationColumnHeight(localX:i32,localZ:i32,halo:bool)->f32{
@@ -2680,18 +2922,15 @@ fn preparePresentationInterpolationCache(lane:u32,cellScale:u32,
   workgroupBarrier();
 }
 
-// Evaluate one conservative limited-linear coarse patch on the existing fine
-// presentation lattice. Symmetric child offsets sum to zero, so publishing or
-// prolonging every child preserves the authoritative parent density exactly.
+// Display a continuous scalar between accepted cell-center densities. The
+// conservative per-cell linear polynomial used for refinement has independent
+// face traces and therefore creates terraces when contoured. Interpolation is
+// presentation-only; directSmoothedPresentationDensityAt retains conservative
+// transfer of the authoritative finite-volume means.
 fn smoothedPresentationDensityAt(q:vec3i,cellScale:u32,
  patchFirst:vec3i,patchDimensions:vec3u)->f32{
-  let shifted=(vec3f(q)+vec3f(0.5))/f32(cellScale);
-  let lower=vec3i(floor(shifted));let t=fract(shifted);
-  let coordinate=vec3u(lower-patchFirst);
-  let index=coordinate.x+patchDimensions.x
-    *(coordinate.y+patchDimensions.y*coordinate.z);
-  let a=presentationInterpolationCoefficients[2u*index];
-  return a.x+dot(a.yzw,t-vec3f(0.5));
+  return interpolatedPresentationDensityAt(q,cellScale,patchFirst-vec3i(1,3,1),
+    patchDimensions+vec3u(2u,6u,2u),true,0u);
 }
 
 // Bounded fallback for macro pages whose native span exceeds the ordinary
@@ -2711,6 +2950,48 @@ fn interpolatedPresentationDensityAt(q:vec3i,cellScale:u32,
     rho+=wx*wy*wz*density;
   }}}
   return rho;
+}
+
+// Native compact volume nodes give every rung the same physical scalar units.
+// Interpolating these nodes avoids both independent coarse-cell face traces
+// and the discontinuous switch between density and a whole-column height proof.
+fn presentationCoarseColumnPhi(coarse:vec3i,cellScale:u32,
+ cacheFirst:vec3i,cacheDimensions:vec3u,cacheFits:bool,densityOffset:u32)->f32{
+  let cellsY=i32(p.dimensions.y/cellScale);
+  var rho:array<f32,5>;
+  for(var at=0u;at<5u;at+=1u){
+    let q=coarse+vec3i(0,i32(at)-2,0);
+    if(q.y>=cellsY){rho[at]=0.0;}
+    else if(q.y<0){
+      // Continue a represented floor film below the floor; a dry floor below
+      // a detached body remains air and must not gain an artificial bridge.
+      let floorDensity=presentationStencilDensityAt(vec3i(q.x,0,q.z),cellScale,
+        cacheFirst,cacheDimensions,cacheFits,densityOffset);
+      rho[at]=select(0.0,1.0,floorDensity>1e-6);
+    }else{
+      rho[at]=presentationStencilDensityAt(q,cellScale,
+        cacheFirst,cacheDimensions,cacheFits,densityOffset);
+    }
+  }
+  // The upper endpoint can belong to a detached liquid body beyond an air
+  // gap. It is not volume in this lower interface bracket. A running minimum
+  // removes that unrelated tail continuously, without a validity threshold.
+  rho[4]=min(rho[4],rho[3]);
+  return f32(cellScale)*presentationResolvedColumnPhi(rho);
+}
+fn presentationInterpolatedVolumePhi(q:vec3i,cellScale:u32,
+ cacheFirst:vec3i,cacheDimensions:vec3u,cacheFits:bool,densityOffset:u32)->f32{
+  let position=(vec3f(q)+vec3f(0.5))/f32(cellScale)-vec3f(0.5);
+  let lower=vec3i(floor(position));let t=fract(position);var phi=0.0;
+  for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
+    let offset=vec3i(dx,dy,dz);
+    let value=presentationCoarseColumnPhi(lower+offset,cellScale,
+      cacheFirst,cacheDimensions,cacheFits,densityOffset);
+    let weight=select(1.0-t.x,t.x,dx==1)*select(1.0-t.y,t.y,dy==1)
+      *select(1.0-t.z,t.z,dz==1);
+    phi+=weight*value;
+  }}}
+  return phi;
 }
 
 // Cache-free mirror of the conservative limited-linear coarse patch. The
@@ -3192,6 +3473,55 @@ fn accumulateTransportDeficit(rank:u32,cell:u32,density:i32,gamma:i32,
   atomicAdd(&conditioning[5u*p.counts.x+cell],momentum.z);
 }
 
+// Read the accepted staggered component at a native face or mixed-width port.
+// Collocated values have already averaged opposite faces: interpolating them
+// back to a face applies a [1/4, 1/2, 1/4] filter even when dt is zero.
+// Dry donor faces have no pressure authority yet and retain velocity extension.
+fn nativeTransportFaceAt(position:vec3f,axis:u32,width:f32)->vec2f{
+  var normal=vec3f(0.0);normal[axis]=0.25*width;
+  let query=clamp(position+normal,vec3f(0.5),vec3f(p.dimensions.xyz)-vec3f(0.5));
+  let owner=ownerCellAt(vec3i(floor(query)));
+  if(owner==INVALID||cellMinimumWidth(owner)>width){return vec2f(0.0);}
+  for(var at=incidenceBegin(owner);at<incidenceEnd(owner);at+=1u){
+    let donor=incidenceRow(at);
+    if(!rowAccepted(donor)||rowAxis(donor)!=axis
+      ||any(abs(rowCenter(donor)-position)>vec3f(1e-4))){continue;}
+    let negative=faceVelocitySupportAt(vec3i(floor(position-normal)));
+    let positive=faceVelocitySupportAt(vec3i(floor(position+normal)));
+    if((negative.owner&&negative.spans.x>width)
+      ||(positive.owner&&positive.spans.x>width)){return vec2f(0.0);}
+    if(negative.liquid||positive.liquid){
+      return vec2f(state[sourceFaceVelocity()+donor],1.0);
+    }
+    return vec2f(0.5*(negative.velocity[axis]+positive.velocity[axis]),1.0);
+  }
+  return vec2f(0.0);
+}
+
+fn sampleNativeTransportFace(position:vec3f,axis:u32,width:f32)->vec2f{
+  var offset=vec3f(0.5);offset[axis]=0.0;
+  let lowerLimit=width*offset;
+  let upperLimit=vec3f(p.dimensions.xyz)-width*offset;
+  let shifted=clamp(position,lowerLimit,upperLimit)/width-offset;
+  let lower=floor(shifted);let fraction=fract(shifted);
+  var value=0.0;
+  for(var z=0u;z<2u;z+=1u){for(var y=0u;y<2u;y+=1u){for(var x=0u;x<2u;x+=1u){
+    let weight=select(1.0-fraction.x,fraction.x,x==1u)
+      *select(1.0-fraction.y,fraction.y,y==1u)
+      *select(1.0-fraction.z,fraction.z,z==1u);
+    if(weight<=0.0){continue;}
+    let point=width*(lower+vec3f(f32(x),f32(y),f32(z))+offset);
+    let donor=nativeTransportFaceAt(point,axis,width);
+    // Only the unsupported corner falls back to the seam-safe interpolant.
+    // Falling back for the whole characteristic would restore the zero-time
+    // smoothing as soon as a corner acquired even an infinitesimal weight.
+    var component=donor.x;
+    if(donor.y==0.0){component=sampleFaceVelocitySupport(point)[axis];}
+    value+=weight*component;
+  }}}
+  return vec2f(value,1.0);
+}
+
 fn finishTransportFaceRow(row:u32,characteristic:f32,touchesLiquid:bool){
   // The traced characteristic is the transported face authority. Blending it
   // back toward the old receiver value attenuates a newly wetted front every
@@ -3221,7 +3551,15 @@ fn prepareTransportFaceRow(row:u32){
   if(!touchesExtendedVelocity){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasSolidBoundaries());return;
   }
-  var regionWidth=1.0;
+  // Both intra-brick and equal-width brick-face rows are regular MAC faces.
+  // At B1 every face is a brick face; excluding kind 1 would leave the
+  // coarsest liquid entirely on the dissipative collocated remap.
+  // Mixed ports (kind 2) live at the coarser patch center and use its lattice.
+  // Only unavailable donor corners need the collocated seam interpolation.
+  let retainFaceDetail=(p.surfaceProof.w&0x40000000u)==0u
+    &&touchesLiquid&&rowKind(row)<=2u
+    &&(!hasSolidBoundaries()||rowOpenFraction(row)>=1.0-1e-6);
+  var regionWidth=select(1.0,max(negative.spans.x,positive.spans.x),retainFaceDetail);
   if(p.refinementRegionControl.x>0u){
     let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
     for(var term=begin;term<end;term+=1u){
@@ -3231,14 +3569,18 @@ fn prepareTransportFaceRow(row:u32){
       }
     }
   }
-  var characteristic=0.0;
+  var characteristic=0.0;var departure=rowCenter(row);
   if(regionWidth>1.0){
     let spans=vec3f(regionWidth);
-    let departure=traceFaceDepartureAtSpans(rowCenter(row),spans);
+    departure=traceFaceDepartureAtSpans(rowCenter(row),spans);
     characteristic=sampleFaceVelocitySupportAtSpans(departure,spans)[axis];
   }else{
-    let departure=traceFaceDeparture(rowCenter(row));
+    departure=traceFaceDeparture(rowCenter(row));
     characteristic=sampleFaceVelocitySupport(departure)[axis];
+  }
+  if(retainFaceDetail){
+    let native=sampleNativeTransportFace(departure,axis,regionWidth);
+    if(native.y!=0.0){characteristic=native.x;}
   }
   finishTransportFaceRow(row,characteristic,touchesLiquid);
 }
@@ -4426,37 +4768,40 @@ fn finalizeDensityCapacityRepairGate${gate}(
     acceptedTemplateCellInvocation(gid.x)),${gate + 1}u);
 }`).join("\n")}
 
-// The CPU sparse path retains a proven horizontal D4 invariant after surface
-// conditioning. Quantizing the orbit sum before division makes that invariant
-// bit-exact despite transformed cells visiting the same values in another
-// floating-point order. This pass is encoded only while the topology and
-// authored material are D4 symmetric.
+// Retain a proven horizontal D4 invariant after conditioning. Every member
+// folds its coordinates into the same octant before enumerating the orbit,
+// so the floating sum has identical order everywhere. Rounding density and
+// gamma to fixed point here discarded sub-quantum liquid every frame, even
+// when the input was already exactly symmetric. No quantization is needed.
 @compute @workgroup_size(64)
 fn preserveHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
   if(!cellActive(cell)){
     state[p.stateOffsets5.x+cell]=0.0;state[p.stateOffsets5.y+cell]=1.0;return;
   }
-  let center=cellCenter(cell);let extent=f32(p.dimensions.x);
+  let rawCenter=cellCenter(cell);let extent=f32(p.dimensions.x);
+  let folded=min(rawCenter.xz,vec2f(extent)-rawCenter.xz);
+  let center=vec3f(min(folded.x,folded.y),rawCenter.y,max(folded.x,folded.y));
   let xs=array<f32,8>(center.x,extent-center.x,center.x,extent-center.x,
     center.z,extent-center.z,center.z,extent-center.z);
   let zs=array<f32,8>(center.z,center.z,extent-center.z,extent-center.z,
     center.x,center.x,extent-center.x,extent-center.x);
-  var rhoSum=0;var gammaSum=0;var count=0;
+  let ownRho=state[destinationDensity()+cell];
+  let ownGamma=state[destinationGamma()+cell];
+  var rhoSum=0.0;var gammaSum=0.0;var count=0;
+  var sameRho=true;var sameGamma=true;
   for(var transform=0u;transform<8u;transform+=1u){
     let member=ownerCellAt(vec3i(i32(floor(xs[transform])),i32(floor(center.y)),
       i32(floor(zs[transform]))));
     if(member==INVALID){continue;}
-    rhoSum+=i32(round(state[destinationDensity()+member]
-      *CM12_SPARSE_TRANSPORT_FIXED));
-    gammaSum+=i32(round(state[destinationGamma()+member]
-      *CM12_SPARSE_TRANSPORT_FIXED));
+    let rho=state[destinationDensity()+member];
+    let gamma=state[destinationGamma()+member];
+    rhoSum+=rho;gammaSum+=gamma;
+    sameRho=sameRho&&rho==ownRho;sameGamma=sameGamma&&gamma==ownGamma;
     count+=1;
   }
-  state[p.stateOffsets5.x+cell]=f32(rhoSum)
-    /(f32(count)*CM12_SPARSE_TRANSPORT_FIXED);
-  state[p.stateOffsets5.y+cell]=f32(gammaSum)
-    /(f32(count)*CM12_SPARSE_TRANSPORT_FIXED);
+  state[p.stateOffsets5.x+cell]=select(rhoSum/f32(count),ownRho,sameRho);
+  state[p.stateOffsets5.y+cell]=select(gammaSum/f32(count),ownGamma,sameGamma);
 }
 
 @compute @workgroup_size(64)
@@ -5241,6 +5586,8 @@ var<workgroup>reduceC:array<f32,64>;
 // Activity is reduced as one record per lane rather than eleven separate
 // planes.
 var<workgroup>activityMoments:array<vec4i,64>;
+var<workgroup>activityRequestedBrick:u32;
+var<workgroup>activityCoarseNormalSupport:vec4f;
 var<workgroup>activityMetrics:array<vec4f,64>;
 var<workgroup>activityNormalMinimum:array<vec3f,64>;
 var<workgroup>activityNormalMaximum:array<vec3f,64>;
@@ -5915,6 +6262,14 @@ fn activityD4MaskToOwn(mask:u32,transform:u32)->u32{
   return result;
 }
 
+// Reasons are boolean flags except for the packed numeric curvature floor.
+// Unioning rungs (for example 1 | 4 == 5) invents a non-dyadic request that
+// candidate validation must reject. Symmetry requires the strongest floor.
+fn mergeActivityReasonWords(a:u32,b:u32)->u32{
+  let curvatureMask=31u<<16u;
+  return ((a|b)&~curvatureMask)|max(a&curvatureMask,b&curvatureMask);
+}
+
 @compute @workgroup_size(64)
 fn preserveActivityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}
@@ -5931,7 +6286,7 @@ fn preserveActivityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
     if(member==INVALID||member>=p.dispatch.w){continue;}
     let record=activityRecord(member);let history=atomicLoad(&activity[record+2u]);
     score=max(score,atomicLoad(&activity[record]));
-    reasons|=atomicLoad(&activity[record+1u]);
+    reasons=mergeActivityReasonWords(reasons,atomicLoad(&activity[record+1u]));
     hot=max(hot,history&255u);quiet=min(quiet,(history>>8u)&255u);
     proof=min(proof,(history>>16u)&255u);
     support|=activityD4MaskToOwn(atomicLoad(&activity[record+32u]),transform);
@@ -5948,6 +6303,9 @@ fn preserveActivityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn commitActivityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
   let brick=gid.x;if(brick>=p.dispatch.w){return;}let record=activityRecord(brick);
+  incrementalActivityReplaceCensus(brick,
+    bitcast<u32>(atomicLoad(&conditioning[brick])),
+    bitcast<u32>(atomicLoad(&conditioning[p.dispatch.w+brick])));
   atomicStore(&activity[record],bitcast<u32>(atomicLoad(&conditioning[brick])));
   atomicStore(&activity[record+1u],bitcast<u32>(atomicLoad(
     &conditioning[p.dispatch.w+brick])));
@@ -6064,7 +6422,8 @@ fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
           atomicStore(&frontierDemanded,1u);
         }
       }
-      if((neighborReasons&(1u|256u|512u))!=0u){
+      if((neighborReasons&(1u|256u|512u))!=0u
+        ||((neighborReasons&64u)!=0u&&activityF32(neighborOutput+4u)<1.0-1e-3)){
         atomicStore(&presentationSurfaceSupportDemanded,1u);
       }
     }
@@ -6090,7 +6449,7 @@ fn classifyAcceptedLiquidFrontier(@builtin(workgroup_id)wid:vec3u,
 // dyadic ladder rather than naming three B8-specific rungs.
 fn activitySignalsEnabled()->bool{return p.activityEpochs.w!=0u;}
 fn surfaceCoarseningEnabled()->bool{return p.surfaceProof.z!=0u;}
-fn forcedSurfaceResolutionForQA()->u32{return p.surfaceProof.w;}
+fn forcedSurfaceResolutionForQA()->u32{return p.surfaceProof.w&31u;}
 fn surfaceDisplacementToleranceMetres()->f32{
   return max(0.0,bitcast<f32>(p.surfaceProof.x));
 }
@@ -6114,16 +6473,126 @@ fn velocityResolutionFloor(travelFineCells:f32)->u32{
 }
 
 fn coarseFirstEnabled()->bool{return p.coarseFirst.x!=0.0;}
-fn coarseFirstDensity(position:vec3f)->f32{
-  let cell=tracerCellAt(mirrorSharpeningSampleToWorld(position));
-  if(cell==INVALID){return 0.0;}
-  return state[destinationDensity()+cell]/max(cellOpenFraction(cell),1e-6);
+// Integrate one logical-brick intersection in native accepted cells. A logical
+// brick has one owner, even when that owner is a macro leaf. Resolve it once;
+// each constant donor contributes its exact overlap volume, not h^3 lookups.
+fn coarseFirstTileMass(lower:vec3i,extent:vec3i)->f32{
+  let owner=compactOwnerCellAt(lower);
+  if(owner.x==INVALID||!brickActive(owner.y)){return 0.0;}
+  let origin=cm12WorldLeafCoordinate(owner.y)*i32(BRICK_FINE_RESOLUTION);
+  let scale=i32(BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z);
+  var upper=origin+vec3i(i32(BRICK_FINE_RESOLUTION*brickSpan(owner.y)));
+  if(!brickHasUnclippedWorldGeometry(owner.y)){upper=min(upper,vec3i(p.dimensions.xyz));}
+  let valid=vec3u((upper-origin+vec3i(scale-1))/scale);
+  let range=templateBrickCellRange(owner.y,owner.z);
+  let relative=lower-origin;
+  var mass=0.0;var z=0;
+  loop{if(z>=extent.z){break;}
+    let dz=min(extent.z-z,scale-(relative.z+z)%scale);var y=0;
+    loop{if(y>=extent.y){break;}
+      let dy=min(extent.y-y,scale-(relative.y+y)%scale);var x=0;
+      loop{if(x>=extent.x){break;}
+        let dx=min(extent.x-x,scale-(relative.x+x)%scale);
+        let local=vec3u((relative+vec3i(x,y,z))/scale);
+        let offset=local.x+valid.x*(local.y+valid.y*local.z);
+        if(offset<range.y){
+          let cell=range.x+offset;
+          if(cellOpenFraction(cell)<0.999){return -1.0;}
+          mass+=f32(dx*dy*dz)*state[destinationDensity()+cell];
+        }
+        x+=dx;
+      }y+=dy;
+    }z+=dz;
+  }
+  return mass;
+}
+fn coarseFirstDensity(position:vec3f,h:f32)->f32{
+  // Activity has not staged the tracer/transport workgroup directory. Query
+  // the accepted topology directly: an unstaged TEI window reads zero leaves
+  // near its default origin and a stale slot elsewhere, erasing curvature.
+  let lower=vec3i(clamp(position-vec3f(0.5*h),cm12WorldFineLower(),
+    max(cm12WorldFineLower(),cm12WorldFineUpper()-vec3f(h))));
+  let owner=compactOwnerCellAt(lower);
+  var scale=1u;var contained=false;
+  var direct=false;var donorStrides=vec3u(0u);
+  if(owner.x!=INVALID&&brickActive(owner.y)){
+    let origin=cm12WorldLeafCoordinate(owner.y)*i32(BRICK_FINE_RESOLUTION);
+    let upper=origin+vec3i(i32(BRICK_FINE_RESOLUTION*brickSpan(owner.y)));
+    contained=all(lower>=origin)&&all(lower+vec3i(i32(h))<=upper);
+    if(contained){scale=BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z;}
+    if(contained&&f32(scale)>=h){
+      if(cellOpenFraction(owner.x)<0.999){return -1.0;}
+      return state[destinationDensity()+owner.x];
+    }
+    // Resolve a contained leaf once. Its accepted cells are a dense interval;
+    // each restriction sample advances from the already resolved first donor.
+    // Clipped support that leaves that interval keeps the spatial fallback.
+    var validUpper=upper;
+    if(!brickHasUnclippedWorldGeometry(owner.y)){
+      validUpper=min(validUpper,vec3i(p.dimensions.xyz));
+    }
+    direct=contained&&all(lower+vec3i(i32(h))<=validUpper);
+    donorStrides=vec3u((validUpper-origin+vec3i(i32(scale)-1))/i32(scale));
+  }else if(h<=f32(BRICK_FINE_RESOLUTION)){
+    return 0.0;
+  }
+  if(!direct){
+    // Partition at logical-brick boundaries so mixed resolutions cannot be
+    // skipped by the first donor's stride. Missing tiles are authoritative air.
+    // Unlike finest quadrature, each tile resolves its sparse owner just once.
+    let edge=i32(BRICK_FINE_RESOLUTION);let limit=i32(h);
+    var mass=0.0;var z=0;
+    loop{if(z>=limit){break;}
+      let dz=min(limit-z,edge-((lower.z+z)%edge+edge)%edge);var y=0;
+      loop{if(y>=limit){break;}
+        let dy=min(limit-y,edge-((lower.y+y)%edge+edge)%edge);var x=0;
+        loop{if(x>=limit){break;}
+          let dx=min(limit-x,edge-((lower.x+x)%edge+edge)%edge);
+          let tileMass=coarseFirstTileMass(lower+vec3i(x,y,z),vec3i(dx,dy,dz));
+          if(tileMass<0.0){return -1.0;}
+          mass+=tileMass;x+=dx;
+        }y+=dy;
+      }z+=dz;
+    }
+    return mass/(h*h*h);
+  }
+  // Contained restriction retains its native-cell summation order.
+  var sum=0.0;var count=0.0;
+  for(var z=0.0;z<h;z+=f32(scale)){for(var y=0.0;y<h;y+=f32(scale)){
+    for(var x=0.0;x<h;x+=f32(scale)){
+      let local=vec3u(vec3f(x,y,z))/scale;
+      let cell=owner.x+local.x+donorStrides.x*(local.y+donorStrides.y*local.z);
+        // A solid interface is not liquid curvature. Its independent solid
+        // geometry/coupling floor owns this stencil; do not treat it as air.
+      if(cellOpenFraction(cell)<0.999){return -1.0;}
+      sum+=state[destinationDensity()+cell];
+      count+=1.0;
+    }
+  }}
+  return sum/max(count,1.0);
 }
 fn coarseFirstNormal(position:vec3f,h:f32)->vec3f{
+  // Adjacent cell averages at different widths are not samples at a common
+  // point. Use one virtual control-volume width for the entire gradient,
+  // including its centre alignment, so a planar surface stays planar at 2:1.
+  var width=h;
+  for(var sample=0u;sample<7u;sample++){
+    var q=position;
+    if(sample>0u){q[(sample-1u)/2u]+=select(-h,h,(sample&1u)==0u);}
+    let cell=ownerCellAt(vec3i(floor(mirrorSharpeningSampleToWorld(q))));
+    if(cell!=INVALID){
+      let leaf=cellBrick(cell);
+      width=max(width,f32(BRICK_FINE_RESOLUTION*brickSpan(leaf))/f32(acceptedBrickResolution(leaf)));
+    }
+  }
+  let center=(floor(position/width)+vec3f(0.5))*width;
   var gradient=vec3f(0.0);
   for(var axis=0u;axis<3u;axis++){
-    var offset=vec3f(0.0);offset[axis]=h;
-    gradient[axis]=coarseFirstDensity(position+offset)-coarseFirstDensity(position-offset);
+    var offset=vec3f(0.0);offset[axis]=width;
+    let forward=coarseFirstDensity(center+offset,width);
+    let back=coarseFirstDensity(center-offset,width);
+    if(forward<0.0||back<0.0){return vec3f(0.0);}
+    gradient[axis]=forward-back;
   }
   let magnitude=length(gradient);
   return select(vec3f(0.0),gradient/max(magnitude,1e-8),magnitude>0.05);
@@ -6176,12 +6645,14 @@ fn coarseFirstIncomingFloor(brick:u32)->u32{
 @compute @workgroup_size(64)
 fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
  @builtin(workgroup_id)wid:vec3u){
-  let requestedBrick=incrementalActivityBrickInvocation(wid.x);let lane=lid.x;
-  // Keep invalid-worklist fail-closed handling outside the workgroup-uniform
-  // reduction. All lanes reduce an empty brick-zero payload, then lane zero
-  // exits without publishing it.
-  let brick=select(0u,requestedBrick,requestedBrick!=INVALID);
-  let resident=requestedBrick!=INVALID&&brickActive(brick);
+  let lane=lid.x;
+  if(lane==0u){activityRequestedBrick=incrementalActivityBrickInvocation(wid.x);}
+  let requestedBrick=workgroupUniformLoad(&activityRequestedBrick);
+  // Only clean/invalid work exits here. Dirty retired leaves still remove
+  // their old census below. The uniform load proves the exit safe for barriers.
+  if(requestedBrick==INVALID){return;}
+  let brick=requestedBrick;
+  let resident=brickActive(brick);
   // Never form INVALID+lane. With no requested brick the old fabricated range
   // was (0xffffffff,0); unsigned wrap made lanes 1..63 walk almost the entire
   // u32 address space despite the nominally empty count.
@@ -6203,6 +6674,7 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
   var supportMask=0u;var sweptSupportMask=0u;
   var boundaryLiquidFaces=0u;
   let measuredCount=select(0u,count,resident);
+  if(lane==0u){activityCoarseNormalSupport=vec4f(0.0);}
   // Test the local offset against the count before adding the potentially
   // sparse global base. This makes an empty range structurally incapable of
   // wrapping into a giant u32 walk.
@@ -6368,14 +6840,13 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     // Weak wall-separation velocity is not liquid curvature. Static and
     // moving solids already have independent geometric/coupling floors.
     if(coarseFirstEnabled()&&(densityInterfaceCell||cellIsThinFluid)){
-      let h=cellMinimumWidth(cell);
+      let h=f32(BRICK_FINE_RESOLUTION*brickSpan(brick))/f32(resolution);
       // A B1 leaf needs halo normals; finer leaves already span the feature
       // with their own interface samples and central-difference neighbours.
-      let samples=select(1u,7u,resolution==1u);
-      for(var sample=0u;sample<samples;sample++){
-        var q=center;
-        if(sample>0u){q[(sample-1u)/2u]+=select(-h,h,(sample&1u)==0u);}
-        let normal=coarseFirstNormal(q,h);
+      if(resolution==1u){
+        activityCoarseNormalSupport=vec4f(center,h);
+      }else{
+        let normal=coarseFirstNormal(center,h);
         if(dot(normal,normal)>0.5){
           normalMinimum=min(normalMinimum,normal);normalMaximum=max(normalMaximum,normal);
         }
@@ -6447,6 +6918,17 @@ fn measureBrickActivity(@builtin(local_invocation_id)lid:vec3u,
     }
   }
   if(coarseFirstEnabled()){
+    // B1 has only one cell. Share its seven independent halo normals instead
+    // of running all seven on lane zero while the other 63 lanes wait.
+    let support=workgroupUniformLoad(&activityCoarseNormalSupport);
+    if(support.w>0.0&&lane<7u){
+      var q=support.xyz;
+      if(lane>0u){q[(lane-1u)/2u]+=select(-support.w,support.w,(lane&1u)==0u);}
+      let normal=coarseFirstNormal(q,support.w);
+      if(dot(normal,normal)>0.5){
+        normalMinimum=min(normalMinimum,normal);normalMaximum=max(normalMaximum,normal);
+      }
+    }
     activityNormalMinimum[lane]=normalMinimum;activityNormalMaximum[lane]=normalMaximum;
     activityMomentum[lane]=liquidMomentum;
   }
@@ -6913,6 +7395,11 @@ fn planBrickResolution(@builtin(global_invocation_id)gid:vec3u){
   // World-growth pages retain their complete B8 graph. Authored leaves may
   // request an isolated generation even when no in-place candidate is packed.
   atomicStore(&activity[output+47u],current);
+  if((p.surfaceProof.w&0x80000000u)!=0u){
+    atomicStore(&activity[output+8u],current);
+    atomicStore(&activity[output+9u],32u);
+    return;
+  }
   if(brick>=CM12_WDR_INITIAL_LEAVES){
     atomicStore(&activity[output+8u],current);
     atomicStore(&activity[output+9u],1024u);
@@ -8352,9 +8839,18 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
     var rho=0.0;var gamma=0.0;var velocity=vec3f(0.0);var pressure=0.0;
     if(!acceptedActive){gamma=1.0;
     }else if(candidate<accepted){let factor=accepted/candidate;
-      var volumeSum=0.0;var massSum=0.0;var momentumSum=vec3f(0.0);
-      for(var dz=0u;dz<factor;dz+=1u){for(var dy=0u;dy<factor;dy+=1u){
-        for(var dx=0u;dx<factor;dx+=1u){
+      // Restrict in short x rows, then y slices, then z. A serial sum of
+      // all 512 fine children can lose enough low bits in gamma to reject
+      // an otherwise conservative B8 -> B1 transfer. Keep the conservation
+      // receipt tolerances; reduce the accumulation error instead.
+      var totals=vec4f(0.0);var momentumSum=vec3f(0.0);
+      for(var dz=0u;dz<factor;dz+=1u){
+        var sliceTotals=vec4f(0.0);var sliceVelocity=vec3f(0.0);
+        var sliceMomentum=vec3f(0.0);
+        for(var dy=0u;dy<factor;dy+=1u){
+          var rowTotals=vec4f(0.0);var rowVelocity=vec3f(0.0);
+          var rowMomentum=vec3f(0.0);
+          for(var dx=0u;dx<factor;dx+=1u){
           let sx=factor*cx+dx;let sy=factor*cy+dy;let sz=factor*cz+dz;
           let sourceCoordinate=vec3u(sx,sy,sz);
           if(any(sourceCoordinate>=sourceDimensions)){continue;}
@@ -8364,13 +8860,19 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
           let velocityAt=destinationCellVelocity()+4u*cell;
           let sourceVelocity=vec3f(state[velocityAt],state[velocityAt+1u],
             state[velocityAt+2u]);
-          volumeSum+=volume;massSum+=sourceRho*volume;
-          rho+=sourceRho*volume;gamma+=state[destinationGamma()+cell]*volume;
-          pressure+=state[p.stateOffsets2.x+cell]*volume;
-          velocity+=sourceVelocity*volume;momentumSum+=sourceRho*volume*sourceVelocity;
-      }}}
-      if(volumeSum>0.0){rho/=volumeSum;gamma/=volumeSum;pressure/=volumeSum;
-        velocity=select(velocity/volumeSum,momentumSum/massSum,abs(massSum)>1e-12);}
+          rowTotals+=vec4f(volume,sourceRho*volume,
+            state[destinationGamma()+cell]*volume,state[p.stateOffsets2.x+cell]*volume);
+          rowVelocity+=sourceVelocity*volume;
+          rowMomentum+=sourceRho*volume*sourceVelocity;
+          }
+          sliceTotals+=rowTotals;sliceVelocity+=rowVelocity;
+          sliceMomentum+=rowMomentum;
+        }
+        totals+=sliceTotals;velocity+=sliceVelocity;momentumSum+=sliceMomentum;
+      }
+      if(totals.x>0.0){rho=totals.y/totals.x;gamma=totals.z/totals.x;
+        pressure=totals.w/totals.x;
+        velocity=select(velocity/totals.x,momentumSum/totals.y,abs(totals.y)>1e-12);}
     }else if(reconstructingFineRung){
       // Mirror the conservative limited-linear field that the accepted B4 page
       // presented immediately before this refinement. The patch correction in
@@ -8727,22 +9229,68 @@ fn publishCandidateTopologyDeltaFromWorklist(@builtin(local_invocation_id)lid:ve
     lid,select(0u,brick,brick!=INVALID),brick!=INVALID);
 }
 
-fn candidateTransferredVelocity(cell:u32)->vec3f{
-  let brick=cellBrick(cell);let resolution=scheduledBrickResolution(brick);
-  let range=templateBrickCellRange(brick,resolution);
-  if(topologyPreparationScheduledAt(activityRecord(brick))
-    &&candidateBrickActive(brick)&&cell>=range.x&&cell-range.x<range.y){
-    if(scheduledConstructionActivationWithoutSlot(brick)){return vec3f(0.0);}
-    let local=cell-range.x;return vec3f(
-      candidateState[candidateFieldIndex(2u,brick,local)],
-      candidateState[candidateFieldIndex(3u,brick,local)],
-      candidateState[candidateFieldIndex(4u,brick,local)]);}
-  let at=destinationCellVelocity()+4u*cell;
-  return vec3f(state[at],state[at+1u],state[at+2u]);
+// The shadow row cache follows candidate fields in transient storage. Build it
+// before publication overwrites the old rung and its cell fields.
+fn candidateFaceRemapIndex(row:u32)->u32{
+  return topology[p.topologyOffsets2.w]
+    *(6u*CANDIDATE_CELLS_PER_BRICK+6u*CANDIDATE_FACE_SAMPLES_PER_SIDE)+row;
 }
 
-// Independent preflip receipt: reconstruct candidate row values from isolated
-// candidateState plus unchanged accepted cells, but author no stable face.
+// Lowest-order staggered reconstruction: normal velocity is linear between
+// the two authoritative faces and constant tangentially within an old cell.
+// Consequently splitting a cell preserves its integrated divergence, and
+// averaging patches preserves normal flux. Collocated velocity is not an
+// authority for this operation: averaging faces into cells and back filters
+// even a perfectly representable staggered field on every topology update.
+fn candidateAcceptedFaceSample(point:vec3f,axis:u32)->vec4f{
+  let q=clamp(vec3i(floor(point)),vec3i(0),vec3i(p.dimensions.xyz)-vec3i(1));
+  let cell=ownerCellAt(q);
+  if(cell==INVALID){return vec4f(0.0,vec3f(q+vec3i(1)));}
+  let center=cellCenter(cell);let widths=cellWidths(cell);
+  var velocity=vec2f(0.0);var weight=vec2f(0.0);
+  for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
+    let row=incidenceRow(at);
+    if(!acceptedRowMember(row)||rowAxis(row)!=axis){continue;}
+    let side=select(0u,1u,rowCenter(row)[axis]>center[axis]);
+    let w=abs(termCoefficient(incidenceTerm(at)))*rowStaticDualWeight(row);
+    velocity[side]+=w*state[destinationFaceVelocity()+row];weight[side]+=w;
+  }
+  for(var side=0u;side<2u;side+=1u){
+    velocity[side]=select(0.0,velocity[side]/max(weight[side],1e-20),weight[side]>0.0);
+  }
+  let fraction=clamp((point[axis]-center[axis])/widths[axis]+0.5,0.0,1.0);
+  return vec4f(mix(velocity.x,velocity.y,fraction),center+0.5*widths);
+}
+
+fn candidateRemappedFaceVelocity(row:u32)->f32{
+  if(acceptedRowMember(row)){return state[destinationFaceVelocity()+row];}
+  let axis=rowAxis(row);let tangent0=select(0u,1u,axis==0u);
+  let tangent1=select(2u,1u,axis==2u);let center=rowCenter(row);
+  var widths=vec3f(0.0);
+  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+  for(var term=begin;term<end;term+=1u){widths=max(widths,cellWidths(termCell(term)));}
+  let lower=center-0.5*widths;let upper=center+0.5*widths;
+  var integral=0.0;var area=0.0;var v=lower[tangent1];
+  // Integrate whole accepted-cell rectangles, rather than finest voxels, so
+  // a macro face costs only the donor patches it actually overlaps.
+  loop{
+    if(v>=upper[tangent1]-1e-5){break;}
+    var u=lower[tangent0];var nextV=upper[tangent1];var strip=0.0;var stripWidth=0.0;
+    loop{
+      if(u>=upper[tangent0]-1e-5){break;}
+      var point=center;point[tangent0]=u+1e-4;point[tangent1]=v+1e-4;
+      let sample=candidateAcceptedFaceSample(point,axis);
+      let nextU=min(upper[tangent0],max(u+1e-4,sample[1u+tangent0]));
+      nextV=min(nextV,max(v+1e-4,sample[1u+tangent1]));
+      strip+=(nextU-u)*sample.x;stripWidth+=nextU-u;u=nextU;
+    }
+    integral+=strip*(nextV-v);area+=stripWidth*(nextV-v);v=nextV;
+  }
+  return select(0.0,integral/max(area,1e-20),area>0.0);
+}
+
+// Independent preflip receipt and cache: conservatively remap the still
+// authoritative accepted faces, but author no stable face until commit.
 @compute @workgroup_size(64)
 fn validateCandidateShadowFaces(@builtin(global_invocation_id)gid:vec3u){
   if(atomicLoad(&activity[16])==0u){return;}
@@ -8757,13 +9305,9 @@ fn validateCandidateShadowFaces(@builtin(global_invocation_id)gid:vec3u){
     let brick=ta(requirements+1u+at)>>TEMPLATE_CELL_RESOLUTION_BITS;
     changed=changed||topologyPreparationScheduledAt(activityRecord(brick));
   }
-  if(!changed){return;}let axis=rowAxis(row);var velocity=0.0;var weight=0.0;
-  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-  for(var term=begin;term<end;term+=1u){let cell=termCell(term);
-    let candidateVelocity=candidateTransferredVelocity(cell);
-    let w=abs(termCoefficient(term));velocity+=w*candidateVelocity[axis];weight+=w;
-  }
-  velocity=select(0.0,velocity/weight,weight>0.0);
+  if(!changed){return;}
+  let velocity=candidateRemappedFaceVelocity(row);
+  candidateState[candidateFaceRemapIndex(row)]=velocity;
   if(velocity!=velocity||abs(velocity)>=3.4e38){
     for(var at=0u;at<requirementCount;at+=1u){let brick=
       ta(requirements+1u+at)>>TEMPLATE_CELL_RESOLUTION_BITS;
@@ -8790,12 +9334,8 @@ fn publishCandidateShadowFaces(@builtin(global_invocation_id)gid:vec3u){
       &&atomicLoad(&activity[activityRecord(brick)+36u])
         ==atomicLoad(&topologyArena[topologyWorklistBase()+1u])
       &&atomicLoad(&topologyArena[topologyWorklistBase()+3u])==2u);}
-  if(!changed||!committed){return;}let axis=rowAxis(row);var velocity=0.0;var weight=0.0;
-  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-  for(var term=begin;term<end;term+=1u){let cell=termCell(term);
-    let at=destinationCellVelocity()+4u*cell;let w=abs(termCoefficient(term));
-    velocity+=w*state[at+axis];weight+=w;}
-  velocity=select(0.0,velocity/weight,weight>0.0);
+  if(!changed||!committed){return;}
+  let velocity=candidateState[candidateFaceRemapIndex(row)];
   state[p.stateOffsets1.z+row]=velocity;state[p.stateOffsets1.w+row]=velocity;
 }
 
@@ -9270,6 +9810,7 @@ fn cm12PresentationPageMatches(page:u32,brick:u32,logicalKey:u32,
 fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
  generation:u32,causeMask:u32)->u32{
   _=generation;_=causeMask;
+  presentationStageTopology(brick,lane);
   if(lane==0u){
     let source=fineMetadata[4u*page+3u];var octant=0u;var span=1u;
     if(PRESENTATION_PAGES_PER_AXIS==4u){
@@ -9290,7 +9831,10 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     let scale=BRICK_FINE_RESOLUTION*span/resolution;
     var patchFirst=vec3i(0);var patchDimensions=vec3u(1u);
     var cacheFirst=vec3i(0);var cacheDimensions=vec3u(1u);var cacheCount=0u;
-    if(scale>1u&&sampleScale==1u){
+    // Cache by native stencil extent, including macro pages. Their samples
+    // are farther apart, but a coarse macro rung still fits this same slab.
+    // Bypassing it multiplied each page's restriction work by up to 40*P^3.
+    if(scale>1u){
       let scaleF=f32(scale);
       let firstShifted=(vec3f(pageOrigin)+vec3f(0.5))/scaleF;
       let lastQ=pageOrigin
@@ -9298,7 +9842,7 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
       let lastShifted=(vec3f(lastQ)+vec3f(0.5))/scaleF;
       patchFirst=vec3i(floor(firstShifted));
       patchDimensions=vec3u(vec3i(floor(lastShifted))-patchFirst)+vec3u(1u);
-      cacheFirst=patchFirst-vec3i(1);cacheDimensions=patchDimensions+vec3u(2u);
+      cacheFirst=patchFirst-vec3i(1,3,1);cacheDimensions=patchDimensions+vec3u(2u,6u,2u);
       cacheCount=cacheDimensions.x*cacheDimensions.y*cacheDimensions.z;
     }
     cm12PresentationBrick=brick;cm12PresentationPage=page;
@@ -9318,8 +9862,9 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     // page once. Evolved frames reuse the compiled 26-neighbour surface apron
     // instead of reconstructing feature-free bulk pages.
     cm12PresentationStencilCandidate=select(0u,1u,
-      scale>1u&&sampleScale==1u&&cacheCount<=PRESENTATION_CACHE_CAPACITY
+      scale>1u&&cacheCount<=PRESENTATION_CACHE_CAPACITY
       &&(!uniformBulkReady||(activityReasons&(1u|256u|512u))!=0u
+        ||(cm12PresentationWet!=0u&&activityF32(activityOutput+4u)<1.0-1e-3)
         ||brickHasPresentationSurfaceSupport(brick)));
     cm12PresentationDensityOffset=select(p.stateOffsets0.x,p.stateOffsets0.y,
       cm12FramePlanAcceptedParity()!=0u);
@@ -9338,8 +9883,11 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     // similarly reclassifies wetness without recomputing those reductions.
     // Keep both paths exact instead of mistaking their zeroed/stale mean for a
     // feature-free air brick. Ordinary frames may use the uniform bulk value.
+    // The resolved surface apron still needs exact magnitudes: replacing its
+    // submerged endpoint with -4h moves a crossing at the next page boundary.
     cm12PresentationResolvedFeature=select(1u,0u,EXP_PRESENTATION_UNIFORM_BULK
-      &&uniformBulkReady&&(activityReasons&(1u|256u|512u))==0u);
+      &&uniformBulkReady&&(activityReasons&(1u|256u|512u))==0u
+      &&!brickHasPresentationSurfaceSupport(brick));
     let bulkLiquid=cm12PresentationWet!=0u
       &&activityF32(activityOutput+4u)>=CM12_LIQUID_ISOVALUE;
     cm12PresentationUniformPhi=select(4.0*p.frame.y,-4.0*p.frame.y,bulkLiquid);
@@ -9349,7 +9897,8 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     brick,cm12PresentationPageOrigin,cm12PresentationDensityOffset,false);}
   if((presentationCandidates&2u)!=0u){
     let heightReady=workgroupUniformLoad(&presentationHeightFieldValid);
-    if(heightReady!=0u){return 0u;}
+    let nativeScale=workgroupUniformLoad(&cm12PresentationScale);
+    if(heightReady!=0u&&nativeScale==1u){return 0u;}
   }
   // Fine pages, uniform coarse bulk and macro fallback pages must not inherit
   // the patch path's barriers or scratch traffic. This predicate is written by
@@ -9371,7 +9920,7 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     let cacheX=cacheRemainder-cacheY*cm12PresentationCacheDimensions.x;
     let coarse=clamp(cm12PresentationCacheFirst
       +vec3i(i32(cacheX),i32(cacheY),i32(cacheZ)),vec3i(0),coarseDimensions-vec3i(1));
-    presentationDensityCache[cacheIndex]=restrictedPresentationDensityAt(
+    presentationDensityCache[cacheIndex]=reconstructedPresentationDensityAt(
       coarse*i32(cm12PresentationScale),i32(cm12PresentationScale),
       cm12PresentationDensityOffset);
   }
@@ -9381,10 +9930,10 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
       presentationDensityCache[cacheIndex]>=CM12_LIQUID_ISOVALUE));
   }
   workgroupBarrier();
-  preparePresentationInterpolationCache(lane,cm12PresentationScale,
-    cm12PresentationPatchFirst,cm12PresentationPatchDimensions,
-    cm12PresentationCacheFirst,cm12PresentationCacheDimensions,
-    cm12PresentationDensityOffset,atomicLoad(&presentationPhaseMask)==3u);
+  if(lane==0u&&cm12PresentationPageOrigin.y==0&&cm12PresentationWet!=0u){
+    atomicOr(&presentationPhaseMask,2u);
+  }
+  workgroupBarrier();
   return 0u;
 }
 fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
@@ -9405,15 +9954,14 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
   // The cache is meaningful only when PreparePage selected and filled the
   // height candidate. Otherwise a zeroed workgroup lane looks like a valid
   // height and turns a fully wet bulk page into phi=+y.
-  else if(cm12PresentationSampleScale==1u
+  else if(cm12PresentationScale==1u&&cm12PresentationSampleScale==1u
     &&(cm12PresentationStencilCandidate&2u)!=0u
     &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
     &&cm12SolidVoxelFractionQ8(q)==0u){
     phi=presentationHeightPhi(q,i32(localX),i32(localZ),false);
   }
   else if(cm12PresentationScale==1u){
-    if(cm12PresentationResolvedFeature!=0u&&cm12PresentationWet!=0u
-      &&cm12SolidVoxelFractionQ8(q)<255u){
+    if(cm12PresentationResolvedFeature!=0u&&cm12SolidVoxelFractionQ8(q)<255u){
         let range=templateBrickCellRange(cm12PresentationBrick,cm12PresentationResolution);
         var valid=vec3u(BRICK_FINE_RESOLUTION);
         if(!dynamicPage){valid=min(p.dimensions.xyz-vec3u(cm12PresentationBrickOrigin),
@@ -9429,20 +9977,19 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
       &&cm12PresentationSampleScale==1u
       &&cm12PresentationCacheFits!=0u
       &&atomicLoad(&presentationPhaseMask)==3u){
-      let rho=smoothedPresentationDensityAt(q,cm12PresentationScale,
-        cm12PresentationPatchFirst,cm12PresentationPatchDimensions);
-      phi=(CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
+      phi=presentationInterpolatedVolumePhi(q,cm12PresentationScale,
+        cm12PresentationCacheFirst,cm12PresentationCacheDimensions,true,
+        cm12PresentationDensityOffset);
     }else if((cm12PresentationStencilCandidate&1u)!=0u
       &&cm12PresentationSampleScale==1u
       &&cm12PresentationCacheFits!=0u
       &&atomicLoad(&presentationPhaseMask)==2u){
       phi=-4.0*p.frame.y;
     }else if(cm12PresentationResolvedFeature!=0u&&cm12PresentationWet!=0u){
-      var rho=0.0;
-      rho=interpolatedPresentationDensityAt(q,cm12PresentationScale,
-        cm12PresentationCacheFirst,cm12PresentationCacheDimensions,false,
+      phi=presentationInterpolatedVolumePhi(q,cm12PresentationScale,
+        cm12PresentationCacheFirst,cm12PresentationCacheDimensions,
+        (cm12PresentationStencilCandidate&1u)!=0u&&cm12PresentationCacheFits!=0u,
         cm12PresentationDensityOffset);
-      phi=(CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
     }
   }
   var floorContinuation=0u;
@@ -9483,35 +10030,64 @@ fn cm12PresentationRejectAccepted(page:u32){
 
 ${framePlanLayout && framePlanPresentationLayout ? /* wgsl */ `
 fn surfaceProofDensityAt(restrictedLocal:vec3i)->f32{
-  let index=vec3u(restrictedLocal+vec3i(2));
+  let index=vec3u(restrictedLocal+vec3i(3));
   return surfaceProofDensity[index.x+SURFACE_PROOF_DENSITY_AXIS
     *(index.y+SURFACE_PROOF_DENSITY_AXIS*index.z)];
 }
-fn surfaceProofVirtualRestrictedDensity(local:vec3i,factor:u32)->f32{
-  let shifted=(vec3f(local)+vec3f(0.5))/f32(factor);
-  let lower=vec3i(floor(shifted));let t=fract(shifted);
-  let center=surfaceProofDensityAt(lower);var slope=vec3f(0.0);
-  for(var axis=0u;axis<3u;axis+=1u){
-    var back=lower;var forward=lower;back[axis]-=1;forward[axis]+=1;
-    slope[axis]=presentationLimitedSlope(surfaceProofDensityAt(back),center,
-      surfaceProofDensityAt(forward));
+fn surfaceProofVirtualColumnPhi(coarse:vec3i,factor:u32)->f32{
+  let baseY=cm12PresentationBrickOrigin.y/i32(factor);
+  let cellsY=i32(p.dimensions.y/factor);var rho:array<f32,5>;
+  for(var at=0u;at<5u;at+=1u){
+    let q=coarse+vec3i(0,i32(at)-2,0);let worldY=baseY+q.y;
+    if(worldY>=cellsY){rho[at]=0.0;}
+    else if(worldY<0){
+      let floorDensity=surfaceProofDensityAt(vec3i(q.x,-baseY,q.z));
+      rho[at]=select(0.0,1.0,floorDensity>1e-6);
+    }else{rho[at]=surfaceProofDensityAt(q);}
   }
-  return center+dot(slope,t-vec3f(0.5));
+  rho[4]=min(rho[4],rho[3]);
+  return f32(factor)*presentationResolvedColumnPhi(rho);
+}
+fn surfaceProofVirtualVolumePhi(local:vec3i,factor:u32)->f32{
+  let position=(vec3f(local)+vec3f(0.5))/f32(factor)-vec3f(0.5);
+  let lower=vec3i(floor(position));let t=fract(position);var phi=0.0;
+  for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
+    let weight=select(1.0-t.x,t.x,dx==1)*select(1.0-t.y,t.y,dy==1)
+      *select(1.0-t.z,t.z,dz==1);
+    phi+=weight*surfaceProofVirtualColumnPhi(lower+vec3i(dx,dy,dz),factor);
+  }}}
+  return phi;
 }
 fn surfaceProofAcceptedPhi(local:vec3i,densityOffset:u32)->f32{
   let q=cm12PresentationBrickOrigin+local;
   if(cm12SolidVoxelFractionQ8(q)>=255u){return 4.0*p.frame.y;}
-  if((atomicLoad(&surfaceProofValid)&2u)!=0u
-    &&presentationColumnHeightValid(local.x,local.z,true)
-    &&cm12SolidVoxelFractionQ8(q)==0u){
-    return presentationHeightPhi(q,local.x,local.z,true);
-  }
-  let owner=compactOwnerCellAt(q);
+  let owner=presentationCompiledOwnerCellAt(q);
   if(owner.x==INVALID||!brickActive(owner.y)){return 4.0*p.frame.y;}
+  // The committed packet is the accepted geometry being certified. Reuse its
+  // quantized scalar instead of reconstructing up to forty native densities
+  // for each proof node. The fallback handles other presentation page shapes.
+  if(PRESENTATION_PAGE_RESOLUTION==BRICK_FINE_RESOLUTION&&brickSpan(owner.y)==1u){
+    let page=cm12FppLoad(cm12FppBrickPages+owner.y);
+    if(page<arrayLength(&fineMetadata)/4u&&fineMetadata[4u*page]==page
+      &&fineMetadata[4u*page+1u]==cm12PresentationLogicalKey(owner.y)
+      &&fineMetadata[4u*page+2u]==1u){
+      let offset=vec3u(q-cm12WorldLeafCoordinate(owner.y)*i32(BRICK_FINE_RESOLUTION));
+      let index=offset.x+PRESENTATION_PAGE_RESOLUTION
+        *(offset.y+PRESENTATION_PAGE_RESOLUTION*offset.z);
+      let packed=fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+index];
+      if((packed&0x10000u)!=0u){return unpack2x16float(packed).x;}
+    }
+  }
   let scale=BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z;
-  if(scale==1u){return presentationPhiAt(owner.x,densityOffset);}
-  let rho=directSmoothedPresentationDensityAt(q,scale,densityOffset);
-  return (CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
+  if(scale==1u){
+    if((atomicLoad(&surfaceProofValid)&2u)!=0u
+      &&presentationColumnHeightValid(local.x,local.z,true)
+      &&cm12SolidVoxelFractionQ8(q)==0u){
+      return presentationHeightPhi(q,local.x,local.z,true);
+    }
+    return presentationPhiAt(owner.x,densityOffset);
+  }
+  return presentationInterpolatedVolumePhi(q,scale,vec3i(0),vec3u(0),false,densityOffset);
 }
 fn surfaceProofPhiAt(local:vec3i,coarse:bool)->f32{
   let q=vec3u(local+vec3i(1));
@@ -9608,9 +10184,9 @@ fn surfaceProofOutputSampleFailure(local:vec3i)->u32{
 }
 
 // Publish a camera-independent, generation-stamped receipt for the next
-// dyadic surface rung. The virtual restricted field uses the exact
-// conservative reconstruction consumed by coarse presentation pages, so the
-// decision and visible result cannot drift into different policies.
+// dyadic surface rung. The virtual restricted field uses the exact continuous
+// volume scalar consumed by coarse presentation pages, so the decision and
+// visible result cannot drift into different reconstruction policies.
 @compute @workgroup_size(64)
 fn publishSparseCM12SurfaceRepresentabilityReceipts(
  @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
@@ -9658,23 +10234,26 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
       atomicLoad(&surfaceProofFailure));}
     return;
   }
+  presentationStageTopology(brick,lane);
   if((proofMode&2u)!=0u){preparePresentationColumnHeights(lane,
     brick,cm12PresentationBrickOrigin,cm12PresentationDensityOffset,true);}
   let targetResolution=surfaceProofTarget;
   let restrictionFactor=surfaceProofRestrictionFactor;
   let restrictedBase=cm12PresentationBrickOrigin/i32(restrictionFactor);
-  let restrictedAxis=targetResolution+4u;
+  let restrictedAxis=targetResolution+6u;
   let restrictedCapacity=restrictedAxis*restrictedAxis*restrictedAxis;
   for(var logicalIndex=lane;logicalIndex<restrictedCapacity;logicalIndex+=64u){
     let z=logicalIndex/(restrictedAxis*restrictedAxis);
     let remainder=logicalIndex-z*restrictedAxis*restrictedAxis;
     let y=remainder/restrictedAxis;
     let x=remainder-y*restrictedAxis;
-    let restrictedLocal=vec3i(i32(x)-2,i32(y)-2,i32(z)-2);
+    let restrictedLocal=vec3i(i32(x)-3,i32(y)-3,i32(z)-3);
     let cacheIndex=x+SURFACE_PROOF_DENSITY_AXIS
       *(y+SURFACE_PROOF_DENSITY_AXIS*z);
-    surfaceProofDensity[cacheIndex]=restrictedPresentationDensityAt(
-      i32(restrictionFactor)*(restrictedBase+restrictedLocal),i32(restrictionFactor),
+    let coarseDimensions=max(vec3i(1),vec3i(p.dimensions.xyz)/i32(restrictionFactor));
+    let canonical=clamp(restrictedBase+restrictedLocal,vec3i(0),coarseDimensions-vec3i(1));
+    surfaceProofDensity[cacheIndex]=reconstructedPresentationDensityAt(
+      i32(restrictionFactor)*canonical,i32(restrictionFactor),
       cm12PresentationDensityOffset);
   }
   workgroupBarrier();
@@ -9686,15 +10265,8 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     let local=vec3i(i32(x)-1,i32(y)-1,i32(z)-1);
     let fine=surfaceProofAcceptedPhi(local,cm12PresentationDensityOffset);
     let world=cm12PresentationBrickOrigin+local;
-    var coarse=(CM12_LIQUID_ISOVALUE
-      -surfaceProofVirtualRestrictedDensity(local,restrictionFactor))
-      *4.0*p.frame.y;
-    if(cm12SolidVoxelFractionQ8(world)>=255u){coarse=4.0*p.frame.y;
-    }else if((proofMode&2u)!=0u
-      &&presentationColumnHeightValid(local.x,local.z,true)
-      &&cm12SolidVoxelFractionQ8(world)==0u){
-      coarse=presentationHeightPhi(world,local.x,local.z,true);
-    }
+    var coarse=surfaceProofVirtualVolumePhi(local,restrictionFactor);
+    if(cm12SolidVoxelFractionQ8(world)>=255u){coarse=4.0*p.frame.y;}
     surfaceProofPhi[index]=vec2f(fine,coarse);
   }
   workgroupBarrier();
@@ -9779,14 +10351,14 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   let scale=BRICK_FINE_RESOLUTION*span/resolution;
   var patchFirst=vec3i(0);var patchDimensions=vec3u(1u);
   var cacheFirst=vec3i(0);var cacheDimensions=vec3u(1u);var cacheCount=0u;
-  if(scale>1u&&sampleScale==1u){
+  if(scale>1u){
     let scaleF=f32(scale);let firstShifted=(vec3f(pageOrigin)+vec3f(0.5))/scaleF;
     let lastQ=pageOrigin
       +vec3i(i32(PRESENTATION_PAGE_RESOLUTION-1u))*i32(sampleScale);
     let lastShifted=(vec3f(lastQ)+vec3f(0.5))/scaleF;
     patchFirst=vec3i(floor(firstShifted));
     patchDimensions=vec3u(vec3i(floor(lastShifted))-patchFirst)+vec3u(1u);
-    cacheFirst=patchFirst-vec3i(1);cacheDimensions=patchDimensions+vec3u(2u);
+    cacheFirst=patchFirst-vec3i(1,3,1);cacheDimensions=patchDimensions+vec3u(2u,6u,2u);
     cacheCount=cacheDimensions.x*cacheDimensions.y*cacheDimensions.z;
   }
   let cacheFits=cacheCount<=PRESENTATION_CACHE_CAPACITY;
@@ -9795,11 +10367,13 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   let activityReasons=select(0u,atomicLoad(&activity[activityRecord(brick)+1u]),
     brick<p.dispatch.w);
   let uniformBulkReady=atomicLoad(&activity[0])!=0u&&p.injectionCenter.w<=0.5;
-  let wantsStencil=scale>1u&&sampleScale==1u&&cacheFits
+  let wantsStencil=scale>1u&&cacheFits
     &&(!uniformBulkReady||(activityReasons&(1u|256u|512u))!=0u
+      ||(wet&&activityF32(activityRecord(brick)+4u)<1.0-1e-3)
       ||brickHasPresentationSurfaceSupport(brick));
   let resolvedFeature=!(EXP_PRESENTATION_UNIFORM_BULK&&uniformBulkReady
-    &&(activityReasons&(1u|256u|512u))==0u);
+    &&(activityReasons&(1u|256u|512u))==0u
+    &&!brickHasPresentationSurfaceSupport(brick));
   if(lane==0u){
     cm12PresentationStencilCandidate=select(0u,1u,wantsStencil);
     presentationHeightFieldValid=0u;
@@ -9816,7 +10390,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   var heightReady=false;
   if(heightCandidate){heightReady=
     workgroupUniformLoad(&presentationHeightFieldValid)!=0u;}
-  let stencilCandidate=(presentationCandidates&1u)!=0u&&!heightReady;
+  let stencilCandidate=(presentationCandidates&1u)!=0u&&(!heightReady||scale>1u);
   if(stencilCandidate){
     if(lane==0u){atomicStore(&presentationPhaseMask,0u);}
     let coarseDimensions=max(vec3i(1),vec3i(p.dimensions.xyz)/i32(scale));
@@ -9836,9 +10410,8 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
         presentationDensityCache[cacheIndex]>=CM12_LIQUID_ISOVALUE));
     }
     workgroupBarrier();
-    preparePresentationInterpolationCache(lane,scale,patchFirst,patchDimensions,
-      cacheFirst,cacheDimensions,destinationDensity(),
-      atomicLoad(&presentationPhaseMask)==3u);
+    if(lane==0u&&pageOrigin.y==0&&wet){atomicOr(&presentationPhaseMask,2u);}
+    workgroupBarrier();
   }
   for(var localIndex=lane;localIndex<PRESENTATION_SAMPLES_PER_PAGE;localIndex+=64u){
     let localZ=localIndex/(PRESENTATION_PAGE_RESOLUTION*PRESENTATION_PAGE_RESOLUTION);
@@ -9857,12 +10430,12 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
     let coarseUniformLiquid=scale>1u&&sampleScale==1u&&cacheFits
       &&stencilCandidate&&coarsePhase==2u;
     if(dynamicPage||(all(q>=vec3i(0))&&all(q<vec3i(p.dimensions.xyz)))){
-      if(sampleScale==1u&&heightCandidate
+      if(scale==1u&&sampleScale==1u&&heightCandidate
         &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
         &&cm12SolidVoxelFractionQ8(q)==0u){
         phi=presentationHeightPhi(q,i32(localX),i32(localZ),false);
       }else if(scale==1u){
-        if(resolvedFeature&&wet&&cm12SolidVoxelFractionQ8(q)<255u){
+        if(resolvedFeature&&cm12SolidVoxelFractionQ8(q)<255u){
           // Metadata already names the source brick and subpage. Fine pages can
           // address their packed source cell directly; resolving q through the
           // sparse directory here would redo a hash lookup for every output sample.
@@ -9879,14 +10452,13 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
       }else if((wet||coarseSurfaceSupport||coarseUniformLiquid)
         &&cm12SolidVoxelFractionQ8(q)<255u){
         if(coarseSurfaceSupport){
-          let rho=smoothedPresentationDensityAt(q,scale,patchFirst,patchDimensions);
-          phi=(CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
+          phi=presentationInterpolatedVolumePhi(q,scale,cacheFirst,
+            cacheDimensions,true,destinationDensity());
         }else if(coarseUniformLiquid){
           phi=-4.0*p.frame.y;
         }else if(resolvedFeature&&wet){
-          let rho=interpolatedPresentationDensityAt(q,scale,cacheFirst,
-            cacheDimensions,false,destinationDensity());
-          phi=(CM12_LIQUID_ISOVALUE-rho)*4.0*p.frame.y;
+          phi=presentationInterpolatedVolumePhi(q,scale,cacheFirst,
+            cacheDimensions,stencilCandidate&&cacheFits,destinationDensity());
         }
       }
     }

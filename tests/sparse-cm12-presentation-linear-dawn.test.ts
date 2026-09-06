@@ -49,6 +49,7 @@ fn presentationStencilDensityAt(q:vec3i,scale:u32,first:vec3i,dims:vec3u,fits:bo
 }
 ${functionSource("presentationLimitedSlope")}
 ${functionSource("preparePresentationInterpolationCache")}
+${functionSource("interpolatedPresentationDensityAt")}
 ${functionSource("smoothedPresentationDensityAt")}
 ${functionSource("directSmoothedPresentationDensityAt")}
 @compute @workgroup_size(64)
@@ -101,7 +102,8 @@ fn main(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)group:vec
         - (32.5 + Math.floor(local / 8) % 8) * .0007
         + (32.5 + Math.floor(local / 64)) * .0003;
       assert.ok(Math.abs(values[i + 2]! - expected) < 1e-6, "shader must produce the analytic fixture");
-      assert.equal(values[i], values[i + 1], "cached publication and direct refinement must agree");
+      assert.ok(Math.abs(values[i]! - values[i + 1]!) < 1e-7,
+        "continuous display and conservative refinement reproduce the same affine field");
       maximumError = Math.max(maximumError, Math.abs(values[i]! - values[i + 2]!));
     }
     assert.ok(maximumError < 1e-6, `an affine field must survive reconstruction: error ${maximumError}`);

@@ -125,6 +125,7 @@ const activityTimedWork = Object.freeze({
       label: "sparse-world frontier allocation",
       entryPoints: Object.freeze([
         "allocateSparseWorldFrontier",
+        "finalizeSparseWorldDirectoryAllocations",
       ]),
     },
     {
@@ -619,9 +620,17 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         id: "power-topology",
         label: "Incremental activity dirty-brick mask publication",
       },
+      "brick-activity-measurement": {
+        id: "power-topology",
+        label: "Brick activity measurement and curvature",
+      },
+      "brick-activity-symmetry": {
+        id: "power-topology",
+        label: "Brick activity D4 symmetry fold",
+      },
       "brick-activity-census-and-history": {
         id: "power-topology",
-        label: "Brick activity census, D4 fold and history",
+        label: "Brick activity census and history",
       },
       "sparse-world-frontier-allocation": {
         id: "power-topology",

@@ -120,7 +120,7 @@ test("the SIM diagram has one node per resident stage, in encode order", () => {
 test("adaptivity timing labels describe the complete bracketed work", () => {
   const stages = new Map(ADAPTIVE_MASS_FLUID_PIPELINE.stages.map((stage) => [stage.id, stage]));
   assert.equal(stages.get("activity-measurement")?.label, "Activity census + frontier");
-  assert.match(stages.get("activity-measurement")?.tip.timing ?? "", /10 shader entry points/);
+  assert.match(stages.get("activity-measurement")?.tip.timing ?? "", /11 shader entry points/);
   assert.equal(stages.get("resolution-planning")?.label, "Candidate topology build");
   assert.match(stages.get("resolution-planning")?.tip.timing ?? "",
     /15 shader entry points \+ 5 command-buffer copies/);

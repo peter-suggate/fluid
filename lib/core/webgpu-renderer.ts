@@ -444,6 +444,8 @@ export interface SimulationRunConfig {
   values: MethodParamValues;
   /** Controller-owned identity for a fresh t=0 simulation. */
   simulationEpoch?: number;
+  /** Live sparse topology control; intentionally absent from solver rebuild keys. */
+  topologyFrozen?: boolean;
   /**
    * How many advances this pane's transport may hold at once.
    *
@@ -915,6 +917,8 @@ export class FluidLabRenderer {
   private pressureSamplesFallbackTexture?: GPUTexture;
   private scalarFallbackTexture?: GPUTexture;
   private gpuFluid?: GPUSolverInstance;
+  private topologyFreezeSolver?: GPUSolverInstance;
+  private topologyFrozen = false;
   /** Renderer-owned sparse source for fluid methods that do not publish one. */
   private svoSceneSidecar?: WebGPULiveSvoScene;
   private readonly retiredGPUFluids = new Set<GPUSolverInstance>();
@@ -2695,6 +2699,12 @@ export class FluidLabRenderer {
       } else this.appliedSceneUniformKey = sceneUniformKey;
     }
     this.gpuFluid.applyRuntimeValues?.(config.values);
+    const topologyFrozen = config.topologyFrozen === true;
+    if (this.topologyFreezeSolver !== this.gpuFluid || this.topologyFrozen !== topologyFrozen) {
+      this.gpuFluid.setTopologyFrozen?.(topologyFrozen);
+      this.topologyFreezeSolver = this.gpuFluid;
+      this.topologyFrozen = topologyFrozen;
+    }
     this.secondaryParticlePipeline?.setSource(this.gpuFluid.secondaryParticles);
     return this.gpuFluid;
   }

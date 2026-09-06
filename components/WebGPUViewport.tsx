@@ -1333,6 +1333,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
               quality: method.quality,
               values: resolvedMethodValues(method),
               simulationEpoch: runtime.simulationEpoch,
+              topologyFrozen: runtime.topologyFrozen,
               // Read every frame rather than captured: entering compare mode
               // pins the window to one advance, and a depth captured at mount
               // would leave this pane two deep inside the barrier.

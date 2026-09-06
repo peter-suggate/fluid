@@ -9,6 +9,9 @@ interface RuntimeStore {
   simulationTime: number;
   /** Monotonic identity for the t=0 simulation timeline. */
   simulationEpoch: number;
+  /** Hold the current sparse topology while the physical clock keeps advancing. */
+  topologyFrozen: boolean;
+  setTopologyFrozen: (frozen: boolean) => void;
   notice: string;
   noticeTone: NoticeTone;
   /**
@@ -32,13 +35,15 @@ export const createRuntimeStore = () => create<RuntimeStore>((set) => ({
   runState: "running",
   simulationTime: 0,
   simulationEpoch: 0,
+  topologyFrozen: false,
+  setTopologyFrozen: (topologyFrozen) => set({ topologyFrozen }),
   notice: "Dam-break initialized · Eulerian projection active",
   noticeTone: "info",
   noticeSaid: 0,
   simRate: null,
   setRunState: (runState) => set({ runState }),
   setSimulationTime: (simulationTime) => set({ simulationTime }),
-  resetSimulationTime: () => set((state) => ({ simulationTime: 0, simulationEpoch: state.simulationEpoch + 1 })),
+  resetSimulationTime: () => set((state) => ({ simulationTime: 0, simulationEpoch: state.simulationEpoch + 1, topologyFrozen: false })),
   setNotice: (notice, tone = "info") => set((state) => ({ notice, noticeTone: tone, noticeSaid: state.noticeSaid + 1 })),
   setSimRate: (simRate) => set({ simRate })
 }));

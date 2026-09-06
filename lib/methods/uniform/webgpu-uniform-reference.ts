@@ -259,6 +259,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   readonly negativeBoundaryVelocityBytes: number;
   /** Negative x/y/z domain MAC faces paired with velocityTexture. */
   get negativeBoundaryVelocityBuffer(): GPUBuffer { return this.boundaryVelocityA; }
+  /** Read-only accepted pressure/gamma for matched-lattice Dawn comparisons. */
+  get physicsFieldsForQA() {
+    return { pressure: this.pressureMultigrid.pressureTexture, gamma: this.gammaA };
+  }
   /** Eight vec4 decision records for every stored MAC face/component. */
   readonly symmetryStageAuditMacCormackBuffer?: GPUBuffer;
   /** Fixed-point beta produced by Sec. 3.4 before deficit scattering. */

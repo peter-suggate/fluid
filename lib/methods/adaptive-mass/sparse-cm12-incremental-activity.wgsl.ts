@@ -210,6 +210,15 @@ fn incrementalActivityAddCensus(brick:u32,score:u32,reasons:u32){
   if(value<=p.activityTiming.w){atomicAdd(&activity[4],1u);}
 }
 
+// Symmetry can replace a measured score/reason word after the census. Keep
+// the histogram paired with that word so the next measurement removes the
+// contribution that was actually added, rather than underflowing a counter.
+fn incrementalActivityReplaceCensus(brick:u32,score:u32,reasons:u32){
+  if(atomicLoad(&activity[ACTIVITY_BRICK_CENSUS+brick])==0u){return;}
+  incrementalActivityRemoveCensus(brick);
+  incrementalActivityAddCensus(brick,score,reasons);
+}
+
 // Exact-authority bricks omitted from the heavy measurement still advance
 // their topology-epoch history. The temporal certificate proves their feature
 // activity and restriction error are zero; retained surface/thin flags would

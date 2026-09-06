@@ -83,7 +83,7 @@ test("surface receipts are output-space, generation-stamped, and camera independ
   assert.match(proof, /generationReceipt[\s\S]*==acceptedGeneration/);
   assert.match(proof, /topologyGeneration[\s\S]*==atomicLoad\(&activity\[12\]\)/);
   assert.match(proof, /surfaceProofAcceptedPhi/);
-  assert.match(proof, /surfaceProofVirtualRestrictedDensity/);
+  assert.match(proof, /surfaceProofVirtualVolumePhi/);
   assert.match(proof, /surfaceProofRestrictionFactor/);
   assert.match(proof,
     /surfaceProofGenerationWord\(surfaceProofTarget\)[\s\S]*activity\[12\]/);
@@ -91,7 +91,7 @@ test("surface receipts are output-space, generation-stamped, and camera independ
   assert.match(shader, /fn presentationLimitedSlope/);
   assert.match(shader,
     /accepted==BRICK_FINE_RESOLUTION\/2u[\s\S]*directSmoothedPresentationDensityAt/,
-    "B4-to-B8 transfer must consume the same conservative field as presentation");
+    "B4-to-B8 transfer must retain conservative density reconstruction");
 
   const planner = shader.slice(
     shader.indexOf("fn planBrickResolution("),

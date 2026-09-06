@@ -147,6 +147,9 @@ function FluidSurfaceRenderRow() {
   const session = useSession();
   const mode = session.ui((state) => state.fluidSurfaceRenderMode);
   const setMode = session.ui((state) => state.setFluidSurfaceRenderMode);
+  const methodId = session.method((state) => state.methodId);
+  const frozen = session.runtime((state) => state.topologyFrozen);
+  const setFrozen = session.runtime((state) => state.setTopologyFrozen);
   return <ToolstripRow
     icon={<Waves width={14} height={14} strokeWidth={1.7} aria-hidden />}
     name="Fluid surface"
@@ -159,6 +162,19 @@ function FluidSurfaceRenderRow() {
       options={[{ value: "shaded", label: "Shade" }, { value: "wireframe", label: "Wire" }, { value: "simple", label: "Simple" }]}
       onChange={(value) => setMode(value as typeof mode)}
     />
+    {methodId === "adaptive-mass" && <div className="toolstrip-choice">
+      <button
+        type="button"
+        className={frozen ? "active" : ""}
+        aria-label="Freeze topology"
+        aria-pressed={frozen}
+        title={frozen
+          ? "Resume topology adaptation. The water keeps moving."
+          : "Freeze the current cells and their coarseness while the water keeps moving."}
+        data-testid="freeze-topology-toggle"
+        onClick={() => setFrozen(!frozen)}
+      >{frozen ? "Frozen" : "Freeze"}</button>
+    </div>}
   </ToolstripRow>;
 }
 
