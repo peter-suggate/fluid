@@ -114,13 +114,11 @@ dawnTest("mini32 conserves liquid volume through four seconds",
         || requestedResolutionMode === "all-coarse"
         ? requestedResolutionMode : "adaptive";
       const values = resolveMethodValues(adaptiveMassMethod, "balanced", {
-        brickFineResolution: "8", resolutionMode,
-        selectorMode: "surface",
-        surfaceFineRings: Number(process.env.FLUID_MINI32_SURFACE_RINGS ?? 1),
-        topologyCadenceSteps: Number(
-          process.env.FLUID_MINI32_TOPOLOGY_CADENCE ?? 1,
-        ),
-        timeStep: "paper",
+        ...(requestedResolutionMode ? { resolutionMode } : {}),
+        ...(process.env.FLUID_MINI32_SURFACE_RINGS !== undefined
+          ? { surfaceFineRings: Number(process.env.FLUID_MINI32_SURFACE_RINGS) } : {}),
+        ...(process.env.FLUID_MINI32_TOPOLOGY_CADENCE !== undefined
+          ? { topologyCadenceSteps: Number(process.env.FLUID_MINI32_TOPOLOGY_CADENCE) } : {}),
         ...(process.env.FLUID_MINI32_SHARPENING === "off"
           ? { surfaceSharpening: "off" } : {}),
       });
@@ -163,6 +161,7 @@ dawnTest("mini32 conserves liquid volume through four seconds",
         WebGPUAdaptiveMassSolver["readGPUActivityPolicy"]>>["bricks"][number]>();
       for (let step = 1; step <= steps; step += 1) {
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
+        await solver.assertSimulationHealthy();
         if (step === 1) {
           await device.queue.onSubmittedWorkDone();
           const [stepOneFields, negativeByPage]: [

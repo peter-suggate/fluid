@@ -3833,6 +3833,15 @@ fn traceGammaAndBeta(@builtin(workgroup_id)wid:vec3u,
     sharpeningSource,cm12TeiStagedScaleAtFine(cm12TransportPacketOriginFine));
 }
 
+// Extrapolated air velocity may leave the resident transport halo. An exactly
+// empty donor carries no mass or momentum out of it; gather preserves the prior
+// gamma for dry receivers. Nonzero mass, including sub-threshold residue, still
+// requires recipient support. This is not a dry-epsilon mass discard.
+fn validateDensityDeficitSupport(donor:u32,visible:f32,deficit:f32,density:f32){
+  if(density!=0.0){cm12RecordFailure(2u,donor,
+    vec4u(bitcast<u32>(visible),bitcast<u32>(deficit),0u,0u));}
+}
+
 // CM12 Sec. 3.4 steps 6-7. Every deficient donor returns its missing column
 // weight along the forward characteristic. The fixed-point scatters are
 // deterministic and keep rho and gamma transfers paired.
@@ -3853,7 +3862,7 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
       let velocityAt=sourceCellVelocity()+4u*donor;
       let donorVelocity=vec3f(state[velocityAt],state[velocityAt+1u],
         state[velocityAt+2u]);
-      if(visible<=1e-9){cm12RecordFailure(2u,donor,vec4u(bitcast<u32>(visible),bitcast<u32>(deficit),0u,0u));
+      if(visible<=1e-9){validateDensityDeficitSupport(donor,visible,deficit,donorDensity);
       }else{for(var corner=0u;corner<8u;corner+=1u){
         var cell=INVALID;var weight=0.0;
         cell=arrivalStencil.cells[corner];weight=arrivalStencil.weights[corner];
@@ -4021,7 +4030,7 @@ fn scatterDensityDeficitPackedCoarse(@builtin(global_invocation_id)gid:vec3u){
       let velocityAt=sourceCellVelocity()+4u*donor;
       let donorVelocity=vec3f(state[velocityAt],state[velocityAt+1u],
         state[velocityAt+2u]);
-      if(visible<=1e-9){cm12RecordFailure(2u,donor,vec4u(bitcast<u32>(visible),bitcast<u32>(deficit),0u,0u));
+      if(visible<=1e-9){validateDensityDeficitSupport(donor,visible,deficit,donorDensity);
       }else{for(var corner=0u;corner<8u;corner+=1u){
         let cell=stencil.cells[corner];let weight=stencil.weights[corner];
         if(cell==INVALID||weight<=0.0){continue;}let normalized=weight/visible;
