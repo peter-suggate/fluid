@@ -1029,11 +1029,17 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .transport-cluster button:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
 .transport-cluster button:disabled { opacity: .45; cursor: wait; }
 /* The one control this cluster exists for, so it is not the smallest thing in
-   it: the same box as STEP and RESET, with the glyph one step up from their
-   tag type because a triangle at 9px is a speck. */
-.transport-cluster .transport-main { min-width: 48px; padding: 0 8px; border-color: var(--accent-line); color: var(--accent); font-size: var(--size-3); }
-.transport-cluster .record-button { color: var(--red); }
+   it: the same box as STEP and RESET, with the glyph two steps up from their
+   tag type because a triangle at 11px was still a speck. */
+.transport-cluster .transport-main { width: 48px; padding: 0; border-color: var(--accent-line); color: var(--accent); font-size: var(--size-5); }
+/* An explicit width, because the label cycles ● REC / ■ STOP / WAIT and those
+   are different lengths: the widest sets the box, and the box never moves. */
+.transport-cluster .record-button { width: 62px; padding: 0; color: var(--red); }
 .transport-cluster .record-button.active { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
+/* Reserved whether or not a recording exists — visibility, not display, so the
+   slot holds its width and the row never reflows when a recording finishes. */
+.transport-cluster .playback-button { width: 26px; min-width: 26px; padding: 0; font-size: var(--size-4); }
+.transport-cluster .playback-button[data-armed="false"] { visibility: hidden; }
 .transport-cluster .stop-gpu-button { border-color: var(--amber-line); color: var(--amber); }
 /* The step, between the buttons and the clock it paces: a pair of nudge
    buttons narrower than the transport's verbs, around a number that is typed
@@ -1041,20 +1047,24 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .transport-step { display: flex; align-items: center; gap: 3px; margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--line); color: var(--ink); font-variant-numeric: tabular-nums; }
 .transport-step small { color: var(--dim); font: var(--text-micro); }
 .transport-cluster .transport-step button { min-width: 22px; height: 22px; padding: 0; font-size: var(--size-2); }
-.transport-step input { width: 52px; height: 22px; padding: 0 4px; border: 1px solid var(--line); background: transparent; color: var(--ink); font: var(--text-readout); text-align: right; -moz-appearance: textfield; appearance: textfield; }
+.transport-step input { width: 44px; height: 22px; padding: 0 4px; border: 1px solid var(--line); background: transparent; color: var(--ink); font: var(--text-readout); text-align: right; -moz-appearance: textfield; appearance: textfield; }
 .transport-step input::-webkit-outer-spin-button, .transport-step input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .transport-step input:focus { outline: none; border-color: var(--accent-line); }
 .transport-step input:disabled { opacity: .45; }
 .transport-step[data-pinned="true"] input { color: var(--amber); }
-.transport-time { display: flex; align-items: baseline; gap: 4px; margin-left: 4px; padding: 0 8px; color: var(--ink); font-variant-numeric: tabular-nums; }
-/* Wide enough for the four decimals it prints, and no wider — the unit belongs
-   beside the number, not a space away from it. */
-.transport-time strong { min-width: 50px; font: var(--text-readout); }
+.transport-time { position: relative; display: flex; align-items: baseline; gap: 4px; margin-left: 4px; padding: 0 8px 0 12px; color: var(--ink); font-variant-numeric: tabular-nums; }
+/* Sized for the hundreds of seconds a long run reaches, right-aligned so the
+   number grows into the reserve and the unit never leaves its side. */
+.transport-time strong { min-width: 8ch; font: var(--text-readout); text-align: right; }
 .transport-time small { color: var(--dim); font: var(--text-micro); }
-.transport-recording-dot { align-self: center; width: 6px; height: 6px; border-radius: 50%; background: var(--red); box-shadow: 0 0 9px var(--red-line); animation: status-pulse 1.2s ease-in-out infinite; }
-/* The whole cluster's width, on its own line: the notice is a sentence, and
-   wrapping the row around it would move the buttons every time it changed. */
-.transport-notice { flex: 1 0 100%; max-width: 100%; margin: 0 0 1px; padding: 0 4px; overflow: hidden; color: var(--dim); font: var(--text-micro); text-align: center; text-overflow: ellipsis; white-space: nowrap; transition: opacity .8s ease; }
+/* On the readout's left padding rather than in the row: a dot that took a flex
+   slot shifted the clock sideways every time recording started. */
+.transport-recording-dot { position: absolute; left: 0; top: 50%; width: 6px; height: 6px; margin-top: -3px; border-radius: 50%; background: var(--red); box-shadow: 0 0 9px var(--red-line); animation: status-pulse 1.2s ease-in-out infinite; }
+/* Out of flow, floated above the bar: a sentence in the row stretched the
+   shrink-wrapped cluster to its own length and — because it stays in the DOM
+   while faded — held that phantom width forever. Absolute positioning means no
+   notice, however long, can ever change the cluster's size. */
+.transport-notice { position: absolute; bottom: calc(100% + 5px); left: 50%; transform: translateX(-50%); width: max-content; max-width: 100%; margin: 0; padding: 2px 9px; overflow: hidden; border: 1px solid var(--line); background: var(--overlay); color: var(--dim); font: var(--text-micro); text-align: center; text-overflow: ellipsis; white-space: nowrap; backdrop-filter: var(--frost); border-radius: var(--radius-s); transition: opacity .8s ease; }
 .transport-notice.warn { color: var(--amber); }
 /* Said once. A notice that never expires stops being news and becomes a label
    on the cluster, so it fades out a few seconds after it last changed and comes
@@ -2199,8 +2209,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .lab-shell button, .lab-shell input, .lab-shell select, .lab-shell .metric-card,
 .lab-shell .estimate-grid > div, .lab-shell .segmented,
 .lab-shell .svo-control-grid .range-control,
-.lab-shell .render-discrete-control,
-.transport-resource-state { border-radius: var(--radius-s); }
+.lab-shell .render-discrete-control { border-radius: var(--radius-s); }
 
 .gpu-badge, .health-chip, .fps-meter, .fps-instruments button, .camera-toolbar, .scene-overlay,
 .transport-cluster, .resource-activity-pill, .scene-scale-overlay,
@@ -2234,9 +2243,12 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .lab-shell .segmented { min-height: var(--control-height); height: var(--control-height); }
 .lab-shell .segmented button { font-size: var(--size-3); }
 .lab-shell .select-control select { height: var(--control-height); padding-inline: var(--control-inline-padding); font-size: var(--control-font-size); }
-/* The transport cluster is chrome on the image, not a form: its buttons are
-   glyph-sized on purpose and opt out of the studio's control floor. */
+/* The transport cluster is chrome on the image, not a form: its buttons and
+   the dt entry are glyph-sized on purpose and opt out of the studio's control
+   floor — the floor's 38px height and 11px padding were what clipped the step
+   readout to "16.6" and bulged the field out of its row. */
 .lab-shell .transport-cluster button { min-height: 27px; }
+.lab-shell .transport-step input { min-height: 22px; padding-inline: 4px; font-size: var(--size-3); }
 
 
 /* ---------------------------------------------------------------------------
@@ -2379,19 +2391,17 @@ button:hover .iso-water-side { fill-opacity: .26; }
 
 /* Resource activity presentation (lib/resource-readiness.ts). A card is the
    loudest mark the shell can put over a live viewport, so only work that took
-   scene interaction keeps one; work that blocks nothing gets a pill, and
-   transport-blocking work states itself in the transport cluster instead. Both new
-   marks inherit the tray's pointer transparency — nothing here may take input. */
-.resource-activity-pills { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+   scene interaction keeps one; everything else — transport-blocking work
+   included — gets a pill up here, because the transport cluster never grows
+   status chrome. Both marks inherit the tray's pointer transparency — nothing
+   here may take input. */
+/* One column, every entry the tray's full width: a stagger of self-sized boxes
+   read as debris, not as a stack of work. */
+.resource-activity-pills { display: grid; gap: 5px; }
 .resource-activity-pill { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 8px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); }
 .resource-activity-pill i { flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: status-pulse 1.6s ease-in-out infinite; }
 .resource-activity-pill strong { overflow: hidden; color: var(--muted); font: var(--text-tag); text-overflow: ellipsis; white-space: nowrap; }
 .resource-activity-pill small { flex: none; color: var(--dim); font: var(--text-note); font-variant-numeric: tabular-nums; }
-
-.transport-resource-state { display: flex; align-items: center; gap: 6px; max-width: 232px; height: 25px; margin-left: 4px; padding: 0 8px; border: 1px solid var(--accent-line); background: var(--accent-wash); }
-.transport-resource-state i { flex: none; width: 7px; height: 7px; border: 1px solid var(--accent-line); border-top-color: var(--accent); border-radius: 50%; animation: gpu-build-spin .8s linear infinite; }
-.transport-resource-state strong { overflow: hidden; color: var(--accent); font: var(--text-tag); letter-spacing: var(--track-wide); text-overflow: ellipsis; white-space: nowrap; }
-.transport-resource-state small { flex: none; color: var(--muted); font: var(--text-micro); font-variant-numeric: tabular-nums; }
 
 /* What an armed tool is proposing to put down: its silhouette on the glass,
    dashed like every other outline that is a proposal rather than a published
@@ -2639,3 +2649,34 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .card-confirm-actions .card-confirm-no:hover { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
 .card-confirm-actions .card-confirm-yes { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
 .card-confirm-actions .card-confirm-yes:hover { background: var(--red); color: var(--on-accent); }
+
+/* Producer-owned progress, shared by startup cards and frame-stage controls. */
+.work-progress { padding: 10px; margin: 8px 0; border: 1px solid var(--line); background: color-mix(in srgb, var(--accent) 4%, transparent); border-radius: 6px; }
+/* Inside a bring-up card the progress is the card's own body, not a box within
+   the box: the card already owns the border, background and padding. */
+.gpu-build-card .work-progress { margin: 7px 0 0; padding: 0; border: 0; background: transparent; }
+/* Floating in the tray, entries carry the overlay chrome themselves. */
+.resource-activity-pills .work-progress { margin: 0; border-color: var(--line-strong); background: var(--overlay); backdrop-filter: var(--frost); box-shadow: var(--shadow-card); }
+.work-progress[data-compact] { padding: 4px 9px 5px; }
+.work-progress[data-compact] .work-progress-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.work-progress[data-compact] .work-progress-heading > span { flex: none; font-variant-numeric: tabular-nums; }
+.work-progress[data-compact] .work-progress-meter { height: 3px; margin: 5px 0 1px; }
+.work-progress[data-compact] progress { height: 3px; }
+.work-progress-heading, .work-progress-summary { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.work-progress-heading strong { font: var(--text-note); color: var(--ink); }
+.work-progress-heading > span, .work-progress-summary { color: var(--muted); font: var(--text-note); font-variant-numeric: tabular-nums; }
+.work-progress-meter { height: 7px; margin: 9px 0 6px; border-radius: 3px; overflow: hidden; }
+.work-progress progress { display: block; width: 100%; height: 7px; margin: 0; accent-color: var(--accent); }
+.work-progress p { margin: 7px 0 0; color: var(--muted); font: var(--text-note); line-height: 1.45; text-transform: none; letter-spacing: normal; }
+.work-progress-phases { display: flex; flex-wrap: wrap; list-style: none; margin: 8px 0 0; padding: 0; gap: 4px; }
+.work-progress-phases li { padding: 3px 6px; border-radius: 3px; color: var(--dim); font: var(--text-tag); }
+.work-progress-phases li[aria-current="step"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 0 -2px var(--accent); }
+.work-progress[data-state="waiting"], .work-progress[data-state="error"] { border-left: 2px solid var(--warning, #a86620); }
+.work-progress[data-state="complete"] { border-left: 2px solid var(--accent); }
+.work-progress[data-compact] { padding: 5px 8px; margin: 0; }
+@media (prefers-reduced-motion: reduce) {
+  /* Native indeterminate animation is browser-owned. Keep its accessible
+     semantics but show a static striped meter instead of the animated pixels. */
+  .work-progress-meter[data-indeterminate] { background: repeating-linear-gradient(90deg, var(--accent) 0 6px, transparent 6px 10px); opacity: .45; }
+  .work-progress-meter[data-indeterminate] progress { opacity: 0; }
+}

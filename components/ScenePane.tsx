@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { WorkProgress } from "./WorkProgress";
+import { resourceWorkProgress } from "../lib/core/work-progress";
 import { requestManualGPUStart } from "../lib/core/gpu-startup";
 import type { ResourceActivity, ResourcePluginDefinition } from "../lib/core/resource-readiness";
 import { resourceActivities, resourceActivitiesFor } from "../lib/core/resource-readiness";
+import { transportReadiness, transportWorkStatus } from "../lib/core/transport-status";
 import type { PaneId } from "../lib/core/session/session";
 import { useSession } from "../lib/core/session/session-context";
 import { useSafeBrowserGPUBringup } from "../lib/core/use-safe-browser-gpu-bringup";
@@ -30,25 +32,15 @@ function GPUInitializationPanel({ activity, plugin }: {
   activity: ResourceActivity;
   plugin: ResourcePluginDefinition;
 }) {
-  const [now, setNow] = useState(() => performance.now());
-  useEffect(() => { const timer = window.setInterval(() => setNow(performance.now()), 100); return () => window.clearInterval(timer); }, []);
-  const completed = activity.completed, total = activity.total;
-  const elapsed_s = Math.max(0, now - activity.startedAt_ms) / 1000;
-  const finalizing = total > 0 && completed >= total;
   const heading = activity.lane === "platform" ? "Starting WebGPU"
     : activity.lane === "fluid" && activity.operation ? "Applying simulation settings"
     : activity.lane === "fluid" ? "Preparing fluid"
     : activity.lane === "svo" ? "Preparing sparse presentation" : "Preparing tool";
-  const explanation = plugin.phaseCopy?.[activity.phase]
-    ?? "Preparing this resource independently from the rest of the product.";
-  return <div className="gpu-build-card gpu-initializing" role="status" aria-live="polite">
+  return <div className="gpu-build-card gpu-initializing" role="region" aria-label={heading}>
     <div className="gpu-build-heading"><i aria-hidden="true" /><strong>{heading}</strong></div>
     {activity.operation && <p className="gpu-build-operation">{activity.operation}</p>}
-    <p>{activity.label}</p>
-    <progress max={Math.max(1, total)} {...(total > 0 && !finalizing ? { value: Math.min(completed, total) } : {})} aria-label="GPU initialization progress" />
-    <div className="gpu-progress-summary"><span>{finalizing ? "Finalizing…" : total > 0 ? `${completed} / ${total} tasks` : "Planning work…"}</span><span>{elapsed_s.toFixed(1)} s</span></div>
-    <p className="gpu-stage-explanation">{explanation}</p>
-    {elapsed_s >= 10 && <p className="gpu-task-wait">Still working on this task. Elapsed time remains live when the GPU driver exposes no intermediate counters.</p>}
+    {/* The label is not restated here — WorkProgress leads with it. */}
+    <WorkProgress progress={resourceWorkProgress(activity, plugin)} />
     <small>{activity.retainingPrevious
       ? "The attached generation remains usable. "
       : plugin.blocks === "viewport"
@@ -62,12 +54,8 @@ function GPUInitializationPanel({ activity, plugin }: {
 }
 
 /** Work that blocks nothing is reported, but it never takes the tray's width. */
-function ResourceActivityPill({ activity }: { activity: ResourceActivity }) {
-  return <span className="resource-activity-pill" role="status" aria-live="polite">
-    <i aria-hidden="true" />
-    <strong>{activity.label}</strong>
-    {activity.total > 0 && <small>{Math.min(activity.completed, activity.total)}/{activity.total}</small>}
-  </span>;
+function ResourceActivityPill({ activity, plugin }: { activity: ResourceActivity; plugin: ResourcePluginDefinition }) {
+  return <WorkProgress compact progress={resourceWorkProgress(activity, plugin)} />;
 }
 
 export interface ScenePaneProps {
@@ -85,12 +73,25 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
   const selectorOpen = session.ui((state) => state.sceneSelectorOpen);
   const setSelectorOpen = session.ui((state) => state.setSceneSelectorOpen);
   const gpuStatus = session.diagnostics((state) => state.gpuStatus);
+  const gpuInfo = session.diagnostics((state) => state.gpuInfo);
   const resourceReadiness = session.diagnostics((state) => state.resourceReadiness);
+  const methodId = session.method((state) => state.methodId);
   const activities = resourceActivities(resourceReadiness);
-  // Transport-blocking work is deliberately absent here: TransportBar states it
-  // inline, beside the controls it suspends.
   const trayCards = resourceActivitiesFor(resourceReadiness, "card");
-  const trayPills = resourceActivitiesFor(resourceReadiness, "pill");
+  // Transport-blocking work reports here too: the transport bar only disables
+  // its controls (with the reason on each control) and never grows a progress
+  // chip, so the story of what is running lives in this tray with the rest.
+  const transportInline = resourceActivitiesFor(resourceReadiness, "transport-inline");
+  const trayPills = [...transportInline, ...resourceActivitiesFor(resourceReadiness, "pill")];
+  // The synthesized gate status earns a pill only when it says something the
+  // plugin activities are not already saying: while bring-up cards and pills
+  // narrate the same loading with real counts, "Loading sparse world" on top of
+  // them is a third telling of one story. Attention states (faults, capacity,
+  // deferred resolution) always show — no activity carries those.
+  const gateWork = transportWorkStatus(transportReadiness(gpuInfo, methodId), gpuInfo);
+  const transportWork = gateWork
+    && (gateWork.state !== "active" || (trayCards.length === 0 && transportInline.length === 0))
+    ? gateWork : undefined;
 
   return (
     <section
@@ -127,14 +128,16 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
         onClick={() => setSelectorOpen(!selectorOpen)}
       >{paneId.toUpperCase()}</button>}
       {selectorOpen && <SceneSelector />}
-      {(trayCards.length > 0 || trayPills.length > 0) && <div className="resource-activity-tray" aria-label="Resource tasks">
+      {(trayCards.length > 0 || trayPills.length > 0 || transportWork) && <div className="resource-activity-tray" aria-label="Resource tasks">
         {trayCards.map((activity) => <GPUInitializationPanel
           key={activity.id}
           activity={activity}
           plugin={resourceReadiness.plugins[activity.pluginId].plugin}
         />)}
-        {trayPills.length > 0 && <div className="resource-activity-pills">
-          {trayPills.map((activity) => <ResourceActivityPill key={activity.id} activity={activity} />)}
+        {(trayPills.length > 0 || transportWork) && <div className="resource-activity-pills">
+          {/* Faults keep their explanation; running work is a compact pill. */}
+          {transportWork && <WorkProgress compact={transportWork.state !== "error"} progress={transportWork} />}
+          {trayPills.map((activity) => <ResourceActivityPill key={activity.id} activity={activity} plugin={resourceReadiness.plugins[activity.pluginId].plugin} />)}
         </div>}
       </div>}
       {gpuStatus.state === "manual" && <div className="gpu-fallback gpu-manual-start" role="status">

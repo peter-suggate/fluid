@@ -242,9 +242,10 @@ export function resourceActivities(snapshot: ResourceReadinessSnapshot): readonl
  *
  * A card is the loudest thing the shell can put over a live viewport, so only
  * work that has actually taken scene interaction earns one. Work that suspends
- * transport states itself beside the controls it suspends, and work that blocks
- * nothing gets a pill. An unrecognised declaration takes the pill: over-claiming
- * would cover a viewport the user can still use.
+ * transport disables the controls it suspends (the reason on each control) and
+ * reports its progress in the activity tray, and work that blocks nothing gets
+ * a pill. An unrecognised declaration takes the pill: over-claiming would cover
+ * a viewport the user can still use.
  */
 export type ResourceActivityPresentation = "card" | "transport-inline" | "pill";
 

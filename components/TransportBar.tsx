@@ -6,8 +6,8 @@ import { simulationRecording } from "../lib/core/simulation/recording";
 import { requestManualGPUStop } from "../lib/core/gpu-startup";
 import { useSafeBrowserGPUBringup } from "../lib/core/use-safe-browser-gpu-bringup";
 import { planSceneRuntime } from "../lib/core/scene-runtime";
-import { resourceActivitiesFor, resourceInteractionGates } from "../lib/core/resource-readiness";
-import { requiresFencedInitialRasterPresentation } from "../lib/core/gpu-t0-presentation";
+import { resourceInteractionGates } from "../lib/core/resource-readiness";
+import { transportLockReason, transportReadiness } from "../lib/core/transport-status";
 import { effectiveSimulationStep_s, methodPinsSimulationStep } from "../lib/core/simulation-step";
 import { useSession } from "../lib/core/session/session-context";
 
@@ -49,7 +49,9 @@ function StepSizeControl({ disabled }: { readonly disabled: boolean }) {
   // 16, 33 ms are the settings a reader actually moves between, and reaching
   // 4 ms from 33 one millisecond at a time is not a control.
   const nudge = (factor: number) => commit(step_ms * factor);
-  const shown = draft ?? (Number.isInteger(+step_ms.toFixed(2)) ? String(Math.round(step_ms)) : step_ms.toFixed(2).replace(/0$/, ""));
+  // One decimal at most: the control moves in halvings and doublings, so a
+  // second decimal is noise, and it was the character that clipped the field.
+  const shown = draft ?? (Number.isInteger(+step_ms.toFixed(1)) ? String(Math.round(step_ms)) : step_ms.toFixed(1));
   return (
     <span
       className="transport-step"
@@ -181,76 +183,14 @@ export function TransportBar() {
   const browserSafetyLocked = safeBringupPolicy !== false;
   const [safeStepRequested, setSafeStepRequested] = useState(false);
   const idle = usePointerIdle();
-  // A resource that declares `blocks: "transport"` says so here rather than in
-  // the activity tray: the suspended control and its reason stay together. It is
-  // one line of micro text now instead of a card — the controls it suspends are
-  // already showing their own disabled state beside it.
-  const transportResourceWork = resourceActivitiesFor(resourceReadiness, "transport-inline")[0];
   const interaction = resourceInteractionGates(resourceReadiness, !rendererOnlyScene);
-  const sparseWorldStatus = gpuInfo?.sparseWorldStatus;
-  const sparseWorldDeviceStatus = gpuInfo?.sparseWorldDeviceStatus;
-  const sparseWorld = sparseWorldStatus !== undefined || sparseWorldDeviceStatus !== undefined;
-  const initialSceneReady = !requiresFencedInitialRasterPresentation(methodId)
-    || (gpuInfo?.initialSparseAuthorityReady === true
-      && gpuInfo?.initialRasterSurfaceReady === true);
-  const sparseWorldFault = sparseWorldStatus?.fault ?? gpuInfo?.sparseWorldDeviceFault;
-  const sparseWorldFaultCode = sparseWorldFault?.code
-    ?? (sparseWorldDeviceStatus === "fault" ? "device-library"
-      : sparseWorldStatus?.state === "fault" ? "internal" : undefined);
-  const sparseWorldReady = sparseWorldStatus !== undefined
-    && sparseWorldDeviceStatus === "ready"
-    && sparseWorldStatus.state !== "fault";
-  const sparseWorldLoading = sparseWorld && !sparseWorldFaultCode
-    && (!sparseWorldReady || !initialSceneReady);
-  // Legacy solvers retain their atomic-pipeline readiness flag. Sparse worlds
-  // expose only device-library readiness and semantic world status.
-  const simulationReady = sparseWorld ? sparseWorldReady
-    : gpuInfo?.simulationPipelinesReady !== false;
+  // The bar itself never narrates work: loading, compiling and topology states
+  // show as progress in the activity tray (see `transportWorkStatus`, rendered
+  // by ScenePane). Here they exist only as a lock, stated on the controls.
+  const readiness = transportReadiness(gpuInfo, methodId);
   const transportLocked = rendererOnlyScene || !interaction.transportInteractive
-    || !initialSceneReady || !simulationReady;
-  const transportLockReason = sparseWorldFaultCode
-    ? `Sparse world fault: ${sparseWorldFaultCode}`
-    : sparseWorld
-      ? sparseWorldLoading ? "Sparse world is loading"
-        : "Simulation controls unlock after the sparse world is ready"
-      : gpuInfo?.simulationPipelineError
-        ? `Simulation pipeline compilation failed: ${gpuInfo.simulationPipelineError}`
-        : !simulationReady
-          ? "Simulation pipelines are compiling in the background"
-          : "Simulation controls unlock after the initial GPU scene is ready";
-  const transportStatus = sparseWorldFaultCode ? {
-    title: transportLockReason,
-    label: "Sparse world fault",
-    detail: sparseWorldFaultCode,
-  } : gpuInfo?.topologyGenerationPending ? {
-    title: "Preparing the next sparse resolution in the background",
-    label: "Preparing detail",
-  } : gpuInfo?.topologyGenerationError ? {
-    title: gpuInfo.topologyGenerationError,
-    label: "Resolution update deferred",
-  } : gpuInfo?.topologyGenerationDeferred ? {
-    title: "The requested resolution exceeds the current topology budget",
-    label: "Resolution budget reached",
-  } : sparseWorldStatus?.state === "saturated" ? {
-    title: "Sparse world capacity reached",
-    label: "Sparse world capacity reached",
-    detail: `${sparseWorldStatus.residentTiles}/${sparseWorldStatus.capacityTiles} tiles`,
-  } : sparseWorldLoading ? {
-    title: "Sparse world is loading",
-    label: "Loading sparse world",
-  } : transportResourceWork ? {
-    title: sparseWorld ? "Sparse world ready" : transportResourceWork.label,
-    label: sparseWorld ? "Sparse world ready"
-      : transportResourceWork.operation ?? transportResourceWork.label,
-    detail: !sparseWorld && transportResourceWork.total > 0
-      ? `${Math.min(transportResourceWork.completed, transportResourceWork.total)}/${transportResourceWork.total}`
-      : undefined,
-  } : !sparseWorld && !simulationReady ? {
-    title: transportLockReason,
-    label: gpuInfo?.simulationPipelineError
-      ? "Simulation compile failed" : "Compiling simulation",
-    detail: gpuInfo?.simulationPipelineError,
-  } : undefined;
+    || !readiness.initialSceneReady || !readiness.simulationReady;
+  const transportLockedReason = transportLockReason(readiness, gpuInfo);
   const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
   const toggleRecording = () => {
     if (recordingStatus === "recording") simulationRecording.stop(simulationTime);
@@ -267,7 +207,8 @@ export function TransportBar() {
     >
       {/* The studio's only feedback channel — it is what says "Nothing to undo"
           now that the chip's history buttons are gone — so it survives the cut,
-          as one ellipsised line that fades with the rest of the cluster. */}
+          as one ellipsised caption floated above the bar (out of flow, so it can
+          never resize the cluster) that fades with the rest of the cluster. */}
       {notice && <p
         className={`transport-notice${noticeTone === "warn" ? " warn" : ""}`}
         data-stale={noticeStale ? "true" : "false"}
@@ -281,7 +222,7 @@ export function TransportBar() {
         aria-label={browserPolicyPending ? "Browser GPU safety policy is loading"
           : rendererOnlyScene ? "Fluid simulation is disabled for this renderer validation scene"
           : safeBringup ? "Continuous play is disabled during bounded GPU bring-up"
-          : transportLocked ? transportLockReason
+          : transportLocked ? transportLockedReason
           : runState === "running" ? "Pause simulation" : "Play simulation"}
       >{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
       <button
@@ -289,7 +230,7 @@ export function TransportBar() {
         disabled={browserPolicyPending || transportLocked || safeStepLocked}
         onClick={() => { if (safeBringup) setSafeStepRequested(true); simulation.singleStep(); }}
         aria-label={browserPolicyPending ? "Browser GPU safety policy is loading"
-          : transportLocked ? transportLockReason
+          : transportLocked ? transportLockedReason
           : safeStepLocked ? "The bounded browser GPU step has already been requested"
           : "Single fluid clock step"}
       >STEP</button>
@@ -313,11 +254,19 @@ export function TransportBar() {
         aria-label={recordingStatus === "recording" ? "Stop simulation recording" : "Record simulation video"}
         data-testid="record-simulation"
       >{recordingStatus === "recording" ? "■ STOP" : recordingStatus === "processing" ? "WAIT" : "● REC"}</button>
-      {recording && recordingStatus !== "recording" && <button
+      {/* The slot is always in the row and only becomes visible once there is a
+          recording to play: a button that pops into existence would move every
+          control to its left, and this bar never changes size. */}
+      <button
         type="button"
+        className="playback-button"
+        data-armed={recording && recordingStatus !== "recording" ? "true" : "false"}
+        disabled={!recording || recordingStatus === "recording"}
+        tabIndex={recording && recordingStatus !== "recording" ? undefined : -1}
         onClick={() => simulationRecording.open()}
         title="Play back the recorded simulation"
-      >Playback</button>}
+        aria-label="Play back the recorded simulation"
+      >▸</button>
       {safeBringup && <button type="button" className="stop-gpu-button" onClick={requestManualGPUStop}>STOP GPU</button>}
       <StepSizeControl disabled={browserSafetyLocked || rendererOnlyScene} />
       <output className="transport-time" aria-label="Simulation time in seconds">
@@ -325,16 +274,6 @@ export function TransportBar() {
           ? <i className="transport-recording-dot" aria-hidden="true" /> : null}
         <strong>{simulationTime.toFixed(4)}</strong><small>s</small>
       </output>
-      {transportStatus && <span
-        className="transport-resource-state"
-        role="status"
-        aria-live="polite"
-        title={transportStatus.title}
-      >
-        <i aria-hidden="true" />
-        <strong>{transportStatus.label}</strong>
-        {transportStatus.detail && <small>{transportStatus.detail}</small>}
-      </span>}
     </div>
   );
 }

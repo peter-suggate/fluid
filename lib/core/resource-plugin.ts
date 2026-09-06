@@ -1,3 +1,5 @@
+import type { WorkProgressPhase } from "./work-progress";
+
 /**
  * The resource-plugin protocol: what a capability owner declares about itself.
  *
@@ -37,5 +39,7 @@ export interface ResourcePluginDefinition {
   readonly provides: readonly RuntimeResourceCapability[];
   /** What loses an action when no usable generation exists. */
   readonly blocks: "viewport" | "transport" | "nothing";
+  /** Displayed as named phases, never treated as equally weighted work. */
+  readonly progressPhases?: readonly WorkProgressPhase[];
   readonly phaseCopy?: Readonly<Record<string, string>>;
 }
