@@ -774,6 +774,17 @@ export function createCoarseFirstPoolImpactHalfScene(): SceneDescription {
   return scene;
 }
 
+/** Quarter the physical extent on each axis, retaining the 0.05 m finest cells. */
+export function createCoarseFirstPoolImpactQuarterScene(): SceneDescription {
+  const scene = createCoarseFirstPoolImpactScene();
+  scene.sceneId = "coarse-first-pool-impact-quarter";
+  scene.container = { ...scene.container, width_m: 1.6, height_m: 1.2, depth_m: 1.6 };
+  scene.fluid.initialLiquidVolumes = [
+    { shape: "sphere", center_m: { x: 0, y: 0.9125, z: 0 }, radius_m: 0.125 },
+  ];
+  return scene;
+}
+
 export function createFallingWaterTorusScene(): SceneDescription {
   const scene = createCoarseFirstPoolImpactScene();
   scene.sceneId = "falling-water-torus";
@@ -2556,6 +2567,17 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     } },
     build: createCoarseFirstPoolImpactHalfScene,
     camera: { distance_m: 5.5, target_m: { x: 0, y: 0.9, z: 0 } },
+  }),
+  defineScene({
+    id: "coarse-first-pool-impact-quarter",
+    name: "Coarse-first · ball into still pool (quarter size)",
+    blurb: "The same pool impact at one quarter the physical dimensions: a 32×24×32 lattice with a proportionally smaller falling ball. Keeps 0.05 m finest cells, with one sixty-fourth of the original lattice volume.",
+    audience: "validation", shelf: "Dam-break ladder", environment: "stage",
+    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+      selectorMode: "coarse-first", timeStep: "scene", brickFineResolution: "8",
+    } },
+    build: createCoarseFirstPoolImpactQuarterScene,
+    camera: { distance_m: 2.75, target_m: { x: 0, y: 0.45, z: 0 } },
   }),
   defineScene({
     id: "minimal-power-dam-break-64",
