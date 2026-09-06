@@ -236,7 +236,7 @@ export type DrySceneReplacementEncoder = (
 export type RasterWaterBackgroundMode = "require-dry-scene" | "clear";
 
 /** How the extracted liquid surface is presented in the viewport. */
-export type FluidSurfaceRenderMode = "shaded" | "wireframe";
+export type FluidSurfaceRenderMode = "shaded" | "wireframe" | "simple";
 
 /**
  * Restricted tall cells cannot contain a free surface below their cubic band.
@@ -1080,6 +1080,7 @@ fn causticLanding(origin:vec3f,direction:vec3f)->vec2f{
 
 export const compositeShader = /* wgsl */ `
 override wireframeOnly:f32=0.0;
+override simpleSurface:f32=0.0;
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
@@ -1257,6 +1258,18 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
   let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);
   let scene=safeSample(sceneTexture,textureUV);if(wireframeOnly>.5){return finish(scene.rgb,ndc);}var front=safePositionSample(frontPosition,textureUV);if(front.a<.5){return finish(scene.rgb,ndc);}var frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
+  // Diagnostic material: preserve the actual mesh silhouette and normals, with
+  // undistorted scenery showing through. Fixed diffuse lighting exposes folds
+  // without environment reflections, specular highlights or optical contact repair.
+  if(simpleSurface>.5){
+    if(resolvedDrySceneDepth(scene.a)+depthEpsilon<frontDepth){return finish(scene.rgb,ndc);}
+    var normal=normalize(safeInterfaceSample(frontNormal,textureUV).xyz);
+    if(dot(normal,rd)>0.0){normal=-normal;}
+    let diffuse=.38+.62*max(dot(normal,normalize(vec3f(-.45,.8,.35))),0.0);
+    let rim=pow(1.0-clamp(dot(normal,-rd),0.0,1.0),2.0);
+    let color=vec3f(.12,.48,.64)*diffuse;
+    return finish(mix(scene.rgb,color,.58+.12*rim),ndc);
+  }
   let frontNormalSample=safeInterfaceSample(frontNormal,textureUV);let filmDensity=recoveredWallFilm(front,frontNormalSample);var n=normalize(frontNormalSample.xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
   if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(scene.rgb,ndc);}}
   if(resolvedDrySceneDepth(scene.a)+depthEpsilon<frontDepth){return finish(scene.rgb,ndc);}
@@ -1362,6 +1375,7 @@ export class RasterWaterPipeline {
   private causticPipeline?: GPURenderPipeline;
   private compositePipeline?: GPURenderPipeline;
   private wireframeCompositePipeline?: GPURenderPipeline;
+  private simpleCompositePipeline?: GPURenderPipeline;
   private extractLayout?: GPUBindGroupLayout;
   private globalExtractLayout?: GPUBindGroupLayout;
   private globalPolygoniseLayout?: GPUBindGroupLayout;
@@ -1785,6 +1799,10 @@ export class RasterWaterPipeline {
       ...compositeDescriptor,label:"Composite water wireframe background",
       fragment:{module:composite,entryPoint:"fragmentMain",constants:{wireframeOnly:1},targets:[{format:this.targetFormat}]},
     },pipeline=>{this.wireframeCompositePipeline=pipeline;});
+    render("Compositing simple translucent water",{
+      ...compositeDescriptor,label:"Composite simple translucent water",
+      fragment:{module:composite,entryPoint:"fragmentMain",constants:{simpleSurface:1},targets:[{format:this.targetFormat}]},
+    },pipeline=>{this.simpleCompositePipeline=pipeline;});
     render("Drawing rigid bodies",{
       label: "Fluid-only rigid bodies", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.rigidSceneLayout] }),
       vertex: { module: rigidScene, entryPoint: "vertexMain" },
@@ -2288,7 +2306,7 @@ export class RasterWaterPipeline {
       geometryDimensions[2], sparseGeometryCapacity);
     const globalFinePipeline = this.extractGlobalFinePipeline;
     const globalCoarsePipeline = this.extractGlobalCoarsePipeline;
-    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||(Boolean(this.globalFineLevelSet)&&!globalFinePipeline)||(this.needsGlobalCoarsePipeline()&&!globalCoarsePipeline)||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.surfaceWireframePipeline||!this.causticPipeline||!this.compositePipeline||!this.wireframeCompositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.globalPolygoniseEmitBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.causticBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture||!this.causticReceiver) return false;
+    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||(Boolean(this.globalFineLevelSet)&&!globalFinePipeline)||(this.needsGlobalCoarsePipeline()&&!globalCoarsePipeline)||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.surfaceWireframePipeline||!this.causticPipeline||!this.compositePipeline||!this.wireframeCompositePipeline||!this.simpleCompositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.globalPolygoniseEmitBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.causticBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture||!this.causticReceiver) return false;
     const now_ms = performance.now();
     // A paused t=0 handoff cannot wait for a new solver revision: reset has
     // already made the current revision the only one that will be presented.
@@ -2479,7 +2497,7 @@ export class RasterWaterPipeline {
     // the clear so the presentation target is the background colour rather than
     // a stale composite that would look like the pass still ran.
     if (!this.disabledStages.has("optical-composite")) {
-      composite.setPipeline(surfaceRenderMode === "wireframe" ? this.wireframeCompositePipeline : this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
+      composite.setPipeline(surfaceRenderMode === "wireframe" ? this.wireframeCompositePipeline : surfaceRenderMode === "simple" ? this.simpleCompositePipeline : this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
     }
     composite.end();
     if (surfaceRenderMode === "wireframe" && !this.disabledStages.has("optical-composite")) {

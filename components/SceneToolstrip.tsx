@@ -150,13 +150,13 @@ function FluidSurfaceRenderRow() {
   return <ToolstripRow
     icon={<Waves width={14} height={14} strokeWidth={1.7} aria-hidden />}
     name="Fluid surface"
-    hint="Shade the liquid normally, or show the extracted triangle edges for topology diagnosis."
+    hint="Shade the liquid normally, inspect a simple translucent surface, or show triangle edges for topology diagnosis."
     testId="fluid-surface-render-row"
   >
     <ToolstripChoice
       ariaLabel="Fluid surface render mode"
       value={mode}
-      options={[{ value: "shaded", label: "Shade" }, { value: "wireframe", label: "Wire" }]}
+      options={[{ value: "shaded", label: "Shade" }, { value: "wireframe", label: "Wire" }, { value: "simple", label: "Simple" }]}
       onChange={(value) => setMode(value as typeof mode)}
     />
   </ToolstripRow>;
@@ -234,6 +234,7 @@ export function ContainerToolstrip({
     {hasFields && <FieldViewRows />}
     <PrimaryTraversalRow />
     <TankRow />
+    {hasSolver && <FluidSurfaceRenderRow />}
     {hasSolver && <SolverRow />}
     {hasSolver && <AdaptiveMassToolstripRow />}
     {/* The seam between the two halves of the column: readings that say what
@@ -256,7 +257,6 @@ export function ContainerToolstrip({
       : <>
         <ToolstripRule />
         <FieldControlRows />
-        {hasSolver && <FluidSurfaceRenderRow />}
         {/* Only over rows that exist. The tank's own list is down to the water's
             settings, and those are only its while the scene has no body to hang
             them off — so on a filled scene this section is empty, and a heading
