@@ -57,13 +57,13 @@ export async function createMini32EnergyBudget(device: GPUDevice, solver: WebGPU
   }
   const captures = new Map<string, GPUBuffer>();
   const stages = ["transport-velocity-extension", "face-preparation", "conservative-transport",
-    "gamma-diffusion", "surface-sharpening", "symmetry-authority", "body-forces", "velocity-projection"];
+    "gamma-diffusion", "surface-sharpening", "scalar-publication", "body-forces", "velocity-projection"];
   return {
     cells: cells.length,
     arm() {
       assert.equal(captures.size, 0);
       solver.setStageCaptureForQA((stage, encoder) => {
-        if(stage === "symmetry-authority" && overrideUpload)
+        if(stage === "scalar-publication" && overrideUpload)
           encoder.copyBufferToBuffer(overrideUpload,0,source.state,overrideDestination,4);
         if (!stages.includes(stage)) return;
         const bytes = 4 * (10 * nc + 2 * nr + 2);
@@ -136,7 +136,7 @@ export async function createMini32EnergyBudget(device: GPUDevice, solver: WebGPU
             bin.mass += m; bin.kinetic += ke; bin.potential += pe;
           }
           assert.ok([mass, potential, kinetic, collocatedKinetic].every(Number.isFinite));
-          if(stage === "symmetry-authority") beforeForces=state.slice();
+          if(stage === "scalar-publication") beforeForces=state.slice();
           result.push({ stage, mass, potential, kinetic, collocatedKinetic, total: potential + kinetic, momentumY, transportMomentumY, transportKinetic, gravityLinear,gravityQuadratic, byPhase, byWidth, cellSamples:cellSamples.length?cellSamples:undefined });
         } finally { if (buffer.mapState === "mapped") buffer.unmap(); buffer.destroy(); }
       }

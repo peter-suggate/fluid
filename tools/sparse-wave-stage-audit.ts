@@ -45,7 +45,7 @@ export async function createSparseWaveStageAudit(device: GPUDevice, solver: WebG
   const cells = buildCells(activity);
   const norm = horizontalArea * (kx ? .5 : 1) * (kz ? .5 : 1);
   const stages = ["transport-velocity-extension", "face-preparation", "conservative-transport",
-    "gamma-diffusion", "surface-sharpening", "symmetry-authority", "body-forces", "velocity-projection", "candidate-transfer"];
+    "gamma-diffusion", "surface-sharpening", "scalar-publication", "body-forces", "velocity-projection", "candidate-transfer"];
   const captures = new Map<string, GPUBuffer>();
   // Gamma's intermediate output reuses the pressure scratch, not densityA/B.
   const segments = [[source.layout.densityA, nc], [source.layout.densityB, nc], [source.layout.pressure, nc],

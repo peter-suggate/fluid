@@ -112,11 +112,9 @@ const activityTimedWork = Object.freeze({
       ]),
     },
     {
-      label: "brick activity census, D4 fold and history",
+      label: "brick activity census and history",
       entryPoints: Object.freeze([
         "measureBrickActivity",
-        "preserveActivityHorizontalD4",
-        "commitActivityHorizontalD4",
         "ageIncrementalActivityHistory",
         "finalizeIncrementalActivityCensus",
       ]),
@@ -429,7 +427,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       summary: "Sec. 3.5's density correction and Algorithm 2's local mass return on the shared transport packet authority: receipt setup, a fused dose/TEI fixed-point mass transform, then scalar finalization. The stage then conservatively enforces per-cell open-volume capacity and publishes FSM1 final-scalar packet masks.",
       reads: "transported density and gamma, solid fractions",
       writes: "conditioned density and gamma, final-scalar packet masks",
-      feeds: "symmetry authority and activity measurement",
+      feeds: "scalar publication and activity measurement",
     },
     toggle: {
       param: "surfaceSharpening", on: "on", off: "off",
@@ -470,18 +468,18 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         fixed(context.values.sharpeningDistance, 1)} cells · ${
         fixed(context.values.sharpeningTraceSteps, 0)} substeps`,
   },
-  "symmetry-authority": {
-    label: "D4 symmetry authority", band: "transport", side: "left",
-    phase: { id: "other", label: "Horizontal D4 symmetry authority" },
+  "scalar-publication": {
+    label: "Scalar publication", band: "transport", side: "left",
+    phase: { id: "other", label: "Scalar output publication" },
     lens: null,
     tip: {
-      summary: "Folds the conditioned scalars onto the horizontal D4 orbit over the frame-control D4 families, so a scene authored symmetric stays bit-identical under the group action instead of drifting apart one rounding step at a time, then publishes the frame's scalar output.",
-      reads: "conditioned density and gamma",
-      writes: "D4-folded density and gamma, frame scalar output",
+      summary: "Publishes the completed scalar output without modifying density or gamma.",
+      reads: "completed scalar stage coverage",
+      writes: "frame scalar output receipt",
       feeds: "body-force prediction",
-      gate: "the authored scene and every injected drop are horizontally D4 symmetric; otherwise the bypass family runs and the fold is a no-op",
+      gate: "accepted frame control",
     },
-    chip: () => "horizontal orbit fold · scalar output",
+    chip: () => "scalar output receipt",
   },
   "body-forces": {
     label: "Body forces", band: "momentum", side: "left",
@@ -600,7 +598,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     phase: { id: "velocity-projection", label: "Composite pressure-gradient projection" },
     lens: null,
     tip: {
-      summary: "Advances the incremental-activity clock, then projects the compiled dirty/pressure row masks directly through the same composite rows that built the divergence, conservative 2:1 ports and sparse-air boundaries included. Collocation publishes divergence maxima during its existing incidence traversal; the face D4 fold, rigid-body reaction and frame face output follow.",
+      summary: "Advances the incremental-activity clock, then projects the compiled dirty/pressure row masks directly through the same composite rows that built the divergence, conservative 2:1 ports and sparse-air boundaries included. Collocation publishes divergence maxima during its existing incidence traversal; rigid-body reaction and frame face output follow.",
       reads: "predicted face velocity, pressure, dirty bricks",
       writes: "projected face and collocated velocity, divergence receipts, frame face output",
       feeds: "activity measurement and the next frame's velocity extension",
@@ -623,10 +621,6 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       "brick-activity-measurement": {
         id: "power-topology",
         label: "Brick activity measurement and curvature",
-      },
-      "brick-activity-symmetry": {
-        id: "power-topology",
-        label: "Brick activity D4 symmetry fold",
       },
       "brick-activity-census-and-history": {
         id: "power-topology",
@@ -906,7 +900,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
   },
   "brick-retirement": {
     label: "Post-commit activity mask", band: "adaptivity", side: "right",
-    phase: { id: "adaptive-publication", label: "Post-topology D4 + activity-mask publication" },
+    phase: { id: "adaptive-publication", label: "Post-topology activity-mask publication" },
     lens: null,
     tip: {
       summary: "Marks every brick the topology commit changed in the post-topology activity mask, so the next advance's direct face and activity transforms select exactly the bricks that moved. The decision to retire an unsupported empty brick is taken in resolution planning; this stage publishes the retired and reshaped brick bits.",

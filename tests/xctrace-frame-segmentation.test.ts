@@ -176,7 +176,7 @@ test("a Sparse CM12 start stage spanning five encoders remains the frame anchor"
       tasks: [authority, authority, authority, authority, authority,
         "Sparse CM12 resident gamma-diffusion",
         "Sparse CM12 resident body-forces",
-        "Sparse CM12 resident symmetry-authority"],
+        "Sparse CM12 resident scalar-publication"],
     }),
     lane: "mini",
     environment: { FLUID_GPU_ISOLATE_PASS_LABELS: "1" },

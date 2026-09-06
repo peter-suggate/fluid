@@ -65,7 +65,7 @@ test("conditioning controls preserve the mandatory sparse scalar-publication suf
   assert.doesNotMatch(gammaStage, /GammaRefinement/);
 
   const sharpeningStage = resident.slice(resident.indexOf('stage("surface-sharpening"'),
-    resident.indexOf('stage("symmetry-authority"'));
+    resident.indexOf('stage("scalar-publication"'));
   assert.match(sharpeningStage,
     /if \(surfaceSharpeningEnabled \|\| gammaDiffusionEnabled\)[\s\S]*finalizeSharpening/);
   assert.match(sharpeningStage, /beginSparseCM12FinalScalarMasks/);

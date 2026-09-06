@@ -1153,7 +1153,7 @@ struct Params {
   stateOffsets2:vec4u,      // pressure, rhs, diagonal, liquid
   stateOffsets3:vec4u,      // theta, residual, preconditioned, direction
   stateOffsets4:vec4u,      // applied, divergence, presentation brick wet, reserved
-  stateOffsets5:vec4u,      // sharpening/D4 rho, D4 gamma, tracers, dense face support
+  stateOffsets5:vec4u,      // sharpening/pressure scratch, gamma scratch, tracers, dense face support
   frame:vec4f,              // dt, finest cell metres, pressure scale, parity
   acceleration:vec4f,       // finest cells / second^2
   dispatch:vec4u,           // cell workgroups, row workgroups, pcg iterations, brick count
@@ -4768,50 +4768,6 @@ fn finalizeDensityCapacityRepairGate${gate}(
     acceptedTemplateCellInvocation(gid.x)),${gate + 1}u);
 }`).join("\n")}
 
-// Retain a proven horizontal D4 invariant after conditioning. Every member
-// folds its coordinates into the same octant before enumerating the orbit,
-// so the floating sum has identical order everywhere. Rounding density and
-// gamma to fixed point here discarded sub-quantum liquid every frame, even
-// when the input was already exactly symmetric. No quantization is needed.
-@compute @workgroup_size(64)
-fn preserveHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  if(!cellActive(cell)){
-    state[p.stateOffsets5.x+cell]=0.0;state[p.stateOffsets5.y+cell]=1.0;return;
-  }
-  let rawCenter=cellCenter(cell);let extent=f32(p.dimensions.x);
-  let folded=min(rawCenter.xz,vec2f(extent)-rawCenter.xz);
-  let center=vec3f(min(folded.x,folded.y),rawCenter.y,max(folded.x,folded.y));
-  let xs=array<f32,8>(center.x,extent-center.x,center.x,extent-center.x,
-    center.z,extent-center.z,center.z,extent-center.z);
-  let zs=array<f32,8>(center.z,center.z,extent-center.z,extent-center.z,
-    center.x,center.x,extent-center.x,extent-center.x);
-  let ownRho=state[destinationDensity()+cell];
-  let ownGamma=state[destinationGamma()+cell];
-  var rhoSum=0.0;var gammaSum=0.0;var count=0;
-  var sameRho=true;var sameGamma=true;
-  for(var transform=0u;transform<8u;transform+=1u){
-    let member=ownerCellAt(vec3i(i32(floor(xs[transform])),i32(floor(center.y)),
-      i32(floor(zs[transform]))));
-    if(member==INVALID){continue;}
-    let rho=state[destinationDensity()+member];
-    let gamma=state[destinationGamma()+member];
-    rhoSum+=rho;gammaSum+=gamma;
-    sameRho=sameRho&&rho==ownRho;sameGamma=sameGamma&&gamma==ownGamma;
-    count+=1;
-  }
-  state[p.stateOffsets5.x+cell]=select(rhoSum/f32(count),ownRho,sameRho);
-  state[p.stateOffsets5.y+cell]=select(gammaSum/f32(count),ownGamma,sameGamma);
-}
-
-@compute @workgroup_size(64)
-fn commitHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  if(!cellActive(cell)){return;}
-  state[destinationDensity()+cell]=state[p.stateOffsets5.x+cell];
-  state[destinationGamma()+cell]=state[p.stateOffsets5.y+cell];
-}
-
 fn publishForcedFace(row:u32,value:f32){
   state[destinationFaceVelocity()+row]=value;
   state[sourceFaceVelocity()+row]=value;
@@ -6174,147 +6130,6 @@ fn collocateAndDiagnose(@builtin(global_invocation_id)gid:vec3u,
     reduceB[lid.x]=max(reduceB[lid.x],reduceB[lid.x+width]);}
     workgroupBarrier();if(width==1u){break;}width/=2u;}
   if(lid.x==0u){partials[wid.x]=vec4f(reduceA[0],reduceB[0],0.0,0.0);}
-}
-
-// Collocated velocity is transport state, not the conservative projected face
-// authority. A newly activated leaf reconstructs its first face values
-// from this field. Make the existing scene-level D4 authority apply here too,
-// before sub-ULP collocation differences are amplified by the next pressure
-// RHS on the much more highly decomposed 4-cell brick grid.
-@compute @workgroup_size(64)
-fn preserveVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
-  if(!cellActive(cell)){
-    for(var component=0u;component<3u;component+=1u){
-      atomicStore(&conditioning[component*p.counts.x+cell],bitcast<i32>(0.0));
-    }
-    state[p.stateOffsets5.x+cell]=0.0;
-    return;
-  }
-  let center=cellCenter(cell);
-  let extent=f32(p.dimensions.x);
-  let xs=array<f32,8>(center.x,extent-center.x,center.x,extent-center.x,
-    center.z,extent-center.z,center.z,extent-center.z);
-  let zs=array<f32,8>(center.z,center.z,extent-center.z,extent-center.z,
-    center.x,center.x,extent-center.x,extent-center.x);
-  var sum=vec3f(0.0);var count=0u;var pressureSum=0.0;var pressureCount=0u;
-  for(var transform=0u;transform<8u;transform+=1u){
-    let member=ownerCellAt(vec3i(i32(floor(xs[transform])),i32(floor(center.y)),
-      i32(floor(zs[transform]))));
-    if(member==INVALID||!cellActive(member)){continue;}
-    let at=destinationCellVelocity()+4u*member;
-    var v=vec3f(state[at],state[at+1u],state[at+2u]);
-    if(transform==1u){v.x=-v.x;}
-    else if(transform==2u){v.z=-v.z;}
-    else if(transform==3u){v.x=-v.x;v.z=-v.z;}
-    else if(transform==4u){let x=v.x;v.x=v.z;v.z=x;}
-    else if(transform==5u){let x=v.x;v.x=v.z;v.z=-x;}
-    else if(transform==6u){let x=v.x;v.x=-v.z;v.z=x;}
-    else if(transform==7u){let x=v.x;v.x=-v.z;v.z=-x;}
-    sum+=v;count+=1u;
-    if(pcmCellContains(member)){
-      pressureSum+=state[p.stateOffsets2.x+member];pressureCount+=1u;
-    }
-  }
-  let average=select(vec3f(0.0),sum/f32(count),count>0u);
-  atomicStore(&conditioning[cell],bitcast<i32>(average.x));
-  atomicStore(&conditioning[p.counts.x+cell],bitcast<i32>(average.y));
-  atomicStore(&conditioning[2u*p.counts.x+cell],bitcast<i32>(average.z));
-  state[p.stateOffsets5.x+cell]=select(0.0,
-    pressureSum/f32(pressureCount),pressureCount>0u);
-}
-
-@compute @workgroup_size(64)
-fn commitVelocityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
-  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID||!cellActive(cell)){return;}
-  let at=destinationCellVelocity()+4u*cell;
-  let previous=vec3f(state[at],state[at+1u],state[at+2u]);
-  let next=vec3f(bitcast<f32>(atomicLoad(&conditioning[cell])),
-    bitcast<f32>(atomicLoad(&conditioning[p.counts.x+cell])),
-    bitcast<f32>(atomicLoad(&conditioning[2u*p.counts.x+cell])));
-  let velocityDelta=next-previous;
-  if(length(velocityDelta)>0.0){
-    incrementalActivityMarkCellClosure(cell);
-  }
-  state[at]=next.x;state[at+1u]=next.y;state[at+2u]=next.z;
-  cm12PublishCollocatedWetEffectiveVelocity(cell,next,
-    state[destinationDensity()+cell]>CM12_LIQUID_ISOVALUE);
-  // Air cells otherwise retain the pressure from the last frame in which
-  // they were liquid. It is outside the current linear system and must not
-  // remain as an asymmetric warm-start/diagnostic value.
-  state[p.stateOffsets2.x+cell]=state[p.stateOffsets5.x+cell];
-}
-
-fn activityD4MaskToOwn(mask:u32,transform:u32)->u32{
-  var result=0u;
-  for(var bit=0u;bit<27u;bit+=1u){if((mask&(1u<<bit))==0u){continue;}
-    let x=i32(bit%3u)-1;let y=i32((bit/3u)%3u)-1;let z=i32(bit/9u)-1;
-    var own=vec3i(x,y,z);
-    if(transform==1u){own.x=-x;}else if(transform==2u){own.z=-z;}
-    else if(transform==3u){own.x=-x;own.z=-z;}
-    else if(transform==4u){own.x=z;own.z=x;}
-    else if(transform==5u){own.x=z;own.z=-x;}
-    else if(transform==6u){own.x=-z;own.z=x;}
-    else if(transform==7u){own.x=-z;own.z=-x;}
-    let destination=u32(own.x+1)+3u*u32(own.y+1)+9u*u32(own.z+1);
-    result|=1u<<destination;
-  }
-  return result;
-}
-
-// Reasons are boolean flags except for the packed numeric curvature floor.
-// Unioning rungs (for example 1 | 4 == 5) invents a non-dyadic request that
-// candidate validation must reject. Symmetry requires the strongest floor.
-fn mergeActivityReasonWords(a:u32,b:u32)->u32{
-  let curvatureMask=31u<<16u;
-  return ((a|b)&~curvatureMask)|max(a&curvatureMask,b&curvatureMask);
-}
-
-@compute @workgroup_size(64)
-fn preserveActivityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
-  let brick=gid.x;if(brick>=p.dispatch.w){return;}
-  let q=cm12WorldLeafCoordinate(brick);let extent=i32((p.dimensions.x
-    +BRICK_FINE_RESOLUTION-1u)/BRICK_FINE_RESOLUTION);
-  let xs=array<i32,8>(q.x,extent-1-q.x,q.x,extent-1-q.x,
-    q.z,extent-1-q.z,q.z,extent-1-q.z);
-  let zs=array<i32,8>(q.z,q.z,extent-1-q.z,extent-1-q.z,
-    q.x,q.x,extent-1-q.x,extent-1-q.x);
-  var score=0u;var reasons=0u;var hot=0u;var quiet=255u;var proof=255u;
-  var support=0u;var swept=0u;
-  for(var transform=0u;transform<8u;transform+=1u){
-    let member=cm12WorldOwnerAt(vec3i(xs[transform],q.y,zs[transform]));
-    if(member==INVALID||member>=p.dispatch.w){continue;}
-    let record=activityRecord(member);let history=atomicLoad(&activity[record+2u]);
-    score=max(score,atomicLoad(&activity[record]));
-    reasons=mergeActivityReasonWords(reasons,atomicLoad(&activity[record+1u]));
-    hot=max(hot,history&255u);quiet=min(quiet,(history>>8u)&255u);
-    proof=min(proof,(history>>16u)&255u);
-    support|=activityD4MaskToOwn(atomicLoad(&activity[record+32u]),transform);
-    swept|=activityD4MaskToOwn(atomicLoad(&activity[record+3u]),transform);
-  }
-  atomicStore(&conditioning[brick],bitcast<i32>(score));
-  atomicStore(&conditioning[p.dispatch.w+brick],bitcast<i32>(reasons));
-  atomicStore(&conditioning[2u*p.dispatch.w+brick],
-    bitcast<i32>(hot|(quiet<<8u)|(proof<<16u)));
-  atomicStore(&conditioning[3u*p.dispatch.w+brick],bitcast<i32>(support));
-  atomicStore(&conditioning[4u*p.dispatch.w+brick],bitcast<i32>(swept));
-}
-
-@compute @workgroup_size(64)
-fn commitActivityHorizontalD4(@builtin(global_invocation_id)gid:vec3u){
-  let brick=gid.x;if(brick>=p.dispatch.w){return;}let record=activityRecord(brick);
-  incrementalActivityReplaceCensus(brick,
-    bitcast<u32>(atomicLoad(&conditioning[brick])),
-    bitcast<u32>(atomicLoad(&conditioning[p.dispatch.w+brick])));
-  atomicStore(&activity[record],bitcast<u32>(atomicLoad(&conditioning[brick])));
-  atomicStore(&activity[record+1u],bitcast<u32>(atomicLoad(
-    &conditioning[p.dispatch.w+brick])));
-  atomicStore(&activity[record+2u],bitcast<u32>(atomicLoad(
-    &conditioning[2u*p.dispatch.w+brick])));
-  atomicStore(&activity[record+32u],bitcast<u32>(atomicLoad(
-    &conditioning[3u*p.dispatch.w+brick])));
-  atomicStore(&activity[record+3u],bitcast<u32>(atomicLoad(
-    &conditioning[4u*p.dispatch.w+brick])));
 }
 
 @compute @workgroup_size(64)

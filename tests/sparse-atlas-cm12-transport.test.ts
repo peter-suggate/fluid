@@ -148,7 +148,6 @@ test("CM12 Algorithm 2 traces sharpening mass across a 2:1 seam", () => {
       timeStep_s: 0.05,
       finestCellSize_m: 1,
       sharpeningDistanceCells: distanceCells,
-      preserveHorizontalD4: false,
     },
   );
   const local = run(1);
@@ -320,4 +319,20 @@ test("all-coarse dynamics keeps resident and newly reached tiles at 4 cubed", ()
     result.stats.resolutionPolicy.targetCoarseBrickCount,
     result.workGrid.atlas.bricks.length,
   );
+});
+
+
+test("surface conditioning preserves an asymmetric edit after a symmetric frame", () => {
+  const atlas = createSparseAdaptiveMassAtlas([8, 8, 8], [brick(0, [0, 0, 0], 8)]);
+  const grid = buildSparseAtlasCompositeGrid(atlas);
+  const density = new Float64Array(grid.cells.length).fill(0.8);
+  const gamma = new Float64Array(grid.cells.length).fill(1);
+  const options = { gammaDiffusionIterations: 0, sharpeningCourant: 0 };
+  conditionSparseAtlasSurface(grid, { density: density.slice(), gamma: gamma.slice() }, options);
+  // A previous symmetric frame must not grant permission to average a later edit.
+  density[0] = 0.9;
+  gamma[0] = 1.1;
+  const result = conditionSparseAtlasSurface(grid, { density, gamma }, options);
+  assert.deepEqual(result.fields.density, density);
+  assert.deepEqual(result.fields.gamma, gamma);
 });

@@ -70,7 +70,7 @@ test("Sparse CM12 receipts retain mixed-resolution signed range", () => {
   assert.match(resident,
     /const CM12_SPARSE_TRANSPORT_FIXED:f32=65536\.0/);
   const phase1 = resident.slice(resident.indexOf("fn transportBeta"),
-    resident.indexOf("fn preserveHorizontalD4"));
+    resident.indexOf("fn publishForcedFace"));
   assert.doesNotMatch(phase1, /CM12_TRANSPORT_FIXED/);
   assert.match(phase1, /CM12_SPARSE_TRANSPORT_FIXED/);
 });

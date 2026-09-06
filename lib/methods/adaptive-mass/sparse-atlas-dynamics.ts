@@ -77,7 +77,6 @@ interface SparseAtlasDynamicsWorkspace {
     gammaDiffusionIterations: number;
     timeStep_s: number;
     finestCellSize_m: number;
-    preserveHorizontalD4: boolean;
   };
   readonly projectionOptions: {
     normalVelocity?: ArrayLike<number>;
@@ -782,7 +781,6 @@ export function initializeSparseAtlasDynamics(
         gammaDiffusionIterations: 1,
         timeStep_s: 0,
         finestCellSize_m: 1,
-        preserveHorizontalD4: false,
       },
       projectionOptions: {},
       publishedVelocityXyz: new Float32Array(0),
@@ -1348,7 +1346,6 @@ export function stepSparseAtlasDynamics(
   // polish. Run it on resident composite rows with the paper's 3dt dose.
   workspace.surfaceOptions.timeStep_s = dt_s;
   workspace.surfaceOptions.finestCellSize_m = options.finestCellSize_m ?? 1;
-  workspace.surfaceOptions.preserveHorizontalD4 = source.preservesHorizontalD4;
   const conditioned = conditionSparseAtlasSurface(
     workGrid, fields, workspace.surfaceOptions, source.workspace.surfaceConditioning,
   );

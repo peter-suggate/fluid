@@ -14,8 +14,6 @@ import {
   type SparseAtlasCompositeCell,
   type SparseAtlasGradientRow,
 } from "./sparse-atlas-composite-projection";
-import { sparseAtlasScalarsHaveHorizontalD4Symmetry } from
-  "./sparse-atlas-surface-conditioning";
 import {
   createSparseAdaptiveMassAtlas,
   sparseBrickContainingCoordinate,
@@ -528,7 +526,7 @@ export const SPARSE_CM12_RESIDENT_STAGES = Object.freeze([
   "tracer-advection",
   "gamma-diffusion",
   "surface-sharpening",
-  "symmetry-authority",
+  "scalar-publication",
   "body-forces",
   "pressure-topology",
   "pressure-rhs",
@@ -581,7 +579,7 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
     "density-capacity-repair",
     "final-scalar-mask-publication",
   ],
-  "symmetry-authority": [],
+  "scalar-publication": [],
   "body-forces": [],
   "pressure-topology": [
     "ptr-setup-brick-plan",
@@ -599,7 +597,6 @@ export const SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES = Object.freeze({
   "activity-measurement": [
     "dirty-brick-mask-publication",
     "brick-activity-measurement",
-    "brick-activity-symmetry",
     "brick-activity-census-and-history",
     "sparse-world-frontier-allocation",
   ],
@@ -3437,7 +3434,6 @@ export class WebGPUSparseCM12Resident {
   private readonly velocityExtensionLayout: SparseCM12VelocityExtensionLayout;
   /** Immutable construction-only HEAD presentation publisher oracle. */
   private readonly presentationPublisherOracleForQA: boolean;
-  private readonly horizontalD4Authority: boolean;
   private readonly framePlanIndirectArguments: GPUBuffer;
   private readonly presentationIndirectArguments: GPUBuffer;
   private readonly frameControlIndirectArguments: GPUBuffer;
@@ -3715,7 +3711,6 @@ export class WebGPUSparseCM12Resident {
     private readonly persistentPressureCacheLayout:
       SparseCM12PersistentPressureCacheLayout,
     presentationPublisherOracleForQA: boolean,
-    initialHorizontalD4Authority: boolean,
     pipelines: Readonly<Record<string, GPUComputePipeline>>,
     startSimulationPipelineCompilation: () =>
       Promise<Readonly<Record<string, GPUComputePipeline>>>,
@@ -3756,7 +3751,6 @@ export class WebGPUSparseCM12Resident {
     this.frameControlLayout = frameControlLayout;
     this.velocityExtensionLayout = velocityExtensionLayout;
     this.presentationPublisherOracleForQA = presentationPublisherOracleForQA;
-    this.horizontalD4Authority = initialHorizontalD4Authority;
     this.tracerLattice = sparseCM12TracerLattice(dimensions);
     this.tracerSource = {
       buffer: this.state,
@@ -4396,11 +4390,6 @@ export class WebGPUSparseCM12Resident {
         }
         : {},
     );
-    const horizontalD4Authority = transferredSymmetry ? transferredSymmetry.scalar && transferredSymmetry.face : sparseAtlasScalarsHaveHorizontalD4Symmetry(
-      grid,
-      Float64Array.from(grid.cells, (cell) => cell.density),
-      Float64Array.from(grid.cells, (cell) => cell.gamma),
-    );
     const cellWorkgroups = Math.ceil(physicsCellCapacity / WORKGROUP_SIZE);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const parameters = device.createBuffer({ label: "Sparse CM12 resident parameters",
@@ -4854,10 +4843,11 @@ export class WebGPUSparseCM12Resident {
       cellWorkgroups,
       rowWorkgroups: Math.ceil(physicsRowCapacity / WORKGROUP_SIZE),
       bodyCapacity: rigid ? 12 : 0,
-      d4Capable: true,
+      // D4 field mutation has been removed; retain the existing frame-control ABI.
+      d4Capable: false,
       rigidCapable: Boolean(rigid),
-      initialScalarD4Authority: horizontalD4Authority,
-      initialFaceD4Authority: horizontalD4Authority,
+      initialScalarD4Authority: false,
+      initialFaceD4Authority: false,
     });
     const pressureTopologyRepairLayout =
       createSparseCM12PressureTopologyRepairLayout({
@@ -5616,7 +5606,7 @@ export class WebGPUSparseCM12Resident {
       "clearGammaReceipts", "finalizeGammaSnapshot",
       "prepareSharpeningField", "scatterSharpeningMass", "finalizeSharpening",
       "initializeDensityCapacityRepair", "scatterDensityCapacityRepair",
-      "finalizeDensityCapacityRepair", "preserveHorizontalD4",
+      "finalizeDensityCapacityRepair",
       ...(alternatingCapacityRepairReceiptsForQA ? [
         "initializeDensityCapacityRepairAlternate",
         "scatterDensityCapacityRepairAlternate5",
@@ -5638,9 +5628,6 @@ export class WebGPUSparseCM12Resident {
           `finalizeDensityCapacityRepairGate${gate}`,
         ]).flat(),
       ] as const : []),
-      "commitHorizontalD4", "preserveVelocityHorizontalD4",
-      "commitVelocityHorizontalD4", "preserveActivityHorizontalD4",
-      "commitActivityHorizontalD4",
       "initializeVelocityExtensionPackets", "advanceVelocityExtensionPackets",
       "prepareSparseCM12DynamicFaceRows", "projectSparseCM12DynamicFaceRows",
       "forceFaces", "enforceSparseCM12InflowFaces",
@@ -6005,7 +5992,6 @@ export class WebGPUSparseCM12Resident {
       pressureTopologyRepairLayout,
       persistentPressureCacheLayout,
       presentationPublisherOracleForQA,
-      horizontalD4Authority,
       presentationPipelines,
       startSimulationPipelineCompilation,
       () => compiler.snapshot(),
@@ -6205,7 +6191,7 @@ export class WebGPUSparseCM12Resident {
     encoder.clearBuffer(this.activity, 4 * ACCEPTED_COARSE_ROW_COUNT_WORD,
       4 * (PRESSURE_ACTIVE_ROW_COUNT_WORD - ACCEPTED_COARSE_ROW_COUNT_WORD + 1));
     // The pass opens on first dispatch rather than up front. A stage that
-    // encodes nothing this advance — the D4 authority on an asymmetric scene —
+    // encodes nothing this advance — for example, disabled gamma diffusion —
     // then leaves no empty pass behind, which matters because Metal writes no
     // timestamp for a pass that does no work and one unsampled boundary
     // rejects the whole chain.
@@ -6395,7 +6381,7 @@ export class WebGPUSparseCM12Resident {
     const leafCapacity = this.worldDirectoryLayout.leafCapacity;
     const bricks = Math.ceil(leafCapacity / WORKGROUP_SIZE);
     stage("transport-velocity-extension", ({ closeSubstage }) => {
-      // FCA1 translates external inputs and persistent D4 receipts into a
+      // FCA1 translates external inputs and persistent frame receipts into a
       // sealed set of fixed indirect families. The host always encodes both
       // work and singleton bypass packets; it never inspects evolving state.
       dispatch("beginSparseCM12FrameControl", 1);
@@ -6658,13 +6644,7 @@ export class WebGPUSparseCM12Resident {
       useBindGroup(this.pressureBindGroup);
       closePass();
     });
-    stage("symmetry-authority", () => {
-      dispatchFrameControl("preserveHorizontalD4",
-        SPARSE_CM12_FRAME_CONTROL_FAMILY.scalarD4Work);
-      dispatchFrameControl("commitHorizontalD4",
-        SPARSE_CM12_FRAME_CONTROL_FAMILY.scalarD4Work);
-      dispatchFrameControl("sparseCM12FrameControlNoop",
-        SPARSE_CM12_FRAME_CONTROL_FAMILY.scalarD4Bypass);
+    stage("scalar-publication", () => {
       dispatch("publishSparseCM12FrameScalarOutput", 1);
     });
     stage("body-forces", () => {
@@ -6839,16 +6819,6 @@ export class WebGPUSparseCM12Resident {
       useBindGroup(this.effectiveVelocityPressureBindGroup);
       dispatchAccepted("collocateAndDiagnose", "cell");
       dispatch("reduceDivergenceDiagnostics", 1);
-      // The divergence this stage produced. Four stages downstream
-      // `candidate-transfer` zeroes it on every cell whose topology changed,
-      // so a lens reading it at frame end would be right everywhere except
-      // where the frame was interesting.
-      dispatchFrameControl("preserveVelocityHorizontalD4",
-        SPARSE_CM12_FRAME_CONTROL_FAMILY.faceD4Work);
-      dispatchFrameControl("commitVelocityHorizontalD4",
-        SPARSE_CM12_FRAME_CONTROL_FAMILY.faceD4Work);
-      dispatchFrameControl("sparseCM12FrameControlNoop",
-        SPARSE_CM12_FRAME_CONTROL_FAMILY.faceD4Bypass);
       useBindGroup(this.bindGroup);
       if (this.rigidCoupling) {
         pass?.end();
@@ -6870,11 +6840,6 @@ export class WebGPUSparseCM12Resident {
       if (activityPhaseLimitForQA === "masks") return;
       dispatch("measureBrickActivity", this.incrementalActivityLayout.brickCount);
       closeSubstage("brick-activity-measurement");
-      if (this.horizontalD4Authority) {
-        dispatch("preserveActivityHorizontalD4", bricks);
-        dispatch("commitActivityHorizontalD4", bricks);
-      }
-      closeSubstage("brick-activity-symmetry");
       if (activityPhaseLimitForQA === "measure") return;
       dispatch("ageIncrementalActivityHistory",
         Math.ceil(leafCapacity / WORKGROUP_SIZE));
@@ -7013,18 +6978,6 @@ export class WebGPUSparseCM12Resident {
       useBindGroup(this.bindGroup);
     });
     stage("brick-retirement", () => {
-      // Candidate transfer can publish a newly accepted cell after the normal
-      // projection-side D4 authority pass.  Re-apply the same scene authority
-      // to the final accepted worklist so pressure/velocity diagnostics cannot
-      // expose whichever member of a horizontal orbit happened to transition
-      // first.  A direct capacity dispatch is intentional: the accepted
-      // indirect snapshot is not promoted until the frame commit below.
-      if (this.horizontalD4Authority) {
-        dispatch("preserveVelocityHorizontalD4",
-          Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
-        dispatch("commitVelocityHorizontalD4",
-          Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
-      }
       // Candidate commit/retirement occurs after the activity census. Re-open
       // only those changed leaf spans for presentation and next-frame reuse.
       dispatch("markIncrementalActivityPostTopology",
@@ -7752,10 +7705,8 @@ export class WebGPUSparseCM12Resident {
     // read accepted parity there; the host never mirrors or predicts it.
     u.set([l.applied, l.divergence, 0x4643_4131,
       this.frameControlLayout.baseWords + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity], 32);
-    // The D4 pass needs two disjoint scalar scratch arrays. In particular the
-    // gamma scratch must never alias densityA at offset zero: doing so corrupts
-    // gamma after the first symmetric frame and makes transport create mass on
-    // the next frame.
+    // The guarded true-residual vector needs its own scratch array; it must
+    // not alias either accepted density bank.
     u.set([l.sharpeningDelta, l.symmetryGamma, l.tracers,
       l.faceVelocitySupport], 36);
     f.set([dt_s, finestCellSize_m, pressureScale, 0], 40);
@@ -8741,8 +8692,8 @@ export class WebGPUSparseCM12Resident {
               // iteration-local solve worklist and may differ for one frame
               // across an otherwise identical topology transition; using it
               // as a display/QA mask exposed a false asymmetric zero. Dry
-              // slots remain canonical zero, while the resident D4 authority
-              // has already cleared/averaged every accepted active slot.
+              // slots remain zero in this presentation view. Raw accepted pressure
+              // is not modified by any symmetry pass.
               pressure[at] = rho >= 0.5 ? mappedPressure : 0;
               divergence[at] = div;
             }

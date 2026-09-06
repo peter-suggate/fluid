@@ -18,7 +18,7 @@ export async function createPoolScalarStageAudit(device: GPUDevice, solver: WebG
   }
   const nc = source.cellCapacity;
   const stages = ["transport-velocity-extension", "conservative-transport", "gamma-diffusion",
-    "surface-sharpening", "symmetry-authority"];
+    "surface-sharpening", "scalar-publication"];
   const captures = new Map<string, GPUBuffer>();
   solver.setStageCaptureForQA((stage, encoder) => {
     if (!stages.includes(stage)) return;

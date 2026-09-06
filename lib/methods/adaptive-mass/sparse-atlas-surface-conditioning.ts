@@ -32,8 +32,6 @@ export interface SparseAtlasSurfaceConditioningOptions {
   /** Explicit sharpening pseudo-time in finest-cell coordinates for probes. */
   readonly sharpeningCourant?: number;
   readonly sharpeningDistanceCells?: number;
-  /** Retain an already-proven horizontal D4 invariant across topology rebuilds. */
-  readonly preserveHorizontalD4?: boolean;
 }
 
 export interface SparseAtlasSurfaceConditioningResult {
@@ -239,34 +237,6 @@ function activeD4SymmetryOrbits(
       || Math.abs(fields.gamma[id] - gamma0) > 1e-10)) return undefined;
   }
   return candidate;
-}
-
-function preserveD4Symmetry(
-  orbits: readonly (readonly number[])[] | undefined,
-  density: Float64Array,
-  gamma: Float64Array,
-): void {
-  if (!orbits) return;
-  for (const orbit of orbits) {
-    let densitySum = 0, densityCorrection = 0;
-    let gammaSum = 0, gammaCorrection = 0;
-    for (const id of orbit) {
-      const densityAdjusted = density[id] - densityCorrection;
-      const densityNext = densitySum + densityAdjusted;
-      densityCorrection = densityNext - densitySum - densityAdjusted;
-      densitySum = densityNext;
-      const gammaAdjusted = gamma[id] - gammaCorrection;
-      const gammaNext = gammaSum + gammaAdjusted;
-      gammaCorrection = gammaNext - gammaSum - gammaAdjusted;
-      gammaSum = gammaNext;
-    }
-    const meanDensity = densitySum / orbit.length;
-    const meanGamma = gammaSum / orbit.length;
-    for (const id of orbit) {
-      density[id] = meanDensity;
-      gamma[id] = meanGamma;
-    }
-  }
 }
 
 /** Expand aggregate mixed-resolution ports into physical scalar subfaces. */
@@ -478,7 +448,6 @@ function buildFineOwnerTable(grid: SparseAtlasCompositeGrid): Int32Array {
 // construction zero-work on ordinary frames while topology epochs naturally
 // miss and rebuild the cache.
 const surfaceTopologyCache = new WeakMap<object, SurfaceTopology>();
-const surfaceD4Authority = new WeakMap<object, boolean>();
 
 function surfaceTopology(
   grid: SparseAtlasCompositeGrid,
@@ -732,16 +701,7 @@ export function conditionSparseAtlasSurface(
   }
   const massBefore = integratedScalar(grid, fields.density);
   const gammaBefore = integratedScalar(grid, fields.gamma);
-  const topologyKey = (grid.topologyKey ?? grid.gradientRows) as object;
   const topology = surfaceTopology(grid, workspace);
-  let preservesD4 = options.preserveHorizontalD4
-    ? topology.d4Orbits !== undefined
-    : surfaceD4Authority.get(topologyKey);
-  if (preservesD4 === undefined) {
-    preservesD4 = activeD4SymmetryOrbits(topology.d4Orbits, fields) !== undefined;
-    surfaceD4Authority.set(topologyKey, preservesD4);
-  }
-  const symmetryOrbits = preservesD4 ? topology.d4Orbits : undefined;
   const edges = topology.edges;
   const gammaPairUpdates = diffuseGamma(
     grid, fields, edges, iterations, gammaScale, workspace,
@@ -775,7 +735,6 @@ export function conditionSparseAtlasSurface(
     returnedIntegratedMass += removedMass;
   }
   const gamma = workspace.gamma;
-  preserveD4Symmetry(symmetryOrbits, density, gamma);
   const massAbsoluteError = Math.abs(integratedScalar(grid, density) - massBefore);
   const gammaIntegralAbsoluteError = Math.abs(
     integratedScalar(grid, gamma) - gammaBefore,
