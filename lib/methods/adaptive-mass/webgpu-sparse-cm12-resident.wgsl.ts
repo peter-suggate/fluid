@@ -2229,65 +2229,82 @@ fn presentationIntegratedColumnHeight(brick:u32,x:i32,z:i32,
   if(any(origin<vec3i(0))||any(origin>=vec3i(p.dimensions.xyz))){
     return vec2f(0.0);
   }
-  let resolution=acceptedBrickResolution(brick);
-  let scale=BRICK_FINE_RESOLUTION/resolution;
-  let validDimensions=vec3u(min(vec3i(p.dimensions.xyz)-origin
-      +vec3i(i32(scale)-1),vec3i(i32(BRICK_FINE_RESOLUTION)))/i32(scale));
-  let localX=min(validDimensions.x-1u,
-    u32(max(0,x-origin.x))/scale);
-  let localZ=min(validDimensions.z-1u,
-    u32(max(0,z-origin.z))/scale);
-  let range=templateBrickCellRange(brick,resolution);
-  var massHeight=0.0;var previous=1.0;
-  var firstFill=0.0;var lastFill=0.0;
-  var columnOpen=-1.0;
+  // Integrate the complete interface bracket, including the neighbouring
+  // vertical bricks. A page-local proof changes scalar units on just one side
+  // of a brick face as soon as a tiny amount of liquid crosses it: the air page
+  // publishes a height distance while the full page retains density-derived
+  // phi. Their interpolated zero then moves by a fraction of a cell. Both
+  // owners must reconstruct the same height from the same accepted column.
+  let searchLower=max(0,origin.y-i32(BRICK_FINE_RESOLUTION));
+  let searchUpper=min(i32(p.dimensions.y),origin.y+2*i32(BRICK_FINE_RESOLUTION));
+  var searchY=searchLower;var previousWet=false;var crossing=-1;
+  while(searchY<searchUpper){
+    let owner=compactOwnerCellAt(vec3i(x,searchY,z));
+    var fill=0.0;var scale=BRICK_FINE_RESOLUTION;
+    if(owner.x!=INVALID&&brickActive(owner.y)){
+      fill=state[densityOffset+owner.x]/max(cellOpenFraction(owner.x),1e-6);
+      scale=max(1u,BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z);
+    }
+    let wet=fill>=CM12_LIQUID_ISOVALUE;
+    if(previousWet&&!wet&&crossing<0){crossing=searchY;}
+    previousWet=wet;
+    searchY+=max(1,min(i32(scale)-searchY%i32(scale),searchUpper-searchY));
+  }
+  if(crossing<0){return vec2f(0.0);}
+  // Anchor the proof to the shared accepted liquid/air crossing, not the
+  // requesting page. Otherwise one page can reject a slightly depleted lower
+  // endpoint while its neighbour starts a brick deeper and accepts the same
+  // surface, reintroducing the incompatible scalar units during motion.
+  let bracket=(crossing/i32(BRICK_FINE_RESOLUTION))*i32(BRICK_FINE_RESOLUTION);
+  let lower=max(0,bracket-i32(BRICK_FINE_RESOLUTION));
+  let upper=min(i32(p.dimensions.y),bracket+2*i32(BRICK_FINE_RESOLUTION));
+  var y=lower;var massHeight=0.0;var previous=1.0;
+  var firstFill=0.0;var lastFill=0.0;var columnOpen=-1.0;
   var sawOpen=false;var sawClosed=false;
-  var sawLiquid=false;var sawAir=false;var valid=range.y>0u;
-  for(var localY=0u;localY<validDimensions.y;localY+=1u){
-    let local=localX+validDimensions.x*(localY+validDimensions.y*localZ);
-    if(local>=range.y){valid=false;break;}
-    let cell=range.x+local;
-    let open=cellOpenFraction(cell);
-    if(open<=1e-6){sawClosed=true;continue;}
-    sawOpen=true;
-    if(columnOpen<0.0){columnOpen=open;}
-    valid=valid&&abs(open-columnOpen)<=1e-3;
-    let fill=clamp(state[densityOffset+cell]/max(open,1e-6),0.0,1.0);
-    if(localY==0u){firstFill=fill;}
-    valid=valid&&fill<=previous+0.01;previous=fill;lastFill=fill;
-    sawLiquid=sawLiquid||fill>1e-3;sawAir=sawAir||fill<1.0-1e-3;
-    let lower=origin.y+i32(localY*scale);
-    let width=max(0,min(i32(scale),i32(p.dimensions.y)-lower));
-    massHeight+=fill*f32(width);
+  var sawLiquid=false;var sawAir=false;var valid=true;
+  while(y<upper){
+    let q=vec3i(x,y,z);let owner=compactOwnerCellAt(q);
+    var fill=0.0;var open=1.0;var width=1;
+    if(owner.x==INVALID||!brickActive(owner.y)){
+      // Unrepresented open air is an authoritative dry interval at reset as
+      // well as after the support apron activates.
+      open=1.0-f32(cm12SolidVoxelFractionQ8(q))/255.0;
+      let brickWidth=i32(BRICK_FINE_RESOLUTION);
+      width=max(1,min(brickWidth-y%brickWidth,upper-y));
+    }else{
+      open=cellOpenFraction(owner.x);
+      fill=clamp(state[densityOffset+owner.x]/max(open,1e-6),0.0,1.0);
+      let scale=max(1u,BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z);
+      width=max(1,min(i32(scale)-y%i32(scale),upper-y));
+    }
+    if(open<=1e-6){sawClosed=true;}
+    else{
+      sawOpen=true;
+      if(columnOpen<0.0){columnOpen=open;}
+      valid=valid&&abs(open-columnOpen)<=1e-3;
+      if(y==lower){firstFill=fill;}
+      valid=valid&&fill<=previous+0.01;previous=fill;lastFill=fill;
+      sawLiquid=sawLiquid||fill>1e-3;sawAir=sawAir||fill<1.0-1e-3;
+      massHeight+=fill*f32(width);
+    }
+    y+=width;
   }
   if(!sawOpen){return vec2f(0.0,2.0);}
-  valid=valid&&!sawClosed;
-  var anchoredBelow=origin.y==0||firstFill>=1.0-0.01;
-  if(origin.y>0&&firstFill<1.0-0.01){
-    let owner=compactOwnerCellAt(vec3i(x,origin.y-1,z));
-    if(owner.x==INVALID||!brickActive(owner.y)){anchoredBelow=false;
-    }else{let open=cellOpenFraction(owner.x);
+  var anchoredBelow=lower==0||firstFill>=1.0-0.01;
+  if(!anchoredBelow){
+    // The first interval may itself be the partial 8h surface cell. Its
+    // full neighbour below still anchors this bracket; requiring the partial
+    // interval to be full would reject legitimate off-grid waterlines.
+    let owner=compactOwnerCellAt(vec3i(x,lower-1,z));
+    if(owner.x!=INVALID&&brickActive(owner.y)){
+      let open=cellOpenFraction(owner.x);
       anchoredBelow=open>1e-6&&abs(open-columnOpen)<=1e-3
         &&state[densityOffset+owner.x]/max(open,1e-6)>=1.0-0.01;
     }
   }
-  let upper=min(i32(p.dimensions.y),origin.y+i32(BRICK_FINE_RESOLUTION));
-  var anchoredAbove=upper==i32(p.dimensions.y)||lastFill<=0.01;
-  if(upper<i32(p.dimensions.y)&&lastFill>0.01){
-    let owner=compactOwnerCellAt(vec3i(x,upper,z));
-    // SparseWorld does not allocate ordinary open air until it becomes a
-    // transport/presentation support page. At generation zero that absence is
-    // already authoritative air; requiring a dry owner makes the reset and
-    // first evolved publication use different geometry.
-    if(owner.x==INVALID||!brickActive(owner.y)){
-      anchoredAbove=cm12SolidVoxelFractionQ8(vec3i(x,upper,z))==0u;
-    }else{let open=cellOpenFraction(owner.x);
-      anchoredAbove=open>1e-6&&abs(open-columnOpen)<=1e-3
-        &&state[densityOffset+owner.x]/max(open,1e-6)<=0.01;
-    }
-  }
-  valid=valid&&anchoredBelow&&anchoredAbove&&sawLiquid&&sawAir;
-  return vec2f(f32(origin.y)+massHeight,select(0.0,1.0,valid));
+  let anchoredAbove=upper==i32(p.dimensions.y)||lastFill<=0.01;
+  valid=valid&&!sawClosed&&anchoredBelow&&anchoredAbove&&sawLiquid&&sawAir;
+  return vec2f(f32(lower)+massHeight,select(0.0,1.0,valid));
 }
 
 // A B1 page has one finite-volume value over its complete 8^3 brick. During a
@@ -4948,7 +4965,13 @@ fn classifyPressureRow(row:u32)->bool{
   var airPhiSum=0.0;var airWeight=0.0;
   var liquidCenterYSum=0.0;var airCenterYSum=0.0;
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);let w=abs(termCoefficient(at));
-    let phi=CM12_LIQUID_ISOVALUE-pressureDensity(cell);
+    // Density-derived phi uses each cell's own width as its distance unit. Convert
+    // both sides to the same units before interpolating the pressure boundary.
+    // Full 8h liquid next to empty 4h air needs theta=2/3, not 1/2; otherwise
+    // changing rungs moves p=0 below a stationary surface and drives false flow.
+    // Exterior rows retain the dimensionless convention of rowExteriorPhi.
+    let phi=(CM12_LIQUID_ISOVALUE-pressureDensity(cell))
+      *select(cellWidths(cell)[rowAxis(row)],1.0,rowKind(row)==3u);
     let liquid=pcmCellContains(cell);
     if(liquid){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;
       liquidCenterYSum+=w*cellCenter(cell).y;

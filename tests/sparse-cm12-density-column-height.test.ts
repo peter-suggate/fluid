@@ -148,7 +148,7 @@ test("production publication uses guarded column height and floor continuation",
   assert.match(shader,
     /fn preparePresentationColumnHeights[\s\S]*maximumHeight-minimumHeight<=0\.125/);
   assert.match(shader,
-    /owner\.x==INVALID\|\|!brickActive\(owner\.y\)[\s\S]*anchoredAbove=cm12SolidVoxelFractionQ8/,
+    /owner\.x==INVALID\|\|!brickActive\(owner\.y\)[\s\S]*cm12SolidVoxelFractionQ8\(q\)/,
     "unrepresented open air must anchor generation zero before support activates");
   assert.match(shader,
     /fn presentationHeightPhi[\s\S]*signedFineCells=f32\(q\.y\)\+0\.5-height[\s\S]*return signedFineCells\*p\.frame\.y/,

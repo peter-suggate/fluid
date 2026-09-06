@@ -68,6 +68,7 @@ WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=metal 
   node --import tsx --test tests/sparse-cm12-adaptive-mesh-dawn.test.ts
 npm run test:water-shaders
 npm run test:dawn:sparse-cm12
+npm run test:dawn:sparse-cm12:coarse-first
 ```
 
 The focused Dawn test executes the production classifier, scan and emitter at
@@ -110,7 +111,8 @@ boundary.
 The focused Dawn gate now also exercises all adjacent 8/4/2/1 accepted widths,
 resolution changes along each axis, clamped pool samples, an ellipsoid, and
 per-triangle outward sphere winding. Both ratios are checked on the authored
-full-size pool at reset and steps 1, 10 and 20. Coverage assertions are always
+full-size pool. The original coverage test made three advances; the follow-up
+regression below pins actual solver step counts. Coverage assertions are always
 active, including when `FLUID_FULL_POOL=1` selects just the full-pool cases;
 edge closure alone must not accept an empty surface.
 
@@ -125,3 +127,85 @@ shader validation pass. The full Sparse CM12 gate completed in 94.73 seconds:
 lane measured 64.1597 ms against its unchanged 50 ms ceiling. Repository type
 checking still reports errors in unrelated Losasso audit and existing test/probe
 files; no adaptive-mesh file appears in those diagnostics.
+
+## Page-boundary terraces after advancing (2026-09-06)
+
+Chrome and native Dawn reproduce the blocky strips after three actual solver
+steps (0.05 s). GPU readback shows no internal interfaces. The free surface
+itself develops terraces: the third-step maximum is 1.615103 m for the authored
+1.6 m pool, and step 30 spans 1.577629–1.616828 m.
+
+The local height proof previously integrated only its own vertical brick. A
+small amount of liquid entering the air brick made that page eligible for
+height-derived signed distance, while the full brick below retained its
+density-derived scalar. For example, the shared contour edge interpolated
+between approximately -0.1 and +0.02467 m. Those samples use incompatible
+scales; they move the zero crossing and tilt the shading normals. Adaptive
+meshing faithfully exposed that upstream scalar discontinuity.
+
+The height proof now finds the accepted liquid-to-air crossing, then integrates
+one canonical vertical bracket around it, walking accepted cell widths. Both
+sides of a page face therefore test the same endpoint conditions, include the
+same partial liquid, and reconstruct the same physical height. A partial
+coarse cell at the bracket's lower endpoint is anchored by its full neighbour
+below, preserving off-grid waterlines. Monotonicity, open-volume consistency,
+and wet/dry endpoint proofs retain the volumetric fallback for cavities,
+detached liquid and cut columns.
+The shared helper serves both publishers and the surface representability
+proof. It does not change mesh winding or conceal interior geometry.
+
+The Dawn regression now advances once per physical timestep and asserts the
+solver's actual step count. `advanceTo` caps each call to one step, so jumping a
+requested timestamp did not reach the named checkpoint. Reset and steps 1, 3,
+and 30 now check upward coverage, absence of interior triangles, both mesh
+ratios, and no added seam defects against the unit contour. The waterline must
+stay within 1 mm at every checkpoint. The mixed-rung synthetic fixtures remain
+strict about closure.
+
+## Coarse-grid pressure imprint at 0.5 s (2026-09-06)
+
+The remaining central rings were physical mass motion, also visible with the
+unit mesh. After repairing publication, step 30 still had a 19.3 mm deficit in
+integrated pool height and spurious velocities up to 0.131 m/s. The falling
+ball was still above the pool; its adaptive support changed the cell widths
+around the waterline. Removing the ball removed the central disturbance.
+Tightening the pressure tolerance from 1e-3 to 1e-6 still left 0.115 m/s of
+unwanted flow, ruling out pressure convergence as the primary cause.
+
+The ghost-fluid pressure boundary interpolated `0.5 - density` without
+accounting for the size of each cell. Full 8h liquid beside empty 4h air then
+placed the zero-pressure boundary halfway between their centres, 5 cm below
+the 1.6 m surface in this scene. The correct fraction is 2/3. Adjacent finer
+pairs placed it at a different height, driving a grid-shaped pressure error.
+
+Pressure classification now scales each interior-row density distance by its
+cell width along the row axis before computing the ghost-fluid fraction. This
+keeps the boundary in common physical units across 2:1 seams, for every
+selector mode and axis. Same-width pairs retain their fraction. Exterior rows
+retain their existing dimensionless ghost convention, and the separate
+authored-region planar-height correction remains unchanged.
+
+The full-pool regression reads accepted density and velocity independently of
+the mesh. Before impact, column height must remain within 1 mm of 1.6 m and
+pool speed below 0.003 m/s through 30 actual timesteps. This prevents a
+presentation-only change from concealing the simulated disturbance.
+
+The repaired full-pool Dawn extraction passes at both mesh ratios through
+0.5 s. At step 30, accepted column heights span 1.599806–1.600100 m and maximum
+pool speed is 0.000840 m/s. Emitted top vertices span 1.599916–1.600511 m, with
+40.960001 m² of upward projected area, zero downward area and zero interior
+triangles. At step 3, the top remains at 1.600000 m. All closed synthetic
+mixed-rung fixtures retain zero open or non-manifold edges. Chrome verification
+at 0.05 s and 0.5000 s clears the perimeter terraces and central rectangular
+pattern, with no browser validation errors.
+
+The canonical gate passes all 14 correctness lanes, including the offset
+waterline, terrain front and live edits. Mini32 passes at 27.3285 ms; mini64
+remains above its unchanged 50 ms ceiling at 64.3564 ms (64.1597 ms before these
+follow-up fixes). The full run takes 102.86 seconds. The separate coarse-first
+gate passes all four still-pool, impact, settling and macro re-rung tests.
+The terrain test now retains its Dawn GPU instance through large readbacks;
+otherwise garbage collection could destroy the native instance while map
+callbacks were pending. No assertions, timing ceilings or lane selections were
+weakened. Type checking still reports unrelated repository errors, with none
+in the changed files.

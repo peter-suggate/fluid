@@ -288,8 +288,36 @@ for(const fullPool of (process.env.FLUID_FULL_POOL ? [true] : [false,true])) daw
       solver=await adaptiveMassMethod.createSolverAsync!(device!,scene,"balanced",values,undefined,()=>{}) as WebGPUAdaptiveMassSolver;
       await solver.waitForSimulationReady();
       assert.equal(solver.globalFineLevelSetSource.surfaceMeshRefinement,2);
-      for(const step of (fullPool ? [0,1,10,20] : [0,1])){
-        if(step){while(!solver.advanceTo(step/60,[]))await new Promise(setImmediate);await solver.waitForTopologyReady();}
+      for(const step of (fullPool ? [0,1,3,30] : [0,1])){
+        while ((solver.info.encodedSteps ?? 0) < step) {
+          const nextStep = (solver.info.encodedSteps ?? 0) + 1;
+          while (!solver.advanceTo(nextStep / 60, [])) await new Promise(setImmediate);
+          await solver.waitForTopologyReady();
+        }
+        assert.equal(solver.info.encodedSteps ?? 0, step, "capture the actual solver checkpoint");
+        if(fullPool){
+          // Inspect accepted mass and velocity independently of presentation.
+          // The falling ball is still above 2 m at 0.5 s; its changing support
+          // rungs must not disturb the disconnected, initially still pool.
+          const fields=await solver.readDiagnosticFields(true);
+          let minimumHeight=Infinity,maximumHeight=-Infinity,maximumSpeed=0;
+          for(let z=0;z<128;z++)for(let x=0;x<128;x++){
+            let height=0;
+            for(let y=0;y<40;y++){
+              const at=x+128*(y+96*z);
+              height+=Math.max(0,Math.min(1,fields.density[at]!/
+                Math.max(1e-6,fields.solidOpenFraction[at]!)))*.05;
+              if(y<31)maximumSpeed=Math.max(maximumSpeed,
+                Math.hypot(...fields.velocity.subarray(at*4,at*4+3)));
+            }
+            minimumHeight=Math.min(minimumHeight,height);
+            maximumHeight=Math.max(maximumHeight,height);
+          }
+          assert.ok(minimumHeight>1.599&&maximumHeight<1.601,
+            `step ${step}: accepted pool height ${minimumHeight}..${maximumHeight}`);
+          assert.ok(maximumSpeed<.003,`step ${step}: still pool speed ${maximumSpeed} m/s`);
+          console.log(JSON.stringify({fullPool,step,minimumHeight,maximumHeight,maximumSpeed}));
+        }
         const source=solver.globalFineLevelSetSource;
         const fine=await runField(device!,"real-pool",0,()=>0,false,source);
         for(const ratio of [2,4] as const){
@@ -303,16 +331,27 @@ for(const fullPool of (process.env.FLUID_FULL_POOL ? [true] : [false,true])) daw
           if(fullPool){
             // Count actual oriented geometry: closure alone accepts an empty top.
             // The falling ball has not reached the 1.6 m pool in these checkpoints.
-            let upwardArea=0,downwardArea=0;
+            let upwardArea=0,downwardArea=0,internalTriangles=0;
+            let minimumTop=Infinity,maximumTop=-Infinity;
             const m=adaptive.mesh;
             for(let i=0;i<m.length;i+=24){
+              const center=[0,1,2].map(axis=>(m[i+axis]!+m[i+8+axis]!+m[i+16+axis]!)/3);
+              if(center[0]!>.1&&center[0]!<6.3&&center[2]!>.1&&center[2]!<6.3
+                &&center[1]!>.1&&center[1]!<1.5)internalTriangles++;
               if(![1,9,17].every(k=>Math.abs(m[i+k]!-1.6)<.1))continue;
               const area=((m[i+10]!-m[i+2]!)*(m[i+16]!-m[i]!)-(m[i+8]!-m[i]!)*(m[i+18]!-m[i+2]!))*.5;
               upwardArea+=Math.max(0,area);downwardArea+=Math.max(0,-area);
+              if(area>0)for(const k of [1,9,17]){
+                minimumTop=Math.min(minimumTop,m[i+k]!);maximumTop=Math.max(maximumTop,m[i+k]!);
+              }
             }
             assert.ok(Math.abs(upwardArea-40.96)<1e-4,`step ${step} x${ratio}: pool top area ${upwardArea}`);
             assert.equal(downwardArea,0,"pool top triangles must face upward");
-            console.log(JSON.stringify({fullPool,step,ratio,upwardArea,downwardArea,adaptiveTriangles:adaptive.adaptive}));
+            assert.equal(internalTriangles,0,"a filled pool must not publish interior interfaces");
+            assert.ok(minimumTop>1.599&&maximumTop<1.601,
+              `step ${step} x${ratio}: calm pool height ${minimumTop}..${maximumTop}`);
+            console.log(JSON.stringify({fullPool,step,ratio,upwardArea,downwardArea,
+              minimumTop,maximumTop,internalTriangles,adaptiveTriangles:adaptive.adaptive}));
           }else{
             assert.equal(adaptive.metrics.nonManifoldEdgeCount,0);
           }

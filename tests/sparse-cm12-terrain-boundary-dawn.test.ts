@@ -18,6 +18,9 @@ import { WebGPUAdaptiveMassSolver } from
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
+// The native instance belongs to GPU, not GPUDevice. Tall Cells readbacks can
+// trigger GC while Dawn's map callbacks still need that instance.
+const liveDawnInstances = new Set<GPU>();
 
 function tallCellsMetrics(fields: Awaited<ReturnType<
   WebGPUAdaptiveMassSolver["readDiagnosticFields"]>>) {
@@ -100,6 +103,7 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-terrain-boundary-dawn.test.ts");
     let device: GPUDevice | undefined;
+    let gpu: GPU | undefined;
     let solver: WebGPUAdaptiveMassSolver | undefined;
     try {
       const dawn = await import(pathToFileURL(dawnModule!).href) as {
@@ -107,7 +111,8 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
         globals: Record<string, unknown>;
       };
       Object.assign(globalThis, dawn.globals);
-      const gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      gpu = dawn.create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+      liveDawnInstances.add(gpu);
       const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
       assert.ok(adapter, "Dawn must expose a WebGPU adapter");
       device = await adapter.requestDevice({
@@ -223,5 +228,6 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
       solver?.destroy();
       device?.destroy();
       await releaseWebGPUExclusiveLock();
+      if (gpu) liveDawnInstances.delete(gpu);
     }
   });
