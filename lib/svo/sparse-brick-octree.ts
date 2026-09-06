@@ -2250,6 +2250,12 @@ export class SparseBrickOctreeGPU {
     const topologyBytes = this.leafTopologyOffsetBytes + leafBytes;
     const payloadBytes = layout.totalBytes;
     const structureBytes = this.topologyOffsetBytes + topologyBytes;
+    // Fail before either arena is allocated. Asynchronous WebGPU validation
+    // cannot serve as an allocation preflight for the refinement ladder.
+    const storageLimit = Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize);
+    if (structureBytes > storageLimit || payloadBytes > storageLimit) {
+      throw new RangeError(`${label} requires structure ${structureBytes} and payload ${payloadBytes} bytes; storage limit is ${storageLimit}`);
+    }
     this.allocatedBytes = structureBytes + payloadBytes + 64;
     this.structure = device.createBuffer({ label: `${label} structural arena`, size: structureBytes, usage: indirectUsage });
     this.topology = this.structure;
@@ -2345,9 +2351,14 @@ export class SparseBrickOctreeGPU {
         ]],
       ] as const : []),
     ] as readonly [string, GPUComputePipeline, readonly GPUBindGroupEntry[]][];
-    const maximum = Math.max(source.capacities.nodes, source.capacities.leaves, source.capacities.voxels, 1);
-    const dispatch = sparseBrickDispatchDimensions(maximum);
+
     for (const [stage, pipeline, entries] of stages) {
+      // Structure has one invocation per node/leaf, never per voxel. The
+      // payload stages retain their own voxel-sized dispatch when present.
+      const maximum = stage === "structure"
+        ? Math.max(source.capacities.nodes, source.capacities.leaves, 1)
+        : Math.max(source.capacities.voxels, 1);
+      const dispatch = sparseBrickDispatchDimensions(maximum);
       const bindGroup = this.device.createBindGroup({
         label: `Sparse brick ${stage} publication bind group`,
         layout: pipeline.getBindGroupLayout(0),

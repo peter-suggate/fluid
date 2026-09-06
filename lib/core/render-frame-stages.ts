@@ -61,6 +61,10 @@ export const RENDER_FRAME_STAGES = Object.freeze([
   "surface-extraction",
   "caustics",
   // PRIMARY VISIBILITY — who is in front of whom.
+  "surface-mesh-update",
+  "surface-mesh-background",
+  "surface-mesh-cull",
+  "surface-mesh-draw",
   "scene-primitive-visibility",
   "near-field-band",
   "brick-cull",
@@ -211,6 +215,26 @@ export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
     owner: "svo",
     node: "primary-entry-prepass",
     phase: { id: "svo-primary", label: "SVO primary entry-depth prepass" },
+  },
+  "surface-mesh-update": {
+    owner: "svo",
+    node: "primary-traversal",
+    phase: { id: "svo-primary", label: "Voxel surface mesh update" },
+  },
+  "surface-mesh-background": {
+    owner: "svo",
+    node: "primary-traversal",
+    phase: { id: "svo-primary", label: "Voxel surface planes and ray fallback" },
+  },
+  "surface-mesh-cull": {
+    owner: "svo",
+    node: "primary-traversal",
+    phase: { id: "svo-primary", label: "Voxel surface mesh culling" },
+  },
+  "surface-mesh-draw": {
+    owner: "svo",
+    node: "primary-traversal",
+    phase: { id: "svo-primary", label: "Voxel surface mesh draw" },
   },
   "primary-traversal": {
     owner: "svo",

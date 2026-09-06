@@ -14,6 +14,7 @@ export const webGPUPlatformResourcePlugin: ResourcePluginDefinition = Object.fre
   label: "WebGPU renderer platform",
   provides: ["renderer"] as const,
   blocks: "viewport",
+  progressPhases: [{ id: "planning", label: "Device" }, { id: "renderer", label: "Canvas" }, { id: "water-renderer", label: "Interfaces" }],
   phaseCopy: {
     planning: "Acquiring the browser GPU and selecting device capabilities.",
     renderer: "Preparing the canvas and minimum presentation resources.",

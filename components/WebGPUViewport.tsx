@@ -26,7 +26,7 @@ import {
 } from "../lib/core/fluid-blast-radius";
 import { getMethod } from "@/lib/core/method-registry";
 import { canonicalScene, type CameraState, type RunState } from "../lib/core/model";
-import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "../lib/core/math";
+import { add, cameraBasis, dot, length, orbit, pan, retarget, scale, sub, zoom } from "../lib/core/math";
 import { boundingRadius, type RigidBodyState } from "../lib/core/rigid-body";
 import { placementBodyDescription } from "../lib/core/editor-placement";
 import type { RigidBodyDescription } from "../lib/core/model";
@@ -34,6 +34,7 @@ import { resourceInteractionGates } from "../lib/core/resource-readiness";
 import { PRIMARY_PANE_ID, simulation } from "../lib/core/simulation/controller";
 import { simulationRecording } from "../lib/core/simulation/recording";
 import { cameraTanHalfFov, projectToViewport, viewportRayForPointer } from "../lib/core/webgpu-camera";
+import { viewportCentrePivot, viewportCentreRay, WHEEL_GESTURE_GAP_MS } from "../lib/core/camera-pivot";
 import {
   closestPointOnAxis,
   GIZMO_AXIS_DIRECTIONS,
@@ -1476,6 +1477,50 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     viewportRayForPointer(session.ui.getState().camera, event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
 
   /**
+   * Whether this camera gesture has already been anchored on what the viewport
+   * is centred on.
+   *
+   * Anchoring is `retarget`, and `retarget` is only free on the *first* sample
+   * of a gesture: it is the pivot being straight ahead that makes it invisible,
+   * and one orbit step later it no longer is. A ref rather than a field on the
+   * pointer entry because an orbit is opened from four places — a raised probe,
+   * a press on empty space, a GPU pick that found no body, and the shift/middle
+   * fallback — and the anchor belongs to the drag, not to how it began. Pointer
+   * ids are reused by the mouse, so the reset is the press, not the id.
+   */
+  const cameraAnchoredRef = useRef(false);
+  /**
+   * The pivot a run of wheel events shares.
+   *
+   * Re-probing per event would be correct — the pivot stays exactly under the
+   * centre of the frame as the camera approaches it, so a fresh probe finds the
+   * same surface — but it would also let the pivot step from one surface to
+   * another mid-flick as the perspective changes, which reads as the zoom
+   * changing its mind. Holding one answer for the burst makes a continuous
+   * scroll a single approach to a single point. A press clears it: an orbit
+   * anchors somewhere else, and a stale pivot applied after that would move the
+   * target rather than leave it.
+   */
+  const wheelPivotRef = useRef<{ pivot_m: Vec3; at_ms: number } | null>(null);
+
+  /**
+   * What the camera turns and zooms about, resolved from the middle of the
+   * frame through the same catalog the hover chip reads.
+   */
+  const cameraPivot = (): Vec3 => viewportCentrePivot(
+    editorEntityContext(session), viewportCentreRay(session.ui.getState().camera));
+
+  /** The burst's pivot, probed once and reused until the scrolling stops. */
+  const wheelPivot = (timeStamp: number): Vec3 => {
+    const held = wheelPivotRef.current;
+    const pivot_m = held && timeStamp - held.at_ms < WHEEL_GESTURE_GAP_MS
+      ? held.pivot_m
+      : cameraPivot();
+    wheelPivotRef.current = { pivot_m, at_ms: timeStamp };
+    return pivot_m;
+  };
+
+  /**
    * Light the hovered object's rim in the renderer.
    *
    * The renderer is told an owner *range* rather than a node id: it knows
@@ -2314,6 +2359,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // would open over a viewport that had just discarded the thing it is about.
     if (event.button === 2) return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    // A new gesture, so a new answer to "about what": the drag re-anchors on
+    // its first move, and any wheel pivot held from before this press is now a
+    // point the camera is no longer looking at.
+    cameraAnchoredRef.current = false;
+    wheelPivotRef.current = null;
     // LOOK is navigation and nothing else. Deliberately above the trace-pin
     // arming and every branch below rather than folded into them: a mode that
     // still armed half a gesture, or still resolved a pick it then threw away,
@@ -2668,7 +2718,16 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const dx = event.clientX - active.x;
     const dy = event.clientY - active.y;
     pointerRef.current = { ...active, x: event.clientX, y: event.clientY };
-    setCamera((current) => active.action === "pan" ? pan(current, dx, dy) : orbit(current, dx, dy));
+    // The first sample of the drag decides what the drag is *about*. Resolved
+    // here rather than at the press so a click that never moved costs no probe
+    // and writes no camera — a press on empty space is a deselection far more
+    // often than it is an orbit.
+    const pivot_m = cameraAnchoredRef.current ? undefined : cameraPivot();
+    cameraAnchoredRef.current = true;
+    setCamera((current) => {
+      const anchored = pivot_m ? retarget(current, pivot_m) : current;
+      return active.action === "pan" ? pan(anchored, dx, dy) : orbit(anchored, dx, dy);
+    });
   };
   const pointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     // Ahead of the pointer-id guard below: a pin gesture is tracked separately,
@@ -2840,7 +2899,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         }
         if (!cameraInteractive) return;
         event.preventDefault();
-        setCamera((current) => zoom(current, event.deltaY));
+        // Anchor on every event, not only the first: `retarget` is idempotent
+        // once the camera is on the pivot, so the burst's second wheel event
+        // costs the same arithmetic and needs no gesture state of its own.
+        const pivot_m = wheelPivot(event.timeStamp);
+        setCamera((current) => zoom(retarget(current, pivot_m), event.deltaY));
       }}
       onContextMenu={openRadialMenuAt}
     />

@@ -767,6 +767,17 @@ export function createCoarseFirstPoolImpactScene(): SceneDescription {
   return scene;
 }
 
+export function createFallingWaterTorusScene(): SceneDescription {
+  const scene = createCoarseFirstPoolImpactScene();
+  scene.sceneId = "falling-water-torus";
+  scene.duration_s = 3;
+  scene.container = { ...scene.container, width_m: 1.6, height_m: 1.6,
+    depth_m: 1.6, fillFraction: 0 };
+  scene.fluid.initialLiquidVolumes = [{ shape: "torus",
+    center_m: { x: 0, y: 1.0, z: 0 }, radius_m: 0.4, tubeRadius_m: 0.125 }];
+  return scene;
+}
+
 export function createTinyHydrostaticScene(): SceneDescription {
   const scene = sceneBody();
   scene.sceneId = "tiny-hydrostatic-two-level";
@@ -2504,6 +2515,18 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
     build: createMinimalPowerDamBreak32Scene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
+  }),
+  defineScene({
+    id: "falling-water-torus",
+    name: "Falling water torus",
+    blurb: "A suspended ring of water drops onto a dry floor. Watch the hole deform as the ring flattens and spreads on impact.",
+    audience: "explore", shelf: "Tanks", environment: "stage",
+    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+      selectorMode: "coarse-first", timeStep: "scene", brickFineResolution: "8",
+      surfaceMeshRefinement: "2",
+    } },
+    build: createFallingWaterTorusScene,
+    camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
   }),
   defineScene({
     id: "coarse-first-pool-impact",

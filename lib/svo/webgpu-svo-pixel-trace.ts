@@ -65,8 +65,6 @@ export interface SvoPixelTraceProbeOptions {
     readonly globalIlluminationOcclusion: number;
     readonly globalIlluminationRequested: number;
   };
-  /** Mirrors SVO_DRY_SCENE_CAMERA_SETTLED_WGSL. */
-  readonly cameraSettledExpression: string;
   /**
    * How the frame this probe runs beside resolves primary visibility.
    *
@@ -514,7 +512,7 @@ fn probeLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32){
     let light=dryLighting.lights[lightIndex];
     if(light.identity.w!=dryLighting.metadata.y){continue;}
     let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;
-    let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${options.cameraSettledExpression}),area),1u,globalIllumination);
+    let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);
     for(var sampleIndex=0u;sampleIndex<${options.areaLightSamples}u;sampleIndex+=1u){
       if(sampleIndex>=sampleCount){break;}
       let sample=dryLightSample(light,sampleIndex,position);
@@ -564,7 +562,7 @@ fn probeContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32){
   if(radius<=0.0){return;}
   let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
   let origin=position+normalize(geometricNormal)*cellScale*.2;
-  let coneSampleCount=select(dry.tuningCounts1.z,dry.tuningCounts1.y,${options.cameraSettledExpression});
+  let coneSampleCount=max(dry.tuningCounts1.z,dry.tuningCounts1.y);
   for(var sampleIndex=0u;sampleIndex<${options.stableOcclusionConeSamples}u;sampleIndex+=1u){
     if(sampleIndex>=coneSampleCount){break;}
     let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);

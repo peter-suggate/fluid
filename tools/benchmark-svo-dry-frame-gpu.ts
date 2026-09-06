@@ -18,6 +18,23 @@
  *
  * Rerun: node --import tsx tools/benchmark-svo-dry-frame-gpu.ts
  * Env: FLUID_SVO_DRY_FRAME_WIDTH / _HEIGHT / _WARMUPS / _CYCLES /
+ *      FLUID_SVO_DRY_FRAME_PRIMARY_TIMING=1 isolates the real primary render
+ *      pass after warmup (fixed scene/camera; excludes entry preparation).
+ *      FLUID_SVO_DRY_FRAME_PRIMARY_COMPUTE_PROBE=1 additionally compares the
+ *      same primary entry body as 32/64/128-thread compute workgroups and
+ *      records full-population G-buffer differences. This is a prototype,
+ *      not a production compute path; its timing excludes a depth bridge.
+ *      FLUID_SVO_DRY_FRAME_PRIMARY_SCHEDULE_MAP=<work-map report.json> adds
+ *      fixed 8x8 tile-order comparisons to the compute probe, one direct dispatch.
+ *      FLUID_SVO_DRY_FRAME_PRIMARY_DIAGNOSTIC=1 records seed-hit agreement and
+ *      stack high-water marks in the compute probe (timing is instrumented).
+ *      FLUID_SVO_DRY_FRAME_PRIMARY_STACK_SWEEP=1 tests 32/24/20-entry stacks;
+ *      scene-specific diagnostic only, not a safe production capacity reduction.
+ *      FLUID_SVO_DRY_FRAME_PRIMARY_SHARED_SWEEP=1 compares conservative tile
+ *      frontiers at depths 2/3/4 with root-traversal controls, one direct dispatch.
+ *      Add _PRIMARY_SHARED_COOPERATIVE=1 for lane-cooperative construction, or
+ *      _PRIMARY_SHARED_PAIRED=1 for an alternating native/cooperative comparison.
+ *      All profiling flags are opt-in and should be used with _TIMING=gpu.
  *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25 | 0.125, default 0.5),
  *      _RADIANCE_RECONSTRUCTION (nearest | gated-linear | joint-bilateral | wide-relight | full-res-relight),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
@@ -90,6 +107,8 @@
 import type { RenderFrameSeam } from "../lib/core/render-frame-stages";
 import "../lib/methods";
 import assert from "node:assert/strict";
+import { benchmarkSvoPrimaryPass } from "./benchmark-svo-primary-pass";
+import { capturePrimaryComputeInputs } from "./probe-svo-primary-compute";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -291,6 +310,7 @@ const maximumShadedLights = Number(process.env.FLUID_SVO_DRY_FRAME_MAX_LIGHTS ??
 const readVoxelLightCounters = process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_COUNTERS === "1";
 const optimizationExperiments: SvoDryOptimizationExperiments = {
   surfaceMesh: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH === "1",
+  surfaceMeshCulling: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_CULLING !== "0",
   surfaceMeshMaxBytes: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES ? Number(process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES) : undefined,
   voxelLightCache: process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_CACHE !== "0",
   edgeReceiverRecovery: process.env.FLUID_SVO_DRY_FRAME_EDGE_RECEIVER_RECOVERY !== "0",
@@ -529,6 +549,8 @@ const { adapterInfo, device, timestampsSupported, validationErrors } = await cre
   requireShaderF16: f16Requested,
 });
 log(`Adapter: ${JSON.stringify(adapterInfo)} timestamps=${timestampsSupported}`);
+const primaryComputeProbe = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_COMPUTE_PROBE === "1"
+  ? capturePrimaryComputeInputs(device) : undefined;
 
 // ---------------------------------------------------------------------------
 // Paired, interleaved record-scale lane. Runs instead of everything below.
@@ -1113,6 +1135,19 @@ if (coneScale !== 1 && profileSeconds <= 0) {
 await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
 log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
+
+const primaryPassTiming = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_TIMING === "1"
+  ? await benchmarkSvoPrimaryPass(device, encodeFrame, warmups, cycles) : undefined;
+if (primaryPassTiming) log(`Isolated primary visibility: ${primaryPassTiming.median_ms.toFixed(3)} ms`);
+const primaryComputeTiming = primaryComputeProbe
+  ? await primaryComputeProbe(encodeFrame, width, height, warmups, cycles, `${outPath}-compute`) : undefined;
+if (primaryPassTiming || primaryComputeTiming) {
+  const restore = device.createCommandEncoder({ label: "Restore full frame after primary timing" });
+  encodeFrame(restore);
+  device.queue.submit([restore.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  assert.deepEqual(validationErrors, [], "GPU validation errors during isolated primary timing");
+}
 
 let coneBoundaryCount: number | undefined;
 if (readConeBoundaryCount && coneTracingMode === "cones" && coneScale !== 1) {
@@ -2123,6 +2158,8 @@ const result = {
     residentMiB: width * height * SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL / (1024 * 1024),
   } : undefined,
   resolution: { width, height },
+  ...(primaryPassTiming ? { primaryPassTiming } : {}),
+  ...(primaryComputeTiming ? { primaryComputeTiming } : {}),
   timing: {
     method: timingMethod,
     warmups: Math.max(1, warmups),

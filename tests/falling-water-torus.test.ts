@@ -1,0 +1,41 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { getSceneDefinition } from "../lib/core/scenes";
+import { sceneDocument } from "../lib/core/scene-definition";
+import { validateScene } from "../lib/core/model";
+import { initialLiquidVolumeContainsPoint, initialLiquidVolumeSignedDistance } from "../lib/core/initial-fluid";
+import { fluidVolumeBox, fluidVolumeVolume_m3, pickFluidVolume, resizeFluidVolumeRadius } from "../lib/core/editor-fluid-volume";
+import { scaleScene } from "../lib/core/scene-scale";
+
+test("falling torus is a valid, empty-floor scene with an analytic open hole", () => {
+  const scene = sceneDocument(getSceneDefinition("falling-water-torus"));
+  assert.deepEqual(validateScene(scene), []);
+  assert.equal(scene.container.fillFraction, 0);
+  assert.equal(scene.rigidBodies.length, 0);
+  const ring = scene.fluid.initialLiquidVolumes![0]!;
+  assert.equal(ring.shape, "torus");
+  if (ring.shape !== "torus") return;
+  assert.equal(initialLiquidVolumeContainsPoint(ring, ring.center_m), false);
+  assert.ok(initialLiquidVolumeSignedDistance(ring, ring.center_m) > 0);
+  const tube = { ...ring.center_m, x: ring.center_m.x + ring.radius_m };
+  assert.equal(initialLiquidVolumeContainsPoint(ring, tube), true);
+  assert.equal(initialLiquidVolumeSignedDistance(ring, tube), -ring.tubeRadius_m);
+  const box = fluidVolumeBox(ring);
+  assert.ok(box.min.y > 0, "the ring must start above the floor");
+  assert.ok(Math.abs(box.max.x - ring.radius_m - ring.tubeRadius_m) < 1e-12);
+  assert.ok(Math.abs(fluidVolumeVolume_m3(ring) - 2*Math.PI**2*ring.radius_m*ring.tubeRadius_m**2) < 1e-12);
+  const direction = { x: 0, y: -1, z: 0 };
+  assert.equal(pickFluidVolume({ origin: { x: 0, y: 2.3, z: 0 }, direction }, ring), undefined,
+    "selection must pass through the hole");
+  assert.ok(pickFluidVolume({ origin: { x: ring.radius_m, y: 2.3, z: 0 }, direction }, ring)! > 0);
+  const resized = resizeFluidVolumeRadius(scene, ring, 0);
+  assert.ok(resized.shape === "torus" && resized.radius_m > resized.tubeRadius_m);
+  const scaled = scaleScene(scene, "world", 2)!;
+  const larger = scaled.fluid.initialLiquidVolumes![0]!;
+  assert.ok(larger.shape === "torus");
+  assert.equal(larger.radius_m, 2*ring.radius_m);
+  assert.equal(larger.tubeRadius_m, 2*ring.tubeRadius_m);
+  const invalid = structuredClone(scene);
+  invalid.fluid.initialLiquidVolumes = [{ ...ring, tubeRadius_m: ring.radius_m }];
+  assert.ok(validateScene(invalid).some(error => error.includes("torus")));
+});

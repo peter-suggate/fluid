@@ -99,6 +99,7 @@ export interface RenderPipelineContext {
    */
   readonly rasterPrimaryActive: boolean;
   readonly surfaceMeshActive?: boolean;
+  readonly surfaceMeshStatus?: import("../svo/svo-surface-mesh").SvoSurfaceMeshStatus;
   readonly surfaceMeshSelected?: boolean;
 }
 
@@ -684,6 +685,37 @@ export interface RenderPipelineNode extends RenderPipelineNodeDefinition {
 
 export const RENDER_PIPELINE_NODES: readonly RenderPipelineNode[] = Object.freeze(
   NODES.map((node) => Object.freeze({ ...node, stages: renderPipelineNodeStages(node.id) })));
+
+/** The raster backend owns exclusive intervals under primary visibility. */
+export const SURFACE_MESH_TIMING_STAGES = [
+  { stage: "surface-mesh-update", label: "Mesh update", detail: "Revision check, extraction when dirty, and publication. Cached frames retain the check and publication cost." },
+  { stage: "surface-mesh-background", label: "Planes / ray fallback", detail: "Full-screen exact planar boundaries, or SVO rays when the mesh cannot be used." },
+  { stage: "surface-mesh-cull", label: "Mesh culling", detail: "Rejects back-facing and out-of-frustum quads before vertex processing. No subpixel or occlusion approximation." },
+  { stage: "surface-mesh-draw", label: "Mesh draw", detail: "Cached quad rasterization and the periodic diagnostic copy. A withheld primary only clears the surface buffer." },
+] as const satisfies readonly { stage: RenderFrameStageId; label: string; detail: string }[];
+
+/** Keep one primary visibility switch and set of plane taps across backends. */
+export function renderPipelineNodeForContext(
+  node: RenderPipelineNode, context: RenderPipelineContext,
+): RenderPipelineNode {
+  if (node.id !== "primary-traversal") return node;
+  const meshStages = new Set<RenderFrameStageId>(SURFACE_MESH_TIMING_STAGES.map(({ stage }) => stage));
+  if (!context.surfaceMeshSelected) return { ...node, stages: node.stages.filter((stage) => !meshStages.has(stage)) };
+  return {
+    ...node,
+    label: "Primary rasterization",
+    stages: node.stages.filter((stage) => meshStages.has(stage)),
+    tip: {
+      ...node.tip,
+      summary: "Primary rasterization fills the surface buffer using cached voxel faces. Its timing is the sum of mesh update, exact planes or ray fallback, mesh culling, and mesh drawing. Mesh update includes revision checks on cached frames and extraction on changed publications. Off clears the surface buffer to sky.",
+    },
+    chip: (current) => current.disabledStages.has("primary-traversal") ? "withheld · clears only"
+      : current.surfaceMeshStatus?.state === "pending" ? "mesh preparation · ray fallback"
+      : current.surfaceMeshStatus?.fallbackReason === "budget" ? "Ray fallback · mesh budget exceeded"
+      : current.surfaceMeshStatus?.state === "fallback" ? "Ray fallback"
+      : current.surfaceMeshActive ? "cached voxel triangles" : "mesh pending · ray fallback",
+  };
+}
 
 /** A stage's trace label back to its stage id. Derived, so it cannot drift. */
 const STAGE_BY_TRACE_LABEL: ReadonlyMap<string, RenderFrameStageId> = new Map(

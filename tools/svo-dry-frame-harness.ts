@@ -187,7 +187,7 @@ export interface SvoDryViewUniformInputs {
   readonly bodyCount: number;
   readonly width: number;
   readonly height: number;
-  /** Publishes the camera-changing sentinel, selecting the moving-quality tier. */
+  /** Publishes camera activity metadata; it never changes rendering quality. */
   readonly cameraMoving?: boolean;
   readonly overlay?: { mode: number; opacity: number };
 }
@@ -198,7 +198,7 @@ export function packSvoDryViewUniforms(inputs: SvoDryViewUniformInputs): Float32
   const position = cameraPosition(camera);
   // options.x: DEFAULT_SVO_RENDER_DIAGNOSTICS maximumTraversalDepth(21)*512 + maximumNodeVisits(256).
   const diagnosticControl = 21 * 512 + 256;
-  // viewport.w carries only the camera-quality tier: the changing sentinel or
+  // viewport.w carries camera activity metadata: the changing sentinel or
   // the stable sentinel. Temporal accumulation and checkerboard phase no longer
   // share this lane.
   const cameraState = inputs.cameraMoving ? SVO_CAMERA_CHANGING_FRAME : -1;

@@ -898,7 +898,7 @@ export class FluidLabRenderer {
    * it.
    */
   private requestedPrimaryTraversal: SvoPrimaryTraversalMode =
-    DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "raster";
+    DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "mesh";
   /** Whether the rebuilt traced-primary shader publishes its per-pixel counter plane. */
   private requestedPrimaryWorkMap = false;
   private presentationTexture?: GPUTexture;
@@ -1041,6 +1041,11 @@ export class FluidLabRenderer {
       && previous.surfaceMesh?.state === status.surfaceMesh?.state
       && previous.surfaceMesh?.detail === status.surfaceMesh?.detail
       && previous.surfaceMesh?.quads === status.surfaceMesh?.quads
+      && previous.surfaceMesh?.requiredQuads === status.surfaceMesh?.requiredQuads
+      && previous.surfaceMesh?.allocatedBytes === status.surfaceMesh?.allocatedBytes
+      && previous.surfaceMesh?.builds === status.surfaceMesh?.builds
+      && previous.surfaceMesh?.maximumBytes === status.surfaceMesh?.maximumBytes
+      && previous.surfaceMesh?.requirementComplete === status.surfaceMesh?.requirementComplete
       && previous.terminalCounts?.voxel === status.terminalCounts?.voxel
       && previous.terminalCounts?.planarBoundary === status.terminalCounts?.planarBoundary) return;
     this.lastEffectiveRendererStatus = status;
@@ -2883,7 +2888,7 @@ export class FluidLabRenderer {
     // withheld would pool into one mean and the panel would report the cost of
     // neither pipeline.
     const disabledStages = disabledRenderStagesFrom(svoLightingOptions.disabledStages);
-    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:fluid-${fluidSurfaceRenderMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:gicache-${svoLightingOptions.worldGiCacheEnabled === true ? "on" : "off"}:primary-${svoLightingOptions.primaryTraversal ?? "raster"}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
+    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:fluid-${fluidSurfaceRenderMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:gicache-${svoLightingOptions.worldGiCacheEnabled === true ? "on" : "off"}:primary-${svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
     if (presentationContext !== this.presentationContext) {
       this.presentationContext = presentationContext;
       this.resetPresentationTrace();
@@ -2945,7 +2950,7 @@ export class FluidLabRenderer {
     // above), so the ratio is the live term and the document's refinement depth
     // only decides the frames before the world has published.
     if (sparsePresentationRequired) {
-      this.applyPrimaryTraversalRequest(svoLightingOptions.primaryTraversal ?? "raster", {
+      this.applyPrimaryTraversalRequest(svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal, {
         leafBricks: this.svoDrySceneSource?.structural?.capacities.leaves,
         targetPixels: this.presentationTexture.width * this.presentationTexture.height,
         environmentRefinementDepth,
@@ -3362,12 +3367,32 @@ export class FluidLabRenderer {
       : undefined;
     if (initialRasterSubmission) initialRasterSubmission.submitted = true;
     const pendingLiveSvo = this.pendingLiveSvoPresentation;
+    const startupMesh = this.svoDryScenePipeline?.surfaceMeshStatus;
+    if (pendingLiveSvo?.attached && !pendingLiveSvo.submitted && startupMesh?.state === "pending") {
+      const label = startupMesh.buildPhase === "capacity" ? "Expanding raster mesh storage"
+        : `Building raster mesh · ${startupMesh.completedBricks ?? 0} / ${startupMesh.totalBricks ?? "…"} bricks`;
+      if (this.svoPipelineProgress?.label !== label) {
+        this.svoPipelineProgress = { label, completed: 8, total: SVO_PRESENTATION_STARTUP_STAGES.length };
+        this.onStatus({ state: "initializing", ...this.svoPipelineProgress, phase: "warmup",
+          startedAt_ms: pendingLiveSvo.startedAt_ms, kind: "startup", retainingPrevious: false,
+          resource: svoPresentationResourcePlugin });
+      }
+    } else if (pendingLiveSvo && startupMesh?.state === "fallback"
+      && (startupMesh.fallbackReason === "budget" || startupMesh.fallbackReason === "extraction")) {
+      this.failPendingLiveSvoPresentation(new Error(startupMesh.detail ?? "Raster mesh construction failed"));
+    }
     const initialLiveSvoSubmission = pendingLiveSvo
       && !pendingLiveSvo.submitted
       && pendingLiveSvo.attached
       && pendingLiveSvo.solver === readyGPUFluid
       && pendingLiveSvo.source === this.svoDrySceneSource
       && svoEncoded
+      // A fenced fallback frame does not establish that raster startup has
+      // finished. The mesh receipt is copied after the GPU's draw publication.
+      && (!this.svoDryScenePipeline?.surfaceMeshStatus
+        || this.svoDryScenePipeline.surfaceMeshStatus.state === "ready"
+        || this.svoDryScenePipeline.surfaceMeshStatus.fallbackReason === "smooth"
+        || this.svoDryScenePipeline.surfaceMeshStatus.fallbackReason === "inside-solid")
       ? pendingLiveSvo
       : undefined;
     if (initialLiveSvoSubmission?.submit()) {

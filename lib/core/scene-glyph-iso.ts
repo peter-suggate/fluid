@@ -167,6 +167,9 @@ function glyphWater(scene: SceneDescription, extent: IsoVec, scale: number): Iso
       const r = liquid.radius_m;
       let negative = { x: r, y: r, z: liquid.shape === "cylinder" ? liquid.halfHeight_m : r };
       let positive = { x: r, y: r, z: liquid.shape === "cylinder" ? liquid.halfHeight_m : r };
+      if (liquid.shape === "torus") {
+        negative = positive = { x: r + liquid.tubeRadius_m, y: liquid.tubeRadius_m, z: r + liquid.tubeRadius_m };
+      }
       if (liquid.shape === "hemisphere") {
         const length = Math.hypot(liquid.outwardNormal.x, liquid.outwardNormal.y, liquid.outwardNormal.z) || 1;
         const n = {

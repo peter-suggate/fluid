@@ -180,7 +180,7 @@ export type SvoLightingOptions = Readonly<{
   /** Omitted means `cones`. */
   coneTracingMode?: SvoConeTracingMode;
   /**
-   * Whether gathered indirect radiance is computed at all. Omitted means yes.
+   * Whether gathered indirect radiance is computed at all. Omitted means no.
    *
    * Distinct from `giBounceStrength`, which is an exposure on a gather that has
    * already happened and therefore costs the same at zero. This withholds the
@@ -201,7 +201,7 @@ export type SvoLightingOptions = Readonly<{
    * the machinery stays compiled so turning it on costs a frame, not a rebuild.
    */
   worldGiCacheEnabled?: boolean;
-  /** Omitted means `raster`. Switching it rebuilds the dry-scene pipeline. */
+  /** Omitted means `mesh`. Switching it rebuilds the dry-scene pipeline. */
   primaryTraversal?: SvoPrimaryTraversalMode;
   /**
    * Frame-graph stages to withhold from this frame's encode.
@@ -222,7 +222,7 @@ export const DEFAULT_SVO_LIGHTING_OPTIONS = Object.freeze({
   ambientOcclusionEnabled: true,
   silhouetteRefinementEnabled: false,
   coneTracingMode: "cones",
-  globalIlluminationEnabled: true,
+  globalIlluminationEnabled: false,
   worldGiCacheEnabled: false,
-  primaryTraversal: "traced",
+  primaryTraversal: "mesh",
 } satisfies SvoLightingOptions);

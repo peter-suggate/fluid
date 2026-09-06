@@ -24,6 +24,7 @@ import type {
   SceneDescription,
   Vec3,
 } from "./model";
+import { initialLiquidVolumeSignedDistance } from "./initial-fluid";
 
 /**
  * Direct manipulation of the analytic liquid volumes — the balls.
@@ -105,6 +106,11 @@ export function fluidVolumeBox(volume: InitialLiquidVolume): BoxExtent {
   if (volume.shape === "box") return { min: volume.min_m, max: volume.max_m };
   const r = volume.radius_m;
   const centre = volume.center_m;
+  if (volume.shape === "torus") {
+    const outer = r + volume.tubeRadius_m;
+    return { min: { x: centre.x - outer, y: centre.y - volume.tubeRadius_m, z: centre.z - outer },
+      max: { x: centre.x + outer, y: centre.y + volume.tubeRadius_m, z: centre.z + outer } };
+  }
   if (volume.shape === "cylinder") {
     return {
       min: { x: centre.x - r, y: centre.y - r, z: centre.z - volume.halfHeight_m },
@@ -152,6 +158,7 @@ export function fluidVolumeVolume_m3(volume: InitialLiquidVolume): number {
     return Math.max(0, size.x) * Math.max(0, size.y) * Math.max(0, size.z);
   }
   const ball = (4 / 3) * Math.PI * volume.radius_m ** 3;
+  if (volume.shape === "torus") return 2 * Math.PI ** 2 * volume.radius_m * volume.tubeRadius_m ** 2;
   if (volume.shape === "sphere") return ball;
   if (volume.shape === "cylinder") return Math.PI * volume.radius_m ** 2 * (2 * volume.halfHeight_m);
   return 0.5 * ball;
@@ -193,6 +200,11 @@ export function fluidVolumeResizePolicy(
 export function fluidVolumeFromBox(volume: InitialLiquidVolume, box: BoxExtent): InitialLiquidVolume {
   if (volume.shape === "box") return { ...volume, min_m: box.min, max_m: box.max };
   const size = boxSize(box);
+  if (volume.shape === "torus") {
+    const scale = size.x / (2 * (volume.radius_m + volume.tubeRadius_m));
+    return { ...volume, center_m: boxCenter(box), radius_m: volume.radius_m * scale,
+      tubeRadius_m: volume.tubeRadius_m * scale };
+  }
   return { ...volume, center_m: boxCenter(box), radius_m: Math.max(0, (size.x + size.y + size.z) / 6) };
 }
 
@@ -229,6 +241,8 @@ export function resizeFluidVolumeRadius(
 ): InitialLiquidVolume {
   if (volume.shape === "box") return volume;
   const cell = Math.min(...sceneCellSizes_m(scene));
+  if (volume.shape === "torus") return { ...volume,
+    radius_m: Math.max(volume.tubeRadius_m + FLUID_VOLUME_MINIMUM_CELLS * cell, radius_m) };
   return { ...volume, radius_m: Math.max(FLUID_VOLUME_MINIMUM_CELLS * cell, radius_m) };
 }
 
@@ -362,7 +376,7 @@ export function addFluidBall(
 export function fluidVolumeNoun(volume: InitialLiquidVolume): string {
   return volume.shape === "box" ? "block"
     : volume.shape === "sphere" ? "ball"
-      : volume.shape === "cylinder" ? "disk" : "dome";
+      : volume.shape === "cylinder" ? "disk" : volume.shape === "torus" ? "torus" : "dome";
 }
 
 function pickZCylinder(ray: EditorRay, volume: Extract<InitialLiquidVolume, { shape: "cylinder" }>): number | undefined {
@@ -397,6 +411,23 @@ function pickZCylinder(ray: EditorRay, volume: Extract<InitialLiquidVolume, { sh
 /** Where a ray meets the volume itself, rather than the box around it. */
 export function pickFluidVolume(ray: EditorRay, volume: InitialLiquidVolume): number | undefined {
   if (volume.shape === "box") return pickSolidBox(ray, fluidVolumeBox(volume));
+  if (volume.shape === "torus") {
+    const speed = Math.hypot(ray.direction.x, ray.direction.y, ray.direction.z);
+    if (speed < 1e-12) return undefined;
+    const limit = (Math.hypot(ray.origin.x - volume.center_m.x,
+      ray.origin.y - volume.center_m.y, ray.origin.z - volume.center_m.z)
+      + volume.radius_m + volume.tubeRadius_m) / speed;
+    let t = 0;
+    for (let step = 0; step < 192 && t <= limit; step++) {
+      const distance = Math.abs(initialLiquidVolumeSignedDistance(volume, {
+        x: ray.origin.x + t * ray.direction.x, y: ray.origin.y + t * ray.direction.y,
+        z: ray.origin.z + t * ray.direction.z,
+      }));
+      if (distance < 1e-6) return t;
+      t += distance / speed;
+    }
+    return undefined;
+  }
   if (volume.shape === "cylinder") return pickZCylinder(ray, volume);
   const hit = pickSolidSphere(ray, volume.center_m, volume.radius_m);
   if (hit === undefined || volume.shape === "sphere") return hit;
@@ -450,13 +481,20 @@ export function fluidVolumeEntity(
   const cell = Math.min(...sceneCellSizes_m(scene));
   const radiusField: readonly EditorField[] = volume.shape === "box" ? [] : [{
     id: "radius",
-    label: "RADIUS",
+    label: volume.shape === "torus" ? "RING RADIUS" : "RADIUS",
     unit: "m",
     value: volume.radius_m,
     step: cell,
-    min: FLUID_VOLUME_MINIMUM_CELLS * cell,
+    min: FLUID_VOLUME_MINIMUM_CELLS * cell + (volume.shape === "torus" ? volume.tubeRadius_m : 0),
     apply: (value: number) => write(resizeFluidVolumeRadius(scene, volume, value)),
-  }];
+  }, ...(volume.shape === "torus" ? [{
+    id: "tube-radius", label: "TUBE RADIUS", unit: "m", value: volume.tubeRadius_m,
+    step: cell, min: FLUID_VOLUME_MINIMUM_CELLS * cell,
+    max: volume.radius_m - FLUID_VOLUME_MINIMUM_CELLS * cell,
+    apply: (value: number) => write({ ...volume, tubeRadius_m: Math.min(
+      volume.radius_m - FLUID_VOLUME_MINIMUM_CELLS * cell,
+      Math.max(FLUID_VOLUME_MINIMUM_CELLS * cell, value)) }),
+  }] : [])];
   return {
     selection: { kind: "fluid-body", id: target.id },
     label,
@@ -465,6 +503,7 @@ export function fluidVolumeEntity(
     box: target.box,
     sizeLabel: volume.shape === "box"
       ? `${[size.x, size.y, size.z].map((value) => value.toFixed(2)).join(" × ")} m`
+      : volume.shape === "torus" ? `${size.x.toFixed(2)} m torus · ${(2 * volume.tubeRadius_m).toFixed(2)} m tube`
       : `${(2 * volume.radius_m).toFixed(2)} m ${noun}`,
     handles: [
       ...(target.resizable

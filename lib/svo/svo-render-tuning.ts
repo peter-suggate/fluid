@@ -45,36 +45,13 @@ export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM = 3;
 export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM = -3;
 
 /**
- * The depth a dry document is authored at when nobody says otherwise.
- *
- * Depth one keeps one authored subdivision below the scene lattice by default.
- * Deeper rungs remain available through the refinement control up to
- * `SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM`.
- *
- * **The ceiling remains measured and available as an explicit choice**, on
- * `hero-garden-hose` through `tmp/sp18/census.ts`, because an older reading of
- * this ladder said depth 3 was unreachable (4.6M pages, a 9.99 GB staging
- * buffer at depth 2, a Node OOM at depth 3). That reading is stale — the
- * page-reduction stack landed and moved the exponent from ~8 to ~4:
- *
- * | depth | leaf | node-mip pages | pyramid | levels | CPU plan |
- * |---|---|---|---|---|---|
- * | 2 | 1.5625 mm |  107,115 | 0.25 GiB | 9  | ~22 s |
- * | 3 | 0.78125 mm | 528,237 | 1.22 GiB | 10 | ~28 s |
- *
- * Both complete. The CPU figures exclude the census harness's own
- * `createTallCellLayout` (130 s of its wall clock), which the live SVO path does
- * not call. Ten levels also clears the cone hierarchy's twelve, past which
- * derived lighting withdraws for roughly 15x.
- *
- * **It is still a request rather than a guarantee.** Those numbers are one
- * scene on one machine, and a larger domain scales with volume.
- * `WebGPULiveSvoScene.create` degrades to the finest depth that fits rather than
- * throwing — a throw there bricks the tab — and reports the rung it settled on
- * through `builtRefinementDepth`, which the renderer surfaces in its status
- * line. A scene that comes up coarser than this has said so.
+ * Requested authored-environment detail when no URL or saved tuning overrides it.
+ * Depth 3 is validated on hero-garden-hose-x10 with bounded mesh extraction
+ * and renderer-only source lanes (see docs/svo-depth3-rendering.md).
+ * Fluid retains its coarser simulation lattice. Device allocation preflight
+ * can select a lower rung, which builtRefinementDepth reports to the UI.
  */
-export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = 0;
+export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = 3;
 
 /**
  * The voxel a set is actually drawn into, given the lattice and the depth.
@@ -277,8 +254,10 @@ export interface SvoRenderTuning {
   readonly coneStepBudget: number;
   readonly maximumShadedLights: number;
   readonly stableAreaLightSamples: number;
+  /** Legacy serialized alias; normalized to the same sample budget. */
   readonly movingAreaLightSamples: number;
   readonly stableAoSamples: number;
+  /** Legacy serialized alias; normalized to the same sample budget. */
   readonly movingAoSamples: number;
   readonly visibilityNodeVisits: number;
   readonly visibilityLeafVisits: number;
@@ -383,9 +362,9 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   coneStepBudget: 48,
   maximumShadedLights: 8,
   stableAreaLightSamples: 2,
-  movingAreaLightSamples: 1,
+  movingAreaLightSamples: 2,
   stableAoSamples: 4,
-  movingAoSamples: 1,
+  movingAoSamples: 4,
   visibilityNodeVisits: 96,
   visibilityLeafVisits: 24,
   visibilityWorkItems: 768,
@@ -457,7 +436,9 @@ const performanceTuning: SvoRenderTuning = Object.freeze({
   giOcclusionStrength: 0.6,
   maximumShadedLights: 3,
   stableAreaLightSamples: 1,
+  movingAreaLightSamples: 1,
   stableAoSamples: 2,
+  movingAoSamples: 2,
   visibilityNodeVisits: 48,
   visibilityLeafVisits: 12,
   visibilityWorkItems: 320,
@@ -532,6 +513,10 @@ const integer = (value: number, minimum: number, maximum: number) =>
   Math.round(bounded(value, minimum, maximum));
 
 export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTuning {
+  // Preserve the higher quality of legacy stationary/moving settings. Camera
+  // activity never selects a cheaper budget; old URL/storage keys remain valid.
+  const areaSamples = Math.max(integer(value.stableAreaLightSamples, 1, 2), integer(value.movingAreaLightSamples, 1, 2));
+  const aoSamples = Math.max(integer(value.stableAoSamples, 1, 4), integer(value.movingAoSamples, 1, 4));
   const coneLightingScale = value.coneLightingScale === 0.125 || value.coneLightingScale === 0.25 || value.coneLightingScale === 0.5
     ? value.coneLightingScale : 1;
   const coneRadianceReconstruction = value.coneRadianceReconstruction === "nearest"
@@ -571,10 +556,10 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     primaryLeafVisits: integer(value.primaryLeafVisits, 1, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT),
     coneStepBudget: integer(value.coneStepBudget, 1, 48),
     maximumShadedLights: integer(value.maximumShadedLights, 1, 8),
-    stableAreaLightSamples: integer(value.stableAreaLightSamples, 1, 2),
-    movingAreaLightSamples: integer(value.movingAreaLightSamples, 1, 2),
-    stableAoSamples: integer(value.stableAoSamples, 1, 4),
-    movingAoSamples: integer(value.movingAoSamples, 1, 4),
+    stableAreaLightSamples: areaSamples,
+    movingAreaLightSamples: areaSamples,
+    stableAoSamples: aoSamples,
+    movingAoSamples: aoSamples,
     visibilityNodeVisits: integer(value.visibilityNodeVisits, 1, 128),
     visibilityLeafVisits: integer(value.visibilityLeafVisits, 1, 32),
     visibilityWorkItems: integer(value.visibilityWorkItems, 16, 1024),

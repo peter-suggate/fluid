@@ -32,6 +32,8 @@ export const liveSvoSceneResourcePlugin: ResourcePluginDefinition = Object.freez
 });
 
 export interface LiveSvoSceneOptions {
+  /** CPU oracle for allocation censuses and paired startup benchmarks. */
+  cpuBrickSelection?: boolean;
   /**
    * Renderer-only construction override used by topology experiments. It does
    * not mutate `scene.voxelDomain` and therefore cannot change the simulation
@@ -180,6 +182,12 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
     // thing here after the octree plan itself.
     reportStage({ stage: LIVE_SVO_SOLID_REACH_STAGE, completed: 0, total: 1 });
     const sceneSolids = liveSvoSceneSolidReach(scene);
+    const gpuSelection = options.cpuBrickSelection ? undefined
+      : (await import("./webgpu-svo-brick-selection")).selectSvoBrickOccupancyGpu;
+    const gpuClassification = options.cpuBrickSelection ? undefined
+      : (await import("./webgpu-svo-node-classification")).classifySvoNodesGpu;
+    const gpuTerrain = options.cpuBrickSelection ? undefined
+      : (await import("./webgpu-svo-render-terrain")).buildSvoRenderTerrainGpu;
     const world = await OctreeSparseBrickWorld.create(device, scene, dimensions, {
       brickSize: liveSvoRenderBrickSize(scene, options),
       rendererOnly: true,
@@ -190,6 +198,11 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
       derivedTraversalStructures: options.derivedTraversalStructures,
       progress: reportStage,
       sceneSolids,
+      buildRenderTerrainGpu: gpuTerrain ? (cellSize, materialId) => gpuTerrain(device, scene, cellSize, materialId, interrupt.signal) : undefined,
+      classifyEnvironmentNodesGpu: gpuClassification
+        ? input => gpuClassification(device, input, interrupt.signal) : undefined,
+      selectPrimitiveBricksGpu: gpuSelection
+        ? input => gpuSelection(device, buildSvoScenePrimitives(scene), input, interrupt.signal) : undefined,
       // The same build, one proxy at a time: what the curvature-driven
       // refinement rule evaluates when `FLUID_SVO_REFINEMENT_MODE=surface`.
       // Bound here for the reason directly above — the world cannot import it.

@@ -1,5 +1,6 @@
 import { refinementRegionsToQuery, withRefinementRegionsFromQuery } from "./editor-refinement-region";
 import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
+import { CAMERA_DISTANCE_RANGE } from "./math";
 import { defaultMethodId, interactiveMethodId, registeredSimulationMethods } from "./method-registry";
 import type { MethodParamValue, MethodParamValues } from "./method-contract";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
@@ -664,7 +665,12 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
     camera: {
       azimuth_rad: numberParam(query, "camera.azimuth", presetCamera.azimuth_rad),
       elevation_rad: numberParam(query, "camera.elevation", presetCamera.elevation_rad, -1.45, 1.45),
-      distance_m: numberParam(query, "camera.distance", presetCamera.distance_m, 0.65, 12),
+      // The wheel's own range, shared rather than restated: `numberParam`
+      // *drops* an out-of-range value back to the preset, so a bound tighter
+      // than the one the camera can reach would silently reframe a link
+      // written from a view someone had zoomed to.
+      distance_m: numberParam(query, "camera.distance", presetCamera.distance_m,
+        CAMERA_DISTANCE_RANGE.minimum_m, CAMERA_DISTANCE_RANGE.maximum_m),
       // Carried from the preset rather than the query: the aperture is the
       // scene's lens, not a view the user orbited to, so it has no URL key to
       // restore from and must not be dropped while rebuilding the rest.

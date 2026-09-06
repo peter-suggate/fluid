@@ -29,7 +29,6 @@ import { sceneCellSizes_m } from "../core/scene-lattice";
 import {
   SOLID_WORLD_BRICK_CELLS,
   SOLID_WORLD_TERRAIN_MATERIAL_ID,
-  solidWorldVoxelPatchBounds_m,
   solidWorldContentStamp,
   solidWorldForScene,
   type SolidWorld,
@@ -148,9 +147,14 @@ import {
   createSvoPlanarLeafClassifier,
   svoPlanarResidualEnvironmentPrimitives,
   svoPlanarResidualSolidWorld,
+  svoPlanarSolidWorldBlockers,
 } from "./svo-planar-boundary";
 
 export interface OctreeSparseBrickWorldOptions {
+  buildRenderTerrainGpu?: (cellSize: readonly [number,number,number], materialId: number) => Promise<import("./svo-render-solid-field").SvoRenderTerrainField | undefined>;
+  classifyEnvironmentNodesGpu?: (input: import("./webgpu-svo-node-classification").SvoNodeClassificationInput) => Promise<import("../core/adaptive-sparse-brick-plan").SparseBrickEnvironmentClassification[]>;
+  /** Async renderer startup selection; the synchronous constructor retains the CPU oracle. */
+  selectPrimitiveBricksGpu?: (input: import("./webgpu-svo-brick-selection").SvoGpuBrickSelectionInput) => Promise<import("../core/adaptive-sparse-brick-plan").SparseBrickProxyOccupancy>;
   brickSize?: SparseBrickSize;
   /**
    * This world publishes authored scene geometry only; no fluid solver writes
@@ -1463,10 +1467,12 @@ export class OctreeSparseBrickWorld {
       const scale = 2 ** (maximumDepth - level);
       nodeEdge_m.push(refinedBrickEdge.map((value) => value * scale));
     }
-    const renderTerrain = dryWorld && refinementDepth > 0
-      ? yield* buildSvoRenderTerrainFieldSteps(scene, renderCellSize,
-        SOLID_WORLD_TERRAIN_MATERIAL_ID)
-      : undefined;
+    let renderTerrain: import("./svo-render-solid-field").SvoRenderTerrainField | undefined;
+    if (dryWorld && refinementDepth > 0) {
+      if (options.buildRenderTerrainGpu) yield options.buildRenderTerrainGpu(renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID)
+        .then(field => { renderTerrain = field; });
+      renderTerrain ??= yield* buildSvoRenderTerrainFieldSteps(scene, renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID);
+    }
     const terrainRefinement = renderTerrain
       ? createSvoRenderTerrainRefinement({
         field: renderTerrain,
@@ -1504,7 +1510,7 @@ export class OctreeSparseBrickWorld {
     // A terrain-free SolidWorld can use its authored boxes directly: accepted
     // thin fills become exact terminals while clear, thick and intersecting
     // boxes remain ordinary voxel residuals.
-    const planarLeafClassifier = createSvoPlanarLeafClassifier({
+    const planarLeafOptions = {
       sources: planarSources,
       blockers: [
         ...environmentPrimitives.map((primitive) => ({
@@ -1519,10 +1525,8 @@ export class OctreeSparseBrickWorld {
             minimum: bounds.minimum,
             maximum: bounds.maximum,
           }))
-          : initialSolidWorld.patches.map((patch, patchIndex) => ({
-            ...solidWorldVoxelPatchBounds_m(scene, patch),
-            planarSourceIndex: solidPlanarCatalog?.patchIndexByPatch.get(patchIndex),
-          }))),
+          : svoPlanarSolidWorldBlockers(scene, initialSolidWorld.patches,
+            solidPlanarCatalog)),
         ...scene.rigidBodies.flatMap((body, ownerId) => {
           if (body.motion !== "static") return [];
           const bounds = sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId));
@@ -1531,7 +1535,8 @@ export class OctreeSparseBrickWorld {
       ],
       worldOrigin_m: worldOrigin,
       nodeEdge_m,
-    });
+    } satisfies import("./svo-planar-boundary").SvoPlanarLeafClassifierOptions;
+    const planarLeafClassifier = createSvoPlanarLeafClassifier(planarLeafOptions);
     /**
      * Primitives whose bounds touch a brick — what the voxeliser bins per leaf.
      *
@@ -1618,14 +1623,23 @@ export class OctreeSparseBrickWorld {
       ? options.sceneSolids ?? [] : [];
     reportStage("Select the bricks the scene reaches");
     yield;
-    const primitiveBricks = refinementDepth > 0
+    const gpuSelection = refinementDepth > 0 && sceneSolids.length > 0 ? options.selectPrimitiveBricksGpu : undefined;
+    let gpuOccupancy: import("../core/adaptive-sparse-brick-plan").SparseBrickProxyOccupancy | undefined;
+    if (gpuSelection) {
+      yield gpuSelection({
+        regions: environmentPrimitives.map(primitive => ({minimum:[primitive.aabb_m.min.x,primitive.aabb_m.min.y,primitive.aabb_m.min.z],
+          maximum:[primitive.aabb_m.max.x,primitive.aabb_m.max.y,primitive.aabb_m.max.z]})),
+        worldOrigin, cellSize:renderCellSize, brickSize, brickDimensions:refinedBrickDimensions, maximumDepth,
+      }).then(result => { gpuOccupancy = result; });
+    }
+    const primitiveBricks = gpuOccupancy ? [] : (refinementDepth > 0
       ? yield* liveSceneBrickCoordinatesForRegionsSteps(
         environmentPrimitives.map((primitive) => ({
           minimum: [primitive.aabb_m.min.x, primitive.aabb_m.min.y, primitive.aabb_m.min.z] as const,
           maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y, primitive.aabb_m.max.z] as const,
         })),
         worldOrigin, renderCellSize, brickSize, refinedBrickDimensions)
-      : sceneDomain.proxyBrickCoordinates.slice(0, environmentPrimitives.length).flat();
+      : sceneDomain.proxyBrickCoordinates.slice(0, environmentPrimitives.length).flat());
     const solidWorldBricks = yield* liveSceneBrickCoordinatesForRegionsSteps(
       solidWorldBounds, worldOrigin, renderCellSize, brickSize, refinedBrickDimensions);
     /**
@@ -1668,8 +1682,10 @@ export class OctreeSparseBrickWorld {
      * sat in the one place between two yield points where nothing could
      * interrupt it, and it was the longest such block in the whole build.
      */
-    const reachablePrimitiveBricks = yield* liveSceneReachableBrickCoordinatesSteps(
-      primitiveBricks, sceneSolids, worldOrigin, renderCellSize, brickSize, pinnedBricks);
+    const reachablePrimitiveBricks = gpuOccupancy ? [] : (yield* liveSceneReachableBrickCoordinatesSteps(
+      primitiveBricks, sceneSolids, worldOrigin, renderCellSize, brickSize, pinnedBricks));
+    const gpuNodeClassification = dryWorld && refinementDepth > 0 && !surfaceRefinement
+      ? options.classifyEnvironmentNodesGpu : undefined;
     reportStage("Plan the adaptive octree");
     yield;
     // The interruptible form of the same plan. This is the longest block in a
@@ -1677,6 +1693,11 @@ export class OctreeSparseBrickWorld {
     // most of the freeze exactly where it was.
     const plan = yield* planAdaptiveSparseBrickOctreeSteps({
       brickSize,
+      proxyOccupancy: gpuOccupancy,
+      classifyEnvironmentBatch: gpuNodeClassification ? (level, coordinates) => gpuNodeClassification({
+        planar: planarLeafOptions, candidateCount: environmentPrimitives.length,
+        candidateLimit: OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET, level, coordinates,
+      }) : undefined,
       // A dry scene has no simulation to pin bricks for. Handing the planner the
       // container anyway is what made the tree uniform-depth in practice.
       solverBricks: plannedSolverBricks,
@@ -1713,13 +1734,13 @@ export class OctreeSparseBrickWorld {
       refineEnvironmentLeaf: (level, coordinate) =>
         terrainRefinement?.refineEnvironmentLeaf(level, coordinate)
         || solidPatchRefinement?.refineEnvironmentLeaf(level, coordinate)
-        || planarLeafClassifier.requiresFineVoxelResidual(level, coordinate)
+        || (!gpuNodeClassification && (planarLeafClassifier.requiresFineVoxelResidual(level, coordinate)
         || (surfaceRefinement
           ? surfaceRefinement.refineEnvironmentLeaf(level, coordinate)
           : refinementDepth > 0
             ? candidatesInBrick(level, coordinate, OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET)
               > OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET
-            : environmentCoarsening?.refineEnvironmentLeaf(level, coordinate) ?? false),
+            : environmentCoarsening?.refineEnvironmentLeaf(level, coordinate) ?? false))),
       classifyEnvironmentLeaf: planarLeafClassifier,
     });
     this.finestLevel = plan.maximumDepth;
@@ -1870,7 +1891,11 @@ export class OctreeSparseBrickWorld {
     // reach. The invariant is stated once in `create` and enforced here.
     const counts = storageBuffer(device, "Sparse brick source counts", packed.counts.byteLength, packed.counts);
     const topology = storageBuffer(device, "Sparse brick source topology", packed.topology.byteLength, packed.topology);
-    const initialVoxelCount = Math.max(1, plan.voxelCount);
+    // Dry publication copies topology only. Its dynamic lanes are absent,
+    // so allocating full zero-filled staging fields wastes 36 bytes per voxel
+    // and can exceed the device's buffer limit before any scene work starts.
+    const initialVoxelCount = this.tree.payloadLayout.lanes.geometry.present
+      ? Math.max(1, plan.voxelCount) : 1;
     const geometry = storageBuffer(device, "Sparse brick source geometry", initialVoxelCount * 16);
     const velocity = storageBuffer(device, "Sparse brick source velocity", initialVoxelCount * 16);
     const materialOwners = storageBuffer(device, "Sparse brick source material owners", initialVoxelCount * 4);

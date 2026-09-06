@@ -194,6 +194,17 @@ const RENDER_GPU_COUNTERS = new Set([
   "GPU Read Bandwidth",
   "GPU Write Bandwidth",
   "GPU Last Level Cache Utilization",
+  "ALU Limiter",
+  "F32 Utilization",
+  "F16 Utilization",
+  "Buffer Read Limiter",
+  "Buffer Load Utilization",
+  "Buffer Write Limiter",
+  "Buffer Store Utilization",
+  "GPU Last Level Cache Limiter",
+  "MMU Limiter",
+  "MMU Utilization",
+  "MMU TLB Miss Rate",
 ]);
 
 interface RenderWorkerResult {

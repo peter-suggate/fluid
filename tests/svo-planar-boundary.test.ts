@@ -11,6 +11,7 @@ import {
   isSvoPlanarBoundaryProxy,
   svoPlanarResidualEnvironmentPrimitives,
   svoPlanarResidualSolidWorld,
+  svoPlanarSolidWorldBlockers,
   svoPlanarBoundaryForProxy,
 } from "../lib/svo/svo-planar-boundary";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives,
@@ -207,6 +208,62 @@ test("a cut tank face stays voxel-owned instead of receiving a false outline own
     "the uncut portion of the rejected face remains visible voxel volume");
   assert.equal(sampleSolidWorld(residual, [4, -1, 4]).materialId, 0,
     "the authored hole survives residual composition");
+});
+
+test("planar classification follows render ownership while retaining visible and edited solids", () => {
+  const scene = getScenePreset("bounded-pool-transfer").create();
+  scene.container.width_m = 16;
+  scene.container.height_m = 8;
+  scene.container.depth_m = 16;
+  scene.voxelDomain.finestCellSize_m = 1;
+  const floor: EnvironmentProxyPrimitive = {
+    ...plate,
+    center_m: { x: 0, y: -0.05, z: 0 },
+    halfSize_m: { x: 8, y: 0.05, z: 8 },
+    aabb_m: { min: { x: -8, y: -0.1, z: -8 }, max: { x: 8, y: 0, z: 8 } },
+  } as EnvironmentProxyPrimitive;
+  const environment = buildSvoPlanarBoundaryCatalog([floor], () => ({
+    materialId: 32, ownerId: 12,
+  }));
+  const shell = boxSolidVoxelShell([16, 8, 16]);
+  const classify = (patches: typeof shell, vessel: "outline" | "glass") => {
+    scene.container.vessel = vessel;
+    scene.solidVoxels = [...patches];
+    const catalog = buildSvoSolidWorldPlanarBoundaryCatalog(scene, patches, 1);
+    const classifier = createSvoPlanarLeafClassifier({
+      sources: [...environment.sources, ...catalog.sources],
+      blockers: [
+        { ...environment.sources[0]!.bounds_m, planarSourceIndex: 0 },
+        ...svoPlanarSolidWorldBlockers(scene, patches, catalog),
+      ],
+      worldOrigin_m: [-1, -0.5, -1], nodeEdge_m: [[2, 1, 2]],
+    });
+    return classifier(0, { x: 0, y: 0, z: 0 });
+  };
+  assert.deepEqual(classify(shell, "outline"), {
+    kind: SPARSE_BRICK_LEAF_TERMINAL.planarBoundary, index: 0,
+  }, "physics-only shell cannot force visible floor traversal into voxels");
+  assert.equal(classify(shell, "glass").kind, SPARSE_BRICK_LEAF_TERMINAL.voxels);
+  assert.equal(classify([...shell, {
+    operation: "clear", minimum: [7, -1, 7], maximumExclusive: [8, 0, 8],
+  }], "outline").kind, SPARSE_BRICK_LEAF_TERMINAL.voxels,
+  "a cut shell face remains visible residual geometry");
+  assert.equal(classify([...shell, {
+    operation: "fill", minimum: [7, -1, 7], maximumExclusive: [9, 1, 9], materialId: 9,
+  }], "outline").kind, SPARSE_BRICK_LEAF_TERMINAL.voxels,
+  "a thick solid still blocks promotion");
+  const crossingPlane = [...shell, {
+    operation: "fill" as const, minimum: [0, 0, 0] as const,
+    maximumExclusive: [16, 1, 16] as const, materialId: 9,
+  }];
+  assert.equal(classify(crossingPlane, "outline").kind,
+    SPARSE_BRICK_LEAF_TERMINAL.voxels,
+    "a second analytic owner remains a blocker even though absent from voxel residual");
+  const catalog = buildSvoSolidWorldPlanarBoundaryCatalog(scene, crossingPlane, 1);
+  assert.equal(catalog.patchIndexByPatch.get(shell.length), 1);
+  assert.equal(svoPlanarSolidWorldBlockers(scene, crossingPlane, catalog)[0]!.planarSourceIndex, 1,
+    "filtering physics-only patches preserves original patch indices");
+  assert.equal(sampleSolidWorld(createSolidWorld(shell), [8, -1, 8]).materialId, 1);
 });
 
 test("only isolated planar leaves become macro terminals", () => {

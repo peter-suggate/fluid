@@ -75,6 +75,22 @@ export function svoPlanarResidualSolidWorld(
     !catalog.residualExcludedPatchIndices.has(patchIndex)));
 }
 
+/** Bounds of visible solid geometry, retaining analytic owners as well as voxels. */
+export function svoPlanarSolidWorldBlockers(
+  scene: SceneDescription,
+  patches: readonly SolidWorldVoxelPatch[],
+  catalog: SvoSolidWorldPlanarBoundaryCatalog | undefined,
+): SvoPlanarLeafClassifierOptions["blockers"] {
+  return patches.flatMap((patch, patchIndex) => {
+    const planarSourceIndex = catalog?.patchIndexByPatch.get(patchIndex);
+    // Physics-only geometry is absent from both render representations. It
+    // cannot disqualify an otherwise isolated analytic surface.
+    if (planarSourceIndex === undefined
+      && catalog?.residualExcludedPatchIndices.has(patchIndex)) return [];
+    return [{ ...solidWorldVoxelPatchBounds_m(scene, patch), planarSourceIndex }];
+  });
+}
+
 const quaternionRotate = (
   vector: PlanarBoundaryVec3,
   orientation: EnvironmentBoxProxy["orientation"],
@@ -250,7 +266,7 @@ export function buildSvoSolidWorldPlanarBoundaryCatalog(
 
 export interface SvoPlanarLeafClassifierOptions {
   readonly sources: readonly SvoPlanarBoundarySource[];
-  /** All authored bounds, including non-planar sources and static solid pages. */
+  /** Visible authored bounds, including non-planar sources and static solid pages. */
   readonly blockers: readonly {
     readonly minimum: PlanarBoundaryVec3;
     readonly maximum: PlanarBoundaryVec3;

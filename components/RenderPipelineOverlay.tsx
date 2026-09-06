@@ -1,5 +1,7 @@
 "use client";
 
+import { WorkProgress } from "./WorkProgress";
+import { surfaceMeshProgress } from "../lib/svo/svo-surface-mesh";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSession } from "../lib/core/session/session-context";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
@@ -11,6 +13,8 @@ import {
   measureRenderPipelineBand,
   measureRenderPipelineNode,
   renderPipelineStageDurations,
+  renderPipelineNodeForContext,
+  SURFACE_MESH_TIMING_STAGES,
   renderPipelineTipText,
   renderPipelineUnownedPhases,
   RENDER_PIPELINE_BANDS,
@@ -208,7 +212,10 @@ export function RenderPipelineOverlay() {
   const total_ms = trace?.total_ms ?? 0;
 
   const updateTuning = <K extends keyof SvoRenderTuning>(key: K, value: SvoRenderTuning[K]) =>
-    setTuning((current) => ({ ...current, [key]: value }));
+    setTuning((current) => ({ ...current, [key]: value,
+      ...(key === "stableAreaLightSamples" ? { movingAreaLightSamples: value as number } : {}),
+      ...(key === "stableAoSamples" ? { movingAoSamples: value as number } : {}),
+    }));
   const modified = <K extends keyof SvoRenderTuning>(key: K) => tuning[key] !== SVO_RENDER_TUNING_PRESETS.balanced[key];
   const resetTuning = <K extends keyof SvoRenderTuning>(key: K) => () =>
     updateTuning(key, SVO_RENDER_TUNING_PRESETS.balanced[key]);
@@ -264,7 +271,8 @@ export function RenderPipelineOverlay() {
     // looking at rather than hard-coding one.
     rasterPrimaryActive: resolvedPrimary !== "traced",
     surfaceMeshSelected: resolvedPrimary === "mesh",
-    surfaceMeshActive: resolvedPrimary === "mesh" && !smoothSurfaceEnabled,
+    surfaceMeshActive: resolvedPrimary === "mesh" && !smoothSurfaceEnabled && effectiveRendererStatus.surfaceMesh?.state === "ready",
+    surfaceMeshStatus: effectiveRendererStatus.surfaceMesh,
   };
 
   // The lamp is the node's own switch, and every node has one.
@@ -319,7 +327,25 @@ export function RenderPipelineOverlay() {
       </div>
     </details>,
 
-    "primary-traversal": <details className="rp-tune"><summary>Traversal budgets</summary>
+    "primary-traversal": resolvedPrimary === "mesh" ? <div className="pipe-fields" aria-label="Rasterization timings">
+      {SURFACE_MESH_TIMING_STAGES.map(({ stage, label, detail }) => {
+        const duration = !partitioned ? undefined : disabledStages.has("primary-traversal")
+          ? 0 : durations.get(stage)?.expected_ms;
+        return <div key={stage} title={detail} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <span>{label}</span><code>{duration === undefined ? "—" : formatPipelineDuration(duration)}</code>
+        </div>;
+      })}
+      {effectiveRendererStatus.surfaceMesh?.allocatedBytes !== undefined && <>
+        <div>Required quads: {effectiveRendererStatus.surfaceMesh.requirementComplete === false ? "≥ " : ""}{effectiveRendererStatus.surfaceMesh.requiredQuads?.toLocaleString() ?? "—"}</div>
+        <div>Capacity: {effectiveRendererStatus.surfaceMesh.capacityQuads?.toLocaleString() ?? "—"} quads</div>
+        <div>Mesh memory: {(effectiveRendererStatus.surfaceMesh.allocatedBytes / (1024 * 1024)).toFixed(1)} MiB / {((effectiveRendererStatus.surfaceMesh.maximumBytes ?? 0) / (1024 * 1024)).toFixed(1)} MiB limit</div>
+        <div>Mesh builds: {effectiveRendererStatus.surfaceMesh.builds ?? "—"}</div>
+      </>}
+      <WorkProgress progress={smoothSurfaceEnabled
+        ? { label: "Smooth surface uses ray fallback", state: "waiting", detail: "Voxel mesh rendering resumes when smooth reconstruction is disabled." }
+        : surfaceMeshProgress(effectiveRendererStatus.surfaceMesh)} />
+      {effectiveRendererStatus.surfaceMesh?.state === "ready" && <div>{effectiveRendererStatus.surfaceMesh.quads?.toLocaleString() ?? "—"} drawn quads</div>}
+    </div> : <details className="rp-tune"><summary>Traversal budgets</summary>
       <div className="pipe-fields">
       <PipeRange label="Maximum traversal depth" unit="levels" value={svoMaximumTraversalDepth}
         min={1} max={21} step={1} digits={0} onChange={setSvoMaximumTraversalDepth}
@@ -399,14 +425,10 @@ export function RenderPipelineOverlay() {
           onChange={(value) => updateTuning("visibilityIntersections", value)} modified={modified("visibilityIntersections")} onReset={resetTuning("visibilityIntersections")} />
       </div>}
       <div className="pipe-fields">
-        <PipeRange label="Area samples · stable" unit="rays" value={tuning.stableAreaLightSamples} min={1} max={2} step={1} digits={0}
+        <PipeRange label="Area samples" unit="rays" value={tuning.stableAreaLightSamples} min={1} max={2} step={1} digits={0}
           onChange={(value) => updateTuning("stableAreaLightSamples", value)} modified={modified("stableAreaLightSamples")} onReset={resetTuning("stableAreaLightSamples")} />
-        <PipeRange label="Area samples · moving" unit="rays" value={tuning.movingAreaLightSamples} min={1} max={2} step={1} digits={0}
-          onChange={(value) => updateTuning("movingAreaLightSamples", value)} modified={modified("movingAreaLightSamples")} onReset={resetTuning("movingAreaLightSamples")} />
-        <PipeRange label="AO samples · stable" unit="cones" value={tuning.stableAoSamples} min={1} max={4} step={1} digits={0}
+        <PipeRange label="AO samples" unit="cones" value={tuning.stableAoSamples} min={1} max={4} step={1} digits={0}
           onChange={(value) => updateTuning("stableAoSamples", value)} modified={modified("stableAoSamples")} onReset={resetTuning("stableAoSamples")} />
-        <PipeRange label="AO samples · moving" unit="cones" value={tuning.movingAoSamples} min={1} max={4} step={1} digits={0}
-          onChange={(value) => updateTuning("movingAoSamples", value)} modified={modified("movingAoSamples")} onReset={resetTuning("movingAoSamples")} />
       </div>
       {/* Only the per-light plane consults the slot, so it appears with that
           plane rather than sitting inert beside the others. */}
@@ -472,7 +494,8 @@ export function RenderPipelineOverlay() {
 
   const bands: readonly PipelineBand[] = RENDER_PIPELINE_BANDS.map((band): PipelineBand => {
     const bandCost = measureRenderPipelineBand(band.id, durations, graphTotal_ms);
-    const nodes = RENDER_PIPELINE_NODES.filter((node) => node.band === band.id);
+    const nodes = RENDER_PIPELINE_NODES.filter((node) => node.band === band.id)
+      .map((node) => renderPipelineNodeForContext(node, context));
     const entries = nodes.map((node) => {
       const state = node.state(context);
       const cost: RenderPipelineMeasurement = partitioned

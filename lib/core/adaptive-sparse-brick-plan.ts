@@ -15,6 +15,10 @@ import {
 import { completeCooperativeBuild } from "./cooperative-build";
 
 export interface AdaptiveSparseBrickPlanOptions {
+  /** Batch geometric decisions on the device while the host assembles records. */
+  classifyEnvironmentBatch?: (level: number, coordinates: readonly SparseBrickCoordinate[]) => Promise<readonly SparseBrickEnvironmentClassification[]>;
+  /** GPU-produced occupancy, unioned with the explicit proxy claim. */
+  proxyOccupancy?: SparseBrickProxyOccupancy;
   brickSize: SparseBrickSize;
   /** Coordinates of simulation bricks, expressed at {@link solverLevel}. */
   solverBricks: readonly SparseBrickCoordinate[];
@@ -52,6 +56,15 @@ export interface AdaptiveSparseBrickPlanOptions {
     level: number,
     coordinate: SparseBrickCoordinate,
   ) => SparseBrickLeafTerminal;
+}
+
+export interface SparseBrickProxyOccupancy {
+  keys(level: number): Iterable<bigint>;
+  has(level: number, coordinate: SparseBrickCoordinate): boolean;
+}
+export interface SparseBrickEnvironmentClassification {
+  refine: boolean;
+  terminal: SparseBrickLeafTerminal;
 }
 
 export interface AdaptiveSparseBrickReductionReport {
@@ -248,6 +261,7 @@ export function* planAdaptiveSparseBrickOctreeSteps(
 
   // `${level}:${morton}` is unambiguous because each level has its own Morton domain.
   const leafKeys = new Set<string>();
+  const batchTerminals = new Map<string, SparseBrickLeafTerminal>();
   for (const key of inputs.solver.keys()) leafKeys.add(`${solverLevel}:${key}`);
 
   /**
@@ -265,7 +279,8 @@ export function* planAdaptiveSparseBrickOctreeSteps(
     function* descend(): Generator<unknown, void, undefined> {
       for (let octant = 0; octant < 8; octant += 1) {
         const child = mortonChild(key, octant);
-        if (proxyPrefixes[level + 1].has(child)) yield* addProxyLeaves(level + 1, child);
+        if (proxyPrefixes[level + 1].has(child)
+          || options.proxyOccupancy?.has(level + 1, coordinateForKey(child, level + 1))) yield* addProxyLeaves(level + 1, child);
       }
     }
     if ((visited += 1) % PLAN_DESCENT_YIELD_BATCH === 0) yield;
@@ -281,8 +296,35 @@ export function* planAdaptiveSparseBrickOctreeSteps(
     }
     leafKeys.add(`${level}:${key}`);
   }
-  for (const key of [...proxyPrefixes[minimumEnvironmentLevel]].sort(compareMorton)) {
-    yield* addProxyLeaves(minimumEnvironmentLevel, key);
+  const proxyRoots = new Set(proxyPrefixes[minimumEnvironmentLevel]);
+  if (options.proxyOccupancy) for (const key of options.proxyOccupancy.keys(minimumEnvironmentLevel)) proxyRoots.add(key);
+  if (options.classifyEnvironmentBatch) {
+    let frontier = [...proxyRoots].sort(compareMorton);
+    for (let level = minimumEnvironmentLevel; level <= maximumDepth && frontier.length; level += 1) {
+      const coordinates = frontier.map(key => coordinateForKey(key, level));
+      let classification: readonly SparseBrickEnvironmentClassification[] = [];
+      yield options.classifyEnvironmentBatch(level, coordinates).then(result => { classification = result; });
+      if (classification.length !== frontier.length) throw new Error("GPU environment classification count mismatch");
+      const next: bigint[] = [];
+      for (let index = 0; index < frontier.length; index += 1) {
+        const key = frontier[index], covered = solverCovers(level, key);
+        if (covered && level >= solverLevel) continue;
+        if (level < maximumDepth && (covered || classification[index].refine || refine?.(level, coordinates[index]))) {
+          for (let octant = 0; octant < 8; octant += 1) {
+            const child = mortonChild(key, octant);
+            if (proxyPrefixes[level + 1].has(child)
+              || options.proxyOccupancy?.has(level + 1, coordinateForKey(child, level + 1))) next.push(child);
+          }
+        } else {
+          const leafKey = `${level}:${key}`;
+          leafKeys.add(leafKey);batchTerminals.set(leafKey, classification[index].terminal);
+        }
+        if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
+      }
+      frontier = next;
+    }
+  } else {
+    for (const key of [...proxyRoots].sort(compareMorton)) yield* addProxyLeaves(minimumEnvironmentLevel, key);
   }
 
   const nodesByLevel = Array.from({ length: maximumDepth + 1 }, () => new Map<bigint, SparseBrickCoordinate>());
@@ -386,7 +428,7 @@ export function* planAdaptiveSparseBrickOctreeSteps(
     if (!leafKeys.has(`${node.level}:${node.morton}`)) continue;
     const index: number = leaves.length;
     const terminal = !solverCovers(node.level, node.morton)
-      ? options.classifyEnvironmentLeaf?.(node.level, node.coordinate)
+      ? batchTerminals.get(`${node.level}:${node.morton}`) ?? options.classifyEnvironmentLeaf?.(node.level, node.coordinate)
         ?? SPARSE_BRICK_VOXEL_TERMINAL
       : SPARSE_BRICK_VOXEL_TERMINAL;
     if (terminal.kind !== SPARSE_BRICK_LEAF_TERMINAL.voxels

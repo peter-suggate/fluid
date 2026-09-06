@@ -277,7 +277,17 @@ export interface FluidRefinementRegion {
 }
 
 /** A world-space analytic liquid volume present at t = 0. */
-export type InitialLiquidVolume = InitialLiquidBox | InitialLiquidSphere | InitialLiquidHemisphere | InitialLiquidCylinder;
+export type InitialLiquidVolume = InitialLiquidBox | InitialLiquidSphere | InitialLiquidHemisphere | InitialLiquidCylinder | InitialLiquidTorus;
+
+/** A horizontal ring, with its symmetry axis along world Y. */
+export interface InitialLiquidTorus {
+  shape: "torus";
+  center_m: Vec3;
+  /** Radius from the centre to the tube centreline. */
+  radius_m: number;
+  /** Tube radius; smaller than radius_m so the hole remains open. */
+  tubeRadius_m: number;
+}
 
 export interface InitialLiquidBox {
   shape: "box";
@@ -587,7 +597,7 @@ export function validateScene(scene: SceneDescription): string[] {
     const volumes = scene.fluid.initialLiquidVolumes;
     if (!Array.isArray(volumes) || volumes.length === 0) errors.push("Initial liquid volumes must be a non-empty array");
     else for (const [index, volume] of volumes.entries()) {
-      if (!volume || !["box", "sphere", "hemisphere", "cylinder"].includes(volume.shape)) {
+      if (!volume || !["box", "sphere", "hemisphere", "cylinder", "torus"].includes(volume.shape)) {
         errors.push(`Initial liquid volume ${index} has an unsupported shape`);
         continue;
       }
@@ -609,6 +619,10 @@ export function validateScene(scene: SceneDescription): string[] {
       else if (!(volume.radius_m > 0) || !Number.isFinite(volume.radius_m)) errors.push(`Initial liquid ${volume.shape} ${index} radius must be positive and finite`);
       else if (volume.shape === "cylinder" && (!(volume.halfHeight_m > 0) || !Number.isFinite(volume.halfHeight_m))) {
         errors.push(`Initial liquid cylinder ${index} half-height must be positive and finite`);
+      }
+      else if (volume.shape === "torus" && (!Number.isFinite(volume.tubeRadius_m)
+        || volume.tubeRadius_m <= 0 || volume.tubeRadius_m >= volume.radius_m)) {
+        errors.push(`Initial liquid torus ${index} tube radius must be positive and smaller than its ring radius`);
       }
       else if (centre.x < -c.width_m / 2 || centre.x > c.width_m / 2 || centre.y < 0 || centre.y > c.height_m
         || centre.z < -c.depth_m / 2 || centre.z > c.depth_m / 2) {

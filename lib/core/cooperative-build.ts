@@ -98,6 +98,15 @@ export async function driveCooperativeBuild<T>(
     }
     const step = steps.next();
     if (step.done) return step.value;
+    // GPU planning stages yield their completion fence. Keep the generator's
+    // resources alive until it settles, and unwind on rejection just as on abort.
+    if (step.value instanceof Promise) {
+      try { await step.value; }
+      catch (error) { steps.return(undefined as T); throw error; }
+      sliceStart_ms = performance.now();
+      sliceYields = 0;
+      continue;
+    }
     sliceYields += 1;
     const elapsed_ms = performance.now() - sliceStart_ms;
     if (elapsed_ms < budget_ms) continue;
@@ -120,5 +129,10 @@ export function completeCooperativeBuild<T>(steps: Generator<unknown, T, undefin
   for (;;) {
     const step = steps.next();
     if (step.done) return step.value;
+    if (step.value instanceof Promise) {
+      void step.value.catch(() => {});
+      steps.return(undefined as T);
+      throw new Error("GPU build stages require driveCooperativeBuild");
+    }
   }
 }

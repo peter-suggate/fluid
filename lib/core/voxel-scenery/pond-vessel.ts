@@ -864,7 +864,7 @@ function pondVesselPlanIndex(
  * roughly one cell diagonal plus one segment — from that diameter. So a distant
  * cell keeps the arc facing it and drops the rest.
  */
-function buildPondVesselPlanIndex(
+export function buildPondVesselPlanIndex(
   curve: readonly (readonly [number, number])[],
 ): PondVesselPlanIndex {
   const count = curve.length;

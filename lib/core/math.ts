@@ -33,8 +33,75 @@ export function orbit(camera: CameraState, dx: number, dy: number): CameraState 
   };
 }
 
+/**
+ * How near and how far the wheel may take the camera from what it is looking at.
+ *
+ * Wide, because the pivot is whatever the viewport is centred on rather than a
+ * fixed authored point (see `retarget`): zooming in is approaching *that*
+ * surface, so the floor is a distance from the thing itself and 2 cm leaves it
+ * two near planes clear of the 0.01 m clip in `voxelViewProjectionMatrix`. The
+ * ceiling sits inside that same matrix's 100 m far plane with room for whatever
+ * stands behind the pivot, and well outside the widest authored view: the ocean
+ * tank is 8 m across and the largest preset opens at 15 m, which the previous
+ * 12 m ceiling could not even hold still.
+ *
+ * `url-state.ts` admits exactly this range. A link is written from whatever the
+ * wheel reached, and a bound that disagreed there would silently drop a shared
+ * view back to its preset distance.
+ */
+export const CAMERA_DISTANCE_RANGE = Object.freeze({ minimum_m: 0.02, maximum_m: 60 });
+
+/**
+ * Distance is exponential in wheel travel, so a notch is a fixed *fraction* of
+ * however far away the camera already is. That is what lets one range serve a
+ * cup and an ocean: 100 px — one mouse notch — is a tenth of the distance
+ * whether that distance is a metre or fifty.
+ */
+const ZOOM_RATE_PER_PIXEL = 0.001;
+
 export function zoom(camera: CameraState, delta: number): CameraState {
-  return { ...camera, distance_m: Math.max(0.65, Math.min(12, camera.distance_m * Math.exp(delta * 0.001))) };
+  const distance_m = camera.distance_m * Math.exp(delta * ZOOM_RATE_PER_PIXEL);
+  return {
+    ...camera,
+    distance_m: Math.min(CAMERA_DISTANCE_RANGE.maximum_m,
+      Math.max(CAMERA_DISTANCE_RANGE.minimum_m, distance_m)),
+  };
+}
+
+/**
+ * Re-anchor the camera on a point *without moving it*.
+ *
+ * The camera is spherical — an azimuth, an elevation and a distance about a
+ * target — so orbiting and zooming both happen about `target_m` and nothing
+ * else. Making the pivot "whatever is at the centre of the viewport" is
+ * therefore not a change to `orbit` or `zoom` at all: it is moving the target
+ * onto that point first, and it is free precisely because the point came off
+ * the centre ray. The centre ray *is* the forward axis, so a pivot on it is
+ * already straight ahead: re-deriving the angles and the distance from the
+ * unchanged eye position reproduces the same view direction and the same eye,
+ * and the rendered frame does not move by a pixel.
+ *
+ * Idempotent for a pivot it has already been anchored to, which is what lets
+ * the wheel apply it on every event without a gesture having to remember
+ * whether it did so already.
+ *
+ * A pivot outside {@link CAMERA_DISTANCE_RANGE} is declined rather than
+ * clamped: clamping would keep the target and move the eye, which is the one
+ * thing this must never do.
+ */
+export function retarget(camera: CameraState, pivot_m: Vec3): CameraState {
+  const offset = sub(cameraPosition(camera), pivot_m);
+  const distance_m = length(offset);
+  if (!(distance_m >= CAMERA_DISTANCE_RANGE.minimum_m && distance_m <= CAMERA_DISTANCE_RANGE.maximum_m)) {
+    return camera;
+  }
+  return {
+    ...camera,
+    target_m: pivot_m,
+    distance_m,
+    azimuth_rad: Math.atan2(offset.x, offset.z),
+    elevation_rad: Math.asin(Math.max(-1, Math.min(1, offset.y / distance_m))),
+  };
 }
 
 export function pan(camera: CameraState, dx: number, dy: number): CameraState {

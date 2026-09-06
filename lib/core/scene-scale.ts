@@ -252,6 +252,9 @@ function scaledScene(scene: SceneDescription, axis: SceneScaleAxis, factor: Scen
   if (next.fluid.initialLiquidVolumes) {
     next.fluid.initialLiquidVolumes = next.fluid.initialLiquidVolumes.map((volume) => volume.shape === "box"
       ? { ...volume, min_m: scaleVec3(volume.min_m, factor), max_m: scaleVec3(volume.max_m, factor) }
+      : volume.shape === "torus"
+        ? { ...volume, center_m: scaleVec3(volume.center_m, factor), radius_m: volume.radius_m * factor,
+          tubeRadius_m: volume.tubeRadius_m * factor }
       : volume.shape === "cylinder"
         ? { ...volume, center_m: scaleVec3(volume.center_m, factor), radius_m: volume.radius_m * factor,
           halfHeight_m: volume.halfHeight_m * factor }

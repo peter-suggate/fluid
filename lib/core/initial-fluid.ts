@@ -152,6 +152,9 @@ export function initialLiquidVolumeContainsPoint(volume: InitialLiquidVolume, po
   const dx = point.x - volume.center_m.x;
   const dy = point.y - volume.center_m.y;
   const dz = point.z - volume.center_m.z;
+  if (volume.shape === "torus") {
+    return Math.hypot(Math.hypot(dx, dz) - volume.radius_m, dy) <= volume.tubeRadius_m;
+  }
   if (volume.shape === "cylinder") {
     return Math.hypot(dx, dy) <= volume.radius_m && Math.abs(dz) <= volume.halfHeight_m;
   }
@@ -182,6 +185,9 @@ export function initialLiquidVolumeSignedDistance(volume: InitialLiquidVolume, p
     const radial = Math.hypot(delta.x, delta.y) - volume.radius_m;
     const axial = Math.abs(delta.z) - volume.halfHeight_m;
     return Math.hypot(Math.max(radial, 0), Math.max(axial, 0)) + Math.min(Math.max(radial, axial), 0);
+  }
+  if (volume.shape === "torus") {
+    return Math.hypot(Math.hypot(delta.x, delta.z) - volume.radius_m, delta.y) - volume.tubeRadius_m;
   }
   const sphere = Math.hypot(delta.x, delta.y, delta.z) - volume.radius_m;
   if (volume.shape === "sphere") return sphere;

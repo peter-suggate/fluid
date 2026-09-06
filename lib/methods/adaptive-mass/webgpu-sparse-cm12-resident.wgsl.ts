@@ -2559,7 +2559,12 @@ fn presentationLimitedSlope(back:f32,center:f32,forward:f32)->f32{
   let left=center-back;let right=forward-center;
   if(left*right<=0.0){return 0.0;}
   let signValue=select(-1.0,1.0,left>0.0);
-  return signValue*min(0.75*abs(forward-back),4.0*min(abs(left),abs(right)));
+  // Reproduce affine cell averages exactly and keep each face value between
+  // its neighbouring means. A 0.75 centred coefficient amplifies a linear
+  // ramp by 50%, introducing a sawtooth at every coarse-cell face. This same
+  // reconstruction initializes refined children, so that error becomes mass
+  // detail as well as a visible surface ridge.
+  return signValue*min(0.5*abs(forward-back),2.0*min(abs(left),abs(right)));
 }
 
 fn preparePresentationInterpolationCache(lane:u32,cellScale:u32,

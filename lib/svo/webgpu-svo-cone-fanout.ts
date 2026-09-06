@@ -309,7 +309,7 @@ fn svoConeFanoutWorker(@builtin(global_invocation_id) gid:vec3u){
   let ray=fanoutRay(gid.xy);let position=ray[0]+ray[1]*receiver.x;let normal=receiver.yzw;
   if(gid.z<FANOUT_AO_LAYERS){
     let sampleIndex=gid.z;
-    let sampleCount=select(dry.tuningCounts1.z,dry.tuningCounts1.y,uniforms.viewport.w>=-1.0);
+    let sampleCount=max(dry.tuningCounts1.z,dry.tuningCounts1.y);
     if((dry.materialPublication.w&FANOUT_AO_FLAG)==0u||sampleIndex>=sampleCount){
       fanoutStore(coordinate,i32(gid.z),FANOUT_INACTIVE);return;
     }
@@ -329,9 +329,8 @@ fn svoConeFanoutWorker(@builtin(global_invocation_id) gid:vec3u){
   }
   let light=dryLighting.lights[lightIndex];
   let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;
-  let settled=uniforms.viewport.w>=-1.0;
   let globalIllumination=(dry.materialPublication.w&FANOUT_GI_FLAG)!=0u;
-  let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,settled),area),1u,globalIllumination);
+  let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);
   if(sampleIndex>=sampleCount){fanoutStore(coordinate,i32(gid.z),FANOUT_INACTIVE);return;}
   if(light.identity.w!=dryLighting.metadata.y){fanoutStore(coordinate,i32(gid.z),0.0);return;}
   let sample=fanoutLightSample(light,sampleIndex,position);
