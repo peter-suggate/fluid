@@ -39,7 +39,7 @@
     "test": "npm run build && node --import tsx --test tests/*.test.ts",
     "test:unit": "node --import tsx --test tests/*.test.ts",
     "test:webgpu": "FLUID_SCENE=${FLUID_SCENE:-all} node --import tsx tools/run-webgpu-smoke.ts",
-    "test:dawn:sparse-cm12:coarse-first": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/sparse-cm12-coarse-first-dawn.test.ts tests/sparse-cm12-macro-rerung-dawn.test.ts tests/sparse-cm12-presentation-linear-dawn.test.ts",
+    "test:dawn:sparse-cm12:coarse-first": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/sparse-cm12-coarse-first-prediction-dawn.test.ts tests/sparse-cm12-symmetric-support-overlay-dawn.test.ts tests/sparse-cm12-coarse-first-dawn.test.ts tests/sparse-cm12-mini32-corner-dawn.test.ts tests/sparse-cm12-macro-rerung-dawn.test.ts tests/sparse-cm12-presentation-linear-dawn.test.ts tests/sparse-cm12-height-reconstruction-dawn.test.ts",
     "test:dawn:sparse-cm12": "node --import tsx tools/run-sparse-cm12-dawn-regression-suite.ts",
     "test:webgpu:adaptive-mass:symmetric-expansion": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/run-adaptive-mass-symmetric-expansion-dawn.ts --steps=${STEPS:-20}",
     "test:webgpu:adaptive-mass:long-dam": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx --test --test-concurrency=1 tests/sparse-world-long-dam-dawn.test.ts",

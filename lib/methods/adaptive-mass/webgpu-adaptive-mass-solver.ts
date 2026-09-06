@@ -823,7 +823,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       coarseFirst: values.selectorMode !== "surface" && values.selectorMode !== "activity",
     });
     this.options = { ...this.options, timeStep, sharpeningDistance, sharpeningTraceSteps,
-      surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
+      surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 1 ? 1
+      : Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
       sharpeningStrength,
       gammaDiffusionEnabled, surfaceSharpeningEnabled,
       pressureIterations, pressureRelativeTolerance, activityPolicy };

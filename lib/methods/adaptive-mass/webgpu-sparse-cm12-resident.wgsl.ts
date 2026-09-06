@@ -1,3 +1,5 @@
+import { SPARSE_CM12_COMMON_HEIGHT_ENABLED, sparseCM12HeightReconstructionWGSL } from "./sparse-cm12-height-reconstruction.wgsl";
+import { sparseCM12CoarseFirstPredictionWGSL } from "./sparse-cm12-coarse-first-prediction.wgsl";
 import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
 import {
   SPARSE_CM12_DIRTY_CAUSE_BIT,
@@ -2163,6 +2165,39 @@ fn restrictedPresentationDensityAt(lower:vec3i,cellScale:i32,densityOffset:u32)-
         /max(cellOpenFraction(owner.x),1e-6),0.0,1.0);
     }
   }
+  // A dyadic virtual cell normally fits inside a single accepted leaf. The
+  // directory lookup above already supplies that leaf's dense cell interval;
+  // use its native strides, as transport does, instead of resolving the same
+  // sparse-world identity for every child. Keep the finest y/z summation order
+  // and x runs identical to the general path (including its wet-bit policy).
+  // Clipped and cross-leaf queries retain the general spatial lookup below.
+  if(owner.x!=INVALID){
+    let origin=cm12WorldLeafCoordinate(owner.y)*i32(BRICK_FINE_RESOLUTION);
+    let span=brickSpan(owner.y);
+    let scale=i32(BRICK_FINE_RESOLUTION*span/owner.z);
+    var upper=origin+vec3i(i32(BRICK_FINE_RESOLUTION*span));
+    if(!brickHasUnclippedWorldGeometry(owner.y)){upper=min(upper,vec3i(p.dimensions.xyz));}
+    if(all(lower>=origin)&&all(lower+vec3i(cellScale)<=upper)){
+      let reasons=atomicLoad(&activity[activityRecord(owner.y)+1u]);
+      if((reasons&64u)==0u){return 0.0;}
+      let valid=vec3u((upper-origin+vec3i(scale-1))/scale);
+      let range=templateBrickCellRange(owner.y,owner.z);
+      var rho=0.0;
+      for(var dz=0;dz<cellScale;dz+=1){for(var dy=0;dy<cellScale;dy+=1){
+        var dx=0;
+        loop{
+          if(dx>=cellScale){break;}
+          let local=(lower-origin+vec3i(dx,dy,dz))/scale;
+          let cell=range.x+u32(local.x)+valid.x*(u32(local.y)+valid.y*u32(local.z));
+          let run=max(1,min(cellScale-dx,origin.x+(local.x+1)*scale-lower.x-dx));
+          rho+=f32(run)*clamp(state[densityOffset+cell]
+            /max(cellOpenFraction(cell),1e-6),0.0,1.0);
+          dx+=run;
+        }
+      }}
+      return rho/f32(cellScale*cellScale*cellScale);
+    }
+  }
   // Walk one finest row at a time, but consume a contiguous run when the
   // accepted owner spans several finest samples. This is bit-equivalent to
   // summing every child because an accepted composite cell is constant across
@@ -2222,12 +2257,26 @@ fn presentationStencilDensityAt(coarse:vec3i,cellScale:u32,
 // evidence and are ignored by the page-wide flatness proof.
 fn presentationIntegratedColumnHeight(brick:u32,x:i32,z:i32,
  densityOffset:u32)->vec2f{
+  let receipt=presentationIntegratedColumnReceipt(brick,x,z,densityOffset);
+  if(heightIsEnabled()&&heightStamp()==heightGeneration()&&receipt.y==1.0&&x>=0&&z>=0
+    &&x<i32(p.dimensions.x)&&z<i32(p.dimensions.z)){
+    let q=vec2u(u32(x),u32(z));
+    // A column can contain another interface (a drop, overhang or cavity).
+    // Only replace the exact monotone receipt used to build this field.
+    if(heightRead(6u,q)>0.0&&abs(heightRead(0u,q)-receipt.x)<1e-3){
+      return vec2f(heightRead(1u,q),receipt.y);
+    }
+  }
+  return receipt.xy;
+}
+fn presentationIntegratedColumnReceipt(brick:u32,x:i32,z:i32,
+ densityOffset:u32)->vec3f{
   if(brick>=p.dispatch.w||!brickActive(brick)||brickSpan(brick)!=1u){
-    return vec2f(0.0);
+    return vec3f(0.0);
   }
   let origin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
   if(any(origin<vec3i(0))||any(origin>=vec3i(p.dimensions.xyz))){
-    return vec2f(0.0);
+    return vec3f(0.0);
   }
   // Integrate the complete interface bracket, including the neighbouring
   // vertical bricks. A page-local proof changes scalar units on just one side
@@ -2238,6 +2287,7 @@ fn presentationIntegratedColumnHeight(brick:u32,x:i32,z:i32,
   let searchLower=max(0,origin.y-i32(BRICK_FINE_RESOLUTION));
   let searchUpper=min(i32(p.dimensions.y),origin.y+2*i32(BRICK_FINE_RESOLUTION));
   var searchY=searchLower;var previousWet=false;var crossing=-1;
+  var previousWidth=BRICK_FINE_RESOLUTION;var interfaceWidth=BRICK_FINE_RESOLUTION;
   while(searchY<searchUpper){
     let owner=compactOwnerCellAt(vec3i(x,searchY,z));
     var fill=0.0;var scale=BRICK_FINE_RESOLUTION;
@@ -2246,11 +2296,11 @@ fn presentationIntegratedColumnHeight(brick:u32,x:i32,z:i32,
       scale=max(1u,BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z);
     }
     let wet=fill>=CM12_LIQUID_ISOVALUE;
-    if(previousWet&&!wet&&crossing<0){crossing=searchY;}
-    previousWet=wet;
+    if(previousWet&&!wet&&crossing<0){crossing=searchY;interfaceWidth=previousWidth;}
+    previousWet=wet;previousWidth=scale;
     searchY+=max(1,min(i32(scale)-searchY%i32(scale),searchUpper-searchY));
   }
-  if(crossing<0){return vec2f(0.0);}
+  if(crossing<0){return vec3f(0.0);}
   // Anchor the proof to the shared accepted liquid/air crossing, not the
   // requesting page. Otherwise one page can reject a slightly depleted lower
   // endpoint while its neighbour starts a brick deeper and accepts the same
@@ -2262,6 +2312,7 @@ fn presentationIntegratedColumnHeight(brick:u32,x:i32,z:i32,
   var firstFill=0.0;var lastFill=0.0;var columnOpen=-1.0;
   var sawOpen=false;var sawClosed=false;
   var sawLiquid=false;var sawAir=false;var valid=true;
+  var columnWidth=BRICK_FINE_RESOLUTION;var hasPartial=false;
   while(y<upper){
     let q=vec3i(x,y,z);let owner=compactOwnerCellAt(q);
     var fill=0.0;var open=1.0;var width=1;
@@ -2286,10 +2337,11 @@ fn presentationIntegratedColumnHeight(brick:u32,x:i32,z:i32,
       valid=valid&&fill<=previous+0.01;previous=fill;lastFill=fill;
       sawLiquid=sawLiquid||fill>1e-3;sawAir=sawAir||fill<1.0-1e-3;
       massHeight+=fill*f32(width);
+      if(fill>1e-6&&fill<1.0-1e-6){columnWidth=min(columnWidth,u32(width));hasPartial=true;}
     }
     y+=width;
   }
-  if(!sawOpen){return vec2f(0.0,2.0);}
+  if(!sawOpen){return vec3f(0.0,2.0,0.0);}
   var anchoredBelow=lower==0||firstFill>=1.0-0.01;
   if(!anchoredBelow){
     // The first interval may itself be the partial 8h surface cell. Its
@@ -2304,7 +2356,7 @@ fn presentationIntegratedColumnHeight(brick:u32,x:i32,z:i32,
   }
   let anchoredAbove=upper==i32(p.dimensions.y)||lastFill<=0.01;
   valid=valid&&!sawClosed&&anchoredBelow&&anchoredAbove&&sawLiquid&&sawAir;
-  return vec2f(f32(lower)+massHeight,select(0.0,1.0,valid));
+  return vec3f(f32(lower)+massHeight,select(0.0,1.0,valid),f32(select(interfaceWidth,columnWidth,hasPartial)));
 }
 
 // A B1 page has one finite-volume value over its complete 8^3 brick. During a
@@ -2387,6 +2439,38 @@ fn presentationIntegratedAdaptiveFloorHeight(x:i32,z:i32,
   if(!sawOpen){return vec2f(0.0,2.0);}
   return vec2f(massHeight,select(0.0,1.0,sawAir));
 }
+
+// One spatial height authority, shared by every vertical page and proof halo.
+// Scratch follows the accepted/candidate packed payload; it never changes mass.
+fn heightDomain()->vec2u{return p.dimensions.xz;}
+fn heightMaximum()->f32{return f32(p.dimensions.y);}
+fn heightGeneration()->u32{return atomicLoad(&activity[0]);}
+fn heightBufferBase()->u32{
+  return 2u*(arrayLength(&fineMetadata)/4u)*PRESENTATION_SAMPLES_PER_PAGE;
+}
+fn heightIsEnabled()->bool{return ${SPARSE_CM12_COMMON_HEIGHT_ENABLED}&&p.coarseFirst.x>0.5&&p.injectionCenter.w<=0.5;}
+fn heightRawReceipt(q:vec2u)->vec2f{
+  if(!heightIsEnabled()){return vec2f(0.0);}
+  let densityOffset=select(p.stateOffsets0.x,p.stateOffsets0.y,(atomicLoad(&activity[0])&1u)!=0u);
+  var y=0;var previousWet=false;var previousBrick=INVALID;
+  while(y<i32(p.dimensions.y)){
+    let owner=compactOwnerCellAt(vec3i(i32(q.x),y,i32(q.y)));
+    var fill=0.0;var width=BRICK_FINE_RESOLUTION;
+    if(owner.x!=INVALID&&brickActive(owner.y)){
+      fill=state[densityOffset+owner.x]/max(cellOpenFraction(owner.x),1e-6);
+      width=max(1u,BRICK_FINE_RESOLUTION*brickSpan(owner.y)/owner.z);
+    }
+    let wet=fill>=CM12_LIQUID_ISOVALUE;
+    if(previousWet&&!wet){
+      let receipt=presentationIntegratedColumnReceipt(previousBrick,i32(q.x),i32(q.y),densityOffset);
+      return vec2f(receipt.x,select(0.0,receipt.z,receipt.y==1.0));
+    }
+    previousWet=wet;previousBrick=owner.y;
+    y+=max(1,min(i32(width)-y%i32(width),i32(p.dimensions.y)-y));
+  }
+  return vec2f(0.0);
+}
+${sparseCM12HeightReconstructionWGSL(brickFineResolution)}
 
 fn preparePresentationColumnHeights(lane:u32,brick:u32,pageOrigin:vec3i,
  densityOffset:u32,halo:bool){
@@ -6048,11 +6132,18 @@ fn coarseFirstNormal(position:vec3f,h:f32)->vec3f{
 // volume identity, or scene name enters the causal neighbourhood. Swept boxes
 // conservatively include the space between samples. A bounded radius makes
 // the performance/maximum anticipation reach explicit in the UI.
+${sparseCM12CoarseFirstPredictionWGSL}
 fn coarseFirstIncomingFloor(brick:u32)->u32{
   let horizon=p.coarseFirst.w;if(horizon<=0.0){return 1u;}
   let coordinate=cm12WorldLeafCoordinate(brick);
   let b=f32(BRICK_FINE_RESOLUTION);
   let center=(vec3f(coordinate)+vec3f(0.5*f32(brickSpan(brick))))*b;
+  let receiverRecord=activityRecord(brick);
+  var receiverVelocity=vec3f(0.0);
+  if((atomicLoad(&activity[receiverRecord+1u])&64u)!=0u){
+    receiverVelocity=vec3f(activityF32(receiverRecord+5u),
+      activityF32(receiverRecord+6u),activityF32(receiverRecord+7u));
+  }
   let radius=i32(p.coarseFirstHistory.x);var required=1u;
   for(var z=-radius;z<=radius;z++){for(var y=-radius;y<=radius;y++){
     for(var x=-radius;x<=radius;x++){
@@ -6062,18 +6153,15 @@ fn coarseFirstIncomingFloor(brick:u32)->u32{
       let record=activityRecord(source);let reasons=atomicLoad(&activity[record+1u]);
       if((reasons&64u)==0u||(reasons&(1u|256u))==0u){continue;}
       let velocity=vec3f(activityF32(record+5u),activityF32(record+6u),activityF32(record+7u));
-      let speed=length(velocity);
-      // Even a touching receiver cannot request more than H*speed.
-      if(horizon*speed<=1.0){continue;}
+      let sweep=horizon*(velocity-receiverVelocity);
+      if(length(sweep)<=1.0){continue;}
       let origin=(vec3f(cm12WorldLeafCoordinate(source))+vec3f(0.5*f32(brickSpan(source))))*b;
-      let delta=center-origin;let sweep=horizon*velocity;
-      if(dot(delta,sweep)<=0.0){continue;}
-      let t=clamp(dot(delta,sweep)/max(dot(sweep,sweep),1e-8),0.0,1.0);
-      let separation=abs(delta-t*sweep);
+      let delta=center-origin;
       let extent=0.5*b*f32(brickSpan(brick)+brickSpan(source));
-      if(any(separation>vec3f(extent))){continue;}
+      let approach=coarseFirstApproachTravel(delta,sweep,extent);
+      if(approach<=1.0){continue;}
       let gap=length(max(abs(delta)-vec3f(extent),vec3f(0.0)));
-      let demand=f32(BRICK_FINE_RESOLUTION)*min(1.0,horizon*speed/max(b,gap+b));
+      let demand=f32(BRICK_FINE_RESOLUTION)*min(1.0,approach/max(b,gap+b));
       var rung=1u;loop{if(rung>=BRICK_FINE_RESOLUTION||f32(rung)>=demand){break;}rung*=2u;}
       required=max(required,rung);
       if(required==BRICK_FINE_RESOLUTION){return required;}
@@ -7192,7 +7280,16 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
     let ownWidth=BRICK_FINE_RESOLUTION*brickSpan(brick)/max(1u,candidate);
     let otherWidth=BRICK_FINE_RESOLUTION*brickSpan(neighbor)/max(1u,neighborCandidate);
     let incompatible=max(ownWidth,otherWidth)>2u*min(ownWidth,otherWidth);
-    if(incompatible&&constructionActivation&&otherWidth>ownWidth
+    if(incompatible&&constructionActivation&&ownWidth>otherWidth){
+      // The inactive construction rung can itself be too coarse for the wet
+      // donor. Request backing before activation instead of rejecting this
+      // same impossible 2:1 transaction on every frame.
+      let required=min(BRICK_FINE_RESOLUTION,max(1u,
+        BRICK_FINE_RESOLUTION*brickSpan(brick)/(2u*otherWidth)));
+      atomicMax(&activity[output+47u],required);
+      atomicOr(&activity[output+9u],2u);
+      waitsForGeneration=true;
+    }else if(incompatible&&constructionActivation&&otherWidth>ownWidth
       &&!brickCandidatePlanningEnabled(neighbor)){
       let required=min(BRICK_FINE_RESOLUTION,max(1u,
         BRICK_FINE_RESOLUTION*brickSpan(neighbor)/(2u*ownWidth)));
@@ -9073,12 +9170,24 @@ fn populateSparseCM12PresentationFramePlan(
   if(page==INVALID&&!brickActive(brick)){return;}
   let pageNeedsActivation=page<arrayLength(&fineMetadata)/4u
     &&fineMetadata[4u*page+2u]!=1u;
+  let brickOrigin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
+  var heightChanged=false;
+  if(heightIsEnabled()&&brickActive(brick)&&brickSpan(brick)==1u
+    &&all(brickOrigin>=vec3i(0))&&all(brickOrigin<vec3i(p.dimensions.xyz))){
+    for(var z=0u;z<BRICK_FINE_RESOLUTION;z+=1u){for(var x=0u;x<BRICK_FINE_RESOLUTION;x+=1u){
+      let q=vec2u(brickOrigin.xz)+vec2u(x,z);if(any(q>=heightDomain())){continue;}
+      let height=heightRead(1u,q);
+      heightChanged=heightChanged||(heightRead(6u,q)>0.0
+        &&height>=f32(brickOrigin.y)-f32(BRICK_FINE_RESOLUTION)
+        &&height<=f32(brickOrigin.y+2*i32(BRICK_FINE_RESOLUTION)));
+    }}
+  }
   let scheduled=bootstrap||injected||pageNeedsActivation||scalarChanged
-    ||topologyChanged||dynamicBrick;
+    ||topologyChanged||dynamicBrick||heightChanged;
   if(!scheduled){return;}
   var origin=select(0u,${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged}u,scalarChanged);
   var inherited=select(0u,${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u,
-    dynamicBrick&&!scalarChanged);
+    (dynamicBrick||heightChanged)&&!scalarChanged);
   if(topologyChanged){origin|=${(SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
     | SPARSE_CM12_DIRTY_CAUSE_BIT.topologyRetired) >>> 0}u;}
   if(bootstrap){origin=${(SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated

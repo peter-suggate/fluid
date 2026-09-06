@@ -342,7 +342,7 @@ export function RenderPipelineOverlay() {
         <div>Mesh builds: {effectiveRendererStatus.surfaceMesh.builds ?? "—"}</div>
       </>}
       <WorkProgress progress={smoothSurfaceEnabled
-        ? { label: "Smooth surface uses ray fallback", state: "waiting", detail: "Voxel mesh rendering resumes when smooth reconstruction is disabled." }
+        ? { label: "Smooth surface unavailable", state: "waiting", detail: "Geometry is withheld. Voxel mesh rendering resumes when smooth reconstruction is disabled." }
         : surfaceMeshProgress(effectiveRendererStatus.surfaceMesh)} />
       {effectiveRendererStatus.surfaceMesh?.state === "ready" && <div>{effectiveRendererStatus.surfaceMesh.quads?.toLocaleString() ?? "—"} drawn quads</div>}
     </div> : <details className="rp-tune"><summary>Traversal budgets</summary>
@@ -636,10 +636,10 @@ export function RenderPipelineOverlay() {
     </div>
 
     {svoPrimaryTraversal === "mesh" && smoothSurfaceEnabled && <p className="render-inline-status">
-      Rasterized visibility uses voxel faces. Turn off Smooth surface to use the mesh; smooth reconstruction currently uses ray tracing.
+      Rasterized visibility uses voxel faces. Turn off Smooth surface to use the mesh; geometry is withheld while Smooth surface is enabled.
     </p>}
 
-    {svoPrimaryTraversal === "mesh" && !smoothSurfaceEnabled && effectiveRendererStatus.surfaceMesh?.state === "fallback"
+    {svoPrimaryTraversal === "mesh" && !smoothSurfaceEnabled && effectiveRendererStatus.surfaceMesh?.state === "blocked"
       && <p className="render-inline-status">{effectiveRendererStatus.surfaceMesh.detail}</p>}
 
     {effectiveRendererStatus.failureReason && <p className="render-inline-warning">SVO unavailable: {effectiveRendererStatus.detail

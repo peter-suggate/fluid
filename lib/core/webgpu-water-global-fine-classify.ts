@@ -179,7 +179,7 @@ fn heightFieldPatch(base:vec3i,scale:i32,heights:ptr<function,array<f32,4>>)->bo
   // Adaptive volume groups own ordinary-height surfaces. Keep only the
   // sub-half-cell film receipt here, otherwise row zero would duplicate the
   // adaptive triangles emitted by the group containing the actual waterline.
-  if(params.physical.w>=2.){
+  if(params.physical.w>=1.){
     for(var corner=0u;corner<4u;corner+=1u){if((*heights)[corner]>.5){valid=false;}}
   }
   return valid;
@@ -430,7 +430,7 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   if(!compactSignedSparseAddressing()
     &&(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions)))){return;}
   let index=id*samples+localIndex;if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return;}
-  if(compactSignedSparseAddressing()&&sampleScale==1u&&params.physical.w>=2.){
+  if(compactSignedSparseAddressing()&&sampleScale==1u&&params.physical.w>=1.){
     let cellWidth=1u<<((fineSamples[index]>>24u)&15u);
     let size=i32(min(8u,max(1u,cellWidth/u32(params.physical.w))));
     if(size>1){
@@ -439,11 +439,27 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
       let origin=compactFloorDiv(q,size)*size;
       if(any(q!=origin)){return;}
       if(classifyAdaptiveGroup(q+vec3i(1),size)){return;}
-      for(var z=0;z<size;z+=1){for(var y=0;y<size;y+=1){for(var x=0;x<size;x+=1){
-        let child=q+vec3i(x,y,z);if(!fineValidAt(child)){continue;}
-        let childLocal=vec3u(child-compactFloorDiv(child,i32(r))*i32(r));
-        classifyFineAnchor(child,1u,childLocal);
-      }}}
+      // A rejected large target may still contain valid smaller patches. Walk
+      // its dyadic children before falling back to unit cubes, so ×1 at a wall
+      // does not discard the simplification already available at ×2. At most
+      // 1 + 7*3 = 22 pending nodes for the maximum eight-wide target.
+      var pending:array<vec4i,22>;var count=1u;
+      pending[0]=vec4i(q,size);
+      loop{
+        if(count==0u){break;}count-=1u;let node=pending[count];
+        let width=node.w/2;
+        for(var z=0;z<2;z+=1){for(var y=0;y<2;y+=1){for(var x=0;x<2;x+=1){
+          let child=node.xyz+vec3i(x,y,z)*width;
+          if(width>1){
+            if(!classifyAdaptiveGroup(child+vec3i(1),width)){
+              pending[count]=vec4i(child,width);count+=1u;
+            }
+          }else if(fineValidAt(child)){
+            let childLocal=vec3u(child-compactFloorDiv(child,i32(r))*i32(r));
+            classifyFineAnchor(child,1u,childLocal);
+          }
+        }}}
+      }
       return;
     }
   }

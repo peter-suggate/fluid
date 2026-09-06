@@ -67,7 +67,14 @@ fn wallHeight(profile:vec3f,rise:f32,d:f32)->f32{
   if(d<=0.0){return rise;}if(d>=centreD){return 0.0;}if(d<=tangentD){return centreY+sqrt(max(0.0,crest*crest-d*d));}
   if(d>=footD){let dx=d-centreD;return foot-sqrt(max(0.0,foot*foot-dx*dx));}return tangentY-(d-tangentD)/t;
 }
-fn wallRun(profile:vec3f,rise:f32)->f32{var run=0.0;loop{if(run>=4.0*rise+profile.x+profile.y||wallHeight(profile,rise,run)<=0.0){return run;}run+=0.0005;}}
+fn wallRun(profile:vec3f,rise:f32)->f32{
+  let batter=max(0.02,profile.z);let c=cos(batter);let s=sin(batter);let t=tan(batter);
+  let fit=min(1.0,rise/max((profile.x+profile.y)*(1.0-s),1e-30));let crest=profile.x*fit;let foot=profile.y*fit;
+  let end=crest*c+(rise-crest+crest*s-foot*(1.0-s))*t+foot*c;
+  // Match the CPU's 0.5 mm stepping without f32 cancellation in foot - sqrt
+  // causing an early zero before the true endpoint.
+  return ceil(end/0.0005)*0.0005;
+}
 fn hashSigned(n:u32)->f32{var h=(n^0x9e3779b9u)*0x85ebca6bu;h=(h^(h>>13u))*0xc2b2ae35u;return 2.0*f32(h^(h>>16u))/4294967296.0-1.0;}
 fn noiseCorner(seed:u32,p:vec2i)->f32{return hashSigned(seed+73856093u*bitcast<u32>(p.x)+19349663u*bitcast<u32>(p.y));}
 fn relief(p:vec2f)->f32{

@@ -17,14 +17,15 @@ export type SvoConeTracingMode = "cones" | "exact" | "off";
  * How *primary* visibility is resolved, as distinct from the lighting visibility
  * `SvoConeTracingMode` selects.
  * - `mesh`: cached opaque voxel boundary triangles; analytic planes, rigid bodies
- *   and glass retain their existing paths. Smooth reconstruction uses exact rays.
+ *   and glass retain their existing paths. Unsupported or unfinished mesh
+ *   geometry is withheld; this mode never substitutes a primary ray march.
  * - `raster`: hardware-rasterize the resident bricks as depth-tested proxies.
  *   Octree leaves partition space, so the depth test alone is an exact
  *   visibility oracle and the image matches `traced` pixel for pixel.
  * - `traced`: the full-screen traversal megakernel every pixel marches for
  *   itself. Kept switchable because it is the reference the raster path is
- *   measured against, and because a device too narrow for four depth-tested
- *   colour planes has to fall back to it.
+ *   measured against. Unsupported raster devices report an error; they do not
+ *   silently switch to this mode.
  */
 export type SvoPrimaryTraversalMode = "raster" | "traced" | "mesh";
 
@@ -126,22 +127,10 @@ export interface SvoPrimaryTraversalScale {
 }
 
 /**
- * Honour the surface-mesh selection. Legacy proxy requests still resolve to
- * tracing because the proxy path lost the measured comparison.
- *
- * The megakernel is the primary. See
- * {@link SVO_PRIMARY_RASTER_PROXIES_PER_PIXEL_CEILING} for the paired-worktree
- * measurement that decided it — 6.2x on a frozen scene with the renderer as the
- * only variable — and for why the ratio this function used to compute steered
- * exactly the wrong way at production resolution.
- *
- * `scale` is retained and ignored. Every call site already computes it, it is
- * the input any future rule would need, and a rule that reads no inputs is
- * better spelled as one that has them and does not consult them than as a
- * signature change that would have to be undone. `raster` remains fully
- * compiled and reachable through {@link SVO_PRIMARY_TRAVERSAL_OVERRIDE}; it is
- * the arm that reproduces the pre-change frame and the one that still carries
- * the analytic scene-primitive tier.
+ * Preserve explicit tracing, and migrate legacy raster requests to the cached
+ * mesh implementation. Scale and device constraints never authorize tracing
+ * when raster was requested. The environment override remains an explicit
+ * diagnostic selection of the historical proxy path.
  */
 export function resolveSvoPrimaryTraversal(
   requested: SvoPrimaryTraversalMode,
@@ -149,7 +138,7 @@ export function resolveSvoPrimaryTraversal(
 ): SvoPrimaryTraversalMode {
   void scale;
   if (SVO_PRIMARY_TRAVERSAL_OVERRIDE) return SVO_PRIMARY_TRAVERSAL_OVERRIDE;
-  return requested === "raster" ? "traced" : requested;
+  return requested === "raster" ? "mesh" : requested;
 }
 
 /** Observable lifecycle of the requested primary seam-closure pass. */

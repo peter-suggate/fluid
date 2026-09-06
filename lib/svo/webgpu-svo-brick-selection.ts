@@ -1,4 +1,4 @@
-import { mortonEncode3D, type SparseBrickCoordinate } from "./sparse-brick-octree";
+import { mortonEncode3D } from "./sparse-brick-octree";
 import type { SparseBrickProxyOccupancy } from "../core/adaptive-sparse-brick-plan";
 import type { SvoScenePrimitiveBuild } from "./svo-scene-primitives";
 import type { SparseSceneAxisAlignedBounds } from "../core/webgpu-sparse-scene-proxies";
@@ -15,6 +15,23 @@ export interface SvoGpuBrickSelectionInput {
   brickSize: number;
   brickDimensions: readonly [number, number, number];
   maximumDepth: number;
+  /** Optional exact integer claims from the shared solver-lattice rounding. */
+  brickRanges?: readonly import("../core/sparse-scene-domain").SparseSceneCellRange[];
+  /** SolidWorld and static bodies retain their complete bounded claim. */
+  retainedRegions?: readonly SparseSceneAxisAlignedBounds[];
+}
+
+/** Exact integer support of the CPU SDF broad-phase test. */
+export function svoSolidReachBrickRange(minimum:number,maximum:number,origin:number,edge:number,margin:number):[number,number] {
+  if(![minimum,maximum,origin,edge,margin].every(Number.isFinite)||edge<=0||margin<0||maximum<minimum)
+    throw new RangeError("Invalid solid-reach brick bounds");
+  let first=Math.ceil((minimum-margin-origin)/edge)-1;
+  while(minimum>origin+first*edge+edge+margin)first++;
+  while(minimum<=origin+(first-1)*edge+edge+margin)first--;
+  let last=Math.floor((maximum+margin-origin)/edge);
+  while(maximum<origin+last*edge-margin)last--;
+  while(maximum>=origin+(last+1)*edge-margin)last++;
+  return [first,last];
 }
 
 // Primitive-major work avoids the old O(bricks * scene primitives) scan.
@@ -36,6 +53,14 @@ ${svoFieldProgramWGSL({functionName:"fieldBlock",loadWord:"arenaWord",baseWordEx
 fn svoFieldProgramReferenceSample(reference:u32,p:vec3f)->SvoFieldValue{return fieldBlock(reference,p);}
 ${svoPrimitiveWGSL}
 ${svoClusterArenaDecodeWGSL({functionName:"clusterBlock",loadWord:"arenaWord",baseWordExpression:"4u",capacityExpression:"arena[2]"})}
+// Resolve an implicit 64-brick tile from O(authored regions) prefix ranges.
+// No host-sized tile worklist or per-brick upload is needed.
+fn tile(index:u32)->vec2u{
+  var lo=0u;var hi=params.pad;
+  while(lo<hi){let mid=(lo+hi)/2u;if(tasks[mid].x<=index){lo=mid+1u;}else{hi=mid;}}
+  var first=0u;if(lo>0u){first=tasks[lo-1u].x;}
+  return vec2u(tasks[lo].y,(index-first)*64u);
+}
 fn coordinate(task:vec2u,lane:u32)->vec3u{
   let r=regions[task.x];let i=task.y+lane;
   return r.lo+vec3u(i%r.size.x,(i/r.size.x)%r.size.y,i/(r.size.x*r.size.y));
@@ -43,13 +68,14 @@ fn coordinate(task:vec2u,lane:u32)->vec3u{
 fn address(p:vec3u)->u32{return p.x+params.dims.x*(p.y+params.dims.y*p.z);}
 @compute @workgroup_size(64)
 fn claim(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
-  let task=tasks[params.taskBase+group.x];let r=regions[task.x];
+  let task=tile(params.taskBase+group.x);let r=regions[task.x];
   if(task.y+lane>=r.size.x*r.size.y*r.size.z){return;}
-  let i=address(coordinate(task,lane));atomicOr(&claimed[i/32u],1u<<(i%32u));
+  let i=address(coordinate(task,lane));let bit=1u<<(i%32u);atomicOr(&claimed[i/32u],bit);
+  if(r.pad!=0u){atomicOr(&reached[i/32u],bit);}
 }
 @compute @workgroup_size(64)
 fn reach(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
-  let task=tasks[params.taskBase+group.x];let r=regions[task.x];
+  let task=tile(params.taskBase+group.x);let r=regions[task.x];
   if(task.y+lane>=r.size.x*r.size.y*r.size.z){return;}
   let p=coordinate(task,lane);let i=address(p);let bit=1u<<(i%32u);
   if((atomicLoad(&claimed[i/32u])&bit)==0u||(atomicLoad(&reached[i/32u])&bit)!=0u){return;}
@@ -127,19 +153,31 @@ export async function selectSvoBrickOccupancyGpu(device: GPUDevice, build: SvoSc
   }
   const edge=cellSize.map(v=>v*brickSize);
   const margin=(brickSize+2)*0.5*Math.hypot(...cellSize);
-  const regions:number[]=[],tasks:number[]=[];
-  function add(bounds:SparseSceneAxisAlignedBounds,primitive:number,padding:number) {
-    const lo=bounds.minimum.map((v,a)=>Math.max(0,Math.floor((v-padding-worldOrigin[a])/edge[a])-(padding>0?1:0)));
-    const hi=bounds.maximum.map((v,a)=>Math.min(dims[a]-1,Math.floor((v+padding-worldOrigin[a])/edge[a])));
+  const regions:number[]=[],tasks:number[]=[];let tileCount=0;
+  function addRange(lo:number[],hi:number[],primitive:number,retained=0) {
     const size=hi.map((v,a)=>Math.max(0,v-lo[a]+1));const count=size[0]*size[1]*size[2];
     if(!count)return;
-    if(tasks.length*4+Math.ceil(count/64)*8>device.limits.maxStorageBufferBindingSize)
-      throw new RangeError("GPU brick selection task table exceeds device limits");
-    const index=regions.length/8;regions.push(...lo,primitive,...size,0);
-    for(let start=0;start<count;start+=64)tasks.push(index,start);
+    tileCount+=Math.ceil(count/64);
+    if(!Number.isSafeInteger(tileCount)||tileCount>0xffffffff)
+      throw new RangeError("GPU brick selection tile count exceeds uint32");
+    const index=regions.length/8;regions.push(...lo,primitive,...size,retained);
+    tasks.push(tileCount,index);
   }
-  for(const bounds of input.regions)add(bounds,0,0);
-  const claimTasks=tasks.length/2;
+  function add(bounds:SparseSceneAxisAlignedBounds,primitive:number,padding:number,retained=0) {
+    // Quantize primitive support before the GPU evaluates an SDF. A
+    // looser range could admit bricks claimed by another primitive.
+    const ranges=bounds.minimum.map((v,a)=>padding>0
+      ? svoSolidReachBrickRange(v,bounds.maximum[a],worldOrigin[a],edge[a],padding)
+      : [Math.floor((v-worldOrigin[a])/edge[a]),Math.floor((bounds.maximum[a]-worldOrigin[a])/edge[a])]);
+    const lo=ranges.map(r=>Math.max(0,r[0]));
+    const hi=ranges.map((r,a)=>Math.min(dims[a]-1,r[1]));
+    addRange(lo,hi,primitive,retained);
+  }
+  if(input.brickRanges) for(const range of input.brickRanges) {
+    addRange(range.min.map(v=>Math.max(0,v)),range.maxExclusive.map((v,a)=>Math.min(dims[a]-1,v-1)),0);
+  } else for(const bounds of input.regions)add(bounds,0,0);
+  for(const bounds of input.retainedRegions??[])add(bounds,0,0,1);
+  const claimTasks=tileCount;
   for(const entry of build.metadata){const {min,max}=entry.coverageBounds.conservative_m;
     add({minimum:[min.x,min.y,min.z],maximum:[max.x,max.y,max.z]},entry.primitiveIndex,margin);}
   const packed=build.packedRecords.slice();
@@ -171,10 +209,10 @@ export async function selectSvoBrickOccupancyGpu(device: GPUDevice, build: SvoSc
     const group=device.createBindGroup({layout:pipeline.claim.getBindGroupLayout(0),entries:
       [uniforms,regionBuffer,taskBuffer,recordBuffer,arenaBuffer,claimBuffer,reachBuffer].map((b,binding)=>({binding,resource:{buffer:b}}))});
     const params=new ArrayBuffer(48),f=new Float32Array(params),u=new Uint32Array(params);
-    f.set(worldOrigin);f[3]=margin;f.set(edge,4);u.set(dims,8);
+    f.set(worldOrigin);f[3]=margin;f.set(edge,4);u.set(dims,8);u[11]=tasks.length/2;
     // Fence bounded chunks so supersession is serviced and expensive aggregate
     // fields never turn all scene selection into one unbounded GPU dispatch.
-    for(const [begin,end,p] of [[0,claimTasks,pipeline.claim],[claimTasks,tasks.length/2,pipeline.reach]] as const){
+    for(const [begin,end,p] of [[0,claimTasks,pipeline.claim],[claimTasks,tileCount,pipeline.reach]] as const){
       for(let base=begin;base<end;base+=256){
         checkAbort();u[7]=base;device.queue.writeBuffer(uniforms,0,params);
         const encoder=device.createCommandEncoder({label:"GPU brick selection batch"});
@@ -185,17 +223,37 @@ export async function selectSvoBrickOccupancyGpu(device: GPUDevice, build: SvoSc
     if(!build.metadata.length){
       const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(claimBuffer,0,reachBuffer,0,bytes);device.queue.submit([encoder.finish()]);
     }
+    // Reduction is cheap, bounded integer work. Keep all levels on the queue
+    // until the one allocator receipt instead of fencing every level/chunk.
+    // Each dispatch needs immutable parameters: rewriting one uniform before
+    // a shared submission would make every dispatch see the final level.
+    const alignment=device.limits.minUniformBufferOffsetAlignment;
+    const stride=Math.ceil(48/alignment)*alignment;
+    const reductions:{parameters:Uint32Array<ArrayBuffer>;groups:number}[]=[];
+    const wordsPerDispatch=Math.min(16384,device.limits.maxComputeWorkgroupsPerDimension*64);
     for(let level=input.maximumDepth-1;level>=0;level--){
-      checkAbort();const coarse=levels[level],fine=levels[level+1];
+      const coarse=levels[level],fine=levels[level+1];
       u.set(fine.dims,0);u[7]=fine.offset;u.set(coarse.dims,8);u[11]=coarse.offset;
-      for(let base=0;base<coarse.words;base+=16384){
-        checkAbort();u[4]=base;device.queue.writeBuffer(uniforms,0,params);
-        const encoder=device.createCommandEncoder({label:"GPU brick occupancy reduction"});const pass=encoder.beginComputePass();
-        pass.setPipeline(pipeline.reduce);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(Math.min(16384,coarse.words-base)/64));pass.end();
-        device.queue.submit([encoder.finish()]);await device.queue.onSubmittedWorkDone();
+      for(let base=0;base<coarse.words;base+=wordsPerDispatch){
+        u[4]=base;
+        reductions.push({parameters:u.slice(),groups:Math.ceil(Math.min(wordsPerDispatch,coarse.words-base)/64)});
       }
     }
-    const encoder=device.createCommandEncoder();
+    const encoder=device.createCommandEncoder({label:"GPU brick occupancy pyramid and receipt"});
+    if(reductions.length){
+      const data=new Uint32Array(reductions.length*stride/4);
+      reductions.forEach((reduction,index)=>data.set(reduction.parameters,index*stride/4));
+      const reductionUniforms=buffer("Brick occupancy immutable reduction parameters",data.byteLength,
+        GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST,data);
+      for(let index=0;index<reductions.length;index++){
+        const reductionGroup=device.createBindGroup({layout:pipeline.reduce.getBindGroupLayout(0),entries:
+          [reductionUniforms,regionBuffer,taskBuffer,recordBuffer,arenaBuffer,claimBuffer,reachBuffer].map((b,binding)=>({binding,
+            resource:binding===0?{buffer:b,offset:index*stride,size:48}:{buffer:b}}))});
+        const pass=encoder.beginComputePass();pass.setPipeline(pipeline.reduce);pass.setBindGroup(0,reductionGroup);
+        pass.dispatchWorkgroups(reductions[index].groups);pass.end();
+      }
+    }
+    checkAbort();
     encoder.copyBufferToBuffer(reachBuffer,0,readback,0,pyramidWords*4);
     device.queue.submit([encoder.finish()]);await readback.mapAsync(GPUMapMode.READ);checkAbort();
     const bits=new Uint32Array(readback.getMappedRange().slice(0));

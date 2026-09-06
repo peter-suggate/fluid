@@ -1505,7 +1505,7 @@ export type SvoDryShadingPath = "inline" | "split";
 export interface SvoDryOptimizationExperiments {
   /** Resolve current-frame radiance and exact fallbacks in one draw; false retains the A/B reference. */
   readonly singlePassReconstruction?: boolean;
-  /** Cached opaque voxel boundary triangles, with exact ray fallback on capacity exhaustion. */
+  /** Cached opaque voxel boundary triangles; unavailable publications fail closed. */
   readonly surfaceMesh?: boolean;
   /** Disable only for paired performance/image comparisons. */
   readonly surfaceMeshCulling?: boolean;
@@ -6832,14 +6832,17 @@ export class SparseVoxelDrySceneRenderer {
       SVO_PRESENTATION_STARTUP_STAGES[completed]!, completed, SVO_PRESENTATION_STARTUP_STAGES.length,
     );
     report(0);
-    const fragmentShader = this.traversalMode === "hybrid" && this.brickOccupancyMode === "off" && this.screenSpaceTerminationPixels === 0
+    // Mesh mode fails closed and never dispatches the monolithic primary.
+    // Do not specialize that unused ray-marching pipeline during raster startup.
+    const meshOnly = this.experiments.surfaceMesh === true;
+    const fragmentShader = meshOnly ? undefined : this.traversalMode === "hybrid" && this.brickOccupancyMode === "off" && this.screenSpaceTerminationPixels === 0
       ? drySceneShader : createSvoDrySceneFragmentWGSL(1, this.traversalMode, this.brickOccupancyMode, this.shadingPath, this.screenSpaceTerminationPixels,
         false, this.rasterPrimary && this.rasterGlassDiscovery, this.rasterPrimary && this.rasterRigidDiscovery, false,
         { ...this.experiments, voxelLightCache: false });
     report(1);
     const [vertexModule, fragmentModule] = await Promise.all([
       checkedModule(this.device, "Sparse voxel dry scene vertex", drySceneVertexShader),
-      checkedModule(this.device, `Sparse voxel dry scene fragment (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
+      fragmentShader === undefined ? Promise.resolve(undefined) : checkedModule(this.device, `Sparse voxel dry scene fragment (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
         fragmentShader),
     ]);
     report(2);
@@ -6847,7 +6850,7 @@ export class SparseVoxelDrySceneRenderer {
       label: `Sparse voxel dry scene bindings (${this.traversalMode})`,
       entries: sparseVoxelDrySceneBindGroupLayoutEntries(this.traversalMode),
     });
-    this.pipeline = await this.device.createRenderPipelineAsync({
+    if (fragmentModule) this.pipeline = await this.device.createRenderPipelineAsync({
       label: `Sparse voxel dry scene (${this.traversalMode}, brick-${this.brickOccupancyMode})`, layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
       vertex: { module: vertexModule, entryPoint: "vertexMain" }, fragment: { module: fragmentModule, entryPoint: "fragmentMain", targets: [
         { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat },
@@ -7143,7 +7146,7 @@ export class SparseVoxelDrySceneRenderer {
     ] });
   }
 
-  /** Includes face count, overflow, source revisions, build count and ray fallback. */
+  /** Includes face count, overflow, source revisions, build count and raster readiness. */
   copySurfaceMeshDiagnostics(encoder: GPUCommandEncoder, target: GPUBuffer): boolean {
     if (!this.surfaceMeshState || target.size < SVO_SURFACE_MESH_HEADER_BYTES) return false;
     encoder.copyBufferToBuffer(this.surfaceMeshState, 0, target, 0, SVO_SURFACE_MESH_HEADER_BYTES);
@@ -7174,7 +7177,7 @@ export class SparseVoxelDrySceneRenderer {
         const totalBricks = words[18]!;
         const restartReasons = ["publication", "initial", "topology", "geometry", "publication"] as const;
         this.surfaceMeshStatus = {
-          state: building && !extractionFailed && (!capacityPaused || canGrow) ? "pending" : fallback ? "fallback" : "ready",
+          state: building && !extractionFailed && (!capacityPaused || canGrow) ? "pending" : fallback ? "blocked" : "ready",
           quads: words[1], requiredQuads,
           capacityQuads: allocatedBytes / 32, allocatedBytes, maximumBytes: this.surfaceMeshMaximumBytes,
           builds: words[12], requirementComplete: complete, completedBricks, totalBricks,
@@ -7182,13 +7185,13 @@ export class SparseVoxelDrySceneRenderer {
           restartReason: restartReasons[words[19]!] ?? "publication",
           ...(building && !extractionFailed && (!capacityPaused || canGrow)
             ? { detail: capacityPaused ? "Mesh storage growing; completed bricks are retained."
-              : `Building mesh: ${completedBricks.toLocaleString()} / ${totalBricks.toLocaleString()} bricks processed; ray fallback until complete.` }
+              : `Building mesh: ${completedBricks.toLocaleString()} / ${totalBricks.toLocaleString()} bricks processed; geometry withheld until complete.` }
             : fallback ? { fallbackReason: reason, detail: reason === "smooth"
-            ? "Smooth reconstruction uses ray tracing. Turn off Smooth surface to rasterize voxel faces."
-            : reason === "inside-solid" ? "Camera is inside a solid voxel; using ray tracing."
-            : reason === "budget" ? "Surface mesh exceeds the allocation limit; using ray tracing."
-            : reason === "extraction" ? "Surface extraction exceeded its subdivision limit; using ray tracing."
-            : "Waiting for a complete voxel publication; using ray tracing." } : {}),
+            ? "Raster requires voxel-flat surfaces. Geometry is withheld."
+            : reason === "inside-solid" ? "Camera is inside a solid voxel. Raster geometry is withheld."
+            : reason === "budget" ? "Surface mesh exceeds the allocation limit. Raster geometry is withheld."
+            : reason === "extraction" ? "Surface extraction exceeded its subdivision limit. Raster geometry is withheld."
+            : "Waiting for a complete voxel publication. Raster geometry is withheld." } : {}),
         };
         // The GPU rolls an overflowing batch back to its last complete-brick
         // checkpoint and pauses. Copy the entire arena in queue order: unlike
@@ -8919,7 +8922,7 @@ export class SparseVoxelDrySceneRenderer {
         const draw = await this.device.createRenderPipelineAsync({ label: "Opaque voxel surface triangles", layout: drawLayout,
           vertex: { module, entryPoint: "surfaceMeshVertex" }, fragment: { module, entryPoint: "surfaceMeshFragment", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-strip", cullMode: "none" }, depthStencil });
-        const background = await this.device.createRenderPipelineAsync({ label: "Voxel mesh exact planes and ray fallback", layout: drawLayout,
+        const background = await this.device.createRenderPipelineAsync({ label: "Voxel mesh exact planes", layout: drawLayout,
           vertex: { module: vertexModule, entryPoint: "vertexMain" }, fragment: { module, entryPoint: "surfaceMeshBackground", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-list" }, depthStencil: { ...depthStencil, depthCompare: "always" } });
         surfaceMesh = { prepare, build, publish, cull, draw, background };
@@ -9184,7 +9187,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   private async ensureConeLightingScale(scale: Exclude<SvoConeLightingScale, 1>): Promise<void> {
-    if (!this.layout || !this.pipeline || !this.vertexModule) return;
+    if (!this.layout || (!this.pipeline && !this.experiments.surfaceMesh) || !this.vertexModule) return;
     const cached = this.conePipelineBundles.get(scale);
     if (cached) {
       if (scale === this.coneScale) this.activateConePipelineBundle(scale, cached);
@@ -10213,7 +10216,7 @@ export class SparseVoxelDrySceneRenderer {
 
   private rebuild(): void {
     const source = this.source, structural = source?.structural;
-    if (!this.layout || !this.pipeline || !source || !structural || !this.scene) {
+    if (!this.layout || (!this.pipeline && !this.experiments.surfaceMesh) || !source || !structural || !this.scene) {
       this.bindGroup = undefined;
       this.coneFanoutSceneBindGroup = undefined;
       return;
@@ -10731,7 +10734,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, tracePhase?: RenderFrameSeam<"svo">, bandPartitioner?: FrameBandPartitioner): DrySceneReplacementResult | false {
-    if (!this.pipeline || !this.bindGroup) return false;
+    if ((!this.pipeline && !this.surfaceMeshPipelines) || !this.bindGroup) return false;
     // The coverage volume allocates lazily and only reports itself once a fill
     // has been encoded, so its validity flips mid-session. Refresh the frame
     // every encode rather than relying on a source change to carry it.
@@ -11212,7 +11215,7 @@ export class SparseVoxelDrySceneRenderer {
       // the deferred lighting at once; either switch withholds the whole thing,
       // and its row is priced as the pair it actually is.
       if (!this.disabledStages.has("primary-traversal") && !this.disabledStages.has("deferred-lighting")) {
-        pass.setPipeline(usePrepass ? this.coneReducedPipeline! : this.pipeline);
+        pass.setPipeline(usePrepass ? this.coneReducedPipeline! : this.pipeline!);
         pass.setBindGroup(0, this.bindGroup);
         if (usePrepass) pass.setBindGroup(1, this.conePrepassBindGroup!);
         pass.draw(3);

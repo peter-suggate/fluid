@@ -3079,6 +3079,12 @@ export class FluidLabRenderer {
       );
     }
     if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const activeSparsePresentation=this.sparseWorldPresentation(this.gpuFluid);const compactSurface=Boolean(activeSparsePresentation?.fineLevelSet||this.gpuFluid.globalFineLevelSetSource||this.gpuFluid.coarseLevelSetSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture, this.gpuFluid.volumeTexture);this.gridOverlayPipeline?.setSparseSource(activeSparsePresentation?.adaptiveGrid??this.gpuFluid.sparseAdaptiveGridSource);}
+    // A newly attached sparse source may still be compiling its water
+    // classifier/scan/emitter. Wait before creating an encoder or claiming
+    // presentation receipts; the next frame retries with the same source.
+    if (!this.waterPipeline.prepareSurfacePipelines()) {
+      return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
+    }
     cpuTrace?.transition({ id: "scene-upload", label: "Scene and field uploads" });
     const cameraStabilityKey = [
       basis.position.x, basis.position.y, basis.position.z,
@@ -3377,8 +3383,8 @@ export class FluidLabRenderer {
           startedAt_ms: pendingLiveSvo.startedAt_ms, kind: "startup", retainingPrevious: false,
           resource: svoPresentationResourcePlugin });
       }
-    } else if (pendingLiveSvo && startupMesh?.state === "fallback"
-      && (startupMesh.fallbackReason === "budget" || startupMesh.fallbackReason === "extraction")) {
+    } else if (pendingLiveSvo && startupMesh?.state === "blocked"
+      && startupMesh.fallbackReason !== "publication") {
       this.failPendingLiveSvoPresentation(new Error(startupMesh.detail ?? "Raster mesh construction failed"));
     }
     const initialLiveSvoSubmission = pendingLiveSvo
@@ -3387,12 +3393,10 @@ export class FluidLabRenderer {
       && pendingLiveSvo.solver === readyGPUFluid
       && pendingLiveSvo.source === this.svoDrySceneSource
       && svoEncoded
-      // A fenced fallback frame does not establish that raster startup has
+      // A fenced empty frame does not establish that raster startup has
       // finished. The mesh receipt is copied after the GPU's draw publication.
       && (!this.svoDryScenePipeline?.surfaceMeshStatus
-        || this.svoDryScenePipeline.surfaceMeshStatus.state === "ready"
-        || this.svoDryScenePipeline.surfaceMeshStatus.fallbackReason === "smooth"
-        || this.svoDryScenePipeline.surfaceMeshStatus.fallbackReason === "inside-solid")
+        || this.svoDryScenePipeline.surfaceMeshStatus.state === "ready")
       ? pendingLiveSvo
       : undefined;
     if (initialLiveSvoSubmission?.submit()) {

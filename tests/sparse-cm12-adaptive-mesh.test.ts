@@ -7,9 +7,11 @@ import { adaptiveMassMethod, adaptiveMassSolverOptions,
   ADAPTIVE_MASS_RUNTIME_PARAM_KEYS } from "../lib/methods/adaptive-mass/method";
 import { SPARSE_CM12_STAGES } from "../lib/methods/adaptive-mass/sparse-cm12-stages";
 
-test("surface mesh ratio defaults to x2 and x4 is available without resetting physics", () => {
+test("surface mesh ratio defaults to x2 and x1/x4 are available without resetting physics", () => {
   const defaults = resolveMethodValues(adaptiveMassMethod, "balanced", {});
   assert.equal(adaptiveMassSolverOptions(defaults).surfaceMeshRefinement, 2);
+  const coarse = resolveMethodValues(adaptiveMassMethod, "balanced", { surfaceMeshRefinement: "1" });
+  assert.equal(adaptiveMassSolverOptions(coarse).surfaceMeshRefinement, 1);
   const fine = resolveMethodValues(adaptiveMassMethod, "balanced", { surfaceMeshRefinement: "4" });
   assert.equal(adaptiveMassSolverOptions(fine).surfaceMeshRefinement, 4);
   assert.ok(ADAPTIVE_MASS_RUNTIME_PARAM_KEYS.includes("surfaceMeshRefinement"));

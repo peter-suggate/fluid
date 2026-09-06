@@ -42,7 +42,7 @@ export interface AdaptiveMassSolverOptions {
   readonly brickFineResolution?: SparseBrickFineResolution;
   /** Renderer-facing samples per presentation-page edge. Defaults to the brick maximum. */
   readonly presentationPageResolution?: SparseBrickFineResolution;
-  readonly surfaceMeshRefinement?: 2 | 4;
+  readonly surfaceMeshRefinement?: 1 | 2 | 4;
   /** Optional positive-power-of-two cap on hierarchical macro-leaf span. */
   readonly maximumMacroSpanBricks?: number;
   /** Physical world-growth page budget. Authored re-rung already owns complete
@@ -111,7 +111,8 @@ const params: MethodParamSpec[] = [
     default: "2",
     tier: "coarse",
     update: "runtime",
-    options: [{ value: "2", label: "×2 per surface cell" },
+    options: [{ value: "1", label: "×1 per surface cell" },
+      { value: "2", label: "×2 per surface cell" },
       { value: "4", label: "×4 per surface cell" }],
     hint: "Target mesh spacing is the accepted cell width divided by this ratio. Shared boundaries retain their contour; unresolved geometry keeps finer triangles.",
   },
@@ -484,7 +485,8 @@ export function adaptiveMassSolverOptions(
   const fineResolution = brickFineResolution(values.brickFineResolution);
   return {
     brickFineResolution: fineResolution,
-    surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
+    surfaceMeshRefinement: Number(values.surfaceMeshRefinement) === 1 ? 1
+      : Number(values.surfaceMeshRefinement) === 4 ? 4 : 2,
     presentationPageResolution:
       presentationPageResolution(values.presentationPageResolution, fineResolution),
     maximumMacroSpanBricks: maximumMacroSpanBricks(values.maximumMacroSpanBricks),

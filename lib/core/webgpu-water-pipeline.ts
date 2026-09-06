@@ -1353,6 +1353,8 @@ export class RasterWaterPipeline {
   private extractTallSidesPipeline?: GPUComputePipeline;
   private extractGlobalFinePipeline?: GPUComputePipeline;
   private extractGlobalFinePipelinePromise?: Promise<void>;
+  private startGlobalSurfaceCompilation?: () => Promise<void>;
+  private globalSurfaceCompilationError?: unknown;
   private extractGlobalCoarsePipeline?: GPUComputePipeline;
   /**
    * Compact-coarse extraction is a compatibility path for Losasso/Power
@@ -1363,6 +1365,7 @@ export class RasterWaterPipeline {
   private globalExtractionPipelineLayout?: GPUPipelineLayout;
   private extractGlobalCoarsePipelinePromise?: Promise<void>;
   private extractGlobalCoarsePipelineFailed = false;
+  private globalCoarseCompilationError?: unknown;
   private preparePipeline?: GPUComputePipeline;
   private polygonisePipeline?: GPUComputePipeline;
   private polygoniseGlobalFineScanPipeline?: GPUComputePipeline;
@@ -1729,12 +1732,10 @@ export class RasterWaterPipeline {
     const compositePipelineLayout=this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeLayout] });
     const compositeDescriptor:GPURenderPipelineDescriptor={ label:"Composite layered water optics", layout: compositePipelineLayout, vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } };
 
-    // Start the expensive global-fine specialization, but do not make platform
-    // readiness wait for it. Sparse solver construction can proceed in
-    // parallel; encode() already fails closed until every pipeline its current
-    // source needs is ready. The managed device keeps this and the workers
-    // below inside the repository-wide three-job Metal safety limit.
-    const globalFineCompilation = this.device.createComputePipelineAsync({
+    // Keep adaptive-water specialization off dry-scene startup. The first
+    // global fine/coarse source starts this group; encode withholds that source
+    // until its complete GPU extraction chain is available.
+    const compileGlobalFine = () => this.device.createComputePipelineAsync({
       label: "Classify global fine surface bricks",
       layout: globalExtractionPipelineLayout,
       compute: { module: globalClassify, entryPoint: "extractGlobalFineMain" },
@@ -1742,11 +1743,8 @@ export class RasterWaterPipeline {
       this.extractGlobalFinePipeline = pipeline;
       this.extractedRevision = -1;
     });
-    this.extractGlobalFinePipelinePromise = options.deferSceneClassifiers
-      ? globalFineCompilation.catch((error: unknown) => {
-        console.error("Failed to compile global-fine water classification", error);
-      })
-      : globalFineCompilation;
+    const globalFineCompilation = options.deferSceneClassifiers ? undefined : compileGlobalFine();
+    this.extractGlobalFinePipelinePromise = globalFineCompilation;
     const globalCoarseCompilation = options.deferSceneClassifiers
       ? undefined
       : this.device.createComputePipelineAsync({
@@ -1773,6 +1771,13 @@ export class RasterWaterPipeline {
 
     compute("Scanning global fine water mesh",{label:"Scan classified global fine triangles",layout:globalPolygonScanLayout,compute:{module:globalScan,entryPoint:"scanGlobalFineTriangles"}},pipeline=>{this.polygoniseGlobalFineScanPipeline=pipeline;});
     compute("Emitting adaptive global fine contour",{label:"Emit classified adaptive global fine contour",layout:globalPolygonEmitLayout,compute:{module:globalEmitAll,entryPoint:"emitGlobalFineTetrahedra"}},pipeline=>{this.polygoniseGlobalFineEmitPipeline=pipeline;});
+    if (options.deferSceneClassifiers) {
+      const globalJobs = jobs.splice(0);
+      this.startGlobalSurfaceCompilation = async () => {
+        await Promise.all([compileGlobalFine(), ...globalJobs.map(job => job.run())]);
+        this.extractedRevision = -1;
+      };
+    }
     compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractMain" } },pipeline=>{this.extractPipeline=pipeline;});
     compute("Classifying restricted water band",{ label: "Classify restricted water band", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractBandMain" } },pipeline=>{this.extractBandPipeline=pipeline;});
     compute("Classifying tall-cell interfaces",{ label: "Classify tall-cell side interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractTallSidesMain" } },pipeline=>{this.extractTallSidesPipeline=pipeline;});
@@ -1812,7 +1817,7 @@ export class RasterWaterPipeline {
     let completed=0;let next=0;const total=jobs.length;
     const compileWorker=async()=>{for(;;){const index=next;next+=1;const job=jobs[index];if(!job)return;
       onProgress(job.label,completed,total);await job.run();completed+=1;onProgress(job.label,completed,total);}};
-    const classifierSlots = globalCoarseCompilation ? 2 : 1;
+    const classifierSlots = (globalCoarseCompilation ? 1 : 0) + (globalFineCompilation ? 1 : 0);
     const workerCount = Math.min(Math.max(1, 3 - classifierSlots), total);
     await Promise.all(Array.from({length:workerCount},()=>compileWorker()));
     // Direct/headless consumers retain initialize()'s historical fully-ready
@@ -1909,6 +1914,7 @@ export class RasterWaterPipeline {
     }).catch((error: unknown) => {
       this.extractGlobalCoarsePipelinePromise = undefined;
       this.extractGlobalCoarsePipelineFailed = true;
+      this.globalCoarseCompilationError = error;
       console.error("Failed to compile compact-coarse water classification", error);
     });
   }
@@ -1935,7 +1941,7 @@ export class RasterWaterPipeline {
     // reallocates; clearing the key here destroyed A before B could prove its
     // tags and defeated the fail-closed retained-mesh contract.
     if (!sameBindings) this.rebuildBindGroups();
-    this.ensureGlobalCoarsePipeline();
+    this.prepareSurfacePipelines();
   }
 
   /** Selects the moving compact-octree surface without enabling a fine band. */
@@ -1956,7 +1962,7 @@ export class RasterWaterPipeline {
     // rebuilding every water bind group here added nine host allocations to
     // every presented frame without changing any bound resource identity.
     if (!sameBindings) this.rebuildBindGroups();
-    this.ensureGlobalCoarsePipeline();
+    this.prepareSurfacePipelines();
   }
 
   private writeCompactRenderParams() {
@@ -2289,6 +2295,29 @@ export class RasterWaterPipeline {
     return bindGroup;
   }
 
+  /** Start source-specific compilation before opening a presentation encoder.
+   * Pending specialization is a retryable state; compilation errors still fail.
+   */
+  prepareSurfacePipelines(): boolean {
+    this.ensureGlobalCoarsePipeline();
+    const needsGlobalSurface = Boolean(this.globalFineLevelSet || this.coarseLevelSet);
+    if (needsGlobalSurface && this.startGlobalSurfaceCompilation) {
+      const start = this.startGlobalSurfaceCompilation;
+      this.startGlobalSurfaceCompilation = undefined;
+      this.extractGlobalFinePipelinePromise = start().catch((error: unknown) => {
+        this.globalSurfaceCompilationError = error;
+      });
+    }
+    if (needsGlobalSurface && this.globalSurfaceCompilationError) throw this.globalSurfaceCompilationError;
+    if (this.needsGlobalCoarsePipeline() && this.globalCoarseCompilationError) {
+      throw this.globalCoarseCompilationError;
+    }
+    return !needsGlobalSurface || Boolean(
+      this.polygoniseGlobalFineScanPipeline && this.polygoniseGlobalFineEmitPipeline
+      && (!this.globalFineLevelSet || this.extractGlobalFinePipeline)
+      && (!this.needsGlobalCoarsePipeline() || this.extractGlobalCoarsePipeline));
+  }
+
   encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, tracePhase?: RenderPathTraceStage, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene", allowSurfaceDiagnostics = true, bandPartitioner?: FrameBandPartitioner, revisionCadenceBypass = false, surfaceRenderMode: FluidSurfaceRenderMode = "shaded"): RasterWaterEncodeResult | false {
     // Count only frames whose source has a completed GPU receipt. The
     // diagnostics/visual panels request full-rate receipts, making this an
@@ -2304,9 +2333,10 @@ export class RasterWaterPipeline {
       : undefined;
     this.ensureGeometry(geometryDimensions[0], geometryDimensions[1],
       geometryDimensions[2], sparseGeometryCapacity);
+    if (!this.prepareSurfacePipelines()) return false;
     const globalFinePipeline = this.extractGlobalFinePipeline;
     const globalCoarsePipeline = this.extractGlobalCoarsePipeline;
-    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||(Boolean(this.globalFineLevelSet)&&!globalFinePipeline)||(this.needsGlobalCoarsePipeline()&&!globalCoarsePipeline)||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.surfaceWireframePipeline||!this.causticPipeline||!this.compositePipeline||!this.wireframeCompositePipeline||!this.simpleCompositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.globalPolygoniseEmitBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.causticBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture||!this.causticReceiver) return false;
+    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||(Boolean(this.globalFineLevelSet)&&!globalFinePipeline)||(this.needsGlobalCoarsePipeline()&&!globalCoarsePipeline)||!this.preparePipeline||!this.polygonisePipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.surfaceWireframePipeline||!this.causticPipeline||!this.compositePipeline||!this.wireframeCompositePipeline||!this.simpleCompositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.globalPolygoniseEmitBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.causticBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture||!this.causticReceiver) return false;
     const now_ms = performance.now();
     // A paused t=0 handoff cannot wait for a new solver revision: reset has
     // already made the current revision the only one that will be presented.
@@ -2373,11 +2403,11 @@ export class RasterWaterPipeline {
         compute.end();
         compute=encoder.beginComputePass({label:"Scan classified global fine surface"});
         compute.setBindGroup(0,this.globalPolygoniseBindGroup);
-        compute.setPipeline(this.polygoniseGlobalFineScanPipeline);compute.dispatchWorkgroups(1);
+        compute.setPipeline(this.polygoniseGlobalFineScanPipeline!);compute.dispatchWorkgroups(1);
         compute.end();
         compute=encoder.beginComputePass({label:"Emit classified global fine surface"});
         compute.setBindGroup(0,this.globalPolygoniseEmitBindGroup);
-        compute.setPipeline(this.polygoniseGlobalFineEmitPipeline);compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer,0);
+        compute.setPipeline(this.polygoniseGlobalFineEmitPipeline!);compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer,0);
         compute.end();
       } else {
         if (plan.mode === "restricted-band") {

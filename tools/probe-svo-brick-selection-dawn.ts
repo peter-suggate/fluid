@@ -11,6 +11,8 @@ import {classifySvoNodesGpu} from "../lib/svo/webgpu-svo-node-classification";
 import {buildSvoPlanarBoundaryCatalog,createSvoPlanarLeafClassifier} from "../lib/svo/svo-planar-boundary";
 import {buildEnvironmentProxyCatalog,environmentProxyPrimitives} from "../lib/core/voxel-environments";
 
+import {createSvoEnvironmentCoarsening,environmentProxyFeatureSize_m,SVO_ENVIRONMENT_FEATURE_VOXELS} from "../lib/svo/svo-environment-coarsening";
+
 const {device,validationErrors}=await createDawnRenderDevice();
 try {
   const build=buildSvoScenePrimitives(getScenePreset("garden-svo-lighting").create());
@@ -59,6 +61,15 @@ try {
       return {refine:classifier.requiresFineVoxelResidual(level,p)||candidates>64,terminal:classifier(level,p)};
     });
     assert.deepEqual(actual,expected,`GPU integer classification must match CPU inclusive bounds at level ${level}`);
+    const regions=[{minimum_m:[-1,-1,-1] as const,maximum_m:[.1,.1,.1] as const,feature_m:0}];
+    const coarsening=createSvoEnvironmentCoarsening({primitives,regions,worldOrigin_m:planar.worldOrigin_m,
+      nodeEdge_m:planar.nodeEdge_m,brickSize:8,maximumDepth:3,crowdingTarget:64});
+    const wet=await classifySvoNodesGpu(device,{planar,coordinates,level,candidateCount:primitives.length,candidateLimit:64,
+      coarsening:{resolves_m:Math.max(...planar.nodeEdge_m[level])/8*SVO_ENVIRONMENT_FEATURE_VOXELS,
+        features_m:primitives.map(environmentProxyFeatureSize_m),regions}});
+    assert.deepEqual(wet,coordinates.map(p=>({
+      refine:classifier.requiresFineVoxelResidual(level,p)||coarsening.refineEnvironmentLeaf(level,p),terminal:classifier(level,p),
+    })),`wet-scene feature and terrain coarsening must match CPU at level ${level}`);
   }
   assert.deepEqual(validationErrors,[]);
   console.log(JSON.stringify({comparisons,extraBricks,validationErrors}));

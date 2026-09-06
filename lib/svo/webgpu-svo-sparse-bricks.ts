@@ -58,6 +58,8 @@ import {
 } from "./svo-environment-refinement";
 import {
   createSvoEnvironmentCoarsening,
+  environmentProxyFeatureSize_m,
+  SVO_ENVIRONMENT_FEATURE_VOXELS,
   solidWorldTerrainSurfaceCoarseningRegions,
   svoEnvironmentCoarseningPower,
 } from "./svo-environment-coarsening";
@@ -1418,6 +1420,7 @@ export class OctreeSparseBrickWorld {
         conservativePaddingCells: 1,
         worldBounds_m: scene.voxelDomain.bounds_m,
         solverClaim: "none",
+        enumerateProxyBricks: !(options.selectPrimitiveBricksGpu && options.sceneSolids?.length && octreeLiveSceneBrickClaim() === "reachable" && (dryWorld || rendererOnly)),
       }
     );
     this.solverGridOriginCells = sceneDomain.solverGridOriginCells;
@@ -1605,10 +1608,11 @@ export class OctreeSparseBrickWorld {
      * predicate and its own gate, and `minimumEnvironmentLevel` can only carry
      * one meaning at a time.
      */
+    const coarseningRegions = !dryWorld ? solidWorldTerrainSurfaceCoarseningRegions(scene, initialSolidWorld) : [];
     const environmentCoarsening = !dryWorld
       ? createSvoEnvironmentCoarsening({
         primitives: environmentPrimitives,
-        regions: solidWorldTerrainSurfaceCoarseningRegions(scene, initialSolidWorld),
+        regions: coarseningRegions,
         worldOrigin_m: worldOrigin as readonly [number, number, number],
         nodeEdge_m, brickSize, maximumDepth,
         crowdingTarget: OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
@@ -1623,12 +1627,15 @@ export class OctreeSparseBrickWorld {
       ? options.sceneSolids ?? [] : [];
     reportStage("Select the bricks the scene reaches");
     yield;
-    const gpuSelection = refinementDepth > 0 && sceneSolids.length > 0 ? options.selectPrimitiveBricksGpu : undefined;
+    const gpuSelection = sceneSolids.length > 0 ? options.selectPrimitiveBricksGpu : undefined;
     let gpuOccupancy: import("../core/adaptive-sparse-brick-plan").SparseBrickProxyOccupancy | undefined;
     if (gpuSelection) {
       yield gpuSelection({
         regions: environmentPrimitives.map(primitive => ({minimum:[primitive.aabb_m.min.x,primitive.aabb_m.min.y,primitive.aabb_m.min.z],
           maximum:[primitive.aabb_m.max.x,primitive.aabb_m.max.y,primitive.aabb_m.max.z]})),
+        brickRanges: refinementDepth === 0 ? sceneDomain.proxyBrickRanges.slice(0, environmentPrimitives.length) : undefined,
+        retainedRegions: [...solidWorldBounds, ...scene.rigidBodies.flatMap((body, ownerId) => body.motion === "static"
+          ? [sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId))] : [])],
         worldOrigin, cellSize:renderCellSize, brickSize, brickDimensions:refinedBrickDimensions, maximumDepth,
       }).then(result => { gpuOccupancy = result; });
     }
@@ -1640,7 +1647,7 @@ export class OctreeSparseBrickWorld {
         })),
         worldOrigin, renderCellSize, brickSize, refinedBrickDimensions)
       : sceneDomain.proxyBrickCoordinates.slice(0, environmentPrimitives.length).flat());
-    const solidWorldBricks = yield* liveSceneBrickCoordinatesForRegionsSteps(
+    const solidWorldBricks = gpuOccupancy ? [] : yield* liveSceneBrickCoordinatesForRegionsSteps(
       solidWorldBounds, worldOrigin, renderCellSize, brickSize, refinedBrickDimensions);
     /**
      * The static rigid bodies, which nothing else in the claim accounts for.
@@ -1658,7 +1665,7 @@ export class OctreeSparseBrickWorld {
      * Only where the container claim was dropped. Everywhere else these bricks
      * are already covered and adding them would change a shipped plan.
      */
-    const rigidBodyBricks = claimsContainer ? [] : yield* liveSceneBrickCoordinatesForRegionsSteps(
+    const rigidBodyBricks = claimsContainer || gpuOccupancy ? [] : yield* liveSceneBrickCoordinatesForRegionsSteps(
       scene.rigidBodies.flatMap((body, ownerId) => body.motion === "static"
         ? [sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId))] : []),
       worldOrigin, renderCellSize, brickSize, refinedBrickDimensions);
@@ -1684,7 +1691,7 @@ export class OctreeSparseBrickWorld {
      */
     const reachablePrimitiveBricks = gpuOccupancy ? [] : (yield* liveSceneReachableBrickCoordinatesSteps(
       primitiveBricks, sceneSolids, worldOrigin, renderCellSize, brickSize, pinnedBricks));
-    const gpuNodeClassification = dryWorld && refinementDepth > 0 && !surfaceRefinement
+    const gpuNodeClassification = (refinementDepth > 0 || !dryWorld) && !surfaceRefinement
       ? options.classifyEnvironmentNodesGpu : undefined;
     reportStage("Plan the adaptive octree");
     yield;
@@ -1697,6 +1704,11 @@ export class OctreeSparseBrickWorld {
       classifyEnvironmentBatch: gpuNodeClassification ? (level, coordinates) => gpuNodeClassification({
         planar: planarLeafOptions, candidateCount: environmentPrimitives.length,
         candidateLimit: OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET, level, coordinates,
+        coarsening: !dryWorld ? {
+          resolves_m: Math.max(...nodeEdge_m[level]) / brickSize * SVO_ENVIRONMENT_FEATURE_VOXELS,
+          features_m: environmentPrimitives.map(environmentProxyFeatureSize_m),
+          regions: coarseningRegions,
+        } : undefined,
       }) : undefined,
       // A dry scene has no simulation to pin bricks for. Handing the planner the
       // container anyway is what made the tree uniform-depth in practice.

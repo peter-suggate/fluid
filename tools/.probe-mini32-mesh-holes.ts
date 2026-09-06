@@ -216,180 +216,20 @@ async function runField(device: GPUDevice, name: string, ratio: 0|1|2|4,
   for(const resource of [uniforms,params,args,cubes,values,offsets,vertices,empty,directory,metadata,worklist,samples])resource.destroy();
   return {metrics,adaptive,mesh};
 }
-const dawnTest=process.env.WEBGPU_NODE_MODULE?test:test.skip;
-for(const fullPool of (process.env.FLUID_FULL_POOL ? [true] : [false,true])) dawnTest(
-  fullPool ? "adaptive surface mesh covers the default coarse-first pool"
-    : "adaptive surface mesh ratios preserve closed mixed-resolution contours",
-  {timeout:600000},async()=>{
-  await acquireWebGPUExclusiveLock("dawn-test","adaptive-surface-mesh");
-  let device:GPUDevice|undefined;
-  let gpu:GPU|undefined;
-  try {
-    const {create,globals}=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
-    Object.assign(globalThis,globals);gpu=create([`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]);
-    liveDawnInstances.add(gpu!);
-    const adapter=await gpu!.requestAdapter();assert.ok(adapter);
-    device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
-    const errors:string[]=[];device!.addEventListener("uncapturederror",event=>errors.push(event.error.message));
-    const fields:Record<string,(q:Point)=>number>={
-      pool:([,y])=>y-7.25,
-      "clamped-pool":([,y])=>y<7.5?-2:2,
-      film:([,y])=>y+0.25,
-      "rising-film":([x,y])=>y+0.25-0.25*x,
-      torus:([x,y,z])=>Math.hypot(Math.hypot(x-15.5,z-11.5)-6,y-11.5)-2.25,
-      sphere:([x,y,z])=>Math.hypot(x-15.5,y-11.5,z-11.5)-8.25,
-      ellipsoid:([x,y,z])=>Math.hypot((x-15.5)/10,(y-11.5)/7,(z-11.5)/8)-1,
-      box:([x,y,z])=>Math.max(Math.abs(x-15.5)-10.25,Math.abs(y-11.5)-6.25,Math.abs(z-11.5)-8.25),
-      disconnected:([x,y,z])=>Math.min(Math.hypot(x-10,y-10,z-10)-2.25,Math.hypot(x-14,y-12,z-12)-1.25),
-    };
-    for(const [name,field] of Object.entries(fullPool ? {} : fields)){
-      const fine=await runField(device!,name,0,field,true);
-      for(const ratio of [1,2,4] as const){
-        const result=await runField(device!,name,ratio,field,true);
-        console.log(JSON.stringify({name,ratio,fine:fine.metrics.triangleCount,adaptive:result.adaptive,triangles:result.metrics.triangleCount,open:result.metrics.interiorOpenEdgeCount,degenerate:result.metrics.degenerateTriangleCount,fineDegenerate:fine.metrics.degenerateTriangleCount}));
-        assert.equal(components(result.mesh,result.metrics.vertexCount),
-          components(fine.mesh,fine.metrics.vertexCount),"simplification must preserve disconnected components");
-        assert.deepEqual(topology(result.mesh,result.metrics.vertexCount),
-          topology(fine.mesh,fine.metrics.vertexCount),"simplification must preserve holes and winding");
-        assert.equal(result.metrics.nonFiniteCount,0);
-        if(name==="sphere")assertSphereWinding(result.mesh);
-        // Existing floor/wall clipping contains collapsed boundary triangles;
-        // simplification must add none. Closed interior fixtures have zero.
-        assert.equal(result.metrics.degenerateTriangleCount,fine.metrics.degenerateTriangleCount);
-        assert.equal(result.metrics.interiorOpenEdgeCount,0,`${name} x${ratio}: cracks ${result.metrics.firstInteriorOpenEdge}`);
-        assert.equal(result.metrics.nonManifoldEdgeCount,0);
-        if(name!=="disconnected" && name!=="film"){
-          assert.ok(result.adaptive>0,"adaptive mesh path must execute");
-          assert.ok(result.metrics.triangleCount<fine.metrics.triangleCount,"adaptive mesh must reduce triangles");
-        }
-      }
-    }
-    if(!fullPool)for(const axis of [0,1,2] as const){
-      const field=fields.sphere!;
-      const fine=await runField(device!,`sphere-axis-${axis}`,0,field,true,undefined,axis);
-      for(const ratio of [1,2,4] as const){
-        const result=await runField(device!,`sphere-axis-${axis}`,ratio,field,true,undefined,axis);
-        assert.ok(result.adaptive>0,`axis ${axis}: adaptive mesh must execute`);
-        assertSphereWinding(result.mesh);
-        assert.equal(result.metrics.interiorOpenEdgeCount,0,`axis ${axis} x${ratio}: 2:1 seams must close`);
-        assert.equal(result.metrics.nonManifoldEdgeCount,0);
-        assert.equal(result.metrics.degenerateTriangleCount,0);
-        assert.equal(result.metrics.nonFiniteCount,0);
-        assert.deepEqual(topology(result.mesh,result.metrics.vertexCount),topology(fine.mesh,fine.metrics.vertexCount));
-      }
-    }
-    let solver:WebGPUAdaptiveMassSolver|undefined;
-    try {
-      const scene=fullPool ? sceneDocument(getSceneDefinition("coarse-first-pool-impact")) : sceneAtContainerExtents(sceneDocument(getSceneDefinition("coarse-first-pool-impact")),
-        {width_m:1.6,height_m:1.2,depth_m:1.2});
-      if(!fullPool){scene.voxelDomain.finestCellSize_m=.05;scene.container.fillFraction=.5;
-      delete scene.fluid.initialLiquidVolumes;}
-      const values=resolveMethodValues(adaptiveMassMethod,"balanced",{selectorMode:"coarse-first",timeStep:"scene"});
-      solver=await adaptiveMassMethod.createSolverAsync!(device!,scene,"balanced",values,undefined,()=>{}) as WebGPUAdaptiveMassSolver;
-      await solver.waitForSimulationReady();
-      assert.equal(solver.globalFineLevelSetSource.surfaceMeshRefinement,2);
-      for(const step of (fullPool ? [0,1,3,30,55] : [0,1])){
-        while ((solver.info.encodedSteps ?? 0) < step) {
-          const nextStep = (solver.info.encodedSteps ?? 0) + 1;
-          while (!solver.advanceTo(nextStep / 60, [])) await new Promise(setImmediate);
-          await solver.waitForTopologyReady();
-        }
-        assert.equal(solver.info.encodedSteps ?? 0, step, "capture the actual solver checkpoint");
-        if(fullPool&&step<=30){
-          // Inspect accepted mass and velocity independently of presentation.
-          // The falling ball is still above 2 m at 0.5 s; its changing support
-          // rungs must not disturb the disconnected, initially still pool.
-          const fields=await solver.readDiagnosticFields(true);
-          let minimumHeight=Infinity,maximumHeight=-Infinity,maximumSpeed=0;
-          for(let z=0;z<128;z++)for(let x=0;x<128;x++){
-            let height=0;
-            for(let y=0;y<40;y++){
-              const at=x+128*(y+96*z);
-              height+=Math.max(0,Math.min(1,fields.density[at]!/
-                Math.max(1e-6,fields.solidOpenFraction[at]!)))*.05;
-              if(y<31)maximumSpeed=Math.max(maximumSpeed,
-                Math.hypot(...fields.velocity.subarray(at*4,at*4+3)));
-            }
-            minimumHeight=Math.min(minimumHeight,height);
-            maximumHeight=Math.max(maximumHeight,height);
-          }
-          assert.ok(minimumHeight>1.599&&maximumHeight<1.601,
-            `step ${step}: accepted pool height ${minimumHeight}..${maximumHeight}`);
-          assert.ok(maximumSpeed<.003,`step ${step}: still pool speed ${maximumSpeed} m/s`);
-          console.log(JSON.stringify({fullPool,step,minimumHeight,maximumHeight,maximumSpeed}));
-        }
-        const source:WebGPUFineLevelSetBrickSource=solver.globalFineLevelSetSource;
-        const fine=await runField(device!,"real-pool",0,()=>0,false,source);
-        for(const ratio of [1,2,4] as const){
-          const adaptive=await runField(device!,"real-pool",ratio,()=>0,false,source);
-          assert.ok(adaptive.adaptive>0,"accepted solver cell sizes must reach mesh classification");
-          assert.equal(adaptive.metrics.nonFiniteCount,0);
-          assert.equal(adaptive.metrics.nonManifoldEdgeCount,fine.metrics.nonManifoldEdgeCount);
-          assert.equal(adaptive.metrics.degenerateTriangleCount,fine.metrics.degenerateTriangleCount);
-          assert.equal(adaptive.metrics.openEdgeCount,fine.metrics.openEdgeCount,"solver publication must remain equally closed");
-          assert.ok(adaptive.metrics.triangleCount<fine.metrics.triangleCount);
-          if(fullPool&&step===55){
-            // The published surface crosses moving 2:1 interfaces.
-            // Inspect emitted edges after impact, including all fallback patches.
-            // Floor clipping already leaves edges on the first sample plane
-            // (also present in the full-resolution reference). No open edge
-            // may escape that exact plane into the reconstructed free surface.
-            const floorY=source.plan.fineCellWidth*.5;
-            const surfaceEdges=adaptive.metrics.interiorOpenEdges!.filter(edge=>
-              edge.endpoints.some(point=>Math.abs(point[1]-floorY)>1e-5));
-            assert.equal(surfaceEdges.length,0,
-              `impact x${ratio}: cracks ${JSON.stringify(surfaceEdges[0])}`);
-            let internalTriangles=0;
-            const m=adaptive.mesh;
-            for(let i=0;i<m.length;i+=24){
-              const x=(m[i]!+m[i+8]!+m[i+16]!)/3;
-              const y=(m[i+1]!+m[i+9]!+m[i+17]!)/3;
-              const z=(m[i+2]!+m[i+10]!+m[i+18]!)/3;
-              if(x>.1&&x<6.3&&z>.1&&z<6.3&&y>.1&&y<1.5
-                &&Math.hypot(x-3.2,z-3.2)>1.2)internalTriangles++;
-            }
-            assert.equal(internalTriangles,0,"impact must not expose internal pool sheets");
-            console.log(JSON.stringify({fullPool,step,ratio,internalTriangles,
-              surfaceOpenEdges:surfaceEdges.length,
-              floorClippingEdges:adaptive.metrics.interiorOpenEdgeCount,
-              adaptiveTriangles:adaptive.adaptive}));
-          }else if(fullPool){
-            // Count actual oriented geometry: closure alone accepts an empty top.
-            // The falling ball has not reached the 1.6 m pool in these checkpoints.
-            let upwardArea=0,downwardArea=0,internalTriangles=0;
-            let minimumTop=Infinity,maximumTop=-Infinity;
-            const m=adaptive.mesh;
-            for(let i=0;i<m.length;i+=24){
-              const center=[0,1,2].map(axis=>(m[i+axis]!+m[i+8+axis]!+m[i+16+axis]!)/3);
-              if(center[0]!>.1&&center[0]!<6.3&&center[2]!>.1&&center[2]!<6.3
-                &&center[1]!>.1&&center[1]!<1.5)internalTriangles++;
-              if(![1,9,17].every(k=>Math.abs(m[i+k]!-1.6)<.1))continue;
-              const area=((m[i+10]!-m[i+2]!)*(m[i+16]!-m[i]!)-(m[i+8]!-m[i]!)*(m[i+18]!-m[i+2]!))*.5;
-              upwardArea+=Math.max(0,area);downwardArea+=Math.max(0,-area);
-              if(area>0)for(const k of [1,9,17]){
-                minimumTop=Math.min(minimumTop,m[i+k]!);maximumTop=Math.max(maximumTop,m[i+k]!);
-              }
-            }
-            assert.ok(Math.abs(upwardArea-40.96)<1e-4,`step ${step} x${ratio}: pool top area ${upwardArea}`);
-            assert.equal(downwardArea,0,"pool top triangles must face upward");
-            assert.equal(internalTriangles,0,"a filled pool must not publish interior interfaces");
-            assert.ok(minimumTop>1.599&&maximumTop<1.601,
-              `step ${step} x${ratio}: calm pool height ${minimumTop}..${maximumTop}`);
-            console.log(JSON.stringify({fullPool,step,ratio,upwardArea,downwardArea,
-              minimumTop,maximumTop,internalTriangles,adaptiveTriangles:adaptive.adaptive}));
-          }else{
-            assert.equal(adaptive.metrics.nonManifoldEdgeCount,0);
-          }
-        }
-      }
 
-      const generation=solver.globalFineLevelSetSource.generation;
-      for(const ratio of [1,4,2] as const){
-        solver.applyRuntimeValues({...values,surfaceMeshRefinement:String(ratio)});
-        assert.equal(solver.globalFineLevelSetSource.surfaceMeshRefinement,ratio);
-        assert.equal(solver.globalFineLevelSetSource.generation,generation,"changing mesh quality must preserve physics");
-      }
-    }finally{solver?.destroy();}
-    assert.deepEqual(errors,[]);
-  }finally{device?.destroy();await releaseWebGPUExclusiveLock();if(gpu)liveDawnInstances.delete(gpu);}
-});
+const fs=await import("node:fs/promises");
+await acquireWebGPUExclusiveLock("dawn-probe","mini32-mesh-holes");
+const {create,globals}=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
+Object.assign(globalThis,globals);const gpu=create(["backend=metal"]);liveDawnInstances.add(gpu);
+const adapter=await gpu.requestAdapter();const device=await adapter!.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter!.limits)});
+try {
+ for(const step of [3,8,12,16,20,24,30,40,52,60]){
+  const path=`/tmp/cm12-holes/step-${step}/`;const plan=JSON.parse(await fs.readFile(path+"source.json","utf8"));
+  const source:any={plan};for(const key of ["metadata","worklist","samples"]){const bytes=await fs.readFile(path+key+".bin");source[key]=buffer(device,key,bytes.byteLength,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC,bytes);}
+  for(const ratio of [0,1] as const){const result=await runField(device,`step-${step}`,ratio,()=>0,false,source);
+   console.log(JSON.stringify({step,ratio,adaptive:result.adaptive,triangles:result.metrics.triangleCount,open:result.metrics.interiorOpenEdgeCount,firstOpen:result.metrics.firstInteriorOpenEdge,topology:topology(result.mesh,result.metrics.vertexCount)}));
+   await fs.writeFile(`/tmp/cm12-holes/step-${step}/mesh-${ratio}.bin`,new Uint8Array(result.mesh.buffer));
+  }
+  for(const key of ["metadata","worklist","samples"])source[key].destroy();
+ }
+}finally{device.destroy();await releaseWebGPUExclusiveLock();liveDawnInstances.delete(gpu);}

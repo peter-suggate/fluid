@@ -4,10 +4,10 @@ import type { WorkProgress } from "../core/work-progress";
  * Cached opaque voxel boundary quads. All coordinates are on the accepted
  * finest-cell lattice, so adjacent bricks produce identical shared vertices.
  * The GPU publication header is also the indirect draw/dispatch buffer.
- * A capacity overflow withdraws the entire mesh and selects current-frame rays.
+ * A capacity overflow withdraws the entire mesh until storage can grow.
  */
 export interface SvoSurfaceMeshStatus {
-  state: "pending" | "ready" | "fallback";
+  state: "pending" | "ready" | "blocked";
   quads?: number;
   detail?: string;
   requiredQuads?: number;
@@ -27,14 +27,14 @@ export interface SvoSurfaceMeshStatus {
 /** Mesh-specific meaning stays beside the producer; the panel only renders facts. */
 export function surfaceMeshProgress(status?: SvoSurfaceMeshStatus): WorkProgress {
   if (!status) return { label: "Waiting for mesh publication", state: "waiting", detail: "Mesh counters have not arrived from the GPU." };
-  const state = status.state === "ready" ? "complete" : status.state === "fallback" ? "waiting" : "active";
+  const state = status.state === "ready" ? "complete" : status.state === "blocked" ? "waiting" : "active";
   const capacity = status.buildPhase === "capacity";
   const reason = status.restartReason === "topology" ? "Topology changed; rebuilding the current scene."
     : status.restartReason === "geometry" ? "Geometry changed; rebuilding the current scene."
     : status.restartReason === "publication" ? "Source publication changed; rebuilding the current scene." : undefined;
   return {
     label: status.state === "ready" ? "Mesh ready"
-      : status.state === "fallback" ? "Using ray fallback"
+      : status.state === "blocked" ? "Raster unavailable"
       : capacity ? "Expanding mesh storage" : "Extracting voxel surfaces",
     state,
     completed: status.completedBricks,
@@ -43,8 +43,8 @@ export function surfaceMeshProgress(status?: SvoSurfaceMeshStatus): WorkProgress
     generation: status.builds,
     phase: status.state === "ready" ? "complete" : capacity ? "capacity" : "extracting",
     phases: [{ id: "extracting", label: "Extract" }, { id: "capacity", label: "Storage" }, { id: "complete", label: "Ready" }],
-    detail: [reason, status.state === "pending" ? "Current-frame rays provide visibility until the complete mesh is published." : undefined,
-      status.state === "fallback" ? status.detail : undefined].filter(Boolean).join(" "),
+    detail: [reason, status.state === "pending" ? "Geometry is withheld until the complete raster mesh is published." : undefined,
+      status.state === "blocked" ? status.detail : undefined].filter(Boolean).join(" "),
   };
 }
 
@@ -133,7 +133,7 @@ fn surfaceMeshPrepare(){
   atomicStore(&meshState[9],1u);atomicStore(&meshState[10],1u);
   atomicStore(&meshState[18],svoControlLoad(1u));
   // Smooth reconstruction has a view-dependent face fallback and cannot be
-  // represented by these cached boundary quads. Keep its exact ray semantics.
+  // represented by these cached boundary quads. Withhold raster geometry for this unsupported representation.
   if((dry.materialPublication.w&${flatNormalsFlag}u)==0u){atomicStore(&meshState[15],2u);atomicStore(&meshState[1],0u);return;}
   let valid=dryPublicationWord(0u)!=0u&&(dryPublicationWord(1u)&REQUIRED_FIELDS)==REQUIRED_FIELDS;
   if(!valid){atomicStore(&meshState[13],0u);atomicStore(&meshState[1],0u);atomicStore(&meshState[11],0u);atomicStore(&meshState[5],0u);return;}
@@ -309,8 +309,10 @@ struct MeshSurfaceOut {
 @fragment fn surfaceMeshBackground(input:VertexOut)->DryRasterPrimaryOut{
   dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let rd=dryRasterPrimaryRay(input.position.xy,camera);
   var hit=missHit();
-  if(meshHeader[13]==0u||meshHeader[15]!=0u){hit=traceStatic(camera[0],rd);}
-  else{hit=dryPlanarCatalogHit(camera[0],rd,0.0,DRY_MISS);}
+  // Raster is fail-closed: incomplete, invalid and unsupported publications
+  // produce no geometry. Never replace a missing mesh with a ray march.
+  if(meshHeader[13]==0u||meshHeader[15]!=0u){return dryRasterPrimaryMiss();}
+  hit=dryPlanarCatalogHit(camera[0],rd,0.0,DRY_MISS);
   if(hit.t>=DRY_MISS){return dryRasterPrimaryMiss();}
   return dryRasterPrimarySurface(hit,camera[0],rd,camera[1],SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND);
 }

@@ -912,6 +912,7 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     controls: [{
       kind: "param-choice", param: "surfaceMeshRefinement", label: "Mesh refinement",
       options: [
+        { value: "1", label: "×1", hint: "One target subdivision per accepted surface-cell edge." },
         { value: "2", label: "×2", hint: "Two target subdivisions per accepted surface-cell edge." },
         { value: "4", label: "×4", hint: "Four target subdivisions per accepted surface-cell edge." },
       ],

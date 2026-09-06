@@ -31,6 +31,9 @@ dawnTest("coarse presentation and refinement reproduce affine cell averages", as
     const adapter = await gpu!.requestAdapter();
     assert.ok(adapter);
     device = await adapter.requestDevice();
+    const gpuErrors: string[] = [];
+    device.addEventListener("uncapturederror", (event) => gpuErrors.push(event.error.message));
+    device.pushErrorScope("validation");
     const shader = `
 struct Params { dimensions:vec4u }
 const p=Params(vec4u(128));
@@ -50,7 +53,7 @@ ${functionSource("smoothedPresentationDensityAt")}
 ${functionSource("directSmoothedPresentationDensityAt")}
 @compute @workgroup_size(64)
 fn main(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)group:vec3u){
-  let scale=2u<<group.x;let first=vec3i(32u/scale);let dims=vec3u(8u/scale);
+  let scale=2u<<group.x;let first=vec3i(i32(32u/scale));let dims=vec3u(8u/scale);
   preparePresentationInterpolationCache(lane,scale,first,dims,first-vec3i(1),dims+vec3u(2),0u,true);
   for(var i=lane;i<512u;i+=64u){
     let local=vec3u(i%8u,(i/8u)%8u,i/64u);
@@ -88,8 +91,16 @@ fn main(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)group:vec
     readback.unmap();
     readback.destroy();
     output.destroy();
+    const validationError = await device.popErrorScope();
+    assert.equal(validationError, null, validationError?.message);
+    assert.deepEqual(gpuErrors, [], "GPU execution must succeed");
     let maximumError = 0;
     for (let i = 0; i < values.length; i += 4) {
+      const local = (i / 4) % 512;
+      const expected = .2 + (32.5 + local % 8) * .001
+        - (32.5 + Math.floor(local / 8) % 8) * .0007
+        + (32.5 + Math.floor(local / 64)) * .0003;
+      assert.ok(Math.abs(values[i + 2]! - expected) < 1e-6, "shader must produce the analytic fixture");
       assert.equal(values[i], values[i + 1], "cached publication and direct refinement must agree");
       maximumError = Math.max(maximumError, Math.abs(values[i]! - values[i + 2]!));
     }

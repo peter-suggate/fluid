@@ -392,7 +392,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
   gridOverlayLensPhase: 0,
-  fluidSurfaceRenderMode: "shaded",
+  fluidSurfaceRenderMode: "simple",
   svoShadowsEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled,
   svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
   silhouetteRefinementEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled ?? false,

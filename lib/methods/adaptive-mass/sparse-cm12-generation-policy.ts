@@ -35,9 +35,13 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
       gamma: new Float64Array(resolution ** 3).fill(1),
     };
   };
-  // Reclaim inactive backing unless a hard floor requires its coarse coverage:
-  // the ordinary signed frontier allocator would otherwise recreate a fine page.
-  let bricks: SparseAdaptiveMassBrick[] = atlas.bricks.filter(brick => active.has(brick.key) || (minimumWidths.get(brick.key) ?? 1) > 1).map(brick => seed(brick, intents.get(brick.key)?.resolution ?? brick.resolution));
+  // Keep explicitly requested refinement of a dormant receiver so its next
+  // activation can satisfy grading. Other inactive backing is reclaimed unless
+  // a hard floor prevents recreating it as an ordinary fine frontier page.
+  let bricks: SparseAdaptiveMassBrick[] = atlas.bricks.filter(brick => active.has(brick.key)
+    || (minimumWidths.get(brick.key) ?? 1) > 1
+    || (intents.get(brick.key)?.resolution ?? brick.resolution) > brick.resolution)
+    .map(brick => seed(brick, intents.get(brick.key)?.resolution ?? brick.resolution));
   const nextActive = new Set(active);
   const demandedWidths = new Map<number, number>();
   for (const [key, intent] of intents) if (intent.maximumCellWidth !== undefined) {

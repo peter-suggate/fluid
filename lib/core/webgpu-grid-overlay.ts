@@ -1000,8 +1000,9 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   // SparseWorld keeps non-occupied B8 pages around a surface as transport and
   // presentation halo capacity. They are not liquid pressure topology, so the
   // structure view must not paint their internal fine graph over a coarsened
-  // wet surface. Field/debug modes still show those pages when their contents
-  // are the subject, and optical/rigid boundaries remain visible below.
+  // wet surface. Show only a faint leaf boundary: hiding them completely made
+  // the supported, dilute diagonal dam front look like missing topology.
+  // Field/debug modes still show their cell contents.
   let sparseStructureHalo=sparseGridEnabled()&&fieldMode==0
     &&!sparseBrickOccupied(sparseOwnerAtCell.y);
   let tallGrid = u.gridInfo.w > 1.5 && u.gridInfo.w < 2.5;
@@ -1105,7 +1106,18 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     alpha = 0.05 + 0.07 * stripe;
     line = firstGridLine * 0.35;
   }
-  if(sparseStructureHalo){fill=vec3f(0.0);alpha=0.0;line=0.0;sampleDot=0.0;}
+  if(sparseStructureHalo){
+    let extent=i32(sparseBrickFineResolution()*sparseBrickSpan(sparseOwnerAtCell.y));
+    let origin=sparseFloorDiv(cell,extent)*extent;
+    let position=local3+vec3f(fineOrigin-origin);
+    let edgeDistance=min(position,vec3f(f32(extent))-position);
+    let distance=min(edgeDistance[firstPlaneAxis]/derivative.x,
+      edgeDistance[secondPlaneAxis]/derivative.y);
+    fill=vec3f(0.0);alpha=0.0;sampleDot=0.0;
+    // Inset in screen space so a support boundary remains distinguishable
+    // from the wet neighbour's bright grid edge and the tank wall outline.
+    line=gridLinePaint(abs(distance-2.5),0.8);lineStrength=0.45;
+  }
   // Field modes recolor represented cells from the live velocity texture;
   // structural lines, sample dots, the above-band hatch, and rigid-body
   // occupancy all stay so the heatmap keeps its spatial reference frame.

@@ -1,3 +1,6 @@
+import { SPARSE_CM12_COMMON_HEIGHT_ENABLED, SPARSE_CM12_HEIGHT_ENTRY_POINTS, SPARSE_CM12_HEIGHT_FIELDS,
+  SPARSE_CM12_HEIGHT_HEADER_FLOATS, SPARSE_CM12_HEIGHT_ITERATIONS } from
+  "./sparse-cm12-height-reconstruction.wgsl";
 import { compileCM12CapturedGeometry, type CM12CapturedGeometryRecipe } from "./sparse-cm12-captured-geometry";
 import { createCM12ResourceRecorder, realizeCM12ResourceRecipe, type CM12ResourceRecipe } from "./sparse-cm12-resource-recipe";
 import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
@@ -3566,10 +3569,12 @@ export class WebGPUSparseCM12Resident {
             Object.create(PreparedSparseCM12GenerationTransfer.prototype), data.transfer, {device:allocation.device});
           return next;
         }
+        // Keep budget-admitted local rerungs after replacement. An accepted-only
+        // image turns each subsequent curvature change into another rebuild.
         return await WebGPUSparseCM12Resident.createConfigured(allocation.device, nextAtlas, nextGrid ?? buildSparseAtlasCompositeGrid(nextAtlas), finestCellSize_m,
           this.currentSolidWorld, active, rigid, journal, presentationPageResolution,
           false, false, false, true, true, () => {}, false, false, false, false, false,
-          topologyPageCapacityMaximum, true, { scalar, face });
+          topologyPageCapacityMaximum, false, { scalar, face });
       } catch (error) { allocation.rollback(); throw error; }
       finally { allocation.finish(); }
   }
@@ -4196,22 +4201,36 @@ export class WebGPUSparseCM12Resident {
     const initialSolidWorld = solidWorld;
     const dynamicWorldGrowth = true;
     const signedWorldGrowth = true;
-    // Back the active working set, including two-brick bulk leaves, with
-    // local dyadic rerungs. Inactive structural guards and larger coverage
-    // changes use generation preparation when demanded. Keep the established
-    // cell/row budgets; do not prepack distant inactive wall guards.
-    const mutableBrickKeysForBudget = atlas.bricks.filter((brick) =>
+    // Back the working set and its immediate dormant apron. A dry B2 guard
+    // beside a B8 front must be able to activate at a graded rung in the same
+    // GPU transaction; asynchronous generation preparation can arrive too late.
+    // Backing does not activate air or add accepted simulation cells.
+    const activeMutableKeys = atlas.bricks.filter((brick) =>
       initiallyActiveBrickKeys.has(brick.key) && sparseBrickSpan(brick) <= 2).map((brick) => brick.key);
-    const candidateKeys = new Set(mutableBrickKeysForBudget);
-    const hostTemplateVariants = !acceptedOnly && sparseCM12HostTemplateVariantsEnabled(
-      grid.cells.length, grid.gradientRows.length, mutableBrickKeysForBudget.length,
-      atlas.brickFineResolution, {
-        cells: grid.cells.reduce((n, cell) => n + Number(
-          candidateKeys.has(cell.brickKey)), 0),
-        rows: grid.gradientRows.reduce((n, row) => n + Number(row.terms.every(term =>
-          candidateKeys.has(grid.cells[term.cellId]!.brickKey))), 0),
-      },
-    );
+    const apron = new Set<string>();
+    for (const brick of atlas.bricks) if (initiallyActiveBrickKeys.has(brick.key)
+      && sparseBrickSpan(brick) <= 2) {
+      const [bx, by, bz] = brick.coordinate, span = sparseBrickSpan(brick);
+      for (let z = -1; z <= span; z++) for (let y = -1; y <= span; y++)
+        for (let x = -1; x <= span; x++) apron.add(`${bx + x}/${by + y}/${bz + z}`);
+    }
+    let mutableBrickKeysForBudget = atlas.bricks.filter(brick =>
+      (initiallyActiveBrickKeys.has(brick.key) && sparseBrickSpan(brick) <= 2)
+      || (sparseBrickSpan(brick) === 1 && apron.has(brick.coordinate.join("/"))))
+      .map(brick => brick.key);
+    const catalogueFits = (keys: readonly number[]) => {
+      const candidateKeys = new Set(keys);
+      return !acceptedOnly && sparseCM12HostTemplateVariantsEnabled(
+        grid.cells.length, grid.gradientRows.length, keys.length,
+        atlas.brickFineResolution, {
+          cells: grid.cells.reduce((n, cell) => n + Number(candidateKeys.has(cell.brickKey)), 0),
+          rows: grid.gradientRows.reduce((n, row) => n + Number(row.terms.every(term =>
+            candidateKeys.has(grid.cells[term.cellId]!.brickKey))), 0),
+        });
+    };
+    // Do not sacrifice the active catalogue if the optional apron cannot fit.
+    if (!catalogueFits(mutableBrickKeysForBudget)) mutableBrickKeysForBudget = activeMutableKeys;
+    const hostTemplateVariants = catalogueFits(mutableBrickKeysForBudget);
     const mutableBrickKeys: ReadonlySet<number> = hostTemplateVariants
       ? new Set(mutableBrickKeysForBudget) : new Set<number>();
     report("Pack resident ownership topology");
@@ -5238,7 +5257,9 @@ export class WebGPUSparseCM12Resident {
       "Sparse CM12 compact fine presentation worklist", fine.worklist, storage);
     const fineSamples = device.createBuffer({
       label: "Sparse CM12 accepted/candidate fine presentation samples",
-      size: Math.max(4, 2 * fine.plan.payloadCapacityBytes),
+      size: Math.max(4, 2 * fine.plan.payloadCapacityBytes
+        + (SPARSE_CM12_COMMON_HEIGHT_ENABLED ? 4 * (SPARSE_CM12_HEIGHT_FIELDS
+          * atlas.dimensions[0] * atlas.dimensions[2] + SPARSE_CM12_HEIGHT_HEADER_FLOATS) : 0)),
       usage: storage,
     });
     const fineWorkA = device.createBuffer({ label: "Sparse CM12 fine presentation work A",
@@ -5470,7 +5491,7 @@ export class WebGPUSparseCM12Resident {
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
-        "publishSparseLevelSet"]
+        "publishSparseLevelSet", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]
       : ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
@@ -5487,7 +5508,7 @@ export class WebGPUSparseCM12Resident {
         "verifySparseCM12FramePlanCurrentStage",
         "finalizeSparseCM12FramePlanPresentationExecution",
         "publishSparseCM12SurfaceRepresentabilityReceipts",
-        "rejectSparseCM12FramePlanPresentationFaults"] as const;
+        "rejectSparseCM12FramePlanPresentationFaults", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])] as const;
     const presentationShaderSource = sparseCM12WGSLForEntryPoints(
       shaderSource, presentationShaderRoots,
     );
@@ -5643,6 +5664,7 @@ export class WebGPUSparseCM12Resident {
       "finalizeSparseCM12FramePlanPresentationExecution",
       "publishSparseCM12SurfaceRepresentabilityReceipts",
       "rejectSparseCM12FramePlanPresentationFaults",
+      ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : []),
       "beginPersistentPressureCache", "finalizePersistentPressureFineCache",
       ...SPARSE_CM12_PRESSURE_EXECUTION_IMAGE_ENTRY_POINTS,
       "publishFrozenPressureCellIds",
@@ -5669,7 +5691,7 @@ export class WebGPUSparseCM12Resident {
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
         "classifyPresentationBricks", "validateSparseCM12InternedBoundaryImmutable",
-        "publishSparseLevelSet"]
+        "publishSparseLevelSet", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]
       : ["refreshSparseCM12SolidWorldCells", "refreshSparseCM12SolidWorldRows",
         "refreshSparseCM12StaticSolidGeometryEvidence",
         "clearSparseWorldFrontierResolutionCache",
@@ -5685,7 +5707,7 @@ export class WebGPUSparseCM12Resident {
         "commitSparseCM12FramePlanPresentationPacket",
         "finalizeSparseCM12FramePlanPresentationExecution",
         "publishSparseCM12SurfaceRepresentabilityReceipts",
-        "rejectSparseCM12FramePlanPresentationFaults"]);
+        "rejectSparseCM12FramePlanPresentationFaults", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])]);
     const presentationNames = names.filter((name) => presentationEntryNames.has(name));
     const simulationNames = names.filter((name) => !presentationEntryNames.has(name));
     const compileNamedEntries = async (
@@ -6004,7 +6026,7 @@ export class WebGPUSparseCM12Resident {
       grid, input.finestCellSize_m, input.solidWorld,
       input.active, rigid, input.journal, 8, false, false, false, true, true,
       () => {}, false, false, false, false, false, input.topologyPageCapacityMaximum,
-      true, input.symmetry);
+      false, input.symmetry);
     await resident.waitForSimulationPipelines();
     const firstSource = input.rigid ? 2 : 0;
     if (input.source?.geometryRecipe) Object.assign(input.source, compileCM12CapturedGeometry(input.source.geometryRecipe));
@@ -7187,10 +7209,44 @@ export class WebGPUSparseCM12Resident {
     };
   }
 
+  private encodeCommonHeightReconstruction(encoder: GPUCommandEncoder, label: string): void {
+    if (!SPARSE_CM12_COMMON_HEIGHT_ENABLED) return;
+    const policyWord = (SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
+      + SPARSE_CM12_REFINEMENT_REGION_BYTES) / 4 + 12;
+    if (this.parameterF32[policyWord]! <= 0.5) return;
+    // The field is GPU resident; publication and surface proofs sample it directly.
+    const pass = encoder.beginComputePass({ label: `${label} common height reconstruction` });
+    pass.setBindGroup(0, this.bindGroup);
+    const b = this.globalFineLevelSetSource.plan.brickResolution;
+    const gx = Math.ceil(this.dimensions[0] / b), gz = Math.ceil(this.dimensions[2] / b);
+    const dispatch = (name: string, reduction = false) => {
+      pass.setPipeline(this.pipelines[name]!);
+      pass.dispatchWorkgroups(reduction ? 1 : gx, reduction ? 1 : gz);
+    };
+    dispatch("initializeCM12Height");
+    dispatch("constrainCM12Height");
+    dispatch("laplacianCM12Height");
+    dispatch("applyCM12HeightLaplacian");
+    dispatch("initializeCM12HeightResidual");
+    dispatch("reduceCM12HeightInitial", true);
+    for (let iteration = 0; iteration < SPARSE_CM12_HEIGHT_ITERATIONS; iteration += 1) {
+      dispatch("laplacianCM12HeightDirection");
+      dispatch("applyCM12HeightLaplacian");
+      dispatch("projectCM12HeightOperator");
+      dispatch("reduceCM12HeightAlpha", true);
+      dispatch("updateCM12HeightResidual");
+      dispatch("reduceCM12HeightBeta", true);
+      dispatch("updateCM12HeightDirection");
+    }
+    dispatch("finishCM12Height");
+    pass.end();
+  }
+
   private encodeFramePlanPresentation(
     encoder: GPUCommandEncoder,
     label: string,
   ): void {
+    this.encodeCommonHeightReconstruction(encoder, label);
     if (this.presentationPublisherOracleForQA) {
       const oracle = encoder.beginComputePass({ label: `${label} QA publisher oracle` });
       oracle.setBindGroup(0, this.bindGroup);
@@ -8401,7 +8457,10 @@ export class WebGPUSparseCM12Resident {
       const packedOwner = authored && this.lastPacked
         ? this.lastPacked.words[this.lastPacked.brickOffset + 2 * record.leafId]! : 0;
       const hasCandidateSlot = ((packedOwner & 0x7fff_ffff) >>> 5) !== 0;
-      if (record.active && !hasCandidateSlot && record.generationRequestedResolution !== resolution)
+      // A demanded inactive construction leaf may need a finer rung before
+      // its first activation can satisfy physical 2:1 grading with wet donors.
+      const demandedActivation = (record.planReasons & 0x80000000) !== 0;
+      if ((record.active || demandedActivation) && !hasCandidateSlot && record.generationRequestedResolution !== resolution)
         planned.set(key, record.generationRequestedResolution);
       bricks.push({ key, coordinate, resolution, spanBricks: authored ? sparseBrickSpan(authored) : 1,
         unclipped: authored ? authored.unclipped : true,

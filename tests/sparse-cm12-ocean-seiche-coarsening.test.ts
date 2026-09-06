@@ -410,7 +410,7 @@ test("closed vast-depth fills do no finest-domain-shaped planning or allocation"
     "GPU ownership must not recreate a logical-domain brick directory");
 });
 
-dawnTest("native ocean pages close interior adaptive seams on the exact tank wall",
+for (const deferred of [false, true]) dawnTest(`native ocean pages close interior adaptive seams on the exact tank wall (${deferred ? "deferred" : "eager"} compilation)`,
   { timeout: 60_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
       "tests/sparse-cm12-ocean-seiche-coarsening.test.ts");
@@ -504,7 +504,10 @@ dawnTest("native ocean pages close interior adaptive seams on the exact tank wal
       device.queue.writeBuffer(uniform, 0, view);
 
       water = new RasterWaterPipeline(device, "rgba16float", uniform, bodies);
-      await water.initialize();
+      const compiledStages: string[] = [];
+      await water.initialize(label => compiledStages.push(label), { deferSceneClassifiers: deferred });
+      assert.equal(compiledStages.some(label => label === "Emitting adaptive global fine contour"), !deferred,
+        "Dry startup must omit the adaptive-water compiler jobs");
       water.ensureSize(64, 64);
       water.setVolume(volume, columns);
       water.setGlobalFineLevelSet({
@@ -524,8 +527,16 @@ dawnTest("native ocean pages close interior adaptive seams on the exact tank wal
       });
       water.setSceneOptics({ container: scene.container });
       const encoder = device.createCommandEncoder();
-      assert.ok(water.encode(encoder, output, ...dimensions, false, 1, 1,
-        undefined, undefined, true));
+      let encoded = water.encode(encoder, output, ...dimensions, false, 1, 1,
+        undefined, undefined, true);
+      if (deferred) assert.equal(encoded, false, "The first wet frame must await deferred GPU compilation");
+      const deadline = performance.now() + 45_000;
+      while (!encoded && performance.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        encoded = water.encode(encoder, output, ...dimensions, false, 1, 1,
+          undefined, undefined, true);
+      }
+      assert.ok(encoded, "Deferred water compilation must admit a complete frame");
       device.queue.submit([encoder.finish()]);
       const diagnostics = await water.completeSurfaceDiagnostics();
       assert.ok(diagnostics && diagnostics.vertexCount > 0);

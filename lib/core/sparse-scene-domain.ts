@@ -44,6 +44,8 @@ export interface SparseSceneDomainOptions {
    * for `none`.
    */
   solverClaim?: SparseSceneSolverClaim;
+  /** GPU planners consume bounds directly and must not enumerate host bricks. */
+  enumerateProxyBricks?: boolean;
 }
 
 export interface SparseSceneCellRange {
@@ -75,6 +77,8 @@ export interface SparseSceneDomainPlan {
   environmentBrickCoordinates: readonly SparseBrickCoordinate[];
   /** Per-proxy candidates, useful for later GPU voxelization; overlaps are intentionally retained here. */
   proxyBrickCoordinates: readonly (readonly SparseBrickCoordinate[])[];
+  /** Exact inclusive-exclusive brick ranges, retaining the lattice rounding. */
+  proxyBrickRanges: readonly SparseSceneCellRange[];
   /** Canonical Morton order, ready for planSparseBrickOctree. */
   coordinates: readonly SparseBrickCoordinate[];
 }
@@ -237,7 +241,11 @@ export function planSparseSceneDomain(
   const solverBrickCoordinates = solverClaim === "none"
     ? [] : enumerateBricks(solverRange, latticeMinimum, brickSize, "volume", 0);
   const solverKeys = new Set(solverBrickCoordinates.map(coordinateKey));
-  const proxyBrickCoordinates = proxyRanges.map((range, index) => enumerateBricks(
+  const proxyBrickRanges = proxyRanges.map(range => ({
+    min: range.min.map((v, a) => Math.floor((v - latticeMinimum[a]) / brickSize)) as MutableTriple,
+    maxExclusive: range.maxExclusive.map((v, a) => Math.ceil((v - latticeMinimum[a]) / brickSize)) as MutableTriple,
+  }));
+  const proxyBrickCoordinates = options.enumerateProxyBricks === false ? [] : proxyRanges.map((range, index) => enumerateBricks(
     range,
     latticeMinimum,
     brickSize,
@@ -278,6 +286,7 @@ export function planSparseSceneDomain(
     solverBrickCoordinates,
     environmentBrickCoordinates,
     proxyBrickCoordinates,
+    proxyBrickRanges,
     coordinates,
   };
 }

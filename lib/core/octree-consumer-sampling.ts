@@ -102,7 +102,7 @@ export function sampleOctreeFaceVelocity(
 }
 
 export interface GlobalFineLevelSetConsumerSource {
-  readonly surfaceMeshRefinement?: 2 | 4;
+  readonly surfaceMeshRefinement?: 1 | 2 | 4;
   readonly kind: "global-fine-levelset-sampling";
   readonly metadata: GPUBufferBinding;
   readonly worklist: GPUBufferBinding;
@@ -165,8 +165,9 @@ export function globalFineCoarseGenerationPairIsValid(
 export function validateGlobalFineLevelSetConsumerSource(source: GlobalFineLevelSetConsumerSource): void {
   if (source.kind !== "global-fine-levelset-sampling") throw new RangeError("Global fine source kind is invalid");
   if (source.surfaceMeshRefinement !== undefined
+    && source.surfaceMeshRefinement !== 1
     && source.surfaceMeshRefinement !== 2 && source.surfaceMeshRefinement !== 4) {
-    throw new RangeError("Surface mesh refinement must be 2 or 4");
+    throw new RangeError("Surface mesh refinement must be 1, 2 or 4");
   }
   const positiveInteger = (value: number, label: string) => {
     if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} must be a positive integer`);

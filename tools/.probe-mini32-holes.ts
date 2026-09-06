@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import { mkdir, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
@@ -28,7 +29,7 @@ async function read(device: GPUDevice, source: GPUBuffer, bytes = source.size, o
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 assert.ok(dawnModule, "Set WEBGPU_NODE_MODULE to the native Dawn module path");
-await acquireWebGPUExclusiveLock("dawn-probe", "pool-interpolation");
+await acquireWebGPUExclusiveLock("dawn-probe", "mini32-corner");
 const errors: string[] = [];
 let gpu: GPU | undefined;
 let device: GPUDevice | undefined;
@@ -42,27 +43,25 @@ try {
   assert.ok(adapter);
   device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
   device.addEventListener("uncapturederror", event => errors.push(event.error.message));
-  const scene = sceneDocument(getSceneDefinition("coarse-first-pool-impact"));
-  if (process.env.POOL_MAX_CELL) {
-    assert.ok([1, 2, 4, 8].includes(Number(process.env.POOL_MAX_CELL)));
-    scene.fluid.refinementRegions = [{
-      id: "interpolation-control", rule: "minimum-cell-size", minimumCellSize_cells: 1,
-      maximumCellSize_cells: Number(process.env.POOL_MAX_CELL),
-      min_m: { x: -3.2, y: 0, z: -3.2 }, max_m: { x: 3.2, y: 4.8, z: 3.2 },
-    }];
-  }
-  const values = resolveMethodValues(adaptiveMassMethod, "balanced", { selectorMode: "coarse-first", timeStep: "scene" });
+  const scene = sceneDocument(getSceneDefinition("minimal-power-dam-break-32"));
+  const values = resolveMethodValues(adaptiveMassMethod, "balanced", { selectorMode: "coarse-first", timeStep: "paper" });
   solver = await adaptiveMassMethod.createSolverAsync!(device, scene, "balanced", values, undefined, () => { }) as WebGPUAdaptiveMassSolver;
   await solver.waitForSimulationReady();
-  for (let step = 1; step <= 55; step++) {
-    while (!solver.advanceTo(step / 60, []))
+  for (let step = 1; step <= 60; step++) {
+    let retries = 0;
+    while (!solver.advanceTo(step * CM12_PAPER_DT_S, [])) {
+      assert.ok(retries++ < 10000, JSON.stringify({step, info: solver.info}));
       await new Promise(setImmediate);
+    }
+    console.log(JSON.stringify({step, time: solver.info.simulatedTime_s, generation: solver.info.topologyGenerationCount}));
     await solver.waitForTopologyReady();
     assert.equal(solver.info.encodedSteps, step);
-    if (![30, 40, 55].includes(step))
+    if (false)
       continue;
-    const output = `${process.env.POOL_OUTPUT ?? "artifacts/pool-interpolation"}/step-${step}`;
+    const output = `${process.env.CORNER_OUTPUT ?? "artifacts/mini32-corner"}/step-${step}`;
     await mkdir(output, { recursive: true });
+    const stats = await solver.readStats();
+    assert.ok(Math.abs((stats.simulatedTime_s ?? NaN) - step * CM12_PAPER_DT_S) < 1e-9);
     const fields = await solver.readDiagnosticFields(true);
     for (const name of ["density", "solidOpenFraction", "velocity", "pressure"] as const)
       await writeFile(`${output}/${name}.bin`, new Uint8Array(fields[name].buffer));
@@ -109,7 +108,7 @@ try {
     await writeFile(`${output}/width.bin`, width);
     await writeFile(`${output}/activity.json`, JSON.stringify(await solver.readGPUActivityPolicy()));
     await writeFile(`${output}/stats.json`, JSON.stringify(await solver.readStats()));
-    console.log(JSON.stringify({ step, time: step / 60, output, errors }));
+    console.log(JSON.stringify({ step, time: step * CM12_PAPER_DT_S, output, errors }));
   }
   assert.deepEqual(errors, []);
 } finally {

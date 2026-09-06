@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { buildSparseAtlasCompositeGrid } from
   "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
 import {
@@ -96,7 +97,11 @@ try {
   };
   Object.assign(globalThis, dawn.globals);
   const backend = process.env.WEBGPU_BACKEND ?? "metal";
-  const adapter = await dawn.create([`backend=${backend}`]).requestAdapter();
+  // The native instance owns asynchronous compile/map callbacks. Retain it
+  // through the isolated process, as the other Dawn harnesses do, so GC cannot
+  // destroy the instance while this gate is validating mixed-rung queries.
+  const gpu = createProcessRetainedDawnGPU(dawn, [`backend=${backend}`]);
+  const adapter = await gpu.requestAdapter();
   if (!adapter) throw new Error(`No Dawn adapter for ${backend}`);
   const device = await adapter.requestDevice();
   const topology = device.createBuffer({ size: image.words.byteLength,

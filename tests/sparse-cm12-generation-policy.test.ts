@@ -102,3 +102,23 @@ test("authored min32 groups non-quiet clipped surface coverage without filling h
  const incomplete=createSparseAdaptiveMassAtlas([32,32,20],bricks.slice(1),0,8);
  assert.equal(planSparseCM12ResidentGeneration(incomplete,active,intents,limits)?.status,"deferred");
 });
+
+test("requested dormant receiver refinement survives reclamation without activating unrelated air", () => {
+ const atlas=createSparseAdaptiveMassAtlas([24,8,8],[0,1,2].map(x=>({
+  key:x,coordinate:[x,0,0] as const,resolution:(x===0?8:2) as 8|2,
+  density:new Float64Array(x===0?512:8).fill(x===0?1:0),
+  gamma:new Float64Array(x===0?512:8).fill(1),
+ })),0,8,false,false);
+ const plan=planSparseCM12ResidentGeneration(atlas,new Set([0]),new Map([
+  [1,{resolution:4 as const,mergeable:false}],
+ ]),limits);
+ assert.equal(plan?.status,"ready");
+ if(plan?.status!=="ready")return;
+ assert.equal(plan.atlas.directory.get(1)?.resolution,4);
+ assert.equal(plan.atlas.directory.has(2),false);
+ assert.deepEqual([...plan.active],[0]);
+ assert.ok(plan.atlas.directory.get(1)!.density.every(value=>value===0));
+ assert.equal(planSparseCM12ResidentGeneration(atlas,new Set([0]),new Map([
+  [1,{resolution:4 as const,mergeable:false}],
+ ]),{...limits,maximumCells:512})?.status,"deferred");
+});

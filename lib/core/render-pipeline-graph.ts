@@ -343,7 +343,7 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     ],
     toggleable: true,
     tip: {
-      summary: "Primary visibility fills the surface buffer using the selected backend: per-pixel SVO rays or cached exposed voxel triangles. Mesh rasterization retains exact planes, rigid bodies and glass; smooth reconstruction and mesh overflow use current-frame rays. Off clears the surface buffer to sky.",
+      summary: "Primary visibility fills the surface buffer using the selected backend: per-pixel SVO rays or cached exposed voxel triangles. Mesh rasterization retains exact planes, rigid bodies and glass; unsupported, unfinished or failed mesh geometry is withheld. Off clears the surface buffer to sky.",
       writes: "packedSurface · identityMedia · hardwareDepth · splitGeometry",
       feeds: "every lighting and shading pass",
     },
@@ -689,7 +689,7 @@ export const RENDER_PIPELINE_NODES: readonly RenderPipelineNode[] = Object.freez
 /** The raster backend owns exclusive intervals under primary visibility. */
 export const SURFACE_MESH_TIMING_STAGES = [
   { stage: "surface-mesh-update", label: "Mesh update", detail: "Revision check, extraction when dirty, and publication. Cached frames retain the check and publication cost." },
-  { stage: "surface-mesh-background", label: "Planes / ray fallback", detail: "Full-screen exact planar boundaries, or SVO rays when the mesh cannot be used." },
+  { stage: "surface-mesh-background", label: "Exact planes", detail: "Exact planar boundaries after complete raster publication. Incomplete or invalid meshes withhold geometry." },
   { stage: "surface-mesh-cull", label: "Mesh culling", detail: "Rejects back-facing and out-of-frustum quads before vertex processing. No subpixel or occlusion approximation." },
   { stage: "surface-mesh-draw", label: "Mesh draw", detail: "Cached quad rasterization and the periodic diagnostic copy. A withheld primary only clears the surface buffer." },
 ] as const satisfies readonly { stage: RenderFrameStageId; label: string; detail: string }[];
@@ -707,13 +707,13 @@ export function renderPipelineNodeForContext(
     stages: node.stages.filter((stage) => meshStages.has(stage)),
     tip: {
       ...node.tip,
-      summary: "Primary rasterization fills the surface buffer using cached voxel faces. Its timing is the sum of mesh update, exact planes or ray fallback, mesh culling, and mesh drawing. Mesh update includes revision checks on cached frames and extraction on changed publications. Off clears the surface buffer to sky.",
+      summary: "Primary rasterization fills the surface buffer using cached voxel faces. Its timing is the sum of mesh update, exact planes, mesh culling, and mesh drawing. Mesh update includes revision checks on cached frames and extraction on changed publications. Off clears the surface buffer to sky.",
     },
     chip: (current) => current.disabledStages.has("primary-traversal") ? "withheld · clears only"
-      : current.surfaceMeshStatus?.state === "pending" ? "mesh preparation · ray fallback"
-      : current.surfaceMeshStatus?.fallbackReason === "budget" ? "Ray fallback · mesh budget exceeded"
-      : current.surfaceMeshStatus?.state === "fallback" ? "Ray fallback"
-      : current.surfaceMeshActive ? "cached voxel triangles" : "mesh pending · ray fallback",
+      : current.surfaceMeshStatus?.state === "pending" ? "mesh preparation · geometry withheld"
+      : current.surfaceMeshStatus?.fallbackReason === "budget" ? "Raster blocked · mesh budget exceeded"
+      : current.surfaceMeshStatus?.state === "blocked" ? "Raster blocked"
+      : current.surfaceMeshActive ? "cached voxel triangles" : "mesh pending · geometry withheld",
   };
 }
 

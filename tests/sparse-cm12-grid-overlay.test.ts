@@ -39,13 +39,13 @@ test("the grid overlay consumes the producer's live activity-record stride", () 
     "renderer ownership must not freeze a second copy of the producer stride");
 });
 
-test("the structure overlay omits non-liquid SparseWorld support halos", () => {
+test("the structure overlay outlines support leaves without drawing their fine cells", () => {
   assert.match(gridOverlayShader,
     /fn sparseBrickOccupied\(brick:u32\)[\s\S]*sparseActivity\[at\]&64u/);
   assert.match(gridOverlayShader,
     /sparseStructureHalo=sparseGridEnabled\(\)&&fieldMode==0[\s\S]*!sparseBrickOccupied/);
   assert.match(gridOverlayShader,
-    /if\(sparseStructureHalo\)\{fill=vec3f\(0\.0\);alpha=0\.0;line=0\.0;sampleDot=0\.0;\}/);
+    /if\(sparseStructureHalo\)\{[\s\S]*line=gridLinePaint\(abs\(distance-2\.5\),0\.8\);lineStrength=0\.45;/);
 });
 
 test("the grid overlay follows SparseWorld's signed ownership directory", () => {

@@ -224,7 +224,7 @@ export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
   "surface-mesh-background": {
     owner: "svo",
     node: "primary-traversal",
-    phase: { id: "svo-primary", label: "Voxel surface planes and ray fallback" },
+    phase: { id: "svo-primary", label: "Voxel surface exact planes" },
   },
   "surface-mesh-cull": {
     owner: "svo",
