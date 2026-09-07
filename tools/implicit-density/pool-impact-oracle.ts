@@ -44,6 +44,20 @@ export function exactPoolImpactImplicitPhi(oracle: PoolImpactOracle, p: Point): 
   return Math.min(p[1] - oracle.poolHeight,
     (squaredRadius - oracle.sphereRadius ** 2) / (2 * oracle.sphereRadius));
 }
+/** Closed-form integral of the retained fixed-width density, independently
+ * derived in spherical coordinates. Pool and sphere transition supports are
+ * disjoint in both actual catalog scenes, and wholly inside the container.
+ */
+export function exactPoolImpactDensityAmount(oracle: PoolImpactOracle): number {
+  const r = oracle.sphereRadius, w = oracle.h;
+  const inner = Math.sqrt(r * r - r * w), outer = Math.sqrt(r * r + r * w);
+  if (oracle.sphereCenter[1] - outer <= oracle.poolHeight + w / 2)
+    throw new Error("analytic amount oracle requires disconnected transition supports");
+  const a = (r * r + r * w) / (2 * r * w), b = 1 / (2 * r * w);
+  const sphereAmount = 4 * Math.PI * (inner ** 3 / 3
+    + a * (outer ** 3 - inner ** 3) / 3 - b * (outer ** 5 - inner ** 5) / 5);
+  return oracle.scene.container.width_m * oracle.scene.container.depth_m * oracle.poolHeight + sphereAmount;
+}
 export function exactPoolImpactNormal(oracle: PoolImpactOracle, p: Point): Point {
   const d = p.map((v, a) => v - oracle.sphereCenter[a]!);
   const length = Math.hypot(...d);
@@ -157,7 +171,6 @@ export function measurePoolImpactMesh(mesh: Float32Array, oracle: PoolImpactOrac
       maximumSphereNormalError = Math.max(maximumSphereNormalError, Math.hypot(...n.map((v, a) => v - expected[a]!)));
     } else if (Math.abs(p[1] - oracle.poolHeight) < h) {
       poolVertices++;
-      maximumPoolHeightError_m = Math.max(maximumPoolHeightError_m, Math.abs(p[1] - oracle.poolHeight));
       // Wall normals are appropriate at the pool's perimeter. The interior
       // free-surface normals must be upward independently of the wall closure.
       if (p[0] > oracle.origin[0] + h && p[0] < -oracle.origin[0] - h
@@ -181,6 +194,12 @@ export function measurePoolImpactMesh(mesh: Float32Array, oracle: PoolImpactOrac
     if ([a, b, c].every(p => Math.abs(p[1] - oracle.poolHeight) < h)) {
       const area = ((b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2])) / 2;
       upwardPoolArea_m2 += Math.max(0, area); downwardPoolArea_m2 += Math.max(0, -area);
+      // A vertical wall cap has exactly zero projected area and legitimately
+      // contains vertices below the waterline. Only the actual free-surface
+      // triangles measure planarity; counting nearby wall vertices would
+      // report a false h/2 displacement of an exactly planar pool.
+      if (Math.abs(area) > 1e-12) for (const p of [a, b, c])
+        maximumPoolHeightError_m = Math.max(maximumPoolHeightError_m, Math.abs(p[1] - oracle.poolHeight));
     }
   }
   return { vertexCount: mesh.length / 8, poolVertices, sphereVertices, unexpectedInteriorVertices,

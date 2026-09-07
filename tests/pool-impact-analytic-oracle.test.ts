@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { packFineLevelSetSample, unpackFineLevelSetPackedPhi } from "../lib/core/fine-levelset-packed-sample";
 import { compileRetainedSceneDensity, evaluateRetainedSceneDensity, evaluateRetainedScenePhi } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
-import { exactPoolImpactImplicitPhi, exactVerticalCrossings, measurePublishedPoolImpact, poolImpactBudgets, poolImpactOracle,
+import { exactPoolImpactDensityAmount, exactPoolImpactImplicitPhi, exactVerticalCrossings, measurePublishedPoolImpact, poolImpactBudgets, poolImpactOracle,
   POOL_IMPACT_SCENES } from "../tools/implicit-density/pool-impact-oracle";
 
 for (const id of POOL_IMPACT_SCENES) test(`${id}: actual catalog geometry and original minmax8 region have an independent oracle`, () => {
@@ -42,6 +42,10 @@ for (const id of POOL_IMPACT_SCENES) test(`${id}: actual catalog geometry and or
     "an intact pool cannot conceal a missing suspended sphere");
   assert.equal(exactVerticalCrossings(oracle, 0, 0).length, 3,
     "the oracle includes pool plus lower and upper sphere surfaces");
+  const sharpAmount = oracle.scene.container.width_m * oracle.scene.container.depth_m * oracle.poolHeight
+    + 4 * Math.PI * oracle.sphereRadius ** 3 / 3;
+  assert.ok(exactPoolImpactDensityAmount(oracle) > sharpAmount + 1e-5,
+    "the native amount oracle distinguishes retained diffuse density from old sharp occupancy");
 });
 
 for (const id of POOL_IMPACT_SCENES) test(`${id}: compiled retained field agrees with analytic geometry at arbitrary physical points`, () => {
