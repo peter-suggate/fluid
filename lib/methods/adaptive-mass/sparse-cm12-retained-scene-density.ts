@@ -269,6 +269,20 @@ function densityRange(field: RetainedSceneDensity, box: RetainedSceneBox): reado
   return [low, high];
 }
 
+/** Algebraic density bounds for a physical box, including hard domain support.
+ * These permit exact constant-region fast paths; they are not outward-rounded
+ * certified interval arithmetic for arbitrary binary64 inputs. */
+export function retainedSceneDensityRange(field: RetainedSceneDensity, query: RetainedSceneBox): readonly [number, number] {
+  if ([...query.lower, ...query.upper].some(v => !Number.isFinite(v))
+    || query.lower.some((v, axis) => v >= query.upper[axis])) throw new Error("Invalid retained density range box");
+  const lower = query.lower.map((v, axis) => Math.max(v, field.domain.lower[axis])) as unknown as RetainedScenePoint;
+  const upper = query.upper.map((v, axis) => Math.min(v, field.domain.upper[axis])) as unknown as RetainedScenePoint;
+  if (lower.some((v, axis) => v >= upper[axis])) return [0, 0];
+  const [low, high] = densityRange(field, { lower, upper });
+  return [query.lower.some((v, axis) => v < field.domain.lower[axis])
+    || query.upper.some((v, axis) => v > field.domain.upper[axis]) ? 0 : low, high];
+}
+
 const GAUSS5 = [[-.906179845938664, .2369268850561891], [-.5384693101056831, .4786286704993665], [0, .5688888888888889], [.5384693101056831, .4786286704993665], [.906179845938664, .2369268850561891]] as const;
 const GAUSS9 = [[-.9681602395076261, .08127438836157441], [-.8360311073266358, .1806481606948574], [-.6133714327005904, .2606106964029354], [-.3242534234038089, .3123470770400029], [0, .3302393550012598], [.3242534234038089, .3123470770400029], [.6133714327005904, .2606106964029354], [.8360311073266358, .1806481606948574], [.9681602395076261, .08127438836157441]] as const;
 export interface RetainedSceneIntegralReceipt {

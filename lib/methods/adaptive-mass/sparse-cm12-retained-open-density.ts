@@ -38,7 +38,8 @@ function checkedLattice(dimensions: readonly [number, number, number], cellSize:
  * geometry uses that stored q8 fraction as the slab height; the separately
  * quantized signed distance does not supersede the authoritative measure.
  * This does not claim to recover the original unquantized terrain surface. */
-function compileSolidFractions(dimensions: readonly [number, number, number], world: SolidWorld): Uint8Array {
+export function compileRetainedSceneSolidFractions(dimensions: readonly [number, number, number], world: SolidWorld): Uint8Array {
+  checkedLattice(dimensions, 1);
   const count = dimensions[0] * dimensions[1] * dimensions[2], solid = new Uint8Array(count), materials = new Uint16Array(count);
   const at = (x: number, y: number, z: number) => x + dimensions[0] * (y + dimensions[1] * z);
   for (const page of world.pages) {
@@ -109,7 +110,7 @@ export function compileRetainedOpenSceneFineMeans(field: RetainedSceneDensity,
   dimensions: readonly [number, number, number], cellSize: number, world: SolidWorld,
   options: RetainedOpenSceneOptions = {}): RetainedOpenSceneFineMeans {
   const { h } = checkedLattice(dimensions, cellSize);
-  return compileMoments(field, dimensions, h, compileSolidFractions(dimensions, world), options);
+  return compileMoments(field, dimensions, h, compileRetainedSceneSolidFractions(dimensions, world), options);
 }
 
 export interface RetainedOpenSceneEditMoments {
