@@ -2413,14 +2413,21 @@ export class FluidLabRenderer {
    * extents than the solver allocated would tear. The viewport is what enforces
    * that, by pinning only for drafts it knows are geometry-preserving.
    */
-  /** A validated solid edit reaches the resident solver before the document is published. */
+  /** Preflight both consumers without submitting work or pausing the fluid clock. */
   validateLiveSolidEdit(scene: SceneDescription): void {
     const solver = this.gpuFluid;
-    if (!solver?.validateLiveSolidEdit || !solver.applySceneUniforms
-      || this.gpuFluidPending || this.simulationFault || this.runtimeFailure) {
-      throw new Error("Live voxel editing needs a ready Sparse CM12 scene.");
+    if (this.gpuFluidPending || this.simulationFault || this.runtimeFailure) {
+      throw new Error("Wait for the scene to be ready before editing voxels.");
     }
-    solver.validateLiveSolidEdit(scene);
+    if (planSceneRuntime(scene).fluidSolver) {
+      if (!solver?.validateLiveSolidEdit || !solver.applySceneUniforms) {
+        throw new Error("Live voxel editing needs a ready Sparse CM12 scene.");
+      }
+      solver.validateLiveSolidEdit(scene);
+    }
+    const display = this.svoSceneSidecar ?? solver;
+    if (!display?.validateLiveSolidEdit) throw new Error("Live voxel display is not ready.");
+    display.validateLiveSolidEdit(scene);
   }
 
   setSimulationScene(scene: SceneDescription | undefined) {

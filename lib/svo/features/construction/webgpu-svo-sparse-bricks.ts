@@ -715,7 +715,9 @@ function planarBoundaryTopologyStamp(
   environmentPrimitives: readonly EnvironmentProxyPrimitive[],
 ): string {
   return JSON.stringify({
-    solidWorld: solidWorldContentStamp(scene),
+    // Authored voxels remain mutable page geometry. Refined terrain is still
+    // baked, so its existing edit guard remains until that field is mutable.
+    terrainSolidWorld: scene.terrain ? solidWorldContentStamp(scene) : undefined,
     environment: environmentPrimitives.map((primitive) => ({
       key: primitive.key,
       ownerIndex: primitive.ownerIndex,
@@ -1499,13 +1501,10 @@ export class OctreeSparseBrickWorld {
         materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
         ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
       }));
-    const solidPlanarCatalog = scene.terrain ? undefined
-      : buildSvoSolidWorldPlanarBoundaryCatalog(scene, initialSolidWorld.patches,
-        planarCatalog.sources.length);
-    const planarSources = [
-      ...planarCatalog.sources,
-      ...(solidPlanarCatalog?.sources ?? []),
-    ];
+    // Never promote editable voxel patches into immutable planar terminals.
+    // Static environment surfaces retain their compact planar representation.
+    const solidPlanarCatalog: ReturnType<typeof buildSvoSolidWorldPlanarBoundaryCatalog> | undefined = undefined;
+    const planarSources = [...planarCatalog.sources];
     const residualSolidWorld = svoPlanarResidualSolidWorld(initialSolidWorld,
       solidPlanarCatalog);
     // Terrain is page-native and may share pages with authored edits, so its
@@ -2509,6 +2508,12 @@ export class OctreeSparseBrickWorld {
    * before the next presentation frame coalesce into one publication whose
    * dirty coverage includes every superseded old/new bound.
    */
+  validateLiveSolidEdit(scene: SceneDescription): void {
+    if (this.destroyed) throw new Error("Sparse scene has been destroyed");
+    if (scene.terrain) throw new Error("Baked terrain does not support live voxel edits");
+    this.proxyVoxelizer.validateSolidWorld(solidWorldForScene(scene));
+  }
+
   stageSceneUpdate(scene: SceneDescription): boolean {
     if (this.destroyed) throw new Error("Cannot update a destroyed sparse-brick world");
     const initialPublication = this.sceneRevision === 0;
@@ -2519,10 +2524,14 @@ export class OctreeSparseBrickWorld {
       || solidWorldStampChanged;
     const nextSolidWorld = solidWorldStampChanged
       ? solidWorldForScene(scene) : previousSolidWorld;
-    const previousSolidBounds = initialPublication ? []
-      : solidWorldPageBounds(scene, previousSolidWorld);
+    const previousPages = new Map(previousSolidWorld.pages.map(page => [page.coordinate.join(","), page]));
+    const nextPages = new Map(nextSolidWorld.pages.map(page => [page.coordinate.join(","), page]));
+    const previousSolidBounds = initialPublication || !solidWorldChanged ? []
+      : solidWorldPageBounds(scene, { ...previousSolidWorld, pages: previousSolidWorld.pages.filter(page =>
+        nextPages.get(page.coordinate.join(",")) !== page) });
     const nextSolidBounds = solidWorldChanged
-      ? solidWorldPageBounds(scene, nextSolidWorld) : [];
+      ? solidWorldPageBounds(scene, { ...nextSolidWorld, pages: initialPublication ? nextSolidWorld.pages
+        : nextSolidWorld.pages.filter(page => previousPages.get(page.coordinate.join(",")) !== page) }) : [];
     const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default", {
       detailCellSize_m: this.environmentDetailCellSize_m || undefined,
     });
@@ -2533,9 +2542,7 @@ export class OctreeSparseBrickWorld {
     }));
     const residualAuthored = svoPlanarResidualEnvironmentPrimitives(authored,
       planarCatalog);
-    const solidPlanarCatalog = scene.terrain ? undefined
-      : buildSvoSolidWorldPlanarBoundaryCatalog(scene, nextSolidWorld.patches,
-        planarCatalog.sources.length);
+    const solidPlanarCatalog: ReturnType<typeof buildSvoSolidWorldPlanarBoundaryCatalog> | undefined = undefined;
     const nextResidualSolidWorld = svoPlanarResidualSolidWorld(nextSolidWorld,
       solidPlanarCatalog);
     if (!initialPublication && this.planarTopologyStamp

@@ -2701,7 +2701,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .voxel-tool-shelf button { cursor: pointer; }
 .voxel-tool-shelf button:disabled { opacity: .45; cursor: default; }
 .voxel-tool-shelf button[aria-pressed="true"] { border-color: #55aaff; background: #23609a; color: #fff; }
-.voxel-tool-panel { margin-top: 7px; padding: 12px; border: 1px solid var(--line, #7775); border-radius: 8px; background: var(--panel, #20252d); color: var(--text, #edf1f5); box-shadow: 0 5px 24px #0003; max-height: calc(100vh - 210px); overflow-y: auto; }
+.voxel-tool-panel { margin-top: 7px; padding: 12px; border: 1px solid var(--line, #7775); border-radius: 8px; background: var(--panel, #20252d); color: var(--ink, #edf1f5); box-shadow: 0 5px 24px #0003; max-height: calc(100vh - 210px); overflow-y: auto; }
 .voxel-tool-panel fieldset { border: 0; padding: 0; margin: 0 0 10px; }
 .voxel-tool-panel legend { font-weight: 600; margin-bottom: 6px; }
 .voxel-tool-buttons { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }

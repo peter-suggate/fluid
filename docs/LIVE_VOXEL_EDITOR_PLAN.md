@@ -88,3 +88,43 @@ Implicit sculpting needs a real scalar-field edit representation. The present fi
 5. Add masks, selection transforms and duplication on the same plugin contract. Then add smooth, flatten and inflate/erode after scalar-field persistence and fluid coupling are implemented and tested.
 
 The latency target should be measured on the repository's reference M1 Max: accepted small edits reach the next simulation step and do not turn a passing frame-time lane into a failure. Until that measurement exists, “no reset” must not be presented as “no stall”.
+
+## Implemented first suite and validation
+
+The registry, eight colocated plugins (Build, Carve, Box, Cut, Sphere, Drill,
+Wall and Channel), generic shelf and asynchronous gesture transaction host are
+implemented. The shelf provides new/open, named save, JSON import/export,
+voxel-only live undo/redo, construction height, face depth, optional tank-wall
+picking and X symmetry. Capacity rejection preserves the last accepted scene.
+
+Small edits reuse their stroke's base SolidWorld, copy only touched pages and
+reuse unchanged payload uploads. The worker preflights fluid and presentation
+capacity before the main thread publishes the accepted scene. Initial arenas
+reserve editing headroom. The SVO uses mutable voxel pages for authored solids;
+static environment geometry retains planar acceleration. SVO invalidation is
+limited to changed/removed pages. No edit invokes reset or waits for GPU readback.
+
+**Current scope:** voxel-authored scenes and Sparse CM12 fluid coupling. Scenes
+with baked terrain are explicitly unavailable in the tool plugins, because their
+refined display field still requires rebuilding. Start a new voxel scene or open
+a terrain-free scene. Smooth, flatten, masks and arbitrary selection transforms
+remain proposed follow-up plugins, not implemented controls. Displaced-liquid
+conservation and full browser latency under large scenes remain acceptance work.
+
+Validation on this checkout:
+
+- 15 focused CPU tests passed, including all eight tool geometry/save round trips,
+  continuous strokes, retracting boxes, cancellation and unchanged-page uploads.
+- Native Dawn solid-boundary test passed: local open fraction 1 → 0.875 → 1;
+  same resident world, clock advanced to 0.1 s, finite fields. The first measured
+  host edit was approximately 2.9 ms. This is a small-fixture measurement, not an
+  end-to-end worst-case latency guarantee.
+- Native Dawn presentation test passed: repeated fill/clear/fill accepted by the
+  same SVO source without rebuild or GPU validation errors.
+- Production build passed. Whole-repository type checking reports existing errors
+  outside the editor files in this concurrently modified checkout.
+- Full Sparse CM12 gate was run without a concurrent browser/Dawn process. It
+  failed D4 symmetry and multiple lane timeouts, then exhausted its 180 s budget.
+  No lane, timeout or performance ceiling was weakened. Broad acceptance is not
+  claimed; the concurrent simulation work prevents attributing these failures to
+  the editor without a controlled baseline comparison.

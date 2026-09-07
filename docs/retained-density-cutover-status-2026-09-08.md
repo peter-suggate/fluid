@@ -24,7 +24,7 @@ that location does not establish their adoption by a production consumer.
 | Same module: `fitPositiveBernsteinMeans` | Nonnegative conservative correction with shared boundary control capacity and a private center correction | Algebraic feasibility only; rejected as a general geometry-preserving reconstruction |
 | `lib/methods/adaptive-mass/sparse-cm12-density-native-geometry.ts` | `compileDensityNativeGeometry`; physical native boxes, compact ordinal mapping, face adjacency and optional boundary-stamped open moments | Geometry compiler, not a field constructor or resident topology transaction |
 | `lib/methods/adaptive-mass/sparse-cm12-density-support-coupling.ts` | `compileDensitySupportCoupling`, `applyDensitySupportCoupling`, `densitySupportGeometryKey`, `assertDensitySupportCouplingSupport`; sparse CSR intersections and tensor Bernstein box moments | Integrates full native boxes; cannot replace clipped-solid basis integrals with scalar open fractions |
-| `lib/methods/adaptive-mass/webgpu-sparse-cm12-retained-density.ts` and `.wgsl.ts` | `WebGPURetainedDensityField.create`, `retain`, `release`, `next`, `compileQueries`, `compileCoupling`; immutable GPU coefficients and leased compiled operations | GPU execution currently implements Bernstein support, not the clamped-affine representation or a complete dynamics update |
+| `lib/methods/adaptive-mass/webgpu-sparse-cm12-retained-density.ts` and `sparse-cm12-retained-density.wgsl.ts` | `WebGPURetainedDensityField.create`, `retain`, `release`, `next`, `compileQueries`, `compileCoupling`; immutable GPU coefficients and leased compiled operations | GPU execution currently implements Bernstein support, not the clamped-affine representation or a complete dynamics update |
 | `lib/methods/adaptive-mass/sparse-cm12-retained-affine-density.ts` | `retainedAffineRamp`, `retainedAffineFeature`, `evaluateRetainedAffineDensity`, `integrateRetainedAffineDensity`, `meanRetainedAffineDensity`, `splitRetainedAffineDensity` | CPU algebra for one ramp or min/max of two ramps; no curved branches, GPU path or assembled global support |
 | `lib/methods/adaptive-mass/sparse-cm12-retained-quadratic-density.ts` | `retainedQuadraticDensity`, `retainedSphereDensity`, `initializeRetainedDensityPrimitive`, evaluation/gradient functions and `integrateRetainedQuadraticDensity`; immutable ten-coefficient declared geometry and outward-rounded CPU integral enclosures | Reference integration can exhaust its accuracy budget; no GPU or evolving hybrid-field assembly |
 
@@ -126,9 +126,11 @@ path, field transport or hybrid assembly follows from these five passes.
 
 ## Verification status
 
-The original combined CPU set passed **86 tests**. A final expanded set adds
-ten resource-readiness tests and five curved-primitive tests.
-**Both real Dawn GPU tests pass after the readiness update**. The independent
+The final expanded CPU set passes **101/101 tests**, including ten
+resource-readiness tests and five curved-primitive tests. Strict targeted
+TypeScript checking is clean. **Both real Dawn GPU tests pass after the
+readiness update**. The CPU receipt is
+`/tmp/fluid-density-cutover-cpu-final.log`. The independent
 24-test affine geometry suite was also run directly and passed. The GPU tests
 cover smooth quadratic and crease values/physical gradients, mixed native
 box integrals against independent piecewise Gauss quadrature, stale epoch
@@ -222,3 +224,8 @@ npm run test:dawn:sparse-cm12
 
 See [the canonical regression policy](SPARSE_CM12_DAWN_REGRESSION.md) for lane
 selection during diagnosis and the unchanged baseline requirements.
+
+The [local validation receipt](../artifacts/retained-density-cutover/validation.json)
+preserves the measured statuses and source hashes; adjacent logs preserve the
+full CPU, component Dawn, production partition and canonical baseline output.
+These generated artifacts follow the repository's ignored-artifact policy.

@@ -2846,6 +2846,7 @@ export class SparseSceneProxyVoxelizer {
   private readonly clusterCapacity: number;
   private readonly fieldProgramCapacity: number;
   private readonly solidWorldLayout?: WebgpuSolidWorldPageLayout;
+  private uploadedSolidWorld?: SolidWorld;
   private readonly renderTerrainLayout?: Readonly<{
     baseWords: number;
     heightsBaseWords: number;
@@ -2976,9 +2977,10 @@ export class SparseSceneProxyVoxelizer {
     }
     this.solidWorldLayout = options.solidWorld ? createWebgpuSolidWorldPageLayout({
       baseWords: solidWorldBaseWords,
-      authoredPageCount: options.solidWorld.pages.length,
+      authoredPageCount: Math.max(256, options.solidWorld.pages.length),
       includesMaterial: true,
     }) : undefined;
+    this.uploadedSolidWorld = options.solidWorld;
     const renderTerrainBaseWords = this.solidWorldLayout?.totalWords ?? solidWorldBaseWords;
     this.renderTerrainLayout = options.renderTerrain ? Object.freeze({
       baseWords: renderTerrainBaseWords,
@@ -3115,6 +3117,12 @@ export class SparseSceneProxyVoxelizer {
   }
 
   /** Replace the canonical static-solid image without allocating a host mirror. */
+  validateSolidWorld(world: SolidWorld): void {
+    if (!this.solidWorldLayout || world.pages.length > this.solidWorldLayout.pageCapacity) {
+      throw new Error("Live display capacity reached; remove some voxels before adding more.");
+    }
+  }
+
   setSolidWorld(world: SolidWorld): void {
     const layout = this.solidWorldLayout;
     const lattice = this.options.solidWorldLattice;
@@ -3122,12 +3130,14 @@ export class SparseSceneProxyVoxelizer {
       if (world.pages.length > 0) throw new Error("This voxelizer has no SolidWorld capacity");
       return;
     }
+    this.validateSolidWorld(world);
     const clear = this.device.createCommandEncoder({ label: "Clear SVO SolidWorld image" });
-    clear.clearBuffer(this.maintenanceArena, 4 * layout.baseWords,
-      4 * (layout.totalWords - layout.baseWords));
+    clear.clearBuffer(this.maintenanceArena, 4 * (layout.baseWords + layout.directoryBaseWords),
+      4 * (layout.pageBaseWords - layout.directoryBaseWords));
     this.device.queue.submit([clear.finish()]);
     writeWebgpuSolidWorldPages(this.device.queue, this.maintenanceArena,
-      layout, world, [0, 0, 0], lattice);
+      layout, world, [0, 0, 0], lattice, this.uploadedSolidWorld);
+    this.uploadedSolidWorld = world;
   }
 
   /** What the last publication asked of the record index, for lanes that measure it. */

@@ -4,7 +4,7 @@ import { fixtures, type LadderFixture } from "./ladder-fixtures";
 
 export const LADDER_BUDGETS = Object.freeze({
   density: 1e-10, integratedAmount: 1e-10, gradient: 1e-9,
-  surfaceResidual: 1e-10, cycles: 100,
+  surfaceResidual: 1e-10, surfaceDisplacement: 1e-9, surfaceNormal: 1e-9, cycles: 100,
 });
 interface Leaf { readonly box: Box; readonly field: DensityField }
 function partition(field: DensityField, box: Box, variant: number): Leaf[] {
@@ -39,6 +39,7 @@ export function runFixture(fixture: LadderFixture, includeSection = false) {
   let field: DensityField = fixture.field;
   const initialMass = fixture.exactMean(fixture.box) * volume(fixture.box);
   let maximumDensityError = 0, maximumGradientError = 0, maximumSurfaceResidual = 0;
+  let maximumSurfaceDisplacement = 0, maximumSurfaceNormalError = 0;
   let maximumMassError = 0, maximumLocalMeanError = 0, maximumSeamJump = 0;
   let maximumLeaves = 0;
   const checkpoints: { cycle: number; leaves: number; massError: number }[] = [];
@@ -75,10 +76,40 @@ export function runFixture(fixture: LadderFixture, includeSection = false) {
       ...actual.map((v, a) => Math.abs(v - expected[a])));
     else if (!!expected !== !!actual) throw new Error(`${fixture.id}: lost or invented sharp branch tie`);
   }
+  // Intersect the represented field along independently specified analytic
+  // normals. A density residual alone has no geometric units and can conceal
+  // a displaced surface when the field's gradient is small. At a crease the
+  // analytic normal is intentionally undefined, so retain the exact level-set
+  // residual check instead of inventing a smoothed normal there.
+  let normalProbeCount = 0, creaseProbeCount = 0;
+  for (const point of fixture.surfacePoints) {
+    const expected = fixture.exactGradient(point);
+    if (!expected) { creaseProbeCount++; continue; }
+    const length = Math.hypot(...expected);
+    const normal = expected.map(v => v / length) as unknown as Vec3;
+    const along = (s: number) => point.map((v, a) => v + s * normal[a]) as unknown as Vec3;
+    let lo = -.01, hi = .01;
+    if (!(evaluate(field, along(lo)) < .5 && evaluate(field, along(hi)) > .5))
+      throw new Error(`${fixture.id}: represented surface lost its analytic crossing`);
+    for (let iteration = 0; iteration < 60; iteration++) {
+      const mid = (lo + hi) / 2;
+      if (evaluate(field, along(mid)) < .5) lo = mid; else hi = mid;
+    }
+    const displacement = (lo + hi) / 2;
+    maximumSurfaceDisplacement = Math.max(maximumSurfaceDisplacement, Math.abs(displacement));
+    const actual = fieldGradient(field, along(displacement));
+    if (!actual) throw new Error(`${fixture.id}: smooth surface acquired a branch tie`);
+    const actualLength = Math.hypot(...actual);
+    maximumSurfaceNormalError = Math.max(maximumSurfaceNormalError,
+      Math.hypot(...actual.map((v, a) => v / actualLength - normal[a])));
+    normalProbeCount++;
+  }
   const b = LADDER_BUDGETS;
   const passed = maximumDensityError <= b.density && maximumLocalMeanError <= b.density
     && maximumMassError <= b.integratedAmount && maximumGradientError <= b.gradient
-    && maximumSurfaceResidual <= b.surfaceResidual && maximumSeamJump <= b.density;
+    && maximumSurfaceResidual <= b.surfaceResidual && maximumSeamJump <= b.density
+    && maximumSurfaceDisplacement <= b.surfaceDisplacement
+    && maximumSurfaceNormalError <= b.surfaceNormal;
   const section = includeSection ? (() => {
     const axes = fixture.id.startsWith("edge-")
       ? fixture.id.endsWith("-z") ? [2, 0] : [0, 2] : [0, 1];
@@ -93,7 +124,8 @@ export function runFixture(fixture: LadderFixture, includeSection = false) {
   })() : undefined;
   return { id: fixture.id, description: fixture.description, passed, maximumLeaves,
     maximumDensityError, maximumLocalMeanError, maximumMassError, maximumGradientError,
-    maximumSurfaceResidual, maximumSeamJump, checkpoints, ...(section ? { section } : {}) };
+    maximumSurfaceResidual, maximumSurfaceDisplacement, maximumSurfaceNormalError,
+    normalProbeCount, creaseProbeCount, maximumSeamJump, checkpoints, ...(section ? { section } : {}) };
 }
 export function runLadder(includeSections = false) {
   return fixtures.map(f => runFixture(f, includeSections));

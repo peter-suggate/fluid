@@ -52,6 +52,7 @@ import type { SceneryPropKind } from "../stores/ui-store";
 import {
   browserSceneLibraryStorage,
   loadSceneFromLibrary,
+  readSceneLibrary,
   saveSceneToLibrary,
   type SceneLibraryEntry,
 } from "../scene-library";
@@ -1692,7 +1693,10 @@ class SimulationController {
         methodProfile: { methodId, quality, overrides: { ...(overrides[methodId] ?? {}) } },
       },
     );
-    this.session(paneId).runtime.getState().setNotice(`Saved “${entry.name}”`);
+    const persisted = readSceneLibrary(browserSceneLibraryStorage())
+      .some((saved) => saved.id === entry.id && saved.scene === entry.scene);
+    this.session(paneId).runtime.getState().setNotice(persisted ? `Saved “${entry.name}”`
+      : "Scene could not be saved in this browser. Export JSON to keep a copy.", persisted ? "info" : "warn");
     return entries;
   }
 

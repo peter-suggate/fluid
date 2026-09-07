@@ -445,6 +445,8 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
     }
   }
 
+  validateLiveSolidEdit(scene: SceneDescription): void { this.world.validateLiveSolidEdit(scene); }
+
   stageSceneUpdate(scene: SceneDescription): void { this.world.stageSceneUpdate(scene); }
   stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]): boolean {
     return this.world.stageLivePrimitiveUpdates(updates);

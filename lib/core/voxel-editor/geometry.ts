@@ -1,5 +1,5 @@
 import type { EditorRay } from "../editor-entity";
-import { pickSolidVoxel, solidVoxelWorldBox } from "../editor-solid-voxel";
+import { containerShellContains, pickSolidVoxel, solidVoxelWorldBox } from "../editor-solid-voxel";
 import { sceneCellSizes_m } from "../scene-lattice";
 import type { SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../solid-world";
 import type { ToolContext, ToolControl, ToolGesture, ToolUpdate } from "./plugin";
@@ -7,7 +7,8 @@ import type { ToolContext, ToolControl, ToolGesture, ToolUpdate } from "./plugin
 export const sizeControl: ToolControl = { id: "size", label: "Width · voxels", min: 1, max: 16, step: 1, initial: 1 };
 export const depthControl: ToolControl = { id: "depth", label: "Depth · voxels", min: 1, max: 32, step: 1, initial: 1 };
 export const planeControl: ToolControl = { id: "plane", label: "Empty-space height · voxels", min: -64, max: 128, step: 1, initial: 0 };
-export const mirrorControl: ToolControl = { id: "mirror", label: "Mirror X (0 off, 1 on)", min: 0, max: 1, step: 1, initial: 0 };
+export const shellControl: ToolControl = { id: "shell", kind: "toggle", label: "Edit tank walls", min: 0, max: 1, step: 1, initial: 0 };
+export const mirrorControl: ToolControl = { id: "mirror", kind: "toggle", label: "Mirror X", min: 0, max: 1, step: 1, initial: 0 };
 /** Limits are checked before accepting an update, never silently truncated. */
 export const MAX_STROKE_VOXELS = 32768;
 export const MAX_STROKE_PATCHES = 4096;
@@ -56,7 +57,10 @@ export function beginShapeGesture(context: ToolContext, operation: Patch["operat
   const { scene, values, ray } = context;
   const cell = sceneCellSizes_m(scene);
   const origin = [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
-  const hit = pickSolidVoxel(scene, ray);
+  const hit = pickSolidVoxel(scene, ray, undefined, {
+    skip: (coordinate) => values.shell !== 1 && coordinate[1] >= 0
+      && containerShellContains(scene, coordinate),
+  });
   const axis = hit?.faceAxis ?? 1;
   const sign = hit?.faceSign ?? 1;
   const plane = hit ? origin[axis]! + (hit.coordinate[axis] + (sign > 0 ? 1 : 0)) * cell[axis]!
@@ -112,9 +116,7 @@ export function beginShapeGesture(context: ToolContext, operation: Patch["operat
     if (patches.length > MAX_STROKE_PATCHES || work > MAX_STROKE_VOXELS) throw new Error("Stroke is full; release and start another stroke.");
     if (mode === "brush") {
       accumulated.clear();
-      // Keep original-side stamps; symmetry is applied once per proposal.
-      for (const at of interpolateCells(last, end)) for (const p of stamp(at)) accumulated.set(JSON.stringify(p), p);
-      // Retain the accepted history, including its mirrored counterpart (deduplicated above).
+      // Retain the accepted stroke; mirrored stamps are deduplicated above.
       for (const p of patches) accumulated.set(JSON.stringify(p), p);
     }
     last = end;
@@ -124,4 +126,13 @@ export function beginShapeGesture(context: ToolContext, operation: Patch["operat
       min: solidVoxelWorldBox(scene, minimum).min, max: solidVoxelWorldBox(scene, maximum).max } },
       caption: `${operation === "fill" ? "BUILD" : "CARVE"} · ${minimum.map((v, a) => maximum[a]! - v + 1).join(" × ")}` };
   } };
+}
+
+/** The declaration is shared by this family, but each plugin owns its availability. */
+export function voxelToolUnavailable({ scene, methodId }: {
+  scene: ToolContext["scene"]; methodId: string;
+}): string | undefined {
+  if (scene.terrain) return "This scene has baked terrain. Start a new voxel scene for live editing.";
+  if (scene.systems?.fluid !== false && methodId !== "adaptive-mass") return "Choose Sparse CM12 to edit solids while water runs.";
+  return undefined;
 }

@@ -141,6 +141,78 @@ export interface SparseCM12PressureRepairLayout {
   readonly totalWords: number;
 }
 
+/** Retained field data lives in the ordinary resident state arena. Integrals
+ * address the immutable cell catalogue, so accepting another partition never
+ * rebuilds the field from that partition's means. */
+export interface SparseCM12RetainedDensityResidentLayout {
+  readonly fieldBaseWords: number;
+  readonly integralBaseWords: number;
+  readonly controlBaseWords: number;
+}
+
+function sparseCM12RetainedDensityResidentWGSL(
+  layout: SparseCM12RetainedDensityResidentLayout | undefined,
+): string {
+  if (!layout) return /* wgsl */ `
+fn cm12RetainedDensityEnabled()->bool{return false;}
+fn cm12RetainedDensityPhiMetres(_point:vec3f)->f32{return 1e6;}
+fn cm12RetainedDensityPhiAtFine(_point:vec3f)->f32{return 1e6;}
+fn cm12RetainedDensityCellMean(_cell:u32)->f32{return 0.0;}
+`;
+  return /* wgsl */ `
+const CM12_RETAINED_FIELD_BASE:u32=${layout.fieldBaseWords}u;
+const CM12_RETAINED_INTEGRAL_BASE:u32=${layout.integralBaseWords}u;
+const CM12_RETAINED_CONTROL_BASE:u32=${layout.controlBaseWords}u;
+fn cm12RetainedDensityEnabled()->bool{
+  return state[CM12_RETAINED_CONTROL_BASE]>0.5;
+}
+fn cm12RetainedDensityVector(at:u32)->vec3f{
+  return vec3f(state[at],state[at+1u],state[at+2u]);
+}
+fn cm12RetainedDensityBoxPhi(point:vec3f,lower:vec3f,upper:vec3f,
+ domainLower:vec3f,domainUpper:vec3f)->f32{
+  // A tank wall is a hard support boundary, not an additional diffuse liquid
+  // interface. Only authored faces strictly inside the domain make ramps.
+  var phi=-1e6;
+  for(var axis=0u;axis<3u;axis+=1u){
+    if(lower[axis]>domainLower[axis]){phi=max(phi,lower[axis]-point[axis]);}
+    if(upper[axis]<domainUpper[axis]){phi=max(phi,point[axis]-upper[axis]);}
+  }
+  return phi;
+}
+fn cm12RetainedDensityPhiMetres(point:vec3f)->f32{
+  let lower=cm12RetainedDensityVector(CM12_RETAINED_FIELD_BASE+4u);
+  let upper=cm12RetainedDensityVector(CM12_RETAINED_FIELD_BASE+8u);
+  if(any(point<lower)||any(point>upper)){
+    return max(state[CM12_RETAINED_FIELD_BASE+3u],1e-6);
+  }
+  let count=u32(state[CM12_RETAINED_FIELD_BASE+1u]);var phi=1e6;
+  for(var primitive=0u;primitive<count;primitive+=1u){
+    let at=CM12_RETAINED_FIELD_BASE+16u+16u*primitive;
+    let kind=u32(state[at]);let a=cm12RetainedDensityVector(at+4u);
+    let b=cm12RetainedDensityVector(at+8u);var branch=1e6;
+    if(kind==1u){branch=cm12RetainedDensityBoxPhi(point,a,b,lower,upper);}
+    else if(kind==2u){
+      let delta=(point-a)/b;
+      branch=0.5*min(b.x,min(b.y,b.z))*(dot(delta,delta)-1.0);
+    }else if(kind==3u){
+      let delta=point-a;
+      branch=delta.y-b.x*delta.x*delta.x-b.z*delta.z*delta.z;
+    }
+    phi=min(phi,branch);
+  }
+  return phi;
+}
+fn cm12RetainedDensityPhiAtFine(point:vec3f)->f32{
+  let origin=cm12RetainedDensityVector(CM12_RETAINED_FIELD_BASE+12u);
+  return cm12RetainedDensityPhiMetres(origin+point*p.frame.y);
+}
+fn cm12RetainedDensityCellMean(cell:u32)->f32{
+  return state[CM12_RETAINED_INTEGRAL_BASE+cell];
+}
+`;
+}
+
 function sparseCM12SolidOccupancyWGSL(
   layout: SparseCM12SolidOccupancyLayout | undefined,
 ): string {
@@ -351,6 +423,7 @@ export function createWebgpuSparseCM12ResidentWGSL(
   implicitSharpeningOwnerArithmeticForQA = false,
   alternatingCapacityRepairReceiptsForQA = false,
   gatherCapacityRepairForQA = false,
+  retainedDensityLayout?: SparseCM12RetainedDensityResidentLayout,
 ): string {
   if (presentationPageResolution > brickFineResolution
     || brickFineResolution % presentationPageResolution !== 0) {
@@ -611,6 +684,7 @@ fn authorizeEmptySparseCM12CandidateEffectsNoFail(acceptedGeneration:u32)->bool{
     })
     : "";
   const solidOccupancyEntries = sparseCM12SolidOccupancyWGSL(solidOccupancyLayout);
+  const retainedDensityEntries = sparseCM12RetainedDensityResidentWGSL(retainedDensityLayout);
   const transportExecutionImageEntries = createSparseCM12TransportExecutionImageWGSL({
     layout: transportExecutionImageLayout,
   });
@@ -2085,6 +2159,7 @@ fn clipBoundarySegment(startInput:vec3f,candidate:vec3f)->vec3f{
 ${worldDirectoryEntries}
 ${logicalOwnerEntries}
 ${solidOccupancyEntries}
+${retainedDensityEntries}
 ${transportExecutionImageEntries}
 ${transportPacketAuthorityEntries}
 ${finalScalarPacketMaskEntries}
@@ -8879,7 +8954,8 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
   let sourceDimensions=transferBrickDimensions(brick,accepted);
   let candidateDimensions=transferBrickDimensions(brick,candidate);
   let reconstructingFineRung=accepted==BRICK_FINE_RESOLUTION/2u
-    &&candidate==BRICK_FINE_RESOLUTION&&brickSpan(brick)==1u;
+    &&candidate==BRICK_FINE_RESOLUTION&&brickSpan(brick)==1u
+    &&!cm12RetainedDensityEnabled();
   if(reconstructingFineRung){
     for(var parentLocal=lane;parentLocal<sourceCount;parentLocal+=64u){
       let parentBase=2u*transferLocalCoordinate(parentLocal,sourceDimensions);
@@ -8998,6 +9074,13 @@ fn transferCandidateCellsWork(lid:vec3u,brick:u32,validBrick:bool){
       gamma=state[destinationGamma()+cell];pressure=state[p.stateOffsets2.x+cell];
       let velocityAt=destinationCellVelocity()+4u*cell;
       velocity=vec3f(state[velocityAt],state[velocityAt+1u],state[velocityAt+2u]);
+    }
+    // A topology transaction integrates the retained physical field over its
+    // new native cells. It must not infer hidden children from a coarse mean
+    // or from the presentation stencil. The integral image was compiled from
+    // the same generation queried by publication and covers every template.
+    if(cm12RetainedDensityEnabled()){
+      rho=cm12RetainedDensityCellMean(candidateRange.x+local);
     }
     candidateState[candidateFieldIndex(0u,brick,local)]=rho;
     candidateState[candidateFieldIndex(1u,brick,local)]=gamma;
@@ -10016,6 +10099,12 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
     let bulkLiquid=cm12PresentationWet!=0u
       &&activityF32(activityOutput+4u)>=CM12_LIQUID_ISOVALUE;
     cm12PresentationUniformPhi=select(4.0*p.frame.y,-4.0*p.frame.y,bulkLiquid);
+    if(cm12RetainedDensityEnabled()){
+      // Retained geometry does not require a native-density interpolation
+      // stencil. The canonical sample positions are unchanged by rerunging.
+      cm12PresentationStencilCandidate=0u;
+      cm12PresentationResolvedFeature=1u;
+    }
   }
   let presentationCandidates=workgroupUniformLoad(&cm12PresentationStencilCandidate);
   if((presentationCandidates&2u)!=0u){preparePresentationColumnHeights(lane,
@@ -10075,6 +10164,10 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
   if(!dynamicPage&&(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz)))){
     phi=4.0*p.frame.y;
   }
+  else if(cm12RetainedDensityEnabled()){
+    phi=select(cm12RetainedDensityPhiAtFine(vec3f(q)+vec3f(0.5)),
+      4.0*p.frame.y,cm12SolidVoxelFractionQ8(q)>=255u);
+  }
   // The cache is meaningful only when PreparePage selected and filled the
   // height candidate. Otherwise a zeroed workgroup lane looks like a valid
   // height and turns a fully wet bulk page into phi=+y.
@@ -10126,6 +10219,9 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
   }
   // Compact CM12 has no cached closest-point payload. Bits 24..27 of
   // the packed word carry log2(accepted cell width), atomically with phi.
+  // A completely full/empty retained domain has no finite-distance interface.
+  // Preserve its sign with a finite half-float payload instead of infinity.
+  phi=clamp(phi,-65504.0,65504.0);
   let flags=1u|floorContinuation|select(0u,16u,phi<0.0)
     |((31u-countLeadingZeros(max(1u,cm12PresentationScale)))<<8u);
   return vec2u((pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u),0u);
@@ -10204,6 +10300,9 @@ fn surfaceProofVirtualVolumePhi(local:vec3i,factor:u32)->f32{
 fn surfaceProofAcceptedPhi(local:vec3i,densityOffset:u32)->f32{
   let q=cm12PresentationBrickOrigin+local;
   if(cm12SolidVoxelFractionQ8(q)>=255u){return 4.0*p.frame.y;}
+  if(cm12RetainedDensityEnabled()){
+    return cm12RetainedDensityPhiAtFine(vec3f(q)+vec3f(0.5));
+  }
   let owner=presentationCompiledOwnerCellAt(q);
   if(owner.x==INVALID||!brickActive(owner.y)){return 4.0*p.frame.y;}
   // The committed packet is the accepted geometry being certified. Reuse its
@@ -10408,7 +10507,11 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     let local=vec3i(i32(x)-1,i32(y)-1,i32(z)-1);
     let fine=surfaceProofAcceptedPhi(local,cm12PresentationDensityOffset);
     let world=cm12PresentationBrickOrigin+local;
-    var coarse=surfaceProofVirtualVolumePhi(local,restrictionFactor);
+    var coarse=0.0;
+    if(cm12RetainedDensityEnabled()){
+      // The candidate changes integration boxes, not the retained field.
+      coarse=cm12RetainedDensityPhiAtFine(vec3f(world)+vec3f(0.5));
+    }else{coarse=surfaceProofVirtualVolumePhi(local,restrictionFactor);}
     if(cm12SolidVoxelFractionQ8(world)>=255u){coarse=4.0*p.frame.y;}
     surfaceProofPhi[index]=vec2f(fine,coarse);
   }
@@ -10564,6 +10667,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
         &&(!uniformBulkReady||(activityReasons&(1u|256u|512u))!=0u
           ||(wet&&activityF32(activityRecord(brick)+4u)<1.0-1e-3)
           ||brickHasPresentationSurfaceSupport(brick)));
+    if(cm12RetainedDensityEnabled()){cm12PresentationStencilCandidate=0u;}
   }
   let presentationCandidates=workgroupUniformLoad(&cm12PresentationStencilCandidate);
   let heightCandidate=(presentationCandidates&2u)!=0u;
@@ -10611,7 +10715,10 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
     let coarseUniformLiquid=scale>1u&&sampleScale==1u&&cacheFits
       &&stencilCandidate&&coarsePhase==2u;
     if(dynamicPage||(all(q>=vec3i(0))&&all(q<vec3i(p.dimensions.xyz)))){
-      if(scale==1u&&sampleScale==1u&&heightCandidate
+      if(cm12RetainedDensityEnabled()){
+        phi=select(cm12RetainedDensityPhiAtFine(vec3f(q)+vec3f(0.5)),
+          4.0*p.frame.y,cm12SolidVoxelFractionQ8(q)>=255u);
+      }else if(scale==1u&&sampleScale==1u&&heightCandidate
         &&presentationColumnHeightValid(i32(localX),i32(localZ),false)
         &&cm12SolidVoxelFractionQ8(q)==0u){
         phi=presentationHeightPhi(q,i32(localX),i32(localZ),false);
@@ -10650,6 +10757,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
       floorContinuation=presentationFloorContinuationFlag(
         q,i32(localX),i32(localZ),false);
     }
+    phi=clamp(phi,-65504.0,65504.0);
     let flags=1u|floorContinuation|select(0u,16u,phi<0.0)
       |((31u-countLeadingZeros(max(1u,scale)))<<8u);
     fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+localIndex]
