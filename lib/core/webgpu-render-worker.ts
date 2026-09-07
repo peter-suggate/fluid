@@ -4,7 +4,7 @@
 // looks up by id. Nothing else in the worker imports the method package.
 import "../methods/index";
 import { FluidLabRenderer } from "./webgpu-renderer";
-import { reuseSolidWorld } from "./solid-world";
+import { reuseSolidWorld, sceneWithSolidStroke } from "./solid-world";
 import { webGPUPlatformResourcePlugin } from "./webgpu-platform-resource";
 import { markSceneRevision, type SceneDescription } from "./model";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
@@ -16,6 +16,7 @@ import type {
 
 const scope = self as DedicatedWorkerGlobalScope;
 let preparedSolidScene: SceneDescription | undefined;
+let solidEditBase: SceneDescription | undefined;
 
 /**
  * Structural levers the browser cannot otherwise reach.
@@ -119,6 +120,14 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       .catch((error) => failure(message.requestId, error));
   } else if (message.type === "validate-solid-edit") {
     try {
+      if (message.base) {
+        solidEditBase = message.base;
+        if (renderScene) reuseSolidWorld(renderScene.document, solidEditBase);
+      }
+      if (!solidEditBase) throw new Error("Missing voxel stroke base");
+      const prepared = sceneWithSolidStroke(solidEditBase,
+        message.scene.solidVoxels.slice(solidEditBase.solidVoxels.length));
+      reuseSolidWorld(prepared, message.scene);
       runtime.validateLiveSolidEdit(message.scene);
       preparedSolidScene = message.scene;
       post({ type: "solid-edit-validated", requestId: message.requestId });

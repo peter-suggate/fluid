@@ -2694,3 +2694,19 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .simulation-stop-panel small { color: var(--muted); }
 .simulation-stop-panel details { margin-top: 8px; }
 .simulation-stop-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+
+/* Voxel tool plugins contribute the content; this shelf only supplies layout. */
+.voxel-tool-shelf { position: absolute; top: 64px; left: 14px; z-index: 25; font-size: 14px; max-width: min(280px, calc(100% - 28px)); }
+.voxel-tool-shelf button, .voxel-tool-shelf input { font: inherit; color: inherit; border: 1px solid var(--line, #7775); border-radius: 5px; background: var(--panel, #20252d); padding: 7px 9px; }
+.voxel-tool-shelf button { cursor: pointer; }
+.voxel-tool-shelf button:disabled { opacity: .45; cursor: default; }
+.voxel-tool-shelf button[aria-pressed="true"] { border-color: #55aaff; background: #23609a; color: #fff; }
+.voxel-tool-panel { margin-top: 7px; padding: 12px; border: 1px solid var(--line, #7775); border-radius: 8px; background: var(--panel, #20252d); color: var(--text, #edf1f5); box-shadow: 0 5px 24px #0003; max-height: calc(100vh - 210px); overflow-y: auto; }
+.voxel-tool-panel fieldset { border: 0; padding: 0; margin: 0 0 10px; }
+.voxel-tool-panel legend { font-weight: 600; margin-bottom: 6px; }
+.voxel-tool-buttons { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
+.voxel-tool-buttons button { display: inline-flex; align-items: center; gap: 5px; }
+.voxel-tool-panel label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; }
+.voxel-tool-panel input { width: 84px; min-width: 0; }
+.voxel-tool-panel p { font-size: 13px; line-height: 1.45; margin: 10px 0; }
+.voxel-tool-help { opacity: .72; }

@@ -33,7 +33,7 @@ for (const supportWidth of [.125, 1, 8]) for (const fraction of [.25, .30, .75])
       near(integrateRetainedAffineDensity(field, lower) + integrateRetainedAffineDensity(field, upper), fraction * supportWidth ** 3,
         2e-11 * Math.max(1, supportWidth ** 3));
     }
-    let partition = [box];
+    const partition = [box];
     for (let cycle = 0; cycle < 12; cycle++) {
       const pick = (cycle * 7) % partition.length;
       const children = splitRetainedAffineDensity(field, partition[pick]!);

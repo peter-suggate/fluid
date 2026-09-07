@@ -48,7 +48,7 @@ export type WebGPURenderWorkerRequest =
   | { type: "set-hover-highlight"; range: { first: number; last: number } | undefined }
   | { type: "set-simulation-running"; requestId: number; running: boolean }
   | { type: "reset-simulation-timeline" }
-  | { type: "validate-solid-edit"; requestId: number; scene: SceneDescription }
+  | { type: "validate-solid-edit"; requestId: number; scene: SceneDescription; base?: SceneDescription }
   | { type: "inject-liquid-ball"; requestId: number; ball: InjectedLiquidBall }
   | { type: "pick-rigid-body"; requestId: number; args: PickArguments }
   | { type: "shutdown"; requestId: number };
@@ -258,8 +258,12 @@ export class WebGPURenderWorkerClient {
    * re-seed instead", which is a worse outcome than a live drop but a far
    * better one than nothing happening.
    */
-  validateLiveSolidEdit(scene: SceneDescription): Promise<void> {
-    return this.request<void>({ type: "validate-solid-edit", requestId: this.nextRequestId(), scene });
+  private solidEditBase?: SceneDescription;
+  validateLiveSolidEdit(scene: SceneDescription, base: SceneDescription): Promise<void> {
+    const sendBase = this.solidEditBase !== base;
+    this.solidEditBase = base;
+    return this.request<void>({ type: "validate-solid-edit", requestId: this.nextRequestId(), scene,
+      ...(sendBase ? { base } : {}) });
   }
 
   injectLiquidBall(ball: InjectedLiquidBall): Promise<boolean> {

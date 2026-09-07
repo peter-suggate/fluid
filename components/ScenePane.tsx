@@ -14,6 +14,7 @@ import { PipelineOverlay } from "./PipelineOverlay";
 import { RadialMenu } from "./RadialMenu";
 import { SceneScaleOverlay } from "./SceneScaleOverlay";
 import { SceneSelector } from "./SceneSelector";
+import { VoxelToolShelf } from "./VoxelToolShelf";
 import { WebGPUViewport } from "./WebGPUViewport";
 
 /**
@@ -108,6 +109,7 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
     >
       <WebGPUViewport paneId={paneId} />
       <EditorModeChip />
+      <VoxelToolShelf />
       <RadialMenu />
       <SceneScaleOverlay />
       <PipelineOverlay />

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, type PointerEvent } from "react";
 import type { EditorRay } from "../lib/core/editor-entity";
-import type { ToolUpdate } from "../lib/core/voxel-editor/plugin";
+import { toolValues, type ToolUpdate } from "../lib/core/voxel-editor/plugin";
 import { beginToolTransaction } from "../lib/core/voxel-editor/transaction";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
 import { simulation } from "../lib/core/simulation/controller";
@@ -10,7 +10,7 @@ import type { SceneDescription } from "../lib/core/model";
 
 type Transaction = NonNullable<ReturnType<typeof beginToolTransaction>>;
 export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>) => EditorRay,
-  validate: (scene: SceneDescription) => Promise<void>, preview: (update: ToolUpdate | null) => void) {
+  validate: (scene: SceneDescription, base: SceneDescription) => Promise<void>, preview: (update: ToolUpdate | null) => void) {
   const session = useSession();
   const active = useRef<{ id: number; transaction: Transaction; queued?: EditorRay;
     busy: boolean; ending?: boolean; cancelled: boolean; frame?: number } | undefined>(undefined);
@@ -69,9 +69,9 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
       try {
         const transaction = beginToolTransaction(plugin, {
           scene: () => session.scene.getState().scene,
-          publish: async (next) => {
+          publish: async (next, base) => {
             const before = session.scene.getState().scene;
-            if (next.systems?.fluid !== false) await validate(next);
+            if (next.systems?.fluid !== false) await validate(next, base);
             if (session.scene.getState().scene !== before) throw new Error("Scene changed during the stroke.");
             session.scene.getState().setScene(next);
           },
@@ -100,7 +100,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
         // Hover uses the exact plugin targeting and geometry without publishing.
         const sample = ray(event);
         const gesture = plugin.begin({ scene: session.scene.getState().scene, ray: sample,
-          values: Object.fromEntries(plugin.ui.controls.map((c) => [c.id, ui.voxelToolValues[plugin.id]?.[c.id] ?? c.initial])) });
+          values: toolValues(plugin, ui.voxelToolValues[plugin.id]) });
         preview(gesture?.update(sample) ?? null);
       } catch { preview(null); }
       return true;
@@ -108,7 +108,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     up(event: PointerEvent<HTMLCanvasElement>): boolean {
       const stroke = active.current;
       if (!stroke || stroke.id !== event.pointerId) return false;
-      stroke.cancelled = event.type === "pointercancel";
+      stroke.cancelled ||= event.type === "pointercancel";
       stroke.queued = stroke.cancelled ? undefined : ray(event);
       stroke.ending = true; schedule(); return true;
     },

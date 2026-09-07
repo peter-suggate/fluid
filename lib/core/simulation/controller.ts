@@ -1246,7 +1246,13 @@ class SimulationController {
   cancelEdit(paneId: PaneId = PRIMARY_PANE_ID) { this.runtime(paneId).pendingEdit = undefined; }
 
   private applyHistorySnapshot(entry: EditorHistorySnapshot, verb: string, paneId: PaneId = PRIMARY_PANE_ID) {
-    this.reset(cloneScene(entry.scene), entry.presetId, paneId);
+    const current = this.session(paneId).scene.getState().scene;
+    const next = cloneScene(entry.scene);
+    const voxelOnly = canonicalScene({ ...current, solidVoxels: [] })
+      === canonicalScene({ ...next, solidVoxels: [] });
+    if (voxelOnly && this.session(paneId).method.getState().methodId === "adaptive-mass") {
+      this.session(paneId).scene.getState().setScene(next, entry.presetId);
+    } else this.reset(next, entry.presetId, paneId);
     this.session(paneId).runtime.getState().setNotice(entry.label ? `${verb} ${entry.label}` : `${verb} last edit`);
   }
 

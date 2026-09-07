@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState , useMemo} from "react";
+import { useVoxelToolGesture } from "./useVoxelToolGesture";
 import type { FluidCellTraceConfig, PixelTraceConfig, PixelTraceStatus } from "../lib/core/webgpu-renderer";
 import { webGPUPlatformResourcePlugin } from "../lib/core/webgpu-platform-resource";
 import { WebGPURenderWorkerClient, type FluidLabRendererHandle } from "../lib/core/webgpu-render-worker-client";
@@ -2354,7 +2355,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       spawned.position_m, spawned.orientation);
   };
 
+  const voxelGesture = useVoxelToolGesture(pointerRay, async (next, base) => {
+    if (!rendererRef.current) throw new Error("Wait for the scene to be ready.");
+    await rendererRef.current.validateLiveSolidEdit(next, base);
+  }, (update) => setVoxelSweep(update ? { highlight: update.highlight, caption: update.caption } : null));
+
   const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (voxelGesture.down(event)) return;
     // Carrying outranks every armed tool: while something is in hand a click
     // means "put it down" and nothing else. A carry that could be ended only by
     // finding the right mode again would be a trap, and the mode underneath is
@@ -2566,6 +2573,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
   };
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!pointerRef.current && voxelGesture.move(event)) return;
     if (carryRef.current) { updateCarry(pointerRay(event), event.timeStamp); return; }
     const active = pointerRef.current;
     // The pixel-trace probe follows the pointer whatever else the gesture is
@@ -2736,6 +2744,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     });
   };
   const pointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (voxelGesture.up(event)) return;
     // Ahead of the pointer-id guard below: a pin gesture is tracked separately,
     // so it must resolve even on the releases the pointer machine ignores.
     resolvePixelTracePinGesture(event);

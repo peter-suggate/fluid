@@ -6,7 +6,7 @@ import { toolValues, type ToolUpdate, type ToolValues, type VoxelToolPlugin } fr
 export interface ToolHost {
   scene(): SceneDescription;
   /** Validate and apply to physics before publishing the accepted document. */
-  publish(scene: SceneDescription): Promise<void>;
+  publish(scene: SceneDescription, base: SceneDescription): Promise<void>;
   begin(label: string): void;
   finish(): void;
   cancel(): void;
@@ -31,7 +31,7 @@ export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
       const nextKey = JSON.stringify(result.patches);
       if (nextKey !== key) {
         const next = sceneWithSolidStroke(base, result.patches);
-        await host.publish(next);
+        await host.publish(next, base);
         accepted = next;
         key = nextKey;
       }
@@ -42,7 +42,7 @@ export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
       closed = true;
       if (host.scene() !== accepted) { host.cancel(); return; }
       if (cancelled) {
-        if (accepted !== base) await host.publish(base);
+        if (accepted !== base) await host.publish(base, base);
         host.cancel();
       } else host.finish();
     },

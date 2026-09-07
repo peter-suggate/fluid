@@ -184,7 +184,7 @@ export class WebGPURetainedDensityField {
 
   private live(): GenerationResource {
     if (this.released) throw new Error("Released retained density lease");
-    if (this.resource.failure) throw this.resource.failure;
+    if (this.resource.retired) throw this.resource.failure ?? new Error("Retired retained density generation");
     return this.resource;
   }
   /** Required before publishing a next() generation. Failed allocations retire
@@ -263,7 +263,10 @@ export class WebGPURetainedDensityField {
     }
     for (const id of coupling.supportIndices) if (id >= support.boxes.length) throw new Error("Missing retained coupling support");
     operations.set(coupling.supportIndices, entries);
-    const moments = Float32Array.from(coupling.axisMoments, value => f32(value, "basis moment"));
+    const moments = Float32Array.from(coupling.axisMoments, value => {
+      if (value < 0) throw new Error("Negative retained basis moment");
+      return f32(value, "basis moment");
+    });
     return this.operation("integrate", operations, moments, {
       topologyGeneration: coupling.topologyGeneration, boundaryGeneration: coupling.boundaryGeneration,
     });
