@@ -137,6 +137,10 @@ export interface TracePinRequest {
 
 /** Viewport state: camera, selection, and debug controls. */
 interface UIStore {
+  voxelToolId?: string;
+  voxelToolValues: Record<string, Record<string, number>>;
+  setVoxelTool: (id: string | undefined) => void;
+  setVoxelToolValue: (id: string, key: string, value: number) => void;
   camera: CameraState;
   /**
    * Whether the pointer edits the scene or only looks at it.
@@ -374,6 +378,12 @@ interface UIStore {
 export const DEFAULT_GRID_OVERLAY_AXIS: Exclude<GridOverlayConfig["axis"], "off"> = "z";
 
 export const createUIStore = () => create<UIStore>((set) => ({
+  voxelToolId: undefined,
+  voxelToolValues: {},
+  setVoxelTool: (voxelToolId) => set({ voxelToolId, viewportMode: "interact", armedGesture: undefined, selection: undefined }),
+  setVoxelToolValue: (id, key, value) => set((state) => ({ voxelToolValues: {
+    ...state.voxelToolValues, [id]: { ...state.voxelToolValues[id], [key]: value },
+  } })),
   camera: defaultCamera,
   viewportMode: DEFAULT_VIEWPORT_MODE,
   armedGesture: undefined,

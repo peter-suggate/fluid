@@ -139,6 +139,8 @@ export interface CM12SparseWorldRuntime {
   /** Cancel an in-flight replacement when holding the current topology. */
   cancelTopologyPreparation(): void;
   readonly generationPlanningRequired: boolean;
+  /** In-place, zero-time region transaction over existing candidate backing. */
+  refreshRefinementRegions(finestCellSize_m: number, policy?: SparseCM12ActivityPolicy): Promise<boolean>;
   needsDetailedGenerationPlanning(maximumSpan: number, demoteEpochs: number,
     finestTravel: number, frozenFrontierOnly?: boolean): Promise<boolean>;
   readonly generationPreparationMaximumSliceMs: number;
@@ -419,6 +421,10 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     });
   }
 
+  validateSceneEdit(scene: SceneDescription): void {
+    this.resident.validateSolidWorld(fluidSolidWorldForScene(scene));
+  }
+
   edit(edit: SparseWorldEdit): SparseWorldEditReceipt {
     this.generationState.changed();
     if (this.destroyed) {
@@ -665,6 +671,9 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   ) {}
 
   waitForSimulationPipelines() { return this.readiness.ready; }
+  async refreshRefinementRegions(finestCellSize_m: number, policy?: SparseCM12ActivityPolicy) {
+    return this.generationState.read(resident => resident.refreshRefinementRegions(finestCellSize_m, policy));
+  }
   get allocatedBytes() { return this.generationState.allocatedBytes; }
   get cellCount() { return this.resident.cellCount; }
   get rowCount() { return this.resident.rowCount; }

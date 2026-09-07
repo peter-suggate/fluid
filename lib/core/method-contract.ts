@@ -393,6 +393,10 @@ export interface GPUSolverInstance {
    * adopting a new scene is a uniform update rather than a rebuild.
    */
   applySceneUniforms?(scene: SceneDescription): void;
+  /** Preflight live voxel edits without mutating or waiting on the GPU. */
+  validateLiveSolidEdit?(scene: SceneDescription): void;
+  /** Publish edited refinement bounds without advancing simulation time. */
+  refreshSceneTopology?(): Promise<void>;
   /**
    * Re-seed t=0 in place for a scene that differs only in the seed tier,
    * reusing every allocation, arena, and compiled pipeline. Resolves false

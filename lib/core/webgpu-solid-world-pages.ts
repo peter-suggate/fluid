@@ -151,7 +151,7 @@ export function packWebgpuSolidWorldPages(layout: WebgpuSolidWorldPageLayout,
 export function writeWebgpuSolidWorldPages(queue: GPUQueue, destination: GPUBuffer,
   layout: WebgpuSolidWorldPageLayout, world: SolidWorld,
   originFine: readonly [number, number, number],
-  lattice?: WebgpuSolidWorldPhysicalLattice): void {
+  lattice?: WebgpuSolidWorldPhysicalLattice, previous?: SolidWorld): void {
   if (world.pages.length > layout.pageCapacity) throw new RangeError(
     `SolidWorld has ${world.pages.length} pages; GPU capacity is ${layout.pageCapacity}`);
   queue.writeBuffer(destination, 4 * layout.baseWords,
@@ -169,8 +169,10 @@ export function writeWebgpuSolidWorldPages(queue: GPUQueue, destination: GPUBuff
       page.coordinate[2] >>> 0, pageIndex]);
     queue.writeBuffer(destination, 4 * (layout.baseWords + layout.directoryBaseWords
       + slot * WEBGPU_SOLID_WORLD_ENTRY_WORDS), entry);
-    packPage(payload, page, layout.includesMaterial);
-    queue.writeBuffer(destination, 4 * (layout.baseWords + layout.pageBaseWords
-      + pageIndex * layout.pageWords), payload);
+    if (previous?.pages[pageIndex] !== page) {
+      packPage(payload, page, layout.includesMaterial);
+      queue.writeBuffer(destination, 4 * (layout.baseWords + layout.pageBaseWords
+        + pageIndex * layout.pageWords), payload);
+    }
   }
 }

@@ -1227,6 +1227,7 @@ const CM12_SPARSE_TRANSPORT_FIXED:f32=65536.0;
 // the stable SRR spatial-tile authority without changing receipt identity.
 const EXP_ACTIVITY_SCALAR_BRICKS:bool=true;
 const ACTIVITY_HEADER_WORDS:u32=28u;
+const REGION_EDIT_BACKING_RECEIPT_WORD:u32=27u;
 const ACTIVITY_RECORD_WORDS:u32=48u;
 const ACTIVITY_SURFACE_PROOF_GENERATION_BASE:u32=39u;
 const ACTIVITY_SURFACE_PROOF_FAILURE_WORD:u32=44u;
@@ -3931,7 +3932,7 @@ fn injectionCoverage(id:u32)->f32{
 // this so a source reaching an inactive leaf makes that leaf resident through
 // the same demand-led activation path instead of losing the injected mass.
 fn injectionReachesBrick(brick:u32)->bool{
-  if(p.injectionCenter.w==0.0){return false;}
+  if(p.injectionCenter.w<=0.0){return false;}
   let lower=vec3f(cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION));
   var upper=lower+vec3f(f32(BRICK_FINE_RESOLUTION*brickSpan(brick)));
   if(!brickHasUnclippedWorldGeometry(brick)){upper=min(upper,vec3f(p.dimensions.xyz));}
@@ -7547,6 +7548,47 @@ fn brickTouchesDemandedMissingWorldPage(brick:u32)->bool{
   return false;
 }
 
+@compute @workgroup_size(64)
+fn refreshEditedRegionPolicy(@builtin(global_invocation_id)gid:vec3u){
+  if(gid.x>=p.dispatch.w){return;}
+  refreshSparseCM12RefinementPolicyCache(gid.x);
+}
+
+// A live region edit clamps accepted ownership without replaying activity
+// decisions or ageing any history. Missing backing remains a generation demand;
+// it never borrows another leaf's candidate storage.
+@compute @workgroup_size(64)
+fn planEditedRegionResolution(@builtin(global_invocation_id)gid:vec3u){
+  let brick=gid.x;if(brick>=p.dispatch.w){return;}
+  let output=activityRecord(brick);
+  let current=acceptedBrickResolution(brick);
+  setCandidateBrickActiveAt(output,brickActive(brick));
+  if(!cm12WorldLeafAllocated(brick)){return;}
+  let frozen=brickResolutionFrozen(brick);
+  setRefinementGradingCap(brick,select(
+    cachedRefinementPolicyResolutionBounds(brick).y,current,frozen));
+  let requested=select(applySparseCM12RefinementRegionBounds(brick,current),current,frozen);
+  if(!frozen){
+    let edge=BRICK_FINE_RESOLUTION*brickSpan(brick);
+    let low=vec3f(cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION));
+    var high=low+vec3f(f32(edge));
+    if(!brickHasUnclippedWorldGeometry(brick)){high=min(high,vec3f(p.dimensions.xyz));}
+    for(var index=0u;index<min(p.refinementRegionControl.x,8u);index+=1u){
+      let lo=p.refinementRegions[2u*index];let hi=p.refinementRegions[2u*index+1u];
+      if((all(low<hi.xyz)&&all(high>lo.xyz)&&u32(lo.w)>edge)
+        ||(all(low>=lo.xyz)&&all(high<=hi.xyz)&&hi.w>0.0&&u32(hi.w)<brickSpan(brick))){
+        atomicOr(&activity[REGION_EDIT_BACKING_RECEIPT_WORD],1u);
+      }
+    }
+  }
+  if(requested!=current&&!brickCandidatePlanningEnabled(brick)){
+    atomicOr(&activity[REGION_EDIT_BACKING_RECEIPT_WORD],1u);
+  }
+  atomicStore(&activity[output+47u],requested);
+  atomicStore(&activity[output+8u],select(current,requested,brickCandidatePlanningEnabled(brick)));
+  atomicStore(&activity[output+9u],32u);
+}
+
 // First candidate-planning rung. The accepted topology remains immutable:
 // this pass publishes only the resolution requested by the CM12 surface floor,
 // characteristic prediction, and retained activity history. Transfer and
@@ -7984,7 +8026,10 @@ fn validateCandidateResolution(@builtin(global_invocation_id)gid:vec3u){
     ||injectionReachesBrick(brick);
   atomicStore(&activity[output+14u],select(select(0u,1u,transition),2u,invalid));
   atomicStore(&activity[output+15u],atomicLoad(&activity[0]));
-  if(invalid){atomicOr(&activity[7],1u);}
+  if(invalid){
+    if(p.injectionCenter.w<0.0){atomicOr(&activity[REGION_EDIT_BACKING_RECEIPT_WORD],1u);}
+    else{atomicOr(&activity[7],1u);}
+  }
 }
 
 // All refinement is urgent because the refine-only 2:1 closure may have
@@ -8009,7 +8054,9 @@ var<workgroup>sourceTopologyLeaseForSchedule:u32;
 @compute @workgroup_size(64)
 fn scheduleTopologyPreparation(@builtin(local_invocation_id)lid:vec3u){
   let lane=lid.x;let count=p.dispatch.w;
-  if(lane==0u){sourceTopologyLeaseForSchedule=atomicLoad(&activity[CM12_SOURCE_TOPOLOGY_LEASE]);}
+  // Missing backing defers the entire editor transaction before publication.
+  if(lane==0u){sourceTopologyLeaseForSchedule=atomicLoad(&activity[CM12_SOURCE_TOPOLOGY_LEASE])
+    |select(0u,1u,p.injectionCenter.w<0.0&&atomicLoad(&activity[REGION_EDIT_BACKING_RECEIPT_WORD])!=0u);}
   if(workgroupUniformLoad(&sourceTopologyLeaseForSchedule)!=0u){
     for(var brick=lane;brick<count;brick+=64u){setTopologyPreparationScheduled(activityRecord(brick),false);}
     if(lane==0u){

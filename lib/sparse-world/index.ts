@@ -136,6 +136,8 @@ export interface SparseWorldStatus {
 }
 
 export interface SparseWorld {
+  /** Read-only preflight; must not submit work or fault a running world. */
+  validateSceneEdit?(scene: SceneDescription): void;
   /** Apply one authored edit without exposing implementation encoders or buffers. */
   edit(edit: SparseWorldEdit): SparseWorldEditReceipt;
   encodeStep(

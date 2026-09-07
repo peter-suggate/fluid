@@ -97,3 +97,22 @@ test("a live liquid edit retires the retained water mesh", () => {
   assert.equal((renderer as unknown as FluidLabRenderer).presentationRevision, 8,
     "a paused viewport must be woken for the replacement mesh");
 });
+
+test("async region publication invalidates the paused mesh and ignores detached solvers", async () => {
+  let complete!: () => void;
+  let invalidated = 0;
+  const solver = { info: {}, refreshSceneTopology: () => new Promise<void>(resolve => { complete = resolve; }) };
+  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
+    disposed: false, gpuFluid: solver, pausedPresentationRevision: 0,
+    waterPipeline: { invalidateSurface: () => { invalidated++; } },
+  });
+  renderer.refreshEditedTopology(solver);
+  assert.equal(invalidated, 0, "retain the current mesh until publication completes");
+  complete(); await Promise.resolve();
+  assert.equal(invalidated, 1);
+  assert.equal(renderer.presentationRevision, 1);
+  renderer.refreshEditedTopology(solver);
+  renderer.gpuFluid = undefined;
+  complete(); await Promise.resolve();
+  assert.equal(invalidated, 1, "an old edit cannot invalidate a replacement solver's mesh");
+});

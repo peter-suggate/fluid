@@ -251,6 +251,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   private atlas: SparseAdaptiveMassAtlas;
   private lastTime_s = 0;
   private topologyGenerationWork?: Promise<void>;
+  private liveRegionUpdateRequested = false;
+  private liveRegionUpdatePending = false;
   private frozenFrontierPending = false;
   private topologyGenerationPolicyDirty = false;
   private topologyRegionStamp?: string;
@@ -855,6 +857,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    * topology plan. Without this seam either edit would construct a new world
    * and discard the timeline.
    */
+  validateLiveSolidEdit(scene: SceneDescription): void {
+    if (!this.sparseWorld.validateSceneEdit) throw new Error("Live voxel editing is unavailable");
+    this.sparseWorld.validateSceneEdit(scene);
+  }
+
   applySceneUniforms(scene: SceneDescription): void {
     const regionStamp = JSON.stringify(sceneRefinementRegions(scene));
     const regionsChanged = regionStamp
@@ -926,6 +933,18 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     while (this.topologyGenerationWork) await this.topologyGenerationWork;
   }
 
+  /** Apply edited bounds to the accepted state without advancing its clock.
+   * Normal simulation drivers can retain the in-place, step-cadenced path;
+   * the editor explicitly requests this asynchronous publication boundary. */
+  async refreshSceneTopology(): Promise<void> {
+    if (this.topologyGenerationPolicyDirty) {
+      this.liveRegionUpdateRequested = true;
+      this.scheduleTopologyGeneration();
+    }
+    await this.waitForTopologyReady();
+    if (this.simulationFailureError) throw this.simulationFailureError;
+  }
+
   private publishPhysicalWidthCensus(atlas: SparseAdaptiveMassAtlas,
     records?: ReadonlyMap<number, SparseCM12GPUActivityRecord>, step = 0): void {
     const bins = new Map<number, { width: number; leaves: number; liquidVolumeFineCells: number }>();
@@ -950,13 +969,16 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   private scheduleTopologyGeneration(): void {
     if (this.simulationFailureError) return;
     if (this.topologyGenerationWork || this.disposed) return;
+    const liveRegionUpdate = this.liveRegionUpdateRequested;
+    this.liveRegionUpdatePending = liveRegionUpdate;
+    this.liveRegionUpdateRequested = false;
     const frozen = this.options.activityPolicy?.freezeTopology === true;
     const frontierCheck = frozen || this.frozenFrontierPending || this.sparseRuntime.pendingLiquidInteractions;
     const preparationStarted = performance.now();
     const cadence = this.options.activityPolicy?.coarseFirst && this.sparseRuntime.generationPlanningRequired
       ? Math.max(1, this.options.activityPolicy.topologyCadenceSteps)
       : Math.max(64, this.options.activityPolicy?.topologyCadenceSteps ?? 64);
-    if (!frozen && !this.frozenFrontierPending && !this.sparseRuntime.pendingLiquidInteractions
+    if (!liveRegionUpdate && !frozen && !this.frozenFrontierPending && !this.sparseRuntime.pendingLiquidInteractions
       && !this.topologyGenerationPolicyDirty && (this.info.encodedSteps ?? 0) % cadence !== 0) return;
     const policyDirty = this.topologyGenerationPolicyDirty;
     this.topologyGenerationPolicyDirty = false;
@@ -969,6 +991,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       && record.maximumVelocityTravelFineCells < 0.125;
     const prepare = async () => {
       await this.assertSimulationHealthy();
+      if (liveRegionUpdate) {
+        const supported = await this.sparseRuntime.refreshRefinementRegions(
+          finestCellSize(this.scene, this.atlas), this.options.activityPolicy);
+        if (supported) return;
+      }
       // Live region edits and explicit spatial bounds take the detailed path.
       // Otherwise an eight-byte conservative GPU receipt rules out ordinary
       // rerungs, macro motion demands and quiet sibling merges before mapping
@@ -987,7 +1014,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       // sibling merges; the frozen capture below rechecks fresh evidence.
       const requiresMacroFloor = sceneRefinementRegions(this.scene).some(region =>
         region.minimumCellSize_cells > this.sparseRuntime.acceptedAtlas.brickFineResolution);
-      if (!frontierCheck && !this.sparseRuntime.generationPlanningRequired && !requiresMacroFloor) {
+      if (!liveRegionUpdate && !frontierCheck && !this.sparseRuntime.generationPlanningRequired && !requiresMacroFloor) {
         if (this.topologyGenerationLimits.maximumSpanBricks <= 1) return;
         const atlas = this.sparseRuntime.acceptedAtlas;
         const snapshot = await this.sparseWorldTrace.readActivitySnapshot();
@@ -1036,7 +1063,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           physicalDemands.set(brick.key, Math.min(physicalDemands.get(brick.key) ?? Infinity, minimum));
         }
       }
-      const requested = new Set([...source.planned.keys(), ...physicalDemands.keys()].filter(key => {
+      const requested = new Set([...source.planned.keys(), ...physicalDemands.keys(),
+        ...(liveRegionUpdate ? physicalFloors.keys() : [])].filter(key => {
         if (source.frozenFrontier.has(key)) return true;
         if (frozen) return false;
         const brick = source.atlas.directory.get(key)!;
@@ -1067,7 +1095,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         const priority = (record: typeof a) => Number((record.planReasons & 2) !== 0) * 2048 + Number(record.thinFluid) * 1024
           + Number((record.reasons & 1) !== 0) * 512 + record.scoreByte;
         return priority(b) - priority(a) || left - right;
-      }).slice(0, frozen ? requested.size : requestBudget));
+      }).slice(0, frozen || liveRegionUpdate ? requested.size : requestBudget));
       // Missing receiver connectivity is required support, not optional
       // adaptation. Never discard the unadmitted half of an interaction.
       for (const key of source.frozenFrontier) admitted.add(key);
@@ -1092,7 +1120,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       const transfer = await accepted.captureGenerationTransferSource(source);
       return accepted.prepareGenerationReplacement(transfer, plan.atlas, plan.active,
         finestCellSize(this.scene, plan.atlas),
-        this.topologyGenerationMaximumBytes - this.sparseRuntime.allocatedBytes, signal, plan.newAirCoverage);
+        this.topologyGenerationMaximumBytes - this.sparseRuntime.allocatedBytes, signal, plan.newAirCoverage, liveRegionUpdate);
       });
     };
     this.topologyGenerationWork = prepare().then(() => {
@@ -1145,9 +1173,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       this.info.topologyPreparationDurationMs = performance.now() - preparationStarted;
       this.info.topologyGenerationPending = this.frozenFrontierPending;
       this.topologyGenerationWork = undefined;
-      if (this.sparseRuntime.pendingLiquidInteractions && (retryInteractions
+      this.liveRegionUpdatePending = false;
+      if (liveRegionUpdate && retryInteractions) this.liveRegionUpdateRequested = true;
+      if (this.liveRegionUpdateRequested || (this.sparseRuntime.pendingLiquidInteractions && (retryInteractions
         || interactionRevision !== this.sparseRuntime.pendingLiquidInteractionRevision
-        || frozen !== (this.options.activityPolicy?.freezeTopology === true))) {
+        || frozen !== (this.options.activityPolicy?.freezeTopology === true)))) {
         this.scheduleTopologyGeneration();
       }
     });
@@ -1162,7 +1192,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       return false;
     }
     this.info.topologyPublicationMaximumDurationMs = this.sparseRuntime.generationPublicationMaximumMs;
-    if (this.disposed || this.sparseRuntime.topologyPreparationPending
+    if (this.disposed || this.liveRegionUpdateRequested || this.liveRegionUpdatePending || this.sparseRuntime.topologyPreparationPending
       // Required support planning starts with asynchronous readbacks, before
       // topologyPreparationPending becomes true. Do not let transport outrun
       // that preflight and consume a frontier whose backing is still pending.

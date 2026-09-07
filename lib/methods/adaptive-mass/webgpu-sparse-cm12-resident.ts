@@ -1212,6 +1212,8 @@ function boundedGenerationDevice(input: GPUDevice, maximumBytes: number) {
 const ACTIVITY_HEADER_WORDS = 28;
 // Reserved activity header tail: topology-only source lease and GPU revocation.
 const SOURCE_TOPOLOGY_LEASE_WORD = 25;
+// Editor-only receipt: a requested rung/halo needs backing before publication.
+const REGION_EDIT_BACKING_RECEIPT_WORD = 27;
 // Word 45 caches frontier neighbours whose signed directory/reachability
 // question has already been resolved. It is topology evidence, not physical
 // activity evidence, and is explicitly re-armed by retirement/solid edits.
@@ -3569,8 +3571,16 @@ export class WebGPUSparseCM12Resident {
   private async createReplacement(nextAtlas: SparseAdaptiveMassAtlas, nextGrid: SparseAtlasCompositeGrid | undefined,
     active: ReadonlySet<number>, scalar: boolean, face: boolean, maximumBytes: number,
     source?: Awaited<ReturnType<WebGPUSparseCM12Resident["captureGenerationTransferSource"]>>, signal?: AbortSignal,
-    newAirCoverage: readonly SparseCM12NewAirCoverage[] = []): Promise<WebGPUSparseCM12Resident> {
-    const { finestCellSize_m, rigid, journal, presentationPageResolution, topologyPageCapacityMaximum } = this.replacementConfiguration;
+    newAirCoverage: readonly SparseCM12NewAirCoverage[] = [], preserveCandidateBacking = false): Promise<WebGPUSparseCM12Resident> {
+    const { finestCellSize_m, rigid, journal, presentationPageResolution } = this.replacementConfiguration;
+    const topologyPageCapacityMaximum = preserveCandidateBacking
+      ? Math.min(this.replacementConfiguration.topologyPageCapacityMaximum, this.topologyPageCapacity)
+      : this.replacementConfiguration.topologyPageCapacityMaximum;
+    // A region request needs accepted backing for new rungs, not an all-rung
+    // catalogue for every dynamic air page that happens to be resident.
+    const candidateKeys = preserveCandidateBacking ? new Set(this.constructionAtlas.bricks
+      .filter((_, leaf) => ((this.lastPacked!.words[this.lastPacked!.brickOffset + 2 * leaf]! & 0x7fff_ffff) >>> 5) !== 0)
+      .map(brick => brick.key)) : undefined;
     const device = generationDeviceRoots.get(this.device) ?? this.device;
       const allocation = boundedGenerationDevice(device, maximumBytes);
       try {
@@ -3583,7 +3593,7 @@ export class WebGPUSparseCM12Resident {
               signal?.addEventListener("abort", () => { worker.terminate(); reject(signal.reason); }, {once:true});
               worker.onmessage = event => event.data.error ? reject(new Error(event.data.error)) : resolve(event.data.recipe);
               worker.onerror = event => reject(new Error(event.message));
-              worker.postMessage({ atlas: nextAtlas, active, finestCellSize_m, newAirCoverage,
+              worker.postMessage({ atlas: nextAtlas, active, finestCellSize_m, newAirCoverage, candidateKeys,
                 solidWorld: this.currentSolidWorld, maximumBytes, topologyPageCapacityMaximum,
                 symmetry: { scalar, face }, limits: { maxComputeWorkgroupsPerDimension: device.limits.maxComputeWorkgroupsPerDimension },
                 source: source ? { geometry: source.geometry, geometryRecipe:source.geometryRecipe, cellIds: source.cellIds, rowIds: source.rowIds,
@@ -3620,7 +3630,7 @@ export class WebGPUSparseCM12Resident {
         return await WebGPUSparseCM12Resident.createConfigured(allocation.device, nextAtlas, nextGrid ?? buildSparseAtlasCompositeGrid(nextAtlas), finestCellSize_m,
           this.currentSolidWorld, active, rigid, journal, presentationPageResolution,
           false, false, false, true, true, () => {}, false, false, false, false, false,
-          topologyPageCapacityMaximum, false, { scalar, face });
+          topologyPageCapacityMaximum, false, { scalar, face }, undefined, candidateKeys);
       } catch (error) { allocation.rollback(); throw error; }
       finally { allocation.finish(); }
   }
@@ -4262,6 +4272,7 @@ export class WebGPUSparseCM12Resident {
     acceptedOnly = false,
     transferredSymmetry?: { scalar: boolean; face: boolean },
     initialVelocity_m_s?: readonly [number, number, number],
+    candidateKeys?: ReadonlySet<number>,
   ): Promise<WebGPUSparseCM12Resident> {
     if (atlas.brickFineResolution !== 8 || presentationPageResolution !== 8) {
       throw new Error("Sparse CM12 PEI1 production is an aggressive B8/P8 cutover");
@@ -4274,7 +4285,8 @@ export class WebGPUSparseCM12Resident {
     // GPU transaction; asynchronous generation preparation can arrive too late.
     // Backing does not activate air or add accepted simulation cells.
     const activeMutableKeys = atlas.bricks.filter((brick) =>
-      initiallyActiveBrickKeys.has(brick.key) && sparseBrickSpan(brick) <= 2).map((brick) => brick.key);
+      initiallyActiveBrickKeys.has(brick.key) && sparseBrickSpan(brick) <= 2
+      && (!candidateKeys || candidateKeys.has(brick.key))).map((brick) => brick.key);
     const apron = new Set<string>();
     for (const brick of atlas.bricks) if (initiallyActiveBrickKeys.has(brick.key)
       && sparseBrickSpan(brick) <= 2) {
@@ -4285,6 +4297,7 @@ export class WebGPUSparseCM12Resident {
     let mutableBrickKeysForBudget = atlas.bricks.filter(brick =>
       (initiallyActiveBrickKeys.has(brick.key) && sparseBrickSpan(brick) <= 2)
       || (sparseBrickSpan(brick) === 1 && apron.has(brick.coordinate.join("/"))))
+      .filter(brick => !candidateKeys || candidateKeys.has(brick.key))
       .map(brick => brick.key);
     const catalogueFits = (keys: readonly number[]) => {
       const candidateKeys = new Set(keys);
@@ -5714,7 +5727,7 @@ export class WebGPUSparseCM12Resident {
       ...(refinementPolicyLeaderCompactionForQA
         ? ["compileSparseCM12RefinementPolicyTileLeaders"] as const : []),
       "classifyAcceptedLiquidFrontier", "classifyRefinementPolicyTiles",
-      "planBrickResolution", "activateSweptFrontierPages",
+      "planBrickResolution", "refreshEditedRegionPolicy", "planEditedRegionResolution", "activateSweptFrontierPages",
       "activateInjectionFrontierPages",
       "closeRefinementPolicyTileResolution", "closePlannedResolution",
       "validateCandidateResolution", "scheduleTopologyPreparation",
@@ -6105,6 +6118,7 @@ export class WebGPUSparseCM12Resident {
     solidWorld: SolidWorld; maximumBytes: number; topologyPageCapacityMaximum: number;
     symmetry: { scalar: boolean; face: boolean }; limits: GPUSupportedLimits;
     newAirCoverage?: readonly SparseCM12NewAirCoverage[];
+    candidateKeys?: ReadonlySet<number>;
     journal?: SparseCM12PressureJournalCapacityRequest;
     source?: Omit<SparseCM12GenerationFields, "state" | "liveControl"> & {
       geometry?: SparseCM12GenerationGeometry; geometryRecipe?: CM12CapturedGeometryRecipe; stateDescriptor: {size:number;usage:number};
@@ -6124,7 +6138,7 @@ export class WebGPUSparseCM12Resident {
       grid, input.finestCellSize_m, input.solidWorld,
       input.active, rigid, input.journal, 8, false, false, false, true, true,
       () => {}, false, false, false, false, false, input.topologyPageCapacityMaximum,
-      false, input.symmetry);
+      false, input.symmetry, undefined, input.candidateKeys);
     await resident.waitForSimulationPipelines();
     const firstSource = input.rigid ? 2 : 0;
     if (input.source?.geometryRecipe) Object.assign(input.source, compileCM12CapturedGeometry(input.source.geometryRecipe));
@@ -7424,19 +7438,33 @@ export class WebGPUSparseCM12Resident {
   }
 
   /** Adopt one accepted uniform solid generation without rebuilding fluid topology. */
-  setSolidWorld(solidWorld: SolidWorld): void {
-    this.currentSolidWorld = solidWorld;
+  validateSolidWorld(solidWorld: SolidWorld): void {
     this.assertLive();
+    const layout = this.solidOccupancyLayout;
+    if (!layout) throw new Error("This world does not support live solid editing");
+    if (solidWorld.pages.length > layout.pageCapacity
+      || (solidWorld.regions?.length ?? 0) > layout.regionCapacity) {
+      throw new Error("Live solid capacity reached; remove some geometry before adding more.");
+    }
+  }
+
+  setSolidWorld(solidWorld: SolidWorld): void {
+    this.validateSolidWorld(solidWorld);
+    const previous = this.currentSolidWorld;
+    this.currentSolidWorld = solidWorld;
     if (!this.solidOccupancyLayout) return;
     this.closedSolidShell = solidWorldHasClosedBoxShell(solidWorld, this.dimensions);
     const clear = this.device.createCommandEncoder({
       label: "Sparse CM12 replace SolidWorld occupancy",
     });
-    clear.clearBuffer(this.topologyArena, 4 * this.solidOccupancyLayout.baseWords,
-      4 * (this.solidOccupancyLayout.totalWords - this.solidOccupancyLayout.baseWords));
+    // Retain page payloads: unchanged page identities need no upload. Only the
+    // directory is replaced; its current entries determine which slots are live.
+    clear.clearBuffer(this.topologyArena,
+      4 * (this.solidOccupancyLayout.baseWords + this.solidOccupancyLayout.directoryBaseWords),
+      4 * (this.solidOccupancyLayout.pageBaseWords - this.solidOccupancyLayout.directoryBaseWords));
     this.device.queue.submit([clear.finish()]);
     writeSparseCM12SolidOccupancy(this.device.queue, this.topologyArena,
-      this.solidOccupancyLayout, solidWorld, [0, 0, 0]);
+      this.solidOccupancyLayout, solidWorld, [0, 0, 0], previous);
     const refresh = this.device.createCommandEncoder({
       label: "Sparse CM12 refresh SolidWorld apertures",
     });
@@ -7508,6 +7536,33 @@ export class WebGPUSparseCM12Resident {
     this.encodeFramePlanPresentation(encoder, "Sparse CM12 initial presentation");
   }
 
+  async refreshRefinementRegions(finestCellSize_m: number,
+    activityPolicy?: SparseCM12ActivityPolicy): Promise<boolean> {
+    await this.waitForSimulationPipelines();
+    const receipt = this.device.createBuffer({ size: 4,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      const encoder = this.device.createCommandEncoder({ label: "Sparse CM12 live region update" });
+      this.encodeRefinementRegionEdit(encoder, finestCellSize_m, activityPolicy);
+      encoder.copyBufferToBuffer(this.activity, 4 * REGION_EDIT_BACKING_RECEIPT_WORD, receipt, 0, 4);
+      this.device.queue.submit([encoder.finish()]);
+      await receipt.mapAsync(GPUMapMode.READ);
+      const supported = new Uint32Array(receipt.getMappedRange())[0] === 0;
+      await this.assertSimulationHealthy();
+      return supported;
+    } finally {
+      if (receipt.mapState === "mapped") receipt.unmap();
+      receipt.destroy();
+    }
+  }
+
+  /** Topology and presentation only: no activity clock, injection or physics. */
+  encodeRefinementRegionEdit(encoder: GPUCommandEncoder, finestCellSize_m: number,
+    activityPolicy?: SparseCM12ActivityPolicy): void {
+    this.encodeTopologyEditTransaction(encoder, finestCellSize_m, [0, 0, 0],
+      [0, 0, 0], 0, 0, 0.004, true, activityPolicy);
+  }
+
   encodeLiquidInjection(
     encoder: GPUCommandEncoder,
     finestCellSize_m: number,
@@ -7516,7 +7571,7 @@ export class WebGPUSparseCM12Resident {
     activityPolicy?: SparseCM12ActivityPolicy,
     phase: "complete" | "prepare" | "apply" = "complete",
   ): void {
-    this.encodeLiquidInjectionTransaction(encoder, finestCellSize_m, centerFine,
+    this.encodeTopologyEditTransaction(encoder, finestCellSize_m, centerFine,
       radiusFine, 1, 0, 0.004, true, activityPolicy, phase);
   }
 
@@ -7536,16 +7591,16 @@ export class WebGPUSparseCM12Resident {
       [number, number, number];
     const center = outletFine.map((value, axis) => value + halfDisplacement[axis]!) as
       [number, number, number];
-    this.encodeLiquidInjectionTransaction(encoder, finestCellSize_m, center,
+    this.encodeTopologyEditTransaction(encoder, finestCellSize_m, center,
       halfDisplacement, 2, radiusFine, dt_s, false, activityPolicy, phase);
   }
 
-  private encodeLiquidInjectionTransaction(
+  private encodeTopologyEditTransaction(
     encoder: GPUCommandEncoder,
     finestCellSize_m: number,
     centerFine: readonly [number, number, number],
     radiusFine: readonly [number, number, number],
-    mode: 1 | 2,
+    mode: 0 | 1 | 2,
     jetRadiusFine: number,
     injectionDt_s: number,
     publishPresentation: boolean,
@@ -7555,16 +7610,16 @@ export class WebGPUSparseCM12Resident {
     this.assertLive();
     this.writeParameters(this.lastPacked!, injectionDt_s, finestCellSize_m, 1,
       [0, 0, 0], undefined, activityPolicy, undefined, 0, undefined, this.lastInflow);
-    // The trailing word is the injection mode that every ordinary frame writes
-    // as zero. It lets the demand planner and writer distinguish an editor
-    // ellipsoid from a swept hose plug at no cost to a quiescent frame.
-    this.parameterF32.set([...centerFine, mode], 52);
+    // Ordinary frames write zero, injections use positive modes, and a
+    // topology-only region edit uses -1. No injection writer runs for an edit.
+    this.parameterF32.set([...centerFine, mode === 0 ? -1 : mode], 52);
     this.parameterF32.set([...radiusFine, jetRadiusFine], 56);
     this.device.queue.writeBuffer(this.parameters, 0, this.parameterWords, 0, SPARSE_CM12_FAILURE_PARAMETER_OFFSET);
     this.encodeFailureGate(encoder);
     const packed = this.lastPacked!;
     const leafCapacity = this.worldDirectoryLayout.leafCapacity;
     const bricks = Math.ceil(leafCapacity / WORKGROUP_SIZE);
+    if (mode === 0) encoder.clearBuffer(this.activity, 4 * REGION_EDIT_BACKING_RECEIPT_WORD, 4);
     if (phase !== "apply") {
       const interactionPageCount = [0, 1, 2].map((axis) => {
         const lower = Math.floor((centerFine[axis]! - radiusFine[axis]!)
@@ -7578,7 +7633,7 @@ export class WebGPUSparseCM12Resident {
       const openTopologyPass = () => {
         if (!topologyPass) {
           topologyPass = encoder.beginComputePass({
-            label: "Sparse CM12 resident liquid injection topology",
+            label: mode === 0 ? "Sparse CM12 region edit topology" : "Sparse CM12 resident liquid injection topology",
           });
           topologyPass.setBindGroup(0, topologyBindGroup);
         }
@@ -7613,19 +7668,22 @@ export class WebGPUSparseCM12Resident {
       // a journal is collecting, so an injection between ordinary frames keeps
       // the frame's already-recorded topology effects intact.
       dispatchTopology("beginSparseCM12PressureTopologyRepair", 1);
-      dispatchTopology("allocateSparseWorldInteractionPages",
-        Math.ceil(interactionPageCount[0] / 4),
-        Math.ceil(interactionPageCount[1] / 4),
-        Math.ceil(interactionPageCount[2] / 4));
-      dispatchTopology("finalizeSparseWorldDirectoryAllocations",
-        Math.ceil(this.worldDirectoryLayout.capacity / WORKGROUP_SIZE));
-      dispatchTopology("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
+      if (mode !== 0) {
+        dispatchTopology("allocateSparseWorldInteractionPages",
+          Math.ceil(interactionPageCount[0] / 4),
+          Math.ceil(interactionPageCount[1] / 4),
+          Math.ceil(interactionPageCount[2] / 4));
+        dispatchTopology("finalizeSparseWorldDirectoryAllocations",
+          Math.ceil(this.worldDirectoryLayout.capacity / WORKGROUP_SIZE));
+        dispatchTopology("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
+      }
       // Promote every intersected brick before writing any density. The planner
       // treats the enabled injection as refine-only: untouched accepted bricks
       // are preserved, while closure may still grow the required 2:1 support.
+      if (mode === 0) dispatchTopology("refreshEditedRegionPolicy", bricks);
       dispatchTopology("classifyRefinementPolicyTiles", leafCapacity);
-      dispatchTopology("planBrickResolution", bricks);
-      dispatchTopology("activateInjectionFrontierPages", bricks);
+      dispatchTopology(mode === 0 ? "planEditedRegionResolution" : "planBrickResolution", bricks);
+      if (mode !== 0) dispatchTopology("activateInjectionFrontierPages", bricks);
       for (let gradingPass = 0;
         gradingPass < Math.log2(this.brickFineResolution); gradingPass += 1) {
         dispatchTopology("closeRefinementPolicyTileResolution", leafCapacity);
@@ -7706,6 +7764,10 @@ export class WebGPUSparseCM12Resident {
     // entire interaction's support first, then apply its density/impulse once
     // after that topology is ready; a deferred page must not lose its dose.
     if (phase === "prepare") return;
+    if (mode === 0) {
+      this.encodeFramePlanPresentation(encoder, "Sparse CM12 region edit presentation");
+      return;
+    }
 
     const injectionPass = encoder.beginComputePass({
       label: "Sparse CM12 resident liquid injection",
@@ -8511,10 +8573,10 @@ export class WebGPUSparseCM12Resident {
     source: Awaited<ReturnType<WebGPUSparseCM12Resident["captureGenerationTransferSource"]>>,
     atlas: SparseAdaptiveMassAtlas, active: ReadonlySet<number>, finestCellSize_m: number,
     maximumBytes = Number.POSITIVE_INFINITY, signal?: AbortSignal,
-    newAirCoverage: readonly SparseCM12NewAirCoverage[] = [],
+    newAirCoverage: readonly SparseCM12NewAirCoverage[] = [], preserveCandidateBacking = false,
   ) {
     const grid = typeof Worker === "undefined" ? buildSparseAtlasCompositeGrid(atlas) : undefined;
-    const next = await this.createReplacement(atlas, grid, active, source.scalarD4, source.faceD4, maximumBytes, source, signal, newAirCoverage);
+    const next = await this.createReplacement(atlas, grid, active, source.scalarD4, source.faceD4, maximumBytes, source, signal, newAirCoverage, preserveCandidateBacking);
     try {
       await next.waitForSimulationPipelines();
       const transfer = next.preparedGenerationTransfer ?? await prepareSparseCM12GenerationTransfer(

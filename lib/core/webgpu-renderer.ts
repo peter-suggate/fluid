@@ -2411,6 +2411,18 @@ export class FluidLabRenderer {
    * extents than the solver allocated would tear. The viewport is what enforces
    * that, by pinning only for drafts it knows are geometry-preserving.
    */
+  /** A validated solid edit reaches the resident solver before the document is published. */
+  applyLiveSolidEdit(scene: SceneDescription): void {
+    const solver = this.gpuFluid;
+    if (!solver?.validateLiveSolidEdit || !solver.applySceneUniforms
+      || this.gpuFluidPending || this.simulationFault || this.runtimeFailure) {
+      throw new Error("Live voxel editing needs a ready Sparse CM12 scene.");
+    }
+    solver.validateLiveSolidEdit(scene);
+    solver.applySceneUniforms(scene);
+    this.appliedSceneUniformKey = gpuSceneUniformKey(scene);
+  }
+
   setSimulationScene(scene: SceneDescription | undefined) {
     this.simulationScene = scene;
   }
@@ -2646,6 +2658,20 @@ export class FluidLabRenderer {
     return fluid?.sparseVoxelSceneSource ? fluid : this.svoSceneSidecar;
   }
 
+  private refreshEditedTopology(solver: GPUSolverInstance): void {
+    if (!solver.refreshSceneTopology) return;
+    void solver.refreshSceneTopology().then(() => {
+      if (this.disposed || this.gpuFluid !== solver) return;
+      this.waterPipeline?.invalidateSurface();
+      this.pausedPresentationRevision += 1;
+      this.gpuInfoCallback?.({ ...solver.info });
+    }).catch(error => {
+      if (this.disposed || this.gpuFluid !== solver) return;
+      if (error instanceof SimulationFailureError) this.stopAfterSimulationFailure(error);
+      else this.stopAfterFailure(error);
+    });
+  }
+
   private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig, presentationMode: ScenePresentationMode) {
     if (!this.device || this.disposed || this.simulationFault || this.runtimeFailure || this.deviceLost) return undefined;
     if (!canInitializeGPUSceneSource(scene, config.methodId)) return undefined;
@@ -2670,6 +2696,7 @@ export class FluidLabRenderer {
     if (sceneUniformKey !== this.appliedSceneUniformKey) {
       if (this.gpuFluid.applySceneUniforms) {
         this.gpuFluid.applySceneUniforms(scene);
+        this.refreshEditedTopology(this.gpuFluid);
         this.appliedSceneUniformKey = sceneUniformKey;
       } else if (this.appliedSceneUniformKey) {
         const rebuildKey = `${key}:${sceneUniformKey}`;
