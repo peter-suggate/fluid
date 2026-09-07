@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { packFineLevelSetSample, unpackFineLevelSetPackedPhi } from "../lib/core/fine-levelset-packed-sample";
+import { createSparseAdaptiveMassAtlas, type SparseBrickResolution } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import { measurePartitionAnalyticField, partitionAnalyticPhi,
   type PartitionFixture } from "../tools/implicit-density/partition-oracle";
 
@@ -40,4 +41,14 @@ test("sharp-box oracle distinguishes exact authored top from a sampled active-fa
   const result = measurePartitionAnalyticField("sharp-box", samples("sharp-box"), [16, 16, 16], .05);
   assert.ok(result.maximumZeroDistance_m > .004, "the lateral face can limit the nearest-surface distance");
   assert.ok(result.maximumZeroDistance_m < .025, "the discrepancy is bounded by finest sampling");
+});
+
+test("partition fixture uses an admissible width-one/width-two face rather than conflicting width-one/width-four bounds", () => {
+  const brick = (x: number, resolution: SparseBrickResolution) => ({
+    key: x, coordinate: [x, 0, 0] as const, resolution,
+    density: new Float64Array(resolution ** 3).fill(1), gamma: new Float64Array(resolution ** 3).fill(1),
+  });
+  assert.throws(() => createSparseAdaptiveMassAtlas([16, 8, 8], [brick(0, 8), brick(1, 2)]), /exceeds 2:1 grading/);
+  const accepted = createSparseAdaptiveMassAtlas([16, 8, 8], [brick(0, 8), brick(1, 4)]);
+  assert.deepEqual(accepted.bricks.map(value => 8 / value.resolution), [1, 2]);
 });

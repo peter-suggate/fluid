@@ -72,7 +72,9 @@ for (const fixture of fixtures) (dawnModule ? test : test.skip)(
         minimumCellSize_cells: width, maximumCellSize_cells: width,
         min_m: { x: -.4, y: 0, z: -.4 }, max_m: { x: mixed ? 0 : .4, y: .8, z: .4 } },
       ...(mixed ? [{ id: "other-half", rule: "minimum-cell-size" as const,
-        minimumCellSize_cells: 4, maximumCellSize_cells: 4,
+        // Adjacent width-one/width-four constraints have no 2:1-graded
+        // solution. Exercise the finest admissible mixed seam explicitly.
+        minimumCellSize_cells: 2, maximumCellSize_cells: 2,
         min_m: { x: 0, y: 0, z: -.4 }, max_m: { x: .4, y: .8, z: .4 } }] : [])];
       scene.fluid.refinementRegions = regions(1);
       solver = await WebGPUAdaptiveMassSolver.createAsync(device, scene, "balanced", undefined,
@@ -146,7 +148,7 @@ for (const fixture of fixtures) (dawnModule ? test : test.skip)(
             const nativeWidth = span / brick.acceptedResolution;
             const origin = brick.coordinate.map(q => 8 * q);
             if (origin.some((q, axis) => q < 0 || q + span > [nx, ny, nz][axis]!)) continue;
-            const expectedWidth: number = mixed && origin[0]! >= nx / 2 ? 4 : width;
+            const expectedWidth: number = mixed && origin[0]! >= nx / 2 ? 2 : width;
             assert.equal(nativeWidth, expectedWidth, `${label}: topology must actually change`);
             for (let z = origin[2]!; z < origin[2]! + span; z += nativeWidth)
               for (let y = origin[1]!; y < origin[1]! + span; y += nativeWidth)
