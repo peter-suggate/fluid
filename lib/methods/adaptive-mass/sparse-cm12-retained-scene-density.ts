@@ -18,6 +18,11 @@ export interface RetainedSceneDensity {
   readonly transitionWidth: number;
   readonly domain: RetainedSceneBox;
   readonly primitives: readonly RetainedScenePrimitive[];
+  /** The admitted initial support is a union of complete physical cells.
+   * Its upper bound is derived from origin + dimensions*f32(cellSize), not
+   * independently rounded authored endpoints. Primitive coefficients and
+   * authored wall attachment still refer to domain above. */
+  readonly supportLattice?: Readonly<{ dimensions: RetainedScenePoint; cellSize: number }>;
 }
 
 export const RETAINED_SCENE_HEADER_FLOATS = 16;
@@ -37,6 +42,10 @@ export function assertRetainedSceneIsotropicLattice(field: RetainedSceneDensity,
     || dimensions.some(n => !Number.isSafeInteger(n) || n < 1)) {
     throw new Error("Invalid retained physical lattice");
   }
+  if (field.supportLattice && (field.supportLattice.cellSize !== h
+    || field.supportLattice.dimensions.some((n, axis) => n !== dimensions[axis]))) {
+    throw new Error("Retained support lattice cannot change during physical field adoption");
+  }
   for (let axis = 0; axis < 3; axis++) {
     const extent = field.domain.upper[axis] - field.domain.lower[axis];
     const realized = dimensions[axis] * h;
@@ -47,6 +56,31 @@ export function assertRetainedSceneIsotropicLattice(field: RetainedSceneDensity,
       throw new Error(`Retained density requires an isotropic realized lattice: axis ${axis} has extent ${extent}, ${dimensions[axis]} cells at ${h} cover ${realized}`);
     }
   }
+}
+
+const supportBoxes = new WeakMap<RetainedSceneDensity, RetainedSceneBox>();
+/** Hard physical support. Authored domain endpoints remain the authority for
+ * deciding whether a liquid box face attaches to a domain wall. */
+export function retainedSceneSupportBox(field: RetainedSceneDensity): RetainedSceneBox {
+  if (!field.supportLattice) return field.domain;
+  let box = supportBoxes.get(field);
+  if (!box) {
+    const lattice = field.supportLattice;
+    box = Object.freeze({ lower: field.domain.lower,
+      upper: Object.freeze(field.domain.lower.map((lo, axis) => lo + lattice.dimensions[axis] * lattice.cellSize)) as unknown as RetainedScenePoint });
+    supportBoxes.set(field, box);
+  }
+  return box;
+}
+
+/** Declare the same support geometry used by native capacity and GPU sample
+ * coordinates. This changes no authored liquid primitive or density value;
+ * it prevents f32 endpoint roundoff from clipping fictitious boundary slivers. */
+export function bindRetainedSceneSupportLattice(field: RetainedSceneDensity,
+  dimensions: readonly [number, number, number], cellSize: number): RetainedSceneDensity {
+  assertRetainedSceneIsotropicLattice(field, dimensions, cellSize);
+  if (field.supportLattice) return field;
+  return retainedSceneDensity({ ...field, supportLattice: { dimensions, cellSize } });
 }
 
 const clamp = (v: number) => Math.max(0, Math.min(1, v));
@@ -78,7 +112,14 @@ export function retainedSceneDensity(input: RetainedSceneDensity): RetainedScene
   });
   const transitionWidth = finite(input.transitionWidth);
   if (!(transitionWidth > 0)) throw new Error("Retained transition width underflows float32");
-  return Object.freeze({ generation: input.generation, transitionWidth, domain, primitives: Object.freeze(primitives) });
+  const supportLattice = input.supportLattice ? Object.freeze({
+    dimensions: Object.freeze([...input.supportLattice.dimensions]) as unknown as RetainedScenePoint,
+    cellSize: finite(input.supportLattice.cellSize),
+  }) : undefined;
+  const result = Object.freeze({ generation: input.generation, transitionWidth, domain, primitives: Object.freeze(primitives),
+    ...(supportLattice ? { supportLattice } : {}) });
+  if (supportLattice) assertRetainedSceneIsotropicLattice(result, supportLattice.dimensions, supportLattice.cellSize);
+  return result;
 }
 
 /** Compile source authoring once, never infer a surface from cell means.
@@ -143,23 +184,27 @@ export function evaluateRetainedScenePhi(field: RetainedSceneDensity, x: Retaine
     else value = x[1] - p.center[1] - p.curvature[0] * (x[0] - p.center[0]) ** 2 - p.curvature[2] * (x[2] - p.center[2]) ** 2;
     phi = Math.min(phi, value);
   }
-  let outside = 0;
-  for (let axis = 0; axis < 3; axis++) outside = Math.max(outside, field.domain.lower[axis] - x[axis], x[axis] - field.domain.upper[axis]);
+  const support = retainedSceneSupportBox(field); let outside = 0;
+  for (let axis = 0; axis < 3; axis++) outside = Math.max(outside, support.lower[axis] - x[axis], x[axis] - support.upper[axis]);
   return outside > 0 ? Math.max(outside, phi) : phi;
 }
 export function evaluateRetainedSceneDensity(field: RetainedSceneDensity, x: RetainedScenePoint): number {
-  if (x.some((v, axis) => v < field.domain.lower[axis] || v > field.domain.upper[axis])) return 0;
+  const support = retainedSceneSupportBox(field);
+  if (x.some((v, axis) => v < support.lower[axis] || v > support.upper[axis])) return 0;
   return clamp(.5 - evaluateRetainedScenePhi(field, x) / field.transitionWidth);
 }
 
 /** Float-only ABI, so the production resident arena can append it directly.
  * Header: version,count,generation,width; lower at4, upper at8, world origin
  * at12. Primitive: kind at0 (1 box,2 ellipsoid,3 height), first vector at4,
- * second at8. The origin converts solver metres to authored world metres. */
+ * second at8. The origin converts solver metres to authored world metres.
+ * Optional support dimensions at7/11/15 derive the hard support upper bound
+ * with the admitted GPU h; zeros preserve raw authored physical-box queries. */
 export function packRetainedSceneDensity(field: RetainedSceneDensity): Float32Array {
   const result = new Float32Array(RETAINED_SCENE_HEADER_FLOATS + RETAINED_SCENE_PRIMITIVE_FLOATS * field.primitives.length);
   result.set([1, field.primitives.length, field.generation, field.transitionWidth]);
   result.set(field.domain.lower, 4); result.set(field.domain.upper, 8); result.set(field.domain.lower, 12);
+  if (field.supportLattice) field.supportLattice.dimensions.forEach((n, axis) => { result[7 + 4 * axis] = n; });
   field.primitives.forEach((p, i) => {
     const start = RETAINED_SCENE_HEADER_FLOATS + i * RETAINED_SCENE_PRIMITIVE_FLOATS;
     result[start] = p.kind === "box" ? 1 : p.kind === "ellipsoid" ? 2 : 3;
@@ -234,8 +279,9 @@ function polynomialIntegral(p: Polynomial, low: number, high: number) {
 export function integrateRetainedSceneVertical(field: RetainedSceneDensity,
   x: number, z: number, lowerY: number, upperY: number): number {
   if (![x, z, lowerY, upperY].every(Number.isFinite) || upperY < lowerY) throw new Error("Invalid retained vertical query");
-  if (x < field.domain.lower[0] || x > field.domain.upper[0] || z < field.domain.lower[2] || z > field.domain.upper[2]) return 0;
-  const y0 = Math.max(lowerY, field.domain.lower[1]), y1 = Math.min(upperY, field.domain.upper[1]);
+  const support = retainedSceneSupportBox(field);
+  if (x < support.lower[0] || x > support.upper[0] || z < support.lower[2] || z > support.upper[2]) return 0;
+  const y0 = Math.max(lowerY, support.lower[1]), y1 = Math.min(upperY, support.upper[1]);
   if (!(y1 > y0) || !field.primitives.length) return 0;
   const middle = (y0 + y1) / 2, low = y0 - middle, high = y1 - middle;
   const profiles = field.primitives.map(p => primitiveProfile(field, p, x, z, middle, low, high));
@@ -302,12 +348,13 @@ function densityRange(field: RetainedSceneDensity, box: RetainedSceneBox): reado
 export function retainedSceneDensityRange(field: RetainedSceneDensity, query: RetainedSceneBox): readonly [number, number] {
   if ([...query.lower, ...query.upper].some(v => !Number.isFinite(v))
     || query.lower.some((v, axis) => v >= query.upper[axis])) throw new Error("Invalid retained density range box");
-  const lower = query.lower.map((v, axis) => Math.max(v, field.domain.lower[axis])) as unknown as RetainedScenePoint;
-  const upper = query.upper.map((v, axis) => Math.min(v, field.domain.upper[axis])) as unknown as RetainedScenePoint;
+  const support = retainedSceneSupportBox(field);
+  const lower = query.lower.map((v, axis) => Math.max(v, support.lower[axis])) as unknown as RetainedScenePoint;
+  const upper = query.upper.map((v, axis) => Math.min(v, support.upper[axis])) as unknown as RetainedScenePoint;
   if (lower.some((v, axis) => v >= upper[axis])) return [0, 0];
   const [low, high] = densityRange(field, { lower, upper });
-  return [query.lower.some((v, axis) => v < field.domain.lower[axis])
-    || query.upper.some((v, axis) => v > field.domain.upper[axis]) ? 0 : low, high];
+  return [query.lower.some((v, axis) => v < support.lower[axis])
+    || query.upper.some((v, axis) => v > support.upper[axis]) ? 0 : low, high];
 }
 
 const GAUSS5 = [[-.906179845938664, .2369268850561891], [-.5384693101056831, .4786286704993665], [0, .5688888888888889], [.5384693101056831, .4786286704993665], [.906179845938664, .2369268850561891]] as const;
@@ -335,8 +382,9 @@ export function integrateRetainedSceneDensity(field: RetainedSceneDensity, query
   const volume = widths[0] * widths[1] * widths[2];
   const tolerance = options.absoluteTolerance ?? Math.max(1e-15, volume * 2e-7), maximum = options.maximumRectangles ?? 8192;
   if (!(tolerance > 0) || !Number.isFinite(tolerance) || !Number.isSafeInteger(maximum) || maximum < 1) throw new Error("Invalid retained integration budget");
-  const lower = query.lower.map((v, axis) => Math.max(v, field.domain.lower[axis])) as unknown as RetainedScenePoint;
-  const upper = query.upper.map((v, axis) => Math.min(v, field.domain.upper[axis])) as unknown as RetainedScenePoint;
+  const support = retainedSceneSupportBox(field);
+  const lower = query.lower.map((v, axis) => Math.max(v, support.lower[axis])) as unknown as RetainedScenePoint;
+  const upper = query.upper.map((v, axis) => Math.min(v, support.upper[axis])) as unknown as RetainedScenePoint;
   let evaluations = 0;
   const receipt = (amount: number, error: number, rectangles: number): RetainedSceneIntegralReceipt => Object.freeze({ amount, mean: amount / volume,
     estimatedAbsoluteError: error, requestedAbsoluteTolerance: tolerance, toleranceMet: error <= tolerance, rectangles, verticalEvaluations: evaluations });
@@ -454,10 +502,12 @@ export function compileRetainedSceneFineMeans(field: RetainedSceneDensity,
     || dimensions.some(v => !Number.isSafeInteger(v) || v < 1)) throw new Error("Invalid retained finest-cell lattice");
   const count = dimensions[0] * dimensions[1] * dimensions[2];
   if (!Number.isSafeInteger(count) || count > 0x1000_0000) throw new Error("Retained finest-cell lattice exceeds storage budget");
-  const means = new Float32Array(count), origin = field.domain.lower;
+  if (field.supportLattice) assertRetainedSceneIsotropicLattice(field, dimensions, h);
+  const support = retainedSceneSupportBox(field);
+  const means = new Float32Array(count), origin = support.lower;
   const reflected = dimensions.map((n, axis) => {
-    if (Math.abs(n * h - (field.domain.upper[axis] - origin[axis])) > n * h * 1e-12) return false;
-    const center = (origin[axis] + field.domain.upper[axis]) / 2;
+    if (Math.abs(n * h - (support.upper[axis] - origin[axis])) > n * h * 1e-12) return false;
+    const center = (origin[axis] + support.upper[axis]) / 2;
     return field.primitives.every(p => {
       if (p.kind === "ellipsoid") return p.center[axis] === center;
       if (p.kind === "box") return p.lower[axis] + p.upper[axis] === 2 * center;
@@ -470,10 +520,10 @@ export function compileRetainedSceneFineMeans(field: RetainedSceneDensity,
   const visit = (lo: readonly number[], hi: readonly number[]) => {
     const box: RetainedSceneBox = { lower: lo.map((v, axis) => origin[axis] + h * v) as unknown as RetainedScenePoint,
       upper: hi.map((v, axis) => origin[axis] + h * v) as unknown as RetainedScenePoint };
-    const outside = box.lower.some((v, axis) => v >= field.domain.upper[axis])
-      || box.upper.some((v, axis) => v <= field.domain.lower[axis]);
-    const inside = box.lower.every((v, axis) => v >= field.domain.lower[axis])
-      && box.upper.every((v, axis) => v <= field.domain.upper[axis]);
+    const outside = box.lower.some((v, axis) => v >= support.upper[axis])
+      || box.upper.some((v, axis) => v <= support.lower[axis]);
+    const inside = box.lower.every((v, axis) => v >= support.lower[axis])
+      && box.upper.every((v, axis) => v <= support.upper[axis]);
     const range = outside ? [0, 0] : densityRange(field, box);
     if (range[1] === 0 || (inside && range[0] === 1)) {
       const value = range[1] === 0 ? 0 : 1;
