@@ -289,8 +289,10 @@ test("large-CFL transport allocates reachable tiles without scanning the domain"
     `${result.workGrid.atlas.bricks.length}`);
   assert.ok(result.workGrid.atlas.bricks.length < 8,
     `${result.workGrid.atlas.bricks.length}`);
-  assert.equal(result.workGrid.atlas.bricks.every((candidate) =>
-    candidate.resolution === 8), true);
+  for (const candidate of result.workGrid.atlas.bricks) {
+    assert.equal(candidate.resolution, candidate.key === 1 ? 8 : atlas.ladder.coarseResolution,
+      "transport preserves the source rung and allocates new support at the coarse rung");
+  }
 });
 
 test("all-coarse dynamics keeps resident and newly reached tiles at 4 cubed", () => {

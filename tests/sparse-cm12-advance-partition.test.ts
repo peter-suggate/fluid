@@ -120,10 +120,14 @@ test("the SIM diagram has one node per resident stage, in encode order", () => {
 test("adaptivity timing labels describe the complete bracketed work", () => {
   const stages = new Map(ADAPTIVE_MASS_FLUID_PIPELINE.stages.map((stage) => [stage.id, stage]));
   assert.equal(stages.get("activity-measurement")?.label, "Activity census + frontier");
-  assert.match(stages.get("activity-measurement")?.tip.timing ?? "", /11 shader entry points/);
+  for (const id of ["activity-measurement", "resolution-planning"] as const) {
+    const work = SPARSE_CM12_STAGES[id].timedWork!;
+    const count = work.groups.reduce((sum, group) => sum + group.entryPoints.length, 0);
+    assert.ok(count > 0);
+    assert.ok(stages.get(id)?.tip.timing?.includes(`${count} shader entry points`));
+    if ("commandCopies" in work && work.commandCopies) assert.ok(stages.get(id)?.tip.timing?.includes(`${work.commandCopies} command-buffer copies`));
+  }
   assert.equal(stages.get("resolution-planning")?.label, "Candidate topology build");
-  assert.match(stages.get("resolution-planning")?.tip.timing ?? "",
-    /15 shader entry points \+ 5 command-buffer copies/);
   assert.equal(stages.get("brick-retirement")?.label, "Post-commit activity mask");
 });
 

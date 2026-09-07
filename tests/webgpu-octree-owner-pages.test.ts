@@ -358,7 +358,7 @@ test("lookup WGSL uses the direct logical directory without mutable allocator op
 
 test("Dawn rejected candidate preserves the accepted owner bank and frontier epoch bit-for-bit", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for GPU owner rejection checks",
-}, async (t) => {
+}, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
     create(options: string[]): GPU; globals: Record<string, unknown>;
   };

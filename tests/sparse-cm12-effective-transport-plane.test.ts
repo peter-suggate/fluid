@@ -118,7 +118,7 @@ test("region-equivalent face transport scales the shared cache without taxing de
   assert.match(scaledTrace, /length\(initial\/spans\)/,
     "face RK2 substeps must measure travel in accepted-cell spans");
   assert.match(wgsl,
-    /characteristic=sampleFaceVelocitySupportAtSpans\(departure,spans\)\[axis\]/);
+    /characteristic=sampleRelativeFaceVelocity\(origin,displacement,spans\)\[axis\]/);
 
   const policyCache = functionSource(wgsl, "refreshSparseCM12RefinementPolicyCache",
     "fn policyTileMembershipRequired");

@@ -908,7 +908,7 @@ test("fine topology binds exactly the resources reachable from every compute ent
   }
 });
 
-test("fine-brick sampling WGSL uses a flat direct lookup, exact generation validation, and explicit coarse authority", () => {
+test("fine-brick sampling keeps direct lookup loop-free while admitting compact signed publishers", () => {
   assert.match(fineLevelSetBrickSamplingWGSL, /let directoryBase=7u\+params\.worklistCapacity/);
   assert.match(fineLevelSetBrickSamplingWGSL, /worklist\[0\]!=params\.generation/);
   assert.match(fineLevelSetBrickSamplingWGSL,
@@ -916,7 +916,9 @@ test("fine-brick sampling WGSL uses a flat direct lookup, exact generation valid
   assert.match(fineLevelSetBrickSamplingWGSL,
     /metadata\[base\]==physicalId&&metadata\[base\+1u\]==key&&metadata\[base\+2u\]==params\.generation/);
   assert.match(fineLevelSetBrickSamplingWGSL, /Result\(coarsePhi,0u/);
-  assert.doesNotMatch(fineLevelSetBrickSamplingWGSL, /while|binary|middle|low<high|hash|probe/i);
+  const direct = fineLevelSetBrickSamplingWGSL.slice(fineLevelSetBrickSamplingWGSL.indexOf("let directoryBase=7u+params.worklistCapacity"), fineLevelSetBrickSamplingWGSL.indexOf("fn ", fineLevelSetBrickSamplingWGSL.indexOf("let directoryBase=7u+params.worklistCapacity")));
+  assert.doesNotMatch(direct, /while|binary|middle|low<high|hash|probe/i);
+  assert.match(fineLevelSetBrickSamplingWGSL, /worklist\[3\]&0x80000000u[\s\S]*var low=0u;var high=count/);
   assert.doesNotMatch(fineLevelSetBrickSamplingWGSL, /octree.*row/i);
 });
 

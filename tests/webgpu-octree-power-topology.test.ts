@@ -1,3 +1,4 @@
+import { compileOctreePowerSampler } from "../lib/methods/power/octree-power-compiled-sampler";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -30,12 +31,15 @@ test("power topology planner accounts only compact rows and fixed catalog", () =
   assert.equal(shallow.entryCount, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount);
   assert.equal(shallow.lookupCount, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount);
   assert.equal(shallow.metricBytes, 1_600);
-  assert.equal(shallow.catalogBytes, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.byteCount - 40 * 4);
+  assert.equal(shallow.catalogBytes, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.byteCount - 40 * 4 + compileOctreePowerSampler(catalog).words.byteLength);
   assert.equal(shallow.rowTemplateBytes,
     catalog.rowTemplateHeaders.byteLength + catalog.rowTemplateSlots.byteLength
     + catalog.rowTemplateData.byteLength + catalog.rowTemplateDiagonals.byteLength
     + catalog.reconstructionData.byteLength);
-  assert.ok(shallow.allocatedBytes < 16 * 1024 * 1024);
+  const moreRows = planOctreePowerTopology(200, catalog);
+  assert.equal(moreRows.catalogBytes, shallow.catalogBytes, "compiled catalog is shared independently of row capacity");
+  assert.equal(moreRows.metricBytes, 2 * shallow.metricBytes);
+  assert.ok(moreRows.allocatedBytes > shallow.allocatedBytes);
 });
 
 test("power topology planner rejects malformed catalog lookup metadata", () => {

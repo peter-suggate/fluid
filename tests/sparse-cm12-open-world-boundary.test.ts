@@ -10,5 +10,5 @@ const shader = readFileSync(new URL(
 test("GPU-grown SparseWorld rows use only signed topology and SolidWorld apertures", () => {
   assert.doesNotMatch(shader, /planarFluidBoundary|hasPlanarFluidBoundaries/);
   assert.match(shader, /fn rowOpenFraction\(id:u32\)->f32\{[\s\S]*?return solid\*solidVoxelRowOpenFraction\(id\);/);
-  assert.match(shader, /fn rowPressureOpenFraction\(id:u32\)->f32\{[\s\S]*?return solid\*solidVoxelRowOpenFraction\(id\);/);
+  assert.match(shader, /fn rowPressureOpenFraction\(id:u32\)->f32\{[\s\S]*?let open=solid\*solidVoxelRowOpenFraction\(id\);[\s\S]*return select\(open,1\.0,rowSeparatingFromClosedWorld\(id\)\);/);
 });

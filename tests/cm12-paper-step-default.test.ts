@@ -40,4 +40,3 @@ test("both CM12 methods use the shared sharpening return distance", () => {
     );
   }
 });
-
