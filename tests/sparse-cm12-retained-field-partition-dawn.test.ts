@@ -7,6 +7,7 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/h
 import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
 import { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 import { readPublishedCM12Field } from "../tools/sparse-cm12-published-field";
+import { measurePartitionAnalyticField } from "../tools/implicit-density/partition-oracle";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const live = new Set<GPU>();
@@ -101,6 +102,21 @@ for (const fixture of fixtures) (dawnModule ? test : test.skip)(
           "the production field must evolve when gravity resumes");
         const [nx, ny, nz]: [number, number, number] = [solver.info.nx, solver.info.ny, solver.info.nz];
         const h = scene.voxelDomain.finestCellSize_m;
+        if (phase === "reset") {
+          const analytic = measurePartitionAnalyticField(fixture, initialPhi, [nx, ny, nz], h);
+          console.log(JSON.stringify({ fixture, phase, analytic }));
+          assert.ok(analytic.sampleCount > 100, "independent analytic interface is nontrivial");
+          assert.equal(analytic.missingSamples, 0, "every analytic interface sample must publish");
+          assert.ok(analytic.maximumSamplePrecisionRatio <= 1,
+            `${fixture}: initial scalar differs from authored analytic field: ${analytic.maximumSamplePrecisionRatio}`);
+          assert.equal(analytic.unresolvedAnalyticColumns, 0, "the finest lattice resolves every authored crossing");
+          assert.equal(analytic.changedCrossingColumns, 0, "all analytic component crossings must publish");
+          assert.equal(analytic.observedCrossings, analytic.analyticCrossings);
+          assert.ok(analytic.maximumRootPrecisionRatio <= 1,
+            `${fixture}: zero crossings differ from independently sampled analytic field`);
+          assert.ok(analytic.maximumZeroDistance_m <= analytic.surfaceBudget_m,
+            `${fixture}: continuous analytic surface distance ${analytic.maximumZeroDistance_m} m`);
+        }
         const baselineRoots = verticalRoots(initialPhi, nx, ny, nz, h);
         assert.ok(baselineRoots.some(roots => roots.length > 0), "fixture has visible vertical crossings");
         const at = (x: number, y: number, z: number) => x + nx * (y + ny * z);
