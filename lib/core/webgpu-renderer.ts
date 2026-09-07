@@ -1,3 +1,4 @@
+import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
 import type { SparseVoxelDrySceneData } from "../svo/contracts/scene-publication";
 import { SimulationFailureError } from "./simulation-failure";
 import { planSvoFluidCoverageRatio, type SvoFluidCoverageTriple } from "../svo/features/scene-publication/svo-fluid-coverage";
@@ -23,7 +24,7 @@ import { getMethod } from "./method-registry";
 import type { GPUSolverInstance, InjectedLiquidBall, MethodParamValues, OverlayPipeline } from "./method-contract";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE, requiredFluidDeviceLimits } from "./webgpu-device-limits";
-import { RasterWaterPipeline, type FluidSurfaceRenderMode, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
+import { RasterWaterPipeline, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import type { ScenePresentationMode } from "./scene-definition";
 import { sceneHasTerrain } from "./terrain";

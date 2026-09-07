@@ -1,3 +1,4 @@
+import { surfaceDisplayFeature } from "../surface-display/definition";
 import type { MethodParamValues } from "../../core/method-contract";
 import { getMethod } from "../../core/method-registry";
 import { composeFeatures } from "../../framework/composition";
@@ -15,7 +16,7 @@ export function composeFeatureUI(
   return composeFeatures({
     features: [
       ...SVO_PIPELINE_FEATURES,
-      ...(fluid ? [gravityFeature] : []),
+      ...(fluid ? [gravityFeature, surfaceDisplayFeature] : []),
       ...(method?.features ?? []),
     ],
     selections: {

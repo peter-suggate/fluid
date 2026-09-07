@@ -1,10 +1,11 @@
+import { normalizeControlNumber, type ControlMetadata } from "../../framework/controls";
 import type { EditorRay } from "../editor-entity";
 import type { EditorHighlight } from "../editor-target";
 import type { SceneDescription } from "../model";
 import type { SolidWorldVoxelPatch } from "../solid-world";
 
 export type ToolValues = Readonly<Record<string, number>>;
-export interface ToolControl {
+export interface ToolControl extends ControlMetadata {
   readonly id: string;
   readonly kind?: "number" | "toggle";
   readonly label: string;
@@ -50,12 +51,7 @@ export interface VoxelToolPlugin {
 }
 export function toolValues(plugin: VoxelToolPlugin, values: ToolValues = {}): ToolValues {
   return Object.fromEntries(plugin.ui.controls.map((control) => {
-    const candidate = values[control.id];
-    const value = candidate !== undefined && Number.isFinite(candidate) ? candidate : control.initial;
-    const clamped = Math.max(control.min, Math.min(control.max, value));
-    // Match native number-input stepping, which is relative to its minimum.
-    const snapped = control.min + Math.round((clamped - control.min) / control.step) * control.step;
-    return [control.id, Math.max(control.min, Math.min(control.max, snapped))];
+    return [control.id, normalizeControlNumber(values[control.id], control.initial, control, true)];
   }));
 }
 export function createVoxelToolRegistry(plugins: readonly VoxelToolPlugin[]) {

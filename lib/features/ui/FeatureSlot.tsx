@@ -1,4 +1,6 @@
 "use client";
+import { SurfaceDisplayRow } from "../surface-display/ui";
+import { TopologyFreezeRow } from "../topology-freeze/ui";
 
 import { resolvedMethodValues } from "../../core/stores/method-store";
 import { useSession } from "../../core/session/session-context";
@@ -11,6 +13,8 @@ import { ComposedFeatureSlot, type FeatureControlViews } from "../../framework/u
 
 /** Only application composition knows the installed React implementations. */
 export const applicationViews: FeatureControlViews = {
+  "presentation.surface-display/mode": SurfaceDisplayRow,
+  "simulation.topology-freeze/enabled": TopologyFreezeRow,
   "scene.gravity/enabled": GravityRow,
   "scene.gravity/y": GravityYRow,
   ...Object.fromEntries(adaptiveMassAdaptivityFeature.controls!.map(control =>

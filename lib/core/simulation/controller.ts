@@ -1,3 +1,4 @@
+import { methodConfigurationImpact } from "../method-lifecycle";
 import { validateMethodConfiguration } from "../stores/method-store";
 import { hostTransportBlockReason, hostTransportFailure } from "./host-transport-status";
 import { BUILD_ID, canonicalScene, cloneScene, parseScene, type RunState, type SceneDescription } from "../model";
@@ -1098,9 +1099,10 @@ class SimulationController {
 
   setMethodParam(methodId: string, key: string, value: MethodParamValue, paneId: PaneId = PRIMARY_PANE_ID) {
     const method = getMethod(methodId), spec = method.params.find((candidate) => candidate.key === key);
-    const structural = methodId === this.session(paneId).method.getState().methodId && spec?.update !== "runtime";
     const state = this.session(paneId).method.getState();
     validateMethodConfiguration(methodId, state.quality, { ...state.overrides[methodId], [key]: value });
+    const impact = methodConfigurationImpact(method, state.quality, state.overrides[methodId] ?? {}, { ...state.overrides[methodId], [key]: value });
+    const structural = methodId === state.methodId && (impact === "rebuild" || impact === "reset");
     if (structural) this.announceGPURebuild(`Apply ${spec?.label ?? key}: ${String(value)}`, paneId);
     this.session(paneId).method.getState().setParam(methodId, key, value);
     if (structural) this.reset(undefined, undefined, paneId);
@@ -1108,11 +1110,12 @@ class SimulationController {
 
   resetMethodParam(methodId: string, key: string, paneId: PaneId = PRIMARY_PANE_ID) {
     const method = getMethod(methodId), spec = method.params.find((candidate) => candidate.key === key);
-    const structural = methodId === this.session(paneId).method.getState().methodId && spec?.update !== "runtime";
     const state = this.session(paneId).method.getState();
     const overrides = { ...state.overrides[methodId] };
     delete overrides[key];
     validateMethodConfiguration(methodId, state.quality, overrides);
+    const impact = methodConfigurationImpact(method, state.quality, state.overrides[methodId] ?? {}, overrides);
+    const structural = methodId === state.methodId && (impact === "rebuild" || impact === "reset");
     if (structural) this.announceGPURebuild(`Restore ${spec?.label ?? key} default`, paneId);
     this.session(paneId).method.getState().resetParam(methodId, key);
     if (structural) this.reset(undefined, undefined, paneId);

@@ -1,8 +1,9 @@
+import type { ControlMetadata } from "./controls";
 import { portsMatch, type PublicationPort, type PortRequirement } from "./ports";
 
 /** Data-only feature composition. Domain hosts retain execution and resource ownership. */
 export type UpdateImpact = "live" | "rebuild" | "reset";
-export interface FeatureControl {
+export interface FeatureControl extends ControlMetadata {
   readonly id: string;
   readonly label: string;
   readonly kind: "number" | "choice" | "toggle" | "action" | "readout";

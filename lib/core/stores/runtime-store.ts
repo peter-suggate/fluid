@@ -1,3 +1,4 @@
+import { initialRuntimeFeatures, resetRuntimeFeatures } from "../../features/runtime-lifecycle";
 import { create } from "zustand";
 import type { RunState } from "../model";
 
@@ -35,7 +36,7 @@ export const createRuntimeStore = () => create<RuntimeStore>((set) => ({
   runState: "running",
   simulationTime: 0,
   simulationEpoch: 0,
-  topologyFrozen: false,
+  ...initialRuntimeFeatures(),
   setTopologyFrozen: (topologyFrozen) => set({ topologyFrozen }),
   notice: "Dam-break initialized · Eulerian projection active",
   noticeTone: "info",
@@ -43,7 +44,7 @@ export const createRuntimeStore = () => create<RuntimeStore>((set) => ({
   simRate: null,
   setRunState: (runState) => set({ runState }),
   setSimulationTime: (simulationTime) => set({ simulationTime }),
-  resetSimulationTime: () => set((state) => ({ simulationTime: 0, simulationEpoch: state.simulationEpoch + 1, topologyFrozen: false })),
+  resetSimulationTime: () => set((state) => ({ simulationTime: 0, simulationEpoch: state.simulationEpoch + 1, ...resetRuntimeFeatures("simulation") })),
   setNotice: (notice, tone = "info") => set((state) => ({ notice, noticeTone: tone, noticeSaid: state.noticeSaid + 1 })),
   setSimRate: (simRate) => set({ simRate })
 }));

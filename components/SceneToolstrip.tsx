@@ -141,42 +141,6 @@ function SolverRow() {
   />;
 }
 
-/** Presentation-only switch for reading the selected tank's extracted mesh. */
-function FluidSurfaceRenderRow() {
-  const session = useSession();
-  const mode = session.ui((state) => state.fluidSurfaceRenderMode);
-  const setMode = session.ui((state) => state.setFluidSurfaceRenderMode);
-  const methodId = session.method((state) => state.methodId);
-  const frozen = session.runtime((state) => state.topologyFrozen);
-  const setFrozen = session.runtime((state) => state.setTopologyFrozen);
-  return <ToolstripRow
-    icon={<Waves width={14} height={14} strokeWidth={1.7} aria-hidden />}
-    name="Fluid surface"
-    hint="Shade the liquid normally, inspect a simple translucent surface, or show triangle edges for topology diagnosis."
-    testId="fluid-surface-render-row"
-  >
-    <ToolstripChoice
-      ariaLabel="Fluid surface render mode"
-      value={mode}
-      options={[{ value: "shaded", label: "Shade" }, { value: "wireframe", label: "Wire" }, { value: "simple", label: "Simple" }]}
-      onChange={(value) => setMode(value as typeof mode)}
-    />
-    {methodId === "adaptive-mass" && <div className="toolstrip-choice">
-      <button
-        type="button"
-        className={frozen ? "active" : ""}
-        aria-label="Freeze topology"
-        aria-pressed={frozen}
-        title={frozen
-          ? "Resume cell-size adaptation. New fluid support can grow in either mode."
-          : "Freeze existing brick coarseness. New bricks still allocate as the water moves."}
-        data-testid="freeze-topology-toggle"
-        onClick={() => setFrozen(!frozen)}
-      >{frozen ? "Frozen" : "Freeze"}</button>
-    </div>}
-  </ToolstripRow>;
-}
-
 /** Whether an entity declares anything for `EntityOptionRows` to draw. */
 function entityHasOptions(entity: EditorEntity): boolean {
   return (entity.choices?.length ?? 0)
@@ -250,9 +214,9 @@ export function ContainerToolstrip({
     <FeatureSlot slot="scene.visibility" />
     <TankRow />
     {hasSolver && <FeatureSlot slot="scene.physics" />}
-    {hasSolver && <FluidSurfaceRenderRow />}
+    {hasSolver && <FeatureSlot slot="scene.surface" />}
     {hasSolver && <SolverRow />}
-    {hasSolver && <FeatureSlot slot="scene.adaptivity" />}
+    {hasSolver && <><FeatureSlot slot="scene.adaptivity" /><FeatureSlot slot="scene.simulation" /></>}
     {/* The seam between the two halves of the column: readings that say what
         the scene *is*, and verbs that say what a stroke would *add* to it.
         Drawn rather than inferred because both halves are glyph rows. */}

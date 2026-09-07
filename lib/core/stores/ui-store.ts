@@ -1,3 +1,4 @@
+import { surfaceDisplayQuery } from "../../features/surface-display/definition";
 import { resolveSvoPipelineComposition } from "../../svo/pipeline/composition";
 import { create } from "zustand";
 import type { EditorAction } from "../editor-action";
@@ -41,7 +42,7 @@ import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../../svo/featu
 import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
 import { isStageLensOverlayMode } from "../stage-lens";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
-import type { FluidSurfaceRenderMode } from "../webgpu-water-pipeline";
+import type { FluidSurfaceRenderMode } from "../../features/surface-display/definition";
 
 /**
  * The object currently in the user's hand.
@@ -405,7 +406,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
   gridOverlayLensPhase: 0,
-  fluidSurfaceRenderMode: "simple",
+  ...surfaceDisplayQuery.read(new URLSearchParams()),
   svoShadowsEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled,
   svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
   silhouetteRefinementEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled ?? false,
@@ -518,7 +519,10 @@ export const createUIStore = () => create<UIStore>((set) => ({
       ? 0 : state.gridOverlayLensPhase,
   })),
   setGridOverlayLensPhase: (phase) => set({ gridOverlayLensPhase: Math.max(0, Math.floor(phase)) }),
-  setFluidSurfaceRenderMode: (fluidSurfaceRenderMode) => set({ fluidSurfaceRenderMode }),
+  setFluidSurfaceRenderMode: (fluidSurfaceRenderMode) => {
+    surfaceDisplayQuery.write(new URLSearchParams(), { fluidSurfaceRenderMode });
+    set({ fluidSurfaceRenderMode });
+  },
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),

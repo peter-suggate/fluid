@@ -1,3 +1,4 @@
+import { normalizeControlNumber, type ControlMetadata } from "../framework/controls";
 import type { FeatureComposition } from "../framework/composition";
 import type { RenderFrameSeam } from "./render-frame-stages";
 import type { FluidPipelineGraph } from "./fluid-pipeline";
@@ -54,7 +55,7 @@ export interface MethodProfile {
   overrides: MethodParamValues;
 }
 
-interface ParamBase {
+interface ParamBase extends ControlMetadata {
   key: string;
   label: string;
   /** One-line explanation shown under the control. */
@@ -694,7 +695,7 @@ export function numberValue(values: MethodParamValues, spec: ReadonlyArray<Metho
   const declared = spec.find((candidate) => candidate.key === key);
   const raw = values[key];
   if (typeof raw === "number" && Number.isFinite(raw)) {
-    if (declared?.kind === "number") return Math.min(declared.max, Math.max(declared.min, raw));
+    if (declared?.kind === "number") return normalizeControlNumber(raw, declared.default, declared);
     return raw;
   }
   return declared?.kind === "number" ? declared.default : 0;

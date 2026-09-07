@@ -210,8 +210,10 @@ function main() {
         // Feature-owned React adapters consume the shared UI primitives. Numerical
         // modules retain the prohibition against reaching the UI layer.
         const featureView = /\/(?:ui|controls)\.tsx$/.test(rel) && (from === "svo" || from.startsWith("method-"));
+        const persistenceCatalog = rel === "lib/features/persistence.ts" && to === "svo";
+        const sharedFeatureDefinition = from.startsWith("method-") && to === "feature" && targetRel.endsWith("/definition.ts");
         const frameworkConsumer = to === "framework" && from !== "framework";
-        if (!ALLOWED[from].has(to) && !frameworkConsumer && !(featureView && to === "ui")) {
+        if (!ALLOWED[from].has(to) && !frameworkConsumer && !persistenceCatalog && !sharedFeatureDefinition && !(featureView && to === "ui")) {
           violations.push(`${rel} [${from}] → ${relative(REPO, target)} [${to}]`);
         }
       }

@@ -1,3 +1,5 @@
+import { uiFeatureQuery, type FeatureUIQueryState } from "../features/persistence";
+import { runtimeFeatureQuery } from "../features/runtime-lifecycle";
 import { GRAVITY_QUERY_PATHS, isGravityVector } from "../features/gravity/state";
 import { refinementRegionsToQuery, withRefinementRegionsFromQuery } from "./editor-refinement-region";
 import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
@@ -20,19 +22,6 @@ import {
 } from "./compare/compare-query";
 import { useShellStore, type ShellView } from "./stores/shell-store";
 import { useUIStore, type SceneOverlay } from "./stores/ui-store";
-import {
-  DEFAULT_SVO_RENDER_DIAGNOSTICS,
-  SVO_RENDER_STAGE_VIEWS,
-  type SvoRenderStageView,
-} from "../svo/features/diagnostics/svo-render-diagnostics";
-import { DEFAULT_SVO_LIGHTING_OPTIONS, type SvoConeTracingMode, type SvoPrimaryTraversalMode } from "../svo/pipeline/svo-render-options";
-import {
-  DEFAULT_SVO_RENDER_TUNING,
-  normalizeSvoRenderTuning,
-  SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
-  SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
-  type SvoRenderTuning,
-} from "../svo/pipeline/svo-render-tuning";
 import type { GPUQuality } from "./gpu-quality";
 import { sceneStoneQuery, withSceneStoneQuery } from "./stone-look-controls";
 import { sceneRimQuery, withSceneRimQuery } from "./vessel-rim-controls";
@@ -94,7 +83,7 @@ export type QueryState = {
   topologyFrozen: boolean;
 };
 
-export type UIQueryState = {
+export type UIQueryState = FeatureUIQueryState & {
   camera: CameraState;
   /**
    * The instrument drawn over the scene, or `null` for a bare view.
@@ -111,23 +100,7 @@ export type UIQueryState = {
   gridOverlaySlice: number;
   gridOverlayMode: GridOverlayMode;
   gridOverlayLensPhase: number;
-  svoShadowsEnabled: boolean;
-  svoAmbientOcclusionEnabled: boolean;
-  silhouetteRefinementEnabled: boolean;
-  svoConeTracingMode: SvoConeTracingMode;
-  svoPrimaryTraversal: SvoPrimaryTraversalMode;
-  svoStageView: SvoRenderStageView;
-  /**
-   * The sparse-presentation tuning, of which exactly two fields round-trip.
-   *
-   * The whole record is ~40 numbers and would dominate any link it appeared in,
-   * so only the two an experiment is actually run over are addressable: the
-   * refinement depth, which rebuilds the world at a finer leaf, and the
-   * screen-space LOD threshold, without which a finer leaf is never descended
-   * into and the depth reads as a no-op. Everything else stays a session value
-   * reachable through the PROFILE strip.
-   */
-  svoRenderTuning: SvoRenderTuning;
+
 };
 
 export type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
@@ -653,7 +626,7 @@ export function parseQueryState(search: string): QueryState {
     scene: validateScene(scene).length === 0 ? scene : baseScene,
     view: shellViewFromQuery(search),
     ui: uiQueryState(query, preset),
-    topologyFrozen: query.get("freezeTopology") === "1",
+    ...runtimeFeatureQuery.read(query),
   };
 }
 
@@ -700,31 +673,7 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
     // fractional or negative one.
     gridOverlayLensPhase: Math.max(0,
       Math.floor(numberParam(query, "lensPhase", initialUI.gridOverlayLensPhase, 0))),
-    svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
-    svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
-    silhouetteRefinementEnabled: query.get("svoPrimarySeamClosure") === "1",
-    svoConeTracingMode: query.get("svoCones") === "exact" || query.get("svoCones") === "off"
-      ? query.get("svoCones") as SvoConeTracingMode
-      : DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
-    svoPrimaryTraversal: query.get("svoPrimary") === "mesh" || query.get("svoPrimary") === "traced" || query.get("svoPrimary") === "raster"
-      ? query.get("svoPrimary") as SvoPrimaryTraversalMode
-      : DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal,
-    svoStageView: SVO_RENDER_STAGE_VIEWS.includes(query.get("svoStage") as SvoRenderStageView)
-      ? query.get("svoStage") as SvoRenderStageView
-      : DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView,
-    // Normalized rather than trusted: these are the tuning fields a link can
-    // carry, and the numbers are clamped by the same function the store
-    // applies, so an out-of-range external value lands on the ceiling instead
-    // of reaching the octree as an unbounded depth request.
-    svoRenderTuning: normalizeSvoRenderTuning({
-      ...DEFAULT_SVO_RENDER_TUNING,
-      environmentRefinementDepth: numberParam(query, "svoRefinementDepth",
-        DEFAULT_SVO_RENDER_TUNING.environmentRefinementDepth, 0,
-        SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM),
-      environmentPlanarRefinementExemption: query.get("svoFlatExempt") === "1",
-    lodScreenSpacePixels: numberParam(query, "svoLodPixels",
-      initialUI.svoRenderTuning.lodScreenSpacePixels, 0, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM),
-    }),
+    ...uiFeatureQuery.read(query),
   };
 }
 
@@ -739,10 +688,10 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
  * instruments, so an old link opens the scene bare.
  */
 function isManagedKey(key: string) {
-  return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth" || key === OVERLAY_QUERY_KEY
+  return uiFeatureQuery.keys.includes(key) || runtimeFeatureQuery.keys.includes(key) || key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth" || key === OVERLAY_QUERY_KEY
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode" || key === "lensPhase"
-    || key === "freezeTopology" || isCompareQueryKey(key)
-    || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === SEEDS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoRefinementDepth" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || isCompareQueryKey(key)
+    || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === SEEDS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoSilhouetteRefinement" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
@@ -760,7 +709,7 @@ export function serializeQueryState(
   for (const key of [...query.keys()]) if (isManagedKey(key)) query.delete(key);
 
   query.set("scene", sceneState.presetId);
-  if (runtimeState.topologyFrozen) query.set("freezeTopology", "1");
+  runtimeFeatureQuery.write(query, runtimeState);
   const preset = getScenePreset(sceneState.presetId);
   const profile = preset.methodProfile;
   const baselineMethodId = defaultMethodId();
@@ -773,29 +722,7 @@ export function serializeQueryState(
   // The studio is the absence of the layer, not a second value: a link to a
   // scene should not also have to say that it is not the shelf it came from.
   if (shellState.view === "library") query.set("view", "library");
-  if (uiState.svoShadowsEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled) query.set("svoShadows", uiState.svoShadowsEnabled ? "1" : "0");
-  if (uiState.svoAmbientOcclusionEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled) query.set("svoAO", uiState.svoAmbientOcclusionEnabled ? "1" : "0");
-  if (uiState.silhouetteRefinementEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled) {
-    query.set("svoPrimarySeamClosure", uiState.silhouetteRefinementEnabled ? "1" : "0");
-  }
-  if (uiState.svoConeTracingMode !== "cones") query.set("svoCones", uiState.svoConeTracingMode);
-  if (uiState.svoPrimaryTraversal !== DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal) {
-    query.set("svoPrimary", uiState.svoPrimaryTraversal);
-  }
-  if (uiState.svoStageView !== DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView) {
-    query.set("svoStage", uiState.svoStageView);
-  }
-  if (uiState.svoRenderTuning.environmentRefinementDepth
-    !== DEFAULT_SVO_RENDER_TUNING.environmentRefinementDepth) {
-    query.set("svoRefinementDepth", String(uiState.svoRenderTuning.environmentRefinementDepth));
-  }
-  if (uiState.svoRenderTuning.environmentPlanarRefinementExemption
-    !== DEFAULT_SVO_RENDER_TUNING.environmentPlanarRefinementExemption) {
-    query.set("svoFlatExempt", uiState.svoRenderTuning.environmentPlanarRefinementExemption ? "1" : "0");
-  }
-  if (uiState.svoRenderTuning.lodScreenSpacePixels !== DEFAULT_SVO_RENDER_TUNING.lodScreenSpacePixels) {
-    query.set("svoLodPixels", String(uiState.svoRenderTuning.lodScreenSpacePixels));
-  }
+  uiFeatureQuery.write(query, uiState);
   // Only when one is up: a closed instrument is the absence of the key, so an
   // ordinary scene link does not have to say which panels it is not showing.
   if (uiState.sceneOverlay) query.set(OVERLAY_QUERY_KEY, uiState.sceneOverlay);

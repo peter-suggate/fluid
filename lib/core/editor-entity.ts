@@ -1,3 +1,4 @@
+import type { ControlMetadata } from "../framework/controls";
 import { constrainedAxes, EDITOR_AXES, type AxisConstraint, type EditorAxis } from "./editor-axis-constraint";
 import { GIZMO_AXIS_DIRECTIONS, gizmoHandleLength_m } from "./editor-gizmo";
 import type { EditorSelection, EditorSelectionKind } from "./editor-tools";
@@ -243,7 +244,7 @@ export interface EditorFieldRow {
   readonly hint?: string;
 }
 
-export interface EditorField {
+export interface EditorField extends ControlMetadata {
   readonly id: string;
   readonly label: string;
   /**

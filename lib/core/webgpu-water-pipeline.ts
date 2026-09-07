@@ -1,3 +1,4 @@
+import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
@@ -236,7 +237,6 @@ export type DrySceneReplacementEncoder = (
 export type RasterWaterBackgroundMode = "require-dry-scene" | "clear";
 
 /** How the extracted liquid surface is presented in the viewport. */
-export type FluidSurfaceRenderMode = "shaded" | "wireframe" | "simple";
 
 /**
  * Restricted tall cells cannot contain a free surface below their cubic band.

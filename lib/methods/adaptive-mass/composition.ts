@@ -1,3 +1,4 @@
+import { topologyFreezeFeature } from "../../features/topology-freeze/definition";
 import { ALGORITHM_PARAMS, algorithmFeature } from "./features/algorithms/definition";
 import { parameterVariantSelections } from "../../core/method-parameter-variants";
 import { composeFeatures, type FeatureDefinition } from "../../framework/composition";
@@ -26,7 +27,7 @@ export function resolveMethodComposition(values: MethodParamValues = {}) {
   for (const param of ALGORITHM_PARAMS) {
     if (typeof algorithmValues[param.key] === "boolean") algorithmValues[param.key] = param.default;
   }
-  return composeFeatures({features: [host, adaptiveMassAdaptivityFeature, algorithmFeature], selections:{
+  return composeFeatures({features: [host, adaptiveMassAdaptivityFeature, algorithmFeature, topologyFreezeFeature], selections:{
     ...parameterVariantSelections("simulation.adaptive-mass.algorithms", ALGORITHM_PARAMS, algorithmValues),
     "simulation.adaptive-mass.surface": "sparse-cm12",
     "simulation.adaptive-mass.adaptivity": String(values.selectorMode ?? "coarse-first"),
