@@ -22,6 +22,33 @@ export interface RetainedSceneDensity {
 
 export const RETAINED_SCENE_HEADER_FLOATS = 16;
 export const RETAINED_SCENE_PRIMITIVE_FLOATS = 16;
+
+/** Production's retained fine-coordinate transform is scalar and isotropic.
+ * Validate the whole initial lattice before atlas seeding and resident
+ * allocation; individual clipped leaves need not span whole domain axes.
+ * Rounding or the minimum lattice dimension can produce anisotropic realized
+ * scene cells, which require a vector transform throughout the solver. Taking
+ * their minimum here would silently change the authored physical geometry.
+ * Raw physical-box integration is independent of this adoption precondition. */
+export function assertRetainedSceneIsotropicLattice(field: RetainedSceneDensity,
+  dimensions: readonly [number, number, number], cellSize: number): void {
+  const h = Math.fround(cellSize);
+  if (!(h > 0) || !Number.isFinite(h)
+    || dimensions.some(n => !Number.isSafeInteger(n) || n < 1)) {
+    throw new Error("Invalid retained physical lattice");
+  }
+  for (let axis = 0; axis < 3; axis++) {
+    const extent = field.domain.upper[axis] - field.domain.lower[axis];
+    const realized = dimensions[axis] * h;
+    // Both domain endpoints and GPU h have already been rounded to f32.
+    const tolerance = 8 * 2 ** -23 * Math.max(extent, realized, h);
+    if (!Number.isFinite(extent) || !Number.isFinite(realized) || !(extent > 0)
+      || Math.abs(extent - realized) > tolerance) {
+      throw new Error(`Retained density requires an isotropic realized lattice: axis ${axis} has extent ${extent}, ${dimensions[axis]} cells at ${h} cover ${realized}`);
+    }
+  }
+}
+
 const clamp = (v: number) => Math.max(0, Math.min(1, v));
 const finite = (v: number) => {
   const f = Math.fround(v);

@@ -78,3 +78,94 @@ test("subcell memory and geometry snapshots are validated before allocation", ()
   assert.throws(() => compileRetainedSceneSubcellMoments(ramp, dimensions, h, createSolidWorld(), { maximumBytes: 10 }), /require.*bytes/);
   assert.throws(() => compileRetainedSceneSubcellMoments(ramp, dimensions, h, createSolidWorld(), { solidFractions: new Uint8Array(1) }), /does not match/);
 });
+
+test("an unchanged static world reuses subcell arrays without integration or uploads", () => {
+  const world = createSolidWorld();
+  const previous = compileRetainedSceneSubcellMoments(ramp, dimensions, h, world);
+  const next = compileRetainedSceneSubcellMoments(ramp, dimensions, h, world, { previous });
+  assert.equal(next.seedAmounts, previous.seedAmounts);
+  assert.equal(next.openVolumes, previous.openVolumes);
+  assert.deepEqual(next.changedCellRanges, []);
+  assert.equal(next.receipt.reusedCells, 512); assert.equal(next.receipt.recomputedCells, 0);
+  assert.equal(next.receipt.integratedSubcells, 0);
+  assert.equal(next.receipt.estimatedAbsoluteError, previous.receipt.estimatedAbsoluteError);
+});
+
+test("local static edits recompute only changed supports using exact ramp antiderivatives", () => {
+  const world = createSolidWorld();
+  const previous = compileRetainedSceneSubcellMoments(ramp, dimensions, h, world);
+  const oldSeed = previous.seedAmounts.slice(), oldOpen = previous.openVolumes.slice();
+  const solidFractions = new Uint8Array(512);
+  solidFractions[0] = 64; solidFractions[1] = 128; solidFractions[3] = 255;
+  const next = compileRetainedSceneSubcellMoments(ramp, dimensions, h, world, { previous, solidFractions });
+  assert.deepEqual(next.changedCellRanges, [{ firstCell: 0, cellCount: 2 }, { firstCell: 3, cellCount: 1 }]);
+  assert.equal(next.receipt.reusedCells, 509); assert.equal(next.receipt.recomputedCells, 3);
+  assert.ok(next.receipt.integratedSubcells <= 16, "unchanged fluid interfaces must not pay for quadrature");
+  for (let cell = 0; cell < 512; cell++) for (let octant = 0; octant < 8; octant++) {
+    const at = 8 * cell + octant;
+    if (!solidFractions[cell]) {
+      assert.equal(next.seedAmounts[at], oldSeed[at]); assert.equal(next.openVolumes[at], oldOpen[at]); continue;
+    }
+    const lower = Math.max((octant & 2) ? .5 : 0, solidFractions[cell] / 255);
+    const upper = (octant & 2) ? 1 : .5;
+    close(next.openVolumes[at], Math.max(0, upper - lower) / 4, 1e-8);
+    close(next.seedAmounts[at], upper > lower ? ((1 - lower) ** 2 - (1 - upper) ** 2) / 8 : 0, 1e-8);
+  }
+  assert.deepEqual(previous.seedAmounts, oldSeed); assert.deepEqual(previous.openVolumes, oldOpen);
+  solidFractions[0] = 255;
+  assert.equal(next.solidFractions[0], 64, "the cache owns its occupancy snapshot");
+});
+
+test("reopening a static support restores seed geometry without mutating the closed snapshot", () => {
+  const world = createSolidWorld();
+  const solidFractions = new Uint8Array(512); solidFractions[0] = 255;
+  const closed = compileRetainedSceneSubcellMoments(ramp, dimensions, h, world, { solidFractions });
+  const opened = compileRetainedSceneSubcellMoments(ramp, dimensions, h, world, { previous: closed });
+  assert.deepEqual(opened.changedCellRanges, [{ firstCell: 0, cellCount: 1 }]);
+  assert.equal(opened.receipt.recomputedCells, 1);
+  for (let octant = 0; octant < 8; octant++) {
+    assert.equal(closed.seedAmounts[octant], 0); assert.equal(closed.openVolumes[octant], 0);
+    assert.equal(opened.seedAmounts[octant], octant & 2 ? .03125 : .09375);
+    assert.equal(opened.openVolumes[octant], .125);
+  }
+  // These are seed basis moments, not an instruction to restore transported
+  // liquid: the resident remains responsible for accepted a,b and edit mass.
+});
+
+test("an edited curved support retains exact quadratic moments across its clipped octants", () => {
+  const field = retainedSceneDensity({ generation: 2, transitionWidth: .5,
+    domain: ramp.domain, primitives: [{ kind: "ellipsoid", center: [0, .5, 0], radii: [.3, .3, .3] }] });
+  const world = createSolidWorld(), previous = compileRetainedSceneSubcellMoments(field, dimensions, h, world);
+  const cell = 4 + 8 * (4 + 8 * 4), solidFractions = previous.solidFractions.slice(); solidFractions[cell] = 64;
+  const next = compileRetainedSceneSubcellMoments(field, dimensions, h, world, { previous, solidFractions });
+  const p = field.primitives[0]; assert.ok(p.kind === "ellipsoid");
+  const radius = p.radii[0], alpha = .5 + radius / (2 * field.transitionWidth), beta = 1 / (2 * field.transitionWidth * radius);
+  const squareMean = (a: number, b: number) => (a * a + a * b + b * b) / 3;
+  for (let octant = 0; octant < 8; octant++) {
+    const x0 = (octant & 1 ? .5 : 0) * h, x1 = x0 + .5 * h;
+    const z0 = (octant & 4 ? .5 : 0) * h, z1 = z0 + .5 * h;
+    const y0 = Math.max(octant & 2 ? .5 : 0, 64 / 255) * h, y1 = (octant & 2 ? 1 : .5) * h;
+    // This entire subbox lies in the unclamped quadratic transition, so the
+    // independent tensor-product monomial integral has no numerical oracle.
+    const density = alpha - beta * (squareMean(x0, x1) + squareMean(y0, y1) + squareMean(z0, z1));
+    const fraction = (y1 - y0) / (4 * h);
+    close(next.seedAmounts[8 * cell + octant], density * fraction, 1e-8);
+    close(next.openVolumes[8 * cell + octant], fraction, 1e-8);
+  }
+  assert.equal(next.receipt.recomputedCells, 1);
+  assert.equal(next.receipt.integratedSubcells, 8);
+});
+
+test("cache reuse checks numerical field identity and requested accuracy", () => {
+  const world = createSolidWorld();
+  const previous = compileRetainedSceneSubcellMoments(ramp, dimensions, h, world);
+  const changed = retainedSceneDensity({ ...ramp, primitives: [{ kind: "quadratic-height",
+    center: [0, 2 * h, 0], curvature: [0, 0, 0] }] });
+  assert.throws(() => compileRetainedSceneSubcellMoments(changed, dimensions, h, world, { previous }), /numeric field and lattice/);
+  assert.throws(() => compileRetainedSceneSubcellMoments(ramp, [4, 16, 8], h, world, { previous }), /numeric field and lattice/);
+  assert.throws(() => compileRetainedSceneSubcellMoments(ramp, dimensions, h, world,
+    { previous, absoluteMeanTolerance: 1e-10 }), /tighter integral tolerance/);
+  const cloned = structuredClone(previous);
+  const next = compileRetainedSceneSubcellMoments(ramp, dimensions, h, world, { previous: cloned });
+  assert.equal(next.receipt.reusedCells, 512, "cache provenance survives generation preparation transfer");
+});

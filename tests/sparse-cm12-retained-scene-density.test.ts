@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { cloneScene, defaultScene } from "../lib/core/model";
 import { createCoarseFirstPoolImpactHalfScene, createCoarseFirstPoolImpactQuarterScene } from "../lib/core/scenes";
-import { sceneLatticeDimensions } from "../lib/core/scene-lattice-dimensions";
+import { sceneCellSizes_m, sceneLatticeDimensions } from "../lib/core/scene-lattice-dimensions";
 import {
-  compileRetainedSceneDensity, compileRetainedSceneFineMeans, evaluateRetainedSceneDensity,
+  assertRetainedSceneIsotropicLattice, compileRetainedSceneDensity, compileRetainedSceneFineMeans, evaluateRetainedSceneDensity,
   evaluateRetainedScenePhi, integrateRetainedSceneDensity, integrateRetainedSceneVertical,
   packRetainedSceneDensity, retainedSceneDensity, type RetainedSceneDensity, type RetainedScenePoint, type RetainedSceneFineMeansReceipt,
 } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
@@ -37,6 +37,29 @@ test("authored pool and sphere compile into immutable numeric density with an ex
   if (sphere.kind === "ellipsoid") {
     close(evaluateRetainedSceneDensity(compiled, [sphere.center[0] + sphere.radii[0], sphere.center[1], sphere.center[2]]), .5);
     assert.ok(evaluateRetainedSceneDensity(compiled, [0, sphere.center[1], 0]) > .999);
+  }
+});
+
+test("production physical-lattice admission preserves authored geometry across f32 rounding", () => {
+  for (const scene of [createCoarseFirstPoolImpactQuarterScene(), createCoarseFirstPoolImpactHalfScene()]) {
+    const f = compileRetainedSceneDensity(scene); assert.ok(f);
+    assert.doesNotThrow(() => assertRetainedSceneIsotropicLattice(f, sceneLatticeDimensions(scene),
+      Math.min(...sceneCellSizes_m(scene))));
+  }
+  // An isotropic lattice may end partway through an ordinary B8 sparse leaf.
+  const clipped = retainedSceneDensity({ generation: 1, transitionWidth: .125,
+    domain: { lower: [-.625, 0, -.625], upper: [.625, 1.25, .625] }, primitives: [] });
+  assert.doesNotThrow(() => assertRetainedSceneIsotropicLattice(clipped, [10, 10, 10], .125));
+});
+
+test("production admission rejects rounded and minimum-eight anisotropic scene lattices", () => {
+  for (const extents of [[1, .11, 1], [1, 1.01, 1]]) {
+    const scene = cloneScene(defaultScene);
+    scene.container.width_m = extents[0]; scene.container.height_m = extents[1]; scene.container.depth_m = extents[2];
+    scene.voxelDomain.finestCellSize_m = .05;
+    const f = compileRetainedSceneDensity(scene); assert.ok(f);
+    assert.throws(() => assertRetainedSceneIsotropicLattice(f, sceneLatticeDimensions(scene),
+      Math.min(...sceneCellSizes_m(scene))), /isotropic realized lattice/);
   }
 });
 
