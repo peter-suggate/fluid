@@ -259,7 +259,7 @@ export function CompareDiffStrip({ a, b }: CompareDiffStripProps) {
         {sharedMode} — n/a in {modeMissingIn}
       </p>}
       {unlinked.length > 0 && <p className="compare-note" data-tone="warn">
-        {unlinked.map((group) => COMPARE_GROUP_LABELS[group]).join(" · ")} unlinked — that difference is not the solver
+        {unlinked.map((group) => COMPARE_GROUP_LABELS[group]).join(" · ")} unlinked — edits apply to each pane separately
       </p>}
       {simulation.panesDtDiffer() && <p className="compare-note" data-tone="warn">
         dt differs — not lockstep

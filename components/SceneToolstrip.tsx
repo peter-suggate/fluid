@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Cuboid, Sigma, Waves } from "lucide-react";
+import { ArrowDown, Cuboid, Sigma, Waves } from "lucide-react";
+import { defaultScene } from "../lib/core/model";
 import type { EditorEntity, EditorField } from "../lib/core/editor-entity";
 import { sceneryIdFromSelection } from "../lib/core/editor-scenery";
 import { TANK_SELECTION_ID, tankExtentFields } from "../lib/core/editor-tank";
@@ -90,6 +91,42 @@ function TankRow() {
   />;
 }
 
+function GravityRow() {
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
+  const gravity = scene.fluid.gravity_m_s2;
+  const enabled = gravity.x !== 0 || gravity.y !== 0 || gravity.z !== 0;
+  const [previous, setPrevious] = useState<{
+    sceneId: string;
+    gravity: typeof gravity;
+  }>();
+  const toggle = () => {
+    if (enabled) setPrevious({ sceneId: scene.sceneId, gravity: { ...gravity } });
+    const next = enabled ? { x: 0, y: 0, z: 0 }
+      : previous?.sceneId === scene.sceneId ? previous.gravity : defaultScene.fluid.gravity_m_s2;
+    simulation.beginEdit(enabled ? "Disable gravity" : "Enable gravity", session.id);
+    simulation.commitEdit({ fluid: { ...scene.fluid, gravity_m_s2: { ...next } } },
+      { reseed: true }, session.id);
+  };
+  return <ToolstripRow
+    icon={<ArrowDown width={14} height={14} strokeWidth={1.7} aria-hidden />}
+    name="Gravity"
+    hint="Turn gravity on or off. Scenes starting without gravity use Earth gravity downward."
+    testId="scene-gravity-row"
+    after={<div className="toolstrip-choice">
+      <button
+        type="button"
+        className={enabled ? "active" : ""}
+        aria-label="Gravity"
+        aria-pressed={enabled}
+        title={enabled ? "Disable gravity" : "Enable gravity"}
+        data-testid="scene-gravity-toggle"
+        onClick={toggle}
+      >Gravity {enabled ? "on" : "off"}</button>
+    </div>}
+  />;
+}
+
 /**
  * The solver behind the water, and the way to swap it.
  *
@@ -169,8 +206,8 @@ function FluidSurfaceRenderRow() {
         aria-label="Freeze topology"
         aria-pressed={frozen}
         title={frozen
-          ? "Resume topology adaptation. The water keeps moving."
-          : "Freeze the current cells and their coarseness while the water keeps moving."}
+          ? "Resume cell-size adaptation. New fluid support can grow in either mode."
+          : "Freeze existing brick coarseness. New bricks still allocate as the water moves."}
         data-testid="freeze-topology-toggle"
         onClick={() => setFrozen(!frozen)}
       >{frozen ? "Frozen" : "Freeze"}</button>
@@ -250,6 +287,7 @@ export function ContainerToolstrip({
     {hasFields && <FieldViewRows />}
     <PrimaryTraversalRow />
     <TankRow />
+    {hasSolver && <GravityRow />}
     {hasSolver && <FluidSurfaceRenderRow />}
     {hasSolver && <SolverRow />}
     {hasSolver && <AdaptiveMassToolstripRow />}

@@ -17,6 +17,7 @@ const reasons: Readonly<Record<number, readonly [string, string]>> = {
   1: ["INCIDENCE_RANGE", "Corrupt incidence range would have been replaced by an empty range"],
   2: ["EMPTY_DEFICIT_STENCIL", "Forward transport has no recipient support; donor self-return refused"],
   3: ["EMPTY_SHARPENING_STENCIL", "Sharpening has no recipient support; donor self-return refused"],
+  5: ["TRANSPORT_STENCIL_GEOMETRY", "Could not locate a positive geometric transport stencil"],
   4: ["INVALID_CONSERVED_VALUE", "Nonfinite or negative transported density/gamma would have been clamped"],
 };
 export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: readonly string[] = []): SimulationFailure | undefined {
@@ -30,11 +31,12 @@ export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: rea
     frame: words[3], generation: words[4], ownerId: words[5],
     operandNames: ({
       1: ["begin", "end", "maximumCount", "reserved"],
-      2: ["visibleWeight", "deficit", "reserved", "reserved"],
+      2: ["visibleWeight", "deficit", "donorDensity", "reserved"],
       3: ["recipientWeight", "removedFixed", "reserved", "reserved"],
+      5: ["positionX", "positionY", "positionZ", "reserved"],
       4: ["rawDensity", "rawGamma", "reserved", "reserved"],
     } as Record<number, string[]>)[words[1]],
-    operands: words[1] >= 2 && words[1] <= 4
+    operands: words[1] >= 2 && words[1] <= 5
       ? [...new Float32Array(words.slice(6, 10).buffer)] : [...words.slice(6, 10)], rawWords: [...words],
   };
 }

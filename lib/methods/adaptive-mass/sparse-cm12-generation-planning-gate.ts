@@ -26,6 +26,9 @@ fn main(@builtin(global_invocation_id)id:vec3u){
   let isActive=a[at+10u]!=0u;let current=a[at+12u];
   let requested=select(current,a[at+47u],a[at+47u]!=0u);
   let activation=(a[at+9u]&0x80000000u)!=0u;
+  let frozenFrontier=(a[at+9u]&0x00020000u)!=0u;
+  if(frozenFrontier){atomicOr(&receipt[0],1u);}
+  if(p.limits.w!=0u){return;}
   let reasons=a[at+1u];let travel=bitcast<f32>(a[at+33u]);
   if(((isActive||activation)&&(flags&1u)==0u&&requested!=current)
     ||(isActive&&span>1u&&((reasons&256u)!=0u||travel>=p.tuning.x))){
@@ -56,10 +59,11 @@ fn main(@builtin(global_invocation_id)id:vec3u){
       [descriptors, receipt, parameters, readback], metadata.length);
   }
 
-  async needed(maximumSpan: number, demoteEpochs: number, finestTravel: number): Promise<boolean> {
+  async needed(maximumSpan: number, demoteEpochs: number, finestTravel: number,
+    frozenFrontierOnly = false): Promise<boolean> {
     const [, receipt, parameters, readback] = this.buffers;
     const data = new ArrayBuffer(32);
-    new Uint32Array(data).set([this.count, maximumSpan, demoteEpochs, 0]);
+    new Uint32Array(data).set([this.count, maximumSpan, demoteEpochs, Number(frozenFrontierOnly)]);
     new Float32Array(data)[4] = finestTravel;
     this.device.queue.writeBuffer(parameters!, 0, data);
     const encoder = this.device.createCommandEncoder({ label: "CM12 planning preflight" });

@@ -136,15 +136,7 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       const metrics = runtime.draw(time_s, renderScene.document, ...args);
       post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime) });
     } catch (error) {
-      post({
-        type: "status",
-        status: {
-          state: "unavailable",
-          label: error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped",
-          resource: webGPUPlatformResourcePlugin,
-        },
-        workerNow_ms: performance.now(),
-      });
+      runtime.stopAfterFailure(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
     }
   } else if (message.type === "set-simulation-scene") {
     runtime.setSimulationScene(message.scene ? markSceneRevision(message.scene) : undefined);

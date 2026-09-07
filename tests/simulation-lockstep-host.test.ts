@@ -180,7 +180,7 @@ test("STEP is refused until the slowest pane lands the previous step", () => {
   assert.ok(Math.abs(host.targetTime() - 2 * DT) < EPSILON);
 });
 
-test("differing pane steps run the host at the smaller one", () => {
+test("differing pane steps fail closed before either pane advances", () => {
   const host = new PaneClockHost();
   host.registerPane("b");
   host.advance(0, DT);
@@ -189,9 +189,10 @@ test("differing pane steps run the host at the smaller one", () => {
 
   host.setPaneDt("b", 0.004);
   assert.equal(host.panesDtDiffer(), true);
-  assert.equal(host.stepSize_s(), 0.004);
-  assert.equal(host.advance(DT, DT), 1);
-  assert.equal(host.targetTime(), 0.004, "the host stepped at pane A's dt, not the smaller");
+  assert.equal(host.stepSize_s(), DT);
+  assert.equal(host.advance(DT, DT), 0);
+  assert.equal(host.step(DT), false);
+  assert.equal(host.targetTime(), 0, "a mismatched pair must never partially advance");
 
   host.setPaneDt("b", undefined);
   assert.equal(host.panesDtDiffer(), false);

@@ -130,20 +130,8 @@ export class PaneClockHost {
     return this.panes.get(id)?.declaredStep_s ?? this.primaryStep_s;
   }
 
-  /**
-   * The host steps at the smallest step any pane declares, and lets a
-   * larger-dt pane skip the steps it does not need. Visually that is no longer
-   * a paired step, which is why `panesDtDiffer` exists for the diff strip to
-   * say so.
-   */
-  stepSize_s(): number {
-    let step = this.primaryStep_s;
-    for (const id of this.panes.keys()) {
-      const pane = this.paneStep_s(id);
-      if (pane > 0 && (step <= 0 || pane < step)) step = pane;
-    }
-    return step;
-  }
+  /** Paired steps require identical dt; callers expose mismatches as errors. */
+  stepSize_s(): number { return this.primaryStep_s; }
 
   /** True when some registered pane is not on pane A's step. */
   panesDtDiffer(): boolean {
@@ -171,6 +159,7 @@ export class PaneClockHost {
    */
   advance(elapsed_s: number, primaryStep_s: number): number {
     this.primaryStep_s = primaryStep_s;
+    if (this.panesDtDiffer()) return 0;
     const dt = this.stepSize_s();
     this.accumulator_s += Math.max(0, Number.isFinite(elapsed_s) ? elapsed_s : 0);
     const collapsed = collapseGPUFixedSteps(this.accumulator_s, dt);
@@ -196,7 +185,7 @@ export class PaneClockHost {
   /** STEP: one paired step for every pane, refused while the barrier is shut. */
   step(primaryStep_s: number): boolean {
     this.primaryStep_s = primaryStep_s;
-    if (!this.canAcceptNextStep()) return false;
+    if (this.panesDtDiffer() || !this.canAcceptNextStep()) return false;
     this.targetTime_s += this.stepSize_s();
     this.clearSubmittedFloors();
     return true;

@@ -56,12 +56,14 @@ dawnTest("an outside-tank ball spreads across both horizontal sparse-world axes"
         radius_m,
       });
       await device.queue.onSubmittedWorkDone();
+      await solver.assertSimulationHealthy();
 
       for (let step = 2; step <= 32; step += 1) {
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true,
           `outside drop failed at step ${step}`);
       }
       await device.queue.onSubmittedWorkDone();
+      await solver.assertSimulationHealthy();
       const growth = await solver.readWorldGrowthReceiptQA();
       assert.ok(growth.dynamicLiquidMassFineCells > 1, JSON.stringify(growth));
       assert.ok(growth.dynamicLiquidBoundsFine, JSON.stringify(growth));

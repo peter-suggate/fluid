@@ -38,6 +38,9 @@ export interface AdaptiveMassSolverOptions {
   readonly resolutionMode?: AdaptiveMassResolutionMode;
   /** Test-only construction seam for manufacturing a fine-start transition. */
   readonly initialResolutionForQA?: SparseBrickResolution;
+  /** Diagnostic fixed-domain setup: activate the initial atlas, including dry
+   * support, without changing its cell sizes or advancing simulation time. */
+  readonly initialAtlasResidentForQA?: boolean;
   /** Construction-time complete dyadic ladder maximum. Defaults to 8. */
   readonly brickFineResolution?: SparseBrickFineResolution;
   /** Renderer-facing samples per presentation-page edge. Defaults to the brick maximum. */

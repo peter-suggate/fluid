@@ -26,9 +26,9 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/h
       words.fill(0);
       for (let i = 0; i < count; i++) { words[header + stride * i + 10] = 1; words[header + stride * i + 12] = 1; }
     };
-    const check = async (expected: boolean, label: string, maximumSpan = 8) => {
+    const check = async (expected: boolean, label: string, maximumSpan = 8, frozen = false) => {
       device!.queue.writeBuffer(activity, 0, words);
-      assert.equal(await gate!.needed(maximumSpan, 64, 1), expected, label);
+      assert.equal(await gate!.needed(maximumSpan, 64, 1, frozen), expected, label);
     };
     reset(); await check(false, "calm leaves before merge persistence need no CPU snapshot");
     words[header + 47] = 8; await check(true, "unbacked refinement");
@@ -44,6 +44,12 @@ import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/h
     }
     await check(false, "physical maximum span forbids all merges", 1);
     words[header + 1] = 1; await check(false, "surface witness vetoes one merge sibling");
+    reset(); words[header + 47] = 8;
+    await check(false, "frozen preflight ignores ordinary adaptation", 8, true);
+    const frontier = header + (count-1)*stride;
+    words[frontier+10] = 0; words[frontier+12] = words[frontier+47] = 8;
+    words[frontier+9] = 0x80020000;
+    await check(true, "inactive frozen frontier needs a graph even at the same rung", 8, true);
     activity.destroy();
   } finally { gate?.destroy(); device?.destroy(); releaseWebGPUExclusiveLock(); void gpu; }
 });

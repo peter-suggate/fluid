@@ -1,6 +1,7 @@
 import { createSparseAdaptiveMassAtlas, sparseAtlasBrickKey, sparseBrickSpan,
   type SparseAdaptiveMassAtlas, type SparseAdaptiveMassBrick, type SparseBrickResolution } from "./sparse-brick-atlas";
 import { compileSparseCM12StableLeafFaceNeighbors } from "./sparse-cm12-factored-aei-topology";
+import type { SparseCM12NewAirCoverage } from "./sparse-cm12-generation-transfer";
 
 export interface SparseCM12GenerationIntent {
   readonly resolution: SparseBrickResolution;
@@ -10,6 +11,10 @@ export interface SparseCM12GenerationIntent {
   readonly maximumCellWidth?: number;
   /** Hard physical floor; grading must coarsen neighbors rather than cross it. */
   readonly minimumCellWidth?: number;
+  /** Preserve this accepted leaf's coverage and cell size during a rebuild. */
+  readonly frozen?: boolean;
+  /** Publish a demanded dry receiver with the new connected row graph. */
+  readonly activate?: boolean;
 }
 
 /** Build one bounded dyadic change and close physical 2:1 grading. No dense
@@ -17,16 +22,23 @@ export interface SparseCM12GenerationIntent {
 export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
   active: ReadonlySet<number>, intents: ReadonlyMap<number, SparseCM12GenerationIntent>,
   limits: { maximumLeaves: number; maximumCells: number; maximumSpanBricks: number },
-): { status: "ready"; atlas: SparseAdaptiveMassAtlas; active: ReadonlySet<number> }
+): { status: "ready"; atlas: SparseAdaptiveMassAtlas; active: ReadonlySet<number>;
+    newAirCoverage: readonly SparseCM12NewAirCoverage[] }
   | { status: "deferred"; leaves: number; cells: number } | undefined {
   const B = atlas.brickFineResolution;
+  const frozen = new Set([...intents].filter(([, intent]) => intent.frozen).map(([key]) => key));
+  const newAirCoverage: SparseCM12NewAirCoverage[] = [];
   const minimumWidths = new Map<number, number>();
   for (const [key, intent] of intents) if (intent.minimumCellWidth !== undefined) {
     if (!Number.isFinite(intent.minimumCellWidth) || intent.minimumCellWidth < 1)
       throw new Error("CM12 minimum cell width must be finite and at least one");
     minimumWidths.set(key, intent.minimumCellWidth);
   }
+  for (const brick of atlas.bricks) if (frozen.has(brick.key)) {
+    minimumWidths.set(brick.key, B * sparseBrickSpan(brick) / brick.resolution);
+  }
   const seed = (brick: SparseAdaptiveMassBrick, resolution: SparseBrickResolution) => {
+    if (frozen.has(brick.key)) return brick;
     const floor = minimumWidths.get(brick.key) ?? 1;
     while (resolution > 1 && B * sparseBrickSpan(brick) / resolution < floor)
       resolution = (resolution / 2) as SparseBrickResolution;
@@ -39,12 +51,14 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
   // activation can satisfy grading. Other inactive backing is reclaimed unless
   // a hard floor prevents recreating it as an ordinary fine frontier page.
   let bricks: SparseAdaptiveMassBrick[] = atlas.bricks.filter(brick => active.has(brick.key)
+    || intents.get(brick.key)?.activate || frozen.has(brick.key)
     || (minimumWidths.get(brick.key) ?? 1) > 1
     || (intents.get(brick.key)?.resolution ?? brick.resolution) > brick.resolution)
     .map(brick => seed(brick, intents.get(brick.key)?.resolution ?? brick.resolution));
   const nextActive = new Set(active);
+  for (const [key, intent] of intents) if (intent.activate) nextActive.add(key);
   const demandedWidths = new Map<number, number>();
-  for (const [key, intent] of intents) if (intent.maximumCellWidth !== undefined) {
+  for (const [key, intent] of intents) if (intent.maximumCellWidth !== undefined && !frozen.has(key)) {
     if (!Number.isFinite(intent.maximumCellWidth) || intent.maximumCellWidth < 1)
       throw new Error("CM12 maximum cell width must be finite and at least one");
     demandedWidths.set(key, intent.maximumCellWidth);
@@ -53,7 +67,7 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
     const groups = new Map<string, SparseAdaptiveMassBrick[]>();
     for (const brick of bricks) {
       const span = sparseBrickSpan(brick);
-      if (brick.unclipped || brick.resolution !== 1 || span * 2 > limits.maximumSpanBricks) continue;
+      if (frozen.has(brick.key) || brick.unclipped || brick.resolution !== 1 || span * 2 > limits.maximumSpanBricks) continue;
       const origin = brick.coordinate.map(q => Math.floor(q / (2 * span)) * 2 * span);
       const key = `${span}/${origin.join("/")}`;
       let group = groups.get(key); if (!group) groups.set(key, group = []);
@@ -88,6 +102,7 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
   };
   mergeCoverage(false);
   const split = (brick: SparseAdaptiveMassBrick): SparseAdaptiveMassBrick[] => {
+    if (frozen.has(brick.key)) throw new Error("CM12 generation cannot split a frozen leaf");
     const half = sparseBrickSpan(brick) / 2;
     const children: SparseAdaptiveMassBrick[] = [];
     const wasActive = nextActive.delete(brick.key);
@@ -104,6 +119,48 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
       if (demand !== undefined) demandedWidths.set(key, demand);
     }
     return children;
+  };
+  const expandDryReceiver = (receiver: SparseAdaptiveMassBrick,
+    host: SparseAdaptiveMassBrick): boolean => {
+    const span = sparseBrickSpan(host) / 2;
+    if (span > limits.maximumSpanBricks) return false;
+    const coordinate = receiver.coordinate.map(q => Math.floor(q / span) * span) as
+      [number, number, number];
+    const overlaps = bricks.filter(brick => brick.coordinate.every((q, axis) =>
+      q < coordinate[axis]! + span && q + sparseBrickSpan(brick) > coordinate[axis]!));
+    // Grow new dry coverage to the smallest dyadic face patch that the frozen
+    // host can represent. Existing accepted geometry is never swallowed by an
+    // allocation, even when it occupies a different corner of the new tile.
+    for (const brick of overlaps) {
+      if (frozen.has(brick.key) || active.has(brick.key)) {
+        throw new Error(`CM12 frozen frontier at ${receiver.coordinate.join(",")} needs span ${span}, `
+          + `but that support would overlap accepted brick ${brick.coordinate.join(",")}`);
+      }
+      if (!brick.coordinate.every((q, axis) => q >= coordinate[axis]!
+        && q + sparseBrickSpan(brick) <= coordinate[axis]! + span)) return false;
+      if (brick.density.some(rho => rho !== 0)) {
+        throw new Error("CM12 cannot expand a nonempty frontier receiver");
+      }
+    }
+    const widthFloor = Math.max(B * sparseBrickSpan(host) / (2 * host.resolution),
+      ...overlaps.map(brick => minimumWidths.get(brick.key) ?? 1));
+    const ceiling = Math.min(...overlaps.map(brick => demandedWidths.get(brick.key) ?? Infinity));
+    const enabled = overlaps.some(brick => nextActive.has(brick.key));
+    const removed = new Set(overlaps.map(brick => brick.key));
+    for (const key of removed) {
+      nextActive.delete(key); minimumWidths.delete(key); demandedWidths.delete(key);
+    }
+    const key = sparseAtlasBrickKey(coordinate, atlas);
+    minimumWidths.set(key, widthFloor);
+    if (Number.isFinite(ceiling)) demandedWidths.set(key, Math.max(widthFloor, ceiling));
+    const parent = seed({ ...receiver, key, coordinate, spanBricks: span,
+      density: new Float64Array(receiver.resolution ** 3),
+      gamma: new Float64Array(receiver.resolution ** 3).fill(1) }, B);
+    bricks = [...bricks.filter(brick => !removed.has(brick.key)), parent];
+    newAirCoverage.push({ minimumFine: coordinate.map(q => q * B),
+      maximumExclusiveFine: coordinate.map(q => (q + span) * B) });
+    if (enabled) nextActive.add(key);
+    return true;
   };
   for (;;) {
     const cells = bricks.reduce((n,b) => n + b.resolution ** 3, 0);
@@ -127,6 +184,21 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
     if (demanded) continue;
     const neighbors = compileSparseCM12StableLeafFaceNeighbors({
       coordinates: bricks.map(b => b.coordinate), spans: bricks.map(sparseBrickSpan) });
+    let macroReceiver: readonly [SparseAdaptiveMassBrick, SparseAdaptiveMassBrick] | undefined;
+    for (let leaf = 0; leaf < bricks.length && !macroReceiver; leaf++) {
+      const host = bricks[leaf]!;
+      if (!frozen.has(host.key)) continue;
+      for (const other of neighbors[leaf]!) {
+        const receiver = bricks[other]!;
+        if (sparseBrickSpan(host) > 2 * sparseBrickSpan(receiver)) {
+          macroReceiver = [receiver, host]; break;
+        }
+      }
+    }
+    if (macroReceiver) {
+      if (!expandDryReceiver(...macroReceiver)) return { status: "deferred", leaves: bricks.length, cells };
+      continue;
+    }
     let changed = false;
     const toSplit = new Set<number>();
     for (let leaf=0; leaf<bricks.length; leaf++) for (const other of neighbors[leaf]!) {
@@ -146,6 +218,7 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
       if (Math.max(aw, bw) / 2 < (minimumWidths.get(brick.key) ?? 1)) {
         const finer = coarser === leaf ? other : leaf;
         const fine = bricks[finer]!;
+        if (frozen.has(fine.key)) return { status: "deferred", leaves: bricks.length, cells };
         minimumWidths.set(fine.key, Math.max(minimumWidths.get(fine.key) ?? 1, Math.max(aw, bw) / 2));
         bricks[finer] = seed(fine, fine.resolution);
         changed = true;
@@ -159,10 +232,11 @@ export function planSparseCM12ResidentGeneration(atlas: SparseAdaptiveMassAtlas,
     if (toSplit.size) bricks = bricks.flatMap((brick, id) => toSplit.has(id) ? split(brick) : [brick]);
     if (!changed) break;
   }
-  const unchanged = bricks.length === atlas.bricks.length && bricks.every(b => {
+  const unchanged = nextActive.size === active.size && [...nextActive].every(key => active.has(key))
+    && bricks.length === atlas.bricks.length && bricks.every(b => {
     const old = atlas.directory.get(b.key);
     return old && sparseBrickSpan(old) === sparseBrickSpan(b) && old.resolution === b.resolution;
   });
   if (unchanged) return undefined;
-  return { status: "ready", atlas: createSparseAdaptiveMassAtlas(atlas.dimensions, bricks, atlas.generation + 1, B, atlas.signedCoordinates), active: nextActive };
+  return { status: "ready", atlas: createSparseAdaptiveMassAtlas(atlas.dimensions, bricks, atlas.generation + 1, B, atlas.signedCoordinates), active: nextActive, newAirCoverage };
 }

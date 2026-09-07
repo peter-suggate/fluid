@@ -460,7 +460,7 @@ test("the diff round-trips through the address as b.* keys", () => {
   const state: CompareState = {
     active: true,
     diff: { method: "uniform", gridMode: COMPARE_ABSENT },
-    links: { view: true, cut: false, instrument: true, look: false },
+    links: { ...INITIAL_COMPARE_STATE.links, view: true, cut: false, instrument: true, look: false },
     focusedPane: "b",
   };
   const search = new URLSearchParams(compareQueryEntries(state).map(([key, value]) => [key, value])).toString();
@@ -498,3 +498,62 @@ function* registeredParams(session: PaneSession) {
     yield { key: spec.key, value: (spec.min + spec.max) / 2 };
   }
 }
+
+test("freeze and region links default to separated and survive all link combinations", () => {
+  for (const topology of [false, true]) for (const regions of [false, true]) {
+    const state = { ...INITIAL_COMPARE_STATE, active: true,
+      links: { ...INITIAL_COMPARE_STATE.links, topology, regions } };
+    const query = new URLSearchParams(compareQueryEntries(state).map(([key, value]) => [key, value]));
+    assert.deepEqual(parseCompareQuery(query.toString()).links, state.links);
+  }
+  assert.equal(parseCompareQuery("b=1").links.topology, false);
+  assert.equal(parseCompareQuery("b=1").links.regions, false);
+});
+
+test("freeze changes stay local in either pane, round-trip, and can be linked", () => {
+  const { a, b } = panes();
+  const store = fakeStore();
+  const sync = startCompareSync(a, b, store);
+  a.runtime.getState().setTopologyFrozen(true);
+  assert.equal(b.runtime.getState().topologyFrozen, false);
+  assert.equal(store.getState().diff.freezeTopology, COMPARE_ABSENT);
+  const query = serializeQueryState("", a.scene.getState(), a.method.getState(), a.ui.getState(),
+    { compare: store.getState() }, undefined, a.runtime.getState());
+  assert.equal(parseQueryState(query).topologyFrozen, true);
+  const restored = panes();
+  restored.a.runtime.getState().setTopologyFrozen(parseQueryState(query).topologyFrozen);
+  const restoredSync = startCompareSync(restored.a, restored.b, fakeStore(parseCompareQuery(query)));
+  assert.equal(restored.b.runtime.getState().topologyFrozen, false);
+  restoredSync.stop();
+  b.runtime.getState().setTopologyFrozen(true);
+  a.runtime.getState().setTopologyFrozen(false);
+  assert.equal(b.runtime.getState().topologyFrozen, true);
+  store.setState({ ...store.getState(), links: { ...store.getState().links, topology: true } });
+  assert.equal(b.runtime.getState().topologyFrozen, false);
+  b.runtime.getState().setTopologyFrozen(true);
+  assert.equal(a.runtime.getState().topologyFrozen, true);
+  sync.stop();
+});
+
+test("enforcement region edits remain separate in either pane and relink to A", async () => {
+  const { withRefinementRegionsFromQuery, refinementRegionsToQuery } = await import("../lib/core/editor-refinement-region");
+  const { a, b } = panes();
+  const store = fakeStore();
+  const sync = startCompareSync(a, b, store);
+  const edit = (pane: PaneSession, raw: string) => {
+    const state = pane.scene.getState();
+    state.setScene(withRefinementRegionsFromQuery(state.scene, raw), state.presetId);
+  };
+  const initialB = refinementRegionsToQuery(b.scene.getState().scene);
+  edit(a, "0_0_0_100_100_100_2");
+  const regionA = refinementRegionsToQuery(a.scene.getState().scene);
+  assert.notEqual(regionA, initialB);
+  assert.equal(refinementRegionsToQuery(b.scene.getState().scene), initialB);
+  edit(b, "0_0_0_100_100_100_4");
+  assert.equal(refinementRegionsToQuery(a.scene.getState().scene), regionA);
+  store.setState({ ...store.getState(), links: { ...store.getState().links, regions: true } });
+  assert.equal(refinementRegionsToQuery(b.scene.getState().scene), regionA);
+  edit(b, "");
+  assert.equal(refinementRegionsToQuery(a.scene.getState().scene), "");
+  sync.stop();
+});

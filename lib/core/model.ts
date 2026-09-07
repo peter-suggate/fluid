@@ -1,4 +1,5 @@
 import sharedDefaultScene from "./default-scene.json";
+import type { InitialLiquidHeightField } from "./initial-height-field";
 import { validateRefinementRegions } from "./refinement-regions";
 import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { SolidWorldVoxelPatch } from "./solid-world";
@@ -185,6 +186,8 @@ export interface SceneDescription {
     surfaceTension_N_m: number;
     gravity_m_s2: Vec3;
     initialCondition: "dam-break" | "tank-fill";
+    /** Optional curved tank-fill surface, rasterized once into initial cell volumes. */
+    initialHeightField?: InitialLiquidHeightField;
     /** Optional absolute size of the dam reservoir. */
     initialDamBreakDimensions_m?: Vec3;
     /**
@@ -561,6 +564,17 @@ export function validateScene(scene: SceneDescription): string[] {
     }
   }
   const damDimensions = scene.fluid?.initialDamBreakDimensions_m;
+  const heightField = scene.fluid?.initialHeightField;
+  if (heightField) {
+    if (scene.fluid.initialCondition !== "tank-fill" || heightField.kind !== "quadratic") {
+      errors.push("Initial height field requires a quadratic tank-fill surface");
+    }
+    if (![heightField.baseHeight_m, heightField.center_m?.x, heightField.center_m?.z,
+      heightField.curvatureX_mInv, heightField.curvatureZ_mInv].every(Number.isFinite)
+      || heightField.baseHeight_m < 0 || heightField.curvatureX_mInv < 0 || heightField.curvatureZ_mInv < 0) {
+      errors.push("Initial height field requires finite coordinates and nonnegative height and curvatures");
+    }
+  }
   const damOrigin = scene.fluid?.initialDamBreakOrigin_m;
   if (damOrigin && !damDimensions) errors.push("Initial dam-break origin requires authored dam-break dimensions");
   if (damDimensions) {

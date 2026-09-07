@@ -311,11 +311,11 @@ fn cm12WorldOwnerAt(q:vec3i)->u32{
 // Claim a physical leaf ID only after the coordinate hash slot is owned. This
 // keeps contention proportional to the frontier and prevents two swept source
 // cells from publishing duplicate pages for the same signed coordinate.
-fn cm12WorldAllocateExact(q:vec3i,spanLog:u32)->u32{
+fn cm12WorldAllocateExactMode(q:vec3i,spanLog:u32,uniqueRequest:bool)->u32{
   let existing=cm12WorldLookupExact(q,spanLog);
   if(existing!=CM12_WDR_INVALID){return existing;}
   let hash=cm12WorldHash(q,spanLog);var slot=hash&CM12_WDR_MASK;
-  for(var probe=0u;probe<CM12_WDR_CAPACITY;probe+=1u){
+  for(var probe=0u;probe<CM12_WDR_CAPACITY;){
     let at=cm12WorldEntry(slot);let state=atomicLoad(&${arenaName}[at+${e.state}u]);
     if(state==2u&&atomicLoad(&${arenaName}[at+${e.hash}u])==hash
       &&bitcast<i32>(atomicLoad(&${arenaName}[at+${e.x}u]))==q.x
@@ -372,17 +372,31 @@ fn cm12WorldAllocateExact(q:vec3i,spanLog:u32)->u32{
       // budget while its divergent branch is still publishing: that can
       // prevent workgroup reconvergence and falsely report a full table.
       // The winning allocation is visible by the next topology epoch.
-      return CM12_WDR_INVALID;
+      if(!uniqueRequest){return CM12_WDR_INVALID;}
+      // A unique caller can retry this bucket without waiting for its
+      // contender to publish a key. It must not skip an empty bucket after a
+      // spurious weak-CAS failure: lookups terminate at the first empty slot.
+      continue;
     }
-    if(state==1u){return CM12_WDR_INVALID;}
-    slot=(slot+1u)&CM12_WDR_MASK;
+    if(state==1u&&!uniqueRequest){return CM12_WDR_INVALID;}
+    slot=(slot+1u)&CM12_WDR_MASK;probe+=1u;
   }
   atomicAdd(&${arenaName}[CM12_WDR_BASE+${h.insertionFaults}u],1u);
   return CM12_WDR_INVALID;
 }
+fn cm12WorldAllocateExact(q:vec3i,spanLog:u32)->u32{
+  return cm12WorldAllocateExactMode(q,spanLog,false);
+}
+// Only for a dispatch whose immutable input proves one invocation per key.
+// A reservation then belongs to a different key, so ordinary linear probing
+// can continue without reading unpublished coordinate words. All requests
+// complete in this epoch even when their starting buckets collide.
+fn cm12WorldAllocateUniqueExact(q:vec3i,spanLog:u32)->u32{
+  return cm12WorldAllocateExactMode(q,spanLog,true);
+}
 // A dispatch boundary makes the complete reservation payload visible before
-// lookup can treat it as a committed directory entry. Allocation never probes
-// past a reservation, so repeated coordinate demand safely retries next epoch.
+// lookup can treat it as a committed directory entry. Duplicate-capable
+// callers retry blocked requests next epoch; unique callers finish now.
 @compute @workgroup_size(64)
 fn finalizeSparseWorldDirectoryAllocations(@builtin(global_invocation_id)gid:vec3u){
   if(gid.x>=CM12_WDR_CAPACITY){return;}

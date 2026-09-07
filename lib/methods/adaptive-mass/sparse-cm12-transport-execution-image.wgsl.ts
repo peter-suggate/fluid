@@ -141,8 +141,11 @@ fn cm12TeiOwnerAtFine(q:vec3i)->CM12TransportOwner{
   if(offset>=leaf.count){return CM12TransportOwner(CM12_TEI_INVALID,vec3u(0u),0u);}
   let lower=origin+vec3i(vec3u(relative)&~vec3u(scale-1u));
   var widths=vec3u(scale);
-  if(owner<CM12_WDR_INITIAL_LEAVES){
-    if(any(lower<vec3i(0))||any(lower>=vec3i(p.dimensions.xyz))){
+  if(!brickHasUnclippedWorldGeometry(owner)){
+    // The final authored cell may be clipped inside its nominal rung span.
+    // Queries beyond the physical box must not alias that clipped cell.
+    if(any(q<vec3i(0))||any(q>=vec3i(p.dimensions.xyz))
+      ||any(lower<vec3i(0))||any(lower>=vec3i(p.dimensions.xyz))){
       return CM12TransportOwner(CM12_TEI_INVALID,vec3u(0u),0u);}
     widths=min(widths,p.dimensions.xyz-vec3u(lower));
   }
@@ -210,7 +213,7 @@ fn cm12TeiSpatialTileSelectsLane(tile:CM12TransportSpatialTile,lane:u32)->bool{
   return lane<64u&&((tile.laneMask[lane>>5u]>>(lane&31u))&1u)!=0u;}
 
 fn cm12TeiLeafExtent(brick:u32,spanFine:u32)->vec3u{
-  if(brick>=CM12_WDR_INITIAL_LEAVES){return vec3u(spanFine);}
+  if(brickHasUnclippedWorldGeometry(brick)){return vec3u(spanFine);}
   let origin=cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION);
   let remaining=max(vec3i(0),vec3i(p.dimensions.xyz)-origin);
   return vec3u(min(vec3i(i32(spanFine)),remaining));

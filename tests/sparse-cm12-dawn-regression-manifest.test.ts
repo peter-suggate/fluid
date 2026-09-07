@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { sparseCM12DawnDefaultOptions, sparseCM12DawnDefaultValues } from "../lib/harness/sparse-cm12-dawn-defaults";
 
 import {
   SPARSE_CM12_DAWN_LANES,
@@ -29,6 +30,13 @@ const expectedCoverage: readonly SparseCM12DawnCoverage[] = [
 ];
 
 test("the compact Sparse CM12 Dawn suite retains its complete confidence matrix", () => {
+  const defaults = sparseCM12DawnDefaultValues();
+  const options = sparseCM12DawnDefaultOptions();
+  assert.equal(defaults.selectorMode, "coarse-first");
+  assert.equal(options.activityPolicy?.coarseFirst, true);
+  assert.equal(options.timeStep, "paper");
+  assert.equal(options.gammaDiffusionEnabled, true);
+  assert.equal(options.surfaceSharpeningEnabled, true);
   assert.equal(SPARSE_CM12_DAWN_SUITE_BUDGET_MS, 180_000);
   assert.deepEqual(SPARSE_CM12_DAWN_LANES.map((lane) => lane.coverage).sort(),
     [...expectedCoverage].sort());
@@ -44,6 +52,9 @@ test("the compact Sparse CM12 Dawn suite retains its complete confidence matrix"
     } else {
       assert.equal(lane.brickFineResolution, 8);
       assert.equal(lane.presentationPageResolution, 8);
+      assert.equal(Number(defaults.brickFineResolution), lane.brickFineResolution,
+        "a changed production default needs a reviewed performance baseline");
+      assert.equal(Number(defaults.presentationPageResolution), lane.presentationPageResolution);
       assert.ok(lane.measuredFrames >= 12,
         `${lane.id} needs enough hardware samples for a stable median`);
       assert.ok(lane.maximumMedianAdvanceMs > lane.referenceMedianAdvanceMs,

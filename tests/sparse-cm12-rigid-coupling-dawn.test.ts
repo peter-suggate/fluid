@@ -1,3 +1,4 @@
+import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -45,11 +46,7 @@ dawnTest("Sparse CM12 couples the settled-tank rigid bodies without losing water
       device.pushErrorScope("validation");
       const solver = await WebGPUAdaptiveMassSolver.createAsync(
         device, scene, "balanced", undefined,
-        {
-          resolutionMode: "adaptive",
-          brickFineResolution: 8,
-          timeStep: "paper",
-        },
+        sparseCM12DawnDefaultOptions(),
         () => {},
       );
       try {
@@ -59,6 +56,7 @@ dawnTest("Sparse CM12 couples the settled-tank rigid bodies without losing water
           assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, bodies), true);
         }
         await device.queue.onSubmittedWorkDone();
+        await solver.assertSimulationHealthy();
 
         const poses = await solver.readRigidBodyPoses();
         assert.equal(poses?.length, bodies.length);

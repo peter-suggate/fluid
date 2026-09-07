@@ -98,7 +98,8 @@ ${deficitSupport}
       else {
         assert.equal(receipt?.code, "EMPTY_DEFICIT_STENCIL");
         assert.equal(receipt?.ownerId, 123);
-        assert.deepEqual(receipt?.operands, [0, 0.5, 0, 0]);
+        assert.deepEqual(receipt?.operandNames, ["visibleWeight", "deficit", "donorDensity", "reserved"]);
+        assert.deepEqual(receipt?.operands, [0, 0.5, Math.fround(density), 0]);
       }
       readback.unmap();
     }

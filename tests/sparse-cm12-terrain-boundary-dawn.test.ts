@@ -1,3 +1,4 @@
+import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -129,11 +130,7 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
         : terrainCutCellDamScene();
       assert.deepEqual(validateScene(scene), []);
       solver = await WebGPUAdaptiveMassSolver.createAsync(
-        device, scene, "balanced", undefined, {
-          resolutionMode: "adaptive",
-          brickFineResolution: 8,
-          timeStep: "paper",
-        }, () => {},
+        device, scene, "balanced", undefined, sparseCM12DawnDefaultOptions(), () => {},
       );
       await solver.waitForSimulationReady();
       const tallCells = process.env.FLUID_SCENE === "tall-cells-hillside-dam-break";
@@ -152,10 +149,14 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
         ? requestedSteps : tallCells ? 90 : 8;
       for (let step = 1; step <= steps; step += 1) {
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
-        if (step % 2 === 0) await device.queue.onSubmittedWorkDone();
+        if (step % 2 === 0) {
+          await device.queue.onSubmittedWorkDone();
+          await solver.assertSimulationHealthy();
+        }
         if (traceTallCells
           && (step <= 4 || step % 30 === 0 || step === steps)) {
           await device.queue.onSubmittedWorkDone();
+          await solver.assertSimulationHealthy();
           const metrics = tallCellsMetrics(await solver.readDiagnosticFields());
           const growth = await solver.readWorldGrowthReceiptQA();
           const activity = await solver.readGPUActivityPolicy();
@@ -181,6 +182,7 @@ dawnTest("Sparse CM12 couples terrain voxels through CM12 cut-cell capacities",
         }
       }
       await device.queue.onSubmittedWorkDone();
+      await solver.assertSimulationHealthy();
 
       const fields = await solver.readDiagnosticFields();
       let partialCells = 0, closedCells = 0, maximumClosedDensity = 0;

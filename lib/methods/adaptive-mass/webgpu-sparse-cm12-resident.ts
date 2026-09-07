@@ -8,7 +8,7 @@ import { createCM12ResourceRecorder, realizeCM12ResourceRecipe, type CM12Resourc
 import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
 import { SparseCM12GenerationPlanningGate } from "./sparse-cm12-generation-planning-gate";
 import { sparseAtlasBrickKey, sparseBrickMaximumFine } from "./sparse-brick-atlas";
-import { sparseCM12TransferFaceGeometry, type SparseCM12TransferBox, type SparseCM12GenerationFields, type SparseCM12GenerationGeometry, PreparedSparseCM12GenerationTransfer, prepareSparseCM12GenerationTransfer } from "./sparse-cm12-generation-transfer";
+import { sparseCM12TransferFaceGeometry, type SparseCM12NewAirCoverage, type SparseCM12TransferBox, type SparseCM12GenerationFields, type SparseCM12GenerationGeometry, PreparedSparseCM12GenerationTransfer, prepareSparseCM12GenerationTransfer } from "./sparse-cm12-generation-transfer";
 import {
   buildSparseAtlasCompositeGrid,
   createSparseAtlasCompositeGridBuildWorkspace,
@@ -268,7 +268,7 @@ export interface SparseCM12ActivityPolicy {
   readonly surfaceCoarseningEnabled: boolean;
   /** QA-only fixed surface rung. Omitted in production and normal UI flows. */
   readonly forcedSurfaceResolutionForQA?: SparseBrickResolution;
-  /** Hold the accepted topology while continuing every physical stage. */
+  /** Retain accepted bricks and their cell widths; new support may still grow. */
   readonly freezeTopology?: boolean;
   /** Causal control for comparing the former collocated face remap. */
   readonly legacyFaceTransportForQA?: boolean;
@@ -863,7 +863,21 @@ fn retireSparseCM12PresentationPages(@builtin(global_invocation_id)gid:vec3u){
   }
   ${worldDirectoryLayout ? /* wgsl */ `if(brick>=CM12_WDR_INITIAL_LEAVES){
     let topologyPage=atomicLoad(&activity[activityRecord+37u]);
+    let coordinate=cm12WorldLeafCoordinate(brick);
     if(topologyPage!=INVALID&&cm12WorldReleaseLeaf(brick)){
+    // Re-arm cached neighbour ownership at the actual directory deletion.
+    // Clearing it at simulation retirement is too early: presentation can
+    // retain this key until a later frame, allowing allocation to cache the
+    // still-present owner again before this release removes it.
+    for(var bit=0u;bit<27u;bit+=1u){
+      if(bit==13u){continue;}
+      let offset=vec3i(i32(bit%3u)-1,i32((bit/3u)%3u)-1,i32(bit/9u)-1);
+      let neighbor=cm12WorldOwnerAt(coordinate+offset);
+      if(neighbor!=INVALID){
+        atomicAnd(&activity[ACTIVITY_HEADER+ACTIVITY_RECORD_WORDS*neighbor+45u],
+          ~(1u<<(26u-bit)));
+      }
+    }
     let topologyBase=atomicLoad(&topologyArena[14u]);
     let descriptor=topologyBase+atomicLoad(&topologyArena[topologyBase+30u])
       +topologyPage*atomicLoad(&topologyArena[topologyBase+31u]);
@@ -3507,13 +3521,14 @@ export class WebGPUSparseCM12Resident {
   private generationPlanningGate?: Promise<SparseCM12GenerationPlanningGate>;
   get needsGenerationPlanning() { return this.generationPlanningRequired; }
   async needsDetailedGenerationPlanning(maximumSpan: number, demoteEpochs: number,
-    finestTravel: number): Promise<boolean> {
+    finestTravel: number, frozenFrontierOnly = false): Promise<boolean> {
     this.assertLive();
     if (!this.generationPlanningGate) {
-      const metadata = Uint32Array.from(this.constructionAtlas.bricks, (brick, leaf) => {
+      const metadata = new Uint32Array(this.leafCapacity).fill(1 << 8);
+      this.constructionAtlas.bricks.forEach((brick, leaf) => {
         const packedOwner = this.lastPacked!.words[this.lastPacked!.brickOffset + 2 * leaf]!;
         const backed = ((packedOwner & 0x7fff_ffff) >>> 5) !== 0;
-        return ((brick.spanBricks ?? 1) << 8) | Number(backed) | (Number(!!brick.unclipped) << 1);
+        metadata[leaf] = ((brick.spanBricks ?? 1) << 8) | Number(backed) | (Number(!!brick.unclipped) << 1);
       });
       this.generationPlanningGate = SparseCM12GenerationPlanningGate.create(this.device,
         this.activity, metadata, ACTIVITY_HEADER_WORDS, ACTIVITY_RECORD_WORDS).then(gate => {
@@ -3523,7 +3538,7 @@ export class WebGPUSparseCM12Resident {
     }
     const gate = await this.generationPlanningGate;
     this.assertLive();
-    return gate.needed(maximumSpan, demoteEpochs, finestTravel);
+    return gate.needed(maximumSpan, demoteEpochs, finestTravel, frozenFrontierOnly);
   }
   private initialGenerationCellIds!: Uint32Array;
   private initialGenerationRowIds!: Uint32Array;
@@ -3553,7 +3568,8 @@ export class WebGPUSparseCM12Resident {
   }
   private async createReplacement(nextAtlas: SparseAdaptiveMassAtlas, nextGrid: SparseAtlasCompositeGrid | undefined,
     active: ReadonlySet<number>, scalar: boolean, face: boolean, maximumBytes: number,
-    source?: Awaited<ReturnType<WebGPUSparseCM12Resident["captureGenerationTransferSource"]>>, signal?: AbortSignal): Promise<WebGPUSparseCM12Resident> {
+    source?: Awaited<ReturnType<WebGPUSparseCM12Resident["captureGenerationTransferSource"]>>, signal?: AbortSignal,
+    newAirCoverage: readonly SparseCM12NewAirCoverage[] = []): Promise<WebGPUSparseCM12Resident> {
     const { finestCellSize_m, rigid, journal, presentationPageResolution, topologyPageCapacityMaximum } = this.replacementConfiguration;
     const device = generationDeviceRoots.get(this.device) ?? this.device;
       const allocation = boundedGenerationDevice(device, maximumBytes);
@@ -3567,7 +3583,7 @@ export class WebGPUSparseCM12Resident {
               signal?.addEventListener("abort", () => { worker.terminate(); reject(signal.reason); }, {once:true});
               worker.onmessage = event => event.data.error ? reject(new Error(event.data.error)) : resolve(event.data.recipe);
               worker.onerror = event => reject(new Error(event.message));
-              worker.postMessage({ atlas: nextAtlas, active, finestCellSize_m,
+              worker.postMessage({ atlas: nextAtlas, active, finestCellSize_m, newAirCoverage,
                 solidWorld: this.currentSolidWorld, maximumBytes, topologyPageCapacityMaximum,
                 symmetry: { scalar, face }, limits: { maxComputeWorkgroupsPerDimension: device.limits.maxComputeWorkgroupsPerDimension },
                 source: source ? { geometry: source.geometry, geometryRecipe:source.geometryRecipe, cellIds: source.cellIds, rowIds: source.rowIds,
@@ -3635,6 +3651,7 @@ export class WebGPUSparseCM12Resident {
   private tracerSeedPending = false;
   /** One-shot command-prefix diagnostic used only by isolated Dawn bring-up. */
   private stageLimitForQA?: SparseCM12ResidentStageId;
+  private candidatePhaseLimitForQA?: (typeof SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES)["candidate-transfer"][number];
   private activityPhaseLimitForQA?: "scalar" | "topology" | "masks" | "measure"
     | "history" | "census" | "allocation" | "synthesis" | "connection";
   private transportPhaseLimitForQA?: "setup" | "trace" | "scatter" | "gather";
@@ -3849,7 +3866,10 @@ export class WebGPUSparseCM12Resident {
 
   /** Read-only native field planes for stage-budget probes. No UI allocation. */
   get fieldSnapshotSourceForQA() {
-    return { state: this.state, topologyArena: this.topologyArena,
+    return { state: this.state, conditioning: this.conditioning, topologyArena: this.topologyArena,
+      acceptedIndirectArguments: this.acceptedIndirectArguments,
+      topologyWorklistBaseWords: this.topologyWorklistBaseBytes / 4,
+      acceptedLeafManifestBaseWords: this.acceptedLeafManifestBaseBytes / 4,
       templateWords: this.templateWords, layout: this.layout,
       cellCapacity: this.templateCellCount, rowCapacity: this.templateRowCount,
       frameControlBaseWords: this.frameControlLayout.baseWords,
@@ -3860,6 +3880,12 @@ export class WebGPUSparseCM12Resident {
   /** Restrict the next encoded frame to a stage prefix for isolated QA only. */
   setStageLimitForQA(stage: SparseCM12ResidentStageId | undefined): void {
     this.stageLimitForQA = stage;
+  }
+
+  setCandidatePhaseLimitForQA(
+    phase: (typeof SPARSE_CM12_RESIDENT_STAGE_SUBSTAGES)["candidate-transfer"][number] | undefined,
+  ): void {
+    this.candidatePhaseLimitForQA = phase;
   }
 
   setActivityPhaseLimitForQA(
@@ -6054,6 +6080,7 @@ export class WebGPUSparseCM12Resident {
     atlas: SparseAdaptiveMassAtlas; active: ReadonlySet<number>; finestCellSize_m: number;
     solidWorld: SolidWorld; maximumBytes: number; topologyPageCapacityMaximum: number;
     symmetry: { scalar: boolean; face: boolean }; limits: GPUSupportedLimits;
+    newAirCoverage?: readonly SparseCM12NewAirCoverage[];
     journal?: SparseCM12PressureJournalCapacityRequest;
     source?: Omit<SparseCM12GenerationFields, "state" | "liveControl"> & {
       geometry?: SparseCM12GenerationGeometry; geometryRecipe?: CM12CapturedGeometryRecipe; stateDescriptor: {size:number;usage:number};
@@ -6081,7 +6108,8 @@ export class WebGPUSparseCM12Resident {
       input.source.geometry!, grid, { ...input.source,
         state: recorder.externalResources[firstSource] as GPUBuffer,
         liveControl: { ...input.source.liveControl, buffer: recorder.externalResources[firstSource+1] as GPUBuffer } },
-      resident.generationTransferTarget(), input.maximumBytes - resident.allocatedBytes) : undefined;
+      resident.generationTransferTarget(), input.maximumBytes - resident.allocatedBytes,
+      input.newAirCoverage) : undefined;
     allocation.finish();
     // Class methods stay in the advancing worker's module. Only initialized
     // data and symbolic resource references are transferred.
@@ -6328,6 +6356,8 @@ export class WebGPUSparseCM12Resident {
     // add timestamps at those same boundaries; they do not control halting.
     const stageLimitForQA = this.stageLimitForQA;
     this.stageLimitForQA = undefined;
+    const candidatePhaseLimitForQA = this.candidatePhaseLimitForQA;
+    this.candidatePhaseLimitForQA = undefined;
     const activityPhaseLimitForQA = this.activityPhaseLimitForQA;
     this.activityPhaseLimitForQA = undefined;
     const transportPhaseLimitForQA = this.transportPhaseLimitForQA;
@@ -6849,7 +6879,7 @@ export class WebGPUSparseCM12Resident {
       dispatch("finalizeIncrementalActivityCensus", 1);
       closeSubstage("brick-activity-census-and-history");
       if (activityPhaseLimitForQA === "census") return;
-      if (this.solidOccupancyLayout && !topologyFrozen) {
+      if (this.solidOccupancyLayout) {
         dispatchAcceptedFrontierNeighbors("allocateSparseWorldFrontier");
         dispatch("finalizeSparseWorldDirectoryAllocations",
           Math.ceil(this.worldDirectoryLayout.capacity / WORKGROUP_SIZE));
@@ -6876,18 +6906,16 @@ export class WebGPUSparseCM12Resident {
       closeSubstage("refinement-policy-classification");
       dispatch("planBrickResolution", bricks);
       closeSubstage("initial-resolution-plan");
-      if (!topologyFrozen) {
       dispatch("activateSweptFrontierPages", leafCapacity);
       // Lifecycle membership is a topology candidate, not a post-publication
       // mutation.  Retirement marks same-rung delta work consumed by the
       // shadow worklists and the single selector flip below.
-      dispatch("retireUnsupportedEmptyBricks", leafCapacity);
+      if (!topologyFrozen) dispatch("retireUnsupportedEmptyBricks", leafCapacity);
       closeSubstage("frontier-activation-and-retirement");
       for (let gradingPass = 0;
         gradingPass < Math.log2(this.brickFineResolution); gradingPass += 1) {
         dispatchRefinementPolicyTiles("closeRefinementPolicyTileResolution");
         dispatch("closePlannedResolution", bricks);
-      }
       }
       dispatch("validateCandidateResolution", bricks);
       closeSubstage("resolution-grading-and-validation");
@@ -6919,27 +6947,35 @@ export class WebGPUSparseCM12Resident {
     stage("candidate-transfer", ({ closeSubstage }) => {
       dispatchTopologyDelta("transferCandidateCellsFromTopologyDelta");
       closeSubstage("candidate-field-transfer");
+      if (candidatePhaseLimitForQA === "candidate-field-transfer") return;
       dispatchTopologyDelta("transferCandidateFacesFromTopologyDelta");
       closeSubstage("candidate-face-reconstruction");
+      if (candidatePhaseLimitForQA === "candidate-face-reconstruction") return;
       dispatchShadow("validateCandidateShadowFaces", "row");
       closeSubstage("candidate-face-validation");
+      if (candidatePhaseLimitForQA === "candidate-face-validation") return;
       dispatch("beginSparseCM12TopologyEffectsPreflight", 1);
       dispatchTopologyDelta("recordCandidateTopologyEffectsFromTopologyDelta");
       dispatch("finalizeSparseCM12TopologyEffectsPreflight", 1);
       closeSubstage("candidate-effects-preflight");
+      if (candidatePhaseLimitForQA === "candidate-effects-preflight") return;
       useBindGroup(this.transportBindGroup);
         dispatch("beginSparseCM12InternedBoundaryDelta", 1);
         dispatchTopologyDelta("compileSparseCM12InternedBoundaryDelta");
         closeSubstage("candidate-ibo-construction");
+        if (candidatePhaseLimitForQA === "candidate-ibo-construction") return;
         dispatch("finalizeSparseCM12ISAChangedSetReceipt", 1);
         dispatchTopologyDelta("validateSparseCM12InternedBoundaryDeltaPackets");
         dispatch("finalizeSparseCM12InternedBoundaryDelta", 1);
       closeSubstage("candidate-ibo-validation");
+      if (candidatePhaseLimitForQA === "candidate-ibo-validation") return;
       dispatchTopologyDelta("compileSparseCM12TransportExecutionImageShadow");
       closeSubstage("candidate-tei-compilation");
+      if (candidatePhaseLimitForQA === "candidate-tei-compilation") return;
       useBindGroup(this.bindGroup);
       dispatch("validateAndAuthorizeShadowTopology", 1);
       closeSubstage("candidate-authorization");
+      if (candidatePhaseLimitForQA === "candidate-authorization") return;
         closePass();
         encoder.copyBufferToBuffer(this.topologyArena,
           sparseCM12TopologyEffectsIndirectByteOffset(
@@ -6949,9 +6985,11 @@ export class WebGPUSparseCM12Resident {
         ptrPass.setPipeline(this.pipelines.publishSparseCM12TopologyPTREffects!);
         ptrPass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments, 0);
         closeSubstage("candidate-ptr-publication");
+        if (candidatePhaseLimitForQA === "candidate-ptr-publication") return;
         dispatch("sealSparseCM12AuthorizedTopologyEffects", 1);
       dispatch("finishSparseCM12TopologyEffectsPublication", 1);
       closeSubstage("candidate-effects-seal");
+      if (candidatePhaseLimitForQA === "candidate-effects-seal") return;
       useBindGroup(this.transportBindGroup);
       dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist");
       useBindGroup(this.bindGroup);
@@ -6973,6 +7011,7 @@ export class WebGPUSparseCM12Resident {
         useBindGroup(this.bindGroup);
       }
       closeSubstage("candidate-state-publication");
+      if (candidatePhaseLimitForQA === "candidate-state-publication") return;
       useBindGroup(this.transportBindGroup);
       dispatchTopologyDelta("replaySparseCM12TransportExecutionImageRetired");
       dispatchTopologyDelta("replaySparseCM12InternedBoundaryDelta");
@@ -7450,9 +7489,11 @@ export class WebGPUSparseCM12Resident {
     finestCellSize_m: number,
     centerFine: readonly [number, number, number],
     radiusFine: readonly [number, number, number],
+    activityPolicy?: SparseCM12ActivityPolicy,
+    phase: "complete" | "prepare" | "apply" = "complete",
   ): void {
     this.encodeLiquidInjectionTransaction(encoder, finestCellSize_m, centerFine,
-      radiusFine, 1, 0, 0.004, true);
+      radiusFine, 1, 0, 0.004, true, activityPolicy, phase);
   }
 
   encodeLiquidJetInjection(
@@ -7462,6 +7503,8 @@ export class WebGPUSparseCM12Resident {
     radiusFine: number,
     velocityFinePerSecond: readonly [number, number, number],
     dt_s: number,
+    activityPolicy?: SparseCM12ActivityPolicy,
+    phase: "complete" | "prepare" | "apply" = "complete",
   ): void {
     const speed = Math.hypot(...velocityFinePerSecond);
     if (!(radiusFine > 0) || !(speed > 0) || !(dt_s > 0)) return;
@@ -7470,7 +7513,7 @@ export class WebGPUSparseCM12Resident {
     const center = outletFine.map((value, axis) => value + halfDisplacement[axis]!) as
       [number, number, number];
     this.encodeLiquidInjectionTransaction(encoder, finestCellSize_m, center,
-      halfDisplacement, 2, radiusFine, dt_s, false);
+      halfDisplacement, 2, radiusFine, dt_s, false, activityPolicy, phase);
   }
 
   private encodeLiquidInjectionTransaction(
@@ -7482,10 +7525,12 @@ export class WebGPUSparseCM12Resident {
     jetRadiusFine: number,
     injectionDt_s: number,
     publishPresentation: boolean,
+    activityPolicy?: SparseCM12ActivityPolicy,
+    phase: "complete" | "prepare" | "apply" = "complete",
   ): void {
     this.assertLive();
     this.writeParameters(this.lastPacked!, injectionDt_s, finestCellSize_m, 1,
-      [0, 0, 0], undefined, undefined, undefined, 0, undefined, this.lastInflow);
+      [0, 0, 0], undefined, activityPolicy, undefined, 0, undefined, this.lastInflow);
     // The trailing word is the injection mode that every ordinary frame writes
     // as zero. It lets the demand planner and writer distinguish an editor
     // ellipsoid from a swept hose plug at no cost to a quiescent frame.
@@ -7496,141 +7541,147 @@ export class WebGPUSparseCM12Resident {
     const packed = this.lastPacked!;
     const leafCapacity = this.worldDirectoryLayout.leafCapacity;
     const bricks = Math.ceil(leafCapacity / WORKGROUP_SIZE);
-    const interactionPageCount = [0, 1, 2].map((axis) => {
-      const lower = Math.floor((centerFine[axis]! - radiusFine[axis]!)
-        / this.brickFineResolution);
-      const upper = Math.floor((centerFine[axis]! + radiusFine[axis]!)
-        / this.brickFineResolution);
-      return Math.max(1, upper - lower + 1);
-    }) as [number, number, number];
-    let topologyPass: GPUComputePassEncoder | undefined;
-    let topologyBindGroup = this.bindGroup;
-    const openTopologyPass = () => {
-      if (!topologyPass) {
-        topologyPass = encoder.beginComputePass({
-          label: "Sparse CM12 resident liquid injection topology",
-        });
-        topologyPass.setBindGroup(0, topologyBindGroup);
+    if (phase !== "apply") {
+      const interactionPageCount = [0, 1, 2].map((axis) => {
+        const lower = Math.floor((centerFine[axis]! - radiusFine[axis]!)
+          / this.brickFineResolution);
+        const upper = Math.floor((centerFine[axis]! + radiusFine[axis]!)
+          / this.brickFineResolution);
+        return Math.max(1, upper - lower + 1);
+      }) as [number, number, number];
+      let topologyPass: GPUComputePassEncoder | undefined;
+      let topologyBindGroup = this.bindGroup;
+      const openTopologyPass = () => {
+        if (!topologyPass) {
+          topologyPass = encoder.beginComputePass({
+            label: "Sparse CM12 resident liquid injection topology",
+          });
+          topologyPass.setBindGroup(0, topologyBindGroup);
+        }
+        return topologyPass;
+      };
+      const closeTopologyPass = () => {
+        topologyPass?.end();
+        topologyPass = undefined;
+      };
+      const useTopologyBindGroup = (bindGroup: GPUBindGroup) => {
+        topologyBindGroup = bindGroup;
+        topologyPass?.setBindGroup(0, bindGroup);
+      };
+      const dispatchTopology = (name: string, count: number, y = 1, z = 1) => {
+        const pass = openTopologyPass();
+        pass.setPipeline(this.pipelines[name]!);
+        pass.dispatchWorkgroups(count, y, z);
+      };
+      const dispatchTopologyIndirect = (name: string, byteOffset: number) => {
+        const pass = openTopologyPass();
+        pass.setPipeline(this.pipelines[name]!);
+        pass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, byteOffset);
+      };
+      const dispatchTopologyDelta = (name: string) => {
+        dispatchTopologyIndirect(name, 72);
+      };
+      // Injection can be the first physics transaction after generation-zero
+      // presentation. Open PTR1 before any tile lifecycle effects are recorded:
+      // its zero-filled stamps otherwise alias candidate generation zero and make
+      // the first newly populated tile look like an incompatible pending write.
+      // `beginSparseCM12PressureTopologyRepair` is deliberately idempotent while
+      // a journal is collecting, so an injection between ordinary frames keeps
+      // the frame's already-recorded topology effects intact.
+      dispatchTopology("beginSparseCM12PressureTopologyRepair", 1);
+      dispatchTopology("allocateSparseWorldInteractionPages",
+        Math.ceil(interactionPageCount[0] / 4),
+        Math.ceil(interactionPageCount[1] / 4),
+        Math.ceil(interactionPageCount[2] / 4));
+      dispatchTopology("finalizeSparseWorldDirectoryAllocations",
+        Math.ceil(this.worldDirectoryLayout.capacity / WORKGROUP_SIZE));
+      dispatchTopology("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
+      // Promote every intersected brick before writing any density. The planner
+      // treats the enabled injection as refine-only: untouched accepted bricks
+      // are preserved, while closure may still grow the required 2:1 support.
+      dispatchTopology("classifyRefinementPolicyTiles", leafCapacity);
+      dispatchTopology("planBrickResolution", bricks);
+      dispatchTopology("activateInjectionFrontierPages", bricks);
+      for (let gradingPass = 0;
+        gradingPass < Math.log2(this.brickFineResolution); gradingPass += 1) {
+        dispatchTopology("closeRefinementPolicyTileResolution", leafCapacity);
+        dispatchTopology("closePlannedResolution", bricks);
       }
-      return topologyPass;
-    };
-    const closeTopologyPass = () => {
-      topologyPass?.end();
-      topologyPass = undefined;
-    };
-    const useTopologyBindGroup = (bindGroup: GPUBindGroup) => {
-      topologyBindGroup = bindGroup;
-      topologyPass?.setBindGroup(0, bindGroup);
-    };
-    const dispatchTopology = (name: string, count: number, y = 1, z = 1) => {
-      const pass = openTopologyPass();
-      pass.setPipeline(this.pipelines[name]!);
-      pass.dispatchWorkgroups(count, y, z);
-    };
-    const dispatchTopologyIndirect = (name: string, byteOffset: number) => {
-      const pass = openTopologyPass();
-      pass.setPipeline(this.pipelines[name]!);
-      pass.dispatchWorkgroupsIndirect(this.acceptedIndirectArguments, byteOffset);
-    };
-    const dispatchTopologyDelta = (name: string) => {
-      dispatchTopologyIndirect(name, 72);
-    };
-    // Injection can be the first physics transaction after generation-zero
-    // presentation. Open PTR1 before any tile lifecycle effects are recorded:
-    // its zero-filled stamps otherwise alias candidate generation zero and make
-    // the first newly populated tile look like an incompatible pending write.
-    // `beginSparseCM12PressureTopologyRepair` is deliberately idempotent while
-    // a journal is collecting, so an injection between ordinary frames keeps
-    // the frame's already-recorded topology effects intact.
-    dispatchTopology("beginSparseCM12PressureTopologyRepair", 1);
-    dispatchTopology("allocateSparseWorldInteractionPages",
-      Math.ceil(interactionPageCount[0] / 4),
-      Math.ceil(interactionPageCount[1] / 4),
-      Math.ceil(interactionPageCount[2] / 4));
-    dispatchTopology("finalizeSparseWorldDirectoryAllocations",
-      Math.ceil(this.worldDirectoryLayout.capacity / WORKGROUP_SIZE));
-    dispatchTopology("synthesizeSparseWorldFrontierPages", this.topologyPageCapacity);
-    // Promote every intersected brick before writing any density. The planner
-    // treats the enabled injection as refine-only: untouched accepted bricks
-    // are preserved, while closure may still grow the required 2:1 support.
-    dispatchTopology("classifyRefinementPolicyTiles", leafCapacity);
-    dispatchTopology("planBrickResolution", bricks);
-    dispatchTopology("activateInjectionFrontierPages", bricks);
-    for (let gradingPass = 0;
-      gradingPass < Math.log2(this.brickFineResolution); gradingPass += 1) {
-      dispatchTopology("closeRefinementPolicyTileResolution", leafCapacity);
-      dispatchTopology("closePlannedResolution", bricks);
-    }
-    dispatchTopology("validateCandidateResolution", bricks);
-    dispatchTopology("scheduleTopologyPreparation", 1);
-    dispatchTopologyIndirect("clearShadowRowMembership", 36);
-    dispatchTopology("beginShadowTopology", 1);
-    dispatchTopology("buildShadowLeafWorklist", 1);
-    closeTopologyPass();
-    encoder.copyBufferToBuffer(this.topologyArena,
-      this.acceptedLeafManifestBaseBytes + 4 * 15,
-      this.acceptedIndirectArguments, 84, 12);
-    dispatchTopologyIndirect("buildShadowStructureWorklist", 84);
-    dispatchTopology("finalizeShadowWorklists", 1);
-    closeTopologyPass();
-    encoder.copyBufferToBuffer(this.topologyArena,
-      this.topologyWorklistBaseBytes + 4 * 20,
-      this.acceptedIndirectArguments, 24, 24);
-    encoder.copyBufferToBuffer(this.topologyArena,
-      this.acceptedLeafManifestBaseBytes + 4 * 7,
-      this.acceptedIndirectArguments, 60, 12);
-    encoder.copyBufferToBuffer(this.topologyArena,
-      this.acceptedLeafManifestBaseBytes + 4 * 12,
-      this.acceptedIndirectArguments, 72, 12);
-    dispatchTopologyIndirect("transferCandidateCellsFromTopologyDelta", 72);
-    dispatchTopologyDelta("transferCandidateFacesFromTopologyDelta");
-    dispatchTopologyIndirect("validateCandidateShadowFaces", 36);
-    dispatchTopology("beginSparseCM12TopologyEffectsPreflight", 1);
-    dispatchTopologyDelta("recordCandidateTopologyEffectsFromTopologyDelta");
-    dispatchTopology("finalizeSparseCM12TopologyEffectsPreflight", 1);
-    useTopologyBindGroup(this.transportBindGroup);
-      dispatchTopology("beginSparseCM12InternedBoundaryDelta", 1);
-      dispatchTopologyDelta("compileSparseCM12InternedBoundaryDelta");
-      dispatchTopology("finalizeSparseCM12ISAChangedSetReceipt", 1);
-      dispatchTopologyDelta("validateSparseCM12InternedBoundaryDeltaPackets");
-      dispatchTopology("finalizeSparseCM12InternedBoundaryDelta", 1);
-      dispatchTopologyDelta("compileSparseCM12TransportExecutionImageShadow");
-    useTopologyBindGroup(this.bindGroup);
-    dispatchTopology("validateAndAuthorizeShadowTopology", 1);
+      dispatchTopology("validateCandidateResolution", bricks);
+      dispatchTopology("scheduleTopologyPreparation", 1);
+      dispatchTopologyIndirect("clearShadowRowMembership", 36);
+      dispatchTopology("beginShadowTopology", 1);
+      dispatchTopology("buildShadowLeafWorklist", 1);
       closeTopologyPass();
       encoder.copyBufferToBuffer(this.topologyArena,
-        sparseCM12TopologyEffectsIndirectByteOffset(
-          this.topologyEffectsAuthorityLayout!),
-        this.frameControlIndirectArguments, 0, 12);
-      const ptrPass = openTopologyPass();
-      ptrPass.setPipeline(this.pipelines.publishSparseCM12TopologyPTREffects!);
-      ptrPass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments, 0);
-      dispatchTopology("sealSparseCM12AuthorizedTopologyEffects", 1);
-    dispatchTopology("finishSparseCM12TopologyEffectsPublication", 1);
-    useTopologyBindGroup(this.transportBindGroup);
-    dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist");
-    useTopologyBindGroup(this.bindGroup);
-    dispatchTopology("connectSparseWorldFrontierPages", this.topologyPageCapacity);
-    dispatchTopologyIndirect("publishCandidateShadowFaces", 36);
-    dispatchTopology("finalizeAuthorizedShadowTopology", 1);
-    dispatchTopology("publishSparseWorldFrontierAcceptance", this.topologyPageCapacity);
-    useTopologyBindGroup(this.transportBindGroup);
-    dispatchTopology("compileSparseWorldFrontierExecutionImage", this.topologyPageCapacity);
-    dispatchTopologyDelta("replaySparseCM12TransportExecutionImageRetired");
-    dispatchTopologyDelta("replaySparseCM12InternedBoundaryDelta");
-    useTopologyBindGroup(this.bindGroup);
-    dispatchTopology("refreshSparseCM12FrontierSolidWorld",
-      this.worldDirectoryLayout.leafCapacity);
-    closeTopologyPass();
-    encoder.copyBufferToBuffer(this.topologyArena,
-      this.topologyWorklistBaseBytes + 4 * 8,
-      this.acceptedIndirectArguments, 0, 6 * 4);
-    encoder.copyBufferToBuffer(this.topologyArena,
-      this.acceptedLeafManifestBaseBytes + 4 * 4,
-      this.acceptedIndirectArguments, 48, 12);
-    encoder.copyBufferToBuffer(this.topologyArena,
-      this.acceptedLeafManifestBaseBytes + 4 * 20,
-      this.acceptedIndirectArguments, 120, 12);
+        this.acceptedLeafManifestBaseBytes + 4 * 15,
+        this.acceptedIndirectArguments, 84, 12);
+      dispatchTopologyIndirect("buildShadowStructureWorklist", 84);
+      dispatchTopology("finalizeShadowWorklists", 1);
+      closeTopologyPass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        this.topologyWorklistBaseBytes + 4 * 20,
+        this.acceptedIndirectArguments, 24, 24);
+      encoder.copyBufferToBuffer(this.topologyArena,
+        this.acceptedLeafManifestBaseBytes + 4 * 7,
+        this.acceptedIndirectArguments, 60, 12);
+      encoder.copyBufferToBuffer(this.topologyArena,
+        this.acceptedLeafManifestBaseBytes + 4 * 12,
+        this.acceptedIndirectArguments, 72, 12);
+      dispatchTopologyIndirect("transferCandidateCellsFromTopologyDelta", 72);
+      dispatchTopologyDelta("transferCandidateFacesFromTopologyDelta");
+      dispatchTopologyIndirect("validateCandidateShadowFaces", 36);
+      dispatchTopology("beginSparseCM12TopologyEffectsPreflight", 1);
+      dispatchTopologyDelta("recordCandidateTopologyEffectsFromTopologyDelta");
+      dispatchTopology("finalizeSparseCM12TopologyEffectsPreflight", 1);
+      useTopologyBindGroup(this.transportBindGroup);
+        dispatchTopology("beginSparseCM12InternedBoundaryDelta", 1);
+        dispatchTopologyDelta("compileSparseCM12InternedBoundaryDelta");
+        dispatchTopology("finalizeSparseCM12ISAChangedSetReceipt", 1);
+        dispatchTopologyDelta("validateSparseCM12InternedBoundaryDeltaPackets");
+        dispatchTopology("finalizeSparseCM12InternedBoundaryDelta", 1);
+        dispatchTopologyDelta("compileSparseCM12TransportExecutionImageShadow");
+      useTopologyBindGroup(this.bindGroup);
+      dispatchTopology("validateAndAuthorizeShadowTopology", 1);
+        closeTopologyPass();
+        encoder.copyBufferToBuffer(this.topologyArena,
+          sparseCM12TopologyEffectsIndirectByteOffset(
+            this.topologyEffectsAuthorityLayout!),
+          this.frameControlIndirectArguments, 0, 12);
+        const ptrPass = openTopologyPass();
+        ptrPass.setPipeline(this.pipelines.publishSparseCM12TopologyPTREffects!);
+        ptrPass.dispatchWorkgroupsIndirect(this.frameControlIndirectArguments, 0);
+        dispatchTopology("sealSparseCM12AuthorizedTopologyEffects", 1);
+      dispatchTopology("finishSparseCM12TopologyEffectsPublication", 1);
+      useTopologyBindGroup(this.transportBindGroup);
+      dispatchTopologyDelta("publishCandidateTopologyDeltaFromWorklist");
+      useTopologyBindGroup(this.bindGroup);
+      dispatchTopology("connectSparseWorldFrontierPages", this.topologyPageCapacity);
+      dispatchTopologyIndirect("publishCandidateShadowFaces", 36);
+      dispatchTopology("finalizeAuthorizedShadowTopology", 1);
+      dispatchTopology("publishSparseWorldFrontierAcceptance", this.topologyPageCapacity);
+      useTopologyBindGroup(this.transportBindGroup);
+      dispatchTopology("compileSparseWorldFrontierExecutionImage", this.topologyPageCapacity);
+      dispatchTopologyDelta("replaySparseCM12TransportExecutionImageRetired");
+      dispatchTopologyDelta("replaySparseCM12InternedBoundaryDelta");
+      useTopologyBindGroup(this.bindGroup);
+      dispatchTopology("refreshSparseCM12FrontierSolidWorld",
+        this.worldDirectoryLayout.leafCapacity);
+      closeTopologyPass();
+      encoder.copyBufferToBuffer(this.topologyArena,
+        this.topologyWorklistBaseBytes + 4 * 8,
+        this.acceptedIndirectArguments, 0, 6 * 4);
+      encoder.copyBufferToBuffer(this.topologyArena,
+        this.acceptedLeafManifestBaseBytes + 4 * 4,
+        this.acceptedIndirectArguments, 48, 12);
+      encoder.copyBufferToBuffer(this.topologyArena,
+        this.acceptedLeafManifestBaseBytes + 4 * 20,
+        this.acceptedIndirectArguments, 120, 12);
+    }
+    // Frozen mixed seams can require a replacement generation. Prepare the
+    // entire interaction's support first, then apply its density/impulse once
+    // after that topology is ready; a deferred page must not lose its dose.
+    if (phase === "prepare") return;
 
     const injectionPass = encoder.beginComputePass({
       label: "Sparse CM12 resident liquid injection",
@@ -8436,15 +8487,16 @@ export class WebGPUSparseCM12Resident {
     source: Awaited<ReturnType<WebGPUSparseCM12Resident["captureGenerationTransferSource"]>>,
     atlas: SparseAdaptiveMassAtlas, active: ReadonlySet<number>, finestCellSize_m: number,
     maximumBytes = Number.POSITIVE_INFINITY, signal?: AbortSignal,
+    newAirCoverage: readonly SparseCM12NewAirCoverage[] = [],
   ) {
     const grid = typeof Worker === "undefined" ? buildSparseAtlasCompositeGrid(atlas) : undefined;
-    const next = await this.createReplacement(atlas, grid, active, source.scalarD4, source.faceD4, maximumBytes, source, signal);
+    const next = await this.createReplacement(atlas, grid, active, source.scalarD4, source.faceD4, maximumBytes, source, signal, newAirCoverage);
     try {
       await next.waitForSimulationPipelines();
       const transfer = next.preparedGenerationTransfer ?? await prepareSparseCM12GenerationTransfer(
         this.device, source.geometry!, grid!, { ...source,
           liveControl: {buffer:this.topologyArena, ...this.generationTransferControlDescription()} },
-        next.generationTransferTarget(), maximumBytes - next.allocatedBytes);
+        next.generationTransferTarget(), maximumBytes - next.allocatedBytes, newAirCoverage);
       next.preparedGenerationTransfer = undefined;
       return { resident: next, disposePreparation: () => transfer.destroy(), commit: async () => {
         // Only this short publication boundary suspends advances. The candidate
@@ -8501,6 +8553,7 @@ export class WebGPUSparseCM12Resident {
     const sourceFirst = new Map<number, number>();
     const sourcePageCoordinates = new Map<number, readonly [number, number, number]>();
     const planned = new Map<number, SparseBrickResolution>();
+    const frozenFrontier = new Set<number>();
     const recordsByKey = new Map<number, SparseCM12GPUActivityRecord>();
     const dynamicKeys = new Set<number>();
     const bricks: SparseAdaptiveMassBrick[] = [];
@@ -8526,6 +8579,10 @@ export class WebGPUSparseCM12Resident {
       // A demanded inactive construction leaf may need a finer rung before
       // its first activation can satisfy physical 2:1 grading with wet donors.
       const demandedActivation = (record.planReasons & 0x80000000) !== 0;
+      if ((record.planReasons & 0x00020000) !== 0) {
+        frozenFrontier.add(key);
+        planned.set(key, record.generationRequestedResolution);
+      }
       if ((record.active || demandedActivation) && !hasCandidateSlot && record.generationRequestedResolution !== resolution)
         planned.set(key, record.generationRequestedResolution);
       bricks.push({ key, coordinate, resolution, spanBricks: authored ? sparseBrickSpan(authored) : 1,
@@ -8544,7 +8601,7 @@ export class WebGPUSparseCM12Resident {
     const atlas = createSparseAdaptiveMassAtlas(original.dimensions, bricks,
       activity.acceptedTopologyGeneration, original.brickFineResolution, true, false);
     return { atlas, active, sourceFirst, sourcePageCoordinates, dynamicKeys,
-      planned, activity, recordsByKey };
+      planned, frozenFrontier, activity, recordsByKey };
   }
 
   private async captureGenerationTransferSourceWhileLeased(

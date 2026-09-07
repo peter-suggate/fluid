@@ -1,4 +1,5 @@
 import type { InitialLiquidVolume, SceneDescription, Vec3 } from "./model";
+import { initialHeightFieldFractionAtCell } from "./initial-height-field";
 
 export interface DamBreakFractions {
   width: number;
@@ -241,8 +242,8 @@ export function initialLiquidFractionAtCell(
   baseWet: boolean | number,
 ): number {
   const brick = initialFluidBrickContainsCell(scene, x, y, z, dimensions);
-  const baseFraction = typeof baseWet === "boolean" ? Number(baseWet)
-    : Math.max(0, Math.min(1, baseWet));
+  const baseFraction = initialHeightFieldFractionAtCell(scene, x, y, z, dimensions)
+    ?? (typeof baseWet === "boolean" ? Number(baseWet) : Math.max(0, Math.min(1, baseWet)));
   const resolvedBase = brick === undefined ? baseFraction
     : scene.fluid.initialBrickSeedsAdditive
       ? brick ? 1 : baseFraction
@@ -286,7 +287,8 @@ export function initialLiquidContainsCell(
   baseWet: boolean,
 ): boolean {
   const brick = initialFluidBrickContainsCell(scene, x, y, z, dimensions);
-  return combineInitialBrickWet(scene, brick, baseWet)
+  const heightFraction = initialHeightFieldFractionAtCell(scene, x, y, z, dimensions);
+  return combineInitialBrickWet(scene, brick, heightFraction === undefined ? baseWet : heightFraction >= .5)
     || initialLiquidVolumeContainsCell(scene, x, y, z, dimensions);
 }
 

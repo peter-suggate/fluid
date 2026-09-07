@@ -32,8 +32,8 @@
   },
   "nominalResolution": { "length_m": 0.025 },
   "numerics": {
-    "fixedDt_s": 0.016,
-    "maxDt_s": 0.016,
+    "fixedDt_s": 0.03333333333333333,
+    "maxDt_s": 0.03333333333333333,
     "pressureRelativeTolerance": 1e-8,
     "pressureMaxIterations": 1000
   },

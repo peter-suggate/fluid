@@ -156,7 +156,7 @@ function useNoticeStale(notice: string, said: number, lifetime_ms = NOTICE_LIFET
  * and comes fully back the moment anything inside it takes focus, because a
  * control that disappears from the tab order is a control that is gone.
  */
-export function TransportBar() {
+export function TransportBar({ hostBlockReason }: { hostBlockReason?: string }) {
   // The host's realm. This component is mounted once by `CompareHost`, outside
   // pane B's provider, so `useSession()` here is pane A — which *is* the host:
   // `runState` is the transport's own state and `simulationTime` is the host
@@ -188,9 +188,9 @@ export function TransportBar() {
   // show as progress in the activity tray (see `transportWorkStatus`, rendered
   // by ScenePane). Here they exist only as a lock, stated on the controls.
   const readiness = transportReadiness(gpuInfo, methodId);
-  const transportLocked = rendererOnlyScene || !interaction.transportInteractive
+  const transportLocked = Boolean(hostBlockReason) || rendererOnlyScene || !interaction.transportInteractive
     || !readiness.initialSceneReady || !readiness.simulationReady;
-  const transportLockedReason = transportLockReason(readiness, gpuInfo);
+  const transportLockedReason = hostBlockReason ?? transportLockReason(readiness, gpuInfo);
   const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
   const toggleRecording = () => {
     if (recordingStatus === "recording") simulationRecording.stop(simulationTime);

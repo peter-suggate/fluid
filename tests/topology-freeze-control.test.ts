@@ -62,6 +62,7 @@ test("live renderer parameter uploads retain a frozen topology until the toggle 
     info: {},
     pressureIterationControlGeneration: 0,
     sparseRuntime: { cancelTopologyPreparation: () => { cancelledPreparations += 1; } },
+    sparseWorldNumerics: { current: {} },
   }) as WebGPUAdaptiveMassSolver;
   const policy = () => (solver as unknown as { options: AdaptiveMassSolverOptions }).options.activityPolicy;
   const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
@@ -74,6 +75,11 @@ test("live renderer parameter uploads retain a frozen topology until the toggle 
   renderer.currentGPUFluid(scene, config, "full-scene");
   renderer.currentGPUFluid(scene, { ...config, topologyFrozen: true }, "full-scene");
   assert.equal(policy()?.freezeTopology, true);
+  const interactionPolicy = () => (solver as unknown as {
+    sparseWorldNumerics: { current: { activityPolicy?: AdaptiveMassSolverOptions["activityPolicy"] } };
+  }).sparseWorldNumerics.current.activityPolicy;
+  assert.equal(interactionPolicy()?.freezeTopology, true,
+    "a paused liquid edit must receive freeze before another simulation step");
   for (let frame = 0; frame < 5; frame += 1) {
     renderer.currentGPUFluid(scene, {
       ...config, topologyFrozen: true,
@@ -81,8 +87,51 @@ test("live renderer parameter uploads retain a frozen topology until the toggle 
     }, "full-scene");
     assert.equal(policy()?.freezeTopology, true, `frame ${frame}: runtime values must not clear freeze`);
     assert.equal(policy()?.energyThreshold, 2 + frame, "live settings still update while frozen");
+    assert.equal(interactionPolicy()?.energyThreshold, 2 + frame,
+      "paused liquid edits must use the current allocation controls");
   }
   assert.equal(cancelledPreparations, 1, "holding freeze must not repeatedly cancel preparation");
   renderer.currentGPUFluid(scene, config, "full-scene");
   assert.equal(policy()?.freezeTopology, false, "the toggle releases the current solver");
+  assert.equal(interactionPolicy()?.freezeTopology, false);
+});
+
+test("a second paused drop supersedes the support receipt before either dose is applied", async () => {
+  let revision = 0, pending = 0, checks = 0;
+  const applied: number[] = [];
+  let enterFirst!: () => void, finishFirst!: (needed: boolean) => void;
+  const entered = new Promise<void>(resolve => { enterFirst = resolve; });
+  const firstReceipt = new Promise<boolean>(resolve => { finishFirst = resolve; });
+  const atlas = {};
+  const solver = Object.assign(Object.create(WebGPUAdaptiveMassSolver.prototype), {
+    scene: createMinimalPowerDamBreak64Scene(),
+    options: { activityPolicy: { freezeTopology: true } },
+    info: { encodedSteps: 0 }, atlas, presentation: { allocatedBytes: 0 },
+    frozenFrontierPending: false,
+    topologyGenerationLimits: { maximumSpanBricks: 1 },
+    assertSimulationHealthy: async () => {},
+    sparseWorld: { edit: () => { revision++; pending++; } },
+    sparseRuntime: {
+      acceptedAtlas: atlas, allocatedBytes: 0, generationPlanningRequired: false,
+      get pendingLiquidInteractions() { return pending > 0; },
+      get pendingLiquidInteractionRevision() { return revision; },
+      needsDetailedGenerationPlanning: async () => {
+        checks++;
+        if (checks === 1) { enterFirst(); return firstReceipt; }
+        return false;
+      },
+      completePendingLiquidInteractions: () => { applied.push(pending); pending = 0; },
+    },
+  }) as WebGPUAdaptiveMassSolver;
+  const ball = { centre_m: { x: 0, y: .4, z: 0 }, radius_m: .1 };
+  solver.injectLiquidBall(ball);
+  await entered;
+  solver.injectLiquidBall({ ...ball, centre_m: { x: .2, y: .4, z: 0 } });
+  assert.deepEqual(applied, []);
+  finishFirst(false);
+  await solver.waitForTopologyReady();
+  assert.equal(checks, 2, "the older receipt cannot authorize the second drop");
+  assert.deepEqual(applied, [2], "both doses apply once after current support is verified");
+  assert.equal(pending, 0);
+  assert.equal(solver.info.encodedSteps, 0);
 });

@@ -13,16 +13,8 @@ import type { PaneId } from "../session/session";
  * is a second document — see `docs/ab-compare-handoff.md`.
  */
 
-/**
- * The four things a reader looks *with* rather than *at*.
- *
- * Each is linked by default and carries a padlock on the diff strip, because
- * the experiment is about the solver: if the two panes are framed differently,
- * or sliced differently, or shaded differently, the eye compares two viewpoints
- * instead of two simulations. Unlinking a group is the deliberate act of
- * comparing *that* thing instead.
- */
-export type CompareLinkGroup = "view" | "cut" | "instrument" | "look";
+/** Independent pane links. Viewing controls start linked; topology and regions start separated. */
+export type CompareLinkGroup = "view" | "cut" | "instrument" | "look" | "topology" | "regions";
 
 /**
  * `config` is everything else — the solver, its parameters and the scene
@@ -31,9 +23,11 @@ export type CompareLinkGroup = "view" | "cut" | "instrument" | "look";
  */
 export type CompareGroup = CompareLinkGroup | "config";
 
-export const COMPARE_LINK_GROUPS: readonly CompareLinkGroup[] = ["view", "cut", "instrument", "look"];
+export const COMPARE_LINK_GROUPS: readonly CompareLinkGroup[] = ["view", "cut", "instrument", "look", "topology", "regions"];
 
 export const COMPARE_GROUP_LABELS: Readonly<Record<CompareLinkGroup, string>> = {
+  topology: "Freeze topology",
+  regions: "Enforcement regions",
   view: "View",
   cut: "Cut",
   instrument: "Instrument",
@@ -41,6 +35,8 @@ export const COMPARE_GROUP_LABELS: Readonly<Record<CompareLinkGroup, string>> = 
 };
 
 export const COMPARE_GROUP_HINTS: Readonly<Record<CompareLinkGroup, string>> = {
+  topology: "Freeze or resume topology adaptation in both panes",
+  regions: "Apply enforcement region edits to both panes",
   view: "One camera fed to both draws — orbit either pane and both move",
   cut: "The same slice of the same axis in both panes",
   instrument: "An instrument raised on one pane is raised on both, each reading its own session",
@@ -51,7 +47,7 @@ export const COMPARE_GROUP_HINTS: Readonly<Record<CompareLinkGroup, string>> = {
 export const COMPARE_ACTIVE_KEY = "b";
 /** Every diff entry: `b.<managed key>=<value>`. */
 export const COMPARE_KEY_PREFIX = "b.";
-/** The groups that are *not* linked, listed; omitted when everything is. */
+/** The groups that are *not* linked, listed; omitted for the default links. An empty value explicitly links everything. */
 export const COMPARE_LINK_KEY = "b.link";
 
 /**
@@ -65,6 +61,8 @@ export const COMPARE_LINK_KEY = "b.link";
 export const COMPARE_ABSENT = "~absent";
 
 export interface CompareLinks {
+  readonly topology: boolean;
+  readonly regions: boolean;
   readonly view: boolean;
   readonly cut: boolean;
   readonly instrument: boolean;
@@ -72,7 +70,11 @@ export interface CompareLinks {
 }
 
 export const COMPARE_ALL_LINKED: CompareLinks = Object.freeze({
-  view: true, cut: true, instrument: true, look: true,
+  view: true, cut: true, instrument: true, look: true, topology: true, regions: true,
+});
+
+export const COMPARE_DEFAULT_LINKS: CompareLinks = Object.freeze({
+  ...COMPARE_ALL_LINKED, topology: false, regions: false,
 });
 
 export interface CompareState {
@@ -88,7 +90,7 @@ export interface CompareState {
 export const INITIAL_COMPARE_STATE: CompareState = Object.freeze({
   active: false,
   diff: Object.freeze({}),
-  links: COMPARE_ALL_LINKED,
+  links: COMPARE_DEFAULT_LINKS,
   focusedPane: "a" as PaneId,
 });
 
@@ -112,6 +114,8 @@ const LOOK_KEYS: Readonly<Record<string, true>> = {
 
 /** Which padlock, if any, governs a managed key. */
 export function compareGroupForKey(key: string): CompareGroup {
+  if (key === "freezeTopology") return "topology";
+  if (key === "regions") return "regions";
   if (key.startsWith("camera.")) return "view";
   if (Object.hasOwn(CUT_KEYS, key)) return "cut";
   if (key === "overlay") return "instrument";
@@ -164,7 +168,7 @@ export function compareQueryEntries(
   if (keys.length === 0) entries.push([COMPARE_ACTIVE_KEY, "1"]);
   for (const key of keys) entries.push([`${COMPARE_KEY_PREFIX}${key}`, state.diff[key]!]);
   const unlinked = unlinkedCompareGroups(state.links);
-  if (unlinked.length > 0) entries.push([COMPARE_LINK_KEY, unlinked.join(",")]);
+  if (COMPARE_LINK_GROUPS.some((group) => state.links[group] !== COMPARE_DEFAULT_LINKS[group])) entries.push([COMPARE_LINK_KEY, unlinked.join(",")]);
   return entries;
 }
 
@@ -173,7 +177,7 @@ export function parseCompareQuery(search: string): CompareState {
   const query = new URLSearchParams(search);
   const diff: Record<string, string> = {};
   let sawCompareKey = query.get(COMPARE_ACTIVE_KEY) !== null;
-  const links: { -readonly [Key in keyof CompareLinks]: boolean } = { ...COMPARE_ALL_LINKED };
+  const links: { -readonly [Key in keyof CompareLinks]: boolean } = { ...(query.has(COMPARE_LINK_KEY) ? COMPARE_ALL_LINKED : COMPARE_DEFAULT_LINKS) };
   for (const [key, value] of query) {
     if (!key.startsWith(COMPARE_KEY_PREFIX)) continue;
     sawCompareKey = true;

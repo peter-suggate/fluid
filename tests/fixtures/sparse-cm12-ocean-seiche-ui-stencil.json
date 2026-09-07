@@ -1,0 +1,365 @@
+{
+  "scene": {
+    "schemaVersion": "2.0.0",
+    "sceneId": "ocean-seiche",
+    "randomSeed": 20260712,
+    "duration_s": 20,
+    "container": {
+      "width_m": 8,
+      "height_m": 2.4,
+      "depth_m": 2,
+      "fillFraction": 0.75,
+      "top": "closed",
+      "fluidWallMode": "no-slip"
+    },
+    "solidVoxels": [
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          -1,
+          0
+        ],
+        "maximumExclusive": [
+          320,
+          0,
+          80
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          -1,
+          0,
+          0
+        ],
+        "maximumExclusive": [
+          0,
+          96,
+          80
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          320,
+          0,
+          0
+        ],
+        "maximumExclusive": [
+          321,
+          96,
+          80
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          0,
+          -1
+        ],
+        "maximumExclusive": [
+          320,
+          96,
+          0
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          0,
+          80
+        ],
+        "maximumExclusive": [
+          320,
+          96,
+          81
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          96,
+          0
+        ],
+        "maximumExclusive": [
+          320,
+          97,
+          80
+        ],
+        "materialId": 1
+      }
+    ],
+    "voxelDomain": {
+      "finestCellSize_m": 0.025,
+      "brickSize_cells": 8
+    },
+    "fluid": {
+      "density_kg_m3": 998.2,
+      "dynamicViscosity_Pa_s": 0.001002,
+      "surfaceTension_N_m": 0,
+      "gravity_m_s2": {
+        "x": 0,
+        "y": -9.80665,
+        "z": 0
+      },
+      "initialCondition": "tank-fill",
+      "initialBrickSeeds_m": [
+        {
+          "x": -3.9,
+          "y": 1.9000000000000001,
+          "z": -0.9
+        },
+        {
+          "x": -3.7,
+          "y": 1.9000000000000001,
+          "z": -0.9
+        },
+        {
+          "x": -3.9,
+          "y": 1.9000000000000001,
+          "z": -0.7
+        },
+        {
+          "x": -3.7,
+          "y": 1.9000000000000001,
+          "z": -0.7
+        },
+        {
+          "x": -3.9,
+          "y": 1.9000000000000001,
+          "z": -0.5
+        },
+        {
+          "x": -3.7,
+          "y": 1.9000000000000001,
+          "z": -0.5
+        },
+        {
+          "x": -3.9,
+          "y": 1.9000000000000001,
+          "z": -0.29999999999999993
+        },
+        {
+          "x": -3.7,
+          "y": 1.9000000000000001,
+          "z": -0.29999999999999993
+        },
+        {
+          "x": -3.9,
+          "y": 1.9000000000000001,
+          "z": -0.09999999999999998
+        },
+        {
+          "x": -3.7,
+          "y": 1.9000000000000001,
+          "z": -0.09999999999999998
+        },
+        {
+          "x": -3.9,
+          "y": 1.9000000000000001,
+          "z": 0.10000000000000009
+        },
+        {
+          "x": -3.7,
+          "y": 1.9000000000000001,
+          "z": 0.10000000000000009
+        },
+        {
+          "x": -3.9,
+          "y": 1.9000000000000001,
+          "z": 0.30000000000000004
+        },
+        {
+          "x": -3.7,
+          "y": 1.9000000000000001,
+          "z": 0.30000000000000004
+        },
+        {
+          "x": -3.9,
+          "y": 1.9000000000000001,
+          "z": 0.5
+        },
+        {
+          "x": -3.7,
+          "y": 1.9000000000000001,
+          "z": 0.5
+        },
+        {
+          "x": -3.9,
+          "y": 1.9000000000000001,
+          "z": 0.7000000000000002
+        },
+        {
+          "x": -3.7,
+          "y": 1.9000000000000001,
+          "z": 0.7000000000000002
+        },
+        {
+          "x": -3.9,
+          "y": 1.9000000000000001,
+          "z": 0.9000000000000001
+        },
+        {
+          "x": -3.7,
+          "y": 1.9000000000000001,
+          "z": 0.9000000000000001
+        }
+      ],
+      "initialBrickSeedsAdditive": true
+    },
+    "nominalResolution": {
+      "length_m": 0.025
+    },
+    "numerics": {
+      "fixedDt_s": 0.03333333333333333,
+      "maxDt_s": 0.03333333333333333,
+      "pressureRelativeTolerance": 1e-08,
+      "pressureMaxIterations": 1000
+    },
+    "rigidBodies": [],
+    "environment": "stage",
+    "scenery": {
+      "palettes": {
+        "stage": {
+          "tint": [
+            1,
+            0.995,
+            0.985
+          ]
+        },
+        "fixture": {
+          "tint": [
+            0.94,
+            0.95,
+            1
+          ]
+        },
+        "lamp": {
+          "tint": [
+            1,
+            0.955,
+            0.88
+          ]
+        }
+      },
+      "nodes": [
+        {
+          "kind": "room-shell",
+          "id": "shell",
+          "materialModel": "room",
+          "faces": [],
+          "floor": {
+            "palette": "stage",
+            "value": 0.62
+          },
+          "wall": {
+            "palette": "stage",
+            "value": 0.62
+          },
+          "ceiling": {
+            "palette": "stage",
+            "value": 0.62
+          }
+        },
+        {
+          "kind": "box",
+          "id": "stage/floor",
+          "group": "stage",
+          "tags": [
+            "stage",
+            "floor",
+            "fluid-collider"
+          ],
+          "place": {
+            "position": {
+              "x": 0,
+              "y": -0.4084084820691897,
+              "z": 0
+            },
+            "units": "metres"
+          },
+          "halfSize": {
+            "x": 12.93293526552434,
+            "y": 0.4084084820691897,
+            "z": 12.93293526552434
+          },
+          "material": {
+            "palette": "stage",
+            "value": 0.12,
+            "surface": "plaster"
+          }
+        },
+        {
+          "kind": "cylinder",
+          "id": "lamp/stem",
+          "group": "lamp",
+          "tags": [
+            "lamp",
+            "fixture"
+          ],
+          "place": {
+            "position": {
+              "x": 0,
+              "y": 22.439777153690482,
+              "z": 0
+            },
+            "units": "metres"
+          },
+          "radius": 0.12252254462075692,
+          "halfHeight": 3.063063615518923,
+          "material": {
+            "palette": "fixture",
+            "value": 0.16,
+            "surface": "brushed-metal"
+          }
+        },
+        {
+          "kind": "cone",
+          "id": "lamp/reflector",
+          "group": "lamp",
+          "tags": [
+            "lamp",
+            "fixture",
+            "light",
+            "spot-light"
+          ],
+          "place": {
+            "position": {
+              "x": 0,
+              "y": 18.026696611331737,
+              "z": 0
+            },
+            "units": "metres"
+          },
+          "baseRadius": 1.4974977675870291,
+          "topRadius": 0.3403404017243248,
+          "halfHeight": 1.3500169268398217,
+          "material": {
+            "colorLinear": [
+              1,
+              0.955,
+              0.88
+            ],
+            "emission": 3474.9476713762433
+          }
+        }
+      ]
+    }
+  },
+  "method": {
+    "methodId": "adaptive-mass",
+    "quality": "balanced",
+    "overrides": {
+      "adaptive-mass": {}
+    }
+  }
+}

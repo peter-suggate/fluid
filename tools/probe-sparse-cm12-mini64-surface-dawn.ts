@@ -14,13 +14,12 @@ import { unpackFineLevelSetPackedFlags,
   unpackFineLevelSetPackedPhi } from "../lib/core/fine-levelset-packed-sample";
 import { createMinimalPowerDamBreak32Scene,
   createMinimalPowerDamBreak64Scene, createCornerBrickDropScene,
-  createSparseCM12LongDamBreakScene,
-  SPARSE_CM12_LONG_DAM_METHOD_PROFILE } from "../lib/core/scenes";
+  createSparseCM12LongDamBreakScene } from "../lib/core/scenes";
 import { solidVoxelShellForScene } from "../lib/core/scene-lattice";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod, adaptiveMassSolverOptions } from
+import { adaptiveMassMethod } from
   "../lib/methods/adaptive-mass/method";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
@@ -628,24 +627,20 @@ try {
         z: 0.5 * scene.container.depth_m },
     }];
   }
-  const values = resolveMethodValues(adaptiveMassMethod,
-    largeOffsetUI?.quality ?? "balanced",
-    largeOffsetUI?.overrides[largeOffsetUI.methodId]
-      ?? (longDam ? { ...SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides,
-        ...(process.env.FLUID_SURFACE_SHARPENING
-          ? { surfaceSharpening: process.env.FLUID_SURFACE_SHARPENING } : {}) } : {
-      // This min-size-region oracle requires the legacy B4/B2/B1 ladder.
-      selectorMode: "activity", resolutionMode: "adaptive", brickFineResolution: "8",
-      presentationPageResolution: "8", timeStep: "paper",
-    }));
-  if (largeOffsetUI || longDam || cornerDrop) {
-    const exactSolver = await adaptiveMassMethod.createSolverAsync!(device, scene,
-      largeOffsetUI?.quality ?? "balanced", values, undefined, () => {});
-    solver = exactSolver as WebGPUAdaptiveMassSolver;
-  } else {
-    solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
-      device, scene, "balanced", undefined, adaptiveMassSolverOptions(values), () => {});
+  if (largeOffsetUI && region === "right-x") {
+    scene.fluid.refinementRegions!.push({ id: "left-b2-surface-fixture",
+      rule: "minimum-cell-size", minimumCellSize_cells: 4, maximumCellSize_cells: 4,
+      min_m: { x: -0.5 * scene.container.width_m, y: 0, z: -0.5 * scene.container.depth_m },
+      max_m: { x: 0, y: scene.container.height_m, z: 0.5 * scene.container.depth_m },
+    });
   }
+  const values = resolveMethodValues(adaptiveMassMethod,
+    largeOffsetUI?.quality ?? "balanced", {
+      ...(process.env.FLUID_SURFACE_SHARPENING
+        ? { surfaceSharpening: process.env.FLUID_SURFACE_SHARPENING } : {}),
+    });
+  solver = await adaptiveMassMethod.createSolverAsync!(device, scene,
+    largeOffsetUI?.quality ?? "balanced", values, undefined, () => {}) as WebGPUAdaptiveMassSolver;
   await solver.waitForSimulationReady();
   const resetDimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
   const resetPublication = await readPublishedField(device, solver);
@@ -665,6 +660,7 @@ try {
     if (step % 2 === 0) await device.queue.onSubmittedWorkDone();
   }
   await device.queue.onSubmittedWorkDone();
+  await solver.assertSimulationHealthy();
   const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
   const publication = await readPublishedField(device, solver);
   const field = publication.values;
@@ -826,8 +822,8 @@ try {
         boundarySurface.maximumDetrendedBumpCells}-cell ridge`);
     assert.deepEqual(resetActivity?.bricks.filter((brick) => brick.active
       && brick.coordinate[1] === 1).map((brick) => brick.acceptedResolution),
-    [4, 2, 1, 1, 4, 2, 1, 1],
-    "the regression must exercise the B4/B2/B1 RHS ladder");
+    [2, 2, 1, 1, 2, 2, 1, 1],
+    "the authored region boundary must exercise B2/B1 under coarse-first defaults");
   }
   if (scenario === "long-dam" && steps > 0 && !frontierTopologyOnly) {
     assert.ok(filmVisibility);

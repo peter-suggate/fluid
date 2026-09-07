@@ -8,7 +8,6 @@ import { FINE_LEVELSET_SIGNED_SPARSE_ADDRESS_FLAG } from
 import { resolveMethodValues } from "../lib/core/method-contract";
 import {
   createSparseCM12LongDamBreakScene,
-  SPARSE_CM12_LONG_DAM_METHOD_PROFILE,
 } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
@@ -30,9 +29,8 @@ const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;
 
 const INITIAL_LONG_DAM_WET_TILE_COUNT = 80;
-const INITIAL_LONG_DAM_DRY_SUPPORT_TILE_COUNT = 196;
-const INITIAL_LONG_DAM_TILE_COUNT = INITIAL_LONG_DAM_WET_TILE_COUNT
-  + INITIAL_LONG_DAM_DRY_SUPPORT_TILE_COUNT;
+// Coarse-first packs the authored reservoir and its dry support into 222 tiles.
+const INITIAL_LONG_DAM_TILE_COUNT = 222;
 const LONG_DAM_FAR_WALL_PAGE_X = 23;
 // The Sparse CM12 profile advances at the paper's 1/30 s, so the authored
 // four-second scene is 120 steps. The previous 1,200 retained the old 4 ms
@@ -269,9 +267,7 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
       });
 
       const scene = createSparseCM12LongDamBreakScene();
-      const values = resolveMethodValues(adaptiveMassMethod, "balanced",
-        // Preserve the exact legacy generation-zero support-band oracle.
-        { ...SPARSE_CM12_LONG_DAM_METHOD_PROFILE.overrides, selectorMode: "activity" });
+      const values = resolveMethodValues(adaptiveMassMethod, "balanced", {});
       solver = await adaptiveMassMethod.createSolverAsync!(
         device, scene, "balanced", values, undefined, () => {},
       );
@@ -287,8 +283,7 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
       const initialPresentation = world.presentation();
       assert.equal(initialStatus.state, "ready");
       assert.equal(initialStatus.residentTiles, INITIAL_LONG_DAM_TILE_COUNT,
-        "generation zero must contain exactly 80 wet tiles and their 196-tile "
-          + "conservative velocity-extension support band");
+        "generation zero must contain the default coarse-first 222-tile support topology");
       assert.equal(initialStatus.acceptedGeneration,
         initialPresentation.acceptedGeneration,
         "status and presentation must share one accepted-generation boundary");
@@ -324,6 +319,7 @@ dawnTest("public sparse world carries Long Dam's material front to the far wall"
         // overlapping-generation hazards present only in the UI-style path.
         if (step % 2 === 0 || step === gateSteps) {
           await device.queue.onSubmittedWorkDone();
+          await solver.assertSimulationHealthy?.();
         }
         if (step % LONG_DAM_CHECKPOINT_INTERVAL !== 0
           && step !== gateSteps) continue;

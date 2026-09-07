@@ -1,4 +1,4 @@
-import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
+import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -106,15 +106,7 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
       scene.numerics.fixedDt_s = scene.numerics.maxDt_s = CM12_PAPER_DT_S;
 
       solver = await WebGPUAdaptiveMassSolver.createCompiledTopologyTransport(
-        device, scene, "balanced", undefined, {
-          // Preserve the original support-band topology oracle.
-          ...adaptiveMassSolverOptions({ selectorMode: "activity" }),
-          resolutionMode: "adaptive",
-          brickFineResolution: 8,
-          presentationPageResolution: 8,
-          timeStep: "paper",
-          pressureIterations: 64,
-        }, () => {},
+        device, scene, "balanced", undefined, sparseCM12DawnDefaultOptions(), () => {},
       );
       await solver.waitForSimulationReady();
 
@@ -131,15 +123,16 @@ dawnTest("symmetric expansion allocates and wets sparse corner tiles",
       for (let step = 1; step <= SYMMETRY_STEPS; step += 1) {
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
         await device.queue.onSubmittedWorkDone();
+        await solver.assertSimulationHealthy();
         if (step !== 1 && step !== 3) continue;
         const activity = await solver.readGPUActivityPolicy();
         const corners = activity.bricks.filter((brick) =>
           brick.active && horizontalCorner(brick.coordinate));
         if (step === 1) {
-          assert.equal(activity.bricks.filter((brick) => brick.active).length, 16,
-            "the first step must preserve the symmetric face-normal support band");
-          assert.equal(corners.length, 0,
-            "diagonal corners must not bypass demand-led frontier propagation");
+          assert.equal(activity.bricks.filter((brick) => brick.active).length, 32,
+            "coarse-first prediction must publish the full symmetric support closure on step one");
+          assert.equal(corners.length, 8,
+            "coarse-first prediction must include the complete diagonal corner orbit");
         } else {
           assert.equal(corners.length, 8,
             "the complete horizontal corner orbit must publish by step 3");

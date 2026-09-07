@@ -74,6 +74,7 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
       assert.equal(solver.advanceTo(CM12_PAPER_DT_S, []), true,
         "the UI run must advance before taking the live-injection path");
       await device.queue.onSubmittedWorkDone();
+      await solver.assertSimulationHealthy();
 
       const beforeMass = sum((await solver.readDiagnosticFields()).density);
       const beforeGeneration = solver.sparseWorld.status().acceptedGeneration;
@@ -81,6 +82,7 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
       assert.equal(solver.sparseWorld.status().acceptedGeneration, beforeGeneration + 1,
         "the UI drop must publish exactly one sparse-world generation");
       await device.queue.onSubmittedWorkDone();
+      await solver.assertSimulationHealthy();
 
       const afterMass = sum((await solver.readDiagnosticFields()).density);
       const growth = await solver.readWorldGrowthReceiptQA();
@@ -95,6 +97,7 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
       assert.equal(solver.advanceTo(2 * CM12_PAPER_DT_S, []), true,
         "the injected pages must remain valid on the next physics step");
       await device.queue.onSubmittedWorkDone();
+      await solver.assertSimulationHealthy();
       const settledMass = sum((await solver.readDiagnosticFields()).density)
         + (await solver.readWorldGrowthReceiptQA()).dynamicLiquidMassFineCells;
       assert.ok(settledMass > beforeMass + 1,
@@ -108,6 +111,7 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
       const outsideGeneration = solver.sparseWorld.status().acceptedGeneration;
       solver.injectLiquidBall({ centre_m: outside.center_m, radius_m: outside.radius_m });
       await device.queue.onSubmittedWorkDone();
+      await solver.assertSimulationHealthy();
       assert.equal(solver.sparseWorld.status().acceptedGeneration, outsideGeneration + 1);
       const outsideMass = sum((await solver.readDiagnosticFields()).density)
         + (await solver.readWorldGrowthReceiptQA()).dynamicLiquidMassFineCells;
@@ -119,6 +123,7 @@ dawnTest("Sparse CM12 accepts a UI-positioned drop in the larger hydrostatic sce
       assert.equal(solver.advanceTo(3 * CM12_PAPER_DT_S, []), true,
         "the outside-tank drop must survive its following physics step");
       await device.queue.onSubmittedWorkDone();
+      await solver.assertSimulationHealthy();
       const outsideSettledMass = sum((await solver.readDiagnosticFields()).density)
         + (await solver.readWorldGrowthReceiptQA()).dynamicLiquidMassFineCells;
       assert.ok(outsideSettledMass > settledMass + 1,

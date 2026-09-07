@@ -9,6 +9,13 @@ export interface SparseCM12TransferBox {
   readonly span: number;
 }
 
+/** Newly allocated dry coverage, proven disjoint from accepted source leaves
+ * by the topology planner. Only this explicit region may introduce air. */
+export interface SparseCM12NewAirCoverage {
+  readonly minimumFine: readonly number[];
+  readonly maximumExclusiveFine: readonly number[];
+}
+
 /** Sparse aligned dyadic overlap index. Clipped extents do not change a cell's
  * nominal dyadic origin. No finest-volume or finest-face expansion is used. */
 function overlapIndex(boxes: readonly SparseCM12TransferBox[], maximumSpan: number, dimensions: number) {
@@ -107,6 +114,7 @@ export interface SparseCM12GenerationTransferPlan {
 
 export function compileSparseCM12GenerationTransfer(
   source: SparseAtlasCompositeGrid | SparseCM12GenerationGeometry, target: SparseAtlasCompositeGrid,
+  newAirCoverage: readonly SparseCM12NewAirCoverage[] = [],
 ): SparseCM12GenerationTransferPlan {
   const sourceDimensions = "atlas" in source ? source.atlas.dimensions : source.dimensions;
   if (sourceDimensions.some((n, axis) => n !== target.atlas.dimensions[axis])) {
@@ -125,7 +133,14 @@ export function compileSparseCM12GenerationTransfer(
       cellSources.push(id); cellVolumes.push(volume); covered += volume;
     }
     const volume = cell.widths.reduce((v, x) => v * x, 1);
-    if (Math.abs(covered - volume) > 1e-6) throw new Error("CM12 target cell lacks complete source coverage");
+    if (covered > volume + 1e-6) throw new Error("CM12 target cell has overlapping source coverage");
+    if (covered < volume - 1e-6) {
+      const newAir = newAirCoverage.some(box => cell.lower.every((q, axis) =>
+        q >= box.minimumFine[axis]!
+        && q + cell.widths[axis]! <= box.maximumExclusiveFine[axis]!));
+      if (!newAir) throw new Error("CM12 target cell lacks complete source coverage");
+      cellSources.push(0xffff_ffff); cellVolumes.push(volume - covered);
+    }
   }
   cellOffsets[target.cells.length] = cellSources.length;
   const sourceFaces = "atlas" in source ? faces(source, sourceCells) : source.faces, targetFaces = faces(target, targetCells);
@@ -181,9 +196,10 @@ export async function prepareSparseCM12GenerationTransfer(
     readonly velocityOtherOffset: number; readonly faceOtherOffset: number;
   },
   maximumTemporaryBytes = Number.POSITIVE_INFINITY,
+  newAirCoverage: readonly SparseCM12NewAirCoverage[] = [],
 ): Promise<PreparedSparseCM12GenerationTransfer> {
   const { gpuCompilationManagerFor } = await import("../../core/gpu-compilation-manager");
-  const plan = compileSparseCM12GenerationTransfer(sourceGrid, targetGrid);
+  const plan = compileSparseCM12GenerationTransfer(sourceGrid, targetGrid, newAirCoverage);
   const metadata: number[] = [];
   const append = (values: ArrayLike<number>) => {
     const start = metadata.length;
@@ -192,7 +208,8 @@ export async function prepareSparseCM12GenerationTransfer(
   };
   const bits = (values: ArrayLike<number>) => new Uint32Array(Float32Array.from(values).buffer);
   const cellOffsets = append(plan.cellOffsets);
-  const cellSources = append(Uint32Array.from(plan.cellSources, (id) => source.cellIds[id]!));
+  const cellSources = append(Uint32Array.from(plan.cellSources, (id) =>
+    id === 0xffff_ffff ? id : source.cellIds[id]!));
   const cellVolumes = append(bits(plan.cellVolumes));
   const cellIds = append(target.cellIds);
   const volumes = append(bits(targetGrid.cells.map((cell) => cell.volume)));
@@ -216,7 +233,7 @@ export async function prepareSparseCM12GenerationTransfer(
   const offsetFunction = (name: string, fallback: number, pair?: readonly [number, number], parityWord?: number) =>
     `fn ${name}()->u32{return ${control && pair ? `select(${pair[0]}u,${pair[1]}u,(control[${parityWord}u]&1u)!=0u)` : `${fallback}u`};}`;
   const compiler = gpuCompilationManagerFor(device);
-  const module = compiler.createShaderModule({ label: "CM12 conservative generation transfer", code: `
+  const shaderModule = compiler.createShaderModule({ label: "CM12 conservative generation transfer", code: `
 @group(0) @binding(0) var<storage, read> old: array<f32>;
 @group(0) @binding(1) var<storage, read_write> next: array<f32>;
 @group(0) @binding(2) var<storage, read> m: array<u32>;
@@ -299,7 +316,7 @@ fn valid(v: f32) -> bool { return abs(v) <= 3.402823e38; }
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
     const pipelines = await Promise.all(["cells", "faces"].map((entryPoint) =>
       compiler.compileComputePipeline({ label: `CM12 generation transfer ${entryPoint}`,
-        layout: pipelineLayout, compute: { module, entryPoint } }, { priority: "critical" })));
+        layout: pipelineLayout, compute: { module: shaderModule, entryPoint } }, { priority: "critical" })));
     const bindings = device.createBindGroup({ layout, entries: [source.state, target.state, data, fault, ...(control ? [control.buffer] : [])]
       .map((buffer, binding) => ({ binding, resource: { buffer } })) });
     return new PreparedSparseCM12GenerationTransfer(device, pipelines, bindings, buffers,

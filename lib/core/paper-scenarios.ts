@@ -69,10 +69,9 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
   scene.container.fluidWallMode = "free-slip";
   scene.fluid.surfaceTension_N_m = 0;
   // These are retained paper-inspired product demos, not reconstructions of
-  // CM12 Figures 3, 4, or 6. Their smaller step and 20 mm lattice are authored
-  // for the interactive scenes rather than for numerical paper validation.
-  scene.numerics.fixedDt_s = 1 / 180;
-  scene.numerics.maxDt_s = 1 / 180;
+  // CM12 Figures 3, 4, or 6. They use the shared 1/30 s product step.
+  scene.numerics.fixedDt_s = 1 / 30;
+  scene.numerics.maxDt_s = 1 / 30;
   scene.nominalResolution.length_m = 0.025;
   scene.voxelDomain.finestCellSize_m = 0.02;
 
@@ -82,9 +81,8 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
     // 64 x 48 x 40 admits complete size-8 brick pages.
     scene.container.width_m = 1.28;
     scene.container.height_m = 0.96;
-    // Retain a small authored scene-step lane; sparse CM12's paper-step lane
-    // injects the corresponding nozzle-swept volume once per simulation step.
-    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 360;
+    // Inject the nozzle-swept volume once per shared simulation step.
+    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
     scene.container.fillFraction = 0.06;
     scene.fluid.initialCondition = "tank-fill";
     // Horizontal hose: the jet enters from the left wall and arcs into the
@@ -107,7 +105,7 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
     scene.container.fillFraction = 0.26;
     scene.fluid.initialCondition = "dam-break";
     delete scene.fluid.inflow;
-    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 360;
+    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
     scene.rigidBodies = [
       box(1, 0.08, 0.06, 0.08), box(2, 0.08, 0.28, 0.08, 0.06), box(3, 0.08, 0.50, 0.08, -0.04),
       box(4, 0.31, 0.06, 0.08, -0.05), box(5, 0.31, 0.28, 0.08, 0.04), box(6, 0.50, 0.06, 0.08)

@@ -1,3 +1,4 @@
+import { hostTransportBlockReason, hostTransportFailure } from "./host-transport-status";
 import { BUILD_ID, canonicalScene, cloneScene, parseScene, type RunState, type SceneDescription } from "../model";
 import { adoptRigidBodyRoster, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "../rigid-body";
 import type { RigidBodyDescription } from "../model";
@@ -5,7 +6,6 @@ import type { RigidShape, Vec3 } from "../model";
 import { BROWSER_GPU_THROUGHPUT_DEPTH, sceneEditRequiresReset } from "../webgpu-renderer";
 import type { RendererFrameMetrics } from "../webgpu-renderer";
 import { getMethod } from "../method-registry";
-import { requiresFencedInitialRasterPresentation } from "../gpu-t0-presentation";
 import { findSceneDefinition, getSceneDefinition } from "../scenes";
 import {
   sceneCardForDefinition,
@@ -40,7 +40,6 @@ import { LOCKSTEP_IN_FLIGHT_DEPTH, PaneClockHost, PRIMARY_PANE_ID, type PaneCloc
 import { applyHostRunState, hostResetPlan, paneResetPlan } from "./pane-transport";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
 import { planSceneRuntime } from "../scene-runtime";
-import { resourceInteractionGates } from "../resource-readiness";
 import { addSceneryNode, createSceneryNodeAt, scenerySelectionId } from "../editor-scenery";
 import { findSceneryNode, withoutSceneryNode } from "../scenery-edit";
 import { scaleScene as scaleSceneBy, sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "../scene-scale";
@@ -235,16 +234,8 @@ class SimulationController {
     return typeof location !== "undefined" && safeBrowserGPUBringupEnabled(location.search);
   }
 
-  private webgpuTransportReady(paneId: PaneId = PRIMARY_PANE_ID): boolean {
-    const diagnostics = this.session(paneId).diagnostics.getState();
-    if (!resourceInteractionGates(diagnostics.resourceReadiness, true).transportInteractive) return false;
-    // A method that publishes its sparse authority and raster separately has
-    // to cross that fence before transport unlocks; one that attaches its
-    // field textures atomically with the warmed solver does not. The method
-    // declares which it is, so this never has to list ids.
-    return !requiresFencedInitialRasterPresentation(this.session(paneId).method.getState().methodId)
-      || (diagnostics.gpuInfo?.initialSparseAuthorityReady === true
-        && diagnostics.gpuInfo?.initialRasterSurfaceReady === true);
+  private webgpuTransportReady(): boolean {
+    return !hostTransportBlockReason([...this.paneSessions.values()]);
   }
 
   constructor() {
@@ -411,7 +402,11 @@ class SimulationController {
   }
 
   paneIds(): readonly string[] { return this.clock.paneIds(); }
-  paneClocks(): readonly PaneClockReport[] { return this.clock.reports(); }
+  paneClocks(): readonly PaneClockReport[] {
+    return this.clock.reports().map((report) => ({ ...report,
+      step_s: effectiveSimulationStep_s(this.session(report.id as PaneId).scene.getState().scene, this.session(report.id as PaneId).method.getState()),
+    }));
+  }
 
   // ---- transport ---------------------------------------------------------
 
@@ -433,7 +428,8 @@ class SimulationController {
    * replaced.
    */
   setRunState(runState: RunState) {
-    applyHostRunState(this.paneSessions.values(), runState);
+    const failure = hostTransportFailure([...this.paneSessions.values()]);
+    applyHostRunState(this.paneSessions.values(), runState === "running" && failure ? "paused" : runState);
   }
 
   /** The run state the transport shows: pane A's, which is the host's. */
@@ -455,12 +451,13 @@ class SimulationController {
   setPaneDt(paneId: PaneId, dt_s: number | undefined) { this.clock.setPaneDt(paneId, dt_s); }
 
   /**
-   * True when a registered pane is not on pane A's step. The host then runs at
-   * the smaller step and the larger-dt pane skips the steps it does not need —
-   * a comparison of rates rather than of paired steps, which the diff strip
-   * has to say out loud.
+   * True when the panes cannot take a paired step. Admission stays closed
+   * until the user chooses compatible steps.
    */
-  panesDtDiffer(): boolean { return this.clock.panesDtDiffer(); }
+  panesDtDiffer(): boolean {
+    const reports = this.paneClocks();
+    return reports.some((report) => Math.abs(report.step_s - reports[0].step_s) > 1e-9);
+  }
 
   private publishBodies(diagnostics?: RigidStepDiagnostics, paneId: PaneId = PRIMARY_PANE_ID) {
     const scene = this.session(paneId).scene.getState().scene;
@@ -524,6 +521,7 @@ class SimulationController {
     }
     const scene = this.session(PRIMARY_PANE_ID).scene.getState().scene;
     if (!this.webgpuTransportReady()) {
+      if (hostTransportFailure([...this.paneSessions.values()])) this.setRunState("paused");
       this.clock.dropPendingTime();
       if (runtime.simRate !== null) runtime.setSimRate(null);
       this.rateWallClock = 0;
@@ -599,7 +597,7 @@ class SimulationController {
     sceneStore.patchNumerics(numerics);
     this.clock.clampPendingTime(numerics.fixedDt_s);
     this.session(paneId).runtime.getState().setNotice(releasedPaperStep
-      ? `Uniform paper 1/30 s step released · shared rigid + fluid step ${(numerics.fixedDt_s * 1000).toFixed(2)} ms`
+      ? `Paper 1/30 s step released · shared rigid + fluid step ${(numerics.fixedDt_s * 1000).toFixed(2)} ms`
       : `Shared rigid + fluid step · ${(numerics.fixedDt_s * 1000).toFixed(2)} ms`);
   }
 

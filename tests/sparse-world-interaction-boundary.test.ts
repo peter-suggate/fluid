@@ -24,7 +24,10 @@ test("liquid-ball authoring uses only the public sparse-world edit API", () => {
     "  /**\n   * Adopt scene scalars");
   assert.match(injection, /this\.sparseWorld\.edit\(\{/);
   assert.match(injection, /kind: "liquid-ellipsoid"/);
-  assert.doesNotMatch(injection, /sparseRuntime|encodeLiquidInjection/);
+  assert.doesNotMatch(injection, /encodeLiquidInjection/);
+  assert.deepEqual([...injection.matchAll(/this\.sparseRuntime\.(\w+)/g)].map(match => match[1]),
+    ["pendingLiquidInteractions"],
+    "the runtime only reports whether the public edit needs a topology boundary");
 
   const runtime = sourceBetween(adapter,
     "export interface CM12SparseWorldRuntime {",
@@ -37,11 +40,20 @@ test("a fluid edit owns one public world generation", () => {
   const interaction = sourceBetween(adapter,
     "  edit(edit: SparseWorldEdit): SparseWorldEditReceipt {",
     "  encodeStep(encoder: GPUCommandEncoder, input: SparseWorldStepInput): SparseWorldStep {");
-  assert.match(interaction, /\(value - origin\[axis\]!\) \* inverseCell/,
+  const encode = sourceBetween(adapter,
+    "  private encodeInteraction(interaction: SparseWorldFluidEdit,",
+    "  constructor(");
+  assert.match(encode, /\(value - origin\[axis\]!\) \* inverseCell/,
     "world-space interaction centres must be translated by the world's origin");
-  assert.match(interaction,
-    /interaction\.radii_m\.map\(\(value\) => value \* inverseCell\)/);
-  assert.match(interaction, /this\.resident\.encodeLiquidInjection\([\s\S]*this\.generation \+= 1;/);
+  assert.match(encode,
+    /interaction\.radii_m\.map\(value => value \* inverseCell\)/);
+  assert.match(encode, /this\.resident\.encodeLiquidInjection\(/);
+  assert.match(interaction, /this\.encodeInteraction\([\s\S]*this\.generation \+= 1;/);
+  const completion = sourceBetween(adapter,
+    "  completePendingLiquidInteractions(): void {",
+    "  private encodeInteraction(");
+  assert.doesNotMatch(completion, /this\.generation \+=/,
+    "applying a prepared dose must not count the public edit a second time");
 
   const step = sourceBetween(adapter,
     "  encodeStep(encoder: GPUCommandEncoder, input: SparseWorldStepInput): SparseWorldStep {",

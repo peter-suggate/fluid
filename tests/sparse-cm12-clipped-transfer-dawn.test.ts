@@ -7,7 +7,7 @@ import { cloneScene, defaultScene } from "../lib/core/model";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
+import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 
@@ -43,16 +43,13 @@ dawnTest("clipped boundary re-rung preserves mass through the resident transacti
       scene.fluid.initialCondition = "dam-break";
       scene.fluid.initialDamBreakDimensions_m = { x: 0.65, y: 0.5, z: 0.45 };
       scene.fluid.gravity_m_s2 = { x: 0, y: 0, z: 0 };
-      const defaults = adaptiveMassSolverOptions({});
+      scene.fluid.refinementRegions = [{ id: "whole-domain-rung",
+        rule: "minimum-cell-size", minimumCellSize_cells: 1, maximumCellSize_cells: 1,
+        min_m: { x: -1, y: -1, z: -1 }, max_m: { x: 1, y: 1, z: 1 } }];
+      const defaults = sparseCM12DawnDefaultOptions();
       solver = await WebGPUAdaptiveMassSolver.createAsync(
         device, scene, "balanced", undefined, {
-          ...defaults, topologyPageBudget, initialResolutionForQA: 8,
-          maximumMacroSpanBricks: 1, pressureIterations: 8,
-          // Isolate topology transfer from the iterative sharpening dose.
-          // Production scalar transforms retain their canonical suite gates.
-          gammaDiffusionEnabled: false, surfaceSharpeningEnabled: false,
-          activityPolicy: { ...defaults.activityPolicy!,
-            topologyCadenceSteps: 1, demoteEpochs: 1, prepareBricksPerFrame: 256 },
+          ...defaults, topologyPageBudget,
         }, () => {},
       );
       await solver.waitForSimulationReady();
@@ -65,11 +62,12 @@ dawnTest("clipped boundary re-rung preserves mass through the resident transacti
           edited.fluid.refinementRegions = [{ id: "whole-domain-rung",
             rule: "minimum-cell-size", minimumCellSize_cells: width,
             maximumCellSize_cells: width,
-            min_m: { x: -1, y: -1, z: -1 }, max_m: { x: 1, y: 1, z: 1 } }];
+          min_m: { x: -1, y: -1, z: -1 }, max_m: { x: 1, y: 1, z: 1 } }];
           solver.applySceneUniforms(edited);
         }
         assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
         await device.queue.onSubmittedWorkDone();
+        await solver.assertSimulationHealthy();
         const after = await solver.readGPUActivityPolicy();
         clippedCommitted ||= after.bricks.some((b) => b.active
           && b.coordinate.some((q, axis) => (q + b.spanBricks) * 8 > [13, 10, 9][axis]!)
@@ -85,7 +83,7 @@ dawnTest("clipped boundary re-rung preserves mass through the resident transacti
         assert.equal(after.topologyPageAllocator.allocationCancellations, 0);
         if (step === 3 || step === 4) {
           assert.ok(after.bricks.filter((b) => b.active).every((b) =>
-            b.acceptedResolution === (step === 3 ? 1 : 8)),
+            8 * b.spanBricks / b.acceptedResolution === (step === 3 ? 8 : 1)),
             "the live edit must coarsen and then refine every clipped leaf");
         }
         assert.ok(after.bricks.every((brick) => brick.topologyPage === undefined),

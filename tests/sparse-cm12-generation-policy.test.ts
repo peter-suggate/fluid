@@ -1,9 +1,83 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSparseAdaptiveMassAtlas, sparseBrickKey, sparseBrickSpan } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
+import { createSparseAdaptiveMassAtlas, sparseAtlasBrickKey, sparseBrickKey, sparseBrickSpan } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import { planSparseCM12ResidentGeneration } from "../lib/methods/adaptive-mass/sparse-cm12-generation-policy";
 import { compileSparseCM12StableLeafFaceNeighbors } from "../lib/methods/adaptive-mass/sparse-cm12-factored-aei-topology";
 const limits = { maximumLeaves: 4096, maximumCells: 262144, maximumSpanBricks: 1024 };
+test("a new dry receiver expands to the face-patch span of a frozen macro host", () => {
+ const dimensions=[32,32,32] as const;
+ const coordinate=[4,1,1] as const;
+ const key=sparseAtlasBrickKey(coordinate,{brickDimensions:[4,4,4],signedCoordinates:true});
+ const hostKey=sparseAtlasBrickKey([0,0,0],{brickDimensions:[4,4,4],signedCoordinates:true});
+ const atlas=createSparseAdaptiveMassAtlas(dimensions,[{
+  key:hostKey,coordinate:[0,0,0],spanBricks:4,resolution:1,
+  density:new Float64Array([1]),gamma:new Float64Array([1]),
+ },{key,coordinate,unclipped:true,resolution:8,
+  density:new Float64Array(512),gamma:new Float64Array(512).fill(1),
+ }],0,8,true,false);
+ const plan=planSparseCM12ResidentGeneration(atlas,new Set([hostKey]),new Map([
+  [hostKey,{resolution:1 as const,mergeable:false,frozen:true}],
+  [key,{resolution:8 as const,mergeable:false,activate:true}],
+ ]),limits);
+ assert.equal(plan?.status,"ready");if(plan?.status!=="ready")return;
+ const host=plan.atlas.directory.get(hostKey)!;
+ assert.equal(host.spanBricks,4);assert.equal(host.resolution,1);
+ const receiver=plan.atlas.bricks.find(b=>b.key!==hostKey)!;
+ assert.deepEqual(receiver.coordinate,[4,0,0]);assert.equal(receiver.spanBricks,2);
+ assert.equal(receiver.resolution,1);assert.equal(receiver.unclipped,true);
+ assert.equal(plan.active.size,2);assert.ok(plan.active.has(receiver.key));
+ assert.ok(receiver.density.every(rho=>rho===0));
+ assert.deepEqual(plan.newAirCoverage,[{minimumFine:[32,0,0],maximumExclusiveFine:[48,16,16]}]);
+ assert.equal(atlas.bricks[1]!.spanBricks,undefined,"the source atlas remains immutable");
+});
+
+test("macro frontier growth refuses to absorb an existing frozen fine leaf", () => {
+ const key=(q:readonly [number,number,number])=>sparseAtlasBrickKey(q,
+  {brickDimensions:[4,4,4],signedCoordinates:true});
+ const atlas=createSparseAdaptiveMassAtlas([32,32,32],[{
+  key:key([0,0,0]),coordinate:[0,0,0],spanBricks:4,resolution:1,
+  density:new Float64Array([1]),gamma:new Float64Array([1]),
+ },...([[4,0,0],[5,1,1]] as const).map(coordinate=>({key:key(coordinate),coordinate,
+  unclipped:true,resolution:8 as const,density:new Float64Array(512),gamma:new Float64Array(512).fill(1)}))],0,8,true,false);
+ const active=new Set([key([0,0,0]),key([5,1,1])]);
+ const intents=new Map(atlas.bricks.map(b=>[b.key,{resolution:b.resolution,mergeable:false,
+  frozen:active.has(b.key),activate:!active.has(b.key)}]));
+ assert.throws(()=>planSparseCM12ResidentGeneration(atlas,active,intents,limits),
+  /would overlap accepted brick 5,1,1/);
+});
+test("frozen accepted cells constrain new support without rerunging the source", () => {
+ const atlas=createSparseAdaptiveMassAtlas([16,8,8],[{
+  key:0,coordinate:[0,0,0],resolution:1,
+  density:new Float64Array([1]),gamma:new Float64Array([1]),
+ },{key:1,coordinate:[1,0,0],resolution:8,
+  density:new Float64Array(512),gamma:new Float64Array(512).fill(1),
+ }],0,8,false,false);
+ const plan=planSparseCM12ResidentGeneration(atlas,new Set([0]),new Map([
+  [0,{resolution:8 as const,mergeable:true,frozen:true}],
+  [1,{resolution:8 as const,mergeable:false,activate:true}],
+ ]),limits);
+ assert.equal(plan?.status,"ready");
+ if(plan?.status!=="ready")return;
+ assert.equal(plan.atlas.directory.get(0)!.resolution,1);
+ assert.equal(plan.atlas.directory.get(1)!.resolution,2);
+ assert.deepEqual([...plan.active],[0,1]);
+ assert.ok(plan.atlas.directory.get(1)!.density.every(rho=>rho===0));
+});
+
+test("a frozen frontier activation needs publication even when every cell size matches", () => {
+ const atlas=createSparseAdaptiveMassAtlas([16,8,8],[0,1].map(x=>({
+  key:x,coordinate:[x,0,0] as const,resolution:8 as const,
+  density:new Float64Array(512).fill(x===0?1:0),gamma:new Float64Array(512).fill(1),
+ })),0,8,false,false);
+ const plan=planSparseCM12ResidentGeneration(atlas,new Set([0]),new Map([
+  [0,{resolution:8 as const,mergeable:false,frozen:true}],
+  [1,{resolution:8 as const,mergeable:false,activate:true}],
+ ]),limits);
+ assert.equal(plan?.status,"ready");
+ if(plan?.status!=="ready")return;
+ assert.deepEqual([...plan.active],[0,1]);
+ assert.ok(plan.atlas.bricks.every(b=>b.resolution===8));
+});
 test("quiet sibling coverage merges into physical 64h cells", () => {
  const atlas = createSparseAdaptiveMassAtlas([64,64,64], Array.from({length:8},(_,i) => {
   const coordinate = [4*(i&1),4*((i>>>1)&1),4*(i>>>2)] as const;

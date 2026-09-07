@@ -16,6 +16,21 @@ function grid(dimensions: readonly [number, number, number], bricks:
     density: new Float64Array(r ** 3).fill(0.5), gamma: new Float64Array(r ** 3).fill(1) })), 0, 8));
 }
 
+test("only explicit new-air allocation can introduce uncovered target volume", () => {
+  const source = grid([16,8,8], [{q:[0,0,0],span:1,r:1}]);
+  const target = grid([16,8,8], [{q:[0,0,0],span:1,r:1}, {q:[1,0,0],span:1,r:1}]);
+  assert.throws(() => compileSparseCM12GenerationTransfer(source,target), /complete source coverage/);
+  assert.throws(() => compileSparseCM12GenerationTransfer(source,target,[{
+    minimumFine:[8,0,0],maximumExclusiveFine:[12,8,8],
+  }]), /complete source coverage/);
+  const plan = compileSparseCM12GenerationTransfer(source,target,[{
+    minimumFine:[8,0,0],maximumExclusiveFine:[16,8,8],
+  }]);
+  assert.deepEqual([...plan.cellSources],[0,0xffffffff]);
+  assert.deepEqual([...plan.cellVolumes],[512,512]);
+  assert.deepEqual([...plan.cellOffsets],[0,1,2]);
+});
+
 test("generation transfer preserves coverage and boundary flux through clipped macro split/merge", () => {
   const macro = grid([13, 15, 11], [{ q: [0, 0, 0], span: 2, r: 2 }]);
   const children = grid([13, 15, 11], Array.from({ length: 8 }, (_, i) => ({

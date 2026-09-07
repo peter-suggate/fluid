@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import {
-  COMPARE_ALL_LINKED,
+  COMPARE_DEFAULT_LINKS,
   INITIAL_COMPARE_STATE,
   type CompareLinkGroup,
   type CompareState,
@@ -69,7 +69,7 @@ export const useShellStore = create<ShellStore>((set) => ({
   setCompareActive: (active) => set((state) => ({
     compare: active
       ? { ...state.compare, active: true, focusedPane: "b" }
-      : { ...INITIAL_COMPARE_STATE, links: COMPARE_ALL_LINKED },
+      : { ...INITIAL_COMPARE_STATE, links: COMPARE_DEFAULT_LINKS },
   })),
   setCompareLink: (group, linked) => set((state) => ({
     compare: { ...state.compare, links: { ...state.compare.links, [group]: linked } },

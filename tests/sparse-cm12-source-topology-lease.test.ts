@@ -33,7 +33,7 @@ test("source lease gates optional scheduling while urgent physical work revokes 
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",import.meta.url),"utf8");
  const allocator=wgsl.slice(wgsl.indexOf("fn allocateSparseWorldFrontier("),
   wgsl.indexOf("fn clearSparseWorldFrontierResolutionCache("));
- assert.match(allocator,/revokeCM12SourceTopologyLease\(\);\s*let leaf=cm12WorldAllocateExact/);
+ assert.match(allocator,/revokeCM12SourceTopologyLease\(\);\s*let leaf=cm12WorldAllocateUniqueExact/);
  assert.match(wgsl,/fn stageDemandedFrontierPage\(brick:u32\)\{\s*revokeCM12SourceTopologyLease\(\);/);
  assert.match(wgsl,/if\(requested>current&&brickCandidatePlanningEnabled\(brick\)\)\{revokeCM12SourceTopologyLease\(\);\}/);
  const schedule=wgsl.slice(wgsl.indexOf("fn scheduleTopologyPreparation("),

@@ -18,6 +18,7 @@
  *     --scene=ocean-seiche --brick-fine=16 --presentation-page=16 \
  *     --warmup=8 --frames=24 --enforce-non-pressure-gate=1
  */
+import { sparseCM12DawnDefaultValues } from "../lib/harness/sparse-cm12-dawn-defaults";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -104,6 +105,7 @@ Options:
   --help, -h                         Print this help and exit without acquiring WebGPU
   --scene=NAME                       mini16, mini32, mini64, long-dam, ocean-seiche,
                                      ocean, or symmetric-expansion (default long-dam)
+  --production-defaults=0|1         Use balanced adaptive-mass defaults (suite mode)
   --brick-fine=4|8|16                Sparse brick ladder (default 16)
   --presentation-page=4|8|16         Presentation page size (default 16)
   --warmup=N                         Warmup hardware samples (default 8)
@@ -113,6 +115,8 @@ Options:
                                      (default scene)
   --minimum-cell-size=N              Add a minimum-cell-size region in finest
                                      cells (power of two; omitted by default)
+  --maximum-cell-size=N              Upper cell-size bound for the same region
+  --freeze-topology=0|1              Freeze the initial accepted topology
   --region-scope=domain|initial-dam  Region bounds (default domain)
   --gamma-diffusion=on|off           Conditioning A/B (default on)
   --surface-sharpening=on|off        Conditioning A/B (default on)
@@ -148,17 +152,21 @@ The non-pressure gate is eligible only for ocean-seiche B16/P16 with at least
   process.exit(0);
 }
 
+const productionDefaults = argument("production-defaults", "0") === "1"
+  ? sparseCM12DawnDefaultValues() : undefined;
 const sceneName = argument("scene", "long-dam");
 const warmup = Number(argument("warmup", "8"));
 const sampled = Number(argument("frames", "40"));
-const brickFineResolution = Number(argument("brick-fine", "16"));
-const presentationPageResolution = Number(argument("presentation-page", "16"));
+const brickFineResolution = Number(argument("brick-fine", String(productionDefaults?.brickFineResolution ?? "16")));
+const presentationPageResolution = Number(argument("presentation-page", String(productionDefaults?.presentationPageResolution ?? "16")));
 const captureGap_ms = Number(argument("capture-gap-ms", "110"));
-const timeStep = argument("time-step", "scene");
+const timeStep = argument("time-step", String(productionDefaults?.timeStep ?? "scene"));
 const minimumCellSize = Number(argument("minimum-cell-size", "0"));
+const maximumCellSize = Number(argument("maximum-cell-size", "0"));
+const freezeTopology = argument("freeze-topology", "0") === "1";
 const regionScope = argument("region-scope", "domain");
-const gammaDiffusion = argument("gamma-diffusion", "on");
-const surfaceSharpening = argument("surface-sharpening", "on");
+const gammaDiffusion = argument("gamma-diffusion", String(productionDefaults?.gammaDiffusion ?? "on"));
+const surfaceSharpening = argument("surface-sharpening", String(productionDefaults?.surfaceSharpening ?? "on"));
 const vexPacketCompaction = argument("vex-packet-compaction", "0") === "1";
 const coarseTransportPacking = argument("coarse-transport-packing", "0") === "1";
 const policyLeaderCompaction = argument("policy-leader-compaction", "0") === "1";
@@ -227,6 +235,12 @@ for (const [name, value] of Object.entries({ sampled, brickFineResolution,
 if (!(Number.isSafeInteger(minimumCellSize) && minimumCellSize >= 0
   && (minimumCellSize === 0 || (minimumCellSize & (minimumCellSize - 1)) === 0))) {
   throw new RangeError("minimum-cell-size must be zero or a positive power of two");
+}
+if (!(Number.isSafeInteger(maximumCellSize) && maximumCellSize >= 0
+  && (maximumCellSize === 0 || (minimumCellSize > 0
+    && maximumCellSize >= minimumCellSize
+    && (maximumCellSize & (maximumCellSize - 1)) === 0)))) {
+  throw new RangeError("maximum-cell-size must be zero or a power of two at least minimum-cell-size");
 }
 if (regionScope !== "domain" && regionScope !== "initial-dam") {
   throw new RangeError("region-scope must be domain or initial-dam");
@@ -525,6 +539,7 @@ try {
       id: `stage-cost-min-${minimumCellSize}-${regionScope}`,
       rule: "minimum-cell-size",
       minimumCellSize_cells: minimumCellSize,
+      ...(maximumCellSize > 0 ? { maximumCellSize_cells: maximumCellSize } : {}),
       min_m,
       max_m,
     }];
@@ -568,9 +583,17 @@ try {
           : phase1Receipt
             ? WebGPUAdaptiveMassSolver.createPhase1TransportReceiptOracleForQA
           : WebGPUAdaptiveMassSolver.createCompiledTopologyTransport;
+  const constructionStarted_ms = performance.now();
   const solver = await createSolver.call(WebGPUAdaptiveMassSolver,
     device, scene, "balanced", undefined, adaptiveMassSolverOptions(values), () => {});
   teardownSolver = solver;
+  await solver.waitForSimulationReady();
+  if (freezeTopology) solver.setTopologyFrozen(true);
+  const construction_ms = performance.now() - constructionStarted_ms;
+  if (process.env.FLUID_STAGE_PROBE_DEBUG === "1") {
+    process.stderr.write(`[stage-probe] construction ${construction_ms.toFixed(1)} ms\n`);
+  }
+  const profileDevice = device;
   const releaseXctraceGate = async (position: "construction" | "after-warmup") => {
     assert.ok(xctraceMetadataWarm && xctraceAdvanceReleased,
       "xctrace gate signals were not registered");
@@ -579,15 +602,15 @@ try {
     await xctraceMetadataWarm;
     // Attached Metal recordings need to observe GPU work before they publish
     // encoder metadata. Keep that disposable work outside the measured frames.
-    const metadataWarmEncoder = device.createCommandEncoder({
+    const metadataWarmEncoder = profileDevice.createCommandEncoder({
       label: "Sparse CM12 stage profile encoder metadata warmup",
     });
     const metadataWarmPass = metadataWarmEncoder.beginComputePass({
       label: "Sparse CM12 stage profile encoder metadata warmup",
     });
     metadataWarmPass.end();
-    device.queue.submit([metadataWarmEncoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
+    profileDevice.queue.submit([metadataWarmEncoder.finish()]);
+    await profileDevice.queue.onSubmittedWorkDone();
     console.log(JSON.stringify({ phase: "xctrace-stage-gate", position, pid: process.pid,
       state: "metadata-warm" }));
     console.log(JSON.stringify({ phase: "xctrace-stage-gate", position, pid: process.pid,
@@ -1195,6 +1218,8 @@ try {
       firstAuthorityFailure,
     },
     configuration: {
+      methodValues: values,
+      freezeTopology,
       brickFineResolution,
       presentationPageResolution,
       transport: "compiled-topology",
@@ -1215,6 +1240,7 @@ try {
       refinementRegion: minimumCellSize === 0 ? undefined : {
         scope: regionScope,
         minimumCellSize_cells: minimumCellSize,
+        ...(maximumCellSize > 0 ? { maximumCellSize_cells: maximumCellSize } : {}),
         bounds_m: scene.fluid.refinementRegions?.[0] === undefined ? undefined : {
           minimum: scene.fluid.refinementRegions[0].min_m,
           maximum: scene.fluid.refinementRegions[0].max_m,
@@ -1261,6 +1287,7 @@ try {
       },
     },
     medianAdvance_ms: Number(total.toFixed(4)),
+    construction_ms: Number(construction_ms.toFixed(4)),
     wallFrame: {
       samples_ms: wallFrameSamples.map((value) => Number(value.toFixed(4))),
       median_ms: Number(median(wallFrameSamples).toFixed(4)),

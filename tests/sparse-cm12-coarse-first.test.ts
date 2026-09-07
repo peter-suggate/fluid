@@ -9,6 +9,10 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 
 test("coarse-first starts the pool at B1 and curved liquid fine, conserving authored mass", () => {
   const scene = sceneDocument(getSceneDefinition("coarse-first-pool-impact"));
+  // Keep the original high-curvature fixture independent of the demo ball size.
+  scene.fluid.initialLiquidVolumes = [
+    { shape: "sphere", center_m: { x: 0, y: 3.65, z: 0 }, radius_m: 0.5 },
+  ];
   const options = { finestDimensions: [128, 96, 128] as const, brickFineResolution: 8 as const };
   const adaptive = initializeSparseBrickAtlasFromScene(scene, {
     ...options, coarseFirstCurvatureTolerance: 0.25,

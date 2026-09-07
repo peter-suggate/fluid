@@ -201,8 +201,11 @@ test("SparseWorld frontier allocation covers all 26 activity-support neighbours"
   assert.match(allocation,
     /ACTIVITY_FRONTIER_RESOLVED_MASK_WORD[\s\S]*atomicOr\(&activity\[output\+ACTIVITY_FRONTIER_RESOLVED_MASK_WORD\],resolvedBit\)/);
 
-  assert.match(shader,
-    /acceptedActive!=candidateActive[\s\S]*candidateActive[\s\S]*atomicAnd\(&activity\[activityRecord\(neighbor\)[\s\S]*ACTIVITY_FRONTIER_RESOLVED_MASK_WORD\],~\(1u<<\(26u-bit\)\)\)/);
+  const retirement = resident.slice(resident.indexOf("fn retireSparseCM12PresentationPages"),
+    resident.indexOf("fn sparseCM12PresentationRecomputeWorldBounds"));
+  assert.match(retirement,
+    /cm12WorldReleaseLeaf\(brick\)[\s\S]*atomicAnd\(&activity\[ACTIVITY_HEADER\+ACTIVITY_RECORD_WORDS\*neighbor\+45u\],[\s\S]*~\(1u<<\(26u-bit\)\)/,
+    "invalidate cached ownership when the directory entry is actually released");
   assert.match(resident,
     /setPipeline\(this\.pipelines\.clearSparseWorldFrontierResolutionCache!\)/);
   assert.match(resident, /const ACTIVITY_RECORD_WORDS = 48;/);

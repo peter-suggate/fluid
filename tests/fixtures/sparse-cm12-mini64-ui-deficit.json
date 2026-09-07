@@ -1,0 +1,272 @@
+{
+  "scene": {
+    "schemaVersion": "2.0.0",
+    "sceneId": "minimal-power-dam-break-64",
+    "randomSeed": 20260712,
+    "duration_s": 0.1,
+    "container": {
+      "width_m": 0.8,
+      "height_m": 0.8,
+      "depth_m": 0.8,
+      "fillFraction": 0.359375,
+      "top": "closed",
+      "fluidWallMode": "free-slip"
+    },
+    "solidVoxels": [
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          -1,
+          0
+        ],
+        "maximumExclusive": [
+          64,
+          0,
+          64
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          -1,
+          0,
+          0
+        ],
+        "maximumExclusive": [
+          0,
+          64,
+          64
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          64,
+          0,
+          0
+        ],
+        "maximumExclusive": [
+          65,
+          64,
+          64
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          0,
+          -1
+        ],
+        "maximumExclusive": [
+          64,
+          64,
+          0
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          0,
+          64
+        ],
+        "maximumExclusive": [
+          64,
+          64,
+          65
+        ],
+        "materialId": 1
+      },
+      {
+        "operation": "fill",
+        "minimum": [
+          0,
+          64,
+          0
+        ],
+        "maximumExclusive": [
+          64,
+          65,
+          64
+        ],
+        "materialId": 1
+      }
+    ],
+    "voxelDomain": {
+      "finestCellSize_m": 0.0125,
+      "brickSize_cells": 8
+    },
+    "fluid": {
+      "density_kg_m3": 998.2,
+      "dynamicViscosity_Pa_s": 0.001002,
+      "surfaceTension_N_m": 0,
+      "gravity_m_s2": {
+        "x": 0,
+        "y": -9.80665,
+        "z": 0
+      },
+      "initialCondition": "dam-break"
+    },
+    "nominalResolution": {
+      "length_m": 0.025
+    },
+    "numerics": {
+      "fixedDt_s": 0.03333333333333333,
+      "maxDt_s": 0.03333333333333333,
+      "pressureRelativeTolerance": 1e-08,
+      "pressureMaxIterations": 1000
+    },
+    "rigidBodies": [],
+    "environment": "stage",
+    "scenery": {
+      "palettes": {
+        "stage": {
+          "tint": [
+            1,
+            0.995,
+            0.985
+          ]
+        },
+        "fixture": {
+          "tint": [
+            0.94,
+            0.95,
+            1
+          ]
+        },
+        "lamp": {
+          "tint": [
+            1,
+            0.955,
+            0.88
+          ]
+        }
+      },
+      "nodes": [
+        {
+          "kind": "room-shell",
+          "id": "shell",
+          "materialModel": "room",
+          "faces": [],
+          "floor": {
+            "palette": "stage",
+            "value": 0.62
+          },
+          "wall": {
+            "palette": "stage",
+            "value": 0.62
+          },
+          "ceiling": {
+            "palette": "stage",
+            "value": 0.62
+          }
+        },
+        {
+          "kind": "box",
+          "id": "stage/floor",
+          "group": "stage",
+          "tags": [
+            "stage",
+            "floor",
+            "fluid-collider"
+          ],
+          "place": {
+            "position": {
+              "x": 0,
+              "y": -0.0560331814680526,
+              "z": 0
+            },
+            "units": "metres"
+          },
+          "halfSize": {
+            "x": 1.7743840798216655,
+            "y": 0.0560331814680526,
+            "z": 1.7743840798216655
+          },
+          "material": {
+            "palette": "stage",
+            "value": 0.12,
+            "surface": "plaster"
+          }
+        },
+        {
+          "kind": "cylinder",
+          "id": "lamp/stem",
+          "group": "lamp",
+          "tags": [
+            "lamp",
+            "fixture"
+          ],
+          "place": {
+            "position": {
+              "x": 0,
+              "y": 3.0787120262168903,
+              "z": 0
+            },
+            "units": "metres"
+          },
+          "radius": 0.016809954440415775,
+          "halfHeight": 0.42024886101039444,
+          "material": {
+            "palette": "fixture",
+            "value": 0.16,
+            "surface": "brushed-metal"
+          }
+        },
+        {
+          "kind": "cone",
+          "id": "lamp/reflector",
+          "group": "lamp",
+          "tags": [
+            "lamp",
+            "fixture",
+            "light",
+            "spot-light"
+          ],
+          "place": {
+            "position": {
+              "x": 0,
+              "y": 2.473242370909322,
+              "z": 0
+            },
+            "units": "metres"
+          },
+          "baseRadius": 0.20545499871619285,
+          "topRadius": 0.04669431789004383,
+          "halfHeight": 0.1852207942971739,
+          "material": {
+            "colorLinear": [
+              1,
+              0.955,
+              0.88
+            ],
+            "emission": 65.41077969649402
+          }
+        }
+      ]
+    }
+  },
+  "method": {
+    "methodId": "adaptive-mass",
+    "quality": "balanced",
+    "overrides": {
+      "adaptive-mass": {
+        "selectorMode": "coarse-first",
+        "timeStep": "paper",
+        "brickFineResolution": "8"
+      },
+      "losasso": {
+        "maximumLeafSize": "32",
+        "interfaceRefinementBandCells": 3,
+        "surfaceRefinementGradingLayers": 3,
+        "globalFineLevelSetFactor": "1"
+      }
+    }
+  }
+}

@@ -37,6 +37,12 @@ dawnTest("coarse presentation and refinement reproduce affine cell averages", as
     const shader = `
 struct Params { dimensions:vec4u }
 const p=Params(vec4u(128));
+const BRICK_FINE_RESOLUTION=8u;
+const INVALID=0xffffffffu;
+fn compactOwnerCellAt(q:vec3i)->vec3u{_=q;return vec3u(0);}
+fn brickHasUnclippedWorldGeometry(brick:u32)->bool{_=brick;return false;}
+fn cm12WorldOwnerAt(q:vec3i)->u32{_=q;return INVALID;}
+fn cm12WorldFloorToSpan(q:i32,span:i32)->i32{return i32(floor(f32(q)/f32(span)))*span;}
 var<workgroup>presentationInterpolationCoefficients:array<vec4f,128>;
 @group(0)@binding(0)var<storage,read_write>result:array<vec4f>;
 // Exact averages of one affine field over physical control volumes.
@@ -48,6 +54,7 @@ fn presentationStencilDensityAt(q:vec3i,scale:u32,first:vec3i,dims:vec3u,fits:bo
   _=first;_=dims;_=fits;return restrictedPresentationDensityAt(q*i32(scale),i32(scale),offset);
 }
 ${functionSource("presentationLimitedSlope")}
+${functionSource("presentationCanonicalCoarseCoordinate")}
 ${functionSource("preparePresentationInterpolationCache")}
 ${functionSource("interpolatedPresentationDensityAt")}
 ${functionSource("smoothedPresentationDensityAt")}

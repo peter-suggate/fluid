@@ -11,6 +11,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sparseCM12DawnDefaultValues } from "../lib/harness/sparse-cm12-dawn-defaults";
 
 import {
   readWebGPUExclusiveLockHolder,
@@ -118,8 +119,7 @@ function performanceArguments(
   return [
     "--import", "tsx", "tools/probe-sparse-cm12-stage-cost.ts",
     `--scene=${lane.scene}`,
-    `--brick-fine=${lane.brickFineResolution}`,
-    `--presentation-page=${lane.presentationPageResolution}`,
+    "--production-defaults=1",
     `--warmup=${lane.warmupFrames}`,
     `--frames=${lane.measuredFrames}`,
     `--capture-gap-ms=${lane.captureGapMs}`,
@@ -179,9 +179,12 @@ Promise<LaneReceipt> {
       medianAdvance_ms?: number;
       diagnostic?: { passed?: boolean };
       validationErrors?: unknown[];
+      configuration?: { methodValues?: unknown };
     };
     assert.equal(report.samples, lane.measuredFrames,
       "performance probe did not capture every requested frame");
+    assert.deepEqual(report.configuration?.methodValues, sparseCM12DawnDefaultValues(),
+      "performance probe must use the balanced adaptive-mass production defaults");
     assert.equal(report.diagnostic?.passed, true,
       "performance probe diagnostics did not pass");
     assert.deepEqual(report.validationErrors, [],

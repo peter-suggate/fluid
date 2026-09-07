@@ -63,7 +63,7 @@ function isMethodKey(key: string): boolean {
 
 /** Everything else the serializer writes lives in the UI store. */
 function isUIKey(key: string): boolean {
-  return !isDocumentKey(key) && !isMethodKey(key);
+  return key !== "freezeTopology" && !isDocumentKey(key) && !isMethodKey(key);
 }
 
 /** The canonical query for one pane, with no address and no shell layer in it. */
@@ -76,6 +76,7 @@ function paneSearch(session: PaneSession, layer: ReturnType<typeof createSceneQu
     session.ui.getState(),
     { view: "studio" },
     layer({ presetId: scene.presetId, scene: scene.scene }),
+    session.runtime.getState(),
   ));
 }
 
@@ -151,6 +152,9 @@ function applyLayers(
   // adoption sees every layer this pass wrote; and never behind a solver
   // switch, whose own rebuild starts this pane from the new document anyway.
   if (replaced && !switchedMethod) adopt.onSceneAdopted?.(session, replaced);
+  if (changed.includes("freezeTopology") || replaced || switchedMethod) {
+    session.runtime.getState().setTopologyFrozen(desired.get("freezeTopology") === "1");
+  }
 }
 
 /** The compare record, as a store the mirror can read, write and watch. */
@@ -322,7 +326,24 @@ export function startCompareSync(
     }
   };
 
-  const onA = () => { if (!stopped) pass(false); };
+  const onA = () => {
+    if (stopped) return;
+    if (!running) {
+      // A's edits must preserve B even when the separated values were equal.
+      const state = store.getState();
+      const searchA = paneSearch(a, layerA);
+      const searchB = paneSearch(b, layerB);
+      const diff = { ...state.diff };
+      for (const key of ["freezeTopology", "regions"]) {
+        const group = compareGroupForKey(key);
+        if (group === "config" || state.links[group]) continue;
+        if (valueOf(searchA, key) !== valueOf(searchB, key)) diff[key] = valueOf(searchB, key);
+        else delete diff[key];
+      }
+      if (!sameDiff(state.diff, diff)) store.setState({ ...state, diff });
+    }
+    pass(false);
+  };
   const onB = () => { if (!stopped) pass(true); };
 
   // ---- cross-pane pins ---------------------------------------------------
@@ -384,10 +405,24 @@ export function startCompareSync(
   // the mode works, so the mirror runs before anything is subscribed.
   pass(false);
 
+  let previousLinks = store.getState().links;
   const unsubscribe = [
     a.scene.subscribe(onA), a.method.subscribe(onA), a.ui.subscribe(onA),
     b.scene.subscribe(onB), b.method.subscribe(onB), b.ui.subscribe(onB),
-    store.subscribe(() => { if (!stopped) pass(false); }),
+    a.runtime.subscribe((state, previous) => { if (state.topologyFrozen !== previous.topologyFrozen) onA(); }),
+    b.runtime.subscribe((state, previous) => { if (state.topologyFrozen !== previous.topologyFrozen) onB(); }),
+    store.subscribe(() => {
+      if (stopped) return;
+      const state = store.getState();
+      const diff = { ...state.diff };
+      for (const key of Object.keys(diff)) {
+        const group = compareGroupForKey(key);
+        if (group !== "config" && state.links[group] && !previousLinks[group]) delete diff[key];
+      }
+      previousLinks = state.links;
+      if (!sameDiff(state.diff, diff)) store.setState({ ...state, diff });
+      pass(false);
+    }),
     probeMirror(a, b),
     probeMirror(b, a),
   ];

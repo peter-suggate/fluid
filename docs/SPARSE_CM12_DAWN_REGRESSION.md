@@ -20,14 +20,14 @@ npm run test:dawn:sparse-cm12 -- --list
 | Lane | Authority | Baseline |
 | --- | --- | --- |
 | `simulation-failure-halt` | Production incidence validator, deficit-support validator and entry guard | Healthy work executes; corrupt input latches first provenance and blocks later stages and frames; empty air may leave resident support but any nonzero donor mass still faults |
-| `symmetric-expansion` | D4 field/topology symmetry, corner residency, mass | Existing 20-step Dawn property gate |
+| `symmetric-expansion` | D4 field/topology symmetry, corner residency, mass | Eight steps; coarse-first publishes the complete corner orbit on step one |
 | `mixed-ratio-topology` | BTI1 GPU cell, point-owner, and row services plus the BFP1 CPU partition at 8\|2, 8\|1, and 8/4/2/1 | GPU results match the exhaustive CPU mirrors; BFP1 covers every row exactly once |
 | `topology-page-budget` | Authored re-rung and WDR page ownership remain independent | Zero, one and 32 growth pages; conservative rung transfers, no borrowed dynamic identities, matching UI/QA allocator receipts |
-| `clipped-topology-transfer` | Compact clipped cells survive live coarsening and refinement | 13×10×9 domain, ordinary demotion then live B1/B8 edits; mass, gamma, momentum and transaction receipts |
+| `clipped-topology-transfer` | Compact clipped cells survive live coarsening and refinement | 13×10×9 domain, live B1/B8 edits under production defaults; mass, gamma, momentum and transaction receipts |
 | `topology-generation-storage` | GPU topology generation storage remains bounded and lease-safe | Stage/cancel/commit, retained old consumers, allocation rollback, stale requests, deferred retry after reclamation; storage component only, not resident adoption |
-| `hydrostatic-adaptivity` | Legacy activity criterion through the UI path has a calm B4 surface pinned at its density-derived 15.25-cell waterline through step one; non-liquid halos stay out of structure view; stable deep-water 4/2/1 support | Reset plus two simulated seconds |
+| `hydrostatic-adaptivity` | Production coarse-first defaults through the UI path have a calm B1 surface pinned at its density-derived 15.25-cell waterline through step one; non-liquid halos stay out of structure view; stable deep-water 4/2/1 support | Reset plus two simulated seconds |
 | `mini32-correctness` | Production defaults, per-step failure receipts and liquid-volume retention | Four simulated seconds, at least 99.5% retained; includes the coarse-first frame-33 empty-air deficit regression |
-| `min8-region-surface` | Partial min8 reconstruction across a B2/B1 boundary | Reset planar top has at least 16 boundary samples, at most 0.05-cell detrended boundary bump, 0.125-cell neighbour step, and 0.02-cell mean curvature |
+| `min8-region-surface` | Authored B2/B1 region boundary with default coarse-first reconstruction | Reset planar top has at least 16 boundary samples, at most 0.05-cell detrended boundary bump, 0.125-cell neighbour step, and 0.02-cell mean curvature |
 | `mini32-performance` | Production B8/P8 frame cost | 24.576 ms reference; 40 ms median ceiling |
 | `mini64-performance` | Production B8/P8 frame cost | 33.4889 ms reference; 50 ms median ceiling |
 | `mini64-min8-surface` | Production min8 presentation reconstruction | Seven paper steps; evolved top-sheet neighbour jump at most 12 fine cells |
@@ -57,8 +57,18 @@ npm run test:dawn:sparse-cm12 -- --kind=correctness
 These selections are diagnostic conveniences. A large Sparse CM12 change is
 accepted only by the unfiltered full command.
 
-Coarse-first is now the production default. Lanes with exact legacy B4/B2/B1
-or generation-zero support-count oracles select the legacy criterion explicitly;
-their physical assertions and timing ceilings are unchanged. Run
-`npm run test:dawn:sparse-cm12:coarse-first` for the default-policy still pool,
-elevated-ball impact and moving-surface coarsening checks.
+Every simulation lane resolves the balanced adaptive-mass production defaults,
+including coarse-first selection, the paper timestep, gamma diffusion,
+sharpening, and the pressure policy. Scene method profiles do not override
+these defaults. The performance probe uses those same defaults; the checked-in
+B8/P8 references and timing ceilings remain unchanged.
+
+Authored geometry, refinement regions, live edits, and page-budget fixtures
+remain test inputs. Transfer lanes use authored rung edits instead of forcing
+QA initial resolutions or accelerating the coarsening policy. The partial-region
+surface lane authors a B2/B1 boundary so it still exercises mixed-resolution
+reconstruction with coarse-first enabled. Kernel and topology-storage unit
+lanes have no simulation selector and continue to test their explicit inputs.
+
+Run `npm run test:dawn:sparse-cm12:coarse-first` for the additional default-policy
+still pool, elevated-ball impact and moving-surface coarsening checks.

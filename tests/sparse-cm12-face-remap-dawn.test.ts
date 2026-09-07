@@ -43,12 +43,43 @@ dawnTest("a zero-length face characteristic preserves staggered modes at every w
     const fixture = `
 struct Params { dimensions:vec4u, frame:vec4f, refinementRegionControl:vec4u, surfaceProof:vec4u }
 const p=Params(vec4u(128),vec4f(0,.05,0,0),vec4u(0),vec4u(0));
+const CM12_LIQUID_ISOVALUE=0.5;
+struct TransportStencil { cells:array<u32,8>, weights:array<f32,8> }
+struct Owner { cell:u32 }
+struct TransportFaceSupport { width:f32, extended:bool, liquid:bool }
 struct FaceVelocitySupport { velocity:vec3f, spans:vec3f, owner:bool, extended:bool, liquid:bool }
 var<private>width:f32;
 var<private>front:bool;
 var<private>oneWet:bool;
 var<private>currentRow:u32;
 const INVALID=0xffffffffu;
+const FACE_VELOCITY_SUPPORT=48u;
+const FIXTURE_CELLS_PER_ROW=4096u;
+fn cm12RecordFailure(code:u32,cell:u32,data:vec4u){_=code;_=cell;_=data;}
+fn cm12ClampToResidentWorld(q:vec3f,margin:vec3f)->vec3f{
+  return clamp(q,margin,vec3f(p.dimensions.xyz)-margin);
+}
+fn cellWidths(cell:u32)->vec3f{_=cell;return vec3f(width);}
+fn cellTransportActive(cell:u32)->bool{return cell<12u*FIXTURE_CELLS_PER_ROW;}
+fn fixtureCellOrigin()->vec3i{return vec3i(floor(rowCenter(currentRow)/width))-vec3i(8);}
+fn cellCenter(cell:u32)->vec3f{
+  let local=cell%FIXTURE_CELLS_PER_ROW;
+  let q=vec3i(i32(local%16u),i32((local/16u)%16u),i32(local/256u));
+  return (vec3f(fixtureCellOrigin()+q)+vec3f(.5))*width;
+}
+fn cm12TransportOwnerAtFine(q:vec3i,direct:bool)->Owner{
+  _=direct;let coordinate=vec3i(floor(vec3f(q)/width));
+  let local=coordinate-fixtureCellOrigin();
+  if(any(local<vec3i(0))||any(local>=vec3i(16))){return Owner(INVALID);}
+  let cell=currentRow*FIXTURE_CELLS_PER_ROW+u32(local.x+16*(local.y+16*local.z));
+  // Seed the frozen cell-indexed support cache lazily from this fixture's
+  // analytic field. Each invocation owns a disjoint cache, so the production
+  // geometric sampler reads exactly the field used by its face-support query.
+  let support=faceVelocitySupportAt(vec3i(floor(cellCenter(cell))));
+  let at=FACE_VELOCITY_SUPPORT+4u*cell;
+  state[at]=support.velocity.x;state[at+1u]=support.velocity.y;state[at+2u]=support.velocity.z;
+  return Owner(cell);
+}
 fn ownerCellAt(q:vec3i)->u32{_=q;return 0u;}
 fn incidenceBegin(cell:u32)->u32{_=cell;return 0u;}
 fn incidenceEnd(cell:u32)->u32{_=cell;return 1u;}
@@ -66,9 +97,12 @@ fn hasSolidBoundaries()->bool{return false;}
 fn clipBoundarySegment(start:vec3f,end:vec3f)->vec3f{_=start;return end;}
 fn sourceFaceVelocity()->u32{return 0u;}
 fn destinationFaceVelocity()->u32{return 12u;}
-fn rowTermOffset(row:u32)->u32{_=row;return 0u;}
-fn rowTermCount(row:u32)->u32{_=row;return 0u;}
-fn termCell(term:u32)->u32{_=term;return 0u;}
+fn sourceDensity()->u32{return 24u;}
+fn cm12ExtendedCellSelected(cell:u32)->bool{_=cell;return true;}
+fn transportSourceSamplingSpans(cell:u32,direct:bool)->vec3f{_=direct;return vec3f(cellMinimumWidth(cell));}
+fn rowTermOffset(row:u32)->u32{return 2u*row;}
+fn rowTermCount(row:u32)->u32{_=row;return 2u;}
+fn termCell(term:u32)->u32{return term;}
 fn cellBrick(cell:u32)->u32{_=cell;return 0u;}
 fn cachedRefinementPolicyTileScale(brick:u32)->u32{_=brick;return 1u;}
 fn cellMinimumWidth(cell:u32)->f32{_=cell;return width;}
@@ -82,15 +116,18 @@ fn faceVelocitySupportAt(q:vec3i)->FaceVelocitySupport{
   let collocated=velocity(center)*cos(3.14159265359*width/32.0);
   return FaceVelocitySupport(select(collocated,vec3f(3,0,0),front),vec3f(width),true,true,!front&&(!oneWet||q.x>=24));
 }
-${["sampleFaceVelocitySupport", "sampleFaceVelocitySupportAtSpans", "traceFaceDeparture",
-  "traceFaceDepartureAtSpans", "nativeTransportFaceAt", "sampleNativeTransportFace", "finishTransportFaceRow", "prepareTransportFaceRow"].map(production).join("\n")}
+${["effectiveTransportStencilAtSpansMode", "sampleFaceVelocitySupport", "sampleFaceVelocitySupportAtSpans", "traceFaceDeparture",
+  "traceFaceDepartureAtSpans", "nativeTransportFaceAt", "sampleNativeTransportFace", "finishTransportFaceRow", "transportFaceSupport", "transportFaceSamplingSpans", "prepareTransportFaceRow"].map(production).join("\n")}
 @compute @workgroup_size(12)
 fn main(@builtin(global_invocation_id)gid:vec3u){
   let row=gid.x;width=f32(1u<<(row%4u));front=row>=8u;oneWet=row>=4u;currentRow=row;
   state[row]=select(velocity(rowCenter(row)).x,0.0,front);
+  state[24u+2u*row]=select(1.0,0.0,front||oneWet);
+  state[25u+2u*row]=select(1.0,0.0,front);
   prepareTransportFaceRow(row);
 }`;
-    const values = await execute(device, fixture, 24);
+    const fixtureFloats=48+4*12*4096;
+    const values = await execute(device, fixture, fixtureFloats);
     console.log(JSON.stringify({ widths: [1, 2, 4, 8], before: [...values.slice(0, 4)], after: [...values.slice(12, 16)] }));
     for (let i = 0; i < 8; i++) assert.ok(Math.abs(values[i]! - values[12 + i]!) < 1e-6,
       `width ${1 << (i % 4)}: a zero-length characteristic must not dissipate the face mode`);
@@ -98,7 +135,7 @@ fn main(@builtin(global_invocation_id)gid:vec3u){
       "new dry receiver faces must acquire extended jet velocity, not retain their old zero");
     const brickFaces = await execute(device, fixture.replace(
       "fn rowKind(row:u32)->u32{_=row;return 0u;}",
-      "fn rowKind(row:u32)->u32{_=row;return 1u;}"), 24);
+      "fn rowKind(row:u32)->u32{_=row;return 1u;}"), fixtureFloats);
     for (let i = 0; i < 8; i++) assert.ok(Math.abs(brickFaces[i]! - brickFaces[12 + i]!) < 1e-6,
       `equal-width brick face ${i}: B1 must receive the same zero-time identity`);
     // A mixed port is located at the coarse patch center. Its finer positive
@@ -107,9 +144,9 @@ fn main(@builtin(global_invocation_id)gid:vec3u){
       "fn rowKind(row:u32)->u32{_=row;return 0u;}",
       "fn rowKind(row:u32)->u32{_=row;return 2u;}")
       .replace("fn cellMinimumWidth(cell:u32)->f32{_=cell;return width;}",
-        "fn cellMinimumWidth(cell:u32)->f32{_=cell;return .5*width;}")
+        "fn cellMinimumWidth(cell:u32)->f32{return select(width,.5*width,cell%2u==0u);}")
       .replace("vec3f(width),true,true,!front", "vec3f(select(width,.5*width,q.x>=24)),true,true,!front");
-    const mixedFaces = await execute(device, mixedFixture, 24);
+    const mixedFaces = await execute(device, mixedFixture, fixtureFloats);
     for (let i = 0; i < 8; i++) assert.ok(Math.abs(mixedFaces[i]! - mixedFaces[12 + i]!) < 1e-6,
       `mixed face ${i}: a zero-time coarse/fine port must retain its staggered value`);
     // Finite characteristics: a divergence-free transverse wave translated
@@ -136,9 +173,10 @@ fn main(@builtin(global_invocation_id)gid:vec3u){
   let row=gid.x;width=f32(1u<<(row%4u));currentRow=row;
   let dt=f32(row/4u)*width/6.0;
   p=Params(vec4u(128),vec4f(dt,.05,0,0),vec4u(0),vec4u(0));
+  state[24u+2u*row]=1.0;state[25u+2u*row]=1.0;
   prepareTransportFaceRow(row);
 }`;
-    const transported = await execute(device, moving, 24);
+    const transported = await execute(device, moving, fixtureFloats);
     for (let i = 0; i < 12; i++) {
       const width = 1 << (i % 4), travel = Math.floor(i / 4) / 2;
       const here = Math.sin(2 * Math.PI * (24 + .5 * width) / 32);

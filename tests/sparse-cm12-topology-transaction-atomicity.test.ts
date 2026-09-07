@@ -58,15 +58,15 @@ test("activation and retirement stage lifecycle intent without mutating accepted
   }
 });
 
-test("GPU-grown page-local leaves may validate same-rung retirement", () => {
+test("dynamic and fixed-rung authored leaves may validate same-rung retirement", () => {
   const validate = functionSource(wgsl, "validateCandidateResolution",
     "// All refinement is urgent");
   assert.match(validate,
-    /dynamicRetirement=brick>=CM12_WDR_INITIAL_LEAVES&&brickActive\(brick\)/);
-  assert.match(validate, /!candidateBrickActive\(brick\)/);
+    /lifecycleRetirement=brickActive\(brick\)&&!candidateBrickActive\(brick\)/);
+  assert.match(validate, /candidate==accepted&&\(brick<CM12_WDR_INITIAL_LEAVES/);
   assert.match(validate,
-    /!brickCandidatePlanningEnabled\(brick\)&&!constructionActivation\s*&&!dynamicRetirement/,
-    "page-local dynamic leaves must bypass only the template-slot early return");
+    /!brickCandidatePlanningEnabled\(brick\)&&!constructionActivation\s*&&!lifecycleRetirement/,
+    "membership-only retirement must bypass the template-slot early return");
 });
 
 test("fine-rung candidate transfer computes each parent mass correction once", () => {
@@ -218,7 +218,7 @@ test("same-active rerung uses the same staged transaction without lifecycle fiel
   const membership = functionSource(wgsl, "candidateBrickActive", "fn cellActive");
   assert.match(membership, /ACTIVITY_CANDIDATE_ACTIVE/);
   assert.match(membership,
-    /fn scheduledBrickActive\(brick:u32\)->bool\{return candidateBrickActive\(brick\);\}/);
+    /return select\(brickActive\(brick\),candidateBrickActive\(brick\),\s*topologyPreparationScheduledAt\(activityRecord\(brick\)\)\)/);
   const schedule = functionSource(wgsl, "scheduleTopologyPreparation",
     "fn candidateTopologyPageBase");
   assert.match(schedule, /candidateBrickActive\(brick\)!=brickActive\(brick\)/,

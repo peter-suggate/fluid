@@ -1150,12 +1150,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     let releaseGPULease: (() => void) | undefined;
     const renderer = new WebGPURenderWorkerClient(canvas, {
       onStatus: (status) => {
-        if (status.state === "lost" || status.state === "unavailable") {
+        if (status.state === "lost" || status.state === "unavailable" || status.state === "blocked") {
           if (status.state === "unavailable" && status.failure) diagnostics.set({ gpuStatus: status });
           running = false;
           queueMicrotask(() => { if (initializationStarted && !stopping && !stopped) void stopGPU(status.label); });
           return;
         }
+        if (stopping || stopped) return;
         const current = session.diagnostics.getState().gpuStatus;
         // The controller publishes the user's intent before the next render
         // can start expensive work. Preserve that context as detailed task
@@ -1240,9 +1241,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         : session.diagnostics.getState().gpuInfo?.simulationFailure;
       stopping = true;
       running = false;
-      session.runtime.getState().setRunState("paused");
+      simulation.setRunState("paused");
       cancelAnimationFrame(frame);
-      if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: "Stopping WebGPU; waiting for initialization and solver tasks to drain", resource: webGPUPlatformResourcePlugin } });
+      if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: `${label} — stopping WebGPU and draining pending work`, resource: webGPUPlatformResourcePlugin } });
       const pendingLease = leaseAcquisition;
       const releasedLabel = label.includes("device released") ? label : `${label}; device released — safe to close this tab`;
       const sceneState = session.scene.getState();
@@ -1306,7 +1307,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       void renderer.initialize().then(async () => {
       if (!alive || stopping || stopped) return;
       const status = session.diagnostics.getState().gpuStatus;
-      if (status.state === "lost" || status.state === "unavailable") {
+      if (status.state === "lost" || status.state === "unavailable" || status.state === "blocked") {
         await stopGPU(status.label);
         return;
       }

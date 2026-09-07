@@ -7,7 +7,7 @@ import { cloneScene, defaultScene } from "../lib/core/model";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
   "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassSolverOptions } from "../lib/methods/adaptive-mass/method";
+import { sparseCM12DawnDefaultOptions } from "../lib/harness/sparse-cm12-dawn-defaults";
 import { WebGPUAdaptiveMassSolver } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 
@@ -43,30 +43,34 @@ dawnTest("authored re-rung does not consume or overwrite world-growth pages",
         scene.fluid.initialCondition = "dam-break";
         scene.fluid.initialDamBreakDimensions_m = { x: 0.8, y: 0.8, z: 0.8 };
         scene.fluid.gravity_m_s2 = { x: 0, y: 0, z: 0 };
-        // This transfer oracle pins the legacy one-epoch coarsening policy.
-        const defaults = adaptiveMassSolverOptions({ selectorMode: "activity" });
+        scene.fluid.refinementRegions = [{ id: "whole-domain-rung",
+          rule: "minimum-cell-size", minimumCellSize_cells: 1, maximumCellSize_cells: 1,
+          min_m: { x: -1, y: -1, z: -1 }, max_m: { x: 1, y: 1, z: 1 } }];
+        const defaults = sparseCM12DawnDefaultOptions();
         solver = await WebGPUAdaptiveMassSolver.createAsync(
           device, scene, "balanced", undefined, {
-            ...defaults, topologyPageBudget, initialResolutionForQA: 8,
-            maximumMacroSpanBricks: 1, pressureIterations: 8,
-            // Isolate topology transfer from the iterative sharpening dose.
-            // Production scalar transforms retain their canonical suite gates.
-            gammaDiffusionEnabled: false, surfaceSharpeningEnabled: false,
-            activityPolicy: { ...defaults.activityPolicy!,
-              topologyCadenceSteps: 1, demoteEpochs: 1, prepareBricksPerFrame: 256 },
+            ...defaults, topologyPageBudget,
           }, () => {},
         );
         await solver.waitForSimulationReady();
         const initialDensity = (await solver.readDiagnosticFields()).density;
         for (let step = 1; step <= 3; step += 1) {
+          const edited = structuredClone(scene);
+          const width = step === 2 ? 1 : 8;
+          edited.fluid.refinementRegions![0] = { ...edited.fluid.refinementRegions![0]!,
+            minimumCellSize_cells: width, maximumCellSize_cells: width };
+          solver.applySceneUniforms(edited);
           assert.equal(solver.advanceTo(step * CM12_PAPER_DT_S, []), true);
           await device.queue.onSubmittedWorkDone();
+          await solver.assertSimulationHealthy();
           const after = await solver.readGPUActivityPolicy();
           assert.equal(after.faultFlags, 0);
           assert.equal(after.commitFailed, false);
           assert.equal(after.topologyPageAllocator.freePages, topologyPageBudget);
           assert.equal(after.topologyPageAllocator.allocationCancellations, 0);
-          assert.ok(after.bricks.some((brick) => brick.active && brick.acceptedResolution < 8));
+          assert.ok(after.bricks.filter((brick) => brick.active).every((brick) =>
+            8 * brick.spanBricks / brick.acceptedResolution === width),
+          "each authored edit must actually commit its requested rung");
           assert.ok(after.bricks.every((brick) => brick.topologyPage === undefined),
             "authored transfer must not borrow a dynamic WDR identity");
         }

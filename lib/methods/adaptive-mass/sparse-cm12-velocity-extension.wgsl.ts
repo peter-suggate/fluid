@@ -297,6 +297,14 @@ fn initializeVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
     1u<<(lane&31u));}
 }
 
+// Use only the opposite side of the physical subface. A mixed gradient
+// also contains same-side fine siblings; those are not extension neighbours.
+fn cm12VelocityExtensionNeighborWeight(row:u32,ownOrdinal:u32,otherOrdinal:u32)->f32{
+  let own=cm12HotRowTermCoefficient(row,ownOrdinal);
+  let other=cm12HotRowTermCoefficient(row,otherOrdinal);
+  return cm12PhysicalSubfaceArea(row,own,other)/max(rowDistance(row),1e-9);
+}
+
 @compute @workgroup_size(64)
 fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lane:u32){
@@ -349,7 +357,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
             if(neighbor==cm12ExtensionInvalid){continue;}
             if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
               >=cm12ExtensionDepth()){continue;}
-            let w=abs(cm12HotRowTermCoefficient(row,ordinal));
+            let w=cm12VelocityExtensionNeighborWeight(row,incidence.y,ordinal);
             velocity+=w*cm12EffectiveTransportVelocity(neighbor).xyz;
             weight+=w;continue;
           }
@@ -358,7 +366,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
             if(neighbor==cell||neighbor==cm12ExtensionInvalid){continue;}
             if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
               >=cm12ExtensionDepth()){continue;}
-            let w=abs(cm12HotRowTermCoefficient(row,ordinal));
+            let w=cm12VelocityExtensionNeighborWeight(row,incidence.y,ordinal);
             velocity+=w*cm12EffectiveTransportVelocity(neighbor).xyz;weight+=w;
           }
         }

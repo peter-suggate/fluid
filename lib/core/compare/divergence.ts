@@ -245,10 +245,10 @@ export function divergenceRows(a: PaneStats, b: PaneStats, clocks: DivergenceClo
       a: fixed(clocks.a?.step_s, 4),
       b: fixed(clocks.b?.step_s, 4),
       delta: inStep === undefined ? MISSING
-        : inStep ? "in step"
+        : clocks.dtDiffers ? "incompatible dt" : inStep ? "in step"
           : `${lag! < 0 ? "B" : "A"} behind ${Math.abs(lag!).toFixed(3)} s`,
       note: clocks.dtDiffers
-        ? "dt differs — the host runs at the smaller step and the coarser pane skips"
+        ? "dt differs — matching steps are required before advancing"
         : step === undefined ? "no step declared yet"
           : "one paired step, both panes",
       tone: clocks.dtDiffers || inStep === false ? "warn" : "neutral",

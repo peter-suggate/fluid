@@ -1,6 +1,7 @@
 "use client";
+import { hostTransportBlockReason, hostTransportFailure } from "../lib/core/simulation/host-transport-status";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { shellCompareStore, startCompareSync } from "../lib/core/compare/compare-model";
 import { COMPARE_ADOPTIONS, SECOND_PANE_ID } from "../lib/core/compare/compare-mode";
 import { createPaneSession, type PaneSession } from "../lib/core/session/session";
@@ -57,6 +58,18 @@ export function CompareHost() {
   const active = compare.active;
   const [sessionB] = useState(paneBSession);
   const [splitFraction, setSplitFraction] = useState(0.5);
+  const subscribeTransport = useCallback((notify: () => void) => {
+    const panes = active ? [sessionA, sessionB] : [sessionA];
+    const unsubscribes = panes.flatMap((pane) => [pane.scene.subscribe(notify), pane.method.subscribe(notify), pane.diagnostics.subscribe(notify)]);
+    return () => unsubscribes.forEach((unsubscribe) => unsubscribe());
+  }, [active, sessionA, sessionB]);
+  const transportBlock = useSyncExternalStore(subscribeTransport,
+    () => hostTransportBlockReason(active ? [sessionA, sessionB] : [sessionA]), () => undefined);
+  const transportFailure = useSyncExternalStore(subscribeTransport,
+    () => hostTransportFailure(active ? [sessionA, sessionB] : [sessionA]), () => undefined);
+  useEffect(() => {
+    if (transportFailure) simulation.setRunState("paused");
+  }, [transportFailure]);
   const shellRef = useRef<HTMLElement>(null);
   const ghostRef = useRef<HTMLDivElement>(null);
 
@@ -167,8 +180,8 @@ export function CompareHost() {
           <SceneOverlay />
         </div>
       </div>
-      <SimulationStopPanel sessions={active ? [sessionA, sessionB] : [sessionA]} />
-      <TransportBar />
+      <SimulationStopPanel sessions={active ? [sessionA, sessionB] : [sessionA]} message={transportFailure} />
+      <TransportBar hostBlockReason={transportBlock} />
       <RecordingPlaybackModal />
     </main>
   );

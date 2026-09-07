@@ -2681,6 +2681,13 @@ button:hover .iso-water-side { fill-opacity: .26; }
   .work-progress-meter[data-indeterminate] progress { opacity: 0; }
 }
 
+.transport-failure { position: absolute; z-index: 40; bottom: 76px; left: 50%; transform: translateX(-50%); width: min(640px, 90%); padding: 16px 20px; border: 1px solid var(--amber-line); border-radius: 12px; background: var(--overlay); color: var(--ink); }
+.transport-failure strong { color: var(--amber); }
+.transport-failure p { margin: 8px 0; }
+.transport-failure small { color: var(--muted); }
+.transport-failure details { margin-top: 8px; }
+.transport-failure pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+
 .simulation-stop-panel { position: absolute; z-index: 40; bottom: 76px; left: 50%; transform: translateX(-50%); width: min(640px, 90%); max-height: calc(100% - 120px); overflow: auto; padding: 16px 20px; border: 1px solid var(--amber-line); border-radius: 12px; background: var(--overlay); color: var(--ink); }
 .simulation-stop-panel strong { color: var(--amber); }
 .simulation-stop-panel p { margin: 8px 0; }

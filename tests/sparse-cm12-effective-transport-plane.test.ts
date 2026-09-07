@@ -48,27 +48,21 @@ test("the effective vec4 plane is a VEX product, never transport materialization
   assert.doesNotMatch(sample, /state\[/);
 });
 
-test("transport holds a scale-invariant source lattice while sharpening stays continuous", () => {
-  const stencil = functionSource(wgsl, "effectiveTransportStencilAtSpans",
-    "${topologyEffectsEntries}");
-  assert.match(stencil, /let spans=max\(vec3f\(1\.0\),inputSpans\)/);
-  assert.doesNotMatch(stencil, /cm12TeiOwnerAtFine[\s\S]*widths/);
-
-  const velocity = functionSource(wgsl, "sampleEffectiveTransportVelocityAtSpans",
+test("scalar and cached velocity consumers share physical dual-cell interpolation", () => {
+  const stencil = functionSource(wgsl, "effectiveTransportStencilAtSpansMode",
+    "fn transportSourceSamplingSpans");
+  assert.match(stencil, /cellCenter\(donor\)/);
+  assert.match(stencil, /cellWidths\(probe\)/);
+  const velocity = functionSource(wgsl, "sampleEffectiveTransportVelocityAtSpansMode",
     "fn traceEffectiveTransportCharacteristic");
-  assert.match(velocity, /let spans=max\(vec3f\(1\.0\),spansInput\)/);
-  const characteristic = functionSource(wgsl, "traceEffectiveTransportCharacteristic",
-    "fn traceEffectiveTransportDeparture");
-  assert.match(characteristic,
-    /sampleEffectiveTransportVelocityAtSpansMode\(midpoint,spans,direct\)/);
-
+  assert.match(velocity, /effectiveTransportStencilAtSpansMode\(position,spansInput,direct\)/);
+  const cachedVelocity = functionSource(wgsl, "sampleFaceVelocitySupportAtSpans",
+    "fn traceFaceDeparture");
+  assert.match(cachedVelocity, /effectiveTransportStencilAtSpansMode\(position,spans,true\)/);
   const sharpeningDensity = functionSource(wgsl, "sampleSharpeningDensity",
     "fn sampleSharpeningField");
-  assert.match(sharpeningDensity, /let spans=vec3f\(1\.0\)/);
-  assert.match(sharpeningDensity,
-    /let atUpper=select\(vec3(?:b|<bool>)\(false\),clamped>=upper,hasInteriorInterval\)/);
-  assert.match(sharpeningDensity, /lower=select\(lower,lower-vec3i\(1\),atUpper\)/);
-  assert.match(sharpeningDensity, /fraction=select\(fraction,vec3f\(1\.0\),atUpper\)/);
+  assert.match(sharpeningDensity, /effectiveTransportStencilAtSpansMode/);
+  assert.match(sharpeningDensity, /mirrorSharpeningSampleToWorld\(position\)/);
   const sharpeningField = functionSource(wgsl, "sampleSharpeningField",
     "fn traceSharpeningMass");
   assert.match(sharpeningField,
@@ -95,9 +89,11 @@ test("fixed-point remainders remain at their source, independent of traversal or
 
   const capacityScatter = functionSource(wgsl, "scatterDensityCapacityRepair",
     "fn finalizeDensityCapacityRepair");
-  assert.match(capacityScatter,
-    /excessMass\*cm12PhysicalMassFixedScale\(\)/);
-  assert.match(capacityScatter, /let distributed=share\*neighborCount/);
+  const capacityMass = functionSource(wgsl, "densityCapacityRepairMass",
+    "fn densityCapacityRepairArea");
+  assert.match(capacityMass, /cellVolume\(cell\)\*cm12PhysicalMassFixedScale\(\)/);
+  assert.match(capacityScatter, /cm12PhysicalSubfaceArea/);
+  assert.match(capacityScatter, /distributed\+=share/);
   assert.match(capacityScatter,
     /atomicAdd\(&conditioning\[plane\*p\.counts\.x\+cell\],-distributed\)/);
   assert.doesNotMatch(capacityScatter, /lastNeighbor/);
@@ -161,7 +157,7 @@ test("region-equivalent face transport scales the shared cache without taxing de
     /if\(hardRegionCaps\)\{[\s\S]*atomicStore\(&activity\[activityRecord\(brick\)\+8u\],min\(required,gradingCap\)\)/,
     "the globally closed hard floor must remain authoritative");
   assert.match(closeFaces,
-    /neighbor=cm12WorldOwnerAt\(coordinate\+directions\[side\]\);[\s\S]*if\(neighbor==INVALID\)\{continue;\}[\s\S]*2u\*cachedRefinementGradingCap\(neighbor\)/,
+    /neighbor=cm12WorldOwnerAt\(candidateFaceNeighborCoordinate\(brick,side\)\);[\s\S]*if\(neighbor==INVALID\)\{continue;\}[\s\S]*2u\*cachedRefinementGradingCap\(neighbor\)/,
     "inactive pre-catalogued halo leaves must grade the first wet activation");
   const scheduler = functionSource(wgsl, "scheduleTopologyPreparation",
     "fn candidateTopologyPageBase");

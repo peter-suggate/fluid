@@ -14,6 +14,7 @@ import {
   sceneInitialLiquidVolumes,
 } from "../../core/initial-fluid";
 import type { SceneDescription } from "../../core/model";
+import { initialHeightFieldRange } from "../../core/initial-height-field";
 import {
   clampRefinementRegionCellSize,
   refinementRegionCellBounds,
@@ -1192,6 +1193,7 @@ function hierarchicalTankFillBricks(
 ): SparseAdaptiveMassBrick[] | undefined {
   if (scene.systems?.fluid === false) return [];
   if (scene.fluid.initialCondition !== "tank-fill"
+    || scene.fluid.initialHeightField
     || initialFluidBrickCoordinates(scene, dimensions, scene.voxelDomain.brickSize_cells)
     || sceneInitialLiquidVolumes(scene).length > 0) {
     return undefined;
@@ -1428,7 +1430,12 @@ function candidateInitialBrickCoordinates(
   // local dam contributes only its own bounded box.
   if (!authored) {
     if (scene.fluid.initialCondition === "tank-fill") {
-      addNormalizedBounds([0, 0, 0], [1, scene.container.fillFraction, 1]);
+      const c = scene.container;
+      const topFraction = scene.fluid.initialHeightField
+        ? initialHeightFieldRange(scene.fluid.initialHeightField,
+          -c.width_m / 2, c.width_m / 2, -c.depth_m / 2, c.depth_m / 2)[1] / c.height_m
+        : c.fillFraction;
+      addNormalizedBounds([0, 0, 0], [1, Math.min(1, topFraction), 1]);
     } else {
       const dam = sceneDamBreakBox(scene);
       addNormalizedBounds([dam.min.x, dam.min.y, dam.min.z],

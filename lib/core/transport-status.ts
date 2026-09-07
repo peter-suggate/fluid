@@ -83,7 +83,7 @@ export function transportWorkStatus(
     };
   }
   if (gpuInfo?.topologyGenerationError) {
-    return { label: "Resolution update deferred", state: "waiting", detail: gpuInfo.topologyGenerationError };
+    return { label: "Resolution update failed", state: "error", detail: gpuInfo.topologyGenerationError };
   }
   if (gpuInfo?.topologyGenerationDeferred) {
     return {

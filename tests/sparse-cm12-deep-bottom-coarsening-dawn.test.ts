@@ -152,15 +152,7 @@ dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
       max_m: { x: 0.5 * scene.container.width_m, y: 1.3,
         z: 0.5 * scene.container.depth_m },
     }];
-    const values = {
-      ...adaptiveMassMethod.presetFor("balanced"),
-      resolutionMode: "adaptive",
-      brickFineResolution: "8",
-      presentationPageResolution: "8",
-      surfaceFineRings: 1,
-      timeStep: "paper",
-      secondaryParticles: "off",
-    };
+    const values = resolveMethodValues(adaptiveMassMethod, "balanced", {});
     solver = await adaptiveMassMethod.createSolverAsync!(
       device, scene, "balanced", values, undefined, () => {},
     ) as WebGPUAdaptiveMassSolver;
@@ -170,6 +162,7 @@ dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
     const samples: StepSample[] = [];
     const sample = async (step: number) => {
       await device!.queue.onSubmittedWorkDone();
+      await solver!.assertSimulationHealthy();
       const [activity, fields] = await Promise.all([
         solver!.readGPUActivityPolicy(),
         solver!.readDiagnosticFields(),
@@ -271,9 +264,8 @@ dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
     assert.equal(offsetUI.ui.gridOverlayAxis, "volume");
     assert.equal(offsetUI.ui.gridOverlayMode, "structure");
     const offsetValues = resolveMethodValues(adaptiveMassMethod,
-      offsetUI.quality, { ...offsetUI.overrides[offsetUI.methodId], selectorMode: "activity" });
-    // Preserve the legacy B4 reset-waterline oracle; coarse-first has a separate B1 gate.
-    assert.equal(offsetValues.selectorMode, "activity");
+      offsetUI.quality, {});
+    assert.equal(offsetValues.selectorMode, "coarse-first");
     assert.equal("resolutionMode" in offsetValues, false);
     const offsetSolver = await adaptiveMassMethod.createSolverAsync!(
       device, offsetUI.scene, offsetUI.quality, offsetValues, undefined,
@@ -286,8 +278,8 @@ dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
         && brick.coordinate[1] === 1);
       assert.equal(resetSurface.length, 8,
         "the exact UI reset frame must contain all eight surface pages");
-      assert.ok(resetSurface.every((brick) => brick.acceptedResolution === 4),
-        `the exact UI reset frame must present its calm surface at B4: ${
+      assert.ok(resetSurface.every((brick) => brick.acceptedResolution === 1),
+        `the exact UI reset frame must present its calm surface at B1: ${
           resetSurface.map((brick) => `${brick.coordinate.join(",")}=${
             brick.acceptedResolution}`).join("; ")}`);
       assert.ok(resetSurface.every((brick) => (brick.reasons & 64) !== 0),
@@ -304,6 +296,7 @@ dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
       for (let step = 1; step <= 16; step += 1) {
         assert.equal(offsetSolver.advanceTo(step * CM12_PAPER_DT_S, []), true);
         await device.queue.onSubmittedWorkDone();
+        await offsetSolver.assertSimulationHealthy();
         const snapshot = await offsetSolver.readGPUActivityPolicy();
         const surfaceLayer = snapshot.bricks.filter((brick) => brick.active
           && brick.coordinate[1] === 1);
@@ -311,9 +304,9 @@ dawnTest("Sparse CM12 publishes coarsening-biased hydrostatic ladders", {
           && brick.coordinate[1] === 2);
         assert.equal(surfaceLayer.length, 8,
           `large-offset surface layer changed membership at step ${step}`);
-        assert.ok(surfaceLayer.every((brick) => brick.acceptedResolution === 4
-          && brick.plannedResolution === 4),
-        `large-offset surface did not retain B4 at step ${step}: ${
+        assert.ok(surfaceLayer.every((brick) => brick.acceptedResolution === 1
+          && brick.plannedResolution === 1),
+        `large-offset surface did not retain B1 at step ${step}: ${
           surfaceLayer.map((brick) => `${brick.coordinate.join(",")}=${
             brick.acceptedResolution}/${brick.plannedResolution}/p${
             brick.planReasons}/r${brick.reasons}/s${brick.scoreByte}`).join("; ")}`);

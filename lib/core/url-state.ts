@@ -66,6 +66,7 @@ const sceneQueryPaths = [
   "fluid.gravity_m_s2.y",
   "fluid.gravity_m_s2.z",
   "fluid.initialCondition",
+  "fluid.initialHeightField",
   "fluid.inflow",
   // Analytic terrain round-trips as an atomic blob. A sculpted terrain grid is
   // far too large for a URL and belongs to the scene library; painted water was
@@ -89,6 +90,7 @@ export type QueryState = {
   scene: SceneDescription;
   view?: ShellView;
   ui: UIQueryState;
+  topologyFrozen: boolean;
 };
 
 export type UIQueryState = {
@@ -646,6 +648,7 @@ export function parseQueryState(search: string): QueryState {
     scene: validateScene(scene).length === 0 ? scene : baseScene,
     view: shellViewFromQuery(search),
     ui: uiQueryState(query, preset),
+    topologyFrozen: query.get("freezeTopology") === "1",
   };
 }
 
@@ -733,7 +736,7 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth" || key === OVERLAY_QUERY_KEY
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode" || key === "lensPhase"
-    || isCompareQueryKey(key)
+    || key === "freezeTopology" || isCompareQueryKey(key)
     || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === SEEDS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoRefinementDepth" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
@@ -746,11 +749,13 @@ export function serializeQueryState(
   uiState: SerializableUIState = useUIStore.getInitialState(),
   shellState: SerializableShellState = { view: "studio" },
   preparedSceneEntries?: readonly SceneQueryEntry[],
+  runtimeState: { topologyFrozen: boolean } = { topologyFrozen: false },
 ): string {
   const query = new URLSearchParams(search);
   for (const key of [...query.keys()]) if (isManagedKey(key)) query.delete(key);
 
   query.set("scene", sceneState.presetId);
+  if (runtimeState.topologyFrozen) query.set("freezeTopology", "1");
   const preset = getScenePreset(sceneState.presetId);
   const profile = preset.methodProfile;
   const baselineMethodId = defaultMethodId();
@@ -845,6 +850,7 @@ export function applyQueryStateToSession(session: PaneSession, search: string): 
   });
   session.scene.getState().setScene(state.scene, state.presetId);
   session.ui.setState(state.ui);
+  session.runtime.getState().setTopologyFrozen(state.topologyFrozen);
 }
 
 /**
@@ -862,7 +868,7 @@ export function replaceQueryStateUrl(
   // `b.*` diff beside it. Today there is one pane and it is A.
   session: PaneSession = resolveSession(),
 ) {
-  const search = serializeQueryState(window.location.search, session.scene.getState(), session.method.getState(), session.ui.getState(), useShellStore.getState(), preparedSceneEntries);
+  const search = serializeQueryState(window.location.search, session.scene.getState(), session.method.getState(), session.ui.getState(), useShellStore.getState(), preparedSceneEntries, session.runtime.getState());
   const next = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next !== current) window.history.replaceState(window.history.state, "", next);
@@ -870,7 +876,7 @@ export function replaceQueryStateUrl(
 
 /** The canonical location for the document currently held by the stores. */
 export function currentScenePageUrl(session: PaneSession = resolveSession()): string {
-  const search = serializeQueryState(window.location.search, session.scene.getState(), session.method.getState(), session.ui.getState(), { view: "studio" });
+  const search = serializeQueryState(window.location.search, session.scene.getState(), session.method.getState(), session.ui.getState(), { view: "studio" }, undefined, session.runtime.getState());
   return `/scene${search ? `?${search}` : ""}`;
 }
 
@@ -932,8 +938,9 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
     session.method.setState({ methodId: interactiveMethodId(state.methodId), quality: state.quality, overrides: state.overrides });
     session.scene.getState().setScene(state.scene, state.presetId);
     session.ui.setState(state.ui);
-    applyingUrl = false;
     onHydrated(state.presetId);
+    session.runtime.getState().setTopologyFrozen(state.topologyFrozen);
+    applyingUrl = false;
     writeUrl();
   };
 
@@ -942,6 +949,9 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
   const stopMethod = session.method.subscribe(scheduleWrite);
   const stopScene = session.scene.subscribe(scheduleWrite);
   const stopUI = session.ui.subscribe(scheduleWrite);
+  const stopRuntime = session.runtime.subscribe((state, previous) => {
+    if (state.topologyFrozen !== previous.topologyFrozen) scheduleWrite();
+  });
   // Search text and section disclosure are intentionally session-only; only
   // the layer in front belongs in the address bar.
   const stopShell = useShellStore.subscribe((shell, previous) => {
@@ -957,6 +967,7 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
     stopMethod();
     stopScene();
     stopUI();
+    stopRuntime();
     stopShell();
     window.removeEventListener("popstate", hydrateScenePage);
   };

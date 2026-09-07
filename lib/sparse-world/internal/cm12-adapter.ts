@@ -132,11 +132,15 @@ export interface CM12SparseWorldFactoryConfig {
  */
 export interface CM12SparseWorldRuntime {
   readonly topologyPreparationPending: boolean;
+  /** Frozen interactions wait for complete support before applying their dose. */
+  readonly pendingLiquidInteractions: boolean;
+  readonly pendingLiquidInteractionRevision: number;
+  completePendingLiquidInteractions(): void;
   /** Cancel an in-flight replacement when holding the current topology. */
   cancelTopologyPreparation(): void;
   readonly generationPlanningRequired: boolean;
   needsDetailedGenerationPlanning(maximumSpan: number, demoteEpochs: number,
-    finestTravel: number): Promise<boolean>;
+    finestTravel: number, frozenFrontierOnly?: boolean): Promise<boolean>;
   readonly generationPreparationMaximumSliceMs: number;
   readonly generationPreparationMaximumSliceOperation?: string;
   readonly generationPublicationMaximumMs: number;
@@ -181,6 +185,8 @@ export interface CM12SparseWorldRuntime {
 export interface CM12SparseWorldDeveloperTrace {
   setStageLimitForQA(stage: Parameters<
     WebGPUSparseCM12Resident["setStageLimitForQA"]>[0]): void;
+  setCandidatePhaseLimitForQA(phase: Parameters<
+    WebGPUSparseCM12Resident["setCandidatePhaseLimitForQA"]>[0]): void;
   setActivityPhaseLimitForQA(phase: Parameters<
     WebGPUSparseCM12Resident["setActivityPhaseLimitForQA"]>[0]): void;
   setTransportPhaseLimitForQA(phase: Parameters<
@@ -297,14 +303,14 @@ export class CM12ResidentGeneration {
         if (candidate.resident === accepted) throw new Error("CM12 replacement must own isolated storage");
         await candidate.resident.waitForSimulationPipelines();
         if (this.disposed || this.revision !== revision) {
-          throw new Error("CM12 scene changed while its resident generation was being prepared");
+          throw new DOMException("CM12 scene changed while its resident generation was being prepared", "AbortError");
         }
         this.committing = true;
         const publicationStarted = performance.now();
         try { await candidate.commit(); }
         finally { this.maximumPublicationMs = Math.max(this.maximumPublicationMs, performance.now() - publicationStarted); }
         if (this.disposed || this.revision !== revision)
-          throw new Error("CM12 scene changed during resident publication");
+          throw new DOMException("CM12 scene changed during resident publication", "AbortError");
         this.current = candidate.resident;
         candidate.disposePreparation();
         this.publications += 1;
@@ -355,6 +361,46 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   private solidEnvironment: SceneDescription["environment"];
   private solidScenery: SceneDescription["scenery"];
   private rigidBodies: SceneDescription["rigidBodies"];
+  private readonly deferredLiquidInteractions: {
+    interaction: SparseWorldFluidEdit; configuration: CM12SparseWorldStepConfiguration;
+  }[] = [];
+  private liquidInteractionRevision = 0;
+  get pendingLiquidInteractions(): boolean { return this.deferredLiquidInteractions.length > 0; }
+  get pendingLiquidInteractionRevision(): number { return this.liquidInteractionRevision; }
+
+  completePendingLiquidInteractions(): void {
+    if (this.destroyed) return;
+    while (this.deferredLiquidInteractions.length > 0) {
+      const pending = this.deferredLiquidInteractions[0]!;
+      this.encodeInteraction(pending.interaction, pending.configuration, "apply");
+      this.deferredLiquidInteractions.shift();
+    }
+  }
+
+  private encodeInteraction(interaction: SparseWorldFluidEdit,
+    configuration: CM12SparseWorldStepConfiguration,
+    phase: "complete" | "prepare" | "apply"): void {
+    const inverseCell = 1 / configuration.finestCellSize_m;
+    const origin = configuration.origin_m ?? [0, 0, 0];
+    const encoder = this.options.gpuDevice.createCommandEncoder({
+      label: `Sparse-world liquid interaction ${phase}`,
+    });
+    if (interaction.kind === "liquid-ellipsoid") {
+      this.resident.encodeLiquidInjection(encoder, configuration.finestCellSize_m,
+        interaction.center_m.map((value, axis) =>
+          (value - origin[axis]!) * inverseCell) as [number, number, number],
+        interaction.radii_m.map(value => value * inverseCell) as [number, number, number],
+        configuration.activityPolicy, phase);
+    } else {
+      this.resident.encodeLiquidJetInjection(encoder, configuration.finestCellSize_m,
+        interaction.outlet_m.map((value, axis) =>
+          (value - origin[axis]!) * inverseCell) as [number, number, number],
+        interaction.radius_m * inverseCell,
+        interaction.velocity_m_s.map(value => value * inverseCell) as [number, number, number],
+        interaction.dt, configuration.activityPolicy, phase);
+    }
+    this.options.gpuDevice.queue.submit([encoder.finish()]);
+  }
 
   constructor(
     private readonly generationState: CM12ResidentGeneration,
@@ -427,33 +473,12 @@ class AdoptedCM12SparseWorld implements SparseWorld {
           dt: 0.004,
           gravity: [0, 0, 0],
         }) : this.options.numerics;
-      const inverseCell = 1 / configuration.finestCellSize_m;
-      const origin = configuration.origin_m ?? [0, 0, 0];
-      const encoder = this.options.gpuDevice.createCommandEncoder({
-        label: "Sparse-world liquid interaction",
-      });
-      if (interaction.kind === "liquid-ellipsoid") {
-        this.resident.encodeLiquidInjection(
-          encoder,
-          configuration.finestCellSize_m,
-          interaction.center_m.map((value, axis) =>
-            (value - origin[axis]!) * inverseCell) as [number, number, number],
-          interaction.radii_m.map((value) => value * inverseCell) as
-            [number, number, number],
-        );
-      } else {
-        this.resident.encodeLiquidJetInjection(
-          encoder,
-          configuration.finestCellSize_m,
-          interaction.outlet_m.map((value, axis) =>
-            (value - origin[axis]!) * inverseCell) as [number, number, number],
-          interaction.radius_m * inverseCell,
-          interaction.velocity_m_s.map((value) => value * inverseCell) as
-            [number, number, number],
-          interaction.dt,
-        );
+      const deferred = configuration.activityPolicy?.freezeTopology === true;
+      this.encodeInteraction(interaction, configuration, deferred ? "prepare" : "complete");
+      if (deferred) {
+        this.deferredLiquidInteractions.push({ interaction, configuration });
+        this.liquidInteractionRevision += 1;
       }
-      this.options.gpuDevice.queue.submit([encoder.finish()]);
       this.generation += 1;
       this.state = "running";
       return Object.freeze({
@@ -562,6 +587,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.deferredLiquidInteractions.length = 0;
     this.generationState.destroy();
   }
 
@@ -617,13 +643,17 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   private get resident() { return this.generationState.current; }
   get acceptedAtlas() { return this.resident.acceptedAtlas; }
   get generationPlanningRequired() { return this.resident.needsGenerationPlanning; }
-  needsDetailedGenerationPlanning(maximumSpan: number, demoteEpochs: number, finestTravel: number) {
-    return this.resident.needsDetailedGenerationPlanning(maximumSpan, demoteEpochs, finestTravel);
+  needsDetailedGenerationPlanning(maximumSpan: number, demoteEpochs: number, finestTravel: number,
+    frozenFrontierOnly = false) {
+    return this.resident.needsDetailedGenerationPlanning(maximumSpan, demoteEpochs, finestTravel, frozenFrontierOnly);
   }
   get generationPreparationMaximumSliceMs() { return this.resident.generationPreparationMaximumSliceMs; }
   get generationPreparationMaximumSliceOperation() { return this.resident.generationPreparationMaximumSliceOperation; }
   get generationPublicationMaximumMs() { return this.generationState.maximumPublicationMs; }
   get topologyPreparationPending() { return this.generationState.pending; }
+  get pendingLiquidInteractions() { return this.world.pendingLiquidInteractions; }
+  get pendingLiquidInteractionRevision() { return this.world.pendingLiquidInteractionRevision; }
+  completePendingLiquidInteractions() { this.world.completePendingLiquidInteractions(); }
   cancelTopologyPreparation() { this.generationState.changed(); }
   prepareResidentGeneration(build: (accepted: WebGPUSparseCM12Resident, signal: AbortSignal) => Promise<Awaited<ReturnType<WebGPUSparseCM12Resident["prepareGenerationReplacement"]>> | undefined>) {
     return this.generationState.prepare(build);
@@ -631,6 +661,7 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   constructor(
     private readonly generationState: CM12ResidentGeneration,
     private readonly readiness: CM12ResidentLibraryReadiness,
+    private readonly world: AdoptedCM12SparseWorld,
   ) {}
 
   waitForSimulationPipelines() { return this.readiness.ready; }
@@ -672,6 +703,10 @@ class AdoptedCM12SparseWorldDeveloperTrace implements CM12SparseWorldDeveloperTr
   setStageLimitForQA(stage: Parameters<
     WebGPUSparseCM12Resident["setStageLimitForQA"]>[0]) {
     this.resident.setStageLimitForQA(stage);
+  }
+  setCandidatePhaseLimitForQA(phase: Parameters<
+    WebGPUSparseCM12Resident["setCandidatePhaseLimitForQA"]>[0]) {
+    this.resident.setCandidatePhaseLimitForQA(phase);
   }
   setActivityPhaseLimitForQA(phase: Parameters<
     WebGPUSparseCM12Resident["setActivityPhaseLimitForQA"]>[0]) {
@@ -883,7 +918,7 @@ export async function createCM12SparseWorld(
     rigidExchange: config.rigid?.exchange,
     initialScene: config.scene,
   }, sparseDevice);
-  const runtime = new AdoptedCM12SparseWorldRuntime(generationState, readiness);
+  const runtime = new AdoptedCM12SparseWorldRuntime(generationState, readiness, world);
   return Object.freeze({
     device: sparseDevice,
     world,

@@ -1,4 +1,4 @@
-import { cloneScene, defaultCamera, defaultScene, DEFAULT_GPU_CPU_TIMESTEP_RATIO, type CameraState, type SceneDescription } from "./model";
+import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
 import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
 import { createMassConservingFigure9DamBreak, createPaperScenario } from "./paper-scenarios";
 import { CM12_FIGURES, cm12Camera, cm12Grid, cm12MethodProfile, cm12Scene } from "./cm12-paper-scenes";
@@ -13,6 +13,7 @@ import {
   HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
 } from "./hero-garden-stress-scene";
 import { studioStageCamera } from "./studio-stage-scene";
+import { createStationaryBowlScene } from "./stationary-bowl-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
 import type { EnvironmentId } from "./environments";
@@ -86,8 +87,8 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
  * Every scene that runs a CM12 lane runs it at the paper's 1/30 s, this one
  * included. Sec. 3.5 sharpening only balances transport diffusion at that
  * per-step dose, so a scene-step profile was asking the gate to certify a
- * front the shipped method never propagates. The scene keeps its authored
- * 4 ms `fixedDt_s` for the other methods that open it; the A/B tool in
+ * front the shipped method never propagates. The scene defaults to
+ * 1/30 s for every method that opens it; the A/B tool in
  * tools/run-sparse-cm12-long-dam-ab-dawn.ts still opts into the scene step
  * explicitly, which is what a matched-dt comparison lane is for.
  */
@@ -194,7 +195,7 @@ function createExternalVoxelPoolTransferScene(sceneId: string): SceneDescription
   delete scene.fluid.inflow;
 
   scene.rigidBodies = [];
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   return scene;
 }
 
@@ -672,7 +673,7 @@ export function createPowerFillScene(liquidCells: PowerFillLiquidCells): SceneDe
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
   scene.fluid.surfaceTension_N_m = 0;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
@@ -752,14 +753,14 @@ export function createCoarseFirstPoolImpactScene(): SceneDescription {
   scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
   scene.fluid.initialCondition = "tank-fill";
   scene.fluid.initialLiquidVolumes = [
-    { shape: "sphere", center_m: { x: 0, y: 3.65, z: 0 }, radius_m: 0.5 },
+    { shape: "sphere", center_m: { x: 0, y: 3.65, z: 0 }, radius_m: 1.0 },
   ];
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
   scene.fluid.surfaceTension_N_m = 0;
   scene.fluid.dynamicViscosity_Pa_s = 0;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 60;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   return scene;
 }
 
@@ -769,7 +770,7 @@ export function createCoarseFirstPoolImpactHalfScene(): SceneDescription {
   scene.sceneId = "coarse-first-pool-impact-half";
   scene.container = { ...scene.container, width_m: 3.2, height_m: 2.4, depth_m: 3.2 };
   scene.fluid.initialLiquidVolumes = [
-    { shape: "sphere", center_m: { x: 0, y: 1.825, z: 0 }, radius_m: 0.25 },
+    { shape: "sphere", center_m: { x: 0, y: 1.825, z: 0 }, radius_m: 0.5 },
   ];
   return scene;
 }
@@ -780,7 +781,7 @@ export function createCoarseFirstPoolImpactQuarterScene(): SceneDescription {
   scene.sceneId = "coarse-first-pool-impact-quarter";
   scene.container = { ...scene.container, width_m: 1.6, height_m: 1.2, depth_m: 1.6 };
   scene.fluid.initialLiquidVolumes = [
-    { shape: "sphere", center_m: { x: 0, y: 0.9125, z: 0 }, radius_m: 0.125 },
+    { shape: "sphere", center_m: { x: 0, y: 0.9125, z: 0 }, radius_m: 0.25 },
   ];
   return scene;
 }
@@ -816,7 +817,7 @@ export function createTinyHydrostaticScene(): SceneDescription {
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   return scene;
 }
 
@@ -846,7 +847,7 @@ export function createLargeHydrostaticScene(): SceneDescription {
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   return scene;
 }
 
@@ -878,7 +879,7 @@ export function createMinimalPowerDamBreakScene(): SceneDescription {
   delete scene.fluid.initialBrickSeedsAdditive;
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
@@ -919,7 +920,7 @@ export function createSymmetricExpansionScene(): SceneDescription {
   // damped scene parameter that the reduced backend does not consume.
   scene.fluid.dynamicViscosity_Pa_s = 0;
   scene.fluid.surfaceTension_N_m = 0;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
@@ -1006,7 +1007,7 @@ export function createSparseCM12LongDamBreakScene(): SceneDescription {
   scene.voxelDomain = { finestCellSize_m: 0.0125, brickSize_cells: 8 };
   scene.fluid.initialDamBreakDimensions_m = { x: 0.4, y: 0.5, z: 0.4 };
   delete scene.fluid.initialDamBreakOrigin_m;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
   return scene;
 }
@@ -1432,7 +1433,7 @@ export function createPowerDropletScene(edgeCells: PowerDropletEdgeCells): Scene
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
   scene.fluid.surfaceTension_N_m = 0;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   return scene;
 }
 
@@ -1456,7 +1457,7 @@ export function createPowerHybridDeepOceanScene(): SceneDescription {
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   return scene;
 }
 
@@ -1523,7 +1524,7 @@ function createFreeFallDropScene(id: FreeFallDropSceneId): SceneDescription {
   delete scene.fluid.initialBrickSeedsAdditive;
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   return scene;
 }
 
@@ -1559,7 +1560,7 @@ export function createRigidCouplingOracleScene(id: RigidCouplingOracleSceneId): 
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
   delete scene.terrain;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   const radius = id === "rigid-float" ? 0.15 : 0.10;
   scene.rigidBodies = [{
     id: `${id}-sphere`, name: id, shape: "sphere",
@@ -1940,7 +1941,7 @@ function createSparseCM12LadderBox(
   scene.fluid.dynamicViscosity_Pa_s = 0;
   scene.fluid.surfaceTension_N_m = 0;
   if (options.gravity === false) scene.fluid.gravity_m_s2 = { x: 0, y: 0, z: 0 };
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   return scene;
 }
 
@@ -2367,7 +2368,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       // pressure methods are the only variables in the comparison.
       scene.fluid.surfaceTension_N_m = 0;
       scene.numerics.fixedDt_s = 1 / 30;
-      scene.numerics.maxDt_s = scene.numerics.fixedDt_s * DEFAULT_GPU_CPU_TIMESTEP_RATIO;
+      scene.numerics.maxDt_s = scene.numerics.fixedDt_s;
       scene.rigidBodies = [];
       return scene;
     },
@@ -2390,6 +2391,22 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createGardenSvoLightingScene,
     camera: gardenCamera,
   }),
+  ...([1, 2] as const).map((curvatureMultiplier) => defineScene({
+    id: curvatureMultiplier === 2 ? "stationary-bowl-2x" : "stationary-bowl",
+    name: curvatureMultiplier === 2 ? "Stationary bowl · 2× curvature" : "Stationary bowl",
+    blurb: curvatureMultiplier === 2
+      ? "The stationary bowl with twice the curvature in both horizontal directions, the same center height and no enforced refinement regions, for inspecting surface reconstruction artifacts."
+      : "A shallow curved water surface held still by zero gravity. Starts with width-4 cells; set the region to min1/max1 to compare fine detail and inspect grid ripples.",
+    audience: "study",
+    shelf: "Surface reconstruction",
+    environment: "stage",
+    build: () => createStationaryBowlScene(curvatureMultiplier),
+    camera: { distance_m: 4.6, target_m: { x: 0, y: .65, z: 0 }, elevation_rad: .58, azimuth_rad: .72 },
+    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+      selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
+      gammaDiffusion: "on", surfaceSharpening: "on",
+    } },
+  })),
   defineScene({
     id: "brick-quad-dam-break",
     name: "Brick quad · dam break",
@@ -2540,7 +2557,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A suspended ring of water drops onto a dry floor. Watch the hole deform as the ring flattens and spreads on impact.",
     audience: "explore", shelf: "Tanks", environment: "stage",
     methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "scene", brickFineResolution: "8",
+      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
       surfaceMeshRefinement: "2",
     } },
     build: createFallingWaterTorusScene,
@@ -2552,7 +2569,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "A fine liquid ball falls into a broad hydrostatic pool. Coarse-first adaptation refines from curvature, energy and approaching liquid without authored refinement regions.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "scene", brickFineResolution: "8",
+      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
     } },
     build: createCoarseFirstPoolImpactScene,
     camera: { distance_m: 11, target_m: { x: 0, y: 1.8, z: 0 } },
@@ -2563,7 +2580,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The same pool impact at half the physical dimensions: a 64×48×64 lattice with a proportionally smaller falling ball. Keeps 0.05 m finest cells, with one eighth of the original lattice volume.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "scene", brickFineResolution: "8",
+      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
     } },
     build: createCoarseFirstPoolImpactHalfScene,
     camera: { distance_m: 5.5, target_m: { x: 0, y: 0.9, z: 0 } },
@@ -2574,7 +2591,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     blurb: "The same pool impact at one quarter the physical dimensions: a 32×24×32 lattice with a proportionally smaller falling ball. Keeps 0.05 m finest cells, with one sixty-fourth of the original lattice volume.",
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
-      selectorMode: "coarse-first", timeStep: "scene", brickFineResolution: "8",
+      selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
     } },
     build: createCoarseFirstPoolImpactQuarterScene,
     camera: { distance_m: 2.75, target_m: { x: 0, y: 0.45, z: 0 } },

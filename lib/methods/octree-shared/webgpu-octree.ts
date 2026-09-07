@@ -575,6 +575,7 @@ export class WebGPUOctreeProjection implements OctreeTopologyEngine {
     // sphere scene would run the box on the GPU while the host believed it had
     // authored a ball.
     const analyticSparseBootstrap = (scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
+      && !scene.fluid.initialHeightField
       && scene.rigidBodies.length === 0 && !sceneHasTerrain(scene)
       && !sceneDamBreakIsOffsetFromCorner(scene) && !sceneHasInitialLiquidVolumes(scene);
     this.analyticSparseBootstrap = analyticSparseBootstrap;
@@ -1270,6 +1271,7 @@ export class WebGPUOctreeProjection implements OctreeTopologyEngine {
                   bounds.maximum.z + 0.5 * this.scene.container.depth_m] as const,
               })) }
             : (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
+            && !this.scene.fluid.initialHeightField
             && !sceneDamBreakIsOffsetFromCorner(this.scene)
             && !sceneHasInitialLiquidVolumes(this.scene)
             ? { initialCondition: this.scene.fluid.initialCondition,

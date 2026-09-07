@@ -44,6 +44,8 @@ export interface SparseCM12DawnTestLane extends CommonLane {
 export interface SparseCM12DawnPerformanceLane extends CommonLane {
   readonly kind: "performance";
   readonly scene: "mini32" | "mini64";
+  // Identify the reviewed baseline; the runner obtains solver settings from
+  // production defaults and validates the probe's resolved values.
   readonly brickFineResolution: 8;
   readonly presentationPageResolution: 8;
   readonly warmupFrames: number;
@@ -109,7 +111,7 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     id: "hydrostatic-adaptivity",
     coverage: "hydrostatic-stability-adaptivity",
     kind: "correctness",
-    description: "exact UI B4 waterline pinned through step one, halo classification, and stable deep water",
+    description: "default coarse-first B1 waterline pinned through step one, halo classification, and stable deep water",
     testFile: "tests/sparse-cm12-deep-bottom-coarsening-dawn.test.ts",
     timeoutMs: 30_000,
   },
@@ -125,7 +127,7 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     id: "min8-region-surface",
     coverage: "min8-region-surface",
     kind: "correctness",
-    description: "gravity keeps a 15.25-cell surface level across the RHS min-8 ladder",
+    description: "gravity keeps a 15.25-cell surface level across an authored B2/B1 region boundary",
     testFile: "tools/probe-sparse-cm12-mini64-surface-dawn.ts",
     environment: {
       FLUID_MIN8_SURFACE_REGION: "right-x",
@@ -140,7 +142,7 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     id: "mini32-performance",
     coverage: "mini32-performance",
     kind: "performance",
-    description: "mini32 B8/P8 hardware-timestamped frame ceiling",
+    description: "mini32 production-default hardware-timestamped frame ceiling",
     scene: "mini32",
     brickFineResolution: 8,
     presentationPageResolution: 8,
@@ -155,7 +157,7 @@ export const SPARSE_CM12_DAWN_LANES: readonly SparseCM12DawnLane[] = [
     id: "mini64-performance",
     coverage: "mini64-performance",
     kind: "performance",
-    description: "mini64 B8/P8 hardware-timestamped frame ceiling",
+    description: "mini64 production-default hardware-timestamped frame ceiling",
     scene: "mini64",
     brickFineResolution: 8,
     presentationPageResolution: 8,
