@@ -1,7 +1,11 @@
 # Persistent implicit density: implementation and evidence roadmap
 
-Status: standalone CPU research, 2026-09-08. No production representation is
-selected. This roadmap implements the priorities in the
+Historical foundation: standalone CPU research, 2026-09-08. The subsequent
+[production acceptance record](retained-density-production-progress-2026-09-08.md)
+records the selected positive diffuse numeric field, production native/surface
+adoption and conservative low-order evolution stage. Prescribed motion and
+high-order curvature transport remain open roadmap work. This roadmap
+implements the priorities in the
 [density-field contract](adaptive-mass-density-field-contract.md) and
 [architecture proposal](adaptive-mass-interface-architecture-2026-09-08.md).
 The contract takes precedence: means are volume integrals, physics refinement
