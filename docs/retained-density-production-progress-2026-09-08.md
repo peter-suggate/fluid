@@ -100,8 +100,25 @@ fixtures through `tools/implicit-density/partition-oracle.ts`, which imports
 neither the production compiler nor evaluator. Every near-interface sample and
 all vertical columns, including boundary columns, are checked against analytic
 references. Root precision accounts for binary16 storage and the local slope.
-Five CPU oracle tests pass, including changed-field and missing-sample
-counterexamples. The strengthened production reset assertions await Dawn.
+Six CPU oracle tests pass, including changed-field and missing-sample
+counterexamples. All four independent production reset assertions passed in
+`/tmp/fluid-retained-ladder-gpu-4.log`:
+
+| Reset fixture | Analytic / observed crossings | Maximum continuous zero-set distance |
+| --- | ---: | ---: |
+| Flat | 256 / 256 | `3.97e-6 m` |
+| Quadratic height | 256 / 256 | `6.07e-6 m` |
+| Sphere/pool | 300 / 300 | `2.244 mm` |
+| Sharp box/pool | 256 / 256 | `5.000 mm` |
+
+Every expected near-interface sample was present and within the declared
+binary16/float32 precision budget. The subsequent first mixed partition failed
+the fixture's native-width assertion: forcing width 1 directly beside width 4
+has no solution under the production 2:1 face-grading contract. The fixture now
+requests width 1 beside width 2, and a CPU counterexample verifies the original
+pair is rejected and the replacement is admissible. Global widths 4, 2 and 1,
+the cycle count and all field/integral thresholds are unchanged. The complete
+paused/resumed partition test has not yet passed after that fixture correction.
 
 The sharp-box L-infinity field can change its active face between sample
 centers, so a linear sampled crossing near an edge need not be at the exact
@@ -126,8 +143,19 @@ The mesh regression now checks the raw vertex allocator, raw active cube
 count and current publication generation before reading the emitted geometry.
 Checking the draw count alone was insufficient because the production scan
 already clamps it to allocation capacity. No capacity or acceptance threshold
-was raised. The strengthened GPU tests are queued for an exclusive run; a
-successful CPU import with Dawn skipped is not a GPU pass.
+was raised. Its synthetic mixed-resolution test passed in 40.2 seconds in
+`/tmp/fluid-retained-ladder-mesh-gpu.log`, and the full pool passed all mesh
+ratios at steps 0, 1 and 3. The process then exhausted the default roughly 4 GB
+JavaScript heap before the step-30 checkpoint. This is an incomplete full-pool
+lane, not a pass; no heap limit, checkpoint or threshold has been changed.
+
+An isolated CPU audit of 456,864 vertices made from four copies of a saved
+half-scene GPU mesh took 3.60 s: heap use was 9.78 MB before, 192.69 MB after
+the audit and 10.54 MB after collection. Maximum RSS was 315 MiB. This shows
+the mesh oracle's large temporary maps release in that reproduction; it does
+not identify the production out-of-memory cause. The crash occurred after
+step-3 mesh capture completed, during subsequent simulation/topology work or
+the next diagnostic readback. Production topology preparation is under review.
 
 The generic resumed partition ladder, broader mesh regressions, browser visual
 acceptance and canonical `npm run test:dawn:sparse-cm12` suite remain required
