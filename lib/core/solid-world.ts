@@ -307,13 +307,8 @@ function applySolidWorldPatches(
 ): SolidWorld {
   const pages = new Map<string, SolidWorldPage>();
   const key = (q: SolidWorldCoordinate) => q.join(",");
-  for (const source of base.pages) pages.set(key(source.coordinate), cloneBase ? {
-      coordinate: [...source.coordinate],
-      solidFraction: source.solidFraction.slice(),
-      signedDistanceQ8: source.signedDistanceQ8.slice(),
-      materialId: source.materialId.slice(),
-      revision: source.revision + 1,
-    } : source);
+  for (const source of base.pages) pages.set(key(source.coordinate), source);
+  const owned = new Set<string>();
   for (const patch of patches) {
     if (!patch.minimum.every(Number.isSafeInteger)
       || !patch.maximumExclusive.every(Number.isSafeInteger)
@@ -334,6 +329,14 @@ function applySolidWorldPatches(
           if (!page) {
             page = emptyPage(address.page, 1);
             pages.set(key(address.page), page);
+          }
+          const pageKey = key(address.page);
+          if (cloneBase && !owned.has(pageKey)) {
+            page = { ...page, solidFraction: page.solidFraction.slice(),
+              signedDistanceQ8: page.signedDistanceQ8.slice(),
+              materialId: page.materialId.slice(), revision: page.revision + 1 };
+            pages.set(pageKey, page);
+            owned.add(pageKey);
           }
           const fill = patch.operation === "fill";
           page.solidFraction[address.localIndex] = fill ? 255 : 0;
@@ -541,4 +544,13 @@ export function sampleSolidWorld(
   return { solidFraction: solidFraction / 255,
     signedDistance_cells: page === undefined && !regionMatched
       ? Number.POSITIVE_INFINITY : signedDistanceQ8 / 256, materialId };
+}
+
+/** Compile only this stroke over an immutable base; terrain and prior edits are reused. */
+export function sceneWithSolidStroke(base: SceneDescription,
+  patches: readonly SolidWorldVoxelPatch[]): SceneDescription {
+  const scene = { ...base, solidVoxels: [...base.solidVoxels, ...patches] };
+  const world = withSolidWorldPatches(solidWorldForScene(base), patches);
+  sceneSolidWorldCache.set(scene, { stamp: solidWorldContentStamp(scene), world });
+  return scene;
 }

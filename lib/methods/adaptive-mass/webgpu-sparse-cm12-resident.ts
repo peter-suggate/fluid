@@ -7271,19 +7271,33 @@ export class WebGPUSparseCM12Resident {
   }
 
   /** Adopt one accepted uniform solid generation without rebuilding fluid topology. */
-  setSolidWorld(solidWorld: SolidWorld): void {
-    this.currentSolidWorld = solidWorld;
+  validateSolidWorld(solidWorld: SolidWorld): void {
     this.assertLive();
+    const layout = this.solidOccupancyLayout;
+    if (!layout) throw new Error("This world does not support live solid editing");
+    if (solidWorld.pages.length > layout.pageCapacity
+      || (solidWorld.regions?.length ?? 0) > layout.regionCapacity) {
+      throw new Error("Live solid capacity reached; remove some geometry before adding more.");
+    }
+  }
+
+  setSolidWorld(solidWorld: SolidWorld): void {
+    this.validateSolidWorld(solidWorld);
+    const previous = this.currentSolidWorld;
+    this.currentSolidWorld = solidWorld;
     if (!this.solidOccupancyLayout) return;
     this.closedSolidShell = solidWorldHasClosedBoxShell(solidWorld, this.dimensions);
     const clear = this.device.createCommandEncoder({
       label: "Sparse CM12 replace SolidWorld occupancy",
     });
-    clear.clearBuffer(this.topologyArena, 4 * this.solidOccupancyLayout.baseWords,
-      4 * (this.solidOccupancyLayout.totalWords - this.solidOccupancyLayout.baseWords));
+    // Retain page payloads: unchanged page identities need no upload. Only the
+    // directory is replaced; its current entries determine which slots are live.
+    clear.clearBuffer(this.topologyArena,
+      4 * (this.solidOccupancyLayout.baseWords + this.solidOccupancyLayout.directoryBaseWords),
+      4 * (this.solidOccupancyLayout.pageBaseWords - this.solidOccupancyLayout.directoryBaseWords));
     this.device.queue.submit([clear.finish()]);
     writeSparseCM12SolidOccupancy(this.device.queue, this.topologyArena,
-      this.solidOccupancyLayout, solidWorld, [0, 0, 0]);
+      this.solidOccupancyLayout, solidWorld, [0, 0, 0], previous);
     const refresh = this.device.createCommandEncoder({
       label: "Sparse CM12 refresh SolidWorld apertures",
     });

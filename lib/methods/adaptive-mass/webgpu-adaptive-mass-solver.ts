@@ -847,6 +847,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    * topology plan. Without this seam either edit would construct a new world
    * and discard the timeline.
    */
+  validateLiveSolidEdit(scene: SceneDescription): void {
+    if (!this.sparseWorld.validateSceneEdit) throw new Error("Live voxel editing is unavailable");
+    this.sparseWorld.validateSceneEdit(scene);
+  }
+
   applySceneUniforms(scene: SceneDescription): void {
     const regionStamp = JSON.stringify(sceneRefinementRegions(scene));
     const regionsChanged = regionStamp

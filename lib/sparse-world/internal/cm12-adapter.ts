@@ -412,6 +412,10 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     });
   }
 
+  validateSceneEdit(scene: SceneDescription): void {
+    this.resident.validateSolidWorld(fluidSolidWorldForScene(scene));
+  }
+
   edit(edit: SparseWorldEdit): SparseWorldEditReceipt {
     this.generationState.changed();
     if (this.destroyed) {

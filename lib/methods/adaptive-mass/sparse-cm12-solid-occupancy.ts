@@ -32,7 +32,9 @@ export function createSparseCM12SolidOccupancyLayout(options: {
   readonly authoredPageCount: number;
   readonly authoredRegionCount?: number;
 }): SparseCM12SolidOccupancyLayout {
-  return createWebgpuSolidWorldPageLayout({ ...options, includesMaterial: false,
+  return createWebgpuSolidWorldPageLayout({ ...options,
+    // Reserve editing headroom at startup, never allocate it during a stroke.
+    authoredPageCount: Math.max(256, options.authoredPageCount), includesMaterial: false,
     maximumBytes: SPARSE_CM12_SOLID_OCCUPANCY_MAX_BYTES });
 }
 
@@ -43,6 +45,6 @@ export function packSparseCM12SolidOccupancy(layout: SparseCM12SolidOccupancyLay
 
 export function writeSparseCM12SolidOccupancy(queue: GPUQueue, destination: GPUBuffer,
   layout: SparseCM12SolidOccupancyLayout, world: SolidWorld,
-  originFine: readonly [number, number, number]): void {
-  writeWebgpuSolidWorldPages(queue, destination, layout, world, originFine);
+  originFine: readonly [number, number, number], previous?: SolidWorld): void {
+  writeWebgpuSolidWorldPages(queue, destination, layout, world, originFine, undefined, previous);
 }
