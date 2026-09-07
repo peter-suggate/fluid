@@ -34,8 +34,8 @@ function dividePositive(a: Interval, b: Interval): Interval {
   return multiply(a, [next(1 / b[1], false), next(1 / b[0], true)]);
 }
 function square(a: Interval): Interval {
-  return [a[0] <= 0 && a[1] >= 0 ? 0 : next(Math.min(a[0] ** 2, a[1] ** 2), false),
-    next(Math.max(a[0] ** 2, a[1] ** 2), true)];
+  return [a[0] <= 0 && a[1] >= 0 ? 0 : next(Math.min(a[0] * a[0], a[1] * a[1]), false),
+    next(Math.max(a[0] * a[0], a[1] * a[1]), true)];
 }
 const clamp = (v: number) => Math.max(0, Math.min(1, v));
 export function retainedQuadraticDensity(input: {
@@ -188,5 +188,6 @@ export function initializeRetainedDensityPrimitive(primitive: DeclaredRetainedDe
     case "plane": return retainedAffineRamp(primitive);
     case "sphere": return retainedSphereDensity(primitive.center, primitive.radius, primitive.transitionWidth, primitive.generation);
     case "quadratic": return retainedQuadraticDensity(primitive);
+    default: throw new Error("Unsupported declared density primitive");
   }
 }

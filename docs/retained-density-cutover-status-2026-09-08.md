@@ -6,8 +6,9 @@ not been switched to them.** A field representation that preserves mass is
 not sufficient: its half-density surface must also preserve the intended
 geometry. The first conservative positive reconstruction failed that test.
 The clamped-affine alternative passes planar and two-plane crease tests, but
-it does not yet supply the general curved, evolving field required for a
-production cutover.
+a separate declared quadratic primitive now supplies exact curved geometry
+and certified CPU integral enclosures. Neither yet supplies the assembled,
+evolving field required for a production cutover.
 
 This report supplements, rather than replaces, the historical
 [initial ladder results](implicit-density-ladder-results-2026-09-08.md) and
@@ -25,6 +26,7 @@ that location does not establish their adoption by a production consumer.
 | `lib/methods/adaptive-mass/sparse-cm12-density-support-coupling.ts` | `compileDensitySupportCoupling`, `applyDensitySupportCoupling`, `densitySupportGeometryKey`, `assertDensitySupportCouplingSupport`; sparse CSR intersections and tensor Bernstein box moments | Integrates full native boxes; cannot replace clipped-solid basis integrals with scalar open fractions |
 | `lib/methods/adaptive-mass/webgpu-sparse-cm12-retained-density.ts` and `.wgsl.ts` | `WebGPURetainedDensityField.create`, `retain`, `release`, `next`, `compileQueries`, `compileCoupling`; immutable GPU coefficients and leased compiled operations | GPU execution currently implements Bernstein support, not the clamped-affine representation or a complete dynamics update |
 | `lib/methods/adaptive-mass/sparse-cm12-retained-affine-density.ts` | `retainedAffineRamp`, `retainedAffineFeature`, `evaluateRetainedAffineDensity`, `integrateRetainedAffineDensity`, `meanRetainedAffineDensity`, `splitRetainedAffineDensity` | CPU algebra for one ramp or min/max of two ramps; no curved branches, GPU path or assembled global support |
+| `lib/methods/adaptive-mass/sparse-cm12-retained-quadratic-density.ts` | `retainedQuadraticDensity`, `retainedSphereDensity`, `initializeRetainedDensityPrimitive`, evaluation/gradient functions and `integrateRetainedQuadraticDensity`; immutable ten-coefficient declared geometry and outward-rounded CPU integral enclosures | Reference integration can exhaust its accuracy budget; no GPU or evolving hybrid-field assembly |
 
 GPU query results contain `(q, gradientX, gradientY, gradientZ)` in physical
 coordinates. Coupled integral results contain `(nativeMean, physicalAmount,
@@ -32,7 +34,11 @@ coordinates. Coupled integral results contain `(nativeMean, physicalAmount,
 generations when encoded. Support identity checks supplement generation
 numbers. An operation leases its source coefficient generation, so releasing
 the original owner or creating a newer generation does not modify the old
-operation. Operations must remain alive until submitted GPU work completes.
+operation. The updated allocation contract requires `await field.ready()` on a new
+`next` generation and `await operation.ready()` before encoding a compiled
+operation. `create` already awaits readiness. Operations must remain alive
+until submitted GPU work completes. The previously reported two Dawn passes
+predate this readiness update; its GPU rerun must be recorded separately.
 
 The affine primitive is
 
@@ -95,6 +101,29 @@ the tested planar and crease primitives. They do not establish general
 curvature preservation, inference from arbitrary native cell means, or a
 mass-conservative moving-field update.
 
+## Declared curved primitive and accuracy limits
+
+The quadratic primitive retains ten numeric coefficients and a physical local
+frame, then clamps the evaluated quadratic to `[0,1]`. Its sphere constructor
+uses `q=clamp(0.5+(R²-r²)/(2Rw),0,1)`, so the half-density radius and radial
+interface gradient are analytic. Its diffuse integrated amount is deliberately
+not identified with the enclosed sharp sphere volume. A numeric primitive
+initializer handles declared pools, planes, spheres and quadratics without
+retaining authored callbacks or reconstructing from occupancy means.
+
+The design agent reports five CPU tests passing. They verify exact sphere
+geometry/gradients, integral bounds containing an independent radial diffuse
+mass, an unclamped shallow quadratic resolving in one interval box, and a
+clamped shallow bowl reaching absolute tolerance 1e-3 in 122 leaves. Interval
+operations round outward, and the receipt explicitly reports whether the
+requested tolerance was met.
+
+The sphere reference remains expensive: at 4096 leaves its integral enclosure
+is approximately 0.0371 wide, so the requested 1e-4 tolerance is **not met**.
+This is useful certified accuracy evidence, not a runtime-performance result
+or a production-ready integration algorithm. No new general curvature GPU
+path, field transport or hybrid assembly follows from these five passes.
+
 ## Verification status
 
 The coordinating agent reported **86 combined CPU tests passing** and
@@ -108,7 +137,11 @@ The new production test
 `tests/sparse-cm12-retained-field-partition-dawn.test.ts` is a stronger cutover
 criterion: four initial fixtures, repeated uniform and mixed partitions,
 accepted native mean restriction, conserved mass, actual published GPU field
-samples, and a resumed physics phase. Its first production baseline failed all four cases, but the reasons must
+samples, and a resumed physics phase. It now also reports all interior
+vertical-ray crossing counts and interpolated crossing motion, preserving
+both the lower and upper crossings of suspended components. Root assertions
+precede scalar assertions, separating visible interface motion from a scalar
+reparameterization. Its first production baseline failed all four cases, but the reasons must
 be distinguished. The flat and quadratic fixtures failed during setup because
 an empty `initialBrickSeeds_m` array suppressed their base fill. The nominal
 sphere/pool and box/pool fixtures consequently contained only the additional
@@ -137,7 +170,7 @@ artifacts, not checked-in baselines.
 ## Concrete remaining integration work
 
 1. **Initialization and geometry:** construct one accepted field from tank fills, quadratic height fields, liquid spheres/boxes and scene edits. Specify how exact source surfaces and native amounts coexist when finite ramp thickness changes the integral near boundaries or curved interfaces.
-2. **Curvature and hybrid assembly:** combine curved polynomial support with clamped ramps/creases under one evaluation and integration contract. Define support ownership, shared traces, hanging interfaces, feature selection and representability checks. The current two separate algebras are not this assembled representation.
+2. **Curvature and hybrid assembly:** establish a practical accurate integral path for the declared curved primitives, then combine curved polynomial support with clamped ramps/creases under one evaluation and integration contract. Define support ownership, shared traces, hanging interfaces, feature selection and representability checks. The current two separate algebras are not this assembled representation.
 3. **Dynamics:** advance the accepted field with transport, pressure-driven velocities, diffusion and sharpening while preserving positivity, local amount and intended surface behavior. A per-step unconstrained refit or the rejected private-bubble correction is not a validated update policy.
 4. **Excess and capacity:** specify density above one, compression/excess mass and redistribution. The affine ramp clamps to one; the positive Bernstein basis allows values above one. Their physical meaning must be reconciled before native solver authority changes.
 5. **Solids:** integrate the retained basis over actual open domains, including terrain and moving rigid geometry. Full-box moments and an averaged open fraction are insufficient for general clipped basis moments.
@@ -160,6 +193,7 @@ Bernstein geometry probe:
 
 ```bash
 node --import tsx --test tests/implicit-density-field.test.ts tests/implicit-density-stencil.test.ts tests/implicit-density-positive-bernstein.test.ts tests/sparse-cm12-density-native-geometry.test.ts tests/sparse-cm12-density-support-coupling.test.ts tests/sparse-cm12-retained-affine-density.test.ts tests/sparse-cm12-retained-affine-geometry.test.ts
+node --import tsx --test tests/sparse-cm12-retained-quadratic-density.test.ts
 node --import tsx tools/probe-positive-bernstein-geometry.ts
 node --import tsx tools/probe-positive-bernstein-geometry.ts --assert-geometry
 ```

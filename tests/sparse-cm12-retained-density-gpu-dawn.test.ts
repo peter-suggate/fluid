@@ -32,6 +32,9 @@ for (const fixture of ["quadratic", "crease"] as const) (dawnModule ? test : tes
       const retained = await WebGPURetainedDensityField.create(device, source); fields.push(retained);
       const queries = [0, 1].flatMap(cell => [0, .17, .5, .93, 1].map(t => ({ cell, point: [2 * cell + 2 * t, .71, 1.23] as Point3 })));
       const query = retained.compileQueries(queries); operations.push(query);
+      const pendingOutput = device.createBuffer({ size: query.outputBytes, usage: GPUBufferUsage.STORAGE });
+      try { assert.throws(() => query.encode(device!.createCommandEncoder(), pendingOutput), /not ready/); }
+      finally { pendingOutput.destroy(); }
       const run = async (op: WebGPURetainedDensityOperation, epoch?: { topologyGeneration: number; boundaryGeneration: number }) => {
         await op.ready();
         const output = device!.createBuffer({ size: op.outputBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
