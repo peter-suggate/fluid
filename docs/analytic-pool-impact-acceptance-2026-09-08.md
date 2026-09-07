@@ -66,6 +66,39 @@ error `5.08e-15`, and maximum half-density residual `1.12e-14`.
 These are standalone exact-family algebra results, not evidence that the
 production renderer or dynamics have passed.
 
+## Production result
+
+The actual quarter and half scenes both passed all thirteen paused partitions
+and the physical resume check in the exclusive Dawn run recorded in
+`/tmp/fluid-retained-pool-production-6.log` (two tests, 64.1 seconds total).
+Published scalar samples were identical across paused partitions; every pool
+and upper/lower sphere crossing remained present. Native means agreed with
+restrictions of the same retained density to below `8.4e-8`.
+
+Fresh production meshes at startup and after both editing cycles had no
+interior open edges or nonmanifold edges. The worst measurements across all
+three captures of each scene were:
+
+| Metric | Quarter | Half |
+| --- | ---: | ---: |
+| Pool height error | 5.96e-9 m | 1.19e-8 m |
+| Sphere vertex radial error | 3.773 mm | 1.879 mm |
+| Whole-triangle radial error | 4.779 mm | 2.737 mm |
+| Sphere normal-vector error | 1.92e-4 | 2.35e-4 |
+
+The whole-triangle measurement finds the closest point anywhere on each
+triangle, not merely its centroid. Curved adaptive fans project their center
+onto the represented scalar and subdivide when interior error exceeds 1/32 of
+a finest cell. Quadratic normal reconstruction selects a one-sided published
+stencil near a support boundary, avoiding an artificial air value above the
+quarter scene's sphere. Exact planar fans keep their coarse triangulation.
+
+`artifacts/retained-density-production/analytic-mesh-sections.png` plots the
+saved GPU triangles intersected with the physical z=0 plane against independent
+plane and circle references. These are finite triangles at 0.05 m sampling;
+the retained implicit zero set is exact up to coefficient precision. The
+broader Dawn matrix and browser capture are separate verification work.
+
 ## Commands
 
 CPU checks:

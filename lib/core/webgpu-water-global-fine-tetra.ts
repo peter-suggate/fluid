@@ -393,7 +393,24 @@ fn filteredNormalAt(lattice:vec3f,fallback:vec3f,filterEnabled:bool)->vec3f{
   // Removing that adapter recovers their integer SDF lattice. Legacy optical
   // samples retain the established one-cell reconstruction frame.
   let x=lattice-select(vec3f(1.0),vec3f(0.5),p.table.y==6u);
-  let center=vec3i(round(x));
+  var center=vec3i(round(x));
+  // Near a sparse publication boundary, a missing neighbour is an air
+  // sentinel rather than a sample of the represented field. Move the
+  // three-point stencil onto published support instead of differentiating
+  // that sentinel. This is local support selection, not a domain clamp:
+  // valid signed pages beyond the original tank keep their own coordinates.
+  if(signedSparseAddressing()){
+    for(var axis=0u;axis<3u;axis+=1u){
+      var step=vec3i(0);step[axis]=1;
+      let lower=compactSampleAddress(center-step);let upper=compactSampleAddress(center+step);
+      var lowerValid=false;var upperValid=false;
+      if(lower.x!=INVALID){let index=lower.x*p.bricks.w+lower.y;
+        if(index<arrayLength(&fineSamples)){lowerValid=(finePackedFlags(index)&1u)!=0u&&finitePhi(finePackedPhi(index));}}
+      if(upper.x!=INVALID){let index=upper.x*p.bricks.w+upper.y;
+        if(index<arrayLength(&fineSamples)){upperValid=(finePackedFlags(index)&1u)!=0u&&finitePhi(finePackedPhi(index));}}
+      if(!upperValid&&lowerValid){center-=step;}else if(!lowerValid&&upperValid){center+=step;}
+    }
+  }
   let t=x-vec3f(center);
   let bx=vec3f(.5*t.x*(t.x-1.),1.-t.x*t.x,.5*t.x*(t.x+1.));
   let by=vec3f(.5*t.y*(t.y-1.),1.-t.y*t.y,.5*t.y*(t.y+1.));

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { packFineLevelSetSample, unpackFineLevelSetPackedPhi } from "../lib/core/fine-levelset-packed-sample";
 import { compileRetainedSceneDensity, evaluateRetainedSceneDensity, evaluateRetainedScenePhi } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
-import { exactPoolImpactDensityAmount, exactPoolImpactImplicitPhi, exactVerticalCrossings, measurePublishedPoolImpact, poolImpactBudgets, poolImpactOracle,
+import { exactPoolImpactDensityAmount, exactPoolImpactImplicitPhi, exactVerticalCrossings, measurePoolImpactMesh, measurePublishedPoolImpact, poolImpactBudgets, poolImpactOracle,
   POOL_IMPACT_SCENES } from "../tools/implicit-density/pool-impact-oracle";
 
 for (const id of POOL_IMPACT_SCENES) test(`${id}: actual catalog geometry and original minmax8 region have an independent oracle`, () => {
@@ -46,6 +46,22 @@ for (const id of POOL_IMPACT_SCENES) test(`${id}: actual catalog geometry and or
     + 4 * Math.PI * oracle.sphereRadius ** 3 / 3;
   assert.ok(exactPoolImpactDensityAmount(oracle) > sharpAmount + 1e-5,
     "the native amount oracle distinguishes retained diffuse density from old sharp occupancy");
+});
+
+test("whole-triangle sphere metric detects a chord defect between perfect sphere vertices", () => {
+  const oracle = poolImpactOracle("coarse-first-pool-impact-quarter");
+  // A scalene great-circle triangle contains the sphere center, although its
+  // centroid does not coincide with it. Vertex or centroid-only probes miss
+  // the maximum radial defect at that interior point.
+  const mesh = new Float32Array([0, 130, 260].flatMap(degrees => {
+    const angle = degrees * Math.PI / 180;
+    const x = Math.cos(angle), y = Math.sin(angle);
+    return [oracle.sphereRadius * x, oracle.sphereCenter[1] + oracle.sphereRadius * y, 0, 1, x, y, 0, 0];
+  }));
+  const metrics = measurePoolImpactMesh(mesh, oracle);
+  assert.ok(metrics.maximumSphereVertexError_m < 1e-7);
+  assert.ok(Math.abs(metrics.maximumSphereInteriorError_m - oracle.sphereRadius) < 1e-12,
+    "measure the exact closest point anywhere on the emitted triangle");
 });
 
 for (const id of POOL_IMPACT_SCENES) test(`${id}: compiled retained field agrees with analytic geometry at arbitrary physical points`, () => {

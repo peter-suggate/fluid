@@ -144,9 +144,12 @@ export function poolImpactBudgets(oracle: PoolImpactOracle) {
   const { h, sphereRadius: r } = oracle;
   return { poolPlanarity_m: 2e-6,
     spherePublishedRadial_m: h * h / (4 * r) + 5e-5,
-    sphereMeshVertexRadial_m: 3 * h * h / (4 * r) + 5e-5,
-    sphereMeshInteriorRadial_m: 3 * h * h / (2 * r) + 5e-5,
-    sphereMeshNormalVector: 2 * h * h / (r * r) + .005,
+    // Trilinear interpolation of the quadratic sphere has maximum scalar
+    // error 3h²/(8R). The mesh fan allows only h/32 additional interior error;
+    // this is finest-sampling error, not a coarse-cell faceting allowance.
+    sphereMeshVertexRadial_m: 3 * h * h / (8 * r) + 5e-5,
+    sphereMeshInteriorRadial_m: 3 * h * h / (8 * r) + h / 32 + 5e-5,
+    sphereMeshNormalVector: .005,
     pausedPublication_m: 1e-6,
     nativeMean: 2e-5,
   };
@@ -184,12 +187,34 @@ export function measurePoolImpactMesh(mesh: Float32Array, oracle: PoolImpactOrac
     const b: Point = [mesh[at + 8]!, mesh[at + 9]!, mesh[at + 10]!];
     const c: Point = [mesh[at + 16]!, mesh[at + 17]!, mesh[at + 18]!];
     if ([a, b, c].every(p => p[1] > split)) {
-      // Triangle interiors are chords; include all edge midpoints and the
-      // centroid so an exact set of sphere vertices cannot conceal faceting.
-      for (const p of [a.map((v, k) => (v + b[k]!) / 2), b.map((v, k) => (v + c[k]!) / 2),
-        c.map((v, k) => (v + a[k]!) / 2), a.map((v, k) => (v + b[k]! + c[k]!) / 3)])
-        maximumSphereInteriorError_m = Math.max(maximumSphereInteriorError_m,
-          Math.abs(exactPoolImpactDistance(oracle, p as unknown as Point)));
+      // Norm is convex: its triangle maximum is at a vertex. Its minimum is
+      // the perpendicular plane projection when that lies inside the face,
+      // otherwise the closest point on an edge. This measures the entire
+      // triangle, including the worst chord sag, not only a few sample points.
+      const points = [a, b, c].map(p => p.map((v, k) => v - oracle.sphereCenter[k]!));
+      const dot = (p: number[], q: number[]) => p.reduce((sum, v, k) => sum + v * q[k]!, 0);
+      let minimumSquaredRadius = Infinity, maximumSquaredRadius = 0;
+      for (let edge = 0; edge < 3; edge++) {
+        const p = points[edge]!, q = points[(edge + 1) % 3]!;
+        const delta = q.map((v, k) => v - p[k]!);
+        const t = Math.max(0, Math.min(1, -dot(p, delta) / Math.max(dot(delta, delta), 1e-30)));
+        const closest = p.map((v, k) => v + t * delta[k]!);
+        minimumSquaredRadius = Math.min(minimumSquaredRadius, dot(closest, closest));
+        maximumSquaredRadius = Math.max(maximumSquaredRadius, dot(p, p));
+      }
+      const first = points[0]!, ab = points[1]!.map((v, k) => v - first[k]!), ac = points[2]!.map((v, k) => v - first[k]!);
+      const aa = dot(ab, ab), cc = dot(ac, ac), cross = dot(ab, ac), determinant = aa * cc - cross * cross;
+      if (determinant > 1e-24) {
+        const rhsB = -dot(first, ab), rhsC = -dot(first, ac);
+        const u = (rhsB * cc - rhsC * cross) / determinant, v = (rhsC * aa - rhsB * cross) / determinant;
+        if (u >= 0 && v >= 0 && u + v <= 1) {
+          const closest = first.map((p, k) => p + u * ab[k]! + v * ac[k]!);
+          minimumSquaredRadius = Math.min(minimumSquaredRadius, dot(closest, closest));
+        }
+      }
+      maximumSphereInteriorError_m = Math.max(maximumSphereInteriorError_m,
+        Math.abs(Math.sqrt(minimumSquaredRadius) - oracle.sphereRadius),
+        Math.abs(Math.sqrt(maximumSquaredRadius) - oracle.sphereRadius));
     }
     if ([a, b, c].every(p => Math.abs(p[1] - oracle.poolHeight) < h)) {
       const area = ((b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2])) / 2;

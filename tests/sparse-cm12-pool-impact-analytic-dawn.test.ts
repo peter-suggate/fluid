@@ -145,6 +145,7 @@ for (const id of POOL_IMPACT_SCENES.filter(id => !requestedScene || id === reque
           assert.ok(meshMetrics.poolVertices > 0 && meshMetrics.sphereVertices > 0, `${label}: both physical components must be emitted`);
           assert.equal(meshMetrics.unexpectedInteriorVertices, 0, `${label}: no invented interior sheet`);
           assert.equal(topology.nonFiniteCount, 0, label); assert.equal(topology.nonManifoldEdgeCount, 0, label);
+          assert.equal(topology.interiorOpenEdgeCount, 0, `${label}: emitted free surface must have no interior cracks`);
           assert.ok(meshMetrics.maximumPoolHeightError_m <= budgets.poolPlanarity_m, `${label}: mesh pool is not planar`);
           assert.ok(meshMetrics.maximumPoolNormalError < .001, `${label}: calm pool normal changed`);
           assert.ok(Math.abs(meshMetrics.upwardPoolArea_m2 - scene.container.width_m * scene.container.depth_m) < 1e-4,

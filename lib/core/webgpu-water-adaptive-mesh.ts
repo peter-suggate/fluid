@@ -140,8 +140,8 @@ fn classifyAdaptiveGroup(base:vec3i,size:i32)->bool{
     // dyadic subdivision path while planar groups keep their large fans.
     let midpoint=adaptiveFieldSample(.5*(a+snappedCentre));
     let interior=adaptiveFieldSample((a+b+snappedCentre)/3.);
-    if(abs(midpoint.x)>.125*max(length(midpoint.yzw),1e-8)
-      ||abs(interior.x)>.125*max(length(interior.yzw),1e-8)){accurate=false;}
+    if(abs(midpoint.x)>.03125*max(length(midpoint.yzw),1e-8)
+      ||abs(interior.x)>.03125*max(length(interior.yzw),1e-8)){accurate=false;}
   }
   if(!oriented||!accurate){return false;}
   for(var i=0u;i<count;i+=1u){emitAdaptiveTriangle(points[i],points[(i+1u)%count],centre,axis,positive[axis]);}
