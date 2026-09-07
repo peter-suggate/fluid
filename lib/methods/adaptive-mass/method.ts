@@ -1,4 +1,4 @@
-import { pressureCaptureParam, pressureCaptureDescriptor } from "./features/pressure-inspection/definition";
+import { pressureCaptureParam, pressureCaptureDescriptor, SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS } from "./features/pressure-inspection/definition";
 import { ALGORITHM_PARAMS } from "./features/algorithms/definition";
 import { resolveMethodComposition } from "./composition";
 import { SPARSE_CM12_ACTIVITY_POLICY } from "./features/adaptivity/policy";
@@ -12,7 +12,7 @@ import { SPARSE_CM12_LENSES } from "./sparse-cm12-stage-lenses";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
 import { adaptiveMassDiagnosticRows } from "./adaptive-mass-diagnostics";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from "./adaptive-mass-frame-pipeline";
-import { sparseCM12PressureIterations, sparseCM12PressureRelativeTolerance, sparseCM12SharpeningDistance, sparseCM12SharpeningStrength, sparseCM12SharpeningTraceSteps, SPARSE_CM12_PRESSURE_ITERATIONS, SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS, SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE, SPARSE_CM12_SHARPENING_DISTANCE_CELLS, SPARSE_CM12_SHARPENING_STRENGTH, SPARSE_CM12_SHARPENING_TRACE_STEPS } from "./webgpu-sparse-cm12-resident";
+import { sparseCM12PressureIterations, sparseCM12PressureRelativeTolerance, sparseCM12SharpeningDistance, sparseCM12SharpeningStrength, sparseCM12SharpeningTraceSteps, SPARSE_CM12_PRESSURE_ITERATIONS, SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE, SPARSE_CM12_SHARPENING_DISTANCE_CELLS, SPARSE_CM12_SHARPENING_STRENGTH, SPARSE_CM12_SHARPENING_TRACE_STEPS } from "./webgpu-sparse-cm12-resident";
 import { sparseCM12ActivityPolicy, type SparseCM12ActivityPolicy } from "./features/adaptivity/policy";
 import { WebGPUAdaptiveMassSolver } from "./webgpu-adaptive-mass-solver";
 import type {

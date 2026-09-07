@@ -1,3 +1,4 @@
+import type { SparseCM12PressureJournalCapacityRequest } from "../../methods/adaptive-mass/features/pressure-inspection/definition";
 import type { SparseAtlasCompositeGrid } from
   "../../methods/adaptive-mass/sparse-atlas-composite-projection";
 import type { SparseAdaptiveMassAtlas } from
@@ -17,7 +18,7 @@ import {
 import type { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
 import { packSparseCM12RefinementRegions } from
   "../../methods/adaptive-mass/sparse-cm12-refinement-regions";
-import { WebGPUSparseCM12Resident, type SharpeningTrace, type SparseCM12InflowControl, type SparseCM12PresentationPageResolution, type SparseCM12PressureControl, type SparseCM12PressureJournalCapacityRequest, type SparseCM12ResidentInitializationReporter, type SparseCM12ResidentStageSeams } from "../../methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import { WebGPUSparseCM12Resident, type SharpeningTrace, type SparseCM12InflowControl, type SparseCM12PresentationPageResolution, type SparseCM12PressureControl, type SparseCM12ResidentInitializationReporter, type SparseCM12ResidentStageSeams } from "../../methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { type SparseCM12ActivityPolicy } from "../../methods/adaptive-mass/features/adaptivity/policy";
 import type {
   SparseWorld,

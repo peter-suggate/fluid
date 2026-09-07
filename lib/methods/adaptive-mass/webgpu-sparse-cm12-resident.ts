@@ -1,3 +1,4 @@
+import { SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS, type SparseCM12PressureJournalCapacityRequest } from "./features/pressure-inspection/definition";
 import { packAdaptivitySurfaceParameters } from "./features/adaptivity/packing";
 import { sparseCM12ActivityPolicy, type SparseCM12ActivityPolicy } from "./features/adaptivity/policy";
 import { CM12_FAILURE_BYTES, CM12_FAILURE_WORDS, decodeCM12SimulationFailure } from "./sparse-cm12-simulation-failure";
@@ -961,29 +962,6 @@ export interface SparseCM12InflowControl {
   readonly radiusFine: number;
   readonly velocityFinePerSecond: readonly [number, number, number];
 }
-
-/**
- * Capacity of the optional pressure journal, chosen at construction.
- *
- * Sized here rather than armed at runtime because the journal is a tail range
- * of the resident state buffer, which exists once. Defaulting it on would be
- * the "capacity is not inert" mistake: on a large scene the snapshot region is
- * tens of megabytes, and a lane that never opens the pressure lab would pay it
- * at t=0. So the default is zero floats and zero dispatches, and a caller that
- * wants the film asks for it.
- */
-export interface SparseCM12PressureJournalCapacityRequest {
-  /**
-   * Encoded iterations to reserve records for. Pass the solve's iteration
-   * ceiling; the reservation adds one for the seed record.
-   */
-  readonly iterationCapacity?: number;
-  /** Whole-field snapshots to reserve. Twelve covers a 128-iteration solve. */
-  readonly snapshotCapacity?: number;
-}
-
-/** Snapshots reserved when a caller asks for a journal without saying how many. */
-export const SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS = 12;
 
 export const sparseCM12PressureIterations = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value)
