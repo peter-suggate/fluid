@@ -73,10 +73,10 @@ def main():
                 panel.set_xlim(cx - radius * 1.16, cx + radius * 1.16)
                 panel.set_ylim(cy - radius * 1.16, cy + radius * 1.16)
                 panel.set_title("Suspended sphere · emitted triangle section")
-                panel.text(.02, .02, f'Whole mesh maximum errors\n'
+                panel.text(.5, .43, f'Whole mesh maximum errors\n'
                            f'vertices: {1000 * metrics["maximumSphereVertexError_m"]:.3f} mm\n'
                            f'triangle interiors: {1000 * metrics["maximumSphereInteriorError_m"]:.3f} mm',
-                           transform=panel.transAxes, fontsize=9, color="#304e60", backgroundcolor="white")
+                           transform=panel.transAxes, ha="center", fontsize=9, color="#304e60", backgroundcolor="white")
             panel.set_aspect("equal")
             panel.set_xlabel("x (m)")
             panel.set_ylabel("y (m)")
