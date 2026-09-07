@@ -1,0 +1,72 @@
+{
+  "scope": "feature ownership cleanup in main",
+  "commits": [
+    "9a7070ed",
+    "ed5a9539",
+    "3c577fa6",
+    "74df5c12"
+  ],
+  "build": "passed",
+  "focused": {
+    "passed": 40,
+    "failed": 0,
+    "gpuSkipped": 8
+  },
+  "unit": {
+    "passed": 1160,
+    "failed": 24,
+    "skipped": 168,
+    "matchesBaselineFailureNames": true,
+    "failingTests": [
+      "render refinement round-trips independently of the scene lattice",
+      "no scene profile sends a CM12 lane off the paper step",
+      "a CM12 scene profile that names the step names the paper one",
+      "all authored scenes default to 1/30 s",
+      "factor-4/factor-8 global fine memory keeps payload resident-capacity-scaled",
+      "parallel total-volume scratch is bounded by compact directory and resident fine samples",
+      "recurring Power Liquids entry graphs contain only reviewed transaction atomics",
+      "resizing a finished tank moves its voxel shell instead of stranding it",
+      "large-CFL transport allocates reachable tiles without scanning the domain",
+      "adaptivity timing labels describe the complete bracketed work",
+      "production publication uses guarded column height and floor continuation",
+      "region-equivalent face transport scales the shared cache without taxing defaults",
+      "GPU-grown SparseWorld rows use only signed topology and SolidWorld apertures",
+      "signed SparseWorld retains the authored all-rung mutation catalogue",
+      "a tiny B8 resident records and clones its complete construction without a GPU",
+      "water-box is sealed by its SolidWorld voxel shell",
+      "fine-rung candidate transfer computes each parent mass correction once",
+      "liquid injection opens and composes its tile-population journal",
+      "aggregate authorization consumes ISA and TFX receipts after every fallible check",
+      "scene and rigid-body edits cross the same public world boundary",
+      "fine-brick sampling WGSL uses a flat direct lookup, exact generation validation, and explicit coarse authority",
+      "factor-8 B4 topology pre-dilates and clips while redistance remains fixed-resident",
+      "power topology planner accounts only compact rows and fixed catalog",
+      "every topology-epoch pipeline binds its own reflected auto layout and exact ABI"
+    ]
+  },
+  "types": {
+    "status": "existing and concurrent unrelated errors remain",
+    "newCleanupErrorCategories": []
+  },
+  "moduleBoundaries": {
+    "remaining": 3,
+    "owner": "existing app/cm12-hole-probe diagnostic route"
+  },
+  "shaderExtraction": {
+    "proof": "Expanding extracted pressure WGSL into the committed resident source exactly matches the parent source",
+    "commit": "ed5a9539"
+  },
+  "gpu": {
+    "status": "blocked before any lane ran",
+    "command": "npm run test:dawn:sparse-cm12",
+    "exitCode": 1,
+    "reason": "Canonical runner refused to start while another task held the repository-wide WebGPU lease; waited more than 18 minutes without interrupting its active browser QA.",
+    "lease": {
+      "pid": 37111,
+      "parentPid": 24472,
+      "startedAt": "2026-09-07T22:43:18.056Z",
+      "kind": "browser-qa",
+      "target": "voxel editor localhost3001"
+    }
+  }
+}
