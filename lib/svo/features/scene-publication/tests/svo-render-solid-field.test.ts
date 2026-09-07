@@ -42,8 +42,8 @@ test("render refinement leaves the garden physics lattice and SolidWorld unchang
 });
 
 test("render refinement round-trips independently of the scene lattice", () => {
-  const parsed = parseQueryState("?scene=garden-svo-lighting&svoRefinementDepth=3");
-  assert.equal(parsed.ui.svoRenderTuning.environmentRefinementDepth, 3);
+  const parsed = parseQueryState("?scene=garden-svo-lighting&svoRefinementDepth=2");
+  assert.equal(parsed.ui.svoRenderTuning.environmentRefinementDepth, 2);
   const finestCellSize_m = parsed.scene.voxelDomain.finestCellSize_m;
   const serialized = serializeQueryState("", {
     presetId: parsed.presetId,
@@ -53,9 +53,9 @@ test("render refinement round-trips independently of the scene lattice", () => {
     quality: parsed.quality,
     overrides: parsed.overrides,
   }, parsed.ui, { view: "studio" });
-  assert.equal(new URLSearchParams(serialized).get("svoRefinementDepth"), "3");
+  assert.equal(new URLSearchParams(serialized).get("svoRefinementDepth"), "2");
   const reparsed = parseQueryState(`?${serialized}`);
-  assert.equal(reparsed.ui.svoRenderTuning.environmentRefinementDepth, 3);
+  assert.equal(reparsed.ui.svoRenderTuning.environmentRefinementDepth, 2);
   assert.equal(reparsed.scene.voxelDomain.finestCellSize_m, finestCellSize_m);
 });
 
