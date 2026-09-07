@@ -536,7 +536,7 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
  */
 export function gpuSceneSeedKey(scene: SceneDescription): string {
   const c = scene.container;
-  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${c.fillFraction}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialDamBreakOrigin_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.fluid.initialLiquidVolumes ?? null)}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
+  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${c.fillFraction}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialDamBreakOrigin_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.fluid.initialLiquidVolumes ?? null)}:${JSON.stringify(scene.fluid.initialVelocity_m_s ?? null)}:${JSON.stringify(scene.fluid.initialHeightField ?? null)}:${JSON.stringify(scene.fluid.refinementKeyframes ?? null)}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
 }
 
 /**

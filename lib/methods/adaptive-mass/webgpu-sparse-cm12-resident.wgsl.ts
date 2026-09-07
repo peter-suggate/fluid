@@ -379,10 +379,10 @@ export function createWebgpuSparseCM12ResidentWGSL(
   const candidateFaceSampleCount = brickFineResolution ** 2;
   const presentationPagesPerAxis = brickFineResolution / presentationPageResolution;
   const transportCellCapacity = velocityExtensionLayouts?.activity.cellCapacity ?? 1;
-  // Interpolated native volume nodes need one horizontal cell of apron and
+  // Smooth native volume reconstruction needs two horizontal cells of apron and
   // three vertical cells (one interpolation neighbor plus its ±2 integral).
   // Scale two is the largest ordinary cached page stencil.
-  const presentationCacheCapacity = (presentationPageResolution / 2 + 2) ** 2
+  const presentationCacheCapacity = (presentationPageResolution / 2 + 4) ** 2
     * (presentationPageResolution / 2 + 6);
   const presentationPatchCapacity = (presentationPageResolution / 2) ** 3;
   const presentationHeightColumnAxis = presentationPageResolution + 2;
@@ -1191,6 +1191,16 @@ ${createSparseCM12IboTRASupplementWGSL({
   return result;
 }
 `;
+  const relativeTransportStencil = geometricTransportStencil
+    .replace("fn effectiveTransportStencilAtSpansMode(", "fn relativeTransportStencilAtSpansMode(")
+    .replace("position:vec3f,inputSpans:vec3f,direct:bool)", "position:vec3f,inputSpans:vec3f,direct:bool,origin:vec3f)")
+    .replaceAll("cm12ClampToResidentWorld(", "clampRelativeTransportPosition(origin,")
+    .replaceAll("vec3i(floor(bounded))", "vec3i(floor(bounded+origin))")
+    .replaceAll("vec3i(floor(q))", "vec3i(floor(q+origin))")
+    .replaceAll("center=cellCenter(probe)", "center=cellCenter(probe)-origin")
+    .replaceAll("node=cellCenter(donor)", "node=cellCenter(donor)-origin")
+    .replace("spans*floor(samplePosition/spans+vec3f(0.5))", "spans*floor((samplePosition+origin)/spans+vec3f(0.5))-origin")
+    .replace("let weight=f.x*f.y*f.z;", "let basis=select(f,max(vec3f(0.0),vec3f(1.0)-abs(nodes[corner])/spans),regular);let weight=basis.x*basis.y*basis.z;");
   const implicitSharpeningGeometry = geometricTransportStencil
     .replace("fn effectiveTransportStencilAtSpansMode(",
       "fn effectiveImplicitSharpeningGeometryAtSpansMode(")
@@ -3140,7 +3150,7 @@ fn interpolatedPresentationDensityAt(q:vec3i,cellScale:u32,
 // Native compact volume nodes give every rung the same physical scalar units.
 // Interpolating these nodes avoids both independent coarse-cell face traces
 // and the discontinuous switch between density and a whole-column height proof.
-fn presentationCoarseColumnPhi(coarse:vec3i,cellScale:u32,
+fn presentationInteriorColumnPhi(coarse:vec3i,cellScale:u32,
  cacheFirst:vec3i,cacheDimensions:vec3u,cacheFits:bool,densityOffset:u32)->f32{
   let cellsY=i32(p.dimensions.y/cellScale);
   var rho:array<f32,5>;
@@ -3166,18 +3176,71 @@ fn presentationCoarseColumnPhi(coarse:vec3i,cellScale:u32,
   rho[4]=min(rho[4],rho[3]);
   return f32(cellScale)*presentationResolvedColumnPhi(rho);
 }
+// Extend a bounded tank's column geometry to the reconstruction apron,
+// without imposing a flat contact angle by repeating its edge average. This
+// continuation touches presentation only; SolidWorld still clips the surface.
+fn presentationColumnContinuation(index:i32,count:i32)->vec4i{
+  if(count>=3&&!brickHasUnclippedWorldGeometry(cm12PresentationBrick)){
+    if(index<0){return vec4i(0,1,3,index);}
+    if(index>=count){return vec4i(count-1,-1,3,count-1-index);}
+  }
+  return vec4i(index,1,1,0);
+}
+fn presentationContinuationWeights(d:i32)->vec3f{
+  let t=f32(d);return vec3f(0.5*(t-1.0)*(t-2.0),-t*(t-2.0),0.5*t*(t-1.0));
+}
+fn presentationCoarseColumnPhi(coarse:vec3i,cellScale:u32,
+ cacheFirst:vec3i,cacheDimensions:vec3u,cacheFits:bool,densityOffset:u32)->f32{
+  let count=vec3i(p.dimensions.xyz/cellScale);
+  let cx=presentationColumnContinuation(coarse.x,count.x);
+  let cz=presentationColumnContinuation(coarse.z,count.z);
+  let wx=presentationContinuationWeights(cx.w);let wz=presentationContinuationWeights(cz.w);
+  var value=0.0;
+  for(var z=0;z<cz.z;z+=1){for(var x=0;x<cx.z;x+=1){
+    value+=wx[x]*wz[z]*presentationInteriorColumnPhi(
+      vec3i(cx.x+x*cx.y,coarse.y,cz.x+z*cz.y),cellScale,
+      cacheFirst,cacheDimensions,cacheFits,densityOffset);
+  }}
+  return value;
+}
+// Quadratic B-spline quasi-interpolation of finite-volume column averages.
+// A quadratic B-spline adds variance 1/4 and a cell average adds 1/12.
+// Subtracting one sixth of the second difference removes their combined
+// quadratic bias. The shared weights reproduce affine and quadratic heights
+// and have a continuous first derivative across native-cell boundaries.
+fn presentationVolumeWeights(t:f32)->array<f32,5>{
+  let b=vec3f(0.5*(0.5-t)*(0.5-t),0.75-t*t,0.5*(0.5+t)*(0.5+t));
+  return array<f32,5>(-b.x/6.0,(8.0*b.x-b.y)/6.0,
+    (8.0*b.y-b.x-b.z)/6.0,(8.0*b.z-b.y)/6.0,-b.z/6.0);
+}
+// Restrict neighboring volume averages to common horizontal support. A fine
+// reconstruction of a coarser neighbor's density invents a vertical profile and
+// gives opposite sides of a mixed seam different surface heights.
+fn presentationHorizontalVolumeScale(brick:u32,scale:u32)->u32{
+  if(scale<=1u||scale>BRICK_FINE_RESOLUTION||brickSpan(brick)!=1u){return scale;}
+  let coordinate=cm12WorldLeafCoordinate(brick);var result=scale;
+  for(var axis=0u;axis<2u;axis+=1u){for(var side=0u;side<2u;side+=1u){
+    var offset=vec3i(0);offset[2u*axis]=select(-1,1,side!=0u);
+    let neighbor=cm12WorldOwnerAt(coordinate+offset);
+    if(neighbor!=INVALID&&brickActive(neighbor)&&brickSpan(neighbor)==1u){
+      result=max(result,BRICK_FINE_RESOLUTION/acceptedBrickResolution(neighbor));
+    }
+  }}
+  return result;
+}
 fn presentationInterpolatedVolumePhi(q:vec3i,cellScale:u32,
  cacheFirst:vec3i,cacheDimensions:vec3u,cacheFits:bool,densityOffset:u32)->f32{
   let position=(vec3f(q)+vec3f(0.5))/f32(cellScale)-vec3f(0.5);
-  let lower=vec3i(floor(position));let t=fract(position);var phi=0.0;
-  for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
-    let offset=vec3i(dx,dy,dz);
-    let value=presentationCoarseColumnPhi(lower+offset,cellScale,
-      cacheFirst,cacheDimensions,cacheFits,densityOffset);
-    let weight=select(1.0-t.x,t.x,dx==1)*select(1.0-t.y,t.y,dy==1)
-      *select(1.0-t.z,t.z,dz==1);
-    phi+=weight*value;
-  }}}
+  let center=vec3i(floor(position+vec3f(0.5)));
+  let lowerY=i32(floor(position.y));let ty=fract(position.y);
+  let wx=presentationVolumeWeights(position.x-f32(center.x));
+  let wz=presentationVolumeWeights(position.z-f32(center.z));var phi=0.0;
+  for(var z=0;z<5;z+=1){for(var x=0;x<5;x+=1){
+    let at=vec3i(center.x+x-2,lowerY,center.z+z-2);
+    let lo=presentationCoarseColumnPhi(at,cellScale,cacheFirst,cacheDimensions,cacheFits,densityOffset);
+    let hi=presentationCoarseColumnPhi(at+vec3i(0,1,0),cellScale,cacheFirst,cacheDimensions,cacheFits,densityOffset);
+    phi+=wx[x]*wz[z]*mix(lo,hi,ty);
+  }}
   return phi;
 }
 
@@ -3264,6 +3327,57 @@ fn traceEffectiveTransportCharacteristicMode(
   }
   return traced;
 }
+// Keep displacement separate from the exact cell centre until donor weights
+// are evaluated. Forming a large absolute coordinate first discards different
+// low bits on opposite sides of the domain.
+fn clampRelativeTransportPosition(origin:vec3f,position:vec3f,padding:vec3f)->vec3f{
+  let lower=cm12WorldFineLower()-origin+padding;
+  let upper=cm12WorldFineUpper()-origin-padding;
+  return clamp(position,lower,max(lower,upper));
+}
+fn orderedScalarPair(a:f32,b:f32)->f32{return min(a,b)+max(a,b);}
+fn transportScalarSum(v:array<f32,8>)->f32{
+ let a=orderedScalarPair(v[0],v[1]);let b=orderedScalarPair(v[2],v[3]);
+ let c=orderedScalarPair(v[4],v[5]);let d=orderedScalarPair(v[6],v[7]);
+ return orderedScalarPair(orderedScalarPair(a,b),orderedScalarPair(c,d));
+}
+fn orderedVectorPair(a:vec3f,b:vec3f)->vec3f{return min(a,b)+max(a,b);}
+fn transportVectorSum(v:array<vec3f,8>)->vec3f{
+ let a=orderedVectorPair(v[0],v[1]);let b=orderedVectorPair(v[2],v[3]);
+ let c=orderedVectorPair(v[4],v[5]);let d=orderedVectorPair(v[6],v[7]);
+ return orderedVectorPair(orderedVectorPair(a,b),orderedVectorPair(c,d));
+}
+fn sampleRelativeTransportVelocity(origin:vec3f,position:vec3f,spans:vec3f,direct:bool)->vec3f{
+  let stencil=relativeTransportStencilAtSpansMode(position,spans,direct,origin);
+  var terms:array<vec3f,8>;var weights:array<f32,8>;
+  for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];
+    if(cell!=INVALID){let weight=stencil.weights[corner];
+      terms[corner]=weight*cm12EffectiveTransportVelocity(cell).xyz;weights[corner]=weight;}}
+  return transportVectorSum(terms)/max(transportScalarSum(weights),1e-9);
+}
+struct TracedMassStencil{position:vec3f,stencil:TransportStencil}
+fn clipRelativeTransportSegment(origin:vec3f,start:vec3f,candidate:vec3f)->vec3f{
+  let absolute=origin+candidate;
+  let clipped=clipBoundarySegment(origin+start,absolute);
+  return select(clipped-origin,candidate,all(clipped==absolute));
+}
+fn traceMassStencil(cell:u32,direction:f32,direct:bool)->TracedMassStencil{
+  let origin=cellCenter(cell);let spans=transportSourceSamplingSpans(cell,direct);
+  var result:TracedMassStencil;
+  let initial=sampleRelativeTransportVelocity(origin,vec3f(0.0),spans,direct);
+  let substeps=clamp(i32(ceil(length(initial)*p.frame.x)),1,16);
+  let subDt=p.frame.x/f32(substeps);var displacement=vec3f(0.0);
+  for(var step=0;step<substeps;step+=1){
+    var first=initial;if(step>0){first=sampleRelativeTransportVelocity(origin,displacement,spans,direct);}
+    let midpoint=clipRelativeTransportSegment(origin,displacement,clampRelativeTransportPosition(origin,
+      displacement+direction*0.5*subDt*first,vec3f(0.5)));
+    displacement=clipRelativeTransportSegment(origin,displacement,clampRelativeTransportPosition(origin,displacement+direction*subDt
+      *sampleRelativeTransportVelocity(origin,midpoint,spans,direct),vec3f(0.5)));
+  }
+  result.position=origin+displacement;
+  result.stencil=relativeTransportStencilAtSpansMode(displacement,spans,direct,origin);
+  return result;
+}
 fn traceEffectiveTransportDeparture(position:vec3f)->vec3f{
   return traceEffectiveTransportCharacteristicMode(position,-1.0,false);}
 fn traceEffectiveTransportArrival(position:vec3f)->vec3f{
@@ -3287,6 +3401,7 @@ fn transportStencil(position:vec3f)->TransportStencil{
 // Same stencil geometry/order, but routed through the Phase-1 name so the
 // packet transport kernels have a mechanically isolated access contract.
 ${geometricTransportStencil}
+${relativeTransportStencil}
 // Physical source width is retained for native face sampling and the initial
 // dual-cell location. The interpolation itself uses actual donor centres.
 fn transportSourceSamplingSpans(source:u32,direct:bool)->vec3f{
@@ -3646,6 +3761,46 @@ fn sampleNativeTransportFace(position:vec3f,axis:u32,width:f32)->vec2f{
   return vec2f(value,1.0);
 }
 
+fn sampleRelativeFaceVelocity(origin:vec3f,position:vec3f,spans:vec3f)->vec3f{
+  let stencil=relativeTransportStencilAtSpansMode(position,spans,true,origin);
+  var values:array<vec3f,8>;var weights:array<f32,8>;
+  for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];
+    if(cell!=INVALID){let at=FACE_VELOCITY_SUPPORT+4u*cell;let weight=stencil.weights[corner];
+      values[corner]=weight*vec3f(state[at],state[at+1u],state[at+2u]);weights[corner]=weight;}}
+  return transportVectorSum(values)/max(transportScalarSum(weights),1e-9);
+}
+fn traceRelativeFaceDisplacement(origin:vec3f,spans:vec3f)->vec3f{
+  let initial=sampleRelativeFaceVelocity(origin,vec3f(0.0),spans);
+  let substeps=clamp(i32(ceil(length(initial/spans)*p.frame.x)),1,16);
+  let subDt=p.frame.x/f32(substeps);var displacement=vec3f(0.0);
+  for(var step=0;step<substeps;step+=1){
+    var first=initial;if(step>0){first=sampleRelativeFaceVelocity(origin,displacement,spans);}
+    let midpoint=clipRelativeTransportSegment(origin,displacement,clampRelativeTransportPosition(origin,
+      displacement-0.5*subDt*first,0.5*spans));
+    displacement=clipRelativeTransportSegment(origin,displacement,clampRelativeTransportPosition(origin,
+      displacement-subDt*sampleRelativeFaceVelocity(origin,midpoint,spans),0.5*spans));
+  }
+  return displacement;
+}
+fn sampleRelativeNativeTransportFace(origin:vec3f,displacement:vec3f,axis:u32,width:f32)->f32{
+  var offset=vec3f(0.5);offset[axis]=0.0;
+  let bounded=clamp(displacement,width*offset-origin,vec3f(p.dimensions.xyz)-width*offset-origin);
+  let base=floor(origin/width-offset);
+  let localOrigin=width*(base+offset)-origin;
+  let lower=floor((bounded-localOrigin)/width);
+  var terms:array<f32,8>;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let index=vec3f(f32(corner&1u),f32((corner>>1u)&1u),f32((corner>>2u)&1u));
+    let point=width*(base+lower+index+offset);
+    let basis=max(vec3f(0.0),vec3f(1.0)-abs((point-origin)-bounded)/width);
+    let weight=basis.x*basis.y*basis.z;if(weight<=0.0){continue;}
+    let donor=nativeTransportFaceAt(point,axis,width);var value=donor.x;
+    if(donor.y==0.0){value=sampleRelativeFaceVelocity(point,vec3f(0.0),vec3f(1.0))[axis];}
+    terms[corner]=weight*value;
+  }
+  return transportScalarSum(terms);
+}
+
 fn finishTransportFaceRow(row:u32,characteristic:f32,touchesLiquid:bool){
   // The traced characteristic is the transported face authority. Blending it
   // back toward the old receiver value attenuates a newly wetted front every
@@ -3713,21 +3868,11 @@ fn prepareTransportFaceRow(row:u32){
       }
     }
   }
-  var characteristic=0.0;var departure=rowCenter(row);
-  if(regionWidth>1.0){
-    // Keep the native MAC face lattice for the transported component, but
-    // trace it on a support lattice whose knots do not bisect finer donors.
-    let spans=transportFaceSamplingSpans(row,regionWidth);
-    departure=traceFaceDepartureAtSpans(rowCenter(row),spans);
-    characteristic=sampleFaceVelocitySupportAtSpans(departure,spans)[axis];
-  }else{
-    departure=traceFaceDeparture(rowCenter(row));
-    characteristic=sampleFaceVelocitySupport(departure)[axis];
-  }
-  if(retainFaceDetail){
-    let native=sampleNativeTransportFace(departure,axis,regionWidth);
-    if(native.y!=0.0){characteristic=native.x;}
-  }
+  var spans=vec3f(1.0);
+  if(regionWidth>1.0){spans=transportFaceSamplingSpans(row,regionWidth);}
+  let origin=rowCenter(row);let displacement=traceRelativeFaceDisplacement(origin,spans);
+  var characteristic=sampleRelativeFaceVelocity(origin,displacement,spans)[axis];
+  if(retainFaceDetail){characteristic=sampleRelativeNativeTransportFace(origin,displacement,axis,regionWidth);}
   finishTransportFaceRow(row,characteristic,touchesLiquid);
 }
 // BFA1 is the immutable host-template fast path. Signed frontier rows do not
@@ -3946,15 +4091,15 @@ fn traceGammaAndBeta(@builtin(workgroup_id)wid:vec3u,
       state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]=0.0;}
     else{let center=cellCenter(id);
       var departure=vec3f(0.0);var stencil:TransportStencil;
-      departure=traceEffectiveTransportDeparture(center);
-      stencil=effectiveTransportStencilAtSpans(departure,transportSourceSamplingSpans(id,false));
+      let traced=traceMassStencil(id,-1.0,false);departure=traced.position;stencil=traced.stencil;
       ${phase1QATraceCapture}
       state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]
         =transportDepartureCharacteristicClearance(stencil);
       storeMassDepartureStencil(id,stencil);
-      var visible=0.0;var sampledGamma=0.0;
+      var gammaTerms:array<f32,8>;
       for(var corner=0u;corner<8u;corner+=1u){let cell=stencil.cells[corner];let weight=stencil.weights[corner];
-        visible+=weight;if(cell!=INVALID){sampledGamma+=weight*state[sourceGamma()+cell];}}
+        if(cell!=INVALID){gammaTerms[corner]=weight*state[sourceGamma()+cell];}}
+      let visible=transportScalarSum(stencil.weights);let sampledGamma=transportScalarSum(gammaTerms);
       let advectedGamma=cm12ConditionedGamma(sampledGamma,visible);
       state[destinationGamma()+id]=advectedGamma;
       if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
@@ -3998,9 +4143,8 @@ fn scatterDensityDeficit(@builtin(workgroup_id)wid:vec3u,
     let deficit=max(0.0,1.0-transportBeta(donor));
     if(deficit>1.0/CM12_SPARSE_TRANSPORT_FIXED){
       var visible=0.0;var arrivalStencil:TransportStencil;
-      let arrival=traceEffectiveTransportArrival(cellCenter(donor));
-      arrivalStencil=effectiveTransportStencilAtSpans(arrival,transportSourceSamplingSpans(donor,false));
-      for(var corner=0u;corner<8u;corner+=1u){visible+=arrivalStencil.weights[corner];}
+      arrivalStencil=traceMassStencil(donor,1.0,false).stencil;
+      visible=transportScalarSum(arrivalStencil.weights);
       let donorDensity=state[sourceDensity()+donor];
       let velocityAt=sourceCellVelocity()+4u*donor;
       let donorVelocity=vec3f(state[velocityAt],state[velocityAt+1u],
@@ -4041,7 +4185,9 @@ fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
   }else{
   let advectedGamma=state[destinationGamma()+id];var visible=0.0;
   var rhoNext=0.0;var gammaNext=0.0;var momentumNext=vec3f(0.0);
-  for(var corner=0u;corner<8u;corner+=1u){visible+=massDepartureStencilWeight(id,corner);}
+  var weights:array<f32,8>;var densityTerms:array<f32,8>;var gammaTerms:array<f32,8>;var momentumTerms:array<vec3f,8>;
+  for(var corner=0u;corner<8u;corner+=1u){weights[corner]=massDepartureStencilWeight(id,corner);}
+  visible=transportScalarSum(weights);
   if(visible>1e-9){for(var corner=0u;corner<8u;corner+=1u){
     let cell=massDepartureStencilCell(id,corner);
     let weight=massDepartureStencilWeight(id,corner);if(cell==INVALID||weight<=0.0){continue;}
@@ -4049,10 +4195,11 @@ fn gatherConservativeDensity(@builtin(workgroup_id)wid:vec3u,
       advectedGamma,weight/visible,transportBeta(cell));
     let donorDensity=state[sourceDensity()+cell];
     let velocityAt=sourceCellVelocity()+4u*cell;
-    rhoNext+=coefficient*donorDensity;gammaNext+=coefficient;
-    momentumNext+=coefficient*donorDensity*vec3f(state[velocityAt],
+    densityTerms[corner]=coefficient*donorDensity;gammaTerms[corner]=coefficient;
+    momentumTerms[corner]=coefficient*donorDensity*vec3f(state[velocityAt],
       state[velocityAt+1u],state[velocityAt+2u]);
   }}
+  rhoNext=transportScalarSum(densityTerms);gammaNext=transportScalarSum(gammaTerms);momentumNext=transportVectorSum(momentumTerms);
   rhoNext+=f32(atomicLoad(&conditioning[p.counts.x+id]))/CM12_SPARSE_TRANSPORT_FIXED;
   gammaNext+=f32(atomicLoad(&conditioning[2u*p.counts.x+id]))/CM12_SPARSE_TRANSPORT_FIXED;
   momentumNext+=vec3f(f32(atomicLoad(&conditioning[3u*p.counts.x+id])),
@@ -4128,8 +4275,7 @@ fn traceGammaAndBetaPackedCoarse(@builtin(global_invocation_id)gid:vec3u){
   if(id!=INVALID){if(!cellTransportActive(id)){state[destinationGamma()+id]=1.0;
       state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]=0.0;
     }else{let center=cellCenter(id);
-      let departure=traceEffectiveTransportDepartureDirect(center);
-      let stencil=effectiveTransportStencilAtSpansDirect(departure,transportSourceSamplingSpans(id,true));
+      let traced=traceMassStencil(id,-1.0,true);let departure=traced.position;let stencil=traced.stencil;
       ${phase1QATraceCapture}
       state[TRANSPORT_CHARACTERISTIC_CLEARANCE+id]
         =transportDepartureCharacteristicClearance(stencil);
@@ -4165,8 +4311,7 @@ fn scatterDensityDeficitPackedCoarse(@builtin(global_invocation_id)gid:vec3u){
   if(donor!=INVALID&&cellTransportActive(donor)){
     let deficit=max(0.0,1.0-transportBeta(donor));
     if(deficit>1.0/CM12_SPARSE_TRANSPORT_FIXED){
-      let arrival=traceEffectiveTransportArrivalDirect(cellCenter(donor));
-      let stencil=effectiveTransportStencilAtSpansDirect(arrival,transportSourceSamplingSpans(donor,true));
+      let stencil=traceMassStencil(donor,1.0,true).stencil;
       var visible=0.0;for(var corner=0u;corner<8u;corner+=1u){
         visible+=stencil.weights[corner];}
       let donorDensity=state[sourceDensity()+donor];
@@ -4360,14 +4505,19 @@ fn scatterGammaRow(row:u32,inputRho:u32,inputGamma:u32){
       }
       let conductedVolume=scale*min(pairArea*cellMinimumWidth(negative),
         pairArea*cellMinimumWidth(positive));
-      let fluxIntoNegative=cm12GammaDiffusionFluxInto(
-        state[inputRho+negative],state[inputGamma+negative],
-        state[inputRho+positive],state[inputGamma+positive],
-        conductedVolume/cellVolume(negative));
-      let rhoReceipt=i32(round(fluxIntoNegative.x*cellVolume(negative)
-        *cm12PhysicalMassFixedScale()));
-      let gammaReceipt=i32(round(fluxIntoNegative.y*cellVolume(negative)
-        *cm12PhysicalMassFixedScale()));
+      // Integrate one nonnegative high-gamma -> low-gamma mass transfer,
+      // then assign its integer sign. Normalizing by the negative-side cell
+      // volume and multiplying back made rounding depend on face orientation.
+      let fromPositive=state[inputGamma+positive]>state[inputGamma+negative];
+      let donor=select(negative,positive,fromPositive);
+      let receiver=select(positive,negative,fromPositive);
+      let integrated=cm12GammaDiffusionFluxInto(
+        state[inputRho+receiver],state[inputGamma+receiver],
+        state[inputRho+donor],state[inputGamma+donor],conductedVolume);
+      let rhoMagnitude=i32(round(integrated.x*cm12PhysicalMassFixedScale()));
+      let gammaMagnitude=i32(round(integrated.y*cm12PhysicalMassFixedScale()));
+      let rhoReceipt=select(-rhoMagnitude,rhoMagnitude,fromPositive);
+      let gammaReceipt=select(-gammaMagnitude,gammaMagnitude,fromPositive);
       atomicAdd(&conditioning[negative],rhoReceipt);
       atomicAdd(&conditioning[p.counts.x+negative],gammaReceipt);
       atomicAdd(&conditioning[positive],-rhoReceipt);
@@ -4449,7 +4599,16 @@ fn sharpeningStats(cell:u32)->SharpeningStats{
     for(var term=begin;term<end;term+=1u){let coefficient=termCoefficient(term);
       if(own*coefficient>=0.0){continue;}let neighbor=termCell(term);
       if(!cellActive(neighbor)){continue;}
-      let neighborRho=conditionedDensity(neighbor);
+      var neighborRho=conditionedDensity(neighbor);
+      if(rowKind(row)==2u){
+        // A 2:1 neighbour centre is also displaced along the face. Its raw
+        // value therefore mixes tangential variation into this normal
+        // derivative. Evaluate the existing affine-exact density interpolant
+        // at the neighbour's normal coordinate, aligned with this cell's
+        // tangential coordinates, before applying the CM12 upwind stencil.
+        var aligned=cellCenter(cell);aligned[axis]=cellCenter(neighbor)[axis];
+        neighborRho=sampleSharpeningDensity(aligned);
+      }
       result.maximumDifference=max(result.maximumDifference,abs(rho-neighborRho));
       if(own<0.0){result.positiveArea[axis]+=area;
         result.positiveDensity[axis]+=area*neighborRho;
@@ -5320,14 +5479,14 @@ fn publishPressureCoefficientCell(cell:u32){
   // for every cell in the solve; mixing it with the immutable host edge image
   // gives opposite sides different off-diagonals and makes PCG non-symmetric.
   if(cell>=ta(2u)||cm12WorldHasDynamicLeaves()){
-    var dynamicDiagonal=0.0;
+    var dynamicDiagonalAxes=vec3f(0.0);
     if(isActive){for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
       let row=incidenceRow(at);let theta=state[p.stateOffsets3.x+row];
       if(!pcmRowContains(row)||theta<=0.0){continue;}
       let coefficient=termCoefficient(incidenceTerm(at));
-      dynamicDiagonal+=rowDualWeight(row)*coefficient*coefficient/theta;
+      dynamicDiagonalAxes[rowAxis(row)]+=rowDualWeight(row)*coefficient*coefficient/theta;
     }}
-    state[p.stateOffsets2.z+cell]=dynamicDiagonal;return;
+    state[p.stateOffsets2.z+cell]=(dynamicDiagonalAxes.x+dynamicDiagonalAxes.y)+dynamicDiagonalAxes.z;return;
   }
   let edgeRange=cm12HotDirectedEdgeRange(cell);
   if(edgeRange.x==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,cell);return;}
@@ -5374,7 +5533,7 @@ fn publishPressureCoefficientCell(cell:u32){
     if(changed){atomicAdd(&topologyArena[PCF_BASE+PCF_H_CHANGED_EDGES],1u);}
     if(changed){pcfAggregateFineEdgeChanged(cell,edgeId);}
   }
-  var diagonal=0.0;
+  var diagonalAxes=vec3f(0.0);
   if(isActive){
     let range=cm12HotIncidenceRange(cell);
     if(range.x==PCF_INVALID){pcfFault(PCF_FAULT_TOPOLOGY,cell);return;}
@@ -5384,9 +5543,10 @@ fn publishPressureCoefficientCell(cell:u32){
       let theta=state[p.stateOffsets3.x+row];
       if(!pcmRowContains(row)||theta<=0.0){continue;}
       let coefficient=cm12HotRowTermCoefficient(row,incidence.y);
-      diagonal+=cm12HotRowDualWeight(row)*coefficient*coefficient/theta;
+      diagonalAxes[rowAxis(row)]+=cm12HotRowDualWeight(row)*coefficient*coefficient/theta;
     }
   }
+  let diagonal=(diagonalAxes.x+diagonalAxes.y)+diagonalAxes.z;
   if(!pcfFinite(diagonal)){pcfFault(PCF_FAULT_NONFINITE,cell);return;}
   let old=bitcast<u32>(state[p.stateOffsets2.z+cell]);
   state[p.stateOffsets2.z+cell]=diagonal;
@@ -5464,6 +5624,18 @@ fn stablePressurePrefix(lane:u32,flag:u32)->u32{
   return pressurePrefix[lane]-flag;
 }
 
+// Ando & Batty 2020, equations (21) and (25): retain the signs of the
+// gradient stencil when a free surface cuts a T-junction. Averaging liquid
+// and air distances separately loses the tangential cancellation. On a
+// two-cell face this is exactly the ordinary inverse ghost-fluid fraction.
+// The existing CM12 theta minimum also bounds the reciprocal at a pole;
+// no new tolerance or scene policy enters this geometric coefficient.
+fn mixedSurfacePressureFactor(fullPhiGradient:f32,liquidPhiGradient:f32)->f32{
+  if(fullPhiGradient==0.0){return 0.0;}
+  if(liquidPhiGradient==0.0){return 1.0/CM12_GHOST_FLUID_THETA_MIN;}
+  return clamp(fullPhiGradient/liquidPhiGradient,0.0,1.0/CM12_GHOST_FLUID_THETA_MIN);
+}
+
 fn classifyPressureRow(row:u32)->bool{
   // Retirement may deactivate a brick after the accepted list was published;
   // keep this dynamic fence even though physical row topology is immutable.
@@ -5487,6 +5659,7 @@ fn classifyPressureRow(row:u32)->bool{
   var liquidCount=0u;var airCount=0u;var liquidPhiSum=0.0;var liquidWeight=0.0;
   var airPhiSum=0.0;var airWeight=0.0;
   var liquidCenterYSum=0.0;var airCenterYSum=0.0;
+  var fullPhiGradient=0.0;var liquidPhiGradient=0.0;
   for(var at=begin;at<end;at+=1u){let cell=termCell(at);let w=abs(termCoefficient(at));
     // Density-derived phi uses each cell's own width as its distance unit. Convert
     // both sides to the same units before interpolating the pressure boundary.
@@ -5496,6 +5669,8 @@ fn classifyPressureRow(row:u32)->bool{
     let phi=(CM12_LIQUID_ISOVALUE-pressureDensity(cell))
       *select(cellWidths(cell)[rowAxis(row)],1.0,rowKind(row)==3u);
     let liquid=pcmCellContains(cell);
+    let signedPhi=termCoefficient(at)*phi;
+    fullPhiGradient+=signedPhi;if(liquid){liquidPhiGradient+=signedPhi;}
     if(liquid){liquidCount+=1u;liquidPhiSum+=w*phi;liquidWeight+=w;
       liquidCenterYSum+=w*cellCenter(cell).y;
     }else{airCount+=1u;airPhiSum+=w*phi;airWeight+=w;
@@ -5524,6 +5699,13 @@ fn classifyPressureRow(row:u32)->bool{
       theta=clamp((height-liquidCenterY)/(airCenterY-liquidCenterY),
         CM12_GHOST_FLUID_THETA_MIN,1.0);
     }
+  }
+  if(cut&&rowKind(row)==2u){
+    let factor=mixedSurfacePressureFactor(fullPhiGradient,liquidPhiGradient);
+    // A zero response is still an incident pressure face: its current flux
+    // participates in the RHS, while its pressure correction and stiffness
+    // vanish. PCM membership distinguishes this from an excluded face.
+    theta=0.0;if(factor>0.0){theta=1.0/factor;}
   }
   state[p.stateOffsets3.x+row]=theta;
   atomicAdd(&activity[PRESSURE_ACTIVE_ROW_COUNT],1u);
@@ -5603,61 +5785,53 @@ fn initializeJacobiDirection(@builtin(global_invocation_id)gid:vec3u,
   reducePair(lid.x,wid.x,gamma,rhs2);
 }
 
-fn applyOperator(cell:u32,inputOffset:u32)->f32{
-  // The pressure epoch assembles the diagonal from canonical row incidence,
-  // so every non-interior off-diagonal must come from that same graph. A
-  // runtime page joins an authored boundary by replacing the boundary cell's
-  // exterior incidence with a two-sided row; the old directed-edge cache has
-  // no address for that neighbour and made the two halves of A disagree.
-  // Keep only the topology-certified arithmetic interior as a fast path.
-  var result=state[p.stateOffsets2.z+cell]*state[inputOffset+cell];
-  if(cell<ta(2u)){
-    let edgeOffsets=pressureTemplateWord(15u);
-    let begin=pressureTemplateWord(edgeOffsets+cell);
-    let end=pressureTemplateWord(edgeOffsets+cell+1u);
-    let strides=pressureImplicitInteriorStrides(cell);
-    // The certificate proves canonical neighbours and exact -rung weights.
-    if(strides.x!=INVALID&&end-begin==6u&&!hasSolidBoundaries()){
-      let weight=-f32(strides.y);
-      let nx=cell-1u;let px=cell+1u;
-      let ny=cell-strides.y;let py=cell+strides.y;
-      let nz=cell-strides.z;let pz=cell+strides.z;
-      result+=select(0.0,weight,peiPressureCellMember(nx))*state[inputOffset+nx];
-      result+=select(0.0,weight,peiPressureCellMember(px))*state[inputOffset+px];
-      result+=select(0.0,weight,peiPressureCellMember(ny))*state[inputOffset+ny];
-      result+=select(0.0,weight,peiPressureCellMember(py))*state[inputOffset+py];
-      result+=select(0.0,weight,peiPressureCellMember(nz))*state[inputOffset+nz];
-      result+=select(0.0,weight,peiPressureCellMember(pz))*state[inputOffset+pz];
-      return result;
-    }
+fn pressureRowGradient(row:u32,inputOffset:u32)->f32{
+  let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+  if(end-begin==2u&&termCoefficient(begin)==-termCoefficient(begin+1u)){
+    let a=termCell(begin);let b=termCell(begin+1u);
+    let pa=select(0.0,state[inputOffset+a],peiPressureCellMember(a));
+    let pb=select(0.0,state[inputOffset+b],peiPressureCellMember(b));
+    return termCoefficient(begin+1u)*(pb-pa);
   }
+  var jump=0.0;
+  for(var term=begin;term<end;term+=1u){let cell=termCell(term);
+    if(peiPressureCellMember(cell)){jump+=termCoefficient(term)*state[inputOffset+cell];}
+  }
+  return jump;
+}
+
+fn applyOperator(cell:u32,inputOffset:u32)->f32{
+  // Evaluate G^T W G as face pressure differences. Expanding it into a
+  // large diagonal product plus negative neighbours cancels hydrostatic
+  // pressure and introduces an orientation-dependent rounding error.
+  var negative=vec3f(0.0);var positive=vec3f(0.0);
   for(var incidence=incidenceBegin(cell);incidence<incidenceEnd(cell);incidence+=1u){
     let row=incidenceRow(incidence);let theta=state[p.stateOffsets3.x+row];
     if(!pcmRowContains(row)||theta<=0.0){continue;}
-    let ownTerm=incidenceTerm(incidence);
-    let ownCoefficient=termCoefficient(ownTerm);
-    let rowBegin=rowTermOffset(row);let rowEnd=rowBegin+rowTermCount(row);
-    for(var term=rowBegin;term<rowEnd;term+=1u){let other=termCell(term);
-      if(other==cell||!peiPressureCellMember(other)){continue;}
-      result+=rowDualWeight(row)*ownCoefficient*termCoefficient(term)
-        *state[inputOffset+other]/theta;
-    }
+    let ownCoefficient=termCoefficient(incidenceTerm(incidence));
+    let jump=pressureRowGradient(row,inputOffset);
+    let contribution=rowDualWeight(row)*ownCoefficient*jump/theta;
+    if(ownCoefficient>0.0){negative[rowAxis(row)]+=contribution;}
+    else{positive[rowAxis(row)]+=contribution;}
   }
-  return result;
+  let axisTerms=min(negative,positive)+max(negative,positive);
+  return (axisTerms.x+axisTerms.y)+axisTerms.z;
 }
 @compute @workgroup_size(64)
 fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
   let id=pressureCellInvocation(gid.x);if(id==INVALID){return;}
   let rho=pressureDensity(id);
-  var rhs=0.0;let diagonal=state[p.stateOffsets2.z+id];
+  var negative=vec3f(0.0);var positive=vec3f(0.0);let diagonal=state[p.stateOffsets2.z+id];
   for(var at=incidenceBegin(id);at<incidenceEnd(id);at+=1u){
-    let row=incidenceRow(at);let theta=state[p.stateOffsets3.x+row];
-    if(theta<=0.0){continue;}
+    let row=incidenceRow(at);
+    if(!pcmRowContains(row)){continue;}
     let coefficient=termCoefficient(incidenceTerm(at));
     let fluxWeight=select(rowDualWeight(row),rowStaticDualWeight(row),
       hasSolidBoundaries());
-    rhs+=coefficient*fluxWeight*state[destinationFaceVelocity()+row];
+    let value=coefficient*fluxWeight*state[destinationFaceVelocity()+row];
+    if(coefficient>0.0){negative[rowAxis(row)]+=value;}else{positive[rowAxis(row)]+=value;}
   }
+  let rhsAxes=min(negative,positive)+max(negative,positive);
   // Preserve the paper's one-sided excess-volume source. Submerged pressure
   // membership is retained above to prevent interior p=0 holes, but an
   // under-density cell is not a pressure-volume sink: imposing the opposite
@@ -5665,7 +5839,7 @@ fn preparePressure(@builtin(global_invocation_id)gid:vec3u){
   let targetDivergence=cm12VolumeCorrectionDivergence(
     rho,p.frame.y*cellMinimumWidth(id),p.frame.x);
   let controlVolume=cellOpenVolume(id);
-  state[p.stateOffsets2.y+id]=rhs+controlVolume*targetDivergence;
+  state[p.stateOffsets2.y+id]=(rhsAxes.x+rhsAxes.y)+rhsAxes.z+controlVolume*targetDivergence;
   state[p.stateOffsets2.z+id]=diagonal;
 }
 
@@ -6176,12 +6350,10 @@ fn reduceCurvatureRecovery(@builtin(local_invocation_id)lid:vec3u){
 fn projectPressureRow(row:u32){
   let separating=rowSeparatingFromClosedWorld(row);
   let theta=state[p.stateOffsets3.x+row];
-  if(theta<=0.0||(!separating&&rowArea(row)<=1e-8)){
+  if(theta<=0.0){return;}
+  if(!separating&&rowArea(row)<=1e-8){
     state[destinationFaceVelocity()+row]=select(0.0,rowSolidVelocity(row),hasSolidBoundaries());return;}
-  var jump=0.0;let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
-  for(var at=begin;at<end;at+=1u){let cell=termCell(at);
-    if(peiPressureCellMember(cell)){
-    jump+=termCoefficient(at)*state[p.stateOffsets2.x+cell];}}
+  let jump=pressureRowGradient(row,p.stateOffsets2.x);
   let pressureOpen=select(1.0,rowPressureOpenFraction(row),hasSolidBoundaries());
   state[destinationFaceVelocity()+row]-=pressureOpen*jump/theta;
 }
@@ -9901,7 +10073,7 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
       BRICK_FINE_RESOLUTION*span/PRESENTATION_PAGE_RESOLUTION,span>1u);
     let brickOrigin=brickCoordinate*i32(BRICK_FINE_RESOLUTION);
     let pageOrigin=brickOrigin+pageOffset;let resolution=acceptedBrickResolution(brick);
-    let scale=BRICK_FINE_RESOLUTION*span/resolution;
+    let scale=presentationHorizontalVolumeScale(brick,BRICK_FINE_RESOLUTION*span/resolution);
     var patchFirst=vec3i(0);var patchDimensions=vec3u(1u);
     var cacheFirst=vec3i(0);var cacheDimensions=vec3u(1u);var cacheCount=0u;
     // Cache by native stencil extent, including macro pages. Their samples
@@ -9915,7 +10087,7 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
       let lastShifted=(vec3f(lastQ)+vec3f(0.5))/scaleF;
       patchFirst=vec3i(floor(firstShifted));
       patchDimensions=vec3u(vec3i(floor(lastShifted))-patchFirst)+vec3u(1u);
-      cacheFirst=patchFirst-vec3i(1,3,1);cacheDimensions=patchDimensions+vec3u(2u,6u,2u);
+      cacheFirst=patchFirst-vec3i(2,3,2);cacheDimensions=patchDimensions+vec3u(4u,6u,4u);
       cacheCount=cacheDimensions.x*cacheDimensions.y*cacheDimensions.z;
     }
     cm12PresentationBrick=brick;cm12PresentationPage=page;
@@ -10106,7 +10278,7 @@ fn surfaceProofDensityAt(restrictedLocal:vec3i)->f32{
   return surfaceProofDensity[index.x+SURFACE_PROOF_DENSITY_AXIS
     *(index.y+SURFACE_PROOF_DENSITY_AXIS*index.z)];
 }
-fn surfaceProofVirtualColumnPhi(coarse:vec3i,factor:u32)->f32{
+fn surfaceProofVirtualInteriorColumnPhi(coarse:vec3i,factor:u32)->f32{
   let baseY=cm12PresentationBrickOrigin.y/i32(factor);
   let cellsY=i32(p.dimensions.y/factor);var rho:array<f32,5>;
   for(var at=0u;at<5u;at+=1u){
@@ -10123,14 +10295,30 @@ fn surfaceProofVirtualColumnPhi(coarse:vec3i,factor:u32)->f32{
   rho[4]=min(rho[4],rho[3]);
   return f32(factor)*presentationResolvedColumnPhi(rho);
 }
+fn surfaceProofVirtualColumnPhi(coarse:vec3i,factor:u32)->f32{
+  let origin=cm12PresentationBrickOrigin/i32(factor);
+  let count=vec3i(p.dimensions.xyz/factor);
+  let cx=presentationColumnContinuation(origin.x+coarse.x,count.x);
+  let cz=presentationColumnContinuation(origin.z+coarse.z,count.z);
+  let wx=presentationContinuationWeights(cx.w);let wz=presentationContinuationWeights(cz.w);
+  var value=0.0;
+  for(var z=0;z<cz.z;z+=1){for(var x=0;x<cx.z;x+=1){
+    value+=wx[x]*wz[z]*surfaceProofVirtualInteriorColumnPhi(
+      vec3i(cx.x+x*cx.y-origin.x,coarse.y,cz.x+z*cz.y-origin.z),factor);
+  }}
+  return value;
+}
 fn surfaceProofVirtualVolumePhi(local:vec3i,factor:u32)->f32{
   let position=(vec3f(local)+vec3f(0.5))/f32(factor)-vec3f(0.5);
-  let lower=vec3i(floor(position));let t=fract(position);var phi=0.0;
-  for(var dz=0;dz<2;dz+=1){for(var dy=0;dy<2;dy+=1){for(var dx=0;dx<2;dx+=1){
-    let weight=select(1.0-t.x,t.x,dx==1)*select(1.0-t.y,t.y,dy==1)
-      *select(1.0-t.z,t.z,dz==1);
-    phi+=weight*surfaceProofVirtualColumnPhi(lower+vec3i(dx,dy,dz),factor);
-  }}}
+  let center=vec3i(floor(position+vec3f(0.5)));
+  let lowerY=i32(floor(position.y));let ty=fract(position.y);
+  let wx=presentationVolumeWeights(position.x-f32(center.x));
+  let wz=presentationVolumeWeights(position.z-f32(center.z));var phi=0.0;
+  for(var z=0;z<5;z+=1){for(var x=0;x<5;x+=1){
+    let at=vec3i(center.x+x-2,lowerY,center.z+z-2);
+    phi+=wx[x]*wz[z]*mix(surfaceProofVirtualColumnPhi(at,factor),
+      surfaceProofVirtualColumnPhi(at+vec3i(0,1,0),factor),ty);
+  }}
   return phi;
 }
 fn surfaceProofAcceptedPhi(local:vec3i,densityOffset:u32)->f32{
@@ -10345,6 +10533,44 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     surfaceProofPhi[index]=vec2f(fine,coarse);
   }
   workgroupBarrier();
+  // A demotion must satisfy the curvature criterion at the proposed rung,
+  // not only resemble the currently published contour. Otherwise restriction
+  // can immediately request its inverse refinement, repeatedly remapping a
+  // stationary interface. Reuse the virtual restricted-density cache.
+  var normalMin=vec3f(1e30);var normalMax=vec3f(-1e30);
+  if(coarseFirstEnabled()){
+    let n=targetResolution;
+    let samples=select(n*n*n,7u,n==1u);
+    for(var index=lane;index<samples;index+=64u){
+      var q=vec3i(i32(index%n),i32((index/n)%n),i32(index/(n*n)));
+      if(n==1u){q=vec3i(0);if(index>0u){q[(index-1u)/2u]=select(-1,1,(index&1u)==0u);}}
+      let rho=surfaceProofDensityAt(q);var hasInterface=rho>0.0&&rho<1.0;
+      var gradient=vec3f(0.0);
+      for(var axis=0u;axis<3u;axis+=1u){
+        var d=vec3i(0);d[axis]=1;
+        let lo=surfaceProofDensityAt(q-d);let hi=surfaceProofDensityAt(q+d);
+        hasInterface=hasInterface||((lo>=0.5)!=(rho>=0.5))||((hi>=0.5)!=(rho>=0.5));
+        gradient[axis]=hi-lo;
+      }
+      let magnitude=length(gradient);
+      if(hasInterface&&magnitude>0.05){let normal=gradient/magnitude;
+        normalMin=min(normalMin,normal);normalMax=max(normalMax,normal);}
+    }
+  }
+  activityNormalMinimum[lane]=normalMin;activityNormalMaximum[lane]=normalMax;
+  workgroupBarrier();
+  for(var stride=32u;stride>0u;stride/=2u){
+    if(lane<stride){
+      activityNormalMinimum[lane]=min(activityNormalMinimum[lane],activityNormalMinimum[lane+stride]);
+      activityNormalMaximum[lane]=max(activityNormalMaximum[lane],activityNormalMaximum[lane+stride]);
+    }workgroupBarrier();
+  }
+  if(lane==0u&&coarseFirstEnabled()){
+    let diameter=length(max(vec3f(0.0),activityNormalMaximum[0]-activityNormalMinimum[0]));
+    if(diameter/f32(targetResolution)>p.coarseFirst.z){
+      atomicOr(&surfaceProofFailure,16u);atomicStore(&surfaceProofValid,0u);
+    }
+  }
   for(var index=lane;index<PRESENTATION_SAMPLES_PER_PAGE;index+=64u){
     let z=index/64u;let remainder=index-z*64u;
     let y=remainder/8u;let x=remainder-y*8u;
@@ -10423,7 +10649,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   let brickOrigin=brickCoordinate*i32(BRICK_FINE_RESOLUTION);
   let pageOrigin=brickOrigin+pageOffset;
   let resolution=acceptedBrickResolution(brick);
-  let scale=BRICK_FINE_RESOLUTION*span/resolution;
+  let scale=presentationHorizontalVolumeScale(brick,BRICK_FINE_RESOLUTION*span/resolution);
   var patchFirst=vec3i(0);var patchDimensions=vec3u(1u);
   var cacheFirst=vec3i(0);var cacheDimensions=vec3u(1u);var cacheCount=0u;
   if(scale>1u){
@@ -10433,7 +10659,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
     let lastShifted=(vec3f(lastQ)+vec3f(0.5))/scaleF;
     patchFirst=vec3i(floor(firstShifted));
     patchDimensions=vec3u(vec3i(floor(lastShifted))-patchFirst)+vec3u(1u);
-    cacheFirst=patchFirst-vec3i(1,3,1);cacheDimensions=patchDimensions+vec3u(2u,6u,2u);
+    cacheFirst=patchFirst-vec3i(2,3,2);cacheDimensions=patchDimensions+vec3u(4u,6u,4u);
     cacheCount=cacheDimensions.x*cacheDimensions.y*cacheDimensions.z;
   }
   let cacheFits=cacheCount<=PRESENTATION_CACHE_CAPACITY;

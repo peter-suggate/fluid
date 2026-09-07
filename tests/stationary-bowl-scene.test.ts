@@ -24,7 +24,8 @@ test("stationary bowl is a selectable scene with its own still-water profile", (
   const changed = { ...scene.fluid.initialHeightField!, baseHeight_m: .9 };
   const edited = parseQueryState(`?scene=stationary-bowl&scene.fluid.initialHeightField=${encodeURIComponent(JSON.stringify(changed))}`);
   assert.deepEqual(edited.scene.fluid.initialHeightField, changed);
-  scene.fluid.initialHeightField!.curvatureX_mInv = -1;
+  assert.equal(scene.fluid.initialHeightField!.kind, "quadratic");
+  if (scene.fluid.initialHeightField!.kind === "quadratic") scene.fluid.initialHeightField!.curvatureX_mInv = -1;
   assert.ok(validateScene(scene).some(e => e.includes("height field")));
 });
 

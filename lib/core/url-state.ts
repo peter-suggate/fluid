@@ -67,6 +67,8 @@ const sceneQueryPaths = [
   "fluid.gravity_m_s2.z",
   "fluid.initialCondition",
   "fluid.initialHeightField",
+  "fluid.refinementKeyframes",
+  "fluid.initialVelocity_m_s",
   "fluid.inflow",
   // Analytic terrain round-trips as an atomic blob. A sculpted terrain grid is
   // far too large for a URL and belongs to the scene library; painted water was

@@ -25,7 +25,7 @@ try {
   device.createShaderModule=d=>{hashes[d.label??String(Object.keys(hashes).length)]=createHash('sha256').update(d.code).digest('hex');return compile(d);};
   for(const arm of ['control','additive','split','flat-split']) {
     const scene=sceneDocument(getSceneDefinition('stationary-bowl'));
-    if(arm==='flat-split') {scene.fluid.initialHeightField!.curvatureX_mInv=0;scene.fluid.initialHeightField!.curvatureZ_mInv=0;}
+    if(arm==='flat-split' && scene.fluid.initialHeightField?.kind === 'quadratic') {scene.fluid.initialHeightField!.curvatureX_mInv=0;scene.fluid.initialHeightField!.curvatureZ_mInv=0;}
     const dt=scene.numerics.fixedDt_s=scene.numerics.maxDt_s=1/60;
     // Preserve the original unconditioned before/after diagnostic independently of UI defaults.
     const options=adaptiveMassSolverOptions({...getSceneDefinition('stationary-bowl').methodProfile!.overrides,

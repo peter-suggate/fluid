@@ -1,7 +1,7 @@
 import type { SceneDescription } from "./model";
 
 /** A construction-time liquid surface in world metres, not a simulation constraint. */
-export interface InitialLiquidHeightField {
+export interface QuadraticLiquidHeightField {
   kind: "quadratic";
   baseHeight_m: number;
   center_m: { x: number; z: number };
@@ -9,7 +9,18 @@ export interface InitialLiquidHeightField {
   curvatureZ_mInv: number;
 }
 
+export interface CosineLiquidHeightField {
+  kind: "cosine";
+  baseHeight_m: number;
+  amplitude_m: number;
+  wavelength_m: number;
+  originX_m: number;
+}
+export type InitialLiquidHeightField = QuadraticLiquidHeightField | CosineLiquidHeightField;
+
 export function initialHeightFieldHeight(field: InitialLiquidHeightField, x: number, z: number): number {
+  if (field.kind === "cosine") return field.baseHeight_m + field.amplitude_m
+    * Math.cos(2 * Math.PI * (x - field.originX_m) / field.wavelength_m);
   return field.baseHeight_m + field.curvatureX_mInv * (x - field.center_m.x) ** 2
     + field.curvatureZ_mInv * (z - field.center_m.z) ** 2;
 }
@@ -17,6 +28,15 @@ export function initialHeightFieldHeight(field: InitialLiquidHeightField, x: num
 /** Bounds for a convex quadratic over an axis-aligned horizontal footprint. */
 export function initialHeightFieldRange(field: InitialLiquidHeightField,
   x0: number, x1: number, z0: number, z1: number): readonly [number, number] {
+  if (field.kind === "cosine") {
+    const values = [initialHeightFieldHeight(field,x0,z0), initialHeightFieldHeight(field,x1,z0)];
+    const halfWave = field.wavelength_m / 2;
+    const first = Math.ceil((x0-field.originX_m)/halfWave);
+    const last = Math.floor((x1-field.originX_m)/halfWave);
+    if (last >= first) values.push(field.baseHeight_m + field.amplitude_m * (first % 2 === 0 ? 1 : -1));
+    if (last > first) values.push(field.baseHeight_m - field.amplitude_m * (first % 2 === 0 ? 1 : -1));
+    return [Math.min(...values),Math.max(...values)];
+  }
   const cx = Math.max(x0, Math.min(x1, field.center_m.x));
   const cz = Math.max(z0, Math.min(z1, field.center_m.z));
   return [initialHeightFieldHeight(field, cx, cz), Math.max(

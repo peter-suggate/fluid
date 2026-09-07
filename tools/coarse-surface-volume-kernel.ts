@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 export async function sampleCoarseBowlVolumeKernel(device: GPUDevice, nx: number, ny: number,
   nz: number, h: number, width: number, phase: number): Promise<Float32Array> {
   const source = await readFile(new URL("../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts", import.meta.url), "utf8");
-  const functions = ["presentationResolvedColumnPhi", "presentationCoarseColumnPhi", "presentationInterpolatedVolumePhi"].map(name => {
+  const functions = ["presentationResolvedColumnPhi", "presentationInteriorColumnPhi", "presentationColumnContinuation", "presentationContinuationWeights", "presentationCoarseColumnPhi", "presentationVolumeWeights", "presentationInterpolatedVolumePhi"].map(name => {
     const fn = source.match(new RegExp(`fn ${name}\\([\\s\\S]*?\\n}`))?.[0];
     assert.ok(fn, `production ${name}`); return fn;
   }).join("\n");
@@ -16,6 +16,7 @@ struct Params{dimensions:vec4u,frame:vec4f}
 const p=Params(vec4u(${nx},${ny},${nz},0),vec4f(0,${h},0,0));
 const CM12_LIQUID_ISOVALUE=.5;
 const cm12PresentationBrick=0u;
+fn brickHasUnclippedWorldGeometry(brick:u32)->bool{_=brick;return false;}
 // This fixture uses bounded interior cells, with the ordinary closed-tank
 // canonicalization. Dynamic-world continuation is intentionally absent.
 fn presentationCanonicalCoarseCoordinate(q:vec3i,scale:u32,brick:u32)->vec3i{

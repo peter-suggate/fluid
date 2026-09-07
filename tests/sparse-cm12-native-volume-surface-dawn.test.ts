@@ -52,7 +52,11 @@ fn presentationStencilDensityAt(q:vec3i,scale:u32,first:vec3i,dims:vec3u,fits:bo
 }
 ${functionSource("presentationResolvedColumnPhi")}
 ${functionSource("presentationCanonicalCoarseCoordinate")}
+${functionSource("presentationInteriorColumnPhi")}
+${functionSource("presentationColumnContinuation")}
+${functionSource("presentationContinuationWeights")}
 ${functionSource("presentationCoarseColumnPhi")}
+${functionSource("presentationVolumeWeights")}
 ${functionSource("presentationInterpolatedVolumePhi")}
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id)gid:vec3u){

@@ -13,6 +13,7 @@ import {
   HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
 } from "./hero-garden-stress-scene";
 import { studioStageCamera } from "./studio-stage-scene";
+import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWaveScene } from "./analytic-motion-scenes";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
@@ -2391,6 +2392,45 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createGardenSvoLightingScene,
     camera: gardenCamera,
   }),
+  ...(["translation", "free-fall"] as const).map(motion => defineScene({
+    id: `coarse-surface-${motion}`,
+    name: motion === "translation" ? "Coarse surface · translation" : "Coarse surface · free fall",
+    blurb: motion === "translation"
+      ? "A small liquid rectangle moves down at 0.4 m/s with zero gravity. Its flat surface crosses fixed coarse and fine halves: expect unchanged shape and 0.20 m descent after 0.5 s."
+      : "The same mixed-resolution rectangle falls from rest. Before contact, expect y = y₀ − ½gt², uniform downward velocity and no deformation. The 0.3 s run ends above the floor.",
+    audience: "validation", shelf: "Analytic motion", environment: "stage",
+    build: () => createAnalyticMotionScene(motion),
+    camera: { distance_m: 2.6, target_m: { x: 0, y: .8, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
+    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+      selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
+      gammaDiffusion: "on", surfaceSharpening: "on",
+    } },
+  })),
+  defineScene({
+    id: "coarse-surface-free-fall-rerung", name: "Coarse surface · free fall with refinement",
+    blurb: "The falling rectangle swaps its coarse and fine halves at 0.1 s and swaps back at 0.2 s. Expect the same ballistic motion, with no mass or velocity jumps during refinement and coarsening.",
+    audience: "validation", shelf: "Analytic motion", environment: "stage",
+    build: createRerungFreeFallScene,
+    camera: { distance_m: 2.6, target_m: { x: 0, y: .8, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
+    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+      selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
+      gammaDiffusion: "on", surfaceSharpening: "on",
+    } },
+  }),
+  ...([false, true] as const).map(live => defineScene({
+    id: live ? "coarse-surface-standing-wave-live" : "coarse-surface-standing-wave",
+    name: live ? "Coarse surface · standing wave, live refinement" : "Coarse surface · standing wave",
+    blurb: live
+      ? "A gentle standing wave with coarse-first choosing resolution as it moves. Compare its period and amplitude with the fixed-resolution wave; watch the surface refine and coarsen."
+      : "A 3 cm cosine disturbance sloshes across a narrow 1.6 m tank, with a fixed B2/B4 seam away from the centre. Expect one oscillation in about 1.58 s and unchanged mean depth.",
+    audience: "validation", shelf: "Analytic motion", environment: "stage",
+    build: () => createStandingWaveScene(live),
+    camera: { distance_m: 2.6, target_m: { x: 0, y: .5, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
+    methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
+      selectorMode: "coarse-first", maximumMacroSpanBricks: "1", timeStep: "scene",
+      curvatureTolerance: .05, gammaDiffusion: "on", surfaceSharpening: "on",
+    } },
+  })),
   ...([1, 2] as const).map((curvatureMultiplier) => defineScene({
     id: curvatureMultiplier === 2 ? "stationary-bowl-2x" : "stationary-bowl",
     name: curvatureMultiplier === 2 ? "Stationary bowl · 2× curvature" : "Stationary bowl",

@@ -80,6 +80,11 @@ export function sceneRefinementRegions(
   return authored.slice(0, OCTREE_REFINEMENT_REGION_CAPACITY);
 }
 
+/** Last authored keyframe at the accepted simulation time. Omission leaves live regions alone. */
+export function refinementKeyframeAt(scene: SceneDescription, time_s: number) {
+  return scene.fluid.refinementKeyframes?.findLast(frame => frame.time_s <= time_s + 1e-9);
+}
+
 /** An id no existing region uses, stable and readable in a saved document. */
 export function nextRefinementRegionId(scene: SceneDescription): string {
   const taken = new Set(sceneRefinementRegions(scene).map((region) => region.id));

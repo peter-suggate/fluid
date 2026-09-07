@@ -328,7 +328,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
   var valid=false;
   if(selected){
     valid=cm12ExtensionPacketInputValid(lane);
-    if(!valid){var velocity=vec3f(0.0);var weight=0.0;
+    if(!valid){var terms:array<vec4f,6>;
       let q=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
       let leafLocal=cm12ExtensionPacketLocal+q;
       if(!hasStaticSolidVoxels()&&cm12ExtensionLeafScale!=0u
@@ -343,7 +343,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
           let neighbor=neighbors[ordinal];
           if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
             >=cm12ExtensionDepth()){continue;}
-          velocity+=w*cm12EffectiveTransportVelocity(neighbor).xyz;weight+=w;
+          terms[ordinal]=w*vec4f(cm12EffectiveTransportVelocity(neighbor).xyz,1.0);
         }
       }else{
         let incidences=cm12HotIncidenceRange(cell);
@@ -351,6 +351,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
           let incidence=cm12HotIncidence(incidences.x+local);let row=incidence.x;
           if(row==cm12ExtensionInvalid||!cm12VelocityExtensionRowOpen(row)){continue;}
           let termCount=cm12HotRowTermCount(row);
+          let side=2u*rowAxis(row)+select(0u,1u,cm12HotRowTermCoefficient(row,incidence.y)<0.0);
           if(termCount==2u){
             let ordinal=incidence.y^1u;
             let neighbor=cm12HotRowTermCell(row,ordinal);
@@ -358,8 +359,7 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
             if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
               >=cm12ExtensionDepth()){continue;}
             let w=cm12VelocityExtensionNeighborWeight(row,incidence.y,ordinal);
-            velocity+=w*cm12EffectiveTransportVelocity(neighbor).xyz;
-            weight+=w;continue;
+            terms[side]+=w*vec4f(cm12EffectiveTransportVelocity(neighbor).xyz,1.0);continue;
           }
           for(var ordinal=0u;ordinal<termCount;ordinal+=1u){
             let neighbor=cm12HotRowTermCell(row,ordinal);
@@ -367,11 +367,15 @@ fn advanceVelocityExtensionPackets(@builtin(workgroup_id)wid:vec3u,
             if(cm12ExtensionLoad(cm12ExtensionAcceptedDepth+neighbor)
               >=cm12ExtensionDepth()){continue;}
             let w=cm12VelocityExtensionNeighborWeight(row,incidence.y,ordinal);
-            velocity+=w*cm12EffectiveTransportVelocity(neighbor).xyz;weight+=w;
+            terms[side]+=w*vec4f(cm12EffectiveTransportVelocity(neighbor).xyz,1.0);
           }
         }
       }
-      valid=weight>0.0;if(valid){velocity/=weight;
+      let x=min(terms[0],terms[1])+max(terms[0],terms[1]);
+      let y=min(terms[2],terms[3])+max(terms[2],terms[3]);
+      let z=min(terms[4],terms[5])+max(terms[4],terms[5]);
+      let sum=(x+y)+z;
+      valid=sum.w>0.0;if(valid){let velocity=sum.xyz/sum.w;
         let value=vec4f(velocity,1.0);${publish}
         cm12ExtensionStore(cm12ExtensionAcceptedDepth+cell,
           cm12ExtensionDepth());}}

@@ -890,6 +890,11 @@ export async function createCM12SparseWorld(
                 .createGatherCapacityRepairOracleForQA(...args)
             : await WebGPUSparseCM12Resident.create(
               ...args, config.topologyPageCapacityMaximum,
+              config.scene.fluid.initialVelocity_m_s ? [
+                config.scene.fluid.initialVelocity_m_s.x,
+                config.scene.fluid.initialVelocity_m_s.y,
+                config.scene.fluid.initialVelocity_m_s.z,
+              ] : undefined,
             );
     resident.setRefinementRegionParameters(config.refinementRegionParameters);
   } catch (error) {

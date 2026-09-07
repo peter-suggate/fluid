@@ -14,6 +14,7 @@ import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-bod
 import { sceneCellSizes_m, sceneLatticeDimensions } from "../../core/scene-lattice";
 import {
   refinementRegionLattice,
+  refinementKeyframeAt,
   refinementRegionCellBounds,
   sceneRefinementRegions,
 } from "../../core/refinement-regions";
@@ -1176,6 +1177,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       ? CM12_PAPER_DT_S
       : Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime_s);
     if (!(dt_s > 0)) return false;
+    const keyframe = refinementKeyframeAt(this.scene, this.lastTime_s);
+    if (keyframe && JSON.stringify(keyframe.regions) !== JSON.stringify(sceneRefinementRegions(this.scene))) {
+      this.applySceneUniforms({ ...this.scene, fluid: { ...this.scene.fluid, refinementRegions: keyframe.regions } });
+    }
     const pressureIterationMaximum = sparseCM12PressureIterations(
       this.options.pressureIterations);
     const pressureRelativeTolerance = sparseCM12PressureRelativeTolerance(

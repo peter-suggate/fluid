@@ -239,9 +239,9 @@ fn emitAdaptiveWallFace(base:vec3i,values:array<f32,8>,axis:u32,side:u32){
   // Require strict liquid evidence here so the wall path cannot duplicate it.
   var ownsLiquid=false;for(var i=0u;i<4u;i+=1u){ownsLiquid=ownsLiquid||values[corners[i]]>.5;}
   if(!ownsLiquid){return;}
-  // Bits 8..13 carry log2(tangential scale)+1 for every wall-face record.
-  // Adaptive nodal faces are unit scale.
-  let tag=(1u<<8u)|(axis<<14u);
+  // Scale code zero marks unit-scale nodal coordinates. Cell-centred
+  // wall records use log2(tangential scale)+1, including at unit scale.
+  let tag=axis<<14u;
   emitClassifiedCubeTagged(base,i32(224u+side),0.,1.,vec4f(values[0],values[1],values[2],values[3]),vec4f(values[4],values[5],values[6],values[7]),tag);
 }
 // Native Sparse CM12 macro pages are sampled every 2*span finest cells. Do

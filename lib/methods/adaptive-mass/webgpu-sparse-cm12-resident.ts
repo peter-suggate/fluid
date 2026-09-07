@@ -3867,6 +3867,7 @@ export class WebGPUSparseCM12Resident {
   /** Read-only native field planes for stage-budget probes. No UI allocation. */
   get fieldSnapshotSourceForQA() {
     return { state: this.state, conditioning: this.conditioning, topologyArena: this.topologyArena,
+      effectiveTransportVelocity: this.effectiveTransportVelocity,
       acceptedIndirectArguments: this.acceptedIndirectArguments,
       topologyWorklistBaseWords: this.topologyWorklistBaseBytes / 4,
       acceptedLeafManifestBaseWords: this.acceptedLeafManifestBaseBytes / 4,
@@ -3928,11 +3929,12 @@ export class WebGPUSparseCM12Resident {
     presentationPageResolution: SparseCM12PresentationPageResolution = atlas.brickFineResolution,
     report?: SparseCM12ResidentInitializationReporter,
     topologyPageCapacityMaximum?: number,
+    initialVelocity_m_s?: readonly [number, number, number],
   ): Promise<WebGPUSparseCM12Resident> {
     return this.createConfigured(device, atlas, grid, finestCellSize_m,
       solidWorld, initiallyActiveBrickKeys, rigid, journal, presentationPageResolution,
       false, false, false, true, true, report, false, true, false, false, false,
-      topologyPageCapacityMaximum);
+      topologyPageCapacityMaximum, false, undefined, initialVelocity_m_s);
   }
 
   /** Retained rejected QA experiment: density-capacity relay with an exact
@@ -4259,6 +4261,7 @@ export class WebGPUSparseCM12Resident {
     topologyPageCapacityMaximum = GPU_TOPOLOGY_PAGE_BUDGET_DEFAULT,
     acceptedOnly = false,
     transferredSymmetry?: { scalar: boolean; face: boolean },
+    initialVelocity_m_s?: readonly [number, number, number],
   ): Promise<WebGPUSparseCM12Resident> {
     if (atlas.brickFineResolution !== 8 || presentationPageResolution !== 8) {
       throw new Error("Sparse CM12 PEI1 production is an aggressive B8/P8 cutover");
@@ -4439,6 +4442,27 @@ export class WebGPUSparseCM12Resident {
     seed(layout.densityB, templates.initialDensity);
     seed(layout.gammaA, templates.initialGamma);
     seed(layout.gammaB, templates.initialGamma);
+    if (initialVelocity_m_s?.some(value => value !== 0)) {
+      if (!initialVelocity_m_s.every(Number.isFinite)) {
+        throw new Error("Initial liquid velocity must be finite");
+      }
+      // CM12 stores velocity in finest cells per second. Seed both parity
+      // banks, including the air support and dormant rung templates, so the
+      // first transport sees the same uniform field as the liquid cells.
+      const velocity = initialVelocity_m_s.map(value => value / finestCellSize_m);
+      const cells = new Float32Array(4 * templates.cellCount);
+      for (let cell = 0; cell < templates.cellCount; cell++) {
+        cells.set(velocity, 4 * cell);
+      }
+      const faces = new Float32Array(templates.rowCount);
+      for (let row = 0; row < templates.rowCount; row++) {
+        const metadata = templates.words[templateRowWord(
+          templates.words[7]!, templates.rowCount, 1, row)]!;
+        faces[row] = velocity[metadata >>> 30]!;
+      }
+      seed(layout.cellVelocityA, cells); seed(layout.cellVelocityB, cells);
+      seed(layout.faceA, faces); seed(layout.faceB, faces);
+    }
     if (layout.solidRowData !== 0) {
       // Inactive dynamic pages are initialized on-device when synthesized.
       // Upload only the immutable host-template prefix instead of mirroring

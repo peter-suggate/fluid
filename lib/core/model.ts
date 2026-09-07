@@ -185,6 +185,8 @@ export interface SceneDescription {
     dynamicViscosity_Pa_s: number;
     surfaceTension_N_m: number;
     gravity_m_s2: Vec3;
+    /** Uniform starting velocity, currently consumed by Sparse CM12. Omitted means rest. */
+    initialVelocity_m_s?: Vec3;
     initialCondition: "dam-break" | "tank-fill";
     /** Optional curved tank-fill surface, rasterized once into initial cell volumes. */
     initialHeightField?: InitialLiquidHeightField;
@@ -241,6 +243,8 @@ export interface SceneDescription {
      * split around a newly drawn box.
      */
     refinementRegions?: FluidRefinementRegion[];
+    /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
+    refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
   nominalResolution: {
     length_m: number;
@@ -563,17 +567,37 @@ export function validateScene(scene: SceneDescription): string[] {
       if (value !== undefined && (!Number.isFinite(value) || value < 0 || value > 1)) errors.push(`Water ${label} must lie in [0, 1]`);
     }
   }
+  const initialVelocity = scene.fluid?.initialVelocity_m_s;
+  if (initialVelocity !== undefined && ![initialVelocity?.x, initialVelocity?.y, initialVelocity?.z].every(Number.isFinite)) {
+    errors.push("Initial liquid velocity requires three finite components");
+  }
   const damDimensions = scene.fluid?.initialDamBreakDimensions_m;
   const heightField = scene.fluid?.initialHeightField;
   if (heightField) {
-    if (scene.fluid.initialCondition !== "tank-fill" || heightField.kind !== "quadratic") {
-      errors.push("Initial height field requires a quadratic tank-fill surface");
-    }
-    if (![heightField.baseHeight_m, heightField.center_m?.x, heightField.center_m?.z,
-      heightField.curvatureX_mInv, heightField.curvatureZ_mInv].every(Number.isFinite)
+    if (scene.fluid.initialCondition !== "tank-fill") errors.push("Initial height field requires tank-fill");
+    if (heightField.kind === "cosine") {
+      if (![heightField.baseHeight_m,heightField.amplitude_m,heightField.wavelength_m,heightField.originX_m].every(Number.isFinite)
+        || heightField.wavelength_m <= 0 || heightField.baseHeight_m < Math.abs(heightField.amplitude_m)) {
+        errors.push("Cosine height field requires finite coordinates, positive wavelength and nonnegative surface height");
+      }
+    } else if (heightField.kind !== "quadratic"
+      || ![heightField.baseHeight_m, heightField.center_m?.x, heightField.center_m?.z,
+        heightField.curvatureX_mInv, heightField.curvatureZ_mInv].every(Number.isFinite)
       || heightField.baseHeight_m < 0 || heightField.curvatureX_mInv < 0 || heightField.curvatureZ_mInv < 0) {
       errors.push("Initial height field requires finite coordinates and nonnegative height and curvatures");
     }
+  }
+  let priorRefinementTime = -1;
+  const keyframes = scene.fluid?.refinementKeyframes;
+  if (keyframes !== undefined && !Array.isArray(keyframes)) errors.push("Refinement keyframes must be an array");
+  for (const frame of Array.isArray(keyframes) ? keyframes : []) {
+    if (!frame || !Number.isFinite(frame.time_s) || frame.time_s < 0 || frame.time_s <= priorRefinementTime) {
+      errors.push("Refinement keyframes require strictly increasing nonnegative times");
+      continue;
+    }
+    priorRefinementTime = frame.time_s;
+    if (!Array.isArray(frame.regions)) errors.push("Each refinement keyframe requires a regions array");
+    else errors.push(...validateRefinementRegions(frame.regions, scene.container));
   }
   const damOrigin = scene.fluid?.initialDamBreakOrigin_m;
   if (damOrigin && !damDimensions) errors.push("Initial dam-break origin requires authored dam-break dimensions");

@@ -61,6 +61,7 @@ import {
   type PerformanceTrace,
 } from "../performance-trace";
 import { effectiveSimulationStep_s, methodPinsSimulationStep } from "../simulation-step";
+import { sharePaneStep } from "./shared-pane-step";
 
 export type BodyDragPhase = "start" | "move" | "end";
 
@@ -229,6 +230,7 @@ class SimulationController {
   private safeBrowserStepConsumed = false;
   private cpuTickTraceSampleId = 0;
   private pendingCpuTickTrace?: PerformanceTrace;
+  private sharedPaneStep?: ReturnType<typeof sharePaneStep>;
 
   private safeBrowserBringup(): boolean {
     return typeof location !== "undefined" && safeBrowserGPUBringupEnabled(location.search);
@@ -309,6 +311,7 @@ class SimulationController {
       // an old prototype. Re-point it exactly as the controller itself is
       // re-pointed; `instanceof` cannot be used here for the same reason.
       Object.setPrototypeOf(retained.clock, PaneClockHost.prototype);
+      this.refreshSharedPaneStep();
       return;
     }
     // Older sessions kept the clock as three fields on the controller.
@@ -359,15 +362,24 @@ class SimulationController {
     // is a different document and starts with an empty one.
     if (this.paneSessions.get(paneId) !== session) {
       this.paneRuntimes.set(paneId, createPaneRuntime());
+      this.paneSessions.set(paneId, session);
+      this.refreshSharedPaneStep();
     }
-    this.paneSessions.set(paneId, session);
+  }
+
+  private refreshSharedPaneStep() {
+    this.sharedPaneStep?.stop();
+    this.sharedPaneStep = this.paneSessions.size > 1
+      ? sharePaneStep([...this.paneSessions.values()]) : undefined;
   }
 
   /** Leaving compare mode. Pane A's realm is the session and never detaches. */
   detachPaneSession(paneId: PaneId): boolean {
     if (paneId === PRIMARY_PANE_ID) return false;
     this.paneRuntimes.delete(paneId);
-    return this.paneSessions.delete(paneId);
+    const removed = this.paneSessions.delete(paneId);
+    if (removed) this.refreshSharedPaneStep();
+    return removed;
   }
 
   /**
@@ -584,6 +596,15 @@ class SimulationController {
 
   /** Apply one shared fixed step to rigid and fluid work without resetting time. */
   setStepSize(step_s: number, paneId: PaneId = PRIMARY_PANE_ID) {
+    if (this.sharedPaneStep) {
+      const sharedStep_s = clampSharedStepSize(step_s);
+      this.sharedPaneStep.setStepSize(sharedStep_s);
+      this.clock.clampPendingTime(sharedStep_s);
+      for (const pane of this.paneSessions.values()) {
+        pane.runtime.getState().setNotice(`Shared rigid + fluid step · ${(sharedStep_s * 1000).toFixed(2)} ms`);
+      }
+      return;
+    }
     const sceneStore = this.session(paneId).scene.getState();
     const numerics = sharedStepNumerics(sceneStore.scene.numerics, step_s);
     // Asking for a step is how you leave the paper step. The uniform paper
