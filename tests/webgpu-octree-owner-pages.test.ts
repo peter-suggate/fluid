@@ -408,8 +408,7 @@ test("Dawn rejected candidate preserves the accepted owner bank and frontier epo
     const validationError = await device.popErrorScope();
     assert.equal(validationError, null, validationError?.message);
     pages.destroy(); frontier.destroy(); worklist.destroy(); device.destroy();
-    t.skip("local Dawn Metal runtime completed a validated compute submission as a no-op");
-    return;
+    assert.fail("Dawn completed a submission without publishing the accepted owner generation");
   }
   assert.equal(acceptedArena[OCTREE_OWNER_PAGE_CONTROL_WORDS.acceptedGeneration], 1);
   assert.equal(acceptedArena[OCTREE_OWNER_PAGE_CONTROL_WORDS.status] >>> 31, 1,

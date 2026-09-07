@@ -29,10 +29,13 @@ test("resizing a finished tank moves its voxel shell instead of stranding it", (
       `old shell plane ${coordinate.join(",")} must be fluid space`);
   }
   for (const coordinate of [[-1, 8, 8], [32, 8, 8], [8, -1, 8],
-    [8, 48, 8], [8, 8, -1], [8, 8, 32]] as const) {
+    [8, 8, -1], [8, 8, 32]] as const) {
     assert.equal(sampleSolidWorld(world, coordinate).solidFraction, 1,
       `resized boundary ${coordinate.join(",")} must be solid`);
   }
+
+  assert.equal(sampleSolidWorld(world, [8, 48, 8]).solidFraction, 0,
+    "the resized tank must retain its open top");
 
   // Structural editing is immutable: callers that still hold the source scene
   // must continue to see its original lattice and shell.

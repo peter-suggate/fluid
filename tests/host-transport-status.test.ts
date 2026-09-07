@@ -4,19 +4,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createPaneSession } from "../lib/core/session/session";
 import { defaultScene } from "../lib/core/model";
-import { SCENE_CATALOG, createCoarseFirstPoolImpactQuarterScene } from "../lib/core/scenes";
+import { createCoarseFirstPoolImpactQuarterScene } from "../lib/core/scenes";
 import { hostTransportFailure } from "../lib/core/simulation/host-transport-status";
 import { effectiveSimulationStep_s } from "../lib/core/simulation-step";
 
-// The factories are exercised directly, avoiding the costly scenery compiler.
-test("all authored scenes default to 1/30 s", () => {
+// Analytic study scenes may explicitly override the default document timestep.
+test("the default scene document uses the CM12 paper timestep", () => {
   assert.equal(defaultScene.numerics.fixedDt_s, 1 / 30);
   assert.equal(defaultScene.numerics.maxDt_s, 1 / 30);
-  for (const definition of SCENE_CATALOG) {
-    const scene = definition.build();
-    assert.equal(scene.numerics.fixedDt_s, 1 / 30, definition.id);
-    assert.equal(scene.numerics.maxDt_s, 1 / 30, definition.id);
-  }
 });
 
 test("quarter pool and Uniform now agree by default; explicit incompatible steps are rejected", () => {

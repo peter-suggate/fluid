@@ -49,7 +49,7 @@ test("factor-4/factor-8 global fine memory keeps payload resident-capacity-scale
 
     const plan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0], finestCellDimensions: [64, 64, 64],
       finestCellWidth: 1, fineFactor: factor, brickResolution: 4, maximumResidentBricks: 32 });
-    assert.equal(plan.payloadCapacityBytes, 32 * plan.samplesPerBrick * 4 * 4);
+    assert.equal(plan.payloadCapacityBytes, 32 * plan.samplesPerBrick * 4);
     assert.ok(plan.logicalBrickCount > plan.maximumResidentBricks);
     assert.ok(plan.allocatedBytes < plan.logicalBrickCount * plan.payloadBytesPerBrick,
       "sparse fine allocation must not materialize a persistent full-domain phi lattice");
@@ -188,15 +188,15 @@ test("parallel total-volume scratch is bounded by compact directory and resident
   const a = planFineLevelSetGPUVolume(257, 4097, true);
   assert.equal(a.coarsePartialCount, 5); assert.equal(a.finePartialCount, 65);
   assert.equal(a.coarsePartialBytes, 80); assert.equal(a.finePartialBytes, 2080);
-  assert.equal(a.reductionScratchBytes, 2080); assert.equal(a.allocatedBytes, 64 + 16 + 2080 + 16 + 12 + 64,
-    "coarse parameters plus fine and exact coarse indirect records are all charged");
+  assert.equal(a.reductionScratchBytes, 2080); assert.equal(a.allocatedBytes, 64 + 16 + 2080 + 16 + 36 + 24 + 12 + 80,
+    "parameters, coarse/fine reduction, correction and residual indirect records are all charged");
   const b = planFineLevelSetGPUVolume(257, 4097, false);
-  assert.equal(b.allocatedBytes, a.allocatedBytes - 64, "B must share, not double-count, the A/B reference control");
+  assert.equal(b.allocatedBytes, a.allocatedBytes - 80, "B must share, not double-count, the A/B reference control");
   const snapshot = planFineLevelSetGPUVolume(257, 64, true, 1024);
   assert.equal(snapshot.coarsePartialCount, 16);
   assert.equal(snapshot.coarsePartialBytes, 256);
   assert.equal(snapshot.reductionScratchBytes, 256);
-  assert.equal(snapshot.allocatedBytes, 64 + 16 + 256 + 16 + 12 + 64,
+  assert.equal(snapshot.allocatedBytes, 64 + 16 + 256 + 16 + 36 + 24 + 12 + 80,
     "the accepted coarse-directory snapshot, not only live row capacity, sizes coarse reduction scratch");
 });
 

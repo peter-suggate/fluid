@@ -190,7 +190,7 @@ test("coupled validation decodes descriptor and SPGrid candidate control ABIs ex
     "an unchanged Section 4.3 hierarchy is a valid zero-page delta");
 });
 
-test("every topology-epoch pipeline binds its own reflected auto layout and exact ABI", () => {
+test("every topology-epoch pipeline binds its own reflected auto layout and exact ABI", async () => {
   Object.assign(globalThis, {
     GPUBufferUsage: { STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, UNIFORM: 8, INDIRECT: 16 },
   });
@@ -201,7 +201,7 @@ test("every topology-epoch pipeline binds its own reflected auto layout and exac
     queue: { writeBuffer() {} },
     createBuffer: () => buffer(),
     createShaderModule: () => ({}),
-    createComputePipeline: ({ label }: { label: string }) => {
+    createComputePipelineAsync: async ({ label }: { label: string }) => {
       const layout = { label }; layouts.set(label, layout);
       return { getBindGroupLayout: () => layout };
     },
@@ -220,6 +220,7 @@ test("every topology-epoch pipeline binds its own reflected auto layout and exac
   };
   const epoch = new WebGPUOctreeTopologyEpoch(device, resources,
     { rowCapacity: 128, slotCapacity: 256, catalogVersion: 5 });
+  await epoch.initializePipelines();
   assert.deepEqual(groups.map((group) => group.layout), [
     layouts.get("validateInactiveTopologyEpoch"),
     layouts.get("beginReadyTopologyCommit"),
