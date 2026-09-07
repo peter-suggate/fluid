@@ -2,7 +2,7 @@
 
 import { SCENE_INSTRUMENTS, SCENE_INSTRUMENT_ORDER } from "../lib/core/scene-instruments";
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay";
-import { RenderPipelineOverlay } from "./RenderPipelineOverlay";
+import { RenderPipelineOverlay } from "../lib/svo/pipeline/ui";
 import { SimPipelineOverlay } from "./SimPipelineOverlay";
 import { useSession } from "../lib/core/session/session-context";
 

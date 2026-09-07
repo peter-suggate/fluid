@@ -597,7 +597,7 @@ pass. Figure 6 passes its traversal gate beyond 512 issued page identities. The 
 mini32/mini64 medians are 30.41/42.27 ms against unchanged 40/50 ms ceilings. These
 are regression receipts, not a paired performance claim. Repository-wide type
 checking still reports existing harness/probe errors, and managed-pipeline compliance
-still reports three direct pipeline creation calls in `lib/svo/sparse-brick-octree.ts`.
+still reports three direct pipeline creation calls in `lib/svo/features/construction/sparse-brick-octree.ts`.
 
 Second implementation slice (2026-09-05): `prepareSparseCM12TopologyWorkingSet`
 uses the shared SCMT serializer to retain accepted cells and add only requested

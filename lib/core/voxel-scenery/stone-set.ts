@@ -1,7 +1,7 @@
 import type { Quaternion, RigidBodyDescription, Vec3 } from "../model";
 import { quaternionMultiply } from "../rigid-body";
 import type { SceneryMaterial, SceneryNode, SceneryPlacement } from "../scenery-graph";
-import { SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES } from "../../svo/svo-primitive-abi";
+import { SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES } from "../../svo/contracts/svo-primitive-abi";
 import { alongAxis, V } from "./builder";
 import {
   pondVesselHeightAt,

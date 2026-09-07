@@ -11,7 +11,7 @@ import {
   type SparseBrickLeafTerminal,
   SPARSE_BRICK_LEAF_TERMINAL,
   SPARSE_BRICK_VOXEL_TERMINAL,
-} from "../svo/sparse-brick-octree";
+} from "../svo/features/construction/sparse-brick-octree";
 import { completeCooperativeBuild } from "./cooperative-build";
 
 export interface AdaptiveSparseBrickPlanOptions {

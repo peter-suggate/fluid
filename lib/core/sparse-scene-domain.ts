@@ -3,7 +3,7 @@ import {
   mortonEncode3D,
   type SparseBrickCoordinate,
   type SparseBrickSize,
-} from "../svo/sparse-brick-octree";
+} from "../svo/features/construction/sparse-brick-octree";
 
 export type SparseSceneProxyCoverage = "volume" | "surface-shell";
 

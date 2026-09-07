@@ -72,7 +72,7 @@ interface OracleRuntime {
     "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver"
   )["WebGPUAdaptiveMassSolver"];
   readonly activityPolicy: typeof import(
-    "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident"
+    "../lib/methods/adaptive-mass/features/adaptivity/policy"
   )["SPARSE_CM12_ACTIVITY_POLICY"];
 }
 
@@ -82,7 +82,7 @@ async function loadRuntime(sourceRoot: string): Promise<OracleRuntime> {
     import(moduleUrl("lib/core/scenes.ts")),
     import(moduleUrl("lib/core/webgpu-device-limits.ts")),
     import(moduleUrl("lib/methods/adaptive-mass/webgpu-adaptive-mass-solver.ts")),
-    import(moduleUrl("lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts")),
+    import(moduleUrl("lib/methods/adaptive-mass/features/adaptivity/policy.ts")),
   ]);
   return {
     createScene: scenes.createSymmetricExpansionScene,

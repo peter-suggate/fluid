@@ -21,7 +21,7 @@ import {
 } from "../lib/core/voxel-scenery/bonsai-canopy-field";
 import { bonsaiCanopyPads, type BonsaiCanopyPad } from "../lib/core/voxel-scenery/bonsai-canopy-pads";
 import { BONSAI_POND_CANOPY } from "../lib/core/voxel-scenery/bonsai";
-import type { SvoFieldProgram } from "../lib/svo/svo-field-program";
+import type { SvoFieldProgram } from "../lib/svo/features/scene-publication/svo-field-program";
 import type { Vec3 } from "../lib/core/model";
 
 /**

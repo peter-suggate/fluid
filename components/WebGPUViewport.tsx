@@ -7,7 +7,7 @@ import { WebGPURenderWorkerClient, type FluidLabRendererHandle } from "../lib/co
 import {
   resolveSvoPixelTracePin, resolveSvoPixelTracePinnedFrame, svoPixelTracePinClick,
   type SvoPixelTrace, type SvoPixelTracePinRequest,
-} from "../lib/svo/svo-pixel-trace";
+} from "../lib/svo/features/diagnostics/svo-pixel-trace";
 import { PixelTraceHud } from "./PixelTraceHud";
 import { FluidCellTraceHud, type FluidCellTraceStatusHint } from "./FluidCellTraceHud";
 import { visualizationIdsForGroups } from "../lib/core/visualization-catalog";
@@ -134,7 +134,7 @@ import {
   SVO_RENDER_STAGE_DEFINITIONS,
   svoRenderStageUsesPrimaryWorkMap,
   svoRenderStageUsesLightSlot,
-} from "../lib/svo/svo-render-diagnostics";
+} from "../lib/svo/features/diagnostics/svo-render-diagnostics";
 import { projectViewportFailure, viewportFailureIndicator } from "../lib/core/viewport-failure-diagnostics";
 import { dawnReproductionForGPUFailure } from "../lib/core/webgpu-failure-reproduction";
 import {

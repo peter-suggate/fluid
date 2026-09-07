@@ -44,8 +44,8 @@ import {
   SVO_PRIMITIVE_MARCH_ITERATIONS,
   type SvoFinitePrimitiveDescriptor,
   type SvoPrimitiveDescriptor,
-} from "../lib/svo/svo-primitive-abi";
-import { evaluateValidatedSvoFieldProgram, validateSvoFieldProgram } from "../lib/svo/svo-field-program";
+} from "../lib/svo/contracts/svo-primitive-abi";
+import { evaluateValidatedSvoFieldProgram, validateSvoFieldProgram } from "../lib/svo/features/scene-publication/svo-field-program";
 
 // ---------------------------------------------------------------------------
 // Small vector helpers. Local because the ABI keeps its own private.

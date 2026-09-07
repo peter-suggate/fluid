@@ -24,7 +24,7 @@ import { sparseCM12PresentationPageAllocatorWGSL,
   sparseCM12WGSLForEntryPoints } from
   "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { createSparseCM12IncrementalActivityLayout } from
-  "../lib/methods/adaptive-mass/sparse-cm12-incremental-activity";
+  "../lib/methods/adaptive-mass/features/adaptivity/sparse-cm12-incremental-activity";
 import { createSparseCM12CanonicalMembershipLayout } from
   "../lib/methods/adaptive-mass/sparse-cm12-canonical-membership";
 import { createSparseCM12FramePlanLayout } from "../lib/core/sparse-cm12-frame-plan";

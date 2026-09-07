@@ -18,8 +18,8 @@ import {
   type SceneryShellNode,
   type SceneryUnits,
 } from "./scenery-graph";
-import { validateSvoClusterPacking, type SvoSmoothUnionClusterPacking } from "../svo/svo-primitive-abi";
-import { svoFieldProgramExtent_m, validateSvoFieldProgram } from "../svo/svo-field-program";
+import { validateSvoClusterPacking, type SvoSmoothUnionClusterPacking } from "../svo/contracts/svo-primitive-abi";
+import { svoFieldProgramExtent_m, validateSvoFieldProgram } from "../svo/features/scene-publication/svo-field-program";
 import {
   aabb,
   V,

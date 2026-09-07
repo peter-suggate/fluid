@@ -5,10 +5,10 @@ import type { EnvironmentProxySway } from "../scenery-sway";
 // Type-only: the aggregate proxy carries the render ABI's own discriminated
 // packing rather than a flattened copy of it, and a value import here would put
 // the primitive ABI in every module that draws a box.
-import type { SvoSmoothUnionClusterPacking } from "../../svo/svo-primitive-abi";
+import type { SvoSmoothUnionClusterPacking } from "../../svo/contracts/svo-primitive-abi";
 // Type-only for the same reason: a tape travels whole on the proxy, and a value
 // import of the evaluator here would put it in every module that draws a box.
-import type { SvoFieldProgram } from "../../svo/svo-field-program";
+import type { SvoFieldProgram } from "../../svo/features/scene-publication/svo-field-program";
 
 export type { EnvironmentProxySway } from "../scenery-sway";
 

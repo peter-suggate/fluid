@@ -13,8 +13,8 @@
 import { environmentIds, type EnvironmentId } from "../lib/core/environments";
 import { createHeroGardenHoseScene, HERO_GARDEN_CELL_M } from "../lib/core/hero-garden-scene";
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/core/model";
-import { buildSvoEnvironmentCoverage } from "../lib/svo/svo-scene-coverage";
-import { SVO_LIGHT_MAXIMUM_RECORDS } from "../lib/svo/svo-light-abi";
+import { buildSvoEnvironmentCoverage } from "../lib/svo/features/scene-publication/svo-scene-coverage";
+import { SVO_LIGHT_MAXIMUM_RECORDS } from "../lib/svo/contracts/svo-light-abi";
 import { terrainSampleShape } from "../lib/core/terrain";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/core/voxel-environments";
 

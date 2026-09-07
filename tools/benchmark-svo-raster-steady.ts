@@ -2,8 +2,8 @@
 import assert from "node:assert/strict";
 import {writeFile} from "node:fs/promises";
 import {GPUPassTimestampRecorder} from "../lib/core/performance-trace";
-import {DEFAULT_SVO_RENDER_TUNING} from "../lib/svo/svo-render-tuning";
-import type {SparseVoxelDrySceneRenderer} from "../lib/svo/webgpu-svo-dry-scene";
+import {DEFAULT_SVO_RENDER_TUNING} from "../lib/svo/pipeline/svo-render-tuning";
+import type {SparseVoxelDrySceneRenderer} from "../lib/svo/pipeline/webgpu-svo-dry-scene";
 import {packSvoDryViewUniforms,packSvoDryRigidBodies,buildSvoDrySceneAssembly} from "./svo-dry-frame-harness";
 
 export async function benchmarkRasterSteady(device:GPUDevice, renderer:SparseVoxelDrySceneRenderer,

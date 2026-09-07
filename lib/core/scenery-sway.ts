@@ -1,5 +1,5 @@
 import type { Quaternion, Vec3 } from "./model";
-import { svoPrimitiveLocalExtent_m, type SvoPrimitiveDescriptor } from "../svo/svo-primitive-abi";
+import { svoPrimitiveLocalExtent_m, type SvoPrimitiveDescriptor } from "../svo/contracts/svo-primitive-abi";
 
 /**
  * Authored scenery motion — the gust that moves a tree, not a rigid body.

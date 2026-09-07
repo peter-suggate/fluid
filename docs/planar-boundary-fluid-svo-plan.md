@@ -1125,9 +1125,9 @@ Work:
 
 Primary files:
 
-- `lib/svo/sparse-brick-octree.ts`;
-- `lib/svo/webgpu-svo-traversal.ts`;
-- `lib/svo/webgpu-svo-dry-scene.ts`;
+- `lib/svo/features/construction/sparse-brick-octree.ts`;
+- `lib/svo/features/primary-visibility/webgpu-svo-traversal.ts`;
+- `lib/svo/pipeline/webgpu-svo-dry-scene.ts`;
 - SVO publication/build modules;
 - CPU/GPU traversal and voxel-coverage tests.
 
@@ -1570,8 +1570,8 @@ named legacy module. Prefer the sparse-world boundary as that migration lands.
 | Trace clipping | `sparse-cm12-transport-home-frame-halo.wgsl.ts` and shared boundary helpers |
 | Fragment geometry | new sparse-world/internal cut-fragment compiler |
 | Pressure fragment rows | hot topology, pressure membership/cache, face/projection authority modules |
-| SVO macro storage | `lib/svo/sparse-brick-octree.ts` and publication layouts |
-| SVO traversal | `lib/svo/webgpu-svo-traversal.ts`; `lib/svo/webgpu-svo-dry-scene.ts` |
+| SVO macro storage | `lib/svo/features/construction/sparse-brick-octree.ts` and publication layouts |
+| SVO traversal | `lib/svo/features/primary-visibility/webgpu-svo-traversal.ts`; `lib/svo/pipeline/webgpu-svo-dry-scene.ts` |
 | Beam prepass | split primary pipeline in `webgpu-svo-dry-scene.ts` |
 | Overlays/telemetry | grid overlay, SVO probe, sparse-world trace, benchmark artifact modules |
 

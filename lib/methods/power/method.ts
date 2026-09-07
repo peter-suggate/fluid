@@ -1,3 +1,4 @@
+import { resolveMethodComposition } from "./composition";
 import { WebGPUOctreeEulerianSolver } from "../octree-shared/webgpu-octree-eulerian";
 import { VISUALIZATION_FIELDS } from "../../core/visualization-catalog";
 import type { MethodParamSpec, MethodParamValues, SimulationMethod } from "../../core/method-contract";
@@ -46,6 +47,8 @@ export const powerLiquidsSolverOptions = (scene: SceneDescription, quality: GPUQ
   }), values);
 
 export const powerLiquidsMethod: SimulationMethod = {
+  composition: resolveMethodComposition(),
+  resolveComposition: values => resolveMethodComposition(values),
   id: "power-liquids",
   label: "Power liquids (2017)",
   shortLabel: "Power",

@@ -1,3 +1,5 @@
+import { gravityFeature } from "../features/gravity/definition";
+import { setGravity } from "../features/gravity/state";
 import { damBreakFractions, initialFluidBrickComponents } from "./initial-fluid";
 import { SCENE_SHAPES_BY_CODE } from "./scene-shape";
 import type { EditorAction, EditorActionTarget } from "./editor-action";
@@ -490,16 +492,13 @@ export function fluidMaterialGroup(scene: SceneDescription): EditorControlGroup 
       },
       {
         id: "gravity",
-        // Named for the axis it writes, because that is the only component the
-        // control moves: a row called "Gravity" beside a single scrub would be
-        // promising a vector.
-        label: "Gravity Y",
-        unit: "m/s\u00b2",
+        label: gravityFeature.controls[1].label,
+        unit: gravityFeature.controls[1].unit,
         value: fluid.gravity_m_s2.y,
-        step: 0.1,
-        min: -20,
-        max: 0,
-        apply: (value: number) => patch({ gravity_m_s2: { ...fluid.gravity_m_s2, y: value } }),
+        step: gravityFeature.controls[1].step,
+        min: gravityFeature.controls[1].min,
+        max: gravityFeature.controls[1].max,
+        apply: (value: number) => patch(setGravity(fluid, { ...fluid.gravity_m_s2, y: value })),
       },
     ],
     summary: fluidBodyCount(scene) > 1

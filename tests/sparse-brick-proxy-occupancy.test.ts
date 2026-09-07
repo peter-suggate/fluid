@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { planAdaptiveSparseBrickOctree, planAdaptiveSparseBrickOctreeSteps } from "../lib/core/adaptive-sparse-brick-plan";
-import { mortonEncode3D, SPARSE_BRICK_VOXEL_TERMINAL } from "../lib/svo/sparse-brick-octree";
+import { mortonEncode3D, SPARSE_BRICK_VOXEL_TERMINAL } from "../lib/svo/features/construction/sparse-brick-octree";
 import { driveCooperativeBuild } from "../lib/core/cooperative-build";
 
 test("occupancy-backed plans preserve explicit proxy union and solver ownership", async () => {

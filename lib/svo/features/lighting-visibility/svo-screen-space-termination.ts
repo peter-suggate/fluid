@@ -1,0 +1,431 @@
+import type { SvoAabb, SvoVec3 } from "../primary-visibility/webgpu-svo-traversal";
+
+/**
+ * Screen-space termination contract shared by the canonical diagnostic and
+ * the production raster-primary resolve.
+ *
+ * Internal canonical nodes still lack representative shading data, so that
+ * path remains an AABB diagnostic. Raster-primary has a stronger interim
+ * contract: it walks a resident leaf to the first occupied cell and resolves
+ * that cell with its published material/owner, avoiding the exact primitive
+ * upgrade once the cell is sub-pixel.
+ */
+export const SVO_SCREEN_SPACE_TERMINATION_CONTRACT = Object.freeze({
+  disabledThresholdPixels: 0,
+  // The predicate measures the diameter of the conservative enclosing sphere.
+  // Three sphere-diameter pixels corresponds to roughly one projected cell
+  // edge for the cubic resident cells in the production lattice.
+  defaultThresholdPixels: 3,
+  // Thresholds are authored at this reference height and scale with the actual
+  // render target. This makes the predicate angular rather than device-pixel
+  // based: changing DPR or resolutionScale cannot silently request more detail.
+  referenceViewportHeightPixels: 460,
+  defaultTanHalfVerticalFov: 0.72,
+  shading: "resident-cell-proxy" as const,
+  exactShadows: true,
+  hasRepresentativeMaterial: false,
+  hasRepresentativeNormal: false,
+});
+
+export interface SvoScreenSpaceTerminationOptions {
+  /** Zero disables termination and preserves exact traversal. */
+  /** Pixel threshold at the contract's reference viewport height. */
+  thresholdPixels: number;
+  viewportHeightPixels: number;
+  /** Must match the camera ray generator. The dry renderer currently uses 0.72. */
+  tanHalfVerticalFov?: number;
+  /** Never approximate nodes shallower than this level. */
+  minimumLevel?: number;
+}
+
+/** Convert an authored threshold into physical pixels for a render target. */
+export function effectiveSvoScreenSpaceThresholdPixels(
+  thresholdPixels: number,
+  viewportHeightPixels: number,
+): number {
+  if (!Number.isFinite(thresholdPixels) || thresholdPixels < 0) {
+    throw new RangeError("SVO screen-space threshold must be a non-negative finite pixel count");
+  }
+  if (!Number.isFinite(viewportHeightPixels) || viewportHeightPixels <= 0) {
+    throw new RangeError("SVO screen-space viewport height must be positive and finite");
+  }
+  return thresholdPixels * viewportHeightPixels
+    / SVO_SCREEN_SPACE_TERMINATION_CONTRACT.referenceViewportHeightPixels;
+}
+
+function finiteVec3(value: SvoVec3, label: string): void {
+  if (value.length !== 3 || value.some((component) => !Number.isFinite(component))) {
+    throw new RangeError(`${label} must contain three finite components`);
+  }
+}
+
+function validatedOptions(options: SvoScreenSpaceTerminationOptions): Required<SvoScreenSpaceTerminationOptions> {
+  const tanHalfVerticalFov = options.tanHalfVerticalFov ?? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultTanHalfVerticalFov;
+  const minimumLevel = options.minimumLevel ?? 0;
+  if (!Number.isFinite(options.thresholdPixels) || options.thresholdPixels < 0) {
+    throw new RangeError("SVO screen-space threshold must be a non-negative finite pixel count");
+  }
+  if (!Number.isFinite(options.viewportHeightPixels) || options.viewportHeightPixels <= 0) {
+    throw new RangeError("SVO screen-space viewport height must be positive and finite");
+  }
+  if (!Number.isFinite(tanHalfVerticalFov) || tanHalfVerticalFov <= 0) {
+    throw new RangeError("SVO screen-space tan-half-FOV must be positive and finite");
+  }
+  if (!Number.isInteger(minimumLevel) || minimumLevel < 0 || minimumLevel > 21) {
+    throw new RangeError("SVO screen-space minimum level must be an integer from 0 to 21");
+  }
+  return { ...options, tanHalfVerticalFov, minimumLevel };
+}
+
+/**
+ * Conservative pixel diameter of the sphere enclosing a node AABB.
+ *
+ * The sphere avoids view-dependent corner underestimation. If the camera is
+ * inside or on the sphere, the footprint is infinite and traversal continues.
+ */
+export function projectedSvoNodeFootprintPixels(
+  bounds: SvoAabb,
+  cameraPosition: SvoVec3,
+  options: Pick<SvoScreenSpaceTerminationOptions, "viewportHeightPixels" | "tanHalfVerticalFov">,
+): number {
+  finiteVec3(bounds.minimum, "SVO node minimum");
+  finiteVec3(bounds.maximum, "SVO node maximum");
+  finiteVec3(cameraPosition, "SVO camera position");
+  if (bounds.maximum.some((value, axis) => value < bounds.minimum[axis])) {
+    throw new RangeError("SVO node maximum must not be below its minimum");
+  }
+  const checked = validatedOptions({ thresholdPixels: 0, minimumLevel: 0, ...options });
+  const halfExtent = bounds.maximum.map((value, axis) => (value - bounds.minimum[axis]) * 0.5) as [number, number, number];
+  const center = bounds.minimum.map((value, axis) => value + halfExtent[axis]) as [number, number, number];
+  const radius = Math.hypot(...halfExtent);
+  if (radius === 0) return 0;
+  const distance = Math.hypot(...center.map((value, axis) => value - cameraPosition[axis]));
+  if (!(distance > radius)) return Number.POSITIVE_INFINITY;
+  const focalLengthPixels = checked.viewportHeightPixels / (2 * checked.tanHalfVerticalFov);
+  // The angular radius of a sphere is asin(radius / distance). Its projected
+  // screen radius is f*tan(angle) = f*r/sqrt(d^2-r^2).
+  return 2 * focalLengthPixels * radius / Math.sqrt(distance * distance - radius * radius);
+}
+
+/** Exact traversal remains the mandatory result for threshold zero. */
+export function shouldTerminateSvoNodeScreenSpace(
+  bounds: SvoAabb,
+  cameraPosition: SvoVec3,
+  level: number,
+  options: SvoScreenSpaceTerminationOptions,
+): boolean {
+  const checked = validatedOptions(options);
+  if (checked.thresholdPixels === 0 || level < checked.minimumLevel) return false;
+  return projectedSvoNodeFootprintPixels(bounds, cameraPosition, checked)
+    <= effectiveSvoScreenSpaceThresholdPixels(checked.thresholdPixels, checked.viewportHeightPixels);
+}
+
+/** Generic WGSL helper shared by future canonical and wide diagnostic paths. */
+export const svoScreenSpaceTerminationWGSL = /* wgsl */ `
+const SVO_STATUS_SCREEN_SPACE_PROXY: u32 = 7u;
+fn svoProjectedNodeFootprintPixels(
+  bounds: mat2x3f,
+  cameraPosition: vec3f,
+  viewportHeightPixels: f32,
+  tanHalfVerticalFov: f32,
+) -> f32 {
+  let halfExtent = (bounds[1] - bounds[0]) * 0.5;
+  let radius = length(halfExtent);
+  if (radius == 0.0) { return 0.0; }
+  let distanceSquared = dot((bounds[0] + halfExtent) - cameraPosition,
+    (bounds[0] + halfExtent) - cameraPosition);
+  let radiusSquared = radius * radius;
+  if (distanceSquared <= radiusSquared) { return 3.402823e38; }
+  let focalLengthPixels = viewportHeightPixels / (2.0 * tanHalfVerticalFov);
+  return 2.0 * focalLengthPixels * radius / sqrt(distanceSquared - radiusSquared);
+}
+
+fn svoShouldTerminateNodeScreenSpace(
+  bounds: mat2x3f,
+  cameraPosition: vec3f,
+  viewportHeightPixels: f32,
+  tanHalfVerticalFov: f32,
+  thresholdPixels: f32,
+  level: u32,
+  minimumLevel: u32,
+) -> bool {
+  return thresholdPixels > 0.0 && level >= minimumLevel
+    && svoProjectedNodeFootprintPixels(bounds, cameraPosition, viewportHeightPixels, tanHalfVerticalFov)
+      <= thresholdPixels;
+}
+`;
+
+/**
+ * Derive an opt-in primary-ray continuation from the canonical implementation.
+ * Keeping this as a generated sibling rather than changing the exact function
+ * is the bit-exact safety boundary: threshold zero never calls this variant.
+ */
+export function createSvoScreenSpaceTraversalWGSL(canonicalTraversalWGSL: string): string {
+  const begin = canonicalTraversalWGSL.indexOf("fn svoTraversalContinuationNext(");
+  const end = canonicalTraversalWGSL.indexOf("\nfn svoTraverseWithDepthLimit", begin);
+  if (begin < 0 || end < 0) throw new Error("Canonical SVO continuation function was not found");
+  const canonical = canonicalTraversalWGSL.slice(begin, end);
+  const leafBranch = "    if (node.links.z != SVO_INVALID) {";
+  if (!canonical.includes(leafBranch)) throw new Error("Canonical SVO leaf branch was not found");
+  const leafBacklinkValidation = `      if (leaf.topology.x != current.nodeIndex) {
+        (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+        return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+      }`;
+  if (!canonical.includes(leafBacklinkValidation)) throw new Error("Canonical SVO leaf validation was not found");
+  const proxyBranch = /* wgsl */ `    // Diagnostic-only: internal nodes have no representative material or normal.
+    if (node.links.z == SVO_INVALID) {
+      var proxyBounds = (*continuation).currentBounds;
+      if ((*continuation).currentBoundsValid == 0u) { proxyBounds = svoNodeBounds(node, mapping); }
+      if (drySvoShouldTerminateNodeScreenSpace(proxyBounds, node.address.z)) {
+        let hit = SvoTraversalHit(SVO_STATUS_SCREEN_SPACE_PROXY, visits, current.nodeIndex,
+          SVO_INVALID, 0u, node.address.z, max(current.tEnter, ray.tMin), min(current.tExit, ray.tMax));
+        svoTraversalContinuationAdvance(continuation);
+        return hit;
+      }
+    }
+`;
+  const leafProxyBranch = /* wgsl */ `
+      // A leaf-level proxy also skips the 8^3 payload DDA, but only after the
+      // leaf record and backlink have been validated so LOD cannot hide damage.
+      var proxyBounds = (*continuation).currentBounds;
+      if ((*continuation).currentBoundsValid == 0u) { proxyBounds = svoNodeBounds(node, mapping); }
+      if (drySvoShouldTerminateNodeScreenSpace(proxyBounds, node.address.z)) {
+        let hit = SvoTraversalHit(SVO_STATUS_SCREEN_SPACE_PROXY, visits, current.nodeIndex,
+          node.links.z, leaf.topology.y, node.address.z, max(current.tEnter, ray.tMin), min(current.tExit, ray.tMax));
+        svoTraversalContinuationAdvance(continuation);
+        return hit;
+      }`;
+  const derived = canonical
+    .replace("fn svoTraversalContinuationNext(", "fn svoTraversalContinuationNextScreenSpace(")
+    .replace(leafBranch, `${proxyBranch}${leafBranch}`)
+    .replace(leafBacklinkValidation, `${leafBacklinkValidation}${leafProxyBranch}`);
+  return `${svoScreenSpaceTerminationWGSL}\n${derived}`;
+}
+
+/**
+ * The rungs below an octree leaf.
+ *
+ * Refining the lattice makes the tree *deeper*, not the bricks fatter: a brick
+ * is a fixed `brickSize` cells, so the hero garden's move from 25 mm to 6.25 mm
+ * took the brick from 200 mm to 50 mm and left the descent with exactly two
+ * choices — collapse all 512 cells to one box, or walk them. Everything here
+ * exists to name the rungs in between.
+ *
+ * A level at or below the leaf's own is the whole brick; each further level
+ * halves the aggregate, so `leafLevel + log2(brickSize)` is the individual cell
+ * and the exact walk. That is what makes `lodFixedLevel`'s default of 21 a true
+ * no-op on every scene the octree can address.
+ */
+export function svoLodBrickSubLevels(brickSize: number): number {
+  if (brickSize !== 4 && brickSize !== 8) throw new RangeError("SVO brick size must be 4 or 8");
+  return Math.log2(brickSize);
+}
+
+/** Cells per aggregate step when descent is pinned to `fixedLevel`. */
+export function svoLodCellStrideForLevel(leafLevel: number, fixedLevel: number, brickSize: number): number {
+  const subLevels = svoLodBrickSubLevels(brickSize);
+  if (!Number.isInteger(leafLevel) || leafLevel < 0) throw new RangeError("SVO leaf level must be a non-negative integer");
+  if (!Number.isInteger(fixedLevel) || fixedLevel < 0) throw new RangeError("SVO fixed level must be a non-negative integer");
+  return brickSize >>> Math.max(0, Math.min(subLevels, fixedLevel - leafLevel));
+}
+
+/**
+ * Coarsest aggregate whose own projection still respects the authored threshold.
+ *
+ * The rule is the user's, stated exactly: descend only while the parent's
+ * expression on screen exceeds the threshold. So the aggregate that gets drawn
+ * is never *larger* on screen than the author asked to tolerate — which is the
+ * property that makes a single number a fidelity budget rather than a tuning
+ * fudge, and the reason this cannot simply reuse the one-cell test.
+ *
+ * `dryPrimaryBrickCellsSubPixel` did reuse it: it collapsed a whole eight-cell
+ * brick as soon as *one* cell fell under the threshold, an eight-fold
+ * over-coarsening that only became visible once 6.25 mm cells put its onset at
+ * roughly 3.5 m instead of 14 m.
+ *
+ * Each candidate is measured at the brick's camera-nearest aggregate-sized
+ * cube, unaligned to the aggregate grid. Unaligned is deliberately conservative:
+ * no aligned aggregate can be nearer, so the footprint is an upper bound and the
+ * stride can only come out finer than the exact test would allow.
+ */
+export function selectSvoLodCellStride(
+  brickBounds: SvoAabb,
+  cameraPosition: SvoVec3,
+  brickSize: number,
+  options: SvoScreenSpaceTerminationOptions,
+): number {
+  const checked = validatedOptions(options);
+  const subLevels = svoLodBrickSubLevels(brickSize);
+  if (checked.thresholdPixels === 0) return 1;
+  const threshold = effectiveSvoScreenSpaceThresholdPixels(checked.thresholdPixels, checked.viewportHeightPixels);
+  const cell = brickBounds.maximum.map((value, axis) => (value - brickBounds.minimum[axis]) / brickSize);
+  for (let level = subLevels; level >= 1; level -= 1) {
+    const stride = 1 << level;
+    const half = cell.map((size) => size * stride * 0.5) as [number, number, number];
+    const centre = cameraPosition.map((value, axis) => Math.max(
+      brickBounds.minimum[axis] + half[axis],
+      Math.min(brickBounds.maximum[axis] - half[axis], value),
+    )) as [number, number, number];
+    const footprint = projectedSvoNodeFootprintPixels(
+      { minimum: centre.map((value, axis) => value - half[axis]) as [number, number, number],
+        maximum: centre.map((value, axis) => value + half[axis]) as [number, number, number] },
+      cameraPosition, checked,
+    );
+    if (footprint <= threshold) return stride;
+  }
+  return 1;
+}
+
+/**
+ * GPU twin of the ladder above.
+ *
+ * The threshold and the level arrive from the render-tuning uniform rather than
+ * a shader constant, so a sweep costs a 16-byte write instead of a pipeline
+ * rebuild. Whether this machinery is compiled at all remains a constructor
+ * decision: a build with it absent is the bit-exact reference image, and a
+ * runtime threshold of zero reproduces that image from the LOD build.
+ */
+export const svoLodDescentWGSL = /* wgsl */ `
+const SVO_LOD_MODE_SCREEN_SPACE:u32=0u;
+const SVO_LOD_MODE_FIXED_LEVEL:u32=1u;
+fn svoLodCellStrideForLevel(leafLevel:u32,fixedLevel:u32,brickSize:u32)->u32{
+  let subLevels=countTrailingZeros(brickSize);
+  return brickSize>>min(subLevels,select(0u,fixedLevel-leafLevel,fixedLevel>leafLevel));
+}
+fn svoLodScreenSpaceCellStride(
+  brickBounds:mat2x3f,
+  brickSize:u32,
+  cameraPosition:vec3f,
+  viewportHeightPixels:f32,
+  tanHalfVerticalFov:f32,
+  thresholdPixels:f32,
+)->u32{
+  if(!(thresholdPixels>0.0)){return 1u;}
+  let cell=(brickBounds[1]-brickBounds[0])/f32(brickSize);
+  var stride=brickSize;
+  loop{
+    if(stride<2u){break;}
+    let half=cell*f32(stride)*.5;
+    let centre=clamp(cameraPosition,brickBounds[0]+half,brickBounds[1]-half);
+    if(svoProjectedNodeFootprintPixels(mat2x3f(centre-half,centre+half),cameraPosition,
+      viewportHeightPixels,tanHalfVerticalFov)<=thresholdPixels){return stride;}
+    stride=stride>>1u;
+  }
+  return 1u;
+}
+`;
+
+export interface SvoScreenSpaceImageComparison {
+  totalPixels: number;
+  changedPixels: number;
+  changedPercent: number;
+  silhouetteDisagreementPixels: number;
+  silhouetteDisagreementPercent: number;
+  silhouetteFalsePositivePixels: number;
+  silhouetteFalseNegativePixels: number;
+  depthSilhouetteDisagreementPixels: number;
+  depthSilhouetteDisagreementPercent: number;
+  depthSilhouetteFalsePositivePixels: number;
+  depthSilhouetteFalseNegativePixels: number;
+  absoluteDepthError: { mean: number; p50: number; p95: number; p99: number; maximum: number };
+  absoluteLuminanceError: { mean: number; p50: number; p95: number; p99: number; maximum: number };
+  relativeLuminanceError: { mean: number; p50: number; p95: number; p99: number; maximum: number; denominatorFloor: number };
+}
+
+function percentile(sorted: readonly number[], fraction: number): number {
+  if (sorted.length === 0) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(fraction * sorted.length) - 1))];
+}
+
+function summarize(values: number[]): { mean: number; p50: number; p95: number; p99: number; maximum: number } {
+  values.sort((left, right) => left - right);
+  return {
+    mean: values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length),
+    p50: percentile(values, 0.5),
+    p95: percentile(values, 0.95),
+    p99: percentile(values, 0.99),
+    maximum: values[values.length - 1] ?? 0,
+  };
+}
+
+/**
+ * Compare two linear RGBA radiance/depth images. Alpha <= 0 is a miss, matching
+ * the dry-scene G-buffer contract; RGB uses Rec.709 relative luminance.
+ */
+export function compareSvoScreenSpaceImages(
+  reference: Float32Array,
+  candidate: Float32Array,
+  options: { changedEpsilon?: number; relativeDenominatorFloor?: number; width?: number; height?: number; depthEdgeRelativeThreshold?: number } = {},
+): SvoScreenSpaceImageComparison {
+  if (reference.length !== candidate.length || reference.length % 4 !== 0) {
+    throw new RangeError("SVO screen-space image inputs must be equal-length RGBA arrays");
+  }
+  const changedEpsilon = options.changedEpsilon ?? 1e-4;
+  const denominatorFloor = options.relativeDenominatorFloor ?? 0.01;
+  const width = options.width ?? reference.length / 4, height = options.height ?? 1;
+  const depthEdgeRelativeThreshold = options.depthEdgeRelativeThreshold ?? 0.02;
+  if (!Number.isFinite(changedEpsilon) || changedEpsilon < 0 || !Number.isFinite(denominatorFloor) || denominatorFloor <= 0) {
+    throw new RangeError("SVO image comparison tolerances must be finite and non-negative (with a positive denominator floor)");
+  }
+  if (!Number.isSafeInteger(width) || width <= 0 || !Number.isSafeInteger(height) || height <= 0 || width * height * 4 !== reference.length) {
+    throw new RangeError("SVO image comparison dimensions must match the RGBA arrays");
+  }
+  if (!Number.isFinite(depthEdgeRelativeThreshold) || depthEdgeRelativeThreshold < 0) {
+    throw new RangeError("SVO depth-edge threshold must be non-negative and finite");
+  }
+  const absoluteErrors: number[] = [], relativeErrors: number[] = [], absoluteDepthErrors: number[] = [];
+  let changedPixels = 0, silhouetteDisagreementPixels = 0;
+  let silhouetteFalsePositivePixels = 0, silhouetteFalseNegativePixels = 0;
+  const totalPixels = reference.length / 4;
+  for (let pixel = 0; pixel < totalPixels; pixel += 1) {
+    const base = pixel * 4;
+    const referenceY = 0.2126 * reference[base] + 0.7152 * reference[base + 1] + 0.0722 * reference[base + 2];
+    const candidateY = 0.2126 * candidate[base] + 0.7152 * candidate[base + 1] + 0.0722 * candidate[base + 2];
+    const absolute = Math.abs(candidateY - referenceY);
+    absoluteErrors.push(absolute);
+    relativeErrors.push(absolute / Math.max(Math.abs(referenceY), denominatorFloor));
+    if (absolute > changedEpsilon || Math.abs(candidate[base + 3] - reference[base + 3]) > changedEpsilon) changedPixels += 1;
+    const referenceHit = reference[base + 3] > 0, candidateHit = candidate[base + 3] > 0;
+    if (referenceHit && candidateHit) absoluteDepthErrors.push(Math.abs(candidate[base + 3] - reference[base + 3]));
+    if (referenceHit !== candidateHit) {
+      silhouetteDisagreementPixels += 1;
+      if (candidateHit) silhouetteFalsePositivePixels += 1;
+      else silhouetteFalseNegativePixels += 1;
+    }
+  }
+  const depthEdge = (pixels: Float32Array, pixel: number): boolean => {
+    const depth = pixels[pixel * 4 + 3];
+    const x = pixel % width, y = Math.floor(pixel / width);
+    for (const neighbor of [x + 1 < width ? pixel + 1 : -1, y + 1 < height ? pixel + width : -1]) {
+      if (neighbor < 0) continue;
+      const other = pixels[neighbor * 4 + 3];
+      if ((depth > 0) !== (other > 0)) return true;
+      if (depth > 0 && other > 0 && Math.abs(depth - other) / Math.max(1e-4, Math.min(depth, other)) > depthEdgeRelativeThreshold) return true;
+    }
+    return false;
+  };
+  let depthSilhouetteDisagreementPixels = 0, depthSilhouetteFalsePositivePixels = 0, depthSilhouetteFalseNegativePixels = 0;
+  for (let pixel = 0; pixel < totalPixels; pixel += 1) {
+    const referenceEdge = depthEdge(reference, pixel), candidateEdge = depthEdge(candidate, pixel);
+    if (referenceEdge === candidateEdge) continue;
+    depthSilhouetteDisagreementPixels += 1;
+    if (candidateEdge) depthSilhouetteFalsePositivePixels += 1;
+    else depthSilhouetteFalseNegativePixels += 1;
+  }
+  return {
+    totalPixels,
+    changedPixels,
+    changedPercent: 100 * changedPixels / Math.max(1, totalPixels),
+    silhouetteDisagreementPixels,
+    silhouetteDisagreementPercent: 100 * silhouetteDisagreementPixels / Math.max(1, totalPixels),
+    silhouetteFalsePositivePixels,
+    silhouetteFalseNegativePixels,
+    depthSilhouetteDisagreementPixels,
+    depthSilhouetteDisagreementPercent: 100 * depthSilhouetteDisagreementPixels / Math.max(1, totalPixels),
+    depthSilhouetteFalsePositivePixels,
+    depthSilhouetteFalseNegativePixels,
+    absoluteDepthError: summarize(absoluteDepthErrors),
+    absoluteLuminanceError: summarize(absoluteErrors),
+    relativeLuminanceError: { ...summarize(relativeErrors), denominatorFloor },
+  };
+}

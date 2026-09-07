@@ -1,3 +1,4 @@
+import { GRAVITY_QUERY_PATHS, isGravityVector } from "../features/gravity/state";
 import { refinementRegionsToQuery, withRefinementRegionsFromQuery } from "./editor-refinement-region";
 import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
 import { CAMERA_DISTANCE_RANGE } from "./math";
@@ -23,15 +24,15 @@ import {
   DEFAULT_SVO_RENDER_DIAGNOSTICS,
   SVO_RENDER_STAGE_VIEWS,
   type SvoRenderStageView,
-} from "../svo/svo-render-diagnostics";
-import { DEFAULT_SVO_LIGHTING_OPTIONS, type SvoConeTracingMode, type SvoPrimaryTraversalMode } from "../svo/svo-render-options";
+} from "../svo/features/diagnostics/svo-render-diagnostics";
+import { DEFAULT_SVO_LIGHTING_OPTIONS, type SvoConeTracingMode, type SvoPrimaryTraversalMode } from "../svo/pipeline/svo-render-options";
 import {
   DEFAULT_SVO_RENDER_TUNING,
   normalizeSvoRenderTuning,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
   SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
   type SvoRenderTuning,
-} from "../svo/svo-render-tuning";
+} from "../svo/pipeline/svo-render-tuning";
 import type { GPUQuality } from "./gpu-quality";
 import { sceneStoneQuery, withSceneStoneQuery } from "./stone-look-controls";
 import { sceneRimQuery, withSceneRimQuery } from "./vessel-rim-controls";
@@ -62,9 +63,7 @@ const sceneQueryPaths = [
   "fluid.density_kg_m3",
   "fluid.dynamicViscosity_Pa_s",
   "fluid.surfaceTension_N_m",
-  "fluid.gravity_m_s2.x",
-  "fluid.gravity_m_s2.y",
-  "fluid.gravity_m_s2.z",
+  ...GRAVITY_QUERY_PATHS,
   "fluid.initialCondition",
   "fluid.initialHeightField",
   "fluid.refinementKeyframes",
@@ -589,6 +588,10 @@ export function parseQueryState(search: string): QueryState {
       const value = JSON.parse(raw);
       // Most presets omit the default voxel-flat style, so this optional path
       // has no baseline type for the generic compatibility check to inspect.
+      if (path === "fluid.rememberedGravity_m_s2") {
+        if (isGravityVector(value)) setAtPath(patched, path, value);
+        continue;
+      }
       if (path === "surfaceStyle") {
         if (value === "smooth" || value === "voxel-flat") setAtPath(patched, path, value);
         continue;

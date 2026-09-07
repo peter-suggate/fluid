@@ -11,7 +11,7 @@ import {
   svoSceneryRefinementDepth,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
-} from "../lib/svo/svo-render-tuning";
+} from "../lib/svo/pipeline/svo-render-tuning";
 import type {
   EditorChoice,
   EditorChoiceGroup,

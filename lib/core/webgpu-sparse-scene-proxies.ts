@@ -10,9 +10,9 @@ import {
   type SparseBrickPayloadProfileName,
   type SparseBrickSceneGeometryFormat,
   type SparseBrickLeafPayloadMode,
-} from "../svo/sparse-brick-octree";
-import { SVO_BRICK_LIFECYCLE, SVO_BRICK_OCCUPANCY } from "../svo/svo-brick-occupancy";
-import { SVO_BRICK_CONTOUR, svoBrickContourFitWGSL, svoBrickContourWGSL } from "../svo/svo-brick-contour";
+} from "../svo/features/construction/sparse-brick-octree";
+import { SVO_BRICK_LIFECYCLE, SVO_BRICK_OCCUPANCY } from "../svo/features/construction/svo-brick-occupancy";
+import { SVO_BRICK_CONTOUR, svoBrickContourFitWGSL, svoBrickContourWGSL } from "../svo/features/construction/svo-brick-contour";
 import type { EnvironmentProxyPrimitive } from "./voxel-environments";
 import {
   sampleSvoPrimitive,
@@ -20,18 +20,18 @@ import {
   svoPrimitiveWGSL,
   type SvoPrimitiveDescriptor,
   type SvoSmoothUnionClusterPacking,
-} from "../svo/svo-primitive-abi";
-import { SVO_PRIMITIVE_KIND_TABLE } from "../svo/svo-primitive-kinds";
-import { SVO_GBUFFER_NORMAL_OCT8_WGSL } from "../svo/svo-gbuffer";
-import { SVO_CLUSTER_ARENA_BLOCK, packSvoClusterArena, svoClusterArenaDecodeWGSL } from "../svo/svo-cluster-arena";
+} from "../svo/contracts/svo-primitive-abi";
+import { SVO_PRIMITIVE_KIND_TABLE } from "../svo/contracts/svo-primitive-kinds";
+import { SVO_GBUFFER_NORMAL_OCT8_WGSL } from "../svo/contracts/svo-gbuffer";
+import { SVO_CLUSTER_ARENA_BLOCK, packSvoClusterArena, svoClusterArenaDecodeWGSL } from "../svo/features/construction/svo-cluster-arena";
 import {
   packSvoFieldProgramArena,
   svoFieldProgramExtent_m,
   svoFieldProgramWGSL,
   SVO_FIELD_PROGRAM_BLOCK_WORDS,
   type SvoFieldProgram,
-} from "../svo/svo-field-program";
-import { svoProceduralNoiseWGSL } from "../svo/svo-procedural-material";
+} from "../svo/features/scene-publication/svo-field-program";
+import { svoProceduralNoiseWGSL } from "../svo/features/materials/svo-procedural-material";
 import { cupWallThickness_m } from "./scene-shape";
 import type { SolidWorld } from "./solid-world";
 import {

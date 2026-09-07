@@ -71,7 +71,7 @@
  * the core below rather than a detail of it: the florets supply the outline and
  * the shadow, and the core supplies the mass they hang on.
  */
-import type { SvoFieldProgram } from "../../svo/svo-field-program";
+import type { SvoFieldProgram } from "../../svo/features/scene-publication/svo-field-program";
 import type { Vec3 } from "../model";
 
 /**

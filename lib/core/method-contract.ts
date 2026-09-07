@@ -1,3 +1,4 @@
+import type { FeatureComposition } from "../framework/composition";
 import type { RenderFrameSeam } from "./render-frame-stages";
 import type { FluidPipelineGraph } from "./fluid-pipeline";
 import type { SceneDescription } from "./model";
@@ -393,6 +394,8 @@ export interface GPUSolverInstance {
    * adopting a new scene is a uniform update rather than a rebuild.
    */
   applySceneUniforms?(scene: SceneDescription): void;
+  /** Publish edited refinement bounds without advancing simulation time. */
+  refreshSceneTopology?(): Promise<void>;
   /**
    * Re-seed t=0 in place for a scene that differs only in the seed tier,
    * reusing every allocation, arena, and compiled pipeline. Resolves false
@@ -411,6 +414,8 @@ export interface GPUSolverInstance {
 }
 
 export interface SimulationMethod {
+  readonly composition: FeatureComposition;
+  readonly resolveComposition: (values: MethodParamValues) => FeatureComposition;
   id: string;
   /** Full name shown in the method picker. */
   label: string;
@@ -678,7 +683,9 @@ export type GPUInitializationReporter = (progress: GPUInitializationProgress) =>
 export function resolveMethodValues(method: SimulationMethod, quality: GPUQuality, overrides: MethodParamValues): MethodParamValues {
   const defaults = Object.fromEntries(method.params.map((spec) => [spec.key, spec.default]));
   const merged = { ...defaults, ...method.presetFor(quality), ...overrides };
-  return method.normalizeValues?.(merged) ?? merged;
+  const resolved = method.normalizeValues?.(merged) ?? merged;
+  method.resolveComposition(resolved);
+  return resolved;
 }
 
 export function numberValue(values: MethodParamValues, spec: ReadonlyArray<MethodParamSpec>, key: string): number {

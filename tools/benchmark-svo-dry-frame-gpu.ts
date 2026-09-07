@@ -126,22 +126,17 @@ import {
   type PaperPhaseId,
   type PerformanceTrace,
 } from "../lib/core/performance-trace";
-import { disabledRenderStagesFrom } from "../lib/core/render-stage-switches";
+import { disabledRenderStagesFrom } from "../lib/svo/pipeline/render-stage-switches";
 import { heroGardenCamera } from "../lib/core/hero-garden-scene";
 import { createHeroGardenHoseStressScene } from "../lib/core/hero-garden-stress-scene";
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "../lib/core/scene-definition";
 import { getSceneDefinition, getScenePreset } from "../lib/core/scenes";
-import type { SvoConeTracingMode } from "../lib/svo/svo-render-options";
-import {
-  DEFAULT_SVO_RENDER_TUNING,
-  svoEnvironmentTreeRefinementDepth,
-  svoSceneryDetailCellSize_m,
-  SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
-  type SvoConeRadianceReconstruction,
-} from "../lib/svo/svo-render-tuning";
-import { effectiveSvoScreenSpaceThresholdPixels, SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/svo-screen-space-termination";
-import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
-import { LIVE_SVO_RADIANCE_FEEDBACK } from "../lib/svo/webgpu-svo-live-derived-builder";
+import type { SvoConeTracingMode } from "../lib/svo/pipeline/svo-render-options";
+import { DEFAULT_SVO_RENDER_TUNING, svoEnvironmentTreeRefinementDepth, svoSceneryDetailCellSize_m, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM } from "../lib/svo/pipeline/svo-render-tuning";
+import { type SvoConeRadianceReconstruction } from "../lib/svo/features/radiance/definition";
+import { effectiveSvoScreenSpaceThresholdPixels, SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/features/lighting-visibility/svo-screen-space-termination";
+import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
+import { LIVE_SVO_RADIANCE_FEEDBACK } from "../lib/svo/features/radiance/webgpu-svo-live-derived-builder";
 import {
   buildSvoDrySceneAssembly,
   createDawnRenderDevice,
@@ -153,23 +148,9 @@ import {
   createPassEncoderIsolationScratch,
   isolateComputePassEncoders,
 } from "../lib/harness/webgpu-pass-encoder-isolation";
-import {
-  canConsumeSparseVoxelPbrMaterials,
-  canEncodeSparseVoxelDryScene,
-  resolveSparseVoxelThickGlassBinderStatus,
-  SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL,
-  SVO_DRY_TRAVERSAL_MODES,
-  SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL,
-  SparseVoxelDrySceneRenderer,
-  svoConePrepassSize,
-  svoDryRigidPrimaryStrategy,
-  type SvoBrickOccupancyMode,
-  type SvoConeLightingScale,
-  type SvoDryTraversalMode,
-  type SvoDryShadingPath,
-  type SvoDryOptimizationExperiments,
-} from "../lib/svo/webgpu-svo-dry-scene";
-import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/webgpu-svo-gbuffer-targets";
+import { canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL, SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL, SparseVoxelDrySceneRenderer, svoConePrepassSize, svoDryRigidPrimaryStrategy } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
+import { SVO_DRY_TRAVERSAL_MODES, type SvoBrickOccupancyMode, type SvoConeLightingScale, type SvoDryTraversalMode, type SvoDryShadingPath, type SvoDryOptimizationExperiments } from "../lib/svo/features/shading/program";
+import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/features/primary-visibility/webgpu-svo-gbuffer-targets";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 

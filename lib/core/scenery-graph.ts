@@ -6,7 +6,7 @@ import type { SceneryGeneratorParamsByKind } from "./scenery-generators";
 // evaluator, its noise library and its WGSL generator in every bundle that
 // parses a scene. Types are erased, so the schema can name a tape without
 // carrying one.
-import type { SvoFieldProgram } from "../svo/svo-field-program";
+import type { SvoFieldProgram } from "../svo/features/scene-publication/svo-field-program";
 import type { PondVesselSpec } from "./voxel-scenery/pond-vessel";
 
 /**

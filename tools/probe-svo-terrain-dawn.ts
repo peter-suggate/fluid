@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createDawnRenderDevice } from "./svo-dry-frame-harness";
-import { buildSvoRenderTerrainGpu } from "../lib/svo/webgpu-svo-render-terrain";
-import { buildSvoRenderTerrainFieldSteps } from "../lib/svo/svo-render-solid-field";
+import { buildSvoRenderTerrainGpu } from "../lib/svo/features/scene-publication/webgpu-svo-render-terrain";
+import { buildSvoRenderTerrainFieldSteps } from "../lib/svo/features/scene-publication/svo-render-solid-field";
 import { completeCooperativeBuild } from "../lib/core/cooperative-build";
 import { getScenePreset } from "../lib/core/scenes";
 

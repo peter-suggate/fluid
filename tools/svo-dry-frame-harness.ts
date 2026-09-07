@@ -1,3 +1,4 @@
+import type { SparseVoxelDrySceneData } from "../lib/svo/contracts/scene-publication";
 /**
  * The parts of a headless SVO dry-frame run that must not be written twice.
  *
@@ -47,18 +48,17 @@ import {
   packSvoMaterialTable,
   svoMaterialFromEnvironmentProxyMaterial,
   svoMaterialFunctionIdForEnvironmentProxy,
-} from "../lib/svo/svo-material-abi";
-import { svoPrimitiveCandidateBounds } from "../lib/svo/svo-primitive-candidates";
-import { buildSvoSceneGlass } from "../lib/svo/svo-scene-glass";
-import { buildSvoScenePrimitives, type SvoScenePrimitiveBuild } from "../lib/svo/svo-scene-primitives";
-import { buildSvoSceneThickGlass } from "../lib/svo/svo-scene-thick-glass";
-import { sceneTerrainSurfaceModel } from "../lib/svo/svo-terrain-material";
+} from "../lib/svo/contracts/svo-material-abi";
+import { svoPrimitiveCandidateBounds } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
+import { buildSvoSceneGlass } from "../lib/svo/features/materials/svo-scene-glass";
+import { buildSvoScenePrimitives, type SvoScenePrimitiveBuild } from "../lib/svo/features/scene-publication/svo-scene-primitives";
+import { buildSvoSceneThickGlass } from "../lib/svo/features/materials/svo-scene-thick-glass";
+import { sceneTerrainSurfaceModel } from "../lib/svo/features/materials/svo-terrain-material";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/core/webgpu-renderer";
 import {
   buildSparseVoxelDrySceneLightingMirrors,
-  type SparseVoxelDrySceneData,
-} from "../lib/svo/webgpu-svo-dry-scene";
+} from "../lib/svo/pipeline/webgpu-svo-dry-scene";
 import type { SparseVoxelSceneRenderSource } from "../lib/core/webgpu-voxel-debug";
 
 /** Floats in the 416-byte view uniform block (`FluidLabRenderer`, webgpu-renderer.ts). */

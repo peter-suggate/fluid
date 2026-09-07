@@ -63,28 +63,28 @@ import { fileURLToPath } from "node:url";
 
 import { SCENE_ENVIRONMENT_OWNER_BASE } from "../lib/core/webgpu-rigid-body";
 import { getScenePreset } from "../lib/core/scenes";
-import { SVO_CLUSTER_ARENA_BLOCK, packSvoClusterArena } from "../lib/svo/svo-cluster-arena";
+import { SVO_CLUSTER_ARENA_BLOCK, packSvoClusterArena } from "../lib/svo/features/construction/svo-cluster-arena";
 import {
   growSvoNodeMipAddressPlan,
   pagesOutsideSvoNodeMipAddressPlan,
   planSvoNodeMipAddresses,
   svoNodeMipDomainBasePages,
   svoNodeMipDomainPyramidPageCount,
-} from "../lib/svo/svo-node-mip-address-plan";
-import type { SvoNodeMipCoordinate } from "../lib/svo/svo-node-mip-pyramid";
-import { SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS, type SvoSmoothUnionClusterPacking } from "../lib/svo/svo-primitive-abi";
+} from "../lib/svo/features/radiance/svo-node-mip-address-plan";
+import type { SvoNodeMipCoordinate } from "../lib/svo/features/radiance/svo-node-mip-pyramid";
+import { SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS, type SvoSmoothUnionClusterPacking } from "../lib/svo/contracts/svo-primitive-abi";
 import {
   SPARSE_BRICK_PAYLOAD_PROFILES, sparseBrickScenePayloadIdentityAt, unpackMaterialOwner,
-} from "../lib/svo/sparse-brick-octree";
-import { packSvoDrySceneClusters } from "../lib/svo/webgpu-svo-dry-scene";
-import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
+} from "../lib/svo/features/construction/sparse-brick-octree";
+import { packSvoDrySceneClusters } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
+import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import {
   ENVIRONMENT_VOXEL_MATERIAL_BASE,
   OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
   OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
   octreeLiveSceneDryPayloadProfile,
   type OctreeSparseBrickWorld,
-} from "../lib/svo/webgpu-svo-sparse-bricks";
+} from "../lib/svo/features/construction/webgpu-svo-sparse-bricks";
 import {
   SPARSE_SCENE_MAINTENANCE_STATE_WORDS,
   sparseScenePrimitiveBounds,

@@ -42,12 +42,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { getScenePreset } from "../lib/core/scenes";
-import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
+import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import {
   ENVIRONMENT_VOXEL_MATERIAL_BASE,
   planOctreeLiveSceneRecordIndex,
   type OctreeSparseBrickWorld,
-} from "../lib/svo/webgpu-svo-sparse-bricks";
+} from "../lib/svo/features/construction/webgpu-svo-sparse-bricks";
 import {
   SPARSE_SCENE_CLUSTER_CAPACITY,
   SPARSE_SCENE_MAINTENANCE_STAGES,

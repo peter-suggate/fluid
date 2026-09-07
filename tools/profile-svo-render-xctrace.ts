@@ -46,8 +46,8 @@ import {
   releaseWebGPUExclusiveLockSync,
   WEBGPU_EXCLUSIVE_LOCK,
 } from "../lib/harness/webgpu-smoke-isolation";
-import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/svo-screen-space-termination";
-import { SVO_DRY_TRAVERSAL_MODES, type SvoDryTraversalMode } from "../lib/svo/webgpu-svo-dry-scene";
+import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/features/lighting-visibility/svo-screen-space-termination";
+import { SVO_DRY_TRAVERSAL_MODES, type SvoDryTraversalMode } from "../lib/svo/features/shading/program";
 import { buildFrameReport, renderFrameReportHtml, type FrameReport } from "./xctrace-frame-report";
 import { parseTraceTable, readTraceRows } from "./xctrace-trace-tables";
 

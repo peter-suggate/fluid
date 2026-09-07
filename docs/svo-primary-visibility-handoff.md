@@ -60,7 +60,7 @@ key is blind to.
 - A camera/scene coherence key once guarded an exact primary-G-buffer cache.
 - The cache and its tuning/UI controls were subsequently removed as a temporal
   shortcut that concealed traversal cost and complicated correctness.
-- `tests/svo-primary-reuse-gate.test.ts` now pins that removal: no tuning field
+- `lib/svo/features/construction/tests/svo-primary-reuse-gate.test.ts` now pins that removal: no tuning field
   and no stationary-reuse frame-graph node may return.
 
 ### Measured
@@ -148,7 +148,7 @@ conservative near distance for the block, then start every fine ray at that
 distance instead of at the root AABB.
 
 This codebase has no such pass. The seam it would attach to is
-`traceStatic` (`lib/svo/webgpu-svo-dry-scene.ts:5434`): `var minimum = 0.0` at
+`traceStatic` (`lib/svo/pipeline/webgpu-svo-dry-scene.ts:5434`): `var minimum = 0.0` at
 `:5442` and the cursor begin at `:5447` are where a per-block `tMin` would be
 substituted for the root-AABB entry, alongside
 `svoTraversalContinuationBegin` (`webgpu-svo-traversal.ts:607`, root AABB with

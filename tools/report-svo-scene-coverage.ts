@@ -1,7 +1,7 @@
 import {
   buildSvoShippedSceneCoverage,
   canonicalSvoSceneCoverage,
-} from "../lib/svo/svo-scene-coverage";
+} from "../lib/svo/features/scene-publication/svo-scene-coverage";
 
 const report = buildSvoShippedSceneCoverage();
 const output = process.argv.includes("--compact")

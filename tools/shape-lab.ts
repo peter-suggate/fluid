@@ -43,7 +43,7 @@ import {
   svoFieldProgramFeatureRadius_m,
   validateSvoFieldProgram,
   type SvoFieldProgram,
-} from "../lib/svo/svo-field-program";
+} from "../lib/svo/features/scene-publication/svo-field-program";
 import { writeFileSync } from "node:fs";
 
 // ---------------------------------------------------------------------------

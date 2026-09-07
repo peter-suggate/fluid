@@ -5,14 +5,14 @@ const gcObserver=new PerformanceObserver(list=>{for(const entry of list.getEntri
 gcObserver.observe({entryTypes:["gc"]});
 import {GPUPassTimestampRecorder} from "../lib/core/performance-trace";
 import {createDawnRenderDevice,buildSvoDrySceneAssembly,packSvoDryRigidBodies,packSvoDryViewUniforms} from "./svo-dry-frame-harness";
-import {WebGPULiveSvoScene} from "../lib/svo/webgpu-live-svo-scene";
+import {WebGPULiveSvoScene} from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import {createProductionSparseVoxelDrySceneRenderer} from "../lib/core/webgpu-renderer";
 import {getSceneDefinition,getScenePreset} from "../lib/core/scenes";
 import {sceneDocumentAtLattice} from "../lib/core/scene-definition";
-import {svoSceneryDetailCellSize_m,DEFAULT_SVO_RENDER_TUNING} from "../lib/svo/svo-render-tuning";
+import {svoSceneryDetailCellSize_m,DEFAULT_SVO_RENDER_TUNING} from "../lib/svo/pipeline/svo-render-tuning";
 import {defaultCamera} from "../lib/core/model";
-import {DEFAULT_SVO_LIGHTING_OPTIONS} from "../lib/svo/svo-render-options";
-import {SVO_GBUFFER_FLAGS,SVO_GBUFFER_PRODUCERS,svoGBufferProducerOf} from "../lib/svo/svo-gbuffer";
+import {DEFAULT_SVO_LIGHTING_OPTIONS} from "../lib/svo/pipeline/svo-render-options";
+import {SVO_GBUFFER_FLAGS,SVO_GBUFFER_PRODUCERS,svoGBufferProducerOf} from "../lib/svo/contracts/svo-gbuffer";
 const depth=Number(process.env.FLUID_PROBE_DEPTH??3), id=process.env.FLUID_PROBE_SCENE??"hero-garden-hose-x10";
 const preset=getScenePreset(id),base=preset.create();
 const scene=sceneDocumentAtLattice(getSceneDefinition(id),{cellSize_m:base.voxelDomain.finestCellSize_m,

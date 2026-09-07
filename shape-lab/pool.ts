@@ -19,7 +19,7 @@
  * cheapest possible load balance and needs no measurement.
  */
 import type { TerrainGrid } from "../lib/core/terrain";
-import type { SvoPrimitiveDescriptor } from "../lib/svo/svo-primitive-abi";
+import type { SvoPrimitiveDescriptor } from "../lib/svo/contracts/svo-primitive-abi";
 import type { ShapeLabCamera, ShapeLabShading } from "./trace";
 import type { ShapeLabRequest, ShapeLabResponse } from "./worker";
 

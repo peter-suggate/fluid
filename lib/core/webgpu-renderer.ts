@@ -1,19 +1,20 @@
+import type { SparseVoxelDrySceneData } from "../svo/contracts/scene-publication";
 import { SimulationFailureError } from "./simulation-failure";
-import { planSvoFluidCoverageRatio, type SvoFluidCoverageTriple } from "../svo/svo-fluid-coverage";
+import { planSvoFluidCoverageRatio, type SvoFluidCoverageTriple } from "../svo/features/scene-publication/svo-fluid-coverage";
 import {
   WebGpuSvoFluidCoverage,
   type WebGpuSvoFluidCoverageOptions,
   type WebGpuSvoFluidCoverageSource,
-} from "../svo/webgpu-svo-fluid-coverage";
+} from "../svo/features/scene-publication/webgpu-svo-fluid-coverage";
 import { cameraBasis, dot } from "./math";
 import { sceneLatticeDimensions } from "./scene-lattice";
 import { canonicalScene, sceneRevision, sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "./model";
 import { SCENE_SHAPE_PALETTE_LINEAR, sceneShapeCode, sceneShapeRenderHalfExtent_m } from "./scene-shape";
-import { svoSceneLighting } from "../svo/svo-dry-scene-lighting";
+import { svoSceneLighting } from "../svo/features/lighting-visibility/svo-dry-scene-lighting";
 import {
   buildSvoSceneLights,
   waterKeyDirectionalFromSceneLights,
-} from "../svo/svo-light-abi";
+} from "../svo/contracts/svo-light-abi";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
 import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, SCENE_ENVIRONMENT_OWNER_BASE, type DrawnRigidBodyPose } from "./webgpu-rigid-body";
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
@@ -32,7 +33,7 @@ import { cameraTanHalfFov, viewportAspect, viewportRayForPixel } from "./webgpu-
 import {
   type SvoPixelTrace,
   type SvoPixelTraceLayer,
-} from "../svo/svo-pixel-trace";
+} from "../svo/features/diagnostics/svo-pixel-trace";
 import { DecorationOverlay } from "./webgpu-decoration-overlay";
 import { FaceVelocityOverlay } from "./webgpu-face-velocity-overlay";
 import type { PressureJournal } from "./pressure-journal";
@@ -60,46 +61,47 @@ import { buildVesselOutlineGeometry, sceneVesselPresentation } from "./vessel-ou
 import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
 import type { FluidCellLattice, FluidCellTrace } from "./fluid-cell-trace";
 import type { FineBandCellContext } from "./fine-band-cell-model";
-import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, resolveSparseVoxelThickGlassBinderStatus, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SparseVoxelDrySceneData, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/webgpu-svo-dry-scene";
+import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, resolveSparseVoxelThickGlassBinderStatus, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/pipeline/webgpu-svo-dry-scene";
+import { SVO_DRY_SCENE_REVERSED_Z_NEAR_M } from "../svo/features/shading/program";
 import {
   buildSvoScenePrimitives,
-} from "../svo/svo-scene-primitives";
+} from "../svo/features/scene-publication/svo-scene-primitives";
 import {
   buildSvoPrimitiveCandidates,
   createSvoPrimitiveCandidateRefitPlan,
   refitSvoPrimitiveCandidatesIncremental,
   svoPrimitiveCandidateBounds,
   type SvoPrimitiveCandidateRefitPlan,
-} from "../svo/svo-primitive-candidates";
-import { packSvoPrimitiveRecords, SVO_PRIMITIVE_RECORD_WORDS, type SvoPrimitiveDescriptor } from "../svo/svo-primitive-abi";
+} from "../svo/features/scene-publication/svo-primitive-candidates";
+import { packSvoPrimitiveRecords, SVO_PRIMITIVE_RECORD_WORDS, type SvoPrimitiveDescriptor } from "../svo/contracts/svo-primitive-abi";
 import { swayedPrimitiveDescriptor, type EnvironmentProxySway } from "./scenery-sway";
 import {
   buildDefaultSvoMaterialRecords,
   packSvoMaterialTable,
   svoMaterialFromEnvironmentProxyMaterial,
   svoMaterialFunctionIdForEnvironmentProxy,
-} from "../svo/svo-material-abi";
-import { buildSvoSceneGlass } from "../svo/svo-scene-glass";
-import { buildSvoSceneThickGlass } from "../svo/svo-scene-thick-glass";
-import { sceneTerrainSurfaceModel } from "../svo/svo-terrain-material";
+} from "../svo/contracts/svo-material-abi";
+import { buildSvoSceneGlass } from "../svo/features/materials/svo-scene-glass";
+import { buildSvoSceneThickGlass } from "../svo/features/materials/svo-scene-thick-glass";
+import { sceneTerrainSurfaceModel } from "../svo/features/materials/svo-terrain-material";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   resolveSvoPrimaryTraversal,
   type SvoLightingOptions,
   type SvoPrimaryTraversalMode,
   type SvoPrimaryTraversalScale,
-} from "../svo/svo-render-options";
+} from "../svo/pipeline/svo-render-options";
 import { webGPUPlatformResourcePlugin } from "./webgpu-platform-resource";
-import { disabledRenderStagesFrom, disabledRenderStagesKey } from "./render-stage-switches";
+import { disabledRenderStagesFrom, disabledRenderStagesKey } from "../svo/pipeline/render-stage-switches";
 import {
   DEFAULT_SVO_RENDER_DIAGNOSTICS,
   normalizeSvoRenderDiagnostics,
   svoRenderStageUsesPrimaryWorkMap,
   type SvoRenderDiagnostics,
-} from "../svo/svo-render-diagnostics";
-import { SparseVoxelRenderStageOverlay } from "../svo/webgpu-svo-stage-overlay";
-import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, type SvoRenderTuning } from "../svo/svo-render-tuning";
-import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../svo/svo-screen-space-termination";
+} from "../svo/features/diagnostics/svo-render-diagnostics";
+import { SparseVoxelRenderStageOverlay } from "../svo/features/diagnostics/webgpu-svo-stage-overlay";
+import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, type SvoRenderTuning } from "../svo/pipeline/svo-render-tuning";
+import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../svo/features/lighting-visibility/svo-screen-space-termination";
 import { isGPUInitializationAbort } from "./gpu-initialization";
 import {
   createGlobalFineLevelSetConsumerSource,
@@ -114,7 +116,7 @@ import {
   fluidExecutionDeviceFeatures,
 } from "./gpu-startup";
 import { initialRasterPresentationReadiness, requiresFencedInitialRasterPresentation } from "./gpu-t0-presentation";
-import { liveSvoSceneResourcePlugin, WebGPULiveSvoScene } from "../svo/webgpu-live-svo-scene";
+import { liveSvoSceneResourcePlugin, WebGPULiveSvoScene } from "../svo/features/scene-publication/webgpu-live-svo-scene";
 import { planSceneRuntime } from "./scene-runtime";
 import type { GPUStatus } from "./gpu-status";
 import {
@@ -2646,6 +2648,20 @@ export class FluidLabRenderer {
     return fluid?.sparseVoxelSceneSource ? fluid : this.svoSceneSidecar;
   }
 
+  private refreshEditedTopology(solver: GPUSolverInstance): void {
+    if (!solver.refreshSceneTopology) return;
+    void solver.refreshSceneTopology().then(() => {
+      if (this.disposed || this.gpuFluid !== solver) return;
+      this.waterPipeline?.invalidateSurface();
+      this.pausedPresentationRevision += 1;
+      this.gpuInfoCallback?.({ ...solver.info });
+    }).catch(error => {
+      if (this.disposed || this.gpuFluid !== solver) return;
+      if (error instanceof SimulationFailureError) this.stopAfterSimulationFailure(error);
+      else this.stopAfterFailure(error);
+    });
+  }
+
   private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig, presentationMode: ScenePresentationMode) {
     if (!this.device || this.disposed || this.simulationFault || this.runtimeFailure || this.deviceLost) return undefined;
     if (!canInitializeGPUSceneSource(scene, config.methodId)) return undefined;
@@ -2670,6 +2686,7 @@ export class FluidLabRenderer {
     if (sceneUniformKey !== this.appliedSceneUniformKey) {
       if (this.gpuFluid.applySceneUniforms) {
         this.gpuFluid.applySceneUniforms(scene);
+        this.refreshEditedTopology(this.gpuFluid);
         this.appliedSceneUniformKey = sceneUniformKey;
       } else if (this.appliedSceneUniformKey) {
         const rebuildKey = `${key}:${sceneUniformKey}`;

@@ -1,3 +1,5 @@
+import { ALGORITHM_PARAMS } from "./features/algorithms/definition";
+import { resolveMethodComposition } from "./composition";
 import { WebGPUOctreeEulerianSolver } from "../octree-shared/webgpu-octree-eulerian";
 import { VISUALIZATION_FIELDS } from "../../core/visualization-catalog";
 import type { MethodParamSpec, MethodParamValues, SimulationMethod } from "../../core/method-contract";
@@ -47,7 +49,7 @@ const runtimeDialParams: MethodParamSpec[] = OCTREE_RUNTIME_DIALS.map((dial) => 
 }));
 
 const params: MethodParamSpec[] = [
-  { kind: "select", key: "losassoVelocityExtension", label: "Losasso extrapolation", default: "fixed-jacobi", tier: "fine", options: [{ value: "fixed-jacobi", label: "Fixed Jacobi · default" }, { value: "causal-front", label: "Causal layer front" }], hint: "Construction-time A/B control for Section 5 air velocity extension. Causal-front publishes one graph layer per sweep from already-valid inner layers." },
+  ...ALGORITHM_PARAMS,
   { kind: "select", key: "globalFineLevelSetFactor", label: "Surface tracking", default: "1", tier: "coarse", options: [{ value: "1", label: "Adaptive finest surface · default" }, { value: "4", label: "4× subcell surface" }, { value: "8", label: "8× subcell surface · experimental" }], hint: "Ando-style factor 1 remeshes the octree itself: every leaf cut by the moving interface stays at the finest pressure/level-set tier, while pure liquid and air grade rapidly to coarse cells away from it. Fixed-point mass is handed conservatively between old and new leaves. Factors 4/8 instead opt into a separate sparse subcell interface band." },
   ...OCTREE_STRUCTURAL_PARAMS,
   { kind: "number", key: "topologyCadenceAdvances", label: "Topology cadence", unit: "advances", min: 1, max: 8, step: 1, digits: 0, default: 8, tier: "fine", hint: "Losasso candidate epochs cover eight accepted advances by default. Each skipped rebuild is represented spatially by an extra dilation ring, keeping the moving interface inside the resident band." },
@@ -64,6 +66,8 @@ export const losassoSolverOptions = (scene: SceneDescription, quality: GPUQualit
   }), values);
 
 export const losassoMethod: SimulationMethod = {
+  composition: resolveMethodComposition(),
+  resolveComposition: values => resolveMethodComposition(values),
   id: "losasso",
   label: "Losasso adaptive octree",
   shortLabel: "Losasso",

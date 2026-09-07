@@ -176,7 +176,7 @@ import {
   retainSparseAtlasResolutionPolicy,
   type SparseAtlasResolutionPolicyReceipt,
   type SparseAtlasResolutionPolicyState,
-} from "./sparse-atlas-resolution-policy";
+} from "./features/adaptivity/sparse-atlas-resolution-policy";
 
 export interface SparseAtlasDynamicsState {
   readonly atlas: SparseAdaptiveMassAtlas;

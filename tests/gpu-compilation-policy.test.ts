@@ -11,7 +11,7 @@ import ts from "typescript";
  * in Node, only inside a fenced smoke run, and the compilation policy below
  * exists to protect an interactive frame — which the harness never draws.
  */
-const NON_PRODUCTION_DIRECTORIES = new Set(["harness"]);
+const NON_PRODUCTION_DIRECTORIES = new Set(["harness", "tests", "verification", "probes"]);
 
 async function sourceFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -20,7 +20,7 @@ async function sourceFiles(directory: string): Promise<string[]> {
     if (entry.isDirectory()) {
       return NON_PRODUCTION_DIRECTORIES.has(entry.name) ? [] : sourceFiles(target);
     }
-    return entry.isFile() && /\.(?:ts|tsx)$/.test(entry.name) ? [target] : [];
+    return entry.isFile() && /\.(?:ts|tsx)$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name) ? [target] : [];
   }));
   return nested.flat();
 }

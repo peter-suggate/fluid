@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
-import { createWebgpuSvoTraversalWGSL, webgpuSvoTraversalWGSL } from "../lib/svo/webgpu-svo-traversal";
+import { createWebgpuSvoTraversalWGSL, webgpuSvoTraversalWGSL } from "../lib/svo/features/primary-visibility/webgpu-svo-traversal";
 
 type Variant = "baseline" | "optimized";
 type Comparison = "expansion" | "morton-decode" | "parametric";

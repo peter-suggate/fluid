@@ -21,34 +21,50 @@ interface MethodStore {
   seedProfile: (profile: MethodProfile) => void;
 }
 
+/** Shared preflight for UI commands, profiles, and direct store callers. */
+export function validateMethodConfiguration(methodId: string, quality: GPUQuality, overrides: MethodParamValues): void {
+  const method = getMethod(methodId);
+  if (method.id !== methodId) throw new Error(`Unknown simulation method ${methodId}`);
+  resolveMethodValues(method, quality, overrides);
+}
+
 export const createMethodStore = () => create<MethodStore>((set) => ({
   methodId: defaultMethodId(),
   quality: "balanced",
   overrides: {},
-  setMethodId: (methodId) => set({ methodId }),
-  setQuality: (quality) => set({ quality }),
-  setParam: (methodId, key, value) => set((state) => ({ overrides: { ...state.overrides, [methodId]: { ...state.overrides[methodId], [key]: value } } })),
-  resetParam: (methodId, key) => set((state) => {
+  setMethodId: (methodId) => set(state => {
+    validateMethodConfiguration(methodId, state.quality, state.overrides[methodId] ?? {});
+    return { methodId };
+  }),
+  setQuality: (quality) => set(state => {
+    validateMethodConfiguration(state.methodId, quality, state.overrides[state.methodId] ?? {});
+    return { quality };
+  }),
+  setParam: (methodId, key, value) => set(state => {
+    const overrides = { ...state.overrides[methodId], [key]: value };
+    validateMethodConfiguration(methodId, state.quality, overrides);
+    return { overrides: { ...state.overrides, [methodId]: overrides } };
+  }),
+  resetParam: (methodId, key) => set(state => {
     const rest = { ...(state.overrides[methodId] ?? {}) };
     delete rest[key];
+    validateMethodConfiguration(methodId, state.quality, rest);
     return { overrides: { ...state.overrides, [methodId]: rest } };
   }),
-  resetParams: (methodId) => set((state) => ({ overrides: { ...state.overrides, [methodId]: {} } })),
-  // Scene profiles are construction contracts: selecting a scene must produce
-  // the same settings in the browser and Dawn. Users can still tune any value
-  // after selection, but an old fine-band choice cannot silently leak into the
-  // next scene and override its authored coarse-only profile.
-  applyProfile: ({ methodId, quality, overrides }) => set((state) => ({
-    methodId,
-    quality,
-    overrides: { ...state.overrides, [methodId]: { ...overrides } },
-  })),
-  // Catalog profiles retain the exact settings needed when their historical
-  // method is selected, but opening a card never switches away from the
-  // product-wide Sparse CM12 default merely because comparison settings exist.
-  seedProfile: ({ methodId, overrides }) => set((state) => ({
-    overrides: { ...state.overrides, [methodId]: { ...overrides } },
-  })),
+  resetParams: methodId => set(state => {
+    validateMethodConfiguration(methodId, state.quality, {});
+    return { overrides: { ...state.overrides, [methodId]: {} } };
+  }),
+  // Scene profiles replace their method's overrides atomically.
+  applyProfile: ({ methodId, quality, overrides }) => set(state => {
+    validateMethodConfiguration(methodId, quality, overrides);
+    return { methodId, quality, overrides: { ...state.overrides, [methodId]: { ...overrides } } };
+  }),
+  // Retain another method's authored configuration without selecting it.
+  seedProfile: ({ methodId, overrides }) => set(state => {
+    validateMethodConfiguration(methodId, state.quality, overrides);
+    return { overrides: { ...state.overrides, [methodId]: { ...overrides } } };
+  }),
 }));
 
 export type MethodStoreHook = ReturnType<typeof createMethodStore>;

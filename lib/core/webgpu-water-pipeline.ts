@@ -44,7 +44,7 @@ import {
   disabledRenderStagesEqual,
   NO_DISABLED_RENDER_STAGES,
   type DisabledRenderStages,
-} from "./render-stage-switches";
+} from "../svo/pipeline/render-stage-switches";
 
 type FluidDomain = NonNullable<GPUSolverInstance["fluidDomain"]>;
 

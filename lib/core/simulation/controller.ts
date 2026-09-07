@@ -1,3 +1,4 @@
+import { validateMethodConfiguration } from "../stores/method-store";
 import { hostTransportBlockReason, hostTransportFailure } from "./host-transport-status";
 import { BUILD_ID, canonicalScene, cloneScene, parseScene, type RunState, type SceneDescription } from "../model";
 import { adoptRigidBodyRoster, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "../rigid-body";
@@ -14,7 +15,7 @@ import {
   sceneDocumentAtLattice,
   type SceneCard,
 } from "../scene-definition";
-import { svoSceneryDetailCellSize_m, svoSceneryRefinementDepth, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM } from "../../svo/svo-render-tuning";
+import { svoSceneryDetailCellSize_m, svoSceneryRefinementDepth, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM } from "../../svo/pipeline/svo-render-tuning";
 import { terrainSampleShape } from "../terrain";
 import { sceneStoneQuery, withSceneStoneQuery } from "../stone-look-controls";
 import { sceneCanopyQuery, withSceneCanopyQuery } from "../tree-canopy-controls";
@@ -1059,6 +1060,8 @@ class SimulationController {
   }
 
   setQuality(quality: GPUQuality, paneId: PaneId = PRIMARY_PANE_ID) {
+    const state = this.session(paneId).method.getState();
+    validateMethodConfiguration(state.methodId, quality, state.overrides[state.methodId] ?? {});
     this.announceGPURebuild(`Apply ${quality} quality`, paneId);
     this.session(paneId).method.getState().setQuality(quality);
     this.reset(undefined, undefined, paneId);
@@ -1066,6 +1069,8 @@ class SimulationController {
   }
 
   setMethod(methodId: string, paneId: PaneId = PRIMARY_PANE_ID) {
+    const state = this.session(paneId).method.getState();
+    validateMethodConfiguration(methodId, state.quality, state.overrides[methodId] ?? {});
     this.announceGPURebuild(`Switch to ${getMethod(methodId).label}`, paneId);
     this.session(paneId).method.getState().setMethodId(methodId);
     this.reset(undefined, undefined, paneId);
@@ -1093,6 +1098,8 @@ class SimulationController {
   setMethodParam(methodId: string, key: string, value: MethodParamValue, paneId: PaneId = PRIMARY_PANE_ID) {
     const method = getMethod(methodId), spec = method.params.find((candidate) => candidate.key === key);
     const structural = methodId === this.session(paneId).method.getState().methodId && spec?.update !== "runtime";
+    const state = this.session(paneId).method.getState();
+    validateMethodConfiguration(methodId, state.quality, { ...state.overrides[methodId], [key]: value });
     if (structural) this.announceGPURebuild(`Apply ${spec?.label ?? key}: ${String(value)}`, paneId);
     this.session(paneId).method.getState().setParam(methodId, key, value);
     if (structural) this.reset(undefined, undefined, paneId);
@@ -1101,6 +1108,10 @@ class SimulationController {
   resetMethodParam(methodId: string, key: string, paneId: PaneId = PRIMARY_PANE_ID) {
     const method = getMethod(methodId), spec = method.params.find((candidate) => candidate.key === key);
     const structural = methodId === this.session(paneId).method.getState().methodId && spec?.update !== "runtime";
+    const state = this.session(paneId).method.getState();
+    const overrides = { ...state.overrides[methodId] };
+    delete overrides[key];
+    validateMethodConfiguration(methodId, state.quality, overrides);
     if (structural) this.announceGPURebuild(`Restore ${spec?.label ?? key} default`, paneId);
     this.session(paneId).method.getState().resetParam(methodId, key);
     if (structural) this.reset(undefined, undefined, paneId);

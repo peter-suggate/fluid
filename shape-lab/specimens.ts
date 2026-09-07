@@ -43,8 +43,8 @@ import { HERO_GARDEN_CELL_M, HERO_GARDEN_CONTAINER } from "../lib/core/hero-gard
 import type { SceneDescription } from "../lib/core/model";
 import { createHeroGardenHoseSceneWithSet } from "../lib/core/scenes";
 import { walkSceneryNodes, type SceneryGraph, type SceneryNode } from "../lib/core/scenery-graph";
-import { svoDescriptorForEnvironmentProxy } from "../lib/svo/svo-scene-primitives";
-import type { SvoPrimitiveDescriptor } from "../lib/svo/svo-primitive-abi";
+import { svoDescriptorForEnvironmentProxy } from "../lib/svo/features/scene-publication/svo-scene-primitives";
+import type { SvoPrimitiveDescriptor } from "../lib/svo/contracts/svo-primitive-abi";
 import { terrainSampleGrid, type TerrainGrid } from "../lib/core/terrain";
 
 import { buildEnvironmentProxyCatalog } from "../lib/core/voxel-environments";

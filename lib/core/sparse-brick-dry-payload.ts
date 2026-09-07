@@ -49,7 +49,7 @@
  * Everything here is device-free so the packing is unit-testable on CPU.
  */
 
-import { SPARSE_BRICK_NO_OWNER, packMaterialOwner, unpackMaterialOwner } from "../svo/sparse-brick-octree";
+import { SPARSE_BRICK_NO_OWNER, packMaterialOwner, unpackMaterialOwner } from "../svo/features/construction/sparse-brick-octree";
 
 /** Air. Written wherever the voxeliser found no coverage. */
 export const SPARSE_BRICK_DRY_EMPTY_IDENTITY = packMaterialOwner(0, SPARSE_BRICK_NO_OWNER);

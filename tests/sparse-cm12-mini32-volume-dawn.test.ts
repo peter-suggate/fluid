@@ -16,8 +16,7 @@ import {
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
 import { WebGPUAdaptiveMassSolver, type AdaptiveMassStepTelemetry } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
-import { SPARSE_CM12_ACTIVITY_POLICY } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import { SPARSE_CM12_ACTIVITY_POLICY } from "../lib/methods/adaptive-mass/features/adaptivity/policy";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 const dawnTest = dawnModule ? test : test.skip;

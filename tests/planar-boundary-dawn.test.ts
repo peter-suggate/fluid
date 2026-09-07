@@ -6,10 +6,9 @@ import {
   planarBoundaryWGSL,
   type PlanarBoundaryPatch,
 } from "../lib/core/planar-boundary";
-import { createSvoDrySceneFragmentWGSL } from
-  "../lib/svo/webgpu-svo-dry-scene";
+import { createSvoDrySceneFragmentWGSL } from "../lib/svo/features/shading/program";
 import { createSvoScenePrimitiveBandWGSL } from
-  "../lib/svo/svo-scene-primitive-band";
+  "../lib/svo/features/scene-publication/svo-scene-primitive-band";
 
 const dawnModule = process.env.WEBGPU_NODE_MODULE;
 

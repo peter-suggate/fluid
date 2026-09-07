@@ -22,10 +22,10 @@ import {
   type SvoNodeMipCoordinate,
   type SvoNodeMipRgba8,
   reduceSvoNodeMipChildren,
-} from "../lib/svo/svo-node-mip-pyramid";
-import { svoNodeMipSamplingWGSL } from "../lib/svo/svo-node-mip-sampling";
-import { WebGpuSvoNodeMipPyramid } from "../lib/svo/webgpu-svo-node-mip-pyramid";
-import { createSvoDryConeMarcherWGSL, type SvoDryConeMarcherOptions } from "../lib/svo/webgpu-svo-dry-scene";
+} from "../lib/svo/features/radiance/svo-node-mip-pyramid";
+import { svoNodeMipSamplingWGSL } from "../lib/svo/features/radiance/svo-node-mip-sampling";
+import { WebGpuSvoNodeMipPyramid } from "../lib/svo/features/radiance/webgpu-svo-node-mip-pyramid";
+import { createSvoDryConeMarcherWGSL, type SvoDryConeMarcherOptions } from "../lib/svo/features/shading/program";
 
 const width = positiveInteger(process.env.FLUID_SVO_CONE_WIDTH ?? "256", "width");
 const height = positiveInteger(process.env.FLUID_SVO_CONE_HEIGHT ?? "256", "height");

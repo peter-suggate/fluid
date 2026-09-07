@@ -4,7 +4,7 @@ import {
   SVO_CLUSTER_LOBE_MAXIMUM_ANISOTROPY,
   SVO_CLUSTER_LOBE_MAXIMUM_COUNT,
   SVO_CLUSTER_LOBE_MINIMUM_COUNT,
-} from "../../svo/svo-cluster-limits";
+} from "../../svo/features/construction/svo-cluster-limits";
 import { bonsaiCanopyField, bonsaiCanopyPadProgram } from "./bonsai-canopy-field";
 import { bonsaiCanopyPads } from "./bonsai-canopy-pads";
 import { alongAxis, V } from "./builder";

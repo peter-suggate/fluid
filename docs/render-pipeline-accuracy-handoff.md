@@ -3,7 +3,7 @@
 Date: 2026-08-11. Review only; nothing here is implemented.
 
 > **2026-08-24 — WP1.4 and WP5/SOURCE landed.** The frame now has a stage ABI
-> (`lib/core/render-frame-stages.ts`) modelled on `SPARSE_CM12_RESIDENT_STAGES`:
+> (`lib/svo/pipeline/render-frame-stages.ts`) modelled on `SPARSE_CM12_RESIDENT_STAGES`:
 > encoders close seams by *stage id*, the panel looks up label, phase, band and
 > prose from one registry keyed by that id, and every stage is assigned to
 > exactly one row by a table that is exhaustive over the ABI (`STAGE_NODE`), so
@@ -11,7 +11,7 @@ Date: 2026-08-11. Review only; nothing here is implemented.
 > reports someone else's number. Alongside it the encoder publishes a per-frame
 > **manifest** of what each stage encoded (`RenderFrameSeamRecorder`), which is
 > what finally separates *encoded nothing* from *encoded render passes nobody
-> can time*. `tests/render-frame-stage-partition.test.ts` pins the partition,
+> can time*. `lib/svo/pipeline/tests/render-frame-stage-partition.test.ts` pins the partition,
 > the per-encoder seam order, and the attribution rule.
 >
 > The bug that motivated it: **Sparse world build read 27.9 ms on frames where

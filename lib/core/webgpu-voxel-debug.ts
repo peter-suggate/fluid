@@ -28,7 +28,7 @@ import {
   FLUID_BRICK_WORKLIST_HEADER_WORDS,
   FLUID_BRICK_WORKLIST_WORDS,
 } from "./webgpu-fluid-brick-residency";
-import type { SparseBrickScenePayloadLanes } from "../svo/sparse-brick-octree";
+import type { SparseBrickScenePayloadLanes } from "../svo/features/construction/sparse-brick-octree";
 
 export const SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS = Object.freeze({
   resident: FLUID_BRICK_RESIDENT,
@@ -310,13 +310,13 @@ export interface SparseVoxelSceneRenderSource {
   /** Direct production source. Optional keeps non-structural producers valid. */
   structural?: SparseVoxelStructuralRenderSource;
   /** Optional generation-matched 4^3 acceleration view derived from the live structural topology. */
-  wideFanout?: import("../svo/webgpu-svo-wide-fanout").WebGPUSvoWideFanoutSource;
+  wideFanout?: import("../svo/features/construction/webgpu-svo-wide-fanout").WebGPUSvoWideFanoutSource;
   /** Optional 16-byte aligned traversal nodes derived from the canonical 32-byte records. */
-  compactHierarchy?: import("../svo/webgpu-svo-compact-hierarchy").WebGpuSvoCompactHierarchySource;
+  compactHierarchy?: import("../svo/features/construction/webgpu-svo-compact-hierarchy").WebGpuSvoCompactHierarchySource;
   /** Optional page-valid sparse opacity cache derived incrementally from the unified live tree. */
-  nodeMipPyramid?: import("../svo/webgpu-svo-node-mip-pyramid").WebGpuSvoNodeMipVisibleGeneration;
+  nodeMipPyramid?: import("../svo/features/radiance/webgpu-svo-node-mip-pyramid").WebGpuSvoNodeMipVisibleGeneration;
   /** Optional directional exitant-radiance generation sharing the opacity page plan and slots. */
-  tetrahedralRadiance?: import("../svo/webgpu-svo-tetrahedral-radiance").WebGpuSvoTetrahedralRadianceVisibleGeneration;
+  tetrahedralRadiance?: import("../svo/features/radiance/webgpu-svo-tetrahedral-radiance").WebGpuSvoTetrahedralRadianceVisibleGeneration;
   /**
    * Capability of the derived opacity/radiance hierarchy. This is independent
    * of authored light-table support: consumers can visibly select exact SVO

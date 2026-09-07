@@ -1,6 +1,6 @@
 import type { Quaternion, Vec3 } from "../model";
 import type { SceneryMaterial, SceneryNode, ScenerySweepPoint } from "../scenery-graph";
-import { SVO_CLUSTER_SWEEP_MAXIMUM_POINTS } from "../../svo/svo-primitive-abi";
+import { SVO_CLUSTER_SWEEP_MAXIMUM_POINTS } from "../../svo/contracts/svo-primitive-abi";
 import { V } from "./builder";
 
 /**

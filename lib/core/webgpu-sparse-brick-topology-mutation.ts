@@ -1,6 +1,6 @@
-import type { SparseBrickCoordinate, SparseBrickOctreeGPU } from "../svo/sparse-brick-octree";
-import { SPARSE_BRICK_GPU_LAYOUT, SPARSE_BRICK_INVALID_INDEX } from "../svo/sparse-brick-octree";
-import { SVO_BRICK_LIFECYCLE, SVO_BRICK_OCCUPANCY } from "../svo/svo-brick-occupancy";
+import type { SparseBrickCoordinate, SparseBrickOctreeGPU } from "../svo/features/construction/sparse-brick-octree";
+import { SPARSE_BRICK_GPU_LAYOUT, SPARSE_BRICK_INVALID_INDEX } from "../svo/features/construction/sparse-brick-octree";
+import { SVO_BRICK_LIFECYCLE, SVO_BRICK_OCCUPANCY } from "../svo/features/construction/svo-brick-occupancy";
 
 export const SPARSE_BRICK_TOPOLOGY_MUTATION = Object.freeze({
   headerWords: 8,

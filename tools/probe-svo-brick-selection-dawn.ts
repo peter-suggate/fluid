@@ -1,17 +1,17 @@
 /** Pair the production GPU selector with the independent CPU SDF oracle. */
 import assert from "node:assert/strict";
 import {createDawnRenderDevice} from "./svo-dry-frame-harness";
-import {selectSvoBrickOccupancyGpu} from "../lib/svo/webgpu-svo-brick-selection";
-import {mortonDecode3D} from "../lib/svo/sparse-brick-octree";
+import {selectSvoBrickOccupancyGpu} from "../lib/svo/features/primary-visibility/webgpu-svo-brick-selection";
+import {mortonDecode3D} from "../lib/svo/features/construction/sparse-brick-octree";
 import {planAdaptiveSparseBrickOctree} from "../lib/core/adaptive-sparse-brick-plan";
-import {buildSvoScenePrimitives,svoScenePrimitiveSolidReach} from "../lib/svo/svo-scene-primitives";
-import {liveSceneBrickCoordinatesForRegions,liveSceneReachableBrickCoordinates} from "../lib/svo/webgpu-svo-sparse-bricks";
+import {buildSvoScenePrimitives,svoScenePrimitiveSolidReach} from "../lib/svo/features/scene-publication/svo-scene-primitives";
+import {liveSceneBrickCoordinatesForRegions,liveSceneReachableBrickCoordinates} from "../lib/svo/features/construction/webgpu-svo-sparse-bricks";
 import {getScenePreset} from "../lib/core/scenes";
-import {classifySvoNodesGpu} from "../lib/svo/webgpu-svo-node-classification";
-import {buildSvoPlanarBoundaryCatalog,createSvoPlanarLeafClassifier} from "../lib/svo/svo-planar-boundary";
+import {classifySvoNodesGpu} from "../lib/svo/features/construction/webgpu-svo-node-classification";
+import {buildSvoPlanarBoundaryCatalog,createSvoPlanarLeafClassifier} from "../lib/svo/features/scene-publication/svo-planar-boundary";
 import {buildEnvironmentProxyCatalog,environmentProxyPrimitives} from "../lib/core/voxel-environments";
 
-import {createSvoEnvironmentCoarsening,environmentProxyFeatureSize_m,SVO_ENVIRONMENT_FEATURE_VOXELS} from "../lib/svo/svo-environment-coarsening";
+import {createSvoEnvironmentCoarsening,environmentProxyFeatureSize_m,SVO_ENVIRONMENT_FEATURE_VOXELS} from "../lib/svo/features/construction/svo-environment-coarsening";
 
 const {device,validationErrors}=await createDawnRenderDevice();
 try {

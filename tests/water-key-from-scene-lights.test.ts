@@ -3,8 +3,8 @@ import test from "node:test";
 
 import { getScenePreset } from "../lib/core/scenes";
 import { REC709_LUMINANCE, resolveWaterKeyLight } from "../lib/core/webgpu-lighting";
-import { svoSceneLighting } from "../lib/svo/svo-dry-scene-lighting";
-import { buildSvoSceneLights, waterKeyDirectionalFromSceneLights } from "../lib/svo/svo-light-abi";
+import { svoSceneLighting } from "../lib/svo/features/lighting-visibility/svo-dry-scene-lighting";
+import { buildSvoSceneLights, waterKeyDirectionalFromSceneLights } from "../lib/svo/contracts/svo-light-abi";
 import type { SceneDescription } from "../lib/core/model";
 
 const luminance = (color: readonly number[]) =>

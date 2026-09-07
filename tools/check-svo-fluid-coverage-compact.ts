@@ -27,11 +27,11 @@ import {
   quantizeSvoFluidCoverage,
   svoFluidCoverageFromSignedDistance,
   SVO_FLUID_COVERAGE_LAYOUT,
-} from "../lib/svo/svo-fluid-coverage";
+} from "../lib/svo/features/scene-publication/svo-fluid-coverage";
 import {
   WebGpuSvoFluidCoverage,
   type WebGpuSvoFluidCoverageCompactSource,
-} from "../lib/svo/webgpu-svo-fluid-coverage";
+} from "../lib/svo/features/scene-publication/webgpu-svo-fluid-coverage";
 
 const BRICK_RESOLUTION = 4;
 const SAMPLES_PER_BRICK = BRICK_RESOLUTION ** 3;

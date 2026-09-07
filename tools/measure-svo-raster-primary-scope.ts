@@ -30,11 +30,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { cameraPosition } from "../lib/core/math";
 import { defaultCamera, type CameraState } from "../lib/core/model";
 import { getScenePreset } from "../lib/core/scenes";
-import { decodeSvoBrickOccupancy } from "../lib/svo/svo-brick-occupancy";
-import { buildSvoScenePrimitives } from "../lib/svo/svo-scene-primitives";
+import { decodeSvoBrickOccupancy } from "../lib/svo/features/construction/svo-brick-occupancy";
+import { buildSvoScenePrimitives } from "../lib/svo/features/scene-publication/svo-scene-primitives";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { SCENE_ENVIRONMENT_OWNER_BASE } from "../lib/core/webgpu-rigid-body";
-import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
+import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const log = (message: string) => process.stderr.write(`${message}\n`);

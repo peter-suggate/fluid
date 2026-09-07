@@ -1,7 +1,7 @@
 import type { SceneDescription } from "./model";
 import type { Quaternion, Vec3 } from "./model";
 import { boundingRadius, primitiveVolume, type RigidBodyState } from "./rigid-body";
-import { SVO_PRIMITIVE_MOTION_STRIDE_BYTES, svoPrimitiveMotionWGSL } from "../svo/svo-primitive-motion";
+import { SVO_PRIMITIVE_MOTION_STRIDE_BYTES, svoPrimitiveMotionWGSL } from "../svo/features/scene-publication/svo-primitive-motion";
 import { sceneHasTerrain } from "./terrain";
 import {
   SCENE_SHAPES_BY_CODE,

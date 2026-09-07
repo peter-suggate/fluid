@@ -41,8 +41,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { getScenePreset } from "../lib/core/scenes";
-import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
-import type { OctreeSparseBrickWorld } from "../lib/svo/webgpu-svo-sparse-bricks";
+import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
+import type { OctreeSparseBrickWorld } from "../lib/svo/features/construction/webgpu-svo-sparse-bricks";
 import { createDawnRenderDevice } from "./svo-dry-frame-harness";
 
 const scenePresetId = process.env.FLUID_SVO_SLOT_SPACE_SCENE ?? "twin-dam-collision";

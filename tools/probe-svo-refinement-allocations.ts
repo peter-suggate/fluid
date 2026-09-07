@@ -1,8 +1,8 @@
 /** CPU-only production allocation census. Never imports Dawn or submits GPU work. */
-import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
+import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import { getSceneDefinition, getScenePreset } from "../lib/core/scenes";
 import { sceneDocumentAtLattice } from "../lib/core/scene-definition";
-import { svoSceneryDetailCellSize_m } from "../lib/svo/svo-render-tuning";
+import { svoSceneryDetailCellSize_m } from "../lib/svo/pipeline/svo-render-tuning";
 const depth = Number(process.env.FLUID_PROBE_DEPTH ?? 3);
 const sceneId = process.env.FLUID_PROBE_SCENE ?? "hero-garden-hose-x10";
 const preset = getScenePreset(sceneId).create();

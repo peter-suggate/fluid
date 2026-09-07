@@ -24,7 +24,7 @@ import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import {
   OctreeSparseBrickWorld,
   type OctreeSparseBrickWorldOptions,
-} from "../svo/webgpu-svo-sparse-bricks";
+} from "../svo/features/construction/webgpu-svo-sparse-bricks";
 
 export type OctreeSparseResidencyWorldOptions = OctreeSparseBrickWorldOptions;
 

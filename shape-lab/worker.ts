@@ -16,7 +16,7 @@
  * Pixel buffers travel back as transfers rather than copies, and each is its own
  * tile rather than a frame, so a full pass moves the picture once.
  */
-import type { SvoPrimitiveDescriptor } from "../lib/svo/svo-primitive-abi";
+import type { SvoPrimitiveDescriptor } from "../lib/svo/contracts/svo-primitive-abi";
 import type { TerrainGrid } from "../lib/core/terrain";
 import {
   prepareShapeLabScene,

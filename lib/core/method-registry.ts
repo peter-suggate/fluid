@@ -33,7 +33,25 @@ export interface SimulationMethodInstallation {
 let installed: SimulationMethodInstallation | undefined;
 
 export function installSimulationMethods(installation: SimulationMethodInstallation): void {
-  installed = installation;
+  const byId = new Map(installation.methods.map(method => [method.id, method]));
+  if (byId.size !== installation.methods.length) throw new Error("Duplicate simulation method ID");
+  if (!byId.has(installation.defaultId)) throw new Error(`Unknown default simulation method ${installation.defaultId}`);
+  const interactive = new Set<string>();
+  for (const method of installation.interactive) {
+    if (byId.get(method.id) !== method) throw new Error(`Interactive method ${method.id} is not the installed definition`);
+    if (interactive.has(method.id)) throw new Error(`Duplicate interactive method ${method.id}`);
+    interactive.add(method.id);
+  }
+  for (const method of installation.methods) {
+    if (!method.composition || !Object.isFrozen(method.composition)) {
+      throw new Error(`Method ${method.id} must supply a resolved feature composition`);
+    }
+  }
+  installed = Object.freeze({
+    methods: Object.freeze([...installation.methods]),
+    interactive: Object.freeze([...installation.interactive]),
+    defaultId: installation.defaultId,
+  });
 }
 
 function installation(): SimulationMethodInstallation {

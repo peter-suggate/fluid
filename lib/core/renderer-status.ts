@@ -1,8 +1,8 @@
-import type { SvoSurfaceMeshStatus } from "../svo/svo-surface-mesh";
+import type { SvoSurfaceMeshStatus } from "../svo/features/primary-visibility/svo-surface-mesh";
 import type {
   SvoLightingVisibilityStatus,
   SvoSilhouetteRefinementStatus,
-} from "../svo/svo-render-options";
+} from "../svo/pipeline/svo-render-options";
 
 export type SvoRendererFailureReason =
   | "missing-source"

@@ -27,21 +27,21 @@ import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib
 import type { SceneDescription } from "../lib/core/model";
 import { getScenePreset } from "../lib/core/scenes";
 import { planSparseSceneDomain } from "../lib/core/sparse-scene-domain";
-import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/svo/sparse-brick-octree";
-import { planSvoNodeMipPyramid } from "../lib/svo/svo-node-mip-pyramid";
-import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/svo-primitive-abi";
-import { SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES } from "../lib/svo/svo-primitive-candidates";
-import { svoTetrahedralRadianceAtlasBytes } from "../lib/svo/svo-tetrahedral-radiance";
+import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/svo/features/construction/sparse-brick-octree";
+import { planSvoNodeMipPyramid } from "../lib/svo/features/radiance/svo-node-mip-pyramid";
+import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/contracts/svo-primitive-abi";
+import { SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
+import { svoTetrahedralRadianceAtlasBytes } from "../lib/svo/features/radiance/svo-tetrahedral-radiance";
 import {
   svoBrickRasterInstanceBytes,
   svoBrickRasterPublicationInstanceOffsetBytes,
   svoRasterCoverageArenaBytes,
   svoRasterCoverageCountAllocationBytes,
   SVO_BRICK_RASTER_CONTRACT,
-} from "../lib/svo/webgpu-svo-brick-raster";
-import { SVO_SCENE_PRIMITIVE_RASTER_CONTRACT } from "../lib/svo/webgpu-svo-dry-scene";
-import { buildSvoScenePrimitives } from "../lib/svo/svo-scene-primitives";
-import { svoPrimitiveCandidateBounds } from "../lib/svo/svo-primitive-candidates";
+} from "../lib/svo/features/primary-visibility/webgpu-svo-brick-raster";
+import { SVO_SCENE_PRIMITIVE_RASTER_CONTRACT } from "../lib/svo/features/shading/program";
+import { buildSvoScenePrimitives } from "../lib/svo/features/scene-publication/svo-scene-primitives";
+import { svoPrimitiveCandidateBounds } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
 import { createTallCellLayout } from "../lib/core/tall-cell-grid";
 import { terrainHeightAt } from "../lib/core/terrain";
 import {
@@ -50,8 +50,8 @@ import {
   liveSvoBasePageDimensions,
   OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY,
   sparseSceneOctreeMaximumDepth,
-} from "../lib/svo/webgpu-svo-sparse-bricks";
-import { liveSvoPlanBasePages } from "../lib/svo/webgpu-svo-live-derived-builder";
+} from "../lib/svo/features/construction/webgpu-svo-sparse-bricks";
+import { liveSvoPlanBasePages } from "../lib/svo/features/radiance/webgpu-svo-live-derived-builder";
 import { svoScenePrimitiveBrickDensity } from "./svo-dry-frame-harness";
 
 /** This machine's Dawn/Metal adapter, as reported by `adapter.limits`. */

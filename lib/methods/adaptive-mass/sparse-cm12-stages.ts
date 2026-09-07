@@ -1,3 +1,4 @@
+import { adaptivityStageControl } from "./features/adaptivity/definition";
 /**
  * Every Sparse CM12 stage, described once.
  *
@@ -284,9 +285,6 @@ export function adaptiveMassPressureTopologyChip(
       ?? info?.adaptiveMixedSeamFaceCount ?? 0).toLocaleString()} mixed seams`;
   return `${input}\n${work}\n${pcm}\n${authorities}\n${structure}\n${next}`;
 }
-
-const legacyActivityOnly = (context: FluidPipelineContext) =>
-  context.values.selectorMode === "activity";
 
 const activityOnly = (context: FluidPipelineContext) =>
   context.values.selectorMode === "activity" || context.values.selectorMode === "coarse-first";
@@ -687,159 +685,33 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         value: (context) => `GPU TOPOLOGY GEN ${context.info?.adaptiveTopologyShadowGeneration ?? 0}`,
         hint: "Accepted GPU-owned cell, pressure-row and field generation. Frame submission stays synchronous. Larger topology changes are prepared between accepted frames.",
       },
-      {
-        kind: "param-choice", param: "selectorMode", label: "Criterion",
-        options: [
-          { value: "coarse-first", label: "COARSE FIRST", hint: "Coarsest representable surface, with energy, curvature and approaching-liquid refinement." },
-          { value: "surface", label: "SURFACE", hint: "Surface/thin liquid is fine; submerged liquid requests 1³ and only 2:1 closure grades it." },
-          { value: "activity", label: "ACTIVITY + PROOF", hint: "Calm surfaces may reach 4³ only after the accepted presentation output proves the merge; flooded deep bulk keeps the full 8/4/2/1 ladder." },
-        ],
-      },
-      { kind: "param-range", param: "energyThreshold", label: "Finest kinetic energy",
-        unit: " m²/s²", min: 0.01, max: 100, step: 0.1, digits: 2,
-        enabled: (context) => context.values.selectorMode === "coarse-first",
-        hint: "Specific kinetic energy ½|u|² requesting the finest rung. Lower rungs use dyadic speed thresholds.",
-      },
-      { kind: "param-range", param: "curvatureTolerance", label: "Curvature tolerance",
-        unit: " κh", min: 0.02, max: 2, step: 0.01, digits: 2,
-        enabled: (context) => context.values.selectorMode === "coarse-first",
-        hint: "Maximum surface normal variation per cell. Smaller values preserve finer curved liquid geometry. Static solid restriction floors remain active.",
-      },
-      { kind: "param-range", param: "anticipationSeconds", label: "Impact lookahead",
-        unit: " s", min: 0, max: 2, step: 0.05, digits: 2,
-        enabled: (context) => context.values.selectorMode === "coarse-first",
-        hint: "Predict approaching liquid from its accepted velocity over this horizon, refining receivers before contact.",
-      },
-      { kind: "param-range", param: "anticipationRadiusBricks", label: "Impact search radius",
-        unit: " bricks", min: 1, max: 6, step: 1, digits: 0,
-        enabled: (context) => context.values.selectorMode === "coarse-first",
-        hint: "Bounded spatial search around a surface receiver. Increase for fast objects or longer prediction horizons; cost grows with radius cubed.",
-      },
-      { kind: "param-range", param: "surfaceQuietEpochs", label: "Surface proof persistence",
-        unit: " epochs", min: 1, max: 32, step: 1, digits: 0,
-        enabled: (context) => context.values.selectorMode === "coarse-first",
-        hint: "Consecutive valid surface proofs before a coarse-first merge. Refinement is immediate.",
-      },
-      {
-        kind: "param-range", param: "surfaceFineRings", label: "Initial fine band",
-        enabled: (context) => context.values.selectorMode !== "coarse-first",
-        unit: " bricks", min: 1, max: 8, step: 1, digits: 0,
-        hint: "Structural/rebuild control: occupied face-distance rings initialized at the ladder maximum around the authored surface.",
-      },
-      {
-        kind: "param-range", param: "finestTravelCells", label: "Finest travel",
-        unit: " cells/step", min: 0.05, max: 4, step: 0.05, digits: 2,
-        enabled: legacyActivityOnly,
-        hint: "Maximum occupied-cell displacement needed to target the ladder maximum.",
-      },
-      {
-        kind: "param-range", param: "fourTravelCells", label: "4³ travel",
-        unit: " cells/step", min: 0, max: 2, step: 0.05, digits: 2,
-        enabled: legacyActivityOnly,
-        hint: "Displacement needed to retain at least 4³.",
-      },
-      {
-        kind: "param-range", param: "twoTravelCells", label: "2³ travel",
-        unit: " cells/step", min: 0, max: 1, step: 0.025, digits: 3,
-        enabled: legacyActivityOnly,
-        hint: "Displacement needed to retain at least 2³; slower calm bulk may target 1³.",
-      },
-      {
-        kind: "param-range", param: "frontLookaheadSteps", label: "Front lookahead",
-        unit: " steps", min: 1, max: 32, step: 1, digits: 0,
-        hint: "Accepted steps swept ahead when a surface characteristic selects missing-solid world pages.",
-      },
-      {
-        kind: "param-range", param: "thinFeatureCells", label: "Thin floor",
-        unit: " cells", min: 0.25, max: 8, step: 0.25, digits: 2,
-        hint: "Two-sided represented liquid thinner than this targets the ladder maximum.",
-      },
-      {
-        kind: "param-range", param: "thinFeatureDensity", label: "Thin density",
-        unit: " ρ", min: 0, max: 0.25, step: 0.005, digits: 3,
-        hint: "Minimum density allowed to pin thin geometry; zero means the CM12 dry threshold.",
-      },
-      {
-        kind: "param-range", param: "residencyDensity", label: "Region density",
-        unit: " ρ", min: 0.000_01, max: 0.05, step: 0.001, digits: 3,
-        hint: "Minimum cell density that keeps a sparse region populated after interface support leaves it.",
-      },
-      {
-        kind: "param-range", param: "residencyMassFineCells", label: "Region mass",
-        unit: " cells", min: 0, max: 8, step: 0.25, digits: 2,
-        hint: "Integrated liquid mass needed to keep a region populated; one cell rejects subcell fragments.",
-      },
-      {
-        kind: "param-range", param: "surfaceDensityMinimum", label: "Surface low",
-        unit: " ρ", min: 0, max: 0.49, step: 0.01, digits: 2,
-        hint: "Low bound of partial-density surface evidence.",
-      },
-      {
-        kind: "param-range", param: "surfaceDensityMaximum", label: "Surface high",
-        unit: " ρ", min: 0.51, max: 1, step: 0.01, digits: 2,
-        hint: "High bound of partial-density surface evidence.",
-      },
-      {
-        kind: "param-range", param: "detailTolerance", label: "Detail tolerance",
-        unit: " ρ", min: 0.005, max: 0.5, step: 0.005, digits: 3,
-        enabled: legacyActivityOnly,
-        hint: "2x2x2 restriction error allowed before enclosed-bulk detail vetoes demotion. Surface demotion is governed separately by the accepted-output proof.",
-      },
-      {
-        kind: "param-range", param: "surfaceDisplacementToleranceCells",
-        label: "Surface displacement", unit: " cells",
-        min: 0, max: 8, step: 0.05, digits: 2,
-        enabled: activityOnly,
-        hint: "Maximum rho=.5 edge-crossing movement accepted when proving that a surface can be represented one rung coarser.",
-      },
-      {
-        kind: "param-range", param: "surfaceNormalToleranceDegrees",
-        label: "Surface normal", unit: "°",
-        min: 0, max: 90, step: 1, digits: 0,
-        enabled: activityOnly,
-        hint: "Maximum narrow-band normal-angle change accepted by each dyadic presentation proof.",
-      },
-      {
-        kind: "param-range", param: "topologyCadenceSteps", label: "Epoch cadence",
-        unit: " steps", min: 1, max: 32, step: 1, digits: 0,
-        enabled: activityOnly,
-        hint: "Accepted steps between quiet-history updates. One evaluates settling every step; each accepted merge still moves only one rung.",
-      },
-      {
-        kind: "param-range", param: "prepareBricksPerFrame", label: "Work budget",
-        unit: " bricks/frame", min: 1, max: 256, step: 1, digits: 0,
-        hint: "Ordinary topology preparations started per frame. Surface/thin-fluid refinement has a separate urgent lane and does not wait behind coarsening.",
-      },
-      {
-        kind: "param-range", param: "promoteEpochs", label: "Promote hold",
-        unit: " epochs", min: 1, max: 16, step: 1, digits: 0,
-        enabled: legacyActivityOnly,
-        hint: "Hot epochs required for non-emergency activity promotion.",
-      },
-      {
-        kind: "param-range", param: "demoteEpochs", label: "Demote hold",
-        unit: " epochs", min: 1, max: 32, step: 1, digits: 0,
-        enabled: legacyActivityOnly,
-        hint: "Quiet epochs required for each one-rung bulk merge; at the surface this is an independent run of fresh accepted-output proofs.",
-      },
-      {
-        kind: "param-range", param: "promoteScore", label: "Promote score",
-        min: 0, max: 1, step: 0.025, digits: 3,
-        enabled: legacyActivityOnly,
-        hint: "Normalized activity needed for a hot epoch.",
-      },
-      {
-        kind: "param-range", param: "demoteScore", label: "Demote score",
-        min: 0, max: 1, step: 0.025, digits: 3,
-        enabled: legacyActivityOnly,
-        hint: "Maximum normalized activity allowed for a quiet epoch.",
-      },
-      {
-        kind: "param-range", param: "emergencyScore", label: "Emergency score",
-        min: 0, max: 1, step: 0.025, digits: 3,
-        enabled: legacyActivityOnly,
-        hint: "Normalized activity that bypasses promotion persistence.",
-      },
+      adaptivityStageControl("selectorMode"),
+      adaptivityStageControl("energyThreshold"),
+      adaptivityStageControl("curvatureTolerance"),
+      adaptivityStageControl("anticipationSeconds"),
+      adaptivityStageControl("anticipationRadiusBricks"),
+      adaptivityStageControl("surfaceQuietEpochs"),
+      adaptivityStageControl("surfaceFineRings"),
+      adaptivityStageControl("finestTravelCells"),
+      adaptivityStageControl("fourTravelCells"),
+      adaptivityStageControl("twoTravelCells"),
+      adaptivityStageControl("frontLookaheadSteps"),
+      adaptivityStageControl("thinFeatureCells"),
+      adaptivityStageControl("thinFeatureDensity"),
+      adaptivityStageControl("residencyDensity"),
+      adaptivityStageControl("residencyMassFineCells"),
+      adaptivityStageControl("surfaceDensityMinimum"),
+      adaptivityStageControl("surfaceDensityMaximum"),
+      adaptivityStageControl("detailTolerance"),
+      adaptivityStageControl("surfaceDisplacementToleranceCells"),
+      adaptivityStageControl("surfaceNormalToleranceDegrees"),
+      adaptivityStageControl("topologyCadenceSteps"),
+      adaptivityStageControl("prepareBricksPerFrame"),
+      adaptivityStageControl("promoteEpochs"),
+      adaptivityStageControl("demoteEpochs"),
+      adaptivityStageControl("promoteScore"),
+      adaptivityStageControl("demoteScore"),
+      adaptivityStageControl("emergencyScore"),
     ],
     chip: (context) => `${context.values.selectorMode === "coarse-first"
       ? "coarse first · energy + curvature + prediction"

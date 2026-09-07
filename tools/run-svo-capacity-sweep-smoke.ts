@@ -55,12 +55,12 @@ import {
 } from "../lib/core/hero-garden-stress-scene";
 import { cloneScene, defaultCamera, defaultScene, type CameraState } from "../lib/core/model";
 import { getScenePreset } from "../lib/core/scenes";
-import { encodeSvoBrickOccupancy } from "../lib/svo/svo-brick-occupancy";
-import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/svo-primitive-abi";
-import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo/svo-primitive-candidates";
-import { DEFAULT_SVO_RENDER_TUNING } from "../lib/svo/svo-render-tuning";
-import { buildSvoSceneGlass, SVO_SCENE_GLASS_MAXIMUM_PANES } from "../lib/svo/svo-scene-glass";
-import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
+import { encodeSvoBrickOccupancy } from "../lib/svo/features/construction/svo-brick-occupancy";
+import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/contracts/svo-primitive-abi";
+import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
+import { DEFAULT_SVO_RENDER_TUNING } from "../lib/svo/pipeline/svo-render-tuning";
+import { buildSvoSceneGlass, SVO_SCENE_GLASS_MAXIMUM_PANES } from "../lib/svo/features/materials/svo-scene-glass";
+import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import {
   assertSvoBrickRasterNodeAddressable,
   createSvoBrickRasterCullWGSL,
@@ -75,18 +75,18 @@ import {
   SVO_BRICK_RASTER_CONTRACT,
   SVO_RASTER_COVERAGE_OVERFLOW_BUDGET,
   SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT,
-} from "../lib/svo/webgpu-svo-brick-raster";
+} from "../lib/svo/features/primary-visibility/webgpu-svo-brick-raster";
 import {
   canConsumeSparseVoxelPrimitiveCandidates,
   SparseVoxelDrySceneRenderer,
   sparseVoxelDrySceneContractFailure,
-} from "../lib/svo/webgpu-svo-dry-scene";
-import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/webgpu-svo-gbuffer-targets";
+} from "../lib/svo/pipeline/webgpu-svo-dry-scene";
+import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/features/primary-visibility/webgpu-svo-gbuffer-targets";
 import {
   assertSvoRigidRasterBodyCount,
   packSvoRigidRasterSplitIdentity,
   SVO_RIGID_RASTER_CONTRACT,
-} from "../lib/svo/webgpu-svo-rigid-raster";
+} from "../lib/svo/features/primary-visibility/webgpu-svo-rigid-raster";
 import {
   buildSvoDrySceneAssembly,
   createDawnRenderDevice,

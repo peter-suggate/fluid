@@ -51,8 +51,8 @@ fallback can still reserve resources for the worst path. Two fixed full-screen
 dispatches with per-pixel flags are an alternative if specialization wins enough
 to pay for another pass; no indirect dispatch is required.
 
-Code: lib/svo/webgpu-svo-primary-entry-prepass.ts:245;
-lib/svo/webgpu-svo-dry-scene.ts:3338 and :5449.
+Code: lib/svo/features/primary-visibility/webgpu-svo-primary-entry-prepass.ts:245;
+lib/svo/pipeline/webgpu-svo-dry-scene.ts:3338 and :5449.
 
 ### 2. Share upper-tree traversal across coherent rays
 

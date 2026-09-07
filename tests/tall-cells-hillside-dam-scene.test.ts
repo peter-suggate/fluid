@@ -21,16 +21,16 @@ import {
   buildSvoPrimitiveCandidates,
   packSvoPrimitiveCandidateArena,
   querySvoPrimitiveCandidates,
-} from "../lib/svo/svo-primitive-candidates";
-import { buildSvoScenePrimitives } from "../lib/svo/svo-scene-primitives";
+} from "../lib/svo/features/scene-publication/svo-primitive-candidates";
+import { buildSvoScenePrimitives } from "../lib/svo/features/scene-publication/svo-scene-primitives";
 import {
   buildSvoSceneLights,
   waterKeyDirectionalFromSceneLights,
-} from "../lib/svo/svo-light-abi";
+} from "../lib/svo/contracts/svo-light-abi";
 import {
   STUDIO_STAGE_DRY_SCENE_LIGHTING,
   svoSceneLighting,
-} from "../lib/svo/svo-dry-scene-lighting";
+} from "../lib/svo/features/lighting-visibility/svo-dry-scene-lighting";
 
 const [NX, NY, NZ] = TALL_CELLS_FLOOD_GRID;
 const WIDTH_M = NX * TALL_CELLS_FLOOD_CELL_SIZE_M;

@@ -10,7 +10,7 @@ validation and startup costs. The historical `raster` value still means brick pr
 
 ## Geometry and publication
 
-`lib/svo/svo-surface-mesh.ts` compiles into the existing dry-scene shader bundle.
+`lib/svo/features/primary-visibility/svo-surface-mesh.ts` compiles into the existing dry-scene shader bundle.
 It reads accepted structural nodes, leaf lifecycle and the shared identity
 codec, including dense, occupancy and banded payloads. It does not modify the
 solver or use authored pre-voxelization geometry as a substitute for voxels.

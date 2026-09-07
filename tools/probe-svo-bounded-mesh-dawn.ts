@@ -1,7 +1,7 @@
 /** Bounded Dawn check of production mesh publication scheduling, without a large scene. */
 import assert from "node:assert/strict";
 import {createDawnRenderDevice} from "./svo-dry-frame-harness";
-import {svoSurfaceMeshWGSL,SVO_SURFACE_MESH_BUILD_BRICKS_PER_FRAME,SVO_SURFACE_MESH_STATE_BYTES} from "../lib/svo/svo-surface-mesh";
+import {svoSurfaceMeshWGSL,SVO_SURFACE_MESH_BUILD_BRICKS_PER_FRAME,SVO_SURFACE_MESH_STATE_BYTES} from "../lib/svo/features/primary-visibility/svo-surface-mesh";
 const leafCount = SVO_SURFACE_MESH_BUILD_BRICKS_PER_FRAME * 2.5;
 const {device,adapterInfo,validationErrors}=await createDawnRenderDevice();
 const shader=svoSurfaceMeshWGSL(0,1);

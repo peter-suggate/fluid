@@ -26,8 +26,8 @@ import {
   withoutSceneryNode,
 } from "./scenery-edit";
 import type { SceneryNode, SceneryPlacement } from "./scenery-graph";
-import { intersectSvoPrimitive, type SvoFinitePrimitiveDescriptor } from "../svo/svo-primitive-abi";
-import { svoDescriptorForEnvironmentProxy, svoOwnerIdForEnvironmentProxy } from "../svo/svo-scene-primitives";
+import { intersectSvoPrimitive, type SvoFinitePrimitiveDescriptor } from "../svo/contracts/svo-primitive-abi";
+import { svoDescriptorForEnvironmentProxy, svoOwnerIdForEnvironmentProxy } from "../svo/features/scene-publication/svo-scene-primitives";
 import type { SceneryPropKind } from "./stores/ui-store";
 import {
   buildEnvironmentProxyCatalog,

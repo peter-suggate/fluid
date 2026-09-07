@@ -15,7 +15,7 @@ import {
   svoPixelTraceTotalWork,
   type SvoPixelTrace,
   type SvoPixelTraceLayer,
-} from "../lib/svo/svo-pixel-trace";
+} from "../lib/svo/features/diagnostics/svo-pixel-trace";
 import type { PixelTraceStatus } from "../lib/core/webgpu-renderer";
 
 interface PixelTraceHudProps {

@@ -26,7 +26,7 @@ import {
 } from "../lib/core/webgpu-fluid-blast-radius";
 import { fluidCellTraceGatherShader } from "../lib/core/webgpu-fluid-cell-trace";
 import { secondaryParticleComputeShader, secondaryParticleOpticalShader } from "../lib/core/webgpu-secondary-particles";
-import { sparseBrickDenseFieldShader } from "../lib/svo/sparse-brick-octree";
+import { sparseBrickDenseFieldShader } from "../lib/svo/features/construction/sparse-brick-octree";
 import { octreeLosassoProjectionShader } from "../lib/methods/losasso/octree-losasso-projection.wgsl";
 import { octreePowerProjectionShader } from "../lib/methods/power/octree-power-projection.wgsl";
 import { octreeSPGridAccurateDispatchGateShader, octreeSPGridAccurateOperatorShader,
@@ -49,8 +49,8 @@ import {
 } from "../lib/core/webgpu-fluid-brick-residency";
 import { octreeFineSeedAdapterShader, octreeFineSeedCandidateShader } from "../lib/methods/octree-shared/webgpu-octree-fine-seed-adapter";
 import { sparseSceneProxyVoxelizationShader } from "../lib/core/webgpu-sparse-scene-proxies";
-import { svoDrySceneShader } from "../lib/svo/webgpu-svo-dry-scene";
-import { svoThickGlassWGSL } from "../lib/svo/svo-thick-glass";
+import { svoDrySceneShader } from "../lib/svo/features/shading/program";
+import { svoThickGlassWGSL } from "../lib/svo/features/materials/svo-thick-glass";
 import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedIndirectScanShader, globalFineClassifiedScanShader } from "../lib/core/webgpu-water-global-fine-tetra";
 import { structuredFineLevelSetTransportWGSL } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-transport";
 import { fineLevelSetVolumeCorrectionWGSL } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-volume";

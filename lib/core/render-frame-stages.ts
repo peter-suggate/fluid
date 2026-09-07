@@ -47,7 +47,7 @@ export type RenderFrameStageOwner = "world" | "renderer" | "water" | "svo";
  *
  * The order is the order the seams close on a full SVO frame; a frame that
  * takes another arm closes a subsequence of it, never a permutation, and
- * `tests/render-frame-stage-partition.test.ts` holds that.
+ * `lib/svo/pipeline/tests/render-frame-stage-partition.test.ts` holds that.
  */
 export const RENDER_FRAME_STAGES = Object.freeze([
   // SOURCE — the world the rest of the frame marches, maintained in place.

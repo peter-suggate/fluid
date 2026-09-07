@@ -1,6 +1,6 @@
 import type { CameraState, SceneDescription } from "./model";
 import type { SceneryGraph } from "./scenery-graph";
-import { SVO_ENVIRONMENT_FEATURE_VOXELS } from "../svo/svo-environment-coarsening";
+import { SVO_ENVIRONMENT_FEATURE_VOXELS } from "../svo/features/construction/svo-environment-coarsening";
 
 /**
  * The house set: a floor, one lamp over it, and nothing else at all.
@@ -42,7 +42,7 @@ import { SVO_ENVIRONMENT_FEATURE_VOXELS } from "../svo/svo-environment-coarsenin
  *
  * **A near-black ambient, and a key held down to a fill.** A spot is only a spot
  * against something darker; the rig is `STUDIO_STAGE_DRY_SCENE_LIGHTING` in
- * `lib/svo/svo-dry-scene-lighting.ts`, and it belongs to the environment rather
+ * `lib/svo/features/lighting-visibility/svo-dry-scene-lighting.ts`, and it belongs to the environment rather
  * than to any one scene for the same reason the set does.
  *
  * ---------------------------------------------------------------------------
@@ -298,7 +298,7 @@ export const studioStageCamera: Partial<CameraState> = {
  * 6.25 mm and a 6.4 m tank at 50 mm cost the same set exactly the same, and the
  * physical size of the scene was not the variable at all.
  *
- * `lib/svo/svo-environment-coarsening.ts` is what changed that. An authored
+ * `lib/svo/features/construction/svo-environment-coarsening.ts` is what changed that. An authored
  * solid is now drawn at the coarsest voxel its own smallest feature survives,
  * so the plate the whole span is made of takes the rung its thickness allows
  * and the domain is counted in *those* bricks. The set is one similarity

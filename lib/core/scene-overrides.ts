@@ -13,7 +13,7 @@ import type { SceneDescription } from "./model";
 import { cameraForPreset, findSceneDefinition, getScenePreset } from "./scenes";
 import { useUIStore } from "./stores/ui-store";
 import { sceneStoneQuery, withSceneStoneQuery } from "./stone-look-controls";
-import type { SvoRenderTuning } from "../svo/svo-render-tuning";
+import type { SvoRenderTuning } from "../svo/pipeline/svo-render-tuning";
 import type { GPUQuality } from "./gpu-quality";
 import { sceneCanopyQuery, withSceneCanopyQuery } from "./tree-canopy-controls";
 import { sceneQueryPathValue, withSceneQueryPathValue } from "./url-state";

@@ -1,3 +1,4 @@
+import { resolveSvoPipelineComposition } from "../../svo/pipeline/composition";
 import { create } from "zustand";
 import type { EditorAction } from "../editor-action";
 import type { EditorGestureId } from "../editor-gesture-catalog";
@@ -32,11 +33,11 @@ import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   type SvoConeTracingMode,
   type SvoPrimaryTraversalMode,
-} from "../../svo/svo-render-options";
-import { RENDER_STAGE_SWITCH_IDS, type RenderStageSwitchId } from "../render-stage-switches";
-import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoRenderStageView } from "../../svo/svo-render-diagnostics";
-import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../../svo/svo-render-tuning";
-import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../../svo/svo-pixel-trace";
+} from "../../svo/pipeline/svo-render-options";
+import { RENDER_STAGE_SWITCH_IDS, type RenderStageSwitchId } from "../../svo/pipeline/render-stage-switches";
+import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoRenderStageUsesPrimaryWorkMap, type SvoRenderStageView } from "../../svo/features/diagnostics/svo-render-diagnostics";
+import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../../svo/pipeline/svo-render-tuning";
+import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../../svo/features/diagnostics/svo-pixel-trace";
 import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
 import { isStageLensOverlayMode } from "../stage-lens";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
@@ -244,6 +245,8 @@ interface UIStore {
   disabledRenderStages: readonly RenderStageSwitchId[];
   /** Which published render-stage plane replaces the composited image. */
   svoStageView: SvoRenderStageView;
+  /** Remembered by the session so all primary-work controls agree. */
+  svoLastPrimaryWorkView: SvoRenderStageView;
   /** Cached light slot the per-light cone visibility view decodes. */
   svoStageLightSlot: number;
   svoMaximumTraversalDepth: number;
@@ -402,6 +405,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   svoPrimaryTraversal: DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "mesh",
   disabledRenderStages: [],
   svoStageView: DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView,
+  svoLastPrimaryWorkView: "primary-work",
   svoStageLightSlot: DEFAULT_SVO_RENDER_DIAGNOSTICS.lightSlot,
   svoMaximumTraversalDepth: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumTraversalDepth,
   svoMaximumNodeVisits: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumNodeVisits,
@@ -508,7 +512,10 @@ export const createUIStore = () => create<UIStore>((set) => ({
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),
-  setSvoConeTracingMode: (svoConeTracingMode) => set({ svoConeTracingMode }),
+  setSvoConeTracingMode: (svoConeTracingMode) => set(state => {
+    resolveSvoPipelineComposition({ primaryTraversal: state.svoPrimaryTraversal, coneTracingMode: svoConeTracingMode, coneRadianceReconstruction: state.svoRenderTuning.coneRadianceReconstruction });
+    return { svoConeTracingMode };
+  }),
   setSvoGlobalIlluminationEnabled: (svoGlobalIlluminationEnabled) => set({ svoGlobalIlluminationEnabled }),
   setSvoWorldGiCacheEnabled: (svoWorldGiCacheEnabled) => set({ svoWorldGiCacheEnabled }),
   // Kept in the canonical stage order rather than click order, so the set has
@@ -522,8 +529,14 @@ export const createUIStore = () => create<UIStore>((set) => ({
       : state.disabledRenderStages.filter((id) => id !== stage);
     return { disabledRenderStages: next };
   }),
-  setSvoPrimaryTraversal: (svoPrimaryTraversal) => set({ svoPrimaryTraversal }),
-  setSvoStageView: (svoStageView) => set({ svoStageView }),
+  setSvoPrimaryTraversal: (svoPrimaryTraversal) => set(state => {
+    resolveSvoPipelineComposition({ primaryTraversal: svoPrimaryTraversal, coneTracingMode: state.svoConeTracingMode, coneRadianceReconstruction: state.svoRenderTuning.coneRadianceReconstruction });
+    return { svoPrimaryTraversal };
+  }),
+  setSvoStageView: (svoStageView) => set((state) => ({
+    svoStageView,
+    svoLastPrimaryWorkView: svoRenderStageUsesPrimaryWorkMap(svoStageView) ? svoStageView : state.svoLastPrimaryWorkView,
+  })),
   setSvoStageLightSlot: (svoStageLightSlot) => set((state) => ({
     svoStageLightSlot: normalizeSvoRenderDiagnostics({
       stageView: state.svoStageView,
@@ -548,9 +561,11 @@ export const createUIStore = () => create<UIStore>((set) => ({
       maximumNodeVisits: svoMaximumNodeVisits,
     }).maximumNodeVisits,
   })),
-  setSvoRenderTuning: (next) => set((state) => ({
-    svoRenderTuning: normalizeSvoRenderTuning(typeof next === "function" ? next(state.svoRenderTuning) : next),
-  })),
+  setSvoRenderTuning: (next) => set((state) => {
+    const requested = typeof next === "function" ? next(state.svoRenderTuning) : next;
+    resolveSvoPipelineComposition({ primaryTraversal: state.svoPrimaryTraversal, coneTracingMode: state.svoConeTracingMode, coneRadianceReconstruction: requested.coneRadianceReconstruction });
+    return { svoRenderTuning: normalizeSvoRenderTuning(requested) };
+  }),
   // Disabling always releases the pin: a pinned trace with the diagnostic off
   // would silently re-appear the next time it is switched on.
   setPixelTraceEnabled: (pixelTraceEnabled) => set((state) => ({

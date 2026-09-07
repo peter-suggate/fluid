@@ -88,6 +88,7 @@ function entryPoints(): string[] {
   const out: string[] = [];
   for (const dir of ["tools", "tests", "worker"]) walkSources(join(REPO, dir), out);
   out.push(...walkSources(join(REPO, "app")));
+  out.push(...walkSources(join(REPO, "lib")).filter(file => /\.test\.tsx?$/.test(file)));
   out.push(...clientRoots());
   out.push("lib/core/webgpu-render-worker.ts");
   return out;

@@ -124,7 +124,7 @@ so brick-gated transport can be bit-identical to dense.
 - **No camera→sim channel exists** (verified negative). But camera and solver
   are siblings in the render worker (`lib/core/webgpu-renderer.ts:159-165` vs
   `:2432`) — wiring is a local change, no IPC change. Reusable screen-space
-  predicate: `lib/svo/svo-screen-space-termination.ts` (angular threshold,
+  predicate: `lib/svo/features/lighting-visibility/svo-screen-space-termination.ts` (angular threshold,
   DPR-safe). Module rule: methods may not import `lib/svo`, so the predicate
   moves/duplicates into core.
 - **Zero uniform unit tests at HEAD** — 1f98eeb deleted all ten
@@ -143,7 +143,7 @@ so brick-gated transport can be bit-identical to dense.
 | Fail-closed double-buffered brick residency | `lib/core/webgpu-fluid-brick-residency.ts` | RESIDENT/CORE/HALO/ACTIVATED flags, `retireAfterFrames` hysteresis, hash page table + per-workgroup claim memo, 3×3×3 tile ring, generation commit that rejects wholesale on pool saturation |
 | Direct-map page table + typed missing defaults | `lib/methods/octree-shared/webgpu-octree-fine-levelset-transport.wgsl.ts:468,804` | `pageOf(key)` array lookup (no hash for bounded key spaces), triple validation, missing neighbor = typed virtual boundary, never a fault |
 | Control-block A/B publication | `lib/methods/octree-shared/webgpu-octree-owner-pages.ts:47-65` | 16-word arena header, status bits, stable physical page IDs while logically resident |
-| Occupancy summary in spare bits | `lib/svo/svo-brick-occupancy.ts:11-25` | packed macrocell mask + min/max bounds per brick, lifecycle bits orthogonal to content bits |
+| Occupancy summary in spare bits | `lib/svo/features/construction/svo-brick-occupancy.ts:11-25` | packed macrocell mask + min/max bounds per brick, lifecycle bits orthogonal to content bits |
 | Coarse min/max classification | `octree-power-coarse-levelset` `minimumPhi/maximumPhi` | exact all-wet/all-dry brick rejection — the model for a per-brick ρ min/max summary (none exists on the uniform lane today) |
 | FIM prepare-pass gating | `lib/methods/uniform/webgpu-uniform-velocity-extrapolation.ts:330-395` | 1-thread pass writes indirect args from an atomic counter; termination = args go to zero; parity + executedPasses readback |
 

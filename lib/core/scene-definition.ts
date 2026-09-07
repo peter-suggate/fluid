@@ -6,12 +6,12 @@ import type { MethodProfile } from "./method-contract";
 import { sceneWithEnvironment } from "./scenery-presets";
 import { studioStageFits } from "./studio-stage-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "./voxel-environments";
-import { svoEnvironmentPayloadBytes } from "../svo/svo-environment-coarsening";
+import { svoEnvironmentPayloadBytes } from "../svo/features/construction/svo-environment-coarsening";
 import {
   svoSceneryDetailCellSize_m,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
-} from "../svo/svo-render-tuning";
+} from "../svo/pipeline/svo-render-tuning";
 import { solidVoxelEditsForScene, solidVoxelShellForScene } from "./scene-lattice";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 

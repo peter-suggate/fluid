@@ -3,7 +3,7 @@ import type { EnvironmentProxySway } from "../scenery-sway";
 import {
   SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES,
   type SvoClusterLatticeField,
-} from "../../svo/svo-primitive-abi";
+} from "../../svo/contracts/svo-primitive-abi";
 import {
   alongAxis,
   V,

@@ -23,7 +23,7 @@ import {
   FINE_LEVELSET_REDISTANCE_CONTROL_BYTES,
   unpackFineLevelSetGPURedistanceControl,
 } from "../methods/octree-shared/webgpu-octree-fine-levelset-redistance";
-import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "../svo/webgpu-svo-sparse-bricks";
+import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "../svo/features/construction/webgpu-svo-sparse-bricks";
 import { environmentIndex } from "../core/environments";
 import {
   MAX_TERRAIN_FEATURES,

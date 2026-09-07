@@ -1,8 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowDown, Cuboid, Sigma, Waves } from "lucide-react";
-import { defaultScene } from "../lib/core/model";
+import { Cuboid, Sigma, Waves } from "lucide-react";
 import type { EditorEntity, EditorField } from "../lib/core/editor-entity";
 import { sceneryIdFromSelection } from "../lib/core/editor-scenery";
 import { TANK_SELECTION_ID, tankExtentFields } from "../lib/core/editor-tank";
@@ -14,9 +13,8 @@ import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
 import { EntityDeleteRow, EntityMoreRow, EntityOptionRows } from "./EntityOptions";
 import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
 import { FieldControlRows, methodSetupTabs } from "./FluidFieldFlyout";
-import { AdaptiveMassToolstripRow } from "./AdaptiveMassToolstripRow";
+import { FeatureSlot } from "../lib/features/ui/FeatureSlot";
 import { MakeRows } from "./MakeRows";
-import { PrimaryTraversalRow } from "./PrimaryTraversalRows";
 import { StoneDialRows } from "./StoneLookFlyout";
 import { CanopyDialRows } from "./TreeCanopyFlyout";
 import { RimDialRows } from "./VesselRimFlyout";
@@ -88,42 +86,6 @@ function TankRow() {
         <span>{fields[0]?.unit}</span>
       </div>
     </>}
-  />;
-}
-
-function GravityRow() {
-  const session = useSession();
-  const scene = session.scene((state) => state.scene);
-  const gravity = scene.fluid.gravity_m_s2;
-  const enabled = gravity.x !== 0 || gravity.y !== 0 || gravity.z !== 0;
-  const [previous, setPrevious] = useState<{
-    sceneId: string;
-    gravity: typeof gravity;
-  }>();
-  const toggle = () => {
-    if (enabled) setPrevious({ sceneId: scene.sceneId, gravity: { ...gravity } });
-    const next = enabled ? { x: 0, y: 0, z: 0 }
-      : previous?.sceneId === scene.sceneId ? previous.gravity : defaultScene.fluid.gravity_m_s2;
-    simulation.beginEdit(enabled ? "Disable gravity" : "Enable gravity", session.id);
-    simulation.commitEdit({ fluid: { ...scene.fluid, gravity_m_s2: { ...next } } },
-      { reseed: true }, session.id);
-  };
-  return <ToolstripRow
-    icon={<ArrowDown width={14} height={14} strokeWidth={1.7} aria-hidden />}
-    name="Gravity"
-    hint="Turn gravity on or off. Scenes starting without gravity use Earth gravity downward."
-    testId="scene-gravity-row"
-    after={<div className="toolstrip-choice">
-      <button
-        type="button"
-        className={enabled ? "active" : ""}
-        aria-label="Gravity"
-        aria-pressed={enabled}
-        title={enabled ? "Disable gravity" : "Enable gravity"}
-        data-testid="scene-gravity-toggle"
-        onClick={toggle}
-      >Gravity {enabled ? "on" : "off"}</button>
-    </div>}
   />;
 }
 
@@ -285,12 +247,12 @@ export function ContainerToolstrip({
     testId="field-quick-bar"
   >
     {hasFields && <FieldViewRows />}
-    <PrimaryTraversalRow />
+    <FeatureSlot slot="scene.visibility" />
     <TankRow />
-    {hasSolver && <GravityRow />}
+    {hasSolver && <FeatureSlot slot="scene.physics" />}
     {hasSolver && <FluidSurfaceRenderRow />}
     {hasSolver && <SolverRow />}
-    {hasSolver && <AdaptiveMassToolstripRow />}
+    {hasSolver && <FeatureSlot slot="scene.adaptivity" />}
     {/* The seam between the two halves of the column: readings that say what
         the scene *is*, and verbs that say what a stroke would *add* to it.
         Drawn rather than inferred because both halves are glyph rows. */}

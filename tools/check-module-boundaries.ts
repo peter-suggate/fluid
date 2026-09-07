@@ -29,6 +29,9 @@ const REPO = resolve(new URL("..", import.meta.url).pathname);
 const SPEC_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*|\bnew\s+URL\s*\(\s*)(["'])([^"']+)\1/g;
 
 type Zone =
+  | "framework"
+  | "feature"
+  | "composition"
   | "core"
   | "method-uniform"
   | "method-losasso"
@@ -44,6 +47,10 @@ type Zone =
   | "tooling";
 
 function zoneOf(relPath: string): Zone {
+  if (/\.test\.tsx?$/.test(relPath) || /\/(?:probes|verification|tests)\//.test(relPath)) return "tooling";
+  if (relPath.startsWith("lib/framework/")) return "framework";
+  if (relPath.startsWith("lib/features/ui/")) return "composition";
+  if (relPath.startsWith("lib/features/")) return "feature";
   if (relPath.startsWith("lib/core/")) return "core";
   if (relPath.startsWith("lib/methods/uniform/")) return "method-uniform";
   if (relPath.startsWith("lib/methods/losasso/")) return "method-losasso";
@@ -61,9 +68,12 @@ function zoneOf(relPath: string): Zone {
 }
 
 const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
+  framework: new Set<Zone>(["framework"]),
+  feature: new Set<Zone>(["framework", "core", "feature", "ui"]),
+  composition: new Set<Zone>(["framework", "core", "feature", "composition", "ui", "svo", "method-uniform", "method-losasso", "method-power", "method-adaptive-mass"]),
   // Core composes the SVO layer: the production renderer draws through it.
   // The reverse direction is what carries the meaning — see "svo" below.
-  core: new Set<Zone>(["core", "svo", "sparse-world"]),
+  core: new Set<Zone>(["core", "svo", "sparse-world", "framework", "feature"]),
   "method-uniform": new Set<Zone>(["core", "method-uniform"]),
   "method-losasso": new Set<Zone>(["core", "octree-shared", "method-losasso"]),
   "method-power": new Set<Zone>(["core", "octree-shared", "method-power"]),
@@ -106,8 +116,10 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
   // The UI presents the render layer's own diagnostics (pixel traces, SVO
   // render receipts), which is the same composition relationship core has with
   // it. What the UI must never reach is a method — that stays absent here.
-  ui: new Set<Zone>(["core", "ui", "svo", "shape-lab"]),
+  ui: new Set<Zone>(["core", "ui", "svo", "shape-lab", "framework", "feature", "composition"]),
   tooling: new Set<Zone>([
+    "feature",
+    "composition",
     "core",
     "tooling",
     "harness",
@@ -195,7 +207,11 @@ function main() {
           violations.push(`${rel} [${from}] → ${targetRel} [${to}]`);
           continue;
         }
-        if (!ALLOWED[from].has(to)) {
+        // Feature-owned React adapters consume the shared UI primitives. Numerical
+        // modules retain the prohibition against reaching the UI layer.
+        const featureView = /\/(?:ui|controls)\.tsx$/.test(rel) && (from === "svo" || from.startsWith("method-"));
+        const frameworkConsumer = to === "framework" && from !== "framework";
+        if (!ALLOWED[from].has(to) && !frameworkConsumer && !(featureView && to === "ui")) {
           violations.push(`${rel} [${from}] → ${relative(REPO, target)} [${to}]`);
         }
       }

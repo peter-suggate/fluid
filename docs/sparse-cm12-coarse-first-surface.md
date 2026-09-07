@@ -179,3 +179,48 @@ The terrain regression exposed negative child density during an existing
 open-volume-corrected B4-to-B8 transfer. A conservative positivity limiter now
 contracts reconstruction deviations about the parent open-volume mean. This
 retains parent mass rather than clipping away negative mass independently.
+
+## Editing resolution while paused
+
+Adding, moving, resizing, or changing a refinement region's Min/Max controls
+now requests an asynchronous topology publication from the live solver. Pause
+at any point, add a region, and set Min and Max to the same cell size to compare
+surface reconstructions at fixed simulation time. The next draw extracts the
+new surface as soon as its conservative transfer has completed. No reset or
+manual physics step is required.
+
+The editor clamps accepted cell widths to the edited bounds and closes physical
+2:1 grading. It does not run transport, pressure, gravity, sharpening, rigid
+motion, or advance the activity clock. Relaxing a bound permits the current
+resolution to remain; ordinary automatic adaptation resumes with physics.
+Topology freeze still holds accepted cells. Surface shape can change under
+coarsening even though liquid volume is conserved; this makes transfer and
+reconstruction movement observable separately from physical motion.
+
+`applySceneUniforms` retains its inexpensive policy-upload contract for normal
+simulation drivers. The renderer follows it with `refreshSceneTopology`. Backed
+rungs use the existing resident candidate transaction: classify the edited bounds,
+close grading, transfer the changed cells/faces, validate, publish, and repaint.
+This reuses GPU storage and returns only a four-byte backing receipt to the host;
+it does not read the fluid fields back or reconstruct the world. Rapid edits
+coalesce, and pending editor work suspends physics admission.
+
+The current storage ABI still limits dynamically created pages to B8 and leaves
+some macro changes without resident candidate backing. An unsupported edit keeps
+the complete accepted topology intact before requesting the existing generation
+preparation path. That compatibility path retains the existing candidate catalogue
+and physical growth-pool ceiling instead of prebuilding extra rungs for every new
+air page. Existing memory, leaf and cell budgets remain enforced. No larger
+editor allocation allowance is introduced.
+
+This fallback is **not the target architecture for vast scenes**. Demand-created,
+complete candidate backing for dynamic leaves and macro changes must replace it;
+the transaction must reserve only the changed region and its grading/seam support,
+then publish and reclaim those pages without rebuilding the whole resident world.
+The new in-place edit path is the fast path for currently backed topology, not a
+claim that arbitrary vast-scene topology creation is complete.
+
+Run `npm run test:dawn:sparse-cm12:paused-regions` for flat and curved surfaces,
+coarsening/refinement at reset and after a physics step, rapid superseding edits,
+partial regions, volume conservation, and resumption. Renderer publication is
+covered by `tests/webgpu-renderer-live-fluid-edit.test.ts`.

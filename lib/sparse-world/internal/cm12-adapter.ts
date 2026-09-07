@@ -17,17 +17,8 @@ import {
 import type { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
 import { packSparseCM12RefinementRegions } from
   "../../methods/adaptive-mass/sparse-cm12-refinement-regions";
-import {
-  WebGPUSparseCM12Resident,
-  type SharpeningTrace,
-  type SparseCM12ActivityPolicy,
-  type SparseCM12InflowControl,
-  type SparseCM12PresentationPageResolution,
-  type SparseCM12PressureControl,
-  type SparseCM12PressureJournalCapacityRequest,
-  type SparseCM12ResidentInitializationReporter,
-  type SparseCM12ResidentStageSeams,
-} from "../../methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import { WebGPUSparseCM12Resident, type SharpeningTrace, type SparseCM12InflowControl, type SparseCM12PresentationPageResolution, type SparseCM12PressureControl, type SparseCM12PressureJournalCapacityRequest, type SparseCM12ResidentInitializationReporter, type SparseCM12ResidentStageSeams } from "../../methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import { type SparseCM12ActivityPolicy } from "../../methods/adaptive-mass/features/adaptivity/policy";
 import type {
   SparseWorld,
   SparseWorldDevice,
@@ -139,6 +130,8 @@ export interface CM12SparseWorldRuntime {
   /** Cancel an in-flight replacement when holding the current topology. */
   cancelTopologyPreparation(): void;
   readonly generationPlanningRequired: boolean;
+  /** In-place, zero-time region transaction over existing candidate backing. */
+  refreshRefinementRegions(finestCellSize_m: number, policy?: SparseCM12ActivityPolicy): Promise<boolean>;
   needsDetailedGenerationPlanning(maximumSpan: number, demoteEpochs: number,
     finestTravel: number, frozenFrontierOnly?: boolean): Promise<boolean>;
   readonly generationPreparationMaximumSliceMs: number;
@@ -665,6 +658,9 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   ) {}
 
   waitForSimulationPipelines() { return this.readiness.ready; }
+  async refreshRefinementRegions(finestCellSize_m: number, policy?: SparseCM12ActivityPolicy) {
+    return this.generationState.read(resident => resident.refreshRefinementRegions(finestCellSize_m, policy));
+  }
   get allocatedBytes() { return this.generationState.allocatedBytes; }
   get cellCount() { return this.resident.cellCount; }
   get rowCount() { return this.resident.rowCount; }

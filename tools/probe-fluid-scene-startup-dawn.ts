@@ -1,11 +1,11 @@
 /** Paired renderer-world preparation; run under run-webgpu-exclusive.ts. */
 import assert from "node:assert/strict";
 import { createDawnRenderDevice } from "./svo-dry-frame-harness";
-import { WebGPULiveSvoScene, type LiveSvoSceneOptions } from "../lib/svo/webgpu-live-svo-scene";
+import { WebGPULiveSvoScene, type LiveSvoSceneOptions } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import { getScenePreset } from "../lib/core/scenes";
 import type { SceneDescription } from "../lib/core/model";
-import type { OctreeSparseBrickWorldProgress } from "../lib/svo/webgpu-svo-sparse-bricks";
-import type { SparseBrickPublicationSource } from "../lib/svo/sparse-brick-octree";
+import type { OctreeSparseBrickWorldProgress } from "../lib/svo/features/construction/webgpu-svo-sparse-bricks";
+import type { SparseBrickPublicationSource } from "../lib/svo/features/construction/sparse-brick-octree";
 
 const { device, validationErrors } = await createDawnRenderDevice();
 // Inspect the actual upload image before ordinary publication. This entry

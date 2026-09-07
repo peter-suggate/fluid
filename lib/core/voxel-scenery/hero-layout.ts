@@ -7,7 +7,7 @@ import {
 import type { Quaternion, SceneDescription, Vec3 } from "../model";
 import { quaternionMultiply } from "../rigid-body";
 import type { SceneryGraph, SceneryMaterial, SceneryNode, SceneryPlacement } from "../scenery-graph";
-import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../../svo/svo-primitive-candidates";
+import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../../svo/features/scene-publication/svo-primitive-candidates";
 import { terrainHeightAt } from "../terrain";
 import { pondVesselPlanCurve, pondVesselPlanDistance } from "./pond-vessel";
 import {

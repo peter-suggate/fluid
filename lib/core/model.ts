@@ -185,6 +185,8 @@ export interface SceneDescription {
     dynamicViscosity_Pa_s: number;
     surfaceTension_N_m: number;
     gravity_m_s2: Vec3;
+    /** Feature-owned toggle memory; serialized with the scene for undo, reset and pane isolation. */
+    rememberedGravity_m_s2?: Vec3;
     /** Uniform starting velocity, currently consumed by Sparse CM12. Omitted means rest. */
     initialVelocity_m_s?: Vec3;
     initialCondition: "dam-break" | "tank-fill";
