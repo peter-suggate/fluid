@@ -113,6 +113,9 @@ for (const id of POOL_IMPACT_SCENES.filter(id => !requestedScene || id === reque
           maximumNativeMeanError, maximumPausedSampleChange_m };
         reports.push(report); console.log(JSON.stringify(report));
         assert.equal(fieldMetrics.missingOrExtraCrossingColumns, 0, `${label}: every pool/upper/lower sphere crossing: ${JSON.stringify(fieldMetrics.firstBadColumn)}`);
+        assert.equal(fieldMetrics.missingAnalyticSamples, 0, `${label}: continuous interface band must be published`);
+        assert.ok(fieldMetrics.maximumSamplePrecisionBudgetRatio <= 1,
+          `${label}: published values must equal the analytic defining field within f16/f32 precision: ${fieldMetrics.maximumAnalyticSampleError_m} m`);
         assert.ok(fieldMetrics.sphereCrossings > 0, `${label}: ball must be present`);
         assert.ok(fieldMetrics.maximumPoolHeightError_m <= budgets.poolPlanarity_m, `${label}: pool displaced ${fieldMetrics.maximumPoolHeightError_m} m`);
         assert.ok(fieldMetrics.maximumSphereDistanceError_m <= budgets.spherePublishedRadial_m, `${label}: published ball radial error ${fieldMetrics.maximumSphereDistanceError_m} m`);

@@ -34,6 +34,16 @@ export function exactPoolImpactDistance(oracle: PoolImpactOracle, p: Point): num
   return Math.min(p[1] - oracle.poolHeight,
     Math.hypot(...p.map((v, a) => v - oracle.sphereCenter[a]!)) - oracle.sphereRadius);
 }
+/** Physical quadratic defining function used by the numeric representation.
+ * This is not a signed distance away from the sphere, but its zero set and
+ * normalized gradient are the exact authored sphere. Kept in geometric form,
+ * independent of retained record packing and GPU polynomial evaluation.
+ */
+export function exactPoolImpactImplicitPhi(oracle: PoolImpactOracle, p: Point): number {
+  const squaredRadius = p.reduce((sum, v, axis) => sum + (v - oracle.sphereCenter[axis]!) ** 2, 0);
+  return Math.min(p[1] - oracle.poolHeight,
+    (squaredRadius - oracle.sphereRadius ** 2) / (2 * oracle.sphereRadius));
+}
 export function exactPoolImpactNormal(oracle: PoolImpactOracle, p: Point): Point {
   const d = p.map((v, a) => v - oracle.sphereCenter[a]!);
   const length = Math.hypot(...d);
@@ -63,6 +73,8 @@ export function measurePublishedPoolImpact(phi: Float32Array, oracle: PoolImpact
   let expectedCrossings = 0, observedCrossings = 0, missingOrExtraCrossingColumns = 0;
   let maximumPoolHeightError_m = 0, maximumSphereCrossingError_m = 0;
   let maximumSphereDistanceError_m = 0, sphereCrossings = 0;
+  let analyticSampleCount = 0, missingAnalyticSamples = 0;
+  let maximumAnalyticSampleError_m = 0, maximumSamplePrecisionBudgetRatio = 0;
   let firstBadColumn: unknown;
   // Include every lattice column, even those inside the original minmax8
   // region. A highest-surface scan would silently omit the bottom of the ball.
@@ -85,9 +97,27 @@ export function measurePublishedPoolImpact(phi: Float32Array, oracle: PoolImpact
       sphereCrossings++;
     }
   }
+  const ny = oracle.dimensions[1];
+  for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+    const point: Point = [oracle.origin[0] + (x + .5) * oracle.h, (y + .5) * oracle.h,
+      oracle.origin[2] + (z + .5) * oracle.h];
+    const expected = exactPoolImpactImplicitPhi(oracle, point);
+    if (Math.abs(expected) > 1.5 * oracle.h) continue;
+    const actual = phi[x + nx * (y + ny * z)]!;
+    analyticSampleCount++;
+    if (!Number.isFinite(actual)) { missingAnalyticSamples++; continue; }
+    const error = Math.abs(actual - expected);
+    maximumAnalyticSampleError_m = Math.max(maximumAnalyticSampleError_m, error);
+    // Binary16 nearest rounding <= half an ulp, plus a float32 physical-frame
+    // allowance. This prevents a geometrically plausible but unrelated field
+    // or a density-derived reconstruction from satisfying the analytic gate.
+    const precisionBudget = Math.abs(expected) / 2048 + 1e-6;
+    maximumSamplePrecisionBudgetRatio = Math.max(maximumSamplePrecisionBudgetRatio, error / precisionBudget);
+  }
   return { expectedCrossings, observedCrossings, missingOrExtraCrossingColumns,
     maximumPoolHeightError_m, maximumSphereCrossingError_m, maximumSphereDistanceError_m,
-    sphereCrossings, firstBadColumn };
+    sphereCrossings, firstBadColumn, analyticSampleCount, missingAnalyticSamples,
+    maximumAnalyticSampleError_m, maximumSamplePrecisionBudgetRatio };
 }
 
 /** Budgets declared from precision and sampling, before measuring a candidate.

@@ -34,7 +34,8 @@ def main():
         panel.set_xlim(section["x"][0], section["x"][-1])
         panel.set_ylim(section["y"][0], section["y"][-1])
         panel.grid(alpha=0.2)
-        panel.text(0.02, 0.03, f'max surface density residual\n{row["maximumSurfaceResidual"]:.2e}',
+        panel.text(0.02, 0.03, f'zero-set displacement {row["maximumSurfaceDisplacement"]:.2e}\n'
+                   f'normal vector error {row["maximumSurfaceNormalError"]:.2e}',
                    transform=panel.transAxes, fontsize=8, color="#44516a")
     fig.suptitle("Implicit density ladder: reference and retained surface after 100 split/merge cycles\n"
                  "Exact-family CPU algebra; feature inference, global assembly and dynamics remain unvalidated",

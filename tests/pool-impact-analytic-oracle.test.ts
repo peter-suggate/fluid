@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { packFineLevelSetSample, unpackFineLevelSetPackedPhi } from "../lib/core/fine-levelset-packed-sample";
-import { exactVerticalCrossings, measurePublishedPoolImpact, poolImpactBudgets, poolImpactOracle,
+import { compileRetainedSceneDensity, evaluateRetainedSceneDensity, evaluateRetainedScenePhi } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
+import { exactPoolImpactImplicitPhi, exactVerticalCrossings, measurePublishedPoolImpact, poolImpactBudgets, poolImpactOracle,
   POOL_IMPACT_SCENES } from "../tools/implicit-density/pool-impact-oracle";
 
 for (const id of POOL_IMPACT_SCENES) test(`${id}: actual catalog geometry and original minmax8 region have an independent oracle`, () => {
@@ -34,9 +35,48 @@ for (const id of POOL_IMPACT_SCENES) test(`${id}: actual catalog geometry and or
   assert.ok(metrics.sphereCrossings > 100, "inspect both sides on every sphere-covered vertical ray");
   assert.ok(metrics.maximumPoolHeightError_m < budgets.poolPlanarity_m);
   assert.ok(metrics.maximumSphereDistanceError_m < budgets.spherePublishedRadial_m);
+  assert.equal(metrics.missingAnalyticSamples, 0);
+  assert.ok(metrics.maximumSamplePrecisionBudgetRatio <= 1);
   const missing = measurePublishedPoolImpact(ballRemoved, oracle);
   assert.equal(missing.missingOrExtraCrossingColumns, metrics.sphereCrossings / 2,
     "an intact pool cannot conceal a missing suspended sphere");
   assert.equal(exactVerticalCrossings(oracle, 0, 0).length, 3,
     "the oracle includes pool plus lower and upper sphere surfaces");
+});
+
+for (const id of POOL_IMPACT_SCENES) test(`${id}: compiled retained field agrees with analytic geometry at arbitrary physical points`, () => {
+  const oracle = poolImpactOracle(id), field = compileRetainedSceneDensity(oracle.scene);
+  assert.ok(field);
+  // Fibonacci sphere points avoid favorable grid axes, symmetric samples, and
+  // cell centers. Compare the retained defining function at the actual sphere,
+  // and its density at physical offsets through the same fixed-width ramp.
+  let maximumSurfaceResidual_m = 0, maximumDensityError = 0, maximumNormalVectorError = 0;
+  for (let i = 0; i < 1000; i++) {
+    const ny = 1 - 2 * (i + .5) / 1000, theta = i * Math.PI * (3 - Math.sqrt(5));
+    const radial = Math.sqrt(1 - ny * ny), normal = [radial * Math.cos(theta), ny, radial * Math.sin(theta)];
+    const point = normal.map((v, axis) => oracle.sphereCenter[axis]! + oracle.sphereRadius * v) as [number, number, number];
+    maximumSurfaceResidual_m = Math.max(maximumSurfaceResidual_m, Math.abs(evaluateRetainedScenePhi(field, point)));
+    const epsilon = 1e-5;
+    const gradient = [0, 1, 2].map(axis => {
+      const plus = [...point] as [number, number, number], minus = [...point] as [number, number, number];
+      plus[axis] += epsilon; minus[axis] -= epsilon;
+      return (evaluateRetainedScenePhi(field, plus) - evaluateRetainedScenePhi(field, minus)) / (2 * epsilon);
+    });
+    const length = Math.hypot(...gradient);
+    maximumNormalVectorError = Math.max(maximumNormalVectorError, Math.hypot(...gradient.map((v, axis) => v / length - normal[axis]!)));
+    for (const offset of [-.031, -.017, .006, .023]) {
+      const query = point.map((v, axis) => v + offset * normal[axis]!) as [number, number, number];
+      const expectedPhi = exactPoolImpactImplicitPhi(oracle, query);
+      const expectedDensity = Math.max(0, Math.min(1, .5 - expectedPhi / oracle.h));
+      maximumDensityError = Math.max(maximumDensityError, Math.abs(evaluateRetainedSceneDensity(field, query) - expectedDensity));
+    }
+  }
+  // Float32 canonical coordinates are accepted; each explicit budget is far
+  // below a finest cell and unrelated to the operation-cell width.
+  assert.ok(maximumSurfaceResidual_m < 2e-7, `${id}: sphere zero surface residual ${maximumSurfaceResidual_m} m`);
+  assert.ok(maximumDensityError < 5e-6, `${id}: retained diffuse density error ${maximumDensityError}`);
+  assert.ok(maximumNormalVectorError < 1e-6, `${id}: sphere normal error ${maximumNormalVectorError}`);
+  for (const x of [-.731, -.183, .017, .389]) for (const z of [-.637, -.109, .277, .513])
+    assert.ok(Math.abs(evaluateRetainedScenePhi(field, [x, oracle.poolHeight, z])) < 1e-7,
+      `${id}: authored flat pool remains the exact zero plane`);
 });
