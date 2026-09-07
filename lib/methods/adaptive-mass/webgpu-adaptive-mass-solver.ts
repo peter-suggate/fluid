@@ -36,6 +36,8 @@ import {
   AdaptiveMassFrameCapture,
 } from "./adaptive-mass-frame-pipeline";
 import type { AdaptiveMassSolverOptions } from "./method";
+import { compileRetainedSceneDensity, compileRetainedSceneFineMeans } from "./sparse-cm12-retained-scene-density";
+import { compileRetainedOpenSceneFineMeans } from "./sparse-cm12-retained-open-density";
 import {
   initializeSparseBrickAtlasFromScene,
   materializeSparseBrickAtlasDensity,
@@ -658,10 +660,16 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           const fineResolution = options.brickFineResolution ?? 8;
           const resolutionForBrick = options.initialResolutionForQA === undefined
             ? undefined : () => options.initialResolutionForQA!;
+          const retained = compileRetainedSceneDensity(scene);
+          const initialFineDensity = retained ? compileRetainedOpenSceneFineMeans(retained,
+            dimensions!, scene.voxelDomain.finestCellSize_m, initialSolidWorld, {
+              seedMeans: compileRetainedSceneFineMeans(retained, dimensions!, scene.voxelDomain.finestCellSize_m),
+            }).effectiveMeans : undefined;
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
             brickFineResolution: fineResolution,
             solidWorld: initialSolidWorld,
+            initialFineDensity,
             maximumMacroSpanBricks: options.maximumMacroSpanBricks,
             surfaceFineRings: options.surfaceFineRings,
             coarseFirstCurvatureTolerance: options.activityPolicy?.coarseFirst
