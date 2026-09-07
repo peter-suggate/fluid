@@ -4,6 +4,7 @@
 // looks up by id. Nothing else in the worker imports the method package.
 import "../methods/index";
 import { FluidLabRenderer } from "./webgpu-renderer";
+import { reuseSolidWorld } from "./solid-world";
 import { webGPUPlatformResourcePlugin } from "./webgpu-platform-resource";
 import { markSceneRevision, type SceneDescription } from "./model";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
@@ -14,6 +15,7 @@ import type {
 } from "./webgpu-render-worker-client";
 
 const scope = self as DedicatedWorkerGlobalScope;
+let preparedSolidScene: SceneDescription | undefined;
 
 /**
  * Structural levers the browser cannot otherwise reach.
@@ -115,7 +117,14 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
   if (message.type === "initialize") {
     void runtime.initialize().then(() => post({ type: "initialized", requestId: message.requestId }))
       .catch((error) => failure(message.requestId, error));
+  } else if (message.type === "validate-solid-edit") {
+    try {
+      runtime.validateLiveSolidEdit(message.scene);
+      preparedSolidScene = message.scene;
+      post({ type: "solid-edit-validated", requestId: message.requestId });
+    } catch (error) { failure(message.requestId, error); }
   } else if (message.type === "set-render-scene") {
+    if (preparedSolidScene) reuseSolidWorld(preparedSolidScene, message.scene);
     renderScene = {
       revision: message.revision,
       document: markSceneRevision(message.scene),

@@ -48,6 +48,7 @@ export type WebGPURenderWorkerRequest =
   | { type: "set-hover-highlight"; range: { first: number; last: number } | undefined }
   | { type: "set-simulation-running"; requestId: number; running: boolean }
   | { type: "reset-simulation-timeline" }
+  | { type: "validate-solid-edit"; requestId: number; scene: SceneDescription }
   | { type: "inject-liquid-ball"; requestId: number; ball: InjectedLiquidBall }
   | { type: "pick-rigid-body"; requestId: number; args: PickArguments }
   | { type: "shutdown"; requestId: number };
@@ -65,6 +66,7 @@ export type WebGPURenderWorkerResponse =
   | { type: "simulation-running-set"; requestId: number; submittedTime_s: number | undefined }
   | { type: "frame"; frameId: number; metrics: RendererFrameMetrics; snapshot: WebGPURenderWorkerSnapshot }
   | { type: "pick-result"; requestId: number; result: PickResult }
+  | { type: "solid-edit-validated"; requestId: number }
   | { type: "inject-result"; requestId: number; taken: boolean }
   | { type: "shutdown-complete"; requestId: number }
   | { type: "request-failed"; requestId: number; message: string };
@@ -256,6 +258,10 @@ export class WebGPURenderWorkerClient {
    * re-seed instead", which is a worse outcome than a live drop but a far
    * better one than nothing happening.
    */
+  validateLiveSolidEdit(scene: SceneDescription): Promise<void> {
+    return this.request<void>({ type: "validate-solid-edit", requestId: this.nextRequestId(), scene });
+  }
+
   injectLiquidBall(ball: InjectedLiquidBall): Promise<boolean> {
     return this.request<boolean>({ type: "inject-liquid-ball", requestId: this.nextRequestId(), ball });
   }
@@ -342,7 +348,7 @@ export class WebGPURenderWorkerClient {
     else if (message.type === "rigid-loads") this.callbacks.onGPURigidLoads?.(message.loads);
     else if (message.type === "advance-completed") this.callbacks.onGPUAdvanceCompleted?.(message.time_s);
     else if (message.type === "effective-renderer-status") this.callbacks.onEffectiveRendererStatus?.(message.status);
-    else if (message.type === "initialized" || message.type === "shutdown-complete") this.settle(message.requestId);
+    else if (message.type === "initialized" || message.type === "shutdown-complete" || message.type === "solid-edit-validated") this.settle(message.requestId);
     else if (message.type === "simulation-running-set") this.settle(message.requestId, message.submittedTime_s);
     else if (message.type === "pick-result") this.settle(message.requestId, message.result);
     else if (message.type === "inject-result") this.settle(message.requestId, message.taken);
