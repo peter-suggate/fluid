@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { resolveMethodValues } from "../lib/core/method-contract";
-import { createMinimalPowerDamBreak32Scene } from "../lib/core/scenes";
-import { VISUALIZATION_FIELDS } from "../lib/core/visualization-catalog";
-import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { resolveMethodValues } from "../../../../../core/method-contract";
+import { createMinimalPowerDamBreak32Scene } from "../../../../../core/scenes";
+import { VISUALIZATION_FIELDS } from "../../../../../core/visualization-catalog";
+import { requiredFluidDeviceLimits } from "../../../../../core/webgpu-device-limits";
 import {
   isPressureJournalOverlayMode,
   PRESSURE_JOURNAL_CELL_BUDGET,
@@ -15,16 +15,16 @@ import {
   pressureJournalOverlayChannel,
   pressureJournalOverlayVisualizations,
   type PressureJournalOverlayMode,
-} from "../lib/core/webgpu-pressure-journal-overlay";
-import { isFieldVisualization } from "../lib/core/visualization-registry";
-import { optionalRendererPipelineRequests } from "../lib/core/webgpu-renderer";
+} from "../../../../../features/pressure-inspection/gpu/overlay";
+import { isFieldVisualization } from "../../../../../core/visualization-registry";
+import { optionalRendererPipelineRequests } from "../../../../../core/webgpu-renderer";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+  "../../../../../harness/webgpu-smoke-isolation";
+import { adaptiveMassMethod } from "../../../method";
 import { SPARSE_CM12_RESIDENT_STAGES } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../../../webgpu-sparse-cm12-resident";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../../../webgpu-adaptive-mass-solver";
 
 /**
  * The view that draws a captured pressure solve.
@@ -148,11 +148,11 @@ test("the film adds no stage to the advance partition", () => {
 dawnTest("Dawn draws a captured film without the validator objecting",
   { timeout: 240_000 }, async () => {
     await acquireWebGPUExclusiveLock("dawn-test",
-      "tests/sparse-cm12-pressure-journal-overlay.test.ts");
+      "lib/methods/adaptive-mass/features/pressure-inspection/verification/overlay.test.ts");
     let device: GPUDevice | undefined;
     try {
       const modulePath = dawnModule
-        ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
+        ?? fileURLToPath(new URL("../../../../../../node_modules/webgpu/index.js", import.meta.url));
       const dawn = await import(pathToFileURL(modulePath).href) as {
         create(options: string[]): GPU; globals: Record<string, unknown>;
       };

@@ -2,22 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { resolveMethodValues } from "../lib/core/method-contract";
-import { createMinimalPowerDamBreak32Scene } from "../lib/core/scenes";
-import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { resolveMethodValues } from "../../../../../core/method-contract";
+import { createMinimalPowerDamBreak32Scene } from "../../../../../core/scenes";
+import { requiredFluidDeviceLimits } from "../../../../../core/webgpu-device-limits";
 import { usePerformanceInstrumentationStore } from
-  "../lib/core/stores/performance-instrumentation-store";
+  "../../../../../core/stores/performance-instrumentation-store";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from
-  "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+  "../../../../../harness/webgpu-smoke-isolation";
+import { adaptiveMassMethod } from "../../../method";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../../../webgpu-adaptive-mass-solver";
 import { sparseCM12PressureIterationsFromReceipt } from
-  "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+  "../../../webgpu-sparse-cm12-resident";
 import {
   assertSparseCM12PressureJournal,
   sparseCM12PressureJournalSchedule,
-} from "../lib/methods/adaptive-mass/sparse-cm12-pressure-journal";
+} from "../decoder";
 
 /**
  * The journal against the solve it filmed.
@@ -42,7 +42,7 @@ async function withSolver<T>(
   await acquireWebGPUExclusiveLock("dawn-test", "sparse-cm12-pressure-journal");
   try {
     const modulePath = dawnModule
-      ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
+      ?? fileURLToPath(new URL("../../../../../../node_modules/webgpu/index.js", import.meta.url));
     const { create, globals } = await import(pathToFileURL(modulePath).href) as {
       create(options: string[]): GPU; globals: Record<string, unknown>;
     };

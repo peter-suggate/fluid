@@ -1,3 +1,4 @@
+import { pressureInspectionFeature } from "../../features/pressure-inspection/definition";
 import { topologyFreezeFeature } from "../../features/topology-freeze/definition";
 import { ALGORITHM_PARAMS, algorithmFeature } from "./features/algorithms/definition";
 import { parameterVariantSelections } from "../../core/method-parameter-variants";
@@ -11,7 +12,7 @@ export const surfacePublication = publicationPort<SparseCM12FinePresentationSour
   id:"simulation.surface", representation:"sparse-atlas", lifetime:"generation",
 });
 const host: FeatureDefinition = {
-  id:"simulation.adaptive-mass.host", provides:["simulation.sparse-atlas"], outputs:[surfacePublication],
+  id:"simulation.adaptive-mass.host", provides:["simulation.sparse-atlas", "simulation.pressure-journal"], outputs:[surfacePublication],
   variants: [{
     id:"sparse-jacobi-pcg", point:"simulation.adaptive-mass.pressure", requires:["simulation.sparse-atlas"],
     provides:["simulation.pressure-projection"], update:"rebuild", default:true,
@@ -27,7 +28,7 @@ export function resolveMethodComposition(values: MethodParamValues = {}) {
   for (const param of ALGORITHM_PARAMS) {
     if (typeof algorithmValues[param.key] === "boolean") algorithmValues[param.key] = param.default;
   }
-  return composeFeatures({features: [host, adaptiveMassAdaptivityFeature, algorithmFeature, topologyFreezeFeature], selections:{
+  return composeFeatures({features: [host, adaptiveMassAdaptivityFeature, algorithmFeature, topologyFreezeFeature, pressureInspectionFeature], selections:{
     ...parameterVariantSelections("simulation.adaptive-mass.algorithms", ALGORITHM_PARAMS, algorithmValues),
     "simulation.adaptive-mass.surface": "sparse-cm12",
     "simulation.adaptive-mass.adaptivity": String(values.selectorMode ?? "coarse-first"),

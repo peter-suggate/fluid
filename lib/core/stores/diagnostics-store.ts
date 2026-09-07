@@ -3,7 +3,7 @@ import type { GPUStatus } from "../gpu-status";
 import { webGPUPlatformResourcePlugin } from "../webgpu-platform-resource";
 import type { EffectiveRendererStatus } from "../renderer-status";
 import type { GPUEulerianInfo } from "../webgpu-eulerian";
-import type { PressureJournal } from "../pressure-journal";
+import type { PressureJournal } from "../../features/pressure-inspection/journal";
 import type { FluidCellPublication } from "../fluid-cell-trace";
 import type { StageLensReceipt } from "../stage-lens";
 import type { StageLensLayerReport } from "../webgpu-stage-lens-overlay";

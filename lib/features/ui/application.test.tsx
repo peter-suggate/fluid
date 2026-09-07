@@ -18,7 +18,7 @@ test("every advertised application placement has a registered implementation", (
 });
 
 test("installed scene and panel slots render from the active session", () => {
-  for (const slot of ["scene.visibility", "scene.physics", "scene.adaptivity", "fluid.material", "sim.adaptivity", "frame.options", "frame.lighting", "frame.reconstruction", "frame.reconstruction"]) {
+  for (const slot of ["scene.visibility", "scene.physics", "scene.adaptivity", "fluid.material", "sim.adaptivity", "frame.options", "frame.lighting", "frame.reconstruction", "scene.surface", "scene.simulation", "sim.topology", "fluid.inspection", "sim.inspection"]) {
     assert.doesNotThrow(() => renderToStaticMarkup(createElement(FeatureSlot, { slot })), slot);
   }
 });

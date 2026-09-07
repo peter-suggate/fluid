@@ -45,7 +45,7 @@ import {
   type PressureJournal as SparseCM12PressureJournal,
   type PressureJournalIteration as SparseCM12PressureJournalIteration,
   type PressureJournalLayout as SparseCM12PressureJournalLayout,
-} from "../../core/pressure-journal";
+} from "../../../../features/pressure-inspection/journal";
 
 export {
   PRESSURE_JOURNAL_FIELD_COUNT as SPARSE_CM12_PRESSURE_JOURNAL_FIELD_COUNT,
@@ -63,7 +63,7 @@ export {
   type PressureJournalField as SparseCM12PressureJournalField,
   type PressureJournalIteration as SparseCM12PressureJournalIteration,
   type PressureJournalLayout as SparseCM12PressureJournalLayout,
-} from "../../core/pressure-journal";
+} from "../../../../features/pressure-inspection/journal";
 
 const relative = (squared: number, rhsSquared: number): number =>
   rhsSquared > 0 ? Math.sqrt(Math.max(0, squared) / rhsSquared) : 0;

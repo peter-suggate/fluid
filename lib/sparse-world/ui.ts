@@ -1,9 +1,9 @@
-import type { PressureJournal } from "../core/pressure-journal";
+import type { PressureJournal } from "../features/pressure-inspection/journal";
 import type { StageLensSource } from "../core/stage-lens";
 import type { GPUFluidFaceVelocitySource } from
   "../core/webgpu-face-velocity-overlay";
 import type { GPUPressureJournalSource } from
-  "../core/webgpu-pressure-journal-overlay";
+  "../features/pressure-inspection/gpu/overlay";
 import type { GPUFluidTracerSource } from "../core/webgpu-tracer-overlay";
 import type { SparseWorldStatus } from "./index";
 

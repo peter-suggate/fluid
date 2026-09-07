@@ -13,7 +13,7 @@ import {
   sparseCM12PressureJournalLayout,
   sparseCM12PressureJournalSchedule,
   sparseCM12PressureJournalSnapshotOffset,
-} from "../lib/methods/adaptive-mass/sparse-cm12-pressure-journal";
+} from "../decoder";
 
 const HEADER = SPARSE_CM12_PRESSURE_JOURNAL_HEADER;
 const WORD = SPARSE_CM12_PRESSURE_JOURNAL_RECORD;

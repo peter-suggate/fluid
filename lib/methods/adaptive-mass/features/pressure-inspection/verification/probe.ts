@@ -17,28 +17,28 @@
  *
  * Run:
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
- *   node --import tsx tools/probe-sparse-cm12-pressure-journal.ts --scene=mini32
+ *   node --import tsx lib/methods/adaptive-mass/features/pressure-inspection/verification/probe.ts --scene=mini32
  */
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { resolveMethodValues } from "../lib/core/method-contract";
+import { resolveMethodValues } from "../../../../../core/method-contract";
 import {
   createMinimalPowerDamBreak32Scene,
   createSparseCM12LongDamBreakScene,
   createSymmetricExpansionScene,
-} from "../lib/core/scenes";
-import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+} from "../../../../../core/scenes";
+import { requiredFluidDeviceLimits } from "../../../../../core/webgpu-device-limits";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
-} from "../lib/harness/webgpu-smoke-isolation";
-import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+} from "../../../../../harness/webgpu-smoke-isolation";
+import { adaptiveMassMethod } from "../../../method";
 import { WebGPUAdaptiveMassSolver } from
-  "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+  "../../../webgpu-adaptive-mass-solver";
 import {
   SPARSE_CM12_PRESSURE_JOURNAL_FIELDS,
   sparseCM12PressureJournalSnapshotOffset,
-} from "../lib/methods/adaptive-mass/sparse-cm12-pressure-journal";
+} from "../decoder";
 
 const argument = (name: string, fallback: string): string =>
   process.argv.slice(2).find((value) => value.startsWith(`--${name}=`))
@@ -87,10 +87,10 @@ function magnitudes(values: Float32Array, live: Float32Array, count: number) {
   };
 }
 
-await acquireWebGPUExclusiveLock("dawn-probe", "tools/probe-sparse-cm12-pressure-journal.ts");
+await acquireWebGPUExclusiveLock("dawn-probe", "lib/methods/adaptive-mass/features/pressure-inspection/verification/probe.ts");
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
-    ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
+    ?? fileURLToPath(new URL("../../../../../../node_modules/webgpu/index.js", import.meta.url));
   const { create, globals } = await import(pathToFileURL(modulePath).href) as {
     create(options: string[]): GPU; globals: Record<string, unknown>;
   };

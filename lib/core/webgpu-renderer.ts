@@ -37,13 +37,13 @@ import {
 } from "../svo/features/diagnostics/svo-pixel-trace";
 import { DecorationOverlay } from "./webgpu-decoration-overlay";
 import { FaceVelocityOverlay } from "./webgpu-face-velocity-overlay";
-import type { PressureJournal } from "./pressure-journal";
+import type { PressureJournal } from "../features/pressure-inspection/journal";
 import {
   isPressureJournalOverlayMode,
   pressureJournalOverlayChannel,
   PressureJournalOverlay,
   type PressureJournalOverlayMode,
-} from "./webgpu-pressure-journal-overlay";
+} from "../features/pressure-inspection/gpu/overlay";
 import {
   isStageLensOverlayMode,
   type StageLensOverlayMode,

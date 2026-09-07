@@ -5,8 +5,8 @@ import {
   pressureJournalSnapshotOffset,
   type PressureJournalField,
   type PressureJournalLayout,
-} from "./pressure-journal";
-import { fieldVisualization, type Visualization } from "./visualization-registry";
+} from "../journal";
+import { fieldVisualization, type Visualization } from "../../../core/visualization-registry";
 
 /**
  * Draws one captured iteration of the Sparse CM12 pressure solve.
@@ -112,7 +112,7 @@ const PRESSURE_JOURNAL_MINIMUM_FRACTION = 0.002;
  * one — a scale that kept the tail visible would have to compress the early
  * iterations into nothing.
  *
- * Measured by `tools/probe-sparse-cm12-pressure-journal.ts`.
+ * Measured by `lib/methods/adaptive-mass/features/pressure-inspection/verification/probe.ts`.
  */
 export const PRESSURE_JOURNAL_DECADES = 6;
 

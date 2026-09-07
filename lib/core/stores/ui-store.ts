@@ -1,3 +1,4 @@
+import { uiFeatureQuery } from "../../features/persistence";
 import { surfaceDisplayQuery } from "../../features/surface-display/definition";
 import { resolveSvoPipelineComposition } from "../../svo/pipeline/composition";
 import { create } from "zustand";
@@ -406,21 +407,14 @@ export const createUIStore = () => create<UIStore>((set) => ({
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
   gridOverlayLensPhase: 0,
-  ...surfaceDisplayQuery.read(new URLSearchParams()),
-  svoShadowsEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled,
-  svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
-  silhouetteRefinementEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled ?? false,
-  svoConeTracingMode: DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode ?? "cones",
+  ...uiFeatureQuery.read(new URLSearchParams()),
   svoGlobalIlluminationEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.globalIlluminationEnabled ?? false,
   svoWorldGiCacheEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.worldGiCacheEnabled ?? false,
-  svoPrimaryTraversal: DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "mesh",
   disabledRenderStages: [],
-  svoStageView: DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView,
   svoLastPrimaryWorkView: "primary-work",
   svoStageLightSlot: DEFAULT_SVO_RENDER_DIAGNOSTICS.lightSlot,
   svoMaximumTraversalDepth: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumTraversalDepth,
   svoMaximumNodeVisits: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumNodeVisits,
-  svoRenderTuning: DEFAULT_SVO_RENDER_TUNING,
   pixelTraceEnabled: false,
   pixelTracePinned: false,
   pixelTracePinRequest: null,

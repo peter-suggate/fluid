@@ -1,5 +1,5 @@
 import { uiFeatureQuery, type FeatureUIQueryState } from "../features/persistence";
-import { runtimeFeatureQuery } from "../features/runtime-lifecycle";
+import { runtimeFeatureQuery, initialRuntimeFeatures, pickRuntimeFeatures, runtimeFeaturesChanged, type RuntimeFeatureState } from "../features/runtime-lifecycle";
 import { GRAVITY_QUERY_PATHS, isGravityVector } from "../features/gravity/state";
 import { refinementRegionsToQuery, withRefinementRegionsFromQuery } from "./editor-refinement-region";
 import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
@@ -9,7 +9,7 @@ import type { MethodParamValue, MethodParamValues } from "./method-contract";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import { isSparseCM12DirtyOverlayMode } from "./sparse-cm12-dirty-visualizations";
-import { isPressureJournalOverlayMode } from "./webgpu-pressure-journal-overlay";
+import { isPressureJournalOverlayMode } from "../features/pressure-inspection/gpu/overlay";
 import { cameraForPreset, defaultScenePresetId, findSceneDefinition, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
 import { resolveSession, type PaneSession } from "./session/session";
@@ -72,7 +72,7 @@ const sceneQueryPaths = [
   "rigidBodies"
 ] as const;
 
-export type QueryState = {
+export type QueryState = RuntimeFeatureState & {
   methodId: string;
   quality: GPUQuality;
   overrides: Record<string, MethodParamValues>;
@@ -80,7 +80,6 @@ export type QueryState = {
   scene: SceneDescription;
   view?: ShellView;
   ui: UIQueryState;
-  topologyFrozen: boolean;
 };
 
 export type UIQueryState = FeatureUIQueryState & {
@@ -703,7 +702,7 @@ export function serializeQueryState(
   uiState: SerializableUIState = useUIStore.getInitialState(),
   shellState: SerializableShellState = { view: "studio" },
   preparedSceneEntries?: readonly SceneQueryEntry[],
-  runtimeState: { topologyFrozen: boolean } = { topologyFrozen: false },
+  runtimeState: RuntimeFeatureState = initialRuntimeFeatures(),
 ): string {
   const query = new URLSearchParams(search);
   for (const key of [...query.keys()]) if (isManagedKey(key)) query.delete(key);
@@ -782,7 +781,7 @@ export function applyQueryStateToSession(session: PaneSession, search: string): 
   });
   session.scene.getState().setScene(state.scene, state.presetId);
   session.ui.setState(state.ui);
-  session.runtime.getState().setTopologyFrozen(state.topologyFrozen);
+  session.runtime.setState(pickRuntimeFeatures(state));
 }
 
 /**
@@ -871,7 +870,7 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
     session.scene.getState().setScene(state.scene, state.presetId);
     session.ui.setState(state.ui);
     onHydrated(state.presetId);
-    session.runtime.getState().setTopologyFrozen(state.topologyFrozen);
+    session.runtime.setState(pickRuntimeFeatures(state));
     applyingUrl = false;
     writeUrl();
   };
@@ -882,7 +881,7 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void, opti
   const stopScene = session.scene.subscribe(scheduleWrite);
   const stopUI = session.ui.subscribe(scheduleWrite);
   const stopRuntime = session.runtime.subscribe((state, previous) => {
-    if (state.topologyFrozen !== previous.topologyFrozen) scheduleWrite();
+    if (runtimeFeaturesChanged(previous, state)) scheduleWrite();
   });
   // Search text and section disclosure are intentionally session-only; only
   // the layer in front belongs in the address bar.

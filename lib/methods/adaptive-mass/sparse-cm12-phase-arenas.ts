@@ -1,7 +1,7 @@
 import {
   sparseCM12PressureJournalLayout,
   type SparseCM12PressureJournalLayout,
-} from "./sparse-cm12-pressure-journal";
+} from "./features/pressure-inspection/decoder";
 import type { SparseCM12HotTopologyLayout } from "./sparse-cm12-hot-topology";
 
 export const SPARSE_CM12_PHASE_ARENA_BRICK_FINE_RESOLUTION = 8;

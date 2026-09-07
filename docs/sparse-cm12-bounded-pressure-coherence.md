@@ -481,7 +481,7 @@ indirect active iterations, zero-dispatch tail iterations, fail-closed code/id
 ```
 
 Implementation touchpoints are a new pressure-coherence overlay beside
-`lib/core/webgpu-pressure-journal-overlay.ts`, registration in
+`lib/features/pressure-inspection/gpu/overlay.ts`, registration in
 `lib/core/visualization-catalog.ts`, and an optional source in
 `lib/core/method-contract.ts`. The existing journal overlay remains the field
 and residual view; the coherence overlay explains why work ran.

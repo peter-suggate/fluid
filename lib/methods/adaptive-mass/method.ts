@@ -1,3 +1,4 @@
+import { pressureCaptureParam, pressureCaptureDescriptor } from "./features/pressure-inspection/definition";
 import { ALGORITHM_PARAMS } from "./features/algorithms/definition";
 import { resolveMethodComposition } from "./composition";
 import { SPARSE_CM12_ACTIVITY_POLICY } from "./features/adaptivity/policy";
@@ -9,7 +10,6 @@ import type {
 } from "../../core/method-contract";
 import { SPARSE_CM12_LENSES } from "./sparse-cm12-stage-lenses";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
-import { pressureJournalSchedule } from "../../core/pressure-journal";
 import { adaptiveMassDiagnosticRows } from "./adaptive-mass-diagnostics";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from "./adaptive-mass-frame-pipeline";
 import { sparseCM12PressureIterations, sparseCM12PressureRelativeTolerance, sparseCM12SharpeningDistance, sparseCM12SharpeningStrength, sparseCM12SharpeningTraceSteps, SPARSE_CM12_PRESSURE_ITERATIONS, SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS, SPARSE_CM12_PRESSURE_RELATIVE_TOLERANCE, SPARSE_CM12_SHARPENING_DISTANCE_CELLS, SPARSE_CM12_SHARPENING_STRENGTH, SPARSE_CM12_SHARPENING_TRACE_STEPS } from "./webgpu-sparse-cm12-resident";
@@ -156,23 +156,7 @@ const params: MethodParamSpec[] = [
     update: "runtime",
     hint: "Scales Algorithm 2's per-step removed-density dose before its conservative mass-return trace. One is the paper dose; zero leaves gamma diffusion active but suppresses sharpening.",
   },
-  {
-    kind: "select",
-    key: "pressureJournal",
-    label: "Pressure film capture",
-    default: "off",
-    tier: "fine",
-    options: [
-      { value: "off", label: "Off" },
-      { value: "on", label: "On · reserve the film" },
-    ],
-    // Structural, deliberately: the reservation is a region of the state buffer
-    // and it is not small, so it cannot appear and disappear under a live
-    // solver. Turning it on rebuilds once, which is the honest price of a
-    // capture that is otherwise free — an armed frame is the only frame that
-    // encodes a snapshot dispatch, and an unarmed one costs literally nothing.
-    hint: "Reserves room to film one pressure solve, so the Pressure lab views can replay its iterations. About 192 bytes per pressure cell — a few megabytes on the mini scenes and hundreds on a large one — which is why it is off unless asked for. Reserving is not capturing: the snapshots are only written on frames a Pressure lab view is open, and the reservation alone changes no dispatch.",
-  },
+  pressureCaptureParam,
 ];
 
 /**
@@ -280,16 +264,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   // authority. A bodyless paper-scale scene omits that substantial arena, so
   // crossing between an empty and non-empty roster rebuilds once.
   capabilities: { volumeRendering: true, sparseWorld: true },
-  pressureJournal: {
-    isReserved: (values) => values.pressureJournal === "on",
-    schedule: (values) => values.pressureJournal === "on"
-      ? pressureJournalSchedule(
-        sparseCM12PressureIterations(values.pressureIterations),
-        SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS,
-      )
-      : [],
-    reserve: { parameter: "pressureJournal", value: "on" },
-  },
+  pressureJournal: pressureCaptureDescriptor(sparseCM12PressureIterations, SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS),
   stageLenses: SPARSE_CM12_LENSES,
   // The ten coherence ("dirty") views are deliberately absent: they were more
   // than half this method's picker and every one of them answers a question

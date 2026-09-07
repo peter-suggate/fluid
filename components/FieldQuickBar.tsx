@@ -17,7 +17,7 @@ import { getMethod } from "../lib/core/method-registry";
 import { pickFieldOverlay, type FieldOverlayView } from "../lib/core/field-overlay-pick";
 import { VISUALIZATION_FIELDS, VISUALIZATION_QUICK_FIELDS } from "../lib/core/visualization-catalog";
 import type { FieldVisualization, FieldVisualizationIcon } from "../lib/core/visualization-registry";
-import { isPressureJournalOverlayMode } from "../lib/core/webgpu-pressure-journal-overlay";
+import { isPressureJournalOverlayMode } from "../lib/features/pressure-inspection/gpu/overlay";
 import { useSession } from "../lib/core/session/session-context";
 import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";

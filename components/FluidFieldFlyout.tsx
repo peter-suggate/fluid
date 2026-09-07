@@ -18,10 +18,9 @@ import { methodHasQuickFields } from "./FieldQuickBar";
 import { useSession } from "../lib/core/session/session-context";
 import { resolvedMethodValues } from "../lib/core/stores/method-store";
 import { DEFAULT_GRID_OVERLAY_AXIS } from "../lib/core/stores/ui-store";
-import { isPressureJournalOverlayMode } from "../lib/core/webgpu-pressure-journal-overlay";
+import { FeatureSlot } from "../lib/features/ui/FeatureSlot";
 import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
 import { LegendEntries } from "./VisualizationLegend";
-import { PressureFilmStrip } from "./PressureFilmStrip";
 import {
   ToolstripChoice,
   ToolstripPane,
@@ -68,7 +67,6 @@ type FieldView = FieldVisualization & { mode: GridOverlayMode };
  */
 type FieldDetail =
   | { readonly kind: "lens"; readonly id: string }
-  | { readonly kind: "film" }
   | { readonly kind: "setup" };
 
 function sameDetail(a: FieldDetail | undefined, b: FieldDetail): boolean {
@@ -295,21 +293,6 @@ export function FieldControlRows({ lenses: override }: {
   // with the catalog row it does not have.
   const shown = active ?? (activeLens && { label: activeLens.label, planeless: false });
 
-  // A film view's slider is a scrub through the captured iterations, not an
-  // opacity. The iteration each stop lands on is knowable here without asking
-  // the solver anything: the snapshot schedule is a pure function of the
-  // iteration ceiling and the reserved capacity, which is the same property
-  // that lets the device pick its slot without the host telling it.
-  const filmMode = active !== undefined && isPressureJournalOverlayMode(active.mode);
-  const filmReserved = method.pressureJournal?.isReserved(methodValues) ?? false;
-  const filmReserve = method.pressureJournal?.reserve;
-  const filmSchedule = filmMode
-    ? method.pressureJournal?.schedule(methodValues) ?? []
-    : [];
-  const filmSlot = filmSchedule.length > 0
-    ? Math.round(Math.max(0, Math.min(1, overlaySlice)) * (filmSchedule.length - 1))
-    : 0;
-
   // Resolved against what is true this frame rather than synchronised with it:
   // a pane whose subject went away — the lens deselected, the overlay hidden,
   // the method switched out from under it — simply stops resolving, so the
@@ -317,8 +300,7 @@ export function FieldControlRows({ lenses: override }: {
   // that no longer produces it.
   const open = detail === undefined ? undefined
     : detail.kind === "lens" ? (activeLens?.id === detail.id ? detail : undefined)
-      : detail.kind === "film" ? (filmMode ? detail : undefined)
-        : detail;
+      : detail;
   // One row open across the whole strip, not one per section: these rows and
   // the selected object's own hang their cards off the same corner, so two open
   // at once overlap.
@@ -381,53 +363,7 @@ export function FieldControlRows({ lenses: override }: {
         onChange={(value) => setOverlayAxis(value as typeof overlayAxis)}
       />
     </ToolstripRow>}
-    {/* A film's curve is the one pane not reachable from a row of its own kind:
-        the view that produces it is chosen in the field list, which then stands
-        down. Without this the pane could be closed and never reopened, and the
-        scrub above would be stepping through stops with nothing plotting them. */}
-    {filmMode && <ToolstripRow
-      tag="FILM"
-      value={filmReserved ? `${filmSchedule.length} stops` : "none reserved"}
-      name="Captured solve"
-      hint="The pressure solve this scrub replays, iteration by iteration."
-      active={open?.kind === "film"}
-      testId="fluid-field-row-film"
-      onClick={() => toggle({ kind: "film" })}
-    >
-      {open?.kind === "film" && <ToolstripPane label="Film" onClose={closePane}>
-        {/* The curve belongs beside the scrub, not under it: a frame of the film
-            means something different at the third iteration than at the
-            thirtieth, and knowing which needs the plot and the slider both on
-            screen at once. Selecting a stop drives the same slider. */}
-        {filmReserved && <ToolstripScrub
-          min={0}
-          max={1}
-          // A film's stops are the captured iterations and nothing between them,
-          // so the scrub steps between snapshots rather than sliding through a
-          // continuum it cannot show.
-          step={filmSchedule.length > 1 ? 1 / (filmSchedule.length - 1) : 1}
-          value={overlaySlice}
-          readout={filmSchedule.length > 0 ? `iter ${filmSchedule[filmSlot]}` : "—"}
-          ariaLabel={`${shown?.label ?? "Film"} iteration`}
-          onChange={setOverlaySlice}
-        />}
-        {filmReserved
-          ? <PressureFilmStrip
-            slot={filmSlot}
-            onSelectSlot={(slot) => setOverlaySlice(filmSchedule.length > 1
-              ? slot / (filmSchedule.length - 1) : 0)}
-          />
-          : <p className="fluid-field-film" data-testid="fluid-field-film-off">
-            <span>No film reserved — this view has nothing to replay.</span>
-            {filmReserve && <button
-              type="button"
-              data-testid="fluid-field-film-reserve"
-              title="Reserve room to capture one pressure solve. Rebuilds the solver once."
-              onClick={() => simulation.setMethodParam(methodId, filmReserve.parameter, filmReserve.value, session.id)}
-            >RESERVE</button>}
-          </p>}
-      </ToolstripPane>}
-    </ToolstripRow>}
+    <FeatureSlot slot="fluid.inspection" />
     {/* What the *stages* did, as opposed to what the state is. A field row picks
         a publication; a lens row opens one pass's own reading of itself, and the
         scrubber only means anything inside one. */}

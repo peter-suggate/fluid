@@ -2,8 +2,8 @@
 
 import type {
   PressureJournal,
-} from "../lib/core/pressure-journal";
-import { useSession } from "../lib/core/session/session-context";
+} from "./journal";
+import { useSession } from "../../core/session/session-context";
 
 /**
  * The captured pressure solve's convergence, beside the scrub that plays it.

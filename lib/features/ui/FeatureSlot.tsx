@@ -1,4 +1,5 @@
 "use client";
+import { PressureInspectionRow } from "../pressure-inspection/ui";
 import { SurfaceDisplayRow } from "../surface-display/ui";
 import { TopologyFreezeRow } from "../topology-freeze/ui";
 
@@ -13,6 +14,7 @@ import { ComposedFeatureSlot, type FeatureControlViews } from "../../framework/u
 
 /** Only application composition knows the installed React implementations. */
 export const applicationViews: FeatureControlViews = {
+  "simulation.pressure-inspection/film": PressureInspectionRow,
   "presentation.surface-display/mode": SurfaceDisplayRow,
   "simulation.topology-freeze/enabled": TopologyFreezeRow,
   "scene.gravity/enabled": GravityRow,

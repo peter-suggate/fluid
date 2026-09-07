@@ -1,5 +1,5 @@
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
-import type { PressureJournal } from "./pressure-journal";
+import type { PressureJournal } from "../features/pressure-inspection/journal";
 import type { StageLensReceipt } from "./stage-lens";
 import type { StageLensLayerReport } from "./webgpu-stage-lens-overlay";
 import type { InjectedLiquidBall } from "./method-contract";

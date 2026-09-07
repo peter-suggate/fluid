@@ -46,7 +46,7 @@ import {
 import type { GPUFluidFaceVelocitySource } from "../../core/webgpu-face-velocity-overlay";
 import type { GPUFluidTracerSource } from "../../core/webgpu-tracer-overlay";
 import { passBrokerLabelIsolationRequested } from "../../core/webgpu-pass-broker";
-import type { GPUPressureJournalSource } from "../../core/webgpu-pressure-journal-overlay";
+import type { GPUPressureJournalSource } from "../../features/pressure-inspection/gpu/overlay";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import type { GPURigidSolidWorldCollisionSource } from
   "../../core/webgpu-rigid-body";
@@ -77,7 +77,7 @@ import {
   sparseCM12PressureJournalSchedule,
   type SparseCM12PressureJournal,
   type SparseCM12PressureJournalLayout,
-} from "./sparse-cm12-pressure-journal";
+} from "./features/pressure-inspection/decoder";
 import {
   createWebgpuSparseCM12ResidentWGSL,
   type SparseCM12PressureRepairLayout,

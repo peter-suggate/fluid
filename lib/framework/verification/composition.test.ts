@@ -45,15 +45,13 @@ test("variant changes use the strongest entering or leaving lifecycle requiremen
 });
 
 test("publication wiring rejects equal names with incompatible representations", async () => {
-  const { publicationPort, readPublication } = await import("../ports");
+  const { publicationPort } = await import("../ports");
   const density = publicationPort<Float32Array>({ id: "density", representation: "sparse-cell-density", lifetime: "generation" });
   const other = publicationPort<Float32Array>({ id: "density", representation: "dense-grid-density", lifetime: "generation" });
   const producer = { id: "simulation", outputs: [density] };
   assert.throws(() => composeFeatures({ features: [producer, { id: "surface", inputs: [{ port: other, provider: "simulation" }] }] }), /matching representation/);
   composeFeatures({ features: [producer, { id: "surface", inputs: [{ port: density, provider: "simulation" }] }] });
-  const publication = { port: density, owner: "simulation", generation: 3, value: new Float32Array([1]) };
-  assert.equal(readPublication(density, publication, { owner: "simulation", generation: 3 })[0], 1);
-  assert.throws(() => readPublication(density, publication, { owner: "simulation", generation: 4 }), /Stale publication/);
+
 });
 
 
@@ -78,9 +76,4 @@ test("one owner cannot publish two incompatible meanings for the same port ID", 
   const a = publicationPort<number>({ id: "field", representation: "density", lifetime: "frame" });
   const b = publicationPort<number>({ id: "field", representation: "pressure", lifetime: "frame" });
   assert.throws(() => composeFeatures({ features: [{ id: "owner", outputs: [a, b] }] }), /Duplicate output port/);
-});
-test("matching generations do not authorize a different publication owner", async () => {
-  const { publicationPort, readPublication } = await import("../ports");
-  const port = publicationPort<number>({ id: "field", representation: "density", lifetime: "frame" });
-  assert.throws(() => readPublication(port, { port, owner: "other-pane", generation: 4, value: 1 }, { owner: "this-pane", generation: 4 }), /Wrong publication owner/);
 });

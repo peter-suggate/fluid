@@ -19,7 +19,7 @@ import { fineFloodVisualizations } from "./fine-flood-provenance";
 import { fluidCellVisualizations } from "./fluid-cell-visualizations";
 import { gridOverlayVisualizations } from "./grid-overlay-visualizations";
 import { octreeFieldVisualizations } from "./octree-technique-debug";
-import { pressureJournalOverlayVisualizations } from "./webgpu-pressure-journal-overlay";
+import { pressureJournalOverlayVisualizations } from "../features/pressure-inspection/gpu/overlay";
 import { svoPixelTraceVisualizations } from "../svo/features/diagnostics/svo-pixel-trace";
 import { tracerOverlayVisualizations } from "./webgpu-tracer-overlay";
 import {

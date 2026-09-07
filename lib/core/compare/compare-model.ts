@@ -2,7 +2,7 @@ import { getMethod, interactiveMethodId } from "../method-registry";
 import { isOctreeTechniqueOverlayMode } from "../octree-technique-debug";
 import { isSparseCM12DirtyOverlayMode } from "../sparse-cm12-dirty-visualizations";
 import { isStageLensOverlayMode, stageLensOverlayMode } from "../stage-lens";
-import { isPressureJournalOverlayMode } from "../webgpu-pressure-journal-overlay";
+import { isPressureJournalOverlayMode } from "../../features/pressure-inspection/gpu/overlay";
 import type { PaneSession } from "../session/session";
 import { useShellStore } from "../stores/shell-store";
 import type { TracePinRequest } from "../stores/ui-store";
