@@ -2412,15 +2412,13 @@ export class FluidLabRenderer {
    * that, by pinning only for drafts it knows are geometry-preserving.
    */
   /** A validated solid edit reaches the resident solver before the document is published. */
-  applyLiveSolidEdit(scene: SceneDescription): void {
+  validateLiveSolidEdit(scene: SceneDescription): void {
     const solver = this.gpuFluid;
     if (!solver?.validateLiveSolidEdit || !solver.applySceneUniforms
       || this.gpuFluidPending || this.simulationFault || this.runtimeFailure) {
       throw new Error("Live voxel editing needs a ready Sparse CM12 scene.");
     }
     solver.validateLiveSolidEdit(scene);
-    solver.applySceneUniforms(scene);
-    this.appliedSceneUniformKey = gpuSceneUniformKey(scene);
   }
 
   setSimulationScene(scene: SceneDescription | undefined) {

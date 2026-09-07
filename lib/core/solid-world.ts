@@ -554,3 +554,9 @@ export function sceneWithSolidStroke(base: SceneDescription,
   sceneSolidWorldCache.set(scene, { stamp: solidWorldContentStamp(scene), world });
   return scene;
 }
+
+/** Preserve a compiled immutable image across worker structured-clone boundaries. */
+export function reuseSolidWorld(source: SceneDescription, target: SceneDescription): void {
+  const cached = sceneSolidWorldCache.get(source);
+  if (cached && cached.stamp === solidWorldContentStamp(target)) sceneSolidWorldCache.set(target, cached);
+}
