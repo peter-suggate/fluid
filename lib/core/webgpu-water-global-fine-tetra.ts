@@ -394,24 +394,26 @@ fn filteredNormalAt(lattice:vec3f,fallback:vec3f,filterEnabled:bool)->vec3f{
   // samples retain the established one-cell reconstruction frame.
   let x=lattice-select(vec3f(1.0),vec3f(0.5),p.table.y==6u);
   let center=vec3i(round(x));
-  var weightSum=0.0;var phiSum=0.0;
-  var derivativeWeightSum=vec3f(0.0);var phiDerivativeSum=vec3f(0.0);
+  let t=x-vec3f(center);
+  let bx=vec3f(.5*t.x*(t.x-1.),1.-t.x*t.x,.5*t.x*(t.x+1.));
+  let by=vec3f(.5*t.y*(t.y-1.),1.-t.y*t.y,.5*t.y*(t.y+1.));
+  let bz=vec3f(.5*t.z*(t.z-1.),1.-t.z*t.z,.5*t.z*(t.z+1.));
+  let dx=vec3f(t.x-.5,-2.*t.x,t.x+.5);
+  let dy=vec3f(t.y-.5,-2.*t.y,t.y+.5);
+  let dz=vec3f(t.z-.5,-2.*t.z,t.z+.5);
+  var derivative=vec3f(0.0);
   var valid=true;
-  // Gradient of a normalized 3x3x3 Gaussian reconstruction evaluated at the
-  // emitted vertex. Subtracting the normalization derivative makes constants
-  // reproduce exactly even when the vertex is off-centre in the sample stencil.
+  // Differentiate a local tensor quadratic through the published samples.
+  // This reproduces affine/quadratic gradients at every subcell point, so
+  // plane and sphere normals remain analytic. It uses the same 27 reads as
+  // the former Gaussian kernel, which biased curved normals off grid.
   for(var oz=0;oz<3;oz+=1){for(var oy=0;oy<3;oy+=1){for(var ox=0;ox<3;ox+=1){
     let q=center+vec3i(ox-1,oy-1,oz-1);
-    let delta=vec3f(q)-x;
-    let weight=exp(-.5*dot(delta,delta)/(.85*.85));
     let value=signedPhi(q);
     if(!finitePhi(value)){valid=false;}
-    weightSum+=weight;phiSum+=weight*value;
-    derivativeWeightSum+=weight*delta;
-    phiDerivativeSum+=weight*value*delta;
+    derivative+=value*vec3f(dx[ox]*by[oy]*bz[oz],bx[ox]*dy[oy]*bz[oz],bx[ox]*by[oy]*dz[oz]);
   }}}
-  if(!valid||weightSum<=1e-8){return fallback;}
-  let derivative=phiDerivativeSum*weightSum-phiSum*derivativeWeightSum;
+  if(!valid){return fallback;}
   let size=vec3f(p.sample.xyz);
   let cell=select(u.container.xyz/size,p.sizing.xyz,all(p.sizing.xyz>vec3f(0.0)));
   let gradient=derivative/cell;

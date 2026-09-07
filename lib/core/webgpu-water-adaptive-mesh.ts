@@ -55,6 +55,19 @@ fn emitAdaptiveTriangle(a:vec3f,b:vec3f,c:vec3f,axis:u32,positive:bool){
   activeCubes[slot]=vec2u(bitcast<u32>(c.z),descriptor<<16u);
   cubeValues[slot*2u]=vec4f(a,c.x);cubeValues[slot*2u+1u]=vec4f(b,c.y);
 }
+// Query the same finest-cell scalar that owns boundary crossings. The
+// gradient is in lattice coordinates, so phi/|gradient| measures finest cells
+// independently of the accepted physics-cell width and field scaling.
+fn adaptiveFieldSample(lattice:vec3f)->vec4f{
+  let point=lattice-vec3f(1.);let base=vec3i(floor(point));let t=point-vec3f(base);
+  var result=vec4f(0.);
+  for(var z=0;z<2;z+=1){for(var y=0;y<2;y+=1){for(var x=0;x<2;x+=1){
+    let side=vec3i(x,y,z);let w=select(vec3f(1.)-t,t,side!=vec3i(0));
+    let d=select(vec3f(-1.),vec3f(1.),side!=vec3i(0));let value=phi(base+side);
+    result+=value*vec4f(w.x*w.y*w.z,d.x*w.y*w.z,w.x*d.y*w.z,w.x*w.y*d.z);
+  }}}
+  return result;
+}
 fn classifyAdaptiveGroup(base:vec3i,size:i32)->bool{
   let dims=vec3i(params.sampleDimensions);
   // Exact tank walls, floor films, missing pages, and native macro transitions
@@ -102,15 +115,35 @@ fn classifyAdaptiveGroup(base:vec3i,size:i32)->bool{
   for(var i=0u;i<count;i+=1u){let a=points[i];let b=points[(i+1u)%count];let c=points[(i+2u)%count];
     if(cross(b-a,c-b)[axis]*area[axis]< -1e-5){convex=false;}}
   if(!convex){return false;}
+  // The average boundary vertex lies inside a curved surface. Keep its
+  // convex projection but solve the monotone coordinate against the actual
+  // scalar interpolant, instead of shrinking the surface to that average.
+  var lower=centre;var upper=centre;lower[axis]=f32(base[axis]);upper[axis]=f32(base[axis]+size);
+  let lowerPhi=adaptiveFieldSample(lower).x;let upperPhi=adaptiveFieldSample(upper).x;
+  if((lowerPhi<=0.)==(upperPhi<=0.)){return false;}
+  for(var iteration=0u;iteration<20u;iteration+=1u){
+    let middle=.5*(lower+upper);let value=adaptiveFieldSample(middle).x;
+    if((value<=0.)==(lowerPhi<=0.)){lower=middle;}else{upper=middle;}
+  }
+  centre=.5*(lower+upper);
   let snappedCentre=round(centre*65536.)/65536.;
   var oriented=true;
+  var accurate=true;
   for(var i=0u;i<count;i+=1u){
     let a=round(points[i]*65536.)/65536.;let b=round(points[(i+1u)%count]*65536.)/65536.;
     // Non-strict monotonicity can contain a vertical zero plateau. Its
     // projected fan has zero area and cannot inherit a unique orientation.
     // Require a strictly oriented graph after the renderer's quantization.
-    if(cross(b-a,snappedCentre-a)[axis]*area[axis]<=0.){oriented=false;}}
-  if(!oriented){return false;}
+    if(cross(b-a,snappedCentre-a)[axis]*area[axis]<=0.){oriented=false;}
+    // Closure alone cannot justify long triangles across curved water. Bound
+    // interior error in finest cells; failed groups follow the existing
+    // dyadic subdivision path while planar groups keep their large fans.
+    let midpoint=adaptiveFieldSample(.5*(a+snappedCentre));
+    let interior=adaptiveFieldSample((a+b+snappedCentre)/3.);
+    if(abs(midpoint.x)>.125*max(length(midpoint.yzw),1e-8)
+      ||abs(interior.x)>.125*max(length(interior.yzw),1e-8)){accurate=false;}
+  }
+  if(!oriented||!accurate){return false;}
   for(var i=0u;i<count;i+=1u){emitAdaptiveTriangle(points[i],points[(i+1u)%count],centre,axis,positive[axis]);}
   return true;
 }
