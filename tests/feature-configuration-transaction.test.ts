@@ -28,3 +28,26 @@ test("controller rejects incompatible variants before announcing GPU work", asyn
   assert.equal(defaultSession.method.getState(), methodBefore);
   assert.equal(defaultSession.diagnostics.getState().gpuStatus, statusBefore);
 });
+
+test("restoring an explicit default removes the override without resetting the active timeline", async () => {
+  const { simulation } = await import("../lib/core/simulation/controller");
+  const { defaultSession: session } = await import("../lib/core/session/session");
+  const savedMethod = session.method.getState();
+  const savedRuntime = session.runtime.getState();
+  const savedDiagnostics = session.diagnostics.getState();
+  try {
+    session.method.setState({ methodId: "adaptive-mass", overrides: { "adaptive-mass": { pressureJournal: "off" } } });
+    session.runtime.setState({ simulationTime: 2, topologyFrozen: true });
+    simulation.resetMethodParam("adaptive-mass", "pressureJournal");
+    assert.equal(session.method.getState().overrides["adaptive-mass"]?.pressureJournal, undefined);
+    assert.equal(session.runtime.getState().simulationTime, 2);
+    assert.equal(session.runtime.getState().topologyFrozen, true);
+    assert.equal(session.diagnostics.getState().gpuStatus, savedDiagnostics.gpuStatus);
+    simulation.setMethodParam("adaptive-mass", "pressureJournal", "off");
+    assert.equal(session.runtime.getState().simulationTime, 2);
+  } finally {
+    session.method.setState(savedMethod, true);
+    session.runtime.setState(savedRuntime, true);
+    session.diagnostics.setState(savedDiagnostics, true);
+  }
+});

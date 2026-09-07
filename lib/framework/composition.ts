@@ -5,14 +5,8 @@ import { portsMatch, type PublicationPort, type PortRequirement } from "./ports"
 export type UpdateImpact = "live" | "rebuild" | "reset";
 export interface FeatureControl extends ControlMetadata {
   readonly id: string;
-  readonly label: string;
   readonly kind: "number" | "choice" | "toggle" | "action" | "readout";
   readonly setting?: string;
-  readonly unit?: string;
-  readonly hint?: string;
-  readonly min?: number;
-  readonly max?: number;
-  readonly step?: number;
   readonly options?: readonly { readonly value: string; readonly label: string; readonly hint?: string }[];
   readonly update?: UpdateImpact;
 }

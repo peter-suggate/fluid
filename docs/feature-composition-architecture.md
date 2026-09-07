@@ -69,3 +69,7 @@ Dawn acceptance is **not green**. Both the worktree and source checkout fail D4 
 See `feature-composition-validation.json` for receipts and inherited failing test names, and `feature-composition-shader-equivalence.json` for shader identity evidence. See `lib/methods/VARIATION_POINTS.md` for supported method dimensions and the boundary between algorithm metadata and domain-owned solver implementations.
 
 The worktree is reviewable, but these results are not a clean merge/acceptance certification. No commit, merge or deployment was performed.
+
+## Follow-up on main
+
+Shared persistence, control metadata and lifecycle integration, plus pressure inspection ownership, are described in [feature-cleanup-followup.md](feature-cleanup-followup.md). That record supersedes the initial worktree status for these areas.
