@@ -116,9 +116,22 @@ binary16/float32 precision budget. The subsequent first mixed partition failed
 the fixture's native-width assertion: forcing width 1 directly beside width 4
 has no solution under the production 2:1 face-grading contract. The fixture now
 requests width 1 beside width 2, and a CPU counterexample verifies the original
-pair is rejected and the replacement is admissible. Global widths 4, 2 and 1,
-the cycle count and all field/integral thresholds are unchanged. The complete
-paused/resumed partition test has not yet passed after that fixture correction.
+pair is rejected and the replacement is admissible. Global widths 4, 2 and 1
+and the cycle count are unchanged. In the subsequent exclusive run
+`/tmp/fluid-retained-ladder-clipped-gpu-5.log`, all four fixtures passed their
+analytic reset and twelve paused edits. Flat and quadratic height also passed
+physical evolution and the four resumed partition changes. Sphere/pool and
+sharp box failed the first physical step's retained-integral guard, each by
+exactly one CM12 amount quantum (`1/65536`). These are still failed lanes.
+The paused native-integral threshold has since been tightened from `2e-5` to
+`2e-6`, matching the production guard so one whole quantum cannot hide in the
+paused acceptance receipt.
+
+The clipped-domain transfer lane in that same run passed with zero mass error,
+eight leaves and final resolution eight. The retained hard support now uses
+the admitted `origin + dimensions * f32(cellWidth)` lattice endpoint. This
+removes an artificial sliver caused by independently rounding the authored
+domain endpoint; authored primitive geometry is unchanged.
 
 The sharp-box L-infinity field can change its active face between sample
 centers, so a linear sampled crossing near an edge need not be at the exact
@@ -153,9 +166,28 @@ An isolated CPU audit of 456,864 vertices made from four copies of a saved
 half-scene GPU mesh took 3.60 s: heap use was 9.78 MB before, 192.69 MB after
 the audit and 10.54 MB after collection. Maximum RSS was 315 MiB. This shows
 the mesh oracle's large temporary maps release in that reproduction; it does
-not identify the production out-of-memory cause. The crash occurred after
-step-3 mesh capture completed, during subsequent simulation/topology work or
-the next diagnostic readback. Production topology preparation is under review.
+not identify the production out-of-memory cause by itself.
+
+The follow-up advance-only reproduction
+`tools/probe-sparse-cm12-full-pool-advance.ts` also exhausted the default heap,
+without any mesh capture or oracle. Its generation phase probe isolated the
+dominant allocation: `packResidentTopologyTemplates` retained roughly
+2.48–2.67 GB of JavaScript cell, row and term objects per catalog build. Source
+overlap geometry accounted for another roughly 69–73 MB. The process completed
+steps 1, 2 and 3 in 33.19, 40.39 and 75.82 seconds, then exhausted memory during
+the fourth catalog build. The saved destination contains 1,836 mutable leaves,
+1,074,060 catalog cells and 3,457,000 rows. These are failing performance
+measurements, not acceptable frame timings.
+
+A separate GPU implementation is replacing repeated native records with
+interned relative operators and compact placement recipes. The device expands
+cell, row and term planes from those recipes. The first CPU word-exact stage
+completed the previously failing catalog under the default heap, using 4,553
+row archetypes and 7,344 cell ranges, but still took 66.14 seconds; this is not
+the finished performance result. Synchronous CPU certification consumers still
+need a typed numeric shadow. GPU word equivalence, integrated generation
+transfer and the unchanged canonical timing gates remain required before this
+replacement is accepted. Increasing the Node heap is not the proposed remedy.
 
 The generic resumed partition ladder, broader mesh regressions, browser visual
 acceptance and canonical `npm run test:dawn:sparse-cm12` suite remain required
