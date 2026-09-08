@@ -633,7 +633,8 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
    * pipeline rebuild, and an A/B over the threshold has to be interleavable.
    *
    * x: bitcast f32 screen-space threshold at the contract's reference height;
-   * y: `SVO_LOD_MODE_*`; z: fixed level; w: unused.
+   * y: `SVO_LOD_MODE_*`; z: fixed level; w: filtered voxel-mesh detail
+   * threshold in reference pixels, zero for the exact boundary mesh.
    *
    * `w` used to carry the surface-reconstruction arm. There is one arm now — the
    * normal is baked into the voxel — so nothing selects between them.
@@ -4692,7 +4693,7 @@ export class SparseVoxelDrySceneRenderer {
     // deep the primary descends and nothing else. It adds no pass, moves no
     // march shape, and lighting never reads it — so a slider drag must cost one
     // 16-byte write, not a world-GI rebuild and a discarded primary.
-    const lodKeys = ["lodMode", "lodScreenSpacePixels", "lodFixedLevel"] as const;
+    const lodKeys = ["lodMode", "lodScreenSpacePixels", "lodFixedLevel", "surfaceMeshLodPixels"] as const;
     const lodOnly = (Object.keys(normalized) as (keyof SvoRenderTuning)[])
       .every((key) => normalized[key] === this.renderTuning[key] || (lodKeys as readonly string[]).includes(key));
     if (lodOnly) {
@@ -4906,7 +4907,9 @@ export class SparseVoxelDrySceneRenderer {
     // it survives the round trip by accident; `fixed-level` is 1 and does not, so
     // `dryLodMode()` never returns it and `dryLodFixedLevel()` is always 0. The
     // panel's FIXED button is consequently a no-op today.
-    floats[offset + 3] = 0;
+    // The mesh threshold shares the lane block so the Frame panel's toggle
+    // takes the same 16-byte write and never invalidates a lighting cache.
+    floats[offset + 3] = this.renderTuning.surfaceMeshLodPixels;
   }
 
   /**

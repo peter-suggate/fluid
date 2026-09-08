@@ -189,6 +189,7 @@ import { VOXEL_MATERIAL_IDS } from "../lib/core/voxel-scene";
 import { resolveSvoPrimaryTraversal, type SvoConeTracingMode } from "../lib/svo/pipeline/svo-render-options";
 import {
   DEFAULT_SVO_RENDER_TUNING, SVO_LOD_FIXED_LEVEL_MAXIMUM, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
+  SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM,
   SVO_RENDER_QUALITY_PRESETS,
   svoSceneryDetailCellSize_m,
   type SvoLodMode,
@@ -1036,6 +1037,11 @@ if (lodMode !== "screen-space" && lodMode !== "fixed-level") {
 }
 const lodPixels = Number(process.env.FLUID_SVO_LOD_PIXELS ?? baseTuning.lodScreenSpacePixels);
 const lodLevel = Number(process.env.FLUID_SVO_LOD_LEVEL ?? baseTuning.lodFixedLevel);
+// Filtered detail for the rasterized voxel mesh (0 is the exact boundary mesh).
+const meshLodPixels = Number(process.env.FLUID_SVO_MESH_LOD_PIXELS ?? baseTuning.surfaceMeshLodPixels);
+if (!Number.isFinite(meshLodPixels) || meshLodPixels < 0 || meshLodPixels > SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM) {
+  throw new RangeError(`FLUID_SVO_MESH_LOD_PIXELS must lie in [0, ${SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM}], got ${meshLodPixels}`);
+}
 if (!Number.isFinite(lodPixels) || lodPixels < 0 || lodPixels > SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM) {
   throw new RangeError(`FLUID_SVO_LOD_PIXELS must lie in [0, ${SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM}], got ${lodPixels}`);
 }
@@ -1079,7 +1085,7 @@ const coneNormalEscapeCells = Number(process.env.FLUID_SVO_CONE_ESCAPE_CELLS
 log(`Secondary escape: shadow bias ${shadowBiasCells} cells, cone normal escape ${coneNormalEscapeCells} cells`);
 renderer.setRenderTuning({
   ...baseTuning, coneLightingScale: coneScale,
-  lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel,
+  lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel, surfaceMeshLodPixels: meshLodPixels,
   shadowBiasCells, coneNormalEscapeCells, visibilityWorkItems, visibilityLeafVisits,
 });
 // Which secondary term is on. Both default on, exactly as production; they are
@@ -1167,7 +1173,7 @@ if (pairArm !== "none") {
   pairRenderer.setRigidBodyCount(bodies.count);
   pairRenderer.setRenderTuning({
     ...baseTuning, coneLightingScale: coneScale,
-    lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel,
+    lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel, surfaceMeshLodPixels: meshLodPixels,
     shadowBiasCells, coneNormalEscapeCells, visibilityWorkItems, visibilityLeafVisits,
   });
   pairRenderer.setLightingOptions({

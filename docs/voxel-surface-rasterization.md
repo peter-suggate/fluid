@@ -142,3 +142,50 @@ preceding observation was approximately 9 ms for mesh draw. This is a live-panel
 observation, not an isolated paired benchmark or an image-difference proof.
 Mesh update remained separately variable (1.81–4.19 ms in those observations).
 Both scale-1 and scale-0.5 shader variants pass offline Naga validation.
+
+## Filtered detail (2026-09-08)
+
+The Frame panel's **Frame surface options** strip, beside **Smooth surface**, carries a **Filtered detail**
+toggle (URL `svoMeshLodPixels`, `FLUID_SVO_MESH_LOD_PIXELS` in the Dawn smoke;
+`SvoRenderTuning.surfaceMeshLodPixels`, zero when off). It answers the far
+garden's moiré and speckle: at distance many voxel quads fall inside one pixel,
+and each carries one of six axis-aligned face normals, so a curved bowl becomes
+a three-shade pattern sampled once per pixel. Coarsening alone cannot fix that,
+which is why the ray path's proxy LOD was turned back to zero; this toggle
+changes both the geometry level and the normal.
+
+**Extraction** now emits every level of every brick into the same quad arena:
+level 0 is the exact voxel boundary as before, and level k bounds cells of
+2^k resident voxels, derived from the brick's own voxels in one invocation per
+level. A coarse cell is solid when any voxel in it is, so far detail dilates
+rather than disappears; its identity carries the first solid material and the
+normalised mean of the solid voxels' baked normals in the high half. Inside a
+brick both sides of a coarse face use the same dilated cells. Across a brick
+boundary a coarse face hides only when the neighbour's finest voxels cover it
+completely (`meshNeighbourCovered`), so a neighbour drawn at a finer level can
+never open a gap and a partial neighbour leaves the face to the depth test.
+Quads merge on material alone; a level-0 quad's normal half is left absent.
+The `face` word packs face, level and brick depth. Jobs per brick are
+`6 * brickSize + log2(brickSize)`; the arena requirement grows by the coarse
+levels' quads (roughly a third for surface bricks).
+
+**Selection** happens in the existing per-frame cull pass (`meshQuadSelected`):
+the brick's enclosing sphere is projected as the traversal contract projects a
+node, and the coarsest level whose cell still falls under the threshold is the
+one level of that brick that survives. With culling compiled out, the vertex
+stage collapses unselected levels to zero-area strips. The threshold is a
+runtime uniform in the `dry.lod.w` lane, written through the same 16-byte
+lod-only path as the ray LOD slider, so toggling never rebuilds a pipeline, the
+mesh, or a lighting cache. Zero selects level 0 everywhere and shades face
+normals, the shipped image.
+
+**Shading** with the toggle on uses baked normals without moving the surface:
+a coarse quad shades its cells' mean normal; an exact quad's fragment walks the
+tree once to the voxel just behind its face and reads that voxel's baked normal.
+A baked normal facing away from the quad's face keeps the face normal. Depth is
+still the quad, so the smooth-surface tangent-plane path remains ray-only.
+
+Validation so far is offline: scale-1, scale-0.5 and no-cull shader variants
+pass Naga, and `tests/svo-surface-mesh-detail.test.ts` covers the tuning
+bounds, the URL round trip, and the shader's level machinery. No Dawn capture
+or in-app measurement of the far camera has been taken.

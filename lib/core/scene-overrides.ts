@@ -356,6 +356,9 @@ export function sceneOverrideClearPlan(
       case "svoLodPixels":
         svoRenderTuning.lodScreenSpacePixels = initialUI.svoRenderTuning.lodScreenSpacePixels;
         break;
+      case "svoMeshLodPixels":
+        svoRenderTuning.surfaceMeshLodPixels = initialUI.svoRenderTuning.surfaceMeshLodPixels;
+        break;
       case "method": break;
       case "quality": break;
       default:

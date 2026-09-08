@@ -158,6 +158,16 @@ export type SvoLodMode = "screen-space" | "fixed-level";
  */
 export const SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM = 64;
 
+/**
+ * Widest useful filtered-detail threshold for the rasterized voxel mesh.
+ *
+ * A brick's coarsest level is a single cell, so past a few pixels the slider
+ * only decides how large a box the far garden dissolves into.
+ */
+export const SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM = 8;
+/** Threshold the Frame panel's toggle engages: one reference pixel per cell. */
+export const SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT = 1;
+
 /** Deepest addressable octree level, matching the Morton key's 21-bit budget. */
 export const SVO_LOD_FIXED_LEVEL_MAXIMUM = 21;
 
@@ -240,6 +250,18 @@ export interface SvoRenderTuning {
   readonly lodScreenSpacePixels: number;
   /** Level descent stops at under `fixed-level`. Ignored by `screen-space`. */
   readonly lodFixedLevel: number;
+  /**
+   * Filtered detail for the rasterized voxel mesh: the projected size, in
+   * reference pixels, under which a brick's cells are drawn from a coarser
+   * level of its own voxels and shaded with baked rather than face normals.
+   *
+   * Zero is the exact voxel boundary with six-axis face normals, the image
+   * the mesh path shipped with. The threshold follows the same angular
+   * contract as `lodScreenSpacePixels`, and a runtime uniform rather than a
+   * shader constant so the Frame panel's toggle never rebuilds a pipeline or
+   * the cached mesh: every level is extracted once and the cull pass picks.
+   */
+  readonly surfaceMeshLodPixels: number;
   readonly primaryLeafVisits: number;
   readonly coneStepBudget: number;
   readonly maximumShadedLights: number;
@@ -348,6 +370,8 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   // as close to a no-op as the mode allows. A mode switch that changes the
   // image on its own would make the debugging tool the thing under suspicion.
   lodFixedLevel: SVO_LOD_FIXED_LEVEL_MAXIMUM,
+  // Off: the shipped mesh image is the exact voxel boundary.
+  surfaceMeshLodPixels: 0,
   primaryLeafVisits: 48,
   coneStepBudget: 48,
   maximumShadedLights: 8,
@@ -542,6 +566,11 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
       value.lodFixedLevel ?? DEFAULT_SVO_RENDER_TUNING.lodFixedLevel,
       0,
       SVO_LOD_FIXED_LEVEL_MAXIMUM,
+    ),
+    surfaceMeshLodPixels: bounded(
+      value.surfaceMeshLodPixels ?? DEFAULT_SVO_RENDER_TUNING.surfaceMeshLodPixels,
+      0,
+      SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM,
     ),
     primaryLeafVisits: integer(value.primaryLeafVisits, 1, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT),
     coneStepBudget: integer(value.coneStepBudget, 1, 48),

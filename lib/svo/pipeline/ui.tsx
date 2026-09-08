@@ -8,6 +8,7 @@ import { renderGiCompositionControls,renderReducedShadeControls } from "../featu
 
 import { useEffect,useMemo,useState,type ReactNode } from "react";
 import { PipeToggle } from "../../../components/PipeControls";
+import { SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT } from "./svo-render-tuning";
 import {
 PipelineGraph,
 formatPipelineDuration,
@@ -448,6 +449,9 @@ export function RenderPipelineOverlay() {
       <PipeToggle label="Smooth surface" checked={smoothSurfaceEnabled}
         onChange={(enabled) => patchScene({ surfaceStyle: enabled ? "smooth" : "voxel-flat" })}
         hint="Reconstruct a sub-voxel tangent surface from each cell's coverage and baked normal, changing both surface depth and orientation. Off draws the entered axis-aligned voxel face." />
+      {resolvedPrimary === "mesh" && <PipeToggle label="Filtered detail" checked={tuning.surfaceMeshLodPixels > 0}
+        onChange={(enabled) => updateTuning("surfaceMeshLodPixels", enabled ? SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT : 0)}
+        hint="Draw each brick from the coarsest of its cached levels whose cells still project under the threshold, and shade baked voxel normals instead of six-axis faces. Off is the exact voxel boundary. Runtime only: no rebuild of the mesh or a pipeline. The threshold sits on the Primary rasterization row." />}
     </div>
 
     {svoPrimaryTraversal === "mesh" && smoothSurfaceEnabled && <p className="render-inline-status">

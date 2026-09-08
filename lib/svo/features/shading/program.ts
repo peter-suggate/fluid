@@ -3756,7 +3756,8 @@ struct DryParams {
   structureOffsets:vec4u,
   // Optional derived traversal offsets; zero for canonical and compact modes.
   derivedTraversal:vec4u,
-  // x: screen-space threshold in reference pixels; y: mode; z: fixed level.
+  // x: screen-space threshold in reference pixels; y: mode; z: fixed level;
+  // w: filtered voxel-mesh detail threshold in reference pixels (zero: exact).
   lod:vec4f,
   // Banded lane bases inside the payload arena: occupancy, record mask, header, blob.
   payloadLanes:vec4u,

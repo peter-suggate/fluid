@@ -5,7 +5,7 @@ import { formatPipelineDuration } from "../../../../components/PipelineGraph";
 import { WorkProgress } from "../../../../components/WorkProgress";
 import type { SvoFeatureControlContext } from "../../pipeline/control-context";
 import { SURFACE_MESH_TIMING_STAGES } from "../../pipeline/render-pipeline-graph";
-import { SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT } from "../../pipeline/svo-render-tuning";
+import { SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT, SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT, SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM } from "../../pipeline/svo-render-tuning";
 import { surfaceMeshProgress } from "./svo-surface-mesh";
 
 export function renderPrimaryTraversalControls({ resolvedPrimary, partitioned, disabledStages, durations, effectiveRendererStatus, smoothSurfaceEnabled, svoMaximumTraversalDepth, setSvoMaximumTraversalDepth, svoMaximumNodeVisits, setSvoMaximumNodeVisits, tuning, updateTuning, modified, resetTuning }: Pick<SvoFeatureControlContext, "resolvedPrimary" | "partitioned" | "disabledStages" | "durations" | "effectiveRendererStatus" | "smoothSurfaceEnabled" | "svoMaximumTraversalDepth" | "setSvoMaximumTraversalDepth" | "svoMaximumNodeVisits" | "setSvoMaximumNodeVisits" | "tuning" | "updateTuning" | "modified" | "resetTuning">) {
@@ -17,6 +17,13 @@ export function renderPrimaryTraversalControls({ resolvedPrimary, partitioned, d
           <span>{label}</span><code>{duration === undefined ? "—" : formatPipelineDuration(duration)}</code>
         </div>;
       })}
+      {/* The Filtered detail switch itself sits in the Frame surface options strip beside Smooth surface. */}
+      {tuning.surfaceMeshLodPixels > 0 && <PipeRange label="Detail threshold" unit="px" value={tuning.surfaceMeshLodPixels}
+        min={0.25} max={SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM} step={0.25} digits={2}
+        onChange={(value) => updateTuning("surfaceMeshLodPixels", value)}
+        modified={tuning.surfaceMeshLodPixels !== SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT}
+        onReset={() => updateTuning("surfaceMeshLodPixels", SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT)}
+        hint="Projected cell size, in pixels at the reference viewport height, under which a coarser level is drawn." />}
       {effectiveRendererStatus.surfaceMesh?.allocatedBytes !== undefined && <>
         <div>Required quads: {effectiveRendererStatus.surfaceMesh.requirementComplete === false ? "≥ " : ""}{effectiveRendererStatus.surfaceMesh.requiredQuads?.toLocaleString() ?? "—"}</div>
         <div>Capacity: {effectiveRendererStatus.surfaceMesh.capacityQuads?.toLocaleString() ?? "—"} quads</div>
