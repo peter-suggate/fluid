@@ -9,6 +9,8 @@ import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
 import { getMethod, interactiveSimulationMethods } from "../lib/core/method-registry";
 import { simulation } from "../lib/core/simulation/controller";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
+import { isEditableOak } from "../lib/core/oak-tree-controls";
+import { findSceneryNode } from "../lib/core/scenery-edit";
 import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
 import { EntityDeleteRow, EntityMoreRow, EntityOptionRows } from "./EntityOptions";
 import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
@@ -286,7 +288,7 @@ export function EntityToolstrip({
   const sceneryId = selection.kind === "scenery" ? sceneryIdFromSelection(selection.id) : undefined;
   const vesselName = selection.kind === "vessel-rim"
     ? vesselNameFromSelection(selection.id) : undefined;
-  const canopyId = sceneryId !== undefined && sceneCanopyPads(scene, sceneryId).length > 0
+  const canopyId = sceneryId !== undefined && !isEditableOak(findSceneryNode(scene, sceneryId)) && sceneCanopyPads(scene, sceneryId).length > 0
     ? sceneryId : undefined;
   // Gated on the node being a capped-boulder generator, so the beds and the
   // path — which stay single entities on purpose — never grow stone dials.

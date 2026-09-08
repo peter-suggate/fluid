@@ -42,7 +42,7 @@ import { LOCKSTEP_IN_FLIGHT_DEPTH, PaneClockHost, PRIMARY_PANE_ID, type PaneCloc
 import { applyHostRunState, hostResetPlan, paneResetPlan } from "./pane-transport";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
 import { planSceneRuntime } from "../scene-runtime";
-import { addSceneryNode, createSceneryNodeAt, scenerySelectionId } from "../editor-scenery";
+import { addSceneryNode, createSceneryNodeAt, scenerySelectionId, sceneryIdFromSelection } from "../editor-scenery";
 import { findSceneryNode, withoutSceneryNode } from "../scenery-edit";
 import { scaleScene as scaleSceneBy, sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "../scene-scale";
 import { sceneLatticeDimensions } from "../scene-lattice";
@@ -1254,8 +1254,15 @@ class SimulationController {
     const next = cloneScene(entry.scene);
     const voxelOnly = canonicalScene({ ...current, solidVoxels: [] })
       === canonicalScene({ ...next, solidVoxels: [] });
-    if (voxelOnly && this.session(paneId).method.getState().methodId === "adaptive-mass") {
+    const sceneryOnly = canonicalScene({ ...current, scenery: undefined })
+      === canonicalScene({ ...next, scenery: undefined });
+    if (sceneryOnly || (voxelOnly && this.session(paneId).method.getState().methodId === "adaptive-mass")) {
       this.session(paneId).scene.getState().setScene(next, entry.presetId);
+      const ui = this.session(paneId).ui.getState();
+      if (ui.selection?.kind === "scenery") {
+        const id = sceneryIdFromSelection(ui.selection.id);
+        if (id && !findSceneryNode(next, id)) ui.select(undefined);
+      }
     } else this.reset(next, entry.presetId, paneId);
     this.session(paneId).runtime.getState().setNotice(entry.label ? `${verb} ${entry.label}` : `${verb} last edit`);
   }

@@ -8,6 +8,7 @@ import type { SceneryGeneratorParamsByKind } from "./scenery-generators";
 // carrying one.
 import type { SvoFieldProgram } from "../svo/features/scene-publication/svo-field-program";
 import type { PondVesselSpec } from "./voxel-scenery/pond-vessel";
+import { oakParameterErrors, type OakV2Recipe } from "./voxel-scenery/oak-v2-parameters";
 
 /**
  * The declarative description of everything visible in a scene that is not
@@ -427,6 +428,8 @@ export interface SceneryFieldProgramNode extends SceneryNodeBase {
 export interface SceneryGroupNode extends SceneryNodeBase {
   readonly kind: "group";
   readonly children: readonly SceneryNode[];
+  /** Saved growth settings. Children remain authoritative until explicitly regenerated. */
+  readonly oak?: OakV2Recipe;
 }
 
 /** The two-scale density field an active foliage pad publishes. */
@@ -762,6 +765,19 @@ export function validateSceneryGraph(graph: SceneryGraph): string[] {
     if (!node.id?.trim()) errors.push("Every scenery node needs a non-empty id");
     else if (ids.has(node.id)) errors.push(`Duplicate scenery node id ${node.id}`);
     ids.add(node.id);
+    if (node.kind === "group" && node.oak !== undefined) {
+      if (node.oak?.version !== 1) errors.push(`Scenery ${node.id} needs oak recipe version 1`);
+      errors.push(...oakParameterErrors(node.oak?.parameters).map(error => `${node.id}: ${error}`));
+      for (const material of [node.oak?.bark, node.oak?.foliage]) {
+        if (!material || typeof material !== "object"
+          || (!("palette" in material) && (!("colorLinear" in material) || !Array.isArray(material.colorLinear)
+            || material.colorLinear.length !== 3 || !material.colorLinear.every(Number.isFinite)))) {
+          errors.push(`Scenery ${node.id} needs oak bark and foliage materials`);
+        } else if ("palette" in material && graph.palettes[material.palette] === undefined) {
+          errors.push(`Scenery ${node.id} oak recipe names unknown palette ${material.palette}`);
+        }
+      }
+    }
     if (isSceneryShellNode(node)) shells += 1;
     if (node.kind === "room-shell" && node.halfSize
       && ![node.halfSize.x, node.halfSize.y, node.halfSize.z].every((value) => Number.isFinite(value) && value > 0)) {

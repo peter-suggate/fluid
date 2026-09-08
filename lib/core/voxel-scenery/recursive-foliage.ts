@@ -100,6 +100,7 @@ export function refineFoliageShape(node: SceneryRecursiveShapeNode): SceneryRecu
       kind: "recursive-shape",
       family: "foliage-pad",
       id: `${node.id}/${suffix}`,
+      tags: node.tags,
       seed: hash32(node.seed ^ Math.imul(index + 1, 0x45d9f3b)),
       place: { units: "metres", position: { x, y, z } },
       form: childForm(node.form, scale, node.split.flattening, Math.abs(jitter)),

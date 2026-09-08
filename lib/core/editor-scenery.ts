@@ -1,3 +1,5 @@
+import { oakTreeControlGroups, OAK_MATERIALS } from "./oak-tree-controls";
+import { planOakV2 } from "./voxel-scenery/oak-v2";
 import { add, sub } from "./math";
 import {
   boxCenter,
@@ -211,6 +213,7 @@ function sceneryEntityFor(
         apply: (value) => withSceneryPlacement(scene, node.id, { scale: Math.max(0.01, value) }),
       },
     ],
+    groups: oakTreeControlGroups(scene, node.id),
     remove: () => withoutSceneryNode(scene, node.id),
   };
 }
@@ -229,11 +232,16 @@ function entityForNode(context: EditorEntityContext, node: SceneryNode): EditorE
  */
 export function createSceneryNodeAt(
   scene: SceneDescription,
-  kind: "box" | "cylinder" | "ellipsoid",
+  kind: SceneryPropKind,
   point_m: Vec3,
   normal: Vec3,
 ): SceneryNode {
   const span = Math.min(scene.container.width_m, scene.container.depth_m);
+  if (kind === "oak-v2") {
+    const node = planOakV2({ key: nextSceneryNodeId(scene, "oak"), seed: 4258,
+      scale_m: Math.max(.1, Math.min(8, span * .65)), ...OAK_MATERIALS[0] }).node;
+    return { ...node, place: { units: "metres", position: { ...point_m } } };
+  }
   const extent = Math.max(SCENERY_MINIMUM_HALF_SIZE_M, 0.07 * span);
   const lift = normal.y > 0.1 ? { x: 0, y: 1, z: 0 } : normal;
   const height = kind === "cylinder" ? extent : extent;
@@ -267,6 +275,7 @@ export function sceneryPlacementPreview(
   point_m: Vec3,
   normal: Vec3,
 ): { centre_m: Vec3; radius_m: number } {
+  if (kind === "oak-v2") return { centre_m: point_m, radius_m: Math.max(.1, Math.min(8, Math.min(scene.container.width_m, scene.container.depth_m) * .65)) * .65 };
   const node = createSceneryNodeAt(scene, kind, point_m, normal);
   const centre_m = node.place?.position ?? point_m;
   if (node.kind === "box") {
@@ -362,6 +371,7 @@ const PROP_ACTION_SHAPES: ReadonlyArray<{
   { kind: "box", label: "Box", icon: "box" },
   { kind: "cylinder", label: "Post", icon: "cylinder" },
   { kind: "ellipsoid", label: "Blob", icon: "ellipsoid" },
+  { kind: "oak-v2", label: "Fractal oak", icon: "prop" },
 ]);
 
 export const sceneryEntity: EditorEntityDefinition = {

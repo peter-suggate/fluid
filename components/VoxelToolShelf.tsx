@@ -6,6 +6,7 @@ import { toolValues } from "../lib/core/voxel-editor/plugin";
 import { useSession } from "../lib/core/session/session-context";
 import { simulation } from "../lib/core/simulation/controller";
 import { serializeScene } from "../lib/core/model";
+import { OakTreeEditor } from "./OakTreeEditor";
 
 /** All tool-specific UI comes from the same plugin that implements its stroke. */
 export function VoxelToolShelf() {
@@ -23,6 +24,7 @@ export function VoxelToolShelf() {
   const allUnavailable = voxelTools.tools.every((tool) => tool.unavailable({ scene, methodId: method }));
   const values = plugin ? toolValues(plugin, stored[plugin.id]) : {};
   const [open, setOpen] = useState(false);
+  const [subject, setSubject] = useState<"voxels" | "trees">("voxels");
   const [name, setName] = useState("Voxel scene");
   const exportScene = () => {
     const url = URL.createObjectURL(new Blob([serializeScene(session.scene.getState().scene)], { type: "application/json" }));
@@ -39,6 +41,13 @@ export function VoxelToolShelf() {
         <button type="button" onClick={() => { session.ui.getState().setVoxelTool(undefined); simulation.newScene(undefined, session.id); }}>New scene</button>
         <button type="button" onClick={() => { session.ui.getState().setVoxelTool(undefined); session.ui.getState().setSceneSelectorOpen(true); }}>Open scene</button>
       </div>
+      <div className="voxel-tool-buttons" aria-label="Editing subject">
+        <button type="button" aria-pressed={subject === "voxels"} onClick={() => setSubject("voxels")}>Voxel tools</button>
+        <button type="button" aria-pressed={subject === "trees"} onClick={() => {
+          setSubject("trees"); session.ui.getState().setVoxelTool(undefined);
+        }}>Trees</button>
+      </div>
+      {subject === "trees" ? <OakTreeEditor /> : <>
       {unavailableReason ? <p role="status">{unavailableReason}</p> : allUnavailable &&
         <p role="status">Voxel tools are unavailable in this scene. Hover over a tool for details.</p>}
       {[...new Set(voxelTools.tools.map((tool) => tool.ui.group))].map((group) => <fieldset key={group}>
@@ -61,6 +70,7 @@ export function VoxelToolShelf() {
               }} />}
         </label>)}
         <p className="voxel-tool-help">Shift-drag to navigate · Escape or Ctrl/⌘ Z cancels the current stroke. Water keeps moving.</p>
+      </>}
       </>}
       <div className="voxel-tool-buttons">
         <button type="button" disabled={!canUndo} onClick={() => simulation.undo(session.id)}>Undo</button>

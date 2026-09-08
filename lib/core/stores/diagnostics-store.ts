@@ -182,7 +182,10 @@ export const createDiagnosticsStore = () => create<DiagnosticsStore>((set) => ({
         patch.effectiveRendererStatus ?? state.effectiveRendererStatus,
       );
     }
-    return { ...patch, resourceReadiness };
+    // Cancellation is an activity event, not a replacement for the active
+    // runtime's readiness (which may already belong to a different owner).
+    return { ...patch, resourceReadiness,
+      ...(patch.gpuStatus?.state === "cancelled" ? { gpuStatus: state.gpuStatus } : {}) };
   }),
   pushPerformanceReport: (report, sample) => set((state) => ({
     performanceReport: report,

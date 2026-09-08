@@ -53,6 +53,17 @@ const CLUMP_PERIOD_MAX_M = 0.30;
 const DETAIL_WEIGHT_MIN = 0.08;
 const DETAIL_WEIGHT_MAX = 0.55;
 
+/** Oak v2 uses twig-sized pads. Keep its dials relative to each pad so a
+ * URL round-trip cannot replace millimetre detail with the old crown's 90 mm
+ * minimum. Legacy documents retain their original absolute dial curves. */
+function dialRange(pad: SceneryRecursiveShapeNode) {
+  return pad.tags?.includes("oak-v2")
+    ? { clumpMin: pad.form.radii_m[0] * .25, clumpMax: pad.form.radii_m[0] * 2,
+      detailMin: .35, detailMax: .8, biasFull: .06 }
+    : { clumpMin: CLUMP_PERIOD_MIN_M, clumpMax: CLUMP_PERIOD_MAX_M,
+      detailMin: DETAIL_WEIGHT_MIN, detailMax: DETAIL_WEIGHT_MAX, biasFull: INTERIOR_BIAS_FULL };
+}
+
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 const unlerp = (a: number, b: number, value: number) => clamp01((value - a) / (b - a));
@@ -60,25 +71,28 @@ const unlerp = (a: number, b: number, value: number) => clamp01((value - a) / (b
 /** The dial positions a pad's stored density reads back as. */
 export function canopyDials(pad: SceneryRecursiveShapeNode): CanopyDials {
   const density = pad.form.density;
+  const range = dialRange(pad);
   return {
     coverage: unlerp(THRESHOLD_BARE, THRESHOLD_FULL, density.threshold),
     clumpSize: clamp01(
-      Math.log(density.clusterPeriod_m / CLUMP_PERIOD_MIN_M)
-      / Math.log(CLUMP_PERIOD_MAX_M / CLUMP_PERIOD_MIN_M),
+      Math.log(density.clusterPeriod_m / range.clumpMin)
+      / Math.log(range.clumpMax / range.clumpMin),
     ),
-    breakup: unlerp(DETAIL_WEIGHT_MIN, DETAIL_WEIGHT_MAX, density.detailWeight),
+    breakup: unlerp(range.detailMin, range.detailMax, density.detailWeight),
   };
 }
 
-function densityForDials(current: FoliageDensityForm, dials: CanopyDials): FoliageDensityForm {
+function densityForDials(pad: SceneryRecursiveShapeNode, dials: CanopyDials): FoliageDensityForm {
+  const current = pad.form.density;
+  const range = dialRange(pad);
   const coverage = clamp01(dials.coverage);
-  const detailWeight = lerp(DETAIL_WEIGHT_MIN, DETAIL_WEIGHT_MAX, clamp01(dials.breakup));
+  const detailWeight = lerp(range.detailMin, range.detailMax, clamp01(dials.breakup));
   return {
     ...current,
     threshold: lerp(THRESHOLD_BARE, THRESHOLD_FULL, coverage),
-    interiorBias: lerp(0, INTERIOR_BIAS_FULL, coverage),
-    clusterPeriod_m: CLUMP_PERIOD_MIN_M
-      * (CLUMP_PERIOD_MAX_M / CLUMP_PERIOD_MIN_M) ** clamp01(dials.clumpSize),
+    interiorBias: lerp(0, range.biasFull, coverage),
+    clusterPeriod_m: range.clumpMin
+      * (range.clumpMax / range.clumpMin) ** clamp01(dials.clumpSize),
     detailWeight,
     clusterWeight: 1 - detailWeight,
   };
@@ -136,9 +150,15 @@ export function withCanopyDials(
   nodeId: string,
   dials: CanopyDials,
 ): SceneDescription {
+  // Parametric oaks have a richer saved density recipe. The legacy three-dial
+  // projection cannot encode it; applying a URL projection would silently
+  // replace leaf openness and interior fill on reload. Their growth editor
+  // is the authoring path; legacy/static canopies retain these dials.
+  const target = findSceneryNode(scene, nodeId);
+  if (target?.kind === "group" && target.oak) return scene;
   return withSceneryNode(scene, nodeId, (node) => mapCanopyPads(node, (pad) => ({
     ...pad,
-    form: { ...pad.form, density: densityForDials(pad.form.density, dials) },
+    form: { ...pad.form, density: densityForDials(pad, dials) },
   })));
 }
 
@@ -156,7 +176,7 @@ export function sceneCanopyQuery(scene: SceneDescription): string {
   const round = (value: number) => String(Math.round(value * 1000) / 1000);
   return sceneSceneryGraph(scene).nodes
     .map((node) => ({ node, pads: canopyPads(node) }))
-    .filter(({ pads }) => pads.length > 0)
+    .filter(({ node, pads }) => pads.length > 0 && !(node.kind === "group" && node.oak))
     .map(({ node, pads }) => {
       const dials = canopyDials(pads[0]!);
       return `${node.id}~${round(dials.coverage)},${round(dials.clumpSize)},${round(dials.breakup)}`;

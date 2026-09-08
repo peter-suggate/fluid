@@ -54,6 +54,8 @@ export type GPUStatus =
   | { state: "ready"; label: string; adapter: string; resource: ResourcePluginDefinition }
   | { state: "blocked"; label: string; resource: ResourcePluginDefinition }
   | { state: "manual"; label: string; resource: ResourcePluginDefinition }
+  /** Retire superseded work without stopping the device or its usable generation. */
+  | { state: "cancelled"; label: string; resource: ResourcePluginDefinition }
   | { state: "stopping"; label: string; resource: ResourcePluginDefinition }
   | { state: "unavailable"; label: string; reproduction?: GPUFailureReproduction; failure?: SimulationFailure; resource: ResourcePluginDefinition }
   | { state: "lost"; label: string; resource: ResourcePluginDefinition };

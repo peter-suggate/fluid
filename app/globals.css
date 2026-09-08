@@ -2710,3 +2710,14 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .voxel-tool-panel input { width: 84px; min-width: 0; }
 .voxel-tool-panel p { font-size: 13px; line-height: 1.45; margin: 10px 0; }
 .voxel-tool-help { opacity: .72; }
+.oak-tree-editor { border-block: 1px solid var(--line, #7775); margin: 12px 0; padding: 12px 0; }
+.oak-tree-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.oak-tree-editor select { font: inherit; max-width: 170px; border: 1px solid var(--line, #7775); border-radius: 5px; padding: 6px; color: inherit; background: var(--panel, #20252d); }
+.oak-tree-editor details { border-top: 1px solid var(--line, #7775); padding: 8px 0; }
+.oak-tree-editor summary { cursor: pointer; font-weight: 600; }
+.oak-tree-editor .oak-tree-field label { font-size: 13px; margin: 8px 0 3px; }
+.oak-tree-field label span { opacity: .65; }
+.oak-tree-inputs { display: flex; gap: 8px; align-items: center; }
+.oak-tree-inputs input[type="range"] { flex: 1; width: 80px; padding: 0; accent-color: #5b9a62; }
+.oak-tree-inputs input[type="number"] { width: 82px; padding: 5px; }
+.oak-tree-choice { margin-top: 10px; font-size: 13px; }

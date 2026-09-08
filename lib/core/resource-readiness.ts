@@ -165,6 +165,14 @@ export function reduceGPUResourceStatus(
       });
     case "manual":
       return updatePlugin(snapshot, plugin, { state: "idle", label: status.label, usable: false });
+    case "cancelled": {
+      // Cancellation retires only this owner's preparation activity. An
+      // already-accepted generation remains usable; no device failure occurred.
+      const previous = snapshot.plugins[plugin.id];
+      const usable = previous?.usable ?? false;
+      return { ...updatePlugin(snapshot, plugin, { state: usable ? "ready" : "idle", label: status.label, usable }),
+        activeLane: snapshot.activeLane };
+    }
     case "stopping":
       return updatePlugin(snapshot, plugin, { state: "preparing", label: status.label, usable: false });
     case "unavailable":

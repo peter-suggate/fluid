@@ -76,6 +76,7 @@ import {
 } from "../svo/features/scene-publication/svo-primitive-candidates";
 import { packSvoPrimitiveRecords, SVO_PRIMITIVE_RECORD_WORDS, type SvoPrimitiveDescriptor } from "../svo/contracts/svo-primitive-abi";
 import { swayedPrimitiveDescriptor, type EnvironmentProxySway } from "./scenery-sway";
+import { sceneryConstructionKey } from "./scenery-construction-key";
 import {
   buildDefaultSvoMaterialRecords,
   packSvoMaterialTable,
@@ -929,6 +930,7 @@ export class FluidLabRenderer {
   private gpuFluidPendingKey = "";
   private gpuFluidPending?: Promise<void>;
   private gpuFluidInitializationAbort?: AbortController;
+  private gpuFluidInitializationResource?: ResourcePluginDefinition;
   private gpuFluidRequestGeneration = 0;
   private adapterName = "WebGPU adapter";
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
@@ -1977,8 +1979,10 @@ export class FluidLabRenderer {
   }
 
   private solverKey(scene:SceneDescription,config:SimulationRunConfig,presentationMode:ScenePresentationMode){
-    return `${gpuSceneSolverKey(scene,config)}:presentation-${presentationMode}`;
+    return `${gpuSceneSolverKey(scene,config)}:presentation-${presentationMode}`
+      + (presentationMode === "full-scene" ? `:scenery-${sceneryConstructionKey(scene)}` : "");
   }
+  private attachedSolverDocumentKey = "";
   /** Presentation policy used to construct the attached solver/sidecar pair. */
   private attachedPresentationMode: ScenePresentationMode = "full-scene";
   /** Scalars already adopted by the live solver; empty until one is attached. */
@@ -2005,6 +2009,7 @@ export class FluidLabRenderer {
       if(this.disposed||this.gpuFluid!==solver||this.gpuFluidGeneration!==generation
         ||this.gpuFluidRequestGeneration!==requestGeneration)return;
       if(!reseeded){this.beginGPUFluidInitialization(scene,config,key,presentationMode);return;}
+      this.attachedSolverDocumentKey = gpuSceneSolverKey(scene, config);
       this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.resetGPUQueueTracking();
       if(presentationMode === "full-scene")this.attachSparsePresentationSource(
         solver,requestGeneration,performance.now(),solver.sparseVoxelSceneSource);
@@ -2274,6 +2279,13 @@ export class FluidLabRenderer {
     const rendererOnlyScene=!planSceneRuntime(scene).fluidSolver;
     const initializationResource=rendererOnlyScene?liveSvoSceneResourcePlugin:method.resource;
     this.gpuFluidInitializationAbort?.abort();
+    if (this.gpuFluidPending && this.gpuFluidInitializationResource) {
+      // The superseded generation can no longer publish progress. Retire its
+      // activity too, especially when the new scene has a different owner.
+      this.onStatus({ state: "cancelled", label: "Previous scene initialization superseded",
+        resource: this.gpuFluidInitializationResource });
+    }
+    this.gpuFluidInitializationResource = initializationResource;
     /**
      * The build this one replaces, so this one can wait for it to let go.
      *
@@ -2296,6 +2308,11 @@ export class FluidLabRenderer {
     const previous=this.gpuFluid;
     const previousSidecar=this.svoSceneSidecar;
     const drainPreviousForReset=this.timelineResetPending&&Boolean(previous);
+    // Sparse CM12's display world is separate from its fluid authority. A
+    // scenery-only rebuild replaces that sidecar while retaining the solver.
+    const retainSimulation = !rendererOnlyScene && Boolean(previous && previousSidecar)
+      && !drainPreviousForReset && this.attachedPresentationMode === presentationMode
+      && this.attachedSolverDocumentKey === gpuSceneSolverKey(scene, config);
     this.timelineResetPending=false;
     this.pendingLiveSvoPresentation=undefined;
     // The active solver remains attached for presentation throughout the
@@ -2334,7 +2351,8 @@ export class FluidLabRenderer {
     const create:Promise<{solver:GPUSolverInstance;sidecar?:WebGPULiveSvoScene}>=prepare().then(async ()=>{
       if(abort.signal.aborted||this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
       let solver:GPUSolverInstance;
-      if (!planSceneRuntime(scene).fluidSolver) {
+      if (retainSimulation) solver = previous!;
+      else if (!planSceneRuntime(scene).fluidSolver) {
         const refinement = config.values.svoEnvironmentBrickRefinementLevels;
         const depth = config.values.svoEnvironmentRefinementDepth;
         solver=await WebGPULiveSvoScene.create(device, scene, config.quality, report, abort.signal, {
@@ -2358,15 +2376,26 @@ export class FluidLabRenderer {
         });
         return {solver,sidecar};
       } catch(error) {
-        solver.destroy();
+        if (!retainSimulation) solver.destroy();
         throw error;
       }
     });
     this.gpuFluidPending=create.then(({solver,sidecar})=>{
-      if(this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration){solver.destroy();sidecar?.destroy();return;}
+      if(this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration){if(!retainSimulation)solver.destroy();sidecar?.destroy();return;}
+      if (retainSimulation && sidecar) {
+        this.svoSceneSidecar = sidecar;
+        this.gpuFluidKey = key;
+        this.gpuFluidPendingKey = "";
+        this.attachSparsePresentationSource(solver, generation, startedAt_ms, sidecar.sparseVoxelSceneSource);
+        this.pausedPresentationRevision += 1;
+        if (previousSidecar) this.retireGPUFluid(previousSidecar);
+        this.onStatus({ state: "ready", label: "Scenery rebuilt; fluid state retained", adapter: this.adapterName, resource: initializationResource });
+        return;
+      }
       if(requiresFencedInitialRasterPresentation(config.methodId)&&!this.sparseAuthorityReady(solver)){solver.destroy();sidecar?.destroy();throw new Error(`${method.label} solver returned before fenced sparse t=0 authority`);}
       report({phase:"attach",taskId:"solver.attach",label:"Attach warmed solver",completed:reportedCompleted,total:reportedTotal+1});
       solver.applyRuntimeValues?.(config.values);
+      this.attachedSolverDocumentKey = gpuSceneSolverKey(scene, config);
       this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.globalFineWaterAttached=false;
       const sparseWorldState=this.refreshSparseWorldState(solver);
       const fencedInitialRaster=requiresFencedInitialRasterPresentation(config.methodId);
@@ -2448,6 +2477,9 @@ export class FluidLabRenderer {
    * next submitted frame without allocation or bind-group churn.
    */
   private publishRenderScene(scene: SceneDescription, solver: GPUSolverInstance | undefined): void {
+    // A transform draft previews its handles until commit. Its baked geometry
+    // cannot be staged into the old planar topology without a replacement.
+    if (this.simulationScene && sceneryConstructionKey(this.simulationScene) !== sceneryConstructionKey(scene)) return;
     const stampedRevision = sceneRevision(scene);
     // Worker publications are retained and stamped when they arrive, so this
     // fallback is now reserved for direct/headless callers that supply an
@@ -2689,7 +2721,7 @@ export class FluidLabRenderer {
       // of rebuilding it. The attempt is fire-and-forget against a generation
       // guard; if it declines or the solver moved on, the ordinary rebuild
       // below still runs, so this can only make the path faster, never wrong.
-      if(this.gpuFluid&&this.attachedPresentationMode===presentationMode&&this.gpuFluidPendingKey!==key&&this.tryReseedGPUFluid(scene,config,key,presentationMode))return undefined;
+      if(this.gpuFluid&&this.attachedPresentationMode===presentationMode&&this.gpuFluidPendingKey!==key&&this.attachedSolverDocumentKey!==gpuSceneSolverKey(scene,config)&&this.tryReseedGPUFluid(scene,config,key,presentationMode))return undefined;
       if(this.gpuFluidPendingKey!==key)this.beginGPUFluidInitialization(scene,config,key,presentationMode);
       return undefined;
     }
