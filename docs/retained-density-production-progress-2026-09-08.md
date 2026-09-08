@@ -1,5 +1,16 @@
 # Retained density production acceptance
 
+**Current status: evolved surface acceptance fails.** The first actual quarter
+scene A/B at 0, 0.2, 0.5 and 1 second confirms stepped, noncircular pre-impact
+geometry in both the original min/max-8 arm and a verified all-fine arm. The
+coarse arm additionally develops asymmetric block-shaped fragments and a much
+weaker, asymmetric splash. These observations are from unmodified shipping
+GPU triangles, with matched offline QA shading and independent physical-plane
+sections; they are not artifacts of different app lighting. See
+`artifacts/retained-visual-ab/quarter/{mesh-comparison,section-comparison}.png`
+and the per-checkpoint receipts. Passing initial geometry and mass checks is
+not sufficient acceptance for the production cutover.
+
 This is an implementation record, not a claim that arbitrary curvature transport
 or every boundary interaction is complete. The authored plane, quadratic height,
 box and sphere sources now compile to a physical density field used by both the
@@ -122,10 +133,18 @@ and the cycle count are unchanged. In the subsequent exclusive run
 analytic reset and twelve paused edits. Flat and quadratic height also passed
 physical evolution and the four resumed partition changes. Sphere/pool and
 sharp box failed the first physical step's retained-integral guard, each by
-exactly one CM12 amount quantum (`1/65536`). These are still failed lanes.
-The paused native-integral threshold has since been tightened from `2e-5` to
+exactly one CM12 amount quantum (`1/65536`). The cause was free dynamic support
+pages whose zero descriptors aliased host leaf zero. The retained integration
+now checks allocation and page ownership before using a dynamic support.
+An extracted-production GPU counterexample verifies that poisoned free and
+retired pages are excluded while a real allocated mismatch still halts.
+
+The subsequent `/tmp/fluid-retained-integrated-ladder-rigid-1.log` passed all
+four complete reset/evolution/repartition fixtures and the moving-rigid lane:
+five tests in 153.57 seconds. The paused native-integral threshold is now
 `2e-6`, matching the production guard so one whole quantum cannot hide in the
-paused acceptance receipt.
+paused receipt. These evolution checks establish conservation and partition
+invariance, not agreement with an advected analytic shape.
 
 The clipped-domain transfer lane in that same run passed with zero mass error,
 eight leaves and final resolution eight. The retained hard support now uses
@@ -179,18 +198,29 @@ the fourth catalog build. The saved destination contains 1,836 mutable leaves,
 1,074,060 catalog cells and 3,457,000 rows. These are failing performance
 measurements, not acceptable frame timings.
 
-A separate GPU implementation is replacing repeated native records with
+A separate GPU implementation now replaces repeated native records with
 interned relative operators and compact placement recipes. The device expands
-cell, row and term planes from those recipes. The first CPU word-exact stage
-completed the previously failing catalog under the default heap, using 4,553
-row archetypes and 7,344 cell ranges, but still took 66.14 seconds; this is not
-the finished performance result. Synchronous CPU certification consumers still
-need a typed numeric shadow. GPU word equivalence, integrated generation
-transfer and the unchanged canonical timing gates remain required before this
-replacement is accepted. Increasing the Node heap is not the proposed remedy.
+cell, row and term planes from those recipes. Reusable local geometry blocks
+reduce the exact previously failing 1,836-leaf catalog to 166 reference builds,
+30,924 reference cells and 104,108 reference rows. The complete CPU preparation
+of the unchanged destination took 6.255 seconds with 403.5 MB peak JavaScript
+heap and 1.140 GB peak RSS, under the default heap. This is a substantial
+reduction, not yet an acceptable end-to-end frame-time result. Synchronous CPU
+certification consumers still need a typed numeric shadow.
 
-The generic resumed partition ladder, broader mesh regressions, browser visual
-acceptance and canonical `npm run test:dawn:sparse-cm12` suite remain required
+Twenty-four CPU/GPU expansion cases compare every native catalog word for
+both builders over full, mixed, clipped, signed, immutable-macro and accepted
+rung fixtures. The production switch is commit `e78daf19`. Generation transfer
+also uses GPU intersection and accumulation in both Node and worker paths
+(`cfde4126`), removing CPU per-cell/per-face overlap objects and the source
+topology clone. Nine independent GPU transfer cases, actual resident
+replacement, and both worker hydration fixtures passed; the worker maximum
+error was `5.97e-8`. Full-pool progression through step 30 and the unchanged
+canonical timing gates still need to pass. Increasing the Node heap is not
+the remedy.
+
+The broader mesh regressions, evolved visual acceptance and canonical
+`npm run test:dawn:sparse-cm12` suite remain required
 before declaring the implementation milestone complete. Their latest results
 must be recorded separately from the passed quarter/half geometry tests. No
 acceptance threshold or performance ceiling is to be relaxed to obtain a pass.
@@ -213,7 +243,15 @@ zero geometry is preserved to coefficient precision. As fluid enters an
 initially empty support, its new shape is represented by this conservative
 support basis, not by transporting a high-order curvature model into it.
 Conservation and a moving half-density surface therefore do not establish
-accurate long-time spherical or other curvature transport.
+accurate spherical or other curvature transport, even before impact. A direct
+counterexample translates a radius-0.1 m sphere by 0.1 m entirely within a
+0.4 m native cell: its exact native mean is unchanged, so the current update
+leaves `(a,b)=(1,0)` and the retained surface does not translate at all. Within
+each support, its normal can only follow `a * gradient(q_seed)`. An initially
+dry support remains spatially constant as it fills. Neither defect can be
+detected or repaired by matching the native zeroth moment alone. The next
+representation must physically transport spatial shape information and retain
+the existing zero-time restriction contract.
 
 The initial support arena retains a dense bounded-domain prefix followed by
 sparse growth slots; it is not the final sparse curvature representation.
