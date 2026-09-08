@@ -2,8 +2,10 @@
 import { writeFileSync } from "node:fs";
 import { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
+const startedAt = performance.now();
 const memory = (phase: string, extra?: unknown) => console.error(JSON.stringify({
-  probe: "cm12-generation-host", phase, ...process.memoryUsage(), extra,
+  probe: "cm12-generation-host", phase, elapsedMilliseconds: performance.now() - startedAt,
+  ...process.memoryUsage(), extra,
 }));
 const resident = WebGPUSparseCM12Resident as unknown as Record<string, any>;
 const prototype = resident.prototype as Record<string, any>;
