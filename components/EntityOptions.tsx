@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { formatNumber } from "./controls";
 import { simulation } from "../lib/core/simulation/controller";
 import { length } from "../lib/core/math";
@@ -13,6 +13,7 @@ import {
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
 } from "../lib/svo/pipeline/svo-render-tuning";
 import type {
+  EditorControlGroup,
   EditorChoice,
   EditorChoiceGroup,
   EditorEntity,
@@ -187,9 +188,10 @@ function ChoiceRow({ group, entityLabel }: { group: EditorChoiceGroup; entityLab
       }))}
       onChange={(value) => {
         const option = group.options.find((candidate) => candidate.id === value);
-        if (!option || option.enabled === false) return;
+        if (!option || option.enabled === false || session.ui.getState().voxelStrokePending) return;
+        const patch = option.apply();
         simulation.beginEdit(`Set ${entityLabel} ${group.label}`, session.id);
-        simulation.commitEdit(option.apply(), { reseed: true }, session.id);
+        simulation.commitEdit(patch, { reseed: true }, session.id);
       }}
     />
   </PaneRow>;
@@ -203,9 +205,10 @@ function FieldRow({ field, entityLabel }: { field: EditorField; entityLabel: str
   const [preview, setPreview] = useState<number | undefined>(undefined);
   const commit = (value: number) => {
     setPreview(undefined);
-    if (value === field.value) return;
+    if (value === field.value || session.ui.getState().voxelStrokePending) return;
+    const patch = field.apply(value);
     simulation.beginEdit(`Set ${entityLabel} ${field.label}`, session.id);
-    simulation.commitEdit(field.apply(value), { reseed: true }, session.id);
+    simulation.commitEdit(patch, { reseed: true }, session.id);
   };
   const bounded = field.min !== undefined && field.max !== undefined;
   const shown = preview ?? field.value;
@@ -432,10 +435,27 @@ export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
           />)}
       </ToolstripRow>;
     })}
+    <EditorControlGroupRows groups={groups} entityLabel={entity.label} />
+  </>;
+}
+
+/** Plugin-declared groups use the same folded rows and scrubs as the tank. */
+export function EditorControlGroupRows({ groups, entityLabel }: {
+  groups: readonly EditorControlGroup[]; entityLabel: string;
+}) {
+  const [open, setOpen] = useState<string | undefined>();
+  const sectionId = useId();
+  const { claim } = useToolstripSection(sectionId, () => setOpen(undefined));
+  const toggle = (id: string) => setOpen(current => {
+    const next = current === id ? undefined : id;
+    claim(next !== undefined);
+    return next;
+  });
+  return <>
     {groups.map((group) => <ToolstripRow
       key={group.id}
-      tag={group.label}
-      value={`${(group.choices?.length ?? 0) + (group.fields?.length ?? 0)} settings`}
+      tag={group.tag ?? group.label}
+      value={group.readout ?? `${(group.choices?.length ?? 0) + (group.fields?.length ?? 0)} settings`}
       name={group.label}
       hint={group.hint}
       active={open === group.id}
@@ -444,10 +464,10 @@ export function EntityOptionRows({ entity }: { entity: EditorEntity }) {
     >
       {open === group.id && <ToolstripPane label={group.label} onClose={() => setOpen(undefined)}>
         {group.choices?.map((choice) => (
-          <ChoiceRow key={choice.id} group={choice} entityLabel={entity.label} />
+          <ChoiceRow key={choice.id} group={choice} entityLabel={entityLabel} />
         ))}
         {group.fields?.map((field) => (
-          <FieldRow key={field.id} field={field} entityLabel={entity.label} />
+          <FieldRow key={field.id} field={field} entityLabel={entityLabel} />
         ))}
         {group.summary && <p className="toolstrip-pane-note">{group.summary}</p>}
       </ToolstripPane>}

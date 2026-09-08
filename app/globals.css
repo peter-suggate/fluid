@@ -2738,14 +2738,6 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .oak-tree-editor { border-block: 1px solid var(--line, #7775); margin: 12px 0; padding: 12px 0; }
 .oak-tree-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .oak-tree-editor select { font: inherit; max-width: 170px; border: 1px solid var(--line, #7775); border-radius: 5px; padding: 6px; color: inherit; background: var(--panel, #20252d); }
-.oak-tree-editor details { border-top: 1px solid var(--line, #7775); padding: 8px 0; }
-.oak-tree-editor summary { cursor: pointer; font-weight: 600; }
-.oak-tree-editor .oak-tree-field label { font-size: 13px; margin: 8px 0 3px; }
-.oak-tree-field label span { opacity: .65; }
-.oak-tree-inputs { display: flex; gap: 8px; align-items: center; }
-.oak-tree-inputs input[type="range"] { flex: 1; width: 80px; padding: 0; accent-color: #5b9a62; }
-.oak-tree-inputs input[type="number"] { width: 82px; padding: 5px; }
-.oak-tree-choice { margin-top: 10px; font-size: 13px; }
 
 /* Contextual scene and object disclosures keep the canvas clear until asked. */
 .contextual-scene-settings, .contextual-object-settings { pointer-events: auto; max-width: min(290px, calc(100vw - 32px)); color: var(--ink); }
@@ -2754,11 +2746,5 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .contextual-scene-settings > summary:focus-visible, .contextual-object-settings > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .contextual-scene-settings[open] > summary, .contextual-object-settings[open] > summary { color: var(--accent-strong); }
 .contextual-scene-settings-body, .contextual-object-settings-body { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px; margin-top: 5px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--overlay); }
-.contextual-object-settings-body:has(> .oak-tree-editor) { width: min(272px, calc(100vw - 48px)); max-height: min(440px, calc(100dvh - 220px)); overflow-y: auto; }
 .contextual-object-settings .oak-tree-editor { width: 100%; border: 0; margin: 0; padding: 0; }
-.contextual-object-settings .oak-tree-editor button, .contextual-object-settings .oak-tree-editor input { font: inherit; color: inherit; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); padding: 5px 7px; }
-.contextual-object-settings .oak-tree-editor button { cursor: pointer; }
-.contextual-object-settings .oak-tree-editor button:disabled { opacity: .45; cursor: default; }
-.contextual-object-settings .oak-tree-editor button[aria-pressed="true"] { color: var(--accent-strong); border-color: var(--accent-line); background: var(--accent-wash); }
-.contextual-object-settings .oak-tree-editor fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
-.contextual-object-settings .oak-tree-editor p { font-size: 12px; line-height: 1.4; }
+.oak-tree-editor { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }

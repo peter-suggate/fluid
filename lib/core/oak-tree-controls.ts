@@ -56,8 +56,21 @@ export function oakTreeControlGroups(scene: SceneDescription, id: string): reado
   if (!isEditableOak(node)) return [];
   const parameters = node.oak.parameters;
   const count = oakPrimitiveCount(parameters);
-  return OAK_CONTROL_GROUPS.map(label => ({
-    id: `oak-${label.toLowerCase()}`, label,
+  const preset = OAK_V2_PRESETS.find(preset => {
+    const candidate = { ...OAK_V2_DEFAULTS, ...preset.values };
+    return (Object.keys(candidate) as OakV2Parameter[]).every(key => ["seed", "scale_m", "showFoliage"].includes(key) || candidate[key] === parameters[key]);
+  });
+  const readouts = {
+    Specimen: preset ? { fractal: "Fractal", open: "Open", spreading: "Spreading", fine: "Fine" }[preset.id] : "Custom",
+    Crown: `${parameters.crownWidth.toFixed(2)} × ${parameters.crownHeight.toFixed(2)}`,
+    Branches: `${parameters.woodScale.toFixed(2)}×`,
+    Twigs: `${parameters.twigDepth} ${parameters.twigDepth === 1 ? "fork" : "forks"}`,
+    Foliage: parameters.showFoliage ? `${parameters.leafScale.toFixed(2)}×` : "Bare",
+  };
+  const fluidEnabled = scene.systems?.fluid !== false;
+  const depth = Math.round(Math.log2(scene.voxelDomain.finestCellSize_m / (scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m)));
+  return [...OAK_CONTROL_GROUPS.map(label => ({
+    id: `oak-${label.toLowerCase()}`, label, readout: readouts[label],
     fields: (Object.entries(OAK_V2_CONTROLS) as [OakV2Parameter, typeof OAK_V2_CONTROLS[OakV2Parameter]][])
       .filter(([key, control]) => control.group === label && key !== "showFoliage")
       .map(([key, control]) => ({ ...control, id: `oak-${key}`, value: parameters[key],
@@ -84,5 +97,16 @@ export function oakTreeControlGroups(scene: SceneDescription, id: string): reado
     summary: label === "Specimen" ? `${count.branches.toLocaleString()} branches · ${count.sprays.toLocaleString()} leaf sprays. Growth edits regenerate the tree; undo restores previous geometry. Position and colour are kept.`
       : label === "Twigs" ? "Fork generations change tree geometry. Use scene refinement to change voxel resolution."
       : label === "Foliage" ? "Small leaf sprays attach to the tips. Trees are decorative scenery and do not block water." : undefined,
-  }));
+  })), {
+    id: "oak-voxel-comparison", label: "Voxel comparison", tag: "Voxels",
+    readout: fluidEnabled ? "Water on" : `Depth ${depth}`,
+    hint: "Compare the same geometry at different voxel sizes.",
+    choices: [{ id: "oak-voxel-depth", label: "Depth", value: fluidEnabled ? "" : String(depth),
+      options: [0, 1, 2, 3].map(value => ({ id: String(value), label: String(value), enabled: !fluidEnabled,
+        hint: `${(scene.voxelDomain.finestCellSize_m * 1000 / 2 ** value).toFixed(3)} mm voxels`,
+        apply: () => withTreePreviewDepth(scene, value),
+      })) }],
+    summary: fluidEnabled ? "Turn water off in Tank settings to compare voxel depths."
+      : `${(scene.voxelDomain.finestCellSize_m * 1000 / 2 ** depth).toFixed(3)} mm voxels. Applies to the whole scene; geometry is preserved. Finer depths use more GPU memory.`,
+  }];
 }

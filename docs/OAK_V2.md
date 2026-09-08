@@ -211,3 +211,12 @@ To repeat this comparison after the v2 matrix:
 ```
 OAK_TREE_JSON=tools/preview/fixtures/oak-v1.json OAK_RENDER_DEPTHS=0,3 OAK_RENDER_OUT_PREFIX=artifacts/oak-v2/baseline node --import tsx tools/check-oak-render.ts
 ```
+
+### Compact plugin controls
+
+Tree settings use the tank's shared toolstrip rows, numeric scrubs and flyouts.
+All six rows start folded. Entity plugins declare `EditorControlGroup.tag` and
+`readout` alongside their fields, choices, hints and summary; the generic
+`EditorControlGroupRows` renders them without tree-specific field handling.
+Voxel comparison is also declared by the oak plugin. Turn water off through
+Tank/Scene settings before choosing a depth. Growth scrubs commit once on release.

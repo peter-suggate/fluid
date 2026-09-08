@@ -130,3 +130,26 @@ test("invalid imported recipes are rejected; ordinary legacy scenery remains edi
   assert.deepEqual(oakTreeControlGroups(legacy, "oak"), []);
   assert.deepEqual(parseScene(serializeScene(legacy)).scenery, legacy.scenery);
 });
+
+
+test("plugin groups declare compact readouts and safe scene-wide voxel choices", () => {
+  const wet = scene();
+  const groups = oakTreeControlGroups(wet, "oak");
+  assert.equal(groups.length, 6);
+  assert.ok(groups.every(group => group.readout && !group.defaultOpen));
+  assert.equal(groups.find(group => group.id === "oak-twigs")?.readout, "3 forks");
+  const comparison = groups.find(group => group.id === "oak-voxel-comparison")!;
+  assert.equal(comparison.tag, "Voxels");
+  assert.ok(comparison.choices![0].options.every(option => option.enabled === false));
+  const dry = { ...wet, systems: { ...wet.systems, fluid: false } };
+  for (const option of oakTreeControlGroups(dry, "oak").at(-1)!.choices![0].options) {
+    assert.equal(option.enabled, true);
+    const patch = option.apply();
+    assert.equal(patch.scenery, dry.scenery);
+    assert.equal(patch.voxelDomain!.detailCellSize_m, dry.voxelDomain.finestCellSize_m / 2 ** Number(option.id));
+  }
+  const changed = withOakParameters(dry, "oak", { twigDepth: 1, showFoliage: 0 });
+  const updated = oakTreeControlGroups(changed, "oak");
+  assert.equal(updated.find(group => group.id === "oak-twigs")?.readout, "1 fork");
+  assert.equal(updated.find(group => group.id === "oak-foliage")?.readout, "Bare");
+});

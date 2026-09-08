@@ -313,6 +313,9 @@ export interface EditorChoiceGroup {
 export interface EditorControlGroup {
   readonly id: string;
   readonly label: string;
+  /** Compact strip label and current readout, supplied by the entity plugin. */
+  readonly tag?: string;
+  readonly readout?: string;
   /** The group's tooltip; the place to say what the cluster is for. */
   readonly hint?: string;
   /** Open on first expansion. Absent means folded, which is the point. */
