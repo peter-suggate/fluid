@@ -1,23 +1,26 @@
 "use client";
 
 import { useState } from "react";
-import { Cuboid, Download, Droplet, FilePlus2, Save, Sigma, Upload } from "lucide-react";
+import { Cuboid, Sigma } from "lucide-react";
 import type { EditorEntity, EditorField } from "../lib/core/editor-entity";
 import { sceneryIdFromSelection } from "../lib/core/editor-scenery";
 import { TANK_SELECTION_ID, tankExtentFields } from "../lib/core/editor-tank";
 import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
+import { sceneDocumentVerbs } from "../lib/core/editor-scene-document";
 import { getMethod, interactiveSimulationMethods } from "../lib/core/method-registry";
 import { simulation } from "../lib/core/simulation/controller";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
 import { isEditableOak } from "../lib/core/oak-tree-controls";
 import { findSceneryNode } from "../lib/core/scenery-edit";
 import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
+import { EditorActionGlyph } from "./EditorActionIcon";
 import { EntityDeleteRow, EntityMoreRow, EntityOptionRows } from "./EntityOptions";
 import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
 import { FieldControlRows, methodSetupTabs } from "./FluidFieldFlyout";
 import { FeatureSlot } from "../lib/features/ui/FeatureSlot";
 import { MakeRows } from "./MakeRows";
+import { SculptRows } from "./SculptRows";
 import { OakTreeEditor } from "./OakTreeEditor";
 import { StoneDialRows } from "./StoneLookFlyout";
 import { CanopyDialRows } from "./TreeCanopyFlyout";
@@ -145,56 +148,60 @@ function SolverRow() {
 }
 
 /**
- * The scene document's own verbs, as rows while the scene is selected.
+ * The scene document's own verbs, from the one declaration both surfaces share.
  *
- * They were a persistent Scene popover on a shelf that stood in the corner of
- * every viewport. A document verb is contextual like any other: selecting the
- * tank is selecting the scene, so the rows join this column — and the same
- * verbs sit on the scene's ring, one state seen from two places, exactly as
- * the making rows and their wedges are.
+ * A verb the catalog ranks high stands up as a row of its own — adding water
+ * to a dry document is the gate everything else waits behind. The low-ranked
+ * file operations fold behind the document row's one chevron: they were five
+ * rows of column for verbs reached once a session, and the catalog's own
+ * priority is what says so, not this component.
  */
-function SceneDocumentRows({ fluid }: { fluid: boolean }) {
+function SceneDocumentRows() {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
-  const glyph = (Icon: typeof Save) => <Icon width={14} height={14} strokeWidth={1.7} aria-hidden />;
-  const perform = (op: "new" | "save" | "export" | "import" | "enable-water") =>
-    performEditorAction({ kind: "scene-document", op }, session);
+  const [picking, setPicking] = useState(false);
+  const { claim } = useToolstripSection("scene-file", () => setPicking(false));
+  const pick = (open: boolean) => {
+    claim(open);
+    setPicking(open);
+  };
+  const verbs = sceneDocumentVerbs(scene);
+  const high = verbs.filter((verb) => verb.priority === "high");
+  const low = verbs.filter((verb) => verb.priority === "low");
   return <>
-    {!fluid && <ToolstripRow
-      icon={glyph(Droplet)}
-      name="Add water"
-      hint="Hand the document to the fluid solver, starting from its authored setup."
-      testId="scene-enable-water-row"
-      onClick={() => perform("enable-water")}
+    {high.map((verb) => <ToolstripRow
+      key={verb.id}
+      icon={<EditorActionGlyph name={verb.icon} />}
+      name={verb.label}
+      hint={`${verb.hint}.`}
+      testId={`${verb.id}-row`}
+      onClick={() => performEditorAction(verb.effect, session)}
+    />)}
+    {low.length > 0 && <ToolstripRow
+      icon={<EditorActionGlyph name="scene" />}
+      name="Scene file"
+      hint={`This document is “${scene.sceneId}”. Open another, start fresh, save it, or move it as JSON.`}
+      testId="scene-file-row"
+      after={<ToolstripMenuButton
+        label="Scene file"
+        hint="Open, save, start fresh, export or import this document."
+        open={picking}
+        testId="scene-file-pick"
+        onOpen={pick}
+      >
+        {low.map((verb) => <ToolstripMenuItem
+          key={verb.id}
+          icon={<EditorActionGlyph name={verb.icon} size={13} />}
+          label={verb.label}
+          title={verb.hint}
+          testId={`${verb.id}-item`}
+          onClick={() => {
+            pick(false);
+            performEditorAction(verb.effect, session);
+          }}
+        />)}
+      </ToolstripMenuButton>}
     />}
-    <ToolstripRow
-      icon={glyph(Save)}
-      name="Save scene"
-      hint={`Save to this browser's library as “${scene.sceneId}”, replacing an earlier save of the same name.`}
-      testId="scene-save-row"
-      onClick={() => perform("save")}
-    />
-    <ToolstripRow
-      icon={glyph(FilePlus2)}
-      name="New scene"
-      hint="Start a fresh document. Water is added later, deliberately."
-      testId="scene-new-row"
-      onClick={() => perform("new")}
-    />
-    <ToolstripRow
-      icon={glyph(Download)}
-      name="Export JSON"
-      hint="Download the document as scene JSON."
-      testId="scene-export-row"
-      onClick={() => perform("export")}
-    />
-    <ToolstripRow
-      icon={glyph(Upload)}
-      name="Import JSON"
-      hint="Open a scene JSON file from this machine."
-      testId="scene-import-row"
-      onClick={() => perform("import")}
-    />
   </>;
 }
 
@@ -229,7 +236,6 @@ export function ContainerToolstrip({
   const session = useSession();
   const scene = session.scene((state) => state.scene);
   const methodId = session.method((state) => state.methodId);
-  const select = session.ui((state) => state.select);
   const hasFields = methodHasQuickFields(methodId);
   // A dry document has no solve to choose, so the solver row follows the water
   // switch — the same flag the tank declares as `offersFluidMethod`.
@@ -243,27 +249,39 @@ export function ContainerToolstrip({
   >
     {hasFields && <FieldViewRows />}
     <FeatureSlot slot="scene.visibility" />
-    <TankRow />
-    {hasSolver && <FeatureSlot slot="scene.physics" />}
-    {hasSolver && <FeatureSlot slot="scene.surface" />}
+    {/* The high-priority readings first, in the order a reader changes them:
+        what is moving the water, how its surface is drawn, and whether gravity
+        is on. The slots order their own placements by declared priority. */}
     {hasSolver && <SolverRow />}
+    {hasSolver && <FeatureSlot slot="scene.surface" />}
+    {hasSolver && <FeatureSlot slot="scene.physics" />}
     {hasSolver && <><FeatureSlot slot="scene.adaptivity" /><FeatureSlot slot="scene.simulation" /></>}
     {/* The seam between the two halves of the column: readings that say what
         the scene *is*, and verbs that say what a stroke would *add* to it.
         Drawn rather than inferred because both halves are glyph rows. */}
     <ToolstripRule />
     <MakeRows fluid={hasSolver} />
+    <SculptRows />
+    {/* The low-priority tail: the container's extents and the document's file
+        operations — reached rarely, so they stand below the verbs and fold
+        their lists behind chevrons rather than spending column on them. */}
+    <ToolstripRule />
+    <TankRow />
+    <SceneDocumentRows />
     {entity === undefined
-      // The way to what the fixed rows left out: the solver's construction, this
-      // scene's own switches, and the water's settings while there is no body to
-      // hang them off. Selecting the tank is what opens those, so this is the
-      // existing route made visible rather than a second one to keep agreeing
-      // with it.
+      // The door to the solver's construction and this scene's own switches.
+      // Choosing setup *is* the intention, so it selects the tank with the
+      // controls already open — one click, not a selection plus a hunt for
+      // the "⋯" that appears afterwards.
       ? <ToolstripMoreRow
         name="Solver setup and scene"
-        hint="How the solver is built, this scene's own switches, and the water's settings. Selects the tank."
+        hint="How the solver is built, this scene's own switches, and the water's settings. Opens them directly."
         testId="field-quick-more"
-        onClick={() => select({ kind: "tank", id: TANK_SELECTION_ID })}
+        onClick={() => performEditorAction({
+          kind: "select",
+          selection: { kind: "tank", id: TANK_SELECTION_ID },
+          openControls: true,
+        }, session)}
       />
       : <>
         <ToolstripRule />
@@ -279,11 +297,6 @@ export function ContainerToolstrip({
             Those used to be a row of their own — one line reporting the quality
             over a card of nine controls, the tallest thing the column opened
             and the most often opened. They are the panel's first face now. */}
-        {/* The document's own verbs, above the door: selecting the tank is
-            selecting the scene, so what used to be a persistent Scene popover
-            answers here. The same verbs sit on the scene's ring. */}
-        <ToolstripRule />
-        <SceneDocumentRows fluid={hasSolver} />
         <EntityMoreRow
           key={`more:${entity.selection.id}`}
           entity={entity}

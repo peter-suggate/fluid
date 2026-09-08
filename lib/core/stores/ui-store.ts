@@ -218,6 +218,11 @@ interface UIStore {
   /** Shape the body-place tool drops on the next click. */
   placementShape: RigidShape;
   /**
+   * The water-shape tool the Drop-water row arms, by the plugin's own id — a
+   * string because the registry owns the vocabulary, exactly as `voxelToolId`.
+   */
+  waterShape: string;
+  /**
    * Sizes typed for the next body, per shape. Empty is every shape's own
    * default — see `PlacementDimensions`, which is where the sparseness is
    * argued for.
@@ -324,6 +329,7 @@ interface UIStore {
   setCarryTilt: (tiltDegrees: number) => void;
   endCarry: () => void;
   setPlacementShape: (shape: RigidShape) => void;
+  setWaterShape: (toolId: string) => void;
   setPlacementDimensions: (shape: RigidShape, dimensions_m: PlacementDimensions[RigidShape]) => void;
   /** Show one instrument over the scene, or `null` to clear the one that is up. */
   setSceneOverlay: (overlay: SceneOverlay | null) => void;
@@ -404,6 +410,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   selectionControlsOpen: false,
   sceneSelectorOpen: false,
   placementShape: "sphere",
+  waterShape: "fluid-ball",
   placementDimensions: {},
   sceneOverlay: null,
   gridOverlayAxis: "off",
@@ -495,6 +502,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
     ? { carry: { ...state.carry, tiltDegrees } } : {}),
   endCarry: () => set({ carry: undefined }),
   setPlacementShape: (placementShape) => set({ placementShape }),
+  setWaterShape: (waterShape) => set({ waterShape }),
   // Per shape, so switching to a box and back finds the sphere the reader sized
   // rather than the one the table ships. The shape's key is written even when
   // the value equals the default: what was typed is what is held.

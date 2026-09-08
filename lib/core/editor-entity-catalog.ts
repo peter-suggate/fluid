@@ -1,4 +1,5 @@
 import { fluidBodyEntity, fluidPlayActions } from "./editor-fluid-body";
+import { sceneDocumentActions } from "./editor-scene-document";
 import { voxelSculptActions } from "./editor-voxel-tool-actions";
 import { inflowEntity } from "./editor-inflow";
 import { refinementRegionEntity } from "./editor-refinement-region";
@@ -330,65 +331,16 @@ export function sceneActionsAt(
  * disabled verb, it is no verb at all.
  */
 function sceneWedge(scene: SceneDescription): EditorAction {
-  const dry = scene.systems?.fluid === false;
   return {
     id: "scene",
     label: "Scene",
     icon: "scene",
     tone: "prop",
     hint: "This pane's document: open another, start fresh, save it, or move it as JSON",
-    children: [
-      {
-        id: "choose-scene",
-        label: "Open…",
-        icon: "scene",
-        tone: "prop",
-        hint: "Choose the scene this pane runs, without leaving the studio",
-        effect: { kind: "choose-scene" },
-      },
-      {
-        id: "scene-new",
-        label: "New",
-        icon: "scene-new",
-        tone: "prop",
-        hint: "Start a fresh document. Water is added later, deliberately",
-        effect: { kind: "scene-document", op: "new" },
-      },
-      {
-        id: "scene-save",
-        label: "Save",
-        icon: "scene-save",
-        tone: "prop",
-        hint: "Save to this browser's library under the document's own name",
-        effect: { kind: "scene-document", op: "save" },
-      },
-      {
-        id: "scene-export",
-        label: "Export",
-        icon: "scene-export",
-        tone: "prop",
-        hint: "Download the document as scene JSON",
-        effect: { kind: "scene-document", op: "export" },
-      },
-      {
-        id: "scene-import",
-        label: "Import…",
-        icon: "scene-import",
-        tone: "prop",
-        hint: "Open a scene JSON file from this machine",
-        effect: { kind: "scene-document", op: "import" },
-      },
-      ...(dry ? [{
-        id: "scene-enable-water",
-        label: "Add water",
-        icon: "water-ball" as const,
-        tone: "fluid" as const,
-        hint: "Hand the document to the fluid solver, starting from its authored setup",
-        effect: { kind: "scene-document" as const, op: "enable-water" as const },
-      }] : []),
-    ],
+    children: sceneDocumentActions(scene),
   };
 }
+
 
 /**
  * A/B compare, on the ring that belongs to no object.

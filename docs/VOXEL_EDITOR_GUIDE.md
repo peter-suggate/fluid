@@ -1,6 +1,6 @@
 # Live voxel editor
 
-Right-click the scene and choose a tool from the **Build**, **Carve** or **Water shapes** wedges (the persistent Scene/Tools strip is gone — every capability is contextual now). Choosing a tool closes the ring and enters EDIT mode. Hover over the viewport to see its proposed bounds; hold the primary mouse button and drag to edit. Accepted samples change solid geometry while the fluid continues running. Releasing completes one history entry.
+In EDIT mode the container strip carries **Build** and **Carve** rows — click one to arm its group's first tool, or open its chevron for the rest — and the **Drop a ball** row's chevron chooses the water shape (ball, cube, torus). The same tools are wedges on the right-click ring (**Build**, **Carve**, **Water shapes**); the persistent Scene/Tools strip is gone — every capability is contextual. Arming a tool shows its card and enters EDIT. Hover over the viewport to see its proposed bounds; hold the primary mouse button and drag to edit. Accepted samples change solid geometry while the fluid continues running. Releasing completes one history entry.
 
 For water scenes, use **Sparse CM12**. A new scene starts as a dry room with its fluid system disabled; wait for its live scene resources to become ready before stamping. New/Open/Import replace the document and restart its initial setup. They are scene-loading operations, not live strokes.
 

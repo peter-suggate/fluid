@@ -15,7 +15,13 @@ export function ComposedFeatureSlot({ composition, views, slot }: {
   readonly views: FeatureControlViews;
   readonly slot: string;
 }) {
-  return <>{composition.placements.filter(placement => placement.slot === slot).map(placement => {
+  const ranked = composition.placements.filter(placement => placement.slot === slot)
+    // High-priority placements first, declaration order within a rank: the
+    // rank is declared beside the control, so the host needs no opinion.
+    .map((placement, index) => ({ placement, index }))
+    .sort((a, b) => (a.placement.priority === "high" ? 0 : 1) - (b.placement.priority === "high" ? 0 : 1) || a.index - b.index)
+    .map(({ placement }) => placement);
+  return <>{ranked.map(placement => {
     const key = `${placement.feature}/${placement.control}`;
     const View = views[key];
     const control = composition.controls.find(candidate => candidate.feature === placement.feature && candidate.id === placement.control);

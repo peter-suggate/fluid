@@ -1,11 +1,13 @@
 "use client";
 
 import { useState } from "react";
+import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { getEditorGesture, type EditorGestureId } from "../lib/core/editor-gesture-catalog";
 import { placementFields } from "../lib/core/editor-placement";
+import { voxelToolGroups } from "../lib/core/editor-voxel-tool-actions";
 import { SCENE_SHAPES_BY_CODE, sceneShape } from "../lib/core/scene-shape";
 import { useSession } from "../lib/core/session/session-context";
-import { EditorActionGlyph } from "./EditorActionIcon";
+import { EditorActionGlyph, EditorActionPathGlyph } from "./EditorActionIcon";
 import {
   ToolstripMenuButton,
   ToolstripMenuItem,
@@ -81,16 +83,71 @@ function RegionRow() {
   />;
 }
 
-/** Drop a ball of water into a solve that is already running. */
+/**
+ * Drop water, at a shape chosen here.
+ *
+ * The body row's treatment, because it is the same question: one shape out of
+ * a handful, so the mark *is* the current answer and the chevron beside it is
+ * the rest. The shapes are the registry's own Fluid group — a water shape
+ * plugin added there appears in this menu without a second table.
+ *
+ * The ball keeps two implementations on purpose: the live shape tool where the
+ * method supports it, and the placement gesture everywhere else — so dropping
+ * water never stops working when the solver cannot take a live stamp. The row
+ * arms whichever the chosen shape can actually run.
+ */
 function WaterRow() {
+  const session = useSession();
+  const scene = session.scene((state) => state.scene);
+  const methodId = session.method((state) => state.methodId);
+  const waterShape = session.ui((state) => state.waterShape);
+  const setWaterShape = session.ui((state) => state.setWaterShape);
   const { armed, toggle } = useArmedStroke("fluid-ball");
+  const [picking, setPicking] = useState(false);
+  const { claim } = useToolstripSection("water-shape", () => setPicking(false));
+  const pick = (open: boolean) => {
+    claim(open);
+    setPicking(open);
+  };
+  const tools = voxelToolGroups(scene, methodId).find((group) => group.group === "Fluid")?.tools ?? [];
+  const chosen = tools.find((tool) => tool.id === waterShape) ?? tools[0];
+  const ballFallsBack = chosen?.id === "fluid-ball" && chosen.unavailable !== undefined;
+  const arm = () => {
+    // The gesture ball is the one shape with a route in every method; the
+    // others arm their tool even when it cannot run — its card says why.
+    if (!chosen || ballFallsBack) return toggle();
+    performEditorAction({ kind: "voxel-tool", toolId: chosen.id }, session);
+  };
+  const name = chosen ? `Drop a ${chosen.label.replace(/^water\s+/i, "")}` : "Drop water";
   return <ToolstripRow
-    icon={<EditorActionGlyph name="water-ball" />}
-    name="Drop water"
-    hint={strokeHint("fluid-ball", armed)}
+    icon={chosen && !ballFallsBack
+      ? <EditorActionPathGlyph path={chosen.iconPath} />
+      : <EditorActionGlyph name="water-ball" />}
+    name={name}
+    hint={armed ? strokeHint("fluid-ball", true) : (ballFallsBack ? strokeHint("fluid-ball", false) : chosen?.hint ?? strokeHint("fluid-ball", false))}
     active={armed}
     testId="scene-water-row"
-    onClick={toggle}
+    onClick={arm}
+    after={tools.length > 1 ? <ToolstripMenuButton
+      label="Water shape"
+      hint="What the next drop pours. Shapes come from the installed water tools."
+      open={picking}
+      testId="scene-water-pick"
+      onOpen={pick}
+    >
+      {tools.map((tool) => <ToolstripMenuItem
+        key={tool.id}
+        icon={<EditorActionPathGlyph path={tool.iconPath} size={13} />}
+        label={tool.label}
+        title={tool.hint}
+        active={tool.id === chosen?.id}
+        testId={`scene-water-pick-${tool.id}`}
+        onClick={() => {
+          setWaterShape(tool.id);
+          pick(false);
+        }}
+      />)}
+    </ToolstripMenuButton> : undefined}
   />;
 }
 

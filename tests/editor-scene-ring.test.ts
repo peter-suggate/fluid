@@ -3,6 +3,9 @@ import test from "node:test";
 import type { EditorAction } from "../lib/core/editor-action";
 import { sceneActionsAt } from "../lib/core/editor-entity-catalog";
 import { cloneScene, defaultScene } from "../lib/core/model";
+import { sceneDocumentVerbs } from "../lib/core/editor-scene-document";
+import { gravityFeature } from "../lib/features/gravity/definition";
+import { surfaceDisplayFeature } from "../lib/features/surface-display/definition";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
 
 // The scene's ring after the shelf: the document verbs and the sculpt tools
@@ -55,4 +58,21 @@ test("the LOOK ring keeps the document verbs but withholds everything that edits
   const ids = actions.map((action) => action.id);
   assert.ok(!ids.some((id) => id.startsWith("sculpt-")), "LOOK must not offer sculpt tools");
   assert.ok(!ids.includes("water"), "LOOK must not offer placement");
+});
+
+// The standing priority direction (2026-09-08): solver, surface method and
+// gravity are high; the document's file operations are low. The rank lives in
+// the colocated declarations — these assertions read them, never a component.
+test("declared priorities match the standing direction", () => {
+  const gravity = gravityFeature.placements.find((placement) => placement.slot === "scene.physics");
+  assert.equal(gravity?.priority, "high", "gravity's strip placement is high priority");
+  const surface = surfaceDisplayFeature.placements.find((placement) => placement.slot === "scene.surface");
+  assert.equal(surface?.priority, "high", "the surface mode's strip placement is high priority");
+
+  const dryScene = cloneScene(defaultScene);
+  dryScene.systems = { ...dryScene.systems, fluid: false };
+  for (const verb of sceneDocumentVerbs(dryScene)) {
+    const expected = verb.id === "scene-enable-water" ? "high" : "low";
+    assert.equal(verb.priority, expected, `${verb.id} priority`);
+  }
 });

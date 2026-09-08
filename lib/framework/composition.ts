@@ -15,6 +15,13 @@ export interface FeaturePlacement {
   readonly control: string;
   readonly order?: number;
   readonly presentation?: "compact" | "expanded";
+  /**
+   * Declared prominence, beside the control it ranks: "high" placements render
+   * before the rest of their slot, and hosts may stand them up where "low"
+   * ones fold behind a disclosure. Absent means low — prominence is earned by
+   * declaration, not by default.
+   */
+  readonly priority?: "high" | "low";
 }
 export interface VariantDefinition {
   readonly id: string;

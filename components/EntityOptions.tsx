@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { formatNumber } from "./controls";
 import { simulation } from "../lib/core/simulation/controller";
 import { length } from "../lib/core/math";
@@ -567,8 +567,23 @@ export function EntityMoreRow({ entity, leadingTabs = [] }: {
   /** Faces to put before the object's own, for a strip that owns a solver. */
   leadingTabs?: readonly ToolstripTab[];
 }) {
-  const [open, setOpen] = useState(false);
+  const session = useSession();
+  // A selection made *for* its settings — the "Solver setup" row, a wedge with
+  // `openControls` — asks for the door already open, so choosing setup is one
+  // click, not a selection plus a hunt for the "⋯". The flag is consumed here
+  // because this row is the door it promises.
+  const [open, setOpen] = useState(() => session.ui.getState().selectionControlsOpen);
   const { claim } = useToolstripSection(`more:${entity.selection.id}`, () => setOpen(false));
+  useEffect(() => {
+    if (!session.ui.getState().selectionControlsOpen) return;
+    session.ui.getState().setSelectionControlsOpen(false);
+    claim(true);
+    // The claim callback closes every *other* section; this row is the one the
+    // selection was made for, so it stays.
+    setOpen(true);
+    // Once, on the mount this selection created: the row is keyed by selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const hasScene = entity.summary !== undefined || entity.offersSceneRebuild === true;
   // Only a simulated body now: removal moved out to its own row on the column,
   // so a thing whose only verb was Remove no longer opens a face containing one

@@ -9,5 +9,5 @@ export const surfaceDisplayQuery = queryRecord<SurfaceDisplayState>({
 export const surfaceDisplayFeature = {
   id: "presentation.surface-display", controls: [{ id: "mode", label: "Fluid surface", kind: "choice", update: "live", setting: "fluidSurfaceRenderMode",
     hint: "Shade the liquid, inspect a simple translucent surface, or show triangle edges.", options: SURFACE_DISPLAY_OPTIONS }],
-  placements: [{ slot: "scene.surface", control: "mode", presentation: "compact" }, { slot: "frame.surface", control: "mode", presentation: "expanded" }],
+  placements: [{ slot: "scene.surface", control: "mode", presentation: "compact", priority: "high" }, { slot: "frame.surface", control: "mode", presentation: "expanded" }],
 } as const satisfies FeatureDefinition;
