@@ -27,15 +27,15 @@ import {
 } from "../lib/core/fluid-blast-radius";
 import { getMethod } from "@/lib/core/method-registry";
 import { canonicalScene, type CameraState, type RunState } from "../lib/core/model";
-import { add, cameraBasis, dot, length, orbit, pan, retarget, scale, sub, zoom } from "../lib/core/math";
+import { add, cameraBasis, dot, length, orbitAbout, pan, scale, sub, zoomToward } from "../lib/core/math";
 import { boundingRadius, type RigidBodyState } from "../lib/core/rigid-body";
 import { placementBodyDescription } from "../lib/core/editor-placement";
 import type { RigidBodyDescription } from "../lib/core/model";
 import { resourceInteractionGates } from "../lib/core/resource-readiness";
 import { PRIMARY_PANE_ID, simulation } from "../lib/core/simulation/controller";
 import { simulationRecording } from "../lib/core/simulation/recording";
-import { cameraTanHalfFov, projectToViewport, viewportRayForPointer } from "../lib/core/webgpu-camera";
-import { viewportCentrePivot, viewportCentreRay, WHEEL_GESTURE_GAP_MS } from "../lib/core/camera-pivot";
+import { cameraTanHalfFov, projectToViewport, viewportRayForPointer, viewportWorldPerPixel } from "../lib/core/webgpu-camera";
+import { gesturePivot, WHEEL_GESTURE_GAP_MS, WHEEL_GESTURE_TRAVEL_PX } from "../lib/core/camera-pivot";
 import {
   closestPointOnAxis,
   GIZMO_AXIS_DIRECTIONS,
@@ -1487,46 +1487,52 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     viewportRayForPointer(session.ui.getState().camera, event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
 
   /**
-   * Whether this camera gesture has already been anchored on what the viewport
-   * is centred on.
+   * What the drag in progress is about: the point under the press, and how
+   * far into the frame it was.
    *
-   * Anchoring is `retarget`, and `retarget` is only free on the *first* sample
-   * of a gesture: it is the pivot being straight ahead that makes it invisible,
-   * and one orbit step later it no longer is. A ref rather than a field on the
-   * pointer entry because an orbit is opened from four places — a raised probe,
-   * a press on empty space, a GPU pick that found no body, and the shift/middle
-   * fallback — and the anchor belongs to the drag, not to how it began. Pointer
-   * ids are reused by the mouse, so the reset is the press, not the id.
+   * Resolved on the drag's first sample and held for its whole length — an
+   * orbit is a rigid turn about one fixed world point, and a pan keeps one
+   * surface glued to the cursor, so neither may re-probe mid-gesture. A ref
+   * rather than a field on the pointer entry because an orbit is opened from
+   * four places — a raised probe, a press on empty space, a GPU pick that found
+   * no body, and the shift/middle fallback — and the pivot belongs to the drag,
+   * not to how it began. Pointer ids are reused by the mouse, so the reset is
+   * the press, not the id.
    */
-  const cameraAnchoredRef = useRef(false);
+  const cameraGestureRef = useRef<{ pivot_m: Vec3; worldPerPixel_m: number } | null>(null);
   /**
    * The pivot a run of wheel events shares.
    *
-   * Re-probing per event would be correct — the pivot stays exactly under the
-   * centre of the frame as the camera approaches it, so a fresh probe finds the
-   * same surface — but it would also let the pivot step from one surface to
-   * another mid-flick as the perspective changes, which reads as the zoom
+   * Re-probing per event would be nearly right — the point under the cursor
+   * stays under the cursor as the camera closes on it, so a fresh probe finds
+   * the same surface — but it would also let the pivot step from one surface
+   * to another mid-flick as the perspective changes, which reads as the zoom
    * changing its mind. Holding one answer for the burst makes a continuous
-   * scroll a single approach to a single point. A press clears it: an orbit
-   * anchors somewhere else, and a stale pivot applied after that would move the
-   * target rather than leave it.
+   * scroll a single approach to a single point. A press clears it, and so does
+   * the cursor moving on: the held point is the one that stays put under the
+   * cursor, and a cursor somewhere else is aiming at something else.
    */
-  const wheelPivotRef = useRef<{ pivot_m: Vec3; at_ms: number } | null>(null);
+  const wheelPivotRef = useRef<{ pivot_m: Vec3; at_ms: number; clientX: number; clientY: number } | null>(null);
 
   /**
-   * What the camera turns and zooms about, resolved from the middle of the
-   * frame through the same catalog the hover chip reads.
+   * What a camera gesture turns and zooms about: whatever is under the given
+   * canvas pixel, resolved through the same catalog the hover chip reads. The
+   * rule — and the two fallbacks — are `gesturePivot`.
    */
-  const cameraPivot = (): Vec3 => viewportCentrePivot(
-    editorEntityContext(session), viewportCentreRay(session.ui.getState().camera));
+  const cameraPivotAt = (clientX: number, clientY: number, rect: DOMRect): Vec3 => {
+    const camera = session.ui.getState().camera;
+    return gesturePivot(editorEntityContext(session), camera, viewportRayForPointer(camera, clientX, clientY, rect));
+  };
 
-  /** The burst's pivot, probed once and reused until the scrolling stops. */
-  const wheelPivot = (timeStamp: number): Vec3 => {
+  /** The burst's pivot, probed once and reused until the scrolling stops or the cursor leaves it. */
+  const wheelPivot = (event: React.WheelEvent<HTMLCanvasElement>): Vec3 => {
     const held = wheelPivotRef.current;
-    const pivot_m = held && timeStamp - held.at_ms < WHEEL_GESTURE_GAP_MS
+    const pivot_m = held
+      && event.timeStamp - held.at_ms < WHEEL_GESTURE_GAP_MS
+      && Math.hypot(event.clientX - held.clientX, event.clientY - held.clientY) <= WHEEL_GESTURE_TRAVEL_PX
       ? held.pivot_m
-      : cameraPivot();
-    wheelPivotRef.current = { pivot_m, at_ms: timeStamp };
+      : cameraPivotAt(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
+    wheelPivotRef.current = { pivot_m, at_ms: event.timeStamp, clientX: event.clientX, clientY: event.clientY };
     return pivot_m;
   };
 
@@ -2390,10 +2396,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // would open over a viewport that had just discarded the thing it is about.
     if (event.button === 2) return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    // A new gesture, so a new answer to "about what": the drag re-anchors on
-    // its first move, and any wheel pivot held from before this press is now a
-    // point the camera is no longer looking at.
-    cameraAnchoredRef.current = false;
+    // A new gesture, so a new answer to "about what": the drag probes under
+    // the press on its first move, and any wheel pivot held from before this
+    // press is a point the cursor is no longer over.
+    cameraGestureRef.current = null;
     wheelPivotRef.current = null;
     // LOOK is navigation and nothing else. Deliberately above the trace-pin
     // arming and every branch below rather than folded into them: a mode that
@@ -2753,16 +2759,24 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const dx = event.clientX - active.x;
     const dy = event.clientY - active.y;
     pointerRef.current = { ...active, x: event.clientX, y: event.clientY };
-    // The first sample of the drag decides what the drag is *about*. Resolved
+    // The first sample of the drag decides what the drag is *about*: the
+    // surface under the *press*, which is what the reader grabbed. Resolved
     // here rather than at the press so a click that never moved costs no probe
     // and writes no camera — a press on empty space is a deselection far more
-    // often than it is an orbit.
-    const pivot_m = cameraAnchoredRef.current ? undefined : cameraPivot();
-    cameraAnchoredRef.current = true;
-    setCamera((current) => {
-      const anchored = pivot_m ? retarget(current, pivot_m) : current;
-      return active.action === "pan" ? pan(anchored, dx, dy) : orbit(anchored, dx, dy);
-    });
+    // often than it is an orbit. The pan scale is fixed here too: a pan is a
+    // translation in the image plane, so the grabbed surface keeps its depth
+    // and one metres-per-pixel serves the whole drag.
+    const gesture = cameraGestureRef.current ?? (() => {
+      const canvasRect = event.currentTarget.getBoundingClientRect();
+      const camera = session.ui.getState().camera, basis = cameraBasis(camera);
+      const pivot_m = cameraPivotAt(active.downX, active.downY, canvasRect);
+      const depth_m = dot(sub(pivot_m, basis.position), basis.forward);
+      return { pivot_m, worldPerPixel_m: viewportWorldPerPixel(camera, depth_m, canvasRect.height) };
+    })();
+    cameraGestureRef.current = gesture;
+    setCamera((current) => active.action === "pan"
+      ? pan(current, dx, dy, gesture.worldPerPixel_m)
+      : orbitAbout(current, gesture.pivot_m, dx, dy));
   };
   const pointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (voxelGesture.up(event)) return;
@@ -2935,11 +2949,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         }
         if (!cameraInteractive) return;
         event.preventDefault();
-        // Anchor on every event, not only the first: `retarget` is idempotent
-        // once the camera is on the pivot, so the burst's second wheel event
-        // costs the same arithmetic and needs no gesture state of its own.
-        const pivot_m = wheelPivot(event.timeStamp);
-        setCamera((current) => zoom(retarget(current, pivot_m), event.deltaY));
+        // Zoom to cursor: the surface under the pointer stays under the
+        // pointer while the frame scales about it, the convention of every
+        // scene view from SketchUp to Unity. The pivot is the burst's.
+        const pivot_m = wheelPivot(event);
+        setCamera((current) => zoomToward(current, pivot_m, event.deltaY));
       }}
       onContextMenu={openRadialMenuAt}
     />

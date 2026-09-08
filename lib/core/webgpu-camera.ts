@@ -152,6 +152,15 @@ export function viewportRayForPointer(
   return viewportRay(camera, ndcX, ndcY, viewportAspect(rect.width, rect.height));
 }
 
+/**
+ * Metres per canvas pixel at a given view depth: the frame is
+ * `2 * depth * tanHalfFov` metres tall there, spread over `height` pixels.
+ * A pan by this much per pixel keeps a surface at that depth under the cursor.
+ */
+export function viewportWorldPerPixel(camera: Pick<CameraState, "tanHalfFov">, depth_m: number, height: number): number {
+  return (2 * depth_m * cameraTanHalfFov(camera)) / Math.max(height, 1);
+}
+
 /** Forward transform of {@link viewportRay}: world point to canvas fractions. */
 export function projectToViewport(
   position_m: Vec3,

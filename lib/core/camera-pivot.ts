@@ -1,22 +1,7 @@
 import { boxCenter, intersectBox, sceneContainerBox, type EditorEntityContext, type EditorRay } from "./editor-entity";
 import { targetAtRay } from "./editor-probe-catalog";
-import { add, dot, scale, sub } from "./math";
+import { add, CAMERA_DISTANCE_RANGE, cameraBasis, dot, length, scale, sub } from "./math";
 import type { CameraState, SceneDescription, Vec3 } from "./model";
-import { viewportRay, type ViewportRay } from "./webgpu-camera";
-
-/**
- * The ray out of the middle of the viewport.
- *
- * Degenerate on purpose: at the centre of the frame both screen offsets are
- * zero, so this is the camera's forward axis and the aspect ratio and the
- * aperture both cancel. It goes through {@link viewportRay} anyway rather than
- * being written as `cameraBasis(camera).forward`, because the one host-side
- * inverse of the WGSL camera is the thing that guarantees the pixel this picks
- * out is the pixel the shader draws in the middle.
- */
-export function viewportCentreRay(camera: CameraState): ViewportRay {
-  return viewportRay(camera, 0, 0, 1);
-}
 
 /**
  * How long a run of wheel events counts as one gesture.
@@ -30,36 +15,62 @@ export function viewportCentreRay(camera: CameraState): ViewportRay {
 export const WHEEL_GESTURE_GAP_MS = 250;
 
 /**
- * What the camera should turn and zoom about: whatever the viewport is centred
- * on.
+ * How far the cursor may wander during a wheel burst before the burst is over.
  *
- * Resolved through the same probe catalog as the hover chip, so the pivot and
- * the interface agree about what "that" is — orbit about the thing the reader
- * would be told they are pointing at, never about a second, private answer.
+ * The held pivot is the point that stays under the cursor, so a cursor that
+ * has moved on is aiming at something else; a jitter of a few pixels is not.
+ */
+export const WHEEL_GESTURE_TRAVEL_PX = 8;
+
+/**
+ * What a camera gesture turns or zooms about: whatever is under the cursor
+ * where the gesture began.
  *
- * The two targets that are *not* good pivots are handled here rather than in
- * the catalog, because they are only bad for this purpose:
+ * This is the rule SketchUp, Onshape, Fusion 360 and Unity's scene view share
+ * — orbit about the thing you grabbed, zoom into the thing you point at — and
+ * it is resolved through the same probe catalog as the hover chip, so the
+ * pivot is the thing the reader has just been told they are pointing at.
+ *
+ * Two answers that catalog gives are *not* good pivots, and are handled here
+ * because they are only bad for this purpose:
  *
  * - **The tank wall.** `pickRoomExitFace` deliberately answers with the wall a
  *   ray *leaves* through, since that is the one you can see from inside. It is
- *   also the furthest surface in the frame, and orbiting about the back wall
+ *   also the furthest surface in the frame, and turning about the back wall
  *   swings everything in front of it — including the water, which is what the
- *   reader was actually looking at and which no CPU probe can pick.
+ *   reader was actually pointing at and which no CPU probe can pick.
  * - **The room.** A ray past the container lands on the ground plane or, aimed
  *   at the sky, a fixed way along itself. Fine as a placement point, arbitrary
  *   as a centre of rotation.
  *
- * Both fall back to {@link containerViewPoint}, which is the same rule
- * `containerPlacementPoint` uses to choose a depth for a click that met
- * nothing: the point of the ray's span through the container that comes
- * nearest the middle of the tank. Aimed into the tank it gives the middle of
- * the tank, and aimed along a corner it gives that corner — so an empty tank
- * orbits about its own volume, which is where the water is.
+ * Both fall back to {@link containerViewPoint} — the point of the ray's span
+ * through the tank nearest its middle, so a press on the water pivots on the
+ * water — and a ray that misses the tank altogether falls back to the point on
+ * the cursor's ray at the depth the camera is already looking at, which is the
+ * fallback Blender and three.js use for a cursor over nothing: still under the
+ * cursor, and at the depth of the last thing the reader was working on, so the
+ * gesture neither jumps nor turns about the horizon. A surface outside the
+ * wheel's reach (see `CAMERA_DISTANCE_RANGE`) takes that same fallback.
  */
-export function viewportCentrePivot(context: EditorEntityContext, ray: EditorRay): Vec3 {
+export function gesturePivot(context: EditorEntityContext, camera: CameraState, ray: EditorRay): Vec3 {
   const target = targetAtRay(context, ray);
-  if (target.kind !== "tank-wall" && target.kind !== "room") return target.point_m;
-  return containerViewPoint(context.scene, ray) ?? target.point_m;
+  const surface = target.kind !== "tank-wall" && target.kind !== "room"
+    ? target.point_m
+    : containerViewPoint(context.scene, ray);
+  if (surface) {
+    const reach_m = length(sub(surface, ray.origin));
+    if (reach_m >= CAMERA_DISTANCE_RANGE.minimum_m && reach_m <= CAMERA_DISTANCE_RANGE.maximum_m) return surface;
+  }
+  return viewDepthPoint(camera, ray);
+}
+
+/**
+ * The point on a ray at the view depth of the camera's look-at target — the
+ * pivot for a cursor over nothing.
+ */
+export function viewDepthPoint(camera: CameraState, ray: EditorRay): Vec3 {
+  const along = dot(ray.direction, cameraBasis(camera).forward);
+  return add(ray.origin, scale(ray.direction, camera.distance_m / Math.max(along, 1e-6)));
 }
 
 /**
