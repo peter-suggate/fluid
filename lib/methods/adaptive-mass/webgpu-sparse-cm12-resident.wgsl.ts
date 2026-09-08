@@ -538,6 +538,32 @@ fn commitRetainedDensityGeneration(){
 `;
 }
 
+/** Signed companion of the retained density itself. Export the production
+ * helper so GPU tests can compare its signs and exact zeros with independent
+ * density evaluations, including the saturated endpoint cases. */
+export const SPARSE_CM12_RETAINED_DENSITY_COMPANION_WGSL = /* wgsl */ `
+fn cm12RetainedDensityEvolvedPhi(phi:f32,width:f32,coefficient:vec2f)->f32{
+  if(coefficient.y>0.5){return width*(0.5-coefficient.y);}
+  let maximum=coefficient.x+coefficient.y;
+  if(maximum<0.5){return width*(0.5-maximum);}
+  if(coefficient.y==0.5||maximum==0.5){
+    // Attaining half density at a range endpoint does not make the entire
+    // support half full. Evaluate the clamped seed at this point; real
+    // half-density plateaus remain zero and must not be replaced by a ramp.
+    let seed=clamp(0.5-phi/width,0.0,1.0);
+    let density=coefficient.x*seed+coefficient.y;
+    return width*(0.5-density);
+  }
+  // A strict interior threshold has an exact inverse in the seed ramp.
+  // Preserve its analytic interpolation instead of clamping it to endpoints.
+  // Form the density residual before dividing. Reciprocal approximation in
+  // (.5-b)/a can otherwise perturb an exactly representable half-density
+  // point away from zero (for example a=.75,b=.125,phi=0).
+  let residual=coefficient.x*phi+width*(0.5-coefficient.y-0.5*coefficient.x);
+  return residual/coefficient.x;
+}
+`;
+
 function sparseCM12RetainedDensityResidentWGSL(
   layout: SparseCM12RetainedDensityResidentLayout | undefined,
 ): string {
@@ -596,6 +622,7 @@ fn cm12RetainedDensityPhiMetres(point:vec3f)->f32{
   }
   return phi;
 }
+${SPARSE_CM12_RETAINED_DENSITY_COMPANION_WGSL}
 fn cm12RetainedDensityPhiAtFine(point:vec3f)->f32{
   let width=state[CM12_RETAINED_FIELD_BASE+3u];
   // Supported fractional terrain occupies a bottom slab of its fine voxel.
@@ -608,15 +635,7 @@ fn cm12RetainedDensityPhiAtFine(point:vec3f)->f32{
   let phi=cm12RetainedDensityPhiMetres(origin+point*p.frame.y);
   if(state[CM12_RETAINED_CONTROL_BASE]<1.5){return phi;}
   let coefficient=cm12RetainedDensitySupportCoefficientAtFine(point);
-  if(coefficient.y>=0.5){return width*(0.5-coefficient.y);}
-  if(coefficient.x+coefficient.y<=0.5){
-    return width*(0.5-coefficient.x-coefficient.y);
-  }
-  // In the unsaturated branch the half-density equation has an exact inverse.
-  // Keeping that implicit companion preserves analytic edge interpolation at
-  // the initial generation and queries the evolved density's own isosurface.
-  let threshold=(0.5-coefficient.y)/coefficient.x;
-  return phi-width*(0.5-threshold);
+  return cm12RetainedDensityEvolvedPhi(phi,width,coefficient);
 }
 fn cm12RetainedDensityCellMean(cell:u32)->f32{
   return state[CM12_RETAINED_INTEGRAL_BASE+cell];

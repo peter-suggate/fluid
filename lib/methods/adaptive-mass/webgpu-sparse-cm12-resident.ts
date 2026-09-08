@@ -3698,6 +3698,7 @@ export class WebGPUSparseCM12Resident {
   get fieldSnapshotSourceForQA() {
     return { state: this.state, conditioning: this.conditioning, topologyArena: this.topologyArena,
       effectiveTransportVelocity: this.effectiveTransportVelocity,
+      activity: this.activity, velocityExtensionLayout: this.velocityExtensionLayout,
       acceptedIndirectArguments: this.acceptedIndirectArguments,
       topologyWorklistBaseWords: this.topologyWorklistBaseBytes / 4,
       acceptedLeafManifestBaseWords: this.acceptedLeafManifestBaseBytes / 4,

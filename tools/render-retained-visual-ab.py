@@ -163,8 +163,15 @@ def expected_ball(config, time):
     ball = volumes[0]
     center = np.array([ball["center_m"][key] for key in ["x", "y", "z"]])
     radius = ball["radius_m"]
-    g = scene["fluid"]["gravity_m_s2"]["y"]
-    center[1] += .5 * g * time*time
+    gravity = np.array([scene["fluid"]["gravity_m_s2"][key] for key in ["x", "y", "z"]])
+    # Production transports before adding gravity. After n completed steps,
+    # undisturbed material has received n-1 moving gathers, not n full kicks.
+    # This is a QA reference only; the saved mesh is never transformed.
+    dt = config["dt"]
+    step = round(time / dt)
+    if not np.isclose(time, step * dt):
+        raise ValueError("The split-step reference requires a captured step boundary")
+    center += gravity * dt * dt * step * (step - 1) / 2
     pool = scene["container"]["height_m"] * scene["container"]["fillFraction"]
     return (center, radius) if center[1] - radius > pool else None
 
@@ -219,7 +226,7 @@ def draw_panel(ax, config, data, receipt, arm, step, projection):
         if ball:
             center, radius = ball; theta = np.linspace(0, 2*np.pi, 241)
             ax.plot(center[0] + radius*np.cos(theta), center[1] + radius*np.sin(theta), "--", color="#d78024", lw=1,
-                    label="Pre-impact ballistic sphere")
+                    label="Pre-impact discrete-gravity sphere")
         for index, body in enumerate(bodies):
             p = body["pose"]["position_m"]
             ax.plot(p["x"], p["y"], marker="+", color=["#aa711c", "#ad463b"][index % 2], ms=8)
@@ -243,7 +250,7 @@ def render(root, output, selected_steps):
                 ax = fig.add_subplot(len(steps), 2, row*2+col+1, projection="3d" if projection == "mesh" else None)
                 data, receipt = load_frame(root, arm, step)
                 draw_panel(ax, config, data, receipt, arm, step, projection)
-        suffix = "Unmodified shipping triangles · matched camera · flat QA shading" if projection == "mesh" else "GPU triangle sections at z=0 · dashed orange: ballistic sphere before impact"
+        suffix = "Unmodified shipping triangles · matched camera · flat QA shading" if projection == "mesh" else "GPU triangle sections at z=0 · dashed orange: discrete-gravity sphere before impact"
         title = {"quarter": "Quarter pool impact", "half": "Half pool impact", "mini32": "Mini32 dam break", "rigid": "Settled tank with rigid bodies"}.get(config["sceneKey"], config["sceneId"])
         fig.suptitle(f"{title}\n{suffix}", fontsize=11)
         path = output / f"{projection}-comparison.png"; fig.savefig(path, dpi=115); plt.close(fig); print(path.resolve())
