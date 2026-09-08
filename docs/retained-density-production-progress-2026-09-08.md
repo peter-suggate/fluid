@@ -11,6 +11,17 @@ sections; they are not artifacts of different app lighting. See
 and the per-checkpoint receipts. Passing initial geometry and mass checks is
 not sufficient acceptance for the production cutover.
 
+The subsequent [full-fine imposed-flow diagnosis](retained-imposed-flow-diagnosis-2026-09-08.md)
+isolates three failures before meshing: native mean interpolation diffuses the
+translated sphere; the retained lift creates face jumps of 0.361 and 0.415
+after one and two steps; and its implicit companion publishes 144 false zero
+samples after the first step, including points with density zero. The actual
+native transport matches the prescribed half-cell translation stencil to
+`4.47e-8`, so the diagnosis does not rely on assumed force or velocity behavior.
+See the [motion authority design and negative controls](retained-density-motion-authority-design-2026-09-08.md).
+The next work validates transport of the current spatial field and its measure
+together. It does not repair the mesh or fit a surface to the old mean targets.
+
 This is an implementation record, not a claim that arbitrary curvature transport
 or every boundary interaction is complete. The authored plane, quadratic height,
 box and sphere sources now compile to a physical density field used by both the
