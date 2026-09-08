@@ -32,7 +32,7 @@ const sceneKey = option("scene", "quarter") as keyof typeof sceneIds;
 assert.ok(sceneKey in sceneIds, `Unknown scene ${sceneKey}`);
 const arm = option("arm", "coarse"); assert.ok(arm === "coarse" || arm === "fine");
 const densityTransport = option("transport", "native-cm12");
-assert.ok(densityTransport === "native-cm12" || densityTransport === "current-map");
+assert.ok(densityTransport === "native-cm12" || densityTransport === "retained-cm12" || densityTransport === "current-map");
 const steps = option("steps", "0,6,15,30").split(",").map(Number);
 assert.ok(steps[0] === 0 && steps.every((step, i) => Number.isSafeInteger(step) && step >= 0 && (!i || step > steps[i - 1]!)));
 const definition = getSceneDefinition(sceneIds[sceneKey]);
@@ -74,6 +74,9 @@ if (process.argv.includes("--list")) {
     "lib/methods/adaptive-mass/sparse-cm12-current-map.wgsl.ts",
     "lib/methods/adaptive-mass/sparse-cm12-current-map-measure.wgsl.ts",
     "lib/methods/adaptive-mass/sparse-cm12-current-map-velocity.wgsl.ts",
+    "lib/methods/adaptive-mass/sparse-cm12-native-surface.wgsl.ts",
+    "lib/core/webgpu-water-adaptive-mesh.ts",
+    "lib/core/webgpu-water-global-fine-tetra.ts",
     "tools/capture-retained-visual-ab-dawn.ts"];
   await writeFile(join(output, "provenance.json"), JSON.stringify({
     gitHead: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
@@ -97,6 +100,11 @@ if (process.argv.includes("--list")) {
     solver = await adaptiveMassMethod.createSolverAsync!(device, scene, "balanced", values, undefined,
       progress => console.log(JSON.stringify({ phase: "initialization", elapsed_ms: performance.now() - startedAt, progress }))) as WebGPUAdaptiveMassSolver;
     await solver.waitForSimulationReady();
+    if (densityTransport === "native-cm12") {
+      assert.equal(solver.fieldSnapshotSourceForQA.retainedControlBaseWords, undefined,
+        "Previous native surface must not allocate an experimental retained field");
+      assert.equal(solver.fieldSnapshotSourceForQA.currentMap, undefined);
+    }
     assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], dimensions);
     const stageReceipts: {stage:string, buffer:GPUBuffer}[] = [];
     if (densityTransport === "current-map") solver.setStageCaptureForQA((stage, encoder) => {

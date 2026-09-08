@@ -381,7 +381,8 @@ export const SPARSE_CM12_STAGES = Object.freeze({
     controls: [{ kind: "param-choice", param: "densityTransport", label: "Density transport",
       hint: "Changing the density authority rebuilds the simulation.",
       options: [{ value: "native-cm12", label: "Native CM12" },
-        { value: "current-map", label: "Current spatial field" }] }],
+        { value: "retained-cm12", label: "Retained · experimental" },
+        { value: "current-map", label: "Current field · experimental" }] }],
     chip: (context) => context.values.densityTransport === "current-map"
       ? "one field · amounts + surface" : "trace · scatter · gather",
   },

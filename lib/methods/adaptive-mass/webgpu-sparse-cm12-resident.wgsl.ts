@@ -1,3 +1,4 @@
+import { NATIVE_PRESENTATION_COARSE_COLUMN_PHI_WGSL, NATIVE_PRESENTATION_INTERPOLATED_VOLUME_PHI_WGSL, NATIVE_SURFACE_PROOF_VIRTUAL_COLUMN_PHI_WGSL, NATIVE_SURFACE_PROOF_VIRTUAL_VOLUME_PHI_WGSL } from "./sparse-cm12-native-surface.wgsl";
 import { createSparseCM12CurrentMapCompletionSpecs, createSparseCM12CurrentMapCompletionWGSL, instrumentSparseCM12CurrentMapCompletionWGSL } from "./sparse-cm12-current-map-completion.wgsl";
 import { createSparseCM12CurrentMapWGSL, type SparseCM12CurrentMapLayout } from "./sparse-cm12-current-map.wgsl";
 import { createSparseCM12CurrentMapMeasureWGSL, type SparseCM12CurrentMapMeasureLayout } from "./sparse-cm12-current-map-measure.wgsl";
@@ -3876,7 +3877,7 @@ fn presentationColumnContinuation(index:i32,count:i32)->vec4i{
 fn presentationContinuationWeights(d:i32)->vec3f{
   let t=f32(d);return vec3f(0.5*(t-1.0)*(t-2.0),-t*(t-2.0),0.5*t*(t-1.0));
 }
-fn presentationCoarseColumnPhi(coarse:vec3i,cellScale:u32,
+${retainedDensityLayout ? /* wgsl */ `fn presentationCoarseColumnPhi(coarse:vec3i,cellScale:u32,
  cacheFirst:vec3i,cacheDimensions:vec3u,cacheFits:bool,densityOffset:u32)->f32{
   let count=vec3i(p.dimensions.xyz/cellScale);
   let cx=presentationColumnContinuation(coarse.x,count.x);
@@ -3889,7 +3890,7 @@ fn presentationCoarseColumnPhi(coarse:vec3i,cellScale:u32,
       cacheFirst,cacheDimensions,cacheFits,densityOffset);
   }}
   return value;
-}
+}` : NATIVE_PRESENTATION_COARSE_COLUMN_PHI_WGSL}
 // Quadratic B-spline quasi-interpolation of finite-volume column averages.
 // A quadratic B-spline adds variance 1/4 and a cell average adds 1/12.
 // Subtracting one sixth of the second difference removes their combined
@@ -3915,7 +3916,7 @@ fn presentationHorizontalVolumeScale(brick:u32,scale:u32)->u32{
   }}
   return result;
 }
-fn presentationInterpolatedVolumePhi(q:vec3i,cellScale:u32,
+${retainedDensityLayout ? /* wgsl */ `fn presentationInterpolatedVolumePhi(q:vec3i,cellScale:u32,
  cacheFirst:vec3i,cacheDimensions:vec3u,cacheFits:bool,densityOffset:u32)->f32{
   let position=(vec3f(q)+vec3f(0.5))/f32(cellScale)-vec3f(0.5);
   let center=vec3i(floor(position+vec3f(0.5)));
@@ -3929,7 +3930,7 @@ fn presentationInterpolatedVolumePhi(q:vec3i,cellScale:u32,
     phi+=wx[x]*wz[z]*mix(lo,hi,ty);
   }}
   return phi;
-}
+}` : NATIVE_PRESENTATION_INTERPOLATED_VOLUME_PHI_WGSL}
 
 // Cache-free mirror of the conservative limited-linear coarse patch. The
 // topology transfer and representability proof use this exact definition.
@@ -10772,7 +10773,7 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
       BRICK_FINE_RESOLUTION*span/PRESENTATION_PAGE_RESOLUTION,span>1u);
     let brickOrigin=brickCoordinate*i32(BRICK_FINE_RESOLUTION);
     let pageOrigin=brickOrigin+pageOffset;let resolution=acceptedBrickResolution(brick);
-    let scale=presentationHorizontalVolumeScale(brick,BRICK_FINE_RESOLUTION*span/resolution);
+    let scale=${retainedDensityLayout ? "presentationHorizontalVolumeScale(brick,BRICK_FINE_RESOLUTION*span/resolution)" : "BRICK_FINE_RESOLUTION*span/resolution"};
     var patchFirst=vec3i(0);var patchDimensions=vec3u(1u);
     var cacheFirst=vec3i(0);var cacheDimensions=vec3u(1u);var cacheCount=0u;
     // Cache by native stencil extent, including macro pages. Their samples
@@ -10786,7 +10787,7 @@ fn cm12PresentationPreparePage(brick:u32,page:u32,lane:u32,
       let lastShifted=(vec3f(lastQ)+vec3f(0.5))/scaleF;
       patchFirst=vec3i(floor(firstShifted));
       patchDimensions=vec3u(vec3i(floor(lastShifted))-patchFirst)+vec3u(1u);
-      cacheFirst=patchFirst-vec3i(2,3,2);cacheDimensions=patchDimensions+vec3u(4u,6u,4u);
+      cacheFirst=patchFirst-vec3i(${retainedDensityLayout ? "2,3,2" : "1,3,1"});cacheDimensions=patchDimensions+vec3u(${retainedDensityLayout ? "4u,6u,4u" : "2u,6u,2u"});
       cacheCount=cacheDimensions.x*cacheDimensions.y*cacheDimensions.z;
     }
     cm12PresentationBrick=brick;cm12PresentationPage=page;
@@ -10957,7 +10958,7 @@ fn cm12PresentationExactSample(brick:u32,page:u32,tile:u32,sample:u32,
   // the packed word carry log2(accepted cell width), atomically with phi.
   // A completely full/empty retained domain has no finite-distance interface.
   // Preserve its sign with a finite half-float payload instead of infinity.
-  phi=clamp(phi,-65504.0,65504.0);
+  ${retainedDensityLayout ? "phi=clamp(phi,-65504.0,65504.0);" : ""}
   let flags=1u|floorContinuation|select(0u,16u,phi<0.0)
     |((31u-countLeadingZeros(max(1u,cm12PresentationScale)))<<8u);
   return vec2u((pack2x16float(vec2f(phi,0.0))&0xffffu)|(flags<<16u),0u);
@@ -11007,7 +11008,7 @@ fn surfaceProofVirtualInteriorColumnPhi(coarse:vec3i,factor:u32)->f32{
   rho[4]=min(rho[4],rho[3]);
   return f32(factor)*presentationResolvedColumnPhi(rho);
 }
-fn surfaceProofVirtualColumnPhi(coarse:vec3i,factor:u32)->f32{
+${retainedDensityLayout ? /* wgsl */ `fn surfaceProofVirtualColumnPhi(coarse:vec3i,factor:u32)->f32{
   let origin=cm12PresentationBrickOrigin/i32(factor);
   let count=vec3i(p.dimensions.xyz/factor);
   let cx=presentationColumnContinuation(origin.x+coarse.x,count.x);
@@ -11019,8 +11020,8 @@ fn surfaceProofVirtualColumnPhi(coarse:vec3i,factor:u32)->f32{
       vec3i(cx.x+x*cx.y-origin.x,coarse.y,cz.x+z*cz.y-origin.z),factor);
   }}
   return value;
-}
-fn surfaceProofVirtualVolumePhi(local:vec3i,factor:u32)->f32{
+}` : NATIVE_SURFACE_PROOF_VIRTUAL_COLUMN_PHI_WGSL}
+${retainedDensityLayout ? /* wgsl */ `fn surfaceProofVirtualVolumePhi(local:vec3i,factor:u32)->f32{
   let position=(vec3f(local)+vec3f(0.5))/f32(factor)-vec3f(0.5);
   let center=vec3i(floor(position+vec3f(0.5)));
   let lowerY=i32(floor(position.y));let ty=fract(position.y);
@@ -11032,7 +11033,7 @@ fn surfaceProofVirtualVolumePhi(local:vec3i,factor:u32)->f32{
       surfaceProofVirtualColumnPhi(at+vec3i(0,1,0),factor),ty);
   }}
   return phi;
-}
+}` : NATIVE_SURFACE_PROOF_VIRTUAL_VOLUME_PHI_WGSL}
 fn surfaceProofAcceptedPhi(local:vec3i,densityOffset:u32)->f32{
   let q=cm12PresentationBrickOrigin+local;
   if(cm12SolidVoxelFractionQ8(q)>=255u){return 4.0*p.frame.y;}
@@ -11252,7 +11253,7 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
     surfaceProofPhi[index]=vec2f(fine,coarse);
   }
   workgroupBarrier();
-  // A demotion must satisfy the curvature criterion at the proposed rung,
+${retainedDensityLayout ? /* wgsl */ `  // A demotion must satisfy the curvature criterion at the proposed rung,
   // not only resemble the currently published contour. Otherwise restriction
   // can immediately request its inverse refinement, repeatedly remapping a
   // stationary interface. Reuse the virtual restricted-density cache.
@@ -11290,6 +11291,7 @@ fn publishSparseCM12SurfaceRepresentabilityReceipts(
       atomicOr(&surfaceProofFailure,16u);atomicStore(&surfaceProofValid,0u);
     }
   }
+` : ""}
   for(var index=lane;index<PRESENTATION_SAMPLES_PER_PAGE;index+=64u){
     let z=index/64u;let remainder=index-z*64u;
     let y=remainder/8u;let x=remainder-y*8u;
@@ -11368,7 +11370,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   let brickOrigin=brickCoordinate*i32(BRICK_FINE_RESOLUTION);
   let pageOrigin=brickOrigin+pageOffset;
   let resolution=acceptedBrickResolution(brick);
-  let scale=presentationHorizontalVolumeScale(brick,BRICK_FINE_RESOLUTION*span/resolution);
+  let scale=${retainedDensityLayout ? "presentationHorizontalVolumeScale(brick,BRICK_FINE_RESOLUTION*span/resolution)" : "BRICK_FINE_RESOLUTION*span/resolution"};
   var patchFirst=vec3i(0);var patchDimensions=vec3u(1u);
   var cacheFirst=vec3i(0);var cacheDimensions=vec3u(1u);var cacheCount=0u;
   if(scale>1u){
@@ -11378,7 +11380,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
     let lastShifted=(vec3f(lastQ)+vec3f(0.5))/scaleF;
     patchFirst=vec3i(floor(firstShifted));
     patchDimensions=vec3u(vec3i(floor(lastShifted))-patchFirst)+vec3u(1u);
-    cacheFirst=patchFirst-vec3i(2,3,2);cacheDimensions=patchDimensions+vec3u(4u,6u,4u);
+    cacheFirst=patchFirst-vec3i(${retainedDensityLayout ? "2,3,2" : "1,3,1"});cacheDimensions=patchDimensions+vec3u(${retainedDensityLayout ? "4u,6u,4u" : "2u,6u,2u"});
     cacheCount=cacheDimensions.x*cacheDimensions.y*cacheDimensions.z;
   }
   let cacheFits=cacheCount<=PRESENTATION_CACHE_CAPACITY;
@@ -11493,7 +11495,7 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
       floorContinuation=presentationFloorContinuationFlag(
         q,i32(localX),i32(localZ),false);
     }
-    phi=clamp(phi,-65504.0,65504.0);
+    ${retainedDensityLayout ? "phi=clamp(phi,-65504.0,65504.0);" : ""}
     let flags=1u|floorContinuation|select(0u,16u,phi<0.0)
       |((31u-countLeadingZeros(max(1u,scale)))<<8u);
     fineSamples[page*PRESENTATION_SAMPLES_PER_PAGE+localIndex]

@@ -669,9 +669,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           const fineResolution = options.brickFineResolution ?? 8;
           const resolutionForBrick = options.initialResolutionForQA === undefined
             ? undefined : () => options.initialResolutionForQA!;
-          retainedDensity = compileRetainedSceneDensity(scene, {
+          retainedDensity = options.densityTransport === "retained-cm12"
+            || options.densityTransport === "current-map" ? compileRetainedSceneDensity(scene, {
             transport: options.densityTransport === "current-map" ? "current-map" : undefined,
-          });
+          }) : null;
           if (options.densityTransport === "current-map" && !retainedDensity) {
             throw new Error("Current spatial field transport does not support this initial liquid authoring");
           }
