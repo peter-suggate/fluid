@@ -5,6 +5,10 @@ import { SparseCM12GenerationBudgetDeferred } from "./sparse-cm12-generation-bud
 import { PreparedSparseCM12GenerationTransfer, type SparseCM12GenerationFields,
   type SparseCM12NewAirCoverage } from "./sparse-cm12-generation-transfer";
 
+/** The packed native geometry stays in the leased GPU arena. Worker requests
+ * carry only leaf ranges and accepted row IDs, never its full SCMT shadow. */
+export type SparseCM12GPUCapturedGeometryRecipe = Omit<CM12CapturedGeometryRecipe, "templateWords">;
+
 export interface SparseCM12PackedGenerationTarget extends SparseCM12GenerationFields {
   readonly topology: GPUBuffer;
   readonly atlas: SparseAdaptiveMassAtlas;
@@ -17,7 +21,7 @@ export interface SparseCM12PackedGenerationTarget extends SparseCM12GenerationFi
 /** Compact immutable input. Native geometry, hash insertion, overlap search and
  * field accumulation execute on the GPU; there is no host native-cell graph. */
 export function packSparseCM12GPUGenerationTransferInput(
-  source: CM12CapturedGeometryRecipe, destination: Pick<SparseCM12PackedGenerationTarget, "atlas" | "cellIds" | "rowIds">,
+  source: SparseCM12GPUCapturedGeometryRecipe, destination: Pick<SparseCM12PackedGenerationTarget, "atlas" | "cellIds" | "rowIds">,
   newAirCoverage: readonly SparseCM12NewAirCoverage[] = [],
 ) {
   if (source.atlas.brickFineResolution !== 8 || destination.atlas.brickFineResolution !== 8)
@@ -86,7 +90,7 @@ export function packSparseCM12GPUGenerationTransferInput(
 /** Direct GPU dyadic intersection. The source topology lease fixes the compact
  * geometry while live parity is read at publication, preserving advancing fields. */
 export async function prepareSparseCM12GPUGenerationTransfer(
-  device: GPUDevice, recipe: CM12CapturedGeometryRecipe,
+  device: GPUDevice, recipe: SparseCM12GPUCapturedGeometryRecipe,
   source: SparseCM12GenerationFields, destination: SparseCM12PackedGenerationTarget,
   maximumTemporaryBytes = Number.POSITIVE_INFINITY,
   newAirCoverage: readonly SparseCM12NewAirCoverage[] = [],

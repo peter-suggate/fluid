@@ -5,7 +5,7 @@ import { createSolidWorld, SolidWorldDirectory } from "../lib/core/solid-world";
 import { createSparseAdaptiveMassAtlas } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import { WebGPUSparseCM12Resident } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 import { buildSparseAtlasCompositeGrid } from "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
-import { PreparedSparseCM12GenerationTransfer, sparseCM12TransferFaceGeometry } from "../lib/methods/adaptive-mass/sparse-cm12-generation-transfer";
+import { PreparedSparseCM12GenerationTransfer } from "../lib/methods/adaptive-mass/sparse-cm12-generation-transfer";
 import { WebGPUSparseCM12RigidCoupling } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-rigid-coupling";
 import { retainedSceneDensity } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
 import { SPARSE_CM12_RETAINED_RIGID_DISPLACEMENT_HOPS } from
@@ -121,8 +121,8 @@ test("rigid and transfer recipes hydrate prototypes and retain live external bin
    retainedDensity:retainedSceneDensity({generation:1,transitionWidth:0.05,
     domain:{lower:[-0.2,0,-0.2],upper:[0.2,0.4,0.2]},
     primitives:[{kind:"quadratic-height",center:[0,0.2,0],curvature:[0,0,0]}]}),
-   source:{geometry:{dimensions:[8,8,8],cells:[{id:0,lower:[0,0,0],widths:[8,8,8],span:8}],
-    faces:grid.gradientRows.map(row=>sparseCM12TransferFaceGeometry(row.id,row.axis,row.centerFine,row.area,8))},
+   source:{geometryRecipe:{atlas,active:new Set([0]),sourceFirst:new Map([[0,0]]),
+    sourcePageCoordinates:new Map(),dynamicKeys:new Set(),rows:Uint32Array.from(grid.gradientRows,row=>row.id)},
     cellIds:new Uint32Array([0]),rowIds:Uint32Array.from(grid.gradientRows,row=>row.id),
     densityOffset:0,gammaOffset:2,velocityOffset:4,pressureOffset:48,faceOffset:16,
     stateDescriptor:descriptor,controlDescriptor:descriptor,
@@ -130,6 +130,19 @@ test("rigid and transfer recipes hydrate prototypes and retain live external bin
      velocityOffsets:[4,8],faceOffsets:[16,32]}},
   };
   const recipe=structuredClone(await WebGPUSparseCM12Resident.recordPreparedGeneration(input));
+  const recorded = recipe.state as { resident: { state: unknown; topologyArena: unknown };
+   transfer: { bindings: { cm12Resource: number }; pipelines: { cm12Resource: number }[] } };
+  const bindingDescriptor = recipe.operations.find(operation => operation.method === "createBindGroup"
+   && operation.result === recorded.transfer.bindings.cm12Resource)!.args[0] as {
+    entries: { binding: number; resource: { buffer: unknown } }[] };
+  const bufferAt = (binding: number) => bindingDescriptor.entries.find(entry => entry.binding === binding)!.resource.buffer;
+  assert.deepEqual(bufferAt(0), { cm12Resource: 2 }, "source fields remain a live external binding");
+  assert.deepEqual(bufferAt(5), { cm12Resource: 3 }, "source geometry and parity remain in the leased live arena");
+  assert.deepEqual(bufferAt(1), recorded.resident.state);
+  assert.deepEqual(bufferAt(6), recorded.resident.topologyArena);
+  assert.deepEqual(recorded.transfer.pipelines.map(reference =>
+   (recipe.operations.find(operation => operation.result === reference.cm12Resource)!.args[0] as GPUComputePipelineDescriptor).compute.entryPoint),
+   ["indexCells", "indexFaces", "cells", "faces"], "worker recipe computes native intersections on the GPU");
   const replay=createCM12ResourceRecorder(input.limits);
   const external=Array.from({length:4},()=>replay.device.createBuffer(descriptor));
   const realized=await realizeCM12ResourceRecipe(replay.device,recipe,external);

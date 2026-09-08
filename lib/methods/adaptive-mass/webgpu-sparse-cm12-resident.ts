@@ -6,7 +6,7 @@ import { SimulationFailureError } from "../../core/simulation-failure";
 import { SPARSE_CM12_COMMON_HEIGHT_ENABLED, SPARSE_CM12_HEIGHT_ENTRY_POINTS, SPARSE_CM12_HEIGHT_FIELDS,
   SPARSE_CM12_HEIGHT_HEADER_FLOATS, SPARSE_CM12_HEIGHT_ITERATIONS } from
   "./sparse-cm12-height-reconstruction.wgsl";
-import { compileCM12CapturedGeometry, type CM12CapturedGeometryRecipe } from "./sparse-cm12-captured-geometry";
+import { prepareSparseCM12GPUGenerationTransfer, type SparseCM12GPUCapturedGeometryRecipe } from "./sparse-cm12-generation-transfer-gpu";
 import { SparseCM12TemplateArchetypes, type SparseCM12TemplateExpansion } from "./sparse-cm12-template-archetypes";
 import { expandSparseCM12TemplateArchetypesGPU } from "./sparse-cm12-template-expansion-gpu";
 import { SparseCM12TemplateBlockCache, visitSparseCM12TemplateBlocks } from "./sparse-cm12-template-blocks";
@@ -14,7 +14,7 @@ import { createCM12ResourceRecorder, realizeCM12ResourceRecipe, type CM12Resourc
 import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
 import { SparseCM12GenerationPlanningGate } from "./sparse-cm12-generation-planning-gate";
 import { sparseAtlasBrickKey, sparseBrickMaximumFine } from "./sparse-brick-atlas";
-import { sparseCM12TransferFaceGeometry, type SparseCM12NewAirCoverage, type SparseCM12TransferBox, type SparseCM12GenerationFields, type SparseCM12GenerationGeometry, PreparedSparseCM12GenerationTransfer, prepareSparseCM12GenerationTransfer } from "./sparse-cm12-generation-transfer";
+import { type SparseCM12NewAirCoverage, type SparseCM12GenerationFields, PreparedSparseCM12GenerationTransfer } from "./sparse-cm12-generation-transfer";
 import {
   buildSparseAtlasCompositeGrid,
   createSparseAtlasCompositeGridBuildWorkspace,
@@ -3516,7 +3516,7 @@ export class WebGPUSparseCM12Resident {
                 solidWorld: this.currentSolidWorld, maximumBytes, topologyPageCapacityMaximum,
                 symmetry: { scalar, face }, limits: { maxComputeWorkgroupsPerDimension: device.limits.maxComputeWorkgroupsPerDimension,
                   maxBufferSize: device.limits.maxBufferSize, maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize },
-                source: source ? { geometry: source.geometry, geometryRecipe:source.geometryRecipe, cellIds: source.cellIds, rowIds: source.rowIds,
+                source: source ? { geometryRecipe:source.geometryRecipe, cellIds: source.cellIds, rowIds: source.rowIds,
                   densityOffset: source.densityOffset, gammaOffset: source.gammaOffset,
                   velocityOffset: source.velocityOffset, pressureOffset: source.pressureOffset, faceOffset: source.faceOffset,
                   stateDescriptor: {size:this.state.size,usage:this.state.usage},
@@ -6165,7 +6165,7 @@ export class WebGPUSparseCM12Resident {
     retainedPreparationCache?: RetainedScenePreparationCache;
     journal?: SparseCM12PressureJournalCapacityRequest;
     source?: Omit<SparseCM12GenerationFields, "state" | "liveControl"> & {
-      geometry?: SparseCM12GenerationGeometry; geometryRecipe?: CM12CapturedGeometryRecipe; stateDescriptor: {size:number;usage:number};
+      geometryRecipe: SparseCM12GPUCapturedGeometryRecipe; stateDescriptor: {size:number;usage:number};
       controlDescriptor: {size:number;usage:number};
       liveControl: Omit<NonNullable<SparseCM12GenerationFields["liveControl"]>, "buffer"> };
     rigid?: { bodies: {size:number;usage:number}; exchange: {size:number;usage:number};
@@ -6186,9 +6186,8 @@ export class WebGPUSparseCM12Resident {
       false, input.symmetry, undefined, input.candidateKeys, input.retainedDensity, input.retainedPreparationCache);
     await resident.waitForSimulationPipelines();
     const firstSource = input.rigid ? 2 : 0;
-    if (input.source?.geometryRecipe) Object.assign(input.source, compileCM12CapturedGeometry(input.source.geometryRecipe));
-    const transfer = input.source ? await prepareSparseCM12GenerationTransfer(recorder.device,
-      input.source.geometry!, grid, { ...input.source,
+    const transfer = input.source ? await prepareSparseCM12GPUGenerationTransfer(recorder.device,
+      input.source.geometryRecipe, { ...input.source,
         state: recorder.externalResources[firstSource] as GPUBuffer,
         liveControl: { ...input.source.liveControl, buffer: recorder.externalResources[firstSource+1] as GPUBuffer } },
       resident.generationTransferTarget(), input.maximumBytes - resident.allocatedBytes,
@@ -8692,7 +8691,8 @@ export class WebGPUSparseCM12Resident {
     };
   }
   private generationTransferTarget() {
-    return { state: this.state, cellIds: this.initialGenerationCellIds, rowIds: this.initialGenerationRowIds,
+    return { state: this.state, topology: this.topologyArena, atlas: this.constructionAtlas,
+      cellIds: this.initialGenerationCellIds, rowIds: this.initialGenerationRowIds,
       densityOffset:this.layout.densityA, densityOtherOffset:this.layout.densityB,
       gammaOffset:this.layout.gammaA, gammaOtherOffset:this.layout.gammaB,
       velocityOffset:this.layout.cellVelocityA, velocityOtherOffset:this.layout.cellVelocityB,
@@ -8765,8 +8765,8 @@ export class WebGPUSparseCM12Resident {
     const next = await this.createReplacement(atlas, grid, active, source.scalarD4, source.faceD4, maximumBytes, source, signal, newAirCoverage, preserveCandidateBacking);
     try {
       await next.waitForSimulationPipelines();
-      const transfer = next.preparedGenerationTransfer ?? await prepareSparseCM12GenerationTransfer(
-        this.device, source.geometry!, grid!, { ...source,
+      const transfer = next.preparedGenerationTransfer ?? await prepareSparseCM12GPUGenerationTransfer(
+        this.device, source.geometryRecipe, { ...source,
           liveControl: {buffer:this.topologyArena, ...this.generationTransferControlDescription()} },
         next.generationTransferTarget(), maximumBytes - next.allocatedBytes, newAirCoverage);
       next.preparedGenerationTransfer = undefined;
@@ -8882,9 +8882,9 @@ export class WebGPUSparseCM12Resident {
   ) {
     const { atlas, active, sourceFirst, sourcePageCoordinates, dynamicKeys,
       planned, activity, recordsByKey } = planning ?? await this.captureGenerationPlanningSourceWhileLeased();
-    // Capture only overlap geometry and field addresses, not another complete
-    // pressure/incidence object graph. The GPU's accepted row list below is
-    // the source face authority, including connected signed frontier pages.
+    // Capture compact leaf descriptors and accepted native field addresses.
+    // Their geometry remains in the leased GPU arena, including connected
+    // signed frontier pages; no host cell/face overlap graph is constructed.
     const header = this.device.createBuffer({ label: "CM12 transfer generation header",
       size: 4 * (32 + 64), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     let words: Uint32Array;
@@ -8897,17 +8897,20 @@ export class WebGPUSparseCM12Resident {
       await header.mapAsync(GPUMapMode.READ);
       words = new Uint32Array(header.getMappedRange()).slice();
     } finally { header.destroy(); }
-    const count = words[5]!, slot = words[2]! & 1;
-    const rowBuffer = this.device.createBuffer({ label: "CM12 transfer accepted row IDs",
-      size: Math.max(4, 4 * count), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    let rows: Uint32Array;
+    const cellCount = words[4]!, count = words[5]!, slot = words[2]! & 1;
+    const rowBuffer = this.device.createBuffer({ label: "CM12 transfer accepted native IDs",
+      size: Math.max(4, 4 * (cellCount + count)), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    let cellIds: Uint32Array, rows: Uint32Array;
     try {
       const encoder = this.device.createCommandEncoder();
+      if (cellCount > 0) encoder.copyBufferToBuffer(this.topologyArena,
+        this.topologyWorklistBaseBytes + 4 * words[14 + slot]!, rowBuffer, 0, 4 * cellCount);
       if (count > 0) encoder.copyBufferToBuffer(this.topologyArena,
-        this.topologyWorklistBaseBytes + 4 * words[16 + slot]!, rowBuffer, 0, 4 * count);
+        this.topologyWorklistBaseBytes + 4 * words[16 + slot]!, rowBuffer, 4 * cellCount, 4 * count);
       this.device.queue.submit([encoder.finish()]);
       await rowBuffer.mapAsync(GPUMapMode.READ);
-      rows = new Uint32Array(rowBuffer.getMappedRange()).slice(0, count);
+      const nativeIds = new Uint32Array(rowBuffer.getMappedRange());
+      cellIds = nativeIds.slice(0, cellCount); rows = nativeIds.slice(cellCount, cellCount + count);
     } finally { rowBuffer.destroy(); }
     // Earlier reads are separate queue submissions while physics advances.
     // Validate the lease after the last topology read, so urgent GPU revocation
@@ -8923,13 +8926,11 @@ export class WebGPUSparseCM12Resident {
       if (observed[0] !== 1 || observed[1] !== 0 || observed[2] !== activity.acceptedTopologyGeneration
         || words[0] !== activity.acceptedTopologyGeneration) throw new SparseCM12GenerationStale();
     } finally { check.destroy(); }
-    const geometryRecipe = { atlas, active, sourceFirst, sourcePageCoordinates, dynamicKeys,
-      rows, templateWords: this.templateWords };
-    const compiledGeometry = typeof Worker === "undefined" ? compileCM12CapturedGeometry(geometryRecipe) : undefined;
+    const geometryRecipe = { atlas, active, sourceFirst, sourcePageCoordinates, dynamicKeys, rows };
     const scalarParity = words[32 + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity]! & 1;
     const faceParity = words[32 + SPARSE_CM12_FRAME_CONTROL_HEADER.faceParity]! & 1;
-    return { atlas, geometry: compiledGeometry?.geometry, geometryRecipe,
-      active, planned, activity, recordsByKey, cellIds:compiledGeometry?.cellIds ?? new Uint32Array(0), rowIds:rows,
+    return { atlas, geometryRecipe,
+      active, planned, activity, recordsByKey, cellIds, rowIds:rows,
       state: this.state,
       densityOffset: scalarParity ? this.layout.densityB : this.layout.densityA,
       gammaOffset: scalarParity ? this.layout.gammaB : this.layout.gammaA,
