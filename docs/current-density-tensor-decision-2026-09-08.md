@@ -1,6 +1,6 @@
 # Current density: bounded 3D tensor investigation
 
-Status: CPU mathematical validation, not a selected production replacement. The isolated current-quadric GPU prototype establishes useful affine transport cases; it does not represent general evolving fluid geometry. This note proposes the next smooth-field carrier and records its demonstrated failure cases. Neither prototype has fixed shipping fluid motion.
+Status: CPU mathematical validation and five passing Metal GPU translation/admission cases, not a selected production replacement. The isolated current-quadric GPU prototype establishes useful affine transport cases; it does not represent general evolving fluid geometry. This note investigates the next smooth-field carrier and records its demonstrated failure cases. Neither prototype has fixed shipping fluid motion.
 
 ## Decision and rejected shortcut
 
@@ -23,6 +23,8 @@ I  : [0, 0, 30, -60, 30]
 Their tensor product has 125 local coefficients. Canonical shared entities store only 27 scalars per periodic bulk cell: eight vertex mixed derivatives, twelve edge partial integrals/derivatives, six face partial integrals/derivatives, and one volume mean. No 125-coefficient expansion is retained globally. Every edge and face has one authority; independent per-leaf interpolation would break this property.
 
 Two f32 banks cost 216N bytes: 40.5 MiB at 196,608 periodic bulk cells. A finite 64×48×64 support grid, counting outer boundary entities, costs about 41.92 MiB before directories, admission receipts, staging, branch records, and velocity data. The CPU reference uses 27N f64 values per state: 108 KiB at 8³ and .844 MiB at 16³. A directional translation pass uses at most five source slots for a point/derivative and ten for an interval average. Three sparse passes require roughly 500–800N multiply-adds; polynomial range checks require roughly 750N useful multiply-adds. These are arithmetic/storage estimates, not GPU performance results.
+
+The implemented GPU experiment retains one accepted bank and two directional scratch banks so a failed candidate cannot overwrite accepted data. Its field storage is therefore 324N bytes: 60.75 MiB at 196,608 cells, before receipts and query buffers. Its current admission limit is 32³ cells; the larger number is an extrapolated storage estimate, not a tested allocation or performance result.
 
 Quadratic B-splines are a smaller alternative: one coefficient per control point, 27 local basis values and C1 smoothness on an ordinary grid. Bounded coefficients provide a sufficient range condition. However, matching prescribed local masses with bounded shared coefficients is a coupled and potentially infeasible constraint; simply advecting coefficients does not establish local conservation. Hierarchical splines require an actual nonnegative partition of unity across refinement, not independent octree fits. They remain an alternative to benchmark if the tensor memory or remap cost is excessive. [Giannelli et al., THB-spline methods](https://gs.jku.at/pubs/NFNreport30.pdf)
 
@@ -63,12 +65,27 @@ The tensor tests verify independent 1D reduction to roundoff, all 27 translated 
 
 This is roughly fifth-order density and fourth-order gradient convergence on this smooth translation fixture, not a general theorem or a production timing claim.
 
+### GPU translation and f32 stability
+
+The isolated [GPU implementation](../tools/implicit-density/tensor-csl4-gpu.ts) performs three directional passes over the current 27-functionals bank, followed by device Bernstein admission and conditional accepted publication. It has no per-step CPU field work, authored seed, external native-M0 target, clipping, or surface operation. Point, gradient and periodic box-integral queries measure the same current polynomial; readbacks are explicit QA operations. Support is a complete periodic grid under prescribed uniform translation.
+
+An initial Metal run failed the unchanged `3e-5` maximum moment-error bound at 4³ (`3.150154e-5`). Expanded cardinal weights accumulated cancellation. The revised arithmetic evaluates the same quartic as a factored Hermite cubic plus `30 δ t²(1−t)²`, with `δ=I−(V0+V1)/2−(hD0−hD1)/12`. It reflects toward the nearer endpoint, and computes interval flux differences from the difference of the two current five-moment records. This preserves an arbitrary constant exactly without changing the polynomial or imposing a new mass target. The independent [f32 arithmetic audit](../tests/tensor-csl4-float32-stability.test.ts) reduces 4³/8³ orbit moment errors from `3.376e-5`/`3.013e-5` to `2.333e-5`/`2.794e-5`; it rounds each primitive operation and is not an exact model of Metal FMA contraction.
+
+Command: `WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=metal node --import tsx --test tests/tensor-csl4-gpu-dawn.test.ts`, under the repository GPU lease. The second actual Metal run passed all five subcases with the original tolerances: anisotropic independent 1D reduction; word-exact fractional translation of `.37` and its zero mixed derivatives; nonquadratic smooth orbits; admitted-source range failure with word-exact rollback and successful integer-shift retry; and rejected initial sharp moments. The local receipt is `/tmp/fluid-tensor-csl4-gpu-2.log`.
+
+| Cells per axis | Steps | Maximum analytic density error | Maximum analytic gradient error | Maximum GPU/CPU moment difference | Maximum sampled shared-face value/gradient difference |
+|---|---:|---:|---:|---:|---:|
+| 4 | 12 | 6.837105e-4 | 4.829085e-3 | 2.285725e-5 | 0 |
+| 8 | 24 | 2.146086e-5 | 2.257171e-4 | 2.809379e-5 | 0 |
+
+Total-amount error remained within `2e-6` and the cross-cell periodic box integral within `3e-6` of the current CPU field. These are bounded fixture checks, not universal error bounds. Device range tests still use f32 arithmetic rather than outward-rounded enclosures. The suite took 1.251 s including process setup; this is not a production step-time benchmark. Saturated sphere/plane transport, sparse support, sharp branches, clipped solids and nonuniform deformation remain unresolved.
+
 | Gate | Required independent evidence | Current status |
 |---|---|---|
 | Tensor algebra | 1D reduction, mixed functional transfer, exact box moments, full C1 face nets | CPU passes |
 | Smooth translation | Several resolutions, complete orbit, analytic value/gradient errors, same-field mass and bounds at every step | CPU 4³/8³/16³ passes |
-| Rejection protocol | Admitted source → inadmissible candidate; accepted field/parity unchanged; no clip | CPU negative control; GPU implementation pending |
-| GPU translation | Independent CPU comparison of every stored moment, queries, box amounts and bounds; f32 budget and resource counts | Pending |
+| Rejection protocol | Admitted source → inadmissible candidate; accepted field/parity unchanged; no clip | CPU and Metal pass; GPU retry and initial rejection verified |
+| GPU translation | Independent CPU comparison of every stored moment, queries, box amounts and bounds; f32 budget and resource counts | Five Metal cases pass; uniform periodic translation only |
 | Saturation and curved primitives | Original clipped plane and sphere, t=0 fidelity, translated saturation boundaries, explicit branch/refinement admission | Unresolved; clipped-plane counterexample rejects |
 | Non-affine deformation | Exact invertible three-shear map, current-field mixed-jet/partial-integral transfer, controlled integration errors and mass, reversal/convergence | Analytic map fixture only |
 | Sharp branches | Moving box edge/corner, disjoint components, contact/merge semantics, winning-region integrals, branch overflow | Pending |
