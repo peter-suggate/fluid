@@ -126,7 +126,7 @@ for (const fixture of fixtures) (dawnModule ? test : test.skip)(
         const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(output, 0, readback, 0, output.size);
         device.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ);
         try {
-          const actual = new Uint32Array(readback.getMappedRange());
+          const actual: Uint32Array = new Uint32Array(readback.getMappedRange());
           exactWords(actual.subarray(0, reference.words.length), reference.words, `${fixture.name} poison ${poison}`);
           assert.deepEqual(actual.subarray(reference.words.length), guardWords, "expansion must not overwrite foreign arena/occupancy guards");
         } finally { readback.unmap(); }
