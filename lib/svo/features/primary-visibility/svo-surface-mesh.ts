@@ -52,11 +52,48 @@ export const SVO_SURFACE_MESH_BYTES = 64 * 1024 * 1024;
 export const SVO_SURFACE_MESH_HEADER_BYTES = 64;
 /** First 64 bytes retain the public draw/diagnostic ABI; tail is builder state. */
 export const SVO_SURFACE_MESH_STATE_BYTES = 80;
-/** Maximum bricks extracted in one presentation; no whole-world dispatch. */
+/** Bricks extracted by one bounded GPU batch; no whole-world dispatch. */
 export const SVO_SURFACE_MESH_BUILD_BRICKS_PER_FRAME = 128;
-/** Separate bounded GPU batches share one presentation, avoiding a complete
- * fallback render between every 128 bricks. Prepare/publish gate each batch. */
-export const SVO_SURFACE_MESH_BUILD_BATCHES_PER_PRESENTATION = 16;
+/**
+ * Batches encoded in the first presentation of a build. Prepare/publish gate
+ * each batch on the GPU, so several share one presentation instead of paying
+ * a complete fallback render between every 128 bricks.
+ */
+export const SVO_SURFACE_MESH_BUILD_BATCHES_INITIAL = 16;
+/**
+ * Ceiling on batches per presentation once a build has stayed pending.
+ *
+ * Every presentation of an incomplete build re-traces the current voxel scene
+ * at full resolution as its fallback, and that trace, not the extraction, is
+ * what a long build is made of: on `hero-garden-hose-x10` a 2,048-brick
+ * presentation spent 8 ms extracting and 83 ms tracing, and 595,825 bricks
+ * took ~291 such presentations. The extraction is GPU resident and its cursor
+ * is GPU owned, so the host is free to encode more batches per presentation.
+ * Doubling while the build stays pending keeps an edit's short rebuild at one
+ * cheap presentation and lets a whole-world build reach this ceiling within a
+ * few frames, where extraction outweighs the fallback it is paired with.
+ * Batches past completion dispatch zero workgroups.
+ */
+export const SVO_SURFACE_MESH_BUILD_BATCHES_MAXIMUM = 128;
+
+/**
+ * Batches to encode for the given number of consecutive presentations this
+ * build has already spent pending. Zero is the first presentation of a build.
+ */
+export function surfaceMeshBuildBatches(pendingPresentations: number): number {
+  const ramp = Math.max(0, Math.floor(pendingPresentations));
+  return Math.min(SVO_SURFACE_MESH_BUILD_BATCHES_MAXIMUM, SVO_SURFACE_MESH_BUILD_BATCHES_INITIAL * 2 ** Math.min(ramp, 30));
+}
+
+/** Presentations a build of `bricks` bricks needs under the ramp, from a cold start. */
+export function surfaceMeshBuildPresentations(bricks: number): number {
+  let remaining = Math.max(0, bricks); let presentations = 0;
+  while (remaining > 0) {
+    remaining -= surfaceMeshBuildBatches(presentations) * SVO_SURFACE_MESH_BUILD_BRICKS_PER_FRAME;
+    presentations += 1;
+  }
+  return presentations;
+}
 
 export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culling = true): string {
   return /* wgsl */ `

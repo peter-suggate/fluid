@@ -72,7 +72,7 @@ SVO_THICK_GLASS_RECORD_STRIDE_BYTES,
 unpackSvoThickGlassVolumes
 } from "../features/materials/svo-thick-glass";
 import { SVO_THIN_GLASS_RECORD_STRIDE_BYTES } from "../features/materials/svo-thin-glass";
-import { SVO_SURFACE_MESH_BUILD_BATCHES_PER_PRESENTATION,SVO_SURFACE_MESH_BYTES,SVO_SURFACE_MESH_HEADER_BYTES,SVO_SURFACE_MESH_STATE_BYTES,type SvoSurfaceMeshStatus } from "../features/primary-visibility/svo-surface-mesh";
+import { SVO_SURFACE_MESH_BYTES,SVO_SURFACE_MESH_HEADER_BYTES,SVO_SURFACE_MESH_STATE_BYTES,type SvoSurfaceMeshStatus,surfaceMeshBuildBatches } from "../features/primary-visibility/svo-surface-mesh";
 import {
 createSvoBrickRasterCullWGSL,
 createSvoRasterCoverageOverflowArgsWGSL,
@@ -1152,6 +1152,8 @@ export class SparseVoxelDrySceneRenderer {
   private surfaceMeshReadbackPending = false;
   private surfaceMeshReadbackCopied = false;
   private surfaceMeshFrames = 0;
+  /** Consecutive presentations the current build has spent pending; paces the batch ramp. */
+  private surfaceMeshBuildPresentations = 0;
   surfaceMeshStatus?: SvoSurfaceMeshStatus;
   private surfaceMeshDispatch?: GPUBuffer;
   private surfaceMeshState?: GPUBuffer;
@@ -1883,6 +1885,9 @@ export class SparseVoxelDrySceneRenderer {
         const completedBricks = words[14]!;
         const totalBricks = words[18]!;
         const restartReasons = ["publication", "initial", "topology", "geometry", "publication"] as const;
+        // A new build generation is a new publication: pace it from the start
+        // again so a small edit's rebuild stays a cheap presentation.
+        if (this.surfaceMeshStatus?.builds !== undefined && this.surfaceMeshStatus.builds !== words[12]) this.surfaceMeshBuildPresentations = 0;
         this.surfaceMeshStatus = {
           state: building && !extractionFailed && (!capacityPaused || canGrow) ? "pending" : fallback ? "blocked" : "ready",
           quads: words[1], requiredQuads,
@@ -1933,8 +1938,13 @@ export class SparseVoxelDrySceneRenderer {
     };
     // GPU prepare checks revisions, completion and capacity before every batch.
     // Once complete the remaining indirect builds are zero-work; no host count
-    // or per-batch readback is used to schedule construction.
-    const buildBatches = this.surfaceMeshStatus?.state === "ready" ? 1 : SVO_SURFACE_MESH_BUILD_BATCHES_PER_PRESENTATION;
+    // or per-batch readback is used to schedule construction. The host only
+    // decides how many batches share this presentation: one to notice a new
+    // publication while ready, and a ramp while a build stays pending, since
+    // each pending presentation also pays the full-resolution fallback trace.
+    const pending = this.surfaceMeshStatus?.state !== "ready";
+    const buildBatches = pending ? surfaceMeshBuildBatches(this.surfaceMeshBuildPresentations) : 1;
+    this.surfaceMeshBuildPresentations = pending ? this.surfaceMeshBuildPresentations + 1 : 0;
     for (let batch = 0; batch < buildBatches; batch += 1) {
     const prepare = encoder.beginComputePass({ label: "Voxel surface mesh revision check" });
     prepare.setPipeline(pipelines.prepare); bindCompute(prepare); prepare.dispatchWorkgroups(1); prepare.end();
@@ -4403,6 +4413,7 @@ export class SparseVoxelDrySceneRenderer {
     if (this.surfaceMeshStatus) {
       this.surfaceMeshStatus = { ...this.surfaceMeshStatus, state: "pending", buildPhase: "extracting" };
       this.surfaceMeshFrames = 0;
+      this.surfaceMeshBuildPresentations = 0;
     }
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;

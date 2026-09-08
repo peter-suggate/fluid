@@ -24,9 +24,21 @@ the vertex stage applies the current metre mapping.
 
 The GPU checks topology and scene-geometry revisions before extraction. Camera
 motion and lighting changes reuse geometry. A changed publication rebuilds the
-whole mesh across frames, extracting at most 128 bricks per frame. Rays remain
+whole mesh across frames in bounded 128-brick GPU batches. Rays remain
 active until the complete mesh is published; this implementation does not yet
-provide per-chunk incremental remeshing. No CPU payload readback or
+provide per-chunk incremental remeshing.
+
+Every presentation of an incomplete build also traces the current voxel scene
+at full resolution as its fallback, and on a large scene that trace, not the
+extraction, is most of a build's wall time (`hero-garden-hose-x10`: 8 ms of
+extraction beside 83 ms of fallback per 2,048-brick presentation, ~291
+presentations for 595,825 bricks). The host therefore paces batches per
+presentation: 16 on a build's first presentation, doubling while the build
+stays pending, to a ceiling of 128 batches (16,384 bricks). A small edit's
+rebuild still completes in one cheap presentation; a whole-world build reaches
+the ceiling within a few frames and finishes in tens of presentations. The
+GPU cursor remains authoritative, and batches past completion dispatch no
+workgroups. `surfaceMeshBuildBatches` in `svo-surface-mesh.ts` is the ramp. No CPU payload readback or
 per-frame mesh upload is required. Physical source-buffer replacement resets
 the cache; current mapping uniforms also support world rescaling.
 
