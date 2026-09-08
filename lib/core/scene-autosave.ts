@@ -146,8 +146,11 @@ export function createSceneAutosave(options: SceneAutosaveOptions = {}): SceneAu
     const identity = `${working.presetId}\n${canonicalScene(working.scene)}\n`
       + JSON.stringify(working.methodProfile ?? null);
     if (identity === written) return;
-    written = identity;
-    writeSceneAutosave(options.storage, working, now());
+    const result = saveSceneToLibrary(options.storage, sceneAutosaveName(working.presetId), working.scene, working.presetId, {
+      savedAt_ms: now(), replaceId: SCENE_AUTOSAVE_ENTRY_ID, methodProfile: working.methodProfile,
+    });
+    // Failed writes must remain retryable after space becomes available.
+    if (result.persisted) written = identity;
   };
 
   return {

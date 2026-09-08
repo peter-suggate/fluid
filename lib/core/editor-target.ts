@@ -61,6 +61,8 @@ export interface EditorTarget {
    */
   readonly selection?: EditorSelection;
   readonly highlight: EditorHighlight;
+  /** Optional selectable-object bounds for a quiet hover outline, independent of GPU rims. */
+  readonly hoverHighlight?: EditorHighlight;
   /**
    * Free-form detail the probe's own actions and gestures read back.
    *
@@ -91,6 +93,12 @@ export type EditorHighlight =
   }
   | { readonly kind: "quad"; readonly corners: readonly [Vec3, Vec3, Vec3, Vec3] }
   | { readonly kind: "point"; readonly position_m: Vec3; readonly radius_m: number }
+  | {
+    /** Plugin-defined world-space outlines; repeat the first point to close a path. */
+    readonly kind: "paths";
+    readonly paths: readonly (readonly Vec3[])[];
+    readonly anchor_m?: Vec3;
+  }
   | { readonly kind: "instance-range"; readonly first: number; readonly last: number };
 
 /** The instance range a highlight names, or undefined when it is not a GPU one. */

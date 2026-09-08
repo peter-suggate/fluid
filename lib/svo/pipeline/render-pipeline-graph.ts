@@ -703,13 +703,13 @@ export function renderPipelineNodeForContext(
     stages: node.stages.filter((stage) => meshStages.has(stage)),
     tip: {
       ...node.tip,
-      summary: "Primary rasterization fills the surface buffer using cached voxel faces. Its timing is the sum of mesh update, exact planes, mesh culling, and mesh drawing. Mesh update includes revision checks on cached frames and extraction on changed publications. Off clears the surface buffer to sky.",
+      summary: "Primary rasterization fills the surface buffer using cached voxel faces. Its timing is the sum of mesh update, exact planes, mesh culling, and mesh drawing. Mesh update includes revision checks on cached frames and extraction on changed publications. During extraction, exact traversal shows the current published voxel scene. Off clears the surface buffer to sky.",
     },
     chip: (current) => current.disabledStages.has("primary-traversal") ? "withheld · clears only"
-      : current.surfaceMeshStatus?.state === "pending" ? "mesh preparation · geometry withheld"
-      : current.surfaceMeshStatus?.fallbackReason === "budget" ? "Raster blocked · mesh budget exceeded"
-      : current.surfaceMeshStatus?.state === "blocked" ? "Raster blocked"
-      : current.surfaceMeshActive ? "cached voxel triangles" : "mesh pending · geometry withheld",
+      : current.surfaceMeshStatus?.state === "pending" ? "mesh preparation · current SVO visible"
+      : current.surfaceMeshStatus?.fallbackReason === "budget" ? "Current SVO · mesh budget exceeded"
+      : current.surfaceMeshStatus?.state === "blocked" ? "Current SVO traversal"
+      : current.surfaceMeshActive ? "cached voxel triangles" : "mesh pending · current SVO visible",
   };
 }
 

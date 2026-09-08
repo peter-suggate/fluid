@@ -127,6 +127,31 @@ export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmen
  * cursor's idea of the room somewhere the render does not agree with.
  */
 const catalogCache = new WeakMap<SceneDescription, Map<string, EnvironmentProxyCatalog>>();
+const sceneryCatalogCache = new WeakMap<object, Map<string, EnvironmentProxyCatalog>>();
+const remoteCatalogScenes = new WeakSet<SceneDescription>();
+let remoteCatalogConsumer = false;
+/** The worker client enables this only in the UI realm, before any new document renders. */
+export function useRemoteEnvironmentCatalogs(): void { remoteCatalogConsumer = true; }
+/** Worker-owned documents must never expand procedural scenery in an input event. */
+export function markEnvironmentCatalogRemote(scene: SceneDescription): void { remoteCatalogScenes.add(scene); }
+export function environmentCatalogPending(scene: SceneDescription): boolean {
+  return (remoteCatalogConsumer || remoteCatalogScenes.has(scene)) && !cachedEnvironmentProxyCatalog(scene);
+}
+export function cachedEnvironmentProxyCatalog(scene: SceneDescription): EnvironmentProxyCatalog | undefined {
+  return cachedCatalog(scene, scene.environment ?? "default", {});
+}
+export function adoptEnvironmentProxyCatalog(scene: SceneDescription, catalog: EnvironmentProxyCatalog): void {
+  retainCatalog(scene, catalog.environmentId, {}, catalog);
+}
+export function reuseEnvironmentProxyCatalog(source: SceneDescription, target: SceneDescription): void {
+  const catalog = cachedEnvironmentProxyCatalog(source);
+  if (!catalog || source.environment !== target.environment
+    || catalogFingerprint(source, catalog.environmentId, {}) !== catalogFingerprint(target, catalog.environmentId, {})
+    || (source.scenery !== target.scenery && JSON.stringify(source.scenery) !== JSON.stringify(target.scenery))) return;
+  adoptEnvironmentProxyCatalog(target, catalog);
+}
+
+
 
 function catalogFingerprint(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions): string {
   const c = scene.container;
@@ -144,13 +169,20 @@ function catalogFingerprint(scene: SceneDescription, environmentId: EnvironmentI
 }
 
 function cachedCatalog(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions): EnvironmentProxyCatalog | undefined {
-  return catalogCache.get(scene)?.get(catalogFingerprint(scene, environmentId, options));
+  const key = catalogFingerprint(scene, environmentId, options);
+  return catalogCache.get(scene)?.get(key) ?? (scene.scenery ? sceneryCatalogCache.get(scene.scenery)?.get(key) : undefined);
 }
 
 function retainCatalog(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions, catalog: EnvironmentProxyCatalog): EnvironmentProxyCatalog {
   let entries = catalogCache.get(scene);
   if (!entries) { entries = new Map(); catalogCache.set(scene, entries); }
-  entries.set(catalogFingerprint(scene, environmentId, options), catalog);
+  const key = catalogFingerprint(scene, environmentId, options);
+  entries.set(key, catalog);
+  if (scene.scenery) {
+    let graphEntries = sceneryCatalogCache.get(scene.scenery);
+    if (!graphEntries) { graphEntries = new Map(); sceneryCatalogCache.set(scene.scenery, graphEntries); }
+    graphEntries.set(key, catalog);
+  }
   return catalog;
 }
 

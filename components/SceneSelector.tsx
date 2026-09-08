@@ -182,6 +182,7 @@ export function SceneSelector() {
   const [active, setActive] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const keyboardAim = useRef(true);
 
   // Storage is only readable in the browser, and this component mounts exactly
   // when the popover opens — so mounting is the read, and a scene saved since
@@ -202,9 +203,12 @@ export function SceneSelector() {
   // The best answer is always the first tile, so typing re-aims the cursor at
   // it: a highlight left on the ninth tile of the previous query would make
   // Enter open a scene the reader is no longer looking at.
-  useEffect(() => { setActive(0); }, [query]);
+  useEffect(() => { keyboardAim.current = true; setActive(0); }, [query]);
 
   useEffect(() => {
+    // Hover must not move the tile between pointer press and release. Only
+    // keyboard/search navigation scrolls the grid to expose its active item.
+    if (!keyboardAim.current) return;
     listRef.current
       ?.querySelector<HTMLElement>(`[data-index="${active}"]`)
       ?.scrollIntoView({ block: "nearest" });
@@ -231,11 +235,11 @@ export function SceneSelector() {
   }, [setOpen]);
 
   const choose = (card: SceneCard) => {
-    setOpen(false);
     // The notice on a refused card is the controller's; a stored document that
     // an older schema wrote fails here rather than becoming a corrupt live
     // scene, and the list stays where it was so the reader can pick another.
     if (!simulation.openSceneCard(card, session.id, { retainConfiguration: true })) return;
+    setOpen(false);
     recordSceneOpen(browserSceneLibraryStorage(), card.id, Date.now());
   };
 
@@ -249,6 +253,7 @@ export function SceneSelector() {
       const caret = event.target instanceof HTMLInputElement && event.target.value.length > 0;
       if (caret && (key === "ArrowLeft" || key === "ArrowRight")) return;
       event.preventDefault();
+      keyboardAim.current = true;
       setActive((current) => sceneSearchStep(rows, current, key));
       return;
     }
@@ -305,7 +310,7 @@ export function SceneSelector() {
                     // written on the tile.
                     shelf={group.shelf === SCENE_SEARCH_RECENT_SHELF}
                     choose={choose}
-                    aim={setActive}
+                    aim={(at) => { keyboardAim.current = false; setActive(at); }}
                   />
                 );
               })}

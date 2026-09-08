@@ -495,14 +495,22 @@ export class WebGPUSparseCM12RigidCoupling {
   /** Intersect a new static geometry with the accepted moving-solid mask.
    * Coefficients and rigid poses are preserved; the caller reconciles scalar
    * amounts after the ordinary conservative capacity redistribution. */
-  encodeStaticGeometryRefresh(encoder: GPUCommandEncoder, cellCount: number): void {
+  staticGeometryRefreshWorkgroups(cellCount: number): readonly [number, number] {
+    return [Math.ceil((this.retainedSupportCounts?.[0] ?? 0) / WORKGROUP_SIZE),
+      Math.ceil(cellCount / WORKGROUP_SIZE)];
+  }
+
+  encodeStaticGeometryRefresh(encoder: GPUCommandEncoder, cellCount: number,
+    indirect?: { buffer: GPUBuffer; offset: number }): void {
     if (!this.retainedSupportCounts) return;
     const pass = encoder.beginComputePass({ label: "Retained density static and rigid intersection" });
     pass.setBindGroup(0, this.bindGroup);
     pass.setPipeline(this.pipelines.reclipRetainedRigidStaticSupport!);
-    pass.dispatchWorkgroups(Math.ceil(this.retainedSupportCounts[0] / WORKGROUP_SIZE));
+    if (indirect) pass.dispatchWorkgroupsIndirect(indirect.buffer, indirect.offset);
+    else pass.dispatchWorkgroups(Math.ceil(this.retainedSupportCounts[0] / WORKGROUP_SIZE));
     pass.setPipeline(this.pipelines.voxelizeAllCells!);
-    pass.dispatchWorkgroups(Math.ceil(cellCount / WORKGROUP_SIZE));
+    if (indirect) pass.dispatchWorkgroupsIndirect(indirect.buffer, indirect.offset + 12);
+    else pass.dispatchWorkgroups(Math.ceil(cellCount / WORKGROUP_SIZE));
     pass.end();
   }
 

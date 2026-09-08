@@ -13,15 +13,15 @@ import { projectToViewport } from "../lib/core/webgpu-camera";
  *
  * Every probe says what to light up as an `EditorHighlight` and none of them
  * says how, so this file is the whole drawing vocabulary: box, boxes, quad,
- * point. That split is what makes a new probe free to add — it inherits the
+ * point and paths. That split is what makes a new probe free to add — it inherits the
  * outline, the clipping rule, the tone and the caption — and it is what stops
  * the viewport accumulating a fifth hand-rolled projected-box overlay next to
  * the four it already had, each with its own idea of when an edge is behind the
  * camera.
  *
- * `instance-range` is absent by design: that highlight is drawn by the renderer
- * as a rim on the actual instanced geometry, which is the only way to outline a
- * tree without drawing a crate around it. It never reaches this layer.
+ * `instance-range` remains renderer-owned. Selectable objects can additionally
+ * declare hover bounds, including instanced trees, so the pointer can preview
+ * the same box that selection will expose.
  *
  * Clipping is per *edge*, not per shape. A box the camera is standing inside has
  * corners behind it; dropping the whole box there makes a highlight blink out
@@ -29,9 +29,11 @@ import { projectToViewport } from "../lib/core/webgpu-camera";
  * throws a line across the screen. Dropping the edge is the only reading that
  * degrades gracefully.
  */
-export function EditorHighlightLayer({ target, camera, width, height, held }: {
+export function EditorHighlightLayer({ target, camera, width, height, held, showHoverWithHeld = false }: {
   /** What is under the cursor, or undefined in LOOK and while a gesture runs. */
   target: EditorTarget | undefined;
+  /** An idle tool ghost may share the view with faint object bounds; active drags may not. */
+  showHoverWithHeld?: boolean;
   camera: CameraState;
   width: number;
   height: number;
@@ -44,14 +46,16 @@ export function EditorHighlightLayer({ target, camera, width, height, held }: {
   };
 }) {
   const drawn: HighlightLayer[] = [];
-  // A gesture's own shape replaces the hover one rather than joining it: while a
-  // drag is running the hover target is whatever the press started on, and
-  // drawing both would leave a stale outline pinned under a live one.
+  // Idle previews can sit alongside quiet object bounds. Once the pointer is
+  // held, the gesture owns the overlay and stale object outlines disappear.
+  if (target && (!held || (showHoverWithHeld && target.hoverHighlight))) drawn.push({
+    highlight: target.hoverHighlight ?? target.highlight, tone: target.tone,
+    live: false, hover: Boolean(target.hoverHighlight),
+  });
   if (held) drawn.push({
     highlight: held.highlight, tone: held.tone ?? target?.tone ?? "prop",
-    caption: held.caption, live: true,
+    caption: held.caption, live: true, hover: false,
   });
-  else if (target) drawn.push({ highlight: target.highlight, tone: target.tone, live: false });
   const layers = drawn.filter((layer) => layer.highlight.kind !== "instance-range");
   if (layers.length === 0 || width <= 0 || height <= 0) return null;
   const project = (point_m: Vec3) => projectToViewport(point_m, camera, width, height);
@@ -67,6 +71,7 @@ export function EditorHighlightLayer({ target, camera, width, height, held }: {
       className="editor-highlight"
       data-tone={layer.tone}
       data-live={layer.live || undefined}
+      data-hover={layer.hover || undefined}
       data-highlight-kind={layer.highlight.kind}
     >
       {drawHighlight(layer.highlight, project, width, height, layer.caption)}
@@ -79,6 +84,7 @@ interface HighlightLayer {
   readonly tone: EditorEntityTone;
   readonly caption?: string;
   readonly live: boolean;
+  readonly hover: boolean;
 }
 
 type Project = (point_m: Vec3) => { leftFraction: number; topFraction: number; depth_m: number };
@@ -93,6 +99,22 @@ function drawHighlight(
   const px = (point: { leftFraction: number; topFraction: number }) =>
     ({ x: point.leftFraction * width, y: point.topFraction * height });
   switch (highlight.kind) {
+    case "paths": {
+      const lines = highlight.paths.flatMap((path, pathIndex) => {
+        const points = path.map((point) => {
+          const projected = project(point);
+          return { ...px(projected), depth_m: projected.depth_m };
+        });
+        return points.slice(1).map((to, index) => {
+          const from = points[index]!;
+          if (!(from.depth_m > 1e-6 && to.depth_m > 1e-6)) return null;
+          return <line key={`path-${pathIndex}-${index}`} className="highlight-edge"
+            x1={from.x} y1={from.y} x2={to.x} y2={to.y} />;
+        });
+      });
+      const anchor = highlight.anchor_m ? project(highlight.anchor_m) : undefined;
+      return [...lines, ...captionAt(anchor && anchor.depth_m > 1e-6 ? px(anchor) : undefined, caption)];
+    }
     case "box":
       return [
         ...boxLines(highlight.box, highlight.frame, project, px, "box"),

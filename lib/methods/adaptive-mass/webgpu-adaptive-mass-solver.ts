@@ -1,3 +1,4 @@
+import type { LiveFluidEdit, LiveFluidEditResult } from "../../core/live-fluid-edit";
 import { SimulationFailureError } from "../../core/simulation-failure";
 import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
 import { planSparseCM12ResidentGeneration } from "./sparse-cm12-generation-policy";
@@ -844,6 +845,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     }
   }
 
+  async editFluid(edit: LiveFluidEdit): Promise<LiveFluidEditResult> {
+    if (this.disposed || !this.sparseWorld.editFluidVolume) return { accepted: false, reason: "Live fluid editing is unavailable." };
+    return this.sparseWorld.editFluidVolume(edit);
+  }
+
   /** Add a semantic liquid interaction through the public sparse-world API. */
   injectLiquidBall(ball: InjectedLiquidBall): void {
     if (this.disposed || !(ball.radius_m > 0)) return;
@@ -866,6 +872,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
    * topology plan. Without this seam either edit would construct a new world
    * and discard the timeline.
    */
+  async prepareLiveSolidEdit(scene: SceneDescription): Promise<boolean> {
+    if (!this.sparseWorld.prepareSceneEdit) throw new Error("Live solid edit acceptance is unavailable.");
+    return this.sparseWorld.prepareSceneEdit(scene);
+  }
+
   validateLiveSolidEdit(scene: SceneDescription): void {
     if (!this.sparseWorld.validateSceneEdit) throw new Error("Live voxel editing is unavailable");
     this.sparseWorld.validateSceneEdit(scene);

@@ -110,18 +110,15 @@ const entityProbe: EditorProbeDefinition = {
       normal: { x: 0, y: 1, z: 0 },
       selection: hit.selection,
       highlight: entityHighlight(context.scene, entity),
+      hoverHighlight: entity.box ? { kind: "box", box: entity.box, frame: entity.frame } : undefined,
     };
   },
 };
 
 /**
- * Scenery lights up through the renderer's own rim pass and everything else
- * through its box.
- *
- * The split is not cosmetic. A stone or a tree is an instanced proxy set with
- * no meaningful axis-aligned box — outlining one would draw a crate around a
- * branch — while the renderer can already stroke the exact instances. Every
- * other entity *is* a box in the document, and a box is what its handles move.
+ * Selected scenery retains its exact instance rim; other entities use their
+ * document bounds. The separate hoverHighlight uses selection bounds for a
+ * faint dotted preselection box, including trees and stones.
  */
 function entityHighlight(scene: SceneDescription, entity: EditorEntity): EditorHighlight {
   if (entity.selection.kind === "scenery") {

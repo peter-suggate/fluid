@@ -1,3 +1,4 @@
+import { LIVE_TERRAIN_PATCH_RESERVE, packTerrainOverlay, terrainOverlayPatches } from "./live-terrain-overlay";
 import {
   SPARSE_BRICK_INVALID_INDEX,
   SPARSE_BRICK_NO_OWNER,
@@ -1458,7 +1459,7 @@ interface RenderTerrainShaderLayout {
   readonly width: number;
   readonly depth: number;
   readonly patchBaseWords: number;
-  readonly patchCount: number;
+  readonly patchCapacity: number;
 }
 
 function renderTerrainProxyWGSL(layout?: RenderTerrainShaderLayout): string {
@@ -1471,7 +1472,7 @@ const RT_HEIGHTS:u32=${layout.heightsBaseWords}u;
 const RT_WIDTH:i32=${layout.width};
 const RT_DEPTH:i32=${layout.depth};
 const RT_PATCH_BASE:u32=${layout.patchBaseWords}u;
-const RT_PATCH_COUNT:u32=${layout.patchCount}u;
+const RT_PATCH_CAPACITY:u32=${layout.patchCapacity}u;
 fn rtFloat(word:u32)->f32{return bitcast<f32>(atomicLoad(&maintenance[word]));}
 fn rtHeight(q:vec2i)->f32{
   let at=clamp(q,vec2i(0),vec2i(RT_WIDTH-1,RT_DEPTH-1));
@@ -1482,16 +1483,18 @@ fn sampleRenderTerrain(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
   let cell=max(vec2f(rtFloat(RT_BASE+2u),rtFloat(RT_BASE+3u)),vec2f(1e-8));
   let point=(world.xz-origin)/cell;
   let q=vec2i(floor(point));
-  if(any(q<vec2i(0))||q.x>=RT_WIDTH||q.y>=RT_DEPTH){
-    return SolidWorldSample(0.0,1e20,0u,vec3f(0.0));
+  var distance=1e20;var normal=vec3f(0.0);var fraction=0.0;var material=0u;
+  if(all(q>=vec2i(0))&&q.x<RT_WIDTH&&q.y<RT_DEPTH){
+    let height=rtHeight(q);distance=world.y-height;
+    let gradient=vec2f((rtHeight(q+vec2i(1,0))-rtHeight(q-vec2i(1,0)))/(2.0*cell.x),
+      (rtHeight(q+vec2i(0,1))-rtHeight(q-vec2i(0,1)))/(2.0*cell.y));
+    normal=normalize(vec3f(-gradient.x,1.0,-gradient.y));
+    fraction=clamp(0.5-distance/max(cellExtent.y,1e-8),0.0,1.0);
+    material=atomicLoad(&maintenance[RT_BASE+6u]);
   }
-  let height=rtHeight(q);var distance=world.y-height;
-  let gradient=vec2f((rtHeight(q+vec2i(1,0))-rtHeight(q-vec2i(1,0)))/(2.0*cell.x),
-    (rtHeight(q+vec2i(0,1))-rtHeight(q-vec2i(0,1)))/(2.0*cell.y));
-  var normal=normalize(vec3f(-gradient.x,1.0,-gradient.y));
-  var fraction=clamp(0.5-distance/max(cellExtent.y,1e-8),0.0,1.0);
-  var material=atomicLoad(&maintenance[RT_BASE+6u]);
-  for(var index=0u;index<RT_PATCH_COUNT;index+=1u){
+  // Authored overlay bounds may extend past the terrain heightfield's XZ domain.
+  let patchCount=min(atomicLoad(&maintenance[RT_BASE+7u]),RT_PATCH_CAPACITY);
+  for(var index=0u;index<patchCount;index+=1u){
     let base=RT_PATCH_BASE+index*8u;
     let minimum=vec3f(rtFloat(base),rtFloat(base+1u),rtFloat(base+2u));
     let maximum=vec3f(rtFloat(base+4u),rtFloat(base+5u),rtFloat(base+6u));
@@ -2854,7 +2857,7 @@ export class SparseSceneProxyVoxelizer {
     width: number;
     depth: number;
     patchBaseWords: number;
-    patchCount: number;
+    patchCapacity: number;
   }>;
   private readonly maintenanceArena: GPUBuffer;
   private readonly maintenanceDispatch: GPUBuffer;
@@ -2986,10 +2989,10 @@ export class SparseSceneProxyVoxelizer {
       baseWords: renderTerrainBaseWords,
       heightsBaseWords: renderTerrainBaseWords + 8,
       patchBaseWords: renderTerrainBaseWords + 8 + options.renderTerrain.heights_m.length,
-      patchCount: options.renderTerrain.patches.length,
+      patchCapacity: options.renderTerrain.patches.length + LIVE_TERRAIN_PATCH_RESERVE,
       totalWords: checkedArenaWords(renderTerrainBaseWords + 8
         + options.renderTerrain.heights_m.length
-        + options.renderTerrain.patches.length * 8, "Render terrain field"),
+        + (options.renderTerrain.patches.length + LIVE_TERRAIN_PATCH_RESERVE) * 8, "Render terrain field"),
       width: options.renderTerrain.dimensions[0],
       depth: options.renderTerrain.dimensions[1],
     }) : undefined;
@@ -3022,22 +3025,14 @@ export class SparseSceneProxyVoxelizer {
       floats.set([options.renderTerrain.origin_m[0], options.renderTerrain.origin_m[1],
         options.renderTerrain.cellSize_m[0], options.renderTerrain.cellSize_m[1]], 0);
       words.set([options.renderTerrain.dimensions[0], options.renderTerrain.dimensions[1],
-        options.renderTerrain.materialId, 0], 4);
+        options.renderTerrain.materialId, options.renderTerrain.patches.length], 4);
       device.queue.writeBuffer(this.maintenanceArena,
         this.renderTerrainLayout.baseWords * 4, header);
       device.queue.writeBuffer(this.maintenanceArena,
         this.renderTerrainLayout.heightsBaseWords * 4,
         options.renderTerrain.heights_m);
       if (options.renderTerrain.patches.length > 0) {
-        const patchData = new ArrayBuffer(options.renderTerrain.patches.length * 8 * 4);
-        const patchWords = new Uint32Array(patchData), patchFloats = new Float32Array(patchData);
-        options.renderTerrain.patches.forEach((patch, index) => {
-          const base = index * 8;
-          patchFloats.set(patch.minimum_m, base);
-          patchWords[base + 3] = patch.operation === "fill" ? 1 : 0;
-          patchFloats.set(patch.maximum_m, base + 4);
-          patchWords[base + 7] = patch.materialId;
-        });
+        const patchData = packTerrainOverlay(options.renderTerrain.patches, this.renderTerrainLayout.patchCapacity);
         device.queue.writeBuffer(this.maintenanceArena,
           this.renderTerrainLayout.patchBaseWords * 4, patchData);
       }
@@ -3118,6 +3113,9 @@ export class SparseSceneProxyVoxelizer {
 
   /** Replace the canonical static-solid image without allocating a host mirror. */
   validateSolidWorld(world: SolidWorld): void {
+    if (this.renderTerrainLayout && world.patches.length > this.renderTerrainLayout.patchCapacity) {
+      throw new RangeError(`Live terrain edit capacity reached (${this.renderTerrainLayout.patchCapacity} patches). Undo or open a new scene.`);
+    }
     if (!this.solidWorldLayout || world.pages.length > this.solidWorldLayout.pageCapacity) {
       throw new Error("Live display capacity reached; remove some voxels before adding more.");
     }
@@ -3137,6 +3135,14 @@ export class SparseSceneProxyVoxelizer {
     this.device.queue.submit([clear.finish()]);
     writeWebgpuSolidWorldPages(this.device.queue, this.maintenanceArena,
       layout, world, [0, 0, 0], lattice, this.uploadedSolidWorld);
+    if (this.renderTerrainLayout) {
+      const overlay = packTerrainOverlay(terrainOverlayPatches(world, lattice), this.renderTerrainLayout.patchCapacity);
+      if (overlay.byteLength) this.device.queue.writeBuffer(this.maintenanceArena,
+        this.renderTerrainLayout.patchBaseWords * 4, overlay);
+      // Publish count after payload; Undo hides stale tail records without rebaking heights.
+      this.device.queue.writeBuffer(this.maintenanceArena,
+        (this.renderTerrainLayout.baseWords + 7) * 4, new Uint32Array([world.patches.length]));
+    }
     this.uploadedSolidWorld = world;
   }
 

@@ -212,7 +212,7 @@ export function reduceGPUResourceEvidence(
     } as const;
     const plugins = Object.fromEntries(Object.entries(next.plugins).map(([id, state]) => [id,
       state.plugin.provides.includes("sparse-voxel-presentation")
-        ? { ...svo, activity: state.activity ?? svo.activity, plugin: state.plugin }
+        ? { ...svo, activity: state.activity, plugin: state.plugin }
         : state]));
     next = { ...next, svo, plugins };
   } else if (renderer?.state === "failed") {

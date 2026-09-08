@@ -32,7 +32,7 @@ import { intersectSvoPrimitive, type SvoFinitePrimitiveDescriptor } from "../svo
 import { svoDescriptorForEnvironmentProxy, svoOwnerIdForEnvironmentProxy } from "../svo/features/scene-publication/svo-scene-primitives";
 import type { SceneryPropKind } from "./stores/ui-store";
 import {
-  buildEnvironmentProxyCatalog,
+  buildEnvironmentProxyCatalog, environmentCatalogPending,
   type EnvironmentProxyPrimitive,
 } from "./voxel-environments";
 
@@ -86,6 +86,7 @@ interface SceneryExpansionView {
 }
 
 function expansionOf(scene: SceneDescription, nodeId: string): SceneryExpansionView | undefined {
+  if (environmentCatalogPending(scene)) return undefined;
   const catalog = buildEnvironmentProxyCatalog(scene, environmentOf(scene));
   const span = catalog.spans.find((candidate) => candidate.nodeId === nodeId);
   if (!span || span.to <= span.from) return undefined;
@@ -337,6 +338,7 @@ function raySpansAabb(aabb: EnvironmentProxyPrimitive["aabb_m"], ray: EditorRay)
 }
 
 function pickTargets(scene: SceneDescription) {
+  if (environmentCatalogPending(scene)) return [];
   const catalog = buildEnvironmentProxyCatalog(scene, environmentOf(scene));
   const cached = pickTargetCache.get(catalog);
   if (cached) return cached;
@@ -449,6 +451,7 @@ export function sceneryHighlightRange(
   scene: SceneDescription,
   nodeId: string,
 ): { readonly first: number; readonly last: number } | undefined {
+  if (environmentCatalogPending(scene)) return undefined;
   const catalog = buildEnvironmentProxyCatalog(scene, environmentOf(scene));
   const span = catalog.spans.find((candidate) => candidate.nodeId === nodeId);
   if (!span || span.to <= span.from) return undefined;

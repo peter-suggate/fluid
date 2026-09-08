@@ -9,6 +9,8 @@ import { voxelTools } from "../lib/core/voxel-editor/registry";
 import { beginToolTransaction } from "../lib/core/voxel-editor/transaction";
 import { createWebgpuSolidWorldPageLayout, writeWebgpuSolidWorldPages } from "../lib/core/webgpu-solid-world-pages";
 
+const solidTools = voxelTools.tools.filter(plugin => plugin.execution !== "release");
+
 function empty() {
   const scene = cloneScene(defaultScene);
   scene.solidVoxels = []; scene.terrain = undefined;
@@ -22,7 +24,7 @@ function ray(scene: ReturnType<typeof empty>, x: number, z: number) {
 
 test("every registered tool owns its UI controls, icon and executable gesture", () => {
   const scene = empty();
-  for (const plugin of voxelTools.tools) {
+  for (const plugin of solidTools) {
     assert.ok(plugin.ui.icon && plugin.ui.hint && plugin.ui.group);
     const initial = ray(scene, -2, 1);
     const gesture = plugin.begin({ scene, ray: initial, values: toolValues(plugin) });
@@ -34,6 +36,12 @@ test("every registered tool owns its UI controls, icon and executable gesture", 
   assert.throws(() => createVoxelToolRegistry([voxelTools.tools[0]!, voxelTools.tools[0]!]));
   const extension = { ...voxelTools.tools[0]!, id: "third-party-brush" };
   assert.equal(createVoxelToolRegistry([extension]).get(extension.id), extension);
+  const externalControl = { ...extension.ui.controls[0]!, presentation: undefined };
+  assert.doesNotThrow(() => createVoxelToolRegistry([{ ...extension,
+    ui: { ...extension.ui, controls: [externalControl] } }]));
+  assert.throws(() => createVoxelToolRegistry([{ ...extension,
+    ui: { ...extension.ui, controls: [{ ...externalControl,
+      presentation: "hidden" as "advanced" }] } }]), /Invalid control/);
 });
 
 test("fast strokes cover negative coordinates continuously and mirroring is involutive", () => {
@@ -128,7 +136,7 @@ function cells(patches: ReturnType<typeof shapePatches> | readonly ReturnType<ty
 const subtractTools = new Set(["carve", "cut", "drill", "channel"]);
 
 test("all eight tools extrude outward or cut inward on every signed face and persist exact occupancy", () => {
-  for (const axis of [0, 1, 2]) for (const sign of [-1, 1]) for (const plugin of voxelTools.tools) {
+  for (const axis of [0, 1, 2]) for (const sign of [-1, 1]) for (const plugin of solidTools) {
     const scene = empty();
     scene.solidVoxels = shapePatches([10, 10, 10], [17, 17, 17], "fill", "box");
     const anchor = [13, 13, 13]; anchor[axis] = sign > 0 ? 16 : 10;
@@ -158,7 +166,7 @@ test("all eight tools extrude outward or cut inward on every signed face and per
 
 test("empty-space construction planes support negative heights and parallel or backward rays are ignored", () => {
   const scene = empty();
-  for (const plugin of voxelTools.tools) {
+  for (const plugin of solidTools) {
     const input = ray(scene, -5, -5);
     const gesture = plugin.begin({ scene, ray: input, values: toolValues(plugin, { plane: -3 }) })!;
     const result = gesture.update(input)!;
@@ -170,7 +178,7 @@ test("empty-space construction planes support negative heights and parallel or b
 
 test("each tool mirrors the complete proposal across the container centre", () => {
   const scene = empty(); const centre = Math.round(scene.container.width_m / sceneCellSizes_m(scene)[0]);
-  for (const plugin of voxelTools.tools) {
+  for (const plugin of solidTools) {
     const input = ray(scene, -5, -5);
     const values = toolValues(plugin, { size: 3, depth: 2, mirror: 1 });
     const gesture = plugin.begin({ scene, ray: input, values })!;
@@ -184,7 +192,7 @@ test("each tool mirrors the complete proposal across the container centre", () =
 });
 
 test("box, cut, wall, channel and movable stamps retract while freehand edits accumulate", () => {
-  for (const plugin of voxelTools.tools) {
+  for (const plugin of solidTools) {
     const scene = empty(); const start = ray(scene, -9, -5);
     const gesture = plugin.begin({ scene, ray: start, values: toolValues(plugin, { size: 1, depth: 1 }) })!;
     gesture.update(start); gesture.update(ray(scene, -3, -5));

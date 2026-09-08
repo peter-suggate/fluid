@@ -1,4 +1,5 @@
 import { publishOpaqueSurfaceCapability } from "../svo/features/shading/deferred-specialization";
+import { validateLiveFluidEdit, type LiveFluidEdit, type LiveFluidEditResult } from "./live-fluid-edit";
 import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
 import type { SparseVoxelDrySceneData } from "../svo/contracts/scene-publication";
 import { SimulationFailureError } from "./simulation-failure";
@@ -2135,6 +2136,18 @@ export class FluidLabRenderer {
     return true;
   }
 
+  async editFluid(input: LiveFluidEdit): Promise<LiveFluidEditResult> {
+    if (this.disposed || this.runtimeFailure || this.deviceLost || !this.sparseDeviceReady(this.gpuFluid)
+      || !this.gpuFluid?.editFluid) return { accepted: false, reason: "Live fluid editing needs a ready fluid simulation." };
+    try {
+      const owner = this.gpuFluid;
+      const result = await owner.editFluid!(validateLiveFluidEdit(input));
+      if (this.gpuFluid !== owner || this.disposed) return { accepted: false, reason: "The fluid scene changed before the edit completed." };
+      if (result.accepted) { this.waterPipeline?.invalidateSurface(); this.pausedPresentationRevision += 1; }
+      return result;
+    } catch (error) { return { accepted: false, reason: error instanceof Error ? error.message : "Fluid edit failed." }; }
+  }
+
   resetSimulationTimeline(): void {
     if (this.disposed || this.runtimeFailure || this.deviceLost) return;
     this.simulationRunning = false;
@@ -2397,7 +2410,7 @@ export class FluidLabRenderer {
       report({phase:"attach",taskId:"solver.attach",label:"Attach warmed solver",completed:reportedCompleted,total:reportedTotal+1});
       solver.applyRuntimeValues?.(config.values);
       this.attachedSolverDocumentKey = gpuSceneSolverKey(scene, config);
-      this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.globalFineWaterAttached=false;
+      this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.globalFineWaterAttached=false;
       const sparseWorldState=this.refreshSparseWorldState(solver);
       const fencedInitialRaster=requiresFencedInitialRasterPresentation(config.methodId);
       if(rendererOnlyScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Live scene source ready; fluid authority intentionally absent";this.pendingInitialRasterPresentation=undefined;}
@@ -2459,6 +2472,37 @@ export class FluidLabRenderer {
     const display = this.svoSceneSidecar ?? solver;
     if (!display?.validateLiveSolidEdit) throw new Error("Live voxel display is not ready.");
     display.validateLiveSolidEdit(scene);
+  }
+
+  private pendingLiveSolidEdit = false;
+
+  /** Complete the GPU wet-overlap proof and publish within the same continuation. */
+  async acceptLiveSolidEdit(scene: SceneDescription, stillCurrent: () => boolean = () => true): Promise<void> {
+    if (this.pendingLiveSolidEdit) throw new Error("A solid edit is still being accepted.");
+    this.validateLiveSolidEdit(scene);
+    this.pendingLiveSolidEdit = true;
+    try {
+    const solver = this.gpuFluid, display = this.svoSceneSidecar ?? solver;
+    let committed = false;
+    if (planSceneRuntime(scene).fluidSolver) {
+      if (!solver?.prepareLiveSolidEdit) throw new Error("Live solid edit acceptance is unavailable.");
+      if (!stillCurrent()) throw new Error("Scene changed before submitting this solid edit.");
+      committed = await solver.prepareLiveSolidEdit(scene) === true;
+    }
+    if (!stillCurrent() || this.disposed || this.gpuFluid !== solver
+      || (this.svoSceneSidecar ?? this.gpuFluid) !== display
+      || (!committed && (this.simulationFault || this.runtimeFailure))) {
+      throw new Error("Scene changed while the solid edit was accepted; the newer scene remains active.");
+    }
+    // The atomic GPU edit and CPU solid cache are already accepted. Adopt the
+    // matching document/scalars; setSolidWorld on that same world is a no-op.
+    if (planSceneRuntime(scene).fluidSolver) {
+      solver!.applySceneUniforms!(scene);
+      this.appliedSceneUniformKey = gpuSceneUniformKey(scene);
+    }
+    display?.stageSceneUpdate?.(scene);
+    this.pausedPresentationRevision += 1;
+    } finally { this.pendingLiveSolidEdit = false; }
   }
 
   setSimulationScene(scene: SceneDescription | undefined) {
@@ -2735,10 +2779,16 @@ export class FluidLabRenderer {
     // instead. A method without applySceneUniforms would otherwise ignore the
     // edit outright, so it falls back to the rebuild it used to take.
     const sceneUniformKey = gpuSceneUniformKey(scene);
-    if (sceneUniformKey !== this.appliedSceneUniformKey) {
+    if (!this.pendingLiveSolidEdit && sceneUniformKey !== this.appliedSceneUniformKey) {
       if (this.gpuFluid.applySceneUniforms) {
         this.gpuFluid.applySceneUniforms(scene);
         this.refreshEditedTopology(this.gpuFluid);
+        this.appliedSceneUniformKey = sceneUniformKey;
+      } else if (!planSceneRuntime(scene).fluidSolver) {
+        // The renderer-owned source stages solids directly and has no fluid
+        // uniform API. A fallback rebuild would attach key:uniform and then
+        // immediately rebuild back to key on the next frame, forever.
+        this.gpuFluid.stageSceneUpdate?.(scene);
         this.appliedSceneUniformKey = sceneUniformKey;
       } else if (this.appliedSceneUniformKey) {
         const rebuildKey = `${key}:${sceneUniformKey}`;

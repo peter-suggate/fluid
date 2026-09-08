@@ -262,3 +262,24 @@ test("raw Phase-1 receipts are reachable only through a construction specializat
   assert.match(solver,
     /PHASE1_TRANSPORT_RECEIPT_QA_TOKEN[\s\S]*createPhase1TransportReceiptOracleForQA/);
 });
+
+
+test("sharpening traces stop before an owned solid or inactive cell without weakening recipient failures", () => {
+  const trace = functionSource(wgsl, "traceSharpeningMass", "// CM12 Sec. 3.5");
+  const candidateGuard = trace.match(/if\((candidateOwner[^\n]+)\)\{break;\}/)?.[1];
+  assert.ok(candidateGuard, "candidate stop predicate remains inspectable");
+  // Evaluate the actual scalar WGSL predicate: its boolean expression is also
+  // valid JavaScript. An edited solid still has a valid topology owner, which
+  // must not be mistaken for an open recipient.
+  const stop = new Function("candidateOwner", "INVALID", "cellTransportActive",
+    `return ${candidateGuard};`) as (owner: number, invalid: number, active: (owner: number) => boolean) => boolean;
+  assert.equal(stop(42, -1, () => false), true, "owned solid stops the characteristic");
+  assert.equal(stop(42, -1, () => true), false, "open owner preserves the ordinary trace");
+  assert.equal(stop(-1, -1, () => { throw new Error("invalid owner dereferenced"); }), true);
+  assert.ok(trace.indexOf(candidateGuard) < trace.indexOf("position=candidate"),
+    "the unsupported point must never replace the previous trace position");
+  assert.match(trace, /if\(owner==INVALID\|\|!cellTransportActive\(owner\)\)\{break;\}/);
+  const scatter = functionSource(wgsl, "scatterSharpeningCell", "fn prepareSharpeningField");
+  assert.match(scatter, /if\(total<=1e-8\)\{\s*cm12RecordFailure\(3u/,
+    "positive sharpening transfers with no support must still halt");
+});

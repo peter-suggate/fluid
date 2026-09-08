@@ -321,6 +321,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   const svoStageRamp = `linear-gradient(90deg,${svoStageDefinition.legend
     .map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
   const armedGesture = session.ui((state) => state.armedGesture);
+  const voxelToolId = session.ui((state) => state.voxelToolId);
+  const voxelStrokePending = session.ui((state) => state.voxelStrokePending);
   const axisConstraint = session.ui((state) => state.axisConstraint);
   const selection = session.ui((state) => state.selection);
   const voxelRegion = session.ui((state) => state.voxelRegion);
@@ -373,6 +375,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   const [voxelSweep, setVoxelSweep] = useState<{
     readonly highlight: EditorHighlight;
     readonly caption: string;
+    readonly tone?: import("../lib/core/voxel-editor/plugin").ToolUpdate["tone"];
   } | null>(null);
 
   const pixelTraceEnabled = session.ui((state) => state.pixelTraceEnabled);
@@ -1544,7 +1547,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * target for its instance range and passes on nothing when there is not one.
    */
   const publishHoverHighlight = (target: EditorTarget | null) => {
-    rendererRef.current?.setHoverHighlight(highlightInstanceRange(target?.highlight));
+    rendererRef.current?.setHoverHighlight(target?.hoverHighlight ? undefined : highlightInstanceRange(target?.highlight));
   };
   const planeHit = (origin: Vec3, direction: Vec3, point: Vec3, normal: Vec3) => {
     const denominator = dot(direction, normal); if (Math.abs(denominator) < 1e-6) return point;
@@ -2355,13 +2358,28 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       spawned.position_m, spawned.orientation);
   };
 
+  useEffect(() => simulation.registerLiveSolidEditAcceptance(session.id, async (next, base) => {
+    const renderer = rendererRef.current;
+    if (!renderer) throw new Error("Wait for the scene to be ready.");
+    await renderer.validateLiveSolidEdit(next, base);
+  }), [session.id]);
+
   const voxelGesture = useVoxelToolGesture(pointerRay, async (next, base) => {
     if (!rendererRef.current) throw new Error("Wait for the scene to be ready.");
     await rendererRef.current.validateLiveSolidEdit(next, base);
-  }, (update) => setVoxelSweep(update ? { highlight: update.highlight, caption: update.caption } : null));
+  }, (update) => setVoxelSweep(update ? { highlight: update.highlight, caption: update.caption, tone: update.tone } : null), async (action) => {
+    if (action.kind !== "fluid") throw new Error("This tool action is unavailable.");
+    const renderer = rendererRef.current;
+    if (!renderer) throw new Error("Wait for the fluid simulation to be ready.");
+    const result = await renderer.editFluid(action.edit);
+    if (!result.accepted) throw new Error(result.reason ?? "Fluid edit was rejected.");
+  });
 
   const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (voxelGesture.down(event)) return;
+    if (voxelGesture.down(event)) {
+      setHoverTarget(null); publishHoverHighlight(null);
+      return;
+    }
     // Carrying outranks every armed tool: while something is in hand a click
     // means "put it down" and nothing else. A carry that could be ended only by
     // finding the right mode again would be a trap, and the mode underneath is
@@ -2573,7 +2591,16 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
   };
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!pointerRef.current && voxelGesture.move(event)) return;
+    if (!pointerRef.current && voxelGesture.move(event)) {
+      const ui = session.ui.getState();
+      // A tool's idle ghost does not hide what object the pointer is over.
+      // Pending gestures own the view; no stale hover survives their first press.
+      const candidate = ui.viewportMode === "interact" && !ui.voxelStrokePending
+        ? targetAtRay(editorEntityContext(session), pointerRay(event), ui.selection) : undefined;
+      const target = candidate?.hoverHighlight ? candidate : null;
+      setHoverTarget(target); publishHoverHighlight(target); setHandleHover(null);
+      return;
+    }
     if (carryRef.current) { updateCarry(pointerRay(event), event.timeStamp); return; }
     const active = pointerRef.current;
     // The pixel-trace probe follows the pointer whatever else the gesture is
@@ -2625,16 +2652,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // recompile look like the cursor had gone dead, which is precisely the
       // "nothing under the pointer" state INTERACT promises never to have.
       const ray = pointerRay(event);
-      // Nothing under the cursor is named while a stroke is armed. A press then
-      // means the stroke and only the stroke — see `gestureForPress` — so a lit
-      // tank wall and a chip naming the water are the interface offering
-      // something it will not do: the reader is aiming a drop, and what they are
-      // aiming it *at* is already drawn, as the circle `previewCursorDrop` rests
-      // on the surface under the ray. Skipping the probe is also what stops the
-      // per-move analytic pick during the one gesture that never reads it.
-      const target = ui.armedGesture === undefined
-        ? targetAtRay(editorEntityContext(session), ray, ui.selection)
-        : null;
+      // An armed placement keeps its ghost primary, but selectable object
+      // bounds still answer what the pointer is over. Suppress non-object chips.
+      const candidate = targetAtRay(editorEntityContext(session), ray, ui.selection);
+      const target = ui.armedGesture === undefined || candidate.hoverHighlight ? candidate : null;
       setHoverTarget(target);
       publishHoverHighlight(target);
       previewCursorDrop(ray);
@@ -2975,10 +2996,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // No gesture guard needed: `pointerDown` clears the target before it
       // claims the press and `pointerMove` never revises it while one is
       // running, so a held pointer already has nothing hovered.
-      target={viewportMode === "interact" ? hoverTarget ?? undefined : undefined}
+      target={viewportMode === "interact" && !voxelStrokePending ? hoverTarget ?? undefined : undefined}
+      showHoverWithHeld={!voxelStrokePending && !pointerRef.current}
       // A sweep is about the region it is making, not about the cell it started
       // on, so it carries its own tone rather than inheriting the anchor's.
-      held={heldHighlight ? { ...heldHighlight, tone: "region" } : undefined}
+      held={heldHighlight ? { ...heldHighlight, tone: voxelSweep?.tone ?? "region" } : undefined}
       camera={camera}
       width={viewportSize.width}
       height={viewportSize.height}
@@ -3100,12 +3122,12 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     {/* Only in EDIT, because LOOK is deliberately bare — a scene opens to be
         watched, and chrome over the water is the thing that mode exists to keep
         off it. */}
-    {viewportMode === "interact" && containerStripCorner && <ContainerToolstrip
+    {viewportMode === "interact" && !voxelToolId && containerStripCorner && <ContainerToolstrip
       leftFraction={containerStripCorner.leftFraction}
       topFraction={containerStripCorner.topFraction}
       entity={tankSelected ? heldEntity : undefined}
     />}
-    {viewportMode === "interact" && heldEntity && entityTopCorner && <EntityToolstrip
+    {viewportMode === "interact" && !voxelToolId && heldEntity && entityTopCorner && <EntityToolstrip
       entity={heldEntity}
       leftFraction={entityTopCorner.leftFraction}
       topFraction={entityTopCorner.topFraction}

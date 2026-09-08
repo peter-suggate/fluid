@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Every accepted edit changes the rendered solid and the fluid boundary during the gesture, by the next simulation step. No reset, pause, global remesh, pipeline compilation or GPU readback is permitted in the interactive path.
+- Every accepted edit changes the rendered solid and the fluid boundary during the gesture, by the next simulation step. No reset, long-running simulation pause, global remesh or pipeline compilation is permitted in the interactive path. Bounded asynchronous GPU acceptance receipts may run while simulation continues; they must not fence the simulation loop.
 - Each tool is a plugin that colocates UI contribution, controls, targeting and implementation. The viewport and tool shelf contain no tool-ID dispatch.
 - One stroke is one undo entry. Undo restores authored geometry, not elapsed fluid evolution. Saving stores the scene recipe, not a fluid checkpoint.
 - Existing user scenes, scene JSON, the library and autosave remain the persistence authority.
@@ -35,9 +35,11 @@ Primary sources, reviewed 2026-09-08:
 - [Nomad tools](https://nomadsculpt.com/manual/tools), [symmetry](https://nomadsculpt.com/manual/symmetry) and [interface](https://nomadsculpt.com/manual/interface): masks, gizmos, tubes, local/world symmetry and temporary tool overrides.
 - [Blender voxel remesh](https://docs.blender.org/manual/en/latest/sculpt_paint/sculpting/tool_settings/remesh.html): voxel resolution controls detail and remeshing rebuilds the mesh. Global remeshing is not appropriate inside this application's live stroke path.
 
-## Proposed UX
+## Contextual UX
 
-A compact **Voxels** shelf beside the viewport exposes tools by their declared groups. Choosing a tool exposes only its controls, a short gesture hint and a voxel-snapped footprint. Add/carve remain paired. Each plugin declares its icon, label, group, order and controls next to its behavior.
+The review separated three intents that had accumulated in a tall persistent panel: document operations, tool choice and detailed settings. At rest the viewport shows a compact **Scene / Tools / Undo / Redo** strip. **Tools** opens a grouped chooser and closes after selection. A small active-tool card shows the gesture hint and primary width/depth controls; **More** reveals targeting, construction height and symmetry. Nondefault advanced settings stay visible as badges. **Done** disarms the tool; closing the chooser does not.
+
+Scene and selected-object settings start collapsed. Voxel tools hide those ambient strips while armed. **Add tree** enters EDIT and selects the new oak; its tree settings live beside that selected object. Each voxel plugin declares its icon, label, group, order and control prominence alongside its behavior, so the contextual host does not dispatch on tool IDs.
 
 Start on a visible solid face or an explicit construction plane. Freeze that plane for the stroke so new geometry cannot pull the cursor forward and accidentally grow a tower. A work-plane height enables building in empty scenes. A visible depth control makes extrusion and cuts predictable. Navigation remains available while a tool is armed.
 
@@ -50,30 +52,44 @@ Save as a named scene in the current library; export/import the same validated J
 Each module exports a tool definition with:
 
 - Stable ID and version.
-- UI contribution: label, description, icon, group, order, controls and optional shortcut.
+- UI contribution: label, hint, SVG icon, group, order and numeric/toggle controls.
 - Availability predicate with a reason (for example, unsupported field representation).
 - Target acquisition and hover footprint.
-- `begin(context)` returning an encapsulated gesture with `update(sample)` and `finish/cancel` semantics.
-- Pure operations producing bounded edits, affected bounds and a history label.
+- `begin(context)` returning an encapsulated gesture with `update(ray)`. The shared transaction supplies finish/cancel semantics.
+- Pure updates producing bounded patches, a highlight and a caption; the host uses the plugin label for history.
 
 The registry validates IDs and sorts contributions. The generic shelf renders declarations. The generic gesture host owns pointer capture, frame coalescing, transaction lifetime, cancellation and history; it invokes plugin behavior without knowing the tool ID. Tool algorithms can be tested without React or WebGPU. Registration is the only shared edit required to add a tool.
+
+```mermaid
+flowchart LR
+  P[Tool plugin: UI and behavior] --> R[Validated registry]
+  R --> U[Generated voxel shelf]
+  R --> G[Generic gesture host]
+  G --> T[Serialized stroke transaction]
+  T --> C[Worker capacity preflight]
+  C --> D[Accepted scene and dirty solid pages]
+  D --> F[Fluid boundary refresh before next step]
+  D --> S[Local SVO publication]
+  T --> H[One history entry per stroke]
+  D --> L[Scene library and JSON]
+```
 
 The existing entity/action/probe catalogs remain valid for object manipulation. New voxel tools must not add another switch to `WebGPUViewport.tsx`. Shared kernels implement rasterization, morphology, bounds and stroke interpolation; they contain no UI tool names.
 
 ## Live boundary architecture
 
-The current seam is `scene.solidVoxels` → `gpuSceneUniformKey` → `applySceneUniforms` → sparse-world `set-scene` → `setSolidWorld` → occupancy upload and aperture refresh. It does not intrinsically require a fluid reset. However, the current implementation rebakes terrain and prior patches, uploads every solid page and reserves capacity from the initial page count. Undo currently calls `reset`. These are implementation gaps, not performance guarantees.
+The live seam is `scene.solidVoxels` → `gpuSceneUniformKey` → `applySceneUniforms` → sparse-world `set-scene` → `setSolidWorld` → occupancy upload and aperture refresh. Voxel transactions and voxel-only history use this path while preserving resident fluid state. Copy-on-write pages, fixed editing reserves and preflight validation keep a stroke from triggering a rebuild. Renderer-only scenes stage the same authored edit directly into their live SVO source.
 
-The production target is a persistent sparse solid field with copy-on-write dirty pages and a bounded edit queue:
+The implemented transaction path uses persistent sparse solid pages and a bounded edit queue:
 
 1. Rasterize a tool's affected region, plus any required filter halo, into changed solid pages.
 2. Preflight the entire small edit against existing GPU capacity before modifying the accepted scene or live occupancy.
-3. Upload dirty pages and affected directory entries into preallocated storage; no synchronous readback or on-demand compilation.
-4. Refresh affected fluid volume fractions, face apertures and boundary conditions before the next pressure/transport step.
+3. Upload dirty page payloads and refresh the fixed-capacity directory in preallocated storage; no synchronous readback or on-demand compilation.
+4. Refresh fluid volume fractions, face apertures and boundary conditions before the next pressure/transport step. These are precompiled resident GPU passes; localized retained-moment host preparation is tracked in the acceptance record.
 5. Publish a shared solid generation to rendering and collision. The fluid clock and resident fluid state continue.
 6. Finish history independently of physics publication. Save the accepted authored document.
 
-Adding solid inside water needs an explicit conservative displaced-liquid policy. Deleting solid creates available space; it does not fabricate water. Tests must measure volume accounting, pressure stability and boundary leakage, not merely show that a buffer changed.
+Adding solid inside water is rejected before acceptance until static editing supports conservative displacement. A precompiled GPU transaction inspects at most 32,768 newly closed fine coordinates against accepted liquid owners. Positive density, including water temporarily covered by a rigid body, rejects the proposal before writes. Otherwise the same command buffer scatters bounded occupancy/support changes and refreshes fluid apertures. A four-byte asynchronous receipt confirms the result after GPU publication; ordinary physics continues while it maps. CPU generation replacement waits for this short acceptance window, and the matching document is published even if a subsequent physics frame faults. Deleting solid creates available space; it does not fabricate water. Tests must measure volume accounting, pressure stability and boundary leakage, not merely show that a buffer changed.
 
 Large operations are not allowed to stall a frame: split them into bounded, visibly progressive edits while simulation continues, or reject them before mutation with a useful limit. A renderer-only preview awaiting a slow bake does not satisfy the live contract. Capacity growth, if required, prepares storage asynchronously while the current generation keeps running; publication must not partially expose an edit.
 
@@ -83,7 +99,7 @@ Implicit sculpting needs a real scalar-field edit representation. The present fi
 
 1. Generic plugin registry, generated shelf and gesture host; add/carve, box build/cut, sphere and cylinder stamps, depth extrusion and line strokes. Pure tests cover negative coordinates, symmetry, bounds and fast-pointer interpolation.
 2. Bounded live transactions, dirty-page publication and capacity handling; live undo/cancel; save/load round trips. No tool may silently fall back to resetting a running simulation.
-3. GPU acceptance: carve a submerged barrier and observe flow through it; restore the barrier and observe blocked flux; insert a solid into water and account for displaced volume. Assert continuing clock, unchanged resident world identity, no compilation/readback and bounded edit latency under repeated strokes.
+3. GPU acceptance: carve a submerged barrier and observe flow through it; restore the barrier and observe blocked flux; insert a solid into water and account for displaced volume or reject it atomically. Assert continuing clock, unchanged resident world identity, no compilation or synchronous readback, and bounded edit latency under repeated strokes.
 4. Run the full canonical `npm run test:dawn:sparse-cm12` without a concurrent browser or Dawn process. Keep existing timing ceilings unchanged. Record any failures in the already modified simulation checkout separately from editor failures.
 5. Add masks, selection transforms and duplication on the same plugin contract. Then add smooth, flatten and inflate/erode after scalar-field persistence and fluid coupling are implemented and tested.
 
@@ -102,29 +118,30 @@ reuse unchanged payload uploads. The worker preflights fluid and presentation
 capacity before the main thread publishes the accepted scene. Initial arenas
 reserve editing headroom. The SVO uses mutable voxel pages for authored solids;
 static environment geometry retains planar acceleration. SVO invalidation is
-limited to changed/removed pages. No edit invokes reset or waits for GPU readback.
+limited to changed/removed pages. No edit invokes reset. Fluid actions use small
+asynchronous acceptance receipts; a bounded wet-overlap receipt for solid
+insertion is being implemented to reject edits that cannot conserve water.
 
-**Current scope:** voxel-authored scenes and Sparse CM12 fluid coupling. Scenes
-with baked terrain are explicitly unavailable in the tool plugins, because their
-refined display field still requires rebuilding. Start a new voxel scene or open
-a terrain-free scene. Smooth, flatten, masks and arbitrary selection transforms
+**Current scope:** voxel-authored scenes and Sparse CM12 fluid coupling.
+Terrain-backed scenes now have a mutable ordered fill/clear overlay over their
+immutable refined heightfield; native and browser acceptance of this extension
+is in progress. Each renderer reserves 4,096 additional overlay patches and
+rejects excess work before publication. Actual terrain-height or lattice edits
+remain scene rebuild operations. Smooth, flatten, masks and arbitrary selection transforms
 remain proposed follow-up plugins, not implemented controls. Displaced-liquid
 conservation and full browser latency under large scenes remain acceptance work.
 
-Validation on this checkout:
+Validation (2026-09-08; final integrated browser acceptance is in progress):
 
-- 15 focused CPU tests passed, including all eight tool geometry/save round trips,
-  continuous strokes, retracting boxes, cancellation and unchanged-page uploads.
-- Native Dawn solid-boundary test passed: local open fraction 1 → 0.875 → 1;
-  same resident world, clock advanced to 0.1 s, finite fields. The first measured
-  host edit was approximately 2.9 ms. This is a small-fixture measurement, not an
-  end-to-end worst-case latency guarantee.
-- Native Dawn presentation test passed: repeated fill/clear/fill accepted by the
-  same SVO source without rebuild or GPU validation errors.
-- Production build passed. Whole-repository type checking reports existing errors
-  outside the editor files in this concurrently modified checkout.
-- Full Sparse CM12 gate was run without a concurrent browser/Dawn process. It
-  failed D4 symmetry and multiple lane timeouts, then exhausted its 180 s budget.
-  No lane, timeout or performance ceiling was weakened. Broad acceptance is not
-  claimed; the concurrent simulation work prevents attributing these failures to
-  the editor without a controlled baseline comparison.
+The operation-by-operation evidence, reproduced defects, native checks and
+unchanged canonical regression results are tracked in
+[the browser acceptance record](VOXEL_EDITOR_BROWSER_QA.md). Earlier snapshot
+successes are distinguished from the latest shared solver integration. The saved scene's retained-density failure has been reproduced and corrected;
+the exact fixture now passes 90 native frames. The final browser sweep follows
+the bounded live-moment integration checks.
+
+See [the editing guide](VOXEL_EDITOR_GUIDE.md) for the shipped interaction model.
+
+The fluid-tool extension is specified in [Live fluid tools](LIVE_FLUID_EDITOR_PLAN.md),
+including contextual primitive drops and the distinction between transient
+fluid injection and authored scene history.

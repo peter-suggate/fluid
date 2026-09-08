@@ -43,7 +43,7 @@ export function surfaceMeshProgress(status?: SvoSurfaceMeshStatus): WorkProgress
     generation: status.builds,
     phase: status.state === "ready" ? "complete" : capacity ? "capacity" : "extracting",
     phases: [{ id: "extracting", label: "Extract" }, { id: "capacity", label: "Storage" }, { id: "complete", label: "Ready" }],
-    detail: [reason, status.state === "pending" ? "Geometry is withheld until the complete raster mesh is published." : undefined,
+    detail: [reason, status.state === "pending" ? "The current voxel scene is traced while its raster mesh is rebuilt." : undefined,
       status.state === "blocked" ? status.detail : undefined].filter(Boolean).join(" "),
   };
 }
@@ -309,12 +309,18 @@ struct MeshSurfaceOut {
 @fragment fn surfaceMeshBackground(input:VertexOut)->DryRasterPrimaryOut{
   dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let rd=dryRasterPrimaryRay(input.position.xy,camera);
   var hit=missHit();
-  // Raster is fail-closed: incomplete, invalid and unsupported publications
-  // produce no geometry. Never replace a missing mesh with a ray march.
-  if(meshHeader[13]==0u||meshHeader[15]!=0u){return dryRasterPrimaryMiss();}
+  // Exact planes are independent of the cached voxel mesh. During bounded
+  // extraction, traverse the current published SVO so edits appear immediately
+  // and unaffected room geometry remains visible. This uses the same voxel
+  // authority, never the preceding mesh or an analytic approximation of it.
   hit=dryPlanarCatalogHit(camera[0],rd,0.0,DRY_MISS);
+  var producer=SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND;
+  if(meshHeader[13]==0u||meshHeader[15]!=0u){
+    let current=traceStatic(camera[0],rd);
+    if(current.t<hit.t){hit=current;producer=SVO_GBUFFER_PRODUCER_BRICK;}
+  }
   if(hit.t>=DRY_MISS){return dryRasterPrimaryMiss();}
-  return dryRasterPrimarySurface(hit,camera[0],rd,camera[1],SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND);
+  return dryRasterPrimarySurface(hit,camera[0],rd,camera[1],producer);
 }
 `;
 }

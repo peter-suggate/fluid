@@ -1,3 +1,4 @@
+import type { LiveFluidEdit, LiveFluidEditResult } from "./live-fluid-edit";
 import { normalizeControlNumber, type ControlMetadata } from "../framework/controls";
 import type { FeatureComposition } from "../framework/composition";
 import type { RenderFrameSeam } from "./render-frame-stages";
@@ -354,6 +355,7 @@ export interface GPUSolverInstance {
    * re-seed, so dropping a ball still works — it just costs the run.
    */
   injectLiquidBall?(ball: InjectedLiquidBall): void;
+  editFluid?(edit: LiveFluidEdit): Promise<LiveFluidEditResult>;
   /**
    * Stage the latest authoritative scene revision for GPU consumers.
    *
@@ -397,6 +399,8 @@ export interface GPUSolverInstance {
   applySceneUniforms?(scene: SceneDescription): void;
   /** Preflight live voxel edits without mutating or waiting on the GPU. */
   validateLiveSolidEdit?(scene: SceneDescription): void;
+  /** True means GPU geometry is committed; subsequent frame faults must not reject document adoption. */
+  prepareLiveSolidEdit?(scene: SceneDescription): Promise<boolean>;
   /** Publish edited refinement bounds without advancing simulation time. */
   refreshSceneTopology?(): Promise<void>;
   /**

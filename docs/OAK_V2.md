@@ -54,10 +54,11 @@ at voxel depths 0–3 (6.25, 3.125, 1.5625, 0.78125 mm on the hero lattice).
 `twigDepth` is a bounded planner parameter, 0–3, useful for studying the geometric
 recursion. Increasing voxel depth does not add or remove document shapes.
 
-Open **Voxels → Trees** to add a tree at the view centre or select an existing
-oak. The surface action **Prop → Fractal oak** plants at a picked point. Move
-and scale trees with the existing object handles. The tree panel and generic
-object inspector consume the same growth control declarations.
+Open the voxel tool chooser and choose **Add tree** to plant at the view centre.
+Select an oak and open its contextual **Tree settings** to experiment with
+growth. The surface action **Prop → Fractal oak** plants at the picked point.
+Move and scale trees with the existing object handles. The contextual editor
+and generic object inspector consume the same growth control declarations.
 
 Twenty numeric controls are grouped into Specimen, Crown, Branches, Twigs, and
 Foliage. Four growth presets (Fractal oak, Open crown, Spreading oak, Fine tracery),
@@ -123,8 +124,8 @@ run passed five lanes, timed out six, and left six unrun at the unchanged
 180-second budget. No numerical assertion failed in that run. Full scene
 regeneration can still take several seconds; cancellation safety does not make
 voxelization instantaneous. Evidence is in `artifacts/oak-v2/editor/`.
-The combined workspace browser pass (including the separate contextual editor
-redesign) verifies Tools → Add tree, contextual selection and Tree settings, and rapid fork-depth 3 → 2 → Undo 3 → Redo 2 without a terminal
+The integrated browser pass verifies Tools → Add tree, contextual selection and
+Tree settings, and rapid fork-depth 3 → 2 → Undo 3 → Redo 2 without a terminal
 halt. The full production build also passes; the project-wide typecheck still
 has unrelated errors recorded in the evidence directory.
 

@@ -412,6 +412,14 @@ fn classifyFineAnchor(q:vec3i,sampleScale:u32,local:vec3u){
 @compute @workgroup_size(256)
 fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   if(!validCurrentPublication()){return;}
+  // A complete compact publication can authoritatively contain no surface.
+  // Retain the old mesh only for invalid/unpublished input, not valid air.
+  // An empty directory has no page leader to publish this receipt below.
+  if((fineWorklist[3]&0x80000000u)!=0u&&fineWorklist[1]==0u
+    &&all(gid==vec3u(0u))){
+    atomicStore(&drawArgs.globalFineAuthorityLatch,1u);
+    atomicMin(&drawArgs.vertexAllocator,0u);
+  }
   let stream=gid.x+gid.y*65535u*256u;let samples=params.samplesPerBrick;let work=stream/max(1u,samples);
   if(work>=fineWorklist[1]){return;}let id=fineWorklist[7u+work];let metadataBase=id*4u;
   if(id>=params.table.z||metadataBase+2u>=arrayLength(&metadata)||metadata[metadataBase]!=id||metadata[metadataBase+2u]!=params.table.w){return;}
@@ -430,6 +438,13 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   if(!compactSignedSparseAddressing()
     &&(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions)))){return;}
   let index=id*samples+localIndex;if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return;}
+  // CM12 commits complete pages atomically. One valid tagged sample per page
+  // certifies its publication even if every phi is positive. Testing only for
+  // zero crossings left the preceding wet mesh visible after water removal.
+  if((fineWorklist[3]&0x80000000u)!=0u&&localIndex==0u){
+    atomicStore(&drawArgs.globalFineAuthorityLatch,1u);
+    atomicMin(&drawArgs.vertexAllocator,0u);
+  }
   if(compactSignedSparseAddressing()&&sampleScale==1u&&params.physical.w>=1.){
     let cellWidth=1u<<((fineSamples[index]>>24u)&15u);
     let size=i32(min(8u,max(1u,cellWidth/u32(params.physical.w))));

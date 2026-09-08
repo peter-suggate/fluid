@@ -4,11 +4,11 @@ import { sceneCellSizes_m } from "../scene-lattice";
 import type { SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../solid-world";
 import type { ToolContext, ToolControl, ToolGesture, ToolUpdate } from "./plugin";
 
-export const sizeControl: ToolControl = { id: "size", label: "Width · voxels", min: 1, max: 16, step: 1, initial: 1 };
-export const depthControl: ToolControl = { id: "depth", label: "Depth · voxels", min: 1, max: 32, step: 1, initial: 1 };
-export const planeControl: ToolControl = { id: "plane", label: "Empty-space height · voxels", min: -64, max: 128, step: 1, initial: 0 };
-export const shellControl: ToolControl = { id: "shell", kind: "toggle", label: "Edit tank walls", min: 0, max: 1, step: 1, initial: 0 };
-export const mirrorControl: ToolControl = { id: "mirror", kind: "toggle", label: "Mirror X", min: 0, max: 1, step: 1, initial: 0 };
+export const sizeControl: ToolControl = { id: "size", presentation: "primary", label: "Width · voxels", min: 1, max: 16, step: 1, initial: 1 };
+export const depthControl: ToolControl = { id: "depth", presentation: "primary", label: "Depth · voxels", min: 1, max: 32, step: 1, initial: 1 };
+export const planeControl: ToolControl = { id: "plane", presentation: "advanced", label: "Empty-space height · voxels", min: -64, max: 128, step: 1, initial: 0 };
+export const shellControl: ToolControl = { id: "shell", kind: "toggle", presentation: "advanced", label: "Edit tank walls", min: 0, max: 1, step: 1, initial: 0 };
+export const mirrorControl: ToolControl = { id: "mirror", kind: "toggle", presentation: "advanced", label: "Mirror X", min: 0, max: 1, step: 1, initial: 0 };
 /** Limits are checked before accepting an update, never silently truncated. */
 export const MAX_STROKE_VOXELS = 32768;
 export const MAX_STROKE_PATCHES = 4096;
@@ -58,6 +58,7 @@ export function beginShapeGesture(context: ToolContext, operation: Patch["operat
   const cell = sceneCellSizes_m(scene);
   const origin = [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
   const hit = pickSolidVoxel(scene, ray, undefined, {
+    rejectBudgetExhaustion: true,
     skip: (coordinate) => values.shell !== 1 && coordinate[1] >= 0
       && containerShellContains(scene, coordinate),
   });
@@ -132,7 +133,6 @@ export function beginShapeGesture(context: ToolContext, operation: Patch["operat
 export function voxelToolUnavailable({ scene, methodId }: {
   scene: ToolContext["scene"]; methodId: string;
 }): string | undefined {
-  if (scene.terrain) return "This scene has baked terrain. Start a new voxel scene for live editing.";
   if (scene.systems?.fluid !== false && methodId !== "adaptive-mass") return "Choose Sparse CM12 to edit solids while water runs.";
   return undefined;
 }

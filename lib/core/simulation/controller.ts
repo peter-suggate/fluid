@@ -1,3 +1,4 @@
+import { sceneEqualExcept } from "../scene-comparison";
 import { methodConfigurationImpact } from "../method-lifecycle";
 import { validateMethodConfiguration } from "../stores/method-store";
 import { hostTransportBlockReason, hostTransportFailure } from "./host-transport-status";
@@ -112,6 +113,7 @@ interface PaneRuntime {
   kinematicDrag: { bodyId: string; position: RigidBodyState["position_m"]; velocity: RigidBodyState["linearVelocity_m_s"] } | null;
   /** Document captured when a direct-manipulation gesture opened. */
   pendingEdit?: { label: string; snapshot: EditorHistorySnapshot };
+  acceptLiveSolidEdit?: (next: SceneDescription, base: SceneDescription) => Promise<void>;
   /** This pane's report cadence — two panes must not throttle each other. */
   lastPerformanceReportAt_ms: number;
   lastPerformanceReportContext: string;
@@ -1229,6 +1231,32 @@ class SimulationController {
     // Documents are immutable at this boundary, so identity is the whole test —
     // and much cheaper than `canonicalScene` over a sculpted terrain grid.
     if (committed === previous) return false;
+    const session = this.session(paneId);
+    if (session.method.getState().methodId === "adaptive-mass"
+      && JSON.stringify(previous.solidVoxels) !== JSON.stringify(committed.solidVoxels)
+      && !sceneEditRequiresReset(previous, committed, session.method.getState().methodId)) {
+      // Compare mirroring writes the store first. Restore the accepted document
+      // synchronously, before a draw can bypass this pane's own water proof.
+      const presetId = session.scene.getState().presetId;
+      session.scene.getState().setScene(previous, presetId);
+      const accept = this.runtime(paneId).acceptLiveSolidEdit;
+      if (session.ui.getState().voxelStrokePending || !accept) {
+        session.runtime.getState().setNotice("Mirrored voxel edit needs a ready, idle scene.", "warn");
+        return false;
+      }
+      session.ui.setState({ voxelStrokePending: true });
+      void (async () => {
+        try {
+          await accept(committed, previous);
+          if (session.scene.getState().scene !== previous) throw new Error("Scene changed while accepting the mirrored edit.");
+          session.scene.getState().setScene(committed, presetId);
+          this.adoptRigidBodies(committed, paneId);
+        } catch (error) {
+          session.runtime.getState().setNotice(error instanceof Error ? error.message : "Mirrored voxel edit rejected.", "warn");
+        } finally { session.ui.setState({ voxelStrokePending: false }); }
+      })();
+      return true;
+    }
     if (sceneEditRequiresReset(previous, committed, this.session(paneId).method.getState().methodId)) {
       // Same care `commitEdit` takes: reset() re-selects the first body, and a
       // mirrored edit must not steal the selection out of the receiving pane.
@@ -1252,10 +1280,8 @@ class SimulationController {
   private applyHistorySnapshot(entry: EditorHistorySnapshot, verb: string, paneId: PaneId = PRIMARY_PANE_ID) {
     const current = this.session(paneId).scene.getState().scene;
     const next = cloneScene(entry.scene);
-    const voxelOnly = canonicalScene({ ...current, solidVoxels: [] })
-      === canonicalScene({ ...next, solidVoxels: [] });
-    const sceneryOnly = canonicalScene({ ...current, scenery: undefined })
-      === canonicalScene({ ...next, scenery: undefined });
+    const voxelOnly = sceneEqualExcept(current, next, ["solidVoxels"]);
+    const sceneryOnly = sceneEqualExcept(current, next, ["scenery"]);
     if (sceneryOnly || (voxelOnly && this.session(paneId).method.getState().methodId === "adaptive-mass")) {
       this.session(paneId).scene.getState().setScene(next, entry.presetId);
       const ui = this.session(paneId).ui.getState();
@@ -1267,21 +1293,51 @@ class SimulationController {
     this.session(paneId).runtime.getState().setNotice(entry.label ? `${verb} ${entry.label}` : `${verb} last edit`);
   }
 
-  undo(paneId: PaneId = PRIMARY_PANE_ID): boolean {
+  /** Register the viewport's atomic GPU acceptance seam for history edits. */
+  registerLiveSolidEditAcceptance(paneId: PaneId, accept: (next: SceneDescription, base: SceneDescription) => Promise<void>): () => void {
+    const runtime = this.runtime(paneId);
+    runtime.acceptLiveSolidEdit = accept;
+    return () => { if (runtime.acceptLiveSolidEdit === accept) runtime.acceptLiveSolidEdit = undefined; };
+  }
+
+  private moveHistory(direction: "undo" | "redo", paneId: PaneId): boolean {
+    const session = this.session(paneId);
+    if (session.ui.getState().voxelStrokePending) return false;
+    const history = session.history.getState();
+    const stack = direction === "undo" ? history.past : history.future;
+    const entry = stack[stack.length - 1];
+    if (!entry) { session.runtime.getState().setNotice(`Nothing to ${direction}`); return false; }
+    const current = session.scene.getState().scene;
+    const next = cloneScene(entry.scene);
+    const voxelOnly = sceneEqualExcept(current, next, ["solidVoxels"]);
+    const solidChanged = JSON.stringify(current.solidVoxels) !== JSON.stringify(next.solidVoxels);
+    const verb = direction === "undo" ? "Undid" : "Redid";
     this.runtime(paneId).pendingEdit = undefined;
-    const entry = this.session(paneId).history.getState().undo(this.documentSnapshot("", paneId));
-    if (!entry) { this.session(paneId).runtime.getState().setNotice("Nothing to undo"); return false; }
-    this.applyHistorySnapshot(entry, "Undid", paneId);
+    if (voxelOnly && solidChanged && session.method.getState().methodId === "adaptive-mass") {
+      const accept = this.runtime(paneId).acceptLiveSolidEdit;
+      if (!accept) { session.runtime.getState().setNotice("Wait for the scene to be ready before changing voxel history.", "warn"); return false; }
+      session.ui.setState({ voxelStrokePending: true });
+      session.runtime.getState().setNotice(`Checking ${direction} against the current water…`);
+      void (async () => {
+        try {
+          await accept(next, current);
+          if (session.scene.getState().scene !== current) throw new Error("Scene changed while accepting history.");
+          session.history.getState()[direction](this.documentSnapshot("", paneId));
+          session.scene.getState().setScene(next, entry.presetId);
+          session.runtime.getState().setNotice(entry.label ? `${verb} ${entry.label}` : `${verb} last edit`);
+        } catch (error) {
+          session.runtime.getState().setNotice(error instanceof Error ? error.message : `Could not ${direction} this edit.`, "warn");
+        } finally { session.ui.setState({ voxelStrokePending: false }); }
+      })();
+      return true;
+    }
+    session.history.getState()[direction](this.documentSnapshot("", paneId));
+    this.applyHistorySnapshot(entry, verb, paneId);
     return true;
   }
 
-  redo(paneId: PaneId = PRIMARY_PANE_ID): boolean {
-    this.runtime(paneId).pendingEdit = undefined;
-    const entry = this.session(paneId).history.getState().redo(this.documentSnapshot("", paneId));
-    if (!entry) { this.session(paneId).runtime.getState().setNotice("Nothing to redo"); return false; }
-    this.applyHistorySnapshot(entry, "Redid", paneId);
-    return true;
-  }
+  undo(paneId: PaneId = PRIMARY_PANE_ID): boolean { return this.moveHistory("undo", paneId); }
+  redo(paneId: PaneId = PRIMARY_PANE_ID): boolean { return this.moveHistory("redo", paneId); }
 
   // ---- rigid-body roster ------------------------------------------------
 
@@ -1695,6 +1751,10 @@ class SimulationController {
 
   /** Save the live document under a name, replacing an entry of the same name. */
   saveNamedScene(name: string, paneId: PaneId = PRIMARY_PANE_ID) {
+    if (this.session(paneId).ui.getState().voxelStrokePending) {
+      this.session(paneId).runtime.getState().setNotice("Finish the voxel stroke before saving.");
+      return readSceneLibrary(browserSceneLibraryStorage());
+    }
     const sceneStore = this.session(paneId).scene.getState();
     const { methodId, quality, overrides } = this.session(paneId).method.getState();
     const { entries, entry } = saveSceneToLibrary(
@@ -1730,8 +1790,17 @@ class SimulationController {
   }
 
   importScene(name: string, contents: string, paneId: PaneId = PRIMARY_PANE_ID) {
+    if (this.session(paneId).ui.getState().voxelStrokePending) {
+      this.session(paneId).runtime.getState().setNotice("Finish the voxel stroke before importing a scene.", "warn");
+      return;
+    }
     try { const loaded = parseScene(contents); this.recordHistory(`import ${name}`, undefined, paneId); this.reset(loaded, undefined, paneId); this.session(paneId).runtime.getState().setNotice(`Loaded ${name}`); }
-    catch (error) { this.session(paneId).runtime.getState().setNotice(error instanceof Error ? error.message : "Scene import failed", "warn"); }
+    catch (error) {
+      const detail = error instanceof SyntaxError ? "The file is not valid JSON."
+        : error instanceof TypeError ? "The file is missing required scene fields. Export a scene from this editor to use as a template."
+        : error instanceof Error ? error.message : "The file does not describe a valid scene.";
+      this.session(paneId).runtime.getState().setNotice(`Scene import failed: ${detail}`, "warn");
+    }
   }
 
   applyAndResetFluid(paneId: PaneId = PRIMARY_PANE_ID) {

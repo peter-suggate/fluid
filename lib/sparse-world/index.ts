@@ -1,3 +1,4 @@
+import type { LiveFluidEdit, LiveFluidEditResult } from "../core/live-fluid-edit";
 import type {
   SparseAdaptiveGridConsumerSource,
   WebGPUFineLevelSetBrickSource,
@@ -136,8 +137,11 @@ export interface SparseWorldStatus {
 }
 
 export interface SparseWorld {
+  editFluidVolume?(edit: LiveFluidEdit): Promise<LiveFluidEditResult>;
   /** Read-only preflight; must not submit work or fault a running world. */
   validateSceneEdit?(scene: SceneDescription): void;
+  /** True means GPU geometry is committed; subsequent frame faults must not reject document adoption. */
+  prepareSceneEdit?(scene: SceneDescription): Promise<boolean>;
   /** Apply one authored edit without exposing implementation encoders or buffers. */
   edit(edit: SparseWorldEdit): SparseWorldEditReceipt;
   encodeStep(

@@ -1,6 +1,7 @@
 import { intersectBox, type EditorRay } from "./editor-entity";
 import type { SceneDescription, Vec3 } from "./model";
-import { sceneCellSizes_m, solidVoxelShellForScene } from "./scene-lattice";
+import { terrainHeightAt } from "./terrain";
+import { sceneCellSizes_m, sceneLatticeDimensions, solidVoxelShellForScene } from "./scene-lattice";
 import { solidWorldForScene, type SolidWorld, type SolidWorldCoordinate,
   type SolidWorldVoxelPatch } from "./solid-world";
 
@@ -59,29 +60,29 @@ export function solidVoxelWorldBox(scene: SceneDescription,
  * can drift from the authoring. Memoized per scene document: a hover asks this
  * once per candidate cell, and the answer only changes when the lattice does.
  */
-const containerShellCells = new WeakMap<SceneDescription, ReadonlySet<string>>();
+const containerShellPredicates = new WeakMap<SceneDescription, (coordinate: SolidWorldCoordinate) => boolean>();
 
-export function containerShellContains(
-  scene: SceneDescription,
-  coordinate: SolidWorldCoordinate,
-): boolean {
-  let cells = containerShellCells.get(scene);
-  if (!cells) {
-    const built = new Set<string>();
-    for (const patch of solidVoxelShellForScene(scene)) {
-      if (patch.operation !== "fill") continue;
-      for (let x = patch.minimum[0]; x < patch.maximumExclusive[0]; x += 1) {
-        for (let y = patch.minimum[1]; y < patch.maximumExclusive[1]; y += 1) {
-          for (let z = patch.minimum[2]; z < patch.maximumExclusive[2]; z += 1) {
-            built.add(`${x},${y},${z}`);
-          }
-        }
-      }
+export function containerShellContains(scene: SceneDescription, coordinate: SolidWorldCoordinate): boolean {
+  let contains = containerShellPredicates.get(scene);
+  if (!contains) {
+    if (scene.container.shape === "sphere") {
+      const dimensions = sceneLatticeDimensions(scene);
+      const radius = .5 * Math.min(...dimensions);
+      // Same cell-center predicate as sphericalSolidVoxelShell, including its
+      // finite [-1, dimension] domain. No cubic shell materialization for a pick.
+      contains = q => q.every((value, axis) => value >= -1 && value <= dimensions[axis]!)
+        && Math.hypot(q[0] + .5 - .5 * dimensions[0], q[1] + .5 - .5 * dimensions[1],
+          q[2] + .5 - .5 * dimensions[2]) >= radius;
+    } else {
+      // A box shell is five/six slabs. Keep that compact authored program
+      // instead of expanding every wall cell into a string Set on first hover.
+      const patches = solidVoxelShellForScene(scene);
+      contains = q => patches.some(patch => q.every((value, axis) => value >= patch.minimum[axis]!
+        && value < patch.maximumExclusive[axis]!));
     }
-    cells = built;
-    containerShellCells.set(scene, cells);
+    containerShellPredicates.set(scene, contains);
   }
-  return cells.has(coordinate.join(","));
+  return contains(coordinate);
 }
 
 export interface SolidVoxelPickOptions {
@@ -93,13 +94,76 @@ export interface SolidVoxelPickOptions {
    * a hole: the wall is still there, the editor just does not point at it.
    */
   readonly skip?: (coordinate: SolidWorldCoordinate) => boolean;
+  readonly rejectBudgetExhaustion?: boolean;
+}
+
+/** Traverse only cells crossed by the input ray; never bake a terrain-sized world on pointerdown. */
+function pickAuthoredVoxelRay(scene: SceneDescription, ray: EditorRay,
+  options: SolidVoxelPickOptions): PickedSolidVoxel | undefined {
+  const h = sceneCellSizes_m(scene), origin = worldOrigin(scene), dimensions = sceneLatticeDimensions(scene);
+  const minimum = [0, 0, 0], maximum = [...dimensions];
+  for (const patch of scene.solidVoxels) for (let axis = 0; axis < 3; axis++) {
+    minimum[axis] = Math.min(minimum[axis]!, patch.minimum[axis]!);
+    maximum[axis] = Math.max(maximum[axis]!, patch.maximumExclusive[axis]!);
+  }
+  const length = Math.hypot(ray.direction.x, ray.direction.y, ray.direction.z);
+  if (!(length > 1e-12)) return undefined;
+  const d = [ray.direction.x / length, ray.direction.y / length, ray.direction.z / length];
+  const o = [ray.origin.x, ray.origin.y, ray.origin.z];
+  const normalized = { origin: ray.origin, direction: { x: d[0]!, y: d[1]!, z: d[2]! } };
+  const span = intersectBox(normalized, { min: { x: origin[0] + minimum[0]! * h[0], y: minimum[1]! * h[1], z: origin[2] + minimum[2]! * h[2] },
+    max: { x: origin[0] + maximum[0]! * h[0], y: maximum[1]! * h[1], z: origin[2] + maximum[2]! * h[2] } });
+  if (!span || span.far_m <= 1e-6) return undefined;
+  let t = Math.max(0, span.near_m);
+  const q = o.map((value, axis) => Math.floor((value + (t + 1e-8) * d[axis]! - origin[axis]!) / h[axis]!));
+  let work = 0;
+  for (let step = 0; step < 4096 && t <= span.far_m; step++) {
+    const coordinate = q as unknown as SolidWorldCoordinate;
+    let occupied: boolean | undefined;
+    for (let index = scene.solidVoxels.length - 1; index >= 0; index--) {
+      if (++work > 262144) {
+        if (options.rejectBudgetExhaustion) throw new Error("This pick exceeds the bounded editing budget; point closer to the surface.");
+        return undefined;
+      }
+      const patch = scene.solidVoxels[index]!;
+      if (q.every((value, axis) => value >= patch.minimum[axis]! && value < patch.maximumExclusive[axis]!)) {
+        occupied = patch.operation === "fill"; break;
+      }
+    }
+    if (occupied === undefined && scene.terrain && q.every((value, axis) => value >= 0 && value < dimensions[axis]!)) {
+      const height = Math.fround(Math.min(scene.container.height_m,
+        terrainHeightAt(scene.terrain, origin[0] + (q[0]! + .5) * h[0], origin[2] + (q[2]! + .5) * h[2])));
+      occupied = Math.round(255 * Math.max(0, Math.min(1, (height - q[1]! * h[1]) / h[1]))) > 0;
+    }
+    if (occupied && !options.skip?.(coordinate)) {
+      const box = solidVoxelWorldBox(scene, coordinate), hit = intersectBox(normalized, box)!;
+      const distance_m = hit.near_m > 1e-6 ? hit.near_m : hit.far_m;
+      const point = o.map((value, axis) => value + distance_m * d[axis]!);
+      let faceAxis: 0 | 1 | 2 = 0, faceSign: -1 | 1 = -1, nearest = Infinity;
+      for (const axis of [0, 1, 2] as const) for (const sign of [-1, 1] as const) {
+        const distance = Math.abs(point[axis]! - (origin[axis]! + (q[axis]! + Number(sign > 0)) * h[axis]!));
+        if (distance < nearest) { nearest = distance; faceAxis = axis; faceSign = sign; }
+      }
+      return { coordinate: [...coordinate] as SolidWorldCoordinate, faceAxis, faceSign, distance_m,
+        point_m: { x: point[0]!, y: point[1]!, z: point[2]! } };
+    }
+    const crossings = q.map((value, axis) => d[axis] === 0 ? Infinity
+      : (origin[axis]! + (value + Number(d[axis]! > 0)) * h[axis]! - o[axis]!) / d[axis]!);
+    const next = Math.min(...crossings);
+    if (!Number.isFinite(next)) return undefined;
+    for (let axis = 0; axis < 3; axis++) if (crossings[axis]! <= next + 1e-10) q[axis]! += Math.sign(d[axis]!);
+    t = next;
+  }
+  if (t <= span.far_m && options.rejectBudgetExhaustion) throw new Error("This pick exceeds the bounded 4096-cell editing ray; point closer to the surface.");
+  return undefined;
 }
 
 /** Ray-pick the authoritative occupied voxels, independent of authored shape. */
 export function pickSolidVoxel(scene: SceneDescription,
   ray: EditorRay,
-  world: SolidWorld = solidWorldForScene(scene),
+  world: SolidWorld | undefined = undefined,
   options: SolidVoxelPickOptions = {}): PickedSolidVoxel | undefined {
+  if (!world) return pickAuthoredVoxelRay(scene, ray, options);
   if (world.pages.length === 0) return undefined;
   const rayLength = Math.hypot(ray.direction.x, ray.direction.y, ray.direction.z);
   if (!(rayLength > 1e-12)) return undefined;

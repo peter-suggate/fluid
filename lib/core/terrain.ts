@@ -837,8 +837,18 @@ export function intersectAuthoredTerrain(
   const directionLength = Math.hypot(direction.x, direction.y, direction.z);
   if (!(directionLength > 1e-9) || !(sceneScale_m > 0) || !Number.isFinite(sceneScale_m)) return undefined;
   const rd = { x: direction.x / directionLength, y: direction.y / directionLength, z: direction.z / directionLength };
-  const ceiling = terrainCeiling(terrain);
-  const grid = terrainSampleGrid(terrain);
+  // The authoring bracket needs a conservative upper bound, not a full
+  // procedural grid scan. The vessel is ground + crest + max terrace + relief.
+  const spec = terrain.procedural?.spec;
+  const ceiling = !terrain.grid && spec
+    ? spec.groundHeight_m + spec.rimHeight_m * (1 + Math.abs(spec.sectionHeightVariation))
+      + Math.max(0, ...(spec.terraces ?? []).map(terrace => terrace.height_m))
+      + Math.abs(spec.relief_m) + TERRAIN_CEILING_MARGIN_M
+    : terrainCeiling(terrain);
+  // A pointer ray needs only a bounded set of point samples. Asking for the
+  // derived procedural grid here baked millions of nodes on the first hover.
+  // Procedural point sampling uses the same bilinear arithmetic without that bake.
+  const grid = terrain.grid;
   if (grid) return marchAuthoredTerrainGrid(terrain, grid, origin_m, rd, ceiling, sceneScale_m, normalEpsilon_m);
   let t0 = 0.005;
   if (origin_m.y > ceiling) {

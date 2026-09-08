@@ -54,7 +54,12 @@ export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: rea
       5: ["positionX", "positionY", "positionZ", "reserved"],
       4: ["rawDensity", "rawGamma", "reserved", "reserved"],
     } as Record<number, string[]>)[words[1]],
-    operands: retained?.values ?? (words[1] >= 2 && words[1] <= 5
+    // Sharpening records its recipient weight as f32 and its mass receipt as
+    // i32. Reinterpreting the latter as a float disguises two mass quanta as
+    // 2.8e-45, making a real missing-recipient failure look like underflow.
+    operands: retained?.values ?? (words[1] === 3
+      ? [new Float32Array(words.slice(6, 7).buffer)[0], words[7] | 0, words[8], words[9]]
+      : words[1] >= 2 && words[1] <= 5
       ? [...new Float32Array(words.slice(6, 10).buffer)] : [...words.slice(6, 10)]), rawWords: [...words],
   };
 }

@@ -1,3 +1,5 @@
+import { adoptEnvironmentProxyCatalog, useRemoteEnvironmentCatalogs, cachedEnvironmentProxyCatalog, reuseEnvironmentProxyCatalog, markEnvironmentCatalogRemote, type EnvironmentProxyCatalog } from "./voxel-environments";
+import type { LiveFluidEdit, LiveFluidEditResult } from "./live-fluid-edit";
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
 import type { PressureJournal } from "../features/pressure-inspection/journal";
 import type { StageLensReceipt } from "./stage-lens";
@@ -42,18 +44,20 @@ export interface WebGPURenderWorkerSnapshot {
 export type WebGPURenderWorkerRequest =
   | { type: "attach"; canvas: OffscreenCanvas }
   | { type: "initialize"; requestId: number }
-  | { type: "set-render-scene"; revision: number; scene: SceneDescription; terrainContentStamp: string }
+  | { type: "set-render-scene"; revision: number; scene: SceneDescription; needsSceneryCatalog?: boolean; terrainContentStamp: string }
   | { type: "draw"; frameId: number; sceneRevision: number; args: DrawArgumentsWithoutScene; viewport: { width: number; height: number; devicePixelRatio: number }; instrumentationMode: PerformanceInstrumentationMode }
   | { type: "set-simulation-scene"; scene: DrawArguments[1] | undefined }
   | { type: "set-hover-highlight"; range: { first: number; last: number } | undefined }
   | { type: "set-simulation-running"; requestId: number; running: boolean }
   | { type: "reset-simulation-timeline" }
   | { type: "validate-solid-edit"; requestId: number; scene: SceneDescription; base?: SceneDescription }
+  | { type: "edit-fluid"; requestId: number; edit: LiveFluidEdit }
   | { type: "inject-liquid-ball"; requestId: number; ball: InjectedLiquidBall }
   | { type: "pick-rigid-body"; requestId: number; args: PickArguments }
   | { type: "shutdown"; requestId: number };
 
 export type WebGPURenderWorkerResponse =
+  | { type: "scenery-catalog"; sceneRevision: number; catalog: EnvironmentProxyCatalog }
   | { type: "attached" }
   | { type: "status"; status: GPUStatus; workerNow_ms: number }
   | { type: "gpu-info"; info: GPUEulerianInfo }
@@ -67,6 +71,7 @@ export type WebGPURenderWorkerResponse =
   | { type: "frame"; frameId: number; metrics: RendererFrameMetrics; snapshot: WebGPURenderWorkerSnapshot }
   | { type: "pick-result"; requestId: number; result: PickResult }
   | { type: "solid-edit-validated"; requestId: number }
+  | { type: "fluid-edit-result"; requestId: number; result: LiveFluidEditResult }
   | { type: "inject-result"; requestId: number; taken: boolean }
   | { type: "shutdown-complete"; requestId: number }
   | { type: "request-failed"; requestId: number; message: string };
@@ -116,6 +121,7 @@ export class WebGPURenderWorkerClient {
   private frameId = 0;
   private nextRenderSceneRevision = 0;
   private publishedRenderSceneRevision = 0;
+  private publishedRenderDocument?: SceneDescription;
   private readonly renderSceneRevisionByDocument = new WeakMap<SceneDescription, number>();
   private readonly terrainStampByDocument = new WeakMap<TerrainDescription, string>();
   private simulationScene?: SceneDescription;
@@ -128,7 +134,8 @@ export class WebGPURenderWorkerClient {
   private snapshot: WebGPURenderWorkerSnapshot = EMPTY_SNAPSHOT;
   private stopped = false;
   private failed = false;
-  private readonly requests = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
+  private runtimeUnavailable?: string;
+  private readonly requests = new Map<number, { kind: WebGPURenderWorkerRequest["type"]; resolve(value: unknown): void; reject(error: Error): void }>();
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -141,6 +148,7 @@ export class WebGPURenderWorkerClient {
       type: "module",
       name: "fluid-lab-webgpu-runtime",
     });
+    useRemoteEnvironmentCatalogs();
     this.worker.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerResponse>) => this.receive(event.data));
     this.worker.addEventListener("error", (event) => {
       const error = new Error(event.message || "WebGPU runtime worker failed");
@@ -266,6 +274,10 @@ export class WebGPURenderWorkerClient {
       ...(sendBase ? { base } : {}) });
   }
 
+  editFluid(edit: LiveFluidEdit): Promise<LiveFluidEditResult> {
+    return this.request<LiveFluidEditResult>({ type: "edit-fluid", requestId: this.nextRequestId(), edit });
+  }
+
   injectLiquidBall(ball: InjectedLiquidBall): Promise<boolean> {
     return this.request<boolean>({ type: "inject-liquid-ball", requestId: this.nextRequestId(), ball });
   }
@@ -277,6 +289,7 @@ export class WebGPURenderWorkerClient {
   shutdown(): Promise<void> {
     if (this.stopped) return Promise.resolve();
     this.stopped = true;
+    this.rejectAll(new Error("WebGPU runtime stopped; the last accepted scene is retained."));
     if (this.failed) {
       this.worker.terminate();
       return Promise.resolve();
@@ -297,20 +310,30 @@ export class WebGPURenderWorkerClient {
     }
     if (revision === this.publishedRenderSceneRevision) return revision;
     this.publishedRenderSceneRevision = revision;
+    if (this.publishedRenderDocument) reuseEnvironmentProxyCatalog(this.publishedRenderDocument, scene);
+    this.publishedRenderDocument = scene;
+    markEnvironmentCatalogRemote(scene);
     const terrain = scene.terrain;
     let stamp = terrain && this.terrainStampByDocument.get(terrain);
     if (stamp === undefined) {
       stamp = terrainContentStamp(terrain);
       if (terrain) this.terrainStampByDocument.set(terrain, stamp);
     }
-    this.post({ type: "set-render-scene", revision, scene, terrainContentStamp: stamp });
+    this.post({ type: "set-render-scene", revision, scene, terrainContentStamp: stamp, needsSceneryCatalog: !cachedEnvironmentProxyCatalog(scene) });
     return revision;
   }
 
   private request<T>(message: Extract<WebGPURenderWorkerRequest, { requestId: number }>): Promise<T> {
+    if (this.failed || (message.type !== "shutdown" && (this.stopped || this.runtimeUnavailable))) {
+      return Promise.reject(new Error(this.runtimeUnavailable ?? "WebGPU runtime is no longer available."));
+    }
     return new Promise<T>((resolve, reject) => {
-      this.requests.set(message.requestId, { resolve: (value) => resolve(value as T), reject });
-      this.worker.postMessage(message);
+      this.requests.set(message.requestId, { kind: message.type, resolve: (value) => resolve(value as T), reject });
+      try { this.worker.postMessage(message); }
+      catch (error) {
+        this.requests.delete(message.requestId);
+        reject(error);
+      }
     });
   }
 
@@ -333,13 +356,24 @@ export class WebGPURenderWorkerClient {
   }
 
   private receive(message: WebGPURenderWorkerResponse): void {
-    if (message.type === "status") {
+    if (message.type === "scenery-catalog") {
+      if (message.sceneRevision === this.publishedRenderSceneRevision && this.publishedRenderDocument) {
+        adoptEnvironmentProxyCatalog(this.publishedRenderDocument, message.catalog);
+      }
+    }
+    else if (message.type === "status") {
       const status = message.status.state === "initializing" && message.status.startedAt_ms !== undefined
         ? { ...message.status,
           // `performance.now()` is realm-relative. Preserve elapsed worker
           // time while translating its origin into the document's clock.
           startedAt_ms: performance.now() - Math.max(0, message.workerNow_ms - message.status.startedAt_ms) }
         : message.status;
+      if (status.state === "unavailable" || status.state === "lost" || status.state === "blocked") {
+        this.runtimeUnavailable = status.label;
+        // The worker may still need to drain/destroy GPU resources. Reject
+        // authoring requests now without interrupting that shutdown handshake.
+        this.rejectAll(new Error(status.label), true);
+      }
       this.callbacks.onStatus(status);
     }
     else if (message.type === "gpu-info") this.callbacks.onGPUInfo?.(message.info);
@@ -355,6 +389,7 @@ export class WebGPURenderWorkerClient {
     else if (message.type === "initialized" || message.type === "shutdown-complete" || message.type === "solid-edit-validated") this.settle(message.requestId);
     else if (message.type === "simulation-running-set") this.settle(message.requestId, message.submittedTime_s);
     else if (message.type === "pick-result") this.settle(message.requestId, message.result);
+    else if (message.type === "fluid-edit-result") this.settle(message.requestId, message.result);
     else if (message.type === "inject-result") this.settle(message.requestId, message.taken);
     else if (message.type === "request-failed") this.settle(message.requestId, undefined, message.message);
     else if (message.type === "frame") {
@@ -367,9 +402,12 @@ export class WebGPURenderWorkerClient {
     }
   }
 
-  private rejectAll(error: Error): void {
-    for (const request of this.requests.values()) request.reject(error);
-    this.requests.clear();
+  private rejectAll(error: Error, preserveShutdown = false): void {
+    for (const [id, request] of this.requests) {
+      if (preserveShutdown && request.kind === "shutdown") continue;
+      this.requests.delete(id);
+      request.reject(error);
+    }
   }
 }
 

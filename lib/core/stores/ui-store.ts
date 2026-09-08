@@ -140,6 +140,8 @@ export interface TracePinRequest {
 
 /** Viewport state: camera, selection, and debug controls. */
 interface UIStore {
+  /** Includes the final asynchronous preflight after pointer release. */
+  voxelStrokePending: boolean;
   voxelToolId?: string;
   voxelToolValues: Record<string, Record<string, number>>;
   setVoxelTool: (id: string | undefined) => void;
@@ -383,6 +385,7 @@ interface UIStore {
 export const DEFAULT_GRID_OVERLAY_AXIS: Exclude<GridOverlayConfig["axis"], "off"> = "z";
 
 export const createUIStore = () => create<UIStore>((set) => ({
+  voxelStrokePending: false,
   voxelToolId: undefined,
   voxelToolValues: {},
   setVoxelTool: (voxelToolId) => set({ voxelToolId, viewportMode: "interact", armedGesture: undefined, selection: undefined }),

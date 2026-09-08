@@ -1,3 +1,4 @@
+import { terrainFieldStamp } from "../../../core/live-terrain-overlay";
 import type { RigidBodyDescription, SceneDescription } from "../../../core/model";
 import type { RenderFrameSeam } from "../../../core/render-frame-stages";
 import { svoSceneLighting } from "../lighting-visibility/svo-dry-scene-lighting";
@@ -26,6 +27,7 @@ import {
 } from "../../contracts/svo-material-abi";
 import { sceneTerrainSurfaceModel, type SvoTerrainSurfaceModel } from "../materials/svo-terrain-material";
 import { sceneCellSizes_m } from "../../../core/scene-lattice";
+import { solidWorldChangeBounds } from "../../../core/solid-world-change-bounds";
 import {
   SOLID_WORLD_BRICK_CELLS,
   SOLID_WORLD_TERRAIN_MATERIAL_ID,
@@ -104,6 +106,7 @@ import {
   WebGpuSparseBrickTopologyMutator,
   packSparseBrickTopologyMutationWorklist,
   sparseBrickTopologyMutationNodeReserve,
+  planSparseBrickTopologyLeafReservation,
 } from "../../../core/webgpu-sparse-brick-topology-mutation";
 import { assertSvoBrickRasterNodeAddressable } from "../primary-visibility/webgpu-svo-brick-raster";
 import { planSparseSceneDomain } from "../../../core/sparse-scene-domain";
@@ -715,9 +718,8 @@ function planarBoundaryTopologyStamp(
   environmentPrimitives: readonly EnvironmentProxyPrimitive[],
 ): string {
   return JSON.stringify({
-    // Authored voxels remain mutable page geometry. Refined terrain is still
-    // baked, so its existing edit guard remains until that field is mutable.
-    terrainSolidWorld: scene.terrain ? solidWorldContentStamp(scene) : undefined,
+    // Terrain heights stay immutable; ordered voxel overlays are live mutable data.
+    terrainSolidWorld: terrainFieldStamp(scene),
     environment: environmentPrimitives.map((primitive) => ({
       key: primitive.key,
       ownerIndex: primitive.ownerIndex,
@@ -1245,6 +1247,7 @@ export class OctreeSparseBrickWorld {
   private surfaceModel!: SvoTerrainSurfaceModel;
   private solidWorld!: SolidWorld;
   private solidWorldStamp = "";
+  private terrainFieldStamp = "";
   /** Catalog expansion input, retained exactly for subsequent live publications. */
   private environmentDetailCellSize_m = 0;
   /** Non-empty only when immutable planar terminals make geometry structural. */
@@ -1263,6 +1266,11 @@ export class OctreeSparseBrickWorld {
    * and is asked only about the bricks an *edit* touches.
    */
   private readonly coveredSceneBrickNodes = new Set<string>();
+  private readonly planarSceneBrickNodes = new Set<string>();
+  private readonly sampledTerrainNodes = new Map<string, SparseSceneAxisAlignedBounds>();
+  private readonly reservedTopologyCoordinates = new Set<string>();
+  private remainingTopologyLeafReserve = 0;
+  private readonly reservedTopologySplits = new Set<string>();
   private readonly pendingTopologyCoordinates = new Map<string, SparseBrickCoordinate>();
   private pendingScenePublication?: SparseScenePublication;
   private pendingTopologyMutation = false;
@@ -1401,6 +1409,7 @@ export class OctreeSparseBrickWorld {
     const initialSolidWorld = solidWorldForScene(scene);
     this.solidWorld = initialSolidWorld;
     this.solidWorldStamp = solidWorldContentStamp(scene);
+    this.terrainFieldStamp = terrainFieldStamp(scene);
     const solidWorldBounds = solidWorldPageBounds(scene, initialSolidWorld);
     // This tree is a sparse presentation consumer, not the fluid solver's
     // address space. Fluid residency claims wet pages as they appear; static
@@ -1761,7 +1770,17 @@ export class OctreeSparseBrickWorld {
     let coveredLeaves = 0;
     for (const leaf of plan.leaves) {
       const node = plan.nodes[leaf.nodeIndex];
-      this.coveredSceneBrickNodes.add(`${node.level}:${brickCoordinateKey(node.coordinate)}`);
+      const key = `${node.level}:${brickCoordinateKey(node.coordinate)}`;
+      this.coveredSceneBrickNodes.add(key);
+      if (leaf.terminalKind === SPARSE_BRICK_LEAF_TERMINAL.planarBoundary) this.planarSceneBrickNodes.add(key);
+      if (scene.terrain && node.level < maximumDepth && leaf.terminalKind === 0) {
+        const edge = renderCellSize.map(value => value * brickSize * 2 ** (maximumDepth - node.level));
+        this.sampledTerrainNodes.set(key, {
+          minimum: edge.map((value, axis) => worldOrigin[axis]! + [node.coordinate.x, node.coordinate.y, node.coordinate.z][axis]! * value) as [number, number, number],
+          maximum: edge.map((value, axis) => worldOrigin[axis]! + ([node.coordinate.x, node.coordinate.y, node.coordinate.z][axis]! + 1) * value) as [number, number, number],
+        });
+        this.planarSceneBrickNodes.add(key); // Shared terminal split ledger, including sampled terrain.
+      }
       if ((coveredLeaves += 1) % 4096 === 0) yield;
     }
     const packed = packSparseBrickPlan(plan, 1);
@@ -1772,6 +1791,7 @@ export class OctreeSparseBrickWorld {
       throw new RangeError("Live scene mutation brick capacity must be a positive safe integer");
     }
     this.topologyMutationCapacity = Math.min(sceneBrickVolume, requestedMutationCapacity);
+    this.remainingTopologyLeafReserve = this.topologyMutationCapacity;
     const nodeCapacity = Math.max(1, plan.nodes.length
       + sparseBrickTopologyMutationNodeReserve(maximumDepth, this.topologyMutationCapacity));
     const leafCapacity = Math.max(1, plan.leaves.length + this.topologyMutationCapacity);
@@ -2510,8 +2530,21 @@ export class OctreeSparseBrickWorld {
    */
   validateLiveSolidEdit(scene: SceneDescription): void {
     if (this.destroyed) throw new Error("Sparse scene has been destroyed");
-    if (scene.terrain) throw new Error("Baked terrain does not support live voxel edits");
-    this.proxyVoxelizer.validateSolidWorld(solidWorldForScene(scene));
+    if (terrainFieldStamp(scene) !== this.terrainFieldStamp) {
+      throw new Error("Changing terrain heights or its lattice requires rebuilding the scene; voxel overlays remain live.");
+    }
+    const world = solidWorldForScene(scene);
+    this.proxyVoxelizer.validateSolidWorld(world);
+    const changes = solidWorldChangeBounds(scene, this.solidWorld, world);
+    const bounds = scene.terrain ? changes.dirtyBounds : changes.addedBounds;
+    for (const bound of bounds) {
+      if (bound.minimum.some((value, axis) => value < this.sceneWorldOrigin[axis]! - 1e-6)
+        || bound.maximum.some((value, axis) => value > this.sceneWorldOrigin[axis]!
+          + this.sceneBrickDimensions[axis]! * this.brickSize * this.cellSize[axis]! + 1e-6)) {
+        throw new RangeError("Edit exceeds this scene's live world bounds. Use a scene with a larger authored domain.");
+      }
+    }
+    this.assertLiveTopologyCapacity(bounds);
   }
 
   stageSceneUpdate(scene: SceneDescription): boolean {
@@ -2524,24 +2557,20 @@ export class OctreeSparseBrickWorld {
       || solidWorldStampChanged;
     const nextSolidWorld = solidWorldStampChanged
       ? solidWorldForScene(scene) : previousSolidWorld;
-    const previousPages = new Map(previousSolidWorld.pages.map(page => [page.coordinate.join(","), page]));
-    const nextPages = new Map(nextSolidWorld.pages.map(page => [page.coordinate.join(","), page]));
-    const previousSolidBounds = initialPublication || !solidWorldChanged ? []
-      : solidWorldPageBounds(scene, { ...previousSolidWorld, pages: previousSolidWorld.pages.filter(page =>
-        nextPages.get(page.coordinate.join(",")) !== page) });
-    const nextSolidBounds = solidWorldChanged
-      ? solidWorldPageBounds(scene, { ...nextSolidWorld, pages: initialPublication ? nextSolidWorld.pages
-        : nextSolidWorld.pages.filter(page => previousPages.get(page.coordinate.join(",")) !== page) }) : [];
+    const changes = solidWorldChanged && !initialPublication
+      ? solidWorldChangeBounds(scene, previousSolidWorld, nextSolidWorld)
+      : { dirtyBounds: [], addedBounds: [] };
+    const nextSolidBounds = initialPublication ? solidWorldPageBounds(scene, nextSolidWorld) : scene.terrain ? changes.dirtyBounds : changes.addedBounds;
+    const dirtySolidBounds = initialPublication ? nextSolidBounds : changes.dirtyBounds;
     const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default", {
       detailCellSize_m: this.environmentDetailCellSize_m || undefined,
     });
     const authored = environmentProxyPrimitives(catalog, true);
-    const planarCatalog = buildSvoPlanarBoundaryCatalog(authored, (primitive) => ({
+    const planarCatalog = buildSvoPlanarBoundaryCatalog(authored, primitive => ({
       materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
       ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
     }));
-    const residualAuthored = svoPlanarResidualEnvironmentPrimitives(authored,
-      planarCatalog);
+    const residualAuthored = svoPlanarResidualEnvironmentPrimitives(authored, planarCatalog);
     const solidPlanarCatalog: ReturnType<typeof buildSvoSolidWorldPlanarBoundaryCatalog> | undefined = undefined;
     const nextResidualSolidWorld = svoPlanarResidualSolidWorld(nextSolidWorld,
       solidPlanarCatalog);
@@ -2569,6 +2598,8 @@ export class OctreeSparseBrickWorld {
         primitive: sparseScenePrimitiveForRigidBody(body, ownerId),
         materialSignature: body.shape,
       }] : []),
+      // The exact planar catalogue remains globally visible after a terminal
+      // splits. Sampling those planes again would duplicate and dilate floors.
       ...residualAuthored.map((primitive) => ({
         key: primitive.key,
         primitive: sparseScenePrimitiveForProxy(primitive, {
@@ -2591,8 +2622,7 @@ export class OctreeSparseBrickWorld {
         maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y,
           primitive.aabb_m.max.z] as const,
       })) : []),
-      ...(solidWorldChanged ? previousSolidBounds : []),
-      ...nextSolidBounds,
+      ...dirtySolidBounds,
     ];
     const newBounds: SparseSceneAxisAlignedBounds[] = [...nextSolidBounds];
     for (const entry of liveEntries) {
@@ -2610,6 +2640,7 @@ export class OctreeSparseBrickWorld {
       if (!nextStates.has(key)) dirtyRegions.push(previous.bounds);
     }
     if (dirtyRegions.length === 0) return false;
+    if (!initialPublication) this.assertLiveTopologyCapacity(newBounds);
     if (solidWorldChanged && !initialPublication) {
       this.proxyVoxelizer.setSolidWorld(nextResidualSolidWorld);
     }
@@ -2675,13 +2706,59 @@ export class OctreeSparseBrickWorld {
     return this.sceneRevision;
   }
 
+  /** Reserve enough existing arena space for every accepted terminal split. */
+  private terrainResamplingBounds(bounds: readonly SparseSceneAxisAlignedBounds[]): SparseSceneAxisAlignedBounds[] {
+    const result: SparseSceneAxisAlignedBounds[] = [];
+    if (!this.sampledTerrainNodes?.size) return result;
+    let touched = 0;
+    for (const bound of bounds) {
+      touched += bound.minimum.reduce((volume, value, axis) => volume
+        * (Math.ceil((bound.maximum[axis]! - value) / (this.cellSize[axis]! * this.brickSize)) + 2), 1);
+      if (touched > 4096) throw new RangeError("Terrain edit exceeds the bounded 4096-brick resampling budget.");
+    }
+    const coordinates = liveSceneMissingBrickCoordinates(bounds, this.sceneWorldOrigin,
+      this.cellSize, this.brickSize, this.sceneBrickDimensions, () => false);
+    const ancestors = new Set<string>();
+    let budget = 0;
+    for (const coordinate of coordinates) for (let level = 0; level < this.finestLevel; level++) {
+      const shift = this.finestLevel - level;
+      const key = `${level}:${coordinate.x >>> shift},${coordinate.y >>> shift},${coordinate.z >>> shift}`;
+      if (ancestors.has(key)) continue;
+      const ancestor = this.sampledTerrainNodes.get(key);
+      if (!ancestor) continue;
+      ancestors.add(key);
+      budget += ancestor.minimum.reduce((volume, value, axis) => volume
+        * Math.ceil((ancestor.maximum[axis]! - value) / (this.cellSize[axis]! * this.brickSize)), 1);
+      if (budget > 4096) throw new RangeError("Terrain edit exceeds the bounded 4096-brick resampling budget.");
+      result.push(ancestor);
+    }
+    return result;
+  }
+
+  private assertLiveTopologyCapacity(bounds: readonly SparseSceneAxisAlignedBounds[]): void {
+    this.terrainResamplingBounds(bounds);
+    const missing = liveSceneMissingBrickCoordinates(bounds, this.sceneWorldOrigin,
+      this.cellSize, this.brickSize, this.sceneBrickDimensions,
+      coordinate => this.sceneBrickCovered(coordinate));
+    const newCoordinates = missing.filter(coordinate =>
+      !this.reservedTopologyCoordinates.has(brickCoordinateKey(coordinate)));
+    const pending = new Set([...this.pendingTopologyCoordinates.keys(),
+      ...missing.map(brickCoordinateKey)]);
+    if (pending.size > this.topologyMutationCapacity
+      || planSparseBrickTopologyLeafReservation(this.finestLevel, newCoordinates,
+        this.planarSceneBrickNodes, this.reservedTopologySplits).leaves > this.remainingTopologyLeafReserve) {
+      throw new RangeError("Edit exceeds the reserved live voxel detail capacity. Save and reopen the scene to prepare more detail.");
+    }
+  }
+
   private stagePrimitivePublication(
     revision: number,
     dirtyRegions: readonly SparseSceneAxisAlignedBounds[],
     newBounds: readonly SparseSceneAxisAlignedBounds[],
     initialPublication: boolean,
   ): void {
-    const coalescedDirty = coalesceDirtyRegions(dirtyRegions, initialPublication ? 1 : OCTREE_LIVE_SCENE_DIRTY_REGION_CAPACITY);
+    if (!initialPublication) this.assertLiveTopologyCapacity(newBounds);
+    const coalescedDirty = coalesceDirtyRegions([...dirtyRegions, ...(!initialPublication ? this.terrainResamplingBounds(newBounds) : [])], initialPublication ? 1 : OCTREE_LIVE_SCENE_DIRTY_REGION_CAPACITY);
     this.pendingScenePublication = {
       primitives: [...this.liveScenePrimitives.values()].map(({ primitive }) => primitive),
       dirtyRegions: coalescedDirty,
@@ -2697,10 +2774,20 @@ export class OctreeSparseBrickWorld {
     };
     if (!initialPublication) {
       const activatedPages: SvoNodeMipCoordinate[] = [];
-      for (const coordinate of liveSceneMissingBrickCoordinates(
+      const coordinates = liveSceneMissingBrickCoordinates(
         newBounds, this.sceneWorldOrigin, this.cellSize, this.brickSize,
         this.sceneBrickDimensions, (coordinate) => this.sceneBrickCovered(coordinate),
-      )) {
+      );
+      const reservation = planSparseBrickTopologyLeafReservation(this.finestLevel,
+        coordinates.filter(coordinate => !this.reservedTopologyCoordinates.has(brickCoordinateKey(coordinate))),
+        this.planarSceneBrickNodes, this.reservedTopologySplits);
+      this.remainingTopologyLeafReserve -= reservation.leaves;
+      for (const key of reservation.splits) this.reservedTopologySplits.add(key);
+      for (const coordinate of coordinates) {
+        const key = brickCoordinateKey(coordinate);
+        if (!this.reservedTopologyCoordinates.has(key)) {
+          this.reservedTopologyCoordinates.add(key);
+        }
         this.pendingTopologyCoordinates.set(brickCoordinateKey(coordinate), coordinate);
         activatedPages.push([coordinate.x, coordinate.y, coordinate.z]
           .map((value) => Math.floor(value * this.brickSize / SVO_NODE_MIP_LAYOUT.interiorSize)) as unknown as SvoNodeMipCoordinate);
@@ -2751,7 +2838,9 @@ export class OctreeSparseBrickWorld {
     for (let level = this.finestLevel; level >= 0; level -= 1) {
       const shift = this.finestLevel - level;
       const key = `${level}:${coordinate.x >>> shift},${coordinate.y >>> shift},${coordinate.z >>> shift}`;
-      if (this.coveredSceneBrickNodes.has(key)) return true;
+      // Analytic coverage cannot store authored voxel detail. Split it into
+      // sampled targets while retaining analytic siblings in the mutator.
+      if (this.coveredSceneBrickNodes.has(key) && !this.planarSceneBrickNodes.has(key)) return true;
     }
     return false;
   }
@@ -2881,12 +2970,14 @@ export class OctreeSparseBrickWorld {
         brickDimensions: this.sceneBrickDimensions,
         generation: this.sceneRevision,
         maximumRequests: this.topologyMutationCapacity,
+        resampleSampledTerminals: this.sampledTerrainNodes.size > 0,
       });
       if (this.pendingTopologyCoordinates.size <= this.topologyMutationCapacity) {
         // Mutation only ever adds *finest* bricks, so these enter at the finest
         // level whatever level the leaves around them sit at.
         for (const [key] of this.pendingTopologyCoordinates) {
           this.coveredSceneBrickNodes.add(`${this.finestLevel}:${key}`);
+          this.planarSceneBrickNodes.delete(`${this.finestLevel}:${key}`);
         }
       }
       this.pendingTopologyCoordinates.clear();

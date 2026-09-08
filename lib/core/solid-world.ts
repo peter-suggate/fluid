@@ -463,12 +463,22 @@ export function fluidColliderVoxelPatchesForScene(
   });
 }
 
-/** SolidWorld used by fluid dynamics, including explicitly opted-in scenery. */
+const fluidSceneWorldCache = new WeakMap<SceneDescription, {
+  readonly source: SolidWorld; readonly regionStamp: string; readonly world: SolidWorld;
+}>();
+
+/** SolidWorld used by fluid dynamics, including explicitly opted-in scenery.
+ * Preserve its identity between preflight and commit, including collider
+ * wrappers. The structural stamp also detects callers mutating scene graphs. */
 export function fluidSolidWorldForScene(scene: SceneDescription): SolidWorld {
   const world = solidWorldForScene(scene);
   const regions = fluidColliderVoxelPatchesForScene(scene);
-  return regions.length === 0 ? world : { ...world,
-    regions: [...(world.regions ?? []), ...regions] };
+  if (regions.length === 0) return world;
+  const regionStamp = JSON.stringify(regions), cached = fluidSceneWorldCache.get(scene);
+  if (cached?.source === world && cached.regionStamp === regionStamp) return cached.world;
+  const wrapped = { ...world, regions: [...(world.regions ?? []), ...regions] };
+  fluidSceneWorldCache.set(scene, { source: world, regionStamp, world: wrapped });
+  return wrapped;
 }
 
 /** Generic voxel-box authoring helper; runtime consumers never infer this shell. */
@@ -550,8 +560,14 @@ export function sampleSolidWorld(
 export function sceneWithSolidStroke(base: SceneDescription,
   patches: readonly SolidWorldVoxelPatch[]): SceneDescription {
   const scene = { ...base, solidVoxels: [...base.solidVoxels, ...patches] };
-  const world = withSolidWorldPatches(solidWorldForScene(base), patches);
-  sceneSolidWorldCache.set(scene, { stamp: solidWorldContentStamp(scene), world });
+  // A browser input transaction may have no compiled terrain image; authoring
+  // a descriptor must not synchronously bake the entire domain on that thread.
+  // Runtime owners already holding the base image retain the incremental path.
+  const cached = sceneSolidWorldCache.get(base);
+  if (cached && cached.stamp === solidWorldContentStamp(base)) {
+    const world = withSolidWorldPatches(cached.world, patches);
+    sceneSolidWorldCache.set(scene, { stamp: solidWorldContentStamp(scene), world });
+  }
   return scene;
 }
 

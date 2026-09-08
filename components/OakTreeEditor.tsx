@@ -39,7 +39,7 @@ function TreeField({ field, commit }: { field: EditorField; commit: (value: numb
 }
 
 /** Tree growth is a scenery edit, sharing selection, history, and scene persistence. */
-export function OakTreeEditor() {
+export function OakTreeEditor({ contextual = false }: { contextual?: boolean }) {
   const session = useSession();
   const scene = session.scene(state => state.scene);
   const selection = session.ui(state => state.selection);
@@ -57,7 +57,7 @@ export function OakTreeEditor() {
     simulation.commitEdit(patch, { reseed: true }, session.id);
   };
   return <section className="oak-tree-editor" aria-label="Fractal oak editor">
-    <div className="oak-tree-heading"><strong>Fractal oaks</strong>
+    {!contextual && <><div className="oak-tree-heading"><strong>Fractal oaks</strong>
       <button type="button" disabled={pending} onClick={() => {
         session.ui.getState().setVoxelTool(undefined);
         const { x, z } = session.ui.getState().camera.target_m;
@@ -72,7 +72,7 @@ export function OakTreeEditor() {
       }}>
       <option value="">Select an oak…</option>
       {trees.map(tree => <option key={tree.id} value={tree.id}>{tree.id}</option>)}
-    </select></label>}
+    </select></label>}</>}
     {selected && <div key={selected.id}>
       <details>
         <summary>Voxel comparison</summary>

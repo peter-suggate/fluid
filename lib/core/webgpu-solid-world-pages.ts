@@ -148,7 +148,7 @@ export function packWebgpuSolidWorldPages(layout: WebgpuSolidWorldPageLayout,
 }
 
 /** Stream one canonical sparse page at a time; never builds an arena-sized host image. */
-export function writeWebgpuSolidWorldPages(queue: GPUQueue, destination: GPUBuffer,
+export function writeWebgpuSolidWorldPages(queue: Pick<GPUQueue, "writeBuffer">, destination: GPUBuffer,
   layout: WebgpuSolidWorldPageLayout, world: SolidWorld,
   originFine: readonly [number, number, number],
   lattice?: WebgpuSolidWorldPhysicalLattice, previous?: SolidWorld): void {

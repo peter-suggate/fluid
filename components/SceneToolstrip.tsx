@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Cuboid, Sigma, Waves } from "lucide-react";
 import type { EditorEntity, EditorField } from "../lib/core/editor-entity";
 import { sceneryIdFromSelection } from "../lib/core/editor-scenery";
@@ -17,6 +17,7 @@ import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
 import { FieldControlRows, methodSetupTabs } from "./FluidFieldFlyout";
 import { FeatureSlot } from "../lib/features/ui/FeatureSlot";
 import { MakeRows } from "./MakeRows";
+import { OakTreeEditor } from "./OakTreeEditor";
 import { StoneDialRows } from "./StoneLookFlyout";
 import { CanopyDialRows } from "./TreeCanopyFlyout";
 import { RimDialRows } from "./VesselRimFlyout";
@@ -150,43 +151,7 @@ function entityHasOptions(entity: EditorEntity): boolean {
     + (entity.groups?.length ?? 0) > 0;
 }
 
-/**
- * The strip at the container's corner: the scene's fixed readings, and — when
- * the tank is selected — everything else about the thing being solved.
- *
- * They are what a reader asks of a running scene, in the order they answer:
- * **what is drawn** over the water, **what the primary rays did**, **what it is
- * drawn in**, and **what is moving it**. Each is one mark and its own controls
- * on one line — view and ray-work glyphs with chevrons, the tank's mark with its
- * three extents, the solver's with its name — so the column is read rather than
- * explored.
- *
- * It was a stack of a dozen: five glyph rows that could only ever light one of
- * them, a FIELD row naming what those glyphs already showed, a PLANE row, a
- * SOLVER row, a title, three separate rows for width, height and depth, and two
- * groups of authored settings — Container and Voxel domain — that a reader
- * watching water never reaches for. The glyph rows collapsed into one; FIELD and
- * SOLVER became the marks' own chevrons; the extents became one line; and the
- * two groups are gone, along with the dials in them.
- *
- * Selecting the tank still *grows* this column rather than swapping it for a
- * panel: the lens and film rows, whatever the tank still has to say, and the
- * door, added underneath the fixed rows so nothing a reader was looking at moves.
- *
- * The water is not one of them. A body of water is an object with its own box
- * and its own extents, so it hangs its own strip off its own corner like every
- * other object — only the tank grows this one, because the tank's outline *is*
- * the container's and two columns at one corner would argue about which is in
- * front.
- *
- * And when anything other than the tank is selected this strip is not drawn at
- * all: the viewport withholds its corner. It is the ambient column — it stands
- * there because nothing has been asked — so it gives way entirely to the column
- * that is an answer, rather than shuffling outward to stand beside it. Two
- * columns a few centimetres apart at the same corner read as one panel about
- * two different subjects, which is worse than briefly losing the field views;
- * deselecting brings them back.
- */
+/** Scene controls stay beside the tank, disclosed only when requested. */
 export function ContainerToolstrip({
   leftFraction,
   topFraction,
@@ -212,6 +177,16 @@ export function ContainerToolstrip({
     ariaLabel="Scene"
     testId="field-quick-bar"
   >
+    <details key={entity?.selection.id ?? "ambient"} className="contextual-scene-settings"
+      onKeyDown={event => {
+        if (event.key === "Escape") {
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector("summary")?.focus();
+          event.stopPropagation();
+        }
+      }}>
+      <summary>{entity ? "Tank settings" : "Scene settings"}</summary>
+      <div className="contextual-scene-settings-body">
     {hasFields && <FieldViewRows />}
     <FeatureSlot slot="scene.visibility" />
     <TankRow />
@@ -256,23 +231,12 @@ export function ContainerToolstrip({
           leadingTabs={methodSetupTabs(methodId)}
         />
       </>}
+      </div>
+    </details>
   </Toolstrip>;
 }
 
-/**
- * The strip at any other selected thing's own corner.
- *
- * Titled, because a boulder's outline does not say "boulder" the way the tank's
- * does, and because while this column is up it is the only one on screen — the
- * container's stands down for it — so nothing else is left saying what the
- * reader is looking at.
- *
- * The sculpting dials come before the declared options: a canopy's three dials
- * are what a reader came to the tree for, and the node's extents are what they
- * reach for afterwards. Delete is last of the object's own rows, for the reason
- * it always is: it is the one row that cannot be walked back by moving the same
- * control the other way.
- */
+/** A selected object's settings travel with it; another selection starts closed. */
 export function EntityToolstrip({
   leftFraction,
   topFraction,
@@ -284,8 +248,12 @@ export function EntityToolstrip({
 }) {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
+  const disclosureGroup = useId();
   const selection = entity.selection;
   const sceneryId = selection.kind === "scenery" ? sceneryIdFromSelection(selection.id) : undefined;
+  const oakId = sceneryId !== undefined && isEditableOak(findSceneryNode(scene, sceneryId)) ? sceneryId : undefined;
+  // Growth groups have their own contextual editor; placement keeps only object fields.
+  const placementEntity = oakId === undefined ? entity : { ...entity, groups: undefined };
   const vesselName = selection.kind === "vessel-rim"
     ? vesselNameFromSelection(selection.id) : undefined;
   const canopyId = sceneryId !== undefined && !isEditableOak(findSceneryNode(scene, sceneryId)) && sceneCanopyPads(scene, sceneryId).length > 0
@@ -303,10 +271,31 @@ export function EntityToolstrip({
     testId="entity-toolstrip"
   >
     <ToolstripTitle>{entity.label}</ToolstripTitle>
+    {oakId !== undefined && <details key={`tree:${oakId}`} name={disclosureGroup} className="contextual-object-settings"
+      onKeyDown={event => {
+        if (event.key === "Escape" && !event.defaultPrevented) {
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector("summary")?.focus();
+          event.stopPropagation();
+        }
+      }}>
+      <summary>Tree settings</summary>
+      <div className="contextual-object-settings-body"><OakTreeEditor contextual /></div>
+    </details>}
+    <details key={`object:${selection.kind}:${selection.id}`} name={disclosureGroup} className="contextual-object-settings"
+      onKeyDown={event => {
+        if (event.key === "Escape" && !event.defaultPrevented) {
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector("summary")?.focus();
+          event.stopPropagation();
+        }
+      }}>
+      <summary>{oakId !== undefined ? "Placement and object" : "Object settings"}</summary>
+      <div className="contextual-object-settings-body">
     {canopyId !== undefined && <CanopyDialRows nodeId={canopyId} />}
     {stoneId !== undefined && <StoneDialRows nodeId={stoneId} />}
     {vesselName !== undefined && <RimDialRows vesselName={vesselName} />}
-    <EntityOptionRows key={selection.id} entity={entity} />
+    <EntityOptionRows key={selection.id} entity={placementEntity} />
     {/* Last of the rows that are about the object, and above the door rather
         than below it: the "⋯" is the foot of every column in this editor, the
         container's included, and a row hung under it would break the one shape
@@ -314,6 +303,8 @@ export function EntityToolstrip({
         can be walked back by moving the same control the other way; this one
         ends the object, so it is where the object's own list ends. */}
     <EntityDeleteRow key={`delete:${selection.id}`} entity={entity} />
-    <EntityMoreRow key={`more:${selection.id}`} entity={entity} />
+    <EntityMoreRow key={`more:${selection.id}`} entity={placementEntity} />
+      </div>
+    </details>
   </Toolstrip>;
 }

@@ -55,6 +55,7 @@ export function SceneOverlay() {
   const presetId = session.scene((state) => state.presetId);
   const scene = session.scene((state) => state.scene);
   const selectorOpen = session.ui((state) => state.sceneSelectorOpen);
+  const strokePending = session.ui((state) => state.voxelStrokePending);
   const setSelectorOpen = session.ui((state) => state.setSceneSelectorOpen);
   const pointerNear = usePointerNearTopLeft();
   const definition = findSceneDefinition(presetId);
@@ -75,6 +76,7 @@ export function SceneOverlay() {
       <button
         type="button"
         className="scene-overlay-chip"
+        disabled={strokePending}
         onClick={() => setSelectorOpen(!selectorOpen)}
         data-scene-selector-toggle=""
         data-testid="open-scene-library"
@@ -96,6 +98,7 @@ export function SceneOverlay() {
       <button
         type="button"
         className="scene-overlay-action"
+        disabled={strokePending}
         onClick={() => simulation.saveNamedScene(scene.sceneId, session.id)}
         data-testid="save-scene"
         title={`Save this document to the library as “${scene.sceneId}”, replacing an earlier save of the same name`}

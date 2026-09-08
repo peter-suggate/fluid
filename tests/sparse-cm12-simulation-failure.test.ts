@@ -25,3 +25,12 @@ test("transport fault operands decode as floats while preserving exact raw bits"
   assert.equal(failure.operandNames?.[0], "rawDensity");
   assert.equal(JSON.parse(JSON.stringify(failure)).rawWords[7], 0x7f800000);
 });
+
+test("sharpening failure decodes integer mass quanta without disguising them as underflow", () => {
+  const words = new Uint32Array(CM12_FAILURE_WORDS);
+  words.set([1, 3, cm12FailureKernelId("scatterSharpeningMass"), 1069, 1071, 3990, 0, 2, 0, 0]);
+  const failure = decodeCM12SimulationFailure(words)!;
+  assert.deepEqual(failure.operands, [0, 2, 0, 0]);
+  assert.equal(failure.rawWords[7], 2);
+  assert.match(new SimulationFailureError(failure).message, /operands=0,2,0,0/);
+});

@@ -1854,6 +1854,48 @@ struct Params {
 // Worklists are device-owned and double-buffered: a commit publishes by
 // flipping word 2 only after shadow transfer/projection has completed.
 @group(0)@binding(16)var<storage,read_write>topologyArena:array<atomic<u32>>;
+// Private bounded solid transaction: pending/rejected/accepted receipt,
+// indirect refresh counts, newly closed coordinates and unique scatter writes.
+@group(1)@binding(0)var<storage,read_write>solidEditProposal:array<atomic<u32>>;
+
+@compute @workgroup_size(64)
+fn inspectSparseCM12SolidEditWetOverlap(@builtin(global_invocation_id)gid:vec3u){
+  if(atomicLoad(&topologyArena[cm12FailureBase()])!=0u){
+    if(gid.x==0u){atomicStore(&solidEditProposal[0],3u);}return;
+  }
+  if(gid.x>=atomicLoad(&solidEditProposal[1])){return;}
+  let index=atomicLoad(&solidEditProposal[64u+gid.x]);
+  let nx=p.dimensions.x;let ny=p.dimensions.y;
+  let q=vec3i(i32(index%nx),i32((index/nx)%ny),i32(index/(nx*ny)));
+  let owner=compactOwnerCellAt(q);
+  if(owner.x==INVALID||!brickActive(owner.y)||cellResolution(owner.x)!=owner.z){return;}
+  // Include conserved water temporarily covered by a rigid body. A coarse
+  // wet owner conservatively rejects its fine voxel; no epsilon hides mass.
+  if(!(state[destinationDensity()+owner.x]<=0.0)){
+    atomicStore(&solidEditProposal[0],1u);
+  }
+}
+
+@compute @workgroup_size(64)
+fn applySparseCM12SolidEditScatter(@builtin(global_invocation_id)gid:vec3u){
+  let receipt=atomicLoad(&solidEditProposal[0]);
+  let accepted=(receipt==2u||receipt==0u)
+    &&atomicLoad(&topologyArena[cm12FailureBase()])==0u;
+  if(gid.x==0u){
+    for(var index=0u;index<24u;index++){
+      atomicStore(&solidEditProposal[4u+index],
+        select(0u,atomicLoad(&solidEditProposal[32u+index]),accepted));
+    }
+    if(accepted){atomicStore(&solidEditProposal[0],0u);}
+    else if(receipt!=1u){atomicStore(&solidEditProposal[0],3u);}
+  }
+  if(!accepted||gid.x>=atomicLoad(&solidEditProposal[2])){return;}
+  let at=atomicLoad(&solidEditProposal[3])+2u*gid.x;
+  let address=atomicLoad(&solidEditProposal[at]);
+  let value=atomicLoad(&solidEditProposal[at+1u]);
+  if((address&0x80000000u)!=0u){state[address&0x7fffffffu]=bitcast<f32>(value);}
+  else{atomicStore(&topologyArena[address],value);}
+}
 
 const IMMUTABLE_HOST_INCIDENCE_BASE:u32=${immutableHostIncidenceBaseWords}u;
 
@@ -4373,7 +4415,7 @@ fn publishSparseCM12MovingSolidActivity(@builtin(global_invocation_id)gid:vec3u)
 // nozzle-swept cylinder. injectionCenter.w is the mode (zero off, one
 // ellipsoid, two hose); downstream hose fluid is never painted here.
 fn injectionCoverageAt(point:vec3f,width:f32)->f32{
-  if(p.injectionCenter.w>1.5){
+  if(p.injectionCenter.w==2.0){
     let halfLength=length(p.injectionRadius.xyz);
     if(p.injectionRadius.w<=0.0||halfLength<=1e-8){return 0.0;}
     let direction=p.injectionRadius.xyz/halfLength;
@@ -4385,13 +4427,24 @@ fn injectionCoverageAt(point:vec3f,width:f32)->f32{
     let signed=outside+min(max(radial,axial),0.0);
     return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
   }
+  let mode=u32(round(p.injectionCenter.w));
+  let relative=point-p.injectionCenter.xyz;
+  if(mode==3u||mode==6u){
+    let q=abs(relative)-p.injectionRadius.xyz;
+    let signed=length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);
+    return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
+  }
+  if(mode==4u||mode==7u){
+    let signed=length(vec2f(length(relative.xz)-(p.injectionRadius.x-p.injectionRadius.w),relative.y))-p.injectionRadius.w;
+    return clamp(0.5-signed/max(width,1e-6),0.0,1.0);
+  }
   let q=(point-p.injectionCenter.xyz)/max(p.injectionRadius.xyz,vec3f(1e-6));
   let signed=length(q)-1.0;
   return clamp(0.5-signed*min(p.injectionRadius.x,
     min(p.injectionRadius.y,p.injectionRadius.z))/max(width,1e-6),0.0,1.0);
 }
 fn injectedJetVelocity()->vec3f{
-  if(p.injectionCenter.w<=1.5){return vec3f(0.0);}
+  if(p.injectionCenter.w!=2.0){return vec3f(0.0);}
   return 2.0*p.injectionRadius.xyz/max(p.frame.x,1e-8);
 }
 fn injectionCoverage(id:u32)->f32{
@@ -4407,7 +4460,7 @@ fn injectionReachesBrick(brick:u32)->bool{
   let lower=vec3f(cm12WorldLeafCoordinate(brick)*i32(BRICK_FINE_RESOLUTION));
   var upper=lower+vec3f(f32(BRICK_FINE_RESOLUTION*brickSpan(brick)));
   if(!brickHasUnclippedWorldGeometry(brick)){upper=min(upper,vec3f(p.dimensions.xyz));}
-  if(p.injectionCenter.w>1.5){
+  if(p.injectionCenter.w==2.0){
     // Besides the source plug, admit one plug-length of forward capacity for
     // the conservative reservoir-overflow sweeps below. This activates
     // topology only; injectLiquid still creates mass solely in the nozzle
@@ -4435,7 +4488,9 @@ fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
   // Density belongs only to an accepted topology generation. Frontier pages
   // are published before this dispatch, but a rejected candidate must leave
   // the accepted field untouched just like an ordinary physics transaction.
-  if(!sparseCM12TopologyLifecycleAccepted()){return;}
+  let accepted=sparseCM12TopologyLifecycleAccepted();
+  if(gid.x==0u){atomicStore(&activity[REGION_EDIT_BACKING_RECEIPT_WORD],select(2u,1u,accepted));}
+  if(!accepted){return;}
   // p.dispatch.w is the authored leaf count. Runtime pages live above it,
   // so the open-world directory capacity is the only valid bound here.
   let brick=gid.x;if(brick>=CM12_WDR_LEAF_CAPACITY||!brickActive(brick)){return;}
@@ -4447,14 +4502,15 @@ fn injectLiquid(@builtin(global_invocation_id)gid:vec3u){
     // Editor drops establish an occupancy shape. A hose adds the authored
     // swept-plug mass; the bounded conservative overflow passes below resolve
     // temporary source compression into downstream capacity before publish.
-    let hose=p.injectionCenter.w>1.5;
-    state[p.stateOffsets0.x+id]=select(
-      max(state[p.stateOffsets0.x+id],clippedCoverage),
-      state[p.stateOffsets0.x+id]+clippedCoverage,hose);
-    state[p.stateOffsets0.y+id]=select(
-      max(state[p.stateOffsets0.y+id],clippedCoverage),
-      state[p.stateOffsets0.y+id]+clippedCoverage,hose);
+    let hose=p.injectionCenter.w==2.0;
+    let removing=p.injectionCenter.w>=5.0;
+    for(var bank=0u;bank<2u;bank+=1u){
+      let at=select(p.stateOffsets0.x,p.stateOffsets0.y,bank!=0u)+id;
+      let previous=state[at];
+      state[at]=select(select(max(previous,clippedCoverage),previous+clippedCoverage,hose),max(0.0,previous-clippedCoverage),removing);
+    }
     if(coverage>0.0){state[p.stateOffsets0.z+id]=1.0;state[p.stateOffsets0.w+id]=1.0;
+      incrementalActivityMarkCellClosure(id);
       if(hose){for(var bank=0u;bank<2u;bank+=1u){
         let at=select(p.stateOffsets1.x,p.stateOffsets1.y,bank!=0u)+4u*id;
         let prior=vec3f(state[at],state[at+1u],state[at+2u]);
@@ -4488,7 +4544,7 @@ fn clearLiquidJetOverflowReceipts(@builtin(global_invocation_id)gid:vec3u){
 @compute @workgroup_size(64)
 fn scatterLiquidJetOverflow(@builtin(global_invocation_id)gid:vec3u){
   let id=acceptedTemplateCellInvocation(gid.x);
-  if(id==INVALID||!cellTransportActive(id)||p.injectionCenter.w<=1.5){return;}
+  if(id==INVALID||!cellTransportActive(id)||p.injectionCenter.w!=2.0){return;}
   let density=state[p.stateOffsets0.x+id];
   let excessDensity=max(0.0,density-cellOpenFraction(id));
   if(excessDensity<=1e-7){return;}
@@ -4541,7 +4597,7 @@ fn finalizeLiquidJetOverflow(@builtin(global_invocation_id)gid:vec3u){
 // Density without these rows makes a hose behave like water appearing at rest.
 @compute @workgroup_size(64)
 fn injectLiquidFaces(@builtin(global_invocation_id)gid:vec3u){
-  if(p.injectionCenter.w<=1.5){return;}
+  if(p.injectionCenter.w!=2.0){return;}
   let row=acceptedTemplateRowInvocation(gid.x);if(row==INVALID||!rowAccepted(row)){return;}
   let center=rowCenter(row);
   let coverage=injectionCoverageAt(center,max(0.5*rowDistance(row),1e-6));
@@ -5196,7 +5252,7 @@ fn traceSharpeningMass(source:u32)->vec3f{
     let owner=${implicitSharpeningOwnerArithmeticForQA
       ? "cm12ImplicitAuthoredOwnerAtFine(vec3i(floor(position)))"
       : "cm12TeiOwnerAtFine(vec3i(floor(position))).cell"};
-    if(owner==INVALID){break;}
+    if(owner==INVALID||!cellTransportActive(owner)){break;}
     let gradient=field.yzw;let magnitude=length(gradient);
     if(magnitude<1e-6){break;}
     let distance=min(0.5*cellMinimumWidth(owner),maximumDistance-travelled);
@@ -5204,7 +5260,9 @@ fn traceSharpeningMass(source:u32)->vec3f{
     let candidateOwner=${implicitSharpeningOwnerArithmeticForQA
       ? "cm12ImplicitAuthoredOwnerAtFine(vec3i(floor(candidate)))"
       : "cm12TeiOwnerAtFine(vec3i(floor(candidate))).cell"};
-    if(candidateOwner==INVALID){break;}
+    // A solid cell retains topology ownership after a live voxel edit.
+    // Stop on its near side; ownership alone does not grant recipient capacity.
+    if(candidateOwner==INVALID||!cellTransportActive(candidateOwner)){break;}
     position=candidate;travelled+=distance;
   }
   return position;
@@ -8544,7 +8602,7 @@ fn candidateTopologyPageBase(page:u32)->u32{
 // uniform voxel-solid field. No coordinate plane is an implicit boundary.
 @compute @workgroup_size(4,4,4)
 fn allocateSparseWorldInteractionPages(@builtin(global_invocation_id)gid:vec3u){
-  if(p.injectionCenter.w<0.5||p.injectionCenter.w>1.5){return;}
+  if(p.injectionCenter.w<0.5||p.injectionCenter.w==2.0||p.injectionCenter.w>=5.0){return;}
   let width=f32(BRICK_FINE_RESOLUTION);
   let lower=vec3i(floor((p.injectionCenter.xyz-p.injectionRadius.xyz)/width));
   let upper=vec3i(floor((p.injectionCenter.xyz+p.injectionRadius.xyz)/width));
@@ -10375,16 +10433,16 @@ fn cm12PresentationLogicalKey(brick:u32)->u32{
 fn populateSparseCM12PresentationFramePlan(
  @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
   let brick=wid.x;if(brick>=p.dispatch.w){return;}
-  let key=cm12PresentationLogicalKey(brick);if(key==INVALID){return;}
-  if(lane==0u){
-    cm12FramePlanSetNextBrickLogicalKey(brick,key);
-    if(brick==0u){
-      let frameGeneration=atomicLoad(&activity[0]);
-      cm12FramePlanSetNextTopologyGeneration(
-        atomicLoad(&topologyArena[topologyWorklistBase()]));
-      cm12FramePlanSetNextFrameAuthority(frameGeneration,frameGeneration&1u);
-    }
+  // Frame authority exists even when an empty world has no resident leaves.
+  // Publishing it behind the logical-key guard permanently faults bootstrap.
+  if(lane==0u&&brick==0u){
+    let frameGeneration=atomicLoad(&activity[0]);
+    cm12FramePlanSetNextTopologyGeneration(
+      atomicLoad(&topologyArena[topologyWorklistBase()]));
+    cm12FramePlanSetNextFrameAuthority(frameGeneration,frameGeneration&1u);
   }
+  let key=cm12PresentationLogicalKey(brick);if(key==INVALID){return;}
+  if(lane==0u){cm12FramePlanSetNextBrickLogicalKey(brick,key);}
   if(lane>=ACTIVITY_TILES_PER_BRICK){return;}
   // Generation zero publishes only accepted resident leaves. An inactive leaf
   // without fluid demand has no presentation page and must not allocate one.

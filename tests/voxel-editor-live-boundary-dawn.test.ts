@@ -35,21 +35,37 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     const world = solver.sparseWorld;
     const before = await solver.readDiagnosticFields();
     const activity = await solver.readGPUActivityPolicy();
-    const sampleCell = [5, 1, 5];
-    const owner = activity.bricks.find((brick) => brick.active && brick.coordinate.every((q, axis) =>
-      sampleCell[axis]! >= 8 * q && sampleCell[axis]! < 8 * (q + brick.spanBricks)));
-    assert.ok(owner);
-    const width = 8 * owner.spanBricks / owner.acceptedResolution;
-    const cellMinimum = sampleCell.map((q) => Math.floor(q / width) * width);
-    const overlap = cellMinimum.reduce((volume, q, axis) => volume * Math.max(0,
-      Math.min(q + width, [8, 4, 8][axis]!) - Math.max(q, [4, 0, 4][axis]!)), 1);
-    const expectedOpen = 1 - overlap / width ** 3;
-    const index = 5 + solver.info.nx * (1 + solver.info.ny * 5);
-    assert.ok(before.solidOpenFraction[index]! > .5, "fixture starts with an open wet cell");
-    const edits = sceneWithSolidStroke(scene, [{ operation: "fill", minimum: [4, 0, 4], maximumExclusive: [8, 4, 8], materialId: 2 }]);
+    const wetEdit = sceneWithSolidStroke(scene, [{ operation: "fill", minimum: [4, 0, 4], maximumExclusive: [8, 4, 8], materialId: 2 }]);
+    const wetGeneration = world.status().acceptedGeneration;
+    const wetTime = solver.info.submittedTime_s;
+    await assert.rejects(solver.prepareLiveSolidEdit(wetEdit), /overlaps moving water/i);
+    assert.deepEqual((await solver.readDiagnosticFields()).density, before.density);
+    assert.equal(world.status().acceptedGeneration, wetGeneration);
+    assert.equal(solver.info.submittedTime_s, wetTime);
+    // Choose an actually resident dry native cell, so the exact aperture change
+    // can be inspected without manufacturing fluid or allocating a new solver.
+    let dry: { minimum: [number, number, number]; width: number; index: number } | undefined;
+    for (const owner of activity.bricks.filter(brick => brick.active)) {
+      const width = 8 * owner.spanBricks / owner.acceptedResolution;
+      const extent = 8 * owner.spanBricks;
+      for (let z = 0; z < extent && !dry; z += width)
+        for (let y = 0; y < extent && !dry; y += width)
+          for (let x = 0; x < extent && !dry; x += width) {
+            const minimum = [x, y, z].map((value, axis) => value + 8 * owner.coordinate[axis]!) as [number, number, number];
+            if (minimum.some((value, axis) => value < 1 || value + width >= [solver!.info.nx, solver!.info.ny, solver!.info.nz][axis]!)
+              || minimum[1] < solver.info.ny / 2) continue;
+            const index = minimum[0] + solver.info.nx * (minimum[1] + solver.info.ny * minimum[2]);
+            if (before.density[index] === 0 && before.solidOpenFraction[index] === 1) dry = { minimum, width, index };
+          }
+    }
+    assert.ok(dry, "fixture must have an open resident dry cell");
+    const index = dry.index, expectedOpen = 0;
+    const edits = sceneWithSolidStroke(scene, [{ operation: "fill", minimum: dry.minimum,
+      maximumExclusive: dry.minimum.map(value => value + dry.width) as [number, number, number], materialId: 2 }]);
     const timeBefore = solver.info.submittedTime_s;
     const started = performance.now();
     solver.validateLiveSolidEdit(edits);
+    await solver.prepareLiveSolidEdit(edits);
     solver.applySceneUniforms(edits);
     const editHostMs = performance.now() - started;
     assert.equal(solver.sparseWorld, world);
@@ -61,6 +77,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE;
     await advance(2 * dt);
     assert.ok(solver.info.submittedTime_s! > timeBefore!);
     solver.validateLiveSolidEdit(scene);
+    await solver.prepareLiveSolidEdit(scene);
     solver.applySceneUniforms(scene);
     const cleared = await solver.readDiagnosticFields();
     assert.equal(cleared.solidOpenFraction[index], 1,

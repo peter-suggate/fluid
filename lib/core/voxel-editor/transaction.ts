@@ -1,12 +1,14 @@
 import type { EditorRay } from "../editor-entity";
 import type { SceneDescription } from "../model";
 import { sceneWithSolidStroke } from "../solid-world";
-import { toolValues, type ToolUpdate, type ToolValues, type VoxelToolPlugin } from "./plugin";
+import { toolValues, type ToolAction, type ToolUpdate, type ToolValues, type VoxelToolPlugin } from "./plugin";
 
 export interface ToolHost {
   scene(): SceneDescription;
-  /** Validate and apply to physics before publishing the accepted document. */
+  /** Preflight capacity, then publish the accepted document for the next fluid step. */
   publish(scene: SceneDescription, base: SceneDescription): Promise<void>;
+  /** Execute a transient plugin action without recording a document edit. */
+  execute?(action: ToolAction): Promise<void>;
   begin(label: string): void;
   finish(): void;
   cancel(): void;
@@ -15,12 +17,14 @@ export interface ToolHost {
 export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
   ray: EditorRay, values: ToolValues = {}) {
   const base = host.scene();
-  const gesture = plugin.begin({ scene: base, ray, values: toolValues(plugin, values) });
+  const gesture = plugin.begin({ scene: base, ray, values: toolValues(plugin, values, base) });
   if (!gesture) return undefined;
   let closed = false;
   let finishing = false;
+  let cancellationRequested = false;
   let accepted = base;
   let key = "";
+  let preview: ToolUpdate | undefined;
   // Release/cancel can arrive while an asynchronous preflight is outstanding.
   // Serialize lifecycle work so rollback always sees the last accepted sample.
   let pending: Promise<unknown> = Promise.resolve();
@@ -34,8 +38,13 @@ export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
       const operation = pending.then(async () => {
         if (closed) return undefined;
         if (!ownsDocument()) { abandon(); return undefined; }
+        if (plugin.execution === "release") preview = undefined;
         const result = gesture.update(input);
         if (!result) return undefined;
+        if (plugin.execution === "release") {
+          preview = result;
+          return result;
+        }
         const nextKey = JSON.stringify(result.patches);
         if (nextKey !== key) {
           const next = sceneWithSolidStroke(base, result.patches);
@@ -52,13 +61,26 @@ export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
       return operation;
     },
     finish(cancelled = false): Promise<void> {
+      cancellationRequested ||= cancelled;
       if (completion) return completion;
       finishing = true;
       completion = pending.then(async () => {
         if (closed) return;
         if (!ownsDocument()) { abandon(); return; }
         closed = true;
-        if (cancelled) {
+        if (plugin.execution === "release") {
+          try {
+            if (!cancellationRequested && preview?.action) {
+              if (!host.execute) throw new Error("This runtime cannot execute this editing action.");
+              await host.execute(preview.action);
+            }
+          } finally {
+            // Moving water is not an authored-scene undo entry, even after success.
+            host.cancel();
+          }
+          return;
+        }
+        if (cancellationRequested) {
           try {
             if (accepted !== base) await host.publish(base, base);
             host.cancel();

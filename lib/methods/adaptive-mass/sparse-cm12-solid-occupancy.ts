@@ -43,7 +43,7 @@ export function packSparseCM12SolidOccupancy(layout: SparseCM12SolidOccupancyLay
   return packWebgpuSolidWorldPages(layout, world, originFine);
 }
 
-export function writeSparseCM12SolidOccupancy(queue: GPUQueue, destination: GPUBuffer,
+export function writeSparseCM12SolidOccupancy(queue: Pick<GPUQueue, "writeBuffer">, destination: GPUBuffer,
   layout: SparseCM12SolidOccupancyLayout, world: SolidWorld,
   originFine: readonly [number, number, number], previous?: SolidWorld): void {
   writeWebgpuSolidWorldPages(queue, destination, layout, world, originFine, undefined, previous);

@@ -1,3 +1,4 @@
+import { validateLiveFluidEdit, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
 import type { SparseCM12PressureJournalCapacityRequest } from "../../methods/adaptive-mass/features/pressure-inspection/definition";
 import type { SparseAtlasCompositeGrid } from
   "../../methods/adaptive-mass/sparse-atlas-composite-projection";
@@ -419,6 +420,58 @@ class AdoptedCM12SparseWorld implements SparseWorld {
     });
   }
 
+  private fluidEditInFlight = false;
+  solidEditInFlight = false;
+  async editFluidVolume(input: LiveFluidEdit): Promise<LiveFluidEditResult> {
+    if (this.destroyed || this.currentFault) return { accepted: false, reason: "The fluid world is unavailable." };
+    if (this.fluidEditInFlight || this.solidEditInFlight || this.generationState.pending || this.pendingLiquidInteractions) {
+      return { accepted: false, reason: "A fluid transaction is still being published; try again shortly." };
+    }
+    let receipt: GPUBuffer | undefined;
+    try {
+      const edit = validateLiveFluidEdit(input);
+      const configuration = typeof this.options.numerics === "function"
+        ? this.options.numerics({ time: this.lastAcceptedTime, dt: .004, gravity: [0, 0, 0] }) : this.options.numerics;
+      receipt = this.options.gpuDevice.createBuffer({ label: "Live fluid edit acceptance", size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = this.options.gpuDevice.createCommandEncoder({ label: "Live fluid volume edit" });
+      this.resident.encodeFluidVolumeEdit(encoder, edit, configuration.finestCellSize_m,
+        configuration.origin_m ?? [0, 0, 0], configuration.activityPolicy, receipt);
+      this.fluidEditInFlight = true;
+      this.generationState.changed();
+      this.options.gpuDevice.queue.submit([encoder.finish()]);
+      // Only this four-byte receipt waits. Simulation continues on its own
+      // queue; it never awaits this Promise or reads back its density field.
+      await receipt.mapAsync(GPUMapMode.READ);
+      const accepted = new Uint32Array(receipt.getMappedRange())[0] === 1;
+      receipt.unmap();
+      if (!accepted) return { accepted: false, reason: "Fluid detail capacity could not accept this volume; use a smaller shape." };
+      this.generation += 1;
+      return { accepted: true };
+    } catch (error) {
+      return { accepted: false, reason: error instanceof Error ? error.message : "Fluid edit was rejected." };
+    } finally { this.fluidEditInFlight = false; receipt?.destroy(); }
+  }
+
+  async prepareSceneEdit(scene: SceneDescription): Promise<boolean> {
+    if (this.solidEditInFlight || this.fluidEditInFlight || this.generationState.pending) {
+      throw new Error("A live edit is still being accepted; try again shortly.");
+    }
+    const resident = this.resident;
+    this.solidEditInFlight = true;
+    // Abort a replacement prepared from the old solid cache. This does not
+    // stop ordinary GPU steps; it only retires stale CPU replacement work.
+    this.generationState.changed();
+    try {
+      const world = fluidSolidWorldForScene(scene);
+      await resident.prepareSolidWorldWetOverlap(world);
+      const committed = resident.isSolidWorldAccepted(world);
+      if (this.destroyed || (!committed && this.currentFault) || this.resident !== resident || this.generationState.pending) {
+        throw new Error("Fluid state changed while checking this solid edit; try again.");
+      }
+      return committed;
+    } finally { this.solidEditInFlight = false; }
+  }
+
   validateSceneEdit(scene: SceneDescription): void {
     this.resident.validateSolidWorld(fluidSolidWorldForScene(scene));
   }
@@ -459,7 +512,7 @@ class AdoptedCM12SparseWorld implements SparseWorld {
           this.rigidBodies = edit.scene.rigidBodies;
         }
         this.generation += 1;
-        this.state = "running";
+        this.state = this.currentFault ? "fault" : "running";
         return Object.freeze({
           disposition: "applied",
           acceptedGeneration: this.generation + this.generationState.publications,
@@ -646,9 +699,10 @@ class AdoptedCM12SparseWorld implements SparseWorld {
 class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   private get resident() { return this.generationState.current; }
   get acceptedAtlas() { return this.resident.acceptedAtlas; }
-  get generationPlanningRequired() { return this.resident.needsGenerationPlanning; }
+  get generationPlanningRequired() { return !this.world.solidEditInFlight && this.resident.needsGenerationPlanning; }
   needsDetailedGenerationPlanning(maximumSpan: number, demoteEpochs: number, finestTravel: number,
     frozenFrontierOnly = false) {
+    if (this.world.solidEditInFlight) return Promise.resolve(false);
     return this.resident.needsDetailedGenerationPlanning(maximumSpan, demoteEpochs, finestTravel, frozenFrontierOnly);
   }
   get generationPreparationMaximumSliceMs() { return this.resident.generationPreparationMaximumSliceMs; }
@@ -660,6 +714,7 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
   completePendingLiquidInteractions() { this.world.completePendingLiquidInteractions(); }
   cancelTopologyPreparation() { this.generationState.changed(); }
   prepareResidentGeneration(build: (accepted: WebGPUSparseCM12Resident, signal: AbortSignal) => Promise<Awaited<ReturnType<WebGPUSparseCM12Resident["prepareGenerationReplacement"]>> | undefined>) {
+    if (this.world.solidEditInFlight) return Promise.reject(new DOMException("Solid edit acceptance is pending", "AbortError"));
     return this.generationState.prepare(build);
   }
   constructor(
@@ -670,6 +725,7 @@ class AdoptedCM12SparseWorldRuntime implements CM12SparseWorldRuntime {
 
   waitForSimulationPipelines() { return this.readiness.ready; }
   async refreshRefinementRegions(finestCellSize_m: number, policy?: SparseCM12ActivityPolicy) {
+    if (this.world.solidEditInFlight) throw new DOMException("Solid edit acceptance is pending", "AbortError");
     return this.generationState.read(resident => resident.refreshRefinementRegions(finestCellSize_m, policy));
   }
   get allocatedBytes() { return this.generationState.allocatedBytes; }

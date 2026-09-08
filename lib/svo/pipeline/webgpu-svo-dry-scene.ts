@@ -1892,13 +1892,13 @@ export class SparseVoxelDrySceneRenderer {
           restartReason: restartReasons[words[19]!] ?? "publication",
           ...(building && !extractionFailed && (!capacityPaused || canGrow)
             ? { detail: capacityPaused ? "Mesh storage growing; completed bricks are retained."
-              : `Building mesh: ${completedBricks.toLocaleString()} / ${totalBricks.toLocaleString()} bricks processed; geometry withheld until complete.` }
+              : `Building mesh: ${completedBricks.toLocaleString()} / ${totalBricks.toLocaleString()} bricks processed; current voxels remain visible through exact traversal.` }
             : fallback ? { fallbackReason: reason, detail: reason === "smooth"
-            ? "Raster requires voxel-flat surfaces. Geometry is withheld."
-            : reason === "inside-solid" ? "Camera is inside a solid voxel. Raster geometry is withheld."
-            : reason === "budget" ? "Surface mesh exceeds the allocation limit. Raster geometry is withheld."
-            : reason === "extraction" ? "Surface extraction exceeded its subdivision limit. Raster geometry is withheld."
-            : "Waiting for a complete voxel publication. Raster geometry is withheld." } : {}),
+            ? "Raster requires voxel-flat surfaces; current SVO traversal remains visible."
+            : reason === "inside-solid" ? "Camera is inside a solid voxel; current SVO traversal remains visible."
+            : reason === "budget" ? "Surface mesh exceeds the allocation limit; current SVO traversal remains visible."
+            : reason === "extraction" ? "Surface extraction exceeded its subdivision limit; current SVO traversal remains visible."
+            : "Waiting for a complete voxel publication; exact planes remain visible." } : {}),
         };
         // The GPU rolls an overflowing batch back to its last complete-brick
         // checkpoint and pauses. Copy the entire arena in queue order: unlike
@@ -4397,6 +4397,13 @@ export class SparseVoxelDrySceneRenderer {
     if (scene.materialRecords.byteLength > SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES) throw new RangeError("Live scene material arena capacity exceeded");
     if ((scene.glassRecords?.byteLength ?? 0) > SVO_DRY_SCENE_GLASS_ARENA_SIZE_BYTES) throw new RangeError("Live scene thin-glass arena capacity exceeded");
 
+    // Host publication is known now; waiting for the periodic GPU diagnostic
+    // leaves a formerly-ready mesh rebuilding at one batch for up to 30 frames.
+    // GPU revision checks remain authoritative and completed builds do no work.
+    if (this.surfaceMeshStatus) {
+      this.surfaceMeshStatus = { ...this.surfaceMeshStatus, state: "pending", buildPhase: "extracting" };
+      this.surfaceMeshFrames = 0;
+    }
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;
     this.worldGiCacheDirty = true;

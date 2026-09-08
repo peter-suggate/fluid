@@ -1,4 +1,4 @@
-import { cloneScene, parseScene, serializeScene, type SceneDescription } from "./model";
+import { cloneScene, parseScene, type SceneDescription } from "./model";
 import type { MethodProfile } from "./method-contract";
 
 /**
@@ -6,7 +6,7 @@ import type { MethodProfile } from "./method-contract";
  *
  * Authoring is worthless if a reload discards it, and the URL cannot carry a
  * sculpted terrain grid or a large seed list. Entries are stored as the same
- * serialized JSON the file export writes, so a library entry and a downloaded
+ * scene JSON the file export writes, so a library entry and a downloaded
  * scene are the same artifact and both round-trip through `parseScene`.
  *
  * The storage handle is injected so the module is testable without a DOM and
@@ -33,7 +33,7 @@ export interface SceneLibraryEntry {
   /** Epoch milliseconds; supplied by the caller so the module stays pure. */
   readonly savedAt_ms: number;
   readonly presetId: string;
-  /** Serialized `SceneDescription`, byte-identical to the file export. */
+  /** Compact serialized `SceneDescription`; file exports remain human-readable. */
   readonly scene: string;
   /** Active solver choice at save time. Absent in pre-benchmark entries. */
   readonly methodProfile?: MethodProfile;
@@ -122,8 +122,8 @@ export function readSceneLibrary(storage: SceneLibraryStorage | undefined): Scen
     const raw = storage.getItem(SCENE_LIBRARY_STORAGE_KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isEntry)
+    const entries = decodeLibrary(parsed);
+    return entries.filter(isEntry)
       .map((entry) => entry.methodProfile === undefined
         ? entry : { ...entry, methodProfile: migratedMethodProfile(entry.methodProfile) })
       .sort((a, b) => b.savedAt_ms - a.savedAt_ms);
@@ -132,15 +132,56 @@ export function readSceneLibrary(storage: SceneLibraryStorage | undefined): Scen
   }
 }
 
-function writeSceneLibrary(storage: SceneLibraryStorage | undefined, entries: readonly SceneLibraryEntry[]): SceneLibraryEntry[] {
-  const bounded = [...entries].sort((a, b) => b.savedAt_ms - a.savedAt_ms).slice(0, SCENE_LIBRARY_LIMIT);
-  if (!storage) return bounded;
+/** Legacy arrays remain readable. Pooling keeps an explicit save and its
+ * identical autosave from paying for the same large terrain document twice. */
+function decodeLibrary(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  const library = value as { version?: unknown; documents?: unknown; entries?: unknown };
+  if (library.version !== 2 || !Array.isArray(library.documents) || !Array.isArray(library.entries)) return [];
+  const documents = library.documents;
+  return library.entries.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const entry = value as { document?: unknown };
+    if (typeof entry.document !== "number" || !Number.isInteger(entry.document)
+      || typeof documents[entry.document] !== "string") return [];
+    const { document, ...metadata } = entry;
+    return [{ ...metadata, scene: documents[document] }];
+  });
+}
+
+function compactSceneDocument(scene: string): string {
+  try { return JSON.stringify(JSON.parse(scene)); }
+  // Keep old invalid documents intact; validation still reports errors on load.
+  catch { return scene; }
+}
+
+function writeSceneLibrary(storage: SceneLibraryStorage | undefined, entries: readonly SceneLibraryEntry[]): {
+  entries: SceneLibraryEntry[]; persisted: boolean;
+} {
+  const previous = readSceneLibrary(storage);
+  // Never evict a saved scene to make a new save fit.
+  if (!storage || entries.length > SCENE_LIBRARY_LIMIT) return { entries: previous, persisted: false };
+  const compact = [...entries].sort((a, b) => b.savedAt_ms - a.savedAt_ms)
+    .map((entry) => ({ ...entry, scene: compactSceneDocument(entry.scene) }));
+  const documents: string[] = [];
+  const indices = new Map<string, number>();
+  const records = compact.map(({ scene, ...entry }) => {
+    let document = indices.get(scene);
+    if (document === undefined) {
+      document = documents.length;
+      indices.set(scene, document);
+      documents.push(scene);
+    }
+    return { ...entry, document };
+  });
   try {
-    storage.setItem(SCENE_LIBRARY_STORAGE_KEY, JSON.stringify(bounded));
+    // One atomic replacement: a quota failure leaves every previous byte intact.
+    storage.setItem(SCENE_LIBRARY_STORAGE_KEY, JSON.stringify({ version: 2, documents, entries: records }));
+    return { entries: compact, persisted: true };
   } catch {
-    // A full quota must not lose the caller's in-memory list.
+    return { entries: previous, persisted: false };
   }
-  return bounded;
 }
 
 export interface SaveSceneOptions {
@@ -161,7 +202,7 @@ export function saveSceneToLibrary(
   scene: SceneDescription,
   presetId: string,
   options: SaveSceneOptions,
-): { entries: SceneLibraryEntry[]; entry: SceneLibraryEntry } {
+): { entries: SceneLibraryEntry[]; entry: SceneLibraryEntry; persisted: boolean } {
   const normalized = normalizeSceneName(name);
   const existing = readSceneLibrary(storage);
   const replaced = options.replaceId
@@ -171,11 +212,11 @@ export function saveSceneToLibrary(
     name: normalized,
     savedAt_ms: options.savedAt_ms,
     presetId,
-    scene: serializeScene(cloneScene(scene)),
+    scene: JSON.stringify(cloneScene(scene)),
     ...(options.methodProfile === undefined ? {} : { methodProfile: options.methodProfile }),
   };
-  const entries = writeSceneLibrary(storage, [entry, ...existing.filter((candidate) => candidate.id !== entry.id)]);
-  return { entries, entry };
+  const result = writeSceneLibrary(storage, [entry, ...existing.filter((candidate) => candidate.id !== entry.id)]);
+  return { ...result, entry };
 }
 
 /**
@@ -221,11 +262,11 @@ export function renameSceneInLibrary(
   const entries = readSceneLibrary(storage);
   if (id === SCENE_AUTOSAVE_ENTRY_ID) return entries;
   const normalized = uniqueSceneName(entries, name, id);
-  return writeSceneLibrary(storage, entries.map((entry) => entry.id === id ? { ...entry, name: normalized } : entry));
+  return writeSceneLibrary(storage, entries.map((entry) => entry.id === id ? { ...entry, name: normalized } : entry)).entries;
 }
 
 export function deleteSceneFromLibrary(storage: SceneLibraryStorage | undefined, id: string): SceneLibraryEntry[] {
-  return writeSceneLibrary(storage, readSceneLibrary(storage).filter((entry) => entry.id !== id));
+  return writeSceneLibrary(storage, readSceneLibrary(storage).filter((entry) => entry.id !== id)).entries;
 }
 
 /**

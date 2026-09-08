@@ -3,8 +3,10 @@
 // Composition root: installs the simulation methods this worker's renderer
 // looks up by id. Nothing else in the worker imports the method package.
 import "../methods/index";
+import { cachedEnvironmentProxyCatalog, reuseEnvironmentProxyCatalog } from "./voxel-environments";
 import { FluidLabRenderer } from "./webgpu-renderer";
-import { reuseSolidWorld, sceneWithSolidStroke } from "./solid-world";
+import { reuseSolidWorld } from "./solid-world";
+import { createWorkerSolidEditAcceptance } from "./voxel-editor/worker-solid-edit-acceptance";
 import { webGPUPlatformResourcePlugin } from "./webgpu-platform-resource";
 import { markSceneRevision, type SceneDescription } from "./model";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
@@ -15,8 +17,8 @@ import type {
 } from "./webgpu-render-worker-client";
 
 const scope = self as DedicatedWorkerGlobalScope;
-let preparedSolidScene: SceneDescription | undefined;
-let solidEditBase: SceneDescription | undefined;
+
+let needsSceneryCatalog = true;
 
 /**
  * Structural levers the browser cannot otherwise reach.
@@ -94,6 +96,15 @@ const failure = (requestId: number, error: unknown) => post({
   message: error instanceof Error ? error.message : String(error),
 });
 
+const solidEditAcceptance = createWorkerSolidEditAcceptance({
+  readScene: () => renderScene,
+  writeScene: (scene) => { renderScene = scene; },
+  accept: async (scene, stillCurrent) => {
+    if (!renderer) throw new Error("WebGPU worker has no canvas");
+    await renderer.acceptLiveSolidEdit(scene, stillCurrent);
+  },
+});
+
 scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest>) => {
   const message = event.data;
   if (message.type === "attach") {
@@ -119,21 +130,17 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
     void runtime.initialize().then(() => post({ type: "initialized", requestId: message.requestId }))
       .catch((error) => failure(message.requestId, error));
   } else if (message.type === "validate-solid-edit") {
+    void (async () => {
     try {
-      if (message.base) {
-        solidEditBase = message.base;
-        if (renderScene) reuseSolidWorld(renderScene.document, solidEditBase);
-      }
-      if (!solidEditBase) throw new Error("Missing voxel stroke base");
-      const prepared = sceneWithSolidStroke(solidEditBase,
-        message.scene.solidVoxels.slice(solidEditBase.solidVoxels.length));
-      reuseSolidWorld(prepared, message.scene);
-      runtime.validateLiveSolidEdit(message.scene);
-      preparedSolidScene = message.scene;
+      await solidEditAcceptance.accept(message);
       post({ type: "solid-edit-validated", requestId: message.requestId });
     } catch (error) { failure(message.requestId, error); }
+    })();
   } else if (message.type === "set-render-scene") {
-    if (preparedSolidScene) reuseSolidWorld(preparedSolidScene, message.scene);
+    needsSceneryCatalog = message.needsSceneryCatalog !== false;
+    // Uniform-only document clones share the already resident terrain image.
+    if (renderScene) { reuseSolidWorld(renderScene.document, message.scene); reuseEnvironmentProxyCatalog(renderScene.document, message.scene); }
+    if (solidEditAcceptance.preparedScene) reuseSolidWorld(solidEditAcceptance.preparedScene, message.scene);
     renderScene = {
       revision: message.revision,
       document: markSceneRevision(message.scene),
@@ -152,6 +159,11 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       runtime.setViewportSize(message.viewport.width, message.viewport.height, message.viewport.devicePixelRatio);
       const [time_s, ...args] = message.args;
       const metrics = runtime.draw(time_s, renderScene.document, ...args);
+      const catalog = cachedEnvironmentProxyCatalog(renderScene.document);
+      if (catalog && needsSceneryCatalog) {
+        post({ type: "scenery-catalog", sceneRevision: renderScene.revision, catalog });
+        needsSceneryCatalog = false;
+      }
       post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime) });
     } catch (error) {
       runtime.stopAfterFailure(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
@@ -165,6 +177,11 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
     post({ type: "simulation-running-set", requestId: message.requestId, submittedTime_s });
   }
   else if (message.type === "reset-simulation-timeline") runtime.resetSimulationTimeline();
+  else if (message.type === "edit-fluid") {
+    void runtime.editFluid(message.edit)
+      .then(result => post({ type: "fluid-edit-result", requestId: message.requestId, result }))
+      .catch(error => failure(message.requestId, error));
+  }
   else if (message.type === "inject-liquid-ball") {
     post({ type: "inject-result", requestId: message.requestId, taken: runtime.injectLiquidBall(message.ball) });
   }

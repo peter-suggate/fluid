@@ -24,6 +24,7 @@ function deferred() {
 function fixture(publish?: (next: SceneDescription, before: SceneDescription) => Promise<void>) {
   const base = cloneScene(defaultScene);
   let scene = base;
+  let pending = false;
   const events: string[] = [];
   const host: ToolHost = {
     scene: () => scene,
@@ -35,11 +36,11 @@ function fixture(publish?: (next: SceneDescription, before: SceneDescription) =>
       scene = next;
       events.push(next === base ? "rollback" : "publish");
     },
-    begin: () => { events.push("begin"); },
-    finish: () => { events.push("finish"); },
-    cancel: () => { events.push("cancel"); },
+    begin: () => { pending = true; events.push("begin"); },
+    finish: () => { pending = false; events.push("finish"); },
+    cancel: () => { pending = false; events.push("cancel"); },
   };
-  return { base, events, scene: () => scene, replace: (next: SceneDescription) => { scene = next; },
+  return { base, events, pending: () => pending, scene: () => scene, replace: (next: SceneDescription) => { scene = next; },
     transaction: beginToolTransaction(plugin, host, ray())! };
 }
 
@@ -52,8 +53,10 @@ test("cancel waits for an outstanding preflight and rolls back exactly once", as
   assert.equal(f.transaction.finish(), finish);
   assert.equal(await f.transaction.update(ray(3)), undefined);
   assert.equal(f.scene(), f.base);
+  assert.equal(f.pending(), true);
   gate.resolve();
   await Promise.all([update, finish]);
+  assert.equal(f.pending(), false);
   assert.equal(f.scene(), f.base);
   assert.deepEqual(f.events, ["begin", "preflight", "publish", "preflight", "rollback", "cancel"]);
 });
@@ -115,4 +118,71 @@ test("failed rollback keeps accepted geometry undoable, without taking ownership
     assert.equal(f.scene(), replace ? external : accepted);
     assert.equal(f.events.at(-1), replace ? "cancel" : "finish");
   }
+});
+
+
+test("abandoning a gesture before its first sample clears the pending state", async () => {
+  const f = fixture();
+  assert.equal(f.pending(), true);
+  await f.transaction.finish(true);
+  assert.equal(f.pending(), false);
+  assert.deepEqual(f.events, ["begin", "cancel"]);
+});
+
+test("controller save and history commands cannot bypass an outstanding voxel stroke", async () => {
+  await import("../lib/methods");
+  const { simulation } = await import("../lib/core/simulation/controller");
+  const session = simulation.session();
+  const entry = { scene: session.scene.getState().scene, presetId: session.scene.getState().presetId, label: "Prior edit" };
+  session.history.setState({ past: [entry], future: [entry] });
+  const before = session.history.getState();
+  session.ui.setState({ voxelStrokePending: true });
+  try {
+    assert.equal(simulation.undo(), false);
+    assert.equal(simulation.redo(), false);
+    simulation.saveNamedScene("Should wait");
+    assert.equal(session.history.getState(), before);
+    assert.equal(session.scene.getState().scene, entry.scene);
+    assert.match(JSON.stringify(session.runtime.getState()), /Finish the voxel stroke before saving/);
+  } finally {
+    session.ui.setState({ voxelStrokePending: false });
+    session.history.getState().clear();
+  }
+});
+
+test("invalid JSON imports preserve the scene and explain the rejected file", async () => {
+  await import("../lib/methods");
+  const { simulation } = await import("../lib/core/simulation/controller");
+  const session = simulation.session();
+  const scene = session.scene.getState().scene;
+  const history = session.history.getState();
+  for (const contents of ["{", "{}"] ) {
+    simulation.importScene("invalid.json", contents);
+    assert.equal(session.scene.getState().scene, scene);
+    assert.equal(session.history.getState(), history);
+    const status = JSON.stringify(session.runtime.getState());
+    assert.match(status, /Scene import failed:/);
+    assert.doesNotMatch(status, /Cannot read properties/);
+  }
+});
+
+test("an asynchronous import finishing during a stroke preserves document, tool and history", async () => {
+  await import("../lib/methods");
+  const { simulation } = await import("../lib/core/simulation/controller");
+  const { serializeScene } = await import("../lib/core/model");
+  const session = simulation.session();
+  const scene = session.scene.getState().scene, history = session.history.getState();
+  const gate = deferred();
+  const contents = serializeScene(scene);
+  const read = gate.promise.then(() => simulation.importScene("delayed.json", contents));
+  const previousTool = session.ui.getState().voxelToolId;
+  session.ui.setState({ voxelStrokePending: true });
+  try {
+    gate.resolve(); await read;
+    assert.equal(session.scene.getState().scene, scene);
+    assert.equal(session.history.getState(), history);
+    assert.equal(session.ui.getState().voxelToolId, previousTool);
+    assert.equal(session.ui.getState().voxelStrokePending, true);
+    assert.match(JSON.stringify(session.runtime.getState()), /Finish the voxel stroke before importing/);
+  } finally { session.ui.setState({ voxelStrokePending: false }); }
 });
