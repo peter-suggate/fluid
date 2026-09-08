@@ -266,7 +266,7 @@ ${layout.rigid ? /* wgsl */ `
   }
   return volume;
 ` : ""}
-${layout.rigid ? "" : "  return 1.0-f32(cm12SolidVoxelFractionQ8(q))/255.0;"}
+${layout.rigid ? "" : "  return f32(255u-cm12SolidVoxelFractionQ8(q))/255.0;"}
 }
 fn cm12RetainedDensitySupportSeedMean(index:u32)->f32{
   if(index<CM12_RETAINED_DENSE_SUPPORT_COUNT){return state[CM12_RETAINED_SEED_MEAN_BASE+index];}
@@ -473,11 +473,10 @@ fn initializeRetainedDensityOpenSupport(@builtin(global_invocation_id)gid:vec3u)
     let at=cm12RetainedDensityCoefficientBase(bank)+2u*index;
     state[at]=1.0;state[at+1u]=0.0;
   }
-  if(index>=CM12_RETAINED_DENSE_SUPPORT_COUNT){return;}
-  let q=vec3i(i32(index%CM12_RETAINED_SUPPORT_DIMENSIONS.x),
-    i32((index/CM12_RETAINED_SUPPORT_DIMENSIONS.x)%CM12_RETAINED_SUPPORT_DIMENSIONS.y),
-    i32(index/(CM12_RETAINED_SUPPORT_DIMENSIONS.x*CM12_RETAINED_SUPPORT_DIMENSIONS.y)));
-  state[CM12_RETAINED_OPEN_BASE+index]=1.0-f32(cm12SolidVoxelFractionQ8(q))/255.0;
+  // Dense seed/open moments were integrated together by the CPU compiler.
+  // Preserve that measure, including exact zero at a closed support. Rewriting
+  // it as 1-q8/255 permits fused reciprocal subtraction to produce a negative
+  // capacity at q8=255 even though both authored moments are nonnegative.
 }
 
 @compute @workgroup_size(64)
@@ -2183,16 +2182,16 @@ fn refreshSparseCM12SolidWorldCell(cell:u32){
   let center=cellCenter(cell);let widths=cellWidths(cell);
   let lower=vec3i(round(center-0.5*widths));
   let upper=vec3i(round(center+0.5*widths));
-  var solidQ8=0u;var volume=0u;
+  var openQ8=0u;var volume=0u;
   for(var z=lower.z;z<upper.z;z+=1){
     for(var y=lower.y;y<upper.y;y+=1){
       for(var x=lower.x;x<upper.x;x+=1){
         volume+=1u;
-        solidQ8+=cm12SolidVoxelFractionQ8(vec3i(x,y,z));
+        openQ8+=255u-cm12SolidVoxelFractionQ8(vec3i(x,y,z));
       }
     }
   }
-  let open=select(0.0,1.0-f32(solidQ8)/(255.0*f32(volume)),volume>0u);
+  let open=select(0.0,f32(openQ8)/(255.0*f32(volume)),volume>0u);
   state[solidVoxelCellOpenOffset()+cell]=open;
 ${retainedDensityLayout?.support?.rigid ? /* wgsl */ `
   if(cm12RetainedDensityEnabled()&&!hasRigidBodies()){
@@ -3191,7 +3190,7 @@ fn presentationIntegratedColumnReceipt(brick:u32,x:i32,z:i32,
     if(owner.x==INVALID||!brickActive(owner.y)){
       // Unrepresented open air is an authoritative dry interval at reset as
       // well as after the support apron activates.
-      open=1.0-f32(cm12SolidVoxelFractionQ8(q))/255.0;
+      open=f32(255u-cm12SolidVoxelFractionQ8(q))/255.0;
       let brickWidth=i32(BRICK_FINE_RESOLUTION);
       width=max(1,min(brickWidth-y%brickWidth,upper-y));
     }else{
@@ -6552,7 +6551,7 @@ fn staticSolidRestrictionError(origin:vec3i,rung:u32,lane:u32)->f32{
       positive[uAxis]+=i32(macroU*span+du);
       positive[vAxis]+=i32(macroV*span+dv);
       var negative=positive;negative[axis]-=1;
-      let value=1.0-f32(max(cm12SolidVoxelFractionQ8(negative),
+      let value=f32(255u-max(cm12SolidVoxelFractionQ8(negative),
         cm12SolidVoxelFractionQ8(positive)))/255.0;
       sum+=value;squareSum+=value*value;count+=1.0;
     }}
@@ -8724,8 +8723,8 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
     state[p.stateOffsets2.w+stableCell]=0.0;
     if(hasSolidBoundaries()){state[p.solidOffsets.x+stableCell]=1.0;}
     if(hasStaticSolidVoxels()){
-      state[solidVoxelCellOpenOffset()+stableCell]=1.0
-        -f32(cm12SolidVoxelFractionQ8(lower))/255.0;
+      state[solidVoxelCellOpenOffset()+stableCell]=
+        f32(255u-cm12SolidVoxelFractionQ8(lower))/255.0;
     }
     for(var side=0u;side<6u;side+=1u){
       let axis=side/2u;let positive=(side&1u)!=0u;
@@ -8756,7 +8755,7 @@ fn synthesizeSparseWorldFrontierPages(@builtin(local_invocation_index)lane:u32,
     center[(axis+2u)%3u]=f32(origin[(axis+2u)%3u])+f32(v)+0.5;
     let face=vec3i(floor(center));
     var negative=face;negative[axis]-=1;
-    let open=1.0-f32(max(cm12SolidVoxelFractionQ8(negative),
+    let open=f32(255u-max(cm12SolidVoxelFractionQ8(negative),
       cm12SolidVoxelFractionQ8(face)))/255.0;
     let solidRow=globalRowBase+row;
     if(hasSolidBoundaries()){

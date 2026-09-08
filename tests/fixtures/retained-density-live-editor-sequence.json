@@ -1,0 +1,2246 @@
+{
+  "schemaVersion": "2.0.0",
+  "sceneId": "coarse-first-pool-impact-quarter",
+  "randomSeed": 20260712,
+  "duration_s": 4,
+  "container": {
+    "width_m": 1.6,
+    "height_m": 1.2,
+    "depth_m": 1.6,
+    "fillFraction": 0.3333333333333333,
+    "top": "open",
+    "fluidWallMode": "free-slip"
+  },
+  "solidVoxels": [
+    {
+      "operation": "fill",
+      "minimum": [
+        0,
+        -1,
+        0
+      ],
+      "maximumExclusive": [
+        32,
+        0,
+        32
+      ],
+      "materialId": 1
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        -1,
+        0,
+        0
+      ],
+      "maximumExclusive": [
+        0,
+        24,
+        32
+      ],
+      "materialId": 1
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        32,
+        0,
+        0
+      ],
+      "maximumExclusive": [
+        33,
+        24,
+        32
+      ],
+      "materialId": 1
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        0,
+        0,
+        -1
+      ],
+      "maximumExclusive": [
+        32,
+        24,
+        0
+      ],
+      "materialId": 1
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        0,
+        0,
+        32
+      ],
+      "maximumExclusive": [
+        32,
+        24,
+        33
+      ],
+      "materialId": 1
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        15,
+        0,
+        24
+      ],
+      "maximumExclusive": [
+        23,
+        8,
+        32
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        1,
+        21
+      ],
+      "maximumExclusive": [
+        9,
+        2,
+        22
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        2,
+        21
+      ],
+      "maximumExclusive": [
+        9,
+        3,
+        22
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        3,
+        21
+      ],
+      "maximumExclusive": [
+        9,
+        4,
+        22
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        0,
+        22
+      ],
+      "maximumExclusive": [
+        9,
+        1,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        5,
+        1,
+        22
+      ],
+      "maximumExclusive": [
+        10,
+        2,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        5,
+        2,
+        22
+      ],
+      "maximumExclusive": [
+        10,
+        3,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        5,
+        3,
+        22
+      ],
+      "maximumExclusive": [
+        10,
+        4,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        4,
+        22
+      ],
+      "maximumExclusive": [
+        9,
+        5,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        0,
+        23
+      ],
+      "maximumExclusive": [
+        9,
+        1,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        5,
+        1,
+        23
+      ],
+      "maximumExclusive": [
+        10,
+        2,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        5,
+        2,
+        23
+      ],
+      "maximumExclusive": [
+        10,
+        3,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        5,
+        3,
+        23
+      ],
+      "maximumExclusive": [
+        10,
+        4,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        4,
+        23
+      ],
+      "maximumExclusive": [
+        9,
+        5,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        0,
+        24
+      ],
+      "maximumExclusive": [
+        9,
+        1,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        5,
+        1,
+        24
+      ],
+      "maximumExclusive": [
+        10,
+        2,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        5,
+        2,
+        24
+      ],
+      "maximumExclusive": [
+        10,
+        3,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        5,
+        3,
+        24
+      ],
+      "maximumExclusive": [
+        10,
+        4,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        4,
+        24
+      ],
+      "maximumExclusive": [
+        9,
+        5,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        1,
+        25
+      ],
+      "maximumExclusive": [
+        9,
+        2,
+        26
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        2,
+        25
+      ],
+      "maximumExclusive": [
+        9,
+        3,
+        26
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        3,
+        25
+      ],
+      "maximumExclusive": [
+        9,
+        4,
+        26
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        5,
+        0,
+        29
+      ],
+      "maximumExclusive": [
+        7,
+        4,
+        31
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        0,
+        29
+      ],
+      "maximumExclusive": [
+        8,
+        4,
+        31
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        0,
+        29
+      ],
+      "maximumExclusive": [
+        9,
+        4,
+        31
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        8,
+        0,
+        29
+      ],
+      "maximumExclusive": [
+        10,
+        4,
+        31
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        9,
+        0,
+        29
+      ],
+      "maximumExclusive": [
+        11,
+        4,
+        31
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        10,
+        0,
+        29
+      ],
+      "maximumExclusive": [
+        12,
+        4,
+        31
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        11,
+        0,
+        29
+      ],
+      "maximumExclusive": [
+        13,
+        4,
+        31
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        28,
+        0,
+        19
+      ],
+      "maximumExclusive": [
+        29,
+        6,
+        20
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        28,
+        0,
+        20
+      ],
+      "maximumExclusive": [
+        29,
+        6,
+        21
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        28,
+        0,
+        21
+      ],
+      "maximumExclusive": [
+        29,
+        6,
+        22
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        29,
+        0,
+        22
+      ],
+      "maximumExclusive": [
+        30,
+        6,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        29,
+        0,
+        23
+      ],
+      "maximumExclusive": [
+        30,
+        6,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        29,
+        0,
+        24
+      ],
+      "maximumExclusive": [
+        30,
+        6,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        29,
+        0,
+        25
+      ],
+      "maximumExclusive": [
+        30,
+        6,
+        26
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        30,
+        0,
+        26
+      ],
+      "maximumExclusive": [
+        31,
+        6,
+        27
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        30,
+        0,
+        27
+      ],
+      "maximumExclusive": [
+        31,
+        6,
+        28
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        30,
+        0,
+        28
+      ],
+      "maximumExclusive": [
+        31,
+        6,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        0,
+        27
+      ],
+      "maximumExclusive": [
+        21,
+        1,
+        28
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        1,
+        27
+      ],
+      "maximumExclusive": [
+        21,
+        2,
+        28
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        2,
+        27
+      ],
+      "maximumExclusive": [
+        21,
+        3,
+        28
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        3,
+        27
+      ],
+      "maximumExclusive": [
+        21,
+        4,
+        28
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        4,
+        27
+      ],
+      "maximumExclusive": [
+        21,
+        5,
+        28
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        5,
+        27
+      ],
+      "maximumExclusive": [
+        21,
+        6,
+        28
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        6,
+        27
+      ],
+      "maximumExclusive": [
+        21,
+        7,
+        28
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        7,
+        27
+      ],
+      "maximumExclusive": [
+        21,
+        8,
+        28
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        0,
+        28
+      ],
+      "maximumExclusive": [
+        21,
+        1,
+        29
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        1,
+        28
+      ],
+      "maximumExclusive": [
+        21,
+        2,
+        29
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        2,
+        28
+      ],
+      "maximumExclusive": [
+        21,
+        3,
+        29
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        3,
+        28
+      ],
+      "maximumExclusive": [
+        21,
+        4,
+        29
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        4,
+        28
+      ],
+      "maximumExclusive": [
+        21,
+        5,
+        29
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        5,
+        28
+      ],
+      "maximumExclusive": [
+        21,
+        6,
+        29
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        6,
+        28
+      ],
+      "maximumExclusive": [
+        21,
+        7,
+        29
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        7,
+        28
+      ],
+      "maximumExclusive": [
+        21,
+        8,
+        29
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        0,
+        29
+      ],
+      "maximumExclusive": [
+        21,
+        1,
+        30
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        1,
+        29
+      ],
+      "maximumExclusive": [
+        21,
+        2,
+        30
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        2,
+        29
+      ],
+      "maximumExclusive": [
+        21,
+        3,
+        30
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        3,
+        29
+      ],
+      "maximumExclusive": [
+        21,
+        4,
+        30
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        4,
+        29
+      ],
+      "maximumExclusive": [
+        21,
+        5,
+        30
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        5,
+        29
+      ],
+      "maximumExclusive": [
+        21,
+        6,
+        30
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        6,
+        29
+      ],
+      "maximumExclusive": [
+        21,
+        7,
+        30
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        18,
+        7,
+        29
+      ],
+      "maximumExclusive": [
+        21,
+        8,
+        30
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        15,
+        5,
+        26
+      ],
+      "maximumExclusive": [
+        18,
+        8,
+        31
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        80,
+        0,
+        23
+      ],
+      "maximumExclusive": [
+        81,
+        1,
+        24
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        22,
+        5,
+        25
+      ],
+      "maximumExclusive": [
+        23,
+        8,
+        26
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        22,
+        5,
+        26
+      ],
+      "maximumExclusive": [
+        23,
+        8,
+        27
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        22,
+        5,
+        27
+      ],
+      "maximumExclusive": [
+        23,
+        8,
+        28
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        22,
+        5,
+        28
+      ],
+      "maximumExclusive": [
+        23,
+        8,
+        29
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        21,
+        5,
+        29
+      ],
+      "maximumExclusive": [
+        22,
+        8,
+        30
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        21,
+        5,
+        30
+      ],
+      "maximumExclusive": [
+        22,
+        8,
+        31
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        21,
+        5,
+        31
+      ],
+      "maximumExclusive": [
+        22,
+        8,
+        32
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        6,
+        2,
+        29
+      ],
+      "maximumExclusive": [
+        8,
+        4,
+        31
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        7,
+        2,
+        29
+      ],
+      "maximumExclusive": [
+        9,
+        4,
+        31
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        8,
+        2,
+        29
+      ],
+      "maximumExclusive": [
+        10,
+        4,
+        31
+      ]
+    },
+    {
+      "operation": "clear",
+      "minimum": [
+        9,
+        2,
+        29
+      ],
+      "maximumExclusive": [
+        11,
+        4,
+        31
+      ]
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        3,
+        0,
+        26
+      ],
+      "maximumExclusive": [
+        4,
+        1,
+        27
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        28,
+        0,
+        26
+      ],
+      "maximumExclusive": [
+        29,
+        1,
+        27
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        2,
+        1,
+        26
+      ],
+      "maximumExclusive": [
+        5,
+        2,
+        27
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        27,
+        1,
+        26
+      ],
+      "maximumExclusive": [
+        30,
+        2,
+        27
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        3,
+        2,
+        26
+      ],
+      "maximumExclusive": [
+        4,
+        3,
+        27
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        28,
+        2,
+        26
+      ],
+      "maximumExclusive": [
+        29,
+        3,
+        27
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        2,
+        0,
+        27
+      ],
+      "maximumExclusive": [
+        5,
+        1,
+        28
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        27,
+        0,
+        27
+      ],
+      "maximumExclusive": [
+        30,
+        1,
+        28
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        2,
+        1,
+        27
+      ],
+      "maximumExclusive": [
+        5,
+        2,
+        28
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        27,
+        1,
+        27
+      ],
+      "maximumExclusive": [
+        30,
+        2,
+        28
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        2,
+        2,
+        27
+      ],
+      "maximumExclusive": [
+        5,
+        3,
+        28
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        27,
+        2,
+        27
+      ],
+      "maximumExclusive": [
+        30,
+        3,
+        28
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        3,
+        0,
+        28
+      ],
+      "maximumExclusive": [
+        4,
+        1,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        28,
+        0,
+        28
+      ],
+      "maximumExclusive": [
+        29,
+        1,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        2,
+        1,
+        28
+      ],
+      "maximumExclusive": [
+        5,
+        2,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        27,
+        1,
+        28
+      ],
+      "maximumExclusive": [
+        30,
+        2,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        3,
+        2,
+        28
+      ],
+      "maximumExclusive": [
+        4,
+        3,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        28,
+        2,
+        28
+      ],
+      "maximumExclusive": [
+        29,
+        3,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        4,
+        25
+      ],
+      "maximumExclusive": [
+        8,
+        5,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        8,
+        4,
+        25
+      ],
+      "maximumExclusive": [
+        9,
+        5,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        9,
+        4,
+        25
+      ],
+      "maximumExclusive": [
+        10,
+        5,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        10,
+        4,
+        25
+      ],
+      "maximumExclusive": [
+        11,
+        5,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        11,
+        4,
+        25
+      ],
+      "maximumExclusive": [
+        12,
+        5,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        12,
+        4,
+        25
+      ],
+      "maximumExclusive": [
+        13,
+        5,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        13,
+        5,
+        25
+      ],
+      "maximumExclusive": [
+        14,
+        6,
+        29
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        16,
+        8,
+        25
+      ],
+      "maximumExclusive": [
+        21,
+        12,
+        27
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        6,
+        21
+      ],
+      "maximumExclusive": [
+        10,
+        7,
+        22
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        6,
+        21
+      ],
+      "maximumExclusive": [
+        25,
+        7,
+        22
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        7,
+        21
+      ],
+      "maximumExclusive": [
+        10,
+        8,
+        22
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        7,
+        21
+      ],
+      "maximumExclusive": [
+        25,
+        8,
+        22
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        8,
+        21
+      ],
+      "maximumExclusive": [
+        10,
+        9,
+        22
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        8,
+        21
+      ],
+      "maximumExclusive": [
+        25,
+        9,
+        22
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        5,
+        22
+      ],
+      "maximumExclusive": [
+        10,
+        6,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        5,
+        22
+      ],
+      "maximumExclusive": [
+        25,
+        6,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        6,
+        22
+      ],
+      "maximumExclusive": [
+        11,
+        7,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        21,
+        6,
+        22
+      ],
+      "maximumExclusive": [
+        26,
+        7,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        7,
+        22
+      ],
+      "maximumExclusive": [
+        11,
+        8,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        21,
+        7,
+        22
+      ],
+      "maximumExclusive": [
+        26,
+        8,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        8,
+        22
+      ],
+      "maximumExclusive": [
+        11,
+        9,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        21,
+        8,
+        22
+      ],
+      "maximumExclusive": [
+        26,
+        9,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        9,
+        22
+      ],
+      "maximumExclusive": [
+        10,
+        10,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        9,
+        22
+      ],
+      "maximumExclusive": [
+        25,
+        10,
+        23
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        5,
+        23
+      ],
+      "maximumExclusive": [
+        10,
+        6,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        5,
+        23
+      ],
+      "maximumExclusive": [
+        25,
+        6,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        6,
+        23
+      ],
+      "maximumExclusive": [
+        11,
+        7,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        21,
+        6,
+        23
+      ],
+      "maximumExclusive": [
+        26,
+        7,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        7,
+        23
+      ],
+      "maximumExclusive": [
+        11,
+        8,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        21,
+        7,
+        23
+      ],
+      "maximumExclusive": [
+        26,
+        8,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        8,
+        23
+      ],
+      "maximumExclusive": [
+        11,
+        9,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        21,
+        8,
+        23
+      ],
+      "maximumExclusive": [
+        26,
+        9,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        9,
+        23
+      ],
+      "maximumExclusive": [
+        10,
+        10,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        9,
+        23
+      ],
+      "maximumExclusive": [
+        25,
+        10,
+        24
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        5,
+        24
+      ],
+      "maximumExclusive": [
+        10,
+        6,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        5,
+        24
+      ],
+      "maximumExclusive": [
+        25,
+        6,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        6,
+        24
+      ],
+      "maximumExclusive": [
+        11,
+        7,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        21,
+        6,
+        24
+      ],
+      "maximumExclusive": [
+        26,
+        7,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        7,
+        24
+      ],
+      "maximumExclusive": [
+        11,
+        8,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        21,
+        7,
+        24
+      ],
+      "maximumExclusive": [
+        26,
+        8,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        6,
+        8,
+        24
+      ],
+      "maximumExclusive": [
+        11,
+        9,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        21,
+        8,
+        24
+      ],
+      "maximumExclusive": [
+        26,
+        9,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        9,
+        24
+      ],
+      "maximumExclusive": [
+        10,
+        10,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        9,
+        24
+      ],
+      "maximumExclusive": [
+        25,
+        10,
+        25
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        6,
+        25
+      ],
+      "maximumExclusive": [
+        10,
+        7,
+        26
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        6,
+        25
+      ],
+      "maximumExclusive": [
+        25,
+        7,
+        26
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        7,
+        25
+      ],
+      "maximumExclusive": [
+        10,
+        8,
+        26
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        7,
+        25
+      ],
+      "maximumExclusive": [
+        25,
+        8,
+        26
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        7,
+        8,
+        25
+      ],
+      "maximumExclusive": [
+        10,
+        9,
+        26
+      ],
+      "materialId": 2
+    },
+    {
+      "operation": "fill",
+      "minimum": [
+        22,
+        8,
+        25
+      ],
+      "maximumExclusive": [
+        25,
+        9,
+        26
+      ],
+      "materialId": 2
+    }
+  ],
+  "voxelDomain": {
+    "finestCellSize_m": 0.05,
+    "brickSize_cells": 8
+  },
+  "fluid": {
+    "density_kg_m3": 998.2,
+    "dynamicViscosity_Pa_s": 0,
+    "surfaceTension_N_m": 0,
+    "gravity_m_s2": {
+      "x": 0,
+      "y": -9.80665,
+      "z": 0
+    },
+    "initialCondition": "tank-fill",
+    "initialLiquidVolumes": [
+      {
+        "shape": "sphere",
+        "center_m": {
+          "x": 0,
+          "y": 0.9125,
+          "z": 0
+        },
+        "radius_m": 0.25
+      }
+    ],
+    "refinementRegions": [
+      {
+        "id": "region-1",
+        "rule": "minimum-cell-size",
+        "minimumCellSize_cells": 8,
+        "min_m": {
+          "x": -0.8,
+          "y": 0,
+          "z": -0.8
+        },
+        "max_m": {
+          "x": -0.4,
+          "y": 0.7999999999999999,
+          "z": 0.8
+        }
+      }
+    ]
+  },
+  "nominalResolution": {
+    "length_m": 0.025
+  },
+  "numerics": {
+    "fixedDt_s": 0.03333333333333333,
+    "maxDt_s": 0.03333333333333333,
+    "pressureRelativeTolerance": 1e-08,
+    "pressureMaxIterations": 1000
+  },
+  "rigidBodies": [],
+  "environment": "stage",
+  "scenery": {
+    "palettes": {
+      "stage": {
+        "tint": [
+          1,
+          0.995,
+          0.985
+        ]
+      },
+      "fixture": {
+        "tint": [
+          0.94,
+          0.95,
+          1
+        ]
+      },
+      "lamp": {
+        "tint": [
+          1,
+          0.955,
+          0.88
+        ]
+      }
+    },
+    "nodes": [
+      {
+        "kind": "room-shell",
+        "id": "shell",
+        "materialModel": "room",
+        "faces": [],
+        "floor": {
+          "palette": "stage",
+          "value": 0.62
+        },
+        "wall": {
+          "palette": "stage",
+          "value": 0.62
+        },
+        "ceiling": {
+          "palette": "stage",
+          "value": 0.62
+        }
+      },
+      {
+        "kind": "box",
+        "id": "stage/floor",
+        "group": "stage",
+        "tags": [
+          "stage",
+          "floor",
+          "fluid-collider"
+        ],
+        "place": {
+          "position": {
+            "x": 0,
+            "y": -0.1120663629361052,
+            "z": 0
+          },
+          "units": "metres"
+        },
+        "halfSize": {
+          "x": 3.548768159643331,
+          "y": 0.1120663629361052,
+          "z": 3.548768159643331
+        },
+        "material": {
+          "palette": "stage",
+          "value": 0.12,
+          "surface": "plaster"
+        }
+      },
+      {
+        "kind": "cylinder",
+        "id": "lamp/stem",
+        "group": "lamp",
+        "tags": [
+          "lamp",
+          "fixture"
+        ],
+        "place": {
+          "position": {
+            "x": 0,
+            "y": 6.157424052433781,
+            "z": 0
+          },
+          "units": "metres"
+        },
+        "radius": 0.03361990888083155,
+        "halfHeight": 0.8404977220207889,
+        "material": {
+          "palette": "fixture",
+          "value": 0.16,
+          "surface": "brushed-metal"
+        }
+      },
+      {
+        "kind": "cone",
+        "id": "lamp/reflector",
+        "group": "lamp",
+        "tags": [
+          "lamp",
+          "fixture",
+          "light",
+          "spot-light"
+        ],
+        "place": {
+          "position": {
+            "x": 0,
+            "y": 4.946484741818644,
+            "z": 0
+          },
+          "units": "metres"
+        },
+        "baseRadius": 0.4109099974323857,
+        "topRadius": 0.09338863578008766,
+        "halfHeight": 0.3704415885943478,
+        "material": {
+          "colorLinear": [
+            1,
+            0.955,
+            0.88
+          ],
+          "emission": 261.64311878597607
+        }
+      }
+    ]
+  }
+}
