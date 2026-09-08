@@ -21,26 +21,40 @@ const reasons: Readonly<Record<number, readonly [string, string]>> = {
   4: ["INVALID_CONSERVED_VALUE", "Nonfinite or negative transported density/gamma would have been clamped"],
   6: ["RETAINED_DENSITY_INTEGRAL", "Retained density support could not represent the accepted native amount"],
 };
+function retainedFailureOperands(words: Uint32Array) {
+  const stage = words[6];
+  const floats = new Float32Array(words.slice(7, 10).buffer);
+  switch (stage) {
+    case 2: return { names: ["stage", "targetDensity", "openFraction", "reserved"],
+      values: [stage, floats[0], floats[1], words[9]] };
+    case 3: return { names: ["stage", "density", "targetDensity", "previousDensity"],
+      values: [stage, ...floats] };
+    case 4: return { names: ["stage", "density", "openFraction", "hopDistance"],
+      values: [stage, floats[0], floats[1], words[9]] };
+    case 5: return { names: ["stage", "packetAmount", "hopDistance", "reserved"],
+      values: [stage, floats[0], words[8], words[9]] };
+    default: return { names: ["stage", "operand1", "operand2", "operand3"],
+      values: [...words.slice(6, 10)] };
+  }
+}
 export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: readonly string[] = []): SimulationFailure | undefined {
   if (words.length !== CM12_FAILURE_WORDS) throw new Error("Incomplete CM12 failure receipt");
   if (words[0] === 0) return undefined;
   for (const name of kernelNames) cm12FailureKernelId(name);
   const [code, message] = reasons[words[1]] ?? ["UNKNOWN_GPU_FAULT", `Unknown GPU failure code ${words[1]}`];
+  const retained = words[1] === 6 ? retainedFailureOperands(words) : undefined;
   return {
     method: "adaptive-mass", code, message,
     kernel: kernels.get(words[2]) ?? `0x${words[2].toString(16)}`,
     frame: words[3], generation: words[4], ownerId: words[5],
-    operandNames: ({
+    operandNames: retained?.names ?? ({
       1: ["begin", "end", "maximumCount", "reserved"],
       2: ["visibleWeight", "deficit", "donorDensity", "reserved"],
       3: ["recipientWeight", "removedFixed", "reserved", "reserved"],
       5: ["positionX", "positionY", "positionZ", "reserved"],
       4: ["rawDensity", "rawGamma", "reserved", "reserved"],
-      6: ["stage", "density", "targetDensity", "reserved"],
     } as Record<number, string[]>)[words[1]],
-    operands: words[1] === 6
-      ? [words[6], ...new Float32Array(words.slice(7, 9).buffer), words[9]]
-      : words[1] >= 2 && words[1] <= 5
-      ? [...new Float32Array(words.slice(6, 10).buffer)] : [...words.slice(6, 10)], rawWords: [...words],
+    operands: retained?.values ?? (words[1] >= 2 && words[1] <= 5
+      ? [...new Float32Array(words.slice(6, 10).buffer)] : [...words.slice(6, 10)]), rawWords: [...words],
   };
 }
