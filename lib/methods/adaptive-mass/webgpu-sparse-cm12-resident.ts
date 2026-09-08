@@ -9,6 +9,7 @@ import { SPARSE_CM12_COMMON_HEIGHT_ENABLED, SPARSE_CM12_HEIGHT_ENTRY_POINTS, SPA
 import { compileCM12CapturedGeometry, type CM12CapturedGeometryRecipe } from "./sparse-cm12-captured-geometry";
 import { SparseCM12TemplateArchetypes, type SparseCM12TemplateExpansion } from "./sparse-cm12-template-archetypes";
 import { expandSparseCM12TemplateArchetypesGPU } from "./sparse-cm12-template-expansion-gpu";
+import { SparseCM12TemplateBlockCache, visitSparseCM12TemplateBlocks } from "./sparse-cm12-template-blocks";
 import { createCM12ResourceRecorder, realizeCM12ResourceRecipe, type CM12ResourceRecipe } from "./sparse-cm12-resource-recipe";
 import { SparseCM12GenerationBudgetDeferred, SparseCM12GenerationStale } from "./sparse-cm12-generation-budget";
 import { SparseCM12GenerationPlanningGate } from "./sparse-cm12-generation-planning-gate";
@@ -1784,9 +1785,9 @@ function sparseCM12BrickLiveCellCount(atlas: SparseAdaptiveMassAtlas,
 }
 
 /**
- * Construction-time physical template library. Four uniform builds provide
+ * Construction-time physical template library. Four uniform placements provide
  * every cell, intra-brick row, same-level face, and sparse-air face. Eighteen
- * alternating builds provide both orientations of every valid 2:1 face pair.
+ * alternating placements provide both orientations of every valid 2:1 face pair.
  * Runtime publication can therefore switch cells and pressure rows by only
  * rebuilding compact worklists; no host topology build is needed after create.
  */
@@ -1800,6 +1801,7 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   mutableKeys?: ReadonlySet<number>,
   useArchetypes = true,
   report: (phase: string) => void = () => {},
+  useBlocks = false,
 ): PackedResidentTopologyTemplates {
   const templateLevels = sparseCM12TemplateLevels(atlas.brickFineResolution);
   const mutableBrickKeys = new Set(atlas.bricks.filter((brick) => preparation
@@ -1867,6 +1869,8 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
   // copied into the persistent template library.
   const variantWorkspace = createSparseAtlasCompositeGridBuildWorkspace();
   const archetypes = useArchetypes ? new SparseCM12TemplateArchetypes(atlas) : undefined;
+  const blocks = useBlocks ? new SparseCM12TemplateBlockCache() : undefined;
+  if (blocks && (!archetypes || preparation)) throw new Error("CM12 local blocks require the all-rung archetype compiler");
   const cells: SparseAtlasCompositeCell[] = archetypes?.cells ?? [];
   const cellId = archetypes?.cellIds ?? new Map<number, number>();
   const cellRanges = new Uint32Array(atlas.bricks.length * templateLevels.length * 2);
@@ -2005,6 +2009,19 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
       levelIndex < templateLevels.length; levelIndex += 1) {
       const level = templateLevels[levelIndex]!;
       for (const { coreKeys, localBricks } of chunkContexts) {
+        if (blocks) {
+          const variant = variantAtlasAtLevels((brick) => mutableBrickKeys.has(brick.key)
+            ? level : brick.resolution, localBricks);
+          for (const brick of variant.bricks) if (mutableBrickKeys.has(brick.key)) {
+            const range = archetypes!.appendBrick(brick);
+            const at = 2 * (templateLevels.length * brickIndex.get(brick.key)! + levelIndex);
+            cellRanges[at] = range.first; cellRanges[at + 1] = range.count;
+          }
+          visitSparseCM12TemplateBlocks(variant, blocks,
+            (block, bricks) => archetypes!.appendBlock(block, bricks),
+            (_kind, bricks) => bricks.some(brick => coreKeys.has(brick.key)));
+          continue;
+        }
         const grid = buildSparseAtlasCompositeGrid(
           variantAtlasAtLevels((brick) => mutableBrickKeys.has(brick.key)
             ? level : brick.resolution, localBricks), 0.5, variantWorkspace,
@@ -2041,6 +2058,15 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
           const variant = variantAtlasAtLevels((brick) => mutableBrickKeys.has(brick.key)
             ? ((brick.coordinate[axis]! & 1) ^ phase) === 0 ? low : high
             : brick.resolution, localBricks);
+          if (blocks) {
+            visitSparseCM12TemplateBlocks(variant, blocks,
+              (block, bricks) => archetypes!.appendBlock(block, bricks),
+              (kind, bricks, faceAxis) => kind === "interface" && faceAxis === axis
+                && sparseBrickSpan(bricks[0]!) / bricks[0]!.resolution
+                  !== sparseBrickSpan(bricks[1]!) / bricks[1]!.resolution
+                && bricks.some(brick => coreKeys.has(brick.key)));
+            continue;
+          }
           const variantGrid = buildSparseAtlasCompositeGrid(
             variant, 0.5, variantWorkspace,
           );
@@ -2065,6 +2091,7 @@ function packResidentTopologyTemplates(atlas: SparseAdaptiveMassAtlas,
     variantWorkspace.cellBaseByBrick.clear(); variantWorkspace.grid = undefined;
   }
   report("Order interned topology instances");
+  if (blocks) report(`Local topology block census ${JSON.stringify(blocks.statistics)}`);
   const ownership = archetypes ? archetypes.orderRows(atlas.bricks.length, templateLevels)
     : sparseCM12ContiguousRowOwnership(atlas.bricks.length,
       templateLevels, rows, rowRequirements, true);
@@ -2235,6 +2262,12 @@ export function packSparseCM12ResidentTopologyArchetypesForQA(
   mutableKeys?: ReadonlySet<number>,
   report?: (phase: string) => void,
 ) { return packResidentTopologyTemplates(atlas, acceptedGrid, undefined, mutableKeys, true, report); }
+
+/** QA seam for the production local-block planner and GPU placement recipe. */
+export function packSparseCM12ResidentTopologyBlocksForQA(
+  atlas: SparseAdaptiveMassAtlas, acceptedGrid: SparseAtlasCompositeGrid,
+  mutableKeys?: ReadonlySet<number>, report?: (phase: string) => void,
+) { return packResidentTopologyTemplates(atlas, acceptedGrid, undefined, mutableKeys, true, report, true); }
 
 /** CPU-only QA seam for the accepted-only production template branch. */
 export function packSparseCM12AcceptedTopologyTemplatesForQA(
@@ -4286,7 +4319,7 @@ export class WebGPUSparseCM12Resident {
       ? "Build four-rung and 2:1 seam topology templates"
       : "Pack accepted topology templates");
     const templates = hostTemplateVariants
-      ? packResidentTopologyTemplates(atlas, grid, undefined, mutableBrickKeys, true, report)
+      ? packResidentTopologyTemplates(atlas, grid, undefined, mutableBrickKeys, true, report, true)
       : packAcceptedTopologyTemplates(atlas, grid);
     const dynamicCellsPerPage = atlas.brickFineResolution ** 3;
     const dynamicRowsPerPage = 3 * (atlas.brickFineResolution + 1)

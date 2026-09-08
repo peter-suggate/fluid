@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { createSparseAdaptiveMassAtlas, sparseBrickSpan } from "../lib/methods/adaptive-mass/sparse-brick-atlas";
 import { buildSparseAtlasCompositeGrid } from "../lib/methods/adaptive-mass/sparse-atlas-composite-projection";
-import { packSparseCM12ResidentTopologyArchetypesForQA, sparseCM12HostTemplateVariantsEnabled } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
+import { packSparseCM12ResidentTopologyArchetypesForQA, packSparseCM12ResidentTopologyBlocksForQA,
+  sparseCM12HostTemplateVariantsEnabled } from "../lib/methods/adaptive-mass/webgpu-sparse-cm12-resident";
 
 const input = JSON.parse(readFileSync("/tmp/fluid-cm12-generation-atlas.json", "utf8"));
 const atlas = createSparseAdaptiveMassAtlas(input.dimensions, input.bricks.map((brick: any) => ({
@@ -29,7 +30,9 @@ if (!fits()) throw new Error("Captured generation does not select the all-rung p
 console.log(JSON.stringify({ phase: "before-catalog", bricks: atlas.bricks.length,
   cells: grid.cells.length, rows: grid.gradientRows.length, mutable: mutable.size, ...process.memoryUsage() }));
 const start = performance.now();
-const output = packSparseCM12ResidentTopologyArchetypesForQA(atlas, grid, mutable,
+const compile = process.argv.includes("--blocks") ? packSparseCM12ResidentTopologyBlocksForQA
+  : packSparseCM12ResidentTopologyArchetypesForQA;
+const output = compile(atlas, grid, mutable,
   phase => console.log(JSON.stringify({ phase, milliseconds: performance.now() - start, ...process.memoryUsage() })));
 console.log(JSON.stringify({ phase: "after-catalog", milliseconds: performance.now() - start,
   cellCount: output.cellCount, rowCount: output.rowCount, archetypes: output.gpuExpansion!.archetypeCount,

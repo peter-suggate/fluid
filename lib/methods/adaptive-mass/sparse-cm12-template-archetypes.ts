@@ -1,5 +1,6 @@
 import type { SparseAtlasCompositeCell, SparseAtlasGradientRow, SparseAtlasGradientTerm } from "./sparse-atlas-composite-projection";
-import { sparseBrickMaximumFine, sparseBrickSpan, type SparseAdaptiveMassAtlas } from "./sparse-brick-atlas";
+import { sparseBrickMaximumFine, sparseBrickSpan, type SparseAdaptiveMassAtlas, type SparseAdaptiveMassBrick } from "./sparse-brick-atlas";
+import type { SparseCM12TemplateBlockPlacement, SparseCM12TemplateBlockRow } from "./sparse-cm12-template-blocks";
 
 /** Typed chunks keep construction residency proportional to numeric payload,
  * never to a JavaScript object per native cell, row, term or requirement. */
@@ -119,6 +120,8 @@ export class SparseCM12TemplateArchetypes {
   private readonly patternByShape = new Map<string, number>();
   private readonly instances = new NumericChunks();
   private readonly instanceKeys = new Set<number>();
+  private readonly blockPatterns = new WeakMap<readonly SparseCM12TemplateBlockRow[], Uint32Array>();
+  private readonly blockInstances = new WeakMap<readonly SparseCM12TemplateBlockRow[], Set<number>>();
   private readonly leafByKey: Map<number, number>;
   private rowOrder?: Uint32Array;
   private readonly rangeKeyCapacity: number;
@@ -181,6 +184,79 @@ export class SparseCM12TemplateArchetypes {
     return new CellView(id, range, this.scalar.get(2 * id), this.scalar.get(2 * id + 1));
   }
 
+  /** Register a complete native range without expanding host cell objects. */
+  appendBrick(brick: SparseAdaptiveMassBrick): { first: number; count: number } {
+    const configuration = brick.key * 32 + brick.resolution;
+    const existing = this.rangeByConfiguration.get(configuration);
+    if (existing !== undefined) return this.ranges[existing]!;
+    const rangeId = this.ranges.length;
+    const width = this.atlas.brickFineResolution * sparseBrickSpan(brick) / brick.resolution;
+    const lower = brick.coordinate.map(q => this.atlas.brickFineResolution * q) as [number, number, number];
+    const maximum = ([0, 1, 2] as const).map(axis => sparseBrickMaximumFine(this.atlas, brick, axis)) as [number, number, number];
+    const dimensions = maximum.map((q, axis) => Math.min(brick.resolution, Math.ceil((q - lower[axis]!) / width))) as [number, number, number];
+    if (dimensions.some(n => n <= 0)) throw new Error("CM12 template block has no native cell extent");
+    const range: CellRange = { first: this.cellRangeIds.length, count: dimensions[0] * dimensions[1] * dimensions[2],
+      leaf: this.leafByKey.get(brick.key)!, key: brick.key, resolution: brick.resolution,
+      coordinate: brick.coordinate, lower, maximum, dimensions, width,
+      stableBase: brick.key * this.atlas.brickCellCapacity };
+    this.ranges.push(range); this.rangeByConfiguration.set(configuration, rangeId);
+    for (let z = 0; z < dimensions[2]; z++) for (let y = 0; y < dimensions[1]; y++) for (let x = 0; x < dimensions[0]; x++) {
+      const local = x + brick.resolution * (y + brick.resolution * z);
+      this.cellRangeIds.push(rangeId); this.scalar.push(brick.density[local]!); this.scalar.push(brick.gamma[local]!);
+    }
+    return range;
+  }
+
+  /** Intern each local block once, then append only typed placement addresses. */
+  appendBlock(block: SparseCM12TemplateBlockPlacement, bricks: readonly SparseAdaptiveMassBrick[]) {
+    if (block.rows.length === 0) return;
+    const rangeIds = bricks.map(brick => this.rangeByConfiguration.get(brick.key * 32 + brick.resolution)!);
+    if (rangeIds.some(id => id === undefined)) throw new Error("CM12 block placement lacks its native range");
+    const sourceRange = rangeIds[0]!, targetRange = rangeIds[1] ?? -1;
+    const instance = sourceRange * this.rangeKeyCapacity + targetRange + 1;
+    let placed = this.blockInstances.get(block.rows);
+    if (!placed) this.blockInstances.set(block.rows, placed = new Set());
+    if (placed.has(instance)) return;
+    placed.add(instance);
+    let patterns = this.blockPatterns.get(block.rows);
+    if (!patterns) {
+      patterns = Uint32Array.from(block.rows, row => {
+        if (row.terms[0]!.slot !== 0 || row.terms.some(term => term.slot > 1))
+          throw new Error("CM12 local block has unsupported term ownership");
+        const terms = row.terms.map(term => {
+          const range = this.ranges[rangeIds[term.slot]!]!, r = range.resolution;
+          const x = term.local % r, y = Math.floor(term.local / r) % r, z = Math.floor(term.local / (r * r));
+          return { target: term.slot === 1, local: x + range.dimensions[0] * (y + range.dimensions[1] * z),
+            coefficient: term.coefficient };
+        });
+        return this.internPattern({ ...row, center: row.centerFine, terms });
+      });
+      this.blockPatterns.set(block.rows, patterns);
+    }
+    for (const pattern of patterns) this.appendInstance(pattern, sourceRange, targetRange, Number.POSITIVE_INFINITY);
+  }
+
+  private internPattern(source: RowArchetype): number {
+    const shape = [source.kind, source.axis, ...source.center, source.area, source.distance,
+      source.dualWeight, source.exteriorPhi ?? .5,
+      ...source.terms.flatMap(term => [Number(term.target), term.local, term.coefficient])].join("/");
+    let pattern = this.patternByShape.get(shape);
+    if (pattern === undefined) {
+      pattern = this.patterns.length; this.patterns.push(source); this.patternByShape.set(shape, pattern);
+    }
+    return pattern;
+  }
+
+  private appendInstance(pattern: number, sourceRange: number, targetRange: number, maximumRows: number): boolean {
+    const key = (pattern * this.rangeKeyCapacity + sourceRange) * this.rangeKeyCapacity + targetRange + 1;
+    if (!Number.isSafeInteger(key)) throw new Error("CM12 archetype instance identity exceeds exact integer range");
+    if (this.instanceKeys.has(key)) return false;
+    if (this.instances.length / 3 >= maximumRows) return true;
+    this.instanceKeys.add(key);
+    this.instances.push(pattern); this.instances.push(sourceRange); this.instances.push(targetRange);
+    return true;
+  }
+
   /** Returns false for the exact same physical row encountered in a halo. */
   appendRow(source: SparseAtlasGradientRow, terms: readonly SparseAtlasGradientTerm[],
     maximumRows = Number.POSITIVE_INFINITY, remap?: (cell: number) => number): boolean {
@@ -199,24 +275,10 @@ export class SparseCM12TemplateArchetypes {
     });
     const origin = this.ranges[sourceRange]!.lower;
     const center = source.centerFine.map((q, axis) => q - origin[axis]!) as [number, number, number];
-    const shape = [source.kind, source.axis, ...center, source.area, source.distance,
-      source.dualWeight, source.exteriorPhi ?? .5,
-      ...normalized.flatMap(term => [Number(term.target), term.local, term.coefficient])].join("/");
-    let pattern = this.patternByShape.get(shape);
-    if (pattern === undefined) {
-      pattern = this.patterns.length;
-      this.patterns.push({ kind: source.kind, axis: source.axis, center,
+    const pattern = this.internPattern({ kind: source.kind, axis: source.axis, center,
         area: source.area, distance: source.distance, dualWeight: source.dualWeight,
         exteriorPhi: source.exteriorPhi, terms: normalized });
-      this.patternByShape.set(shape, pattern);
-    }
-    const key = (pattern * this.rangeKeyCapacity + sourceRange) * this.rangeKeyCapacity + targetRange + 1;
-    if (!Number.isSafeInteger(key)) throw new Error("CM12 archetype instance identity exceeds exact integer range");
-    if (this.instanceKeys.has(key)) return false;
-    if (this.instances.length / 3 >= maximumRows) return true;
-    this.instanceKeys.add(key);
-    this.instances.push(pattern); this.instances.push(sourceRange); this.instances.push(targetRange);
-    return true;
+    return this.appendInstance(pattern, sourceRange, targetRange, maximumRows);
   }
 
   private instance(row: number) { return 3 * (this.rowOrder?.[row] ?? row); }
