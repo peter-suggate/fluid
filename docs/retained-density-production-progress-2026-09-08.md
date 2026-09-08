@@ -264,6 +264,32 @@ before declaring the implementation milestone complete. Their latest results
 must be recorded separately from the passed quarter/half geometry tests. No
 acceptance threshold or performance ceiling is to be relaxed to obtain a pass.
 
+## Current editor contract replay
+
+The historical 450-frame replay was adapted to the public asynchronous
+`prepareLiveSolidEdit` contract and passed in 46.02 s on Metal
+(`/tmp/fluid-retained-live-replay-current-1.log`). It attempts the original
+whole recorded batches at frames 116, 176 and 432, without moving, splitting,
+or retrying them. All three now correctly reject moving-water overlap.
+Accepted-bank density, solid open fractions, clock, world identity and accepted
+generation remain unchanged on rejection; the simulation continues to frame
+450, t=15 s. Later attempts start from the last accepted scene, so rejected
+strokes cannot be silently reintroduced. This proves rejection and continued
+simulation, not accepted insertion into wet fluid. The editor task separately
+validates dry insertion with moving water elsewhere.
+
+The replay includes runtime leaves through `readDiagnosticFields(true)`.
+`readWorldGrowthReceiptQA().dynamicLiquidMassFineCells` is a diagnostic envelope
+formed from `max(densityA,densityB)`, not the accepted mass. Summing that envelope
+can report growth during ordinary conservative motion; it must not be used as
+a conservation oracle. The current replay reads the GPU-selected accepted bank.
+
+The latest unchanged canonical gate still reports five passes, six timeouts
+and six unrun lanes under its 180 s budget. It is not a passing regression
+receipt. The isolated current-field comparisons in
+[the matched-flow report](current-quadratic-matched-flow-2026-09-08.md) do not
+change that status or establish evolved shipping surface acceptance.
+
 ## Evolution and remaining validation
 
 An actual scalar update creates the next retained generation on persistent
