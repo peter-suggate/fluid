@@ -1,5 +1,6 @@
-/** Node-only canonical-lane preload. Counts direct compilation separately
- * from manifest-cache statistics, with bounded output and weak device keys. */
+/** Node-only diagnostic observer. Load with the explicit child launcher, not
+ * NODE_OPTIONS: inherited preloads affect npm, forks and loader workers.
+ * Instrumented timing is diagnostic, not a canonical performance receipt. */
 import "./probe-sparse-cm12-generation-host";
 import { appendFileSync } from "node:fs";
 import { GPUCompilationManager } from "../lib/core/gpu-compilation-manager";
@@ -25,30 +26,37 @@ function times(manager: object) {
 }
 const prototype = GPUCompilationManager.prototype as unknown as Record<string, any>;
 const createModule = prototype.createShaderModule;
-prototype.createShaderModule = function (descriptor: GPUShaderModuleDescriptor) {
+prototype.createShaderModule = function (...args: any[]) {
+  const descriptor = args[0] as GPUShaderModuleDescriptor;
   const summary = times(this), begin = performance.now();
-  try { return createModule.call(this, descriptor); }
+  try { return Reflect.apply(createModule, this, args); }
   finally { summary.modules++; summary.sourceCodeUnits += descriptor.code.length;
     summary.moduleCallMs += performance.now() - begin; }
 };
 const enqueue = prototype.enqueueDirect;
-prototype.enqueueDirect = function (kind: string, descriptor: object, options: object) {
-  queued.set(descriptor, performance.now()); return enqueue.call(this, kind, descriptor, options);
+prototype.enqueueDirect = function (...args: any[]) {
+  queued.set(args[1], performance.now()); return Reflect.apply(enqueue, this, args);
 };
 const run = prototype.run;
-prototype.run = async function (job: { kind: string; label: string; descriptor?: object }) {
-  if (job.kind === "manifest") return run.call(this, job);
+prototype.run = function (...args: any[]) {
+  const job = args[0] as { kind: string; label: string; descriptor?: object };
+  if (job.kind === "manifest") return Reflect.apply(run, this, args);
   const summary = times(this), begin = performance.now();
   const queueWaitMs = begin - (queued.get(job.descriptor!) ?? begin);
   const active = { label: job.label, started: begin, queueWaitMs }; summary.active.push(active);
-  try { return await run.call(this, job); }
-  finally {
+  const complete = () => {
     const executionMs = performance.now() - begin;
     summary.active.splice(summary.active.indexOf(active), 1);
     summary.pipelines++; summary.queueWaitMs += queueWaitMs; summary.executionMs += executionMs;
     summary.slowest.push({ label: job.label, queueWaitMs, executionMs });
     summary.slowest.sort((a, b) => b.executionMs - a.executionMs); summary.slowest.length = Math.min(12, summary.slowest.length);
-  }
+  };
+  let result: unknown;
+  try { result = Reflect.apply(run, this, args); }
+  catch (error) { complete(); throw error; }
+  if (result instanceof Promise) void result.then(complete, complete);
+  else complete();
+  return result;
 };
 const output = `/tmp/fluid-cm12-compilation-${process.pid}.jsonl`;
 function report(phase: string) {
