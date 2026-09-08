@@ -18,9 +18,10 @@ import { gpuCompilationManagerFor } from "../../lib/core/gpu-compilation-manager
  * publication, every potentially wet source support's full forward footprint
  * must be in the candidate worklist. The conservative range/footprint test can
  * require extra dry halo; a sampled zero integral never authorizes omission.
- * Advance publishes coefficients/coherence and spatial coverage;
+ * advance publishes coefficients/coherence and spatial coverage;
  * integrate is a SEPARATE diagnostic operation and may reject afterwards.
- * This is not a combined field-and-mass transaction or a production transport
+ * advanceConservative instead integrates candidate amounts before accepting
+ * either coefficients or amounts. Neither API is a production transport
  * implementation. Integral assertions apply to the independently enclosed
  * plane/sphere/quadric fixtures in the accompanying tests.
  */
@@ -298,11 +299,22 @@ fn conservativePhiRange(q:Q)->vec2f{
  let roundoff=8e-6*max(1.0,abs(value)+variation);
  return vec2f(value-variation-roundoff,value+variation+roundoff);
 }
-@compute @workgroup_size(64) fn integrate(@builtin(global_invocation_id)gid:vec3u){
- if(gid.x>=u(21u)){return;}let id=work[gid.x];if(!valid(id,false)){fail(1u,id);return;}
- let q=loadQ(id,false);let h=p[3];let range=conservativePhiRange(q);
- if(range.x>=0.5*p[24]){output[gid.x]=0.0;return;}
- if(range.y<=-0.5*p[24]){output[gid.x]=h*h*h;return;}
+fn publishAmount(rank:u32,id:u32,amount:f32,error:f32,slices:u32,next:bool){
+ if(next){
+  destination[16u*id+12u]=amount;destination[16u*id+13u]=error;
+  destination[16u*id+14u]=bitcast<f32>(slices);
+  destination[16u*id+15u]=bitcast<f32>(u(20u)+1u);
+ }else{output[rank]=amount;}
+}
+fn integrateField(gid:vec3u,next:bool){
+ if(gid.x>=u(21u)){return;}
+ // Every earlier pass has completed before this dispatch. A failed geometry
+ // transaction cannot make its partial candidate into an integration source.
+ if(next&&atomicLoad(&receipt[0])!=0u){return;}
+ let id=work[gid.x];if(!valid(id,next)){fail(1u,id);return;}
+ let q=loadQ(id,next);let h=p[3];let range=conservativePhiRange(q);
+ if(range.x>=0.5*p[24]){publishAmount(gid.x,id,0.0,0.0,0u,next);return;}
+ if(range.y<=-0.5*p[24]){publishAmount(gid.x,id,h*h*h,0.0,0u,next);return;}
  // Depth-first quadtree: depth<=4 needs at most 1+3*4=13 pending tiles.
  // Every parent compares against its four children; worst case87360 exact-x
  // slices per support. Terminal tiles share the same WHOLE-support2e-6
@@ -321,11 +333,14 @@ fn conservativePhiRange(q:Q)->vec2f{
    for(var corner=0u;corner<4u;corner++){pending[count]=children[corner];count++;}
   }
  }
- atomicMax(&receipt[2],bitcast<u32>(errorSum));atomicMax(&receipt[3],slices);
+ let errorWord=select(2u,6u,next);let slicesWord=select(3u,7u,next);
+ atomicMax(&receipt[errorWord],bitcast<u32>(errorSum));atomicMax(&receipt[slicesWord],slices);
  if(errorSum>p[25]){fail(64u,id);return;}
  if(!(sum>=-p[25]&&sum<=1.0+p[25])){fail(8u,id);return;}
- output[gid.x]=sum*h*h*h;
+ publishAmount(gid.x,id,sum*h*h*h,errorSum,slices,next);
 }
+@compute @workgroup_size(64) fn integrate(@builtin(global_invocation_id)gid:vec3u){integrateField(gid,false);}
+@compute @workgroup_size(64) fn integrateDestination(@builtin(global_invocation_id)gid:vec3u){integrateField(gid,true);}
 fn closestRoot(a:f32,b:f32,c:f32,lo:f32,hi:f32)->f32{
  var answer=3.4e38;if(abs(a)<1e-20){if(abs(b)>1e-20){let r=-c/b;if(r>=lo&&r<=hi){answer=r;}}}
  else{let disc=b*b-4.0*a*c;if(disc>=0.0){let root=sqrt(disc);
@@ -368,6 +383,9 @@ fn closestRoot(a:f32,b:f32,c:f32,lo:f32,hi:f32)->f32{
 export interface QuadraticSample { point: V3; direction?: V3; minimum?: number; maximum?: number }
 export interface PullbackReceipt { generation: number; supports: number; donorVisits: number;
   potentiallyWetSourceSupports: number; forwardCoverageVisits: number }
+export interface ConservativePullbackReceipt extends PullbackReceipt {
+  maximumEstimatedMeanError: number; maximumXSlicesPerSupport: number;
+}
 
 export class GPUQuadraticPullback {
   private bank = 0;
@@ -393,7 +411,7 @@ export class GPUQuadraticPullback {
       buffer: { type: [0, 2, 3, 5].includes(binding) ? "read-only-storage" as const : "storage" as const },
     })) });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const names = ["validateSource", "pullback", "validateDestination", "validateWetCoverage", "integrate", "sample"];
+    const names = ["validateSource", "pullback", "validateDestination", "validateWetCoverage", "integrate", "integrateDestination", "sample"];
     const pipelines = new Map<string, GPUComputePipeline>();
     try {
       for (const entryPoint of names) pipelines.set(entryPoint, await compiler.compileComputePipeline({
@@ -410,7 +428,7 @@ export class GPUQuadraticPullback {
   }
 
   private async run(names: readonly string[], targets: Uint32Array, map: AffineDeparture,
-    queries = new Float32Array(), resultWords = 1, maxDonors = 64): Promise<{ receipt: Uint32Array; values: Float32Array }> {
+    queries = new Float32Array(), resultWords = 1, maxDonors = 64): Promise<{ receipt: Uint32Array; values: Float32Array; generation: number }> {
     if (this.busy) throw new Error("Quadratic generation transaction already running");
     this.busy = true;
     const resources: GPUBuffer[] = [];
@@ -470,21 +488,45 @@ export class GPUQuadraticPullback {
       const mapped = readback.getMappedRange();
       const receipt = new Uint32Array(mapped, 0, 8).slice();
       const output = new Float32Array(mapped, 32, resultWords).slice(); readback.unmap();
-      if (receipt[0]) throw new Error(`Quadratic generation rejected: fault=${receipt[0]} id=${receipt[1]} generation=${this.epoch}`
-        + (names.includes("integrate") ? ` maxEstimatedMeanError=${new Float32Array(receipt.buffer)[2]} maxXSlices=${receipt[3]}` : ""));
-      return { receipt, values: output };
+      if (receipt[0]) {
+        const integrationWord = names.includes("integrateDestination") ? 6 : names.includes("integrate") ? 2 : -1;
+        throw new Error(`Quadratic generation rejected: fault=${receipt[0]} id=${receipt[1]} generation=${this.epoch}`
+          + (integrationWord >= 0 ? ` maxEstimatedMeanError=${new Float32Array(receipt.buffer)[integrationWord]} maxXSlices=${receipt[integrationWord + 1]}` : ""));
+      }
+      // Commit while busy is STILL held. Unlocking before the caller resumes
+      // allows a queued operation to encode against the old bank/epoch.
+      if (names.includes("pullback")) {
+        if (receipt[3] !== targets.length) throw new Error("Incomplete quadratic generation receipt");
+        this.bank ^= 1; this.epoch++;
+      }
+      return { receipt, values: output, generation: this.epoch };
     } finally { for (const resource of resources) resource.destroy(); this.busy = false; }
   }
 
   async advance(map: AffineDeparture, targets: Uint32Array, maxDonors = 64): Promise<PullbackReceipt> {
+    return this.advanceTransaction(map, targets, maxDonors, false);
+  }
+
+  /** Candidate coefficients AND same-field support amounts are accepted only
+   * after coverage, coherence and bounded integration all succeed. Words
+   * 12..15 contain amount, error estimate, bitcast slice count and amount epoch.
+   * The transport reads back only a fixed-size receipt, never the field.
+   * This does not certify quadrature error or implement pressure/momentum. */
+  async advanceConservative(map: AffineDeparture, targets: Uint32Array, maxDonors = 64): Promise<ConservativePullbackReceipt> {
+    return this.advanceTransaction(map, targets, maxDonors, true);
+  }
+
+  private async advanceTransaction(map: AffineDeparture, targets: Uint32Array,
+    maxDonors: number, conservative: boolean): Promise<ConservativePullbackReceipt> {
     if (targets.length === 0 || !Number.isInteger(maxDonors) || maxDonors < 1 || maxDonors > 256 || this.epoch >= 1_000_000) {
       throw new Error("Invalid or unsupported prescribed departure map");
     }
-    const { receipt } = await this.run(["validateSource", "pullback", "validateDestination", "validateWetCoverage"], targets, map, undefined, 1, maxDonors);
-    if (receipt[3] !== targets.length) throw new Error("Incomplete quadratic generation receipt");
-    this.bank ^= 1; this.epoch++;
-    return { generation: this.epoch, supports: targets.length, donorVisits: receipt[2]!,
-      potentiallyWetSourceSupports: receipt[4]!, forwardCoverageVisits: receipt[5]! };
+    const names = ["validateSource", "pullback", "validateDestination", "validateWetCoverage"];
+    if (conservative) names.push("integrateDestination");
+    const { receipt, generation } = await this.run(names, targets, map, undefined, 1, maxDonors);
+    return { generation, supports: targets.length, donorVisits: receipt[2]!,
+      potentiallyWetSourceSupports: receipt[4]!, forwardCoverageVisits: receipt[5]!,
+      maximumEstimatedMeanError: new Float32Array(receipt.buffer)[6]!, maximumXSlicesPerSupport: receipt[7]! };
   }
 
   async integrate(targets: Uint32Array): Promise<Float32Array> {

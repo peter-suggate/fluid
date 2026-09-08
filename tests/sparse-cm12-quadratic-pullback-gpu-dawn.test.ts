@@ -283,6 +283,69 @@ function checkCompleteField(records: Float32Array, generation: number,
           assert.equal(field.generation, 1);
         } finally { field.destroy(); }
       });
+
+      await t.test("candidate same-field amounts and coefficients publish in one accepted generation", async () => {
+        const field = await GPUQuadraticPullback.create(device!, grid, width,
+          compileQuadraticSupports(grid, sphereQuadratic([0, 0, 0], radius)));
+        try {
+          const targets = supportBoxWorklist(grid, [1, 0, 0], [32, 32, 32]);
+          const receipt = await field.advanceConservative({ matrix: IDENTITY_MATRIX, translation: [-h / 2, 0, 0] }, targets);
+          assert.equal(receipt.generation, 2);
+          assert.ok(receipt.maximumEstimatedMeanError <= 2e-6);
+          assert.ok(receipt.maximumXSlicesPerSupport > 0 && receipt.maximumXSlicesPerSupport <= 87360);
+          const records = await field.readCurrentRecordsForQA(), words = new Uint32Array(records.buffer);
+          const independentQuery = await field.integrate(targets);
+          let amount = 0;
+          for (let rank = 0; rank < targets.length; rank++) {
+            const id = targets[rank]!;
+            assert.equal(words[16 * id + 10], field.generation, "current potential generation");
+            assert.equal(words[16 * id + 15], field.generation, "same-field amount generation");
+            near(records[16 * id + 12]!, independentQuery[rank]!, h ** 3 * 2e-6,
+              "accepted amount matches a separate GPU integration of the accepted field");
+            amount += records[16 * id + 12]!;
+          }
+          near(amount, sphereRampMass(radius, width), sphereRampMass(radius, width) * 2e-5,
+            "accepted complete amount versus independent radial oracle");
+          const before = new Uint32Array(records.buffer).slice();
+          await assert.rejects(field.advanceConservative({ matrix: IDENTITY_MATRIX, translation: [0, 0, 0] },
+            targets.filter(id => id !== at(16, 16, 16))), /fault=32 /);
+          assert.equal(field.generation, 2);
+          assert.deepEqual(new Uint32Array((await field.readCurrentRecordsForQA()).buffer), before,
+            "a coverage failure preserves both accepted field and accepted amounts word for word");
+          const retried = await field.advanceConservative({ matrix: IDENTITY_MATRIX, translation: [0, 0, 0] }, targets);
+          assert.equal(retried.generation, 3);
+          const after = await field.readCurrentRecordsForQA(), tags = new Uint32Array(after.buffer);
+          for (const id of targets) assert.equal(tags[16 * id + 15], 3, "retry cannot inherit a previous candidate amount epoch");
+          await field.advance({ matrix: IDENTITY_MATRIX, translation: [0, 0, 0] }, targets);
+          const geometryOnly = await field.readCurrentRecordsForQA(), invalidAmounts = new Uint32Array(geometryOnly.buffer);
+          for (const id of targets) {
+            assert.equal(invalidAmounts[16 * id + 10], 4);
+            assert.equal(invalidAmounts[16 * id + 15], 0, "geometry-only generations never advertise stale accepted amounts");
+          }
+          await field.advanceConservative({ matrix: IDENTITY_MATRIX, translation: [0, 0, 0] }, targets);
+          const renewed = new Uint32Array((await field.readCurrentRecordsForQA()).buffer);
+          for (const id of targets) assert.equal(renewed[16 * id + 15], 5);
+          console.log(JSON.stringify({ fixture: "atomic-current-field-and-amounts", amount, ...receipt }));
+        } finally { field.destroy(); }
+      });
+
+      await t.test("candidate integration failure leaves current field and amount words untouched", async () => {
+        // Dyadic grid, center and radius make the initial coefficient coherence
+        // algebra exact in f32. The deliberately tiny integral budget targets
+        // the integration gate, not the earlier donor-coherence check.
+        const exactGrid: QuadraticSupportGrid = { origin: [0, 0, 0], dimensions: [8, 8, 8], h: .125 };
+        const field = await GPUQuadraticPullback.create(device!, exactGrid, .05,
+          compileQuadraticSupports(exactGrid, sphereQuadratic([.5, .5, .5], .25)), 1e-10);
+        try {
+          const before = new Uint32Array((await field.readCurrentRecordsForQA()).buffer);
+          const targets = supportBoxWorklist(exactGrid, [0, 0, 0], [8, 8, 8]);
+          for (let attempt = 0; attempt < 2; attempt++) {
+            await assert.rejects(field.advanceConservative({ matrix: IDENTITY_MATRIX, translation: [0, 0, 0] }, targets), /fault=64 /);
+            assert.equal(field.generation, 1);
+            assert.deepEqual(new Uint32Array((await field.readCurrentRecordsForQA()).buffer), before);
+          }
+        } finally { field.destroy(); }
+      });
       await device.queue.onSubmittedWorkDone(); assert.deepEqual(errors, []);
     } finally { device?.destroy(); if (gpu) liveDawn.delete(gpu); await releaseWebGPUExclusiveLock(); }
   });

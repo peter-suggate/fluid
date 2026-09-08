@@ -82,9 +82,38 @@ Validation on Metal:
   `/tmp/fluid-quadratic-imposed-flow-analysis-1.log`.
 
 These are isolated-process wall times, not production frame benchmarks. The
-captured prototype still publishes coefficients before a separate integration
-query. Combining field and native amounts into one accepted transaction,
-compiling motion from immutable velocity, and non-affine/branch/solid handling
+capture above uses coefficient publication followed by a separate integration
+query. The later atomic gate below closes that transaction gap. Compiling motion
+from actual immutable resident velocity and non-affine/branch/solid handling
 remain required before production adoption. The
 [departure-map decision](current-density-departure-map-decision-2026-09-08.md)
 describes the next gates and the unresolved bounded-history problem.
+
+## Subsequent atomic field-and-amount gate
+
+`advanceConservative` now writes candidate support amounts into the same GPU
+record bank as the candidate potential. Coherence and complete wet coverage
+validate first; candidate integration follows. Only a successful receipt
+publishes the bank and generation. Words 12–15 hold the amount, quadrature
+estimate, work count, and amount generation. Consumers must require the amount
+generation to match the coefficient generation: initialization and the older
+geometry-only `advance` API do not advertise accepted amounts.
+
+An independent review also reproduced a host race: the old operation released
+its lock before the caller flipped the bank. A second microtask could encode
+against the same old source while both operations advanced the host epoch.
+Completeness validation and bank publication now occur inside the locked
+operation, which returns its captured generation. Three CPU interleaving tests
+verify sequencing, pending-operation exclusion, and failed-receipt recovery.
+
+Metal passes all 17 quadric cases in 2.87 s, including same-generation field
+and amount publication, complete radial mass, coverage-failure rollback,
+retry, explicit amount invalidation by geometry-only updates, and a deliberately
+unachievable integration budget. The integration-failure case preserves an
+initial field with empty amount slots; the coverage-failure case preserves
+nonzero accepted amounts. Log: `/tmp/fluid-quadratic-pullback-gpu-9.log`.
+
+No field-sized CPU readback is part of this transport operation. Its fixed-size
+receipt is still read on the host in this research API. Quadrature estimates,
+the f32 map determinant envelope, and same-field integration remain numerical
+contracts, not certified exact conservation or a production physics coupling.
