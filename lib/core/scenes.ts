@@ -2632,6 +2632,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation", shelf: "Dam-break ladder", environment: "stage",
     methodProfile: { methodId: "adaptive-mass", quality: "balanced", overrides: {
       selectorMode: "coarse-first", timeStep: "paper", brickFineResolution: "8",
+      densityTransport: "current-map",
     } },
     build: createCoarseFirstPoolImpactQuarterScene,
     camera: { distance_m: 2.75, target_m: { x: 0, y: 0.45, z: 0 } },

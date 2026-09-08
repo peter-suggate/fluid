@@ -21,6 +21,9 @@ import type { AffineDeparture, M3, V3 } from "./sparse-quadratic-pullback";
  */
 export const UNIFORM_VEX_MAP_MAGIC = 0x5556_4d31; // UVM1
 export const UNIFORM_VEX_MAP_WORDS = 40;
+/** Appended after physical-center words; published only with an accepted map. */
+export const UNIFORM_VEX_COVERAGE_CERTIFICATE_WORDS = 8;
+export const UNIFORM_VEX_COVERAGE_MAGIC = 0x55564331;
 export const UNIFORM_VEX_MAP_FAULT = Object.freeze({ header: 1, stale: 2, geometry: 4,
   velocity: 8, ownership: 16, nonuniform: 32, empty: 64, parameters: 128 } as const);
 
@@ -192,6 +195,11 @@ fn headerFault(field:u32){fault(1u,0u);atomicStore(&result[37],field);}
   atomicStore(&result[19u+4u*row],bitcast<u32>(translation[row]));
   atomicStore(&result[28u+row],bitcast<u32>(physicalVelocity[row]));
  }
+ let footer=atomicLoad(&result[12]);
+ atomicStore(&owners[footer],0x55564331u);
+ for(var i=0u;i<4u;i++){atomicStore(&owners[footer+1u+i],atomicLoad(&result[4u+i]));}
+ atomicStore(&owners[footer+5u],atomicLoad(&result[8]));
+ atomicStore(&owners[footer+6u],footer);atomicStore(&owners[footer+7u],atomicLoad(&result[32]));
  atomicStore(&result[33],steps);atomicStore(&result[2],1u);
 }
 `;
@@ -254,7 +262,7 @@ export class GPUUniformVexMapCompiler {
     const snapshot = this.device.createBuffer({ label: "Immutable pre-gather native VEX snapshot", size: 4 * l.words, usage: storage });
     const parameters = this.device.createBuffer({ label: "Uniform VEX snapshot addressing", size: 80, usage: storage });
     const result = this.device.createBuffer({ label: "GPU uniform VEX map and provenance", size: 4 * UNIFORM_VEX_MAP_WORDS, usage: storage });
-    const owners = this.device.createBuffer({ label: "Uniform VEX certified native-center coverage", size: 4 * count, usage: storage });
+    const owners = this.device.createBuffer({ label: "Uniform VEX certified native-center coverage", size: 4 * (count + UNIFORM_VEX_COVERAGE_CERTIFICATE_WORDS), usage: storage });
     const members = this.device.createBuffer({ label: "Uniform VEX unique accepted membership", size: 4 * (source.cellCapacity + count), usage: storage });
     const words = new Uint32Array(20);
     words.set([l.parameters, l.scmt, l.topology, l.frame, l.vex, l.depth, l.velocity, l.cells, l.open, l.voxelOpen,
@@ -288,7 +296,12 @@ export class UniformVexMapAttempt {
   }
   async readReceiptForQA(): Promise<UniformVexMapReceipt> { return decodeUniformVexMapReceipt(await this.read(this.mapAndReceipt)); }
   async readRawReceiptForQA(): Promise<Uint32Array> { return this.read(this.mapAndReceipt); }
-  async readCoverageForQA(): Promise<Uint32Array> { return this.read(this.nativeCenterCoverage); }
+  async readCoverageForQA(): Promise<Uint32Array> {
+    return (await this.read(this.nativeCenterCoverage)).slice(0, -UNIFORM_VEX_COVERAGE_CERTIFICATE_WORDS);
+  }
+  async readCoverageCertificateForQA(): Promise<Uint32Array> {
+    return (await this.read(this.nativeCenterCoverage)).slice(-UNIFORM_VEX_COVERAGE_CERTIFICATE_WORDS);
+  }
   /** Bounded provenance/failure diagnosis: 212 copied words, never field planes. */
   async readCopiedHeadersForQA(): Promise<Record<string, number[]>> {
     const l = this.snapshotLayout;

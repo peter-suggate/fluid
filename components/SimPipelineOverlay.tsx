@@ -198,7 +198,7 @@ export function SimPipelineOverlay({ lenses: override }: {
     });
     return () => { cancelled = true; };
   }, [methodId]);
-  const graph = loadedGraph?.methodId === methodId ? loadedGraph.graph : undefined;
+  const sourceGraph = loadedGraph?.methodId === methodId ? loadedGraph.graph : undefined;
 
   const [liveTiming, setLiveTiming] = useState(true);
 
@@ -237,6 +237,11 @@ export function SimPipelineOverlay({ lenses: override }: {
     hasInflow: Boolean(scene.fluid.inflow),
     running,
   }), [values, info, scene, bodyCount, running]);
+
+  const graph = useMemo(() => sourceGraph ? { ...sourceGraph,
+    bands: sourceGraph.bands.map(band => ({ ...band, label: band.labelForContext?.(context) ?? band.label })),
+    stages: sourceGraph.stages.map(stage => ({ ...stage, ...stage.presentation?.(context) })),
+  } : undefined, [sourceGraph, context]);
 
   // Declarative stage controls, materialized here so the graph module stays
   // free of React. `param-*` route through the method store exactly as the
@@ -315,7 +320,7 @@ export function SimPipelineOverlay({ lenses: override }: {
           const toggleable = Boolean(stage.toggle);
           const statusLabel = toggleable
             ? state === "on" ? "encoding" : state === "off" ? "configured off" : "not applicable to this scene"
-            : "always encoded";
+            : state === "on" ? "always encoded" : "bypassed";
           // The node carries its own lens; the roster lookup is only for a
           // caller that overrides the method's lenses.
           const lens = override ? lensByStage.get(stage.id) : stage.lens;
@@ -342,7 +347,7 @@ export function SimPipelineOverlay({ lenses: override }: {
               ariaLabel: `${stage.label}: ${statusLabel}`,
               title: toggleable
                 ? stage.toggle?.hint ? `${stage.toggle.hint}\n\n${tip}` : tip
-                : `Always encoded · fixed pipeline stage\n\n${tip}`,
+                : `${state === "on" ? "Always encoded" : "Bypassed"} · fixed pipeline stage\n\n${tip}`,
               onToggle: toggleable ? () => toggleStage(stage.id, state !== "on") : undefined,
             },
             tap: lens ? {

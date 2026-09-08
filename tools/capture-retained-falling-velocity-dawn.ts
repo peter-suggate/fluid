@@ -12,11 +12,16 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
 import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
+import { captureCurrentMapSnapshot } from "./current-map-snapshot-dawn";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 import { analyzeNativeVelocity, nativeLocalGradient, type NativeVelocitySample, type Point3, selectSnapshotVelocity } from "./retained-falling-velocity-analysis";
 
 const option = (name: string, fallback: string) => process.argv.find(arg => arg.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 const arm = option("arm", "fine"); assert.ok(arm === "fine" || arm === "coarse");
+const stepCount = Number(option("steps", "6"));
+assert.ok(Number.isSafeInteger(stepCount) && stepCount > 0 && stepCount <= 30);
+const densityTransport = option("transport", "native-cm12");
+assert.ok(densityTransport === "native-cm12" || densityTransport === "current-map");
 const regionQuery = "0_0_0_25_66.6667_100_8_8";
 let scene = withRefinementRegionsFromQuery(sceneDocument(getSceneDefinition("coarse-first-pool-impact-quarter")), regionQuery);
 const h = scene.voxelDomain.finestCellSize_m, dt = scene.numerics.fixedDt_s;
@@ -31,10 +36,10 @@ assert.ok(sphere.shape === "sphere");
 const seedCenter: Point3 = [sphere.center_m.x, sphere.center_m.y, sphere.center_m.z];
 const gravity: Point3 = [scene.fluid.gravity_m_s2.x, scene.fluid.gravity_m_s2.y, scene.fluid.gravity_m_s2.z];
 const poolHeight = height * scene.container.fillFraction;
-const values = resolveMethodValues(adaptiveMassMethod, "balanced", { selectorMode: "coarse-first", timeStep: "paper" });
+const values = resolveMethodValues(adaptiveMassMethod, "balanced", { selectorMode: "coarse-first", timeStep: "paper", densityTransport });
 const config = { scene, values, arm, h, dt, dimensions, origin_m: origin, seedCenter_m: seedCenter,
   radius_m: sphere.radius_m, poolHeight_m: poolHeight, gravity_m_s2: gravity, originalRegionQuery: regionQuery,
-  steps: [1, 2, 3, 4, 5, 6], scope: "Unmodified production velocity/density under authored gravity. Readbacks after VEX and after velocity projection; no prescribed velocity, force, pressure, gamma, scalar, or retained coefficient writes.",
+  steps: Array.from({ length: stepCount }, (_, i) => i + 1), scope: "Unmodified production velocity/density under authored gravity. Readbacks after VEX and after velocity projection; no prescribed velocity, force, pressure, gamma, scalar, or retained coefficient writes.",
   expectedSplit: "VEX in step n uses velocity from n-1 completed gravity/projection updates. Exact kick-at-end translation has u=g*(n-1)*dt and position c0+g*dt^2*(n-1)*(n-2)/2 before its gather. This is a QA reference only.",
   velocityValidity: "VEX uses accepted depth 0..8 and effective w>0. Projection uses the destination collocated velocity bank, restricted to destination density>0.5; it does not measure an extended projected halo. Both captures precede frame commit, so projection reads source parity XOR 1.",
   selections: "sphere-wet: positive native mean with centre above midpoint between pool top and expected sphere bottom; sphere-halo: centre within diffuse outer radius + sqrt(3)*h, above pool top+h/2; pool: centre below pool top+h/2. Velocity statistics exclude samples outside the stage validity mask; group mass includes every geometrically selected native cell. Native-cell volumes weight fits. Local derivatives are physical face-neighbour least squares, separately from stored pressure divergence." };
@@ -208,7 +213,7 @@ else {
     solver = await adaptiveMassMethod.createSolverAsync!(device, scene, "balanced", values, undefined,
       progress => console.log(JSON.stringify({ phase: "initialization", elapsed_ms: performance.now() - start, progress }))) as WebGPUAdaptiveMassSolver;
     await solver.waitForSimulationReady(); assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], dimensions);
-    for (let step = 1; step <= 6; step++) {
+    for (let step = 1; step <= stepCount; step++) {
       for (;;) {
         assert.ok(performance.now() - start < 240000, "capture exceeded 240s");
         // advanceTo(false) can initiate required frontier preparation without
@@ -217,8 +222,9 @@ else {
         await solver.waitForTopologyReady();
         assert.equal(solver.info.encodedSteps ?? 0, step - 1, "one accepted step per capture");
         assert.equal(snapshots.length, 0, "no partially encoded capture on retry");
-        const source = solver.fieldSnapshotSourceForQA, { cells, topologyGeneration } = await cellsFor(source);
-        const current = solver.fieldSnapshotSourceForQA;
+        const source: Source = solver.fieldSnapshotSourceForQA;
+        const { cells, topologyGeneration } = await cellsFor(source);
+        const current: Source = solver.fieldSnapshotSourceForQA;
         assert.equal(current.state, source.state, "state stable during native ownership readback");
         assert.equal(current.topologyArena, source.topologyArena, "topology stable during native ownership readback");
         assert.equal(current.templateWords, source.templateWords, "template stable during native ownership readback");
@@ -244,6 +250,7 @@ else {
     }
     await json("completed.json", { completed: true, snapshots: trace.length, elapsed_ms: performance.now() - start });
   } catch (error) {
+    if (device && solver) await captureCurrentMapSnapshot(device, solver.fieldSnapshotSourceForQA, output, "current-map-failure");
     await json("failure.json", { elapsed_ms: performance.now() - start, errors, message: error instanceof Error ? error.message : String(error) });
     throw error;
   } finally {

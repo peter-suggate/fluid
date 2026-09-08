@@ -3,7 +3,9 @@
  * rebuilding, projecting, smoothing, or substituting an analytic surface.
  */
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sceneDocument } from "../lib/core/scene-definition";
@@ -15,6 +17,8 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
 import type { WebGPUAdaptiveMassSolver } from "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
+import { CM12_FAILURE_BYTES } from "../lib/methods/adaptive-mass/sparse-cm12-simulation-failure";
+import { captureCurrentMapSnapshot } from "./current-map-snapshot-dawn";
 import { readPublishedCM12Mesh } from "./sparse-cm12-published-mesh";
 
 const sceneIds = {
@@ -27,11 +31,15 @@ const option = (name: string, fallback: string) => process.argv.find(arg => arg.
 const sceneKey = option("scene", "quarter") as keyof typeof sceneIds;
 assert.ok(sceneKey in sceneIds, `Unknown scene ${sceneKey}`);
 const arm = option("arm", "coarse"); assert.ok(arm === "coarse" || arm === "fine");
+const densityTransport = option("transport", "native-cm12");
+assert.ok(densityTransport === "native-cm12" || densityTransport === "current-map");
 const steps = option("steps", "0,6,15,30").split(",").map(Number);
 assert.ok(steps[0] === 0 && steps.every((step, i) => Number.isSafeInteger(step) && step >= 0 && (!i || step > steps[i - 1]!)));
 const definition = getSceneDefinition(sceneIds[sceneKey]);
 let scene = sceneDocument(definition);
-const regionQuery = sceneKey === "quarter" || sceneKey === "half"
+const regionMode = option("regions", "authored");
+assert.ok(regionMode === "authored" || regionMode === "handoff");
+const regionQuery = regionMode === "handoff" && (sceneKey === "quarter" || sceneKey === "half")
   ? "0_0_0_25_66.6667_100_8_8" : undefined;
 if (regionQuery) scene = withRefinementRegionsFromQuery(scene, regionQuery);
 const h = scene.voxelDomain.finestCellSize_m;
@@ -45,9 +53,9 @@ if (arm === "fine") scene.fluid.refinementRegions = [{
 }];
 const dt = 1 / 30;
 assert.equal(scene.numerics.fixedDt_s, dt, "capture keeps the catalog's authored paper step");
-const values = resolveMethodValues(adaptiveMassMethod, "balanced", { selectorMode: "coarse-first", timeStep: "paper" });
+const values = resolveMethodValues(adaptiveMassMethod, "balanced", { selectorMode: "coarse-first", timeStep: "paper", densityTransport });
 const config = { sceneKey, sceneId: sceneIds[sceneKey], arm, scene, values, h, dimensions, origin,
-  steps, times_s: steps.map(step => step * dt), dt, originalRegionQuery: regionQuery,
+  steps, times_s: steps.map(step => step * dt), dt, regionMode, originalRegionQuery: regionQuery,
   fieldDomain: "Diagnostic arrays are clipped to the authored domain; signed world leaves are additionally checked in activity receipts.",
   camera: { projection: "orthographic QA mesh view", elevation_deg: 24, azimuth_deg: -55,
     bounds_m: [origin, [width / 2, Math.max(height, ...scene.rigidBodies.map(body => body.position_m.y + body.dimensions_m.y)), depth / 2]] },
@@ -61,6 +69,18 @@ if (process.argv.includes("--list")) {
   const output = option("out", join("artifacts/retained-visual-ab", sceneKey, arm));
   await mkdir(output, { recursive: true });
   await writeFile(join(output, "configuration.json"), JSON.stringify(config, null, 2));
+  const sources = ["lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.ts",
+    "lib/methods/adaptive-mass/webgpu-sparse-cm12-resident.wgsl.ts",
+    "lib/methods/adaptive-mass/sparse-cm12-current-map.wgsl.ts",
+    "lib/methods/adaptive-mass/sparse-cm12-current-map-measure.wgsl.ts",
+    "lib/methods/adaptive-mass/sparse-cm12-current-map-velocity.wgsl.ts",
+    "tools/capture-retained-visual-ab-dawn.ts"];
+  await writeFile(join(output, "provenance.json"), JSON.stringify({
+    gitHead: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    capturedAt: new Date().toISOString(),
+    sha256: Object.fromEntries(await Promise.all(sources.map(async path =>
+      [path, createHash("sha256").update(await readFile(path)).digest("hex")]))),
+  }, null, 2));
   await acquireWebGPUExclusiveLock("dawn-probe", `retained-visual-${sceneKey}-${arm}`);
   const startedAt = performance.now(), budgetMs = Number(option("budget-ms", "240000"));
   let gpu: GPU | undefined, device: GPUDevice | undefined, solver: WebGPUAdaptiveMassSolver | undefined;
@@ -78,8 +98,19 @@ if (process.argv.includes("--list")) {
       progress => console.log(JSON.stringify({ phase: "initialization", elapsed_ms: performance.now() - startedAt, progress }))) as WebGPUAdaptiveMassSolver;
     await solver.waitForSimulationReady();
     assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], dimensions);
+    const stageReceipts: {stage:string, buffer:GPUBuffer}[] = [];
+    if (densityTransport === "current-map") solver.setStageCaptureForQA((stage, encoder) => {
+      const source = solver!.fieldSnapshotSourceForQA;
+      const buffer = device!.createBuffer({ size: 20 + CM12_FAILURE_BYTES + 128, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      encoder.copyBufferToBuffer(source.state, 4 * source.retainedControlBaseWords!, buffer, 0, 16);
+      encoder.copyBufferToBuffer(source.state, 4 * source.currentMap!.chainCountBaseWords, buffer, 16, 4);
+      encoder.copyBufferToBuffer(source.topologyArena, source.topologyArena.size - CM12_FAILURE_BYTES, buffer, 20, CM12_FAILURE_BYTES);
+      encoder.copyBufferToBuffer(source.topologyArena, source.topologyArena.size - CM12_FAILURE_BYTES - 128, buffer, 20 + CM12_FAILURE_BYTES, 128);
+      stageReceipts.push({stage, buffer});
+    });
     const capture = async () => {
       const directory = join(output, `step-${step}`); await mkdir(directory, { recursive: true });
+      await captureCurrentMapSnapshot(device!, solver!.fieldSnapshotSourceForQA, directory);
       const fields = await solver!.readDiagnosticFields(true);
       const activity = await solver!.readGPUActivityPolicy();
       const poses = await solver!.readRigidBodyPoses();
@@ -110,7 +141,7 @@ if (process.argv.includes("--list")) {
           if (rho >= .5) { wetMin[axis] = Math.min(wetMin[axis]!, p - h / 2); wetMax[axis] = Math.max(wetMax[axis]!, p + h / 2); }
         }
       }
-      for (const name of ["density", "solidOpenFraction", "velocity"] as const) await writeFile(join(directory, `${name}.bin`),
+      for (const name of ["density", "solidOpenFraction", "velocity", "pressure", "divergence"] as const) await writeFile(join(directory, `${name}.bin`),
         new Uint8Array(fields[name].buffer, fields[name].byteOffset, fields[name].byteLength));
       await writeFile(join(directory, "activity.json"), JSON.stringify(activity));
       const receipt: Record<string, unknown> = { step, time_s: step * dt, elapsed_ms: performance.now() - startedAt,
@@ -147,6 +178,19 @@ if (process.argv.includes("--list")) {
       }
       await solver.waitForTopologyReady();
       assert.equal(solver.info.encodedSteps, step, "deferred preparation must not drop a step");
+      if (stageReceipts.length) {
+        const receipts = [];
+        for (const {stage, buffer} of stageReceipts.splice(0)) {
+          await buffer.mapAsync(GPUMapMode.READ);
+          const f = new Float32Array(buffer.getMappedRange()).slice(), u = new Uint32Array(f.buffer);
+          receipts.push({stage, retainedControl:[...f.subarray(0,4)], chainCount:f[4], failure:[...u.subarray(5, 5 + CM12_FAILURE_BYTES / 4)], completions:[...u.subarray(5 + CM12_FAILURE_BYTES / 4)]});
+          buffer.unmap(); buffer.destroy();
+        }
+        await json(`publication-step-${step}.json`, receipts);
+        const last = receipts.at(-1)!;
+        await solver.assertSimulationHealthy();
+        assert.equal(last.chainCount, step, `Current field must publish exactly once per encoded step ${step}`);
+      }
       if (steps.includes(step)) await capture();
       await solver.assertSimulationHealthy();
       if (performance.now() - startedAt > budgetMs) throw new Error(`Arm exceeded ${budgetMs}ms at step ${step}`);
@@ -154,6 +198,7 @@ if (process.argv.includes("--list")) {
     await device.queue.onSubmittedWorkDone(); assert.deepEqual(errors, []);
     await json("completed.json", { completed: true, snapshots: trace.length, elapsed_ms: performance.now() - startedAt });
   } catch (error) {
+    if (device && solver) await captureCurrentMapSnapshot(device, solver.fieldSnapshotSourceForQA, output, "current-map-failure");
     await json("failure.json", { completed: false, step, elapsed_ms: performance.now() - startedAt,
       message: error instanceof Error ? error.message : String(error), errors, completedSnapshots: trace.length });
     throw error;

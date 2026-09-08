@@ -1,3 +1,5 @@
+import { createSparseCM12CurrentMapLayout } from "./sparse-cm12-current-map.wgsl";
+import { SPARSE_CM12_CURRENT_MAP_VELOCITY_EXTENSION_SWEEPS } from "./sparse-cm12-current-map-velocity.wgsl";
 import { prepareSolidEditUpload } from "./sparse-cm12-solid-edit-upload";
 import { liveFluidEditMode, type LiveFluidEdit } from "../../core/live-fluid-edit";
 import { SPARSE_CM12_PRESSURE_JOURNAL_SNAPSHOTS, type SparseCM12PressureJournalCapacityRequest } from "./features/pressure-inspection/definition";
@@ -3699,6 +3701,8 @@ export class WebGPUSparseCM12Resident {
     return { state: this.state, conditioning: this.conditioning, topologyArena: this.topologyArena,
       effectiveTransportVelocity: this.effectiveTransportVelocity,
       activity: this.activity, velocityExtensionLayout: this.velocityExtensionLayout,
+      currentMap: this.retainedDensityLayout?.currentMap, currentMapMeasure: this.retainedDensityLayout?.currentMapMeasure,
+      retainedControlBaseWords: this.retainedDensityLayout?.controlBaseWords,
       acceptedIndirectArguments: this.acceptedIndirectArguments,
       topologyWorklistBaseWords: this.topologyWorklistBaseBytes / 4,
       acceptedLeafManifestBaseWords: this.acceptedLeafManifestBaseBytes / 4,
@@ -4302,7 +4306,19 @@ export class WebGPUSparseCM12Resident {
     const retainedSupportCount = retainedFineCount + 512 * retainedGrowthLeaves;
     const retainedRigidBase = layout.floatCount + (retainedRecords?.length ?? 0)
       + physicsCellCapacity + 4 + 2 * retainedFineCount + 4 * retainedSupportCount + 8 * retainedGrowthLeaves;
+    const currentMapLayout = retainedDensity?.transport === "current-map"
+      ? createSparseCM12CurrentMapLayout(retainedRigidBase + (rigid ? 16 * retainedFineCount + retainedSupportCount : 0), retainedDimensions!) : undefined;
+    if (currentMapLayout && (rigid || retainedOpenMeans!.openFractions.some(value => value !== 1)))
+      throw new Error("Current-field transport requires an unclipped fluid domain without rigid bodies");
+    if (currentMapLayout && 6 * retainedFineCount > 3 * currentMapLayout.nodeCount)
+      throw new Error("Current-field fine range cache exceeds reusable map scratch");
+    const currentMapMeasure = currentMapLayout ? { baseWords: currentMapLayout.endWords,
+      dimensions: retainedDimensions!, rangeCacheBaseWords: currentMapLayout.scratchBaseWords } : undefined;
+    const currentMapEndWords = currentMapMeasure ? currentMapMeasure.baseWords + 8 * retainedFineCount : undefined;
+    if (currentMapEndWords !== undefined && 4 * currentMapEndWords > Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize))
+      throw new Error("Current-field transport exceeds the device storage budget");
     const retainedDensityLayout = retainedRecords ? {
+      currentMap: currentMapLayout, currentMapMeasure,
       fieldBaseWords: layout.floatCount,
       integralBaseWords: layout.floatCount + retainedRecords.length,
       controlBaseWords: layout.floatCount + retainedRecords.length + physicsCellCapacity,
@@ -4327,8 +4343,8 @@ export class WebGPUSparseCM12Resident {
       },
     } : undefined;
     const state = device.createBuffer({ label: "Sparse CM12 resident state",
-      size: Math.max(4, 4 * (retainedDensityLayout ? retainedRigidBase
-        + (rigid ? 16 * retainedFineCount + retainedSupportCount : 0) : layout.floatCount)), usage: storage });
+      size: Math.max(4, 4 * (currentMapEndWords ?? (retainedDensityLayout ? retainedRigidBase
+        + (rigid ? 16 * retainedFineCount + retainedSupportCount : 0) : layout.floatCount))), usage: storage });
     const seed = (floatOffset: number, values: Float32Array) => {
       if (values.byteLength === 0) return;
       device.queue.writeBuffer(state, 4 * floatOffset, values.buffer as ArrayBuffer,
@@ -4355,6 +4371,14 @@ export class WebGPUSparseCM12Resident {
         seed(retainedDensityLayout.support.rigid.seedSubcellAmountBaseWords, subcells.seedAmounts);
         seed(retainedDensityLayout.support.rigid.staticOpenSubcellVolumeBaseWords, subcells.openVolumes);
       }
+    }
+    if (currentMapMeasure) {
+      const values = new Float32Array(4 * retainedFineCount);
+      for (let i = 0; i < retainedFineCount; i++) {
+        const rho = retainedFineMeans![i]!; values[4 * i] = rho;
+        for (let axis = 0; axis < 3; axis++) values[4 * i + axis + 1] = rho * (initialVelocity_m_s?.[axis] ?? 0) / finestCellSize_m;
+      }
+      seed(currentMapMeasure.baseWords, values); seed(currentMapMeasure.baseWords + 4 * retainedFineCount, values);
     }
     seed(layout.gammaA, templates.initialGamma);
     seed(layout.gammaB, templates.initialGamma);
@@ -5079,7 +5103,7 @@ export class WebGPUSparseCM12Resident {
     const immutableHostIncidenceWords = templates.words.subarray(
       templates.words[10]!, templates.words[10]! + 2 * hostIncidenceCount);
     const topologyArenaWords = immutableHostIncidenceBaseWords
-      + immutableHostIncidenceWords.length + CM12_FAILURE_WORDS;
+      + immutableHostIncidenceWords.length + CM12_FAILURE_WORDS + (currentMapLayout ? 32 : 0);
     const topologyArena = device.createBuffer({
       label: "Sparse CM12 physical topology templates and worklists",
       size: Math.max(4, 4 * topologyArenaWords),
@@ -5569,7 +5593,9 @@ export class WebGPUSparseCM12Resident {
       label: "Sparse CM12 solid overlap receipt layout",
       bindGroupLayouts: [solidEditReadLayout, solidEditProposalLayout],
     });
-    const names = ["injectLiquid", "injectLiquidFaces", "inspectSparseCM12SolidEditWetOverlap", "applySparseCM12SolidEditScatter",
+    const names = [
+      ...(currentMapLayout ? ["compileCurrentMapVelocity", "extendCurrentMapVelocityToScratch", "extendCurrentMapVelocityFromScratch", "compileCurrentMapTraceSchedule", "sealCurrentMapTraceSchedule", "advanceCurrentMapNodes", "filterCurrentMapX", "filterCurrentMapY", "filterCurrentMapZ", "certifyCurrentMap", "compileCurrentMapPhysicalBoundary", "boundCurrentMapPhysicalBoundary", "validateCurrentMapMaterialCoverage", "compileCurrentMapFineMeasureRanges", "integrateCurrentMapFineMeasureCooperative", "validateCurrentMapCoverage", "validateCurrentMapBeforeNative", "validateCurrentMapPublication", "publishCurrentMapIncrement"] : []),
+      "injectLiquid", "injectLiquidFaces", "inspectSparseCM12SolidEditWetOverlap", "applySparseCM12SolidEditScatter",
       ...(retainedDensityLayout?.support ? ["advanceRetainedDensitySupport", "compileRetainedDensityNativeIntegrals", "commitRetainedDensityGeneration",
         "refreshRetainedDensityNativeIntegralImage",
         "advanceRetainedDensityDynamicSupport",
@@ -6189,8 +6215,10 @@ export class WebGPUSparseCM12Resident {
     this.encodeAcceptedSolidQuantum(encoder);
     const topologyFrozen = activityPolicy?.freezeTopology === true;
     const pressureIterations = sparseCM12PressureIterations(pressureControl?.iterations);
-    const gammaDiffusionEnabled = sharpening?.gammaDiffusionEnabled !== false;
-    const surfaceSharpeningEnabled = sharpening?.surfaceSharpeningEnabled !== false;
+    const currentMap = this.retainedDensityLayout?.currentMap;
+    if (currentMap && (inflow || bodyCount > 0)) throw new Error("Current-field transport cannot accept inflow or rigid bodies");
+    const gammaDiffusionEnabled = !currentMap && sharpening?.gammaDiffusionEnabled !== false;
+    const surfaceSharpeningEnabled = !currentMap && sharpening?.surfaceSharpeningEnabled !== false;
     // The header carries the two device-side cursors, so it starts each
     // captured frame at zero. The records and snapshots behind it are
     // overwritten in place and never read past their cursor.
@@ -6513,6 +6541,45 @@ export class WebGPUSparseCM12Resident {
     });
     stage("conservative-transport", ({ closeSubstage }) => {
       useBindGroup(this.transportBindGroup);
+      if (currentMap) {
+        closePass();
+        encoder.clearBuffer(this.topologyArena, this.topologyArena.size - CM12_FAILURE_BYTES - 128, 128);
+        // The effective velocity plane is still the immutable VEX output.
+        // All candidate field and measure checks precede native publication.
+        dispatch("compileCurrentMapVelocity", Math.ceil(currentMap.nodeCount / WORKGROUP_SIZE));
+        for (let sweep = 0; sweep < SPARSE_CM12_CURRENT_MAP_VELOCITY_EXTENSION_SWEEPS; sweep += 2) {
+          dispatch("extendCurrentMapVelocityToScratch", Math.ceil(currentMap.nodeCount / WORKGROUP_SIZE));
+          dispatch("extendCurrentMapVelocityFromScratch", Math.ceil(currentMap.nodeCount / WORKGROUP_SIZE));
+        }
+        dispatch("compileCurrentMapTraceSchedule", Math.ceil(currentMap.lineCounts[0] / WORKGROUP_SIZE));
+        dispatch("sealCurrentMapTraceSchedule", 1);
+        dispatch("advanceCurrentMapNodes", Math.ceil(currentMap.nodeCount / WORKGROUP_SIZE));
+        dispatch("filterCurrentMapX", Math.ceil(currentMap.lineCounts[0] / WORKGROUP_SIZE));
+        dispatch("filterCurrentMapY", Math.ceil(currentMap.lineCounts[1] / WORKGROUP_SIZE));
+        dispatch("filterCurrentMapZ", Math.ceil(currentMap.lineCounts[2] / WORKGROUP_SIZE));
+        dispatch("certifyCurrentMap", Math.ceil(currentMap.cellCount / WORKGROUP_SIZE));
+        dispatch("compileCurrentMapPhysicalBoundary", Math.ceil(currentMap.boundarySampleCount / WORKGROUP_SIZE));
+        dispatch("boundCurrentMapPhysicalBoundary", 6);
+        closePass(); this.encodeFailureGate(encoder);
+        dispatch("validateCurrentMapMaterialCoverage", 1);
+        // Filtering no longer uses the scratch plane. Compute identical
+        // whole-chain bounds with one worker per support before cooperative
+        // quadrature, where a lane-zero calculation would idle 63 workers.
+        dispatch("compileCurrentMapFineMeasureRanges", Math.ceil(currentMap.dimensions.reduce((a, b) => a * b, 1) / WORKGROUP_SIZE));
+        closePass();
+        dispatch("integrateCurrentMapFineMeasureCooperative", currentMap.dimensions.reduce((a, b) => a * b, 1));
+        closePass(); this.encodeFailureGate(encoder);
+        dispatch("validateCurrentMapCoverage", Math.ceil(currentMap.dimensions.reduce((a, b) => a * b, 1) / WORKGROUP_SIZE));
+        dispatch("validateCurrentMapBeforeNative", 1);
+        closePass(); this.encodeFailureGate(encoder);
+        dispatch("compileRetainedDensityNativeIntegrals", Math.ceil(this.templateCellCount / WORKGROUP_SIZE));
+        closePass(); this.encodeFailureGate(encoder);
+        dispatch("publishCurrentMapIncrement", Math.ceil(currentMap.nodeCount / WORKGROUP_SIZE));
+        closePass(); this.encodeFailureGate(encoder);
+        dispatch("commitRetainedDensityGeneration", 1);
+        closeSubstage("transport-gather");
+        return;
+      }
       dispatchAccepted("clearSparseCM12TransportReceipts", "cell");
       if (this.phase1TransportQALayout) {
         dispatchAccepted("captureSparseCM12Phase1TransportPackets", "cell");
@@ -6573,6 +6640,20 @@ export class WebGPUSparseCM12Resident {
       dispatchAccepted("finalizeGammaSnapshot", "cell");
     });
     stage("surface-sharpening", ({ closeSubstage }) => {
+      if (currentMap) {
+        dispatch("validateCurrentMapPublication", 1);
+        closePass(); this.encodeFailureGate(encoder);
+        // Gamma diffusion, sharpening and native capacity redistribution belong
+        // to the former CM12 transport matrix. The current field already owns
+        // the density and momentum measure; these are not additional writers.
+        useBindGroup(this.transportBindGroup);
+        dispatch("beginSparseCM12FinalScalarMasks", 1);
+        dispatch("publishSparseCM12FinalScalarMasks", leafCapacity);
+        dispatch("sealSparseCM12FinalScalarMasks", 1);
+        closeSubstage("final-scalar-mask-publication");
+        useBindGroup(this.pressureBindGroup);
+        return;
+      }
       // Start the stage with real, already-required GPU work. Besides resetting
       // the downstream counters before any producer can observe them, this pass
       // materializes the preceding stage's timestamp before the native receipt
@@ -7452,6 +7533,8 @@ export class WebGPUSparseCM12Resident {
 
   /** Adopt one accepted uniform solid generation without rebuilding fluid topology. */
   validateSolidWorld(solidWorld: SolidWorld): void {
+    if (this.retainedDensityLayout?.currentMap && solidWorld !== this.currentSolidWorld)
+      throw new Error("Current-field transport does not yet admit live solid edits");
     this.assertLive();
     const layout = this.solidOccupancyLayout;
     if (!layout) throw new Error("This world does not support live solid editing");
@@ -7838,6 +7921,8 @@ export class WebGPUSparseCM12Resident {
     phase: "complete" | "prepare" | "apply" = "complete",
   ): void {
     this.assertLive();
+    if (this.retainedDensityLayout?.currentMap && mode !== 0)
+      throw new Error("Current-field transport does not yet admit live liquid edits");
     this.solidEditRevision++;
     if (mode > 0 && mode < 5) this.liquidMayExist = true;
     this.writeParameters(this.lastPacked!, injectionDt_s, finestCellSize_m, 1,
@@ -8825,6 +8910,12 @@ export class WebGPUSparseCM12Resident {
     const copy = (from: number, to: number, length: number) => {
       if (length) encoder.copyBufferToBuffer(this.state, 4 * from, next.state, 4 * to, 4 * length);
     };
+    if (Boolean(previous.currentMap) !== Boolean(target.currentMap)) throw new Error("Replacement lost current spatial map");
+    if (previous.currentMap && target.currentMap && previous.currentMapMeasure && target.currentMapMeasure) {
+      if (previous.currentMap.totalWords !== target.currentMap.totalWords) throw new Error("Replacement changed spatial map support");
+      copy(previous.currentMap.baseWords, target.currentMap.baseWords, previous.currentMap.totalWords);
+      copy(previous.currentMapMeasure.baseWords, target.currentMapMeasure.baseWords, 8 * count);
+    }
     copy(previous.controlBaseWords, target.controlBaseWords, 4);
     copy(oldSupport.seedMeanBaseWords, newSupport.seedMeanBaseWords, count);
     copy(oldSupport.openFractionBaseWords, newSupport.openFractionBaseWords, count);
@@ -9056,7 +9147,11 @@ export class WebGPUSparseCM12Resident {
     this.assertLive();
     await this.assertSimulationHealthy();
     const activitySnapshot = await this.readActivitySnapshot(includeWorldLeaves);
-    const readbackBytes = this.state.size + this.conditioning.size + 4;
+    // Native QA planes precede the current-field arena; do not map unused
+    // spatial archive capacity just to inspect density and pressure.
+    const stateBytes = this.retainedDensityLayout?.currentMap
+      ? 4 * this.retainedDensityLayout.currentMap.baseWords : this.state.size;
+    const readbackBytes = stateBytes + this.conditioning.size + 4;
     const readback = this.device.createBuffer({
       label: "Sparse CM12 QA field readback",
       size: readbackBytes,
@@ -9066,20 +9161,20 @@ export class WebGPUSparseCM12Resident {
       const encoder = this.device.createCommandEncoder({
         label: "Sparse CM12 QA field copy",
       });
-      encoder.copyBufferToBuffer(this.state, 0, readback, 0, this.state.size);
+      encoder.copyBufferToBuffer(this.state, 0, readback, 0, stateBytes);
       encoder.copyBufferToBuffer(this.conditioning, 0, readback,
-        this.state.size, this.conditioning.size);
+        stateBytes, this.conditioning.size);
       encoder.copyBufferToBuffer(this.topologyArena,
         4 * (this.frameControlLayout.baseWords
           + SPARSE_CM12_FRAME_CONTROL_HEADER.scalarParity),
-        readback, this.state.size + this.conditioning.size, 4);
+        readback, stateBytes + this.conditioning.size, 4);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
       const state = new Float32Array(readback.getMappedRange());
       const acceptedParity = new Uint32Array(state.buffer,
-        state.byteOffset + this.state.size + this.conditioning.size, 1)[0]! & 1;
+        state.byteOffset + stateBytes + this.conditioning.size, 1)[0]! & 1;
       const conditioning = new Int32Array(state.buffer,
-        state.byteOffset + this.state.size, this.conditioning.size / 4);
+        state.byteOffset + stateBytes, this.conditioning.size / 4);
       const fieldParity = acceptedParity ^ Number(frameBank === "candidate");
       const [nx, ny, nz] = this.dimensions;
       const count = nx * ny * nz;

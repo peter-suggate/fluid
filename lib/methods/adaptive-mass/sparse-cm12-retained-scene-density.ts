@@ -14,6 +14,8 @@ export type RetainedScenePrimitive =
  * to the domain. Its .5 surface is the authored surface; its amount is the
  * diffuse density integral, deliberately not the sharp enclosed volume. */
 export interface RetainedSceneDensity {
+  /** Optional production transport owner; omission retains native CM12. */
+  readonly transport?: "current-map";
   readonly generation: number;
   readonly transitionWidth: number;
   readonly domain: RetainedSceneBox;
@@ -92,6 +94,9 @@ const finite = (v: number) => {
 const point = (v: RetainedScenePoint): RetainedScenePoint => Object.freeze(v.map(finite)) as unknown as RetainedScenePoint;
 
 export function retainedSceneDensity(input: RetainedSceneDensity): RetainedSceneDensity {
+  if (input.transport !== undefined && input.transport !== "current-map") {
+    throw new Error("Unsupported retained density transport");
+  }
   if (!Number.isSafeInteger(input.generation) || input.generation < 1 || input.generation > 0xff_ffff
     || !(input.transitionWidth > 0)) throw new Error("Invalid retained scene field generation or width");
   const domain = Object.freeze({ lower: point(input.domain.lower), upper: point(input.domain.upper) });
@@ -117,6 +122,7 @@ export function retainedSceneDensity(input: RetainedSceneDensity): RetainedScene
     cellSize: finite(input.supportLattice.cellSize),
   }) : undefined;
   const result = Object.freeze({ generation: input.generation, transitionWidth, domain, primitives: Object.freeze(primitives),
+    ...(input.transport ? { transport: input.transport } : {}),
     ...(supportLattice ? { supportLattice } : {}) });
   if (supportLattice) assertRetainedSceneIsotropicLattice(result, supportLattice.dimensions, supportLattice.cellSize);
   return result;
@@ -126,7 +132,7 @@ export function retainedSceneDensity(input: RetainedSceneDensity): RetainedScene
  * Unsupported authoring returns null so callers cannot silently omit a source.
  * Solids/open-domain coupling remains the caller's responsibility. */
 export function compileRetainedSceneDensity(scene: SceneDescription,
-  options: { generation?: number; transitionWidth?: number } = {}): RetainedSceneDensity | null {
+  options: { generation?: number; transitionWidth?: number; transport?: "current-map" } = {}): RetainedSceneDensity | null {
   if (scene.fluid.initialHeightField?.kind === "cosine"
     || scene.fluid.initialLiquidVolumes?.some(v => v.shape !== "box" && v.shape !== "sphere")) return null;
   const c = scene.container;
@@ -160,6 +166,7 @@ export function compileRetainedSceneDensity(scene: SceneDescription,
     }
   }
   return retainedSceneDensity({ generation: options.generation ?? 1,
+    ...(options.transport ? { transport: options.transport } : {}),
     transitionWidth: options.transitionWidth ?? scene.voxelDomain.finestCellSize_m,
     domain: { lower, upper }, primitives });
 }

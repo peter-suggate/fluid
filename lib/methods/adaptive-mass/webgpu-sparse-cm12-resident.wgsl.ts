@@ -1,3 +1,7 @@
+import { createSparseCM12CurrentMapCompletionSpecs, createSparseCM12CurrentMapCompletionWGSL, instrumentSparseCM12CurrentMapCompletionWGSL } from "./sparse-cm12-current-map-completion.wgsl";
+import { createSparseCM12CurrentMapWGSL, type SparseCM12CurrentMapLayout } from "./sparse-cm12-current-map.wgsl";
+import { createSparseCM12CurrentMapMeasureWGSL, type SparseCM12CurrentMapMeasureLayout } from "./sparse-cm12-current-map-measure.wgsl";
+import { createSparseCM12CurrentMapVelocityWGSL } from "./sparse-cm12-current-map-velocity.wgsl";
 import { PRESSURE_JOURNAL_CONSTANTS_WGSL, PRESSURE_JOURNAL_ACCESS_WGSL, PRESSURE_JOURNAL_CAPTURE_WGSL } from "./features/pressure-inspection/capture.wgsl";
 import { cm12SimulationFailureWGSL, guardCM12SimulationDispatches } from "./sparse-cm12-simulation-failure.wgsl";
 import { SPARSE_CM12_COMMON_HEIGHT_ENABLED, sparseCM12HeightReconstructionWGSL } from "./sparse-cm12-height-reconstruction.wgsl";
@@ -150,6 +154,8 @@ export interface SparseCM12RetainedDensityResidentLayout {
   readonly integralBaseWords: number;
   readonly controlBaseWords: number;
   readonly support?: SparseCM12RetainedDensitySupportLayout;
+  readonly currentMap?: SparseCM12CurrentMapLayout;
+  readonly currentMapMeasure?: SparseCM12CurrentMapMeasureLayout;
 }
 
 /** Maximum accepted-cell edges traversed by an admitted rigid displacement.
@@ -180,6 +186,7 @@ export interface SparseCM12RetainedDensitySupportLayout {
 
 function sparseCM12RetainedDensitySupportWGSL(
   layout: SparseCM12RetainedDensitySupportLayout | undefined,
+  currentMap = false,
 ): string {
   if (!layout) return /* wgsl */ `
 fn cm12RetainedDensitySupportCoefficientAtFine(_point:vec3f)->vec2f{
@@ -273,12 +280,14 @@ fn cm12RetainedDensitySupportSeedMean(index:u32)->f32{
   return 0.0;
 }
 fn cm12RetainedDensitySupportMomentsAt(q:vec3i,bank:u32)->vec2f{
+${currentMap ? "  return vec2f(cm12CurrentMapFineMeasure(q,bank).x,1.0);" : /* wgsl */ `
   let index=cm12RetainedDensitySupportAt(q,bank);
   if(index==INVALID){return vec2f(0.0);}
   let at=cm12RetainedDensityCoefficientBase(bank)+2u*index;
   let open=cm12RetainedDensitySupportOpen(index,q);
   return vec2f(state[at]*cm12RetainedDensitySupportSeedMean(index)+state[at+1u]*open,open);
-}
+`}}
+
 fn cm12RetainedDensitySupportMeanAt(q:vec3i,bank:u32)->f32{
   return cm12RetainedDensitySupportMomentsAt(q,bank).x;
 }
@@ -512,7 +521,24 @@ fn refreshRetainedDensityNativeIntegralImage(@builtin(global_invocation_id)gid:v
 }
 
 @compute @workgroup_size(64)
-fn compileRetainedDensityNativeIntegrals(@builtin(global_invocation_id)gid:vec3u){
+${currentMap ? /* wgsl */ `fn compileRetainedDensityNativeIntegrals(@builtin(global_invocation_id)gid:vec3u){
+  let cell=gid.x;
+  if(cell>=p.counts.x||!cm12RetainedDensityEnabled()||cm12CurrentMapFailed()){return;}
+  if(!cm12RetainedDensityCellAllocated(cell)){return;}
+  let center=cellCenter(cell);let widths=cellWidths(cell);
+  let lower=vec3i(round(center-0.5*widths));let upper=vec3i(round(center+0.5*widths));
+  var measure=vec4f(0.0);
+  for(var z=lower.z;z<upper.z;z++){for(var y=lower.y;y<upper.y;y++){for(var x=lower.x;x<upper.x;x++){
+    measure+=cm12CurrentMapFineMeasure(vec3i(x,y,z),cm12CurrentMapCandidateBank());
+  }}}
+  let mean=measure.x/max(cellVolume(cell),1e-12);
+  state[CM12_RETAINED_INTEGRAL_BASE+cell]=mean;
+  state[destinationDensity()+cell]=mean;state[destinationGamma()+cell]=1.0;
+  var velocity=vec3f(0.0);if(measure.x>0.0){velocity=measure.yzw/measure.x;}
+  let at=destinationCellVelocity()+4u*cell;
+  state[at]=velocity.x;state[at+1u]=velocity.y;state[at+2u]=velocity.z;state[at+3u]=0.0;
+}
+` : /* wgsl */ `fn compileRetainedDensityNativeIntegrals(@builtin(global_invocation_id)gid:vec3u){
   let cell=gid.x;if(cell>=p.counts.x||!cm12RetainedDensityEnabled()){return;}
   let moments=cm12RetainedDensityIntegrateCellMoments(cell,1u-cm12RetainedDensityAcceptedBank());
   let mean=moments.x;
@@ -527,13 +553,16 @@ fn compileRetainedDensityNativeIntegrals(@builtin(global_invocation_id)gid:vec3u
   state[CM12_RETAINED_INTEGRAL_BASE+cell]=mean;
 ${layout.rigid ? "  state[p.solidOffsets.x+cell]=moments.y;" : ""}
 }
+`}
 
 @compute @workgroup_size(1)
 fn commitRetainedDensityGeneration(){
   if(!cm12RetainedDensityEnabled()||atomicLoad(&topologyArena[cm12FailureBase()])!=0u){return;}
+${currentMap ? "  if(!cm12CurrentMapCompletionValid()){return;}\n  cm12CurrentMapCommitIncrement();" : ""}
   state[CM12_RETAINED_CONTROL_BASE+1u]=f32(1u-cm12RetainedDensityAcceptedBank());
   state[CM12_RETAINED_CONTROL_BASE+2u]+=1.0;
   state[CM12_RETAINED_CONTROL_BASE]=2.0;
+${currentMap ? "  atomicStore(&topologyArena[cm12CurrentMapCompletionBase()+31u],1u);" : ""}
 }
 `;
 }
@@ -631,16 +660,126 @@ fn cm12RetainedDensityPhiAtFine(point:vec3f)->f32{
   let solid=cm12SolidVoxelFractionQ8(vec3i(floor(point)));
   if(solid>=255u||fract(point.y)<f32(solid)/255.0
     ||!cm12RetainedDensityRigidPointOpen(point)){return width;}
+${layout.currentMap ? "  return cm12CurrentMapPhiAtFine(point,cm12RetainedDensityAcceptedBank());" : /* wgsl */ `
   let origin=cm12RetainedDensityVector(CM12_RETAINED_FIELD_BASE+12u);
   let phi=cm12RetainedDensityPhiMetres(origin+point*p.frame.y);
   if(state[CM12_RETAINED_CONTROL_BASE]<1.5){return phi;}
   let coefficient=cm12RetainedDensitySupportCoefficientAtFine(point);
   return cm12RetainedDensityEvolvedPhi(phi,width,coefficient);
-}
+`}}
 fn cm12RetainedDensityCellMean(cell:u32)->f32{
   return state[CM12_RETAINED_INTEGRAL_BASE+cell];
 }
-${sparseCM12RetainedDensitySupportWGSL(layout.support)}
+${sparseCM12RetainedDensitySupportWGSL(layout.support, Boolean(layout.currentMap))}
+${layout.currentMap && layout.currentMapMeasure ? createSparseCM12CurrentMapWGSL(layout.currentMap)
+  + createSparseCM12CurrentMapVelocityWGSL(layout.currentMap)
+  + createSparseCM12CurrentMapMeasureWGSL(layout.currentMapMeasure) + /* wgsl */ `
+fn cm12CurrentMapFail(code:u32,id:u32){cm12RecordFailure(6u,id,vec4u(100u+code,0u,0u,0u));}
+fn cm12CurrentMapMeasureFailure(id:u32,error:vec4f,tolerance:vec4f,mean:vec4f){
+  var axis=0u;for(var i=1u;i<4u;i++){if(error[i]/tolerance[i]>error[axis]/tolerance[axis]){axis=i;}}
+  cm12RecordFailure(6u,id,vec4u(121u,bitcast<u32>(error[axis]),bitcast<u32>(tolerance[axis]),bitcast<u32>(mean[axis])));
+}
+fn cm12CurrentMapFailed()->bool{return atomicLoad(&topologyArena[cm12FailureBase()])!=0u;}
+fn cm12CurrentMapNativeVelocity(point:vec3f)->vec4f{
+  let dimensions=vec3f(p.dimensions.xyz);
+  // Mirror the continuation through impermeable planes. Together with odd
+  // normal velocity below, this makes the displacement's normal component
+  // odd at a wall, so the C2 carrier preserves the physical boundary plane.
+  var reflected=abs(point);
+  reflected.x=dimensions.x-abs(dimensions.x-reflected.x);
+  reflected.z=dimensions.z-abs(dimensions.z-reflected.z);
+  let samplePoint=clamp(reflected,vec3f(0.5),dimensions-vec3f(0.5));
+  // This dense cache dispatch has no staged TEI workgroup directory. Resolve
+  // ownership from the accepted compiled topology instead of reading that
+  // packet-local scratch as though a transport packet had staged it.
+  let stencil=effectiveTransportStencilAtSpansMode(samplePoint,vec3f(1.0),true);
+  var velocity=vec3f(0.0);var weight=0.0;
+  for(var corner=0u;corner<8u;corner++){
+    let cell=stencil.cells[corner];if(cell==INVALID){continue;}
+    let value=cm12EffectiveTransportVelocity(cell);
+    if(value.w<=0.0||!cm12ExtendedCellSelected(cell)){continue;}
+    velocity+=stencil.weights[corner]*value.xyz;weight+=stencil.weights[corner];
+  }
+  return vec4f(velocity/max(weight,1e-9),select(0.0,1.0,weight>0.0));
+}
+fn cm12CurrentMapVelocityBoundary(point:vec3f,value:vec3f)->vec3f{
+  let dimensions=vec3f(p.dimensions.xyz);var velocity=value;
+  // Impermeable side/floor normal boundary conditions, with tangential slip.
+  velocity.x*=clamp(2.0*min(point.x,dimensions.x-point.x),-1.0,1.0);
+  velocity.z*=clamp(2.0*min(point.z,dimensions.z-point.z),-1.0,1.0);
+  velocity.y*=clamp(2.0*point.y,-1.0,1.0);
+  // The map has a dry exterior collar; velocity extension decays there.
+  let outside=max(vec3f(0.0),max(-point,point-dimensions));
+  // Keep a mirrored guard wider than the carrier stencil before tapering
+  // toward the distant identity collar; a taper starting on the wall would
+  // break odd normal/even tangential continuation at that physical plane.
+  let t=clamp((max(outside.x,max(outside.y,outside.z))-4.0)/8.0,0.0,1.0);
+  return velocity*(1.0-t*t*(3.0-2.0*t));
+}
+fn cm12CurrentMapCoefficientBoundaryPoint(point:vec3f)->vec3f{
+  let dimensions=vec3f(p.dimensions.xyz);var reflected=point;
+  for(var axis=0u;axis<3u;axis++){
+    if(point[axis]==-CM12_CURRENT_MAP_SPACING){reflected[axis]=-point[axis];}
+    if(axis!=1u&&point[axis]==dimensions[axis]+CM12_CURRENT_MAP_SPACING){
+      reflected[axis]=2.0*dimensions[axis]-point[axis];
+    }
+  }
+  return reflected;
+}
+fn cm12CurrentMapCoefficientBoundaryValue(point:vec3f,value:vec3f)->vec3f{
+  let dimensions=vec3f(p.dimensions.xyz);var bounded=value;
+  for(var axis=0u;axis<3u;axis++){
+    // Odd normal displacement and even tangential ghosts enforce an exact
+    // impermeable free-slip plane in the C2 spline, including its derivatives.
+    if(point[axis]==0.0||(axis!=1u&&point[axis]==dimensions[axis])){bounded[axis]=0.0;}
+    else if(point[axis]==-CM12_CURRENT_MAP_SPACING
+      ||(axis!=1u&&point[axis]==dimensions[axis]+CM12_CURRENT_MAP_SPACING)){bounded[axis]=-bounded[axis];}
+  }
+  return bounded;
+}
+@compute @workgroup_size(64)
+fn validateCurrentMapCoverage(@builtin(global_invocation_id)gid:vec3u){
+  let id=gid.x;let dimensions=p.dimensions.xyz;
+  if(id>=dimensions.x*dimensions.y*dimensions.z||cm12CurrentMapFailed()){return;}
+  let q=vec3i(i32(id%dimensions.x),i32((id/dimensions.x)%dimensions.y),i32(id/(dimensions.x*dimensions.y)));
+  let measure=cm12CurrentMapFineMeasure(q,cm12CurrentMapCandidateBank());
+  if(measure.x>1e-7){let owner=compactOwnerCellAt(q);
+    if(owner.x==INVALID||!brickActive(owner.y)){cm12CurrentMapFail(8u,id);}
+  }
+}
+@compute @workgroup_size(1)
+fn validateCurrentMapMaterialCoverage(){
+  if(cm12CurrentMapFailed()){return;}
+  // Global orientation plus the zero exterior collar makes X a proper
+  // bijection. Signed face bounds then place a shrunken physical box inside
+  // X(domain). Any omitted seed material lies in these six boundary slabs.
+  // Bound its amount using the same seed's interval support proof and q<=1.
+  let dimensions=p.dimensions.xyz;var omitted=0.0;var seedAmount=0.0;
+  for(var i=0u;i<CM12_CURRENT_MAP_MEASURE_COUNT;i++){
+    seedAmount+=state[CM12_RETAINED_SEED_MEAN_BASE+i];
+  }
+  for(var face=0u;face<6u;face++){
+    let axis=face/2u;let side=face%2u;
+    let depth=state[CM12_CURRENT_MAP_BOUNDARY_BOUNDS_BASE+face];
+    if(depth==0.0){continue;}
+    if(!(depth>=0.0&&depth<f32(dimensions[axis]))){cm12CurrentMapFail(23u,face);return;}
+    let tangentU=select(0u,1u,axis==0u);let tangentV=select(2u,1u,axis==2u);
+    for(var v=0u;v<dimensions[tangentV];v++){for(var u=0u;u<dimensions[tangentU];u++){
+      var lower=vec3f(0.0);lower[tangentU]=f32(u);lower[tangentV]=f32(v);
+      var upper=lower+vec3f(1.0);
+      lower[axis]=select(0.0,f32(dimensions[axis])-depth,side!=0u);
+      upper[axis]=select(depth,f32(dimensions[axis]),side!=0u);
+      if(!cm12CurrentMapSeedRangeIsDry(lower,upper)){omitted+=depth;}
+    }}
+  }
+  // Numerical material-coverage budget: one part per million of the seed
+  // amount. This bounds possible omitted material, rather than inferring
+  // complete coverage from samples or from conserved-looking native totals.
+  if(omitted>1e-6*seedAmount){
+    cm12RecordFailure(6u,0u,vec4u(123u,bitcast<u32>(omitted),bitcast<u32>(seedAmount),0u));
+  }
+}
+` : ""}
 `;
 }
 
@@ -1115,7 +1254,22 @@ fn authorizeEmptySparseCM12CandidateEffectsNoFail(acceptedGeneration:u32)->bool{
     })
     : "";
   const solidOccupancyEntries = sparseCM12SolidOccupancyWGSL(solidOccupancyLayout);
-  const retainedDensityEntries = sparseCM12RetainedDensityResidentWGSL(retainedDensityLayout);
+  const completionSpecs = retainedDensityLayout?.currentMap ? createSparseCM12CurrentMapCompletionSpecs(retainedDensityLayout.currentMap, "p.counts.x", {
+    cooperativeMeasure: true,
+    cachedMeasureRanges: retainedDensityLayout.currentMapMeasure?.rangeCacheBaseWords !== undefined,
+  }) : [];
+  const retainedDensityEntries = sparseCM12RetainedDensityResidentWGSL(retainedDensityLayout) + (completionSpecs.length ? createSparseCM12CurrentMapCompletionWGSL(completionSpecs) + /* wgsl */ `
+@compute @workgroup_size(1)
+fn validateCurrentMapBeforeNative(){
+  let valid=cm12CurrentMapCompletionValidPrefix(${completionSpecs.find(spec => spec.name === "compileRetainedDensityNativeIntegrals")!.slot}u);
+}
+@compute @workgroup_size(1)
+fn validateCurrentMapPublication(){
+  if(!cm12CurrentMapCompletionValid()){return;}
+  let committed=atomicLoad(&topologyArena[cm12CurrentMapCompletionBase()+31u]);
+  if(committed!=1u){cm12RecordFailure(6u,31u,vec4u(124u,31u,committed,1u));}
+}
+` : "");
   const transportExecutionImageEntries = createSparseCM12TransportExecutionImageWGSL({
     layout: transportExecutionImageLayout,
   });
@@ -1710,7 +1864,7 @@ ${createSparseCM12IboTRASupplementWGSL({
     .replace("fn effectiveTransportStencilAtSpansMode(",
       "fn effectiveImplicitSharpeningGeometryAtSpansMode(")
     .replaceAll("cm12TransportOwnerAtFine(", "cm12ImplicitSharpeningGeometryOwnerAtFine(");
-  return guardCM12SimulationDispatches(/* wgsl */ `
+  return guardCM12SimulationDispatches(instrumentSparseCM12CurrentMapCompletionWGSL(/* wgsl */ `
 ${createCm12NumericsWGSL()}
 ${cm12SimulationFailureWGSL}
 
@@ -6385,8 +6539,9 @@ fn classifyPressureRow(row:u32)->bool{
     // Full 8h liquid next to empty 4h air needs theta=2/3, not 1/2; otherwise
     // changing rungs moves p=0 below a stationary surface and drives false flow.
     // Exterior rows retain the dimensionless convention of rowExteriorPhi.
-    let phi=(CM12_LIQUID_ISOVALUE-pressureDensity(cell))
-      *select(cellWidths(cell)[rowAxis(row)],1.0,rowKind(row)==3u);
+    let phi=${retainedDensityLayout?.currentMap
+      ? "cm12CurrentMapPhiAtFine(cellCenter(cell),cm12RetainedDensityAcceptedBank())/p.frame.y"
+      : "(CM12_LIQUID_ISOVALUE-pressureDensity(cell))*select(cellWidths(cell)[rowAxis(row)],1.0,rowKind(row)==3u)"};
     let liquid=pcmCellContains(cell);
     let signedPhi=termCoefficient(at)*phi;
     fullPhiGradient+=signedPhi;if(liquid){liquidPhiGradient+=signedPhi;}
@@ -6407,6 +6562,7 @@ fn classifyPressureRow(row:u32)->bool{
   // physical waterline rather than at a rung-dependent interpolation of rho.
   let gravityLength=length(p.acceleration.xyz);
   if(cut&&rowAxis(row)==1u&&gravityLength>1e-6
+    &&${retainedDensityLayout?.currentMap ? "false" : "true"}
     &&pressureHasPartialRefinementRegion()
     &&p.acceleration.y<=-0.5*gravityLength){
     let heightReceipt=pressurePlanarColumnHeight(row);
@@ -10505,10 +10661,15 @@ fn populateSparseCM12PresentationFramePlan(
         &&height<=f32(brickOrigin.y+2*i32(BRICK_FINE_RESOLUTION)));
     }}
   }
-  let scheduled=bootstrap||injected||pageNeedsActivation||scalarChanged
+  // A transported spatial field can change inside a support while its native
+  // mean stays equal. Replacement also copies both scalar banks together.
+  // Publish every existing field page from the current authority; native
+  // scalar masks alone cannot certify that its point samples are unchanged.
+  let spatialChanged=${retainedDensityLayout?.currentMap ? "cm12RetainedDensityEnabled()" : "false"};
+  let scheduled=bootstrap||injected||pageNeedsActivation||scalarChanged||spatialChanged
     ||topologyChanged||dynamicBrick||heightChanged;
   if(!scheduled){return;}
-  var origin=select(0u,${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged}u,scalarChanged);
+  var origin=select(0u,${SPARSE_CM12_DIRTY_CAUSE_BIT.densityChanged}u,scalarChanged||spatialChanged);
   var inherited=select(0u,${SPARSE_CM12_DIRTY_CAUSE_BIT.dependencyClosure}u,
     (dynamicBrick||heightChanged)&&!scalarChanged);
   if(topologyChanged){origin|=${(SPARSE_CM12_DIRTY_CAUSE_BIT.topologyCreated
@@ -11340,5 +11501,5 @@ fn publishSparseLevelSet(@builtin(workgroup_id)wid:vec3u,
   }
 }
 
-`);
+`, completionSpecs));
 }

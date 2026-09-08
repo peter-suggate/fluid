@@ -609,6 +609,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       | typeof GATHER_CAPACITY_REPAIR_QA_TOKEN,
   ): Promise<WebGPUAdaptiveMassSolver> {
     options = { ...options, activityPolicy: sparseCM12ActivityPolicy(options.activityPolicy ?? {}) };
+    if (options.densityTransport === "current-map"
+      && scene.rigidBodies.some(body => body.motion !== "static")) {
+      throw new Error("Current spatial field transport does not yet support moving rigid bodies");
+    }
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
     const fluidDomainPlan = adaptiveMassFluidDomainForScene(scene);
     const initialSolidWorld = fluidSolidWorldForScene(scene);
@@ -665,7 +669,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           const fineResolution = options.brickFineResolution ?? 8;
           const resolutionForBrick = options.initialResolutionForQA === undefined
             ? undefined : () => options.initialResolutionForQA!;
-          retainedDensity = compileRetainedSceneDensity(scene);
+          retainedDensity = compileRetainedSceneDensity(scene, {
+            transport: options.densityTransport === "current-map" ? "current-map" : undefined,
+          });
+          if (options.densityTransport === "current-map" && !retainedDensity) {
+            throw new Error("Current spatial field transport does not support this initial liquid authoring");
+          }
           const retainedCellSize_m = Math.min(...sceneCellSizes_m(scene));
           if (retainedDensity) {
             assertRetainedSceneIsotropicLattice(retainedDensity, dimensions!, retainedCellSize_m);

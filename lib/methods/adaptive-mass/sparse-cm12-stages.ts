@@ -57,6 +57,7 @@ export type SparseCM12StageBand = keyof typeof SPARSE_CM12_STAGE_BANDS;
 interface SparseCM12StageDeclarationBase<Stage extends SparseCM12ResidentStageId> {
   /** The diagram node's name. The id is the resident's stage id. */
   readonly label: string;
+  readonly presentation?: FluidPipelineStage["presentation"];
   readonly band: SparseCM12StageBand;
   readonly side: "left" | "right";
   /**
@@ -368,7 +369,21 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       writes: "transported density, gamma and momentum; sharpening cell catalog",
       feeds: "gamma diffusion and surface sharpening",
     },
-    chip: () => "trace · scatter · gather",
+    presentation: (context) => context.values.densityTransport === "current-map" ? {
+      label: "Current spatial field transport",
+      tip: {
+        summary: "Transports the current density through a chain of spatial departure maps using simulated velocity. The same field supplies native liquid amounts, momentum, and the displayed surface.",
+        reads: "current spatial field and extended simulated velocity",
+        writes: "accepted current field, native amounts and momentum",
+        feeds: "pressure projection and surface publication",
+      },
+    } : {},
+    controls: [{ kind: "param-choice", param: "densityTransport", label: "Density transport",
+      hint: "Changing the density authority rebuilds the simulation.",
+      options: [{ value: "native-cm12", label: "Native CM12" },
+        { value: "current-map", label: "Current spatial field" }] }],
+    chip: (context) => context.values.densityTransport === "current-map"
+      ? "one field · amounts + surface" : "trace · scatter · gather",
   },
   "tracer-advection": {
     label: "Marker advection", band: "transport", side: "right",
@@ -396,7 +411,13 @@ export const SPARSE_CM12_STAGES = Object.freeze({
       param: "gammaDiffusion", on: "on", off: "off",
       hint: "Toggle CM12 Sec. 3.4 gamma diffusion. Conservative transport and the sparse scalar-publication chain remain active when it is off.",
     },
-    chip: (context) => context.values.gammaDiffusion === "off"
+    presentation: (context) => context.values.densityTransport === "current-map" ? {
+      toggle: undefined, state: () => "unavailable",
+      tip: { summary: "Bypassed: current spatial field transport does not use CM12 gamma diffusion.",
+        gate: "Native CM12 transport only" },
+    } : {},
+    chip: (context) => context.values.densityTransport === "current-map"
+      ? "bypassed · current spatial field" : context.values.gammaDiffusion === "off"
       ? "disabled · transported scalars pass through"
       : "2 × row scatter + cell resolve",
   },
@@ -460,7 +481,14 @@ export const SPARSE_CM12_STAGES = Object.freeze({
         enabled: (context) => context.values.surfaceSharpening !== "off",
       },
     ],
-    chip: (context) => context.values.surfaceSharpening === "off"
+    presentation: (context) => context.values.densityTransport === "current-map" ? {
+      label: "Scalar mask publication", toggle: undefined, controls: [], state: () => "on",
+      tip: { summary: "Publishes final scalar masks from the accepted current field. CM12 sharpening and density-capacity redistribution are bypassed.",
+        reads: "accepted current field amounts", writes: "final scalar masks",
+        feeds: "pressure topology and activity measurement" },
+    } : {},
+    chip: (context) => context.values.densityTransport === "current-map"
+      ? "sharpening bypassed · masks only" : context.values.surfaceSharpening === "off"
       ? "Algorithm 2 disabled · sparse publication remains"
       : `CM12 sharpening · ${fixed(context.values.sharpeningStrength, 2)} dose · D ${
         fixed(context.values.sharpeningDistance, 1)} cells · ${

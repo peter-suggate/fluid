@@ -21,10 +21,27 @@ const reasons: Readonly<Record<number, readonly [string, string]>> = {
   4: ["INVALID_CONSERVED_VALUE", "Nonfinite or negative transported density/gamma would have been clamped"],
   6: ["RETAINED_DENSITY_INTEGRAL", "Retained density support could not represent the accepted native amount"],
 };
+const currentFieldReasons: Readonly<Record<number, readonly [string, string]>> = {
+  101: ["CURRENT_FIELD_NONFINITE", "Current spatial field contains a nonfinite value"],
+  102: ["CURRENT_FIELD_TRACE_BUDGET", "Current spatial field trajectory exceeds the supported trace budget"],
+  103: ["CURRENT_FIELD_ORIENTATION", "Current spatial field could not certify positive orientation over every map cell"],
+  104: ["CURRENT_FIELD_COLLAR", "Current spatial field lost its identity exterior boundary"],
+  105: ["CURRENT_FIELD_CHAIN_CAPACITY", "Current spatial field exhausted its certified increment storage"],
+  108: ["CURRENT_FIELD_NATIVE_COVERAGE", "Current spatial field contains liquid outside accepted native support"],
+  120: ["CURRENT_FIELD_INVALID_MEASURE", "Current spatial field integration produced an invalid measure"],
+  121: ["CURRENT_FIELD_QUADRATURE", "Current spatial field integration did not meet its accuracy target"],
+  124: ["CURRENT_FIELD_INCOMPLETE_DISPATCH", "Current spatial field did not complete every required GPU invocation"],
+  123: ["CURRENT_FIELD_MATERIAL_COVERAGE", "Current spatial field could not bound omitted seed material within its coverage budget"],
+};
 function retainedFailureOperands(words: Uint32Array) {
   const stage = words[6];
   const floats = new Float32Array(words.slice(7, 10).buffer);
   switch (stage) {
+    case 121: return { names: ["stage", "integrationError", "tolerance", "measureComponent"],
+      values: [stage, ...floats] };
+    case 124: return { names: ["stage", "receiptSlot", "completedInvocations", "expectedInvocations"], values: [...words.subarray(6, 10)] };
+    case 123: return { names: ["stage", "omittedAmountBound", "seedAmount", "reserved"],
+      values: [stage, floats[0], floats[1], words[9]] };
     case 2: return { names: ["stage", "targetDensity", "openFraction", "reserved"],
       values: [stage, floats[0], floats[1], words[9]] };
     case 3: return { names: ["stage", "density", "targetDensity", "previousDensity"],
@@ -41,7 +58,8 @@ export function decodeCM12SimulationFailure(words: Uint32Array, kernelNames: rea
   if (words.length !== CM12_FAILURE_WORDS) throw new Error("Incomplete CM12 failure receipt");
   if (words[0] === 0) return undefined;
   for (const name of kernelNames) cm12FailureKernelId(name);
-  const [code, message] = reasons[words[1]] ?? ["UNKNOWN_GPU_FAULT", `Unknown GPU failure code ${words[1]}`];
+  const [code, message] = (words[1] === 6 ? currentFieldReasons[words[6]] : undefined)
+    ?? reasons[words[1]] ?? ["UNKNOWN_GPU_FAULT", `Unknown GPU failure code ${words[1]}`];
   const retained = words[1] === 6 ? retainedFailureOperands(words) : undefined;
   return {
     method: "adaptive-mass", code, message,
