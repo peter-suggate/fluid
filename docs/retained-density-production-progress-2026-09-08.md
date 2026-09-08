@@ -22,6 +22,34 @@ See the [motion authority design and negative controls](retained-density-motion-
 The next work validates transport of the current spatial field and its measure
 together. It does not repair the mesh or fit a surface to the old mean targets.
 
+The isolated current-generation quadratic GPU probe now passes all eleven
+subcases (`ff078725`, `/tmp/fluid-quadratic-pullback-gpu-6.log`, 2.216 seconds).
+Eight translations move a sphere by 0.1 m through fixed supports: maximum
+implicit-value error is `5.01e-7 m`, face derivative/Hessian jumps are zero,
+and maximum global amount error is `3.06e-9 m³` (relative `7.24e-7`). Rotation,
+unit-determinant shear, individual support integrals, and rejected unsupported
+or incoherent donors also pass. This is prescribed affine transport of a
+globally coherent quadric, not general evolution or shipping physics. Integral
+queries remain separate from the coefficient commit; complete wet destination
+coverage and an atomic field/integral transaction are still required.
+
+The [production dependency audit](retained-density-production-cutover-audit-2026-09-08.md)
+records velocity freshness, momentum, gamma, solids and injection requirements.
+Independent nonlinear shear/sphere/sharp-box fixtures and the RK2 saddle
+Jacobian negative control pass three CPU tests (`47792554`). General smooth
+field work is validating a dimensionally consistent tensor Hermite/integral
+representation; the smaller volume-bubble shortcut can invent transverse
+variation and is not the selected carrier. Saturated density and sharp branch
+admission remain separate requirements.
+
+The latest unchanged canonical suite (`/tmp/fluid-editor-final-canonical.log`)
+ended at 180.026 seconds: five lanes passed, six timed out and six were not
+run. There was no reported numerical assertion failure, which does not imply
+the timed-out lanes passed. A later instrumented mini32 run still timed out
+during simulation pipeline compilation at its unchanged 20-second deadline.
+See the [startup audit](sparse-cm12-retained-startup-audit-2026-09-08.md) for the
+measured parser improvement and diagnostic timing limits.
+
 This is an implementation record, not a claim that arbitrary curvature transport
 or every boundary interaction is complete. The authored plane, quadratic height,
 box and sphere sources now compile to a physical density field used by both the

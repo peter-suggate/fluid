@@ -1,12 +1,57 @@
 # Sparse CM12 retained startup audit — 2026-09-08
 
-This audit used source inspection and CPU-only resource recording. It did not
+The original census below used source inspection and CPU-only resource recording. It did not
 open a GPU device, run Dawn, or measure driver compilation. The reported
 19–22 second setup times motivated the audit; the measurements below do not
 attribute that elapsed time to a particular GPU kernel.
 
 The current production acceptance record is
 [retained-density-production-progress-2026-09-08.md](retained-density-production-progress-2026-09-08.md).
+
+## Subsequent measured work
+
+Commit `559a6acb` reuses the WGSL parse index within one source construction,
+including journal and allocator families. All 60 four-entry families covering
+238 entries from a 789,916-code-unit generated B8/P8 fixture emit exactly the
+same bytes as the previous parser. Nine bounded CPU tests pass. Three
+alternating CPU benchmark runs measured median total pruning time, including
+index creation, of **1,394.31 ms before and 73.25 ms after**. This is a parser
+benchmark, not a solver construction or canonical timing receipt. The cache
+is construction-local and does not globally retain source generations.
+
+An explicit child-only profiling launcher (`56fff3f9`) replaces the unusable
+inherited `NODE_OPTIONS` preload attempt. It registers TypeScript before
+loading the observer and preserves target arguments. The tests verify the
+observer loads once in the direct target and never in its worker/fork. No
+timings were obtained from the earlier hung preload attempt.
+
+The first valid instrumented mini32 profile was stopped at its normal
+20-second external deadline (20.040 seconds including termination). Logs:
+`/tmp/fluid-mini32-compilation-diagnostic.log` and
+`/tmp/fluid-cm12-compilation-43377.jsonl`. `createConfigured` began at 2.873
+seconds and returned at 7.454 seconds relative to observer startup. At 15
+seconds, 26 module calls and 114 completed direct pipeline jobs had been
+observed; background simulation compilation was still running. Full solver
+construction had not completed by the deadline, so no frame benchmark result
+exists for this run.
+
+The two longest completed first-frame pipeline requests were
+`executeSparseCM12FramePlanPresentationPacket` (3.478 seconds) and
+`publishSparseCM12SurfaceRepresentabilityReceipts` (3.171 seconds). Several
+transport, sharpening and dynamic-face pipeline requests took 0.8–1.15
+seconds. Synchronous module creation accounted for 131 ms cumulatively at
+the 15-second snapshot. Pipeline request durations include event-loop stalls
+and can overlap; they are not measured hardware compiler times and must not
+be summed as elapsed wall time. The observer covers direct compilation, not
+the manager's separate manifest route.
+
+The unchanged plain canonical run before this parser improvement still
+failed: five lanes passed, six timed out, six were unrun when the 180-second
+suite budget expired. Mini64 received only 13.212 seconds of remaining suite
+time, rather than its nominal 30-second lane deadline. Timeout lane callbacks
+suppress initialization progress, so their TAP-only logs cannot place each
+timeout at a specific phase. The valid profile supplies that evidence for
+mini32 only; the final plain gate remains required.
 
 ## CPU construction census
 
@@ -77,9 +122,10 @@ device, compatible pipeline/binding layout, entry point, and override values.
   heavy roots isolated. Inserting retained roots changes chunk membership.
   Exact per-entry identity can avoid this incidental cache invalidation while
   keeping bounded compiler memory. Increasing compiler fanout is not proposed.
-- `sparseCM12WGSLForEntryPoints` reparses declarations and dependencies on each
-  call. Parsed graphs could be reused within one source. Journal and allocator
-  construction also compute some identical slices twice.
+- At the time of the census, `sparseCM12WGSLForEntryPoints` reparsed declarations
+  and dependencies on each call. Commit `559a6acb` now reuses this parse within
+  each source and avoids the duplicate journal/allocator slices, as measured
+  above.
 - `gpu-compilation-manager.ts` caches `acquire(manifest)` bundles. Its direct
   `compileComputePipeline` route schedules a fresh job and does not deduplicate
   programs. The manager's `snapshot.cached` counts manifest bundles, excluding
