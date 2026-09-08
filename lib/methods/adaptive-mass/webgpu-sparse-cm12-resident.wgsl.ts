@@ -149,6 +149,394 @@ export interface SparseCM12RetainedDensityResidentLayout {
   readonly fieldBaseWords: number;
   readonly integralBaseWords: number;
   readonly controlBaseWords: number;
+  readonly support?: SparseCM12RetainedDensitySupportLayout;
+}
+
+/** Maximum accepted-cell edges traversed by an admitted rigid displacement.
+ * Keep even: paired Jacobi dispatches finish in route bank A. An unresolved
+ * wet component fails its route proof before any scalar amount is debited. */
+export const SPARSE_CM12_RETAINED_RIGID_DISPLACEMENT_HOPS = 64;
+
+export interface SparseCM12RetainedDensitySupportLayout {
+  readonly seedMeanBaseWords: number;
+  readonly openFractionBaseWords: number;
+  /** Interleaved a,b pairs; density is a*q_seed+b on each retained support. */
+  readonly coefficientBaseWords: readonly [number, number];
+  readonly dimensions: readonly [number, number, number];
+  /** Exact seed/static-open half-cell moments for the canonical moving-solid
+   * occupancy measure. Masks select whole physical h/2 subboxes. */
+  readonly rigid?: Readonly<{
+    readonly seedSubcellAmountBaseWords: number;
+    readonly staticOpenSubcellVolumeBaseWords: number;
+    readonly coveredMaskBaseWords: number;
+  }>;
+  readonly dynamic?: Readonly<{
+    readonly firstLeaf: number;
+    readonly leafCount: number;
+    /** Four numeric floats (coordinate xyz, allocation generation) per leaf. */
+    readonly stampBaseWords: readonly [number, number];
+  }>;
+}
+
+function sparseCM12RetainedDensitySupportWGSL(
+  layout: SparseCM12RetainedDensitySupportLayout | undefined,
+): string {
+  if (!layout) return /* wgsl */ `
+fn cm12RetainedDensitySupportCoefficientAtFine(_point:vec3f)->vec2f{
+  return vec2f(1.0,0.0);
+}
+fn cm12RetainedDensityRigidPointOpen(_point:vec3f)->bool{return true;}
+fn cm12RetainedDensityRetireCellSupport(_cell:u32){}
+fn cm12RetainedDensityRetireLeaf(_leaf:u32){}
+`;
+  const denseCount = layout.dimensions.reduce((a, b) => a * b, 1);
+  const dynamic = layout.dynamic;
+  const dynamicCount = dynamic?.leafCount ?? 0;
+  return /* wgsl */ `
+const CM12_RETAINED_SUPPORT_DIMENSIONS:vec3u=vec3u(${layout.dimensions.map(n => `${n}u`).join(",")});
+const CM12_RETAINED_DENSE_SUPPORT_COUNT:u32=${denseCount}u;
+const CM12_RETAINED_SUPPORT_COUNT:u32=${denseCount + dynamicCount * 512}u;
+const CM12_RETAINED_DYNAMIC_FIRST_LEAF:u32=${dynamic?.firstLeaf ?? 0}u;
+const CM12_RETAINED_DYNAMIC_LEAF_COUNT:u32=${dynamicCount}u;
+const CM12_RETAINED_SEED_MEAN_BASE:u32=${layout.seedMeanBaseWords}u;
+const CM12_RETAINED_OPEN_BASE:u32=${layout.openFractionBaseWords}u;
+fn cm12RetainedDensityAcceptedBank()->u32{
+  return u32(state[CM12_RETAINED_CONTROL_BASE+1u])&1u;
+}
+fn cm12RetainedDensityCoefficientBase(bank:u32)->u32{
+  return select(${layout.coefficientBaseWords[0]}u,${layout.coefficientBaseWords[1]}u,bank!=0u);
+}
+fn cm12RetainedDensityStampBase(bank:u32)->u32{
+  return select(${dynamic?.stampBaseWords[0] ?? 0}u,${dynamic?.stampBaseWords[1] ?? 0}u,bank!=0u);
+}
+fn cm12RetainedDensityDenseSupport(q:vec3i)->u32{
+  if(any(q<vec3i(0))||any(q>=vec3i(CM12_RETAINED_SUPPORT_DIMENSIONS))){return INVALID;}
+  let at=vec3u(q);
+  return at.x+CM12_RETAINED_SUPPORT_DIMENSIONS.x
+    *(at.y+CM12_RETAINED_SUPPORT_DIMENSIONS.y*at.z);
+}
+fn cm12RetainedDensityDynamicStampMatches(leaf:u32,bank:u32)->bool{
+  if(leaf<CM12_RETAINED_DYNAMIC_FIRST_LEAF
+    ||leaf-CM12_RETAINED_DYNAMIC_FIRST_LEAF>=CM12_RETAINED_DYNAMIC_LEAF_COUNT
+    ||!cm12WorldLeafAllocated(leaf)){return false;}
+  let at=cm12RetainedDensityStampBase(bank)
+    +4u*(leaf-CM12_RETAINED_DYNAMIC_FIRST_LEAF);
+  let coordinate=cm12WorldLeafCoordinate(leaf);
+  let stored=vec3f(state[at],state[at+1u],state[at+2u]);
+  return all(stored==vec3f(coordinate))&&state[at+3u]
+    ==f32(atomicLoad(&topologyArena[cm12WorldLeafRecord(leaf)+4u]));
+}
+fn cm12RetainedDensitySupportAt(q:vec3i,bank:u32)->u32{
+  let dense=cm12RetainedDensityDenseSupport(q);if(dense!=INVALID){return dense;}
+  let tile=vec3i(cm12WorldFloorToSpan(q.x,8),cm12WorldFloorToSpan(q.y,8),
+    cm12WorldFloorToSpan(q.z,8))/8;
+  let leaf=cm12WorldOwnerAt(tile);
+  if(!cm12RetainedDensityDynamicStampMatches(leaf,bank)
+    ||cm12WorldLeafSpanLog(leaf)!=0u){return INVALID;}
+  let local=q-8*cm12WorldLeafCoordinate(leaf);
+  if(any(local<vec3i(0))||any(local>=vec3i(8))){return INVALID;}
+  return CM12_RETAINED_DENSE_SUPPORT_COUNT
+    +512u*(leaf-CM12_RETAINED_DYNAMIC_FIRST_LEAF)
+    +u32(local.x+8*(local.y+8*local.z));
+}
+fn cm12RetainedDensitySupportCoefficientAtFine(point:vec3f)->vec2f{
+  let bank=cm12RetainedDensityAcceptedBank();
+  let index=cm12RetainedDensitySupportAt(vec3i(floor(point)),bank);
+  if(index==INVALID){return vec2f(0.0);}
+  let at=cm12RetainedDensityCoefficientBase(bank)+2u*index;
+  return vec2f(state[at],state[at+1u]);
+}
+fn cm12RetainedDensityRigidPointOpen(point:vec3f)->bool{
+${layout.rigid ? /* wgsl */ `
+  let index=cm12RetainedDensitySupportAt(vec3i(floor(point)),cm12RetainedDensityAcceptedBank());
+  if(index==INVALID){return true;}
+  let high=select(vec3u(0u),vec3u(1u),fract(point)>=vec3f(0.5));
+  let subcell=high.x+2u*high.y+4u*high.z;
+  return (u32(state[${layout.rigid.coveredMaskBaseWords}u+index])&(1u<<subcell))==0u;
+` : "  return true;"}
+}
+fn cm12RetainedDensitySupportOpen(index:u32,q:vec3i)->f32{
+  if(index<CM12_RETAINED_DENSE_SUPPORT_COUNT){return state[CM12_RETAINED_OPEN_BASE+index];}
+${layout.rigid ? /* wgsl */ `
+  let mask=u32(state[${layout.rigid.coveredMaskBaseWords}u+index]);
+  let floor=f32(cm12SolidVoxelFractionQ8(q))/255.0;var volume=0.0;
+  for(var subcell=0u;subcell<8u;subcell+=1u){
+    if((mask&(1u<<subcell))==0u){let lower=0.5*f32((subcell>>1u)&1u);
+      volume+=0.25*max(0.0,lower+0.5-max(lower,floor));}
+  }
+  return volume;
+` : ""}
+${layout.rigid ? "" : "  return 1.0-f32(cm12SolidVoxelFractionQ8(q))/255.0;"}
+}
+fn cm12RetainedDensitySupportSeedMean(index:u32)->f32{
+  if(index<CM12_RETAINED_DENSE_SUPPORT_COUNT){return state[CM12_RETAINED_SEED_MEAN_BASE+index];}
+  return 0.0;
+}
+fn cm12RetainedDensitySupportMomentsAt(q:vec3i,bank:u32)->vec2f{
+  let index=cm12RetainedDensitySupportAt(q,bank);
+  if(index==INVALID){return vec2f(0.0);}
+  let at=cm12RetainedDensityCoefficientBase(bank)+2u*index;
+  let open=cm12RetainedDensitySupportOpen(index,q);
+  return vec2f(state[at]*cm12RetainedDensitySupportSeedMean(index)+state[at+1u]*open,open);
+}
+fn cm12RetainedDensitySupportMeanAt(q:vec3i,bank:u32)->f32{
+  return cm12RetainedDensitySupportMomentsAt(q,bank).x;
+}
+fn cm12RetainedDensityRetireCellSupport(cell:u32){
+  if(!cm12RetainedDensityEnabled()||cm12RetainedDensityCellMean(cell)==0.0){return;}
+  let center=cellCenter(cell);let widths=cellWidths(cell);
+  let lower=vec3i(round(center-0.5*widths));
+  let upper=vec3i(round(center+0.5*widths));
+  for(var z=lower.z;z<upper.z;z+=1){for(var y=lower.y;y<upper.y;y+=1){
+    for(var x=lower.x;x<upper.x;x+=1){
+      let index=cm12RetainedDensitySupportAt(vec3i(x,y,z),cm12RetainedDensityAcceptedBank());
+      if(index==INVALID){continue;}
+      for(var bank=0u;bank<2u;bank+=1u){
+        let at=cm12RetainedDensityCoefficientBase(bank)+2u*index;
+        state[at]=0.0;state[at+1u]=0.0;
+      }
+    }
+  }}
+}
+fn cm12RetainedDensityRetireLeaf(leaf:u32){
+  if(!cm12RetainedDensityEnabled()){return;}
+  // This runs after all cell lanes have cleared the separately receipted
+  // retirement residue. A rerung never calls it: only physical retirement
+  // discards the retained amount and prevents same-slot reactivation ghosts.
+  for(var resolution=1u;resolution<=BRICK_FINE_RESOLUTION;resolution*=2u){
+    let range=templateBrickCellRange(leaf,resolution);
+    for(var local=0u;local<range.y;local+=1u){
+      state[CM12_RETAINED_INTEGRAL_BASE+range.x+local]=0.0;
+    }
+  }
+  if(leaf>=CM12_RETAINED_DYNAMIC_FIRST_LEAF
+    &&leaf-CM12_RETAINED_DYNAMIC_FIRST_LEAF<CM12_RETAINED_DYNAMIC_LEAF_COUNT){
+${layout.rigid ? /* wgsl */ `
+    // This slot may later describe another physical coordinate. Its old body
+    // mask has no meaning there, including when the retired page was dry.
+    let first=CM12_RETAINED_DENSE_SUPPORT_COUNT
+      +512u*(leaf-CM12_RETAINED_DYNAMIC_FIRST_LEAF);
+    for(var local=0u;local<512u;local+=1u){
+      state[${layout.rigid.coveredMaskBaseWords}u+first+local]=0.0;
+    }
+` : ""}
+    for(var bank=0u;bank<2u;bank+=1u){
+      let at=cm12RetainedDensityStampBase(bank)
+        +4u*(leaf-CM12_RETAINED_DYNAMIC_FIRST_LEAF);
+      // Generations are unsigned. A numeric negative stamp is impossible for
+      // a live allocation and remains finite in WGSL constant evaluation.
+      state[at+3u]=-1.0;
+    }
+  }
+}
+
+// Scalar dynamics advance a retained spatial generation, independently of
+// topology publication. Each support keeps the authored subcell function and
+// an affine density transform. Draining scales positive density; filling
+// mixes toward the open capacity. Thus native target amounts are reproduced
+// by exact linear integral algebra without fitting geometry to cell means.
+// This bounded first evolution representation is discontinuous at support
+// faces. In initially empty supports newly transported density is uniform;
+// it does not claim high-order curvature transport across those faces.
+fn cm12AdvanceRetainedDensitySupportAt(index:u32){
+  if(index>=CM12_RETAINED_SUPPORT_COUNT||!cm12RetainedDensityEnabled()){return;}
+  let bank=cm12RetainedDensityAcceptedBank();let next=1u-bank;
+  var q=vec3i(0);var priorValid=true;
+  if(index<CM12_RETAINED_DENSE_SUPPORT_COUNT){
+    q=vec3i(i32(index%CM12_RETAINED_SUPPORT_DIMENSIONS.x),
+      i32((index/CM12_RETAINED_SUPPORT_DIMENSIONS.x)%CM12_RETAINED_SUPPORT_DIMENSIONS.y),
+      i32(index/(CM12_RETAINED_SUPPORT_DIMENSIONS.x*CM12_RETAINED_SUPPORT_DIMENSIONS.y)));
+  }else{
+    let relative=index-CM12_RETAINED_DENSE_SUPPORT_COUNT;
+    let dynamicLeaf=relative/512u;let local=relative%512u;
+    let leaf=CM12_RETAINED_DYNAMIC_FIRST_LEAF+dynamicLeaf;
+    if(!cm12WorldLeafAllocated(leaf)){return;}
+    let coordinate=cm12WorldLeafCoordinate(leaf);
+    let leafLower=8*coordinate;
+    let leafUpper=leafLower+vec3i(i32(8u<<cm12WorldLeafSpanLog(leaf)));
+    if(all(leafLower>=vec3i(0))
+      &&all(leafUpper<=vec3i(CM12_RETAINED_SUPPORT_DIMENSIONS))){return;}
+    if(cm12WorldLeafSpanLog(leaf)!=0u){
+      if(local==0u){cm12RecordFailure(6u,leaf,vec4u(1u,0u,0u,0u));}return;
+    }
+    q=8*coordinate+vec3i(i32(local%8u),i32((local/8u)%8u),i32(local/64u));
+    priorValid=cm12RetainedDensityDynamicStampMatches(leaf,bank);
+    if(local==0u){
+      let stamp=cm12RetainedDensityStampBase(next)+4u*dynamicLeaf;
+      state[stamp]=f32(coordinate.x);state[stamp+1u]=f32(coordinate.y);
+      state[stamp+2u]=f32(coordinate.z);
+      state[stamp+3u]=f32(atomicLoad(&topologyArena[cm12WorldLeafRecord(leaf)+4u]));
+    }
+    // The dense support owns every point in its original domain, even if a
+    // sparse leaf has subsequently been recycled there. Publish the page's
+    // next stamp first: a clipped initial domain may end inside this page.
+    if(cm12RetainedDensityDenseSupport(q)!=INVALID){return;}
+  }
+  let oldAt=cm12RetainedDensityCoefficientBase(bank)+2u*index;
+  var coefficient=vec2f(0.0);
+  if(priorValid){coefficient=vec2f(state[oldAt],state[oldAt+1u]);}
+  let owner=compactOwnerCellAt(q);
+  if(owner.x!=INVALID&&brickActive(owner.y)){
+    let cell=owner.x;var before=cm12RetainedDensityCellMean(cell);
+    if(!priorValid){before=0.0;}
+    let targetMean=state[destinationDensity()+cell];let capacity=cellOpenFraction(cell);
+    if(!cm12ConservedValueValid(targetMean)||!cm12ConservedValueValid(before)){
+      cm12RecordFailure(4u,cell,vec4u(bitcast<u32>(targetMean),bitcast<u32>(before),0u,0u));return;
+    }
+    if(targetMean<before&&before>0.0){coefficient*=targetMean/before;}
+    else if(targetMean>before){
+      if(targetMean<=capacity&&before<capacity){
+        let added=(targetMean-before)/(capacity-before);
+        coefficient=vec2f((1.0-added)*coefficient.x,
+          (1.0-added)*coefficient.y+added);
+      }else if(capacity>0.0){
+        // Compression is retained as positive excess density; the CM12
+        // capacity repair stages decide how that amount subsequently moves.
+        coefficient.y+=(targetMean-before)/capacity;
+      }else{cm12RecordFailure(6u,cell,vec4u(2u,bitcast<u32>(targetMean),0u,0u));return;}
+    }
+  }else{coefficient=vec2f(0.0);}
+  let nextAt=cm12RetainedDensityCoefficientBase(next)+2u*index;
+  state[nextAt]=coefficient.x;state[nextAt+1u]=coefficient.y;
+}
+
+@compute @workgroup_size(64)
+fn advanceRetainedDensitySupport(@builtin(global_invocation_id)gid:vec3u){
+  if(gid.x>=CM12_RETAINED_DENSE_SUPPORT_COUNT){return;}
+  cm12AdvanceRetainedDensitySupportAt(gid.x);
+}
+fn cm12AdvanceRetainedDensityDynamicLeaf(leaf:u32,lane:u32){
+  if(!cm12RetainedDensityEnabled()||leaf<CM12_RETAINED_DYNAMIC_FIRST_LEAF
+    ||leaf-CM12_RETAINED_DYNAMIC_FIRST_LEAF>=CM12_RETAINED_DYNAMIC_LEAF_COUNT
+    ||!cm12WorldLeafAllocated(leaf)){return;}
+  let lower=8*cm12WorldLeafCoordinate(leaf);
+  let upper=lower+vec3i(i32(8u<<cm12WorldLeafSpanLog(leaf)));
+  if(all(lower>=vec3i(0))&&all(upper<=vec3i(CM12_RETAINED_SUPPORT_DIMENSIONS))){return;}
+  let first=CM12_RETAINED_DENSE_SUPPORT_COUNT
+    +512u*(leaf-CM12_RETAINED_DYNAMIC_FIRST_LEAF);
+  for(var local=lane;local<512u;local+=64u){cm12AdvanceRetainedDensitySupportAt(first+local);}
+}
+@compute @workgroup_size(64)
+fn advanceRetainedDensityDynamicSupportAccepted(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  cm12AdvanceRetainedDensityDynamicLeaf(acceptedLeafInvocation(wid.x),lane);
+}
+// Injection may have just activated a page before its accepted manifest is
+// compacted. Its edit transaction uses this bounded leaf-indexed variant.
+@compute @workgroup_size(64)
+fn advanceRetainedDensityDynamicSupport(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lane:u32){
+  cm12AdvanceRetainedDensityDynamicLeaf(CM12_RETAINED_DYNAMIC_FIRST_LEAF+wid.x,lane);
+}
+
+fn cm12RetainedDensityCellAllocated(cell:u32)->bool{
+  if(cell>=p.counts.x){return false;}
+  if(cell<ta(2u)){return cm12WorldLeafAllocated(cellBrick(cell));}
+  let page=(cell-ta(2u))/(BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION);
+  let pageBase=candidateTopologyPageBase(page);
+  // Dynamic field addresses are permanently page = leaf - initialLeaves,
+  // including signed-coordinate recycling. A free descriptor is zeroed and
+  // otherwise decodes as live host leaf zero. It is not a native cell.
+  let leaf=CM12_WDR_INITIAL_LEAVES+page;
+  return atomicLoad(&topologyArena[pageBase])==leaf
+    &&atomicLoad(&topologyArena[pageBase+1u])==BRICK_FINE_RESOLUTION
+    &&atomicLoad(&topologyArena[pageBase+2u])==BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION*BRICK_FINE_RESOLUTION
+    &&cm12WorldLeafAllocated(leaf);
+}
+fn cm12RetainedDensityIntegrateCellMoments(cell:u32,bank:u32)->vec2f{
+  if(!cm12RetainedDensityCellAllocated(cell)){return vec2f(0.0);}
+  let center=cellCenter(cell);let widths=cellWidths(cell);
+  let lower=vec3i(round(center-0.5*widths));
+  let upper=vec3i(round(center+0.5*widths));
+  var amount=vec2f(0.0);
+  for(var z=lower.z;z<upper.z;z+=1){var slice=vec2f(0.0);
+    for(var y=lower.y;y<upper.y;y+=1){var row=vec2f(0.0);
+      for(var x=lower.x;x<upper.x;x+=1){
+        row+=cm12RetainedDensitySupportMomentsAt(vec3i(x,y,z),bank);
+      }slice+=row;
+    }amount+=slice;
+  }
+  return amount/max(cellVolume(cell),1e-12);
+}
+fn cm12RetainedDensityIntegrateCell(cell:u32,bank:u32)->f32{
+  return cm12RetainedDensityIntegrateCellMoments(cell,bank).x;
+}
+
+// Construction installs exact seed/open integrals supplied by the field
+// compiler. A fractional aperture is a capacity, not permission to replace
+// the clipped seed integral by (unclipped mean)*(open fraction).
+@compute @workgroup_size(64)
+fn initializeRetainedDensityOpenSupport(@builtin(global_invocation_id)gid:vec3u){
+  let index=gid.x;if(index>=CM12_RETAINED_SUPPORT_COUNT
+    ||!cm12RetainedDensityEnabled()){return;}
+  for(var bank=0u;bank<2u;bank+=1u){
+    let at=cm12RetainedDensityCoefficientBase(bank)+2u*index;
+    state[at]=1.0;state[at+1u]=0.0;
+  }
+  if(index>=CM12_RETAINED_DENSE_SUPPORT_COUNT){return;}
+  let q=vec3i(i32(index%CM12_RETAINED_SUPPORT_DIMENSIONS.x),
+    i32((index/CM12_RETAINED_SUPPORT_DIMENSIONS.x)%CM12_RETAINED_SUPPORT_DIMENSIONS.y),
+    i32(index/(CM12_RETAINED_SUPPORT_DIMENSIONS.x*CM12_RETAINED_SUPPORT_DIMENSIONS.y)));
+  state[CM12_RETAINED_OPEN_BASE+index]=1.0-f32(cm12SolidVoxelFractionQ8(q))/255.0;
+}
+
+@compute @workgroup_size(64)
+fn adoptRetainedDensitySupportStamps(@builtin(global_invocation_id)gid:vec3u){
+  let local=gid.x;if(local>=CM12_RETAINED_DYNAMIC_LEAF_COUNT
+    ||!cm12RetainedDensityEnabled()){return;}
+  let leaf=CM12_RETAINED_DYNAMIC_FIRST_LEAF+local;
+  if(!cm12WorldLeafAllocated(leaf)){return;}
+  let coordinate=cm12WorldLeafCoordinate(leaf);
+  let generation=atomicLoad(&topologyArena[cm12WorldLeafRecord(leaf)+4u]);
+  for(var bank=0u;bank<2u;bank+=1u){
+    let at=cm12RetainedDensityStampBase(bank)+4u*local;
+    state[at]=f32(coordinate.x);state[at+1u]=f32(coordinate.y);
+    state[at+2u]=f32(coordinate.z);state[at+3u]=f32(generation);
+  }
+}
+
+@compute @workgroup_size(64)
+fn initializeRetainedDensityNativeIntegrals(@builtin(global_invocation_id)gid:vec3u){
+  let cell=gid.x;if(cell>=p.counts.x||!cm12RetainedDensityEnabled()){return;}
+  let moments=cm12RetainedDensityIntegrateCellMoments(cell,cm12RetainedDensityAcceptedBank());
+  let mean=moments.x;
+  state[CM12_RETAINED_INTEGRAL_BASE+cell]=mean;
+  state[p.stateOffsets0.x+cell]=mean;state[p.stateOffsets0.y+cell]=mean;
+${layout.rigid ? "  state[p.solidOffsets.x+cell]=moments.y;" : ""}
+}
+
+@compute @workgroup_size(64)
+fn refreshRetainedDensityNativeIntegralImage(@builtin(global_invocation_id)gid:vec3u){
+  let cell=gid.x;if(cell>=p.counts.x||!cm12RetainedDensityEnabled()){return;}
+  state[CM12_RETAINED_INTEGRAL_BASE+cell]=
+    cm12RetainedDensityIntegrateCell(cell,cm12RetainedDensityAcceptedBank());
+}
+
+@compute @workgroup_size(64)
+fn compileRetainedDensityNativeIntegrals(@builtin(global_invocation_id)gid:vec3u){
+  let cell=gid.x;if(cell>=p.counts.x||!cm12RetainedDensityEnabled()){return;}
+  let moments=cm12RetainedDensityIntegrateCellMoments(cell,1u-cm12RetainedDensityAcceptedBank());
+  let mean=moments.x;
+  if(cm12RetainedDensityCellAllocated(cell)&&cellActive(cell)){
+    let targetMean=state[destinationDensity()+cell];
+    let tolerance=max(2e-6,2e-6*max(abs(mean),abs(targetMean)));
+    if(abs(mean-targetMean)>tolerance){
+      cm12RecordFailure(6u,cell,vec4u(3u,bitcast<u32>(mean),bitcast<u32>(targetMean),
+        bitcast<u32>(cm12RetainedDensityCellMean(cell))));
+    }
+  }
+  state[CM12_RETAINED_INTEGRAL_BASE+cell]=mean;
+${layout.rigid ? "  state[p.solidOffsets.x+cell]=moments.y;" : ""}
+}
+
+@compute @workgroup_size(1)
+fn commitRetainedDensityGeneration(){
+  if(!cm12RetainedDensityEnabled()||atomicLoad(&topologyArena[cm12FailureBase()])!=0u){return;}
+  state[CM12_RETAINED_CONTROL_BASE+1u]=f32(1u-cm12RetainedDensityAcceptedBank());
+  state[CM12_RETAINED_CONTROL_BASE+2u]+=1.0;
+  state[CM12_RETAINED_CONTROL_BASE]=2.0;
+}
+`;
 }
 
 function sparseCM12RetainedDensityResidentWGSL(
@@ -159,6 +547,8 @@ fn cm12RetainedDensityEnabled()->bool{return false;}
 fn cm12RetainedDensityPhiMetres(_point:vec3f)->f32{return 1e6;}
 fn cm12RetainedDensityPhiAtFine(_point:vec3f)->f32{return 1e6;}
 fn cm12RetainedDensityCellMean(_cell:u32)->f32{return 0.0;}
+fn cm12RetainedDensityRetireCellSupport(_cell:u32){}
+fn cm12RetainedDensityRetireLeaf(_leaf:u32){}
 `;
   return /* wgsl */ `
 const CM12_RETAINED_FIELD_BASE:u32=${layout.fieldBaseWords}u;
@@ -184,7 +574,10 @@ fn cm12RetainedDensityBoxPhi(point:vec3f,lower:vec3f,upper:vec3f,
 fn cm12RetainedDensityPhiMetres(point:vec3f)->f32{
   let lower=cm12RetainedDensityVector(CM12_RETAINED_FIELD_BASE+4u);
   let upper=cm12RetainedDensityVector(CM12_RETAINED_FIELD_BASE+8u);
-  if(any(point<lower)||any(point>upper)){
+  let supportDimensions=vec3f(state[CM12_RETAINED_FIELD_BASE+7u],
+    state[CM12_RETAINED_FIELD_BASE+11u],state[CM12_RETAINED_FIELD_BASE+15u]);
+  let supportUpper=select(upper,lower+supportDimensions*p.frame.y,all(supportDimensions>vec3f(0.0)));
+  if(any(point<lower)||any(point>supportUpper)){
     return max(state[CM12_RETAINED_FIELD_BASE+3u],1e-6);
   }
   let count=u32(state[CM12_RETAINED_FIELD_BASE+1u]);var phi=1e6;
@@ -205,16 +598,35 @@ fn cm12RetainedDensityPhiMetres(point:vec3f)->f32{
   return phi;
 }
 fn cm12RetainedDensityPhiAtFine(point:vec3f)->f32{
+  let width=state[CM12_RETAINED_FIELD_BASE+3u];
+  // Supported fractional terrain occupies a bottom slab of its fine voxel.
+  // Use the same point mask as the compiler's exact open-domain integrals;
+  // a fractional voxel's centre can be solid even though its q8 is below255.
+  let solid=cm12SolidVoxelFractionQ8(vec3i(floor(point)));
+  if(solid>=255u||fract(point.y)<f32(solid)/255.0
+    ||!cm12RetainedDensityRigidPointOpen(point)){return width;}
   let origin=cm12RetainedDensityVector(CM12_RETAINED_FIELD_BASE+12u);
-  return cm12RetainedDensityPhiMetres(origin+point*p.frame.y);
+  let phi=cm12RetainedDensityPhiMetres(origin+point*p.frame.y);
+  if(state[CM12_RETAINED_CONTROL_BASE]<1.5){return phi;}
+  let coefficient=cm12RetainedDensitySupportCoefficientAtFine(point);
+  if(coefficient.y>=0.5){return width*(0.5-coefficient.y);}
+  if(coefficient.x+coefficient.y<=0.5){
+    return width*(0.5-coefficient.x-coefficient.y);
+  }
+  // In the unsaturated branch the half-density equation has an exact inverse.
+  // Keeping that implicit companion preserves analytic edge interpolation at
+  // the initial generation and queries the evolved density's own isosurface.
+  let threshold=(0.5-coefficient.y)/coefficient.x;
+  return phi-width*(0.5-threshold);
 }
 fn cm12RetainedDensityCellMean(cell:u32)->f32{
   return state[CM12_RETAINED_INTEGRAL_BASE+cell];
 }
+${sparseCM12RetainedDensitySupportWGSL(layout.support)}
 `;
 }
 
-function sparseCM12SolidOccupancyWGSL(
+export function sparseCM12SolidOccupancyWGSL(
   layout: SparseCM12SolidOccupancyLayout | undefined,
 ): string {
   if (!layout) return /* wgsl */ `
@@ -1694,6 +2106,7 @@ ${createSparseCM12CellAccessWGSL(SPARSE_CM12_ATOMIC_ARENA_READERS, true)}
 ${createSparseCM12RowAccessWGSL(SPARSE_CM12_ATOMIC_ARENA_READERS, true, "cm12RecordFailure(1u,cell,vec4u(begin,end,maximum,0u));")}
 fn cellOpenFraction(id:u32)->f32{
   if(!hasSolidBoundaries()){return 1.0;}
+${retainedDensityLayout?.support?.rigid ? "  if(cm12RetainedDensityEnabled()){return state[p.solidOffsets.x+id];}" : ""}
   return state[p.solidOffsets.x+id]*solidVoxelCellOpenFraction(id);
 }
 fn cellOpenVolume(id:u32)->f32{
@@ -1779,8 +2192,13 @@ fn refreshSparseCM12SolidWorldCell(cell:u32){
       }
     }
   }
-  state[solidVoxelCellOpenOffset()+cell]=select(0.0,
-    1.0-f32(solidQ8)/(255.0*f32(volume)),volume>0u);
+  let open=select(0.0,1.0-f32(solidQ8)/(255.0*f32(volume)),volume>0u);
+  state[solidVoxelCellOpenOffset()+cell]=open;
+${retainedDensityLayout?.support?.rigid ? /* wgsl */ `
+  if(cm12RetainedDensityEnabled()&&!hasRigidBodies()){
+    state[p.solidOffsets.x+cell]=open;
+  }
+` : ""}
 }
 
 @compute @workgroup_size(64)
@@ -2103,10 +2521,10 @@ fn cellTransportActive(cell:u32)->bool{return cellActive(cell)&&cellOpenVolume(c
 fn cm12VelocityExtensionRowOpen(row:u32)->bool{
   return rowAccepted(row)&&rowArea(row)>1e-8;
 }
-// A body can cover a wet cell in one frame. Keep its conservative mass receipt
-// while V_i is exactly zero; partial cells use the Sec. 3.6 excess scatter, and
-// an uncovered cell re-enters transport with the same mass instead of making
-// water disappear inside a moving solid.
+// A body can cover a wet cell in one frame. Conservative transport keeps that
+// donor receipt until retained rigid displacement evacuates it before scalar
+// publication. The legacy representation keeps it until the cell reopens;
+// partial cells use the ordinary Sec. 3.6 capacity redistribution.
 fn dynamicallyCoveredCell(cell:u32)->bool{
   return hasRigidBodies()&&cellActive(cell)&&cellVolume(cell)>1e-8
     &&state[p.solidOffsets.x+cell]<=1e-8;
@@ -4881,6 +5299,176 @@ fn finalizeSharpening(@builtin(global_invocation_id)gid:vec3u){
   let cell=acceptedTemplateCellInvocation(gid.x);if(cell!=INVALID){
     finalizeSharpeningCell(cell);}
 }
+${retainedDensityLayout?.support?.rigid ? /* wgsl */ `
+// Moving solids can remove every open subvolume from a wet native cell. Its
+// complete amount must leave that cell before it can become a retained field.
+// The static-open incidence graph supplies a bounded evacuation route through
+// the newly covered component. Moving-solid interiors are transient packet
+// addresses, never accepted liquid storage; static solids remain barriers.
+//
+// Conditioning's seven dead scalar planes hold immutable original amounts,
+// hop labels A/B, packet amounts A/B, outgoing weight sums, and receiver flags.
+// Integer shortest-hop labels form an acyclic graph toward open cells. Every
+// closed donor distributes its WHOLE floating amount to every descending
+// physical subface with area/distance weights. Receiver-owned gathers read an
+// immutable packet bank, so no native-ID winner, float atomics, or fixed-point
+// remainder changes the geometry or leaves liquid inside a closed cell.
+fn retainedRigidDisplacementLive()->bool{
+  return cm12RetainedDensityEnabled()&&hasRigidBodies();
+}
+fn retainedRigidDisplacementClosed(cell:u32)->bool{
+  return cellActive(cell)&&cellVolume(cell)>1e-8&&cellOpenVolume(cell)<=1e-8;
+}
+fn retainedRigidDisplacementWord(plane:u32,cell:u32)->u32{
+  return plane*p.counts.x+cell;
+}
+fn retainedRigidDisplacementUint(plane:u32,cell:u32)->u32{
+  return bitcast<u32>(atomicLoad(&conditioning[retainedRigidDisplacementWord(plane,cell)]));
+}
+fn retainedRigidDisplacementFloat(plane:u32,cell:u32)->f32{
+  return bitcast<f32>(atomicLoad(&conditioning[retainedRigidDisplacementWord(plane,cell)]));
+}
+fn retainedRigidDisplacementWeight(row:u32,own:f32,other:f32,cell:u32,neighbor:u32)->f32{
+  if(own*other>=0.0||!cellActive(neighbor)||solidVoxelCellOpenFraction(neighbor)<=1e-8){return 0.0;}
+  let distance=rowDistance(row);
+  let area=rowStaticArea(row)*solidVoxelRowOpenFraction(row)
+    *(abs(own)*distance)*(abs(other)*distance);
+  // Moving-body row openness is deliberately absent. This is the evacuation
+  // graph through a covered component, not an ordinary liquid transport face.
+  return area/max(length(cellCenter(cell)-cellCenter(neighbor)),1e-8);
+}
+fn retainedRigidDisplacementAdd(sum:vec2f,value:f32)->vec2f{
+  let next=sum.x+value;
+  let error=select((value-next)+sum.x,(sum.x-next)+value,sum.x>=value);
+  return vec2f(next,sum.y+error);
+}
+@compute @workgroup_size(64)
+fn initializeRetainedRigidDisplacement(@builtin(global_invocation_id)gid:vec3u){
+  if(!retainedRigidDisplacementLive()){return;}
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let amount=state[destinationDensity()+cell]*cellVolume(cell);
+  atomicStore(&conditioning[cell],bitcast<i32>(amount));
+  let distance=select(INVALID,0u,cellTransportActive(cell));
+  let packet=select(0.0,amount,retainedRigidDisplacementClosed(cell));
+  for(var bank=0u;bank<2u;bank+=1u){
+    atomicStore(&conditioning[retainedRigidDisplacementWord(1u+bank,cell)],bitcast<i32>(distance));
+    atomicStore(&conditioning[retainedRigidDisplacementWord(3u+bank,cell)],bitcast<i32>(packet));
+  }
+  atomicStore(&conditioning[retainedRigidDisplacementWord(5u,cell)],0);
+  atomicStore(&conditioning[retainedRigidDisplacementWord(6u,cell)],0);
+}
+fn propagateRetainedRigidDisplacementCell(cell:u32,bank:u32){
+  if(cell==INVALID||!retainedRigidDisplacementLive()){return;}
+  var distance=retainedRigidDisplacementUint(1u+bank,cell);
+  if(retainedRigidDisplacementClosed(cell)&&solidVoxelCellOpenFraction(cell)>1e-8){
+    for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
+      let row=incidenceRow(at);if(!rowAccepted(row)||solidVoxelRowOpenFraction(row)<=1e-8){continue;}
+      let own=termCoefficient(incidenceTerm(at));
+      let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+      for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
+        if(retainedRigidDisplacementWeight(row,own,termCoefficient(term),cell,neighbor)<=0.0){continue;}
+        let otherDistance=retainedRigidDisplacementUint(1u+bank,neighbor);
+        if(otherDistance<${SPARSE_CM12_RETAINED_RIGID_DISPLACEMENT_HOPS}u){distance=min(distance,otherDistance+1u);}
+      }
+    }
+  }
+  atomicStore(&conditioning[retainedRigidDisplacementWord(2u-bank,cell)],bitcast<i32>(distance));
+}
+@compute @workgroup_size(64)
+fn propagateRetainedRigidDisplacementAtoB(@builtin(global_invocation_id)gid:vec3u){
+  propagateRetainedRigidDisplacementCell(acceptedTemplateCellInvocation(gid.x),0u);
+}
+@compute @workgroup_size(64)
+fn propagateRetainedRigidDisplacementBtoA(@builtin(global_invocation_id)gid:vec3u){
+  propagateRetainedRigidDisplacementCell(acceptedTemplateCellInvocation(gid.x),1u);
+}
+@compute @workgroup_size(64)
+fn validateRetainedRigidDisplacement(@builtin(global_invocation_id)gid:vec3u){
+  if(!retainedRigidDisplacementLive()){return;}
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let distance=retainedRigidDisplacementUint(1u,cell);
+  var outgoing=vec2f(0.0);var receives=false;
+  if(distance!=INVALID&&solidVoxelCellOpenFraction(cell)>1e-8){
+    for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
+      let row=incidenceRow(at);if(!rowAccepted(row)||solidVoxelRowOpenFraction(row)<=1e-8){continue;}
+      let own=termCoefficient(incidenceTerm(at));
+      let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+      for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
+        let weight=retainedRigidDisplacementWeight(row,own,termCoefficient(term),cell,neighbor);
+        if(weight<=0.0){continue;}
+        let otherDistance=retainedRigidDisplacementUint(1u,neighbor);
+        if(otherDistance<distance){outgoing=retainedRigidDisplacementAdd(outgoing,weight);}
+        receives=receives||(otherDistance!=INVALID&&otherDistance>distance);
+      }
+    }
+  }
+  let weight=outgoing.x+outgoing.y;
+  atomicStore(&conditioning[retainedRigidDisplacementWord(5u,cell)],bitcast<i32>(weight));
+  atomicStore(&conditioning[retainedRigidDisplacementWord(6u,cell)],select(0,1,receives));
+  if(retainedRigidDisplacementClosed(cell)&&retainedRigidDisplacementFloat(0u,cell)>0.0
+    &&(distance==INVALID||weight<=0.0)){
+    cm12RecordFailure(6u,cell,vec4u(4u,bitcast<u32>(state[destinationDensity()+cell]),
+      bitcast<u32>(cellOpenFraction(cell)),distance));
+  }
+}
+fn gatherRetainedRigidDisplacementCell(cell:u32,bank:u32){
+  if(cell==INVALID||!retainedRigidDisplacementLive()
+    ||atomicLoad(&topologyArena[cm12FailureBase()])!=0u){return;}
+  let distance=retainedRigidDisplacementUint(1u,cell);
+  var packet=vec2f(0.0);
+  // Open receivers retain earlier arrivals. Covered transit nodes send their
+  // entire previous packet and retain only this round's incoming packets.
+  if(distance==0u){packet.x=retainedRigidDisplacementFloat(3u+bank,cell);}
+  if(retainedRigidDisplacementUint(6u,cell)!=0u){
+    for(var at=incidenceBegin(cell);at<incidenceEnd(cell);at+=1u){
+      let row=incidenceRow(at);if(!rowAccepted(row)||solidVoxelRowOpenFraction(row)<=1e-8){continue;}
+      let own=termCoefficient(incidenceTerm(at));
+      let begin=rowTermOffset(row);let end=begin+rowTermCount(row);
+      for(var term=begin;term<end;term+=1u){let neighbor=termCell(term);
+        let weight=retainedRigidDisplacementWeight(row,own,termCoefficient(term),cell,neighbor);
+        if(weight<=0.0){continue;}
+        let otherDistance=retainedRigidDisplacementUint(1u,neighbor);
+        if(otherDistance==INVALID||otherDistance<=distance){continue;}
+        let amount=retainedRigidDisplacementFloat(3u+bank,neighbor);
+        if(amount<=0.0){continue;}
+        let totalWeight=retainedRigidDisplacementFloat(5u,neighbor);
+        packet=retainedRigidDisplacementAdd(packet,amount*(weight/totalWeight));
+      }
+    }
+  }
+  atomicStore(&conditioning[retainedRigidDisplacementWord(4u-bank,cell)],bitcast<i32>(packet.x+packet.y));
+}
+@compute @workgroup_size(64)
+fn gatherRetainedRigidDisplacementAtoB(@builtin(global_invocation_id)gid:vec3u){
+  gatherRetainedRigidDisplacementCell(acceptedTemplateCellInvocation(gid.x),0u);
+}
+@compute @workgroup_size(64)
+fn gatherRetainedRigidDisplacementBtoA(@builtin(global_invocation_id)gid:vec3u){
+  gatherRetainedRigidDisplacementCell(acceptedTemplateCellInvocation(gid.x),1u);
+}
+@compute @workgroup_size(64)
+fn validateRetainedRigidDisplacementPackets(@builtin(global_invocation_id)gid:vec3u){
+  if(!retainedRigidDisplacementLive()||atomicLoad(&topologyArena[cm12FailureBase()])!=0u){return;}
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  let packet=retainedRigidDisplacementFloat(3u,cell);
+  if(!cm12ConservedValueValid(packet)||(retainedRigidDisplacementClosed(cell)&&packet!=0.0)){
+    cm12RecordFailure(6u,cell,vec4u(5u,bitcast<u32>(packet),retainedRigidDisplacementUint(1u,cell),0u));
+  }
+}
+@compute @workgroup_size(64)
+fn finalizeRetainedRigidDisplacement(@builtin(global_invocation_id)gid:vec3u){
+  if(!retainedRigidDisplacementLive()||atomicLoad(&topologyArena[cm12FailureBase()])!=0u){return;}
+  let cell=acceptedTemplateCellInvocation(gid.x);if(cell==INVALID){return;}
+  if(retainedRigidDisplacementClosed(cell)){state[destinationDensity()+cell]=0.0;return;}
+  let incoming=retainedRigidDisplacementFloat(3u,cell);if(incoming==0.0){return;}
+  let amount=retainedRigidDisplacementFloat(0u,cell)+incoming;
+  let mean=amount/cellVolume(cell);
+  if(!cm12ConservedValueValid(mean)){
+    cm12RecordFailure(4u,cell,vec4u(bitcast<u32>(mean),bitcast<u32>(amount),0u,0u));return;
+  }
+  state[destinationDensity()+cell]=mean;
+}
+` : ""}
 fn densityCapacityRepairGateOpen(gate:u32)->bool{
   return !EXP_DENSITY_CAPACITY_EARLY_EXIT||atomicLoad(
     &activity[DENSITY_CAPACITY_GATE_BASE+gate])!=0u;
@@ -9219,6 +9807,7 @@ fn publishCandidateTopologyDeltaWork(lid:vec3u,brick:u32,validBrick:bool){
   let publishCount=select(acceptedRange.y,candidateRange.y,candidateActive);
   for(var local=lane;local<publishCount;local+=64u){
     let cell=select(acceptedRange.x+local,candidateRange.x+local,candidateActive);
+    if(!candidateActive){cm12RetainedDensityRetireCellSupport(cell);}
     var rho=0.0;var gamma=1.0;var vx=0.0;var vy=0.0;var vz=0.0;var pressure=0.0;
     if(candidateActive&&!constructionActivation){
       rho=candidateState[candidateFieldIndex(0u,brick,local)];
@@ -9245,6 +9834,7 @@ fn publishCandidateTopologyDeltaWork(lid:vec3u,brick:u32,validBrick:bool){
     ${phase1QATransferredVelocityPublish}
   }
   workgroupBarrier();if(lane!=0u){return;}
+  if(!candidateActive){cm12RetainedDensityRetireLeaf(brick);}
   atomicStore(&activity[output+10u],select(0u,1u,candidateActive));
   atomicStore(&activity[output+12u],candidate);
   // Receipts describe exactly one accepted topology generation. Presentation

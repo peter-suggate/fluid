@@ -36,8 +36,10 @@ import {
   AdaptiveMassFrameCapture,
 } from "./adaptive-mass-frame-pipeline";
 import type { AdaptiveMassSolverOptions } from "./method";
-import { compileRetainedSceneDensity, compileRetainedSceneFineMeans } from "./sparse-cm12-retained-scene-density";
-import { compileRetainedOpenSceneFineMeans } from "./sparse-cm12-retained-open-density";
+import { assertRetainedSceneIsotropicLattice, bindRetainedSceneSupportLattice, compileRetainedSceneDensity,
+  type RetainedSceneDensity } from "./sparse-cm12-retained-scene-density";
+import { compileRetainedScenePreparationCache, type RetainedScenePreparationCache } from
+  "./sparse-cm12-retained-preparation-cache";
 import {
   initializeSparseBrickAtlasFromScene,
   materializeSparseBrickAtlasDensity,
@@ -645,6 +647,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       scene.fluid.initialLiquidVolumes?.some((volume) =>
         volume.shape !== "box") ?? false;
     let initiallyActiveBrickKeys: ReadonlySet<number> | undefined;
+    let retainedDensity: RetainedSceneDensity | null = null;
+    let retainedPreparationCache: RetainedScenePreparationCache | undefined;
     try {
       await runner.run([{
         id: "adaptive-mass.plan",
@@ -660,11 +664,15 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
           const fineResolution = options.brickFineResolution ?? 8;
           const resolutionForBrick = options.initialResolutionForQA === undefined
             ? undefined : () => options.initialResolutionForQA!;
-          const retained = compileRetainedSceneDensity(scene);
-          const initialFineDensity = retained ? compileRetainedOpenSceneFineMeans(retained,
-            dimensions!, scene.voxelDomain.finestCellSize_m, initialSolidWorld, {
-              seedMeans: compileRetainedSceneFineMeans(retained, dimensions!, scene.voxelDomain.finestCellSize_m),
-            }).effectiveMeans : undefined;
+          retainedDensity = compileRetainedSceneDensity(scene);
+          const retainedCellSize_m = Math.min(...sceneCellSizes_m(scene));
+          if (retainedDensity) {
+            assertRetainedSceneIsotropicLattice(retainedDensity, dimensions!, retainedCellSize_m);
+            retainedDensity = bindRetainedSceneSupportLattice(retainedDensity, dimensions!, retainedCellSize_m);
+            retainedPreparationCache = compileRetainedScenePreparationCache(retainedDensity,
+              dimensions!, retainedCellSize_m, initialSolidWorld, { rigid: rigidCouplingEnabled });
+          }
+          const initialFineDensity = retainedPreparationCache?.openMeans.effectiveMeans;
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
             brickFineResolution: fineResolution,
@@ -727,6 +735,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
             rigid: rigidCouplingEnabled ? {
               bodies: rigidSystem!.stateBuffer,
               exchange: rigidExchange!,
+              initialBodyCount: scene.rigidBodies.length,
               worldDimensions_m: fluidDomainPlan.dimensions.map((value, axis) =>
                 value * fluidDomainPlan.cellSize_m[axis]) as [number, number, number],
             } : undefined,
@@ -750,6 +759,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               options.topologyPageBudget
                 ?? (curvedInitialLiquidNeedsFineFrontier ? 1024 : undefined),
             solidWorld: initialSolidWorld,
+            retainedDensity,
+            retainedPreparationCache,
             refinementRegionParameters: packSparseCM12RefinementRegions(
               sceneRefinementRegions(scene), refinementRegionLattice(scene)),
             mode: qaToken === PRESENTATION_PUBLISHER_ORACLE_QA_TOKEN

@@ -11,6 +11,8 @@ import {
   solidWorldContentStamp,
 } from "../../core/solid-world";
 import type { SceneDescription } from "../../core/model";
+import { compileRetainedSceneDensity, type RetainedSceneDensity } from "../../methods/adaptive-mass/sparse-cm12-retained-scene-density";
+import type { RetainedScenePreparationCache } from "../../methods/adaptive-mass/sparse-cm12-retained-preparation-cache";
 import {
   refinementRegionLattice,
   sceneRefinementRegions,
@@ -109,6 +111,10 @@ export interface CM12SparseWorldFactoryConfig {
   readonly topologyPageCapacityMaximum?: number;
   /** Canonical static solid authority for construction and later live edits. */
   readonly solidWorld: SolidWorld;
+  /** Already compiled initial authority. Null explicitly selects unsupported
+   * legacy initialization; omission lets direct factory callers compile it. */
+  readonly retainedDensity?: RetainedSceneDensity | null;
+  readonly retainedPreparationCache?: RetainedScenePreparationCache;
   /** Packed initial refinement policy, installed without publishing a live edit. */
   readonly refinementRegionParameters: ArrayBuffer;
   readonly mode?: CM12SparseWorldResidentFactoryMode;
@@ -896,6 +902,9 @@ export async function createCM12SparseWorld(
                 config.scene.fluid.initialVelocity_m_s.y,
                 config.scene.fluid.initialVelocity_m_s.z,
               ] : undefined,
+              (config.retainedDensity === undefined
+                ? compileRetainedSceneDensity(config.scene) : config.retainedDensity) ?? undefined,
+              config.retainedPreparationCache,
             );
     resident.setRefinementRegionParameters(config.refinementRegionParameters);
   } catch (error) {
