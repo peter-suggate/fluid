@@ -82,6 +82,8 @@ import {
   type SparseCM12PressureJournal,
   type SparseCM12PressureJournalLayout,
 } from "./features/pressure-inspection/decoder";
+import { createSparseCM12WGSLPruner } from "./sparse-cm12-wgsl-pruning";
+export { sparseCM12WGSLForEntryPoints } from "./sparse-cm12-wgsl-pruning";
 import {
   createWebgpuSparseCM12ResidentWGSL,
   SPARSE_CM12_RETAINED_RIGID_DISPLACEMENT_HOPS,
@@ -812,130 +814,6 @@ SparseCM12DeviceCompilationCache {
   return cache;
 }
 
-/**
- * Retain the WGSL declarations and only the function call graph needed by a
- * small entry-point family. Metal otherwise compiles every function in the
- * monolithic CM12 module even when a pipeline names one presentation kernel.
- */
-export function sparseCM12WGSLForEntryPoints(source: string, roots: readonly string[]): string {
-  type FunctionSpan = { name: string; start: number; end: number; body: string };
-  type GlobalSpan = { name: string; start: number; end: number; text: string };
-  // Mask comments while preserving offsets/newlines. Generated WGSL is often
-  // deliberately compact (several declarations per line), so line anchoring
-  // misses real globals while an unmasked regex mistakes prose for syntax.
-  const syntaxCharacters = source.split("");
-  for (let index = 0; index < syntaxCharacters.length;) {
-    if (source[index] === "/" && source[index + 1] === "/") {
-      while (index < syntaxCharacters.length && source[index] !== "\n") {
-        syntaxCharacters[index++] = " ";
-      }
-    } else if (source[index] === "/" && source[index + 1] === "*") {
-      syntaxCharacters[index++] = " ";syntaxCharacters[index++] = " ";
-      while (index < syntaxCharacters.length
-        && !(source[index] === "*" && source[index + 1] === "/")) {
-        if (source[index] !== "\n") syntaxCharacters[index] = " ";
-        index += 1;
-      }
-      if (index < syntaxCharacters.length) {
-        syntaxCharacters[index++] = " ";syntaxCharacters[index++] = " ";
-      }
-    } else index += 1;
-  }
-  const syntaxSource = syntaxCharacters.join("");
-  const spans: FunctionSpan[] = [];
-  const declaration = /(?:@\w+(?:\([^)]*\))?\s*)*fn\s+([A-Za-z_]\w*)\s*\(/g;
-  for (let match = declaration.exec(syntaxSource); match;
-    match = declaration.exec(syntaxSource)) {
-    const open = syntaxSource.indexOf("{", declaration.lastIndex);
-    if (open < 0) throw new Error(`WGSL function ${match[1]} has no body`);
-    let depth = 0, end = open;
-    for (; end < syntaxSource.length; end += 1) {
-      const character = syntaxSource[end]!;
-      if (character === "{") depth += 1;
-      else if (character === "}" && --depth === 0) { end += 1; break; }
-    }
-    if (depth !== 0) throw new Error(`WGSL function ${match[1]} has an unclosed body`);
-    spans.push({ name: match[1]!, start: match.index, end,
-      body: syntaxSource.slice(open, end) });
-    declaration.lastIndex = end;
-  }
-  const byName = new Map(spans.map((span) => [span.name, span]));
-  const retained = new Set<string>();
-  const pending = roots.filter((root) => byName.has(root));
-  while (pending.length > 0) {
-    const name = pending.pop()!;
-    if (retained.has(name)) continue;
-    retained.add(name);
-    const body = byName.get(name)!.body;
-    for (const call of body.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)) {
-      const dependency = call[1]!;
-      if (byName.has(dependency) && !retained.has(dependency)) pending.push(dependency);
-    }
-  }
-  const insideFunction = (offset: number) => spans.some((span) =>
-    offset >= span.start && offset < span.end);
-  const globals: GlobalSpan[] = [];
-  const addSimpleGlobals = (pattern: RegExp) => {
-    for (let match = pattern.exec(syntaxSource); match;
-      match = pattern.exec(syntaxSource)) {
-      if (insideFunction(match.index)) continue;
-      globals.push({ name: match[1]!, start: match.index,
-        end: pattern.lastIndex, text: match[0] });
-    }
-  };
-  // WGSL has no executable global initializers. These declaration forms are
-  // therefore sufficient to close the lexical dependency graph of a sliced
-  // entry point. Keeping every declaration had left each tiny pipeline with
-  // the monolith's complete binding and workgroup-memory topology.
-  addSimpleGlobals(/(?:@\w+(?:\([^)]*\))?\s*)*\bvar(?:<[^>]+>)?\s*([A-Za-z_]\w*)[^;]*;/g);
-  addSimpleGlobals(/\b(?:const|override|alias)\s+([A-Za-z_]\w*)[^;]*;/g);
-  const structPattern = /\bstruct\s+([A-Za-z_]\w*)\s*\{/g;
-  for (let match = structPattern.exec(syntaxSource); match;
-    match = structPattern.exec(syntaxSource)) {
-    if (insideFunction(match.index)) continue;
-    const open = syntaxSource.indexOf("{", match.index);
-    let depth = 0, end = open;
-    for (; end < syntaxSource.length; end += 1) {
-      if (syntaxSource[end] === "{") depth += 1;
-      else if (syntaxSource[end] === "}" && --depth === 0) {
-        end += 1;
-        if (syntaxSource[end] === ";") end += 1;
-        break;
-      }
-    }
-    globals.push({ name: match[1]!, start: match.index, end,
-      text: source.slice(match.index, end) });
-    structPattern.lastIndex = end;
-  }
-  const globalByName = new Map(globals.map((span) => [span.name, span]));
-  const requiredGlobals = new Set<string>();
-  const globalPending: string[] = [];
-  const enqueueIdentifiers = (text: string) => {
-    for (const token of text.matchAll(/\b([A-Za-z_]\w*)\b/g)) {
-      const name = token[1]!;
-      if (globalByName.has(name) && !requiredGlobals.has(name)) globalPending.push(name);
-    }
-  };
-  for (const name of retained) enqueueIdentifiers(
-    source.slice(byName.get(name)!.start, byName.get(name)!.end));
-  while (globalPending.length > 0) {
-    const name = globalPending.pop()!;
-    if (requiredGlobals.has(name)) continue;
-    requiredGlobals.add(name);
-    enqueueIdentifiers(globalByName.get(name)!.text);
-  }
-  const removable = [
-    ...spans.filter((span) => !retained.has(span.name)),
-    ...globals.filter((span) => !requiredGlobals.has(span.name)),
-  ].sort((left, right) => left.start - right.start);
-  let result = "", cursor = 0;
-  for (const span of removable) {
-    if (span.start < cursor) continue;
-    result += source.slice(cursor, span.start);
-    cursor = span.end;
-  }
-  return result + source.slice(cursor);
-}
 const SPARSE_CM12_PHASE1_TRANSPORT_PROFILE_WORDS = 64;
 /** Params in the resident WGSL, including the fixed authored-region tail. */
 const SPARSE_CM12_FAILURE_PARAMETER_OFFSET = SPARSE_CM12_REFINEMENT_REGION_PARAMETER_OFFSET
@@ -5598,6 +5476,7 @@ export class WebGPUSparseCM12Resident {
         retainedDensityLayout,
       );
     const shaderSource = createResidentShaderSource();
+    const pruneResidentShader = createSparseCM12WGSLPruner(shaderSource);
     const sourceByShaderModule = new WeakMap<GPUShaderModule, string>();
     const shaderModuleFor = (source: string, label: string) => {
       let promise = deviceCompilation.shaderModules.get(source);
@@ -5638,8 +5517,8 @@ export class WebGPUSparseCM12Resident {
         "rejectSparseCM12FramePlanPresentationFaults", ...(SPARSE_CM12_COMMON_HEIGHT_ENABLED ? SPARSE_CM12_HEIGHT_ENTRY_POINTS : [])] as const;
     const retainedInitializationNames = retainedDensityLayout?.support
       ? ["initializeRetainedDensityOpenSupport", "adoptRetainedDensitySupportStamps", "initializeRetainedDensityNativeIntegrals"] : [];
-    const presentationShaderSource = sparseCM12WGSLForEntryPoints(
-      shaderSource, [...presentationShaderRoots, ...retainedInitializationNames],
+    const presentationShaderSource = pruneResidentShader(
+      [...presentationShaderRoots, ...retainedInitializationNames],
     );
     report("Compile first-frame presentation pipelines");
     const shaderModule = await shaderModuleFor(
@@ -5944,7 +5823,7 @@ export class WebGPUSparseCM12Resident {
           for (let chunkIndex = 0; chunkIndex < simulationNameChunks.length;
             chunkIndex += 1) {
             const chunkNames = simulationNameChunks[chunkIndex]!;
-            const chunkSource = sparseCM12WGSLForEntryPoints(shaderSource, chunkNames);
+            const chunkSource = pruneResidentShader(chunkNames);
             const chunkModule = await shaderModuleFor(chunkSource,
               `Sparse CM12 simulation shader ${chunkIndex + 1}/${simulationNameChunks.length}`);
             try {
@@ -5957,12 +5836,10 @@ export class WebGPUSparseCM12Resident {
           // Two pipelines from one entry point: the snapshot variant additionally
           // advances the device-side snapshot cursor and stamps its slot.
           const journalEntries = layout.journal === 0 ? [] : await (async () => {
+            const journalSource = pruneResidentShader(["journalIteration"]);
             const journalShaderModule = await shaderModuleFor(
-              sparseCM12WGSLForEntryPoints(shaderSource, ["journalIteration"]),
-              "Sparse CM12 journal snapshot shader",
+              journalSource, "Sparse CM12 journal snapshot shader",
             );
-            const journalSource = sparseCM12WGSLForEntryPoints(
-              shaderSource, ["journalIteration"]);
             try {
               return [["journalIterationSnapshot", await compiler.compileComputePipeline({
                 label: "Sparse CM12 journalIteration with field snapshot",
@@ -5974,18 +5851,17 @@ export class WebGPUSparseCM12Resident {
               deviceCompilation.shaderModules.delete(journalSource);
             }
           })();
+          const pruneAllocatorShader = createSparseCM12WGSLPruner(presentationAllocatorShaderSource);
           const presentationAllocatorEntries = await Promise.all([
             "allocateSparseCM12PresentationPages",
             "sortSparseCM12PresentationPageDirectory",
             "retireSparseCM12PresentationPages",
             "compactSparseCM12PresentationPageDirectory",
           ].map(async (entryPoint) => {
+            const allocatorSource = pruneAllocatorShader([entryPoint]);
             const module = await shaderModuleFor(
-              sparseCM12WGSLForEntryPoints(presentationAllocatorShaderSource, [entryPoint]),
-              `Sparse CM12 ${entryPoint} shader`,
+              allocatorSource, `Sparse CM12 ${entryPoint} shader`,
             );
-            const allocatorSource = sparseCM12WGSLForEntryPoints(
-              presentationAllocatorShaderSource, [entryPoint]);
             try {
               return [entryPoint, await compiler.compileComputePipeline({
                 label: `Sparse CM12 ${entryPoint}`,
