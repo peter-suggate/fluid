@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compileQuadraticSupports, IDENTITY_MATRIX, pullbackQuadratic, quadraticGradient, quadraticValue,
+import { canonicalAffineDeparture, compileQuadraticSupports, IDENTITY_MATRIX, pullbackQuadratic, quadraticGradient, quadraticValue,
   supportBoxWorklist, supportCount, supportOrigin, type AffineDeparture, type Quadratic,
   type QuadraticSupportGrid, type V3 } from "../tools/implicit-density/sparse-quadratic-pullback";
 import { gaussLegendre, integrateBoxDensity, mappedPoint, mappedSphereGradient, sphereQuadratic,
@@ -86,4 +86,29 @@ test("coarse CM12 center transfer conflicts with an exactly translated contained
   assert.ok(Math.abs(coarseNeighbor / mass - .25) < 1e-15);
   console.log(JSON.stringify({ geometricNativeMass: mass, coarseRetained, coarseNeighbor,
     prematureNativeTransferFraction: coarseNeighbor / mass, shapeProjectionApplied: false }));
+});
+
+test("GPU affine parameters use f32-canonical coefficients and a coherent inverse", () => {
+  for (const map of maps) {
+    const canonical = canonicalAffineDeparture(map);
+    assert.deepEqual(canonical.departure.matrix, map.matrix.map(Math.fround));
+    assert.deepEqual(canonical.departure.translation, map.translation.map(Math.fround));
+    for (const point of [[0, 0, 0], [.3, -.2, .1], [-.2, .1, -.3]] as const) {
+      const returned = mappedPoint(canonical.forward, mappedPoint(canonical.departure, point));
+      for (let axis = 0; axis < 3; axis++) assert.ok(Math.abs(returned[axis]! - point[axis]!) < 1e-7);
+    }
+  }
+  // Finite f64 inputs with determinant one must not upload an infinite f32
+  // coefficient and rely on device conversion/loop behaviour to reject it.
+  assert.throws(() => canonicalAffineDeparture({ matrix: [1e39, 0, 0, 0, 1e-39, 0, 0, 0, 1], translation: [0, 0, 0] }), /unsupported/);
+  assert.throws(() => canonicalAffineDeparture({ matrix: IDENTITY_MATRIX, translation: [1e39, 0, 0] }), /unsupported/);
+  assert.throws(() => canonicalAffineDeparture({ matrix: [1, 0, 0, 0, 0, 0, 0, 0, 1], translation: [0, 0, 0] }), /unsupported/);
+  assert.throws(() => canonicalAffineDeparture({ matrix: [16, 0, 0, 0, 1 / 16, 0, 0, 0, 1], translation: [0, 0, 0] }), /envelope/);
+});
+
+test("grid admission rejects unrepresentable f32 geometry and cell volumes", () => {
+  assert.throws(() => supportCount({ ...grid, origin: [1e39, 0, 0] }), /f32/);
+  assert.throws(() => supportCount({ ...grid, origin: [1e10, 0, 0] }), /f32/);
+  assert.throws(() => supportCount({ ...grid, h: 1e-40 }), /f32/);
+  assert.throws(() => supportCount({ ...grid, origin: [0, 0, 0], h: 1e20 }), /f32/);
 });

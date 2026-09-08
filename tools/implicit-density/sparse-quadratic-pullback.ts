@@ -14,9 +14,11 @@ import { gpuCompilationManagerFor } from "../../lib/core/gpu-compilation-manager
  * generation. There is no extrapolation, boundary clamping, mass correction,
  * initial-field resampling, or surface repair.
  *
- * Scope: only prescribed volume-preserving affine maps are admitted. A
- * requested worklist is a restricted field probe, not proof that the entire
- * transported liquid was covered. Advance publishes coefficients/coherence;
+ * Scope: only prescribed volume-preserving affine maps are admitted. Before
+ * publication, every potentially wet source support's full forward footprint
+ * must be in the candidate worklist. The conservative range/footprint test can
+ * require extra dry halo; a sampled zero integral never authorizes omission.
+ * Advance publishes coefficients/coherence and spatial coverage;
  * integrate is a SEPARATE diagnostic operation and may reject afterwards.
  * This is not a combined field-and-mass transaction or a production transport
  * implementation. Integral assertions apply to the independently enclosed
@@ -28,13 +30,44 @@ export type M3 = readonly [number, number, number, number, number, number, numbe
 export type Quadratic = readonly [number, number, number, number, number, number, number, number, number, number];
 export interface QuadraticSupportGrid { origin: V3; dimensions: V3; h: number }
 export interface AffineDeparture { matrix: M3; translation: V3 }
+export interface CanonicalAffineDeparture { departure: AffineDeparture; forward: AffineDeparture }
 export const IDENTITY_MATRIX: M3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 export const QUADRATIC_PATCH_WORDS = 16;
+const MIN_NORMAL_F32 = 2 ** -126;
+const MAX_AFFINE_COEFFICIENT = 8;
+
+/** Validate the actual f32 map uploaded to the GPU, then derive its inverse.
+ * This is constant-size operation data, not CPU cell/geometry expansion. */
+export function canonicalAffineDeparture(map: AffineDeparture): CanonicalAffineDeparture {
+  if (map.matrix.length !== 9 || map.translation.length !== 3) throw new Error("Invalid or unsupported prescribed departure map");
+  const m = map.matrix.map(Math.fround) as unknown as M3, t = map.translation.map(Math.fround) as unknown as V3;
+  const [a, b, c, d, e, f, g, h, i] = m;
+  const determinant = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+  if (![...m, ...t].every(Number.isFinite) || Math.abs(determinant - 1) > 1e-6) {
+    throw new Error("Invalid or unsupported prescribed departure map");
+  }
+  const inverse = [e * i - f * h, c * h - b * i, b * f - c * e,
+    f * g - d * i, a * i - c * g, c * d - a * f,
+    d * h - e * g, b * g - a * h, a * e - b * d].map(value => Math.fround(value / determinant)) as unknown as M3;
+  const translation = [0, 1, 2].map(row => Math.fround(-(inverse[3 * row]! * t[0]
+    + inverse[3 * row + 1]! * t[1] + inverse[3 * row + 2]! * t[2]))) as unknown as V3;
+  if (![...inverse, ...translation].every(Number.isFinite)
+    || [...m, ...inverse].some(value => Math.abs(value) > MAX_AFFINE_COEFFICIENT)) {
+    throw new Error("Invalid or unsupported inverse departure map (coefficient envelope8)");
+  }
+  return { departure: { matrix: m, translation: t }, forward: { matrix: inverse, translation } };
+}
 
 export function supportCount(grid: QuadraticSupportGrid): number {
   if (!(grid.h > 0) || !Number.isFinite(grid.h) || !grid.origin.every(Number.isFinite)
     || !grid.dimensions.every(value => Number.isSafeInteger(value) && value > 0)) {
     throw new Error("Invalid quadratic support grid");
+  }
+  const h = Math.fround(grid.h), volume = Math.fround(h * h * h);
+  if (!Number.isFinite(h) || !(volume >= MIN_NORMAL_F32) || !Number.isFinite(volume)
+    || grid.origin.some((value, axis) => !Number.isFinite(Math.fround(value))
+      || Math.abs(Math.fround(value) / h) + grid.dimensions[axis]! > 1_048_576)) {
+    throw new Error("Unsupported f32 quadratic grid envelope");
   }
   const count = grid.dimensions[0] * grid.dimensions[1] * grid.dimensions[2];
   if (count > 1_048_576) throw new Error("Prototype support capacity exceeds 1048576");
@@ -156,7 +189,11 @@ fn mapTranslation()->vec3f{return vec3f(p[11],p[15],p[19]);}
  // Compute the footprint in lattice-relative coordinates. Identity maps must
  // not manufacture tiny slivers across an exact support face through x/h.
  let gridOrigin=vec3f(p[0],p[1],p[2]);
- let start=B*vec3f(coord(id))+(B*gridOrigin-gridOrigin+mapTranslation())/p[3];
+ var start=B*vec3f(coord(id))+(B*gridOrigin-gridOrigin+mapTranslation())/p[3];
+ // Even an exactly representable ratio t/h can acquire a sliver from GPU
+ // division. The host uploads certified half-integer lattice offsets for
+ // identity rows; their integer-coordinate sums need no division at all.
+ for(var axis=0u;axis<3u;axis++){if((u(40u)&(1u<<axis))!=0u){start[axis]=f32(coord(id)[axis])-p[44u+axis];}}
  var lo=vec3f(3.4e38);var hi=vec3f(-3.4e38);
  for(var corner=0u;corner<8u;corner++){
   let x=start+B*vec3f(f32(corner&1u),f32((corner>>1u)&1u),f32(corner>>2u));
@@ -184,6 +221,37 @@ fn mapTranslation()->vec3f{return vec3f(p[11],p[15],p[19]);}
 }
 @compute @workgroup_size(64) fn validateDestination(@builtin(global_invocation_id)gid:vec3u){
  if(gid.x<u(21u)){checkNeighbors(work[gid.x],true);}}
+
+@compute @workgroup_size(64) fn validateWetCoverage(@builtin(global_invocation_id)gid:vec3u){
+ let id=gid.x;if(id>=u(7u)||atomicLoad(&receipt[0])!=0u||!valid(id,false)){return;}
+ // A zero quadrature result is not a dry certificate. This conservative
+ // quadratic range includes coefficient/evaluation roundoff in phi units.
+ if(conservativePhiRange(loadQ(id,false)).x>=0.5*p[24]){return;}
+ let A=mat3x3f(vec3f(p[28],p[32],p[36]),vec3f(p[29],p[33],p[37]),vec3f(p[30],p[34],p[38]));
+ let translation=vec3f(p[31],p[35],p[39]);let gridOrigin=vec3f(p[0],p[1],p[2]);
+ let originFine=gridOrigin/p[3];let sourceCoordinate=vec3f(coord(id));
+ var start=A*sourceCoordinate+(A*gridOrigin-gridOrigin+translation)/p[3];
+ for(var axis=0u;axis<3u;axis++){if((u(40u)&(1u<<axis))!=0u){start[axis]=sourceCoordinate[axis]+p[44u+axis];}}
+ var lo=vec3f(3.4e38);var hi=vec3f(-3.4e38);
+ for(var corner=0u;corner<8u;corner++){
+  let x=start+A*vec3f(f32(corner&1u),f32((corner>>1u)&1u),f32(corner>>2u));lo=min(lo,x);hi=max(hi,x);
+ }
+ // Half-integer translations on identity rows are exact for this <=2^20
+ // lattice. Other rows get a conservative f32 inverse/evaluation envelope.
+ // Its possible extra dry halo is deliberate; it never trims a footprint.
+ let absoluteA=mat3x3f(abs(A[0]),abs(A[1]),abs(A[2]));
+ var roundoff=8e-6*(vec3f(1.0)+absoluteA*(abs(originFine)+abs(sourceCoordinate)+vec3f(1.0))
+  +abs(originFine)+abs(translation/p[3]));
+ for(var axis=0u;axis<3u;axis++){if((u(40u)&(1u<<axis))!=0u){roundoff[axis]=0.0;}}
+ lo-=roundoff;hi+=roundoff;
+ if(!all(abs(lo)<=vec3f(16777216.0))||!all(abs(hi)<=vec3f(16777216.0))){fail(4u,id);return;}
+ let a=vec3i(floor(lo));let b=vec3i(ceil(hi))-vec3i(1);let span=b-a+vec3i(1);
+ if(any(span<=vec3i(0))||any(span>vec3i(i32(u(23u))))||u32(span.x*span.y*span.z)>u(23u)){fail(4u,id);return;}
+ for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
+  if(!valid(cell(vec3i(x,y,z)),true)){fail(32u,id);return;}
+ }}}
+ atomicAdd(&receipt[4],1u);atomicAdd(&receipt[5],u32(span.x*span.y*span.z));
+}
 
 // Integrate the clamped quadratic EXACTLY along x after splitting at its
 // q=0 and q=1 roots, then bounded adaptive 8-point Gauss in y/z. A nested-rule
@@ -298,7 +366,8 @@ fn closestRoot(a:f32,b:f32,c:f32,lo:f32,hi:f32)->f32{
 `;
 
 export interface QuadraticSample { point: V3; direction?: V3; minimum?: number; maximum?: number }
-export interface PullbackReceipt { generation: number; supports: number; donorVisits: number }
+export interface PullbackReceipt { generation: number; supports: number; donorVisits: number;
+  potentiallyWetSourceSupports: number; forwardCoverageVisits: number }
 
 export class GPUQuadraticPullback {
   private bank = 0;
@@ -315,8 +384,8 @@ export class GPUQuadraticPullback {
   static async create(device: GPUDevice, grid: QuadraticSupportGrid, width: number,
     records: Float32Array, tolerance = 2e-6): Promise<GPUQuadraticPullback> {
     const count = supportCount(grid);
-    if (!(width > 0) || !Number.isFinite(width) || records.length !== 16 * count
-      || !(tolerance > 0) || !Number.isFinite(tolerance)) throw new Error("Invalid quadratic field input");
+    if (!(Math.fround(width) >= MIN_NORMAL_F32) || !Number.isFinite(Math.fround(width)) || records.length !== 16 * count
+      || !(Math.fround(tolerance) >= MIN_NORMAL_F32) || !Number.isFinite(Math.fround(tolerance))) throw new Error("Invalid quadratic field input");
     const compiler = gpuCompilationManagerFor(device);
     const module = compiler.createShaderModule({ label: "Research: coherent current quadratic pullback", code: QUADRATIC_PULLBACK_WGSL });
     const layout = device.createBindGroupLayout({ entries: Array.from({ length: 7 }, (_, binding) => ({
@@ -324,7 +393,7 @@ export class GPUQuadraticPullback {
       buffer: { type: [0, 2, 3, 5].includes(binding) ? "read-only-storage" as const : "storage" as const },
     })) });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const names = ["validateSource", "pullback", "validateDestination", "integrate", "sample"];
+    const names = ["validateSource", "pullback", "validateDestination", "validateWetCoverage", "integrate", "sample"];
     const pipelines = new Map<string, GPUComputePipeline>();
     try {
       for (const entryPoint of names) pipelines.set(entryPoint, await compiler.compileComputePipeline({
@@ -351,9 +420,19 @@ export class GPUQuadraticPullback {
         if (id >= count || seen.has(id)) throw new Error("Invalid or duplicate destination support");
         seen.add(id);
       }
-      const values = new Float32Array(32), words = new Uint32Array(values.buffer);
+      const canonical = canonicalAffineDeparture(map);
+      const values = new Float32Array(48), words = new Uint32Array(values.buffer);
       values.set([...this.grid.origin, this.grid.h]); words.set([...this.grid.dimensions, count], 4);
-      for (let row = 0; row < 3; row++) values.set([...map.matrix.slice(row * 3, row * 3 + 3), map.translation[row]!], 8 + 4 * row);
+      for (let row = 0; row < 3; row++) {
+        values.set([...canonical.departure.matrix.slice(row * 3, row * 3 + 3), canonical.departure.translation[row]!], 8 + 4 * row);
+        values.set([...canonical.forward.matrix.slice(row * 3, row * 3 + 3), canonical.forward.translation[row]!], 28 + 4 * row);
+        const offset = canonical.forward.translation[row]! / Math.fround(this.grid.h);
+        const exactRow = [0, 1, 2].every(column => canonical.forward.matrix[3 * row + column] === Number(row === column)
+          && canonical.departure.matrix[3 * row + column] === Number(row === column));
+        if (exactRow && Number.isInteger(2 * offset) && Math.abs(offset) <= 1_048_576) {
+          words[40]! |= 1 << row; values[44 + row] = offset;
+        }
+      }
       words.set([this.epoch, targets.length, queries.length / 8, maxDonors], 20);
       values[24] = this.width; values[25] = this.tolerance;
       const buffer = (label: string, size: number, usage: GPUBufferUsageFlags) => {
@@ -367,9 +446,9 @@ export class GPUQuadraticPullback {
       const parameters = upload("Quadratic immutable operation parameters", values);
       const worklist = upload("Quadratic requested fixed supports", targets);
       const queryBuffer = upload("Quadratic field queries", queries);
-      const fault = upload("Quadratic publication receipt", new Uint32Array([0, 0xffffffff, 0, 0]), GPUBufferUsage.COPY_SRC);
+      const fault = upload("Quadratic publication receipt", new Uint32Array([0, 0xffffffff, 0, 0, 0, 0, 0, 0]), GPUBufferUsage.COPY_SRC);
       const result = buffer("Quadratic diagnostics", 4 * resultWords, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
-      const readback = buffer("Quadratic diagnostics and receipt readback", 16 + 4 * resultWords, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
+      const readback = buffer("Quadratic diagnostics and receipt readback", 32 + 4 * resultWords, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
       const binding = this.device.createBindGroup({ layout: this.layout,
         entries: [this.banks[this.bank]!, this.banks[this.bank ^ 1]!, parameters, worklist, fault, queryBuffer, result]
           .map((buffer, binding) => ({ binding, resource: { buffer } })),
@@ -379,17 +458,18 @@ export class GPUQuadraticPullback {
       // with a smaller/disjoint worklist must not publish those old writes.
       if (names.includes("pullback")) encoder.clearBuffer(this.banks[this.bank ^ 1]!);
       for (const name of names) {
-        const invocations = name === "validateSource" ? count : name === "sample" ? queries.length / 8 : targets.length;
+        const invocations = name === "validateSource" || name === "validateWetCoverage" ? count
+          : name === "sample" ? queries.length / 8 : targets.length;
         if (invocations === 0) continue;
         const pass = encoder.beginComputePass(); pass.setPipeline(this.pipelines.get(name)!); pass.setBindGroup(0, binding);
         pass.dispatchWorkgroups(Math.ceil(invocations / 64)); pass.end();
       }
-      encoder.copyBufferToBuffer(fault, 0, readback, 0, 16);
-      encoder.copyBufferToBuffer(result, 0, readback, 16, 4 * resultWords);
+      encoder.copyBufferToBuffer(fault, 0, readback, 0, 32);
+      encoder.copyBufferToBuffer(result, 0, readback, 32, 4 * resultWords);
       this.device.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ);
       const mapped = readback.getMappedRange();
-      const receipt = new Uint32Array(mapped, 0, 4).slice();
-      const output = new Float32Array(mapped, 16, resultWords).slice(); readback.unmap();
+      const receipt = new Uint32Array(mapped, 0, 8).slice();
+      const output = new Float32Array(mapped, 32, resultWords).slice(); readback.unmap();
       if (receipt[0]) throw new Error(`Quadratic generation rejected: fault=${receipt[0]} id=${receipt[1]} generation=${this.epoch}`
         + (names.includes("integrate") ? ` maxEstimatedMeanError=${new Float32Array(receipt.buffer)[2]} maxXSlices=${receipt[3]}` : ""));
       return { receipt, values: output };
@@ -397,17 +477,14 @@ export class GPUQuadraticPullback {
   }
 
   async advance(map: AffineDeparture, targets: Uint32Array, maxDonors = 64): Promise<PullbackReceipt> {
-    const m = map.matrix;
-    const determinant = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6])
-      + m[2] * (m[3] * m[7] - m[4] * m[6]);
-    if (![...m, ...map.translation].every(Number.isFinite) || Math.abs(determinant - 1) > 1e-6 || targets.length === 0
-      || !Number.isInteger(maxDonors) || maxDonors < 1 || maxDonors > 256 || this.epoch >= 1_000_000) {
+    if (targets.length === 0 || !Number.isInteger(maxDonors) || maxDonors < 1 || maxDonors > 256 || this.epoch >= 1_000_000) {
       throw new Error("Invalid or unsupported prescribed departure map");
     }
-    const { receipt } = await this.run(["validateSource", "pullback", "validateDestination"], targets, map, undefined, 1, maxDonors);
+    const { receipt } = await this.run(["validateSource", "pullback", "validateDestination", "validateWetCoverage"], targets, map, undefined, 1, maxDonors);
     if (receipt[3] !== targets.length) throw new Error("Incomplete quadratic generation receipt");
     this.bank ^= 1; this.epoch++;
-    return { generation: this.epoch, supports: targets.length, donorVisits: receipt[2]! };
+    return { generation: this.epoch, supports: targets.length, donorVisits: receipt[2]!,
+      potentiallyWetSourceSupports: receipt[4]!, forwardCoverageVisits: receipt[5]! };
   }
 
   async integrate(targets: Uint32Array): Promise<Float32Array> {

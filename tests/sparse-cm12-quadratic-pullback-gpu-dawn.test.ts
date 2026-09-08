@@ -111,7 +111,9 @@ function checkCompleteField(records: Float32Array, generation: number,
         try {
           const old = await field.sample([{ point: [.04, 0, 0] }]); assert.equal(old[1], 0);
           await field.advance({ matrix: IDENTITY_MATRIX, translation: [-.1, 0, 0] },
-            supportBoxWorklist(grid, [5, 1, 1], [31, 31, 31]));
+            // Include every translated potentially wet source support, also
+            // the wet domain-edge rows. Local queries below remain unchanged.
+            supportBoxWorklist(grid, [4, 0, 0], [32, 32, 32]));
           const sample = await field.sample([{ point: [.025, 0, 0], direction: [1, 0, 0], maximum: .024 }]);
           near(sample[5]!, .015, 2e-7, "new plane root inside formerly dry support");
           near(sample[6]!, 1, 1e-7, "plane normal");
@@ -188,8 +190,11 @@ function checkCompleteField(records: Float32Array, generation: number,
       });
 
       await t.test("failed partial writes cannot become valid during a disjoint retry", async () => {
+        // This deliberately tests disjoint geometry publication with an
+        // entirely dry field; a wet-field disjoint retry must fail coverage.
+        const dry: Quadratic = [1, 1, 0, 0, 0, 0, 0, 0, 0, 0];
         const field = await GPUQuadraticPullback.create(device!, grid, width,
-          compileQuadraticSupports(grid, sphereQuadratic([0, 0, 0], radius)));
+          compileQuadraticSupports(grid, dry));
         try {
           const failedTarget = at(12, 12, 12), successfulTarget = at(20, 20, 20);
           await assert.rejects(field.advance({ matrix: IDENTITY_MATRIX, translation: [-.0125, 0, 0] },
@@ -200,6 +205,68 @@ function checkCompleteField(records: Float32Array, generation: number,
           assert.equal(field.generation, 2); assert.equal(words[16 * successfulTarget + 10], 2);
           assert.equal(words[16 * failedTarget + 10], 0, "failed candidate record is absent from accepted retry");
           assert.equal(Array.from({ length: records.length / 16 }, (_, id) => words[16 * id + 10]).filter(tag => tag === 2).length, 1);
+        } finally { field.destroy(); }
+      });
+
+      await t.test("omitted wet support rejects atomically; complete shifted retry erases failed records", async () => {
+        const field = await GPUQuadraticPullback.create(device!, grid, width,
+          compileQuadraticSupports(grid, sphereQuadratic([0, 0, 0], radius)));
+        try {
+          const missing = at(16, 16, 16), before = await field.readCurrentRecordsForQA();
+          const incomplete = supportBoxWorklist(grid, [0, 0, 0], [32, 32, 32]).filter(id => id !== missing);
+          await assert.rejects(field.advance({ matrix: IDENTITY_MATRIX, translation: [0, 0, 0] }, incomplete), /fault=32 /);
+          assert.equal(field.generation, 1);
+          const after = await field.readCurrentRecordsForQA();
+          assert.deepEqual(new Uint32Array(after.buffer), new Uint32Array(before.buffer), "coverage rejection preserves the accepted field");
+          const receipt = await field.advance({ matrix: IDENTITY_MATRIX, translation: [-.0125, 0, 0] }, nativeBox);
+          assert.ok(receipt.potentiallyWetSourceSupports > 0);
+          assert.ok(receipt.forwardCoverageVisits >= receipt.potentiallyWetSourceSupports);
+          const records = await field.readCurrentRecordsForQA(), words = new Uint32Array(records.buffer);
+          assert.equal(Array.from({ length: records.length / 16 }, (_, id) => words[16 * id + 10]).filter(tag => tag === 2).length,
+            nativeBox.length, "failed whole-domain candidate cannot leak into the smaller successful retry");
+          near(sum(await field.integrate(nativeBox)), sphereRampMass(radius, width), sphereRampMass(radius, width) * 2e-5,
+            "complete retry preserves independently enclosed mass");
+          console.log(JSON.stringify({ fixture: "coverage-reject-and-complete-retry", ...receipt }));
+        } finally { field.destroy(); }
+      });
+
+      await t.test("full forward footprint rejects an omitted transported corner", async () => {
+        const field = await GPUQuadraticPullback.create(device!, grid, width,
+          compileQuadraticSupports(grid, sphereQuadratic([0, 0, 0], radius)));
+        try {
+          const missingCorner = at(16, 17, 17);
+          const targets = supportBoxWorklist(grid, [1, 1, 1], [32, 32, 32]).filter(id => id !== missingCorner);
+          await assert.rejects(field.advance({ matrix: IDENTITY_MATRIX, translation: [-.0125, -.0125, -.0125] }, targets), /fault=32 /);
+          assert.equal(field.generation, 1);
+        } finally { field.destroy(); }
+      });
+
+      await t.test("certified dry supports can be omitted while preserving all potentially wet coverage", async () => {
+        const field = await GPUQuadraticPullback.create(device!, grid, width,
+          compileQuadraticSupports(grid, sphereQuadratic([0, 0, 0], radius)));
+        try {
+          const targets = nativeBox.filter(id => id !== at(8, 8, 8));
+          const receipt = await field.advance({ matrix: IDENTITY_MATRIX, translation: [0, 0, 0] }, targets);
+          assert.ok(receipt.potentiallyWetSourceSupports > 0 && receipt.potentiallyWetSourceSupports < targets.length);
+          near(sum(await field.integrate(targets)), sphereRampMass(radius, width), sphereRampMass(radius, width) * 2e-5,
+            "dry omission does not change independently integrated mass");
+          console.log(JSON.stringify({ fixture: "certified-dry-omission", ...receipt }));
+        } finally { field.destroy(); }
+      });
+
+      await t.test("uncertain range cannot be declared dry from a zero quadrature result", async () => {
+        // This positive definite polynomial is analytically above width/2
+        // everywhere, but the conservative finite-box bound near its minimum
+        // is unresolved. The strict probe deliberately requires that halo.
+        const dry: Quadratic = [width / 2 + 1e-7, 0, 0, 0, 1, 1, 1, 0, 0, 0];
+        const field = await GPUQuadraticPullback.create(device!, grid, width, compileQuadraticSupports(grid, dry));
+        try {
+          assert.equal(sum(await field.integrate(nativeBox)), 0);
+          await assert.rejects(field.advance({ matrix: IDENTITY_MATRIX, translation: [0, 0, 0] }, Uint32Array.of(0)), /fault=32 /);
+          assert.equal(field.generation, 1);
+          const receipt = await field.advance({ matrix: IDENTITY_MATRIX, translation: [0, 0, 0] }, nativeBox);
+          assert.ok(receipt.potentiallyWetSourceSupports > 0, "uncertain supports were retained despite measured zero mass");
+          assert.equal(sum(await field.integrate(nativeBox)), 0);
         } finally { field.destroy(); }
       });
 
