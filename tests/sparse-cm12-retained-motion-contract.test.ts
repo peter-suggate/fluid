@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  evaluateRetainedSceneDensity, integrateRetainedSceneDensity, retainedSceneDensity,
+  evaluateRetainedSceneDensity, evaluateRetainedScenePhi, integrateRetainedSceneDensity, retainedSceneDensity,
   type RetainedScenePoint,
 } from "../lib/methods/adaptive-mass/sparse-cm12-retained-scene-density";
 
@@ -135,4 +135,89 @@ test("M0, centroid and covariance do not uniquely determine a general half-densi
   }
   assert.ok(plus(.95) > .5 && minus(.95) < .5);
   assert.ok(plus(-.95) < .5 && minus(-.95) > .5);
+});
+
+// Preserve the rejected 2026-09-08 endpoint formula as a negative control, not
+// as an oracle for a corrected production function. Its two non-strict guards
+// erase the seed value at exactly the endpoints of the attainable q interval.
+function endpointCompanionNegativeControl(phi: number, a: number, b: number, width: number): number {
+  if (b >= .5) return width * (.5 - b);
+  if (a + b <= .5) return width * (.5 - a - b);
+  return phi - width * (.5 - (.5 - b) / a);
+}
+
+test("implicit zero oracle rejects endpoint shortcuts that label dry or wet density as half density", () => {
+  const width = .05;
+  for (const [a, b, seed, expectedDensity] of [
+    [.5, 0, 0, 0], [.5, 0, .5, .25], // a+b=.5 does not make the entire support q=.5.
+    [.5, .5, .5, .75], [.5, .5, 1, 1], // b=.5 does not make wet seed points q=.5.
+  ]) {
+    const phi = width * (.5 - seed), actualDensity = a * clamp(.5 - phi / width) + b;
+    close(actualDensity, expectedDensity);
+    assert.equal(endpointCompanionNegativeControl(phi, a, b, width), 0);
+    assert.notEqual(actualDensity, .5, "an implicit zero must imply the same density's isovalue");
+  }
+  // Away from both endpoints, the inverse ramp has the correct signs/zeros.
+  // This isolates the failed boundary cases rather than blaming all inverses.
+  for (const phi of [-.05, -.02, -.005, .01, .05]) {
+    const a = .75, b = .125, q = a * clamp(.5 - phi / width) + b;
+    assert.equal(Math.sign(endpointCompanionNegativeControl(phi, a, b, width)), Math.sign(.5 - q));
+  }
+});
+
+test("captured full-fine half-drain coefficients produce a false zero inside actual empty point support", () => {
+  // Actual GPU capture: step1, dense index10668, a=.5,b=0, published phi=0;
+  // seed mean=.00018469570204615593. Provenance and raw banks live under
+  // artifacts/retained-imposed-flow/sphere-full-fine/. This test reconstructs
+  // the primitive independently so it does not require archived GPU artifacts.
+  const field = retainedSceneDensity({ generation: 1, transitionWidth: .05,
+    domain: { lower: [-.8, 0, -.8], upper: [.8, 1.6, .8] },
+    primitives: [{ kind: "ellipsoid", center: [-.15, .8, 0], radii: [.25, .25, .25] }] });
+  const point: RetainedScenePoint = [-.175, .675, -.275];
+  const seed = evaluateRetainedSceneDensity(field, point), a = .5, b = 0;
+  assert.equal(seed, 0); assert.equal(a * seed + b, 0);
+  assert.equal(endpointCompanionNegativeControl(evaluateRetainedScenePhi(field, point), a, b, field.transitionWidth), 0);
+  const receipt = integrateRetainedSceneDensity(field, { lower: [-.2, .65, -.3], upper: [-.15, .7, -.25] },
+    { absoluteTolerance: 1e-13, maximumRectangles: 8192 });
+  assert.ok(receipt.toleranceMet);
+  assert.ok(receipt.mean > 1e-4 && receipt.mean < 3e-4,
+    "the support has a tiny corner amount; its center has no liquid and no half-density root");
+  // The support never reaches seed=1: its closest sphere distance already
+  // exceeds the q=1 radius. Thus the exact retained field has NO q=.5 anywhere
+  // inside this box, while the shortcut returns zero over the entire volume.
+  const nearestPoint: RetainedScenePoint = [-.15, .7, -.25];
+  assert.ok(evaluateRetainedSceneDensity(field, nearestPoint) < .11);
+});
+
+test("exact half-density plateaus do not define a regular surface even after false zeros are removed", () => {
+  const width = .05;
+  const seed = (x: number) => clamp(.5 - x / width);
+  const drained = (x: number) => .5 * seed(x);
+  const filled = (x: number) => .5 * seed(x) + .5;
+  const exactImplicit = (q: number) => width * (.5 - q);
+  for (const x of [-.05, -.04, -.03]) {
+    assert.equal(drained(x), .5);
+    assert.equal(exactImplicit(drained(x)), 0);
+    assert.equal((exactImplicit(drained(x + 1e-5)) - exactImplicit(drained(x - 1e-5))) / 2e-5, 0);
+  }
+  for (const x of [.03, .04, .05]) assert.equal(exactImplicit(filled(x)), 0);
+  // These are true open-volume zeros of q-.5, not shortcut artifacts. Any
+  // differentiable exactly zero-equivalent function is constant zero there,
+  // so its gradient vanishes; it cannot supply a regular interface normal.
+  assert.ok(drained(.01) < .5 && filled(-.01) > .5);
+});
+
+test("a support jump across half density cannot have both a continuous signed companion and identical zeros", () => {
+  // A possible pair of old-dry supports under independent native affine lifts.
+  const q = (x: number) => x < 0 ? .25 : .75;
+  const exactSignCompanion = (x: number) => .5 - q(x);
+  assert.equal(exactSignCompanion(-1e-9), .25);
+  assert.equal(exactSignCompanion(0), -.25);
+  for (const x of [-1, -1e-9, 0, 1e-9, 1]) assert.notEqual(q(x), .5);
+  // Any continuous signed companion must cross zero (intermediate value
+  // theorem); the original density never does. Linear interpolation is one
+  // concrete negative control, not a proposed surface or density repair.
+  const smoothedNegativeControl = (x: number) => -.25 * x;
+  close(smoothedNegativeControl(0), 0);
+  assert.notEqual(q(0), .5);
 });

@@ -24,6 +24,26 @@ Predictions: a falling sphere retains an old-centered cap and acquires block-lik
 
 There is a **second incompatibility**. With uniform velocity, uniform native width `H`, and `gamma=beta=1`, CM12 center interpolation translates means by the fractional offset `d/H`. In the contained-sphere example `d/H=.25`, this sends 25% of the mass into a neighboring cell which the exact translated diffuse sphere never reaches. Therefore exact transported geometry cannot also obey those unchanged native targets. Chentanez–Müller advects surface density itself (equation 3) and defines its conservative matrix from trilinear characteristic weights (§3.4); conservation does not make that low-order spatial approximation exact. [Original CM12 paper](https://matthias-research.github.io/pages/publications/masscon_sca.pdf).
 
+## A separate published-zero contract failure
+
+`cm12RetainedDensityPhiAtFine` also creates false zeros at the endpoints of the attainable density interval. For `a>0` and `s=q_seed` in `[0,1]`, the actual retained density is `q=a*s+b`:
+
+| Coefficients | Exact points with `q=.5` | Present shortcut |
+| --- | --- | --- |
+| `b=.5` | Only `s=0` | Returns zero for every `s`, including points with `q>.5` |
+| `a+b=.5` | Only `s=1` | Returns zero for every `s`, including points with `q<.5` |
+| `b<.5<a+b` | `s=(.5-b)/a` | The inverse unsaturated ramp has the correct zero/sign |
+| `a=0,b=.5` | Every point | A real volumetric half-density plateau |
+
+This is observed in the **actual all-fine prescribed-flow capture**, not only an algebraic example. After the first half-cell translation, all 144 exactly-zero published GPU samples have retained density different from `.5` by more than `1e-4`; the largest discrepancy is `.5`. At dense index 10668, world point `(-.175,.675,-.275)`, the captured coefficients are exactly `a=.5,b=0`, point seed density and retained density are both zero, but published `phi=0`. Its seed mean is only `.00018469570204615593`; a tiny diffuse corner amount does not justify a zero over the support's whole volume. The independent CPU counterexample reconstructs that same geometry. Raw evidence: `artifacts/retained-imposed-flow/sphere-full-fine/published-zero-semantic-audit.json`; source hashes and capture time are in its neighboring `provenance.json` (WGSL SHA-256 `016ebcd1b74b3c1ab5d67a5c958950303ccb4116c6139c035623b5ab02b5ba4e`).
+
+Removing a non-strict tie shortcut cannot restore the transported field. The mathematical companion `w*(.5-q)` would have exact point signs/zeros, but it inherits two intrinsic defects of the current authority:
+
+- Real half-density plateaus occupy open volumes when a saturated seed is drained to `.5`, or empty seed is filled to `.5`. Any differentiable function with precisely those zeros has zero gradient there. A smooth function can have such a plateau, but it is not a regular two-dimensional interface and supplies no unique normal.
+- Across a support jump from `q=.25` to `q=.75`, the half-open support definition has no `q=.5` point. Any continuous function with the correct opposite phase signs must nevertheless cross zero. It therefore cannot preserve both the signs and the density's zero set. Zero-set equivalence alone could be obtained with a constant nonzero function, but that would discard the liquid phase signs.
+
+The representation must be replaced or rejected when it cannot carry the required transported interface; a valid native mean `.5` is not itself an invalid physical state. A surface interpolation adjustment would hide the failure rather than supply the missing density. These endpoint, plateau and discontinuity cases are retained as CPU negative controls. No publication or renderer patch is part of this diagnosis.
+
 ## Required authority and continuity
 
 Let `X` be the accepted forward characteristic map from the previous generation. For fixed geometric supports `J,K`, the conservative measure is
