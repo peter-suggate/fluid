@@ -175,3 +175,29 @@ work in progress, not a validated fix or measured startup reduction.
 
 No lane, correctness threshold, compiler concurrency, or timing ceiling was
 changed by this audit.
+
+## Unused pipeline removal and unchanged gate
+
+The resident no longer warms seven entry points with no dispatch consumers:
+`advanceRetainedDensityDynamicSupportAccepted`, `buildShadowCellWorklist`,
+`buildShadowRowWorklist`, `transferCandidateCells`,
+`prepareCandidateFaceReceipts`, `transferCandidateFaces`, and
+`publishCandidateTopologyDelta`. Their shader definitions remain available;
+the active direct, topology-delta and worklist variants are unchanged.
+Tracer pipelines remain because the same resident can enable that view after
+construction. Both pressure implementations and packed transport also remain.
+
+The CPU resource-recorder test exercises actual construction, ordinary frames,
+initial presentation, paused region editing and tracer off/on/off/on changes.
+Every dispatched handle must have compiled and its pruned shader must contain
+the entry point. It and the resource-recipe suite pass seven tests
+(`/tmp/fluid-unused-pipeline-cpu-1.log`). The actual two-step native VEX capture
+also passes with these removals in place.
+
+The unchanged canonical gate still fails:
+`/tmp/fluid-current-field-canonical-1.log`, 180.043 s, five passed, six timed out,
+six unrun. The mini64 performance lane had only 12.300 s of remaining suite
+budget. No numerical assertion failed in the completed lanes, but no result
+exists for the timed-out or unrun work. Removing unused compile requests is
+sound independently of a timing benefit; this run does not establish a cold
+startup speedup or resolve the regression gate.

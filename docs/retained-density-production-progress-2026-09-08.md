@@ -22,16 +22,38 @@ See the [motion authority design and negative controls](retained-density-motion-
 The next work validates transport of the current spatial field and its measure
 together. It does not repair the mesh or fit a surface to the old mean targets.
 
-The isolated current-generation quadratic GPU probe now passes all eleven
-subcases (`ff078725`, `/tmp/fluid-quadratic-pullback-gpu-6.log`, 2.216 seconds).
+The isolated current-generation quadratic GPU probe now passes all seventeen
+subcases (`21c503b0`, `/tmp/fluid-quadratic-pullback-gpu-9.log`, 2.869 seconds).
 Eight translations move a sphere by 0.1 m through fixed supports: maximum
 implicit-value error is `5.01e-7 m`, face derivative/Hessian jumps are zero,
 and maximum global amount error is `3.06e-9 m³` (relative `7.24e-7`). Rotation,
 unit-determinant shear, individual support integrals, and rejected unsupported
 or incoherent donors also pass. This is prescribed affine transport of a
-globally coherent quadric, not general evolution or shipping physics. Integral
-queries remain separate from the coefficient commit; complete wet destination
-coverage and an atomic field/integral transaction are still required.
+globally coherent quadric, not general evolution or shipping physics. The new
+`advanceConservative` transaction checks complete wet destination coverage and
+integrates candidate amounts before accepting either coefficients or amounts.
+Coverage and integration failures retain the accepted bank. A host race test
+also prevents overlapping operations from publishing the wrong generation.
+The original geometry-only and diagnostic integration APIs remain distinct.
+
+The [matched full-fine comparison](current-quadratic-matched-flow-2026-09-08.md)
+uses the same sphere, half-cell displacement, physical width and sample sites
+as the failing production experiment. After two steps the new GPU density
+error is below `7.1e-7`, face density jumps below `3.7e-7`, and relative global
+amount error below `2e-7`. The density plots compare captured coefficients
+against independent analytic values; no mesh correction is involved.
+
+The next connection now has an actual-native velocity receipt. The corrected
+uniform-VEX compiler passed 21 isolated GPU cases and two real native steps
+(`/tmp/fluid-uniform-vex-map-gpu-2.log` and
+`/tmp/fluid-native-uniform-vex-capture-2.log`). Immutable snapshots are encoded
+after velocity extension and before gather. Both steps produce the GPU map
+`B=I, t=(-0.02500000037252903,0,0) m`; all native-center donors needed by the
+whole swept wet sphere are covered. The first run exposed a test-adapter phase
+error: this hook has sealed FCA authority, not collecting authority. The
+corrected compiler requires that sealed generation and rejects stale or
+unsealed inputs. This receipt establishes the actual motion source; it does
+not yet drive the new field or replace production density transfer.
 
 The [production dependency audit](retained-density-production-cutover-audit-2026-09-08.md)
 records velocity freshness, momentum, gamma, solids and injection requirements.
@@ -42,10 +64,11 @@ representation; the smaller volume-bubble shortcut can invent transverse
 variation and is not the selected carrier. Saturated density and sharp branch
 admission remain separate requirements.
 
-The latest unchanged canonical suite (`/tmp/fluid-editor-final-canonical.log`)
-ended at 180.026 seconds: five lanes passed, six timed out and six were not
+The latest unchanged canonical suite (`/tmp/fluid-current-field-canonical-1.log`)
+ended at 180.043 seconds: five lanes passed, six timed out and six were not
 run. There was no reported numerical assertion failure, which does not imply
-the timed-out lanes passed. A later instrumented mini32 run still timed out
+the timed-out lanes passed. The seven unused compile-entry removals did not
+resolve this failure. An earlier instrumented mini32 run timed out
 during simulation pipeline compilation at its unchanged 20-second deadline.
 See the [startup audit](sparse-cm12-retained-startup-audit-2026-09-08.md) for the
 measured parser improvement and diagnostic timing limits.
