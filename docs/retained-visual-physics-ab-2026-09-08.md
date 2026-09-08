@@ -122,8 +122,12 @@ Run-start provenance records HEAD, source hashes and working-tree filenames.
 
 The independent CPU oracle passes two tests: physical integral partitioning and
 translation against a radial shell integral, and a negative control rejecting
-the old seed on newly occupied support. **The GPU diagnostic has not yet run**
-as of this preparation entry. Run serially under the shared GPU lease with:
+the old seed on newly occupied support. The GPU diagnostic subsequently saved
+all seven snapshots in 28.631 seconds and **failed continuity after the first
+step**. It also exposed 144 false published phi-zero samples. See the
+[full-fine imposed-flow diagnosis](retained-imposed-flow-diagnosis-2026-09-08.md)
+for the separate transport, retained-field and implicit-companion failures.
+Run serially under the shared GPU lease with:
 
 ```bash
 WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=metal \
