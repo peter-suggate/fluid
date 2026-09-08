@@ -17,20 +17,20 @@ export interface SparseCM12PackedGenerationTarget extends SparseCM12GenerationFi
 /** Compact immutable input. Native geometry, hash insertion, overlap search and
  * field accumulation execute on the GPU; there is no host native-cell graph. */
 export function packSparseCM12GPUGenerationTransferInput(
-  source: CM12CapturedGeometryRecipe, target: Pick<SparseCM12PackedGenerationTarget, "atlas" | "cellIds" | "rowIds">,
+  source: CM12CapturedGeometryRecipe, destination: Pick<SparseCM12PackedGenerationTarget, "atlas" | "cellIds" | "rowIds">,
   newAirCoverage: readonly SparseCM12NewAirCoverage[] = [],
 ) {
-  if (source.atlas.brickFineResolution !== 8 || target.atlas.brickFineResolution !== 8)
+  if (source.atlas.brickFineResolution !== 8 || destination.atlas.brickFineResolution !== 8)
     throw new Error("CM12 GPU generation transfer requires B8 native topology");
-  if (source.atlas.dimensions.some((n, axis) => n !== target.atlas.dimensions[axis]))
+  if (source.atlas.dimensions.some((n, axis) => n !== destination.atlas.dimensions[axis]))
     throw new Error("CM12 transfer requires the same physical domain");
   const leaves = source.atlas.bricks.length;
   const pages = Math.max(0, ...source.sourcePageCoordinates.keys()) + 1;
   const leafBase = 0, pageBase = 12 * leaves, sourceRows = pageBase + 4 * pages;
   const targetCells = sourceRows + source.rows.length;
-  const targetRows = targetCells + target.cellIds.length;
-  const targetWidths = targetRows + target.rowIds.length;
-  const airBase = targetWidths + target.atlas.bricks.length;
+  const targetRows = targetCells + destination.cellIds.length;
+  const targetWidths = targetRows + destination.rowIds.length;
+  const airBase = targetWidths + destination.atlas.bricks.length;
   const words = new Uint32Array(airBase + 6 * newAirCoverage.length);
   const floats = new Float32Array(words.buffer);
   let cellCount = 0, maximumSpan = 1;
@@ -65,9 +65,9 @@ export function packSparseCM12GPUGenerationTransferInput(
     words[pageBase + 4 * page + 3] = 1;
   }
   words.set(source.rows, sourceRows);
-  words.set(target.cellIds, targetCells);
-  words.set(target.rowIds, targetRows);
-  target.atlas.bricks.forEach((brick, leaf) => {
+  words.set(destination.cellIds, targetCells);
+  words.set(destination.rowIds, targetRows);
+  destination.atlas.bricks.forEach((brick, leaf) => {
     const width = 8 * sparseBrickSpan(brick) / brick.resolution;
     maximumSpan = Math.max(maximumSpan, width);
     floats[targetWidths + leaf] = width;
@@ -87,13 +87,13 @@ export function packSparseCM12GPUGenerationTransferInput(
  * geometry while live parity is read at publication, preserving advancing fields. */
 export async function prepareSparseCM12GPUGenerationTransfer(
   device: GPUDevice, recipe: CM12CapturedGeometryRecipe,
-  source: SparseCM12GenerationFields, target: SparseCM12PackedGenerationTarget,
+  source: SparseCM12GenerationFields, destination: SparseCM12PackedGenerationTarget,
   maximumTemporaryBytes = Number.POSITIVE_INFINITY,
   newAirCoverage: readonly SparseCM12NewAirCoverage[] = [],
 ): Promise<PreparedSparseCM12GenerationTransfer> {
   const control = source.liveControl;
   if (!control) throw new Error("CM12 GPU transfer requires the leased source topology and live parity");
-  const input = packSparseCM12GPUGenerationTransferInput(recipe, target, newAirCoverage);
+  const input = packSparseCM12GPUGenerationTransferInput(recipe, destination, newAirCoverage);
   const hashBytes = 4 * (input.cellHashCapacity + input.faceHashCapacity);
   const temporaryBytes = Math.max(4, input.words.byteLength) + hashBytes + 8;
   if (temporaryBytes > maximumTemporaryBytes)
@@ -206,38 +206,38 @@ fn lookup(lower:vec3f,span:f32,axis:u32,faces:bool)->u32 {
 fn aligned(lower:vec3f,span:f32,axis:u32)->vec3f{
  var result=floor(lower/span)*span;if(axis<3u){result[axis]=lower[axis];}return result;
 }
-fn overlap(source:Box,target:Box)->f32{
- var width=max(vec3f(0),min(source.lower+source.width,target.lower+target.width)-max(source.lower,target.lower));
- if(target.axis<3u){width[target.axis]=1;}
+fn overlap(source:Box,destination:Box)->f32{
+ var width=max(vec3f(0),min(source.lower+source.width,destination.lower+destination.width)-max(source.lower,destination.lower));
+ if(destination.axis<3u){width[destination.axis]=1;}
  return width.x*width.y*width.z;
 }
 // Ascend to the next dyadic sibling without per-invocation recursion or stacks.
 // x/y/z child order matches the CPU conservative-overlap oracle exactly.
-fn successor(position:vec3f,size:f32,target:Box)->vec4f{
+fn successor(position:vec3f,size:f32,destination:Box)->vec4f{
  var lower=position;var span=size;
  loop {
-  if(span>=target.span){return vec4f(lower,0);}
-  let relative=vec3u((lower-target.lower)/span);
+  if(span>=destination.span){return vec4f(lower,0);}
+  let relative=vec3u((lower-destination.lower)/span);
   var child=0u;var bit=0u;
   for(var axis=0u;axis<3u;axis++){
-   if(axis==target.axis){continue;}child|=(relative[axis]&1u)<<bit;bit++;
+   if(axis==destination.axis){continue;}child|=(relative[axis]&1u)<<bit;bit++;
   }
-  let parent=target.lower+floor((lower-target.lower)/(2.0*span))*(2.0*span);
+  let parent=destination.lower+floor((lower-destination.lower)/(2.0*span))*(2.0*span);
   if(child+1u<(1u<<bit)){
    lower=parent;bit=0u;child++;
    for(var axis=0u;axis<3u;axis++){
-    if(axis==target.axis){lower[axis]=target.lower[axis];continue;}
+    if(axis==destination.axis){lower[axis]=destination.lower[axis];continue;}
     lower[axis]+=f32((child>>bit)&1u)*span;bit++;
    }
    return vec4f(lower,span);
   }
-  span*=2.0;lower=parent;if(target.axis<3u){lower[target.axis]=target.lower[target.axis];}
+  span*=2.0;lower=parent;if(destination.axis<3u){lower[destination.axis]=destination.lower[destination.axis];}
  }
 }
-fn initialAncestor(target:Box,faces:bool)->u32{
- var span=target.span;
+fn initialAncestor(destination:Box,faces:bool)->u32{
+ var span=destination.span;
  loop {
-  let token=lookup(aligned(target.lower,span,target.axis),span,target.axis,faces);
+  let token=lookup(aligned(destination.lower,span,destination.axis),span,destination.axis,faces);
   if(token!=0u){return token;}if(span>=MAX_SPAN){return 0u;}span*=2.0;
  }
 }
@@ -251,17 +251,17 @@ fn linear(id:vec3u)->u32{return id.x+id.y*${device.limits.maxComputeWorkgroupsPe
  let box=sourceFace(ordinal);if(box.valid!=0u){insert(ordinal+1u,box,true);}
 }
 @compute @workgroup_size(64) fn cells(@builtin(global_invocation_id) invocation:vec3u){
- let id=linear(invocation);if(id>=${target.cellIds.length}u){return;}
- let target=targetCell(id);let volume=target.width.x*target.width.y*target.width.z;
+ let id=linear(invocation);if(id>=${destination.cellIds.length}u){return;}
+ let destination=targetCell(id);let volume=destination.width.x*destination.width.y*destination.width.z;
  var mass=0.0;var gamma=0.0;var pressure=0.0;var covered=0.0;
  var momentum=vec3f(0);var dryVelocity=vec3f(0);
- var cursor=vec4f(target.lower,target.span);var first=true;
+ var cursor=vec4f(destination.lower,destination.span);var first=true;
  loop {
   var token=0u;
-  if(first){token=initialAncestor(target,false);first=false;}
+  if(first){token=initialAncestor(destination,false);first=false;}
   else{token=lookup(cursor.xyz,cursor.w,3u,false);}
   if(token!=0u){
-   let box=sourceCell(token-1u);let weight=overlap(box,target);covered+=weight;
+   let box=sourceCell(token-1u);let weight=overlap(box,destination);covered+=weight;
    if(box.physical==INVALID){gamma+=weight;}
    else{
     let before=box.physical;let rho=old[oldDensity()+before];let g=old[oldGamma()+before];
@@ -272,7 +272,7 @@ fn linear(id:vec3u)->u32{return id.x+id.y*${device.limits.maxComputeWorkgroupsPe
     momentum+=rho*weight*v;dryVelocity+=weight*v;
    }
   }else if(cursor.w>1.0){cursor.w*=.5;continue;}
-  cursor=successor(cursor.xyz,cursor.w,target);if(cursor.w==0){break;}
+  cursor=successor(cursor.xyz,cursor.w,destination);if(cursor.w==0){break;}
  }
  if(covered>volume+1e-6){atomicOr(&fault,16u);}
  if(covered<volume-1e-6){
@@ -280,46 +280,46 @@ fn linear(id:vec3u)->u32{return id.x+id.y*${device.limits.maxComputeWorkgroupsPe
   for(var region=0u;region<${input.airCount}u;region++){
    let at=${input.airBase}u+6u*region;
    let lower=vec3f(mf(at),mf(at+1u),mf(at+2u));let upper=vec3f(mf(at+3u),mf(at+4u),mf(at+5u));
-   if(all(target.lower>=lower)&&all(target.lower+target.width<=upper)){admitted=true;break;}
+   if(all(destination.lower>=lower)&&all(destination.lower+destination.width<=upper)){admitted=true;break;}
   }
   if(!admitted){atomicOr(&fault,16u);}gamma+=volume-covered;
  }
- let dst=target.physical;let rho=mass/volume;let g=gamma/volume;
+ let dst=destination.physical;let rho=mass/volume;let g=gamma/volume;
  var velocity=dryVelocity/volume;if(mass>0){velocity=momentum/mass;}
- next[${target.densityOffset}u+dst]=rho;next[${target.densityOtherOffset}u+dst]=rho;
- next[${target.gammaOffset}u+dst]=g;next[${target.gammaOtherOffset}u+dst]=g;
- next[${target.pressureOffset}u+dst]=pressure/volume;
+ next[${destination.densityOffset}u+dst]=rho;next[${destination.densityOtherOffset}u+dst]=rho;
+ next[${destination.gammaOffset}u+dst]=g;next[${destination.gammaOtherOffset}u+dst]=g;
+ next[${destination.pressureOffset}u+dst]=pressure/volume;
  for(var axis=0u;axis<3u;axis++){
-  next[${target.velocityOffset}u+4u*dst+axis]=velocity[axis];
-  next[${target.velocityOtherOffset}u+4u*dst+axis]=velocity[axis];
+  next[${destination.velocityOffset}u+4u*dst+axis]=velocity[axis];
+  next[${destination.velocityOtherOffset}u+4u*dst+axis]=velocity[axis];
  }
 }
 @compute @workgroup_size(64) fn faces(@builtin(global_invocation_id) invocation:vec3u){
- let id=linear(invocation);if(id>=${target.rowIds.length}u){return;}
- let row=m[${input.targetRows}u+id];let target=faceBox(row,false);
- if(target.valid==0u){return;}
- var flux=0.0;var covered=0.0;var cursor=vec4f(target.lower,target.span);var first=true;
+ let id=linear(invocation);if(id>=${destination.rowIds.length}u){return;}
+ let row=m[${input.targetRows}u+id];let destination=faceBox(row,false);
+ if(destination.valid==0u){return;}
+ var flux=0.0;var covered=0.0;var cursor=vec4f(destination.lower,destination.span);var first=true;
  loop {
   var token=0u;
-  if(first){token=initialAncestor(target,true);first=false;}
-  else{token=lookup(cursor.xyz,cursor.w,target.axis,true);}
+  if(first){token=initialAncestor(destination,true);first=false;}
+  else{token=lookup(cursor.xyz,cursor.w,destination.axis,true);}
   if(token!=0u){
-   let box=sourceFace(token-1u);let weight=overlap(box,target);let velocity=old[oldFace()+box.physical];
+   let box=sourceFace(token-1u);let weight=overlap(box,destination);let velocity=old[oldFace()+box.physical];
    if(!valid(velocity)){atomicOr(&fault,2u);}flux+=weight*velocity;covered+=weight;
   }else if(cursor.w>1.0){cursor.w*=.5;continue;}
-  cursor=successor(cursor.xyz,cursor.w,target);if(cursor.w==0){break;}
+  cursor=successor(cursor.xyz,cursor.w,destination);if(cursor.w==0){break;}
  }
  let rowCount=nt[3u];let rowBase=nt[7u];let packed=nt[rowBase+row];
  let firstTerm=packed&0x7fffffu;let count=packed>>23u;
  var velocity=0.0;var weight=0.0;
  for(var term=0u;term<count;term++){
   let at=nt[8u]+2u*(firstTerm+term);let cell=nt[at];let w=abs(nf(at+1u,false));
-  velocity+=w*next[${target.velocityOffset}u+4u*cell+target.axis];weight+=w;
+  velocity+=w*next[${destination.velocityOffset}u+4u*cell+destination.axis];weight+=w;
  }
  let area=nf(rowBase+3u*rowCount+row,false);
  if(covered>area+1e-6){atomicOr(&fault,16u);}
  let value=(flux+max(0.0,area-covered)*velocity/max(weight,1e-20))/area;
- next[${target.faceOffset}u+row]=value;next[${target.faceOtherOffset}u+row]=value;
+ next[${destination.faceOffset}u+row]=value;next[${destination.faceOtherOffset}u+row]=value;
 }
 `;
   const buffers: GPUBuffer[] = [];
@@ -342,11 +342,16 @@ fn linear(id:vec3u)->u32{return id.x+id.y*${device.limits.maxComputeWorkgroupsPe
     const module = compiler.createShaderModule({ label: "CM12 GPU dyadic generation transfer", code });
     const pipelines = await Promise.all(["indexCells", "indexFaces", "cells", "faces"].map(entryPoint =>
       compiler.compileComputePipeline({ label: `CM12 GPU generation ${entryPoint}`, layout: pipelineLayout,
-        compute: { module, entryPoint } }, { priority: "critical" })));
-    const bindings = device.createBindGroup({ layout, entries: [source.state, target.state, metadata, hash,
-      fault, control.buffer, target.topology].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+        compute: { module, entryPoint } }, { priority: "critical" }))).catch(async cause => {
+      const information = await module.getCompilationInfo();
+      const errors = information.messages.filter(message => message.type === "error")
+        .map(message => `${message.lineNum}:${message.linePos}: ${message.message}`);
+      throw new Error(`CM12 GPU generation shader compilation failed: ${errors.join("; ")}`, { cause });
+    });
+    const bindings = device.createBindGroup({ layout, entries: [source.state, destination.state, metadata, hash,
+      fault, control.buffer, destination.topology].map((buffer, binding) => ({ binding, resource: { buffer } })) });
     return new PreparedSparseCM12GenerationTransfer(device, pipelines, bindings, buffers,
-      fault, readback, target.cellIds.length, target.rowIds.length,
-      [512 * input.leaves, input.sourceRowCount, target.cellIds.length, target.rowIds.length], [hash]);
+      fault, readback, destination.cellIds.length, destination.rowIds.length,
+      [512 * input.leaves, input.sourceRowCount, destination.cellIds.length, destination.rowIds.length], [hash]);
   } catch (error) { for (const buffer of buffers) buffer.destroy(); throw error; }
 }
