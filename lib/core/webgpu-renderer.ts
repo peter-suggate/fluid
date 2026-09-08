@@ -1,3 +1,4 @@
+import { publishOpaqueSurfaceCapability } from "../svo/features/shading/deferred-specialization";
 import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
 import type { SparseVoxelDrySceneData } from "../svo/contracts/scene-publication";
 import { SimulationFailureError } from "./simulation-failure";
@@ -816,7 +817,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
     rasterArms,
     rasterArms,
     true,
-    { primaryWorkMap, surfaceMesh: primaryTraversal === "mesh" },
+    { primaryWorkMap, surfaceMesh: primaryTraversal === "mesh", voxelLightCache: false, specializedDeferredLighting: true },
   );
 }
 
@@ -2553,6 +2554,7 @@ export class FluidLabRenderer {
       primitiveRecords: scenePrimitives.packedRecords,
       primitiveCandidates,
       materialRecords,
+      opaqueSurfaceOnly: publishOpaqueSurfaceCapability(scene, materialRecords, scenePrimitives.packedRecords),
       materialRevision: revision,
       ownerBase: SCENE_ENVIRONMENT_OWNER_BASE,
       skippedOwnerId: scenePrimitives.openShellOwnerId,

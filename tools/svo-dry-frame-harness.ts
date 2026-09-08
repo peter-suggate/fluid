@@ -1,3 +1,4 @@
+import { publishOpaqueSurfaceCapability } from "../lib/svo/features/shading/deferred-specialization";
 import type { SparseVoxelDrySceneData } from "../lib/svo/contracts/scene-publication";
 /**
  * The parts of a headless SVO dry-frame run that must not be written twice.
@@ -306,6 +307,7 @@ export function buildSvoDrySceneAssembly(
     // when the product document requested voxel-flat surfaces.
     flatVoxelNormals: sceneUsesFlatVoxelNormals(scene),
   };
+  drySceneData.opaqueSurfaceOnly = publishOpaqueSurfaceCapability(scene, drySceneData.materialRecords, drySceneData.primitiveRecords);
   return { drySceneData, scenePrimitives, sceneGlass, sceneThickGlass, terrainSurface };
 }
 

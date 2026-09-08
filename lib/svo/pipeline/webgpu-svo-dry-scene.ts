@@ -1,3 +1,4 @@
+import { canUseOpaqueDirectionalCones } from "../features/shading/deferred-specialization";
 import type { SceneDescription } from "../../core/model";
 import {
 PLANAR_BOUNDARY_PATCH_BYTES
@@ -1003,6 +1004,7 @@ interface SvoDrySplitPipelineBundle {
   /** Optional one-pixel primary coverage closure before the sky/surface partition. */
   readonly primarySeamClosure: GPURenderPipeline;
   readonly lighting: GPURenderPipeline;
+  readonly optimizedLighting?: GPURenderPipeline;
   readonly reconstructedLighting?: GPURenderPipeline;
   /** Complement of `lighting`: the pixels primary visibility left as a miss. */
   readonly skyLighting: GPURenderPipeline;
@@ -1053,6 +1055,7 @@ export class SparseVoxelDrySceneRenderer {
   private splitVisibilityPipeline?: GPURenderPipeline;
   private splitRasterRigidVisibilityPipeline?: GPURenderPipeline;
   private primarySeamClosurePipeline?: GPURenderPipeline;
+  private splitOptimizedLightingPipeline?: GPURenderPipeline;
   private splitLightingPipeline?: GPURenderPipeline;
   private splitReconstructedLightingPipeline?: GPURenderPipeline;
   private splitSkyLightingPipeline?: GPURenderPipeline;
@@ -1651,6 +1654,7 @@ export class SparseVoxelDrySceneRenderer {
     this.splitRasterRigidVisibilityPipeline = bundle.rasterRigidVisibility;
     this.primarySeamClosurePipeline = bundle.primarySeamClosure;
     this.splitLightingPipeline = bundle.lighting;
+    this.splitOptimizedLightingPipeline = bundle.optimizedLighting;
     this.splitReconstructedLightingPipeline = bundle.reconstructedLighting;
     this.splitSkyLightingPipeline = bundle.skyLighting;
     this.conePrepassResetPipeline = bundle.prepassReset;
@@ -3630,7 +3634,25 @@ export class SparseVoxelDrySceneRenderer {
           primitive: { topology: "triangle-list" }, depthStencil: { ...depthStencil, depthCompare: "always" } });
         surfaceMesh = { prepare, build, publish, cull, draw, background };
       }
-      const bundle = { surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
+      // Compile only the expensive closure again. All visibility and cone work
+      // shares the generic bundle; unsupported live publications switch back in
+      // the same draw, with no asynchronous capability transition.
+      let optimizedLighting: GPURenderPipeline | undefined;
+      if (scale !== 1 && !globalIlluminationCapable && this.experiments.specializedDeferredLighting) {
+        const optimizedModule = await checkedModule(this.device, "Opaque directional cone deferred lighting",
+          createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split",
+            this.screenSpaceTerminationPixels, false, this.rasterGlassDiscovery, false,
+            this.coneFanout, { ...shaderExperiments, opaqueDirectionalCones: true }));
+        optimizedLighting = await this.device.createRenderPipelineAsync({
+          label: "Opaque directional cone deferred lighting",
+          layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout!, ...cacheConsumerLayouts] }),
+          vertex: { module: vertexModule, entryPoint: "vertexMain" },
+          fragment: { module: optimizedModule, entryPoint: "dryLightingMain", targets: [{ format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat }] },
+          primitive: { topology: "triangle-list" },
+          depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: false, depthCompare: "less" },
+        });
+      }
+      const bundle = { optimizedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate,
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
         brickCoverageOverflow, scenePrimitiveRaster,
@@ -5892,7 +5914,13 @@ export class SparseVoxelDrySceneRenderer {
           lighting.setPipeline(this.splitReconstructedLightingPipeline!);
           lighting.draw(3);
         }
-        lighting.setPipeline(this.splitLightingPipeline!);
+        lighting.setPipeline(this.splitOptimizedLightingPipeline && usePrepass
+          && canUseOpaqueDirectionalCones(this.scene, {
+            coneMode: this.lightingOptions.coneTracingMode ?? "cones",
+            hierarchyReady: this.derivedLightingReady(),
+            globalIllumination: this.lightingOptions.globalIlluminationEnabled === true,
+            reconstruction: this.renderTuning.coneRadianceReconstruction,
+          }) ? this.splitOptimizedLightingPipeline : this.splitLightingPipeline!);
         lighting.draw(3);
       }
       lighting.end();
@@ -6047,6 +6075,7 @@ export class SparseVoxelDrySceneRenderer {
     this.splitVisibilityPipeline = undefined;
     this.primarySeamClosurePipeline = undefined;
     this.splitLightingPipeline = undefined;
+    this.splitOptimizedLightingPipeline = undefined;
     this.splitReconstructedLightingPipeline = undefined;
     this.splitSkyLightingPipeline = undefined;
     this.rasterGlassPipeline = undefined;

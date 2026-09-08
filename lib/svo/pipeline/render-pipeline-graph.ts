@@ -442,21 +442,13 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     label: "Voxel light cache",
     stage: "voxel-light-cache",
     taps: [],
-    toggleable: true,
+    toggleable: false,
     tip: {
-      summary: "Persistent level-0 voxel visibility for directional light slot zero, drained over several frames by a bounded queue. Off withholds the demand and population dispatches; the consumers keep their bindings and read whatever the cache last held, so this measures the drain and not the lookup.",
-      writes: "rg32uint voxel visibility cache",
-      gate: "cones with shadows on a dry scene, split shading, and a device exposing at least seventeen sampled textures per stage",
+      summary: "The production renderer uses the screen-space cone visibility prepass directly. The persistent directional cache is disabled: its lookups and update work cost more than they save in the large-scene shading benchmark.",
+      gate: "available only in the reference benchmark renderer",
     },
-    // Mirrors the encoder's own gate: fluid coverage displaces the cache, and
-    // it only drains under cones with shadows enabled. Reporting `on` for a wet
-    // scene lit the lamp over dispatches the frame never encoded.
-    state: (context) => (context.disabledStages.has("voxel-light-cache") ? "off"
-      : context.coneTracingMode !== "cones" || !context.shadowsEnabled || context.sceneHasFluid ? "off" : "on"),
-    chip: (context) => (context.disabledStages.has("voxel-light-cache") ? "withheld · drain stopped"
-      : context.sceneHasFluid ? "fluid coverage · cache idle"
-      : context.coneTracingMode !== "cones" || !context.shadowsEnabled ? "needs cones + shadows"
-      : "slot 0 · 16 384 voxels/frame"),
+    state: () => "unavailable",
+    chip: () => "disabled in production",
   },
   {
     id: "world-gi-cache",

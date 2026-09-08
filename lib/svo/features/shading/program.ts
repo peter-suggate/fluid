@@ -604,6 +604,10 @@ export type SvoDryShadingPath = "inline" | "split";
  * the renderer default.
  */
 export interface SvoDryOptimizationExperiments {
+  /** Compile a guarded opaque, single-directional-light cone closure alongside the generic closure. */
+  readonly specializedDeferredLighting?: boolean;
+  /** Internal shader variant; selected only with a matching publication and ready cone hierarchy. */
+  readonly opaqueDirectionalCones?: boolean;
   /** Resolve current-frame radiance and exact fallbacks in one draw; false retains the A/B reference. */
   readonly singlePassReconstruction?: boolean;
   /** Cached opaque voxel boundary triangles; unavailable publications fail closed. */
@@ -1201,6 +1205,7 @@ fn drySceneFractionOfVoxel(voxel:u32)->f32{
     leafPayloadMode === "dense"
       ? `let identity=sceneIdentityOf(identitySource,${index});if(sceneIdentitySolid(identity)){${onSolid}}`
       : `if(sceneIdentitySolidAt(${index})){let identity=sceneIdentityAt(${index});${onSolid}}`;
+  const fastDeferred = split && experiments.opaqueDirectionalCones === true;
   const voxelLightCache = split && experiments.voxelLightCache !== false;
   const edgeReceiverRecovery = reduced && experiments.edgeReceiverRecovery !== false;
   // Full-rate/inline shaders still own the diagnostic overlay. The reduced
@@ -2185,9 +2190,10 @@ fn dryPrepassDecodeNormal(octIn:vec2f)->vec3f{var normal=vec3f(octIn,1.0-abs(oct
 fn dryPrepassHitMetadata(hit:DryHit)->u32{return (hit.featureId&15u)|((hit.fieldSource&15u)<<4u)|((hit.motionKind&3u)<<8u)|((hit.motionValid&1u)<<10u);}
 fn dryPrepassPackIdentity(hit:DryHit)->u32{return (hit.materialId&0xffffu)|((hit.ownerId&0xffffu)<<16u);}
 fn dryPrepassChannel(index:u32)->f32{
+  ${fastDeferred ? "return dryPrepassData0.y;" : `
   if(index<4u){return dryPrepassData0[index];}
   if(index<8u){return dryPrepassData1[index-4u];}
-  return dryPrepassData2[min(index-8u,3u)];
+  return dryPrepassData2[min(index-8u,3u)];`}
 }
 fn dryPrepassReceiverCompatible(identity:u32,metadata:u32,hit:DryHit)->bool{
   let materialMatches=(identity&0xffffu)==(hit.materialId&0xffffu);
@@ -2195,14 +2201,16 @@ fn dryPrepassReceiverCompatible(identity:u32,metadata:u32,hit:DryHit)->bool{
   // Static authored surfaces with the same complete shading classification may
   // share a nearby receiver across object seams. Motion keeps exact ownership:
   // its current-frame rigid blocker correction and GI neighbourhood are owned.
-  return materialMatches&&metadata==dryPrepassHitMetadata(hit)&&(hit.motionKind==DRY_GBUFFER_MOTION_STATIC||ownerMatches);
+  // The opaque no-GI relight specialization shares visibility, never material
+  // colour or radiance; it still evaluates the receiving material at full rate.
+  return ${fastDeferred ? "(materialMatches||dry.tuningCounts2.w==4u)" : "materialMatches"}&&metadata==dryPrepassHitMetadata(hit)&&(hit.motionKind==DRY_GBUFFER_MOTION_STATIC||ownerMatches);
 }
 ${edgeReceiverRecovery ? /* wgsl */ `fn dryPrepassUseExactReceiver(texel:vec2i,depth:f32,normal:vec3f,hit:DryHit)->bool{
   let geometry=textureLoad(dryPrepassGeometryTexture,texel,0);if(geometry.x<=0.0){return false;}
   if(!dryPrepassReceiverCompatible(textureLoad(dryPrepassIdentityTexture,texel,0).x,u32(round(geometry.w)),hit)){return false;}
-  let depthWeight=exp(-24.0*abs(geometry.x-depth)/max(depth,1e-3));
-  let normalWeight=pow(max(dot(normal,dryPrepassDecodeNormal(geometry.yz)),0.0),8.0);
-  if(depthWeight<0.25||normalWeight<0.25){return false;}
+  // Invert the old exp/pow >= .25 tests: ln(4)/24 and pow(.25,1/8).
+  if(abs(geometry.x-depth)>0.057762265*max(depth,1e-3)){return false;}
+  if(dot(normal,dryPrepassDecodeNormal(geometry.yz))<0.840896415){return false;}
   let packed=textureLoad(dryPrepassVisibilityKeyTexture,texel,0);if(all(packed.xy==DRY_PREPASS_INVALID_PACKED)){return false;}
   dryPrepassData0=dryPrepassUnpack0(packed);dryPrepassData1=dryPrepassUnpack1(packed);dryPrepassData2=dryPrepassUnpack2(packed);dryPrepassState=1u;
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u){dryPrepassGi=textureLoad(dryPrepassRadianceTexture,texel,0);dryPrepassGiState=1u;}
@@ -4775,7 +4783,7 @@ fn dryLightVisibilitySolid(position:vec3f,geometricNormal:vec3f,ownerId:u32,towa
   // Reduced shading retains its full-rate analytic rigid-body correction in
   // prepassShadowShortcutWGSL. Cone mode has no undeclared exact escape: an
   // unavailable requested page publishes a typed fail-closed diagnostic.
-  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){
+  if(${fastDeferred ? "true" : `(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u`}){
     if(!dryNodeMipReady()){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.directVisibilityPage}u;return vec3f(0.0);}${prepassShadowShortcutWGSL}
     // The cone origin escapes the receiver's own trilinear coverage support
     // along the geometric normal: the 0.02-cell hard-ray bias alone leaves the
@@ -4837,7 +4845,7 @@ fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32,owner
 fn dryContactVisibilitySolid(position:vec3f,geometricNormal:vec3f,featureId:u32,ownerId:u32)->vec3f {
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion}u)==0u){return vec3f(1.0);}
   if((dryDerivedPageFailure&${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u)!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.ambientOcclusionPage}u;return vec3f(0.0);}
-  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){
+  if(${fastDeferred ? "true" : `(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u`}){
     if(!dryNodeMipReady()){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.ambientOcclusionPage}u;return vec3f(0.0);}${prepassContactShortcutWGSL}
     let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(1.0);}var visibility=0.0;let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let origin=position+normalize(geometricNormal)*cellScale*.2;let coneSampleCount=max(dry.tuningCounts1.z,dry.tuningCounts1.y);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=coneSampleCount){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let cone=dryConeVisibility(origin,rotated,dry.tuningRays1.x,radius,vec3f(0.0),false);if(cone.valid==0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.ambientOcclusionPage}u;return vec3f(0.0);}let rigidBlocker=nearestBodyIgnoring(origin,rotated,ownerId);visibility+=select(cone.transmittance,0.0,rigidBlocker.t<radius);}let raw=clamp(visibility/f32(coneSampleCount),0.0,1.0);return vec3f(mix(1.0,raw,dry.tuningRays0.w));
@@ -4940,8 +4948,8 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   // configured emitters, while the sample-count selection below still limits
   // GLOBAL shading to one exact visibility sample per light.
   let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
-  for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
-    if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);
+  for(var lightIndex=0u;lightIndex<${fastDeferred ? 1 : SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
+    if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}${fastDeferred ? "var light=dryLighting.lights[lightIndex];light.identity.x=SVO_LIGHT_DIRECTIONAL;" : "let light=dryLighting.lights[lightIndex];"}if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=${fastDeferred ? "1u" : "select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination)"};
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,hit.normal,hit.ownerId,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(hit.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIllumination(position,hit.normal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;let indirectDiffuse=diffuseColor*gi.radiance;
@@ -5008,7 +5016,7 @@ fn shadeDryThinDielectric(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
 }
 fn shadeDrySurface(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   drySurfaceOcclusionDepth_m=select(0.0,hit.t,hit.t<DRY_MISS);
-  if(dryHitThinDielectric(hit)){return shadeDryThinDielectric(hit,ro,rd);}
+  ${fastDeferred ? "" : "if(dryHitThinDielectric(hit)){return shadeDryThinDielectric(hit,ro,rd);}"}
   return shadeDryOpaque(hit,ro,rd);
 }
 struct DryGlassSurface{color:vec3f,depth:f32,materialId:u32,ownerId:u32,paneId:u32,_padding:u32}

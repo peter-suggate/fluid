@@ -11,6 +11,8 @@ export interface SparseVoxelDrySceneData {
   /** Complete live material table. Binding 6 is renderer-owned and capacity-stable. */
   materialRecords: Uint32Array<ArrayBuffer>;
   materialRevision: number;
+  /** Producer proof that dry primary surfaces cannot select a thin dielectric. Omission keeps the generic closure. */
+  opaqueSurfaceOnly?: boolean;
   /** First owner ID belonging to primitive zero (rigid bodies occupy the ids below it). */
   ownerBase: number;
   /** Interior-facing shell pane omitted so the camera can see into the room. */
