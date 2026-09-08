@@ -103,11 +103,38 @@ they are not used as independent evolving global-mass evidence.
 
 The planned mini32 and rigid-tank pairs are paused following the user's
 instruction to begin with the full-fine root cause. The next bounded diagnostic
-will inspect the first full-fine updates, current retained coefficient bank,
-native means, retained phi and published phi against an analytic translation.
-Constant initial velocity must not be mistaken for velocity prescribed after
-pressure projection. No production representation or renderer repair was made
-by this investigation.
+is prepared in `tools/capture-retained-imposed-flow-dawn.ts` (commit `713ee123`).
+It captures a 32³ isolated sphere at reset and after one and two imposed-flow
+steps. Before each normal advance it prescribes both native velocity banks,
+both face banks and the effective transport plane to `(0.75,0,0) m/s`, gamma
+to one and pressure to zero. Density and retained coefficients remain untouched.
+The measured VEX output must verify that velocity on every support in the swept
+sphere's padded donor region. These are imposed-flow diagnostics, not a claim
+that an initially uniform velocity survives shipping pressure projection.
+
+Readbacks at conservative transport and scalar publication precede body forces
+and pressure. Independent translated-sphere integrals measure native transport
+error; raw retained coefficients measure pointwise density and one-sided jumps
+across support faces. Actual packed GPU phi is compared separately with the
+analytic sphere and the captured coefficient interpretation. This separates
+scalar transport, retained shape and publication errors without meshing.
+Run-start provenance records HEAD, source hashes and working-tree filenames.
+
+The independent CPU oracle passes two tests: physical integral partitioning and
+translation against a radial shell integral, and a negative control rejecting
+the old seed on newly occupied support. **The GPU diagnostic has not yet run**
+as of this preparation entry. Run serially under the shared GPU lease with:
+
+```bash
+WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=metal \
+  node --import tsx tools/capture-retained-imposed-flow-dawn.ts --assert-continuity
+```
+
+Its optional continuity assertion rejects a density jump above `1e-4` after
+all requested evidence is saved. Native finite-volume translation errors are
+reported independently; this is not an exact-M0 acceptance claim or a weakened
+surface threshold. No production representation or renderer repair was made by
+this investigation.
 
 Reproduce one arm with `WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js
 FLUID_WEBGPU_BACKEND=metal node --import tsx
